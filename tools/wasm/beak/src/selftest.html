@@ -329,6 +329,21 @@ row(langRows, "new String ist ein Objekt", function () {
   return typeof new String("x") === "object" && new String("x") == "x"
       && Object.prototype.toString.call(new Number(1)) === "[object Number]";
 });
+row(langRows, "super.getter keeps this; super in object literals", function () {
+  class A { constructor() { this.v = 7 } get g() { return this.v } }
+  class B extends A { get g() { return super.g + 1 } }
+  var o = { __proto__: { m: function () { return "p" + this.w } }, w: 5, m() { return super.m() + "!" } };
+  return new B().g === 8 && o.m() === "p5!";
+});
+row(langRows, "WeakRef, FinalizationRegistry", function () {
+  var t = {}, w = new WeakRef(t), r = new FinalizationRegistry(function () {}), k = {};
+  r.register(t, 1, k);
+  return w.deref() === t && r.unregister(k) === true && r.unregister(k) === false;
+});
+row(langRows, "Error.stack is a string", function () {
+  var e = new TypeError("boom");
+  return typeof e.stack === "string" && e.stack.split("\n")[0] === "TypeError: boom";
+});
 
 /* ---------- Dokument ---------- */
 row(domRows, "getElementById", function () { return document.getElementById("verdict") !== null });
@@ -818,6 +833,36 @@ row(domRows, "addEventListener: once, capture, signal", function () {
   ac.abort();
   kid.dispatchEvent(new Event("st", { bubbles: true }));
   return log.join(",") === "capture,once,bubble,capture" && ac.signal instanceof EventTarget;
+});
+row(domRows, "NodeList, HTMLCollection with named items", function () {
+  var f = document.createElement("form");
+  f.innerHTML = '<input name="q"><input id="w">';
+  return document.querySelectorAll("h2") instanceof NodeList
+      && f.children instanceof HTMLCollection && f.children.q === f.firstChild
+      && f.elements.namedItem("w") === f.lastChild && f.children.item(9) === null;
+});
+row(domRows, "a.href and its URL parts", function () {
+  var a = document.createElement("a");
+  a.href = "https://example.org/a/b?x=1#h";
+  var ok = a.pathname === "/a/b" && a.search === "?x=1" && a.hash === "#h"
+        && a.host === "example.org" && a.origin === "https://example.org";
+  a.pathname = "/c";
+  return ok && a.getAttribute("href") === "https://example.org/c?x=1#h";
+});
+row(domRows, "window.event and the event kinds", function () {
+  var d = document.createElement("div"), seen = false;
+  d.addEventListener("x", function (e) { seen = window.event === e; });
+  d.dispatchEvent(new Event("x"));
+  var p = new PointerEvent("pointerdown", { pointerId: 3, clientX: 5 });
+  return seen && window.event === undefined && p.pointerId === 3 && p.clientX === 5
+      && p instanceof MouseEvent && new SubmitEvent("submit").submitter === null
+      && new MessageEvent("message", { data: 7 }).data === 7;
+});
+row(domRows, "getAttribute ignores case on HTML", function () {
+  var d = document.createElement("div");
+  d.setAttribute("itemProp", "name");
+  return d.getAttribute("itemprop") === "name" && d.getAttribute("ITEMPROP") === "name"
+      && d.hasAttribute("itemProp");
 });
 
 /* ---------- Behandler ---------- */

@@ -372,8 +372,13 @@ pub fn install(realm: &mut Realm) {
     }, 1, &fp);
     d(&sp_proto, "has", |i, t, a| {
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        // The second argument narrows the match to one value.
+        let want = match a.get(1) {
+            None | Some(Value::Undefined) => None,
+            Some(v) => Some(i.to_string(v)?),
+        };
         let pairs = sp_read(i, &t)?;
-        Ok(Value::Bool(pairs.iter().any(|(n, _)| *n == *k)))
+        Ok(Value::Bool(pairs.iter().any(|(n, v)| *n == *k && want.as_ref().is_none_or(|w| **w == **v))))
     }, 1, &fp);
     d(&sp_proto, "set", |i, t, a| {
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
@@ -403,13 +408,29 @@ pub fn install(realm: &mut Realm) {
     }, 2, &fp);
     d(&sp_proto, "delete", |i, t, a| {
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let want = match a.get(1) {
+            None | Some(Value::Undefined) => None,
+            Some(v) => Some(i.to_string(v)?),
+        };
         let mut pairs = sp_read(i, &t)?;
-        pairs.retain(|(n, _)| *n != *k);
+        pairs.retain(|(n, v)| !(*n == *k && want.as_ref().is_none_or(|w| **w == **v)));
         sp_write(i, &t, &pairs)?;
         Ok(Value::Undefined)
     }, 1, &fp);
     d(&sp_proto, "toString", |i, t, _| {
         let pairs = sp_read(i, &t)?; Ok(Value::string(build_query(&pairs)))
+    }, 0, &fp);
+    // `size` and `sort` (URL §6.2). The sort is stable and compares names
+    // in UTF-16 code units, as the standard says, not by Rust's byte order.
+    let size = native(Some(fp.clone()), |i, t, _| Ok(Value::Num(sp_read(i, &t)?.len() as f64)),
+        "get size", 0, false);
+    sp_proto.borrow_mut().define("size", Prop { value: None, get: Some(Value::Obj(size)), set: None,
+        writable: false, enumerable: false, configurable: true });
+    d(&sp_proto, "sort", |i, t, _| {
+        let mut pairs = sp_read(i, &t)?;
+        pairs.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
+        sp_write(i, &t, &pairs)?;
+        Ok(Value::Undefined)
     }, 0, &fp);
     d(&sp_proto, "forEach", |i, t, a| {
         let f = a.first().cloned().unwrap_or(Value::Undefined);

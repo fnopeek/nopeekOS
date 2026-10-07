@@ -73,6 +73,10 @@ strict-probe = []
 # `cargo test` needs `-- --test-threads=1`, otherwise tests race on the
 # same `static mut`.
 heap-census = []
+# Dev-only: records reads that found nothing on a platform object (and
+# `in`/`typeof` probes that said no), so silently failing feature tests show
+# up. Kept out of the shipped module.
+miss-census = []
 
 # brotli-decompressor: WOFF2 compresses its tables with Brotli (RFC 7932).
 # Decompressor only; `default-features = false` means no `std`.

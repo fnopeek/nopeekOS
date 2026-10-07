@@ -1324,7 +1324,7 @@ impl Compiler {
                         ObjPropValue::Method(f) => {
                             let k = self.prop_key(&p.key, p.computed)?;
                             let fi = self.chunk.func(f.clone());
-                            self.chunk.emit(Op::Closure(fi));
+                            self.chunk.emit(Op::Method { f: fi, under: k.is_none() as u8 });
                             match k {
                                 Some(n) => {
                                     self.chunk.emit(Op::NameFunc(n));
@@ -1337,7 +1337,7 @@ impl Compiler {
                             let get = matches!(p.value, ObjPropValue::Get(_));
                             let k = self.prop_key(&p.key, p.computed)?;
                             let fi = self.chunk.func(f.clone());
-                            self.chunk.emit(Op::Closure(fi));
+                            self.chunk.emit(Op::Method { f: fi, under: k.is_none() as u8 });
                             match k {
                                 Some(name) => { self.chunk.emit(Op::DefineAccessor { name, get }); }
                                 None => { self.chunk.emit(Op::DefineAccessorComputed { get }); }

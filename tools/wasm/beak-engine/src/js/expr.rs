@@ -219,6 +219,8 @@ impl Interp {
         // `undefined`).
         let g = self.realm.global.clone();
         if self.has_property(&g, n) { return Ok((self.get(&Value::Obj(g), n)?, None)); }
+        #[cfg(feature = "miss-census")]
+        self.note_miss(&g, n, "ref ");
         self.ref_err(&alloc::format!("{n} is not defined"))
     }
 
@@ -358,10 +360,14 @@ impl Interp {
 
     /// Resolve `super.k`: the value comes from the parent prototype, `this`
     /// stays the current receiver.
+    ///
+    /// A getter found on the parent runs with the current `this` as well
+    /// (ES 13.3.7.3, `GetValue` on a Super Reference): `super.names` inside a
+    /// getter must see the instance, not the parent prototype.
     fn super_lookup(&mut self, key: &str, env: &Rc<RefCell<Env>>) -> C<(Value, Value)> {
         let parent = self.super_parent(env)?;
         let this_val = env_this(env);
-        let f = self.get(&Value::Obj(parent), key)?;
+        let f = self.get_with_receiver(&Value::Obj(parent), key, &this_val)?;
         Ok((f, this_val))
     }
 
@@ -581,13 +587,13 @@ impl Interp {
                 }
                 ObjPropValue::Method(f) => {
                     let key = self.prop_key(&p.key, env)?;
-                    let v = self.make_closure(f.clone(), env, None);
+                    let v = self.make_method(f.clone(), env, None, Some(g.clone()));
                     self.name_function(&v, &key);
                     g.borrow_mut().set_prop(key, Prop::data(v));
                 }
                 ObjPropValue::Get(f) | ObjPropValue::Set(f) => {
                     let key = self.prop_key(&p.key, env)?;
-                    let v = self.make_closure(f.clone(), env, None);
+                    let v = self.make_method(f.clone(), env, None, Some(g.clone()));
                     let is_get = matches!(p.value, ObjPropValue::Get(_));
                     // An accessor is named `"get x"`/`"set x"`, not `"x"`.
                     let show = alloc::format!("{} {key}", if is_get { "get" } else { "set" });
@@ -892,6 +898,8 @@ impl Interp {
         if env_lookup(env, n).is_none() {
             let g = self.realm.global.clone();
             if !self.has_property(&g, n) {
+                #[cfg(feature = "miss-census")]
+                self.note_miss(&g, n, "typeof ");
                 return Ok(Value::str("undefined"));
             }
         }
@@ -1175,7 +1183,10 @@ impl Interp {
                 let Value::Obj(o) = &r else { return self.type_err("'in' needs an object on the right") };
                 let k = self.to_prop_key(&l)?;
                 let o = o.clone();
-                Value::Bool(self.has_prop(&o, &k)?)
+                let has = self.has_prop(&o, &k)?;
+                #[cfg(feature = "miss-census")]
+                if !has { self.note_miss(&o, &k, "in ") }
+                Value::Bool(has)
             }
             Instanceof => {
                 let Value::Obj(_) = &r else { return self.type_err("right side of 'instanceof' is not callable") };

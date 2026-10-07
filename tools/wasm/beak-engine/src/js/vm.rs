@@ -473,6 +473,12 @@ impl Vm {
             }
             Op::GetProp(n) => {
                 let obj = self.pop();
+                if matches!(obj, Value::Undefined | Value::Null) {
+                    return i.type_err(&alloc::format!("cannot read '{}' of {}{}",
+                        chunk.names[*n as usize],
+                        if matches!(obj, Value::Null) { "null" } else { "undefined" },
+                        source_name(chunk, ip)));
+                }
                 let v = i.get(&obj, &chunk.names[*n as usize])?;
                 self.push(v);
             }
@@ -586,6 +592,14 @@ impl Vm {
             }
             Op::Closure(f) => {
                 let v = i.func_value(chunk.funcs[*f as usize].clone(), &env);
+                self.push(v);
+            }
+            Op::Method { f, under } => {
+                let home = match &self.stack[self.stack.len() - 1 - *under as usize] {
+                    Value::Obj(o) => Some(o.clone()),
+                    _ => None,
+                };
+                let v = i.make_method(chunk.funcs[*f as usize].clone(), &env, None, home);
                 self.push(v);
             }
             // Same helpers as the tree-walker; see `Op::BindPat`.
@@ -1303,6 +1317,30 @@ impl IdxBuf {
     }
 }
 
+/// What produced the value an op at `ip` consumes, as ` (a.b)` for an error
+/// message; empty if the previous ops are not a plain name or member chain.
+///
+/// Minified code has no lines, and the AST carries no positions, so naming
+/// the operand is what makes `cannot read 'x' of undefined` findable.
+fn source_name(chunk: &Chunk, ip: usize) -> alloc::string::String {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut j = ip;
+    // A method call duplicates the receiver before reading the method.
+    if j > 0 && matches!(chunk.ops[j - 1], Op::Dup) { j -= 1 }
+    while j > 0 && parts.len() < 3 {
+        j -= 1;
+        match &chunk.ops[j] {
+            Op::GetProp(m) => parts.push(&chunk.names[*m as usize]),
+            Op::LoadVar(m) => { parts.push(&chunk.names[*m as usize]); break }
+            Op::This => { parts.push("this"); break }
+            _ => { if parts.is_empty() { return alloc::string::String::new() } break }
+        }
+    }
+    if parts.is_empty() { return alloc::string::String::new() }
+    parts.reverse();
+    alloc::format!(" ({})", parts.join("."))
+}
+
 #[cfg(test)]
 mod tests {
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -1739,6 +1777,19 @@ mod tests {
         assert_eq!(on_both("class A { constructor(){ this.a = 1 } } class D extends A {} \
                             Object.setPrototypeOf(D, function O(){ this.o = 1 }); \
                             JSON.stringify(new D())"), r#"{"o":1}"#);
+    }
+
+    /// A getter reached through `super` runs with the current `this`, not
+    /// the parent prototype; object literal methods have a home object too.
+    #[test]
+    fn super_property_reads_keep_the_receiver() {
+        assert_eq!(on_both("class A { constructor(){ this.v = 7 } get g(){ return this.v } } \
+                            class B extends A { get g(){ return super.g + 1 } get h(){ const e = super.g; return e } } \
+                            const b = new B(); [b.g, b.h].join()"), "8,7");
+        assert_eq!(on_both("const o = { __proto__: { get q(){ return this.w }, m(){ return 'p' + this.w } }, \
+                            w: 5, get q2(){ return super.q }, m(){ return super.m() + '!' }, ['k'](){ return super.m() } }; \
+                            [o.q2, o.m(), o.k()].join()"), "5,p5!,p5");
+        assert_eq!(on_both("Reflect.get({ get x(){ return this.y } }, 'x', { y: 42 })"), "42");
     }
 
     /// `Reflect.construct` with a builtin takes the prototype from the new target.

@@ -280,6 +280,41 @@ pub fn make_realm() -> Realm {
                 if matches!(o.borrow().kind, ObjKind::Error))))
         }, 1, fp);
     }
+    // `stack`: an accessor on the prototype, as in SpiderMonkey. beak keeps
+    // no source positions, so the trace is the error's own line plus one
+    // anonymous frame; libraries split it by lines and read `stack` far more
+    // often than they parse it (18 000 reads on GitHub alone), and
+    // `undefined` breaks the split. Writing it makes an own data property.
+    let sget = native(Some(function_proto.clone()), |i, this, _| {
+        let Value::Obj(o) = &this else { return Ok(Value::Undefined) };
+        if !matches!(o.borrow().kind, ObjKind::Error) { return Ok(Value::Undefined) }
+        let f = i.get(&this, "toString")?;
+        let head = i.call(&f, this.clone(), &[])?;
+        let head = i.to_string(&head)?;
+        Ok(Value::string(alloc::format!("{head}\n    at <anonymous>")))
+    }, "get stack", 0, false);
+    let sset = native(Some(function_proto.clone()), |_, this, a| {
+        if let Value::Obj(o) = &this {
+            o.borrow_mut().define("stack", Prop { value: Some(a.first().cloned().unwrap_or(Value::Undefined)),
+                get: None, set: None, writable: true, enumerable: false, configurable: true });
+        }
+        Ok(Value::Undefined)
+    }, "set stack", 1, false);
+    error_proto.borrow_mut().define("stack", Prop { value: None, get: Some(Value::Obj(sget)),
+        set: Some(Value::Obj(sset)), writable: false, enumerable: false, configurable: true });
+    // `Error.captureStackTrace(obj)` (V8, also in Chromium pages' feature
+    // tests): gives any object a `stack` of the same shape.
+    if let Some(Value::Obj(ec)) = global.borrow().get_own("Error").and_then(|p| p.value.clone()) {
+        def(&ec, "captureStackTrace", |i, _, a| {
+            let Some(t @ Value::Obj(o)) = a.first() else { return i.type_err("captureStackTrace needs an object") };
+            let f = i.get(t, "toString")?;
+            let head = if i.is_callable(&f) { let h = i.call(&f, t.clone(), &[])?; i.to_string(&h)? } else { Rc::from("Error") };
+            o.borrow_mut().define("stack", Prop { value: Some(Value::string(alloc::format!("{head}\n    at <anonymous>"))),
+                get: None, set: None, writable: true, enumerable: false, configurable: true });
+            Ok(Value::Undefined)
+        }, 2, fp);
+        ec.borrow_mut().define("stackTraceLimit", Prop::data(Value::Num(10.0)));
+    }
     err_ctor!("TypeError", |i, _, a| make_error(i, "TypeError", a));
     err_ctor!("RangeError", |i, _, a| make_error(i, "RangeError", a));
     err_ctor!("SyntaxError", |i, _, a| make_error(i, "SyntaxError", a));
@@ -1857,6 +1892,72 @@ pub fn make_realm() -> Realm {
     collection!("WeakMap", true, (|i: &mut Interp, _: Value, a: &[Value]| coll_new(i, "WeakMap", true, a)) as NativeFn);
     collection!("WeakSet", false, (|i: &mut Interp, _: Value, a: &[Value]| coll_new(i, "WeakSet", false, a)) as NativeFn);
 
+    // ── WeakRef, FinalizationRegistry (ES 26.1, 26.2) ────────────────────
+    //
+    // beak frees by reference count and has no tracing collector, so a weak
+    // reference cannot observe a collection; holding the target strongly is
+    // a conforming implementation (the spec never requires a target to be
+    // collected). Callbacks of a registry therefore never run.
+    let wr_proto = new_obj(Some(object_proto.clone()));
+    let wr = native(Some(function_proto.clone()), |i, _, a| {
+        let t = a.first().cloned().unwrap_or(Value::Undefined);
+        if !can_be_held_weakly(&t) { return i.type_err("WeakRef: target must be an object or symbol") }
+        let proto = weak_proto(i, "WeakRef");
+        let o = new_obj(proto);
+        o.borrow_mut().define(WEAKREF_TARGET, Prop::frozen(t));
+        Ok(Value::Obj(o))
+    }, "WeakRef", 1, true);
+    wr.borrow_mut().define("prototype", Prop::frozen(Value::Obj(wr_proto.clone())));
+    wr_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(wr.clone())));
+    wr_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("WeakRef")));
+    def(&wr_proto, "deref", |i, t, _| {
+        let v = match &t { Value::Obj(o) => o.borrow().get_own(WEAKREF_TARGET).and_then(|p| p.value.clone()), _ => None };
+        match v { Some(v) => Ok(v), None => i.type_err("WeakRef.prototype.deref called on a non-WeakRef") }
+    }, 0, fp);
+    global.borrow_mut().define("WeakRef", Prop::builtin(Value::Obj(wr)));
+
+    let fr_proto = new_obj(Some(object_proto.clone()));
+    let fr = native(Some(function_proto.clone()), |i, _, a| {
+        let cb = a.first().cloned().unwrap_or(Value::Undefined);
+        if !i.is_callable(&cb) { return i.type_err("FinalizationRegistry: cleanup callback must be callable") }
+        let proto = weak_proto(i, "FinalizationRegistry");
+        let o = new_obj(proto);
+        let tokens = i.new_array(alloc::vec::Vec::new());
+        o.borrow_mut().define(FINREG_TOKENS, Prop::frozen(tokens));
+        Ok(Value::Obj(o))
+    }, "FinalizationRegistry", 1, true);
+    fr.borrow_mut().define("prototype", Prop::frozen(Value::Obj(fr_proto.clone())));
+    fr_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(fr.clone())));
+    fr_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("FinalizationRegistry")));
+    def(&fr_proto, "register", |i, t, a| {
+        let toks = finreg_tokens(i, &t)?;
+        let target = a.first().cloned().unwrap_or(Value::Undefined);
+        if !can_be_held_weakly(&target) { return i.type_err("register: target must be an object or symbol") }
+        let held = a.get(1).cloned().unwrap_or(Value::Undefined);
+        if same_ref(&target, &held) { return i.type_err("register: target and held value must differ") }
+        let tok = a.get(2).cloned().unwrap_or(Value::Undefined);
+        if !matches!(tok, Value::Undefined) {
+            if !can_be_held_weakly(&tok) { return i.type_err("register: invalid unregister token") }
+            let n = array_len(i, &toks)?;
+            i.set(&toks, &num_to_string(n), tok, true)?;
+        }
+        Ok(Value::Undefined)
+    }, 2, fp);
+    def(&fr_proto, "unregister", |i, t, a| {
+        let toks = finreg_tokens(i, &t)?;
+        let tok = a.first().cloned().unwrap_or(Value::Undefined);
+        if !can_be_held_weakly(&tok) { return i.type_err("unregister: invalid unregister token") }
+        let items = i.elems(&toks)?;
+        let kept: alloc::vec::Vec<Value> = items.iter().filter(|v| !same_ref(v, &tok)).cloned().collect();
+        let hit = kept.len() != items.len();
+        if hit {
+            let fresh = i.new_array(kept);
+            if let Value::Obj(o) = &t { o.borrow_mut().define(FINREG_TOKENS, Prop::frozen(fresh)); }
+        }
+        Ok(Value::Bool(hit))
+    }, 1, fp);
+    global.borrow_mut().define("FinalizationRegistry", Prop::builtin(Value::Obj(fr)));
+
     // ── The seven set operations (ES2025) ────────────────────────────────
     //
     // They read the argument via `size`/`has`/`keys`; it need not be a Set, only
@@ -1957,8 +2058,12 @@ pub fn make_realm() -> Realm {
     let reflect = new_obj(Some(object_proto.clone()));
     def(&reflect, "get", |i, _, a| {
         let t = a.first().cloned().unwrap_or(Value::Undefined);
+        if !matches!(t, Value::Obj(_)) { return i.type_err("Reflect.get on a non-object"); }
         let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
-        i.get(&t, &k)
+        match a.get(2) {
+            Some(r) => { let r = r.clone(); i.get_with_receiver(&t, &k, &r) }
+            None => i.get(&t, &k),
+        }
     }, 2, fp);
     def(&reflect, "set", |i, _, a| {
         let t = a.first().cloned().unwrap_or(Value::Undefined);
@@ -3389,6 +3494,40 @@ fn coll_view(i: &mut Interp, t: &Value, kind: u8) -> C<Value> {
 }
 
 /// The shared body of the four collection constructors.
+const WEAKREF_TARGET: &str = "\0!weakref.target";
+const FINREG_TOKENS: &str = "\0!finreg.tokens";
+
+/// ES 9.13 CanBeHeldWeakly: an object, or a symbol that is not registered.
+fn can_be_held_weakly(v: &Value) -> bool {
+    match v {
+        Value::Obj(_) => true,
+        Value::Sym(s) => s.registered.is_none(),
+        _ => false,
+    }
+}
+
+fn same_ref(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Obj(x), Value::Obj(y)) => Rc::ptr_eq(x, y),
+        (Value::Sym(x), Value::Sym(y)) => Rc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+fn weak_proto(i: &mut Interp, name: &str) -> Option<Gc> {
+    let c = i.realm.global.borrow().get_own(name).and_then(|p| p.value.clone());
+    match c {
+        Some(Value::Obj(c)) => match c.borrow().get_own("prototype").and_then(|p| p.value.clone()) {
+            Some(Value::Obj(p)) => Some(p), _ => None },
+        _ => None,
+    }
+}
+
+fn finreg_tokens(i: &mut Interp, t: &Value) -> C<Value> {
+    let v = match t { Value::Obj(o) => o.borrow().get_own(FINREG_TOKENS).and_then(|p| p.value.clone()), _ => None };
+    match v { Some(v) => Ok(v), None => i.type_err("not a FinalizationRegistry") }
+}
+
 fn coll_new(i: &mut Interp, name: &str, is_map: bool, a: &[Value]) -> C<Value> {
     let pv = i.get(&Value::Obj(i.realm.global.clone()), name)?;
     let proto = match i.get(&pv, "prototype")? { Value::Obj(p) => Some(p), _ => None };

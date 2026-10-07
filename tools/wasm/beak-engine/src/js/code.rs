@@ -167,6 +167,10 @@ pub enum Op {
     JumpNullishTo(u32),
     /// Build a function; the index points into `funcs`.
     Closure(u32),
+    /// An object literal's method, getter or setter: a closure whose home
+    /// object is the literal, so `super.x` inside it works. `under` is how
+    /// many values above the object sit on the stack (1 for a computed key).
+    Method { f: u32, under: u8 },
     /// Bind a pattern. Stack: value -> (nothing). The index points into
     /// `pats`.
     ///

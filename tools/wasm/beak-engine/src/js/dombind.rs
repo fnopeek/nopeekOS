@@ -1596,9 +1596,32 @@ fn nodes_equal(d: &Doc, x: u32, y: u32) -> bool {
         && a.children.iter().zip(b.children.iter()).all(|(&p, &q)| nodes_equal(d, p, q))
 }
 
+/// The attribute name a `*Attribute` method looks up: on an HTML element in
+/// an HTML document it is lowercased first (DOM §4.9.2), because the parser
+/// stored `itemProp` as `itemprop`. Inside `<svg>` the case is kept
+/// (`viewBox`).
+fn attr_name(i: &mut Interp, id: u32, v: Option<&Value>) -> C<Rc<str>> {
+    let k = i.to_string(v.unwrap_or(&Value::Undefined))?;
+    if !k.bytes().any(|b| b.is_ascii_uppercase()) { return Ok(k) }
+    let in_svg = i.doc.as_ref().is_some_and(|d| {
+        let mut cur = Some(id);
+        while let Some(x) = cur {
+            let tag = &d.nodes[x as usize].tag;
+            if &**tag == "svg" || tag.starts_with("svg:") || &**tag == "math" { return true }
+            if &**tag == "foreignObject" || &**tag == "foreignobject" { return false }
+            cur = d.nodes[x as usize].parent;
+        }
+        false
+    });
+    Ok(if in_svg { k } else { Rc::from(k.to_ascii_lowercase().as_str()) })
+}
+
 fn nodes_array(i: &mut Interp, ids: Vec<u32>) -> Value {
-    let vals: Vec<Value> = ids.into_iter().map(|id| wrap(i, id)).collect();
-    i.new_array(vals)
+    surface::node_list(i, ids)
+}
+
+fn collection(i: &mut Interp, ids: Vec<u32>) -> Value {
+    surface::html_collection(i, ids)
 }
 
 /// Read access to a node without holding the borrow across a call; each
@@ -1708,7 +1731,7 @@ fn event_of_kind(i: &mut Interp, iface: &str, a: &[Value]) -> C<Gc> {
             let r = if has { i.get(&init, "relatedTarget")? } else { Value::Null };
             set(&ev, "__evrelated", if matches!(r, Value::Undefined) { Value::Null } else { r });
         }
-        "MouseEvent" => {
+        "MouseEvent" | "PointerEvent" | "WheelEvent" | "DragEvent" => {
             for (k, slot) in [("clientX", "__evclientx"), ("clientY", "__evclienty"),
                               ("pageX", "__evpagex"), ("pageY", "__evpagey"),
                               ("offsetX", "__evoffsetx"), ("offsetY", "__evoffsety"),
@@ -1720,7 +1743,59 @@ fn event_of_kind(i: &mut Interp, iface: &str, a: &[Value]) -> C<Gc> {
         }
         _ => {}
     }
+    for (k, d) in event_fields(iface) {
+        let v = if has { i.get(&init, k)? } else { Value::Undefined };
+        let v = match (v, d) {
+            (Value::Undefined, EvDef::Num(n)) => Value::Num(*n),
+            (Value::Undefined, EvDef::Str) => Value::str(""),
+            (Value::Undefined, EvDef::Null) => Value::Null,
+            (Value::Undefined, EvDef::False) => Value::Bool(false),
+            (Value::Undefined, EvDef::Arr) => i.new_array(Vec::new()),
+            (v, EvDef::Num(_)) => Value::Num(i.to_number(&v)?),
+            (v, EvDef::Str) => Value::Str(i.to_string(&v)?),
+            (v, EvDef::False) => Value::Bool(v.truthy()),
+            (v, _) => v,
+        };
+        set(&ev, &alloc::format!("__ev.{k}"), v);
+    }
     Ok(ev)
+}
+
+/// The default of an event dictionary member, which is also its type.
+enum EvDef { Num(f64), Str, Null, False, Arr }
+
+/// The members of the event kinds that are plain records, by interface.
+/// The getters read the slot `__ev.<name>`; `ev_field!` defines them.
+fn event_fields(iface: &str) -> &'static [(&'static str, EvDef)] {
+    use EvDef::*;
+    match iface {
+        "PointerEvent" => &[("pointerId", Num(0.0)), ("width", Num(1.0)), ("height", Num(1.0)),
+            ("pressure", Num(0.0)), ("tangentialPressure", Num(0.0)), ("tiltX", Num(0.0)),
+            ("tiltY", Num(0.0)), ("twist", Num(0.0)),
+            ("altitudeAngle", Num(core::f64::consts::FRAC_PI_2)), ("azimuthAngle", Num(0.0)),
+            ("pointerType", Str), ("isPrimary", False)],
+        "WheelEvent" => &[("deltaX", Num(0.0)), ("deltaY", Num(0.0)), ("deltaZ", Num(0.0)),
+            ("deltaMode", Num(0.0))],
+        "DragEvent" => &[("dataTransfer", Null)],
+        "CompositionEvent" => &[("data", Str)],
+        "AnimationEvent" => &[("animationName", Str), ("elapsedTime", Num(0.0)), ("pseudoElement", Str)],
+        "TransitionEvent" => &[("propertyName", Str), ("elapsedTime", Num(0.0)), ("pseudoElement", Str)],
+        "SubmitEvent" => &[("submitter", Null)],
+        "ClipboardEvent" => &[("clipboardData", Null)],
+        "HashChangeEvent" => &[("oldURL", Str), ("newURL", Str)],
+        "PopStateEvent" => &[("state", Null)],
+        "PageTransitionEvent" => &[("persisted", False)],
+        "StorageEvent" => &[("key", Null), ("oldValue", Null), ("newValue", Null), ("url", Str),
+            ("storageArea", Null)],
+        "ProgressEvent" => &[("lengthComputable", False), ("loaded", Num(0.0)), ("total", Num(0.0))],
+        "MessageEvent" => &[("data", Null), ("origin", Str), ("lastEventId", Str), ("source", Null),
+            ("ports", Arr)],
+        "ErrorEvent" => &[("message", Str), ("filename", Str), ("lineno", Num(0.0)),
+            ("colno", Num(0.0)), ("error", Null)],
+        "ToggleEvent" => &[("oldState", Str), ("newState", Str)],
+        "FormDataEvent" => &[("formData", Null)],
+        _ => &[],
+    }
 }
 
 /// An event object with its slots set. `trusted` distinguishes what beak
@@ -1995,6 +2070,105 @@ macro_rules! attr_prop {
         $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
             set: Some(Value::Obj(s)), writable: false, enumerable: false, configurable: true });
     }};
+}
+
+/// The document's base URL (HTML §2.4.1): the first `<base href>`,
+/// resolved against the address, else the address itself.
+fn doc_base(i: &Interp) -> Option<super::url::Parts> {
+    let here = super::url::parse_abs(&i.loc_href)?;
+    let b = i.doc.as_ref().and_then(|d| d.nodes.iter()
+        .find(|n| n.kind == 1.0 && &*n.tag == "base" && n.attr("href").is_some())
+        .and_then(|n| n.attr("href").cloned()));
+    Some(match b { Some(h) => super::url::resolve(h.trim(), &here), None => here })
+}
+
+/// A URL-valued attribute as its IDL attribute returns it (HTML §2.6.1,
+/// "reflect" for USVString URLs): resolved against the base URL; the empty
+/// string if absent; the raw value if it does not resolve.
+fn url_attr(i: &Interp, id: u32, attr: &str) -> Value {
+    let raw = i.doc.as_ref().and_then(|d| d.nodes[id as usize].attr(attr).cloned());
+    let Some(raw) = raw else { return Value::str("") };
+    match doc_base(i) {
+        Some(b) => Value::string(super::url::resolve(raw.trim(), &b).href()),
+        None => Value::Str(raw),
+    }
+}
+
+/// `attr_prop!` for a URL: the getter resolves, the setter stores the
+/// string as given.
+macro_rules! url_prop {
+    ($proto:expr, $fp:expr, $js:literal, $attr:literal) => {{
+        let g = native(Some($fp.clone()), |i, t, _| {
+            let id = node_of(i, &t)?;
+            Ok(url_attr(i, id, $attr))
+        }, concat!("get ", $js), 0, false);
+        let s = native(Some($fp.clone()), |i, t, a| {
+            let id = node_of(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            if let Some(d) = &mut i.doc { d.set_attr_at(id, $attr, &v); }
+            Ok(Value::Undefined)
+        }, concat!("set ", $js), 1, false);
+        $proto.borrow_mut().define($js, Prop { value: None, get: Some(Value::Obj(g)),
+            set: Some(Value::Obj(s)), writable: false, enumerable: false, configurable: true });
+    }};
+}
+
+/// The parsed `href` of an `<a>`/`<area>` (HTMLHyperlinkElementUtils §
+/// "reinitialize url"): `None` without an attribute or if it does not parse.
+fn link_url(i: &Interp, id: u32) -> Option<super::url::Parts> {
+    let raw = i.doc.as_ref().and_then(|d| d.nodes[id as usize].attr("href").cloned())?;
+    let b = doc_base(i)?;
+    Some(super::url::resolve(raw.trim(), &b))
+}
+
+/// One component of a hyperlink's URL, read and written like `URL`'s.
+/// Writing does nothing while the link has no URL, as the spec says.
+macro_rules! link_part {
+    ($proto:expr, $fp:expr, $name:literal, $get:expr, $set:expr) => {{
+        let g = native(Some($fp.clone()), |i, t, _| {
+            let id = node_of(i, &t)?;
+            let f: fn(&super::url::Parts) -> String = $get;
+            Ok(match link_url(i, id) { Some(p) => Value::string(f(&p)), None => Value::str("") })
+        }, concat!("get ", $name), 0, false);
+        let s = native(Some($fp.clone()), |i, t, a| {
+            let id = node_of(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            if let Some(mut p) = link_url(i, id) {
+                let f: fn(&mut super::url::Parts, &str) = $set;
+                f(&mut p, &v);
+                let h = p.href();
+                if let Some(d) = &mut i.doc { d.set_attr_at(id, "href", &h); }
+            }
+            Ok(Value::Undefined)
+        }, concat!("set ", $name), 1, false);
+        $proto.borrow_mut().define($name, Prop { value: None, get: Some(Value::Obj(g)),
+            set: Some(Value::Obj(s)), writable: false, enumerable: false, configurable: true });
+    }};
+}
+
+/// HTMLHyperlinkElementUtils (HTML §4.6.6) on one prototype.
+fn hyperlink_utils(p: &Gc, fp: &Gc) {
+    link_part!(p, fp, "protocol", |p| alloc::format!("{}:", p.scheme),
+        |p, v| p.scheme = v.trim_end_matches(':').to_ascii_lowercase());
+    link_part!(p, fp, "host", |p| p.host_with_port(), |p, v| match v.rfind(':') {
+        Some(k) => { p.host = v[..k].to_ascii_lowercase(); p.port = v[k + 1..].to_string() }
+        None => p.host = v.to_ascii_lowercase(),
+    });
+    link_part!(p, fp, "hostname", |p| p.host.clone(), |p, v| p.host = v.to_ascii_lowercase());
+    link_part!(p, fp, "port", |p| p.port.clone(), |p, v| p.port = v.to_string());
+    link_part!(p, fp, "pathname", |p| p.path.clone(),
+        |p, v| p.path = if v.starts_with('/') { v.to_string() } else { alloc::format!("/{v}") });
+    link_part!(p, fp, "search", |p| if p.query.is_empty() { String::new() } else { alloc::format!("?{}", p.query) },
+        |p, v| p.query = v.trim_start_matches('?').to_string());
+    link_part!(p, fp, "hash", |p| if p.hash.is_empty() { String::new() } else { alloc::format!("#{}", p.hash) },
+        |p, v| p.hash = v.trim_start_matches('#').to_string());
+    link_part!(p, fp, "username", |_| String::new(), |_, _| {});
+    link_part!(p, fp, "password", |_| String::new(), |_, _| {});
+    getter(p, "origin", |i, t, _| {
+        let id = node_of(i, &t)?;
+        Ok(match link_url(i, id) { Some(p) => Value::string(p.origin()), None => Value::str("") })
+    }, fp);
+    meth(p, "toString", |i, t, _| { let id = node_of(i, &t)?; Ok(url_attr(i, id, "href")) }, 0, fp);
 }
 
 /// Like `attr_prop!`, but `null` instead of the empty string when the
@@ -3005,7 +3179,7 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, &t)?;
         let cs: Vec<u32> = i.doc.as_ref().map(|d| d.nodes[id as usize].children.iter()
             .copied().filter(|&c| d.nodes[c as usize].kind == ELEMENT_NODE).collect()).unwrap_or_default();
-        Ok(nodes_array(i, cs))
+        Ok(collection(i, cs))
     }, &fp);
     getter(&element_proto, "firstElementChild", |i, t, _| {
         let id = node_of(i, &t)?;
@@ -3024,23 +3198,25 @@ pub fn install(realm: &mut Realm) {
                     if let Some(d) = &mut i.doc { d.set_attr_at(id, "class", &v); }
                     Ok(Value::Undefined) }, &fp);
     meth(&element_proto, "getAttribute", |i, t, a| {
-        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let id = node_of(i, &t)?;
+        let k = attr_name(i, id, a.first())?;
         with_node!(i, t, |n| Ok(match n.attr(&k) { Some(v) => Value::Str(v.clone()), None => Value::Null }))
     }, 1, &fp);
     meth(&element_proto, "hasAttribute", |i, t, a| {
-        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let id = node_of(i, &t)?;
+        let k = attr_name(i, id, a.first())?;
         with_node!(i, t, |n| Ok(Value::Bool(n.attr(&k).is_some())))
     }, 1, &fp);
     meth(&element_proto, "setAttribute", |i, t, a| {
         let id = node_of(i, &t)?;
-        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let k = attr_name(i, id, a.first())?;
         let v = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
         if let Some(d) = &mut i.doc { d.set_attr_at(id, &k, &v); }
         Ok(Value::Undefined)
     }, 2, &fp);
     meth(&element_proto, "removeAttribute", |i, t, a| {
         let id = node_of(i, &t)?;
-        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let k = attr_name(i, id, a.first())?;
         if let Some(d) = &mut i.doc { d.remove_attr_at(id, &k); }
         Ok(Value::Undefined)
     }, 1, &fp);
@@ -3365,7 +3541,7 @@ pub fn install(realm: &mut Realm) {
                 Some(d) => all.into_iter().filter(|&x| &*s == "*" || d.nodes[x as usize].tag.eq_ignore_ascii_case(&s)).collect(),
                 None => Vec::new(),
             };
-            Ok(nodes_array(i, found))
+            Ok(collection(i, found))
         }, 1, &fp);
         meth(target, "getElementsByClassName", |i, t, a| {
             let id = node_of(i, &t)?;
@@ -3376,7 +3552,7 @@ pub fn install(realm: &mut Realm) {
                 Some(d) => all.into_iter().filter(|&x| d.classes(x).iter().any(|c| **c == *s)).collect(),
                 None => Vec::new(),
             };
-            Ok(nodes_array(i, found))
+            Ok(collection(i, found))
         }, 1, &fp);
     }
 
@@ -3585,7 +3761,7 @@ pub fn install(realm: &mut Realm) {
     // looks up by `id` and `name`.
     getter(&document_proto, "forms", |i, _, _| {
         let ids = match &i.doc { Some(d) => tags_of(d, d.doc, "form"), None => Vec::new() };
-        let arr = nodes_array(i, ids.clone());
+        let arr = collection(i, ids.clone());
         if let Value::Obj(o) = &arr {
             for id in ids {
                 let (name, ident) = match &i.doc {
@@ -4427,7 +4603,7 @@ pub fn install(realm: &mut Realm) {
     // relies on it.
     meth(&element_proto, "toggleAttribute", |i, t, a| {
         let id = node_of(i, &t)?;
-        let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let k = attr_name(i, id, a.first())?;
         let da = i.doc.as_ref().is_some_and(|d| d.nodes[id as usize].attr(&k).is_some());
         let soll = match a.get(1) {
             None | Some(Value::Undefined) => !da,
@@ -4498,7 +4674,7 @@ pub fn install(realm: &mut Realm) {
             let cs: Vec<u32> = i.doc.as_ref().map(|d| d.nodes[id as usize].children.iter()
                 .copied().filter(|&c| d.nodes[c as usize].kind == ELEMENT_NODE).collect())
                 .unwrap_or_default();
-            Ok(nodes_array(i, cs))
+            Ok(collection(i, cs))
         }, &fp);
     }
     // `isConnected`: is this node attached to the document? Libraries ask
@@ -4770,6 +4946,212 @@ pub fn install(realm: &mut Realm) {
     style_prop!(style_proto, fp, "aspectRatio", "aspect-ratio");
     style_prop!(style_proto, fp, "cssFloat", "float");
     style_prop!(style_proto, fp, "float", "float");
+    // The rest of the names a page sets or feature-tests (`"perspective" in
+    // el.style`): each reaches the `style` attribute like the ones above,
+    // whether or not the cascade builds the property. Chromium answers `in`
+    // for all of them, and a missing one sends libraries down a fallback.
+    style_prop!(style_proto, fp, "perspective", "perspective");
+    style_prop!(style_proto, fp, "perspectiveOrigin", "perspective-origin");
+    style_prop!(style_proto, fp, "backfaceVisibility", "backface-visibility");
+    style_prop!(style_proto, fp, "transformStyle", "transform-style");
+    style_prop!(style_proto, fp, "transformBox", "transform-box");
+    style_prop!(style_proto, fp, "translate", "translate");
+    style_prop!(style_proto, fp, "rotate", "rotate");
+    style_prop!(style_proto, fp, "scale", "scale");
+    style_prop!(style_proto, fp, "touchAction", "touch-action");
+    style_prop!(style_proto, fp, "backgroundClip", "background-clip");
+    style_prop!(style_proto, fp, "backgroundOrigin", "background-origin");
+    style_prop!(style_proto, fp, "backgroundAttachment", "background-attachment");
+    style_prop!(style_proto, fp, "backgroundBlendMode", "background-blend-mode");
+    style_prop!(style_proto, fp, "textWrap", "text-wrap");
+    style_prop!(style_proto, fp, "textOverflow", "text-overflow");
+    style_prop!(style_proto, fp, "textIndent", "text-indent");
+    style_prop!(style_proto, fp, "wordWrap", "word-wrap");
+    style_prop!(style_proto, fp, "overflowWrap", "overflow-wrap");
+    style_prop!(style_proto, fp, "wordSpacing", "word-spacing");
+    style_prop!(style_proto, fp, "tabSize", "tab-size");
+    style_prop!(style_proto, fp, "direction", "direction");
+    style_prop!(style_proto, fp, "writingMode", "writing-mode");
+    style_prop!(style_proto, fp, "unicodeBidi", "unicode-bidi");
+    style_prop!(style_proto, fp, "hyphens", "hyphens");
+    style_prop!(style_proto, fp, "animationName", "animation-name");
+    style_prop!(style_proto, fp, "animationDuration", "animation-duration");
+    style_prop!(style_proto, fp, "animationDelay", "animation-delay");
+    style_prop!(style_proto, fp, "animationTimingFunction", "animation-timing-function");
+    style_prop!(style_proto, fp, "animationIterationCount", "animation-iteration-count");
+    style_prop!(style_proto, fp, "animationDirection", "animation-direction");
+    style_prop!(style_proto, fp, "animationFillMode", "animation-fill-mode");
+    style_prop!(style_proto, fp, "animationPlayState", "animation-play-state");
+    style_prop!(style_proto, fp, "transitionProperty", "transition-property");
+    style_prop!(style_proto, fp, "transitionDuration", "transition-duration");
+    style_prop!(style_proto, fp, "transitionDelay", "transition-delay");
+    style_prop!(style_proto, fp, "transitionTimingFunction", "transition-timing-function");
+    style_prop!(style_proto, fp, "transitionBehavior", "transition-behavior");
+    style_prop!(style_proto, fp, "clipPath", "clip-path");
+    style_prop!(style_proto, fp, "clip", "clip");
+    style_prop!(style_proto, fp, "mask", "mask");
+    style_prop!(style_proto, fp, "maskImage", "mask-image");
+    style_prop!(style_proto, fp, "maskSize", "mask-size");
+    style_prop!(style_proto, fp, "maskPosition", "mask-position");
+    style_prop!(style_proto, fp, "maskRepeat", "mask-repeat");
+    style_prop!(style_proto, fp, "backdropFilter", "backdrop-filter");
+    style_prop!(style_proto, fp, "mixBlendMode", "mix-blend-mode");
+    style_prop!(style_proto, fp, "isolation", "isolation");
+    style_prop!(style_proto, fp, "objectPosition", "object-position");
+    style_prop!(style_proto, fp, "fontVariant", "font-variant");
+    style_prop!(style_proto, fp, "fontVariantNumeric", "font-variant-numeric");
+    style_prop!(style_proto, fp, "fontFeatureSettings", "font-feature-settings");
+    style_prop!(style_proto, fp, "fontStretch", "font-stretch");
+    style_prop!(style_proto, fp, "fontDisplay", "font-display");
+    style_prop!(style_proto, fp, "fontKerning", "font-kerning");
+    style_prop!(style_proto, fp, "fontOpticalSizing", "font-optical-sizing");
+    style_prop!(style_proto, fp, "fontVariationSettings", "font-variation-settings");
+    style_prop!(style_proto, fp, "scrollBehavior", "scroll-behavior");
+    style_prop!(style_proto, fp, "scrollSnapType", "scroll-snap-type");
+    style_prop!(style_proto, fp, "scrollSnapAlign", "scroll-snap-align");
+    style_prop!(style_proto, fp, "scrollMargin", "scroll-margin");
+    style_prop!(style_proto, fp, "scrollPadding", "scroll-padding");
+    style_prop!(style_proto, fp, "overscrollBehavior", "overscroll-behavior");
+    style_prop!(style_proto, fp, "contain", "contain");
+    style_prop!(style_proto, fp, "containerType", "container-type");
+    style_prop!(style_proto, fp, "containerName", "container-name");
+    style_prop!(style_proto, fp, "contentVisibility", "content-visibility");
+    style_prop!(style_proto, fp, "accentColor", "accent-color");
+    style_prop!(style_proto, fp, "caretColor", "caret-color");
+    style_prop!(style_proto, fp, "colorScheme", "color-scheme");
+    style_prop!(style_proto, fp, "fill", "fill");
+    style_prop!(style_proto, fp, "fillOpacity", "fill-opacity");
+    style_prop!(style_proto, fp, "stroke", "stroke");
+    style_prop!(style_proto, fp, "strokeWidth", "stroke-width");
+    style_prop!(style_proto, fp, "strokeOpacity", "stroke-opacity");
+    style_prop!(style_proto, fp, "strokeDasharray", "stroke-dasharray");
+    style_prop!(style_proto, fp, "strokeDashoffset", "stroke-dashoffset");
+    style_prop!(style_proto, fp, "strokeLinecap", "stroke-linecap");
+    style_prop!(style_proto, fp, "strokeLinejoin", "stroke-linejoin");
+    style_prop!(style_proto, fp, "outlineOffset", "outline-offset");
+    style_prop!(style_proto, fp, "outlineColor", "outline-color");
+    style_prop!(style_proto, fp, "outlineWidth", "outline-width");
+    style_prop!(style_proto, fp, "outlineStyle", "outline-style");
+    style_prop!(style_proto, fp, "textDecorationLine", "text-decoration-line");
+    style_prop!(style_proto, fp, "textDecorationColor", "text-decoration-color");
+    style_prop!(style_proto, fp, "textDecorationStyle", "text-decoration-style");
+    style_prop!(style_proto, fp, "textDecorationThickness", "text-decoration-thickness");
+    style_prop!(style_proto, fp, "textUnderlineOffset", "text-underline-offset");
+    style_prop!(style_proto, fp, "textUnderlinePosition", "text-underline-position");
+    style_prop!(style_proto, fp, "textRendering", "text-rendering");
+    style_prop!(style_proto, fp, "borderCollapse", "border-collapse");
+    style_prop!(style_proto, fp, "borderSpacing", "border-spacing");
+    style_prop!(style_proto, fp, "borderImage", "border-image");
+    style_prop!(style_proto, fp, "borderTopLeftRadius", "border-top-left-radius");
+    style_prop!(style_proto, fp, "borderTopRightRadius", "border-top-right-radius");
+    style_prop!(style_proto, fp, "borderBottomLeftRadius", "border-bottom-left-radius");
+    style_prop!(style_proto, fp, "borderBottomRightRadius", "border-bottom-right-radius");
+    style_prop!(style_proto, fp, "columnCount", "column-count");
+    style_prop!(style_proto, fp, "columnWidth", "column-width");
+    style_prop!(style_proto, fp, "columns", "columns");
+    style_prop!(style_proto, fp, "columnRule", "column-rule");
+    style_prop!(style_proto, fp, "columnSpan", "column-span");
+    style_prop!(style_proto, fp, "breakInside", "break-inside");
+    style_prop!(style_proto, fp, "breakBefore", "break-before");
+    style_prop!(style_proto, fp, "breakAfter", "break-after");
+    style_prop!(style_proto, fp, "pageBreakInside", "page-break-inside");
+    style_prop!(style_proto, fp, "grid", "grid");
+    style_prop!(style_proto, fp, "gridArea", "grid-area");
+    style_prop!(style_proto, fp, "gridTemplate", "grid-template");
+    style_prop!(style_proto, fp, "gridTemplateAreas", "grid-template-areas");
+    style_prop!(style_proto, fp, "gridAutoFlow", "grid-auto-flow");
+    style_prop!(style_proto, fp, "gridAutoRows", "grid-auto-rows");
+    style_prop!(style_proto, fp, "gridAutoColumns", "grid-auto-columns");
+    style_prop!(style_proto, fp, "gridColumnStart", "grid-column-start");
+    style_prop!(style_proto, fp, "gridColumnEnd", "grid-column-end");
+    style_prop!(style_proto, fp, "gridRowStart", "grid-row-start");
+    style_prop!(style_proto, fp, "gridRowEnd", "grid-row-end");
+    style_prop!(style_proto, fp, "placeItems", "place-items");
+    style_prop!(style_proto, fp, "placeContent", "place-content");
+    style_prop!(style_proto, fp, "placeSelf", "place-self");
+    style_prop!(style_proto, fp, "justifyItems", "justify-items");
+    style_prop!(style_proto, fp, "justifySelf", "justify-self");
+    style_prop!(style_proto, fp, "inlineSize", "inline-size");
+    style_prop!(style_proto, fp, "blockSize", "block-size");
+    style_prop!(style_proto, fp, "minInlineSize", "min-inline-size");
+    style_prop!(style_proto, fp, "minBlockSize", "min-block-size");
+    style_prop!(style_proto, fp, "maxInlineSize", "max-inline-size");
+    style_prop!(style_proto, fp, "maxBlockSize", "max-block-size");
+    style_prop!(style_proto, fp, "marginInline", "margin-inline");
+    style_prop!(style_proto, fp, "marginBlock", "margin-block");
+    style_prop!(style_proto, fp, "marginInlineStart", "margin-inline-start");
+    style_prop!(style_proto, fp, "marginInlineEnd", "margin-inline-end");
+    style_prop!(style_proto, fp, "marginBlockStart", "margin-block-start");
+    style_prop!(style_proto, fp, "marginBlockEnd", "margin-block-end");
+    style_prop!(style_proto, fp, "paddingInline", "padding-inline");
+    style_prop!(style_proto, fp, "paddingBlock", "padding-block");
+    style_prop!(style_proto, fp, "paddingInlineStart", "padding-inline-start");
+    style_prop!(style_proto, fp, "paddingInlineEnd", "padding-inline-end");
+    style_prop!(style_proto, fp, "paddingBlockStart", "padding-block-start");
+    style_prop!(style_proto, fp, "paddingBlockEnd", "padding-block-end");
+    style_prop!(style_proto, fp, "insetInline", "inset-inline");
+    style_prop!(style_proto, fp, "insetBlock", "inset-block");
+    style_prop!(style_proto, fp, "insetInlineStart", "inset-inline-start");
+    style_prop!(style_proto, fp, "insetInlineEnd", "inset-inline-end");
+    style_prop!(style_proto, fp, "listStyleType", "list-style-type");
+    style_prop!(style_proto, fp, "listStylePosition", "list-style-position");
+    style_prop!(style_proto, fp, "listStyleImage", "list-style-image");
+    style_prop!(style_proto, fp, "appearance", "appearance");
+    style_prop!(style_proto, fp, "quotes", "quotes");
+    style_prop!(style_proto, fp, "counterReset", "counter-reset");
+    style_prop!(style_proto, fp, "counterIncrement", "counter-increment");
+    style_prop!(style_proto, fp, "imageRendering", "image-rendering");
+    style_prop!(style_proto, fp, "emptyCells", "empty-cells");
+    style_prop!(style_proto, fp, "captionSide", "caption-side");
+    style_prop!(style_proto, fp, "lineClamp", "line-clamp");
+    style_prop!(style_proto, fp, "textSizeAdjust", "text-size-adjust");
+    style_prop!(style_proto, fp, "whiteSpaceCollapse", "white-space-collapse");
+    style_prop!(style_proto, fp, "WebkitTransform", "-webkit-transform");
+    style_prop!(style_proto, fp, "webkitTransform", "-webkit-transform");
+    style_prop!(style_proto, fp, "WebkitTransition", "-webkit-transition");
+    style_prop!(style_proto, fp, "webkitTransition", "-webkit-transition");
+    style_prop!(style_proto, fp, "WebkitAnimation", "-webkit-animation");
+    style_prop!(style_proto, fp, "webkitAnimation", "-webkit-animation");
+    style_prop!(style_proto, fp, "WebkitPerspective", "-webkit-perspective");
+    style_prop!(style_proto, fp, "webkitPerspective", "-webkit-perspective");
+    style_prop!(style_proto, fp, "WebkitAppearance", "-webkit-appearance");
+    style_prop!(style_proto, fp, "webkitAppearance", "-webkit-appearance");
+    style_prop!(style_proto, fp, "WebkitBackdropFilter", "-webkit-backdrop-filter");
+    style_prop!(style_proto, fp, "webkitBackdropFilter", "-webkit-backdrop-filter");
+    style_prop!(style_proto, fp, "WebkitMaskImage", "-webkit-mask-image");
+    style_prop!(style_proto, fp, "webkitMaskImage", "-webkit-mask-image");
+    style_prop!(style_proto, fp, "WebkitLineClamp", "-webkit-line-clamp");
+    style_prop!(style_proto, fp, "webkitLineClamp", "-webkit-line-clamp");
+    style_prop!(style_proto, fp, "WebkitBoxOrient", "-webkit-box-orient");
+    style_prop!(style_proto, fp, "webkitBoxOrient", "-webkit-box-orient");
+    style_prop!(style_proto, fp, "WebkitUserSelect", "-webkit-user-select");
+    style_prop!(style_proto, fp, "webkitUserSelect", "-webkit-user-select");
+    style_prop!(style_proto, fp, "WebkitTextSizeAdjust", "-webkit-text-size-adjust");
+    style_prop!(style_proto, fp, "webkitTextSizeAdjust", "-webkit-text-size-adjust");
+    style_prop!(style_proto, fp, "WebkitFontSmoothing", "-webkit-font-smoothing");
+    style_prop!(style_proto, fp, "webkitFontSmoothing", "-webkit-font-smoothing");
+    style_prop!(style_proto, fp, "WebkitTapHighlightColor", "-webkit-tap-highlight-color");
+    style_prop!(style_proto, fp, "webkitTapHighlightColor", "-webkit-tap-highlight-color");
+    style_prop!(style_proto, fp, "WebkitOverflowScrolling", "-webkit-overflow-scrolling");
+    style_prop!(style_proto, fp, "webkitOverflowScrolling", "-webkit-overflow-scrolling");
+    style_prop!(style_proto, fp, "WebkitTransformOrigin", "-webkit-transform-origin");
+    style_prop!(style_proto, fp, "webkitTransformOrigin", "-webkit-transform-origin");
+    style_prop!(style_proto, fp, "WebkitTransitionDuration", "-webkit-transition-duration");
+    style_prop!(style_proto, fp, "webkitTransitionDuration", "-webkit-transition-duration");
+    style_prop!(style_proto, fp, "WebkitAnimationName", "-webkit-animation-name");
+    style_prop!(style_proto, fp, "webkitAnimationName", "-webkit-animation-name");
+    style_prop!(style_proto, fp, "WebkitTextFillColor", "-webkit-text-fill-color");
+    style_prop!(style_proto, fp, "webkitTextFillColor", "-webkit-text-fill-color");
+    style_prop!(style_proto, fp, "WebkitBackgroundClip", "-webkit-background-clip");
+    style_prop!(style_proto, fp, "webkitBackgroundClip", "-webkit-background-clip");
+    style_prop!(style_proto, fp, "WebkitBoxShadow", "-webkit-box-shadow");
+    style_prop!(style_proto, fp, "webkitBoxShadow", "-webkit-box-shadow");
+    style_prop!(style_proto, fp, "WebkitFilter", "-webkit-filter");
+    style_prop!(style_proto, fp, "webkitFilter", "-webkit-filter");
+    style_prop!(style_proto, fp, "WebkitFlex", "-webkit-flex");
+    style_prop!(style_proto, fp, "webkitFlex", "-webkit-flex");
+    style_prop!(style_proto, fp, "WebkitBoxFlex", "-webkit-box-flex");
+    style_prop!(style_proto, fp, "webkitBoxFlex", "-webkit-box-flex");
     realm.style_proto = style_proto;
     realm.token_list_proto = token_list_proto;
     realm.comment_proto = comment_proto.clone();
@@ -4846,7 +5228,8 @@ pub fn install(realm: &mut Realm) {
         let chain = ancestors(i, id);
         // From the target outwards; `ancestors` returns dispatch order, outermost
         // first.
-        Ok(nodes_array(i, chain.into_iter().rev().collect()))
+        let vals: Vec<Value> = chain.into_iter().rev().map(|id| wrap(i, id)).collect();
+        Ok(i.new_array(vals))
     }, 0, &fp2);
     let event_ctor = native(Some(realm.function_proto.clone()), |i, _, a| {
         let kind = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
@@ -4991,6 +5374,50 @@ pub fn install(realm: &mut Realm) {
         let ev = event_of_kind(i, "MouseEvent", a)?;
         Ok(Value::Obj(ev))
     });
+
+    // The record-like event kinds: a constructor, the chain, and a getter
+    // per member of `event_fields`. Pages feature-test with them
+    // (`"PointerEvent" in window`, `e instanceof SubmitEvent`) and construct
+    // them for `dispatchEvent`; a missing name is a `ReferenceError` there.
+    macro_rules! ev_kind {
+        ($name:literal, $parent:expr, [$($f:literal),*]) => {{
+            if realm.global.borrow().get_own($name).is_none() {
+                let p = new_obj(Some($parent.clone()));
+                $( ev_getter!(p, fp2, $f, concat!("__ev.", $f)); )*
+                iface_with(realm, $name, &p, |i, _, a| Ok(Value::Obj(event_of_kind(i, $name, a)?)));
+                Some(p)
+            } else { None }
+        }};
+    }
+    let pointer = ev_kind!("PointerEvent", mouse_proto, ["pointerId", "width", "height", "pressure",
+        "tangentialPressure", "tiltX", "tiltY", "twist", "altitudeAngle", "azimuthAngle",
+        "pointerType", "isPrimary"]);
+    if let Some(p) = pointer {
+        meth(&p, "getCoalescedEvents", |i, _, _| Ok(i.new_array(Vec::new())), 0, &fp2);
+        meth(&p, "getPredictedEvents", |i, _, _| Ok(i.new_array(Vec::new())), 0, &fp2);
+    }
+    if let Some(p) = ev_kind!("WheelEvent", mouse_proto, ["deltaX", "deltaY", "deltaZ", "deltaMode"]) {
+        let c = realm.global.borrow().get_own("WheelEvent").and_then(|x| x.value.clone());
+        for (k, v) in [("DOM_DELTA_PIXEL", 0.0), ("DOM_DELTA_LINE", 1.0), ("DOM_DELTA_PAGE", 2.0)] {
+            p.borrow_mut().define(k, Prop::frozen(Value::Num(v)));
+            if let Some(Value::Obj(c)) = &c { c.borrow_mut().define(k, Prop::frozen(Value::Num(v))); }
+        }
+    }
+    ev_kind!("DragEvent", mouse_proto, ["dataTransfer"]);
+    ev_kind!("CompositionEvent", ui_proto, ["data"]);
+    ev_kind!("AnimationEvent", event_proto, ["animationName", "elapsedTime", "pseudoElement"]);
+    ev_kind!("TransitionEvent", event_proto, ["propertyName", "elapsedTime", "pseudoElement"]);
+    ev_kind!("SubmitEvent", event_proto, ["submitter"]);
+    ev_kind!("ClipboardEvent", event_proto, ["clipboardData"]);
+    ev_kind!("HashChangeEvent", event_proto, ["oldURL", "newURL"]);
+    ev_kind!("PopStateEvent", event_proto, ["state"]);
+    ev_kind!("PageTransitionEvent", event_proto, ["persisted"]);
+    ev_kind!("StorageEvent", event_proto, ["key", "oldValue", "newValue", "url", "storageArea"]);
+    ev_kind!("ProgressEvent", event_proto, ["lengthComputable", "loaded", "total"]);
+    ev_kind!("MessageEvent", event_proto, ["data", "origin", "lastEventId", "source", "ports"]);
+    ev_kind!("ErrorEvent", event_proto, ["message", "filename", "lineno", "colno", "error"]);
+    ev_kind!("ToggleEvent", event_proto, ["oldState", "newState"]);
+    ev_kind!("FormDataEvent", event_proto, ["formData"]);
     // `PromiseRejectionEvent`: the kind under which an unhandled rejection
     // reaches the window. beak does report unhandled rejections
     // (`promise::report_rejections` dispatches this event, then logs to the
@@ -5134,6 +5561,38 @@ pub fn install(realm: &mut Realm) {
     handler_prop!(html_element_proto, fp, "onbeforeunload", "beforeunload");
     handler_prop!(html_element_proto, fp, "onunload", "unload");
     handler_prop!(html_element_proto, fp, "ondomcontentloaded", "DOMContentLoaded");
+    // Named so that `"ontransitionend" in el` answers as in browsers; most of
+    // these events are not dispatched by beak yet.
+    handler_prop!(html_element_proto, fp, "onanimationstart", "animationstart");
+    handler_prop!(html_element_proto, fp, "onanimationend", "animationend");
+    handler_prop!(html_element_proto, fp, "onanimationiteration", "animationiteration");
+    handler_prop!(html_element_proto, fp, "onanimationcancel", "animationcancel");
+    handler_prop!(html_element_proto, fp, "ontransitionstart", "transitionstart");
+    handler_prop!(html_element_proto, fp, "ontransitionend", "transitionend");
+    handler_prop!(html_element_proto, fp, "ontransitionrun", "transitionrun");
+    handler_prop!(html_element_proto, fp, "ontransitioncancel", "transitioncancel");
+    handler_prop!(html_element_proto, fp, "onscrollend", "scrollend");
+    handler_prop!(html_element_proto, fp, "onwheel", "wheel");
+    handler_prop!(html_element_proto, fp, "onpointercancel", "pointercancel");
+    handler_prop!(html_element_proto, fp, "onpointerover", "pointerover");
+    handler_prop!(html_element_proto, fp, "onpointerout", "pointerout");
+    handler_prop!(html_element_proto, fp, "ontoggle", "toggle");
+    handler_prop!(html_element_proto, fp, "onbeforetoggle", "beforetoggle");
+    handler_prop!(html_element_proto, fp, "onbeforeinput", "beforeinput");
+    handler_prop!(html_element_proto, fp, "onpaste", "paste");
+    handler_prop!(html_element_proto, fp, "oncopy", "copy");
+    handler_prop!(html_element_proto, fp, "oncut", "cut");
+    handler_prop!(html_element_proto, fp, "ondrop", "drop");
+    handler_prop!(html_element_proto, fp, "ondragstart", "dragstart");
+    handler_prop!(html_element_proto, fp, "ondragover", "dragover");
+    handler_prop!(html_element_proto, fp, "ondragend", "dragend");
+    handler_prop!(html_element_proto, fp, "oninvalid", "invalid");
+    handler_prop!(html_element_proto, fp, "onreset", "reset");
+    handler_prop!(html_element_proto, fp, "onselect", "select");
+    handler_prop!(html_element_proto, fp, "onselectionchange", "selectionchange");
+    handler_prop!(html_element_proto, fp, "onmouseenter", "mouseenter");
+    handler_prop!(html_element_proto, fp, "onmouseleave", "mouseleave");
+    handler_prop!(html_element_proto, fp, "onauxclick", "auxclick");
 
     // The same on the window: `window.onload = …` is the oldest form of all.
     handler_prop!(realm.global, fp, "onclick", "click");
@@ -5158,6 +5617,36 @@ pub fn install(realm: &mut Realm) {
     handler_prop!(realm.global, fp, "ondblclick", "dblclick");
     handler_prop!(realm.global, fp, "ontouchstart", "touchstart");
     handler_prop!(realm.global, fp, "ontouchend", "touchend");
+    handler_prop!(realm.global, fp, "onanimationstart", "animationstart");
+    handler_prop!(realm.global, fp, "onanimationend", "animationend");
+    handler_prop!(realm.global, fp, "onanimationiteration", "animationiteration");
+    handler_prop!(realm.global, fp, "onanimationcancel", "animationcancel");
+    handler_prop!(realm.global, fp, "ontransitionstart", "transitionstart");
+    handler_prop!(realm.global, fp, "ontransitionend", "transitionend");
+    handler_prop!(realm.global, fp, "ontransitionrun", "transitionrun");
+    handler_prop!(realm.global, fp, "ontransitioncancel", "transitioncancel");
+    handler_prop!(realm.global, fp, "onscrollend", "scrollend");
+    handler_prop!(realm.global, fp, "onwheel", "wheel");
+    handler_prop!(realm.global, fp, "onpointercancel", "pointercancel");
+    handler_prop!(realm.global, fp, "onpointerover", "pointerover");
+    handler_prop!(realm.global, fp, "onpointerout", "pointerout");
+    handler_prop!(realm.global, fp, "ontoggle", "toggle");
+    handler_prop!(realm.global, fp, "onbeforetoggle", "beforetoggle");
+    handler_prop!(realm.global, fp, "onbeforeinput", "beforeinput");
+    handler_prop!(realm.global, fp, "onpaste", "paste");
+    handler_prop!(realm.global, fp, "oncopy", "copy");
+    handler_prop!(realm.global, fp, "oncut", "cut");
+    handler_prop!(realm.global, fp, "ondrop", "drop");
+    handler_prop!(realm.global, fp, "ondragstart", "dragstart");
+    handler_prop!(realm.global, fp, "ondragover", "dragover");
+    handler_prop!(realm.global, fp, "ondragend", "dragend");
+    handler_prop!(realm.global, fp, "oninvalid", "invalid");
+    handler_prop!(realm.global, fp, "onreset", "reset");
+    handler_prop!(realm.global, fp, "onselect", "select");
+    handler_prop!(realm.global, fp, "onselectionchange", "selectionchange");
+    handler_prop!(realm.global, fp, "onmouseenter", "mouseenter");
+    handler_prop!(realm.global, fp, "onmouseleave", "mouseleave");
+    handler_prop!(realm.global, fp, "onauxclick", "auxclick");
     handler_prop!(realm.global, fp, "onmessage", "message");
     handler_prop!(realm.global, fp, "onbeforeunload", "beforeunload");
     handler_prop!(realm.global, fp, "onunload", "unload");
@@ -5197,26 +5686,31 @@ pub fn install(realm: &mut Realm) {
     }
     // Per interface, the members pages actually query.
     //
-    // `href` and `src` are raw, as in the attribute. In browsers they are
-    // resolved (`a.href` of a relative URL is absolute); not implemented, so
-    // `.href` equals `getAttribute("href")`.
+    // URL attributes (`href`, `src`, `action`) resolve against the base URL
+    // on read, as in browsers: a router compares `a.href` with
+    // `location.href`, and `new URL(a.href)` needs an absolute one.
     // HTMLAnchorElement
     if let Some(p) = tag_protos.get("a") {
-        attr_prop!(p, fp, "href", "href");
+        url_prop!(p, fp, "href", "href");
         attr_prop!(p, fp, "type", "type");
         attr_prop!(p, fp, "target", "target");
         attr_prop!(p, fp, "rel", "rel");
         attr_prop!(p, fp, "download", "download");
         attr_prop!(p, fp, "hreflang", "hreflang");
-        // `a.hash`: derived from the raw `href`, like its neighbours.
-        getter(p, "hash", |i, t, _| {
-            with_node!(i, t, |n| Ok(match n.attr("href").and_then(|h| h.find('#').map(|k| h[k..].to_string())) {
-                Some(f) => Value::string(f), None => Value::str("") }))
-        }, &fp);
+        attr_prop!(p, fp, "ping", "ping");
+        attr_prop!(p, fp, "referrerPolicy", "referrerpolicy");
+        hyperlink_utils(p, &fp);
+    }
+    if let Some(p) = tag_protos.get("area") {
+        url_prop!(p, fp, "href", "href");
+        attr_prop!(p, fp, "target", "target");
+        attr_prop!(p, fp, "rel", "rel");
+        attr_prop!(p, fp, "alt", "alt");
+        hyperlink_utils(p, &fp);
     }
     // HTMLLinkElement
     if let Some(p) = tag_protos.get("link") {
-        attr_prop!(p, fp, "href", "href");
+        url_prop!(p, fp, "href", "href");
         attr_prop!(p, fp, "rel", "rel");
         attr_prop!(p, fp, "type", "type");
         attr_prop!(p, fp, "as", "as");
@@ -5224,13 +5718,13 @@ pub fn install(realm: &mut Realm) {
     }
     // HTMLScriptElement
     if let Some(p) = tag_protos.get("script") {
-        attr_prop!(p, fp, "src", "src");
+        url_prop!(p, fp, "src", "src");
         attr_prop!(p, fp, "type", "type");
         attr_prop!(p, fp, "charset", "charset");
     }
     // HTMLImageElement
     if let Some(p) = tag_protos.get("img") {
-        attr_prop!(p, fp, "src", "src");
+        url_prop!(p, fp, "src", "src");
         attr_prop!(p, fp, "alt", "alt");
         attr_prop!(p, fp, "srcset", "srcset");
         attr_prop!(p, fp, "sizes", "sizes");
@@ -5415,7 +5909,7 @@ pub fn install(realm: &mut Realm) {
         getter(p, "elements", |i, t, _| {
             let id = node_of(i, &t)?;
             let cs = form_controls(i, id);
-            Ok(nodes_array(i, cs))
+            Ok(collection(i, cs))
         }, &fp);
         getter(p, "length", |i, t, _| {
             let id = node_of(i, &t)?;
@@ -5494,7 +5988,7 @@ pub fn install(realm: &mut Realm) {
         getter(p, "options", |i, t, _| {
             let id = node_of(i, &t)?;
             let opts = select_options(i, id);
-            Ok(nodes_array(i, opts))
+            Ok(collection(i, opts))
         }, &fp);
         getter(p, "length", |i, t, _| {
             let id = node_of(i, &t)?;
@@ -5505,7 +5999,7 @@ pub fn install(realm: &mut Realm) {
             let opts: Vec<u32> = select_options(i, id).into_iter()
                 .filter(|o| i.doc.as_ref().is_some_and(|d| d.nodes[*o as usize].attr("selected").is_some()))
                 .collect();
-            Ok(nodes_array(i, opts))
+            Ok(collection(i, opts))
         }, &fp);
         accessor(p, "selectedIndex", |i, t, _| {
             let id = node_of(i, &t)?;
@@ -5544,7 +6038,22 @@ pub fn install(realm: &mut Realm) {
     }
     // HTMLFormElement
     if let Some(p) = tag_protos.get("form") {
-        attr_prop!(p, fp, "action", "action");
+        // `action` without an attribute (or an empty one) is the document's
+        // address (HTML §4.10.18.6), resolved like any URL attribute.
+        let g = native(Some(fp.clone()), |i, t, _| {
+            let id = node_of(i, &t)?;
+            let has = i.doc.as_ref().and_then(|d| d.nodes[id as usize].attr("action").cloned())
+                .is_some_and(|a| !a.trim().is_empty());
+            Ok(if has { url_attr(i, id, "action") } else { Value::string(i.loc_href.clone()) })
+        }, "get action", 0, false);
+        let st = native(Some(fp.clone()), |i, t, a| {
+            let id = node_of(i, &t)?;
+            let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            if let Some(d) = &mut i.doc { d.set_attr_at(id, "action", &v); }
+            Ok(Value::Undefined)
+        }, "set action", 1, false);
+        p.borrow_mut().define("action", Prop { value: None, get: Some(Value::Obj(g)),
+            set: Some(Value::Obj(st)), writable: false, enumerable: false, configurable: true });
         attr_prop!(p, fp, "method", "method");
         attr_prop!(p, fp, "target", "target");
     }
@@ -5555,12 +6064,12 @@ pub fn install(realm: &mut Realm) {
     }
     // HTMLIFrameElement
     if let Some(p) = tag_protos.get("iframe") {
-        attr_prop!(p, fp, "src", "src");
+        url_prop!(p, fp, "src", "src");
         attr_prop!(p, fp, "srcdoc", "srcdoc");
     }
     // HTMLSourceElement
     if let Some(p) = tag_protos.get("source") {
-        attr_prop!(p, fp, "src", "src");
+        url_prop!(p, fp, "src", "src");
         attr_prop!(p, fp, "srcset", "srcset");
         attr_prop!(p, fp, "type", "type");
         attr_prop!(p, fp, "media", "media");
@@ -5614,6 +6123,7 @@ pub fn install(realm: &mut Realm) {
     realm.fragment_proto = fragment_proto;
     realm.tag_protos = tag_protos;
     extra::install(realm);
+    surface::install(realm);
 }
 
 /// Which element carries which interface.
@@ -5661,6 +6171,29 @@ const HTML_IFACES: &[(&str, &[&str])] = &[
     ("HTMLPreElement",       &["pre"]),
     ("HTMLDetailsElement",   &["details"]),
     ("HTMLDialogElement",    &["dialog"]),
+    ("HTMLAreaElement",      &["area"]),
+    ("HTMLBaseElement",      &["base"]),
+    ("HTMLFieldSetElement",  &["fieldset"]),
+    ("HTMLLegendElement",    &["legend"]),
+    ("HTMLOptGroupElement",  &["optgroup"]),
+    ("HTMLTableSectionElement", &["thead", "tbody", "tfoot"]),
+    ("HTMLTableCaptionElement", &["caption"]),
+    ("HTMLTableColElement",  &["col", "colgroup"]),
+    ("HTMLDListElement",     &["dl"]),
+    ("HTMLQuoteElement",     &["blockquote", "q"]),
+    ("HTMLModElement",       &["ins", "del"]),
+    ("HTMLEmbedElement",     &["embed"]),
+    ("HTMLObjectElement",    &["object"]),
+    ("HTMLMapElement",       &["map"]),
+    ("HTMLTrackElement",     &["track"]),
+    ("HTMLProgressElement",  &["progress"]),
+    ("HTMLMeterElement",     &["meter"]),
+    ("HTMLOutputElement",    &["output"]),
+    ("HTMLDataElement",      &["data"]),
+    ("HTMLTimeElement",      &["time"]),
+    ("HTMLDataListElement",  &["datalist"]),
+    ("HTMLMenuElement",      &["menu"]),
+    ("HTMLSlotElement",      &["slot"]),
 ];
 
 /// The next/previous element sibling. Like `sibling`, but keeps going
@@ -5912,6 +6445,15 @@ fn invoke(i: &mut Interp, ev: &Gc, kind: &str, node: u32, capture: bool, phase: 
     set_ev(ev, EV_CUR, this_node.clone());
     set_ev(ev, EV_PHASE, Value::Num(phase));
     let evv = Value::Obj(ev.clone());
+    let prev = surface::enter_event(i, &evv);
+    let r = invoke_calls(i, ev, &evv, kind, node, handler, snap, this_node);
+    surface::leave_event(i, prev);
+    r
+}
+
+/// The calls of `invoke`, between setting and restoring `window.event`.
+fn invoke_calls(i: &mut Interp, ev: &Gc, evv: &Value, kind: &str, node: u32,
+                handler: Option<Value>, snap: Vec<Listener>, this_node: Value) -> C<()> {
     if let Some(f) = handler {
         match i.call(&f, this_node.clone(), &[evv.clone()]) {
             // `onclick="return false"` is the old form of `preventDefault`.
@@ -8083,3 +8625,4 @@ mod extra_tests {
 }
 
 mod extra;
+mod surface;

@@ -5740,7 +5740,15 @@ fn apply_flex_shorthand(v: &str, s: &mut ComputedStyle) {
         }
     }
     match nums.len() {
-        0 => {}
+        // `flex: 300px` is `1 1 300px`: an omitted grow or shrink factor is
+        // 1 in the shorthand (css-flexbox-1 §7.1.1), not the longhand's
+        // initial 0. GitHub sizes its repository title this way.
+        0 => {
+            if basis.is_some() {
+                s.flex_grow = 1.0;
+                s.flex_shrink = 1.0;
+            }
+        }
         1 => {
             s.flex_grow = nums[0];
             s.flex_shrink = 1.0;

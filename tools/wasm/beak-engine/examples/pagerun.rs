@@ -186,8 +186,7 @@ fn main() {
     // every framework class looks absent.
     let mut linked = String::new();
     let mut nlink = 0usize;
-    collect_links(dom.body(), &dir, &mut linked, &mut nlink);
-    collect_links(&dom.root, &dir, &mut linked, &mut nlink);
+    collect_sheets(&dom, &dir, &mut linked, &mut nlink);
     let sheet = beak_engine::css::collect_all(&dom, &linked, media);
     sess.interp.set_style_context(beak_engine::js::interp::StyleCtx {
         sheet: std::rc::Rc::new(sheet),
@@ -538,9 +537,7 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
         let Some(dom) = sess.interp.doc.as_mut().map(|d| d.to_dom()) else { return };
         let mut css = String::new();
         let mut sheets = 0;
-        collect_links(dom.body(), &dir, &mut css, &mut sheets);
-        // `<head>` is not under `body()`; both sides of the tree.
-        collect_links(&dom.root, &dir, &mut css, &mut sheets);
+        collect_sheets(&dom, &dir, &mut css, &mut sheets);
         let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
         use beak_engine::layout::{Rgb, Theme};
         let mut eng = beak_engine::Engine::new();
@@ -595,6 +592,16 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
         let tot: u64 = d.iter().map(|(_, n)| **n).sum();
         println!("Rumpfe abgelehnt: {tot} in {} Sorten", d.len());
         for (why, n) in d.iter().take(8) { println!("  {why} x{n}"); }
+    }
+    // `--features miss-census`: what the page looked for on platform objects
+    // and did not find, most asked first.
+    #[cfg(feature = "miss-census")]
+    {
+        // SAFETY: single-threaded tool; the engine is done running.
+        let m = unsafe { &*core::ptr::addr_of!(beak_engine::js::interp::MISSES) };
+        let mut v: Vec<_> = m.iter().collect();
+        v.sort_by_key(|(_, n)| core::cmp::Reverse(**n));
+        for (k, n) in v { println!("MISS {n:6} {k}"); }
     }
     println!("\n{ran} gelaufen, {failed} gescheitert, {timers} Zeitgeber, {}",
              if listeners { "Ereignisse SCHARF" } else { "keine Behandler" });
@@ -820,11 +827,23 @@ fn push_sheet(text: &str, url: &str, dir: &str, out: &mut String, n: &mut usize,
 
 /// Every `<link rel=stylesheet>` in the tree, in tree order, read from the
 /// directory. Same order in which the host appends them.
-fn collect_links(el: &beak_engine::dom::Element, dir: &str, out: &mut String, n: &mut usize) {
+/// Every linked sheet once, in tree order — as the host collects them
+/// (`nav_begin_stylesheets`). The order is part of the cascade: the first
+/// sheet to name an `@layer` fixes its rank, so walking `<body>` first, or
+/// taking a sheet twice, measures a different cascade than the device.
+fn collect_sheets(dom: &beak_engine::dom::Dom, dir: &str, out: &mut String, n: &mut usize) {
+    let mut seen = Vec::new();
+    collect_links(&dom.root, dir, out, n, &mut seen);
+}
+
+fn collect_links(el: &beak_engine::dom::Element, dir: &str, out: &mut String, n: &mut usize,
+                 seen: &mut Vec<String>) {
     if el.tag == "link"
         && el.attr("rel").is_some_and(|r| r.to_ascii_lowercase().contains("stylesheet")) {
         if let Some(h) = el.attr("href") {
             let u = resolve_path(&format!("{}/", origin()), h);
+            if seen.contains(&u) { return }
+            seen.push(u.clone());
             match std::fs::read_to_string(local(dir, &u)) {
                 Ok(t) => {
                     // The probe must follow `@import` as the host does; a
@@ -836,7 +855,7 @@ fn collect_links(el: &beak_engine::dom::Element, dir: &str, out: &mut String, n:
         }
     }
     for c in &el.children {
-        if let beak_engine::dom::Node::Element(e) = c { collect_links(e, dir, out, n); }
+        if let beak_engine::dom::Node::Element(e) = c { collect_links(e, dir, out, n, seen); }
     }
 }
 
@@ -899,8 +918,7 @@ fn page_layout(ip: &mut beak_engine::js::interp::Interp, html: &str, dir: &str)
     let t_css = std::time::Instant::now();
     let mut css = String::new();
     let mut n = 0;
-    collect_links(dom.body(), dir, &mut css, &mut n);
-    collect_links(&dom.root, dir, &mut css, &mut n);
+    collect_sheets(&dom, dir, &mut css, &mut n);
     let d_css = t_css.elapsed();
     if std::env::var("CSSDBG").is_ok() {
         eprintln!("[css] {n} Blaetter, {} B, .main-area: {}", css.len(), css.contains(".main-area"));

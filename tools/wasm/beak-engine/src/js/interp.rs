@@ -431,6 +431,44 @@ macro_rules! strict_site {
 }
 pub(crate) use strict_site;
 
+/// Reads that found nothing on a platform object, as `Interface.name` with a
+/// count. Feature tests and `try` blocks swallow a missing API silently; this
+/// is the list of what pages asked for and did not get.
+#[cfg(feature = "miss-census")]
+pub static mut MISSES: alloc::collections::BTreeMap<alloc::string::String, u32> =
+    alloc::collections::BTreeMap::new();
+
+#[cfg(feature = "miss-census")]
+impl Interp {
+    /// The first native constructor on the chain names the interface; an
+    /// ordinary object or a page's own class without a platform base is not
+    /// recorded.
+    pub(crate) fn note_miss(&self, o: &Gc, key: &str, how: &str) {
+        let label: Rc<str> = if Rc::ptr_eq(o, &self.realm.global) { Rc::from("window") } else {
+            let mut cur = Some(o.clone());
+            let mut hops = 0;
+            let mut found = None;
+            while let Some(c) = cur {
+                hops += 1;
+                if hops > 32 { break }
+                if let Some(p) = c.borrow().get_own("constructor") {
+                    if let Some(Value::Obj(f)) = &p.value {
+                        if let ObjKind::Native(n) = &f.borrow().kind { found = Some(n.name.clone()); break }
+                    }
+                }
+                cur = c.borrow().proto.clone();
+            }
+            match found { Some(n) if &*n != "Object" => n, _ => return }
+        };
+        // SAFETY: the engine is single-threaded and this dev-only table is
+        // touched from nowhere else concurrently.
+        unsafe {
+            let m = &mut *core::ptr::addr_of_mut!(MISSES);
+            *m.entry(alloc::format!("{how}{label}.{key}")).or_insert(0) += 1;
+        }
+    }
+}
+
 /// What a page requested of the history. An intent, not an action; the host,
 /// which owns the history, carries it out.
 #[derive(Debug, Clone)]
@@ -1883,6 +1921,53 @@ impl Interp {
                 if let Some(g) = &p.get {
                     if !matches!(g, Value::Undefined) {
                         return self.call(&g.clone(), base.clone(), &[]);
+                    }
+                }
+                if p.is_accessor() { return Ok(Value::Undefined); }
+                return Ok(p.value.clone().unwrap_or(Value::Undefined));
+            }
+            let next = o.borrow().proto.clone();
+            cur = next;
+        }
+        #[cfg(feature = "miss-census")]
+        if let Value::Obj(o) = base { self.note_miss(o, key, "") }
+        Ok(Value::Undefined)
+    }
+
+    /// `[[Get]](key, receiver)` with a receiver other than the object the
+    /// lookup starts on: a getter found on the way runs with `receiver` as
+    /// `this`. `super.x` and `Reflect.get(t, k, r)` need it; `get` is the
+    /// common case where both are the same.
+    pub fn get_with_receiver(&mut self, target: &Value, key: &str, receiver: &Value) -> C<Value> {
+        let Value::Obj(start) = target else { return self.get(target, key) };
+        if let Value::Obj(r) = receiver { if Rc::ptr_eq(r, start) { return self.get(target, key) } }
+        let mut cur = Some(start.clone());
+        let mut hops = 0;
+        while let Some(o) = cur {
+            hops += 1;
+            if hops > MAX_PROTO_CHAIN { return self.type_err("prototype chain too long (cycle?)"); }
+            if super::proxy::parts(&o).is_some() {
+                return match super::proxy::trap(self, &o, "get")? {
+                    Some((f, h, t)) => {
+                        let kv = super::proxy::key_value(key);
+                        self.call(&f, h, &[t, kv, receiver.clone()])
+                    }
+                    None => {
+                        let t = super::proxy::target(self, &o)?;
+                        self.get_with_receiver(&Value::Obj(t), key, receiver)
+                    }
+                };
+            }
+            // Exotic objects answer reads themselves; none of them has a
+            // getter that could see the receiver.
+            let exotic = matches!(o.borrow().kind,
+                ObjKind::TypedArray(_) | ObjKind::ModuleNs(_));
+            if exotic { return self.get(&Value::Obj(o), key) }
+            let found = o.borrow().get_own(key).cloned();
+            if let Some(p) = found {
+                if let Some(g) = &p.get {
+                    if !matches!(g, Value::Undefined) {
+                        return self.call(&g.clone(), receiver.clone(), &[]);
                     }
                 }
                 if p.is_accessor() { return Ok(Value::Undefined); }

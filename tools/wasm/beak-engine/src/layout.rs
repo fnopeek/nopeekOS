@@ -4904,6 +4904,16 @@ family: st.family,
         Some(measure_sp(font, text.trim(), ps.font_px, sp) + frame)
     }
 
+    /// Whether `el`'s generated box of this kind is block-level, i.e. stands
+    /// on its own line instead of joining the inline content.
+    fn pseudo_is_block(&self, el: &Element, st: &ComputedStyle, kind: PseudoElem) -> bool {
+        match self.pseudo_content(el, st, kind) {
+            Some((_, ps)) => !matches!(ps.display,
+                Display::Inline | Display::InlineBlock | Display::InlineFlex | Display::Contents),
+            None => false,
+        }
+    }
+
     /// Lay a `position:absolute`/`fixed` box, out of flow, at a position derived
     /// from the containing block (`self.cb`) + `top`/`right`/`bottom`/`left`.
     /// The element is `el`, already pushed onto `self.path` by the caller.
@@ -6486,9 +6496,20 @@ family: st.family,
             // At max-content they add to the content; at min-content they
             // compete, since the line may break between the pseudo and the
             // first word — the same rule as for an atomic inline.
-            let ps = self.pseudo_intrinsic(el, st, PseudoElem::Before).unwrap_or(0.0)
-                + self.pseudo_intrinsic(el, st, PseudoElem::After).unwrap_or(0.0);
-            (got.0 + ps, got.1.max(ps))
+            //
+            // A block-level one is a line of its own (GitHub's tabs reserve
+            // the bold width with `::before { display:block; height:0 }`), so
+            // it competes at max-content too instead of adding.
+            let mut out = got;
+            for kind in [PseudoElem::Before, PseudoElem::After] {
+                let Some(w) = self.pseudo_intrinsic(el, st, kind) else { continue };
+                if self.pseudo_is_block(el, st, kind) {
+                    out = (out.0.max(w), out.1.max(w));
+                } else {
+                    out = (out.0 + w, out.1.max(w));
+                }
+            }
+            out
         };
         // Whole pixels, rounded up. A max-content width is a requirement — the
         // width at which the content does not wrap — so a consumer that turns
@@ -6617,7 +6638,24 @@ family: st.family,
         {
             run.frame += inline_frame(&cs, 0.0);
             self.path.push(self.info(el));
-            self.intrinsic_walk(&el.children, &cs, run, pref, min);
+            if !st.pre && !cs.pre && measures_differently(st, &cs) {
+                // Its text is measured in its own font: `run.text` is
+                // measured once, in the block's (`flush_run`), and a
+                // `<strong>` measured as regular comes out narrower than it
+                // paints — the shrink-to-fit box around it then wraps it.
+                // The width joins the line like an atomic inline's; a word
+                // joiner (no advance, no break) keeps the spaces on either
+                // side of it where they were.
+                let mut sub = Run::default();
+                let (mut p, mut m) = (0.0f32, 0.0f32);
+                self.intrinsic_walk(&el.children, &cs, &mut sub, &mut p, &mut m);
+                flush_run(self.fonts, &cs, &mut sub, &mut p, &mut m, false);
+                run.text.push('\u{2060}');
+                run.atomic += p;
+                run.atomic_min = run.atomic_min.max(m);
+            } else {
+                self.intrinsic_walk(&el.children, &cs, run, pref, min);
+            }
             self.path.pop();
             return;
         }
@@ -8985,6 +9023,15 @@ struct Run {
     atomic_min: f32,
 }
 
+/// Whether text in `inner` measures differently from text in `outer`, so it
+/// cannot share one measured run with it.
+fn measures_differently(outer: &ComputedStyle, inner: &ComputedStyle) -> bool {
+    outer.bold != inner.bold || outer.italic != inner.italic || outer.mono != inner.mono
+        || outer.family != inner.family || outer.font_px != inner.font_px
+        || outer.letter_spacing != inner.letter_spacing || outer.word_spacing != inner.word_spacing
+        || outer.nowrap != inner.nowrap
+}
+
 /// The horizontal space one inline box adds to its line. `flow` advances the
 /// pen by exactly this (as `InlineBox::lead + trail`), so the measurement has
 /// to count it too or every shrink-to-fit box around a padded `<span>` comes
@@ -10452,7 +10499,12 @@ impl Inline {
                     // fits. A line that can't take even one character is
                     // already as narrow as it will get (a float band), so force
                     // one character through rather than spin.
-                    if style.break_word && pen + lead + ww > right {
+                    //
+                    // Not under `nowrap`: `overflow-wrap` only adds break
+                    // opportunities where wrapping is allowed at all
+                    // (css-text-3 §5.2), and GitHub inherits `break-word` from
+                    // `body` into every `nowrap` tab label.
+                    if style.break_word && !style.nowrap && pen + lead + ww > right {
                         let f = face(style);
                         let mut rest = text.as_str();
                         while !rest.is_empty() {
@@ -14748,6 +14800,50 @@ fn dbg_wiki_shape() {
         let right = *t.iter().find(|(_, _, s)| *s == "right").expect("right");
         assert_eq!(left.1, right.1, "row items share a y (not stacked)");
         assert!(right.0 > left.0 + 200, "2nd item pushed right by the 1st's grown width");
+    }
+
+    #[test]
+    fn flex_with_only_a_basis_grows() {
+        // `flex: 300px` is `1 1 300px`, so the item takes the free space.
+        let l = lay("<body><div style=\"display:flex;width:800px\">\
+                     <div style=\"flex:300px\">a</div><div>b</div></div></body>", 800);
+        let t = texts(&l);
+        let b = *t.iter().find(|(_, _, s)| *s == "b").expect("b");
+        assert!(b.0 > 700, "the grown item pushes b to the far end, b at {}", b.0);
+    }
+
+    #[test]
+    fn nowrap_is_not_broken_by_overflow_wrap() {
+        // `overflow-wrap` only adds break chances where wrapping is allowed;
+        // GitHub inherits `break-word` into every `nowrap` tab label.
+        let l = lay("<body><div style=\"width:20px;white-space:nowrap;overflow-wrap:break-word\">\
+                     Pull requests</div></body>", 300);
+        let ys: alloc::collections::BTreeSet<i32> = texts(&l).iter().map(|t| t.1).collect();
+        assert_eq!(ys.len(), 1, "one line, got {:?}", texts(&l));
+    }
+
+    #[test]
+    fn bold_inline_text_is_measured_in_bold() {
+        // The shrink-to-fit box around `<b>` must be as wide as the bold text,
+        // or the text wraps inside a box sized for regular weight.
+        let l = lay("<body><div style=\"display:inline-block\"><b>nopeekOS nopeekOS nopeekOS</b></div></body>", 800);
+        let ys: alloc::collections::BTreeSet<i32> = texts(&l).iter().map(|t| t.1).collect();
+        assert_eq!(ys.len(), 1, "one line, got {:?}", texts(&l));
+    }
+
+    #[test]
+    fn a_block_pseudo_does_not_add_to_the_line() {
+        // GitHub reserves the bold width of a tab with
+        // `::before { content: attr(…); display:block; height:0 }`: a line of
+        // its own, so the box is as wide as the wider of the two, not both.
+        let html = |extra: &str| format!("<html><head><style>.t{{display:inline-block}}\
+            .t::before{{content:attr(data-c);display:block;height:0;visibility:hidden{extra}}}</style></head>\
+            <body><span class=t data-c=\"Before\">Before</span>|</body></html>");
+        let bar = |l: &Layout| texts(l).iter().find(|t| t.2 == "|").map(|t| t.0).expect("bar");
+        let plain = lay("<body><span style=\"display:inline-block\">Before</span>|</body>", 800);
+        let with = lay(&html(""), 800);
+        assert!((bar(&with) - bar(&plain)).abs() <= 1,
+            "pseudo must not widen the box: {} vs {}", bar(&with), bar(&plain));
     }
 
     #[test]
