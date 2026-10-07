@@ -299,6 +299,15 @@ impl Vm {
     /// The dispatch loop. Runs until the root frame returns or a `yield` /
     /// `await` suspends it; the next call continues from there.
     pub fn drive(&mut self, i: &mut Interp) -> C<Step> {
+        // Script is on the stack while the machine runs; see
+        // `Interp::script_depth`.
+        i.script_depth += 1;
+        let r = self.drive_inner(i);
+        i.script_depth -= 1;
+        r
+    }
+
+    fn drive_inner(&mut self, i: &mut Interp) -> C<Step> {
         // Hold the chunk instead of cloning the `Rc` per op (two refcount
         // operations on the hottest path); switch only when the frame changes,
         // checked by pointer comparison.

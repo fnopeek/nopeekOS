@@ -582,6 +582,14 @@ pub struct Interp {
     /// error. The limit is mandatory.
     pub depth: usize,
     pub max_depth: usize,
+    /// How many script executions are on the stack (`Interp::call`, the
+    /// bytecode machine, `run_program`). A microtask checkpoint only runs when
+    /// it is zero (HTML §8.1.4.4 "clean up after running script"): a native
+    /// such as `el.click()` or `el.focus()` reached from script must not drain
+    /// the queue in the middle of that script. React's own scheduling task
+    /// ran in the middle of React's commit that way, and later updates were
+    /// lost.
+    pub script_depth: u32,
     /// Executed statements. Without a cap a `while(true)` hangs the whole run,
     /// and a test runner stuck on one program measures nothing.
     pub steps: u64,
@@ -909,7 +917,7 @@ impl Interp {
                  ran_scripts: Vec::new(),
                  pending_fetches: Vec::new(), fetch_waiting: Vec::new(),
                  aborted_fetches: Vec::new(), next_fetch_id: 1,
-                 pending_rejections: Vec::new(), custom: Default::default(), depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
+                 pending_rejections: Vec::new(), custom: Default::default(), depth: 0, max_depth: MAX_DEPTH, script_depth: 0, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, clock: None, epoch_ms: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  #[cfg(feature = "strict-probe")]
                  strict_probe: [0; STRICT_SITES],
@@ -2186,7 +2194,9 @@ impl Interp {
             self.depth -= 1;
             return self.range_err("Maximum call stack size exceeded");
         }
+        self.script_depth += 1;
         let r = self.call_inner(f, this_val, args);
+        self.script_depth -= 1;
         self.depth -= 1;
         r
     }
@@ -2503,6 +2513,18 @@ impl Interp {
 
     // ── Program ──────────────────────────────────────────────────────────
     pub fn run_program(&mut self, prog: &Program) -> C<Value> {
+        self.script_depth += 1;
+        let r = self.run_program_body(prog);
+        self.script_depth -= 1;
+        // Even if the program threw, the queue must be drained: a `.then`
+        // attached before the error is registered. A program run from inside
+        // script (an attribute handler compiled on first read) leaves that to
+        // the outer checkpoint.
+        super::promise::run_jobs(self);
+        r
+    }
+
+    fn run_program_body(&mut self, prog: &Program) -> C<Value> {
         let env = self.realm.global_env.clone();
         // The global environment belongs to the unit currently running: a script
         // with `"use strict"` makes it strict, the next one without makes it sloppy
@@ -2534,9 +2556,6 @@ impl Interp {
                 })()
             }
         };
-        // Even if the program threw, the queue must be drained: a `.then` attached
-        // before the error is registered.
-        super::promise::run_jobs(self);
         r
     }
 

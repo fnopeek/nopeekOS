@@ -175,6 +175,8 @@ pub fn perform_then_cap(i: &mut Interp, p: &Gc, on_ok: Value, on_err: Value,
 /// (a chain needs its steps), unbounded is too much; same choice as
 /// `run_timers`.
 pub fn run_jobs(i: &mut Interp) -> usize {
+    // Only with no script on the stack; the outermost checkpoint drains.
+    if i.script_depth > 0 { return 0 }
     let mut n = 0;
     // Observer checkpoint. It belongs here, not in `run_timers`: `run_jobs` runs
     // after every entry point (script, event, timer), so a page without timers
@@ -187,7 +189,9 @@ pub fn run_jobs(i: &mut Interp) -> usize {
         // the script ran, i.e. before any `.then` registered afterwards.
         let zugestellt = super::dombind::deliver_mutations(i)
             | super::dombind::deliver_box_observers(i);
+        i.script_depth += 1;
         let gefahren = run_queue(i);
+        i.script_depth -= 1;
         n += gefahren;
         if !zugestellt && gefahren == 0 { break }
         if i.tick().is_err() { break }

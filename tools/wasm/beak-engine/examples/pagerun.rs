@@ -365,7 +365,10 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
     // otherwise does it once, and every element a script inserts later
     // reports `offsetWidth == 0` forever.
     let geom_every = std::env::var("GEOMEVERY").is_ok();
-    for _ in 0..64 {
+    // `ROUNDS=` for a page whose work waits seconds of virtual time behind
+    // timers that keep re-arming (animations use up 64 rounds early).
+    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
+    for _ in 0..rounds {
         let f = serve_fetches(&mut sess, &dir);
         fetches += f;
         let js = serve_dyn_scripts(&mut sess, &dir) + serve_dyn_imports(&mut sess, &dir);
@@ -567,6 +570,28 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
             for o in lay.ops.iter() {
                 if let beak_engine::layout::DrawOp::Image { x, y, w, h, src, .. } = o {
                     println!("IMG {x:5},{y:<5} {w:5}x{h:<5} {src}");
+                }
+            }
+        }
+        // `OPSAT=x,y,w,h` lists every command whose box meets that rectangle —
+        // the question "what paints there?" for a box nobody can name.
+        if let Ok(r) = std::env::var("OPSAT") {
+            use beak_engine::layout::DrawOp as D;
+            let v: Vec<i32> = r.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+            if let [rx, ry, rw, rh] = v[..] {
+                for (n, o) in lay.ops.iter().enumerate() {
+                    let (k, x, y, w, h, extra) = match o {
+                        D::Rect { x, y, w, h, color } => ("Rect", *x, *y, *w, *h, format!("{:?} a={}", color.c, color.a)),
+                        D::RoundRect { x, y, w, h, color, .. } => ("RoundRect", *x, *y, *w, *h, format!("{:?} a={}", color.c, color.a)),
+                        D::Shadow { x, y, w, h, color, blur, .. } => ("Shadow", *x, *y, *w, *h, format!("{:?} a={} blur={blur}", color.c, color.a)),
+                        D::Image { x, y, w, h, src, .. } => ("Image", *x, *y, *w, *h, src.chars().take(80).collect()),
+                        D::Gradient { x, y, w, h, .. } => ("Gradient", *x, *y, *w, *h, String::new()),
+                        D::Text { x, y, text, .. } => ("Text", *x, *y, 1, 1, text.chars().take(40).collect()),
+                        _ => continue,
+                    };
+                    if x < rx + rw && x + w > rx && y < ry + rh && y + h > ry {
+                        println!("OP {n:5} {k} {x},{y} {w}x{h} {extra}");
+                    }
                 }
             }
         }
@@ -1006,5 +1031,8 @@ fn feed_geometry(ip: &mut beak_engine::js::interp::Interp, html: &str, dir: &str
         boxes: std::rc::Rc::new(rects), scroll: (0, 0),
         content: (width as i32, lay.height as i32),
     });
-    ip.set_media(width as f64, 1080.0, std::env::var("DARK").is_ok());
+    // The viewport the layout used: `IntersectionObserver` measures against it.
+    let vh: f64 = std::env::var("H").ok().and_then(|v| v.parse().ok()).unwrap_or(993.0);
+    ip.set_media(width as f64, vh, std::env::var("DARK").is_ok());
+    ip.set_viewport(width as f64, vh);
 }

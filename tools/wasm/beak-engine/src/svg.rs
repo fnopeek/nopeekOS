@@ -177,7 +177,7 @@ pub fn render(bytes: &[u8]) -> Option<Image> {
     }
     // A standalone document has no CSS around it, so `currentColor` is the
     // initial `color`.
-    render_tree(&root, Rgb(0, 0, 0), None)
+    render_tree(&root, Rgb(0, 0, 0), None, None)
 }
 
 /// Render an inline `<svg>` straight out of the HTML DOM.
@@ -187,8 +187,11 @@ pub fn render(bytes: &[u8]) -> Option<Image> {
 /// used box from layout: an inline `<svg>` is sized by CSS, not by its own
 /// `width`/`height` attributes, so the raster has to match that box or the
 /// icon is drawn at the wrong scale.
-pub fn render_element(el: &crate::dom::Element, current: Rgb, box_px: Option<(u32, u32)>) -> Option<Image> {
-    render_tree(&from_dom(el)?, current, box_px)
+/// `spin` is the CSS `transform` of the `<svg>` element itself (its linear
+/// part, see `ComputedStyle::spin`), applied about the centre of the box.
+pub fn render_element(el: &crate::dom::Element, current: Rgb, box_px: Option<(u32, u32)>,
+                      spin: Option<[f32; 4]>) -> Option<Image> {
+    render_tree(&from_dom(el)?, current, box_px, spin)
 }
 
 /// The HTML DOM and this module's XML tree hold the same data in the same
@@ -215,7 +218,7 @@ fn from_dom(el: &crate::dom::Element) -> Option<XmlEl> {
     Some(conv(el))
 }
 
-fn render_tree(root: &XmlEl, current: Rgb, box_px: Option<(u32, u32)>) -> Option<Image> {
+fn render_tree(root: &XmlEl, current: Rgb, box_px: Option<(u32, u32)>, spin: Option<[f32; 4]>) -> Option<Image> {
     // Intrinsic size + user→device root matrix.
     let vb = attr(root, "viewBox").and_then(parse_view_box);
     let aw = attr(root, "width").and_then(|v| parse_len(&v));
@@ -242,7 +245,15 @@ fn render_tree(root: &XmlEl, current: Rgb, box_px: Option<(u32, u32)>) -> Option
         return None;
     }
 
-    let root_mat = view_box_matrix(vb, iw as f32, ih as f32);
+    let mut root_mat = view_box_matrix(vb, iw as f32, ih as f32);
+    if let Some([a, b, c, d]) = spin {
+        // Around the centre of the raster: shift the centre to the origin,
+        // turn, shift back. What leaves the box is clipped by the raster.
+        let (cx, cy) = (iw as f32 / 2.0, ih as f32 / 2.0);
+        let to = Mat { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: cx, f: cy };
+        let from = Mat { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: -cx, f: -cy };
+        root_mat = to.mul(&Mat { a, b, c, d, e: 0.0, f: 0.0 }).mul(&from).mul(&root_mat);
+    }
 
     // Walk the tree into an ordered fill list.
     let mut fills: Vec<Fill> = Vec::new();

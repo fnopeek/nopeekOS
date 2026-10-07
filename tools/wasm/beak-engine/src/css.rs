@@ -206,6 +206,9 @@ pub enum PseudoElem {
     None,
     Before,
     After,
+    /// `::placeholder`: styles the hint text of an empty field. Read only by
+    /// the control painter; it generates no box.
+    Placeholder,
 }
 
 /// An `[attr]` attribute selector with its match operator.
@@ -2574,8 +2577,14 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                         }
                         c.pseudo = PseudoElem::After;
                     }
-                    // Any other `::pseudo-element` (first-line, placeholder,
-                    // selection, …) is unsupported → drop rather than mis-apply.
+                    ("placeholder" | "-webkit-input-placeholder" | "-moz-placeholder", None) => {
+                        if c.pseudo != PseudoElem::None {
+                            return None;
+                        }
+                        c.pseudo = PseudoElem::Placeholder;
+                    }
+                    // Any other `::pseudo-element` (first-line, selection, …)
+                    // is unsupported → drop rather than mis-apply.
                     _ if dbl => return None,
                     ("not", Some(a)) => {
                         // A state a static render never enters makes the

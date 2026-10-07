@@ -81,13 +81,17 @@ const MAX_DMA_ALLOCS: usize = 1024;
 const MAX_DMA_PAGES: usize = 2048; // 8MB total (iwlwifi FW sections ~1.3MB)
 const MAX_DMA_PAGES_PER_CALL: usize = 1024; // 4MB; a single FW section can exceed 256KB
 
-/// The caps forge applies in `forge_rt`, for wasmi: linear memory up to
-/// `MAX_INSTANCE_BYTES` (initial size included), tables up to a million
-/// entries, one memory. A refused growth fails the instruction instead of
-/// exhausting the kernel heap, which backs wasmi's memories.
+/// Linear memory a wasmi instance may hold. Fixed, unlike forge's rule:
+/// wasmi's memories live on the kernel heap, which is a bounded region and
+/// not the frame pool `forge_rt::may_map` watches.
+const WASMI_MEMORY_BYTES: usize = 1024 * 1024 * 1024;
+
+/// wasmi's caps: linear memory up to `WASMI_MEMORY_BYTES` (initial size
+/// included), tables up to a million entries, one memory. A refused growth
+/// fails the instruction instead of exhausting the kernel heap.
 fn guest_limits() -> wasmi::StoreLimits {
     wasmi::StoreLimitsBuilder::new()
-        .memory_size(crate::forge_rt::MAX_INSTANCE_BYTES as usize)
+        .memory_size(WASMI_MEMORY_BYTES)
         .table_elements(1 << 20)
         .memories(1)
         .build()

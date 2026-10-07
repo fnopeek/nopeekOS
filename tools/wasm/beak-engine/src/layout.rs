@@ -337,8 +337,13 @@ fn band_of(floats: &[FloatRect], top: i32, bot: i32, cl: i32, cr: i32) -> (i32, 
 /// The image-store key of an inline `<svg>`. `seq` is the document-order index
 /// the parser assigns, so the key is stable across re-layouts of the same
 /// document and cannot collide with a page's own `src` (no URL has this shape).
-fn svg_key(el: &Element) -> alloc::string::String {
-    alloc::format!("svg:{}", el.seq)
+/// The rotation is part of it, so a turned icon (a dropdown opening) is drawn
+/// anew instead of served from the cache.
+pub(crate) fn svg_key_spun(seq: u32, spin: Option<[f32; 4]>) -> alloc::string::String {
+    match spin {
+        None => alloc::format!("svg:{seq}"),
+        Some(m) => alloc::format!("svg:{seq}:{:.3},{:.3},{:.3},{:.3}", m[0], m[1], m[2], m[3]),
+    }
 }
 
 /// What to show if the raster fails. An icon's accessible name is its
@@ -1387,7 +1392,7 @@ pub struct Layout {
     /// box is decided by CSS, not by the SVG's own attributes. So layout states
     /// what it needs and `Engine::resolve_inline_svgs` renders it afterwards,
     /// the same split `css_image_srcs` already uses.
-    pub inline_svgs: Vec<(u32, Rgb, u32, u32)>,
+    pub inline_svgs: Vec<(u32, Rgb, u32, u32, Option<[f32; 4]>)>,
     /// Element boxes for the inspect dev tool (empty unless inspection was on).
     pub inspect: Vec<InspectBox>,
     /// Element boxes for pointer hit-testing (empty unless the sheet has
@@ -1999,7 +2004,7 @@ struct Ctx<'a> {
     /// later batch.
     guessed: core::cell::RefCell<Vec<String>>,
     /// Inline `<svg>` render requests — see `Layout::inline_svgs`.
-    inline_svgs: core::cell::RefCell<Vec<(u32, Rgb, u32, u32)>>,
+    inline_svgs: core::cell::RefCell<Vec<(u32, Rgb, u32, u32, Option<[f32; 4]>)>>,
     /// `url_key`s of the CSS images this layout referenced. Deliberately a
     /// set (deduped on insert), not an append-only log: a throwaway
     /// measurement layout paints boxes too, and its entries must be
@@ -3270,7 +3275,7 @@ impl<'a> Ctx<'a> {
                 let svg = el.tag == "svg";
                 let (iw, ih) = if svg { self.svg_box(el, &st) } else { self.img_box(el, &st) };
                 let alt = svg_alt(el, svg);
-                let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
+                let src = if svg { svg_key_spun(el.seq, st.spin) } else { el.attr("src").unwrap_or("").to_string() };
                 let fx = self.filter_index(&st);
                 inline.image(src, iw, ih, None, alt, st.hidden, st.transparent, st.object_fit, fx, self.image_deco(&st));
                 self.path.pop();
@@ -3673,6 +3678,17 @@ impl<'a> Ctx<'a> {
         self.pseudos.borrow_mut().insert(key, got.clone());
         let (template, ps) = got?;
         Some((self.render_content(owner, &template), ps))
+    }
+
+    /// The `::placeholder` paint of a field (see `CtlBox::ghost_ink`).
+    fn placeholder_ink(&self, el: &Element, st: &ComputedStyle) -> Option<Option<Rgba>> {
+        let on_path = self.path.last().map(|p| p.seq()) == Some(el.seq);
+        let anc = if on_path { self.path.len() - 1 } else { self.path.len() };
+        let cq = self.cq.borrow();
+        let ps = style::resolve_placeholder(&self.info(el), st, self.theme, self.sheet,
+            &self.path[..anc], &[], 0, self.match_env(&cq))?;
+        if ps.transparent || ps.hidden || ps.opacity <= 0.0 { return Some(None) }
+        (ps.color != st.color).then_some(Some(ps.color))
     }
 
     /// Place an out-of-flow `::before`/`::after` now that its originating box's
@@ -4411,7 +4427,7 @@ family: st.family,
         if w > 0 && h > 0 {
             self.inline_svgs
                 .borrow_mut()
-                .push((el.seq, st.color.c, w as u32, h as u32));
+                .push((el.seq, st.color.c, w as u32, h as u32, st.spin));
         }
         (w, h)
     }
@@ -4713,6 +4729,7 @@ family: st.family,
             h: if said_h { h.max(0) } else { h.max(8) },
             text,
             ghost,
+            ghost_ink: if ghost { self.placeholder_ink(el, st) } else { None },
             placeholder: el.attr("placeholder").unwrap_or("").to_string(),
             checked: self.forms.checked_or(el.seq, el.attr("checked").is_some()),
             disabled: el.attr("disabled").is_some(),
@@ -5073,7 +5090,7 @@ family: st.family,
             // either way and lets paint decide, and both paths must agree for
             // the same picture.
             if iw > 0 && ih > 0 {
-                let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
+                let src = if svg { svg_key_spun(el.seq, st.spin) } else { el.attr("src").unwrap_or("").to_string() };
                 let (alt, fit, filter) = (svg_alt(el, svg), st.object_fit, self.filter_index(st));
                 self.ops.push(DrawOp::Image {
                     x: px as i32 + (st.border_left.width + st.pad_left) as i32,
@@ -6736,7 +6753,11 @@ family: st.family,
                 let outer = clamp_len(outer, cs.min_width, cs.max_width, cs.box_border, frame);
                 (outer, outer)
             }
-            _ => (p + frame, m + frame),
+            // `min-width`/`max-width` clamp the contribution as well
+            // (css-sizing-3 §5.2): a heading with `max-width: 924px` and one
+            // long line contributes 924, not the line.
+            _ => (clamp_len(p + frame, cs.min_width, cs.max_width, cs.box_border, frame),
+                  clamp_len(m + frame, cs.min_width, cs.max_width, cs.box_border, frame)),
         }
     }
 
@@ -6820,11 +6841,12 @@ family: st.family,
         let ncols = st.grid_ncols as usize;
         if ncols == 0 { return self.intrinsic_width_nodes(&el.children, st) }
         let kids = self.flow_kids(el, st);
+        let gap = st.grid_col_gap.px(0.0).unwrap_or(0.0);
         // Assign the children to columns — row by row, as layout's placement
         // does, and with `grid-column-start` where one is set. Without it the
         // max-content width would be "track count times widest child", too
         // large for any uneven grid.
-        let (mut col_p, mut col_m) = (alloc::vec![0.0f32; ncols], alloc::vec![0.0f32; ncols]);
+        let mut items: Vec<(usize, usize, f32, f32)> = Vec::new();
         let mut next = 0usize;
         for (ce, cs) in &kids {
             let span = (cs.grid_col_span as usize).clamp(1, ncols);
@@ -6836,28 +6858,71 @@ family: st.family,
                 next += span;
                 c
             };
-            // A child spanning several tracks says nothing about a single one —
-            // the same simplification as in layout's column sizing.
-            if span != 1 { continue }
             let (p, m) = self.child_outer(ce, cs);
-            col_p[c] = col_p[c].max(p);
-            col_m[c] = col_m[c].max(m);
+            items.push((c, span, p, m));
         }
-        let (mut pref, mut min) = (0.0f32, 0.0f32);
-        for c in 0..ncols {
-            match st.grid_tracks[c] {
-                GridTrack::Fixed(px) => { pref += px; min += px; }
-                // A percentage has no basis here (css-sizing-3 §4.1) and so
-                // contributes nothing.
-                GridTrack::Pct(_) => {}
-                GridTrack::MinContent => { pref += col_m[c]; min += col_m[c]; }
-                GridTrack::MaxContent => { pref += col_p[c]; min += col_p[c]; }
-                GridTrack::AutoFrom(px) => { pref += col_p[c].max(px); min += px; }
-                GridTrack::Auto | GridTrack::Fr(_) => { pref += col_p[c]; min += col_m[c]; }
+        let fr = |c: usize| match st.grid_tracks[c] { GridTrack::Fr(f) => Some(f), _ => None };
+        // Single-track contributions size the tracks that are not flexible.
+        let (mut col_p, mut col_m) = (alloc::vec![0.0f32; ncols], alloc::vec![0.0f32; ncols]);
+        for &(c, span, p, m) in &items {
+            if span == 1 {
+                col_p[c] = col_p[c].max(p);
+                col_m[c] = col_m[c].max(m);
             }
         }
-        let gaps = st.grid_col_gap.px(0.0).unwrap_or(0.0) * (ncols as f32 - 1.0).max(0.0);
-        (pref + gaps, min + gaps)
+        let mut base_p = alloc::vec![0.0f32; ncols];
+        let mut base_m = alloc::vec![0.0f32; ncols];
+        for c in 0..ncols {
+            let (bp, bm) = match st.grid_tracks[c] {
+                GridTrack::Fixed(px) => (px, px),
+                // A percentage has no basis here (css-sizing-3 §4.1) and so
+                // contributes nothing.
+                GridTrack::Pct(_) => (0.0, 0.0),
+                GridTrack::MinContent => (col_m[c], col_m[c]),
+                GridTrack::MaxContent => (col_p[c], col_p[c]),
+                GridTrack::AutoFrom(px) => (col_p[c].max(px), px),
+                GridTrack::Auto => (col_p[c], col_m[c]),
+                // Sized below, from the flex fraction.
+                GridTrack::Fr(_) => (0.0, col_m[c]),
+            };
+            base_p[c] = bp;
+            base_m[c] = bm;
+        }
+        // A spanning item that crosses no flexible track spreads what the
+        // tracks it spans lack over the content-sized ones among them
+        // (css-grid-1 §12.5.1, simplified to an even share).
+        for &(c, span, p, _) in &items {
+            if span == 1 || (c..c + span).any(|k| fr(k).is_some()) { continue }
+            let have: f32 = (c..c + span).map(|k| base_p[k]).sum::<f32>() + gap * (span - 1) as f32;
+            let grow: Vec<usize> = (c..c + span).filter(|&k| matches!(st.grid_tracks[k],
+                GridTrack::Auto | GridTrack::AutoFrom(_) | GridTrack::MaxContent)).collect();
+            if p > have && !grow.is_empty() {
+                let each = (p - have) / grow.len() as f32;
+                for k in grow { base_p[k] += each; }
+            }
+        }
+        // The flex fraction under a max-content constraint (css-grid-1
+        // §12.7.1, indefinite free space): for every item that crosses a
+        // flexible track, what one `fr` must be for the item to fit — its
+        // contribution less the inflexible tracks and gaps it spans, over the
+        // flex factors it spans. An item spanning all twelve `1fr` columns of
+        // a page grid sizes the grid; skipping it measured that grid as empty.
+        let mut frac = 0.0f32;
+        for &(c, span, p, _) in &items {
+            let flex: f32 = (c..c + span).filter_map(fr).sum();
+            if flex <= 0.0 { continue }
+            let fixed: f32 = (c..c + span).filter(|&k| fr(k).is_none()).map(|k| base_p[k]).sum::<f32>()
+                + gap * (span - 1) as f32;
+            frac = frac.max((p - fixed).max(0.0) / flex.max(1.0));
+        }
+        let mut pref = 0.0f32;
+        let mut min = 0.0f32;
+        for c in 0..ncols {
+            pref += match fr(c) { Some(f) => frac * f, None => base_p[c] };
+            min += base_m[c];
+        }
+        let gaps = gap * (ncols as f32 - 1.0).max(0.0);
+        (pref + gaps, (min + gaps).min(pref + gaps))
     }
 
     /// `intrinsic_width`, dispatching on whether the cell is real or anonymous.
@@ -7073,7 +7138,7 @@ family: st.family,
             let f0 = self.ops.len();
             self.paint_box_decoration(st, x, y, bw, bh, f0);
             if iw > 0 && ih > 0 {
-                let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
+                let src = if svg { svg_key_spun(el.seq, st.spin) } else { el.attr("src").unwrap_or("").to_string() };
                 let (alt, fit, filter) = (svg_alt(el, svg), st.object_fit, self.filter_index(st));
                 self.ops.push(DrawOp::Image {
                     x: x + pl as i32, y: y + pt as i32, w: iw, h: ih, src, alt, fit, filter,
@@ -8939,6 +9004,17 @@ fn flex_item_style(s: &ComputedStyle, main: Option<f32>, forced_cross: Option<f3
             s2.width = main_px(c, main_chrome);
         }
     }
+    // A forced width already obeys the item's percentage bounds, resolved
+    // against the container. The box is laid out with its own width as the
+    // containing block, so they would apply a second time, against itself:
+    // `max-width: 80%` made a fit-content item 80 % of its own width (the trap
+    // `place_float` names too).
+    let forced_w = if row { main.is_some() } else { forced_cross.is_some() };
+    if forced_w {
+        let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
+        if pct(s2.max_width) { s2.max_width = Len::Auto }
+        if pct(s2.min_width) { s2.min_width = Len::Auto }
+    }
     s2
 }
 
@@ -9351,7 +9427,7 @@ impl<'a> Ctx<'a> {
         if el.tag == "img" || el.tag == "svg" {
             let svg = el.tag == "svg";
             let (iw, ih) = if svg { self.svg_box(el, st) } else { self.img_box(el, st) };
-            let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
+            let src = if svg { svg_key_spun(el.seq, st.spin) } else { el.attr("src").unwrap_or("").to_string() };
             let fx = self.filter_index(st);
             inline.image(src, iw, ih, href, svg_alt(el, svg), st.hidden, st.transparent, st.object_fit, fx, self.image_deco(st));
             return;
@@ -9584,6 +9660,10 @@ struct CtlBox {
     text: String,
     /// `text` is a placeholder → paint it muted.
     ghost: bool,
+    /// How a placeholder paints, from `::placeholder`: `None` is the theme's
+    /// muted colour, `Some(None)` is not at all (`opacity: 0`, hidden or
+    /// transparent: the floating-label pattern hides it until focus).
+    ghost_ink: Option<Option<Rgba>>,
     /// The element's `placeholder`, kept for a repaint: emptying a field has to
     /// bring it back, and the repaint has no element to ask.
     placeholder: String,
@@ -10056,8 +10136,10 @@ fn paint_control(
                 let inner_w = (w - ctl.pad_l - CTL_PAD_X - 2).max(1) as f32;
                 let rows = ((h - 2 * CTL_PAD_Y - 2) / lh.max(1)).max(1);
                 let mut ly = top + CTL_PAD_Y + 1;
-                let color = if ctl.ghost { theme.muted.into() } else { ink };
-                for line in wrap_lines(font, &ctl.text, ctl.style.size, inner_w, rows as usize) {
+                let color = if ctl.ghost { ctl.ghost_ink.flatten().unwrap_or(theme.muted.into()) } else { ink };
+                let lines = if ctl.ghost && ctl.ghost_ink == Some(None) { Vec::new() }
+                            else { wrap_lines(font, &ctl.text, ctl.style.size, inner_w, rows as usize) };
+                for line in lines {
                     ops.push(DrawOp::Text {
                         clip: None,
                         x: tx,
@@ -10076,7 +10158,7 @@ family: ctl.style.family,
                 controls.push(rect(ops, ctl));
                 return;
             }
-            if !ctl.text.is_empty() {
+            if !ctl.text.is_empty() && !(ctl.ghost && ctl.ghost_ink == Some(None)) {
                 // Clip an over-long value to the box. A field being typed into keeps
                 // its tail, where the caret is; a label keeps its head, because a name
                 // clipped at the front reads as a different word.
@@ -10101,7 +10183,7 @@ family: ctl.style.family,
                     x: tx,
                     y: ty,
                     size: ctl.style.size,
-                    color: if ctl.ghost { theme.muted.into() } else { ink },
+                    color: if ctl.ghost { ctl.ghost_ink.flatten().unwrap_or(theme.muted.into()) } else { ink },
                     bold: ctl.style.bold,
                     italic: ctl.style.italic,
                     mono: ctl.style.mono,
@@ -11514,6 +11596,8 @@ fn plan_one(
                 (Some(a), Some(c)) => (a, c),
                 _ => return Err("a pseudo-element appears or vanishes"),
             },
+            // A `::placeholder` paints inside its control and records no box.
+            PseudoElem::Placeholder => return Err("a placeholder has no box of its own"),
         };
         if !box_differs(off, on) {
             continue;
@@ -14800,6 +14884,40 @@ fn dbg_wiki_shape() {
         let right = *t.iter().find(|(_, _, s)| *s == "right").expect("right");
         assert_eq!(left.1, right.1, "row items share a y (not stacked)");
         assert!(right.0 > left.0 + 200, "2nd item pushed right by the 1st's grown width");
+    }
+
+    #[test]
+    fn placeholder_pseudo_hides_or_colours_the_hint() {
+        let hint = |css: &str| {
+            let l = lay(&format!("<html><head><style>{css}</style></head>\
+                <body><input placeholder=\"you@domain.com\"></body></html>"), 800);
+            l.ops.iter().find_map(|o| match o {
+                DrawOp::Text { text, color, .. } if text.contains("domain") => Some(color.c),
+                _ => None,
+            })
+        };
+        assert!(hint("").is_some(), "a plain placeholder is painted");
+        // GitHub's floating label: the hint stays hidden until focus.
+        assert_eq!(hint("input::placeholder{opacity:0}"), None);
+        assert_eq!(hint("input::-webkit-input-placeholder{visibility:hidden}"), None);
+        assert_eq!(hint("input::placeholder{color:rgb(200,10,10)}"), Some(Rgb(200, 10, 10)));
+    }
+
+    #[test]
+    fn a_grid_of_fr_tracks_measures_its_spanning_item() {
+        // `repeat(12, minmax(0,1fr))` with one item over all twelve columns:
+        // the item sizes the fr, so the shrink-to-fit box around the grid is
+        // as wide as the item (capped by its `max-width`), not empty.
+        let html = "<html><head><style>.g{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));column-gap:24px}\
+            .c{grid-column:auto/span 12}h1{max-width:300px;margin:0}</style></head>\
+            <body><div style=\"display:flex;justify-content:center;width:800px\"><section>\
+            <div class=g><div class=c><h1>A heading long enough to be capped by its max width</h1></div></div>\
+            </section></div></body></html>";
+        let l = lay(html, 800);
+        let t = texts(&l);
+        let first = t.first().expect("text");
+        // Centred in 800 at 300 wide: starts near 250, not at the centre line.
+        assert!(first.0 < 300, "grid measured too narrow, text starts at {}", first.0);
     }
 
     #[test]

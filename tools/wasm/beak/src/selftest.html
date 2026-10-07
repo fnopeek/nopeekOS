@@ -858,6 +858,14 @@ row(domRows, "window.event and the event kinds", function () {
       && p instanceof MouseEvent && new SubmitEvent("submit").submitter === null
       && new MessageEvent("message", { data: 7 }).data === 7;
 });
+row(domRows, "click() and focus() leave microtasks for later", function () {
+  var b = document.createElement("button"), log = [];
+  document.body.appendChild(b);
+  Promise.resolve().then(function () { log.push("micro"); });
+  b.click(); b.focus(); log.push("sync");
+  b.remove();
+  return log.join(",") === "sync";
+});
 row(domRows, "getAttribute ignores case on HTML", function () {
   var d = document.createElement("div");
   d.setAttribute("itemProp", "name");

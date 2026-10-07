@@ -27,18 +27,21 @@ const INSTANCE_STRIDE: u64 = 16 * 1024 * 1024 * 1024;
 /// an eight-byte access at the very top needs.
 pub const MAX_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024 + 0x1000;
 
-/// How much RAM one module may actually occupy.
-///
-/// `MAX_MEMORY_BYTES` is the address reservation, not a cap on RAM. Without
-/// this limit a module could grow until the machine is empty and the kernel
-/// fails its own next allocation. A module that wants too much must fail, not
-/// the machine: the machine's memory is outside the sandbox. The value is set
-/// well above the normal working set of the hungriest module.
-pub const MAX_INSTANCE_BYTES: u64 = 1024 * 1024 * 1024;
-
 /// RAM the kernel keeps for itself. Without it, the last frame could go to a
 /// module and the kernel could not even log the refusal.
 pub const KERNEL_RESERVE_MB: usize = 96;
+
+/// RAM one module's growth must leave to every other module.
+///
+/// `MAX_MEMORY_BYTES` is the address reservation, not a cap on RAM, and a
+/// fixed per-module cap would be a guess about the machine. What has to be
+/// protected is the rest of the system: one module (a browser on a heavy
+/// page) must not take the frames the compositor, the network or audio
+/// daemon need for their next allocation. So a module grows as far as the
+/// machine allows, and is refused once growing would leave less than this
+/// on top of the kernel's reserve. A module that wants too much fails, not
+/// the machine.
+pub const SHARED_RESERVE_MB: usize = 512;
 
 const PAGE: u64 = 4096;
 
@@ -130,19 +133,20 @@ fn unmap_range(at: u64, bytes: u64) {
 }
 
 /// May an instance hold `total` bytes of linear memory, `add` of them about
-/// to be mapped? The per-module cap, then the machine-wide reserve. Shared by
-/// instantiation and `memory.grow`: a module that declares a large initial
-/// memory must not get what growing would refuse.
+/// to be mapped? Only if the kernel's reserve and the share left to the other
+/// modules both stay free afterwards. Shared by instantiation and
+/// `memory.grow`: a module that declares a large initial memory must not get
+/// what growing would refuse. The address limit (`MAX_MEMORY_BYTES`, and
+/// 4 GiB for a 32-bit memory) is checked by the callers.
 fn may_map(total: u64, add: u64) -> Result<(), alloc::string::String> {
-    if total > MAX_INSTANCE_BYTES {
-        return Err(alloc::format!("module cap reached ({} MB of at most {} MB)",
-            total / (1024 * 1024), MAX_INSTANCE_BYTES / (1024 * 1024)));
-    }
     let (_, free_mb) = crate::memory::stats();
     let want_mb = (add as usize).div_ceil(1024 * 1024);
-    if free_mb < KERNEL_RESERVE_MB + want_mb {
-        return Err(alloc::format!("machine nearly full ({} MB free, {} MB reserve, {} MB asked)",
-            free_mb, KERNEL_RESERVE_MB, want_mb));
+    let keep_mb = KERNEL_RESERVE_MB + SHARED_RESERVE_MB;
+    if free_mb < keep_mb + want_mb {
+        return Err(alloc::format!(
+            "machine nearly full ({} MB free, {} MB kept for kernel and other modules, \
+             {} MB asked, module at {} MB)",
+            free_mb, keep_mb, want_mb, total / (1024 * 1024)));
     }
     Ok(())
 }

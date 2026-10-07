@@ -1031,13 +1031,13 @@ impl Engine {
             for c in &el.children {
                 let crate::dom::Node::Element(e) = c else { continue };
                 if e.tag == "svg" {
-                    if let Some(&(_, color, w, h)) =
+                    if let Some(&(_, color, w, h, spin)) =
                         lay.inline_svgs.iter().find(|(seq, ..)| *seq == e.seq)
                     {
-                        let key = alloc::format!("svg:{}", e.seq);
+                        let key = crate::layout::svg_key_spun(e.seq, spin);
                         if !eng.images.borrow().contains_key(key.as_str()) {
                             if let Some(img) =
-                                crate::svg::render_element(e, color, Some((w, h)))
+                                crate::svg::render_element(e, color, Some((w, h)), spin)
                             {
                                 if img.bgra.len() <= eng.img_budget.get() {
                                     eng.img_budget.set(eng.img_budget.get() - img.bgra.len());

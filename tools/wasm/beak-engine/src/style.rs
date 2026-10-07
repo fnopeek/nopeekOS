@@ -1253,6 +1253,12 @@ pub struct ComputedStyle {
     /// transformed raster path, and any other transform leaves this `None`
     /// rather than being approximated.
     pub translate: Option<(Len, Len)>,
+    /// The linear part (`a b c d`, CSS matrix order) of a `transform` that
+    /// rotates, scales or skews. Only an inline `<svg>` applies it, about the
+    /// centre of its box (the initial `transform-origin`): its raster is
+    /// already drawn through a matrix, and a rotated icon — the chevron of
+    /// every dropdown — is by far the common case. Other boxes ignore it.
+    pub spin: Option<[f32; 4]>,
     /// `caption-side: bottom` — the caption renders below the table grid
     /// instead of above it. Inherited (CSS2.1 §17.4.1), so it can be set on
     /// either the `<table>` or the `<caption>`.
@@ -1325,6 +1331,7 @@ impl ComputedStyle {
             shadow_soft: None,
             shadow_inset: None,
             translate: None,
+            spin: None,
             bold: false,
             italic: false,
             mono: false,
@@ -1600,6 +1607,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         shadow_soft: None,
         shadow_inset: None,
         translate: None,
+        spin: None,
         display: Display::Inline, // CSS initial `display` is inline
         width: Len::Auto,
         min_width: Len::Auto,
@@ -2180,6 +2188,42 @@ fn unbox_contents(tag: &str, s: &mut ComputedStyle) {
 ///
 /// `own` is `el`'s own already-resolved computed style; the pseudo box
 /// inherits from it exactly as a real child element would.
+#[allow(clippy::too_many_arguments)]
+/// The style of an element's `::placeholder`, or `None` when no rule
+/// targets it. Like `resolve_pseudo`, without `content`: the text is the
+/// `placeholder` attribute.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_placeholder(
+    subject: &ElemInfo,
+    own: &ComputedStyle,
+    theme: &Theme,
+    sheet: &Stylesheet,
+    ancestors: &[ElemInfo],
+    prev_siblings: &[ElemInfo],
+    sib_count: u32,
+    viewport: impl crate::css::Viewport,
+) -> Option<ComputedStyle> {
+    if sheet.is_empty() {
+        return None;
+    }
+    let mut matched = sheet.matched_pseudo(subject, ancestors, prev_siblings, sib_count,
+        viewport.env(theme.is_dark()), PseudoElem::Placeholder);
+    if matched.is_empty() {
+        return None;
+    }
+    matched.sort_by_key(|(layer, spec, order, _, _, _, _)| (*layer, *spec, *order));
+    let mut s = inherit_reset(own);
+    for pass_imp in [false, true] {
+        for (_, _, _, decls, imp, _, _) in &matched {
+            for (p, v) in if pass_imp { *imp } else { *decls } {
+                apply_one(*p, v, theme, &mut s);
+            }
+        }
+    }
+    s.transparent |= s.opacity_zero;
+    Some(s)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_pseudo(
     subject: &ElemInfo,
@@ -3333,6 +3377,11 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         Prop::Transform => {
             s.translate = parse_translate(&v, u);
+            s.spin = parse_spin(&v);
+            // `translate(…) rotate(…)`: the shift still applies to the box.
+            if s.spin.is_some() && s.translate.is_none() {
+                s.translate = transform_shift(&v, u);
+            }
         }
         Prop::BoxShadow => {
             let t = v.trim();
@@ -3744,6 +3793,10 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                     s.bg = if cc { Some(s.color) } else { color };
                     s.bg_cc = cc;
                     s.bg_mix = None;
+                    // The page spoke about the background, even if it named no
+                    // colour: `background: none` (minified `0 0`) resets the
+                    // colour to transparent and takes a button's UA face away.
+                    s.bg_set = true;
                     s.bg_layer = layer;
                     s.bg_origin = origin;
                     s.bg_clip = clip;
@@ -4341,6 +4394,75 @@ fn fn_body<'a>(v: &'a str, name: &str) -> Option<&'a str> {
         }
     }
     None
+}
+
+/// The functions of a `transform` list, as `(name, arguments)`.
+fn transform_fns(v: &str) -> Vec<(&str, Vec<&str>)> {
+    let mut out = Vec::new();
+    let mut rest = v.trim();
+    while let Some(open) = rest.find('(') {
+        let name = rest[..open].trim();
+        let Some(close) = rest[open..].find(')') else { break };
+        let args = rest[open + 1..open + close]
+            .split(|c: char| c == ',' || c.is_ascii_whitespace())
+            .filter(|t| !t.is_empty()).collect();
+        out.push((name, args));
+        rest = &rest[open + close + 1..];
+    }
+    out
+}
+
+/// The linear part of a `transform` list that rotates, scales or skews
+/// (see `ComputedStyle::spin`); `None` for translations alone, the
+/// identity, or anything unparseable.
+fn parse_spin(v: &str) -> Option<[f32; 4]> {
+    let fns = transform_fns(v);
+    if fns.is_empty() { return None }
+    let mul = |m: [f32; 4], n: [f32; 4]| [
+        m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+        m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+    ];
+    let num = |t: &str| t.trim().parse::<f32>().ok();
+    let scale = |t: &str| t.trim().strip_suffix('%').map_or_else(|| num(t), |p| num(p).map(|x| x / 100.0));
+    let mut m = [1.0f32, 0.0, 0.0, 1.0];
+    for (name, a) in fns {
+        let n: [f32; 4] = match name.to_ascii_lowercase().as_str() {
+            "translate" | "translatex" | "translatey" | "translate3d" | "translatez" => continue,
+            "rotate" | "rotatez" => {
+                let r = parse_angle(a.first()?)? * core::f32::consts::PI / 180.0;
+                let (c, sn) = (libm::cosf(r), libm::sinf(r));
+                [c, sn, -sn, c]
+            }
+            "scale" => {
+                let x = scale(a.first()?)?;
+                let y = a.get(1).and_then(|t| scale(t)).unwrap_or(x);
+                [x, 0.0, 0.0, y]
+            }
+            "scalex" => [scale(a.first()?)?, 0.0, 0.0, 1.0],
+            "scaley" => [1.0, 0.0, 0.0, scale(a.first()?)?],
+            "skewx" => [1.0, 0.0, libm::tanf(parse_angle(a.first()?)? * core::f32::consts::PI / 180.0), 1.0],
+            "skewy" => [1.0, libm::tanf(parse_angle(a.first()?)? * core::f32::consts::PI / 180.0), 0.0, 1.0],
+            "matrix" if a.len() == 6 => [num(a[0])?, num(a[1])?, num(a[2])?, num(a[3])?],
+            _ => return None,
+        };
+        m = mul(m, n);
+    }
+    let id = (m[0] - 1.0).abs() < 1e-4 && m[1].abs() < 1e-4 && m[2].abs() < 1e-4 && (m[3] - 1.0).abs() < 1e-4;
+    (!id).then_some(m)
+}
+
+/// The translation in a mixed `transform` list, when it is a single
+/// `translate…()` (the centring idiom `translate(-50%, -50%) rotate(…)`).
+fn transform_shift(v: &str, u: Units) -> Option<(Len, Len)> {
+    let fns = transform_fns(v);
+    let mut shift = None;
+    for (name, a) in &fns {
+        if name.to_ascii_lowercase().starts_with("translate") {
+            if shift.is_some() { return None }
+            shift = parse_translate(&alloc::format!("{name}({})", a.join(",")), u);
+        }
+    }
+    shift
 }
 
 /// An angle in degrees. `0deg` points up and turns clockwise, as CSS counts,
@@ -4943,7 +5065,7 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
         alloc::format!("rgba({}, {}, {}, {})", c.c.0, c.c.1, c.c.2, trim_f32(c.a as f32 / 255.0))
     };
 
-    put("display", if s.hidden { "none" } else { crate::layout::display_name(s.display) });
+    put("display", crate::layout::display_name(s.display));
     put("color", &rgba(s.color));
     put("background-color", &match s.bg { Some(c) => rgba(c), None => String::from("rgba(0, 0, 0, 0)") });
     put("font-size", &px(s.font_px));
@@ -4957,7 +5079,9 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
     put("width", &len(s.width));
     put("height", &len(s.height));
     put("min-width", &len(s.min_width));
-    put("max-width", &len(s.max_width));
+    // An absent maximum is `none`, not `auto`.
+    put("max-width", &if s.max_width == Len::Auto { String::from("none") } else { len(s.max_width) });
+    put("letter-spacing", &if s.letter_spacing == 0.0 { String::from("normal") } else { px(s.letter_spacing) });
     // Top/bottom are already resolved, left/right may be `auto` (centring), so
     // two different forms.
     put("margin-top", &if s.margin_top_auto { "auto".into() } else { px(s.margin_top) });
@@ -4977,7 +5101,7 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
         put(&alloc::format!("border-{side}-style"), if b.hidden { "hidden" } else if b.styled { "solid" } else { "none" });
     }
     put("opacity", &if s.transparent || s.opacity_zero { "0".into() } else { trim_f32(s.opacity) });
-    put("visibility", if s.transparent { "hidden" } else { "visible" });
+    put("visibility", if s.hidden { "hidden" } else { "visible" });
 
     // Scripts branch on these (`position` for positioning libraries, `overflow`
     // for scroll observers, `flex-grow` for flex helpers); an empty answer sends
@@ -5015,7 +5139,7 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
     // The shorthand only when both axes agree, as browsers serialize it.
     if s.overflow_x == s.overflow_y { put("overflow", ovf(s.overflow_x)); }
     put("min-height", &len(s.min_height));
-    put("max-height", &len(s.max_height));
+    put("max-height", &if s.max_height == Len::Auto { String::from("none") } else { len(s.max_height) });
     put("flex-direction", if s.flex_row { "row" } else { "column" });
     put("flex-wrap", if s.flex_wrap { "wrap" } else { "nowrap" });
     put("justify-content", match s.justify {
@@ -6523,6 +6647,6 @@ mod size_probe {
     fn the_style_stays_small() {
         assert_eq!(core::mem::size_of::<super::GradStop>(), 12);
         assert_eq!(core::mem::size_of::<super::Gradient>(), 84);
-        assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1520);
+        assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1544);
     }
 }
