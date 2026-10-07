@@ -2650,8 +2650,10 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     crate::microvm::boottime::start();
     let tsc_khz = crate::interrupts::tsc_freq() / 1000;
     let mut s = String::new();
-    // Boot output stays verbose (no `quiet loglevel=3`) so a guest panic or
-    // wedge during early init surfaces on the host console.
+    // `loglevel=5` keeps warnings, errors and panics on the host console and
+    // drops the informational boot log: every console byte is a VM exit, and
+    // on QEMU the ~330 lines cost ~1.5 s of boot. `set microvm_verbose on`
+    // brings the full log back.
     //
     // maxcpus: an AP that Linux enumerates but that never responds hangs the
     // cpuhp bring-up, so APs are onlined only where the host spawns a
@@ -2674,6 +2676,11 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
     // guest must fall back to the PIT IRQ0 the VMX path injects — otherwise it
     // programs the LAPIC timer and hangs waiting for a tick that never comes
     // (cage/Wayland never starts). See cpu::guest_lapic_active().
+    if !crate::config::get("microvm_verbose")
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("on"))
+    {
+        let _ = write!(s, " loglevel=5");
+    }
     if !crate::microvm::cpu::guest_lapic_active() {
         let _ = write!(s, " nolapic");
     }

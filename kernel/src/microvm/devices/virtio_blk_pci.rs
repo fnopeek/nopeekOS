@@ -19,6 +19,7 @@
 
 extern crate alloc;
 use crate::kprintln;
+use super::blk_image::BlkImage;
 use super::guest_mem::GuestMem;
 
 const VIRTIO_VENDOR: u32 = 0x1AF4;
@@ -157,9 +158,9 @@ pub struct VirtioBlk {
     /// bundle is immutable, distributed via OTA — never persisted.
     persist: bool,
 
-    /// Backing store for the virtual disk. Sized to capacity, held in RAM
-    /// and persisted to npkFS by `save()`.
-    backing: alloc::vec::Vec<u8>,
+    /// Backing store for the virtual disk, sized to capacity. Chunks are
+    /// read from npkFS on first touch; `save()` writes the changed ones.
+    backing: BlkImage,
 
     /// Set by mmio_write when the driver kicks a queue. The hypervisor
     /// run-loop picks this up after the MMIO trap returns and calls
@@ -197,7 +198,7 @@ impl VirtioBlk {
         irq_line: u8,
         read_only: bool,
         persist: bool,
-        backing: alloc::vec::Vec<u8>,
+        backing: BlkImage,
         capacity_sectors: u64,
     ) -> Self {
         Self {
@@ -244,45 +245,24 @@ impl VirtioBlk {
         self.pending_kick_queue.take()
     }
 
-    /// Persist the current backing buffer to npkFS. Called when the
-    /// VM exits the run loop. npkFS encrypts every blob with AES-256-GCM
-    /// at rest under the disk key, so storing the plaintext
-    /// here yields an encrypted-at-rest profile image automatically.
-    /// Per-sector AEAD with sector-in-AAD would allow partial
-    /// random-access without re-encrypting the whole image; the
-    /// whole-blob approach gives crash-loss-bounded persistence (last save
-    /// wins).
-    pub fn save(&self) {
+    /// Persist the disk to npkFS. Called for every disk when the VM exits
+    /// the run loop; the read-only one only reports what it read.
+    /// Only chunks the guest wrote are encrypted and stored again; the rest
+    /// keep their blob. The old image is replaced atomically at `finish`;
+    /// on an error it stays intact.
+    pub fn save(&mut self) {
+        let (touched, total) = self.backing.residency();
+        kprintln!("[virtio-blk] {} chunks of {} read from npkFS this run{}",
+            touched, total, if self.persist { " (home)" } else { " (sqfs)" });
         if !self.persist {
             return; // read-only sqfs bundle — nothing to write back.
         }
-        // Stream the save in 1 MiB chunks instead of a whole-blob upsert.
-        // upsert encodes + AES-GCM-encrypts the entire image at once, which
-        // needs ~image-size of transient buffers on top of the resident
-        // backing and can exhaust host memory next to a large guest. The
-        // streaming writer caps peak at one ~1 MiB chunk, and
-        // content-addressed dedup means the mostly-zero fresh image collapses
-        // to a handful of blobs (every all-zero chunk hashes identically →
-        // stored once). It atomically replaces the old image at `finish`
-        // (same as upsert).
-        let mut w = match crate::npkfs::open_streaming_write(PROFILE_PATH) {
-            Ok(w) => w,
-            Err(e) => { kprintln!("[virtio-blk] save open failed: {:?}", e); return; }
-        };
-        if let Err(e) = w.write(&self.backing) {
-            // Drop w → flushed chunks orphaned (gc reclaims); old image intact.
-            kprintln!("[virtio-blk] save write failed: {:?}", e);
-            return;
-        }
-        match w.finish() {
-            Ok(n) => {
-                let (sum, nz) = img_fingerprint(&self.backing);
-                kprintln!(
-                    "[virtio-blk] saved home image ({} bytes streamed, fp sum={:#x} nz={})",
-                    n, sum, nz
-                );
-            }
-            Err(e) => kprintln!("[virtio-blk] save finish failed: {:?}", e),
+        match self.backing.save(PROFILE_PATH) {
+            Ok((written, reused)) => kprintln!(
+                "[virtio-blk] saved home image ({} chunks written, {} reused)",
+                written, reused,
+            ),
+            Err(e) => kprintln!("[virtio-blk] save failed: {:?} — old image kept", e),
         }
     }
 
@@ -614,45 +594,25 @@ const PROFILE_PATH: &str = "sys/microvm/apps/browser/home.img";
 /// size/layout ever changes (must match CAPACITY_SECTORS).
 static HOME_TEMPLATE: &[u8] = include_bytes!("home_template.bin");
 
-/// Build the initial backing buffer. Tries to load the saved home image
-/// from npkFS (auto-decrypts at-rest); on miss (or size change) seeds a
-/// fresh empty ext4 from `HOME_TEMPLATE` so PID-1's first
-/// `mount -t ext4 /dev/vda` succeeds.
-fn load_or_init_backing() -> alloc::vec::Vec<u8> {
+/// Open the saved home image from npkFS (auto-decrypts at rest) for
+/// chunk-wise reads. On miss or size change, seed a fresh empty ext4 from
+/// `HOME_TEMPLATE` so PID-1's first `mount -t ext4 /dev/vda` succeeds.
+fn load_or_init_backing() -> BlkImage {
     let cap = (CAPACITY_SECTORS * 512) as usize;
-
-    if let Ok((data, _hash)) = crate::npkfs::fetch(PROFILE_PATH) {
+    if let Some(img) = BlkImage::open_lazy(PROFILE_PATH) {
+        if img.len() == cap {
+            kprintln!("[virtio-blk] home image opened ({} bytes, chunks on demand) /dev/vda", cap);
+            return img;
+        }
+        kprintln!("[virtio-blk] home image size mismatch ({} != {}), reseeding", img.len(), cap);
+    } else if let Ok((data, _hash)) = crate::npkfs::fetch(PROFILE_PATH) {
         if data.len() == cap {
-            let (sum, nz) = img_fingerprint(&data);
-            kprintln!(
-                "[virtio-blk] loaded home image ({} bytes) /dev/vda (fp sum={:#x} nz={})",
-                data.len(), sum, nz
-            );
-            return data;
+            kprintln!("[virtio-blk] loaded home image ({} bytes) /dev/vda", cap);
+            return BlkImage::resident(data);
         }
-        kprintln!(
-            "[virtio-blk] home image size mismatch ({} != {}), reseeding",
-            data.len(), cap,
-        );
+        kprintln!("[virtio-blk] home image size mismatch ({} != {}), reseeding", data.len(), cap);
     }
-
-    seed_home_image(cap)
-}
-
-/// Cheap content fingerprint (wrapping byte sum, non-zero count) for
-/// persistence diagnosis: lets us see across a save→reboot→load cycle
-/// whether the same bytes come back (persist OK) or the template
-/// (write/persist broken).
-fn img_fingerprint(data: &[u8]) -> (u64, usize) {
-    let mut sum: u64 = 0;
-    let mut nz: usize = 0;
-    for &b in data {
-        sum = sum.wrapping_add(b as u64);
-        if b != 0 {
-            nz += 1;
-        }
-    }
-    (sum, nz)
+    BlkImage::resident(seed_home_image(cap))
 }
 
 /// Expand `HOME_TEMPLATE` into a fresh `cap`-byte empty ext4 image.
@@ -676,10 +636,9 @@ fn seed_home_image(cap: usize) -> alloc::vec::Vec<u8> {
                 }
                 off += 512;
             }
-            let (sum, nz) = img_fingerprint(&v);
             kprintln!(
-                "[virtio-blk] seeded fresh ext4 home image ({} bytes) /dev/vda — NO saved profile found (fp sum={:#x} nz={})",
-                cap, sum, nz
+                "[virtio-blk] seeded fresh ext4 home image ({} bytes) /dev/vda — NO saved profile found",
+                cap
             );
             return v;
         }
@@ -689,25 +648,33 @@ fn seed_home_image(cap: usize) -> alloc::vec::Vec<u8> {
     v
 }
 
-/// Load the read-only squashfs userspace bundle from npkFS. Returns
+/// Open the read-only squashfs userspace bundle from npkFS. Returns
 /// `(backing, capacity_512_sectors)`. On miss, a one-sector zero
 /// buffer — the guest's `mount -t squashfs /dev/vdb` then fails its
 /// superblock-magic check and PID-1 falls back to the smoke path.
-fn load_sqfs_backing() -> (alloc::vec::Vec<u8>, u64) {
+fn load_sqfs_backing() -> (BlkImage, u64) {
+    // mksquashfs pads to 4 KiB, so the length is already 512-aligned;
+    // round up defensively regardless.
+    if let Some(img) = BlkImage::open_lazy(SQFS_PATH) {
+        let sectors = (img.len() as u64).div_ceil(512);
+        kprintln!(
+            "[virtio-blk] sqfs bundle opened ({} bytes, chunks on demand) /dev/vdb",
+            img.len(),
+        );
+        return (img, sectors);
+    }
     match crate::npkfs::fetch(SQFS_PATH) {
         Ok((data, _hash)) if !data.is_empty() => {
-            // mksquashfs pads to 4 KiB, so len is already 512-aligned;
-            // round up defensively regardless.
-            let sectors = ((data.len() as u64) + 511) / 512;
+            let sectors = (data.len() as u64).div_ceil(512);
             kprintln!(
                 "[virtio-blk] sqfs bundle loaded ({} bytes, {} sectors) /dev/vdb",
                 data.len(), sectors,
             );
-            (data, sectors)
+            (BlkImage::resident(data), sectors)
         }
         _ => {
             kprintln!("[virtio-blk] no sqfs bundle at {} — /dev/vdb empty", SQFS_PATH);
-            (alloc::vec![0u8; 512], 1)
+            (BlkImage::resident(alloc::vec![0u8; 512]), 1)
         }
     }
 }

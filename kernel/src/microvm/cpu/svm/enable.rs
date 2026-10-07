@@ -854,7 +854,11 @@ impl VmContext {
         // save: every teardown reaches it (guest exit, run error, window
         // close), after the APs have stopped, so the image does not change
         // under the stream and no vCPU waits for the device lock meanwhile.
-        self.shared.dev.lock().pci.virtio_blk.save();
+        {
+            let mut dev = self.shared.dev.lock();
+            dev.pci.virtio_blk.save();
+            dev.pci.virtio_blk_sqfs.save();
+        }
         if !workers_gone {
             // A worker may still read guest memory and fault pages in: keep
             // all of it — guest RAM, page tables, the active GuestMem —

@@ -120,7 +120,7 @@ pub fn service_blk_queue(
     queue_size: u16,
     last_avail_idx: &mut u16,
     used_idx: &mut u16,
-    backing: &mut [u8],
+    backing: &mut super::blk_image::BlkImage,
     read_only: bool,
 ) -> bool {
     // avail.flags @ +0 (ignored — VIRTIO_F_RING_EVENT_IDX off)
@@ -188,7 +188,7 @@ fn service_one_request(
     desc_table: u64,
     head_idx: u16,
     queue_size: u16,
-    backing: &mut [u8],
+    backing: &mut super::blk_image::BlkImage,
     read_only: bool,
 ) -> u32 {
     // [0] header
@@ -250,9 +250,18 @@ fn service_one_request(
                     let n = d.len as usize;
                     match backing_range(sector_off, n, backing.len()) {
                         Some((start, end)) => {
-                            mem.write_bytes(d.addr, &backing[start..end]);
-                            bytes_written = bytes_written.saturating_add(n as u32);
-                            sector_off = Some(end as u64);
+                            let mut pos = start;
+                            while pos < end {
+                                let Some(s) = backing.read_at(pos, end - pos) else { break };
+                                mem.write_bytes(d.addr + (pos - start) as u64, s);
+                                pos += s.len();
+                            }
+                            if pos == end {
+                                bytes_written = bytes_written.saturating_add(n as u32);
+                                sector_off = Some(end as u64);
+                            } else {
+                                status = VIRTIO_BLK_S_IOERR;
+                            }
                         }
                         None => status = VIRTIO_BLK_S_IOERR,
                     }
@@ -264,8 +273,18 @@ fn service_one_request(
                     let n = d.len as usize;
                     match backing_range(sector_off, n, backing.len()) {
                         Some((start, end)) => {
-                            mem.read_bytes(d.addr, &mut backing[start..end]);
-                            sector_off = Some(end as u64);
+                            let mut pos = start;
+                            while pos < end {
+                                let Some(s) = backing.write_at(pos, end - pos) else { break };
+                                let k = s.len();
+                                mem.read_bytes(d.addr + (pos - start) as u64, s);
+                                pos += k;
+                            }
+                            if pos == end {
+                                sector_off = Some(end as u64);
+                            } else {
+                                status = VIRTIO_BLK_S_IOERR;
+                            }
                         }
                         None => status = VIRTIO_BLK_S_IOERR,
                     }
@@ -281,7 +300,7 @@ fn service_one_request(
                 }
             }
             VIRTIO_BLK_T_FLUSH => {
-                // No-op — backing is in-RAM.
+                // No-op — changed chunks are held in RAM until `save`.
             }
             _ => { status = VIRTIO_BLK_S_UNSUPP; }
         }

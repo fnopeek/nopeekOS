@@ -1030,7 +1030,11 @@ impl VmContext {
         let workers_gone = crate::microvm::devices::net_dataplane::stop_worker();
         // Persist the home image before teardown: the one save, see the svm
         // mirror.
-        self.shared.dev.lock().pci.virtio_blk.save();
+        {
+            let mut dev = self.shared.dev.lock();
+            dev.pci.virtio_blk.save();
+            dev.pci.virtio_blk_sqfs.save();
+        }
         // SAFETY: this vCPU entered VMX root on this core → VMXOFF is valid.
         unsafe { vmx_exit_root(); }
         if !workers_gone {

@@ -575,6 +575,41 @@ pub fn last_gc() -> Option<LastGc> { *LAST_GC.lock() }
 /// stitch chunks of any size, so objects with larger chunks stay readable.
 pub const STREAMING_CHUNK_SIZE: usize = 1024 * 1024;
 
+/// Chunk layout of a File written as a `Chunked` manifest: total size and
+/// the storage hash of every chunk, in order. `Ok(None)` if the file is
+/// missing or stored as a single Blob. Lets a reader fetch one chunk at a
+/// time with [`read_chunk`] instead of the whole file.
+pub fn chunk_list(path: &str) -> Result<Option<(u64, Vec<[u8; 32]>)>, Error> {
+    let root = current_root()?;
+    let walk = match paths::walk(&root, path) {
+        Ok(w) => w,
+        Err(PathError::NotFound) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if walk.kind != EntryKind::File {
+        return Err(PathError::NotADirectory);
+    }
+    let bytes = storage::get(&walk.hash)
+        .map_err(Error::Storage)?
+        .ok_or(PathError::Corrupt)?;
+    if bytes.first() == Some(&0) {
+        return Ok(None);
+    }
+    match super::object::Object::decode(&bytes).map_err(|_| PathError::Corrupt)? {
+        super::object::Object::Chunked { total_size, chunks } => Ok(Some((total_size, chunks))),
+        super::object::Object::Blob(_) => Ok(None),
+        super::object::Object::Tree(_) => Err(PathError::Corrupt),
+    }
+}
+
+/// One chunk of a `Chunked` file, by the hash from [`chunk_list`].
+pub fn read_chunk(hash: &[u8; 32]) -> Result<Vec<u8>, Error> {
+    let bytes = storage::get(hash)
+        .map_err(Error::Storage)?
+        .ok_or(PathError::Corrupt)?;
+    super::object::decode_blob_inplace(bytes).map_err(|_| PathError::Corrupt)
+}
+
 /// Stitch a `Chunked` manifest back into a single `Vec<u8>`. Used by
 /// `read_with_hash` so callers see a transparent file regardless of
 /// whether it was stored as a single `Blob` or as a chunked blob.
@@ -634,6 +669,18 @@ impl StreamingWriter {
                 self.flush_chunk()?;
             }
         }
+        Ok(())
+    }
+
+    /// Append a chunk that is already stored under `hash`, without reading
+    /// or re-encrypting it. Only at a chunk boundary, and only a full chunk
+    /// unless it is the last one appended.
+    pub fn append_stored_chunk(&mut self, hash: [u8; 32], len: usize) -> Result<(), Error> {
+        if !self.buf.is_empty() || len > self.chunk_size || !storage::has(&hash) {
+            return Err(PathError::Corrupt);
+        }
+        self.chunk_hashes.push(hash);
+        self.written += len as u64;
         Ok(())
     }
 

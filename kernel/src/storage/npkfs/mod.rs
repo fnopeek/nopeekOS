@@ -33,6 +33,7 @@ pub mod paths;
 pub mod fs;
 
 pub use types::{FsError, BLOCK_SIZE};
+pub use fs::STREAMING_CHUNK_SIZE;
 
 /// Per-operation perf-timing logs (`[put]`/`[get]`/`[fs::read]`/
 /// `[fs::write]` with µs breakdowns). Off by default because a large
@@ -124,6 +125,23 @@ pub fn fetch(name: &str) -> Result<(Vec<u8>, [u8; 32]), FsError> {
         Ok(None) => Err(FsError::ObjectNotFound),
         Err(e) => Err(path_to_fs_err(e)),
     }
+}
+
+/// Chunk layout of `name` for random access: `(total_size, chunk hashes)`.
+/// `Ok(None)` when the object is stored as a single Blob; read it whole
+/// with [`fetch`] then.
+pub fn chunk_list(name: &str) -> Result<Option<(u64, Vec<[u8; 32]>)>, FsError> {
+    let path = clean_path(name);
+    validate(path)?;
+    match fs::chunk_list(path) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(path_to_fs_err(e)),
+    }
+}
+
+/// Plaintext of one chunk named by [`chunk_list`].
+pub fn read_chunk(hash: &[u8; 32]) -> Result<Vec<u8>, FsError> {
+    fs::read_chunk(hash).map_err(path_to_fs_err)
 }
 
 /// Open a streaming writer for `name`. Use this for inputs that don't
