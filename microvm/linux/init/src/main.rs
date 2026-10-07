@@ -126,7 +126,11 @@ unsafe extern "C" fn rust_main() -> ! {
 /// the seatd daemon (Alpine's libseat has no builtin backend), its
 /// socket on a tmpfs over /run (RO sqfs root). XDG_RUNTIME_DIR on
 /// tmpfs for the same reason. Output → /dev/kmsg (8250 TX is never
-/// flushed: cmdline is `noapic nolapic`, no IRQ4). On success PID-1
+/// flushed: cmdline is `noapic nolapic`, no IRQ4). cage starts as soon as
+/// the seatd socket exists. The periodic `sync` (the only flush when the
+/// host closes the window) begins 15 s in, after the browser's start,
+/// whose SQLite writes it would otherwise force through the disk one by
+/// one. On success PID-1
 /// becomes the supervising shell and never returns; on absence we
 /// return so the caller can park.
 fn launch_wayland(kmsg_fd: i64) {
@@ -247,9 +251,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_ENABLE_WAYLAND=1 \
                  MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
-                 ( while true; do sync 2>/dev/null; sleep 3; done ) & \
-                 sleep 1; \
-                 cage -- librewolf --no-remote --profile /tmp/moz \
+                 ( sleep 15; while true; do sync 2>/dev/null; sleep 3; done ) & \
+                 i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do usleep 5000; i=$((i+1)); done; \
+                 echo \"<0>[wl] cage start (seatd after ${i}x5ms)\" > /dev/kmsg; \
+                 cage -- sh -c 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; exec librewolf --no-remote --profile /tmp/moz' \
                    > /tmp/cage.log 2>&1; \
                  rc=$?; echo \"<0>[wl] browser exited rc=$rc\" > /dev/kmsg; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
