@@ -229,6 +229,9 @@ fn launch_wayland(kmsg_fd: i64) {
                    'media.av1.enabled|false' \
                    'browser.startup.page|3' \
                    'browser.sessionstore.interval|5000' \
+                   'browser.warnOnQuit|false' \
+                   'browser.warnOnQuitShortcut|false' \
+                   'browser.tabs.warnOnClose|false' \
                    'browser.cache.disk.enable|false' \
                    'datareporting.healthreport.uploadEnabled|false' \
                    'datareporting.policy.dataSubmissionEnabled|false' \

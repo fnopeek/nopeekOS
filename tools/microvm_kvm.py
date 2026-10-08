@@ -121,6 +121,8 @@ def main():
     ap.add_argument("--min-change", type=int, default=5,
                     help="percent of rows that must differ to count as a change")
     ap.add_argument("--show", action="store_true", help="open a window (gtk)")
+    ap.add_argument("--quit-after", type=float, default=None,
+                    help="seconds after 'window up' to press Ctrl+Q, as the host does on close")
     ap.add_argument("--fresh-home", action="store_true", help="new empty ext4 profile")
     ap.add_argument("--extra", default="", help="appended to the guest kernel command line")
     ap.add_argument("--qemu-arg", action="append", default=[], help="extra QEMU argument (repeatable)")
@@ -217,7 +219,7 @@ def main():
         rc = proc.wait(timeout=10)
         sys.exit(f"QEMU exited at start (rc {rc}); run with --show to see its error")
     shot = os.path.join(a.work, "shot.ppm")
-    last, changes, window_up = None, [], None
+    last, changes, window_up, quit_sent = None, [], None, False
     deadline = t0 + a.seconds
     try:
         while time.monotonic() < deadline and proc.poll() is None:
@@ -243,6 +245,12 @@ def main():
                         print(f"[boottime] +{t} ms screen change #{len(changes)} "
                               f"({share}% of rows)", flush=True)
                 last = rows
+            if (a.quit_after is not None and window_up is not None and not quit_sent
+                    and ms() - window_up >= a.quit_after * 1000):
+                quit_sent = True
+                qmp.cmd("send-key", keys=[{"type": "qcode", "data": "ctrl"},
+                                          {"type": "qcode", "data": "q"}])
+                print(f"[boottime] +{ms()} ms host: Ctrl+Q", flush=True)
             time.sleep(a.sample / 1000)
     except KeyboardInterrupt:
         pass

@@ -377,11 +377,16 @@ static ACTIVE_VM_WINDOW: AtomicU32 = AtomicU32::new(0);
 /// the guest down instead of running it headless.
 static VM_CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// TSC by which a guest asked to quit over the control channel must have
-/// powered off; 0 = no quit pending.
+/// TSC by which a guest asked to quit must have powered off; 0 = no quit
+/// pending.
 static QUIT_DEADLINE: AtomicU64 = AtomicU64::new(0);
 /// How long a guest gets to end its app, sync and power off.
 const QUIT_GRACE_MS: u64 = 10_000;
+/// TSC at which an app that ignored its quit shortcut gets `MSG_QUIT`;
+/// 0 = already sent or no quit pending.
+static TERM_AT: AtomicU64 = AtomicU64::new(0);
+/// How long the app gets to end on its own shortcut.
+const TERM_AFTER_MS: u64 = 3_000;
 
 /// The run loop must stop the guest: the user closed the window and there is
 /// no clean way (or a second close), a quit took longer than its grace, or
@@ -393,6 +398,13 @@ fn close_requested() -> bool {
     if crate::microvm::devices::virtio_console_pci::violated() {
         VM_CLOSE_REQUESTED.store(true, Ordering::Release);
         return true;
+    }
+    let term_at = TERM_AT.load(Ordering::Acquire);
+    if term_at != 0 && crate::interrupts::rdtsc() >= term_at {
+        TERM_AT.store(0, Ordering::Release);
+        crate::kprintln!("[microvm] app still running after {} s — asking the guest to end it", TERM_AFTER_MS / 1000);
+        let _ = crate::microvm::devices::virtio_console_pci::send(
+            crate::microvm::devices::virtio_console_pci::MSG_QUIT, &[]);
     }
     let deadline = QUIT_DEADLINE.load(Ordering::Acquire);
     if deadline != 0 && crate::interrupts::rdtsc() >= deadline {
@@ -408,6 +420,7 @@ fn close_requested() -> bool {
 fn reset_close_state() {
     VM_CLOSE_REQUESTED.store(false, Ordering::Release);
     QUIT_DEADLINE.store(0, Ordering::Release);
+    TERM_AT.store(0, Ordering::Release);
     crate::microvm::devices::virtio_console_pci::reset();
 }
 
@@ -848,24 +861,26 @@ pub fn vm_window() -> u32 {
     ACTIVE_VM_WINDOW.load(Ordering::Acquire)
 }
 
-/// Window closed by the user. With the control channel up, the guest is
-/// asked to quit: its app ends cleanly, it syncs and powers off, and the
-/// home image is saved after that (`note_guest_shutdown`). Without it, on a
-/// second close, or after `QUIT_GRACE_MS`, the VM is stopped as it is.
+/// Window closed by the user. With the control channel up (the guest's
+/// session is running), the app gets its quit shortcut and ends the way its
+/// own menu would end it; if it is still there after `TERM_AFTER_MS`, the
+/// guest is asked to end it (`MSG_QUIT`). The guest then syncs and powers
+/// off, and the home image is saved after that (`note_guest_shutdown`).
+/// Without the channel, on a second close, or after `QUIT_GRACE_MS`, the
+/// VM is stopped as it is.
 /// No-op if it isn't the active VM's window.
 pub fn vm_close_for_window(window_id: u32) {
     if window_id == 0 || window_id != ACTIVE_VM_WINDOW.load(Ordering::Acquire) {
         return;
     }
     let quitting = QUIT_DEADLINE.load(Ordering::Acquire) != 0;
-    if !quitting
-        && crate::microvm::devices::virtio_console_pci::send(
-            crate::microvm::devices::virtio_console_pci::MSG_QUIT, &[])
-    {
-        let hz = crate::interrupts::tsc_freq();
-        QUIT_DEADLINE.store(
-            crate::interrupts::rdtsc() + hz / 1000 * QUIT_GRACE_MS, Ordering::Release);
-        crate::kprintln!("[microvm] asking the guest to quit");
+    if !quitting && crate::microvm::devices::virtio_console_pci::control_ready() {
+        let ms = crate::interrupts::tsc_freq() / 1000;
+        let now = crate::interrupts::rdtsc();
+        TERM_AT.store(now + ms * TERM_AFTER_MS, Ordering::Release);
+        QUIT_DEADLINE.store(now + ms * QUIT_GRACE_MS, Ordering::Release);
+        crate::microvm::devices::virtio_input_keymap::press_ctrl_q();
+        crate::kprintln!("[microvm] asking the app to quit");
     } else {
         VM_CLOSE_REQUESTED.store(true, Ordering::Release);
     }
