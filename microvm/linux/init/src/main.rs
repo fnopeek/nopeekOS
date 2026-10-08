@@ -667,12 +667,35 @@ unsafe fn spawn_gdiag(kmsg_fd: i64) {
 
 unsafe fn rt_watcher_loop(kmsg_fd: i64) -> ! {
     loop {
-        unsafe { rt_scan_proc(kmsg_fd); }
-        // ~50 ms between sweeps: a freshly spawned cubeb/AudioIPC thread must
-        // get SCHED_RR before it underruns its first periods. The scan is cheap.
+        // The sweep opens every thread's comm file and contends with thread
+        // creation; run all the time, it doubled the browser's start. Audio
+        // threads exist only while a playback stream is open, so sweep then.
+        if unsafe { playback_open() } {
+            unsafe { rt_scan_proc(kmsg_fd); }
+        }
+        // ~50 ms between checks: a freshly spawned cubeb/AudioIPC thread must
+        // get SCHED_RR before it underruns its first periods.
         let ts: [i64; 2] = [0, 50_000_000];
         unsafe { let _ = syscall2(SYS_NANOSLEEP, ts.as_ptr() as u64, 0); }
     }
+}
+
+/// True while the playback substream is open (prepared or running); its
+/// status file reads "closed" otherwise, and is absent without a sound card.
+unsafe fn playback_open() -> bool {
+    let fd = unsafe {
+        syscall2(SYS_OPEN, b"/proc/asound/card0/pcm0p/sub0/status\0".as_ptr() as u64, O_RDONLY)
+    };
+    if fd < 0 { return false; }
+    let mut buf = [0u8; 8];
+    let n = unsafe { syscall3(SYS_READ, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    unsafe { let _ = syscall1(SYS_CLOSE, fd as u64); }
+    let closed = b"closed";
+    let mut is_closed = n >= closed.len() as i64;
+    for i in 0..closed.len() {
+        if is_closed && buf[i] != closed[i] { is_closed = false; }
+    }
+    n > 0 && !is_closed
 }
 
 unsafe fn rt_scan_proc(kmsg_fd: i64) {
