@@ -2,9 +2,10 @@
 //! line matching each known guest milestone, and the first presented
 //! virtio-gpu frames. All times are milliseconds since `start()`.
 //!
-//! Once the app is exec'd, the frame on screen becomes the baseline, and the
-//! first frame that differs from it in most rows is the app's window: a mark
-//! that does not depend on what the page loads afterwards.
+//! After the app is exec'd, the first frame that is mostly not black is the
+//! app's window: the guest console and the compositor's empty output are
+//! black, a browser window is not, even in a dark theme. The mark does not
+//! depend on what the page loads afterwards.
 //!
 //! Every guest console line is printed with its time, so the full log is the
 //! timeline; the `[boottime]` lines are the milestones out of it. `report()`
@@ -12,9 +13,6 @@
 //! time spent printing guest lines.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-
-use alloc::vec::Vec;
-use spin::Mutex;
 
 use crate::interrupts::{rdtsc, tsc_freq};
 use crate::kprintln;
@@ -27,18 +25,15 @@ static PRINT_TSC: AtomicU64 = AtomicU64::new(0);
 static FLUSHES: AtomicU32 = AtomicU32::new(0);
 static GUEST_SEEN: AtomicU32 = AtomicU32::new(0);
 
-/// Window detection: off, waiting for app exec, comparing frames, done.
-const WIN_OFF: u32 = 0;
-const WIN_TRACK: u32 = 1;
-const WIN_ARMED: u32 = 2;
-const WIN_DONE: u32 = 3;
-static WIN_STATE: AtomicU32 = AtomicU32::new(WIN_OFF);
-/// Row hashes of the last frame, and of the frame on screen at app exec.
-static ROWS: Mutex<(Vec<u64>, Vec<u64>)> = Mutex::new((Vec::new(), Vec::new()));
-/// Share of rows, in percent, that must differ from the baseline.
-const WINDOW_ROWS_PCT: usize = 90;
-/// Hash every n-th pixel of a row; enough to see a window appear.
-const ROW_SAMPLE_STEP: usize = 4;
+/// Window detection: not yet armed, waiting for the window, done.
+const WIN_IDLE: u32 = 0;
+const WIN_ARMED: u32 = 1;
+const WIN_DONE: u32 = 2;
+static WIN_STATE: AtomicU32 = AtomicU32::new(WIN_IDLE);
+/// Share of sampled pixels, in percent, that must not be black.
+const WINDOW_LIT_PCT: usize = 50;
+/// Sample every n-th pixel of every n-th row.
+const SAMPLE_STEP: usize = 4;
 /// Guest console line after which the next full repaint is the app.
 const APP_EXEC_LABEL: &str = "session: app exec";
 
@@ -78,12 +73,7 @@ pub fn start() {
     PRINT_TSC.store(0, Ordering::Relaxed);
     FLUSHES.store(0, Ordering::Relaxed);
     GUEST_SEEN.store(0, Ordering::Relaxed);
-    {
-        let mut rows = ROWS.lock();
-        rows.0.clear();
-        rows.1.clear();
-    }
-    WIN_STATE.store(WIN_TRACK, Ordering::Relaxed);
+    WIN_STATE.store(WIN_IDLE, Ordering::Relaxed);
     T0.store(rdtsc(), Ordering::Relaxed);
     ACTIVE.store(true, Ordering::Release);
     kprintln!("[boottime] +0 ms launch");
@@ -118,7 +108,7 @@ pub fn guest_line(s: &str) {
             GUEST_SEEN.fetch_or(bit, Ordering::Relaxed);
             kprintln!("[boottime] +{} ms {}", ms, label);
             if *label == APP_EXEC_LABEL {
-                arm_window();
+                WIN_STATE.store(WIN_ARMED, Ordering::Release);
             }
         }
     }
@@ -136,52 +126,31 @@ pub fn gpu_frame() {
     }
 }
 
-fn arm_window() {
-    let mut rows = ROWS.lock();
-    let (last, base) = &mut *rows;
-    base.clear();
-    base.extend_from_slice(last);
-    WIN_STATE.store(WIN_ARMED, Ordering::Release);
-}
-
-fn hash_rows(pixels: &[u8], width: u32, height: u32, out: &mut Vec<u64>) {
-    let stride = width as usize * 4;
-    out.clear();
-    for row in pixels.chunks_exact(stride).take(height as usize) {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for px in row.chunks_exact(4).step_by(ROW_SAMPLE_STEP) {
-            let v = u32::from_le_bytes([px[0], px[1], px[2], px[3]]) as u64;
-            h = (h ^ v).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        out.push(h);
-    }
-}
-
-/// The pixels of a presented frame. Until the app window is found, keeps
-/// row hashes; after app exec, marks the first frame that repaints most
-/// rows of the baseline.
+/// The pixels of a presented frame. After app exec, marks the first frame
+/// whose sampled pixels are mostly not black.
 pub fn gpu_pixels(pixels: &[u8], width: u32, height: u32) {
-    let state = WIN_STATE.load(Ordering::Acquire);
-    if !ACTIVE.load(Ordering::Acquire) || (state != WIN_TRACK && state != WIN_ARMED) {
+    if !ACTIVE.load(Ordering::Acquire) || WIN_STATE.load(Ordering::Acquire) != WIN_ARMED {
         return;
     }
-    let mut rows = ROWS.lock();
-    let (last, base) = &mut *rows;
-    hash_rows(pixels, width, height, last);
-    if state != WIN_ARMED || last.is_empty() {
+    let stride = width as usize * 4;
+    if stride == 0 {
         return;
     }
-    let changed = if base.len() == last.len() {
-        last.iter().zip(base.iter()).filter(|(a, b)| a != b).count()
-    } else {
-        last.len()
-    };
-    if changed * 100 >= last.len() * WINDOW_ROWS_PCT {
+    let (mut lit, mut total) = (0usize, 0usize);
+    for row in pixels.chunks_exact(stride).take(height as usize).step_by(SAMPLE_STEP) {
+        for px in row.chunks_exact(4).step_by(SAMPLE_STEP) {
+            total += 1;
+            if px[0] | px[1] | px[2] != 0 {
+                lit += 1;
+            }
+        }
+    }
+    if total > 0 && lit * 100 >= total * WINDOW_LIT_PCT {
         WIN_STATE.store(WIN_DONE, Ordering::Release);
         kprintln!(
-            "[boottime] +{} ms app: window up ({}% of rows repainted)",
+            "[boottime] +{} ms app: window up ({}% of pixels lit)",
             now_ms(),
-            changed * 100 / last.len(),
+            lit * 100 / total,
         );
     }
 }
@@ -191,11 +160,7 @@ pub fn report() {
     if !ACTIVE.swap(false, Ordering::AcqRel) {
         return;
     }
-    WIN_STATE.store(WIN_OFF, Ordering::Relaxed);
-    {
-        let mut rows = ROWS.lock();
-        *rows = (Vec::new(), Vec::new());
-    }
+    WIN_STATE.store(WIN_IDLE, Ordering::Relaxed);
     let hz = tsc_freq().max(1);
     kprintln!(
         "[boottime] +{} ms end: {} guest console bytes (= VM exits), {} lines, {} ms host printing them, {} frames",

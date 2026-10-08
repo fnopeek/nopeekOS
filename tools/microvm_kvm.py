@@ -77,6 +77,18 @@ def ppm_rows(data):
     return [pix[i * stride:(i + 1) * stride] for i in range(h)]
 
 
+def lit_share(rows, step=4):
+    """Percent of sampled pixels that are not black, as kernel/src/microvm/
+    boottime.rs counts it for the 'app: window up' mark."""
+    lit = total = 0
+    for row in rows[::step]:
+        for i in range(0, len(row) - 2, 3 * step):
+            total += 1
+            if row[i] | row[i + 1] | row[i + 2]:
+                lit += 1
+    return 100 * lit // max(total, 1)
+
+
 class Qmp:
     def __init__(self, path):
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -177,6 +189,7 @@ def main():
 
     seen = set()
     cage_at = [None]
+    app_at = [None]
 
     def read_serial():
         for raw in proc.stdout:
@@ -189,6 +202,8 @@ def main():
                     print(f"[boottime] +{t} ms {label}", flush=True)
                     if label in ("session: mounts done", "session: cage start"):
                         cage_at[0] = t
+                    if label == "session: app exec":
+                        app_at[0] = t
 
     threading.Thread(target=read_serial, daemon=True).start()
 
@@ -198,7 +213,7 @@ def main():
         rc = proc.wait(timeout=10)
         sys.exit(f"QEMU exited at start (rc {rc}); run with --show to see its error")
     shot = os.path.join(a.work, "shot.ppm")
-    last, changes = None, []
+    last, changes, window_up = None, [], None
     deadline = t0 + a.seconds
     try:
         while time.monotonic() < deadline and proc.poll() is None:
@@ -208,6 +223,12 @@ def main():
             if "return" in r and os.path.exists(shot):
                 with open(shot, "rb") as f:
                     rows = ppm_rows(f.read())
+                if window_up is None and app_at[0] is not None:
+                    lit = lit_share(rows)
+                    if lit >= 50:
+                        window_up = ms()
+                        print(f"[boottime] +{window_up} ms app: window up "
+                              f"({lit}% of pixels lit)", flush=True)
                 if last is not None and len(rows) == len(last):
                     diff = sum(1 for x, y in zip(rows, last) if x != y)
                     share = 100 * diff // max(len(rows), 1)
@@ -233,6 +254,8 @@ def main():
     c = cage_at[0]
     if c is not None:
         print(f"  launch -> cage             {c} ms")
+        if window_up is not None and app_at[0] is not None:
+            print(f"  app exec -> window up      +{window_up - app_at[0]} ms")
         after = [t for t in changes if t > c]
         if after:
             print(f"  cage -> first change       +{after[0] - c} ms")
