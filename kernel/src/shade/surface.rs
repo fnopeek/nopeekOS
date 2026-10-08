@@ -136,6 +136,7 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
 
     let mut map = SURFACES.lock();
     let Some(surf) = map.get_mut(&window_id) else { return };
+    let first = surf.width == 0;
     let realloc = surf.width != width || surf.height != height;
     surf.width = width;
     surf.height = height;
@@ -176,7 +177,11 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
     // not the whole screen): a 60 Hz guest doing a full-screen MMIO blit
     // every frame starves the cursor. Both just set an atomic; poll_render
     // picks it up.
-    if crate::shade::SURFACE_CLIP_BLIT {
+    // The first frame makes the window itself appear (`has_frame`), border
+    // and all, which the clipped tile blit does not cover.
+    if first {
+        crate::shade::request_render();
+    } else if crate::shade::SURFACE_CLIP_BLIT {
         crate::shade::request_surface_render();
     } else {
         crate::shade::request_render();
@@ -232,6 +237,12 @@ pub fn set_tile_size(window_id: u32, w: u32, h: u32) {
         surf.size_changed_at = crate::interrupts::ticks();
         ANY_DISPLAY_DIRTY.store(true, Ordering::Release);
     }
+}
+
+/// True once the guest has presented a frame. Until then the window is not
+/// drawn at all: a Linux app's window appears with its first picture.
+pub fn has_frame(window_id: u32) -> bool {
+    SURFACES.lock().get(&window_id).is_some_and(|s| s.width != 0)
 }
 
 /// The size the guest should render at (window content rect), for

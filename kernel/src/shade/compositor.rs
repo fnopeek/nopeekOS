@@ -1880,6 +1880,11 @@ impl Compositor {
                 win.width + g + (win.x - win.x.saturating_sub(g)),
                 win.height + g + (win.y - win.y.saturating_sub(g)));
         }
+        if win.kind == crate::shade::window::WindowKind::Surface
+            && !crate::shade::surface::has_frame(win.id.0)
+        {
+            return;
+        }
         if glow.alpha > 0 {
             render::draw_glow_ring(shadow, info, win.x, win.y, win.width, win.height,
                 rounding, glow.color, glow.band, glow.alpha);

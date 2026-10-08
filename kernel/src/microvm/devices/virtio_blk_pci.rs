@@ -82,12 +82,20 @@ const CC_QUEUE_DEVICE_HI:        u32 = 0x34; // u32 RW
 // virtio-blk device-cfg layout (§5.2.4)
 const DC_CAPACITY_LO:    u32 = 0x00; // u32
 const DC_CAPACITY_HI:    u32 = 0x04; // u32
+const DC_SEG_MAX:        u32 = 0x0C; // u32
 
 const NUM_QUEUES: u16 = 1;
 const MAX_QUEUE_SIZE: u16 = 256;
 
 /// virtio-blk feature bits (§5.2.3). We only ever advertise RO.
 const VIRTIO_BLK_F_RO: u32 = 1 << 5;
+/// `seg_max` in the config space is valid. Without it Linux sends one
+/// segment, a single 4 KB page, per request: a 128 KB squashfs block read
+/// became 32 requests, each a full ring round trip with an interrupt.
+const VIRTIO_BLK_F_SEG_MAX: u32 = 1 << 2;
+/// Data segments per request. A chain is bounded by the queue size anyway
+/// (header + segments + status <= MAX_QUEUE_SIZE).
+const SEG_MAX: u32 = 128;
 
 /// Second blk device (slot 5) — read-only squashfs userspace bundle.
 /// Distinct BAR window above virtio-input's (0xFE00_C000 + 0x4000).
@@ -474,9 +482,9 @@ impl VirtioBlk {
                 if self.device_feature_select == 1 {
                     1 // bit 32 = VIRTIO_F_VERSION_1
                 } else if self.read_only {
-                    VIRTIO_BLK_F_RO as u64 // bit 5
+                    (VIRTIO_BLK_F_RO | VIRTIO_BLK_F_SEG_MAX) as u64
                 } else {
-                    0
+                    VIRTIO_BLK_F_SEG_MAX as u64
                 }
             }
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select as u64,
@@ -559,6 +567,7 @@ impl VirtioBlk {
         let v: u64 = match off {
             DC_CAPACITY_LO => (self.capacity_sectors & 0xFFFF_FFFF) as u64,
             DC_CAPACITY_HI => (self.capacity_sectors >> 32) as u64,
+            DC_SEG_MAX => SEG_MAX as u64,
             _ => 0,
         };
         v & mask
