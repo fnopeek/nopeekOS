@@ -42,6 +42,11 @@ const NPT_2M_ADDR_MASK: u64 = 0x000F_FFFF_FFE0_0000;
 /// Frames in one 2 MB page.
 const FRAMES_PER_2M: usize = (TWO_MB / 4096) as usize;
 
+/// Demand blocks mapped as one 2 MB leaf, and those that fell back to a PT
+/// of 4 KB pages (no free 2 MB-aligned host block).
+pub static DEMAND_2M: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static DEMAND_4K_BLOCKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 const TWO_MB: u64 = 2 * 1024 * 1024;
 const ONE_GB: u64 = 1024 * 1024 * 1024;
 /// Maximum guest RAM we can map: PDPT slots [0, 1, 2] hold guest-RAM
@@ -265,6 +270,7 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64, guest_bytes: u64) -> Option<u64
                 if let Some(block) = memory::allocate_contiguous_aligned(FRAMES_PER_2M, FRAMES_PER_2M) {
                     core::ptr::write_bytes(block as *mut u8, 0, TWO_MB as usize);
                     pd.add(pd_idx).write_volatile(block | NPT_P | NPT_RW | NPT_US | NPT_PS);
+                    DEMAND_2M.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     return Some(block + in_block);
                 }
             }
@@ -274,6 +280,7 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64, guest_bytes: u64) -> Option<u64
             let pt = memory::allocate_frame()?;
             core::ptr::write_bytes(pt as *mut u8, 0, 4096);
             pd.add(pd_idx).write_volatile(pt | NPT_P | NPT_RW | NPT_US);
+            DEMAND_4K_BLOCKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             pt as *mut u64
         };
         let pt_idx = (in_block / 4096) as usize;

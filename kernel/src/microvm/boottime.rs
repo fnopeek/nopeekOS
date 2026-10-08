@@ -35,7 +35,20 @@ const WIN_DONE: u32 = 2;
 static WIN_STATE: AtomicU32 = AtomicU32::new(WIN_IDLE);
 /// vCPU time split and exit counts at app exec, diffed at window up.
 static APP_SNAP: Mutex<Option<AppSnap>> = Mutex::new(None);
-type AppSnap = (u64, [u64; VT_BUCKETS], [u64; VMEXIT_BUCKETS], ([u64; 5], u64), [(u64, u64); MAX_FREQ_VCPUS]);
+type AppSnap = (u64, [u64; VT_BUCKETS], [u64; VMEXIT_BUCKETS], ([u64; 5], u64), [(u64, u64); MAX_FREQ_VCPUS], [u64; IO_COUNTERS]);
+const IO_COUNTERS: usize = 6;
+
+/// virtio-blk kicks, requests, bytes, cycles; demand blocks in 2 MB / 4 KB.
+fn io_counters() -> [u64; IO_COUNTERS] {
+    use core::sync::atomic::Ordering::Relaxed;
+    use crate::microvm::devices::virtqueue as vq;
+    use crate::microvm::cpu::svm::npt;
+    [
+        vq::BLK_KICKS.load(Relaxed), vq::BLK_REQS.load(Relaxed),
+        vq::BLK_BYTES.load(Relaxed), vq::BLK_CYCLES.load(Relaxed),
+        npt::DEMAND_2M.load(Relaxed), npt::DEMAND_4K_BLOCKS.load(Relaxed),
+    ]
+}
 /// vCPUs whose host cores' clock is sampled for the app phase.
 const MAX_FREQ_VCPUS: usize = 8;
 
@@ -135,6 +148,7 @@ pub fn guest_line(s: &str) {
                     crate::microvm::cpu::vm_exit_snapshot(),
                     (hist, sum),
                     vcpu_core_clocks(),
+                    io_counters(),
                 ));
                 WIN_STATE.store(WIN_ARMED, Ordering::Release);
                 crate::microvm::cpu::rip_sample::begin_window();
@@ -178,7 +192,7 @@ pub fn gpu_pixels(pixels: &[u8], width: u32, height: u32) {
 /// all vCPUs: inside the guest, halted, waiting for the device lock, and the
 /// rest of exit handling; and the exits by kind.
 fn report_app_phase() {
-    let Some((t0, vt0, ex0, (wh0, ws0), clk0)) = APP_SNAP.lock().take() else { return };
+    let Some((t0, vt0, ex0, (wh0, ws0), clk0, io0)) = APP_SNAP.lock().take() else { return };
     let hz = tsc_freq().max(1);
     let ms = |c: u64| c * 1000 / hz;
     let vt = crate::microvm::cpu::vcpu_time_snapshot();
@@ -220,6 +234,12 @@ device lock {} ms, exit handling {} ms | exits:{}",
         da += clk[i].0.saturating_sub(clk0[i].0);
         dm += clk[i].1.saturating_sub(clk0[i].1);
     }
+    let io = io_counters();
+    let di = |i: usize| io[i].saturating_sub(io0[i]);
+    kprintln!(
+        "[boottime] app phase disk: {} kicks, {} requests, {} KB, {} us serving | guest RAM: {} blocks as 2 MB, {} as 4 KB",
+        di(0), di(1), di(2) / 1024, di(3) * 1_000_000 / hz, di(4), di(5),
+    );
     if dm > 0 {
         let nominal = hz / 1_000_000;
         kprintln!(

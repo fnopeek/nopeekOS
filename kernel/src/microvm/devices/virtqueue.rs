@@ -112,6 +112,13 @@ pub fn used_push(mem: &GuestMem, used_gpa: u64, queue_size: u16, used_idx: &mut 
 /// and service each request. Returns true if any request completed
 /// (caller should set ISR + inject IRQ). A `read_only` device fails every
 /// write with IOERR (virtio 1.2 §5.2.6, VIRTIO_BLK_F_RO).
+/// virtio-blk work, all devices: kicks that found requests, requests, data
+/// bytes, and TSC cycles spent serving them (for the app-phase report).
+pub static BLK_KICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static BLK_REQS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static BLK_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static BLK_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn service_blk_queue(
     mem: &GuestMem,
     desc_table: u64,
@@ -135,6 +142,8 @@ pub fn service_blk_queue(
     }
 
     let mut serviced_any = false;
+    let t0 = crate::interrupts::rdtsc();
+    BLK_KICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     for _ in 0..pending {
         // ring[i] @ avail + 4 + (i % size) * 2
@@ -147,6 +156,8 @@ pub fn service_blk_queue(
         let total_written = service_one_request(
             mem, desc_table, head_idx, queue_size, backing, read_only,
         );
+        BLK_REQS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        BLK_BYTES.fetch_add(total_written as u64, core::sync::atomic::Ordering::Relaxed);
 
         // used.elem[used_idx % size] = (head_idx, total_written)
         let used_slot = (*used_idx % queue_size) as u64;
@@ -167,6 +178,8 @@ pub fn service_blk_queue(
         // used.idx @ +2
         mem.write_u16(used + 2, *used_idx);
     }
+    BLK_CYCLES.fetch_add(
+        crate::interrupts::rdtsc().wrapping_sub(t0), core::sync::atomic::Ordering::Relaxed);
 
     serviced_any
 }
