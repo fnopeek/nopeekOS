@@ -14,7 +14,10 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use spin::Mutex;
+
 use crate::interrupts::{rdtsc, tsc_freq};
+use crate::microvm::cpu::{VMEXIT_BUCKETS, VMEXIT_LABELS, VT_BUCKETS};
 use crate::kprintln;
 
 static T0: AtomicU64 = AtomicU64::new(0);
@@ -32,6 +35,8 @@ const WIN_DONE: u32 = 2;
 static WIN_STATE: AtomicU32 = AtomicU32::new(WIN_IDLE);
 /// Share of sampled pixels, in percent, that must not be black.
 const WINDOW_LIT_PCT: usize = 50;
+/// vCPU time split and exit counts at app exec, diffed at window up.
+static APP_SNAP: Mutex<Option<(u64, [u64; VT_BUCKETS], [u64; VMEXIT_BUCKETS])>> = Mutex::new(None);
 /// Sample every n-th pixel of every n-th row.
 const SAMPLE_STEP: usize = 4;
 /// Guest console line after which the next full repaint is the app.
@@ -74,6 +79,7 @@ pub fn start() {
     FLUSHES.store(0, Ordering::Relaxed);
     GUEST_SEEN.store(0, Ordering::Relaxed);
     WIN_STATE.store(WIN_IDLE, Ordering::Relaxed);
+    *APP_SNAP.lock() = None;
     T0.store(rdtsc(), Ordering::Relaxed);
     ACTIVE.store(true, Ordering::Release);
     kprintln!("[boottime] +0 ms launch");
@@ -108,6 +114,11 @@ pub fn guest_line(s: &str) {
             GUEST_SEEN.fetch_or(bit, Ordering::Relaxed);
             kprintln!("[boottime] +{} ms {}", ms, label);
             if *label == APP_EXEC_LABEL {
+                *APP_SNAP.lock() = Some((
+                    rdtsc(),
+                    crate::microvm::cpu::vcpu_time_snapshot(),
+                    crate::microvm::cpu::vm_exit_snapshot(),
+                ));
                 WIN_STATE.store(WIN_ARMED, Ordering::Release);
             }
         }
@@ -152,7 +163,37 @@ pub fn gpu_pixels(pixels: &[u8], width: u32, height: u32) {
             now_ms(),
             lit * 100 / total,
         );
+        report_app_phase();
     }
+}
+
+/// Where the vCPUs' time went between app exec and window up, summed over
+/// all vCPUs: inside the guest, halted, waiting for the device lock, and the
+/// rest of exit handling; and the exits by kind.
+fn report_app_phase() {
+    let Some((t0, vt0, ex0)) = APP_SNAP.lock().take() else { return };
+    let hz = tsc_freq().max(1);
+    let ms = |c: u64| c * 1000 / hz;
+    let vt = crate::microvm::cpu::vcpu_time_snapshot();
+    let ex = crate::microvm::cpu::vm_exit_snapshot();
+    let d = |i: usize| vt[i].saturating_sub(vt0[i]);
+    let guest = d(crate::microvm::cpu::VT_GUEST);
+    let outside = d(crate::microvm::cpu::VT_OUTSIDE);
+    let halted = d(crate::microvm::cpu::VT_HALTED);
+    let devlock = d(crate::microvm::cpu::VT_DEVLOCK);
+    let handling = outside.saturating_sub(halted).saturating_sub(devlock);
+    let mut exits = alloc::string::String::new();
+    for i in 0..VMEXIT_BUCKETS {
+        let _ = core::fmt::Write::write_fmt(
+            &mut exits,
+            format_args!(" {} {}", VMEXIT_LABELS[i], ex[i].saturating_sub(ex0[i])),
+        );
+    }
+    kprintln!(
+        "[boottime] app phase {} ms, vCPU time: guest {} ms, halted {} ms, \
+device lock {} ms, exit handling {} ms | exits:{}",
+        ms(rdtsc().saturating_sub(t0)), ms(guest), ms(halted), ms(devlock), ms(handling), exits,
+    );
 }
 
 /// Close the timeline with what the console cost. Called on guest exit.

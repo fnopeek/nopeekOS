@@ -140,6 +140,7 @@ fn launch_wayland(kmsg_fd: i64) {
         return;
     }
     say(kmsg_fd, b"[microvm-init] cage present, starting Wayland session\n");
+    write_file(b"/tmp/lw-probe.js\0", LW_PROBE);
 
     let prog = b"/bin/sh\0".as_ptr();
     let arg0 = b"/bin/sh\0".as_ptr();
@@ -244,6 +245,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo 'user_pref(\"media.audioipc.shm_area_size\", 262144);' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.cubeb_latency_playback_ms\", 2000);' >> /tmp/moz/user.js; \
                  sync; \
+                 if [ -s /tmp/lw-probe.js ] && [ -f /usr/lib/librewolf/librewolf.cfg ]; then \
+                   cat /usr/lib/librewolf/librewolf.cfg /tmp/lw-probe.js > /tmp/librewolf.cfg \
+                     && mount --bind /tmp/librewolf.cfg /usr/lib/librewolf/librewolf.cfg 2>/dev/null; \
+                 fi; \
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
@@ -516,6 +521,19 @@ fn open_console_kmsg() -> (i64, i64) {
 
 /// Write a message to both /dev/kmsg (printk-direct, polled, always
 /// reaches the host capture) and stdout. Either reaching is enough.
+/// Appended to LibreWolf's autoconfig by the session script: the browser's
+/// own startup times go to /dev/kmsg, next to the host's timeline.
+const LW_PROBE: &[u8] = include_bytes!("lw_probe.js");
+
+/// Create or truncate `path` (NUL-terminated) and write `data`; best effort.
+fn write_file(path: &[u8], data: &[u8]) {
+    const O_WRONLY_CREAT_TRUNC: u64 = 0o1 | 0o100 | 0o1000;
+    let fd = unsafe { syscall3(SYS_OPEN, path.as_ptr() as u64, O_WRONLY_CREAT_TRUNC, 0o644) };
+    if fd < 0 { return; }
+    let _ = sys_write(fd as u64, data);
+    unsafe { let _ = syscall1(SYS_CLOSE, fd as u64); }
+}
+
 fn say(kmsg_fd: i64, msg: &[u8]) {
     if kmsg_fd >= 0 {
         let _ = unsafe { syscall3(SYS_WRITE, kmsg_fd as u64, msg.as_ptr() as u64, msg.len() as u64) };

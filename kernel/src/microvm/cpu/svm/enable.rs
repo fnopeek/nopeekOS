@@ -709,6 +709,10 @@ pub struct Vcpu {
     /// off → exit the VM (tears the window down on browser close instead
     /// of leaving a black idle window). Reset on any IF=1 HLT.
     if_off_halts: u32,
+    /// TSC of the last exit, and of the last HLT exit (0 = not halted), for
+    /// the vCPU time split (`cpu::record_vcpu_time`).
+    exit_tsc: u64,
+    halt_tsc: u64,
     /// Emulated MSR state (MTRR, SPEC_CTRL, HWCR …) — see `svm::msr`.
     msrs: super::msr::GuestMsrs,
     /// Guest XCR0 (reset value 1 = x87). Swapped around VMRUN in
@@ -833,6 +837,8 @@ impl VmContext {
                 lapic: LocalApic::new(0),
                 halt_poll_us: HALT_POLL_MIN_US,
                 if_off_halts: 0,
+                exit_tsc: 0,
+                halt_tsc: 0,
                 msrs: super::msr::GuestMsrs::new(),
                 xcr0: 1,
             },
@@ -1072,6 +1078,8 @@ impl VmContext {
                 lapic: LocalApic::new(apic_id),
                 halt_poll_us: HALT_POLL_MIN_US,
                 if_off_halts: 0,
+                exit_tsc: 0,
+                halt_tsc: 0,
                 msrs: super::msr::GuestMsrs::new(),
                 xcr0: 1,
             },
@@ -1474,6 +1482,16 @@ impl VmContext {
 
         // Host↔guest FPU save/restore is embedded in run_guest_once's asm.
         let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
+        let t_entry = crate::interrupts::rdtsc();
+        if self.vcpu.exit_tsc != 0 {
+            crate::microvm::cpu::record_vcpu_time(
+                crate::microvm::cpu::VT_OUTSIDE, t_entry.wrapping_sub(self.vcpu.exit_tsc));
+        }
+        if self.vcpu.halt_tsc != 0 {
+            crate::microvm::cpu::record_vcpu_time(
+                crate::microvm::cpu::VT_HALTED, t_entry.wrapping_sub(self.vcpu.halt_tsc));
+            self.vcpu.halt_tsc = 0;
+        }
         lapic::phase(self.vcpu.apic_id, lapic::PH_GUEST);
         // SAFETY: `open`/`open_ap` enabled EFER.SVME on this core and built
         // this vCPU's VMCB (`vmcb_phys` is its address) with the VM's IOPM,
@@ -1486,6 +1504,10 @@ impl VmContext {
         };
         super::msr::spec_ctrl_exit(host_spec);
         crate::microvm::cpu::entry_irqs_on();
+        let t_exit = crate::interrupts::rdtsc();
+        crate::microvm::cpu::record_vcpu_time(
+            crate::microvm::cpu::VT_GUEST, t_exit.wrapping_sub(t_entry));
+        self.vcpu.exit_tsc = t_exit;
         let exit = outcome.exit_reason;
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         self.vcpu.lapic.pv_eoi_sync_from(self.shared.guest_mem);
@@ -1610,7 +1632,10 @@ impl VmContext {
         // The device model is shared between vCPUs (guest SMP). Released at
         // the end of this iteration, or before the HLT path parks.
         lapic::phase(self.vcpu.apic_id, lapic::PH_BIGLOCK);
+        let t_lock = crate::interrupts::rdtsc();
         let mut dev = self.shared.dev.lock();
+        crate::microvm::cpu::record_vcpu_time(
+            crate::microvm::cpu::VT_DEVLOCK, crate::interrupts::rdtsc().wrapping_sub(t_lock));
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         let sh = &mut *dev;
         let gm = self.shared.guest_mem;
@@ -1642,6 +1667,7 @@ impl VmContext {
                 advance_rip(&mut self.vcpu.vmcb);
                 last_outcome = Some(outcome);
                 drop(dev);
+                self.vcpu.halt_tsc = crate::interrupts::rdtsc();
                 // `kvm_vcpu_halt`: resume at once if something is deliverable,
                 // else halt-poll, then block (the fiber parks until the next
                 // timer deadline or a kick).

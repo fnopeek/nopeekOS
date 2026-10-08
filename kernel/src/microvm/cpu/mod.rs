@@ -67,6 +67,29 @@ pub fn vm_exit_snapshot() -> [u64; VMEXIT_BUCKETS] {
     out
 }
 
+// ── vCPU time split (diagnosis) ────────────────────────────────────
+//
+// TSC cycles summed over all vCPUs: inside VMRUN, between an exit and the
+// next entry, the part of that spent halted (HLT until resumed), and the
+// part spent waiting for the device-model lock. `boottime` diffs two
+// snapshots to say where the vCPUs' time went during an app's start.
+pub const VT_GUEST: usize = 0;
+pub const VT_OUTSIDE: usize = 1;
+pub const VT_HALTED: usize = 2;
+pub const VT_DEVLOCK: usize = 3;
+pub const VT_BUCKETS: usize = 4;
+static VCPU_TIME: [AtomicU64; VT_BUCKETS] = [const { AtomicU64::new(0) }; VT_BUCKETS];
+
+pub fn record_vcpu_time(bucket: usize, cycles: u64) {
+    if bucket < VT_BUCKETS {
+        VCPU_TIME[bucket].fetch_add(cycles, Ordering::Relaxed);
+    }
+}
+
+pub fn vcpu_time_snapshot() -> [u64; VT_BUCKETS] {
+    core::array::from_fn(|i| VCPU_TIME[i].load(Ordering::Relaxed))
+}
+
 // ── Per-port I/O exit breakdown ────────────────────────────────────
 // The `io` exit bucket can be dominated by the PIC EOI (`outb 0x20`): a
 // guest running `noapic` acks every device IRQ through the 8259, and each
