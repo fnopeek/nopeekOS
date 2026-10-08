@@ -122,6 +122,8 @@ def main():
                     help="percent of rows that must differ to count as a change")
     ap.add_argument("--show", action="store_true", help="open a window (gtk)")
     ap.add_argument("--fresh-home", action="store_true", help="new empty ext4 profile")
+    ap.add_argument("--extra", default="", help="appended to the guest kernel command line")
+    ap.add_argument("--qemu-arg", action="append", default=[], help="extra QEMU argument (repeatable)")
     ap.add_argument("--work", default="/tmp/microvm-kvm")
     ap.add_argument("--qemu", default="qemu-system-x86_64")
     ap.add_argument("--bzimage", default=os.path.join(ROOT, "release/assets/linux-virt.bzImage"))
@@ -157,12 +159,14 @@ def main():
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 panic=1 nokaslr "
         f"acpi=off tsc=reliable idle=halt devtmpfs.mount=1 maxcpus={a.cpus} "
         f"loglevel=5 nopeektime={int(time.time())}"
+        + (f" {a.extra}" if a.extra else "")
     )
     # Slot order fixes the names: home is vda, sqfs is vdb, as in nopeekOS.
     argv = [
         a.qemu, "-enable-kvm", "-cpu", "host", "-machine", "pc",
         "-smp", str(a.cpus), "-m", a.mem,
         "-kernel", a.bzimage, "-initrd", a.initramfs, "-append", cmdline,
+        *a.qemu_arg,
         "-drive", f"file={home},format=raw,if=none,id=home",
         "-device", "virtio-blk-pci,drive=home,addr=0x4",
         "-drive", f"file={a.sqfs},format=raw,if=none,id=sqfs,readonly=on",
