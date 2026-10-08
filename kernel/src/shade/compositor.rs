@@ -2173,11 +2173,12 @@ impl Compositor {
             crate::shade::window::WindowKind::Surface => {
                 // Raw guest framebuffer → tile, 1:1 (no scaling).
                 // The guest compositor gets this content rect as its
-                // output size, so it reflows to the
-                // tile size natively — guest `sw×sh` == `cw×ch` in
-                // steady state; a brief mismatch during a resize
-                // round-trip just clips (never stretches). Same
-                // memcpy-middle + SDF-corner-blend shape as the Widget
+                // output size, so it reflows to the tile size natively —
+                // guest `sw×sh` == `cw×ch` in steady state. While a resize
+                // is on its way a larger frame is clipped, and a smaller
+                // one is extended by its last column and row (never
+                // stretched), so the tile never shows what lies under it.
+                // Same memcpy-middle + SDF-corner-blend shape as the Widget
                 // arm above so the browser tile gets the identical
                 // concentric rounded corners as every other window
                 // and sits flush in the dwindle layout.
@@ -2186,16 +2187,38 @@ impl Compositor {
                         return;
                     }
                     let pitch = info.pitch as usize;
-                    let fb_w = info.width;
-                    let fb_h = info.height;
-                    // Clip the 1:1 blit to the guest buffer, the
-                    // content rect, and the framebuffer — never
-                    // overdraw the border or a neighbour tile.
-                    let x1 = (cx + sw).min(cx + cw).min(fb_w);
-                    let y1 = (cy + sh).min(cy + ch).min(fb_h);
+                    // Clip the blit to the content rect and the
+                    // framebuffer — never overdraw the border or a
+                    // neighbour tile.
+                    let x1 = (cx + cw).min(info.width);
+                    let y1 = (cy + ch).min(info.height);
                     let cw_local = x1.saturating_sub(cx);
                     let ch_local = y1.saturating_sub(cy);
                     let r = inner_r.min(cw_local / 2).min(ch_local / 2);
+                    let src = |lx: u32, ly: u32| -> u32 {
+                        px[(ly.min(sh - 1) as usize) * (sw as usize) + lx.min(sw - 1) as usize]
+                    };
+                    // Copy row `ly` into `[from, to)` of the tile row at
+                    // `dy`: the frame's pixels, then its last one repeated.
+                    let copy_span = |dy: u32, ly: u32, from: u32, to: u32| {
+                        let row = (ly.min(sh - 1) as usize) * (sw as usize);
+                        let have = to.min(sw).max(from);
+                        // SAFETY: `dy < y1 <= info.height` and
+                        // `cx + to <= x1 <= info.width`, so every write lies
+                        // in the shadow buffer; `row + have <= px.len()`
+                        // because `have <= sw` and the row is below `sh`.
+                        unsafe {
+                            let dst = shadow.add(dy as usize * pitch + (cx + from) as usize * 4) as *mut u32;
+                            if have > from {
+                                core::ptr::copy_nonoverlapping(
+                                    px.as_ptr().add(row + from as usize), dst, (have - from) as usize);
+                            }
+                            let edge = px[row + sw as usize - 1];
+                            for i in (have - from)..(to - from) {
+                                *dst.add(i as usize) = edge;
+                            }
+                        }
+                    };
 
                     for dy in cy..y1 {
                         let local_y = dy - cy;
@@ -2203,53 +2226,29 @@ impl Compositor {
                         let in_bottom = r > 0 && local_y >= ch_local - r;
 
                         if !in_top && !in_bottom {
-                            // Straight middle: fast memcpy of the row.
-                            let src_base = (local_y as usize) * (sw as usize);
-                            let dst_off  = dy as usize * pitch + cx as usize * 4;
-                            unsafe {
-                                let dst = shadow.add(dst_off) as *mut u32;
-                                core::ptr::copy_nonoverlapping(
-                                    px.as_ptr().add(src_base),
-                                    dst,
-                                    cw_local as usize,
-                                );
-                            }
+                            copy_span(dy, local_y, 0, cw_local);
                             continue;
                         }
 
                         // Corner row: r pixels on each side go through
-                        // the SDF blend; the middle is still memcpy.
+                        // the SDF blend; the middle is still a copy.
                         let mid_lo = r.min(cw_local);
                         let mid_hi = cw_local.saturating_sub(r).max(mid_lo);
 
                         for dx in cx..(cx + mid_lo).min(x1) {
-                            let local_x = dx - cx;
                             let cov = render::rect_coverage_sdf(dx, dy, cx, cy, cw_local, ch_local, r);
                             if cov == 0 { continue; }
-                            let src_idx = (local_y as usize) * (sw as usize) + local_x as usize;
-                            render::blend_pixel(shadow, info, dx, dy, px[src_idx], cov);
+                            render::blend_pixel(shadow, info, dx, dy, src(dx - cx, local_y), cov);
                         }
 
                         if mid_hi > mid_lo {
-                            let src_base = (local_y as usize) * (sw as usize) + mid_lo as usize;
-                            let dst_off  = dy as usize * pitch + (cx + mid_lo) as usize * 4;
-                            let span     = (mid_hi - mid_lo) as usize;
-                            unsafe {
-                                let dst = shadow.add(dst_off) as *mut u32;
-                                core::ptr::copy_nonoverlapping(
-                                    px.as_ptr().add(src_base),
-                                    dst,
-                                    span,
-                                );
-                            }
+                            copy_span(dy, local_y, mid_lo, mid_hi);
                         }
 
                         for dx in (cx + mid_hi).min(x1)..x1 {
-                            let local_x = dx - cx;
                             let cov = render::rect_coverage_sdf(dx, dy, cx, cy, cw_local, ch_local, r);
                             if cov == 0 { continue; }
-                            let src_idx = (local_y as usize) * (sw as usize) + local_x as usize;
-                            render::blend_pixel(shadow, info, dx, dy, px[src_idx], cov);
+                            render::blend_pixel(shadow, info, dx, dy, src(dx - cx, local_y), cov);
                         }
                     }
                 });

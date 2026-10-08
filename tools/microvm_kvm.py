@@ -170,6 +170,9 @@ def main():
     ap.add_argument("--resize-after", action="append", default=[],
                     help="SECONDS:WxH after the window is up: send its new size over "
                          "npk.windows, as nopeekOS does on a retile (repeatable)")
+    ap.add_argument("--watch-dark", type=int, default=None, metavar="PCT",
+                    help="after the window is up, report every capture with less than "
+                         "PCT%% of pixels lit (black frames while resizing)")
     ap.add_argument("--fresh-home", action="store_true", help="new empty ext4 profile")
     ap.add_argument("--extra", default="", help="appended to the guest kernel command line")
     ap.add_argument("--qemu-arg", action="append", default=[], help="extra QEMU argument (repeatable)")
@@ -313,6 +316,10 @@ def main():
                         window_up = ms()
                         print(f"[boottime] +{window_up} ms app: window up "
                               f"({lit}% of pixels lit)", flush=True)
+                if a.watch_dark is not None and window_up is not None:
+                    lit = lit_share(rows)
+                    if lit < a.watch_dark:
+                        print(f"[boottime] +{ms()} ms dark frame ({lit}% lit, {len(rows)} rows)", flush=True)
                 if last is not None and len(rows) != len(last):
                     print(f"[boottime] +{ms()} ms screen height {len(last)} -> {len(rows)}", flush=True)
                 if last is not None and len(rows) == len(last):

@@ -136,10 +136,13 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
 
     // Union the guest's damage rect (clamped to the surface) into the
     // pending region. A fresh buffer must blit in full — the new pixels
-    // around the reported rect are otherwise undefined. Coalesced frames
-    // (cursor took priority) accumulate here until the next render.
-    let dmg = if realloc {
-        (0, 0, width, height)
+    // around the reported rect are otherwise undefined — and so must a
+    // frame that does not match the tile, whose last row and column the
+    // compositor extends to the tile's edge. Coalesced frames (cursor took
+    // priority) accumulate here until the next render.
+    let mismatch = surf.tile_w != 0 && (width != surf.tile_w || height != surf.tile_h);
+    let dmg = if realloc || mismatch {
+        (0, 0, width.max(surf.tile_w), height.max(surf.tile_h))
     } else {
         let x = dmg.0.min(width);
         let y = dmg.1.min(height);
@@ -261,6 +264,11 @@ pub fn tile_size(window_id: u32) -> Option<(u32, u32)> {
 /// on every exit without taking the map lock.
 pub fn any_display_dirty() -> bool {
     ANY_DISPLAY_DIRTY.load(Ordering::Acquire)
+}
+
+/// The window's tile size changed and has not been sent yet.
+pub fn display_dirty(window_id: u32) -> bool {
+    SURFACES.lock().get(&window_id).is_some_and(|s| s.display_dirty)
 }
 
 /// True (and clears the flag) if the tile size changed since the last
