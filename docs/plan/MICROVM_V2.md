@@ -514,12 +514,18 @@ der Angreifer **root im Gast**. Die Frage ist nur, was er dann hat.
 
 ### 6.1 Heute
 
-- LibreWolf läuft **als root**. Der Gastkernel wird aus
-  `microvm-linux/nopeek-virt.config` über `x86_64_defconfig` gebaut
-  (`microvm/linux/nopeek-tiny.config` ist eine alte, unbenutzte Datei) und
-  hat `MULTIUSER`, `SECCOMP_FILTER`, `PID_NS`, `NET_NS` — es fehlt nur
-  `USER_NS`. Ob die Sandbox von LibreWolf als root und ohne `USER_NS`
-  greift, ist zu prüfen. Ein Fehler im Renderer = root im Gast.
+- **Ring 1 steht (Kernel 0.523.0, microvm-init 0.4.35):** cage und LibreWolf
+  laufen als `app` (uid 1000), PID 1, seatd und der Steuerkanal bleiben root.
+  Der Gastkernel hat `USER_NS`, und jeder Kindprozess läuft wie bei nativem
+  Firefox mit seccomp in eigenem Nutzer- und Netz-Namensraum (Web Content,
+  RDD, Utility, WebExtensions), unter KVM nachgezählt. Zwei Dinge hielten das
+  auf: der Wechsel in die sqfs war ein `chroot`, und ein gechrooteter Prozess
+  bekommt vom Kernel keinen Nutzer-Namensraum (jetzt `MS_MOVE` auf `/` wie
+  `switch_root`); und `media.cubeb.sandbox=false` senkt die Inhalts-Sandbox
+  von Stufe 4 auf 3. Beides ist weg, ebenso `MOZ_DISABLE_RDD/UTILITY_SANDBOX`.
+  Offen: der Ton am Gerät mit der vollen Sandbox.
+- Ring 2 bleibt vorerst so (Entscheid 2026-10-08): `home/` bleibt freigegeben,
+  bis die Dateiwahl über das System (Portal, §4b) kommt.
 - root im Gast hat: das **ganze `home/<user>/` lesend und schreibend** (9P),
   Netz über NAT, Ton, Eingaben, Bildschirm.
 - **Das ist heute das grösste Risiko, nicht der Ausbruch aus der VM.** Eine

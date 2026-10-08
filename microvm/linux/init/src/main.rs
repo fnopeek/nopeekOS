@@ -42,6 +42,7 @@ const SCHED_RR: u64 = 2;
 
 // mount(2) flags
 const MS_RDONLY: u64 = 1;
+const MS_MOVE: u64 = 8192;
 
 // access(2) modes
 const F_OK: u64 = 0;
@@ -168,8 +169,11 @@ fn launch_wayland(kmsg_fd: i64) {
     // demands (no GPU / GL → software webrender; userChrome.css must
     // load to hide the titlebar buttons that crash the browser when
     // clicked under cage; dark mode). Everything else stays default:
-    // e10s, fission, content/RDD/GMP sandboxes, OCSP, telemetry,
+    // e10s, fission, content/RDD/GMP/utility sandboxes, OCSP, telemetry,
     // addons — like a fresh install.
+    // cage and the app run as `app` (uid 1000); PID 1, seatd and the
+    // control process stay root. The app owns its profile, runtime dir and
+    // the sound devices; seatd hands it the GPU and input devices.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
                  NPT=$(sed -n 's/.*nopeektime=\\([0-9][0-9]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$NPT\" ] && date -s @\"$NPT\" >/dev/null 2>&1; \
@@ -182,7 +186,11 @@ fn launch_wayland(kmsg_fd: i64) {
                  fi; \
                  hostname nopeek 2>/dev/null \
                    || echo nopeek > /proc/sys/kernel/hostname 2>/dev/null; \
-                 mkdir -p /tmp/xrt; chmod 0700 /tmp/xrt; \
+                 cp /etc/passwd /tmp/passwd; echo 'app:x:1000:1000:app:/tmp/app:/sbin/nologin' >> /tmp/passwd; \
+                 mount --bind /tmp/passwd /etc/passwd 2>/dev/null; \
+                 cp /etc/group /tmp/group; echo 'app:x:1000:' >> /tmp/group; \
+                 mount --bind /tmp/group /etc/group 2>/dev/null; \
+                 mkdir -p /tmp/xrt /tmp/app; chmod 0700 /tmp/xrt; chown 1000:1000 /tmp/xrt /tmp/app; \
                  mount -t tmpfs -o mode=0755 tmpfs /run 2>/dev/null; \
                  mkdir -p /dev/shm 2>/dev/null; mount -t tmpfs -o mode=1777 tmpfs /dev/shm 2>/dev/null; \
                  mkdir -p /run/udev; \
@@ -247,9 +255,12 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"browser.download.dir\", \"/tmp/npkhome/downloads\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.cubeb.backend\", \"alsa\");' >> /tmp/moz/user.js; \
-                 echo 'user_pref(\"media.cubeb.sandbox\", false);' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.audioipc.shm_area_size\", 262144);' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.cubeb_latency_playback_ms\", 2000);' >> /tmp/moz/user.js; \
+                 find /tmp/moz -xdev ! -user 1000 -exec chown -h 1000:1000 {} + 2>/dev/null; \
+                 chown 1000:1000 /tmp/bcache /tmp/gleandb; \
+                 chown 1000:1000 /dev/snd/* 2>/dev/null; \
+                 chgrp app /dev/kmsg; chmod 0620 /dev/kmsg; \
                  sync; \
                  if [ -s /tmp/lw-probe.js ] && [ -f /usr/lib/librewolf/librewolf.cfg ]; then \
                    cat /usr/lib/librewolf/librewolf.cfg /tmp/lw-probe.js > /tmp/librewolf.cfg \
@@ -260,10 +271,9 @@ fn launch_wayland(kmsg_fd: i64) {
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
-                 XDG_CONFIG_HOME=/tmp HOME=/tmp \
-                 MOZ_ENABLE_WAYLAND=1 \
-                 MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1; \
-                 seatd -g root > /tmp/seatd.log 2>&1 & \
+                 XDG_CONFIG_HOME=/tmp/app HOME=/tmp/app \
+                 MOZ_ENABLE_WAYLAND=1; \
+                 seatd -g app > /tmp/seatd.log 2>&1 & \
                  ( sleep 15; while true; do sync 2>/dev/null; sleep 3; done ) & \
                  if grep -q npkbench_cpu /proc/cmdline; then \
                    t() { read u _ < /proc/uptime; echo \"${u%.*}${u#*.}\"; }; \
@@ -277,9 +287,11 @@ fn launch_wayland(kmsg_fd: i64) {
                  i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do usleep 5000; i=$((i+1)); done; \
                  echo \"<0>[wl] cage start (seatd after ${i}x5ms)\" > /dev/kmsg; \
                  grep -q npkstats /proc/cmdline || : > /tmp/lw-sample.sh; \
-                 cage -- sh -c 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; [ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' \
+                 echo 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; [ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' > /tmp/app.sh; \
+                 su -s /bin/sh app -c 'exec cage -- sh /tmp/app.sh' \
                    > /tmp/cage.log 2>&1; \
                  rc=$?; echo \"<0>[wl] browser exited rc=$rc\" > /dev/kmsg; \
+                 [ $rc = 0 ] || tail -n 20 /tmp/cage.log | while read -r l; do echo \"<0>[wl] $l\" > /dev/kmsg; done; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
@@ -415,15 +427,16 @@ fn launch_bench(kmsg_fd: i64) {
     say(kmsg_fd, b"[microvm-init] netbench execve failed\n");
 }
 
-/// Mount the read-only squashfs userspace bundle from `/dev/vdb` and
-/// chroot into it. Returns `true` if we are now running inside the
-/// bundle root, `false` if the device is absent or not a valid
-/// squashfs (→ caller stays in the minimal initramfs).
+/// Mount the read-only squashfs userspace bundle from `/dev/vdb` and make
+/// it the root. Returns `true` if we are now running inside the bundle
+/// root, `false` if the device is absent or not a valid squashfs (→ caller
+/// stays in the minimal initramfs).
 ///
-/// chroot (not pivot_root/MS_MOVE): with squashfs the initramfs holds
-/// only our ~1 KB PID-1, so there is no initramfs RAM worth reclaiming
-/// — chroot is the lower-risk switch. Open fds (kmsg/console) survive
-/// it, so logging keeps working across the boundary.
+/// The bundle is moved onto `/` before the chroot, as `switch_root` does:
+/// a process whose root is not its mount namespace's root counts as
+/// chrooted, and the kernel then refuses it a user namespace, which the
+/// app's sandbox needs. Open fds (kmsg/console) survive the switch, so
+/// logging keeps working across the boundary.
 fn try_switch_to_sqfs(kmsg_fd: i64) -> bool {
     // /dev/vdb only exists once devtmpfs is mounted (done by the
     // initramfs-side mount_essentials before we get here).
@@ -450,9 +463,17 @@ fn try_switch_to_sqfs(kmsg_fd: i64) -> bool {
         return false;
     }
 
-    let cr = unsafe { syscall1(SYS_CHROOT, b"/newroot\0".as_ptr() as u64) };
+    let _ = unsafe { syscall1(SYS_CHDIR, b"/newroot\0".as_ptr() as u64) };
+    let mv = unsafe {
+        syscall5(SYS_MOUNT, b".\0".as_ptr() as u64, b"/\0".as_ptr() as u64, 0, MS_MOVE, 0)
+    };
+    if mv != 0 {
+        say(kmsg_fd, b"[microvm-init] moving /newroot onto / failed\n");
+        return false;
+    }
+    let cr = unsafe { syscall1(SYS_CHROOT, b".\0".as_ptr() as u64) };
     if cr != 0 {
-        say(kmsg_fd, b"[microvm-init] chroot(/newroot) failed\n");
+        say(kmsg_fd, b"[microvm-init] chroot(.) failed\n");
         return false;
     }
     let _ = unsafe { syscall1(SYS_CHDIR, b"/\0".as_ptr() as u64) };

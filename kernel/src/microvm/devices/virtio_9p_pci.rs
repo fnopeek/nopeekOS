@@ -778,8 +778,8 @@ impl Virtio9p {
         b.extend_from_slice(&0x0000_07ffu64.to_le_bytes());      // valid = P9_GETATTR_BASIC
         b.extend_from_slice(&qid(&path, is_dir));                // qid[13]
         b.extend_from_slice(&mode.to_le_bytes());                // mode
-        b.extend_from_slice(&0u32.to_le_bytes());                // uid
-        b.extend_from_slice(&0u32.to_le_bytes());                // gid
+        b.extend_from_slice(&GUEST_APP_ID.to_le_bytes());        // uid
+        b.extend_from_slice(&GUEST_APP_ID.to_le_bytes());        // gid
         b.extend_from_slice(&1u64.to_le_bytes());                // nlink
         b.extend_from_slice(&0u64.to_le_bytes());                // rdev
         b.extend_from_slice(&size.to_le_bytes());                // size
@@ -1147,6 +1147,10 @@ impl Virtio9p {
 
 // ── 9P2000.L message type codes ──
 const RLERROR:   u8 = 7;
+/// The guest's app user and group (microvm-init runs the app as uid 1000):
+/// the shared files are the user's, so they belong to the app inside.
+const GUEST_APP_ID: u32 = 1000;
+
 const TSTATFS:   u8 = 8;  const RSTATFS:   u8 = 9;
 const TLOPEN:    u8 = 12; const RLOPEN:    u8 = 13;
 const TLCREATE:  u8 = 14; const RLCREATE:  u8 = 15;

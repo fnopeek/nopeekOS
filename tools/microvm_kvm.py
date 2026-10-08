@@ -123,6 +123,9 @@ def main():
     ap.add_argument("--show", action="store_true", help="open a window (gtk)")
     ap.add_argument("--quit-after", type=float, default=None,
                     help="seconds after 'window up' to press Ctrl+Q, as the host does on close")
+    ap.add_argument("--key-after", action="append", default=[],
+                    help="SECONDS:QCODE, a key press that many seconds after 'window up'; "
+                         "QCODE 'click' clicks the middle of the screen (repeatable)")
     ap.add_argument("--fresh-home", action="store_true", help="new empty ext4 profile")
     ap.add_argument("--extra", default="", help="appended to the guest kernel command line")
     ap.add_argument("--qemu-arg", action="append", default=[], help="extra QEMU argument (repeatable)")
@@ -220,6 +223,7 @@ def main():
         sys.exit(f"QEMU exited at start (rc {rc}); run with --show to see its error")
     shot = os.path.join(a.work, "shot.ppm")
     last, changes, window_up, quit_sent = None, [], None, False
+    keys = [(float(k.split(":")[0]), k.split(":")[1]) for k in a.key_after]
     deadline = t0 + a.seconds
     try:
         while time.monotonic() < deadline and proc.poll() is None:
@@ -245,6 +249,18 @@ def main():
                         print(f"[boottime] +{t} ms screen change #{len(changes)} "
                               f"({share}% of rows)", flush=True)
                 last = rows
+            for k in list(keys):
+                if window_up is not None and ms() - window_up >= k[0] * 1000:
+                    keys.remove(k)
+                    if k[1] == "click":
+                        pos = [{"type": "abs", "data": {"axis": ax, "value": 16384}} for ax in ("x", "y")]
+                        qmp.cmd("input-send-event", events=pos)
+                        for down in (True, False):
+                            qmp.cmd("input-send-event", events=[
+                                {"type": "btn", "data": {"down": down, "button": "left"}}])
+                    else:
+                        qmp.cmd("send-key", keys=[{"type": "qcode", "data": k[1]}])
+                    print(f"[boottime] +{ms()} ms host: key {k[1]}", flush=True)
             if (a.quit_after is not None and window_up is not None and not quit_sent
                     and ms() - window_up >= a.quit_after * 1000):
                 quit_sent = True
