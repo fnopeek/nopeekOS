@@ -121,7 +121,26 @@ pub fn post(apic_id: u8, vector: u8) -> bool {
     let t = apic_id as usize;
     if t >= MAX_VCPUS { return false; }
     PIR[t][(vector >> 6) as usize].fetch_or(1u64 << (vector & 63), Ordering::AcqRel);
-    !PIR_ON[t].swap(true, Ordering::AcqRel)
+    let edge = !PIR_ON[t].swap(true, Ordering::AcqRel);
+    if edge {
+        let _ = POST_TSC[t].compare_exchange(0, rdtsc().max(1), Ordering::AcqRel, Ordering::Relaxed);
+    }
+    edge
+}
+
+/// TSC at which an interrupt was posted to an idle descriptor, 0 = none
+/// outstanding: the start of its delivery latency.
+static POST_TSC: [AtomicU64; MAX_VCPUS] = [const { AtomicU64::new(0) }; MAX_VCPUS];
+
+/// Cycles since the oldest interrupt posted to `apic_id` was posted, and
+/// clear it; called at guest entry.
+pub fn take_post_latency(apic_id: u8, now: u64) -> Option<u64> {
+    let t = apic_id as usize;
+    if t >= MAX_VCPUS { return None; }
+    match POST_TSC[t].swap(0, Ordering::AcqRel) {
+        0 => None,
+        at => Some(now.saturating_sub(at)),
+    }
 }
 
 /// Anything posted to `apic_id` and not yet folded into its IRR?

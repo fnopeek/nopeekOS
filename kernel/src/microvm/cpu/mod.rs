@@ -90,6 +90,30 @@ pub fn vcpu_time_snapshot() -> [u64; VT_BUCKETS] {
     core::array::from_fn(|i| VCPU_TIME[i].load(Ordering::Relaxed))
 }
 
+// Interrupt delivery latency: posted to a vCPU until that vCPU next enters
+// the guest. Buckets by upper bound in microseconds; the last is open.
+pub const WAKE_BOUNDS_US: [u64; 5] = [10, 50, 200, 1000, u64::MAX];
+static WAKE_HIST: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static WAKE_SUM: AtomicU64 = AtomicU64::new(0);
+static WAKE_MAX: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_wake(cycles: u64) {
+    let us = cycles / (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let b = WAKE_BOUNDS_US.iter().position(|&lim| us < lim).unwrap_or(4);
+    WAKE_HIST[b].fetch_add(1, Ordering::Relaxed);
+    WAKE_SUM.fetch_add(cycles, Ordering::Relaxed);
+    WAKE_MAX.fetch_max(cycles, Ordering::Relaxed);
+}
+
+/// (histogram, summed cycles); the max is reset by the read.
+pub fn wake_snapshot() -> ([u64; 5], u64, u64) {
+    (
+        core::array::from_fn(|i| WAKE_HIST[i].load(Ordering::Relaxed)),
+        WAKE_SUM.load(Ordering::Relaxed),
+        WAKE_MAX.swap(0, Ordering::Relaxed),
+    )
+}
+
 // ── Per-port I/O exit breakdown ────────────────────────────────────
 // The `io` exit bucket can be dominated by the PIC EOI (`outb 0x20`): a
 // guest running `noapic` acks every device IRQ through the 8259, and each

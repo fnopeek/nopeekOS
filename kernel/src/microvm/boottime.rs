@@ -36,7 +36,8 @@ static WIN_STATE: AtomicU32 = AtomicU32::new(WIN_IDLE);
 /// Share of sampled pixels, in percent, that must not be black.
 const WINDOW_LIT_PCT: usize = 50;
 /// vCPU time split and exit counts at app exec, diffed at window up.
-static APP_SNAP: Mutex<Option<(u64, [u64; VT_BUCKETS], [u64; VMEXIT_BUCKETS])>> = Mutex::new(None);
+static APP_SNAP: Mutex<Option<AppSnap>> = Mutex::new(None);
+type AppSnap = (u64, [u64; VT_BUCKETS], [u64; VMEXIT_BUCKETS], ([u64; 5], u64));
 /// Sample every n-th pixel of every n-th row.
 const SAMPLE_STEP: usize = 4;
 /// Guest console line after which the next full repaint is the app.
@@ -114,10 +115,12 @@ pub fn guest_line(s: &str) {
             GUEST_SEEN.fetch_or(bit, Ordering::Relaxed);
             kprintln!("[boottime] +{} ms {}", ms, label);
             if *label == APP_EXEC_LABEL {
+                let (hist, sum, _) = crate::microvm::cpu::wake_snapshot();
                 *APP_SNAP.lock() = Some((
                     rdtsc(),
                     crate::microvm::cpu::vcpu_time_snapshot(),
                     crate::microvm::cpu::vm_exit_snapshot(),
+                    (hist, sum),
                 ));
                 WIN_STATE.store(WIN_ARMED, Ordering::Release);
             }
@@ -171,7 +174,7 @@ pub fn gpu_pixels(pixels: &[u8], width: u32, height: u32) {
 /// all vCPUs: inside the guest, halted, waiting for the device lock, and the
 /// rest of exit handling; and the exits by kind.
 fn report_app_phase() {
-    let Some((t0, vt0, ex0)) = APP_SNAP.lock().take() else { return };
+    let Some((t0, vt0, ex0, (wh0, ws0))) = APP_SNAP.lock().take() else { return };
     let hz = tsc_freq().max(1);
     let ms = |c: u64| c * 1000 / hz;
     let vt = crate::microvm::cpu::vcpu_time_snapshot();
@@ -193,6 +196,16 @@ fn report_app_phase() {
         "[boottime] app phase {} ms, vCPU time: guest {} ms, halted {} ms, \
 device lock {} ms, exit handling {} ms | exits:{}",
         ms(rdtsc().saturating_sub(t0)), ms(guest), ms(halted), ms(devlock), ms(handling), exits,
+    );
+    let (wh, ws, wmax) = crate::microvm::cpu::wake_snapshot();
+    let n: u64 = (0..5).map(|i| wh[i].saturating_sub(wh0[i])).sum();
+    let us = |c: u64| c * 1_000_000 / hz;
+    let b = |i: usize| wh[i].saturating_sub(wh0[i]);
+    kprintln!(
+        "[boottime] app phase interrupt delivery: {} posted, avg {} us, max {} us | \
+<10us {} <50us {} <200us {} <1ms {} >=1ms {}",
+        n, if n > 0 { us(ws.saturating_sub(ws0)) / n } else { 0 }, us(wmax),
+        b(0), b(1), b(2), b(3), b(4),
     );
 }
 

@@ -1483,6 +1483,9 @@ impl VmContext {
         // Host↔guest FPU save/restore is embedded in run_guest_once's asm.
         let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
         let t_entry = crate::interrupts::rdtsc();
+        if let Some(c) = lapic::take_post_latency(self.vcpu.apic_id, t_entry) {
+            crate::microvm::cpu::record_wake(c);
+        }
         if self.vcpu.exit_tsc != 0 {
             crate::microvm::cpu::record_vcpu_time(
                 crate::microvm::cpu::VT_OUTSIDE, t_entry.wrapping_sub(self.vcpu.exit_tsc));
