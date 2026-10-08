@@ -171,11 +171,21 @@ verfälscht spätere Bildzähler (deshalb gilt Bild #50, nicht #200).
 - Der **erste Start** nach einem Update oder einem Wechsel der sqfs ist
   regelmässig 2-2,5 s langsamer. Nicht nur die fehlende `.hot`-Liste — der
   erste raw-Lauf war schnell. Ungeklärt.
-- **Mehrkerniges Entpacken** im Gastkernel
-  (`CONFIG_SQUASHFS_DECOMP_MULTI_PERCPU`); heute entpackt ein Kern, der Gast
-  hat sechs.
 - Die Restzeit gegen nativ (0,55 s): kalter Seitencache im Gast,
   Anzeigekette (cage, pixman, virtio-gpu 2D).
+
+**Mehrkerniges Entpacken bringt nichts** (2026-10-08, KVM 9600X, 6 vCPUs,
+946x1074, je drei Läufe): `SQUASHFS_COMPILE_DECOMP_MULTI_PERCPU` gegen
+`SINGLE` — cage → App 272 gegen 273 ms, cage → volles Fenster 1,36 gegen
+1,37 s. LibreWolf liest im Wesentlichen aus einem Prozess nacheinander per
+Seitenfehler; ein Entpacker je CPU hilft nur gleichzeitigen Lesern. Nicht
+übernommen. Achtung beim Kconfig: einstellbar ist nur `COMPILE_DECOMP_*`,
+`DECOMP_*` ist ein versteckter Hilfsschalter.
+
+**QEMU mit zstd** (Kernel 0.501.0, 2 vCPUs, 2542x1314, zweiter Lauf):
+Aufsetzen 21 ms (vorher 316, die sqfs liegt jetzt in Stücken), bis cage
+0,70 s (vorher 0,97), cage → App 0,43 s, bis Bild #50 3,57 s (vorher 6,26).
+Der erste Lauf war dort nur ~0,3 s langsamer.
 
 ### 0.7a Methode, falls die Frage wiederkommt
 
@@ -395,7 +405,7 @@ Gebraucht wird er für:
 | Gast → Wirt | `exited { code }`, `build { fortschritt, ergebnis }` | Verwaltung, Bau-VM |
 
 **Entscheid: virtio-console** (ein Port, `/dev/hvc0`). `CONFIG_VIRTIO_CONSOLE=y`
-steht schon in `nopeek-tiny.config`, vsock nicht; vsock brächte Sockets auf
+ist im Gastkernel schon gesetzt, vsock nicht; vsock brächte Sockets auf
 beiden Seiten, die wir für einen Partner nicht brauchen. Protokoll:
 längenpräfigierte Meldungen mit Obergrenze, feste Typen, der Wirt verwirft
 alles Unbekannte und beendet die VM bei einer Verletzung. **Nur PID 1 (root)
@@ -409,10 +419,12 @@ der Angreifer **root im Gast**. Die Frage ist nur, was er dann hat.
 
 ### 6.1 Heute
 
-- LibreWolf läuft **als root** und **ohne Sandbox** — `nopeek-tiny.config`
-  kommt von `tinyconfig` und hat weder `SECCOMP` noch Namespaces noch
-  `MULTIUSER` (in der Datei nicht gesetzt; zu prüfen, ob der gebaute Kernel
-  dieselbe ist). Ein Fehler im Renderer = root im Gast.
+- LibreWolf läuft **als root**. Der Gastkernel wird aus
+  `microvm-linux/nopeek-virt.config` über `x86_64_defconfig` gebaut
+  (`microvm/linux/nopeek-tiny.config` ist eine alte, unbenutzte Datei) und
+  hat `MULTIUSER`, `SECCOMP_FILTER`, `PID_NS`, `NET_NS` — es fehlt nur
+  `USER_NS`. Ob die Sandbox von LibreWolf als root und ohne `USER_NS`
+  greift, ist zu prüfen. Ein Fehler im Renderer = root im Gast.
 - root im Gast hat: das **ganze `home/<user>/` lesend und schreibend** (9P),
   Netz über NAT, Ton, Eingaben, Bildschirm.
 - **Das ist heute das grösste Risiko, nicht der Ausbruch aus der VM.** Eine
