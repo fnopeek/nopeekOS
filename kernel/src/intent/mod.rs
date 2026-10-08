@@ -2648,6 +2648,7 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     // host wall clock; PID-1 sets it with `date -s` before starting cage.
     use core::fmt::Write;
     crate::microvm::boottime::start();
+    crate::microvm::devices::gpu_backend::present_reset();
     crate::microvm::cpu::rip_sample::set_enabled(
         crate::config::get("microvm_ripsample").is_some_and(|v| v.trim().eq_ignore_ascii_case("on")),
     );

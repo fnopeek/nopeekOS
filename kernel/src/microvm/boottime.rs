@@ -33,8 +33,6 @@ const WIN_IDLE: u32 = 0;
 const WIN_ARMED: u32 = 1;
 const WIN_DONE: u32 = 2;
 static WIN_STATE: AtomicU32 = AtomicU32::new(WIN_IDLE);
-/// Share of sampled pixels, in percent, that must not be black.
-const WINDOW_LIT_PCT: usize = 50;
 /// vCPU time split and exit counts at app exec, diffed at window up.
 static APP_SNAP: Mutex<Option<AppSnap>> = Mutex::new(None);
 type AppSnap = (u64, [u64; VT_BUCKETS], [u64; VMEXIT_BUCKETS], ([u64; 5], u64), [(u64, u64); MAX_FREQ_VCPUS]);
@@ -50,10 +48,10 @@ fn vcpu_core_clocks() -> [(u64, u64); MAX_FREQ_VCPUS] {
         }
     })
 }
-/// Sample every n-th pixel of every n-th row.
-const SAMPLE_STEP: usize = 4;
 /// Guest console line after which the next full repaint is the app.
 const APP_EXEC_LABEL: &str = "session: app exec";
+/// Guest console line after which the app is gone and its window closing.
+const APP_EXITED_LABEL: &str = "session: browser exited";
 
 /// First guest console line containing the needle → milestone label.
 const GUEST_MARKS: &[(&str, &str)] = &[
@@ -126,6 +124,9 @@ pub fn guest_line(s: &str) {
         if seen & bit == 0 && s.contains(needle) {
             GUEST_SEEN.fetch_or(bit, Ordering::Relaxed);
             kprintln!("[boottime] +{} ms {}", ms, label);
+            if *label == APP_EXITED_LABEL {
+                crate::microvm::devices::gpu_backend::present_closing();
+            }
             if *label == APP_EXEC_LABEL {
                 let (hist, sum, _) = crate::microvm::cpu::wake_snapshot();
                 *APP_SNAP.lock() = Some((
@@ -160,25 +161,13 @@ pub fn gpu_pixels(pixels: &[u8], width: u32, height: u32) {
     if !ACTIVE.load(Ordering::Acquire) || WIN_STATE.load(Ordering::Acquire) != WIN_ARMED {
         return;
     }
-    let stride = width as usize * 4;
-    if stride == 0 {
-        return;
-    }
-    let (mut lit, mut total) = (0usize, 0usize);
-    for row in pixels.chunks_exact(stride).take(height as usize).step_by(SAMPLE_STEP) {
-        for px in row.chunks_exact(4).step_by(SAMPLE_STEP) {
-            total += 1;
-            if px[0] | px[1] | px[2] != 0 {
-                lit += 1;
-            }
-        }
-    }
-    if total > 0 && lit * 100 >= total * WINDOW_LIT_PCT {
+    let lit = crate::microvm::devices::gpu_backend::lit_percent(pixels, width, height);
+    if lit >= crate::microvm::devices::gpu_backend::LIT_PCT {
         WIN_STATE.store(WIN_DONE, Ordering::Release);
         kprintln!(
             "[boottime] +{} ms app: window up ({}% of pixels lit)",
             now_ms(),
-            lit * 100 / total,
+            lit,
         );
         report_app_phase();
         crate::microvm::cpu::rip_sample::dump_now();

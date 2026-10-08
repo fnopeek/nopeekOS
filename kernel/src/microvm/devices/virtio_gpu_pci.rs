@@ -832,6 +832,9 @@ impl VirtioGpu {
         let r = &*r;
         let pix = match &r.host_pixels { Some(p) => p, None => return };
         crate::microvm::boottime::gpu_pixels(pix, r.width, r.height);
+        if !super::gpu_backend::should_present(pix, r.width, r.height) {
+            return;
+        }
 
         // One-time "first guest frame reached the host" confirmation;
         // further flushes are silent.

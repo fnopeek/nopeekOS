@@ -79,6 +79,77 @@ pub fn bar0_in_range(gpa: u64) -> bool {
     gpa >= BAR0_BASE && gpa < BAR0_BASE + 0x4000
 }
 
+// ── When guest frames reach the window ──
+//
+// A launch shows the window's own background until the app has painted:
+// the guest console and the compositor's empty output are black, and an
+// app starting looks like a black window with a console behind it. The
+// first frame after launch that is mostly not black is the app; from then
+// on every frame shows. If none comes within `REVEAL_TIMEOUT_MS` (a failed
+// start, an app that is black) the frames show anyway, so the failure is
+// visible. Once the app has exited, the compositor's black teardown frames
+// are dropped and the window keeps the app's last frame until it closes.
+
+const PRESENT_HIDDEN: u8 = 0;
+const PRESENT_SHOWN: u8 = 1;
+const PRESENT_CLOSING: u8 = 2;
+static PRESENT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(PRESENT_SHOWN);
+static LAUNCH_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// How long a launch may stay hidden without a lit frame.
+const REVEAL_TIMEOUT_MS: u64 = 8000;
+/// Share of sampled pixels, in percent, that makes a frame the app's.
+pub const LIT_PCT: usize = 50;
+/// Sample every n-th pixel of every n-th row.
+const SAMPLE_STEP: usize = 4;
+
+/// Percent of sampled pixels (BGRX, `width` per row) that are not black.
+pub fn lit_percent(pixels: &[u8], width: u32, height: u32) -> usize {
+    let stride = width as usize * 4;
+    if stride == 0 {
+        return 0;
+    }
+    let (mut lit, mut total) = (0usize, 0usize);
+    for row in pixels.chunks_exact(stride).take(height as usize).step_by(SAMPLE_STEP) {
+        for px in row.chunks_exact(4).step_by(SAMPLE_STEP) {
+            total += 1;
+            if px[0] | px[1] | px[2] != 0 {
+                lit += 1;
+            }
+        }
+    }
+    if total == 0 { 0 } else { lit * 100 / total }
+}
+
+/// A launch begins: hide guest frames until the app paints.
+pub fn present_reset() {
+    LAUNCH_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+    PRESENT.store(PRESENT_HIDDEN, Ordering::Release);
+}
+
+/// The app has exited: keep the last frame, drop the teardown.
+pub fn present_closing() {
+    PRESENT.store(PRESENT_CLOSING, Ordering::Release);
+}
+
+/// Whether this flushed frame goes to the window.
+pub fn should_present(pixels: &[u8], width: u32, height: u32) -> bool {
+    match PRESENT.load(Ordering::Acquire) {
+        PRESENT_SHOWN => true,
+        PRESENT_CLOSING => false,
+        _ => {
+            let hz = crate::interrupts::tsc_freq().max(1);
+            let waited_ms = crate::interrupts::rdtsc()
+                .saturating_sub(LAUNCH_TSC.load(Ordering::Relaxed)) * 1000 / hz;
+            if waited_ms >= REVEAL_TIMEOUT_MS || lit_percent(pixels, width, height) >= LIT_PCT {
+                PRESENT.store(PRESENT_SHOWN, Ordering::Release);
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
 // ── Off-vCPU worker: controlq doorbell defer ──
 /// Pending controlq notify from the vCPU. 0xFFFF = none. On the doorbell the vCPU
 /// sets the qidx here (instead of servicing inline) + wakes the worker's core;
