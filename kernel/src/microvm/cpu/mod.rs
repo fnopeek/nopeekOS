@@ -26,6 +26,7 @@ pub mod guest_msr; // vendor-neutral guest MSR emulation
 pub mod svm;
 pub mod vmx;
 
+use crate::microvm::devices::virtio_gpu_pci::MAX_OUTPUTS;
 use spin::Mutex;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
@@ -368,10 +369,20 @@ enum ActiveVm {
 
 static ACTIVE_VM: Mutex<Option<ActiveVm>> = Mutex::new(None);
 
-/// Shade window the active VM's framebuffer is bound to (0 = none).
-/// virtio-gpu FLUSH reads this to know which surface to write; the
-/// teardown path closes it. One VM ↔ one window; keyed by id.
-static ACTIVE_VM_WINDOW: AtomicU32 = AtomicU32::new(0);
+/// Shade windows of the active VM, by guest output (= virtio-gpu
+/// scanout); 0 = none. Output 0 is the window the VM starts with; the guest
+/// compositor asks for more as the app opens windows. virtio-gpu FLUSH
+/// reads this to know which surface to write; the teardown path closes
+/// them all.
+static OUT_WINDOWS: [AtomicU32; MAX_OUTPUTS] = [const { AtomicU32::new(0) }; MAX_OUTPUTS];
+/// A window came or went; the vCPU core tells the guest (`display_tick`).
+static OUTPUTS_CHANGED: AtomicBool = AtomicBool::new(false);
+/// Output whose window the guest was last told has focus; `NO_FOCUS` =
+/// none told yet.
+static FOCUS_SENT: AtomicU32 = AtomicU32::new(NO_FOCUS);
+const NO_FOCUS: u32 = u32::MAX;
+/// Name of every window of a VM; the dock recognises the app by it.
+pub const VM_WINDOW_TITLE: &str = "microvm";
 
 /// Set when the user closes the VM's window so the next slice tears
 /// the guest down instead of running it headless.
@@ -452,7 +463,7 @@ pub fn request_open_loft() {
 // Core 0 only stashes a request (`PENDING_VM`); the dedicated core
 // (`vm_core_serve`, driven from `smp_ap_entry`) owns the VmContext on
 // its own stack for the VM's whole lifetime. Core 0 coordinates only
-// via these atomics + `ACTIVE_VM_WINDOW` / `VM_CLOSE_REQUESTED`, never
+// via these atomics + `OUT_WINDOWS` / `VM_CLOSE_REQUESTED`, never
 // the `ACTIVE_VM` mutex (cooperative path only), so it can't deadlock
 // against the unbounded run loop.
 
@@ -850,15 +861,72 @@ struct PendingVm {
 }
 static PENDING_VM: Mutex<Option<PendingVm>> = Mutex::new(None);
 
-/// Bind the active VM to a Shade Surface window (called by the
-/// microvm intent right after a successful `vm_open`).
+/// Bind the active VM's first output to a Shade Surface window (called by
+/// the microvm intent right after a successful `vm_open`).
 pub fn vm_bind_window(window_id: u32) {
-    ACTIVE_VM_WINDOW.store(window_id, Ordering::Release);
+    OUT_WINDOWS[0].store(window_id, Ordering::Release);
 }
 
-/// The Shade window the active VM renders into (0 = none/unbound).
-pub fn vm_window() -> u32 {
-    ACTIVE_VM_WINDOW.load(Ordering::Acquire)
+/// The Shade window showing guest output `k` (0 = none).
+pub fn output_window(k: usize) -> u32 {
+    OUT_WINDOWS.get(k).map_or(0, |w| w.load(Ordering::Acquire))
+}
+
+/// The guest output a Shade window shows, if it is one of the VM's.
+pub fn output_of_window(window_id: u32) -> Option<usize> {
+    if window_id == 0 {
+        return None;
+    }
+    OUT_WINDOWS.iter().position(|w| w.load(Ordering::Acquire) == window_id)
+}
+
+/// The active VM has at least one window.
+pub fn vm_has_window() -> bool {
+    OUT_WINDOWS.iter().any(|w| w.load(Ordering::Acquire) != 0)
+}
+
+/// A window came or went since the last call (the guest must re-read its
+/// displays).
+pub fn take_outputs_changed() -> bool {
+    OUTPUTS_CHANGED.swap(false, Ordering::AcqRel)
+}
+
+/// Core 0: carry out what the guest asked for its windows, and tell it which
+/// one the user focused. A window opens only for a VM that has one already
+/// and only on a free output (at most `MAX_OUTPUTS`); a reported-closed
+/// output's window closes unless it is the last (then the app is ending,
+/// and the VM's own exit closes it).
+fn sync_vm_windows() {
+    use crate::microvm::devices::virtio_console_pci as console;
+    if !vm_has_window() {
+        return;
+    }
+    let (open, closed) = console::take_output_requests();
+    for k in 0..MAX_OUTPUTS {
+        if open & (1 << k) != 0 && output_window(k) == 0 {
+            if let Some(wid) = crate::shade::create_surface_window(VM_WINDOW_TITLE) {
+                OUT_WINDOWS[k].store(wid.0, Ordering::Release);
+                OUTPUTS_CHANGED.store(true, Ordering::Release);
+            }
+        }
+        if closed & (1 << k) != 0 {
+            let wid = output_window(k);
+            let others = (0..MAX_OUTPUTS).any(|i| i != k && output_window(i) != 0);
+            if wid != 0 && others {
+                OUT_WINDOWS[k].store(0, Ordering::Release);
+                OUTPUTS_CHANGED.store(true, Ordering::Release);
+                crate::shade::surface::remove_surface(wid);
+                crate::shade::close_window(crate::shade::window::WindowId(wid));
+            }
+        }
+    }
+    if let Some(k) = crate::shade::focused_surface_id().and_then(output_of_window) {
+        if FOCUS_SENT.load(Ordering::Acquire) != k as u32
+            && console::send_windows(console::WIN_FOCUS, &[k as u8])
+        {
+            FOCUS_SENT.store(k as u32, Ordering::Release);
+        }
+    }
 }
 
 /// Window closed by the user. With the control channel up (the guest's
@@ -870,18 +938,24 @@ pub fn vm_window() -> u32 {
 /// that (`note_guest_shutdown`).
 /// Without the channel, on a second close, or after `QUIT_GRACE_MS`, the
 /// VM is stopped as it is.
-/// No-op if it isn't the active VM's window.
+/// No-op if it isn't one of the active VM's windows. With several, only
+/// the closed one's app window is asked to close; the app goes on.
 pub fn vm_close_for_window(window_id: u32) {
-    if window_id == 0 || window_id != ACTIVE_VM_WINDOW.load(Ordering::Acquire) {
+    let Some(k) = output_of_window(window_id) else { return };
+    use crate::microvm::devices::virtio_console_pci as console;
+    // One of several windows: only it closes, the app goes on.
+    if (0..MAX_OUTPUTS).any(|i| i != k && output_window(i) != 0) {
+        OUT_WINDOWS[k].store(0, Ordering::Release);
+        OUTPUTS_CHANGED.store(true, Ordering::Release);
+        let _ = console::send_windows(console::WIN_CLOSE, &[k as u8]);
         return;
     }
     let quitting = QUIT_DEADLINE.load(Ordering::Acquire) != 0;
-    use crate::microvm::devices::virtio_console_pci as console;
     if !quitting && console::control_ready() {
         let ms = crate::interrupts::tsc_freq() / 1000;
         let now = crate::interrupts::rdtsc();
         QUIT_DEADLINE.store(now + ms * QUIT_GRACE_MS, Ordering::Release);
-        if console::send_windows(console::WIN_CLOSE, &[0]) {
+        if console::send_windows(console::WIN_CLOSE, &[k as u8]) {
             TERM_AT.store(now + ms * TERM_AFTER_MS, Ordering::Release);
             crate::kprintln!("[microvm] asking the app to close its window");
         } else {
@@ -905,16 +979,20 @@ pub fn note_guest_shutdown() {
     crate::intent::wake_shell();
 }
 
-/// Drop the VM↔window binding + its surface and close the Shade
-/// window. Must be called without the ACTIVE_VM lock held (it locks
+/// Drop the VM↔window bindings + their surfaces and close the Shade
+/// windows. Must be called without the ACTIVE_VM lock held (it locks
 /// the compositor, whose close path re-enters microvm). Idempotent.
 fn teardown_vm_window() {
     crate::microvm::boottime::report();
-    let wid = ACTIVE_VM_WINDOW.swap(0, Ordering::AcqRel);
     VM_CLOSE_REQUESTED.store(false, Ordering::Release);
-    if wid != 0 {
-        crate::shade::surface::remove_surface(wid);
-        crate::shade::close_window(crate::shade::window::WindowId(wid));
+    FOCUS_SENT.store(NO_FOCUS, Ordering::Release);
+    OUTPUTS_CHANGED.store(false, Ordering::Release);
+    for w in &OUT_WINDOWS {
+        let wid = w.swap(0, Ordering::AcqRel);
+        if wid != 0 {
+            crate::shade::surface::remove_surface(wid);
+            crate::shade::close_window(crate::shade::window::WindowId(wid));
+        }
     }
 }
 
@@ -1073,6 +1151,7 @@ pub fn vm_poll_slice() {
     // Cross-boundary trigger: the microvm browser asked (via 9p) to open
     // loft. Spawn it here on Core 0 (compositor op). Runs on both the
     // cooperative and dedicated paths since it's before the early return.
+    sync_vm_windows();
     if OPEN_LOFT_REQUESTED.swap(false, Ordering::AcqRel) {
         // `launch_app` dedups by open window, but loading runs on a worker:
         // a burst of guest requests before the window exists would start

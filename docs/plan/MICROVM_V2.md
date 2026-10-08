@@ -520,13 +520,18 @@ Dialog steht mittig in eigener Grösse, Popups werden an den Ausgang geklemmt,
 die Dekoration bleibt beim Client.
 
 **Fensterprotokoll** auf dem zweiten virtio-console-Port `npk.windows`,
-gleiche Rahmen wie §5.1, höchstens 512 Bytes je Meldung:
+gleiche Rahmen wie §5.1, höchstens 512 Bytes je Meldung, jede Nutzlast
+beginnt mit dem Ausgang (`u8`):
 
 | Richtung | Typ | Inhalt |
 |---|---|---|
-| Wirt → Gast | `0x01 close` | `u8` Ausgang: allen Fenstern ohne Elter `xdg_toplevel.close` |
-| Gast → Wirt | `0x81 hello` | `u8` Protokollfassung |
-| Gast → Wirt | `0x82 title` | `u8` Ausgang, UTF-8-Titel des Fensters mit Fokus |
+| Wirt → Gast | `0x01 close` | allen Fenstern ohne Elter auf dem Ausgang `xdg_toplevel.close` |
+| Wirt → Gast | `0x02 focus` | der Nutzer hat das Fenster dieses Ausgangs fokussiert |
+| Wirt → Gast | `0x03 resize` | `u16` Breite, `u16` Höhe: neue Kachelgrösse |
+| Gast → Wirt | `0x81 hello` | Protokollfassung (3) |
+| Gast → Wirt | `0x82 title` | UTF-8-Titel des obersten Fensters des Ausgangs |
+| Gast → Wirt | `0x83 open` | die App hat ein Fenster geöffnet: ein Wirtsfenster für diesen Ausgang |
+| Gast → Wirt | `0x84 closed` | auf dem Ausgang ist kein Fenster mehr |
 
 Der Wirt bereinigt den Titel (ungültiges UTF-8 ersetzt, Steuerzeichen
 entfernt, höchstens 200 Bytes) und zeigt ihn in der Bar
@@ -556,16 +561,36 @@ KVM 9600X, 6 vCPUs, 1280×900, frisches Profil, je drei Läufe:
 Am Notebook offen; dort lag „cage → App“ schon bei ~0,2 s (§0.7), der
 Gewinn kann also kleiner sein.
 
+**Stufe 2 gebaut (Kernel 0.525.0, microvm-init 0.6.0): jedes App-Fenster
+ein eigenes nopeek-Fenster** (Entscheid 2026-10-08: ein abgetrennter Tab
+soll nicht das Hauptfenster überdecken). Ausgang k ist virtio-gpu-Scanout
+k, der Wirt bietet 8 an (`MAX_OUTPUTS`). Ein neues Fenster ohne Elter
+nimmt einen Ausgang, der da und leer ist (Ausgang 0 beim Start), sonst
+fragt npkwm mit `open` nach einem und hält das Fenster versteckt, bis der
+Ausgang kommt: der Wirt legt ein Fenster an und schaltet den Scanout zu
+(Display-Ereignis). Dialoge bleiben beim Ausgang ihres Elters, Popups bei
+ihrem Fenster. Mod+Q auf einem von mehreren Fenstern schliesst nur dieses
+(`close` für seinen Ausgang); erst beim letzten läuft die Abfolge mit
+`MSG_QUIT`. Meldet der Gast `closed`, schliesst der Wirt das Fenster, ausser
+es ist das letzte (dann endet die App ohnehin).
+
+**Der Zeiger trägt sein Fenster selbst:** x des Tablets ist in 8 gleiche
+Abschnitte geteilt, der Abschnitt ist der Ausgang. Eine Zeigerbewegung
+hängt so nie davon ab, dass eine `focus`-Meldung vorher ankommt; `focus`
+setzt nur die Tastatur.
+
+**Grösse über das Protokoll:** der Wirt schickt `resize`, npkwm setzt den
+Modus selbst (eigener CVT-Modus). Weg sind die 150 ms Wartezeit, bis eine
+Grösse ruht, und der 100-ms-Zyklus aus Trennen und Neuverbinden, den cage
+brauchte, weil wlroots einen neuen Modus bei verbundenem Ausgang
+ignoriert. Unter KVM: neue Grösse nach ~30 ms, LibreWolf neu ausgelegt
+nach ~65 ms.
+
+Unter KVM geprüft: `open`, verstecktes Fenster, `closed`, `resize`. Mehrere
+sichtbare Fenster zeigt QEMU nicht (es schaltet keinen zweiten Ausgang
+zu); das prüft der Gerätelauf.
+
 **Weiter:**
-- **Stufe 2 — jedes App-Fenster ein eigenes nopeek-Fenster** (Entscheid
-  2026-10-08: abgetrennte Tabs und Dialoge sollen nicht das Hauptfenster
-  überdecken). Je Fenster ein virtio-gpu-Ausgang: npkwm meldet ein neues
-  Toplevel, der Wirt schaltet einen weiteren Ausgang zu (Display-Ereignis),
-  npkwm legt das Fenster dorthin; Popups bleiben beim Ausgang ihres Elters.
-  Der Wirt meldet den Fokus (`focus`), npkwm bindet die Tablet-Eingabe an
-  diesen Ausgang.
-- **Grösse über das Protokoll** (`resize`) statt Trennen und Neuverbinden des
-  Ausgangs (wlroots ignoriert einen neuen Modus bei verbundenem Ausgang).
 - **Stufe 3 — Zwischenablage** über denselben Port, nur Text, nur auf
   Nutzeraktion.
 - Mit v2 braucht das Grundgerüst weder cage noch Alpines wlroots, Mesa oder
@@ -701,7 +726,7 @@ Jede Stufe wird auf AMD **und** Intel gefahren (Lehre aus
 - **Steuerkanal = virtio-console**, nur PID 1 hat Zugriff (§5.1).
 - **Eigener Compositor** (npkwm, C auf wlroots, statisch und ohne GL) statt
   cage; Fensterprotokoll auf `npk.windows`; jedes App-Fenster wird ein
-  eigenes nopeek-Fenster (§5.2).
+  eigenes nopeek-Fenster; die Grösse geht über das Protokoll (§5.2).
 - **Platten bei Bedarf aus npkFS**, im Hintergrund vorab geladen (§0.6).
 - **Verwaltung „Linux-Apps“:** Vorgaben aus dem signierten Store,
   Übersteuerung durch den Nutzer, auch beim RAM (§4c).

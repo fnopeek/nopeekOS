@@ -138,11 +138,6 @@ const LEAD: u64 = 8_192;
 /// continuously. Must be > LEAD.
 const MAX_FILL: u64 = 20_480;
 
-/// Verbose lifecycle + rate diagnostics (host serial). Cheap: lifecycle is
-/// a few lines per stream, the rate heartbeat is throttled to ~2 s.
-const SND_DIAG: bool = true;
-static DBG_LAST_HB: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static DBG_BYTES_AT_HB: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
@@ -375,7 +370,6 @@ impl VirtioSnd {
                 else { crate::audio::reset(self.slot as usize); }
                 self.started = false;
                 self.bytes_completed = 0;
-                if SND_DIAG { crate::kprintln!("[snd] PREPARE slot={}", self.slot); }
                 put32(resp, 0, if self.slot >= 0 { S_OK } else { S_IO_ERR });
                 4
             }
@@ -384,13 +378,11 @@ impl VirtioSnd {
                 self.started = true;
                 self.play_start_tsc = crate::interrupts::rdtsc();
                 self.bytes_completed = 0;
-                if SND_DIAG { crate::kprintln!("[snd] START slot={}", self.slot); }
                 put32(resp, 0, S_OK);
                 4
             }
             R_PCM_STOP  => {
                 self.started = false;
-                if SND_DIAG { crate::kprintln!("[snd] STOP slot={}", self.slot); }
                 put32(resp, 0, S_OK); 4
             }
             R_PCM_RELEASE => {
@@ -404,8 +396,7 @@ impl VirtioSnd {
                 // stream starts on an inconsistent queue → silence. Flush
                 // before closing the slot.
                 self.started = false;
-                let flushed = self.flush_tx(mem);
-                if SND_DIAG { crate::kprintln!("[snd] RELEASE slot={} flushed={}", self.slot, flushed); }
+                self.flush_tx(mem);
                 if self.slot >= 0 { crate::audio::close(self.slot as usize); self.slot = -1; }
                 put32(resp, 0, S_OK);
                 4
@@ -509,19 +500,6 @@ impl VirtioSnd {
                 / PLAYBACK_BYTES_PER_SEC as u128) as u64;
             self.play_start_tsc = tsc_now.wrapping_sub(pos_cycles);
             budget = target;
-        }
-
-        // Rate heartbeat (~2 s): actual bytes completed vs the 192000 B/s target,
-        // plus ticks() to show how far the IRQ counter lags the TSC under load.
-        if SND_DIAG {
-            let last = DBG_LAST_HB.load(core::sync::atomic::Ordering::Relaxed);
-            if tsc_now.wrapping_sub(last) > tsc_hz.saturating_mul(2) {
-                DBG_LAST_HB.store(tsc_now, core::sync::atomic::Ordering::Relaxed);
-                let prev = DBG_BYTES_AT_HB.swap(self.bytes_completed, core::sync::atomic::Ordering::Relaxed);
-                crate::kprintln!("[snd] hb done={}B/2s (want ~384000) ticks={} free={} buf={}",
-                    self.bytes_completed.saturating_sub(prev), crate::interrupts::ticks(),
-                    crate::audio::free_space(slot), crate::audio::buffered(slot));
-            }
         }
 
         while last != avail_top {

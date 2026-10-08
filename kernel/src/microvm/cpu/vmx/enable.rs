@@ -598,9 +598,6 @@ struct VmDevices {
     serial: SerialState,
     pci: crate::microvm::devices::PciBus,
     pic: crate::microvm::devices::pic8259::Pic8259,
-    /// `ticks()` of the last virtio-gpu display config-change IRQ — rate-
-    /// limits the resize round-trip (debounce).
-    last_cfg_tick: u64,
     /// `ticks()` of the last NAT mapping reap.
     last_reap_tick: u64,
     /// i8253 channel 0; its output is IRQ0 on the PIC. See `pit8253`.
@@ -719,7 +716,6 @@ impl VmContext {
                             pic.ioapic.set_id(crate::microvm::cpu::guest_vcpus());
                             pic
                         },
-                        last_cfg_tick: 0,
                         last_reap_tick: 0,
                         pit: crate::microvm::devices::pit8253::Pit::new(),
                     }),
@@ -882,24 +878,8 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
     sh.pit.poll(&mut sh.pic);
 
     let now = crate::interrupts::ticks();
-    // Live resize: disconnect, then reconnect after 100 ms; a new
-    // cycle at most every 250 ms while the window is dragged.
-    if crate::microvm::devices::gpu_backend::d4_pending()
-        && crate::microvm::devices::gpu_backend::lock().tick_d4(now)
-    {
+    if crate::microvm::devices::gpu_backend::display_tick() {
         sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
-    } else {
-        let wid = crate::microvm::vm_window();
-        if wid != 0
-            && !crate::microvm::devices::gpu_backend::d4_pending()
-            && crate::shade::surface::display_dirty_peek(wid)
-            && now.wrapping_sub(sh.last_cfg_tick) >= 25
-        {
-            let _ = crate::shade::surface::take_display_dirty(wid);
-            sh.last_cfg_tick = now;
-            crate::microvm::devices::gpu_backend::lock().signal_display_change(now);
-            sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
-        }
     }
     // NAT mapping reaper: an idle scan, once per 10 ms at most.
     if now != sh.last_reap_tick {
@@ -1213,7 +1193,7 @@ impl SerialState {
     fn scan_for_shutdown(&mut self, n: usize) {
         if self.halt_observed { return; }
         // Require the `reboot: ` prefix (kernel/reboot.c only). PID-1 mirrors
-        // cage/moz app logs to /dev/kmsg → serial, so a bare "Power down"
+        // the guest session logs to /dev/kmsg → serial, so a bare "Power down"
         // substring could false-trigger; the prefix can't appear in app text.
         let line = &self.line[..n];
         let hit = line_contains(line, b"reboot: System halted")
@@ -1405,7 +1385,7 @@ impl VmContext {
     let host_core = crate::smp::per_core::current_core_id();
     lapic::set_host_core(self.vcpu.apic_id, host_core);
 
-    while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
+    while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_has_window() {
         if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline {
             return Ok(SliceOutcome::StillRunning);
         }
@@ -1668,7 +1648,7 @@ impl VmContext {
             }
             12 => {
                 // A headless test guest halting is done.
-                if crate::microvm::vm_window() == 0 {
+                if !crate::microvm::vm_has_window() {
                     sh.serial.flush();
                     kprintln!("[vmx] guest HLT after {} VM-exits — exiting", self.vcpu.iter);
                     self.vcpu.io_stats.dump();
@@ -1948,7 +1928,7 @@ impl VmContext {
         }
     }
 
-    if self.vcpu.iter >= MAX_ITERATIONS && crate::microvm::vm_window() == 0 {
+    if self.vcpu.iter >= MAX_ITERATIONS && !crate::microvm::vm_has_window() {
         self.shared.dev.lock().serial.flush();
         kprintln!(
             "[microvm] iteration cap ({}) reached — guest still running, ({} I/O drops)",

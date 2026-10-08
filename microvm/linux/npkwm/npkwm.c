@@ -1,14 +1,30 @@
 /*
  * npkwm: the Wayland compositor inside a nopeekOS app VM.
  *
- * Built on wlroots' tinywl (CC0). One output, the host window. A toplevel
- * without a parent fills the output; a dialog keeps its own size, centred.
- * The host talks to it over the virtio-console port "npk.windows"
- * (`NPK_WINDOWS` names the device): the host asks to close the app's
- * windows, npkwm reports the title of the focused one.
+ * Built on wlroots' tinywl (CC0). Every toplevel without a parent gets an
+ * output of its own, and every output is a window on the host: output k is
+ * virtio-gpu scanout k, which the guest kernel names "Virtual-(k+1)". A
+ * toplevel fills its output; a dialog stays on its parent's output, centred
+ * in its own size; popups follow their toplevel.
  *
- * Frames on that port: u16 len | u8 type | payload, little-endian, `len`
- * counting the type byte and the payload, at most WIN_MAX_FRAME.
+ * The host talks to it over the virtio-console port "npk.windows"
+ * (`NPK_WINDOWS` names the device). Frames: u16 len | u8 type | payload,
+ * little-endian, `len` counting the type byte and the payload, at most
+ * WIN_MAX_FRAME. Every payload starts with the output index.
+ *
+ * A new toplevel takes an output that exists and holds nothing (output 0 at
+ * start); otherwise npkwm asks the host for one (WIN_OPEN) and keeps the
+ * toplevel hidden until the output appears. When an output's last toplevel
+ * goes, npkwm tells the host (WIN_CLOSED), unless it is the app's last
+ * window: then the app is ending and the host waits for the VM to stop.
+ *
+ * The host sets an output's size (WIN_RESIZE) whenever its window's tile
+ * changes; npkwm sets that mode on the output directly, so a resize costs
+ * no disconnect and shows no black frames.
+ *
+ * The host's pointer is a tablet: x carries the output in its high part
+ * (MAX_OUTPUTS equal slots), so a pointer event names its window itself and
+ * never depends on a focus message arriving first.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -52,14 +68,25 @@
 
 /* Host -> guest. */
 #define WIN_CLOSE 0x01
+#define WIN_FOCUS 0x02
+#define WIN_RESIZE 0x03
 /* Guest -> host. */
 #define WIN_HELLO 0x81
 #define WIN_TITLE 0x82
+#define WIN_OPEN 0x83
+#define WIN_CLOSED 0x84
 
-#define WIN_VERSION 1
+#define WIN_VERSION 3
 #define WIN_MAX_FRAME 512
 /* Bytes of title sent; cut on a UTF-8 boundary. */
 #define TITLE_MAX 200
+/* Outputs (host windows) at most; the host offers as many scanouts. */
+#define MAX_OUTPUTS 8
+/* Outputs sit side by side in the layout, this far apart, so none overlap
+ * whatever their sizes. */
+#define SLOT_X 16384
+
+struct output;
 
 struct server {
 	struct wl_display *display;
@@ -69,7 +96,6 @@ struct server {
 	struct wlr_scene *scene;
 	struct wlr_scene_output_layout *scene_layout;
 	struct wlr_output_layout *output_layout;
-	struct wl_listener layout_change;
 	struct wl_listener new_output;
 
 	struct wlr_xdg_shell *xdg_shell;
@@ -77,6 +103,8 @@ struct server {
 	struct wl_listener new_xdg_popup;
 	/* Mapped toplevels, most recently focused first. */
 	struct wl_list toplevels;
+	/* Every toplevel, mapped or not. */
+	struct wl_list all;
 
 	struct wlr_cursor *cursor;
 	struct wlr_xcursor_manager *cursor_mgr;
@@ -93,16 +121,26 @@ struct server {
 	struct wl_listener request_set_primary_selection;
 	struct wl_list keyboards;
 
+	struct output *outputs[MAX_OUTPUTS];
+	/* An output npkwm asked for (WIN_OPEN) that has not appeared yet. */
+	bool requested[MAX_OUTPUTS];
+	/* An output the host was told to close (WIN_CLOSED) or closed itself
+	 * (WIN_CLOSE); it takes no new toplevel, and what is still on it when
+	 * it goes moves elsewhere. A plain disconnect (the host resizing the
+	 * window) keeps its toplevels hidden until it is back. */
+	bool released[MAX_OUTPUTS];
+
 	/* npk.windows; -1 without a host channel. */
 	int win_fd;
 	uint8_t win_rx[2 + WIN_MAX_FRAME];
 	size_t win_rx_len;
-	char sent_title[TITLE_MAX + 1];
+	char sent_title[MAX_OUTPUTS][TITLE_MAX + 1];
 };
 
 struct output {
 	struct server *server;
 	struct wlr_output *wlr_output;
+	int index;
 	struct wl_listener frame;
 	struct wl_listener request_state;
 	struct wl_listener destroy;
@@ -110,9 +148,13 @@ struct output {
 
 struct toplevel {
 	struct wl_list link;
+	struct wl_list all_link;
 	struct server *server;
 	struct wlr_xdg_toplevel *xdg_toplevel;
 	struct wlr_scene_tree *scene_tree;
+	/* Output index; -1 until mapped. */
+	int out;
+	bool mapped;
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener commit;
@@ -138,6 +180,9 @@ struct keyboard {
 	struct wl_listener destroy;
 };
 
+static void place_toplevel(struct toplevel *t);
+static void focus_toplevel(struct toplevel *t);
+
 /* ── npk.windows ─────────────────────────────────────────────────── */
 
 static void win_send(struct server *server, uint8_t type, const void *payload, size_t len) {
@@ -156,18 +201,62 @@ static void win_send(struct server *server, uint8_t type, const void *payload, s
 	}
 }
 
-static struct toplevel *focused_toplevel(struct server *server) {
-	if (wl_list_empty(&server->toplevels)) {
-		return NULL;
-	}
-	struct toplevel *t = wl_container_of(server->toplevels.next, t, link);
-	return t;
+static void win_send_out(struct server *server, uint8_t type, int k) {
+	uint8_t b = (uint8_t)k;
+	win_send(server, type, &b, 1);
 }
 
-/* Report the focused toplevel's title, if it changed. Payload: u8 output
- * index, then the title bytes. */
-static void report_title(struct server *server) {
-	struct toplevel *t = focused_toplevel(server);
+/* ── Toplevels and outputs ───────────────────────────────────────── */
+
+static bool is_root(struct toplevel *t) {
+	return t->xdg_toplevel->parent == NULL;
+}
+
+/* The topmost (most recently focused) mapped toplevel on output k. */
+static struct toplevel *top_on(struct server *server, int k) {
+	struct toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->out == k) {
+			return t;
+		}
+	}
+	return NULL;
+}
+
+/* A root toplevel has output k, mapped or about to be. */
+static bool occupied(struct server *server, int k) {
+	struct toplevel *t;
+	wl_list_for_each(t, &server->all, all_link) {
+		if (t->out == k && is_root(t)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static struct toplevel *toplevel_of(struct wlr_xdg_toplevel *xdg) {
+	if (xdg == NULL || xdg->base->data == NULL) {
+		return NULL;
+	}
+	struct wlr_scene_tree *tree = xdg->base->data;
+	return tree->node.data;
+}
+
+static struct wlr_box output_box(struct server *server, int k) {
+	struct wlr_box box = {0};
+	if (k >= 0 && k < MAX_OUTPUTS && server->outputs[k] != NULL) {
+		wlr_output_layout_get_box(server->output_layout, server->outputs[k]->wlr_output, &box);
+	}
+	return box;
+}
+
+/* Report the title of the topmost toplevel on output k, if it changed.
+ * Payload: u8 output, then the title bytes. */
+static void report_title(struct server *server, int k) {
+	if (k < 0 || k >= MAX_OUTPUTS) {
+		return;
+	}
+	struct toplevel *t = top_on(server, k);
 	const char *title = (t && t->xdg_toplevel->title) ? t->xdg_toplevel->title : "";
 	size_t n = strlen(title);
 	if (n > TITLE_MAX) {
@@ -176,31 +265,137 @@ static void report_title(struct server *server) {
 			n--;
 		}
 	}
-	if (strlen(server->sent_title) == n && memcmp(server->sent_title, title, n) == 0) {
+	char *sent = server->sent_title[k];
+	if (strlen(sent) == n && memcmp(sent, title, n) == 0) {
 		return;
 	}
-	memcpy(server->sent_title, title, n);
-	server->sent_title[n] = '\0';
+	memcpy(sent, title, n);
+	sent[n] = '\0';
 	uint8_t payload[1 + TITLE_MAX];
-	payload[0] = 0;
+	payload[0] = (uint8_t)k;
 	memcpy(payload + 1, title, n);
 	win_send(server, WIN_TITLE, payload, 1 + n);
 }
 
-static void close_all(struct server *server) {
+/* The output a new root toplevel goes to: one that exists and holds
+ * nothing, else a free index the host is asked to open, else -1. */
+static int pick_output(struct server *server) {
+	for (int k = 0; k < MAX_OUTPUTS; k++) {
+		if (server->outputs[k] && !server->released[k] && !occupied(server, k)) {
+			return k;
+		}
+	}
+	for (int k = 0; k < MAX_OUTPUTS; k++) {
+		if (!server->outputs[k] && !server->requested[k] && !occupied(server, k)) {
+			server->requested[k] = true;
+			server->released[k] = false;
+			win_send_out(server, WIN_OPEN, k);
+			return k;
+		}
+	}
+	return -1;
+}
+
+/* Some output for toplevels whose own one is gone. */
+static int any_output(struct server *server) {
+	for (int k = 0; k < MAX_OUTPUTS; k++) {
+		if (server->outputs[k] && !server->released[k]) {
+			return k;
+		}
+	}
+	return -1;
+}
+
+/* After a toplevel left output k: if nothing is on it any more and the app
+ * still has a window elsewhere, the host may close it. */
+static void output_maybe_closed(struct server *server, int k) {
+	if (k < 0 || occupied(server, k)) {
+		return;
+	}
+	bool others = false;
+	struct toplevel *t;
+	wl_list_for_each(t, &server->all, all_link) {
+		others |= is_root(t) && t->out >= 0;
+	}
+	if (others && (server->outputs[k] || server->requested[k]) && !server->released[k]) {
+		server->requested[k] = false;
+		server->released[k] = true;
+		win_send_out(server, WIN_CLOSED, k);
+	}
+	report_title(server, k);
+}
+
+static void close_output(struct server *server, int k) {
 	struct toplevel *t;
 	wl_list_for_each(t, &server->toplevels, link) {
-		if (t->xdg_toplevel->parent == NULL) {
+		if (t->out == k && is_root(t)) {
 			wlr_xdg_toplevel_send_close(t->xdg_toplevel);
 		}
 	}
 }
 
+/* Move every toplevel of output `from` to output `to`. */
+static void move_toplevels(struct server *server, int from, int to) {
+	struct toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->out == from) {
+			t->out = to;
+			place_toplevel(t);
+		}
+	}
+	report_title(server, to);
+}
+
+/* Fit output k's toplevels to its current size. */
+static void replace_on(struct server *server, int k) {
+	struct toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->out == k) {
+			place_toplevel(t);
+		}
+	}
+}
+
+static void resize_output(struct server *server, int k, int w, int h) {
+	if (server->outputs[k] == NULL || w <= 0 || h <= 0) {
+		return;
+	}
+	struct wlr_output *o = server->outputs[k]->wlr_output;
+	if (o->width == w && o->height == h) {
+		return;
+	}
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_custom_mode(&state, w, h, 0);
+	if (!wlr_output_commit_state(o, &state)) {
+		fprintf(stderr, "npkwm: output %d: %dx%d refused\n", k, w, h);
+	}
+	wlr_output_state_finish(&state);
+	replace_on(server, k);
+}
+
 static void win_handle_frame(struct server *server, uint8_t type, const uint8_t *payload, size_t len) {
+	if (len < 1 || payload[0] >= MAX_OUTPUTS) {
+		return;
+	}
+	int k = payload[0];
 	switch (type) {
 	case WIN_CLOSE:
-		close_all(server);
+		server->released[k] = true;
+		close_output(server, k);
 		break;
+	case WIN_RESIZE:
+		if (len >= 5) {
+			resize_output(server, k, payload[1] | payload[2] << 8, payload[3] | payload[4] << 8);
+		}
+		break;
+	case WIN_FOCUS: {
+		struct toplevel *t = top_on(server, k);
+		if (t) {
+			focus_toplevel(t);
+		}
+		break;
+	}
 	default:
 		break;
 	}
@@ -253,17 +448,17 @@ static void win_open(struct server *server) {
 
 /* ── Layout ──────────────────────────────────────────────────────── */
 
-static struct wlr_box output_box(struct server *server) {
-	struct wlr_box box = {0};
-	wlr_output_layout_get_box(server->output_layout, NULL, &box);
-	return box;
-}
-
-/* A toplevel without a parent fills the output; a dialog is centred. */
+/* A root toplevel fills its output; a dialog is centred on it. Without
+ * its output (not there yet, or reconnecting) the toplevel is hidden. */
 static void place_toplevel(struct toplevel *t) {
 	struct server *server = t->server;
-	struct wlr_box out = output_box(server);
-	if (t->xdg_toplevel->parent == NULL) {
+	struct wlr_box out = output_box(server, t->out);
+	bool shown = out.width > 0 && out.height > 0;
+	wlr_scene_node_set_enabled(&t->scene_tree->node, shown);
+	if (!shown) {
+		return;
+	}
+	if (is_root(t)) {
 		wlr_scene_node_set_position(&t->scene_tree->node, out.x, out.y);
 		if (t->xdg_toplevel->base->initialized) {
 			wlr_xdg_toplevel_set_size(t->xdg_toplevel, out.width, out.height);
@@ -276,14 +471,6 @@ static void place_toplevel(struct toplevel *t) {
 	wlr_scene_node_set_position(&t->scene_tree->node, x < out.x ? out.x : x, y < out.y ? out.y : y);
 }
 
-static void layout_change(struct wl_listener *listener, void *data) {
-	struct server *server = wl_container_of(listener, server, layout_change);
-	struct toplevel *t;
-	wl_list_for_each(t, &server->toplevels, link) {
-		place_toplevel(t);
-	}
-}
-
 /* ── Focus ───────────────────────────────────────────────────────── */
 
 static void focus_toplevel(struct toplevel *t) {
@@ -294,6 +481,9 @@ static void focus_toplevel(struct toplevel *t) {
 	struct wlr_seat *seat = server->seat;
 	struct wlr_surface *prev = seat->keyboard_state.focused_surface;
 	struct wlr_surface *surface = t->xdg_toplevel->base->surface;
+	wlr_scene_node_raise_to_top(&t->scene_tree->node);
+	wl_list_remove(&t->link);
+	wl_list_insert(&server->toplevels, &t->link);
 	if (prev != surface) {
 		if (prev) {
 			struct wlr_xdg_toplevel *prev_toplevel = wlr_xdg_toplevel_try_from_wlr_surface(prev);
@@ -301,9 +491,6 @@ static void focus_toplevel(struct toplevel *t) {
 				wlr_xdg_toplevel_set_activated(prev_toplevel, false);
 			}
 		}
-		wlr_scene_node_raise_to_top(&t->scene_tree->node);
-		wl_list_remove(&t->link);
-		wl_list_insert(&server->toplevels, &t->link);
 		wlr_xdg_toplevel_set_activated(t->xdg_toplevel, true);
 		struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
 		if (keyboard != NULL) {
@@ -311,7 +498,7 @@ static void focus_toplevel(struct toplevel *t) {
 				keyboard->keycodes, keyboard->num_keycodes, &keyboard->modifiers);
 		}
 	}
-	report_title(server);
+	report_title(server, t->out);
 }
 
 /* ── Keyboard ────────────────────────────────────────────────────── */
@@ -451,10 +638,24 @@ static void cursor_motion(struct wl_listener *listener, void *data) {
 	process_motion(server, event->time_msec);
 }
 
+/* x in [0, 1) spans MAX_OUTPUTS slots: the slot is the output, the rest
+ * the position on it. */
 static void cursor_motion_absolute(struct wl_listener *listener, void *data) {
 	struct server *server = wl_container_of(listener, server, cursor_motion_absolute);
 	struct wlr_pointer_motion_absolute_event *event = data;
-	wlr_cursor_warp_absolute(server->cursor, &event->pointer->base, event->x, event->y);
+	double slots = event->x * MAX_OUTPUTS;
+	int k = (int)slots;
+	if (k < 0 || k >= MAX_OUTPUTS) {
+		return;
+	}
+	struct wlr_box out = output_box(server, k);
+	if (out.width <= 0 || out.height <= 0) {
+		return;
+	}
+	double fx = slots - k;
+	double lx = out.x + fx * out.width;
+	double ly = out.y + event->y * out.height;
+	wlr_cursor_warp_closest(server->cursor, NULL, lx, ly);
 	process_motion(server, event->time_msec);
 }
 
@@ -500,20 +701,46 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 	struct output *output = wl_container_of(listener, output, request_state);
 	const struct wlr_output_event_request_state *event = data;
 	wlr_output_commit_state(output->wlr_output, event->state);
+	replace_on(output->server, output->index);
 }
 
 static void output_destroy(struct wl_listener *listener, void *data) {
 	struct output *output = wl_container_of(listener, output, destroy);
+	struct server *server = output->server;
+	int k = output->index;
 	wl_list_remove(&output->frame.link);
 	wl_list_remove(&output->request_state.link);
 	wl_list_remove(&output->destroy.link);
 	free(output);
+	server->outputs[k] = NULL;
+	if (server->released[k]) {
+		int to = any_output(server);
+		if (to >= 0) {
+			move_toplevels(server, k, to);
+		}
+		return;
+	}
+	struct toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->out == k) {
+			place_toplevel(t);
+		}
+	}
+}
+
+/* Scanout k is the connector "Virtual-(k+1)". */
+static int output_index(struct wlr_output *wlr_output) {
+	const char *p = strrchr(wlr_output->name, '-');
+	int n = p ? atoi(p + 1) : 0;
+	return n >= 1 && n <= MAX_OUTPUTS ? n - 1 : -1;
 }
 
 static void new_output(struct wl_listener *listener, void *data) {
 	struct server *server = wl_container_of(listener, server, new_output);
 	struct wlr_output *wlr_output = data;
-	if (wlr_output->non_desktop || !wlr_output_init_render(wlr_output, server->allocator, server->renderer)) {
+	int k = output_index(wlr_output);
+	if (k < 0 || server->outputs[k] != NULL || wlr_output->non_desktop
+			|| !wlr_output_init_render(wlr_output, server->allocator, server->renderer)) {
 		return;
 	}
 	struct output *output = calloc(1, sizeof(*output));
@@ -522,6 +749,7 @@ static void new_output(struct wl_listener *listener, void *data) {
 	}
 	output->server = server;
 	output->wlr_output = wlr_output;
+	output->index = k;
 	output->frame.notify = output_frame;
 	wl_signal_add(&wlr_output->events.frame, &output->frame);
 	output->request_state.notify = output_request_state;
@@ -539,33 +767,72 @@ static void new_output(struct wl_listener *listener, void *data) {
 	wlr_output_commit_state(wlr_output, &state);
 	wlr_output_state_finish(&state);
 
-	struct wlr_output_layout_output *l_output = wlr_output_layout_add_auto(server->output_layout, wlr_output);
+	struct wlr_output_layout_output *l_output =
+		wlr_output_layout_add(server->output_layout, wlr_output, k * SLOT_X, 0);
 	struct wlr_scene_output *scene_output = wlr_scene_output_create(server->scene, wlr_output);
 	wlr_scene_output_layout_add_output(server->scene_layout, l_output, scene_output);
+	server->outputs[k] = output;
+	server->requested[k] = false;
+
+	/* Whatever waited for this output: show it, and give the newest the
+	 * keyboard. */
+	struct toplevel *t, *newest = NULL;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->out == k) {
+			place_toplevel(t);
+			if (newest == NULL) {
+				newest = t;
+			}
+		}
+	}
+	if (newest) {
+		focus_toplevel(newest);
+	}
 }
 
 /* ── Toplevels ───────────────────────────────────────────────────── */
 
 static void toplevel_map(struct wl_listener *listener, void *data) {
 	struct toplevel *t = wl_container_of(listener, t, map);
-	wl_list_insert(&t->server->toplevels, &t->link);
+	struct server *server = t->server;
+	if (!is_root(t)) {
+		struct toplevel *parent = toplevel_of(t->xdg_toplevel->parent);
+		t->out = parent ? parent->out : any_output(server);
+	} else if (t->out < 0) {
+		t->out = pick_output(server);
+		if (t->out < 0) {
+			struct toplevel *f = top_on(server, any_output(server));
+			t->out = f ? f->out : any_output(server);
+		}
+	}
+	t->mapped = true;
+	wl_list_insert(&server->toplevels, &t->link);
 	place_toplevel(t);
-	focus_toplevel(t);
+	if (t->out >= 0 && server->outputs[t->out]) {
+		focus_toplevel(t);
+	}
 }
 
 static void toplevel_unmap(struct wl_listener *listener, void *data) {
 	struct toplevel *t = wl_container_of(listener, t, unmap);
 	struct server *server = t->server;
-	bool was_focused = focused_toplevel(server) == t;
+	int k = t->out;
+	bool was_focused = server->seat->keyboard_state.focused_surface == t->xdg_toplevel->base->surface;
+	t->mapped = false;
 	wl_list_remove(&t->link);
+	if (is_root(t)) {
+		t->out = -1;
+	}
 	if (was_focused) {
-		struct toplevel *next = focused_toplevel(server);
+		struct toplevel *next = top_on(server, k);
+		if (next == NULL && !wl_list_empty(&server->toplevels)) {
+			next = wl_container_of(server->toplevels.next, next, link);
+		}
 		if (next) {
 			focus_toplevel(next);
-		} else {
-			report_title(server);
 		}
 	}
+	output_maybe_closed(server, k);
 }
 
 static void toplevel_commit(struct wl_listener *listener, void *data) {
@@ -573,13 +840,18 @@ static void toplevel_commit(struct wl_listener *listener, void *data) {
 	if (!t->xdg_toplevel->base->initial_commit) {
 		return;
 	}
-	if (t->xdg_toplevel->parent == NULL) {
-		struct wlr_box out = output_box(t->server);
-		wlr_xdg_toplevel_set_size(t->xdg_toplevel, out.width, out.height);
-		wlr_xdg_toplevel_set_maximized(t->xdg_toplevel, true);
-	} else {
+	if (!is_root(t)) {
 		wlr_xdg_toplevel_set_size(t->xdg_toplevel, 0, 0);
+		return;
 	}
+	/* Its output is chosen now, so the first configure carries the size
+	 * of the window it will fill. */
+	if (t->out < 0) {
+		t->out = pick_output(t->server);
+	}
+	struct wlr_box out = output_box(t->server, t->out);
+	wlr_xdg_toplevel_set_size(t->xdg_toplevel, out.width, out.height);
+	wlr_xdg_toplevel_set_maximized(t->xdg_toplevel, true);
 }
 
 static void toplevel_request_maximize(struct wl_listener *listener, void *data) {
@@ -598,13 +870,15 @@ static void toplevel_request_fullscreen(struct wl_listener *listener, void *data
 
 static void toplevel_set_title(struct wl_listener *listener, void *data) {
 	struct toplevel *t = wl_container_of(listener, t, set_title);
-	if (focused_toplevel(t->server) == t && t->xdg_toplevel->base->surface->mapped) {
-		report_title(t->server);
+	if (t->mapped && top_on(t->server, t->out) == t) {
+		report_title(t->server, t->out);
 	}
 }
 
 static void toplevel_destroy(struct wl_listener *listener, void *data) {
 	struct toplevel *t = wl_container_of(listener, t, destroy);
+	struct server *server = t->server;
+	int k = t->out;
 	wl_list_remove(&t->map.link);
 	wl_list_remove(&t->unmap.link);
 	wl_list_remove(&t->commit.link);
@@ -612,7 +886,14 @@ static void toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&t->request_maximize.link);
 	wl_list_remove(&t->request_fullscreen.link);
 	wl_list_remove(&t->set_title.link);
+	wl_list_remove(&t->all_link);
 	free(t);
+	/* Destroyed before it ever mapped: give back an output it asked for. */
+	if (k >= 0 && server->requested[k] && !occupied(server, k)) {
+		server->requested[k] = false;
+		server->released[k] = true;
+		win_send_out(server, WIN_CLOSED, k);
+	}
 }
 
 static void new_xdg_toplevel(struct wl_listener *listener, void *data) {
@@ -624,6 +905,8 @@ static void new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	}
 	t->server = server;
 	t->xdg_toplevel = xdg_toplevel;
+	t->out = -1;
+	wl_list_insert(&server->all, &t->all_link);
 	t->scene_tree = wlr_scene_xdg_surface_create(&server->scene->tree, xdg_toplevel->base);
 	t->scene_tree->node.data = t;
 	xdg_toplevel->base->data = t->scene_tree;
@@ -646,7 +929,8 @@ static void new_xdg_toplevel(struct wl_listener *listener, void *data) {
 
 /* ── Popups ──────────────────────────────────────────────────────── */
 
-/* Keep a popup inside the output, in coordinates of its toplevel. */
+/* Keep a popup inside its toplevel's output, in coordinates of that
+ * toplevel. */
 static void popup_unconstrain(struct wlr_xdg_popup *popup) {
 	struct wlr_xdg_popup *p = popup;
 	struct wlr_xdg_surface *parent = NULL;
@@ -659,7 +943,7 @@ static void popup_unconstrain(struct wlr_xdg_popup *popup) {
 	}
 	struct wlr_scene_tree *tree = parent->data;
 	struct toplevel *t = tree->node.data;
-	struct wlr_box out = output_box(t->server);
+	struct wlr_box out = output_box(t->server, t->out);
 	struct wlr_box box = {
 		.x = out.x - tree->node.x,
 		.y = out.y - tree->node.y,
@@ -722,6 +1006,7 @@ int main(void) {
 	struct server server = {0};
 	server.win_fd = -1;
 	wl_list_init(&server.toplevels);
+	wl_list_init(&server.all);
 	wl_list_init(&server.keyboards);
 
 	server.display = wl_display_create();
@@ -756,8 +1041,6 @@ int main(void) {
 
 	server.output_layout = wlr_output_layout_create(server.display);
 	wlr_xdg_output_manager_v1_create(server.display, server.output_layout);
-	server.layout_change.notify = layout_change;
-	wl_signal_add(&server.output_layout->events.change, &server.layout_change);
 	server.new_output.notify = new_output;
 	wl_signal_add(&server.backend->events.new_output, &server.new_output);
 

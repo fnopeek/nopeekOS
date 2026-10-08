@@ -6,8 +6,7 @@
 //! composites it as a tile like any other window (tiling invariant —
 //! never fullscreen).
 //!
-//! Keyed by `WindowId` so the design handles N surfaces even though one
-//! VM exists now; the consumer side never assumes a count.
+//! Keyed by `WindowId`: a VM has one surface per app window.
 //!
 //! Concurrency: the producer (virtio-gpu FLUSH on a vCPU core) and the
 //! consumer (Shade render on Core 0) run on different cores. Three
@@ -49,19 +48,16 @@ pub struct GuestSurface {
     damage: Option<(u32, u32, u32, u32)>,
     /// Desired output size = the window's content rect, written by
     /// Shade on create + every retile (`set_tile_size`). virtio-gpu
-    /// `GET_DISPLAY_INFO` reports this so the guest (wlroots/cage)
-    /// reflows to the tile natively, with no host-side scaling.
+    /// `GET_DISPLAY_INFO` reports this for a new output, and a change goes
+    /// to the guest compositor as `WIN_RESIZE`, so the guest renders at the
+    /// tile size natively, with no host-side scaling.
     /// 0 until Shade has placed the window.
     tile_w: u32,
     tile_h: u32,
     /// Set by `set_tile_size` when the tile size changed, taken by the
-    /// VM core (`take_display_dirty`) to raise a virtio-gpu
-    /// config-change IRQ so the guest re-queries GET_DISPLAY_INFO.
-    /// Coalescing is free: many resizes before one take = one IRQ.
+    /// VM core (`take_display_dirty`), which sends the guest the new size.
+    /// Many resizes before one take = one message.
     display_dirty: bool,
-    /// Tick of the last tile size change. The guest is told only once the
-    /// size has held for `SIZE_SETTLE_TICKS`.
-    size_changed_at: u64,
 }
 
 #[derive(Default)]
@@ -85,19 +81,12 @@ impl GuestSurface {
             tile_w: 0,
             tile_h: 0,
             display_dirty: false,
-            size_changed_at: 0,
         }
     }
 }
 
 static SURFACES: Mutex<BTreeMap<u32, GuestSurface>> = Mutex::new(BTreeMap::new());
 
-/// How long a tile size must hold before the guest hears of it, in 100 Hz
-/// ticks. Every size the guest is told costs it an output rebuild (a
-/// disconnect/reconnect cycle, black frames from the compositor in it); a
-/// dock animation or a drag passes through dozens of sizes, and only the
-/// last one matters.
-const SIZE_SETTLE_TICKS: u64 = 15;
 
 /// Any surface has `display_dirty` set — lets the vCPU ask on every exit
 /// without taking the map lock.
@@ -180,7 +169,7 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
     // The first frame makes the window itself appear (`has_frame`), border
     // and all, which the clipped tile blit does not cover.
     if first {
-        PENDING_REVEAL.store(window_id, Ordering::Release);
+        PENDING_REVEAL.lock().push(window_id);
         crate::shade::request_render();
     } else if crate::shade::SURFACE_CLIP_BLIT {
         crate::shade::request_surface_render();
@@ -235,21 +224,17 @@ pub fn set_tile_size(window_id: u32, w: u32, h: u32) {
         surf.tile_w = w;
         surf.tile_h = h;
         surf.display_dirty = true;
-        surf.size_changed_at = crate::interrupts::ticks();
         ANY_DISPLAY_DIRTY.store(true, Ordering::Release);
     }
 }
 
-/// Window to reveal once Core 0 renders next: its guest presented its first
-/// frame on a vCPU core, and only Core 0 touches the compositor. 0 = none.
-static PENDING_REVEAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Windows to reveal once Core 0 renders next: their guest presented the
+/// first frame on a vCPU core, and only Core 0 touches the compositor.
+static PENDING_REVEAL: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
-/// The window whose first frame arrived, if any (clears it).
+/// A window whose first frame arrived, if any (taken off the list).
 pub fn take_reveal() -> Option<u32> {
-    match PENDING_REVEAL.swap(0, Ordering::AcqRel) {
-        0 => None,
-        id => Some(id),
-    }
+    PENDING_REVEAL.lock().pop()
 }
 
 /// True once the guest has presented a frame. Until then the window is not
@@ -272,25 +257,14 @@ pub fn tile_size(window_id: u32) -> Option<(u32, u32)> {
     })
 }
 
-/// Non-consuming peek of the display-dirty flag. The VM core checks
-/// this first so it can rate-limit the config-change IRQ (debounce)
-/// without clearing the flag when it decides to skip — the dirty state
-/// (and the latest tile size) then survives to the next allowed
-/// window, so the final resize size is always delivered.
-pub fn display_dirty_peek(window_id: u32) -> bool {
-    if !ANY_DISPLAY_DIRTY.load(Ordering::Acquire) {
-        return false;
-    }
-    let now = crate::interrupts::ticks();
-    SURFACES.lock().get(&window_id).is_some_and(|s| {
-        s.display_dirty && now.saturating_sub(s.size_changed_at) >= SIZE_SETTLE_TICKS
-    })
+/// Any window's tile size changed and is not yet taken — lets the vCPU ask
+/// on every exit without taking the map lock.
+pub fn any_display_dirty() -> bool {
+    ANY_DISPLAY_DIRTY.load(Ordering::Acquire)
 }
 
 /// True (and clears the flag) if the tile size changed since the last
-/// call → the VM core must raise a virtio-gpu config-change IRQ so the
-/// guest re-queries `GET_DISPLAY_INFO`. Only consumed on a tick where
-/// the IRQ can actually be injected, so a missed slot keeps the flag.
+/// call → the VM core sends the guest the new size.
 pub fn take_display_dirty(window_id: u32) -> bool {
     let mut map = SURFACES.lock();
     match map.get_mut(&window_id) {

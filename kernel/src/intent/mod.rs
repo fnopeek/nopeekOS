@@ -2828,7 +2828,7 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
             // teardown path closes it on guest exit / window close.
             // Without a compositor (serial-only boot) we stay unbound
             // and virtio-gpu falls back to the fullscreen blit.
-            match crate::shade::create_surface_window("microvm") {
+            match crate::shade::create_surface_window(crate::microvm::VM_WINDOW_TITLE) {
                 Some(wid) => {
                     crate::microvm::vm_bind_window(wid.0);
                     // The window stays hidden, and unfocused, until the

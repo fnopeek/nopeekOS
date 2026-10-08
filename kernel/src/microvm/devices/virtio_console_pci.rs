@@ -21,10 +21,11 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 use super::guest_mem::GuestMem;
+use super::virtio_gpu_pci::MAX_OUTPUTS;
 
 const VIRTIO_VENDOR: u32 = 0x1AF4;
 const VIRTIO_CONSOLE_DEVICE: u32 = 0x1043;
@@ -116,10 +117,18 @@ pub const MSG_READY: u8 = 0x81;
 const WIN_MAX_FRAME: usize = 512;
 /// Host -> guest: close the app's windows on output `u8`.
 pub const WIN_CLOSE: u8 = 0x01;
+/// Host -> guest: the user focused output `u8`'s window.
+pub const WIN_FOCUS: u8 = 0x02;
+/// Host -> guest: output `u8`'s window is now `u16` x `u16` pixels.
+pub const WIN_RESIZE: u8 = 0x03;
 /// Guest -> host: the compositor is listening; payload: protocol version.
 const WIN_HELLO: u8 = 0x81;
-/// Guest -> host: title of the focused window on output `u8`, then UTF-8.
+/// Guest -> host: title of the topmost window on output `u8`, then UTF-8.
 const WIN_TITLE: u8 = 0x82;
+/// Guest -> host: the app opened a window; give output `u8` a host window.
+const WIN_OPEN: u8 = 0x83;
+/// Guest -> host: output `u8` holds no window any more; close its window.
+const WIN_CLOSED: u8 = 0x84;
 /// Bytes of a guest title kept.
 const TITLE_MAX: usize = 200;
 
@@ -129,11 +138,18 @@ static CONTROL_READY: AtomicBool = AtomicBool::new(false);
 static VIOLATION: AtomicBool = AtomicBool::new(false);
 /// The guest's compositor has said HELLO on this launch.
 static WINDOWS_READY: AtomicBool = AtomicBool::new(false);
+/// The compositor just started: send it every window's size, in case one
+/// changed after its output came up and before it listened.
+static RESEND_SIZES: AtomicBool = AtomicBool::new(false);
 /// Frames for each port, queued by any core (`send`, `send_windows`),
 /// delivered by `pump` on the vCPU that owns the device.
 static OUTBOX: [Mutex<VecDeque<u8>>; NUM_PORTS] = [const { Mutex::new(VecDeque::new()) }; NUM_PORTS];
-/// A title from the guest, not yet taken by Core 0 (`take_title`).
-static TITLE: Mutex<Option<String>> = Mutex::new(None);
+/// Titles from the guest by output, not yet taken by Core 0 (`take_titles`).
+static TITLES: Mutex<[Option<String>; MAX_OUTPUTS]> = Mutex::new([const { None }; MAX_OUTPUTS]);
+/// Outputs the guest asked to open / reported closed (bit k = output k),
+/// not yet taken by Core 0 (`take_output_requests`).
+static OPEN_REQ: AtomicU32 = AtomicU32::new(0);
+static CLOSED_REQ: AtomicU32 = AtomicU32::new(0);
 
 /// Whether a guest is listening on the control port.
 pub fn control_ready() -> bool { CONTROL_READY.load(Ordering::Acquire) }
@@ -174,20 +190,34 @@ fn queue(port: usize, max_frame: usize, msg_type: u8, payload: &[u8]) -> bool {
     true
 }
 
-/// The latest title the guest reported for its window, once.
-pub fn take_title() -> Option<String> {
-    TITLE.lock().take()
+/// The compositor needs every window's size again (it just said HELLO).
+pub fn take_resend_sizes() -> bool {
+    RESEND_SIZES.swap(false, Ordering::AcqRel)
+}
+
+/// The latest title the guest reported per output, each once.
+pub fn take_titles() -> [Option<String>; MAX_OUTPUTS] {
+    core::mem::replace(&mut *TITLES.lock(), [const { None }; MAX_OUTPUTS])
+}
+
+/// Outputs the guest asked to open and reported closed since the last
+/// call, as bit masks (bit k = output k).
+pub fn take_output_requests() -> (u32, u32) {
+    (OPEN_REQ.swap(0, Ordering::AcqRel), CLOSED_REQ.swap(0, Ordering::AcqRel))
 }
 
 /// Forget the previous launch's channel state.
 pub fn reset() {
     CONTROL_READY.store(false, Ordering::Release);
     WINDOWS_READY.store(false, Ordering::Release);
+    RESEND_SIZES.store(false, Ordering::Release);
     VIOLATION.store(false, Ordering::Release);
     for out in &OUTBOX {
         out.lock().clear();
     }
-    *TITLE.lock() = None;
+    *TITLES.lock() = [const { None }; MAX_OUTPUTS];
+    OPEN_REQ.store(0, Ordering::Release);
+    CLOSED_REQ.store(0, Ordering::Release);
 }
 
 /// A guest title as the host shows it: invalid UTF-8 replaced, control
@@ -470,13 +500,27 @@ impl VirtioConsole {
                     }
                 }
                 (PORT_WINDOWS, WIN_HELLO) => {
+                    RESEND_SIZES.store(true, Ordering::Release);
                     if !WINDOWS_READY.swap(true, Ordering::AcqRel) {
                         crate::kprintln!("[microvm] window channel up (protocol {})",
                             payload.first().copied().unwrap_or(0));
                     }
                 }
-                (PORT_WINDOWS, WIN_TITLE) if payload.first() == Some(&0) => {
-                    *TITLE.lock() = Some(clean_title(&payload[1..]));
+                (PORT_WINDOWS, WIN_TITLE | WIN_OPEN | WIN_CLOSED)
+                    if payload.first().is_some_and(|&k| (k as usize) < MAX_OUTPUTS) =>
+                {
+                    let k = payload[0] as usize;
+                    match msg_type {
+                        WIN_TITLE => TITLES.lock()[k] = Some(clean_title(&payload[1..])),
+                        WIN_OPEN => {
+                            OPEN_REQ.fetch_or(1 << k, Ordering::AcqRel);
+                            crate::intent::wake_shell();
+                        }
+                        _ => {
+                            CLOSED_REQ.fetch_or(1 << k, Ordering::AcqRel);
+                            crate::intent::wake_shell();
+                        }
+                    }
                 }
                 _ => {}
             }

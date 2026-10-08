@@ -6,16 +6,16 @@
 //!   q1 = cursorq  (cursor updates — acknowledged but ignored)
 //!
 //! 2D scanout end-to-end. We accept:
-//!   * GET_DISPLAY_INFO → report one 1280×720 display
+//!   * GET_DISPLAY_INFO → one display per app window (`MAX_OUTPUTS`)
 //!   * RESOURCE_CREATE_2D → track resource (id, fmt, w, h)
 //!   * RESOURCE_ATTACH_BACKING → record guest page list per resource
-//!   * SET_SCANOUT → bind resource to scanout 0
+//!   * SET_SCANOUT → bind resource to a scanout
 //!   * TRANSFER_TO_HOST_2D → copy guest pages → host-side resource buffer
-//!   * RESOURCE_FLUSH → composite into the bound Shade surface
+//!   * RESOURCE_FLUSH → composite into the scanout's Shade surface
 //!   * RESOURCE_UNREF / DETACH_BACKING → drop resource
 //!   * Cursor cmds → respond OK_NODATA, no rendering
 //!
-//! Out of scope here: virgl/3D, blob resources, EDID, multi-display.
+//! Out of scope here: virgl/3D, blob resources.
 //! We advertise 0 capsets so Linux skips virgl probing entirely.
 
 #![allow(dead_code)]
@@ -85,18 +85,15 @@ const DC_NUM_SCANOUTS:  u32 = 0x08;
 const DC_NUM_CAPSETS:   u32 = 0x0C;
 
 /// `events_read` bit: the display configuration changed → the guest
-/// must re-issue GET_DISPLAY_INFO. Raised by `signal_display_change`
-/// when Shade resizes the tile (live-resize round-trip).
+/// must re-issue GET_DISPLAY_INFO. Raised by `signal_outputs_changed`
+/// when an app window opens or closes.
 const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1 << 0;
 
 /// virtio-gpu feature bit. We advertise EDID so the guest's
 /// virtio_gpu_config_changed_work_func also calls
-/// virtio_gpu_cmd_get_edids on every DISPLAY event. The EDID callback
-/// in turn calls drm_kms_helper_hotplug_event() unconditionally,
-/// where drm_helper_hpd_irq_event would not, because the connector
-/// stays "connected" across a tile resize. That's the only path that
-/// makes wlroots/cage actually rescan the output and propagate a new
-/// xdg_surface.configure to the client.
+/// virtio_gpu_cmd_get_edids on every DISPLAY event; the EDID callback
+/// then raises the hotplug event that makes the compositor rescan its
+/// connectors. A new output's preferred mode comes from that EDID.
 const VIRTIO_GPU_F_EDID: u32 = 1 << 1;
 
 // virtio-gpu protocol command/response types
@@ -136,6 +133,9 @@ const MAX_QUEUE_SIZE: u16 = 16;
 /// The display refresh the controlq is paced to (see `service_controlq`).
 const VBLANK_HZ: u64 = 60;
 const MAX_SCANOUTS: usize = 16;   // protocol max
+/// Scanouts offered to the guest: one per app window (`MAX_OUTPUTS` in the
+/// guest compositor, npkwm). Output k is scanout k.
+pub const MAX_OUTPUTS: usize = 8;
 
 #[derive(Default, Clone, Copy)]
 struct VirtQueue {
@@ -187,8 +187,8 @@ struct Resource {
     flushed_frame: u64,
 }
 
-/// Per-scanout binding. We advertise 1 scanout (id 0); ids 1..16 stay
-/// disabled.
+/// Per-scanout binding. We advertise `MAX_OUTPUTS`; a scanout is connected
+/// while a host window shows it.
 #[derive(Default, Clone, Copy)]
 struct Scanout {
     enabled: bool,
@@ -229,19 +229,6 @@ pub struct VirtioGpu {
     /// Per-scanout bindings.
     scanouts: [Scanout; MAX_SCANOUTS],
 
-    /// Disconnect/reconnect state. wlroots/cage only ever picks an
-    /// output mode at connector-up time — a "preferred mode changed
-    /// while still connected" hotplug uevent is silently ignored. To
-    /// force a real mode-set on tile resize we synthesize a connector
-    /// disconnect (GET_DISPLAY_INFO reports enabled=0) immediately,
-    /// then a reconnect ~100 ms later with the new geometry + fresh
-    /// EDID. The compositor tears down the output on disconnect,
-    /// brings it back up on reconnect, and picks our new preferred
-    /// mode by spec.
-    ///
-    /// `Some(tick)` means we're in the disconnect window; reconnect
-    /// fires once `interrupts::ticks() >= tick`.
-    d4_disconnect_until: Option<u64>,
 
     /// First N flush events get a verbose log; afterwards we silently
     /// keep updating to avoid swamping the serial console.
@@ -250,7 +237,7 @@ pub struct VirtioGpu {
     /// console-line update which is a full 3.6 MB blit; logging each
     /// via kprintln stalls the guest for tens of seconds.
     transfer_log_count: u32,
-    /// Same for SET_SCANOUT — a wlroots/cage compositor double-buffers
+    /// Same for SET_SCANOUT — the guest compositor (wlroots) double-buffers
     /// by flipping the scanout between two resources every frame
     /// (res 3 ↔ 4 at the guest's refresh rate). Logging each floods
     /// the loop terminal forever; first 5 are enough to confirm setup.
@@ -267,8 +254,8 @@ pub struct VirtioGpu {
     /// once a FLUSH was served (0 = not paused). What a display does: one
     /// scan-out per refresh, the rest waits.
     paused_until: u64,
-    /// Resource of the last FLUSH that reached the surface.
-    last_flush_res: u32,
+    /// Per scanout: resource of the last FLUSH that reached its surface.
+    last_flush_res: [u32; MAX_OUTPUTS],
 }
 
 impl VirtioGpu {
@@ -303,9 +290,8 @@ impl VirtioGpu {
             dmg_area_acc: 0,
             dmg_tile_acc: 0,
             dmg_flush_count: 0,
-            d4_disconnect_until: None,
             paused_until: 0,
-            last_flush_res: 0,
+            last_flush_res: [0; MAX_OUTPUTS],
         }
     }
 
@@ -322,58 +308,14 @@ impl VirtioGpu {
         self.pending_kick_queue.take()
     }
 
-    /// Shade resized the tile → start a disconnect/reconnect cycle.
-    /// Phase 1 (this call): GET_DISPLAY_INFO will report the connector
-    /// as `enabled=0`, the guest sees `connector_status_disconnected`,
-    /// wlroots/cage tears down the output. Phase 2 (`tick_d4`, ~100 ms
-    /// later): GET_DISPLAY_INFO flips back to `enabled=1` with the new
-    /// W×H, the guest re-detects the connector, picks the preferred
-    /// mode from our fresh EDID, the compositor rebuilds the output
-    /// with the new size and propagates `xdg_surface.configure` to
-    /// the client.
-    ///
-    /// Why two phases: wlroots only mode-sets at connector-up time.
-    /// A "preferred mode changed while still connected" hotplug uevent
-    /// is silently dropped. The disconnect/reconnect round-trip is the
-    /// one path every Wayland compositor honors because it's what real
-    /// HW does.
-    ///
-    /// Caller injects IRQ 9 right after this returns. Pass the current
-    /// host tick from `interrupts::ticks()`.
-    pub fn signal_display_change(&mut self, now: u64) {
-        const DISCONNECT_TICKS: u64 = 10; // ~100 ms at 100 Hz host-timer
-        self.d4_disconnect_until = Some(now.wrapping_add(DISCONNECT_TICKS));
-        super::gpu_backend::set_d4_pending(true);
+    /// A window came or went: the guest re-reads which scanouts are
+    /// connected. Caller injects IRQ 9.
+    pub fn signal_outputs_changed(&mut self) {
         self.events_read |= VIRTIO_GPU_EVENT_DISPLAY;
         self.isr |= 0b10; // bit 1 = device configuration changed
         self.config_generation = self.config_generation.wrapping_add(1);
     }
 
-    /// Phase 2 of the resize cycle: if a disconnect window is pending and
-    /// the reconnect tick has been reached, flip the connector back to
-    /// `enabled=1` and raise a fresh DISPLAY event. Returns `true` iff
-    /// the reconnect fired (caller injects IRQ 9 then).
-    pub fn tick_d4(&mut self, now: u64) -> bool {
-        match self.d4_disconnect_until {
-            Some(until) if now.wrapping_sub(until) as i64 >= 0 => {
-                self.d4_disconnect_until = None;
-                super::gpu_backend::set_d4_pending(false);
-                self.events_read |= VIRTIO_GPU_EVENT_DISPLAY;
-                self.isr |= 0b10;
-                self.config_generation = self.config_generation.wrapping_add(1);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// True while we're in the disconnect half of a resize cycle. Used by
-    /// the vmx/svm run-loop to suppress fresh DISPLAY events until the
-    /// reconnect has fired (otherwise back-to-back resizes would queue
-    /// disconnects without the matching reconnect).
-    pub fn d4_disconnecting(&self) -> bool {
-        self.d4_disconnect_until.is_some()
-    }
 
     /// Process queue notify. q0 = controlq, q1 = cursorq.
     pub fn service_queues(&mut self, queue_idx: u16, mem: &GuestMem) -> bool {
@@ -569,18 +511,20 @@ impl VirtioGpu {
         match cmd_type {
             VIRTIO_GPU_CMD_GET_DISPLAY_INFO => {
                 let _ = ctx_id;
-                // Report the bound window's content rect so the
-                // guest renders to the tile size (no host scaling).
-                // Falls back to the default if Shade hasn't placed the
-                // window yet / VM unbound (dev fullscreen path).
-                let (dw, dh) = crate::shade::surface::tile_size(
-                    crate::microvm::vm_window())
-                    .unwrap_or((DISPLAY_W, DISPLAY_H));
-                // Disconnect half of a resize cycle: report enabled=0 so
-                // the guest connector goes status_disconnected → the
-                // compositor tears down the output.
-                let enabled = !self.d4_disconnecting();
-                build_display_info_resp(flags, fence_id, dw, dh, enabled)
+                // Each scanout with a window reports that window's content
+                // rect, so a new output starts at the tile size (no host
+                // scaling); the default if Shade hasn't placed it yet.
+                // Without any window (serial-only boot) scanout 0 stays on
+                // at the default.
+                let any = crate::microvm::vm_has_window();
+                let mut modes = [(0u32, 0u32, false); MAX_OUTPUTS];
+                for (k, m) in modes.iter_mut().enumerate() {
+                    let wid = crate::microvm::output_window(k);
+                    let (w, h) = crate::shade::surface::tile_size(wid).unwrap_or((DISPLAY_W, DISPLAY_H));
+                    let on = if any { wid != 0 } else { k == 0 };
+                    *m = (w, h, on);
+                }
+                build_display_info_resp(flags, fence_id, &modes)
             }
             VIRTIO_GPU_CMD_RESOURCE_CREATE_2D => {
                 let resp = if self.handle_resource_create_2d(&request[24..]) {
@@ -636,10 +580,10 @@ impl VirtioGpu {
                 if scanout as usize >= MAX_SCANOUTS {
                     return build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, flags, fence_id);
                 }
-                let (dw, dh) = crate::shade::surface::tile_size(crate::microvm::vm_window())
+                let (dw, dh) = crate::shade::surface::tile_size(
+                    crate::microvm::output_window(scanout as usize))
                     .unwrap_or((DISPLAY_W, DISPLAY_H));
                 let edid = build_edid(dw, dh);
-                let _ = scanout;
                 build_edid_resp(flags, fence_id, &edid)
             }
             _ => {
@@ -818,7 +762,12 @@ impl VirtioGpu {
         let h = u32::from_le_bytes([body[12], body[13], body[14], body[15]]);
         let resource_id = u32::from_le_bytes([body[16], body[17], body[18], body[19]]);
 
-        let last_res = self.last_flush_res;
+        // The scanout showing this resource, and its window.
+        let Some(k) = (0..MAX_OUTPUTS).find(|&k| {
+            self.scanouts[k].enabled && self.scanouts[k].resource_id == resource_id
+        }) else { return };
+        let wid = crate::microvm::output_window(k);
+        let last_res = self.last_flush_res[k];
         let r = match self.resources.iter_mut().find(|r| r.id == resource_id) {
             Some(r) => r, None => return,
         };
@@ -832,6 +781,15 @@ impl VirtioGpu {
         let r = &*r;
         let pix = match &r.host_pixels { Some(p) => p, None => return };
         crate::microvm::boottime::gpu_pixels(pix, r.width, r.height);
+        // A window opened while the app runs appears with its first
+        // picture, not with the black its output starts with.
+        if wid != 0
+            && super::gpu_backend::presenting()
+            && !crate::shade::surface::has_frame(wid)
+            && super::gpu_backend::lit_percent(pix, r.width, r.height) < super::gpu_backend::LIT_PCT
+        {
+            return;
+        }
         if !super::gpu_backend::should_present(pix, r.width, r.height) {
             return;
         }
@@ -876,12 +834,11 @@ impl VirtioGpu {
             self.dmg_tile_acc = 0;
         }
 
-        self.last_flush_res = resource_id;
-        let wid = crate::microvm::vm_window();
+        self.last_flush_res[k] = resource_id;
         if wid != 0 {
             super::gpu_backend::note(super::gpu_backend::STAT_FLUSH_KB, pix.len() as u64 / 1024);
             crate::shade::surface::write_frame(wid, pix, r.width, r.height, (x, y, dmg_w, dmg_h));
-        } else {
+        } else if !crate::microvm::vm_has_window() {
             blit_to_host_fb(pix, r.width, r.height);
         }
     }
@@ -1077,7 +1034,7 @@ impl VirtioGpu {
                 .copy_from_slice(&self.events_read.to_le_bytes());
             // events_clear reads back 0 (write-1-to-clear).
             b[DC_NUM_SCANOUTS as usize..DC_NUM_SCANOUTS as usize + 4]
-                .copy_from_slice(&1u32.to_le_bytes());
+                .copy_from_slice(&(MAX_OUTPUTS as u32).to_le_bytes());
             b[DC_NUM_CAPSETS as usize..DC_NUM_CAPSETS as usize + 4]
                 .copy_from_slice(&0u32.to_le_bytes());
             b
@@ -1269,10 +1226,9 @@ fn write_cvt_dtd(dtd: &mut [u8], w: u32, h: u32) {
 }
 
 /// Build a GET_DISPLAY_INFO response: ctrl_hdr + array of 16
-/// virtio_gpu_display_one. Only scanout 0 is reported; `enabled` is
-/// driven by the disconnect/reconnect state (false during the
-/// disconnect half of a tile-resize round-trip).
-fn build_display_info_resp(flags: u32, fence_id: u64, disp_w: u32, disp_h: u32, enabled: bool) -> Vec<u8> {
+/// virtio_gpu_display_one, the first `MAX_OUTPUTS` from `modes`
+/// (width, height, enabled).
+fn build_display_info_resp(flags: u32, fence_id: u64, modes: &[(u32, u32, bool); MAX_OUTPUTS]) -> Vec<u8> {
     // Per virtio-gpu spec: VIRTIO_GPU_MAX_SCANOUTS = 16.
     // struct virtio_gpu_resp_display_info:
     //   hdr (24)
@@ -1283,15 +1239,14 @@ fn build_display_info_resp(flags: u32, fence_id: u64, disp_w: u32, disp_h: u32, 
     buf[4..8].copy_from_slice(&flags.to_le_bytes());
     buf[8..16].copy_from_slice(&fence_id.to_le_bytes());
 
-    let p0 = 24;
-    buf[p0 +  0..p0 +  4].copy_from_slice(&0u32.to_le_bytes()); // x
-    buf[p0 +  4..p0 +  8].copy_from_slice(&0u32.to_le_bytes()); // y
-    buf[p0 +  8..p0 + 12].copy_from_slice(&disp_w.to_le_bytes());
-    buf[p0 + 12..p0 + 16].copy_from_slice(&disp_h.to_le_bytes());
-    buf[p0 + 16..p0 + 20].copy_from_slice(&(enabled as u32).to_le_bytes());
-    buf[p0 + 20..p0 + 24].copy_from_slice(&0u32.to_le_bytes()); // flags
-
-    // pmodes[1..16] stay zero (disabled)
+    for (k, &(w, h, enabled)) in modes.iter().enumerate() {
+        let p = 24 + k * 24;
+        // x, y and flags stay 0.
+        buf[p +  8..p + 12].copy_from_slice(&w.to_le_bytes());
+        buf[p + 12..p + 16].copy_from_slice(&h.to_le_bytes());
+        buf[p + 16..p + 20].copy_from_slice(&(enabled as u32).to_le_bytes());
+    }
+    // pmodes[MAX_OUTPUTS..16] stay zero (disabled)
     buf
 }
 

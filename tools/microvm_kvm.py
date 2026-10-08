@@ -10,6 +10,7 @@ nopeekOS this separates our VMM from what the guest and the app need anyway.
   python3 tools/microvm_kvm.py --show              # with a window
   python3 tools/microvm_kvm.py --fresh-home        # empty profile
   python3 tools/microvm_kvm.py --close-after 8     # close like Mod+Q does
+  python3 tools/microvm_kvm.py --resize-after 5:900x700   # resize the window
 
 Prints the guest milestones nopeekOS prints, timed from QEMU start, and the
 screen: it is captured every --sample ms over QMP and every change is
@@ -160,12 +161,15 @@ def main():
     ap.add_argument("--show", action="store_true", help="open a window (gtk)")
     ap.add_argument("--quit-after", type=float, default=None,
                     help="seconds after 'window up' to press Ctrl+Q, as the host does on close")
-    ap.add_argument("--key-after", action="append", default=[],
+    ap.add_argument("--key-after", action="append", default=[],  # QCODE may be ctrl+n
                     help="SECONDS:QCODE, a key press that many seconds after 'window up'; "
                          "QCODE 'click' clicks the middle of the screen (repeatable)")
     ap.add_argument("--close-after", type=float, default=None,
                     help="seconds after the window is up: close it over npk.windows, "
                          "then npk.control quit after 3 s, as nopeekOS does")
+    ap.add_argument("--resize-after", action="append", default=[],
+                    help="SECONDS:WxH after the window is up: send its new size over "
+                         "npk.windows, as nopeekOS does on a retile (repeatable)")
     ap.add_argument("--fresh-home", action="store_true", help="new empty ext4 profile")
     ap.add_argument("--extra", default="", help="appended to the guest kernel command line")
     ap.add_argument("--qemu-arg", action="append", default=[], help="extra QEMU argument (repeatable)")
@@ -276,7 +280,10 @@ def main():
         for t, payload in port.frames():
             if port.name == "win" and t == 0x82:
                 text = payload[1:].decode("utf-8", "replace")
-                print(f"[boottime] +{ms()} ms win: title {text!r}", flush=True)
+                print(f"[boottime] +{ms()} ms win: title {payload[0]} {text!r}", flush=True)
+            elif port.name == "win" and t in (0x83, 0x84):
+                what = "open" if t == 0x83 else "closed"
+                print(f"[boottime] +{ms()} ms win: {what} {payload[0]}", flush=True)
             else:
                 print(f"[boottime] +{ms()} ms {port.name}: type {t:#04x} {payload.hex()}", flush=True)
 
@@ -285,6 +292,11 @@ def main():
     shot = os.path.join(a.work, "shot.ppm")
     last, changes, window_up, quit_sent = None, [], None, False
     close_at = None
+    resizes = []
+    for r in a.resize_after:
+        sec, size = r.split(":")
+        w, h = size.split("x")
+        resizes.append((float(sec), int(w), int(h)))
     keys = [(float(k.split(":")[0]), k.split(":")[1]) for k in a.key_after]
     deadline = t0 + a.seconds
     try:
@@ -301,6 +313,8 @@ def main():
                         window_up = ms()
                         print(f"[boottime] +{window_up} ms app: window up "
                               f"({lit}% of pixels lit)", flush=True)
+                if last is not None and len(rows) != len(last):
+                    print(f"[boottime] +{ms()} ms screen height {len(last)} -> {len(rows)}", flush=True)
                 if last is not None and len(rows) == len(last):
                     diff = sum(1 for x, y in zip(rows, last) if x != y)
                     share = 100 * diff // max(len(rows), 1)
@@ -321,7 +335,7 @@ def main():
                             qmp.cmd("input-send-event", events=[
                                 {"type": "btn", "data": {"down": down, "button": "left"}}])
                     else:
-                        qmp.cmd("send-key", keys=[{"type": "qcode", "data": k[1]}])
+                        qmp.cmd("send-key", keys=[{"type": "qcode", "data": c} for c in k[1].split("+")])
                     print(f"[boottime] +{ms()} ms host: key {k[1]}", flush=True)
             if (a.quit_after is not None and window_up is not None and not quit_sent
                     and ms() - window_up >= a.quit_after * 1000):
@@ -329,6 +343,11 @@ def main():
                 qmp.cmd("send-key", keys=[{"type": "qcode", "data": "ctrl"},
                                           {"type": "qcode", "data": "q"}])
                 print(f"[boottime] +{ms()} ms host: Ctrl+Q", flush=True)
+            for r in list(resizes):
+                if window_up is not None and ms() - window_up >= r[0] * 1000:
+                    resizes.remove(r)
+                    win.send(0x03, bytes([0]) + r[1].to_bytes(2, "little") + r[2].to_bytes(2, "little"))
+                    print(f"[boottime] +{ms()} ms host: resize {r[1]}x{r[2]}", flush=True)
             if (a.close_after is not None and window_up is not None and close_at is None
                     and ms() - window_up >= a.close_after * 1000):
                 close_at = ms()

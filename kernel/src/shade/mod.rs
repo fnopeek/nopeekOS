@@ -300,9 +300,12 @@ pub fn focused_surface_id() -> Option<u32> {
 /// Forward a host pointer event into the focused Surface window's
 /// guest virtio-input eventq as an absolute pointer (qemu
 /// usb-tablet model): cursor position relative to the tile content
-/// rect, scaled to `0..ABS_MAX`, plus button transitions and wheel.
-/// Resolution-independent — the guest scales `ABS_MAX` onto its own
-/// display, so host-side tile scaling never desyncs the guest cursor.
+/// rect, plus button transitions and wheel. x carries the window: the
+/// range `0..ABS_MAX` is cut into one slot per guest output, and the guest
+/// compositor reads the output from the slot, so a pointer event never
+/// depends on a focus message arriving first. Resolution-independent — the
+/// guest scales a slot onto that output, so host-side tile scaling never
+/// desyncs the guest cursor.
 /// Additive to `handle_mouse` (which still draws the host cursor).
 pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
     use crate::microvm::devices::virtio_input_pci::{push_input_event, ABS_MAX};
@@ -319,23 +322,28 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
     const BTN_RIGHT: u16 = 0x111;
     const BTN_MIDDLE: u16 = 0x112;
 
-    // Content rect of the focused Surface window.
+    use crate::microvm::devices::virtio_gpu_pci::MAX_OUTPUTS;
+
+    // Content rect of the focused Surface window, and its guest output.
     let rect = with_compositor(|comp| {
         let fid = comp.focused?;
         let win = comp.windows.iter().find(|w| w.id == fid)?;
         if win.kind != window::WindowKind::Surface { return None; }
-        Some((win.content_x(comp.border), win.content_y(comp.border),
+        Some((fid.0, win.content_x(comp.border), win.content_y(comp.border),
               win.content_w(comp.border), win.content_h(comp.border)))
     }).flatten();
-    let (cx, cy, cw, ch) = match rect {
-        Some(r) if r.2 > 0 && r.3 > 0 => r,
+    let (wid, cx, cy, cw, ch) = match rect {
+        Some(r) if r.3 > 0 && r.4 > 0 => r,
         _ => return, // no Surface focused → no-op (called on every move)
     };
+    let Some(out) = crate::microvm::output_of_window(wid) else { return };
 
+    // x: one slot of `0..ABS_MAX` per guest output (see above).
+    let slot = (ABS_MAX + 1) / MAX_OUTPUTS as u32;
     let (mx, my) = cursor::atomic_pos();
     let rx = (mx - cx as i32).clamp(0, cw as i32 - 1) as u32;
     let ry = (my - cy as i32).clamp(0, ch as i32 - 1) as u32;
-    let ax = rx * ABS_MAX / (cw - 1).max(1);
+    let ax = out as u32 * slot + rx * (slot - 1) / (cw - 1).max(1);
     let ay = ry * ABS_MAX / (ch - 1).max(1);
 
     let mut any = false;
@@ -1360,16 +1368,24 @@ pub fn poll_render() {
         force_redraw();
     }
 
-    if let Some(id) = crate::shade::surface::take_reveal() {
+    let mut revealed = false;
+    while let Some(id) = crate::shade::surface::take_reveal() {
         with_compositor(|comp| comp.reveal_surface(WindowId(id)));
+        revealed = true;
+    }
+    if revealed {
         render_frame();
     }
 
-    // The guest named its window: the bar shows it from the next notify.
-    if let Some(caption) = crate::microvm::devices::virtio_console_pci::take_title() {
-        let id = WindowId(crate::microvm::vm_window());
+    // The guest named its windows: the bar shows them from the next notify.
+    let titles = crate::microvm::devices::virtio_console_pci::take_titles();
+    if titles.iter().any(Option::is_some) {
         note_shell_fingerprint(with_compositor(|comp| {
-            comp.set_caption(id, caption);
+            for (k, caption) in titles.into_iter().enumerate() {
+                if let Some(caption) = caption {
+                    comp.set_caption(WindowId(crate::microvm::output_window(k)), caption);
+                }
+            }
             comp.shell_fingerprint()
         }));
     }

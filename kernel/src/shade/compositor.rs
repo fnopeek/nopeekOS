@@ -2172,8 +2172,8 @@ impl Compositor {
             }
             crate::shade::window::WindowKind::Surface => {
                 // Raw guest framebuffer → tile, 1:1 (no scaling).
-                // virtio-gpu GET_DISPLAY_INFO advertises this content
-                // rect, so the guest (wlroots/cage) reflows to the
+                // The guest compositor gets this content rect as its
+                // output size, so it reflows to the
                 // tile size natively — guest `sw×sh` == `cw×ch` in
                 // steady state; a brief mismatch during a resize
                 // round-trip just clips (never stretches). Same

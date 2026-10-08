@@ -26,7 +26,6 @@ pub fn lock() -> MutexGuard<'static, VirtioGpu> { GPU.lock() }
 pub fn reset() {
     *GPU.lock() = VirtioGpu::new();
     RESUME_TSC.store(0, Ordering::Release);
-    D4_PENDING.store(false, Ordering::Release);
 }
 
 /// Guest GPU traffic for `cores`: controlq commands by kind, cursorq
@@ -65,12 +64,39 @@ pub fn take_resume(now: u64) -> bool {
         && RESUME_TSC.compare_exchange(t, 0, Ordering::AcqRel, Ordering::Acquire).is_ok()
 }
 
-/// Mirror of `VirtioGpu::d4_disconnecting`, so the vCPU's per-exit look at
-/// the resize state needs no device lock. Written under the lock.
-static D4_PENDING: AtomicBool = AtomicBool::new(false);
-pub(super) fn set_d4_pending(on: bool) { D4_PENDING.store(on, Ordering::Release); }
-#[inline]
-pub fn d4_pending() -> bool { D4_PENDING.load(Ordering::Acquire) }
+/// The vCPU core's display work: tell the guest that windows came or went
+/// (true: raise the GPU interrupt), and send the guest compositor the new
+/// size of every window that changed. A window's size waits only while the
+/// compositor is not yet listening.
+pub fn display_tick() -> bool {
+    use super::virtio_console_pci as console;
+    use super::virtio_gpu_pci::MAX_OUTPUTS;
+    let changed = crate::microvm::take_outputs_changed();
+    if changed {
+        lock().signal_outputs_changed();
+    }
+    if console::take_resend_sizes() {
+        for k in 0..MAX_OUTPUTS {
+            send_size(k);
+        }
+    } else if crate::shade::surface::any_display_dirty() && console::windows_ready() {
+        for k in 0..MAX_OUTPUTS {
+            let wid = crate::microvm::output_window(k);
+            if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
+                send_size(k);
+            }
+        }
+    }
+    changed
+}
+
+/// `WIN_RESIZE` for output k: u8 output, u16 width, u16 height.
+fn send_size(k: usize) {
+    use super::virtio_console_pci as console;
+    let Some((w, h)) = crate::shade::surface::tile_size(crate::microvm::output_window(k)) else { return };
+    let (w, h) = ((w.min(u16::MAX as u32) as u16).to_le_bytes(), (h.min(u16::MAX as u32) as u16).to_le_bytes());
+    let _ = console::send_windows(console::WIN_RESIZE, &[k as u8, w[0], w[1], h[0], h[1]]);
+}
 
 /// Lock-free BAR0 range check (const base) — the vCPU NPF dispatch tests this on
 /// every MMIO exit, so keep it off the device lock (mirror of net_backend).
@@ -131,6 +157,11 @@ pub fn present_closing() {
     PRESENT.store(PRESENT_CLOSING, Ordering::Release);
 }
 
+/// The app has painted: frames go to the windows.
+pub fn presenting() -> bool {
+    PRESENT.load(Ordering::Acquire) == PRESENT_SHOWN
+}
+
 /// Whether this flushed frame goes to the window.
 pub fn should_present(pixels: &[u8], width: u32, height: u32) -> bool {
     match PRESENT.load(Ordering::Acquire) {
@@ -159,7 +190,7 @@ static WORKER_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 static FULL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Compile-time gate for the off-vCPU GPU worker. Off: the off-vCPU GPU's
-/// async IRQ9 delivery to the guest is unreliable (cage's virtio-gpu driver
+/// async IRQ9 delivery to the guest is unreliable (the guest's virtio-gpu driver
 /// can stall waiting for a completion that never arrives), so the GPU stays
 /// inline on the vCPU (synchronous deliver_irq).
 pub const FULL_GPU_BACKEND: bool = false;
