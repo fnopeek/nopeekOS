@@ -1146,6 +1146,11 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
     }
     if sh.pci.virtio_input.drain_injected(gm) { sh.pic.pulse(crate::microvm::devices::virtio_input_pci::IRQ_LINE); }
     if sh.pci.virtio_console.pump(gm) { sh.pic.pulse(crate::microvm::devices::virtio_console_pci::IRQ_LINE); }
+    if let Some(r) = crate::microvm::devices::virtio_console_pci::take_disk_report() {
+        if sh.pci.virtio_blk.grow_home(&r) {
+            sh.pic.pulse(crate::microvm::devices::virtio_blk_pci::HOME_IRQ_LINE);
+        }
+    }
     sh.pit.poll(&mut sh.pic);
 
     let now = crate::interrupts::ticks();

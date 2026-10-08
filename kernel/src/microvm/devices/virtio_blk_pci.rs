@@ -178,12 +178,24 @@ pub struct VirtioBlk {
     /// require host_base — not available inside mmio_write).
     pending_kick_queue: Option<u16>,
 
+    /// npkFS was too full to grow the home image (said once).
+    grow_refused: bool,
+    /// Fill level, in percent, at which the home image grows.
+    grow_at_pct: u64,
     /// Diagnostic counters (limited, to avoid log spam).
     notify_log_count: u32,
     serviced_log_count: u32,
 }
 
-const CAPACITY_SECTORS: u64 = 1048576; // 512 MiB — ext4 home image (/dev/vda); template regenerated via tools/gen_home_template.py
+/// Size of a fresh home image: the ext4 of `HOME_TEMPLATE`. It grows from
+/// there as the guest fills it (`grow_home`).
+const CAPACITY_SECTORS: u64 = 1048576; // 512 MiB — template regenerated via tools/gen_home_template.py
+/// The home image grows once the guest's filesystem is this full;
+/// `set microvm_home_grow_at <percent>` overrides it (to try growth out).
+const GROW_AT_PCT: u64 = 80;
+/// The smallest step worth growing by; less free npkFS space than twice
+/// this and the image stays as it is.
+const MIN_GROW_BYTES: u64 = 64 * 1024 * 1024;
 
 impl VirtioBlk {
     /// Slot 1 — the read-write, npkFS-persisted per-app home image.
@@ -191,7 +203,55 @@ impl VirtioBlk {
     /// (LibreWolf cookies/history/bookmarks/prefs/extensions) survives
     /// reboots. Cache stays in tmpfs to keep the image small.
     pub fn new() -> Self {
-        Self::with(BAR0_BASE, HOME_IRQ_LINE, false, true, load_or_init_backing(), CAPACITY_SECTORS)
+        let backing = load_or_init_backing();
+        let sectors = (backing.len() / 512) as u64;
+        let mut dev = Self::with(BAR0_BASE, HOME_IRQ_LINE, false, true, backing, sectors);
+        dev.grow_at_pct = crate::config::get("microvm_home_grow_at")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|p| (1..=99).contains(p))
+            .unwrap_or(GROW_AT_PCT);
+        dev
+    }
+
+    /// Grow the home image when the guest's filesystem is filling up, by
+    /// its current size (doubling) while npkFS and host RAM each keep at
+    /// least as much free again: the report is the guest's word, and every
+    /// chunk it writes stays in host RAM until the VM ends. The guest hears
+    /// of it through a config change and grows its filesystem into the
+    /// space. Only once the guest's filesystem covers the whole disk, so
+    /// one growth is taken in before the next. True: raise the device
+    /// interrupt.
+    pub fn grow_home(&mut self, r: &super::virtio_console_pci::DiskReport) -> bool {
+        let cap = self.capacity_sectors * 512;
+        if !self.persist
+            || r.dev_bytes != cap
+            || r.fs_bytes < cap
+            || r.used_bytes * 100 < r.data_bytes * self.grow_at_pct
+        {
+            return false;
+        }
+        let free = crate::npkfs::stats()
+            .map_or(0, |(_, free_blocks, _, _)| free_blocks * crate::npkfs::BLOCK_SIZE as u64);
+        let ram = (super::guest_mem::frames_spare() * crate::memory::PAGE_SIZE) as u64;
+        let chunk = crate::npkfs::STREAMING_CHUNK_SIZE as u64;
+        let step = cap.min(free / 2).min(ram / 2) / chunk * chunk;
+        if step < MIN_GROW_BYTES {
+            if !self.grow_refused {
+                self.grow_refused = true;
+                kprintln!("[virtio-blk] home image {} MiB is {}% full, and npkFS or RAM has no room to grow it",
+                    cap >> 20, r.used_bytes * 100 / r.data_bytes.max(1));
+            }
+            return false;
+        }
+        if !self.backing.grow((cap + step) as usize) {
+            return false;
+        }
+        self.capacity_sectors = (cap + step) / 512;
+        self.isr |= 0b10; // configuration changed
+        self.config_generation = self.config_generation.wrapping_add(1);
+        kprintln!("[virtio-blk] home image grown {} -> {} MiB (guest was {}% full)",
+            cap >> 20, (cap + step) >> 20, r.used_bytes * 100 / r.data_bytes.max(1));
+        true
     }
 
     /// Slot 5 — the read-only squashfs userspace bundle. Backing is
@@ -239,6 +299,8 @@ impl VirtioBlk {
             persist,
             backing,
             pending_kick_queue: None,
+            grow_refused: false,
+            grow_at_pct: GROW_AT_PCT,
             notify_log_count: 0,
             serviced_log_count: 0,
         }
@@ -607,24 +669,26 @@ const PROFILE_PATH: &str = "sys/microvm/apps/browser/home.img";
 static HOME_TEMPLATE: &[u8] = include_bytes!("home_template.bin");
 
 /// Open the saved home image from npkFS (auto-decrypts at rest) for
-/// chunk-wise reads. On miss or size change, seed a fresh empty ext4 from
-/// `HOME_TEMPLATE` so PID-1's first `mount -t ext4 /dev/vda` succeeds.
+/// chunk-wise reads, whatever size it has grown to. Without one (or with
+/// one no disk can be), seed a fresh empty ext4 from `HOME_TEMPLATE` so
+/// PID-1's first `mount -t ext4 /dev/vda` succeeds.
 fn load_or_init_backing() -> BlkImage {
-    let cap = (CAPACITY_SECTORS * 512) as usize;
+    let fresh = (CAPACITY_SECTORS * 512) as usize;
+    let usable = |len: usize| len >= fresh && len % 512 == 0;
     if let Some(img) = BlkImage::open_lazy(PROFILE_PATH, false) {
-        if img.len() == cap {
-            kprintln!("[virtio-blk] home image opened ({} bytes, chunks on demand) /dev/vda", cap);
+        if usable(img.len()) {
+            kprintln!("[virtio-blk] home image opened ({} MiB, chunks on demand) /dev/vda", img.len() >> 20);
             return img;
         }
-        kprintln!("[virtio-blk] home image size mismatch ({} != {}), reseeding", img.len(), cap);
+        kprintln!("[virtio-blk] home image of {} bytes cannot be a disk, reseeding", img.len());
     } else if let Ok((data, _hash)) = crate::npkfs::fetch(PROFILE_PATH) {
-        if data.len() == cap {
-            kprintln!("[virtio-blk] loaded home image ({} bytes) /dev/vda", cap);
+        if usable(data.len()) {
+            kprintln!("[virtio-blk] loaded home image ({} MiB) /dev/vda", data.len() >> 20);
             return BlkImage::resident(data);
         }
-        kprintln!("[virtio-blk] home image size mismatch ({} != {}), reseeding", data.len(), cap);
+        kprintln!("[virtio-blk] home image of {} bytes cannot be a disk, reseeding", data.len());
     }
-    BlkImage::resident(seed_home_image(cap))
+    BlkImage::resident(seed_home_image(fresh))
 }
 
 /// Expand `HOME_TEMPLATE` into a fresh `cap`-byte empty ext4 image.

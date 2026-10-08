@@ -111,6 +111,28 @@ const MAX_CTRL_OUT: usize = 16;
 pub const MSG_QUIT: u8 = 0x01;
 /// Guest -> host: PID 1's control process is listening.
 pub const MSG_READY: u8 = 0x81;
+/// Guest -> host: the home disk and its filesystem, four u64 (`DiskReport`).
+const MSG_DISK: u8 = 0x82;
+
+/// What the guest reports about its home disk (`MSG_DISK`), in bytes.
+#[derive(Clone, Copy)]
+pub struct DiskReport {
+    /// The disk as the guest sees it.
+    pub dev_bytes: u64,
+    /// The ext4 on it (block count × block size).
+    pub fs_bytes: u64,
+    /// The filesystem's data area (statfs) and what of it is used.
+    pub data_bytes: u64,
+    pub used_bytes: u64,
+}
+
+/// The guest's latest home disk report, not yet taken by the vCPU core.
+static DISK_REPORT: Mutex<Option<DiskReport>> = Mutex::new(None);
+
+/// The guest's latest home disk report, once.
+pub fn take_disk_report() -> Option<DiskReport> {
+    DISK_REPORT.lock().take()
+}
 
 // Window-port message types.
 /// Largest window frame (type byte + payload).
@@ -216,6 +238,7 @@ pub fn reset() {
         out.lock().clear();
     }
     *TITLES.lock() = [const { None }; MAX_OUTPUTS];
+    *DISK_REPORT.lock() = None;
     OPEN_REQ.store(0, Ordering::Release);
     CLOSED_REQ.store(0, Ordering::Release);
 }
@@ -498,6 +521,16 @@ impl VirtioConsole {
                     if !CONTROL_READY.swap(true, Ordering::AcqRel) {
                         crate::kprintln!("[microvm] control channel up");
                     }
+                }
+                (PORT_CONTROL, MSG_DISK) if payload.len() >= 32 => {
+                    let u = |i: usize| {
+                        let mut b = [0u8; 8];
+                        b.copy_from_slice(&payload[i * 8..i * 8 + 8]);
+                        u64::from_le_bytes(b)
+                    };
+                    *DISK_REPORT.lock() = Some(DiskReport {
+                        dev_bytes: u(0), fs_bytes: u(1), data_bytes: u(2), used_bytes: u(3),
+                    });
                 }
                 (PORT_WINDOWS, WIN_HELLO) => {
                     RESEND_SIZES.store(true, Ordering::Release);

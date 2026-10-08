@@ -494,7 +494,8 @@ Gebraucht wird er für:
 |---|---|---|
 | Wirt → Gast | `start { app, freigaben, netz }` | App-Daten + Freigaben einhängen, App starten |
 | Wirt → Gast | `quit` | App **sauber** beenden (SIGTERM, warten), dann `sync` — heute wird die App beim Schliessen hart abgeschnitten, vermutlich der Grund für das verlorene LibreWolf-Profil |
-| Wirt → Gast | `disk_grown`, `grant_changed` | `resize2fs`, Freigabe aus-/einhängen |
+| Wirt → Gast | `grant_changed` | Freigabe aus-/einhängen (das Wachsen der Platte meldet virtio-blk selbst, §7) |
+| Gast → Wirt | `disk` | Platte, ext4, Belegung; der Wirt vergrössert das Image (§7) |
 | Gast → Wirt | `ready`, `first_frame` | Meilensteine für die Zeitachse (§0.7) |
 | Gast → Wirt | `exited { code }`, `build { fortschritt, ergebnis }` | Verwaltung, Bau-VM |
 
@@ -704,6 +705,22 @@ der Angreifer **root im Gast**. Die Frage ist nur, was er dann hat.
   Aufräumfunktion löscht Schichten ohne Rezept oder mit veralteter Basis.
 - Gelesene Plattenstücke liegen im Wirts-RAM, solange die VM läuft (die sqfs
   fast ganz, gemessen 243 von 253 MiB).
+- **Die App-Daten wachsen** (Kernel 0.529.0, microvm-init 0.7.0). Das
+  `home.img` startet bei 512 MiB (ext4-Vorlage). PID 1 meldet alle 5 s über
+  den Steuerkanal Platte, ext4, Datenbereich und Belegung (`0x82 disk`,
+  vier `u64`). Ab 80 % (`set microvm_home_grow_at <prozent>`) und nur, wenn
+  die ext4 die ganze Platte deckt, verdoppelt der Wirt das Image — höchstens
+  um die Hälfte des freien npkFS-Platzes und des freien RAMs über der
+  Kernel-Reserve, denn die Meldung ist das Wort des Gasts und jedes
+  beschriebene Stück bleibt bis zum VM-Ende im Wirts-RAM. Das neue Ende sind
+  Null-Stücke: im RAM erst beim Schreiben, in npkFS als ein einziges
+  geteiltes Null-Stück. Der Gast erfährt es über ein virtio-Config-Ereignis;
+  PID 1 sieht die grössere Platte und lässt die eingehängte ext4 per
+  `EXT4_IOC_RESIZE_FS` mitwachsen (die Vorlage hat `resize_inode`). Ein
+  Image beliebiger Grösse wird geladen; das alte „Grösse passt nicht → neu
+  anlegen“ ist weg. Unter KVM geprüft (QMP `block_resize` 512 → 1024 MiB,
+  ext4 wuchs im Betrieb, Datenbereich 487 → 990 MiB); das Wachsen durch den
+  Wirt prüft der Gerätelauf.
 
 ## 8. Reihenfolge
 

@@ -173,6 +173,9 @@ def main():
     ap.add_argument("--watch-dark", type=int, default=None, metavar="PCT",
                     help="after the window is up, report every capture with less than "
                          "PCT%% of pixels lit (black frames while resizing)")
+    ap.add_argument("--grow-home-after", default=None, metavar="SECONDS:MIB",
+                    help="grow the home disk to MIB that many seconds after the window is up "
+                         "(QMP block_resize), as nopeekOS does when it fills up")
     ap.add_argument("--fresh-home", action="store_true", help="new empty ext4 profile")
     ap.add_argument("--extra", default="", help="appended to the guest kernel command line")
     ap.add_argument("--qemu-arg", action="append", default=[], help="extra QEMU argument (repeatable)")
@@ -284,6 +287,10 @@ def main():
             if port.name == "win" and t == 0x82:
                 text = payload[1:].decode("utf-8", "replace")
                 print(f"[boottime] +{ms()} ms win: title {payload[0]} {text!r}", flush=True)
+            elif port.name == "ctl" and t == 0x82 and len(payload) >= 32:
+                dev, fs, data, used = (int.from_bytes(payload[i:i + 8], "little") for i in range(0, 32, 8))
+                print(f"[boottime] +{ms()} ms ctl: disk {dev >> 20} MiB, ext4 {fs >> 20} MiB, "
+                      f"used {used >> 20} of {data >> 20} MiB", flush=True)
             elif port.name == "win" and t in (0x83, 0x84):
                 what = "open" if t == 0x83 else "closed"
                 print(f"[boottime] +{ms()} ms win: {what} {payload[0]}", flush=True)
@@ -295,6 +302,10 @@ def main():
     shot = os.path.join(a.work, "shot.ppm")
     last, changes, window_up, quit_sent = None, [], None, False
     close_at = None
+    grow = None
+    if a.grow_home_after:
+        sec, mib = a.grow_home_after.split(":")
+        grow = (float(sec), int(mib))
     resizes = []
     for r in a.resize_after:
         sec, size = r.split(":")
@@ -354,6 +365,10 @@ def main():
                 qmp.cmd("send-key", keys=[{"type": "qcode", "data": "ctrl"},
                                           {"type": "qcode", "data": "q"}])
                 print(f"[boottime] +{ms()} ms host: Ctrl+Q", flush=True)
+            if grow and window_up is not None and ms() - window_up >= grow[0] * 1000:
+                r = qmp.cmd("block_resize", device="home", size=grow[1] << 20)
+                print(f"[boottime] +{ms()} ms host: home disk -> {grow[1]} MiB {r}", flush=True)
+                grow = None
             for r in list(resizes):
                 if window_up is not None and ms() - window_up >= r[0] * 1000:
                     resizes.remove(r)

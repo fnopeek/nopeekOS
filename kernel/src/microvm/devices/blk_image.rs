@@ -9,6 +9,10 @@
 //!
 //! Saving writes only the chunks the guest changed and reuses the stored
 //! blobs for the rest.
+//!
+//! An image can grow (`grow`): the added part is a tail of chunks that
+//! read as zeros until the guest writes them, and a never-written one is
+//! saved as the shared zero chunk.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -85,6 +89,9 @@ impl Chunks {
 pub struct BlkImage {
     chunks: Arc<Chunks>,
     dirty: Vec<bool>,
+    /// Chunks added by `grow`, `TAIL_CHUNK` bytes each; `None` reads as
+    /// zeros until the guest writes it.
+    tail: Vec<Option<Box<[u8]>>>,
     /// npkFS object the image came from; `<path>.hot` holds the touched set.
     path: Option<&'static str>,
 }
@@ -105,6 +112,7 @@ impl BlkImage {
                 prefetched: AtomicUsize::new(0),
             }),
             dirty: alloc::vec![true],
+            tail: Vec::new(),
             path: None,
         }
     }
@@ -138,19 +146,42 @@ impl BlkImage {
         Some(Self {
             chunks,
             dirty: alloc::vec![false; n],
+            tail: Vec::new(),
             path: Some(path),
         })
     }
 
     pub fn len(&self) -> usize {
-        self.chunks.len
+        self.chunks.len + self.tail.len() * TAIL_CHUNK
+    }
+
+    /// Grow the image to `new_len` bytes, zeros at the end. Only whole
+    /// `TAIL_CHUNK`s on an image that ends on one; false otherwise.
+    pub fn grow(&mut self, new_len: usize) -> bool {
+        let len = self.len();
+        if new_len <= len || len % TAIL_CHUNK != 0 || new_len % TAIL_CHUNK != 0 {
+            return false;
+        }
+        if self.tail.try_reserve((new_len - len) / TAIL_CHUNK).is_err() {
+            return false;
+        }
+        self.tail.resize_with(new_len / TAIL_CHUNK - self.chunks.len / TAIL_CHUNK, || None);
+        true
     }
 
     /// `(chunks touched by the guest, loaded by prefetch, total)` this run.
     pub fn residency(&self) -> (usize, usize, usize) {
         let c = &self.chunks;
-        let touched = c.touched.iter().filter(|t| t.load(Ordering::Relaxed)).count();
-        (touched, c.prefetched.load(Ordering::Relaxed), c.slots.len())
+        let touched = c.touched.iter().filter(|t| t.load(Ordering::Relaxed)).count()
+            + self.tail.iter().filter(|t| t.is_some()).count();
+        (touched, c.prefetched.load(Ordering::Relaxed), c.slots.len() + self.tail.len())
+    }
+
+    /// Tail chunk and offset in it for image offset `off` past the base.
+    fn tail_at(&self, off: usize) -> Option<(usize, usize)> {
+        let rel = off.checked_sub(self.chunks.len)?;
+        let t = rel / TAIL_CHUNK;
+        (t < self.tail.len()).then_some((t, rel % TAIL_CHUNK))
     }
 
     /// Hand `f` the bytes at `off`, at most `max` long and never across a
@@ -159,7 +190,12 @@ impl BlkImage {
     pub fn read_with<R>(&mut self, off: usize, max: usize, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
         let c = &self.chunks;
         if off >= c.len {
-            return None;
+            let (t, at) = self.tail_at(off)?;
+            let n = max.min(TAIL_CHUNK - at);
+            return Some(match &self.tail[t] {
+                Some(b) => f(&b[at..at + n]),
+                None => f(&ZEROS[..n.min(ZEROS.len())]),
+            });
         }
         let i = off / c.chunk;
         let at = off - i * c.chunk;
@@ -171,7 +207,20 @@ impl BlkImage {
     pub fn write_with<R>(&mut self, off: usize, max: usize, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
         let c = &self.chunks;
         if off >= c.len {
-            return None;
+            let (t, at) = self.tail_at(off)?;
+            let n = max.min(TAIL_CHUNK - at);
+            // A new chunk stays in host RAM until the VM ends: only while
+            // the host keeps its reserve after it.
+            if self.tail[t].is_none() {
+                if super::guest_mem::frames_spare() * crate::memory::PAGE_SIZE < 2 * TAIL_CHUNK {
+                    return None;
+                }
+                let mut v = Vec::new();
+                v.try_reserve_exact(TAIL_CHUNK).ok()?;
+                v.resize(TAIL_CHUNK, 0);
+                self.tail[t] = Some(v.into_boxed_slice());
+            }
+            return self.tail[t].as_deref_mut().map(|b| f(&mut b[at..at + n]));
         }
         let i = off / c.chunk;
         let at = off - i * c.chunk;
@@ -181,13 +230,17 @@ impl BlkImage {
         Some(r)
     }
 
-    /// Store which chunks the guest touched, for the next run's prefetch.
+    /// Store which chunks the guest touched, for the next run's prefetch;
+    /// a tail chunk counts once it holds data.
     pub fn remember_hot(&self) {
         let Some(path) = self.path else { return };
         let c = &self.chunks;
-        let mut bits = alloc::vec![0u8; c.slots.len().div_ceil(8)];
-        for (i, t) in c.touched.iter().enumerate() {
-            if t.load(Ordering::Relaxed) {
+        let n = c.slots.len();
+        let mut bits = alloc::vec![0u8; (n + self.tail.len()).div_ceil(8)];
+        let touched = c.touched.iter().map(|t| t.load(Ordering::Relaxed))
+            .chain(self.tail.iter().map(Option::is_some));
+        for (i, t) in touched.enumerate() {
+            if t {
                 bits[i / 8] |= 1 << (i % 8);
             }
         }
@@ -218,10 +271,29 @@ impl BlkImage {
                 .map_err(|_| crate::npkfs::FsError::Corrupt)?;
             written += 1;
         }
+        for t in &self.tail {
+            match t {
+                Some(b) => {
+                    w.write(b).map_err(|_| crate::npkfs::FsError::Corrupt)?;
+                    written += 1;
+                }
+                None => {
+                    w.append_zero_chunk(TAIL_CHUNK).map_err(|_| crate::npkfs::FsError::Corrupt)?;
+                    reused += 1;
+                }
+            }
+        }
         w.finish().map_err(|_| crate::npkfs::FsError::Corrupt)?;
         Ok((written, reused))
     }
 }
+
+/// Size of a chunk added by `grow`: the npkFS chunk, so a saved image
+/// stays uniformly chunked.
+const TAIL_CHUNK: usize = crate::npkfs::STREAMING_CHUNK_SIZE;
+
+/// What a never-written tail chunk reads as, a piece at a time.
+static ZEROS: [u8; 4096] = [0; 4096];
 
 /// Chunks touched on the last run first, then (with `all`) the rest, each
 /// in ascending order.

@@ -633,6 +633,10 @@ fn stitch_chunked(total_size: u64, chunks: &[[u8; 32]]) -> Result<Vec<u8>, PathE
     Ok(out)
 }
 
+/// Length and storage hash of the last zero chunk stored
+/// (`StreamingWriter::append_zero_chunk`).
+static ZERO_CHUNK: spin::Mutex<Option<(usize, [u8; 32])>> = spin::Mutex::new(None);
+
 /// Chunks between deferred-batch flushes during a streaming write.
 const STREAM_COMMIT_EVERY: usize = 16;
 
@@ -679,6 +683,31 @@ impl StreamingWriter {
         if !self.buf.is_empty() || len > self.chunk_size || !storage::has(&hash) {
             return Err(PathError::Corrupt);
         }
+        self.chunk_hashes.push(hash);
+        self.written += len as u64;
+        Ok(())
+    }
+
+    /// Append a chunk of `len` zero bytes. The zero chunk is stored once
+    /// and its hash remembered, so a large empty region (a disk image that
+    /// grew) costs neither hashing nor space. Only at a chunk boundary.
+    pub fn append_zero_chunk(&mut self, len: usize) -> Result<(), Error> {
+        if !self.buf.is_empty() || len == 0 || len > self.chunk_size {
+            return Err(PathError::Corrupt);
+        }
+        let known = (*ZERO_CHUNK.lock()).filter(|(l, h)| *l == len && storage::has(h));
+        let hash = match known {
+            Some((_, h)) => h,
+            None => {
+                let blob = super::object::Object::Blob(alloc::vec![0u8; len]);
+                let (encoded, hash) = blob.encode_and_hash().map_err(|_| PathError::Corrupt)?;
+                if !storage::has(&hash) {
+                    storage::put(&hash, &encoded)?;
+                }
+                *ZERO_CHUNK.lock() = Some((len, hash));
+                hash
+            }
+        };
         self.chunk_hashes.push(hash);
         self.written += len as u64;
         Ok(())
