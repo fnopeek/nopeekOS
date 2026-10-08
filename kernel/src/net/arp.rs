@@ -22,15 +22,31 @@ struct ArpEntry {
     /// wrong until the next boot; a stale next-hop MAC breaks everything
     /// through the gateway while LAN-direct traffic keeps working.
     at: u64,
+    /// Tick a stale entry was first used again, 0 while fresh. From then on
+    /// it is re-asked until confirmed or given up.
+    probe_since: u64,
+    /// Tick of the last revalidation request.
+    asked: u64,
 }
 
-/// How long a learned mapping is trusted. Linux revalidates a reachable
-/// neighbour after 30 s; we simply forget, which costs one ARP round trip on the
-/// next use and cannot outlive a topology change (an AP hand-off in a mesh).
+/// How long a learned mapping is trusted without asking (Linux:
+/// `base_reachable_time`, 30 s). After that the entry is stale, as in
+/// Linux's `NUD_STALE`: it still carries traffic, and its next use starts a
+/// revalidation. Forgetting it instead would send that packet to L2
+/// broadcast, where the gateway drops it.
 const ENTRY_TTL_TICKS: u64 = 3000; // 100 Hz → 30 s
 
+/// How long a stale entry in use stays usable without an answer (Linux:
+/// `delay_first_probe_time` 5 s + `ucast_probes` 3 × `retrans_time` 1 s).
+/// Then it is dropped, so a mapping that changed underneath us (an AP
+/// hand-off in a mesh) is learned anew.
+const PROBE_WINDOW_TICKS: u64 = 800; // 8 s
+
+/// Gap between revalidation requests for a stale entry in use.
+const PROBE_RETRANS_TICKS: u64 = 100; // 1 s
+
 static CACHE: Mutex<[ArpEntry; CACHE_SIZE]> = Mutex::new(
-    [const { ArpEntry { ip: [0; 4], mac: [0; 6], valid: false, at: 0 } }; CACHE_SIZE]
+    [const { ArpEntry { ip: [0; 4], mac: [0; 6], valid: false, at: 0, probe_since: 0, asked: 0 } }; CACHE_SIZE]
 );
 
 /// Our IP address (set during network init)
@@ -117,19 +133,33 @@ pub fn announce() {
     let _ = eth::send_frame(&eth::BROADCAST, eth::ETHERTYPE_ARP, &pkt);
 }
 
-/// Lookup MAC for IP in ARP cache
+/// Lookup MAC for IP in ARP cache. A stale entry is returned and re-asked
+/// for at most once per `PROBE_RETRANS_TICKS`; one unconfirmed for
+/// `PROBE_WINDOW_TICKS` is dropped.
 pub fn lookup(ip: [u8; 4]) -> Option<[u8; 6]> {
     let now = crate::interrupts::ticks();
-    let mut cache = CACHE.lock();
-    let e = cache.iter_mut().find(|e| e.valid && e.ip == ip)?;
-    if now.saturating_sub(e.at) > ENTRY_TTL_TICKS {
-        // Expired rather than refreshed in place: the next `resolve` re-asks,
-        // which is one round trip and the only way a mapping that changed
-        // underneath us can ever be corrected.
-        e.valid = false;
-        return None;
+    let (mac, ask) = {
+        let mut cache = CACHE.lock();
+        let e = cache.iter_mut().find(|e| e.valid && e.ip == ip)?;
+        if now.saturating_sub(e.at) <= ENTRY_TTL_TICKS {
+            return Some(e.mac);
+        }
+        if e.probe_since == 0 {
+            e.probe_since = now.max(1);
+        } else if now.saturating_sub(e.probe_since) > PROBE_WINDOW_TICKS {
+            e.valid = false;
+            return None;
+        }
+        let due = e.asked == 0 || now.saturating_sub(e.asked) >= PROBE_RETRANS_TICKS;
+        if due {
+            e.asked = now.max(1);
+        }
+        (e.mac, due)
+    };
+    if ask {
+        request(ip);
     }
-    Some(e.mac)
+    Some(mac)
 }
 
 /// Gap between ARP retransmits, in 100 Hz ticks. Linux waits a second between
@@ -175,16 +205,18 @@ fn cache_insert(ip: [u8; 4], mac: [u8; 6]) {
         }
         entry.mac = mac;
         entry.at = now;
+        entry.probe_since = 0;
+        entry.asked = 0;
         return;
     }
     // Prefer a free slot, else the oldest — a full table of stale entries must
     // not lock out the one address we actually need.
     if let Some(entry) = cache.iter_mut().find(|e| !e.valid) {
-        *entry = ArpEntry { ip, mac, valid: true, at: now };
+        *entry = ArpEntry { ip, mac, valid: true, at: now, probe_since: 0, asked: 0 };
         return;
     }
     if let Some(entry) = cache.iter_mut().min_by_key(|e| e.at) {
-        *entry = ArpEntry { ip, mac, valid: true, at: now };
+        *entry = ArpEntry { ip, mac, valid: true, at: now, probe_since: 0, asked: 0 };
     }
 }
 

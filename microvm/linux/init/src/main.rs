@@ -194,6 +194,8 @@ fn launch_wayland(kmsg_fd: i64) {
                    || route add default gw 10.99.0.1 2>/dev/null; \
                  printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /tmp/resolv.conf; \
                  mount --bind /tmp/resolv.conf /etc/resolv.conf 2>/dev/null; \
+                 printf '127.0.0.1 localhost nopeek\n::1 localhost nopeek\n' > /tmp/hosts; \
+                 mount --bind /tmp/hosts /etc/hosts 2>/dev/null; \
                  mkdir -p /tmp/moz /tmp/bcache /tmp/gleandb; \
                  ( [ -b /dev/vda ] && echo '<0>[moz-disk] /dev/vda present' > /dev/kmsg || echo '<0>[moz-disk] /dev/vda ABSENT' > /dev/kmsg ); \
                  if mount -t ext4 /dev/vda /tmp/moz 2>/tmp/mnterr; then \
