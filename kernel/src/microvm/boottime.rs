@@ -37,7 +37,19 @@ static WIN_STATE: AtomicU32 = AtomicU32::new(WIN_IDLE);
 const WINDOW_LIT_PCT: usize = 50;
 /// vCPU time split and exit counts at app exec, diffed at window up.
 static APP_SNAP: Mutex<Option<AppSnap>> = Mutex::new(None);
-type AppSnap = (u64, [u64; VT_BUCKETS], [u64; VMEXIT_BUCKETS], ([u64; 5], u64));
+type AppSnap = (u64, [u64; VT_BUCKETS], [u64; VMEXIT_BUCKETS], ([u64; 5], u64), [(u64, u64); MAX_FREQ_VCPUS]);
+/// vCPUs whose host cores' clock is sampled for the app phase.
+const MAX_FREQ_VCPUS: usize = 8;
+
+/// APERF/MPERF of each vCPU's host core as of its last halt.
+fn vcpu_core_clocks() -> [(u64, u64); MAX_FREQ_VCPUS] {
+    core::array::from_fn(|i| {
+        match crate::microvm::cpu::svm::lapic::phase_snapshot(i) {
+            Some((_, _, core)) => crate::smp::per_core::halted_aperf_mperf(core),
+            None => (0, 0),
+        }
+    })
+}
 /// Sample every n-th pixel of every n-th row.
 const SAMPLE_STEP: usize = 4;
 /// Guest console line after which the next full repaint is the app.
@@ -121,6 +133,7 @@ pub fn guest_line(s: &str) {
                     crate::microvm::cpu::vcpu_time_snapshot(),
                     crate::microvm::cpu::vm_exit_snapshot(),
                     (hist, sum),
+                    vcpu_core_clocks(),
                 ));
                 WIN_STATE.store(WIN_ARMED, Ordering::Release);
                 crate::microvm::cpu::rip_sample::begin_window();
@@ -176,7 +189,7 @@ pub fn gpu_pixels(pixels: &[u8], width: u32, height: u32) {
 /// all vCPUs: inside the guest, halted, waiting for the device lock, and the
 /// rest of exit handling; and the exits by kind.
 fn report_app_phase() {
-    let Some((t0, vt0, ex0, (wh0, ws0))) = APP_SNAP.lock().take() else { return };
+    let Some((t0, vt0, ex0, (wh0, ws0), clk0)) = APP_SNAP.lock().take() else { return };
     let hz = tsc_freq().max(1);
     let ms = |c: u64| c * 1000 / hz;
     let vt = crate::microvm::cpu::vcpu_time_snapshot();
@@ -209,6 +222,22 @@ device lock {} ms, exit handling {} ms | exits:{}",
         n, if n > 0 { us(ws.saturating_sub(ws0)) / n } else { 0 }, us(wmax),
         b(0), b(1), b(2), b(3), b(4),
     );
+    // Effective clock of the vCPUs' host cores while running: APERF counts
+    // at the actual frequency, MPERF at the nominal one (= TSC here).
+    let clk = vcpu_core_clocks();
+    let (mut da, mut dm) = (0u64, 0u64);
+    for i in 0..MAX_FREQ_VCPUS {
+        if clk0[i].1 == 0 || clk[i].1 <= clk0[i].1 { continue; }
+        da += clk[i].0.saturating_sub(clk0[i].0);
+        dm += clk[i].1.saturating_sub(clk0[i].1);
+    }
+    if dm > 0 {
+        let nominal = hz / 1_000_000;
+        kprintln!(
+            "[boottime] app phase vCPU host cores ran at {} MHz on average (nominal {} MHz)",
+            (da as u128 * nominal as u128 / dm as u128) as u64, nominal,
+        );
+    }
 }
 
 /// Close the timeline with what the console cost. Called on guest exit.

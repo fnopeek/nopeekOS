@@ -160,6 +160,13 @@ pub fn halt_begin(core_id: usize, t0: u64) {
 static RUN_APERF: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 static RUN_MPERF: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
+/// APERF/MPERF of `core_id` as of its last halt entry; (0, 0) without the
+/// MSRs. A reader on another core gets the running cycles up to that halt.
+pub fn halted_aperf_mperf(core_id: usize) -> (u64, u64) {
+    if core_id >= 256 { return (0, 0); }
+    (RUN_APERF[core_id].load(Ordering::Relaxed), RUN_MPERF[core_id].load(Ordering::Relaxed))
+}
+
 fn read_aperf_mperf() -> (u64, u64) {
     if !HAS_APERFMPERF.load(Ordering::Relaxed) { return (0, 0); }
     // SAFETY: CPUID.06H:ECX[0] says MSRs 0xE7/0xE8 exist (checked above);
