@@ -165,7 +165,9 @@ verfälscht spätere Bildzähler (deshalb gilt Bild #50, nicht #200).
 | Platten bei Bedarf, leiser Gast (0.497) | 5,62 s |
 | + Vorauslesen (0.498) | 5,23 s |
 | + ohne `sleep 1` (0.499) | 4,31 s |
-| + zstd (0.500) | **3,23 s** |
+| + zstd (0.500) | 3,23 s |
+| Startmass ab hier „Fenster“ statt Bild #50: zstd, DNS/ARP behoben (0.505) | 2,5 s |
+| + lz4 (0.506) | **1,8 s** |
 
 **Der „langsame erste Start“ war DNS** (Kernel 0.504.0, microvm-init
 0.4.28). LibreWolf löst beim Start den eigenen Rechnernamen auf; `nopeek`
@@ -196,10 +198,15 @@ erstes Bild **0,32 s** (`tools/librewolf_native_start.py`). Kalt (Cache
 geleert) steht aus — erst damit ist klar, wie viel der 1,31 s ein
 unvermeidbarer Kaltstart ist.
 
+**lz4 statt zstd** (Kernel 0.506.0, `assets/librewolf-0.5.0`, 311 statt
+239 MB, Inhalt identisch). Notebook, vier Läufe: cage → App 0,48 → 0,23 s,
+App → Fenster 1,31 → 0,98 s, **Start → Fenster 2,5 → 1,8 s**. Die 72 MB
+mehr liest das Vorauslesen im Hintergrund (285–293 von 297 Stücken). Unter
+KVM war der Gewinn kleiner (2,18 → 1,83 s): der langsamere Kern entpackt
+langsamer und gewinnt mehr.
+
 **Offen:**
 - Kalte native Messung.
-- lz4 statt zstd (entpackt mehrfach schneller, kleiner als raw) — unter KVM
-  zu messen.
 - Streuung bis Bild #1 (~150 ms) beim GPU-Start des Gasts.
 - cage → App 0,48 s und die Anzeigekette: siehe Bildweg (eigener Compositor
   im Gast statt cage).
