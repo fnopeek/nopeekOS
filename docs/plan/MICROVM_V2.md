@@ -205,8 +205,25 @@ mehr liest das Vorauslesen im Hintergrund (285–293 von 297 Stücken). Unter
 KVM war der Gewinn kleiner (2,18 → 1,83 s): der langsamere Kern entpackt
 langsamer und gewinnt mehr.
 
+**Der RT-Wächter kostete die halbe App-Zeit** (Kernel 0.508.0,
+microvm-init 0.4.29). PID 1 forkt einen Wächter, der cubeb/AudioIPC-Threads
+auf `SCHED_RR` setzt; er öffnete alle 50 ms die `comm`-Datei JEDES Threads,
+immer. Das konkurriert mit dem Anlegen von Threads, und daraus besteht ein
+Browserstart. LibreWolf meldet im Gast selbst (Autoconfig →
+`getStartupInfo()` → `/dev/kmsg`), KVM 9600X: Prozess → erstes Bild
+**830 → 405 ms**, nativ dasselbe Programm ~310 ms. Jetzt sucht der Wächter
+nur, solange ein Wiedergabe-Stream offen ist
+(`/proc/asound/card0/pcm0p/sub0/status` ≠ `closed`).
+
+Ausgeschlossen auf dem Weg dorthin, jeweils gemessen: Netz/DNS beim Start
+(nativ keine Anfrage), Entpacken (raw −60 ms), Fenstergrösse (−55 ms),
+cage/pixman (nativ verschachtelt gleich), vCPU-Zahl, `idle=poll`,
+`mitigations=off`, THP, vorab belegter Gastspeicher (−25 ms), `fsync` des
+Profils (`cache=unsafe`), Zufall (crng nach 241 ms). Rechnen, Systemaufrufe,
+Prozessstart und Speicher kosten im Gast dasselbe wie nativ.
+
 **Offen:**
-- Kalte native Messung.
+- Kalte native Messung (nativ war kalt = warm, ~0,3 s).
 - Streuung bis Bild #1 (~150 ms) beim GPU-Start des Gasts.
 - cage → App 0,48 s und die Anzeigekette: siehe Bildweg (eigener Compositor
   im Gast statt cage).
