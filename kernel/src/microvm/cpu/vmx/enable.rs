@@ -878,6 +878,7 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
         sh.pic.pulse(l);
     }
     if sh.pci.virtio_input.drain_injected(gm) { sh.pic.pulse(crate::microvm::devices::virtio_input_pci::IRQ_LINE); }
+    if sh.pci.virtio_console.pump(gm) { sh.pic.pulse(crate::microvm::devices::virtio_console_pci::IRQ_LINE); }
     sh.pit.poll(&mut sh.pic);
 
     let now = crate::interrupts::ticks();
@@ -1860,6 +1861,11 @@ impl VmContext {
                         last_outcome = Some(outcome);
                         continue;
                     }
+                } else if sh.pci.virtio_console.bar0_in_range(gpa) {
+                    if handle_mmio_ept_dev(&mut self.vcpu.regs, &mut sh.pci.virtio_console, &mut sh.pic, gpa, gm) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
                 }
                 // Demand-paged guest RAM. A violation on a gpa
                 // inside the advertised window but above the
@@ -2454,6 +2460,47 @@ fn handle_mmio_ept_gpu(
         }
     }
 
+    if vmcs::advance_guest_rip_by(dec.length as u64).is_err() { return false; }
+    true
+}
+
+/// Handle an EPT violation on the BAR of any `MmioDevice`: decode the MOV,
+/// forward the access, serve a queue notify on the spot and raise the
+/// device's line if a queue advanced.
+fn handle_mmio_ept_dev<D: crate::microvm::devices::MmioDevice>(
+    regs: &mut vmcs::GuestRegs,
+    dev: &mut D,
+    pic: &mut crate::microvm::devices::pic8259::Pic8259,
+    gpa: u64,
+    mem: &GuestMem,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
+    let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
+    let Some(buf) = fetch_inst(rip, cr3, mem) else {
+        kprintln!("[microvm] mmio: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
+        return false;
+    };
+    let Some(dec) = decode_mov(&buf) else {
+        kprintln!("[microvm] mmio: unsupported insn @ gpa={:#x}, bytes={:02x?}", gpa, &buf[..8]);
+        return false;
+    };
+    let off = (gpa - dev.bar0_base()) as u32;
+    if dec.is_write {
+        let value = read_gpr_vmx(regs, dec.reg) & width_mask(dec.width);
+        dev.mmio_write(off, dec.width, value);
+    } else {
+        let value = dev.mmio_read(off, dec.width);
+        write_gpr_vmx(regs, dec.reg, dec.width, value);
+    }
+    if let Some(qidx) = dev.take_pending_kick() {
+        if dev.service_queues(qidx, mem) {
+            pic.pulse(dev.irq_line());
+        }
+    }
     if vmcs::advance_guest_rip_by(dec.length as u64).is_err() { return false; }
     true
 }

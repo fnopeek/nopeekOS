@@ -1149,6 +1149,7 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
         sh.pic.pulse(l);
     }
     if sh.pci.virtio_input.drain_injected(gm) { sh.pic.pulse(crate::microvm::devices::virtio_input_pci::IRQ_LINE); }
+    if sh.pci.virtio_console.pump(gm) { sh.pic.pulse(crate::microvm::devices::virtio_console_pci::IRQ_LINE); }
     sh.pit.poll(&mut sh.pic);
 
     let now = crate::interrupts::ticks();
@@ -1803,6 +1804,11 @@ impl VmContext {
                         last_outcome = Some(outcome);
                         continue;
                     }
+                } else if sh.pci.virtio_console.bar0_in_range(gpa) {
+                    if handle_mmio_npf_dev(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_console, &mut sh.pic, gpa, gm) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
                 }
                 // I/O APIC page (0xFEC00000), NPT-not-present like the LAPIC's.
                 {
@@ -2359,6 +2365,49 @@ fn handle_mmio_npf_gpu(
 
 /// Handle a #NPF on virtio-input BAR0. Mirror of `handle_mmio_npf_gpu`
 /// — only the device and IRQ line differ.
+/// Handle a #NPF on the BAR of any `MmioDevice`: decode the MOV, forward
+/// the access, serve a queue notify on the spot and raise the device's line
+/// if a queue advanced.
+fn handle_mmio_npf_dev<D: crate::microvm::devices::MmioDevice>(
+    vmcb: &mut vmcb::Vmcb,
+    regs: &mut vmcb::GuestRegs,
+    dev: &mut D,
+    pic: &mut crate::microvm::devices::pic8259::Pic8259,
+    gpa: u64,
+    mem: &GuestMem,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
+    let cr3 = vmcb.read_u64(vmcb::OFF_SAVE_CR3);
+    let Some(buf) = fetch_inst(rip, cr3, mem) else {
+        kprintln!("[svm] mmio: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
+        return false;
+    };
+    let Some(dec) = decode_mov(&buf) else {
+        kprintln!("[svm] mmio: unsupported insn @ gpa={:#x}, bytes={:02x?}", gpa, &buf[..8]);
+        return false;
+    };
+    let off = (gpa - dev.bar0_base()) as u32;
+    let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
+    if dec.is_write {
+        let value = read_guest_gpr(regs, rax, dec.reg) & width_mask(dec.width);
+        dev.mmio_write(off, dec.width, value);
+    } else {
+        let value = dev.mmio_read(off, dec.width);
+        write_guest_gpr(regs, vmcb, rax, dec.reg, dec.width, value);
+    }
+    if let Some(qidx) = dev.take_pending_kick() {
+        if dev.service_queues(qidx, mem) {
+            pic.pulse(dev.irq_line());
+        }
+    }
+    advance_rip_by_length(vmcb, dec.length);
+    true
+}
+
 fn handle_mmio_npf_input(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,

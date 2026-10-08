@@ -377,6 +377,40 @@ static ACTIVE_VM_WINDOW: AtomicU32 = AtomicU32::new(0);
 /// the guest down instead of running it headless.
 static VM_CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// TSC by which a guest asked to quit over the control channel must have
+/// powered off; 0 = no quit pending.
+static QUIT_DEADLINE: AtomicU64 = AtomicU64::new(0);
+/// How long a guest gets to end its app, sync and power off.
+const QUIT_GRACE_MS: u64 = 10_000;
+
+/// The run loop must stop the guest: the user closed the window and there is
+/// no clean way (or a second close), a quit took longer than its grace, or
+/// the guest broke the control channel's frame format.
+fn close_requested() -> bool {
+    if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+        return true;
+    }
+    if crate::microvm::devices::virtio_console_pci::violated() {
+        VM_CLOSE_REQUESTED.store(true, Ordering::Release);
+        return true;
+    }
+    let deadline = QUIT_DEADLINE.load(Ordering::Acquire);
+    if deadline != 0 && crate::interrupts::rdtsc() >= deadline {
+        QUIT_DEADLINE.store(0, Ordering::Release);
+        crate::kprintln!("[microvm] guest did not quit within {} s — stopping it", QUIT_GRACE_MS / 1000);
+        VM_CLOSE_REQUESTED.store(true, Ordering::Release);
+        return true;
+    }
+    false
+}
+
+/// A new launch: no close pending, a fresh control channel.
+fn reset_close_state() {
+    VM_CLOSE_REQUESTED.store(false, Ordering::Release);
+    QUIT_DEADLINE.store(0, Ordering::Release);
+    crate::microvm::devices::virtio_console_pci::reset();
+}
+
 /// Cross-boundary "open my files in loft" trigger: the guest's browser
 /// opens the magic 9p file `<root>/.open-in-loft`, the 9p server (on the
 /// VM core) sets this, and Core 0 reaps it in `vm_poll_slice` to spawn
@@ -814,13 +848,28 @@ pub fn vm_window() -> u32 {
     ACTIVE_VM_WINDOW.load(Ordering::Acquire)
 }
 
-/// Window closed by the user → ask the bound VM to power off on the
-/// next slice. No-op if it isn't the active VM's window.
+/// Window closed by the user. With the control channel up, the guest is
+/// asked to quit: its app ends cleanly, it syncs and powers off, and the
+/// home image is saved after that (`note_guest_shutdown`). Without it, on a
+/// second close, or after `QUIT_GRACE_MS`, the VM is stopped as it is.
+/// No-op if it isn't the active VM's window.
 pub fn vm_close_for_window(window_id: u32) {
-    if window_id != 0 && window_id == ACTIVE_VM_WINDOW.load(Ordering::Acquire) {
-        VM_CLOSE_REQUESTED.store(true, Ordering::Release);
-        crate::intent::wake_shell();
+    if window_id == 0 || window_id != ACTIVE_VM_WINDOW.load(Ordering::Acquire) {
+        return;
     }
+    let quitting = QUIT_DEADLINE.load(Ordering::Acquire) != 0;
+    if !quitting
+        && crate::microvm::devices::virtio_console_pci::send(
+            crate::microvm::devices::virtio_console_pci::MSG_QUIT, &[])
+    {
+        let hz = crate::interrupts::tsc_freq();
+        QUIT_DEADLINE.store(
+            crate::interrupts::rdtsc() + hz / 1000 * QUIT_GRACE_MS, Ordering::Release);
+        crate::kprintln!("[microvm] asking the guest to quit");
+    } else {
+        VM_CLOSE_REQUESTED.store(true, Ordering::Release);
+    }
+    crate::intent::wake_shell();
 }
 
 /// The guest shut itself down (e.g. LibreWolf's own window-X → cage exits →
@@ -950,7 +999,7 @@ pub fn vm_open(
             initramfs: initramfs.map(<[u8]>::to_vec),
             inject: inject.to_vec(),
         });
-        VM_CLOSE_REQUESTED.store(false, Ordering::Release);
+        reset_close_state();
         // Snapshot the protected cores while still idle (see `protected_cores`).
         let _ = protected_cores();
         VM_RUN_STATE.store(VM_REQUESTED, Ordering::Release);
@@ -974,7 +1023,7 @@ pub fn vm_open(
             initramfs: initramfs.map(<[u8]>::to_vec),
             inject: inject.to_vec(),
         });
-        VM_CLOSE_REQUESTED.store(false, Ordering::Release);
+        reset_close_state();
         let _ = protected_cores();
         VM_RUN_STATE.store(VM_REQUESTED, Ordering::Release);
         return Ok(());
@@ -990,7 +1039,7 @@ pub fn vm_open(
         Vendor::Unknown(reason) => return Err(reason),
     };
     *slot = Some(vm);
-    VM_CLOSE_REQUESTED.store(false, Ordering::Release);
+    reset_close_state();
     Ok(())
 }
 
@@ -1096,7 +1145,7 @@ pub fn vm_poll_slice() {
 
     // User closed the VM's window → force the guest down this tick
     // instead of running it headless until idle.
-    if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+    if close_requested() {
         match slot.as_mut() {
             Some(ActiveVm::Vmx(ctx)) => ctx.close(),
             Some(ActiveVm::Svm(ctx)) => ctx.close(),
@@ -1205,7 +1254,7 @@ pub fn vm_core_serve() {
             ) {
                 Ok(mut ctx) => {
                     loop {
-                        if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                        if close_requested() {
                             crate::kprintln!("[microvm] window closed — stopping guest");
                             break;
                         }
@@ -1243,7 +1292,7 @@ pub fn vm_core_serve() {
             ) {
                 Ok(mut ctx) => {
                     loop {
-                        if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                        if close_requested() {
                             crate::kprintln!("[microvm] window closed — stopping guest");
                             break;
                         }
@@ -1423,7 +1472,7 @@ fn vcpu_fiber_task(_arg: u64) {
                         ctx.publish_for_aps();
                     }
                     loop {
-                    if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                    if close_requested() {
                         crate::kprintln!("[microvm] window closed — stopping guest");
                         break;
                     }
@@ -1495,7 +1544,7 @@ fn vcpu_fiber_task(_arg: u64) {
                         ctx.publish_for_aps();
                     }
                     loop {
-                        if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                        if close_requested() {
                             crate::kprintln!("[microvm] window closed — stopping guest");
                             break;
                         }
@@ -1581,7 +1630,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
         Vendor::Intel => match vmx::vm_open_ap(vector, apic_id) {
             Ok(mut ctx) => {
                 loop {
-                    if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                    if close_requested() {
                         break;
                     }
                     // SAFETY: ring-0; same IF discipline as the BSP fiber.
@@ -1616,7 +1665,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
         },
         Vendor::Amd => match svm::vm_open_ap(vector, apic_id) {
             Ok(mut ctx) => loop {
-                if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
+                if close_requested() {
                     break;
                 }
                 // SAFETY: ring-0; same IF discipline as the BSP fiber.

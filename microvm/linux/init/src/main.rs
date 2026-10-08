@@ -13,6 +13,8 @@
 
 use core::arch::asm;
 
+mod control;
+
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
@@ -287,6 +289,9 @@ fn launch_wayland(kmsg_fd: i64) {
     // /proc promoting cubeb/AudioIPC threads to SCHED_RR from outside the
     // sandbox; the parent execs cage+librewolf as usual.
     unsafe { spawn_rt_watcher(kmsg_fd); }
+
+    // The control channel to the host (`control.rs`).
+    unsafe { control::spawn(kmsg_fd); }
 
     // Fork the guest-side diagnostic probe (only if the host asked via
     // `nopeekgdiag` on the cmdline). It dumps the guest's internal view every

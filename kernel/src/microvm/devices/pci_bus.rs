@@ -14,6 +14,8 @@
 //!   bus 0, slot 4, func 0  →  virtio-input-pci (1AF4:1052)
 //!   bus 0, slot 5, func 0  →  virtio-blk-pci  (1AF4:1042, ro sqfs → /dev/vdb)
 //!   bus 0, slot 6, func 0  →  virtio-9p-pci   (1AF4:1049, npkFS share → mount -t 9p)
+//!   bus 0, slot 7, func 0  →  virtio-snd-pci  (1AF4:1059)
+//!   bus 0, slot 8, func 0  →  virtio-console-pci (1AF4:1043, control + window ports)
 //!   everything else        →  vendor=0xFFFF (no device)
 //! ```
 //!
@@ -25,6 +27,7 @@ use super::virtio_blk_pci::VirtioBlk;
 use super::virtio_input_pci::VirtioInput;
 use super::virtio_9p_pci::Virtio9p;
 use super::virtio_snd_pci::VirtioSnd;
+use super::virtio_console_pci::VirtioConsole;
 
 pub const PCI_CONFIG_ADDR: u16 = 0xCF8;
 pub const PCI_CONFIG_DATA_START: u16 = 0xCFC;
@@ -34,7 +37,7 @@ const NO_DEVICE: u32 = 0xFFFF_FFFF;
 
 /// INTA line of each device slot on bus 0, for the MP table's PCI
 /// interrupt sources.
-pub const INTX_LINES: [(u8, u8); 7] = [
+pub const INTX_LINES: [(u8, u8); 8] = [
     (1, super::virtio_blk_pci::HOME_IRQ_LINE),
     (2, super::virtio_net_dev::IRQ_LINE),
     (3, super::virtio_gpu_pci::IRQ_LINE),
@@ -42,6 +45,7 @@ pub const INTX_LINES: [(u8, u8); 7] = [
     (5, super::virtio_blk_pci::SQFS_IRQ_LINE),
     (6, super::virtio_9p_pci::IRQ_LINE),
     (7, super::virtio_snd_pci::IRQ_LINE),
+    (8, super::virtio_console_pci::IRQ_LINE),
 ];
 
 /// Per-VM PCI bus emulation state.
@@ -58,6 +62,8 @@ pub struct PciBus {
     pub virtio_9p: Virtio9p,
     /// Slot 7 — virtio-sound: bridges guest audio → kernel audio mailbox.
     pub virtio_snd: VirtioSnd,
+    /// Slot 8 — virtio-console: the control channel and the window port.
+    pub virtio_console: VirtioConsole,
 }
 
 impl PciBus {
@@ -69,6 +75,7 @@ impl PciBus {
             virtio_blk_sqfs: VirtioBlk::new_sqfs(),
             virtio_9p: Virtio9p::new(),
             virtio_snd: VirtioSnd::new(),
+            virtio_console: VirtioConsole::new(),
         }
     }
 }
@@ -147,6 +154,7 @@ fn read_pci_dword(bus: &PciBus, bus_num: u8, slot: u8, func: u8, reg: u8) -> u32
         5 => bus.virtio_blk_sqfs.pci_read_dword(reg),
         6 => bus.virtio_9p.pci_read_dword(reg),
         7 => bus.virtio_snd.pci_read_dword(reg),
+        8 => bus.virtio_console.pci_read_dword(reg),
         _ => NO_DEVICE,
     }
 }
@@ -163,6 +171,7 @@ fn write_pci_dword(bus: &mut PciBus, bus_num: u8, slot: u8, func: u8, reg: u8, v
         5 => bus.virtio_blk_sqfs.pci_write_dword(reg, val),
         6 => bus.virtio_9p.pci_write_dword(reg, val),
         7 => bus.virtio_snd.pci_write_dword(reg, val),
+        8 => bus.virtio_console.pci_write_dword(reg, val),
         _ => {}
     }
 }
