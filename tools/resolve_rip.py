@@ -13,7 +13,7 @@ maps to the nearest symbol at or below it: "function+0xNN".
 import sys, re, os, bisect
 
 SYSMAP = os.path.expanduser(
-    "~/.cache/nopeekos/linux-src/linux-6.18.26/System.map")
+    "~/.cache/nopeekos/linux-src/linux-6.18.53/System.map")
 
 
 def load_symbols(path):

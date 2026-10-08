@@ -18,16 +18,27 @@
 //! independent next window. Resolve the raw hex RIPs offline against the
 //! guest kernel's `System.map`.
 //!
-//! Gated by `DEBUG`; `record`/`maybe_dump` compile to an early return when off.
+//! Off unless `set microvm_ripsample on` (read at each launch); `record` and
+//! `maybe_dump` return at once when off. `boottime` also takes one window
+//! exactly over an app's start (`begin_window` at app exec, `dump_now` at
+//! window up).
 
 use crate::kprintln;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 /// Master switch. `record()` runs on every exit, and each dump blocks its
 /// core on the UART for tens of milliseconds, so keep this off unless
 /// diagnosing.
-const DEBUG: bool = false;
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn enabled() -> bool { ENABLED.load(Ordering::Relaxed) }
+
+pub fn set_enabled(on: bool) { ENABLED.store(on, Ordering::Relaxed); }
+
+/// Guest kernel addresses (upper canonical half) vs user space.
+const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
 
 const SLOTS: usize = 48;
 /// 64-byte RIP buckets: clusters a hot loop's instructions into one entry so
@@ -42,11 +53,12 @@ struct Hist {
     cnt: [u64; SLOTS],
     vcpu: [u64; MAX_VCPU],
     total: u64,
+    user: u64,
 }
 
 impl Hist {
     const fn new() -> Self {
-        Hist { rip: [0; SLOTS], cnt: [0; SLOTS], vcpu: [0; MAX_VCPU], total: 0 }
+        Hist { rip: [0; SLOTS], cnt: [0; SLOTS], vcpu: [0; MAX_VCPU], total: 0, user: 0 }
     }
     fn clear(&mut self) {
         *self = Hist::new();
@@ -67,7 +79,7 @@ static IPI_TARGETS_PREEMPTED: AtomicU64 = AtomicU64::new(0);
 
 /// Record one cross-vCPU IPI target and whether it was preempted at send time.
 pub fn note_ipi_target(preempted: bool) {
-    if !DEBUG {
+    if !enabled() {
         return;
     }
     IPI_TARGETS.fetch_add(1, Ordering::Relaxed);
@@ -81,12 +93,15 @@ pub fn note_ipi_target(preempted: bool) {
 /// slot inheriting its count (so genuine heavy hitters can't be displaced by a
 /// stream of cold one-offs).
 pub fn record(rip: u64, vcpu: u8) {
-    if !DEBUG {
+    if !enabled() {
         return;
     }
     let bucket = (rip >> BUCKET_SHIFT) << BUCKET_SHIFT;
     let mut h = H.lock();
     h.total += 1;
+    if rip < KERNEL_BASE {
+        h.user += 1;
+    }
     if (vcpu as usize) < MAX_VCPU {
         h.vcpu[vcpu as usize] += 1;
     }
@@ -108,7 +123,7 @@ pub fn record(rip: u64, vcpu: u8) {
 
 /// Cheap to call on every exit: only locks + dumps once per `WINDOW_SECS`.
 pub fn maybe_dump() {
-    if !DEBUG {
+    if !enabled() {
         return;
     }
     let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
@@ -142,8 +157,8 @@ fn dump_and_reset(window_us: u64) {
     // Per-vCPU sample split — which vCPU is hot. The dominant one's guest code
     // is what the RIP histogram below is mostly showing.
     kprintln!(
-        "[ripsample] {} samples / {}s ({}/s) | per-vCPU: v0={} v1={} v2={} v3={} v4={} v5={} v6={} v7={}",
-        h.total, secs, h.total / secs,
+        "[ripsample] {} samples / {}s ({}/s), {}% user space | per-vCPU: v0={} v1={} v2={} v3={} v4={} v5={} v6={} v7={}",
+        h.total, secs, h.total / secs, h.user * 100 / h.total,
         h.vcpu[0], h.vcpu[1], h.vcpu[2], h.vcpu[3],
         h.vcpu[4], h.vcpu[5], h.vcpu[6], h.vcpu[7],
     );
@@ -165,7 +180,7 @@ fn dump_and_reset(window_us: u64) {
     // Top buckets by count (simple selection over 48 slots).
     let total = h.total;
     let mut used: [bool; SLOTS] = [false; SLOTS];
-    for _ in 0..12 {
+    for _ in 0..20 {
         let mut best_i = usize::MAX;
         let mut best_c = 0u64;
         for i in 0..SLOTS {
@@ -191,9 +206,30 @@ fn dump_and_reset(window_us: u64) {
 
 /// Reset at VM teardown so the next launch profiles from scratch.
 pub fn reset() {
-    if !DEBUG {
+    if !enabled() {
         return;
     }
     H.lock().clear();
     LAST_DUMP_TSC.store(0, Ordering::Relaxed);
+}
+
+/// Start a fresh window now (app exec): clear the table and push the
+/// periodic dump a full window away.
+pub fn begin_window() {
+    if !enabled() {
+        return;
+    }
+    H.lock().clear();
+    LAST_DUMP_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+}
+
+/// Dump and reset the current window now (window up).
+pub fn dump_now() {
+    if !enabled() {
+        return;
+    }
+    let now = crate::interrupts::rdtsc();
+    let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let last = LAST_DUMP_TSC.swap(now, Ordering::Relaxed);
+    dump_and_reset(now.wrapping_sub(last) / mhz);
 }

@@ -123,6 +123,7 @@ pub fn guest_line(s: &str) {
                     (hist, sum),
                 ));
                 WIN_STATE.store(WIN_ARMED, Ordering::Release);
+                crate::microvm::cpu::rip_sample::begin_window();
             }
         }
     }
@@ -167,6 +168,7 @@ pub fn gpu_pixels(pixels: &[u8], width: u32, height: u32) {
             lit * 100 / total,
         );
         report_app_phase();
+        crate::microvm::cpu::rip_sample::dump_now();
     }
 }
 
