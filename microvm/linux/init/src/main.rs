@@ -259,6 +259,15 @@ fn launch_wayland(kmsg_fd: i64) {
                  MOZ_DISABLE_UTILITY_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1; \
                  seatd -g root > /tmp/seatd.log 2>&1 & \
                  ( sleep 15; while true; do sync 2>/dev/null; sleep 3; done ) & \
+                 if grep -q npkbench_cpu /proc/cmdline; then \
+                   t() { read u _ < /proc/uptime; echo \"${u%.*}${u#*.}\"; }; \
+                   a=$(t); i=0; while [ $i -lt 1000000 ]; do i=$((i+1)); done; b=$(t); \
+                   dd if=/dev/zero of=/dev/null bs=1 count=1000000 2>/dev/null; c=$(t); \
+                   n=0; while [ $n -lt 1000 ]; do /bin/true; n=$((n+1)); done; d=$(t); \
+                   head -c 1000000000 /dev/zero > /dev/shm/npkb; rm -f /dev/shm/npkb; e=$(t); \
+                   head -c 200000000 /dev/zero | gzip -1 > /dev/null; f=$(t); \
+                   echo \"<0>[bench] cpu=$(( (b-a)*10 ))ms syscalls=$(( (c-b)*10 ))ms fork-exec1000=$(( (d-c)*10 ))ms memtouch1G=$(( (e-d)*10 ))ms gzip200M=$(( (f-e)*10 ))ms\" > /dev/kmsg; \
+                 fi; \
                  i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do usleep 5000; i=$((i+1)); done; \
                  echo \"<0>[wl] cage start (seatd after ${i}x5ms)\" > /dev/kmsg; \
                  cage -- sh -c 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; exec librewolf --no-remote --profile /tmp/moz' \
