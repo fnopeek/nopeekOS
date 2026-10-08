@@ -319,7 +319,11 @@ def main():
                 if a.watch_dark is not None and window_up is not None:
                     lit = lit_share(rows)
                     if lit < a.watch_dark:
-                        print(f"[boottime] +{ms()} ms dark frame ({lit}% lit, {len(rows)} rows)", flush=True)
+                        dark_n = sum(1 for f in os.listdir(a.work) if f.startswith("dark-"))
+                        keep = os.path.join(a.work, f"dark-{dark_n}.ppm")
+                        os.replace(shot, keep)
+                        print(f"[boottime] +{ms()} ms dark frame ({lit}% lit, {len(rows)} rows) "
+                              f"-> {keep}", flush=True)
                 if last is not None and len(rows) != len(last):
                     print(f"[boottime] +{ms()} ms screen height {len(last)} -> {len(rows)}", flush=True)
                 if last is not None and len(rows) == len(last):

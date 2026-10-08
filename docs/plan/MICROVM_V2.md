@@ -586,6 +586,24 @@ brauchte, weil wlroots einen neuen Modus bei verbundenem Ausgang
 ignoriert. Unter KVM: neue Grösse nach ~30 ms, LibreWolf neu ausgelegt
 nach ~65 ms.
 
+**Kein schwarzes Bild beim Grössenändern** (microvm-init 0.6.1, Kernel
+0.528.0). Drei Ursachen, je eine Stufe:
+- Der Wirt schickt während Dock-Animation und Ziehen keine Grösse, nur die
+  am Ende; bis dahin schneidet die Kachel das Bild ab oder verlängert
+  seinen Rand (das Hintergrundbild schien vorher durch die Lücke).
+- Ein Moduswechsel allein geht in wlroots mit einem leeren, schwarzen
+  Puffer hinaus; npkwm übergibt Modus und gerendertes Bild in einem Commit
+  (`wlr_scene_output_build_state`).
+- LibreWolf schickt seinen Puffer in der neuen Grösse, bevor es den neuen
+  Teil gemalt hat (altes Layout, Rest schwarz), und seine Inhaltsfläche ist
+  eine eigene Unterfläche. npkwm zeigt deshalb während einer ausstehenden
+  Grösse kein neues Bild (die App bekommt ihre Frame-Callbacks weiter) und
+  schaltet um, sobald alle Flächen die Grösse decken und dort, wo das
+  Fenster wächst, die unterste Zeile bzw. rechte Spalte bemalt ist;
+  spätestens nach 200 ms.
+Unter KVM, vier Läufe mit Wachsen und Schrumpfen in beiden Richtungen:
+0 dunkle Bilder (vorher 1–2 je Wechsel), Umschalten 15–37 ms nach `resize`.
+
 Unter KVM geprüft: `open`, verstecktes Fenster, `closed`, `resize`. Mehrere
 sichtbare Fenster zeigt QEMU nicht (es schaltet keinen zweiten Ausgang
 zu); das prüft der Gerätelauf.

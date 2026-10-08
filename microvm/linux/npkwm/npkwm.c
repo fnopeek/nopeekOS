@@ -19,8 +19,11 @@
  * window: then the app is ending and the host waits for the VM to stop.
  *
  * The host sets an output's size (WIN_RESIZE) whenever its window's tile
- * changes; npkwm sets that mode on the output directly, so a resize costs
- * no disconnect and shows no black frames.
+ * changes. npkwm asks the app for that size first, shows nothing new on
+ * that output meanwhile, and switches the output once the app's picture
+ * fills it (or after RESIZE_WAIT_MS), with that picture in the same commit. An app may send its buffer at the new size
+ * before it has drawn into the new part (LibreWolf does: its old layout,
+ * the rest unpainted), so "fills" means the bottom row holds pixels.
  *
  * The host's pointer is a tablet: x carries the output in its high part
  * (MAX_OUTPUTS equal slots), so a pointer event names its window itself and
@@ -64,6 +67,8 @@
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
+#include <drm_fourcc.h>
+#include <wlr/render/wlr_texture.h>
 #include <xkbcommon/xkbcommon.h>
 
 /* Host -> guest. */
@@ -80,6 +85,8 @@
 #define WIN_MAX_FRAME 512
 /* Bytes of title sent; cut on a UTF-8 boundary. */
 #define TITLE_MAX 200
+/* How long an output waits for the app to draw at a new size. */
+#define RESIZE_WAIT_MS 200
 /* Outputs (host windows) at most; the host offers as many scanouts. */
 #define MAX_OUTPUTS 8
 /* Outputs sit side by side in the layout, this far apart, so none overlap
@@ -141,6 +148,10 @@ struct output {
 	struct server *server;
 	struct wlr_output *wlr_output;
 	int index;
+	/* A size the host asked for and the app has not drawn yet (0 = none);
+	 * the output keeps its mode until then (`resize_output`). */
+	int pend_w, pend_h;
+	struct wl_event_source *pend_timer;
 	struct wl_listener frame;
 	struct wl_listener request_state;
 	struct wl_listener destroy;
@@ -356,22 +367,136 @@ static void replace_on(struct server *server, int k) {
 	}
 }
 
+/* Switch output k to the size it waits for, with the scene rendered at
+ * that size in the same commit (a mode alone would go out with an empty,
+ * black buffer). */
+static void apply_pending_mode(struct output *output) {
+	int w = output->pend_w, h = output->pend_h;
+	if (w <= 0 || h <= 0) {
+		return;
+	}
+	output->pend_w = output->pend_h = 0;
+	wl_event_source_timer_update(output->pend_timer, 0);
+	struct wlr_output *o = output->wlr_output;
+	if (o->width != w || o->height != h) {
+		replace_on(output->server, output->index);
+		struct wlr_output_state state;
+		wlr_output_state_init(&state);
+		wlr_output_state_set_custom_mode(&state, w, h, 0);
+		struct wlr_scene_output *scene_output =
+			wlr_scene_get_scene_output(output->server->scene, o);
+		if (scene_output == NULL || !wlr_scene_output_build_state(scene_output, &state, NULL)
+				|| !wlr_output_commit_state(o, &state)) {
+			fprintf(stderr, "npkwm: output %d: %dx%d refused\n", output->index, w, h);
+		}
+		wlr_output_state_finish(&state);
+	}
+	replace_on(output->server, output->index);
+}
+
+/* A line of the window (its bottom row or its right column, in window
+ * coordinates) and whether some surface holds a non-black pixel on it. */
+struct edge_check {
+	bool column;
+	int at;
+	bool painted;
+};
+
+static void check_edge(struct wlr_surface *surface, int sx, int sy, void *data) {
+	struct edge_check *c = data;
+	struct wlr_texture *tex = wlr_surface_get_texture(surface);
+	if (c->painted || tex == NULL) {
+		return;
+	}
+	int at = c->column ? c->at - sx : c->at - sy;
+	int across = c->column ? (int)tex->width : (int)tex->height;
+	int along = c->column ? (int)tex->height : (int)tex->width;
+	if (at < 0 || at >= across || along <= 0) {
+		return;
+	}
+	enum { SAMPLES = 64 };
+	int n = along < SAMPLES ? along : SAMPLES;
+	for (int i = 0; i < n && !c->painted; i++) {
+		int p = i * along / n;
+		uint32_t px = 0;
+		struct wlr_texture_read_pixels_options opt = {
+			.data = &px, .format = DRM_FORMAT_XRGB8888, .stride = 4,
+			.src_box = { .x = c->column ? at : p, .y = c->column ? p : at, .width = 1, .height = 1 },
+		};
+		if (wlr_texture_read_pixels(tex, &opt) && (px & 0x00ffffff) != 0) {
+			c->painted = true;
+		}
+	}
+}
+
+static bool edge_painted(struct toplevel *t, bool column, int at) {
+	struct edge_check c = { .column = column, .at = at, .painted = false };
+	wlr_surface_for_each_surface(t->xdg_toplevel->base->surface, check_edge, &c);
+	return c.painted;
+}
+
+/* Every app window on output k has drawn at the size it waits for: its
+ * surfaces (subsurfaces included, an app may resize its window before the
+ * content in a subsurface follows) cover the size, and where the window
+ * grew, its bottom row or right column is painted. A shrinking window's old
+ * layout fills the smaller size anyway. */
+static bool drawn_at_pending(struct output *output) {
+	bool any = false;
+	struct toplevel *t;
+	wl_list_for_each(t, &output->server->toplevels, link) {
+		if (t->out != output->index || !is_root(t)) {
+			continue;
+		}
+		struct wlr_box geo = t->xdg_toplevel->base->geometry;
+		struct wlr_box ext;
+		wlr_surface_get_extents(t->xdg_toplevel->base->surface, &ext);
+		if (geo.width != output->pend_w || geo.height != output->pend_h
+				|| ext.width < output->pend_w || ext.height < output->pend_h) {
+			return false;
+		}
+		struct wlr_output *o = output->wlr_output;
+		if (output->pend_h > o->height && !edge_painted(t, false, geo.y + geo.height - 1)) {
+			return false;
+		}
+		if (output->pend_w > o->width && !edge_painted(t, true, geo.x + geo.width - 1)) {
+			return false;
+		}
+		any = true;
+	}
+	return any;
+}
+
+static int pending_timeout(void *data) {
+	apply_pending_mode(data);
+	return 0;
+}
+
+/* The host resized output k's window: the app gets the size now, the
+ * output when the app has drawn at it. */
 static void resize_output(struct server *server, int k, int w, int h) {
-	if (server->outputs[k] == NULL || w <= 0 || h <= 0) {
+	struct output *output = server->outputs[k];
+	if (output == NULL || w <= 0 || h <= 0) {
 		return;
 	}
-	struct wlr_output *o = server->outputs[k]->wlr_output;
-	if (o->width == w && o->height == h) {
+	struct wlr_output *o = output->wlr_output;
+	if (o->width == w && o->height == h && output->pend_w == 0) {
 		return;
 	}
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_custom_mode(&state, w, h, 0);
-	if (!wlr_output_commit_state(o, &state)) {
-		fprintf(stderr, "npkwm: output %d: %dx%d refused\n", k, w, h);
+	output->pend_w = w;
+	output->pend_h = h;
+	bool waits = false;
+	struct toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->out == k && is_root(t) && t->xdg_toplevel->base->initialized) {
+			wlr_xdg_toplevel_set_size(t->xdg_toplevel, w, h);
+			waits = true;
+		}
 	}
-	wlr_output_state_finish(&state);
-	replace_on(server, k);
+	if (waits) {
+		wl_event_source_timer_update(output->pend_timer, RESIZE_WAIT_MS);
+	} else {
+		apply_pending_mode(output);
+	}
 }
 
 static void win_handle_frame(struct server *server, uint8_t type, const uint8_t *payload, size_t len) {
@@ -460,8 +585,11 @@ static void place_toplevel(struct toplevel *t) {
 	}
 	if (is_root(t)) {
 		wlr_scene_node_set_position(&t->scene_tree->node, out.x, out.y);
+		struct output *o = server->outputs[t->out];
+		int w = o->pend_w ? o->pend_w : out.width;
+		int h = o->pend_h ? o->pend_h : out.height;
 		if (t->xdg_toplevel->base->initialized) {
-			wlr_xdg_toplevel_set_size(t->xdg_toplevel, out.width, out.height);
+			wlr_xdg_toplevel_set_size(t->xdg_toplevel, w, h);
 		}
 		return;
 	}
@@ -686,6 +814,24 @@ static void cursor_frame(struct wl_listener *listener, void *data) {
 
 static void output_frame(struct wl_listener *listener, void *data) {
 	struct output *output = wl_container_of(listener, output, frame);
+	/* Every commit of the app (a subsurface's too, which no toplevel
+	 * listener sees) damages the output and brings a frame. While a resize
+	 * waits, the output shows nothing new — the host keeps the last whole
+	 * picture — but the app still gets its frame callbacks and draws on. */
+	if (output->pend_w) {
+		if (drawn_at_pending(output)) {
+			apply_pending_mode(output);
+		} else {
+			struct wlr_scene_output *held =
+				wlr_scene_get_scene_output(output->server->scene, output->wlr_output);
+			struct timespec now;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			if (held) {
+				wlr_scene_output_send_frame_done(held, &now);
+			}
+		}
+		return;
+	}
 	struct wlr_scene_output *scene_output =
 		wlr_scene_get_scene_output(output->server->scene, output->wlr_output);
 	if (scene_output == NULL) {
@@ -711,6 +857,7 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&output->frame.link);
 	wl_list_remove(&output->request_state.link);
 	wl_list_remove(&output->destroy.link);
+	wl_event_source_remove(output->pend_timer);
 	free(output);
 	server->outputs[k] = NULL;
 	if (server->released[k]) {
@@ -750,6 +897,8 @@ static void new_output(struct wl_listener *listener, void *data) {
 	output->server = server;
 	output->wlr_output = wlr_output;
 	output->index = k;
+	output->pend_timer = wl_event_loop_add_timer(wl_display_get_event_loop(server->display),
+		pending_timeout, output);
 	output->frame.notify = output_frame;
 	wl_signal_add(&wlr_output->events.frame, &output->frame);
 	output->request_state.notify = output_request_state;
