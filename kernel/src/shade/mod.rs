@@ -1360,6 +1360,11 @@ pub fn poll_render() {
         force_redraw();
     }
 
+    if let Some(id) = crate::shade::surface::take_reveal() {
+        with_compositor(|comp| comp.reveal_surface(WindowId(id)));
+        render_frame();
+    }
+
     // Tick swap animation (smooth window transition)
     let animating = with_compositor(|comp| comp.tick_animation()).unwrap_or(false);
     if animating {

@@ -768,11 +768,33 @@ impl Compositor {
 
         self.windows.push(win);
         self.z_order.insert(0, id);
+        // Tile it once so the guest learns the size it will have, then hide
+        // it and tile the rest back: the window appears, and its neighbours
+        // move aside, only with the app's first frame (`reveal_surface`).
+        // Both passes run before any render, so nothing shows in between.
+        self.retile();
+        if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
+            w.visible = false;
+        }
         self.retile();
         self.pin_overlays_to_front();
         self.needs_full_redraw = true;
 
         id
+    }
+
+    /// Show a Surface window hidden by `create_surface_window`, tile it in
+    /// and give it focus. No-op for a window that is gone or already shown.
+    pub fn reveal_surface(&mut self, id: WindowId) {
+        let Some(w) = self.windows.iter_mut().find(|w| w.id == id) else { return };
+        if w.visible || w.kind != crate::shade::window::WindowKind::Surface {
+            return;
+        }
+        w.visible = true;
+        w.dirty = true;
+        self.retile();
+        self.focus_window(id);
+        self.needs_full_redraw = true;
     }
 
     /// Convert the Terminal-kind window backing `terminal_idx` into a

@@ -2824,13 +2824,11 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
             match crate::shade::create_surface_window("microvm") {
                 Some(wid) => {
                     crate::microvm::vm_bind_window(wid.0);
-                    // Focus the guest window on launch: pointer and
-                    // keyboard forwarding only run in the Surface-focused
-                    // branch, so otherwise the guest gets no input until the
-                    // user focuses the tile. The spawning shell stays
-                    // reachable via Mod-focus / Mod+number.
-                    crate::shade::focus_window(wid);
-                    kprintln!("[microvm] guest running — window {} (focused)", wid.0);
+                    // The window stays hidden, and unfocused, until the
+                    // guest's first frame; `reveal_surface` then shows and
+                    // focuses it (pointer and keyboard forwarding only run in
+                    // the Surface-focused branch).
+                    kprintln!("[microvm] guest running — window {} (shown with its first frame)", wid.0);
                     crate::microvm::boottime::mark("host: window bound");
                 }
                 None => kprintln!("[microvm] guest running (no compositor; serial only)"),

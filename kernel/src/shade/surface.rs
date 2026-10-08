@@ -180,6 +180,7 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
     // The first frame makes the window itself appear (`has_frame`), border
     // and all, which the clipped tile blit does not cover.
     if first {
+        PENDING_REVEAL.store(window_id, Ordering::Release);
         crate::shade::request_render();
     } else if crate::shade::SURFACE_CLIP_BLIT {
         crate::shade::request_surface_render();
@@ -236,6 +237,18 @@ pub fn set_tile_size(window_id: u32, w: u32, h: u32) {
         surf.display_dirty = true;
         surf.size_changed_at = crate::interrupts::ticks();
         ANY_DISPLAY_DIRTY.store(true, Ordering::Release);
+    }
+}
+
+/// Window to reveal once Core 0 renders next: its guest presented its first
+/// frame on a vCPU core, and only Core 0 touches the compositor. 0 = none.
+static PENDING_REVEAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// The window whose first frame arrived, if any (clears it).
+pub fn take_reveal() -> Option<u32> {
+    match PENDING_REVEAL.swap(0, Ordering::AcqRel) {
+        0 => None,
+        id => Some(id),
     }
 }
 
