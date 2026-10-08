@@ -1758,14 +1758,29 @@ impl Compositor {
         }
     }
 
+    /// Tiles are moving through sizes nobody keeps: the dock is sliding,
+    /// or a split line is being dragged.
+    fn geometry_in_motion(&self) -> bool {
+        let dock_sliding = self.dock.is_some_and(|d| {
+            let target = if d.target_shown { 0 } else { d.thickness + d.gap };
+            d.offset != target
+        });
+        dock_sliding || self.drag.is_some_and(|d| d.mode == DragMode::Resize)
+    }
+
     /// Push every Surface window's content rect into the surface
-    /// registry so virtio-gpu can advertise it via GET_DISPLAY_INFO
-    /// (the guest renders to the tile size, no host scaling). Called
-    /// at the end of every retile; `set_tile_size` is idempotent and
-    /// only flags a config-change on a real size change. The `border`
-    /// must match render_window's content-rect inset exactly or the
-    /// guest would render a few px off.
+    /// registry: the guest renders at the tile size, no host scaling.
+    /// Called at the end of every retile; `set_tile_size` is idempotent
+    /// and only flags a change on a real size change. While tiles are in
+    /// motion (`geometry_in_motion`) nothing is pushed: a guest redraws its
+    /// whole window for every size, so it gets only the one the motion
+    /// ends at, and until then its tile clips or extends its picture. The
+    /// `border` must match render_window's content-rect inset exactly or
+    /// the guest would render a few px off.
     fn sync_surface_tile_sizes(&self) {
+        if self.geometry_in_motion() {
+            return;
+        }
         let border = self.border;
         for win in &self.windows {
             if win.kind == crate::shade::window::WindowKind::Surface {
@@ -2499,6 +2514,7 @@ impl Compositor {
                 }
             } else {
                 self.drag = None;
+                self.sync_surface_tile_sizes();
                 return drag.mode == DragMode::Resize; // resize needs final render
             }
         }
@@ -2595,6 +2611,7 @@ impl Compositor {
                 }
             } else {
                 self.drag = None;
+                self.sync_surface_tile_sizes();
                 return drag.mode == DragMode::Resize;
             }
         }

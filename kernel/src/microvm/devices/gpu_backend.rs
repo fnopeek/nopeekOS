@@ -64,19 +64,10 @@ pub fn take_resume(now: u64) -> bool {
         && RESUME_TSC.compare_exchange(t, 0, Ordering::AcqRel, Ordering::Acquire).is_ok()
 }
 
-/// Tick (100 Hz) at which each output's size last went to the guest.
-static SIZE_SENT_AT: [core::sync::atomic::AtomicU64; super::virtio_gpu_pci::MAX_OUTPUTS] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; super::virtio_gpu_pci::MAX_OUTPUTS];
-/// A window's size goes to the guest at once, and while it keeps changing
-/// (a dock sliding in, a drag) at most this often: every size makes the app
-/// draw again, and one it cannot keep up with is seen half-drawn. The last
-/// size always goes.
-const SIZE_EVERY_TICKS: u64 = 10;
-
 /// The vCPU core's display work: tell the guest that windows came or went
 /// (true: raise the GPU interrupt), and send the guest compositor the new
-/// size of every window that changed (see `SIZE_EVERY_TICKS`). A window's
-/// size waits only while the compositor is not yet listening.
+/// size of every window that changed. A window's size waits only while the
+/// compositor is not yet listening.
 pub fn display_tick() -> bool {
     use super::virtio_console_pci as console;
     use super::virtio_gpu_pci::MAX_OUTPUTS;
@@ -89,17 +80,11 @@ pub fn display_tick() -> bool {
             send_size(k);
         }
     } else if crate::shade::surface::any_display_dirty() && console::windows_ready() {
-        let now = crate::interrupts::ticks();
         for k in 0..MAX_OUTPUTS {
             let wid = crate::microvm::output_window(k);
-            if wid == 0
-                || now.wrapping_sub(SIZE_SENT_AT[k].load(Ordering::Relaxed)) < SIZE_EVERY_TICKS
-                || !crate::shade::surface::display_dirty(wid)
-            {
-                continue;
+            if wid != 0 && crate::shade::surface::take_display_dirty(wid) {
+                send_size(k);
             }
-            let _ = crate::shade::surface::take_display_dirty(wid);
-            send_size(k);
         }
     }
     changed
@@ -111,7 +96,6 @@ fn send_size(k: usize) {
     let Some((w, h)) = crate::shade::surface::tile_size(crate::microvm::output_window(k)) else { return };
     let (w, h) = ((w.min(u16::MAX as u32) as u16).to_le_bytes(), (h.min(u16::MAX as u32) as u16).to_le_bytes());
     let _ = console::send_windows(console::WIN_RESIZE, &[k as u8, w[0], w[1], h[0], h[1]]);
-    SIZE_SENT_AT[k].store(crate::interrupts::ticks(), Ordering::Relaxed);
 }
 
 /// Lock-free BAR0 range check (const base) — the vCPU NPF dispatch tests this on

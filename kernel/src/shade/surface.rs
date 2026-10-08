@@ -266,11 +266,6 @@ pub fn any_display_dirty() -> bool {
     ANY_DISPLAY_DIRTY.load(Ordering::Acquire)
 }
 
-/// The window's tile size changed and has not been sent yet.
-pub fn display_dirty(window_id: u32) -> bool {
-    SURFACES.lock().get(&window_id).is_some_and(|s| s.display_dirty)
-}
-
 /// True (and clears the flag) if the tile size changed since the last
 /// call → the VM core sends the guest the new size.
 pub fn take_display_dirty(window_id: u32) -> bool {
