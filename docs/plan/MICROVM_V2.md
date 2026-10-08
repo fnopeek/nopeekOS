@@ -244,8 +244,26 @@ App-Bild (≥ 50 % nicht schwarz): beim Anlegen einmal gekachelt, damit der Gast
 seine Grösse kennt, dann versteckt; das erste Bild deckt es auf und gibt den
 Fokus. Nach „browser exited“ werden keine Bilder mehr übernommen.
 
+**Auflösung (Kernel 0.519/0.520):** Der Gast-Benchmark (`microvm_cmdline
+npkbench_cpu`) gibt den CPU-Faktor Notebook (Zen 2) gegen Desktop (Zen 5):
+Rechnen 2,0×, Speicher 1,9×, Systemaufrufe 3,7×, Prozessstart 3,2× (der
+Spectre-Schutz von Zen 2 kostet jeden Kernel-Eintritt). Der Prozess-Sampler
+(`microvm_stats` → `[lw-proc]`) zeigt: **unter KVM startete LibreWolf
+zweistufig**, weil `tools/microvm_kvm.py` QEMU hart beendet und das Profil
+beschädigt (prefs.js mit NUL-Zeilen, 56 `prefs-N.js`, `InvalidateCaches=1`);
+`main` misst ab dem zweiten Prozess, die „10 ms“ waren geschönt. Am Notebook
+startet LibreWolf einstufig; die ~170 ms vor `main` sind Rechenzeit im
+Gastkernel (`sys` 160 ms bei +200 ms: exec, Abbilden, Seitenfehler,
+squashfs entpacken), kein Warten (`runqueue` ≈ 0). **Unser VMM bremst den
+App-Start nicht messbar**; der Abstand zum Desktop ist der Prozessor.
+
+**Folgerungen:**
+- Ein hart gestoppter Gast beschädigt das App-Profil. Der Steuerkanal mit
+  sauberem `quit` (§5.1, Stufe 1) schützt Daten, nicht nur Startzeit.
+- Der KVM-Prüfstand braucht ein frisches oder sauber geschlossenes Profil,
+  sonst vergleicht er gegen einen Neustart.
+
 **Offen:**
-- `main` am Notebook 176 ms gegen 10 ms unter KVM.
 - Kalte native Messung (nativ war kalt = warm, ~0,3 s).
 - Streuung bis Bild #1 (~150 ms) beim GPU-Start des Gasts.
 - cage → App 0,48 s und die Anzeigekette: siehe Bildweg (eigener Compositor
