@@ -59,6 +59,9 @@ pub struct GuestSurface {
     /// config-change IRQ so the guest re-queries GET_DISPLAY_INFO.
     /// Coalescing is free: many resizes before one take = one IRQ.
     display_dirty: bool,
+    /// Tick of the last tile size change. The guest is told only once the
+    /// size has held for `SIZE_SETTLE_TICKS`.
+    size_changed_at: u64,
 }
 
 #[derive(Default)]
@@ -82,11 +85,19 @@ impl GuestSurface {
             tile_w: 0,
             tile_h: 0,
             display_dirty: false,
+            size_changed_at: 0,
         }
     }
 }
 
 static SURFACES: Mutex<BTreeMap<u32, GuestSurface>> = Mutex::new(BTreeMap::new());
+
+/// How long a tile size must hold before the guest hears of it, in 100 Hz
+/// ticks. Every size the guest is told costs it an output rebuild (a
+/// disconnect/reconnect cycle, black frames from the compositor in it); a
+/// dock animation or a drag passes through dozens of sizes, and only the
+/// last one matters.
+const SIZE_SETTLE_TICKS: u64 = 15;
 
 /// Any surface has `display_dirty` set — lets the vCPU ask on every exit
 /// without taking the map lock.
@@ -218,6 +229,7 @@ pub fn set_tile_size(window_id: u32, w: u32, h: u32) {
         surf.tile_w = w;
         surf.tile_h = h;
         surf.display_dirty = true;
+        surf.size_changed_at = crate::interrupts::ticks();
         ANY_DISPLAY_DIRTY.store(true, Ordering::Release);
     }
 }
@@ -242,8 +254,13 @@ pub fn tile_size(window_id: u32) -> Option<(u32, u32)> {
 /// (and the latest tile size) then survives to the next allowed
 /// window, so the final resize size is always delivered.
 pub fn display_dirty_peek(window_id: u32) -> bool {
-    ANY_DISPLAY_DIRTY.load(Ordering::Acquire)
-        && SURFACES.lock().get(&window_id).is_some_and(|s| s.display_dirty)
+    if !ANY_DISPLAY_DIRTY.load(Ordering::Acquire) {
+        return false;
+    }
+    let now = crate::interrupts::ticks();
+    SURFACES.lock().get(&window_id).is_some_and(|s| {
+        s.display_dirty && now.saturating_sub(s.size_changed_at) >= SIZE_SETTLE_TICKS
+    })
 }
 
 /// True (and clears the flag) if the tile size changed since the last
