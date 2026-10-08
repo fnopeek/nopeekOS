@@ -2694,6 +2694,15 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
     {
         let _ = write!(s, " nopeektime={}", epoch);
     }
+    // `set microvm_cmdline <params>`: appended last, so a repeated parameter
+    // overrides the one above (e.g. `idle=poll`, `maxcpus=2`), so guest
+    // variants can be measured without rebuilding.
+    if let Some(extra) = crate::config::get("microvm_cmdline") {
+        let extra = extra.trim();
+        if !extra.is_empty() && extra.is_ascii() && !extra.contains('\0') {
+            let _ = write!(s, " {}", extra);
+        }
+    }
     // Guest-side diagnostic probe: PID-1 forks a 1 s busybox loop that dumps the
     // guest's own view (per-vCPU busy/softirq %, socket cwnd/rtt/retrans, softnet
     // drops/squeeze) to /dev/kmsg → our console as `[gdiag]`.
