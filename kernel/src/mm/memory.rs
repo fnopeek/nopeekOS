@@ -256,6 +256,30 @@ pub fn allocate_contiguous(count: usize) -> Option<u64> {
     allocate_contiguous_below(count, 0)
 }
 
+/// Allocate `count` contiguous frames whose base is a multiple of `align`
+/// frames, searching from the top of memory. `align` is a power of two and
+/// both are multiples of 8, so every candidate is whole bitmap bytes and is
+/// free iff those bytes are zero.
+pub fn allocate_contiguous_aligned(count: usize, align: usize) -> Option<u64> {
+    if count == 0 || count % 8 != 0 || align < 8 || !align.is_power_of_two() {
+        return None;
+    }
+    let mut alloc = ALLOCATOR.lock();
+    let top = alloc.memory_top.min(MAX_FRAMES);
+    if count > top { return None; }
+    let mut start = (top - count) & !(align - 1);
+    loop {
+        if alloc.bitmap[start / 8..(start + count) / 8].iter().all(|&b| b == 0) {
+            for i in 0..count {
+                alloc.set_used(start + i);
+            }
+            return Some((start * PAGE_SIZE) as u64);
+        }
+        if start < align { return None; }
+        start -= align;
+    }
+}
+
 /// Deallocate `count` contiguous physical frames starting at `base`.
 pub fn deallocate_contiguous(base: u64, count: usize) {
     let mut alloc = ALLOCATOR.lock();

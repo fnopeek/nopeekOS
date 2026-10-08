@@ -37,6 +37,10 @@ const GUEST_RAM_ALIGN_SLACK: usize = 511;
 
 /// Bits [51:12] of an NPT entry hold the next-level / page phys addr.
 const NPT_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+/// Bits [51:21] of a 2 MB leaf hold the page's phys addr.
+const NPT_2M_ADDR_MASK: u64 = 0x000F_FFFF_FFE0_0000;
+/// Frames in one 2 MB page.
+const FRAMES_PER_2M: usize = (TWO_MB / 4096) as usize;
 
 const TWO_MB: u64 = 2 * 1024 * 1024;
 const ONE_GB: u64 = 1024 * 1024 * 1024;
@@ -201,28 +205,21 @@ fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Resul
             }
         }
 
-        // Populate each PD: [base_leaf, end_leaf) in this PD's window. The
-        // tree is linked and walkable from here on, so a failed demand-PT
-        // allocation unwinds through `release`.
+        // Populate each PD: the boot window as 2 MB leaves. The demand region
+        // stays not present (the PDs are zeroed); its first touch installs
+        // either a 2 MB leaf or a PT (`demand_fault_in`). Either is a
+        // not-present -> present change, which needs no TLB flush, so a
+        // present entry is never replaced.
         const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
         for p in 0..num_pds {
             let pd = pd_physs[p] as *mut u64;
             let base_leaf = (p as u64) * LEAVES_PER_PD;
-            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(guest_leaves);
+            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(boot_leaves);
             for leaf in base_leaf..end_leaf {
                 let local = (leaf - base_leaf) as usize;
-                if leaf < boot_leaves {
-                    let host_target = host_base + leaf * TWO_MB;
-                    let entry = host_target | NPT_P | NPT_RW | NPT_US | NPT_PS;
-                    pd.add(local).write_volatile(entry);
-                } else {
-                    let Some(pt) = memory::allocate_frame() else {
-                        release(pml4_phys, guest_bytes);
-                        return Err("OOM allocating NPT demand PT");
-                    };
-                    core::ptr::write_bytes(pt as *mut u8, 0, 4096);
-                    pd.add(local).write_volatile(pt | NPT_P | NPT_RW | NPT_US);
-                }
+                let host_target = host_base + leaf * TWO_MB;
+                let entry = host_target | NPT_P | NPT_RW | NPT_US | NPT_PS;
+                pd.add(local).write_volatile(entry);
             }
         }
     }
@@ -230,34 +227,56 @@ fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Resul
     Ok(pml4_phys)
 }
 
-/// Walk PML4[0]→PDPT[0]→PD→PT for a demand-region `gpa`; allocate +
-/// map a zeroed 4 KB frame on first touch, return its host phys.
-/// Idempotent. Called from the #NPF handler and `GuestMem` (host DMA
-/// to an untouched page). `gpa` must be ≥ the boot window. No
-/// INVLPGA needed: the entry was not-present (no stale TLB).
-/// Mirrors `ept::demand_fault_in`.
-pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
-    // SAFETY: our own freshly-built NPT, identity-mapped tables.
+/// Back the 4 KB guest page at `gpa` (demand region of a guest of
+/// `guest_bytes`) and return its host address. The first touch of a 2 MB
+/// block maps the whole block as one 2 MB leaf from a 2 MB-aligned host
+/// block (one allocation, one TLB entry for the guest, like a THP-backed
+/// KVM memslot); without such a block it falls back to a PT of 4 KB pages.
+/// `None` outside the demand region or without host memory to spare.
+pub fn demand_fault_in(pml4_phys: u64, gpa: u64, guest_bytes: u64) -> Option<u64> {
+    if gpa < boot_window_bytes(guest_bytes) || gpa >= guest_bytes {
+        return None;
+    }
+    // SAFETY: our own freshly-built NPT, identity-mapped tables; `gpa` lies in
+    // the demand region, whose PDs exist (`build_npt` maps one per GiB).
     unsafe {
         let pml4 = pml4_phys as *const u64;
         let pdpt = (pml4.read_volatile() & NPT_ADDR_MASK) as *const u64;
-        // Pick the right guest-RAM PD from PDPT[0..3] by gpa.
         let pdpt_idx = (gpa / ONE_GB) as usize;
         if pdpt_idx >= 3 {
             return None; // PDPT[3] is MMIO, never demand-faulted
         }
         let pdpt_entry = pdpt.add(pdpt_idx).read_volatile();
         if pdpt_entry == 0 {
-            return None; // PD not present (gpa beyond advertised guest_bytes)
+            return None;
         }
         let pd = (pdpt_entry & NPT_ADDR_MASK) as *mut u64;
         let pd_idx = ((gpa % ONE_GB) / TWO_MB) as usize;
+        let in_block = gpa % TWO_MB & !0xFFF;
         let pde = pd.add(pd_idx).read_volatile();
-        if pde == 0 || pde & NPT_PS != 0 {
-            return None; // outside demand region / unexpected 2-MB leaf
+        if pde & NPT_P != 0 && pde & NPT_PS != 0 {
+            return Some((pde & NPT_2M_ADDR_MASK) + in_block); // already a 2 MB leaf
         }
-        let pt = (pde & NPT_ADDR_MASK) as *mut u64;
-        let pt_idx = ((gpa % TWO_MB) / 4096) as usize;
+        let pt = if pde & NPT_P != 0 {
+            (pde & NPT_ADDR_MASK) as *mut u64
+        } else {
+            let spare = crate::microvm::devices::guest_mem::frames_spare();
+            if spare > FRAMES_PER_2M {
+                if let Some(block) = memory::allocate_contiguous_aligned(FRAMES_PER_2M, FRAMES_PER_2M) {
+                    core::ptr::write_bytes(block as *mut u8, 0, TWO_MB as usize);
+                    pd.add(pd_idx).write_volatile(block | NPT_P | NPT_RW | NPT_US | NPT_PS);
+                    return Some(block + in_block);
+                }
+            }
+            if spare < 2 {
+                return None;
+            }
+            let pt = memory::allocate_frame()?;
+            core::ptr::write_bytes(pt as *mut u8, 0, 4096);
+            pd.add(pd_idx).write_volatile(pt | NPT_P | NPT_RW | NPT_US);
+            pt as *mut u64
+        };
+        let pt_idx = (in_block / 4096) as usize;
         let pte = pt.add(pt_idx).read_volatile();
         if pte & NPT_P != 0 {
             return Some(pte & NPT_ADDR_MASK); // already faulted in
@@ -271,9 +290,8 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
         pt.add(pt_idx)
             .write_volatile(frame | NPT_P | NPT_RW | NPT_US);
         // Fault-around: back the rest of this 2 MB block now, so a guest
-        // walking fresh memory takes one exit per 2 MB, not one per 4 KB
-        // (KVM gets the same from a THP-backed memslot). Stops at the host
-        // reserve; the remaining pages fault in singly.
+        // walking fresh memory takes one exit per 2 MB, not one per 4 KB.
+        // Stops at the host reserve; the remaining pages fault in singly.
         let mut left = spare - 1;
         for j in 0..512usize {
             if left == 0 { break; }
@@ -311,7 +329,11 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
                 if leaf < boot_leaves { continue; }
                 let local = (leaf - base_leaf) as usize;
                 let pde = pd.add(local).read_volatile();
-                if pde == 0 || pde & NPT_PS != 0 { continue; }
+                if pde & NPT_P == 0 { continue; }
+                if pde & NPT_PS != 0 {
+                    memory::deallocate_contiguous(pde & NPT_2M_ADDR_MASK, FRAMES_PER_2M);
+                    continue;
+                }
                 let pt_phys = pde & NPT_ADDR_MASK;
                 let pt = pt_phys as *const u64;
                 for j in 0..512usize {

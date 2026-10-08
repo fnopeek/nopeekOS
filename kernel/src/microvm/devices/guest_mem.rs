@@ -183,7 +183,7 @@ impl GuestMem {
                 crate::microvm::cpu::vmx::ept::demand_fault_in(self.table_root, page)
             }
             SecondLevel::Npt => {
-                crate::microvm::cpu::svm::npt::demand_fault_in(self.table_root, page)
+                crate::microvm::cpu::svm::npt::demand_fault_in(self.table_root, page, self.len)
             }
         }?;
         // host is page-aligned (a fresh demand frame), so host>>12<<12 == host.
