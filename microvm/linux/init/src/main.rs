@@ -141,6 +141,7 @@ fn launch_wayland(kmsg_fd: i64) {
     }
     say(kmsg_fd, b"[microvm-init] cage present, starting Wayland session\n");
     write_file(b"/tmp/lw-probe.js\0", LW_PROBE);
+    write_file(b"/tmp/lw-sample.sh\0", LW_SAMPLE);
 
     let prog = b"/bin/sh\0".as_ptr();
     let arg0 = b"/bin/sh\0".as_ptr();
@@ -270,7 +271,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  fi; \
                  i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do usleep 5000; i=$((i+1)); done; \
                  echo \"<0>[wl] cage start (seatd after ${i}x5ms)\" > /dev/kmsg; \
-                 cage -- sh -c 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; exec librewolf --no-remote --profile /tmp/moz' \
+                 grep -q npkstats /proc/cmdline || : > /tmp/lw-sample.sh; \
+                 cage -- sh -c 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; [ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' \
                    > /tmp/cage.log 2>&1; \
                  rc=$?; echo \"<0>[wl] browser exited rc=$rc\" > /dev/kmsg; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
@@ -533,6 +535,10 @@ fn open_console_kmsg() -> (i64, i64) {
 /// Appended to LibreWolf's autoconfig by the session script: the browser's
 /// own startup times go to /dev/kmsg, next to the host's timeline.
 const LW_PROBE: &[u8] = include_bytes!("lw_probe.js");
+
+/// With `npkstats` on the command line, samples the app process's faults,
+/// CPU time and waits for its first second.
+const LW_SAMPLE: &[u8] = include_bytes!("lw_sample.sh");
 
 /// Create or truncate `path` (NUL-terminated) and write `data`; best effort.
 fn write_file(path: &[u8], data: &[u8]) {

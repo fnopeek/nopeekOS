@@ -27,6 +27,13 @@ static SERIAL_LINES: AtomicU32 = AtomicU32::new(0);
 static PRINT_TSC: AtomicU64 = AtomicU64::new(0);
 static FLUSHES: AtomicU32 = AtomicU32::new(0);
 static GUEST_SEEN: AtomicU32 = AtomicU32::new(0);
+/// `set microvm_stats on`: the app-phase detail lines (vCPU time, exits,
+/// interrupt delivery, disk, clock) after the window is up.
+static STATS: AtomicBool = AtomicBool::new(false);
+
+pub fn set_stats(on: bool) {
+    STATS.store(on, Ordering::Relaxed);
+}
 
 /// Window detection: not yet armed, waiting for the window, done.
 const WIN_IDLE: u32 = 0;
@@ -183,7 +190,9 @@ pub fn gpu_pixels(pixels: &[u8], width: u32, height: u32) {
             now_ms(),
             lit,
         );
-        report_app_phase();
+        if STATS.load(Ordering::Relaxed) {
+            report_app_phase();
+        }
         crate::microvm::cpu::rip_sample::dump_now();
     }
 }

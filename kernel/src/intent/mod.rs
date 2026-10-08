@@ -2649,6 +2649,9 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     use core::fmt::Write;
     crate::microvm::boottime::start();
     crate::microvm::devices::gpu_backend::present_reset();
+    let stats = crate::config::get("microvm_stats")
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("on"));
+    crate::microvm::boottime::set_stats(stats);
     crate::microvm::cpu::rip_sample::set_enabled(
         crate::config::get("microvm_ripsample").is_some_and(|v| v.trim().eq_ignore_ascii_case("on")),
     );
@@ -2697,6 +2700,10 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         crate::rtc::read_unix_time().or_else(crate::net::ntp::unix_time)
     {
         let _ = write!(s, " nopeektime={}", epoch);
+    }
+    // The guest samples the app process too (`[lw-proc]` lines).
+    if stats {
+        let _ = write!(s, " npkstats");
     }
     // `set microvm_cmdline <params>`: appended last, so a repeated parameter
     // overrides the one above (e.g. `idle=poll`, `maxcpus=2`), so guest
