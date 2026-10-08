@@ -167,12 +167,42 @@ verfälscht spätere Bildzähler (deshalb gilt Bild #50, nicht #200).
 | + ohne `sleep 1` (0.499) | 4,31 s |
 | + zstd (0.500) | **3,23 s** |
 
+**Der „langsame erste Start“ war DNS** (Kernel 0.504.0, microvm-init
+0.4.28). LibreWolf löst beim Start den eigenen Rechnernamen auf; `nopeek`
+stand nicht in der `/etc/hosts` des Gasts, also ging bei jedem Start eine
+Anfrage an 1.1.1.1. Und der ARP-Eintrag des Wirts verfiel 30 s nach dem
+Lernen: das erste Paket danach ging an L2-Broadcast und wurde vom Router
+verworfen. Folge: nach jeder Pause über 30 s fiel die Anfrage weg, und musl
+fragte erst nach 2,5 s neu. Jetzt kennt der Gast seinen Namen, und ein
+abgelaufener ARP-Eintrag wird weiter benutzt und nachgefragt (wie Linux
+`NUD_STALE`). Am Notebook danach auch nach 124 s Pause kein Ausreisser.
+
+**Startmass ab Kernel 0.505.0: `app: window up`** — das erste Bild nach dem
+App-Start, das zu mindestens der Hälfte nicht schwarz ist (Konsole und
+leere cage-Ausgabe sind schwarz, ein Browserfenster nicht). Bild #50 zählt
+das Nachladen der Seiten mit und liegt 0,5–0,7 s später.
+
+**Notebook, Kernel 0.505.0** (Läufe 2–4, Fenster 946 und 1902 breit):
+
+| Abschnitt | Zeit |
+|---|---|
+| Start → cage | ~0,62 s, davon bis 150 ms Streuung bis Bild #1 (GPU-Start) |
+| cage → App gestartet | ~0,48 s |
+| App gestartet → Fenster | ~1,31 s, unabhängig von der Fenstergrösse |
+| **Start → Fenster** | **~2,5 s** |
+
+Nativ, dasselbe LibreWolf aus der sqfs per `bwrap`, warm, 9600X:
+erstes Bild **0,32 s** (`tools/librewolf_native_start.py`). Kalt (Cache
+geleert) steht aus — erst damit ist klar, wie viel der 1,31 s ein
+unvermeidbarer Kaltstart ist.
+
 **Offen:**
-- Der **erste Start** nach einem Update oder einem Wechsel der sqfs ist
-  regelmässig 2-2,5 s langsamer. Nicht nur die fehlende `.hot`-Liste — der
-  erste raw-Lauf war schnell. Ungeklärt.
-- Die Restzeit gegen nativ (0,55 s): kalter Seitencache im Gast,
-  Anzeigekette (cage, pixman, virtio-gpu 2D).
+- Kalte native Messung.
+- lz4 statt zstd (entpackt mehrfach schneller, kleiner als raw) — unter KVM
+  zu messen.
+- Streuung bis Bild #1 (~150 ms) beim GPU-Start des Gasts.
+- cage → App 0,48 s und die Anzeigekette: siehe Bildweg (eigener Compositor
+  im Gast statt cage).
 
 **Mehrkerniges Entpacken bringt nichts** (2026-10-08, KVM 9600X, 6 vCPUs,
 946x1074, je drei Läufe): `SQUASHFS_COMPILE_DECOMP_MULTI_PERCPU` gegen
