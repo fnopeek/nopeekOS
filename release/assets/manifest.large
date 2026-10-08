@@ -1,5 +1,5 @@
 [microvm:userspace-sqfs]
-size=239177728
-sha384=e1acafc745cd6d6bbc43c45fec050a61c6389b7800b32ecb7528f97cfe5c72cb1217bc65dc002d4a032c456c1f9f570a
-url=https://github.com/fnopeek/nopeekOS/releases/download/assets/librewolf-0.4.0/microvm-userspace.sqfs
+size=311218176
+sha384=1cd16b6a3cf8eebd874642d3706b6a4a8f1ad67f3f53e05ced4354e7724296405562ee4d4b9ad24fb3436f0145034901
+url=https://github.com/fnopeek/nopeekOS/releases/download/assets/librewolf-0.5.0/microvm-userspace.sqfs
 
