@@ -266,8 +266,7 @@ App-Start nicht messbar**; der Abstand zum Desktop ist der Prozessor.
 **Offen:**
 - Kalte native Messung (nativ war kalt = warm, ~0,3 s).
 - Streuung bis Bild #1 (~150 ms) beim GPU-Start des Gasts.
-- cage → App 0,48 s und die Anzeigekette: siehe Bildweg (eigener Compositor
-  im Gast statt cage).
+- cage → App 0,48 s: war Mesa/LLVM beim Laden, siehe §5.2.
 
 **Mehrkerniges Entpacken bringt nichts** (2026-10-08, KVM 9600X, 6 vCPUs,
 946x1074, je drei Läufe): `SQUASHFS_COMPILE_DECOMP_MULTI_PERCPU` gegen
@@ -506,6 +505,74 @@ längenpräfigierte Meldungen mit Obergrenze, feste Typen, der Wirt verwirft
 alles Unbekannte und beendet die VM bei einer Verletzung. **Nur PID 1 (root)
 öffnet das Gerät** — die App läuft nicht als root (§6) und kommt nicht heran.
 
+### 5.2 Eigener Compositor im Gast (npkwm)
+
+**Gebaut (Kernel 0.524.0, microvm-init 0.5.0), Stufe 1 von 3.** cage ist
+ersetzt durch `npkwm` (`microvm/linux/npkwm/`), C auf wlroots 0.20, aus
+tinywl. Er läuft als eigener Nutzer `wl` (uid 1001), getrennt von der App
+(`app`, 1000): nur `wl` öffnet den Port, nur `wl` bekommt über seatd GPU und
+Eingabe, die App erreicht ihn nur über seinen Socket (`/tmp/wlrt`, setgid
+`app`). PID 1 trägt ihn eingebettet und legt ihn nach `/tmp`; die sqfs bleibt
+unverändert.
+
+Verhalten wie cage: ein Fenster ohne Elter füllt den Ausgang (maximiert), ein
+Dialog steht mittig in eigener Grösse, Popups werden an den Ausgang geklemmt,
+die Dekoration bleibt beim Client.
+
+**Fensterprotokoll** auf dem zweiten virtio-console-Port `npk.windows`,
+gleiche Rahmen wie §5.1, höchstens 512 Bytes je Meldung:
+
+| Richtung | Typ | Inhalt |
+|---|---|---|
+| Wirt → Gast | `0x01 close` | `u8` Ausgang: allen Fenstern ohne Elter `xdg_toplevel.close` |
+| Gast → Wirt | `0x81 hello` | `u8` Protokollfassung |
+| Gast → Wirt | `0x82 title` | `u8` Ausgang, UTF-8-Titel des Fensters mit Fokus |
+
+Der Wirt bereinigt den Titel (ungültiges UTF-8 ersetzt, Steuerzeichen
+entfernt, höchstens 200 Bytes) und zeigt ihn in der Bar
+(`Window::caption`); der Fenstername, an dem das Dock Apps erkennt, bleibt.
+Mod+Q schickt `close` statt Strg+Q zu tippen; die App endet wie über ihren
+eigenen Schliessknopf (unter KVM: `sessionstore-final-state-write-complete`,
+`rc=0` 0,2 s nach `close`). Danach wie gehabt 3 s → `MSG_QUIT`, 10 s → hart.
+
+**Startzeit, und der Fund dabei.** Zwischen Compositor-Start und App-Start
+lagen unter KVM ~0,75 s — bei cage genauso. npkwm selbst ist nach 11 ms
+bereit; die Zeit lag **vor `main()`**: Alpines `libwlroots` bringt die
+GLES2- und Vulkan-Renderer mit und über sie Mesa und **libLLVM (191 MB)**, und
+musl löst jede Relokation beim Laden auf. Deshalb wird wlroots jetzt im
+Bau selbst gebaut, nur mit DRM, libinput und pixman, und statisch gelinkt
+(831 KB, keine Abhängigkeit mehr auf EGL/Mesa/LLVM). Danach bezahlte
+LibreWolf dieselbe Rechnung: sein `glxtest` lädt Mesa und LLVM, um eine GPU
+abzutasten, die es hier nicht gibt. `glxtest` und `vaapitest` sind jetzt
+`/bin/false` (Software-Rendering ist ohnehin erzwungen).
+
+KVM 9600X, 6 vCPUs, 1280×900, frisches Profil, je drei Läufe:
+
+| | cage (0.523) | npkwm (0.524) |
+|---|---|---|
+| Compositor-Start → App-Start | ~0,72 s | 0,05 s |
+| Start → Fenster steht | 3,55 s | 2,73–2,95 s |
+
+Am Notebook offen; dort lag „cage → App“ schon bei ~0,2 s (§0.7), der
+Gewinn kann also kleiner sein.
+
+**Weiter:**
+- **Stufe 2 — jedes App-Fenster ein eigenes nopeek-Fenster** (Entscheid
+  2026-10-08: abgetrennte Tabs und Dialoge sollen nicht das Hauptfenster
+  überdecken). Je Fenster ein virtio-gpu-Ausgang: npkwm meldet ein neues
+  Toplevel, der Wirt schaltet einen weiteren Ausgang zu (Display-Ereignis),
+  npkwm legt das Fenster dorthin; Popups bleiben beim Ausgang ihres Elters.
+  Der Wirt meldet den Fokus (`focus`), npkwm bindet die Tablet-Eingabe an
+  diesen Ausgang.
+- **Grösse über das Protokoll** (`resize`) statt Trennen und Neuverbinden des
+  Ausgangs (wlroots ignoriert einen neuen Modus bei verbundenem Ausgang).
+- **Stufe 3 — Zwischenablage** über denselben Port, nur Text, nur auf
+  Nutzeraktion.
+- Mit v2 braucht das Grundgerüst weder cage noch Alpines wlroots, Mesa oder
+  LLVM; die Bibliotheken von npkwm (libdrm, libinput, libudev, libseat,
+  pixman, xkbcommon, wayland, libdisplay-info) gehören dann ausdrücklich in
+  die Paketliste.
+
 ## 6. Sicherheit: wenn jemand in der Linux-Büchse ausbricht
 
 **Grundannahme: der ganze Gast ist feindlich.** Eine App aus dem Store, ein
@@ -514,8 +581,9 @@ der Angreifer **root im Gast**. Die Frage ist nur, was er dann hat.
 
 ### 6.1 Heute
 
-- **Ring 1 steht (Kernel 0.523.0, microvm-init 0.4.35):** cage und LibreWolf
-  laufen als `app` (uid 1000), PID 1, seatd und der Steuerkanal bleiben root.
+- **Ring 1 steht (Kernel 0.523.0, microvm-init 0.4.35):** LibreWolf läuft
+  als `app` (uid 1000), der Compositor seit 0.524 als `wl` (1001, §5.2),
+  PID 1, seatd und der Steuerkanal bleiben root.
   Der Gastkernel hat `USER_NS`, und jeder Kindprozess läuft wie bei nativem
   Firefox mit seccomp in eigenem Nutzer- und Netz-Namensraum (Web Content,
   RDD, Utility, WebExtensions), unter KVM nachgezählt. Zwei Dinge hielten das
@@ -523,7 +591,7 @@ der Angreifer **root im Gast**. Die Frage ist nur, was er dann hat.
   bekommt vom Kernel keinen Nutzer-Namensraum (jetzt `MS_MOVE` auf `/` wie
   `switch_root`); und `media.cubeb.sandbox=false` senkt die Inhalts-Sandbox
   von Stufe 4 auf 3. Beides ist weg, ebenso `MOZ_DISABLE_RDD/UTILITY_SANDBOX`.
-  Offen: der Ton am Gerät mit der vollen Sandbox.
+  Ton mit voller Sandbox am Notebook bestätigt (YouTube, 2026-10-08).
 - Ring 2 bleibt vorerst so (Entscheid 2026-10-08): `home/` bleibt freigegeben,
   bis die Dateiwahl über das System (Portal, §4b) kommt.
 - root im Gast hat: das **ganze `home/<user>/` lesend und schreibend** (9P),
@@ -631,6 +699,9 @@ Jede Stufe wird auf AMD **und** Intel gefahren (Lehre aus
 - **Keine Ordnerfreigabe ohne Zustimmung**; `home/` als Ganzes bekommt keine
   App (§4b).
 - **Steuerkanal = virtio-console**, nur PID 1 hat Zugriff (§5.1).
+- **Eigener Compositor** (npkwm, C auf wlroots, statisch und ohne GL) statt
+  cage; Fensterprotokoll auf `npk.windows`; jedes App-Fenster wird ein
+  eigenes nopeek-Fenster (§5.2).
 - **Platten bei Bedarf aus npkFS**, im Hintergrund vorab geladen (§0.6).
 - **Verwaltung „Linux-Apps“:** Vorgaben aus dem signierten Store,
   Übersteuerung durch den Nutzer, auch beim RAM (§4c).

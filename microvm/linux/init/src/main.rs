@@ -82,7 +82,7 @@ unsafe extern "C" fn rust_main() -> ! {
 
     // If the read-only userspace bundle is present on /dev/vdb
     // (second virtio-blk, slot 5), switch into it. The big bundle
-    // (Mesa/cage/LibreWolf) lives compressed on squashfs, decompressed
+    // (Mesa/wlroots/LibreWolf) lives compressed on squashfs, decompressed
     // on read — RAM-efficient vs. an unpacked cpio initramfs. On
     // absence/failure we stay in the minimal initramfs (the device
     // comes up empty until the OTA bundle lands).
@@ -95,33 +95,34 @@ unsafe extern "C" fn rust_main() -> ! {
     }
 
     // Diagnostic: if the host passed `nopeekbench=` on the cmdline, run a pure
-    // busybox download through the nat bridge (no cage/GPU/browser) so the
+    // busybox download through the nat bridge (no compositor/GPU/browser) so the
     // bridge can be measured in isolation, then halt.
     if bench_requested() {
         launch_bench(kmsg_fd);
     }
 
-    // Hand the framebuffer to the Wayland stack: cage (wlroots kiosk
+    // Hand the framebuffer to the Wayland stack: npkwm (our wlroots
     // compositor) running LibreWolf, rendered through the pixman
     // software renderer + wlroots DRM backend → /dev/dri/card0 →
     // virtio-gpu → our Shade Surface tile. On success PID-1 becomes
     // the supervising shell and never returns. It returns only if the
-    // bundle has no cage (degraded/minimal initramfs) — then just
+    // bundle has no wlroots (degraded/minimal initramfs) — then just
     // park, so the window still persists (Linux panics if PID-1
     // exits).
     launch_wayland(kmsg_fd);
 
-    say(kmsg_fd, b"[microvm-init] no cage in bundle; parking\n");
+    say(kmsg_fd, b"[microvm-init] no Wayland stack in bundle; parking\n");
     loop {
         let _ = unsafe { syscall0(SYS_PAUSE) };
     }
 }
 
 /// Hand the framebuffer to a real Wayland stack. If the bundle ships
-/// `/usr/bin/cage`, exec a shell that sets up the runtime env and runs
-/// `cage -- librewolf`:
-///   - cage: wlroots kiosk compositor, one fullscreen client — the
-///     browser, exactly the one-surface-one-tile topology.
+/// wlroots, exec a shell that sets up the runtime env, starts npkwm and
+/// runs librewolf against it:
+///   - npkwm: our wlroots compositor (`microvm/linux/npkwm`), embedded
+///     here and written to /tmp; it speaks to the host over the
+///     "npk.windows" port.
 ///   - librewolf: the client (Firefox fork). Needs MOZ_ENABLE_WAYLAND=1
 ///     or it tries X11 (there is no X).
 /// Renderer = pixman (software, no GL/Mesa driver). Backend = wlroots
@@ -129,22 +130,23 @@ unsafe extern "C" fn rust_main() -> ! {
 /// the seatd daemon (Alpine's libseat has no builtin backend), its
 /// socket on a tmpfs over /run (RO sqfs root). XDG_RUNTIME_DIR on
 /// tmpfs for the same reason. Output → /dev/kmsg (8250 TX is never
-/// flushed: cmdline is `noapic nolapic`, no IRQ4). cage starts as soon as
-/// the seatd socket exists. The periodic `sync` (the only flush when the
+/// flushed: cmdline is `noapic nolapic`, no IRQ4). npkwm starts as soon as
+/// the seatd socket exists, the app as soon as npkwm's socket does. The periodic `sync` (the only flush when the
 /// host closes the window) begins 15 s in, after the browser's start,
 /// whose SQLite writes it would otherwise force through the disk one by
 /// one. On success PID-1
 /// becomes the supervising shell and never returns; on absence we
 /// return so the caller can park.
 fn launch_wayland(kmsg_fd: i64) {
-    let probe = unsafe { syscall3(SYS_ACCESS, b"/usr/bin/cage\0".as_ptr() as u64, F_OK, 0) };
+    let probe = unsafe { syscall3(SYS_ACCESS, b"/usr/lib/libwlroots-0.20.so\0".as_ptr() as u64, F_OK, 0) };
     if probe != 0 {
-        say(kmsg_fd, b"[microvm-init] no /usr/bin/cage -- not a Wayland bundle\n");
+        say(kmsg_fd, b"[microvm-init] no wlroots -- not a Wayland bundle\n");
         return;
     }
-    say(kmsg_fd, b"[microvm-init] cage present, starting Wayland session\n");
-    write_file(b"/tmp/lw-probe.js\0", LW_PROBE);
-    write_file(b"/tmp/lw-sample.sh\0", LW_SAMPLE);
+    say(kmsg_fd, b"[microvm-init] starting Wayland session\n");
+    write_file(b"/tmp/lw-probe.js\0", LW_PROBE, 0o644);
+    write_file(b"/tmp/lw-sample.sh\0", LW_SAMPLE, 0o644);
+    write_file(b"/tmp/npkwm\0", NPKWM, 0o755);
 
     let prog = b"/bin/sh\0".as_ptr();
     let arg0 = b"/bin/sh\0".as_ptr();
@@ -152,28 +154,31 @@ fn launch_wayland(kmsg_fd: i64) {
     // XDG_RUNTIME_DIR + seatd socket on tmpfs (sqfs root is RO); seatd
     // daemon because Alpine libseat has no builtin backend; pixman
     // renderer (no GL); WLR DRM backend on virtio-gpu KMS. seatd.log is
-    // kept as the one thing worth seeing if the seat breaks. cage runs
-    // in the foreground; PID-1 parks if it exits so the window/VM stay
-    // alive.
-    // udevd + `udevadm trigger`/`settle` must run before cage:
+    // kept as the one thing worth seeing if the seat breaks.
+    // udevd + `udevadm trigger`/`settle` must run before npkwm:
     // wlroots' libinput backend discovers input devices, and its
     // DRM/session backend discovers the GPU and receives connector
     // hotplug, exclusively through the udev monitor. Without udev
     // wlroots finds no input devices and never reacts to the DRM
     // hotplug raised on a tile resize. `trigger` replays uevents for
     // already-present devices (event0, card0); `settle` waits for
-    // /run/udev/data to be populated before cage enumerates. Degrades
-    // with a WARN if eudev is absent — cage still starts, just
+    // /run/udev/data to be populated before npkwm enumerates. Degrades
+    // with a WARN if eudev is absent — npkwm still starts, just
     // input/hotplug-blind.
     // Standard LibreWolf config — only the prefs this environment
     // demands (no GPU / GL → software webrender; userChrome.css must
     // load to hide the titlebar buttons that crash the browser when
-    // clicked under cage; dark mode). Everything else stays default:
+    // clicked; dark mode). Everything else stays default:
     // e10s, fission, content/RDD/GMP/utility sandboxes, OCSP, telemetry,
-    // addons — like a fresh install.
-    // cage and the app run as `app` (uid 1000); PID 1, seatd and the
-    // control process stay root. The app owns its profile, runtime dir and
-    // the sound devices; seatd hands it the GPU and input devices.
+    // addons — like a fresh install. Its `glxtest` and `vaapitest` helpers are
+    // replaced by /bin/false: they probe GL and VA-API, there is no GPU here,
+    // and to probe they load Mesa and LLVM (230 MB), about 0.6 s per start.
+    // npkwm runs as `wl` (uid 1001) and the app as `app` (uid 1000); PID 1,
+    // seatd and the control process stay root. Only `wl` can open the
+    // npk.windows port and only through seatd does it get the GPU and input
+    // devices; the app reaches npkwm through its socket (the runtime dir
+    // /tmp/wlrt is setgid `app`). The app owns its profile, runtime dir and
+    // the sound devices.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
                  NPT=$(sed -n 's/.*nopeektime=\\([0-9][0-9]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$NPT\" ] && date -s @\"$NPT\" >/dev/null 2>&1; \
@@ -187,10 +192,12 @@ fn launch_wayland(kmsg_fd: i64) {
                  hostname nopeek 2>/dev/null \
                    || echo nopeek > /proc/sys/kernel/hostname 2>/dev/null; \
                  cp /etc/passwd /tmp/passwd; echo 'app:x:1000:1000:app:/tmp/app:/sbin/nologin' >> /tmp/passwd; \
+                 echo 'wl:x:1001:1001:wl:/tmp/wlrt:/sbin/nologin' >> /tmp/passwd; \
                  mount --bind /tmp/passwd /etc/passwd 2>/dev/null; \
-                 cp /etc/group /tmp/group; echo 'app:x:1000:' >> /tmp/group; \
+                 cp /etc/group /tmp/group; printf 'app:x:1000:\\nwl:x:1001:\\n' >> /tmp/group; \
                  mount --bind /tmp/group /etc/group 2>/dev/null; \
-                 mkdir -p /tmp/xrt /tmp/app; chmod 0700 /tmp/xrt; chown 1000:1000 /tmp/xrt /tmp/app; \
+                 mkdir -p /tmp/xrt /tmp/app /tmp/wlrt; chmod 0700 /tmp/xrt; chown 1000:1000 /tmp/xrt /tmp/app; \
+                 chown 1001:1000 /tmp/wlrt; chmod 2750 /tmp/wlrt; \
                  mount -t tmpfs -o mode=0755 tmpfs /run 2>/dev/null; \
                  mkdir -p /dev/shm 2>/dev/null; mount -t tmpfs -o mode=1777 tmpfs /dev/shm 2>/dev/null; \
                  mkdir -p /run/udev; \
@@ -261,11 +268,14 @@ fn launch_wayland(kmsg_fd: i64) {
                  chown 1000:1000 /tmp/bcache /tmp/gleandb; \
                  chown 1000:1000 /dev/snd/* 2>/dev/null; \
                  chgrp app /dev/kmsg; chmod 0620 /dev/kmsg; \
+                 W=; for p in /sys/class/virtio-ports/*; do [ \"$(cat $p/name 2>/dev/null)\" = npk.windows ] && W=/dev/${p##*/}; done; \
+                 [ -n \"$W\" ] && chown 1001 \"$W\" && chmod 0600 \"$W\"; \
                  sync; \
                  if [ -s /tmp/lw-probe.js ] && [ -f /usr/lib/librewolf/librewolf.cfg ]; then \
                    cat /usr/lib/librewolf/librewolf.cfg /tmp/lw-probe.js > /tmp/librewolf.cfg \
                      && mount --bind /tmp/librewolf.cfg /usr/lib/librewolf/librewolf.cfg 2>/dev/null; \
                  fi; \
+                 for t in glxtest vaapitest; do mount --bind /bin/false /usr/lib/librewolf/$t 2>/dev/null; done; \
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
@@ -273,7 +283,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp/app HOME=/tmp/app \
                  MOZ_ENABLE_WAYLAND=1; \
-                 seatd -g app > /tmp/seatd.log 2>&1 & \
+                 seatd -g wl > /tmp/seatd.log 2>&1 & \
                  ( sleep 15; while true; do sync 2>/dev/null; sleep 3; done ) & \
                  if grep -q npkbench_cpu /proc/cmdline; then \
                    t() { read u _ < /proc/uptime; echo \"${u%.*}${u#*.}\"; }; \
@@ -285,13 +295,18 @@ fn launch_wayland(kmsg_fd: i64) {
                    echo \"<0>[bench] cpu=$(( (b-a)*10 ))ms syscalls=$(( (c-b)*10 ))ms fork-exec1000=$(( (d-c)*10 ))ms memtouch1G=$(( (e-d)*10 ))ms gzip200M=$(( (f-e)*10 ))ms\" > /dev/kmsg; \
                  fi; \
                  i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do usleep 5000; i=$((i+1)); done; \
-                 echo \"<0>[wl] cage start (seatd after ${i}x5ms)\" > /dev/kmsg; \
+                 echo \"<0>[wl] npkwm start (seatd after ${i}x5ms)\" > /dev/kmsg; \
+                 su -s /bin/sh wl -c \"XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec /tmp/npkwm\" > /tmp/npkwm.log 2>&1 & \
+                 WLPID=$!; \
+                 i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do usleep 5000; i=$((i+1)); done; \
+                 echo \"<0>[wl] npkwm up after ${i}x5ms\" > /dev/kmsg; \
                  grep -q npkstats /proc/cmdline || : > /tmp/lw-sample.sh; \
                  echo 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; [ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' > /tmp/app.sh; \
-                 su -s /bin/sh app -c 'exec cage -- sh /tmp/app.sh' \
-                   > /tmp/cage.log 2>&1; \
+                 su -s /bin/sh app -c 'WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 exec sh /tmp/app.sh' \
+                   > /tmp/app.log 2>&1; \
                  rc=$?; echo \"<0>[wl] browser exited rc=$rc\" > /dev/kmsg; \
-                 [ $rc = 0 ] || tail -n 20 /tmp/cage.log | while read -r l; do echo \"<0>[wl] $l\" > /dev/kmsg; done; \
+                 kill $WLPID 2>/dev/null; \
+                 [ $rc = 0 ] || tail -n 20 /tmp/app.log /tmp/npkwm.log | while read -r l; do echo \"<0>[wl] $l\" > /dev/kmsg; done; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
                  while true; do sleep 3600; done\0".as_ptr();
     let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
@@ -302,7 +317,7 @@ fn launch_wayland(kmsg_fd: i64) {
 
     // Fork the RT-promoter before becoming the shell. The child loops on
     // /proc promoting cubeb/AudioIPC threads to SCHED_RR from outside the
-    // sandbox; the parent execs cage+librewolf as usual.
+    // sandbox; the parent execs the session as usual.
     unsafe { spawn_rt_watcher(kmsg_fd); }
 
     // The control channel to the host (`control.rs`).
@@ -323,7 +338,7 @@ fn launch_wayland(kmsg_fd: i64) {
             envp.as_ptr() as u64,
         );
     }
-    say(kmsg_fd, b"[microvm-init] cage execve failed -- falling back\n");
+    say(kmsg_fd, b"[microvm-init] session execve failed -- falling back\n");
 }
 
 /// True if the kernel cmdline contains `nopeekbench` — the host asked for a
@@ -345,7 +360,7 @@ fn bench_requested() -> bool {
 }
 
 /// Pure-bridge throughput run: bring up eth0, wget a big file three times from
-/// the local server (10.0.2.2 via slirp) through our nat bridge — no cage, no
+/// the local server (10.0.2.2 via slirp) through our nat bridge — no compositor, no
 /// GPU, no browser. The server reports the authoritative rate; guest /proc/
 /// uptime gives a cross-check. Then halt. `MB` read from the cmdline.
 fn launch_bench(kmsg_fd: i64) {
@@ -569,12 +584,20 @@ const LW_PROBE: &[u8] = include_bytes!("lw_probe.js");
 /// CPU time and waits for its first second.
 const LW_SAMPLE: &[u8] = include_bytes!("lw_sample.sh");
 
+/// The guest compositor, built by `microvm/linux/npkwm/build.sh`.
+const NPKWM: &[u8] = include_bytes!("../../npkwm/npkwm");
+
 /// Create or truncate `path` (NUL-terminated) and write `data`; best effort.
-fn write_file(path: &[u8], data: &[u8]) {
+fn write_file(path: &[u8], data: &[u8], mode: u64) {
     const O_WRONLY_CREAT_TRUNC: u64 = 0o1 | 0o100 | 0o1000;
-    let fd = unsafe { syscall3(SYS_OPEN, path.as_ptr() as u64, O_WRONLY_CREAT_TRUNC, 0o644) };
+    let fd = unsafe { syscall3(SYS_OPEN, path.as_ptr() as u64, O_WRONLY_CREAT_TRUNC, mode) };
     if fd < 0 { return; }
-    let _ = sys_write(fd as u64, data);
+    let mut rest = data;
+    while !rest.is_empty() {
+        let n = sys_write(fd as u64, rest);
+        if n <= 0 { break; }
+        rest = &rest[n as usize..];
+    }
     unsafe { let _ = syscall1(SYS_CLOSE, fd as u64); }
 }
 
@@ -688,11 +711,11 @@ fn gdiag_requested() -> bool {
 ///   softnet          — /proc/net/softnet_stat: col2 = drops, col3 = times the
 ///                      NAPI poll ran out of budget (squeeze = guest can't drain).
 /// The child execs /bin/sh; on exec failure it parks (never falls back into the
-/// parent's cage launch).
+/// parent's session launch).
 unsafe fn spawn_gdiag(kmsg_fd: i64) {
     let pid = unsafe { syscall0(SYS_FORK) };
     if pid != 0 {
-        return; // parent continues to cage
+        return; // parent continues to the session
     }
     let prog = b"/bin/sh\0".as_ptr();
     let arg0 = b"/bin/sh\0".as_ptr();
@@ -720,7 +743,7 @@ unsafe fn spawn_gdiag(kmsg_fd: i64) {
         );
     }
     // execve failed — park forever so the child never falls back into the
-    // parent's cage launch (a double cage exec).
+    // parent's session launch (a double session exec).
     say(kmsg_fd, b"[gdiag] /bin/sh execve failed -- probe off\n");
     loop {
         let _ = unsafe { syscall0(SYS_PAUSE) };

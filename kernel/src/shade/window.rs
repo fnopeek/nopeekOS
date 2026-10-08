@@ -46,7 +46,11 @@ pub enum WindowKind {
 #[allow(dead_code)]
 pub struct Window {
     pub id: WindowId,
+    /// The window's name; the dock matches running apps on it.
     pub title: String,
+    /// What the app inside calls its window (a guest's page title); the bar
+    /// shows it instead of `title` when set.
+    pub caption: String,
     /// Position relative to screen origin (set by WM layout).
     pub x: u32,
     pub y: u32,
@@ -112,6 +116,7 @@ impl Window {
         Window {
             id,
             title: String::from(title),
+            caption: String::new(),
             x,
             y,
             width: w,

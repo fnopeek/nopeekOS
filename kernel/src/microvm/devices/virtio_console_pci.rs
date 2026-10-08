@@ -1,5 +1,6 @@
 //! virtio-console-pci with two named ports: the control channel between the
-//! host and the guest's PID 1, and a port reserved for the window protocol.
+//! host and the guest's PID 1, and the window protocol between the host and
+//! the guest's compositor (npkwm).
 //!
 //! Modern virtio (1.0+), vendor 0x1AF4, device 0x1043, with
 //! VIRTIO_CONSOLE_F_MULTIPORT, so the guest sees plain character devices
@@ -7,17 +8,18 @@
 //! virtio spec §5.3.2: 0/1 port 0 receive/transmit, 2/3 control
 //! receive/transmit, 4/5 port 1 receive/transmit.
 //!
-//! Port 0 ("npk.control") carries frames `u16 len | u8 type | payload`,
-//! little-endian, at most `MAX_FRAME` bytes after the length. Unknown types
-//! are dropped; a frame that cannot be one (zero or oversized length) ends
-//! the VM, since only a misbehaving guest sends it. Port 1 ("npk.windows")
-//! is announced and opened; what the guest writes there is consumed and
-//! dropped until the window protocol exists.
+//! Both ports carry frames `u16 len | u8 type | payload`, little-endian, at
+//! most `MAX_FRAME` (control) or `WIN_MAX_FRAME` (windows) bytes after the
+//! length. Unknown types are dropped; a frame that cannot be one (zero or
+//! oversized length) ends the VM, since only a misbehaving guest sends it.
+//! Port 0 ("npk.control") is PID 1's, port 1 ("npk.windows") the
+//! compositor's, which runs as its own user, apart from the app.
 
 #![allow(dead_code)]
 
 extern crate alloc;
 use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
@@ -92,6 +94,7 @@ const VIRTIO_CONSOLE_PORT_NAME:    u16 = 7;
 
 const PORT_NAMES: [&[u8]; NUM_PORTS] = [b"npk.control", b"npk.windows"];
 const PORT_CONTROL: usize = 0;
+const PORT_WINDOWS: usize = 1;
 
 /// Largest frame (type byte + payload) either side may send.
 pub const MAX_FRAME: usize = 4096;
@@ -108,16 +111,35 @@ pub const MSG_QUIT: u8 = 0x01;
 /// Guest -> host: PID 1's control process is listening.
 pub const MSG_READY: u8 = 0x81;
 
+// Window-port message types.
+/// Largest window frame (type byte + payload).
+const WIN_MAX_FRAME: usize = 512;
+/// Host -> guest: close the app's windows on output `u8`.
+pub const WIN_CLOSE: u8 = 0x01;
+/// Guest -> host: the compositor is listening; payload: protocol version.
+const WIN_HELLO: u8 = 0x81;
+/// Guest -> host: title of the focused window on output `u8`, then UTF-8.
+const WIN_TITLE: u8 = 0x82;
+/// Bytes of a guest title kept.
+const TITLE_MAX: usize = 200;
+
 /// The guest's control process has said READY on this launch.
 static CONTROL_READY: AtomicBool = AtomicBool::new(false);
 /// The guest broke the frame format; the run loop ends the VM.
 static VIOLATION: AtomicBool = AtomicBool::new(false);
-/// Frames for the control port, queued by any core (`send`), delivered by
-/// `pump` on the vCPU that owns the device.
-static OUTBOX: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
+/// The guest's compositor has said HELLO on this launch.
+static WINDOWS_READY: AtomicBool = AtomicBool::new(false);
+/// Frames for each port, queued by any core (`send`, `send_windows`),
+/// delivered by `pump` on the vCPU that owns the device.
+static OUTBOX: [Mutex<VecDeque<u8>>; NUM_PORTS] = [const { Mutex::new(VecDeque::new()) }; NUM_PORTS];
+/// A title from the guest, not yet taken by Core 0 (`take_title`).
+static TITLE: Mutex<Option<String>> = Mutex::new(None);
 
 /// Whether a guest is listening on the control port.
 pub fn control_ready() -> bool { CONTROL_READY.load(Ordering::Acquire) }
+
+/// Whether the guest's compositor is listening on the window port.
+pub fn windows_ready() -> bool { WINDOWS_READY.load(Ordering::Acquire) }
 
 /// Whether the guest has violated the frame format (the VM must end).
 pub fn violated() -> bool { VIOLATION.load(Ordering::Acquire) }
@@ -125,12 +147,22 @@ pub fn violated() -> bool { VIOLATION.load(Ordering::Acquire) }
 /// Queue one control frame for the guest. False if the channel is not up or
 /// the payload is too large.
 pub fn send(msg_type: u8, payload: &[u8]) -> bool {
-    if !control_ready() || payload.len() + 1 > MAX_FRAME {
+    control_ready() && queue(PORT_CONTROL, MAX_FRAME, msg_type, payload)
+}
+
+/// Queue one window frame for the guest's compositor. False if it is not
+/// listening or the payload is too large.
+pub fn send_windows(msg_type: u8, payload: &[u8]) -> bool {
+    windows_ready() && queue(PORT_WINDOWS, WIN_MAX_FRAME, msg_type, payload)
+}
+
+fn queue(port: usize, max_frame: usize, msg_type: u8, payload: &[u8]) -> bool {
+    if payload.len() + 1 > max_frame {
         return false;
     }
     let len = (payload.len() + 1) as u16;
     {
-        let mut out = OUTBOX.lock();
+        let mut out = OUTBOX[port].lock();
         if out.len() + 2 + len as usize > MAX_BUFFERED {
             return false;
         }
@@ -142,11 +174,36 @@ pub fn send(msg_type: u8, payload: &[u8]) -> bool {
     true
 }
 
+/// The latest title the guest reported for its window, once.
+pub fn take_title() -> Option<String> {
+    TITLE.lock().take()
+}
+
 /// Forget the previous launch's channel state.
 pub fn reset() {
     CONTROL_READY.store(false, Ordering::Release);
+    WINDOWS_READY.store(false, Ordering::Release);
     VIOLATION.store(false, Ordering::Release);
-    OUTBOX.lock().clear();
+    for out in &OUTBOX {
+        out.lock().clear();
+    }
+    *TITLE.lock() = None;
+}
+
+/// A guest title as the host shows it: invalid UTF-8 replaced, control
+/// characters dropped, at most `TITLE_MAX` bytes.
+fn clean_title(raw: &[u8]) -> String {
+    let mut out = String::new();
+    for c in String::from_utf8_lossy(raw).chars() {
+        if c.is_control() {
+            continue;
+        }
+        if out.len() + c.len_utf8() > TITLE_MAX {
+            break;
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[derive(Default, Clone, Copy)]
@@ -195,8 +252,8 @@ pub struct VirtioConsole {
 
     /// Control messages for the guest's driver, one per receive buffer.
     ctrl_out: VecDeque<Vec<u8>>,
-    /// Bytes the guest wrote on the control port, not yet a whole frame.
-    control_in: Vec<u8>,
+    /// Bytes the guest wrote on each port, not yet a whole frame.
+    port_in: [Vec<u8>; NUM_PORTS],
 }
 
 impl VirtioConsole {
@@ -217,7 +274,7 @@ impl VirtioConsole {
             isr: 0,
             pending_kick_queue: None,
             ctrl_out: VecDeque::new(),
-            control_in: Vec::new(),
+            port_in: [const { Vec::new() }; NUM_PORTS],
         }
     }
 
@@ -250,8 +307,8 @@ impl VirtioConsole {
         any
     }
 
-    /// Deliver pending control messages and control-port frames into the
-    /// guest's receive buffers. True if anything was delivered (the caller
+    /// Deliver pending control messages and port frames into the guest's
+    /// receive buffers. True if anything was delivered (the caller
     /// raises the IRQ). Called on notify and on the timer tick.
     pub fn pump(&mut self, mem: &GuestMem) -> bool {
         let mut any = false;
@@ -263,16 +320,19 @@ impl VirtioConsole {
             self.ctrl_out.pop_front();
             any = true;
         }
-        loop {
-            let chunk: Vec<u8> = {
-                let out = OUTBOX.lock();
-                if out.is_empty() { break; }
-                out.iter().take(MAX_FRAME + 2).copied().collect()
-            };
-            let Some(n) = self.deliver_partial(0, &chunk, mem) else { break };
-            let mut out = OUTBOX.lock();
-            for _ in 0..n { out.pop_front(); }
-            any = true;
+        for port in 0..NUM_PORTS {
+            let rx = (if port == 0 { 0 } else { 2 * port + 2 }) as u16;
+            loop {
+                let chunk: Vec<u8> = {
+                    let out = OUTBOX[port].lock();
+                    if out.is_empty() { break; }
+                    out.iter().take(MAX_FRAME + 2).copied().collect()
+                };
+                let Some(n) = self.deliver_partial(rx, &chunk, mem) else { break };
+                let mut out = OUTBOX[port].lock();
+                for _ in 0..n { out.pop_front(); }
+                any = true;
+            }
         }
         if any { self.isr |= 1; }
         any
@@ -379,37 +439,48 @@ impl VirtioConsole {
         if port >= NUM_PORTS { return false; }
         let qi = (if port == 0 { 1 } else { 2 * port + 3 }) as u16;
         let any = self.consume(qi, mem, |dev, data| {
-            if port == PORT_CONTROL {
-                dev.control_in.extend_from_slice(data);
-                dev.parse_control();
-            }
+            dev.port_in[port].extend_from_slice(data);
+            dev.parse_port(port);
         });
         if any { self.isr |= 1; }
         any
     }
 
-    /// Take whole frames off the control-port input.
-    fn parse_control(&mut self) {
+    /// Take whole frames off a port's input.
+    fn parse_port(&mut self, port: usize) {
+        let max_frame = if port == PORT_WINDOWS { WIN_MAX_FRAME } else { MAX_FRAME };
         loop {
-            if self.control_in.len() < 2 { return; }
-            let len = u16::from_le_bytes([self.control_in[0], self.control_in[1]]) as usize;
-            if len == 0 || len > MAX_FRAME || self.control_in.len() > MAX_BUFFERED {
-                crate::kprintln!("[microvm] control channel: malformed frame (len {}) — ending the guest", len);
+            let input = &mut self.port_in[port];
+            if input.len() < 2 { return; }
+            let len = u16::from_le_bytes([input[0], input[1]]) as usize;
+            if len == 0 || len > max_frame || input.len() > MAX_BUFFERED {
+                crate::kprintln!("[microvm] {} channel: malformed frame (len {}) — ending the guest",
+                    core::str::from_utf8(PORT_NAMES[port]).unwrap_or("?"), len);
                 VIOLATION.store(true, Ordering::Release);
-                self.control_in.clear();
+                input.clear();
                 return;
             }
-            if self.control_in.len() < 2 + len { return; }
-            let msg_type = self.control_in[2];
-            match msg_type {
-                MSG_READY => {
+            if input.len() < 2 + len { return; }
+            let msg_type = input[2];
+            let payload = &input[3..2 + len];
+            match (port, msg_type) {
+                (PORT_CONTROL, MSG_READY) => {
                     if !CONTROL_READY.swap(true, Ordering::AcqRel) {
                         crate::kprintln!("[microvm] control channel up");
                     }
                 }
+                (PORT_WINDOWS, WIN_HELLO) => {
+                    if !WINDOWS_READY.swap(true, Ordering::AcqRel) {
+                        crate::kprintln!("[microvm] window channel up (protocol {})",
+                            payload.first().copied().unwrap_or(0));
+                    }
+                }
+                (PORT_WINDOWS, WIN_TITLE) if payload.first() == Some(&0) => {
+                    *TITLE.lock() = Some(clean_title(&payload[1..]));
+                }
                 _ => {}
             }
-            self.control_in.drain(..2 + len);
+            input.drain(..2 + len);
         }
     }
 
@@ -545,7 +616,7 @@ impl VirtioConsole {
                     self.device_feature_select = 0;
                     self.queue_select = 0;
                     self.ctrl_out.clear();
-                    self.control_in.clear();
+                    for input in &mut self.port_in { input.clear(); }
                     self.config_generation = self.config_generation.wrapping_add(1);
                 }
             }

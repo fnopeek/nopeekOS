@@ -1365,6 +1365,15 @@ pub fn poll_render() {
         render_frame();
     }
 
+    // The guest named its window: the bar shows it from the next notify.
+    if let Some(caption) = crate::microvm::devices::virtio_console_pci::take_title() {
+        let id = WindowId(crate::microvm::vm_window());
+        note_shell_fingerprint(with_compositor(|comp| {
+            comp.set_caption(id, caption);
+            comp.shell_fingerprint()
+        }));
+    }
+
     // Tick swap animation (smooth window transition)
     let animating = with_compositor(|comp| comp.tick_animation()).unwrap_or(false);
     if animating {

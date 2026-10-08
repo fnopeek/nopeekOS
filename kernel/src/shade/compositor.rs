@@ -783,6 +783,13 @@ impl Compositor {
         id
     }
 
+    /// Set what the app inside the window calls it (`Window::caption`).
+    pub fn set_caption(&mut self, id: WindowId, caption: alloc::string::String) {
+        if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
+            w.caption = caption;
+        }
+    }
+
     /// Show a Surface window hidden by `create_surface_window`, tile it in
     /// and give it focus. No-op for a window that is gone or already shown.
     pub fn reveal_surface(&mut self, id: WindowId) {
@@ -1117,7 +1124,7 @@ impl Compositor {
                     .filter_map(|wid| self.windows.iter().find(|w| w.id == *wid))
                     .find(|w| is_app(w) && w.workspace == self.active_workspace && w.visible)
             })
-            .map(|w| w.title.clone())
+            .map(|w| if w.caption.is_empty() { w.title.clone() } else { w.caption.clone() })
             .unwrap_or_default();
         (self.workspace_count, self.active_workspace, title)
     }
@@ -1142,6 +1149,8 @@ impl Compositor {
             eat(&w.id.0.to_le_bytes());
             eat(&[w.workspace, w.visible as u8, w.is_overlay as u8, w.is_dock as u8, w.is_bar as u8]);
             eat(w.title.as_bytes());
+            eat(&[0xFF]);
+            eat(w.caption.as_bytes());
             eat(&[0xFF]);
         }
         h

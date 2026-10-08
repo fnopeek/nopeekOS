@@ -79,10 +79,11 @@ const GUEST_MARKS: &[(&str, &str)] = &[
     ("Run /init as init process", "guest kernel: exec /init"),
     ("[microvm-init] PID-1 up", "pid1: up"),
     ("switched to squashfs bundle root", "pid1: sqfs root"),
-    ("cage present, starting Wayland", "pid1: session script"),
+    ("starting Wayland session", "pid1: session script"),
     ("[moz-disk] /dev/vda present", "session: udev settled"),
     ("[9p] npkhome mounted", "session: mounts done"),
-    ("[wl] cage start", "session: cage start"),
+    ("[wl] npkwm start", "session: compositor start"),
+    ("[wl] npkwm up", "session: compositor up"),
     ("[wl] librewolf exec", "session: app exec"),
     ("browser exited", "session: browser exited"),
 ];

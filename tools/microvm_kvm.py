@@ -9,6 +9,7 @@ nopeekOS this separates our VMM from what the guest and the app need anyway.
   python3 tools/microvm_kvm.py --cpus 6 --res 946x1074
   python3 tools/microvm_kvm.py --show              # with a window
   python3 tools/microvm_kvm.py --fresh-home        # empty profile
+  python3 tools/microvm_kvm.py --close-after 8     # close like Mod+Q does
 
 Prints the guest milestones nopeekOS prints, timed from QEMU start, and the
 screen: it is captured every --sample ms over QMP and every change is
@@ -36,10 +37,11 @@ GUEST_MARKS = [
     ("Run /init as init process", "guest kernel: exec /init"),
     ("[microvm-init] PID-1 up", "pid1: up"),
     ("switched to squashfs bundle root", "pid1: sqfs root"),
-    ("cage present, starting Wayland", "pid1: session script"),
+    ("starting Wayland session", "pid1: session script"),
     ("[moz-disk] /dev/vda present", "session: udev settled"),
     ("[9p] npkhome mounted", "session: mounts done"),
-    ("[wl] cage start", "session: cage start"),
+    ("[wl] npkwm start", "session: compositor start"),
+    ("[wl] npkwm up", "session: compositor up"),
     ("[wl] librewolf exec", "session: app exec"),
     ("browser exited", "session: browser exited"),
 ]
@@ -89,6 +91,41 @@ def lit_share(rows, step=4):
     return 100 * lit // max(total, 1)
 
 
+class Port:
+    """A guest virtio-console port, framed `u16 len | u8 type | payload`."""
+
+    def __init__(self, path, name):
+        self.name = name
+        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        for _ in range(100):
+            try:
+                self.s.connect(path)
+                break
+            except OSError:
+                time.sleep(0.05)
+
+    def send(self, msg_type, payload=b""):
+        n = len(payload) + 1
+        self.s.sendall(bytes([n & 0xFF, n >> 8, msg_type]) + payload)
+
+    def frames(self):
+        buf = b""
+        while True:
+            try:
+                data = self.s.recv(4096)
+            except OSError:
+                return
+            if not data:
+                return
+            buf += data
+            while len(buf) >= 2:
+                n = buf[0] | buf[1] << 8
+                if len(buf) < 2 + n:
+                    break
+                yield buf[2], buf[3:2 + n]
+                buf = buf[2 + n:]
+
+
 class Qmp:
     def __init__(self, path):
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -126,6 +163,9 @@ def main():
     ap.add_argument("--key-after", action="append", default=[],
                     help="SECONDS:QCODE, a key press that many seconds after 'window up'; "
                          "QCODE 'click' clicks the middle of the screen (repeatable)")
+    ap.add_argument("--close-after", type=float, default=None,
+                    help="seconds after the window is up: close it over npk.windows, "
+                         "then npk.control quit after 3 s, as nopeekOS does")
     ap.add_argument("--fresh-home", action="store_true", help="new empty ext4 profile")
     ap.add_argument("--extra", default="", help="appended to the guest kernel command line")
     ap.add_argument("--qemu-arg", action="append", default=[], help="extra QEMU argument (repeatable)")
@@ -156,8 +196,11 @@ def main():
             f.truncate(512 * 1024 * 1024)
         subprocess.run(["mkfs.ext4", "-q", "-F", home], check=True)
     qmp_path = os.path.join(a.work, "qmp.sock")
-    if os.path.exists(qmp_path):
-        os.unlink(qmp_path)
+    ctl_path = os.path.join(a.work, "ctl.sock")
+    win_path = os.path.join(a.work, "win.sock")
+    for p in (qmp_path, ctl_path, win_path):
+        if os.path.exists(p):
+            os.unlink(p)
     xres, yres = a.res.split("x")
 
     cmdline = (
@@ -184,6 +227,11 @@ def main():
         "-netdev", "user,id=n0,net=10.99.0.0/24,host=10.99.0.1",
         "-device", "virtio-net-pci,netdev=n0",
         "-audiodev", "none,id=snd0", "-device", "virtio-sound-pci,audiodev=snd0",
+        "-device", "virtio-serial-pci",
+        "-chardev", f"socket,id=ctl,path={ctl_path},server=on,wait=off",
+        "-device", "virtserialport,chardev=ctl,name=npk.control",
+        "-chardev", f"socket,id=win,path={win_path},server=on,wait=off",
+        "-device", "virtserialport,chardev=win,name=npk.windows",
         "-fsdev", f"local,id=h,path={share},security_model=none",
         "-device", "virtio-9p-pci,fsdev=h,mount_tag=npkhome",
         "-serial", "stdio", "-monitor", "none", "-no-reboot",
@@ -197,7 +245,7 @@ def main():
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
 
     seen = set()
-    cage_at = [None]
+    comp_at = [None]
     app_at = [None]
 
     def read_serial():
@@ -209,8 +257,8 @@ def main():
                 if label not in seen and needle in line:
                     seen.add(label)
                     print(f"[boottime] +{t} ms {label}", flush=True)
-                    if label in ("session: mounts done", "session: cage start"):
-                        cage_at[0] = t
+                    if label in ("session: mounts done", "session: compositor start"):
+                        comp_at[0] = t
                     if label == "session: app exec":
                         app_at[0] = t
 
@@ -221,8 +269,22 @@ def main():
     except OSError:
         rc = proc.wait(timeout=10)
         sys.exit(f"QEMU exited at start (rc {rc}); run with --show to see its error")
+    ctl = Port(ctl_path, "ctl")
+    win = Port(win_path, "win")
+
+    def listen(port):
+        for t, payload in port.frames():
+            if port.name == "win" and t == 0x82:
+                text = payload[1:].decode("utf-8", "replace")
+                print(f"[boottime] +{ms()} ms win: title {text!r}", flush=True)
+            else:
+                print(f"[boottime] +{ms()} ms {port.name}: type {t:#04x} {payload.hex()}", flush=True)
+
+    for port in (ctl, win):
+        threading.Thread(target=listen, args=(port,), daemon=True).start()
     shot = os.path.join(a.work, "shot.ppm")
     last, changes, window_up, quit_sent = None, [], None, False
+    close_at = None
     keys = [(float(k.split(":")[0]), k.split(":")[1]) for k in a.key_after]
     deadline = t0 + a.seconds
     try:
@@ -267,6 +329,15 @@ def main():
                 qmp.cmd("send-key", keys=[{"type": "qcode", "data": "ctrl"},
                                           {"type": "qcode", "data": "q"}])
                 print(f"[boottime] +{ms()} ms host: Ctrl+Q", flush=True)
+            if (a.close_after is not None and window_up is not None and close_at is None
+                    and ms() - window_up >= a.close_after * 1000):
+                close_at = ms()
+                win.send(0x01, bytes([0]))
+                print(f"[boottime] +{close_at} ms host: close over npk.windows", flush=True)
+            if close_at is not None and close_at > 0 and ms() - close_at >= 3000:
+                close_at = -1
+                ctl.send(0x01)
+                print(f"[boottime] +{ms()} ms host: quit over npk.control", flush=True)
             time.sleep(a.sample / 1000)
     except KeyboardInterrupt:
         pass
@@ -279,17 +350,17 @@ def main():
 
     print()
     print(f"summary ({a.cpus} vCPUs, {a.res}):")
-    c = cage_at[0]
+    c = comp_at[0]
     if c is not None:
-        print(f"  launch -> cage             {c} ms")
+        print(f"  launch -> compositor       {c} ms")
         if window_up is not None and app_at[0] is not None:
             print(f"  app exec -> window up      +{window_up - app_at[0]} ms")
         after = [t for t in changes if t > c]
         if after:
-            print(f"  cage -> first change       +{after[0] - c} ms")
-            print(f"  cage -> last change        +{after[-1] - c} ms (within {a.seconds:.0f} s)")
+            print(f"  compositor -> first change +{after[0] - c} ms")
+            print(f"  compositor -> last change  +{after[-1] - c} ms (within {a.seconds:.0f} s)")
     else:
-        print("  cage never reached")
+        print("  compositor never reached")
 
 
 if __name__ == "__main__":

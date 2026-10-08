@@ -382,10 +382,10 @@ static VM_CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static QUIT_DEADLINE: AtomicU64 = AtomicU64::new(0);
 /// How long a guest gets to end its app, sync and power off.
 const QUIT_GRACE_MS: u64 = 10_000;
-/// TSC at which an app that ignored its quit shortcut gets `MSG_QUIT`;
+/// TSC at which an app that did not close its windows gets `MSG_QUIT`;
 /// 0 = already sent or no quit pending.
 static TERM_AT: AtomicU64 = AtomicU64::new(0);
-/// How long the app gets to end on its own shortcut.
+/// How long the app gets to close its windows on its own.
 const TERM_AFTER_MS: u64 = 3_000;
 
 /// The run loop must stop the guest: the user closed the window and there is
@@ -862,10 +862,12 @@ pub fn vm_window() -> u32 {
 }
 
 /// Window closed by the user. With the control channel up (the guest's
-/// session is running), the app gets its quit shortcut and ends the way its
-/// own menu would end it; if it is still there after `TERM_AFTER_MS`, the
-/// guest is asked to end it (`MSG_QUIT`). The guest then syncs and powers
-/// off, and the home image is saved after that (`note_guest_shutdown`).
+/// session is running), the guest's compositor asks the app to close its
+/// windows (`WIN_CLOSE`), and the app ends the way its own close button
+/// would end it; if it is still there after `TERM_AFTER_MS`, or no
+/// compositor is listening yet, the guest is asked to end it (`MSG_QUIT`).
+/// The guest then syncs and powers off, and the home image is saved after
+/// that (`note_guest_shutdown`).
 /// Without the channel, on a second close, or after `QUIT_GRACE_MS`, the
 /// VM is stopped as it is.
 /// No-op if it isn't the active VM's window.
@@ -874,20 +876,25 @@ pub fn vm_close_for_window(window_id: u32) {
         return;
     }
     let quitting = QUIT_DEADLINE.load(Ordering::Acquire) != 0;
-    if !quitting && crate::microvm::devices::virtio_console_pci::control_ready() {
+    use crate::microvm::devices::virtio_console_pci as console;
+    if !quitting && console::control_ready() {
         let ms = crate::interrupts::tsc_freq() / 1000;
         let now = crate::interrupts::rdtsc();
-        TERM_AT.store(now + ms * TERM_AFTER_MS, Ordering::Release);
         QUIT_DEADLINE.store(now + ms * QUIT_GRACE_MS, Ordering::Release);
-        crate::microvm::devices::virtio_input_keymap::press_ctrl_q();
-        crate::kprintln!("[microvm] asking the app to quit");
+        if console::send_windows(console::WIN_CLOSE, &[0]) {
+            TERM_AT.store(now + ms * TERM_AFTER_MS, Ordering::Release);
+            crate::kprintln!("[microvm] asking the app to close its window");
+        } else {
+            let _ = console::send(console::MSG_QUIT, &[]);
+            crate::kprintln!("[microvm] no compositor listening — asking the guest to end the app");
+        }
     } else {
         VM_CLOSE_REQUESTED.store(true, Ordering::Release);
     }
     crate::intent::wake_shell();
 }
 
-/// The guest shut itself down (e.g. LibreWolf's own window-X → cage exits →
+/// The guest shut itself down (e.g. LibreWolf's own window-X → the app exits →
 /// PID-1 `halt` → `reboot: System halted`). The serial scanner calls this so
 /// the run loop takes the same clean exit as a user Mod+Q: break → `close()`
 /// (saves the home image) → Core-0 reaper closes the window. Without it a

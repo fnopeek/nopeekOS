@@ -168,13 +168,3 @@ pub fn forward_key(ev: &KeyEvent) -> bool {
     if ctrl { frame(KEY_LEFTCTRL, false); }
     true
 }
-
-/// Press and release Ctrl+Q: the app's own quit shortcut, so it ends the
-/// way its quit menu entry would (the browser saves its session).
-pub fn press_ctrl_q() {
-    const KEY_Q: u16 = 16;
-    frame(KEY_LEFTCTRL, true);
-    frame(KEY_Q, true);
-    frame(KEY_Q, false);
-    frame(KEY_LEFTCTRL, false);
-}

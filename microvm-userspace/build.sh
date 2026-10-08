@@ -21,14 +21,8 @@ set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────
 
-# Alpine release tracking. Bump these together and give the reason in
-# the commit message. A stable branch does not follow the browser:
-# rebuilding on the same branch only brings library patches. Check
-# `librewolf` in the next branch's APKINDEX before assuming a rebuild
-# updates it.
-ALPINE_BRANCH="${ALPINE_BRANCH:-v3.24}"
-ALPINE_VERSION="${ALPINE_VERSION:-3.24.2}"
-ALPINE_MINIROOTFS_SHA256="${ALPINE_MINIROOTFS_SHA256:-c5ca053cfe1d85c5b96dff8b9bc57045f7f184a30ffb6b65776409ca90388677}"
+# Alpine release tracking: the pins live in alpine.env.
+source "$(dirname "$0")/alpine.env"
 
 # Output naming; the bundle is named after its main client.
 BUNDLE_NAME="${BUNDLE_NAME:-librewolf}"

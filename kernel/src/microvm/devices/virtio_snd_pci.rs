@@ -519,7 +519,7 @@ impl VirtioSnd {
                 DBG_LAST_HB.store(tsc_now, core::sync::atomic::Ordering::Relaxed);
                 let prev = DBG_BYTES_AT_HB.swap(self.bytes_completed, core::sync::atomic::Ordering::Relaxed);
                 crate::kprintln!("[snd] hb done={}B/2s (want ~384000) ticks={} free={} buf={}",
-                    self.bytes_completed.wrapping_sub(prev), crate::interrupts::ticks(),
+                    self.bytes_completed.saturating_sub(prev), crate::interrupts::ticks(),
                     crate::audio::free_space(slot), crate::audio::buffered(slot));
             }
         }
