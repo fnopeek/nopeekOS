@@ -222,7 +222,30 @@ cage/pixman (nativ verschachtelt gleich), vCPU-Zahl, `idle=poll`,
 Profils (`cache=unsafe`), Zufall (crng nach 241 ms). Rechnen, Systemaufrufe,
 Prozessstart und Speicher kosten im Gast dasselbe wie nativ.
 
+**Was die Messzeilen ab Kernel 0.510 am Notebook gezeigt haben** (jede
+`browser`-Sitzung schreibt `[lw-startup]` und `[boottime] app phase …`):
+
+| Befund | Ergebnis |
+|---|---|
+| Interrupt-Zustellung an vCPUs | Mittel 4–8 µs, 90 % < 10 µs — kein Engpass |
+| Geräte-Lock, Exit-Bearbeitung | ~25 ms bzw. ~110 ms über alle vCPUs — kein Engpass |
+| Takt der vCPU-Kerne (APERF/MPERF) | ~4,07 GHz, voller Boost — keine Bremse |
+| 4-KB-Gastseiten | unter KVM +40 %; **0.514: Bedarfsbereich in 2-MB-Seiten** (am Notebook ohne sichtbaren Gewinn, in QEMU −30 %) |
+| **virtio-blk ohne `SEG_MAX`** | **51 276 Anfragen à 4 KB → 0.517: `seg_max = 128`, 3 755 Anfragen** |
+| `readahead()` der libxul (184 MB) | ruft LibreWolf vor `main`; unter KVM ohne Wirkung abgeschaltet (402 ms gleich) |
+
+Notebook, Kernel 0.518: **Start → Fenster 1,70 s** (Linux bis cage 0,61 s,
+cage → App 0,21 s, App → Fenster 0,89 s). LibreWolf selbst: `main` 176 ms,
+Fenster 473 ms, erstes Bild 892 ms. Unter KVM auf dem 9600X: 10 / 210 /
+405 ms. Ungeklärt bleibt vor allem `main` (176 gegen 10 ms).
+
+**Fenster:** Ab 0.515/0.518 erscheint ein Linux-Fenster erst mit dem ersten
+App-Bild (≥ 50 % nicht schwarz): beim Anlegen einmal gekachelt, damit der Gast
+seine Grösse kennt, dann versteckt; das erste Bild deckt es auf und gibt den
+Fokus. Nach „browser exited“ werden keine Bilder mehr übernommen.
+
 **Offen:**
+- `main` am Notebook 176 ms gegen 10 ms unter KVM.
 - Kalte native Messung (nativ war kalt = warm, ~0,3 s).
 - Streuung bis Bild #1 (~150 ms) beim GPU-Start des Gasts.
 - cage → App 0,48 s und die Anzeigekette: siehe Bildweg (eigener Compositor
