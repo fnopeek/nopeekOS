@@ -32,6 +32,18 @@ pub const PCI_CONFIG_DATA_END: u16 = 0xCFF;
 
 const NO_DEVICE: u32 = 0xFFFF_FFFF;
 
+/// INTA line of each device slot on bus 0, for the MP table's PCI
+/// interrupt sources.
+pub const INTX_LINES: [(u8, u8); 7] = [
+    (1, super::virtio_blk_pci::HOME_IRQ_LINE),
+    (2, super::virtio_net_dev::IRQ_LINE),
+    (3, super::virtio_gpu_pci::IRQ_LINE),
+    (4, super::virtio_input_pci::IRQ_LINE),
+    (5, super::virtio_blk_pci::SQFS_IRQ_LINE),
+    (6, super::virtio_9p_pci::IRQ_LINE),
+    (7, super::virtio_snd_pci::IRQ_LINE),
+];
+
 /// Per-VM PCI bus emulation state.
 pub struct PciBus {
     config_addr: u32,

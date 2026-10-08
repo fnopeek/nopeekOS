@@ -94,7 +94,9 @@ const VIRTIO_BLK_F_RO: u32 = 1 << 5;
 pub const SQFS_BAR0_BASE: u64 = 0xFE01_0000;
 /// IRQ line for the sqfs device. 9/10/11/12 are taken by
 /// gpu/net/blk/input; 5 is a free master-PIC line.
-const SQFS_IRQ_LINE: u8 = 5;
+pub const SQFS_IRQ_LINE: u8 = 5;
+/// IRQ line for the home image (slot 1).
+pub const HOME_IRQ_LINE: u8 = 11;
 /// npkFS object holding the userspace `.sqfs`, delivered as an OTA asset.
 /// If absent → empty backing → guest squashfs mount fails → PID-1 falls
 /// back.
@@ -181,7 +183,7 @@ impl VirtioBlk {
     /// (LibreWolf cookies/history/bookmarks/prefs/extensions) survives
     /// reboots. Cache stays in tmpfs to keep the image small.
     pub fn new() -> Self {
-        Self::with(BAR0_BASE, 11, false, true, load_or_init_backing(), CAPACITY_SECTORS)
+        Self::with(BAR0_BASE, HOME_IRQ_LINE, false, true, load_or_init_backing(), CAPACITY_SECTORS)
     }
 
     /// Slot 5 — the read-only squashfs userspace bundle. Backing is

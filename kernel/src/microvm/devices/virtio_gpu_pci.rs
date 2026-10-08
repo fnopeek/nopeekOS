@@ -33,6 +33,8 @@ const VIRTIO_GPU_DEVICE: u32 = 0x1050;
 
 pub const BAR0_BASE: u64 = 0xFE00_8000;
 pub const BAR0_SIZE: u64 = 0x4000;
+/// 8259 line.
+pub const IRQ_LINE: u8 = 9;
 const BAR0_SIZE_MASK_LO: u32 = !((BAR0_SIZE as u32) - 1) | 0b0100;
 
 const CAP_COMMON_OFF: u8 = 0x40;
@@ -895,8 +897,7 @@ impl VirtioGpu {
             0x30 => 0,
             0x34 => CAP_COMMON_OFF as u32,
             0x38 => 0,
-            // Interrupt: line=9, pin=INTA. Distinct from blk (11) + net (10).
-            0x3C => 0x0000_0109,
+            0x3C => (0x01 << 8) | IRQ_LINE as u32, // INTA
 
             // Modern virtio cap list (same shape as blk/net).
             0x40 => 0x09 | ((CAP_NOTIFY_OFF as u32) << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_COMMON_CFG as u32) << 24),

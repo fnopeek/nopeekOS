@@ -858,16 +858,16 @@ impl VmContext {
 /// of the SVM backend.
 fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
     if crate::microvm::devices::net_backend::take_irq() {
-        sh.pic.pulse(10);
+        sh.pic.pulse(crate::microvm::devices::virtio_net_dev::IRQ_LINE);
         crate::microvm::devices::nat::note_net_irq();
     }
-    if crate::microvm::devices::gpu_backend::take_irq() { sh.pic.pulse(9); }
+    if crate::microvm::devices::gpu_backend::take_irq() { sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE); }
     // vblank: a paused controlq runs its next frame (virtio-gpu IRQ 9).
     if crate::microvm::devices::gpu_backend::take_resume(crate::interrupts::rdtsc())
         && crate::microvm::devices::gpu_backend::lock()
             .service_queues(0, gm)
     {
-        sh.pic.pulse(9);
+        sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
     }
     if sh.pci.virtio_snd.pump(gm) {
         let l = sh.pci.virtio_snd.irq_line();
@@ -877,7 +877,7 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
         let l = sh.pci.virtio_9p.irq_line();
         sh.pic.pulse(l);
     }
-    if sh.pci.virtio_input.drain_injected(gm) { sh.pic.pulse(12); }
+    if sh.pci.virtio_input.drain_injected(gm) { sh.pic.pulse(crate::microvm::devices::virtio_input_pci::IRQ_LINE); }
     sh.pit.poll(&mut sh.pic);
 
     let now = crate::interrupts::ticks();
@@ -886,7 +886,7 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
     if crate::microvm::devices::gpu_backend::d4_pending()
         && crate::microvm::devices::gpu_backend::lock().tick_d4(now)
     {
-        sh.pic.pulse(9);
+        sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
     } else {
         let wid = crate::microvm::vm_window();
         if wid != 0
@@ -897,7 +897,7 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
             let _ = crate::shade::surface::take_display_dirty(wid);
             sh.last_cfg_tick = now;
             crate::microvm::devices::gpu_backend::lock().signal_display_change(now);
-            sh.pic.pulse(9);
+            sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
         }
     }
     // NAT mapping reaper: an idle scan, once per 10 ms at most.
@@ -2393,7 +2393,7 @@ fn handle_mmio_ept_net(
                 | crate::microvm::devices::net_backend::msix_notify(1))
             {
                 // virtio-net IRQ line = 10 (per pci config 0x3C).
-                pic.pulse(10);
+                pic.pulse(crate::microvm::devices::virtio_net_dev::IRQ_LINE);
             }
         }
     }
@@ -2449,8 +2449,7 @@ fn handle_mmio_ept_gpu(
         } else {
             let advanced = gpu.service_queues(qidx, mem);
             if advanced {
-                // virtio-gpu IRQ line = 9.
-                pic.pulse(9);
+                pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
             }
         }
     }
@@ -2502,7 +2501,7 @@ fn handle_mmio_ept_input(
         let advanced = input.service_queues(qidx, mem);
         if advanced {
             // virtio-input IRQ line = 12.
-            pic.pulse(12);
+            pic.pulse(crate::microvm::devices::virtio_input_pci::IRQ_LINE);
         }
     }
 

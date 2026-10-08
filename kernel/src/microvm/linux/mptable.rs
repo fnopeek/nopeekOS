@@ -17,6 +17,8 @@
 //! also the bus / IOAPIC / INTSRC / LINTSRC entries of `io_entries`.
 
 use crate::microvm::devices::guest_mem::GuestMem;
+use crate::microvm::devices::ioapic::isa_pin;
+use crate::microvm::devices::pci_bus::INTX_LINES;
 
 /// Floating pointer — first 16-byte slot of the BIOS scan window.
 const MPF_GUEST_PHYS: u64 = 0xF_0000;
@@ -50,6 +52,10 @@ const IOAPIC_PHYS: u32 = 0xFEC0_0000;
 const MPC_BUS_LEN: usize = 8;
 const MPC_IOAPIC_LEN: usize = 8;
 const MPC_INTSRC_LEN: usize = 8;
+/// MP bus IDs. The PCI bus must carry ID 0: `IO_APIC_get_PCI_irq_vector`
+/// matches an entry's source bus against the PCI bus number.
+const BUS_PCI: u8 = 0;
+const BUS_ISA: u8 = 1;
 const CPU_ENABLED: u8 = 0x01;
 const CPU_BOOTPROCESSOR: u8 = 0x02;
 /// Integrated xAPIC version (matches `svm::lapic` LVR low byte).
@@ -80,29 +86,36 @@ fn push_cpu(buf: &mut alloc::vec::Vec<u8>, apicid: u8, bsp: bool) {
     buf.extend_from_slice(&[0u8; 8]); // reserved[2]
 }
 
-/// The I/O part (`with_ioapic`): an ISA bus, the I/O APIC at 0xFEC00000
-/// with APIC ID `ncpu`, one explicit edge/active-high source per ISA IRQ
-/// (IRQ 0 → pin 2, n → n; IRQ 2 is the cascade), and the local sources
-/// (ExtINT on LINT0, NMI on LINT1). Explicit, so Linux does not guess: with
-/// no bus entry `mp_bus_not_pci` is clear and bus 0 counts as PCI, whose
-/// default is level-low. PCI devices find no entry and keep their config-
-/// space line (`pirq_enable_irq`) — an ISA IRQ here, routed as above.
+/// The I/O part (`with_ioapic`): a PCI and an ISA bus, the I/O APIC at
+/// 0xFEC00000 with APIC ID `ncpu`, one source per ISA IRQ (IRQ 0 → pin 2,
+/// n → n; IRQ 2 is the cascade), one per PCI slot's INTA onto the pin of
+/// its line, and the local sources (ExtINT on LINT0, NMI on LINT1). Every
+/// source is explicitly edge/active-high — our devices send pulses — so
+/// Linux does not fall back to the PCI default of level-low.
 fn io_entries(ncpu: u8) -> (alloc::vec::Vec<u8>, u16) {
     let mut v = alloc::vec::Vec::new();
     let mut count = 0u16;
-    v.extend_from_slice(&[MP_BUS, 0]);
-    v.extend_from_slice(b"ISA   ");
-    count += 1;
+    for (id, name) in [(BUS_PCI, b"PCI   "), (BUS_ISA, b"ISA   ")] {
+        v.extend_from_slice(&[MP_BUS, id]);
+        v.extend_from_slice(name);
+        count += 1;
+    }
     v.extend_from_slice(&[MP_IOAPIC, ncpu, IOAPIC_VERSION, MPC_IOAPIC_ENABLED]);
     v.extend_from_slice(&IOAPIC_PHYS.to_le_bytes());
     count += 1;
-    for irq in 0u8..16 {
-        if irq == 2 { continue; }
-        let pin = if irq == 0 { 2 } else { irq };
+    let mut intsrc = |bus: u8, busirq: u8, pin: u8| {
         v.extend_from_slice(&[MP_INTSRC, MP_INT]);
         v.extend_from_slice(&MP_IRQ_EDGE_HIGH.to_le_bytes());
-        v.extend_from_slice(&[0, irq, ncpu, pin]);
+        v.extend_from_slice(&[bus, busirq, ncpu, pin]);
         count += 1;
+    };
+    for irq in 0u8..16 {
+        if irq == 2 { continue; }
+        intsrc(BUS_ISA, irq, isa_pin(irq) as u8);
+    }
+    // srcbusirq for PCI: slot in bits 6:2, pin (0 = INTA) in bits 1:0.
+    for (slot, line) in INTX_LINES {
+        intsrc(BUS_PCI, slot << 2, isa_pin(line) as u8);
     }
     for (kind, lint) in [(MP_EXTINT, 0u8), (MP_NMI, 1u8)] {
         v.extend_from_slice(&[MP_LINTSRC, kind]);
@@ -112,7 +125,7 @@ fn io_entries(ncpu: u8) -> (alloc::vec::Vec<u8>, u16) {
     }
     debug_assert_eq!(
         v.len(),
-        MPC_BUS_LEN + MPC_IOAPIC_LEN + (count as usize - 2) * MPC_INTSRC_LEN,
+        2 * MPC_BUS_LEN + MPC_IOAPIC_LEN + (count as usize - 3) * MPC_INTSRC_LEN,
     );
     (v, count)
 }

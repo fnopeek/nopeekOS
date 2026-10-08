@@ -30,6 +30,8 @@ const VIRTIO_INPUT_DEVICE: u32 = 0x1052;
 
 pub const BAR0_BASE: u64 = 0xFE00_C000;
 pub const BAR0_SIZE: u64 = 0x4000;
+/// 8259 line: the PS/2-mouse IRQ, free here (no PS/2 controller).
+pub const IRQ_LINE: u8 = 12;
 
 const BAR0_SIZE_MASK_LO: u32 = !((BAR0_SIZE as u32) - 1) | 0b0100;
 
@@ -338,9 +340,7 @@ impl VirtioInput {
             0x30 => 0,
             0x34 => CAP_COMMON_OFF as u32,
             0x38 => 0,
-            // Interrupt: line=12, pin=INTA. Conventional PS/2-mouse IRQ
-            // line, free in our microvm (no real PS/2 controller).
-            0x3C => 0x0000_010C,
+            0x3C => (0x01 << 8) | IRQ_LINE as u32, // INTA
 
             // Modern virtio capability list — same shape as the rest.
             0x40 => 0x09 | ((CAP_NOTIFY_OFF as u32) << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_COMMON_CFG as u32) << 24),

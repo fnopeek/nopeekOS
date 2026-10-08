@@ -39,6 +39,8 @@ const VIRTIO_NET_DEVICE: u32 = 0x1041;
 
 pub const BAR0_BASE: u64 = 0xFE00_4000;
 pub const BAR0_SIZE: u64 = 0x4000;
+/// 8259 line.
+pub const IRQ_LINE: u8 = 10;
 const BAR0_SIZE_MASK_LO: u32 = !((BAR0_SIZE as u32) - 1) | 0b0100;
 
 const CAP_COMMON_OFF: u8 = 0x40;
@@ -298,7 +300,7 @@ impl VirtioNet {
             0x14 => if self.bar0_hi_sized { 0xFFFF_FFFF } else { self.bar0_hi },
             0x2C => (0x0001 << 16) | 0x1AF4,
             0x34 => CAP_COMMON_OFF as u32,
-            0x3C => 0x0000_010A,   // IRQ line 10, INTA
+            0x3C => (0x01 << 8) | IRQ_LINE as u32, // INTA
 
             0x40 => 0x09 | ((CAP_NOTIFY_OFF as u32) << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_COMMON_CFG as u32) << 24),
             0x48 => COMMON_OFF, 0x4C => COMMON_LEN,

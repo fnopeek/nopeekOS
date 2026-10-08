@@ -29,7 +29,7 @@ const BAR0_SIZE_MASK_LO: u32 = !((BAR0_SIZE as u32) - 1) | 0b0100;
 /// interrupt run the sound handler too, and that handler's ISR read is an
 /// MMIO exit. Not 8: under `acpi=off` the guest's rtc_cmos claims it. 14 is
 /// the legacy primary-IDE line, and the guest has no IDE.
-const IRQ_LINE: u8 = 14;
+pub const IRQ_LINE: u8 = 14;
 
 const CAP_COMMON_OFF: u8 = 0x40;
 const CAP_NOTIFY_OFF: u8 = 0x54;

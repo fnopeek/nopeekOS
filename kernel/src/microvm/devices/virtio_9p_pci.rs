@@ -118,7 +118,7 @@ const BAR0_SIZE_MASK_LO: u32 = !((BAR0_SIZE as u32) - 1) | 0b0100; // 64-bit MMI
 
 /// 8259 line. 0,5,9,10,11,12 are taken (timer/sqfs/gpu/net/blk/input);
 /// 6 is free.
-const IRQ_LINE: u8 = 6;
+pub const IRQ_LINE: u8 = 6;
 
 // PCI capability list anchors (identical scheme to virtio-blk).
 const CAP_COMMON_OFF: u8 = 0x40;
