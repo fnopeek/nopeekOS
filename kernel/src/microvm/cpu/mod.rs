@@ -832,6 +832,30 @@ pub fn place_worker(claim: bool) -> usize {
     c
 }
 
+/// Up to `n` distinct cores for short-lived helper fibers (the disk-image
+/// prefetch): never a vCPU's core or a pumping driver's, protected host cores
+/// first (vCPUs never go there), then any other. At least one core.
+pub fn place_helpers(n: usize) -> alloc::vec::Vec<usize> {
+    let ncores = crate::smp::per_core::core_count().min(32);
+    let all = ((1u64 << ncores) - 1) as u32 & !1;
+    let mut taken = VCPU_CORES.load(Ordering::Acquire);
+    if let Some(c) = crate::netdev::wasm_nic_core() { taken |= 1 << c; }
+    if let Some(c) = crate::wifi::manager_core() { taken |= 1 << c; }
+    let protected = PROTECTED_CORES.load(Ordering::Acquire);
+    let mut out = alloc::vec::Vec::new();
+    for _ in 0..n {
+        let Some(c) = least_fibered(all & protected & !taken)
+            .or_else(|| least_fibered(all & !taken))
+        else { break };
+        taken |= 1 << c;
+        out.push(c);
+    }
+    if out.is_empty() {
+        out.push(place_worker(false));
+    }
+    out
+}
+
 /// Reserve a distinct idle worker core (1..core_count()) for an AP vCPU fiber,
 /// marking it taken. `None` if every worker core already runs a vCPU (the
 /// caller then falls back to the shared deque — only safe on SVM; on VMX that

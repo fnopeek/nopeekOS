@@ -320,7 +320,12 @@ fn prefetch_order(path: &str, n: usize, all: bool) -> Vec<usize> {
 
 /// Pending prefetch jobs: an image and the chunks still to read.
 static QUEUE: Mutex<VecDeque<(Arc<Chunks>, VecDeque<usize>)>> = Mutex::new(VecDeque::new());
-static RUNNING: AtomicBool = AtomicBool::new(false);
+/// Prefetch workers running.
+static RUNNING: AtomicUsize = AtomicUsize::new(0);
+/// Workers per launch. Each chunk is an npkFS read and an AES-GCM decrypt,
+/// and npkFS holds its lock only for the lookup: in parallel the image is
+/// in memory before the guest, now at its session in ~170 ms, asks for it.
+const WORKERS: usize = 3;
 static STOP: AtomicBool = AtomicBool::new(false);
 
 /// npkFS reads run AES and the B-tree walk; the default fiber stack is too
@@ -332,22 +337,26 @@ fn queue_prefetch(chunks: &Arc<Chunks>, order: Vec<usize>) {
         return;
     }
     QUEUE.lock().push_back((chunks.clone(), order.into()));
-    if !RUNNING.swap(true, Ordering::AcqRel) {
+    if RUNNING.compare_exchange(0, WORKERS, Ordering::AcqRel, Ordering::Acquire).is_ok() {
         STOP.store(false, Ordering::Release);
-        let core = crate::microvm::cpu::place_worker(false);
-        crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
+        let cores = crate::microvm::cpu::place_helpers(WORKERS);
+        // One worker per core; fewer cores than workers means fewer workers.
+        RUNNING.store(cores.len(), Ordering::Release);
+        for core in cores {
+            crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
+        }
     }
 }
 
-/// Stop prefetching at VM teardown and wait (bounded) for the worker to
+/// Stop prefetching at VM teardown and wait (bounded) for the workers to
 /// leave, so the next launch starts with an empty queue.
 pub fn stop_worker() {
-    if !RUNNING.load(Ordering::Acquire) {
+    if RUNNING.load(Ordering::Acquire) == 0 {
         return;
     }
     STOP.store(true, Ordering::Release);
     for _ in 0..50_000_000u64 {
-        if !RUNNING.load(Ordering::Acquire) {
+        if RUNNING.load(Ordering::Acquire) == 0 {
             break;
         }
         core::hint::spin_loop();
@@ -357,12 +366,12 @@ pub fn stop_worker() {
 fn worker_entry(_: u64) {
     loop {
         drain();
-        RUNNING.store(false, Ordering::Release);
-        // A job queued while the worker was finishing saw it running and did
-        // not spawn another one; pick it up instead of leaving it behind.
-        if STOP.load(Ordering::Acquire)
+        // The last worker out picks up a job queued while it was finishing:
+        // that job saw workers running and spawned none.
+        if RUNNING.fetch_sub(1, Ordering::AcqRel) != 1
+            || STOP.load(Ordering::Acquire)
             || QUEUE.lock().is_empty()
-            || RUNNING.swap(true, Ordering::AcqRel)
+            || RUNNING.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_err()
         {
             return;
         }
