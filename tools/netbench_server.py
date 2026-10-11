@@ -84,28 +84,52 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         sock = self.connection
+        peer = self.client_address[0]
         t0 = time.monotonic()
         sent = 0
         peak_cwnd = 0
         min_cwnd = 1 << 30
         min_sndwnd = 1 << 30
         peak_sndwnd = 0
-        next_sample = 16 * CHUNK
+        # Sample by time, not by size: a crawling transfer would never reach
+        # a size threshold and would show only its end state.
+        SAMPLE_S = 0.5
+        t_next = t0 + SAMPLE_S
+        last_sent = 0
+        # Time spent inside write(): high means the send buffer is full (the
+        # receiver does not acknowledge), low means the sender is not the
+        # bottleneck.
+        blocked = 0.0
+        print(f"[server] GET  {peer} -> {mb} MB requested", flush=True)
         try:
             while sent < total:
                 n = min(CHUNK, total - sent)
+                tw = time.monotonic()
                 self.wfile.write(ZEROS[:n])
+                blocked += time.monotonic() - tw
                 sent += n
-                if sent >= next_sample:
-                    ti = tcp_info(sock)
+                now = time.monotonic()
+                if now >= t_next:
+                    ti = tcp_info(sock) or {}
                     if ti:
                         peak_cwnd = max(peak_cwnd, ti["cwnd"])
                         min_cwnd = min(min_cwnd, ti["cwnd"])
                         min_sndwnd = min(min_sndwnd, ti["snd_wnd"])
                         peak_sndwnd = max(peak_sndwnd, ti["snd_wnd"])
-                    next_sample += 16 * CHUNK
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+                    dt = now - (t_next - SAMPLE_S)
+                    rate = (sent - last_sent) * 8 / dt / 1e6
+                    print(f"[server]   +{(sent-last_sent)//1024:>6} KiB "
+                          f"({rate:6.2f} Mbit/s)  total {sent//1024:>7} KiB  "
+                          f"| cwnd={ti.get('cwnd',0):<5} ssthresh={ti.get('ssthresh',0):<6} "
+                          f"snd_wnd={ti.get('snd_wnd',0):<7} rtt={ti.get('rtt',0):<8} "
+                          f"retr={ti.get('retrans',0):<4} lost={ti.get('lost',0):<4} "
+                          f"dsack={ti.get('dsack_dups',0):<4} "
+                          f"| in write: {blocked*100/ (now-t0):.0f} %", flush=True)
+                    last_sent = sent
+                    t_next = now + SAMPLE_S
+        except (BrokenPipeError, ConnectionResetError) as e:
+            print(f"[server]   ABORTED after {sent//1024} KiB: {type(e).__name__}",
+                  flush=True)
         dt = time.monotonic() - t0
         rate = (sent * 8 / dt / 1e6) if dt > 0 else 0
         ti = tcp_info(sock) or {}
@@ -114,13 +138,15 @@ class Handler(BaseHTTPRequestHandler):
         if min_sndwnd == 1 << 30:
             min_sndwnd = ti.get("snd_wnd", 0)
         pacing_mbit = ti.get("pacing", 0) * 8 / 1e6
-        print(f"[server] GET  served {sent//CHUNK} MB in {dt*1e3:.0f} ms "
+        print(f"[server] GET  done: {sent//CHUNK} MB in {dt*1e3:.0f} ms "
               f"= {rate:.0f} Mbit/s | cwnd={ti.get('cwnd',0)} "
               f"(min{min_cwnd}/peak{peak_cwnd}) "
               f"snd_wnd={ti.get('snd_wnd',0)} (min{min_sndwnd}/peak{peak_sndwnd}) "
               f"ssthresh={ti.get('ssthresh',0)} "
               f"rtt={ti.get('rtt',0)}us retrans={ti.get('retrans',0)} "
-              f"dsack={ti.get('dsack_dups',0)} pacing={pacing_mbit:.0f}Mbit")
+              f"dsack={ti.get('dsack_dups',0)} pacing={pacing_mbit:.0f}Mbit "
+              f"| in write: {blocked:.1f}s of {dt:.1f}s "
+              f"({blocked*100/max(dt,1e-9):.0f} %)", flush=True)
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -130,19 +156,33 @@ class Handler(BaseHTTPRequestHandler):
         remaining = length
         min_rcvspace = 1 << 30
         peak_rcvspace = 0
-        next_sample = 16 * CHUNK
+        # Sampled by time as in GET, so a drop in the middle of an upload
+        # shows instead of only the average.
+        SAMPLE_S = 0.5
+        t_next = t0 + SAMPLE_S
+        last_got = 0
+        print(f"[server] POST {self.client_address[0]} -> {length // CHUNK} MB announced",
+              flush=True)
         while remaining > 0:
-            buf = self.rfile.read(min(CHUNK, remaining))
+            buf = self.rfile.read1(min(CHUNK, remaining))
             if not buf:
                 break
             got += len(buf)
             remaining -= len(buf)
-            if got >= next_sample:
-                ti = tcp_info(sock)
+            now = time.monotonic()
+            if now >= t_next:
+                ti = tcp_info(sock) or {}
                 if ti:
                     min_rcvspace = min(min_rcvspace, ti["rcv_space"])
                     peak_rcvspace = max(peak_rcvspace, ti["rcv_space"])
-                next_sample += 16 * CHUNK
+                dt_s = now - (t_next - SAMPLE_S)
+                r = (got - last_got) * 8 / dt_s / 1e6
+                print(f"[server]   +{(got-last_got)//1024:>6} KiB ({r:6.2f} Mbit/s)  "
+                      f"total {got//1024:>7} KiB | rcv_space={ti.get('rcv_space',0):<8} "
+                      f"rtt={ti.get('rtt',0):<6} lost={ti.get('lost',0):<4} "
+                      f"sacked={ti.get('sacked',0):<4} retr={ti.get('retrans',0)}", flush=True)
+                last_got = got
+                t_next = now + SAMPLE_S
         dt = time.monotonic() - t0
         rate = (got * 8 / dt / 1e6) if dt > 0 else 0
         ti = tcp_info(sock) or {}
