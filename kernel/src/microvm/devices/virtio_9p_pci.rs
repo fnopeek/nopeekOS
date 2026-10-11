@@ -255,6 +255,9 @@ struct Fid {
     /// Tread slices it; Twrite/Tsetattr mutate it. None for dirs / not
     /// yet opened, or once a large sequential write promoted to `stream`.
     data: Option<Vec<u8>>,
+    /// An opened file stored chunked in npkFS: read one chunk at a time
+    /// instead of caching the whole file.
+    chunked: Option<ChunkedRead>,
     /// `data` has unflushed writes — persisted to npkFS on Tfsync/Tclunk.
     dirty: bool,
     /// Set once a write grows the file past STREAM_PROMOTE_BYTES while
@@ -269,10 +272,66 @@ struct Fid {
     stream_next: u64,
 }
 
+/// Reader over a chunked npkFS file. Chunk lengths are learned as chunks
+/// are read; only the current chunk is held in memory.
+struct ChunkedRead {
+    total: u64,
+    chunks: Vec<[u8; 32]>,
+    /// Start offset of chunk i, known for every chunk up to the first unread.
+    starts: Vec<u64>,
+    /// Index and bytes of the chunk read last.
+    cur: Option<(usize, Vec<u8>)>,
+}
+
+impl ChunkedRead {
+    fn held(&self) -> usize { self.cur.as_ref().map_or(0, |(_, b)| b.len()) }
+
+    /// Load chunk `i` into `cur`, recording where chunk `i + 1` starts.
+    /// `budget` caps the chunk's size.
+    fn load(&mut self, i: usize, budget: usize) -> Result<(), u32> {
+        if self.cur.as_ref().is_some_and(|(c, _)| *c == i) { return Ok(()); }
+        let hash = self.chunks.get(i).ok_or(EIO)?;
+        self.cur = None;
+        let bytes = crate::npkfs::fs::read_chunk(hash).map_err(|_| EIO)?;
+        if bytes.len() > budget { return Err(ENOSPC); }
+        if i + 1 == self.starts.len() {
+            self.starts.push(self.starts[i] + bytes.len() as u64);
+        }
+        self.cur = Some((i, bytes));
+        Ok(())
+    }
+
+    /// Up to `count` bytes at `offset`; crosses chunk boundaries.
+    fn read_at(&mut self, offset: u64, count: usize, budget: usize) -> Result<Vec<u8>, u32> {
+        let end = offset.saturating_add(count as u64).min(self.total);
+        let mut out = Vec::new();
+        let mut pos = offset;
+        while pos < end {
+            // The chunk holding `pos`: among the known starts, or by reading on.
+            let i = loop {
+                let k = self.starts.partition_point(|&s| s <= pos);
+                if k < self.starts.len() || k > self.chunks.len() { break k - 1; }
+                self.load(k - 1, budget)?;
+            };
+            self.load(i, budget)?;
+            let (_, bytes) = self.cur.as_ref().ok_or(EIO)?;
+            let at = (pos - self.starts[i]) as usize;
+            if at >= bytes.len() { return Err(EIO); }
+            let take = bytes.len().min(at + (end - pos) as usize);
+            out.extend_from_slice(&bytes[at..take]);
+            pos += (take - at) as u64;
+        }
+        Ok(out)
+    }
+}
+
 /// Promote a buffered file to streaming once it reaches this size and the
 /// current write appended at the end. Small files (configs, editor saves) stay
 /// fully buffered; only big sequential downloads stream.
 const STREAM_PROMOTE_BYTES: usize = 4 * 1024 * 1024;
+/// Files streaming at once. Each holds a writer on the persist worker and
+/// keeps npkFS GC waiting; past this, a file stays in the buffered path.
+const MAX_STREAMS: usize = 8;
 
 impl Virtio9p {
     pub fn new() -> Self {
@@ -511,7 +570,9 @@ impl Virtio9p {
 
         let head_avail = match avail_idx(mem, avail) { Some(v) => v, None => return false };
         let mut last = self.queues[queue_idx as usize].last_avail_idx;
-        if head_avail == last { return false; }
+        let pending = super::virtqueue::avail_pending(last, head_avail, size);
+        if pending == 0 { return false; }
+        let head_avail = last.wrapping_add(pending);
 
         let mut used_idx = self.queues[queue_idx as usize].used_idx;
         let mut serviced = false;        // consumed at least one avail entry
@@ -691,11 +752,24 @@ impl Virtio9p {
 
     /// Tattach: fid[4] afid[4] uname[s] aname[s] n_uname[4]. The fid
     /// becomes the filesystem root — confined to `self.root`.
+    /// A write to a file opened for chunked reading needs the whole file
+    /// in a buffer: load it, within the device budget.
+    fn materialize(&mut self, fid: u32) -> Result<(), u32> {
+        let room = MAX_DEVICE_BUFFERED.saturating_sub(self.buffered_except(fid));
+        let Some(f) = self.fids.get_mut(&fid) else { return Ok(()) };
+        let Some(c) = f.chunked.as_ref() else { return Ok(()) };
+        if c.total > room.min(MAX_BUFFERED_BYTES) as u64 { return Err(EFBIG); }
+        f.chunked = None;
+        f.data = Some(npkfs_read(&f.path).ok_or(EIO)?);
+        Ok(())
+    }
+
     /// Bytes buffered by every fid but `except`.
     fn buffered_except(&self, except: u32) -> usize {
         self.fids.iter()
             .filter(|(k, _)| **k != except)
-            .map(|(_, f)| f.data.as_ref().map_or(0, |d| d.len()))
+            .map(|(_, f)| f.data.as_ref().map_or(0, |d| d.len())
+                + f.chunked.as_ref().map_or(0, |c| c.held()))
             .sum()
     }
 
@@ -709,7 +783,7 @@ impl Virtio9p {
         let fid = rd_u32(body, 0);
         if !self.fid_room(fid) { return rlerror(tag, EMFILE); }
         let root = self.root.clone();
-        self.fids.insert(fid, Fid { path: root.clone(), is_dir: true, data: None, dirty: false, async_stream: false, stream_next: 0 });
+        self.fids.insert(fid, Fid { path: root.clone(), is_dir: true, data: None, chunked: None, dirty: false, async_stream: false, stream_next: 0 });
         if self.log_count < 32 {
             kprintln!("[9p] Tattach fid={} → root '{}'", fid, root);
             self.log_count += 1;
@@ -749,7 +823,7 @@ impl Virtio9p {
         if walked as usize == nw {
             if !self.fid_room(newfid) { return rlerror(tag, EMFILE); }
             let is_dir = npkfs_stat(&cur).map(|s| s.0).unwrap_or(true);
-            self.fids.insert(newfid, Fid { path: cur, is_dir, data: None, dirty: false, async_stream: false, stream_next: 0 });
+            self.fids.insert(newfid, Fid { path: cur, is_dir, data: None, chunked: None, dirty: false, async_stream: false, stream_next: 0 });
         }
         let mut b = Vec::with_capacity(2 + qids.len());
         b.extend_from_slice(&walked.to_le_bytes());
@@ -840,18 +914,30 @@ impl Virtio9p {
         let fid = rd_u32(body, 0);
         let (path, is_dir) = match self.fids.get(&fid) { Some(f) => (f.path.clone(), f.is_dir), None => return rlerror(tag, EINVAL) };
         if !is_dir {
-            let data = if is_magic(&path) {
+            const P9_DOTL_TRUNC: u32 = 0o1000;
+            let flags = rd_u32(body, 4);
+            let room = MAX_DEVICE_BUFFERED.saturating_sub(self.buffered_except(fid));
+            let (data, chunked) = if is_magic(&path) {
                 // Opening the magic file pops loft on the host.
                 crate::microvm::cpu::request_open_loft();
                 p9diag!("[9p] .open-in-loft opened → spawning loft on host");
-                MAGIC_OPEN_CONTENT.to_vec()
+                (Some(MAGIC_OPEN_CONTENT.to_vec()), None)
+            } else if flags & P9_DOTL_TRUNC != 0 {
+                (Some(Vec::new()), None)
+            } else if let Ok(Some((total, chunks))) = crate::npkfs::fs::chunk_list(&path) {
+                (None, Some(ChunkedRead { total, chunks, starts: alloc::vec![0], cur: None }))
             } else {
-                npkfs_read(&path).unwrap_or_default()
+                // A single blob: read whole, but only if it fits the budget.
+                let size = npkfs_stat(&path).map_or(0, |(_, size, _)| size);
+                if size > room as u64 { return rlerror(tag, ENOSPC); }
+                (Some(npkfs_read(&path).unwrap_or_default()), None)
             };
-            if self.buffered_except(fid) + data.len() > MAX_DEVICE_BUFFERED {
-                return rlerror(tag, ENOSPC);
+            if data.as_ref().map_or(0, |d| d.len()) > room { return rlerror(tag, ENOSPC); }
+            if let Some(f) = self.fids.get_mut(&fid) {
+                f.dirty = flags & P9_DOTL_TRUNC != 0;
+                f.data = data;
+                f.chunked = chunked;
             }
-            if let Some(f) = self.fids.get_mut(&fid) { f.data = Some(data); }
         }
         let mut b = Vec::with_capacity(17);
         b.extend_from_slice(&qid(&path, is_dir));
@@ -864,9 +950,23 @@ impl Virtio9p {
         STAT_TREAD.fetch_add(1, AtO::Relaxed);
         if body.len() < 16 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
-        let offset = u64::from_le_bytes(body[4..12].try_into().unwrap()) as usize;
-        let count = rd_u32(body, 12) as usize;
-        let f = match self.fids.get(&fid) { Some(f) => f, None => return rlerror(tag, EINVAL) };
+        let offset = u64::from_le_bytes(body[4..12].try_into().unwrap());
+        // Rread = size[4] type[1] tag[2] count[4] data.
+        let count = (rd_u32(body, 12) as usize).min((self.msize as usize).saturating_sub(11));
+        let room = MAX_DEVICE_BUFFERED.saturating_sub(self.buffered_except(fid));
+        let f = match self.fids.get_mut(&fid) { Some(f) => f, None => return rlerror(tag, EINVAL) };
+        if let Some(c) = f.chunked.as_mut() {
+            return match c.read_at(offset, count, room) {
+                Ok(bytes) => {
+                    let mut b = Vec::with_capacity(4 + bytes.len());
+                    b.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    b.extend_from_slice(&bytes);
+                    msg(RREAD, tag, &b)
+                }
+                Err(e) => rlerror(tag, e),
+            };
+        }
+        let offset = usize::try_from(offset).unwrap_or(usize::MAX);
         let data = match f.data.as_ref() {
             Some(d) => d,
             // A streaming (write-only download) fid has no readable buffer →
@@ -937,7 +1037,7 @@ impl Virtio9p {
         }
         p9diag!("[9p] Tlcreate '{}'", path);
         // Re-bind fid to the new open file with an empty write buffer.
-        self.fids.insert(fid, Fid { path: path.clone(), is_dir: false, data: Some(Vec::new()), dirty: false, async_stream: false, stream_next: 0 });
+        self.fids.insert(fid, Fid { path: path.clone(), is_dir: false, data: Some(Vec::new()), chunked: None, dirty: false, async_stream: false, stream_next: 0 });
         let mut b = Vec::with_capacity(17);
         b.extend_from_slice(&qid(&path, false));
         b.extend_from_slice(&0u32.to_le_bytes()); // iounit
@@ -952,7 +1052,9 @@ impl Virtio9p {
         let offset = u64::from_le_bytes(body[4..12].try_into().unwrap());
         let count = rd_u32(body, 12) as usize;
         let data = &body[16..body.len().min(16 + count)];
+        if let Err(e) = self.materialize(fid) { return rlerror(tag, e); }
         let others = self.buffered_except(fid);
+        let streams = self.fids.values().filter(|f| f.async_stream).count();
         STAT_TWRITES.fetch_add(1, AtO::Relaxed);
         STAT_TWRITE_BYTES.fetch_add(data.len() as u64, AtO::Relaxed);
         let f = match self.fids.get_mut(&fid) { Some(f) if !f.is_dir => f, _ => return rlerror(tag, EINVAL) };
@@ -1015,7 +1117,7 @@ impl Virtio9p {
         // to the worker via Start (defer this reply); the worker owns the
         // StreamingWriter from here, so the vCPU never holds the whole file.
         let dlen = f.data.as_ref().map_or(0, |b| b.len());
-        if dlen >= STREAM_PROMOTE_BYTES && offset + data.len() == dlen {
+        if dlen >= STREAM_PROMOTE_BYTES && offset + data.len() == dlen && streams < MAX_STREAMS {
             let prefix = f.data.take().unwrap_or_default();
             f.async_stream = true;
             f.stream_next = dlen as u64;
@@ -1065,12 +1167,21 @@ impl Virtio9p {
         if valid & P9_SETATTR_SIZE != 0 && body.len() >= 32 {
             let size = usize::try_from(u64::from_le_bytes(body[24..32].try_into().unwrap()))
                 .unwrap_or(usize::MAX);
+            if size == 0 {
+                if let Some(f) = self.fids.get_mut(&fid) { f.chunked = None; }
+            } else if let Err(e) = self.materialize(fid) {
+                return rlerror(tag, e);
+            }
+            let others = self.buffered_except(fid);
             if let Some(f) = self.fids.get_mut(&fid) {
                 // Ignore resize on a streaming file (would corrupt state by
                 // creating a second buffer); downloads only truncate at open,
                 // before promotion.
                 if !f.is_dir && !f.async_stream {
                     let buf = f.data.get_or_insert_with(Vec::new);
+                    if size > buf.len() && others.saturating_add(size) > MAX_DEVICE_BUFFERED {
+                        return rlerror(tag, ENOSPC);
+                    }
                     if let Err(e) = grow_buffer(buf, size) { return rlerror(tag, e); }
                     buf.truncate(size);
                     f.dirty = true;

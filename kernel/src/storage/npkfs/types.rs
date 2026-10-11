@@ -72,6 +72,8 @@ pub enum FsError {
     TooManyExtents,
     /// No disk key: nothing can be written or read before unlock.
     Locked,
+    /// The host could not reserve memory for the object.
+    OutOfMemory,
 }
 
 impl From<crate::virtio_blk::BlkError> for FsError {
@@ -94,6 +96,7 @@ impl core::fmt::Display for FsError {
             FsError::TreeTooDeep => write!(f, "B-tree too deep"),
             FsError::TooManyExtents => write!(f, "too many extents"),
             FsError::Locked => write!(f, "disk is locked"),
+            FsError::OutOfMemory => write!(f, "out of memory"),
         }
     }
 }

@@ -719,6 +719,29 @@ static AP_SIPI_VECTORS: [AtomicU8; ORCH_MAX_VCPUS] =
 /// (last-one-out).
 static VCPU_COUNT: AtomicU32 = AtomicU32::new(0);
 
+/// A vCPU did not stop at teardown: its core and the VM's memory are kept,
+/// and no new VM starts until a reboot.
+static VM_WEDGED: AtomicBool = AtomicBool::new(false);
+
+/// How long the BSP waits for the APs to leave the guest at teardown.
+const AP_STOP_TIMEOUT_MS: u64 = 5000;
+
+/// Wait for every AP to stop, bounded. False: one did not, and the VM is
+/// left in place (memory not freed under a running vCPU).
+fn wait_aps_down() -> bool {
+    let start = crate::interrupts::ticks();
+    while VCPU_COUNT.load(Ordering::Acquire) > 1 {
+        if crate::interrupts::ticks().wrapping_sub(start) * 10 >= AP_STOP_TIMEOUT_MS {
+            VM_WEDGED.store(true, Ordering::Release);
+            crate::kprintln!("[microvm] a vCPU did not stop within {} ms — its core and the guest memory are kept; restart to start a VM again",
+                AP_STOP_TIMEOUT_MS);
+            return false;
+        }
+        crate::smp::fiber::yield_sleep(2);
+    }
+    true
+}
+
 /// Bitmask of host cores currently running a vCPU fiber (bit c). Core 0 (bit 0)
 /// is always reserved (shell/reaper). Each vCPU must get a distinct core: VMX
 /// root is per physical core, so two vCPUs VMXONing one core fail with
@@ -1089,6 +1112,9 @@ pub fn vm_open(
     // it (smp_ap_entry → fiber::admit) and runs the guest on that core for
     // its lifetime (VMXON/run/VMXOFF all bind there; the fiber is pinned).
     // Owned copies so the caller's npkFS Vecs can drop.
+    if VM_WEDGED.load(Ordering::Acquire) {
+        return Err("a previous microvm did not stop; restart to start one again");
+    }
     if vm_fiber_mode() {
         if VM_RUN_STATE.load(Ordering::Acquire) != VM_IDLE {
             return Err("a microvm is already running");
@@ -1617,12 +1643,11 @@ fn vcpu_fiber_task(_arg: u64) {
                     // touching the shared state before we free it (close()).
                     VM_CLOSE_REQUESTED.store(true, Ordering::Release);
                     crate::intent::wake_shell();
-                    while VCPU_COUNT.load(Ordering::Acquire) > 1 {
-                        crate::smp::fiber::yield_sleep(2);
+                    if wait_aps_down() {
+                        ap_orch_reset();
+                        ctx.close();
+                        VCPU_COUNT.store(0, Ordering::Release);
                     }
-                    ap_orch_reset();
-                    ctx.close();
-                    VCPU_COUNT.store(0, Ordering::Release);
                 }
                 Err(e) => crate::kprintln!("[microvm] open FAILED: {}", e),
             }
@@ -1680,12 +1705,11 @@ fn vcpu_fiber_task(_arg: u64) {
                     // still running, signal down + wait before freeing (close).
                     VM_CLOSE_REQUESTED.store(true, Ordering::Release);
                     crate::intent::wake_shell();
-                    while VCPU_COUNT.load(Ordering::Acquire) > 1 {
-                        crate::smp::fiber::yield_sleep(2);
+                    if wait_aps_down() {
+                        ap_orch_reset();
+                        ctx.close();
+                        VCPU_COUNT.store(0, Ordering::Release);
                     }
-                    ap_orch_reset();
-                    ctx.close();
-                    VCPU_COUNT.store(0, Ordering::Release);
                 }
                 Err(e) => crate::kprintln!("[microvm] open FAILED: {}", e),
             }

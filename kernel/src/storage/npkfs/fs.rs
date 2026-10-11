@@ -614,8 +614,9 @@ pub fn read_chunk(hash: &[u8; 32]) -> Result<Vec<u8>, Error> {
 /// `read_with_hash` so callers see a transparent file regardless of
 /// whether it was stored as a single `Blob` or as a chunked blob.
 fn stitch_chunked(total_size: u64, chunks: &[[u8; 32]]) -> Result<Vec<u8>, PathError> {
-    let total = total_size as usize;
-    let mut out = Vec::with_capacity(total);
+    let total = usize::try_from(total_size).map_err(|_| PathError::Corrupt)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(total).map_err(|_| Error::Storage(FsError::OutOfMemory))?;
     for h in chunks {
         let bytes = storage::get(h)
             .map_err(Error::Storage)?

@@ -272,7 +272,9 @@ impl VirtioSnd {
             _ => return false,
         };
         let avail_top = match avail_idx(mem, q.driver_gpa()) { Some(v) => v, None => return false };
-        if avail_top == q.last_avail_idx { return false; }
+        let pending = super::virtqueue::avail_pending(q.last_avail_idx, avail_top, q.size);
+        if pending == 0 { return false; }
+        let avail_top = q.last_avail_idx.wrapping_add(pending);
 
         let mut last = q.last_avail_idx;
         let mut used = q.used_idx;
@@ -419,6 +421,8 @@ impl VirtioSnd {
             _ => return 0,
         };
         let avail_top = match avail_idx(mem, q.driver_gpa()) { Some(v) => v, None => return 0 };
+        let avail_top = q.last_avail_idx
+            .wrapping_add(super::virtqueue::avail_pending(q.last_avail_idx, avail_top, q.size));
         let mut last = q.last_avail_idx;
         let mut used = q.used_idx;
         let mut any = false;
@@ -464,7 +468,9 @@ impl VirtioSnd {
             _ => return false,
         };
         let avail_top = match avail_idx(mem, q.driver_gpa()) { Some(v) => v, None => return false };
-        if avail_top == q.last_avail_idx { return false; }
+        let pending = super::virtqueue::avail_pending(q.last_avail_idx, avail_top, q.size);
+        if pending == 0 { return false; }
+        let avail_top = q.last_avail_idx.wrapping_add(pending);
 
         let mut last = q.last_avail_idx;
         let mut used = q.used_idx;

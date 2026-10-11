@@ -343,7 +343,9 @@ impl VirtioGpu {
         let avail_top = match avail_idx(mem, q.driver_gpa()) {
             Some(v) => v, None => return false,
         };
-        if avail_top == q.last_avail_idx { return false; }
+        let pending = super::virtqueue::avail_pending(q.last_avail_idx, avail_top, q.size);
+        if pending == 0 { return false; }
+        let avail_top = q.last_avail_idx.wrapping_add(pending);
 
         let desc_gpa = q.desc_gpa();
         let device_gpa = q.device_gpa();
@@ -440,7 +442,9 @@ impl VirtioGpu {
         let avail_top = match avail_idx(mem, q.driver_gpa()) {
             Some(v) => v, None => return false,
         };
-        if avail_top == q.last_avail_idx { return false; }
+        let pending = super::virtqueue::avail_pending(q.last_avail_idx, avail_top, q.size);
+        if pending == 0 { return false; }
+        let avail_top = q.last_avail_idx.wrapping_add(pending);
 
         let desc_gpa = q.desc_gpa();
         let device_gpa = q.device_gpa();
@@ -727,11 +731,12 @@ impl VirtioGpu {
         // → linear offset → page-walk.
         let row_bytes = w as usize * bpp;
         let t0 = crate::interrupts::rdtsc();
+        let mut cursor = (0, 0);
         for row in 0..h as usize {
             let src_lin = (offset as usize).saturating_add((y as usize + row) * stride + x as usize * bpp);
             let dst_lin = (y as usize + row) * stride + x as usize * bpp;
             if dst_lin + row_bytes > host_buf.len() { break; }
-            copy_from_backing(mem, &r.backing, src_lin, &mut host_buf[dst_lin..dst_lin + row_bytes]);
+            copy_from_backing(mem, &r.backing, &mut cursor, src_lin, &mut host_buf[dst_lin..dst_lin + row_bytes]);
         }
         // The per-frame pixel-copy cost on the vCPU core, in cycles: the
         // byte count alone cannot say how much of a core the copy takes,
@@ -1253,27 +1258,29 @@ fn build_display_info_resp(flags: u32, fence_id: u64, modes: &[(u32, u32, bool);
 /// Copy `dst.len()` bytes from a guest backing-page list, starting at
 /// linear offset `src_lin` into the conceptual resource buffer. The
 /// backing pages are an ordered list of (guest_phys_addr, len).
-fn copy_from_backing(mem: &GuestMem, backing: &[(u64, u32)], src_lin: usize, dst: &mut [u8]) {
-    let mut remaining = dst.len();
+/// `cursor` is (segment index, its start offset) and carries over between
+/// calls with rising `src_lin`, so a whole transfer walks the list once.
+fn copy_from_backing(
+    mem: &GuestMem,
+    backing: &[(u64, u32)],
+    cursor: &mut (usize, usize),
+    src_lin: usize,
+    dst: &mut [u8],
+) {
+    if src_lin < cursor.1 { *cursor = (0, 0); }
     let mut dst_off = 0;
-    let mut walked: usize = 0;
-    for &(addr, len) in backing {
+    while dst_off < dst.len() {
+        let Some(&(addr, len)) = backing.get(cursor.0) else { return };
         let len = len as usize;
-        if walked + len <= src_lin {
-            walked += len;
+        let pos = src_lin + dst_off;
+        if pos >= cursor.1 + len {
+            *cursor = (cursor.0 + 1, cursor.1 + len);
             continue;
         }
-        let local_off = src_lin.saturating_sub(walked);
-        if local_off >= len {
-            walked += len;
-            continue;
-        }
-        let take = (len - local_off).min(remaining);
+        let local_off = pos - cursor.1;
+        let take = (len - local_off).min(dst.len() - dst_off);
         mem.read_bytes(addr + local_off as u64, &mut dst[dst_off..dst_off + take]);
         dst_off += take;
-        remaining -= take;
-        walked += len;
-        if remaining == 0 { break; }
     }
 }
 

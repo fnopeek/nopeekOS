@@ -24,6 +24,20 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 const EIO: i32 = 5;
+const ENOSPC: i32 = 28;
+
+/// npkFS space a guest download may not take: the host's own saves, the
+/// vault and the app's disk image still need room. The larger of the two.
+const NPKFS_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+const NPKFS_RESERVE_PERCENT: u64 = 5;
+
+/// Whether npkFS still has room for `len` more streamed bytes.
+fn npkfs_has_room(len: usize) -> bool {
+    let Some((total, free, _, _)) = crate::npkfs::stats() else { return false };
+    let bs = crate::npkfs::BLOCK_SIZE as u64;
+    let reserve = NPKFS_RESERVE_BYTES.max(total * bs * NPKFS_RESERVE_PERCENT / 100);
+    (free * bs).saturating_sub(reserve) >= len as u64
+}
 
 /// Backpressure ceiling: bytes buffered in PENDING but not yet persisted. When
 /// exceeded, the vCPU stops pulling the 9p avail-ring, so the guest's
@@ -120,7 +134,7 @@ pub fn stop_worker() {
 const HOT_TICKS: u64 = 30;
 
 fn worker_entry(_: u64) {
-    let mut writers: BTreeMap<u64, crate::storage::npkfs::fs::StreamingWriter> = BTreeMap::new();
+    let mut writers: BTreeMap<u64, Stream> = BTreeMap::new();
     let mut last_work = crate::interrupts::ticks();
     loop {
         // Check teardown first so close is snappy (abandon any queued writes;
@@ -175,26 +189,44 @@ fn worker_entry(_: u64) {
 
 static DIAG: AtomicUsize = AtomicUsize::new(0);
 
-fn apply(
-    writers: &mut BTreeMap<u64, crate::storage::npkfs::fs::StreamingWriter>,
-    key: u64,
-    op: Op,
-) -> i32 {
+/// A streamed file. Once a write fails, later writes are dropped and the
+/// file is never committed: a write acked on the fast path cannot report
+/// its error, so `Finish` reports it instead.
+struct Stream {
+    writer: crate::storage::npkfs::fs::StreamingWriter,
+    failed: Option<i32>,
+}
+
+fn apply(writers: &mut BTreeMap<u64, Stream>, key: u64, op: Op) -> i32 {
     use crate::storage::npkfs::fs;
     match op {
         Op::Start { path, data } => {
-            let mut w = fs::open_streaming_write(&path);
-            match w.write(&data) {
-                Ok(_) => { let n = data.len() as i32; writers.insert(key, w); n }
-                Err(_) => -EIO, // w dropped here → stream_end
+            if !npkfs_has_room(data.len()) { return -ENOSPC; }
+            let mut writer = fs::open_streaming_write(&path);
+            match writer.write(&data) {
+                Ok(_) => {
+                    writers.insert(key, Stream { writer, failed: None });
+                    data.len() as i32
+                }
+                Err(_) => -EIO, // writer dropped here → stream_end
             }
         }
         Op::Write { data } => match writers.get_mut(&key) {
-            Some(w) => match w.write(&data) { Ok(_) => data.len() as i32, Err(_) => -EIO },
+            Some(Stream { failed: Some(e), .. }) => *e,
+            Some(st) => {
+                let r = if !npkfs_has_room(data.len()) {
+                    -ENOSPC
+                } else {
+                    match st.writer.write(&data) { Ok(_) => data.len() as i32, Err(_) => -EIO }
+                };
+                if r < 0 { st.failed = Some(r); }
+                r
+            }
             None => -EIO,
         },
         Op::Finish => match writers.remove(&key) {
-            Some(w) => match w.finish() { Ok(_) => 0, Err(_) => -EIO },
+            Some(Stream { failed: Some(e), .. }) => e,
+            Some(st) => match st.writer.finish() { Ok(_) => 0, Err(_) => -EIO },
             None => 0, // never promoted to streaming → nothing to finish
         },
     }

@@ -405,7 +405,7 @@ impl VirtioConsole {
         let q = self.queues.get_mut(qi as usize)?;
         if q.enable == 0 || q.size == 0 { return None; }
         let top = avail_idx(mem, q.driver_gpa())?;
-        if top == q.last_avail_idx { return None; }
+        if super::virtqueue::avail_pending(q.last_avail_idx, top, q.size) == 0 { return None; }
         let head = avail_ring(mem, q.driver_gpa(), q.size, q.last_avail_idx)?;
         let mut idx = head;
         let mut hops = 0u16;
@@ -429,7 +429,9 @@ impl VirtioConsole {
     fn consume<F: FnMut(&mut Self, &[u8])>(&mut self, qi: u16, mem: &GuestMem, mut f: F) -> bool {
         use super::virtqueue::{avail_idx, avail_pending, avail_ring, read_desc, chain_next, used_push, VRING_DESC_F_WRITE};
         let mut any = false;
-        loop {
+        // At most one ring's worth per call: another vCPU may keep refilling it.
+        let limit = self.queues.get(qi as usize).map_or(0, |q| q.size);
+        for _ in 0..limit {
             let (head, data) = {
                 let Some(q) = self.queues.get_mut(qi as usize) else { return any };
                 if q.enable == 0 || q.size == 0 { return any; }
@@ -457,6 +459,7 @@ impl VirtioConsole {
             f(self, &data);
             any = true;
         }
+        any
     }
 
     fn queue_ctrl(&mut self, msg: Vec<u8>) {

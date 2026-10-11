@@ -85,6 +85,16 @@ impl GuestSurface {
     }
 }
 
+impl GuestSurface {
+    fn held_pixels(&self) -> usize {
+        self.ready.pixels.len() + self.front.pixels.len() + self.back.pixels.len()
+    }
+}
+
+/// Pixels all surfaces together may hold, three buffers each: 512 MiB, two
+/// full-screen 4K windows with room to spare.
+const MAX_SURFACE_PIXELS: usize = 128 << 20;
+
 static SURFACES: Mutex<BTreeMap<u32, GuestSurface>> = Mutex::new(BTreeMap::new());
 
 
@@ -109,13 +119,23 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
     if px_count == 0 || src.len() < px_count * 4 {
         return;
     }
-    let mut back = {
+    let (mut back, held) = {
         let mut map = SURFACES.lock();
+        let held: usize = map.values().map(GuestSurface::held_pixels).sum();
         let surf = map.entry(window_id).or_insert_with(GuestSurface::new);
-        core::mem::take(&mut surf.back)
+        (core::mem::take(&mut surf.back), held)
     };
     if back.pixels.len() != px_count {
-        back.pixels = alloc::vec![0u32; px_count];
+        // The guest picks the frame size: past the budget, or when the host
+        // cannot reserve the memory, the frame is dropped.
+        if held.saturating_add(px_count) > MAX_SURFACE_PIXELS {
+            return;
+        }
+        back.pixels = Vec::new();
+        if back.pixels.try_reserve_exact(px_count).is_err() {
+            return;
+        }
+        back.pixels.resize(px_count, 0);
     }
     back.width = width;
     back.height = height;

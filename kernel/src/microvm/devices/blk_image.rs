@@ -169,6 +169,12 @@ impl BlkImage {
         true
     }
 
+    /// `(tail chunks holding data, tail chunks)`: how much of the space
+    /// added by `grow` the guest has written to.
+    pub fn tail_written(&self) -> (usize, usize) {
+        (self.tail.iter().filter(|t| t.is_some()).count(), self.tail.len())
+    }
+
     /// `(chunks touched by the guest, loaded by prefetch, total)` this run.
     pub fn residency(&self) -> (usize, usize, usize) {
         let c = &self.chunks;

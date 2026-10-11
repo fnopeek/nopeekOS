@@ -263,6 +263,8 @@ impl VirtioInput {
             Some(v) => v,
             None => return false,
         };
+        let avail_top = q.last_avail_idx
+            .wrapping_add(super::virtqueue::avail_pending(q.last_avail_idx, avail_top, q.size));
 
         let mut any = false;
         while q.last_avail_idx != avail_top {
@@ -307,7 +309,9 @@ impl VirtioInput {
         let avail_top = match avail_idx(mem, q.driver_gpa()) {
             Some(v) => v, None => return false,
         };
-        if avail_top == q.last_avail_idx { return false; }
+        let pending = super::virtqueue::avail_pending(q.last_avail_idx, avail_top, q.size);
+        if pending == 0 { return false; }
+        let avail_top = q.last_avail_idx.wrapping_add(pending);
 
         let mut any = false;
         while q.last_avail_idx != avail_top {

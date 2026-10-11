@@ -182,6 +182,10 @@ pub struct VirtioBlk {
     grow_refused: bool,
     /// Fill level, in percent, at which the home image grows.
     grow_at_pct: u64,
+    /// Largest size the home image may grow to, in bytes.
+    grow_max: u64,
+    /// Tick of the last growth.
+    grown_at: Option<u64>,
     /// Diagnostic counters (limited, to avoid log spam).
     notify_log_count: u32,
     serviced_log_count: u32,
@@ -196,6 +200,14 @@ const GROW_AT_PCT: u64 = 80;
 /// The smallest step worth growing by; less free npkFS space than twice
 /// this and the image stays as it is.
 const MIN_GROW_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest home image; `set microvm_home_max <GiB>` overrides it.
+const MAX_HOME_BYTES: u64 = 16 << 30;
+/// Ticks (100 Hz) between two growths.
+const GROW_INTERVAL_TICKS: u64 = 30 * 100;
+/// Share of the space added by the last growth, in percent, that must hold
+/// data before the next: a full filesystem has written to most of it, a
+/// guest that only claims to be full has not.
+const GROW_TAIL_USED_PCT: usize = 25;
 
 impl VirtioBlk {
     /// Slot 1 — the read-write, npkFS-persisted per-app home image.
@@ -210,6 +222,10 @@ impl VirtioBlk {
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|p| (1..=99).contains(p))
             .unwrap_or(GROW_AT_PCT);
+        dev.grow_max = crate::config::get("microvm_home_max")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|g| *g >= 1)
+            .map_or(MAX_HOME_BYTES, |g| g.saturating_mul(1 << 30));
         dev
     }
 
@@ -226,20 +242,30 @@ impl VirtioBlk {
         if !self.persist
             || r.dev_bytes != cap
             || r.fs_bytes < cap
-            || r.used_bytes * 100 < r.data_bytes * self.grow_at_pct
+            || (r.used_bytes as u128) * 100 < (r.data_bytes as u128) * self.grow_at_pct as u128
+            || cap >= self.grow_max
         {
+            return false;
+        }
+        let now = crate::interrupts::ticks();
+        if self.grown_at.is_some_and(|t| now.wrapping_sub(t) < GROW_INTERVAL_TICKS) {
+            return false;
+        }
+        let (written, tail) = self.backing.tail_written();
+        let need_pct = GROW_TAIL_USED_PCT.min(self.grow_at_pct as usize / 2);
+        if written * 100 < tail * need_pct {
             return false;
         }
         let free = crate::npkfs::stats()
             .map_or(0, |(_, free_blocks, _, _)| free_blocks * crate::npkfs::BLOCK_SIZE as u64);
         let ram = (super::guest_mem::frames_spare() * crate::memory::PAGE_SIZE) as u64;
         let chunk = crate::npkfs::STREAMING_CHUNK_SIZE as u64;
-        let step = cap.min(free / 2).min(ram / 2) / chunk * chunk;
+        let step = cap.min(free / 2).min(ram / 2).min(self.grow_max - cap) / chunk * chunk;
         if step < MIN_GROW_BYTES {
             if !self.grow_refused {
                 self.grow_refused = true;
                 kprintln!("[virtio-blk] home image {} MiB is {}% full, and npkFS or RAM has no room to grow it",
-                    cap >> 20, r.used_bytes * 100 / r.data_bytes.max(1));
+                    cap >> 20, r.used_bytes.saturating_mul(100) / r.data_bytes.max(1));
             }
             return false;
         }
@@ -247,10 +273,11 @@ impl VirtioBlk {
             return false;
         }
         self.capacity_sectors = (cap + step) / 512;
+        self.grown_at = Some(now);
         self.isr |= 0b10; // configuration changed
         self.config_generation = self.config_generation.wrapping_add(1);
         kprintln!("[virtio-blk] home image grown {} -> {} MiB (guest was {}% full)",
-            cap >> 20, (cap + step) >> 20, r.used_bytes * 100 / r.data_bytes.max(1));
+            cap >> 20, (cap + step) >> 20, r.used_bytes.saturating_mul(100) / r.data_bytes.max(1));
         true
     }
 
@@ -301,6 +328,8 @@ impl VirtioBlk {
             pending_kick_queue: None,
             grow_refused: false,
             grow_at_pct: GROW_AT_PCT,
+            grow_max: MAX_HOME_BYTES,
+            grown_at: None,
             notify_log_count: 0,
             serviced_log_count: 0,
         }
