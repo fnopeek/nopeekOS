@@ -106,6 +106,17 @@ fn xstate_size(xfeatures: u64, compacted: bool) -> u32 {
     size
 }
 
+/// IBPB_BRTYPE (0x8000_0021 EAX[28]) for an AMD family 17h host: its IBPB
+/// also flushes branch type predictions, which Linux assumes only on bare
+/// metal (`init_amd`); a guest has to be told, as KVM's `SYNTHESIZED_F`
+/// does. Without it the guest reports SRSO as unmitigated.
+fn zen12_ibpb_brtype() -> u32 {
+    let (sig, ..) = host_cpuid(1, 0);
+    let family = ((sig >> 8) & 0xF) + ((sig >> 20) & 0xFF);
+    let ibpb = host_cpuid(0x8000_0008, 0).1 & (1 << 12) != 0;
+    if family == 0x17 && ibpb { 1 << 28 } else { 0 }
+}
+
 pub fn guest_cpuid(
     vendor: Vendor,
     leaf: u32,
@@ -174,14 +185,21 @@ pub fn guest_cpuid(
             KVM_FEATURE_NOP_IO_DELAY | KVM_FEATURE_PV_EOI | KVM_FEATURE_PV_SEND_IPI, 0, 0, 0,
         ),
         0x4000_0002..=0x4000_FFFF => return (0, 0, 0, 0),
-        0x8000_0000 => a = a.min(MAX_EXT_LEAF),
+        // AMD: at least up to 0x8000_0021, where IBPB_BRTYPE is synthesized
+        // (KVM does the same). Intel answers leaves past its maximum with
+        // the highest basic leaf, so there the host's maximum stands.
+        0x8000_0000 => a = if intel { a.min(MAX_EXT_LEAF) } else { MAX_EXT_LEAF },
         0x8000_0001 => { c &= EXT1_ECX; d &= EXT1_EDX; }
         // Only invariant TSC.
         0x8000_0007 => return (0, 0, 0, d & (1 << 8)),
         0x8000_0008 => b &= EXT8_EBX,
         // SVM features, topology, SEV, RDT-A: none of it is ours to give.
         0x8000_000A | 0x8000_001E | 0x8000_001F | 0x8000_0020 => return (0, 0, 0, 0),
-        0x8000_0021 => return (a & EXT21_EAX, 0, 0, 0),
+        0x8000_0021 => {
+            let host_has = host_cpuid(0x8000_0000, 0).0 >= 0x8000_0021;
+            let a = if host_has { a & EXT21_EAX } else { 0 };
+            return (a | zen12_ibpb_brtype(), 0, 0, 0);
+        }
         l if l > MAX_EXT_LEAF && l < 0x8FFF_FFFF => return (0, 0, 0, 0),
         _ => {}
     }

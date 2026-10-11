@@ -782,6 +782,13 @@ impl Virtio9p {
         if body.len() < 4 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
         if !self.fid_room(fid) { return rlerror(tag, EMFILE); }
+        // Only one user's home: without a configured name the root would be
+        // every user's.
+        let user = self.root.strip_prefix("home/").unwrap_or("");
+        if user.is_empty() || user.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+            kprintln!("[9p] no user home to share (config `name` unset or invalid) — attach refused");
+            return rlerror(tag, EACCES);
+        }
         let root = self.root.clone();
         self.fids.insert(fid, Fid { path: root.clone(), is_dir: true, data: None, chunked: None, dirty: false, async_stream: false, stream_next: 0 });
         if self.log_count < 32 {
@@ -1301,6 +1308,7 @@ const ENOSYS:  u32 = 38;
 const ENODATA: u32 = 61;
 const EFBIG:   u32 = 27;
 const ENOSPC:  u32 = 28;
+const EACCES:  u32 = 13;
 
 /// Largest file the buffered path holds in host memory. Sizes and offsets
 /// come from the guest; past this, or when the host cannot reserve the

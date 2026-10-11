@@ -144,6 +144,7 @@ static NS_IP_PROTO: AtomicU64 = AtomicU64::new(0);     // not TCP / UDP / ICMP
 static NS_TX_RUNT: AtomicU64 = AtomicU64::new(0);      // frame shorter than vnet+eth
 static NS_TX_BADTCP: AtomicU64 = AtomicU64::new(0);    // emit_tcp_out bailed on the header
 static NS_TX_ARPMISS: AtomicU64 = AtomicU64::new(0);   // went out to L2 broadcast
+static NS_TX_REFUSED: AtomicU64 = AtomicU64::new(0);   // broadcast, multicast, the host itself
 static NS_TX_RINGBAD: AtomicU64 = AtomicU64::new(0);   // guest TX queue unusable
 static NS_TX_TRUNC: AtomicU64 = AtomicU64::new(0);     // descriptor chain broke mid-frame
 /// An inbound TCP segment addressed to a port in our masquerade range that
@@ -532,8 +533,23 @@ fn csum_update(old_check: u16, changes: &[(u16, u16)]) -> u16 {
 /// Outbound SNAT: rewrite the guest's L4 source port to a masquerade
 /// host port and send from our host IP. The guest's TCP/UDP semantics
 /// (seq/ack/window/options/QUIC) pass through untouched.
+/// Destinations a guest never reaches. The LAN stays open (as in any
+/// browser), but nothing addressed to many hosts at once, and not the host
+/// itself or its loopback: the guest would speak with the host's address.
+fn outbound_refused(dst: [u8; 4]) -> bool {
+    dst == [255, 255, 255, 255]
+        || dst[0] == 0
+        || dst[0] == 127
+        || dst[0] >= 224
+        || dst == crate::net::arp::our_ip()
+}
+
 fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
                 dst_port: u16, l4: &[u8], gso_size: u16) -> Option<Vec<u8>> {
+    if outbound_refused(dst_ip) {
+        NS_TX_REFUSED.fetch_add(1, AtOrd::Relaxed);
+        return None;
+    }
     let now = crate::interrupts::ticks();
     let hp = match l3_map_out(proto, src_port, dst_ip, dst_port, now) {
         Some(p) => p,
@@ -1141,6 +1157,13 @@ fn handle_dns(src_ip: [u8; 4], src_port: u16, dgram: &[u8]) -> Option<Vec<u8>> {
     let q = parse_dns_query(dgram)?;
 
     let outcome = if q.qtype == 1 {
+        // The host resolver's cache also holds what the host looked up
+        // itself (the native browser): a name the guest has not asked for
+        // before goes the slow way, so an instant answer tells it nothing.
+        if !guest_asked(q.name.as_str()) {
+            crate::net::dns::want(q.name.as_str());
+            return None;
+        }
         match crate::net::dns::cached(q.name.as_str()) {
             crate::net::dns::Cached::Ip(ip) => DnsOutcome::Answer(ip),
             crate::net::dns::Cached::Failed => DnsOutcome::NxDomain,
@@ -1159,6 +1182,24 @@ fn handle_dns(src_ip: [u8; 4], src_port: u16, dgram: &[u8]) -> Option<Vec<u8>> {
     let frame = build_ipv4_udp_reply(src_ip, src_port, PORT_DNS, &dns_payload);
     let _ = outcome;
     Some(frame)
+}
+
+/// Names the guest has asked for, oldest first.
+static GUEST_ASKED: spin::Mutex<alloc::collections::VecDeque<String>> =
+    spin::Mutex::new(alloc::collections::VecDeque::new());
+const GUEST_ASKED_MAX: usize = 1024;
+
+/// Whether the guest asked for `name` before; remembers it if not.
+fn guest_asked(name: &str) -> bool {
+    let mut asked = GUEST_ASKED.lock();
+    if asked.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+        return true;
+    }
+    if asked.len() >= GUEST_ASKED_MAX {
+        asked.pop_front();
+    }
+    asked.push_back(String::from(name));
+    false
 }
 
 struct DnsQuery {

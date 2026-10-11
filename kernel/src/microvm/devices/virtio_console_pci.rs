@@ -244,11 +244,11 @@ pub fn reset() {
 }
 
 /// A guest title as the host shows it: invalid UTF-8 replaced, control
-/// characters dropped, at most `TITLE_MAX` bytes.
+/// and invisible format characters dropped, at most `TITLE_MAX` bytes.
 fn clean_title(raw: &[u8]) -> String {
     let mut out = String::new();
     for c in String::from_utf8_lossy(raw).chars() {
-        if c.is_control() {
+        if c.is_control() || is_invisible_format(c) {
             continue;
         }
         if out.len() + c.len_utf8() > TITLE_MAX {
@@ -257,6 +257,17 @@ fn clean_title(raw: &[u8]) -> String {
         out.push(c);
     }
     out
+}
+
+/// Format characters that change how a title reads without showing
+/// themselves: bidi overrides and isolates, zero-width characters, the
+/// soft hyphen, tags. With them a title can show text in an order other
+/// than the one it is stored in.
+fn is_invisible_format(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x061C | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E
+        | 0x2060..=0x2064 | 0x2066..=0x2069 | 0xFEFF | 0xFFF9..=0xFFFB
+        | 0xE0000..=0xE007F)
 }
 
 #[derive(Default, Clone, Copy)]

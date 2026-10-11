@@ -2493,7 +2493,11 @@ pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i3
 
 pub(crate) fn npk_run_intent(mem: &mut [u8], ctx: &mut HostState, verb_ptr: i32, verb_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::EXECUTE).is_err() {
+    // Launching a microvm hands a guest the network, the user's home and
+    // sound: a shell role (launcher, dock), not something every module with
+    // the default EXECUTE may do.
+    let need = capability::Rights::EXECUTE | capability::Rights::SHELL;
+    if capability::check_global(&cap_id, need).is_err() {
         return -1;
     }
     if verb_len <= 0 || verb_len > 64 { return -1; }

@@ -790,17 +790,29 @@ impl Compositor {
         }
     }
 
-    /// Show a Surface window hidden by `create_surface_window`, tile it in
-    /// and give it focus. No-op for a window that is gone or already shown.
+    /// Show a Surface window hidden by `create_surface_window` and tile it
+    /// in. It takes focus only when the user is already with the guest app
+    /// (a guest window has focus) or just launched it (no other guest
+    /// window). The guest decides when its windows open: focusing every one
+    /// would let it pull the keyboard, and with it a passphrase being typed,
+    /// away from a host window. No-op for a window that is gone or shown.
     pub fn reveal_surface(&mut self, id: WindowId) {
+        use crate::shade::window::WindowKind;
         let Some(w) = self.windows.iter_mut().find(|w| w.id == id) else { return };
-        if w.visible || w.kind != crate::shade::window::WindowKind::Surface {
+        if w.visible || w.kind != WindowKind::Surface {
             return;
         }
         w.visible = true;
         w.dirty = true;
+        let first = !self.windows.iter()
+            .any(|w| w.id != id && w.kind == WindowKind::Surface && w.visible);
+        let guest_focused = self.focused.is_some_and(|f| {
+            self.windows.iter().any(|w| w.id == f && w.kind == WindowKind::Surface)
+        });
         self.retile();
-        self.focus_window(id);
+        if first || guest_focused {
+            self.focus_window(id);
+        }
         self.needs_full_redraw = true;
     }
 
@@ -1124,7 +1136,15 @@ impl Compositor {
                     .filter_map(|wid| self.windows.iter().find(|w| w.id == *wid))
                     .find(|w| is_app(w) && w.workspace == self.active_workspace && w.visible)
             })
-            .map(|w| if w.caption.is_empty() { w.title.clone() } else { w.caption.clone() })
+            .map(|w| match (w.caption.is_empty(), w.kind) {
+                (true, _) => w.title.clone(),
+                // A guest picks its caption freely: the host's name for the
+                // window goes first, so it cannot pass as a system window.
+                (false, crate::shade::window::WindowKind::Surface) => {
+                    alloc::format!("{} · {}", w.title, w.caption)
+                }
+                (false, _) => w.caption.clone(),
+            })
             .unwrap_or_default();
         (self.workspace_count, self.active_workspace, title)
     }
