@@ -323,6 +323,9 @@ pub fn intent_cores() {
         if let Some(([sent, latched], state)) = crate::microvm::devices::net_backend::msix_report() {
             kprintln!("    net msix: sent={} latched={} (totals) {}", sent, latched, state);
         }
+        if let Some(([sent, latched], state)) = crate::microvm::devices::gpu_backend::msix_report() {
+            kprintln!("    gpu msix: sent={} latched={} (totals) {}", sent, latched, state);
+        }
         kprintln!("    net tap backpressure: tapfull={}/s injfalse={}/s",
                   tapfull * 1000 / window_ms, injf * 1000 / window_ms);
         // Outbound TX rate. Read together with the worker core's BUSY% above:

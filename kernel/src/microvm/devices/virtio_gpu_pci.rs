@@ -41,6 +41,7 @@ const CAP_COMMON_OFF: u8 = 0x40;
 const CAP_NOTIFY_OFF: u8 = 0x54;
 const CAP_ISR_OFF:    u8 = 0x68;
 const CAP_DEVICE_OFF: u8 = 0x78;
+const CAP_MSIX_OFF:   u8 = 0x88;
 
 const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
 const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
@@ -49,13 +50,13 @@ const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
 
 const COMMON_OFF:  u32 = 0x0000;
 const COMMON_LEN:  u32 = 0x0100;
-const NOTIFY_OFF:  u32 = 0x0100;
-const NOTIFY_LEN:  u32 = 0x0100;
-const ISR_OFF:     u32 = 0x0200;
-const ISR_LEN:     u32 = 0x0100;
+pub const NOTIFY_OFF:  u32 = 0x0100;
+pub const NOTIFY_LEN:  u32 = 0x0100;
+pub const ISR_OFF:     u32 = 0x0200;
+pub const ISR_LEN:     u32 = 0x0100;
 const DEVICE_OFF:  u32 = 0x0300;
 const DEVICE_LEN:  u32 = 0x0100;
-const NOTIFY_OFF_MULTIPLIER: u32 = 4;
+pub const NOTIFY_OFF_MULTIPLIER: u32 = 4;
 
 // Common Cfg register offsets (same as virtio-blk / virtio-net)
 const CC_DEVICE_FEATURE_SELECT:  u32 = 0x00;
@@ -215,7 +216,6 @@ pub struct VirtioGpu {
 
     queues: [VirtQueue; NUM_QUEUES as usize],
 
-    isr: u8,
     /// virtio-gpu device-cfg `events_read`. Sticky until the guest
     /// clears the bits via `events_clear`. See `VIRTIO_GPU_EVENT_*`.
     events_read: u32,
@@ -279,7 +279,6 @@ impl VirtioGpu {
                 device_lo: 0, device_hi: 0,
                 last_avail_idx: 0, used_idx: 0,
             }; NUM_QUEUES as usize],
-            isr: 0,
             events_read: 0,
             pending_kick_queue: None,
             resources: Vec::new(),
@@ -312,7 +311,7 @@ impl VirtioGpu {
     /// connected. Caller injects IRQ 9.
     pub fn signal_outputs_changed(&mut self) {
         self.events_read |= VIRTIO_GPU_EVENT_DISPLAY;
-        self.isr |= 0b10; // bit 1 = device configuration changed
+        super::gpu_backend::raise_isr(0b10); // bit 1 = device configuration changed
         self.config_generation = self.config_generation.wrapping_add(1);
     }
 
@@ -423,7 +422,7 @@ impl VirtioGpu {
             super::gpu_backend::set_resume_tsc(self.paused_until);
         }
 
-        if any { self.isr |= 1; }
+        if any { super::gpu_backend::raise_isr(1); }
         any
     }
 
@@ -487,7 +486,7 @@ impl VirtioGpu {
         let q = &mut self.queues[q_idx];
         q.last_avail_idx = last_avail;
         q.used_idx = used_idx;
-        if any { self.isr |= 1; }
+        if any { super::gpu_backend::raise_isr(1); }
         any
     }
 
@@ -883,10 +882,18 @@ impl VirtioGpu {
             0x70 => ISR_OFF,
             0x74 => ISR_LEN,
 
-            0x78 => 0x09 | (0 << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_DEVICE_CFG as u32) << 24),
+            0x78 => {
+                let next = if super::gpu_backend::msix_offered() { CAP_MSIX_OFF } else { 0 };
+                0x09 | ((next as u32) << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_DEVICE_CFG as u32) << 24)
+            }
             0x7C => 0,
             0x80 => DEVICE_OFF,
             0x84 => DEVICE_LEN,
+
+            // MSI-X capability: table + PBA in BAR0.
+            0x88 => super::msix::CAP_ID | ((super::gpu_backend::msix_msgctl() as u32) << 16),
+            0x8C => super::msix::TABLE_OFF,
+            0x90 => super::msix::PBA_OFF,
 
             _ => 0,
         }
@@ -908,17 +915,19 @@ impl VirtioGpu {
                     self.bar0_hi_sized = false;
                 }
             }
+            0x88 => super::gpu_backend::msix_set_msgctl((value >> 16) as u16),
             _ => {}
         }
     }
 
     pub fn mmio_read(&mut self, off: u32, width: u8) -> u64 {
+        if let Some(v) = super::gpu_backend::msix_mmio(off, None) {
+            return v as u64 & width_mask(width);
+        }
         if off >= COMMON_OFF && off < COMMON_OFF + COMMON_LEN {
             self.common_read(off - COMMON_OFF, width)
         } else if off >= ISR_OFF && off < ISR_OFF + ISR_LEN {
-            let v = self.isr as u64;
-            self.isr = 0;
-            v & width_mask(width)
+            super::gpu_backend::take_isr() as u64 & width_mask(width)
         } else if off >= DEVICE_OFF && off < DEVICE_OFF + DEVICE_LEN {
             self.device_read(off - DEVICE_OFF, width)
         } else {
@@ -927,6 +936,9 @@ impl VirtioGpu {
     }
 
     pub fn mmio_write(&mut self, off: u32, width: u8, value: u64) {
+        if super::gpu_backend::msix_mmio(off, Some(value as u32)).is_some() {
+            return;
+        }
         if off >= COMMON_OFF && off < COMMON_OFF + COMMON_LEN {
             self.common_write(off - COMMON_OFF, width, value);
         } else if off >= NOTIFY_OFF && off < NOTIFY_OFF + NOTIFY_LEN {
@@ -992,7 +1004,10 @@ impl VirtioGpu {
                 let half = (self.driver_feature_select & 1) as usize;
                 self.driver_features[half] = val as u32;
             }
-            CC_MSIX_CONFIG => self.msix_config = val as u16,
+            CC_MSIX_CONFIG => {
+                self.msix_config = val as u16;
+                super::gpu_backend::set_config_vector(val as u16);
+            }
             CC_DEVICE_STATUS => {
                 let prev = self.device_status;
                 self.device_status = val as u8;
@@ -1014,12 +1029,17 @@ impl VirtioGpu {
                     self.device_feature_select = 0;
                     self.queue_select = 0;
                     self.events_read = 0;
+                    self.msix_config = 0xFFFF;
+                    super::gpu_backend::reset_vectors();
                     self.config_generation = self.config_generation.wrapping_add(1);
                 }
             }
             CC_QUEUE_SELECT => self.queue_select = val as u16,
             CC_QUEUE_SIZE => self.q_mut().size = (val as u16).min(MAX_QUEUE_SIZE),
-            CC_QUEUE_MSIX_VECTOR => self.q_mut().msix_vec = val as u16,
+            CC_QUEUE_MSIX_VECTOR => {
+                self.q_mut().msix_vec = val as u16;
+                super::gpu_backend::set_queue_vector(self.queue_select, val as u16);
+            }
             CC_QUEUE_ENABLE => self.q_mut().enable = val as u16,
             CC_QUEUE_DESC_LO => self.q_mut().desc_lo = val as u32,
             CC_QUEUE_DESC_HI => self.q_mut().desc_hi = val as u32,

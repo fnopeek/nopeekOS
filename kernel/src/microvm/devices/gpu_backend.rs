@@ -12,7 +12,7 @@
 //! cores without waiting for the vCPUs' device lock. Lock order: a vCPU takes
 //! `VmShared::dev` then this lock; the worker takes only this lock — no cycle.
 
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 use super::virtio_gpu_pci::{VirtioGpu, BAR0_BASE};
 
@@ -26,6 +26,81 @@ pub fn lock() -> MutexGuard<'static, VirtioGpu> { GPU.lock() }
 pub fn reset() {
     *GPU.lock() = VirtioGpu::new();
     RESUME_TSC.store(0, Ordering::Release);
+    MSIX.reset(super::msix::wanted());
+    reset_vectors();
+    ISR.store(0, Ordering::Release);
+    GPU_KICK.store(0, Ordering::Release);
+}
+
+// ── Interrupts: MSI-X (config, controlq, cursorq) or INTx line 9 ──
+
+pub const MSIX_VECTORS: usize = 3;
+static MSIX: super::msix::Msix<MSIX_VECTORS> = super::msix::Msix::new();
+pub fn msix_offered() -> bool { MSIX.offered() }
+pub fn msix_msgctl() -> u16 { MSIX.msgctl() }
+pub fn msix_set_msgctl(v: u16) { MSIX.set_msgctl(v) }
+pub fn msix_mmio(off: u32, write: Option<u32>) -> Option<u32> { MSIX.mmio(off, write) }
+pub fn msix_report() -> Option<([u64; 2], alloc::string::String)> { MSIX.report() }
+
+/// virtio `msix_config` and `queue_msix_vector` (controlq 0, cursorq 1), in
+/// atomics so any core signals without the device lock; 0xFFFF = none.
+static CONFIG_VECTOR: AtomicU16 = AtomicU16::new(0xFFFF);
+static QUEUE_VECTOR: [AtomicU16; 2] = [const { AtomicU16::new(0xFFFF) }; 2];
+pub fn set_config_vector(v: u16) { CONFIG_VECTOR.store(v, Ordering::Release); }
+pub fn set_queue_vector(q: u16, v: u16) {
+    if let Some(x) = QUEUE_VECTOR.get(q as usize) { x.store(v, Ordering::Release); }
+}
+pub fn reset_vectors() {
+    CONFIG_VECTOR.store(0xFFFF, Ordering::Release);
+    for q in QUEUE_VECTOR.iter() { q.store(0xFFFF, Ordering::Release); }
+}
+
+/// Queue `q` completed. `false` = MSI-X is off, the caller raises IRQ 9.
+pub fn notify_queue(q: u16) -> bool {
+    MSIX.notify(QUEUE_VECTOR.get(q as usize).map_or(0xFFFF, |x| x.load(Ordering::Acquire)))
+}
+/// The configuration changed. `false` = MSI-X is off, the caller raises IRQ 9.
+pub fn notify_config() -> bool {
+    MSIX.notify(CONFIG_VECTOR.load(Ordering::Acquire))
+}
+
+/// virtio ISR status (read-to-clear): bit 0 queue, bit 1 configuration. An
+/// atomic so the guest's ISR read needs no device lock.
+static ISR: AtomicU8 = AtomicU8::new(0);
+pub fn raise_isr(bits: u8) { ISR.fetch_or(bits, Ordering::AcqRel); }
+pub fn take_isr() -> u8 { ISR.swap(0, Ordering::AcqRel) }
+
+/// The BSP at vblank: a paused controlq runs its next frame — on the worker
+/// as a doorbell, else here. True = raise IRQ 9.
+pub fn vblank(now: u64, gm: &super::guest_mem::GuestMem) -> bool {
+    if !take_resume(now) { return false; }
+    if full_active() {
+        note_gpu_kick(0);
+        return false;
+    }
+    lock().service_queues(0, gm) && !notify_queue(0)
+}
+
+/// Windows came or went (`display_tick`). True = raise IRQ 9.
+pub fn display_tick_intx() -> bool {
+    display_tick() && !notify_config()
+}
+
+/// The guest's hot BAR accesses without the device lock: the ISR read, the
+/// MSI-X table, and, while the worker owns the queues, the doorbell.
+pub fn mmio_fast(off: u32, write: Option<u32>) -> Option<u64> {
+    use super::virtio_gpu_pci::{ISR_OFF, ISR_LEN, NOTIFY_OFF, NOTIFY_LEN, NOTIFY_OFF_MULTIPLIER};
+    if write.is_none() && (ISR_OFF..ISR_OFF + ISR_LEN).contains(&off) {
+        return Some(take_isr() as u64);
+    }
+    if let Some(v) = MSIX.mmio(off, write) {
+        return Some(v as u64);
+    }
+    if write.is_some() && full_active() && (NOTIFY_OFF..NOTIFY_OFF + NOTIFY_LEN).contains(&off) {
+        note_gpu_kick(((off - NOTIFY_OFF) / NOTIFY_OFF_MULTIPLIER) as u16);
+        return Some(0);
+    }
+    None
 }
 
 /// Guest GPU traffic for `cores`: controlq commands by kind, cursorq
@@ -181,21 +256,19 @@ pub fn should_present(pixels: &[u8], width: u32, height: u32) -> bool {
     }
 }
 
-// ── Off-vCPU worker: controlq doorbell defer ──
-/// Pending controlq notify from the vCPU. 0xFFFF = none. On the doorbell the vCPU
-/// sets the qidx here (instead of servicing inline) + wakes the worker's core;
-/// the GPU worker drains it on its own core.
-static GPU_KICK: AtomicU16 = AtomicU16::new(0xFFFF);
+// ── Off-vCPU worker: queue doorbell defer ──
+/// Queues the vCPU noted a doorbell for, one bit per queue. On the doorbell the
+/// vCPU sets the bit here (instead of servicing inline) + wakes the worker's
+/// core; the GPU worker drains them on its own core.
+static GPU_KICK: AtomicU8 = AtomicU8::new(0);
 static WORKER_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 static FULL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Compile-time gate for the off-vCPU GPU worker. Off: the off-vCPU GPU's
-/// async IRQ9 delivery to the guest is unreliable (the guest's virtio-gpu driver
-/// can stall waiting for a completion that never arrives), so the GPU stays
-/// inline on the vCPU (synchronous deliver_irq).
-pub const FULL_GPU_BACKEND: bool = false;
+/// The worker owns the queues: it runs, and the guest took MSI-X, so the
+/// worker signals completions itself. Under INTx the line would have to go
+/// through the BSP's PIC and the ISR read, and the GPU stays inline.
 #[inline]
-pub fn full_active() -> bool { FULL_ACTIVE.load(Ordering::Acquire) }
+pub fn full_active() -> bool { FULL_ACTIVE.load(Ordering::Acquire) && MSIX.active() }
 pub fn set_full_active(on: bool) { FULL_ACTIVE.store(on, Ordering::Release); }
 pub fn set_worker_core(core: usize) { WORKER_CORE.store(core, Ordering::Release); }
 
@@ -207,19 +280,14 @@ pub fn worker_core() -> Option<usize> {
     }
 }
 
-/// vCPU: the guest notified the controlq (`qidx`). Defer to the worker and, on the
+/// vCPU: the guest notified queue `qidx`. Defer to the worker and, on the
 /// empty→set edge, wake its core out of HLT (coalesced like the net TX kick).
 pub fn note_gpu_kick(qidx: u16) {
-    if GPU_KICK.swap(qidx, Ordering::AcqRel) == 0xFFFF {
+    if qidx >= 2 { return; }
+    if GPU_KICK.fetch_or(1 << qidx, Ordering::AcqRel) == 0 {
         let c = WORKER_CORE.load(Ordering::Acquire);
         if c != usize::MAX { crate::smp::kick_host_core(c); }
     }
-}
-
-/// Worker: take the pending controlq qidx (clears it). `Some(q)` ⇒ service it.
-pub fn take_gpu_kick() -> Option<u16> {
-    let q = GPU_KICK.swap(0xFFFF, Ordering::AcqRel);
-    if q == 0xFFFF { None } else { Some(q) }
 }
 
 /// Guest GPU completion IRQ (line 9), raised by the worker after it advanced the
@@ -240,7 +308,7 @@ static STOP: AtomicBool = AtomicBool::new(false);
 const WORKER_STACK_BYTES: usize = 256 * 1024;
 
 /// Spawn the GPU worker on its own reserved `core`. Idempotent per VM session.
-/// Only when `FULL_GPU_BACKEND` + a core was reserved (see `mod::guest_vcpus`).
+/// Only when a core was reserved (see `cpu::reserve_gpu_core`).
 pub fn start_worker(core: usize) {
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
     STOP.store(false, Ordering::Release);
@@ -264,7 +332,7 @@ pub fn stop_worker() -> bool {
         core::hint::spin_loop();
     }
     let stopped = !WORKER_RUNNING.load(Ordering::Acquire);
-    GPU_KICK.store(0xFFFF, Ordering::Release);
+    GPU_KICK.store(0, Ordering::Release);
     GPU_IRQ_PENDING.store(false, Ordering::Release);
     WORKER_CORE.store(usize::MAX, Ordering::Release);
     stopped
@@ -276,14 +344,20 @@ fn worker_entry(_arg: u64) {
             WORKER_RUNNING.store(false, Ordering::Release);
             return;
         }
-        // Drain any deferred controlq notify: do the heavy copy + write_frame on
-        // this core, off the vCPU. Raise IRQ9 + wake the BSP to inject it.
-        if let Some(qidx) = take_gpu_kick() {
+        // Drain the deferred doorbells: the heavy copy + write_frame run on
+        // this core, off the vCPU, and the completion goes out as a message.
+        let kicks = GPU_KICK.swap(0, Ordering::AcqRel);
+        if kicks != 0 {
             if let Some(gm) = crate::microvm::devices::guest_mem::active() {
-                let advanced = GPU.lock().service_queues(qidx, gm);
-                if advanced {
-                    raise_irq();
-                    crate::microvm::cpu::kick_bsp_net_irq();
+                for q in 0..2u16 {
+                    if kicks & (1 << q) != 0
+                        && GPU.lock().service_queues(q, gm)
+                        && !notify_queue(q)
+                    {
+                        // The guest left MSI-X while the kick was in flight.
+                        raise_irq();
+                        crate::microvm::cpu::kick_bsp_net_irq();
+                    }
                 }
             }
         }

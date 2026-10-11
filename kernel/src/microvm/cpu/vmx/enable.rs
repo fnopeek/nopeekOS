@@ -866,11 +866,8 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
         crate::microvm::devices::nat::note_net_irq();
     }
     if crate::microvm::devices::gpu_backend::take_irq() { sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE); }
-    // vblank: a paused controlq runs its next frame (virtio-gpu IRQ 9).
-    if crate::microvm::devices::gpu_backend::take_resume(crate::interrupts::rdtsc())
-        && crate::microvm::devices::gpu_backend::lock()
-            .service_queues(0, gm)
-    {
+    // vblank: a paused controlq runs its next frame.
+    if crate::microvm::devices::gpu_backend::vblank(crate::interrupts::rdtsc(), gm) {
         sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
     }
     if sh.pci.virtio_snd.pump(gm) {
@@ -891,7 +888,7 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
     sh.pit.poll(&mut sh.pic);
 
     let now = crate::interrupts::ticks();
-    if crate::microvm::devices::gpu_backend::display_tick() {
+    if crate::microvm::devices::gpu_backend::display_tick_intx() {
         sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
     }
     // NAT mapping reaper: an idle scan, once per 10 ms at most.
@@ -1869,8 +1866,7 @@ impl VmContext {
                         continue;
                     }
                 } else if crate::microvm::devices::gpu_backend::bar0_in_range(gpa) {
-                    let mut gpu = crate::microvm::devices::gpu_backend::lock();
-                    if handle_mmio_ept_gpu(&mut self.vcpu.regs, &mut *gpu, &mut sh.pic, gpa, gm) {
+                    if handle_mmio_ept_gpu(&mut self.vcpu.regs, &mut sh.pic, gpa, gm) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -2450,7 +2446,6 @@ fn handle_mmio_ept_net(
 /// — only the device and IRQ line differ.
 fn handle_mmio_ept_gpu(
     regs: &mut vmcs::GuestRegs,
-    gpu: &mut crate::microvm::devices::virtio_gpu_pci::VirtioGpu,
     pic: &mut crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
     mem: &GuestMem,
@@ -2476,9 +2471,20 @@ fn handle_mmio_ept_gpu(
         }
     };
 
-    let off = (gpa - gpu.bar0_base()) as u32;
-    if dec.is_write {
-        let value = read_gpr_vmx(regs, dec.reg) & width_mask(dec.width);
+    let off = (gpa - crate::microvm::devices::virtio_gpu_pci::BAR0_BASE) as u32;
+
+    // ISR read, MSI-X table and the worker's doorbell: lock-free (the worker
+    // holds the device across a frame copy).
+    let write = dec.is_write.then(|| read_gpr_vmx(regs, dec.reg) & width_mask(dec.width));
+    if let Some(v) = crate::microvm::devices::gpu_backend::mmio_fast(off, write.map(|w| w as u32)) {
+        if !dec.is_write {
+            write_gpr_vmx(regs, dec.reg, dec.width, v & width_mask(dec.width));
+        }
+        return vmcs::advance_guest_rip_by(dec.length as u64).is_ok();
+    }
+
+    let mut gpu = crate::microvm::devices::gpu_backend::lock();
+    if let Some(value) = write {
         gpu.mmio_write(off, dec.width, value);
     } else {
         let value = gpu.mmio_read(off, dec.width);
@@ -2491,7 +2497,7 @@ fn handle_mmio_ept_gpu(
             crate::microvm::devices::gpu_backend::note_gpu_kick(qidx);
         } else {
             let advanced = gpu.service_queues(qidx, mem);
-            if advanced {
+            if advanced && !crate::microvm::devices::gpu_backend::notify_queue(qidx) {
                 pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
             }
         }

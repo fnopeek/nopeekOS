@@ -543,6 +543,18 @@ pub const GUEST_SMP: bool = true;
 /// stable) by the MP-table builder, the `maxcpus=` cmdline, and the IPI
 /// broadcast loops — all see the same value for one run.
 pub fn guest_vcpus() -> u8 {
+    let mut workers = vcpu_cores_before_gpu();
+    // A second reserved core for the off-vCPU GPU worker (framebuffer copy off
+    // the vCPU). One fewer vCPU; the browser is not guest-CPU-bound so it wins.
+    if reserve_gpu_core() {
+        workers = workers.saturating_sub(1);
+    }
+    workers.clamp(1, MAX_VCPUS_CAP) as u8
+}
+
+/// Cores left for vCPUs once Core 0, the net worker and the protected cores
+/// are taken.
+fn vcpu_cores_before_gpu() -> usize {
     let mut workers = crate::smp::per_core::core_count().saturating_sub(1);
     // When the off-vCPU net backend runs it needs its own worker core, never
     // a vCPU's (`place_worker`). Co-located with a vCPU, the vCPU gets
@@ -552,14 +564,8 @@ pub fn guest_vcpus() -> u8 {
     if reserve_offload_core() {
         workers = workers.saturating_sub(1);
     }
-    // A second reserved core for the off-vCPU GPU worker (framebuffer copy off
-    // the vCPU). One fewer vCPU; the browser is not guest-CPU-bound so it wins.
-    if reserve_gpu_core() {
-        workers = workers.saturating_sub(1);
-    }
     // And one per core carrying the network's own fibers — see `protected_cores`.
-    workers = workers.saturating_sub(protected_cores().count_ones() as usize);
-    workers.clamp(1, MAX_VCPUS_CAP) as u8
+    workers.saturating_sub(protected_cores().count_ones() as usize)
 }
 
 /// Bitmask of cores that must stay clear of vCPUs: every core a hardware
@@ -651,13 +657,21 @@ fn reserve_offload_core() -> bool {
 }
 
 /// Reserve a second dedicated worker core for the off-vCPU GPU backend (the
-/// per-frame framebuffer copy + write_frame). Needs ≥4 cores: Core 0 + ≥1
-/// vCPU + net worker + gpu worker. AMD-only (the off-vCPU GPU backend is
-/// SVM-only). Below that the GPU work stays inline on the vCPU.
+/// per-frame framebuffer copy + write_frame). Only with MSI-X, which lets the
+/// worker signal completions itself, and only while at least two vCPUs
+/// remain. Otherwise the GPU work stays inline on the vCPU. Snapshotted
+/// while no VM exists, like `protected_cores`: `guest_vcpus()` depends on it.
+static GPU_CORE_RESERVED: AtomicBool = AtomicBool::new(false);
+
 fn reserve_gpu_core() -> bool {
-    reserve_offload_core()
-        && crate::microvm::devices::gpu_backend::FULL_GPU_BACKEND
-        && crate::smp::per_core::core_count() >= 4
+    if VM_RUN_STATE.load(Ordering::Acquire) != VM_IDLE {
+        return GPU_CORE_RESERVED.load(Ordering::Acquire);
+    }
+    let r = reserve_offload_core()
+        && crate::microvm::devices::msix::wanted()
+        && vcpu_cores_before_gpu() >= 3;
+    GPU_CORE_RESERVED.store(r, Ordering::Release);
+    r
 }
 
 /// Hard cap on guest vCPUs (sizes the per-backend IPI bitmaps + the spawn
@@ -1618,11 +1632,11 @@ fn vcpu_fiber_task(_arg: u64) {
     );
     crate::microvm::devices::net_dataplane::start_worker(worker_core);
 
-    // Off-vCPU GPU worker: on AMD with a spare core, claim a second reserved
+    // Off-vCPU GPU worker: with a spare core, claim a second reserved
     // core and run the per-frame framebuffer copy + write_frame there, off
     // the vCPU, so the browser's rendering never steals the net-servicing
     // cycles. guest_vcpus() already left this core free. Gated on
-    // FULL_GPU_BACKEND + AMD + ≥4 cores; else GPU stays inline.
+    // `reserve_gpu_core`; else GPU stays inline.
     if reserve_gpu_core() {
         let gpu_core = place_worker(true);
         crate::kprintln!(
