@@ -29,8 +29,7 @@ BUNDLE_NAME="${BUNDLE_NAME:-librewolf}"
 BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 
 # Apks to add on top of minirootfs. Package names only; versions come
-# from the pinned Alpine branch (patch level via ALPINE_VERSION).
-#   cage      - kiosk Wayland compositor (one client = the browser)
+# from the pinned Alpine branch and are recorded in packages.txt.
 #   librewolf - the browser (Firefox fork; pulls gtk/nss/fontconfig/
 #               freetype/... via apk deps)
 #   seatd     - libseat daemon (Alpine libseat has no builtin backend)
@@ -40,7 +39,7 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 #               monitor; without udev they find no input devices and
 #               never see the DRM connector hotplug raised on a tile
 #               resize. launch_wayland runs udevd, `udevadm trigger`
-#               and `settle` before cage.
+#               and `settle` before npkwm.
 #   mesa-gbm  - wlroots DRM backend buffer alloc (pixman SW renderer,
 #               no GL driver)
 # font-dejavu + font-noto: the minirootfs ships no fonts, so without them
@@ -49,7 +48,7 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 # alsa-lib: libasound for LibreWolf's cubeb ALSA backend (no PulseAudio /
 # PipeWire in the bundle). cubeb opens the ALSA "default" PCM, which is
 # the virtio-snd card (card 0) backed by the host audio path.
-APK_PACKAGES="${APK_PACKAGES:-cage librewolf seatd libinput eudev mesa-gbm font-dejavu font-noto alsa-lib}"
+APK_PACKAGES="${APK_PACKAGES:-librewolf seatd libinput eudev mesa-gbm font-dejavu font-noto alsa-lib}"
 
 # ── Paths ────────────────────────────────────────────────────────
 
@@ -133,12 +132,16 @@ if [ -n "$APK_PACKAGES" ]; then
             set -e
             mount --bind '$APK_CACHE_DIR' '$STAGE/var/cache/apk'
             chroot '$STAGE' /sbin/apk update 2>&1 | tail -3
+            chroot '$STAGE' /sbin/apk upgrade --no-progress --available 2>&1 | tail -5
             chroot '$STAGE' /sbin/apk add --no-progress $APK_PACKAGES 2>&1 | tail -20
-            # Pre-build the fontconfig cache inside the image. The
-            # guest has no RTC, so font dirs can look newer than its
-            # clock ('mtime in the future', fonts not scanned, tofu).
-            # A prebuilt cache serves fonts without a runtime scan.
+            # Pre-build the fontconfig cache inside the image. A cache is
+            # valid only while its recorded directory mtime matches, and
+            # the image is packed with every mtime at the epoch (see
+            # mksquashfs below): the font dirs are set to the epoch first,
+            # or every app start rescans all fonts into a tmpfs cache.
+            find '$STAGE/usr/share/fonts' -type d -exec touch -h -d @0 {} +
             chroot '$STAGE' /usr/bin/fc-cache -f 2>&1 | tail -3 || true
+            chroot '$STAGE' /sbin/apk info -v 2>/dev/null | LC_ALL=C sort > '$SCRIPT_DIR/packages.txt'
         "
 
     # Apk leaves /var/cache/apk populated with symlinks/copies; wipe
@@ -148,6 +151,10 @@ if [ -n "$APK_PACKAGES" ]; then
     # Drop the temporary resolver; the guest sets its own.
     : > "$STAGE/etc/resolv.conf"
 fi
+
+# No set-uid or set-gid binaries: the app's processes are the attacker in
+# this guest, and nothing it runs needs to gain privileges.
+find "$STAGE" -xdev -type f -perm /6000 -exec chmod ug-s {} +
 
 # Install our PID-1 as /init: Linux execs /init as PID-1 when an
 # initramfs is in use. Overrides anything Alpine ships (openrc lives

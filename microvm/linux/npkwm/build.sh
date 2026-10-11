@@ -57,6 +57,7 @@ unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c "
     set -e
     mount --bind '$CACHE/apks' '$STAGE/var/cache/apk'
     chroot '$STAGE' /sbin/apk update >/dev/null
+    chroot '$STAGE' /sbin/apk upgrade --no-progress --available >/dev/null
     chroot '$STAGE' /sbin/apk add --no-progress $BUILD_PACKAGES >/dev/null
     chroot '$STAGE' /bin/sh -c '
         set -e
