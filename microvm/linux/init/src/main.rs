@@ -97,6 +97,12 @@ unsafe extern "C" fn rust_main() -> ! {
         say(kmsg_fd, b"[microvm-init] switched to squashfs bundle root\n");
     }
 
+    // The kernel boots on one vCPU (`maxcpus=1`): every code patch it makes
+    // while starting is synchronized across all online CPUs, and in a VM that
+    // costs far more than on bare metal. The rest come online here, beside
+    // the session instead of before it.
+    unsafe { spawn_cpu_onliner(); }
+
     // Diagnostic: if the host passed `nopeekbench=` on the cmdline, run a pure
     // busybox download through the nat bridge (no compositor/GPU/browser) so the
     // bridge can be measured in isolation, then halt.
@@ -183,9 +189,6 @@ fn launch_wayland(kmsg_fd: i64) {
     // /tmp/wlrt is setgid `app`). The app owns its profile, runtime dir and
     // the sound devices.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
-                 ( for r in 0 48 96 144; do dd if=/usr/lib/librewolf/libxul.so of=/dev/null bs=1M skip=$r count=48 2>/dev/null & done; \
-                   for f in /usr/lib/librewolf/omni.ja /usr/lib/librewolf/browser/omni.ja /usr/lib/librewolf/libgkcodecs.so /usr/lib/libgtk-3.so.0; do cat $f > /dev/null 2>&1 & done; \
-                   wait ) & \
                  NPT=$(sed -n 's/.*nopeektime=\\([0-9][0-9]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$NPT\" ] && date -s @\"$NPT\" >/dev/null 2>&1; \
                  echo 1 > /proc/sys/kernel/print-fatal-signals 2>/dev/null; \
@@ -222,6 +225,9 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo \"<0>[wl] npkwm start (seatd after ${i}x5ms)\" > /dev/kmsg; \
                  su -s /bin/sh wl -c \"XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec /tmp/npkwm\" > /tmp/npkwm.log 2>&1 & \
                  WLPID=$!; \
+                 nice -n 19 sh -c 'for r in 0 64 128; do dd if=/usr/lib/librewolf/libxul.so of=/dev/null bs=1M skip=$r count=64 2>/dev/null & done; \
+                   cat /usr/lib/librewolf/omni.ja /usr/lib/librewolf/browser/omni.ja /usr/lib/librewolf/libgkcodecs.so /usr/lib/libgtk-3.so.0 > /dev/null 2>&1; \
+                   wait' & \
                  IFACE=$(for d in /sys/class/net/*; do n=${d##*/}; [ \"$n\" = lo ] || { echo $n; break; }; done); \
                  ip link set \"$IFACE\" up 2>/dev/null \
                    || ifconfig \"$IFACE\" up 2>/dev/null; \
@@ -684,6 +690,45 @@ fn byte_find(hay: &[u8], needle: &[u8]) -> bool {
 }
 
 /// Fork the RT watcher. Parent returns immediately; the child never returns.
+/// Bring every present CPU online, in a child so PID 1 goes on. How many
+/// there are says /sys/devices/system/cpu/present ("0-5"), which lists what
+/// the host put in the MP table; a write that fails is skipped.
+unsafe fn spawn_cpu_onliner() {
+    let pid = unsafe { syscall0(SYS_FORK) };
+    if pid != 0 {
+        return;
+    }
+    let mut buf = [0u8; 64];
+    let n = unsafe { control::read_file(b"/sys/devices/system/cpu/present\0", &mut buf) }.unwrap_or(0);
+    // The highest CPU number: the digits after the last '-' or ','.
+    let mut last = 0u32;
+    let mut cur = 0u32;
+    for &b in &buf[..n] {
+        match b {
+            b'0'..=b'9' => cur = cur.saturating_mul(10).saturating_add((b - b'0') as u32),
+            b'-' | b',' => cur = 0,
+            _ => break,
+        }
+        last = cur;
+    }
+    for cpu in 1..=last.min(999) {
+        let mut path = [0u8; 48];
+        let prefix = b"/sys/devices/system/cpu/cpu";
+        let mut len = prefix.len();
+        path[..len].copy_from_slice(prefix);
+        let digits = [cpu / 100, cpu / 10 % 10, cpu % 10];
+        let first = if cpu >= 100 { 0 } else if cpu >= 10 { 1 } else { 2 };
+        for d in &digits[first..] {
+            path[len] = b'0' + *d as u8;
+            len += 1;
+        }
+        let suffix = b"/online\0";
+        path[len..len + suffix.len()].copy_from_slice(suffix);
+        write_file(&path[..len + suffix.len()], b"1", 0);
+    }
+    unsafe { let _ = syscall1(SYS_EXIT, 0); }
+}
+
 unsafe fn spawn_rt_watcher(kmsg_fd: i64) {
     let pid = unsafe { syscall0(SYS_FORK) };
     if pid == 0 {

@@ -2661,21 +2661,19 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     // on QEMU the ~330 lines cost ~1.5 s of boot. `set microvm_verbose on`
     // brings the full log back.
     //
-    // maxcpus: an AP that Linux enumerates but that never responds hangs the
-    // cpuhp bring-up, so APs are onlined only where the host spawns a
-    // responding AP vCPU on INIT-SIPI (`smp_ap_active()`). The count scales
-    // with the host's worker cores (`guest_vcpus()`).
-    let maxcpus: u8 = if crate::microvm::cpu::smp_ap_active() {
-        crate::microvm::cpu::guest_vcpus()
-    } else {
-        1
-    };
+    // CPUs: the kernel boots on the BSP alone (`maxcpus=1`) and PID 1 brings
+    // the other vCPUs online beside the session: each code patch the kernel
+    // makes while booting is synchronized across all online CPUs, and in a VM
+    // that costs tens of ms per patch site. Without responding AP vCPUs
+    // (`smp_ap_active()`), an AP brought online would hang the hotplug, so
+    // `nr_cpus=1` makes the others impossible instead.
+    let cpus = if crate::microvm::cpu::smp_ap_active() { "maxcpus=1" } else { "nr_cpus=1" };
     let _ = write!(
         s,
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
 panic=1 acpi=off tsc=reliable idle=halt \
-tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
-        tsc_khz, maxcpus,
+tsc_early_khz={} devtmpfs.mount=1 {}",
+        tsc_khz, cpus,
     );
     // The guest kernel randomizes its own placement; the RIP sampler's
     // addresses are only resolvable against System.map without that.
@@ -2710,7 +2708,7 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         let _ = write!(s, " npkstats");
     }
     // `set microvm_cmdline <params>`: appended last, so a repeated parameter
-    // overrides the one above (e.g. `idle=poll`, `maxcpus=2`), so guest
+    // overrides the one above (e.g. `idle=poll`), so guest
     // variants can be measured without rebuilding.
     if let Some(extra) = crate::config::get("microvm_cmdline") {
         let extra = extra.trim();

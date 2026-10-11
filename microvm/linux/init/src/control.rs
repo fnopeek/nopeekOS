@@ -310,7 +310,7 @@ unsafe fn find_port(path: &mut [u8; 48]) -> bool {
 }
 
 /// Read up to `buf.len()` bytes of the NUL-terminated path `path`.
-unsafe fn read_file(path: &[u8], buf: &mut [u8]) -> Option<usize> {
+pub(crate) unsafe fn read_file(path: &[u8], buf: &mut [u8]) -> Option<usize> {
     let fd = unsafe { syscall2(SYS_OPEN, path.as_ptr() as u64, O_RDONLY) };
     if fd < 0 {
         return None;
