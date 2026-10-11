@@ -91,9 +91,31 @@ impl GuestSurface {
     }
 }
 
-/// Pixels all surfaces together may hold, three buffers each: 512 MiB, two
-/// full-screen 4K windows with room to spare.
-const MAX_SURFACE_PIXELS: usize = 128 << 20;
+/// Slack over the screen size, in percent: frames during a resize may be
+/// larger than the tile they are headed for.
+const SURFACE_SLACK_PERCENT: usize = 25;
+
+/// Whether a new `px_count`-pixel buffer may join the `held` pixels of all
+/// surfaces. A tile is never larger than the screen, so neither is a frame;
+/// all windows together need at most three screen-sized buffers each. The
+/// host keeps its memory reserve on top.
+fn surface_fits(held: usize, px_count: usize) -> bool {
+    let fb = crate::framebuffer::get_info();
+    let screen = match (fb.width as usize).saturating_mul(fb.height as usize) {
+        0 => 3840 * 2160,
+        n => n,
+    };
+    let frame_max = screen.saturating_mul(100 + SURFACE_SLACK_PERCENT) / 100;
+    let total_max = frame_max
+        .saturating_mul(3)
+        .saturating_mul(crate::microvm::devices::virtio_gpu_pci::MAX_OUTPUTS as usize);
+    if px_count > frame_max || held.saturating_add(px_count) > total_max {
+        return false;
+    }
+    let (free, _) = crate::memory::stats();
+    let reserve = crate::forge_rt::KERNEL_RESERVE_MB * (1024 * 1024 / crate::memory::PAGE_SIZE);
+    free.saturating_sub(reserve) > (px_count * 4).div_ceil(crate::memory::PAGE_SIZE)
+}
 
 static SURFACES: Mutex<BTreeMap<u32, GuestSurface>> = Mutex::new(BTreeMap::new());
 
@@ -128,7 +150,7 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
     if back.pixels.len() != px_count {
         // The guest picks the frame size: past the budget, or when the host
         // cannot reserve the memory, the frame is dropped.
-        if held.saturating_add(px_count) > MAX_SURFACE_PIXELS {
+        if !surface_fits(held, px_count) {
             return;
         }
         back.pixels = Vec::new();
