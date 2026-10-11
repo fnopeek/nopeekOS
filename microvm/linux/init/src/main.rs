@@ -188,6 +188,9 @@ fn launch_wayland(kmsg_fd: i64) {
     // devices; the app reaches npkwm through its socket (the runtime dir
     // /tmp/wlrt is setgid `app`). The app owns its profile, runtime dir and
     // the sound devices.
+    // `npkprofile=<ip>:<port>` on the command line runs the app under the
+    // Gecko startup profiler and, after it exits, sends the gzipped profile
+    // to that address (`nc -l` on the receiving side).
     let arg2 = b"exec >/dev/kmsg 2>&1; \
                  NPT=$(sed -n 's/.*nopeektime=\\([0-9][0-9]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$NPT\" ] && date -s @\"$NPT\" >/dev/null 2>&1; \
@@ -315,10 +318,19 @@ fn launch_wayland(kmsg_fd: i64) {
                  i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do usleep 5000; i=$((i+1)); done; \
                  echo \"<0>[wl] npkwm up after ${i}x5ms\" > /dev/kmsg; \
                  grep -q npkstats /proc/cmdline || : > /tmp/lw-sample.sh; \
-                 echo 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; [ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' > /tmp/app.sh; \
+                 PROF=$(sed -n 's/.*npkprofile=\\([0-9.]*:[0-9]*\\).*/\\1/p' /proc/cmdline); \
+                 [ -n \"$PROF\" ] && echo 'export MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_STARTUP_INTERVAL=1 MOZ_PROFILER_STARTUP_FEATURES=js,stackwalk,cpu,fileio MOZ_PROFILER_SHUTDOWN=/tmp/bcache/lw-prof.json' > /tmp/app.sh || : > /tmp/app.sh; \
+                 echo 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; [ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' >> /tmp/app.sh; \
                  su -s /bin/sh app -c 'WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 exec sh /tmp/app.sh' \
                    > /tmp/app.log 2>&1; \
                  rc=$?; echo \"<0>[wl] browser exited rc=$rc\" > /dev/kmsg; \
+                 if [ -n \"$PROF\" ]; then \
+                   if [ -s /tmp/bcache/lw-prof.json ]; then \
+                     gzip -c /tmp/bcache/lw-prof.json | nc -w 10 ${PROF%:*} ${PROF#*:} \
+                       && echo \"<0>[lw-prof] sent $(wc -c < /tmp/bcache/lw-prof.json) bytes to $PROF\" > /dev/kmsg \
+                       || echo \"<0>[lw-prof] send to $PROF FAILED\" > /dev/kmsg; \
+                   else echo '<0>[lw-prof] no profile written' > /dev/kmsg; fi; \
+                 fi; \
                  kill $WLPID 2>/dev/null; \
                  [ $rc = 0 ] || tail -n 20 /tmp/app.log /tmp/npkwm.log | while read -r l; do echo \"<0>[wl] $l\" > /dev/kmsg; done; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
