@@ -42,6 +42,9 @@ const SCHED_RR: u64 = 2;
 
 // mount(2) flags
 const MS_RDONLY: u64 = 1;
+const MS_NOSUID: u64 = 2;
+const MS_NODEV: u64 = 4;
+const MS_NOEXEC: u64 = 8;
 const MS_MOVE: u64 = 8192;
 
 // access(2) modes
@@ -180,6 +183,9 @@ fn launch_wayland(kmsg_fd: i64) {
     // /tmp/wlrt is setgid `app`). The app owns its profile, runtime dir and
     // the sound devices.
     let arg2 = b"exec >/dev/kmsg 2>&1; \
+                 ( for r in 0 48 96 144; do dd if=/usr/lib/librewolf/libxul.so of=/dev/null bs=1M skip=$r count=48 2>/dev/null & done; \
+                   for f in /usr/lib/librewolf/omni.ja /usr/lib/librewolf/browser/omni.ja /usr/lib/librewolf/libgkcodecs.so /usr/lib/libgtk-3.so.0; do cat $f > /dev/null 2>&1 & done; \
+                   wait ) & \
                  NPT=$(sed -n 's/.*nopeektime=\\([0-9][0-9]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$NPT\" ] && date -s @\"$NPT\" >/dev/null 2>&1; \
                  echo 1 > /proc/sys/kernel/print-fatal-signals 2>/dev/null; \
@@ -198,12 +204,24 @@ fn launch_wayland(kmsg_fd: i64) {
                  mount --bind /tmp/group /etc/group 2>/dev/null; \
                  mkdir -p /tmp/xrt /tmp/app /tmp/wlrt; chmod 0700 /tmp/xrt; chown 1000:1000 /tmp/xrt /tmp/app; \
                  chown 1001:1000 /tmp/wlrt; chmod 2750 /tmp/wlrt; \
-                 mount -t tmpfs -o mode=0755 tmpfs /run 2>/dev/null; \
-                 mkdir -p /dev/shm 2>/dev/null; mount -t tmpfs -o mode=1777 tmpfs /dev/shm 2>/dev/null; \
+                 mount -t tmpfs -o mode=0755,nosuid,nodev,noexec tmpfs /run 2>/dev/null; \
+                 mkdir -p /dev/shm 2>/dev/null; mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm 2>/dev/null; \
                  mkdir -p /run/udev; \
                  udevd --daemon 2>/dev/null; \
-                 udevadm trigger --type=devices --action=add 2>/dev/null; \
+                 udevadm trigger --type=devices --action=add --subsystem-match=drm --subsystem-match=input --subsystem-match=sound 2>/dev/null; \
                  udevadm settle --timeout=10 2>/dev/null; \
+                 W=; for p in /sys/class/virtio-ports/*; do [ \"$(cat $p/name 2>/dev/null)\" = npk.windows ] && W=/dev/${p##*/}; done; \
+                 [ -n \"$W\" ] && chown 1001 \"$W\" && chmod 0600 \"$W\"; \
+                 export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
+                 WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
+                 LIBSEAT_BACKEND=seatd \
+                 XDG_CONFIG_HOME=/tmp/app HOME=/tmp/app \
+                 MOZ_ENABLE_WAYLAND=1; \
+                 seatd -g wl > /tmp/seatd.log 2>&1 & \
+                 i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do usleep 5000; i=$((i+1)); done; \
+                 echo \"<0>[wl] npkwm start (seatd after ${i}x5ms)\" > /dev/kmsg; \
+                 su -s /bin/sh wl -c \"XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec /tmp/npkwm\" > /tmp/npkwm.log 2>&1 & \
+                 WLPID=$!; \
                  IFACE=$(for d in /sys/class/net/*; do n=${d##*/}; [ \"$n\" = lo ] || { echo $n; break; }; done); \
                  ip link set \"$IFACE\" up 2>/dev/null \
                    || ifconfig \"$IFACE\" up 2>/dev/null; \
@@ -217,7 +235,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  mount --bind /tmp/hosts /etc/hosts 2>/dev/null; \
                  mkdir -p /tmp/moz /tmp/bcache /tmp/gleandb; \
                  ( [ -b /dev/vda ] && echo '<0>[moz-disk] /dev/vda present' > /dev/kmsg || echo '<0>[moz-disk] /dev/vda ABSENT' > /dev/kmsg ); \
-                 if mount -t ext4 /dev/vda /tmp/moz 2>/tmp/mnterr; then \
+                 if mount -t ext4 -o nosuid,nodev /dev/vda /tmp/moz 2>/tmp/mnterr; then \
                    echo '<0>[moz-disk] ext4 mounted at /tmp/moz (persist OK)' > /dev/kmsg; \
                  else \
                    echo '<0>[moz-disk] ext4 mount FAILED -> profile lives in RAM, NO persist:' > /dev/kmsg; \
@@ -226,7 +244,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  rm -rf /tmp/moz/datareporting 2>/dev/null; \
                  ln -s /tmp/gleandb /tmp/moz/datareporting 2>/dev/null; \
                  mkdir -p /tmp/npkhome; \
-                 mount -t 9p -o trans=virtio,version=9p2000.L,access=any,msize=131072 npkhome /tmp/npkhome 2>/dev/null \
+                 mount -t 9p -o trans=virtio,version=9p2000.L,access=any,msize=131072,nosuid,nodev,noexec npkhome /tmp/npkhome 2>/dev/null \
                    && echo '<0>[9p] npkhome mounted at /tmp/npkhome' > /dev/kmsg \
                    || echo '<0>[9p] mount FAILED (read path)' > /dev/kmsg; \
                  : > /tmp/moz/user.js; \
@@ -264,13 +282,11 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo 'user_pref(\"media.cubeb.backend\", \"alsa\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.audioipc.shm_area_size\", 262144);' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.cubeb_latency_playback_ms\", 2000);' >> /tmp/moz/user.js; \
-                 find /tmp/moz -xdev ! -user 1000 -exec chown -h 1000:1000 {} + 2>/dev/null; \
+                 [ -e /tmp/moz/.npk-owned ] || { find /tmp/moz -xdev ! -user 1000 -exec chown -h 1000:1000 {} + 2>/dev/null; : > /tmp/moz/.npk-owned; }; \
+                 chown -h 1000:1000 /tmp/moz /tmp/moz/user.js /tmp/moz/datareporting 2>/dev/null; \
                  chown 1000:1000 /tmp/bcache /tmp/gleandb; \
                  chown 1000:1000 /dev/snd/* 2>/dev/null; \
                  chgrp app /dev/kmsg; chmod 0620 /dev/kmsg; \
-                 W=; for p in /sys/class/virtio-ports/*; do [ \"$(cat $p/name 2>/dev/null)\" = npk.windows ] && W=/dev/${p##*/}; done; \
-                 [ -n \"$W\" ] && chown 1001 \"$W\" && chmod 0600 \"$W\"; \
-                 sync; \
                  if [ -s /tmp/lw-probe.js ] && [ -f /usr/lib/librewolf/librewolf.cfg ]; then \
                    cat /usr/lib/librewolf/librewolf.cfg /tmp/lw-probe.js > /tmp/librewolf.cfg \
                      && mount --bind /tmp/librewolf.cfg /usr/lib/librewolf/librewolf.cfg 2>/dev/null; \
@@ -278,12 +294,6 @@ fn launch_wayland(kmsg_fd: i64) {
                  for t in glxtest vaapitest; do mount --bind /bin/false /usr/lib/librewolf/$t 2>/dev/null; done; \
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
-                 export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
-                 WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
-                 LIBSEAT_BACKEND=seatd \
-                 XDG_CONFIG_HOME=/tmp/app HOME=/tmp/app \
-                 MOZ_ENABLE_WAYLAND=1; \
-                 seatd -g wl > /tmp/seatd.log 2>&1 & \
                  ( sleep 15; while true; do sync 2>/dev/null; sleep 3; done ) & \
                  if grep -q npkbench_cpu /proc/cmdline; then \
                    t() { read u _ < /proc/uptime; echo \"${u%.*}${u#*.}\"; }; \
@@ -294,10 +304,6 @@ fn launch_wayland(kmsg_fd: i64) {
                    head -c 200000000 /dev/zero | gzip -1 > /dev/null; f=$(t); \
                    echo \"<0>[bench] cpu=$(( (b-a)*10 ))ms syscalls=$(( (c-b)*10 ))ms fork-exec1000=$(( (d-c)*10 ))ms memtouch1G=$(( (e-d)*10 ))ms gzip200M=$(( (f-e)*10 ))ms\" > /dev/kmsg; \
                  fi; \
-                 i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do usleep 5000; i=$((i+1)); done; \
-                 echo \"<0>[wl] npkwm start (seatd after ${i}x5ms)\" > /dev/kmsg; \
-                 su -s /bin/sh wl -c \"XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec /tmp/npkwm\" > /tmp/npkwm.log 2>&1 & \
-                 WLPID=$!; \
                  i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do usleep 5000; i=$((i+1)); done; \
                  echo \"<0>[wl] npkwm up after ${i}x5ms\" > /dev/kmsg; \
                  grep -q npkstats /proc/cmdline || : > /tmp/lw-sample.sh; \
@@ -500,6 +506,9 @@ fn try_switch_to_sqfs(kmsg_fd: i64) -> bool {
 /// hard-requires /dev/shm). With a cpio initramfs Linux skips
 /// `prepare_namespace()` and never honors `devtmpfs.mount=1`, so the
 /// init has to do it itself.
+/// /proc, /sys, /dev, /tmp and /dev/shm. None of them carries set-uid or
+/// device files a process should use from there; /tmp keeps exec, because
+/// npkwm runs from it.
 fn mount_essentials() {
     unsafe {
         let _ = syscall2(SYS_MKDIR, b"/proc\0".as_ptr() as u64, 0o755);
@@ -508,7 +517,7 @@ fn mount_essentials() {
             b"proc\0".as_ptr() as u64,
             b"/proc\0".as_ptr() as u64,
             b"proc\0".as_ptr() as u64,
-            0, 0,
+            MS_NOSUID | MS_NODEV | MS_NOEXEC, 0,
         );
         let _ = syscall2(SYS_MKDIR, b"/sys\0".as_ptr() as u64, 0o755);
         let _ = syscall5(
@@ -516,7 +525,7 @@ fn mount_essentials() {
             b"sysfs\0".as_ptr() as u64,
             b"/sys\0".as_ptr() as u64,
             b"sysfs\0".as_ptr() as u64,
-            0, 0,
+            MS_NOSUID | MS_NODEV | MS_NOEXEC, 0,
         );
         let _ = syscall2(SYS_MKDIR, b"/dev\0".as_ptr() as u64, 0o755);
         let _ = syscall5(
@@ -524,7 +533,7 @@ fn mount_essentials() {
             b"devtmpfs\0".as_ptr() as u64,
             b"/dev\0".as_ptr() as u64,
             b"devtmpfs\0".as_ptr() as u64,
-            0, 0,
+            MS_NOSUID | MS_NOEXEC, 0,
         );
         let _ = syscall2(SYS_MKDIR, b"/tmp\0".as_ptr() as u64, 0o755);
         let _ = syscall5(
@@ -532,7 +541,7 @@ fn mount_essentials() {
             b"tmpfs\0".as_ptr() as u64,
             b"/tmp\0".as_ptr() as u64,
             b"tmpfs\0".as_ptr() as u64,
-            0, 0,
+            MS_NOSUID | MS_NODEV, 0,
         );
         // /dev/shm — Firefox/Gecko hard-requires POSIX shared memory
         // for content-process IPC. Without it shm_open() fails and a
@@ -544,7 +553,7 @@ fn mount_essentials() {
             b"tmpfs\0".as_ptr() as u64,
             b"/dev/shm\0".as_ptr() as u64,
             b"tmpfs\0".as_ptr() as u64,
-            0,
+            MS_NOSUID | MS_NODEV,
             b"mode=1777\0".as_ptr() as u64,
         );
     }

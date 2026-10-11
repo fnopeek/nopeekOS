@@ -2632,8 +2632,7 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     // emulation). Alpine's virt kernel has CONFIG_SERIAL_EARLYCON but not
     // CONFIG_EARLY_PRINTK, so `earlyprintk=` would be ignored.
     // `console=ttyS0,115200`: the regular 8250 console once full init runs.
-    // `panic=1`: halt on panic, no reboot loop. `nokaslr`: predictable load
-    // addresses for the hypervisor side. `acpi=off tsc=reliable`: skip probes
+    // `panic=1`: halt on panic, no reboot loop. `acpi=off tsc=reliable`: skip probes
     // that misbehave without real silicon (there are no ACPI tables).
     //
     // `tsc_early_khz=<host TSC kHz>` skips Linux's PIT-based TSC calibration,
@@ -2652,9 +2651,9 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     let stats = crate::config::get("microvm_stats")
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("on"));
     crate::microvm::boottime::set_stats(stats);
-    crate::microvm::cpu::rip_sample::set_enabled(
-        crate::config::get("microvm_ripsample").is_some_and(|v| v.trim().eq_ignore_ascii_case("on")),
-    );
+    let ripsample =
+        crate::config::get("microvm_ripsample").is_some_and(|v| v.trim().eq_ignore_ascii_case("on"));
+    crate::microvm::cpu::rip_sample::set_enabled(ripsample);
     let tsc_khz = crate::interrupts::tsc_freq() / 1000;
     let mut s = String::new();
     // `loglevel=5` keeps warnings, errors and panics on the host console and
@@ -2674,10 +2673,15 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     let _ = write!(
         s,
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
-panic=1 nokaslr acpi=off tsc=reliable idle=halt \
+panic=1 acpi=off tsc=reliable idle=halt \
 tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         tsc_khz, maxcpus,
     );
+    // The guest kernel randomizes its own placement; the RIP sampler's
+    // addresses are only resolvable against System.map without that.
+    if ripsample {
+        let _ = write!(s, " nokaslr");
+    }
     // `nolapic` unless the LAPIC is actually emulated for this host. LAPIC
     // emulation is SVM-only (svm/lapic.rs); on Intel/VMX there is none, so the
     // guest must fall back to the PIT IRQ0 the VMX path injects — otherwise it

@@ -133,6 +133,13 @@ const CMDLINE_GUEST_PHYS: u64 = 0x20000;
 const BOOT_PARAMS_GUEST_PHYS: u64 = 0x90000;
 const KERNEL_GUEST_PHYS: u64 = 0x100000;
 const INITRAMFS_GUEST_PHYS: u64 = 0xC000000;
+/// One `setup_data` node (boot protocol 2.09+), inside low RAM below the
+/// BIOS hole; Linux reserves setup_data ranges itself.
+const SETUP_DATA_GUEST_PHYS: u64 = 0x9E000;
+/// `SETUP_RNG_SEED`: bytes the guest mixes into its RNG before anything
+/// else runs, so its randomness does not rest on the CPU's RDRAND alone.
+const SETUP_RNG_SEED: u32 = 9;
+const RNG_SEED_LEN: usize = 32;
 
 /// e820 memory map types.
 const E820_TYPE_RAM: u32 = 1;
@@ -286,6 +293,15 @@ pub fn load_into_guest_ram(
         };
         bp[start..start + entry_size].copy_from_slice(entry_bytes);
     }
+
+    // setup_data: next[8] type[4] len[4] data[len], one node.
+    let mut sd = [0u8; 16 + RNG_SEED_LEN];
+    sd[8..12].copy_from_slice(&SETUP_RNG_SEED.to_le_bytes());
+    sd[12..16].copy_from_slice(&(RNG_SEED_LEN as u32).to_le_bytes());
+    crate::security::csprng::fill(&mut sd[16..]);
+    mem.write_bytes(SETUP_DATA_GUEST_PHYS, &sd);
+    // setup_data (u64) at 0x250.
+    bp[0x250..0x258].copy_from_slice(&SETUP_DATA_GUEST_PHYS.to_le_bytes());
 
     // Copy boot_params into guest RAM at 0x90000.
     mem.write_bytes(BOOT_PARAMS_GUEST_PHYS, &bp);
