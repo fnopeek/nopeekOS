@@ -292,10 +292,12 @@ fn launch_wayland(kmsg_fd: i64) {
                  chown -h 1000:1000 /tmp/moz /tmp/moz/user.js /tmp/moz/datareporting 2>/dev/null; \
                  chown 1000:1000 /tmp/bcache /tmp/gleandb; \
                  chown 1000:1000 /dev/snd/* 2>/dev/null; \
-                 chgrp app /dev/kmsg; chmod 0620 /dev/kmsg; \
-                 if [ -s /tmp/lw-probe.js ] && [ -f /usr/lib/librewolf/librewolf.cfg ]; then \
+                 if grep -q npkstats /proc/cmdline && [ -f /usr/lib/librewolf/librewolf.cfg ]; then \
+                   chgrp app /dev/kmsg; chmod 0620 /dev/kmsg; \
                    cat /usr/lib/librewolf/librewolf.cfg /tmp/lw-probe.js > /tmp/librewolf.cfg \
                      && mount --bind /tmp/librewolf.cfg /usr/lib/librewolf/librewolf.cfg 2>/dev/null; \
+                   { cat /usr/lib/librewolf/defaults/pref/channel-prefs.js; echo 'pref(\"general.config.sandbox_enabled\", false);'; } > /tmp/channel-prefs.js \
+                     && mount --bind /tmp/channel-prefs.js /usr/lib/librewolf/defaults/pref/channel-prefs.js 2>/dev/null; \
                  fi; \
                  for t in glxtest vaapitest; do mount --bind /bin/false /usr/lib/librewolf/$t 2>/dev/null; done; \
                  mkdir -p /tmp/moz/chrome; \
@@ -589,10 +591,10 @@ fn open_console_kmsg() -> (i64, i64) {
     (kmsg_fd, console_fd)
 }
 
-/// Write a message to both /dev/kmsg (printk-direct, polled, always
-/// reaches the host capture) and stdout. Either reaching is enough.
-/// Appended to LibreWolf's autoconfig by the session script: the browser's
-/// own startup times go to /dev/kmsg, next to the host's timeline.
+/// Appended to LibreWolf's autoconfig by the session script, with
+/// `npkstats` only: the browser's own startup times go to /dev/kmsg, next to
+/// the host's timeline. It needs the autoconfig sandbox off, which the
+/// session script turns off for that run alone.
 const LW_PROBE: &[u8] = include_bytes!("lw_probe.js");
 
 /// With `npkstats` on the command line, samples the app process's faults,
@@ -616,6 +618,8 @@ fn write_file(path: &[u8], data: &[u8], mode: u64) {
     unsafe { let _ = syscall1(SYS_CLOSE, fd as u64); }
 }
 
+/// Write a message to both /dev/kmsg (printk-direct, polled, always
+/// reaches the host capture) and stdout. Either reaching is enough.
 fn say(kmsg_fd: i64, msg: &[u8]) {
     if kmsg_fd >= 0 {
         let _ = unsafe { syscall3(SYS_WRITE, kmsg_fd as u64, msg.as_ptr() as u64, msg.len() as u64) };
