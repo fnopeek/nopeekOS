@@ -147,9 +147,9 @@ unsafe extern "C" fn rust_main() -> ! {
 /// becomes the supervising shell and never returns; on absence we
 /// return so the caller can park.
 fn launch_wayland(kmsg_fd: i64) {
-    let probe = unsafe { syscall3(SYS_ACCESS, b"/usr/lib/libwlroots-0.20.so\0".as_ptr() as u64, F_OK, 0) };
+    let probe = unsafe { syscall3(SYS_ACCESS, b"/usr/bin/seatd\0".as_ptr() as u64, F_OK, 0) };
     if probe != 0 {
-        say(kmsg_fd, b"[microvm-init] no wlroots -- not a Wayland bundle\n");
+        say(kmsg_fd, b"[microvm-init] no seatd -- not a Wayland bundle\n");
         return;
     }
     say(kmsg_fd, b"[microvm-init] starting Wayland session\n");

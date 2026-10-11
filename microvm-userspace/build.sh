@@ -45,10 +45,12 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 # font-dejavu + font-noto: the minirootfs ships no fonts, so without them
 # all GTK and web text renders as tofu. dejavu covers Latin UI/body;
 # noto adds broad Unicode and a sans default.
+# libseat, wayland-libs-server, libdisplay-info: libraries npkwm links
+# (it carries wlroots itself); checked against its NEEDED list below.
 # alsa-lib: libasound for LibreWolf's cubeb ALSA backend (no PulseAudio /
 # PipeWire in the bundle). cubeb opens the ALSA "default" PCM, which is
 # the virtio-snd card (card 0) backed by the host audio path.
-APK_PACKAGES="${APK_PACKAGES:-librewolf seatd libinput eudev mesa-gbm font-dejavu font-noto alsa-lib}"
+APK_PACKAGES="${APK_PACKAGES:-librewolf seatd libseat libinput eudev mesa-gbm wayland-libs-server libdisplay-info font-dejavu font-noto alsa-lib}"
 
 # ── Paths ────────────────────────────────────────────────────────
 
@@ -67,7 +69,7 @@ red()   { printf '\033[0;31m[npk]\033[0m %s\n' "$1" >&2; }
 
 # ── Sanity ───────────────────────────────────────────────────────
 
-for t in curl sha256sum tar bsdtar gzip cargo unshare chroot; do
+for t in curl sha256sum tar bsdtar gzip cargo unshare chroot readelf; do
     command -v "$t" >/dev/null 2>&1 || { red "missing: $t"; exit 1; }
 done
 
@@ -151,6 +153,13 @@ if [ -n "$APK_PACKAGES" ]; then
     # Drop the temporary resolver; the guest sets its own.
     : > "$STAGE/etc/resolv.conf"
 fi
+
+# npkwm is embedded in PID-1 and loads its libraries from this image: every
+# library it needs must be here, or the session never starts.
+for lib in $(readelf -d "$REPO_ROOT/microvm/linux/npkwm/npkwm" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+    [ -e "$STAGE/usr/lib/$lib" ] || [ -L "$STAGE/usr/lib/$lib" ] || [ -e "$STAGE/lib/$lib" ] || [ -L "$STAGE/lib/$lib" ] \
+        || { red "npkwm needs $lib, not in the image"; exit 1; }
+done
 
 # No set-uid or set-gid binaries: the app's processes are the attacker in
 # this guest, and nothing it runs needs to gain privileges.
