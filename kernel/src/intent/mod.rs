@@ -2667,11 +2667,14 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     // that costs tens of ms per patch site. Without responding AP vCPUs
     // (`smp_ap_active()`), an AP brought online would hang the hotplug, so
     // `nr_cpus=1` makes the others impossible instead.
+    //
+    // Idle: no `idle=` — CPUID hides MONITOR, so the guest halts with HLT on
+    // its own, and any `idle=` would keep `cpuidle_haltpoll` from loading.
     let cpus = if crate::microvm::cpu::smp_ap_active() { "maxcpus=1" } else { "nr_cpus=1" };
     let _ = write!(
         s,
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
-panic=1 acpi=off tsc=reliable idle=halt \
+panic=1 acpi=off tsc=reliable \
 tsc_early_khz={} devtmpfs.mount=1 {}",
         tsc_khz, cpus,
     );
@@ -2708,7 +2711,7 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
         let _ = write!(s, " npkstats");
     }
     // `set microvm_cmdline <params>`: appended last, so a repeated parameter
-    // overrides the one above (e.g. `idle=poll`), so guest
+    // overrides the one above (e.g. `tsc=`), so guest
     // variants can be measured without rebuilding.
     if let Some(extra) = crate::config::get("microvm_cmdline") {
         let extra = extra.trim();
