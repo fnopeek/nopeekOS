@@ -557,6 +557,11 @@ const CPU_HLT_EXITING: u32 = 1 << 7;
 const CPU_INTR_WINDOW_EXITING: u32 = 1 << 2;
 const CPU_MWAIT_EXITING: u32 = 1 << 10;
 const CPU_RDPMC_EXITING: u32 = 1 << 11;
+/// Bits 19/20: MOV to/from CR8 exit. Without them (and without a TPR
+/// shadow) CR8 is the PHYSICAL local APIC's TPR: a guest writing 15 masks
+/// every host interrupt on the core, and never exits again.
+const CPU_CR8_LOAD_EXITING: u32 = 1 << 19;
+const CPU_CR8_STORE_EXITING: u32 = 1 << 20;
 const CPU_MONITOR_EXITING: u32 = 1 << 29;
 const CPU_USE_IO_BITMAPS: u32 = 1 << 25;
 const CPU_USE_MSR_BITMAPS: u32 = 1 << 28;
@@ -751,6 +756,8 @@ unsafe fn write_execution_controls(eptp: u64, bitmaps: &ExecBitmaps) -> Result<(
         CPU_HLT_EXITING
             | CPU_MWAIT_EXITING
             | CPU_RDPMC_EXITING
+            | CPU_CR8_LOAD_EXITING
+            | CPU_CR8_STORE_EXITING
             | CPU_MONITOR_EXITING
             | CPU_USE_IO_BITMAPS
             | CPU_USE_MSR_BITMAPS
@@ -825,8 +832,15 @@ unsafe fn write_execution_controls(eptp: u64, bitmaps: &ExecBitmaps) -> Result<(
     //
     // Triple faults (basic reason 2) still surface independently of
     // EXCEPTION_BITMAP if Linux truly fails.
+    // #DB and #AC are always intercepted and reflected (KVM
+    // `vmx_update_exception_bitmap`): either one raised while the CPU
+    // delivers the same exception re-faults inside microcode with no
+    // interrupt window, and holds the host core (CVE-2015-8104,
+    // CVE-2015-5307).
+    const TRAP_DB: u64 = 1 << 1;
+    const TRAP_AC: u64 = 1 << 17;
     const TRAP_CP: u64 = 1 << 21;
-    vmwrite(EXCEPTION_BITMAP, TRAP_CP)?;
+    vmwrite(EXCEPTION_BITMAP, TRAP_DB | TRAP_AC | TRAP_CP)?;
     vmwrite(CR3_TARGET_COUNT, 0)?;
     vmwrite(VM_EXIT_MSR_STORE_COUNT, 0)?;
     vmwrite(VM_EXIT_MSR_LOAD_COUNT, 0)?;
@@ -1307,6 +1321,30 @@ pub(super) unsafe fn run_guest_once(
             "push r15",
             // Stack now: 15 GPRs [rsp+0..119], guest_fpu [+120],
             //   host_fpu [+128], struct_ptr [+136], callee_saved [+144..]
+
+            // ── Speculation barrier, before any host return or indirect
+            // branch: IBPB (when `IBPB_ON_EXIT`) drops branch predictions
+            // the guest trained, then 32 calls refill the return stack
+            // (Linux `__FILL_RETURN_BUFFER`). Interrupts are still off.
+            "cmp byte ptr [rip + IBPB_ON_EXIT], 0",
+            "je 81f",
+            "mov ecx, 0x49",                // MSR_IA32_PRED_CMD
+            "mov eax, 1",                   // IBPB
+            "xor edx, edx",
+            "wrmsr",
+            "81:",
+            "mov eax, 16",
+            "82:",
+            "call 83f",
+            "int3",
+            "83:",
+            "call 84f",
+            "int3",
+            "84:",
+            "dec eax",
+            "jnz 82b",
+            "add rsp, 256",
+            "lfence",
 
             // ── FPU save/restore (paired exit half) ──────────────
             // Guest GPRs are on the stack now → rax/rcx/rdx free to

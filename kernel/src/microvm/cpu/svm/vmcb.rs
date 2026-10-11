@@ -27,7 +27,7 @@ pub const VMCB_SIZE: usize = 4096;
 
 #[allow(dead_code)] pub const OFF_INTERCEPT_CR: usize = 0x000;
 #[allow(dead_code)] pub const OFF_INTERCEPT_DR: usize = 0x004;
-#[allow(dead_code)] pub const OFF_INTERCEPT_EXC: usize = 0x008;
+pub const OFF_INTERCEPT_EXC: usize = 0x008;
 /// Misc intercepts vector 1 — INTR/NMI/SMI/INIT/VINTR/.../HLT/IO/MSR.
 pub const OFF_INTERCEPT_MISC1: usize = 0x00C;
 /// Misc intercepts vector 2 — VMRUN (mandatory) /VMMCALL/VMSAVE/...

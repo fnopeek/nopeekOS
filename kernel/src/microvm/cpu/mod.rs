@@ -241,15 +241,11 @@ impl FpuArea {
     }
 }
 
-// The XCR0 register is not touched. XSETBV is not intercepted, so the
-// guest's Linux owns XCR0. Forcing a mask breaks things: the host mask vs
-// the guest's CPUID-0xD-masked set panics fpu__init_system_xstate, and a
-// reset mask while +avx2-built host code runs gives #UD on `vmovups ymm`.
-// Mask = -1: xsave64/xrstor64 operate on every component enabled in the
-// current XCR0. Guest XCR0 ⊇ host XCR0 (guest Linux enables at least
-// x87+SSE+AVX, the host's set; extra AVX-512 bits are covered by -1), so
-// host save/restore under the guest's XCR0 preserves the host's subset,
-// and guest save/restore under it covers all guest state.
+// XSETBV is intercepted and checked (`xcr0_valid`: x87 on, nothing beyond
+// the host's XCR0). The FPU swap runs with mask -1 under the HOST XCR0 in
+// both directions, and the guest's value is live only between the swap and
+// the exit: every component the host uses is then saved and replaced,
+// whatever subset the guest enabled.
 
 /// Guest-RAM size for the next VM, chosen at `vm_open` from live host
 /// free memory.
@@ -428,7 +424,35 @@ fn close_requested() -> bool {
 }
 
 /// A new launch: no close pending, a fresh control channel.
+/// Read by the exit path of `run_guest_once` (both vendors): issue an IBPB
+/// right after every VM exit. The host is built without retpolines or IBRS,
+/// so branch predictions the guest trained would otherwise steer the host's
+/// indirect branches and returns (Spectre v2, Retbleed, SRSO; KVM
+/// `ibpb-vmexit`). The return stack is refilled after every exit either way.
+#[unsafe(no_mangle)]
+pub static IBPB_ON_EXIT: AtomicBool = AtomicBool::new(false);
+
+/// Whether this CPU has the IBPB command (`PRED_CMD`): AMD CPUID
+/// 0x8000_0008 EBX[12], Intel CPUID 7 EDX[26]. Writing it without would #GP.
+fn cpu_has_ibpb() -> bool {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+    let amd = __cpuid(0x8000_0000).eax >= 0x8000_0008
+        && __cpuid(0x8000_0008).ebx & (1 << 12) != 0;
+    let intel = __cpuid_count(7, 0).edx & (1 << 26) != 0;
+    amd || intel
+}
+
+/// Decide once per launch: on where the CPU has it, unless
+/// `set microvm_ibpb off` (to measure what it costs).
+fn arm_exit_mitigations() {
+    let off = crate::config::get("microvm_ibpb").is_some_and(|v| v.trim() == "off");
+    let on = cpu_has_ibpb() && !off;
+    IBPB_ON_EXIT.store(on, Ordering::Release);
+    crate::kprintln!("[microvm] IBPB on VM exit: {}", if on { "on" } else if off { "off (config)" } else { "not available" });
+}
+
 fn reset_close_state() {
+    arm_exit_mitigations();
     VM_CLOSE_REQUESTED.store(false, Ordering::Release);
     QUIT_DEADLINE.store(0, Ordering::Release);
     TERM_AT.store(0, Ordering::Release);

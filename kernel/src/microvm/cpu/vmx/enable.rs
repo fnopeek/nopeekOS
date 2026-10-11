@@ -33,8 +33,16 @@ use crate::microvm::cpu::svm::lapic::{self, LocalApic};
 /// const check (no vendor lock — vmx code only runs on Intel). Gates every
 /// LAPIC-related VMX path; false ⇒ the `nolapic` boot. See
 /// `cpu::VMX_GUEST_LAPIC`.
+const VEC_DB: u8 = 1;
 const VEC_UD: u8 = 6;
 const VEC_GP: u8 = 13;
+const VEC_AC: u8 = 17;
+
+/// DR6 bits a #DB exit qualification reports: B0-B3, BD, BS.
+const DR6_TRAP_BITS: u64 = 0xF | (1 << 13) | (1 << 14);
+
+/// Local APIC task-priority register offset; CR8 is its bits 7:4.
+const APIC_TASKPRI: u32 = 0x80;
 
 #[inline]
 fn vmx_lapic_on() -> bool {
@@ -1595,6 +1603,29 @@ impl VmContext {
                 crate::interrupts::NMI_COUNT.fetch_add(1, Ordering::Relaxed);
                 last_outcome = Some(outcome);
             }
+            0 if matches!(
+                (vmcs::read_exit_intr_info().unwrap_or(0) & 0xFF) as u8,
+                VEC_DB | VEC_AC
+            ) => {
+                // Reflected unchanged (KVM `handle_exception_nmi`). A #DB exit
+                // leaves DR6 as it was and reports the new bits in the exit
+                // qualification; the host does not use the debug registers,
+                // so they go straight into the guest's live DR6.
+                let vector = (vmcs::read_exit_intr_info().unwrap_or(0) & 0xFF) as u8;
+                if vector == VEC_DB {
+                    let dr6: u64;
+                    // SAFETY: ring 0; DR6 holds the guest's value between
+                    // exit and entry, and the host does not use it.
+                    unsafe { core::arch::asm!("mov {}, dr6", out(reg) dr6) };
+                    let dr6 = (dr6 & !DR6_TRAP_BITS) | (outcome.exit_qualification & DR6_TRAP_BITS);
+                    // SAFETY: as above; only the status bits change.
+                    unsafe { core::arch::asm!("mov dr6, {}", in(reg) dr6) };
+                    vmcs::inject_exception(VEC_DB, None)?;
+                } else {
+                    vmcs::inject_exception(VEC_AC, Some(0))?;
+                }
+                last_outcome = Some(outcome);
+            }
             0 => {
                 // Exception/NMI. EXCEPTION_BITMAP=0 in production —
                 // exceptions go to Linux's IDT directly. This arm
@@ -1697,7 +1728,27 @@ impl VmContext {
                 let access_type = ((qual >> 4) & 0x3) as u8;
                 let gp_reg = ((qual >> 8) & 0xF) as u8;
 
-                if cr_num != 3 {
+                if cr_num == 8 {
+                    // CR8 is TPR[7:4] of the emulated local APIC; bits above
+                    // 3 are reserved (#GP).
+                    let fault = if access_type == 0 {
+                        let val = read_gpr(&self.vcpu.regs, gp_reg)?;
+                        if val <= 0xF {
+                            let _ = self.vcpu.lapic.write(APIC_TASKPRI, (val as u32) << 4);
+                        }
+                        val > 0xF
+                    } else {
+                        let tpr = self.vcpu.lapic.read(APIC_TASKPRI);
+                        write_gpr(&mut self.vcpu.regs, gp_reg, ((tpr >> 4) & 0xF) as u64)?;
+                        false
+                    };
+                    if fault {
+                        vmcs::inject_exception(VEC_GP, Some(0))?;
+                    } else {
+                        vmcs::advance_guest_rip()?;
+                    }
+                    last_outcome = Some(outcome);
+                } else if cr_num != 3 {
                     sh.serial.flush();
                     kprintln!(
                         "[microvm] unhandled CR{} access (type {}, reg {}, qual {:#x})",
@@ -1705,30 +1756,31 @@ impl VmContext {
                     );
                     last_outcome = Some(outcome);
                     break;
+                } else {
+                    match access_type {
+                        0 => {
+                            // MOV to CR3 (set page-table base).
+                            let val = read_gpr(&self.vcpu.regs, gp_reg)?;
+                            vmcs::write_guest_cr3(val)?;
+                        }
+                        1 => {
+                            // MOV from CR3.
+                            let val = vmcs::read_guest_cr3()?;
+                            write_gpr(&mut self.vcpu.regs, gp_reg, val)?;
+                        }
+                        _ => {
+                            sh.serial.flush();
+                            kprintln!(
+                                "[microvm] CR3 unusual access type {} (qual {:#x})",
+                                access_type, qual,
+                            );
+                            last_outcome = Some(outcome);
+                            break;
+                        }
+                    }
+                    vmcs::advance_guest_rip()?;
+                    last_outcome = Some(outcome);
                 }
-                match access_type {
-                    0 => {
-                        // MOV to CR3 (set page-table base).
-                        let val = read_gpr(&self.vcpu.regs, gp_reg)?;
-                        vmcs::write_guest_cr3(val)?;
-                    }
-                    1 => {
-                        // MOV from CR3.
-                        let val = vmcs::read_guest_cr3()?;
-                        write_gpr(&mut self.vcpu.regs, gp_reg, val)?;
-                    }
-                    _ => {
-                        sh.serial.flush();
-                        kprintln!(
-                            "[microvm] CR3 unusual access type {} (qual {:#x})",
-                            access_type, qual,
-                        );
-                        last_outcome = Some(outcome);
-                        break;
-                    }
-                }
-                vmcs::advance_guest_rip()?;
-                last_outcome = Some(outcome);
             }
             30 => {
                 let (port, dir_in, size) =

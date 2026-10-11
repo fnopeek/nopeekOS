@@ -384,14 +384,22 @@ unsafe fn run_guest_once(
             // preserves no x87/SSE/AVX/AVX-512. Must be in-asm,
             // adjacent to vmrun — a +avx2-built kernel spills `ymm`
             // anywhere between a Rust helper and the asm, clobbering
-            // the just-restored guest state. Mask = -1 (all
-            // XCR0-enabled components; guest owns XCR0 via XSETBV).
-            // Only GPR/vm* instructions sit between this xrstor and
-            // vmrun, and between vmrun and the paired xsave below.
+            // the just-restored guest state. Both xsave and xrstor run
+            // under the HOST XCR0 (KVM order): every component the host
+            // uses is then replaced by guest data or its init state. Under
+            // a smaller guest XCR0 the components it leaves out would keep
+            // host values (XMM keys) that the guest can still read. The
+            // guest XCR0 goes live only after the restore.
+            // Only GPR/vm* instructions sit between this and vmrun, and
+            // between vmrun and the paired exit half below.
             "mov rcx, [rsp + 16]",          // host_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",
             "xsave64 [rcx]",                // save host FPU (host XCR0)
+            "mov rcx, [rsp + 8]",           // guest_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xrstor64 [rcx]",               // restore guest FPU (host XCR0)
             "mov r11, [rsp + 0]",           // xcr pair
             "mov rax, [r11]",               // guest XCR0
             "cmp rax, [r11 + 8]",
@@ -401,10 +409,6 @@ unsafe fn run_guest_once(
             "xor ecx, ecx",
             "xsetbv",                       // guest XCR0 on
             "2:",
-            "mov rcx, [rsp + 8]",           // guest_fpu
-            "mov eax, 0xffffffff",
-            "mov edx, 0xffffffff",
-            "xrstor64 [rcx]",               // restore guest FPU (guest XCR0)
 
             // ── Entry: load guest GPRs from struct ────────────────
             "mov rbx, [rdi +   0]",
@@ -463,14 +467,35 @@ unsafe fn run_guest_once(
             //   host_fpu[+128], host_extra[+136], vmcb[+144],
             //   struct_ptr[+152], host_callee_saved(6).
 
+            // ── Speculation barrier, before any host return or indirect
+            // branch: IBPB (when `IBPB_ON_EXIT`) drops branch predictions
+            // the guest trained, then 32 calls refill the return stack
+            // (Linux `__FILL_RETURN_BUFFER`). Interrupts are still off.
+            "cmp byte ptr [rip + IBPB_ON_EXIT], 0",
+            "je 81f",
+            "mov ecx, 0x49",                // MSR_IA32_PRED_CMD
+            "mov eax, 1",                   // IBPB
+            "xor edx, edx",
+            "wrmsr",
+            "81:",
+            "mov eax, 16",
+            "82:",
+            "call 83f",
+            "int3",
+            "83:",
+            "call 84f",
+            "int3",
+            "84:",
+            "dec eax",
+            "jnz 82b",
+            "add rsp, 256",
+            "lfence",
+
             // ── FPU save/restore (paired exit half): no FP since
-            // vmexit (only vm*/push above). Save guest FPU, restore
-            // host's. Guest GPRs are on the stack now → rax/rcx/rdx
-            // free to clobber.
-            "mov rcx, [rsp + 120]",         // guest_fpu
-            "mov eax, 0xffffffff",
-            "mov edx, 0xffffffff",
-            "xsave64 [rcx]",                // save guest FPU (guest XCR0)
+            // vmexit (only vm*/push above). Host XCR0 back first, then
+            // save the guest FPU and restore the host's under it.
+            // Guest GPRs are on the stack now → rax/rcx/rdx free to
+            // clobber.
             "mov r11, [rsp + 112]",         // xcr pair
             "mov rax, [r11 + 8]",           // host XCR0
             "cmp rax, [r11]",
@@ -480,6 +505,10 @@ unsafe fn run_guest_once(
             "xor ecx, ecx",
             "xsetbv",                       // host XCR0 back
             "3:",
+            "mov rcx, [rsp + 120]",         // guest_fpu
+            "mov eax, 0xffffffff",
+            "mov edx, 0xffffffff",
+            "xsave64 [rcx]",                // save guest FPU (host XCR0)
             "mov rcx, [rsp + 128]",         // host_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",
@@ -564,8 +593,19 @@ const EXIT_MWAIT_COND: u64 = 0x08C;
 const EXIT_XSETBV: u64 = 0x08D;
 const EXIT_RDPRU: u64 = 0x08E;
 
+const EXIT_EXCP_DB: u64 = 0x041;
+const EXIT_EXCP_AC: u64 = 0x051;
+
+const VEC_DB: u8 = 1;
 const VEC_UD: u8 = 6;
 const VEC_GP: u8 = 13;
+const VEC_AC: u8 = 17;
+
+/// Exceptions always intercepted and reflected (KVM `init_vmcb`): a #DB
+/// or #AC raised while the CPU delivers the same exception re-faults inside
+/// microcode, with no interrupt window in between, and holds the host core
+/// forever (CVE-2015-8104, CVE-2015-5307). Intercepted, each try is an exit.
+const INTERCEPT_EXC_LINUX: u32 = (1 << VEC_DB) | (1 << VEC_AC);
 
 /// Queue a hardware exception for the next VMRUN (EVENTINJ type 3). RIP is
 /// not advanced: the faulting instruction is the one reported.
@@ -922,6 +962,7 @@ fn setup_vmcb_linux(
     // ── Control area ──────────────────────────────────────────────
     vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, vmcb::LINUX_MISC1);
     vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC2, vmcb::LINUX_MISC2);
+    vmcb.write_u32(vmcb::OFF_INTERCEPT_EXC, INTERCEPT_EXC_LINUX);
     vmcb.write_u32(vmcb::OFF_INT_CTL, vmcb::V_INTR_MASKING);
 
     vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
@@ -988,6 +1029,7 @@ fn setup_vmcb_ap(
     // ── Control area — identical to setup_vmcb_linux ────────────────
     vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, vmcb::LINUX_MISC1);
     vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC2, vmcb::LINUX_MISC2);
+    vmcb.write_u32(vmcb::OFF_INTERCEPT_EXC, INTERCEPT_EXC_LINUX);
     vmcb.write_u32(vmcb::OFF_INT_CTL, vmcb::V_INTR_MASKING);
     vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
     vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
@@ -1700,6 +1742,16 @@ impl VmContext {
             | EXIT_CLGI | EXIT_SKINIT | EXIT_INVLPGA | EXIT_RDPRU
             | EXIT_MONITOR | EXIT_MWAIT | EXIT_MWAIT_COND => {
                 inject_exception(&mut self.vcpu.vmcb, VEC_UD, None);
+                last_outcome = Some(outcome);
+            }
+            // Reflected unchanged (KVM `db_interception`, `ac_interception`):
+            // the guest's DR6 is already in the VMCB, and #AC's error code is 0.
+            EXIT_EXCP_DB => {
+                inject_exception(&mut self.vcpu.vmcb, VEC_DB, None);
+                last_outcome = Some(outcome);
+            }
+            EXIT_EXCP_AC => {
+                inject_exception(&mut self.vcpu.vmcb, VEC_AC, Some(0));
                 last_outcome = Some(outcome);
             }
             // No vPMU (KVM with enable_pmu=0): RDPMC faults.
