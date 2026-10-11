@@ -481,7 +481,7 @@ impl Linker {
         // One entry per processor fault the generator relies on. A handler
         // only has to point the interrupted instruction pointer at the right
         // one; the entry names the reason itself.
-        let mut fault_entry = |code: &mut Vec<u8>, reason: u32| -> usize {
+        let fault_entry = |code: &mut Vec<u8>, reason: u32| -> usize {
             let at = code.len();
             let mut a = x64::Asm::new();
             a.mov_r32_imm32(x64::Reg::Rax, reason as i32);

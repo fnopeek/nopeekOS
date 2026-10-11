@@ -183,12 +183,6 @@ impl Memory {
 
     // Growth happens only through `forge_rt::grow`, which writes the vmctx;
     // `Drop for Instance` copies the current size back before this drops.
-
-    /// Does `addr` fall inside this instance's reservation? What a page-fault
-    /// handler asks to tell a module's mistake from a kernel's.
-    pub fn owns(&self, addr: u64) -> bool {
-        addr >= self.base && addr < self.base + INSTANCE_STRIDE
-    }
 }
 
 impl Drop for Memory {
@@ -239,10 +233,6 @@ impl Code {
             off += PAGE;
         }
         Some(Code { base, len })
-    }
-
-    pub fn owns(&self, addr: u64) -> bool {
-        addr >= self.base && addr < self.base + self.len as u64
     }
 
     /// Bytes actually mapped; `map` rounds up to whole pages.

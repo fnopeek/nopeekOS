@@ -205,15 +205,8 @@ struct Ctrl {
     dead: bool,
 }
 
-/// Does this value need REX.W — that is, is it a 64-bit integer? Floats never
-/// answer yes here; their width is carried by `Fw`.
-fn w64(t: ValType) -> bool {
-    matches!(t, ValType::I64)
-}
-
 /// Does the value occupy all eight bytes of its slot? True for i64 and f64,
-/// which is a different question from `w64` and used in different places —
-/// conflating the two is how an f64 ends up half-stored.
+/// which is a different question from whether it needs REX.W (only i64).
 fn wide(t: ValType) -> bool {
     matches!(t, ValType::I64 | ValType::F64)
 }
@@ -647,25 +640,6 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Make `r` available: whatever stack value holds it goes to its slot.
-    fn evict_gpr(&mut self, r: Reg) {
-        for i in 0..self.stack.len() {
-            if self.stack[i].loc == Loc::Gpr(r) {
-                self.spill(i);
-                return;
-            }
-        }
-    }
-
-    fn evict_xmm(&mut self, x: Xmm) {
-        for i in 0..self.stack.len() {
-            if self.stack[i].loc == Loc::Xmm(x) {
-                self.spill(i);
-                return;
-            }
-        }
-    }
-
     /// Drop the stack back to `h` entries, releasing their registers.
     fn truncate_to(&mut self, h: u32) {
         while self.stack.len() > h as usize {
@@ -740,10 +714,6 @@ impl<'a> Ctx<'a> {
         }
         self.stack.push(Val { ty: t, loc: Loc::Gpr(d) });
         self.note_depth();
-    }
-
-    fn push_from(&mut self, r: Reg) {
-        self.push_from_ty(r, ValType::I32);
     }
 
     fn fpush_from(&mut self, x: Xmm, t: ValType) {
