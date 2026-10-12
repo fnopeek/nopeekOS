@@ -1188,8 +1188,10 @@ pub fn vm_open(
             inject: inject.to_vec(),
         });
         reset_close_state();
-        // Snapshot the protected cores while still idle (see `protected_cores`).
+        // Snapshot the protected cores and the GPU core while still idle
+        // (see `protected_cores`, `reserve_gpu_core`).
         let _ = protected_cores();
+        let _ = reserve_gpu_core();
         VM_RUN_STATE.store(VM_REQUESTED, Ordering::Release);
         // Place it deliberately: `spawn_fiber` hands the task to whichever
         // worker steals it first, and that core owns the guest for its whole
@@ -1213,6 +1215,7 @@ pub fn vm_open(
         });
         reset_close_state();
         let _ = protected_cores();
+        let _ = reserve_gpu_core();
         VM_RUN_STATE.store(VM_REQUESTED, Ordering::Release);
         return Ok(());
     }
