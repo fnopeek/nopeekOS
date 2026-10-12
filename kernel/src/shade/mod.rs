@@ -1222,7 +1222,7 @@ pub fn start_autostart() {
         .filter(|s| !s.is_empty())
         .map(String::from);
     let Some(first) = names.next() else { return };
-    launch_app_with_ttl(&first, None);
+    launch(&first, None, true);
     let rest: alloc::collections::VecDeque<String> = names.collect();
     if rest.is_empty() { return; }
     *AUTOSTART_REST.lock() = rest;
@@ -1244,7 +1244,7 @@ fn autostart_fiber(_: u64) {
     loop {
         crate::smp::fiber::yield_sleep(AUTOSTART_STAGGER_MS);
         let Some(name) = AUTOSTART_REST.lock().pop_front() else { return };
-        launch_app_with_ttl(&name, None);
+        launch(&name, None, true);
     }
 }
 
@@ -1266,6 +1266,11 @@ pub fn launch_app(name: &str) {
 /// module starts failing, which looks like the device breaking, not like a
 /// capability expiring.
 pub fn launch_app_with_ttl(name: &str, ttl_ticks: Option<u64>) {
+    launch(name, ttl_ticks, false);
+}
+
+/// `background`: an autostart app, which shares the app core with the others.
+fn launch(name: &str, ttl_ticks: Option<u64>, background: bool) {
     let already_open = with_compositor(|comp| {
         comp.windows.iter()
             .find(|w| w.kind == window::WindowKind::Widget && w.title == name)
@@ -1280,7 +1285,9 @@ pub fn launch_app_with_ttl(name: &str, ttl_ticks: Option<u64>) {
     // reading it from npkFS, decrypting it and checking its hash can take
     // tens of milliseconds for a large module, which on Core 0 would delay
     // the next frame. The check above stays here: it needs the compositor.
-    let job = alloc::boxed::Box::new(LaunchJob { name: alloc::string::String::from(name), ttl_ticks });
+    let job = alloc::boxed::Box::new(LaunchJob {
+        name: alloc::string::String::from(name), ttl_ticks, background,
+    });
     let arg = alloc::boxed::Box::into_raw(job) as u64;
     if crate::smp::scheduler::worker_count() == 0 {
         launch_task(arg);
@@ -1292,6 +1299,7 @@ pub fn launch_app_with_ttl(name: &str, ttl_ticks: Option<u64>) {
 struct LaunchJob {
     name: alloc::string::String,
     ttl_ticks: Option<u64>,
+    background: bool,
 }
 
 fn launch_task(arg: u64) {
@@ -1311,7 +1319,12 @@ fn launch_task(arg: u64) {
         Ok(id) => id,
         Err(e) => { crate::kprintln!("[npk] launch_app: cap failed: {}", e); return; }
     };
-    if !crate::wasm::spawn_widget_app(bytes.to_vec(), module_cap, name, 0) {
+    let spawned = if job.background {
+        crate::wasm::spawn_background_widget_app(bytes.to_vec(), module_cap, name)
+    } else {
+        crate::wasm::spawn_widget_app(bytes.to_vec(), module_cap, name, 0)
+    };
+    if !spawned {
         crate::kprintln!("[npk] launch_app: spawn failed for '{}'", name);
     }
 }

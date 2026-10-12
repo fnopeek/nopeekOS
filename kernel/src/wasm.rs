@@ -436,9 +436,16 @@ pub fn spawn_widget_app(wasm_bytes: Vec<u8>, cap_id: CapId, module_name: &str, w
     spawn_on_worker_inner(wasm_bytes, cap_id, 255, module_name, false, widget_wid, None)
 }
 
+/// Like `spawn_widget_app`, for a background app (autostart) that shares the
+/// app core with the others (`smp::per_core::app_core`).
+pub fn spawn_background_widget_app(wasm_bytes: Vec<u8>, cap_id: CapId, module_name: &str) -> bool {
+    spawn_on_worker_inner_engine(
+        wasm_bytes, cap_id, 255, module_name, false, 0, None, forge_is_default(), true)
+}
+
 /// Like `spawn_on_worker`, but under forge: same job queue, same window.
 pub fn spawn_on_worker_forge(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str) -> bool {
-    spawn_on_worker_inner_engine(wasm_bytes, cap_id, terminal_idx, module_name, true, 0, None, true)
+    spawn_on_worker_inner_engine(wasm_bytes, cap_id, terminal_idx, module_name, true, 0, None, true, false)
 }
 
 fn spawn_on_worker_inner(
@@ -449,13 +456,14 @@ fn spawn_on_worker_inner(
     // the default engine like everything else.
     let e = forge_is_default();
     spawn_on_worker_inner_engine(
-        wasm_bytes, cap_id, terminal_idx, module_name, foreground, widget_wid, launch_arg, e)
+        wasm_bytes, cap_id, terminal_idx, module_name, foreground, widget_wid, launch_arg, e, false)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_on_worker_inner_engine(
     wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str,
     foreground: bool, widget_wid: u32, launch_arg: Option<String>, use_forge: bool,
+    shared_core: bool,
 ) -> bool {
     let mut jobs = WASM_JOBS.lock();
     let slot = match jobs.iter().position(|j| j.is_none()) {
@@ -485,10 +493,11 @@ fn spawn_on_worker_inner_engine(
     // Run the app on a fiber (own stack) so it can yield at npk_sleep /
     // npk_event_wait instead of pinning its worker core — see smp::fiber
     // + docs/plan/SCHEDULER_FIBERS.md. Native intents still use plain `spawn`.
-    crate::smp::scheduler::spawn_fiber(
-        wasm_worker_task,
-        slot as u64,
-    );
+    if shared_core {
+        crate::smp::scheduler::spawn_fiber_shared(wasm_worker_task, slot as u64);
+    } else {
+        crate::smp::scheduler::spawn_fiber(wasm_worker_task, slot as u64);
+    }
 
     true
 }

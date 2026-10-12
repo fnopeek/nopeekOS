@@ -26,6 +26,10 @@ pub struct Task {
     /// may block at yield points). Native run-to-completion tasks
     /// (intents) leave this false and run directly. See `smp::fiber`.
     pub is_fiber: bool,
+    /// A background app (autostart: dock, bar). These share one core
+    /// (`per_core::app_core`) instead of taking an empty core each, which
+    /// a vCPU could have used.
+    pub shared: bool,
 }
 
 // ── Global Scheduler State ─────────────────────────────────────
@@ -55,22 +59,27 @@ pub fn init(num_workers: usize) {
 
 /// Queue a native run-to-completion task (an intent). Callable from any core.
 pub fn spawn(name: &'static str, func: fn(u64), arg: u64) {
-    spawn_inner(name, func, arg, false);
+    spawn_inner(name, func, arg, false, false);
 }
 
 /// Like `spawn`, but the task runs as a stackful fiber on the worker core
 /// (`smp::fiber`). Used for `wasm_worker_task` so apps run on their own
 /// stack and yield at `npk_sleep` instead of pinning the core.
 pub fn spawn_fiber(func: fn(u64), arg: u64) {
-    spawn_inner("fiber", func, arg, true);
+    spawn_inner("fiber", func, arg, true, false);
 }
 
-fn spawn_inner(name: &'static str, func: fn(u64), arg: u64, is_fiber: bool) {
+/// Like `spawn_fiber`, for a background app that shares the app core.
+pub fn spawn_fiber_shared(func: fn(u64), arg: u64) {
+    spawn_inner("fiber", func, arg, true, true);
+}
+
+fn spawn_inner(name: &'static str, func: fn(u64), arg: u64, is_fiber: bool, shared: bool) {
     if WORKER_COUNT.load(Ordering::Acquire) == 0 {
         func(arg);
         return;
     }
-    INBOX.lock().push_back(Task { name, func, arg, is_fiber });
+    INBOX.lock().push_back(Task { name, func, arg, is_fiber, shared });
     TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
     // Idle workers have no periodic tick, so wake them.
     super::per_core::wake_idle_workers();
@@ -81,9 +90,21 @@ pub fn has_work() -> bool {
     !INBOX.lock().is_empty()
 }
 
-/// Take the oldest waiting task, if any.
-pub fn next_task(_core_id: usize) -> Option<Task> {
-    let t = INBOX.lock().pop_front();
+/// Whether the oldest waiting task is one `accept` would take, given whether
+/// it is a shared background app. For the idle re-check.
+pub fn head_acceptable(accept: impl Fn(bool) -> bool) -> bool {
+    INBOX.lock().front().is_some_and(|t| accept(t.shared))
+}
+
+/// Take the oldest waiting task if `accept` takes it. The decision is made
+/// under the inbox lock, so the task decided on is the task taken.
+pub fn next_task(accept: impl Fn(bool) -> bool) -> Option<Task> {
+    let mut inbox = INBOX.lock();
+    if !inbox.front().is_some_and(|t| accept(t.shared)) {
+        return None;
+    }
+    let t = inbox.pop_front();
+    drop(inbox);
     if t.is_some() {
         TASKS_TAKEN.fetch_add(1, Ordering::Relaxed);
     }

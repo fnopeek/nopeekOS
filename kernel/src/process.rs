@@ -73,6 +73,19 @@ pub fn pid_at_index(idx: usize) -> u32 {
     PROCS.lock().values().nth(idx).map(|p| p.pid).unwrap_or(0)
 }
 
+/// Names of the WASM processes on core `cid`, comma-separated, and how many.
+pub fn wasm_names_on_core(cid: usize) -> (alloc::string::String, u64) {
+    let mut out = alloc::string::String::new();
+    let mut n = 0;
+    for p in PROCS.lock().values() {
+        if p.kind != KIND_WASM || p.core_id as usize != cid { continue; }
+        if n > 0 { out.push_str(", "); }
+        out.push_str(core::str::from_utf8(&p.name[..p.name_len as usize]).unwrap_or("?"));
+        n += 1;
+    }
+    (out, n)
+}
+
 /// Accumulate CPU busy cycles for a process.
 pub fn add_busy_tsc(pid: u32, cycles: u64) {
     if let Some(p) = PROCS.lock().get_mut(&pid) {

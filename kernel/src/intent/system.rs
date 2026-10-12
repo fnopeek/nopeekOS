@@ -211,6 +211,19 @@ pub fn intent_cores() {
         kprintln!("        timer: fires={}/s late_max={}us",
             t1[c].0.saturating_sub(t0[c].0) * 1000 / window_ms,
             t1[c].1 / tsc_per_us.max(1));
+        // Who lives here: WASM modules by name, the rest are kernel fibers
+        // (vCPU, NAPI, microvm workers). `driver` and `apps` decide whether
+        // a vCPU may take the core.
+        let fibers = crate::smp::fiber::fiber_count(c);
+        if c > 0 && fibers > 0 {
+            let (names, n) = crate::process::wasm_names_on_core(c);
+            kprint!("        fibers: {}", if n > 0 { names.as_str() } else { "-" });
+            let kernel = fibers.saturating_sub(n);
+            if kernel > 0 { kprint!(" (+{} kernel)", kernel); }
+            if crate::smp::per_core::driver_cores() & (1 << c) != 0 { kprint!(" [driver]"); }
+            if crate::smp::per_core::app_core() == Some(c) { kprint!(" [apps]"); }
+            kprintln!();
+        }
     }
 
     // VM-exit mix — only when a guest ran during the window. Tells why

@@ -918,6 +918,46 @@ fn least_loaded(cid: usize) -> bool {
     true
 }
 
+/// The core the background apps share (autostart: dock, bar); 0 = none yet.
+///
+/// Each of them sleeps on events almost all the time, yet on a core of its
+/// own it makes that core unusable for a vCPU (`microvm::cpu::protected_cores`).
+/// Together they cost one core. Only background apps are packed: an
+/// interactive app may compute for seconds without yielding, and a peer
+/// on its core would wait that long.
+static APP_CORE: AtomicUsize = AtomicUsize::new(0);
+
+/// The shared app core, if one has been chosen.
+pub fn app_core() -> Option<usize> {
+    let c = APP_CORE.load(Ordering::Acquire);
+    (c != 0).then_some(c)
+}
+
+/// `c` may keep collecting background apps: not a driver's core (those stay
+/// to themselves), not the NIC driver's or the microVM's.
+fn app_core_usable(c: usize) -> bool {
+    c != 0 && c < 64
+        && driver_cores() & (1 << c) == 0
+        && crate::netdev::wasm_nic_core() != Some(c)
+        && DEDICATED_VM_CORE.load(Ordering::Acquire) as usize != c
+        && !crate::microvm::cpu::is_vm_worker_core(c)
+}
+
+/// Whether `cid` takes the oldest waiting task. A background app goes to the
+/// app core while that can take it; everything else, and a background app
+/// with no usable app core, goes to a least loaded core.
+fn accepts(cid: usize, shared: bool) -> bool {
+    if shared {
+        let a = APP_CORE.load(Ordering::Acquire);
+        if app_core_usable(a) && IN_LOOP[a].load(Ordering::Acquire)
+            && !NATIVE_BUSY[a].load(Ordering::Relaxed)
+        {
+            return a == cid;
+        }
+    }
+    least_loaded(cid)
+}
+
 /// AP Rust entry — called by trampoline after long mode transition.
 /// Interrupts are disabled (cli from trampoline). IDT is loaded.
 #[unsafe(no_mangle)]
@@ -987,14 +1027,17 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // cooperative fibers then starve each other. A core with a vCPU or VM
         // worker takes nothing new: next to a spinning vCPU it would barely
         // get to run.
-        let take = !nic_core && !crate::microvm::cpu::is_vm_worker_core(cid)
-            && least_loaded(cid);
+        let take = !nic_core && !crate::microvm::cpu::is_vm_worker_core(cid);
         // Admit a freshly-spawned app as a fiber, or run a native intent.
         // New work arrives in the shared inbox (`scheduler::spawn`).
-        if let Some(task) = if take { super::scheduler::next_task(cid) } else { None } {
+        let next = if take { super::scheduler::next_task(|shared| accepts(cid, shared)) } else { None };
+        if let Some(task) = next {
             if task.is_fiber {
                 // App: hand to this core's fiber scheduler. It runs on its
                 // own stack and yields at npk_sleep so peers share the core.
+                if task.shared && !app_core_usable(APP_CORE.load(Ordering::Acquire)) {
+                    APP_CORE.store(cid, Ordering::Release);
+                }
                 super::fiber::admit(cid, task.func, task.arg);
             } else {
                 // Native run-to-completion task (intent) — run directly.
@@ -1042,7 +1085,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             continue; // became runnable — round again
         }
         if super::scheduler::has_work() {
-            if !nic_core && least_loaded(cid) {
+            if !nic_core && super::scheduler::head_acceptable(|shared| accepts(cid, shared)) {
                 IDLE[cid].store(false, Ordering::Relaxed);
                 crate::interrupts::irq_restore(flags);
                 continue;
