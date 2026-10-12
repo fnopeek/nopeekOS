@@ -422,6 +422,36 @@ extern "C" fn grow(ctx: *mut u64, delta: u32) -> u32 {
 }
 
 
+/// Fuel per slice: how far generated code runs between two looks at the
+/// other fibers of its core — about a millisecond. The checks are the ones
+/// the generator places anyway (every loop head and function entry), so a
+/// slice costs one call into here and nothing on the straight path.
+const FUEL_SLICE: i64 = 2_000_000;
+
+/// `BUILTIN_FUEL`: the fuel register ran out. Charge the slice against the
+/// instance's budget and, while some is left, let a runnable fiber of this
+/// core go first (`fiber::yield_if_contended`) — preemption of a computing
+/// module at a point the generator chose, so the kernel stays cooperative.
+/// A spent budget leaves `FUEL` non-positive, and generated code traps.
+extern "C" fn refuel(ctx: *mut u64) {
+    // SAFETY: `ctx` is the instance context of the running module, laid out
+    // by `forge_core::vmctx`.
+    unsafe {
+        let fuel = *ctx.add(vmctx::FUEL as usize / 8) as i64;
+        let reserve = *ctx.add(vmctx::FUEL_RESERVE as usize / 8) as i64;
+        let total = reserve.saturating_add(fuel);
+        if total <= 0 {
+            *ctx.add(vmctx::FUEL_RESERVE as usize / 8) = 0;
+            *ctx.add(vmctx::FUEL as usize / 8) = total as u64;
+            return;
+        }
+        crate::smp::fiber::yield_if_contended();
+        let slice = total.min(FUEL_SLICE);
+        *ctx.add(vmctx::FUEL_RESERVE as usize / 8) = (total - slice) as u64;
+        *ctx.add(vmctx::FUEL as usize / 8) = slice as u64;
+    }
+}
+
 /// A host function's integer type; host calls take and return nothing else.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Wt { I32, I64 }
@@ -594,6 +624,7 @@ impl Instance {
         ctx[vmctx::TABLE_SIGS as usize / 8] = table_sigs.as_ptr() as u64;
         ctx[vmctx::HOST_FNS as usize / 8] = host_fns.as_ptr() as u64;
         ctx[vmctx::BUILTIN_GROW as usize / 8] = grow as *const () as usize as u64;
+        ctx[vmctx::BUILTIN_FUEL as usize / 8] = refuel as *const () as usize as u64;
         ctx[vmctx::HOST_CTX as usize / 8] = host.map(|h| h.ctx_ptr()).unwrap_or(0);
 
         Some(Instance {
@@ -619,8 +650,12 @@ impl Instance {
         self.ctx[vmctx::MEM_SIZE as usize / 8]
     }
 
+    /// The instance's budget: one slice in the register, the rest behind it
+    /// for `refuel`.
     pub fn set_fuel(&mut self, v: i64) {
-        self.ctx[vmctx::FUEL as usize / 8] = v as u64;
+        let slice = v.min(FUEL_SLICE);
+        self.ctx[vmctx::FUEL as usize / 8] = slice as u64;
+        self.ctx[vmctx::FUEL_RESERVE as usize / 8] = (v - slice).max(0) as u64;
     }
 
     pub fn trap_code(&self) -> u32 {

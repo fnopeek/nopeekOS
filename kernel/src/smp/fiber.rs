@@ -522,6 +522,36 @@ pub fn steal_for(thief: usize) -> bool {
     false
 }
 
+/// Called from a computing fiber at a safe point (forge's `refuel`): if
+/// another fiber of this core could run now, ask an idle core to take it and
+/// give this core up for a turn. A no-op outside a fiber or when nothing
+/// else is runnable here.
+pub fn yield_if_contended() {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES {
+        return;
+    }
+    // SAFETY: CURRENT_FIBER[cid] is non-null iff we run inside a fiber here.
+    if unsafe { CURRENT_FIBER[cid].is_null() } {
+        return;
+    }
+    let now = crate::interrupts::rdtsc();
+    let others = FIBER_QUEUES[cid].lock().iter().any(|f| runnable(f, now));
+    if others {
+        PREEMPTS.fetch_add(1, Ordering::Relaxed);
+        crate::smp::per_core::invite_stealer(cid);
+        yield_ready();
+    }
+}
+
+/// Times a computing fiber gave its core up at a safe point (`cores`).
+static PREEMPTS: AtomicU64 = AtomicU64::new(0);
+
+/// How many times computing fibers yielded to a runnable peer since boot.
+pub fn preempts() -> u64 {
+    PREEMPTS.load(Ordering::Relaxed)
+}
+
 /// Fibers taken over by an idle core since boot (`cores`).
 static STEALS: AtomicU64 = AtomicU64::new(0);
 

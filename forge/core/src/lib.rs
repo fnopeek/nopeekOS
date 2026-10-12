@@ -77,8 +77,17 @@ pub mod vmctx {
     /// and the end of the stack is the room left for host functions. Zero
     /// disables the check.
     pub const STACK_LIMIT: i32 = 120;
+    /// Called where the fuel register has run out, with the context in `rdi`
+    /// and the counter stored at `FUEL`. It may refill `FUEL` from a budget
+    /// of the embedder's and let other work run first; generated code then
+    /// reloads the counter and goes on, or traps if it is still not positive.
+    /// Zero: no such routine, running out traps at once.
+    pub const BUILTIN_FUEL: i32 = 128;
+    /// The embedder's own budget behind `FUEL`, for `BUILTIN_FUEL`. Generated
+    /// code never reads it.
+    pub const FUEL_RESERVE: i32 = 136;
 
-    pub const SIZE: usize = 128;
+    pub const SIZE: usize = 144;
     /// Every global occupies eight bytes regardless of type, so the index is
     /// a plain shift.
     pub const GLOBAL_STRIDE: i32 = 8;

@@ -338,6 +338,9 @@ struct Ctx<'a> {
     max_stack: u32,
     frame_patch: usize,
     ctrl: Vec<Ctrl>,
+    /// Fuel checks that still need their refuel stub: the jump out, and where
+    /// execution resumes.
+    refuels: Vec<(Patch, usize)>,
     /// Instructions counted since the last time the fuel register was
     /// updated. Charged in one go at the next control-flow edge, so metering
     /// costs one `sub` per basic block instead of one per instruction.
@@ -864,12 +867,41 @@ impl<'a> Ctx<'a> {
     /// forever — a loop's back edge and a function's entry. Straight-line code
     /// cannot loop, so it needs no check, and the counter simply goes negative
     /// until the next one.
+    ///
+    /// Running out leaves the straight path for a refuel stub after the
+    /// function (`emit_refuels`), which asks the embedder for more and comes
+    /// back here. Both places hold every value in its frame slot — the entry
+    /// has stored the arguments, a loop head has spilled — so a call there
+    /// clobbers nothing live.
     fn fuel_check(&mut self) {
         self.asm.test(true, FUEL, FUEL);
         // `jle`, not `js`: a budget of exactly zero is spent too, and a check
         // that only fired on negative would let one more block through.
         let p = self.asm.jcc(Cond::Le);
-        self.trap_patch(trap::OUT_OF_FUEL, p);
+        let resume = self.asm.pos();
+        self.refuels.push((p, resume));
+    }
+
+    /// One stub per fuel check: call `BUILTIN_FUEL` with the counter in the
+    /// context, take the counter back, and return to the check's resume
+    /// point; trap if there is no routine or still no fuel.
+    fn emit_refuels(&mut self) {
+        let refuels = core::mem::take(&mut self.refuels);
+        for (p, resume) in refuels {
+            self.asm.bind(p);
+            self.asm.load64(T, VMCTX, vmctx::BUILTIN_FUEL);
+            self.asm.test(true, T, T);
+            let none = self.asm.jcc(Cond::E);
+            self.trap_patch(trap::OUT_OF_FUEL, none);
+            self.asm.store64(VMCTX, vmctx::FUEL, FUEL);
+            self.asm.mov_rr64(Reg::Rdi, VMCTX);
+            self.asm.call_reg(T);
+            self.asm.load64(FUEL, VMCTX, vmctx::FUEL);
+            self.asm.test(true, FUEL, FUEL);
+            let spent = self.asm.jcc(Cond::Le);
+            self.trap_patch(trap::OUT_OF_FUEL, spent);
+            self.asm.jmp_back(resume);
+        }
     }
 
     fn trap_patch(&mut self, code: u32, p: Patch) {
@@ -952,6 +984,7 @@ pub fn compile_func(
         trap_relocs: Vec::new(),
         n_locals,
         fuel_pending: 0,
+        refuels: Vec::new(),
         stack: Vec::new(),
         gpr_used: [false; 16],
         xmm_used: [false; 16],
@@ -1054,6 +1087,9 @@ pub fn compile_func(
     f.asm.mov_rr64(Reg::Rsp, Reg::Rbp);
     f.asm.pop(Reg::Rbp);
     f.asm.ret();
+
+    // Refuel stubs first: they add trap patches of their own.
+    f.emit_refuels();
 
     // One stub per reason, after the return path so the common path falls
     // straight through. Two instructions: name the reason, leave.
