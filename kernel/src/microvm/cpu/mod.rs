@@ -544,9 +544,8 @@ pub const GUEST_SMP: bool = true;
 /// broadcast loops — all see the same value for one run.
 pub fn guest_vcpus() -> u8 {
     let mut workers = vcpu_cores_before_gpu();
-    // A second reserved core for the off-vCPU GPU worker (framebuffer copy off
-    // the vCPU). One fewer vCPU; the browser is not guest-CPU-bound so it wins.
-    if reserve_gpu_core() {
+    // The GPU worker's own core, unless it shares the app core.
+    if gpu_core_costs_vcpu() {
         workers = workers.saturating_sub(1);
     }
     workers.clamp(1, MAX_VCPUS_CAP) as u8
@@ -656,22 +655,45 @@ fn reserve_offload_core() -> bool {
     RESERVE_OFFLOAD_CORE && crate::smp::per_core::core_count() >= 3
 }
 
-/// Reserve a second dedicated worker core for the off-vCPU GPU backend (the
-/// per-frame framebuffer copy + write_frame). Only with MSI-X, which lets the
-/// worker signal completions itself, and only while at least two vCPUs
-/// remain. Otherwise the GPU work stays inline on the vCPU. Snapshotted
-/// while no VM exists, like `protected_cores`: `guest_vcpus()` depends on it.
+/// Run the GPU backend (the per-frame framebuffer copy + write_frame) off the
+/// vCPUs. Only with MSI-X, which lets the worker signal completions itself.
+/// The worker shares the app core when there is one: it copies a frame and
+/// parks, and the panels there sleep on events too, so the guest keeps every
+/// other core as a vCPU. Without an app core it claims a core of its own, and
+/// only while at least two vCPUs remain. Otherwise the GPU work stays inline
+/// on the vCPU. Snapshotted while no VM exists, like `protected_cores`:
+/// `guest_vcpus()` depends on it.
 static GPU_CORE_RESERVED: AtomicBool = AtomicBool::new(false);
+/// The host core the GPU worker shares, `usize::MAX` = it claims its own.
+static GPU_SHARED_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 fn reserve_gpu_core() -> bool {
     if VM_RUN_STATE.load(Ordering::Acquire) != VM_IDLE {
         return GPU_CORE_RESERVED.load(Ordering::Acquire);
     }
+    let shared = gpu_share_candidate();
+    GPU_SHARED_CORE.store(shared.unwrap_or(usize::MAX), Ordering::Release);
     let r = reserve_offload_core()
         && crate::microvm::devices::msix::wanted()
-        && vcpu_cores_before_gpu() >= 3;
+        && (shared.is_some() || vcpu_cores_before_gpu() >= 3);
     GPU_CORE_RESERVED.store(r, Ordering::Release);
     r
+}
+
+/// The app core, if no vCPU can land there (it is protected) and it does not
+/// pump a NIC or the WiFi manager.
+fn gpu_share_candidate() -> Option<usize> {
+    let c = crate::smp::per_core::app_core()?;
+    let ok = c < 32
+        && protected_cores() & (1 << c) != 0
+        && crate::netdev::wasm_nic_core() != Some(c)
+        && crate::wifi::manager_core() != Some(c);
+    ok.then_some(c)
+}
+
+/// True when the GPU worker takes a core away from the vCPUs.
+fn gpu_core_costs_vcpu() -> bool {
+    reserve_gpu_core() && GPU_SHARED_CORE.load(Ordering::Acquire) == usize::MAX
 }
 
 /// Hard cap on guest vCPUs (sizes the per-backend IPI bitmaps + the spawn
@@ -1643,13 +1665,12 @@ fn vcpu_fiber_task(_arg: u64) {
     );
     crate::microvm::devices::net_dataplane::start_worker(worker_core);
 
-    // Off-vCPU GPU worker: with a spare core, claim a second reserved
-    // core and run the per-frame framebuffer copy + write_frame there, off
-    // the vCPU, so the browser's rendering never steals the net-servicing
-    // cycles. guest_vcpus() already left this core free. Gated on
-    // `reserve_gpu_core`; else GPU stays inline.
+    // Off-vCPU GPU worker: the per-frame framebuffer copy + write_frame run
+    // on the app core (shared) or on a claimed core that guest_vcpus() left
+    // free. Gated on `reserve_gpu_core`; else GPU stays inline.
     if reserve_gpu_core() {
-        let gpu_core = place_worker(true);
+        let shared = GPU_SHARED_CORE.load(Ordering::Acquire);
+        let gpu_core = if shared != usize::MAX { shared } else { place_worker(true) };
         crate::kprintln!(
             "[microvm] gpu worker core {} (off-vCPU framebuffer copy)", gpu_core);
         crate::microvm::devices::gpu_backend::start_worker(gpu_core);
