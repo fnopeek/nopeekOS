@@ -4,13 +4,12 @@
 //! sampling is blind to it; this takes an unbiased program-counter sample
 //! of the running guest.
 //!
-//! Sampling point (SVM): every `EXIT_INTR` is a host physical interrupt
-//! (the per-core host timer, or a device IRQ) that preempted a running
-//! guest. The VMCB save area then holds the exact guest RIP at the moment
-//! of preemption. An idle vCPU halts (`EXIT_HLT`, a different exit) so it
-//! is never sampled: the histogram concentrates on whatever is actually
-//! burning CPU. Not implemented for VMX (would use the VMX-preemption
-//! timer).
+//! Sampling point: every external-interrupt exit (SVM `EXIT_INTR`, VMX
+//! reason 1) is a host physical interrupt (the per-core host timer, or a
+//! device IRQ) that preempted a running guest. The VMCB save area or
+//! `GUEST_RIP` then holds the exact guest RIP at the moment of preemption.
+//! An idle vCPU halts (a different exit) so it is never sampled: the
+//! histogram concentrates on whatever is actually burning CPU.
 //!
 //! Aggregation: a Space-Saving heavy-hitter table (48 slots, 64-byte RIP
 //! buckets) keeps true hot spots under bounded memory, plus a per-vCPU

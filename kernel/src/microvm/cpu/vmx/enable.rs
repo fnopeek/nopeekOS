@@ -1492,6 +1492,14 @@ impl VmContext {
         }
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
         self.vcpu.trace.record(basic, outcome.exit_qualification);
+        // A host interrupt preempted the running guest: its RIP is an
+        // unbiased sample of what the vCPU executes (as on SVM).
+        if basic == 1 {
+            if let Ok(rip) = vmcs::read_guest_rip() {
+                crate::microvm::cpu::rip_sample::record(rip, self.vcpu.apic_id);
+            }
+        }
+        crate::microvm::cpu::rip_sample::maybe_dump();
         lapic::note_exit(self.vcpu.apic_id);
 
         // Exit-reason histogram (diagnosis — `cores` shows the mix).
