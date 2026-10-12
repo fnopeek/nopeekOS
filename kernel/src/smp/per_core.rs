@@ -930,9 +930,9 @@ fn core_load(c: usize) -> u64 {
 
 /// Whether `cid` is among the least loaded workers that take work.
 ///
-/// The NIC driver's core, the microVM core and every core running a vCPU or
-/// VM worker are excluded: they never take anything, so the minimum could
-/// otherwise sit on a core that never takes it. Ties are allowed; several
+/// The NIC driver's core, the microVM core and every core running a vCPU are
+/// excluded: they never take anything, so the minimum could otherwise sit on
+/// a core that never takes it. Ties are allowed; several
 /// empty cores may race for the inbox.
 fn least_loaded(cid: usize) -> bool {
     let workers = super::scheduler::worker_count();
@@ -947,7 +947,7 @@ fn least_loaded(cid: usize) -> bool {
         // it would make new work wait for that intent to finish.
         if c == cid || Some(c) == nic || c == vm || !IN_LOOP[c].load(Ordering::Acquire)
             || NATIVE_BUSY[c].load(Ordering::Relaxed)
-            || crate::microvm::cpu::is_vm_worker_core(c)
+            || crate::microvm::cpu::is_vcpu_core(c)
         {
             continue;
         }
@@ -980,7 +980,7 @@ fn app_core_usable(c: usize) -> bool {
         && driver_cores() & (1 << c) == 0
         && crate::netdev::wasm_nic_core() != Some(c)
         && DEDICATED_VM_CORE.load(Ordering::Acquire) as usize != c
-        && !crate::microvm::cpu::is_vm_worker_core(c)
+        && !crate::microvm::cpu::is_vcpu_core(c)
 }
 
 /// Whether core `cid` takes new work from the inbox at all.
@@ -989,13 +989,15 @@ fn app_core_usable(c: usize) -> bool {
 /// millisecond and would otherwise win nearly every new intent, including the
 /// one consuming the driver's frames; an intent runs to completion, so driver
 /// and consumer would alternate instead of running side by side. A core with
-/// a vCPU or VM worker takes nothing new either: next to a spinning vCPU it
-/// would barely get to run. Among the rest, `accepts` prefers the least
-/// loaded, so the core that wakes most often does not collect every fiber.
+/// a vCPU takes nothing new either: fibers are cooperative, and the vCPU
+/// would wait for a computing app to yield. A core with a microVM worker does
+/// take work — the workers park or yield between passes. Among the rest,
+/// `accepts` prefers the least loaded, so the core that wakes most often does
+/// not collect every fiber.
 fn takes_work(cid: usize) -> bool {
     let nic_core = crate::netdev::wasm_nic_core() == Some(cid)
         && super::scheduler::worker_count() > 1;
-    !nic_core && !crate::microvm::cpu::is_vm_worker_core(cid)
+    !nic_core && !crate::microvm::cpu::is_vcpu_core(cid)
 }
 
 /// Hand an app task to this core's fiber scheduler. It runs on its own stack

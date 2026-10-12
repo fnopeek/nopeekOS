@@ -601,16 +601,6 @@ fn least_fibered(candidates: u32) -> Option<usize> {
         .min_by_key(|&c| crate::smp::fiber::fiber_count(c))
 }
 
-/// True if `cid` runs a vCPU or a microvm worker (not a protected host core).
-/// Such a core must not pick up new host work while the guest runs.
-pub fn is_vm_worker_core(cid: usize) -> bool {
-    if cid == 0 || cid >= 32 || VM_RUN_STATE.load(Ordering::Acquire) == VM_IDLE {
-        return false;
-    }
-    let busy = VM_CORE_MASK.load(Ordering::Acquire) & !protected_cores();
-    busy & (1 << cid) != 0
-}
-
 /// Lowest worker core the network does not need. Whichever core picks up the BSP
 /// vCPU fiber owns the guest for its whole lifetime, so the choice is made here
 /// rather than left to work-stealing.

@@ -313,6 +313,12 @@ pub fn admit_movable(cid: usize, func: fn(u64), arg: u64) {
     admit_inner(cid, func, arg, DEFAULT_STACK_BYTES, true);
 }
 
+/// `admit_movable` with an explicit stack size, for a kernel worker that
+/// keeps no state tied to its core (woken through a `Doorbell`).
+pub fn admit_movable_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize) {
+    admit_inner(cid, func, arg, stack_bytes, true);
+}
+
 fn admit_inner(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize, movable: bool) {
     if cid >= MAX_CORES {
         func(arg); // degenerate (no per-core queue) → run inline

@@ -119,7 +119,9 @@ pub fn start_worker(core: usize) {
     STOP.store(false, Ordering::Release);
     // The card's RX interrupt stays with the NAPI fiber (`net::napi`), which
     // drains the card into the tap. This worker reads the tap, not a card.
-    crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
+    // Movable: it is woken through `NET_BELL`, and an idle core may take it
+    // over while its first core is busy with something else.
+    crate::smp::fiber::admit_movable_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
 }
 
 /// The active card raises no RX interrupt, so somebody has to poll it, as
@@ -363,6 +365,9 @@ fn worker_entry(_arg: u64) {
             + PARK_SAFETY_MS.saturating_mul(crate::interrupts::tsc_freq() / 1000);
         let woke = crate::smp::fiber::park_on_bell(deadline, has_work);
         crate::microvm::devices::nat::set_worker_parked(false);
+        // It may have woken on another core (`fiber::steal_for`).
+        crate::microvm::devices::net_backend::set_worker_core(
+            crate::smp::per_core::current_core_id());
         if woke {
             WAKE_IRQ.fetch_add(1, Ordering::Relaxed);
         } else {

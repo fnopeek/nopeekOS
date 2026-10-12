@@ -308,14 +308,16 @@ static STOP: AtomicBool = AtomicBool::new(false);
 /// fiber stack (the default 128 KiB has no guard page).
 const WORKER_STACK_BYTES: usize = 256 * 1024;
 
-/// Spawn the GPU worker on its own reserved `core`. Idempotent per VM session.
-/// Only when a core was reserved (see `cpu::reserve_gpu_core`).
+/// Spawn the GPU worker, first on `core`. Idempotent per VM session. Only
+/// when the off-vCPU GPU path is on (see `cpu::reserve_gpu_core`).
 pub fn start_worker(core: usize) {
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
     STOP.store(false, Ordering::Release);
     set_worker_core(core);
     set_full_active(true);
-    crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
+    // Movable: it is woken through `GPU_BELL`, and an idle core may take it
+    // over while its first core is busy with something else.
+    crate::smp::fiber::admit_movable_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
 }
 
 /// Stop the worker at VM teardown and wait (bounded) for it to exit. False
@@ -371,5 +373,7 @@ fn worker_entry(_arg: u64) {
         crate::smp::fiber::park_on_bell(deadline, || {
             GPU_KICK.load(Ordering::Acquire) != 0 || STOP.load(Ordering::Acquire)
         });
+        // It may have woken on another core (`fiber::steal_for`).
+        set_worker_core(crate::smp::per_core::current_core_id());
     }
 }
