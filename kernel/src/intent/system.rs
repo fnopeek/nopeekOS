@@ -114,6 +114,10 @@ pub fn intent_cores() {
     let eg0 = crate::microvm::devices::nat::egress_stats();
     let gr0 = crate::microvm::devices::nat::gro_stats();
     let tl0 = crate::microvm::devices::nat::tcp_loss_stats();
+    let tr0 = crate::microvm::devices::net_dataplane::tx_round_stats();
+    let tpk0 = crate::microvm::devices::net_dataplane::TX_PICKUP.snapshot();
+    let tsg0 = crate::microvm::devices::net_dataplane::TX_SIGNAL.snapshot();
+    let tre0 = crate::microvm::devices::net_dataplane::TX_REACT.snapshot();
     let gt0 = crate::microvm::devices::nat::guest_timer_count();
     let tx0 = crate::microvm::devices::nat::tx_stats();
     let rp0 = crate::microvm::devices::net_dataplane::rx_pass_stats(); // clears gap_max
@@ -152,6 +156,10 @@ pub fn intent_cores() {
     let eg1 = crate::microvm::devices::nat::egress_stats();
     let gr1 = crate::microvm::devices::nat::gro_stats();
     let tl1 = crate::microvm::devices::nat::tcp_loss_stats();
+    let tr1 = crate::microvm::devices::net_dataplane::tx_round_stats();
+    let tpk1 = crate::microvm::devices::net_dataplane::TX_PICKUP.snapshot();
+    let tsg1 = crate::microvm::devices::net_dataplane::TX_SIGNAL.snapshot();
+    let tre1 = crate::microvm::devices::net_dataplane::TX_REACT.snapshot();
     let gt1 = crate::microvm::devices::nat::guest_timer_count();
     let tx1 = crate::microvm::devices::nat::tx_stats();
     let rp1 = crate::microvm::devices::net_dataplane::rx_pass_stats(); // gap_max = window peak
@@ -399,6 +407,26 @@ pub fn intent_cores() {
         let sack = tl1.1.saturating_sub(tl0.1);
         kprintln!("    net TCP loss: retrans={}/s sack={}/s",
                   rtx * 1000 / window_ms, sack * 1000 / window_ms);
+        // The guest's TX round trip: take, tell, and how soon it sends again.
+        let passes = tr1.0.saturating_sub(tr0.0);
+        if passes > 0 {
+            let frames = tr1.1.saturating_sub(tr0.1);
+            let bytes = tr1.2.saturating_sub(tr0.2);
+            kprintln!("    net TX round: {}passes/s {}frames/pass {}KB/pass irq raised={}/s quiet={}/s",
+                      passes * 1000 / window_ms, frames / passes, bytes / passes / 1024,
+                      tr1.3.saturating_sub(tr0.3) * 1000 / window_ms,
+                      tr1.4.saturating_sub(tr0.4) * 1000 / window_ms);
+            let line = |name: &str, a: &([u64; 5], u64, u64), b: &([u64; 5], u64, u64)| {
+                let n = b.2.saturating_sub(a.2);
+                if n == 0 { return; }
+                let d: [u64; 5] = core::array::from_fn(|i| b.0[i].saturating_sub(a.0[i]));
+                kprintln!("      {:<7} avg {}us  <50us {}  <200us {}  <1ms {}  <5ms {}  >=5ms {}",
+                          name, b.1.saturating_sub(a.1) / n, d[0], d[1], d[2], d[3], d[4]);
+            };
+            line("pickup", &tpk0, &tpk1);
+            line("signal", &tsg0, &tsg1);
+            line("react", &tre0, &tre1);
+        }
         // GRO towards the guest: coalesced frames and segments per frame.
         let grf = gr1.0.saturating_sub(gr0.0);
         let grs = gr1.1.saturating_sub(gr0.1);

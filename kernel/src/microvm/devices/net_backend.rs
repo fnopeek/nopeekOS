@@ -10,7 +10,7 @@
 //!
 //! Single instance: exactly one microvm runs at a time.
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicBool, AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 use super::virtio_net_dev::VirtioNet;
 
@@ -42,10 +42,19 @@ pub fn worker_core() -> Option<usize> {
 /// vCPU: the guest kicked TX (q1). Set the flag and, on the empty→set edge,
 /// ring the worker's doorbell.
 pub fn note_tx_kick() {
+    // When the guest asked first, for the pickup time (`net_dataplane`).
+    let _ = TX_KICK_TSC.compare_exchange(
+        0, crate::interrupts::rdtsc(), Ordering::Relaxed, Ordering::Relaxed);
     if !TX_KICK.swap(true, Ordering::AcqRel) {
         NET_BELL.ring();
     }
 }
+
+/// TSC of the first guest TX kick not yet followed by a pickup; 0 = none.
+static TX_KICK_TSC: AtomicU64 = AtomicU64::new(0);
+
+/// Take the TSC of the pending guest TX kick, if any.
+pub fn take_tx_kick_tsc() -> u64 { TX_KICK_TSC.swap(0, Ordering::Relaxed) }
 
 /// Worker: take the TX-kick doorbell (clears it). True ⇒ run service_tx.
 pub fn take_tx_kick() -> bool { TX_KICK.swap(false, Ordering::AcqRel) }

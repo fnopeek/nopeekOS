@@ -84,6 +84,69 @@ pub fn rx_pass_stats() -> (u64, u64, u64) {
      RX_GAP_MAX_TSC.swap(0, Ordering::Relaxed))
 }
 
+// ── The guest's TX round trip, for `cores` ──
+//
+// Linux lets a TCP socket keep only about a millisecond of data below TCP
+// (TCP Small Queues); more goes out only after the device reports frames
+// sent and the guest frees them. So the time from taking a frame to the
+// guest hearing about it, and the time until it sends again, bound the
+// upload directly.
+
+/// Latency histogram: < 50 us, < 200 us, < 1 ms, < 5 ms, longer; sum; count.
+pub struct LatHist {
+    b: [AtomicU64; 5],
+    sum: AtomicU64,
+    n: AtomicU64,
+}
+
+impl LatHist {
+    const fn new() -> Self {
+        LatHist { b: [const { AtomicU64::new(0) }; 5], sum: AtomicU64::new(0), n: AtomicU64::new(0) }
+    }
+    fn record(&self, tsc: u64) {
+        let us = tsc / (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+        let i = [50u64, 200, 1000, 5000].iter().position(|&lim| us < lim).unwrap_or(4);
+        self.b[i].fetch_add(1, Ordering::Relaxed);
+        self.sum.fetch_add(us, Ordering::Relaxed);
+        self.n.fetch_add(1, Ordering::Relaxed);
+    }
+    /// (buckets, summed us, count).
+    pub fn snapshot(&self) -> ([u64; 5], u64, u64) {
+        (core::array::from_fn(|i| self.b[i].load(Ordering::Relaxed)),
+         self.sum.load(Ordering::Relaxed), self.n.load(Ordering::Relaxed))
+    }
+}
+
+/// Guest TX kick until the worker took the frames.
+pub static TX_PICKUP: LatHist = LatHist::new();
+/// Frames taken until the guest is told (TX interrupt raised).
+pub static TX_SIGNAL: LatHist = LatHist::new();
+/// Guest told, with its ring empty, until its next frame shows up.
+pub static TX_REACT: LatHist = LatHist::new();
+/// TX passes that took frames, the frames and bytes, interrupts raised and
+/// suppressed by the guest's `used_event`.
+static TX_PASSES: AtomicU64 = AtomicU64::new(0);
+static TX_FRAMES: AtomicU64 = AtomicU64::new(0);
+static TX_BYTES: AtomicU64 = AtomicU64::new(0);
+static TX_IRQ_RAISED: AtomicU64 = AtomicU64::new(0);
+static TX_IRQ_QUIET: AtomicU64 = AtomicU64::new(0);
+/// When the guest was last told about frames while its ring was empty; 0 =
+/// no reaction pending.
+static TX_TOLD_EMPTY_TSC: AtomicU64 = AtomicU64::new(0);
+
+/// (passes, frames, bytes, irqs raised, irqs suppressed).
+pub fn tx_round_stats() -> (u64, u64, u64, u64, u64) {
+    (TX_PASSES.load(Ordering::Relaxed), TX_FRAMES.load(Ordering::Relaxed),
+     TX_BYTES.load(Ordering::Relaxed), TX_IRQ_RAISED.load(Ordering::Relaxed),
+     TX_IRQ_QUIET.load(Ordering::Relaxed))
+}
+
+/// Tell the guest its frames are sent right after taking them, before the
+/// segmentation and the hand-over to the card — vhost signals after
+/// `sendmsg`, which does not segment. `set microvm_tx_early off` signals
+/// after the hand-over, for an A/B.
+static TX_EARLY: AtomicBool = AtomicBool::new(true);
+
 static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
 /// True between start_worker and stop_worker. Core 0's `net::poll()` yields the
@@ -116,6 +179,7 @@ const BUSY_POLL_US: u64 = 1000;
 /// independent drainer.
 pub fn start_worker(core: usize) {
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
+    arm_tx_early();
     STOP.store(false, Ordering::Release);
     // The card's RX interrupt stays with the NAPI fiber (`net::napi`), which
     // drains the card into the tap. This worker reads the tap, not a card.
@@ -230,8 +294,16 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
             alloc::vec::Vec::new()
         };
         let caps = dev.caps();
-        (rx_raise, tx_payloads, caps)
+        // Early completion: the TX interrupt now, before the segmentation
+        // below; synthetic replies follow in the late call.
+        let early_raise = if !tx_payloads.is_empty() && TX_EARLY.load(Ordering::Relaxed) {
+            dev.tx_finish(gm, true, &[]).0
+        } else {
+            false
+        };
+        (rx_raise, tx_payloads, (caps, early_raise))
     }; // device mutex released.
+    let (caps, early_raise) = caps;
     if rx_frames > 0 {
         note_rx_pass(rx_frames, crate::interrupts::rdtsc());
     }
@@ -240,6 +312,19 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     //    bulk upload this is the long pole; outside the device mutex it cannot
     //    stall the vCPU's ACK/ISR exits. ──
     let tx_advanced = !tx_payloads.is_empty();
+    let early = tx_advanced && TX_EARLY.load(Ordering::Relaxed);
+    let t_taken = crate::interrupts::rdtsc();
+    if tx_advanced {
+        note_tx_taken(&tx_payloads, t_taken);
+    }
+    // Told early: raise its vector now, before the long part.
+    if early && early_raise && !net_backend::msix_notify(1) {
+        net_backend::raise_irq();
+        crate::microvm::cpu::kick_bsp_net_irq();
+    }
+    if early {
+        note_tx_told(early_raise, t_taken, gm);
+    }
     let mut tx_replies: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
     for p in &tx_payloads {
         for rep in nat::tap_outbound(p, &caps) { tx_replies.push(rep); }
@@ -250,8 +335,12 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     // rings, so dropping the lock in between is race-free.
     let (tx_raise, reply_rx_raise) = {
         let mut dev = net_backend::lock();
-        dev.tx_finish(gm, tx_advanced, &tx_replies)
+        dev.tx_finish(gm, tx_advanced && !early, &tx_replies)
     };
+    if tx_advanced && !early {
+        note_tx_told(tx_raise, t_taken, gm);
+    }
+    let tx_raise = tx_raise || (early && early_raise);
     let rx_raise = rx_raise || reply_rx_raise;
 
     // Flush any guest egress batched into the host NIC's TX ring. Host-stack
@@ -269,11 +358,53 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     // With MSI-X each queue's vector goes straight to its vCPU (irqfd → MSI);
     // only INTx still takes the detour through the BSP's IRQ 10.
     let rx_intx = rx_raise && !net_backend::msix_notify(0);
-    let tx_intx = tx_raise && !net_backend::msix_notify(1);
+    // An early raise already went out above.
+    let tx_intx = tx_raise && !(early && early_raise) && !net_backend::msix_notify(1);
     if rx_intx || tx_intx {
         net_backend::raise_irq();
         crate::microvm::cpu::kick_bsp_net_irq();
     }
+}
+
+/// Frames taken from the guest's TX ring at `now`: the pickup time since its
+/// kick, the guest's reaction time if it had been told with an empty ring,
+/// and the pass size.
+fn note_tx_taken(payloads: &[alloc::vec::Vec<u8>], now: u64) {
+    TX_PASSES.fetch_add(1, Ordering::Relaxed);
+    TX_FRAMES.fetch_add(payloads.len() as u64, Ordering::Relaxed);
+    TX_BYTES.fetch_add(payloads.iter().map(|p| p.len() as u64).sum(), Ordering::Relaxed);
+    let kick = crate::microvm::devices::net_backend::take_tx_kick_tsc();
+    if kick != 0 {
+        TX_PICKUP.record(now.wrapping_sub(kick));
+    }
+    let told = TX_TOLD_EMPTY_TSC.swap(0, Ordering::Relaxed);
+    if told != 0 {
+        TX_REACT.record(now.wrapping_sub(told));
+    }
+}
+
+/// The guest was told about the frames taken at `taken` (`raised`: by an
+/// interrupt; else its `used_event` asked for none). With its TX ring now
+/// empty, its next frame measures its reaction.
+fn note_tx_told(raised: bool, taken: u64, gm: &crate::microvm::devices::guest_mem::GuestMem) {
+    let now = crate::interrupts::rdtsc();
+    if raised {
+        TX_IRQ_RAISED.fetch_add(1, Ordering::Relaxed);
+        TX_SIGNAL.record(now.wrapping_sub(taken));
+    } else {
+        TX_IRQ_QUIET.fetch_add(1, Ordering::Relaxed);
+    }
+    if !crate::microvm::devices::net_backend::tx_ring_pending(gm) {
+        TX_TOLD_EMPTY_TSC.store(now, Ordering::Relaxed);
+    }
+}
+
+/// Read `microvm_tx_early` once per launch.
+fn arm_tx_early() {
+    let off = crate::config::get("microvm_tx_early").is_some_and(|v| v.trim() == "off");
+    TX_EARLY.store(!off, Ordering::Relaxed);
+    crate::kprintln!("[microvm] TX completion: {}",
+        if off { "after hand-over (config)" } else { "early" });
 }
 
 fn worker_entry(_arg: u64) {
