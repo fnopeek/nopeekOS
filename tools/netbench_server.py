@@ -68,6 +68,48 @@ def tcp_info(sock):
                 snd_wnd=u32(228), rcv_wnd=u32(232))
 
 
+# A browser speed test against this server: download and upload through
+# the browser's own network stack, with a bar that repaints every frame the
+# way a speed-test page does. GET /speed.
+SPEED_PAGE = """<!doctype html><meta charset=utf-8><title>netbench speed</title>
+<style>body{font:20px sans-serif;margin:40px;background:#111;color:#eee}
+#bar{height:30px;background:#0a8;width:0}#wrap{width:100%;background:#333;margin:20px 0}
+button{font-size:20px;padding:8px 20px}</style>
+<h1>netbench speed</h1>
+<button onclick="run()">start</button> <span id=mb>500</span> MB each way
+<div id=wrap><div id=bar></div></div><pre id=out></pre>
+<script>
+const MB = 500, out = document.getElementById('out'), bar = document.getElementById('bar');
+let live = 0, t0 = 0, phase = '';
+function frame(){ if (phase) { bar.style.width = (Math.sin(performance.now()/200)*50+50)+'%';
+  document.title = phase + ' ' + live.toFixed(0) + ' Mbit'; } requestAnimationFrame(frame); }
+requestAnimationFrame(frame);
+function log(s){ out.textContent += s + '\\n'; }
+async function down(){
+  phase = 'download'; t0 = performance.now(); let got = 0;
+  const r = await fetch('/get?mb=' + MB + '&t=' + Date.now());
+  const rd = r.body.getReader();
+  for (;;) { const {done, value} = await rd.read(); if (done) break; got += value.length;
+    live = got * 8 / ((performance.now() - t0) * 1000); }
+  const s = (performance.now() - t0) / 1000;
+  log('download ' + (got >> 20) + ' MB in ' + s.toFixed(2) + ' s = ' + (got * 8 / s / 1e6).toFixed(0) + ' Mbit');
+}
+function up(){
+  return new Promise(res => {
+    const chunk = new Uint8Array(1 << 20); crypto.getRandomValues(chunk.subarray(0, 65536));
+    const blob = new Blob(Array(MB).fill(chunk));
+    const x = new XMLHttpRequest(); phase = 'upload'; t0 = performance.now();
+    x.upload.onprogress = e => { live = e.loaded * 8 / ((performance.now() - t0) * 1000); };
+    x.onloadend = () => { const s = (performance.now() - t0) / 1000;
+      log('upload ' + MB + ' MB in ' + s.toFixed(2) + ' s = ' + (MB * 8 * 1048576 / s / 1e6).toFixed(0) + ' Mbit');
+      res(); };
+    x.open('POST', '/upload'); x.send(blob);
+  });
+}
+async function run(){ out.textContent = ''; await down(); await up(); phase = ''; log('done'); }
+</script>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -75,6 +117,14 @@ class Handler(BaseHTTPRequestHandler):
         pass  # quiet
 
     def do_GET(self):
+        if urlparse(self.path).path == "/speed":
+            body = SPEED_PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         q = parse_qs(urlparse(self.path).query)
         mb = int(q.get("mb", ["200"])[0])
         total = mb * CHUNK
