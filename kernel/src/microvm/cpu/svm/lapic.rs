@@ -156,9 +156,25 @@ pub fn posted_pending(apic_id: u8) -> bool {
 /// out of guest mode; `usize::MAX` = not running yet.
 static VCPU_HOST_CORE: [AtomicUsize; MAX_VCPUS] =
     [const { AtomicUsize::new(usize::MAX) }; MAX_VCPUS];
-/// TSC of each vCPU's last exit — a running vCPU exits ≥1 kHz, a blocked one
-/// goes quiet (the PV-TLB "preempted" estimate in `rip_sample`).
-static VCPU_LAST_ACTIVE: [AtomicU64; MAX_VCPUS] = [const { AtomicU64::new(0) }; MAX_VCPUS];
+/// What each vCPU writes on every exit, one cache line per vCPU: written by
+/// its own fiber, read by `cores` and by IPI senders. In shared lines the
+/// stores of the vCPU cores would bounce one line between them.
+#[repr(align(64))]
+struct VcpuTrace {
+    /// TSC of the last exit — a running vCPU exits ≥1 kHz, a blocked one
+    /// goes quiet (the PV-TLB "preempted" estimate in `rip_sample`).
+    last_active: AtomicU64,
+    phase: core::sync::atomic::AtomicU8,
+    phase_tsc: AtomicU64,
+}
+
+static TRACE: [VcpuTrace; MAX_VCPUS] = [const {
+    VcpuTrace {
+        last_active: AtomicU64::new(0),
+        phase: core::sync::atomic::AtomicU8::new(0),
+        phase_tsc: AtomicU64::new(0),
+    }
+}; MAX_VCPUS];
 
 /// Guest LAPIC accesses by register (`cores`): each one is a trapped MMIO
 /// exit with an instruction fetch + decode, so which register dominates
@@ -197,16 +213,13 @@ pub const PH_PARK: u8 = 6;
 pub const PH_YIELD: u8 = 7;
 pub const PHASE_LABELS: [&str; 8] =
     ["out", "inject", "guest", "exit", "big-lock", "halt-poll", "park", "yield"];
-static PHASE: [core::sync::atomic::AtomicU8; MAX_VCPUS] =
-    [const { core::sync::atomic::AtomicU8::new(0) }; MAX_VCPUS];
-static PHASE_TSC: [AtomicU64; MAX_VCPUS] = [const { AtomicU64::new(0) }; MAX_VCPUS];
 
 #[inline]
 pub fn phase(apic_id: u8, p: u8) {
     let i = apic_id as usize;
     if i < MAX_VCPUS {
-        PHASE[i].store(p, Ordering::Relaxed);
-        PHASE_TSC[i].store(rdtsc(), Ordering::Relaxed);
+        TRACE[i].phase.store(p, Ordering::Relaxed);
+        TRACE[i].phase_tsc.store(rdtsc(), Ordering::Relaxed);
     }
 }
 
@@ -215,7 +228,7 @@ pub fn phase_snapshot(i: usize) -> Option<(u8, u64, usize)> {
     if i >= MAX_VCPUS { return None; }
     let core = VCPU_HOST_CORE[i].load(Ordering::Relaxed);
     if core == usize::MAX { return None; }
-    Some((PHASE[i].load(Ordering::Relaxed), PHASE_TSC[i].load(Ordering::Relaxed), core))
+    Some((TRACE[i].phase.load(Ordering::Relaxed), TRACE[i].phase_tsc.load(Ordering::Relaxed), core))
 }
 
 /// The vCPU running on the calling host core, or 0xFF (a device worker, the
@@ -235,7 +248,7 @@ pub fn set_host_core(apic_id: u8, core: usize) {
 
 pub fn note_exit(apic_id: u8) {
     if (apic_id as usize) < MAX_VCPUS {
-        VCPU_LAST_ACTIVE[apic_id as usize].store(rdtsc(), Ordering::Relaxed);
+        TRACE[apic_id as usize].last_active.store(rdtsc(), Ordering::Relaxed);
     }
 }
 
@@ -249,7 +262,7 @@ fn kick(target: u8, self_core: usize) {
 }
 
 fn preempted(target: u8) -> bool {
-    let Some(slot) = VCPU_LAST_ACTIVE.get(target as usize) else { return false };
+    let Some(slot) = TRACE.get(target as usize).map(|t| &t.last_active) else { return false };
     let last = slot.load(Ordering::Relaxed);
     last == 0 || rdtsc().wrapping_sub(last) > (crate::interrupts::tsc_freq() / 1000) * 2
 }
@@ -337,7 +350,7 @@ pub fn reset_posted() {
     }
     for on in PIR_ON.iter() { on.store(false, Ordering::Relaxed); }
     for c in VCPU_HOST_CORE.iter() { c.store(usize::MAX, Ordering::Relaxed); }
-    for a in VCPU_LAST_ACTIVE.iter() { a.store(0, Ordering::Relaxed); }
+    for t in TRACE.iter() { t.last_active.store(0, Ordering::Relaxed); }
 }
 
 pub struct LocalApic {

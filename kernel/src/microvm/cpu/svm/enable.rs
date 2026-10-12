@@ -1521,11 +1521,11 @@ impl VmContext {
             crate::microvm::cpu::record_wake(c);
         }
         if self.vcpu.exit_tsc != 0 {
-            crate::microvm::cpu::record_vcpu_time(
+            crate::microvm::cpu::record_vcpu_time(self.vcpu.apic_id,
                 crate::microvm::cpu::VT_OUTSIDE, t_entry.wrapping_sub(self.vcpu.exit_tsc));
         }
         if self.vcpu.halt_tsc != 0 {
-            crate::microvm::cpu::record_vcpu_time(
+            crate::microvm::cpu::record_vcpu_time(self.vcpu.apic_id,
                 crate::microvm::cpu::VT_HALTED, t_entry.wrapping_sub(self.vcpu.halt_tsc));
             self.vcpu.halt_tsc = 0;
         }
@@ -1543,7 +1543,7 @@ impl VmContext {
         crate::microvm::cpu::note_guest_exit(host_core);
         crate::microvm::cpu::entry_irqs_on();
         let t_exit = crate::interrupts::rdtsc();
-        crate::microvm::cpu::record_vcpu_time(
+        crate::microvm::cpu::record_vcpu_time(self.vcpu.apic_id,
             crate::microvm::cpu::VT_GUEST, t_exit.wrapping_sub(t_entry));
         self.vcpu.exit_tsc = t_exit;
         let exit = outcome.exit_reason;
@@ -1557,7 +1557,7 @@ impl VmContext {
         }
         crate::microvm::cpu::rip_sample::maybe_dump();
         lapic::note_exit(self.vcpu.apic_id);
-        crate::microvm::cpu::record_vm_exit(match exit {
+        crate::microvm::cpu::record_vm_exit(self.vcpu.apic_id, match exit {
             EXIT_INTR => crate::microvm::cpu::VMX_INTR,
             EXIT_HLT => crate::microvm::cpu::VMX_HLT,
             EXIT_NPF => crate::microvm::cpu::VMX_MMIO,
@@ -1672,7 +1672,7 @@ impl VmContext {
         lapic::phase(self.vcpu.apic_id, lapic::PH_BIGLOCK);
         let t_lock = crate::interrupts::rdtsc();
         let mut dev = self.shared.dev.lock();
-        crate::microvm::cpu::record_vcpu_time(
+        crate::microvm::cpu::record_vcpu_time(self.vcpu.apic_id,
             crate::microvm::cpu::VT_DEVLOCK, crate::interrupts::rdtsc().wrapping_sub(t_lock));
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         let sh = &mut *dev;

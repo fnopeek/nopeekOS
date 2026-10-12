@@ -1439,7 +1439,7 @@ impl VmContext {
         // handler bucket, then time the VMRESUME itself as guest cycles.
         let prof_pre = crate::interrupts::rdtsc();
         if prof_post != 0 {
-            crate::microvm::cpu::record_exit_cycles(prof_bucket, prof_pre.wrapping_sub(prof_post));
+            crate::microvm::cpu::record_exit_cycles(self.vcpu.apic_id, prof_bucket, prof_pre.wrapping_sub(prof_post));
         }
         let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
         lapic::phase(self.vcpu.apic_id, lapic::PH_GUEST);
@@ -1455,7 +1455,7 @@ impl VmContext {
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         super::msr::spec_ctrl_exit(host_spec);
         prof_post = crate::interrupts::rdtsc();
-        crate::microvm::cpu::record_guest_cycles(prof_post.wrapping_sub(prof_pre));
+        crate::microvm::cpu::record_guest_cycles(self.vcpu.apic_id, prof_post.wrapping_sub(prof_pre));
         let outcome = result?;
         self.vcpu.launched = true;
         self.vcpu.lapic.pv_eoi_sync_from(self.shared.guest_mem);
@@ -1504,7 +1504,7 @@ impl VmContext {
             10 => crate::microvm::cpu::VMX_CPUID,
             _ => crate::microvm::cpu::VMX_OTHER,
         };
-        crate::microvm::cpu::record_vm_exit(prof_bucket);
+        crate::microvm::cpu::record_vm_exit(self.vcpu.apic_id, prof_bucket);
 
         // Diagnostic: per-exit mode trace for the first ~14 exits. Shows
         // when the guest enters long mode (CS.L / EFER.LMA flip 0→1) and

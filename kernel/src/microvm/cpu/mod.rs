@@ -47,25 +47,49 @@ pub const VMX_OTHER: usize = 6;
 pub const VMEXIT_LABELS: [&str; VMEXIT_BUCKETS] =
     ["intr", "hlt", "mmio", "io", "msr", "cpuid", "other"];
 
-static VM_EXIT_COUNTS: [AtomicU64; VMEXIT_BUCKETS] = {
-    const Z: AtomicU64 = AtomicU64::new(0);
-    [Z; VMEXIT_BUCKETS]
-};
+/// The per-exit counters, one cache line set per vCPU. Each slot is written
+/// only by its own vCPU fiber, so a plain load and store does (no locked
+/// add), and no two vCPUs write the same line: at tens of thousands of exits
+/// a second, shared counters bounce their lines between the vCPU cores.
+/// Readers sum over the slots.
+#[repr(align(64))]
+struct VcpuCounters {
+    exits: [AtomicU64; VMEXIT_BUCKETS],
+    exit_cycles: [AtomicU64; VMEXIT_BUCKETS],
+    time: [AtomicU64; VT_BUCKETS],
+    guest_cycles: AtomicU64,
+}
 
-/// Bump the exit-reason bucket for one guest exit.
-pub fn record_vm_exit(bucket: usize) {
-    if bucket < VMEXIT_BUCKETS {
-        VM_EXIT_COUNTS[bucket].fetch_add(1, Ordering::Relaxed);
+static COUNTERS: [VcpuCounters; MAX_VCPUS_CAP] = [const {
+    VcpuCounters {
+        exits: [const { AtomicU64::new(0) }; VMEXIT_BUCKETS],
+        exit_cycles: [const { AtomicU64::new(0) }; VMEXIT_BUCKETS],
+        time: [const { AtomicU64::new(0) }; VT_BUCKETS],
+        guest_cycles: AtomicU64::new(0),
+    }
+}; MAX_VCPUS_CAP];
+
+/// Add to a counter only its vCPU writes.
+#[inline]
+fn bump(c: &AtomicU64, by: u64) {
+    c.store(c.load(Ordering::Relaxed).wrapping_add(by), Ordering::Relaxed);
+}
+
+#[inline]
+fn counters(vcpu: u8) -> Option<&'static VcpuCounters> {
+    COUNTERS.get(vcpu as usize)
+}
+
+/// Bump the exit-reason bucket for one guest exit of `vcpu`.
+pub fn record_vm_exit(vcpu: u8, bucket: usize) {
+    if let (Some(c), true) = (counters(vcpu), bucket < VMEXIT_BUCKETS) {
+        bump(&c.exits[bucket], 1);
     }
 }
 
 /// Snapshot all VM-exit buckets (double-sample to get a rate).
 pub fn vm_exit_snapshot() -> [u64; VMEXIT_BUCKETS] {
-    let mut out = [0u64; VMEXIT_BUCKETS];
-    for i in 0..VMEXIT_BUCKETS {
-        out[i] = VM_EXIT_COUNTS[i].load(Ordering::Relaxed);
-    }
-    out
+    core::array::from_fn(|i| COUNTERS.iter().map(|c| c.exits[i].load(Ordering::Relaxed)).sum())
 }
 
 // ── vCPU time split (diagnosis) ────────────────────────────────────
@@ -79,16 +103,14 @@ pub const VT_OUTSIDE: usize = 1;
 pub const VT_HALTED: usize = 2;
 pub const VT_DEVLOCK: usize = 3;
 pub const VT_BUCKETS: usize = 4;
-static VCPU_TIME: [AtomicU64; VT_BUCKETS] = [const { AtomicU64::new(0) }; VT_BUCKETS];
-
-pub fn record_vcpu_time(bucket: usize, cycles: u64) {
-    if bucket < VT_BUCKETS {
-        VCPU_TIME[bucket].fetch_add(cycles, Ordering::Relaxed);
+pub fn record_vcpu_time(vcpu: u8, bucket: usize, cycles: u64) {
+    if let (Some(c), true) = (counters(vcpu), bucket < VT_BUCKETS) {
+        bump(&c.time[bucket], cycles);
     }
 }
 
 pub fn vcpu_time_snapshot() -> [u64; VT_BUCKETS] {
-    core::array::from_fn(|i| VCPU_TIME[i].load(Ordering::Relaxed))
+    core::array::from_fn(|i| COUNTERS.iter().map(|c| c.time[i].load(Ordering::Relaxed)).sum())
 }
 
 // Interrupt delivery latency: posted to a vCPU until that vCPU next enters
@@ -192,30 +214,25 @@ pub fn io_port_snapshot() -> [u64; IO_PORT_BUCKETS] {
 // Counts (above) say how often we exit; these say how long each kind of
 // handling costs versus time spent running the guest (VMRESUME), i.e.
 // whether the host burns the core in exit handling or runs the guest.
-static VM_EXIT_CYCLES: [AtomicU64; VMEXIT_BUCKETS] = {
-    const Z: AtomicU64 = AtomicU64::new(0);
-    [Z; VMEXIT_BUCKETS]
-};
-static VM_GUEST_CYCLES: AtomicU64 = AtomicU64::new(0);
-
 /// TSC cycles spent in the handler for `bucket` (between the exit and the
 /// next VMRESUME).
-pub fn record_exit_cycles(bucket: usize, cycles: u64) {
-    if bucket < VMEXIT_BUCKETS {
-        VM_EXIT_CYCLES[bucket].fetch_add(cycles, Ordering::Relaxed);
+pub fn record_exit_cycles(vcpu: u8, bucket: usize, cycles: u64) {
+    if let (Some(c), true) = (counters(vcpu), bucket < VMEXIT_BUCKETS) {
+        bump(&c.exit_cycles[bucket], cycles);
     }
 }
 /// TSC cycles spent inside VMRESUME (the guest actually executing).
-pub fn record_guest_cycles(cycles: u64) {
-    VM_GUEST_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+pub fn record_guest_cycles(vcpu: u8, cycles: u64) {
+    if let Some(c) = counters(vcpu) {
+        bump(&c.guest_cycles, cycles);
+    }
 }
 /// `(per-bucket handler cycles, total guest cycles)` for a rate snapshot.
 pub fn vm_cycle_snapshot() -> ([u64; VMEXIT_BUCKETS], u64) {
-    let mut out = [0u64; VMEXIT_BUCKETS];
-    for i in 0..VMEXIT_BUCKETS {
-        out[i] = VM_EXIT_CYCLES[i].load(Ordering::Relaxed);
-    }
-    (out, VM_GUEST_CYCLES.load(Ordering::Relaxed))
+    let out = core::array::from_fn(|i| {
+        COUNTERS.iter().map(|c| c.exit_cycles[i].load(Ordering::Relaxed)).sum()
+    });
+    (out, COUNTERS.iter().map(|c| c.guest_cycles.load(Ordering::Relaxed)).sum())
 }
 
 // ── Guest/host FPU (XSAVE) swap ────────────────────────────────────
