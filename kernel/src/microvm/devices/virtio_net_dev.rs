@@ -635,8 +635,9 @@ impl VirtioNet {
     /// emit run outside the device mutex (see net_dataplane::service_full).
     fn service_tx(&mut self, mem: &GuestMem) -> bool {
         super::nat::note_guest_kick();
+        super::nat::egress_flush();
         let self_caps = self.caps;
-        let payloads = self.drain_tx_payloads(mem);
+        let payloads = self.drain_tx_payloads(mem, usize::MAX);
         let advanced = !payloads.is_empty();
         let mut pending_rx: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
         for p in &payloads {
@@ -651,7 +652,11 @@ impl VirtioNet {
     /// segmentation / checksum / host-NIC send here — those are the expensive
     /// part and run lock-free in the caller (`nat::tap_outbound`). Returns one
     /// owned payload per consumed frame (len == frames consumed = "advanced").
-    pub fn drain_tx_payloads(&mut self, mem: &GuestMem) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+    /// Stops once `max_bytes` are taken (vhost's per-pass weight); the rest
+    /// stays in the guest's ring for the next pass.
+    pub fn drain_tx_payloads(&mut self, mem: &GuestMem, max_bytes: usize)
+        -> alloc::vec::Vec<alloc::vec::Vec<u8>>
+    {
         let mut payloads: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
         const TX_FRAME_MAX: usize = 65_536 + 128;
         let mut frame = core::mem::take(&mut self.tx_scratch);
@@ -667,6 +672,7 @@ impl VirtioNet {
             }
             let start_used = q.used_idx;
             let mut nused: u16 = 0;
+            let mut taken = 0usize;
             let mut avail_top = match avail_idx(mem, q.avail_gpa()) {
                 Some(v) => v,
                 None => {
@@ -688,7 +694,7 @@ impl VirtioNet {
                     super::nat::note_tx_ring_bad();
                     break;
                 }
-                while q.last_avail_idx != avail_top && nused < q.size {
+                while q.last_avail_idx != avail_top && nused < q.size && taken < max_bytes {
                     let head = match avail_ring(mem, q.avail_gpa(), q.size, q.last_avail_idx) {
                         Some(v) => v, None => break,
                     };
@@ -712,13 +718,14 @@ impl VirtioNet {
                         idx = d.next;
                     }
                     payloads.push(frame[..off].to_vec());   // own it; emit lock-free later
+                    taken += off;
 
                     // TX buffers are device-read-only → used len = 0 (virtio spec).
                     used_fill(mem, q.used_gpa(), q.size, start_used.wrapping_add(nused), head, 0);
                     nused = nused.wrapping_add(1);
                     q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
                 }
-                if !evidx || nused >= q.size { break; }
+                if !evidx || nused >= q.size || taken >= max_bytes { break; }
                 // Arm: kick me when avail.idx passes what I've consumed — or,
                 // while the worker polls, not before a full ring.
                 let target = if notify_off {

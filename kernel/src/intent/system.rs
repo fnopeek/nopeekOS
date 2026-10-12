@@ -91,6 +91,7 @@ pub fn intent_cores() {
     let kw0 = crate::smp::fiber::kick_wait_snapshot();
     let kl0 = crate::smp::fiber::kick_latency_snapshot(); // clears max
     let rh0 = crate::microvm::devices::nat::rx_health_snapshot();
+    let eg0 = crate::microvm::devices::nat::egress_stats();
     let gt0 = crate::microvm::devices::nat::guest_timer_count();
     let tx0 = crate::microvm::devices::nat::tx_stats();
     let rp0 = crate::microvm::devices::net_dataplane::rx_pass_stats(); // clears gap_max
@@ -126,6 +127,7 @@ pub fn intent_cores() {
     let kw1 = crate::smp::fiber::kick_wait_snapshot();
     let kl1 = crate::smp::fiber::kick_latency_snapshot();
     let rh1 = crate::microvm::devices::nat::rx_health_snapshot();
+    let eg1 = crate::microvm::devices::nat::egress_stats();
     let gt1 = crate::microvm::devices::nat::guest_timer_count();
     let tx1 = crate::microvm::devices::nat::tx_stats();
     let rp1 = crate::microvm::devices::net_dataplane::rx_pass_stats(); // gap_max = window peak
@@ -341,6 +343,10 @@ pub fn intent_cores() {
         }
         kprintln!("    net tap backpressure: tapfull={}/s injfalse={}/s",
                   tapfull * 1000 / window_ms, injf * 1000 / window_ms);
+        // Guest egress the host card held back (parked, then sent) and the
+        // packets it lost for good. Refused is loss to the guest's TCP.
+        kprintln!("    net egress: deferred={}/s refused={} (total)",
+                  eg1.0.saturating_sub(eg0.0) * 1000 / window_ms, eg1.1);
         // Outbound TX rate. Read together with the worker core's BUSY% above:
         // high segs/s with the worker near 100% = the SW-TSO emit pipeline is
         // the cap; the same rate with the worker idle = cwnd × bridge RTT.

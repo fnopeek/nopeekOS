@@ -395,25 +395,40 @@ pub fn rx_irq_vector() -> u8 {
 }
 
 /// Send an Ethernet frame. `frame` must be a complete Ethernet frame (dst + src + type + payload).
+/// A full ring is spun on briefly (`TX_RECLAIM_SPINS`), then refused.
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
+    send_inner(frame, true)
+}
+
+/// `send` without the spin: a full ring is `QueueFull` at once, with the
+/// doorbell rung so the device drains. For a caller that keeps the frame and
+/// retries (`nat`'s egress backlog) — spinning would hold `DEVICE`, which the
+/// RX path needs for the ACKs that free the ring.
+pub fn try_send(frame: &[u8]) -> Result<(), NetError> {
+    send_inner(frame, false)
+}
+
+fn send_inner(frame: &[u8], spin: bool) -> Result<(), NetError> {
     if frame.len() > MTU { return Err(NetError::FrameTooLarge); }
 
     let mut lock = DEVICE.lock();
     let dev = lock.as_mut().ok_or(NetError::NotInitialized)?;
 
     // Reclaim completed TX descriptors. Under burst upload the ring fills
-    // faster than QEMU/slirp drains it; rather than dropping the frame
-    // (→ guest TCP retransmit → upload collapse), spin-reclaim briefly so
-    // in-flight descriptors free up. Backpressure, not loss. Bounded.
+    // faster than QEMU/slirp drains it; spin-reclaim briefly so in-flight
+    // descriptors free up. Bounded.
     dev.reclaim_tx();
     if dev.tx_num_free < 2 {
         let mut spins = 0;
-        while dev.tx_num_free < 2 && spins < TX_RECLAIM_SPINS {
+        while spin && dev.tx_num_free < 2 && spins < TX_RECLAIM_SPINS {
             core::hint::spin_loop();
             dev.reclaim_tx();
             spins += 1;
         }
-        if dev.tx_num_free < 2 { return Err(NetError::QueueFull); }
+        if dev.tx_num_free < 2 {
+            dev.tx_kick();
+            return Err(NetError::QueueFull);
+        }
     }
 
     let d0 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;

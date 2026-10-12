@@ -530,6 +530,82 @@ fn csum_update(old_check: u16, changes: &[(u16, u16)]) -> u16 {
     !(sum as u16)
 }
 
+/// Masqueraded packets the host card refused for a full ring, in order —
+/// vhost-net's `-EAGAIN`. While any wait here the worker takes nothing new from
+/// the guest's TX ring, so the guest's own queue fills and its TCP slows down:
+/// backpressure, not loss. A dropped segment is loss to the guest, whose TCP
+/// cuts its window each time; an upload then starts at line rate and settles
+/// at half.
+struct Egress {
+    dst: [u8; 4],
+    proto: u8,
+    seg: Vec<u8>,
+}
+static EGRESS: Mutex<alloc::collections::VecDeque<Egress>> =
+    Mutex::new(alloc::collections::VecDeque::new());
+static EGRESS_LEN: AtomicU64 = AtomicU64::new(0);
+/// Packets parked because the card's ring was full (healthy in moderation).
+static NS_EGRESS_DEFERRED: AtomicU64 = AtomicU64::new(0);
+/// Bound on the backlog. The worker stops draining the guest at the first
+/// parked packet and one pass takes at most `TX_PASS_BYTES`, so this is only
+/// reached by the inline path or a wedged card.
+const EGRESS_MAX: usize = 4096;
+
+/// Hand one masqueraded packet to the host card, or park it behind the ones
+/// already waiting.
+fn egress(dst: [u8; 4], proto: u8, seg: Vec<u8>) {
+    use crate::virtio_net::NetError;
+    // What no card can send never parks: the backlog's bound is then
+    // `EGRESS_MAX` frames of at most an MTU, whatever the guest hands us.
+    if ETH_HDR_LEN + IPV4_HDR_LEN + seg.len() > crate::netdev::MTU {
+        NS_DROP_EGRESS.fetch_add(1, AtOrd::Relaxed);
+        return;
+    }
+    if EGRESS_LEN.load(AtOrd::Acquire) == 0 {
+        match crate::net::ipv4::try_send(dst, proto, &seg) {
+            Ok(true) => return,
+            Ok(false) => { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); return; }
+            Err(NetError::QueueFull) => {}
+            Err(_) => { NS_DROP_EGRESS.fetch_add(1, AtOrd::Relaxed); return; }
+        }
+    }
+    let mut q = EGRESS.lock();
+    if q.len() >= EGRESS_MAX {
+        drop(q);
+        NS_DROP_EGRESS.fetch_add(1, AtOrd::Relaxed);
+        return;
+    }
+    q.push_back(Egress { dst, proto, seg });
+    EGRESS_LEN.store(q.len() as u64, AtOrd::Release);
+    NS_EGRESS_DEFERRED.fetch_add(1, AtOrd::Relaxed);
+}
+
+/// Send what the card will take now. True when nothing is left waiting.
+pub fn egress_flush() -> bool {
+    use crate::virtio_net::NetError;
+    if EGRESS_LEN.load(AtOrd::Acquire) == 0 { return true; }
+    let mut q = EGRESS.lock();
+    while let Some(e) = q.front() {
+        match crate::net::ipv4::try_send(e.dst, e.proto, &e.seg) {
+            Err(NetError::QueueFull) => break,
+            Ok(true) => {}
+            Ok(false) => { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
+            Err(_) => { NS_DROP_EGRESS.fetch_add(1, AtOrd::Relaxed); }
+        }
+        q.pop_front();
+    }
+    EGRESS_LEN.store(q.len() as u64, AtOrd::Release);
+    q.is_empty()
+}
+
+/// Packets are waiting for the host card.
+pub fn egress_pending() -> bool { EGRESS_LEN.load(AtOrd::Acquire) != 0 }
+
+/// (deferred, refused) since boot, for `cores`.
+pub fn egress_stats() -> (u64, u64) {
+    (NS_EGRESS_DEFERRED.load(AtOrd::Relaxed), NS_DROP_EGRESS.load(AtOrd::Relaxed))
+}
+
 /// Outbound SNAT: rewrite the guest's L4 source port to a masquerade
 /// host port and send from our host IP. The guest's TCP/UDP semantics
 /// (seq/ack/window/options/QUIC) pass through untouched.
@@ -571,7 +647,7 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
         let mut seg = l4.to_vec();
         seg[0..2].copy_from_slice(&hp.to_be_bytes());        // src port → host port
         fix_l4_checksum(proto, our_ip, dst_ip, &mut seg);
-        if !crate::net::ipv4::send(dst_ip, proto, &seg) { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
+        egress(dst_ip, proto, seg);
     }
     L3_ACTIVE.store(true, AtOrd::Release);
     None
@@ -603,13 +679,16 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
         seg[16..18].copy_from_slice(&c.to_be_bytes());
         NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
         NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
-        if !crate::net::ipv4::send(dst_ip, PROTO_TCP, &seg) { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
+        egress(dst_ip, PROTO_TCP, seg);
         return;
     }
 
     // The card segments it: one super-frame instead of many software-cut
     // segments, each with a full checksum and its own trip through ipv4::send.
-    if crate::netdev::tso_capable() && emit_tcp_tso(hp, our_ip, dst_ip, l4, thlen, gso_size) {
+    // Not past a backlog: the super-frame would overtake the parked segments.
+    if crate::netdev::tso_capable() && !egress_pending()
+        && emit_tcp_tso(hp, our_ip, dst_ip, l4, thlen, gso_size)
+    {
         return;
     }
 
@@ -641,7 +720,7 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
 
         NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
         NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
-        if !crate::net::ipv4::send(dst_ip, PROTO_TCP, &seg) { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
+        egress(dst_ip, PROTO_TCP, seg);
         off += this;
     }
 }
@@ -713,7 +792,7 @@ fn l3_icmp_outbound(dst_ip: [u8; 4], l4: &[u8]) -> Option<Vec<u8>> {
     let mut seg = l4.to_vec();
     seg[4..6].copy_from_slice(&hp.to_be_bytes()); // id → masquerade id
     fix_icmp_checksum(&mut seg);
-    if !crate::net::ipv4::send(dst_ip, PROTO_ICMP, &seg) { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
+    egress(dst_ip, PROTO_ICMP, seg);
     L3_ACTIVE.store(true, AtOrd::Release);
     None
 }
@@ -880,6 +959,9 @@ pub fn tap_reset() {
     t.tail = 0;
     TAP_LEN.store(0, AtOrd::Relaxed);
     WORKER_PARKED.store(false, AtOrd::SeqCst);
+    drop(t);
+    EGRESS.lock().clear();
+    EGRESS_LEN.store(0, AtOrd::Release);
 }
 
 /// The inbound acceptance test, and the only translation. Called from

@@ -439,6 +439,17 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); })
 }
 
+/// `send` for a caller that keeps a refused frame and retries: the virtio
+/// card refuses a full ring at once instead of spinning on it. Other cards
+/// behave as in `send`.
+pub fn try_send(frame: &[u8]) -> Result<(), NetError> {
+    match active() {
+        Active::Virtio | Active::None if active_link_up() => virtio_net::try_send(frame)
+            .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); }),
+        _ => send(frame),
+    }
+}
+
 /// Can the active card segment + checksum a TCPv4 GSO super-frame itself?
 pub fn tso_capable() -> bool {
     match active() {

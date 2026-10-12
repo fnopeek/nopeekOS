@@ -82,6 +82,24 @@ pub fn send(dst_ip: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
 
 /// Send an IPv4 packet with custom TTL (for traceroute)
 pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> bool {
+    transmit(dst_ip, protocol, payload, ttl, false).0
+}
+
+/// `send` that reports a refused frame instead of dropping it: `Ok(resolved)`
+/// once the card took it, `Err(QueueFull)` when its ring is full and the
+/// caller should keep the packet and retry.
+pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8])
+    -> Result<bool, crate::virtio_net::NetError>
+{
+    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, true);
+    sent.map(|()| resolved)
+}
+
+/// Build and hand over one packet. Returns whether the next hop's MAC was
+/// known, and the card's verdict. `try_` refuses a full ring at once.
+fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, try_: bool)
+    -> (bool, Result<(), crate::virtio_net::NetError>)
+{
     let src_ip = arp::our_ip();
     let total_len = (HEADER_LEN + payload.len()) as u16;
 
@@ -125,8 +143,12 @@ pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> 
         }
     };
 
-    let _ = eth::send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt);
-    resolved
+    let sent = if try_ {
+        eth::try_send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt)
+    } else {
+        eth::send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt)
+    };
+    (resolved, sent)
 }
 
 fn ipv4_checksum(header: &[u8]) -> u16 {

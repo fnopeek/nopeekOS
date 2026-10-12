@@ -20,11 +20,20 @@ pub fn handle_frame(frame: &[u8]) {
 
 /// Build and send an Ethernet frame
 pub fn send_frame(dst: &[u8; 6], ethertype: u16, payload: &[u8]) -> Result<(), crate::virtio_net::NetError> {
+    netdev::send(&build_frame(dst, ethertype, payload))
+}
+
+/// `send_frame` through `netdev::try_send`: a full ring is refused at once.
+pub fn try_send_frame(dst: &[u8; 6], ethertype: u16, payload: &[u8]) -> Result<(), crate::virtio_net::NetError> {
+    netdev::try_send(&build_frame(dst, ethertype, payload))
+}
+
+fn build_frame(dst: &[u8; 6], ethertype: u16, payload: &[u8]) -> alloc::vec::Vec<u8> {
     let src = netdev::mac().unwrap_or([0; 6]);
     let mut frame = alloc::vec![0u8; HEADER_LEN + payload.len()];
     frame[0..6].copy_from_slice(dst);
     frame[6..12].copy_from_slice(&src);
     frame[12..14].copy_from_slice(&ethertype.to_be_bytes());
     frame[HEADER_LEN..].copy_from_slice(payload);
-    netdev::send(&frame)
+    frame
 }

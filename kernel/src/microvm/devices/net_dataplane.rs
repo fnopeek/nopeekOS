@@ -30,6 +30,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 fn has_work() -> bool {
     use crate::microvm::devices::{guest_mem, nat, net_backend};
     nat::tap_len() > 0
+        || nat::egress_pending()
         || net_backend::tx_kick_pending()
         || guest_mem::active().is_some_and(net_backend::tx_ring_pending)
 }
@@ -166,6 +167,10 @@ pub fn stop_worker() -> bool {
 /// yielding, so a saturated link cannot starve everything else on this core.
 const RX_PKT_WEIGHT: u64 = 256;
 
+/// `VHOST_NET_WEIGHT`: guest TX bytes one pass may take. Also bounds what a
+/// pass can park in the egress backlog when the host card's ring is full.
+const TX_PASS_BYTES: usize = 0x80000;
+
 /// vhost `handle_rx` + `handle_tx`: one pass on this core, then wake the guest.
 ///
 /// The fiber does not touch a network card. Whoever drains the host NIC —
@@ -185,6 +190,10 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     //    the socket and waits to be told buffers were refilled — it stages it
     //    nowhere else. That is the whole of the backpressure: the tap fills,
     //    the producer counts a drop, the far end slows down. ──
+    // vhost handle_tx on -EAGAIN: while the host card still holds back
+    // earlier packets, leave the guest's frames in its ring. Flushed before the
+    // device mutex — the send takes the card's lock.
+    let egress_clear = nat::egress_flush();
     let mut injected = false;
     let mut rx_frames = 0u64;
     let (rx_raise, tx_payloads, caps) = {
@@ -210,7 +219,11 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
         // handle_tx: poll the guest TX ring every pass (take_tx_kick clears the
         // doorbell so the halt-poll's tx_kick_pending resets). Cheap if empty.
         net_backend::take_tx_kick();
-        let tx_payloads = dev.drain_tx_payloads(gm);
+        let tx_payloads = if egress_clear {
+            dev.drain_tx_payloads(gm, TX_PASS_BYTES)
+        } else {
+            alloc::vec::Vec::new()
+        };
         let caps = dev.caps();
         (rx_raise, tx_payloads, caps)
     }; // device mutex released.
