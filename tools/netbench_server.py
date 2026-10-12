@@ -115,7 +115,7 @@ async function up(){
   const s = (performance.now() - t0) / 1000;
   log('upload ' + (sent >> 20) + ' MB in ' + s.toFixed(2) + ' s = ' + (sent * 8 / s / 1e6).toFixed(0) + ' Mbit');
 }
-async function run(){ out.textContent = ANIM ? '' : 'no animation\n'; await down(); await up(); phase = ''; log('done'); }
+async function run(){ out.textContent = ANIM ? '' : 'no animation\\n'; await down(); await up(); phase = ''; log('done'); }
 </script>"""
 
 
