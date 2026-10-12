@@ -45,6 +45,8 @@ up)
                     echo "4096 16384 33554432" > /proc/sys/net/ipv4/tcp_wmem'
         $run ip link set lo up
     done
+    # slirp forwards the guest's ping through an unprivileged ICMP socket.
+    in_client sh -c 'echo "0 0" > /proc/sys/net/ipv4/ping_group_range'
     in_client ip link add veth-c type veth peer name veth-s
     in_client ip link set veth-s netns "$(server_pid)"
     in_client ip addr add 10.99.0.1/24 dev veth-c
