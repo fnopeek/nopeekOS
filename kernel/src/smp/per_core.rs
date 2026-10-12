@@ -945,6 +945,45 @@ fn app_core_usable(c: usize) -> bool {
         && !crate::microvm::cpu::is_vm_worker_core(c)
 }
 
+/// Whether core `cid` takes new work from the inbox at all.
+///
+/// The NIC driver's core takes none while other workers exist: it wakes every
+/// millisecond and would otherwise win nearly every new intent, including the
+/// one consuming the driver's frames; an intent runs to completion, so driver
+/// and consumer would alternate instead of running side by side. A core with
+/// a vCPU or VM worker takes nothing new either: next to a spinning vCPU it
+/// would barely get to run. Among the rest, `accepts` prefers the least
+/// loaded, so the core that wakes most often does not collect every fiber.
+fn takes_work(cid: usize) -> bool {
+    let nic_core = crate::netdev::wasm_nic_core() == Some(cid)
+        && super::scheduler::worker_count() > 1;
+    !nic_core && !crate::microvm::cpu::is_vm_worker_core(cid)
+}
+
+/// Hand an app task to this core's fiber scheduler. It runs on its own stack
+/// and yields at its waits, so peers share the core.
+fn admit_fiber_task(cid: usize, task: super::scheduler::Task) {
+    if task.shared && !app_core_usable(APP_CORE.load(Ordering::Acquire)) {
+        APP_CORE.store(cid, Ordering::Release);
+    }
+    super::fiber::admit(cid, task.func, task.arg);
+}
+
+/// Between two fibers of core `cid` (`fiber::run_core_fibers`): take a new
+/// app if it is waiting and this core would take it. Without this a core
+/// looks at the inbox only once all its fibers park, which a busy-polling
+/// worker never does. Native tasks still wait for the top of the loop or for
+/// another core: run here they would stop every fiber of the core until they
+/// return. Core 0 takes no inbox work.
+pub fn admit_between_fibers(cid: usize) {
+    if cid == 0 || !takes_work(cid) {
+        return;
+    }
+    if let Some(task) = super::scheduler::next_fiber_task(|shared, waited| accepts(cid, shared, waited)) {
+        admit_fiber_task(cid, task);
+    }
+}
+
 /// Whether `cid` takes the oldest waiting task. A background app goes to the
 /// app core while that can take it; everything else, and a background app
 /// with no usable app core, goes to a least loaded core.
@@ -1028,30 +1067,13 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             continue;
         }
 
-        // The NIC driver's core takes no new work while other workers exist.
-        // It wakes every millisecond and would otherwise win nearly every
-        // new intent, including the one consuming the driver's frames; an
-        // intent runs to completion, so driver and consumer would alternate
-        // instead of running side by side.
-        let nic_core = crate::netdev::wasm_nic_core() == Some(cid)
-            && super::scheduler::worker_count() > 1;
-        // In general, only a core among the least loaded takes new work;
-        // otherwise the core that wakes most often collects every fiber, and
-        // cooperative fibers then starve each other. A core with a vCPU or VM
-        // worker takes nothing new: next to a spinning vCPU it would barely
-        // get to run.
-        let take = !nic_core && !crate::microvm::cpu::is_vm_worker_core(cid);
+        let take = takes_work(cid);
         // Admit a freshly-spawned app as a fiber, or run a native intent.
         // New work arrives in the shared inbox (`scheduler::spawn`).
         let next = if take { super::scheduler::next_task(|shared, waited| accepts(cid, shared, waited)) } else { None };
         if let Some(task) = next {
             if task.is_fiber {
-                // App: hand to this core's fiber scheduler. It runs on its
-                // own stack and yields at npk_sleep so peers share the core.
-                if task.shared && !app_core_usable(APP_CORE.load(Ordering::Acquire)) {
-                    APP_CORE.store(cid, Ordering::Release);
-                }
-                super::fiber::admit(cid, task.func, task.arg);
+                admit_fiber_task(cid, task);
             } else {
                 // Native run-to-completion task (intent) — run directly.
                 CORE_ACTIVE[cid].store(true, Ordering::Relaxed);

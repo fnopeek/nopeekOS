@@ -41,6 +41,11 @@ pub struct Task {
 /// spin lock needs no IRQ masking.
 static INBOX: Mutex<VecDeque<Task>> = Mutex::new(VecDeque::new());
 
+/// Tasks in `INBOX`, readable without its lock: `run_core_fibers` asks after
+/// every fiber switch, and a busy-polling fiber switches millions of times a
+/// second.
+static INBOX_LEN: AtomicUsize = AtomicUsize::new(0);
+
 /// Number of active worker cores (excludes BSP)
 static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -83,7 +88,11 @@ fn spawn_inner(name: &'static str, func: fn(u64), arg: u64, is_fiber: bool, shar
         return;
     }
     let queued = crate::interrupts::rdtsc();
-    INBOX.lock().push_back(Task { name, func, arg, is_fiber, shared, queued });
+    {
+        let mut inbox = INBOX.lock();
+        inbox.push_back(Task { name, func, arg, is_fiber, shared, queued });
+        INBOX_LEN.store(inbox.len(), Ordering::Release);
+    }
     TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
     // Idle workers have no periodic tick, so wake them.
     super::per_core::wake_idle_workers();
@@ -105,12 +114,30 @@ pub fn head_acceptable(accept: impl Fn(bool, u64) -> bool) -> bool {
 /// Take the oldest waiting task if `accept` takes it. The decision is made
 /// under the inbox lock, so the task decided on is the task taken.
 pub fn next_task(accept: impl Fn(bool, u64) -> bool) -> Option<Task> {
+    take_head(false, accept)
+}
+
+/// Like `next_task`, but only when the oldest task is a fiber. For a core
+/// between two of its fibers: a fiber is only queued there, while a native
+/// task would hold every other fiber of the core until it returns. The order
+/// stays FIFO — a native task at the head is not skipped.
+pub fn next_fiber_task(accept: impl Fn(bool, u64) -> bool) -> Option<Task> {
+    if INBOX_LEN.load(Ordering::Acquire) == 0 {
+        return None;
+    }
+    take_head(true, accept)
+}
+
+fn take_head(fiber_only: bool, accept: impl Fn(bool, u64) -> bool) -> Option<Task> {
     let now = crate::interrupts::rdtsc();
     let mut inbox = INBOX.lock();
-    if !inbox.front().is_some_and(|t| accept(t.shared, now.saturating_sub(t.queued))) {
+    if !inbox.front().is_some_and(|t| {
+        (!fiber_only || t.is_fiber) && accept(t.shared, now.saturating_sub(t.queued))
+    }) {
         return None;
     }
     let t = inbox.pop_front();
+    INBOX_LEN.store(inbox.len(), Ordering::Release);
     drop(inbox);
     if t.is_some() {
         TASKS_TAKEN.fetch_add(1, Ordering::Relaxed);

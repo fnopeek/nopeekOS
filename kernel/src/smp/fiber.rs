@@ -409,6 +409,7 @@ pub fn run_core_fibers(cid: usize) {
         } else {
             FIBER_QUEUES[cid].lock().push_back(fiber);
         }
+        crate::smp::per_core::admit_between_fibers(cid);
     }
 }
 
