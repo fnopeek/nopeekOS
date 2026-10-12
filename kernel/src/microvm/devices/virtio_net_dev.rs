@@ -286,6 +286,14 @@ impl VirtioNet {
     fn guest_gso_ok(&self) -> bool {
         self.driver_features[0] & (1 << VIRTIO_NET_F_GUEST_TSO4) != 0
     }
+    /// The guest takes coalesced RX frames: TCPv4 GSO, a checksum it need not
+    /// verify, and mergeable buffers to hold up to 64 KB (`nat::tap_pop_rx`).
+    pub fn rx_gro_ok(&self) -> bool {
+        let f = self.driver_features[0];
+        self.guest_gso_ok()
+            && f & (1 << VIRTIO_NET_F_GUEST_CSUM) != 0
+            && f & (1 << VIRTIO_NET_F_MRG_RXBUF) != 0
+    }
 
     pub fn take_pending_kick(&mut self) -> Option<u16> { self.pending_kick_queue.take() }
 
@@ -422,7 +430,7 @@ impl VirtioNet {
                         "[net-dev] DRIVER_OK lo=0x{:08x} hi=0x{:08x} mrg={} eventidx={} gso={} gro={}",
                         self.driver_features[0], self.driver_features[1],
                         self.driver_features[0] & (1 << VIRTIO_NET_F_MRG_RXBUF) != 0,
-                        self.event_idx_on(), self.guest_gso_ok(), false,
+                        self.event_idx_on(), self.guest_gso_ok(), self.rx_gro_ok(),
                     );
                 }
             }

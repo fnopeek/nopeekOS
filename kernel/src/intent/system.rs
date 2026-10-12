@@ -92,6 +92,7 @@ pub fn intent_cores() {
     let kl0 = crate::smp::fiber::kick_latency_snapshot(); // clears max
     let rh0 = crate::microvm::devices::nat::rx_health_snapshot();
     let eg0 = crate::microvm::devices::nat::egress_stats();
+    let gr0 = crate::microvm::devices::nat::gro_stats();
     let gt0 = crate::microvm::devices::nat::guest_timer_count();
     let tx0 = crate::microvm::devices::nat::tx_stats();
     let rp0 = crate::microvm::devices::net_dataplane::rx_pass_stats(); // clears gap_max
@@ -128,6 +129,7 @@ pub fn intent_cores() {
     let kl1 = crate::smp::fiber::kick_latency_snapshot();
     let rh1 = crate::microvm::devices::nat::rx_health_snapshot();
     let eg1 = crate::microvm::devices::nat::egress_stats();
+    let gr1 = crate::microvm::devices::nat::gro_stats();
     let gt1 = crate::microvm::devices::nat::guest_timer_count();
     let tx1 = crate::microvm::devices::nat::tx_stats();
     let rp1 = crate::microvm::devices::net_dataplane::rx_pass_stats(); // gap_max = window peak
@@ -368,6 +370,13 @@ pub fn intent_cores() {
         if rpc > 0 {
             kprintln!("    net RX cadence: {}passes/s batch={}frames gap_max={}us",
                       rpc * 1000 / window_ms, rpf / rpc, gap_us);
+        }
+        // GRO towards the guest: coalesced frames and segments per frame.
+        let grf = gr1.0.saturating_sub(gr0.0);
+        let grs = gr1.1.saturating_sub(gr0.1);
+        if grf > 0 {
+            kprintln!("    net RX GRO: {}frames/s, {} segments per frame",
+                      grf * 1000 / window_ms, grs / grf);
         }
         // Effective guest HZ: the guest programs 1 kHz (CONFIG_HZ=1000); injected
         // only while VMRUN runs, so a value below 1000 means the guest timer

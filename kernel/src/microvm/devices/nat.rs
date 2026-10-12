@@ -922,6 +922,180 @@ pub fn tap_pop() -> Option<Vec<u8>> {
     f
 }
 
+// ── RX coalescing: Linux GRO (tcp_gro_receive, inet_gro_receive) ──
+//
+// Consecutive in-order segments of one TCP flow leave the tap as one GSO
+// frame of up to 64 KB, the way tun hands a GRO'd skb to vhost-net: the
+// guest's stack then handles one skb where it handled up to 44. Every segment
+// is checksummed here first and the frame says DATA_VALID, so the guest
+// does not checksum it again (`virtio_net_hdr_from_skb` for
+// CHECKSUM_UNNECESSARY).
+
+/// virtio_net_hdr flags / gso_type.
+const VNET_F_DATA_VALID: u8 = 2;
+const VNET_GSO_TCPV4: u8 = 1;
+/// The largest IPv4 packet: what one GSO frame may carry.
+const GRO_MAX_IP_LEN: usize = 65535;
+const TCP_FLAG_PSH: u8 = 0x08;
+const TCP_FLAG_ACK: u8 = 0x10;
+
+/// Where a tap frame's TCP segment sits. Only plain IPv4 (no options, not a
+/// fragment) with a well-formed TCP header.
+struct TcpSeg {
+    tcp: usize,
+    thlen: usize,
+    payload_len: usize,
+    seq: u32,
+    flags: u8,
+}
+
+fn tcp_seg(f: &[u8]) -> Option<TcpSeg> {
+    let ip = VNET_HDR_LEN + ETH_HDR_LEN;
+    if f.len() < ip + IPV4_HDR_LEN + TCP_HDR_LEN || f[ip] != 0x45 || f[ip + 9] != PROTO_TCP {
+        return None;
+    }
+    // MF set or a fragment offset: not a whole segment.
+    if f[ip + 6] & 0x3F != 0 || f[ip + 7] != 0 {
+        return None;
+    }
+    if u16::from_be_bytes([f[ip + 2], f[ip + 3]]) as usize != f.len() - ip {
+        return None;
+    }
+    let tcp = ip + IPV4_HDR_LEN;
+    let thlen = (f[tcp + 12] >> 4) as usize * 4;
+    if thlen < TCP_HDR_LEN || tcp + thlen > f.len() {
+        return None;
+    }
+    Some(TcpSeg {
+        tcp,
+        thlen,
+        payload_len: f.len() - tcp - thlen,
+        seq: u32::from_be_bytes([f[tcp + 4], f[tcp + 5], f[tcp + 6], f[tcp + 7]]),
+        flags: f[tcp + 13],
+    })
+}
+
+/// The segment's TCP checksum holds (as rewritten by `tap_inbound`).
+fn tcp_csum_ok(f: &[u8], s: &TcpSeg) -> bool {
+    let ip = VNET_HDR_LEN + ETH_HDR_LEN;
+    let src: [u8; 4] = f[ip + 12..ip + 16].try_into().unwrap();
+    let dst: [u8; 4] = f[ip + 16..ip + 20].try_into().unwrap();
+    tcp_checksum(src, dst, &f[s.tcp..]) == 0
+}
+
+/// Whether segment `b` continues `a` (`inet_gro_receive` + `tcp_gro_receive`):
+/// same addresses, TOS, TTL and DF; same ports, ACK, window and options;
+/// flags ACK or ACK|PSH; starts at `next_seq`; carries 1..=`mss` bytes.
+fn gro_continues(a: &[u8], sa: &TcpSeg, b: &[u8], sb: &TcpSeg, mss: usize, next_seq: u32) -> bool {
+    let ip = VNET_HDR_LEN + ETH_HDR_LEN;
+    sb.payload_len > 0 && sb.payload_len <= mss && sb.seq == next_seq
+        && (sb.flags == TCP_FLAG_ACK || sb.flags == TCP_FLAG_ACK | TCP_FLAG_PSH)
+        && sb.thlen == sa.thlen
+        && a[ip + 1] == b[ip + 1] && a[ip + 8] == b[ip + 8]
+        && a[ip + 6] & 0x40 == b[ip + 6] & 0x40
+        && a[ip + 12..ip + 20] == b[ip + 12..ip + 20]
+        && a[sa.tcp..sa.tcp + 4] == b[sb.tcp..sb.tcp + 4]
+        && a[sa.tcp + 8..sa.tcp + 12] == b[sb.tcp + 8..sb.tcp + 12]
+        && a[sa.tcp + 14..sa.tcp + 16] == b[sb.tcp + 14..sb.tcp + 16]
+        && a[sa.tcp + TCP_HDR_LEN..sa.tcp + sa.thlen] == b[sb.tcp + TCP_HDR_LEN..sb.tcp + sb.thlen]
+}
+
+/// `tap_pop`, coalescing when the guest takes GSO frames with a valid
+/// checksum (`gro`). A TCP segment whose checksum holds is marked
+/// DATA_VALID; full-sized ACK-only segments are merged with the in-order
+/// segments behind them until a short or PSH segment, a mismatch, or 64 KB.
+pub fn tap_pop_rx(gro: bool) -> Option<Vec<u8>> {
+    let mut first = tap_pop()?;
+    if !gro {
+        return Some(first);
+    }
+    let Some(s0) = tcp_seg(&first) else { return Some(first) };
+    if !tcp_csum_ok(&first, &s0) {
+        return Some(first); // the guest checks it and drops it
+    }
+    first[0] = VNET_F_DATA_VALID;
+    if s0.payload_len == 0 || s0.flags != TCP_FLAG_ACK {
+        return Some(first);
+    }
+    let mss = s0.payload_len;
+    let mut next_seq = s0.seq.wrapping_add(mss as u32);
+    let mut acc: Option<Vec<u8>> = None;
+    let mut segs = 1u32;
+    let mut psh = false;
+    loop {
+        let len_now = acc.as_ref().map_or(first.len(), |a| a.len());
+        if len_now - VNET_HDR_LEN - ETH_HDR_LEN + mss > GRO_MAX_IP_LEN {
+            break;
+        }
+        let next = {
+            let mut t = TAP.lock();
+            let head = t.head;
+            let fits = t.len > 0 && t.slots[head].as_deref().is_some_and(|b| {
+                tcp_seg(b).is_some_and(|sb| gro_continues(&first, &s0, b, &sb, mss, next_seq))
+            });
+            if !fits {
+                None
+            } else {
+                let f = t.slots[head].take();
+                t.head = (head + 1) % TAP_RING;
+                t.len -= 1;
+                TAP_LEN.store(t.len as u64, AtOrd::Relaxed);
+                f
+            }
+        };
+        let Some(b) = next else { break };
+        let sb = tcp_seg(&b).unwrap();
+        if !tcp_csum_ok(&b, &sb) {
+            tap_push_front(b);
+            break;
+        }
+        let a = acc.get_or_insert_with(|| {
+            let mut v = Vec::with_capacity(VNET_HDR_LEN + ETH_HDR_LEN + GRO_MAX_IP_LEN);
+            v.extend_from_slice(&first);
+            v
+        });
+        a.extend_from_slice(&b[sb.tcp + sb.thlen..]);
+        next_seq = next_seq.wrapping_add(sb.payload_len as u32);
+        segs += 1;
+        let last = sb.payload_len < mss || sb.flags & TCP_FLAG_PSH != 0;
+        psh |= sb.flags & TCP_FLAG_PSH != 0;
+        frame_pool_put(b);
+        if last {
+            break;
+        }
+    }
+    let Some(mut a) = acc else { return Some(first) };
+    frame_pool_put(first);
+    let ip = VNET_HDR_LEN + ETH_HDR_LEN;
+    let ip_len = (a.len() - ip) as u16;
+    a[ip + 2..ip + 4].copy_from_slice(&ip_len.to_be_bytes());
+    a[ip + 10] = 0;
+    a[ip + 11] = 0;
+    let ipc = ipv4_checksum(&a[ip..ip + IPV4_HDR_LEN]);
+    a[ip + 10..ip + 12].copy_from_slice(&ipc.to_be_bytes());
+    if psh {
+        a[s0.tcp + 13] |= TCP_FLAG_PSH;
+    }
+    // virtio_net_hdr: DATA_VALID, TCPv4 GSO, header length, segment size.
+    a[0] = VNET_F_DATA_VALID;
+    a[1] = VNET_GSO_TCPV4;
+    a[2..4].copy_from_slice(&((ETH_HDR_LEN + IPV4_HDR_LEN + s0.thlen) as u16).to_le_bytes());
+    a[4..6].copy_from_slice(&(mss as u16).to_le_bytes());
+    a[6..10].fill(0);
+    NS_GRO_FRAMES.fetch_add(1, AtOrd::Relaxed);
+    NS_GRO_SEGS.fetch_add(segs as u64, AtOrd::Relaxed);
+    Some(a)
+}
+
+/// Coalesced frames handed to the guest and the segments in them.
+static NS_GRO_FRAMES: AtomicU64 = AtomicU64::new(0);
+static NS_GRO_SEGS: AtomicU64 = AtomicU64::new(0);
+
+/// (frames, segments) coalesced since boot, for `cores`.
+pub fn gro_stats() -> (u64, u64) {
+    (NS_GRO_FRAMES.load(AtOrd::Relaxed), NS_GRO_SEGS.load(AtOrd::Relaxed))
+}
+
 /// `vhost_discard_vq_desc`: `inject_rx` rolled its descriptors back, so this
 /// frame was never consumed. Put it back at the head — order matters on a TCP
 /// stream. Only the worker calls this, between a pop and the next pop.

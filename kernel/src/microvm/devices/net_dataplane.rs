@@ -199,9 +199,10 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     let mut rx_frames = 0u64;
     let (rx_raise, tx_payloads, caps) = {
         let mut dev = net_backend::lock();
+        let gro = dev.rx_gro_ok();
         while rx_frames < RX_PKT_WEIGHT {
             if dev.rx_avail_count(gm) == 0 { break; }   // get_rx_bufs -> 0
-            let Some(frame) = nat::tap_pop() else { break };
+            let Some(frame) = nat::tap_pop_rx(gro) else { break };
             if dev.inject_rx(gm, &frame) {
                 injected = true;
                 rx_frames += 1;
