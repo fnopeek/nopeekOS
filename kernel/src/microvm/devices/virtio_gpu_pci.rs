@@ -27,6 +27,8 @@ use super::guest_mem::GuestMem;
 
 /// How often the [gpu-dmg] coverage line is logged (every N flushes).
 const DMG_LOG_EVERY: u32 = 120;
+/// How many `[gpu-dmg]` windows a session reports.
+const DMG_LOG_WINDOWS: u32 = 3;
 
 const VIRTIO_VENDOR: u32 = 0x1AF4;
 const VIRTIO_GPU_DEVICE: u32 = 0x1050;
@@ -942,9 +944,10 @@ impl VirtioGpu {
         self.dmg_flush_count = self.dmg_flush_count.wrapping_add(1);
         if self.dmg_flush_count % DMG_LOG_EVERY == 0 && self.dmg_tile_acc > 0 {
             let pct = self.dmg_area_acc.saturating_mul(100) / self.dmg_tile_acc;
-            // Guests typically dirty 100% of the scanout every frame, so only
-            // report when partial damage actually appears.
-            if pct < 95 {
+            // The first windows of a session only: partial damage is the
+            // normal case since the device compares rows itself, and a line
+            // every two seconds is noise.
+            if self.dmg_flush_count <= DMG_LOG_EVERY * DMG_LOG_WINDOWS {
                 kprintln!(
                     "[gpu-dmg] {} flushes: avg damage {}% of tile (last {}x{}+{}+{} of {}x{})",
                     DMG_LOG_EVERY, pct, dmg_w, dmg_h, x, y, r.width, r.height,
