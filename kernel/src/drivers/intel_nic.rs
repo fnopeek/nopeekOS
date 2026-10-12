@@ -412,6 +412,18 @@ pub fn mac() -> Option<[u8; 6]> {
     DEVICE.lock().as_ref().map(|d| d.mac_addr)
 }
 
+/// `send` that refuses a full ring at once on I225/I226 (`igc::try_send`);
+/// the e1000 path has no such mode and sends as `send` does.
+pub fn try_send(frame: &[u8]) -> Result<(), NetError> {
+    if IS_IGC.load(Ordering::Acquire) {
+        if frame.len() > MTU { return Err(NetError::FrameTooLarge); }
+        let r = igc::try_send(frame);
+        if r.is_ok() { TX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
+        return r;
+    }
+    send(frame)
+}
+
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
     if frame.len() > MTU { return Err(NetError::FrameTooLarge); }
     if IS_IGC.load(Ordering::Acquire) {

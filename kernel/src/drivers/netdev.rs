@@ -442,11 +442,13 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
 }
 
 /// `send` for a caller that keeps a refused frame and retries: the virtio
-/// card refuses a full ring at once instead of spinning on it. Other cards
-/// behave as in `send`.
+/// card and the I225/I226 refuse a full ring at once instead of spinning on
+/// it. Other cards behave as in `send`.
 pub fn try_send(frame: &[u8]) -> Result<(), NetError> {
     match active() {
         Active::Virtio | Active::None if active_link_up() => virtio_net::try_send(frame)
+            .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); }),
+        Active::Intel if active_link_up() => intel_nic::try_send(frame)
             .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); }),
         _ => send(frame),
     }

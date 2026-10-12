@@ -109,6 +109,14 @@ const IGC_DEFAULT_TXD: usize = 256;
 /// Return RX buffers in batches — "one at a time is too slow".
 const IGC_RX_BUFFER_WRITE: u16 = 16;
 const BUF_SIZE: usize = IGC_RXBUFFER_2048 as usize;
+/// `IGC_MAX_DATA_PER_TXD`: one data descriptor carries up to 32 KiB.
+const IGC_MAX_DATA_PER_TXD: usize = 1 << 15;
+/// A TSO super-frame lies whole in one of these, so it takes one data
+/// descriptor per 32 KiB (Linux maps the skb's fragments the same way)
+/// instead of one per 2 KiB copy buffer.
+const TSO_SLOT_SIZE: usize = 66 * 1024;
+const TSO_SLOTS: usize = 32;
+const NO_TSO_SLOT: u8 = 0xFF;
 
 /// MSI-X table entry for queue pair 0; entry 0 is "other causes" (link),
 /// which we leave masked — link state is read from STATUS.
@@ -132,6 +140,12 @@ struct Igc {
     /// EOP descriptor — the only one the NIC writes DD back to (RS is set on
     /// the last descriptor; a TSO context descriptor never gets one).
     tx_eop: [u16; IGC_DEFAULT_TXD],
+    /// `TSO_SLOTS` super-frame buffers.
+    tso_data: DmaRegion,
+    /// Free TSO slots, one bit each.
+    tso_free: u32,
+    /// For the first slot of a TSO packet, the super-frame buffer it uses.
+    tso_slot_of: [u8; IGC_DEFAULT_TXD],
     /// EIMS bit of the queue vector; 0 = no interrupt, polled.
     eims_value: u32,
 }
@@ -156,6 +170,16 @@ pub fn init(dev: pci::PciAddr, mmio: Mmio) -> bool {
     let Some(rx_bufs) = alloc_zeroed(IGC_DEFAULT_RXD * BUF_SIZE) else { return false };
     let Some(tx_descs) = alloc_zeroed(IGC_DEFAULT_TXD * 16) else { return false };
     let Some(tx_bufs) = alloc_zeroed(IGC_DEFAULT_TXD * BUF_SIZE) else { return false };
+    // Without the super-frame buffers the card still runs: every TSO frame
+    // is then refused and the caller segments in software.
+    let (tso_data, tso_free) = match alloc_zeroed(TSO_SLOTS * TSO_SLOT_SIZE) {
+        Some(r) => (r, ((1u64 << TSO_SLOTS) - 1) as u32),
+        None => {
+            crate::kprintln!("[npk] igc: no memory for TSO buffers, segmenting in software");
+            let Some(r) = alloc_zeroed(4096) else { return false };
+            (r, 0)
+        }
+    };
 
     // igc_get_hw_control
     mmio.w32(IGC_CTRL_EXT, mmio.r32(IGC_CTRL_EXT) | IGC_CTRL_EXT_DRV_LOAD);
@@ -209,6 +233,8 @@ pub fn init(dev: pci::PciAddr, mmio: Mmio) -> bool {
         mmio, rx_descs, rx_bufs, tx_descs, tx_bufs,
         rx_next_to_clean: 0, rx_cleaned: 0, rx_discarding: false,
         tx_next_to_use: 0, tx_next_to_clean: 0, tx_eop: [0; IGC_DEFAULT_TXD],
+        tso_data, tso_free,
+        tso_slot_of: [NO_TSO_SLOT; IGC_DEFAULT_TXD],
         eims_value: 0,
     };
 
@@ -314,10 +340,15 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
 fn tx_clean(d: &mut Igc) {
     let n = IGC_DEFAULT_TXD as u16;
     while d.tx_next_to_clean != d.tx_next_to_use {
-        let eop = d.tx_eop[d.tx_next_to_clean as usize];
+        let first = d.tx_next_to_clean as usize;
+        let eop = d.tx_eop[first];
         // `wb.status` is the olinfo word.
         let status = d.tx_descs.r32(desc_off(eop) + 12);
         if status & IGC_TXD_STAT_DD == 0 { break; }
+        let slot = core::mem::replace(&mut d.tso_slot_of[first], NO_TSO_SLOT);
+        if slot != NO_TSO_SLOT {
+            d.tso_free |= 1 << slot;
+        }
         d.tx_next_to_clean = (eop + 1) % n;
     }
 }
@@ -360,10 +391,27 @@ fn tx_bump_tail(d: &mut Igc, next: u16) {
 
 /// `igc_xmit_frame_ring` for a single-buffer frame.
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
+    send_inner(frame, true)
+}
+
+/// `send` without waiting for completions: a full ring is `QueueFull` at
+/// once (`NETDEV_TX_BUSY`), for a caller that keeps the frame and retries
+/// (`nat`'s egress backlog). Waiting would hold `DEVICE`, which the receive
+/// path needs for the ACKs that free the ring.
+pub fn try_send(frame: &[u8]) -> Result<(), NetError> {
+    send_inner(frame, false)
+}
+
+fn send_inner(frame: &[u8], wait: bool) -> Result<(), NetError> {
     if frame.len() > MTU { return Err(NetError::FrameTooLarge); }
     let mut lock = DEVICE.lock();
     let d = lock.as_mut().ok_or(NetError::NotInitialized)?;
-    tx_reserve(d, 1)?;
+    if wait {
+        tx_reserve(d, 1)?;
+    } else {
+        tx_clean(d);
+        if tx_unused(d) < 1 { return Err(NetError::QueueFull); }
+    }
     let i = d.tx_next_to_use;
     write_data_desc(d, i, frame,
         IGC_ADVTXD_DTYP_DATA | IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DCMD_IFCS
@@ -378,10 +426,16 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
 /// `frame` is a whole Ethernet frame (IPv4, no options, TCP) whose TCP check
 /// holds the Linux `CHECKSUM_PARTIAL` seed (pseudo-header incl. length).
 pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result<(), NetError> {
+    if frame.len() > TSO_SLOT_SIZE { return Err(NetError::FrameTooLarge); }
     let mut lock = DEVICE.lock();
     let d = lock.as_mut().ok_or(NetError::NotInitialized)?;
-    let chunks = frame.len().div_ceil(BUF_SIZE);
-    tx_reserve(d, 1 + chunks as u16)?;
+    // `igc_maybe_stop_tx` without the wait: a full ring is the caller's to
+    // handle, and it segments in software.
+    let pieces = frame.len().div_ceil(IGC_MAX_DATA_PER_TXD);
+    tx_clean(d);
+    if tx_unused(d) < 1 + pieces as u16 || d.tso_free == 0 {
+        return Err(NetError::QueueFull);
+    }
 
     // igc_tso: IP tot_len 0 (HW fills per segment), IP check 0 (IXSM), and
     // the payload length taken back out of the TCP seed.
@@ -395,6 +449,13 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
     let mut sum = (!seed) as u32 + paylen;
     while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
     hdr[l4_off + 16..l4_off + 18].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+
+    // The whole frame into a free super-frame buffer, its headers rewritten.
+    let slot = d.tso_free.trailing_zeros() as usize;
+    d.tso_free &= !(1u32 << slot);
+    let slot_off = (slot * TSO_SLOT_SIZE) as u64;
+    d.tso_data.copy_in(slot_off, frame);
+    d.tso_data.copy_in(slot_off, &hdr[..hdr_len]);
 
     let n = IGC_DEFAULT_TXD as u16;
     let first = d.tx_next_to_use;
@@ -410,26 +471,26 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
     txd.w32(ctx + 12,
         (((hdr_len - l4_off) as u32) << IGC_ADVTXD_L4LEN_SHIFT)
         | ((mss as u32) << IGC_ADVTXD_MSS_SHIFT));
-    // Data descriptors; PAYLEN + checksum insertion on the first only.
+    // `igc_tx_map`: data descriptors of at most IGC_MAX_DATA_PER_TXD; PAYLEN
+    // and checksum insertion on the first only, EOP + RS on the last.
     let cmd = IGC_ADVTXD_DTYP_DATA | IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DCMD_IFCS
         | IGC_ADVTXD_DCMD_TSE;
     let olinfo = ((frame.len() - hdr_len) as u32) << IGC_ADVTXD_PAYLEN_SHIFT
         | ((IGC_TXD_POPTS_TXSM | IGC_TXD_POPTS_IXSM) << 8);
     let mut i = (first + 1) % n;
-    let mut chunk = [0u8; BUF_SIZE];
-    for c in 0..chunks {
-        let off = c * BUF_SIZE;
-        let end = (off + BUF_SIZE).min(frame.len());
-        let len = end - off;
-        chunk[..len].copy_from_slice(&frame[off..end]);
-        // The rewritten headers replace the head of the first chunk.
-        if c == 0 { chunk[..hdr_len].copy_from_slice(&hdr[..hdr_len]); }
-        let last = c == chunks - 1;
+    for c in 0..pieces {
+        let off = c * IGC_MAX_DATA_PER_TXD;
+        let len = (frame.len() - off).min(IGC_MAX_DATA_PER_TXD);
+        let last = c == pieces - 1;
         let this_cmd = if last { cmd | IGC_ADVTXD_DCMD_EOP | IGC_ADVTXD_DCMD_RS } else { cmd };
-        write_data_desc(d, i, &chunk[..len], this_cmd, if c == 0 { olinfo } else { 0 });
+        let desc = desc_off(i);
+        d.tx_descs.w64(desc, d.tso_data.phys() + slot_off + off as u64);
+        d.tx_descs.w32(desc + 8, this_cmd | len as u32);
+        d.tx_descs.w32(desc + 12, if c == 0 { olinfo } else { 0 });
         if last { d.tx_eop[first as usize] = i; }
         i = (i + 1) % n;
     }
+    d.tso_slot_of[first as usize] = slot as u8;
     tx_bump_tail(d, i);
     Ok(())
 }
