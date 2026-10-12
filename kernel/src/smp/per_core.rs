@@ -1018,14 +1018,12 @@ fn admit_fiber_task(cid: usize, task: super::scheduler::Task) {
 }
 
 /// Whether core `c` may take over fibers from busy cores when it has nothing
-/// to run. Not Core 0 (the shell and the compositor want it responsive) and
-/// not a core holding a vCPU: a fiber is cooperative, and the vCPU would
-/// wait for it to yield.
+/// to run. Not Core 0 (the shell and the compositor want it responsive). A
+/// core holding a vCPU takes only preemptible fibers (`steal_for`).
 fn may_steal(c: usize) -> bool {
     c != 0 && c < 256
         && IN_LOOP[c].load(Ordering::Acquire)
         && DEDICATED_VM_CORE.load(Ordering::Acquire) as usize != c
-        && !crate::microvm::cpu::is_vcpu_core(c)
 }
 
 /// Last time an idle core was asked to look at core `c`'s queue.
@@ -1047,8 +1045,11 @@ pub fn invite_stealer(victim: usize) {
     INVITED_TSC[victim].store(now, Ordering::Relaxed);
     let workers = super::scheduler::worker_count().min(255);
     let me = current_core_id();
+    // A core without a vCPU first: it can take any movable fiber.
+    let idle = |c: usize| c != victim && c != me && IDLE[c].load(Ordering::SeqCst) && may_steal(c);
     if let Some(c) = (1..=workers)
-        .find(|&c| c != victim && c != me && IDLE[c].load(Ordering::SeqCst) && may_steal(c))
+        .find(|&c| idle(c) && !crate::microvm::cpu::is_vcpu_core(c))
+        .or_else(|| (1..=workers).find(|&c| idle(c)))
     {
         super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
     }
@@ -1188,7 +1189,9 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
 
         // Nothing of its own to run: take over a fiber that waits, runnable,
         // behind a busy core. Its scheduler runs it on the next pass.
-        if may_steal(cid) && super::fiber::steal_for(cid) {
+        if may_steal(cid)
+            && super::fiber::steal_for(cid, crate::microvm::cpu::is_vcpu_core(cid))
+        {
             continue;
         }
 

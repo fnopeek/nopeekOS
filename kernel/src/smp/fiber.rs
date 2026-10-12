@@ -479,6 +479,22 @@ pub fn pin_current() {
     }
 }
 
+/// The running fiber yields within a fuel slice even while it computes.
+pub fn mark_preemptible() {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES {
+        return;
+    }
+    // SAFETY: CURRENT_FIBER[cid] is non-null iff we run inside a fiber here,
+    // and only this core touches the fiber while it runs.
+    unsafe {
+        let f = CURRENT_FIBER[cid];
+        if !f.is_null() {
+            (*f).preemptible = true;
+        }
+    }
+}
+
 /// Idle core `thief` takes one movable fiber that is runnable now but sits in
 /// the queue of a core busy with another one. True if it took one; the
 /// fiber is then in `thief`'s queue, and the caller runs its scheduler.
@@ -489,7 +505,11 @@ pub fn pin_current() {
 /// after everything the fiber did on its old core, unmaps included — memory
 /// mapped for a fiber is only touched by that fiber, so no other core needs
 /// to see its unmaps first.
-pub fn steal_for(thief: usize) -> bool {
+///
+/// `preemptible_only`: the thief holds a vCPU, so only a fiber that yields
+/// while it computes may go there — anything else could keep the vCPU out
+/// for as long as it runs.
+pub fn steal_for(thief: usize, preemptible_only: bool) -> bool {
     if thief >= MAX_CORES {
         return false;
     }
@@ -504,7 +524,9 @@ pub fn steal_for(thief: usize) -> bool {
         }
         let taken = {
             let mut q = FIBER_QUEUES[victim].lock();
-            match q.iter().position(|f| f.movable && runnable(f, now)) {
+            match q.iter().position(|f| {
+                f.movable && (f.preemptible || !preemptible_only) && runnable(f, now)
+            }) {
                 Some(i) => q.remove(i),
                 None => None,
             }
@@ -839,6 +861,9 @@ pub struct Fiber {
     waker: Waker,
     /// An idle core may take it over (`steal_for`).
     movable: bool,
+    /// It yields to a runnable peer within a fuel slice even while it
+    /// computes (a forge app), so it may also run beside a vCPU.
+    preemptible: bool,
     app_func: Option<fn(u64)>,
     app_arg: u64,
     /// Switched into at least once. Until then its RFLAGS slot is a
@@ -878,6 +903,7 @@ impl Fiber {
             state: FiberState::Ready,
             waker: NO_WAKER,
             movable: false,
+            preemptible: false,
             app_func: None,
             app_arg: 0,
             started: false,

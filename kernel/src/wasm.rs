@@ -620,6 +620,9 @@ fn wasm_worker_task(arg: u64) {
 /// The same job under forge. Kept separate from `wasm_worker_task` so the
 /// interpreter path stays untouched; the cost is a duplicated cleanup tail.
 fn forge_worker_task(slot: usize, job: WasmJob) {
+    // Generated code gives its core up at fuel-slice ends (`forge_rt::refuel`),
+    // so this fiber may also run on a core it shares with a vCPU.
+    crate::smp::fiber::mark_preemptible();
     let terminal_idx = job.terminal_idx;
     let core_id = crate::smp::per_core::current_core_id();
     let name_str = core::str::from_utf8(&job.name[..job.name_len as usize]).unwrap_or("?");
