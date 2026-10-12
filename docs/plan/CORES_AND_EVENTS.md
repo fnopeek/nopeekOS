@@ -659,10 +659,8 @@ NUC** zu bestaetigen, bevor der naechste kommt.
 | # | Schritt | Tor |
 |---|---|---|
 | 4.0 | ✓ 0.546.0: VM-Kerne zaehlen nicht in `least_loaded`, Aufgabe nach 20 ms von jedem Kern | NUC: `top` laeuft neben der microVM ✓ |
-| 4.1 | Aufnahme bei jedem Fiberwechsel (`run_core_fibers` schaut in den Eingang) | `top` startet < 1 ms auch neben pollendem Arbeiter; Boot unveraendert |
-| 4.2 | Sperren-Zaehler + Pruefung im `switch` (7.5) | Ein Speedtest, ein YouTube, Apps auf/zu ohne Treffer — oder die Liste der Treffer |
-| 4.3 | Kick an Weckgriff/vCPU statt an Kern (7.4 Punkt 2); `wake_core` auf einem vCPU-Kern holt die vCPU aus dem Gast | `kick→resume` unveraendert; ein geweckter Fiber auf einem vCPU-Kern laeuft in < 100 µs statt ≤ 3 ms |
-| 4.4 | vCPU teilt: Fiber-Regel in `protected_cores` faellt, vCPU-Zahl = Kerne ohne Kern 0. `KVM_HINTS_REALTIME` (0.544) faellt mit — eine teilende vCPU wird verdraengt | NUC: Gast 3 vCPUs, Speedtest, `top`, Ton; QEMU: 6–7 vCPUs; kein Haenger ueber einen Abend |
+| 4.1 | ✓ 0.547.0: Aufnahme bei jedem Fiberwechsel (`run_core_fibers` schaut in den Eingang) | `top` startet < 1 ms auch neben pollendem Arbeiter; Boot unveraendert |
+| 4.2–4.4 | ✓ 0.548.x: vCPU teilt (Weck-IPI an vCPU-Kerne, `PEER_WAKE`), Netz/GPU-Arbeiter auf `fiber::Doorbell`, GPU ohne eigenen Kern, `protected_cores` nur Pump-Kerne, Abbau-Schleifen geben ab. Sperren-Audit per Lesen aller 25 Abgabestellen statt Zaehler. `KVM_HINTS_REALTIME` bleibt (0.548.1): ohne ihn 9–14k statt 2–3k HLT-Exits/s; er schaltet in Linux nur Haltpoll an und PV-Spinlock/TLB-Flush/Sched-Yield ab, die wir nicht anbieten | QEMU -smp 8: 6 vCPUs ✓, `top` daneben ✓, Abbau ✓; NUC offen |
 | 4.5 | Weckgriff folgt dem Fiber, `FIBER_COUNT` wandert, `HostState.core_id` live, Registries nachgefuehrt (7.4 leicht) | Verhalten unveraendert (noch keine Migration) |
 | 4.6 | TLB-Quarantaene | forge laedt/entlaedt Module unter Last ohne Fehler |
 | 4.7 | Migration: Affinitaet je Fiber, Leerlauf-Kern holt `Any`-Fiber vom vollsten Kern | NUC: Netz-Arbeiter und NIC-Treiber nicht mehr auf einem Kern; `cores` zeigt verteilte Last |
