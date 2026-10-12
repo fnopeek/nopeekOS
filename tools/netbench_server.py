@@ -94,17 +94,25 @@ async function down(){
   const s = (performance.now() - t0) / 1000;
   log('download ' + (got >> 20) + ' MB in ' + s.toFixed(2) + ' s = ' + (got * 8 / s / 1e6).toFixed(0) + ' Mbit');
 }
-function up(){
+// One 32 MB blob, posted again and again: the browser holds 32 MB, not the
+// whole transfer (a 500 MB blob got the guest's browser OOM-killed).
+const PART = 32;
+function post(blob){
   return new Promise(res => {
-    const chunk = new Uint8Array(1 << 20); crypto.getRandomValues(chunk.subarray(0, 65536));
-    const blob = new Blob(Array(MB).fill(chunk));
-    const x = new XMLHttpRequest(); phase = 'upload'; t0 = performance.now();
-    x.upload.onprogress = e => { live = e.loaded * 8 / ((performance.now() - t0) * 1000); };
-    x.onloadend = () => { const s = (performance.now() - t0) / 1000;
-      log('upload ' + MB + ' MB in ' + s.toFixed(2) + ' s = ' + (MB * 8 * 1048576 / s / 1e6).toFixed(0) + ' Mbit');
-      res(); };
+    const x = new XMLHttpRequest();
+    x.upload.onprogress = e => { live = (sent + e.loaded) * 8 / ((performance.now() - t0) * 1000); };
+    x.onloadend = () => res(x.status === 200);
     x.open('POST', '/upload'); x.send(blob);
   });
+}
+let sent = 0;
+async function up(){
+  const chunk = new Uint8Array(PART << 20); crypto.getRandomValues(chunk.subarray(0, 65536));
+  const blob = new Blob([chunk]);
+  phase = 'upload'; sent = 0; t0 = performance.now();
+  for (let i = 0; i < MB / PART; i++) { if (!await post(blob)) { log('upload failed'); break; } sent += blob.size; }
+  const s = (performance.now() - t0) / 1000;
+  log('upload ' + (sent >> 20) + ' MB in ' + s.toFixed(2) + ' s = ' + (sent * 8 / s / 1e6).toFixed(0) + ' Mbit');
 }
 async function run(){ out.textContent = ''; await down(); await up(); phase = ''; log('done'); }
 </script>"""
