@@ -415,6 +415,7 @@ struct TraceMark {
     react_sum: u64,
     react_n: u64,
     hs: (u64, u64, u64, u64),
+    kinds: ([[u64; 5]; 2], u64),
 }
 
 impl TraceMark {
@@ -430,6 +431,7 @@ impl TraceMark {
             react_sum: sum,
             react_n: n,
             hs: crate::microvm::devices::nat::handshake_stats(),
+            kinds: crate::microvm::devices::nat::tcp_kind_stats(),
         }
     }
 }
@@ -448,6 +450,14 @@ fn trace_tick(mark: &mut Option<TraceMark>) {
     let us = (dt / (freq / 1_000_000).max(1)).max(1);
     let up = (n.tx - m.tx) * 8 / us;
     let down = (n.rx - m.rx) * 8 / us;
+    let ms = (now.wrapping_sub(n.start)) / (freq / 1000).max(1);
+    let d = |dir: usize, i: usize| n.kinds.0[dir][i] - m.kinds.0[dir][i];
+    if (0..2).any(|dir| (0..5).any(|i| d(dir, i) > 0)) {
+        crate::kprintln!("[nettrace] +{}ms tcp out: data={} ack={} fin={} rst={} zwin={} resent={} | in: data={} ack={} fin={} rst={} zwin={} | {}KB up {}KB down",
+            ms, d(0, 0), d(0, 1), d(0, 2), d(0, 3), d(0, 4), n.kinds.1 - m.kinds.1,
+            d(1, 0), d(1, 1), d(1, 2), d(1, 3), d(1, 4),
+            (n.tx - m.tx) / 1024, (n.rx - m.rx) / 1024);
+    }
     if up > 0 || down > 0 {
         let passes = n.passes - m.passes;
         let kb = (n.taken - m.taken) / passes.max(1) / 1024;

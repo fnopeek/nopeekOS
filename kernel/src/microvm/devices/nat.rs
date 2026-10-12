@@ -65,6 +65,7 @@ const TCP_HDR_LEN: usize = 20;
 const TCP_FIN: u8 = 0x01;
 const TCP_SYN: u8 = 0x02;
 const TCP_PSH: u8 = 0x08;
+const TCP_RST: u8 = 0x04;
 const TCP_CWR: u8 = 0x80;
 /// virtio-net header gso_type for a TCPv4 super-frame on guest TX (the ECN flag
 /// 0x80 is OR'd on top and must be masked off before comparing).
@@ -670,6 +671,7 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
     }
     let payload = &l4[thlen..];
     note_tx_seq(hp, l4, payload.len());
+    note_tcp_kind(0, l4, payload.len());
     let mss = gso_size as usize;
 
     // Non-GSO (or fits in one MSS): single segment.
@@ -743,6 +745,29 @@ static NS_RX_SYNACK: AtomicU64 = AtomicU64::new(0);
 pub fn handshake_stats() -> (u64, u64, u64, u64) {
     (NS_SYN.load(AtOrd::Relaxed), NS_SYN_RETRANS.load(AtOrd::Relaxed),
      NS_RX_SYNACK.load(AtOrd::Relaxed), NS_RX_UNMATCHED.load(AtOrd::Relaxed))
+}
+
+/// Guest TCP segments by kind, each way: data, pure ACK, FIN, RST, zero
+/// window. Index 0 = guest to far end, 1 = far end to guest.
+static TCP_KIND: [[AtomicU64; 5]; 2] = [const { [const { AtomicU64::new(0) }; 5] }; 2];
+
+fn note_tcp_kind(dir: usize, l4: &[u8], payload_len: usize) {
+    let flags = l4[13];
+    let k = &TCP_KIND[dir];
+    if payload_len > 0 { k[0].fetch_add(1, AtOrd::Relaxed); }
+    else if flags & (TCP_SYN | TCP_FIN | TCP_RST) == 0 { k[1].fetch_add(1, AtOrd::Relaxed); }
+    if flags & TCP_FIN != 0 { k[2].fetch_add(1, AtOrd::Relaxed); }
+    if flags & TCP_RST != 0 { k[3].fetch_add(1, AtOrd::Relaxed); }
+    if flags & (TCP_SYN | TCP_RST) == 0 && l4[14] == 0 && l4[15] == 0 {
+        k[4].fetch_add(1, AtOrd::Relaxed);
+    }
+}
+
+/// [direction][data, ack, fin, rst, zero window], plus the guest's resent
+/// data segments. Monotonic.
+pub fn tcp_kind_stats() -> ([[u64; 5]; 2], u64) {
+    (core::array::from_fn(|d| core::array::from_fn(|i| TCP_KIND[d][i].load(AtOrd::Relaxed))),
+     NS_TX_RETRANS.load(AtOrd::Relaxed))
 }
 /// Inbound TCP segments for the guest carrying SACK blocks: the far end
 /// reports holes in what it received.
@@ -1255,6 +1280,11 @@ pub fn tap_inbound(ip: &[u8]) -> bool {
     }
     if proto == PROTO_TCP && l4.len() >= TCP_HDR_LEN && l4[13] & TCP_SYN != 0 {
         NS_RX_SYNACK.fetch_add(1, AtOrd::Relaxed);
+    }
+    if proto == PROTO_TCP && l4.len() >= TCP_HDR_LEN {
+        let thlen = ((l4[12] >> 4) as usize * 4).clamp(TCP_HDR_LEN, l4.len());
+        let tot = (u16::from_be_bytes([ip[2], ip[3]]) as usize).min(ip.len());
+        note_tcp_kind(1, l4, tot.saturating_sub(ihl + thlen));
     }
 
     let mut frame = frame_pool_get(VNET_HDR_LEN + ETH_HDR_LEN + ip.len());
