@@ -516,8 +516,9 @@ fn arm_tx_early() {
     crate::drivers::igc::set_tx_limit(kb.saturating_mul(1024));
     crate::kprintln!("[microvm] host card queue: {}",
         if kb == 0 { alloc::format!("ring size") } else { alloc::format!("{} KB", kb) });
-    TRACE.store(crate::config::get("microvm_nettrace").is_some_and(|v| v.trim() == "on"),
-        Ordering::Relaxed);
+    let trace = crate::config::get("microvm_nettrace").is_some_and(|v| v.trim() == "on");
+    TRACE.store(trace, Ordering::Relaxed);
+    crate::microvm::devices::nat::set_flight(trace);
     let off = crate::config::get("microvm_tx_early").is_some_and(|v| v.trim() == "off");
     TX_EARLY.store(!off, Ordering::Relaxed);
     crate::kprintln!("[microvm] TX completion: {}",

@@ -676,6 +676,7 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
     let payload = &l4[thlen..];
     note_tx_seq(hp, l4, payload.len());
     note_tcp_kind(0, l4, payload.len());
+    flight(0, hp, l4, payload.len());
     let mss = gso_size as usize;
 
     // Non-GSO (or fits in one MSS): single segment.
@@ -767,6 +768,97 @@ fn note_tcp_kind(dir: usize, l4: &[u8], payload_len: usize) {
     if flags & TCP_RST != 0 { k[3].fetch_add(1, AtOrd::Relaxed); }
     if flags & (TCP_SYN | TCP_RST) == 0 && l4[14] == 0 && l4[15] == 0 {
         k[4].fetch_add(1, AtOrd::Relaxed);
+    }
+}
+
+/// Flight recorder for `set microvm_nettrace on`: every guest TCP segment
+/// each way, and after a flow's upload stood still for `FLIGHT_GAP_MS`, the
+/// segments of that flow from just before the gap to its end.
+#[derive(Clone, Copy)]
+struct FlightEv {
+    tsc: u64,
+    seq: u32,
+    ack: u32,
+    len: u32,
+    win: u16,
+    hp: u16,
+    dir: u8,
+    flags: u8,
+    sack: bool,
+}
+const FLIGHT_LEN: usize = 16384;
+const FLIGHT_GAP_MS: u64 = 300;
+const FLIGHT_DUMPS_MAX: u32 = 6;
+struct Flight { ev: [FlightEv; FLIGHT_LEN], next: usize }
+static FLIGHT: Mutex<Flight> = Mutex::new(Flight {
+    ev: [FlightEv { tsc: 0, seq: 0, ack: 0, len: 0, win: 0, hp: 0, dir: 0, flags: 0, sack: false }; FLIGHT_LEN],
+    next: 0,
+});
+static FLIGHT_ON: AtomicBool = AtomicBool::new(false);
+static FLIGHT_DUMPS: AtomicU32 = AtomicU32::new(0);
+/// Last outbound data segment per host port.
+static FLIGHT_LAST_OUT: [AtomicU64; PORT_RANGE] = [const { AtomicU64::new(0) }; PORT_RANGE];
+
+pub fn set_flight(on: bool) {
+    FLIGHT_ON.store(on, AtOrd::Relaxed);
+    FLIGHT_DUMPS.store(0, AtOrd::Relaxed);
+}
+
+fn flight(dir: u8, hp: u16, l4: &[u8], payload_len: usize) {
+    if !FLIGHT_ON.load(AtOrd::Relaxed) { return; }
+    let now = crate::interrupts::rdtsc();
+    let ev = FlightEv {
+        tsc: now,
+        seq: u32::from_be_bytes([l4[4], l4[5], l4[6], l4[7]]),
+        ack: u32::from_be_bytes([l4[8], l4[9], l4[10], l4[11]]),
+        len: payload_len as u32,
+        win: u16::from_be_bytes([l4[14], l4[15]]),
+        hp,
+        dir,
+        flags: l4[13],
+        sack: has_sack(l4),
+    };
+    {
+        let mut f = FLIGHT.lock();
+        let i = f.next;
+        f.ev[i] = ev;
+        f.next = (i + 1) % FLIGHT_LEN;
+    }
+    if dir != 0 || payload_len == 0 { return; }
+    let Some(slot) = (hp as usize).checked_sub(L3_PORT_LO as usize)
+        .and_then(|i| FLIGHT_LAST_OUT.get(i)) else { return };
+    let last = slot.swap(now, AtOrd::Relaxed);
+    let freq = crate::interrupts::tsc_freq().max(1);
+    if last == 0 || now.wrapping_sub(last) < freq / 1000 * FLIGHT_GAP_MS { return; }
+    if FLIGHT_DUMPS.fetch_add(1, AtOrd::Relaxed) >= FLIGHT_DUMPS_MAX { return; }
+    flight_dump(hp, last, now, freq);
+}
+
+/// The flow's segments around its silence, oldest first.
+fn flight_dump(hp: u16, last: u64, now: u64, freq: u64) {
+    let from = last.saturating_sub(freq / 50);
+    let mut out: Vec<FlightEv> = Vec::new();
+    {
+        let f = FLIGHT.lock();
+        for k in 0..FLIGHT_LEN {
+            let e = f.ev[(f.next + k) % FLIGHT_LEN];
+            if e.hp == hp && e.tsc >= from && e.tsc <= now { out.push(e); }
+        }
+    }
+    let us = |t: u64| (t.wrapping_sub(last) as i64) / (freq / 1_000_000).max(1) as i64;
+    kprintln!("[flight] port {} silent {} ms, {} segments around it (t=0: its last data out)",
+        hp, now.wrapping_sub(last) / (freq / 1000).max(1), out.len());
+    // The last 40 before the silence and the first 100 from its start.
+    let split = out.iter().position(|e| e.tsc > last).unwrap_or(out.len());
+    let shown = out[split.saturating_sub(40)..split].iter()
+        .chain(out[split..].iter().take(100));
+    for e in shown {
+        let f = e.flags;
+        kprintln!("[flight] {:>8}us {} seq={} ack={} len={} win={} {}{}{}{}{}{}",
+            us(e.tsc), if e.dir == 0 { "out" } else { "in " }, e.seq, e.ack, e.len, e.win,
+            if f & TCP_SYN != 0 { "S" } else { "" }, if f & TCP_FIN != 0 { "F" } else { "" },
+            if f & TCP_RST != 0 { "R" } else { "" }, if f & TCP_PSH != 0 { "P" } else { "" },
+            if f & 0x10 != 0 { "." } else { "" }, if e.sack { " SACK" } else { "" });
     }
 }
 
@@ -1299,6 +1391,7 @@ pub fn tap_inbound(ip: &[u8]) -> bool {
         let thlen = ((l4[12] >> 4) as usize * 4).clamp(TCP_HDR_LEN, l4.len());
         let tot = (u16::from_be_bytes([ip[2], ip[3]]) as usize).min(ip.len());
         note_tcp_kind(1, l4, tot.saturating_sub(ihl + thlen));
+        flight(1, host_port, l4, tot.saturating_sub(ihl + thlen));
     }
 
     let mut frame = frame_pool_get(VNET_HDR_LEN + ETH_HDR_LEN + ip.len());
