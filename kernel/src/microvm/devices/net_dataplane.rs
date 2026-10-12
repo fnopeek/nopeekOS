@@ -416,6 +416,9 @@ struct TraceMark {
     react_n: u64,
     hs: (u64, u64, u64, u64),
     kinds: ([[u64; 5]; 2], u64),
+    egress: (u64, u64),
+    sack: u64,
+    card_err: u32,
 }
 
 impl TraceMark {
@@ -432,6 +435,9 @@ impl TraceMark {
             react_n: n,
             hs: crate::microvm::devices::nat::handshake_stats(),
             kinds: crate::microvm::devices::nat::tcp_kind_stats(),
+            egress: crate::microvm::devices::nat::egress_stats(),
+            sack: crate::microvm::devices::nat::tcp_loss_stats().1,
+            card_err: crate::netdev::tx_reject_stats().1,
         }
     }
 }
@@ -457,6 +463,12 @@ fn trace_tick(mark: &mut Option<TraceMark>) {
             ms, d(0, 0), d(0, 1), d(0, 2), d(0, 3), d(0, 4), n.kinds.1 - m.kinds.1,
             d(1, 0), d(1, 1), d(1, 2), d(1, 3), d(1, 4),
             (n.tx - m.tx) / 1024, (n.rx - m.rx) / 1024);
+    }
+    let lost = (n.egress.0 - m.egress.0, n.egress.1 - m.egress.1, n.sack - m.sack,
+                n.card_err.wrapping_sub(m.card_err));
+    if lost != (0, 0, 0, 0) {
+        crate::kprintln!("[nettrace] +{}ms egress parked={} dropped={} | card refused={} | sack-in={}",
+            ms, lost.0, lost.1, lost.3, lost.2);
     }
     if up > 0 || down > 0 {
         let passes = n.passes - m.passes;
