@@ -648,7 +648,7 @@ run_qemu_generic() {
         local tapdev="${QEMU_TAP:-tap0}"
         net_args=(
             -netdev tap,id=net0,ifname="$tapdev",script=no,downscript=no,vhost=on
-            -device virtio-net-pci,netdev=net0
+            -device virtio-net-pci,netdev=net0,vectors=3,rx_queue_size=1024
         )
         info "Network: vhost/tap ($tapdev) — bypassing slirp"
     else

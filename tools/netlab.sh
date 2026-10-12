@@ -2,7 +2,12 @@
 # Internet-like link without root: two user-owned network namespaces joined by
 # a veth pair, each end shaped with netem (one-way delay + rate + queue).
 #
-#   client ns (QEMU, curl)  10.77.0.1 --veth-- 10.77.0.2  server ns (netbench :80)
+#   QEMU --tap0-- 172.30.0.1 client ns 10.77.0.1 --veth-- 10.77.0.2 server ns
+#   (nopeekOS 172.30.0.15 by DHCP)                            (netbench :80)
+#
+# The client ns routes tap0 to the link, so the microVM guest's TCP runs end
+# to end through our NAT and sees the real RTT. slirp would terminate it in
+# QEMU instead; `NETLAB_SLIRP=1 netlab.sh qemu` still runs that way.
 #
 #   netlab.sh up [delay_ms] [rate] [queue_ms]   start (default 10 ms, 1gbit, 5 ms)
 #   netlab.sh shell                             shell in the client ns
@@ -54,6 +59,15 @@ up)
     in_server ip addr add 10.77.0.2/24 dev veth-s
     in_client ip link set veth-c up
     in_server ip link set veth-s up
+    # QEMU's tap, routed (not masqueraded) to the server.
+    in_client ip tuntap add dev tap0 mode tap user 0
+    in_client ip addr add 172.30.0.1/24 dev tap0
+    in_client ip link set tap0 up
+    in_client sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward'
+    in_server ip route add 172.30.0.0/24 via 10.77.0.1
+    in_client python3 "$REPO/tools/netlab_dhcp.py" tap0 172.30.0.1 172.30.0.15 255.255.255.0 \
+        > "$STATE/dhcp.log" 2>&1 &
+    echo $! > "$STATE/dhcp.pid"
     # Packets in flight one way (BDP) plus a queue of qms at line rate.
     rbits=$(python3 -c "import re,sys;s='$rate'.lower();m=re.match(r'([\d.]+)([kmg]?)bit',s);print(int(float(m[1])*{'':1,'k':1e3,'m':1e6,'g':1e9}[m[2]]))")
     limit=$(( rbits / 8 / 1514 * (delay + qms) / 1000 + 64 ))
@@ -66,7 +80,13 @@ up)
     in_client ping -c 2 -q 10.77.0.2 | tail -1
     ;;
 shell) in_client bash ;;
-qemu)  in_client env -C "$REPO" ./build.sh "${2:-qemu-gui}" ;;
+qemu)
+    if [ -n "${NETLAB_SLIRP:-}" ]; then
+        in_client env -C "$REPO" ./build.sh "${2:-qemu-gui}"
+    else
+        in_client env -C "$REPO" QEMU_NET=tap QEMU_TAP=tap0 ./build.sh "${2:-qemu-gui}"
+    fi
+    ;;
 base)
     mb=${2:-500}
     echo "download ${mb} MiB:"
@@ -75,8 +95,9 @@ base)
     head -c $((mb << 20)) /dev/zero | in_client curl -s -X POST --data-binary @- http://10.77.0.2/upload; echo
     ;;
 log)  tail -n "${2:-40}" "$STATE/server.log" ;;
+dhcp) cat "$STATE/dhcp.log" ;;
 down)
-    for f in netbench server client; do
+    for f in dhcp netbench server client; do
         [ -f "$STATE/$f.pid" ] && kill "$(cat "$STATE/$f.pid")" 2>/dev/null || true
     done
     rm -rf "$STATE"; echo "netlab down"
