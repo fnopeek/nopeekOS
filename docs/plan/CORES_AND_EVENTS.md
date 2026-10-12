@@ -7,6 +7,9 @@ Wartezustand, `npk_wait`), Stufe 2b/2c = 0.413.0 + wifi_rtl8822ce 0.68.0
 dock 0.7.0 (Panels abonnieren), Stufe 3a = 0.415.0 (I/O APIC), 3b = 0.416.0 (Eingabe per Interrupt), 3c-1 = 0.417.0 (Shell als Fiber auf
 Kern 0), 0.418.0/0.419.0 (DNS/GC/History/App-Start von Kern 0 herunter), 3e =
 0.420.0 (Kern 0 ohne Takt). Offen: Strom (3b-Strom), aml, Compositor-Fiber.
+**2026-10-12:** Stufe 4 neu gefasst als „Rechenzeit nach Last" — §7. Erster
+Schritt gebaut: 0.546.0 (keine Arbeit wartet mehr auf einen Kern, der nie
+annimmt).
 **Ausloeser:** Kernel 0.408/0.409 (Treiberkern nimmt keine Intents, neue
 Arbeit an den leersten Kern) haben das WLAN von 200 auf ~400 Mbit gebracht —
 nicht durch schnelleren Code, sondern durch **Platzierung von Hand**. Das ist
@@ -474,7 +477,7 @@ Jede Stufe ist einzeln messbar (`cores`: Aufwachungen/s + Last je Kern,
 | **2** | Warten/Wecken: `Waiting{mask}`, IPI-Wake, `npk_wait`; **WLAN auf MSI+NAPI**, dann audio_hda, i2c_hid, Panels | WLAN: kein `sleep_ms(1)` mehr, Einbrueche? Durchsatz ≥ 0.67; Ton ohne Knacken |
 | **3** | Kern 0 aufloesen; dabei xHCI ueber MSI-X (Eingabe per IRQ statt Tick) und der Takt von Kern 0 faellt | Maus fluessig waehrend DNS/GC/App-Start; Kern 0 ohne Takt |
 | **3b** | Strom: **amd-pstate/CPPC** (MSR `CPPC_ENABLE` 0xC00102B1, `CPPC_REQ` 0xC00102B3, EPP je Kern — das AMD-Gegenstueck zu `enable_hwp`, das nur Intel kennt) und **cpuidle mit tiefen C-States** (MWAIT-Hinweise aus `_CST`, Wahl nach erwarteter Schlafdauer wie Linux' `menu`/`teo`). Erst NACH Stufe 3: C6 lohnt nur, wenn ein Kern lange schlaeft | `power`: Package-Watt im Leerlauf; Kern 0 nicht mehr dauerhaft auf Hoechsttakt (Florian 2026-09-24: am IdeaPad ~3,5 GHz gegen ~1,4 GHz der anderen). Ehrlich: RAPL mass Kern 0 schon bei 6 mW, der Grossteil der 21 W liegt ausserhalb der Kerne (`project_idle_power_21w`) |
-| **4** | Skalieren: Heap-Magazine, NVMe je Kern, TCP-Sperren, TLB-Epochen, Migration, Epochen-Praeemption | Zwei Downloads parallel skalieren; rechnender Fiber blockiert keinen Nachbarn |
+| **4** | **Rechenzeit nach Last (§7, ersetzt die alte Zeile):** Aufnahme bei jedem Fiberwechsel, Weckgriff folgt dem Fiber, vCPU teilt Kern mit schlafenden Fibern, Migration der Host-Fiber, Arbeiter ohne festen Kern. Danach Heap-Magazine, NVMe je Kern, TCP-Sperren, Epochen-Praeemption | NUC (4 Kerne): Gast ≥ 3 vCPUs, `top` sofort, Speedtest; QEMU -smp 8: 6 vCPUs |
 | **5** | `par_for`, paralleles Rastern | Bildzeit bei 4K |
 
 ---
@@ -514,3 +517,169 @@ Beim jeweiligen Schritt verifizieren, nicht blind loeschen.
   (Schleifenkopf = ein Laden + Vergleich).
 * **Bild-Deadline:** ohne Vblank-IRQ (GOP/UC-Framebuffer) ist die
   Bild-Deadline eine TSC-Deadline von 16,7 ms; mit intel_xe spaeter Vblank.
+
+---
+
+## 7. Stufe 4 neu gefasst: Rechenzeit dort holen, wo sie frei ist (2026-10-12)
+
+### 7.1 Anlass, gemessen
+
+Ein Tag Netzsuche (Upload im Browser-Gast 400 statt 900) endete nicht im
+Netzweg — `benchvm` traegt dieselbe Strecke mit 869/906 Mbit, und derselbe
+Gast mit demselben Browser kommt unter KVM auf dieselben Zahlen wie bei uns
+(419/403 gegen 407/597, Testseite `/speed` im netlab). Er endete bei der
+**Verteilung der Kerne**:
+
+| Rechner | was die Platzierung daraus machte |
+|---|---|
+| QEMU -smp 8 (0.544) | Gast 3 vCPUs bei 85–97 %; Kern 0 1 %, App-Kern 1 %, GPU-Arbeiter-Kern **8 %** — ein ganzer Kern fuer ein Zehntel Last |
+| QEMU -smp 8 (0.545) | GPU-Arbeiter auf den App-Kern → Gast 4 vCPUs (vorher 3) |
+| NUC, 4 Kerne (0.545) | Gast **1 vCPU** (100 %, haelt nie an), NIC-Treiber + Netz-Arbeiter auf **einem** Kern (100 %, 774 Halts/s à 12 µs), Kern 0 und 1 fast leer; Speedtest bleibt stehen, 30 W |
+| NUC, 4 Kerne (bis 0.545) | `top`/`cores` starten erst, wenn die microVM endet |
+
+Die Ursache ist eine einzige: **Kerne werden nach Rolle vergeben, nicht
+nach Last, und eine Rolle bleibt bis zum Ende.** Vier Regeln tragen sie:
+
+1. `protected_cores` (`microvm/cpu/mod.rs`): eine vCPU bekommt nur einen
+   Kern **ohne jeden Fiber** — auch einer, der nur schlaeft, sperrt ihn. Grund
+   im Kommentar: kooperative Fiber + Spinlocks, „vCPUs beside app fibers have
+   been seen to hang", nie geklaert.
+2. `guest_vcpus` rechnet einen eigenen Kern fuer den Netz-Arbeiter und
+   (ohne App-Kern) einen fuer den GPU-Arbeiter heraus.
+3. Ein Kern nimmt neue Arbeit nur oben in seiner Schleife, also erst wenn
+   **alle** seine Fiber schlafen; ein Kern mit vCPU oder VM-Arbeiter nie.
+4. Ein Fiber bleibt fuer immer auf dem Kern, der ihn aufgenommen hat.
+
+**0.546.0 (gebaut, NUC bestaetigt):** `least_loaded` zaehlte den vCPU-Kern
+als „am leersten" (ein Fiber), alle anderen liessen ihm den Vortritt, er
+nahm nie an. Jetzt zaehlen VM-Kerne nicht mit, und eine Aufgabe, die 20 ms
+gewartet hat, nimmt jeder Kern, der ueberhaupt annimmt. Das war die
+Notbremse, nicht der Umbau.
+
+### 7.2 Wie Linux/KVM es macht, und was wir davon wollen
+
+* Ein Thread hat eine **erlaubte Kernmenge**, keinen Kern. Beim Aufwachen
+  waehlt der Scheduler einen (leer, nah am Cache); ein leerer Kern holt sich
+  Arbeit (`newidle balance`).
+* Eine vCPU ist ein gewoehnlicher Thread. Wacht auf ihrem Kern etwas auf,
+  wird sie per Reschedule-IPI aus dem Gast geholt, der andere laeuft, sie
+  geht zurueck. Pinnen ist eine Wahl fuer Spitzenleistung, keine Pflicht.
+* Gegen die Folgen einer verdraengten vCPU (Lock-Holder-Preemption) gibt es
+  Steal Time, PV-Spinlocks, PV-TLB-Flush.
+
+**Unser Zuschnitt:** vCPUs bleiben **gepinnt** (je vCPU ein Kern, wie heute)
+— sie sollen nur **teilen** duerfen, nicht wandern. Alles andere wird
+beweglich. Damit faellt der teuerste Block weg: vCPU-Migration (SVM-ASID je
+Kern, VMX-VMXON/VMCS/Host-Felder je Kern, s. 7.4) braucht es dafuer nicht.
+
+### 7.3 Zielbild
+
+* **Aufnahme bei jedem Fiberwechsel.** `run_core_fibers` schaut zwischen
+  zwei Fibern in den Eingang, nicht erst, wenn alle schlafen. Ein
+  pollender Arbeiter blockiert keine Tuer mehr.
+* **Affinitaet statt Platz.** Jeder Fiber traegt eine Kernmenge:
+  `Pinned(c)` (Kern-0-Shell/Compositor, vCPU, Treiber an seinem MSI-X),
+  `Any` (Apps, Netz-/GPU-/9p-/fetch-Arbeiter), `Shared` (Hintergrund-Apps).
+* **Weckgriff folgt dem Fiber.** `signal` weckt den Kern, auf dem der Fiber
+  gerade wohnt; Kicks gehen an einen Fiber/eine vCPU, nicht an einen Kern.
+* **vCPU teilt.** Wird auf einem vCPU-Kern ein anderer Fiber lauffaehig,
+  holt ein Kick die vCPU sofort aus dem Gast (heute: bis zu `SLICE_MS` = 3 ms
+  Wartezeit, weil `wake_core` nur LEERE Kerne per IPI weckt). Die vCPU gibt
+  ab, der Fiber laeuft, die vCPU kehrt zurueck. `protected_cores` sperrt dann
+  nur noch Kerne mit pumpendem Treiber.
+* **Last steuert.** Ein Kern, der in den Leerlauf ginge, holt sich einen
+  lauffaehigen `Any`-Fiber vom vollsten Kern. Grundlage ist die Last, die
+  `cores` schon misst (`CORE_USAGE`), nicht die Fiberzahl.
+* **vCPU-Zahl** = Kerne ohne Kern 0 (Deckel `MAX_VCPUS_CAP`), nicht mehr
+  „was nach den Rollen uebrig bleibt". Auf dem NUC 3 statt 1.
+
+### 7.4 Was heute an einem Kern klebt (Inventar 2026-10-12)
+
+Vollstaendig ausgezaehlt (alle Stellen in `kernel/src`), hier gruppiert.
+
+**Blockiert Migration der Host-Fiber:**
+
+1. **Weckgriff `core`** (`fiber.rs`, `alloc_waker`): einmal gesetzt; jeder
+   `signal` (IRQ, Taste, notify, NIC/WLAN) weckt den alten Kern — der
+   gewanderte Fiber schlaeft bis zur Frist. Neu: beim Wiederaufnehmen den
+   Kern eintragen, danach `pending` erneut pruefen (dieselbe
+   Veroeffentlichen-dann-Nachsehen-Ordnung wie `IDLE`).
+2. **Kick-Modell je Kern:** `NET_KICK_GEN`, `KICK_WAITER` (ein Wartender je
+   Kern!), `kick_host_core`, `BSP_HOST_CORE` (einmal gesetzt),
+   `WORKER_CORE` von Netz- und GPU-Arbeiter, `lapic::kick`
+   (ueberspringt den eigenen Kern), `vcpu_on_this_core` (Suche nach Kern —
+   mehrdeutig, sobald zwei vCPU-artige Fiber einen Kern teilen). Wird: Kick
+   an einen Weckgriff bzw. eine vCPU-Kennung.
+3. **TLB-Quarantaene fehlt.** Die Generation (`TLB_GEN`/`sync_tlb`) ist
+   gebaut und laeuft vor jedem Fiberwechsel; aber Rahmen werden sofort
+   freigegeben (`forge_rt.rs` `unmap_range` + RW→RX, `mm/stack.rs` beim
+   Freigeben eines Stacks). Der Kommentar in `paging.rs` stuetzt sich
+   woertlich auf „pinned". Wird: Rahmen erst zurueck, wenn jeder Kern die
+   Generation gesehen hat (schlafende Kerne zaehlen als ruhig).
+4. **Kern-0-Identitaet:** `shade`, `intent::on_core0`, `net`, `dns` fragen
+   „bin ich Kern 0" — gemeint ist „bin ich die Shell". Braucht `Pinned(0)`.
+
+**Leicht zu richten:** `FIBER_COUNT` wandert mit; `HostState.core_id`
+(`wasm.rs`) live lesen statt cachen (Buchhaltung, `process`, und die
+fetch-Platzierung, die den Kern des Aufrufers meiden muss); `irq::arm` beim
+Wiederaufnehmen erneut (oder Treiber-Fiber `Pinned`); `DRIVER_CORES` nicht
+mehr kleben lassen; `WASM_NIC_CORE` nachfuehren wie `MGR_CORE`;
+`VM_CORE_MASK`/`VCPU_CORES`/`WORKER_CORES` aus dem Ist-Zustand rechnen.
+
+**Schon sicher:** Kontextwechsel, `wait`/`yield_ready`/`fiber_on_exit`
+(lesen den Kern bei jedem Aufruf), `sync_tlb` vor jedem Wiederaufnehmen,
+LAPIC-Timer (bei jedem Eintritt neu), SVM-Host-Save (bei jedem Eintritt),
+FPU (ABI-gesichert; Gast-FPU lebt in der vCPU), RFLAGS/IF, Statistikfelder.
+
+**Blockiert nur vCPU-Migration (die wir nicht wollen):** SVM ASID 1 fuer
+alle vCPUs, nur beim ersten Eintritt geleert; VMX VMXON je vCPU, VMCS
+`launched` auf einem Kern, Host-Felder (TR/GDTR/IDTR/GS/CR3) einmal
+geschrieben, VPID 1 fuer alle. **Teilen** mit Host-Fibern beruehrt nichts
+davon: die laufen ohne VMX/SVM-Zustand.
+
+### 7.5 Die offene Frage zuerst: warum hingen vCPUs neben Fibern?
+
+`protected_cores` begruendet die Sperre mit einem beobachteten Haenger, nie
+geklaert („a peer that yields while holding a lock the vCPU needs may never
+run again"). Bevor sie faellt, wird das bewiesen oder widerlegt:
+
+* **Kein Spinlock ueber einen Fiberwechsel.** Ein Zaehler gehaltener
+  Sperren je Kern; `switch` prueft ihn (Debug-Bau: Panik mit Name). Damit
+  wird jede Stelle sichtbar, die beim Abgeben eine Sperre haelt.
+* **Kein Busy-Wait auf eine Bedingung, die nur ein Fiber desselben Kerns
+  erfuellt** (der klassische kooperative Deadlock). Kandidaten: Spins in
+  `stop_worker` (50 Mio. Runden), `kick_wait`-Fallbacks, `send`-Spins.
+* Erst dann faellt die Fiber-Regel in `protected_cores`.
+
+### 7.6 Schritte
+
+Jeder Schritt einzeln baubar, messbar und auf **QEMU -smp 8, IdeaPad und
+NUC** zu bestaetigen, bevor der naechste kommt.
+
+| # | Schritt | Tor |
+|---|---|---|
+| 4.0 | ✓ 0.546.0: VM-Kerne zaehlen nicht in `least_loaded`, Aufgabe nach 20 ms von jedem Kern | NUC: `top` laeuft neben der microVM ✓ |
+| 4.1 | Aufnahme bei jedem Fiberwechsel (`run_core_fibers` schaut in den Eingang) | `top` startet < 1 ms auch neben pollendem Arbeiter; Boot unveraendert |
+| 4.2 | Sperren-Zaehler + Pruefung im `switch` (7.5) | Ein Speedtest, ein YouTube, Apps auf/zu ohne Treffer — oder die Liste der Treffer |
+| 4.3 | Kick an Weckgriff/vCPU statt an Kern (7.4 Punkt 2); `wake_core` auf einem vCPU-Kern holt die vCPU aus dem Gast | `kick→resume` unveraendert; ein geweckter Fiber auf einem vCPU-Kern laeuft in < 100 µs statt ≤ 3 ms |
+| 4.4 | vCPU teilt: Fiber-Regel in `protected_cores` faellt, vCPU-Zahl = Kerne ohne Kern 0. `KVM_HINTS_REALTIME` (0.544) faellt mit — eine teilende vCPU wird verdraengt | NUC: Gast 3 vCPUs, Speedtest, `top`, Ton; QEMU: 6–7 vCPUs; kein Haenger ueber einen Abend |
+| 4.5 | Weckgriff folgt dem Fiber, `FIBER_COUNT` wandert, `HostState.core_id` live, Registries nachgefuehrt (7.4 leicht) | Verhalten unveraendert (noch keine Migration) |
+| 4.6 | TLB-Quarantaene | forge laedt/entlaedt Module unter Last ohne Fehler |
+| 4.7 | Migration: Affinitaet je Fiber, Leerlauf-Kern holt `Any`-Fiber vom vollsten Kern | NUC: Netz-Arbeiter und NIC-Treiber nicht mehr auf einem Kern; `cores` zeigt verteilte Last |
+| 4.8 | Arbeiter ohne festen Kern (Netz, GPU, 9p, fetch als `Any`) | Download/Upload wie vorher oder besser, ohne Kern-Reservierung |
+
+### 7.7 Daneben, nicht Teil dieser Stufe (aus den Durchsichten 2026-10-12)
+
+Gefunden beim selben Abend, eigene Faeden:
+
+* **Exits billiger:** Kick nur, wenn die Ziel-vCPU im Gast ist (KVM
+  `IN_GUEST_MODE`); IBPB je Exit pruefen (`set microvm_ibpb off` fuer A/B);
+  FPU-Tausch und Statistik-Atomics je Exit; Host-Haltpoll achtet nicht auf
+  `MSR_KVM_POLL_CONTROL` (Kommentar in `lapic.rs` falsch); AVIC auf AMD.
+* **Netz zum Gast:** kein GRO/GSO und kein `DATA_VALID` — der Gast prueft
+  jede Pruefsumme selbst (`download_active()` ist toter Code); `TAP_RING`
+  fasst ~6 ms; Signal je 256 statt 64 Rahmen.
+* **Bild:** der Gast uebertraegt immer das ganze Fenster (409 MB/s in QEMU,
+  892 MB/s am NUC), auch ohne Aenderung — zu pruefen.
+* **NUC:** `mmio sqfs=11988/s` waehrend des haengenden Speedtests
+  (Programmplatte; Speicherdruck bei 2 GB Gast-RAM?).
