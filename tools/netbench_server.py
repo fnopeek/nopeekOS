@@ -135,6 +135,27 @@ async function run(){ out.textContent = STREAMS + ' stream(s)' + (ANIM ? '' : ',
 </script>"""
 
 
+
+# GET /cpu: a fixed amount of browser work, timed per kind, so a guest's
+# browser can be held against the same browser on the host.
+CPU_PAGE = """<!doctype html><meta charset=utf-8><title>cpu</title>
+<body style="font:16px monospace;background:#fff;color:#000"><pre id=o>running...</pre>
+<script>
+function t(name, f){const a=performance.now();f();const d=performance.now()-a;
+ document.getElementById('o').textContent+=name.padEnd(28)+d.toFixed(0).padStart(7)+' ms\\n';return d;}
+setTimeout(()=>{
+ document.getElementById('o').textContent='';
+ let total=0;
+ total+=t('js loop (JIT)',()=>{let s=0;for(let i=0;i<200000000;i++){s=(s+i*7)%1000003;}window.x=s;});
+ total+=t('random 64 MB',()=>{const b=new Uint8Array(65536);for(let i=0;i<1024;i++)crypto.getRandomValues(b);});
+ total+=t('alloc+free 32 MB x40',()=>{for(let i=0;i<40;i++){const a=new Uint8Array(32<<20);a[a.length-1]=1;}});
+ total+=t('fill 32 MB x20',()=>{const a=new Uint8Array(32<<20);for(let i=0;i<20;i++)a.fill(i);});
+ total+=t('blob 32 MB x10',()=>{const a=new Uint8Array(32<<20);for(let i=0;i<10;i++){new Blob([a]);}});
+ total+=t('json 10 MB x5',()=>{const o=[];for(let i=0;i<200000;i++)o.push({a:i,b:'x'+i});for(let i=0;i<5;i++)JSON.parse(JSON.stringify(o));});
+ document.getElementById('o').textContent+='total'.padEnd(28)+total.toFixed(0).padStart(7)+' ms\\n';
+},500);
+</script>"""
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -147,6 +168,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.send_header("Content-Length", "0")
             self.end_headers()
+            return
+        if urlparse(self.path).path == "/cpu":
+            body = CPU_PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if urlparse(self.path).path in ("/speed", "/go"):
             body = SPEED_PAGE.encode()

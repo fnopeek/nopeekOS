@@ -842,15 +842,47 @@ fn flight(dir: u8, hp: u16, l4: &[u8], payload_len: usize) {
     flight_dump(hp, last, now, freq);
 }
 
+/// A TCP frame just written into the guest's receive ring; `hp` holds the
+/// guest port, `dir` 2.
+pub fn flight_delivered(frame: &[u8]) {
+    if !FLIGHT_ON.load(AtOrd::Relaxed) { return; }
+    let ip_off = VNET_HDR_LEN + ETH_HDR_LEN;
+    let Some(ip) = frame.get(ip_off..) else { return };
+    if ip.len() < IPV4_HDR_LEN || ip[9] != PROTO_TCP { return; }
+    let ihl = (ip[0] & 0x0F) as usize * 4;
+    let tot = (u16::from_be_bytes([ip[2], ip[3]]) as usize).min(ip.len());
+    let Some(l4) = ip.get(ihl..tot) else { return };
+    if l4.len() < TCP_HDR_LEN { return; }
+    let thlen = ((l4[12] >> 4) as usize * 4).clamp(TCP_HDR_LEN, l4.len());
+    let ev = FlightEv {
+        tsc: crate::interrupts::rdtsc(),
+        seq: u32::from_be_bytes([l4[4], l4[5], l4[6], l4[7]]),
+        ack: u32::from_be_bytes([l4[8], l4[9], l4[10], l4[11]]),
+        len: (l4.len() - thlen) as u32,
+        win: u16::from_be_bytes([l4[14], l4[15]]),
+        hp: u16::from_be_bytes([l4[2], l4[3]]),
+        dir: 2,
+        flags: l4[13],
+        sack: false,
+    };
+    let mut f = FLIGHT.lock();
+    let i = f.next;
+    f.ev[i] = ev;
+    f.next = (i + 1) % FLIGHT_LEN;
+}
+
 /// The flow's segments around its silence, oldest first.
 fn flight_dump(hp: u16, last: u64, now: u64, freq: u64) {
     let from = last.saturating_sub(freq / 50);
     let mut out: Vec<FlightEv> = Vec::new();
+    let mut others: Vec<FlightEv> = Vec::new();
     {
         let f = FLIGHT.lock();
         for k in 0..FLIGHT_LEN {
             let e = f.ev[(f.next + k) % FLIGHT_LEN];
-            if e.hp == hp && e.tsc >= from && e.tsc <= now { out.push(e); }
+            if e.tsc < from || e.tsc > now { continue; }
+            if e.hp == hp && e.dir != 2 { out.push(e); }
+            else if e.tsc > last && e.len > 0 { others.push(e); }
         }
     }
     let us = |t: u64| (t.wrapping_sub(last) as i64) / (freq / 1_000_000).max(1) as i64;
@@ -867,6 +899,16 @@ fn flight_dump(hp: u16, last: u64, now: u64, freq: u64) {
             if f & TCP_SYN != 0 { "S" } else { "" }, if f & TCP_FIN != 0 { "F" } else { "" },
             if f & TCP_RST != 0 { "R" } else { "" }, if f & TCP_PSH != 0 { "P" } else { "" },
             if f & 0x10 != 0 { "." } else { "" }, if e.sack { " SACK" } else { "" });
+    }
+    // Every segment with data on any connection during the silence: `in` =
+    // reached us from the card, `dlv` = written into the guest's ring
+    // (port = the guest's), `out` = taken from the guest.
+    kprintln!("[flight] port {}: all data during the silence ({} segments, last 60):",
+        hp, others.len());
+    for e in &others[others.len().saturating_sub(60)..] {
+        kprintln!("[flight]   {:>8}us {} port={} len={} {}",
+            us(e.tsc), match e.dir { 0 => "out", 1 => "in ", _ => "dlv" }, e.hp, e.len,
+            if e.flags & TCP_PSH != 0 { "P" } else { "" });
     }
 }
 

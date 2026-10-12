@@ -274,6 +274,7 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
                 injected = true;
                 rx_frames += 1;
                 nat::note_tap_delivered();
+                nat::flight_delivered(&frame);
                 nat::recycle_frame(frame);
             } else {
                 // `vhost_discard_vq_desc`: inject_rx rolled its descriptors back,
