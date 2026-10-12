@@ -1533,6 +1533,14 @@ pub fn vm_core_serve() {
 /// re-checking VM_CLOSE_REQUESTED.
 const PARK_SAFETY_MS: u64 = 8;
 
+/// Something is waiting for vCPU `apic_id`: a posted interrupt (device MSI or
+/// another vCPU's IPI) or, on the BSP, the net backend's INTx. The re-check
+/// before a vCPU blocks (`kick_wait_until_unless`).
+fn vcpu_wake_pending(apic_id: u8) -> bool {
+    svm::lapic::posted_pending(apic_id)
+        || (apic_id == 0 && crate::microvm::devices::net_backend::irq_pending())
+}
+
 /// Wake-up bound for a blocked vCPU: the guest's next timer tick, clamped to
 /// [now, safety]. A past deadline re-enters at once; a far or absent one
 /// re-checks no later than the safety cap.
@@ -1565,7 +1573,7 @@ fn park_vcpu_idle(next_timer_tsc: Option<u64>) {
         // The off-vCPU worker injects RX + kicks this fiber. No halt-poll
         // (busy spin before HLT): the guest idles waiting for data, it is
         // not CPU-bound, so keeping it warm only burns the core.
-        crate::smp::fiber::kick_wait_until(deadline);
+        crate::smp::fiber::kick_wait_until_unless(deadline, || vcpu_wake_pending(0));
         return;
     }
 
@@ -1831,8 +1839,9 @@ fn ap_vcpu_fiber_task(arg: u64) {
                     match outcome {
                         Ok(vmx::SliceOutcome::StillRunning) => { crate::smp::fiber::yield_ready(); }
                         Ok(vmx::SliceOutcome::Idle) => {
-                            crate::smp::fiber::kick_wait_until(
-                                vcpu_block_deadline(ctx.next_timer_deadline_tsc()));
+                            crate::smp::fiber::kick_wait_until_unless(
+                                vcpu_block_deadline(ctx.next_timer_deadline_tsc()),
+                                || vcpu_wake_pending(apic_id));
                         }
                         Ok(vmx::SliceOutcome::Exited(o)) => {
                             crate::kprintln!(
@@ -1870,8 +1879,9 @@ fn ap_vcpu_fiber_task(arg: u64) {
                     }
                     Ok(svm::SliceOutcome::Idle) => {
                         svm::lapic::phase(apic_id, svm::lapic::PH_PARK);
-                        crate::smp::fiber::kick_wait_until(
-                            vcpu_block_deadline(ctx.next_timer_deadline_tsc()));
+                        crate::smp::fiber::kick_wait_until_unless(
+                            vcpu_block_deadline(ctx.next_timer_deadline_tsc()),
+                            || vcpu_wake_pending(apic_id));
                     }
                     Ok(svm::SliceOutcome::Exited(o)) => {
                         crate::kprintln!(

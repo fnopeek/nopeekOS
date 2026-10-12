@@ -513,7 +513,7 @@ pub fn net_kick_bump(cid: usize) {
     if cid < MAX_CORES {
         NET_KICK_GEN[cid].fetch_add(1, Ordering::Release);
         // probe: stamp the first kick after a park began (CAS 0→now); cleared at
-        // park start in kick_wait_until, read on resume → kick→resume latency.
+        // park start in kick_wait_until_unless, read on resume → kick→resume latency.
         let _ = KICK_SENT_TSC[cid].compare_exchange(
             0, crate::interrupts::rdtsc(), Ordering::Relaxed, Ordering::Relaxed);
         let w = KICK_WAITER[cid].load(Ordering::Acquire);
@@ -523,7 +523,7 @@ pub fn net_kick_bump(cid: usize) {
     }
 }
 
-/// The fiber that waits in `kick_wait_until` on each core. One per core
+/// The fiber that waits in `kick_wait_until_unless` on each core. One per core
 /// (a vCPU fiber, or the net worker on its reserved core); a second one
 /// would only be resumed by its deadline, which every kick wait has.
 static KICK_WAITER: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(NO_WAKER) }; MAX_CORES];
@@ -561,23 +561,19 @@ pub fn kick_latency_snapshot() -> (u64, u64, u64) {
 }
 
 /// Park the running fiber until this core's net-kick generation advances (an
-/// off-vCPU producer injected + kicked) or `timeout_ms` elapses. The snapshot
-/// is taken here, after the caller has drained its inbound queue, so a kick
-/// racing the park is never lost (it advances the gen past the snapshot →
-/// resumes at once). Returns true if kicked, false on timeout / not-in-fiber.
-pub fn kick_wait(timeout_ms: u64) -> bool {
-    let freq = crate::interrupts::tsc_freq();
-    let deadline = crate::interrupts::rdtsc() + timeout_ms.saturating_mul(freq / 1000);
-    kick_wait_until(deadline)
-}
-
-/// Park the running fiber until this core's net-kick generation advances (an
-/// off-vCPU producer / IPI kicked us) or absolute host TSC `deadline` passes.
-/// The deadline variant is the vCPU-park form: the caller passes the guest's
-/// next LAPIC-timer deadline (`LocalApic::next_timer_deadline_tsc`), so the park
-/// ends exactly at the guest's own 1 kHz tick — the KVM hrtimer model — instead
-/// of a magic fixed timeout. Returns true if a kick woke us, false on deadline.
-pub fn kick_wait_until(deadline: u64) -> bool {
+/// off-vCPU producer / IPI kicked us), `ready` holds, or absolute host TSC
+/// `deadline` passes. Returns true if woken, false on deadline.
+///
+/// `ready` is checked after the generation snapshot and before sleeping —
+/// `kvm_vcpu_block`'s check after `prepare_to_rcuwait`.
+///
+/// A producer publishes its work, then bumps the generation. A bump before the
+/// snapshot is invisible to the wait, but its work is already visible to
+/// `ready`; a bump after it ends the wait. Without the re-check, work published
+/// between the caller's last look and the snapshot sleeps until `deadline`,
+/// and an edge-triggered producer (`lapic::post`, a guest TX kick under
+/// EVENT_IDX) never kicks again in the meantime.
+pub fn kick_wait_until_unless(deadline: u64, ready: impl Fn() -> bool) -> bool {
     let cid = crate::smp::per_core::current_core_id();
     if cid >= MAX_CORES {
         return false;
@@ -592,8 +588,14 @@ pub fn kick_wait_until(deadline: u64) -> bool {
     let kgen = net_kick_gen(cid);
     KICK_SENT_TSC[cid].store(0, Ordering::Relaxed); // probe: measure kicks from here
     // Register before the loop's look at the generation: a bump after the
-    // look signals us, and `wait` returns at once.
+    // look signals us, and `wait` returns at once. The fence keeps the store
+    // ahead of the loads below; otherwise the producer can miss the waiter
+    // while we miss its bump.
     KICK_WAITER[cid].store(me, Ordering::Release);
+    core::sync::atomic::fence(Ordering::SeqCst);
+    if ready() {
+        return true;
+    }
     while net_kick_gen(cid) == kgen && crate::interrupts::rdtsc() < deadline {
         if wait(SIG_KICK, deadline).is_none() {
             break;

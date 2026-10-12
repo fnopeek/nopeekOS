@@ -362,8 +362,12 @@ fn worker_entry(_arg: u64) {
             }
         }
         // Park until the next doorbell: `note_gpu_kick` → `kick_host_core` bumps
-        // this core's net-kick generation + IPIs it, so `kick_wait` resumes us
-        // event-driven (2 ms safety re-check on a quiet display).
-        crate::smp::fiber::kick_wait(2);
+        // this core's net-kick generation + IPIs it (2 ms safety re-check on a
+        // quiet display). A doorbell that rang since the swap above ends the
+        // park at once.
+        let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 500;
+        crate::smp::fiber::kick_wait_until_unless(deadline, || {
+            GPU_KICK.load(Ordering::Acquire) != 0 || STOP.load(Ordering::Acquire)
+        });
     }
 }

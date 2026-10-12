@@ -346,7 +346,9 @@ fn worker_entry(_arg: u64) {
             crate::microvm::devices::nat::set_worker_parked(false);
             continue;
         }
-        let woke = crate::smp::fiber::kick_wait(PARK_SAFETY_MS);
+        let deadline = crate::interrupts::rdtsc()
+            + PARK_SAFETY_MS.saturating_mul(crate::interrupts::tsc_freq() / 1000);
+        let woke = crate::smp::fiber::kick_wait_until_unless(deadline, has_work);
         crate::microvm::devices::nat::set_worker_parked(false);
         if woke {
             WAKE_IRQ.fetch_add(1, Ordering::Relaxed);
