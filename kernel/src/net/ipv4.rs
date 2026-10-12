@@ -82,22 +82,32 @@ pub fn send(dst_ip: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
 
 /// Send an IPv4 packet with custom TTL (for traceroute)
 pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> bool {
-    transmit(dst_ip, protocol, payload, ttl, false).0
+    transmit(dst_ip, protocol, payload, ttl, false, Forwarded::default()).0
+}
+
+/// The header fields a forwarded packet keeps from its sender: TOS (with the
+/// ECN bits), identification and DF. A packet we originate has none of them.
+#[derive(Clone, Copy, Default)]
+pub struct Forwarded {
+    pub tos: u8,
+    pub id: u16,
+    pub df: bool,
 }
 
 /// `send` that reports a refused frame instead of dropping it: `Ok(resolved)`
 /// once the card took it, `Err(QueueFull)` when its ring is full and the
 /// caller should keep the packet and retry.
-pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8])
+pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
     -> Result<bool, crate::virtio_net::NetError>
 {
-    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, true);
+    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, true, head);
     sent.map(|()| resolved)
 }
 
 /// Build and hand over one packet. Returns whether the next hop's MAC was
 /// known, and the card's verdict. `try_` refuses a full ring at once.
-fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, try_: bool)
+fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, try_: bool,
+            head: Forwarded)
     -> (bool, Result<(), crate::virtio_net::NetError>)
 {
     let src_ip = arp::our_ip();
@@ -106,7 +116,10 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, try_: bool)
     let mut pkt = alloc::vec![0u8; total_len as usize];
 
     pkt[0] = 0x45;
+    pkt[1] = head.tos;
     pkt[2..4].copy_from_slice(&total_len.to_be_bytes());
+    pkt[4..6].copy_from_slice(&head.id.to_be_bytes());
+    if head.df { pkt[6] = 0x40; }
     pkt[8] = ttl;
     pkt[9] = protocol;
     pkt[12..16].copy_from_slice(&src_ip);

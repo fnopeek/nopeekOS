@@ -417,7 +417,9 @@ struct TraceMark {
     hs: (u64, u64, u64, u64),
     kinds: ([[u64; 5]; 2], u64),
     egress: (u64, u64),
+    arp_miss: u64,
     sack: u64,
+    link: (u64, u64, u64),
     card_err: u32,
 }
 
@@ -436,6 +438,8 @@ impl TraceMark {
             hs: crate::microvm::devices::nat::handshake_stats(),
             kinds: crate::microvm::devices::nat::tcp_kind_stats(),
             egress: crate::microvm::devices::nat::egress_stats(),
+            arp_miss: crate::microvm::devices::nat::arp_miss_count(),
+            link: crate::drivers::igc::link_stats(),
             sack: crate::microvm::devices::nat::tcp_loss_stats().1,
             card_err: crate::netdev::tx_reject_stats().1,
         }
@@ -465,10 +469,15 @@ fn trace_tick(mark: &mut Option<TraceMark>) {
             (n.tx - m.tx) / 1024, (n.rx - m.rx) / 1024);
     }
     let lost = (n.egress.0 - m.egress.0, n.egress.1 - m.egress.1, n.sack - m.sack,
-                n.card_err.wrapping_sub(m.card_err));
-    if lost != (0, 0, 0, 0) {
-        crate::kprintln!("[nettrace] +{}ms egress parked={} dropped={} | card refused={} | sack-in={}",
-            ms, lost.0, lost.1, lost.3, lost.2);
+                n.card_err.wrapping_sub(m.card_err), n.arp_miss - m.arp_miss);
+    let link = (n.link.0 - m.link.0, n.link.1 - m.link.1, n.link.2 - m.link.2);
+    if link != (0, 0, 0) {
+        crate::kprintln!("[nettrace] +{}ms card: rx-missed={} pause-in={} resume-in={}",
+            ms, link.0, link.1, link.2);
+    }
+    if lost != (0, 0, 0, 0, 0) {
+        crate::kprintln!("[nettrace] +{}ms egress parked={} dropped={} arp-miss={} | card refused={} | sack-in={}",
+            ms, lost.0, lost.1, lost.4, lost.3, lost.2);
     }
     if up > 0 || down > 0 {
         let passes = n.passes - m.passes;
@@ -487,8 +496,19 @@ fn trace_tick(mark: &mut Option<TraceMark>) {
     *mark = Some(n);
 }
 
+/// Bytes on the card's ring for the guest, about 2 ms at 1 Gbit.
+const TXQ_KB_DEFAULT: u32 = 256;
+
 /// Read `microvm_tx_early` once per launch.
 fn arm_tx_early() {
+    // The guest's frames are complete once taken, so its TSQ and BQL never
+    // hold it back; this cap is the queue limit Linux's BQL would keep on the
+    // card. `set microvm_txq_kb 0` lifts it.
+    let kb = crate::config::get("microvm_txq_kb")
+        .and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(TXQ_KB_DEFAULT);
+    crate::drivers::igc::set_tx_limit(kb.saturating_mul(1024));
+    crate::kprintln!("[microvm] host card queue: {}",
+        if kb == 0 { alloc::format!("ring size") } else { alloc::format!("{} KB", kb) });
     TRACE.store(crate::config::get("microvm_nettrace").is_some_and(|v| v.trim() == "on"),
         Ordering::Relaxed);
     let off = crate::config::get("microvm_tx_early").is_some_and(|v| v.trim() == "off");

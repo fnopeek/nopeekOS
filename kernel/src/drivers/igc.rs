@@ -146,12 +146,57 @@ struct Igc {
     tso_free: u32,
     /// For the first slot of a TSO packet, the super-frame buffer it uses.
     tso_slot_of: [u8; IGC_DEFAULT_TXD],
+    /// For the first slot of each packet, its length; `tx_inflight` sums the
+    /// packets on the ring (BQL's `num_queued - num_completed`).
+    tx_len: [u32; IGC_DEFAULT_TXD],
+    tx_inflight: u32,
     /// EIMS bit of the queue vector; 0 = no interrupt, polled.
     eims_value: u32,
 }
 
 static DEVICE: Mutex<Option<Igc>> = Mutex::new(None);
 static RX_VECTOR: AtomicU8 = AtomicU8::new(0);
+
+const IGC_CTRL: u32 = 0x0000;
+const IGC_CTRL_RFCE: u32 = 0x0800_0000;
+const IGC_CTRL_TFCE: u32 = 0x1000_0000;
+const IGC_FCAL: u32 = 0x0028;
+const IGC_FCAH: u32 = 0x002C;
+const IGC_FCT: u32 = 0x0030;
+const IGC_FCTTV: u32 = 0x0170;
+const IGC_FCRTL: u32 = 0x2160;
+const IGC_FCRTH: u32 = 0x2168;
+const IGC_FCRTL_XONE: u32 = 0x8000_0000;
+const FLOW_CONTROL_ADDRESS_LOW: u32 = 0x00C2_8001;
+const FLOW_CONTROL_ADDRESS_HIGH: u32 = 0x0000_0100;
+const FLOW_CONTROL_TYPE: u32 = 0x8808;
+const FC_PAUSE_TIME: u32 = 0xFFFF;
+const IGC_PBA_34K: u32 = 0x22;
+const MAX_JUMBO_FRAME_SIZE: u32 = 0x2600;
+/// MTU + Ethernet header + FCS + VLAN tag (`igc_sw_init`).
+const MAX_FRAME_SIZE: u32 = 1500 + 14 + 4 + 4;
+const IGC_STATUS_SPEED_100: u32 = 0x0000_0040;
+const IGC_STATUS_SPEED_1000: u32 = 0x0000_0080;
+const IGC_STATUS_SPEED_2500: u32 = 0x0040_0000;
+const IGC_MPC: u32 = 0x4010;
+const IGC_XONRXC: u32 = 0x4048;
+const IGC_XOFFRXC: u32 = 0x4050;
+
+/// Statistics registers clear on read; these sum what was read.
+static STAT_MPC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static STAT_XOFF_RX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static STAT_XON_RX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// (missed RX frames, XOFF received, XON received) since boot.
+pub fn link_stats() -> (u64, u64, u64) {
+    if let Some(d) = DEVICE.lock().as_ref() {
+        STAT_MPC.fetch_add(d.mmio.r32(IGC_MPC) as u64, Ordering::Relaxed);
+        STAT_XOFF_RX.fetch_add(d.mmio.r32(IGC_XOFFRXC) as u64, Ordering::Relaxed);
+        STAT_XON_RX.fetch_add(d.mmio.r32(IGC_XONRXC) as u64, Ordering::Relaxed);
+    }
+    (STAT_MPC.load(Ordering::Relaxed), STAT_XOFF_RX.load(Ordering::Relaxed),
+     STAT_XON_RX.load(Ordering::Relaxed))
+}
 
 fn wrfl(mmio: &Mmio) { let _ = mmio.r32(IGC_STATUS); }
 
@@ -183,6 +228,23 @@ pub fn init(dev: pci::PciAddr, mmio: Mmio) -> bool {
 
     // igc_get_hw_control
     mmio.w32(IGC_CTRL_EXT, mmio.r32(IGC_CTRL_EXT) | IGC_CTRL_EXT_DRV_LOAD);
+
+    // igc_setup_link + igc_set_fc_watermarks + igc_force_mac_fc, requested
+    // mode full (the default): honour the switch's PAUSE frames and send our
+    // own before the receive FIFO overflows.
+    mmio.w32(IGC_FCT, FLOW_CONTROL_TYPE);
+    mmio.w32(IGC_FCAH, FLOW_CONTROL_ADDRESS_HIGH);
+    mmio.w32(IGC_FCAL, FLOW_CONTROL_ADDRESS_LOW);
+    mmio.w32(IGC_FCTTV, FC_PAUSE_TIME);
+    let high_water = ((IGC_PBA_34K << 10) - (MAX_FRAME_SIZE + MAX_JUMBO_FRAME_SIZE)) & 0xFFFF_FFF0;
+    mmio.w32(IGC_FCRTL, (high_water - 16) | IGC_FCRTL_XONE);
+    mmio.w32(IGC_FCRTH, high_water);
+    mmio.w32(IGC_CTRL, mmio.r32(IGC_CTRL) | IGC_CTRL_RFCE | IGC_CTRL_TFCE);
+    let status = mmio.r32(IGC_STATUS);
+    let speed = if status & IGC_STATUS_SPEED_2500 != 0 { 2500 }
+        else if status & IGC_STATUS_SPEED_1000 != 0 { 1000 }
+        else if status & IGC_STATUS_SPEED_100 != 0 { 100 } else { 10 };
+    kprintln!("[npk] igc: link {} Mbit/s, flow control rx+tx", speed);
 
     // igc_setup_tctl
     mmio.w32(IGC_TXDCTL0, 0);
@@ -235,6 +297,7 @@ pub fn init(dev: pci::PciAddr, mmio: Mmio) -> bool {
         tx_next_to_use: 0, tx_next_to_clean: 0, tx_eop: [0; IGC_DEFAULT_TXD],
         tso_data, tso_free,
         tso_slot_of: [NO_TSO_SLOT; IGC_DEFAULT_TXD],
+        tx_len: [0; IGC_DEFAULT_TXD], tx_inflight: 0,
         eims_value: 0,
     };
 
@@ -345,12 +408,30 @@ fn tx_clean(d: &mut Igc) {
         // `wb.status` is the olinfo word.
         let status = d.tx_descs.r32(desc_off(eop) + 12);
         if status & IGC_TXD_STAT_DD == 0 { break; }
+        d.tx_inflight -= core::mem::replace(&mut d.tx_len[first], 0);
         let slot = core::mem::replace(&mut d.tso_slot_of[first], NO_TSO_SLOT);
         if slot != NO_TSO_SLOT {
             d.tso_free |= 1 << slot;
         }
         d.tx_next_to_clean = (eop + 1) % n;
     }
+}
+
+/// Bytes the non-waiting senders may keep on the ring; 0 = the ring's size.
+/// `set microvm_txq_kb`, read at each microVM launch.
+static TX_LIMIT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+pub fn set_tx_limit(bytes: u32) { TX_LIMIT.store(bytes, Ordering::Relaxed); }
+
+/// A packet of `len` would pass the limit. The first one always goes.
+fn over_limit(d: &Igc, len: usize) -> bool {
+    let lim = TX_LIMIT.load(Ordering::Relaxed);
+    lim != 0 && d.tx_inflight != 0 && d.tx_inflight as usize + len > lim as usize
+}
+
+fn note_queued(d: &mut Igc, first: u16, len: usize) {
+    d.tx_len[first as usize] = len as u32;
+    d.tx_inflight += len as u32;
 }
 
 /// Descriptors free for a new packet (one always stays unused).
@@ -410,9 +491,10 @@ fn send_inner(frame: &[u8], wait: bool) -> Result<(), NetError> {
         tx_reserve(d, 1)?;
     } else {
         tx_clean(d);
-        if tx_unused(d) < 1 { return Err(NetError::QueueFull); }
+        if tx_unused(d) < 1 || over_limit(d, frame.len()) { return Err(NetError::QueueFull); }
     }
     let i = d.tx_next_to_use;
+    note_queued(d, i, frame.len());
     write_data_desc(d, i, frame,
         IGC_ADVTXD_DTYP_DATA | IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DCMD_IFCS
         | IGC_ADVTXD_DCMD_EOP | IGC_ADVTXD_DCMD_RS,
@@ -433,7 +515,7 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
     // handle, and it segments in software.
     let pieces = frame.len().div_ceil(IGC_MAX_DATA_PER_TXD);
     tx_clean(d);
-    if tx_unused(d) < 1 + pieces as u16 || d.tso_free == 0 {
+    if tx_unused(d) < 1 + pieces as u16 || d.tso_free == 0 || over_limit(d, frame.len()) {
         return Err(NetError::QueueFull);
     }
 
@@ -491,6 +573,7 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
         i = (i + 1) % n;
     }
     d.tso_slot_of[first as usize] = slot as u8;
+    note_queued(d, first, frame.len());
     tx_bump_tail(d, i);
     Ok(())
 }

@@ -110,6 +110,7 @@ impl Default for NetCaps {
 // table — no rtx/ack/RTO logic, none of the termination brittleness.
 // ===========================================================================
 
+use crate::net::ipv4::Forwarded;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtOrd};
 
 const L3_MAX: usize = 1024;
@@ -542,6 +543,7 @@ struct Egress {
     dst: [u8; 4],
     proto: u8,
     seg: Vec<u8>,
+    head: Forwarded,
 }
 static EGRESS: Mutex<alloc::collections::VecDeque<Egress>> =
     Mutex::new(alloc::collections::VecDeque::new());
@@ -555,7 +557,7 @@ const EGRESS_MAX: usize = 4096;
 
 /// Hand one masqueraded packet to the host card, or park it behind the ones
 /// already waiting.
-fn egress(dst: [u8; 4], proto: u8, seg: Vec<u8>) {
+fn egress(dst: [u8; 4], proto: u8, seg: Vec<u8>, head: Forwarded) {
     use crate::virtio_net::NetError;
     // What no card can send never parks: the backlog's bound is then
     // `EGRESS_MAX` frames of at most an MTU, whatever the guest hands us.
@@ -564,7 +566,7 @@ fn egress(dst: [u8; 4], proto: u8, seg: Vec<u8>) {
         return;
     }
     if EGRESS_LEN.load(AtOrd::Acquire) == 0 {
-        match crate::net::ipv4::try_send(dst, proto, &seg) {
+        match crate::net::ipv4::try_send(dst, proto, &seg, head) {
             Ok(true) => return,
             Ok(false) => { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); return; }
             Err(NetError::QueueFull) => {}
@@ -577,7 +579,7 @@ fn egress(dst: [u8; 4], proto: u8, seg: Vec<u8>) {
         NS_DROP_EGRESS.fetch_add(1, AtOrd::Relaxed);
         return;
     }
-    q.push_back(Egress { dst, proto, seg });
+    q.push_back(Egress { dst, proto, seg, head });
     EGRESS_LEN.store(q.len() as u64, AtOrd::Release);
     NS_EGRESS_DEFERRED.fetch_add(1, AtOrd::Relaxed);
 }
@@ -588,7 +590,7 @@ pub fn egress_flush() -> bool {
     if EGRESS_LEN.load(AtOrd::Acquire) == 0 { return true; }
     let mut q = EGRESS.lock();
     while let Some(e) = q.front() {
-        match crate::net::ipv4::try_send(e.dst, e.proto, &e.seg) {
+        match crate::net::ipv4::try_send(e.dst, e.proto, &e.seg, e.head) {
             Err(NetError::QueueFull) => break,
             Ok(true) => {}
             Ok(false) => { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
@@ -607,6 +609,8 @@ pub fn egress_pending() -> bool { EGRESS_LEN.load(AtOrd::Acquire) != 0 }
 pub fn egress_stats() -> (u64, u64) {
     (NS_EGRESS_DEFERRED.load(AtOrd::Relaxed), NS_DROP_EGRESS.load(AtOrd::Relaxed))
 }
+/// Frames sent to L2 broadcast because the next hop's MAC was unknown.
+pub fn arp_miss_count() -> u64 { NS_TX_ARPMISS.load(AtOrd::Relaxed) }
 
 /// Outbound SNAT: rewrite the guest's L4 source port to a masquerade
 /// host port and send from our host IP. The guest's TCP/UDP semantics
@@ -623,7 +627,7 @@ fn outbound_refused(dst: [u8; 4]) -> bool {
 }
 
 fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
-                dst_port: u16, l4: &[u8], gso_size: u16) -> Option<Vec<u8>> {
+                dst_port: u16, l4: &[u8], gso_size: u16, head: Forwarded) -> Option<Vec<u8>> {
     if outbound_refused(dst_ip) {
         NS_TX_REFUSED.fetch_add(1, AtOrd::Relaxed);
         return None;
@@ -640,7 +644,7 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
         // with VIRTIO_NET_F_CSUM negotiated the guest offloads its checksum
         // (CHECKSUM_PARTIAL: the field holds only the pseudo-header seed), so
         // an incremental update has no valid base.
-        emit_tcp_out(hp, our_ip, dst_ip, l4, gso_size);
+        emit_tcp_out(hp, our_ip, dst_ip, l4, gso_size, head);
     } else {
         // UDP (and anything else routed here): single datagram, port rewrite +
         // checksum fix-up, no segmentation.
@@ -649,7 +653,7 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
         let mut seg = l4.to_vec();
         seg[0..2].copy_from_slice(&hp.to_be_bytes());        // src port → host port
         fix_l4_checksum(proto, our_ip, dst_ip, &mut seg);
-        egress(dst_ip, proto, seg);
+        egress(dst_ip, proto, seg, head);
     }
     L3_ACTIVE.store(true, AtOrd::Release);
     None
@@ -663,7 +667,7 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
 /// independent segment. The IP layer (`ipv4::send`) builds the per-segment IPv4
 /// header (src/total-len/checksum), so we only fix up the TCP header here.
 fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
-                l4: &[u8], gso_size: u16) {
+                l4: &[u8], gso_size: u16, head: Forwarded) {
     if l4.len() < TCP_HDR_LEN { NS_TX_BADTCP.fetch_add(1, AtOrd::Relaxed); return; }
     let thlen = ((l4[12] >> 4) & 0x0F) as usize * 4;
     if thlen < TCP_HDR_LEN || l4.len() < thlen {
@@ -683,7 +687,7 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
         seg[16..18].copy_from_slice(&c.to_be_bytes());
         NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
         NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
-        egress(dst_ip, PROTO_TCP, seg);
+        egress(dst_ip, PROTO_TCP, seg, head);
         return;
     }
 
@@ -691,7 +695,7 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
     // segments, each with a full checksum and its own trip through ipv4::send.
     // Not past a backlog: the super-frame would overtake the parked segments.
     if crate::netdev::tso_capable() && !egress_pending()
-        && emit_tcp_tso(hp, our_ip, dst_ip, l4, thlen, gso_size)
+        && emit_tcp_tso(hp, our_ip, dst_ip, l4, thlen, gso_size, head)
     {
         return;
     }
@@ -724,7 +728,10 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
 
         NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
         NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
-        egress(dst_ip, PROTO_TCP, seg);
+        // `inet_gso_segment`: each segment's IP id is the super-frame's plus
+        // its index; TOS and DF stay.
+        egress(dst_ip, PROTO_TCP, seg,
+            Forwarded { id: head.id.wrapping_add(k as u16), ..head });
         off += this;
     }
 }
@@ -827,7 +834,7 @@ pub fn tcp_loss_stats() -> (u64, u64) {
 /// the host address. False ⇒ nothing was sent; the caller segments in software
 /// (no ARP entry yet, ring full, card refused).
 fn emit_tcp_tso(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4], l4: &[u8],
-                thlen: usize, mss: u16) -> bool {
+                thlen: usize, mss: u16, head: Forwarded) -> bool {
     const ETH: usize = 14;
     let ip_total = IPV4_HDR_LEN + l4.len();
     if ip_total > u16::MAX as usize { return false; }
@@ -842,8 +849,11 @@ fn emit_tcp_tso(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4], l4: &[u8],
     f.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
     let mut ip = [0u8; IPV4_HDR_LEN];
     ip[0] = 0x45;
+    ip[1] = head.tos;
     ip[2..4].copy_from_slice(&(ip_total as u16).to_be_bytes());
-    ip[6..8].copy_from_slice(&0x4000u16.to_be_bytes()); // DF
+    // The card counts the id up per segment, as `inet_gso_segment` does.
+    ip[4..6].copy_from_slice(&head.id.to_be_bytes());
+    if head.df { ip[6] = 0x40; }
     ip[8] = 64;
     ip[9] = PROTO_TCP;
     ip[12..16].copy_from_slice(&our_ip);
@@ -888,7 +898,7 @@ fn l3_icmp_outbound(dst_ip: [u8; 4], l4: &[u8]) -> Option<Vec<u8>> {
     let mut seg = l4.to_vec();
     seg[4..6].copy_from_slice(&hp.to_be_bytes()); // id → masquerade id
     fix_icmp_checksum(&mut seg);
-    egress(dst_ip, PROTO_ICMP, seg);
+    egress(dst_ip, PROTO_ICMP, seg, Forwarded::default());
     L3_ACTIVE.store(true, AtOrd::Release);
     None
 }
@@ -1002,6 +1012,10 @@ fn tap_push(frame: Vec<u8>) -> bool {
     // Wake the reader only on the empty→occupied edge, and only if one is
     // actually asleep. During a burst the ring stays occupied, so a burst costs
     // one wakeup, not one per frame.
+    // Pairs with the worker's parked-store and `has_work()` re-check
+    // (`wq_has_sleeper`): without a full fence the load can pass the length
+    // store and both sides miss each other.
+    core::sync::atomic::fence(AtOrd::SeqCst);
     if was_empty && WORKER_PARKED.load(AtOrd::SeqCst) {
         // The ring's signal bit stays set until the worker's park consumes
         // it, so a ring racing the park is never lost.
@@ -1444,6 +1458,11 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
     let ip_total = u16::from_be_bytes([ip[2], ip[3]]) as usize;
     if ip_total < ihl || ip_total > ip.len() { NS_IP_MALFORMED.fetch_add(1, AtOrd::Relaxed); return None; }
     let l4 = &ip[ihl..ip_total];
+    let head = Forwarded {
+        tos: ip[1],
+        id: u16::from_be_bytes([ip[4], ip[5]]),
+        df: ip[6] & 0x40 != 0,
+    };
 
     match proto {
         PROTO_UDP => {
@@ -1469,7 +1488,7 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
                     cap_reject("UDP", dst_ip, dst_port);
                     return None;
                 }
-                l3_outbound(PROTO_UDP, src_port, dst_ip, dst_port, l4, 0)
+                l3_outbound(PROTO_UDP, src_port, dst_ip, dst_port, l4, 0, head)
             }
         }
         PROTO_TCP => {
@@ -1480,7 +1499,7 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
                 cap_reject("TCP", dst_ip, dst_port);
                 return None;
             }
-            l3_outbound(PROTO_TCP, src_port, dst_ip, dst_port, l4, gso_size)
+            l3_outbound(PROTO_TCP, src_port, dst_ip, dst_port, l4, gso_size, head)
         }
         PROTO_ICMP => {
             if !caps.allow_icmp {
