@@ -30,6 +30,9 @@ pub struct Task {
     /// (`per_core::app_core`) instead of taking an empty core each, which
     /// a vCPU could have used.
     pub shared: bool,
+    /// TSC when it was queued: a task no core has taken for long is taken
+    /// by any core that takes work at all (`per_core::accepts`).
+    pub queued: u64,
 }
 
 // ── Global Scheduler State ─────────────────────────────────────
@@ -79,7 +82,8 @@ fn spawn_inner(name: &'static str, func: fn(u64), arg: u64, is_fiber: bool, shar
         func(arg);
         return;
     }
-    INBOX.lock().push_back(Task { name, func, arg, is_fiber, shared });
+    let queued = crate::interrupts::rdtsc();
+    INBOX.lock().push_back(Task { name, func, arg, is_fiber, shared, queued });
     TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
     // Idle workers have no periodic tick, so wake them.
     super::per_core::wake_idle_workers();
@@ -91,16 +95,19 @@ pub fn has_work() -> bool {
 }
 
 /// Whether the oldest waiting task is one `accept` would take, given whether
-/// it is a shared background app. For the idle re-check.
-pub fn head_acceptable(accept: impl Fn(bool) -> bool) -> bool {
-    INBOX.lock().front().is_some_and(|t| accept(t.shared))
+/// it is a shared background app and how many TSC cycles it has waited. For
+/// the idle re-check.
+pub fn head_acceptable(accept: impl Fn(bool, u64) -> bool) -> bool {
+    let now = crate::interrupts::rdtsc();
+    INBOX.lock().front().is_some_and(|t| accept(t.shared, now.saturating_sub(t.queued)))
 }
 
 /// Take the oldest waiting task if `accept` takes it. The decision is made
 /// under the inbox lock, so the task decided on is the task taken.
-pub fn next_task(accept: impl Fn(bool) -> bool) -> Option<Task> {
+pub fn next_task(accept: impl Fn(bool, u64) -> bool) -> Option<Task> {
+    let now = crate::interrupts::rdtsc();
     let mut inbox = INBOX.lock();
-    if !inbox.front().is_some_and(|t| accept(t.shared)) {
+    if !inbox.front().is_some_and(|t| accept(t.shared, now.saturating_sub(t.queued))) {
         return None;
     }
     let t = inbox.pop_front();

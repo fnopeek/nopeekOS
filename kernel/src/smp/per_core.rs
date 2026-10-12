@@ -892,9 +892,10 @@ fn core_load(c: usize) -> u64 {
 
 /// Whether `cid` is among the least loaded workers that take work.
 ///
-/// The NIC driver's core and the microVM core are excluded: they never take
-/// anything, so the minimum could otherwise sit on a core that never takes
-/// it. Ties are allowed; several empty cores may race for the inbox.
+/// The NIC driver's core, the microVM core and every core running a vCPU or
+/// VM worker are excluded: they never take anything, so the minimum could
+/// otherwise sit on a core that never takes it. Ties are allowed; several
+/// empty cores may race for the inbox.
 fn least_loaded(cid: usize) -> bool {
     let workers = super::scheduler::worker_count();
     if workers <= 1 {
@@ -908,6 +909,7 @@ fn least_loaded(cid: usize) -> bool {
         // it would make new work wait for that intent to finish.
         if c == cid || Some(c) == nic || c == vm || !IN_LOOP[c].load(Ordering::Acquire)
             || NATIVE_BUSY[c].load(Ordering::Relaxed)
+            || crate::microvm::cpu::is_vm_worker_core(c)
         {
             continue;
         }
@@ -946,7 +948,13 @@ fn app_core_usable(c: usize) -> bool {
 /// Whether `cid` takes the oldest waiting task. A background app goes to the
 /// app core while that can take it; everything else, and a background app
 /// with no usable app core, goes to a least loaded core.
-fn accepts(cid: usize, shared: bool) -> bool {
+fn accepts(cid: usize, shared: bool, waited: u64) -> bool {
+    // Placement is a preference, not a reason to strand work: a core whose
+    // fibers never all park (a busy-polling worker) never gets back to the
+    // inbox, yet still counts as less loaded.
+    if waited >= crate::interrupts::tsc_freq() / 1000 * INBOX_STARVE_MS {
+        return true;
+    }
     if shared {
         let a = APP_CORE.load(Ordering::Acquire);
         if app_core_usable(a) && IN_LOOP[a].load(Ordering::Acquire)
@@ -957,6 +965,11 @@ fn accepts(cid: usize, shared: bool) -> bool {
     }
     least_loaded(cid)
 }
+
+/// How long a task may wait for its preferred core before any core that
+/// takes work takes it. Twice the idle re-check (10 ms), so every declining
+/// core has looked again at least once.
+const INBOX_STARVE_MS: u64 = 20;
 
 /// AP Rust entry — called by trampoline after long mode transition.
 /// Interrupts are disabled (cli from trampoline). IDT is loaded.
@@ -1030,7 +1043,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         let take = !nic_core && !crate::microvm::cpu::is_vm_worker_core(cid);
         // Admit a freshly-spawned app as a fiber, or run a native intent.
         // New work arrives in the shared inbox (`scheduler::spawn`).
-        let next = if take { super::scheduler::next_task(|shared| accepts(cid, shared)) } else { None };
+        let next = if take { super::scheduler::next_task(|shared, waited| accepts(cid, shared, waited)) } else { None };
         if let Some(task) = next {
             if task.is_fiber {
                 // App: hand to this core's fiber scheduler. It runs on its
@@ -1085,7 +1098,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             continue; // became runnable — round again
         }
         if super::scheduler::has_work() {
-            if !nic_core && super::scheduler::head_acceptable(|shared| accepts(cid, shared)) {
+            if take && super::scheduler::head_acceptable(|shared, waited| accepts(cid, shared, waited)) {
                 IDLE[cid].store(false, Ordering::Relaxed);
                 crate::interrupts::irq_restore(flags);
                 continue;
