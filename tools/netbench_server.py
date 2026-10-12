@@ -70,7 +70,8 @@ def tcp_info(sock):
 
 # A browser speed test against this server: download and upload through
 # the browser's own network stack, with a bar that repaints every frame the
-# way a speed-test page does. GET /speed; /speed?anim=0 without the bar.
+# way a speed-test page does. GET /speed; /speed?anim=0 without the bar;
+# /go starts by itself.
 SPEED_PAGE = """<!doctype html><meta charset=utf-8><title>netbench speed</title>
 <style>body{font:20px sans-serif;margin:40px;background:#111;color:#eee}
 #bar{height:30px;background:#0a8;width:0}#wrap{width:100%;background:#333;margin:20px 0}
@@ -128,6 +129,8 @@ async function up(){
   const s = (performance.now() - t0) / 1000;
   log('upload ' + (sent >> 20) + ' MB in ' + s.toFixed(2) + ' s = ' + (sent * 8 / s / 1e6).toFixed(0) + ' Mbit');
 }
+// /go starts on load: a test driven by key presses alone (microvm_kvm.py).
+if (location.pathname === '/go') addEventListener('load', () => setTimeout(run, 1000));
 async function run(){ out.textContent = STREAMS + ' stream(s)' + (ANIM ? '' : ', no animation') + '\\n'; await down(); await up(); phase = ''; log('done'); }
 </script>"""
 
@@ -145,7 +148,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        if urlparse(self.path).path == "/speed":
+        if urlparse(self.path).path in ("/speed", "/go"):
             body = SPEED_PAGE.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")

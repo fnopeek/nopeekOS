@@ -159,10 +159,14 @@ def main():
     ap.add_argument("--min-change", type=int, default=5,
                     help="percent of rows that must differ to count as a change")
     ap.add_argument("--show", action="store_true", help="open a window (gtk)")
+    ap.add_argument("--keys-from-launch", action="store_true",
+                    help="time --key-after from QEMU start, not from 'window up' "
+                         "(which needs the app's own kmsg line)")
     ap.add_argument("--quit-after", type=float, default=None,
                     help="seconds after 'window up' to press Ctrl+Q, as the host does on close")
     ap.add_argument("--key-after", action="append", default=[],  # QCODE may be ctrl+n
-                    help="SECONDS:QCODE, a key press that many seconds after 'window up'; "
+                    help="SECONDS:QCODE, a key press that many seconds after 'window up' "
+                         "(QCODE 'click' or 'click@X,Y' in guest pixels clicks instead); "
                          "QCODE 'click' clicks the middle of the screen (repeatable)")
     ap.add_argument("--close-after", type=float, default=None,
                     help="seconds after the window is up: close it over npk.windows, "
@@ -348,10 +352,17 @@ def main():
                               f"({share}% of rows)", flush=True)
                 last = rows
             for k in list(keys):
-                if window_up is not None and ms() - window_up >= k[0] * 1000:
+                base = 0 if a.keys_from_launch else window_up
+                if base is not None and ms() - base >= k[0] * 1000:
                     keys.remove(k)
-                    if k[1] == "click":
-                        pos = [{"type": "abs", "data": {"axis": ax, "value": 16384}} for ax in ("x", "y")]
+                    if k[1] == "click" or k[1].startswith("click@"):
+                        # click@X,Y in guest pixels; plain click hits the centre.
+                        if k[1].startswith("click@"):
+                            px, py = (int(v) for v in k[1][6:].split(","))
+                            ax_val = {"x": px * 32767 // int(xres), "y": py * 32767 // int(yres)}
+                        else:
+                            ax_val = {"x": 16384, "y": 16384}
+                        pos = [{"type": "abs", "data": {"axis": ax, "value": ax_val[ax]}} for ax in ("x", "y")]
                         qmp.cmd("input-send-event", events=pos)
                         for down in (True, False):
                             qmp.cmd("input-send-event", events=[
