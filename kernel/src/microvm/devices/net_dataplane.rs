@@ -399,8 +399,69 @@ fn note_tx_told(raised: bool, taken: u64, gm: &crate::microvm::devices::guest_me
     }
 }
 
+/// `set microvm_nettrace on`: one log line per `TRACE_MS` while traffic
+/// flows, so a transfer's course shows, not one window of it.
+static TRACE: AtomicBool = AtomicBool::new(false);
+const TRACE_MS: u64 = 250;
+
+/// The counters at the previous trace line.
+struct TraceMark {
+    tsc: u64,
+    start: u64,
+    tx: u64,
+    rx: u64,
+    passes: u64,
+    taken: u64,
+    react_sum: u64,
+    react_n: u64,
+}
+
+impl TraceMark {
+    fn now(start: u64) -> Self {
+        let (_, sum, n) = TX_REACT.snapshot();
+        TraceMark {
+            tsc: crate::interrupts::rdtsc(),
+            start,
+            tx: crate::microvm::devices::nat::tx_stats().1,
+            rx: crate::microvm::devices::nat::rx_bytes(),
+            passes: TX_PASSES.load(Ordering::Relaxed),
+            taken: TX_BYTES.load(Ordering::Relaxed),
+            react_sum: sum,
+            react_n: n,
+        }
+    }
+}
+
+fn trace_tick(mark: &mut Option<TraceMark>) {
+    if !TRACE.load(Ordering::Relaxed) { return; }
+    let freq = crate::interrupts::tsc_freq().max(1);
+    let now = crate::interrupts::rdtsc();
+    let Some(m) = mark else {
+        *mark = Some(TraceMark::now(now));
+        return;
+    };
+    let dt = now.wrapping_sub(m.tsc);
+    if dt < freq / 1000 * TRACE_MS { return; }
+    let n = TraceMark::now(m.start);
+    let us = (dt / (freq / 1_000_000).max(1)).max(1);
+    let up = (n.tx - m.tx) * 8 / us;
+    let down = (n.rx - m.rx) * 8 / us;
+    if up > 0 || down > 0 {
+        let passes = n.passes - m.passes;
+        let kb = (n.taken - m.taken) / passes.max(1) / 1024;
+        let rn = n.react_n - m.react_n;
+        let react = (n.react_sum - m.react_sum) / rn.max(1);
+        crate::kprintln!("[nettrace] +{}ms up={}Mbit down={}Mbit passes={} KB/pass={} react={}us (n={})",
+            (now.wrapping_sub(n.start)) / (freq / 1000).max(1), up, down,
+            passes, kb, react, rn);
+    }
+    *mark = Some(n);
+}
+
 /// Read `microvm_tx_early` once per launch.
 fn arm_tx_early() {
+    TRACE.store(crate::config::get("microvm_nettrace").is_some_and(|v| v.trim() == "on"),
+        Ordering::Relaxed);
     let off = crate::config::get("microvm_tx_early").is_some_and(|v| v.trim() == "off");
     TX_EARLY.store(!off, Ordering::Relaxed);
     crate::kprintln!("[microvm] TX completion: {}",
@@ -414,7 +475,9 @@ fn worker_entry(_arg: u64) {
         crate::smp::per_core::current_core_id());
     crate::microvm::devices::net_backend::set_full_active(true);
     let mut last_tick = crate::interrupts::ticks();
+    let mut trace = None;
     loop {
+        trace_tick(&mut trace);
         if STOP.load(Ordering::Acquire) {
             crate::microvm::devices::net_backend::NET_BELL.unbind();
             WORKER_RUNNING.store(false, Ordering::Release);

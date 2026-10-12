@@ -1709,6 +1709,8 @@ pub fn guest_timer_count() -> u64 { NS_GTIMER.load(AtOrd::Relaxed) }
 pub fn tx_stats() -> (u64, u64) {
     (NS_TX_PKTS.load(AtOrd::Relaxed), NS_TX_BYTES.load(AtOrd::Relaxed))
 }
+/// Cumulative bytes delivered toward the guest. Monotonic.
+pub fn rx_bytes() -> u64 { NS_RX_BYTES.load(AtOrd::Relaxed) }
 /// Count of net-RX IRQ10 actually raised to the guest (after ITR moderation).
 /// vs the per-packet rate it would be without (EOI-storm signal).
 static NS_NET_IRQ: AtomicU64 = AtomicU64::new(0);
