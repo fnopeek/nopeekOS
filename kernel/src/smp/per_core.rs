@@ -688,6 +688,12 @@ static APIC_TO_CORE: [core::sync::atomic::AtomicU16; 256] =
 /// Sequential core id → xAPIC id, the reverse of `APIC_TO_CORE`.
 static CORE_APIC: [AtomicU32; 256] = [const { AtomicU32::new(0) }; 256];
 
+/// The xAPIC id of core `c`, if it is a registered core. Lock-free, for IPI
+/// senders on hot paths.
+pub fn core_apic(c: usize) -> Option<u32> {
+    (c < core_count().min(256)).then(|| CORE_APIC[c].load(Ordering::Relaxed))
+}
+
 fn map_apic(apic_id: u32, core_id: u32) {
     APIC_TO_CORE[(apic_id & 0xFF) as usize].store(core_id as u16, Ordering::Release);
     if (core_id as usize) < 256 {

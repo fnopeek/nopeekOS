@@ -320,15 +320,11 @@ pub fn kick_host_core(core_id: usize) {
     if !crate::microvm::cpu::in_guest(core_id) {
         return;
     }
-    let apic_id = {
-        let cores = per_core::CORES.lock();
-        match cores.get(core_id) {
-            Some(c) => c.apic_id,
-            None => return,
-        }
-    };
+    // Lock-free and without the APIC-base RDMSR, which is itself a VM exit
+    // when nopeekOS runs virtualized: a kick is on the IPI hot path.
+    let Some(apic_id) = per_core::core_apic(core_id) else { return };
     // FIXED delivery (mode 000), level assert (bit 14), physical dest.
-    send_ipi(crate::interrupts::lapic_from_msr(), apic_id,
+    send_ipi(crate::interrupts::lapic(), apic_id,
         0x0000_4000 | crate::interrupts::VCPU_KICK_VECTOR as u32);
 }
 
