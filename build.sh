@@ -650,7 +650,7 @@ run_qemu_generic() {
             -netdev tap,id=net0,ifname="$tapdev",script=no,downscript=no,vhost=on
             -device virtio-net-pci,netdev=net0,vectors=3,rx_queue_size=1024
         )
-        info "Network: vhost/tap ($tapdev) — bypassing slirp"
+        log "Network: vhost/tap ($tapdev) — bypassing slirp"
     else
         # Explicit device (not the -nic shorthand) so we can request MSI-X
         # vectors (config + RX + TX); the shorthand's virtio-net exposes no
