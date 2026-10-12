@@ -73,15 +73,21 @@ const L1_ECX_HYPERVISOR: u32 = 1 << 31;
 /// (`kvm_para_available` is `x2apic_available`). Nothing else — no kvmclock,
 /// steal time, async PF.
 ///
-/// No `KVM_HINTS_REALTIME`: a vCPU shares its host core with host fibers and
-/// leaves the guest whenever one of them wakes, so it is preempted, and the
-/// hint would tell the guest it never is.
+/// `KVM_HINTS_REALTIME`: Linux then idles through cpuidle-haltpoll — it polls
+/// with TIF_POLLING_NRFLAG set before HLT, so a wakeup aimed at an idle vCPU
+/// is a flag store instead of a reschedule IPI, and far fewer HLTs exit
+/// (measured: 2-3k HLT exits/s with it, 9-14k without). A vCPU does share
+/// its core with host fibers and is preempted when one wakes, which the hint
+/// denies; what Linux would do differently on that account is PV spinlocks,
+/// PV TLB flush and PV sched-yield, none of which we offer. A polling vCPU
+/// still leaves the guest at once when a fiber of its core wakes.
 const KVM_CPUID_SIGNATURE: u32 = 0x4000_0000;
 const KVM_CPUID_FEATURES: u32 = 0x4000_0001;
 const KVM_FEATURE_NOP_IO_DELAY: u32 = 1 << 1;
 const KVM_FEATURE_PV_EOI: u32 = 1 << 6;
 const KVM_FEATURE_PV_SEND_IPI: u32 = 1 << 11;
 const KVM_FEATURE_POLL_CONTROL: u32 = 1 << 12;
+const KVM_HINTS_REALTIME: u32 = 1 << 0;
 /// Leaf 1 EDX bits never shown: PSN, DS, ACPI, TM, IA64, PBE.
 const L1_EDX_DROP: u32 = bits(&[18, 21, 22, 29, 30, 31]);
 /// Intel only, leaf 1 ECX: SDBG (IA32_DEBUG_INTERFACE), PDCM (PERF_CAPABILITIES).
@@ -190,7 +196,7 @@ pub fn guest_cpuid(
         KVM_CPUID_FEATURES => return (
             KVM_FEATURE_NOP_IO_DELAY | KVM_FEATURE_PV_EOI | KVM_FEATURE_PV_SEND_IPI
                 | KVM_FEATURE_POLL_CONTROL,
-            0, 0, 0,
+            0, 0, KVM_HINTS_REALTIME,
         ),
         0x4000_0002..=0x4000_FFFF => return (0, 0, 0, 0),
         // AMD: at least up to 0x8000_0021, where IBPB_BRTYPE is synthesized
