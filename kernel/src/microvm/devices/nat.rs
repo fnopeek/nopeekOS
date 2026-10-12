@@ -732,6 +732,18 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
 /// or a timeout on its side of the conversation (`cores`: net TCP retrans).
 static TX_SEQ_END: [AtomicU32; PORT_RANGE] = [const { AtomicU32::new(0) }; PORT_RANGE];
 static NS_TX_RETRANS: AtomicU64 = AtomicU64::new(0);
+/// Guest connection openings, and the same SYN sent again (its handshake
+/// got no answer within the guest's retransmission timeout).
+static NS_SYN: AtomicU64 = AtomicU64::new(0);
+static NS_SYN_RETRANS: AtomicU64 = AtomicU64::new(0);
+/// SYN-ACKs from the far end toward the guest.
+static NS_RX_SYNACK: AtomicU64 = AtomicU64::new(0);
+
+/// (SYNs, SYN retransmits, SYN-ACKs in, unmatched inbound TCP). Monotonic.
+pub fn handshake_stats() -> (u64, u64, u64, u64) {
+    (NS_SYN.load(AtOrd::Relaxed), NS_SYN_RETRANS.load(AtOrd::Relaxed),
+     NS_RX_SYNACK.load(AtOrd::Relaxed), NS_RX_UNMATCHED.load(AtOrd::Relaxed))
+}
 /// Inbound TCP segments for the guest carrying SACK blocks: the far end
 /// reports holes in what it received.
 static NS_RX_SACK: AtomicU64 = AtomicU64::new(0);
@@ -741,7 +753,11 @@ fn note_tx_seq(hp: u16, l4: &[u8], payload_len: usize) {
         .and_then(|i| TX_SEQ_END.get(i)) else { return };
     let seq = u32::from_be_bytes([l4[4], l4[5], l4[6], l4[7]]);
     if l4[13] & TCP_SYN != 0 {
-        slot.store(seq.wrapping_add(1), AtOrd::Relaxed);
+        if slot.swap(seq.wrapping_add(1), AtOrd::Relaxed) == seq.wrapping_add(1) {
+            NS_SYN_RETRANS.fetch_add(1, AtOrd::Relaxed);
+        } else {
+            NS_SYN.fetch_add(1, AtOrd::Relaxed);
+        }
         return;
     }
     if payload_len == 0 {
@@ -1236,6 +1252,9 @@ pub fn tap_inbound(ip: &[u8]) -> bool {
     NS_RX_BYTES.fetch_add(ip.len() as u64, AtOrd::Relaxed);
     if proto == PROTO_TCP && l4.len() >= TCP_HDR_LEN && has_sack(l4) {
         NS_RX_SACK.fetch_add(1, AtOrd::Relaxed);
+    }
+    if proto == PROTO_TCP && l4.len() >= TCP_HDR_LEN && l4[13] & TCP_SYN != 0 {
+        NS_RX_SYNACK.fetch_add(1, AtOrd::Relaxed);
     }
 
     let mut frame = frame_pool_get(VNET_HDR_LEN + ETH_HDR_LEN + ip.len());

@@ -414,6 +414,7 @@ struct TraceMark {
     taken: u64,
     react_sum: u64,
     react_n: u64,
+    hs: (u64, u64, u64, u64),
 }
 
 impl TraceMark {
@@ -428,6 +429,7 @@ impl TraceMark {
             taken: TX_BYTES.load(Ordering::Relaxed),
             react_sum: sum,
             react_n: n,
+            hs: crate::microvm::devices::nat::handshake_stats(),
         }
     }
 }
@@ -454,6 +456,11 @@ fn trace_tick(mark: &mut Option<TraceMark>) {
         crate::kprintln!("[nettrace] +{}ms up={}Mbit down={}Mbit passes={} KB/pass={} react={}us (n={})",
             (now.wrapping_sub(n.start)) / (freq / 1000).max(1), up, down,
             passes, kb, react, rn);
+    }
+    let hs = (n.hs.0 - m.hs.0, n.hs.1 - m.hs.1, n.hs.2 - m.hs.2, n.hs.3 - m.hs.3);
+    if hs != (0, 0, 0, 0) {
+        crate::kprintln!("[nettrace] +{}ms syn={} syn-again={} synack-in={} unmatched-in={}",
+            (now.wrapping_sub(n.start)) / (freq / 1000).max(1), hs.0, hs.1, hs.2, hs.3);
     }
     *mark = Some(n);
 }
