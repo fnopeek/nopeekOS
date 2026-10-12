@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Minimal DHCP server for netlab's tap: one client, one fixed lease.
 
-  netlab_dhcp.py <iface> <server_ip> <client_ip> <netmask>
+  netlab_dhcp.py <iface> <server_ip> <client_ip> <netmask> [dns_ip]
 
 Answers DISCOVER with OFFER and every REQUEST with ACK for `client_ip`
-(router and DNS = `server_ip`), broadcast on `iface`. Enough for nopeekOS,
+(router = `server_ip`, DNS = `dns_ip` or `server_ip`), broadcast on `iface`. Enough for nopeekOS,
 which needs no lease renewal inside a measurement run.
 """
 import socket
@@ -15,12 +15,12 @@ SO_BINDTODEVICE = 25
 MAGIC = b"\x63\x82\x53\x63"
 
 
-def options(msg_type, server, mask):
+def options(msg_type, server, mask, dns):
     o = bytes([53, 1, msg_type])
     o += bytes([54, 4]) + server
     o += bytes([1, 4]) + mask
     o += bytes([3, 4]) + server
-    o += bytes([6, 4]) + server
+    o += bytes([6, 4]) + dns
     o += bytes([51, 4]) + struct.pack(">I", 86400)
     return o + b"\xff"
 
@@ -43,6 +43,7 @@ def msg_type_of(pkt):
 
 def main():
     iface, server, client, mask = sys.argv[1:5]
+    dns_b = socket.inet_aton(sys.argv[5] if len(sys.argv) > 5 else server)
     server_b = socket.inet_aton(server)
     client_b = socket.inet_aton(client)
     mask_b = socket.inet_aton(mask)
@@ -69,7 +70,7 @@ def main():
         rep[20:24] = server_b           # siaddr
         rep[28:44] = pkt[28:44]         # chaddr
         rep[236:240] = MAGIC
-        s.sendto(bytes(rep) + options(reply_type, server_b, mask_b),
+        s.sendto(bytes(rep) + options(reply_type, server_b, mask_b, dns_b),
                  ("255.255.255.255", 68))
         print(f"[dhcp] {'OFFER' if reply_type == 2 else 'ACK'} {client}", flush=True)
 
