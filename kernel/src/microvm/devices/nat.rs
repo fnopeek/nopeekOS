@@ -839,8 +839,12 @@ pub fn recycle_frame(buf: Vec<u8>) { frame_pool_put(buf); }
 // touches a NIC.
 // ===========================================================================
 
-/// tun's `dev->tx_queue_len = TUN_READQ_SIZE` is 500. 512 keeps the power of two.
-const TAP_RING: usize = 512;
+/// tun's `dev->tx_queue_len = TUN_READQ_SIZE` is 500 skbs, and what reaches
+/// tun has been through GRO at the card: often several segments each. This
+/// ring holds single MTU frames (GRO happens on the way out, `tap_pop_rx`),
+/// so 500 slots held ~6 ms at 1 Gbit and overflowed while the guest was
+/// slow to refill (`tapfull` in `cores`). 2048 frames is ~24 ms.
+const TAP_RING: usize = 2048;
 
 struct Tap {
     slots: [Option<Vec<u8>>; TAP_RING],
