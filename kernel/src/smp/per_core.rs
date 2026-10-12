@@ -838,6 +838,40 @@ pub fn wake_core(c: usize) {
     }
 }
 
+/// A fiber on core `c` became runnable while `c` may be running a vCPU.
+/// `run_slice` reads and clears it after every exit and gives the core back
+/// to the fiber scheduler, so the fiber runs within one exit instead of at
+/// the end of the vCPU's slice.
+static PEER_WAKE: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+
+/// Wake core `c` for a fiber that lives there and was just made runnable
+/// (`fiber::signal`, `fiber::admit`). Like `wake_core`, and in addition: a
+/// vCPU running there is taken out of the guest at once, the way KVM's
+/// reschedule IPI preempts a vCPU thread. The IPI's arrival is the exit.
+pub fn wake_fiber_core(c: usize) {
+    if c >= 256 {
+        return;
+    }
+    PEER_WAKE[c].store(true, Ordering::SeqCst);
+    if current_core_id() == c {
+        return;
+    }
+    if IDLE[c].load(Ordering::SeqCst) || crate::microvm::cpu::is_vcpu_core(c) {
+        super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
+    }
+}
+
+/// Did a fiber on core `c` become runnable since the last look? Clears it.
+pub fn take_peer_wake(c: usize) -> bool {
+    c < 256 && PEER_WAKE[c].swap(false, Ordering::AcqRel)
+}
+
+/// Whether a fiber on core `c` became runnable, without clearing it — for
+/// the last look before a guest entry.
+pub fn peer_wake_pending(c: usize) -> bool {
+    c < 256 && PEER_WAKE[c].load(Ordering::Acquire)
+}
+
 /// Core 0's loop after boot: the same fiber scheduler as a worker, with the
 /// shell (`intent::run_loop`) as a fiber. No periodic tick: the halt ends at
 /// the earliest fiber deadline, on an interrupt, or by the wake IPI when

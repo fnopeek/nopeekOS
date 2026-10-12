@@ -207,7 +207,7 @@ pub fn signal(w: Waker, bits: u32) {
         return;
     }
     slot.signals.fetch_or(bits, Ordering::SeqCst);
-    crate::smp::per_core::wake_core(slot.core.load(Ordering::Relaxed) as usize);
+    crate::smp::per_core::wake_fiber_core(slot.core.load(Ordering::Relaxed) as usize);
 }
 
 /// The running fiber's waker, or None outside a fiber.
@@ -305,7 +305,7 @@ pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize)
     // tick and would not look at its queue. It sees the new Ready
     // fiber in its idle re-check (`earliest_deadline`) or gets the IPI.
     core::sync::atomic::fence(Ordering::SeqCst);
-    crate::smp::per_core::wake_core(cid);
+    crate::smp::per_core::wake_fiber_core(cid);
 }
 
 /// Resident fibers per core, readable from any core. The queue length is not:
@@ -618,6 +618,53 @@ pub fn kick_wait_until_unless(deadline: u64, ready: impl Fn() -> bool) -> bool {
         KICK_TIMEOUT.fetch_add(1, Ordering::Relaxed);
     }
     woke
+}
+
+/// A doorbell for one fiber, rung from any core or an ISR. It reaches the
+/// fiber through its waker, so it wakes whichever core the fiber lives on
+/// and needs no per-core state: two fibers ringing-and-parking on one core
+/// do not share anything, unlike the per-core kick generation.
+pub struct Doorbell(AtomicU32);
+
+impl Doorbell {
+    pub const fn new() -> Self { Doorbell(AtomicU32::new(NO_WAKER)) }
+
+    /// The running fiber answers this doorbell from now on.
+    pub fn bind(&self) {
+        self.0.store(current_waker().unwrap_or(NO_WAKER), Ordering::Release);
+    }
+
+    /// Nobody answers any more (the fiber is about to finish).
+    pub fn unbind(&self) { self.0.store(NO_WAKER, Ordering::Release); }
+
+    /// Wake the bound fiber. The producer publishes its work first; the
+    /// signal bit stays set until the fiber's next park consumes it, so a
+    /// ring that lands before the park is not lost.
+    pub fn ring(&self) {
+        let w = self.0.load(Ordering::Acquire);
+        if w != NO_WAKER {
+            signal(w, SIG_KICK);
+        }
+    }
+}
+
+/// Park the running fiber until its doorbell rings, `ready` holds, or TSC
+/// `deadline` passes. True if woken (rung or ready), false on the deadline or
+/// outside a fiber.
+pub fn park_on_bell(deadline: u64, ready: impl Fn() -> bool) -> bool {
+    if ready() {
+        return true;
+    }
+    matches!(wait(SIG_KICK, deadline), Some(bits) if bits != 0)
+}
+
+/// One round of a wait for another fiber to make progress: inside a fiber,
+/// let the core's other fibers run (the one waited for may live here);
+/// outside one, spin.
+pub fn spin_or_yield() {
+    if !yield_ready() {
+        core::hint::spin_loop();
+    }
 }
 
 /// Fresh-fiber entry: run the app's `(func, arg)`. On return the trampoline

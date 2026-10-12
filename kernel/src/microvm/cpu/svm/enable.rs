@@ -1277,7 +1277,11 @@ impl VmContext {
                 self.vcpu.halt_poll_us = (self.vcpu.halt_poll_us * 2).min(HALT_POLL_MAX_US);
                 return true;
             }
-            if now.wrapping_sub(start) >= budget {
+            // A fiber of this core was woken: stop spinning and let the
+            // vCPU park, which gives it the core.
+            if now.wrapping_sub(start) >= budget
+                || crate::smp::per_core::peer_wake_pending(cid)
+            {
                 break;
             }
             core::hint::spin_loop();
@@ -1484,9 +1488,14 @@ impl VmContext {
     // Publish this vCPU's host core so a sender can kick it.
     let host_core = crate::smp::per_core::current_core_id();
     lapic::set_host_core(self.vcpu.apic_id, host_core);
+    // The core's other fibers end the slice early: their deadlines, and any
+    // of them made runnable during it (`per_core::wake_fiber_core`).
+    let slice_deadline = crate::microvm::cpu::slice_deadline_with_peers(host_core, slice_deadline);
 
     while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_has_window() {
-        if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline {
+        if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline
+            || crate::smp::per_core::take_peer_wake(host_core)
+        {
             return Ok(SliceOutcome::StillRunning);
         }
         self.vcpu.iter = self.vcpu.iter.saturating_add(1);

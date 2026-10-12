@@ -150,12 +150,11 @@ pub fn stop_worker() -> bool {
     STOP.store(true, Ordering::Release);
     // A parked worker would only see STOP at its park timeout: ring its
     // doorbell.
-    if let Some(core) = crate::microvm::devices::net_backend::worker_core() {
-        crate::smp::kick_host_core(core);
-    }
+    crate::microvm::devices::net_backend::NET_BELL.ring();
+    // Yielding, not spinning: the worker may live on the caller's core.
     for _ in 0..50_000_000u64 {
         if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
-        core::hint::spin_loop();
+        crate::smp::fiber::spin_or_yield();
     }
     let stopped = !WORKER_RUNNING.load(Ordering::Acquire);
     crate::microvm::devices::net_backend::set_worker_core(usize::MAX);
@@ -272,6 +271,7 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
 }
 
 fn worker_entry(_arg: u64) {
+    crate::microvm::devices::net_backend::NET_BELL.bind();
     ACTIVE.store(true, Ordering::Release);
     crate::microvm::devices::net_backend::set_worker_core(
         crate::smp::per_core::current_core_id());
@@ -279,6 +279,7 @@ fn worker_entry(_arg: u64) {
     let mut last_tick = crate::interrupts::ticks();
     loop {
         if STOP.load(Ordering::Acquire) {
+            crate::microvm::devices::net_backend::NET_BELL.unbind();
             WORKER_RUNNING.store(false, Ordering::Release);
             return;
         }
@@ -347,13 +348,12 @@ fn worker_entry(_arg: u64) {
             }
         }
 
-        // Park on our own doorbell, never on some card's MSI-X. `tap_push` wakes
-        // this core on the tap's empty→occupied edge and `note_tx_kick` on a
-        // guest TX kick; both go through `kick_host_core`, which bumps this
-        // core's kick generation before the IPI. Announce the park first, then
-        // re-check, so a frame that lands in the arming window is never lost:
-        // either we see it here, or the producer sees `parked` and kicks, and the
-        // scheduler re-tests the generation on every scan.
+        // Park on our own doorbell, never on some card's MSI-X. `tap_push` rings
+        // it on the tap's empty→occupied edge and `note_tx_kick` on a guest TX
+        // kick. Announce the park first, then re-check, so a frame that lands
+        // in the arming window is never lost: either we see it here, or the
+        // producer sees `parked` and rings, and the ring's signal bit stays set
+        // until the park below consumes it.
         crate::microvm::devices::nat::set_worker_parked(true);
         if has_work() {
             crate::microvm::devices::nat::set_worker_parked(false);
@@ -361,7 +361,7 @@ fn worker_entry(_arg: u64) {
         }
         let deadline = crate::interrupts::rdtsc()
             + PARK_SAFETY_MS.saturating_mul(crate::interrupts::tsc_freq() / 1000);
-        let woke = crate::smp::fiber::kick_wait_until_unless(deadline, has_work);
+        let woke = crate::smp::fiber::park_on_bell(deadline, has_work);
         crate::microvm::devices::nat::set_worker_parked(false);
         if woke {
             WAKE_IRQ.fetch_add(1, Ordering::Relaxed);

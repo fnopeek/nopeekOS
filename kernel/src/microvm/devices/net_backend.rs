@@ -23,7 +23,11 @@ static TX_KICK: AtomicBool = AtomicBool::new(false);
 /// RX-IRQ park promptly (else TX waits for the park timeout → slow ACKs).
 static WORKER_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-/// Worker records its core at startup so TX-kicks can target it.
+/// Wakes the data-plane worker wherever it runs; it may share its core with
+/// a vCPU, so it is not woken through the per-core kick generation.
+pub static NET_BELL: crate::smp::fiber::Doorbell = crate::smp::fiber::Doorbell::new();
+
+/// Worker records its core at startup, for `cores` and placement.
 pub fn set_worker_core(core: usize) { WORKER_CORE.store(core, Ordering::Release); }
 
 /// Core the data-plane worker fiber runs on, if one is up. The tap's producer
@@ -35,16 +39,11 @@ pub fn worker_core() -> Option<usize> {
     }
 }
 
-/// vCPU: the guest kicked TX (q1). Set the doorbell and, on the empty→set edge,
-/// wake the worker's core (coalesced like the IPI kick).
+/// vCPU: the guest kicked TX (q1). Set the flag and, on the empty→set edge,
+/// ring the worker's doorbell.
 pub fn note_tx_kick() {
     if !TX_KICK.swap(true, Ordering::AcqRel) {
-        let c = WORKER_CORE.load(Ordering::Acquire);
-        if c != usize::MAX {
-            // The worker parks in `kick_wait` on its own doorbell; this bumps
-            // the generation and IPIs its core.
-            crate::smp::kick_host_core(c);
-        }
+        NET_BELL.ring();
     }
 }
 

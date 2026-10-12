@@ -543,17 +543,12 @@ pub const GUEST_SMP: bool = true;
 /// stable) by the MP-table builder, the `maxcpus=` cmdline, and the IPI
 /// broadcast loops — all see the same value for one run.
 pub fn guest_vcpus() -> u8 {
-    let mut workers = vcpu_cores_before_gpu();
-    // The GPU worker's own core, unless it shares the app core.
-    if gpu_core_costs_vcpu() {
-        workers = workers.saturating_sub(1);
-    }
-    workers.clamp(1, MAX_VCPUS_CAP) as u8
+    vcpu_cores().clamp(1, MAX_VCPUS_CAP) as u8
 }
 
 /// Cores left for vCPUs once Core 0, the net worker and the protected cores
-/// are taken.
-fn vcpu_cores_before_gpu() -> usize {
+/// are taken. The GPU worker costs none: it shares a core (`reserve_gpu_core`).
+fn vcpu_cores() -> usize {
     let mut workers = crate::smp::per_core::core_count().saturating_sub(1);
     // When the off-vCPU net backend runs it needs its own worker core, never
     // a vCPU's (`place_worker`). Co-located with a vCPU, the vCPU gets
@@ -567,17 +562,17 @@ fn vcpu_cores_before_gpu() -> usize {
     workers.saturating_sub(protected_cores().count_ones() as usize)
 }
 
-/// Bitmask of cores that must stay clear of vCPUs: every core a hardware
-/// driver lives on (`per_core::driver_cores` — a fiber there bound a device
-/// or waits on its interrupt), the WASM NIC driver's and the WiFi manager's.
+/// Bitmask of cores that must stay clear of vCPUs: the WASM NIC driver's and
+/// the WiFi manager's. Those poll every millisecond; next to a vCPU each poll
+/// would take it out of the guest.
 ///
-/// A vCPU fiber and a driver fiber on one core are cooperative peers: the
-/// driver runs only when the vCPU yields, once per `SLICE_MS` at best. That
-/// is too rare for input devices, and a NIC driver's receive buffers (which
-/// the host's own network relies on) overflow.
-///
-/// A core whose fibers are apps (panels, dock) is not protected: they sleep
-/// on events, and a vCPU yielding every slice costs them at most that slice.
+/// Every other core may hold a vCPU next to its fibers. A fiber there that
+/// becomes runnable takes the vCPU out of the guest at once
+/// (`per_core::wake_fiber_core`, `slice_deadline_with_peers`), the way a
+/// KVM vCPU thread is preempted, so a driver or an app waits one exit, not a
+/// slice. No fiber holds a lock across a park, and every teardown wait for a
+/// worker yields (`fiber::spin_or_yield`), so a fiber never spins on one that
+/// shares its core.
 ///
 /// Snapshotted while no VM exists: `guest_vcpus()` sizes the MP table and the
 /// IPI broadcast and must not change under a running guest.
@@ -591,15 +586,6 @@ fn protected_cores() -> u32 {
     if crate::smp::per_core::core_count() >= 3 {
         if let Some(c) = crate::netdev::wasm_nic_core() { mask |= 1 << c; }
         if let Some(c) = crate::wifi::manager_core() { mask |= 1 << c; }
-        mask |= crate::smp::per_core::driver_cores() as u32;
-        // Every other fiber core too, for now: with cooperative fibers and
-        // spin locks, a peer that yields while holding a lock the vCPU
-        // needs may never run again, and vCPUs beside app fibers have been
-        // seen to hang. vCPUs get empty cores until that is ruled out.
-        let n = crate::smp::per_core::core_count().min(32);
-        for c in 1..n {
-            if crate::smp::fiber::fiber_count(c) > 0 { mask |= 1 << c; }
-        }
     }
     mask &= !1; // Core 0 is never a vCPU core anyway
     PROTECTED_CORES.store(mask, Ordering::Release);
@@ -657,14 +643,12 @@ fn reserve_offload_core() -> bool {
 
 /// Run the GPU backend (the per-frame framebuffer copy + write_frame) off the
 /// vCPUs. Only with MSI-X, which lets the worker signal completions itself.
-/// The worker shares the app core when there is one: it copies a frame and
-/// parks, and the panels there sleep on events too, so the guest keeps every
-/// other core as a vCPU. Without an app core it claims a core of its own, and
-/// only while at least two vCPUs remain. Otherwise the GPU work stays inline
-/// on the vCPU. Snapshotted while no VM exists, like `protected_cores`:
-/// `guest_vcpus()` depends on it.
+/// The worker never takes a core of its own: it copies a frame and parks on
+/// its doorbell, so it shares the app core, or the net worker's core when
+/// there is no app core. Otherwise the GPU work stays inline on the vCPU.
+/// Snapshotted while no VM exists, like `protected_cores`.
 static GPU_CORE_RESERVED: AtomicBool = AtomicBool::new(false);
-/// The host core the GPU worker shares, `usize::MAX` = it claims its own.
+/// The app core the GPU worker shares, `usize::MAX` = the net worker's core.
 static GPU_SHARED_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 fn reserve_gpu_core() -> bool {
@@ -673,27 +657,19 @@ fn reserve_gpu_core() -> bool {
     }
     let shared = gpu_share_candidate();
     GPU_SHARED_CORE.store(shared.unwrap_or(usize::MAX), Ordering::Release);
-    let r = reserve_offload_core()
-        && crate::microvm::devices::msix::wanted()
-        && (shared.is_some() || vcpu_cores_before_gpu() >= 3);
+    let r = reserve_offload_core() && crate::microvm::devices::msix::wanted();
     GPU_CORE_RESERVED.store(r, Ordering::Release);
     r
 }
 
-/// The app core, if no vCPU can land there (it is protected) and it does not
-/// pump a NIC or the WiFi manager.
+/// The app core, unless it pumps a NIC or the WiFi manager.
 fn gpu_share_candidate() -> Option<usize> {
     let c = crate::smp::per_core::app_core()?;
     let ok = c < 32
-        && protected_cores() & (1 << c) != 0
+        && protected_cores() & (1 << c) == 0
         && crate::netdev::wasm_nic_core() != Some(c)
         && crate::wifi::manager_core() != Some(c);
     ok.then_some(c)
-}
-
-/// True when the GPU worker takes a core away from the vCPUs.
-fn gpu_core_costs_vcpu() -> bool {
-    reserve_gpu_core() && GPU_SHARED_CORE.load(Ordering::Acquire) == usize::MAX
 }
 
 /// Hard cap on guest vCPUs (sizes the per-backend IPI bitmaps + the spawn
@@ -1136,11 +1112,33 @@ pub fn entry_irqs_off(kick_gen: u64, host_core: usize, deadline: u64) -> bool {
     // exit asm sets it again.
     unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
     crate::interrupts::arm_vcpu_timer(deadline);
-    if crate::smp::fiber::net_kick_gen(host_core) != kick_gen {
+    // A fiber of this core woken after the slice's last look: its IPI is
+    // pending under IF=0 and would end the guest entry at once anyway.
+    if crate::smp::fiber::net_kick_gen(host_core) != kick_gen
+        || crate::smp::per_core::peer_wake_pending(host_core)
+    {
         entry_irqs_on();
         return false;
     }
     true
+}
+
+/// A runnable fiber next to a busy vCPU gets the core within this long.
+const PEER_SLICE_US: u64 = 200;
+
+/// The end of a vCPU slice on `host_core`, given the core's other fibers:
+/// one that is already runnable gets the core after `PEER_SLICE_US`, one
+/// that sleeps gets it at its deadline. Clears the core's peer-wake flag —
+/// the fibers made runnable before this slice are accounted for here.
+pub fn slice_deadline_with_peers(host_core: usize, slice_deadline: u64) -> u64 {
+    crate::smp::per_core::take_peer_wake(host_core);
+    let now = crate::interrupts::rdtsc();
+    match crate::smp::fiber::earliest_deadline(host_core) {
+        Some(d) if d <= now => slice_deadline
+            .min(now + PEER_SLICE_US * (crate::interrupts::tsc_freq() / 1_000_000)),
+        Some(d) => slice_deadline.min(d),
+        None => slice_deadline,
+    }
 }
 
 /// Host interrupts back on after the guest exit; a pending one is taken now.
@@ -1666,11 +1664,11 @@ fn vcpu_fiber_task(_arg: u64) {
     crate::microvm::devices::net_dataplane::start_worker(worker_core);
 
     // Off-vCPU GPU worker: the per-frame framebuffer copy + write_frame run
-    // on the app core (shared) or on a claimed core that guest_vcpus() left
-    // free. Gated on `reserve_gpu_core`; else GPU stays inline.
+    // on the app core, or beside the net worker. Gated on
+    // `reserve_gpu_core`; else GPU stays inline.
     if reserve_gpu_core() {
         let shared = GPU_SHARED_CORE.load(Ordering::Acquire);
-        let gpu_core = if shared != usize::MAX { shared } else { place_worker(true) };
+        let gpu_core = if shared != usize::MAX { shared } else { worker_core };
         crate::kprintln!(
             "[microvm] gpu worker core {} (off-vCPU framebuffer copy)", gpu_core);
         crate::microvm::devices::gpu_backend::start_worker(gpu_core);

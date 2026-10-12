@@ -903,12 +903,9 @@ fn tap_push(frame: Vec<u8>) -> bool {
     // actually asleep. During a burst the ring stays occupied, so a burst costs
     // one wakeup, not one per frame.
     if was_empty && WORKER_PARKED.load(AtOrd::SeqCst) {
-        if let Some(c) = super::net_backend::worker_core() {
-            // Bumps the target core's kick generation before the IPI, so a wake
-            // racing the park is never lost — the scheduler re-tests the
-            // generation every scan and finds the fiber runnable.
-            crate::smp::kick_host_core(c);
-        }
+        // The ring's signal bit stays set until the worker's park consumes
+        // it, so a ring racing the park is never lost.
+        super::net_backend::NET_BELL.ring();
     }
     true
 }

@@ -113,15 +113,15 @@ pub fn start_worker(core: usize) {
 
 /// Stop the worker at VM teardown and wait (bounded) for it to exit, so it
 /// drops any in-flight writers — which balances the npkFS stream gc-guard
-/// (`ACTIVE_STREAMS`) and leaves a clean slate for the next launch. The worker
-/// runs on its own core, so this brief spin on the teardown core doesn't block
-/// it from exiting. Incomplete downloads are abandoned (the VM is closing).
+/// (`ACTIVE_STREAMS`) and leaves a clean slate for the next launch. The wait
+/// yields, so a worker on the teardown core can still run and exit.
+/// Incomplete downloads are abandoned (the VM is closing).
 pub fn stop_worker() {
     if !WORKER_RUNNING.load(Ordering::Acquire) { return; }
     STOP.store(true, Ordering::Release);
     for _ in 0..50_000_000u64 {
         if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
-        core::hint::spin_loop();
+        crate::smp::fiber::spin_or_yield();
     }
 }
 

@@ -349,7 +349,8 @@ fn queue_prefetch(chunks: &Arc<Chunks>, order: Vec<usize>) {
 }
 
 /// Stop prefetching at VM teardown and wait (bounded) for the workers to
-/// leave, so the next launch starts with an empty queue.
+/// leave, so the next launch starts with an empty queue. The wait yields, so
+/// a worker on the caller's core can still run and leave.
 pub fn stop_worker() {
     if RUNNING.load(Ordering::Acquire) == 0 {
         return;
@@ -359,7 +360,7 @@ pub fn stop_worker() {
         if RUNNING.load(Ordering::Acquire) == 0 {
             break;
         }
-        core::hint::spin_loop();
+        crate::smp::fiber::spin_or_yield();
     }
 }
 

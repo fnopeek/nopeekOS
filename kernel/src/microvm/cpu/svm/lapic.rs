@@ -34,8 +34,8 @@ const MSR_TSC_DEADLINE: u32 = 0x6E0;
 /// `MSR_KVM_PV_EOI_EN` (kvm_para.h).
 const MSR_KVM_PV_EOI_EN: u32 = 0x4b56_4d04;
 const KVM_MSR_ENABLED: u64 = 1;
-/// `MSR_KVM_POLL_CONTROL`: bit 0 = host-side halt polling allowed. Our vCPUs
-/// never halt-poll on the host, so the value is only kept for the guest.
+/// `MSR_KVM_POLL_CONTROL`: bit 0 = host-side halt polling allowed. Kept for
+/// the guest to read back; the host halt-poll does not consult it.
 const MSR_KVM_POLL_CONTROL: u32 = 0x4b56_4d05;
 
 // Register offsets (apicdef.h). Index into `regs` is `off >> 4`.

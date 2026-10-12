@@ -262,6 +262,8 @@ pub fn should_present(pixels: &[u8], width: u32, height: u32) -> bool {
 /// core; the GPU worker drains them on its own core.
 static GPU_KICK: AtomicU8 = AtomicU8::new(0);
 static WORKER_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Wakes the worker wherever it runs; it may share its core with a vCPU.
+static GPU_BELL: crate::smp::fiber::Doorbell = crate::smp::fiber::Doorbell::new();
 static FULL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// The worker owns the queues: it runs, and the guest took MSI-X, so the
@@ -281,12 +283,11 @@ pub fn worker_core() -> Option<usize> {
 }
 
 /// vCPU: the guest notified queue `qidx`. Defer to the worker and, on the
-/// empty→set edge, wake its core out of HLT (coalesced like the net TX kick).
+/// empty→set edge, ring its doorbell (coalesced like the net TX kick).
 pub fn note_gpu_kick(qidx: u16) {
     if qidx >= 2 { return; }
     if GPU_KICK.fetch_or(1 << qidx, Ordering::AcqRel) == 0 {
-        let c = WORKER_CORE.load(Ordering::Acquire);
-        if c != usize::MAX { crate::smp::kick_host_core(c); }
+        GPU_BELL.ring();
     }
 }
 
@@ -325,11 +326,11 @@ pub fn stop_worker() -> bool {
     set_full_active(false);
     STOP.store(true, Ordering::Release);
     // Out of its park now rather than at the next timeout.
-    let core = WORKER_CORE.load(Ordering::Acquire);
-    if core != usize::MAX { crate::smp::kick_host_core(core); }
+    GPU_BELL.ring();
+    // Yielding, not spinning: the worker may live on the caller's core.
     for _ in 0..50_000_000u64 {
         if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
-        core::hint::spin_loop();
+        crate::smp::fiber::spin_or_yield();
     }
     let stopped = !WORKER_RUNNING.load(Ordering::Acquire);
     GPU_KICK.store(0, Ordering::Release);
@@ -339,8 +340,10 @@ pub fn stop_worker() -> bool {
 }
 
 fn worker_entry(_arg: u64) {
+    GPU_BELL.bind();
     loop {
         if STOP.load(Ordering::Acquire) {
+            GPU_BELL.unbind();
             WORKER_RUNNING.store(false, Ordering::Release);
             return;
         }
@@ -361,12 +364,11 @@ fn worker_entry(_arg: u64) {
                 }
             }
         }
-        // Park until the next doorbell: `note_gpu_kick` → `kick_host_core` bumps
-        // this core's net-kick generation + IPIs it (2 ms safety re-check on a
-        // quiet display). A doorbell that rang since the swap above ends the
-        // park at once.
+        // Park until the next doorbell (`note_gpu_kick`), with a 2 ms safety
+        // re-check on a quiet display. A doorbell that rang since the swap
+        // above ends the park at once.
         let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 500;
-        crate::smp::fiber::kick_wait_until_unless(deadline, || {
+        crate::smp::fiber::park_on_bell(deadline, || {
             GPU_KICK.load(Ordering::Acquire) != 0 || STOP.load(Ordering::Acquire)
         });
     }
