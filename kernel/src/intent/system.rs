@@ -68,6 +68,26 @@ pub fn intent_status(vault: &Vault) {
 ///                             few long halts = healthy deep idle.
 ///
 /// Output goes to serial via kprintln (primary I/O).
+/// Wait until TSC `deadline` and keep the screen going. These intents run
+/// in the shell's fiber on Core 0, and the shell's loop is what composites
+/// (`shade::poll_render`): `halt_until` there froze every window, the
+/// microVM's included, for the whole wait. Now the fiber parks in frame-sized
+/// steps and composites between them. Outside a fiber, halt as before.
+fn idle_until(deadline: u64) {
+    let step = crate::interrupts::tsc_freq() / 60;
+    loop {
+        let now = crate::interrupts::rdtsc();
+        if now >= deadline {
+            return;
+        }
+        let d = deadline.min(now + step);
+        if crate::smp::fiber::wait(0, d).is_none() {
+            crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
+        }
+        crate::shade::poll_render();
+    }
+}
+
 pub fn intent_cores() {
     let cores = crate::smp::per_core::core_count().min(256);
     let tsc_hz = crate::interrupts::tsc_freq().max(1);
@@ -100,14 +120,14 @@ pub fn intent_cores() {
     let (cy0, gcy0) = crate::microvm::cpu::vm_cycle_snapshot();
     let wall0 = crate::interrupts::rdtsc();
 
-    // Sample window. Idle Core 0 honestly with HLT (the normal shell-idle
-    // path) instead of busy-waiting, so Core 0's own halt counter advances
-    // and its BUSY% reflects reality rather than this command spinning.
+    // Sample window. The shell's fiber parks instead of busy-waiting, so
+    // Core 0 halts when nothing else there runs, its halt counter advances
+    // and its BUSY% reflects reality — and the compositor beside it keeps
+    // drawing.
     let window_ms: u64 = 500;
     let deadline = wall0 + window_ms * (tsc_hz / 1000);
     while crate::interrupts::rdtsc() < deadline {
-        // Core 0 has no periodic tick: halt to the deadline.
-        crate::interrupts::halt_until(Some(deadline), crate::smp::per_core::WAKE_HLT_FALLBACK);
+        idle_until(deadline);
     }
 
     // Snapshot 2
@@ -507,7 +527,7 @@ pub fn intent_power(args: &str) {
     while crate::interrupts::rdtsc() < deadline {
         // Core 0 has no periodic tick: check every 20 ms.
         let d = (crate::interrupts::rdtsc() + tsc_hz / 50).min(deadline);
-        crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
+        idle_until(d);
         let e = crate::smp::per_core::rapl_pkg_raw();
         if e != last {
             jumps += 1;
@@ -964,7 +984,7 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
             let t = crate::interrupts::rdtsc();
             let d = t + crate::interrupts::tsc_freq() / 100;
             while crate::interrupts::rdtsc() < d {
-                crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
+                idle_until(d);
             }
         }
     }
@@ -1045,7 +1065,7 @@ pub fn intent_ec_watch(args: &str) {
     let mut changes = 0u32;
     while crate::interrupts::rdtsc() < end && changes < 60 {
         let now = crate::interrupts::rdtsc();
-        crate::interrupts::halt_until(Some(now + tsc_hz / 200), crate::smp::per_core::WAKE_HLT_FALLBACK);
+        idle_until(now + tsc_hz / 200);
         let ms = (crate::interrupts::rdtsc() - t0) / (tsc_hz / 1000).max(1);
         let ec = EC_SC.inb();
         if (ec ^ last_ec) & 0x20 != 0 {
