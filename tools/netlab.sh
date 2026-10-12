@@ -2,7 +2,7 @@
 # Internet-like link without root: two user-owned network namespaces joined by
 # a veth pair, each end shaped with netem (one-way delay + rate + queue).
 #
-#   client ns (QEMU, curl)  10.99.0.1 --veth-- 10.99.0.2  server ns (netbench :80)
+#   client ns (QEMU, curl)  10.77.0.1 --veth-- 10.77.0.2  server ns (netbench :80)
 #
 #   netlab.sh up [delay_ms] [rate] [queue_ms]   start (default 10 ms, 1gbit, 5 ms)
 #   netlab.sh shell                             shell in the client ns
@@ -10,8 +10,9 @@
 #   netlab.sh base                              native baseline: curl down/up
 #   netlab.sh down                              stop everything
 #
-# nopeekOS: `set benchhost 10.99.0.2` then `microvm benchvm 1000`.
-# The browser VM reaches it too: http://10.99.0.2/get?mb=500
+# Not 10.99.0.0/24: that is the microVM guest's own subnet (nat.rs).
+# nopeekOS: `set benchhost 10.77.0.2` then `microvm benchvm 1000`.
+# The browser VM reaches it too: http://10.77.0.2/get?mb=500
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 STATE=${XDG_RUNTIME_DIR:-/tmp}/netlab
@@ -49,8 +50,8 @@ up)
     in_client sh -c 'echo "0 0" > /proc/sys/net/ipv4/ping_group_range'
     in_client ip link add veth-c type veth peer name veth-s
     in_client ip link set veth-s netns "$(server_pid)"
-    in_client ip addr add 10.99.0.1/24 dev veth-c
-    in_server ip addr add 10.99.0.2/24 dev veth-s
+    in_client ip addr add 10.77.0.1/24 dev veth-c
+    in_server ip addr add 10.77.0.2/24 dev veth-s
     in_client ip link set veth-c up
     in_server ip link set veth-s up
     # Packets in flight one way (BDP) plus a queue of qms at line rate.
@@ -62,16 +63,16 @@ up)
     echo $! > "$STATE/netbench.pid"
     sleep 0.5
     echo "netlab up: RTT $((2 * delay)) ms, $rate each way, queue ${qms} ms (limit $limit pkts)"
-    in_client ping -c 2 -q 10.99.0.2 | tail -1
+    in_client ping -c 2 -q 10.77.0.2 | tail -1
     ;;
 shell) in_client bash ;;
 qemu)  in_client env -C "$REPO" ./build.sh "${2:-qemu-gui}" ;;
 base)
     mb=${2:-500}
     echo "download ${mb} MiB:"
-    in_client curl -s -o /dev/null -w '  %{speed_download} B/s in %{time_total}s\n' "http://10.99.0.2/get?mb=$mb"
+    in_client curl -s -o /dev/null -w '  %{speed_download} B/s in %{time_total}s\n' "http://10.77.0.2/get?mb=$mb"
     echo "upload ${mb} MiB:"
-    head -c $((mb << 20)) /dev/zero | in_client curl -s -X POST --data-binary @- http://10.99.0.2/upload; echo
+    head -c $((mb << 20)) /dev/zero | in_client curl -s -X POST --data-binary @- http://10.77.0.2/upload; echo
     ;;
 log)  tail -n "${2:-40}" "$STATE/server.log" ;;
 down)
