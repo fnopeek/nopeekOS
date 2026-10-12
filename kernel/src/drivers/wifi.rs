@@ -45,6 +45,8 @@ static MGR_SEEN: AtomicU64 = AtomicU64::new(0);
 
 /// Called from the manager's own fiber, on every event poll.
 pub fn note_manager_core() {
+    // Its core is kept clear of vCPUs; the manager stays on it.
+    crate::smp::fiber::pin_current();
     MGR_CORE.store(
         crate::smp::per_core::current_core_id() as u32 + 1, Ordering::Relaxed);
     MGR_SEEN.store(crate::interrupts::ticks(), Ordering::Relaxed);

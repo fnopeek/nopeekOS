@@ -720,11 +720,22 @@ pub(crate) fn npk_sys_info(ctx: &mut HostState, key: i32) -> i64 {
     }
 }
 
-pub(crate) fn npk_sleep(_ctx: &mut HostState, ms: i32) -> i32 {
+/// An app may wake on another core than it parked on (`fiber::steal_for`):
+/// account its time and list it there from now on.
+fn follow_core(ctx: &mut HostState) {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid != ctx.core_id {
+        ctx.core_id = cid;
+        crate::process::set_core(ctx.pid, cid);
+    }
+}
+
+pub(crate) fn npk_sleep(ctx: &mut HostState, ms: i32) -> i32 {
     if ms <= 0 || ms > 60000 { return -1; }
 
     // The normal path: we run inside a fiber → yield to the scheduler.
     if crate::smp::fiber::yield_sleep(ms as u64) {
+        follow_core(ctx);
         return 0;
     }
 
@@ -895,6 +906,7 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
                 Some(deadline.min(recheck)), crate::smp::per_core::WAKE_NPK_SLEEP);
         }
     };
+    follow_core(ctx);
     crate::smp::per_core::start_work(ctx.core_id);
     fired
 }
@@ -948,9 +960,10 @@ pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
         }
     };
 
-    // Resume work tracking
-    crate::smp::per_core::set_active(core_id, true);
-    crate::smp::per_core::start_work(core_id);
+    // Resume work tracking, on the core it woke on.
+    follow_core(ctx);
+    crate::smp::per_core::set_active(ctx.core_id, true);
+    crate::smp::per_core::start_work(ctx.core_id);
 
     result
 }

@@ -407,6 +407,9 @@ pub fn intent_cores() {
             }
         }
     }
+    // Fibers an idle core took over from a busy one (`fiber::steal_for`).
+    kprintln!("  fibers taken over by idle cores: {} (since boot)",
+        crate::smp::fiber::steals());
     // Every figure above assumes one TSC across cores (smp::init).
     {
         let mut worst = 0i64;

@@ -1619,6 +1619,8 @@ fn park_vcpu_idle(next_timer_tsc: Option<u64>) {
 /// servicing between VMRUNs), restored to IF=0 before every yield so peer
 /// fibers keep the cooperative IF=0 invariant.
 fn vcpu_fiber_task(_arg: u64) {
+    // A vCPU's hardware state (VMCB/VMCS, ASID/VPID, VMX root) is per core.
+    crate::smp::fiber::pin_current();
     if VM_RUN_STATE.load(Ordering::Acquire) != VM_REQUESTED {
         return;
     }
@@ -1832,6 +1834,8 @@ fn vcpu_fiber_task(_arg: u64) {
 /// AP must `close_ap` (VMXOFF on its own core); on AMD it just stops
 /// VMRUNning (the BSP owns teardown).
 fn ap_vcpu_fiber_task(arg: u64) {
+    // A vCPU's hardware state (VMCB/VMCS, ASID/VPID, VMX root) is per core.
+    crate::smp::fiber::pin_current();
     let apic_id = arg as u8;
     let vector = AP_SIPI_VECTORS
         .get(apic_id as usize)

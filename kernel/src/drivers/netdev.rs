@@ -104,6 +104,8 @@ pub fn register_wasm_nic(mac: [u8; 6]) {
     nic.link_up = false;
     WASM_NIC_CORE.store(
         crate::smp::per_core::current_core_id() as u32 + 1, Ordering::Release);
+    // The core is recorded once and kept clear of vCPUs; the driver stays.
+    crate::smp::fiber::pin_current();
     WASM_NIC_ACTIVE.store(true, Ordering::Release);
 }
 

@@ -9,8 +9,10 @@
 //!
 //! `npk_sleep` parks the fiber and switches back to a per-core scheduler
 //! that round-robins the core's other fibers, so many apps share few cores.
-//! A fiber is pinned to the core that admitted it (its wasm `HostState`
-//! caches `core_id`), so each core owns its queue — no cross-core hot path.
+//! A fiber lives in one core's queue. A movable one (an app from the inbox)
+//! may be taken over by an idle core while it waits, runnable, behind a busy
+//! one (`steal_for`); everything placed directly (vCPUs, the shell, device
+//! workers) and every fiber that binds an interrupt stays where it is.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -116,11 +118,12 @@ const RFLAGS_RESERVED: u64 = 1 << 1;
 
 // ── Per-core fiber scheduler ───────────────────────────────────────────
 //
-// Each app is a fiber pinned to the core that admitted it. `npk_sleep`
-// parks the running fiber (Waiting + a TSC wake-deadline) and switches
-// back to the core's scheduler context, freeing the core to run its other
-// ready fibers. No fiber migrates between cores, so each core owns its
-// queue with no cross-core hot path.
+// Each fiber sits in the queue of one core. `npk_sleep` parks the running
+// fiber (Waiting + a TSC wake-deadline) and switches back to the core's
+// scheduler context, freeing the core to run its other ready fibers. The
+// queue is the core's own; another core only reaches into it to take over a
+// movable fiber that waits there, runnable, while the core is busy
+// (`steal_for`).
 
 const MAX_CORES: usize = 256;
 
@@ -164,8 +167,12 @@ const MAX_WAKERS: usize = 1024;
 
 struct WakerSlot {
     signals: core::sync::atomic::AtomicU32,
+    /// The core whose queue holds the fiber. Rewritten when the fiber moves.
     core: core::sync::atomic::AtomicU32,
     used: core::sync::atomic::AtomicBool,
+    /// Mirrors `Fiber::movable`, for a signaller deciding whether an idle
+    /// core could take the woken fiber.
+    movable: core::sync::atomic::AtomicBool,
 }
 
 static WAKERS: [WakerSlot; MAX_WAKERS] = [const {
@@ -173,13 +180,15 @@ static WAKERS: [WakerSlot; MAX_WAKERS] = [const {
         signals: core::sync::atomic::AtomicU32::new(0),
         core: core::sync::atomic::AtomicU32::new(0),
         used: core::sync::atomic::AtomicBool::new(false),
+        movable: core::sync::atomic::AtomicBool::new(false),
     }
 }; MAX_WAKERS];
 
-fn alloc_waker(cid: usize) -> Waker {
+fn alloc_waker(cid: usize, movable: bool) -> Waker {
     for (i, w) in WAKERS.iter().enumerate() {
         if w.used.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
             w.signals.store(0, Ordering::Relaxed);
+            w.movable.store(movable, Ordering::Relaxed);
             w.core.store(cid as u32, Ordering::Release);
             return i as Waker;
         }
@@ -207,7 +216,14 @@ pub fn signal(w: Waker, bits: u32) {
         return;
     }
     slot.signals.fetch_or(bits, Ordering::SeqCst);
-    crate::smp::per_core::wake_fiber_core(slot.core.load(Ordering::Relaxed) as usize);
+    // SeqCst against the store in `steal_for`: a signaller that still reads
+    // the old core set its bits before the move, so the new core sees them.
+    let core = slot.core.load(Ordering::SeqCst) as usize;
+    crate::smp::per_core::wake_fiber_core(core);
+    // Its core is busy with another fiber: an idle core can run it instead.
+    if slot.movable.load(Ordering::Relaxed) && crate::smp::per_core::is_active(core) {
+        crate::smp::per_core::invite_stealer(core);
+    }
 }
 
 /// The running fiber's waker, or None outside a fiber.
@@ -271,8 +287,10 @@ static mut SCHED_CTX: [Context; MAX_CORES] = [Context::empty(); MAX_CORES];
 static mut CURRENT_FIBER: [*mut Fiber; MAX_CORES] =
     [core::ptr::null_mut(); MAX_CORES];
 
-/// Per-core run queue (Ready + Waiting fibers). Only the owning core
-/// touches it; the lock is never held across a `switch`.
+/// Per-core run queue (Ready + Waiting fibers). The owning core runs from
+/// it; another core takes from it only in `steal_for` and pushes to it only
+/// in `admit`. The lock is never held across a `switch`, and never together
+/// with another core's.
 static FIBER_QUEUES: [Mutex<VecDeque<Box<Fiber>>>; MAX_CORES] =
     [const { Mutex::new(VecDeque::new()) }; MAX_CORES];
 
@@ -285,6 +303,17 @@ pub fn admit(cid: usize, func: fn(u64), arg: u64) {
 /// Like `admit` but with an explicit stack size, for workers with deep call
 /// chains (e.g. the 9p persist worker: AES + B-tree COW + journal).
 pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize) {
+    admit_inner(cid, func, arg, stack_bytes, false);
+}
+
+/// Like `admit`, for a fiber an idle core may take over while it waits,
+/// runnable, behind a busy one: an app from the inbox. It stops being
+/// movable once it binds an interrupt (`pin_current`).
+pub fn admit_movable(cid: usize, func: fn(u64), arg: u64) {
+    admit_inner(cid, func, arg, DEFAULT_STACK_BYTES, true);
+}
+
+fn admit_inner(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize, movable: bool) {
     if cid >= MAX_CORES {
         func(arg); // degenerate (no per-core queue) → run inline
         return;
@@ -297,7 +326,8 @@ pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize)
     fiber.app_func = Some(func);
     fiber.app_arg = arg;
     fiber.state = FiberState::Ready;
-    fiber.waker = alloc_waker(cid);
+    fiber.movable = movable;
+    fiber.waker = alloc_waker(cid, movable);
     FIBER_COUNT[cid].fetch_add(1, Ordering::Relaxed);
     FIBER_QUEUES[cid].lock().push_back(fiber);
     // A fiber placed on another core (the microVM's AP vCPUs, the fetch /
@@ -363,20 +393,20 @@ pub fn run_core_fibers(cid: usize) {
         let now = crate::interrupts::rdtsc();
         // Check out the next runnable fiber (FIFO). Lock dropped before the
         // switch — the fiber's Box is owned by this stack frame meanwhile.
-        let mut fiber = {
+        let (mut fiber, left_behind) = {
             let mut q = FIBER_QUEUES[cid].lock();
-            let idx = q.iter().position(|f| match f.state {
-                FiberState::Ready => true,
-                FiberState::Waiting { mask, deadline } => {
-                    now >= deadline || pending(f.waker, mask)
-                }
-                FiberState::Done => false,
-            });
-            match idx {
+            let idx = q.iter().position(|f| runnable(f, now));
+            let fiber = match idx {
                 Some(i) => q.remove(i).unwrap(),
                 None => return, // nothing runnable → idle
-            }
+            };
+            (fiber, q.iter().any(|f| f.movable && runnable(f, now)))
         };
+        // Another fiber here could run now but waits for this one to yield:
+        // an idle core may take it (`steal_for`).
+        if left_behind {
+            crate::smp::per_core::invite_stealer(cid);
+        }
 
         if !fiber.started {
             fiber.started = true;
@@ -411,6 +441,87 @@ pub fn run_core_fibers(cid: usize) {
         }
         crate::smp::per_core::admit_between_fibers(cid);
     }
+}
+
+/// Whether `f` would run if its core picked it now.
+fn runnable(f: &Fiber, now: u64) -> bool {
+    match f.state {
+        FiberState::Ready => true,
+        FiberState::Waiting { mask, deadline } => now >= deadline || pending(f.waker, mask),
+        FiberState::Done => false,
+    }
+}
+
+/// Keep the running fiber on its core from now on. For a fiber that binds
+/// an interrupt routed to this core, registers itself as a core's driver,
+/// or otherwise ties state to where it runs.
+pub fn pin_current() {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES {
+        return;
+    }
+    // SAFETY: CURRENT_FIBER[cid] is non-null iff we run inside a fiber here,
+    // and only this core touches the fiber while it runs.
+    unsafe {
+        let f = CURRENT_FIBER[cid];
+        if !f.is_null() && (*f).movable {
+            (*f).movable = false;
+            if let Some(slot) = WAKERS.get((*f).waker as usize) {
+                slot.movable.store(false, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Idle core `thief` takes one movable fiber that is runnable now but sits in
+/// the queue of a core busy with another one. True if it took one; the
+/// fiber is then in `thief`'s queue, and the caller runs its scheduler.
+///
+/// Only a fiber in a queue is taken, never one that is running. Its waker
+/// moves with it (SeqCst against `signal`). `run_core_fibers` flushes the
+/// TLB before it starts a fiber (`sync_tlb`), and the queue lock orders this
+/// after everything the fiber did on its old core, unmaps included — memory
+/// mapped for a fiber is only touched by that fiber, so no other core needs
+/// to see its unmaps first.
+pub fn steal_for(thief: usize) -> bool {
+    if thief >= MAX_CORES {
+        return false;
+    }
+    let n = crate::smp::per_core::core_count().min(MAX_CORES);
+    let now = crate::interrupts::rdtsc();
+    for victim in 1..n {
+        if victim == thief
+            || FIBER_COUNT[victim].load(Ordering::Relaxed) < 2
+            || !crate::smp::per_core::is_active(victim)
+        {
+            continue;
+        }
+        let taken = {
+            let mut q = FIBER_QUEUES[victim].lock();
+            match q.iter().position(|f| f.movable && runnable(f, now)) {
+                Some(i) => q.remove(i),
+                None => None,
+            }
+        };
+        let Some(fiber) = taken else { continue };
+        FIBER_COUNT[victim].fetch_sub(1, Ordering::Relaxed);
+        FIBER_COUNT[thief].fetch_add(1, Ordering::Relaxed);
+        if let Some(slot) = WAKERS.get(fiber.waker as usize) {
+            slot.core.store(thief as u32, Ordering::SeqCst);
+        }
+        STEALS.fetch_add(1, Ordering::Relaxed);
+        FIBER_QUEUES[thief].lock().push_back(fiber);
+        return true;
+    }
+    false
+}
+
+/// Fibers taken over by an idle core since boot (`cores`).
+static STEALS: AtomicU64 = AtomicU64::new(0);
+
+/// How many fibers idle cores have taken over since boot.
+pub fn steals() -> u64 {
+    STEALS.load(Ordering::Relaxed)
 }
 
 /// The earliest TSC deadline any fiber on this core is waiting for — 0 for
@@ -690,6 +801,8 @@ pub struct Fiber {
     pub ctx: Context,
     state: FiberState,
     waker: Waker,
+    /// An idle core may take it over (`steal_for`).
+    movable: bool,
     app_func: Option<fn(u64)>,
     app_arg: u64,
     /// Switched into at least once. Until then its RFLAGS slot is a
@@ -728,6 +841,7 @@ impl Fiber {
             ctx: Context { rsp: sp0 as u64 },
             state: FiberState::Ready,
             waker: NO_WAKER,
+            movable: false,
             app_func: None,
             app_arg: 0,
             started: false,

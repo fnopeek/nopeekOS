@@ -57,6 +57,14 @@ pub fn spawn(name: &str, kind: u8, terminal_idx: u8, core_id: u8) -> u32 {
     pid
 }
 
+/// Record that process `pid` now runs on core `core_id` (an app moved while
+/// parked).
+pub fn set_core(pid: u32, core_id: usize) {
+    if let Some(p) = PROCS.lock().get_mut(&pid) {
+        p.core_id = core_id.min(u8::MAX as usize) as u8;
+    }
+}
+
 /// Deregister a process.
 pub fn exit(pid: u32) {
     PROCS.lock().remove(&pid);

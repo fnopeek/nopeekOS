@@ -101,7 +101,10 @@ fn flush_tlb_all() {
 /// halt, so an IPI would be answered only there. Instead every core flushes
 /// at its next scheduling point (`sync_tlb`), before it starts the next fiber
 /// or task. The core that made the change flushes at once; a fiber only ever
-/// touches memory mapped for it, on the core it is pinned to.
+/// touches memory mapped for it, on the core it runs on. A fiber taken over
+/// by another core (`fiber::steal_for`) is started there only after that
+/// core's `sync_tlb`, which the queue lock orders after the fiber's last
+/// change on its old core.
 static TLB_GEN: AtomicU64 = AtomicU64::new(0);
 static TLB_SEEN: [AtomicU64; 256] =
     [const { AtomicU64::new(0) }; 256];

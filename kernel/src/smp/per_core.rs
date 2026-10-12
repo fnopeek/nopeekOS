@@ -244,6 +244,10 @@ pub fn mark_driver_core(core_id: usize) {
     if core_id > 0 && core_id < 64 {
         DRIVER_CORES.fetch_or(1 << core_id, Ordering::Relaxed);
     }
+    // A driver stays with its interrupt and its registration.
+    if core_id == current_core_id() {
+        super::fiber::pin_current();
+    }
 }
 
 pub fn driver_cores() -> u64 { DRIVER_CORES.load(Ordering::Relaxed) }
@@ -1000,7 +1004,44 @@ fn admit_fiber_task(cid: usize, task: super::scheduler::Task) {
     if task.shared && !app_core_usable(APP_CORE.load(Ordering::Acquire)) {
         APP_CORE.store(cid, Ordering::Release);
     }
-    super::fiber::admit(cid, task.func, task.arg);
+    super::fiber::admit_movable(cid, task.func, task.arg);
+}
+
+/// Whether core `c` may take over fibers from busy cores when it has nothing
+/// to run. Not Core 0 (the shell and the compositor want it responsive) and
+/// not a core holding a vCPU: a fiber is cooperative, and the vCPU would
+/// wait for it to yield.
+fn may_steal(c: usize) -> bool {
+    c != 0 && c < 256
+        && IN_LOOP[c].load(Ordering::Acquire)
+        && DEDICATED_VM_CORE.load(Ordering::Acquire) as usize != c
+        && !crate::microvm::cpu::is_vcpu_core(c)
+}
+
+/// Last time an idle core was asked to look at core `c`'s queue.
+static INVITED_TSC: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+/// Core `victim` holds a movable fiber that could run now but waits behind
+/// another: wake one idle core that may take it (`fiber::steal_for`). At most
+/// once per 50 us per victim — the woken core takes one fiber per look and
+/// looks again before it halts.
+pub fn invite_stealer(victim: usize) {
+    if victim >= 256 {
+        return;
+    }
+    let now = crate::interrupts::rdtsc();
+    let last = INVITED_TSC[victim].load(Ordering::Relaxed);
+    if now.wrapping_sub(last) < crate::interrupts::tsc_freq() / 20_000 {
+        return;
+    }
+    INVITED_TSC[victim].store(now, Ordering::Relaxed);
+    let workers = super::scheduler::worker_count().min(255);
+    let me = current_core_id();
+    if let Some(c) = (1..=workers)
+        .find(|&c| c != victim && c != me && IDLE[c].load(Ordering::SeqCst) && may_steal(c))
+    {
+        super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
+    }
 }
 
 /// Between two fibers of core `cid` (`fiber::run_core_fibers`): take a new
@@ -1134,6 +1175,12 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
 
         // Before sleep: update usage stats (delta covers work + idle since last call)
         update_core_freq(cid);
+
+        // Nothing of its own to run: take over a fiber that waits, runnable,
+        // behind a busy core. Its scheduler runs it on the next pass.
+        if may_steal(cid) && super::fiber::steal_for(cid) {
+            continue;
+        }
 
         // Idle: halt until the earliest parked fiber is due, or until an
         // interrupt — a device IRQ for a fiber in `irq_wait`, a kick, or

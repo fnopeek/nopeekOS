@@ -212,6 +212,8 @@ pub fn arm(vector: u8) -> u64 {
     if !crate::microvm::cpu::is_vcpu_core(cid) {
         crate::smp::per_core::mark_driver_core(cid);
     }
+    // The vector now targets this core; its waiter stays here.
+    crate::smp::fiber::pin_current();
     route_to_current(vector);
     let since = fired_count(vector);
     // A level line was masked by the ISR: the driver has serviced the
