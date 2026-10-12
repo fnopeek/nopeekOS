@@ -168,9 +168,12 @@ pub fn stop_worker() -> bool {
 /// yielding, so a saturated link cannot starve everything else on this core.
 const RX_PKT_WEIGHT: u64 = 256;
 
-/// `VHOST_NET_WEIGHT`: guest TX bytes one pass may take. Also bounds what a
-/// pass can park in the egress backlog when the host card's ring is full.
-const TX_PASS_BYTES: usize = 0x80000;
+/// Guest TX bytes one pass may take. vhost's `VHOST_NET_WEIGHT` is 512 KiB,
+/// but vhost only hands frames on; this pass also cuts them into segments
+/// when the card has no TSO (slirp), ~350 checksummed segments for 512 KiB,
+/// while the guest's ACKs wait for the next pass. 128 KiB keeps that wait
+/// short. Also bounds what a pass can park in the egress backlog.
+const TX_PASS_BYTES: usize = 0x20000;
 
 /// vhost `handle_rx` + `handle_tx`: one pass on this core, then wake the guest.
 ///

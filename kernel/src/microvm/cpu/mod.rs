@@ -650,33 +650,20 @@ fn reserve_offload_core() -> bool {
 
 /// Run the GPU backend (the per-frame framebuffer copy + write_frame) off the
 /// vCPUs. Only with MSI-X, which lets the worker signal completions itself.
-/// The worker never takes a core of its own: it copies a frame and parks on
-/// its doorbell, so it shares the app core, or the net worker's core when
-/// there is no app core. Otherwise the GPU work stays inline on the vCPU.
-/// Snapshotted while no VM exists, like `protected_cores`.
+/// The worker lives on Core 0, beside the compositor it feeds: Core 0 is
+/// otherwise nearly idle, and the net worker keeps its own core — sharing
+/// one, a frame copy held up the ACKs of a microVM upload. Otherwise the
+/// GPU work stays inline on the vCPU. Snapshotted while no VM exists, like
+/// `protected_cores`.
 static GPU_CORE_RESERVED: AtomicBool = AtomicBool::new(false);
-/// The app core the GPU worker shares, `usize::MAX` = the net worker's core.
-static GPU_SHARED_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 fn reserve_gpu_core() -> bool {
     if VM_RUN_STATE.load(Ordering::Acquire) != VM_IDLE {
         return GPU_CORE_RESERVED.load(Ordering::Acquire);
     }
-    let shared = gpu_share_candidate();
-    GPU_SHARED_CORE.store(shared.unwrap_or(usize::MAX), Ordering::Release);
     let r = reserve_offload_core() && crate::microvm::devices::msix::wanted();
     GPU_CORE_RESERVED.store(r, Ordering::Release);
     r
-}
-
-/// The app core, unless it pumps a NIC or the WiFi manager.
-fn gpu_share_candidate() -> Option<usize> {
-    let c = crate::smp::per_core::app_core()?;
-    let ok = c < 32
-        && protected_cores() & (1 << c) == 0
-        && crate::netdev::wasm_nic_core() != Some(c)
-        && crate::wifi::manager_core() != Some(c);
-    ok.then_some(c)
 }
 
 /// Hard cap on guest vCPUs (sizes the per-backend IPI bitmaps + the spawn
@@ -1698,11 +1685,9 @@ fn vcpu_fiber_task(_arg: u64) {
     crate::microvm::devices::net_dataplane::start_worker(worker_core);
 
     // Off-vCPU GPU worker: the per-frame framebuffer copy + write_frame run
-    // on the app core, or beside the net worker. Gated on
-    // `reserve_gpu_core`; else GPU stays inline.
+    // on Core 0 (`reserve_gpu_core`); else GPU stays inline.
     if reserve_gpu_core() {
-        let shared = GPU_SHARED_CORE.load(Ordering::Acquire);
-        let gpu_core = if shared != usize::MAX { shared } else { worker_core };
+        let gpu_core = 0;
         crate::kprintln!(
             "[microvm] gpu worker core {} (off-vCPU framebuffer copy)", gpu_core);
         crate::microvm::devices::gpu_backend::start_worker(gpu_core);
