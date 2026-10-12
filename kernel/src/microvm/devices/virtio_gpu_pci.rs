@@ -186,6 +186,38 @@ struct Resource {
     frame: u64,
     /// `frame` at this resource's last FLUSH to the surface.
     flushed_frame: u64,
+    /// What the transfers since its last FLUSH changed against the picture
+    /// on screen.
+    dirty: Dirty,
+}
+
+/// Pixels a resource's transfers changed against the picture the surface
+/// shows. The guest's own damage is the whole frame on every page flip
+/// (`virtio_gpu_primary_plane_check` drops damage clips when the
+/// framebuffer changes, and wlroots flips between buffers each frame), so
+/// the device works it out while copying, row by row.
+#[derive(Clone, Copy, PartialEq)]
+enum Dirty {
+    /// No comparison possible: present everything.
+    Unknown,
+    /// Equal to resource `against` as it was presented.
+    Clean { against: u32 },
+    /// Differs from resource `against` within x0..x1, y0..y1 (pixels).
+    Rect { against: u32, x0: u32, y0: u32, x1: u32, y1: u32 },
+}
+
+impl Dirty {
+    /// Add a changed row span, measured against resource `against`.
+    fn add(&mut self, against: u32, x0: u32, y: u32, x1: u32) {
+        *self = match *self {
+            Dirty::Unknown => Dirty::Unknown,
+            Dirty::Clean { against: a } if a == against =>
+                Dirty::Rect { against, x0, y0: y, x1, y1: y + 1 },
+            Dirty::Rect { against: a, x0: ax0, y0: ay0, x1: ax1, y1: ay1 } if a == against =>
+                Dirty::Rect { against, x0: ax0.min(x0), y0: ay0.min(y), x1: ax1.max(x1), y1: ay1.max(y + 1) },
+            _ => Dirty::Unknown,
+        };
+    }
 }
 
 /// Per-scanout binding. We advertise `MAX_OUTPUTS`; a scanout is connected
@@ -237,6 +269,8 @@ pub struct VirtioGpu {
     /// console-line update which is a full 3.6 MB blit; logging each
     /// via kprintln stalls the guest for tens of seconds.
     transfer_log_count: u32,
+    /// One row of a transfer, before it is compared and stored.
+    row_scratch: Vec<u8>,
     /// Same for SET_SCANOUT — the guest compositor (wlroots) double-buffers
     /// by flipping the scanout between two resources every frame
     /// (res 3 ↔ 4 at the guest's refresh rate). Logging each floods
@@ -285,6 +319,7 @@ impl VirtioGpu {
             scanouts: [Scanout { enabled: false, resource_id: 0, rect: Rect { x: 0, y: 0, w: 0, h: 0 } }; MAX_SCANOUTS],
             flush_log_count: 0,
             transfer_log_count: 0,
+            row_scratch: Vec::new(),
             set_scanout_log_count: 0,
             dmg_area_acc: 0,
             dmg_tile_acc: 0,
@@ -616,6 +651,7 @@ impl VirtioGpu {
             self.resources.push(Resource {
                 id, format, width, height,
                 backing: Vec::new(), host_pixels: None, frame: 0, flushed_frame: 0,
+                dirty: Dirty::Unknown,
             });
         }
         true
@@ -693,49 +729,103 @@ impl VirtioGpu {
             .filter(|r| r.id != resource_id)
             .map(|r| r.host_pixels.as_ref().map_or(0, |p| p.len()))
             .sum();
-        let r = match self.resources.iter_mut().find(|r| r.id == resource_id) {
-            Some(r) => r, None => return,
-        };
-        r.frame = r.frame.wrapping_add(1);
+        let Some(ri) = self.resources.iter().position(|r| r.id == resource_id) else { return };
+        // The picture on screen to compare against: what the first enabled
+        // scanout last presented, if it has this resource's size.
+        let shown = (0..MAX_OUTPUTS)
+            .find(|&k| self.scanouts[k].enabled && self.last_flush_res[k] != 0)
+            .map(|k| self.last_flush_res[k]);
+        let (w_res, h_res) = (self.resources[ri].width, self.resources[ri].height);
+        let ref_i = shown.and_then(|id| self.resources.iter().position(|o| {
+            o.id == id && o.width == w_res && o.height == h_res && o.host_pixels.is_some()
+        }));
 
         // Compute bytes per pixel from format. Virtio-gpu B8G8R8A8 etc.
         // are all 4 bytes per pixel for the formats Linux's virtio-gpu
         // driver uses. We're conservative and treat everything as 4 BPP.
         let bpp: usize = 4;
-        let stride = r.width as usize * bpp;
-        let total_pixels_bytes = r.height as usize * stride;
+        let stride = w_res as usize * bpp;
+        let total_pixels_bytes = h_res as usize * stride;
 
         // Only the part of the rectangle that lies on the resource; the rest
         // has nowhere to go. Width and height are bounded at creation.
-        if x >= r.width || y >= r.height { return; }
-        let w = w.min(r.width - x);
-        let h = h.min(r.height - y);
+        if x >= w_res || y >= h_res { return; }
+        let w = w.min(w_res - x);
+        let h = h.min(h_res - y);
 
         // Ensure host_pixels exists with the right size, without panicking
         // when the host cannot spare it.
         if others + total_pixels_bytes > MAX_HOST_PIXEL_BYTES { return; }
-        let host_buf = r.host_pixels.get_or_insert_with(Vec::new);
-        if host_buf.len() != total_pixels_bytes {
-            if total_pixels_bytes > host_buf.len()
-                && host_buf.try_reserve(total_pixels_bytes - host_buf.len()).is_err()
-            {
-                return;
+        {
+            let host_buf = self.resources[ri].host_pixels.get_or_insert_with(Vec::new);
+            if host_buf.len() != total_pixels_bytes {
+                if total_pixels_bytes > host_buf.len()
+                    && host_buf.try_reserve(total_pixels_bytes - host_buf.len()).is_err()
+                {
+                    return;
+                }
+                host_buf.resize(total_pixels_bytes, 0);
+                // New contents: nothing to compare against.
+                self.resources[ri].dirty = Dirty::Unknown;
             }
-            host_buf.resize(total_pixels_bytes, 0);
         }
+        let row_bytes = w as usize * bpp;
+        if self.row_scratch.len() < row_bytes {
+            self.row_scratch.resize(row_bytes, 0);
+        }
+        // Split the resource list so this resource is written while the one
+        // on screen is read; both may be the same resource.
+        let (own, reference): (&mut Resource, Option<&Resource>) = match ref_i {
+            Some(j) if j != ri => {
+                let (lo, hi) = self.resources.split_at_mut(ri.max(j));
+                if ri < j { (&mut lo[ri], Some(&hi[0])) } else { (&mut hi[0], Some(&lo[j])) }
+            }
+            _ => (&mut self.resources[ri], None),
+        };
+        let against = match ref_i {
+            Some(j) if j == ri => Some(resource_id),
+            Some(_) => reference.map(|o| o.id),
+            None => None,
+        };
+        // A part of another buffer: the rows outside it may still differ from
+        // the screen, and only a whole-buffer transfer says what it holds.
+        let whole = x == 0 && y == 0 && w == w_res && h == h_res;
+        let against = against.filter(|&a| a == resource_id || whole);
+        // Nothing transferred since its last present: start a fresh comparison.
+        let fresh = own.frame == own.flushed_frame;
+        own.dirty = match (against, own.dirty) {
+            (None, _) => Dirty::Unknown,
+            (Some(a), Dirty::Clean { against: b }) | (Some(a), Dirty::Rect { against: b, .. })
+                if b == a => own.dirty,
+            (Some(a), _) if fresh => Dirty::Clean { against: a },
+            _ => Dirty::Unknown,
+        };
+        own.frame = own.frame.wrapping_add(1);
 
         // Walk the rect row by row, copying from guest backing pages.
         // The guest-side resource is laid out contiguously starting at
         // `offset` (relative to the backing). We translate (row, col)
-        // → linear offset → page-walk.
-        let row_bytes = w as usize * bpp;
+        // → linear offset → page-walk. Each row lands in a scratch row
+        // first and is compared with the same row of the picture on screen.
         let t0 = crate::interrupts::rdtsc();
         let mut cursor = (0, 0);
+        let scratch = &mut self.row_scratch[..row_bytes];
         for row in 0..h as usize {
             let src_lin = (offset as usize).saturating_add((y as usize + row) * stride + x as usize * bpp);
             let dst_lin = (y as usize + row) * stride + x as usize * bpp;
+            let Some(host_buf) = own.host_pixels.as_mut() else { break };
             if dst_lin + row_bytes > host_buf.len() { break; }
-            copy_from_backing(mem, &r.backing, &mut cursor, src_lin, &mut host_buf[dst_lin..dst_lin + row_bytes]);
+            copy_from_backing(mem, &own.backing, &mut cursor, src_lin, scratch);
+            if let Some(a) = against {
+                let shown_row: &[u8] = match reference {
+                    Some(o) => &o.host_pixels.as_ref().unwrap()[dst_lin..dst_lin + row_bytes],
+                    None => &host_buf[dst_lin..dst_lin + row_bytes],
+                };
+                if let Some((c0, c1)) = differing_span(scratch, shown_row) {
+                    own.dirty.add(a, x + (c0 / bpp) as u32, y + row as u32, x + (c1 / bpp) as u32);
+                }
+            }
+            host_buf[dst_lin..dst_lin + row_bytes].copy_from_slice(scratch);
         }
         // The per-frame pixel-copy cost on the vCPU core, in cycles: the
         // byte count alone cannot say how much of a core the copy takes,
@@ -781,6 +871,21 @@ impl VirtioGpu {
             return;
         }
         r.flushed_frame = r.frame;
+        // What differs from the screen, if that is known. A comparison against
+        // some other picture than the one shown now says nothing.
+        let changed = match r.dirty {
+            Dirty::Clean { against } if against == last_res => None,
+            Dirty::Rect { against, x0, y0, x1, y1 } if against == last_res =>
+                Some((x0, y0, x1 - x0, y1 - y0)),
+            _ => Some((0, 0, r.width, r.height)),
+        };
+        r.dirty = Dirty::Clean { against: resource_id };
+        let Some(changed) = changed else {
+            // Pixel for pixel what the screen shows: nothing to present, but
+            // this resource is the reference for the next comparison.
+            self.last_flush_res[k] = resource_id;
+            return;
+        };
         crate::microvm::boottime::gpu_frame();
         let r = &*r;
         let pix = match &r.host_pixels { Some(p) => p, None => return };
@@ -817,8 +922,19 @@ impl VirtioGpu {
         // The FLUSH rect (x,y,w,h) is the guest's damage region for this
         // present. Clamp it to the resource and forward it so the host
         // blits only the changed pixels instead of the whole tile.
-        let dmg_w = w.min(r.width.saturating_sub(x.min(r.width)));
-        let dmg_h = h.min(r.height.saturating_sub(y.min(r.height)));
+        // Narrowed to the pixels that differ from the screen.
+        let (cx, cy, cw, ch) = changed;
+        let x0 = x.max(cx).min(r.width);
+        let y0 = y.max(cy).min(r.height);
+        let x1 = x.saturating_add(w).min(cx + cw).min(r.width);
+        let y1 = y.saturating_add(h).min(cy + ch).min(r.height);
+        if x1 <= x0 || y1 <= y0 {
+            self.last_flush_res[k] = resource_id;
+            return;
+        }
+        let (x, y) = (x0, y0);
+        let dmg_w = x1 - x0;
+        let dmg_h = y1 - y0;
 
         // [gpu-dmg] rolling coverage: damage area vs tile area.
         self.dmg_area_acc += (dmg_w as u64) * (dmg_h as u64);
@@ -840,7 +956,8 @@ impl VirtioGpu {
 
         self.last_flush_res[k] = resource_id;
         if wid != 0 {
-            super::gpu_backend::note(super::gpu_backend::STAT_FLUSH_KB, pix.len() as u64 / 1024);
+            super::gpu_backend::note(super::gpu_backend::STAT_FLUSH_KB,
+                dmg_w as u64 * dmg_h as u64 * 4 / 1024);
             crate::shade::surface::write_frame(wid, pix, r.width, r.height, (x, y, dmg_w, dmg_h));
         } else if !crate::microvm::vm_has_window() {
             blit_to_host_fb(pix, r.width, r.height);
@@ -1280,6 +1397,17 @@ fn build_display_info_resp(flags: u32, fence_id: u64, modes: &[(u32, u32, bool);
 /// backing pages are an ordered list of (guest_phys_addr, len).
 /// `cursor` is (segment index, its start offset) and carries over between
 /// calls with rising `src_lin`, so a whole transfer walks the list once.
+/// The byte span where `a` and `b` (same length) differ, as (first, end),
+/// in whole 4-byte pixels; None when equal.
+fn differing_span(a: &[u8], b: &[u8]) -> Option<(usize, usize)> {
+    if a == b {
+        return None;
+    }
+    let first = a.iter().zip(b).position(|(x, y)| x != y)?;
+    let last = a.iter().zip(b).rposition(|(x, y)| x != y)?;
+    Some((first & !3, (last | 3) + 1))
+}
+
 fn copy_from_backing(
     mem: &GuestMem,
     backing: &[(u64, u32)],
