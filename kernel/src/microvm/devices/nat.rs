@@ -798,6 +798,10 @@ static FLIGHT_ON: AtomicBool = AtomicBool::new(false);
 static FLIGHT_DUMPS: AtomicU32 = AtomicU32::new(0);
 /// Last outbound data segment per host port.
 static FLIGHT_LAST_OUT: [AtomicU64; PORT_RANGE] = [const { AtomicU64::new(0) }; PORT_RANGE];
+/// Payload bytes a flow sent since its last silence; only an upload that
+/// moved `FLIGHT_BULK` before going quiet is shown.
+static FLIGHT_SENT: [AtomicU64; PORT_RANGE] = [const { AtomicU64::new(0) }; PORT_RANGE];
+const FLIGHT_BULK: u64 = 1 << 20;
 
 pub fn set_flight(on: bool) {
     FLIGHT_ON.store(on, AtOrd::Relaxed);
@@ -825,11 +829,15 @@ fn flight(dir: u8, hp: u16, l4: &[u8], payload_len: usize) {
         f.next = (i + 1) % FLIGHT_LEN;
     }
     if dir != 0 || payload_len == 0 { return; }
-    let Some(slot) = (hp as usize).checked_sub(L3_PORT_LO as usize)
-        .and_then(|i| FLIGHT_LAST_OUT.get(i)) else { return };
-    let last = slot.swap(now, AtOrd::Relaxed);
+    let Some(i) = (hp as usize).checked_sub(L3_PORT_LO as usize)
+        .filter(|&i| i < PORT_RANGE) else { return };
+    let last = FLIGHT_LAST_OUT[i].swap(now, AtOrd::Relaxed);
     let freq = crate::interrupts::tsc_freq().max(1);
-    if last == 0 || now.wrapping_sub(last) < freq / 1000 * FLIGHT_GAP_MS { return; }
+    if last == 0 || now.wrapping_sub(last) < freq / 1000 * FLIGHT_GAP_MS {
+        FLIGHT_SENT[i].fetch_add(payload_len as u64, AtOrd::Relaxed);
+        return;
+    }
+    if FLIGHT_SENT[i].swap(payload_len as u64, AtOrd::Relaxed) < FLIGHT_BULK { return; }
     if FLIGHT_DUMPS.fetch_add(1, AtOrd::Relaxed) >= FLIGHT_DUMPS_MAX { return; }
     flight_dump(hp, last, now, freq);
 }
