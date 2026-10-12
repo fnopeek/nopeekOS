@@ -86,36 +86,49 @@ function frame(){ if (phase && ANIM) { bar.style.width = (Math.sin(performance.n
   document.title = phase + ' ' + live.toFixed(0) + ' Mbit'; } requestAnimationFrame(frame); }
 requestAnimationFrame(frame);
 function log(s){ out.textContent += s + '\\n'; }
-async function down(){
-  phase = 'download'; t0 = performance.now(); let got = 0;
-  const r = await fetch('/get?mb=' + MB + '&t=' + Date.now());
+// Several connections at once, as speed-test pages do: one 32 MB request
+// on a fresh connection spends most of its time in slow start (at 20 ms RTT
+// 413 ms, i.e. 650 Mbit, on a perfect 1 Gbit line). STREAMS=1 with ?streams=1.
+const STREAMS = +(new URLSearchParams(location.search).get('streams') || 4);
+let got = 0;
+async function down1(mb){
+  const r = await fetch('/get?mb=' + mb + '&t=' + Date.now() + Math.random());
   const rd = r.body.getReader();
   for (;;) { const {done, value} = await rd.read(); if (done) break; got += value.length;
     live = got * 8 / ((performance.now() - t0) * 1000); }
+}
+async function down(){
+  phase = 'download'; got = 0; t0 = performance.now();
+  await Promise.all(Array.from({length: STREAMS}, () => down1(Math.ceil(MB / STREAMS))));
   const s = (performance.now() - t0) / 1000;
   log('download ' + (got >> 20) + ' MB in ' + s.toFixed(2) + ' s = ' + (got * 8 / s / 1e6).toFixed(0) + ' Mbit');
 }
 // One 32 MB blob, posted again and again: the browser holds 32 MB, not the
 // whole transfer (a 500 MB blob got the guest's browser OOM-killed).
 const PART = 32;
-function post(blob){
+let sent = 0, left = 0, inflight = [];
+function post(blob, slot){
   return new Promise(res => {
     const x = new XMLHttpRequest();
-    x.upload.onprogress = e => { live = (sent + e.loaded) * 8 / ((performance.now() - t0) * 1000); };
-    x.onloadend = () => res(x.status === 200);
+    x.upload.onprogress = e => { inflight[slot] = e.loaded;
+      live = (sent + inflight.reduce((a, b) => a + b, 0)) * 8 / ((performance.now() - t0) * 1000); };
+    x.onloadend = () => { inflight[slot] = 0; res(x.status === 200); };
     x.open('POST', '/upload'); x.send(blob);
   });
 }
-let sent = 0;
+async function up1(blob, slot){
+  while (left > 0) { left--; if (!await post(blob, slot)) { log('upload failed'); return; } sent += blob.size; }
+}
 async function up(){
   const chunk = new Uint8Array(PART << 20); crypto.getRandomValues(chunk.subarray(0, 65536));
   const blob = new Blob([chunk]);
-  phase = 'upload'; sent = 0; t0 = performance.now();
-  for (let i = 0; i < MB / PART; i++) { if (!await post(blob)) { log('upload failed'); break; } sent += blob.size; }
+  phase = 'upload'; sent = 0; left = Math.ceil(MB / PART); inflight = Array(STREAMS).fill(0);
+  t0 = performance.now();
+  await Promise.all(Array.from({length: STREAMS}, (_, i) => up1(blob, i)));
   const s = (performance.now() - t0) / 1000;
   log('upload ' + (sent >> 20) + ' MB in ' + s.toFixed(2) + ' s = ' + (sent * 8 / s / 1e6).toFixed(0) + ' Mbit');
 }
-async function run(){ out.textContent = ANIM ? '' : 'no animation\\n'; await down(); await up(); phase = ''; log('done'); }
+async function run(){ out.textContent = STREAMS + ' stream(s)' + (ANIM ? '' : ', no animation') + '\\n'; await down(); await up(); phase = ''; log('done'); }
 </script>"""
 
 
