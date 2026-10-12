@@ -181,11 +181,28 @@ const IGC_STATUS_SPEED_2500: u32 = 0x0040_0000;
 const IGC_MPC: u32 = 0x4010;
 const IGC_XONRXC: u32 = 0x4048;
 const IGC_XOFFRXC: u32 = 0x4050;
+const IGC_GPTC: u32 = 0x4080;
+const IGC_HTDPMC: u32 = 0x403C;
 
 /// Statistics registers clear on read; these sum what was read.
 static STAT_MPC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static STAT_XOFF_RX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static STAT_XON_RX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static STAT_GPTC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static STAT_HTDPMC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Frames handed to the ring (single frames, and TSO segments by MSS).
+static STAT_QUEUED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// (frames handed to the ring, good frames the card sent, frames the card
+/// discarded) since boot.
+pub fn tx_stats() -> (u64, u64, u64) {
+    if let Some(d) = DEVICE.lock().as_ref() {
+        STAT_GPTC.fetch_add(d.mmio.r32(IGC_GPTC) as u64, Ordering::Relaxed);
+        STAT_HTDPMC.fetch_add(d.mmio.r32(IGC_HTDPMC) as u64, Ordering::Relaxed);
+    }
+    (STAT_QUEUED.load(Ordering::Relaxed), STAT_GPTC.load(Ordering::Relaxed),
+     STAT_HTDPMC.load(Ordering::Relaxed))
+}
 
 /// (missed RX frames, XOFF received, XON received) since boot.
 pub fn link_stats() -> (u64, u64, u64) {
@@ -500,6 +517,7 @@ fn send_inner(frame: &[u8], wait: bool) -> Result<(), NetError> {
         | IGC_ADVTXD_DCMD_EOP | IGC_ADVTXD_DCMD_RS,
         (frame.len() as u32) << IGC_ADVTXD_PAYLEN_SHIFT);
     d.tx_eop[i as usize] = i;
+    STAT_QUEUED.fetch_add(1, Ordering::Relaxed);
     tx_bump_tail(d, (i + 1) % IGC_DEFAULT_TXD as u16);
     Ok(())
 }
@@ -574,6 +592,7 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
     }
     d.tso_slot_of[first as usize] = slot as u8;
     note_queued(d, first, frame.len());
+    STAT_QUEUED.fetch_add((frame.len() - hdr_len).div_ceil(mss as usize) as u64, Ordering::Relaxed);
     tx_bump_tail(d, i);
     Ok(())
 }

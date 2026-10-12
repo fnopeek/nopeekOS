@@ -420,6 +420,7 @@ struct TraceMark {
     arp_miss: u64,
     sack: u64,
     link: (u64, u64, u64),
+    card_tx: (u64, u64, u64),
     card_err: u32,
 }
 
@@ -440,6 +441,7 @@ impl TraceMark {
             egress: crate::microvm::devices::nat::egress_stats(),
             arp_miss: crate::microvm::devices::nat::arp_miss_count(),
             link: crate::drivers::igc::link_stats(),
+            card_tx: crate::drivers::igc::tx_stats(),
             sack: crate::microvm::devices::nat::tcp_loss_stats().1,
             card_err: crate::netdev::tx_reject_stats().1,
         }
@@ -470,6 +472,11 @@ fn trace_tick(mark: &mut Option<TraceMark>) {
     }
     let lost = (n.egress.0 - m.egress.0, n.egress.1 - m.egress.1, n.sack - m.sack,
                 n.card_err.wrapping_sub(m.card_err), n.arp_miss - m.arp_miss);
+    let ctx = (n.card_tx.0 - m.card_tx.0, n.card_tx.1 - m.card_tx.1, n.card_tx.2 - m.card_tx.2);
+    if ctx.0 > 1000 {
+        crate::kprintln!("[nettrace] +{}ms card tx: queued={} sent={} discarded={}",
+            ms, ctx.0, ctx.1, ctx.2);
+    }
     let link = (n.link.0 - m.link.0, n.link.1 - m.link.1, n.link.2 - m.link.2);
     if link != (0, 0, 0) {
         crate::kprintln!("[nettrace] +{}ms card: rx-missed={} pause-in={} resume-in={}",
