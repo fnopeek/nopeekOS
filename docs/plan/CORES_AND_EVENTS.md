@@ -7,9 +7,7 @@ Wartezustand, `npk_wait`), Stufe 2b/2c = 0.413.0 + wifi_rtl8822ce 0.68.0
 dock 0.7.0 (Panels abonnieren), Stufe 3a = 0.415.0 (I/O APIC), 3b = 0.416.0 (Eingabe per Interrupt), 3c-1 = 0.417.0 (Shell als Fiber auf
 Kern 0), 0.418.0/0.419.0 (DNS/GC/History/App-Start von Kern 0 herunter), 3e =
 0.420.0 (Kern 0 ohne Takt). Offen: Strom (3b-Strom), aml, Compositor-Fiber.
-**2026-10-12:** Stufe 4 neu gefasst als „Rechenzeit nach Last" — §7. Erster
-Schritt gebaut: 0.546.0 (keine Arbeit wartet mehr auf einen Kern, der nie
-annimmt).
+**2026-10-12:** Stufe 4 neu gefasst als „Rechenzeit nach Last" — §7. Gebaut: 0.546.0–0.550.0 (Schritte 4.0–4.8).
 **Ausloeser:** Kernel 0.408/0.409 (Treiberkern nimmt keine Intents, neue
 Arbeit an den leersten Kern) haben das WLAN von 200 auf ~400 Mbit gebracht —
 nicht durch schnelleren Code, sondern durch **Platzierung von Hand**. Das ist
@@ -662,7 +660,8 @@ NUC** zu bestaetigen, bevor der naechste kommt.
 | 4.1 | ✓ 0.547.0: Aufnahme bei jedem Fiberwechsel (`run_core_fibers` schaut in den Eingang) | `top` startet < 1 ms auch neben pollendem Arbeiter; Boot unveraendert |
 | 4.2–4.4 | ✓ 0.548.x: vCPU teilt (Weck-IPI an vCPU-Kerne, `PEER_WAKE`), Netz/GPU-Arbeiter auf `fiber::Doorbell`, GPU ohne eigenen Kern, `protected_cores` nur Pump-Kerne, Abbau-Schleifen geben ab. Sperren-Audit per Lesen aller 25 Abgabestellen statt Zaehler. `KVM_HINTS_REALTIME` bleibt (0.548.1): ohne ihn 9–14k statt 2–3k HLT-Exits/s; er schaltet in Linux nur Haltpoll an und PV-Spinlock/TLB-Flush/Sched-Yield ab, die wir nicht anbieten | QEMU -smp 8: 6 vCPUs ✓, `top` daneben ✓, Abbau ✓; NUC offen |
 | 4.5–4.7 | ✓ 0.549.0: Apps aus dem Eingang sind beweglich (`admit_movable`), alles direkt Platzierte nicht; wer einen IRQ bindet, NIC-Treiber/WLAN-Manager wird oder vCPU ist, pinnt sich (`pin_current`). Ein leerer Kern (nicht 0, nicht vCPU) holt einen lauffaehigen beweglichen Fiber von einem beschaeftigten (`steal_for`), eingeladen per `invite_stealer`. Weckgriff + `FIBER_COUNT` wandern, Apps folgen ihrem Kern (`follow_core`). **TLB-Quarantaene nicht noetig:** Speicher eines Fibers fasst nur er an, und `sync_tlb` laeuft auf dem neuen Kern vor dem Start, durch die Queue-Sperre nach seinem letzten Unmap geordnet | `cores`: „fibers taken over by idle cores"; QEMU + NUC offen |
-| 4.8 | Arbeiter ohne festen Kern (Netz, GPU, 9p, fetch als `Any`) | Download/Upload wie vorher oder besser, ohne Kern-Reservierung |
+| 4.8 | ✓ 0.550.0: Netz- und GPU-Arbeiter beweglich (`admit_movable_with_stack`, Tuerklingel), Kerne mit VM-Arbeitern nehmen neue Apps (nur vCPU-Kerne lehnen ab — sonst fand eine App waehrend der VM bei 6 vCPUs keinen Kern). 9p/Prefetch/fetch bleiben fest (kurzlebig bzw. Platzierung absichtlich) | QEMU 0.549 ✓ (11 Uebernahmen); NUC offen |
+| danach | **Offen:** vCPU-Kerne nehmen nichts und stehlen nicht, weil ein rechnender Fiber die vCPU bis zu seinem `yield` aufhielte. Loest erst Epochen-Praeemption in forge (§2) | — |
 
 ### 7.7 Daneben, nicht Teil dieser Stufe (aus den Durchsichten 2026-10-12)
 
