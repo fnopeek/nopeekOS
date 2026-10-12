@@ -53,6 +53,12 @@ const F_GSO: u32       = 1 << 6;   // VIRTIO_NET_F_GSO (legacy) — device handl
                                    // virtio-net offers this (not the modern
                                    // per-type HOST_TSO4) to a legacy driver.
 const F_HOST_TSO4: u32 = 1 << 11;  // VIRTIO_NET_F_HOST_TSO4 — device segments TSOv4
+/// VIRTIO_F_ANY_LAYOUT: the device takes the header and the frame in one
+/// buffer. Linux then pushes the header in front of the data (`can_push` in
+/// `xmit_skb`), one descriptor per frame instead of two.
+const F_ANY_LAYOUT: u32 = 1 << 27;
+/// Bytes per TX data slot: the header in front of an MTU frame, rounded up.
+const TX_SLOT_STRIDE: usize = 1536;
 /// virtio_net_hdr.flags / gso_type for offloaded TX (host does csum + TCP-GSO).
 #[allow(dead_code)]
 const F_STATUS: u32    = 1 << 16;
@@ -137,6 +143,9 @@ struct VirtioNet {
     /// (which may be freed and reused before QEMU's slirp loop does the DMA).
     /// Modelled on `intel_nic::send`'s `tx_bufs`.
     tx_data: DmaRegion,
+    /// ANY_LAYOUT negotiated: a frame goes out as header + data in one
+    /// descriptor, so the ring holds twice the frames.
+    one_desc: bool,
     /// `TSO_SLOTS` super-frame buffers, `TSO_SLOT_SIZE` each.
     tso_data: DmaRegion,
     /// Bit per free TSO slot.
@@ -191,7 +200,8 @@ pub fn init() -> bool {
     // capabilities (it can segment and checksum for us); we do not currently
     // hand it a GSO frame, and accepting them costs nothing. Only when both
     // are present, so we never promise a frame the device can't segment.
-    let mut accepted = features & F_MAC;
+    let mut accepted = features & (F_MAC | F_ANY_LAYOUT);
+    let one_desc = features & F_ANY_LAYOUT != 0;
     // Prefer the modern per-type bits; fall back to the legacy combined F_GSO
     // (what QEMU's transitional device offers a legacy driver). Either lets us
     // forward the guest's GSO super-frame AS-IS (device segments + checksums).
@@ -277,7 +287,7 @@ pub fn init() -> bool {
     // sender copies the frame here so the descriptor points at
     // memory that outlives the caller's stack frame; otherwise QEMU/slirp
     // can DMA-read recycled heap memory.
-    let tx_data_pages = (tx_qs as usize * MTU + 4095) / 4096;
+    let tx_data_pages = (tx_qs as usize * TX_SLOT_STRIDE).div_ceil(4096);
     let tx_data = match DmaRegion::alloc_zeroed(tx_data_pages) {
         Some(r) => r,
         None => {
@@ -379,6 +389,7 @@ pub fn init() -> bool {
         tx_free_head: 0,
         tx_hdrs,
         tx_data,
+        one_desc,
         tso_data,
         tso_free: if TSO_SLOTS == 32 { u32::MAX } else { (1u32 << TSO_SLOTS) - 1 },
         tso_slot_of: alloc::vec![NO_TSO_SLOT; tx_qs as usize],
@@ -418,38 +429,42 @@ fn send_inner(frame: &[u8], spin: bool) -> Result<(), NetError> {
     // faster than QEMU/slirp drains it; spin-reclaim briefly so in-flight
     // descriptors free up. Bounded.
     dev.reclaim_tx();
-    if dev.tx_num_free < 2 {
+    // Descriptors one frame takes: header and data share one under ANY_LAYOUT.
+    let need: u16 = if dev.one_desc { 1 } else { 2 };
+    if dev.tx_num_free < need {
         let mut spins = 0;
-        while spin && dev.tx_num_free < 2 && spins < TX_RECLAIM_SPINS {
+        while spin && dev.tx_num_free < need && spins < TX_RECLAIM_SPINS {
             core::hint::spin_loop();
             dev.reclaim_tx();
             spins += 1;
         }
-        if dev.tx_num_free < 2 {
+        if dev.tx_num_free < need {
             dev.tx_kick();
             return Err(NetError::QueueFull);
         }
     }
 
+    // Copy into the DMA-stable pool before publishing the descriptor — the
+    // caller's `frame: &[u8]` is a stack-local Vec that gets dropped before
+    // QEMU/slirp's event loop wakes up to walk our virtqueue.
     let d0 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
-    let d1 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
-
-    let hdr_off = d0 as u64 * NET_HDR_SIZE as u64;
-
-    // Zero net header (no offload)
-    dev.tx_hdrs.fill(hdr_off, 0, NET_HDR_SIZE as u64);
-
-    // Descriptor 0: net header
-    set_desc(&dev.tx_q, d0, dev.tx_hdrs.phys() + hdr_off, NET_HDR_SIZE as u32, DESC_F_NEXT, d1);
-
-    // Descriptor 1: frame data. Copy into the DMA-stable pool
-    // before publishing the descriptor — the caller's `frame: &[u8]`
-    // is a stack-local Vec that gets dropped before QEMU/slirp's
-    // event loop wakes up to walk our virtqueue.
-    let data_off = d1 as u64 * MTU as u64;
-    dev.tx_data.copy_in(data_off, frame);
-
-    set_desc(&dev.tx_q, d1, dev.tx_data.phys() + data_off, frame.len() as u32, 0, 0);
+    if dev.one_desc {
+        // A zero net header (no offload) and the frame behind it, one buffer.
+        let off = d0 as u64 * TX_SLOT_STRIDE as u64;
+        dev.tx_data.fill(off, 0, NET_HDR_SIZE as u64);
+        dev.tx_data.copy_in(off + NET_HDR_SIZE as u64, frame);
+        set_desc(&dev.tx_q, d0, dev.tx_data.phys() + off,
+            (NET_HDR_SIZE + frame.len()) as u32, 0, 0);
+    } else {
+        let d1 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
+        let hdr_off = d0 as u64 * NET_HDR_SIZE as u64;
+        // Zero net header (no offload)
+        dev.tx_hdrs.fill(hdr_off, 0, NET_HDR_SIZE as u64);
+        set_desc(&dev.tx_q, d0, dev.tx_hdrs.phys() + hdr_off, NET_HDR_SIZE as u32, DESC_F_NEXT, d1);
+        let data_off = d1 as u64 * TX_SLOT_STRIDE as u64;
+        dev.tx_data.copy_in(data_off, frame);
+        set_desc(&dev.tx_q, d1, dev.tx_data.phys() + data_off, frame.len() as u32, 0, 0);
+    }
 
     // Add to available ring
     let avail_ring = dev.tx_avail + 4;
@@ -488,17 +503,14 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
     let mut lock = DEVICE.lock();
     let dev = lock.as_mut().ok_or(NetError::NotInitialized)?;
 
-    // Two descriptors (header, data) and a free super-frame buffer.
+    // Two descriptors (header, data) and a free super-frame buffer. A full
+    // ring is refused at once: the caller segments in software, and waiting
+    // here would hold `DEVICE`, which the RX path needs for the ACKs that
+    // free the ring.
     dev.reclaim_tx();
     if dev.tx_num_free < 2 || dev.tso_free == 0 {
         dev.tx_kick();
-        let mut spins = 0;
-        while (dev.tx_num_free < 2 || dev.tso_free == 0) && spins < TX_RECLAIM_SPINS {
-            core::hint::spin_loop();
-            dev.reclaim_tx();
-            spins += 1;
-        }
-        if dev.tx_num_free < 2 || dev.tso_free == 0 { return Err(NetError::QueueFull); }
+        return Err(NetError::QueueFull);
     }
     let slot = dev.tso_free.trailing_zeros() as usize;
     dev.tso_free &= !(1u32 << slot);
