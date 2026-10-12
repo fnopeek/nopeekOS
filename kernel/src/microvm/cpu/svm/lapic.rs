@@ -34,6 +34,9 @@ const MSR_TSC_DEADLINE: u32 = 0x6E0;
 /// `MSR_KVM_PV_EOI_EN` (kvm_para.h).
 const MSR_KVM_PV_EOI_EN: u32 = 0x4b56_4d04;
 const KVM_MSR_ENABLED: u64 = 1;
+/// `MSR_KVM_POLL_CONTROL`: bit 0 = host-side halt polling allowed. Our vCPUs
+/// never halt-poll on the host, so the value is only kept for the guest.
+const MSR_KVM_POLL_CONTROL: u32 = 0x4b56_4d05;
 
 // Register offsets (apicdef.h). Index into `regs` is `off >> 4`.
 const APIC_ID: u32 = 0x20;
@@ -356,6 +359,8 @@ pub struct LocalApic {
     pv_eoi_gpa: u64,
     /// `KVM_APIC_PV_EOI_PENDING`: we set the guest's flag before this entry.
     pv_eoi_pending: bool,
+    /// `MSR_KVM_POLL_CONTROL` as the guest last wrote it (reset value 1).
+    poll_control: u64,
 }
 
 impl LocalApic {
@@ -375,6 +380,7 @@ impl LocalApic {
         LocalApic {
             regs, apic_id, timer_start_tsc: 0, timer_fired: false, timer_owed: 0,
             x2apic: false, tsc_deadline: 0, pv_eoi_gpa: 0, pv_eoi_pending: false,
+            poll_control: 1,
         }
     }
 
@@ -634,6 +640,12 @@ impl LocalApic {
                 if v & 0x2 != 0 { return Some(Err(())); } // reserved, 4-byte aligned
                 self.pv_eoi_gpa = if v & KVM_MSR_ENABLED != 0 { v & !0x3 } else { 0 };
                 self.pv_eoi_pending = false;
+                Ok((0, None))
+            }
+            (MSR_KVM_POLL_CONTROL, None) => Ok((self.poll_control, None)),
+            (MSR_KVM_POLL_CONTROL, Some(v)) => {
+                if v & !1 != 0 { return Some(Err(())); } // only the enable bit
+                self.poll_control = v;
                 Ok((0, None))
             }
             (MSR_X2APIC_FIRST..=MSR_X2APIC_LAST, w) => {
