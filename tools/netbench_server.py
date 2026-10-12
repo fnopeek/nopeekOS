@@ -70,7 +70,7 @@ def tcp_info(sock):
 
 # A browser speed test against this server: download and upload through
 # the browser's own network stack, with a bar that repaints every frame the
-# way a speed-test page does. GET /speed.
+# way a speed-test page does. GET /speed; /speed?anim=0 without the bar.
 SPEED_PAGE = """<!doctype html><meta charset=utf-8><title>netbench speed</title>
 <style>body{font:20px sans-serif;margin:40px;background:#111;color:#eee}
 #bar{height:30px;background:#0a8;width:0}#wrap{width:100%;background:#333;margin:20px 0}
@@ -81,7 +81,8 @@ button{font-size:20px;padding:8px 20px}</style>
 <script>
 const MB = 500, out = document.getElementById('out'), bar = document.getElementById('bar');
 let live = 0, t0 = 0, phase = '';
-function frame(){ if (phase) { bar.style.width = (Math.sin(performance.now()/200)*50+50)+'%';
+const ANIM = !location.search.includes('anim=0');
+function frame(){ if (phase && ANIM) { bar.style.width = (Math.sin(performance.now()/200)*50+50)+'%';
   document.title = phase + ' ' + live.toFixed(0) + ' Mbit'; } requestAnimationFrame(frame); }
 requestAnimationFrame(frame);
 function log(s){ out.textContent += s + '\\n'; }
@@ -114,7 +115,7 @@ async function up(){
   const s = (performance.now() - t0) / 1000;
   log('upload ' + (sent >> 20) + ' MB in ' + s.toFixed(2) + ' s = ' + (sent * 8 / s / 1e6).toFixed(0) + ' Mbit');
 }
-async function run(){ out.textContent = ''; await down(); await up(); phase = ''; log('done'); }
+async function run(){ out.textContent = ANIM ? '' : 'no animation\n'; await down(); await up(); phase = ''; log('done'); }
 </script>"""
 
 
@@ -125,6 +126,12 @@ class Handler(BaseHTTPRequestHandler):
         pass  # quiet
 
     def do_GET(self):
+        if urlparse(self.path).path == "/favicon.ico":
+            # Not a 200 MB download behind the page's back.
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if urlparse(self.path).path == "/speed":
             body = SPEED_PAGE.encode()
             self.send_response(200)
