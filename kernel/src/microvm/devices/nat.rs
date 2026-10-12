@@ -63,6 +63,7 @@ const TCP_HDR_LEN: usize = 20;
 /// TCP flags the outbound segmenter has to carry correctly across a split
 /// (`tcp_gso_segment`, net/ipv4/tcp_offload.c).
 const TCP_FIN: u8 = 0x01;
+const TCP_SYN: u8 = 0x02;
 const TCP_PSH: u8 = 0x08;
 const TCP_CWR: u8 = 0x80;
 /// virtio-net header gso_type for a TCPv4 super-frame on guest TX (the ECN flag
@@ -108,7 +109,7 @@ impl Default for NetCaps {
 // table — no rtx/ack/RTO logic, none of the termination brittleness.
 // ===========================================================================
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtOrd};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtOrd};
 
 const L3_MAX: usize = 1024;
 
@@ -668,6 +669,7 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
         NS_TX_BADTCP.fetch_add(1, AtOrd::Relaxed); return;
     }
     let payload = &l4[thlen..];
+    note_tx_seq(hp, l4, payload.len());
     let mss = gso_size as usize;
 
     // Non-GSO (or fits in one MSS): single segment.
@@ -723,6 +725,59 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
         egress(dst_ip, PROTO_TCP, seg);
         off += this;
     }
+}
+
+/// Highest sequence end each guest TCP flow has sent, by host port. A
+/// segment that ends at or below it is the guest sending data again — loss
+/// or a timeout on its side of the conversation (`cores`: net TCP retrans).
+static TX_SEQ_END: [AtomicU32; PORT_RANGE] = [const { AtomicU32::new(0) }; PORT_RANGE];
+static NS_TX_RETRANS: AtomicU64 = AtomicU64::new(0);
+/// Inbound TCP segments for the guest carrying SACK blocks: the far end
+/// reports holes in what it received.
+static NS_RX_SACK: AtomicU64 = AtomicU64::new(0);
+
+fn note_tx_seq(hp: u16, l4: &[u8], payload_len: usize) {
+    let Some(slot) = (hp as usize).checked_sub(L3_PORT_LO as usize)
+        .and_then(|i| TX_SEQ_END.get(i)) else { return };
+    let seq = u32::from_be_bytes([l4[4], l4[5], l4[6], l4[7]]);
+    if l4[13] & TCP_SYN != 0 {
+        slot.store(seq.wrapping_add(1), AtOrd::Relaxed);
+        return;
+    }
+    if payload_len == 0 {
+        return;
+    }
+    let end = seq.wrapping_add(payload_len as u32);
+    let max = slot.load(AtOrd::Relaxed);
+    if (end.wrapping_sub(max) as i32) <= 0 {
+        NS_TX_RETRANS.fetch_add(1, AtOrd::Relaxed);
+    } else {
+        slot.store(end, AtOrd::Relaxed);
+    }
+}
+
+/// Whether TCP header `l4` carries a SACK option (kind 5).
+fn has_sack(l4: &[u8]) -> bool {
+    let thlen = ((l4[12] >> 4) as usize * 4).min(l4.len());
+    let mut i = TCP_HDR_LEN;
+    while i < thlen {
+        match l4[i] {
+            0 => return false,
+            1 => i += 1,
+            5 => return true,
+            _ => {
+                let len = *l4.get(i + 1).unwrap_or(&0) as usize;
+                if len < 2 { return false; }
+                i += len;
+            }
+        }
+    }
+    false
+}
+
+/// (guest TCP segments sent again, inbound segments with SACK) since boot.
+pub fn tcp_loss_stats() -> (u64, u64) {
+    (NS_TX_RETRANS.load(AtOrd::Relaxed), NS_RX_SACK.load(AtOrd::Relaxed))
 }
 
 /// Hand a guest TSO super-frame to the host card whole (`netdev::send_tso`):
@@ -1179,6 +1234,9 @@ pub fn tap_inbound(ip: &[u8]) -> bool {
     };
     NS_RX_PKTS.fetch_add(1, AtOrd::Relaxed);
     NS_RX_BYTES.fetch_add(ip.len() as u64, AtOrd::Relaxed);
+    if proto == PROTO_TCP && l4.len() >= TCP_HDR_LEN && has_sack(l4) {
+        NS_RX_SACK.fetch_add(1, AtOrd::Relaxed);
+    }
 
     let mut frame = frame_pool_get(VNET_HDR_LEN + ETH_HDR_LEN + ip.len());
     frame[..VNET_HDR_LEN].fill(0); // empty virtio-net header
