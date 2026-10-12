@@ -1102,15 +1102,40 @@ pub fn entry_irqs_off(kick_gen: u64, host_core: usize, deadline: u64) -> bool {
     // exit asm sets it again.
     unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
     crate::interrupts::arm_vcpu_timer(deadline);
-    // A fiber of this core woken after the slice's last look: its IPI is
-    // pending under IF=0 and would end the guest entry at once anyway.
+    // `vcpu->mode = IN_GUEST_MODE` then the last look (KVM
+    // vcpu_enter_guest): a kicker bumps the generation or sets the peer
+    // wake, then reads this flag. Either we see its change here, or it sees
+    // the flag and sends the IPI, which stays pending under IF=0 and ends
+    // the entry at once.
+    if host_core < IN_GUEST.len() {
+        IN_GUEST[host_core].store(true, Ordering::SeqCst);
+    }
+    core::sync::atomic::fence(Ordering::SeqCst);
     if crate::smp::fiber::net_kick_gen(host_core) != kick_gen
         || crate::smp::per_core::peer_wake_pending(host_core)
     {
+        note_guest_exit(host_core);
         entry_irqs_on();
         return false;
     }
     true
+}
+
+/// A vCPU on this host core is past its last look before guest entry and
+/// not yet back out (`entry_irqs_off` .. `note_guest_exit`). Only then does a
+/// kick need an IPI; otherwise the vCPU sees the kick on its next look.
+static IN_GUEST: [AtomicBool; 32] = [const { AtomicBool::new(false) }; 32];
+
+/// The vCPU on `host_core` left the guest (or never entered).
+pub fn note_guest_exit(host_core: usize) {
+    if host_core < IN_GUEST.len() {
+        IN_GUEST[host_core].store(false, Ordering::Release);
+    }
+}
+
+/// Whether a vCPU on `host_core` may be running guest code right now.
+pub fn in_guest(host_core: usize) -> bool {
+    host_core < IN_GUEST.len() && IN_GUEST[host_core].load(Ordering::SeqCst)
 }
 
 /// A runnable fiber next to a busy vCPU gets the core within this long.

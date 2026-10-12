@@ -313,6 +313,13 @@ pub fn kick_host_core(core_id: usize) {
     // before the IPI, so the wake is never lost. Harmless for non-net kicks
     // (only `kick_wait` fibers observe the generation).
     crate::smp::fiber::net_kick_bump(core_id);
+    // `kvm_vcpu_kick`: the IPI only when the vCPU may be in the guest. A
+    // parked one was woken above, and one between exit and entry sees the
+    // new generation in its last look (`entry_irqs_off`). The bump is a
+    // locked RMW, so it is ordered before this load.
+    if !crate::microvm::cpu::in_guest(core_id) {
+        return;
+    }
     let apic_id = {
         let cores = per_core::CORES.lock();
         match cores.get(core_id) {

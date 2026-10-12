@@ -1540,6 +1540,7 @@ impl VmContext {
             )
         };
         super::msr::spec_ctrl_exit(host_spec);
+        crate::microvm::cpu::note_guest_exit(host_core);
         crate::microvm::cpu::entry_irqs_on();
         let t_exit = crate::interrupts::rdtsc();
         crate::microvm::cpu::record_vcpu_time(

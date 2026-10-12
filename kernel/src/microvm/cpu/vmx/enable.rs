@@ -1451,6 +1451,7 @@ impl VmContext {
                 &mut self.vcpu.host_fpu, &mut self.vcpu.guest_fpu,
             )
         };
+        crate::microvm::cpu::note_guest_exit(host_core);
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         super::msr::spec_ctrl_exit(host_spec);
         prof_post = crate::interrupts::rdtsc();

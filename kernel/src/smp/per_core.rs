@@ -860,7 +860,9 @@ pub fn wake_fiber_core(c: usize) {
     if current_core_id() == c {
         return;
     }
-    if IDLE[c].load(Ordering::SeqCst) || crate::microvm::cpu::is_vcpu_core(c) {
+    // A vCPU core only while the vCPU may be in the guest: between exit and
+    // entry it sees `PEER_WAKE` in its last look (`entry_irqs_off`).
+    if IDLE[c].load(Ordering::SeqCst) || crate::microvm::cpu::in_guest(c) {
         super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
     }
 }
@@ -873,7 +875,7 @@ pub fn take_peer_wake(c: usize) -> bool {
 /// Whether a fiber on core `c` became runnable, without clearing it — for
 /// the last look before a guest entry.
 pub fn peer_wake_pending(c: usize) -> bool {
-    c < 256 && PEER_WAKE[c].load(Ordering::Acquire)
+    c < 256 && PEER_WAKE[c].load(Ordering::SeqCst)
 }
 
 /// Core 0's loop after boot: the same fiber scheduler as a worker, with the
