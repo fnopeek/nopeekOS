@@ -6,7 +6,7 @@
 #
 #   netlab.sh up [delay_ms] [rate] [queue_ms]   start (default 10 ms, 1gbit, 5 ms)
 #   netlab.sh shell                             shell in the client ns
-#   netlab.sh qemu                              ./build.sh qemu in the client ns
+#   netlab.sh qemu [target]                     ./build.sh <target> in the client ns (qemu-gui)
 #   netlab.sh base                              native baseline: curl down/up
 #   netlab.sh down                              stop everything
 #
@@ -63,7 +63,7 @@ up)
     in_client ping -c 2 -q 10.99.0.2 | tail -1
     ;;
 shell) in_client bash ;;
-qemu)  in_client env -C "$REPO" ./build.sh qemu ;;
+qemu)  in_client env -C "$REPO" ./build.sh "${2:-qemu-gui}" ;;
 base)
     mb=${2:-500}
     echo "download ${mb} MiB:"
