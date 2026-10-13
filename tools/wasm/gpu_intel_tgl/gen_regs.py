@@ -56,7 +56,7 @@ HEADERS = [
     "gt/intel_gpu_commands.h", "intel_device_info.h", "intel_step.h",
     "display/intel_display_regs.h", "display/intel_display_device.h",
     "display/intel_pch.h", "display/intel_display_limits.h", "display/intel_fbc.h",
-    "intel_pci_config.h",
+    "intel_pci_config.h", "drm/intel/i915_drm.h",
 ]
 
 # The kernel build's flags (drivers/gpu/drm/i915/.intel_uncore.o.cmd),
@@ -112,9 +112,12 @@ def values(exprs, prelude=None):
             continue
         if cur is None:
             continue
-        m = re.match(r"\s+mov(?:l|q|absq)\s+\$(-?\d+), %[er]ax", line)
+        m = re.match(r"\s+mov(l|q|absq)\s+\$(-?\d+), %[er]ax", line)
         if m:
-            out[cur] = int(m.group(1)) & 0xFFFF_FFFF_FFFF_FFFF
+            # movl writes eax and clears the upper half of rax; movq and
+            # movabsq set all 64 bits (a negative immediate sign-extends).
+            width = 0xFFFF_FFFF if m.group(1) == "l" else 0xFFFF_FFFF_FFFF_FFFF
+            out[cur] = int(m.group(2)) & width
         elif re.match(r"\s+xorl\s+%eax, %eax", line):
             out[cur] = 0
         elif re.match(r"\s+ret", line):
@@ -147,21 +150,37 @@ def expand(text, plain=False):
 
 
 def where(name):
-    """file:line of `#define NAME`, or of the enum entry NAME, in the i915 tree."""
+    """file:line of `#define NAME`, or of the enum entry NAME: the i915
+    tree first, then the shared drm/PCI headers, selftests and GVT last."""
     rx = re.compile(r"^\s*(?:#\s*define\s+" + re.escape(name) + r"\b|"
                     + re.escape(name) + r"\s*(?:=[^=]|,|$))")
-    for dp, _, fs in os.walk(I915):
+
+    def search(path, rel):
+        for i, line in enumerate(open(path, errors="ignore"), 1):
+            if rx.match(line):
+                return f"{rel}:{i}"
+        return None
+
+    late = []
+    for dp, _, fs in sorted(os.walk(I915)):
         for f in sorted(fs, key=lambda x: (not x.endswith(".h"), x)):
             if not f.endswith((".h", ".c")):
                 continue
             p = os.path.join(dp, f)
-            for i, line in enumerate(open(p, errors="ignore"), 1):
-                if rx.match(line):
-                    return f"{os.path.relpath(p, I915)}:{i}"
-    for h in ("include/linux/pci_ids.h",):
-        for i, line in enumerate(open(os.path.join(L, h), errors="ignore"), 1):
-            if rx.match(line):
-                return f"{h}:{i}"
+            if "selftests" in dp or "/gvt" in dp:
+                late.append(p)
+                continue
+            hit = search(p, os.path.relpath(p, I915))
+            if hit:
+                return hit
+    for h in ("include/linux/pci_ids.h", "include/drm/intel/i915_drm.h"):
+        hit = search(os.path.join(L, h), h)
+        if hit:
+            return hit
+    for p in late:
+        hit = search(p, os.path.relpath(p, I915))
+        if hit:
+            return hit
     return None
 
 
@@ -228,9 +247,21 @@ def gen():
         else:
             e = expand(name)
             consts[name] = f"i915_mmio_reg_offset({name})" if is_reg(e) else name
-    vals = values(consts) if consts else {}
+    def typed(exprs, prelude=None):
+        """Value, byte size and signedness of each C expression."""
+        q = {}
+        for k, e in exprs.items():
+            q[k] = e
+            # `+ 0` promotes bit-fields and narrow types as C arithmetic
+            # does; sizeof and the sign are those of the promoted value.
+            q[k + "__size"] = f"sizeof(({e}) + 0)"
+            q[k + "__neg"] = f"(((({e}) + 0) < 0) ? 1 : 0)"
+        v = values(q, prelude)
+        return {k: (v[k], v[k + "__size"], v[k + "__neg"]) for k in exprs}
+
+    vals = typed(consts) if consts else {}
     for src, names in csrc.items():
-        vals.update(values(names, f'#include "{src}"\n'))
+        vals.update(typed(names, f'#include "{src}"\n'))
 
     # Parameterised: placeholder expansion, then samples.
     rust_fn, samples = {}, {}
@@ -276,11 +307,16 @@ def gen():
             out.append(f"/// {loc}")
             out.append(f"pub const fn {name}({sig}) -> u32 {{ {rust_fn[name]} }}")
         else:
-            v = vals[name]
-            if v >= 1 << 63:
-                out.append(f"pub const {name}: i32 = {v - (1 << 64)}; // {loc}")
+            v, size, neg = vals[name]
+            if neg:
+                ty = "i64" if size == 8 else "i32"
+                out.append(f"pub const {name}: {ty} = {v - (1 << 64) if v >= 1 << 63 else v}; // {loc}")
                 continue
-            ty = "u64" if v > 0xFFFF_FFFF else "u32"
+            if size == 8:
+                ty = "u64"
+            else:
+                ty = "u32"
+                v &= 0xFFFF_FFFF
             out.append(f"pub const {name}: {ty} = {v:#x}; // {loc}")
     return "\n".join(out) + "\n"
 

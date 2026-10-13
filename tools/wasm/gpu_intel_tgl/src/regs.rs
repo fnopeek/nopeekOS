@@ -17,8 +17,8 @@ pub const fn FORCEWAKE_ACK_MEDIA_VDBOX_GEN11(n: u32) -> u32 { (0xd50 + (n) * 4) 
 pub const fn FORCEWAKE_MEDIA_VEBOX_GEN11(n: u32) -> u32 { (0xa560 + (n) * 4) }
 /// gt/intel_gt_regs.h:55
 pub const fn FORCEWAKE_ACK_MEDIA_VEBOX_GEN11(n: u32) -> u32 { (0xd70 + (n) * 4) }
-pub const FORCEWAKE_KERNEL: u32 = 0x1; // gt/intel_gt_regs.h:1497
-pub const FORCEWAKE_KERNEL_FALLBACK: u32 = 0x8000; // gt/intel_gt_regs.h:1499
+pub const FORCEWAKE_KERNEL: u64 = 0x1; // gt/intel_gt_regs.h:1497
+pub const FORCEWAKE_KERNEL_FALLBACK: u64 = 0x8000; // gt/intel_gt_regs.h:1499
 pub const FORCEWAKE_ACK_TIMEOUT_MS: u32 = 0x32; // intel_uncore.c:40
 
 // Forcewake domains (intel_uncore.h)
@@ -35,10 +35,10 @@ pub const FORCEWAKE_MEDIA: u32 = 0x4; // intel_uncore.h:73
 pub const FORCEWAKE_ALL: u32 = 0xffff; // intel_uncore.h:88
 pub const FW_REG_READ: u32 = 0x1; // intel_uncore.h:262
 pub const FW_REG_WRITE: u32 = 0x2; // intel_uncore.h:263
-pub const UNCORE_HAS_FORCEWAKE: u32 = 0x1; // intel_uncore.h:152
-pub const UNCORE_HAS_FPGA_DBG_UNCLAIMED: u32 = 0x2; // intel_uncore.h:153
-pub const UNCORE_HAS_DBG_UNCLAIMED: u32 = 0x4; // intel_uncore.h:154
-pub const UNCORE_HAS_FIFO: u32 = 0x8; // intel_uncore.h:155
+pub const UNCORE_HAS_FORCEWAKE: u64 = 0x1; // intel_uncore.h:152
+pub const UNCORE_HAS_FPGA_DBG_UNCLAIMED: u64 = 0x2; // intel_uncore.h:153
+pub const UNCORE_HAS_DBG_UNCLAIMED: u64 = 0x4; // intel_uncore.h:154
+pub const UNCORE_HAS_FIFO: u64 = 0x8; // intel_uncore.h:155
 pub const I915_MAX_VCS: u32 = 0x8; // gt/intel_engine_types.h:100
 pub const I915_MAX_VECS: u32 = 0x4; // gt/intel_engine_types.h:101
 
@@ -199,13 +199,13 @@ pub const COMPUTE_CLASS: u32 = 0x5; // gt/intel_engine_types.h:36
 pub const MAX_ENGINE_CLASS: u32 = 0x5; // gt/intel_engine_types.h:37
 pub const MAX_ENGINE_INSTANCE: u32 = 0x8; // gt/intel_engine_types.h:38
 pub const MAX_MMIO_BASES: u32 = 0x3; // gt/intel_engine_cs.c:52
-pub const GEN11_LR_CONTEXT_RENDER_SIZE: u32 = 0xe000; // gt/intel_engine_cs.c:48
-pub const GEN8_LR_CONTEXT_OTHER_SIZE: u32 = 0x2000; // gt/intel_engine_cs.c:50
+pub const GEN11_LR_CONTEXT_RENDER_SIZE: u64 = 0xe000; // gt/intel_engine_cs.c:48
+pub const GEN8_LR_CONTEXT_OTHER_SIZE: u64 = 0x2000; // gt/intel_engine_cs.c:50
 /// gt/intel_engine_regs.h:72
 pub const fn RING_HWSTAM(base: u32) -> u32 { ((base) + 0x98) }
-pub const I915_ENGINE_FIRST_RENDER_COMPUTE: u32 = 0x800; // gt/intel_engine_types.h:593
-pub const I915_ENGINE_HAS_RCS_REG_STATE: u32 = 0x200; // gt/intel_engine_types.h:591
-pub const I915_ENGINE_HAS_EU_PRIORITY: u32 = 0x400; // gt/intel_engine_types.h:592
+pub const I915_ENGINE_FIRST_RENDER_COMPUTE: u64 = 0x800; // gt/intel_engine_types.h:593
+pub const I915_ENGINE_HAS_RCS_REG_STATE: u64 = 0x200; // gt/intel_engine_types.h:591
+pub const I915_ENGINE_HAS_EU_PRIORITY: u64 = 0x400; // gt/intel_engine_types.h:592
 pub const I915_VIDEO_CLASS_CAPABILITY_HEVC: u32 = 0x1; // ?
 pub const I915_VIDEO_AND_ENHANCE_CLASS_CAPABILITY_SFC: u32 = 0x2; // ?
 pub const CONFIG_DRM_I915_HEARTBEAT_INTERVAL: u32 = 0x9c4; // ?
@@ -317,3 +317,56 @@ pub const PCH_RAWCLK_FREQ: u32 = 0xc6204; // display/intel_display_regs.h:1791
 
 // Host bridge (soc/intel_gmch.c)
 pub const MCHBAR_I965: u32 = 0x48; // intel_pci_config.h:37
+
+// GGTT (gt/intel_ggtt.c, intel_gtt.h)
+pub const SNB_GMCH_CTRL: u32 = 0x50; // include/drm/intel/i915_drm.h:49
+pub const BDW_GMCH_GGMS_SHIFT: u32 = 0x6; // include/drm/intel/i915_drm.h:54
+pub const BDW_GMCH_GGMS_MASK: u32 = 0x3; // include/drm/intel/i915_drm.h:55
+pub const BDW_GMCH_GMS_SHIFT: u32 = 0x8; // include/drm/intel/i915_drm.h:56
+pub const BDW_GMCH_GMS_MASK: u32 = 0xff; // include/drm/intel/i915_drm.h:57
+pub const GEN4_GTTMMADR_BAR: u32 = 0x0; // intel_pci_config.h:19
+pub const GEN4_GMADR_BAR: u32 = 0x2; // intel_pci_config.h:20
+pub const I915_GTT_PAGE_SIZE: u64 = 0x1000; // gt/intel_gtt.h:49
+pub const I915_GTT_PAGE_SIZE_4K: u64 = 0x1000; // gt/intel_gtt.h:45
+pub const GEN8_PAGE_PRESENT: u64 = 0x1; // gt/intel_gtt.h:152
+pub const GEN12_GGTT_PTE_LM: u64 = 0x2; // gt/intel_gtt.h:97
+pub const GEN12_GGTT_PTE_ADDR_MASK: u64 = 0x3ffffffff000; // gt/intel_gtt.h:100
+pub const I915_CACHE_NONE: u32 = 0x0; // gem/i915_gem_object_types.h:147
+pub const I915_CACHE_LLC: u32 = 0x1; // gem/i915_gem_object_types.h:167
+pub const TGL_PAT_CACHE_NONE: u32 = 0x3; // tgl_info.cachelevel_to_pat[I915_CACHE_NONE] in i915_pci.c
+pub const TGL_PAT_CACHE_LLC: u32 = 0x0; // tgl_info.cachelevel_to_pat[I915_CACHE_LLC] in i915_pci.c
+/// i915_reg.h:216
+pub const fn FENCE_REG_GEN6_LO(i: u32) -> u32 { (0x100000 + (i) * 8) }
+/// i915_reg.h:217
+pub const fn FENCE_REG_GEN6_HI(i: u32) -> u32 { (0x100000 + (i) * 8 + 4) }
+
+// Stolen memory (gem/i915_gem_stolen.c, arch/x86/kernel/early-quirks.c)
+pub const INTEL_GEN11_BSM_DW0: u32 = 0xc0; // include/drm/intel/i915_drm.h:98
+pub const INTEL_GEN11_BSM_DW1: u32 = 0xc4; // include/drm/intel/i915_drm.h:99
+pub const INTEL_BSM_MASK: u32 = 0xfff00000; // include/drm/intel/i915_drm.h:100
+pub const GEN6_STOLEN_RESERVED: u32 = 0x1082c0; // i915_reg.h:128
+pub const GEN8_STOLEN_RESERVED_SIZE_MASK: u32 = 0x180; // i915_reg.h:139
+pub const GEN8_STOLEN_RESERVED_1M: u32 = 0x0; // i915_reg.h:140
+pub const GEN8_STOLEN_RESERVED_2M: u32 = 0x80; // i915_reg.h:141
+pub const GEN8_STOLEN_RESERVED_4M: u32 = 0x100; // i915_reg.h:142
+pub const GEN8_STOLEN_RESERVED_8M: u32 = 0x180; // i915_reg.h:143
+pub const GEN11_STOLEN_RESERVED_ADDR_MASK: u64 = 0xfffffffffff00000; // i915_reg.h:145
+
+// eDRAM and PCODE (soc/intel_dram.c, intel_pcode.c)
+pub const HSW_EDRAM_CAP: u32 = 0x120010; // i915_reg.h:1073
+pub const EDRAM_ENABLED: u32 = 0x1; // i915_reg.h:1074
+pub const GEN6_PCODE_MAILBOX: u32 = 0x138124; // i915_reg.h:1079
+pub const GEN6_PCODE_READY: i32 = -2147483648; // i915_reg.h:1080
+pub const GEN6_PCODE_DATA: u32 = 0x138128; // i915_reg.h:1179
+pub const GEN6_PCODE_DATA1: u32 = 0x13812c; // i915_reg.h:1182
+pub const GEN6_PCODE_ERROR_MASK: u32 = 0xff; // i915_reg.h:1084
+pub const GEN6_PCODE_SUCCESS: u32 = 0x0; // i915_reg.h:1085
+pub const GEN6_PCODE_ILLEGAL_CMD: u32 = 0x1; // i915_reg.h:1086
+pub const GEN7_PCODE_TIMEOUT: u32 = 0x2; // i915_reg.h:1090
+pub const GEN7_PCODE_ILLEGAL_DATA: u32 = 0x3; // i915_reg.h:1091
+pub const GEN11_PCODE_ILLEGAL_SUBCOMMAND: u32 = 0x4; // i915_reg.h:1092
+pub const GEN11_PCODE_LOCKED: u32 = 0x6; // i915_reg.h:1093
+pub const GEN11_PCODE_REJECTED: u32 = 0x11; // i915_reg.h:1094
+pub const GEN7_PCODE_MIN_FREQ_TABLE_GT_RATIO_OUT_OF_RANGE: u32 = 0x10; // i915_reg.h:1095
+pub const ICL_PCODE_MEM_SUBSYSYSTEM_INFO: u32 = 0xd; // i915_reg.h:1113
+pub const ICL_PCODE_MEM_SS_READ_GLOBAL_INFO: u32 = 0x0; // i915_reg.h:1114

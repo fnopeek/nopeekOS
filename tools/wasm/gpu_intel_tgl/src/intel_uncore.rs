@@ -131,19 +131,19 @@ impl intel_uncore {
     }
 
     pub fn intel_uncore_has_forcewake(&self) -> bool {
-        self.flags & UNCORE_HAS_FORCEWAKE != 0
+        self.flags & (UNCORE_HAS_FORCEWAKE as u32) != 0
     }
 
     pub fn intel_uncore_has_fpga_dbg_unclaimed(&self) -> bool {
-        self.flags & UNCORE_HAS_FPGA_DBG_UNCLAIMED != 0
+        self.flags & (UNCORE_HAS_FPGA_DBG_UNCLAIMED as u32) != 0
     }
 
     pub fn intel_uncore_has_dbg_unclaimed(&self) -> bool {
-        self.flags & UNCORE_HAS_DBG_UNCLAIMED != 0
+        self.flags & (UNCORE_HAS_DBG_UNCLAIMED as u32) != 0
     }
 
     pub fn intel_uncore_has_fifo(&self) -> bool {
-        self.flags & UNCORE_HAS_FIFO != 0
+        self.flags & (UNCORE_HAS_FIFO as u32) != 0
     }
 
     // ── forcewake domains ────────────────────────────────────────
@@ -186,7 +186,7 @@ impl intel_uncore {
     }
 
     fn fw_domain_wait_ack_clear(&self, d: &intel_uncore_forcewake_domain) {
-        if self.wait_ack_clear(d, FORCEWAKE_KERNEL).is_ok() {
+        if self.wait_ack_clear(d, FORCEWAKE_KERNEL as u32).is_ok() {
             return;
         }
         if self.fw_ack(d) == !0 {
@@ -203,17 +203,17 @@ impl intel_uncore {
     /// WaRsForcewakeAddDelayForAck: toggle the fallback bit to kick the
     /// GT state machine. `Ok` when the ack was seen.
     fn fw_domain_wait_ack_with_fallback(&self, d: &intel_uncore_forcewake_domain, set: bool) -> Result<(), ()> {
-        let ack_bit = FORCEWAKE_KERNEL;
+        let ack_bit = FORCEWAKE_KERNEL as u32;
         let value = if set { ack_bit } else { 0 };
         let mut pass = 1u64;
         let mut ack_detected;
         loop {
-            let _ = self.wait_ack_clear(d, FORCEWAKE_KERNEL_FALLBACK);
-            self.fw_set(d, FORCEWAKE_KERNEL_FALLBACK);
+            let _ = self.wait_ack_clear(d, FORCEWAKE_KERNEL_FALLBACK as u32);
+            self.fw_set(d, FORCEWAKE_KERNEL_FALLBACK as u32);
             linux::udelay(10 * pass);
-            let _ = self.wait_ack_set(d, FORCEWAKE_KERNEL_FALLBACK);
+            let _ = self.wait_ack_set(d, FORCEWAKE_KERNEL_FALLBACK as u32);
             ack_detected = self.fw_ack(d) & ack_bit == value;
-            self.fw_clear(d, FORCEWAKE_KERNEL_FALLBACK);
+            self.fw_clear(d, FORCEWAKE_KERNEL_FALLBACK as u32);
             let again = !ack_detected && pass < 10;
             pass += 1;
             if !again {
@@ -224,7 +224,7 @@ impl intel_uncore {
     }
 
     fn fw_domain_wait_ack_clear_fallback(&self, d: &intel_uncore_forcewake_domain) {
-        if self.wait_ack_clear(d, FORCEWAKE_KERNEL).is_ok() {
+        if self.wait_ack_clear(d, FORCEWAKE_KERNEL as u32).is_ok() {
             return;
         }
         if self.fw_domain_wait_ack_with_fallback(d, false).is_err() {
@@ -233,18 +233,18 @@ impl intel_uncore {
     }
 
     fn fw_domain_get(&self, d: &intel_uncore_forcewake_domain) {
-        self.fw_set(d, FORCEWAKE_KERNEL);
+        self.fw_set(d, FORCEWAKE_KERNEL as u32);
     }
 
     fn fw_domain_wait_ack_set(&self, d: &intel_uncore_forcewake_domain) {
-        if self.wait_ack_set(d, FORCEWAKE_KERNEL).is_err() {
+        if self.wait_ack_set(d, FORCEWAKE_KERNEL as u32).is_err() {
             linux::Line::new().s("error: ").s(intel_uncore_forcewake_domain_to_str(d.id))
                 .s(": timed out waiting for forcewake ack request.").say();
         }
     }
 
     fn fw_domain_wait_ack_set_fallback(&self, d: &intel_uncore_forcewake_domain) {
-        if self.wait_ack_set(d, FORCEWAKE_KERNEL).is_ok() {
+        if self.wait_ack_set(d, FORCEWAKE_KERNEL as u32).is_ok() {
             return;
         }
         if self.fw_domain_wait_ack_with_fallback(d, true).is_err() {
@@ -253,7 +253,7 @@ impl intel_uncore {
     }
 
     fn fw_domain_put(&self, d: &intel_uncore_forcewake_domain) {
-        self.fw_clear(d, FORCEWAKE_KERNEL);
+        self.fw_clear(d, FORCEWAKE_KERNEL as u32);
     }
 
     /// The initialised domains in `mask`, lowest id first
@@ -819,10 +819,10 @@ impl intel_uncore {
                                   has_fpga_dbg_unclaimed: bool) -> Result<(), ()> {
         self.sanity_check_mmio_access()?;
         // GRAPHICS_VER > 5 and not a vGPU.
-        self.flags |= UNCORE_HAS_FORCEWAKE;
+        self.flags |= UNCORE_HAS_FORCEWAKE as u32;
         self.uncore_forcewake_init(engine_mask, has_rcs_or_ccs);
         if has_fpga_dbg_unclaimed {
-            self.flags |= UNCORE_HAS_FPGA_DBG_UNCLAIMED;
+            self.flags |= UNCORE_HAS_FPGA_DBG_UNCLAIMED as u32;
         }
         // UNCORE_HAS_DBG_UNCLAIMED is VLV/CHV, UNCORE_HAS_FIFO GRAPHICS_VER 6..7.
         let _ = self.intel_uncore_unclaimed_mmio();

@@ -48,7 +48,7 @@ pub struct intel_engine_cs {
     pub class: u32,
     pub instance: u32,
     pub logical_mask: u32,
-    pub flags: u32,
+    pub flags: u64,
     pub heartbeat_interval_ms: u64,
     pub max_busywait_duration_ns: u64,
     pub preempt_timeout_ms: u64,
@@ -235,8 +235,8 @@ fn intel_gt_mcr_init(i915: &mut drm_i915_private, gt: &mut intel_gt) {
 /// `intel_engine_context_size`.
 fn intel_engine_context_size(class: u32) -> u32 {
     match class {
-        COMPUTE_CLASS | RENDER_CLASS => GEN11_LR_CONTEXT_RENDER_SIZE,
-        _ => GEN8_LR_CONTEXT_OTHER_SIZE,
+        COMPUTE_CLASS | RENDER_CLASS => GEN11_LR_CONTEXT_RENDER_SIZE as u32,
+        _ => GEN8_LR_CONTEXT_OTHER_SIZE as u32,
     }
 }
 
