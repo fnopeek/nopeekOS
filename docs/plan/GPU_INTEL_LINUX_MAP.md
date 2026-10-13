@@ -183,9 +183,9 @@ DDI-Encoder (Combo A/B, Type-C TC1–6), DPLLs (Combo, TBT, DKL),
 Type-C-PHY, Power-Wells, Ebenen, HDMI-Infoframes, Hotplug, und fuer eDP
 (laeuft, wenn die VBT ein Panel nennt) Backlight, PPS und Panel-Typ.
 
-**Offen und eine Geraetefrage:** die Quirk-Hooks (`intel_quirks.c`,
-DPCD-Quirks) greifen je PCI-Subsystem-ID bzw. Panel — welche auf dem NUC
-laufen, sagt `lspci -nnv` am Geraet, nicht die Plattform.
+**Quirks:** keiner greift auf dem NUC — `intel_quirks[]` hat keinen Eintrag
+fuer `0x9a78` und keinen fuer alle Geraete, die DMI-Quirks nennen NCR,
+Thundersoft und Google Lillipup, die DPCD-Quirks zwei Dell-Geraete.
 
 **uAPI fuer native context (Stufe 7):** `i915_gem_execbuffer.c`,
 `i915_getparam.c`, `i915_query.c`, `i915_gem_create.c`,

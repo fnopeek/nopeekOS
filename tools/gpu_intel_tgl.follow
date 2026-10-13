@@ -259,10 +259,10 @@ get_panel_type = vbt_get_panel_type
 get_panel_type = pnpid_get_panel_type
 get_panel_type = fallback_get_panel_type
 hz_to_pwm = cnp_hz_to_pwm
-# Not followed: skl_wm_funcs has no update_wm; the quirk hooks
-# (intel_quirks.c, intel_init_dpcd_quirks) apply by PCI subsystem ID and
-# panel, so which of them runs on the NUC is a device question, not a
-# platform one -- read on the device (lspci -nnv subsystem) before porting.
+# Not followed: skl_wm_funcs has no update_wm; the quirk hooks never run
+# on 8086:9A78 -- intel_quirks[] has no 0x9a78 and no DEVICE_ID_ANY entry,
+# the DMI quirks name NCR, Thundersoft and Google Lillipup, the DPCD quirks
+# two Dell machines (subsystem vendor 0x1028).
 
 # --- stage-1 graph (GT + display readout together)
 # gen8_gmch_probe: GGTT read-back, used by the initial plane takeover to
