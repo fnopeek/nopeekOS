@@ -764,6 +764,7 @@ pub fn kick_wait_until_unless(deadline: u64, ready: impl Fn() -> bool) -> bool {
     KICK_WAITER[cid].store(me, Ordering::Release);
     core::sync::atomic::fence(Ordering::SeqCst);
     if ready() {
+        let _ = KICK_WAITER[cid].compare_exchange(me, NO_WAKER, Ordering::AcqRel, Ordering::Relaxed);
         return true;
     }
     while net_kick_gen(cid) == kgen && crate::interrupts::rdtsc() < deadline {
@@ -771,6 +772,9 @@ pub fn kick_wait_until_unless(deadline: u64, ready: impl Fn() -> bool) -> bool {
             break;
         }
     }
+    // Only a fiber that waits is signalled; a stale entry would wake a vCPU
+    // that runs in the guest on every kick to its core (wake IPI, slice end).
+    let _ = KICK_WAITER[cid].compare_exchange(me, NO_WAKER, Ordering::AcqRel, Ordering::Relaxed);
     let woke = net_kick_gen(cid) != kgen;
     if woke {
         KICK_WOKE.fetch_add(1, Ordering::Relaxed);

@@ -1487,6 +1487,17 @@ impl VmContext {
         if !crate::microvm::cpu::entry_irqs_off(kick_gen, host_core, entry_deadline) {
             continue;
         }
+        // `vmx_sync_pir_to_irr` after `IN_GUEST_MODE` (vcpu_enter_guest): a
+        // post that saw the vCPU outside the guest sent no notification, and
+        // is folded in here; one that saw it inside notifies the CPU.
+        if self.vcpu.apicv {
+            let rvi = self.vcpu.lapic.sync_for_apicv();
+            if let Err(e) = vmcs::set_rvi(rvi) {
+                crate::microvm::cpu::note_guest_exit(host_core);
+                crate::microvm::cpu::entry_irqs_on();
+                return Err(e);
+            }
+        }
         // The host↔guest FPU swap is inside run_guest_once's asm,
         // bracketing VMRESUME with no compiler-emittable code between
         // xrstor and vmresume (a +avx2 kernel can spill `vmovups ymm`

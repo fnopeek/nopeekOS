@@ -193,8 +193,10 @@ pub fn pi_set_notify(apic_id: u8, nv: u8, ndst: u32) {
 pub fn post(apic_id: u8, vector: u8) -> bool {
     let t = apic_id as usize;
     let (Some(word), Some(ctl)) = (pir(t, (vector >> 6) as usize), pi_control(t)) else { return false };
-    word.fetch_or(1u64 << (vector & 63), Ordering::AcqRel);
-    let edge = ctl.fetch_or(PI_ON, Ordering::AcqRel) & PI_ON == 0;
+    word.fetch_or(1u64 << (vector & 63), Ordering::SeqCst);
+    // SeqCst against the target's `IN_GUEST` store: a kicker that reads
+    // "not in guest" posted before the target's post-entry sync looks.
+    let edge = ctl.fetch_or(PI_ON, Ordering::SeqCst) & PI_ON == 0;
     if edge {
         let _ = POST_TSC[t].compare_exchange(0, rdtsc().max(1), Ordering::AcqRel, Ordering::Relaxed);
     }
