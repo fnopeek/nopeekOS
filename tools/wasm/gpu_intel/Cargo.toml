@@ -1,0 +1,19 @@
+[package]
+name = "gpu_intel"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+npk_sys = { path = "../sdk/npk_sys" }
+
+[build-dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

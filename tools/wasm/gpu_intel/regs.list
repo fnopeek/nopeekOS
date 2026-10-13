@@ -1,0 +1,3 @@
+# Forcewake acknowledge (readable without a wake reference)
+FORCEWAKE_ACK_GT_GEN9
+FORCEWAKE_ACK_RENDER_GEN9

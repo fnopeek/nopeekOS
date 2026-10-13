@@ -320,6 +320,10 @@ fn auto_detect_device(name: &str) -> Option<crate::drivers::pci::PciDevice> {
         return pci::find_by_class(0x02, 0x80)
             .or_else(|| pci::find_by_class(0x0D, 0x80));
     }
+    // gpu_intel, gpu_amd, …: the display controller (class 03:00).
+    if name.starts_with("gpu") {
+        return pci::find_by_class(0x03, 0x00);
+    }
     if name.starts_with("bluetooth") {
         // Bluetooth is often on the same device or a USB subfunction
         return pci::find_by_class(0x0D, 0x01);
