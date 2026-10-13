@@ -171,6 +171,26 @@ seinem Rueckfallwissen: wo der letzte gueltige Scanout-Puffer liegt.
    `gpudev_ready` — erst jetzt schaltet der Compositor auf den gpudev-Weg.
    Faellt der Test durch, bleibt alles auf der CPU.
 
+**Gebaut 2026-10-13 (d43bdff4c):** `pci::Owner` — ein Besitzer je Geraet;
+`npk_pci_bind` gibt `-3`, wenn ein anderer Treiber das Geraet haelt. NVMe,
+xHCI und die Intel-NIC tragen sich als Kernelbesitzer ein (vorher haette
+ein Modul den Controller binden koennen, auf dem npkFS liegt). Der native
+GPU-Treiber traegt sich ebenso ein und ist der einzige Kernelbesitzer, der
+abgibt: `gpu::yield_to_module` tauscht ihn unter der GPU-Sperre gegen einen
+GOP-Treiber auf dem gezeigten Bild, ohne Registerzugriff. Beim Modultod
+bleibt auf einem Display-Controller das Bus-Master-Bit an (der Scanout
+liest auch als Bus-Master), und die DMA-Puffer des Moduls werden deshalb
+**nicht** freigegeben, sondern bis zum Neustart behalten — die Karte
+koennte sie noch lesen. Sobald `gpu_intel` abgibt, gehoert davor ein
+Stillsetzen der Engines (GT-Reset) in den Rueckweg; dann koennen die
+Puffer wieder zurueck.
+
+**Offen:** `npk_mmio_map_phys` laesst ein Modul mit globalem `HARDWARE`
+die BARs eines fremden Geraets ueber die physische Adresse abbilden, an
+der Besitzerpruefung vorbei. Dafuer braucht es eine BAR-Tabelle aus der
+Enumeration (BARs an einer laufenden GPU auszumessen stoert das Bild).
+`HARDWARE` ist heute ohnehin Kernelvertrauen (§8.4).
+
 **Rueckweg beim Modultod (F1):** Das Modul scannt nur Puffer aus, die dem
 Kernel gehoeren (`flip(bo)` nimmt einen Griff, keine Adresse) — der erste
 ist das uebernommene Firmware-Bild. Die GGTT-Eintraege dafuer bleiben
