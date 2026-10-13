@@ -14,6 +14,7 @@
 use core::arch::asm;
 
 mod control;
+mod wakebench;
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
@@ -102,6 +103,10 @@ unsafe extern "C" fn rust_main() -> ! {
     // costs far more than on bare metal. The rest come online here, beside
     // the session instead of before it.
     unsafe { spawn_cpu_onliner(); }
+
+    if wakebench::requested() {
+        wakebench::run(kmsg_fd);
+    }
 
     // Diagnostic: if the host passed `nopeekbench=` on the cmdline, run a pure
     // busybox download through the nat bridge (no compositor/GPU/browser) so the
