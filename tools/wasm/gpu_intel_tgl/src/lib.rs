@@ -21,6 +21,7 @@ mod intel_dram;
 mod intel_engine;
 mod intel_ggtt;
 mod intel_gt;
+mod intel_opregion;
 mod intel_pch;
 mod intel_pcode;
 mod intel_reset;
@@ -161,6 +162,8 @@ pub extern "C" fn _start() {
     if npk_sys::pci_enable_bus_master() != 0 {
         say("bus mastering could not be enabled");
     }
+    // intel_opregion_setup (display), then i915_pcode_init.
+    let opregion = intel_opregion::intel_opregion_setup();
     let _ = intel_pcode::intel_pcode_init();
     let dram = intel_dram::intel_dram_detect(&mut i915);
 
@@ -177,6 +180,20 @@ pub extern "C" fn _start() {
                 .dec(d.usable_size >> 20).s(" MB").say();
         }
         None => say("no stolen memory"),
+    }
+    match &opregion {
+        Some(op) if op.vbt_len != 0 => {
+            let (ver, bdb_size) = intel_opregion::vbt(op.vbt_len, |v| {
+                let le16 = |o: usize| u16::from_le_bytes([v[o], v[o + 1]]);
+                let o = regs::VBT_HEADER_BDB_OFFSET as usize;
+                let bdb = u32::from_le_bytes([v[o], v[o + 1], v[o + 2], v[o + 3]]) as usize;
+                (le16(bdb + regs::BDB_HEADER_VERSION as usize), le16(bdb + regs::BDB_HEADER_BDB_SIZE as usize))
+            });
+            Line::new().s("VBT from ").s(op.vbt_source).s(": ").dec(op.vbt_len as u64)
+                .s(" bytes, BDB version ").dec(ver as u64).s(", BDB size ").dec(bdb_size as u64).say();
+        }
+        Some(_) => say("OpRegion without a valid VBT"),
+        None => say("no OpRegion"),
     }
     Line::new().s("DRAM ").s(dram.type_name).s(", ").dec(dram.num_channels as u64).s(" channels, ")
         .dec(dram.num_qgv_points as u64).s(" QGV points, ").dec(dram.num_psf_gv_points as u64)

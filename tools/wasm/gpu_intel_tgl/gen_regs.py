@@ -18,7 +18,8 @@ would be a second semantics waiting to drift, so nothing here evaluates C:
 
 Names come from regs.list, one per line: `NAME` for a constant, `NAME(a, b)`
 for a parameterised register, `NAME @ file.c` for a constant a .c file
-defines (it is compiled with that file), `NAME = expr @ file.c` for a value
+defines (it is compiled with that file), `NAME : str [@ file.c]` for a
+string literal, `NAME = expr @ file.c` for a value
 read out of that file (e.g. a field of `tgl_info`). `# ` lines group the
 output.
 
@@ -230,6 +231,10 @@ def gen():
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
+        m = re.match(r"^(\w+)\s*:\s*str(?:\s*@\s*(\S+))?$", line)
+        if m:
+            entries.append(("str", m.group(1), m.group(2)))
+            continue
         m = re.match(r"^(\w+)\s*=\s*(.+?)\s*@\s*(\S+)$", line)
         if m:
             entries.append(("reg", m.group(1), ("@", m.group(3), m.group(2))))
@@ -300,6 +305,15 @@ def gen():
            "// Each value is GCC's, compiled from the named header line.", "",
            "#![allow(unused_parens)]", ""]
     for kind, name, params in entries:
+        if kind == "str":
+            pre = PRELUDE + (f'#include "{params}"\n' if params else "")
+            src = pre + f"\n__NPK_BEGIN__ {name} __NPK_END__\n"
+            text = gcc(src, ["-E", "-P"])
+            lit = re.search(r"__NPK_BEGIN__\s*(\"(?:[^\"\\\\]|\\\\.)*\")\s*__NPK_END__", text)
+            if not lit:
+                sys.exit(f"{name}: not a string literal")
+            out.append(f"pub const {name}: &[u8] = b{lit.group(1)}; // {where(name) or '?'}")
+            continue
         if kind == "group":
             if out[-1] != "":
                 out.append("")

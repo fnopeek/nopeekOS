@@ -338,3 +338,56 @@ EINVAL
 EBUSY
 EACCES
 EAGAIN
+# OpRegion (display/intel_opregion.c, intel_pci_config.h)
+ASLS
+SWSCI
+SWSCI_SCISEL
+SWSCI_GSSCIE
+OPREGION_SIGNATURE : str @ display/intel_opregion.c
+OPREGION_SIZE @ display/intel_opregion.c
+OPREGION_ACPI_OFFSET @ display/intel_opregion.c
+OPREGION_SWSCI_OFFSET @ display/intel_opregion.c
+OPREGION_ASLE_OFFSET @ display/intel_opregion.c
+OPREGION_VBT_OFFSET @ display/intel_opregion.c
+OPREGION_ASLE_EXT_OFFSET @ display/intel_opregion.c
+MBOX_ACPI @ display/intel_opregion.c
+MBOX_SWSCI @ display/intel_opregion.c
+MBOX_ASLE @ display/intel_opregion.c
+MBOX_ASLE_EXT @ display/intel_opregion.c
+MBOX_BACKLIGHT @ display/intel_opregion.c
+ASLE_ARDY_NOT_READY @ display/intel_opregion.c
+MAX_DSLP @ display/intel_opregion.c
+SWSCI_SCIC_INDICATOR @ display/intel_opregion.c
+SWSCI_SCIC_MAIN_FUNCTION_SHIFT @ display/intel_opregion.c
+SWSCI_SCIC_MAIN_FUNCTION_MASK @ display/intel_opregion.c
+SWSCI_SCIC_SUB_FUNCTION_SHIFT @ display/intel_opregion.c
+SWSCI_SCIC_SUB_FUNCTION_MASK @ display/intel_opregion.c
+SWSCI_SCIC_EXIT_STATUS_SHIFT @ display/intel_opregion.c
+SWSCI_SCIC_EXIT_STATUS_MASK @ display/intel_opregion.c
+SWSCI_SCIC_EXIT_STATUS_SUCCESS @ display/intel_opregion.c
+SWSCI_GBDA @ display/intel_opregion.c
+SWSCI_SBCB @ display/intel_opregion.c
+SWSCI_GBDA_SUPPORTED_CALLS @ display/intel_opregion.c
+SWSCI_GBDA_REQUESTED_CALLBACKS @ display/intel_opregion.c
+SWSCI_SBCB_SUPPORTED_CALLBACKS @ display/intel_opregion.c
+OPREGION_HDR_OVER_MINOR = offsetof(struct opregion_header, over.minor) @ display/intel_opregion.c
+OPREGION_HDR_OVER_MAJOR = offsetof(struct opregion_header, over.major) @ display/intel_opregion.c
+OPREGION_HDR_OVER_REVISION = offsetof(struct opregion_header, over.revision) @ display/intel_opregion.c
+OPREGION_HDR_MBOXES = offsetof(struct opregion_header, mboxes) @ display/intel_opregion.c
+OPREGION_ACPI_CHPD = offsetof(struct opregion_acpi, chpd) @ display/intel_opregion.c
+OPREGION_SWSCI_SCIC = offsetof(struct opregion_swsci, scic) @ display/intel_opregion.c
+OPREGION_SWSCI_PARM = offsetof(struct opregion_swsci, parm) @ display/intel_opregion.c
+OPREGION_SWSCI_DSLP = offsetof(struct opregion_swsci, dslp) @ display/intel_opregion.c
+OPREGION_ASLE_ARDY = offsetof(struct opregion_asle, ardy) @ display/intel_opregion.c
+OPREGION_ASLE_RVDA = offsetof(struct opregion_asle, rvda) @ display/intel_opregion.c
+OPREGION_ASLE_RVDS = offsetof(struct opregion_asle, rvds) @ display/intel_opregion.c
+# VBT (display/intel_vbt_defs.h, intel_bios.c)
+VBT_HEADER_SIZE = sizeof(struct vbt_header) @ display/intel_bios.c
+VBT_HEADER_VBT_SIZE = offsetof(struct vbt_header, vbt_size) @ display/intel_bios.c
+VBT_HEADER_BDB_OFFSET = offsetof(struct vbt_header, bdb_offset) @ display/intel_bios.c
+BDB_HEADER_SIZE = sizeof(struct bdb_header) @ display/intel_bios.c
+BDB_HEADER_VERSION = offsetof(struct bdb_header, version) @ display/intel_bios.c
+BDB_HEADER_HEADER_SIZE = offsetof(struct bdb_header, header_size) @ display/intel_bios.c
+BDB_HEADER_BDB_SIZE = offsetof(struct bdb_header, bdb_size) @ display/intel_bios.c
+VBT_SIGNATURE_LEN = vbt_signature_len @ display/intel_bios.c
+EIO

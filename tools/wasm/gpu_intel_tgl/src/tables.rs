@@ -165,3 +165,7 @@ pub static intel_engines: [engine_info; 27] = [
     engine_info { class: 0x5, instance: 0x3, ver0: 0xc, base0: 0x26000, ver1: 0x0, base1: 0x0, ver2: 0x0, base2: 0x0 },
     engine_info { class: 0x4, instance: 0x6, ver0: 0xc, base0: 0x11a000, ver1: 0x0, base1: 0x0, ver2: 0x0, base2: 0x0 },
 ];
+
+// display/intel_bios.c
+/// display/intel_bios.c:3016
+pub static vbt_signature: [u8; 5] = [0x24, 0x56, 0x42, 0x54, 0x0];
