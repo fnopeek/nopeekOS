@@ -161,6 +161,13 @@ def where(name):
                 return f"{rel}:{i}"
         return None
 
+    shared = ("include/linux/pci_ids.h", "include/drm/intel/i915_drm.h",
+              "include/uapi/asm-generic/errno-base.h", "include/uapi/asm-generic/errno.h")
+    if re.match(r"^E[A-Z]+$", name):
+        for h in shared[2:]:
+            hit = search(os.path.join(L, h), h)
+            if hit:
+                return hit
     late = []
     for dp, _, fs in sorted(os.walk(I915)):
         for f in sorted(fs, key=lambda x: (not x.endswith(".h"), x)):
@@ -173,7 +180,7 @@ def where(name):
             hit = search(p, os.path.relpath(p, I915))
             if hit:
                 return hit
-    for h in ("include/linux/pci_ids.h", "include/drm/intel/i915_drm.h"):
+    for h in shared:
         hit = search(os.path.join(L, h), h)
         if hit:
             return hit

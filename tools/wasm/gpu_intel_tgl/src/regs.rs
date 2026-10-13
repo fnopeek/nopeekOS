@@ -330,6 +330,7 @@ pub const I915_GTT_PAGE_SIZE: u64 = 0x1000; // gt/intel_gtt.h:49
 pub const I915_GTT_PAGE_SIZE_4K: u64 = 0x1000; // gt/intel_gtt.h:45
 pub const GEN8_PAGE_PRESENT: u64 = 0x1; // gt/intel_gtt.h:152
 pub const GEN12_GGTT_PTE_LM: u64 = 0x2; // gt/intel_gtt.h:97
+pub const PTE_LM: u64 = 0x2; // gt/intel_gtt.h:317
 pub const GEN12_GGTT_PTE_ADDR_MASK: u64 = 0x3ffffffff000; // gt/intel_gtt.h:100
 pub const I915_CACHE_NONE: u32 = 0x0; // gem/i915_gem_object_types.h:147
 pub const I915_CACHE_LLC: u32 = 0x1; // gem/i915_gem_object_types.h:167
@@ -370,3 +371,13 @@ pub const GEN11_PCODE_REJECTED: u32 = 0x11; // i915_reg.h:1094
 pub const GEN7_PCODE_MIN_FREQ_TABLE_GT_RATIO_OUT_OF_RANGE: u32 = 0x10; // i915_reg.h:1095
 pub const ICL_PCODE_MEM_SUBSYSYSTEM_INFO: u32 = 0xd; // i915_reg.h:1113
 pub const ICL_PCODE_MEM_SS_READ_GLOBAL_INFO: u32 = 0x0; // i915_reg.h:1114
+
+// Linux error numbers (include/uapi/asm-generic/errno*.h)
+pub const ENODEV: u32 = 0x13; // include/uapi/asm-generic/errno-base.h:23
+pub const ENXIO: u32 = 0x6; // include/uapi/asm-generic/errno-base.h:10
+pub const EOVERFLOW: u32 = 0x4b; // include/uapi/asm-generic/errno.h:58
+pub const ETIMEDOUT: u32 = 0x6e; // include/uapi/asm-generic/errno.h:93
+pub const EINVAL: u32 = 0x16; // include/uapi/asm-generic/errno-base.h:26
+pub const EBUSY: u32 = 0x10; // include/uapi/asm-generic/errno-base.h:20
+pub const EACCES: u32 = 0xd; // include/uapi/asm-generic/errno-base.h:17
+pub const EAGAIN: u32 = 0xb; // include/uapi/asm-generic/errno-base.h:15

@@ -1,11 +1,13 @@
 //! gpu_intel_tgl: Intel Tiger Lake graphics, ported from Linux 6.18.55 i915.
 //!
 //! The port follows docs/plan/GPU_INTEL_LINUX_MAP.md and the call order in
-//! docs/plan/GPU_INTEL_TGL_TREE.txt. This stage runs `i915_driver_probe` up
-//! to and including `i915_driver_mmio_probe`: device and display info,
-//! the PCH, forcewake, the GT's clock, slices, L3 banks and engines from
-//! the fuses, the display fuses and raw clock, and the full GT reset
-//! `sanitize_gpu` does. It reports what it found and gives the card back.
+//! docs/plan/GPU_INTEL_TGL_TREE.txt. This stage runs `i915_driver_probe`
+//! through `i915_driver_mmio_probe` (device and display info, the PCH,
+//! forcewake, the GT's clock, slices, L3 banks and engines from the fuses,
+//! the display fuses and raw clock, the full GT reset of `sanitize_gpu`)
+//! and the non-display part of `i915_driver_hw_probe` (GGTT probe, fences,
+//! stolen memory, bus mastering, PCODE, DRAM). It reports what it found
+//! and gives the card back.
 
 #![no_std]
 // Linux names are kept as they are (`intel_uncore`, `FORCEWAKE_MT`,
@@ -15,9 +17,12 @@
 
 mod i915_drv;
 mod intel_display_device;
+mod intel_dram;
 mod intel_engine;
+mod intel_ggtt;
 mod intel_gt;
 mod intel_pch;
+mod intel_pcode;
 mod intel_reset;
 mod intel_uncore;
 mod linux;
@@ -76,7 +81,7 @@ fn intel_gmch_bar_setup() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 1: i915_driver_probe up to the MMIO probe").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2a: i915_driver_probe up to the hardware probe").say();
 
     // pci_enable_device: bind (the kernel's own driver hands the card over).
     match npk_sys::pci_bind(INTEL_VENDOR as i32, TGL_GT2 as i32) {
@@ -137,6 +142,45 @@ pub extern "C" fn _start() {
     }
 
     report(&i915, &gt, &drt);
+
+    // i915_driver_hw_probe, without the display parts (OpRegion, bandwidth)
+    // and MSI, which comes with the interrupt handler.
+    intel_dram::intel_dram_edram_detect(&mut i915);
+    // i915_set_dma_info: TGL_DMA_MASK_SIZE bits; DMA buffers come from
+    // below 4 GB, inside the mask.
+    let mut ggtt = match intel_ggtt::i915_ggtt_probe_hw(regs) {
+        Ok(g) => g,
+        Err(()) => {
+            say("i915_ggtt_probe_hw failed");
+            return;
+        }
+    };
+    intel_ggtt::i915_ggtt_init_hw(&mut i915, &mut ggtt);
+    let dsm = intel_ggtt::i915_gem_init_stolen(&mut i915);
+    // i915_ggtt_enable_hw: GRAPHICS_VER >= 6 has nothing to enable.
+    if npk_sys::pci_enable_bus_master() != 0 {
+        say("bus mastering could not be enabled");
+    }
+    let _ = intel_pcode::intel_pcode_init();
+    let dram = intel_dram::intel_dram_detect(&mut i915);
+
+    Line::new().s("GGTT ").dec(ggtt.total >> 20).s(" MB, aperture ").hex((ggtt.gmadr_start >> 32) as u32)
+        .s("_").hex(ggtt.gmadr_start as u32).s(" + ").dec(ggtt.mappable_end >> 20).s(" MB, ")
+        .dec(ggtt.num_fences as u64).s(" fences").say();
+    Line::new().s("GGTT[0] -> ").hex((ggtt.gen8_ggtt_read_entry(0) >> 32) as u32).s("_")
+        .hex(ggtt.gen8_ggtt_read_entry(0) as u32).say();
+    match dsm {
+        Some(d) => {
+            Line::new().s("stolen ").hex((d.stolen_start >> 32) as u32).s("_").hex(d.stolen_start as u32)
+                .s(" + ").dec((d.stolen_end - d.stolen_start + 1) >> 20).s(" MB, reserved ")
+                .hex(d.reserved_start as u32).s(" + ").dec(d.reserved_size >> 20).s(" MB, usable ")
+                .dec(d.usable_size >> 20).s(" MB").say();
+        }
+        None => say("no stolen memory"),
+    }
+    Line::new().s("DRAM ").s(dram.type_name).s(", ").dec(dram.num_channels as u64).s(" channels, ")
+        .dec(dram.num_qgv_points as u64).s(" QGV points, ").dec(dram.num_psf_gv_points as u64)
+        .s(" PSF GV points").say();
 
     // Forcewake taken for register access is released by its timer; wait
     // for it, so the GT can enter RC6 once the module is gone.
