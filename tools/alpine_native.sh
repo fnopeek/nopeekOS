@@ -38,7 +38,7 @@ URL="${1:-https://www.speedtest.net}"
 exec unshare --map-root-user --mount sh -c '
     D=$0; R=$1; W=$2; U=$3; P=$4
     mount --rbind /dev "$D/dev" && mount --rbind /proc "$D/proc" && mount --rbind /sys "$D/sys"
-    mount --bind "$R" "$D/tmp/xrt"
+    mount --rbind "$R" "$D/tmp/xrt" || exit 1
     exec chroot "$D" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home \
         XDG_RUNTIME_DIR=/tmp/xrt WAYLAND_DISPLAY="$W" MOZ_ENABLE_WAYLAND=1 \
         ${P:+LD_PRELOAD=$P} \
