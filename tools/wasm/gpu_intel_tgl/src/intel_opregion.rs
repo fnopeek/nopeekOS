@@ -14,7 +14,7 @@ use npk_sys::Mmio;
 
 /// The largest VBT the module keeps (RVDA may point outside the 8 KB
 /// OpRegion).
-const VBT_MAX: usize = 64 * 1024;
+pub const VBT_MAX: usize = 64 * 1024;
 
 static VBT_BUF: Single<[u8; VBT_MAX]> = Single::new([0; VBT_MAX]);
 

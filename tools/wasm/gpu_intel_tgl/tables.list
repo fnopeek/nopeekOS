@@ -32,3 +32,9 @@ icl_procmon_values[] => icl_procmon_values: icl_procmon { name=e0.name as str, d
 @ display/intel_cdclk.c
 icl_cdclk_table: intel_cdclk_vals { cdclk, refclk, waveform, ratio }
 tgl_calc_voltage_level::tgl_voltage_level_max_cdclk: i32
+@ display/intel_bios.c
+bdb_blocks: bdb_block { section_id, min_size }
+icp_ddc_pin_map: u8
+direct_aux_ch_map: u8
+@ display/intel_gmbus.c
+gmbus_pins_icp: gmbus_pin { valid=name != 0 }

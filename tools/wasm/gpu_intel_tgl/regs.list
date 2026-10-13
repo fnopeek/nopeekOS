@@ -507,3 +507,156 @@ SKL_CDCLK_PREPARE_FOR_CHANGE
 SKL_CDCLK_READY_FOR_CHANGE
 TGL_DISPLAY_HAS_CDCLK_CRAWL = tgl_desc.info->has_cdclk_crawl @ display/intel_display_device.c
 TGL_DISPLAY_HAS_CDCLK_SQUASH = tgl_desc.info->has_cdclk_squash @ display/intel_display_device.c
+# VBT parsing (display/intel_bios.c, intel_vbt_defs.h)
+BDB_GENERAL_FEATURES @ display/intel_bios.c
+BDB_GENERAL_DEFINITIONS @ display/intel_bios.c
+BDB_DRIVER_FEATURES @ display/intel_bios.c
+BDB_LFP_DATA_PTRS @ display/intel_bios.c
+BDB_LFP_DATA @ display/intel_bios.c
+BDB_MIPI_SEQUENCE @ display/intel_bios.c
+BDB_COMPRESSION_PARAMETERS @ display/intel_bios.c
+VBT_HEADER_SIGNATURE_SIZE = sizeof(((struct vbt_header *)0)->signature) @ display/intel_bios.c
+BDB_GENERAL_FEATURES_SIZE =sizeof(struct bdb_general_features) @ display/intel_bios.c
+BDB_GENERAL_DEFINITIONS_SIZE = sizeof(struct bdb_general_definitions) @ display/intel_bios.c
+BDB_GENERAL_DEFINITIONS_CRT_DDC_GMBUS_PIN = offsetof(struct bdb_general_definitions, crt_ddc_gmbus_pin) @ display/intel_bios.c
+BDB_GENERAL_DEFINITIONS_CHILD_DEV_SIZE = offsetof(struct bdb_general_definitions, child_dev_size) @ display/intel_bios.c
+BDB_GENERAL_DEFINITIONS_DEVICES = offsetof(struct bdb_general_definitions, devices) @ display/intel_bios.c
+BDB_DRIVER_FEATURES_SIZE = sizeof(struct bdb_driver_features) @ display/intel_bios.c
+BDB_LFP_DATA_PTRS_SIZE = sizeof(struct bdb_lfp_data_ptrs) @ display/intel_bios.c
+BDB_LFP_DATA_PTRS_NUM_ENTRIES = offsetof(struct bdb_lfp_data_ptrs, num_entries) @ display/intel_bios.c
+BDB_LFP_DATA_PTRS_PTR = offsetof(struct bdb_lfp_data_ptrs, ptr) @ display/intel_bios.c
+BDB_LFP_DATA_PTRS_PANEL_NAME = offsetof(struct bdb_lfp_data_ptrs, panel_name) @ display/intel_bios.c
+BDB_LFP_DATA_PTRS_N = ARRAY_SIZE(((struct bdb_lfp_data_ptrs *)0)->ptr) @ display/intel_bios.c
+LFP_DATA_PTR_SIZE = sizeof(struct lfp_data_ptr) @ display/intel_bios.c
+LFP_DATA_PTR_FP_TIMING = offsetof(struct lfp_data_ptr, fp_timing) @ display/intel_bios.c
+LFP_DATA_PTR_DVO_TIMING = offsetof(struct lfp_data_ptr, dvo_timing) @ display/intel_bios.c
+LFP_DATA_PTR_PANEL_PNP_ID = offsetof(struct lfp_data_ptr, panel_pnp_id) @ display/intel_bios.c
+LFP_DATA_PTR_TABLE_OFFSET = offsetof(struct lfp_data_ptr_table, offset) @ display/intel_bios.c
+LFP_DATA_PTR_TABLE_TABLE_SIZE = offsetof(struct lfp_data_ptr_table, table_size) @ display/intel_bios.c
+BDB_LFP_DATA_SIZE = sizeof(struct bdb_lfp_data) @ display/intel_bios.c
+BDB_LFP_DATA_TAIL_SIZE = sizeof(struct bdb_lfp_data_tail) @ display/intel_bios.c
+BDB_EDID_DTD_SIZE = sizeof(struct bdb_edid_dtd) @ display/intel_bios.c
+BDB_EDID_PNP_ID_SIZE = sizeof(struct bdb_edid_pnp_id) @ display/intel_bios.c
+BDB_EDID_PRODUCT_NAME_SIZE = sizeof(struct bdb_edid_product_name) @ display/intel_bios.c
+BDB_COMPRESSION_PARAMETERS_SIZE = sizeof(struct bdb_compression_parameters) @ display/intel_bios.c
+BDB_COMPRESSION_PARAMETERS_ENTRY_SIZE = offsetof(struct bdb_compression_parameters, entry_size) @ display/intel_bios.c
+BDB_COMPRESSION_PARAMETERS_DATA = offsetof(struct bdb_compression_parameters, data) @ display/intel_bios.c
+DSC_COMPRESSION_PARAMETERS_ENTRY_SIZE = sizeof(struct dsc_compression_parameters_entry) @ display/intel_bios.c
+CHILD_DEVICE_CONFIG_SIZE = sizeof(struct child_device_config) @ display/intel_bios.c
+LEGACY_CHILD_DEVICE_CONFIG_SIZE @ display/intel_bios.c
+BDB_DRIVER_FEATURE_INT_LVDS @ display/intel_bios.c
+DEVICE_TYPE_ANALOG_OUTPUT @ display/intel_bios.c
+DEVICE_TYPE_DISPLAYPORT_OUTPUT @ display/intel_bios.c
+DEVICE_TYPE_TMDS_DVI_SIGNALING @ display/intel_bios.c
+DEVICE_TYPE_MIPI_OUTPUT @ display/intel_bios.c
+DEVICE_TYPE_NOT_HDMI_OUTPUT @ display/intel_bios.c
+DEVICE_TYPE_INTERNAL_CONNECTOR @ display/intel_bios.c
+DVO_PORT_HDMIA @ display/intel_bios.c
+DVO_PORT_HDMIB @ display/intel_bios.c
+DVO_PORT_HDMIC @ display/intel_bios.c
+DVO_PORT_HDMID @ display/intel_bios.c
+DVO_PORT_CRT @ display/intel_bios.c
+DVO_PORT_DPB @ display/intel_bios.c
+DVO_PORT_DPC @ display/intel_bios.c
+DVO_PORT_DPD @ display/intel_bios.c
+DVO_PORT_DPA @ display/intel_bios.c
+DVO_PORT_DPE @ display/intel_bios.c
+DVO_PORT_HDMIE @ display/intel_bios.c
+DVO_PORT_DPF @ display/intel_bios.c
+DVO_PORT_HDMIF @ display/intel_bios.c
+DVO_PORT_DPG @ display/intel_bios.c
+DVO_PORT_HDMIG @ display/intel_bios.c
+DVO_PORT_DPH @ display/intel_bios.c
+DVO_PORT_HDMIH @ display/intel_bios.c
+DVO_PORT_DPI @ display/intel_bios.c
+DVO_PORT_HDMII @ display/intel_bios.c
+DVO_PORT_MIPIA @ display/intel_bios.c
+DVO_PORT_MIPIB @ display/intel_bios.c
+DVO_PORT_MIPIC @ display/intel_bios.c
+DVO_PORT_MIPID @ display/intel_bios.c
+HDMI_MAX_DATA_RATE_PLATFORM @ display/intel_bios.c
+HDMI_MAX_DATA_RATE_297 @ display/intel_bios.c
+HDMI_MAX_DATA_RATE_165 @ display/intel_bios.c
+HDMI_MAX_DATA_RATE_594 @ display/intel_bios.c
+HDMI_MAX_DATA_RATE_340 @ display/intel_bios.c
+HDMI_MAX_DATA_RATE_300 @ display/intel_bios.c
+BDB_216_VBT_DP_MAX_LINK_RATE_HBR3 @ display/intel_bios.c
+BDB_216_VBT_DP_MAX_LINK_RATE_HBR2 @ display/intel_bios.c
+BDB_216_VBT_DP_MAX_LINK_RATE_HBR @ display/intel_bios.c
+BDB_216_VBT_DP_MAX_LINK_RATE_LBR @ display/intel_bios.c
+BDB_230_VBT_DP_MAX_LINK_RATE_DEF @ display/intel_bios.c
+BDB_230_VBT_DP_MAX_LINK_RATE_LBR @ display/intel_bios.c
+BDB_230_VBT_DP_MAX_LINK_RATE_HBR @ display/intel_bios.c
+BDB_230_VBT_DP_MAX_LINK_RATE_HBR2 @ display/intel_bios.c
+BDB_230_VBT_DP_MAX_LINK_RATE_HBR3 @ display/intel_bios.c
+BDB_230_VBT_DP_MAX_LINK_RATE_UHBR10 @ display/intel_bios.c
+BDB_230_VBT_DP_MAX_LINK_RATE_UHBR13P5 @ display/intel_bios.c
+BDB_230_VBT_DP_MAX_LINK_RATE_UHBR20 @ display/intel_bios.c
+PORT_NONE @ display/intel_bios.c
+PORT_A @ display/intel_bios.c
+PORT_B @ display/intel_bios.c
+PORT_C @ display/intel_bios.c
+PORT_D @ display/intel_bios.c
+PORT_E @ display/intel_bios.c
+PORT_F @ display/intel_bios.c
+PORT_G @ display/intel_bios.c
+PORT_H @ display/intel_bios.c
+PORT_I @ display/intel_bios.c
+I915_MAX_PORTS @ display/intel_bios.c
+PHY_D @ display/intel_bios.c
+PHY_I @ display/intel_bios.c
+AUX_CH_NONE @ display/intel_bios.c
+AUX_CH_A @ display/intel_bios.c
+AUX_CH_USBC1 @ display/intel_bios.c
+TGL_DISPLAY_HAS_DDI = tgl_desc.info->has_ddi @ display/intel_display_device.c
+GMBUS_PIN_VGADDC @ display/intel_bios.c
+DRM_MODE_PANEL_ORIENTATION_UNKNOWN @ display/intel_bios.c
+DRM_MODE_PANEL_ORIENTATION_NORMAL @ display/intel_bios.c
+DRM_MODE_PANEL_ORIENTATION_BOTTOM_UP @ display/intel_bios.c
+ENOENT
+# VBT values Linux keeps in function bodies, from its own functions at display version 12
+SSC_FREQ_TGL_DEFAULT = intel_bios_ssc_frequency(&(struct intel_display){ .info.__runtime_info.ip.ver = 12 }, 0) @ display/intel_bios.c
+SSC_FREQ_TGL_ALTERNATE = intel_bios_ssc_frequency(&(struct intel_display){ .info.__runtime_info.ip.ver = 12 }, 1) @ display/intel_bios.c
+IBOOST_0 = translate_iboost(0, 0) @ display/intel_bios.c
+IBOOST_1 = translate_iboost(0, 1) @ display/intel_bios.c
+IBOOST_2 = translate_iboost(0, 2) @ display/intel_bios.c
+DP_RATE_230_UHBR20 = parse_bdb_230_dp_max_link_rate(BDB_230_VBT_DP_MAX_LINK_RATE_UHBR20) @ display/intel_bios.c
+DP_RATE_230_UHBR13P5 = parse_bdb_230_dp_max_link_rate(BDB_230_VBT_DP_MAX_LINK_RATE_UHBR13P5) @ display/intel_bios.c
+DP_RATE_230_UHBR10 = parse_bdb_230_dp_max_link_rate(BDB_230_VBT_DP_MAX_LINK_RATE_UHBR10) @ display/intel_bios.c
+DP_RATE_230_HBR3 = parse_bdb_230_dp_max_link_rate(BDB_230_VBT_DP_MAX_LINK_RATE_HBR3) @ display/intel_bios.c
+DP_RATE_230_HBR2 = parse_bdb_230_dp_max_link_rate(BDB_230_VBT_DP_MAX_LINK_RATE_HBR2) @ display/intel_bios.c
+DP_RATE_230_HBR = parse_bdb_230_dp_max_link_rate(BDB_230_VBT_DP_MAX_LINK_RATE_HBR) @ display/intel_bios.c
+DP_RATE_230_LBR = parse_bdb_230_dp_max_link_rate(BDB_230_VBT_DP_MAX_LINK_RATE_LBR) @ display/intel_bios.c
+DP_RATE_216_HBR3 = parse_bdb_216_dp_max_link_rate(BDB_216_VBT_DP_MAX_LINK_RATE_HBR3) @ display/intel_bios.c
+DP_RATE_216_HBR2 = parse_bdb_216_dp_max_link_rate(BDB_216_VBT_DP_MAX_LINK_RATE_HBR2) @ display/intel_bios.c
+DP_RATE_216_HBR = parse_bdb_216_dp_max_link_rate(BDB_216_VBT_DP_MAX_LINK_RATE_HBR) @ display/intel_bios.c
+DP_RATE_216_LBR = parse_bdb_216_dp_max_link_rate(BDB_216_VBT_DP_MAX_LINK_RATE_LBR) @ display/intel_bios.c
+# VBT bit-fields (display/intel_vbt_defs.h)
+GENERAL_INT_TV_SUPPORT = bitfield(struct bdb_general_features, int_tv_support) @ display/intel_bios.c
+GENERAL_INT_CRT_SUPPORT = bitfield(struct bdb_general_features, int_crt_support) @ display/intel_bios.c
+GENERAL_ENABLE_SSC = bitfield(struct bdb_general_features, enable_ssc) @ display/intel_bios.c
+GENERAL_SSC_FREQ = bitfield(struct bdb_general_features, ssc_freq) @ display/intel_bios.c
+GENERAL_DISPLAY_CLOCK_MODE = bitfield(struct bdb_general_features, display_clock_mode) @ display/intel_bios.c
+GENERAL_FDI_RX_POLARITY_INVERTED = bitfield(struct bdb_general_features, fdi_rx_polarity_inverted) @ display/intel_bios.c
+GENERAL_ROTATE_180 = bitfield(struct bdb_general_features, rotate_180) @ display/intel_bios.c
+GENERAL_AFC_STARTUP_CONFIG = bitfield(struct bdb_general_features, afc_startup_config) @ display/intel_bios.c
+DRIVER_LVDS_CONFIG = bitfield(struct bdb_driver_features, lvds_config) @ display/intel_bios.c
+CHILD_DEVICE_TYPE = bitfield(struct child_device_config, device_type) @ display/intel_bios.c
+CHILD_DDC_PIN = bitfield(struct child_device_config, ddc_pin) @ display/intel_bios.c
+CHILD_AUX_CHANNEL = bitfield(struct child_device_config, aux_channel) @ display/intel_bios.c
+CHILD_HDMI_LEVEL_SHIFTER_VALUE = bitfield(struct child_device_config, hdmi_level_shifter_value) @ display/intel_bios.c
+CHILD_HDMI_MAX_DATA_RATE = bitfield(struct child_device_config, hdmi_max_data_rate) @ display/intel_bios.c
+CHILD_COMPRESSION_ENABLE = bitfield(struct child_device_config, compression_enable) @ display/intel_bios.c
+CHILD_COMPRESSION_METHOD_CPS = bitfield(struct child_device_config, compression_method_cps) @ display/intel_bios.c
+CHILD_COMPRESSION_STRUCTURE_INDEX = bitfield(struct child_device_config, compression_structure_index) @ display/intel_bios.c
+CHILD_LSPCON = bitfield(struct child_device_config, lspcon) @ display/intel_bios.c
+CHILD_IBOOST = bitfield(struct child_device_config, iboost) @ display/intel_bios.c
+CHILD_USE_VBT_VSWING = bitfield(struct child_device_config, use_vbt_vswing) @ display/intel_bios.c
+CHILD_DP_MAX_LANE_COUNT = bitfield(struct child_device_config, dp_max_lane_count) @ display/intel_bios.c
+CHILD_LANE_REVERSAL = bitfield(struct child_device_config, lane_reversal) @ display/intel_bios.c
+CHILD_DP_USB_TYPE_C = bitfield(struct child_device_config, dp_usb_type_c) @ display/intel_bios.c
+CHILD_TBT = bitfield(struct child_device_config, tbt) @ display/intel_bios.c
+CHILD_DP_IBOOST_LEVEL = bitfield(struct child_device_config, dp_iboost_level) @ display/intel_bios.c
+CHILD_HDMI_IBOOST_LEVEL = bitfield(struct child_device_config, hdmi_iboost_level) @ display/intel_bios.c
+CHILD_DP_MAX_LINK_RATE = bitfield(struct child_device_config, dp_max_link_rate) @ display/intel_bios.c
+CHILD_EDP_DATA_RATE_OVERRIDE = bitfield(struct child_device_config, edp_data_rate_override) @ display/intel_bios.c

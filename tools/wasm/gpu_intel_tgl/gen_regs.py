@@ -337,6 +337,12 @@ def gen():
             sys.exit(f"regs.list: {name}: a .c source is for constants only")
         entries.append(("reg", name, params if not src else ("@", src)))
 
+    seen = set()
+    for kind, name, _ in entries:
+        if kind != "group" and name in seen:
+            sys.exit(f"regs.list: {name} is listed twice")
+        seen.add(name)
+
     consts, funcs, csrc = {}, {}, {}
     for kind, name, params in entries:
         if kind != "reg":

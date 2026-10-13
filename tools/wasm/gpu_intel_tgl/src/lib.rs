@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 
 mod i915_drv;
+mod intel_bios;
 mod intel_cdclk;
 mod intel_combo_phy;
 mod intel_de;
@@ -35,6 +36,7 @@ mod regs;
 mod tables;
 
 use i915_drv::intel_step_info;
+use intel_bios::{bdb_block, gmbus_pin};
 use intel_cdclk::intel_cdclk_vals;
 use intel_combo_phy::icl_procmon;
 use intel_display_power::{power_well_domain, power_well_inst, power_well_inst_ops};
@@ -89,7 +91,7 @@ fn intel_gmch_bar_setup() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2a: i915_driver_probe up to the hardware probe").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2b: i915_driver_probe up to the hardware probe and the VBT").say();
 
     // pci_enable_device: bind (the kernel's own driver hands the card over).
     match npk_sys::pci_bind(INTEL_VENDOR as i32, TGL_GT2 as i32) {
@@ -179,6 +181,8 @@ pub extern "C" fn _start() {
     }
     // intel_opregion_setup (display), then i915_pcode_init.
     let opregion = intel_opregion::intel_opregion_setup();
+    let mut display = intel_bios::intel_display::new(i915.display.ip.ver, pch_type, drt.pipe_mask, drt.port_mask);
+    intel_bios::intel_bios_init(&mut display, opregion.as_ref());
     let _ = intel_pcode::intel_pcode_init();
     let dram = intel_dram::intel_dram_detect(&mut i915);
 
