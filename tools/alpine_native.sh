@@ -8,6 +8,11 @@
 #   tools/alpine_native.sh https://example.org
 #   PRELOAD=/usr/lib/libjemalloc.so.2 tools/alpine_native.sh   # path inside the bundle
 #   SQFS=path/to/other.sqfs DIR=/tmp/other tools/alpine_native.sh
+#   PROFILE=1 tools/alpine_native.sh            # Gecko profile, as npkprofile in the guest
+#
+# With PROFILE=1 the profile is written on exit as lw-prof.json in the bundle's
+# home directory ($DIR/tmp/home),
+# with the same settings the guest's `npkprofile` uses.
 #
 # The bundle is unpacked once to $DIR (default /tmp/npk-alpine-native) and is
 # writable there, so `tools/alpine_native.sh --apk add jemalloc` installs into it.
@@ -35,12 +40,17 @@ if [ "${1:-}" = "--apk" ]; then
 fi
 
 URL="${1:-https://www.speedtest.net}"
+PROF_ENV=
+if [ -n "${PROFILE:-}" ]; then
+    rm -f "$DIR/tmp/home/lw-prof.json"
+    PROF_ENV="MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_STARTUP_INTERVAL=1 MOZ_PROFILER_STARTUP_ENTRIES=16777216 MOZ_PROFILER_STARTUP_FILTERS=GeckoMain,Socket,Worker,Renderer,Compositor,Timer,StreamTrans MOZ_PROFILER_STARTUP_FEATURES=js,stackwalk,cpu,fileio MOZ_PROFILER_SHUTDOWN=/tmp/home/lw-prof.json"
+fi
 exec unshare --map-root-user --mount sh -c '
-    D=$0; R=$1; W=$2; U=$3; P=$4
+    D=$0; R=$1; W=$2; U=$3; P=$4; PE=$5
     mount --rbind /dev "$D/dev" && mount --rbind /proc "$D/proc" && mount --rbind /sys "$D/sys"
     mount --rbind "$R" "$D/tmp/xrt" || exit 1
     exec chroot "$D" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home \
         XDG_RUNTIME_DIR=/tmp/xrt WAYLAND_DISPLAY="$W" MOZ_ENABLE_WAYLAND=1 \
-        ${P:+LD_PRELOAD=$P} \
+        ${P:+LD_PRELOAD=$P} $PE \
         /usr/bin/librewolf --no-remote --profile /tmp/home "$U"' \
-    "$DIR" "$XDG_RUNTIME_DIR" "$WL" "$URL" "${PRELOAD:-}"
+    "$DIR" "$XDG_RUNTIME_DIR" "$WL" "$URL" "${PRELOAD:-}" "$PROF_ENV"
