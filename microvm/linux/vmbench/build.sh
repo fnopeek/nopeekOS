@@ -41,5 +41,4 @@ unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c "
     '
 "
 cp "$STAGE/src/vmbench" "$OUT"
-touch -d @0 "$OUT"
 echo "vmbench: $(stat -c%s "$OUT") bytes"
