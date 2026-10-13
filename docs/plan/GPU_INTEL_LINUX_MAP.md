@@ -253,3 +253,10 @@ Wirkung auf die Hardware steckt in der aufgerufenen A-Funktion.
   `uc_expand_default_options` bekommt jede Plattform nach TGL/RKL/ADL-S
   GuC-Submission. Ein Treiber fuer ADL-N ist damit ein anderer Weg und ein eigenes Modul
   (GuC-Firmware, CT-Kanal) — offen, ob es dafuer ein Geraet gibt.
+- **Erster Lauf am NUC (2026-10-13, Stufe 0):** Revision `0x01` =
+  Stepping **B0** (`intel_step.c` `tgl_uy_revids[1]`) — damit sind die
+  stepping-abhaengigen Workarounds bestimmt. `FORCEWAKE_ACK_GT_GEN9` und
+  `FORCEWAKE_ACK_RENDER_GEN9` lesen beide `0x1`: `intel_xe.rs` nimmt beim
+  BCS-Start Forcewake fuer GT, Render und Media (`intel_xe.rs:1708`) und
+  gibt es nie ab — die GT kann seitdem nicht in RC6. Linux beginnt den
+  Probe mit `forcewake_early_sanitize`, also mit genau diesem Aufraeumen.
