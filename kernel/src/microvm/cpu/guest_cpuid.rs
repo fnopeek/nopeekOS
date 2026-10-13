@@ -139,6 +139,10 @@ pub fn guest_cpuid(
     guest_xcr0: u64,
 ) -> (u32, u32, u32, u32) {
     let intel = vendor == Vendor::Intel;
+    if leaf == super::BENCH_MARK_LEAF {
+        super::bench_mark(apic_id);
+        return (0, 0, 0, 0);
+    }
     let (mut a, mut b, mut c, mut d) = host_cpuid(leaf, subleaf);
     match leaf {
         1 => {

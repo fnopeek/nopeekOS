@@ -110,6 +110,43 @@ pub fn record_vcpu_time(vcpu: u8, bucket: usize, cycles: u64) {
     }
 }
 
+// ── Benchmark marks (`npkbench_vm`) ────────────────────────────────
+//
+// vmbench brackets each measurement with CPUID leaf `BENCH_MARK_LEAF`; the
+// host prints every vCPU's exits and time split since the previous mark,
+// as `kvm_stat` does for KVM. Only a VM booted with `npkbench_vm` may print.
+
+pub const BENCH_MARK_LEAF: u32 = 0x4E50_4B00;
+static BENCH_MARKS: AtomicBool = AtomicBool::new(false);
+/// Per vCPU at the last mark: exits per bucket, guest cycles, handler cycles.
+static BENCH_PREV: Mutex<[([u64; VMEXIT_BUCKETS], u64, u64); MAX_VCPUS_CAP]> =
+    Mutex::new([([0; VMEXIT_BUCKETS], 0, 0); MAX_VCPUS_CAP]);
+
+pub fn set_bench_marks(on: bool) {
+    BENCH_MARKS.store(on, Ordering::Relaxed);
+}
+
+/// A mark from vCPU `vcpu`: print each vCPU's deltas since the last one.
+pub fn bench_mark(vcpu: u8) {
+    if !BENCH_MARKS.load(Ordering::Relaxed) { return; }
+    let us = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let mut prev = BENCH_PREV.lock();
+    let n = (guest_vcpus() as usize).min(MAX_VCPUS_CAP);
+    for (i, c) in COUNTERS.iter().enumerate().take(n) {
+        let exits: [u64; VMEXIT_BUCKETS] = core::array::from_fn(|b| c.exits[b].load(Ordering::Relaxed));
+        let guest = c.guest_cycles.load(Ordering::Relaxed);
+        let handlers: u64 = c.exit_cycles.iter().map(|x| x.load(Ordering::Relaxed)).sum();
+        let (pe, pg, ph) = prev[i];
+        let d = |b: usize| exits[b].wrapping_sub(pe[b]);
+        crate::kprintln!(
+            "[vmbench-host] mark from vcpu{} · vcpu{}: intr {} hlt {} mmio {} io {} msr {} cpuid {} other {} | in guest {} us, in exit handlers {} us",
+            vcpu, i, d(0), d(1), d(2), d(3), d(4), d(5), d(6),
+            guest.wrapping_sub(pg) / us, handlers.wrapping_sub(ph) / us,
+        );
+        prev[i] = (exits, guest, handlers);
+    }
+}
+
 pub fn vcpu_time_snapshot() -> [u64; VT_BUCKETS] {
     core::array::from_fn(|i| COUNTERS.iter().map(|c| c.time[i].load(Ordering::Relaxed)).sum())
 }

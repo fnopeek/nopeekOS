@@ -34,9 +34,17 @@ static void pin(int cpu) {
     sched_setaffinity(0, sizeof s, &s);
 }
 
+// nopeekOS prints every vCPU's exits since the last mark on this CPUID
+// leaf; anywhere else it is an unknown leaf and does nothing.
+static void mark(void) {
+    unsigned a = 0x4E504B00, b, c = 0, d;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+}
+
 static void report(const char *name, double ns, const char *unit) {
     printf("[vmbench] %-28s %10.0f ns/%s\n", name, ns, unit);
     fflush(stdout);
+    mark();
 }
 
 // Threads that keep this mm active on the other CPUs, so every unmap or
@@ -228,6 +236,7 @@ int main(void) {
     // Linux lets a sleep overshoot by 50 us by default; measure the timer.
     prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
     pin(0);
+    mark();
     bench_syscall();
     bench_clock();
     bench_exit(0);
@@ -240,11 +249,13 @@ int main(void) {
     bench_madvise("madvise 256K, alone");
     if (ncpu > 1) {
         start_helpers(spinner);
+        mark();
         bench_unmap("unmap, others running");
         bench_mprotect("mprotect pair, others running");
         bench_madvise("madvise 256K, others running");
         stop_helpers();
         start_helpers(sleeper);
+        mark();
         bench_unmap("unmap, others asleep");
         bench_madvise("madvise 256K, others asleep");
         stop_helpers();
@@ -254,6 +265,7 @@ int main(void) {
         self_cpu = ncpu - 1;
         pin(self_cpu);
         start_helpers(spinner);
+        mark();
         bench_unmap("unmap, others running, from last");
         bench_mprotect("mprotect pair, others, from last");
         stop_helpers();

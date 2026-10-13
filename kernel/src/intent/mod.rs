@@ -2822,6 +2822,7 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
     kprintln!("[microvm] launching Linux ({} bytes, cmdline: {:?})",
               bytes.len(),
               core::str::from_utf8(cmdline).unwrap_or("?"));
+    crate::microvm::cpu::set_bench_marks(cmdline.windows(11).any(|w| w == b"npkbench_vm"));
 
     // Non-blocking: open the VM (one-time substrate + guest-image setup,
     // copies the bzImage into guest RAM so `bytes` can drop here), register
