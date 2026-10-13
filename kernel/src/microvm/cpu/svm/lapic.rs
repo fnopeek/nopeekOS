@@ -14,7 +14,7 @@
 //! (`sync_pir_to_irr`, KVM's posted-interrupt model).
 
 use crate::interrupts::rdtsc;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub const LAPIC_BASE: u64 = 0xFEE0_0000;
 pub const LAPIC_SIZE: u64 = 0x1000;
@@ -99,8 +99,34 @@ pub struct IcrWrite {
 /// LVR: integrated xAPIC 0x14, MAXLVT 5 (KVM `kvm_apic_set_version`, no CMCI).
 const LVR_VALUE: u32 = 0x14 | (5 << 16);
 
-#[inline]
-fn idx(off: u32) -> usize { (off >> 4) as usize }
+/// The register page in the architectural layout (a 32-bit register at its
+/// byte offset), one 4 KiB frame at a stable physical address, so the same
+/// page can serve as the VMX virtual-APIC page and the SVM AVIC backing
+/// page (KVM: `apic->regs`). Accessed through atomics: hardware and other
+/// cores write IRR there while this vCPU's fiber reads it.
+struct ApicPage(u64);
+
+impl ApicPage {
+    fn new() -> Option<Self> {
+        let frame = crate::mm::memory::allocate_frame()?;
+        // SAFETY: a fresh frame, identity-mapped, owned by this page.
+        unsafe { core::ptr::write_bytes(frame as *mut u8, 0, 4096) };
+        Some(ApicPage(frame))
+    }
+
+    #[inline]
+    fn reg(&self, off: u32) -> &AtomicU32 {
+        // SAFETY: the frame lives as long as `self`; `off & 0xFFC` stays in
+        // it and is 4-byte aligned.
+        unsafe { &*((self.0 + (off & 0xFFC) as u64) as *const AtomicU32) }
+    }
+}
+
+impl Drop for ApicPage {
+    fn drop(&mut self) {
+        crate::mm::memory::deallocate_frame(self.0);
+    }
+}
 
 // ── Posted interrupts (other vCPUs → this one) ──
 
@@ -354,9 +380,8 @@ pub fn reset_posted() {
 }
 
 pub struct LocalApic {
-    /// The register page, indexed by `offset >> 4` (whole 4 KiB page, so any
-    /// in-page offset is a safe store).
-    regs: [u32; 256],
+    /// The register page.
+    page: ApicPage,
     apic_id: u8,
     /// Host TSC the current timer count started from.
     timer_start_tsc: u64,
@@ -381,42 +406,53 @@ pub struct LocalApic {
 impl LocalApic {
     /// `kvm_lapic_reset`: LVTs masked, except the BSP's LVT0 in ExtINT
     /// (KVM_X86_QUIRK_LINT0_REENABLED) — the virtual wire the PIC uses.
-    pub fn new(apic_id: u8) -> Self {
-        let mut regs = [0u32; 256];
-        regs[idx(APIC_LVR)] = LVR_VALUE;
-        regs[idx(APIC_ID)] = (apic_id as u32) << 24;
-        regs[idx(APIC_SPIV)] = 0xFF;
+    /// `None` without a free frame for the register page.
+    pub fn new(apic_id: u8) -> Option<Self> {
+        let page = ApicPage::new()?;
+        page.reg(APIC_LVR).store(LVR_VALUE, Ordering::Relaxed);
+        page.reg(APIC_ID).store((apic_id as u32) << 24, Ordering::Relaxed);
+        page.reg(APIC_SPIV).store(0xFF, Ordering::Relaxed);
         for lvt in [APIC_LVTT, APIC_LVTTHMR, APIC_LVTPC, APIC_LVT0, APIC_LVT1, APIC_LVTERR] {
-            regs[idx(lvt)] = LVT_MASKED;
+            page.reg(lvt).store(LVT_MASKED, Ordering::Relaxed);
         }
         if apic_id == 0 {
-            regs[idx(APIC_LVT0)] = APIC_MODE_EXTINT;
+            page.reg(APIC_LVT0).store(APIC_MODE_EXTINT, Ordering::Relaxed);
         }
-        LocalApic {
-            regs, apic_id, timer_start_tsc: 0, timer_fired: false, timer_owed: 0,
+        Some(LocalApic {
+            page, apic_id, timer_start_tsc: 0, timer_fired: false, timer_owed: 0,
             x2apic: false, tsc_deadline: 0, pv_eoi_gpa: 0, pv_eoi_pending: false,
             poll_control: 1, steal: super::super::steal_time::StealTime::new(),
-        }
+        })
     }
 
+    /// Physical address of the register page.
+    pub fn page_phys(&self) -> u64 { self.page.0 }
+
     #[inline]
-    fn sw_enabled(&self) -> bool { self.regs[idx(APIC_SPIV)] & SPIV_APIC_ENABLED != 0 }
+    fn reg(&self, off: u32) -> &AtomicU32 { self.page.reg(off) }
+    #[inline]
+    fn r(&self, off: u32) -> u32 { self.reg(off).load(Ordering::Relaxed) }
+    #[inline]
+    fn w(&self, off: u32, v: u32) { self.reg(off).store(v, Ordering::Relaxed) }
+
+    #[inline]
+    fn sw_enabled(&self) -> bool { self.r(APIC_SPIV) & SPIV_APIC_ENABLED != 0 }
 
     // ── IRR / ISR bitmaps (8 × 32-bit words at 16-byte stride) ──
 
     fn set_bit(&mut self, base: u32, v: u8) {
-        self.regs[idx(base) + (v >> 5) as usize] |= 1 << (v & 31);
+        self.reg(base + (v as u32 >> 5) * 0x10).fetch_or(1 << (v & 31), Ordering::AcqRel);
     }
     fn clear_bit(&mut self, base: u32, v: u8) {
-        self.regs[idx(base) + (v >> 5) as usize] &= !(1 << (v & 31));
+        self.reg(base + (v as u32 >> 5) * 0x10).fetch_and(!(1 << (v & 31)), Ordering::AcqRel);
     }
     fn test_bit(&self, base: u32, v: u8) -> bool {
-        self.regs[idx(base) + (v >> 5) as usize] & (1 << (v & 31)) != 0
+        self.r(base + (v as u32 >> 5) * 0x10) & (1 << (v & 31)) != 0
     }
     /// `apic_search_irr` / `apic_find_highest_isr`.
     fn find_highest(&self, base: u32) -> Option<u8> {
-        for w in (0..8).rev() {
-            let word = self.regs[idx(base) + w];
+        for w in (0..8u32).rev() {
+            let word = self.r(base + w * 0x10);
             if word != 0 {
                 return Some((w as u32 * 32 + 31 - word.leading_zeros()) as u8);
             }
@@ -426,10 +462,10 @@ impl LocalApic {
 
     /// `__apic_update_ppr`.
     fn update_ppr(&mut self) -> u32 {
-        let tpr = self.regs[idx(APIC_TASKPRI)];
+        let tpr = self.r(APIC_TASKPRI);
         let isrv = self.find_highest(APIC_ISR).unwrap_or(0) as u32;
         let ppr = if (tpr & 0xF0) >= (isrv & 0xF0) { tpr & 0xFF } else { isrv & 0xF0 };
-        self.regs[idx(APIC_PROCPRI)] = ppr;
+        self.w(APIC_PROCPRI, ppr);
         ppr
     }
 
@@ -476,7 +512,7 @@ impl LocalApic {
     /// `kvm_apic_accept_pic_intr`: does this vCPU take the PIC's INTR (LINT0
     /// in ExtINT, the virtual wire)?
     pub fn accept_pic_intr(&self) -> bool {
-        let lvt0 = self.regs[idx(APIC_LVT0)];
+        let lvt0 = self.r(APIC_LVT0);
         lvt0 & LVT_MASKED == 0 && lvt0 & 0x700 == APIC_MODE_EXTINT
     }
 
@@ -484,7 +520,7 @@ impl LocalApic {
 
     /// TDCR → divide count (`update_divide_count`).
     fn divide_count(&self) -> u64 {
-        let tdcr = self.regs[idx(APIC_TDCR)] & 0xF;
+        let tdcr = self.r(APIC_TDCR) & 0xF;
         let shift = ((tdcr & 0x3) | ((tdcr & 0x8) >> 1)) + 1;
         1u64 << (shift & 0x7)
     }
@@ -492,8 +528,8 @@ impl LocalApic {
     /// Period of one count in host TSC cycles, if the timer is armed.
     fn period(&self) -> Option<u64> {
         if self.tscdeadline_mode() { return None; }
-        let tmict = self.regs[idx(APIC_TMICT)];
-        if !self.sw_enabled() || self.regs[idx(APIC_LVTT)] & LVT_MASKED != 0 || tmict == 0 {
+        let tmict = self.r(APIC_TMICT);
+        if !self.sw_enabled() || self.r(APIC_LVTT) & LVT_MASKED != 0 || tmict == 0 {
             return None;
         }
         let p = tmict as u64 * self.divide_count();
@@ -501,11 +537,11 @@ impl LocalApic {
     }
 
     fn periodic(&self) -> bool {
-        self.regs[idx(APIC_LVTT)] & LVT_TIMER_MODE_MASK == LVT_TIMER_PERIODIC
+        self.r(APIC_LVTT) & LVT_TIMER_MODE_MASK == LVT_TIMER_PERIODIC
     }
 
     fn tscdeadline_mode(&self) -> bool {
-        self.regs[idx(APIC_LVTT)] & LVT_TIMER_MODE_MASK == LVT_TIMER_TSCDEADLINE
+        self.r(APIC_LVTT) & LVT_TIMER_MODE_MASK == LVT_TIMER_TSCDEADLINE
     }
 
     /// TSC-deadline expiry (`start_sw_tscdeadline` → `apic_timer_expired`):
@@ -513,7 +549,7 @@ impl LocalApic {
     fn tscdeadline_poll(&mut self) {
         if self.tsc_deadline == 0 || rdtsc() < self.tsc_deadline { return; }
         self.tsc_deadline = 0;
-        let lvtt = self.regs[idx(APIC_LVTT)];
+        let lvtt = self.r(APIC_LVTT);
         if self.sw_enabled() && lvtt & LVT_MASKED == 0 {
             self.accept_irq((lvtt & VECTOR_MASK) as u8);
             crate::microvm::devices::nat::note_guest_timer();
@@ -543,7 +579,7 @@ impl LocalApic {
             }
         }
         if self.timer_owed > 0 {
-            let vec = (self.regs[idx(APIC_LVTT)] & VECTOR_MASK) as u8;
+            let vec = (self.r(APIC_LVTT) & VECTOR_MASK) as u8;
             if !self.test_bit(APIC_IRR, vec) {
                 self.accept_irq(vec);
                 self.timer_owed -= 1;
@@ -567,7 +603,7 @@ impl LocalApic {
     /// APIC_TMCCT (`apic_get_tmcct`).
     fn tmcct(&self) -> u32 {
         if self.tscdeadline_mode() { return 0; }
-        let tmict = self.regs[idx(APIC_TMICT)];
+        let tmict = self.r(APIC_TMICT);
         if tmict == 0 { return 0; }
         let elapsed_ticks = rdtsc().saturating_sub(self.timer_start_tsc) / self.divide_count();
         if self.periodic() {
@@ -616,7 +652,7 @@ impl LocalApic {
     }
 
     fn isr_count(&self) -> u32 {
-        (0..8).map(|w| self.regs[idx(APIC_ISR) + w].count_ones()).sum()
+        (0..8u32).map(|w| self.r(APIC_ISR + w * 0x10).count_ones()).sum()
     }
 
     // ── MSR interface: IA32_APIC_BASE, x2APIC, PV-EOI enable ──
@@ -636,7 +672,11 @@ impl LocalApic {
                 // not a legal transition (SDM 10.12.5) and is ignored.
                 if v & APIC_BASE_X2APIC != 0 && v & APIC_BASE_ENABLE != 0 && !self.x2apic {
                     self.x2apic = true;
-                    self.regs[idx(APIC_ID)] = self.apic_id as u32;
+                    // x2APIC ID and logical ID live in the page, where
+                    // hardware reads them (KVM `kvm_apic_set_x2apic_id`).
+                    let id = self.apic_id as u32;
+                    self.w(APIC_ID, id);
+                    self.w(APIC_LDR, (id >> 4) << 16 | 1 << (id & 0xF));
                 }
                 Ok((0, None))
             }
@@ -677,8 +717,9 @@ impl LocalApic {
         match (off, write) {
             // No DFR, no ICR2 in x2APIC mode; SELF_IPI is write-only.
             (APIC_DFR, _) | (APIC_ICR2, _) | (X2APIC_SELF_IPI, None) => Err(()),
+            // One 64-bit register at 0x300 (KVM `kvm_lapic_get_reg64`).
             (APIC_ICR, None) => Ok((
-                self.regs[idx(APIC_ICR)] as u64 | (self.regs[idx(APIC_ICR2)] as u64) << 32,
+                self.r(APIC_ICR) as u64 | (self.r(APIC_ICR + 4) as u64) << 32,
                 None,
             )),
             (APIC_LDR, None) => {
@@ -690,8 +731,8 @@ impl LocalApic {
             (APIC_ICR, Some(v)) => {
                 note_access(APIC_ICR, true);
                 let lo = v as u32;
-                self.regs[idx(APIC_ICR)] = lo & !ICR_BUSY;
-                self.regs[idx(APIC_ICR2)] = (v >> 32) as u32;
+                self.w(APIC_ICR, lo & !ICR_BUSY);
+                self.w(APIC_ICR + 4, (v >> 32) as u32);
                 Ok((0, Some(IcrWrite {
                     delivery_mode: lo & ICR_DM_MASK,
                     shorthand: (lo >> 18) & 0x3,
@@ -723,7 +764,7 @@ impl LocalApic {
         match off & 0xFF0 {
             APIC_TMCCT => self.tmcct(),
             APIC_PROCPRI => self.update_ppr(),
-            o => self.regs[idx(o)],
+            o => self.r(o),
         }
     }
 
@@ -733,58 +774,58 @@ impl LocalApic {
         note_access(off, true);
         match off & 0xFF0 {
             APIC_EOI => self.set_eoi(),
-            APIC_ID => self.regs[idx(APIC_ID)] = val,
+            APIC_ID => self.w(APIC_ID, val),
             APIC_TASKPRI => {
-                self.regs[idx(APIC_TASKPRI)] = val & 0xFF;
+                self.w(APIC_TASKPRI, val & 0xFF);
                 self.update_ppr();
             }
             APIC_SPIV => {
-                self.regs[idx(APIC_SPIV)] = val & 0x3FF;
+                self.w(APIC_SPIV, val & 0x3FF);
                 // Software-disabling masks every LVT (KVM `kvm_lapic_reg_write`).
                 if val & SPIV_APIC_ENABLED == 0 {
                     for lvt in [APIC_LVTT, APIC_LVTTHMR, APIC_LVTPC, APIC_LVT0, APIC_LVT1, APIC_LVTERR] {
-                        self.regs[idx(lvt)] |= LVT_MASKED;
+                        self.reg(lvt).fetch_or(LVT_MASKED, Ordering::Relaxed);
                     }
                 }
             }
-            APIC_ESR => self.regs[idx(APIC_ESR)] = 0,
+            APIC_ESR => self.w(APIC_ESR, 0),
             // Ignored in TSC-deadline mode (KVM `kvm_lapic_reg_write`).
             APIC_TMICT if self.tscdeadline_mode() => {}
             APIC_TMICT => {
-                self.regs[idx(APIC_TMICT)] = val;
+                self.w(APIC_TMICT, val);
                 self.timer_start_tsc = rdtsc();
                 self.timer_fired = false;
                 self.timer_owed = 0;
             }
-            APIC_TDCR => self.regs[idx(APIC_TDCR)] = val & 0xB,
+            APIC_TDCR => self.w(APIC_TDCR, val & 0xB),
             APIC_LVTT | APIC_LVTTHMR | APIC_LVTPC | APIC_LVT0 | APIC_LVT1 | APIC_LVTERR => {
                 let mut v = val;
                 if !self.sw_enabled() { v |= LVT_MASKED; }
                 // A timer-mode change stops the timer (`apic_update_lvtt`).
                 if off & 0xFF0 == APIC_LVTT
-                    && (self.regs[idx(APIC_LVTT)] ^ v) & LVT_TIMER_MODE_MASK != 0
+                    && (self.r(APIC_LVTT) ^ v) & LVT_TIMER_MODE_MASK != 0
                 {
-                    self.regs[idx(APIC_TMICT)] = 0;
+                    self.w(APIC_TMICT, 0);
                     self.tsc_deadline = 0;
                     self.timer_owed = 0;
                     self.timer_fired = false;
                 }
-                self.regs[idx(off & 0xFF0)] = v;
+                self.w(off & 0xFF0, v);
             }
             APIC_ICR => {
-                self.regs[idx(APIC_ICR)] = val & !ICR_BUSY;
+                self.w(APIC_ICR, val & !ICR_BUSY);
                 return Some(IcrWrite {
                     delivery_mode: val & ICR_DM_MASK,
                     shorthand: (val >> 18) & 0x3,
-                    dest: (self.regs[idx(APIC_ICR2)] >> 24) as u8,
+                    dest: (self.r(APIC_ICR2) >> 24) as u8,
                     vector: (val & VECTOR_MASK) as u8,
                 });
             }
-            APIC_ICR2 => self.regs[idx(APIC_ICR2)] = val & 0xFF00_0000,
+            APIC_ICR2 => self.w(APIC_ICR2, val & 0xFF00_0000),
             // Read-only: LVR, PPR, ISR, TMR, IRR.
             APIC_LVR | APIC_PROCPRI => {}
             o if (APIC_ISR..APIC_ESR).contains(&o) => {}
-            o => self.regs[idx(o)] = val,
+            o => self.w(o, val),
         }
         None
     }
