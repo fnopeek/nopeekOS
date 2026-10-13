@@ -168,7 +168,8 @@ fn wait_for_cpus() -> u32 {
     last
 }
 
-/// Run `vmbench` in a child with its output on the console, and wait for it.
+/// Run `vmbench` in a child with its output on the serial console, and
+/// wait for it.
 pub fn run_vm(kmsg_fd: i64) {
     // SAFETY: fork has no preconditions.
     let pid = unsafe { syscall0(super::SYS_FORK) };
@@ -181,14 +182,9 @@ pub fn run_vm(kmsg_fd: i64) {
         return;
     }
     wait_for_cpus();
-    // Lines written to /dev/kmsg are rate-limited to a burst of ten until
-    // this is set; the session script sets it too, but only after this run.
-    super::write_file(b"/proc/sys/kernel/printk_devkmsg\0", b"on", 0);
     super::write_file(b"/tmp/vmbench\0", VMBENCH, 0o755);
-    if kmsg_fd >= 0 {
-        // SAFETY: duplicating an open fd onto stdout.
-        unsafe { syscall2(super::SYS_DUP2, kmsg_fd as u64, 1) };
-    }
+    // stdout stays PID 1's console: /dev/kmsg would cut the run off after a
+    // burst of ten lines.
     let path = b"/tmp/vmbench\0";
     let argv = [path.as_ptr(), core::ptr::null()];
     let envp: [*const u8; 1] = [core::ptr::null()];
