@@ -3,7 +3,7 @@ use nopeek_widgets::IconId;
 
 fn main() {
     let meta = AppMeta {
-        display_name: "GPU Intel".into(),
+        display_name: "GPU Intel TGL".into(),
         description:  "Intel Tiger Lake graphics (i915 port)".into(),
         icon:         IconRef::Builtin(IconId::List),
     };

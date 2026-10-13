@@ -9,7 +9,7 @@ von der CPU weg; **die CPU bleibt der Rueckfall** fuer Karten, die wir noch
 nicht kennen. Und: **der Treiber als Modul, analog zum WLAN-Treiber, nicht im
 Kernel.**
 
-Portierkarte fuer `gpu_intel`: `GPU_INTEL_LINUX_MAP.md`.
+Portierkarte fuer `gpu_intel_tgl`: `GPU_INTEL_LINUX_MAP.md`.
 Verwandt: `MICROKERNEL_REFACTOR.md` (Treiber als WASM), `MICROVM_V2.md`,
 `CORES_AND_EVENTS.md` (Ereignisse statt Takt), Memory
 `project_baremetal_gfx_perf.md` (BCS-Bring-up am NUC, UC-Framebuffer),
@@ -31,7 +31,7 @@ Verwandt: `MICROKERNEL_REFACTOR.md` (Treiber als WASM), `MICROVM_V2.md`,
                    │  (Befehlsring Kernel → Modul, wie netdev beim WLAN)
                    ▼
         GPU-Modul (WASM, forge)  — EINES je Karte, besitzt die Karte ganz
-           gpu_intel (i915-Weg)   gpu_amd (amdgpu-Weg)
+      gpu_intel_tgl (i915-Weg)  gpu_amd_renoir (amdgpu-Weg)
                    │
         kein Modul / Modul tot  →  CPU-Rueckfall (heute: GOP + memcpy)
 ```
@@ -47,7 +47,11 @@ Drei Entscheidungen tragen das Papier:
    kartenspezifische Teil (Shader-Compiler, Befehlsaufbau) IM GAST; der Wirt
    legt Puffer an, reicht Befehlspuffer an die Karte und meldet Fences. Das
    ist genau die Haelfte, die wir ohnehin aus dem Linux-Kernel portieren.
-3. **Ein Modul je Karte, und es besitzt die Karte ganz** (§3.2). Der Kernel
+3. **Ein Modul je Karte, und es besitzt die Karte ganz** (§3.2). Benannt
+   wie die WLAN-Treiber nach dem, was es treibt: `gpu_intel_tgl` (Tiger
+   Lake, i915-Weg ohne GuC), spaeter z. B. `gpu_amd_renoir` — Linux deckt
+   mit einem `i915` alle Generationen ab, wir portieren je Plattform den
+   festgelegten Graphen. Der Kernel
    behaelt nur, was er fuer den Rueckfall braucht.
 
 ---
@@ -148,7 +152,7 @@ seinem Rueckfallwissen: wo der letzte gueltige Scanout-Puffer liegt.
 |---|---|---|
 | Boot bis Login | CPU | GOP + CPU-Kopie — wie heute (der BCS startet schon heute erst nach dem Login, `main.rs` vor `shade::init`) |
 | nach dem Login, Modul noch nicht bereit | CPU | dasselbe; der Desktop steht sofort, die GPU kommt dazu |
-| Modul bereit | GPU | `gpu_intel` steht in `autostart` wie der WLAN-Treiber, faehrt die Karte nach Linux hoch und meldet sich ueber gpudev |
+| Modul bereit | GPU | `gpu_intel_tgl` steht in `autostart` wie der WLAN-Treiber, faehrt die Karte nach Linux hoch und meldet sich ueber gpudev |
 | kein Modul / unbekannte Karte | CPU | bleibt beim Rueckfall — kein Fehler, nur langsamer |
 | Modul stirbt | CPU | Compositor schaltet zurueck, schreibt nichts in die Karte |
 | Monitor beim Booten aus | — | die Firmware richtet keinen Modus ein, GOP fehlt (`GPU: no display available`, gesehen am NUC 2026-10-13). Stufe 1 hat dann nichts zu uebernehmen; ein Bild gibt es erst mit Stufe 4 (Modeset + Hotplug). Bis dahin: Neustart mit Monitor an. |
@@ -181,7 +185,7 @@ GOP-Treiber auf dem gezeigten Bild, ohne Registerzugriff. Beim Modultod
 bleibt auf einem Display-Controller das Bus-Master-Bit an (der Scanout
 liest auch als Bus-Master), und die DMA-Puffer des Moduls werden deshalb
 **nicht** freigegeben, sondern bis zum Neustart behalten — die Karte
-koennte sie noch lesen. Sobald `gpu_intel` abgibt, gehoert davor ein
+koennte sie noch lesen. Sobald `gpu_intel_tgl` abgibt, gehoert davor ein
 Stillsetzen der Engines (GT-Reset) in den Rueckweg; dann koennen die
 Puffer wieder zurueck.
 
@@ -359,7 +363,7 @@ dieselbe Leitung wie die microVM — eigenes Papier, wenn es so weit ist.
 
 ## 7. Die Karten
 
-### 7.1 `gpu_intel` — Tiger Lake, i915-Weg
+### 7.1 `gpu_intel_tgl` — Tiger Lake, i915-Weg
 
 Linux-Quelle 1:1, der Execlist-Weg von i915 (nicht `xe`, der verlangt GuC):
 
@@ -438,7 +442,7 @@ Jede Stufe hat ein Ergebnis, das man am Geraet sieht oder misst.
 |---|---|---|---|
 | **0a** | `gpu_amd` Stufe 0: SMU-Postfach + Panel-PWM | IdeaPad | Helligkeit per Fn; Watt vorher/nachher mit `power` |
 | **0b** | `gpu`-Ausgabe ohne Treiber korrigieren | beide | kleine Aufraeumarbeit |
-| **1** | `gpudev`-ABI + `gpu_intel` uebernimmt die Karte vom Kernel: GGTT, ForceWake, BCS, Flip — **Gleichstand mit `intel_xe.rs`** | NUC | gleiche Bildzeiten wie heute; Hostaufrufe je Bild gezaehlt (forge-Kosten) |
+| **1** | `gpudev`-ABI + `gpu_intel_tgl` uebernimmt die Karte vom Kernel: GGTT, ForceWake, BCS, Flip — **Gleichstand mit `intel_xe.rs`** | NUC | gleiche Bildzeiten wie heute; Hostaufrufe je Bild gezaehlt (forge-Kosten) |
 | **2** | PPGTT je Kontext, GT-Interrupts, RCS, erster Compute-Dispatch mit Readback-Selbsttest | NUC | Selbsttest gruen; Fences per Interrupt |
 | **3** | Fenster als Puffer im Compositor (CPU-Weg zuerst) | beide | kein Rueckschritt auf dem CPU-Weg |
 | **4** | Display-Ebenen: Zeiger, dann ein Fenster | NUC | Zeiger ohne save-under |
@@ -477,7 +481,7 @@ kein `modprobe.d`. Pakete nachinstallieren ist erlaubt.
 | QEMU nackt | `gpudev` mit einem `gpu_soft`-Modul (gpudev auf der CPU): ABI, Puffer, Fences, Uebergabe beim Laden, Rueckfall beim Modultod | 1, 3 |
 | QEMU + native context | **Referenz** fuer die microVM-Seite: unser Gast unter QEMU, was er schickt, was er erwartet — wie die Galerien beak gegen Chromium | 6–9 |
 | QEMU + 610M (VFIO) | amdgpu-Grundlagen auf echter Hardware (PSP, Firmware, SDMA) — **aber RDNA2, nicht Vega**, und AMD-iGPUs sind in VFIO zickig (VBIOS aus VFCT, Reset nach VM-Ende). Erst nach Entscheid, braucht `vfio-pci`-Bindung zur Laufzeit | 8 |
-| NUC | `gpu_intel` | 1, 2, 4, 5, 7 |
+| NUC | `gpu_intel_tgl` | 1, 2, 4, 5, 7 |
 | IdeaPad | Lucienne: SMU, Helligkeit, DCN 2.1 | 0a, 8, 9 |
 
 ### Die Referenz: `tools/gpu_nativectx.py`

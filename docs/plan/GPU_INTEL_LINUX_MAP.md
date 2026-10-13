@@ -1,4 +1,4 @@
-# gpu_intel gegen Linux — die Karte
+# gpu_intel_tgl gegen Linux — die Karte
 
 **Stand:** 2026-10-13 · noch kein Modul · Referenz **Linux 6.18.55**, i915
 **Geraet:** NUC, `8086:9A78` Tiger Lake-LP GT2, Gen12.1
@@ -236,8 +236,8 @@ Wirkung auf die Hardware steckt in der aufgerufenen A-Funktion.
 1. **Portieren in der Reihenfolge von `GPU_INTEL_TGL_TREE.txt`**, Datei
    fuer Datei ganz (Workarounds, Uncore-Tabellen, LRC-Offsets sind
    Tabellen — gegen die Quelle abgleichen, Laenge pruefen).
-2. Modul `tools/wasm/gpu_intel/`, und `linux-coverage.py` bekommt den
-   Eintrag `gpu_intel` gegen die A-Zeilen von `GPU_INTEL_TGL_FUNCTIONS.txt`.
+2. Modul `tools/wasm/gpu_intel_tgl/`, und `linux-coverage.py` bekommt den
+   Eintrag `gpu_intel_tgl` gegen die A-Zeilen von `GPU_INTEL_TGL_FUNCTIONS.txt`.
 3. Die Verwaltung (B) als gpudev-Kernelseite: Puffer, Fences, Kontexte.
 
 ---
@@ -246,10 +246,10 @@ Wirkung auf die Hardware steckt in der aufgerufenen A-Funktion.
 
 - **`intel_xe.rs` ist kein Port.** Es nennt fast keinen Linux-Funktionsnamen
   (`grep` gegen die Namen der Karte). Es hat GGTT, Forcewake, Execlists und
-  LRC fuer den BCS frei geschrieben — `gpu_intel` uebernimmt das Wissen
+  LRC fuer den BCS frei geschrieben — `gpu_intel_tgl` uebernimmt das Wissen
   nicht, sondern portiert aus Linux. Der Vergleich der beiden bei Stufe 1
   sagt, was `intel_xe.rs` ausgelassen hat.
 - **ADL-N braucht GuC.** `intel_xe.rs` kennt ADL-N; laut
   `uc_expand_default_options` bekommt jede Plattform nach TGL/RKL/ADL-S
-  GuC-Submission. Ein `gpu_intel` fuer ADL-N ist damit ein anderer Weg
+  GuC-Submission. Ein Treiber fuer ADL-N ist damit ein anderer Weg und ein eigenes Modul
   (GuC-Firmware, CT-Kanal) — offen, ob es dafuer ein Geraet gibt.
