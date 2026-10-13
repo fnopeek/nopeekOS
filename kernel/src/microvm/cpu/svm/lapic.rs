@@ -132,25 +132,69 @@ impl Drop for ApicPage {
 
 pub const MAX_VCPUS: usize = 8;
 
-/// `struct pi_desc`'s PIR: one 256-bit request bitmap per vCPU. Any vCPU may
-/// set bits; only the owner clears them (in `sync_posted`).
-static PIR: [[AtomicU64; 4]; MAX_VCPUS] =
-    [const { [const { AtomicU64::new(0) }; 4] }; MAX_VCPUS];
+/// `struct pi_desc` (KVM `asm/posted_intr.h`), 64 bytes per vCPU in one
+/// frame, in the layout VMX posted-interrupt processing reads: PIR at bytes
+/// 0-31 (one 256-bit request bitmap; any vCPU sets bits, the owner or the
+/// CPU clears them), the control word at 32: ON bit 0, SN bit 1, NV at
+/// byte 34, NDST at bytes 36-39. ON is set by the poster after its PIR bit
+/// and cleared before PIR is drained, so whoever flips it false→true kicks
+/// and a post that lands after a drain always kicks. Deriving the edge from
+/// the PIR words instead would lose it when the owner drains in between,
+/// leaving the vector in PIR while the target runs in guest with no exit to
+/// fold it in. On SVM and before APICv the same protocol runs in software.
+static PI_FRAME: AtomicU64 = AtomicU64::new(0);
+const PI_ON: u64 = 1;
 
-/// `pi_desc.ON`: set by the poster after its PIR bit, cleared by the owner
-/// before it drains PIR. Whoever flips it false→true kicks, so a post that
-/// lands after a drain always kicks. Deriving the edge from the PIR words
-/// instead would lose it when the owner drains in between, leaving the
-/// vector in PIR while the target runs in guest with no exit to fold it in.
-static PIR_ON: [AtomicBool; MAX_VCPUS] = [const { AtomicBool::new(false) }; MAX_VCPUS];
+/// The descriptor table, allocated once per boot and kept.
+fn pi_base() -> u64 {
+    let b = PI_FRAME.load(Ordering::Acquire);
+    if b != 0 { return b; }
+    let Some(f) = crate::mm::memory::allocate_frame() else { return 0 };
+    // SAFETY: a fresh frame, identity-mapped, not yet published.
+    unsafe { core::ptr::write_bytes(f as *mut u8, 0, 4096) };
+    match PI_FRAME.compare_exchange(0, f, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => f,
+        Err(won) => { crate::mm::memory::deallocate_frame(f); won }
+    }
+}
+
+fn pi_word(t: usize, word: usize) -> Option<&'static AtomicU64> {
+    let b = pi_base();
+    // SAFETY: the frame is never freed; `t < MAX_VCPUS` keeps the offset
+    // inside it and 8-byte aligned.
+    (b != 0 && t < MAX_VCPUS).then(|| unsafe { &*((b + (t * 64 + word * 8) as u64) as *const AtomicU64) })
+}
+
+fn pir(t: usize, w: usize) -> Option<&'static AtomicU64> { pi_word(t, w) }
+fn pi_control(t: usize) -> Option<&'static AtomicU64> { pi_word(t, 4) }
+
+/// Physical address of vCPU `apic_id`'s descriptor (`POSTED_INTR_DESC_ADDR`).
+pub fn pi_desc_phys(apic_id: u8) -> Option<u64> {
+    let b = pi_base();
+    (b != 0 && (apic_id as usize) < MAX_VCPUS).then_some(b + apic_id as u64 * 64)
+}
+
+/// Notification vector and destination (`vmx_vcpu_pi_load`): NV at bits
+/// 16-23, NDST at 32-63; ON and SN stay as they are.
+pub fn pi_set_notify(apic_id: u8, nv: u8, ndst: u32) {
+    let Some(c) = pi_control(apic_id as usize) else { return };
+    let mut cur = c.load(Ordering::Acquire);
+    loop {
+        let new = (cur & 0x3) | (nv as u64) << 16 | (ndst as u64) << 32;
+        match c.compare_exchange(cur, new, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(seen) => cur = seen,
+        }
+    }
+}
 
 /// Post `vector` to vCPU `apic_id`. True when the caller must kick the
 /// target (`pi_test_and_set_on`), once per burst.
 pub fn post(apic_id: u8, vector: u8) -> bool {
     let t = apic_id as usize;
-    if t >= MAX_VCPUS { return false; }
-    PIR[t][(vector >> 6) as usize].fetch_or(1u64 << (vector & 63), Ordering::AcqRel);
-    let edge = !PIR_ON[t].swap(true, Ordering::AcqRel);
+    let (Some(word), Some(ctl)) = (pir(t, (vector >> 6) as usize), pi_control(t)) else { return false };
+    word.fetch_or(1u64 << (vector & 63), Ordering::AcqRel);
+    let edge = ctl.fetch_or(PI_ON, Ordering::AcqRel) & PI_ON == 0;
     if edge {
         let _ = POST_TSC[t].compare_exchange(0, rdtsc().max(1), Ordering::AcqRel, Ordering::Relaxed);
     }
@@ -175,7 +219,7 @@ pub fn take_post_latency(apic_id: u8, now: u64) -> Option<u64> {
 /// Anything posted to `apic_id` and not yet folded into its IRR?
 pub fn posted_pending(apic_id: u8) -> bool {
     let t = apic_id as usize;
-    t < MAX_VCPUS && PIR[t].iter().any(|w| w.load(Ordering::Acquire) != 0)
+    (0..4).any(|w| pir(t, w).is_some_and(|p| p.load(Ordering::Acquire) != 0))
 }
 
 /// Host core each vCPU runs on (indexed by apic_id), so a sender can kick it
@@ -278,12 +322,30 @@ pub fn note_exit(apic_id: u8) {
     }
 }
 
-/// `kvm_vcpu_kick`: get vCPU `target` out of guest mode / out of its park.
+/// vCPUs whose VMCS processes posted interrupts (VMX APICv).
+static APICV_ON: [AtomicBool; MAX_VCPUS] = [const { AtomicBool::new(false) }; MAX_VCPUS];
+
+pub fn set_apicv(apic_id: u8, on: bool) {
+    if let Some(f) = APICV_ON.get(apic_id as usize) { f.store(on, Ordering::Release); }
+}
+
+/// `kvm_vcpu_kick`, or `kvm_vcpu_trigger_posted_interrupt` under APICv: get
+/// vCPU `target` out of its park, and out of guest mode only where the CPU
+/// cannot take the posted vectors itself.
 fn kick(target: u8, self_core: usize) {
+    use crate::microvm::cpu::{bench_count, BK_NONE, BK_PLAIN, BK_POSTED};
     let Some(slot) = VCPU_HOST_CORE.get(target as usize) else { return };
     let hc = slot.load(Ordering::Relaxed);
     if hc != usize::MAX && hc != self_core {
-        crate::smp::kick_host_core(hc);
+        if APICV_ON[target as usize].load(Ordering::Acquire) {
+            bench_count(target, BK_POSTED);
+            crate::smp::kick_host_core_posted(hc);
+        } else {
+            bench_count(target, BK_PLAIN);
+            crate::smp::kick_host_core(hc);
+        }
+    } else {
+        bench_count(target, BK_NONE);
     }
 }
 
@@ -371,11 +433,13 @@ pub fn deliver_msg(dest: u8, logical: bool, mode: u8, vector: u8, from: u8) {
 
 /// Clear every descriptor (VM start/teardown).
 pub fn reset_posted() {
-    for t in PIR.iter() {
-        for w in t.iter() { w.store(0, Ordering::Relaxed); }
+    for t in 0..MAX_VCPUS {
+        for w in 0..5 {
+            if let Some(p) = pi_word(t, w) { p.store(0, Ordering::Relaxed); }
+        }
     }
-    for on in PIR_ON.iter() { on.store(false, Ordering::Relaxed); }
     for c in VCPU_HOST_CORE.iter() { c.store(usize::MAX, Ordering::Relaxed); }
+    for a in APICV_ON.iter() { a.store(false, Ordering::Relaxed); }
     for t in TRACE.iter() { t.last_active.store(0, Ordering::Relaxed); }
 }
 
@@ -401,6 +465,8 @@ pub struct LocalApic {
     poll_control: u64,
     /// `MSR_KVM_STEAL_TIME`, the vCPU's other per-vCPU KVM MSR.
     pub steal: super::super::steal_time::StealTime,
+    /// The CPU delivers, EOIs and prioritises from the page (VMX APICv).
+    apicv: bool,
 }
 
 impl LocalApic {
@@ -422,11 +488,32 @@ impl LocalApic {
             page, apic_id, timer_start_tsc: 0, timer_fired: false, timer_owed: 0,
             x2apic: false, tsc_deadline: 0, pv_eoi_gpa: 0, pv_eoi_pending: false,
             poll_control: 1, steal: super::super::steal_time::StealTime::new(),
+            apicv: false,
         })
     }
 
     /// Physical address of the register page.
     pub fn page_phys(&self) -> u64 { self.page.0 }
+
+    pub fn is_x2apic(&self) -> bool { self.x2apic }
+
+    /// Hand delivery to the CPU (`vmx_refresh_apicv_exec_ctrl`). PV-EOI is
+    /// never armed again (`apic_sync_pv_eoi_to_guest`). Returns the highest
+    /// in-service vector, the initial SVI.
+    pub fn activate_apicv(&mut self) -> u8 {
+        self.apicv = true;
+        self.pv_eoi_pending = false;
+        set_apicv(self.apic_id, true);
+        self.find_highest(APIC_ISR).unwrap_or(0)
+    }
+
+    /// `vmx_sync_pir_to_irr` before an APICv entry: posted vectors and an
+    /// expired timer into IRR; returns the highest IRR vector, the RVI.
+    pub fn sync_for_apicv(&mut self) -> u8 {
+        self.sync_posted();
+        self.timer_poll();
+        self.find_highest(APIC_IRR).unwrap_or(0)
+    }
 
     #[inline]
     fn reg(&self, off: u32) -> &AtomicU32 { self.page.reg(off) }
@@ -480,9 +567,10 @@ impl LocalApic {
     fn sync_posted(&mut self) {
         let t = self.apic_id as usize;
         if t >= MAX_VCPUS { return; }
-        let _ = PIR_ON[t].swap(false, Ordering::AcqRel);
+        let (Some(ctl), Some(_)) = (pi_control(t), pir(t, 0)) else { return };
+        ctl.fetch_and(!PI_ON, Ordering::AcqRel);
         for w in 0..4 {
-            let bits = PIR[t][w].swap(0, Ordering::AcqRel);
+            let bits = pir(t, w).map_or(0, |p| p.swap(0, Ordering::AcqRel));
             if bits == 0 { continue; }
             for b in 0..64 {
                 if bits & (1 << b) != 0 { self.accept_irq((w * 64 + b) as u8); }
@@ -633,7 +721,7 @@ impl LocalApic {
 
     /// Before entry: arm the guest's flag if its next EOI may be lazy.
     pub fn pv_eoi_sync_to(&mut self, mem: &crate::microvm::devices::guest_mem::GuestMem) {
-        if self.pv_eoi_gpa == 0 || self.pv_eoi_pending { return; }
+        if self.pv_eoi_gpa == 0 || self.pv_eoi_pending || self.apicv { return; }
         if self.find_highest(APIC_IRR).is_some() || self.isr_count() != 1 { return; }
         if mem.write_u8(self.pv_eoi_gpa, 1) {
             self.pv_eoi_pending = true;

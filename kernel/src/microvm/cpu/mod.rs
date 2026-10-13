@@ -122,6 +122,26 @@ static BENCH_MARKS: AtomicBool = AtomicBool::new(false);
 static BENCH_PREV: Mutex<[([u64; VMEXIT_BUCKETS], u64, u64); MAX_VCPUS_CAP]> =
     Mutex::new([([0; VMEXIT_BUCKETS], 0, 0); MAX_VCPUS_CAP]);
 
+/// Per target vCPU: kicks sent as the posted-interrupt vector, as the plain
+/// kick, and posts that needed no kick; per vCPU: external-interrupt exits
+/// on the posted vector, on the kick vector, on anything else.
+pub const BK_POSTED: usize = 0;
+pub const BK_PLAIN: usize = 1;
+pub const BK_NONE: usize = 2;
+pub const BX_PI: usize = 3;
+pub const BX_KICK: usize = 4;
+pub const BX_OTHER: usize = 5;
+static BENCH_EV: [[AtomicU64; 6]; MAX_VCPUS_CAP] =
+    [const { [const { AtomicU64::new(0) }; 6] }; MAX_VCPUS_CAP];
+
+pub fn bench_count(vcpu: u8, what: usize) {
+    if BENCH_MARKS.load(Ordering::Relaxed) {
+        if let Some(c) = BENCH_EV.get(vcpu as usize).and_then(|a| a.get(what)) {
+            c.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 pub fn set_bench_marks(on: bool) {
     BENCH_MARKS.store(on, Ordering::Relaxed);
 }
@@ -138,10 +158,15 @@ pub fn bench_mark(vcpu: u8) {
         let handlers: u64 = c.exit_cycles.iter().map(|x| x.load(Ordering::Relaxed)).sum();
         let (pe, pg, ph) = prev[i];
         let d = |b: usize| exits[b].wrapping_sub(pe[b]);
+        let ev: [u64; 6] = core::array::from_fn(|k| BENCH_EV[i][k].swap(0, Ordering::Relaxed));
         crate::kprintln!(
             "[vmbench-host] mark from vcpu{} · vcpu{}: intr {} hlt {} mmio {} io {} msr {} cpuid {} other {} | in guest {} us, in exit handlers {} us",
             vcpu, i, d(0), d(1), d(2), d(3), d(4), d(5), d(6),
             guest.wrapping_sub(pg) / us, handlers.wrapping_sub(ph) / us,
+        );
+        crate::kprintln!(
+            "[vmbench-host]   vcpu{} kicked: posted {} plain {} none {} | intr exits: PI vector {} kick vector {} other {}",
+            i, ev[BK_POSTED], ev[BK_PLAIN], ev[BK_NONE], ev[BX_PI], ev[BX_KICK], ev[BX_OTHER],
         );
         prev[i] = (exits, guest, handlers);
     }

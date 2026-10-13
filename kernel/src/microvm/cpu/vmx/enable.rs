@@ -645,6 +645,8 @@ pub struct Vcpu {
     halt_poll_us: u64,
     /// Interrupt-window exiting currently requested (mirrors the VMCS bit).
     irq_window: bool,
+    /// x2APIC APICv active in this VMCS: the CPU delivers LAPIC vectors.
+    apicv: bool,
     /// Host/guest FPU (XSAVE) save areas — VMRESUME preserves neither.
     host_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
     guest_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
@@ -708,6 +710,8 @@ impl VmContext {
             // off-vCPU backend can own it; re-arm it to power-on state per VM.
             crate::microvm::devices::net_backend::reset();
             crate::microvm::devices::gpu_backend::reset();
+            // Fresh posted-interrupt descriptors and kick targets for this VM.
+            lapic::reset_posted();
 
             Ok(VmContext {
                 shared: Arc::new(VmShared {
@@ -744,6 +748,7 @@ impl VmContext {
                     lapic: LocalApic::new(0).ok_or("no frame for the LAPIC page")?,
                     halt_poll_us: HALT_POLL_MIN_US,
                     irq_window: false,
+                    apicv: false,
                     host_fpu: crate::microvm::cpu::FpuArea::boxed(),
                     guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
                 },
@@ -799,6 +804,7 @@ impl VmContext {
                     lapic: LocalApic::new(apic_id).ok_or("no frame for the LAPIC page")?,
                     halt_poll_us: HALT_POLL_MIN_US,
                     irq_window: false,
+                    apicv: false,
                     host_fpu: crate::microvm::cpu::FpuArea::boxed(),
                     guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
                 },
@@ -909,14 +915,17 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
 /// `kvm_cpu_has_interrupt`: the PIC's INTR if this vCPU takes it (LINT0 in
 /// ExtINT, or no LAPIC), else a LAPIC vector above PPR. `dev` is the locked
 /// device model on the BSP (the PIC is wired there), `None` on an AP.
-fn pending_interrupt(vcpu: &mut Vcpu, dev: Option<&VmDevices>) -> Option<bool> {
+///
+/// Under APICv the CPU delivers LAPIC vectors itself; `inject` then asks only
+/// for what needs an injection (ExtINT), as `kvm_cpu_has_injectable_intr`.
+fn pending_interrupt(vcpu: &mut Vcpu, dev: Option<&VmDevices>, inject: bool) -> Option<bool> {
     let lapic_on = vmx_lapic_on();
     if dev.is_some_and(|sh| sh.pic.output())
         && (!lapic_on || vcpu.lapic.accept_pic_intr())
     {
         return Some(true);
     }
-    if lapic_on && vcpu.lapic.has_interrupt().is_some() {
+    if lapic_on && !(inject && vcpu.apicv) && vcpu.lapic.has_interrupt().is_some() {
         return Some(false);
     }
     None
@@ -944,20 +953,24 @@ impl VmContext {
         let mut dev = (self.vcpu.apic_id == 0).then(|| self.shared.dev.lock());
         if let Some(sh) = dev.as_deref_mut() { collect_device_irqs(sh, self.shared.guest_mem); }
         let vcpu = &mut self.vcpu;
+        if vcpu.apicv {
+            let rvi = vcpu.lapic.sync_for_apicv();
+            vmcs::set_rvi(rvi)?;
+        }
 
         if vcpu.reinject != 0 {
             let rtype = (vcpu.reinject >> 8) & 0x7;
             if rtype != 0 || vmcs::guest_interruptible() {
                 vmcs::write_entry_intr_info(vcpu.reinject)?;
                 vcpu.reinject = 0;
-                let more = pending_interrupt(vcpu, dev.as_deref()).is_some();
+                let more = pending_interrupt(vcpu, dev.as_deref(), true).is_some();
                 vcpu.set_irq_window(more)?;
             } else {
                 vcpu.set_irq_window(true)?;
             }
             return Ok(());
         }
-        let Some(from_pic) = pending_interrupt(vcpu, dev.as_deref()) else {
+        let Some(from_pic) = pending_interrupt(vcpu, dev.as_deref(), true) else {
             return vcpu.set_irq_window(false);
         };
         let queued = vmcs::read_entry_intr_info()? & (1u64 << 31) != 0;
@@ -977,11 +990,45 @@ impl VmContext {
         vcpu.set_irq_window(false)
     }
 
+    /// Once the guest is in x2APIC mode, hand interrupt delivery to the CPU
+    /// (KVM enables APICv per vCPU; xAPIC MMIO stays emulated before that).
+    /// `set microvm_apicv off` keeps the emulated path.
+    fn maybe_activate_apicv(&mut self) -> Result<(), &'static str> {
+        let v = &mut self.vcpu;
+        if v.apicv || !vmx_lapic_on() || !v.lapic.is_x2apic() {
+            return Ok(());
+        }
+        if crate::config::get("microvm_apicv").is_some_and(|s| s.trim() == "off") {
+            if v.apic_id == 0 { crate::kprintln!("[microvm] APICv: off (config)"); }
+            return Ok(());
+        }
+        if !vmcs::apicv_supported() {
+            if v.apic_id == 0 { crate::kprintln!("[microvm] APICv: not offered by this CPU"); }
+            return Ok(());
+        }
+        let Some(desc) = lapic::pi_desc_phys(v.apic_id) else { return Ok(()) };
+        let core = crate::smp::per_core::current_core_id();
+        let nv = crate::interrupts::POSTED_INTR_VECTOR;
+        lapic::pi_set_notify(v.apic_id, nv,
+            crate::smp::per_core::core_apic(core).unwrap_or(0) << 8);
+        let svi = v.lapic.activate_apicv();
+        // SAFETY: this vCPU's VMCS is current on this core; the register
+        // page lives in `v.lapic` and the descriptor table is never freed.
+        unsafe { vmcs::activate_apicv(&v.bitmaps, v.lapic.page_phys(), desc, nv, svi)? };
+        v.apicv = true;
+        // The window was for LAPIC vectors, which the CPU now delivers.
+        v.set_irq_window(false)?;
+        if v.apic_id == 0 {
+            crate::kprintln!("[microvm] APICv: on (posted interrupts, x2APIC virtualization)");
+        }
+        Ok(())
+    }
+
     /// Anything deliverable right now (takes `dev` + collects on the BSP).
     fn event_pending(&mut self) -> bool {
         let mut dev = (self.vcpu.apic_id == 0).then(|| self.shared.dev.lock());
         if let Some(sh) = dev.as_deref_mut() { collect_device_irqs(sh, self.shared.guest_mem); }
-        self.vcpu.reinject != 0 || pending_interrupt(&mut self.vcpu, dev.as_deref()).is_some()
+        self.vcpu.reinject != 0 || pending_interrupt(&mut self.vcpu, dev.as_deref(), false).is_some()
     }
 
     /// `kvm_vcpu_halt` with adaptive halt-polling. Mirror of the SVM backend.
@@ -1546,7 +1593,21 @@ impl VmContext {
         match basic {
             // A host interrupt (timer, device, kick IPI) pre-empted the guest;
             // the host took it on exit. Pending guest events inject at entry.
+            // Under APICv the exit acknowledged it, and its handler runs here.
             1 => {
+                if self.vcpu.apicv {
+                    let info = vmcs::read_exit_intr_info().unwrap_or(0);
+                    if info & (1 << 31) != 0 {
+                        use crate::microvm::cpu as c;
+                        let v = info as u8;
+                        c::bench_count(self.vcpu.apic_id, match v {
+                            crate::interrupts::POSTED_INTR_VECTOR => c::BX_PI,
+                            crate::interrupts::VCPU_KICK_VECTOR => c::BX_KICK,
+                            _ => c::BX_OTHER,
+                        });
+                        crate::interrupts::dispatch_acked(v);
+                    }
+                }
                 last_outcome = Some(outcome);
                 continue;
             }
@@ -1597,6 +1658,9 @@ impl VmContext {
                     vmcs::advance_guest_rip()?;
                 } else {
                     vmcs::inject_exception(VEC_GP, Some(0))?;
+                }
+                if ok && basic == 32 && msr == 0x1B {
+                    self.maybe_activate_apicv()?;
                 }
                 last_outcome = Some(outcome);
                 continue;
