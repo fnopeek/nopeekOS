@@ -92,6 +92,21 @@ pub fn write32(addr: PciAddr, offset: u8, value: u32) {
     })
 }
 
+/// A 16-bit config write through the data port's byte lanes (Linux
+/// `pci_conf1_write` with len 2): only the addressed word changes, which a
+/// read-modify-write of the dword would not guarantee for registers with
+/// side effects on write.
+pub fn write16(addr: PciAddr, offset: u8, value: u16) {
+    crate::interrupts::without_interrupts(|| {
+        let _g = CONFIG_LOCK.lock();
+        CONFIG_ADDR.outl(addr.address(offset));
+        // SAFETY: 0xCFC + 0 or 2, a lane of the config data port owned by
+        // this module; the access is serialised by CONFIG_LOCK.
+        let lane = unsafe { Port::new(0xCFC + (offset & 2) as u16) };
+        lane.outw(value);
+    })
+}
+
 pub fn read16(addr: PciAddr, offset: u8) -> u16 {
     let val = read32(addr, offset);
     ((val >> ((offset & 2) * 8)) & 0xFFFF) as u16

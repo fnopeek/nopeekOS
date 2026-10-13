@@ -1447,6 +1447,22 @@ pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32)
     0
 }
 
+/// `npk_pci_write_config16(offset, value)`: a word write to the bound
+/// device's config space, with the same refusals as the dword form.
+pub(crate) fn npk_pci_write_config16(ctx: &mut HostState, offset: i32, value: i32) -> i32 {
+    let hw = match ctx.hw.as_ref() {
+        Some(h) if h.is_pci => h,
+        _ => return -1,
+    };
+    if offset < 0 || offset > 254 || offset & 1 != 0 { return -1; }
+    if config_write_refused(hw.pci_addr, offset as u8 & !3) {
+        kprintln!("[npk] WASM: PCI config write at {:#x} refused (address or interrupt routing)", offset);
+        return -1;
+    }
+    pci::write16(hw.pci_addr, offset as u8, value as u16);
+    0
+}
+
 /// Config dwords a driver must not write: they decide where the device sits
 /// in physical memory (BARs, expansion ROM, a bridge's windows) or where its
 /// interrupts go (MSI address and data, MSI-X control). The kernel sizes and

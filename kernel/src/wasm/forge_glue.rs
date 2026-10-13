@@ -944,6 +944,10 @@ host_imports! {
     // npk_pci_write_config(offset, value) -> 0 or -1
     ctx fn npk_pci_write_config(offset: i32, value: i32) -> i32;
 
+    // npk_pci_write_config16(offset, value) -> 0 or -1; one 16-bit write,
+    // same refusals as the dword form
+    ctx fn npk_pci_write_config16(offset: i32, value: i32) -> i32;
+
     // npk_pci_enable_bus_master() -> 0 or -1
     ctx fn npk_pci_enable_bus_master() -> i32;
 
