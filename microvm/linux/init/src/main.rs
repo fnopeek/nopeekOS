@@ -223,6 +223,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp/app HOME=/tmp/app \
                  MOZ_ENABLE_WAYLAND=1; \
+                 grep -q npkswcursor /proc/cmdline && export WLR_NO_HARDWARE_CURSORS=1; \
                  seatd -g wl > /tmp/seatd.log 2>&1 & \
                  i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do usleep 5000; i=$((i+1)); done; \
                  echo \"<0>[wl] npkwm start (seatd after ${i}x5ms)\" > /dev/kmsg; \

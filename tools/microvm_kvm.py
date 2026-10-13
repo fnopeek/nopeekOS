@@ -224,6 +224,8 @@ def main():
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 panic=1 nokaslr "
         f"acpi=off tsc=reliable idle=halt devtmpfs.mount=1 maxcpus={a.cpus} "
         f"loglevel=5 nopeektime={int(time.time())}"
+        # The host draws the pointer in nopeekOS; in QEMU's window npkwm must.
+        + (" npkswcursor" if a.show else "")
         + (f" {a.extra}" if a.extra else "")
     )
     # Slot order fixes the names: home is vda, sqfs is vdb, as in nopeekOS.
