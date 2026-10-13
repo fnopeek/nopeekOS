@@ -32,6 +32,9 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# npkwm's MAX_OUTPUTS: a tablet's x spans this many outputs side by side.
+NPKWM_SLOTS = 8
+
 # Same milestones as kernel/src/microvm/boottime.rs.
 GUEST_MARKS = [
     ("Linux version", "guest kernel: first line"),
@@ -237,7 +240,13 @@ def main():
         # not the BIOS text console.
         "-vga", "none",
         "-device", f"virtio-gpu-pci,xres={xres},yres={yres},addr=0x6",
-        "-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci",
+        # npkwm reads a tablet as nopeekOS sends it: x split into one slot
+        # per output (MAX_OUTPUTS = 8), so the host pointer on QEMU's tablet
+        # would only reach the leftmost strip. With a window: a relative
+        # mouse (grabbed on click, Ctrl+Alt+G releases). Without: the tablet,
+        # which the scripted clicks below aim at slot 0.
+        "-device", "virtio-keyboard-pci",
+        "-device", "virtio-mouse-pci" if a.show else "virtio-tablet-pci",
         "-netdev", "user,id=n0,net=10.99.0.0/24,host=10.99.0.1",
         "-device", "virtio-net-pci,netdev=n0",
         "-audiodev", "none,id=snd0", "-device", "virtio-sound-pci,audiodev=snd0",
@@ -359,9 +368,10 @@ def main():
                         # click@X,Y in guest pixels; plain click hits the centre.
                         if k[1].startswith("click@"):
                             px, py = (int(v) for v in k[1][6:].split(","))
-                            ax_val = {"x": px * 32767 // int(xres), "y": py * 32767 // int(yres)}
+                            ax_val = {"x": px * 32767 // (int(xres) * NPKWM_SLOTS),
+                                      "y": py * 32767 // int(yres)}
                         else:
-                            ax_val = {"x": 16384, "y": 16384}
+                            ax_val = {"x": 16384 // NPKWM_SLOTS, "y": 16384}
                         pos = [{"type": "abs", "data": {"axis": ax, "value": ax_val[ax]}} for ax in ("x", "y")]
                         qmp.cmd("input-send-event", events=pos)
                         for down in (True, False):
