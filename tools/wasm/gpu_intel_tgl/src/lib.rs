@@ -33,64 +33,86 @@ const BAR0_PAGES: i32 = 16 * 1024 * 1024 / 4096;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    say("[gpu_intel_tgl] PANIC, driver stopped");
-    if let Some(l) = info.location() {
-        say(" at ");
-        say(l.file());
-        say(":");
-        say_hex(l.line());
+    let mut l = Line::new();
+    l.s("PANIC, driver stopped");
+    if let Some(loc) = info.location() {
+        l.s(" at ").s(loc.file()).s(":").hex(loc.line());
     }
-    say("\n");
+    l.say();
     core::arch::wasm32::unreachable()
 }
 
-fn say(s: &str) {
-    npk_sys::print(s.as_bytes());
+/// One output line, built whole so the kernel log keeps it on one line.
+struct Line {
+    buf: [u8; 160],
+    len: usize,
 }
 
-fn say_hex(v: u32) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut b = *b"0x00000000";
-    for i in 0..8 {
-        b[9 - i] = HEX[((v >> (i * 4)) & 0xf) as usize];
+impl Line {
+    fn new() -> Self {
+        let mut l = Line { buf: [0; 160], len: 0 };
+        l.s("[gpu_intel_tgl] ");
+        l
     }
-    say(core::str::from_utf8(&b).unwrap_or("?"));
+
+    fn s(&mut self, s: &str) -> &mut Self {
+        let n = s.len().min(self.buf.len() - self.len);
+        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+        self.len += n;
+        self
+    }
+
+    fn hex(&mut self, v: u32) -> &mut Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut b = *b"0x00000000";
+        for i in 0..8 {
+            b[9 - i] = HEX[((v >> (i * 4)) & 0xf) as usize];
+        }
+        self.s(core::str::from_utf8(&b).unwrap_or("?"))
+    }
+
+    /// To the terminal `driver` was started from, and to the kernel log, so
+    /// the result can be read with `dmesg` from any session.
+    fn say(&self) {
+        let text = &self.buf[..self.len];
+        npk_sys::print(text);
+        npk_sys::print(b"\n");
+        npk_sys::log(text);
+    }
+}
+
+fn say(s: &str) {
+    Line::new().s(s).say();
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    say("[gpu_intel_tgl] v");
-    say(DRIVER_VERSION);
-    say(", stage 0: take over and read\n");
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 0: take over and read").say();
 
     match npk_sys::pci_bind(INTEL_VENDOR as i32, TGL_GT2 as i32) {
         0 => {}
         rc => {
             say(match rc {
-                -1 => "[gpu_intel_tgl] no 8086:9a78 on the bus\n",
-                -2 => "[gpu_intel_tgl] bind denied (needs HARDWARE)\n",
-                -3 => "[gpu_intel_tgl] card owned by another driver\n",
-                _ => "[gpu_intel_tgl] bind failed\n",
+                -1 => "no 8086:9a78 on the bus",
+                -2 => "bind denied (needs HARDWARE)",
+                -3 => "card owned by another driver",
+                _ => "bind failed",
             });
             return;
         }
     }
-    say("[gpu_intel_tgl] bound 8086:9a78, kernel driver handed over\n");
+    say("bound 8086:9a78, kernel driver handed over");
 
     let rev = npk_sys::pci_read_config(0x08) as u32 & 0xff;
-    say("[gpu_intel_tgl] revision ");
-    say_hex(rev);
-    say("\n");
+    Line::new().s("revision ").hex(rev).say();
 
     let Some(regs) = Mmio::map_bar(0, BAR0_PAGES) else {
-        say("[gpu_intel_tgl] BAR0 could not be mapped\n");
+        say("BAR0 could not be mapped");
         return;
     };
-    say("[gpu_intel_tgl] BAR0 mapped (16 MB)\n");
+    say("BAR0 mapped (16 MB)");
 
-    say("[gpu_intel_tgl] FORCEWAKE_ACK_GT_GEN9     ");
-    say_hex(regs.r32(regs::FORCEWAKE_ACK_GT_GEN9));
-    say("\n[gpu_intel_tgl] FORCEWAKE_ACK_RENDER_GEN9 ");
-    say_hex(regs.r32(regs::FORCEWAKE_ACK_RENDER_GEN9));
-    say("\n[gpu_intel_tgl] stage 0 done, desktop stays on the CPU path\n");
+    Line::new().s("FORCEWAKE_ACK_GT_GEN9     ").hex(regs.r32(regs::FORCEWAKE_ACK_GT_GEN9)).say();
+    Line::new().s("FORCEWAKE_ACK_RENDER_GEN9 ").hex(regs.r32(regs::FORCEWAKE_ACK_RENDER_GEN9)).say();
+    say("stage 0 done, desktop stays on the CPU path");
 }
