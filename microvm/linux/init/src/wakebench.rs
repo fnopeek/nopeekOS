@@ -181,6 +181,9 @@ pub fn run_vm(kmsg_fd: i64) {
         return;
     }
     wait_for_cpus();
+    // Lines written to /dev/kmsg are rate-limited to a burst of ten until
+    // this is set; the session script sets it too, but only after this run.
+    super::write_file(b"/proc/sys/kernel/printk_devkmsg\0", b"on", 0);
     super::write_file(b"/tmp/vmbench\0", VMBENCH, 0o755);
     if kmsg_fd >= 0 {
         // SAFETY: duplicating an open fd onto stdout.
