@@ -4,7 +4,9 @@
 //! (non-identity), so the guest can place Linux at guest-phys 0x10000 /
 //! 0x100000 without touching the host kernel image at the same host
 //! addresses. The low boot window is one contiguous block of 2-MB leaves;
-//! the rest of guest RAM is demand-paged 4 KB on EPT violation. The high
+//! the rest of guest RAM is demand-paged on EPT violation, a 2-MB leaf per
+//! first-touched block where the host has an aligned 2-MB block free and
+//! 4-KB pages otherwise (as `svm::npt`). The high
 //! MMIO range [3 GiB, 4 GiB) has its own PD (scratch page, trapped
 //! LAPIC/IOAPIC pages).
 //!
@@ -41,6 +43,13 @@ const GUEST_RAM_ALIGN_SLACK: usize = 511;
 
 /// Bits [51:12] of an EPT entry hold the next-level / page phys addr.
 const EPT_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+/// Bits [51:21] of a 2-MB leaf.
+const EPT_2M_ADDR_MASK: u64 = 0x000F_FFFF_FFE0_0000;
+const FRAMES_PER_2M: usize = (TWO_MB / 4096) as usize;
+
+/// Demand blocks mapped as one 2-MB leaf, and as a PT of 4-KB pages.
+pub static DEMAND_2M: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static DEMAND_4K_BLOCKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Hybrid split: `[0, BOOT_WINDOW_BYTES)` is one contiguous 2-MB-leaf
 /// block (fast boot, no faults on the early path, covers the kernel image
@@ -79,8 +88,8 @@ pub fn boot_frames_for(guest_bytes: u64) -> usize {
 /// Build the EPT. Maps:
 ///   - guest-physical [0, boot window) → host-physical
 ///     [boot_base, +boot window) via 2-MB leaf entries;
-///   - [boot window, guest_bytes) via PD→PT sub-tables with all-absent
-///     4-KB PTEs, faulted in on demand;
+///   - [boot window, guest_bytes) not present, faulted in on demand
+///     (`demand_fault_in`);
 ///   - guest-physical [0xFEC00000, 0xFF000000) (IOAPIC, HPET, LAPIC) →
 ///     a 4 KB scratch page via PT-level mapping, except the trapped
 ///     IOAPIC page and (with LAPIC emulation) the LAPIC page, which are
@@ -99,7 +108,6 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
         return Err("EPT: guest_bytes > 3 GiB (PDPT[3] reserved for MMIO)");
     }
     let boot_leaves = boot_window_bytes(guest_bytes) / TWO_MB;
-    let guest_leaves = guest_bytes / TWO_MB;
     // One PD covers 1 GiB (512 × 2-MB leaves). Allocate as many PDs
     // as the guest needs, chained off PDPT[0..num_pds).
     let num_pds = ((guest_bytes + ONE_GB - 1) / ONE_GB) as usize;
@@ -177,28 +185,21 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
             }
         }
 
-        // Populate each PD: entries [0..512) cover [p*1GiB, (p+1)*1GiB). The
-        // tree is linked and walkable from here on, so a failed demand-PT
-        // allocation unwinds through `release`.
+        // Populate each PD: the boot window as 2-MB leaves. The demand region
+        // stays not present (the PDs are zeroed); its first touch installs
+        // either a 2-MB leaf or a PT (`demand_fault_in`). Either is a
+        // not-present -> present change, which needs no INVEPT, so a present
+        // entry is never replaced.
         const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
         for p in 0..num_pds {
             let pd = pd_physs[p] as *mut u64;
             let base_leaf = (p as u64) * LEAVES_PER_PD;
-            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(guest_leaves);
+            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(boot_leaves);
             for leaf in base_leaf..end_leaf {
                 let local = (leaf - base_leaf) as usize;
-                if leaf < boot_leaves {
-                    let host_target = boot_base + leaf * TWO_MB;
-                    pd.add(local).write_volatile(
-                        host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
-                } else {
-                    let Some(pt) = memory::allocate_frame() else {
-                        release(pml4_phys, guest_bytes);
-                        return Err("OOM: EPT demand PT");
-                    };
-                    core::ptr::write_bytes(pt as *mut u8, 0, 4096);
-                    pd.add(local).write_volatile(pt | EPT_RWX);
-                }
+                let host_target = boot_base + leaf * TWO_MB;
+                pd.add(local).write_volatile(
+                    host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
             }
         }
     }
@@ -206,15 +207,20 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
     Ok((pml4_phys | EPTP_WALK_LENGTH_4 | EPTP_MEM_TYPE_WB, pml4_phys))
 }
 
-/// Walk PML4[0]→PDPT[0]→PD→PT for a demand-region `gpa` and return
-/// the host phys of its 4 KB page, allocating + mapping a zeroed
-/// frame on first touch. Called from the EPT-violation handler
+/// Back the 4 KB guest page at `gpa` (demand region) and return its host
+/// address. The first touch of a 2 MB block maps the whole block as one
+/// 2-MB leaf from a 2-MB-aligned host block (one allocation, one TLB entry
+/// for the guest, like a THP-backed KVM memslot); without such a block it
+/// falls back to a PT of 4 KB pages. Called from the EPT-violation handler
 /// (guest fault) and `GuestMem` (host DMA to an untouched page) —
-/// idempotent: an already-present PTE returns its existing frame.
-/// `gpa` must be ≥ the boot window (caller guarantees; the boot
-/// region is 2-MB leaves, never PT-walked). No INVEPT needed: the
-/// entry was not-present so there is no stale TLB for it.
-pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
+/// idempotent. `None` outside the demand region or without host memory to
+/// spare. Mirrors `svm::npt::demand_fault_in`.
+pub fn demand_fault_in(pml4_phys: u64, gpa: u64, guest_bytes: u64) -> Option<u64> {
+    // The demand PDEs and those past the end of guest RAM are both empty:
+    // only the bounds tell them apart.
+    if gpa < boot_window_bytes(guest_bytes) || gpa >= guest_bytes {
+        return None;
+    }
     // SAFETY: our own freshly-built EPT, identity-mapped tables.
     unsafe {
         let pml4 = pml4_phys as *const u64;
@@ -230,12 +236,33 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
         }
         let pd = (pdpt_entry & EPT_ADDR_MASK) as *mut u64;
         let pd_idx = ((gpa % ONE_GB) / TWO_MB) as usize;
+        let in_block = gpa % TWO_MB & !0xFFF;
         let pde = pd.add(pd_idx).read_volatile();
-        if pde == 0 || pde & EPT_LEAF != 0 {
-            return None; // outside demand region / unexpected 2-MB leaf
+        if pde & EPT_R != 0 && pde & EPT_LEAF != 0 {
+            return Some((pde & EPT_2M_ADDR_MASK) + in_block); // a 2-MB leaf
         }
-        let pt = (pde & EPT_ADDR_MASK) as *mut u64;
-        let pt_idx = ((gpa % TWO_MB) / 4096) as usize;
+        let pt = if pde & EPT_R != 0 {
+            (pde & EPT_ADDR_MASK) as *mut u64
+        } else {
+            let spare = crate::microvm::devices::guest_mem::frames_spare();
+            if spare > FRAMES_PER_2M {
+                if let Some(block) = memory::allocate_contiguous_aligned(FRAMES_PER_2M, FRAMES_PER_2M) {
+                    core::ptr::write_bytes(block as *mut u8, 0, TWO_MB as usize);
+                    pd.add(pd_idx).write_volatile(block | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
+                    DEMAND_2M.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    return Some(block + in_block);
+                }
+            }
+            if spare < 2 {
+                return None;
+            }
+            let pt = memory::allocate_frame()?;
+            core::ptr::write_bytes(pt as *mut u8, 0, 4096);
+            pd.add(pd_idx).write_volatile(pt | EPT_RWX);
+            DEMAND_4K_BLOCKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            pt as *mut u64
+        };
+        let pt_idx = (in_block / 4096) as usize;
         let pte = pt.add(pt_idx).read_volatile();
         if pte & EPT_R != 0 {
             return Some(pte & EPT_ADDR_MASK); // already faulted in
@@ -249,9 +276,8 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
         pt.add(pt_idx)
             .write_volatile(frame | EPT_RWX | EPT_MEM_TYPE_WB);
         // Fault-around: back the rest of this 2 MB block now, so a guest
-        // walking fresh memory takes one exit per 2 MB, not one per 4 KB
-        // (KVM gets the same from a THP-backed memslot). Stops at the host
-        // reserve; the remaining pages fault in singly.
+        // walking fresh memory takes one exit per 2 MB, not one per 4 KB.
+        // Stops at the host reserve; the remaining pages fault in singly.
         let mut left = spare - 1;
         for j in 0..512usize {
             if left == 0 { break; }
@@ -266,7 +292,7 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
 }
 
 /// Free everything `install_window` allocated for `guest_bytes`: every
-/// demand-faulted 4 KB frame, the demand PT pages, and the fixed tables
+/// demand 2-MB block and 4 KB frame, the demand PT pages, and the fixed tables
 /// (PML4/PDPT/PDs/PD_HIGH/PT_DUMMY/PT_LAPIC/scratch page). Also unwinds a
 /// partially built tree: absent entries are skipped. The contiguous boot
 /// block is freed separately by the caller (it owns `boot_raw_base`).
@@ -294,7 +320,11 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
                 if leaf < boot_leaves { continue; }
                 let local = (leaf - base_leaf) as usize;
                 let pde = pd.add(local).read_volatile();
-                if pde == 0 || pde & EPT_LEAF != 0 { continue; }
+                if pde & EPT_R == 0 { continue; }
+                if pde & EPT_LEAF != 0 {
+                    memory::deallocate_contiguous(pde & EPT_2M_ADDR_MASK, FRAMES_PER_2M);
+                    continue;
+                }
                 let pt_phys = pde & EPT_ADDR_MASK;
                 let pt = pt_phys as *const u64;
                 for j in 0..512usize {

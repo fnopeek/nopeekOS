@@ -67,6 +67,7 @@ pub const AC_RFDS_CLEAR: u64 = 1 << 28;
 const AC_ITS_NO: u64 = 1 << 62;
 
 const MSR_ARCH_CAPABILITIES: u32 = 0x10A;
+/// IA32_BIOS_SIGN_ID on Intel, MSR_AMD64_PATCH_LEVEL on AMD.
 const MSR_AMD64_PATCH_LEVEL: u32 = 0x8B;
 
 /// The CPU's identity and the bugs Linux would set on it.
@@ -105,6 +106,8 @@ pub struct Bugs {
     pub stibp: bool,
     pub stibp_always_on: bool,
     pub smt: bool,
+    /// Microcode revision (`intel_get_microcode_revision`, AMD patch level).
+    pub microcode: u32,
 }
 
 fn cpuid(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
@@ -168,6 +171,17 @@ pub fn detect() -> Bugs {
         max >= 0xB && cpuid(0xB, 0).1 & 0xFFFF > 1
     };
     let _ = l1b;
+    if b.intel && !b.hypervisor {
+        // SAFETY: IA32_BIOS_SIGN_ID is architectural on Intel; writing 0 and
+        // a CPUID make the CPU store the revision in its upper half.
+        unsafe { msr::write(MSR_AMD64_PATCH_LEVEL, 0) };
+        let _ = cpuid(1, 0);
+        // SAFETY: as above.
+        b.microcode = (unsafe { msr::read(MSR_AMD64_PATCH_LEVEL) } >> 32) as u32;
+    } else if b.amd && !b.hypervisor {
+        // SAFETY: MSR_AMD64_PATCH_LEVEL exists on every AMD family 0x10+.
+        b.microcode = unsafe { msr::read(MSR_AMD64_PATCH_LEVEL) } as u32;
+    }
 
     // `tsa_init`: Zen 3/4 get VERW_CLEAR from a microcode revision, every
     // other AMD part is TSA-immune.
@@ -177,8 +191,7 @@ pub fn detect() -> Bugs {
     if b.amd && !b.hypervisor {
         let zen34 = b.family == 0x19 && matches!(b.model, 0x00..=0x0f | 0x20..=0x5f | 0x10..=0x1f | 0x60..=0xaf);
         if zen34 {
-            // SAFETY: MSR_AMD64_PATCH_LEVEL exists on every AMD family 0x10+.
-            let rev = unsafe { msr::read(MSR_AMD64_PATCH_LEVEL) } as u32;
+            let rev = b.microcode;
             if table::AMD_TSA_MICROCODE.iter().any(|&(f, m, s, min)|
                 f == b.family && m == b.model && s == b.stepping && rev >= min)
             {

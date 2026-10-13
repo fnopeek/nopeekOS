@@ -180,7 +180,7 @@ impl GuestMem {
         let _g = DEMAND_LOCK.lock();
         let host = match self.sl {
             SecondLevel::Ept => {
-                crate::microvm::cpu::vmx::ept::demand_fault_in(self.table_root, page)
+                crate::microvm::cpu::vmx::ept::demand_fault_in(self.table_root, page, self.len)
             }
             SecondLevel::Npt => {
                 crate::microvm::cpu::svm::npt::demand_fault_in(self.table_root, page, self.len)

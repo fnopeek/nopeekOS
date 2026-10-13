@@ -2030,8 +2030,8 @@ impl VmContext {
                 }
                 // Demand-paged guest RAM. A violation on a gpa
                 // inside the advertised window but above the
-                // contiguous boot block = first touch of a 4-KB
-                // demand page → fault it in + re-enter. Ordering is
+                // contiguous boot block = first touch of a demand
+                // block → fault it in (2 MB or 4 KB) + re-enter. Ordering is
                 // load-bearing: MMIO BAR ranges first (above),
                 // RAM-demand here, fatal dump last.
                 if gm.ensure(gpa) {

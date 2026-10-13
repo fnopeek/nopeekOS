@@ -251,7 +251,9 @@ fn report_bugs(b: &crate::cpu_vulns::Bugs, ibpb: bool, host_spec: u64) {
     VERW_ON_ENTRY.store(verw, Ordering::Relaxed);
     L1D_FLUSH_ON_ENTRY.store(l1d, Ordering::Relaxed);
     let text = core::str::from_utf8(&l.buf[..l.len]).unwrap_or("?");
-    crate::kprintln!("[npk] cpu bugs: {}", if text.is_empty() { "none that reach a guest" } else { text });
+    crate::kprintln!("[npk] cpu bugs (family {:#x} model {:#x} stepping {}, microcode {:#x}): {}",
+        b.family, b.model, b.stepping, b.microcode,
+        if text.is_empty() { "none that reach a guest" } else { text });
 }
 
 /// Decide once, then set this core up. Called on every core before any

@@ -49,11 +49,12 @@ const IO_COUNTERS: usize = 6;
 fn io_counters() -> [u64; IO_COUNTERS] {
     use core::sync::atomic::Ordering::Relaxed;
     use crate::microvm::devices::virtqueue as vq;
-    use crate::microvm::cpu::svm::npt;
+    use crate::microvm::cpu::{svm::npt, vmx::ept};
     [
         vq::BLK_KICKS.load(Relaxed), vq::BLK_REQS.load(Relaxed),
         vq::BLK_BYTES.load(Relaxed), vq::BLK_CYCLES.load(Relaxed),
-        npt::DEMAND_2M.load(Relaxed), npt::DEMAND_4K_BLOCKS.load(Relaxed),
+        npt::DEMAND_2M.load(Relaxed) + ept::DEMAND_2M.load(Relaxed),
+        npt::DEMAND_4K_BLOCKS.load(Relaxed) + ept::DEMAND_4K_BLOCKS.load(Relaxed),
     ]
 }
 /// vCPUs whose host cores' clock is sampled for the app phase.
