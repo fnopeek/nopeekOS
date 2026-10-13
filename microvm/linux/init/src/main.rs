@@ -328,6 +328,9 @@ fn launch_wayland(kmsg_fd: i64) {
                  grep -q npkstats /proc/cmdline || : > /tmp/lw-sample.sh; \
                  PROF=$(sed -n 's/.*npkprofile=\\([0-9.]*:[0-9]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$PROF\" ] && echo 'export MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_STARTUP_INTERVAL=1 MOZ_PROFILER_STARTUP_ENTRIES=16777216 MOZ_PROFILER_STARTUP_FILTERS=GeckoMain,Socket,Worker,Timer,StreamTrans,IPC,RemoteLzy,File,BgIO,BackgroundThreadPool,Renderer MOZ_PROFILER_STARTUP_FEATURES=js,stackwalk,cpu,fileio MOZ_PROFILER_SHUTDOWN=/tmp/bcache/lw-prof.json' > /tmp/app.sh || : > /tmp/app.sh; \
+                 SCU=$(sed -n 's/.*npkscudo=\\([^ ]*\\).*/\\1/p' /proc/cmdline); \
+                 [ -n \"$SCU\" ] && echo \"export SCUDO_OPTIONS=$SCU\" >> /tmp/app.sh \
+                   && echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; \
                  echo 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; [ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' >> /tmp/app.sh; \
                  su -s /bin/sh app -c 'WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 exec sh /tmp/app.sh' \
                    > /tmp/app.log 2>&1; \
