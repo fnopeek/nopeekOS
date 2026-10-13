@@ -82,7 +82,12 @@ llvmpipe — auch das auf der CPU.
 
 **Nebenbefund:** `gpu` sagt auf dem IdeaPad `BCS: off (probe failed)` und
 `blit did not paint`, obwohl es dort gar keinen Probe gibt
-(`intent/system.rs:1255`). Soll „no native driver" heissen.
+(`intent/system.rs:1255`). Soll „no native driver" heissen. Dasselbe am NUC
+ohne Bild der Firmware: dort steht `Pending … use 'gpu init'`, und der
+eigentliche Grund — die Firmware hat kein Bild geliefert, Monitor beim
+Booten aus? — steht nirgends. Die Ausgabe stammt aus der ADL-N-Zeit (N100)
+und wird mit gpudev neu: Besitzer der Karte, Modul, Selbsttest, Rueckfall,
+und warum.
 
 ---
 
@@ -146,6 +151,7 @@ seinem Rueckfallwissen: wo der letzte gueltige Scanout-Puffer liegt.
 | Modul bereit | GPU | `gpu_intel` steht in `autostart` wie der WLAN-Treiber, faehrt die Karte nach Linux hoch und meldet sich ueber gpudev |
 | kein Modul / unbekannte Karte | CPU | bleibt beim Rueckfall — kein Fehler, nur langsamer |
 | Modul stirbt | CPU | Compositor schaltet zurueck, schreibt nichts in die Karte |
+| Monitor beim Booten aus | — | die Firmware richtet keinen Modus ein, GOP fehlt (`GPU: no display available`, gesehen am NUC 2026-10-13). Stufe 1 hat dann nichts zu uebernehmen; ein Bild gibt es erst mit Stufe 4 (Modeset + Hotplug). Bis dahin: Neustart mit Monitor an. |
 
 **Die Uebergabe im Einzelnen:**
 
