@@ -319,6 +319,49 @@ pub fn intel_display_power_get(i915: &mut drm_i915_private, domain: u32) {
     __intel_display_power_get_domain(i915, domain);
 }
 
+/// `__intel_display_power_is_enabled`: runtime PM never suspends here.
+fn __intel_display_power_is_enabled(i915: &mut drm_i915_private, domain: u32) -> bool {
+    for w in (0..i915.display.power.power_well_count).rev() {
+        let pw = i915.display.power.power_wells[w];
+        if !test_bit(&pw.domains, domain) || inst(&pw).always_on != 0 {
+            continue;
+        }
+        if !pw.hw_enabled {
+            return false;
+        }
+    }
+    true
+}
+
+/// `intel_display_power_get_if_enabled`: true when a reference was taken.
+pub fn intel_display_power_get_if_enabled(i915: &mut drm_i915_private, domain: u32) -> bool {
+    if __intel_display_power_is_enabled(i915, domain) {
+        __intel_display_power_get_domain(i915, domain);
+        true
+    } else {
+        false
+    }
+}
+
+/// `__intel_display_power_put_domain`; nothing is put asynchronously.
+fn __intel_display_power_put_domain(i915: &mut drm_i915_private, domain: u32) {
+    if i915.display.power.domain_use_count[domain as usize] == 0 {
+        Line::new().s("warning: use count on power domain ").dec(domain as u64)
+            .s(" is already zero").say();
+    }
+    i915.display.power.domain_use_count[domain as usize] -= 1;
+    for w in (0..i915.display.power.power_well_count).rev() {
+        if test_bit(&i915.display.power.power_wells[w].domains, domain) {
+            intel_power_well_put(i915, w);
+        }
+    }
+}
+
+/// `intel_display_power_put`.
+pub fn intel_display_power_put(i915: &mut drm_i915_private, domain: u32) {
+    __intel_display_power_put_domain(i915, domain);
+}
+
 /// `intel_power_domains_sync_hw`.
 fn intel_power_domains_sync_hw(i915: &mut drm_i915_private) {
     for w in 0..i915.display.power.power_well_count {

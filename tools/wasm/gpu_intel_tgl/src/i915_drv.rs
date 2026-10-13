@@ -68,6 +68,7 @@ pub struct intel_display {
     pub gmbus: [crate::intel_gmbus::intel_gmbus; crate::intel_gmbus::NUM_PINS],
     /// `display->pps.mmio_base`.
     pub pps_mmio_base: u32,
+    pub dpll: crate::intel_dpll_mgr::intel_display_dpll,
 }
 
 /// `struct drm_i915_private`, as far as this stage needs it.

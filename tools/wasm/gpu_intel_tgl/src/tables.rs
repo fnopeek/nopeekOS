@@ -473,3 +473,17 @@ pub static gmbus_pins_icp_gpio: [gmbus_pin_gpio; 15] = [
     gmbus_pin_gpio { valid: 0x1, gpio: 0xd },
     gmbus_pin_gpio { valid: 0x1, gpio: 0xe },
 ];
+
+// display/intel_dpll_mgr.c
+/// display/intel_dpll_mgr.c: tgl_plls[ARRAY_SIZE(tgl_plls) - 1]
+pub static tgl_plls: [dpll_info; 9] = [
+    dpll_info { name: b"DPLL 0", funcs: dpll_info_funcs::combo_pll_funcs, id: 0x0, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"DPLL 1", funcs: dpll_info_funcs::combo_pll_funcs, id: 0x1, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TBT PLL", funcs: dpll_info_funcs::tbt_pll_funcs, id: 0x2, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x1 },
+    dpll_info { name: b"TC PLL 1", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x3, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TC PLL 2", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x4, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TC PLL 3", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x5, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TC PLL 4", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x6, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TC PLL 5", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x7, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TC PLL 6", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x8, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+];

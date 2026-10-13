@@ -726,3 +726,126 @@ GMBUS4_PCH = ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }
 GPIO_PCH_BASE = ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GPIO(&d, 0)); }) @ display/intel_gmbus.c
 GPIO_PCH_STRIDE = ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GPIO(&d, 1)) - i915_mmio_reg_offset(GPIO(&d, 0)); }) @ display/intel_gmbus.c
 TGL_DISPLAY_HAS_HTI = tgl_desc.info->has_hti @ display/intel_display_device.c
+# DPLL (display/intel_dpll_mgr.c, intel_dkl_phy.c)
+DPLL_ID_ICL_DPLL0 @ display/intel_dpll_mgr.c
+DPLL_ID_ICL_DPLL1 @ display/intel_dpll_mgr.c
+DPLL_ID_ICL_TBTPLL @ display/intel_dpll_mgr.c
+DPLL_ID_ICL_MGPLL1 @ display/intel_dpll_mgr.c
+DPLL_ID_ICL_MGPLL2 @ display/intel_dpll_mgr.c
+DPLL_ID_ICL_MGPLL3 @ display/intel_dpll_mgr.c
+DPLL_ID_ICL_MGPLL4 @ display/intel_dpll_mgr.c
+DPLL_ID_TGL_MGPLL5 @ display/intel_dpll_mgr.c
+DPLL_ID_TGL_MGPLL6 @ display/intel_dpll_mgr.c
+I915_NUM_PLLS @ display/intel_dpll_mgr.c
+TC_PORT_1 @ display/intel_dpll_mgr.c
+I915_MAX_TC_PORTS @ display/intel_dpll_mgr.c
+POWER_DOMAIN_DISPLAY_CORE @ display/intel_dpll_mgr.c
+PLL_ENABLE
+PLL_LOCK
+PLL_POWER_ENABLE
+PLL_POWER_STATE
+TBT_PLL_ENABLE
+MG_PLL_ENABLE(tc_port) samples 0 1 2 5
+ICL_DPLL_ENABLE_0 = i915_mmio_reg_offset(ICL_DPLL_ENABLE(0)) @ display/intel_dpll_mgr.c
+ICL_DPLL_ENABLE_1 = i915_mmio_reg_offset(ICL_DPLL_ENABLE(1)) @ display/intel_dpll_mgr.c
+TGL_DPLL_CFGCR0_0 = i915_mmio_reg_offset(TGL_DPLL_CFGCR0(0)) @ display/intel_dpll_mgr.c
+TGL_DPLL_CFGCR1_0 = i915_mmio_reg_offset(TGL_DPLL_CFGCR1(0)) @ display/intel_dpll_mgr.c
+TGL_DPLL_CFGCR0_1 = i915_mmio_reg_offset(TGL_DPLL_CFGCR0(1)) @ display/intel_dpll_mgr.c
+TGL_DPLL_CFGCR1_1 = i915_mmio_reg_offset(TGL_DPLL_CFGCR1(1)) @ display/intel_dpll_mgr.c
+TGL_DPLL_CFGCR0_2 = i915_mmio_reg_offset(TGL_DPLL_CFGCR0(2)) @ display/intel_dpll_mgr.c
+TGL_DPLL_CFGCR1_2 = i915_mmio_reg_offset(TGL_DPLL_CFGCR1(2)) @ display/intel_dpll_mgr.c
+TGL_DPLL0_DIV0(pll) samples 0 1 2
+TGL_DPLL0_DIV0_AFC_STARTUP_MASK
+DPLL_CFGCR0_DCO_FRACTION_MASK
+DPLL_CFGCR0_DCO_FRACTION_SHIFT
+DPLL_CFGCR0_DCO_INTEGER_MASK
+DPLL_CFGCR1_QDIV_RATIO_MASK
+DPLL_CFGCR1_QDIV_RATIO_SHIFT
+DPLL_CFGCR1_QDIV_MODE(x) samples 0 1
+DPLL_CFGCR1_KDIV_MASK
+DPLL_CFGCR1_KDIV_1
+DPLL_CFGCR1_KDIV_2
+DPLL_CFGCR1_KDIV_3
+DPLL_CFGCR1_PDIV_MASK
+DPLL_CFGCR1_PDIV_2
+DPLL_CFGCR1_PDIV_3
+DPLL_CFGCR1_PDIV_5
+DPLL_CFGCR1_PDIV_7
+MG_REFCLKIN_CTL_OD_2_MUX_MASK
+MG_CLKTOP2_CORECLKCTL1_A_DIVRATIO_MASK
+MG_CLKTOP2_HSCLKCTL_TLINEDRV_CLKSEL_MASK
+MG_CLKTOP2_HSCLKCTL_CORE_INPUTSEL_MASK
+MG_CLKTOP2_HSCLKCTL_HSDIV_RATIO_MASK
+MG_CLKTOP2_HSCLKCTL_DSDIV_RATIO_MASK
+MG_CLKTOP2_HSCLKCTL_DSDIV_RATIO_SHIFT
+MG_CLKTOP2_HSCLKCTL_HSDIV_RATIO_2
+MG_CLKTOP2_HSCLKCTL_HSDIV_RATIO_3
+MG_CLKTOP2_HSCLKCTL_HSDIV_RATIO_5
+MG_CLKTOP2_HSCLKCTL_HSDIV_RATIO_7
+DKL_PLL_DIV0_MASK
+DKL_PLL_DIV0_AFC_STARTUP_MASK
+DKL_PLL_DIV0_FBPREDIV_MASK
+DKL_PLL_DIV0_FBPREDIV_SHIFT
+DKL_PLL_DIV0_FBDIV_INT_MASK
+DKL_PLL_DIV1_IREF_TRIM_MASK
+DKL_PLL_DIV1_TDC_TARGET_CNT_MASK
+DKL_PLL_SSC_IREF_NDIV_RATIO_MASK
+DKL_PLL_SSC_STEP_LEN_MASK
+DKL_PLL_SSC_STEP_NUM_MASK
+DKL_PLL_SSC_EN
+DKL_PLL_BIAS_FRAC_EN_H
+DKL_PLL_BIAS_FBDIV_FRAC_MASK
+DKL_PLL_BIAS_FBDIV_SHIFT
+DKL_PLL_TDC_SSC_STEP_SIZE_MASK
+DKL_PLL_TDC_FEED_FWD_GAIN_MASK
+_DKL_PHY1_BASE
+_DKL_PHY2_BASE
+_DKL_BANK_SHIFT
+_DKL_REG_PHY_BASE(tc_port) samples 0 1 2 5
+_DKL_REFCLKIN_CTL
+_DKL_CLKTOP2_HSCLKCTL
+_DKL_CLKTOP2_CORECLKCTL1
+_DKL_PLL_DIV0
+_DKL_PLL_DIV1
+_DKL_PLL_SSC
+_DKL_PLL_BIAS
+_DKL_PLL_TDC_COLDST_BIAS
+DKL_REFCLKIN_CTL_TC0_REG = ({ enum tc_port tc_port = 0; DKL_REFCLKIN_CTL(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_REFCLKIN_CTL_TC0_BANK = ({ enum tc_port tc_port = 0; DKL_REFCLKIN_CTL(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_REFCLKIN_CTL_TC5_REG = ({ enum tc_port tc_port = 5; DKL_REFCLKIN_CTL(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_REFCLKIN_CTL_TC5_BANK = ({ enum tc_port tc_port = 5; DKL_REFCLKIN_CTL(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_CLKTOP2_HSCLKCTL_TC0_REG = ({ enum tc_port tc_port = 0; DKL_CLKTOP2_HSCLKCTL(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_CLKTOP2_HSCLKCTL_TC0_BANK = ({ enum tc_port tc_port = 0; DKL_CLKTOP2_HSCLKCTL(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_CLKTOP2_HSCLKCTL_TC5_REG = ({ enum tc_port tc_port = 5; DKL_CLKTOP2_HSCLKCTL(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_CLKTOP2_HSCLKCTL_TC5_BANK = ({ enum tc_port tc_port = 5; DKL_CLKTOP2_HSCLKCTL(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_CLKTOP2_CORECLKCTL1_TC0_REG = ({ enum tc_port tc_port = 0; DKL_CLKTOP2_CORECLKCTL1(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_CLKTOP2_CORECLKCTL1_TC0_BANK = ({ enum tc_port tc_port = 0; DKL_CLKTOP2_CORECLKCTL1(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_CLKTOP2_CORECLKCTL1_TC5_REG = ({ enum tc_port tc_port = 5; DKL_CLKTOP2_CORECLKCTL1(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_CLKTOP2_CORECLKCTL1_TC5_BANK = ({ enum tc_port tc_port = 5; DKL_CLKTOP2_CORECLKCTL1(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_PLL_DIV0_TC0_REG = ({ enum tc_port tc_port = 0; DKL_PLL_DIV0(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_PLL_DIV0_TC0_BANK = ({ enum tc_port tc_port = 0; DKL_PLL_DIV0(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_PLL_DIV0_TC5_REG = ({ enum tc_port tc_port = 5; DKL_PLL_DIV0(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_PLL_DIV0_TC5_BANK = ({ enum tc_port tc_port = 5; DKL_PLL_DIV0(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_PLL_DIV1_TC0_REG = ({ enum tc_port tc_port = 0; DKL_PLL_DIV1(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_PLL_DIV1_TC0_BANK = ({ enum tc_port tc_port = 0; DKL_PLL_DIV1(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_PLL_DIV1_TC5_REG = ({ enum tc_port tc_port = 5; DKL_PLL_DIV1(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_PLL_DIV1_TC5_BANK = ({ enum tc_port tc_port = 5; DKL_PLL_DIV1(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_PLL_SSC_TC0_REG = ({ enum tc_port tc_port = 0; DKL_PLL_SSC(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_PLL_SSC_TC0_BANK = ({ enum tc_port tc_port = 0; DKL_PLL_SSC(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_PLL_SSC_TC5_REG = ({ enum tc_port tc_port = 5; DKL_PLL_SSC(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_PLL_SSC_TC5_BANK = ({ enum tc_port tc_port = 5; DKL_PLL_SSC(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_PLL_BIAS_TC0_REG = ({ enum tc_port tc_port = 0; DKL_PLL_BIAS(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_PLL_BIAS_TC0_BANK = ({ enum tc_port tc_port = 0; DKL_PLL_BIAS(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_PLL_BIAS_TC5_REG = ({ enum tc_port tc_port = 5; DKL_PLL_BIAS(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_PLL_BIAS_TC5_BANK = ({ enum tc_port tc_port = 5; DKL_PLL_BIAS(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_PLL_TDC_COLDST_BIAS_TC0_REG = ({ enum tc_port tc_port = 0; DKL_PLL_TDC_COLDST_BIAS(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_PLL_TDC_COLDST_BIAS_TC0_BANK = ({ enum tc_port tc_port = 0; DKL_PLL_TDC_COLDST_BIAS(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+DKL_PLL_TDC_COLDST_BIAS_TC5_REG = ({ enum tc_port tc_port = 5; DKL_PLL_TDC_COLDST_BIAS(tc_port).reg; }) @ display/intel_dpll_mgr.c
+DKL_PLL_TDC_COLDST_BIAS_TC5_BANK = ({ enum tc_port tc_port = 5; DKL_PLL_TDC_COLDST_BIAS(tc_port).bank_idx; }) @ display/intel_dpll_mgr.c
+HIP_INDEX_REG_0 = i915_mmio_reg_offset(HIP_INDEX_REG(0)) @ display/intel_dpll_mgr.c
+HIP_INDEX_REG_1 = i915_mmio_reg_offset(HIP_INDEX_REG(1)) @ display/intel_dpll_mgr.c
+HIP_INDEX_REG_2 = i915_mmio_reg_offset(HIP_INDEX_REG(2)) @ display/intel_dpll_mgr.c
+HIP_INDEX_REG_3 = i915_mmio_reg_offset(HIP_INDEX_REG(3)) @ display/intel_dpll_mgr.c
+HIP_INDEX_REG_4 = i915_mmio_reg_offset(HIP_INDEX_REG(4)) @ display/intel_dpll_mgr.c
+HIP_INDEX_REG_5 = i915_mmio_reg_offset(HIP_INDEX_REG(5)) @ display/intel_dpll_mgr.c
+HIP_INDEX_VAL(tc_port, val) samples 0 1 2 5

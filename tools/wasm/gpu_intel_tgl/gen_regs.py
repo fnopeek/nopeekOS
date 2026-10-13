@@ -65,7 +65,7 @@ HEADERS = [
     "display/intel_display_regs.h", "display/intel_display_device.h",
     "display/intel_pch.h", "display/intel_display_limits.h", "display/intel_fbc.h",
     "intel_pci_config.h", "drm/intel/i915_drm.h", "display/intel_combo_phy_regs.h",
-    "display/skl_watermark_regs.h",
+    "display/skl_watermark_regs.h", "display/intel_dkl_phy_regs.h", "display/intel_mg_phy_regs.h",
 ]
 
 # The kernel build's flags (drivers/gpu/drm/i915/.intel_uncore.o.cmd),
@@ -312,7 +312,7 @@ def is_reg(expr):
 def c_to_rust(expr, params):
     """Plain arithmetic of the expansion as Rust, or None.
 
-    Accepted: integer literals, the placeholders, + - * << >> | & ~ and
+    Accepted: integer literals, the placeholders, + - * % << >> | & ~ and
     parentheses. Anything else (casts, `?:`, `sizeof`, calls) means the
     macro is more than an address and is ported by hand."""
     e = expr
@@ -343,7 +343,7 @@ def c_to_rust(expr, params):
         vals = values({w: w for w in consts})
         for w in consts:
             e = re.sub(r"\b" + w + r"\b", f"{vals[w]:#x}", e)
-    if re.search(r"[^\w\s()+\-*<>|&~,]", e) or ("," in e and not picks):
+    if re.search(r"[^\w\s()+\-*%<>|&~,]", e) or ("," in e and not picks):
         return None
     if re.search(r"(?<![<>])[<>](?![<>])", e):
         return None
@@ -603,18 +603,19 @@ def walk_table(name, ty, fields, walk, prelude):
     """A nested C table flattened into one Rust array.
 
     `walk` is the path from the outer array inwards: the first segment is a
-    static array (`tbl[]`), every further one `member[count]` relative to
+    static array (`tbl[]`, or `tbl[count]` for a C count expression, e.g.
+    one that leaves out a `{}` terminator), every further one `member[count]` relative to
     the element above it, with `@` standing for that element. A field is a
     C expression over `eN` (the element at level N), `iN` (its index under
     its parent) and `nN` (its running index over the whole level); a field
     written `name=expr as str` is a string literal, one written
     `name=expr as sym` the object a pointer points at, emitted as the
     variant of that name of the enum `<RustType>_<name>`."""
-    first = walk[0]
-    if not first.endswith("[]"):
-        sys.exit(f"tables.list: {first!r}: the first level must be `name[]`")
-    top = first[:-2]
-    k = values({"n": f"ARRAY_SIZE({top})"}, prelude)["n"]
+    m = re.match(r"^(\w+)\[(.*)\]$", walk[0])
+    if not m:
+        sys.exit(f"tables.list: {walk[0]!r}: the first level must be `name[]` or `name[count]`")
+    top = m.group(1)
+    k = values({"n": m.group(2) or f"ARRAY_SIZE({top})"}, prelude)["n"]
     levels = [[((i,), f"{top}[{i}]") for i in range(k)]]
     for seg in walk[1:]:
         m = re.match(r"^(.*)\[(.*)\]$", seg)

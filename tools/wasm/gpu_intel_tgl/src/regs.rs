@@ -815,3 +815,132 @@ pub const GMBUS4_PCH: u32 = 0xc5110; // ({ struct intel_display d = { .gmbus.mmi
 pub const GPIO_PCH_BASE: u32 = 0xc5010; // ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GPIO(&d, 0)); }) in display/intel_gmbus.c
 pub const GPIO_PCH_STRIDE: u32 = 0x4; // ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GPIO(&d, 1)) - i915_mmio_reg_offset(GPIO(&d, 0)); }) in display/intel_gmbus.c
 pub const TGL_DISPLAY_HAS_HTI: u32 = 0x0; // tgl_desc.info->has_hti in display/intel_display_device.c
+
+// DPLL (display/intel_dpll_mgr.c, intel_dkl_phy.c)
+pub const DPLL_ID_ICL_DPLL0: u32 = 0x0; // display/intel_dpll_mgr.h:114
+pub const DPLL_ID_ICL_DPLL1: u32 = 0x1; // display/intel_dpll_mgr.h:118
+pub const DPLL_ID_ICL_TBTPLL: u32 = 0x2; // display/intel_dpll_mgr.h:126
+pub const DPLL_ID_ICL_MGPLL1: u32 = 0x3; // display/intel_dpll_mgr.h:131
+pub const DPLL_ID_ICL_MGPLL2: u32 = 0x4; // display/intel_dpll_mgr.h:136
+pub const DPLL_ID_ICL_MGPLL3: u32 = 0x5; // display/intel_dpll_mgr.h:141
+pub const DPLL_ID_ICL_MGPLL4: u32 = 0x6; // display/intel_dpll_mgr.h:146
+pub const DPLL_ID_TGL_MGPLL5: u32 = 0x7; // display/intel_dpll_mgr.h:150
+pub const DPLL_ID_TGL_MGPLL6: u32 = 0x8; // display/intel_dpll_mgr.h:154
+pub const I915_NUM_PLLS: u32 = 0x9; // display/intel_dpll_mgr.h:174
+pub const TC_PORT_1: u32 = 0x0; // display/intel_display.h:127
+pub const I915_MAX_TC_PORTS: u32 = 0x6; // display/intel_display.h:134
+pub const POWER_DOMAIN_DISPLAY_CORE: u32 = 0x0; // display/intel_display_power.h:27
+pub const PLL_ENABLE: u32 = 0x80000000; // display/intel_display_regs.h:2653
+pub const PLL_LOCK: u32 = 0x40000000; // display/intel_display_regs.h:2654
+pub const PLL_POWER_ENABLE: u32 = 0x8000000; // display/intel_display_regs.h:2655
+pub const PLL_POWER_STATE: u32 = 0x4000000; // display/intel_display_regs.h:2656
+pub const TBT_PLL_ENABLE: u32 = 0x46020; // display/intel_display_regs.h:2667
+/// display/intel_display_regs.h:2674
+pub const fn MG_PLL_ENABLE(tc_port: u32) -> u32 { (((0x46030) + ((tc_port)) * ((0x46034) - (0x46030)))) }
+pub const ICL_DPLL_ENABLE_0: u32 = 0x46010; // i915_mmio_reg_offset(ICL_DPLL_ENABLE(0)) in display/intel_dpll_mgr.c
+pub const ICL_DPLL_ENABLE_1: u32 = 0x46014; // i915_mmio_reg_offset(ICL_DPLL_ENABLE(1)) in display/intel_dpll_mgr.c
+pub const TGL_DPLL_CFGCR0_0: u32 = 0x164284; // i915_mmio_reg_offset(TGL_DPLL_CFGCR0(0)) in display/intel_dpll_mgr.c
+pub const TGL_DPLL_CFGCR1_0: u32 = 0x164288; // i915_mmio_reg_offset(TGL_DPLL_CFGCR1(0)) in display/intel_dpll_mgr.c
+pub const TGL_DPLL_CFGCR0_1: u32 = 0x16428c; // i915_mmio_reg_offset(TGL_DPLL_CFGCR0(1)) in display/intel_dpll_mgr.c
+pub const TGL_DPLL_CFGCR1_1: u32 = 0x164290; // i915_mmio_reg_offset(TGL_DPLL_CFGCR1(1)) in display/intel_dpll_mgr.c
+pub const TGL_DPLL_CFGCR0_2: u32 = 0x16429c; // i915_mmio_reg_offset(TGL_DPLL_CFGCR0(2)) in display/intel_dpll_mgr.c
+pub const TGL_DPLL_CFGCR1_2: u32 = 0x1642a0; // i915_mmio_reg_offset(TGL_DPLL_CFGCR1(2)) in display/intel_dpll_mgr.c
+/// display/intel_display_regs.h:2747
+pub const fn TGL_DPLL0_DIV0(pll: u32) -> u32 { (((0x164B00) + (pll) * ((0x164C00) - (0x164B00)))) }
+pub const TGL_DPLL0_DIV0_AFC_STARTUP_MASK: u32 = 0xe000000; // display/intel_display_regs.h:2748
+pub const DPLL_CFGCR0_DCO_FRACTION_MASK: u32 = 0x1fffc00; // display/intel_display_regs.h:2705
+pub const DPLL_CFGCR0_DCO_FRACTION_SHIFT: u32 = 0xa; // display/intel_display_regs.h:2706
+pub const DPLL_CFGCR0_DCO_INTEGER_MASK: u32 = 0x3ff; // display/intel_display_regs.h:2708
+pub const DPLL_CFGCR1_QDIV_RATIO_MASK: u32 = 0x3fc00; // display/intel_display_regs.h:2714
+pub const DPLL_CFGCR1_QDIV_RATIO_SHIFT: u32 = 0xa; // display/intel_display_regs.h:2715
+/// display/intel_display_regs.h:2718
+pub const fn DPLL_CFGCR1_QDIV_MODE(x: u32) -> u32 { ((x) << 9) }
+pub const DPLL_CFGCR1_KDIV_MASK: u32 = 0x1c0; // display/intel_display_regs.h:2719
+pub const DPLL_CFGCR1_KDIV_1: u32 = 0x40; // display/intel_display_regs.h:2722
+pub const DPLL_CFGCR1_KDIV_2: u32 = 0x80; // display/intel_display_regs.h:2723
+pub const DPLL_CFGCR1_KDIV_3: u32 = 0x100; // display/intel_display_regs.h:2724
+pub const DPLL_CFGCR1_PDIV_MASK: u32 = 0x3c; // display/intel_display_regs.h:2725
+pub const DPLL_CFGCR1_PDIV_2: u32 = 0x4; // display/intel_display_regs.h:2728
+pub const DPLL_CFGCR1_PDIV_3: u32 = 0x8; // display/intel_display_regs.h:2729
+pub const DPLL_CFGCR1_PDIV_5: u32 = 0x10; // display/intel_display_regs.h:2730
+pub const DPLL_CFGCR1_PDIV_7: u32 = 0x20; // display/intel_display_regs.h:2731
+pub const MG_REFCLKIN_CTL_OD_2_MUX_MASK: u32 = 0x700; // display/intel_mg_phy_regs.h:162
+pub const MG_CLKTOP2_CORECLKCTL1_A_DIVRATIO_MASK: u32 = 0xff00; // display/intel_mg_phy_regs.h:172
+pub const MG_CLKTOP2_HSCLKCTL_TLINEDRV_CLKSEL_MASK: u32 = 0xc000; // display/intel_mg_phy_regs.h:182
+pub const MG_CLKTOP2_HSCLKCTL_CORE_INPUTSEL_MASK: u32 = 0x10000; // display/intel_mg_phy_regs.h:180
+pub const MG_CLKTOP2_HSCLKCTL_HSDIV_RATIO_MASK: u32 = 0x3000; // display/intel_mg_phy_regs.h:183
+pub const MG_CLKTOP2_HSCLKCTL_DSDIV_RATIO_MASK: u32 = 0xf00; // display/intel_mg_phy_regs.h:190
+pub const MG_CLKTOP2_HSCLKCTL_DSDIV_RATIO_SHIFT: u32 = 0x8; // display/intel_mg_phy_regs.h:189
+pub const MG_CLKTOP2_HSCLKCTL_HSDIV_RATIO_2: u32 = 0x0; // display/intel_mg_phy_regs.h:184
+pub const MG_CLKTOP2_HSCLKCTL_HSDIV_RATIO_3: u32 = 0x1000; // display/intel_mg_phy_regs.h:185
+pub const MG_CLKTOP2_HSCLKCTL_HSDIV_RATIO_5: u32 = 0x2000; // display/intel_mg_phy_regs.h:186
+pub const MG_CLKTOP2_HSCLKCTL_HSDIV_RATIO_7: u32 = 0x3000; // display/intel_mg_phy_regs.h:187
+pub const DKL_PLL_DIV0_MASK: u32 = 0x1fffff; // display/intel_dkl_phy_regs.h:72
+pub const DKL_PLL_DIV0_AFC_STARTUP_MASK: u32 = 0xe000000; // display/intel_dkl_phy_regs.h:61
+pub const DKL_PLL_DIV0_FBPREDIV_MASK: u32 = 0xf00; // display/intel_dkl_phy_regs.h:69
+pub const DKL_PLL_DIV0_FBPREDIV_SHIFT: u32 = 0x8; // display/intel_dkl_phy_regs.h:67
+pub const DKL_PLL_DIV0_FBDIV_INT_MASK: u32 = 0xff; // display/intel_dkl_phy_regs.h:71
+pub const DKL_PLL_DIV1_IREF_TRIM_MASK: u32 = 0x1f0000; // display/intel_dkl_phy_regs.h:81
+pub const DKL_PLL_DIV1_TDC_TARGET_CNT_MASK: u32 = 0xff; // display/intel_dkl_phy_regs.h:83
+pub const DKL_PLL_SSC_IREF_NDIV_RATIO_MASK: i32 = -536870912; // display/intel_dkl_phy_regs.h:89
+pub const DKL_PLL_SSC_STEP_LEN_MASK: u32 = 0xff0000; // display/intel_dkl_phy_regs.h:91
+pub const DKL_PLL_SSC_STEP_NUM_MASK: u32 = 0x3800; // display/intel_dkl_phy_regs.h:93
+pub const DKL_PLL_SSC_EN: u32 = 0x200; // display/intel_dkl_phy_regs.h:94
+pub const DKL_PLL_BIAS_FRAC_EN_H: u32 = 0x40000000; // display/intel_dkl_phy_regs.h:99
+pub const DKL_PLL_BIAS_FBDIV_FRAC_MASK: u32 = 0x3fffff00; // display/intel_dkl_phy_regs.h:102
+pub const DKL_PLL_BIAS_FBDIV_SHIFT: u32 = 0x8; // display/intel_dkl_phy_regs.h:100
+pub const DKL_PLL_TDC_SSC_STEP_SIZE_MASK: u32 = 0xff00; // display/intel_dkl_phy_regs.h:108
+pub const DKL_PLL_TDC_FEED_FWD_GAIN_MASK: u32 = 0xff; // display/intel_dkl_phy_regs.h:110
+pub const _DKL_PHY1_BASE: u32 = 0x168000; // display/intel_dkl_phy_regs.h:18
+pub const _DKL_PHY2_BASE: u32 = 0x169000; // display/intel_dkl_phy_regs.h:19
+pub const _DKL_BANK_SHIFT: u32 = 0xc; // display/intel_dkl_phy_regs.h:35
+/// display/intel_dkl_phy_regs.h:31
+pub const fn _DKL_REG_PHY_BASE(tc_port: u32) -> u32 { ((0x168000) + (tc_port) * ((0x169000) - (0x168000))) }
+pub const _DKL_REFCLKIN_CTL: u32 = 0x212c; // display/intel_dkl_phy_regs.h:112
+pub const _DKL_CLKTOP2_HSCLKCTL: u32 = 0x20d4; // display/intel_dkl_phy_regs.h:117
+pub const _DKL_CLKTOP2_CORECLKCTL1: u32 = 0x20d8; // display/intel_dkl_phy_regs.h:122
+pub const _DKL_PLL_DIV0: u32 = 0x2200; // display/intel_dkl_phy_regs.h:58
+pub const _DKL_PLL_DIV1: u32 = 0x2204; // display/intel_dkl_phy_regs.h:77
+pub const _DKL_PLL_SSC: u32 = 0x2210; // display/intel_dkl_phy_regs.h:85
+pub const _DKL_PLL_BIAS: u32 = 0x2214; // display/intel_dkl_phy_regs.h:96
+pub const _DKL_PLL_TDC_COLDST_BIAS: u32 = 0x2218; // display/intel_dkl_phy_regs.h:104
+pub const DKL_REFCLKIN_CTL_TC0_REG: u32 = 0x16812c; // ({ enum tc_port tc_port = 0; DKL_REFCLKIN_CTL(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_REFCLKIN_CTL_TC0_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 0; DKL_REFCLKIN_CTL(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_REFCLKIN_CTL_TC5_REG: u32 = 0x16d12c; // ({ enum tc_port tc_port = 5; DKL_REFCLKIN_CTL(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_REFCLKIN_CTL_TC5_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 5; DKL_REFCLKIN_CTL(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_CLKTOP2_HSCLKCTL_TC0_REG: u32 = 0x1680d4; // ({ enum tc_port tc_port = 0; DKL_CLKTOP2_HSCLKCTL(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_CLKTOP2_HSCLKCTL_TC0_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 0; DKL_CLKTOP2_HSCLKCTL(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_CLKTOP2_HSCLKCTL_TC5_REG: u32 = 0x16d0d4; // ({ enum tc_port tc_port = 5; DKL_CLKTOP2_HSCLKCTL(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_CLKTOP2_HSCLKCTL_TC5_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 5; DKL_CLKTOP2_HSCLKCTL(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_CLKTOP2_CORECLKCTL1_TC0_REG: u32 = 0x1680d8; // ({ enum tc_port tc_port = 0; DKL_CLKTOP2_CORECLKCTL1(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_CLKTOP2_CORECLKCTL1_TC0_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 0; DKL_CLKTOP2_CORECLKCTL1(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_CLKTOP2_CORECLKCTL1_TC5_REG: u32 = 0x16d0d8; // ({ enum tc_port tc_port = 5; DKL_CLKTOP2_CORECLKCTL1(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_CLKTOP2_CORECLKCTL1_TC5_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 5; DKL_CLKTOP2_CORECLKCTL1(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_DIV0_TC0_REG: u32 = 0x168200; // ({ enum tc_port tc_port = 0; DKL_PLL_DIV0(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_DIV0_TC0_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 0; DKL_PLL_DIV0(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_DIV0_TC5_REG: u32 = 0x16d200; // ({ enum tc_port tc_port = 5; DKL_PLL_DIV0(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_DIV0_TC5_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 5; DKL_PLL_DIV0(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_DIV1_TC0_REG: u32 = 0x168204; // ({ enum tc_port tc_port = 0; DKL_PLL_DIV1(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_DIV1_TC0_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 0; DKL_PLL_DIV1(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_DIV1_TC5_REG: u32 = 0x16d204; // ({ enum tc_port tc_port = 5; DKL_PLL_DIV1(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_DIV1_TC5_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 5; DKL_PLL_DIV1(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_SSC_TC0_REG: u32 = 0x168210; // ({ enum tc_port tc_port = 0; DKL_PLL_SSC(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_SSC_TC0_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 0; DKL_PLL_SSC(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_SSC_TC5_REG: u32 = 0x16d210; // ({ enum tc_port tc_port = 5; DKL_PLL_SSC(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_SSC_TC5_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 5; DKL_PLL_SSC(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_BIAS_TC0_REG: u32 = 0x168214; // ({ enum tc_port tc_port = 0; DKL_PLL_BIAS(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_BIAS_TC0_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 0; DKL_PLL_BIAS(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_BIAS_TC5_REG: u32 = 0x16d214; // ({ enum tc_port tc_port = 5; DKL_PLL_BIAS(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_BIAS_TC5_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 5; DKL_PLL_BIAS(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_TDC_COLDST_BIAS_TC0_REG: u32 = 0x168218; // ({ enum tc_port tc_port = 0; DKL_PLL_TDC_COLDST_BIAS(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_TDC_COLDST_BIAS_TC0_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 0; DKL_PLL_TDC_COLDST_BIAS(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_TDC_COLDST_BIAS_TC5_REG: u32 = 0x16d218; // ({ enum tc_port tc_port = 5; DKL_PLL_TDC_COLDST_BIAS(tc_port).reg; }) in display/intel_dpll_mgr.c
+pub const DKL_PLL_TDC_COLDST_BIAS_TC5_BANK: u32 = 0x2; // ({ enum tc_port tc_port = 5; DKL_PLL_TDC_COLDST_BIAS(tc_port).bank_idx; }) in display/intel_dpll_mgr.c
+pub const HIP_INDEX_REG_0: u32 = 0x1010a0; // i915_mmio_reg_offset(HIP_INDEX_REG(0)) in display/intel_dpll_mgr.c
+pub const HIP_INDEX_REG_1: u32 = 0x1010a0; // i915_mmio_reg_offset(HIP_INDEX_REG(1)) in display/intel_dpll_mgr.c
+pub const HIP_INDEX_REG_2: u32 = 0x1010a0; // i915_mmio_reg_offset(HIP_INDEX_REG(2)) in display/intel_dpll_mgr.c
+pub const HIP_INDEX_REG_3: u32 = 0x1010a0; // i915_mmio_reg_offset(HIP_INDEX_REG(3)) in display/intel_dpll_mgr.c
+pub const HIP_INDEX_REG_4: u32 = 0x1010a4; // i915_mmio_reg_offset(HIP_INDEX_REG(4)) in display/intel_dpll_mgr.c
+pub const HIP_INDEX_REG_5: u32 = 0x1010a4; // i915_mmio_reg_offset(HIP_INDEX_REG(5)) in display/intel_dpll_mgr.c
+/// display/intel_dkl_phy_regs.h:205
+pub const fn HIP_INDEX_VAL(tc_port: u32, val: u32) -> u32 { ((val) << (8 * ((tc_port) % 4))) }
