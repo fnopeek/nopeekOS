@@ -13,11 +13,21 @@ would be a second semantics waiting to drift, so nothing here evaluates C:
     and that Rust expression is checked against GCC at sample arguments.
     A macro whose expansion is not plain arithmetic is reported, not guessed.
 
-    python3 gen_regs.py            # rewrite src/regs.rs from regs.list
-    python3 gen_regs.py --check    # fail if src/regs.rs is not what it would write
+    python3 gen_regs.py            # rewrite src/regs.rs and src/tables.rs
+    python3 gen_regs.py --check    # fail if either is not what it would write
 
 Names come from regs.list, one per line: `NAME` for a constant, `NAME(a, b)`
-for a parameterised register. `# file` lines group the output.
+for a parameterised register, `NAME @ file.c` for a constant a .c file
+defines (it is compiled with that file), `NAME = expr @ file.c` for a value
+read out of that file (e.g. a field of `tgl_info`). `# ` lines group the
+output.
+
+Tables come from tables.list: `@ file.c` names the Linux source the
+following arrays live in (it is compiled as is, so `static` arrays are
+reachable), then one array per line, either `name: u16` for an array of
+integers or `name: RustType { field, field }` for an array of structs. The
+Rust struct types are written by hand next to the code that uses them;
+the generator only fills in GCC's values, in source order.
 
 The tree is ~/.cache/nopeekos/i915-work: the include/, arch/x86/include/
 and drivers/gpu/drm/i915/ parts of the linux-6.18.55 tarball, plus the
@@ -37,12 +47,16 @@ I915 = os.path.join(L, "drivers/gpu/drm/i915")
 KB = os.path.join(W, "kb")
 OUT = os.path.join(HERE, "src", "regs.rs")
 LIST = os.path.join(HERE, "regs.list")
+TOUT = os.path.join(HERE, "src", "tables.rs")
+TLIST = os.path.join(HERE, "tables.list")
 
 HEADERS = [
     "i915_drv.h", "i915_reg.h", "intel_uncore.h",
     "gt/intel_gt_regs.h", "gt/intel_engine_regs.h", "gt/intel_lrc_reg.h",
     "gt/intel_gpu_commands.h", "intel_device_info.h", "intel_step.h",
     "display/intel_display_regs.h", "display/intel_display_device.h",
+    "display/intel_pch.h", "display/intel_display_limits.h", "display/intel_fbc.h",
+    "intel_pci_config.h",
 ]
 
 # The kernel build's flags (drivers/gpu/drm/i915/.intel_uncore.o.cmd),
@@ -56,7 +70,8 @@ CFLAGS = [
     "-include", f"{L}/include/linux/compiler-version.h",
     "-include", f"{L}/include/linux/kconfig.h",
     "-include", f"{L}/include/linux/compiler_types.h",
-    "-D__KERNEL__", "-DI915", "-DMODULE", "-std=gnu11", "-O2", "-fno-PIE",
+    "-D__KERNEL__", "-DI915", "-DMODULE", "-DKBUILD_MODNAME=\"i915\"",
+    "-DKBUILD_BASENAME=\"gpu_intel_tgl\"", "-std=gnu11", "-O2", "-fno-PIE",
     "-funsigned-char", "-fno-strict-aliasing", "-mno-sse", "-mno-mmx",
     "-mno-sse2", "-mno-avx", "-m64", "-mcmodel=kernel", "-mno-red-zone",
     "-fcf-protection=none", "-fno-asynchronous-unwind-tables", "-I.",
@@ -77,13 +92,14 @@ def gcc(src, flags):
         r = subprocess.run(["gcc", *CFLAGS, *flags, c, "-o", out],
                            cwd=I915, capture_output=True, text=True)
         if r.returncode != 0:
-            sys.exit("gcc failed:\n" + "\n".join(r.stderr.splitlines()[:30]))
+            errs = [l for l in r.stderr.splitlines() if "error" in l or "Fehler" in l]
+            sys.exit("gcc failed:\n" + "\n".join((errs or r.stderr.splitlines())[:20]))
         return open(out).read()
 
 
-def values(exprs):
+def values(exprs, prelude=None):
     """{key: int} for C expressions, computed by GCC."""
-    src = PRELUDE
+    src = PRELUDE if prelude is None else prelude
     for k, e in exprs.items():
         src += f"unsigned long long v_{k}(void);\n"
         src += f"unsigned long long v_{k}(void) {{ return {e}; }}\n"
@@ -109,25 +125,43 @@ def values(exprs):
     return out
 
 
-def expand(text):
+# For turning a parameterised macro into Rust only: the bit helpers without
+# their compile-time assertions. What comes out is still checked against
+# GCC with the original definitions at the sample arguments.
+PLAIN_BITS = """
+#undef REG_BIT
+#define REG_BIT(n) (1u << (n))
+#undef REG_GENMASK
+#define REG_GENMASK(h, l) (((~0u) >> (31 - (h))) & ((~0u) << (l)))
+#undef BIT
+#define BIT(n) (1u << (n))
+"""
+
+
+def expand(text, plain=False):
     """Preprocessor output for one expression."""
-    src = PRELUDE + f"\n__NPK_BEGIN__ {text} __NPK_END__\n"
+    src = PRELUDE + (PLAIN_BITS if plain else "") + f"\n__NPK_BEGIN__ {text} __NPK_END__\n"
     pre = gcc(src, ["-E", "-P"])
     m = re.search(r"__NPK_BEGIN__(.*?)__NPK_END__", pre, re.S)
     return " ".join(m.group(1).split())
 
 
 def where(name):
-    """file:line of `#define NAME` in the i915 tree."""
-    rx = re.compile(r"^\s*#\s*define\s+" + re.escape(name) + r"\b")
+    """file:line of `#define NAME`, or of the enum entry NAME, in the i915 tree."""
+    rx = re.compile(r"^\s*(?:#\s*define\s+" + re.escape(name) + r"\b|"
+                    + re.escape(name) + r"\s*(?:=[^=]|,|$))")
     for dp, _, fs in os.walk(I915):
-        for f in sorted(fs):
-            if not f.endswith(".h"):
+        for f in sorted(fs, key=lambda x: (not x.endswith(".h"), x)):
+            if not f.endswith((".h", ".c")):
                 continue
             p = os.path.join(dp, f)
             for i, line in enumerate(open(p, errors="ignore"), 1):
                 if rx.match(line):
                     return f"{os.path.relpath(p, I915)}:{i}"
+    for h in ("include/linux/pci_ids.h",):
+        for i, line in enumerate(open(os.path.join(L, h), errors="ignore"), 1):
+            if rx.match(line):
+                return f"{h}:{i}"
     return None
 
 
@@ -146,9 +180,17 @@ def c_to_rust(expr, params):
         e = re.sub(r"^\(\(const " + t + r"\)\{ \.reg = (.*) \}\)$", r"\1", e)
     e = re.sub(r"\b(0x[0-9a-fA-F]+|\d+)[uUlL]+\b", r"\1", e)
     words = re.findall(r"[A-Za-z_]\w*", re.sub(r"\b0x[0-9a-fA-F]+\b", "", e))
-    if any(w not in params for w in words):
-        return None
+    # Enum constants survive the preprocessor; GCC gives their values.
+    consts = sorted({w for w in words if w not in params})
+    if consts:
+        if any(not re.match(r"^[A-Z][A-Z0-9_]*$", w) for w in consts):
+            return None
+        vals = values({w: w for w in consts})
+        for w in consts:
+            e = re.sub(r"\b" + w + r"\b", f"{vals[w]:#x}", e)
     if re.search(r"[^\w\s()+\-*<>|&~]", e):
+        return None
+    if re.search(r"(?<![<>])[<>](?![<>])", e):
         return None
     return e
 
@@ -162,23 +204,33 @@ def gen():
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
-        m = re.match(r"^(\w+)(?:\(([^)]*)\))?$", line)
+        m = re.match(r"^(\w+)\s*=\s*(.+?)\s*@\s*(\S+)$", line)
+        if m:
+            entries.append(("reg", m.group(1), ("@", m.group(3), m.group(2))))
+            continue
+        m = re.match(r"^(\w+)(?:\(([^)]*)\))?(?:\s*@\s*(\S+))?$", line)
         if not m:
             sys.exit(f"regs.list: cannot read {line!r}")
-        name, args = m.group(1), m.group(2)
+        name, args, src = m.group(1), m.group(2), m.group(3)
         params = [a.strip() for a in args.split(",")] if args else []
-        entries.append(("reg", name, params))
+        if src and params:
+            sys.exit(f"regs.list: {name}: a .c source is for constants only")
+        entries.append(("reg", name, params if not src else ("@", src)))
 
-    consts, funcs = {}, {}
+    consts, funcs, csrc = {}, {}, {}
     for kind, name, params in entries:
         if kind != "reg":
             continue
-        if params:
+        if isinstance(params, tuple):
+            csrc.setdefault(params[1], {})[name] = params[2] if len(params) > 2 else name
+        elif params:
             funcs[name] = params
         else:
             e = expand(name)
             consts[name] = f"i915_mmio_reg_offset({name})" if is_reg(e) else name
     vals = values(consts) if consts else {}
+    for src, names in csrc.items():
+        vals.update(values(names, f'#include "{src}"\n'))
 
     # Parameterised: placeholder expansion, then samples.
     rust_fn, samples = {}, {}
@@ -186,6 +238,8 @@ def gen():
         ph = [f"__p{i}" for i in range(len(params))]
         e = expand(f"{name}({', '.join(ph)})")
         r = c_to_rust(e, ph)
+        if r is None:
+            r = c_to_rust(expand(f"{name}({', '.join(ph)})", plain=True), ph)
         if r is None:
             sys.exit(f"{name}: expansion is not plain arithmetic, port by hand:\n  {e}")
         for p, q in zip(ph, params):
@@ -205,36 +259,112 @@ def gen():
                 sys.exit(f"{name}({s}): Rust {got:#x} != GCC {want:#x}")
 
     out = ["// Generated by gen_regs.py from Linux 6.18.55 i915; do not edit.",
-           "// Each value is GCC's, compiled from the named header line.", ""]
+           "// Each value is GCC's, compiled from the named header line.", "",
+           "#![allow(unused_parens)]", ""]
     for kind, name, params in entries:
         if kind == "group":
             if out[-1] != "":
                 out.append("")
             out.append(f"// {name}")
             continue
-        loc = where(name) or "?"
-        if params:
+        if isinstance(params, tuple) and len(params) > 2:
+            loc = f"{params[2]} in {params[1]}"
+        else:
+            loc = where(name) or "?"
+        if params and not isinstance(params, tuple):
             sig = ", ".join(f"{p}: u32" for p in params)
             out.append(f"/// {loc}")
             out.append(f"pub const fn {name}({sig}) -> u32 {{ {rust_fn[name]} }}")
         else:
             v = vals[name]
+            if v >= 1 << 63:
+                out.append(f"pub const {name}: i32 = {v - (1 << 64)}; // {loc}")
+                continue
             ty = "u64" if v > 0xFFFF_FFFF else "u32"
             out.append(f"pub const {name}: {ty} = {v:#x}; // {loc}")
     return "\n".join(out) + "\n"
 
 
+def gen_tables():
+    if not os.path.exists(TLIST):
+        return None
+    groups, cur = [], None
+    for raw in open(TLIST):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("@"):
+            cur = (line[1:].strip(), [])
+            groups.append(cur)
+            continue
+        m = re.match(r"^(\w+)\s*:\s*(\w+)(?:\s*\{([^}]*)\})?$", line)
+        if not m or cur is None:
+            sys.exit(f"tables.list: cannot read {line!r}")
+        fields = [f.strip() for f in m.group(3).split(",")] if m.group(3) else []
+        cur[1].append((m.group(1), m.group(2), fields))
+
+    out = ["// Generated by gen_regs.py from Linux 6.18.55 i915; do not edit.",
+           "// Each value is GCC's, compiled from the named source file.", "",
+           "#![allow(non_upper_case_globals)]", "", "use super::*;"]
+    for src, arrays in groups:
+        prelude = f'#include "{src}"\n'
+        lens = values({f"{n}__len": f"ARRAY_SIZE({n})" for n, _, _ in arrays}, prelude)
+        exprs = {}
+        for n, ty, fields in arrays:
+            for i in range(lens[f"{n}__len"]):
+                if fields:
+                    for f in fields:
+                        name, _, path = f.partition("=")
+                        exprs[f"{n}__{i}__{name}"] = f"{n}[{i}].{path or name}"
+                else:
+                    exprs[f"{n}__{i}"] = f"{n}[{i}]"
+        vals = values(exprs, prelude)
+        out += ["", f"// {src}"]
+        for n, ty, fields in arrays:
+            k = lens[f"{n}__len"]
+            loc = where_array(src, n)
+            if fields:
+                items = []
+                for i in range(k):
+                    names = [f.partition("=")[0] for f in fields]
+                    body = ", ".join(f"{f}: {vals[f'{n}__{i}__{f}']:#x}" for f in names)
+                    items.append(f"    {ty} {{ {body} }},")
+                out.append(f"/// {loc}")
+                out.append(f"pub static {n}: [{ty}; {k}] = [")
+                out += items
+                out.append("];")
+            else:
+                body = ", ".join(f"{vals[f'{n}__{i}']:#x}" for i in range(k))
+                out.append(f"/// {loc}")
+                out.append(f"pub static {n}: [{ty}; {k}] = [{body}];")
+    return "\n".join(out) + "\n"
+
+
+def where_array(src, name):
+    rx = re.compile(r"\b" + re.escape(name) + r"\s*\[\s*\]\s*=")
+    for i, line in enumerate(open(os.path.join(I915, src), errors="ignore"), 1):
+        if rx.search(line):
+            return f"{src}:{i}"
+    return src
+
+
 def main():
-    text = gen()
+    outputs = [(OUT, gen()), (TOUT, gen_tables())]
     if "--check" in sys.argv:
-        cur = open(OUT).read() if os.path.exists(OUT) else ""
-        if cur != text:
-            sys.exit("src/regs.rs differs from what gen_regs.py writes")
-        print("src/regs.rs matches the headers")
+        for path, text in outputs:
+            if text is None:
+                continue
+            cur = open(path).read() if os.path.exists(path) else ""
+            if cur != text:
+                sys.exit(f"{os.path.relpath(path, HERE)} differs from what gen_regs.py writes")
+        print("generated files match the Linux sources")
         return
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    open(OUT, "w").write(text)
-    print(f"wrote {OUT}")
+    for path, text in outputs:
+        if text is None:
+            continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").write(text)
+        print(f"wrote {os.path.relpath(path, HERE)}")
 
 
 if __name__ == "__main__":

@@ -1,15 +1,32 @@
 //! gpu_intel_tgl: Intel Tiger Lake graphics, ported from Linux 6.18.55 i915.
 //!
 //! The port follows docs/plan/GPU_INTEL_LINUX_MAP.md and the call order in
-//! docs/plan/GPU_INTEL_TGL_TREE.txt. This first stage only takes the card
-//! over from the kernel and reads it: bind (which makes the kernel's own
-//! driver hand over), map the register BAR, read two registers that need
-//! no forcewake. Nothing is written to the card.
+//! docs/plan/GPU_INTEL_TGL_TREE.txt. This stage runs `i915_driver_probe` up
+//! to and including `i915_driver_mmio_probe`: device and display info,
+//! the PCH, forcewake, the GT's clock, slices, L3 banks and engines from
+//! the fuses, the display fuses and raw clock, and the full GT reset
+//! `sanitize_gpu` does. It reports what it found and gives the card back.
 
 #![no_std]
+// Linux names are kept as they are (`intel_uncore`, `FORCEWAKE_MT`,
+// `__gen12_fw_ranges`), so a function can be found in both trees by name.
+#![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
+#![allow(dead_code)]
 
+mod i915_drv;
+mod intel_display_device;
+mod intel_engine;
+mod intel_gt;
+mod intel_pch;
+mod intel_reset;
+mod intel_uncore;
+mod linux;
 mod regs;
+mod tables;
 
+use i915_drv::intel_step_info;
+use intel_gt::engine_info;
+use intel_uncore::{i915_range, intel_forcewake_range};
 use npk_sys::Mmio;
 
 #[unsafe(link_section = ".npk.app_meta")]
@@ -36,56 +53,32 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let mut l = Line::new();
     l.s("PANIC, driver stopped");
     if let Some(loc) = info.location() {
-        l.s(" at ").s(loc.file()).s(":").hex(loc.line());
+        l.s(" at ").s(loc.file()).s(":").dec(loc.line() as u64);
     }
     l.say();
     core::arch::wasm32::unreachable()
 }
 
-/// One output line, built whole so the kernel log keeps it on one line.
-struct Line {
-    buf: [u8; 160],
-    len: usize,
-}
+use linux::{say, Line};
 
-impl Line {
-    fn new() -> Self {
-        let mut l = Line { buf: [0; 160], len: 0 };
-        l.s("[gpu_intel_tgl] ");
-        l
+/// `intel_gmch_bridge_setup` + `intel_gmch_bar_setup`: the host bridge at
+/// 00:00.0 must have MCHBAR enabled. Linux enables it when the firmware
+/// did not; a module may only read another function's config, so a
+/// disabled MCHBAR is reported, not fixed.
+fn intel_gmch_bar_setup() {
+    let mchbar = npk_sys::pci_read_config_at(0, regs::MCHBAR_I965 as i32) as u32;
+    if mchbar == 0xffff_ffff {
+        linux::drm_err("bridge device not found");
+    } else if mchbar & 1 == 0 {
+        linux::drm_err("MCHBAR is disabled on the host bridge and cannot be enabled from a module");
     }
-
-    fn s(&mut self, s: &str) -> &mut Self {
-        let n = s.len().min(self.buf.len() - self.len);
-        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
-        self.len += n;
-        self
-    }
-
-    fn hex(&mut self, v: u32) -> &mut Self {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut b = *b"0x00000000";
-        for i in 0..8 {
-            b[9 - i] = HEX[((v >> (i * 4)) & 0xf) as usize];
-        }
-        self.s(core::str::from_utf8(&b).unwrap_or("?"))
-    }
-
-    /// To the kernel log: `dmesg`, the terminal's log stream and `debug`
-    /// all show it, once.
-    fn say(&self) {
-        npk_sys::log(&self.buf[..self.len]);
-    }
-}
-
-fn say(s: &str) {
-    Line::new().s(s).say();
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 0: take over and read").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 1: i915_driver_probe up to the MMIO probe").say();
 
+    // pci_enable_device: bind (the kernel's own driver hands the card over).
     match npk_sys::pci_bind(INTEL_VENDOR as i32, TGL_GT2 as i32) {
         0 => {}
         rc => {
@@ -98,18 +91,79 @@ pub extern "C" fn _start() {
             return;
         }
     }
-    say("bound 8086:9a78, kernel driver handed over");
-
-    let rev = npk_sys::pci_read_config(0x08) as u32 & 0xff;
-    Line::new().s("revision ").hex(rev).say();
-
+    let revision = npk_sys::pci_read_config(0x08) as u32 as u8;
     let Some(regs) = Mmio::map_bar(0, BAR0_PAGES) else {
         say("BAR0 could not be mapped");
         return;
     };
-    say("BAR0 mapped (16 MB)");
 
-    Line::new().s("FORCEWAKE_ACK_GT_GEN9     ").hex(regs.r32(regs::FORCEWAKE_ACK_GT_GEN9)).say();
-    Line::new().s("FORCEWAKE_ACK_RENDER_GEN9 ").hex(regs.r32(regs::FORCEWAKE_ACK_RENDER_GEN9)).say();
-    say("stage 0 done, desktop stays on the CPU path");
+    // i915_driver_create
+    let mut i915 = i915_drv::drm_i915_private {
+        revision,
+        runtime: i915_drv::intel_device_info_driver_create(TGL_GT2),
+        display: i915_drv::intel_display_device_probe(revision),
+        uncore: intel_uncore::intel_uncore::new(regs),
+    };
+
+    // i915_driver_early_probe
+    i915_drv::intel_device_info_runtime_init_early(&mut i915.runtime);
+    i915_drv::intel_step_init(&mut i915);
+    let mut gt = intel_gt::intel_gt::new();
+    let pch_type = intel_pch::intel_pch_detect(i915.display.has_display);
+    i915_drv::intel_detect_preproduction_hw(&i915);
+    Line::new().s("graphics ").dec(i915.runtime.graphics_ip.ver as u64).s(".")
+        .dec(i915.runtime.graphics_ip.rel as u64).s(" stepping ")
+        .s(i915_drv::intel_step_name(i915.runtime.step.graphics_step))
+        .s(", display stepping ").s(i915_drv::intel_step_name(i915.display.step))
+        .s(", PCH type ").dec(pch_type as u64).say();
+
+    // i915_driver_mmio_probe
+    let has_rcs = intel_engine::has_engine(gt.info.engine_mask, regs::RCS0);
+    // HAS_FPGA_DBG_UNCLAIMED(display): the display info flag.
+    let fpga_dbg = regs::TGL_DISPLAY_HAS_FPGA_DBG != 0;
+    if i915.uncore.intel_uncore_init_mmio(gt.info.engine_mask, has_rcs, fpga_dbg).is_err() {
+        say("intel_uncore_init_mmio failed, giving the card back");
+        return;
+    }
+    intel_gmch_bar_setup();
+    let mut drt = intel_display_device::tgl_runtime_defaults();
+    intel_display_device::intel_display_device_info_runtime_init(&mut i915, &mut drt, pch_type);
+    intel_gt::intel_gt_init_mmio(&mut i915, &mut gt);
+    // sanitize_gpu
+    if !intel_reset::intel_gt_gpu_reset_clobbers_display() {
+        if intel_reset::intel_gt_reset_all_engines(&mut i915, &gt).is_err() {
+            say("GT reset failed");
+        }
+    }
+
+    report(&i915, &gt, &drt);
+
+    // Forcewake taken for register access is released by its timer; wait
+    // for it, so the GT can enter RC6 once the module is gone.
+    let t0 = linux::now_us();
+    while i915.uncore.fw_domains_active != 0 && linux::now_us() - t0 < 100_000 {
+        npk_sys::sleep(1);
+        i915.uncore.run_timers();
+    }
+    Line::new().s("forcewake held at exit: ").hex(i915.uncore.fw_domains_active).say();
+}
+
+fn report(i915: &i915_drv::drm_i915_private, gt: &intel_gt::intel_gt,
+          drt: &intel_display_device::intel_display_runtime_info) {
+    Line::new().s("forcewake domains ").hex(i915.uncore.fw_domains).say();
+    Line::new().s("GT clock ").dec(gt.clock_frequency as u64).s(" Hz, period ")
+        .dec(gt.clock_period_ns as u64).s(" ns").say();
+    let s = &gt.info.sseu;
+    Line::new().s("slices ").hex(s.slice_mask).s(", subslices ").hex(s.subslice_mask[0])
+        .s(", EUs ").dec(s.eu_total as u64).s(" (").dec(s.eu_per_subslice as u64)
+        .s(" per subslice), L3 banks ").hex(gt.info.l3bank_mask).say();
+    let mut l = Line::new();
+    l.s("engines ").hex(gt.info.engine_mask as u32).s(":");
+    for e in gt.engine.iter().flatten() {
+        l.s(" ").s(intel_gt::intel_engine_class_repr(e.class)).dec(e.instance as u64)
+            .s("@").hex(e.mmio_base);
+    }
+    l.say();
+    Line::new().s("display pipes ").hex(drt.pipe_mask).s(", dmc ").dec(drt.has_dmc as u64)
+        .s(", rawclk ").dec(drt.rawclk_freq as u64).s(" kHz").say();
 }

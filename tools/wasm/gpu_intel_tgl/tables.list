@@ -1,0 +1,24 @@
+@ intel_uncore.c
+__gen12_fw_ranges: intel_forcewake_range { start, end, domains }
+gen12_shadowed_regs: i915_range { start, end }
+@ intel_step.c
+tgl_uy_revids: intel_step_info { graphics_step, media_step }
+@ intel_device_info.c
+subplatform_ult_ids: u16
+subplatform_ulx_ids: u16
+subplatform_portf_ids: u16
+subplatform_uy_ids: u16
+subplatform_n_ids: u16
+subplatform_rpl_ids: u16
+subplatform_rplu_ids: u16
+subplatform_g10_ids: u16
+subplatform_g11_ids: u16
+subplatform_g12_ids: u16
+subplatform_dg2_d_ids: u16
+subplatform_arl_h_ids: u16
+subplatform_arl_u_ids: u16
+subplatform_arl_s_ids: u16
+@ display/intel_display_device.c
+tgl_uy_steppings: u32
+@ gt/intel_engine_cs.c
+intel_engines: engine_info { class, instance, ver0=mmio_bases[0].graphics_ver, base0=mmio_bases[0].base, ver1=mmio_bases[1].graphics_ver, base1=mmio_bases[1].base, ver2=mmio_bases[2].graphics_ver, base2=mmio_bases[2].base }
