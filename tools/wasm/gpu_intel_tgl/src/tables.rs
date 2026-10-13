@@ -169,3 +169,29 @@ pub static intel_engines: [engine_info; 27] = [
 // display/intel_bios.c
 /// display/intel_bios.c:3016
 pub static vbt_signature: [u8; 5] = [0x24, 0x56, 0x42, 0x54, 0x0];
+
+// display/intel_cdclk.c
+/// display/intel_cdclk.c: `tgl_voltage_level_max_cdclk` in `tgl_calc_voltage_level`
+pub static tgl_voltage_level_max_cdclk: [i32; 4] = [312000, 326400, 556800, 652800];
+/// display/intel_cdclk.c:1342
+pub static icl_cdclk_table: [intel_cdclk_vals; 19] = [
+    intel_cdclk_vals { cdclk: 0x2a300, refclk: 0x4b00, waveform: 0x0, ratio: 0x12 },
+    intel_cdclk_vals { cdclk: 0x2ee00, refclk: 0x4b00, waveform: 0x0, ratio: 0x14 },
+    intel_cdclk_vals { cdclk: 0x4b000, refclk: 0x4b00, waveform: 0x0, ratio: 0x20 },
+    intel_cdclk_vals { cdclk: 0x4fb00, refclk: 0x4b00, waveform: 0x0, ratio: 0x44 },
+    intel_cdclk_vals { cdclk: 0x87f00, refclk: 0x4b00, waveform: 0x0, ratio: 0x3a },
+    intel_cdclk_vals { cdclk: 0x9f600, refclk: 0x4b00, waveform: 0x0, ratio: 0x44 },
+    intel_cdclk_vals { cdclk: 0x2bf20, refclk: 0x5dc0, waveform: 0x0, ratio: 0xf },
+    intel_cdclk_vals { cdclk: 0x2ee00, refclk: 0x5dc0, waveform: 0x0, ratio: 0x10 },
+    intel_cdclk_vals { cdclk: 0x4c2c0, refclk: 0x5dc0, waveform: 0x0, ratio: 0x1a },
+    intel_cdclk_vals { cdclk: 0x4f1a0, refclk: 0x5dc0, waveform: 0x0, ratio: 0x36 },
+    intel_cdclk_vals { cdclk: 0x86c40, refclk: 0x5dc0, waveform: 0x0, ratio: 0x2e },
+    intel_cdclk_vals { cdclk: 0x9e340, refclk: 0x5dc0, waveform: 0x0, ratio: 0x36 },
+    intel_cdclk_vals { cdclk: 0x2a300, refclk: 0x9600, waveform: 0x0, ratio: 0x9 },
+    intel_cdclk_vals { cdclk: 0x2ee00, refclk: 0x9600, waveform: 0x0, ratio: 0xa },
+    intel_cdclk_vals { cdclk: 0x4b000, refclk: 0x9600, waveform: 0x0, ratio: 0x10 },
+    intel_cdclk_vals { cdclk: 0x4fb00, refclk: 0x9600, waveform: 0x0, ratio: 0x22 },
+    intel_cdclk_vals { cdclk: 0x87f00, refclk: 0x9600, waveform: 0x0, ratio: 0x1d },
+    intel_cdclk_vals { cdclk: 0x9f600, refclk: 0x9600, waveform: 0x0, ratio: 0x22 },
+    intel_cdclk_vals { cdclk: 0x0, refclk: 0x0, waveform: 0x0, ratio: 0x0 },
+];

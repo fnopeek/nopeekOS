@@ -24,3 +24,6 @@ tgl_uy_steppings: u32
 intel_engines: engine_info { class, instance, ver0=mmio_bases[0].graphics_ver, base0=mmio_bases[0].base, ver1=mmio_bases[1].graphics_ver, base1=mmio_bases[1].base, ver2=mmio_bases[2].graphics_ver, base2=mmio_bases[2].base }
 @ display/intel_bios.c
 vbt_signature: u8
+@ display/intel_cdclk.c
+icl_cdclk_table: intel_cdclk_vals { cdclk, refclk, waveform, ratio }
+tgl_calc_voltage_level::tgl_voltage_level_max_cdclk: i32

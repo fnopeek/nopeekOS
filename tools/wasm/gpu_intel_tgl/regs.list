@@ -395,3 +395,28 @@ EIO
 CHILD_HPD_INVERT = bitfield(struct child_device_config, hpd_invert) @ display/intel_bios.c
 CHILD_HDMI_SUPPORT = bitfield(struct child_device_config, hdmi_support) @ display/intel_bios.c
 CHILD_DVO_PORT = bitfield(struct child_device_config, dvo_port) @ display/intel_bios.c
+# cdclk (display/intel_cdclk.c)
+SKL_DSSM
+ICL_DSSM_CDCLK_PLL_REFCLK_MASK
+ICL_DSSM_CDCLK_PLL_REFCLK_24MHz
+ICL_DSSM_CDCLK_PLL_REFCLK_19_2MHz
+ICL_DSSM_CDCLK_PLL_REFCLK_38_4MHz
+BXT_DE_PLL_ENABLE
+BXT_DE_PLL_PLL_ENABLE
+BXT_DE_PLL_LOCK
+ICL_CDCLK_PLL_RATIO(x)
+ICL_CDCLK_PLL_RATIO_MASK
+CDCLK_CTL
+BXT_CDCLK_CD2X_DIV_SEL_MASK
+BXT_CDCLK_CD2X_DIV_SEL_1
+BXT_CDCLK_CD2X_DIV_SEL_1_5
+BXT_CDCLK_CD2X_DIV_SEL_2
+BXT_CDCLK_CD2X_DIV_SEL_4
+TGL_CDCLK_CD2X_PIPE(pipe)
+TGL_CDCLK_CD2X_PIPE_NONE
+INVALID_PIPE
+SKL_PCODE_CDCLK_CONTROL
+SKL_CDCLK_PREPARE_FOR_CHANGE
+SKL_CDCLK_READY_FOR_CHANGE
+TGL_DISPLAY_HAS_CDCLK_CRAWL = tgl_desc.info->has_cdclk_crawl @ display/intel_display_device.c
+TGL_DISPLAY_HAS_CDCLK_SQUASH = tgl_desc.info->has_cdclk_squash @ display/intel_display_device.c

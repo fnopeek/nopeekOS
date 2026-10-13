@@ -2,7 +2,7 @@
 //! outside the forcewake domains, so the `_fw` accessors are used.
 
 use crate::i915_drv::drm_i915_private;
-use crate::linux::Line;
+use crate::linux::{self, Line};
 use crate::regs::*;
 
 fn e(errno: u32) -> i32 {
@@ -68,6 +68,50 @@ pub fn snb_pcode_write_timeout(i915: &mut drm_i915_private, mbox: u32, mut val: 
             .s(" failed: ").dec((-e) as u64).say();
     }
     r
+}
+
+/// `intel_pcode_write`.
+pub fn intel_pcode_write(i915: &mut drm_i915_private, mbox: u32, val: u32) -> Result<(), i32> {
+    snb_pcode_write_timeout(i915, mbox, val, 1)
+}
+
+/// `skl_pcode_try_request`.
+fn skl_pcode_try_request(i915: &mut drm_i915_private, mbox: u32, mut request: u32, reply_mask: u32,
+                         reply: u32, status: &mut i32) -> bool {
+    *status = match __snb_pcode_rw(i915, mbox, &mut request, None, 500, 0, true) {
+        Ok(()) => 0,
+        Err(e) => e,
+    };
+    *status == 0 && request & reply_mask == reply
+}
+
+/// `skl_pcode_request` / `intel_pcode_request`: repeats the request until
+/// the reply matches, first for `timeout_base_ms`, then busy for 50 ms.
+pub fn skl_pcode_request(i915: &mut drm_i915_private, mbox: u32, request: u32, reply_mask: u32,
+                         reply: u32, timeout_base_ms: u32) -> Result<(), i32> {
+    let mut status = 0i32;
+    let mut ret: Result<(), ()>;
+    if skl_pcode_try_request(i915, mbox, request, reply_mask, reply, &mut status) {
+        ret = Ok(());
+    } else {
+        ret = linux::_wait_for(timeout_base_ms as u64 * 1000, 10, 10, || {
+            skl_pcode_try_request(i915, mbox, request, reply_mask, reply, &mut status)
+        });
+        if ret.is_err() {
+            Line::new().s("PCODE timeout, retrying with preemption disabled").say();
+            if timeout_base_ms > 3 {
+                Line::new().s("warning: pcode request base timeout ").dec(timeout_base_ms as u64)
+                    .s(" ms above 3").say();
+            }
+            ret = linux::wait_for_atomic_us(50 * 1000, || {
+                skl_pcode_try_request(i915, mbox, request, reply_mask, reply, &mut status)
+            });
+        }
+    }
+    if status != 0 {
+        return Err(status);
+    }
+    ret.map_err(|()| e(ETIMEDOUT))
 }
 
 /// `intel_pcode_init`: discrete GPUs only.

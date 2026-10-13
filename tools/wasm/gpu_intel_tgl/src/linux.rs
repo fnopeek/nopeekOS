@@ -34,11 +34,17 @@ pub fn wait_for_atomic_us(timeout_us: u64, mut cond: impl FnMut() -> bool) -> Re
 }
 
 /// `wait_for(COND, ms)`: polls with sleeps that grow from 10 us to 1 ms.
-pub fn wait_for_ms(timeout_ms: u64, mut cond: impl FnMut() -> bool) -> Result<(), ()> {
+pub fn wait_for_ms(timeout_ms: u64, cond: impl FnMut() -> bool) -> Result<(), ()> {
+    _wait_for(timeout_ms * 1000, 10, 1000, cond)
+}
+
+/// `_wait_for(COND, US, Wmin, Wmax)`: polls with sleeps that double from
+/// `wmin` up to `wmax` microseconds.
+pub fn _wait_for(timeout_us: u64, wmin: u64, wmax: u64, mut cond: impl FnMut() -> bool) -> Result<(), ()> {
     let t0 = now_us();
-    let mut wait_us = 10u64;
+    let mut wait_us = wmin;
     loop {
-        let expired = now_us() - t0 > timeout_ms * 1000;
+        let expired = now_us() - t0 > timeout_us;
         if cond() {
             return Ok(());
         }
@@ -50,7 +56,9 @@ pub fn wait_for_ms(timeout_ms: u64, mut cond: impl FnMut() -> bool) -> Result<()
         } else {
             udelay(wait_us);
         }
-        wait_us = (wait_us * 2).min(1000);
+        if wait_us < wmax {
+            wait_us <<= 1;
+        }
     }
 }
 

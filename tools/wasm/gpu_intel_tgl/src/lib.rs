@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 
 mod i915_drv;
+mod intel_cdclk;
 mod intel_display_device;
 mod intel_dram;
 mod intel_engine;
@@ -31,6 +32,7 @@ mod regs;
 mod tables;
 
 use i915_drv::intel_step_info;
+use intel_cdclk::intel_cdclk_vals;
 use intel_gt::engine_info;
 use intel_uncore::{i915_range, intel_forcewake_range};
 use npk_sys::Mmio;
@@ -134,6 +136,13 @@ pub extern "C" fn _start() {
     intel_gmch_bar_setup();
     let mut drt = intel_display_device::tgl_runtime_defaults();
     intel_display_device::intel_display_device_info_runtime_init(&mut i915, &mut drt, pch_type);
+    // intel_init_cdclk_hooks, intel_cdclk_init and the readout of
+    // intel_display_driver_probe_nogem; nothing is programmed here.
+    let mut cdclk = intel_cdclk::intel_init_cdclk_hooks();
+    let _ = intel_cdclk::intel_cdclk_init(&mut cdclk);
+    intel_cdclk::intel_update_cdclk(&mut i915, &mut cdclk);
+    intel_cdclk::intel_cdclk_dump_config(&cdclk.hw, "Current CDCLK");
+    intel_cdclk::intel_update_max_cdclk(&mut cdclk);
     intel_gt::intel_gt_init_mmio(&mut i915, &mut gt);
     // sanitize_gpu
     if !intel_reset::intel_gt_gpu_reset_clobbers_display() {
