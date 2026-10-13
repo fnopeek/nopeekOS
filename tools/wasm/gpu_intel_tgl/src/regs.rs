@@ -3,6 +3,11 @@
 
 #![allow(unused_parens)]
 
+/// Where a C bit-field sits: byte offset, bit shift within that byte
+/// (a field may run into the following bytes), width in bits.
+#[derive(Clone, Copy)]
+pub struct Bitfield { pub byte: u32, pub shift: u32, pub width: u32 }
+
 // Forcewake registers (gt/intel_gt_regs.h)
 pub const FORCEWAKE_MT: u32 = 0xa188; // intel_uncore.c:2229
 pub const FORCEWAKE_RENDER_GEN9: u32 = 0xa278; // intel_uncore.c:2187
@@ -436,3 +441,8 @@ pub const BDB_HEADER_HEADER_SIZE: u64 = 0x12; // offsetof(struct bdb_header, hea
 pub const BDB_HEADER_BDB_SIZE: u64 = 0x14; // offsetof(struct bdb_header, bdb_size) in display/intel_bios.c
 pub const VBT_SIGNATURE_LEN: u32 = 0x4; // vbt_signature_len in display/intel_bios.c
 pub const EIO: u32 = 0x5; // include/uapi/asm-generic/errno-base.h:9
+
+// VBT child device bit-fields (display/intel_vbt_defs.h)
+pub const CHILD_HPD_INVERT: Bitfield = Bitfield { byte: 23, shift: 4, width: 1 }; // struct child_device_config.hpd_invert in display/intel_bios.c
+pub const CHILD_HDMI_SUPPORT: Bitfield = Bitfield { byte: 24, shift: 0, width: 1 }; // struct child_device_config.hdmi_support in display/intel_bios.c
+pub const CHILD_DVO_PORT: Bitfield = Bitfield { byte: 16, shift: 0, width: 8 }; // struct child_device_config.dvo_port in display/intel_bios.c

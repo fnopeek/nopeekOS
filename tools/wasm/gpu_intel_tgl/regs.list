@@ -391,3 +391,7 @@ BDB_HEADER_HEADER_SIZE = offsetof(struct bdb_header, header_size) @ display/inte
 BDB_HEADER_BDB_SIZE = offsetof(struct bdb_header, bdb_size) @ display/intel_bios.c
 VBT_SIGNATURE_LEN = vbt_signature_len @ display/intel_bios.c
 EIO
+# VBT child device bit-fields (display/intel_vbt_defs.h)
+CHILD_HPD_INVERT = bitfield(struct child_device_config, hpd_invert) @ display/intel_bios.c
+CHILD_HDMI_SUPPORT = bitfield(struct child_device_config, hdmi_support) @ display/intel_bios.c
+CHILD_DVO_PORT = bitfield(struct child_device_config, dvo_port) @ display/intel_bios.c
