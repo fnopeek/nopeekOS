@@ -107,6 +107,9 @@ unsafe extern "C" fn rust_main() -> ! {
     if wakebench::requested() {
         wakebench::run(kmsg_fd);
     }
+    if wakebench::vm_requested() {
+        wakebench::run_vm(kmsg_fd);
+    }
 
     // Diagnostic: if the host passed `nopeekbench=` on the cmdline, run a pure
     // busybox download through the nat bridge (no compositor/GPU/browser) so the

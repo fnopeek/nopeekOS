@@ -1,8 +1,13 @@
-//! `npkbench_wake` on the cmdline: two processes bounce one byte through a
-//! pair of pipes, pinned to the same or to different CPUs. Each blocking read
-//! puts its side to sleep, so one round trip costs two cross-CPU wakeups — the
-//! path every IPC handoff in the guest takes. Runs before the session, on an
-//! idle system; `tools/wakebench.c` is the same loop for a native host.
+//! Guest benchmarks, run before the session on an idle system.
+//!
+//! `npkbench_wake`: two processes bounce one byte through a pair of pipes,
+//! pinned to the same or to different CPUs. Each blocking read puts its side
+//! to sleep, so one round trip costs two cross-CPU wakeups — the path every
+//! IPC handoff in the guest takes; `tools/wakebench.c` is the same loop for
+//! a native host.
+//!
+//! `npkbench_vm`: runs `vmbench` (microvm/linux/vmbench), the operations a
+//! hypervisor makes expensive, with its output on the console.
 
 use super::{syscall0, syscall1, syscall2, syscall3, syscall4, say};
 
@@ -16,12 +21,22 @@ const ROUNDS: u64 = 20_000;
 const WARMUP: u64 = 200;
 const SLOW_NS: u64 = 100_000;
 
-pub fn requested() -> bool {
+const VMBENCH: &[u8] = include_bytes!("../../vmbench/vmbench");
+
+fn cmdline_has(needle: &[u8]) -> bool {
     let mut buf = [0u8; 1024];
     // SAFETY: `read_file` writes at most `buf.len()` bytes into `buf`.
     let n = unsafe { super::control::read_file(b"/proc/cmdline\0", &mut buf) }.unwrap_or(0);
-    let needle = b"npkbench_wake";
-    buf[..n].windows(needle.len()).any(|w| w == needle)
+    // Byte by byte: without libc a slice comparison may become `bcmp`.
+    buf[..n].windows(needle.len()).any(|w| w.iter().zip(needle).all(|(a, b)| a == b))
+}
+
+pub fn requested() -> bool {
+    cmdline_has(b"npkbench_wake")
+}
+
+pub fn vm_requested() -> bool {
+    cmdline_has(b"npkbench_vm")
 }
 
 fn now_ns() -> u64 {
@@ -131,19 +146,9 @@ fn pingpong(a: u32, b: u32) -> Option<(u64, u64, u64)> {
     ok.then_some((sum / ROUNDS, max, slow))
 }
 
-/// Run in a child and wait for it, so PID 1 keeps its own CPU mask.
-pub fn run(kmsg_fd: i64) {
-    // SAFETY: as in `pingpong`.
-    let pid = unsafe { syscall0(super::SYS_FORK) };
-    if pid != 0 {
-        if pid > 0 {
-            let mut status = 0i32;
-            // SAFETY: as in `pingpong`.
-            unsafe { syscall4(SYS_WAIT4, pid as u64, &mut status as *mut i32 as u64, 0, 0) };
-        }
-        return;
-    }
-    // The other vCPUs come online beside PID 1; give them up to 5 s.
+/// The other vCPUs come online beside PID 1; wait up to 5 s for the first
+/// and then until the count holds still. Returns the highest online CPU.
+fn wait_for_cpus() -> u32 {
     let mut last = 0;
     for _ in 0..100 {
         last = last_online();
@@ -160,6 +165,50 @@ pub fn run(kmsg_fd: i64) {
         unsafe { syscall2(super::SYS_NANOSLEEP, ts.as_ptr() as u64, 0) };
         last = last_online();
     }
+    last
+}
+
+/// Run `vmbench` in a child with its output on the console, and wait for it.
+pub fn run_vm(kmsg_fd: i64) {
+    // SAFETY: fork has no preconditions.
+    let pid = unsafe { syscall0(super::SYS_FORK) };
+    if pid != 0 {
+        if pid > 0 {
+            let mut status = 0i32;
+            // SAFETY: reap our own child; `status` is a valid int.
+            unsafe { syscall4(SYS_WAIT4, pid as u64, &mut status as *mut i32 as u64, 0, 0) };
+        }
+        return;
+    }
+    wait_for_cpus();
+    super::write_file(b"/tmp/vmbench\0", VMBENCH, 0o755);
+    if kmsg_fd >= 0 {
+        // SAFETY: duplicating an open fd onto stdout.
+        unsafe { syscall2(super::SYS_DUP2, kmsg_fd as u64, 1) };
+    }
+    let path = b"/tmp/vmbench\0";
+    let argv = [path.as_ptr(), core::ptr::null()];
+    let envp: [*const u8; 1] = [core::ptr::null()];
+    // SAFETY: NUL-terminated path, NULL-terminated argv and envp.
+    unsafe { syscall3(super::SYS_EXECVE, path.as_ptr() as u64, argv.as_ptr() as u64, envp.as_ptr() as u64) };
+    say(kmsg_fd, b"[vmbench] exec failed\n");
+    // SAFETY: the child ends here.
+    unsafe { syscall1(super::SYS_EXIT, 1) };
+}
+
+/// Run in a child and wait for it, so PID 1 keeps its own CPU mask.
+pub fn run(kmsg_fd: i64) {
+    // SAFETY: as in `pingpong`.
+    let pid = unsafe { syscall0(super::SYS_FORK) };
+    if pid != 0 {
+        if pid > 0 {
+            let mut status = 0i32;
+            // SAFETY: as in `pingpong`.
+            unsafe { syscall4(SYS_WAIT4, pid as u64, &mut status as *mut i32 as u64, 0, 0) };
+        }
+        return;
+    }
+    let last = wait_for_cpus();
     for b in 0..=last {
         let mut line = [0u8; 160];
         let mut at = 0;
