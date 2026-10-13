@@ -1537,6 +1537,90 @@ pub fn set_interrupt_window_exiting(on: bool) -> Result<(), &'static str> {
     Ok(())
 }
 
+// ── APICv (KVM `vmx.c`, `posted_intr.c`) ──────────────────────────
+
+const POSTED_INTR_NV: u64 = 0x0002;
+const GUEST_INTR_STATUS: u64 = 0x0810;
+const VIRTUAL_APIC_PAGE_ADDR: u64 = 0x2012;
+const POSTED_INTR_DESC_ADDR: u64 = 0x2016;
+const EOI_EXIT_BITMAP0: u64 = 0x201C;
+const TPR_THRESHOLD: u64 = 0x401C;
+
+const PIN_POSTED_INTR: u32 = 1 << 7;
+const CPU_TPR_SHADOW: u32 = 1 << 21;
+const SEC_VIRT_X2APIC_MODE: u32 = 1 << 4;
+const SEC_APIC_REGISTER_VIRT: u32 = 1 << 8;
+const SEC_VIRTUAL_INTR_DELIVERY: u32 = 1 << 9;
+const EXIT_ACK_INTR_ON_EXIT: u32 = 1 << 15;
+
+fn allowed1(msr: u32, bits: u32) -> bool {
+    // SAFETY: VMX capability MSRs exist whenever VMX does (checked by probe).
+    (unsafe { rdmsr(msr) } >> 32) as u32 & bits == bits
+}
+
+/// `cpu_has_vmx_apicv` + `cpu_has_vmx_posted_intr` + x2APIC virtualization:
+/// every control the x2APIC APICv mode needs may be 1.
+pub fn apicv_supported() -> bool {
+    allowed1(pinbased_ctls_msr(), PIN_POSTED_INTR)
+        && allowed1(procbased_ctls_msr(), CPU_TPR_SHADOW | CPU_ACTIVATE_SECONDARY)
+        && allowed1(IA32_VMX_PROCBASED_CTLS2,
+            SEC_VIRT_X2APIC_MODE | SEC_APIC_REGISTER_VIRT | SEC_VIRTUAL_INTR_DELIVERY)
+        && allowed1(exit_ctls_msr(), EXIT_ACK_INTR_ON_EXIT)
+        // SAFETY: as in `allowed1`. CR8 exits must be clearable.
+        && unsafe { rdmsr(procbased_ctls_msr()) } as u32
+            & (CPU_CR8_LOAD_EXITING | CPU_CR8_STORE_EXITING) == 0
+}
+
+/// Switch the current VMCS to x2APIC APICv (`vmx_refresh_apicv_exec_ctrl`,
+/// `init_vmcs`): TPR shadow on the register page, x2APIC register reads and
+/// TPR/EOI/SELF_IPI writes virtualized, virtual-interrupt delivery, posted
+/// interrupts on `nv`, external interrupts acknowledged on exit. All
+/// vectors are edge-triggered, so no EOI exits.
+///
+/// # Safety
+/// In VMX root with this vCPU's VMCS current; `bitmaps` are its own, and
+/// `vapic_page` / `pi_desc` stay allocated while the VMCS can run.
+pub(super) unsafe fn activate_apicv(
+    bitmaps: &ExecBitmaps, vapic_page: u64, pi_desc: u64, nv: u8, svi: u8,
+) -> Result<(), &'static str> {
+    // SAFETY: the caller's contract; the controls were checked against the
+    // capability MSRs in `apicv_supported`.
+    unsafe {
+        vmwrite_unchecked(VIRTUAL_APIC_PAGE_ADDR, vapic_page)?;
+        vmwrite_unchecked(POSTED_INTR_DESC_ADDR, pi_desc)?;
+        vmwrite_unchecked(POSTED_INTR_NV, nv as u64)?;
+        for i in 0..4 { vmwrite_unchecked(EOI_EXIT_BITMAP0 + 2 * i, 0)?; }
+        vmwrite_unchecked(TPR_THRESHOLD, 0)?;
+        vmwrite(GUEST_INTR_STATUS, (svi as u64) << 8)?;
+        let exit = vmread(VM_EXIT_CONTROLS)? as u32 | EXIT_ACK_INTR_ON_EXIT;
+        vmwrite_unchecked(VM_EXIT_CONTROLS, exit as u64)?;
+        let sec = vmread(SECONDARY_VM_EXEC_CONTROL)? as u32
+            | SEC_VIRT_X2APIC_MODE | SEC_APIC_REGISTER_VIRT | SEC_VIRTUAL_INTR_DELIVERY;
+        vmwrite_unchecked(SECONDARY_VM_EXEC_CONTROL, sec as u64)?;
+        // CR8 goes to the page's TPR: no CR8 exits (KVM clears them with a
+        // TPR shadow).
+        let cpu = (vmread(CPU_BASED_VM_EXEC_CONTROL)? as u32 | CPU_TPR_SHADOW)
+            & !(CPU_CR8_LOAD_EXITING | CPU_CR8_STORE_EXITING);
+        vmwrite_unchecked(CPU_BASED_VM_EXEC_CONTROL, cpu as u64)?;
+        let pin = vmread(PIN_BASED_VM_EXEC_CONTROL)? as u32 | PIN_POSTED_INTR;
+        vmwrite_unchecked(PIN_BASED_VM_EXEC_CONTROL, pin as u64)?;
+        // Last: an x2APIC MSR the bitmap lets through reaches the real
+        // hardware unless x2APIC virtualization is already on.
+        super::msr::x2apic_apicv_bitmap(bitmaps.msr);
+    }
+    Ok(())
+}
+
+/// `vmx_set_rvi`: the highest requested vector, which the CPU delivers on
+/// entry once it is above the virtual PPR.
+pub fn set_rvi(vector: u8) -> Result<(), &'static str> {
+    let status = vmread(GUEST_INTR_STATUS)?;
+    if status as u8 != vector {
+        vmwrite(GUEST_INTR_STATUS, (status & !0xFF) | vector as u64)?;
+    }
+    Ok(())
+}
+
 pub fn read_guest_pat() -> Result<u64, &'static str> { vmread(GUEST_IA32_PAT_FIELD) }
 pub fn write_guest_pat(v: u64) -> Result<(), &'static str> { vmwrite(GUEST_IA32_PAT_FIELD, v) }
 
