@@ -319,6 +319,138 @@ pub fn intel_display_power_get(i915: &mut drm_i915_private, domain: u32) {
     __intel_display_power_get_domain(i915, domain);
 }
 
+/// `__intel_display_power_is_enabled`: no runtime PM, so never suspended.
+fn __intel_display_power_is_enabled(i915: &drm_i915_private, domain: u32) -> bool {
+    let pd = &i915.display.power;
+    for w in (0..pd.power_well_count).rev() {
+        let pw = &pd.power_wells[w];
+        if !test_bit(&pw.domains, domain) {
+            continue;
+        }
+        if inst(pw).always_on != 0 {
+            continue;
+        }
+        if !pw.hw_enabled {
+            return false;
+        }
+    }
+    true
+}
+
+/// `intel_display_power_is_enabled`.
+pub fn intel_display_power_is_enabled(i915: &drm_i915_private, domain: u32) -> bool {
+    __intel_display_power_is_enabled(i915, domain)
+}
+
+/// `intel_display_power_get_if_enabled`: true when a reference was taken.
+pub fn intel_display_power_get_if_enabled(i915: &mut drm_i915_private, domain: u32) -> bool {
+    if __intel_display_power_is_enabled(i915, domain) {
+        __intel_display_power_get_domain(i915, domain);
+        true
+    } else {
+        false
+    }
+}
+
+/// `__intel_display_power_put_domain`.
+fn __intel_display_power_put_domain(i915: &mut drm_i915_private, domain: u32) {
+    if i915.display.power.domain_use_count[domain as usize] == 0 {
+        Line::new().s("warning: use count on domain ").dec(domain as u64).s(" is already zero").say();
+    }
+    i915.display.power.domain_use_count[domain as usize] -= 1;
+
+    for w in (0..i915.display.power.power_well_count).rev() {
+        if test_bit(&i915.display.power.power_wells[w].domains, domain) {
+            intel_power_well_put(i915, w);
+        }
+    }
+}
+
+/// `intel_display_power_put` (`intel_display_power_put_unchecked` without
+/// the runtime PM debug option).
+pub fn intel_display_power_put(i915: &mut drm_i915_private, domain: u32) {
+    __intel_display_power_put_domain(i915, domain);
+}
+
+/// `struct intel_ddi_port_domains`.
+#[derive(Clone, Copy)]
+pub struct intel_ddi_port_domains {
+    pub port_start: u32,
+    pub port_end: u32,
+    pub aux_ch_start: u32,
+    pub aux_ch_end: u32,
+    pub ddi_lanes: u32,
+    pub ddi_io: u32,
+    pub aux_io: u32,
+    pub aux_legacy_usbc: u32,
+    pub aux_tbt: u32,
+}
+
+/// `intel_port_domains_for_port` (display version 12: `d12_port_domains`).
+fn intel_port_domains_for_port(port: u32) -> Option<&'static intel_ddi_port_domains> {
+    tables::d12_port_domains.iter().find(|d| port >= d.port_start && port <= d.port_end)
+}
+
+/// `intel_port_domains_for_aux_ch`.
+fn intel_port_domains_for_aux_ch(aux_ch: u32) -> Option<&'static intel_ddi_port_domains> {
+    tables::d12_port_domains.iter().find(|d| aux_ch >= d.aux_ch_start && aux_ch <= d.aux_ch_end)
+}
+
+/// `intel_display_power_ddi_io_domain`.
+pub fn intel_display_power_ddi_io_domain(port: u32) -> u32 {
+    match intel_port_domains_for_port(port) {
+        Some(d) if d.ddi_io != POWER_DOMAIN_INVALID => d.ddi_io + (port - d.port_start),
+        _ => {
+            linux::say("warning: no DDI IO power domain for port");
+            POWER_DOMAIN_PORT_DDI_IO_A
+        }
+    }
+}
+
+/// `intel_display_power_ddi_lanes_domain`.
+pub fn intel_display_power_ddi_lanes_domain(port: u32) -> u32 {
+    match intel_port_domains_for_port(port) {
+        Some(d) if d.ddi_lanes != POWER_DOMAIN_INVALID => d.ddi_lanes + (port - d.port_start),
+        _ => {
+            linux::say("warning: no DDI lanes power domain for port");
+            POWER_DOMAIN_PORT_DDI_LANES_A
+        }
+    }
+}
+
+/// `intel_display_power_aux_io_domain`.
+pub fn intel_display_power_aux_io_domain(aux_ch: u32) -> u32 {
+    match intel_port_domains_for_aux_ch(aux_ch) {
+        Some(d) if d.aux_io != POWER_DOMAIN_INVALID => d.aux_io + (aux_ch - d.aux_ch_start),
+        _ => {
+            linux::say("warning: no AUX IO power domain for AUX channel");
+            POWER_DOMAIN_AUX_IO_A
+        }
+    }
+}
+
+/// `intel_display_power_legacy_aux_domain`.
+pub fn intel_display_power_legacy_aux_domain(aux_ch: u32) -> u32 {
+    match intel_port_domains_for_aux_ch(aux_ch) {
+        Some(d) if d.aux_legacy_usbc != POWER_DOMAIN_INVALID => d.aux_legacy_usbc + (aux_ch - d.aux_ch_start),
+        _ => {
+            linux::say("warning: no legacy AUX power domain for AUX channel");
+            POWER_DOMAIN_AUX_A
+        }
+    }
+}
+
+/// `intel_display_power_tbt_aux_domain`.
+pub fn intel_display_power_tbt_aux_domain(aux_ch: u32) -> u32 {
+    match intel_port_domains_for_aux_ch(aux_ch) {
+        Some(d) if d.aux_tbt != POWER_DOMAIN_INVALID => d.aux_tbt + (aux_ch - d.aux_ch_start),
+        _ => {
+            linux::say("warning: no TBT AUX power domain for AUX channel");
+            POWER_DOMAIN_AUX_TBT1
+        }
+    }
+}
+
 /// `intel_power_domains_sync_hw`.
 fn intel_power_domains_sync_hw(i915: &mut drm_i915_private) {
     for w in 0..i915.display.power.power_well_count {

@@ -56,6 +56,9 @@ pub struct intel_display {
     pub cdclk: crate::intel_cdclk::intel_display_cdclk,
     /// `display->dbuf.enabled_slices`.
     pub dbuf_enabled_slices: u8,
+    /// The encoders, digital ports and connectors `intel_setup_outputs`
+    /// creates.
+    pub outputs: crate::intel_encoder::intel_outputs,
 }
 
 /// `struct drm_i915_private`, as far as this stage needs it.

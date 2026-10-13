@@ -102,7 +102,7 @@ impl intel_display {
         }
     }
 
-    fn devices(&self) -> &[intel_bios_encoder_data] {
+    pub fn devices(&self) -> &[intel_bios_encoder_data] {
         &self.vbt.display_devices[..self.vbt.n_display_devices]
     }
 
@@ -1162,7 +1162,7 @@ fn child_device_size_valid(display: &intel_display, size: i32) -> bool {
 
 /// `intel_gmbus_is_valid_pin` of intel_gmbus.c: `get_gmbus_pin` picks
 /// `gmbus_pins_icp` for PCH TGP (at least PCH_ICP, below PCH_DG1).
-fn intel_gmbus_is_valid_pin(_display: &intel_display, pin: u32) -> bool {
+pub fn intel_gmbus_is_valid_pin(_display: &intel_display, pin: u32) -> bool {
     let pins = &tables::gmbus_pins_icp;
     (pin as usize) < pins.len() && pins[pin as usize].valid != 0
 }

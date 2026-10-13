@@ -40,3 +40,9 @@ direct_aux_ch_map: u8
 gmbus_pins_icp: gmbus_pin { valid=name != 0 }
 @ display/intel_display_power.c
 tgl_buddy_page_masks: buddy_page_mask { page_mask, ty=type, num_channels }
+@ display/intel_display_power.c
+d12_port_domains: intel_ddi_port_domains { port_start, port_end, aux_ch_start, aux_ch_end, ddi_lanes, ddi_io, aux_io, aux_legacy_usbc, aux_tbt }
+@ display/intel_hotplug_irq.c
+hpd_icp: u32
+@ display/intel_dp.c
+intel_dp_set_source_rates::icl_rates: i32

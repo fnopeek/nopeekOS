@@ -65,7 +65,7 @@ HEADERS = [
     "display/intel_display_regs.h", "display/intel_display_device.h",
     "display/intel_pch.h", "display/intel_display_limits.h", "display/intel_fbc.h",
     "intel_pci_config.h", "drm/intel/i915_drm.h", "display/intel_combo_phy_regs.h",
-    "display/skl_watermark_regs.h",
+    "display/skl_watermark_regs.h", "display/intel_hti_regs.h", "display/intel_dp_aux_regs.h",
 ]
 
 # The kernel build's flags (drivers/gpu/drm/i915/.intel_uncore.o.cmd),
@@ -691,6 +691,13 @@ def local_static(prelude, func, name):
                 break
             if re.match(r"\s+\.size\s", line):
                 break
+    if sym is None:
+        # `func` was inlined into its caller; the static is still emitted
+        # once under its own label.
+        labels = {m.group(1) for line in asm
+                  for m in [re.match(rf"^({re.escape(name)}\.\d+):", line)] if m}
+        if len(labels) == 1:
+            sym = labels.pop()
     if sym is None:
         sys.exit(f"tables.list: {func}::{name}: no static of that name used in {func}")
     widths = {".byte": 1, ".value": 2, ".long": 4, ".quad": 8}
