@@ -1572,7 +1572,9 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
         // would access 00:00.0.
         _ => return -1,
     };
-    if bar_idx < 0 || bar_idx > 5 || pages <= 0 || pages > 256 { return -1; }
+    // Up to 16 MB: a GPU's register BAR holds its registers and, in the
+    // upper half, the GGTT (TGL GTTMMADR is 16 MB).
+    if bar_idx < 0 || bar_idx > 5 || pages <= 0 || pages > 4096 { return -1; }
     if hw.mmio_maps.len() >= MAX_MMIO_MAPS { return -1; }
 
     let bar_offset = 0x10 + (bar_idx as u8) * 4;
@@ -1866,6 +1868,23 @@ pub(crate) fn npk_mmio_write64(ctx: &mut HostState, handle: i32, offset: i32, va
         else { return -1 };
     lo.write(value as u32);
     hi.write((value as u64 >> 32) as u32);
+    0
+}
+
+/// One 64-bit read, as Linux `readq`. `npk_mmio_read64` is two 32-bit reads
+/// (low, then high), which is what iwlwifi's `iwl_read64` does; a GPU's
+/// page-table entries are read in one access.
+pub(crate) fn npk_mmio_readq(ctx: &mut HostState, handle: i32, offset: i32) -> i64 {
+    if offset & 7 != 0 { return -1; }
+    mmio_at(ctx, handle, offset, 8).map_or(-1, |a| a.read::<u64>() as i64)
+}
+
+/// One 64-bit write, as Linux `writeq`: the device never sees half of the
+/// value. i915 writes GGTT entries this way.
+pub(crate) fn npk_mmio_writeq(ctx: &mut HostState, handle: i32, offset: i32, value: i64) -> i32 {
+    if offset & 7 != 0 { return -1; }
+    let Some(a) = mmio_at(ctx, handle, offset, 8) else { return -1 };
+    a.write(value as u64);
     0
 }
 

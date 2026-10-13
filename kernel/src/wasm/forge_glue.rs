@@ -1000,6 +1000,11 @@ host_imports! {
     // npk_mmio_write64(handle, offset, value) -> 0 or -1
     ctx fn npk_mmio_write64(handle: i32, offset: i32, value: i64) -> i32;
 
+    // Single 64-bit accesses (Linux readq/writeq); the two above are split
+    // into 32-bit halves. Offset must be 8-byte aligned.
+    ctx fn npk_mmio_readq(handle: i32, offset: i32) -> i64;
+    ctx fn npk_mmio_writeq(handle: i32, offset: i32, value: i64) -> i32;
+
     // npk_dma_alloc_below(page_count, limit_mb) -> handle or -1
     // The driver names the upper limit itself. `allocate_contiguous_below`
     // searches from the top, so a 4 GB limit always lands right below the

@@ -61,6 +61,8 @@ unsafe extern "C" {
     fn npk_mmio_write16(handle: i32, offset: i32, value: i32) -> i32;
     fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
     fn npk_mmio_write64(handle: i32, offset: i32, value: i64) -> i32;
+    fn npk_mmio_readq(handle: i32, offset: i32) -> i64;
+    fn npk_mmio_writeq(handle: i32, offset: i32, value: i64) -> i32;
     fn npk_memory_fence() -> i32;
     fn npk_dma_alloc(pages: i32) -> i32;
     fn npk_dma_alloc_below(pages: i32, limit_mb: i32) -> i32;
@@ -150,6 +152,10 @@ plain! {
     fn mmio_write16 = npk_mmio_write16(handle: i32, offset: i32, value: i32) -> i32;
     fn mmio_write32 = npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
     fn mmio_write64 = npk_mmio_write64(handle: i32, offset: i32, value: i64) -> i32;
+    /// One 64-bit read (Linux `readq`); `mmio_read64` is two 32-bit reads.
+    fn mmio_readq = npk_mmio_readq(handle: i32, offset: i32) -> i64;
+    /// One 64-bit write (Linux `writeq`); `mmio_write64` is two 32-bit writes.
+    fn mmio_writeq = npk_mmio_writeq(handle: i32, offset: i32, value: i64) -> i32;
     fn memory_fence = npk_memory_fence() -> i32;
     fn dma_alloc = npk_dma_alloc(pages: i32) -> i32;
     fn dma_alloc_below = npk_dma_alloc_below(pages: i32, limit_mb: i32) -> i32;
@@ -340,10 +346,12 @@ impl Mmio {
     pub fn r16(self, off: u32) -> u16 { mmio_read16(self.0, off as i32) as u16 }
     pub fn r32(self, off: u32) -> u32 { mmio_read32(self.0, off as i32) as u32 }
     pub fn r64(self, off: u32) -> u64 { mmio_read64(self.0, off as i32) as u64 }
+    pub fn readq(self, off: u32) -> u64 { mmio_readq(self.0, off as i32) as u64 }
     pub fn w8(self, off: u32, v: u8) { mmio_write8(self.0, off as i32, v as i32); }
     pub fn w16(self, off: u32, v: u16) { mmio_write16(self.0, off as i32, v as i32); }
     pub fn w32(self, off: u32, v: u32) { mmio_write32(self.0, off as i32, v as i32); }
     pub fn w64(self, off: u32, v: u64) { mmio_write64(self.0, off as i32, v as i64); }
+    pub fn writeq(self, off: u32, v: u64) { mmio_writeq(self.0, off as i32, v as i64); }
 }
 
 /// A DMA buffer of the bound device: its handle and bus address.
