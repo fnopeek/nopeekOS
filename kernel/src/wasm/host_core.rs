@@ -1420,6 +1420,17 @@ pub(crate) fn npk_pci_read_config_at(ctx: &mut HostState, bdf: i32, offset: i32)
     pci::read32(addr, offset as u8) as i32
 }
 
+/// Base and size of memory BAR `bar` of the bound device, as the boot scan
+/// sized it: `npk_pci_bar_size` returns the size (0 = no such BAR).
+pub(crate) fn npk_pci_bar_size(ctx: &mut HostState, bar: i32) -> i64 {
+    let hw = match ctx.hw.as_ref() {
+        Some(h) if h.is_pci => h,
+        _ => return -1,
+    };
+    if !(0..6).contains(&bar) { return -1; }
+    pci::bar(hw.pci_addr, bar as usize).map_or(0, |b| b.size as i64)
+}
+
 pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
         Some(h) if h.is_pci => h,
@@ -1614,17 +1625,23 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
     }
     if bar_base == 0 { return -1; }
 
-    // Size the BAR: disable memory, write 0xFFFFFFFF, read back, restore.
-    // Safe at this point because the driver hasn't started using the
-    // BAR yet (mmio_map_bar is the first access after pci_bind).
-    let cmd = pci::read32(hw.pci_addr, 0x04);
-    pci::write32(hw.pci_addr, 0x04, cmd & !0x02);
-    let saved_lo = pci::read32(hw.pci_addr, bar_offset);
-    pci::write32(hw.pci_addr, bar_offset, 0xFFFF_FFFF);
-    let size_lo = pci::read32(hw.pci_addr, bar_offset);
-    pci::write32(hw.pci_addr, bar_offset, saved_lo);
-    let bar_size = (!((size_lo & !0xF) as u64)).wrapping_add(1) & 0xFFFF_FFFF;
-    pci::write32(hw.pci_addr, 0x04, cmd);
+    // The size the boot scan measured. Only a BAR the firmware left
+    // unassigned (placed just above) is sized here, before anyone uses it;
+    // measuring a live device would turn its decoding off under whoever
+    // is using it (a GPU's aperture holds the picture on screen).
+    let bar_size = match pci::bar(hw.pci_addr, bar_idx as usize) {
+        Some(b) if b.base == bar_base => b.size,
+        _ => {
+            let cmd = pci::read32(hw.pci_addr, 0x04);
+            pci::write32(hw.pci_addr, 0x04, cmd & !0x02);
+            let saved_lo = pci::read32(hw.pci_addr, bar_offset);
+            pci::write32(hw.pci_addr, bar_offset, 0xFFFF_FFFF);
+            let size_lo = pci::read32(hw.pci_addr, bar_offset);
+            pci::write32(hw.pci_addr, bar_offset, saved_lo);
+            pci::write32(hw.pci_addr, 0x04, cmd);
+            (!((size_lo & !0xF) as u64)).wrapping_add(1) & 0xFFFF_FFFF
+        }
+    };
 
     let max_pages = (bar_size as usize) / 4096;
     let requested = pages as usize;
@@ -1715,6 +1732,15 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
         if let Some(why) = mmio_refusal(a) {
             kprintln!("[npk] WASM: npk_mmio_map_phys refused {:#x}: {}", a, why);
             return -1;
+        }
+        // A BAR of a device another driver owns is that driver's, whatever
+        // the address it is reached by.
+        if let Some(dev) = pci::bar_owner_of(a) {
+            if pci::owner(dev).is_some_and(|o| o != pci::Owner::Module(ctx.pid)) {
+                kprintln!("[npk] WASM: npk_mmio_map_phys refused {:#x}: BAR of {:02x}:{:02x}.{}, owned by {:?}",
+                    a, dev.bus, dev.device, dev.function, pci::owner(dev));
+                return -1;
+            }
         }
     }
 

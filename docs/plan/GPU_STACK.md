@@ -189,11 +189,11 @@ koennte sie noch lesen. Sobald `gpu_intel_tgl` abgibt, gehoert davor ein
 Stillsetzen der Engines (GT-Reset) in den Rueckweg; dann koennen die
 Puffer wieder zurueck.
 
-**Offen:** `npk_mmio_map_phys` laesst ein Modul mit globalem `HARDWARE`
-die BARs eines fremden Geraets ueber die physische Adresse abbilden, an
-der Besitzerpruefung vorbei. Dafuer braucht es eine BAR-Tabelle aus der
-Enumeration (BARs an einer laufenden GPU auszumessen stoert das Bild).
-`HARDWARE` ist heute ohnehin Kernelvertrauen (§8.4).
+**Geschlossen (Kernel 0.600.0):** `npk_mmio_map_phys` lehnt Adressen in der
+BAR eines Geraets ab, das ein anderer Treiber besitzt. Moeglich durch die
+BAR-Tabelle, die der Kernel jetzt beim Booten anlegt (`pci::size_bars`,
+wie Linux `__pci_read_base`); `npk_mmio_map_bar` misst damit keine
+laufende Karte mehr aus.
 
 **Rueckweg beim Modultod (F1):** Das Modul scannt nur Puffer aus, die dem
 Kernel gehoeren (`flip(bo)` nimmt einen Griff, keine Adresse) — der erste

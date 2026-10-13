@@ -710,6 +710,79 @@ pub fn msix_debug(dev: PciAddr, entry: u16) -> Option<MsixDebug> {
 }
 
 /// Scan PCI bus, print all devices, return count
+/// A sized memory BAR: where the firmware put it and how large it is.
+#[derive(Debug, Clone, Copy)]
+pub struct Bar {
+    pub base: u64,
+    pub size: u64,
+}
+
+/// Every function's memory BARs, sized once at boot (`size_bars`).
+static BARS: spin::Mutex<alloc::vec::Vec<(PciAddr, [Option<Bar>; 6])>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
+
+/// The sized memory BAR `idx` of `addr`, if the boot scan found one.
+pub fn bar(addr: PciAddr, idx: usize) -> Option<Bar> {
+    BARS.lock().iter().find(|(a, _)| *a == addr).and_then(|(_, b)| b.get(idx).copied().flatten())
+}
+
+/// The function whose memory BAR contains `phys`, if any.
+pub fn bar_owner_of(phys: u64) -> Option<PciAddr> {
+    BARS.lock().iter().find(|(_, bars)| {
+        bars.iter().flatten().any(|b| phys >= b.base && phys < b.base.saturating_add(b.size))
+    }).map(|(a, _)| *a)
+}
+
+/// Size the memory BARs of a type-0 function the way Linux's
+/// `__pci_read_base` does: decoding off (not on a host bridge, which Linux
+/// keeps `mmio_always_on`), all ones into the BAR, read the mask back,
+/// restore. Run once at boot, before a driver uses the device; afterwards
+/// nothing needs to toggle a live device's decoding to learn a size.
+fn size_bars(addr: PciAddr) {
+    if read8(addr, 0x0E) & 0x7F != 0 {
+        return;
+    }
+    let class = read32(addr, 0x08) >> 16;
+    let host_bridge = class == 0x0600;
+    let cmd = read16(addr, 0x04);
+    if !host_bridge {
+        write32(addr, 0x04, (cmd & !0x3) as u32);
+    }
+    let mut bars: [Option<Bar>; 6] = [None; 6];
+    let mut i = 0usize;
+    while i < 6 {
+        let off = 0x10 + (i as u8) * 4;
+        let lo = read32(addr, off);
+        if lo & 1 != 0 {
+            i += 1; // I/O BAR
+            continue;
+        }
+        let is64 = (lo >> 1) & 3 == 2;
+        write32(addr, off, 0xFFFF_FFFF);
+        let mask_lo = read32(addr, off) & !0xF;
+        write32(addr, off, lo);
+        let (base, mask) = if is64 && i < 5 {
+            let hi = read32(addr, off + 4);
+            write32(addr, off + 4, 0xFFFF_FFFF);
+            let mask_hi = read32(addr, off + 4);
+            write32(addr, off + 4, hi);
+            (((hi as u64) << 32) | (lo & !0xF) as u64, ((mask_hi as u64) << 32) | mask_lo as u64)
+        } else {
+            ((lo & !0xF) as u64, 0xFFFF_FFFF_0000_0000 | mask_lo as u64)
+        };
+        let implemented = if is64 { mask != 0 } else { mask_lo != 0 };
+        let size = (!mask).wrapping_add(1);
+        if implemented && size != 0 && base != 0 {
+            bars[i] = Some(Bar { base, size });
+        }
+        i += if is64 { 2 } else { 1 };
+    }
+    if !host_bridge {
+        write32(addr, 0x04, cmd as u32);
+    }
+    BARS.lock().push((addr, bars));
+}
+
 pub fn scan() -> u16 {
     let mut count = 0u16;
     for bus in 0u16..=255 {
@@ -727,6 +800,14 @@ pub fn scan() -> u16 {
             crate::kdebug!("[npk]   {:02x}:{:02x}.0  {:04x}:{:04x}  class {:02x}.{:02x}",
                 bus, dev, vid, did, cls, sub);
             count += 1;
+
+            let multi = read8(addr, 0x0E) & 0x80 != 0;
+            for func in 0..if multi { 8 } else { 1 } {
+                let f = PciAddr { bus: bus as u8, device: dev, function: func };
+                let fid = read32(f, 0x00);
+                if fid == 0xFFFF_FFFF || fid == 0 { continue; }
+                size_bars(f);
+            }
         }
     }
     count

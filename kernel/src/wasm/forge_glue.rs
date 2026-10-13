@@ -937,6 +937,10 @@ host_imports! {
     // read-only, needs HARDWARE. bdf = bus << 8 | dev << 3 | fn.
     ctx fn npk_pci_read_config_at(bdf: i32, offset: i32) -> i32;
 
+    // npk_pci_bar_size(bar) -> size of the bound device's memory BAR as the
+    // boot scan sized it, 0 = none, -1 = no device
+    ctx fn npk_pci_bar_size(bar: i32) -> i64;
+
     // npk_pci_write_config(offset, value) -> 0 or -1
     ctx fn npk_pci_write_config(offset: i32, value: i32) -> i32;
 
