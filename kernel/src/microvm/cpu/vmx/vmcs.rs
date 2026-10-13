@@ -139,6 +139,8 @@ const VM_EXIT_GUEST_PHYS_ADDR: u64 = 0x2400;
 const CR0_GUEST_HOST_MASK: u64 = 0x6000;
 const CR4_GUEST_HOST_MASK: u64 = 0x6002;
 const CR0_READ_SHADOW: u64 = 0x6004;
+const CR0_CD: u64 = 1 << 30;
+const CR0_NW: u64 = 1 << 29;
 const CR4_READ_SHADOW: u64 = 0x6006;
 
 // VM-exit information (read-only).
@@ -872,7 +874,11 @@ unsafe fn write_execution_controls(eptp: u64, bitmaps: &ExecBitmaps) -> Result<(
     // shadow.VMXE = 0 = matches → no exit, real CR4.VMXE stays 1.
     // Linux never tries to set VMXE=1 (it doesn't know about VMX),
     // so the exit branch never fires.
-    vmwrite(CR0_GUEST_HOST_MASK, 0)?;
+    // CR0.CD and NW are the host's (KVM `KVM_VM_CR0_ALWAYS_OFF`): the guest
+    // reads its own value from the shadow, the hardware never runs the
+    // guest with caching off. Linux sets CD around every MTRR/PAT update,
+    // on all CPUs at once when one comes online.
+    vmwrite(CR0_GUEST_HOST_MASK, CR0_CD | CR0_NW)?;
     vmwrite(CR4_GUEST_HOST_MASK, 1 << 13)?; // VMXE
     vmwrite(CR0_READ_SHADOW, 0)?;
     vmwrite(CR4_READ_SHADOW, 0)?;
@@ -1670,6 +1676,30 @@ pub fn write_guest_pat(v: u64) -> Result<(), &'static str> { vmwrite(GUEST_IA32_
 /// instruction that caused the most recent VM-exit.
 pub fn read_guest_rip() -> Result<u64, &'static str> {
     vmread(GUEST_RIP)
+}
+
+/// MOV to CR0 that changed CD or NW (the host-owned bits): `kvm_set_cr0`
+/// checks, the guest's value into the read shadow, the hardware CR0 without
+/// CD/NW (`vmx_set_cr0`), and EFER.LMA following PG under LME. `false` =
+/// the write faults (#GP).
+pub fn set_guest_cr0(val: u64) -> Result<bool, &'static str> {
+    const PE: u64 = 1 << 0;
+    const PG: u64 = 1 << 31;
+    const EFER_LME: u64 = 1 << 8;
+    const EFER_LMA: u64 = 1 << 10;
+    if val >> 32 != 0 || (val & CR0_NW != 0 && val & CR0_CD == 0) || (val & PG != 0 && val & PE == 0) {
+        return Ok(false);
+    }
+    let old = vmread(GUEST_CR0)?;
+    let efer = vmread(GUEST_IA32_EFER)?;
+    if (old ^ val) & PG != 0 && efer & EFER_LME != 0 {
+        let lma = if val & PG != 0 { efer | EFER_LMA } else { efer & !EFER_LMA };
+        vmwrite(GUEST_IA32_EFER, lma)?;
+    }
+    // SAFETY: the read shadow only changes what the guest reads back.
+    unsafe { vmwrite_unchecked(CR0_READ_SHADOW, val)? };
+    vmwrite(GUEST_CR0, val & !(CR0_CD | CR0_NW))?;
+    Ok(true)
 }
 
 /// Read VMCS GUEST_CR0.

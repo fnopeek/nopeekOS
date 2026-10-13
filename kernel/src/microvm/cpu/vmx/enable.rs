@@ -1894,6 +1894,15 @@ impl VmContext {
                         vmcs::advance_guest_rip()?;
                     }
                     last_outcome = Some(outcome);
+                } else if cr_num == 0 && access_type == 0 {
+                    // MOV to CR0 changing CD/NW (the only CR0 bits that exit).
+                    let val = read_gpr(&self.vcpu.regs, gp_reg)?;
+                    if vmcs::set_guest_cr0(val)? {
+                        vmcs::advance_guest_rip()?;
+                    } else {
+                        vmcs::inject_exception(VEC_GP, Some(0))?;
+                    }
+                    last_outcome = Some(outcome);
                 } else if cr_num != 3 {
                     sh.serial.flush();
                     kprintln!(
