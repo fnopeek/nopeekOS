@@ -310,6 +310,17 @@ fn boot_ap(lapic: Mmio, target_apic_id: u32, core_id: u32) -> bool {
 /// (~10 ms host-timer tick). No-op if the core id is unknown. The kick vector's
 /// host ISR is a pure EOI — the receipt itself is the wakeup.
 pub fn kick_host_core(core_id: usize) {
+    kick_host_core_with(core_id, crate::interrupts::VCPU_KICK_VECTOR);
+}
+
+/// As `kick_host_core` for a vCPU with posted interrupts: in guest mode the
+/// notification vector delivers the posted vectors without an exit
+/// (`kvm_vcpu_trigger_posted_interrupt`).
+pub fn kick_host_core_posted(core_id: usize) {
+    kick_host_core_with(core_id, crate::interrupts::POSTED_INTR_VECTOR);
+}
+
+fn kick_host_core_with(core_id: usize, vector: u8) {
     // Event-wake a consumer fiber parked in `kick_wait` on the target core
     // before the IPI, so the wake is never lost. Harmless for non-net kicks
     // (only `kick_wait` fibers observe the generation).
@@ -326,7 +337,7 @@ pub fn kick_host_core(core_id: usize) {
     let Some(apic_id) = per_core::core_apic(core_id) else { return };
     // FIXED delivery (mode 000), level assert (bit 14), physical dest.
     send_ipi(crate::interrupts::lapic(), apic_id,
-        0x0000_4000 | crate::interrupts::VCPU_KICK_VECTOR as u32);
+        0x0000_4000 | vector as u32);
 }
 
 /// Send the worker wake IPI to the core with xAPIC id `apic_id`.

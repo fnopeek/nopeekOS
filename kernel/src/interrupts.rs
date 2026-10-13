@@ -303,6 +303,9 @@ pub fn init() {
         // Cross-vCPU kick IPI (guest SMP) — prompt inter-vCPU IPI delivery.
         IDT[VCPU_KICK_VECTOR as usize]
             .set_handler(vcpu_kick_handler as *const () as u64);
+        // Posted-interrupt notification that found its vCPU outside the guest.
+        IDT[POSTED_INTR_VECTOR as usize]
+            .set_handler(vcpu_kick_handler as *const () as u64);
         // Input by interrupt: the i8042 through the I/O APIC,
         // the xHCI controllers through MSI-X — both to Core 0.
         IDT[PS2_VECTOR as usize].set_handler(ps2_irq_handler as *const () as u64);
@@ -712,6 +715,13 @@ extern "x86-interrupt" fn worker_timer_handler(_frame: InterruptStackFrame) {
 /// `csd_lock_wait` spins in the guest. Pure EOI: receipt is the effect.
 pub const VCPU_KICK_VECTOR: u8 = 51;
 
+/// VMX posted-interrupt notification (KVM `POSTED_INTR_VECTOR`). In guest
+/// mode the CPU consumes it and delivers the posted vectors without an exit;
+/// one that arrives while the vCPU is outside the guest needs only an EOI,
+/// since the next entry folds the descriptor in (`kvm_posted_intr_ipi`).
+/// Must differ from `VCPU_KICK_VECTOR`, which has to force an exit.
+pub const POSTED_INTR_VECTOR: u8 = 55;
+
 extern "x86-interrupt" fn vcpu_kick_handler(_frame: InterruptStackFrame) {
     if let Some(lapic) = worker_lapic() {
         lapic.w32(LAPIC_EOI, 0); // each core EOIs its own LAPIC
@@ -1111,3 +1121,38 @@ pub fn init_apic_timer() {
         TARGET_FREQ, apic_base, elapsed);
 }
 
+
+// One `int N; ret` per vector, four bytes each, for `dispatch_acked`.
+core::arch::global_asm!(
+    ".pushsection .text.npk_int_stubs, \"ax\", @progbits",
+    ".global npk_int_stubs",
+    ".p2align 4",
+    "npk_int_stubs:",
+    ".set npk_int_v, 0",
+    ".rept 256",
+    ".byte 0xCD, npk_int_v",
+    "ret",
+    "int3",
+    ".set npk_int_v, npk_int_v + 1",
+    ".endr",
+    ".popsection",
+);
+
+unsafe extern "C" {
+    static npk_int_stubs: u8;
+}
+
+/// Run the host handler of an external interrupt that a VM exit already
+/// acknowledged ("acknowledge interrupt on exit", which posted interrupts
+/// require): KVM `handle_external_interrupt_irqoff`. The handler EOIs as for
+/// any delivery.
+pub fn dispatch_acked(vector: u8) {
+    if vector < 32 {
+        return;
+    }
+    let stub = core::ptr::addr_of!(npk_int_stubs) as u64 + vector as u64 * 4;
+    // SAFETY: `stub` is the `int vector; ret` entry for an IDT vector the
+    // kernel installed; the handler returns with iretq and preserves every
+    // register, the call only clobbers the stack below rsp.
+    unsafe { core::arch::asm!("call {}", in(reg) stub) };
+}

@@ -94,6 +94,34 @@ pub unsafe fn init_msr_bitmap(bitmap_phys: u64) {
     }
 }
 
+/// x2APIC MSRs under APICv (KVM `vmx_update_msr_bitmap_x2apic`): reads of
+/// every readable register come from the virtual-APIC page except the
+/// current timer count; writes trap except TPR, EOI and SELF_IPI, which the
+/// CPU virtualizes.
+///
+/// # Safety
+/// As `init_msr_bitmap`, on the bitmap of the current VMCS.
+pub unsafe fn x2apic_apicv_bitmap(bitmap_phys: u64) {
+    // `kvm_lapic_readable_reg_mask` in x2APIC mode, as register offsets.
+    const READABLE: [u32; 19] = [
+        0x20, 0x30, 0x80, 0xA0, 0xD0, 0xF0, 0x280, 0x300, 0x320, 0x330, 0x340,
+        0x350, 0x360, 0x370, 0x380, 0x3E0, 0x100, 0x180, 0x200,
+    ];
+    for &off in READABLE.iter() {
+        // ISR, TMR and IRR are eight registers each.
+        let n = if matches!(off, 0x100 | 0x180 | 0x200) { 8 } else { 1 };
+        for i in 0..n {
+            let msr = MSR_X2APIC_FIRST + (off >> 4) + i;
+            // SAFETY: the caller's contract. `true` intercepts.
+            unsafe { set_intercept(bitmap_phys, msr, false, off != 0x80); }
+        }
+    }
+    for off in [0xB0u32, 0x3F0] {
+        // SAFETY: as above; EOI and SELF_IPI are write-only.
+        unsafe { set_intercept(bitmap_phys, MSR_X2APIC_FIRST + (off >> 4), true, false); }
+    }
+}
+
 /// SDM §25.6.9: read-low @0x000, read-high @0x400, write-low @0x800,
 /// write-high @0xC00; one bit per MSR.
 unsafe fn set_intercept(bitmap_phys: u64, msr: u32, read: bool, write: bool) {
