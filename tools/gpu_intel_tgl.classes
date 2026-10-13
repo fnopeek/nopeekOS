@@ -20,3 +20,36 @@ A ^(\./\./)?intel_uncore
 A ^intel_(pcode|step|device_info|clock_gating)\.
 A ^i915_irq\.
 A ^(\./\./)?gt/(gen8_engine_cs|gen8_ppgtt|intel_ppgtt|intel_gtt|intel_ggtt|intel_ggtt_fencing|intel_breadcrumbs|intel_engine_cs|intel_engine\.h|intel_engine_heartbeat|intel_execlists_submission|intel_gt\.|intel_gt_clock_utils|intel_gt_irq|intel_gt_mcr|intel_gt_pm_irq|intel_gt_pm\.|intel_engine_pm\.|intel_llc|intel_lrc|intel_mocs|intel_rc6|intel_renderstate|intel_reset|intel_ring|intel_rps|intel_sseu|intel_timeline|intel_tlb|intel_wopcm|intel_workarounds)
+
+# Function-level overrides (@name), checked before the file rules. These
+# live in bookkeeping files but fix the order of the bring-up, read the
+# hardware or write the ring, so they are ported 1:1 as well.
+# bring-up order (i915_driver.c, i915_gem.c)
+A @i915_driver_probe
+A @i915_driver_early_probe
+A @i915_driver_mmio_probe
+A @i915_driver_hw_probe
+A @i915_set_dma_info               # DMA mask 39 bits: bounds our allocations
+A @intel_detect_preproduction_hw
+A @sanitize_gpu
+A @i915_pcode_init
+A @i915_gem_init
+# stolen memory layout: reserved ranges read from the hardware
+A @i915_gem_stolen_smem_setup
+A @init_stolen_smem
+A @i915_gem_init_stolen
+A @adjust_stolen
+A @request_smem_stolen
+A @valid_stolen_size
+A @init_reserved_stolen
+A @icl_get_stolen_reserved
+# requests: what goes into the ring and in which order
+A @__i915_request_create
+A @__i915_request_commit
+A @__i915_request_add_to_timeline
+A @__i915_request_submit
+A @__i915_request_unsubmit
+A @__i915_request_fill
+A @emit_semaphore_wait
+A @__emit_semaphore_wait
+A @can_use_semaphore_wait

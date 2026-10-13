@@ -1,22 +1,22 @@
 # i915 on Tiger Lake GT2 (8086:9A78), Linux 6.18.55 — generated, do not edit.
-# Regenerate: see docs/plan/GPU_INTEL_LINUX_MAP.md §0.
+# Regenerate: see docs/plan/GPU_INTEL_LINUX_MAP.md §0 (--list).
 # class depth file:line function   (A = port 1:1, B = bookkeeping, N = not TGL)
-B  0 i915_driver.c:781:5                           i915_driver_probe
+A  0 i915_driver.c:781:5                           i915_driver_probe
 A  0 i915_irq.c:553:20                             gen11_irq_handler
 A  0 gt/intel_engine_heartbeat.c:136:13            heartbeat
 B  0 gt/intel_gt_requests.c:205:13                 retire_work_handler
 A  0 gt/intel_execlists_submission.c:2535:13       execlists_timeslice
 A  0 gt/intel_execlists_submission.c:2540:13       execlists_preempt
 B  1 i915_driver.c:741:1                           i915_driver_create
-B  1 i915_driver.c:220:12                          i915_driver_early_probe
+A  1 i915_driver.c:220:12                          i915_driver_early_probe
 B  1 intel_runtime_pm.h:159:1                      disable_rpm_wakeref_asserts
 N  1 i915_vgpu.c:62:6                              intel_vgpu_detect
 A  1 gt/intel_gt.c:891:5                           intel_gt_probe_all
-B  1 i915_driver.c:313:12                          i915_driver_mmio_probe
-B  1 i915_driver.c:460:12                          i915_driver_hw_probe
+A  1 i915_driver.c:313:12                          i915_driver_mmio_probe
+A  1 i915_driver.c:460:12                          i915_driver_hw_probe
 A  1 i915_irq.c:1220:5                             intel_irq_install
 A  1 i915_irq.c:1253:6                             intel_irq_uninstall
-B  1 i915_gem.c:1141:5                             i915_gem_init
+A  1 i915_gem.c:1141:5                             i915_gem_init
 B  1 intel_runtime_pm.h:177:1                      enable_rpm_wakeref_asserts
 B  1 i915_driver.c:708:13                          i915_welcome_messages
 B  1 gem/i915_gem_pm.c:22:6                        i915_gem_suspend
@@ -67,7 +67,7 @@ N  2 intel_region_ttm.c:44:6                       intel_region_ttm_device_fini
 B  2 i915_gem.c:1297:6                             i915_gem_init_early
 A  2 i915_irq.c:1122:6                             intel_irq_init
 A  2 intel_clock_gating.c:757:6                    intel_clock_gating_hooks_init
-B  2 i915_driver.c:176:13                          intel_detect_preproduction_hw
+A  2 i915_driver.c:176:13                          intel_detect_preproduction_hw
 N  2 vlv_suspend.c:475:6                           vlv_suspend_cleanup
 B  2 i915_driver.c:160:13                          i915_workqueues_cleanup
 B  2 i915_drv.h:350:32                             to_gt
@@ -75,17 +75,17 @@ A  2 gt/intel_gt.c:858:12                          intel_gt_tile_setup
 A  2 intel_uncore.c:2503:5                         intel_uncore_init_mmio
 A  2 intel_device_info.c:389:6                     intel_device_info_runtime_init
 A  2 gt/intel_gt.c:131:5                           intel_gt_init_mmio
-B  2 i915_driver.c:199:13                          sanitize_gpu
+A  2 i915_driver.c:199:13                          sanitize_gpu
 N  2 i915_vgpu.c:117:6                             intel_vgpu_active
 N  2 i915_vgpu.c:122:6                             intel_vgpu_has_full_ppgtt
 N  2 i915_vgpu.c:127:6                             intel_vgpu_has_hwsp_emulation
-B  2 i915_driver.c:380:12                          i915_set_dma_info
+A  2 i915_driver.c:380:12                          i915_set_dma_info
 A  2 gt/intel_ggtt.c:1562:5                        i915_ggtt_probe_hw
 A  2 gt/intel_ggtt.c:90:5                          i915_ggtt_init_hw
 A  2 gt/intel_gt.c:975:5                           intel_gt_tiles_init
 B  2 intel_memory_region.c:338:5                   intel_memory_regions_hw_probe
 A  2 gt/intel_ggtt.c:1596:5                        i915_ggtt_enable_hw
-B  2 i915_driver.c:436:12                          i915_pcode_init
+A  2 i915_driver.c:436:12                          i915_pcode_init
 A  2 i915_irq.c:1169:13                            intel_irq_reset
 A  2 i915_irq.c:1149:22                            intel_irq_handler
 A  2 i915_irq.c:1189:13                            intel_irq_postinstall
@@ -135,10 +135,10 @@ A  2 gt/intel_reset.c:1328:5                       __intel_engine_reset_bh
 A  2 gt/intel_reset.c:1406:13                      intel_gt_reset_global
 B  2 intel_runtime_pm.h:212:1                      intel_runtime_pm_put
 B  2 gt/intel_context.h:208:20                     intel_context_enter
-B  2 i915_request.c:894:1                          __i915_request_create
+A  2 i915_request.c:894:1                          __i915_request_create
 B  2 gt/intel_context.h:225:20                     intel_context_exit
 A  2 gt/intel_engine_heartbeat.c:79:13             idle_pulse
-B  2 i915_request.c:1786:22                        __i915_request_commit
+A  2 i915_request.c:1786:22                        __i915_request_commit
 B  2 i915_request.c:1822:6                         __i915_request_queue
 A  2 gt/intel_engine_cs.c:571:5                    intel_clamp_heartbeat_interval_ms
 B  2 i915_utils.h:103:29                           msecs_to_jiffies_timeout
@@ -175,7 +175,7 @@ A  3 gt/intel_ggtt.c:55:12                         ggtt_init_hw
 A  3 gt/intel_gt.c:84:12                           intel_gt_probe_lmem
 B  3 gem/i915_gem_shmem.c:662:29                   i915_gem_shmem_setup
 B  3 gem/i915_gem_stolen.c:890:1                   i915_gem_stolen_lmem_setup
-B  3 gem/i915_gem_stolen.c:978:1                   i915_gem_stolen_smem_setup
+A  3 gem/i915_gem_stolen.c:978:1                   i915_gem_stolen_smem_setup
 A  3 intel_pcode.c:223:5                           intel_pcode_init
 A  3 i915_irq.c:701:13                             gen11_irq_reset
 A  3 i915_irq.c:782:13                             gen11_irq_postinstall
@@ -300,7 +300,7 @@ A  3 gt/intel_engine.h:338:1                       intel_engine_has_heartbeat
 B  3 i915_request.h:401:1                          i915_request_get
 A  3 gt/intel_ring.c:230:6                         intel_ring_begin
 A  3 gt/intel_ring.h:80:19                         intel_ring_offset
-B  3 i915_request.c:1719:1                         __i915_request_add_to_timeline
+A  3 i915_request.c:1719:1                         __i915_request_add_to_timeline
 B  3 i915_request.c:1816:6                         __i915_request_queue_bh
 B  3 intel_wakeref.h:155:1                         __intel_wakeref_put
 B  3 gt/intel_gt_requests.c:34:13                  flush_submission
@@ -575,7 +575,7 @@ B  5 i915_active.c:342:6                           __i915_active_init
 B  5 intel_memory_region.c:230:13                  intel_memory_type_str
 B  5 intel_memory_region.c:215:12                  intel_memory_region_memtest
 B  5 gem/i915_gem_shmem.c:642:12                   init_shmem
-B  5 gem/i915_gem_stolen.c:801:12                  init_stolen_smem
+A  5 gem/i915_gem_stolen.c:801:12                  init_stolen_smem
 A  5 gt/intel_gt_mcr.c:562:13                      reg_needs_read_steering
 A  5 gt/intel_gt_mcr.c:593:13                      get_nonterminated_steering
 A  5 gt/intel_gt_mcr.c:284:12                      rw_with_mcr_steering
@@ -722,7 +722,7 @@ B  5 i915_request.c:588:22                         i915_request_mark_eio
 B  5 i915_request.h:413:1                          i915_request_put
 A  5 gt/intel_breadcrumbs.h:37:1                   intel_engine_signal_breadcrumbs
 A  5 gt/intel_execlists_submission.c:255:30        to_priolist
-B  5 i915_request.c:604:6                          __i915_request_submit
+A  5 i915_request.c:604:6                          __i915_request_submit
 B  5 i915_scheduler.h:46:20                        i915_priolist_free
 A  5 gt/intel_engine_pm.h:52:20                    intel_engine_pm_put
 A  5 gt/intel_gt.c:326:13                          gen8_report_fault
@@ -880,7 +880,7 @@ B  6 i915_drv.h:350:32                             to_gt
 B  6 i915_active.h:63:1                            __i915_active_fence_init
 B  6 intel_memory_region.c:98:12                   iomemtest
 B  6 gem/i915_gemfs.c:14:6                         i915_gemfs_init
-B  6 gem/i915_gem_stolen.c:510:12                  i915_gem_init_stolen
+A  6 gem/i915_gem_stolen.c:510:12                  i915_gem_init_stolen
 A  6 gt/intel_sseu.h:141:1                         intel_sseu_find_first_xehp_dss
 A  6 gt/intel_gt_mcr.c:207:12                      rw_with_mcr_steering_fw
 A  6 intel_uncore.h:348:1                          __raw_uncore_read64
@@ -1115,7 +1115,7 @@ A  6 gt/intel_engine_cs.c:1625:12                  __intel_engine_stop_cs
 A  6 intel_uncore.h:347:1                          __raw_uncore_read32
 A  6 gt/intel_engine_cs.c:1700:12                  __cs_pending_mi_force_wakes
 A  6 gt/intel_engine_cs.c:1733:13                  __gpm_wait_for_fw_complete
-B  6 i915_request.c:710:6                          __i915_request_unsubmit
+A  6 i915_request.c:710:6                          __i915_request_unsubmit
 A  6 gt/intel_ring.h:59:19                         intel_ring_direction
 A  6 gt/intel_gt_mcr.c:504:6                       intel_gt_mcr_multicast_write_fw
 A  6 intel_uncore.h:352:1                          __raw_uncore_write32
@@ -1166,9 +1166,9 @@ A  7 gt/intel_gtt.h:428:1                          i915_vm_is_4lvl
 A  7 gt/intel_gtt.c:99:5                           map_pt_dma
 A  7 gt/intel_gtt.c:346:13                         poison_scratch_page
 B  7 intel_memory_region.c:61:12                   iopagetest
-B  7 gem/i915_gem_stolen.c:84:12                   adjust_stolen
-B  7 gem/i915_gem_stolen.c:141:12                  request_smem_stolen
-B  7 gem/i915_gem_stolen.c:444:12                  init_reserved_stolen
+A  7 gem/i915_gem_stolen.c:84:12                   adjust_stolen
+A  7 gem/i915_gem_stolen.c:141:12                  request_smem_stolen
+A  7 gem/i915_gem_stolen.c:444:12                  init_reserved_stolen
 A  7 intel_uncore.h:352:1                          __raw_uncore_write32
 B  7 i915_gem_evict.c:328:5                        i915_gem_evict_for_node
 A  7 gt/intel_ppgtt.c:88:1                         write_dma_entry
@@ -1310,7 +1310,7 @@ A  7 gt/intel_reset.c:125:6                        __i915_request_reset
 A  7 gt/intel_lrc.c:958:6                          lrc_reset_regs
 A  7 gt/intel_lrc.c:1535:5                         lrc_update_regs
 A  7 gt/intel_execlists_submission.c:1622:13       clear_ports
-B  7 i915_request.c:220:13                         __i915_request_fill
+A  7 i915_request.c:220:13                         __i915_request_fill
 A  7 gt/intel_breadcrumbs.c:348:13                 insert_breadcrumb
 B  7 i915_scatterlist.h:60:35                      ____sg_next
 A  7 gt/gen8_ppgtt.c:199:1                         gen8_pdp_for_page_address
@@ -1399,8 +1399,8 @@ A  8 gt/intel_reset.c:375:13                       get_sfc_forced_lock_data
 A  8 gt/intel_reset.c:354:32                       find_sfc_paired_vecs_engine
 A  8 intel_uncore.h:447:20                         intel_uncore_rmw_fw
 B  8 intel_memory_region.c:36:12                   __iopagetest
-B  8 gem/i915_gem_stolen.c:79:13                   valid_stolen_size
-B  8 gem/i915_gem_stolen.c:379:13                  icl_get_stolen_reserved
+A  8 gem/i915_gem_stolen.c:79:13                   valid_stolen_size
+A  8 gem/i915_gem_stolen.c:379:13                  icl_get_stolen_reserved
 B  8 i915_trace.h:221:1                            trace_i915_gem_evict_node
 A  8 gt/intel_gtt.h:465:1                          i915_vm_to_ggtt
 B  8 gt/intel_gt_requests.h:17:20                  intel_gt_retire_requests
@@ -1756,7 +1756,7 @@ B 10 i915_request.h:612:20                         i915_request_completed
 B 10 i915_sw_fence.h:117:1                         i915_sw_fence_set_error_once
 B 10 i915_scheduler.c:357:5                        i915_sched_node_add_dependency
 B 10 i915_request.c:1449:1                         await_request_submit
-B 10 i915_request.c:1200:1                         emit_semaphore_wait
+A 10 i915_request.c:1200:1                         emit_semaphore_wait
 B 10 i915_request.c:1348:1                         __i915_request_await_external
 A 10 gt/intel_timeline.h:46:19                     __intel_timeline_sync_set
 B 10 i915_active.h:101:1                           i915_active_fence_get
@@ -1818,13 +1818,13 @@ B 11 i915_syncmap.c:151:6                          i915_syncmap_is_later
 B 11 i915_scheduler.c:317:1                        i915_dependency_alloc
 B 11 i915_sw_fence.c:403:5                         i915_sw_fence_await_sw_fence_gfp
 B 11 i915_request.c:1263:1                         __i915_request_await_execution
-B 11 i915_request.c:1194:1                         can_use_semaphore_wait
+A 11 i915_request.c:1194:1                         can_use_semaphore_wait
 B 11 gt/intel_context.h:303:20                     intel_context_use_semaphores
 B 11 i915_request.h:472:1                          i915_request_has_initial_breadcrumb
 B 11 i915_request.c:1125:1                         already_busywaiting
 B 11 i915_request.c:1059:1                         i915_request_await_start
 B 11 i915_request.c:501:1                          __await_execution
-B 11 i915_request.c:1143:1                         __emit_semaphore_wait
+A 11 i915_request.c:1143:1                         __emit_semaphore_wait
 B 11 i915_request.c:1334:13                        mark_external
 B 11 i915_config.c:12:1                            i915_fence_context_timeout
 B 11 i915_syncmap.c:350:5                          i915_syncmap_set

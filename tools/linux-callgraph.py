@@ -26,6 +26,7 @@ written down instead of guessed.
     linux-callgraph.py --dir D reach ROOT... [--depth N] [--prune RE]
                        [--prune-file RE] [--follow member=func ...] [--extern]
                        [--follow-file F] [--classes F] [--list]
+                       [--tree [--only CLASSES]]
     linux-callgraph.py --dir D callers FUNC
 """
 import argparse, collections, os, re, sys
@@ -137,15 +138,18 @@ def load_classes(path):
     return out
 
 
-def classify(classes, loc):
+def classify(classes, loc, name=''):
+    """Function-level entries (@name) win over file patterns."""
     for cls, rx in classes:
-        if rx.search(loc):
+        if rx.pattern.startswith('@') and rx.pattern[1:] == name:
+            return cls
+    for cls, rx in classes:
+        if not rx.pattern.startswith('@') and rx.search(loc):
             return cls
     return 'B'
 
 
-def reach(g, roots, depth, prune, prune_file, follow, show_extern,
-          classes=None, flat=False):
+def parse_follow(follow):
     follow_map = collections.defaultdict(list)
     for item in follow:
         item = item.split('#', 1)[0].strip()
@@ -153,6 +157,66 @@ def reach(g, roots, depth, prune, prune_file, follow, show_extern,
             continue
         mem, fn = (x.strip() for x in item.split('=', 1))
         follow_map[sitekey(mem) if mem.startswith('@') else mem].append(fn)
+    return follow_map
+
+
+def site_line(site):
+    m = re.search(r':(\d+):\d+$', site)
+    return int(m.group(1)) if m else 0
+
+
+def tree(g, roots, depth, prune, prune_file, follow, classes, only):
+    """Depth-first, each function's callees in the order of their call
+    sites in the source -- the order the code runs, minus branches and
+    loops. A function is expanded once; later calls print as `^name`."""
+    follow_map = parse_follow(follow)
+    seen = set()
+
+    def skip(fn):
+        return ((prune and prune.search(bare(fn))) or
+                (prune_file and prune_file.search(g.defs.get(fn, ''))))
+
+    def callees(fn):
+        out = []
+        for callee, site in g.edges.get(fn, ()):
+            if callee == '__indirect_call':
+                mem = g.member_at(site)
+                key = sitekey(site.rsplit(':', 1)[0])
+                if mem is None or key in follow_map:
+                    mem = key
+                for t in follow_map.get(mem, ()):
+                    out.append((site_line(site), g.resolve(t, fn), f'->{mem}'))
+                continue
+            c = g.resolve(callee, fn)
+            if c in g.defs:
+                out.append((site_line(site), c, ''))
+        out.sort(key=lambda x: x[0])
+        return out
+
+    def walk(fn, d, via):
+        if skip(fn):
+            return
+        loc = g.defs.get(fn, '?')
+        cls = classify(classes, loc, bare(fn)) if classes else '-'
+        again = fn in seen
+        if not only or cls in only:
+            mark = '^' if again else ''
+            tag = f'  [{via}]' if via else ''
+            print(f'{cls} {"  " * d}{mark}{bare(fn)}  {loc.lstrip("./")}{tag}')
+        if again or (depth is not None and d >= depth):
+            return
+        seen.add(fn)
+        for _, c, v in callees(fn):
+            walk(c, d + 1, v)
+
+    sys.setrecursionlimit(10000)
+    for r in roots:
+        walk(g.resolve(r, ''), 0, '')
+
+
+def reach(g, roots, depth, prune, prune_file, follow, show_extern,
+          classes=None, flat=False):
+    follow_map = parse_follow(follow)
     seen, order, ext = {}, [], collections.Counter()
     indirect = collections.defaultdict(set)   # member -> sites' callers
     q = collections.deque((g.resolve(r, ''), 0, None) for r in roots)
@@ -187,7 +251,7 @@ def reach(g, roots, depth, prune, prune_file, follow, show_extern,
         # roots): class, depth, file:line, name.
         for fn, d, via in order:
             loc = g.defs.get(fn, '?')
-            cls = classify(classes, loc) if classes else '-'
+            cls = classify(classes, loc, bare(fn)) if classes else '-'
             print(f'{cls} {d:2d} {loc.lstrip("./"):45s} {bare(fn)}')
         return
 
@@ -196,7 +260,7 @@ def reach(g, roots, depth, prune, prune_file, follow, show_extern,
         files = collections.defaultdict(set)
         for fn, _, _ in order:
             loc = g.defs.get(fn, '?')
-            c = classify(classes, loc)
+            c = classify(classes, loc, bare(fn))
             tot[c] += 1
             files[c].add(loc.rsplit(':', 2)[0])
         for c in sorted(tot):
@@ -245,6 +309,9 @@ def main():
     r.add_argument('--prune-file', help='skip functions defined in matching files')
     r.add_argument('--follow', action='append', default=[])
     r.add_argument('--extern', action='store_true')
+    r.add_argument('--tree', action='store_true',
+                   help='depth-first in call-site order instead of the summary')
+    r.add_argument('--only', help='with --tree: print only these classes, e.g. A')
     c = sub.add_parser('callers')
     c.add_argument('func')
     r.add_argument('--classes', help='class file, see gpu_intel_tgl.classes')
@@ -256,7 +323,11 @@ def main():
     for ff in getattr(a, 'follow_file', []):
         a.follow += open(ff).read().splitlines()
     g = Graph(os.path.expanduser(a.dir))
-    if a.cmd == 'reach':
+    if a.cmd == 'reach' and a.tree:
+        tree(g, a.roots, a.depth, re.compile(a.prune) if a.prune else None,
+             re.compile(a.prune_file) if a.prune_file else None, a.follow,
+             load_classes(a.classes) if a.classes else None, a.only)
+    elif a.cmd == 'reach':
         reach(g, a.roots, a.depth, re.compile(a.prune) if a.prune else None,
               re.compile(a.prune_file) if a.prune_file else None,
               a.follow, a.extern,

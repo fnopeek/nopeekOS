@@ -23,8 +23,11 @@ tools/i915-tgl-specialize.py  legt eine KOPIE von i915 auf TGL GT2 fest:
 tools/gpu_intel_tgl.follow    jede Plattformweiche (indirekter Aufruf),
                               mit der Quellzeile, die TGL dorthin schickt
 tools/gpu_intel_tgl.classes   A / B / N je Datei
-GPU_INTEL_TGL_FUNCTIONS.txt   das Ergebnis: jede Funktion mit Klasse,
-                              Tiefe und Fundstelle — der Auftragszettel
+GPU_INTEL_TGL_FUNCTIONS.txt   jede Funktion mit Klasse, Tiefe und
+                              Fundstelle — der Auftragszettel (--list)
+GPU_INTEL_TGL_TREE.txt        derselbe Graph als Baum, Aufrufe in der
+                              Reihenfolge der Quelle (--tree) — die
+                              Portierreihenfolge
 ```
 
 Fertige Graphen liegen unter `~/.cache/nopeekos/i915-callgraph/`
@@ -95,8 +98,8 @@ Die Festlegung allein nimmt 350 Funktionen heraus — `intel_workarounds.c`
 
 | Klasse | fn | Dateien | Umgang |
 |---|---|---|---|
-| **A — programmiert die Hardware** | **958** | 54 | 1:1 portieren |
-| **B — Linux-Verwaltung** | 937 | 81 | Gegenstueck mit derselben Semantik (§3) |
+| **A — programmiert die Hardware** | **984** | 58 | 1:1 portieren |
+| **B — Linux-Verwaltung** | 911 | 81 | Gegenstueck mit derselben Semantik (§3) |
 | **N — nicht TGL** | 30 | 10 | entfaellt, Grund in der `.classes`-Datei |
 
 **Stufe 1 ist der ganze Init-Weg aus A, nicht „nur BCS".** Linux bringt
@@ -161,17 +164,37 @@ Feinklassifizierung nach A.
 
 ---
 
-## 5 — Naechste Schritte
+## 5 — Die Grenze A/B, maschinell gezogen
 
-1. **Reihenfolge**: die A-Liste in Aufrufreihenfolge ab `i915_driver_probe`
-   (die `--list`-Ausgabe ist breadth-first; fuer die Portierung gilt die
-   Reihenfolge der Aufrufe IN jeder Funktion, gelesen in der Quelle).
-2. **Die Grenze A/B je Funktion**: Funktionen aus B, die ein Register oder
-   einen Befehlsstrom beruehren, wandern nach A; Funktionen aus A, die nur
-   Linux-Zustand halten (Referenzen, Sperren), werden auf gpudev
-   abgebildet. Erst danach ist die Liste der Auftragszettel.
-3. Erst danach Code (`tools/wasm/gpu_intel/`), und `linux-coverage.py`
-   bekommt den Eintrag `gpu_intel` gegen `GPU_INTEL_TGL_FUNCTIONS.txt`.
+**67 Funktionen aus B rufen A direkt** — das sind die Naehte, an denen
+unser gpudev-Gegenstueck den portierten Code aufrufen wird. Ausgezaehlt
+mit dem Graphen (jede Kante B → A). 26 davon sind in Wahrheit selbst A
+und stehen einzeln mit Grund in der `.classes`-Datei:
+
+- **Ablauf des Hochfahrens:** `i915_driver_probe`, `_early_probe`,
+  `_mmio_probe`, `_hw_probe`, `sanitize_gpu`, `i915_pcode_init`,
+  `i915_gem_init`, `i915_set_dma_info` (DMA-Maske 39 Bit — gilt fuer unsere
+  Puffer). Die Reihenfolge, in der Linux die Teile anlegt, IST Teil des
+  Hardwarezustands.
+- **Stolen-Speicher:** `icl_get_stolen_reserved`, `init_reserved_stolen`,
+  `i915_gem_init_stolen` u. a. lesen den reservierten Bereich aus der
+  Hardware — wer ihn nicht kennt, ueberschreibt Firmware-Speicher.
+- **Requests:** `__i915_request_create`, `__i915_request_commit`,
+  `__i915_request_submit`, Semaphor-Wait u. a. schreiben den Ring und
+  legen fest, in welcher Reihenfolge Breadcrumbs und Seqnos entstehen.
+
+Die uebrigen 41 Naehte sind echte Verwaltung, die A aufruft (VMA-Pin →
+PPGTT-Allokation, Kontext-Enter → Engine-PM, Retire → Timeline). Ihre
+Wirkung auf die Hardware steckt in der aufgerufenen A-Funktion.
+
+## 5a — Naechste Schritte
+
+1. **Portieren in der Reihenfolge von `GPU_INTEL_TGL_TREE.txt`**, Datei
+   fuer Datei ganz (Workarounds, Uncore-Tabellen, LRC-Offsets sind
+   Tabellen — gegen die Quelle abgleichen, Laenge pruefen).
+2. Modul `tools/wasm/gpu_intel/`, und `linux-coverage.py` bekommt den
+   Eintrag `gpu_intel` gegen die A-Zeilen von `GPU_INTEL_TGL_FUNCTIONS.txt`.
+3. Die Verwaltung (B) als gpudev-Kernelseite: Puffer, Fences, Kontexte.
 
 ---
 
