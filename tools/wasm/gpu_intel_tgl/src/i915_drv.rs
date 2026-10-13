@@ -48,6 +48,11 @@ pub struct intel_display {
     pub platform_tigerlake_uy: bool,
     pub ip: intel_ip_version,
     pub step: u32,
+    pub params: crate::intel_display_power::intel_display_params,
+    /// `display->power.domains`.
+    pub power: crate::intel_display_power::i915_power_domains,
+    /// `intel_dmc_has_payload`: no DMC firmware is loaded by this port.
+    pub dmc_has_payload: bool,
 }
 
 /// `struct drm_i915_private`, as far as this stage needs it.
@@ -57,6 +62,8 @@ pub struct drm_i915_private {
     pub runtime: intel_runtime_info,
     pub display: intel_display,
     pub uncore: intel_uncore,
+    /// `intel_irqs_enabled`.
+    pub irqs_enabled: bool,
 }
 
 const BITS_PER_U32: u32 = 32;
@@ -150,6 +157,7 @@ pub fn intel_display_device_probe(revision: u8) -> intel_display {
         platform_tigerlake_uy: true,
         ip: intel_ip_version { ver: 12, rel: 0, step: 0 },
         step: get_pre_gmdid_step(revision),
+        ..Default::default()
     };
     Line::new().s("Found TIGERLAKE/UY (device ID 9a78) integrated display version 12.00 stepping ")
         .s(intel_step_name(d.step)).say();

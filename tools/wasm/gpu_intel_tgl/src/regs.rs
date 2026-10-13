@@ -8,6 +8,9 @@
 #[derive(Clone, Copy)]
 pub struct Bitfield { pub byte: u32, pub shift: u32, pub width: u32 }
 
+/// `_PICK`: element `i` of a register-base table.
+pub const fn pick<const N: usize>(a: [u32; N], i: u32) -> u32 { a[i as usize] }
+
 // Forcewake registers (gt/intel_gt_regs.h)
 pub const FORCEWAKE_MT: u32 = 0xa188; // intel_uncore.c:2229
 pub const FORCEWAKE_RENDER_GEN9: u32 = 0xa278; // intel_uncore.c:2187
@@ -446,3 +449,107 @@ pub const EIO: u32 = 0x5; // include/uapi/asm-generic/errno-base.h:9
 pub const CHILD_HPD_INVERT: Bitfield = Bitfield { byte: 23, shift: 4, width: 1 }; // struct child_device_config.hpd_invert in display/intel_bios.c
 pub const CHILD_HDMI_SUPPORT: Bitfield = Bitfield { byte: 24, shift: 0, width: 1 }; // struct child_device_config.hdmi_support in display/intel_bios.c
 pub const CHILD_DVO_PORT: Bitfield = Bitfield { byte: 16, shift: 0, width: 8 }; // struct child_device_config.dvo_port in display/intel_bios.c
+
+// display power (display/intel_display_power.c, intel_display_power_well.c)
+pub const DC_STATE_EN: u32 = 0x45504; // display/intel_display_regs.h:2799
+pub const DC_STATE_DISABLE: u32 = 0x0; // display/intel_display_regs.h:2800
+pub const DC_STATE_EN_UPTO_DC5: u32 = 0x1; // display/intel_display_regs.h:2805
+pub const DC_STATE_EN_UPTO_DC6: u32 = 0x2; // display/intel_display_regs.h:2807
+pub const DC_STATE_EN_DC3CO: u32 = 0x40000000; // display/intel_display_regs.h:2801
+pub const DC_STATE_EN_DC9: u32 = 0x8; // display/intel_display_regs.h:2806
+pub const DC_STATE_EN_UPTO_DC5_DC6_MASK: u32 = 0x3; // display/intel_display_regs.h:2808
+pub const DC_STATE_DC3CO_STATUS: u32 = 0x20000000; // display/intel_display_regs.h:2802
+pub const SOUTH_DSPCLK_GATE_D: u32 = 0xc2020; // i915_reg.h:1062
+pub const PCH_DPMGUNIT_CLOCK_GATE_DISABLE: u32 = 0x8000; // i915_reg.h:1066
+pub const PCH_DG1: u32 = 0x400; // display/intel_pch.h:31
+pub const HSW_NDE_RSTWRN_OPT: u32 = 0x46408; // display/intel_display_regs.h:1510
+pub const RESET_PCH_HANDSHAKE_ENABLE: u32 = 0x10; // display/intel_display_regs.h:1512
+pub const GEN11_CHICKEN_DCPR_2: u32 = 0x46434; // display/intel_display_regs.h:1514
+pub const DCPR_CLEAR_MEMSTAT_DIS: u32 = 0x1000000; // display/intel_display_regs.h:1518
+pub const DCPR_SEND_RESP_IMM: u32 = 0x2000000; // display/intel_display_regs.h:1517
+pub const DCPR_MASK_LPMODE: u32 = 0x4000000; // display/intel_display_regs.h:1516
+pub const DCPR_MASK_MAXLATENCY_MEMUP_CLR: u32 = 0x8000000; // display/intel_display_regs.h:1515
+/// display/intel_display_regs.h:2113
+pub const fn HSW_PWR_WELL_CTL_REQ(pw_idx: u32) -> u32 { (0x2 << ((pw_idx) * 2)) }
+/// display/intel_display_regs.h:2114
+pub const fn HSW_PWR_WELL_CTL_STATE(pw_idx: u32) -> u32 { (0x1 << ((pw_idx) * 2)) }
+pub const SKL_FUSE_STATUS: u32 = 0x42000; // display/intel_display_regs.h:2207
+/// display/intel_display_regs.h:2209
+pub const fn SKL_FUSE_PG_DIST_STATUS(pg: u32) -> u32 { (1 << (27 - (pg))) }
+pub const ICL_PW_CTL_IDX_PW_1: u32 = 0x0; // display/intel_display_regs.h:2137
+pub const SKL_PG0: u32 = 0x0; // display/intel_display_regs.h:2200
+pub const SKL_PG1: u32 = 0x1; // display/intel_display_regs.h:2201
+pub const DISP_PW_ID_NONE: u32 = 0x0; // display/intel_display_power_well.h:37
+pub const SKL_DISP_PW_1: u32 = 0x8; // display/intel_display_power_well.h:46
+pub const SKL_DISP_DC_OFF: u32 = 0xb; // display/intel_display_power_well.h:49
+pub const POWER_DOMAIN_INIT: u32 = 0x4b; // display/intel_display_power.h:114
+pub const POWER_DOMAIN_NUM: u32 = 0x4c; // display/intel_display_power.h:116
+pub const HSW_PWR_WELL_REGS_BIOS: u32 = 0x45400; // i915_mmio_reg_offset(hsw_power_well_regs.bios) in display/intel_display_power_well.c
+pub const HSW_PWR_WELL_REGS_DRIVER: u32 = 0x45404; // i915_mmio_reg_offset(hsw_power_well_regs.driver) in display/intel_display_power_well.c
+pub const HSW_PWR_WELL_REGS_KVMR: u32 = 0x45408; // i915_mmio_reg_offset(hsw_power_well_regs.kvmr) in display/intel_display_power_well.c
+pub const HSW_PWR_WELL_REGS_DEBUG: u32 = 0x4540c; // i915_mmio_reg_offset(hsw_power_well_regs.debug) in display/intel_display_power_well.c
+pub const ICL_AUX_PW_REGS_BIOS: u32 = 0x45440; // i915_mmio_reg_offset(icl_aux_power_well_regs.bios) in display/intel_display_power_well.c
+pub const ICL_AUX_PW_REGS_DRIVER: u32 = 0x45444; // i915_mmio_reg_offset(icl_aux_power_well_regs.driver) in display/intel_display_power_well.c
+pub const ICL_AUX_PW_REGS_KVMR: u32 = 0x0; // i915_mmio_reg_offset(icl_aux_power_well_regs.kvmr) in display/intel_display_power_well.c
+pub const ICL_AUX_PW_REGS_DEBUG: u32 = 0x4544c; // i915_mmio_reg_offset(icl_aux_power_well_regs.debug) in display/intel_display_power_well.c
+pub const ICL_DDI_PW_REGS_BIOS: u32 = 0x45450; // i915_mmio_reg_offset(icl_ddi_power_well_regs.bios) in display/intel_display_power_well.c
+pub const ICL_DDI_PW_REGS_DRIVER: u32 = 0x45454; // i915_mmio_reg_offset(icl_ddi_power_well_regs.driver) in display/intel_display_power_well.c
+pub const ICL_DDI_PW_REGS_KVMR: u32 = 0x0; // i915_mmio_reg_offset(icl_ddi_power_well_regs.kvmr) in display/intel_display_power_well.c
+pub const ICL_DDI_PW_REGS_DEBUG: u32 = 0x4545c; // i915_mmio_reg_offset(icl_ddi_power_well_regs.debug) in display/intel_display_power_well.c
+pub const TGL_PCODE_TCCOLD: u32 = 0x26; // i915_reg.h:1149
+pub const TGL_PCODE_EXIT_TCCOLD_DATA_L_BLOCK_REQ: u32 = 0x0; // i915_reg.h:1151
+pub const TGL_PCODE_EXIT_TCCOLD_DATA_L_UNBLOCK_REQ: u32 = 0x1; // i915_reg.h:1152
+pub const TGL_PCODE_EXIT_TCCOLD_DATA_L_EXIT_FAILED: u32 = 0x1; // i915_reg.h:1150
+pub const ENABLE_DC_DEFAULT: i32 = -1; // display_param(enable_dc) in display/intel_display_params.c
+pub const DISABLE_POWER_WELL_DEFAULT: i32 = -1; // display_param(disable_power_well) in display/intel_display_params.c
+
+// combo PHY (display/intel_combo_phy.c, intel_combo_phy_regs.h)
+pub const PHY_A: u32 = 0x0; // display/intel_display.h:166
+pub const PHY_B: u32 = 0x1; // display/intel_display.h:167
+pub const PHY_NONE: i32 = -1; // display/intel_display.h:164
+pub const I915_MAX_PHYS: u32 = 0x9; // display/intel_display.h:176
+/// display/intel_combo_phy_regs.h:54
+pub const fn ICL_PORT_COMP_DW0(phy: u32) -> u32 { (((pick([0x162000, 0x6C000, 0x160000, 0x161000, 0x16B000], phy)) + 0x100 + 4 * (0))) }
+/// display/intel_combo_phy_regs.h:57
+pub const fn ICL_PORT_COMP_DW1(phy: u32) -> u32 { (((pick([0x162000, 0x6C000, 0x160000, 0x161000, 0x16B000], phy)) + 0x100 + 4 * (1))) }
+/// display/intel_combo_phy_regs.h:59
+pub const fn ICL_PORT_COMP_DW3(phy: u32) -> u32 { (((pick([0x162000, 0x6C000, 0x160000, 0x161000, 0x16B000], phy)) + 0x100 + 4 * (3))) }
+/// display/intel_combo_phy_regs.h:69
+pub const fn ICL_PORT_COMP_DW8(phy: u32) -> u32 { (((pick([0x162000, 0x6C000, 0x160000, 0x161000, 0x16B000], phy)) + 0x100 + 4 * (8))) }
+/// display/intel_combo_phy_regs.h:72
+pub const fn ICL_PORT_COMP_DW9(phy: u32) -> u32 { (((pick([0x162000, 0x6C000, 0x160000, 0x161000, 0x16B000], phy)) + 0x100 + 4 * (9))) }
+/// display/intel_combo_phy_regs.h:74
+pub const fn ICL_PORT_COMP_DW10(phy: u32) -> u32 { (((pick([0x162000, 0x6C000, 0x160000, 0x161000, 0x16B000], phy)) + 0x100 + 4 * (10))) }
+pub const COMP_INIT: u32 = 0x80000000; // display/intel_combo_phy_regs.h:55
+pub const IREFGEN: u32 = 0x1000000; // display/intel_combo_phy_regs.h:70
+pub const PROCESS_INFO_MASK: u32 = 0x1c000000; // display/intel_combo_phy_regs.h:60
+pub const PROCESS_INFO_DOT_0: u32 = 0x0; // display/intel_combo_phy_regs.h:61
+pub const PROCESS_INFO_DOT_1: u32 = 0x4000000; // display/intel_combo_phy_regs.h:62
+pub const VOLTAGE_INFO_MASK: u32 = 0x3000000; // display/intel_combo_phy_regs.h:64
+pub const VOLTAGE_INFO_0_85V: u32 = 0x0; // display/intel_combo_phy_regs.h:65
+pub const VOLTAGE_INFO_0_95V: u32 = 0x1000000; // display/intel_combo_phy_regs.h:66
+pub const VOLTAGE_INFO_1_05V: u32 = 0x2000000; // display/intel_combo_phy_regs.h:67
+/// display/intel_display_regs.h:2868
+pub const fn ICL_PHY_MISC(phy: u32) -> u32 { (((0x64C00) + (phy) * ((0x64C04) - (0x64C00)))) }
+pub const ICL_PHY_MISC_DE_IO_COMP_PWR_DOWN: u32 = 0x800000; // display/intel_display_regs.h:2872
+/// display/intel_combo_phy_regs.h:158
+pub const fn ICL_PORT_TX_DW8_LN(ln: u32, phy: u32) -> u32 { (((pick([0x162000, 0x6C000, 0x160000, 0x161000, 0x16B000], phy)) + (0x880 + (ln) * 0x100) + 4 * (8))) }
+/// display/intel_combo_phy_regs.h:157
+pub const fn ICL_PORT_TX_DW8_GRP(phy: u32) -> u32 { (((pick([0x162000, 0x6C000, 0x160000, 0x161000, 0x16B000], phy)) + 0x680 + 4 * (8))) }
+pub const ICL_PORT_TX_DW8_ODCC_CLK_SEL: u32 = 0x80000000; // display/intel_combo_phy_regs.h:159
+pub const ICL_PORT_TX_DW8_ODCC_CLK_DIV_SEL_MASK: u32 = 0x60000000; // display/intel_combo_phy_regs.h:160
+pub const ICL_PORT_TX_DW8_ODCC_CLK_DIV_SEL_DIV2: u32 = 0x20000000; // display/intel_combo_phy_regs.h:161
+/// display/intel_combo_phy_regs.h:88
+pub const fn ICL_PORT_PCS_DW1_LN(ln: u32, phy: u32) -> u32 { (((pick([0x162000, 0x6C000, 0x160000, 0x161000, 0x16B000], phy)) + (0x800 + (ln) * 0x100) + 4 * (1))) }
+/// display/intel_combo_phy_regs.h:87
+pub const fn ICL_PORT_PCS_DW1_GRP(phy: u32) -> u32 { (((pick([0x162000, 0x6C000, 0x160000, 0x161000, 0x16B000], phy)) + 0x600 + 4 * (1))) }
+pub const DCC_MODE_SELECT_MASK: u32 = 0x300000; // display/intel_combo_phy_regs.h:89
+pub const RUN_DCC_ONCE: u32 = 0x0; // display/intel_combo_phy_regs.h:90
+/// display/intel_combo_phy_regs.h:27
+pub const fn ICL_PORT_CL_DW5(phy: u32) -> u32 { (((pick([0x162000, 0x6C000, 0x160000, 0x161000, 0x16B000], phy)) + 4 * (5))) }
+pub const CL_POWER_DOWN_ENABLE: u32 = 0x10; // display/intel_combo_phy_regs.h:28
+pub const PROCMON_0_85V_DOT_0: u32 = 0x0; // display/intel_combo_phy.c:24
+pub const PROCMON_0_95V_DOT_0: u32 = 0x1; // display/intel_combo_phy.c:25
+pub const PROCMON_0_95V_DOT_1: u32 = 0x2; // display/intel_combo_phy.c:26
+pub const PROCMON_1_05V_DOT_0: u32 = 0x3; // display/intel_combo_phy.c:27
+pub const PROCMON_1_05V_DOT_1: u32 = 0x4; // display/intel_combo_phy.c:28

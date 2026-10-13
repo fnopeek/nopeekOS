@@ -17,19 +17,23 @@ would be a second semantics waiting to drift, so nothing here evaluates C:
     python3 gen_regs.py --check    # fail if either is not what it would write
 
 Names come from regs.list, one per line: `NAME` for a constant, `NAME(a, b)`
-for a parameterised register, `NAME @ file.c` for a constant a .c file
+for a parameterised register (`NAME(a) samples 0 1 7` checks it at
+those arguments instead of the register-base defaults, for a bit index), `NAME @ file.c` for a constant a .c file
 defines (it is compiled with that file), `NAME : str [@ file.c]` for a
 string literal, `NAME = bitfield(struct T, field) @ file.c` for where a
 bit-field sits (byte, shift, width), `NAME = expr @ file.c` for a value
-read out of that file (e.g. a field of `tgl_info`). `# ` lines group the
-output.
+read out of that file (e.g. a field of `tgl_info`; `display_param(m)` is
+the default of a display module parameter). `# ` lines group the output.
 
 Tables come from tables.list: `@ file.c` names the Linux source the
 following arrays live in (it is compiled as is, so `static` arrays are
 reachable), then one array per line, either `name: u16` for an array of
 integers or `name: RustType { field, field }` for an array of structs. The
 Rust struct types are written by hand next to the code that uses them;
-the generator only fills in GCC's values, in source order.
+the generator only fills in GCC's values, in source order. A nested table
+(lists of pointers to lists) is flattened with
+`outer[] / @.member[@.count] / ... => name: RustType { field=expr, ... }`,
+see walk_table.
 
 The tree is ~/.cache/nopeekos/i915-work: the include/, arch/x86/include/
 and drivers/gpu/drm/i915/ parts of the linux-6.18.55 tarball, plus the
@@ -58,7 +62,7 @@ HEADERS = [
     "gt/intel_gpu_commands.h", "intel_device_info.h", "intel_step.h",
     "display/intel_display_regs.h", "display/intel_display_device.h",
     "display/intel_pch.h", "display/intel_display_limits.h", "display/intel_fbc.h",
-    "intel_pci_config.h", "drm/intel/i915_drm.h",
+    "intel_pci_config.h", "drm/intel/i915_drm.h", "display/intel_combo_phy_regs.h",
 ]
 
 # The kernel build's flags (drivers/gpu/drm/i915/.intel_uncore.o.cmd),
@@ -81,6 +85,18 @@ CFLAGS = [
 ]
 
 PRELUDE = "".join(f'#include "{h}"\n' for h in HEADERS)
+
+# `display_param(member)`: the default of an i915 display module
+# parameter, from the same X-macro intel_display_params.c initialises
+# intel_display_modparams with (that variable is writable, so GCC does not
+# fold reads of it).
+DISPLAY_PARAMS = """
+#define NPK_MEMBER(T, member, value, ...) .member = (value),
+static const struct intel_display_params npk_display_params = {
+	INTEL_DISPLAY_PARAMS_FOR_EACH(NPK_MEMBER)
+};
+#define display_param(m) (npk_display_params.m)
+"""
 
 # Arguments a parameterised register is sampled at.
 SAMPLES = [0, 1, 2, 3, 0x22000, 0x1C0000]
@@ -134,6 +150,49 @@ def values(exprs, prelude=None):
     if missing:
         sys.exit(f"no constant from GCC for: {sorted(missing)}")
     return out
+
+
+def strings(exprs, prelude, symbols=False):
+    """{key: text} for C expressions of type `const char *`, read off the
+    string literal GCC loads; with `symbols`, the name of the object a
+    pointer expression points at."""
+    src = prelude
+    for k, e in exprs.items():
+        src += f"const void *s_{k}(void);\n"
+        src += f"const void *s_{k}(void) {{ return {e}; }}\n"
+    asm = gcc(src, ["-S"])
+    lits, out, label, cur, body = {}, {}, None, None, []
+    for line in asm.splitlines():
+        m = re.match(r"^(\.LC\d+):", line)
+        if m:
+            label = m.group(1)
+            continue
+        m = re.match(r'\s+\.string\s+(".*")$', line)
+        if m and label:
+            lits[label] = m.group(1)
+            label = None
+            continue
+        m = re.match(r"^s_(\w+):", line)
+        if m:
+            cur, body = m.group(1), []
+            continue
+        if cur is None:
+            continue
+        if re.match(r"\s+[a-z]", line) and not re.match(r"\s+\.", line):
+            body.append(line.strip())
+            if len(body) > 2:
+                sys.exit(f"{cur}: not a string constant: {body}")
+        m = re.match(r"\s+mov[lq]\s+\$([.\w]+), %[er]ax", line)
+        if m:
+            out[cur] = m.group(1)
+        elif re.match(r"\s+ret", line):
+            cur = None
+    missing = set(exprs) - set(out)
+    if missing:
+        sys.exit(f"no string literal from GCC for: {sorted(missing)}")
+    if symbols:
+        return out
+    return {k: lits[v] for k, v in out.items()}
 
 
 # For turning a parameterised macro into Rust only: the bit helpers without
@@ -213,7 +272,18 @@ def c_to_rust(expr, params):
     for t in ("i915_reg_t", "i915_mcr_reg_t"):
         e = re.sub(r"^\(\(const " + t + r"\)\{ \.reg = (.*) \}\)$", r"\1", e)
     e = re.sub(r"\b(0x[0-9a-fA-F]+|\d+)[uUlL]+\b", r"\1", e)
+    # `_PICK`: an index into a compound-literal array becomes `pick`
+    # (defined in regs.rs, and for the sample check below).
+    picks = []
+    def pick(m):
+        items = [x.strip() for x in m.group(1).split(",") if x.strip()]
+        if any(not re.match(r"^(0x[0-9a-fA-F]+|\d+)$", x) for x in items):
+            return m.group(0)
+        picks.append(", ".join(items))
+        return f"pick(__PICK{len(picks) - 1}__, {m.group(2)})"
+    e = re.sub(r"\(\(const u32 \[\]\)\{([^{}]*)\}\)\[([^\[\]]*)\]", pick, e)
     words = re.findall(r"[A-Za-z_]\w*", re.sub(r"\b0x[0-9a-fA-F]+\b", "", e))
+    words = [w for w in words if w != "pick" and not re.match(r"^__PICK\d+__$", w)]
     # Enum constants survive the preprocessor; GCC gives their values.
     consts = sorted({w for w in words if w not in params})
     if consts:
@@ -222,15 +292,17 @@ def c_to_rust(expr, params):
         vals = values({w: w for w in consts})
         for w in consts:
             e = re.sub(r"\b" + w + r"\b", f"{vals[w]:#x}", e)
-    if re.search(r"[^\w\s()+\-*<>|&~]", e):
+    if re.search(r"[^\w\s()+\-*<>|&~,]", e) or ("," in e and not picks):
         return None
     if re.search(r"(?<![<>])[<>](?![<>])", e):
         return None
+    for i, items in enumerate(picks):
+        e = e.replace(f"__PICK{i}__", f"[{items}]")
     return e
 
 
 def gen():
-    entries = []
+    entries, own_samples = [], {}
     for raw in open(LIST):
         if raw.startswith("# "):
             entries.append(("group", raw[2:].strip(), None))
@@ -250,6 +322,10 @@ def gen():
         if m:
             entries.append(("reg", m.group(1), ("@", m.group(3), m.group(2))))
             continue
+        m = re.match(r"^(\w+)\(([^)]*)\)\s+samples\s+([\d\s]+)$", line)
+        if m:
+            own_samples[m.group(1)] = [int(x) for x in m.group(3).split()]
+            line = f"{m.group(1)}({m.group(2)})"
         m = re.match(r"^(\w+)(?:\(([^)]*)\))?(?:\s*@\s*(\S+))?$", line)
         if not m:
             sys.exit(f"regs.list: cannot read {line!r}")
@@ -284,7 +360,10 @@ def gen():
 
     vals = typed(consts) if consts else {}
     for src, names in csrc.items():
-        vals.update(typed(names, f'#include "{src}"\n'))
+        prelude = f'#include "{src}"\n'
+        if any("display_param(" in e for e in names.values()):
+            prelude += DISPLAY_PARAMS
+        vals.update(typed(names, prelude))
 
     # Parameterised: placeholder expansion, then samples.
     rust_fn, samples = {}, {}
@@ -299,15 +378,15 @@ def gen():
         for p, q in zip(ph, params):
             r = r.replace(p, q)
         rust_fn[name] = r
-        for i, s in enumerate(SAMPLES):
+        for i, s in enumerate(own_samples.get(name, SAMPLES)):
             call = f"{name}({', '.join(str(s) for _ in params)})"
             samples[f"{name}__{i}"] = (f"i915_mmio_reg_offset({call})"
                                        if is_reg(e) else call)
     svals = values(samples) if samples else {}
     for name, params in funcs.items():
-        for i, s in enumerate(SAMPLES):
+        for i, s in enumerate(own_samples.get(name, SAMPLES)):
             env = {p: s for p in params}
-            got = eval(rust_fn[name], {}, env) & 0xFFFF_FFFF
+            got = eval(rust_fn[name], {"pick": lambda a, i: a[i]}, env) & 0xFFFF_FFFF
             want = svals[f"{name}__{i}"] & 0xFFFF_FFFF
             if got != want:
                 sys.exit(f"{name}({s}): Rust {got:#x} != GCC {want:#x}")
@@ -342,7 +421,9 @@ def gen():
            "/// Where a C bit-field sits: byte offset, bit shift within that byte",
            "/// (a field may run into the following bytes), width in bits.",
            "#[derive(Clone, Copy)]",
-           "pub struct Bitfield { pub byte: u32, pub shift: u32, pub width: u32 }", ""]
+           "pub struct Bitfield { pub byte: u32, pub shift: u32, pub width: u32 }", "",
+           "/// `_PICK`: element `i` of a register-base table.",
+           "pub const fn pick<const N: usize>(a: [u32; N], i: u32) -> u32 { a[i as usize] }", ""]
     for kind, name, params in entries:
         if kind == "bitfield":
             b, sh, wd, loc = bitfields[name]
@@ -397,6 +478,12 @@ def gen_tables():
             cur = (line[1:].strip(), [])
             groups.append(cur)
             continue
+        m = re.match(r"^(.+?)\s*=>\s*(\w+)\s*:\s*(\w+)\s*\{([^}]*)\}$", line)
+        if m and cur is not None:
+            walk = [seg.strip() for seg in m.group(1).split("/")]
+            fields = [f.strip() for f in m.group(4).split(",")]
+            cur[1].append((m.group(2), m.group(3), fields, walk))
+            continue
         m = re.match(r"^(\w+)\s*:\s*(\w+)(?:\s*\{([^}]*)\})?$", line)
         if not m or cur is None:
             sys.exit(f"tables.list: cannot read {line!r}")
@@ -408,6 +495,13 @@ def gen_tables():
            "#![allow(non_upper_case_globals)]", "", "use super::*;"]
     for src, arrays in groups:
         prelude = f'#include "{src}"\n'
+        walks = [a for a in arrays if len(a) == 4]
+        arrays = [a for a in arrays if len(a) == 3]
+        for n, ty, fields, walk in walks:
+            out += ["", f"// {src}: {' / '.join(walk)}"]
+            out += walk_table(n, ty, fields, walk, prelude)
+        if not arrays:
+            continue
         lens = values({f"{n}__len": f"ARRAY_SIZE({n})" for n, _, _ in arrays}, prelude)
         exprs = {}
         for n, ty, fields in arrays:
@@ -438,6 +532,80 @@ def gen_tables():
                 out.append(f"/// {loc}")
                 out.append(f"pub static {n}: [{ty}; {k}] = [{body}];")
     return "\n".join(out) + "\n"
+
+
+def walk_table(name, ty, fields, walk, prelude):
+    """A nested C table flattened into one Rust array.
+
+    `walk` is the path from the outer array inwards: the first segment is a
+    static array (`tbl[]`), every further one `member[count]` relative to
+    the element above it, with `@` standing for that element. A field is a
+    C expression over `eN` (the element at level N), `iN` (its index under
+    its parent) and `nN` (its running index over the whole level); a field
+    written `name=expr as str` is a string literal, one written
+    `name=expr as sym` the object a pointer points at, emitted as the
+    variant of that name of the enum `<RustType>_<name>`."""
+    first = walk[0]
+    if not first.endswith("[]"):
+        sys.exit(f"tables.list: {first!r}: the first level must be `name[]`")
+    top = first[:-2]
+    k = values({"n": f"ARRAY_SIZE({top})"}, prelude)["n"]
+    levels = [[((i,), f"{top}[{i}]") for i in range(k)]]
+    for seg in walk[1:]:
+        m = re.match(r"^(.*)\[(.*)\]$", seg)
+        if not m:
+            sys.exit(f"tables.list: {seg!r}: expected `member[count]`")
+        member, count = m.group(1), m.group(2)
+        parents = levels[-1]
+        counts = values({f"c{j}": count.replace("@", f"({e})") for j, (_, e) in enumerate(parents)},
+                        prelude)
+        level = []
+        for j, (idx, e) in enumerate(parents):
+            for i in range(counts[f"c{j}"]):
+                level.append((idx + (i,), f"{member.replace('@', f'({e})')}[{i}]"))
+        levels.append(level)
+
+    # running index of every element at every level, keyed by its index path
+    flat = [{idx: n for n, (idx, _) in enumerate(lv)} for lv in levels]
+    exprs, strs, syms = {}, {}, {}
+    rows = levels[-1]
+    for r, (idx, _) in enumerate(rows):
+        def subst(expr):
+            def one(m):
+                kind, lv = m.group(1), int(m.group(2))
+                if kind == "e":
+                    return f"({dict(levels[lv])[idx[:lv + 1]]})"
+                if kind == "i":
+                    return str(idx[lv])
+                return str(flat[lv][idx[:lv + 1]])
+            return re.sub(r"\b([ein])(\d)\b", one, expr)
+        for f in fields:
+            fname, _, expr = f.partition("=")
+            fname, expr = fname.strip(), expr.strip() or fname.strip()
+            if expr.endswith(" as str"):
+                strs[f"r{r}__{fname}"] = subst(expr[:-len(" as str")])
+            elif expr.endswith(" as sym"):
+                syms[f"r{r}__{fname}"] = subst(expr[:-len(" as sym")])
+            else:
+                exprs[f"r{r}__{fname}"] = subst(expr)
+    vals = values(exprs, prelude) if exprs else {}
+    texts = strings(strs, prelude) if strs else {}
+    names = strings(syms, prelude, symbols=True) if syms else {}
+    out = [f"pub static {name}: [{ty}; {len(rows)}] = ["]
+    for r in range(len(rows)):
+        body = []
+        for f in fields:
+            fname = f.partition("=")[0].strip()
+            key = f"r{r}__{fname}"
+            if key in texts:
+                body.append(f"{fname}: b{texts[key]}")
+            elif key in names:
+                body.append(f"{fname}: {ty}_{fname}::{names[key]}")
+            else:
+                body.append(f"{fname}: {vals[key]:#x}")
+        out.append(f"    {ty} {{ {', '.join(body)} }},")
+    out.append("];")
+    return out
 
 
 def where_array(src, name):

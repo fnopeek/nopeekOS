@@ -16,7 +16,10 @@
 #![allow(dead_code)]
 
 mod i915_drv;
+mod intel_de;
 mod intel_display_device;
+mod intel_display_power;
+mod intel_combo_phy;
 mod intel_dram;
 mod intel_engine;
 mod intel_ggtt;
@@ -31,6 +34,8 @@ mod regs;
 mod tables;
 
 use i915_drv::intel_step_info;
+use intel_combo_phy::icl_procmon;
+use intel_display_power::{power_well_domain, power_well_inst, power_well_inst_ops};
 use intel_gt::engine_info;
 use intel_uncore::{i915_range, intel_forcewake_range};
 use npk_sys::Mmio;
@@ -109,6 +114,7 @@ pub extern "C" fn _start() {
         runtime: i915_drv::intel_device_info_driver_create(TGL_GT2),
         display: i915_drv::intel_display_device_probe(revision),
         uncore: intel_uncore::intel_uncore::new(regs),
+        irqs_enabled: false,
     };
 
     // i915_driver_early_probe
@@ -198,6 +204,22 @@ pub extern "C" fn _start() {
     Line::new().s("DRAM ").s(dram.type_name).s(", ").dec(dram.num_channels as u64).s(" channels, ")
         .dec(dram.num_qgv_points as u64).s(" QGV points, ").dec(dram.num_psf_gv_points as u64)
         .s(" PSF GV points").say();
+
+    // intel_display_driver_probe_noirq: power domains (the hardware init
+    // follows once icl_display_core_init is complete).
+    intel_display_power::intel_power_domains_init(&mut i915);
+    let pd = i915.display.power;
+    Line::new().s("power domains: ").dec(pd.power_well_count as u64).s(" wells, allowed DC mask ")
+        .hex(pd.allowed_dc_mask).s(", target DC state ").hex(pd.target_dc_state)
+        .s(", DC_STATE_EN ").hex(intel_de::intel_de_read(&mut i915, regs::DC_STATE_EN)).say();
+    let mut on = Line::new();
+    on.s("wells on:");
+    for w in 0..pd.power_well_count {
+        if intel_display_power::intel_power_well_is_enabled(&mut i915, w) {
+            on.s(" ").s(intel_display_power::power_well_name(&i915, w));
+        }
+    }
+    on.say();
 
     // Forcewake taken for register access is released by its timer; wait
     // for it, so the GT can enter RC6 once the module is gone.

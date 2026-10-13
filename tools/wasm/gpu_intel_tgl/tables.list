@@ -24,3 +24,8 @@ tgl_uy_steppings: u32
 intel_engines: engine_info { class, instance, ver0=mmio_bases[0].graphics_ver, base0=mmio_bases[0].base, ver1=mmio_bases[1].graphics_ver, base1=mmio_bases[1].base, ver2=mmio_bases[2].graphics_ver, base2=mmio_bases[2].base }
 @ display/intel_bios.c
 vbt_signature: u8
+@ display/intel_display_power_map.c
+tgl_power_wells[] / @.list[@.count] / @.instances->list[@.instances->count] => tgl_power_well_insts: power_well_inst { desc=n1, instance_idx=i2, name=e2.name as str, id=e2.id, hsw_idx=e2.hsw.idx, ops=e1.ops as sym, irq_pipe_mask=e1.irq_pipe_mask, always_on=e1.always_on, fixed_enable_delay=e1.fixed_enable_delay, has_vga=e1.has_vga, has_fuses=e1.has_fuses, is_tc_tbt=e1.is_tc_tbt, enable_timeout=e1.enable_timeout, domain_list=!e2.domain_list ? 0 : e2.domain_list->count == 0 ? 1 : 2 }
+tgl_power_wells[] / @.list[@.count] / @.instances->list[@.instances->count] / @.domain_list->list[@.domain_list ? @.domain_list->count : 0] => tgl_power_well_domains: power_well_domain { well=n2, domain=e3 }
+@ display/intel_combo_phy.c
+icl_procmon_values[] => icl_procmon_values: icl_procmon { name=e0.name as str, dw1=e0.dw1, dw9=e0.dw9, dw10=e0.dw10 }

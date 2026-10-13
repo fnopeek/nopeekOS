@@ -395,3 +395,90 @@ EIO
 CHILD_HPD_INVERT = bitfield(struct child_device_config, hpd_invert) @ display/intel_bios.c
 CHILD_HDMI_SUPPORT = bitfield(struct child_device_config, hdmi_support) @ display/intel_bios.c
 CHILD_DVO_PORT = bitfield(struct child_device_config, dvo_port) @ display/intel_bios.c
+# display power (display/intel_display_power.c, intel_display_power_well.c)
+DC_STATE_EN
+DC_STATE_DISABLE
+DC_STATE_EN_UPTO_DC5
+DC_STATE_EN_UPTO_DC6
+DC_STATE_EN_DC3CO
+DC_STATE_EN_DC9
+DC_STATE_EN_UPTO_DC5_DC6_MASK
+DC_STATE_DC3CO_STATUS
+SOUTH_DSPCLK_GATE_D
+PCH_DPMGUNIT_CLOCK_GATE_DISABLE
+PCH_DG1
+HSW_NDE_RSTWRN_OPT
+RESET_PCH_HANDSHAKE_ENABLE
+GEN11_CHICKEN_DCPR_2
+DCPR_CLEAR_MEMSTAT_DIS
+DCPR_SEND_RESP_IMM
+DCPR_MASK_LPMODE
+DCPR_MASK_MAXLATENCY_MEMUP_CLR
+HSW_PWR_WELL_CTL_REQ(pw_idx) samples 0 1 2 14 15
+HSW_PWR_WELL_CTL_STATE(pw_idx) samples 0 1 2 14 15
+SKL_FUSE_STATUS
+SKL_FUSE_PG_DIST_STATUS(pg) samples 0 1 2 3 4 5
+ICL_PW_CTL_IDX_PW_1
+SKL_PG0 @ display/intel_display_power_well.c
+SKL_PG1 @ display/intel_display_power_well.c
+DISP_PW_ID_NONE @ display/intel_display_power_well.c
+SKL_DISP_PW_1 @ display/intel_display_power_well.c
+SKL_DISP_DC_OFF @ display/intel_display_power_well.c
+POWER_DOMAIN_INIT @ display/intel_display_power.c
+POWER_DOMAIN_NUM @ display/intel_display_power.c
+HSW_PWR_WELL_REGS_BIOS = i915_mmio_reg_offset(hsw_power_well_regs.bios) @ display/intel_display_power_well.c
+HSW_PWR_WELL_REGS_DRIVER = i915_mmio_reg_offset(hsw_power_well_regs.driver) @ display/intel_display_power_well.c
+HSW_PWR_WELL_REGS_KVMR = i915_mmio_reg_offset(hsw_power_well_regs.kvmr) @ display/intel_display_power_well.c
+HSW_PWR_WELL_REGS_DEBUG = i915_mmio_reg_offset(hsw_power_well_regs.debug) @ display/intel_display_power_well.c
+ICL_AUX_PW_REGS_BIOS = i915_mmio_reg_offset(icl_aux_power_well_regs.bios) @ display/intel_display_power_well.c
+ICL_AUX_PW_REGS_DRIVER = i915_mmio_reg_offset(icl_aux_power_well_regs.driver) @ display/intel_display_power_well.c
+ICL_AUX_PW_REGS_KVMR = i915_mmio_reg_offset(icl_aux_power_well_regs.kvmr) @ display/intel_display_power_well.c
+ICL_AUX_PW_REGS_DEBUG = i915_mmio_reg_offset(icl_aux_power_well_regs.debug) @ display/intel_display_power_well.c
+ICL_DDI_PW_REGS_BIOS = i915_mmio_reg_offset(icl_ddi_power_well_regs.bios) @ display/intel_display_power_well.c
+ICL_DDI_PW_REGS_DRIVER = i915_mmio_reg_offset(icl_ddi_power_well_regs.driver) @ display/intel_display_power_well.c
+ICL_DDI_PW_REGS_KVMR = i915_mmio_reg_offset(icl_ddi_power_well_regs.kvmr) @ display/intel_display_power_well.c
+ICL_DDI_PW_REGS_DEBUG = i915_mmio_reg_offset(icl_ddi_power_well_regs.debug) @ display/intel_display_power_well.c
+TGL_PCODE_TCCOLD
+TGL_PCODE_EXIT_TCCOLD_DATA_L_BLOCK_REQ
+TGL_PCODE_EXIT_TCCOLD_DATA_L_UNBLOCK_REQ
+TGL_PCODE_EXIT_TCCOLD_DATA_L_EXIT_FAILED
+ENABLE_DC_DEFAULT = display_param(enable_dc) @ display/intel_display_params.c
+DISABLE_POWER_WELL_DEFAULT = display_param(disable_power_well) @ display/intel_display_params.c
+# combo PHY (display/intel_combo_phy.c, intel_combo_phy_regs.h)
+PHY_A @ display/intel_combo_phy.c
+PHY_B @ display/intel_combo_phy.c
+PHY_NONE @ display/intel_combo_phy.c
+I915_MAX_PHYS @ display/intel_combo_phy.c
+ICL_PORT_COMP_DW0(phy) samples 0 1 2 3
+ICL_PORT_COMP_DW1(phy) samples 0 1 2 3
+ICL_PORT_COMP_DW3(phy) samples 0 1 2 3
+ICL_PORT_COMP_DW8(phy) samples 0 1 2 3
+ICL_PORT_COMP_DW9(phy) samples 0 1 2 3
+ICL_PORT_COMP_DW10(phy) samples 0 1 2 3
+COMP_INIT
+IREFGEN
+PROCESS_INFO_MASK
+PROCESS_INFO_DOT_0
+PROCESS_INFO_DOT_1
+VOLTAGE_INFO_MASK
+VOLTAGE_INFO_0_85V
+VOLTAGE_INFO_0_95V
+VOLTAGE_INFO_1_05V
+ICL_PHY_MISC(phy) samples 0 1 2 3
+ICL_PHY_MISC_DE_IO_COMP_PWR_DOWN
+ICL_PORT_TX_DW8_LN(ln, phy) samples 0 1 2 3
+ICL_PORT_TX_DW8_GRP(phy) samples 0 1 2 3
+ICL_PORT_TX_DW8_ODCC_CLK_SEL
+ICL_PORT_TX_DW8_ODCC_CLK_DIV_SEL_MASK
+ICL_PORT_TX_DW8_ODCC_CLK_DIV_SEL_DIV2
+ICL_PORT_PCS_DW1_LN(ln, phy) samples 0 1 2 3
+ICL_PORT_PCS_DW1_GRP(phy) samples 0 1 2 3
+DCC_MODE_SELECT_MASK
+RUN_DCC_ONCE
+ICL_PORT_CL_DW5(phy) samples 0 1 2 3
+CL_POWER_DOWN_ENABLE
+PROCMON_0_85V_DOT_0 @ display/intel_combo_phy.c
+PROCMON_0_95V_DOT_0 @ display/intel_combo_phy.c
+PROCMON_0_95V_DOT_1 @ display/intel_combo_phy.c
+PROCMON_1_05V_DOT_0 @ display/intel_combo_phy.c
+PROCMON_1_05V_DOT_1 @ display/intel_combo_phy.c
