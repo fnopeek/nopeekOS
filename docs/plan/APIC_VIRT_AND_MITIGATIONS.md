@@ -140,3 +140,18 @@ has only the generated tables to go on — read its two boot lines.
 | IdeaPad | Ryzen 5 5500U (0x17) | IBPB on every exit, full RSB fill | expected: retbleed IBPB, retbleed SMT STIBP, SRSO IBPB, SMT_RSB | software (AVIC open) | 0.432 boot + LibreWolf |
 | Dev box (QEMU) | Ryzen 5 9600X (0x1A), nested | AutoIBRS, IBPB on exit for SRSO (BP_CFG is not written under a hypervisor) | expected: SRSO IBPB | software | 0.583 upload |
 | N100 | Gracemont (6, 0xBE) | — | expected: RFDS VERW if `RFDS_CLEAR`, BHI | — | not run |
+
+## Open: CR0.CD/NW on SVM
+
+VMX keeps CR0.CD/NW host-owned since 0.597.0 (KVM `KVM_VM_CR0_ALWAYS_OFF`,
+vmx.c:3329): Linux's MTRR/PAT rendezvous when a CPU comes online
+(`cache_ap_online` → `stop_machine_from_inactive_cpu`) sets CD on every CPU,
+and passing it to the hardware ran the guest uncached — NUC first frame
+2123 → 468 ms. SVM still passes CD/NW through (no CR intercepts at all; an
+AP even starts with hardware CR0 = 0x60000010). KVM (`svm_set_cr0`): hardware
+CR0 without CD/NW (`KVM_X86_QUIRK_CD_NW_CLEARED`), the selective CR0 write
+intercept always on, full CR0 read/write intercepts while the guest's value
+differs from the hardware's. The selective intercept fires on every PE/PG
+change too, so MOV CR0 must be emulated completely (EFER.LMA, TLB flush,
+decode assists for the GPR; CLTS/LMSW/SMSW). Boot path of every AMD guest:
+QEMU first. Not measured as slow on the IdeaPad (7 APs in ~0.65 s).
