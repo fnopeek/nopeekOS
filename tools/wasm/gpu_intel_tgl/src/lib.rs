@@ -17,6 +17,7 @@
 
 mod i915_drv;
 mod intel_bios;
+mod intel_bw;
 mod intel_cdclk;
 mod intel_combo_phy;
 mod intel_de;
@@ -25,6 +26,7 @@ mod intel_display_power;
 mod intel_dram;
 mod intel_engine;
 mod intel_ggtt;
+mod intel_gmbus;
 mod intel_gt;
 mod intel_opregion;
 mod intel_pch;
@@ -33,6 +35,7 @@ mod intel_reset;
 mod intel_uncore;
 mod linux;
 mod regs;
+mod skl_watermark;
 mod tables;
 
 use i915_drv::intel_step_info;
@@ -40,6 +43,7 @@ use intel_bios::{bdb_block, gmbus_pin};
 use intel_cdclk::intel_cdclk_vals;
 use intel_combo_phy::icl_procmon;
 use intel_display_power::{buddy_page_mask, power_well_domain, power_well_inst, power_well_inst_ops};
+use intel_gmbus::gmbus_pin_gpio;
 use intel_gt::engine_info;
 use intel_uncore::{i915_range, intel_forcewake_range};
 use npk_sys::Mmio;
@@ -182,6 +186,7 @@ pub extern "C" fn _start() {
     let _ = intel_pcode::intel_pcode_init();
     let dram = intel_dram::intel_dram_detect(&mut i915);
     i915.dram_info = dram;
+    intel_bw::intel_bw_init_hw(&mut i915);
 
     // intel_display_driver_probe_noirq, after intel_bios_init.
     intel_display_power::intel_power_domains_init(&mut i915);
@@ -190,11 +195,23 @@ pub extern "C" fn _start() {
     // stay disabled.
     let mut cd = i915.display.cdclk;
     let _ = intel_cdclk::intel_cdclk_init(&mut cd);
-    // intel_display_driver_probe_nogem
-    if cd.max_cdclk_freq == 0 {
-        intel_cdclk::intel_update_max_cdclk(&mut cd);
-    }
     i915.display.cdclk = cd;
+
+    // intel_display_driver_probe_nogem. intel_panel_sanitize_ssc only acts
+    // on IBX/CPT, intel_fdi_pll_freq_update and intel_update_czclk only on
+    // ILK/SNB/IVB and VLV/CHV.
+    skl_watermark::intel_wm_init(&mut i915);
+    // intel_pps_setup: HAS_PCH_SPLIT.
+    i915.display.pps_mmio_base = regs::PCH_PPS_BASE;
+    intel_gmbus::intel_gmbus_setup(&mut i915);
+    intel_display_driver_init_hw(&mut i915);
+    if i915.display.cdclk.max_cdclk_freq == 0 {
+        let mut cd = i915.display.cdclk;
+        intel_cdclk::intel_update_max_cdclk(&mut cd);
+        i915.display.cdclk = cd;
+    }
+    // intel_hti_init: Tiger Lake has no HTI.
+    const _: () = assert!(regs::TGL_DISPLAY_HAS_HTI == 0);
 
     Line::new().s("GGTT ").dec(ggtt.total >> 20).s(" MB, aperture ").hex((ggtt.gmadr_start >> 32) as u32)
         .s("_").hex(ggtt.gmadr_start as u32).s(" + ").dec(ggtt.mappable_end >> 20).s(" MB, ")
@@ -250,6 +267,18 @@ pub extern "C" fn _start() {
         i915.uncore.run_timers();
     }
     Line::new().s("forcewake held at exit: ").hex(i915.uncore.fw_domains_active).say();
+}
+
+/// `intel_display_driver_init_hw`: `intel_cdclk_read_hw`, then
+/// `xe_d_display_wa_apply` (Wa_14013723622).
+fn intel_display_driver_init_hw(i915: &mut i915_drv::drm_i915_private) {
+    if !i915.display.has_display {
+        return;
+    }
+    let mut cd = i915.display.cdclk;
+    intel_cdclk::intel_cdclk_read_hw(i915, &mut cd);
+    i915.display.cdclk = cd;
+    intel_de::intel_de_rmw(i915, regs::CLKREQ_POLICY, regs::CLKREQ_POLICY_MEM_UP_OVRD, 0);
 }
 
 fn report(i915: &i915_drv::drm_i915_private, gt: &intel_gt::intel_gt,

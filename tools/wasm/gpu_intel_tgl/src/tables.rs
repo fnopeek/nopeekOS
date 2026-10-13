@@ -453,3 +453,23 @@ pub static tgl_buddy_page_masks: [buddy_page_mask; 9] = [
     buddy_page_mask { page_mask: 0x38, ty: 0x7, num_channels: 0x4 },
     buddy_page_mask { page_mask: 0x0, ty: 0x0, num_channels: 0x0 },
 ];
+
+// display/intel_gmbus.c
+/// display/intel_gmbus.c: gmbus_pins_icp[]
+pub static gmbus_pins_icp_gpio: [gmbus_pin_gpio; 15] = [
+    gmbus_pin_gpio { valid: 0x0, gpio: 0x0 },
+    gmbus_pin_gpio { valid: 0x1, gpio: 0x1 },
+    gmbus_pin_gpio { valid: 0x1, gpio: 0x2 },
+    gmbus_pin_gpio { valid: 0x1, gpio: 0x3 },
+    gmbus_pin_gpio { valid: 0x0, gpio: 0x0 },
+    gmbus_pin_gpio { valid: 0x0, gpio: 0x0 },
+    gmbus_pin_gpio { valid: 0x0, gpio: 0x0 },
+    gmbus_pin_gpio { valid: 0x0, gpio: 0x0 },
+    gmbus_pin_gpio { valid: 0x0, gpio: 0x0 },
+    gmbus_pin_gpio { valid: 0x1, gpio: 0x9 },
+    gmbus_pin_gpio { valid: 0x1, gpio: 0xa },
+    gmbus_pin_gpio { valid: 0x1, gpio: 0xb },
+    gmbus_pin_gpio { valid: 0x1, gpio: 0xc },
+    gmbus_pin_gpio { valid: 0x1, gpio: 0xd },
+    gmbus_pin_gpio { valid: 0x1, gpio: 0xe },
+];

@@ -56,6 +56,18 @@ pub struct intel_display {
     pub cdclk: crate::intel_cdclk::intel_display_cdclk,
     /// `display->dbuf.enabled_slices`.
     pub dbuf_enabled_slices: u8,
+    pub bw: crate::intel_bw::intel_display_bw,
+    /// `display->sagv.status`, `display->sagv.block_time_us`.
+    pub sagv_status: u32,
+    pub sagv_block_time_us: u32,
+    /// `display->wm.num_levels`, `display->wm.skl_latency`.
+    pub wm_num_levels: usize,
+    pub wm_skl_latency: [u16; crate::skl_watermark::NUM_LATENCY],
+    /// `display->gmbus.mmio_base`, `display->gmbus.bus`.
+    pub gmbus_mmio_base: u32,
+    pub gmbus: [crate::intel_gmbus::intel_gmbus; crate::intel_gmbus::NUM_PINS],
+    /// `display->pps.mmio_base`.
+    pub pps_mmio_base: u32,
 }
 
 /// `struct drm_i915_private`, as far as this stage needs it.

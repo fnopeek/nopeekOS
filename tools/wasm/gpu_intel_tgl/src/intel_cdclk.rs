@@ -417,6 +417,14 @@ pub fn intel_cdclk_dump_config(cdclk_config: &intel_cdclk_config, context: &str)
         .dec(cdclk_config.voltage_level as u64).say();
 }
 
+/// `intel_cdclk_read_hw`.
+pub fn intel_cdclk_read_hw(i915: &mut drm_i915_private, cd: &mut intel_display_cdclk) {
+    intel_update_cdclk(i915, cd);
+    intel_cdclk_dump_config(&cd.hw, "Current CDCLK");
+    cd.obj.actual = cd.hw;
+    cd.obj.logical = cd.hw;
+}
+
 /// `intel_update_cdclk`.
 pub fn intel_update_cdclk(i915: &mut drm_i915_private, cd: &mut intel_display_cdclk) {
     let mut hw = cd.hw;

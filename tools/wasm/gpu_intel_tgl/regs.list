@@ -694,3 +694,35 @@ INTEL_DRAM_LPDDR3 @ soc/intel_dram.c
 INTEL_DRAM_LPDDR4 @ soc/intel_dram.c
 INTEL_DRAM_DDR5 @ soc/intel_dram.c
 INTEL_DRAM_LPDDR5 @ soc/intel_dram.c
+# bandwidth, watermarks, GMBUS, PPS (display/intel_bw.c, skl_watermark.c, intel_gmbus.c, intel_pps.c)
+ICL_PCODE_MEM_SS_READ_QGV_POINT_INFO(point) samples 0 1 2 7
+I915_NUM_QGV_POINTS @ display/intel_bw.c
+I915_NUM_PSF_GV_POINTS @ display/intel_bw.c
+BW_NUM_GROUPS = ARRAY_SIZE(((struct intel_display *)0)->bw.max) @ display/intel_bw.c
+DEPROGBWPCLIMIT @ display/intel_bw.c
+TGL_SA_DISPLAYRTIDS = tgl_sa_info.displayrtids @ display/intel_bw.c
+TGL_SA_DEBURST = tgl_sa_info.deburst @ display/intel_bw.c
+TGL_SA_DEPROGBWLIMIT = tgl_sa_info.deprogbwlimit @ display/intel_bw.c
+TGL_SA_DERATING = tgl_sa_info.derating @ display/intel_bw.c
+I915_SAGV_UNKNOWN @ display/skl_watermark.c
+I915_SAGV_DISABLED @ display/skl_watermark.c
+I915_SAGV_ENABLED @ display/skl_watermark.c
+I915_SAGV_NOT_CONTROLLED @ display/skl_watermark.c
+GEN12_PCODE_READ_SAGV_BLOCK_TIME_US
+GEN9_PCODE_READ_MEM_LATENCY
+GEN9_MEM_LATENCY_LEVEL_0_4_MASK
+GEN9_MEM_LATENCY_LEVEL_1_5_MASK
+GEN9_MEM_LATENCY_LEVEL_2_6_MASK
+GEN9_MEM_LATENCY_LEVEL_3_7_MASK
+WM_SKL_LATENCY_LEVELS = ARRAY_SIZE(((struct intel_display *)0)->wm.skl_latency) @ display/skl_watermark.c
+CLKREQ_POLICY
+CLKREQ_POLICY_MEM_UP_OVRD
+PCH_DISPLAY_BASE
+PCH_PPS_BASE @ display/intel_pps.c
+GMBUS_RATE_100KHZ @ display/intel_gmbus.c
+GMBUS_NUM_PINS = ARRAY_SIZE(((struct intel_display *)0)->gmbus.bus) @ display/intel_gmbus.c
+GMBUS0_PCH = ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GMBUS0(&d)); }) @ display/intel_gmbus.c
+GMBUS4_PCH = ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GMBUS4(&d)); }) @ display/intel_gmbus.c
+GPIO_PCH_BASE = ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GPIO(&d, 0)); }) @ display/intel_gmbus.c
+GPIO_PCH_STRIDE = ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GPIO(&d, 1)) - i915_mmio_reg_offset(GPIO(&d, 0)); }) @ display/intel_gmbus.c
+TGL_DISPLAY_HAS_HTI = tgl_desc.info->has_hti @ display/intel_display_device.c

@@ -40,3 +40,5 @@ direct_aux_ch_map: u8
 gmbus_pins_icp: gmbus_pin { valid=name != 0 }
 @ display/intel_display_power.c
 tgl_buddy_page_masks: buddy_page_mask { page_mask, ty=type, num_channels }
+@ display/intel_gmbus.c
+gmbus_pins_icp[] => gmbus_pins_icp_gpio: gmbus_pin_gpio { valid=e0.name != 0, gpio=e0.gpio }

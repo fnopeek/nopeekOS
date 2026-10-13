@@ -14,6 +14,8 @@ pub struct dram_info {
     pub num_channels: u32,
     pub num_qgv_points: u32,
     pub num_psf_gv_points: u32,
+    /// Only the gen9-11 DIMM decoding sets it.
+    pub has_16gb_dimms: bool,
 }
 
 /// `intel_dram_edram_detect`. The size computation (`gen9_edram_size_mb`)

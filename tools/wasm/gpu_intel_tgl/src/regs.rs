@@ -781,3 +781,37 @@ pub const INTEL_DRAM_LPDDR3: u32 = 0x4; // soc/intel_dram.h:20
 pub const INTEL_DRAM_LPDDR4: u32 = 0x5; // soc/intel_dram.h:21
 pub const INTEL_DRAM_DDR5: u32 = 0x6; // soc/intel_dram.h:22
 pub const INTEL_DRAM_LPDDR5: u32 = 0x7; // soc/intel_dram.h:23
+
+// bandwidth, watermarks, GMBUS, PPS (display/intel_bw.c, skl_watermark.c, intel_gmbus.c, intel_pps.c)
+/// i915_reg.h:1115
+pub const fn ICL_PCODE_MEM_SS_READ_QGV_POINT_INFO(point: u32) -> u32 { (((point) << 16) | (0x1 << 8)) }
+pub const I915_NUM_QGV_POINTS: u32 = 0x8; // display/intel_display_core.h:56
+pub const I915_NUM_PSF_GV_POINTS: u32 = 0x3; // display/intel_display_core.h:59
+pub const BW_NUM_GROUPS: u64 = 0x6; // ARRAY_SIZE(((struct intel_display *)0)->bw.max) in display/intel_bw.c
+pub const DEPROGBWPCLIMIT: u32 = 0x3c; // display/intel_bw.c:64
+pub const TGL_SA_DISPLAYRTIDS: u32 = 0x100; // tgl_sa_info.displayrtids in display/intel_bw.c
+pub const TGL_SA_DEBURST: u32 = 0x10; // tgl_sa_info.deburst in display/intel_bw.c
+pub const TGL_SA_DEPROGBWLIMIT: u32 = 0x22; // tgl_sa_info.deprogbwlimit in display/intel_bw.c
+pub const TGL_SA_DERATING: u32 = 0xa; // tgl_sa_info.derating in display/intel_bw.c
+pub const I915_SAGV_UNKNOWN: u32 = 0x0; // display/intel_display_core.h:539
+pub const I915_SAGV_DISABLED: u32 = 0x1; // display/intel_display_core.h:540
+pub const I915_SAGV_ENABLED: u32 = 0x2; // display/intel_display_core.h:541
+pub const I915_SAGV_NOT_CONTROLLED: u32 = 0x3; // display/intel_display_core.h:542
+pub const GEN12_PCODE_READ_SAGV_BLOCK_TIME_US: u32 = 0x23; // i915_reg.h:1170
+pub const GEN9_PCODE_READ_MEM_LATENCY: u32 = 0x6; // i915_reg.h:1101
+pub const GEN9_MEM_LATENCY_LEVEL_0_4_MASK: u32 = 0xff; // i915_reg.h:1105
+pub const GEN9_MEM_LATENCY_LEVEL_1_5_MASK: u32 = 0xff00; // i915_reg.h:1104
+pub const GEN9_MEM_LATENCY_LEVEL_2_6_MASK: u32 = 0xff0000; // i915_reg.h:1103
+pub const GEN9_MEM_LATENCY_LEVEL_3_7_MASK: u32 = 0xff000000; // i915_reg.h:1102
+pub const WM_SKL_LATENCY_LEVELS: u64 = 0x8; // ARRAY_SIZE(((struct intel_display *)0)->wm.skl_latency) in display/skl_watermark.c
+pub const CLKREQ_POLICY: u32 = 0x101038; // display/intel_display_regs.h:2906
+pub const CLKREQ_POLICY_MEM_UP_OVRD: u32 = 0x2; // display/intel_display_regs.h:2907
+pub const PCH_DISPLAY_BASE: u32 = 0xc0000; // display/intel_display_regs.h:1564
+pub const PCH_PPS_BASE: u32 = 0xc7200; // display/intel_pps_regs.h:14
+pub const GMBUS_RATE_100KHZ: u32 = 0x0; // display/intel_gmbus_regs.h:32
+pub const GMBUS_NUM_PINS: u64 = 0xf; // ARRAY_SIZE(((struct intel_display *)0)->gmbus.bus) in display/intel_gmbus.c
+pub const GMBUS0_PCH: u32 = 0xc5100; // ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GMBUS0(&d)); }) in display/intel_gmbus.c
+pub const GMBUS4_PCH: u32 = 0xc5110; // ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GMBUS4(&d)); }) in display/intel_gmbus.c
+pub const GPIO_PCH_BASE: u32 = 0xc5010; // ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GPIO(&d, 0)); }) in display/intel_gmbus.c
+pub const GPIO_PCH_STRIDE: u32 = 0x4; // ({ struct intel_display d = { .gmbus.mmio_base = PCH_DISPLAY_BASE }; i915_mmio_reg_offset(GPIO(&d, 1)) - i915_mmio_reg_offset(GPIO(&d, 0)); }) in display/intel_gmbus.c
+pub const TGL_DISPLAY_HAS_HTI: u32 = 0x0; // tgl_desc.info->has_hti in display/intel_display_device.c
