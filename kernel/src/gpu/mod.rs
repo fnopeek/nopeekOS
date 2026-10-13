@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 pub mod gop;
+mod stolen_ids;
 pub mod intel_xe;
 pub mod ggtt_layout;
 pub mod ggtt_slab;
@@ -448,4 +449,40 @@ pub fn next_log_name() -> alloc::string::String {
     } else {
         alloc::format!("gpu-log-{:03}", n)
     }
+}
+
+/// The Intel part of Linux's x86 early quirks (`intel_graphics_quirks`,
+/// `gen11_early_ops`): the integrated GPU's stolen memory is taken out of
+/// the frame allocator, whatever the firmware's map says. The GPU keeps
+/// its framebuffer and its own reserved area there; a frame handed out of
+/// it would be shared with the device. A firmware map that types any of it
+/// as RAM is reported, since frames from it may already be in use.
+pub fn reserve_intel_stolen() {
+    use crate::drivers::pci;
+    let dev = pci::PciAddr { bus: 0, device: 2, function: 0 };
+    let id = pci::read32(dev, 0x00);
+    if id & 0xffff != 0x8086 {
+        return;
+    }
+    let device = (id >> 16) as u16;
+    if !stolen_ids::GEN11_STOLEN_IDS.contains(&device) {
+        return;
+    }
+    // gen9_stolen_size. Names from include/drm/intel/i915_drm.h:
+    // SNB_GMCH_CTRL 0x50, BDW_GMCH_GMS_SHIFT 8, BDW_GMCH_GMS_MASK 0xff.
+    let gmch_ctrl = pci::read16(dev, 0x50);
+    let gms = ((gmch_ctrl >> 8) & 0xff) as u64;
+    let size = if gms < 0xf0 { gms * (32 << 20) } else { (gms - 0xf0) * (4 << 20) + (4 << 20) };
+    // gen11_stolen_base: INTEL_GEN11_BSM_DW0 0xc0 masked with
+    // INTEL_BSM_MASK, INTEL_GEN11_BSM_DW1 0xc4 as the upper half.
+    let base = (pci::read32(dev, 0xc0) & 0xfff0_0000) as u64 | (pci::read32(dev, 0xc4) as u64) << 32;
+    if size == 0 || base == 0 {
+        return;
+    }
+    if crate::mm::memory::firmware_ram_in(base, size) {
+        crate::kprintln!("[npk] GPU: stolen memory {:#x}+{} MB is RAM in the firmware map; reserving it now",
+            base, size >> 20);
+    }
+    crate::mm::memory::reserve_region(base, size);
+    crate::kdebug!("[npk] GPU: reserved stolen memory {:#x}+{} MB", base, size >> 20);
 }

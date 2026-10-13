@@ -289,6 +289,15 @@ pub fn deallocate_contiguous(base: u64, count: usize) {
     }
 }
 
+/// Whether any page of `[base, base + length)` is RAM in the firmware map
+/// (a type the allocator may hand out).
+pub fn firmware_ram_in(base: u64, length: u64) -> bool {
+    let map = FIRMWARE_MAP.lock();
+    map.regions[..map.count].iter().any(|&(b, l, t)| {
+        is_ram_type(t) && b < base.saturating_add(length) && base < b.saturating_add(l)
+    })
+}
+
 pub fn reserve_region(base: u64, length: u64) {
     ALLOCATOR.lock().mark_region_used(base, length);
 }
