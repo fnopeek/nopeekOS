@@ -892,6 +892,27 @@ pub fn flight_rx_wait(kind: u8, n: u64) {
     f.next = (i + 1) % FLIGHT_LEN;
 }
 
+/// The virtio-net device mutex waited for (`FLIGHT_LOCK_WAIT`) or held
+/// (`FLIGHT_LOCK_HELD`) over 2 ms, at `at`.
+pub const FLIGHT_LOCK_WAIT: u8 = 5;
+pub const FLIGHT_LOCK_HELD: u8 = 6;
+
+pub fn flight_lock(held: bool, tsc: u64, at: &'static core::panic::Location<'static>) {
+    if !FLIGHT_ON.load(AtOrd::Relaxed) { return; }
+    let ms = tsc / (crate::interrupts::tsc_freq() / 1000).max(1);
+    if ms < 2 { return; }
+    let p = at as *const core::panic::Location<'static> as u64;
+    let ev = FlightEv {
+        tsc: crate::interrupts::rdtsc(), seq: p as u32, ack: (p >> 32) as u32,
+        len: ms as u32, win: 0, hp: 0,
+        dir: if held { FLIGHT_LOCK_HELD } else { FLIGHT_LOCK_WAIT }, flags: 0, sack: false,
+    };
+    let mut f = FLIGHT.lock();
+    let i = f.next;
+    f.ev[i] = ev;
+    f.next = (i + 1) % FLIGHT_LEN;
+}
+
 /// `FLIGHT_LATE` with where the worker was: the step it entered last
 /// (`net_dataplane::PH_*`) and the cores of its previous and this pass.
 pub fn flight_worker_late(gap_ms: u64, phase: u64, prev_core: u64, core: u64) {
@@ -948,8 +969,18 @@ fn flight_dump(hp: u16, last: u64, now: u64, freq: u64) {
                 us(e.tsc), e.len),
             FLIGHT_LATE => kprintln!("[flight]   {:>8}us late  worker back after {} ms, frames waiting (was in {}, core {} -> {})",
                 us(e.tsc), e.len,
-                ["service", "tcp tick", "poll yield", "notify lock", "park"].get(e.seq as usize).unwrap_or(&"?"),
+                ["service", "tcp tick", "poll yield", "notify lock", "park", "notify-off lock"]
+                    .get(e.seq as usize).unwrap_or(&"?"),
                 e.ack >> 16, e.ack & 0xFFFF),
+            FLIGHT_LOCK_WAIT | FLIGHT_LOCK_HELD => {
+                // SAFETY: `flight_lock` stored a `&'static Location` from
+                // `#[track_caller]`; it lives for the whole kernel run.
+                let at = unsafe { &*((e.seq as u64 | (e.ack as u64) << 32)
+                    as *const core::panic::Location<'static>) };
+                kprintln!("[flight]   {:>8}us net lock {} {} ms at {}:{}", us(e.tsc),
+                    if e.dir == FLIGHT_LOCK_HELD { "held" } else { "waited" }, e.len,
+                    at.file(), at.line());
+            }
             d => kprintln!("[flight]   {:>8}us {} port={} len={} {}",
                 us(e.tsc), if d == 0 { "out" } else if d == 1 { "in " } else { "dlv" }, e.hp, e.len,
                 if e.flags & TCP_PSH != 0 { "P" } else { "" }),

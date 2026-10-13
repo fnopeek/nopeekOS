@@ -173,9 +173,39 @@ pub fn set_full_active(on: bool) { FULL_ACTIVE.store(on, Ordering::Release); }
 static NET: Mutex<VirtioNet> = Mutex::new(VirtioNet::new());
 
 /// Acquire the device for a multi-statement access (MMIO dispatch + service).
+/// With the flight recorder on, a wait or a hold over 2 ms is logged with
+/// the caller's location: vCPU exits spin on this mutex.
 #[inline]
-pub fn lock() -> MutexGuard<'static, VirtioNet> {
-    NET.lock()
+#[track_caller]
+pub fn lock() -> NetGuard {
+    let at = core::panic::Location::caller();
+    let t0 = crate::interrupts::rdtsc();
+    let g = NET.lock();
+    let since = crate::interrupts::rdtsc();
+    super::nat::flight_lock(false, since.wrapping_sub(t0), at);
+    NetGuard { g, since, at }
+}
+
+/// The device mutex, held; see `lock`.
+pub struct NetGuard {
+    g: MutexGuard<'static, VirtioNet>,
+    since: u64,
+    at: &'static core::panic::Location<'static>,
+}
+
+impl core::ops::Deref for NetGuard {
+    type Target = VirtioNet;
+    fn deref(&self) -> &VirtioNet { &self.g }
+}
+
+impl core::ops::DerefMut for NetGuard {
+    fn deref_mut(&mut self) -> &mut VirtioNet { &mut self.g }
+}
+
+impl Drop for NetGuard {
+    fn drop(&mut self) {
+        super::nat::flight_lock(true, crate::interrupts::rdtsc().wrapping_sub(self.since), self.at);
+    }
 }
 
 /// Lock-free BAR0 range check for the vCPU's NPF/EPT exit dispatch, so an

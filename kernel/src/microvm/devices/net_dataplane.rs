@@ -382,6 +382,7 @@ pub const PH_TICK: u64 = 1;
 pub const PH_POLL_YIELD: u64 = 2;
 pub const PH_NOTIFY_LOCK: u64 = 3;
 pub const PH_PARK: u64 = 4;
+pub const PH_NOTIFY_OFF_LOCK: u64 = 5;
 
 #[inline]
 fn phase(p: u64) { WORKER_PHASE.store(p, Ordering::Relaxed); }
@@ -608,6 +609,7 @@ fn worker_entry(_arg: u64) {
         if crate::microvm::devices::nat::recently_active() {
             // Polling: the guest need not kick TX — this loop reads the ring.
             if let Some(gm) = gm {
+                phase(PH_NOTIFY_OFF_LOCK);
                 crate::microvm::devices::net_backend::lock().tx_set_notify(gm, false);
             }
             let freq = crate::interrupts::tsc_freq();
