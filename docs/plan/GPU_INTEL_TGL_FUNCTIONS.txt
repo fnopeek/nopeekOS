@@ -79,14 +79,18 @@ N  2 vlv_suspend.c:475:6                           vlv_suspend_cleanup
 B  2 i915_driver.c:160:13                          i915_workqueues_cleanup
 B  2 i915_drv.h:350:32                             to_gt
 A  2 gt/intel_gt.c:858:12                          intel_gt_tile_setup
+A  2 soc/intel_gmch.c:24:5                         intel_gmch_bridge_setup
 A  2 intel_uncore.c:2503:5                         intel_uncore_init_mmio
+A  2 soc/intel_gmch.c:86:6                         intel_gmch_bar_setup
 A  2 intel_device_info.c:389:6                     intel_device_info_runtime_init
 A  2 display/intel_display_device.c:1918:6         intel_display_device_info_runtime_init
 A  2 gt/intel_gt.c:131:5                           intel_gt_init_mmio
+A  2 soc/intel_gmch.c:123:6                        intel_gmch_bar_teardown
 A  2 i915_driver.c:199:13                          sanitize_gpu
 N  2 i915_vgpu.c:117:6                             intel_vgpu_active
 N  2 i915_vgpu.c:122:6                             intel_vgpu_has_full_ppgtt
 N  2 i915_vgpu.c:127:6                             intel_vgpu_has_hwsp_emulation
+A  2 soc/intel_dram.c:794:6                        intel_dram_edram_detect
 A  2 i915_driver.c:380:12                          i915_set_dma_info
 A  2 gt/intel_ggtt.c:1562:5                        i915_ggtt_probe_hw
 A  2 gt/intel_ggtt.c:90:5                          i915_ggtt_init_hw
@@ -95,6 +99,7 @@ B  2 intel_memory_region.c:338:5                   intel_memory_regions_hw_probe
 A  2 gt/intel_ggtt.c:1596:5                        i915_ggtt_enable_hw
 A  2 display/intel_opregion.c:876:5                intel_opregion_setup
 A  2 i915_driver.c:436:12                          i915_pcode_init
+A  2 soc/intel_dram.c:729:5                        intel_dram_detect
 A  2 display/intel_bw.c:807:6                      intel_bw_init_hw
 A  2 display/intel_opregion.c:1275:6               intel_opregion_cleanup
 A  2 display/intel_bios.c:3198:6                   intel_bios_init
@@ -237,6 +242,7 @@ A  3 intel_uncore.h:204:1                          intel_uncore_has_forcewake
 A  3 intel_uncore.c:2382:13                        uncore_raw_init
 A  3 intel_uncore.c:2414:12                        uncore_forcewake_init
 A  3 intel_uncore.c:2816:6                         intel_uncore_unclaimed_mmio
+A  3 soc/intel_gmch.c:45:1                         intel_alloc_mchbar_resource
 A  3 display/intel_display_device.c:1750:13        __intel_display_device_info_runtime_init
 A  3 gt/intel_gt_clock_utils.c:172:6               intel_gt_init_clock_frequency
 A  3 gt/intel_sseu.c:632:6                         intel_sseu_info_init
@@ -245,6 +251,8 @@ A  3 gt/intel_engine_cs.c:953:5                    intel_engines_init_mmio
 B  3 i915_drv.h:350:32                             to_gt
 A  3 gt/intel_reset.c:1178:6                       intel_gt_gpu_reset_clobbers_display
 A  3 gt/intel_reset.c:1309:5                       intel_gt_reset_all_engines
+A  3 intel_uncore.h:347:1                          __raw_uncore_read32
+A  3 soc/intel_dram.c:784:12                       gen9_edram_size_mb
 A  3 gt/intel_gt.c:115:5                           intel_gt_assign_ggtt
 A  3 gt/intel_ggtt.c:1508:12                       ggtt_probe_hw
 B  3 i915_utils.c:50:6                             i915_vtd_active
@@ -256,6 +264,10 @@ A  3 gem/i915_gem_stolen.c:978:1                   i915_gem_stolen_smem_setup
 A  3 display/intel_opregion.c:798:13               swsci_setup
 A  3 display/intel_bios.c:3027:6                   intel_bios_is_valid_vbt
 A  3 intel_pcode.c:223:5                           intel_pcode_init
+A  3 display/intel_display_device.c:1960:6         intel_display_device_present
+A  3 soc/intel_dram.c:681:12                       gen12_get_dram_info
+A  3 soc/intel_dram.c:34:13                        intel_dram_type_str
+A  3 soc/intel_dram.c:777:25                       intel_dram_info
 A  3 display/intel_bw.c:534:12                     tgl_get_bw_info
 A  3 display/intel_bios.c:2918:1                   init_vbt_defaults
 A  3 display/intel_bios.c:3164:33                  intel_bios_get_vbt
@@ -534,6 +546,8 @@ A  4 gt/intel_gt_mcr.c:725:5                       intel_gt_mcr_read_any
 A  4 intel_uncore.h:397:1                          intel_uncore_read64
 B  4 i915_utils.c:59:6                             i915_direct_stolen_access
 A  4 display/intel_opregion.c:307:12               swsci
+A  4 soc/intel_dram.c:608:12                       icl_pcode_read_mem_global_info
+B  4 i915_drv.h:331:40                             to_i915
 A  4 display/intel_bw.c:256:12                     icl_get_qgv_points
 A  4 display/intel_bw.c:379:12                     icl_sagv_max_dclk
 A  4 display/intel_bw.c:369:12                     adl_calc_psf_bw
@@ -542,6 +556,7 @@ A  4 display/intel_bios.c:3071:27                  firmware_get_vbt
 A  4 display/intel_opregion.c:1149:13              intel_opregion_get_vbt
 B  4 display/intel_display_rpm.c:26:21             intel_display_rpm_get
 B  4 i915_drv.h:331:40                             to_i915
+A  4 soc/intel_rom.c:88:19                         intel_rom_pci
 A  4 display/intel_bios.c:3108:27                  oprom_get_vbt
 A  4 display/intel_display.c:1871:10               intel_port_to_phy
 A  4 display/intel_display.c:1841:6                intel_phy_is_tc
@@ -957,8 +972,14 @@ A  5 gt/intel_gt_mcr.c:284:12                      rw_with_mcr_steering
 A  5 gt/intel_gt_mcr.c:186:19                      mcr_reg_cast
 A  5 intel_uncore.c:1931:1                         fwtable_read64
 A  5 display/intel_opregion.c:275:12               check_swsci_function
+A  5 intel_pcode.c:278:5                           intel_pcode_read
 A  5 display/intel_bw.c:244:1                      intel_read_qgv_point_info
 A  5 display/intel_bw.c:145:12                     adls_pcode_read_psf_gv_point_info
+A  5 soc/intel_rom.c:137:8                         intel_rom_find
+A  5 soc/intel_rom.c:149:8                         intel_rom_size
+A  5 soc/intel_rom.c:117:5                         intel_rom_read16
+A  5 soc/intel_rom.c:122:6                         intel_rom_read_block
+A  5 soc/intel_rom.c:154:6                         intel_rom_free
 A  5 display/intel_bios.c:100:1                    find_raw_section
 A  5 display/intel_bios.c:367:14                   generate_lfp_data_ptrs
 A  5 display/intel_bios.c:318:13                   fixup_lfp_data_ptrs
@@ -1493,6 +1514,7 @@ A  6 intel_uncore.c:321:1                          fw_domains_get_with_fallback
 A  6 display/intel_de.h:77:1                       intel_de_write
 A  6 display/intel_de.h:21:1                       intel_de_read
 B  6 i915_drv.h:331:40                             to_i915
+A  6 soc/intel_dram.c:237:14                       intel_fsb_freq
 A  6 intel_uncore.h:374:1                          intel_uncore_read
 A  6 gt/intel_gt_clock_utils.c:14:12               read_reference_ts_freq
 A  6 gt/intel_gt_clock_utils.c:31:12               gen11_get_crystal_clock_freq
@@ -1518,8 +1540,11 @@ A  6 gem/i915_gem_stolen.c:510:12                  i915_gem_init_stolen
 A  6 gt/intel_sseu.h:141:1                         intel_sseu_find_first_xehp_dss
 A  6 gt/intel_gt_mcr.c:207:12                      rw_with_mcr_steering_fw
 A  6 intel_uncore.h:348:1                          __raw_uncore_read64
+B  6 i915_drv.h:331:40                             to_i915
+A  6 intel_pcode.c:96:5                            snb_pcode_read
 A  6 display/intel_bw.c:117:12                     icl_pcode_read_qgv_point_info
-A  6 intel_pcode.c:278:5                           intel_pcode_read
+A  6 soc/intel_rom.c:77:13                         pci_read_block
+A  6 soc/intel_rom.c:83:13                         pci_free
 A  6 display/intel_bios.c:347:12                   make_lfp_data_ptr
 A  6 display/intel_bios.c:359:13                   next_lfp_data_ptr
 A  6 display/intel_bios.c:134:12                   raw_block_offset
@@ -1559,7 +1584,6 @@ A  6 display/intel_de.h:67:1                       intel_de_posting_read
 A  6 display/intel_display_power.c:469:1           async_put_domains_clear_domain
 A  6 display/intel_display_power_well.c:192:5      intel_power_well_refcount
 A  6 display/intel_bw.c:754:21                     tgl_max_bw_index
-B  6 i915_drv.h:331:40                             to_i915
 A  6 intel_pcode.c:159:5                           skl_pcode_request
 A  6 display/intel_display_power.c:605:1           __intel_display_power_put_domain
 A  6 display/intel_display_power.c:360:13          __async_put_domains_mask
@@ -1841,7 +1865,6 @@ A  6 gt/intel_rc6.c:51:33                          rc6_to_i915
 A  6 gt/intel_rc6.c:41:25                          rc6_to_gt
 A  6 intel_uncore.h:352:1                          __raw_uncore_write32
 A  6 gt/intel_rps.c:1178:6                         gen6_rps_get_freq_caps
-A  6 intel_pcode.c:96:5                            snb_pcode_read
 B  6 gem/i915_gem_object.h:189:19                  i915_gem_object_lock
 A  6 gt/intel_engine_cs.c:1042:12                  pin_ggtt_status_page
 B  6 i915_vma.h:320:20                             i915_vma_unpin
@@ -2083,6 +2106,7 @@ A  7 gem/i915_gem_stolen.c:84:12                   adjust_stolen
 A  7 gem/i915_gem_stolen.c:141:12                  request_smem_stolen
 A  7 gem/i915_gem_stolen.c:444:12                  init_reserved_stolen
 A  7 intel_uncore.h:352:1                          __raw_uncore_write32
+A  7 intel_pcode.c:56:12                           __snb_pcode_rw
 A  7 display/intel_bios.c:2339:18                  __dvo_port_to_port
 A  7 intel_uncore.h:380:1                          intel_uncore_write
 A  7 intel_uncore.h:374:1                          intel_uncore_read
@@ -2421,7 +2445,6 @@ B  7 i915_gem_evict.c:41:13                        dying_vma
 B  7 gem/i915_gem_object.h:211:20                  i915_gem_object_unlock
 B  7 gem/i915_gem_object.h:134:1                   i915_gem_object_get
 A  7 gt/intel_rps.c:1135:1                         __gen6_rps_get_freq_caps
-A  7 intel_pcode.c:56:12                           __snb_pcode_rw
 B  7 gem/i915_gem_object.h:163:19                  __i915_gem_object_lock
 B  7 i915_vma.h:314:20                             __i915_vma_unpin
 A  7 gt/intel_workarounds.c:2196:1                 engine_fake_wa_init
@@ -2619,6 +2642,9 @@ A  8 intel_uncore.h:447:20                         intel_uncore_rmw_fw
 B  8 intel_memory_region.c:36:12                   __iopagetest
 A  8 gem/i915_gem_stolen.c:79:13                   valid_stolen_size
 A  8 gem/i915_gem_stolen.c:379:13                  icl_get_stolen_reserved
+A  8 intel_uncore.h:347:1                          __raw_uncore_read32
+A  8 intel_uncore.h:352:1                          __raw_uncore_write32
+A  8 intel_pcode.c:31:12                           gen7_check_mailbox_status
 A  8 intel_uncore.h:436:19                         intel_uncore_rmw
 A  8 display/intel_dmc_wl.c:425:6                  intel_dmc_wl_flush_release_work
 A  8 display/intel_display_power.c:2563:1          intel_display_power_legacy_aux_domain
@@ -2922,9 +2948,6 @@ A  8 gt/intel_rps.c:44:33                          rps_to_i915
 A  8 gt/intel_rps.c:1106:12                        intel_rps_read_state_cap
 B  8 i915_drv.h:350:32                             to_gt
 A  8 intel_uncore.h:374:1                          intel_uncore_read
-A  8 intel_uncore.h:347:1                          __raw_uncore_read32
-A  8 intel_uncore.h:352:1                          __raw_uncore_write32
-A  8 intel_pcode.c:31:12                           gen7_check_mailbox_status
 B  8 gem/i915_gem_object.h:134:1                   i915_gem_object_get
 A  8 gt/intel_workarounds.c:323:1                  wa_masked_field_set
 A  8 gt/intel_workarounds.c:2722:1                 add_render_compute_tuning_settings

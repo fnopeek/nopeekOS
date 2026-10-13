@@ -38,7 +38,7 @@ python3 tools/linux-callgraph.py --dir ~/.cache/nopeekos/i915-callgraph/linux-6.
     i915_driver_probe gen11_irq_handler heartbeat retire_work_handler \
     execlists_timeslice execlists_preempt \
     --prune 'intel_display_|^intel_power_domains|^intel_dmc|^intel_bios|^intel_opregion|^i915_driver_register$|guc|huc|gsc|pxp|perf|pmu' \
-    --prune-file '^(display/|\./\./display|gt/uc/|\./\./gt/uc/|pxp/|\./\./pxp|gvt/|i915_perf|i915_pmu|i915_debugfs|i915_hwmon|i915_gpu_error|soc/|gt/.*debugfs|i915_gsc|gt/intel_gsc|i915_sysfs|gt/sysfs|gt/intel_gt_sysfs|i915_hdcp|i915_ioc32|gt/selftest|selftests/|i915_trace)' \
+    --prune-file '^(\./\./display/intel_display_trace|display/intel_display_trace|display/intel_display_debugfs|display/.*debugfs|display/intel_hdcp|display/intel_audio|display/intel_fbdev|gt/uc/|\./\./gt/uc/|pxp/|\./\./pxp|gvt/|i915_perf|i915_pmu|i915_debugfs|i915_hwmon|i915_gpu_error|gt/.*debugfs|i915_gsc|gt/intel_gsc|i915_sysfs|gt/sysfs|gt/intel_gt_sysfs|i915_hdcp|i915_ioc32|gt/selftest|selftests/|i915_trace)' \
     --follow-file tools/gpu_intel_tgl.follow --classes tools/gpu_intel_tgl.classes [--list]
 ```
 
@@ -183,6 +183,16 @@ DDI-Encoder (Combo A/B, Type-C TC1–6), DPLLs (Combo, TBT, DKL),
 Type-C-PHY, Power-Wells, Ebenen, HDMI-Infoframes, Hotplug, und fuer eDP
 (laeuft, wenn die VBT ein Panel nennt) Backlight, PPS und Panel-Typ.
 
+**`soc/` gehoert dazu (Korrektur 2026-10-13):** `intel_dram_detect`,
+`intel_dram_edram_detect` und `intel_gmch` laufen in
+`i915_driver_hw_probe` und lesen Speicherdaten ueber den MCHBAR-Spiegel
+(die Display-Bandbreite rechnet damit), `intel_rom.c` liest die VBT aus dem
+Option-ROM, wenn die OpRegion keine hat. Die erste Fassung hatte `soc/`
+ganz ausgeschlossen; jetzt Klasse A, +20 Funktionen. Die OpRegion selbst
+(`intel_opregion_setup`, VBT, SWSCI) liegt in ACPI-NVS und ist mit
+`npk_mmio_map_phys` erreichbar — die Adresse steht im ASLS-Register der
+Karte.
+
 **Quirks:** keiner greift auf dem NUC — `intel_quirks[]` hat keinen Eintrag
 fuer `0x9a78` und keinen fuer alle Geraete, die DMI-Quirks nennen NCR,
 Thundersoft und Google Lillipup, die DPCD-Quirks zwei Dell-Geraete.
@@ -195,10 +205,10 @@ Thundersoft und Google Lillipup, die DPCD-Quirks zwei Dell-Geraete.
 
 | Klasse | fn |
 |---|---|
-| **A** gesamt | **2602** |
+| **A** gesamt | **2624** |
 | davon GT + Kern | 1117 |
 | davon Display | 1485 (groesste: `intel_de.h` 159, `intel_bios.c` 106, `intel_display.c` 91, `intel_ddi.c` 72, `intel_dp.c` 69, `intel_tc.c` 68, `intel_fb.c` 59, Power-Wells 97, `intel_pps.c` 44, CDCLK 43, DPLL 36, DMC 28) |
-| B | 1086 |
+| B | 1087 |
 | N | 30 |
 
 `GPU_INTEL_TGL_FUNCTIONS.txt` und `GPU_INTEL_TGL_TREE.txt` beschreiben seit

@@ -59,3 +59,5 @@ A @can_use_semaphore_wait
 # Bookkeeping files first, since the first match wins.
 B ^display/(intel_display_rpm|intel_frontbuffer|intel_fb_bo|intel_bo|intel_display_conversion|intel_display_types\.h|intel_display_trace)
 A ^(\./\./)?display/
+# soc/: DRAM info and the VBT from the option ROM, read from the hardware.
+A ^(\./\./)?soc/
