@@ -333,8 +333,125 @@ fn intel_pch_reset_handshake(i915: &mut drm_i915_private, enable: bool) {
     intel_de_rmw(i915, reg, reset_bits, if enable { reset_bits } else { 0 });
 }
 
-/// `icl_display_core_init`, the steps before the combo PHYs: DC states
-/// off, Wa_14011294188, the PCH reset handshake.
+/// `gen9_dbuf_slice_set`.
+fn gen9_dbuf_slice_set(i915: &mut drm_i915_private, slice: u32, enable: bool) {
+    let reg = DBUF_CTL_S(slice);
+    intel_de_rmw(i915, reg, DBUF_POWER_REQUEST, if enable { DBUF_POWER_REQUEST } else { 0 });
+    intel_de_read(i915, reg);
+    linux::udelay(10);
+
+    let state = intel_de_read(i915, reg) & DBUF_POWER_STATE != 0;
+    if enable != state {
+        Line::new().s("DBuf slice ").dec(slice as u64).s(" power ")
+            .s(if enable { "enable" } else { "disable" }).s(" timeout!").say();
+    }
+}
+
+/// `for_each_dbuf_slice`.
+fn dbuf_slices() -> impl Iterator<Item = u32> {
+    (DBUF_S1..I915_MAX_DBUF_SLICES).filter(|s| TGL_DISPLAY_DBUF_SLICE_MASK & (1 << s) != 0)
+}
+
+/// `gen9_dbuf_slices_update`.
+pub fn gen9_dbuf_slices_update(i915: &mut drm_i915_private, req_slices: u8) {
+    let slice_mask = TGL_DISPLAY_DBUF_SLICE_MASK as u8;
+    if req_slices & !slice_mask != 0 {
+        Line::new().s("Invalid set of dbuf slices (").hex(req_slices as u32)
+            .s(") requested (total dbuf slices ").hex(slice_mask as u32).s(")").say();
+    }
+    for slice in dbuf_slices() {
+        gen9_dbuf_slice_set(i915, slice, req_slices as u32 & (1 << slice) != 0);
+    }
+    i915.display.dbuf_enabled_slices = req_slices;
+}
+
+/// `intel_enabled_dbuf_slices_mask` (skl_watermark.c).
+pub fn intel_enabled_dbuf_slices_mask(i915: &mut drm_i915_private) -> u8 {
+    let mut enabled_slices = 0u8;
+    for slice in dbuf_slices() {
+        if intel_de_read(i915, DBUF_CTL_S(slice)) & DBUF_POWER_STATE != 0 {
+            enabled_slices |= 1 << slice;
+        }
+    }
+    enabled_slices
+}
+
+/// `gen9_dbuf_enable`: power up at least one slice; which ones are needed
+/// is decided later.
+fn gen9_dbuf_enable(i915: &mut drm_i915_private) {
+    i915.display.dbuf_enabled_slices = intel_enabled_dbuf_slices_mask(i915);
+    let slices_mask = (1 << DBUF_S1) as u8 | i915.display.dbuf_enabled_slices;
+    gen9_dbuf_slices_update(i915, slices_mask);
+}
+
+/// `gen12_dbuf_slices_config`.
+fn gen12_dbuf_slices_config(i915: &mut drm_i915_private) {
+    for slice in dbuf_slices() {
+        intel_de_rmw(i915, DBUF_CTL_S(slice), DBUF_TRACKER_STATE_SERVICE_MASK, DBUF_TRACKER_STATE_SERVICE(8));
+    }
+}
+
+/// `icl_mbus_init` (display version 12).
+fn icl_mbus_init(i915: &mut drm_i915_private) {
+    let mut abox_regs = TGL_DISPLAY_ABOX_MASK;
+    let mask = MBUS_ABOX_BT_CREDIT_POOL1_MASK | MBUS_ABOX_BT_CREDIT_POOL2_MASK
+        | MBUS_ABOX_B_CREDIT_MASK | MBUS_ABOX_BW_CREDIT_MASK;
+    let val = MBUS_ABOX_BT_CREDIT_POOL1(16) | MBUS_ABOX_BT_CREDIT_POOL2(16)
+        | MBUS_ABOX_B_CREDIT(1) | MBUS_ABOX_BW_CREDIT(1);
+
+    // Display version 12 reads pixel data through abox1 and abox2 and
+    // still expects abox_ctl0 to be programmed.
+    abox_regs |= 1 << 0;
+
+    let regs = [MBUS_ABOX_CTL_0, MBUS_ABOX_CTL_1, MBUS_ABOX_CTL_2];
+    for i in 0..32 {
+        if abox_regs & (1 << i) != 0 {
+            intel_de_rmw(i915, regs[i], mask, val);
+        }
+    }
+}
+
+/// `struct buddy_page_mask`.
+#[derive(Clone, Copy)]
+pub struct buddy_page_mask {
+    pub page_mask: u32,
+    pub ty: u32,
+    pub num_channels: u32,
+}
+
+/// `tgl_bw_buddy_init` (integrated, not ADL-S or RKL A0).
+fn tgl_bw_buddy_init(i915: &mut drm_i915_private) {
+    let dram_info = i915.dram_info;
+    let table = &tables::tgl_buddy_page_masks;
+    let abox_mask = TGL_DISPLAY_ABOX_MASK;
+
+    let mut config = 0;
+    while table[config].page_mask != 0 {
+        if table[config].num_channels == dram_info.num_channels && table[config].ty == dram_info.ty {
+            break;
+        }
+        config += 1;
+    }
+
+    if table[config].page_mask == 0 {
+        linux::say("Unknown memory configuration; disabling address buddy logic.");
+        for i in 0..32 {
+            if abox_mask & (1 << i) != 0 {
+                intel_de_write(i915, BW_BUDDY_CTL(i), BW_BUDDY_DISABLE);
+            }
+        }
+    } else {
+        for i in 0..32 {
+            if abox_mask & (1 << i) != 0 {
+                intel_de_write(i915, BW_BUDDY_PAGE_MASK(i), table[config].page_mask);
+                // Wa_22010178259:tgl,dg1,rkl,adl-s
+                intel_de_rmw(i915, BW_BUDDY_CTL(i), BW_BUDDY_TLB_REQ_TIMER_MASK, BW_BUDDY_TLB_REQ_TIMER(0x8));
+            }
+        }
+    }
+}
+
+/// `icl_display_core_init` (display version 12, integrated, not DG2).
 fn icl_display_core_init(i915: &mut drm_i915_private, pch_type: i32, _resume: bool) {
     gen9_set_dc_state(i915, DC_STATE_DISABLE);
 
@@ -349,13 +466,57 @@ fn icl_display_core_init(i915: &mut drm_i915_private, pch_type: i32, _resume: bo
     if !i915.display.has_display {
         return;
     }
+
+    // 2. Initialize all combo phys
+    crate::intel_combo_phy::intel_combo_phy_init(i915);
+
+    // 3. Enable Power Well 1 (PG1). The AUX IO power wells are enabled on
+    // demand.
+    let well = lookup_power_well(i915, SKL_DISP_PW_1);
+    intel_power_well_enable(i915, well);
+
+    // 4. Enable CDCLK.
+    let mut cd = i915.display.cdclk;
+    crate::intel_cdclk::intel_cdclk_init_hw(i915, &mut cd);
+    i915.display.cdclk = cd;
+
+    gen12_dbuf_slices_config(i915);
+
+    // 5. Enable DBUF.
+    gen9_dbuf_enable(i915);
+
+    // 6. Setup MBUS.
+    icl_mbus_init(i915);
+
+    // 7. Program arbiter BW_BUDDY registers
+    tgl_bw_buddy_init(i915);
+
+    // Wa_14011508470:tgl,dg1,rkl,adl-s,adl-p,dg2
+    intel_de_rmw(i915, GEN11_CHICKEN_DCPR_2, 0,
+                 DCPR_CLEAR_MEMSTAT_DIS | DCPR_SEND_RESP_IMM | DCPR_MASK_LPMODE
+                     | DCPR_MASK_MAXLATENCY_MEMUP_CLR);
 }
 
-/// `intel_power_domains_init_hw`, display version 11 and up, up to the
-/// point that is ported.
+/// `intel_power_domains_init_hw` (display version 11 and up). The wells of
+/// `POWER_DOMAIN_INIT` stay referenced until the display readout is done.
 pub fn intel_power_domains_init_hw(i915: &mut drm_i915_private, pch_type: i32, resume: bool) {
     i915.display.power.initializing = true;
+
     icl_display_core_init(i915, pch_type, resume);
+
+    if i915.display.power.init_wakeref {
+        linux::say("warning: init wakeref already held");
+    }
+    intel_display_power_get(i915, POWER_DOMAIN_INIT);
+    i915.display.power.init_wakeref = true;
+
+    // Disable power support if the user asked so.
+    if i915.display.params.disable_power_well == 0 {
+        intel_display_power_get(i915, POWER_DOMAIN_INIT);
+        i915.display.power.disable_wakeref = true;
+    }
+    intel_power_domains_sync_hw(i915);
+
     i915.display.power.initializing = false;
 }
 
@@ -705,9 +866,55 @@ fn gen9_dc_off_power_well_enabled(i915: &mut drm_i915_private) -> bool {
         && intel_de_read(i915, DC_STATE_EN) & DC_STATE_EN_UPTO_DC5_DC6_MASK == 0
 }
 
-/// `gen9_dc_off_power_well_enable` → `gen9_disable_dc_states`.
-fn gen9_dc_off_power_well_enable(_i915: &mut drm_i915_private) {
-    linux::say("warning: gen9_disable_dc_states needs the cdclk and dbuf state, not ported yet");
+/// `tgl_disable_dc3co`.
+fn tgl_disable_dc3co(i915: &mut drm_i915_private) {
+    intel_de_rmw(i915, DC_STATE_EN, DC_STATE_DC3CO_STATUS, 0);
+    gen9_set_dc_state(i915, DC_STATE_DISABLE);
+    // Delay of 200us DC3CO Exit time B.Spec 49196
+    linux::udelay(200);
+}
+
+/// `gen9_assert_dbuf_enabled`.
+fn gen9_assert_dbuf_enabled(i915: &mut drm_i915_private) {
+    let hw_enabled_dbuf_slices = intel_enabled_dbuf_slices_mask(i915);
+    let enabled_dbuf_slices = i915.display.dbuf_enabled_slices;
+    if hw_enabled_dbuf_slices != enabled_dbuf_slices {
+        Line::new().s("Unexpected DBuf power power state (").hex(hw_enabled_dbuf_slices as u32)
+            .s(", expected ").hex(enabled_dbuf_slices as u32).s(")").say();
+    }
+}
+
+/// `gen9_disable_dc_states` (display version 12; the DMC wakelock is
+/// only used from version 20 on).
+pub fn gen9_disable_dc_states(i915: &mut drm_i915_private) {
+    if i915.display.power.target_dc_state == DC_STATE_EN_DC3CO {
+        tgl_disable_dc3co(i915);
+        return;
+    }
+
+    if !i915.display.has_display {
+        gen9_set_dc_state(i915, DC_STATE_DISABLE);
+        return;
+    }
+    gen9_set_dc_state(i915, DC_STATE_DISABLE);
+
+    let mut cdclk_config = crate::intel_cdclk::intel_cdclk_config::default();
+    crate::intel_cdclk::intel_cdclk_get_cdclk(i915, &mut cdclk_config);
+    // The voltage level cannot be read out, so only the clocks are compared.
+    if crate::intel_cdclk::intel_cdclk_clock_changed(&i915.display.cdclk.hw, &cdclk_config) {
+        linux::say("warning: CDCLK changed while DC states were enabled");
+    }
+
+    gen9_assert_dbuf_enabled(i915);
+
+    // The DMC keeps the HW context of port A only; combo PHY B loses it
+    // across DC transitions.
+    crate::intel_combo_phy::intel_combo_phy_init(i915);
+}
+
+/// `gen9_dc_off_power_well_enable`.
+fn gen9_dc_off_power_well_enable(i915: &mut drm_i915_private) {
+    gen9_disable_dc_states(i915);
 }
 
 /// `gen9_dc_off_power_well_disable`: without a DMC payload the DC states

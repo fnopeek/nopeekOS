@@ -439,3 +439,17 @@ pub static gmbus_pins_icp: [gmbus_pin; 15] = [
     gmbus_pin { valid: 0x1 },
     gmbus_pin { valid: 0x1 },
 ];
+
+// display/intel_display_power.c
+/// display/intel_display_power.c:1592
+pub static tgl_buddy_page_masks: [buddy_page_mask; 9] = [
+    buddy_page_mask { page_mask: 0xf, ty: 0x3, num_channels: 0x1 },
+    buddy_page_mask { page_mask: 0xf, ty: 0x6, num_channels: 0x1 },
+    buddy_page_mask { page_mask: 0x1c, ty: 0x5, num_channels: 0x2 },
+    buddy_page_mask { page_mask: 0x1c, ty: 0x7, num_channels: 0x2 },
+    buddy_page_mask { page_mask: 0x1f, ty: 0x3, num_channels: 0x2 },
+    buddy_page_mask { page_mask: 0x1e, ty: 0x6, num_channels: 0x2 },
+    buddy_page_mask { page_mask: 0x38, ty: 0x5, num_channels: 0x4 },
+    buddy_page_mask { page_mask: 0x38, ty: 0x7, num_channels: 0x4 },
+    buddy_page_mask { page_mask: 0x0, ty: 0x0, num_channels: 0x0 },
+];

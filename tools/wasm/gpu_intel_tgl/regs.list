@@ -660,3 +660,37 @@ CHILD_DP_IBOOST_LEVEL = bitfield(struct child_device_config, dp_iboost_level) @ 
 CHILD_HDMI_IBOOST_LEVEL = bitfield(struct child_device_config, hdmi_iboost_level) @ display/intel_bios.c
 CHILD_DP_MAX_LINK_RATE = bitfield(struct child_device_config, dp_max_link_rate) @ display/intel_bios.c
 CHILD_EDP_DATA_RATE_OVERRIDE = bitfield(struct child_device_config, edp_data_rate_override) @ display/intel_bios.c
+# DBUF, MBUS, BW_BUDDY (display/intel_display_power.c, skl_watermark.c)
+DBUF_CTL_S(slice) samples 0 1 2 3
+DBUF_POWER_REQUEST
+DBUF_POWER_STATE
+DBUF_TRACKER_STATE_SERVICE_MASK
+DBUF_TRACKER_STATE_SERVICE(x) samples 0 1 8 31
+DBUF_S1 @ display/intel_display_power.c
+I915_MAX_DBUF_SLICES @ display/intel_display_power.c
+TGL_DISPLAY_DBUF_SLICE_MASK = tgl_desc.info->dbuf.slice_mask @ display/intel_display_device.c
+TGL_DISPLAY_ABOX_MASK = tgl_desc.info->abox_mask @ display/intel_display_device.c
+MBUS_ABOX_CTL_0 = i915_mmio_reg_offset(MBUS_ABOX_CTL(0)) @ display/intel_display_power.c
+MBUS_ABOX_CTL_1 = i915_mmio_reg_offset(MBUS_ABOX_CTL(1)) @ display/intel_display_power.c
+MBUS_ABOX_CTL_2 = i915_mmio_reg_offset(MBUS_ABOX_CTL(2)) @ display/intel_display_power.c
+MBUS_ABOX_BT_CREDIT_POOL1_MASK
+MBUS_ABOX_BT_CREDIT_POOL2_MASK
+MBUS_ABOX_B_CREDIT_MASK
+MBUS_ABOX_BW_CREDIT_MASK
+MBUS_ABOX_BT_CREDIT_POOL1(x) samples 0 1 16 31
+MBUS_ABOX_BT_CREDIT_POOL2(x) samples 0 1 16 31
+MBUS_ABOX_B_CREDIT(x) samples 0 1 15
+MBUS_ABOX_BW_CREDIT(x) samples 0 1 3
+BW_BUDDY_CTL(i) samples 0 1 2
+BW_BUDDY_PAGE_MASK(i) samples 0 1 2
+BW_BUDDY_DISABLE
+BW_BUDDY_TLB_REQ_TIMER_MASK
+BW_BUDDY_TLB_REQ_TIMER(x) samples 0 1 8 63
+INTEL_DRAM_UNKNOWN @ soc/intel_dram.c
+INTEL_DRAM_DDR2 @ soc/intel_dram.c
+INTEL_DRAM_DDR3 @ soc/intel_dram.c
+INTEL_DRAM_DDR4 @ soc/intel_dram.c
+INTEL_DRAM_LPDDR3 @ soc/intel_dram.c
+INTEL_DRAM_LPDDR4 @ soc/intel_dram.c
+INTEL_DRAM_DDR5 @ soc/intel_dram.c
+INTEL_DRAM_LPDDR5 @ soc/intel_dram.c

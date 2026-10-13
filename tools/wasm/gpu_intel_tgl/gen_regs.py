@@ -65,6 +65,7 @@ HEADERS = [
     "display/intel_display_regs.h", "display/intel_display_device.h",
     "display/intel_pch.h", "display/intel_display_limits.h", "display/intel_fbc.h",
     "intel_pci_config.h", "drm/intel/i915_drm.h", "display/intel_combo_phy_regs.h",
+    "display/skl_watermark_regs.h",
 ]
 
 # The kernel build's flags (drivers/gpu/drm/i915/.intel_uncore.o.cmd),
@@ -207,7 +208,51 @@ PLAIN_BITS = """
 #define REG_GENMASK(h, l) (((~0u) >> (31 - (h))) & ((~0u) << (l)))
 #undef BIT
 #define BIT(n) (1u << (n))
+#undef REG_FIELD_PREP
+#define REG_FIELD_PREP(mask, value) __NPK_PREP((mask), (value))
 """
+
+
+def call_args(e, name):
+    """(start, end, [args]) of each call `name(...)` in e, outermost first."""
+    out, i = [], 0
+    while True:
+        i = e.find(name + "(", i)
+        if i < 0:
+            return out
+        j, depth, args, cur = i + len(name) + 1, 1, [], ""
+        while depth:
+            c = e[j]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if not depth:
+                    break
+            if c == "," and depth == 1:
+                args.append(cur)
+                cur = ""
+            else:
+                cur += c
+            j += 1
+        args.append(cur)
+        out.append((i, j + 1, [a.strip() for a in args]))
+        i = j + 1
+
+
+def field_prep(e):
+    """`REG_FIELD_PREP(mask, value)` with a constant mask: GCC folds the
+    mask, the shift is its lowest set bit."""
+    while True:
+        calls = call_args(e, "__NPK_PREP")
+        if not calls:
+            return e
+        a, b, (mask, value) = calls[0]
+        m = values({"m": mask})["m"]
+        if m == 0:
+            return None
+        shift = (m & -m).bit_length() - 1
+        e = e[:a] + f"((({value}) << {shift}) & {m:#x})" + e[b:]
 
 
 def expand(text, plain=False):
@@ -271,6 +316,10 @@ def c_to_rust(expr, params):
     parentheses. Anything else (casts, `?:`, `sizeof`, calls) means the
     macro is more than an address and is ported by hand."""
     e = expr
+    if "__NPK_PREP" in e:
+        e = field_prep(e)
+        if e is None:
+            return None
     for t in ("i915_reg_t", "i915_mcr_reg_t"):
         e = re.sub(r"^\(\(const " + t + r"\)\{ \.reg = (.*) \}\)$", r"\1", e)
     e = re.sub(r"\b(0x[0-9a-fA-F]+|\d+)[uUlL]+\b", r"\1", e)

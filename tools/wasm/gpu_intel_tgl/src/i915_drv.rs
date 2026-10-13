@@ -53,6 +53,9 @@ pub struct intel_display {
     pub power: crate::intel_display_power::i915_power_domains,
     /// `intel_dmc_has_payload`: no DMC firmware is loaded by this port.
     pub dmc_has_payload: bool,
+    pub cdclk: crate::intel_cdclk::intel_display_cdclk,
+    /// `display->dbuf.enabled_slices`.
+    pub dbuf_enabled_slices: u8,
 }
 
 /// `struct drm_i915_private`, as far as this stage needs it.
@@ -64,6 +67,8 @@ pub struct drm_i915_private {
     pub uncore: intel_uncore,
     /// `intel_irqs_enabled`.
     pub irqs_enabled: bool,
+    /// `i915->dram_info`.
+    pub dram_info: crate::intel_dram::dram_info,
 }
 
 const BITS_PER_U32: u32 = 32;

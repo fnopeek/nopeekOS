@@ -737,3 +737,47 @@ pub const CHILD_DP_IBOOST_LEVEL: Bitfield = Bitfield { byte: 37, shift: 0, width
 pub const CHILD_HDMI_IBOOST_LEVEL: Bitfield = Bitfield { byte: 37, shift: 4, width: 4 }; // struct child_device_config.hdmi_iboost_level in display/intel_bios.c
 pub const CHILD_DP_MAX_LINK_RATE: Bitfield = Bitfield { byte: 38, shift: 0, width: 3 }; // struct child_device_config.dp_max_link_rate in display/intel_bios.c
 pub const CHILD_EDP_DATA_RATE_OVERRIDE: Bitfield = Bitfield { byte: 40, shift: 0, width: 12 }; // struct child_device_config.edp_data_rate_override in display/intel_bios.c
+
+// DBUF, MBUS, BW_BUDDY (display/intel_display_power.c, skl_watermark.c)
+/// display/skl_watermark_regs.h:58
+pub const fn DBUF_CTL_S(slice: u32) -> u32 { ((pick([0x45008, 0x44FE8, 0x44300, 0x44304], slice))) }
+pub const DBUF_POWER_REQUEST: u32 = 0x80000000; // display/skl_watermark_regs.h:63
+pub const DBUF_POWER_STATE: u32 = 0x40000000; // display/skl_watermark_regs.h:64
+pub const DBUF_TRACKER_STATE_SERVICE_MASK: u32 = 0xf80000; // display/skl_watermark_regs.h:65
+/// display/skl_watermark_regs.h:66
+pub const fn DBUF_TRACKER_STATE_SERVICE(x: u32) -> u32 { ((((x)) << 19) & 0xf80000) }
+pub const DBUF_S1: u32 = 0x0; // display/intel_display_power.h:290
+pub const I915_MAX_DBUF_SLICES: u32 = 0x4; // display/intel_display_power.h:294
+pub const TGL_DISPLAY_DBUF_SLICE_MASK: u32 = 0x3; // tgl_desc.info->dbuf.slice_mask in display/intel_display_device.c
+pub const TGL_DISPLAY_ABOX_MASK: u32 = 0x6; // tgl_desc.info->abox_mask in display/intel_display_device.c
+pub const MBUS_ABOX_CTL_0: u32 = 0x45038; // i915_mmio_reg_offset(MBUS_ABOX_CTL(0)) in display/intel_display_power.c
+pub const MBUS_ABOX_CTL_1: u32 = 0x45048; // i915_mmio_reg_offset(MBUS_ABOX_CTL(1)) in display/intel_display_power.c
+pub const MBUS_ABOX_CTL_2: u32 = 0x4504c; // i915_mmio_reg_offset(MBUS_ABOX_CTL(2)) in display/intel_display_power.c
+pub const MBUS_ABOX_BT_CREDIT_POOL1_MASK: u32 = 0x1f; // display/intel_display_regs.h:110
+pub const MBUS_ABOX_BT_CREDIT_POOL2_MASK: u32 = 0x1f00; // display/intel_display_regs.h:108
+pub const MBUS_ABOX_B_CREDIT_MASK: u32 = 0xf0000; // display/intel_display_regs.h:106
+pub const MBUS_ABOX_BW_CREDIT_MASK: u32 = 0x300000; // display/intel_display_regs.h:104
+/// display/intel_display_regs.h:111
+pub const fn MBUS_ABOX_BT_CREDIT_POOL1(x: u32) -> u32 { ((x) << 0) }
+/// display/intel_display_regs.h:109
+pub const fn MBUS_ABOX_BT_CREDIT_POOL2(x: u32) -> u32 { ((x) << 8) }
+/// display/intel_display_regs.h:107
+pub const fn MBUS_ABOX_B_CREDIT(x: u32) -> u32 { ((x) << 16) }
+/// display/intel_display_regs.h:105
+pub const fn MBUS_ABOX_BW_CREDIT(x: u32) -> u32 { ((x) << 20) }
+/// display/intel_display_regs.h:1497
+pub const fn BW_BUDDY_CTL(i: u32) -> u32 { (((0x45130) + (i) * ((0x45140) - (0x45130)))) }
+/// display/intel_display_regs.h:1506
+pub const fn BW_BUDDY_PAGE_MASK(i: u32) -> u32 { (((0x45134) + (i) * ((0x45144) - (0x45134)))) }
+pub const BW_BUDDY_DISABLE: u32 = 0x80000000; // display/intel_display_regs.h:1500
+pub const BW_BUDDY_TLB_REQ_TIMER_MASK: u32 = 0x3f0000; // display/intel_display_regs.h:1501
+/// display/intel_display_regs.h:1502
+pub const fn BW_BUDDY_TLB_REQ_TIMER(x: u32) -> u32 { ((((x)) << 16) & 0x3f0000) }
+pub const INTEL_DRAM_UNKNOWN: u32 = 0x0; // soc/intel_dram.h:16
+pub const INTEL_DRAM_DDR2: u32 = 0x1; // soc/intel_dram.h:17
+pub const INTEL_DRAM_DDR3: u32 = 0x2; // soc/intel_dram.h:18
+pub const INTEL_DRAM_DDR4: u32 = 0x3; // soc/intel_dram.h:19
+pub const INTEL_DRAM_LPDDR3: u32 = 0x4; // soc/intel_dram.h:20
+pub const INTEL_DRAM_LPDDR4: u32 = 0x5; // soc/intel_dram.h:21
+pub const INTEL_DRAM_DDR5: u32 = 0x6; // soc/intel_dram.h:22
+pub const INTEL_DRAM_LPDDR5: u32 = 0x7; // soc/intel_dram.h:23

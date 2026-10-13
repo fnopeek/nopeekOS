@@ -8,6 +8,8 @@ use crate::regs::*;
 /// `struct dram_info`, as `icl_pcode_read_mem_global_info` fills it.
 #[derive(Clone, Copy, Default)]
 pub struct dram_info {
+    /// `enum intel_dram_type`.
+    pub ty: u32,
     pub type_name: &'static str,
     pub num_channels: u32,
     pub num_qgv_points: u32,
@@ -29,13 +31,13 @@ fn icl_pcode_read_mem_global_info(i915: &mut drm_i915_private, info: &mut dram_i
     let mut val = 0u32;
     intel_pcode::snb_pcode_read(i915, ICL_PCODE_MEM_SUBSYSYSTEM_INFO | ICL_PCODE_MEM_SS_READ_GLOBAL_INFO,
                                 &mut val, None)?;
-    info.type_name = match val & 0xf {
-        0 => "DDR4",
-        1 => "DDR5",
-        2 => "LPDDR5",
-        3 => "LPDDR4",
-        4 => "DDR3",
-        5 => "LPDDR3",
+    (info.ty, info.type_name) = match val & 0xf {
+        0 => (INTEL_DRAM_DDR4, "DDR4"),
+        1 => (INTEL_DRAM_DDR5, "DDR5"),
+        2 => (INTEL_DRAM_LPDDR5, "LPDDR5"),
+        3 => (INTEL_DRAM_LPDDR4, "LPDDR4"),
+        4 => (INTEL_DRAM_DDR3, "DDR3"),
+        5 => (INTEL_DRAM_LPDDR3, "LPDDR3"),
         other => {
             Line::new().s("warning: missing case DRAM type ").dec(other as u64).say();
             return Err(-(EINVAL as i32));

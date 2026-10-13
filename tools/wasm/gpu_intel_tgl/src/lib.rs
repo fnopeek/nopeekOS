@@ -39,7 +39,7 @@ use i915_drv::intel_step_info;
 use intel_bios::{bdb_block, gmbus_pin};
 use intel_cdclk::intel_cdclk_vals;
 use intel_combo_phy::icl_procmon;
-use intel_display_power::{power_well_domain, power_well_inst, power_well_inst_ops};
+use intel_display_power::{buddy_page_mask, power_well_domain, power_well_inst, power_well_inst_ops};
 use intel_gt::engine_info;
 use intel_uncore::{i915_range, intel_forcewake_range};
 use npk_sys::Mmio;
@@ -119,6 +119,7 @@ pub extern "C" fn _start() {
         display: i915_drv::intel_display_device_probe(revision),
         uncore: intel_uncore::intel_uncore::new(regs),
         irqs_enabled: false,
+        dram_info: Default::default(),
     };
 
     // i915_driver_early_probe
@@ -144,13 +145,8 @@ pub extern "C" fn _start() {
     intel_gmch_bar_setup();
     let mut drt = intel_display_device::tgl_runtime_defaults();
     intel_display_device::intel_display_device_info_runtime_init(&mut i915, &mut drt, pch_type);
-    // intel_init_cdclk_hooks, intel_cdclk_init and the readout of
-    // intel_display_driver_probe_nogem; nothing is programmed here.
-    let mut cdclk = intel_cdclk::intel_init_cdclk_hooks();
-    let _ = intel_cdclk::intel_cdclk_init(&mut cdclk);
-    intel_cdclk::intel_update_cdclk(&mut i915, &mut cdclk);
-    intel_cdclk::intel_cdclk_dump_config(&cdclk.hw, "Current CDCLK");
-    intel_cdclk::intel_update_max_cdclk(&mut cdclk);
+    // intel_display_driver_early_probe: intel_init_cdclk_hooks.
+    i915.display.cdclk = intel_cdclk::intel_init_cdclk_hooks();
     intel_gt::intel_gt_init_mmio(&mut i915, &mut gt);
     // sanitize_gpu
     if !intel_reset::intel_gt_gpu_reset_clobbers_display() {
@@ -185,6 +181,20 @@ pub extern "C" fn _start() {
     intel_bios::intel_bios_init(&mut display, opregion.as_ref());
     let _ = intel_pcode::intel_pcode_init();
     let dram = intel_dram::intel_dram_detect(&mut i915);
+    i915.dram_info = dram;
+
+    // intel_display_driver_probe_noirq, after intel_bios_init.
+    intel_display_power::intel_power_domains_init(&mut i915);
+    intel_display_power::intel_power_domains_init_hw(&mut i915, pch_type, false);
+    // intel_dmc_init: no DMC firmware is shipped yet, so the DC states
+    // stay disabled.
+    let mut cd = i915.display.cdclk;
+    let _ = intel_cdclk::intel_cdclk_init(&mut cd);
+    // intel_display_driver_probe_nogem
+    if cd.max_cdclk_freq == 0 {
+        intel_cdclk::intel_update_max_cdclk(&mut cd);
+    }
+    i915.display.cdclk = cd;
 
     Line::new().s("GGTT ").dec(ggtt.total >> 20).s(" MB, aperture ").hex((ggtt.gmadr_start >> 32) as u32)
         .s("_").hex(ggtt.gmadr_start as u32).s(" + ").dec(ggtt.mappable_end >> 20).s(" MB, ")
@@ -218,13 +228,11 @@ pub extern "C" fn _start() {
         .dec(dram.num_qgv_points as u64).s(" QGV points, ").dec(dram.num_psf_gv_points as u64)
         .s(" PSF GV points").say();
 
-    // intel_display_driver_probe_noirq: power domains (the hardware init
-    // follows once icl_display_core_init is complete).
-    intel_display_power::intel_power_domains_init(&mut i915);
     let pd = i915.display.power;
-    Line::new().s("power domains: ").dec(pd.power_well_count as u64).s(" wells, allowed DC mask ")
-        .hex(pd.allowed_dc_mask).s(", target DC state ").hex(pd.target_dc_state)
-        .s(", DC_STATE_EN ").hex(intel_de::intel_de_read(&mut i915, regs::DC_STATE_EN)).say();
+    Line::new().s("power domains: allowed DC mask ").hex(pd.allowed_dc_mask).s(", target ")
+        .hex(pd.target_dc_state).s(", DC_STATE_EN ").hex(intel_de::intel_de_read(&mut i915, regs::DC_STATE_EN))
+        .s(", dbuf slices ").hex(i915.display.dbuf_enabled_slices as u32)
+        .s(", max CDCLK ").dec(i915.display.cdclk.max_cdclk_freq as u64).s(" kHz").say();
     let mut on = Line::new();
     on.s("wells on:");
     for w in 0..pd.power_well_count {

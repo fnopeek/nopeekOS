@@ -49,6 +49,7 @@ pub struct intel_cdclk_state {
 }
 
 /// The `cdclk` member of `struct intel_display`.
+#[derive(Clone, Copy, Default)]
 pub struct intel_display_cdclk {
     pub hw: intel_cdclk_config,
     pub table: &'static [intel_cdclk_vals],
