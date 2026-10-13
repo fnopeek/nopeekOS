@@ -116,3 +116,27 @@ Linux does, which skip unmodified components.
 
 `npkbench_vm`: "others running" within ~1.5× of "alone"; upload fast with
 `npkscudo=off` → remove the switch.
+
+## Stage 4 — the remaining Linux mitigations
+
+`cpu_vulns.rs` ports `cpu_set_bug_bits`; its vendor tables are generated
+from Linux (`tools/gen_cpu_vulns.py <linux-src>`, rerun on every Linux
+bump). `spec_mitigations::report_bugs` decides VERW (MDS, TAA, RFDS with
+`RFDS_CLEAR`, MMIO with MDS/TAA; TSA with `VERW_CLEAR` on AMD), the L1D
+flush (L1TF, KVM `always`), legacy IBRS (retbleed Intel without eIBRS) and
+STIBP (SMT AMD with IBPB for retbleed). The boot line `[npk] cpu bugs:`
+names every affected bug with what covers it, or `NOT MITIGATED`. Known
+open by design: ITS on parts that are not `ITS_NATIVE_ONLY` (Linux needs
+thunks there), and any bug whose microcode is missing.
+
+## Verified hardware
+
+What a machine reports, and whether it was measured. A CPU that is not here
+has only the generated tables to go on — read its two boot lines.
+
+| Machine | CPU | `guest isolation` | `cpu bugs` | APICv/AVIC | Measured |
+|---|---|---|---|---|---|
+| NUC | Tiger Lake (6, 0x8C) | eIBRS + BHB clearing, one RSB entry | expected: BHI, PBRSB, GDS microcode, ITS host only | APICv on | 0.591–0.592: vmbench, upload |
+| IdeaPad | Ryzen 5 5500U (0x17) | IBPB on every exit, full RSB fill | expected: retbleed IBPB, retbleed SMT STIBP, SRSO IBPB, SMT_RSB | software (AVIC open) | 0.432 boot + LibreWolf |
+| Dev box (QEMU) | Ryzen 5 9600X (0x1A), nested | AutoIBRS (BP_CFG not written under a hypervisor) | expected: SRSO | software | 0.583 upload |
+| N100 | Gracemont (6, 0xBE) | — | expected: RFDS VERW if `RFDS_CLEAR`, BHI | — | not run |
