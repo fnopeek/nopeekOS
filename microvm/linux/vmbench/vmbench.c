@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 static int ncpu;
+static int self_cpu;
 static atomic_int stop;
 
 static uint64_t now_ns(void) {
@@ -57,14 +58,15 @@ static pthread_t helpers[256];
 
 static void start_helpers(void *(*fn)(void *)) {
     atomic_store(&stop, 0);
-    for (int c = 1; c < ncpu && c < 256; c++)
-        pthread_create(&helpers[c], NULL, fn, (void *)(intptr_t)c);
+    for (int c = 0; c < ncpu && c < 256; c++)
+        if (c != self_cpu) pthread_create(&helpers[c], NULL, fn, (void *)(intptr_t)c);
     usleep(20000);
 }
 
 static void stop_helpers(void) {
     atomic_store(&stop, 1);
-    for (int c = 1; c < ncpu && c < 256; c++) pthread_join(helpers[c], NULL);
+    for (int c = 0; c < ncpu && c < 256; c++)
+        if (c != self_cpu) pthread_join(helpers[c], NULL);
 }
 
 static void bench_syscall(void) {
@@ -80,6 +82,21 @@ static void bench_clock(void) {
     uint64_t t0 = now_ns();
     for (int i = 0; i < n; i++) clock_gettime(CLOCK_MONOTONIC, &ts);
     report("clock_gettime", (double)(now_ns() - t0) / n, "call");
+}
+
+// CPUID always exits under VMX and SVM: one guest/host round trip.
+static void bench_exit(int cpu) {
+    const int n = 200000;
+    pin(cpu);
+    uint64_t t0 = now_ns();
+    for (int i = 0; i < n; i++) {
+        unsigned a = 0, b, c = 0, d;
+        __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    }
+    char name[40];
+    snprintf(name, sizeof name, "VM exit (cpuid) on cpu%d", cpu);
+    report(name, (double)(now_ns() - t0) / n, "exit");
+    pin(self_cpu);
 }
 
 static void bench_fault(void) {
@@ -213,6 +230,8 @@ int main(void) {
     pin(0);
     bench_syscall();
     bench_clock();
+    bench_exit(0);
+    if (ncpu > 1) bench_exit(ncpu - 1);
     bench_fault();
     bench_memcpy();
     bench_sleep();
@@ -231,6 +250,15 @@ int main(void) {
         stop_helpers();
         bench_futex(1);
         bench_futex(ncpu - 1);
+        // The same shootdowns sent from the last CPU instead of cpu0.
+        self_cpu = ncpu - 1;
+        pin(self_cpu);
+        start_helpers(spinner);
+        bench_unmap("unmap, others running, from last");
+        bench_mprotect("mprotect pair, others, from last");
+        stop_helpers();
+        self_cpu = 0;
+        pin(0);
     }
     printf("[vmbench] done\n");
     return 0;
