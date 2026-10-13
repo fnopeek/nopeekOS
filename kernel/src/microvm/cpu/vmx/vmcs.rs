@@ -1238,7 +1238,13 @@ pub(super) unsafe fn run_guest_once(
             "mov rcx, [rsp + 8]",           // host_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",
-            "xsave64 [rcx]",                // save host FPU
+            "cmp byte ptr [rip + XSAVEOPT_OK], 0",
+            "je 61f",
+            "xsaveopt64 [rcx]",
+            "jmp 62f",
+            "61:",
+            "xsave64 [rcx]",
+            "62:",                // save host FPU
             "mov rcx, [rsp + 0]",           // guest_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",
@@ -1301,7 +1307,13 @@ pub(super) unsafe fn run_guest_once(
             "mov rcx, [rsp + 0]",           // guest_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",
-            "xsave64 [rcx]",                // save guest FPU
+            "cmp byte ptr [rip + XSAVEOPT_OK], 0",
+            "je 63f",
+            "xsaveopt64 [rcx]",
+            "jmp 64f",
+            "63:",
+            "xsave64 [rcx]",
+            "64:",                // save guest FPU
             "mov rcx, [rsp + 8]",           // host_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",
@@ -1386,7 +1398,13 @@ pub(super) unsafe fn run_guest_once(
             "mov rcx, [rsp + 120]",         // guest_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",
-            "xsave64 [rcx]",                // save guest FPU
+            "cmp byte ptr [rip + XSAVEOPT_OK], 0",
+            "je 65f",
+            "xsaveopt64 [rcx]",
+            "jmp 66f",
+            "65:",
+            "xsave64 [rcx]",
+            "66:",                // save guest FPU
             "mov rcx, [rsp + 128]",         // host_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",

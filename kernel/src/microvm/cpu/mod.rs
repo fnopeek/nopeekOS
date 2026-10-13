@@ -164,6 +164,23 @@ pub fn set_bench_marks(on: bool) {
     BENCH_MARKS.store(on, Ordering::Relaxed);
 }
 
+/// One XSAVEOPT64 + XRSTOR64 of an area restored just before, in ns.
+fn xsaveopt_pair_ns() -> u64 {
+    let mut area = FpuArea::boxed();
+    let p = area.0.as_mut_ptr();
+    const N: u64 = 2000;
+    let t0 = crate::interrupts::rdtsc();
+    for _ in 0..N {
+        // SAFETY: as in `xsave_pair_ns`; only used where CPUID reports XSAVEOPT.
+        unsafe {
+            core::arch::asm!("xsaveopt64 [{p}]", "xrstor64 [{p}]", p = in(reg) p,
+                in("eax") 0xFFFF_FFFFu32, in("edx") 0xFFFF_FFFFu32, options(nostack));
+        }
+    }
+    let cyc = crate::interrupts::rdtsc().wrapping_sub(t0);
+    cyc * 1000 / (crate::interrupts::tsc_freq() / 1_000_000).max(1) / N
+}
+
 /// One XSAVE64 + XRSTOR64 of every XCR0 component, in ns: the exit asm
 /// does two such pairs.
 fn xsave_pair_ns() -> u64 {
@@ -191,6 +208,9 @@ pub fn bench_mark(vcpu: u8) {
     if !BENCH_XSAVE_SHOWN.swap(true, Ordering::Relaxed) {
         crate::kprintln!("[vmbench-host] host xsave64+xrstor64, all components: {} ns per pair (an exit does two)",
             xsave_pair_ns());
+        if XSAVEOPT_OK.load(Ordering::Relaxed) {
+            crate::kprintln!("[vmbench-host] host xsaveopt64+xrstor64: {} ns per pair (in use)", xsaveopt_pair_ns());
+        }
     }
     let us = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
     let mut prev = BENCH_PREV.lock();
@@ -570,6 +590,12 @@ pub static IBPB_ON_EXIT: AtomicBool = AtomicBool::new(false);
 #[unsafe(no_mangle)]
 pub static CLEAR_BHB_ON_EXIT: AtomicBool = AtomicBool::new(false);
 
+/// Read by both FPU swaps of `run_guest_once`: save with XSAVEOPT, which
+/// skips the components unchanged since the area was last restored, as
+/// Linux `os_xsave` does (CPUID 0xD.1 EAX[0]).
+#[unsafe(no_mangle)]
+pub static XSAVEOPT_OK: AtomicBool = AtomicBool::new(false);
+
 /// Read by the entry path of `run_guest_once` (both vendors): `verw` right
 /// before VMRESUME/VMLAUNCH/VMRUN (`spec_mitigations::verw_on_entry`).
 #[unsafe(no_mangle)]
@@ -604,6 +630,9 @@ fn arm_exit_mitigations() {
     let rsb = if on { crate::spec_mitigations::RSB_FULL } else { crate::spec_mitigations::rsb_fill_on_exit() };
     RSB_FILL_ON_EXIT.store(rsb, Ordering::Release);
     VERW_ON_ENTRY.store(crate::spec_mitigations::verw_on_entry(), Ordering::Release);
+    let xsaveopt = core::arch::x86_64::__cpuid_count(0xD, 1).eax & 1 != 0
+        && crate::config::get("microvm_xsaveopt").is_none_or(|v| v.trim() != "off");
+    XSAVEOPT_OK.store(xsaveopt, Ordering::Release);
     L1D_FLUSH_ON_ENTRY.store(crate::spec_mitigations::l1d_flush_on_entry(), Ordering::Release);
     crate::kprintln!("[microvm] IBPB on VM exit: {}{}{}", if on { "on" } else { "off" },
         if forced.is_some() { " (config)" } else { "" },
