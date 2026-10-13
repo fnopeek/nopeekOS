@@ -18,7 +18,10 @@ would be a second semantics waiting to drift, so nothing here evaluates C:
 
 Names come from regs.list, one per line: `NAME` for a constant, `NAME(a, b)`
 for a parameterised register (`NAME(a) samples 0 1 7` checks it at
-those arguments instead of the register-base defaults, for a bit index), `NAME @ file.c` for a constant a .c file
+those arguments instead of the register-base defaults, for a bit index;
+`NAME(display, t) at TRANSCODER_A TRANSCODER_B` is a register whose offset
+comes from the display info's offset tables, evaluated at tgl_desc for the
+listed arguments only), `NAME @ file.c` for a constant a .c file
 defines (it is compiled with that file), `NAME : str [@ file.c]` for a
 string literal, `NAME = bitfield(struct T, field) @ file.c` for where a
 bit-field sits (byte, shift, width), `NAME = expr @ file.c` for a value
@@ -35,13 +38,16 @@ the generator only fills in GCC's values, in source order. A nested table
 `outer[] / @.member[@.count] / ... => name: RustType { field=expr, ... }`,
 see walk_table. A `static`
 array declared inside a function is named `func::name: type` and read off
-the data GCC emits for it.
+the data GCC emits for it; one of structs is
+`func::name: RustType = struct T { field, field=member.path }`.
 
 The tree is ~/.cache/nopeekos/i915-work: the include/, arch/x86/include/
-and drivers/gpu/drm/i915/ parts of the linux-6.18.55 tarball, plus the
+and drivers/gpu/drm/i915/ parts of the linux-6.18.55 tarball and
+drivers/gpu/drm/drm_fourcc.c (the format table), plus the
 generated headers of a build configured with CONFIG_DRM_I915=m (kb/). See
 docs/plan/GPU_INTEL_LINUX_MAP.md.
 """
+import base64
 import os
 import re
 import subprocess
@@ -66,7 +72,9 @@ HEADERS = [
     "display/intel_pch.h", "display/intel_display_limits.h", "display/intel_fbc.h",
     "intel_pci_config.h", "drm/intel/i915_drm.h", "display/intel_combo_phy_regs.h",
     "display/skl_watermark_regs.h", "display/intel_dkl_phy_regs.h", "display/intel_mg_phy_regs.h",
-    "display/intel_hti_regs.h", "display/intel_dp_aux_regs.h",
+    "display/intel_hti_regs.h", "display/intel_dp_aux_regs.h", "display/skl_universal_plane_regs.h",
+    "display/intel_cursor_regs.h", "display/intel_color_regs.h", "display/intel_vrr_regs.h",
+    "display/intel_vdsc_regs.h", "display/intel_pfit_regs.h",
 ]
 
 # The kernel build's flags (drivers/gpu/drm/i915/.intel_uncore.o.cmd),
@@ -374,6 +382,10 @@ def gen():
         if m:
             entries.append(("reg", m.group(1), ("@", m.group(3), m.group(2))))
             continue
+        m = re.match(r"^(\w+)\(\s*display\s*,\s*(\w+)\s*\)\s+at\s+([\w\s]+)$", line)
+        if m:
+            entries.append(("dreg", m.group(1), (m.group(2), m.group(3).split())))
+            continue
         m = re.match(r"^(\w+)\(([^)]*)\)\s+samples\s+([\d\s]+)$", line)
         if m:
             own_samples[m.group(1)] = [int(x) for x in m.group(3).split()]
@@ -482,7 +494,30 @@ def gen():
            "pub struct Bitfield { pub byte: u32, pub shift: u32, pub width: u32 }", "",
            "/// `_PICK`: element `i` of a register-base table.",
            "pub const fn pick<const N: usize>(a: [u32; N], i: u32) -> u32 { a[i as usize] }", ""]
+    # Display-dependent registers: the offset tables of TGL's display info.
+    dvals = {}
+    dq = {}
     for kind, name, params in entries:
+        if kind != "dreg":
+            continue
+        for a in params[1]:
+            dq[f"{name}__{a}"] = (f"({{ struct intel_display __d = {{ .info.__device_info = tgl_desc.info, "
+                                  f".info.__runtime_info = tgl_desc.info->__runtime_defaults }}; "
+                                  f"i915_mmio_reg_offset({name}(&__d, {a})); }})")
+    if dq:
+        for kind, name, params in entries:
+            if kind == "dreg":
+                for a in params[1]:
+                    dq[f"idx__{a}"] = a
+        dvals = values(dq, PRELUDE + '#include "display/intel_display_device.c"\n')
+    for kind, name, params in entries:
+        if kind == "dreg":
+            pname, args = params
+            arms = " ".join(f"{dvals[f'idx__{a}']} => {dvals[f'{name}__{a}']:#x}," for a in args)
+            out.append(f"/// {where(name) or '?'}, at tgl_desc's display info")
+            out.append(f"pub const fn {name}({pname}: u32) -> u32 {{ match {pname} {{ {arms} "
+                       f"_ => panic!(\"{name}: index not generated\") }} }}")
+            continue
         if kind == "bitfield":
             b, sh, wd, loc = bitfields[name]
             out.append(f"pub const {name}: Bitfield = Bitfield {{ byte: {b}, shift: {sh}, width: {wd} }}; // {loc}")
@@ -546,6 +581,11 @@ def gen_tables():
         if m and cur is not None:
             cur[2].append((m.group(1), m.group(2), m.group(3)))
             continue
+        m = re.match(r"^(\w+)::(\w+)\s*:\s*(\w+)\s*=\s*(struct\s+\w+)\s*\{([^}]*)\}$", line)
+        if m and cur is not None:
+            fields = [f.strip() for f in m.group(5).split(",")]
+            cur[2].append((m.group(1), m.group(2), m.group(3), m.group(4), fields))
+            continue
         m = re.match(r"^(\w+)\s*:\s*(\w+)(?:\s*\{([^}]*)\})?$", line)
         if not m or cur is None:
             sys.exit(f"tables.list: cannot read {line!r}")
@@ -560,7 +600,11 @@ def gen_tables():
         walks = [a for a in arrays if len(a) == 4]
         arrays = [a for a in arrays if len(a) == 3]
         out += ["", f"// {src}"]
-        for func, n, ty in statics:
+        for st in statics:
+            if len(st) == 5:
+                out += local_static_structs(prelude, src, *st)
+                continue
+            func, n, ty = st
             vals = local_static(prelude, func, n)
             out.append(f"/// {src}: `{n}` in `{func}`")
             out.append(f"pub static {n}: [{ty}; {len(vals)}] = [{', '.join(str(v) for v in vals)}];")
@@ -719,6 +763,105 @@ def local_static(prelude, func, name):
     if not vals:
         sys.exit(f"tables.list: {func}::{name}: no integer data for {sym}")
     return vals
+
+
+def gas_string(text):
+    """The bytes of a GNU as string literal body."""
+    simple = {"b": 8, "t": 9, "n": 10, "f": 12, "r": 13, "\\": 92, '"': 34}
+    out, i = bytearray(), 0
+    while i < len(text):
+        c = text[i]
+        if c != "\\":
+            out.append(ord(c))
+            i += 1
+            continue
+        m = re.match(r"[0-7]{1,3}", text[i + 1:])
+        if m:
+            out.append(int(m.group(0), 8) & 0xFF)
+            i += 1 + len(m.group(0))
+        elif text[i + 1] in simple:
+            out.append(simple[text[i + 1]])
+            i += 2
+        else:
+            sys.exit(f"gas string escape not understood: {text!r}")
+    return bytes(out)
+
+
+def local_static_bytes(prelude, func, name):
+    """The bytes of a `static const` object declared inside `func`, as GCC
+    emits them. Data that is a symbol (a pointer) is refused."""
+    asm = gcc(prelude, ["-S"]).splitlines()
+    sym, body = None, False
+    for line in asm:
+        if re.match(rf"^{re.escape(func)}:", line):
+            body = True
+            continue
+        if body:
+            m = re.search(rf"\$({re.escape(name)}\.\d+)\b", line)
+            if m:
+                sym = m.group(1)
+                break
+            if re.match(r"\s+\.size\s", line):
+                break
+    if sym is None:
+        sys.exit(f"tables.list: {func}::{name}: no static of that name used in {func}")
+    widths = {".byte": 1, ".value": 2, ".long": 4, ".quad": 8}
+    data, inside = bytearray(), False
+    for line in asm:
+        if line == f"{sym}:":
+            inside = True
+            continue
+        if not inside:
+            continue
+        m = re.match(r"\s+(\.byte|\.value|\.long|\.quad)\s+(-?\d+)$", line)
+        if m:
+            w = widths[m.group(1)]
+            data += (int(m.group(2)) & ((1 << (8 * w)) - 1)).to_bytes(w, "little")
+            continue
+        m = re.match(r"\s+\.zero\s+(\d+)$", line)
+        if m:
+            data += bytes(int(m.group(1)))
+            continue
+        m = re.match(r'\s+\.(string|ascii)\s+"(.*)"$', line)
+        if m:
+            data += gas_string(m.group(2)) + (b"\0" if m.group(1) == "string" else b"")
+            continue
+        m = re.match(r'\s+\.base64\s+"([A-Za-z0-9+/=]*)"$', line)
+        if m:
+            data += base64.b64decode(m.group(1))
+            continue
+        if re.match(r"\s+(\.byte|\.value|\.long|\.quad)\s", line):
+            sys.exit(f"tables.list: {func}::{name}: data that is not a number: {line.strip()}")
+        break
+    if not data:
+        sys.exit(f"tables.list: {func}::{name}: no data for {sym}")
+    return bytes(data)
+
+
+def local_static_structs(prelude, src, func, name, ty, ctype, fields):
+    """A `static const` array of `ctype` declared inside `func`: its bytes
+    as GCC emits them, cut into the listed fields at the offsets and sizes
+    GCC gives (`name=path` for a member path)."""
+    data = local_static_bytes(prelude, func, name)
+    q = {"size": f"sizeof({ctype})"}
+    for f in fields:
+        fname, _, path = f.partition("=")
+        path = path or fname
+        q[f"o_{fname}"] = f"__builtin_offsetof({ctype}, {path})"
+        q[f"s_{fname}"] = f"sizeof((({ctype} *)0)->{path})"
+    v = values(q, prelude)
+    size = v["size"]
+    if len(data) % size:
+        sys.exit(f"tables.list: {func}::{name}: {len(data)} bytes is not a multiple of {size}")
+    rows = []
+    for i in range(len(data) // size):
+        body = []
+        for f in fields:
+            fname = f.partition("=")[0]
+            o, n = v[f"o_{fname}"], v[f"s_{fname}"]
+            body.append(f"{fname}: {int.from_bytes(data[i * size + o:i * size + o + n], 'little'):#x}")
+        rows.append(f"    {ty} {{ {', '.join(body)} }},")
+    return [f"/// {src}: `{name}` in `{func}`", f"pub static {name}: [{ty}; {len(rows)}] = ["] + rows + ["];"]
 
 
 def where_array(src, name):

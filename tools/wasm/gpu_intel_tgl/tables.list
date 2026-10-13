@@ -50,3 +50,5 @@ d12_port_domains: intel_ddi_port_domains { port_start, port_end, aux_ch_start, a
 hpd_icp: u32
 @ display/intel_dp.c
 intel_dp_set_source_rates::icl_rates: i32
+@ ../drm_fourcc.c
+__drm_format_info::formats: drm_format_info = struct drm_format_info { format, cpp0=cpp[0] }

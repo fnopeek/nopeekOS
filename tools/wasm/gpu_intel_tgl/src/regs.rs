@@ -1066,3 +1066,273 @@ pub const POWER_DOMAIN_PORT_DDI_LANES_A: u32 = 0x11; // display/intel_display_po
 pub const POWER_DOMAIN_AUX_IO_A: u32 = 0x2f; // display/intel_display_power.h:82
 pub const POWER_DOMAIN_AUX_A: u32 = 0x35; // display/intel_display_power.h:89
 pub const POWER_DOMAIN_AUX_TBT1: u32 = 0x41; // display/intel_display_power.h:103
+
+// pipes and planes (display/intel_display.c, intel_crtc.c, skl_universal_plane.c, intel_cursor.c, intel_color.c, intel_vrr.c, intel_vdsc.c, skl_scaler.c, intel_plane_initial.c)
+pub const TRANSCODER_EDP: u32 = 0x4; // display/intel_display_limits.h:43
+pub const TRANSCODER_DSI_0: u32 = 0x5; // display/intel_display_limits.h:44
+pub const TRANSCODER_DSI_1: u32 = 0x6; // display/intel_display_limits.h:45
+pub const I915_MAX_TRANSCODERS: u32 = 0x7; // display/intel_display_limits.h:49
+pub const PLANE_1: u32 = 0x0; // display/intel_display_limits.h:74
+pub const PLANE_2: u32 = 0x1; // display/intel_display_limits.h:75
+pub const PLANE_CURSOR: u32 = 0x7; // display/intel_display_limits.h:82
+pub const I915_MAX_PLANES: u32 = 0x8; // display/intel_display_limits.h:84
+pub const POWER_DOMAIN_PIPE_A: u32 = 0x1; // display/intel_display_power.h:28
+pub const POWER_DOMAIN_PIPE_PANEL_FITTER_A: u32 = 0x5; // display/intel_display_power.h:32
+pub const POWER_DOMAIN_TRANSCODER_A: u32 = 0x9; // display/intel_display_power.h:36
+pub const POWER_DOMAIN_TRANSCODER_EDP: u32 = 0xd; // display/intel_display_power.h:40
+pub const POWER_DOMAIN_TRANSCODER_VDSC_PW2: u32 = 0x10; // display/intel_display_power.h:45
+pub const INTEL_OUTPUT_FORMAT_RGB: u32 = 0x0; // display/intel_display_types.h:929
+pub const INTEL_OUTPUT_FORMAT_YCBCR420: u32 = 0x1; // display/intel_display_types.h:930
+pub const INTEL_OUTPUT_FORMAT_YCBCR444: u32 = 0x2; // display/intel_display_types.h:931
+/// display/intel_display_regs.h:2219, at tgl_desc's display info
+pub const fn TRANS_DDI_FUNC_CTL(tran: u32) -> u32 { match tran { 0 => 0x60400, 1 => 0x61400, 2 => 0x62400, 3 => 0x63400, 4 => 0x400, 5 => 0x6b400, 6 => 0x6bc00, _ => panic!("TRANS_DDI_FUNC_CTL: index not generated") } }
+/// display/intel_display_regs.h:731, at tgl_desc's display info
+pub const fn TRANSCONF(trans: u32) -> u32 { match trans { 0 => 0x70008, 1 => 0x71008, 2 => 0x72008, 3 => 0x73008, 4 => 0x8, 5 => 0x7b008, 6 => 0x7b808, _ => panic!("TRANSCONF: index not generated") } }
+/// display/intel_display_regs.h:348, at tgl_desc's display info
+pub const fn TRANS_HTOTAL(trans: u32) -> u32 { match trans { 0 => 0x60000, 1 => 0x61000, 2 => 0x62000, 3 => 0x63000, 4 => 0x0, 5 => 0x6b000, 6 => 0x6b800, _ => panic!("TRANS_HTOTAL: index not generated") } }
+/// display/intel_display_regs.h:356, at tgl_desc's display info
+pub const fn TRANS_HBLANK(trans: u32) -> u32 { match trans { 0 => 0x60004, 1 => 0x61004, 2 => 0x62004, 3 => 0x63004, 4 => 0x4, _ => panic!("TRANS_HBLANK: index not generated") } }
+/// display/intel_display_regs.h:364, at tgl_desc's display info
+pub const fn TRANS_HSYNC(trans: u32) -> u32 { match trans { 0 => 0x60008, 1 => 0x61008, 2 => 0x62008, 3 => 0x63008, 4 => 0x8, 5 => 0x6b008, 6 => 0x6b808, _ => panic!("TRANS_HSYNC: index not generated") } }
+/// display/intel_display_regs.h:372, at tgl_desc's display info
+pub const fn TRANS_VTOTAL(trans: u32) -> u32 { match trans { 0 => 0x6000c, 1 => 0x6100c, 2 => 0x6200c, 3 => 0x6300c, 4 => 0xc, 5 => 0x6b00c, 6 => 0x6b80c, _ => panic!("TRANS_VTOTAL: index not generated") } }
+/// display/intel_display_regs.h:380, at tgl_desc's display info
+pub const fn TRANS_VBLANK(trans: u32) -> u32 { match trans { 0 => 0x60010, 1 => 0x61010, 2 => 0x62010, 3 => 0x63010, 4 => 0x10, _ => panic!("TRANS_VBLANK: index not generated") } }
+/// display/intel_display_regs.h:388, at tgl_desc's display info
+pub const fn TRANS_VSYNC(trans: u32) -> u32 { match trans { 0 => 0x60014, 1 => 0x61014, 2 => 0x62014, 3 => 0x63014, 4 => 0x14, 5 => 0x6b014, 6 => 0x6b814, _ => panic!("TRANS_VSYNC: index not generated") } }
+/// display/intel_display_regs.h:412, at tgl_desc's display info
+pub const fn TRANS_MULT(trans: u32) -> u32 { match trans { 0 => 0x6002c, 1 => 0x6102c, 2 => 0x6202c, 3 => 0x6302c, _ => panic!("TRANS_MULT: index not generated") } }
+/// display/intel_display_regs.h:1469, at tgl_desc's display info
+pub const fn CHICKEN_TRANS(trans: u32) -> u32 { match trans { 0 => 0x420c0, 1 => 0x420c4, 2 => 0x420c8, 3 => 0x420d8, 4 => 0x420cc, _ => panic!("CHICKEN_TRANS: index not generated") } }
+/// display/intel_display_regs.h:396, at tgl_desc's display info
+pub const fn PIPESRC(pipe: u32) -> u32 { match pipe { 0 => 0x6001c, 1 => 0x6101c, 2 => 0x6201c, 3 => 0x6301c, _ => panic!("PIPESRC: index not generated") } }
+/// display/intel_vrr_regs.h:15, at tgl_desc's display info
+pub const fn TRANS_VRR_CTL(trans: u32) -> u32 { match trans { 0 => 0x60420, 1 => 0x61420, 2 => 0x62420, 3 => 0x63420, _ => panic!("TRANS_VRR_CTL: index not generated") } }
+/// display/intel_vrr_regs.h:83, at tgl_desc's display info
+pub const fn TRANS_VRR_FLIPLINE(trans: u32) -> u32 { match trans { 0 => 0x60438, 1 => 0x61438, 2 => 0x62438, 3 => 0x63438, _ => panic!("TRANS_VRR_FLIPLINE: index not generated") } }
+/// display/intel_vrr_regs.h:30, at tgl_desc's display info
+pub const fn TRANS_VRR_VMAX(trans: u32) -> u32 { match trans { 0 => 0x60424, 1 => 0x61424, 2 => 0x62424, 3 => 0x63424, _ => panic!("TRANS_VRR_VMAX: index not generated") } }
+/// display/intel_vrr_regs.h:37, at tgl_desc's display info
+pub const fn TRANS_VRR_VMIN(trans: u32) -> u32 { match trans { 0 => 0x60434, 1 => 0x61434, 2 => 0x62434, 3 => 0x63434, _ => panic!("TRANS_VRR_VMIN: index not generated") } }
+/// display/intel_cursor_regs.h:12, at tgl_desc's display info
+pub const fn CURCNTR(pipe: u32) -> u32 { match pipe { 0 => 0x70080, 1 => 0x71080, 2 => 0x72080, 3 => 0x73080, _ => panic!("CURCNTR: index not generated") } }
+pub const TRANS_DDI_FUNC_ENABLE: i32 = -2147483648; // display/intel_display_regs.h:2221
+pub const TRANS_DDI_EDP_INPUT_MASK: u32 = 0x7000; // display/intel_display_regs.h:2246
+pub const TRANS_DDI_EDP_INPUT_A_ON: u32 = 0x0; // display/intel_display_regs.h:2247
+pub const TRANS_DDI_EDP_INPUT_A_ONOFF: u32 = 0x4000; // display/intel_display_regs.h:2248
+pub const TRANS_DDI_EDP_INPUT_B_ONOFF: u32 = 0x5000; // display/intel_display_regs.h:2249
+pub const TRANS_DDI_EDP_INPUT_C_ONOFF: u32 = 0x6000; // display/intel_display_regs.h:2250
+pub const TRANS_DDI_EDP_INPUT_D_ONOFF: u32 = 0x7000; // display/intel_display_regs.h:2251
+pub const TRANSCONF_ENABLE: u32 = 0x80000000; // display/intel_display_regs.h:732
+pub const TRANSCONF_INTERLACE_MASK_HSW: u32 = 0x600000; // display/intel_display_regs.h:758
+pub const HTOTAL_MASK: u32 = 0xffff0000; // display/intel_display_regs.h:349
+pub const HACTIVE_MASK: u32 = 0xffff; // display/intel_display_regs.h:351
+pub const HBLANK_END_MASK: u32 = 0xffff0000; // display/intel_display_regs.h:357
+pub const HBLANK_START_MASK: u32 = 0xffff; // display/intel_display_regs.h:359
+pub const HSYNC_END_MASK: u32 = 0xffff0000; // display/intel_display_regs.h:365
+pub const HSYNC_START_MASK: u32 = 0xffff; // display/intel_display_regs.h:367
+pub const VTOTAL_MASK: u32 = 0xffff0000; // display/intel_display_regs.h:373
+pub const VACTIVE_MASK: u32 = 0xffff; // display/intel_display_regs.h:375
+pub const VBLANK_END_MASK: u32 = 0xffff0000; // display/intel_display_regs.h:381
+pub const VBLANK_START_MASK: u32 = 0xffff; // display/intel_display_regs.h:383
+pub const VSYNC_END_MASK: u32 = 0xffff0000; // display/intel_display_regs.h:389
+pub const VSYNC_START_MASK: u32 = 0xffff; // display/intel_display_regs.h:391
+pub const PIPESRC_WIDTH_MASK: u32 = 0xffff0000; // display/intel_display_regs.h:397
+pub const PIPESRC_HEIGHT_MASK: u32 = 0xffff; // display/intel_display_regs.h:399
+/// display/intel_display_regs.h:847
+pub const fn PIPE_MISC(pipe: u32) -> u32 { (((0x70030) + (pipe) * ((0x71030) - (0x70030)))) }
+pub const PIPE_MISC_YUV420_ENABLE: u32 = 0x8000000; // display/intel_display_regs.h:848
+pub const PIPE_MISC_YUV420_MODE_FULL_BLEND: u32 = 0x4000000; // display/intel_display_regs.h:849
+pub const PIPE_MISC_OUTPUT_COLORSPACE_YUV: u32 = 0x800; // display/intel_display_regs.h:856
+/// display/intel_display_regs.h:2819
+pub const fn WM_LINETIME(pipe: u32) -> u32 { (((0x45270) + (pipe) * ((0x45274) - (0x45270)))) }
+pub const HSW_LINETIME_MASK: u32 = 0x1ff; // display/intel_display_regs.h:2820
+pub const HSW_FRAME_START_DELAY_MASK: u32 = 0x18000000; // display/intel_display_regs.h:1472
+/// display/intel_vdsc_regs.h:33
+pub const fn ICL_PIPE_DSS_CTL1(pipe: u32) -> u32 { (((0x78200) + ((pipe) - 0x1) * ((0x78400) - (0x78200)))) }
+/// display/intel_vdsc_regs.h:49
+pub const fn ICL_PIPE_DSS_CTL2(pipe: u32) -> u32 { (((0x78204) + ((pipe) - 0x1) * ((0x78404) - (0x78204)))) }
+pub const ICL_PIPE_DSS_CTL1_A: u32 = 0x78000; // i915_mmio_reg_offset(ICL_PIPE_DSS_CTL1(PIPE_A)) in display/intel_vdsc.c
+pub const ICL_PIPE_DSS_CTL2_A: u32 = 0x78004; // i915_mmio_reg_offset(ICL_PIPE_DSS_CTL2(PIPE_A)) in display/intel_vdsc.c
+pub const BIG_JOINER_ENABLE: u32 = 0x20000000; // display/intel_vdsc_regs.h:36
+pub const PRIMARY_BIG_JOINER_ENABLE: u32 = 0x10000000; // display/intel_vdsc_regs.h:37
+pub const JOINER_ENABLE: u32 = 0x40000000; // display/intel_vdsc_regs.h:14
+pub const VDSC0_ENABLE: u32 = 0x80000000; // display/intel_vdsc_regs.h:24
+pub const VDSC1_ENABLE: u32 = 0x8000; // display/intel_vdsc_regs.h:27
+pub const VDSC2_ENABLE: u32 = 0x40000000; // display/intel_vdsc_regs.h:25
+pub const SMALL_JOINER_CONFIG_3_ENGINES: u32 = 0x800000; // display/intel_vdsc_regs.h:26
+/// display/intel_display_regs.h:1049
+pub const fn SKL_PS_CTRL(pipe: u32, id: u32) -> u32 { (((((0x68180) + (id) * ((0x68280) - (0x68180)))) + (pipe) * ((((0x68980) + (id) * ((0x68A80) - (0x68980)))) - (((0x68180) + (id) * ((0x68280) - (0x68180))))))) }
+/// display/intel_display_regs.h:1124
+pub const fn SKL_PS_WIN_POS(pipe: u32, id: u32) -> u32 { (((((0x68170) + (id) * ((0x68270) - (0x68170)))) + (pipe) * ((((0x68970) + (id) * ((0x68A70) - (0x68970)))) - (((0x68170) + (id) * ((0x68270) - (0x68170))))))) }
+/// display/intel_display_regs.h:1137
+pub const fn SKL_PS_WIN_SZ(pipe: u32, id: u32) -> u32 { (((((0x68174) + (id) * ((0x68274) - (0x68174)))) + (pipe) * ((((0x68974) + (id) * ((0x68A74) - (0x68974)))) - (((0x68174) + (id) * ((0x68274) - (0x68174))))))) }
+pub const PS_SCALER_EN: u32 = 0x80000000; // display/intel_display_regs.h:1052
+pub const PS_BINDING_MASK: u32 = 0xe000000; // display/intel_display_regs.h:1064
+pub const PS_BINDING_PIPE: u32 = 0x0; // display/intel_display_regs.h:1065
+pub const PS_WIN_XPOS_MASK: u32 = 0xffff0000; // display/intel_display_regs.h:1127
+pub const PS_WIN_YPOS_MASK: u32 = 0xffff; // display/intel_display_regs.h:1129
+pub const PS_WIN_XSIZE_MASK: u32 = 0xffff0000; // display/intel_display_regs.h:1140
+pub const PS_WIN_YSIZE_MASK: u32 = 0xffff; // display/intel_display_regs.h:1142
+pub const SKL_CRTC_INDEX: u32 = 0x1f; // display/intel_display_types.h:754
+/// display/intel_color_regs.h:317
+pub const fn SKL_BOTTOM_COLOR(pipe: u32) -> u32 { (((0x70034) + (pipe) * ((0x71034) - (0x70034)))) }
+pub const SKL_BOTTOM_COLOR_GAMMA_ENABLE: u32 = 0x80000000; // display/intel_color_regs.h:315
+pub const SKL_BOTTOM_COLOR_CSC_ENABLE: u32 = 0x40000000; // display/intel_color_regs.h:316
+/// display/intel_color_regs.h:73
+pub const fn GAMMA_MODE(pipe: u32) -> u32 { (((0x4a480) + (pipe) * ((0x4ac80) - (0x4a480)))) }
+/// display/intel_color_regs.h:126
+pub const fn PIPE_CSC_MODE(pipe: u32) -> u32 { (((0x49028) + (pipe) * ((0x49128) - (0x49028)))) }
+pub const ICL_CSC_ENABLE: i32 = -2147483648; // display/intel_color_regs.h:93
+pub const ICL_OUTPUT_CSC_ENABLE: u32 = 0x40000000; // display/intel_color_regs.h:94
+pub const PRE_CSC_GAMMA_ENABLE: u32 = 0x80000000; // display/intel_color_regs.h:74
+pub const POST_CSC_GAMMA_ENABLE: u32 = 0x40000000; // display/intel_color_regs.h:75
+/// display/intel_color_regs.h:127
+pub const fn PIPE_CSC_PREOFF_HI(pipe: u32) -> u32 { (((0x49030) + (pipe) * ((0x49130) - (0x49030)))) }
+/// display/intel_color_regs.h:128
+pub const fn PIPE_CSC_PREOFF_ME(pipe: u32) -> u32 { (((0x49034) + (pipe) * ((0x49134) - (0x49034)))) }
+/// display/intel_color_regs.h:129
+pub const fn PIPE_CSC_PREOFF_LO(pipe: u32) -> u32 { (((0x49038) + (pipe) * ((0x49138) - (0x49038)))) }
+/// display/intel_color_regs.h:120
+pub const fn PIPE_CSC_COEFF_RY_GY(pipe: u32) -> u32 { (((0x49010) + (pipe) * ((0x49110) - (0x49010)))) }
+/// display/intel_color_regs.h:121
+pub const fn PIPE_CSC_COEFF_BY(pipe: u32) -> u32 { (((0x49014) + (pipe) * ((0x49114) - (0x49014)))) }
+/// display/intel_color_regs.h:122
+pub const fn PIPE_CSC_COEFF_RU_GU(pipe: u32) -> u32 { (((0x49018) + (pipe) * ((0x49118) - (0x49018)))) }
+/// display/intel_color_regs.h:123
+pub const fn PIPE_CSC_COEFF_BU(pipe: u32) -> u32 { (((0x4901c) + (pipe) * ((0x4911c) - (0x4901c)))) }
+/// display/intel_color_regs.h:124
+pub const fn PIPE_CSC_COEFF_RV_GV(pipe: u32) -> u32 { (((0x49020) + (pipe) * ((0x49120) - (0x49020)))) }
+/// display/intel_color_regs.h:125
+pub const fn PIPE_CSC_COEFF_BV(pipe: u32) -> u32 { (((0x49024) + (pipe) * ((0x49124) - (0x49024)))) }
+/// display/intel_color_regs.h:130
+pub const fn PIPE_CSC_POSTOFF_HI(pipe: u32) -> u32 { (((0x49040) + (pipe) * ((0x49140) - (0x49040)))) }
+/// display/intel_color_regs.h:131
+pub const fn PIPE_CSC_POSTOFF_ME(pipe: u32) -> u32 { (((0x49044) + (pipe) * ((0x49144) - (0x49044)))) }
+/// display/intel_color_regs.h:132
+pub const fn PIPE_CSC_POSTOFF_LO(pipe: u32) -> u32 { (((0x49048) + (pipe) * ((0x49148) - (0x49048)))) }
+/// display/intel_color_regs.h:179
+pub const fn PIPE_CSC_OUTPUT_PREOFF_HI(pipe: u32) -> u32 { (((0x49068) + (pipe) * ((0x49168) - (0x49068)))) }
+/// display/intel_color_regs.h:182
+pub const fn PIPE_CSC_OUTPUT_PREOFF_ME(pipe: u32) -> u32 { (((0x4906c) + (pipe) * ((0x4916c) - (0x4906c)))) }
+/// display/intel_color_regs.h:185
+pub const fn PIPE_CSC_OUTPUT_PREOFF_LO(pipe: u32) -> u32 { (((0x49070) + (pipe) * ((0x49170) - (0x49070)))) }
+/// display/intel_color_regs.h:161
+pub const fn PIPE_CSC_OUTPUT_COEFF_RY_GY(pipe: u32) -> u32 { (((0x49050) + (pipe) * ((0x49150) - (0x49050)))) }
+/// display/intel_color_regs.h:164
+pub const fn PIPE_CSC_OUTPUT_COEFF_BY(pipe: u32) -> u32 { (((0x49054) + (pipe) * ((0x49154) - (0x49054)))) }
+/// display/intel_color_regs.h:167
+pub const fn PIPE_CSC_OUTPUT_COEFF_RU_GU(pipe: u32) -> u32 { (((0x49058) + (pipe) * ((0x49158) - (0x49058)))) }
+/// display/intel_color_regs.h:170
+pub const fn PIPE_CSC_OUTPUT_COEFF_BU(pipe: u32) -> u32 { (((0x4905c) + (pipe) * ((0x4915c) - (0x4905c)))) }
+/// display/intel_color_regs.h:173
+pub const fn PIPE_CSC_OUTPUT_COEFF_RV_GV(pipe: u32) -> u32 { (((0x49060) + (pipe) * ((0x49160) - (0x49060)))) }
+/// display/intel_color_regs.h:176
+pub const fn PIPE_CSC_OUTPUT_COEFF_BV(pipe: u32) -> u32 { (((0x49064) + (pipe) * ((0x49164) - (0x49064)))) }
+/// display/intel_color_regs.h:188
+pub const fn PIPE_CSC_OUTPUT_POSTOFF_HI(pipe: u32) -> u32 { (((0x49074) + (pipe) * ((0x49174) - (0x49074)))) }
+/// display/intel_color_regs.h:191
+pub const fn PIPE_CSC_OUTPUT_POSTOFF_ME(pipe: u32) -> u32 { (((0x49078) + (pipe) * ((0x49178) - (0x49078)))) }
+/// display/intel_color_regs.h:194
+pub const fn PIPE_CSC_OUTPUT_POSTOFF_LO(pipe: u32) -> u32 { (((0x4907c) + (pipe) * ((0x4917c) - (0x4907c)))) }
+pub const VRR_CTL_VRR_ENABLE: u32 = 0x80000000; // display/intel_vrr_regs.h:16
+pub const VRR_CTL_FLIP_LINE_EN: u32 = 0x20000000; // display/intel_vrr_regs.h:18
+pub const VRR_CTL_PIPELINE_FULL_OVERRIDE: u32 = 0x1; // display/intel_vrr_regs.h:22
+pub const VRR_CTL_PIPELINE_FULL_MASK: u32 = 0x7f8; // display/intel_vrr_regs.h:20
+pub const I915_MODE_FLAG_VRR: u32 = 0x40; // display/intel_display_types.h:777
+pub const DRM_MODE_FLAG_INTERLACE: u32 = 0x10; // ?
+pub const DRM_MODE_TYPE_DRIVER: u32 = 0x40; // ?
+/// display/skl_universal_plane_regs.h:35
+pub const fn PLANE_CTL(pipe: u32, plane: u32) -> u32 { (((((((0x70180))) + ((((pipe)))) * ((((0x71180))) - (((0x70180)))))) + ((((plane)))) * ((((((0x70280))) + ((((pipe)))) * ((((0x71280))) - (((0x70280)))))) - (((((0x70180))) + ((((pipe)))) * ((((0x71180))) - (((0x70180))))))))) }
+/// display/skl_universal_plane_regs.h:249
+pub const fn PLANE_COLOR_CTL(pipe: u32, plane: u32) -> u32 { (((((((0x701cc))) + ((((pipe)))) * ((((0x711cc))) - (((0x701cc)))))) + ((((plane)))) * ((((((0x702cc))) + ((((pipe)))) * ((((0x712cc))) - (((0x702cc)))))) - (((((0x701cc))) + ((((pipe)))) * ((((0x711cc))) - (((0x701cc))))))))) }
+/// display/skl_universal_plane_regs.h:157
+pub const fn PLANE_SURF(pipe: u32, plane: u32) -> u32 { (((((((0x7019c))) + ((((pipe)))) * ((((0x7119c))) - (((0x7019c)))))) + ((((plane)))) * ((((((0x7029c))) + ((((pipe)))) * ((((0x7129c))) - (((0x7029c)))))) - (((((0x7019c))) + ((((pipe)))) * ((((0x7119c))) - (((0x7019c))))))))) }
+/// display/skl_universal_plane_regs.h:178
+pub const fn PLANE_OFFSET(pipe: u32, plane: u32) -> u32 { (((((((0x701a4))) + ((((pipe)))) * ((((0x711a4))) - (((0x701a4)))))) + ((((plane)))) * ((((((0x702a4))) + ((((pipe)))) * ((((0x712a4))) - (((0x702a4)))))) - (((((0x701a4))) + ((((pipe)))) * ((((0x711a4))) - (((0x701a4))))))))) }
+/// display/skl_universal_plane_regs.h:128
+pub const fn PLANE_SIZE(pipe: u32, plane: u32) -> u32 { (((((((0x70190))) + ((((pipe)))) * ((((0x71190))) - (((0x70190)))))) + ((((plane)))) * ((((((0x70290))) + ((((pipe)))) * ((((0x71290))) - (((0x70290)))))) - (((((0x70190))) + ((((pipe)))) * ((((0x71190))) - (((0x70190))))))))) }
+/// display/skl_universal_plane_regs.h:106
+pub const fn PLANE_STRIDE(pipe: u32, plane: u32) -> u32 { (((((((0x70188))) + ((((pipe)))) * ((((0x71188))) - (((0x70188)))))) + ((((plane)))) * ((((((0x70288))) + ((((pipe)))) * ((((0x71288))) - (((0x70288)))))) - (((((0x70188))) + ((((pipe)))) * ((((0x71188))) - (((0x70188))))))))) }
+pub const PLANE_CTL_ENABLE: u32 = 0x80000000; // display/skl_universal_plane_regs.h:38
+pub const PLANE_CTL_FORMAT_MASK_ICL: u32 = 0xf800000; // display/skl_universal_plane_regs.h:49
+pub const PLANE_CTL_ORDER_RGBX: u32 = 0x100000; // display/skl_universal_plane_regs.h:71
+pub const PLANE_CTL_TILED_MASK: u32 = 0x1c00; // display/skl_universal_plane_regs.h:83
+pub const PLANE_CTL_TILED_LINEAR: u32 = 0x0; // display/skl_universal_plane_regs.h:84
+pub const PLANE_CTL_TILED_X: u32 = 0x400; // display/skl_universal_plane_regs.h:85
+pub const PLANE_CTL_TILED_Y: u32 = 0x1000; // display/skl_universal_plane_regs.h:86
+pub const PLANE_CTL_TILED_YF: u32 = 0x1400; // display/skl_universal_plane_regs.h:87
+pub const PLANE_CTL_RENDER_DECOMPRESSION_ENABLE: u32 = 0x8000; // display/skl_universal_plane_regs.h:79
+pub const PLANE_CTL_MEDIA_DECOMPRESSION_ENABLE: u32 = 0x10; // display/skl_universal_plane_regs.h:91
+pub const PLANE_CTL_ROTATE_MASK: u32 = 0x3; // display/skl_universal_plane_regs.h:96
+pub const PLANE_CTL_ROTATE_0: u32 = 0x0; // display/skl_universal_plane_regs.h:97
+pub const PLANE_CTL_ROTATE_90: u32 = 0x1; // display/skl_universal_plane_regs.h:98
+pub const PLANE_CTL_ROTATE_180: u32 = 0x2; // display/skl_universal_plane_regs.h:99
+pub const PLANE_CTL_ROTATE_270: u32 = 0x3; // display/skl_universal_plane_regs.h:100
+pub const PLANE_CTL_FLIP_HORIZONTAL: u32 = 0x100; // display/skl_universal_plane_regs.h:90
+pub const PLANE_COLOR_ALPHA_MASK: u32 = 0x30; // display/skl_universal_plane_regs.h:264
+pub const PLANE_SURF_ADDR_MASK: u32 = 0xfffff000; // display/skl_universal_plane_regs.h:160
+pub const PLANE_HEIGHT_MASK: u32 = 0xffff0000; // display/skl_universal_plane_regs.h:131
+pub const PLANE_WIDTH_MASK: u32 = 0xffff; // display/skl_universal_plane_regs.h:133
+pub const PLANE_STRIDE__MASK: u32 = 0xfff; // display/skl_universal_plane_regs.h:109
+pub const PLANE_CTL_FORMAT_RGB_565: u32 = 0xe000000; // display/skl_universal_plane_regs.h:60
+pub const PLANE_CTL_FORMAT_NV12: u32 = 0x1000000; // display/skl_universal_plane_regs.h:51
+pub const PLANE_CTL_FORMAT_XYUV: u32 = 0x8000000; // display/skl_universal_plane_regs.h:58
+pub const PLANE_CTL_FORMAT_P010: u32 = 0x3000000; // display/skl_universal_plane_regs.h:53
+pub const PLANE_CTL_FORMAT_P012: u32 = 0x5000000; // display/skl_universal_plane_regs.h:55
+pub const PLANE_CTL_FORMAT_P016: u32 = 0x7000000; // display/skl_universal_plane_regs.h:57
+pub const PLANE_CTL_FORMAT_Y210: u32 = 0x800000; // display/skl_universal_plane_regs.h:61
+pub const PLANE_CTL_FORMAT_Y212: u32 = 0x1800000; // display/skl_universal_plane_regs.h:62
+pub const PLANE_CTL_FORMAT_Y216: u32 = 0x2800000; // display/skl_universal_plane_regs.h:63
+pub const PLANE_CTL_FORMAT_Y410: u32 = 0x3800000; // display/skl_universal_plane_regs.h:64
+pub const PLANE_CTL_FORMAT_Y412: u32 = 0x4800000; // display/skl_universal_plane_regs.h:65
+pub const PLANE_CTL_FORMAT_Y416: u32 = 0x5800000; // display/skl_universal_plane_regs.h:66
+pub const PLANE_CTL_FORMAT_XRGB_8888: u32 = 0x4000000; // display/skl_universal_plane_regs.h:54
+pub const PLANE_CTL_FORMAT_XRGB_2101010: u32 = 0x2000000; // display/skl_universal_plane_regs.h:52
+pub const PLANE_CTL_FORMAT_XRGB_16161616F: u32 = 0x6000000; // display/skl_universal_plane_regs.h:56
+pub const MCURSOR_MODE_MASK: u32 = 0x27; // display/intel_cursor_regs.h:33
+pub const DRM_FORMAT_RGB565: u32 = 0x36314752; // display/i9xx_plane.c:33
+pub const DRM_FORMAT_NV12: u32 = 0x3231564e; // display/skl_universal_plane.c:65
+pub const DRM_FORMAT_XYUV8888: u32 = 0x56555958; // display/skl_universal_plane.c:47
+pub const DRM_FORMAT_P010: u32 = 0x30313050; // display/skl_universal_plane.c:86
+pub const DRM_FORMAT_P012: u32 = 0x32313050; // display/skl_universal_plane.c:87
+pub const DRM_FORMAT_P016: u32 = 0x36313050; // display/skl_universal_plane.c:88
+pub const DRM_FORMAT_Y210: u32 = 0x30313259; // display/skl_universal_plane.c:106
+pub const DRM_FORMAT_Y212: u32 = 0x32313259; // display/skl_universal_plane.c:107
+pub const DRM_FORMAT_Y216: u32 = 0x36313259; // display/skl_universal_plane.c:108
+pub const DRM_FORMAT_XVYU2101010: u32 = 0x30335658; // display/skl_universal_plane.c:110
+pub const DRM_FORMAT_XVYU12_16161616: u32 = 0x36335658; // display/skl_universal_plane.c:167
+pub const DRM_FORMAT_XVYU16161616: u32 = 0x38345658; // display/skl_universal_plane.c:168
+pub const DRM_FORMAT_ABGR8888: u32 = 0x34324241; // display/i9xx_plane.c:65
+pub const DRM_FORMAT_XBGR8888: u32 = 0x34324258; // display/i9xx_plane.c:42
+pub const DRM_FORMAT_ARGB8888: u32 = 0x34325241; // display/i9xx_plane.c:64
+pub const DRM_FORMAT_XRGB8888: u32 = 0x34325258; // display/i9xx_plane.c:34
+pub const DRM_FORMAT_ABGR2101010: u32 = 0x30334241; // display/i9xx_plane.c:69
+pub const DRM_FORMAT_XBGR2101010: u32 = 0x30334258; // display/i9xx_plane.c:44
+pub const DRM_FORMAT_ARGB2101010: u32 = 0x30335241; // display/i9xx_plane.c:68
+pub const DRM_FORMAT_XRGB2101010: u32 = 0x30335258; // display/i9xx_plane.c:43
+pub const DRM_FORMAT_ABGR16161616F: u32 = 0x48344241; // display/skl_universal_plane.c:153
+pub const DRM_FORMAT_XBGR16161616F: u32 = 0x48344258; // display/i9xx_plane.c:55
+pub const DRM_FORMAT_ARGB16161616F: u32 = 0x48345241; // display/skl_universal_plane.c:152
+pub const DRM_FORMAT_XRGB16161616F: u32 = 0x48345258; // display/intel_sprite.c:1448
+pub const DRM_FORMAT_MOD_LINEAR: u64 = 0x0; // display/skl_watermark.c:642
+pub const I915_FORMAT_MOD_X_TILED: u64 = 0x100000000000001; // ?
+pub const I915_FORMAT_MOD_Y_TILED: u64 = 0x100000000000002; // ?
+pub const I915_FORMAT_MOD_Yf_TILED: u64 = 0x100000000000003; // ?
+pub const I915_FORMAT_MOD_Y_TILED_CCS: u64 = 0x100000000000004; // ?
+pub const I915_FORMAT_MOD_Yf_TILED_CCS: u64 = 0x100000000000005; // ?
+pub const I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS: u64 = 0x100000000000006; // ?
+pub const I915_FORMAT_MOD_Y_TILED_GEN12_MC_CCS: u64 = 0x100000000000007; // ?
+pub const I915_TILING_NONE: u32 = 0x0; // ?
+pub const I915_TILING_X: u32 = 0x1; // ?
+pub const I915_TILING_Y: u32 = 0x2; // ?
+pub const DRM_MODE_ROTATE_0: u32 = 0x1; // display/i9xx_plane.c:1113
+pub const DRM_MODE_ROTATE_90: u32 = 0x2; // ?
+pub const DRM_MODE_ROTATE_180: u32 = 0x4; // ?
+pub const DRM_MODE_ROTATE_270: u32 = 0x8; // ?
+pub const DRM_MODE_REFLECT_X: u32 = 0x10; // ?
+pub const ENABLE_DPT_DEFAULT: u32 = 0x1; // display_param(enable_dpt) in display/intel_display_params.c
+pub const SKL_NUM_SCALERS: u32 = 0x2; // display/intel_display_types.h:734
+pub const INTEL_FRONTBUFFER_BITS_PER_PIPE: u32 = 0x8; // display/intel_frontbuffer.h:62
+pub const ENOMEM: u32 = 0xc; // include/uapi/asm-generic/errno-base.h:16
+pub const INVALID_TRANSCODER: i32 = -1; // display/intel_display_limits.h:27
