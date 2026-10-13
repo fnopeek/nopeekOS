@@ -1463,6 +1463,26 @@ pub(crate) fn npk_pci_write_config16(ctx: &mut HostState, offset: i32, value: i3
     0
 }
 
+/// `npk_vga_msr_touch()`: `outb(inb(VGA_MIS_R), VGA_MIS_W)`, Linux
+/// intel_vga_reset_io_mem. A display engine whose VGA power well was just
+/// enabled raises unclaimed-register errors on 0x3d5 until the MSR has been
+/// written once. Only for a bound VGA-compatible controller; the value
+/// written is the one read back, so the legacy decode does not change.
+pub(crate) fn npk_vga_msr_touch(ctx: &mut HostState) -> i32 {
+    let hw = match ctx.hw.as_ref() {
+        Some(h) if h.is_pci => h,
+        _ => return -1,
+    };
+    if pci::read8(hw.pci_addr, 0x0B) != 0x03 || pci::read8(hw.pci_addr, 0x0A) != 0x00 {
+        return -1;
+    }
+    // SAFETY: the VGA MSR belongs to the legacy VGA decode of the display
+    // controller this module owns; it is rewritten with its own value.
+    let (read, write) = unsafe { (crate::hw::Port::new(0x3CC), crate::hw::Port::new(0x3C2)) };
+    write.outb(read.inb());
+    0
+}
+
 /// Config dwords a driver must not write: they decide where the device sits
 /// in physical memory (BARs, expansion ROM, a bridge's windows) or where its
 /// interrupts go (MSI address and data, MSI-X control). The kernel sizes and

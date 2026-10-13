@@ -51,6 +51,7 @@ unsafe extern "C" {
     fn npk_pci_read_config(offset: i32) -> i32;
     fn npk_pci_read_config_at(bdf: i32, offset: i32) -> i32;
     fn npk_pci_write_config16(offset: i32, value: i32) -> i32;
+    fn npk_vga_msr_touch() -> i32;
     fn npk_pci_bar_size(bar: i32) -> i64;
     fn npk_pci_write_config(offset: i32, value: i32) -> i32;
     fn npk_pci_enable_bus_master() -> i32;
@@ -148,6 +149,8 @@ plain! {
     fn pci_read_config_at = npk_pci_read_config_at(bdf: i32, offset: i32) -> i32;
     /// One 16-bit config write to the bound device (Linux pci_write_config_word).
     fn pci_write_config16 = npk_pci_write_config16(offset: i32, value: i32) -> i32;
+    /// Rewrites the VGA MSR with its own value (Linux intel_vga_reset_io_mem).
+    fn vga_msr_touch = npk_vga_msr_touch() -> i32;
     /// Size of the bound device's memory BAR `bar` (boot scan), 0 = none.
     fn pci_bar_size = npk_pci_bar_size(bar: i32) -> i64;
     fn pci_write_config = npk_pci_write_config(offset: i32, value: i32) -> i32;

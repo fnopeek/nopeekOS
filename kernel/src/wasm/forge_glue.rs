@@ -948,6 +948,10 @@ host_imports! {
     // same refusals as the dword form
     ctx fn npk_pci_write_config16(offset: i32, value: i32) -> i32;
 
+    // npk_vga_msr_touch() -> 0 or -1; rewrites the VGA MSR with its own
+    // value (bound VGA-compatible controller only)
+    ctx fn npk_vga_msr_touch() -> i32;
+
     // npk_pci_enable_bus_master() -> 0 or -1
     ctx fn npk_pci_enable_bus_master() -> i32;
 
