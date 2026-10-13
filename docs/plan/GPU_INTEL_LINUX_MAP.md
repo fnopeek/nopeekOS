@@ -15,30 +15,44 @@ vollstaendig portiert, auch die „vermutlich no-op".
 ## 0 — Werkzeug und Wiederholbarkeit
 
 ```
-tools/linux-callgraph.py      Graph aus -fcallgraph-info, Kopf der Datei
-                              sagt, wie i915 dafuer gebaut wird
+tools/linux-callgraph.py      Graph aus -fcallgraph-info; der Kopf der
+                              Datei sagt, wie i915 dafuer gebaut wird
+tools/i915-tgl-specialize.py  legt eine KOPIE von i915 auf TGL GT2 fest:
+                              GRAPHICS_VER, IS_PLATFORM, INTEL_INFO werden
+                              Konstanten, GCC wirft fremde Zweige weg
 tools/gpu_intel_tgl.follow    jede Plattformweiche (indirekter Aufruf),
                               mit der Quellzeile, die TGL dorthin schickt
+tools/gpu_intel_tgl.classes   A / B / N je Datei
+GPU_INTEL_TGL_FUNCTIONS.txt   das Ergebnis: jede Funktion mit Klasse,
+                              Tiefe und Fundstelle — der Auftragszettel
 ```
 
-Lauf (Wurzeln = alles, was ohne Aufrufer im Treiber beginnt):
+Fertige Graphen liegen unter `~/.cache/nopeekos/i915-callgraph/`
+(`linux-6.18.55` allgemein, `linux-6.18.55-tgl` festgelegt). Lauf:
 
 ```
-# Graph liegt fertig unter ~/.cache/nopeekos/i915-callgraph/linux-6.18.55
-python3 tools/linux-callgraph.py --dir ~/.cache/nopeekos/i915-callgraph/linux-6.18.55 reach \
+python3 tools/linux-callgraph.py --dir ~/.cache/nopeekos/i915-callgraph/linux-6.18.55-tgl reach \
     i915_driver_probe gen11_irq_handler heartbeat retire_work_handler \
     execlists_timeslice execlists_preempt \
     --prune 'intel_display_|^intel_power_domains|^intel_dmc|^intel_bios|^intel_opregion|^i915_driver_register$|guc|huc|gsc|pxp|perf|pmu' \
     --prune-file '^(display/|\./\./display|gt/uc/|\./\./gt/uc/|pxp/|\./\./pxp|gvt/|i915_perf|i915_pmu|i915_debugfs|i915_hwmon|i915_gpu_error|soc/|gt/.*debugfs|i915_gsc|gt/intel_gsc|i915_sysfs|gt/sysfs|gt/intel_gt_sysfs|i915_hdcp|i915_ioc32|gt/selftest|selftests/|i915_trace)' \
-    --follow-file tools/gpu_intel_tgl.follow --extern
+    --follow-file tools/gpu_intel_tgl.follow --classes tools/gpu_intel_tgl.classes [--list]
 ```
 
-**Indirekte Aufrufe folgt das Werkzeug nie von selbst.** Dort waehlt i915
-die Plattform (`engine->emit_flush`, `uncore->funcs.mmio_readl`, …); welcher
-Kandidat auf TGL laeuft, ist in der Quelle gelesen und steht mit Fundstelle
-in der `.follow`-Datei. Die verbleibenden ungefolgten Aufrufe sind entweder
-als „nicht auf TGL" belegt oder Rueckrufe der Linux-Infrastruktur
-(`i915_active`, `i915_sw_fence`).
+Zwei Stufen der Plattformwahl, beide maschinell:
+
+1. **Direkte Zweige** (`if (GRAPHICS_VER(i915) >= 12)`, `IS_TIGERLAKE`,
+   `HAS_*` aus der Geraeteinfo) wirft der Compiler weg, weil die Kopie sie
+   als Konstanten sieht. Nicht festgelegt sind Stepping-Abfragen (bleiben
+   im Graphen, also eher zu viel als zu wenig) und Werte, die erst zur
+   Laufzeit aus der Hardware kommen (Engine-Maske nach Fuses, `CCS_MASK`):
+   eine Funktion wie `xehp_enable_ccs_engines` steht deshalb drin und
+   kehrt auf TGL sofort zurueck.
+2. **Indirekte Aufrufe** folgt das Werkzeug nie von selbst. Welcher
+   Kandidat auf TGL laeuft, ist gelesen und steht mit Fundstelle in der
+   `.follow`-Datei. Ungefolgt bleiben nur als „nicht auf TGL" belegte
+   Zweige und Rueckrufe der Linux-Infrastruktur (`i915_active`,
+   `i915_sw_fence`).
 
 Ausgeschlossen und warum:
 
@@ -52,11 +66,12 @@ Ausgeschlossen und warum:
 
 ## 1 — Was TGL laut Linux IST
 
-Aus `i915_pci.c` (`tgl_info` ← `GEN12_FEATURES` ← … ← `GEN7_FEATURES`):
+Aus `i915_pci.c` (`tgl_info` ← `GEN12_FEATURES` ← … ← `GEN7_FEATURES`),
+`9A78` steht in `INTEL_TGL_GT2_IDS` → Unterplattform UY:
 
 | | |
 |---|---|
-| Engines | **RCS0, BCS0, VCS0, VCS2, VECS0 — keine CCS.** Compute laeuft ueber die GPGPU-Pipeline der RCS (`GPU_STACK.md` §7.1 sagt „RCS/CCS" — falsch fuer TGL). |
+| Engines | **RCS0, BCS0, VCS0, VCS2, VECS0 — keine CCS.** Compute laeuft ueber die GPGPU-Pipeline der RCS. |
 | Abgabe | Execlists mit **ELSQ** (`has_logical_ring_elsq`), CSB mit `GEN11_CSB_ENTRIES` |
 | Adressraum | **PPGTT voll, 48 Bit** → vier Ebenen (`i915_vm_is_4lvl`) |
 | Speicher | kein LMEM; Regionen `SMEM` + `STOLEN_SMEM` |
@@ -70,63 +85,58 @@ Aus `i915_pci.c` (`tgl_info` ← `GEN12_FEATURES` ← … ← `GEN7_FEATURES`):
 
 ## 2 — Der Umfang, ausgezaehlt
 
-**2275 Funktionen in 153 Dateien** auf TGL erreichbar (Stand des Graphen
-oben; Header-Inlines eingeschlossen).
+| Graph | Funktionen | Dateien |
+|---|---|---|
+| allgemein (alle Plattformen) | 2275 | 153 |
+| **auf TGL festgelegt** | **1925** | 145 |
+
+Die Festlegung allein nimmt 350 Funktionen heraus — `intel_workarounds.c`
+104 → 47, `intel_rps.c` 72 → 41, `i915_irq.c` 42 → 17.
 
 | Klasse | fn | Dateien | Umgang |
 |---|---|---|---|
-| **A — programmiert die Hardware** | **1221** | 56 | 1:1 portieren |
-| **B — Linux-Verwaltung** | 993 | 83 | Gegenstueck mit derselben Semantik, nicht abschreiben (§3) |
-| **N — nicht TGL** | 61 | 14 | entfaellt, Grund je Datei unten |
+| **A — programmiert die Hardware** | **958** | 54 | 1:1 portieren |
+| **B — Linux-Verwaltung** | 937 | 81 | Gegenstueck mit derselben Semantik (§3) |
+| **N — nicht TGL** | 30 | 10 | entfaellt, Grund in der `.classes`-Datei |
 
-**Vorbehalt:** direkte Aufrufe hinter `if (IS_VALLEYVIEW(…))` usw. zaehlen
-noch mit — der Graph kennt keine Bedingungen. Klasse A ist deshalb eine
-Obergrenze; die Feinklassifizierung je Funktion (TGL / nicht TGL) ist der
-naechste Schritt (§5).
+**Stufe 1 ist der ganze Init-Weg aus A, nicht „nur BCS".** Linux bringt
+die GT nie mit einer einzelnen Engine hoch: `intel_gt_init` legt alle
+Engines, Workarounds, MOCS, RC6 und RPS in einem Gang an, und die
+Workaround-Listen setzen Register, die alle Engines betreffen. Eine BCS
+allein waere genau die Auswahl einzelner Schritte, die beim RTL8852BE den
+Chip nie in einen stimmigen Gesamtzustand brachte.
 
-### A — Hardware, Datei fuer Datei
+### A — Hardware, Datei fuer Datei (TGL-Graph)
 
 | Datei | fn | Inhalt |
 |---|---|---|
-| `gt/intel_workarounds.c` | 104 | GT-, Engine-, Kontext-Workarounds **und die Registerpositivliste** (F4 aus `GPU_STACK.md`) |
-| `gt/intel_execlists_submission.c` | 99 | ELSQ, CSB-Auswertung, Preemption, Timeslice, Reset-Pfade |
-| `intel_uncore.c` + `.h` | 168 | MMIO mit Forcewake, Domaenentabellen, Shadow-Register |
-| `gt/intel_rps.c` + `.h` | 84 | Taktsteuerung (RPS) — fuer Watt und Leistung, nicht fuer das erste Bild |
-| `gt/intel_lrc.c` + `.h` | 55 | Kontextbild (LRC), Register-Offsets je Engine, indirekter Kontext-BB |
-| `gt/intel_engine_cs.c` + `intel_engine.h` | 64 | Engine-Init, MMIO-Basen, Status-Page, Idle-Pruefung |
-| `gt/intel_reset.c` | 49 | Engine- und GT-Reset — Pflicht, sobald ein Gast abgibt |
-| `gt/intel_gtt.c/.h`, `intel_ggtt.c`, `intel_ppgtt.c`, `gen8_ppgtt.c` | 148 | GGTT, PPGTT vier Ebenen, PTE-Kodierung `gen12_pte_encode` |
-| `i915_irq.c`, `gt/intel_gt_irq.c`, `intel_gt_pm_irq.c` | 65 | `gen11_irq_handler`, GT-Interrupts je Engine |
-| `gt/intel_gt.c` + `.h` | 49 | `intel_gt_init_hw`, Sanitize, Probe |
-| `gt/intel_rc6.c` | 26 | RC6 — Leerlaufstrom |
-| `gt/intel_ggtt_fencing.c` | 21 | Fence-Register (Detiling ueber die Apertur) |
-| `gt/intel_sseu.c/.h` | 23 | Slice/Subslice-Topologie, `R_PWR_CLK_STATE` |
-| `gt/gen8_engine_cs.c/.h` | 27 | **die Befehlsstroeme**: Flush, Breadcrumb, BB-Start |
+| `gt/intel_execlists_submission.c` | 96 | ELSQ, CSB-Auswertung, Preemption, Timeslice, Reset-Pfade |
+| `intel_uncore.c` + `.h` | 127 | MMIO mit Forcewake, Domaenentabellen, Shadow-Register |
+| `gt/intel_engine_cs.c` + `intel_engine.h` | 61 | Engine-Init, MMIO-Basen, Status-Page, Idle-Pruefung |
+| `gt/intel_workarounds.c` + `.h` | 49 | GT-, Engine-, Kontext-Workarounds **und die Registerpositivliste** (F4 aus `GPU_STACK.md`) |
+| `gt/intel_reset.c` | 46 | Engine- und GT-Reset — Pflicht, sobald ein Gast abgibt |
+| `gt/intel_lrc.c` + `.h` | 45 | Kontextbild (LRC), Register-Offsets je Engine, indirekter Kontext-BB |
+| `gt/intel_rps.c` + `.h` | 52 | Taktsteuerung |
+| `gt/intel_gtt.c/.h`, `intel_ggtt.c`, `intel_ppgtt.c`, `gen8_ppgtt.c` | 128 | GGTT, PPGTT vier Ebenen, PTE-Kodierung `gen12_pte_encode` |
+| `gt/intel_gt.c` + `.h` | 43 | `intel_gt_init_hw`, Sanitize, Probe |
+| `gt/intel_gt_pm.c/.h`, `intel_engine_pm.c/.h` | 62 | Park/Unpark — Mischung aus A und B |
+| `i915_irq.c`, `gt/intel_gt_irq.c/.h`, `intel_gt_pm_irq.c` | 35 | `gen11_irq_handler`, GT-Interrupts je Engine |
 | `gt/intel_timeline.c/.h` | 24 | HWSP-Seqnos — die Fences der Hardware |
-| `gt/intel_gt_mcr.c` | 16 | Multicast/Replicated-Register (Steering) |
-| `gt/intel_gt_pm.c/.h`, `intel_engine_pm.c/.h` | 65 | Park/Unpark — Mischung aus A und B |
-| `gt/intel_breadcrumbs.c/.h` | 18 | Warten auf Seqnos per Interrupt |
-| `gt/intel_mocs.c` | 13 | MOCS-Tabellen (Cache-Steuerung je Zugriff) |
+| `gt/gen8_engine_cs.c/.h` | 24 | **die Befehlsstroeme**: Flush, Breadcrumb, BB-Start |
 | `gt/intel_ring.c/.h` | 20 | Ringpuffer |
-| Rest (`clock_utils`, `heartbeat`, `wopcm`, `llc`, `tlb`, `renderstate`, `pcode`, `step`, `device_info`, `clock_gating`) | 77 | |
-
-### N — nicht TGL
-
-`vlv_iosf_sb.c` 11, `vlv_suspend.c` 2 (Valleyview), `i915_vgpu.c` 9 (GVT-Gast-
-Erkennung; wir laufen nackt), `i915_cmd_parser.c` 8 (auf Gen12 gibt es keinen
-Parser), `gt/intel_region_lmem.c` 7, `gem/i915_gem_lmem.c` 3, TTM 6 (kein
-LMEM), `gt/intel_migrate.c` 6 (LMEM-Kopien), `gt/gen6_ppgtt.c` 5,
-`gt/intel_ggtt_gmch.c` 4 (Gen5 und aelter), `gt/intel_gt_ccs_mode.c` 1 (keine
-CCS), `gt/intel_sa_media.c` 1 (MTL).
-
----
+| `gt/intel_breadcrumbs.c/.h` | 18 | Warten auf Seqnos per Interrupt |
+| `gt/intel_rc6.c` | 16 | RC6 — Leerlaufstrom |
+| `gt/intel_sseu.c/.h` | 14 | Slice/Subslice-Topologie, `R_PWR_CLK_STATE` |
+| `gt/intel_gt_mcr.c` | 13 | Multicast/Replicated-Register (Steering) |
+| `gt/intel_ggtt_fencing.c` | 12 | Fence-Register |
+| Rest (`heartbeat`, `mocs`, `clock_utils`, `device_info`, `llc`, `tlb`, `pcode`, `wopcm`, `renderstate`, `clock_gating`, `step`) | 71 | |
 
 ## 3 — Klasse B: was Linux verwaltet und wir selbst
 
-Groesste Posten: `i915_request` 124, `i915_vma` 128 + `vma_resource` 15,
-GEM-Objekte/Seiten/shmem/stolen ~200, `intel_wakeref` + Runtime-PM 97,
-`i915_active` 55, `intel_context` 63, Scheduler 22, `sw_fence` 22,
-`syncmap` 16.
+Groesste Posten (TGL-Graph): GEM-Objekte/Seiten/shmem/stolen 210,
+`i915_request` 124, `i915_vma` 115 + `vma_resource` 15, `intel_wakeref` +
+Runtime-PM 91, `intel_context` 65, `i915_active` 54, `sw_fence` 25,
+Scheduler 21, `syncmap` 16, Rest (Treiberkern, Hilfen) 201.
 
 Hier liegt die eine echte Abweichung von „1:1": diese Schicht verwaltet
 Linux-Objekte (Referenzzaehler, Sperren, Speicherdruck), keine Register. Sie
@@ -153,14 +163,15 @@ Feinklassifizierung nach A.
 
 ## 5 — Naechste Schritte
 
-1. **Feinklassifizierung A**: jede Funktion TGL / nicht TGL, an den
-   Plattformbedingungen gelesen (`GRAPHICS_VER`, `IS_*`, `HAS_*`). Ergebnis:
-   die exakte Portierliste.
-2. **Reihenfolge**: die Liste in Aufrufreihenfolge ab
-   `i915_driver_probe` → `intel_gt_init_hw` → `intel_engines_init` → erste
-   Abgabe auf BCS. Das ist Stufe 1.
+1. **Reihenfolge**: die A-Liste in Aufrufreihenfolge ab `i915_driver_probe`
+   (die `--list`-Ausgabe ist breadth-first; fuer die Portierung gilt die
+   Reihenfolge der Aufrufe IN jeder Funktion, gelesen in der Quelle).
+2. **Die Grenze A/B je Funktion**: Funktionen aus B, die ein Register oder
+   einen Befehlsstrom beruehren, wandern nach A; Funktionen aus A, die nur
+   Linux-Zustand halten (Referenzen, Sperren), werden auf gpudev
+   abgebildet. Erst danach ist die Liste der Auftragszettel.
 3. Erst danach Code (`tools/wasm/gpu_intel/`), und `linux-coverage.py`
-   bekommt den Eintrag `gpu_intel` gegen genau diese Liste.
+   bekommt den Eintrag `gpu_intel` gegen `GPU_INTEL_TGL_FUNCTIONS.txt`.
 
 ---
 

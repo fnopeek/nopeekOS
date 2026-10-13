@@ -1,0 +1,22 @@
+# Classes for the TGL call graph, by defining file (first match wins);
+# read by tools/linux-callgraph.py --classes. Unmatched files are B.
+#   A  programs the hardware: port 1:1
+#   N  not on TGL (reason after #)
+#   B  Linux bookkeeping: own counterpart on gpudev, same effect on hardware
+
+N ^gt/gen6_ppgtt\.          # aliasing PPGTT, TGL has full 48-bit PPGTT
+N ^gt/intel_ggtt_gmch\.     # Gen5 and older GMCH
+N ^gt/intel_gt_ccs_mode\.   # TGL has no CCS
+N ^gt/intel_sa_media\.      # MTL standalone media
+N ^gt/intel_region_lmem\.   # no LMEM
+N ^gt/intel_migrate\.       # LMEM copies
+N ^vlv_                     # Valleyview
+N ^i915_cmd_parser\.        # no command parser on Gen12
+N ^i915_vgpu\.              # GVT guest detection, we run bare
+N ^gem/i915_gem_(lmem|ttm|phys)\.   # LMEM / TTM / phys objects
+N ^(intel_region_ttm|i915_ttm_buddy_manager)\.
+
+A ^(\./\./)?intel_uncore
+A ^intel_(pcode|step|device_info|clock_gating)\.
+A ^i915_irq\.
+A ^(\./\./)?gt/(gen8_engine_cs|gen8_ppgtt|intel_ppgtt|intel_gtt|intel_ggtt|intel_ggtt_fencing|intel_breadcrumbs|intel_engine_cs|intel_engine\.h|intel_engine_heartbeat|intel_execlists_submission|intel_gt\.|intel_gt_clock_utils|intel_gt_irq|intel_gt_mcr|intel_gt_pm_irq|intel_gt_pm\.|intel_engine_pm\.|intel_llc|intel_lrc|intel_mocs|intel_rc6|intel_renderstate|intel_reset|intel_ring|intel_rps|intel_sseu|intel_timeline|intel_tlb|intel_wopcm|intel_workarounds)

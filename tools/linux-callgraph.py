@@ -13,7 +13,8 @@ inlining off, so every static helper keeps its own node:
 
 (modpost fails afterwards for lack of Module.symvers; the .ci files are
 written before that.) With M= the objects land in the source tree, so
---dir is the driver directory itself.
+--dir is the driver directory itself. To see one platform only, pin the
+copy first (tools/i915-tgl-specialize.py) so GCC drops the other branches.
 
 Indirect calls are where a driver picks its platform: GCC only records
 "an indirect call at file:line". This tool names the member being called
@@ -24,6 +25,7 @@ written down instead of guessed.
 
     linux-callgraph.py --dir D reach ROOT... [--depth N] [--prune RE]
                        [--prune-file RE] [--follow member=func ...] [--extern]
+                       [--follow-file F] [--classes F] [--list]
     linux-callgraph.py --dir D callers FUNC
 """
 import argparse, collections, os, re, sys
@@ -125,7 +127,25 @@ def bare(name):
     return name.split(':', 1)[-1]
 
 
-def reach(g, roots, depth, prune, prune_file, follow, show_extern):
+def load_classes(path):
+    out = []
+    for line in open(path):
+        line = line.split('#', 1)[0].strip()
+        if line:
+            cls, rx = line.split(None, 1)
+            out.append((cls, re.compile(rx)))
+    return out
+
+
+def classify(classes, loc):
+    for cls, rx in classes:
+        if rx.search(loc):
+            return cls
+    return 'B'
+
+
+def reach(g, roots, depth, prune, prune_file, follow, show_extern,
+          classes=None, flat=False):
     follow_map = collections.defaultdict(list)
     for item in follow:
         item = item.split('#', 1)[0].strip()
@@ -161,6 +181,26 @@ def reach(g, roots, depth, prune, prune_file, follow, show_extern):
                 q.append((c, d + 1, None))
             else:
                 ext[bare(c)] += 1
+
+    if flat:
+        # One line per function in discovery order (breadth first from the
+        # roots): class, depth, file:line, name.
+        for fn, d, via in order:
+            loc = g.defs.get(fn, '?')
+            cls = classify(classes, loc) if classes else '-'
+            print(f'{cls} {d:2d} {loc.lstrip("./"):45s} {bare(fn)}')
+        return
+
+    if classes:
+        tot = collections.Counter()
+        files = collections.defaultdict(set)
+        for fn, _, _ in order:
+            loc = g.defs.get(fn, '?')
+            c = classify(classes, loc)
+            tot[c] += 1
+            files[c].add(loc.rsplit(':', 2)[0])
+        for c in sorted(tot):
+            print(f'class {c}: {tot[c]} functions in {len(files[c])} files')
 
     byfile = collections.defaultdict(list)
     for fn, d, via in order:
@@ -207,6 +247,9 @@ def main():
     r.add_argument('--extern', action='store_true')
     c = sub.add_parser('callers')
     c.add_argument('func')
+    r.add_argument('--classes', help='class file, see gpu_intel_tgl.classes')
+    r.add_argument('--list', action='store_true',
+                   help='flat list: class depth file:line function')
     r.add_argument('--follow-file', action='append', default=[],
                    help='one member=func per line, # starts a comment')
     a = ap.parse_args()
@@ -216,7 +259,8 @@ def main():
     if a.cmd == 'reach':
         reach(g, a.roots, a.depth, re.compile(a.prune) if a.prune else None,
               re.compile(a.prune_file) if a.prune_file else None,
-              a.follow, a.extern)
+              a.follow, a.extern,
+              load_classes(a.classes) if a.classes else None, a.list)
     else:
         callers(g, a.func)
 
