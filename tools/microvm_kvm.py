@@ -24,6 +24,7 @@ go to --work, default /tmp/microvm-kvm.
 import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -186,6 +187,8 @@ def main():
     ap.add_argument("--fresh-home", action="store_true", help="new empty ext4 profile")
     ap.add_argument("--extra", default="", help="appended to the guest kernel command line")
     ap.add_argument("--qemu-arg", action="append", default=[], help="extra QEMU argument (repeatable)")
+    ap.add_argument("--net", choices=("passt", "user"), default=None,
+                    help="passt (near line rate, default when installed) or QEMU's slirp")
     ap.add_argument("--work", default="/tmp/microvm-kvm")
     ap.add_argument("--qemu", default="qemu-system-x86_64")
     ap.add_argument("--bzimage", default=os.path.join(ROOT, "release/assets/linux-virt.bzImage"))
@@ -229,6 +232,26 @@ def main():
         + (" npkswcursor" if a.show else "")
         + (f" {a.extra}" if a.extra else "")
     )
+    # The guest sets 10.99.0.2/24 via 10.99.0.1 itself and asks 1.1.1.1.
+    # slirp ends the guest's TCP inside QEMU and caps the upload well below
+    # 1 Gbit; passt carries it to the host's sockets near line rate.
+    net = a.net or ("passt" if shutil.which("passt") else "user")
+    passt = None
+    if net == "passt":
+        sock = os.path.join(a.work, "passt.sock")
+        if os.path.exists(sock):
+            os.unlink(sock)
+        passt = subprocess.Popen(["passt", "-f", "-1", "-s", sock, "-a", "10.99.0.2",
+                                  "-n", "24", "-g", "10.99.0.1"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(100):
+            if os.path.exists(sock):
+                break
+            time.sleep(0.02)
+        netdev = ["-netdev", f"stream,id=n0,server=off,addr.type=unix,addr.path={sock}"]
+    else:
+        netdev = ["-netdev", "user,id=n0,net=10.99.0.0/24,host=10.99.0.1"]
+    print(f"[boottime] network: {net}", flush=True)
     # Slot order fixes the names: home is vda, sqfs is vdb, as in nopeekOS.
     argv = [
         a.qemu, "-enable-kvm", "-cpu", "host", "-machine", "pc",
@@ -250,7 +273,7 @@ def main():
         # which the scripted clicks below aim at slot 0.
         "-device", "virtio-keyboard-pci",
         "-device", "virtio-mouse-pci" if a.show else "virtio-tablet-pci",
-        "-netdev", "user,id=n0,net=10.99.0.0/24,host=10.99.0.1",
+        *netdev,
         "-device", "virtio-net-pci,netdev=n0",
         "-audiodev", "none,id=snd0", "-device", "virtio-sound-pci,audiodev=snd0",
         "-device", "virtio-serial-pci",
