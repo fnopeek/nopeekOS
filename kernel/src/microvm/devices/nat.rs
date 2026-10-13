@@ -892,6 +892,21 @@ pub fn flight_rx_wait(kind: u8, n: u64) {
     f.next = (i + 1) % FLIGHT_LEN;
 }
 
+/// `FLIGHT_LATE` with where the worker was: the step it entered last
+/// (`net_dataplane::PH_*`) and the cores of its previous and this pass.
+pub fn flight_worker_late(gap_ms: u64, phase: u64, prev_core: u64, core: u64) {
+    if !FLIGHT_ON.load(AtOrd::Relaxed) { return; }
+    let ev = FlightEv {
+        tsc: crate::interrupts::rdtsc(), seq: phase as u32,
+        ack: ((prev_core as u32 & 0xFFFF) << 16) | (core as u32 & 0xFFFF),
+        len: gap_ms as u32, win: 0, hp: 0, dir: FLIGHT_LATE, flags: 0, sack: false,
+    };
+    let mut f = FLIGHT.lock();
+    let i = f.next;
+    f.ev[i] = ev;
+    f.next = (i + 1) % FLIGHT_LEN;
+}
+
 /// The flow's segments around its silence, oldest first.
 fn flight_dump(hp: u16, last: u64, now: u64, freq: u64) {
     let from = last.saturating_sub(freq / 50);
@@ -931,8 +946,10 @@ fn flight_dump(hp: u16, last: u64, now: u64, freq: u64) {
         match e.dir {
             FLIGHT_NOBUF => kprintln!("[flight]   {:>8}us nobuf tap={} (guest posted no RX buffer)",
                 us(e.tsc), e.len),
-            FLIGHT_LATE => kprintln!("[flight]   {:>8}us late  worker back after {} ms, frames waiting",
-                us(e.tsc), e.len),
+            FLIGHT_LATE => kprintln!("[flight]   {:>8}us late  worker back after {} ms, frames waiting (was in {}, core {} -> {})",
+                us(e.tsc), e.len,
+                ["service", "tcp tick", "poll yield", "notify lock", "park"].get(e.seq as usize).unwrap_or(&"?"),
+                e.ack >> 16, e.ack & 0xFFFF),
             d => kprintln!("[flight]   {:>8}us {} port={} len={} {}",
                 us(e.tsc), if d == 0 { "out" } else if d == 1 { "in " } else { "dlv" }, e.hp, e.len,
                 if e.flags & TCP_PSH != 0 { "P" } else { "" }),

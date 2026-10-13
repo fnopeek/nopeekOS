@@ -373,18 +373,32 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
 
 /// The previous pass of this worker, for the flight recorder's `late`.
 static LAST_PASS_TSC: AtomicU64 = AtomicU64::new(0);
+/// Where the worker was between two passes, for `late`: the step it entered
+/// last (`PH_*`) and the core of the previous pass.
+static WORKER_PHASE: AtomicU64 = AtomicU64::new(0);
+static LAST_PASS_CORE: AtomicU64 = AtomicU64::new(u64::MAX);
+pub const PH_SERVICE: u64 = 0;
+pub const PH_TICK: u64 = 1;
+pub const PH_POLL_YIELD: u64 = 2;
+pub const PH_NOTIFY_LOCK: u64 = 3;
+pub const PH_PARK: u64 = 4;
+
+#[inline]
+fn phase(p: u64) { WORKER_PHASE.store(p, Ordering::Relaxed); }
 
 /// Frames waited for the guest while this worker was away for over 5 ms.
 fn note_rx_wait_gap() {
     let now = crate::interrupts::rdtsc();
     let prev = LAST_PASS_TSC.swap(now, Ordering::Relaxed);
+    let core = crate::smp::per_core::current_core_id() as u64;
+    let prev_core = LAST_PASS_CORE.swap(core, Ordering::Relaxed);
     let ms = (crate::interrupts::tsc_freq() / 1000).max(1);
     let gap = now.wrapping_sub(prev) / ms;
-    if prev != 0 && gap > 5 {
-        crate::microvm::devices::nat::flight_rx_wait(
-            crate::microvm::devices::nat::FLIGHT_LATE,
-            if crate::microvm::devices::nat::tap_len() > 0 { gap } else { 0 });
+    if prev != 0 && gap > 5 && crate::microvm::devices::nat::tap_len() > 0 {
+        crate::microvm::devices::nat::flight_worker_late(
+            gap, WORKER_PHASE.load(Ordering::Relaxed), prev_core, core);
     }
+    phase(PH_SERVICE);
 }
 
 /// Frames taken from the guest's TX ring at `now`: the pickup time since its
@@ -575,6 +589,7 @@ fn worker_entry(_arg: u64) {
         // Host-originated TCP timers (OTA/https) at most ~100 Hz — never per-wake.
         let now = crate::interrupts::ticks();
         if now != last_tick {
+            phase(PH_TICK);
             crate::net::tcp::tick_connections();
             last_tick = now;
         }
@@ -605,6 +620,7 @@ fn worker_entry(_arg: u64) {
                 if crate::interrupts::rdtsc() >= deadline { break; }
                 // Cooperative core: a peer fiber here (the NAPI fiber filling
                 // the tap) runs between two looks instead of after the window.
+                phase(PH_POLL_YIELD);
                 crate::smp::fiber::yield_ready();
                 // Teardown may have run meanwhile.
                 if STOP.load(Ordering::Acquire) { break; }
@@ -621,6 +637,7 @@ fn worker_entry(_arg: u64) {
         // was off is served now instead of waiting for the park's timeout.
         // Fetched again: the one above predates the busy-poll's yields.
         if let Some(gm) = crate::microvm::devices::guest_mem::active() {
+            phase(PH_NOTIFY_LOCK);
             if crate::microvm::devices::net_backend::lock().tx_set_notify(gm, true) {
                 continue;
             }
@@ -639,6 +656,7 @@ fn worker_entry(_arg: u64) {
         }
         let deadline = crate::interrupts::rdtsc()
             + PARK_SAFETY_MS.saturating_mul(crate::interrupts::tsc_freq() / 1000);
+        phase(PH_PARK);
         let woke = crate::smp::fiber::park_on_bell(deadline, has_work);
         crate::microvm::devices::nat::set_worker_parked(false);
         // It may have woken on another core (`fiber::steal_for`).
