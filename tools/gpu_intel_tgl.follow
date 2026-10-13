@@ -129,3 +129,145 @@ schedule = i915_schedule
 #     IP < 12.10 -> gen11_irq_handler (a root, registered via request_irq);
 #     logical_ring_default_vfuncs -> intel_engine_set_irq_handler
 irq_handler = execlists_irq_handler
+
+# ===== display (display/, pinned to TGL UY, DISPLAY_VER 12) =====
+# Member names repeat across tables (get_hw_state: DPLL, encoder,
+# connector, TC PHY, watermarks); each line names its table.
+
+# intel_display.c intel_init_display_hooks: DISPLAY_VER >= 9 -> skl_display_funcs
+get_pipe_config            = hsw_get_pipe_config
+crtc_disable               = hsw_crtc_disable
+get_initial_plane_config   = skl_get_initial_plane_config
+fixup_initial_plane_config = skl_fixup_initial_plane_config
+
+# intel_cdclk.c intel_init_cdclk_hooks: DISPLAY_VER >= 12 -> tgl_cdclk_funcs
+get_cdclk          = bxt_get_cdclk
+calc_voltage_level = tgl_calc_voltage_level
+
+# intel_wm.c intel_wm_init -> skl_wm_init -> skl_wm_funcs (no update_wm)
+get_hw_state = skl_wm_get_hw_state
+sanitize     = skl_wm_sanitize
+
+# intel_color.c intel_color_init_hooks: !HAS_GMCH, DISPLAY_VER >= 12 -> tgl_color_funcs
+color_commit_arm   = icl_color_commit_arm
+color_commit_noarm = icl_color_commit_noarm
+get_config         = skl_get_config
+
+# intel_fbc.c: DISPLAY_VER >= 7 -> ivb_fbc_funcs
+deactivate = ilk_fbc_deactivate
+is_active  = ilk_fbc_is_active
+
+# intel_display.c intel_setup_outputs: VBT encoders -> intel_ddi_init
+@display/intel_bios.c:3775 = intel_ddi_init
+
+# intel_ddi.c intel_ddi_init: common hooks, then DISPLAY_VER >= 11 with
+# combo ports (A, B) and Type-C ports (TC1..TC6)
+get_hw_state      = intel_ddi_get_hw_state
+sync_state        = intel_ddi_sync_state
+get_power_domains = intel_ddi_get_power_domains
+post_disable      = intel_ddi_post_disable
+get_config        = icl_ddi_combo_get_config
+get_config        = icl_ddi_tc_get_config
+disable_clock     = icl_ddi_combo_disable_clock
+disable_clock     = icl_ddi_tc_disable_clock
+is_clock_enabled  = icl_ddi_combo_is_clock_enabled
+is_clock_enabled  = icl_ddi_tc_is_clock_enabled
+# intel_dp.c / intel_hdmi.c: HAS_DDI -> intel_ddi_connector_get_hw_state
+get_hw_state      = intel_ddi_connector_get_hw_state
+
+# intel_dpll_mgr.c intel_dpll_init: DISPLAY_VER >= 12 -> tgl_pll_mgr,
+# tgl_plls = combo_pll_funcs x2, tbt_pll_funcs, dkl_pll_funcs x6
+update_ref_clks = icl_update_dpll_ref_clks
+dump_hw_state   = icl_dump_hw_state
+get_hw_state    = combo_pll_get_hw_state
+get_hw_state    = tbt_pll_get_hw_state
+get_hw_state    = dkl_pll_get_hw_state
+disable         = combo_pll_disable
+disable         = tbt_pll_disable
+disable         = mg_pll_disable
+
+# intel_tc.c: DISPLAY_VER 12, not ADL-P -> tgl_tc_phy_ops
+hpd_live_status = icl_tc_phy_hpd_live_status
+get_hw_state    = icl_tc_phy_get_hw_state
+
+# intel_display_power_map.c tgl_power_wells: always-on, pw_1, main, tc_cold_off, aux
+sync_hw    = i9xx_power_well_sync_hw_noop
+sync_hw    = hsw_power_well_sync_hw
+sync_hw    = tgl_tc_cold_off_power_well_sync_hw
+enable     = i9xx_always_on_power_well_noop
+enable     = hsw_power_well_enable
+enable     = gen9_dc_off_power_well_enable
+enable     = icl_aux_power_well_enable
+enable     = tgl_tc_cold_off_power_well_enable
+disable    = i9xx_always_on_power_well_noop
+disable    = hsw_power_well_disable
+disable    = gen9_dc_off_power_well_disable
+disable    = icl_aux_power_well_disable
+disable    = tgl_tc_cold_off_power_well_disable
+is_enabled = i9xx_always_on_power_well_enabled
+is_enabled = hsw_power_well_enabled
+is_enabled = gen9_dc_off_power_well_enabled
+is_enabled = tgl_tc_cold_off_power_well_is_enabled
+
+# skl_universal_plane.c skl_universal_plane_create: VER 12
+max_stride    = skl_plane_max_stride
+min_alignment = tgl_plane_min_alignment
+disable_arm   = icl_plane_disable_arm
+
+@intel_uncore.h:376 = fwtable_read32
+
+# --- second display round (reached through intel_ddi_init)
+# tgl_tc_phy_ops
+cold_off_domain = tgl_tc_phy_cold_off_domain
+connect         = icl_tc_phy_connect
+disconnect      = icl_tc_phy_disconnect
+is_owned        = icl_tc_phy_is_owned
+is_ready        = icl_tc_phy_is_ready
+# tgl_plls get_freq; intel_ddi_init DISPLAY_VER >= 11 TC port_pll_type
+get_freq      = icl_ddi_combo_pll_get_freq
+get_freq      = icl_ddi_tbt_pll_get_freq
+get_freq      = icl_ddi_mg_pll_get_freq
+port_pll_type = icl_ddi_tc_port_pll_type
+post_pll_disable = intel_ddi_post_pll_disable
+# tgl_color_funcs
+read_csc  = icl_read_csc
+read_luts = icl_read_luts
+# intel_ddi_init: DISPLAY_VER >= 11, TC ports lock/unlock, connected per port kind
+lock      = intel_tc_port_lock
+unlock    = intel_tc_port_unlock
+connected = intel_tc_port_connected
+connected = lpt_digital_port_connected
+# intel_hdmi.c intel_infoframe_init: HAS_DDI, LSPCON only if the VBT says so
+write_infoframe    = hsw_write_infoframe
+write_infoframe    = lspcon_write_infoframe
+read_infoframe     = hsw_read_infoframe
+read_infoframe     = lspcon_read_infoframe
+set_infoframes     = hsw_set_infoframes
+set_infoframes     = lspcon_set_infoframes
+infoframes_enabled = hsw_infoframes_enabled
+infoframes_enabled = lspcon_infoframes_enabled
+# intel_hotplug_irq.c: DISPLAY_VER >= 11 -> gen11_hpd_funcs
+hpd_enable_detection = gen11_hpd_enable_detection
+# eDP only, run when the VBT lists a panel: PCH TGP >= CNP -> cnp_pwm_funcs;
+# intel_pps.c pps index checks; intel_bios.c tries every panel-type source
+setup = cnp_setup_backlight
+@display/intel_pps.c:393 = pps_has_pp_on
+@display/intel_pps.c:393 = pps_has_vdd_on
+@display/intel_pps.c:393 = pps_any
+get_panel_type = opregion_get_panel_type
+get_panel_type = vbt_get_panel_type
+get_panel_type = pnpid_get_panel_type
+get_panel_type = fallback_get_panel_type
+hz_to_pwm = cnp_hz_to_pwm
+# Not followed: skl_wm_funcs has no update_wm; the quirk hooks
+# (intel_quirks.c, intel_init_dpcd_quirks) apply by PCI subsystem ID and
+# panel, so which of them runs on the NUC is a device question, not a
+# platform one -- read on the device (lspci -nnv subsystem) before porting.
+
+# --- stage-1 graph (GT + display readout together)
+# gen8_gmch_probe: GGTT read-back, used by the initial plane takeover to
+# find the firmware framebuffer's pages
+read_entry = gen8_ggtt_read_entry
+pte_decode = gen8_ggtt_pte_decode
+# gen11_hpd_funcs (INTEL_HPD_FUNCS(gen11))
+hpd_irq_setup = gen11_hpd_irq_setup

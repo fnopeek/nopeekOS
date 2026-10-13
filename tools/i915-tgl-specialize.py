@@ -18,7 +18,9 @@ graph.
 The display code has its own switches: DISPLAY_VER and the platform
 bitfield (display->platform.tigerlake). Both are pinned the same way, from
 intel_display_device.c (tgl_desc: platform tigerlake, subplatform uy, IP 12).
-DISPLAY_INFO flags (has_psr, has_dsb, ...) stay at run time.
+DISPLAY_INFO is pinned to the branch flags of XE_D_DISPLAY (has_ddi,
+has_psr, ...); its tables (pipe offsets, colour) read as zero in the copy,
+which is harmless for a call graph and wrong for anything else.
 """
 import os, re, sys
 
@@ -86,6 +88,11 @@ def main(d):
     print(f'{path}: pinned to TGL GT2')
 
 
+# The 1-flags of XE_D_DISPLAY; every other DEV_INFO_DISPLAY flag is 0 on TGL.
+TGL_DISPLAY_FLAGS = ['has_ddi', 'has_dp_mst', 'has_dsb', 'has_fpga_dbg',
+                     'has_hotplug', 'has_ipc', 'has_psr', 'has_psr_hw_tracking']
+
+
 def pin_display(d):
     dd = f'{d}/display'
     path = f'{dd}/intel_display_device.h'
@@ -103,7 +110,21 @@ def pin_display(d):
                      '/* Tiger Lake UY display platform as a compile-time constant */\n'
                      'static const struct intel_display_platforms __npk_display_platform = {\n'
                      '\t.tigerlake = 1,\n\t.tigerlake_uy = 1,\n};\n\n#undef __MEMBER\n')
+    s = replace_once(s, '#define DISPLAY_INFO(__display)\t\t((__display)->info.__device_info)',
+                     '#define DISPLAY_INFO(__display)\t\t((void)(__display), &__npk_tgl_display_info)')
+    end = s.rstrip().rfind('#endif')
+    s = (s[:end] +
+         '/* XE_D_DISPLAY branch flags (intel_display_device.c tgl_desc) */\n'
+         'static const struct intel_display_device_info __npk_tgl_display_info = {\n'
+         + ''.join(f'\t.{f} = 1,\n' for f in TGL_DISPLAY_FLAGS) +
+         '};\n\n' + s[end:])
     open(path, 'w').write(s)
+    # The probe stores the info pointer through the macro; keep that store.
+    dev_c = f'{dd}/intel_display_device.c'
+    t, k = re.subn(r'DISPLAY_INFO\((\w+)\) = ', r'\1->info.__device_info = ', open(dev_c).read())
+    if k == 0:
+        sys.exit('DISPLAY_INFO store not found in intel_display_device.c')
+    open(dev_c, 'w').write(t)
     # Every read of the platform bits, except where the probe writes them.
     rx = re.compile(r'(\(__display\)|\bdisplay)->platform\.')
     n_files = n_sites = 0

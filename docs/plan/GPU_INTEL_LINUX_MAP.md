@@ -159,29 +159,52 @@ Feinklassifizierung nach A.
 `intel_display_driver_probe_nogem` liest erst den ganzen Display-Zustand
 aus der Hardware (`intel_modeset_setup_hw_state`: aktive Pipes,
 Transcoder, Encoder, DPLLs), dann liest `intel_initial_plane_config`
-(`skl_get_initial_plane_config` auf TGL) Adresse, Groesse und Tiling der
-Ebene und **reserviert diesen Bereich in Stolen-Speicher und GGTT** —
-bevor `i915_gem_init` → `init_ggtt` die GGTT einrichtet. `init_ggtt` sagt
-es im Kommentar selbst: „0 may already be in use by the system (e.g. the
-BIOS framebuffer)". Ohne diesen Teil ist das Bild nach dem Laden des
-Moduls weg — und unser Compositor kopiert heute JEDES Bild per BCS nach
-GGTT-Offset 0, dem Scanout der Firmware.
+(`skl_get_initial_plane_config`) Adresse, Groesse und Tiling der Ebene,
+findet ueber `gen8_ggtt_read_entry` die Seiten dahinter und **reserviert
+den Bereich in Stolen-Speicher und GGTT** — bevor `i915_gem_init` →
+`init_ggtt` die GGTT einrichtet („0 may already be in use by the system
+(e.g. the BIOS framebuffer)"). Ohne diesen Teil ist das Bild nach dem
+Laden des Moduls weg; unser Compositor kopiert heute jedes Bild per BCS
+nach GGTT-Offset 0.
 
-Gemessen am festgelegten Graphen (`i915-tgl-specialize.py` legt seit
-heute auch `DISPLAY_VER` und `display->platform` fest, 1214 Lesestellen in
-76 Dateien): **`probe_noirq` + `probe_nogem` erreichen ~1080 Funktionen**
-direkt, dazu 40 noch nicht gelesene Weichen (Encoder-`get_hw_state`,
-Power-Wells, DPLL-Manager). `DISPLAY_INFO`-Flags (`has_ddi`, `has_psr`, …)
-sind noch nicht festgelegt — deshalb steht z. B. `intel_sdvo.c` noch
-drin; die Zahl ist eine Obergrenze. Darin auch **DMC**: TGL laedt die
-Display-Firmware fuer die Stromsparzustaende DC5/DC6.
+**Grenze von Stufe 1 im Display:** `probe_noirq` + `probe_nogem` (Auslesen
+und Uebernahme) gehoeren dazu; `intel_display_driver_probe` danach — der
+erste atomare Commit des ausgelesenen Zustands, Hotplug, fbdev — **nicht**.
+Er braucht die ganze Commit-Maschine, und die kommt mit Stufe 4 (Ebenen).
+Bis dahin bleibt das Bild der Firmware unveraendert stehen; der Desktop
+kommt wie heute per BCS hinein. Auch der Display-Interrupt bleibt bis
+Stufe 4 draussen (der BCS-Weg braucht kein vblank).
 
-Der Display-Teil ist zugleich die Grundlage fuer Stufe 4 (Ebenen): wer
-eine Ebene setzt, muss wissen, welche Pipe laeuft.
+Festgelegt ist der Display-Code wie die GT (`i915-tgl-specialize.py`):
+`DISPLAY_VER`, die Plattformbits (1214 Lesestellen in 76 Dateien) und die
+Verzweigungsflags von `DISPLAY_INFO` (`XE_D_DISPLAY`). Die Weichen stehen
+in der `.follow`-Datei — Display-Hooks, CDCLK, Watermarks, Farbe, FBC,
+DDI-Encoder (Combo A/B, Type-C TC1–6), DPLLs (Combo, TBT, DKL),
+Type-C-PHY, Power-Wells, Ebenen, HDMI-Infoframes, Hotplug, und fuer eDP
+(laeuft, wenn die VBT ein Panel nennt) Backlight, PPS und Panel-Typ.
+
+**Offen und eine Geraetefrage:** die Quirk-Hooks (`intel_quirks.c`,
+DPCD-Quirks) greifen je PCI-Subsystem-ID bzw. Panel — welche auf dem NUC
+laufen, sagt `lspci -nnv` am Geraet, nicht die Plattform.
 
 **uAPI fuer native context (Stufe 7):** `i915_gem_execbuffer.c`,
 `i915_getparam.c`, `i915_query.c`, `i915_gem_create.c`,
 `i915_gem_context.c` — eigene Wurzeln, wenn Stufe 7 ansteht.
+
+### Stufe 1 gesamt (GT + Display-Uebernahme)
+
+| Klasse | fn |
+|---|---|
+| **A** gesamt | **2602** |
+| davon GT + Kern | 1117 |
+| davon Display | 1485 (groesste: `intel_de.h` 159, `intel_bios.c` 106, `intel_display.c` 91, `intel_ddi.c` 72, `intel_dp.c` 69, `intel_tc.c` 68, `intel_fb.c` 59, Power-Wells 97, `intel_pps.c` 44, CDCLK 43, DPLL 36, DMC 28) |
+| B | 1086 |
+| N | 30 |
+
+`GPU_INTEL_TGL_FUNCTIONS.txt` und `GPU_INTEL_TGL_TREE.txt` beschreiben seit
+diesem Stand Stufe 1 gesamt. Die GT-Zahlen aus §2 (984) gelten fuer die GT
+allein; mit dem Display wachsen sie auf 1117, weil die Uebernahme mehr von
+GEM/GGTT braucht (Objekt an fester Stelle, GGTT auslesen).
 
 ---
 

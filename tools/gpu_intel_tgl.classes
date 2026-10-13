@@ -53,3 +53,9 @@ A @__i915_request_fill
 A @emit_semaphore_wait
 A @__emit_semaphore_wait
 A @can_use_semaphore_wait
+
+# Display: nearly every function reads or writes display registers
+# (intel_de_*) or decodes firmware tables (VBT, intel_bios.c) -- port 1:1.
+# Bookkeeping files first, since the first match wins.
+B ^display/(intel_display_rpm|intel_frontbuffer|intel_fb_bo|intel_bo|intel_display_conversion|intel_display_types\.h|intel_display_trace)
+A ^(\./\./)?display/
