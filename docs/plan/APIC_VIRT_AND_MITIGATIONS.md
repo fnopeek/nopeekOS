@@ -138,5 +138,5 @@ has only the generated tables to go on — read its two boot lines.
 |---|---|---|---|---|---|
 | NUC | Tiger Lake (6, 0x8C) | eIBRS + BHB clearing, one RSB entry | expected: BHI, PBRSB, GDS microcode, ITS host only | APICv on | 0.591–0.592: vmbench, upload |
 | IdeaPad | Ryzen 5 5500U (0x17) | IBPB on every exit, full RSB fill | expected: retbleed IBPB, retbleed SMT STIBP, SRSO IBPB, SMT_RSB | software (AVIC open) | 0.432 boot + LibreWolf |
-| Dev box (QEMU) | Ryzen 5 9600X (0x1A), nested | AutoIBRS (BP_CFG not written under a hypervisor) | expected: SRSO | software | 0.583 upload |
+| Dev box (QEMU) | Ryzen 5 9600X (0x1A), nested | AutoIBRS, IBPB on exit for SRSO (BP_CFG is not written under a hypervisor) | expected: SRSO IBPB | software | 0.583 upload |
 | N100 | Gracemont (6, 0xBE) | — | expected: RFDS VERW if `RFDS_CLEAR`, BHI | — | not run |
