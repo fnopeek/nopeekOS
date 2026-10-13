@@ -169,3 +169,46 @@ pub static intel_engines: [engine_info; 27] = [
 // display/intel_bios.c
 /// display/intel_bios.c:3016
 pub static vbt_signature: [u8; 5] = [0x24, 0x56, 0x42, 0x54, 0x0];
+/// display/intel_bios.c:168
+pub static bdb_blocks: [bdb_block; 16] = [
+    bdb_block { section_id: 0x1, min_size: 0x7 },
+    bdb_block { section_id: 0x2, min_size: 0x5 },
+    bdb_block { section_id: 0x9, min_size: 0x64 },
+    bdb_block { section_id: 0xc, min_size: 0x13 },
+    bdb_block { section_id: 0x16, min_size: 0x16 },
+    bdb_block { section_id: 0x17, min_size: 0x48 },
+    bdb_block { section_id: 0x1b, min_size: 0x350 },
+    bdb_block { section_id: 0x28, min_size: 0x22 },
+    bdb_block { section_id: 0x29, min_size: 0x94 },
+    bdb_block { section_id: 0x2a, min_size: 0x0 },
+    bdb_block { section_id: 0x2b, min_size: 0x131 },
+    bdb_block { section_id: 0x2c, min_size: 0x88 },
+    bdb_block { section_id: 0x34, min_size: 0x336 },
+    bdb_block { section_id: 0x35, min_size: 0x1 },
+    bdb_block { section_id: 0x38, min_size: 0xd2 },
+    bdb_block { section_id: 0x3a, min_size: 0x2 },
+];
+/// display/intel_bios.c:2223
+pub static icp_ddc_pin_map: [u8; 15] = [0x0, 0x1, 0x2, 0x3, 0x0, 0x0, 0x0, 0x0, 0x0, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9];
+/// display/intel_bios.c:3639
+pub static direct_aux_ch_map: [u8; 9] = [0x40, 0x10, 0x20, 0x30, 0x50, 0x60, 0x70, 0x80, 0x90];
+
+// display/intel_gmbus.c
+/// display/intel_gmbus.c:116
+pub static gmbus_pins_icp: [gmbus_pin; 15] = [
+    gmbus_pin { valid: 0x0 },
+    gmbus_pin { valid: 0x1 },
+    gmbus_pin { valid: 0x1 },
+    gmbus_pin { valid: 0x1 },
+    gmbus_pin { valid: 0x0 },
+    gmbus_pin { valid: 0x0 },
+    gmbus_pin { valid: 0x0 },
+    gmbus_pin { valid: 0x0 },
+    gmbus_pin { valid: 0x0 },
+    gmbus_pin { valid: 0x1 },
+    gmbus_pin { valid: 0x1 },
+    gmbus_pin { valid: 0x1 },
+    gmbus_pin { valid: 0x1 },
+    gmbus_pin { valid: 0x1 },
+    gmbus_pin { valid: 0x1 },
+];

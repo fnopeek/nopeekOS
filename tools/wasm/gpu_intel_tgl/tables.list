@@ -24,3 +24,8 @@ tgl_uy_steppings: u32
 intel_engines: engine_info { class, instance, ver0=mmio_bases[0].graphics_ver, base0=mmio_bases[0].base, ver1=mmio_bases[1].graphics_ver, base1=mmio_bases[1].base, ver2=mmio_bases[2].graphics_ver, base2=mmio_bases[2].base }
 @ display/intel_bios.c
 vbt_signature: u8
+bdb_blocks: bdb_block { section_id, min_size }
+icp_ddc_pin_map: u8
+direct_aux_ch_map: u8
+@ display/intel_gmbus.c
+gmbus_pins_icp: gmbus_pin { valid=name != 0 }
