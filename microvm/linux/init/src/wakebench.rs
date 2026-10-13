@@ -168,8 +168,21 @@ fn wait_for_cpus() -> u32 {
     last
 }
 
-/// Run `vmbench` in a child with its output on the serial console, and
-/// wait for it.
+/// Write "on" to /proc/sys/kernel/printk_devkmsg; true if the kernel took it.
+fn set_devkmsg_on() -> bool {
+    let path = b"/proc/sys/kernel/printk_devkmsg\0";
+    // SAFETY: NUL-terminated path, O_WRONLY.
+    let fd = unsafe { syscall3(super::SYS_OPEN, path.as_ptr() as u64, 1, 0) };
+    if fd < 0 { return false; }
+    let v = b"on\n";
+    // SAFETY: fd just opened, buffer of `v.len()` bytes.
+    let n = unsafe { syscall3(super::SYS_WRITE, fd as u64, v.as_ptr() as u64, v.len() as u64) };
+    // SAFETY: closing the fd opened above.
+    unsafe { syscall1(super::SYS_CLOSE, fd as u64) };
+    n == v.len() as i64
+}
+
+/// Run `vmbench` in a child with its output on /dev/kmsg, and wait for it.
 pub fn run_vm(kmsg_fd: i64) {
     // SAFETY: fork has no preconditions.
     let pid = unsafe { syscall0(super::SYS_FORK) };
@@ -183,8 +196,14 @@ pub fn run_vm(kmsg_fd: i64) {
     }
     wait_for_cpus();
     super::write_file(b"/tmp/vmbench\0", VMBENCH, 0o755);
-    // stdout stays PID 1's console: /dev/kmsg would cut the run off after a
-    // burst of ten lines.
+    // /dev/kmsg cuts a writer off after a burst of ten lines unless this is
+    // "on"; the console's own tty path is not reliable on every host.
+    let ok = set_devkmsg_on();
+    say(kmsg_fd, if ok { b"[vmbench] kmsg rate limit off\n" } else { b"[vmbench] kmsg rate limit still on\n" });
+    if kmsg_fd >= 0 {
+        // SAFETY: duplicating an open fd onto stdout.
+        unsafe { syscall2(super::SYS_DUP2, kmsg_fd as u64, 1) };
+    }
     let path = b"/tmp/vmbench\0";
     let argv = [path.as_ptr(), core::ptr::null()];
     let envp: [*const u8; 1] = [core::ptr::null()];
