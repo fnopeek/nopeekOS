@@ -155,6 +155,7 @@ fn launch_wayland(kmsg_fd: i64) {
     say(kmsg_fd, b"[microvm-init] starting Wayland session\n");
     write_file(b"/tmp/lw-probe.js\0", LW_PROBE, 0o644);
     write_file(b"/tmp/lw-sample.sh\0", LW_SAMPLE, 0o644);
+    write_file(b"/tmp/load-sample.sh\0", LOAD_SAMPLE, 0o644);
     write_file(b"/tmp/npkwm\0", NPKWM, 0o755);
 
     let prog = b"/bin/sh\0".as_ptr();
@@ -307,6 +308,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  ( sleep 15; while true; do sync 2>/dev/null; sleep 3; done ) & \
+                 grep -q npkload /proc/cmdline && sh /tmp/load-sample.sh /dev/kmsg & \
                  if grep -q npkbench_cpu /proc/cmdline; then \
                    t() { read u _ < /proc/uptime; echo \"${u%.*}${u#*.}\"; }; \
                    a=$(t); i=0; while [ $i -lt 1000000 ]; do i=$((i+1)); done; b=$(t); \
@@ -613,6 +615,9 @@ const LW_PROBE: &[u8] = include_bytes!("lw_probe.js");
 /// With `npkstats` on the command line, samples the app process's faults,
 /// CPU time and waits for its first second.
 const LW_SAMPLE: &[u8] = include_bytes!("lw_sample.sh");
+
+/// System load per second (`npkload` on the cmdline).
+const LOAD_SAMPLE: &[u8] = include_bytes!("load_sample.sh");
 
 /// The guest compositor, built by `microvm/linux/npkwm/build.sh`.
 const NPKWM: &[u8] = include_bytes!("../../npkwm/npkwm");
