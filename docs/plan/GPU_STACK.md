@@ -444,6 +444,30 @@ Vorher geprueft: das sqfs enthaelt `libgallium-26.2.4.so` **mit radeonsi und
 dem virtio-Backend** (`vdrm_*`), dazu `libdrm_amdgpu`. Fehlt am Wirt:
 `qemu-hw-display-virtio-gpu-gl` und `qemu-hw-display-virtio-gpu-pci-gl`.
 
+**Erster Lauf, 2026-10-13 — native context traegt mit UNSEREM Gast.**
+`--mode drm` auf dem Entwicklungsrechner: unser bzImage (6.18.55-nopeek) und
+das Mesa aus unserem sqfs (26.2.4) melden auf GBM, Surfaceless und Device
+`AMD Radeon RX 9060 XT (radeonsi, gfx1200, ACO, DRM 3.64)`; der Gast sieht
+`+virgl +edid +resource_blob +host_visible +context_init`. Am Gast war
+nichts zu aendern. Die Gegenprobe `--mode off` bleibt bei llvmpipe.
+
+Was der Gast fuer `eglinfo -B` schickt (QEMU-Trace) — die Bauliste fuer
+`virtio_gpu_pci.rs`:
+
+| Befehl | Anzahl |
+|---|---|
+| `CTX_SUBMIT` (die ccmds) | 168 |
+| Fences (`fence_ctrl`/`fence_resp`) | 135 |
+| `RESOURCE_CREATE_BLOB`, `CTX_ATTACH/DETACH_RESOURCE`, `RESOURCE_UNREF` | je 21 |
+| `CTX_CREATE` / `CTX_DESTROY` | je 3 |
+| `GET_DISPLAY_INFO`, `GET_EDID` | je 2 |
+
+`RESOURCE_MAP_BLOB` kommt in diesem Lauf nicht vor — `eglinfo` rendert
+nichts. Ein echter Zeichenlauf (z. B. `eglgears` oder LibreWolf mit WebGL)
+ist der naechste Referenzlauf, und mit ihm die hostmem-Region. Die
+Capset-Abfrage (`GET_CAPSET_INFO`/`GET_CAPSET`) hat in QEMU keinen
+Trace-Punkt und fehlt deshalb in der Zaehlung, nicht im Ablauf.
+
 **Befund fuer spaeter:** der Sitzungsstart im Gast bindet `glxtest` und
 `vaapitest` von LibreWolf auf `/bin/false` (`microvm/linux/init/src/main.rs`)
 und npkwm laeuft mit `WLR_RENDERER=pixman`. Damit nimmt LibreWolf heute
