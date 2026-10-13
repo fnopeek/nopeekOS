@@ -153,14 +153,35 @@ Feinklassifizierung nach A.
 
 ---
 
-## 4 — Noch nicht im Graphen
+## 4 — Display: die Uebergabe braucht ihn schon in Stufe 1
 
-- **Display fuer Stufe 1:** Ebene + Flip + vblank auf TGL
-  (`skl_universal_plane.c`, `PLANE_SURF`, vblank-Interrupt). Eigene,
-  kleine Wurzelmenge — der Modus bleibt der der Firmware.
-- **uAPI fuer native context (Stufe 7):** `i915_gem_execbuffer.c`,
-  `i915_getparam.c`, `i915_query.c`, `i915_gem_create.c`, `i915_gem_context.c`
-  — eigene Wurzeln, wenn Stufe 7 ansteht.
+**Befund 2026-10-13:** Linux uebernimmt das Bild der Firmware nicht blind.
+`intel_display_driver_probe_nogem` liest erst den ganzen Display-Zustand
+aus der Hardware (`intel_modeset_setup_hw_state`: aktive Pipes,
+Transcoder, Encoder, DPLLs), dann liest `intel_initial_plane_config`
+(`skl_get_initial_plane_config` auf TGL) Adresse, Groesse und Tiling der
+Ebene und **reserviert diesen Bereich in Stolen-Speicher und GGTT** —
+bevor `i915_gem_init` → `init_ggtt` die GGTT einrichtet. `init_ggtt` sagt
+es im Kommentar selbst: „0 may already be in use by the system (e.g. the
+BIOS framebuffer)". Ohne diesen Teil ist das Bild nach dem Laden des
+Moduls weg — und unser Compositor kopiert heute JEDES Bild per BCS nach
+GGTT-Offset 0, dem Scanout der Firmware.
+
+Gemessen am festgelegten Graphen (`i915-tgl-specialize.py` legt seit
+heute auch `DISPLAY_VER` und `display->platform` fest, 1214 Lesestellen in
+76 Dateien): **`probe_noirq` + `probe_nogem` erreichen ~1080 Funktionen**
+direkt, dazu 40 noch nicht gelesene Weichen (Encoder-`get_hw_state`,
+Power-Wells, DPLL-Manager). `DISPLAY_INFO`-Flags (`has_ddi`, `has_psr`, …)
+sind noch nicht festgelegt — deshalb steht z. B. `intel_sdvo.c` noch
+drin; die Zahl ist eine Obergrenze. Darin auch **DMC**: TGL laedt die
+Display-Firmware fuer die Stromsparzustaende DC5/DC6.
+
+Der Display-Teil ist zugleich die Grundlage fuer Stufe 4 (Ebenen): wer
+eine Ebene setzt, muss wissen, welche Pipe laeuft.
+
+**uAPI fuer native context (Stufe 7):** `i915_gem_execbuffer.c`,
+`i915_getparam.c`, `i915_query.c`, `i915_gem_create.c`,
+`i915_gem_context.c` — eigene Wurzeln, wenn Stufe 7 ansteht.
 
 ---
 

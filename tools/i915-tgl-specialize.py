@@ -14,8 +14,13 @@ Values come from i915_pci.c (tgl_info and the feature macros it expands)
 and intel_device_info.c (9A78 is in INTEL_TGL_GT2_IDS -> SUBPLATFORM_UY).
 Stepping checks stay at run time, so step-gated workarounds remain in the
 graph.
+
+The display code has its own switches: DISPLAY_VER and the platform
+bitfield (display->platform.tigerlake). Both are pinned the same way, from
+intel_display_device.c (tgl_desc: platform tigerlake, subplatform uy, IP 12).
+DISPLAY_INFO flags (has_psr, has_dsb, ...) stay at run time.
 """
-import re, sys
+import os, re, sys
 
 FEATURE_MACROS = [
     'GEN', 'TGL_CACHELEVEL', 'GEN12_FEATURES', 'GEN11_FEATURES',
@@ -81,7 +86,42 @@ def main(d):
     print(f'{path}: pinned to TGL GT2')
 
 
+def pin_display(d):
+    dd = f'{d}/display'
+    path = f'{dd}/intel_display_device.h'
+    s = open(path).read()
+    if '__npk_display_platform' in s:
+        sys.exit('display already specialized')
+    s = replace_once(s, '#define DISPLAY_VER(__display)\t\t(DISPLAY_RUNTIME_INFO(__display)->ip.ver)',
+                     '#define DISPLAY_VER(__display)\t\t((void)(__display), 12)')
+    s, n = re.subn(r'#define DISPLAY_VERx100\(__display\)\s+\(DISPLAY_RUNTIME_INFO\(__display\)->ip\.ver \* 100 \+ \\\n'
+                   r'\s*DISPLAY_RUNTIME_INFO\(__display\)->ip\.rel\)',
+                   '#define DISPLAY_VERx100(__display)\t((void)(__display), 1200)', s)
+    if n != 1:
+        sys.exit('DISPLAY_VERx100 not found')
+    s = replace_once(s, '#undef __MEMBER\n',
+                     '/* Tiger Lake UY display platform as a compile-time constant */\n'
+                     'static const struct intel_display_platforms __npk_display_platform = {\n'
+                     '\t.tigerlake = 1,\n\t.tigerlake_uy = 1,\n};\n\n#undef __MEMBER\n')
+    open(path, 'w').write(s)
+    # Every read of the platform bits, except where the probe writes them.
+    rx = re.compile(r'(\(__display\)|\bdisplay)->platform\.')
+    n_files = n_sites = 0
+    for f in sorted(os.listdir(dd)):
+        if not f.endswith(('.c', '.h')) or f == 'intel_display_device.c':
+            continue
+        fp = f'{dd}/{f}'
+        t = open(fp).read()
+        t2, k = rx.subn('__npk_display_platform.', t)
+        if k:
+            open(fp, 'w').write(t2)
+            n_files += 1
+            n_sites += k
+    print(f'{dd}: display pinned to TGL UY ({n_sites} platform reads in {n_files} files)')
+
+
 if __name__ == '__main__':
     if len(sys.argv) != 2:
         sys.exit(__doc__)
     main(sys.argv[1])
+    pin_display(sys.argv[1])
