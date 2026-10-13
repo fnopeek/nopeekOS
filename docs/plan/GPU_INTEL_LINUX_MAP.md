@@ -42,6 +42,14 @@ python3 tools/linux-callgraph.py --dir ~/.cache/nopeekos/i915-callgraph/linux-6.
     --follow-file tools/gpu_intel_tgl.follow --classes tools/gpu_intel_tgl.classes [--list]
 ```
 
+Der Arbeitsbaum fuer `tools/wasm/gpu_intel_tgl/gen_regs.py` ist
+`~/.cache/nopeekos/i915-work` (include/, arch/x86/include/,
+drivers/gpu/drm/i915/ aus dem Tarball plus die erzeugten Header eines
+`CONFIG_DRM_I915=m`-Builds in `kb/`) **und zusaetzlich
+`drivers/gpu/drm/drm_fourcc.c`** (Formattabelle, Bytes je Pixel), kopiert
+aus `~/.cache/nopeekos/linux-src/linux-6.18.55`. Ein voller Lauf dauert
+rund zwei Minuten.
+
 Zwei Stufen der Plattformwahl, beide maschinell:
 
 1. **Direkte Zweige** (`if (GRAPHICS_VER(i915) >= 12)`, `IS_TIGERLAKE`,
