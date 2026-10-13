@@ -1457,7 +1457,18 @@ impl VmContext {
     // of them made runnable during it (`per_core::wake_fiber_core`).
     let slice_deadline = crate::microvm::cpu::slice_deadline_with_peers(host_core, slice_deadline);
 
+    // Section timing for `npkbench_vm` (see `cpu::bench_segs`): stamps of
+    // the current round trip, flushed when the next one starts.
+    let seg_on = crate::microvm::cpu::bench_marks_on();
+    let mut segs = [0u64; crate::microvm::cpu::SEG_N];
+    let mut seg_match: u64 = 0;
     while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_has_window() {
+        let seg_top = if seg_on { crate::interrupts::rdtsc() } else { 0 };
+        if seg_match != 0 {
+            segs[5] = seg_top.wrapping_sub(seg_match);
+            crate::microvm::cpu::bench_segs(self.vcpu.apic_id, &segs);
+            seg_match = 0;
+        }
         if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline
             || crate::smp::per_core::take_peer_wake(host_core)
         {
@@ -1473,6 +1484,7 @@ impl VmContext {
         let kick_gen = crate::smp::fiber::net_kick_gen(host_core);
         lapic::phase(self.vcpu.apic_id, lapic::PH_INJECT);
         self.inject_pending_event()?;
+        let seg_inj = if seg_on { crate::interrupts::rdtsc() } else { 0 };
         self.vcpu.lapic.pv_eoi_sync_to(self.shared.guest_mem);
         if self.vcpu.lapic.steal.record(self.shared.guest_mem) {
             vmcs::flush_guest_tlb();
@@ -1482,6 +1494,7 @@ impl VmContext {
         // core: its fire is the exit that delivers the tick on time.
         let entry_deadline =
             self.next_timer_deadline_tsc().map_or(slice_deadline, |d| d.min(slice_deadline));
+        let seg_pre = if seg_on { crate::interrupts::rdtsc() } else { 0 };
         // IF stays 0 into VMRESUME (external-interrupt exiting exits on a
         // pending interrupt regardless); the asm sets it again after the exit.
         if !crate::microvm::cpu::entry_irqs_off(kick_gen, host_core, entry_deadline) {
@@ -1599,6 +1612,15 @@ impl VmContext {
             );
         }
 
+        if seg_on {
+            let now = crate::interrupts::rdtsc();
+            segs[0] = seg_inj.wrapping_sub(seg_top);
+            segs[1] = seg_pre.wrapping_sub(seg_inj);
+            segs[2] = prof_pre.wrapping_sub(seg_pre);
+            segs[3] = prof_post.wrapping_sub(prof_pre);
+            segs[4] = now.wrapping_sub(prof_post);
+            seg_match = now;
+        }
         // Exits that touch only this vCPU take no device lock (see the SVM
         // run loop): the interrupt window, an MSR (x2APIC, PV-EOI), a hypercall.
         match basic {

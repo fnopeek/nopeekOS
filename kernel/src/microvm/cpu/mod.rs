@@ -142,13 +142,56 @@ pub fn bench_count(vcpu: u8, what: usize) {
     }
 }
 
+/// The exit loop in sections (VMX): cycles summed per vCPU, plus the count of
+/// complete round trips. Printed as an average per exit at each mark.
+pub const SEG_N: usize = 6;
+const SEG_LABELS: [&str; SEG_N] = ["inject", "pre-entry", "entry", "asm+guest", "post-exit", "handler"];
+static BENCH_SEG: [[AtomicU64; SEG_N + 1]; MAX_VCPUS_CAP] =
+    [const { [const { AtomicU64::new(0) }; SEG_N + 1] }; MAX_VCPUS_CAP];
+
+pub fn bench_marks_on() -> bool {
+    BENCH_MARKS.load(Ordering::Relaxed)
+}
+
+/// One round trip of `vcpu`'s exit loop, in cycles per section.
+pub fn bench_segs(vcpu: u8, segs: &[u64; SEG_N]) {
+    let Some(a) = BENCH_SEG.get(vcpu as usize) else { return };
+    for (i, &s) in segs.iter().enumerate() { bump(&a[i], s); }
+    bump(&a[SEG_N], 1);
+}
+
 pub fn set_bench_marks(on: bool) {
     BENCH_MARKS.store(on, Ordering::Relaxed);
 }
 
+/// One XSAVE64 + XRSTOR64 of every XCR0 component, in ns: the exit asm
+/// does two such pairs.
+fn xsave_pair_ns() -> u64 {
+    let mut area = FpuArea::boxed();
+    let p = area.0.as_mut_ptr();
+    const N: u64 = 2000;
+    let t0 = crate::interrupts::rdtsc();
+    for _ in 0..N {
+        // SAFETY: `p` is a 64-byte aligned 4 KiB save area owned here; the
+        // XRSTOR loads back exactly the state the XSAVE just stored.
+        unsafe {
+            core::arch::asm!("xsave64 [{p}]", "xrstor64 [{p}]", p = in(reg) p,
+                in("eax") 0xFFFF_FFFFu32, in("edx") 0xFFFF_FFFFu32, options(nostack));
+        }
+    }
+    let cyc = crate::interrupts::rdtsc().wrapping_sub(t0);
+    cyc * 1000 / (crate::interrupts::tsc_freq() / 1_000_000).max(1) / N
+}
+
+static BENCH_XSAVE_SHOWN: AtomicBool = AtomicBool::new(false);
+
 /// A mark from vCPU `vcpu`: print each vCPU's deltas since the last one.
 pub fn bench_mark(vcpu: u8) {
     if !BENCH_MARKS.load(Ordering::Relaxed) { return; }
+    if !BENCH_XSAVE_SHOWN.swap(true, Ordering::Relaxed) {
+        crate::kprintln!("[vmbench-host] host xsave64+xrstor64, all components: {} ns per pair (an exit does two)",
+            xsave_pair_ns());
+    }
     let us = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
     let mut prev = BENCH_PREV.lock();
     let n = (guest_vcpus() as usize).min(MAX_VCPUS_CAP);
@@ -164,6 +207,16 @@ pub fn bench_mark(vcpu: u8) {
             vcpu, i, d(0), d(1), d(2), d(3), d(4), d(5), d(6),
             guest.wrapping_sub(pg) / us, handlers.wrapping_sub(ph) / us,
         );
+        let n_rt = BENCH_SEG[i][SEG_N].swap(0, Ordering::Relaxed);
+        if n_rt > 0 {
+            let mut line = alloc::string::String::new();
+            for (k, label) in SEG_LABELS.iter().enumerate() {
+                let cyc = BENCH_SEG[i][k].swap(0, Ordering::Relaxed);
+                let _ = core::fmt::Write::write_fmt(&mut line,
+                    format_args!(" {} {}", label, cyc * 1000 / us / n_rt));
+            }
+            crate::kprintln!("[vmbench-host]   vcpu{} ns per exit ({} exits):{}", i, n_rt, line);
+        }
         crate::kprintln!(
             "[vmbench-host]   vcpu{} kicked: posted {} plain {} none {} | intr exits: PI vector {} kick vector {} other {}",
             i, ev[BK_POSTED], ev[BK_PLAIN], ev[BK_NONE], ev[BX_PI], ev[BX_KICK], ev[BX_OTHER],
