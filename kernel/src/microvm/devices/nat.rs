@@ -871,6 +871,27 @@ pub fn flight_delivered(frame: &[u8]) {
     f.next = (i + 1) % FLIGHT_LEN;
 }
 
+/// Why frames for the guest wait: `FLIGHT_NOBUF` = the worker ran while the
+/// tap held `n` frames and the guest had posted no receive buffer;
+/// `FLIGHT_LATE` = the worker came back after `n` ms with frames waiting.
+pub const FLIGHT_NOBUF: u8 = 3;
+pub const FLIGHT_LATE: u8 = 4;
+static FLIGHT_NOBUF_TSC: AtomicU64 = AtomicU64::new(0);
+
+pub fn flight_rx_wait(kind: u8, n: u64) {
+    if !FLIGHT_ON.load(AtOrd::Relaxed) || n == 0 { return; }
+    let now = crate::interrupts::rdtsc();
+    if kind == FLIGHT_NOBUF {
+        let ms = crate::interrupts::tsc_freq() / 1000;
+        if now.wrapping_sub(FLIGHT_NOBUF_TSC.swap(now, AtOrd::Relaxed)) < ms { return; }
+    }
+    let ev = FlightEv { tsc: now, seq: 0, ack: 0, len: n as u32, win: 0, hp: 0, dir: kind, flags: 0, sack: false };
+    let mut f = FLIGHT.lock();
+    let i = f.next;
+    f.ev[i] = ev;
+    f.next = (i + 1) % FLIGHT_LEN;
+}
+
 /// The flow's segments around its silence, oldest first.
 fn flight_dump(hp: u16, last: u64, now: u64, freq: u64) {
     let from = last.saturating_sub(freq / 50);
@@ -881,7 +902,7 @@ fn flight_dump(hp: u16, last: u64, now: u64, freq: u64) {
         for k in 0..FLIGHT_LEN {
             let e = f.ev[(f.next + k) % FLIGHT_LEN];
             if e.tsc < from || e.tsc > now { continue; }
-            if e.hp == hp && e.dir != 2 { out.push(e); }
+            if e.hp == hp && e.dir < 2 { out.push(e); }
             else if e.tsc > last && e.len > 0 { others.push(e); }
         }
     }
@@ -902,13 +923,20 @@ fn flight_dump(hp: u16, last: u64, now: u64, freq: u64) {
     }
     // Every segment with data on any connection during the silence: `in` =
     // reached us from the card, `dlv` = written into the guest's ring
-    // (port = the guest's), `out` = taken from the guest.
+    // (port = the guest's), `out` = taken from the guest; and why frames
+    // waited (`nobuf`, `late`).
     kprintln!("[flight] port {}: all data during the silence ({} segments, last 60):",
         hp, others.len());
     for e in &others[others.len().saturating_sub(60)..] {
-        kprintln!("[flight]   {:>8}us {} port={} len={} {}",
-            us(e.tsc), match e.dir { 0 => "out", 1 => "in ", _ => "dlv" }, e.hp, e.len,
-            if e.flags & TCP_PSH != 0 { "P" } else { "" });
+        match e.dir {
+            FLIGHT_NOBUF => kprintln!("[flight]   {:>8}us nobuf tap={} (guest posted no RX buffer)",
+                us(e.tsc), e.len),
+            FLIGHT_LATE => kprintln!("[flight]   {:>8}us late  worker back after {} ms, frames waiting",
+                us(e.tsc), e.len),
+            d => kprintln!("[flight]   {:>8}us {} port={} len={} {}",
+                us(e.tsc), if d == 0 { "out" } else if d == 1 { "in " } else { "dlv" }, e.hp, e.len,
+                if e.flags & TCP_PSH != 0 { "P" } else { "" }),
+        }
     }
 }
 

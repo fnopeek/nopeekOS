@@ -262,13 +262,17 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     // earlier packets, leave the guest's frames in its ring. Flushed before the
     // device mutex — the send takes the card's lock.
     let egress_clear = nat::egress_flush();
+    note_rx_wait_gap();
     let mut injected = false;
     let mut rx_frames = 0u64;
     let (rx_raise, tx_payloads, caps) = {
         let mut dev = net_backend::lock();
         let gro = dev.rx_gro_ok();
         while rx_frames < RX_PKT_WEIGHT {
-            if dev.rx_avail_count(gm) == 0 { break; }   // get_rx_bufs -> 0
+            if dev.rx_avail_count(gm) == 0 {   // get_rx_bufs -> 0
+                nat::flight_rx_wait(nat::FLIGHT_NOBUF, nat::tap_len());
+                break;
+            }
             let Some(frame) = nat::tap_pop_rx(gro) else { break };
             if dev.inject_rx(gm, &frame) {
                 injected = true;
@@ -364,6 +368,22 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     if rx_intx || tx_intx {
         net_backend::raise_irq();
         crate::microvm::cpu::kick_bsp_net_irq();
+    }
+}
+
+/// The previous pass of this worker, for the flight recorder's `late`.
+static LAST_PASS_TSC: AtomicU64 = AtomicU64::new(0);
+
+/// Frames waited for the guest while this worker was away for over 5 ms.
+fn note_rx_wait_gap() {
+    let now = crate::interrupts::rdtsc();
+    let prev = LAST_PASS_TSC.swap(now, Ordering::Relaxed);
+    let ms = (crate::interrupts::tsc_freq() / 1000).max(1);
+    let gap = now.wrapping_sub(prev) / ms;
+    if prev != 0 && gap > 5 {
+        crate::microvm::devices::nat::flight_rx_wait(
+            crate::microvm::devices::nat::FLIGHT_LATE,
+            if crate::microvm::devices::nat::tap_len() > 0 { gap } else { 0 });
     }
 }
 
