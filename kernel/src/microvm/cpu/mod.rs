@@ -443,10 +443,10 @@ fn close_requested() -> bool {
 
 /// A new launch: no close pending, a fresh control channel.
 /// Read by the exit path of `run_guest_once` (both vendors): issue an IBPB
-/// right after every VM exit. The host is built without retpolines or IBRS,
-/// so branch predictions the guest trained would otherwise steer the host's
-/// indirect branches and returns (Spectre v2, Retbleed, SRSO; KVM
-/// `ibpb-vmexit`). The return stack is refilled after every exit either way.
+/// right after every VM exit, on CPUs where enhanced IBRS does not already
+/// keep guest-trained predictions out of the host (`spec_mitigations`; the
+/// host has no retpolines or return thunks). The return stack is refilled
+/// after every exit either way.
 #[unsafe(no_mangle)]
 pub static IBPB_ON_EXIT: AtomicBool = AtomicBool::new(false);
 
@@ -460,13 +460,14 @@ fn cpu_has_ibpb() -> bool {
     amd || intel
 }
 
-/// Decide once per launch: on where the CPU has it, unless
-/// `set microvm_ibpb off` (to measure what it costs).
+/// Decide once per launch: where `spec_mitigations` says this CPU needs it,
+/// unless `set microvm_ibpb on|off` forces it (to measure what it costs).
 fn arm_exit_mitigations() {
-    let off = crate::config::get("microvm_ibpb").is_some_and(|v| v.trim() == "off");
-    let on = cpu_has_ibpb() && !off;
+    let forced = crate::config::get("microvm_ibpb").map(|v| v.trim() == "on");
+    let on = cpu_has_ibpb() && forced.unwrap_or_else(crate::spec_mitigations::ibpb_on_exit);
     IBPB_ON_EXIT.store(on, Ordering::Release);
-    crate::kprintln!("[microvm] IBPB on VM exit: {}", if on { "on" } else if off { "off (config)" } else { "not available" });
+    crate::kprintln!("[microvm] IBPB on VM exit: {}{}", if on { "on" } else { "off" },
+        if forced.is_some() { " (config)" } else { "" });
 }
 
 fn reset_close_state() {

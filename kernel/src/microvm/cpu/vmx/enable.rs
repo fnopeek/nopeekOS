@@ -1452,7 +1452,7 @@ impl VmContext {
         if prof_post != 0 {
             crate::microvm::cpu::record_exit_cycles(self.vcpu.apic_id, prof_bucket, prof_pre.wrapping_sub(prof_post));
         }
-        let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
+        self.vcpu.regs.spec_ctrl_host = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
         lapic::phase(self.vcpu.apic_id, lapic::PH_GUEST);
         // SAFETY: `open`/`open_ap` entered VMX root on this core, loaded this
         // vCPU's VMCS and wrote its host, guest and control state.
@@ -1464,7 +1464,8 @@ impl VmContext {
         };
         crate::microvm::cpu::note_guest_exit(host_core);
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
-        super::msr::spec_ctrl_exit(host_spec);
+        super::msr::spec_ctrl_exit(core::mem::replace(
+            &mut self.vcpu.regs.spec_ctrl_host, super::msr::SPEC_CTRL_KEEP));
         prof_post = crate::interrupts::rdtsc();
         crate::microvm::cpu::record_guest_cycles(self.vcpu.apic_id, prof_post.wrapping_sub(prof_pre));
         let outcome = result?;

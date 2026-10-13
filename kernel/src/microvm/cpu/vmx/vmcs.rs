@@ -1133,6 +1133,8 @@ pub struct GuestRegs {
     pub r13: u64,    //        104
     pub r14: u64,    //        112
     pub r15: u64,    //        120
+    /// Host SPEC_CTRL the exit asm writes back, or `SPEC_CTRL_KEEP`.
+    pub spec_ctrl_host: u64, //    128
 }
 
 /// Outcome of one VM-entry/exit cycle.
@@ -1383,6 +1385,20 @@ pub(super) unsafe fn run_guest_once(
             "pop rax", "mov [rdi +  16], rax",      // rdx
             "pop rax", "mov [rdi +   8], rax",      // rcx
             "pop rax", "mov [rdi +   0], rax",      // rax
+
+            // Host SPEC_CTRL back before the first RET (KVM
+            // `vmx_spec_ctrl_restore_host`).
+            "mov r11, [rdi + 128]",
+            "test r11, r11",
+            "jz 86f",
+            "mov qword ptr [rdi + 128], 0",
+            "btr r11, 63",                  // SPEC_CTRL_RESTORE tag
+            "mov eax, r11d",
+            "mov rdx, r11",
+            "shr rdx, 32",
+            "mov ecx, 0x48",                // MSR_IA32_SPEC_CTRL
+            "wrmsr",
+            "86:",
 
             // Read VM-exit info now that GPRs are safe.
             "mov rcx, 0x4402",              // VM_EXIT_REASON

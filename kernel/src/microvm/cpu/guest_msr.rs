@@ -186,22 +186,30 @@ fn unknown(msr: u32, write: Option<u64>) -> u64 {
     0
 }
 
-/// Load the guest's SPEC_CTRL before VM entry; returns the host value to
-/// restore. KVM without V_SPEC_CTRL does the same swap (`x86_spec_ctrl_set_guest`).
-pub fn spec_ctrl_enter(guest: u64) -> Option<u64> {
-    if guest == 0 { return None; }
-    // SAFETY: `write` accepts a non-zero guest value only when the host
-    // has SPEC_CTRL bits, so the MSR exists.
-    let host = unsafe { host_rdmsr(MSR_SPEC_CTRL) };
-    if host == guest { return None; }
-    // SAFETY: guest was validated against the host's SPEC_CTRL bits in `write`.
+/// No host SPEC_CTRL to restore after the exit; a value to restore carries
+/// `SPEC_CTRL_RESTORE` (bit 63, unused by the MSR), so a zeroed GuestRegs
+/// restores nothing.
+pub const SPEC_CTRL_KEEP: u64 = 0;
+pub const SPEC_CTRL_RESTORE: u64 = 1 << 63;
+
+/// Load the guest's SPEC_CTRL before VM entry whenever it differs from the
+/// host's; returns what the exit asm writes back before the first RET
+/// (KVM `vmx_spec_ctrl_restore_host`, `x86_spec_ctrl_set_guest`).
+pub fn spec_ctrl_enter(guest: u64) -> u64 {
+    let host = crate::spec_mitigations::host_spec_ctrl();
+    if host == guest { return SPEC_CTRL_KEEP; }
+    // SAFETY: guest and host differ, so one of them is non-zero: `write`
+    // accepts a non-zero guest value, and `spec_mitigations` a non-zero
+    // host value, only when the MSR exists.
     unsafe { host_wrmsr(MSR_SPEC_CTRL, guest); }
-    Some(host)
+    host | SPEC_CTRL_RESTORE
 }
 
-pub fn spec_ctrl_exit(host: Option<u64>) {
-    if let Some(h) = host {
-        // SAFETY: restoring the value read from this very MSR before entry.
-        unsafe { host_wrmsr(MSR_SPEC_CTRL, h); }
+/// The exit asm restores the host value and leaves `SPEC_CTRL_KEEP`; this
+/// covers a failed entry, where it never ran.
+pub fn spec_ctrl_exit(pending: u64) {
+    if pending != SPEC_CTRL_KEEP {
+        // SAFETY: the host value `spec_ctrl_enter` took from `spec_mitigations`.
+        unsafe { host_wrmsr(MSR_SPEC_CTRL, pending & !SPEC_CTRL_RESTORE); }
     }
 }

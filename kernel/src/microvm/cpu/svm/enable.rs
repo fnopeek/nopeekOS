@@ -532,6 +532,19 @@ unsafe fn run_guest_once(
             "pop rcx", "mov [rax +  16], rcx",      // rdx
             "pop rcx", "mov [rax +   8], rcx",      // rcx
             "pop rcx", "mov [rax +   0], rcx",      // rbx
+            // Host SPEC_CTRL back before the first RET (KVM
+            // `RESTORE_HOST_SPEC_CTRL`).
+            "mov r11, [rax + 112]",
+            "test r11, r11",
+            "jz 86f",
+            "mov qword ptr [rax + 112], 0",
+            "btr r11, 63",                  // SPEC_CTRL_RESTORE tag
+            "mov eax, r11d",
+            "mov rdx, r11",
+            "shr rdx, 32",
+            "mov ecx, 0x48",                // MSR_IA32_SPEC_CTRL
+            "wrmsr",
+            "86:",
             "add rsp, 48",                          // discard xcr,guest_fpu,host_fpu,host_extra,vmcb,struct
 
             // Restore host callee-saved.
@@ -1526,7 +1539,7 @@ impl VmContext {
         }
 
         // Host↔guest FPU save/restore is embedded in run_guest_once's asm.
-        let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
+        self.vcpu.regs.spec_ctrl_host = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
         let t_entry = crate::interrupts::rdtsc();
         if let Some(c) = lapic::take_post_latency(self.vcpu.apic_id, t_entry) {
             crate::microvm::cpu::record_wake(c);
@@ -1550,7 +1563,8 @@ impl VmContext {
                 &mut self.vcpu.host_fpu, &mut self.vcpu.guest_fpu, self.vcpu.xcr0,
             )
         };
-        super::msr::spec_ctrl_exit(host_spec);
+        super::msr::spec_ctrl_exit(core::mem::replace(
+            &mut self.vcpu.regs.spec_ctrl_host, super::msr::SPEC_CTRL_KEEP));
         crate::microvm::cpu::note_guest_exit(host_core);
         crate::microvm::cpu::entry_irqs_on();
         let t_exit = crate::interrupts::rdtsc();

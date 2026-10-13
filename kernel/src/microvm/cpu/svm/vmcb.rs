@@ -290,4 +290,6 @@ pub struct GuestRegs {
     pub r13: u64,    //  88
     pub r14: u64,    //  96
     pub r15: u64,    // 104
+    /// Host SPEC_CTRL the exit asm writes back, or `SPEC_CTRL_KEEP`.
+    pub spec_ctrl_host: u64, // 112
 }

@@ -1111,6 +1111,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
     lapic.w32(crate::interrupts::LAPIC_SVR, svr | (1 << 8) | crate::interrupts::SPURIOUS_VECTOR as u32);
 
     crate::cpu_errata::apply();
+    crate::spec_mitigations::apply();
 
     // Enable HWP on this AP (per-core frequency scaling)
     enable_hwp();

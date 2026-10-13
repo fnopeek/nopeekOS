@@ -63,6 +63,7 @@ pub fn init() {
     per_core::register_bsp(bsp_id);
 
     crate::cpu_errata::apply();
+    crate::spec_mitigations::apply();
 
     // Enable HWP (hardware frequency scaling) on BSP
     if per_core::enable_hwp() {

@@ -10,7 +10,7 @@
 
 use crate::microvm::cpu::guest_msr::{self as common, *};
 
-pub use common::{GuestMsrs, spec_ctrl_enter, spec_ctrl_exit};
+pub use common::{GuestMsrs, SPEC_CTRL_KEEP, spec_ctrl_enter, spec_ctrl_exit};
 
 const MSR_TSC: u32 = 0x10;
 const MSR_FEATURE_CONTROL: u32 = 0x3A;
