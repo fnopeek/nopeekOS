@@ -553,3 +553,31 @@ pub const PROCMON_0_95V_DOT_0: u32 = 0x1; // display/intel_combo_phy.c:25
 pub const PROCMON_0_95V_DOT_1: u32 = 0x2; // display/intel_combo_phy.c:26
 pub const PROCMON_1_05V_DOT_0: u32 = 0x3; // display/intel_combo_phy.c:27
 pub const PROCMON_1_05V_DOT_1: u32 = 0x4; // display/intel_combo_phy.c:28
+
+// cdclk (display/intel_cdclk.c)
+pub const SKL_DSSM: u32 = 0x51004; // display/intel_display_regs.h:1546
+pub const ICL_DSSM_CDCLK_PLL_REFCLK_MASK: i32 = -536870912; // display/intel_display_regs.h:1547
+pub const ICL_DSSM_CDCLK_PLL_REFCLK_24MHz: u32 = 0x0; // display/intel_display_regs.h:1548
+pub const ICL_DSSM_CDCLK_PLL_REFCLK_19_2MHz: u32 = 0x20000000; // display/intel_display_regs.h:1549
+pub const ICL_DSSM_CDCLK_PLL_REFCLK_38_4MHz: u32 = 0x40000000; // display/intel_display_regs.h:1550
+pub const BXT_DE_PLL_ENABLE: u32 = 0x46070; // display/intel_display_regs.h:2790
+pub const BXT_DE_PLL_PLL_ENABLE: i32 = -2147483648; // display/intel_display_regs.h:2791
+pub const BXT_DE_PLL_LOCK: u32 = 0x40000000; // display/intel_display_regs.h:2792
+/// display/intel_display_regs.h:2795
+pub const fn ICL_CDCLK_PLL_RATIO(x: u32) -> u32 { (x) }
+pub const ICL_CDCLK_PLL_RATIO_MASK: u32 = 0xff; // display/intel_display_regs.h:2796
+pub const CDCLK_CTL: u32 = 0x46000; // display/intel_display_regs.h:2497
+pub const BXT_CDCLK_CD2X_DIV_SEL_MASK: u32 = 0xc00000; // display/intel_display_regs.h:2506
+pub const BXT_CDCLK_CD2X_DIV_SEL_1: u32 = 0x0; // display/intel_display_regs.h:2507
+pub const BXT_CDCLK_CD2X_DIV_SEL_1_5: u32 = 0x400000; // display/intel_display_regs.h:2508
+pub const BXT_CDCLK_CD2X_DIV_SEL_2: u32 = 0x800000; // display/intel_display_regs.h:2509
+pub const BXT_CDCLK_CD2X_DIV_SEL_4: u32 = 0xc00000; // display/intel_display_regs.h:2510
+/// display/intel_display_regs.h:2516
+pub const fn TGL_CDCLK_CD2X_PIPE(pipe: u32) -> u32 { ((pipe) << 20) }
+pub const TGL_CDCLK_CD2X_PIPE_NONE: u32 = 0x380000; // display/intel_display_regs.h:2517
+pub const INVALID_PIPE: i32 = -1; // display/intel_display_limits.h:15
+pub const SKL_PCODE_CDCLK_CONTROL: u32 = 0x7; // i915_reg.h:1107
+pub const SKL_CDCLK_PREPARE_FOR_CHANGE: u32 = 0x3; // i915_reg.h:1108
+pub const SKL_CDCLK_READY_FOR_CHANGE: u32 = 0x1; // i915_reg.h:1109
+pub const TGL_DISPLAY_HAS_CDCLK_CRAWL: u32 = 0x0; // tgl_desc.info->has_cdclk_crawl in display/intel_display_device.c
+pub const TGL_DISPLAY_HAS_CDCLK_SQUASH: u32 = 0x0; // tgl_desc.info->has_cdclk_squash in display/intel_display_device.c

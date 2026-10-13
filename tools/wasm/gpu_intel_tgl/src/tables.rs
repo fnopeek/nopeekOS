@@ -170,7 +170,8 @@ pub static intel_engines: [engine_info; 27] = [
 /// display/intel_bios.c:3016
 pub static vbt_signature: [u8; 5] = [0x24, 0x56, 0x42, 0x54, 0x0];
 
-// display/intel_display_power_map.c: tgl_power_wells[] / @.list[@.count] / @.instances->list[@.instances->count]
+// display/intel_display_power_map.c
+/// display/intel_display_power_map.c: tgl_power_wells[] / @.list[@.count] / @.instances->list[@.instances->count]
 pub static tgl_power_well_insts: [power_well_inst; 32] = [
     power_well_inst { desc: 0x0, instance_idx: 0x0, name: b"always-on", id: 0x0, hsw_idx: 0x0, ops: power_well_inst_ops::i9xx_always_on_power_well_ops, irq_pipe_mask: 0x0, always_on: 0x1, fixed_enable_delay: 0x0, has_vga: 0x0, has_fuses: 0x0, is_tc_tbt: 0x0, enable_timeout: 0x0, domain_list: 0x1 },
     power_well_inst { desc: 0x1, instance_idx: 0x0, name: b"PW_1", id: 0x8, hsw_idx: 0x0, ops: power_well_inst_ops::hsw_power_well_ops, irq_pipe_mask: 0x0, always_on: 0x1, fixed_enable_delay: 0x0, has_vga: 0x0, has_fuses: 0x1, is_tc_tbt: 0x0, enable_timeout: 0x0, domain_list: 0x0 },
@@ -205,8 +206,7 @@ pub static tgl_power_well_insts: [power_well_inst; 32] = [
     power_well_inst { desc: 0xa, instance_idx: 0x4, name: b"AUX_TBT5", id: 0x0, hsw_idx: 0xd, ops: power_well_inst_ops::icl_aux_power_well_ops, irq_pipe_mask: 0x0, always_on: 0x0, fixed_enable_delay: 0x0, has_vga: 0x0, has_fuses: 0x0, is_tc_tbt: 0x1, enable_timeout: 0x0, domain_list: 0x2 },
     power_well_inst { desc: 0xa, instance_idx: 0x5, name: b"AUX_TBT6", id: 0x0, hsw_idx: 0xe, ops: power_well_inst_ops::icl_aux_power_well_ops, irq_pipe_mask: 0x0, always_on: 0x0, fixed_enable_delay: 0x0, has_vga: 0x0, has_fuses: 0x0, is_tc_tbt: 0x1, enable_timeout: 0x0, domain_list: 0x2 },
 ];
-
-// display/intel_display_power_map.c: tgl_power_wells[] / @.list[@.count] / @.instances->list[@.instances->count] / @.domain_list->list[@.domain_list ? @.domain_list->count : 0]
+/// display/intel_display_power_map.c: tgl_power_wells[] / @.list[@.count] / @.instances->list[@.instances->count] / @.domain_list->list[@.domain_list ? @.domain_list->count : 0]
 pub static tgl_power_well_domains: [power_well_domain; 149] = [
     power_well_domain { well: 0x2, domain: 0x4 },
     power_well_domain { well: 0x2, domain: 0x8 },
@@ -359,11 +359,38 @@ pub static tgl_power_well_domains: [power_well_domain; 149] = [
     power_well_domain { well: 0x1f, domain: 0x46 },
 ];
 
-// display/intel_combo_phy.c: icl_procmon_values[]
+// display/intel_combo_phy.c
+/// display/intel_combo_phy.c: icl_procmon_values[]
 pub static icl_procmon_values: [icl_procmon; 5] = [
     icl_procmon { name: b"0.85V dot0 (low-voltage)", dw1: 0x0, dw9: 0x62ab67bb, dw10: 0x51914f96 },
     icl_procmon { name: b"0.95V dot0", dw1: 0x0, dw9: 0x86e172c7, dw10: 0x77ca5eab },
     icl_procmon { name: b"0.95V dot1", dw1: 0x0, dw9: 0x93f87fe1, dw10: 0x8ae871c5 },
     icl_procmon { name: b"1.05V dot0", dw1: 0x0, dw9: 0x98fa82dd, dw10: 0x89e46dc1 },
     icl_procmon { name: b"1.05V dot1", dw1: 0x440000, dw9: 0x9a00ab25, dw10: 0x8ae38ff1 },
+];
+
+// display/intel_cdclk.c
+/// display/intel_cdclk.c: `tgl_voltage_level_max_cdclk` in `tgl_calc_voltage_level`
+pub static tgl_voltage_level_max_cdclk: [i32; 4] = [312000, 326400, 556800, 652800];
+/// display/intel_cdclk.c:1342
+pub static icl_cdclk_table: [intel_cdclk_vals; 19] = [
+    intel_cdclk_vals { cdclk: 0x2a300, refclk: 0x4b00, waveform: 0x0, ratio: 0x12 },
+    intel_cdclk_vals { cdclk: 0x2ee00, refclk: 0x4b00, waveform: 0x0, ratio: 0x14 },
+    intel_cdclk_vals { cdclk: 0x4b000, refclk: 0x4b00, waveform: 0x0, ratio: 0x20 },
+    intel_cdclk_vals { cdclk: 0x4fb00, refclk: 0x4b00, waveform: 0x0, ratio: 0x44 },
+    intel_cdclk_vals { cdclk: 0x87f00, refclk: 0x4b00, waveform: 0x0, ratio: 0x3a },
+    intel_cdclk_vals { cdclk: 0x9f600, refclk: 0x4b00, waveform: 0x0, ratio: 0x44 },
+    intel_cdclk_vals { cdclk: 0x2bf20, refclk: 0x5dc0, waveform: 0x0, ratio: 0xf },
+    intel_cdclk_vals { cdclk: 0x2ee00, refclk: 0x5dc0, waveform: 0x0, ratio: 0x10 },
+    intel_cdclk_vals { cdclk: 0x4c2c0, refclk: 0x5dc0, waveform: 0x0, ratio: 0x1a },
+    intel_cdclk_vals { cdclk: 0x4f1a0, refclk: 0x5dc0, waveform: 0x0, ratio: 0x36 },
+    intel_cdclk_vals { cdclk: 0x86c40, refclk: 0x5dc0, waveform: 0x0, ratio: 0x2e },
+    intel_cdclk_vals { cdclk: 0x9e340, refclk: 0x5dc0, waveform: 0x0, ratio: 0x36 },
+    intel_cdclk_vals { cdclk: 0x2a300, refclk: 0x9600, waveform: 0x0, ratio: 0x9 },
+    intel_cdclk_vals { cdclk: 0x2ee00, refclk: 0x9600, waveform: 0x0, ratio: 0xa },
+    intel_cdclk_vals { cdclk: 0x4b000, refclk: 0x9600, waveform: 0x0, ratio: 0x10 },
+    intel_cdclk_vals { cdclk: 0x4fb00, refclk: 0x9600, waveform: 0x0, ratio: 0x22 },
+    intel_cdclk_vals { cdclk: 0x87f00, refclk: 0x9600, waveform: 0x0, ratio: 0x1d },
+    intel_cdclk_vals { cdclk: 0x9f600, refclk: 0x9600, waveform: 0x0, ratio: 0x22 },
+    intel_cdclk_vals { cdclk: 0x0, refclk: 0x0, waveform: 0x0, ratio: 0x0 },
 ];
