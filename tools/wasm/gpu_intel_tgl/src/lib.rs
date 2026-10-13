@@ -71,13 +71,10 @@ impl Line {
         self.s(core::str::from_utf8(&b).unwrap_or("?"))
     }
 
-    /// To the terminal `driver` was started from, and to the kernel log, so
-    /// the result can be read with `dmesg` from any session.
+    /// To the kernel log: `dmesg`, the terminal's log stream and `debug`
+    /// all show it, once.
     fn say(&self) {
-        let text = &self.buf[..self.len];
-        npk_sys::print(text);
-        npk_sys::print(b"\n");
-        npk_sys::log(text);
+        npk_sys::log(&self.buf[..self.len]);
     }
 }
 
