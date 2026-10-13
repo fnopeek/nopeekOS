@@ -1272,11 +1272,22 @@ pub(super) unsafe fn run_guest_once(
                                             // struct ptr)
             "jz 9f",                        // ZF set → !launched →
                                             // VMLAUNCH path
+            // CPU buffers cleared last before entry (Linux
+            // `VM_CLEAR_CPU_BUFFERS`); clobbers the flags, which the
+            // guest gets from the VMCS.
+            "cmp byte ptr [rip + VERW_ON_ENTRY], 0",
+            "je 76f",
+            "verw word ptr [rip + npk_verw_sel]",
+            "76:",
             "vmresume",
             "jmp 4f",                       // fall-through =
                                             // VMfail{Invalid,Valid}
 
             "9:",                           // VMLAUNCH path
+            "cmp byte ptr [rip + VERW_ON_ENTRY], 0",
+            "je 75f",
+            "verw word ptr [rip + npk_verw_sel]",
+            "75:",
             "vmlaunch",
             // fall-through to fail handler
 

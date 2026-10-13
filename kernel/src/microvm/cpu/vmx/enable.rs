@@ -1520,6 +1520,11 @@ impl VmContext {
             crate::microvm::cpu::record_exit_cycles(self.vcpu.apic_id, prof_bucket, prof_pre.wrapping_sub(prof_post));
         }
         self.vcpu.regs.spec_ctrl_host = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
+        if crate::microvm::cpu::L1D_FLUSH_ON_ENTRY.load(Ordering::Relaxed) {
+            // SAFETY: chosen only when CPUID 7.0 EDX[28] reports IA32_FLUSH_CMD;
+            // bit 0 writes back and invalidates the L1D (`vmx_l1d_flush`).
+            unsafe { super::wrmsr(0x10B, 1) };
+        }
         lapic::phase(self.vcpu.apic_id, lapic::PH_GUEST);
         // SAFETY: `open`/`open_ap` entered VMX root on this core, loaded this
         // vCPU's VMCS and wrote its host, guest and control state.

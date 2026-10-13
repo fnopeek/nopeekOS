@@ -439,6 +439,12 @@ unsafe fn run_guest_once(
             // (V_INTR_MASKING: the host's IF gates physical interrupts).
             "sti",
             "vmload rax",                   // load guest FS/GS/KernelGS/STAR/LSTAR/SFMASK/SYSENTER
+            // CPU buffers cleared right before VMRUN (Linux
+            // `VM_CLEAR_CPU_BUFFERS`, TSA).
+            "cmp byte ptr [rip + VERW_ON_ENTRY], 0",
+            "je 76f",
+            "verw word ptr [rip + npk_verw_sel]",
+            "76:",
             "vmrun rax",
             "vmsave rax",                   // save guest's back into the guest VMCB
             "mov rax, [rsp + 24]",          // host_extra_save phys

@@ -60,6 +60,7 @@ mod gpu;
 mod shade;
 mod smp;
 mod cpu_errata;
+mod cpu_vulns;
 mod spec_mitigations;
 mod process;
 mod tss;

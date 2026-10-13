@@ -570,6 +570,14 @@ pub static IBPB_ON_EXIT: AtomicBool = AtomicBool::new(false);
 #[unsafe(no_mangle)]
 pub static CLEAR_BHB_ON_EXIT: AtomicBool = AtomicBool::new(false);
 
+/// Read by the entry path of `run_guest_once` (both vendors): `verw` right
+/// before VMRESUME/VMLAUNCH/VMRUN (`spec_mitigations::verw_on_entry`).
+#[unsafe(no_mangle)]
+pub static VERW_ON_ENTRY: AtomicBool = AtomicBool::new(false);
+
+/// An L1D flush before every VMX entry (`spec_mitigations::l1d_flush_on_entry`).
+pub static L1D_FLUSH_ON_ENTRY: AtomicBool = AtomicBool::new(false);
+
 /// Read by the exit path of `run_guest_once` (both vendors): the return
 /// stack fill, `spec_mitigations::RSB_*`. Full wherever an IBPB runs.
 #[unsafe(no_mangle)]
@@ -595,6 +603,8 @@ fn arm_exit_mitigations() {
     CLEAR_BHB_ON_EXIT.store(bhb, Ordering::Release);
     let rsb = if on { crate::spec_mitigations::RSB_FULL } else { crate::spec_mitigations::rsb_fill_on_exit() };
     RSB_FILL_ON_EXIT.store(rsb, Ordering::Release);
+    VERW_ON_ENTRY.store(crate::spec_mitigations::verw_on_entry(), Ordering::Release);
+    L1D_FLUSH_ON_ENTRY.store(crate::spec_mitigations::l1d_flush_on_entry(), Ordering::Release);
     crate::kprintln!("[microvm] IBPB on VM exit: {}{}{}", if on { "on" } else { "off" },
         if forced.is_some() { " (config)" } else { "" },
         if bhb { ", branch history cleared" } else { "" });
