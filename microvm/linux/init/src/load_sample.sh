@@ -25,9 +25,11 @@ snap() {
     END { print t, u, s, i, q, st, cs, pf, mj, as, cp, th, sd, np, nd, sq, rt }
   ' /proc/stat /proc/vmstat /proc/net/softnet_stat /proc/net/snmp
 }
-# Busiest threads since the last sample: "name/tid=percent of one CPU".
+# Busiest threads since the last sample: "name/tid=percent of one CPU", the
+# sum over all threads, and each online CPU's busy share.
 threads() {
   read up _ < /proc/uptime; echo "uptime x $up"
+  awk '$1 ~ /^cpu[0-9]/ { t = 0; for (k = 2; k <= 9; k++) t += $k; print "cpu", $1, t, t - $5 - $6 }' /proc/stat
   for f in /proc/[0-9]*/task/[0-9]*/stat; do cat "$f" 2>/dev/null; echo; done | awk '
     NF { a = index($0, "("); b = 0; for (k = length($0); k > 0; k--) if (substr($0, k, 1) == ")") { b = k; break }
          if (a == 0 || b == 0) next
@@ -39,9 +41,12 @@ top_threads() {
   { echo "$1"; echo "--"; echo "$2"; } | awk -v pre="$pre" -v n="$n" '
     $0 == "--" { cur = 1; next }
     $1 == "uptime" { if (cur) t1 = $3; else t0 = $3; next }
+    $1 == "cpu" && !cur { ct[$2] = $3; cb[$2] = $4; next }
+    $1 == "cpu" { if ($2 in ct) { dt = $3 - ct[$2]; ncpu++; cpus = cpus sprintf(" %d", dt > 0 ? 100 * ($4 - cb[$2]) / dt : 0) } next }
     !cur { old[$1] = $3; next }
-    ($1 in old) { d = $3 - old[$1]; if (d > 0) { busy[$1] = d; nm[$1] = $2 } }
-    END { el = t1 - t0; if (el <= 0) el = 1; line = ""; for (k = 0; k < 8; k++) { best = ""; for (t in busy) if (best == "" || busy[t] > busy[best]) best = t
+    ($1 in old) { d = $3 - old[$1]; if (d > 0) { busy[$1] = d; nm[$1] = $2; sum += d } }
+    END { el = t1 - t0; if (el <= 0) el = 1
+          line = sprintf(" cpus=%d busy=[%s ] threads=%d%% |", ncpu, cpus, sum / el); for (k = 0; k < 8; k++) { best = ""; for (t in busy) if (best == "" || busy[t] > busy[best]) best = t
             if (best == "" || busy[best] < 5) break
             line = line sprintf(" %s/%s=%d%%", nm[best], best, busy[best] / el); delete busy[best] }
           printf "%s[load] +%ds top:%s\n", pre, n, line }'
