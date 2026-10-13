@@ -43,7 +43,7 @@ URL="${1:-https://www.speedtest.net}"
 PROF_ENV=
 if [ -n "${PROFILE:-}" ]; then
     rm -f "$DIR/tmp/home/lw-prof.json"
-    PROF_ENV="MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_STARTUP_INTERVAL=1 MOZ_PROFILER_STARTUP_ENTRIES=16777216 MOZ_PROFILER_STARTUP_FILTERS=GeckoMain,Socket,Worker,Renderer,Compositor,Timer,StreamTrans MOZ_PROFILER_STARTUP_FEATURES=js,stackwalk,cpu,fileio MOZ_PROFILER_SHUTDOWN=/tmp/home/lw-prof.json"
+    PROF_ENV="MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_STARTUP_INTERVAL=1 MOZ_PROFILER_STARTUP_ENTRIES=16777216 MOZ_PROFILER_STARTUP_FILTERS=GeckoMain,Socket,Worker,Timer,StreamTrans,IPC,RemoteLzy,File,BgIO,BackgroundThreadPool,Renderer MOZ_PROFILER_STARTUP_FEATURES=js,stackwalk,cpu,fileio MOZ_PROFILER_SHUTDOWN=/tmp/home/lw-prof.json"
 fi
 exec unshare --map-root-user --mount sh -c '
     D=$0; R=$1; W=$2; U=$3; P=$4; PE=$5
