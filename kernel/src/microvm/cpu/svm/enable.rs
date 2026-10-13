@@ -1129,6 +1129,14 @@ impl VmContext {
         *AP_SHARED.lock() = Some(self.shared.clone());
     }
 
+    /// Give the core to its fibers while runnable: the guest sees this vCPU
+    /// preempted, and the time off the core as steal.
+    pub fn yield_runnable(&mut self) {
+        self.vcpu.lapic.steal.leave(self.shared.guest_mem);
+        crate::smp::fiber::yield_ready();
+        self.vcpu.lapic.steal.back();
+    }
+
     /// Host TSC of this vCPU's next timer event — the LAPIC timer, and on the
     /// BSP the PIT — the deadline a blocked vCPU parks until (KVM's hrtimer).
     pub fn next_timer_deadline_tsc(&self) -> Option<u64> {
@@ -1505,6 +1513,9 @@ impl VmContext {
         lapic::phase(self.vcpu.apic_id, lapic::PH_INJECT);
         self.inject_pending_event();
         self.vcpu.lapic.pv_eoi_sync_to(self.shared.guest_mem);
+        if self.vcpu.lapic.steal.record(self.shared.guest_mem) {
+            self.vcpu.vmcb.write_u8(vmcb::OFF_TLB_CTL, vmcb::tlb_flush_guest());
+        }
 
         // The guest's next timer, or the slice end, as a host one-shot on this
         // core: its fire is the exit that delivers the tick on time.

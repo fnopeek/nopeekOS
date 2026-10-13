@@ -374,6 +374,8 @@ pub struct LocalApic {
     pv_eoi_pending: bool,
     /// `MSR_KVM_POLL_CONTROL` as the guest last wrote it (reset value 1).
     poll_control: u64,
+    /// `MSR_KVM_STEAL_TIME`, the vCPU's other per-vCPU KVM MSR.
+    pub steal: super::super::steal_time::StealTime,
 }
 
 impl LocalApic {
@@ -393,7 +395,7 @@ impl LocalApic {
         LocalApic {
             regs, apic_id, timer_start_tsc: 0, timer_fired: false, timer_owed: 0,
             x2apic: false, tsc_deadline: 0, pv_eoi_gpa: 0, pv_eoi_pending: false,
-            poll_control: 1,
+            poll_control: 1, steal: super::super::steal_time::StealTime::new(),
         }
     }
 
@@ -661,6 +663,7 @@ impl LocalApic {
                 self.poll_control = v;
                 Ok((0, None))
             }
+            (super::super::steal_time::MSR_KVM_STEAL_TIME, w) => self.steal.msr(w).map(|v| (v, None)),
             (MSR_X2APIC_FIRST..=MSR_X2APIC_LAST, w) => {
                 if !self.x2apic { return Some(Err(())); }
                 self.x2apic_access((msr - MSR_X2APIC_FIRST) << 4, w)

@@ -259,6 +259,19 @@ impl GuestMem {
         Some(u64::from_le_bytes(b))
     }
 
+    /// Atomic exchange of one guest byte, against the guest's own atomics on
+    /// it from another vCPU.
+    pub fn xchg_u8(&self, gpa: u64, val: u8) -> Option<u8> {
+        if gpa >= self.len {
+            return None;
+        }
+        let host = self.page_host(gpa & !0xFFF)? + (gpa & 0xFFF);
+        // SAFETY: `host` lies in the mapped frame of this guest page, which
+        // stays mapped for the VM's life; a byte has no alignment.
+        let a = unsafe { core::sync::atomic::AtomicU8::from_ptr(host as *mut u8) };
+        Some(a.swap(val, Ordering::AcqRel))
+    }
+
     pub fn write_u8(&self, gpa: u64, val: u8) -> bool {
         self.write_bytes(gpa, &[val])
     }

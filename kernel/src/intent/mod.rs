@@ -2670,6 +2670,7 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     //
     // Idle: no `idle=` — CPUID hides MONITOR, so the guest halts with HLT on
     // its own, and any `idle=` would keep `cpuidle_haltpoll` from loading.
+    // Without `KVM_HINTS_REALTIME` (steal time on) it loads only when forced.
     let cpus = if crate::microvm::cpu::smp_ap_active() { "maxcpus=1" } else { "nr_cpus=1" };
     let _ = write!(
         s,
@@ -2682,6 +2683,9 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
     // addresses are only resolvable against System.map without that.
     if ripsample {
         let _ = write!(s, " nokaslr");
+    }
+    if crate::microvm::cpu::steal_time::configured() {
+        let _ = write!(s, " cpuidle_haltpoll.force=1");
     }
     // `nolapic` unless the LAPIC is actually emulated for this host. LAPIC
     // emulation is SVM-only (svm/lapic.rs); on Intel/VMX there is none, so the

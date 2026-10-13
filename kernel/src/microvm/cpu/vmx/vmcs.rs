@@ -612,6 +612,14 @@ fn invept(eptp: u64) {
     }
 }
 
+/// `vmx_flush_tlb_guest`: the guest's translations on this core. Without
+/// VPID every entry flushes them anyway.
+pub fn flush_guest_tlb() {
+    if vpid_supported() {
+        invvpid_all();
+    }
+}
+
 /// INVVPID all-context (type 2): drop every VPID-tagged translation on this core.
 fn invvpid_all() {
     let desc: [u64; 2] = [0, 0];

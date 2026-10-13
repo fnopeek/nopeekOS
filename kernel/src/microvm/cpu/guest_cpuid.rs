@@ -69,22 +69,23 @@ const L1_ECX_HYPERVISOR: u32 = 1 << 31;
 /// KVM paravirt leaves (`KVM_CPUID_SIGNATURE`, `KVM_CPUID_FEATURES`). The
 /// guest's Linux then takes the KVM paths we back: PV EOI (its EOI is a flag
 /// in its memory, no exit), PV send-IPI (one hypercall for a set of vCPUs),
-/// NOP io_delay, poll control, and x2APIC without interrupt remapping
-/// (`kvm_para_available` is `x2apic_available`). Nothing else — no kvmclock,
-/// steal time, async PF.
+/// NOP io_delay, poll control, x2APIC without interrupt remapping
+/// (`kvm_para_available` is `x2apic_available`), and steal time with PV TLB
+/// flush (`steal_time`). Nothing else — no kvmclock, async PF, PV unhalt.
 ///
-/// `KVM_HINTS_REALTIME`: Linux then idles through cpuidle-haltpoll — it polls
-/// with TIF_POLLING_NRFLAG set before HLT, so a wakeup aimed at an idle vCPU
-/// is a flag store instead of a reschedule IPI, and far fewer HLTs exit
-/// (measured: 2-3k HLT exits/s with it, 9-14k without). A vCPU does share
-/// its core with host fibers and is preempted when one wakes, which the hint
-/// denies; what Linux would do differently on that account is PV spinlocks,
-/// PV TLB flush and PV sched-yield, none of which we offer. A polling vCPU
-/// still leaves the guest at once when a fiber of its core wakes.
+/// A vCPU shares its core with host fibers and is preempted when one is due,
+/// so `KVM_HINTS_REALTIME` is not given: it would switch off PV TLB flush.
+/// The guest still idles through cpuidle-haltpoll (`cpuidle_haltpoll.force=1`
+/// on its cmdline) — it polls with TIF_POLLING_NRFLAG set before HLT, so a
+/// wakeup aimed at an idle vCPU is a flag store instead of a reschedule IPI
+/// (measured: 2-3k HLT exits/s with it, 9-14k without). `set microvm_steal
+/// off` gives the hint instead of steal time.
 const KVM_CPUID_SIGNATURE: u32 = 0x4000_0000;
 const KVM_CPUID_FEATURES: u32 = 0x4000_0001;
 const KVM_FEATURE_NOP_IO_DELAY: u32 = 1 << 1;
+const KVM_FEATURE_STEAL_TIME: u32 = 1 << 5;
 const KVM_FEATURE_PV_EOI: u32 = 1 << 6;
+const KVM_FEATURE_PV_TLB_FLUSH: u32 = 1 << 9;
 const KVM_FEATURE_PV_SEND_IPI: u32 = 1 << 11;
 const KVM_FEATURE_POLL_CONTROL: u32 = 1 << 12;
 const KVM_HINTS_REALTIME: u32 = 1 << 0;
@@ -193,11 +194,15 @@ pub fn guest_cpuid(
         }
         // "KVMKVMKVM\0\0\0"
         KVM_CPUID_SIGNATURE => return (KVM_CPUID_FEATURES, 0x4b4d_564b, 0x564b_4d56, 0x4d),
-        KVM_CPUID_FEATURES => return (
-            KVM_FEATURE_NOP_IO_DELAY | KVM_FEATURE_PV_EOI | KVM_FEATURE_PV_SEND_IPI
-                | KVM_FEATURE_POLL_CONTROL,
-            0, 0, KVM_HINTS_REALTIME,
-        ),
+        KVM_CPUID_FEATURES => {
+            let base = KVM_FEATURE_NOP_IO_DELAY | KVM_FEATURE_PV_EOI | KVM_FEATURE_PV_SEND_IPI
+                | KVM_FEATURE_POLL_CONTROL;
+            return if super::steal_time::enabled() {
+                (base | KVM_FEATURE_STEAL_TIME | KVM_FEATURE_PV_TLB_FLUSH, 0, 0, 0)
+            } else {
+                (base, 0, 0, KVM_HINTS_REALTIME)
+            };
+        }
         0x4000_0002..=0x4000_FFFF => return (0, 0, 0, 0),
         // AMD: at least up to 0x8000_0021, where IBPB_BRTYPE is synthesized
         // (KVM does the same). Intel answers leaves past its maximum with

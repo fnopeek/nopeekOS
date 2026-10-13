@@ -21,6 +21,7 @@
 //! no shared implementation, so a plain match is used.
 
 pub mod rip_sample;
+pub mod steal_time;
 pub mod guest_cpuid; // guest CPUID allowlist (KVM kvm_cpu_cap_init model)
 pub mod guest_msr; // vendor-neutral guest MSR emulation
 pub mod svm;
@@ -470,6 +471,7 @@ fn arm_exit_mitigations() {
 
 fn reset_close_state() {
     arm_exit_mitigations();
+    steal_time::arm();
     VM_CLOSE_REQUESTED.store(false, Ordering::Release);
     QUIT_DEADLINE.store(0, Ordering::Release);
     TERM_AT.store(0, Ordering::Release);
@@ -1727,7 +1729,7 @@ fn vcpu_fiber_task(_arg: u64) {
                         // Busy guest: let peers take a turn, resume next pass.
                         Ok(svm::SliceOutcome::StillRunning) => {
                             svm::lapic::phase(0, svm::lapic::PH_YIELD);
-                            crate::smp::fiber::yield_ready();
+                            ctx.yield_runnable();
                         }
                         // Idle guest: park briefly → core runs app fibers.
                         // Event-driven on host RX IRQ while downloading.
@@ -1793,7 +1795,7 @@ fn vcpu_fiber_task(_arg: u64) {
                         unsafe { core::arch::asm!("cli") };
                         match outcome {
                             Ok(vmx::SliceOutcome::StillRunning) => {
-                                crate::smp::fiber::yield_ready();
+                                ctx.yield_runnable();
                             }
                             Ok(vmx::SliceOutcome::Idle) => {
                                 park_vcpu_idle(ctx.next_timer_deadline_tsc());
@@ -1877,7 +1879,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
                     // SAFETY: ring-0.
                     unsafe { core::arch::asm!("cli") };
                     match outcome {
-                        Ok(vmx::SliceOutcome::StillRunning) => { crate::smp::fiber::yield_ready(); }
+                        Ok(vmx::SliceOutcome::StillRunning) => { ctx.yield_runnable(); }
                         Ok(vmx::SliceOutcome::Idle) => {
                             crate::smp::fiber::kick_wait_until_unless(
                                 vcpu_block_deadline(ctx.next_timer_deadline_tsc()),
@@ -1915,7 +1917,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
                 match outcome {
                     Ok(svm::SliceOutcome::StillRunning) => {
                         svm::lapic::phase(apic_id, svm::lapic::PH_YIELD);
-                        crate::smp::fiber::yield_ready();
+                        ctx.yield_runnable();
                     }
                     Ok(svm::SliceOutcome::Idle) => {
                         svm::lapic::phase(apic_id, svm::lapic::PH_PARK);
