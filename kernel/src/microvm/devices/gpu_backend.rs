@@ -300,6 +300,7 @@ pub fn raise_irq() { GPU_IRQ_PENDING.store(true, Ordering::Release); }
 /// BSP: take the pending GPU IRQ (clears it). True ⇒ fold IRQ9 into pending_irqs.
 #[inline]
 pub fn take_irq() -> bool { GPU_IRQ_PENDING.swap(false, Ordering::AcqRel) }
+pub fn irq_pending() -> bool { GPU_IRQ_PENDING.load(Ordering::Acquire) }
 
 // ── The off-vCPU GPU worker fiber ──
 static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);

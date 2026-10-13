@@ -270,6 +270,7 @@ pub fn set_tile_size(window_id: u32, w: u32, h: u32) {
         surf.tile_h = h;
         surf.display_dirty = true;
         ANY_DISPLAY_DIRTY.store(true, Ordering::Release);
+        crate::microvm::cpu::note_device_work();
     }
 }
 

@@ -781,6 +781,8 @@ pub struct Vcpu {
     /// mid-vectoring → corrupt guest state (AMD APM §15.20; KVM
     /// `svm_complete_interrupts`). 0 = nothing pending.
     reinject: u64,
+    /// When the BSP last collected device interrupts.
+    dev_poll: crate::microvm::cpu::DevPoll,
     iter: u32,
     io_dropped: u32,
     /// Per-vCPU emulated local APIC (xAPIC MMIO @ 0xFEE00000). Inert
@@ -918,6 +920,7 @@ impl VmContext {
                 host_fpu: crate::microvm::cpu::FpuArea::boxed(),
                 guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
                 reinject: 0,
+                dev_poll: crate::microvm::cpu::DevPoll::new(),
                 iter: 0,
                 io_dropped: 0,
                 lapic: LocalApic::new(0).ok_or("no frame for the LAPIC page")?,
@@ -1161,6 +1164,7 @@ impl VmContext {
                 host_fpu: crate::microvm::cpu::FpuArea::boxed(),
                 guest_fpu: crate::microvm::cpu::FpuArea::boxed(),
                 reinject: 0,
+                dev_poll: crate::microvm::cpu::DevPoll::new(),
                 iter: 0,
                 io_dropped: 0,
                 lapic: LocalApic::new(apic_id).ok_or("no frame for the LAPIC page")?,
@@ -1267,9 +1271,16 @@ impl VmContext {
     /// the guest cannot take it now (IF=0, interrupt shadow, or an exception
     /// already queued), open the interrupt window so it exits the moment it can.
     fn inject_pending_event(&mut self) {
-        // The BSP owns the device lines: collect them under `dev`.
-        let mut dev = (self.vcpu.apic_id == 0).then(|| self.shared.dev.lock());
-        if let Some(sh) = dev.as_deref_mut() { collect_device_irqs(sh, self.shared.guest_mem); }
+        // The BSP owns the device lines: collect them under `dev`, when
+        // something can have changed (`cpu::DevPoll`).
+        let poll = self.vcpu.apic_id == 0
+            && self.vcpu.dev_poll.due(LAST_DEV_DEADLINE.load(Ordering::Relaxed));
+        let mut dev = poll.then(|| self.shared.dev.lock());
+        if let Some(sh) = dev.as_deref_mut() {
+            let snap = crate::microvm::cpu::DevPoll::snapshot();
+            collect_device_irqs(sh, self.shared.guest_mem);
+            self.vcpu.dev_poll.done(snap, sh.pic.output());
+        }
         let vcpu = &mut self.vcpu;
 
         if vcpu.reinject != 0 {
@@ -1734,6 +1745,12 @@ impl VmContext {
         lapic::phase(self.vcpu.apic_id, lapic::PH_BIGLOCK);
         let t_lock = crate::interrupts::rdtsc();
         let mut dev = self.shared.dev.lock();
+        // A device access on any vCPU can leave work for the BSP's collection.
+        if self.vcpu.apic_id == 0 {
+            self.vcpu.dev_poll.dirty = true;
+        } else {
+            crate::microvm::cpu::note_device_work();
+        }
         crate::microvm::cpu::record_vcpu_time(self.vcpu.apic_id,
             crate::microvm::cpu::VT_DEVLOCK, crate::interrupts::rdtsc().wrapping_sub(t_lock));
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);

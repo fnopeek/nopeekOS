@@ -633,6 +633,8 @@ fn arm_exit_mitigations() {
     let xsaveopt = core::arch::x86_64::__cpuid_count(0xD, 1).eax & 1 != 0
         && crate::config::get("microvm_xsaveopt").is_none_or(|v| v.trim() != "off");
     XSAVEOPT_OK.store(xsaveopt, Ordering::Release);
+    DEVPOLL_ALWAYS.store(crate::config::get("microvm_devpoll").is_some_and(|v| v.trim() == "always"),
+        Ordering::Release);
     L1D_FLUSH_ON_ENTRY.store(crate::spec_mitigations::l1d_flush_on_entry(), Ordering::Release);
     crate::kprintln!("[microvm] IBPB on VM exit: {}{}{}", if on { "on" } else { "off" },
         if forced.is_some() { " (config)" } else { "" },
@@ -1156,6 +1158,7 @@ fn sync_vm_windows() {
             if let Some(wid) = crate::shade::create_surface_window(VM_WINDOW_TITLE) {
                 OUT_WINDOWS[k].store(wid.0, Ordering::Release);
                 OUTPUTS_CHANGED.store(true, Ordering::Release);
+                note_device_work();
             }
         }
         if closed & (1 << k) != 0 {
@@ -1164,6 +1167,7 @@ fn sync_vm_windows() {
             if wid != 0 && others {
                 OUT_WINDOWS[k].store(0, Ordering::Release);
                 OUTPUTS_CHANGED.store(true, Ordering::Release);
+                note_device_work();
                 crate::shade::surface::remove_surface(wid);
                 crate::shade::close_window(crate::shade::window::WindowId(wid));
             }
@@ -1196,6 +1200,7 @@ pub fn vm_close_for_window(window_id: u32) {
     if (0..MAX_OUTPUTS).any(|i| i != k && output_window(i) != 0) {
         OUT_WINDOWS[k].store(0, Ordering::Release);
         OUTPUTS_CHANGED.store(true, Ordering::Release);
+        note_device_work();
         let _ = console::send_windows(console::WIN_CLOSE, &[k as u8]);
         return;
     }
@@ -1348,9 +1353,69 @@ pub fn entry_irqs_on() {
 /// services (input, 9p replies): a blocked vCPU parks until a timer
 /// deadline or this kick.
 pub fn kick_bsp_net_irq() {
+    note_device_work();
     let hc = BSP_HOST_CORE.load(Ordering::Relaxed);
     if hc != usize::MAX {
         crate::smp::kick_host_core(hc);
+    }
+}
+
+// ── Device polling on the BSP ──────────────────────────────────────
+//
+// The BSP collects device interrupts (`collect_device_irqs`) under the
+// device-model lock. It does so only when something can have changed, not on
+// every entry: a host producer noted work (`note_device_work`, which every
+// wake of the BSP for a device goes through), the last exit was a device
+// access, a device deadline (PIT, GPU resume, sound) passed, the tick moved
+// (NAT housekeeping, window sizes), an interrupt line is raised, or the PIC
+// still has an interrupt waiting.
+
+static DEVICE_WORK: AtomicU64 = AtomicU64::new(0);
+/// `set microvm_devpoll always`: collect before every entry, as before.
+static DEVPOLL_ALWAYS: AtomicBool = AtomicBool::new(false);
+
+/// Host side: device work for the BSP to collect.
+pub fn note_device_work() {
+    DEVICE_WORK.fetch_add(1, Ordering::AcqRel);
+}
+
+/// What the BSP saw at its last collection.
+pub struct DevPoll {
+    work: u64,
+    tick: u64,
+    pic: bool,
+    /// The last exit took the device lock (MMIO, port I/O, a kick).
+    pub dirty: bool,
+}
+
+impl DevPoll {
+    pub const fn new() -> Self {
+        DevPoll { work: 0, tick: 0, pic: false, dirty: true }
+    }
+
+    /// Whether to collect before this entry; `deadline` is the device
+    /// deadline last read (0 = none).
+    pub fn due(&self, deadline: u64) -> bool {
+        self.dirty || self.pic
+            || DEVPOLL_ALWAYS.load(Ordering::Relaxed)
+            || DEVICE_WORK.load(Ordering::Acquire) != self.work
+            || crate::interrupts::ticks() != self.tick
+            || crate::microvm::devices::net_backend::irq_pending()
+            || crate::microvm::devices::gpu_backend::irq_pending()
+            || (deadline != 0 && crate::interrupts::rdtsc() >= deadline)
+    }
+
+    /// The work generation before collecting: work noted while collecting
+    /// makes the next entry collect again.
+    pub fn snapshot() -> u64 {
+        DEVICE_WORK.load(Ordering::Acquire)
+    }
+
+    pub fn done(&mut self, snapshot: u64, pic_output: bool) {
+        self.work = snapshot;
+        self.tick = crate::interrupts::ticks();
+        self.pic = pic_output;
+        self.dirty = false;
     }
 }
 
