@@ -4,9 +4,9 @@
 # and TCP retransmits. In the guest the session starts it when the host passes
 # `npkload` and the lines go to /dev/kmsg; on a host, run it as is and they
 # go to stdout, so both sides can be compared line for line.
-out=${1:-/dev/stdout}
 # kmsg lines need a level the console shows (the guest boots with loglevel=5).
-pre=; [ "$out" = /dev/kmsg ] && pre="<0>"
+pre=; [ "${1:-}" = /dev/kmsg ] && pre="<0>"
+[ -n "${1:-}" ] && exec > "$1"
 snap() {
   awk '
     function hex(x,  v, k, c) { v = 0; x = tolower(x)
@@ -25,7 +25,29 @@ snap() {
     END { print t, u, s, i, q, st, cs, pf, mj, as, cp, th, sd, np, nd, sq, rt }
   ' /proc/stat /proc/vmstat /proc/net/softnet_stat /proc/net/snmp
 }
+# Busiest threads since the last sample: "name/tid=percent of one CPU".
+threads() {
+  read up _ < /proc/uptime; echo "uptime x $up"
+  for f in /proc/[0-9]*/task/[0-9]*/stat; do cat "$f" 2>/dev/null; echo; done | awk '
+    NF { a = index($0, "("); b = 0; for (k = length($0); k > 0; k--) if (substr($0, k, 1) == ")") { b = k; break }
+         if (a == 0 || b == 0) next
+         name = substr($0, a + 1, b - a - 1); gsub(/ /, "_", name)
+         split(substr($0, b + 2), r, " ")
+         print $1, name, r[12] + r[13] }'
+}
+top_threads() {
+  { echo "$1"; echo "--"; echo "$2"; } | awk -v pre="$pre" -v n="$n" '
+    $0 == "--" { cur = 1; next }
+    $1 == "uptime" { if (cur) t1 = $3; else t0 = $3; next }
+    !cur { old[$1] = $3; next }
+    ($1 in old) { d = $3 - old[$1]; if (d > 0) { busy[$1] = d; nm[$1] = $2 } }
+    END { el = t1 - t0; if (el <= 0) el = 1; line = ""; for (k = 0; k < 8; k++) { best = ""; for (t in busy) if (best == "" || busy[t] > busy[best]) best = t
+            if (best == "" || busy[best] < 5) break
+            line = line sprintf(" %s/%s=%d%%", nm[best], best, busy[best] / el); delete busy[best] }
+          printf "%s[load] +%ds top:%s\n", pre, n, line }'
+}
 prev=$(snap)
+tprev=$(threads)
 n=0
 while sleep 1; do
   n=$((n + 1))
@@ -34,6 +56,9 @@ while sleep 1; do
     h=17; for (k=1;k<=h;k++) d[k]=$(k+h)-$k; t=d[1]>0?d[1]:1
     printf "%s[load] +%ds cpu usr=%d%% sys=%d%% irq=%d%% idle=%d%% steal=%d%% | ctxsw=%d | pgfault=%d major=%d thp=%d | allocstall=%d compact=%d scan=%d | rx pkts=%d drop=%d squeeze=%d | retrans=%d\n",
       pre, n, 100*d[2]/t, 100*d[3]/t, 100*d[5]/t, 100*d[4]/t, 100*d[6]/t, d[7], d[8], d[9], d[12], d[10], d[11], d[13], d[14], d[15], d[16], d[17]
-  }' > "$out"
+  }'
   prev=$cur
+  tcur=$(threads)
+  top_threads "$tprev" "$tcur"
+  tprev=$tcur
 done
