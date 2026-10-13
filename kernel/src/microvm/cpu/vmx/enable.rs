@@ -1728,11 +1728,14 @@ impl VmContext {
         // across run_guest_once or a yield.
         lapic::phase(self.vcpu.apic_id, lapic::PH_BIGLOCK);
         let mut dev = self.shared.dev.lock();
-        // A device access on any vCPU can leave work for the BSP's collection.
-        if self.vcpu.apic_id == 0 {
-            self.vcpu.dev_poll.dirty = true;
-        } else {
-            crate::microvm::cpu::note_device_work();
+        // A device access (port I/O, MMIO) on any vCPU can leave work for
+        // the BSP's collection; CPUID, HLT and the like cannot.
+        if matches!(basic, 30 | 48) {
+            if self.vcpu.apic_id == 0 {
+                self.vcpu.dev_poll.dirty = true;
+            } else {
+                crate::microvm::cpu::note_device_work();
+            }
         }
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         let sh = &mut *dev;

@@ -1745,11 +1745,14 @@ impl VmContext {
         lapic::phase(self.vcpu.apic_id, lapic::PH_BIGLOCK);
         let t_lock = crate::interrupts::rdtsc();
         let mut dev = self.shared.dev.lock();
-        // A device access on any vCPU can leave work for the BSP's collection.
-        if self.vcpu.apic_id == 0 {
-            self.vcpu.dev_poll.dirty = true;
-        } else {
-            crate::microvm::cpu::note_device_work();
+        // A device access (port I/O, MMIO) on any vCPU can leave work for
+        // the BSP's collection; CPUID, HLT and the like cannot.
+        if matches!(exit, EXIT_IOIO | EXIT_NPF) {
+            if self.vcpu.apic_id == 0 {
+                self.vcpu.dev_poll.dirty = true;
+            } else {
+                crate::microvm::cpu::note_device_work();
+            }
         }
         crate::microvm::cpu::record_vcpu_time(self.vcpu.apic_id,
             crate::microvm::cpu::VT_DEVLOCK, crate::interrupts::rdtsc().wrapping_sub(t_lock));
