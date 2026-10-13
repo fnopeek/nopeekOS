@@ -1,0 +1,131 @@
+# Indirect calls in i915 resolved for Tiger Lake (8086:9A78, Gen12.1),
+# Linux 6.18.55. Each line names the source that makes the choice; read
+# by tools/linux-callgraph.py --follow-file.
+#
+# Platform facts used below (i915_pci.c tgl_info / GEN12..GEN7_FEATURES):
+#   engines RCS0 BCS0 VCS0 VCS2 VECS0 (no CCS), ppgtt FULL 48 bit,
+#   has_logical_ring_elsq, no LMEM, regions SMEM + STOLEN_SMEM.
+#   enable_guc = 0 on TGL (gt/uc/intel_uc.c uc_expand_default_options).
+
+# --- uncore: intel_uncore.c uncore_forcewake_init, GRAPHICS_VER >= 12
+#     ASSIGN_READ/WRITE_MMIO_VFUNCS(fwtable), __gen12_fw_ranges,
+#     intel_uncore_fw_domains_init: fw_get_funcs = uncore_get_fallback
+@intel_uncore.h:373 = fwtable_read16
+@intel_uncore.h:374 = fwtable_read32
+@intel_uncore.h:375 = fwtable_read16
+@intel_uncore.h:376 = fwtable_read32
+@intel_uncore.h:379 = fwtable_write16
+@intel_uncore.h:380 = fwtable_write32
+@intel_uncore.h:397 = fwtable_read64
+read_fw_domains  = fwtable_reg_read_fw_domains
+write_fw_domains = fwtable_reg_write_fw_domains
+force_wake_get   = fw_domains_get_with_fallback
+
+# --- submission: intel_engine_cs.c intel_engines_init, HAS_EXECLISTS and
+#     no GuC -> intel_execlists_submission_setup
+@gt/intel_engine_cs.c:1514 = intel_execlists_submission_setup
+
+# --- intel_execlists_submission.c logical_ring_default_vfuncs
+resume                 = execlists_resume
+request_alloc          = execlists_request_alloc
+remove_active_request  = remove_from_engine
+prepare                = execlists_reset_prepare
+rewind                 = execlists_reset_rewind
+cancel                 = execlists_reset_cancel
+finish                 = execlists_reset_finish
+set_default_submission = execlists_set_default_submission
+sanitize               = execlists_sanitize
+release                = execlists_release
+callback               = execlists_submission_tasklet
+# GRAPHICS_VER >= 12 for xcs; rcs_submission_override case 12 for RCS
+emit_flush             = gen12_emit_flush_xcs
+emit_flush             = gen12_emit_flush_rcs
+emit_fini_breadcrumb   = gen12_emit_fini_breadcrumb_xcs
+emit_fini_breadcrumb   = gen12_emit_fini_breadcrumb_rcs
+# can_preempt: GRAPHICS_VER > 8; IP < 12.55
+emit_bb_start          = gen8_emit_bb_start
+
+# execlists_set_default_submission
+submit_request         = execlists_submit_request
+kick_backend           = kick_execlists
+add_active_request     = add_to_engine
+park                   = execlists_park
+# GRAPHICS_VER >= 11: irq_enable/irq_disable stay NULL, unpark = NULL;
+# bump_serial, bump_inflight_request_prio and revoke are GuC/ring only.
+
+# --- intel_lrc.c: GRAPHICS_VER >= 12 sets ce->wa_bb_page (__lrc_alloc_state)
+#     and __lrc_init_regs picks the indirect ctx bb by engine class;
+#     lrc_init_wa_ctx returns early for GRAPHICS_VER >= 11
+@gt/intel_lrc.c:1472 = gen12_emit_indirect_ctx_xcs
+@gt/intel_lrc.c:1472 = gen12_emit_indirect_ctx_rcs
+
+# --- execlists_context_ops
+alloc      = execlists_context_alloc
+pre_pin    = execlists_context_pre_pin
+pin        = execlists_context_pin
+unpin      = lrc_unpin
+reset      = lrc_reset
+post_unpin = lrc_post_unpin
+enter      = intel_context_enter_engine
+exit       = intel_context_exit_engine
+
+# --- wakerefs: intel_engine_pm.c wf_ops, intel_gt_pm.c wf_ops
+get = __engine_unpark
+get = __gt_unpark
+put = __engine_park
+put = __gt_park
+
+# --- GGTT: intel_ggtt.c ggtt_probe_hw -> gen8_gmch_probe; no BXT VT-d
+#     serialisation, no MTL binder, no GuC invalidate
+cleanup       = gen6_gmch_remove
+clear_range   = nop_clear_range
+scratch_range = gen8_ggtt_clear_range
+invalidate    = gen8_ggtt_invalidate
+bind_vma      = intel_ggtt_bind_vma
+insert_entries = gen8_ggtt_insert_entries
+pte_encode    = gen8_ggtt_pte_encode
+alloc_scratch_dma = alloc_pt_dma
+
+# --- PPGTT: intel_ppgtt.c -> gen8_ppgtt_create, no LMEM, GRAPHICS_VER >= 12
+alloc_pt_dma      = alloc_pt_dma
+pte_encode        = gen12_pte_encode
+allocate_va_range = gen8_ppgtt_alloc
+clear_range       = gen8_ppgtt_clear
+foreach           = gen8_ppgtt_foreach
+cleanup           = gen8_ppgtt_cleanup
+bind_vma          = ppgtt_bind_vma
+insert_entries    = gen8_ppgtt_insert
+# intel_gtt.h set_pd_entry
+@gt/intel_ppgtt.c:109 = gen8_pde_encode
+
+# --- reset: intel_reset.c intel_get_gpu_reset, GRAPHICS_VER >= 8
+@gt/intel_reset.c:787 = gen8_reset_engines
+
+# --- memory: GEN_DEFAULT_REGIONS, !HAS_LMEM -> shmem + stolen smem;
+#     internal objects for status pages and scratch
+init        = init_shmem
+init        = init_stolen_smem
+init_object = shmem_object_init
+init_object = _i915_gem_object_stolen_init
+get_pages   = shmem_get_pages
+get_pages   = i915_gem_object_get_pages_stolen
+get_pages   = i915_gem_object_get_pages_internal
+put_pages   = shmem_put_pages
+put_pages   = i915_gem_object_put_pages_stolen
+put_pages   = i915_gem_object_put_pages_internal
+shrink      = shmem_shrink
+release     = release_shmem
+release     = release_stolen_smem
+
+# --- scheduler
+schedule = i915_schedule
+
+# Not taken on TGL: sched_disable (GuC only), adjust_lru and
+# unmap_virtual (TTM only), submit_request via resubmit_virtual_request
+# (virtual engines, not created by the kernel itself),
+# init_clock_gating (intel_clock_gating_hooks_init -> nop for TGL).
+
+# --- interrupts: i915_irq.c intel_irq_handler, GRAPHICS_VER >= 11 and
+#     IP < 12.10 -> gen11_irq_handler (a root, registered via request_irq);
+#     logical_ring_default_vfuncs -> intel_engine_set_irq_handler
+irq_handler = execlists_irq_handler
