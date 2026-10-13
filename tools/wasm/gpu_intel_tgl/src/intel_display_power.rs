@@ -319,6 +319,111 @@ pub fn intel_display_power_get(i915: &mut drm_i915_private, domain: u32) {
     __intel_display_power_get_domain(i915, domain);
 }
 
+/// `__intel_display_power_is_enabled`: runtime PM never suspends here.
+fn __intel_display_power_is_enabled(i915: &drm_i915_private, domain: u32) -> bool {
+    let pd = &i915.display.power;
+    for w in (0..pd.power_well_count).rev() {
+        let pw = &pd.power_wells[w];
+        if !test_bit(&pw.domains, domain) {
+            continue;
+        }
+        if inst(pw).always_on != 0 {
+            continue;
+        }
+        if !pw.hw_enabled {
+            return false;
+        }
+    }
+    true
+}
+
+/// `intel_display_power_get_if_enabled`; `true` stands for a wakeref.
+pub fn intel_display_power_get_if_enabled(i915: &mut drm_i915_private, domain: u32) -> bool {
+    if __intel_display_power_is_enabled(i915, domain) {
+        __intel_display_power_get_domain(i915, domain);
+        true
+    } else {
+        false
+    }
+}
+
+/// `__intel_display_power_put_domain`.
+fn __intel_display_power_put_domain(i915: &mut drm_i915_private, domain: u32) {
+    if i915.display.power.domain_use_count[domain as usize] == 0 {
+        Line::new().s("warning: use count on domain ").dec(domain as u64).s(" is already zero").say();
+    }
+    i915.display.power.domain_use_count[domain as usize] -= 1;
+    for w in (0..i915.display.power.power_well_count).rev() {
+        if test_bit(&i915.display.power.power_wells[w].domains, domain) {
+            intel_power_well_put(i915, w);
+        }
+    }
+}
+
+/// `intel_display_power_put` (`intel_display_power_put_unchecked` without
+/// the runtime-PM debug tracking).
+pub fn intel_display_power_put(i915: &mut drm_i915_private, domain: u32) {
+    __intel_display_power_put_domain(i915, domain);
+}
+
+/// `intel_display_power_put_async`. Linux delays the release by a work
+/// item so a well is not cycled between back-to-back users; there is no
+/// work queue here, so the reference is dropped at once.
+pub fn intel_display_power_put_async(i915: &mut drm_i915_private, domain: u32) {
+    __intel_display_power_put_domain(i915, domain);
+}
+
+/// `struct intel_display_power_domain_set`.
+#[derive(Clone, Copy, Default)]
+pub struct intel_display_power_domain_set {
+    pub mask: [u64; DOMAIN_WORDS],
+}
+
+/// `intel_display_power_get_in_set_if_enabled`.
+pub fn intel_display_power_get_in_set_if_enabled(i915: &mut drm_i915_private,
+                                                 set: &mut intel_display_power_domain_set,
+                                                 domain: u32) -> bool {
+    if test_bit(&set.mask, domain) {
+        linux::say("warning: power domain already in the set");
+    }
+    if !intel_display_power_get_if_enabled(i915, domain) {
+        return false;
+    }
+    set_bit(&mut set.mask, domain);
+    true
+}
+
+/// `intel_display_power_put_all_in_set` → `intel_display_power_put_mask_in_set`.
+pub fn intel_display_power_put_all_in_set(i915: &mut drm_i915_private,
+                                          set: &mut intel_display_power_domain_set) {
+    for domain in 0..POWER_DOMAIN_NUM {
+        if !test_bit(&set.mask, domain) {
+            continue;
+        }
+        intel_display_power_put(i915, domain);
+        set.mask[(domain / 64) as usize] &= !(1 << (domain % 64));
+    }
+}
+
+/// `POWER_DOMAIN_PIPE`.
+pub const fn POWER_DOMAIN_PIPE(pipe: u32) -> u32 {
+    pipe - PIPE_A + POWER_DOMAIN_PIPE_A
+}
+
+/// `POWER_DOMAIN_PIPE_PANEL_FITTER`.
+pub const fn POWER_DOMAIN_PIPE_PANEL_FITTER(pipe: u32) -> u32 {
+    pipe - PIPE_A + POWER_DOMAIN_PIPE_PANEL_FITTER_A
+}
+
+/// `POWER_DOMAIN_TRANSCODER`.
+pub const fn POWER_DOMAIN_TRANSCODER(tran: u32) -> u32 {
+    if tran == TRANSCODER_EDP {
+        POWER_DOMAIN_TRANSCODER_EDP
+    } else {
+        tran - TRANSCODER_A + POWER_DOMAIN_TRANSCODER_A
+    }
+}
+
 /// `intel_power_domains_sync_hw`.
 fn intel_power_domains_sync_hw(i915: &mut drm_i915_private) {
     for w in 0..i915.display.power.power_well_count {

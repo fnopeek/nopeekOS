@@ -18,21 +18,32 @@
 mod i915_drv;
 mod intel_bios;
 mod intel_cdclk;
+mod intel_color;
 mod intel_combo_phy;
+mod intel_crtc;
+mod intel_cursor;
 mod intel_de;
+mod intel_display;
 mod intel_display_device;
 mod intel_display_power;
+mod intel_display_types;
 mod intel_dram;
 mod intel_engine;
+mod intel_fb;
 mod intel_ggtt;
 mod intel_gt;
 mod intel_opregion;
 mod intel_pch;
 mod intel_pcode;
+mod intel_plane_initial;
 mod intel_reset;
 mod intel_uncore;
+mod intel_vdsc;
+mod intel_vrr;
 mod linux;
 mod regs;
+mod skl_scaler;
+mod skl_universal_plane;
 mod tables;
 
 use i915_drv::intel_step_info;
@@ -40,6 +51,7 @@ use intel_bios::{bdb_block, gmbus_pin};
 use intel_cdclk::intel_cdclk_vals;
 use intel_combo_phy::icl_procmon;
 use intel_display_power::{buddy_page_mask, power_well_domain, power_well_inst, power_well_inst_ops};
+use intel_fb::drm_format_info;
 use intel_gt::engine_info;
 use intel_uncore::{i915_range, intel_forcewake_range};
 use npk_sys::Mmio;
@@ -145,6 +157,7 @@ pub extern "C" fn _start() {
     intel_gmch_bar_setup();
     let mut drt = intel_display_device::tgl_runtime_defaults();
     intel_display_device::intel_display_device_info_runtime_init(&mut i915, &mut drt, pch_type);
+    i915.display.runtime = drt;
     // intel_display_driver_early_probe: intel_init_cdclk_hooks.
     i915.display.cdclk = intel_cdclk::intel_init_cdclk_hooks();
     intel_gt::intel_gt_init_mmio(&mut i915, &mut gt);
@@ -195,6 +208,7 @@ pub extern "C" fn _start() {
         intel_cdclk::intel_update_max_cdclk(&mut cd);
     }
     i915.display.cdclk = cd;
+    display_readout(&mut i915);
 
     Line::new().s("GGTT ").dec(ggtt.total >> 20).s(" MB, aperture ").hex((ggtt.gmadr_start >> 32) as u32)
         .s("_").hex(ggtt.gmadr_start as u32).s(" + ").dec(ggtt.mappable_end >> 20).s(" MB, ")
@@ -270,4 +284,58 @@ fn report(i915: &i915_drv::drm_i915_private, gt: &intel_gt::intel_gt,
     l.say();
     Line::new().s("display pipes ").hex(drt.pipe_mask).s(", dmc ").dec(drt.has_dmc as u64)
         .s(", rawclk ").dec(drt.rawclk_freq as u64).s(" kHz").say();
+}
+
+/// intel_display_driver_probe_nogem, the crtc part: `intel_crtc_init` for
+/// each pipe, the crtc and plane state readout of
+/// `intel_modeset_setup_hw_state`, and `intel_initial_plane_config`. Only
+/// registers are read.
+fn display_readout(i915: &mut i915_drv::drm_i915_private) {
+    for pipe in 0..regs::I915_MAX_PIPES {
+        if i915.display.runtime.pipe_mask & (1 << pipe) == 0 {
+            continue;
+        }
+        if intel_crtc::intel_crtc_init(i915, pipe).is_err() {
+            Line::new().s("intel_crtc_init failed for pipe ").dec(pipe as u64).say();
+            return;
+        }
+    }
+    Line::new().s("crtcs ").dec(i915.display.runtime.pipe_mask.count_ones() as u64)
+        .s(", planes ").dec(i915.display.num_planes as u64).say();
+
+    intel_crtc::intel_modeset_readout_crtcs(i915);
+    for c in 0..regs::I915_MAX_PIPES as usize {
+        if !i915.display.crtc_valid[c] {
+            continue;
+        }
+        intel_crtc::intel_crtc_copy_hw_to_uapi_state(i915, c);
+        let st = i915.display.crtcs[c].state;
+        if !st.hw.active {
+            continue;
+        }
+        let m = st.hw.adjusted_mode;
+        Line::new().s("pipe ").dec(c as u64).s(": transcoder ").dec(st.cpu_transcoder as u64)
+            .s(", source ").dec(st.pipe_src.width() as u64).s("x").dec(st.pipe_src.height() as u64)
+            .s(", output format ").dec(st.output_format as u64).s(", planes ").hex(st.active_planes as u32)
+            .s(", joiner ").hex(st.joiner_pipes as u32).s(", dsc ").dec(st.dsc.compression_enable as u64)
+            .s(", vrr ").dec(st.vrr.enable as u64).say();
+        Line::new().s("pipe ").dec(c as u64).s(": h ").dec(m.crtc_hdisplay as u64).s(" ")
+            .dec(m.crtc_hsync_start as u64).s(" ").dec(m.crtc_hsync_end as u64).s(" ")
+            .dec(m.crtc_htotal as u64).s(", v ").dec(m.crtc_vdisplay as u64).s(" ")
+            .dec(m.crtc_vsync_start as u64).s(" ").dec(m.crtc_vsync_end as u64).s(" ")
+            .dec(m.crtc_vtotal as u64).s(", flags ").hex(m.flags).s(", pfit ")
+            .dec(st.pch_pfit.enabled as u64).s(", gamma ").hex(st.gamma_mode).s(", csc ").hex(st.csc_mode)
+            .say();
+    }
+
+    let configs = intel_plane_initial::intel_initial_plane_config(i915);
+    for (pipe, pc) in configs.iter().enumerate() {
+        if let Some(fb) = pc.fb {
+            Line::new().s("initial fb on pipe ").dec(pipe as u64).s(": GGTT ").hex(pc.base).s(", ")
+                .dec(fb.width as u64).s("x").dec(fb.height as u64).s(", format ").hex(fb.format)
+                .s(", modifier ").hex((fb.modifier >> 32) as u32).s("_").hex(fb.modifier as u32)
+                .s(", stride ").dec(fb.pitch as u64).s(", size ").hex(pc.size).s(", rotation ")
+                .hex(pc.rotation).say();
+        }
+    }
 }

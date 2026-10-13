@@ -56,6 +56,14 @@ pub struct intel_display {
     pub cdclk: crate::intel_cdclk::intel_display_cdclk,
     /// `display->dbuf.enabled_slices`.
     pub dbuf_enabled_slices: u8,
+    /// `DISPLAY_RUNTIME_INFO(display)`.
+    pub runtime: crate::intel_display_device::intel_display_runtime_info,
+    /// The crtcs, indexed by pipe; `crtc_valid` marks the ones created.
+    pub crtcs: [crate::intel_display_types::intel_crtc; crate::regs::I915_MAX_PIPES as usize],
+    pub crtc_valid: [bool; crate::regs::I915_MAX_PIPES as usize],
+    /// The planes in `drm_plane_index` order.
+    pub planes: [crate::intel_display_types::intel_plane; crate::intel_display_types::MAX_PLANES],
+    pub num_planes: usize,
 }
 
 /// `struct drm_i915_private`, as far as this stage needs it.

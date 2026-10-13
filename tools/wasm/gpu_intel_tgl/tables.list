@@ -40,3 +40,5 @@ direct_aux_ch_map: u8
 gmbus_pins_icp: gmbus_pin { valid=name != 0 }
 @ display/intel_display_power.c
 tgl_buddy_page_masks: buddy_page_mask { page_mask, ty=type, num_channels }
+@ ../drm_fourcc.c
+__drm_format_info::formats: drm_format_info = struct drm_format_info { format, cpp0=cpp[0] }
