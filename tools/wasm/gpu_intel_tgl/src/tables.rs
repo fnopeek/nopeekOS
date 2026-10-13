@@ -453,3 +453,17 @@ pub static tgl_buddy_page_masks: [buddy_page_mask; 9] = [
     buddy_page_mask { page_mask: 0x38, ty: 0x7, num_channels: 0x4 },
     buddy_page_mask { page_mask: 0x0, ty: 0x0, num_channels: 0x0 },
 ];
+
+// display/intel_dpll_mgr.c
+/// display/intel_dpll_mgr.c: tgl_plls[ARRAY_SIZE(tgl_plls) - 1]
+pub static tgl_plls: [dpll_info; 9] = [
+    dpll_info { name: b"DPLL 0", funcs: dpll_info_funcs::combo_pll_funcs, id: 0x0, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"DPLL 1", funcs: dpll_info_funcs::combo_pll_funcs, id: 0x1, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TBT PLL", funcs: dpll_info_funcs::tbt_pll_funcs, id: 0x2, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x1 },
+    dpll_info { name: b"TC PLL 1", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x3, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TC PLL 2", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x4, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TC PLL 3", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x5, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TC PLL 4", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x6, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TC PLL 5", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x7, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+    dpll_info { name: b"TC PLL 6", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x8, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
+];

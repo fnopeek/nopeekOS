@@ -22,6 +22,8 @@ mod intel_combo_phy;
 mod intel_de;
 mod intel_display_device;
 mod intel_display_power;
+mod intel_dkl_phy;
+mod intel_dpll_mgr;
 mod intel_dram;
 mod intel_engine;
 mod intel_ggtt;
@@ -40,6 +42,7 @@ use intel_bios::{bdb_block, gmbus_pin};
 use intel_cdclk::intel_cdclk_vals;
 use intel_combo_phy::icl_procmon;
 use intel_display_power::{buddy_page_mask, power_well_domain, power_well_inst, power_well_inst_ops};
+use intel_dpll_mgr::{dpll_info, dpll_info_funcs};
 use intel_gt::engine_info;
 use intel_uncore::{i915_range, intel_forcewake_range};
 use npk_sys::Mmio;
@@ -190,11 +193,32 @@ pub extern "C" fn _start() {
     // stay disabled.
     let mut cd = i915.display.cdclk;
     let _ = intel_cdclk::intel_cdclk_init(&mut cd);
+    i915.display.cdclk = cd;
     // intel_display_driver_probe_nogem
+    intel_dpll_mgr::intel_dpll_init(&mut i915);
+    intel_dpll_mgr::intel_dpll_update_ref_clks(&mut i915);
+    let mut cd = i915.display.cdclk;
     if cd.max_cdclk_freq == 0 {
         intel_cdclk::intel_update_max_cdclk(&mut cd);
     }
     i915.display.cdclk = cd;
+    // The PLL part of intel_modeset_readout_hw_state, read-only: no CRTC
+    // is read out yet, so no pipe is attributed and nothing is sanitized.
+    intel_dpll_mgr::intel_dpll_readout_hw_state(&mut i915, &display.vbt, &|_| 0);
+    for i in 0..i915.display.dpll.num_dpll {
+        let pll = i915.display.dpll.dplls[i];
+        if !pll.on {
+            continue;
+        }
+        let mut l = Line::new();
+        l.s(intel_dpll_mgr::dpll_name(&pll)).s(" on");
+        if pll.info.map(|p| p.funcs) != Some(intel_dpll_mgr::dpll_info_funcs::tbt_pll_funcs) {
+            l.s(", ").dec(intel_dpll_mgr::intel_dpll_get_freq(&i915, &pll, &pll.state.hw_state) as u64)
+                .s(" kHz");
+        }
+        l.say();
+        intel_dpll_mgr::intel_dpll_dump_hw_state(&pll.state.hw_state);
+    }
 
     Line::new().s("GGTT ").dec(ggtt.total >> 20).s(" MB, aperture ").hex((ggtt.gmadr_start >> 32) as u32)
         .s("_").hex(ggtt.gmadr_start as u32).s(" + ").dec(ggtt.mappable_end >> 20).s(" MB, ")

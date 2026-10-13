@@ -56,6 +56,7 @@ pub struct intel_display {
     pub cdclk: crate::intel_cdclk::intel_display_cdclk,
     /// `display->dbuf.enabled_slices`.
     pub dbuf_enabled_slices: u8,
+    pub dpll: crate::intel_dpll_mgr::intel_display_dpll,
 }
 
 /// `struct drm_i915_private`, as far as this stage needs it.

@@ -40,3 +40,5 @@ direct_aux_ch_map: u8
 gmbus_pins_icp: gmbus_pin { valid=name != 0 }
 @ display/intel_display_power.c
 tgl_buddy_page_masks: buddy_page_mask { page_mask, ty=type, num_channels }
+@ display/intel_dpll_mgr.c
+tgl_plls[ARRAY_SIZE(tgl_plls) - 1] => tgl_plls: dpll_info { name=e0.name as str, funcs=e0.funcs as sym, id=e0.id, power_domain=e0.power_domain, always_on=e0.always_on, is_alt_port_dpll=e0.is_alt_port_dpll }
