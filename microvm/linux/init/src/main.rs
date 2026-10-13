@@ -180,6 +180,12 @@ fn launch_wayland(kmsg_fd: i64) {
     // /run/udev/data to be populated before npkwm enumerates. Degrades
     // with a WARN if eudev is absent — npkwm still starts, just
     // input/hotplug-blind.
+    // The browser's allocator (scudo) keeps freed memory instead of handing
+    // it back with madvise/munmap every few seconds: each hand-back is a TLB
+    // shootdown on every vCPU the process ran on, and under an upload they
+    // stall the parent process for over a second per round.
+    // `npkscudo=off` restores scudo's default, `npkscudo=<options>` sets others.
+    //
     // Standard LibreWolf config — only the prefs this environment
     // demands (no GPU / GL → software webrender; userChrome.css must
     // load to hide the titlebar buttons that crash the browser when
@@ -329,8 +335,9 @@ fn launch_wayland(kmsg_fd: i64) {
                  PROF=$(sed -n 's/.*npkprofile=\\([0-9.]*:[0-9]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$PROF\" ] && echo 'export MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_STARTUP_INTERVAL=1 MOZ_PROFILER_STARTUP_ENTRIES=16777216 MOZ_PROFILER_STARTUP_FILTERS=GeckoMain,Socket,Worker,Timer,StreamTrans,IPC,RemoteLzy,File,BgIO,BackgroundThreadPool,Renderer MOZ_PROFILER_STARTUP_FEATURES=js,stackwalk,cpu,fileio MOZ_PROFILER_SHUTDOWN=/tmp/bcache/lw-prof.json' > /tmp/app.sh || : > /tmp/app.sh; \
                  SCU=$(sed -n 's/.*npkscudo=\\([^ ]*\\).*/\\1/p' /proc/cmdline); \
-                 [ -n \"$SCU\" ] && echo \"export SCUDO_OPTIONS=$SCU\" >> /tmp/app.sh \
-                   && echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; \
+                 [ -n \"$SCU\" ] || SCU=release_to_os_interval_ms=-1; \
+                 [ \"$SCU\" = off ] || { echo \"export SCUDO_OPTIONS=$SCU\" >> /tmp/app.sh; \
+                   echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
                  echo 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; [ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' >> /tmp/app.sh; \
                  su -s /bin/sh app -c 'WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 exec sh /tmp/app.sh' \
                    > /tmp/app.log 2>&1; \
