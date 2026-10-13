@@ -2108,6 +2108,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
         Vendor::Intel => match vmx::vm_open_ap(vector, apic_id) {
             Ok(mut ctx) => {
                 crate::microvm::boottime::mark("host: AP opened, first entry next");
+                rip_sample::begin_window();
                 loop {
                     if close_requested() {
                         break;

@@ -146,6 +146,11 @@ pub fn guest_line(s: &str) {
         if seen & bit == 0 && s.contains(needle) {
             GUEST_SEEN.fetch_or(bit, Ordering::Relaxed);
             kprintln!("[boottime] +{} ms {}", ms, label);
+            // The AP bring-up window ends where the session gets going.
+            if *label == "session: compositor start" {
+                kprintln!("[ripsample] window: AP opened .. compositor start");
+                crate::microvm::cpu::rip_sample::dump_now();
+            }
             if *label == APP_EXITED_LABEL {
                 crate::microvm::devices::gpu_backend::present_closing();
             }

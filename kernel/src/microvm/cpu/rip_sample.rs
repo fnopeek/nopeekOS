@@ -40,9 +40,9 @@ pub fn set_enabled(on: bool) { ENABLED.store(on, Ordering::Relaxed); }
 const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
 
 const SLOTS: usize = 48;
-/// 64-byte RIP buckets: clusters a hot loop's instructions into one entry so
-/// the 48 slots aren't fragmented across a function's individual addresses.
-const BUCKET_SHIFT: u64 = 6;
+/// 16-byte RIP buckets: fine enough to tell the 32-byte interrupt entry
+/// stubs apart, coarse enough to keep a loop in a few slots.
+const BUCKET_SHIFT: u64 = 4;
 const MAX_VCPU: usize = 8;
 /// Dump cadence in seconds.
 const WINDOW_SECS: u64 = 5;
@@ -74,6 +74,16 @@ static LAST_DUMP_TSC: AtomicU64 = AtomicU64::new(0);
 /// csd_lock_wait for — high → PV pays off, low → vCPUs are all busy and the
 /// lever is vCPU count instead. Measured host-side, no guest changes needed.
 static IPI_TARGETS: AtomicU64 = AtomicU64::new(0);
+
+/// Host vectors of the external-interrupt exits sampled (VMX with the
+/// interrupt acknowledged on exit): which host interrupt cut the guest off.
+static HOST_VECTORS: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+pub fn note_host_vector(v: u8) {
+    if enabled() {
+        HOST_VECTORS[v as usize].fetch_add(1, Ordering::Relaxed);
+    }
+}
 static IPI_TARGETS_PREEMPTED: AtomicU64 = AtomicU64::new(0);
 
 /// Record one cross-vCPU IPI target and whether it was preempted at send time.
@@ -174,6 +184,17 @@ fn dump_and_reset(window_us: u64) {
             pre,
             tgt,
         );
+    }
+
+    let mut line = alloc::string::String::new();
+    for v in 0..256usize {
+        let n = HOST_VECTORS[v].swap(0, Ordering::Relaxed);
+        if n > 0 {
+            let _ = core::fmt::Write::write_fmt(&mut line, format_args!(" {:#x}={}", v, n));
+        }
+    }
+    if !line.is_empty() {
+        kprintln!("[ripsample]   host vectors of those exits:{}", line);
     }
 
     // Top buckets by count (simple selection over 48 slots).

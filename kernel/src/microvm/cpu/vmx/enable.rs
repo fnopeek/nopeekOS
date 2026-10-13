@@ -1645,6 +1645,7 @@ impl VmContext {
                     if info & (1 << 31) != 0 {
                         use crate::microvm::cpu as c;
                         let v = info as u8;
+                        c::rip_sample::note_host_vector(v);
                         c::bench_count(self.vcpu.apic_id, match v {
                             crate::interrupts::POSTED_INTR_VECTOR => c::BX_PI,
                             crate::interrupts::VCPU_KICK_VECTOR => c::BX_KICK,
