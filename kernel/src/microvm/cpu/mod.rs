@@ -570,6 +570,11 @@ pub static IBPB_ON_EXIT: AtomicBool = AtomicBool::new(false);
 #[unsafe(no_mangle)]
 pub static CLEAR_BHB_ON_EXIT: AtomicBool = AtomicBool::new(false);
 
+/// Read by the exit path of `run_guest_once` (both vendors): the return
+/// stack fill, `spec_mitigations::RSB_*`. Full wherever an IBPB runs.
+#[unsafe(no_mangle)]
+pub static RSB_FILL_ON_EXIT: AtomicU8 = AtomicU8::new(crate::spec_mitigations::RSB_FULL);
+
 /// Whether this CPU has the IBPB command (`PRED_CMD`): AMD CPUID
 /// 0x8000_0008 EBX[12], Intel CPUID 7 EDX[26]. Writing it without would #GP.
 fn cpu_has_ibpb() -> bool {
@@ -588,6 +593,8 @@ fn arm_exit_mitigations() {
     IBPB_ON_EXIT.store(on, Ordering::Release);
     let bhb = crate::spec_mitigations::clear_bhb_on_exit();
     CLEAR_BHB_ON_EXIT.store(bhb, Ordering::Release);
+    let rsb = if on { crate::spec_mitigations::RSB_FULL } else { crate::spec_mitigations::rsb_fill_on_exit() };
+    RSB_FILL_ON_EXIT.store(rsb, Ordering::Release);
     crate::kprintln!("[microvm] IBPB on VM exit: {}{}{}", if on { "on" } else { "off" },
         if forced.is_some() { " (config)" } else { "" },
         if bhb { ", branch history cleared" } else { "" });

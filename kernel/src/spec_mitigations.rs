@@ -30,6 +30,7 @@ const MSR_AMD64_BP_CFG: u32 = 0xC001_102E;
 const SPEC_CTRL_IBRS: u64 = 1 << 0;
 const SPEC_CTRL_BHI_DIS_S: u64 = 1 << 10;
 const ARCH_CAP_IBRS_ALL: u64 = 1 << 1;
+const ARCH_CAP_PBRSB_NO: u64 = 1 << 24;
 const EFER_AUTOIBRS: u64 = 1 << 21;
 const BP_CFG_SPEC_REDUCE: u64 = 1 << 4;
 
@@ -44,6 +45,14 @@ static AUTOIBRS: AtomicBool = AtomicBool::new(false);
 static BP_SPEC_REDUCE: AtomicBool = AtomicBool::new(false);
 static IBPB_ON_EXIT: AtomicBool = AtomicBool::new(true);
 static CLEAR_BHB_ON_EXIT: AtomicBool = AtomicBool::new(false);
+static RSB_FILL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(RSB_FULL);
+
+/// Return-stack fill after a VM exit (`spectre_v2_determine_rsb_fill_type_at_vmexit`):
+/// none under eIBRS without PBRSB, one CALL with PBRSB (`RSB_VMEXIT_LITE`),
+/// all 32 entries otherwise (`RSB_VMEXIT`).
+pub const RSB_NONE: u8 = 0;
+pub const RSB_LITE: u8 = 1;
+pub const RSB_FULL: u8 = 2;
 
 fn cpuid(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
     let r = core::arch::x86_64::__cpuid_count(leaf, sub);
@@ -65,6 +74,11 @@ pub fn host_spec_ctrl() -> u64 {
 /// Whether a VM exit still needs an IBPB on this CPU.
 pub fn ibpb_on_exit() -> bool {
     IBPB_ON_EXIT.load(Ordering::Relaxed)
+}
+
+/// The return-stack fill a VM exit needs on this CPU when no IBPB runs.
+pub fn rsb_fill_on_exit() -> u8 {
+    RSB_FILL.load(Ordering::Relaxed)
 }
 
 /// Whether a VM exit needs the branch history overwritten on this CPU.
@@ -92,6 +106,10 @@ fn decide() {
             host_spec = SPEC_CTRL_IBRS | if bhi_ctrl { SPEC_CTRL_BHI_DIS_S } else { 0 };
             ibpb = false;
             CLEAR_BHB_ON_EXIT.store(!bhi_ctrl, Ordering::Relaxed);
+            // X86_BUG_EIBRS_PBRSB (common.c); the Atom whitelist is left out,
+            // which keeps the single CALL there.
+            RSB_FILL.store(if caps & ARCH_CAP_PBRSB_NO != 0 { RSB_NONE } else { RSB_LITE },
+                Ordering::Relaxed);
             report = if bhi_ctrl {
                 "eIBRS + BHI_DIS_S, no IBPB on VM exit"
             } else {
@@ -105,11 +123,14 @@ fn decide() {
             let (a, ..) = cpuid(1, 0);
             let family = ((a >> 8) & 0xF) + if (a >> 8) & 0xF == 0xF { (a >> 20) & 0xFF } else { 0 };
             let srso = matches!(family, 0x17 | 0x19 | 0x1A) && ext & AMD_SRSO_NO == 0;
+            // AutoIBRS is eIBRS to Linux, and AMD is NO_EIBRS_PBRSB.
             if !srso {
                 ibpb = false;
+                RSB_FILL.store(RSB_NONE, Ordering::Relaxed);
                 report = "AutoIBRS, no IBPB on VM exit";
             } else if ext & AMD_SRSO_BP_SPEC_REDUCE != 0 && !under_hypervisor() {
                 BP_SPEC_REDUCE.store(true, Ordering::Relaxed);
+                RSB_FILL.store(RSB_NONE, Ordering::Relaxed);
                 ibpb = false;
                 report = "AutoIBRS + SRSO BP_SPEC_REDUCE, no IBPB on VM exit";
             } else {
@@ -119,7 +140,8 @@ fn decide() {
     }
     HOST_SPEC_CTRL.store(host_spec, Ordering::Relaxed);
     IBPB_ON_EXIT.store(ibpb, Ordering::Relaxed);
-    crate::kprintln!("[npk] guest isolation: {} (SPEC_CTRL {:#x})", report, host_spec);
+    let rsb = ["no RSB fill", "one RSB entry", "full RSB fill"][RSB_FILL.load(Ordering::Relaxed) as usize];
+    crate::kprintln!("[npk] guest isolation: {}, {} (SPEC_CTRL {:#x})", report, rsb, host_spec);
 }
 
 /// Decide once, then set this core up. Called on every core before any

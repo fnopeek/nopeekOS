@@ -953,10 +953,6 @@ impl VmContext {
         let mut dev = (self.vcpu.apic_id == 0).then(|| self.shared.dev.lock());
         if let Some(sh) = dev.as_deref_mut() { collect_device_irqs(sh, self.shared.guest_mem); }
         let vcpu = &mut self.vcpu;
-        if vcpu.apicv {
-            let rvi = vcpu.lapic.sync_for_apicv();
-            vmcs::set_rvi(rvi)?;
-        }
 
         if vcpu.reinject != 0 {
             let rtype = (vcpu.reinject >> 8) & 0x7;

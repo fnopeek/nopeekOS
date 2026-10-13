@@ -570,6 +570,9 @@ impl LocalApic {
         let t = self.apic_id as usize;
         if t >= MAX_VCPUS { return; }
         let (Some(ctl), Some(_)) = (pi_control(t), pir(t, 0)) else { return };
+        // `pi_test_on` first: a post sets its PIR bit before ON, and ON
+        // clear means nothing new (a read, not a locked operation).
+        if ctl.load(Ordering::Acquire) & PI_ON == 0 { return; }
         ctl.fetch_and(!PI_ON, Ordering::AcqRel);
         for w in 0..4 {
             let bits = pir(t, w).map_or(0, |p| p.swap(0, Ordering::AcqRel));

@@ -469,8 +469,8 @@ unsafe fn run_guest_once(
 
             // ── Speculation barrier, before any host return or indirect
             // branch: IBPB (when `IBPB_ON_EXIT`) drops branch predictions
-            // the guest trained, then 32 calls refill the return stack
-            // (Linux `__FILL_RETURN_BUFFER`). Interrupts are still off.
+            // the guest trained, then the return stack is refilled as
+            // `RSB_FILL_ON_EXIT` says. Interrupts are still off.
             "cmp byte ptr [rip + IBPB_ON_EXIT], 0",
             "je 81f",
             "mov ecx, 0x49",                // MSR_IA32_PRED_CMD
@@ -478,6 +478,18 @@ unsafe fn run_guest_once(
             "xor edx, edx",
             "wrmsr",
             "81:",
+            // Return stack (`RSB_FILL_ON_EXIT`): 0 none, 1 one CALL retired
+            // (Linux `__FILL_ONE_RETURN`), 2 all 32 entries.
+            "cmp byte ptr [rip + RSB_FILL_ON_EXIT], 1",
+            "jb 79f",
+            "ja 80f",
+            "call 85f",
+            "int3",
+            "85:",
+            "add rsp, 8",
+            "lfence",
+            "jmp 79f",
+            "80:",
             "mov eax, 16",
             "82:",
             "call 83f",
@@ -490,6 +502,7 @@ unsafe fn run_guest_once(
             "jnz 82b",
             "add rsp, 256",
             "lfence",
+            "79:",
 
             // ── FPU save/restore (paired exit half): no FP since
             // vmexit (only vm*/push above). Host XCR0 back first, then
