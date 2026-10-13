@@ -137,16 +137,41 @@ und die Ringe haengen alle an derselben MMIO-BAR. **Das Modul bindet die Karte
 ganz** (`npk_pci_bind`), und der Kernel fasst danach nichts mehr an ausser
 seinem Rueckfallwissen: wo der letzte gueltige Scanout-Puffer liegt.
 
-Uebergabe beim Laden: der Kernel haelt den Compositor kurz an, das Modul
-uebernimmt die Anzeige mit genau dem Puffer, den der Kernel gerade zeigt
-(kein Modeset noetig, wie heute bei TGL „blit-only"), dann schaltet der
-Compositor auf den gpudev-Weg. Rueckgabe beim Tod des Moduls: der Kernel
-schreibt nichts in die Karte, sondern rendert weiter in den Puffer, der
-zuletzt im Scanout stand, auf der CPU. Ob das auf beiden Karten ohne
-Registerzugriff geht, ist offene Frage F1.
+**Ablauf, entschieden 2026-10-13 (Florian):**
 
-`intel_xe.rs` bleibt im Kernel, **bis `gpu_intel` gleichzieht**, und wird
-dann entfernt (einziger Nutzer, kein Migrationscode).
+| Phase | Wer zeichnet | Wie |
+|---|---|---|
+| Boot bis Login | CPU | GOP + CPU-Kopie — wie heute (der BCS startet schon heute erst nach dem Login, `main.rs` vor `shade::init`) |
+| nach dem Login, Modul noch nicht bereit | CPU | dasselbe; der Desktop steht sofort, die GPU kommt dazu |
+| Modul bereit | GPU | `gpu_intel` steht in `autostart` wie der WLAN-Treiber, faehrt die Karte nach Linux hoch und meldet sich ueber gpudev |
+| kein Modul / unbekannte Karte | CPU | bleibt beim Rueckfall — kein Fehler, nur langsamer |
+| Modul stirbt | CPU | Compositor schaltet zurueck, schreibt nichts in die Karte |
+
+**Die Uebergabe im Einzelnen:**
+
+1. Das Modul bindet die Karte **exklusiv**. `npk_pci_bind` kennt heute
+   keinen Besitzer — zwei Module (oder Kernel und Modul) koennten dieselbe
+   Karte binden. Neu: ein Besitzer je Geraet; ein Kerneltreiber, der die
+   Karte gerade benutzt (`intel_xe.rs`, solange es ihn gibt), zaehlt als
+   Besitzer und gibt erst nach `gpudev_handover` ab.
+2. Der Kernel haelt den Compositor an (das laufende Bild wird fertig),
+   laesst den Kernel-BCS leerlaufen und fasst die Karte ab da nicht mehr an.
+3. Das Modul faehrt **den ganzen Linux-Weg**: GT, und vom Display die
+   Zustandsauslesung samt Uebernahme des Firmware-Bildes
+   (`intel_initial_plane_config` reserviert es in Stolen und GGTT, bevor
+   `init_ggtt` laeuft — `GPU_INTEL_LINUX_MAP.md` §4). Kein Modeset: das Bild
+   der Firmware bleibt stehen.
+4. Readback-Selbsttest (dieselbe Regel wie heute beim BCS), dann
+   `gpudev_ready` — erst jetzt schaltet der Compositor auf den gpudev-Weg.
+   Faellt der Test durch, bleibt alles auf der CPU.
+
+**Rueckweg beim Modultod (F1):** Das Modul scannt nur Puffer aus, die dem
+Kernel gehoeren (`flip(bo)` nimmt einen Griff, keine Adresse) — der erste
+ist das uebernommene Firmware-Bild. Die GGTT-Eintraege dafuer bleiben
+stehen, wenn das Modul stirbt. Der Kernel zeichnet also auf der CPU in den
+zuletzt geflippten Puffer weiter und schreibt dabei kein Register. Offen
+bleibt der Tod MITTEN in einem GGTT-Umbau — dagegen schuetzt nur, dass das
+Modul den Scanout-Eintrag nie anfasst, solange er im Scanout steht.
 
 ### 3.3 Die neue ABI: `gpudev`
 
@@ -477,10 +502,9 @@ und npkwm laeuft mit `WLR_RENDERER=pixman`. Damit nimmt LibreWolf heute
 
 ## 10. Offene Fragen
 
-- **F1** Rueckgabe beim Modultod: reicht es auf beiden Karten, in den
-  zuletzt gezeigten Puffer weiterzurendern, ohne ein Register anzufassen? Bei
-  Intel liegt der Scanout in der GGTT, die das Modul verwaltet hat — der
-  Eintrag bleibt stehen, solange niemand ihn ueberschreibt.
+- **F1** Rueckgabe beim Modultod — Entwurf in §3.2: nur Kernelpuffer im
+  Scanout, Kernel zeichnet auf der CPU in den zuletzt geflippten weiter.
+  Offen: Tod mitten in einem GGTT-Umbau; und ob das auf AMD genauso traegt.
 - **F2** forge-Kosten: wie viele Hostaufrufe kostet eine Abgabe, und wie teuer
   ist einer? Stufe 1 misst es; bei Bedarf ein `npk_mmio_write_batch`.
 - **F3** ~~Geteilter Speicher Kernel ↔ Modul fuer den Befehlsring?~~
