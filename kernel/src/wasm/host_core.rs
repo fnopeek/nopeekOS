@@ -1400,6 +1400,26 @@ pub(crate) fn npk_pci_read_config(ctx: &mut HostState, offset: i32) -> i32 {
     pci::read32(hw.pci_addr, offset as u8) as i32
 }
 
+/// Read a config dword of any PCI function, read-only. Linux drivers read
+/// other functions' config to learn the platform: i915 asks the ISA bridge
+/// for the PCH type and the host bridge for MCHBAR. Needs global
+/// `HARDWARE`; config reads have no side effects in the header.
+/// `bdf` = bus << 8 | device << 3 | function.
+pub(crate) fn npk_pci_read_config_at(ctx: &mut HostState, bdf: i32, offset: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    if !(0..=0xffff).contains(&bdf) || !(0..=252).contains(&offset) || offset & 3 != 0 {
+        return -1;
+    }
+    let addr = pci::PciAddr {
+        bus: (bdf >> 8) as u8,
+        device: ((bdf >> 3) & 0x1f) as u8,
+        function: (bdf & 7) as u8,
+    };
+    pci::read32(addr, offset as u8) as i32
+}
+
 pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
         Some(h) if h.is_pci => h,

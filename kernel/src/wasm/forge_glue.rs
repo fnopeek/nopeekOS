@@ -933,6 +933,10 @@ host_imports! {
     // npk_pci_read_config(offset) -> u32 value or -1
     ctx fn npk_pci_read_config(offset: i32) -> i32;
 
+    // npk_pci_read_config_at(bdf, offset) -> u32 value or -1; any function,
+    // read-only, needs HARDWARE. bdf = bus << 8 | dev << 3 | fn.
+    ctx fn npk_pci_read_config_at(bdf: i32, offset: i32) -> i32;
+
     // npk_pci_write_config(offset, value) -> 0 or -1
     ctx fn npk_pci_write_config(offset: i32, value: i32) -> i32;
 
