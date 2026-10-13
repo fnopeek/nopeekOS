@@ -68,7 +68,8 @@ pub struct intel_vbt_data {
 }
 
 /// The parts of `struct intel_display` the VBT code reads, and its `vbt`.
-pub struct intel_display {
+#[derive(Clone, Copy)]
+pub struct intel_bios_display {
     pub ver: u32,
     pub pch_type: i32,
     pub pipe_mask: u32,
@@ -76,9 +77,15 @@ pub struct intel_display {
     pub vbt: intel_vbt_data,
 }
 
-impl intel_display {
+impl Default for intel_bios_display {
+    fn default() -> Self {
+        intel_bios_display::new(0, 0, 0, 0)
+    }
+}
+
+impl intel_bios_display {
     pub fn new(ver: u32, pch_type: i32, pipe_mask: u32, port_mask: u32) -> Self {
-        intel_display {
+        intel_bios_display {
             ver,
             pch_type,
             pipe_mask,
@@ -582,22 +589,22 @@ fn init_bdb_blocks(version: u32, bdb: &[u8]) {
 }
 
 /// `intel_bios_ssc_frequency`: DISPLAY_VER 12 takes the default branch.
-fn intel_bios_ssc_frequency(_display: &intel_display, alternate: bool) -> u32 {
+fn intel_bios_ssc_frequency(_display: &intel_bios_display, alternate: bool) -> u32 {
     if alternate { SSC_FREQ_TGL_ALTERNATE } else { SSC_FREQ_TGL_DEFAULT }
 }
 
 /// `HAS_DDI`: the display info flag of `tgl_desc`.
-fn HAS_DDI(_display: &intel_display) -> bool {
+fn HAS_DDI(_display: &intel_bios_display) -> bool {
     TGL_DISPLAY_HAS_DDI != 0
 }
 
 /// `HAS_PCH_SPLIT`.
-fn HAS_PCH_SPLIT(display: &intel_display) -> bool {
+fn HAS_PCH_SPLIT(display: &intel_bios_display) -> bool {
     display.pch_type != PCH_NONE as i32
 }
 
 /// `parse_general_features`.
-fn parse_general_features(display: &mut intel_display) {
+fn parse_general_features(display: &mut intel_bios_display) {
     const SIZE: usize = BDB_GENERAL_FEATURES_SIZE as usize;
     let Some((general, _)) = bdb_copy_section::<SIZE>(BDB_GENERAL_FEATURES) else {
         return;
@@ -639,7 +646,7 @@ fn parse_general_features(display: &mut intel_display) {
 }
 
 /// `parse_sdvo_device_mapping`: SDVO exists on display versions 3 to 7 only.
-fn parse_sdvo_device_mapping(display: &intel_display) {
+fn parse_sdvo_device_mapping(display: &intel_bios_display) {
     if !(3..=7).contains(&display.ver) {
         say("Skipping SDVO device mapping");
         return;
@@ -648,7 +655,7 @@ fn parse_sdvo_device_mapping(display: &intel_display) {
 }
 
 /// `parse_driver_features`.
-fn parse_driver_features(display: &mut intel_display) {
+fn parse_driver_features(display: &mut intel_bios_display) {
     const SIZE: usize = BDB_DRIVER_FEATURES_SIZE as usize;
     let Some((driver, _)) = bdb_copy_section::<SIZE>(BDB_DRIVER_FEATURES) else {
         return;
@@ -662,7 +669,7 @@ fn parse_driver_features(display: &mut intel_display) {
 }
 
 /// `parse_compression_parameters`.
-fn parse_compression_parameters(display: &mut intel_display) {
+fn parse_compression_parameters(display: &mut intel_bios_display) {
     const SIZE: usize = BDB_COMPRESSION_PARAMETERS_SIZE as usize;
     if display.vbt.version < 198 {
         return;
@@ -715,7 +722,7 @@ fn translate_iboost(val: u32) -> u32 {
 
 /// `map_ddc_pin`: PCH TGP on Tiger Lake is below PCH_DG1, not RKL, display
 /// version 12 and at least PCH_ICP, so `icp_ddc_pin_map`.
-fn map_ddc_pin(_display: &intel_display, vbt_pin: u32) -> u32 {
+fn map_ddc_pin(_display: &intel_bios_display, vbt_pin: u32) -> u32 {
     let ddc_pin_map = &tables::icp_ddc_pin_map;
     for (i, &p) in ddc_pin_map.iter().enumerate() {
         if p as u32 == vbt_pin {
@@ -772,12 +779,12 @@ const PORT_MAPPING: [[i32; 3]; PORT_I as usize + 1] = {
 
 /// `dvo_port_to_port`: display version 12, not ADL-S, DG1 or RKL, so the
 /// plain `port_mapping`.
-fn dvo_port_to_port(_display: &intel_display, dvo_port: u32) -> i32 {
+fn dvo_port_to_port(_display: &intel_bios_display, dvo_port: u32) -> i32 {
     __dvo_port_to_port(&PORT_MAPPING, dvo_port)
 }
 
 /// `dsi_dvo_port_to_port`.
-fn dsi_dvo_port_to_port(display: &intel_display, dvo_port: u32) -> i32 {
+fn dsi_dvo_port_to_port(display: &intel_bios_display, dvo_port: u32) -> i32 {
     match dvo_port {
         DVO_PORT_MIPIA => PORT_A as i32,
         DVO_PORT_MIPIC => {
@@ -788,7 +795,7 @@ fn dsi_dvo_port_to_port(display: &intel_display, dvo_port: u32) -> i32 {
 }
 
 /// `intel_bios_encoder_port`.
-pub fn intel_bios_encoder_port(display: &intel_display, devdata: &intel_bios_encoder_data) -> i32 {
+pub fn intel_bios_encoder_port(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> i32 {
     let dvo_port = child(devdata, CHILD_DVO_PORT);
     let mut port = dvo_port_to_port(display, dvo_port);
     if port == PORT_NONE && display.ver >= 11 {
@@ -822,7 +829,7 @@ fn parse_bdb_216_dp_max_link_rate(vbt_max_link_rate: u32) -> u32 {
 }
 
 /// `intel_bios_dp_max_link_rate`.
-pub fn intel_bios_dp_max_link_rate(display: &intel_display, devdata: &intel_bios_encoder_data) -> u32 {
+pub fn intel_bios_dp_max_link_rate(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> u32 {
     if display.vbt.version < 216 {
         return 0;
     }
@@ -835,7 +842,7 @@ pub fn intel_bios_dp_max_link_rate(display: &intel_display, devdata: &intel_bios
 }
 
 /// `intel_bios_dp_max_lane_count`.
-pub fn intel_bios_dp_max_lane_count(display: &intel_display, devdata: &intel_bios_encoder_data) -> u32 {
+pub fn intel_bios_dp_max_lane_count(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> u32 {
     if display.vbt.version < 244 {
         return 0;
     }
@@ -843,7 +850,7 @@ pub fn intel_bios_dp_max_lane_count(display: &intel_display, devdata: &intel_bio
 }
 
 /// `sanitize_device_type`: only port A before display version 12.
-fn sanitize_device_type(display: &intel_display, devdata: &mut intel_bios_encoder_data, port: i32) {
+fn sanitize_device_type(display: &intel_bios_display, devdata: &mut intel_bios_encoder_data, port: i32) {
     if port != PORT_A as i32 || display.ver >= 12 {
         return;
     }
@@ -860,7 +867,7 @@ fn sanitize_device_type(display: &intel_display, devdata: &mut intel_bios_encode
 }
 
 /// `sanitize_hdmi_level_shift`: the clamp is for Broadwell only.
-fn sanitize_hdmi_level_shift(_display: &intel_display, devdata: &intel_bios_encoder_data, _port: i32) {
+fn sanitize_hdmi_level_shift(_display: &intel_bios_display, devdata: &intel_bios_encoder_data, _port: i32) {
     if !intel_bios_encoder_supports_dvi(devdata) {
         return;
     }
@@ -895,13 +902,13 @@ pub fn intel_bios_encoder_supports_dsi(devdata: &intel_bios_encoder_data) -> boo
 }
 
 /// `intel_bios_encoder_is_lspcon`: HAS_LSPCON is display versions 9 and 10.
-pub fn intel_bios_encoder_is_lspcon(display: &intel_display, devdata: &intel_bios_encoder_data) -> bool {
+pub fn intel_bios_encoder_is_lspcon(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> bool {
     (9..=10).contains(&display.ver) && child(devdata, CHILD_LSPCON) != 0
 }
 
 /// `intel_bios_hdmi_level_shift`: an index in the HDMI/DVI DDI buffer
 /// translation table, or -1.
-pub fn intel_bios_hdmi_level_shift(display: &intel_display, devdata: &intel_bios_encoder_data) -> i32 {
+pub fn intel_bios_hdmi_level_shift(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> i32 {
     if display.vbt.version < 158 || display.ver >= 14 {
         return -1;
     }
@@ -909,7 +916,7 @@ pub fn intel_bios_hdmi_level_shift(display: &intel_display, devdata: &intel_bios
 }
 
 /// `intel_bios_hdmi_max_tmds_clock`.
-pub fn intel_bios_hdmi_max_tmds_clock(display: &intel_display, devdata: &intel_bios_encoder_data) -> u32 {
+pub fn intel_bios_hdmi_max_tmds_clock(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> u32 {
     if display.vbt.version < 204 {
         return 0;
     }
@@ -928,7 +935,7 @@ pub fn intel_bios_hdmi_max_tmds_clock(display: &intel_display, devdata: &intel_b
 }
 
 /// `is_port_valid`: the port F check is for Ice Lake only.
-fn is_port_valid(_display: &intel_display, _port: i32) -> bool {
+fn is_port_valid(_display: &intel_bios_display, _port: i32) -> bool {
     true
 }
 
@@ -946,7 +953,7 @@ pub fn intel_bios_encoder_supports_dp_dual_mode(devdata: &intel_bios_encoder_dat
 }
 
 /// `map_aux_ch`: display version 12, not ADL-S, DG1 or RKL, so `direct_aux_ch_map`.
-fn map_aux_ch(_display: &intel_display, aux_channel: u32) -> i32 {
+fn map_aux_ch(_display: &intel_bios_display, aux_channel: u32) -> i32 {
     let aux_ch_map = &tables::direct_aux_ch_map;
     for (i, &a) in aux_ch_map.iter().enumerate() {
         if a as u32 == aux_channel {
@@ -959,7 +966,7 @@ fn map_aux_ch(_display: &intel_display, aux_channel: u32) -> i32 {
 }
 
 /// `intel_bios_dp_aux_ch`.
-pub fn intel_bios_dp_aux_ch(display: &intel_display, devdata: &intel_bios_encoder_data) -> i32 {
+pub fn intel_bios_dp_aux_ch(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> i32 {
     let aux_channel = child(devdata, CHILD_AUX_CHANNEL);
     if aux_channel == 0 {
         return AUX_CH_NONE;
@@ -968,7 +975,7 @@ pub fn intel_bios_dp_aux_ch(display: &intel_display, devdata: &intel_bios_encode
 }
 
 /// `intel_bios_dp_boost_level`.
-pub fn intel_bios_dp_boost_level(display: &intel_display, devdata: &intel_bios_encoder_data) -> u32 {
+pub fn intel_bios_dp_boost_level(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> u32 {
     if display.vbt.version < 196 || child(devdata, CHILD_IBOOST) == 0 {
         return 0;
     }
@@ -976,7 +983,7 @@ pub fn intel_bios_dp_boost_level(display: &intel_display, devdata: &intel_bios_e
 }
 
 /// `intel_bios_hdmi_boost_level`.
-pub fn intel_bios_hdmi_boost_level(display: &intel_display, devdata: &intel_bios_encoder_data) -> u32 {
+pub fn intel_bios_hdmi_boost_level(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> u32 {
     if display.vbt.version < 196 || child(devdata, CHILD_IBOOST) == 0 {
         return 0;
     }
@@ -984,7 +991,7 @@ pub fn intel_bios_hdmi_boost_level(display: &intel_display, devdata: &intel_bios
 }
 
 /// `intel_bios_hdmi_ddc_pin`.
-pub fn intel_bios_hdmi_ddc_pin(display: &intel_display, devdata: &intel_bios_encoder_data) -> u32 {
+pub fn intel_bios_hdmi_ddc_pin(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> u32 {
     let ddc_pin = child(devdata, CHILD_DDC_PIN);
     if ddc_pin == 0 {
         return 0;
@@ -992,11 +999,11 @@ pub fn intel_bios_hdmi_ddc_pin(display: &intel_display, devdata: &intel_bios_enc
     map_ddc_pin(display, ddc_pin)
 }
 
-pub fn intel_bios_encoder_supports_typec_usb(display: &intel_display, devdata: &intel_bios_encoder_data) -> bool {
+pub fn intel_bios_encoder_supports_typec_usb(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> bool {
     display.vbt.version >= 195 && child(devdata, CHILD_DP_USB_TYPE_C) != 0
 }
 
-pub fn intel_bios_encoder_supports_tbt(display: &intel_display, devdata: &intel_bios_encoder_data) -> bool {
+pub fn intel_bios_encoder_supports_tbt(display: &intel_bios_display, devdata: &intel_bios_encoder_data) -> bool {
     display.vbt.version >= 209 && child(devdata, CHILD_TBT) != 0
 }
 
@@ -1018,7 +1025,7 @@ fn aux_ch_name(l: &mut Line, aux_ch: i32) {
 }
 
 /// `print_ddi_port`, with the AUX channel and DDC pin on a line of their own.
-fn print_ddi_port(display: &intel_display, devdata: &intel_bios_encoder_data) {
+fn print_ddi_port(display: &intel_bios_display, devdata: &intel_bios_encoder_data) {
     let port = intel_bios_encoder_port(display, devdata);
     if port == PORT_NONE {
         return;
@@ -1083,7 +1090,7 @@ fn print_ddi_port(display: &intel_display, devdata: &intel_bios_encoder_data) {
 }
 
 /// `parse_ddi_port`.
-fn parse_ddi_port(display: &intel_display, devdata: &mut intel_bios_encoder_data) {
+fn parse_ddi_port(display: &intel_bios_display, devdata: &mut intel_bios_encoder_data) {
     let port = intel_bios_encoder_port(display, devdata);
     if port == PORT_NONE {
         return;
@@ -1100,7 +1107,7 @@ fn parse_ddi_port(display: &intel_display, devdata: &mut intel_bios_encoder_data
 }
 
 /// `parse_ddi_ports`: has_ddi_port_info is display version 5 and up.
-fn parse_ddi_ports(display: &mut intel_display) {
+fn parse_ddi_ports(display: &mut intel_bios_display) {
     for i in 0..display.vbt.n_display_devices {
         let mut devdata = display.vbt.display_devices[i];
         parse_ddi_port(display, &mut devdata);
@@ -1136,7 +1143,7 @@ fn child_device_expected_size(version: u32) -> i32 {
 }
 
 /// `child_device_size_valid`.
-fn child_device_size_valid(display: &intel_display, size: i32) -> bool {
+fn child_device_size_valid(display: &intel_bios_display, size: i32) -> bool {
     let mut expected_size = child_device_expected_size(display.vbt.version);
     if expected_size < 0 {
         expected_size = CHILD_SIZE as i32;
@@ -1162,13 +1169,13 @@ fn child_device_size_valid(display: &intel_display, size: i32) -> bool {
 
 /// `intel_gmbus_is_valid_pin` of intel_gmbus.c: `get_gmbus_pin` picks
 /// `gmbus_pins_icp` for PCH TGP (at least PCH_ICP, below PCH_DG1).
-pub fn intel_gmbus_is_valid_pin(_display: &intel_display, pin: u32) -> bool {
+pub fn intel_gmbus_is_valid_pin(_display: &intel_bios_display, pin: u32) -> bool {
     let pins = &tables::gmbus_pins_icp;
     (pin as usize) < pins.len() && pins[pin as usize].valid != 0
 }
 
 /// `parse_general_definitions`.
-fn parse_general_definitions(display: &mut intel_display) {
+fn parse_general_definitions(display: &mut intel_bios_display) {
     BDB.with(|a| {
         let Some(defs) = bdb_find_section(a, BDB_GENERAL_DEFINITIONS) else {
             say("No general definition block is found, no devices defined.");
@@ -1222,7 +1229,7 @@ fn parse_general_definitions(display: &mut intel_display) {
 }
 
 /// `init_vbt_defaults`: common defaults which may be overridden by VBT.
-fn init_vbt_defaults(display: &mut intel_display) {
+fn init_vbt_defaults(display: &mut intel_bios_display) {
     display.vbt.crt_ddc_pin = GMBUS_PIN_VGADDC;
 
     // general features
@@ -1241,17 +1248,17 @@ fn init_vbt_defaults(display: &mut intel_display) {
 
 /// `intel_port_to_phy` of intel_display.c: display version 12, not ADL-S,
 /// DG1, RKL, JSL or EHL, so the last branch.
-fn intel_port_to_phy(_display: &intel_display, port: u32) -> u32 {
+fn intel_port_to_phy(_display: &intel_bios_display, port: u32) -> u32 {
     PHY_A + port - PORT_A
 }
 
 /// `intel_phy_is_tc` of intel_display.c: Tiger Lake, integrated.
-fn intel_phy_is_tc(_display: &intel_display, phy: u32) -> bool {
+fn intel_phy_is_tc(_display: &intel_bios_display, phy: u32) -> bool {
     (PHY_D..=PHY_I).contains(&phy)
 }
 
 /// `init_vbt_missing_defaults`: defaults to initialize only if there is no VBT.
-fn init_vbt_missing_defaults(display: &mut intel_display) {
+fn init_vbt_missing_defaults(display: &mut intel_bios_display) {
     let ports = display.port_mask;
 
     if !HAS_DDI(display) {
@@ -1320,7 +1327,7 @@ fn intel_bios_get_vbt(opregion: Option<&intel_opregion::intel_opregion>) -> Opti
 
 /// `intel_bios_init`: find the VBT and initialize settings from it, or
 /// defaults if there is none.
-pub fn intel_bios_init(display: &mut intel_display, opregion: Option<&intel_opregion::intel_opregion>) {
+pub fn intel_bios_init(display: &mut intel_bios_display, opregion: Option<&intel_opregion::intel_opregion>) {
     display.vbt.n_display_devices = 0;
 
     // HAS_DISPLAY

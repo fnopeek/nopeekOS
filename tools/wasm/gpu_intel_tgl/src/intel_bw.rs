@@ -1,8 +1,10 @@
 //! display/intel_bw.c (Linux 6.18.55): `intel_bw_init_hw` for Tiger Lake,
 //! i.e. `tgl_get_bw_info` with `tgl_sa_info`: the QGV points from PCODE
-//! and the derated bandwidth per plane group.
+//! and the derated bandwidth per plane group; and the bandwidth state the
+//! hardware readout rebuilds (`intel_bw_update_hw_state`).
 
 use crate::i915_drv::drm_i915_private;
+use crate::intel_display_types::{intel_crtc_state, skl_ddb_entry};
 use crate::intel_pcode;
 use crate::linux::Line;
 use crate::regs::*;
@@ -234,4 +236,141 @@ pub fn intel_bw_init_hw(i915: &mut drm_i915_private) {
         return;
     }
     let _ = tgl_get_bw_info(i915);
+}
+
+// ── bandwidth state of the readout ───────────────────────────────────
+
+const MAX_PIPES: usize = I915_MAX_PIPES as usize;
+const MAX_SLICES: usize = I915_MAX_DBUF_SLICES as usize;
+
+/// `struct intel_dbuf_bw`.
+#[derive(Clone, Copy, Default)]
+pub struct intel_dbuf_bw {
+    pub max_bw: [u32; MAX_SLICES],
+    pub active_planes: [u8; MAX_SLICES],
+}
+
+/// `struct intel_bw_state`, without the QGV fields a commit sets.
+#[derive(Clone, Copy, Default)]
+pub struct intel_bw_state {
+    pub dbuf_bw: [intel_dbuf_bw; MAX_PIPES],
+    pub pipe_sagv_reject: u8,
+    pub active_pipes: u8,
+    pub data_rate: [u32; MAX_PIPES],
+    pub num_active_planes: [u8; MAX_PIPES],
+}
+
+/// `for_each_plane_id_on_crtc` of crtc `c`.
+fn plane_ids(i915: &drm_i915_private, c: usize) -> impl Iterator<Item = u32> {
+    let mask = i915.display.crtcs[c].plane_ids_mask;
+    (0..I915_MAX_PLANES).filter(move |id| mask & (1 << id) != 0)
+}
+
+/// `intel_bw_crtc_data_rate` (display version 11+: no separate Y plane).
+fn intel_bw_crtc_data_rate(i915: &drm_i915_private, c: usize) -> u32 {
+    let cs = &i915.display.crtcs[c].state;
+    // Cursors are assumed small enough not to matter.
+    plane_ids(i915, c).filter(|&id| id != PLANE_CURSOR).map(|id| cs.data_rate[id as usize]).sum()
+}
+
+/// `intel_bw_crtc_num_active_planes`.
+fn intel_bw_crtc_num_active_planes(cs: &intel_crtc_state) -> u8 {
+    (cs.active_planes & !(1u8 << PLANE_CURSOR)).count_ones() as u8
+}
+
+/// `skl_plane_calc_dbuf_bw`: the arbiter only guarantees each plane an
+/// equal share.
+fn skl_plane_calc_dbuf_bw(dbuf_bw: &mut intel_dbuf_bw, plane_id: u32, ddb: &skl_ddb_entry, data_rate: u32) {
+    let dbuf_mask = crate::skl_watermark::skl_ddb_dbuf_slice_mask(ddb);
+    for slice in 0..MAX_SLICES {
+        if TGL_DISPLAY_DBUF_SLICE_MASK & (1 << slice) == 0 || dbuf_mask & (1 << slice) == 0 {
+            continue;
+        }
+        dbuf_bw.max_bw[slice] = dbuf_bw.max_bw[slice].max(data_rate);
+        dbuf_bw.active_planes[slice] |= 1 << plane_id;
+    }
+}
+
+/// `skl_crtc_calc_dbuf_bw` (display version 11+).
+fn skl_crtc_calc_dbuf_bw(i915: &drm_i915_private, c: usize) -> intel_dbuf_bw {
+    let mut dbuf_bw = intel_dbuf_bw::default();
+    let cs = &i915.display.crtcs[c].state;
+    if !cs.hw.active {
+        return dbuf_bw;
+    }
+    for plane_id in plane_ids(i915, c) {
+        // Cursors are assumed small enough not to matter.
+        if plane_id == PLANE_CURSOR {
+            continue;
+        }
+        skl_plane_calc_dbuf_bw(&mut dbuf_bw, plane_id, &cs.wm_skl.plane_ddb[plane_id as usize],
+                               cs.data_rate[plane_id as usize]);
+    }
+    dbuf_bw
+}
+
+/// `intel_bw_update_hw_state`.
+pub fn intel_bw_update_hw_state(i915: &mut drm_i915_private) {
+    let mut bw_state = i915.display.bw_state;
+    bw_state.active_pipes = 0;
+    bw_state.pipe_sagv_reject = 0;
+
+    for c in 0..MAX_PIPES {
+        if !i915.display.crtc_valid[c] {
+            continue;
+        }
+        let pipe = i915.display.crtcs[c].pipe as usize;
+        let cs = i915.display.crtcs[c].state;
+        if cs.hw.active {
+            bw_state.active_pipes |= 1 << pipe;
+        }
+
+        // intel_bw_crtc_update
+        bw_state.data_rate[pipe] = intel_bw_crtc_data_rate(i915, c);
+        bw_state.num_active_planes[pipe] = intel_bw_crtc_num_active_planes(&cs);
+
+        bw_state.dbuf_bw[pipe] = skl_crtc_calc_dbuf_bw(i915, c);
+
+        // SAGV starts out forced off.
+        bw_state.pipe_sagv_reject |= 1 << pipe;
+    }
+    i915.display.bw_state = bw_state;
+}
+
+/// `intel_bw_dbuf_min_cdclk`.
+fn intel_bw_dbuf_min_cdclk(i915: &drm_i915_private, bw_state: &intel_bw_state) -> i32 {
+    let mut total_max_bw = 0u32;
+    for slice in 0..MAX_SLICES {
+        if TGL_DISPLAY_DBUF_SLICE_MASK & (1 << slice) == 0 {
+            continue;
+        }
+        let mut num_active_planes = 0u32;
+        let mut max_bw = 0u32;
+        for pipe in 0..MAX_PIPES {
+            if i915.display.runtime.pipe_mask & (1 << pipe) == 0 {
+                continue;
+            }
+            let dbuf_bw = &bw_state.dbuf_bw[pipe];
+            max_bw = max_bw.max(dbuf_bw.max_bw[slice]);
+            num_active_planes += dbuf_bw.active_planes[slice].count_ones();
+        }
+        max_bw *= num_active_planes;
+        total_max_bw = total_max_bw.max(max_bw);
+    }
+    total_max_bw.div_ceil(64) as i32
+}
+
+/// `intel_bw_min_cdclk` (display version 12: `intel_bw_crtc_min_cdclk` is
+/// data rate * 10 / 512).
+pub fn intel_bw_min_cdclk(i915: &drm_i915_private) -> i32 {
+    let bw_state = i915.display.bw_state;
+    let mut min_cdclk = intel_bw_dbuf_min_cdclk(i915, &bw_state);
+    for pipe in 0..MAX_PIPES {
+        if i915.display.runtime.pipe_mask & (1 << pipe) == 0 {
+            continue;
+        }
+        let crtc_min = (bw_state.data_rate[pipe] as u64 * 10).div_ceil(512) as i32;
+        min_cdclk = min_cdclk.max(crtc_min);
+    }
+    min_cdclk
 }

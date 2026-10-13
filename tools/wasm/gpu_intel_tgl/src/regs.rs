@@ -1336,3 +1336,113 @@ pub const SKL_NUM_SCALERS: u32 = 0x2; // display/intel_display_types.h:734
 pub const INTEL_FRONTBUFFER_BITS_PER_PIPE: u32 = 0x8; // display/intel_frontbuffer.h:62
 pub const ENOMEM: u32 = 0xc; // include/uapi/asm-generic/errno-base.h:16
 pub const INVALID_TRANSCODER: i32 = -1; // display/intel_display_limits.h:27
+
+// modeset readout and sanitize (display/intel_modeset_setup.c, intel_ddi.c, intel_hdmi.c, skl_watermark.c, intel_fbc.c, intel_vga.c)
+pub const DDI_CLK_SEL_TBT_162: u32 = 0xc0000000; // display/intel_display_regs.h:2441
+pub const DDI_CLK_SEL_TBT_270: u32 = 0xd0000000; // display/intel_display_regs.h:2442
+pub const DDI_CLK_SEL_TBT_540: u32 = 0xe0000000; // display/intel_display_regs.h:2443
+pub const DDI_CLK_SEL_TBT_810: u32 = 0xf0000000; // display/intel_display_regs.h:2444
+pub const DDI_CLK_SEL_MG: u32 = 0x80000000; // display/intel_display_regs.h:2440
+/// display/intel_display_regs.h:2601
+pub const fn ICL_DPCLKA_CFGCR0_DDI_CLK_SEL_MASK(phy: u32) -> u32 { (3 << ((phy) * 2)) }
+/// display/intel_display_regs.h:2600
+pub const fn ICL_DPCLKA_CFGCR0_DDI_CLK_SEL_SHIFT(phy: u32) -> u32 { ((phy) * 2) }
+pub const ICL_PORT_DPLL_COUNT: u32 = 0x2; // display/intel_dpll_mgr.h:180
+pub const TRANS_DDI_PHSYNC: u32 = 0x10000; // display/intel_display_regs.h:2243
+pub const TRANS_DDI_PVSYNC: u32 = 0x20000; // display/intel_display_regs.h:2242
+pub const TRANS_DDI_BPC_MASK: u32 = 0x700000; // display/intel_display_regs.h:2235
+pub const TRANS_DDI_BPC_6: u32 = 0x200000; // display/intel_display_regs.h:2238
+pub const TRANS_DDI_BPC_8: u32 = 0x0; // display/intel_display_regs.h:2236
+pub const TRANS_DDI_BPC_10: u32 = 0x100000; // display/intel_display_regs.h:2237
+pub const TRANS_DDI_BPC_12: u32 = 0x300000; // display/intel_display_regs.h:2239
+pub const TRANS_DDI_HDMI_SCRAMBLING: u32 = 0x1; // display/intel_display_regs.h:2265
+pub const TRANS_DDI_HIGH_TMDS_CHAR_RATE: u32 = 0x10; // display/intel_display_regs.h:2262
+pub const DDI_PORT_WIDTH_MASK: u32 = 0xe; // display/intel_display_regs.h:2351
+pub const DDI_PORT_WIDTH_SHIFT: u32 = 0x1; // display/intel_display_regs.h:2354
+pub const TRANS_DDI_MST_TRANSPORT_SELECT_MASK: u32 = 0xc00; // display/intel_display_regs.h:2253
+/// display/intel_display_regs.h:2276, at tgl_desc's display info
+pub const fn TRANS_DDI_FUNC_CTL2(tran: u32) -> u32 { match tran { 0 => 0x60404, 1 => 0x61404, 2 => 0x62404, 3 => 0x63404, _ => panic!("TRANS_DDI_FUNC_CTL2: index not generated") } }
+pub const PORT_SYNC_MODE_ENABLE: u32 = 0x10; // display/intel_display_regs.h:2277
+pub const PORT_SYNC_MODE_MASTER_SELECT_MASK: u32 = 0x7; // display/intel_display_regs.h:2279
+/// display/intel_display_regs.h:2290, at tgl_desc's display info
+pub const fn TGL_DP_TP_CTL(tran: u32) -> u32 { match tran { 0 => 0x60540, 1 => 0x61540, 2 => 0x62540, 3 => 0x63540, _ => panic!("TGL_DP_TP_CTL: index not generated") } }
+pub const DP_TP_CTL_ENHANCED_FRAME_ENABLE: u32 = 0x40000; // display/intel_display_regs.h:2301
+pub const DP_TP_CTL_FEC_ENABLE: u32 = 0x40000000; // display/intel_display_regs.h:2292
+/// display/intel_display_regs.h:1010, at tgl_desc's display info
+pub const fn PIPE_DATA_M1(tran: u32) -> u32 { match tran { 0 => 0x60030, 1 => 0x61030, 2 => 0x62030, 3 => 0x63030, _ => panic!("PIPE_DATA_M1: index not generated") } }
+/// display/intel_display_regs.h:1014, at tgl_desc's display info
+pub const fn PIPE_DATA_N1(tran: u32) -> u32 { match tran { 0 => 0x60034, 1 => 0x61034, 2 => 0x62034, 3 => 0x63034, _ => panic!("PIPE_DATA_N1: index not generated") } }
+/// display/intel_display_regs.h:1026, at tgl_desc's display info
+pub const fn PIPE_LINK_M1(tran: u32) -> u32 { match tran { 0 => 0x60040, 1 => 0x61040, 2 => 0x62040, 3 => 0x63040, _ => panic!("PIPE_LINK_M1: index not generated") } }
+/// display/intel_display_regs.h:1030, at tgl_desc's display info
+pub const fn PIPE_LINK_N1(tran: u32) -> u32 { match tran { 0 => 0x60044, 1 => 0x61044, 2 => 0x62044, 3 => 0x63044, _ => panic!("PIPE_LINK_N1: index not generated") } }
+pub const DATA_LINK_M_N_MASK: u32 = 0xffffff; // display/intel_display_regs.h:699
+pub const TU_SIZE_MASK: u32 = 0x7e000000; // display/intel_display_regs.h:697
+pub const HSW_AUD_PIN_ELD_CP_VLD: u32 = 0x650c0; // display/intel_audio_regs.h:113
+/// display/intel_audio_regs.h:115
+pub const fn AUDIO_OUTPUT_ENABLE(trans: u32) -> u32 { ((1 << 2) << ((trans) * 4)) }
+pub const POWER_DOMAIN_AUDIO_MMIO: u32 = 0x2d; // display/intel_display_power.h:79
+/// display/intel_display_regs.h:1930, at tgl_desc's display info
+pub const fn HSW_TVIDEO_DIP_CTL(trans: u32) -> u32 { match trans { 0 => 0x60200, 1 => 0x61200, 2 => 0x62200, 3 => 0x63200, _ => panic!("HSW_TVIDEO_DIP_CTL: index not generated") } }
+/// display/intel_display_regs.h:1975, at tgl_desc's display info
+pub const fn HSW_TVIDEO_DIP_GCP(trans: u32) -> u32 { match trans { 0 => 0x60210, 1 => 0x61210, 2 => 0x62210, 3 => 0x63210, _ => panic!("HSW_TVIDEO_DIP_GCP: index not generated") } }
+pub const VIDEO_DIP_ENABLE_VSC_HSW: u32 = 0x100000; // display/intel_display_regs.h:615
+pub const VIDEO_DIP_ENABLE_AVI_HSW: u32 = 0x1000; // display/intel_display_regs.h:617
+pub const VIDEO_DIP_ENABLE_GCP_HSW: u32 = 0x10000; // display/intel_display_regs.h:616
+pub const VIDEO_DIP_ENABLE_VS_HSW: u32 = 0x100; // display/intel_display_regs.h:618
+pub const VIDEO_DIP_ENABLE_GMP_HSW: u32 = 0x10; // display/intel_display_regs.h:619
+pub const VIDEO_DIP_ENABLE_SPD_HSW: u32 = 0x1; // display/intel_display_regs.h:620
+pub const VIDEO_DIP_ENABLE_DRM_GLK: u32 = 0x10000000; // display/intel_display_regs.h:606
+pub const VIDEO_DIP_ENABLE_AS_ADL: u32 = 0x800000; // display/intel_display_regs.h:622
+pub const VDIP_ENABLE_PPS: u32 = 0x1000000; // display/intel_display_regs.h:614
+pub const HDMI_PACKET_TYPE_GENERAL_CONTROL: u32 = 0x3; // display/intel_hdmi.c:585
+pub const HDMI_PACKET_TYPE_GAMUT_METADATA: u32 = 0xa; // display/intel_hdmi.c:586
+pub const DP_SDP_VSC: u32 = 0x7; // display/intel_hdmi.c:587
+pub const DP_SDP_ADAPTIVE_SYNC: u32 = 0x22; // display/intel_hdmi.c:588
+pub const DP_SDP_PPS: u32 = 0x10; // display/intel_vdsc.c:750
+pub const HDMI_INFOFRAME_TYPE_AVI: u32 = 0x82; // display/g4x_hdmi.c:205
+pub const HDMI_INFOFRAME_TYPE_SPD: u32 = 0x83; // display/g4x_hdmi.c:208
+pub const HDMI_INFOFRAME_TYPE_VENDOR: u32 = 0x81; // display/g4x_hdmi.c:211
+pub const HDMI_INFOFRAME_TYPE_DRM: u32 = 0x87; // display/intel_ddi.c:4208
+pub const INTEL_OUTPUT_ANALOG: u32 = 0x1; // display/intel_display_types.h:74
+pub const DRM_MODE_FLAG_PHSYNC: u32 = 0x1; // ?
+pub const DRM_MODE_FLAG_NHSYNC: u32 = 0x2; // ?
+pub const DRM_MODE_FLAG_PVSYNC: u32 = 0x4; // ?
+pub const DRM_MODE_FLAG_NVSYNC: u32 = 0x8; // ?
+pub const SPLITTER_ENABLE: i32 = -2147483648; // display/intel_vdsc_regs.h:13
+pub const SPLITTER_CONFIGURATION_MASK: u32 = 0x6000000; // display/intel_vdsc_regs.h:39
+pub const SPLITTER_CONFIGURATION_2_SEGMENT: u32 = 0x0; // display/intel_vdsc_regs.h:40
+pub const SPLITTER_CONFIGURATION_4_SEGMENT: u32 = 0x2000000; // display/intel_vdsc_regs.h:41
+pub const OVERLAP_PIXELS_MASK: u32 = 0xf0000; // display/intel_vdsc_regs.h:17
+/// display/skl_universal_plane_regs.h:320
+pub const fn PLANE_WM(pipe: u32, plane: u32, level: u32) -> u32 { (((((((((0x70240)))) + (((((pipe))))) * (((((0x71240)))) - ((((0x70240))))))) + (((((plane))))) * (((((((0x70340)))) + (((((pipe))))) * (((((0x71340)))) - ((((0x70340))))))) - ((((((0x70240)))) + (((((pipe))))) * (((((0x71240)))) - ((((0x70240))))))))) + (((level))) * 4)) }
+/// display/intel_cursor_regs.h:80
+pub const fn CUR_WM(pipe: u32, level: u32) -> u32 { (((0x70140) + ((pipe)) * ((0x71140) - (0x70140))) + (level) * 4) }
+/// display/skl_universal_plane_regs.h:349
+pub const fn PLANE_WM_TRANS(pipe: u32, plane: u32) -> u32 { (((((((0x70268))) + ((((pipe)))) * ((((0x71268))) - (((0x70268)))))) + ((((plane)))) * ((((((0x70368))) + ((((pipe)))) * ((((0x71368))) - (((0x70368)))))) - (((((0x70268))) + ((((pipe)))) * ((((0x71268))) - (((0x70268))))))))) }
+/// display/intel_cursor_regs.h:96
+pub const fn CUR_WM_TRANS(pipe: u32) -> u32 { (((0x70168) + ((pipe)) * ((0x71168) - (0x70168)))) }
+pub const PLANE_WM_EN: u32 = 0x80000000; // display/skl_universal_plane_regs.h:323
+pub const PLANE_WM_IGNORE_LINES: u32 = 0x40000000; // display/skl_universal_plane_regs.h:324
+pub const PLANE_WM_BLOCKS_MASK: u32 = 0xfff; // display/skl_universal_plane_regs.h:327
+pub const PLANE_WM_LINES_MASK: u32 = 0x7ffc000; // display/skl_universal_plane_regs.h:326
+/// display/intel_cursor_regs.h:100
+pub const fn CUR_BUF_CFG(pipe: u32) -> u32 { (((0x7017c) + ((pipe)) * ((0x7117c) - (0x7017c)))) }
+/// display/skl_universal_plane_regs.h:374
+pub const fn PLANE_BUF_CFG(pipe: u32, plane: u32) -> u32 { (((((((0x7027c))) + ((((pipe)))) * ((((0x7127c))) - (((0x7027c)))))) + ((((plane)))) * ((((((0x7037c))) + ((((pipe)))) * ((((0x7137c))) - (((0x7037c)))))) - (((((0x7027c))) + ((((pipe)))) * ((((0x7127c))) - (((0x7027c))))))))) }
+pub const PLANE_BUF_START_MASK: u32 = 0xfff; // display/skl_universal_plane_regs.h:381
+pub const PLANE_BUF_END_MASK: u32 = 0xfff0000; // display/skl_universal_plane_regs.h:379
+pub const DBUF_S2: u32 = 0x1; // display/intel_display_power.h:291
+pub const TGL_DISPLAY_DBUF_SIZE: u32 = 0x800; // tgl_desc.info->dbuf.size in display/intel_display_device.c
+/// display/intel_fbc_regs.h:56
+pub const fn ILK_DPFC_CONTROL(fbc_id: u32) -> u32 { (((0x43208) + ((fbc_id)) * ((0x43248) - (0x43208)))) }
+pub const DPFC_CTL_EN: u32 = 0x80000000; // display/intel_fbc_regs.h:57
+pub const I915_MAX_FBCS: u32 = 0x4; // display/intel_fbc.h:27
+pub const CPU_VGACNTRL: u32 = 0x41000; // display/intel_vga_regs.h:13
+pub const VGA_DISP_DISABLE: u32 = 0x80000000; // display/intel_vga_regs.h:14
+pub const GEN9_CLKGATE_DIS_0: u32 = 0x46530; // i915_reg.h:764
+pub const DARBF_GATING_DIS: u32 = 0x8000000; // i915_reg.h:765
+pub const SWSCI_SBCB_DISPLAY_POWER_STATE: u32 = 0x80c; // display/intel_opregion.c:244
+pub const DISPLAY_TYPE_CRT: u32 = 0x0; // display/intel_opregion.c:385
+pub const DISPLAY_TYPE_EXTERNAL_FLAT_PANEL: u32 = 0x2; // display/intel_opregion.c:387
+pub const DISPLAY_TYPE_INTERNAL_FLAT_PANEL: u32 = 0x3; // display/intel_opregion.c:388

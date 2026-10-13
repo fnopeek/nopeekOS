@@ -75,6 +75,7 @@ HEADERS = [
     "display/intel_hti_regs.h", "display/intel_dp_aux_regs.h", "display/skl_universal_plane_regs.h",
     "display/intel_cursor_regs.h", "display/intel_color_regs.h", "display/intel_vrr_regs.h",
     "display/intel_vdsc_regs.h", "display/intel_pfit_regs.h",
+    "display/intel_vga_regs.h", "display/intel_audio_regs.h", "display/intel_fbc_regs.h",
 ]
 
 # The kernel build's flags (drivers/gpu/drm/i915/.intel_uncore.o.cmd),

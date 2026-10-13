@@ -464,6 +464,44 @@ pub struct intel_display_power_domain_set {
     pub mask: [u64; DOMAIN_WORDS],
 }
 
+/// `intel_display_power_get_in_set`.
+pub fn intel_display_power_get_in_set(i915: &mut drm_i915_private, set: &mut intel_display_power_domain_set,
+                                      domain: u32) {
+    if test_bit(&set.mask, domain) {
+        linux::say("warning: power domain already in the set");
+    }
+    intel_display_power_get(i915, domain);
+    set_bit(&mut set.mask, domain);
+}
+
+/// `intel_display_power_put_mask_in_set`.
+pub fn intel_display_power_put_mask_in_set(i915: &mut drm_i915_private, set: &mut intel_display_power_domain_set,
+                                           mask: &[u64; DOMAIN_WORDS]) {
+    for domain in 0..POWER_DOMAIN_NUM {
+        if !test_bit(mask, domain) {
+            continue;
+        }
+        if !test_bit(&set.mask, domain) {
+            linux::say("warning: putting a power domain not in the set");
+        }
+        intel_display_power_put(i915, domain);
+        set.mask[(domain / 64) as usize] &= !(1 << (domain % 64));
+    }
+}
+
+/// `intel_power_domains_sanitize_state`: wells the BIOS left on that no
+/// domain holds are turned off, last to first.
+pub fn intel_power_domains_sanitize_state(i915: &mut drm_i915_private) {
+    for w in (0..i915.display.power.power_well_count).rev() {
+        let pw = i915.display.power.power_wells[w];
+        if inst(&pw).always_on != 0 || pw.count != 0 || !intel_power_well_is_enabled(i915, w) {
+            continue;
+        }
+        Line::new().s("BIOS left unused ").s(name(&pw)).s(" power well enabled, disabling it").say();
+        intel_power_well_disable(i915, w);
+    }
+}
+
 /// `intel_display_power_get_in_set_if_enabled`.
 pub fn intel_display_power_get_in_set_if_enabled(i915: &mut drm_i915_private,
                                                  set: &mut intel_display_power_domain_set,

@@ -72,6 +72,8 @@ pub struct intel_display {
     /// The encoders, digital ports and connectors `intel_setup_outputs`
     /// creates.
     pub outputs: crate::intel_encoder::intel_outputs,
+    /// `display->vbt`, with the display facts the VBT code reads.
+    pub bios: crate::intel_bios::intel_bios_display,
     /// `DISPLAY_RUNTIME_INFO(display)`.
     pub runtime: crate::intel_display_device::intel_display_runtime_info,
     /// The crtcs, indexed by pipe; `crtc_valid` marks the ones created.
@@ -80,6 +82,10 @@ pub struct intel_display {
     /// The planes in `drm_plane_index` order.
     pub planes: [crate::intel_display_types::intel_plane; crate::intel_display_types::MAX_PLANES],
     pub num_planes: usize,
+    /// `display->dbuf.obj.state`.
+    pub dbuf_state: crate::skl_watermark::intel_dbuf_state,
+    /// `display->bw.obj.state`.
+    pub bw_state: crate::intel_bw::intel_bw_state,
 }
 
 /// `struct drm_i915_private`, as far as this stage needs it.

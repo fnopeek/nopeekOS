@@ -12,6 +12,7 @@ use crate::intel_de::*;
 use crate::intel_display_power::{intel_display_power_get, intel_display_power_is_enabled,
                                  intel_display_power_legacy_aux_domain, intel_display_power_put,
                                  intel_display_power_tbt_aux_domain};
+use crate::intel_display_types::intel_crtc_state;
 use crate::intel_encoder::*;
 use crate::linux::{self, Line};
 use crate::regs::*;
@@ -704,6 +705,17 @@ fn intel_tc_port_needs_reset(i915: &mut drm_i915_private, o: &mut intel_outputs,
     tc_phy_get_target_mode(i915, o, d) != tc(o, d).mode
 }
 
+/// `intel_tc_port_link_needs_reset` → `__intel_tc_port_link_needs_reset`.
+pub fn intel_tc_port_link_needs_reset(i915: &mut drm_i915_private, o: &mut intel_outputs, d: usize) -> bool {
+    if !intel_encoder_is_tc(&o.encoders[o.dig_ports[d].encoder]) {
+        return false;
+    }
+    tc(o, d).locked = true;
+    let ret = tc(o, d).link_refcount != 0 && tc(o, d).mode == TC_PORT_DP_ALT && intel_tc_port_needs_reset(i915, o, d);
+    tc(o, d).locked = false;
+    ret
+}
+
 /// `intel_tc_port_update_mode`.
 fn intel_tc_port_update_mode(i915: &mut drm_i915_private, o: &mut intel_outputs, d: usize,
                              required_lanes: u32, force_disconnect: bool) {
@@ -771,13 +783,13 @@ pub fn intel_tc_port_init_mode(i915: &mut drm_i915_private, o: &mut intel_output
 
 /// `tc_port_has_active_streams`. MST readout is not done in Linux either.
 fn tc_port_has_active_streams(i915: &mut drm_i915_private, o: &mut intel_outputs, d: usize,
-                              crtc_state: Option<&encoder_crtc_state>) -> u32 {
+                              crtc_state: Option<&intel_crtc_state>) -> u32 {
     let mut pll_type = ICL_PORT_DPLL_DEFAULT;
     let mut active_streams = 0;
 
     if o.dig_ports[d].dp.is_mst {
         active_streams = 0;
-    } else if let Some(cs) = crtc_state.filter(|cs| cs.active) {
+    } else if let Some(cs) = crtc_state.filter(|cs| cs.hw.active) {
         pll_type = crate::intel_ddi::intel_ddi_port_pll_type(o, o.dig_ports[d].encoder, cs);
         active_streams = 1;
     }
@@ -794,7 +806,7 @@ fn tc_port_has_active_streams(i915: &mut drm_i915_private, o: &mut intel_outputs
 /// locked until it is disabled; a disabled one gets its PHY disconnected.
 /// `crtc_state` is the attached crtc's state when the port is enabled.
 pub fn intel_tc_port_sanitize_mode(i915: &mut drm_i915_private, o: &mut intel_outputs, d: usize,
-                                   crtc_state: Option<&encoder_crtc_state>) {
+                                   crtc_state: Option<&intel_crtc_state>) {
     tc(o, d).locked = true;
 
     if tc(o, d).link_refcount != 1 {

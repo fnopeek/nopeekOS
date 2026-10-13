@@ -3,15 +3,20 @@
 //! with PCH TGP.
 //!
 //! Properties, HDCP and the CEC notifier only register with DRM and are
-//! left out.
+//! left out. Of the infoframe readout, the enable mask and the GCP are
+//! kept.
 
+use crate::i915_drv::drm_i915_private;
 use crate::intel_bios;
+use crate::intel_de::intel_de_read;
+use crate::intel_display_types::intel_crtc_state;
 use crate::intel_encoder::*;
 use crate::linux::Line;
 use crate::regs::*;
+use crate::tables;
 
 /// `intel_infoframe_init` (DDI platform).
-pub fn intel_infoframe_init(o: &mut intel_outputs, vbt: &intel_bios::intel_display, d: usize) {
+pub fn intel_infoframe_init(o: &mut intel_outputs, vbt: &intel_bios::intel_bios_display, d: usize) {
     let e = &o.encoders[o.dig_ports[d].encoder];
     let devdata = &vbt.devices()[e.devdata];
     o.dig_ports[d].infoframes = if intel_bios::intel_bios_encoder_is_lspcon(vbt, devdata) {
@@ -53,7 +58,7 @@ fn get_encoder_by_ddc_pin(o: &intel_outputs, encoder: usize, ddc_pin: u8) -> Opt
 }
 
 /// `intel_hdmi_ddc_pin`.
-fn intel_hdmi_ddc_pin(o: &intel_outputs, vbt: &intel_bios::intel_display, encoder: usize) -> u8 {
+fn intel_hdmi_ddc_pin(o: &intel_outputs, vbt: &intel_bios::intel_bios_display, encoder: usize) -> u8 {
     let e = &o.encoders[encoder];
     let mut ddc_pin = intel_bios::intel_bios_hdmi_ddc_pin(vbt, &vbt.devices()[e.devdata]) as u8;
     let mut source = "VBT";
@@ -80,7 +85,7 @@ fn intel_hdmi_ddc_pin(o: &intel_outputs, vbt: &intel_bios::intel_display, encode
 }
 
 /// `intel_hdmi_init_connector`.
-pub fn intel_hdmi_init_connector(o: &mut intel_outputs, vbt: &intel_bios::intel_display, d: usize) -> bool {
+pub fn intel_hdmi_init_connector(o: &mut intel_outputs, vbt: &intel_bios::intel_bios_display, d: usize) -> bool {
     let enc = o.dig_ports[d].encoder;
 
     Line::new().s("Adding HDMI connector on [ENCODER:").s(o.encoders[enc].name()).s("]").say();
@@ -101,9 +106,73 @@ pub fn intel_hdmi_init_connector(o: &mut intel_outputs, vbt: &intel_bios::intel_
         encoder: enc,
         polled: DRM_CONNECTOR_POLL_HPD,
         ddc_pin,
+        ..Default::default()
     }) else {
         return false;
     };
     o.dig_ports[d].hdmi.attached_connector = Some(c);
     true
+}
+
+// ── infoframe state readout ──────────────────────────────────────────
+
+/// `hsw_infoframe_enable`.
+fn hsw_infoframe_enable(type_: u32) -> u32 {
+    match type_ {
+        HDMI_PACKET_TYPE_GENERAL_CONTROL => VIDEO_DIP_ENABLE_GCP_HSW,
+        HDMI_PACKET_TYPE_GAMUT_METADATA => VIDEO_DIP_ENABLE_GMP_HSW,
+        DP_SDP_VSC => VIDEO_DIP_ENABLE_VSC_HSW,
+        DP_SDP_ADAPTIVE_SYNC => VIDEO_DIP_ENABLE_AS_ADL,
+        DP_SDP_PPS => VDIP_ENABLE_PPS,
+        HDMI_INFOFRAME_TYPE_AVI => VIDEO_DIP_ENABLE_AVI_HSW,
+        HDMI_INFOFRAME_TYPE_SPD => VIDEO_DIP_ENABLE_SPD_HSW,
+        HDMI_INFOFRAME_TYPE_VENDOR => VIDEO_DIP_ENABLE_VS_HSW,
+        HDMI_INFOFRAME_TYPE_DRM => VIDEO_DIP_ENABLE_DRM_GLK,
+        _ => {
+            Line::new().s("MISSING_CASE infoframe type ").hex(type_).say();
+            0
+        }
+    }
+}
+
+/// `hsw_infoframes_enabled` (display version 10+; the adaptive-sync SDP
+/// comes with version 13).
+fn hsw_infoframes_enabled(i915: &mut drm_i915_private, cpu_transcoder: u32) -> u32 {
+    let val = intel_de_read(i915, HSW_TVIDEO_DIP_CTL(cpu_transcoder));
+    let mask = VIDEO_DIP_ENABLE_VSC_HSW | VIDEO_DIP_ENABLE_AVI_HSW | VIDEO_DIP_ENABLE_GCP_HSW
+        | VIDEO_DIP_ENABLE_VS_HSW | VIDEO_DIP_ENABLE_GMP_HSW | VIDEO_DIP_ENABLE_SPD_HSW
+        | VIDEO_DIP_ENABLE_DRM_GLK;
+    val & mask
+}
+
+/// `intel_hdmi_infoframes_enabled`: the hardware DIP bits mapped to their
+/// `infoframe_type_to_idx` positions. `dig_port->infoframes_enabled` is
+/// `hsw_infoframes_enabled` on a DDI port without LSPCON.
+pub fn intel_hdmi_infoframes_enabled(i915: &mut drm_i915_private, cpu_transcoder: u32) -> u32 {
+    let val = hsw_infoframes_enabled(i915, cpu_transcoder);
+    let mut ret = 0;
+    for (i, &type_) in tables::infoframe_type_to_idx.iter().enumerate() {
+        if val & hsw_infoframe_enable(type_ as u32) != 0 {
+            ret |= 1 << i;
+        }
+    }
+    ret
+}
+
+/// `intel_hdmi_infoframe_enable`.
+pub fn intel_hdmi_infoframe_enable(type_: u32) -> u32 {
+    for (i, &t) in tables::infoframe_type_to_idx.iter().enumerate() {
+        if t as u32 == type_ {
+            return 1 << i;
+        }
+    }
+    0
+}
+
+/// `intel_hdmi_read_gcp_infoframe` (HAS_DDI).
+pub fn intel_hdmi_read_gcp_infoframe(i915: &mut drm_i915_private, crtc_state: &mut intel_crtc_state) {
+    if crtc_state.infoframes.enable & intel_hdmi_infoframe_enable(HDMI_PACKET_TYPE_GENERAL_CONTROL) == 0 {
+        return;
+    }
+    crtc_state.infoframes.gcp = intel_de_read(i915, HSW_TVIDEO_DIP_GCP(crtc_state.cpu_transcoder));
 }

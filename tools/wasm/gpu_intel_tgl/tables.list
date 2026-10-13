@@ -52,3 +52,7 @@ hpd_icp: u32
 intel_dp_set_source_rates::icl_rates: i32
 @ ../drm_fourcc.c
 __drm_format_info::formats: drm_format_info = struct drm_format_info { format, cpp0=cpp[0] }
+@ display/intel_hdmi.c
+infoframe_type_to_idx: u8
+@ display/skl_watermark.c
+tgl_allowed_dbufs: dbuf_slice_conf_entry { active_pipes, join_mbus, m0=dbuf_mask[0], m1=dbuf_mask[1], m2=dbuf_mask[2], m3=dbuf_mask[3] }

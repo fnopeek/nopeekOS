@@ -3,6 +3,7 @@
 //! `intel_plane_state` that the readout fills. DRM object bookkeeping
 //! (`uapi` blobs, properties) is not kept.
 
+use crate::intel_dpll_mgr::intel_dpll_hw_state;
 use crate::regs::*;
 
 /// Planes per pipe on display version 12: PLANE_1..PLANE_7 and the cursor.
@@ -126,11 +127,78 @@ pub struct intel_crtc_splitter {
     pub pixel_overlap: i32,
 }
 
-/// Placeholder for `struct intel_dpll_hw_state`: the DPLL port
-/// (intel_dpll_mgr.rs) owns the real type and replaces this one.
+/// `struct intel_link_m_n`.
 #[derive(Clone, Copy, Default)]
-pub struct intel_dpll_hw_state_placeholder {
-    pub raw: [u32; 16],
+pub struct intel_link_m_n {
+    pub tu: u32,
+    pub data_m: u32,
+    pub data_n: u32,
+    pub link_m: u32,
+    pub link_n: u32,
+}
+
+/// `struct icl_port_dpll`; `pll` indexes `i915.display.dpll.dplls`.
+#[derive(Clone, Copy, Default)]
+pub struct icl_port_dpll {
+    pub pll: Option<usize>,
+    pub hw_state: intel_dpll_hw_state,
+}
+
+/// `crtc_state->infoframes`: which DIPs are on, and the GCP. The DIP
+/// payloads are not read back (see intel_ddi_get_config).
+#[derive(Clone, Copy, Default)]
+pub struct intel_crtc_infoframes {
+    pub enable: u32,
+    pub gcp: u32,
+}
+
+/// `struct skl_ddb_entry`.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct skl_ddb_entry {
+    pub start: u16,
+    pub end: u16,
+}
+
+/// `struct skl_wm_level`.
+#[derive(Clone, Copy, Default)]
+pub struct skl_wm_level {
+    pub min_ddb_alloc: u16,
+    pub blocks: u16,
+    pub lines: u8,
+    pub enable: bool,
+    pub ignore_lines: bool,
+    pub auto_min_alloc_wm_enable: bool,
+    pub can_sagv: bool,
+}
+
+/// `struct skl_plane_wm`; `sagv` holds `sagv.wm0` and `sagv.trans_wm`.
+#[derive(Clone, Copy, Default)]
+pub struct skl_plane_wm {
+    pub wm: [skl_wm_level; crate::skl_watermark::NUM_LATENCY],
+    pub uv_wm: [skl_wm_level; crate::skl_watermark::NUM_LATENCY],
+    pub trans_wm: skl_wm_level,
+    pub sagv_wm0: skl_wm_level,
+    pub sagv_trans_wm: skl_wm_level,
+    pub is_planar: bool,
+}
+
+/// `struct skl_pipe_wm`.
+#[derive(Clone, Copy, Default)]
+pub struct skl_pipe_wm {
+    pub planes: [skl_plane_wm; I915_MAX_PLANES as usize],
+    pub use_sagv_wm: bool,
+}
+
+/// `crtc_state->wm.skl`.
+#[derive(Clone, Copy, Default)]
+pub struct intel_crtc_wm_skl {
+    pub optimal: skl_pipe_wm,
+    pub raw: skl_pipe_wm,
+    pub ddb: skl_ddb_entry,
+    pub plane_ddb: [skl_ddb_entry; I915_MAX_PLANES as usize],
+    pub plane_ddb_y: [skl_ddb_entry; I915_MAX_PLANES as usize],
+    pub plane_min_ddb: [u16; I915_MAX_PLANES as usize],
+    pub plane_interim_ddb: [u16; I915_MAX_PLANES as usize],
 }
 
 /// `crtc_state->hw`.
@@ -180,9 +248,54 @@ pub struct intel_crtc_state {
     pub c8_planes: u8,
     pub enabled_planes: u8,
     pub active_planes: u8,
-    /// `shared_dpll`: the id of the DPLL the encoder readout finds.
-    pub shared_dpll: Option<u32>,
-    pub dpll_hw_state: intel_dpll_hw_state_placeholder,
+    /// `uapi.encoder_mask` / `uapi.connector_mask`, by list index.
+    pub uapi_encoder_mask: u32,
+    pub uapi_connector_mask: u32,
+    /// `intel_dpll`: index into `i915.display.dpll.dplls`.
+    pub intel_dpll: Option<usize>,
+    pub dpll_hw_state: intel_dpll_hw_state,
+    pub icl_port_dplls: [icl_port_dpll; ICL_PORT_DPLL_COUNT as usize],
+    pub has_pch_encoder: bool,
+    pub double_wide: bool,
+    pub lane_count: i32,
+    pub has_audio: bool,
+    pub has_hdmi_sink: bool,
+    pub has_infoframe: bool,
+    pub hdmi_scrambling: bool,
+    pub hdmi_high_tmds_clock_ratio: bool,
+    pub enhanced_framing: bool,
+    pub fec_enable: bool,
+    pub has_psr: bool,
+    pub mst_master_transcoder: u32,
+    pub master_transcoder: u32,
+    pub sync_mode_slaves_mask: u8,
+    pub dp_m_n: intel_link_m_n,
+    pub dp_m2_n2: intel_link_m_n,
+    pub infoframes: intel_crtc_infoframes,
+    pub min_voltage_level: u8,
+    /// Set by the readout: the next commit recomputes the derived state.
+    pub inherited: bool,
+    pub data_rate: [u32; I915_MAX_PLANES as usize],
+    pub min_cdclk: [i32; I915_MAX_PLANES as usize],
+    pub wm_skl: intel_crtc_wm_skl,
+}
+
+impl intel_crtc_state {
+    /// `intel_crtc_has_type`.
+    pub fn has_type(&self, t: u32) -> bool {
+        self.output_types & (1 << t) != 0
+    }
+
+    /// `intel_crtc_has_dp_encoder`.
+    pub fn has_dp_encoder(&self) -> bool {
+        self.has_type(INTEL_OUTPUT_DP) || self.has_type(INTEL_OUTPUT_DP_MST) || self.has_type(INTEL_OUTPUT_EDP)
+    }
+
+    /// `icl_ddi_tc_pll_is_tbt(crtc_state->intel_dpll)`. The DPLL array
+    /// holds `tgl_plls` in table order, so the index names the PLL.
+    pub fn pll_is_tbt(&self) -> Option<bool> {
+        self.intel_dpll.map(|i| crate::tables::tgl_plls[i].id == DPLL_ID_ICL_TBTPLL)
+    }
 }
 
 /// `struct intel_crtc`.
@@ -193,6 +306,14 @@ pub struct intel_crtc {
     pub plane_ids_mask: u8,
     /// `crtc->hw_readout_power_domains`.
     pub hw_readout_power_domains: crate::intel_display_power::intel_display_power_domain_set,
+    /// `crtc->enabled_power_domains`.
+    pub enabled_power_domains: crate::intel_display_power::intel_display_power_domain_set,
+    /// `crtc->active`, `crtc->base.enabled`.
+    pub active: bool,
+    pub enabled: bool,
+    pub vmax_vblank_start: i32,
+    pub mode_flags: u32,
+    pub scanline_offset: i32,
     /// `crtc->base.state`.
     pub state: intel_crtc_state,
 }

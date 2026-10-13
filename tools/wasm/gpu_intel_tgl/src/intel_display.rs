@@ -588,3 +588,51 @@ pub fn intel_plane_fixup_bitmasks(i915: &mut drm_i915_private, c: usize) {
 pub fn intel_crtc_for_pipe(i915: &drm_i915_private, pipe: u32) -> Option<usize> {
     (0..I915_MAX_PIPES as usize).find(|&c| i915.display.crtc_valid[c] && i915.display.crtcs[c].pipe == pipe)
 }
+
+/// `intel_get_m_n`.
+fn intel_get_m_n(i915: &mut drm_i915_private, data_m_reg: u32, data_n_reg: u32, link_m_reg: u32,
+                 link_n_reg: u32) -> intel_link_m_n {
+    intel_link_m_n {
+        link_m: intel_de_read(i915, link_m_reg) & DATA_LINK_M_N_MASK,
+        link_n: intel_de_read(i915, link_n_reg) & DATA_LINK_M_N_MASK,
+        data_m: intel_de_read(i915, data_m_reg) & DATA_LINK_M_N_MASK,
+        data_n: intel_de_read(i915, data_n_reg) & DATA_LINK_M_N_MASK,
+        tu: REG_FIELD_GET(TU_SIZE_MASK, intel_de_read(i915, data_m_reg)) + 1,
+    }
+}
+
+/// `intel_cpu_transcoder_get_m1_n1` (display version 5+).
+pub fn intel_cpu_transcoder_get_m1_n1(i915: &mut drm_i915_private, transcoder: u32) -> intel_link_m_n {
+    intel_get_m_n(i915, PIPE_DATA_M1(transcoder), PIPE_DATA_N1(transcoder), PIPE_LINK_M1(transcoder),
+                  PIPE_LINK_N1(transcoder))
+}
+
+/// `intel_dotclock_calculate`.
+fn intel_dotclock_calculate(link_freq: i32, m_n: &intel_link_m_n) -> i32 {
+    // pixel_clock = (m * link_freq * 10) / (n * link_symbol_size)
+    if m_n.link_n == 0 {
+        return 0;
+    }
+    let num = m_n.link_m as u64 * (link_freq as u64 * 10);
+    let den = m_n.link_n as u64 * crate::intel_dp::intel_dp_link_symbol_size(link_freq) as u64;
+    num.div_ceil(den) as i32
+}
+
+/// `intel_crtc_dotclock`.
+pub fn intel_crtc_dotclock(state: &intel_crtc_state) -> i32 {
+    let mut dotclock = if state.has_dp_encoder() {
+        intel_dotclock_calculate(state.port_clock, &state.dp_m_n)
+    } else if state.has_hdmi_sink && state.pipe_bpp > 24 {
+        (state.port_clock * 24 + state.pipe_bpp / 2) / state.pipe_bpp
+    } else {
+        state.port_clock
+    };
+
+    if state.output_format == INTEL_OUTPUT_FORMAT_YCBCR420 && !state.has_dp_encoder() {
+        dotclock *= 2;
+    }
+    if state.pixel_multiplier != 0 {
+        dotclock /= state.pixel_multiplier as i32;
+    }
+    dotclock
+}

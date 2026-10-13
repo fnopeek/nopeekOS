@@ -5,9 +5,13 @@
 //! through `i915_driver_mmio_probe` (device and display info, the PCH,
 //! forcewake, the GT's clock, slices, L3 banks and engines from the fuses,
 //! the display fuses and raw clock, the full GT reset of `sanitize_gpu`)
-//! and the non-display part of `i915_driver_hw_probe` (GGTT probe, fences,
-//! stolen memory, bus mastering, PCODE, DRAM). It reports what it found
-//! and gives the card back.
+//! and `i915_driver_hw_probe` (GGTT probe, fences, stolen memory, bus
+//! mastering, OpRegion and VBT, PCODE, DRAM, bandwidth), then the display
+//! part of the probe: `intel_display_driver_probe_noirq` (power wells,
+//! display core, CDCLK) and `intel_display_driver_probe_nogem` up to the
+//! hardware state readout and sanitize (`intel_modeset_setup_hw_state`)
+//! and the firmware framebuffer's plane registers. It reports what it
+//! found and gives the card back.
 
 #![no_std]
 // Linux names are kept as they are (`intel_uncore`, `FORCEWAKE_MT`,
@@ -35,11 +39,13 @@ mod intel_dpll_mgr;
 mod intel_dram;
 mod intel_encoder;
 mod intel_engine;
+mod intel_fbc;
 mod intel_fb;
 mod intel_ggtt;
 mod intel_gmbus;
 mod intel_gt;
 mod intel_hdmi;
+mod intel_modeset_setup;
 mod intel_opregion;
 mod intel_pch;
 mod intel_pcode;
@@ -48,6 +54,7 @@ mod intel_reset;
 mod intel_tc;
 mod intel_uncore;
 mod intel_vdsc;
+mod intel_vga;
 mod intel_vrr;
 mod linux;
 mod regs;
@@ -63,6 +70,7 @@ use intel_combo_phy::icl_procmon;
 use intel_display_power::{buddy_page_mask, intel_ddi_port_domains, power_well_domain, power_well_inst, power_well_inst_ops};
 use intel_dpll_mgr::{dpll_info, dpll_info_funcs};
 use intel_gmbus::gmbus_pin_gpio;
+use skl_watermark::dbuf_slice_conf_entry;
 use intel_fb::drm_format_info;
 use intel_gt::engine_info;
 use intel_uncore::{i915_range, intel_forcewake_range};
@@ -115,7 +123,7 @@ fn intel_gmch_bar_setup() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2b: i915_driver_probe up to the hardware probe and the VBT").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2b: i915_driver_probe up to the display hardware state readout").say();
 
     // pci_enable_device: bind (the kernel's own driver hands the card over).
     match npk_sys::pci_bind(INTEL_VENDOR as i32, TGL_GT2 as i32) {
@@ -202,8 +210,9 @@ pub extern "C" fn _start() {
     }
     // intel_opregion_setup (display), then i915_pcode_init.
     let opregion = intel_opregion::intel_opregion_setup();
-    let mut display = intel_bios::intel_display::new(i915.display.ip.ver, pch_type, drt.pipe_mask, drt.port_mask);
-    intel_bios::intel_bios_init(&mut display, opregion.as_ref());
+    let mut bios = intel_bios::intel_bios_display::new(i915.display.ip.ver, pch_type, drt.pipe_mask, drt.port_mask);
+    intel_bios::intel_bios_init(&mut bios, opregion.as_ref());
+    i915.display.bios = bios;
     let _ = intel_pcode::intel_pcode_init();
     let dram = intel_dram::intel_dram_detect(&mut i915);
     i915.dram_info = dram;
@@ -217,7 +226,6 @@ pub extern "C" fn _start() {
     let mut cd = i915.display.cdclk;
     let _ = intel_cdclk::intel_cdclk_init(&mut cd);
     i915.display.cdclk = cd;
-    display_readout(&mut i915);
 
     // intel_display_driver_probe_nogem. intel_panel_sanitize_ssc only acts
     // on IBX/CPT, intel_fdi_pll_freq_update and intel_update_czclk only on
@@ -226,6 +234,15 @@ pub extern "C" fn _start() {
     // intel_pps_setup: HAS_PCH_SPLIT.
     i915.display.pps_mmio_base = regs::PCH_PPS_BASE;
     intel_gmbus::intel_gmbus_setup(&mut i915);
+    for pipe in 0..regs::I915_MAX_PIPES {
+        if i915.display.runtime.pipe_mask & (1 << pipe) == 0 {
+            continue;
+        }
+        if intel_crtc::intel_crtc_init(&mut i915, pipe).is_err() {
+            Line::new().s("intel_crtc_init failed for pipe ").dec(pipe as u64).say();
+            return;
+        }
+    }
     intel_dpll_mgr::intel_dpll_init(&mut i915);
     intel_display_driver_init_hw(&mut i915);
     intel_dpll_mgr::intel_dpll_update_ref_clks(&mut i915);
@@ -235,27 +252,11 @@ pub extern "C" fn _start() {
         i915.display.cdclk = cd;
     }
     // intel_hti_init, intel_setup_outputs
-    intel_ddi::intel_setup_outputs(&mut i915, &display, &drt);
-    log_outputs(&mut i915, drt.pipe_mask);
-
-    // The PLL part of intel_modeset_readout_hw_state, read-only: no CRTC
-    // is read out yet, so no pipe is attributed and nothing is sanitized.
-    intel_dpll_mgr::intel_dpll_readout_hw_state(&mut i915, &display.vbt, &|_| 0);
-    for i in 0..i915.display.dpll.num_dpll {
-        let pll = i915.display.dpll.dplls[i];
-        if !pll.on {
-            continue;
-        }
-        let mut l = Line::new();
-        l.s(intel_dpll_mgr::dpll_name(&pll)).s(" on");
-        if pll.info.map(|p| p.funcs) != Some(intel_dpll_mgr::dpll_info_funcs::tbt_pll_funcs) {
-            l.s(", ").dec(intel_dpll_mgr::intel_dpll_get_freq(&i915, &pll, &pll.state.hw_state) as u64)
-                .s(" kHz");
-        }
-        l.say();
-        intel_dpll_mgr::intel_dpll_dump_hw_state(&pll.state.hw_state);
-    }
-
+    let bios = i915.display.bios;
+    intel_ddi::intel_setup_outputs(&mut i915, &bios, &drt);
+    log_outputs(&i915);
+    intel_modeset_setup::intel_modeset_setup_hw_state(&mut i915, opregion.as_ref());
+    log_initial_plane_config(&mut i915);
 
     Line::new().s("GGTT ").dec(ggtt.total >> 20).s(" MB, aperture ").hex((ggtt.gmadr_start >> 32) as u32)
         .s("_").hex(ggtt.gmadr_start as u32).s(" + ").dec(ggtt.mappable_end >> 20).s(" MB, ")
@@ -325,10 +326,9 @@ fn intel_display_driver_init_hw(i915: &mut i915_drv::drm_i915_private) {
     intel_de::intel_de_rmw(i915, regs::CLKREQ_POLICY, regs::CLKREQ_POLICY_MEM_UP_OVRD, 0);
 }
 
-/// Each encoder and connector `intel_setup_outputs` created, with the
-/// encoder's hardware state (read only) and the TypeC mode.
-fn log_outputs(i915: &mut i915_drv::drm_i915_private, pipes: u32) {
-    let o = i915.display.outputs;
+/// The encoders and connectors `intel_setup_outputs` created.
+fn log_outputs(i915: &i915_drv::drm_i915_private) {
+    let o = &i915.display.outputs;
     for e in 0..o.n_encoders {
         let enc = o.encoders[e];
         if matches!(enc.kind, intel_encoder::encoder_kind::dp_mst(..)) {
@@ -337,16 +337,10 @@ fn log_outputs(i915: &mut i915_drv::drm_i915_private, pipes: u32) {
         let mut l = Line::new();
         l.s("[ENCODER:").s(enc.name()).s("] type ").dec(enc.type_ as u64).s(", hpd pin ")
             .dec(enc.hpd_pin as u64).s(", possible crtcs ").hex(enc.possible_crtcs);
-        let (pipe_mask, is_mst) = intel_ddi::intel_ddi_get_encoder_pipes(i915, &o, e, pipes);
-        match intel_ddi::intel_encoder_get_hw_state(i915, &o, e, pipes) {
-            Some(p) => l.s(", enabled on pipe ").dec(p as u64),
-            None => l.s(", disabled"),
-        };
-        l.s(" (pipe mask ").hex(pipe_mask as u32).s(if is_mst { ", MST" } else { "" }).s(")");
         if let Some(d) = o.dig_port_of(e) {
             l.s(", AUX ").dec(o.dig_ports[d].aux_ch as u64);
             if o.dig_ports[d].tc.is_some() {
-                l.s(", TC mode ").s(intel_tc::intel_tc_port_mode_name(&o, d));
+                l.s(", TC mode ").s(intel_tc::intel_tc_port_mode_name(o, d));
             }
         }
         l.say();
@@ -356,10 +350,23 @@ fn log_outputs(i915: &mut i915_drv::drm_i915_private, pipes: u32) {
     Line::new().s("fake MST encoders: ").dec(n_mst as u64).say();
     for c in 0..o.n_connectors {
         let con = o.connectors[c];
-        let on = intel_ddi::intel_ddi_connector_get_hw_state(i915, &o, c, pipes);
         Line::new().s("connector ").dec(c as u64).s(" type ").dec(con.connector_type as u64).s(" on [ENCODER:")
-            .s(o.encoders[con.encoder].name()).s("], ddc pin ").dec(con.ddc_pin as u64)
-            .s(if on { ", active" } else { ", inactive" }).say();
+            .s(o.encoders[con.encoder].name()).s("], ddc pin ").dec(con.ddc_pin as u64).say();
+    }
+}
+
+/// `intel_initial_plane_config`, the register part: where the firmware
+/// framebuffer of each active pipe is.
+fn log_initial_plane_config(i915: &mut i915_drv::drm_i915_private) {
+    let configs = intel_plane_initial::intel_initial_plane_config(i915);
+    for (pipe, pc) in configs.iter().enumerate() {
+        if let Some(fb) = pc.fb {
+            Line::new().s("initial fb on pipe ").dec(pipe as u64).s(": GGTT ").hex(pc.base).s(", ")
+                .dec(fb.width as u64).s("x").dec(fb.height as u64).s(", format ").hex(fb.format)
+                .s(", modifier ").hex((fb.modifier >> 32) as u32).s("_").hex(fb.modifier as u32)
+                .s(", stride ").dec(fb.pitch as u64).s(", size ").hex(pc.size).s(", rotation ")
+                .hex(pc.rotation).say();
+        }
     }
 }
 
@@ -381,58 +388,4 @@ fn report(i915: &i915_drv::drm_i915_private, gt: &intel_gt::intel_gt,
     l.say();
     Line::new().s("display pipes ").hex(drt.pipe_mask).s(", dmc ").dec(drt.has_dmc as u64)
         .s(", rawclk ").dec(drt.rawclk_freq as u64).s(" kHz").say();
-}
-
-/// intel_display_driver_probe_nogem, the crtc part: `intel_crtc_init` for
-/// each pipe, the crtc and plane state readout of
-/// `intel_modeset_setup_hw_state`, and `intel_initial_plane_config`. Only
-/// registers are read.
-fn display_readout(i915: &mut i915_drv::drm_i915_private) {
-    for pipe in 0..regs::I915_MAX_PIPES {
-        if i915.display.runtime.pipe_mask & (1 << pipe) == 0 {
-            continue;
-        }
-        if intel_crtc::intel_crtc_init(i915, pipe).is_err() {
-            Line::new().s("intel_crtc_init failed for pipe ").dec(pipe as u64).say();
-            return;
-        }
-    }
-    Line::new().s("crtcs ").dec(i915.display.runtime.pipe_mask.count_ones() as u64)
-        .s(", planes ").dec(i915.display.num_planes as u64).say();
-
-    intel_crtc::intel_modeset_readout_crtcs(i915);
-    for c in 0..regs::I915_MAX_PIPES as usize {
-        if !i915.display.crtc_valid[c] {
-            continue;
-        }
-        intel_crtc::intel_crtc_copy_hw_to_uapi_state(i915, c);
-        let st = i915.display.crtcs[c].state;
-        if !st.hw.active {
-            continue;
-        }
-        let m = st.hw.adjusted_mode;
-        Line::new().s("pipe ").dec(c as u64).s(": transcoder ").dec(st.cpu_transcoder as u64)
-            .s(", source ").dec(st.pipe_src.width() as u64).s("x").dec(st.pipe_src.height() as u64)
-            .s(", output format ").dec(st.output_format as u64).s(", planes ").hex(st.active_planes as u32)
-            .s(", joiner ").hex(st.joiner_pipes as u32).s(", dsc ").dec(st.dsc.compression_enable as u64)
-            .s(", vrr ").dec(st.vrr.enable as u64).say();
-        Line::new().s("pipe ").dec(c as u64).s(": h ").dec(m.crtc_hdisplay as u64).s(" ")
-            .dec(m.crtc_hsync_start as u64).s(" ").dec(m.crtc_hsync_end as u64).s(" ")
-            .dec(m.crtc_htotal as u64).s(", v ").dec(m.crtc_vdisplay as u64).s(" ")
-            .dec(m.crtc_vsync_start as u64).s(" ").dec(m.crtc_vsync_end as u64).s(" ")
-            .dec(m.crtc_vtotal as u64).s(", flags ").hex(m.flags).s(", pfit ")
-            .dec(st.pch_pfit.enabled as u64).s(", gamma ").hex(st.gamma_mode).s(", csc ").hex(st.csc_mode)
-            .say();
-    }
-
-    let configs = intel_plane_initial::intel_initial_plane_config(i915);
-    for (pipe, pc) in configs.iter().enumerate() {
-        if let Some(fb) = pc.fb {
-            Line::new().s("initial fb on pipe ").dec(pipe as u64).s(": GGTT ").hex(pc.base).s(", ")
-                .dec(fb.width as u64).s("x").dec(fb.height as u64).s(", format ").hex(fb.format)
-                .s(", modifier ").hex((fb.modifier >> 32) as u32).s("_").hex(fb.modifier as u32)
-                .s(", stride ").dec(fb.pitch as u64).s(", size ").hex(pc.size).s(", rotation ")
-                .hex(pc.rotation).say();
-        }
-    }
 }

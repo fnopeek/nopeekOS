@@ -71,6 +71,8 @@ pub struct intel_encoder {
     /// `encoder->base.possible_crtcs` / `possible_clones`.
     pub possible_crtcs: u32,
     pub possible_clones: u32,
+    /// `encoder->base.crtc`: the crtc (pipe index) the readout attached.
+    pub crtc: Option<usize>,
 }
 
 impl intel_encoder {
@@ -232,6 +234,15 @@ pub struct intel_connector {
     /// `connector->base.ddc`: the GMBUS pin of an HDMI connector, 0 for DP
     /// (whose DDC is the AUX channel).
     pub ddc_pin: u8,
+    /// `connector->base.encoder` after the readout.
+    pub attached: Option<usize>,
+    /// `connector->base.dpms == DRM_MODE_DPMS_ON`.
+    pub dpms_on: bool,
+    /// `conn_state->crtc` and `conn_state->max_bpc`.
+    pub state_crtc: Option<usize>,
+    pub max_bpc: u8,
+    /// `connector->dp.dsc_decompression_enabled`.
+    pub dsc_decompression_enabled: bool,
 }
 
 /// The encoder, digital port and connector lists of `struct drm_device`.
@@ -348,29 +359,4 @@ pub fn intel_encoder_is_dp(o: &intel_outputs, encoder: usize) -> bool {
 
 pub fn port_name(port: u32) -> [u8; 1] {
     [b'A' + port as u8]
-}
-
-/// The crtc state the encoder hooks read (`struct intel_crtc_state`): the
-/// readout fills it from the crtc it attaches the encoder to.
-#[derive(Clone, Copy, Default)]
-pub struct encoder_crtc_state {
-    pub active: bool,
-    /// `crtc_state->output_types`, a mask of `BIT(INTEL_OUTPUT_*)`.
-    pub output_types: u32,
-    pub port_clock: i32,
-    pub lane_count: i32,
-    /// `icl_ddi_tc_pll_is_tbt(crtc_state->intel_dpll)`, None without a PLL.
-    pub pll_is_tbt: Option<bool>,
-}
-
-impl encoder_crtc_state {
-    /// `intel_crtc_has_type`.
-    pub fn has_type(&self, t: u32) -> bool {
-        self.output_types & (1 << t) != 0
-    }
-
-    /// `intel_crtc_has_dp_encoder`.
-    pub fn has_dp_encoder(&self) -> bool {
-        self.has_type(INTEL_OUTPUT_DP) || self.has_type(INTEL_OUTPUT_DP_MST) || self.has_type(INTEL_OUTPUT_EDP)
-    }
 }

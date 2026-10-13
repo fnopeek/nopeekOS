@@ -48,12 +48,13 @@ pub fn intel_crtc_init(i915: &mut drm_i915_private, pipe: u32) -> Result<(), i32
     Ok(())
 }
 
-/// `intel_crtc_state_reset`; the transcoders and pipes Linux also sets to
-/// INVALID here (master, MST master, HSW workaround pipe) are not kept.
+/// `intel_crtc_state_reset` (the HSW workaround pipe is not kept).
 pub fn intel_crtc_state_reset(state: &mut intel_crtc_state) {
     *state = intel_crtc_state::default();
     state.cpu_transcoder = INVALID_TRANSCODER as u32;
+    state.master_transcoder = INVALID_TRANSCODER as u32;
     state.scaler_state.scaler_id = -1;
+    state.mst_master_transcoder = INVALID_TRANSCODER as u32;
 }
 
 /// The crtc part of `intel_modeset_readout_hw_state` (intel_modeset_setup.c):
@@ -78,7 +79,7 @@ pub fn intel_modeset_readout_crtcs(i915: &mut drm_i915_private) {
 }
 
 /// `intel_crtc_is_joiner_secondary`.
-fn intel_crtc_is_joiner_secondary(state: &intel_crtc_state, pipe: u32) -> bool {
+pub fn intel_crtc_is_joiner_secondary(state: &intel_crtc_state, pipe: u32) -> bool {
     // joiner_primary_pipe: the lowest pipe of the joined set
     state.joiner_pipes != 0 && (state.joiner_pipes | (1 << pipe)).trailing_zeros() != pipe
 }

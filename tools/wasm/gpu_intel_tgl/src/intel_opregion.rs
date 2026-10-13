@@ -128,6 +128,44 @@ impl intel_opregion {
         Ok(())
     }
 
+    /// `intel_opregion_notify_encoder` (HAS_DDI). The SWSCI port numbering
+    /// covers ports 0..4, port E being 0; later ports are out of range.
+    pub fn intel_opregion_notify_encoder(&self, e: &crate::intel_encoder::intel_encoder, enable: bool) -> Result<(), i32> {
+        self.check_swsci_function(SWSCI_SBCB_DISPLAY_POWER_STATE)?;
+
+        let mut parm = 0u32;
+        let mut port = if e.type_ == INTEL_OUTPUT_DSI { 0 } else { e.port };
+        if port == PORT_E {
+            port = 0;
+        } else {
+            parm |= 1 << port;
+            port += 1;
+        }
+
+        if port > 4 {
+            Line::new().s("[ENCODER:").s(e.name()).s("] port index ").dec(port as u64)
+                .s(" out of bounds for display power state notification").say();
+            return Err(-(EINVAL as i32));
+        }
+
+        if !enable {
+            parm |= 4 << 8;
+        }
+
+        let type_ = match e.type_ {
+            INTEL_OUTPUT_ANALOG => DISPLAY_TYPE_CRT,
+            INTEL_OUTPUT_DDI | INTEL_OUTPUT_DP | INTEL_OUTPUT_HDMI | INTEL_OUTPUT_DP_MST => DISPLAY_TYPE_EXTERNAL_FLAT_PANEL,
+            INTEL_OUTPUT_EDP | INTEL_OUTPUT_DSI => DISPLAY_TYPE_INTERNAL_FLAT_PANEL,
+            t => {
+                Line::new().s("warning: unsupported intel_encoder type ").dec(t as u64).say();
+                return Err(-(EINVAL as i32));
+            }
+        };
+        parm |= type_ << (16 + port * 3);
+
+        self.swsci(SWSCI_SBCB_DISPLAY_POWER_STATE, parm, None)
+    }
+
     /// `swsci_setup`.
     fn swsci_setup(&mut self) {
         let mut requested_callbacks = false;

@@ -10,6 +10,7 @@
 use crate::i915_drv::drm_i915_private;
 use crate::intel_bios;
 use crate::intel_de::*;
+use crate::intel_display_types::intel_crtc_state;
 use crate::intel_encoder::*;
 use crate::linux::{self, Line};
 use crate::regs::*;
@@ -23,6 +24,12 @@ fn drm_dp_bw_channel_coding_efficiency(is_uhbr: bool) -> u64 {
 /// `drm_dp_is_uhbr_rate`.
 fn drm_dp_is_uhbr_rate(link_rate: i32) -> bool {
     link_rate >= 1000000
+}
+
+/// `intel_dp_link_symbol_size`: 32 bits per symbol for 128b/132b, 10 for
+/// 8b/10b.
+pub fn intel_dp_link_symbol_size(rate: i32) -> i32 {
+    if drm_dp_is_uhbr_rate(rate) { 32 } else { 10 }
 }
 
 /// `drm_dp_max_dprx_data_rate`.
@@ -60,7 +67,7 @@ fn get_encoder_by_aux_ch(o: &intel_outputs, encoder: usize, aux_ch: i32) -> Opti
 }
 
 /// `intel_dp_aux_ch`.
-pub fn intel_dp_aux_ch(o: &intel_outputs, vbt: &intel_bios::intel_display, encoder: usize) -> i32 {
+pub fn intel_dp_aux_ch(o: &intel_outputs, vbt: &intel_bios::intel_bios_display, encoder: usize) -> i32 {
     let e = &o.encoders[encoder];
     let devdata = &vbt.devices()[e.devdata];
     let mut aux_ch = intel_bios::intel_bios_dp_aux_ch(vbt, devdata);
@@ -137,14 +144,14 @@ fn icl_max_source_rate(o: &intel_outputs, d: usize) -> i32 {
 }
 
 /// `vbt_max_link_rate` (no eDP).
-fn vbt_max_link_rate(o: &intel_outputs, vbt: &intel_bios::intel_display, d: usize) -> i32 {
+fn vbt_max_link_rate(o: &intel_outputs, vbt: &intel_bios::intel_bios_display, d: usize) -> i32 {
     let e = &o.encoders[o.dig_ports[d].encoder];
     intel_bios::intel_bios_dp_max_link_rate(vbt, &vbt.devices()[e.devdata]) as i32
 }
 
 /// `intel_dp_set_source_rates`: display version 11 and 12 use `icl_rates`;
 /// Tiger Lake takes the `icl_max_source_rate` limit.
-fn intel_dp_set_source_rates(o: &mut intel_outputs, vbt: &intel_bios::intel_display, d: usize) {
+fn intel_dp_set_source_rates(o: &mut intel_outputs, vbt: &intel_bios::intel_bios_display, d: usize) {
     if !o.dig_ports[d].dp.source_rates.is_empty() || o.dig_ports[d].dp.num_source_rates != 0 {
         linux::say("warning: DP source rates set twice");
     }
@@ -205,7 +212,7 @@ pub fn intel_dp_max_common_rate(dp: &intel_dp) -> i32 {
 }
 
 /// `intel_dp_max_source_lane_count`.
-pub fn intel_dp_max_source_lane_count(o: &intel_outputs, vbt: &intel_bios::intel_display, d: usize) -> i32 {
+pub fn intel_dp_max_source_lane_count(o: &intel_outputs, vbt: &intel_bios::intel_bios_display, d: usize) -> i32 {
     let e = &o.encoders[o.dig_ports[d].encoder];
     let vbt_max_lanes = intel_bios::intel_bios_dp_max_lane_count(vbt, &vbt.devices()[e.devdata]) as i32;
     let mut max_lanes = o.dig_ports[d].max_lanes;
@@ -217,7 +224,7 @@ pub fn intel_dp_max_source_lane_count(o: &intel_outputs, vbt: &intel_bios::intel
 
 /// `intel_dp_max_common_lane_count`. Without a DPCD read there are no
 /// LTTPR caps, so `drm_dp_lttpr_max_lane_count` is 0.
-pub fn intel_dp_max_common_lane_count(o: &intel_outputs, vbt: &intel_bios::intel_display, d: usize) -> i32 {
+pub fn intel_dp_max_common_lane_count(o: &intel_outputs, vbt: &intel_bios::intel_bios_display, d: usize) -> i32 {
     let source_max = intel_dp_max_source_lane_count(o, vbt, d);
     let sink_max = o.dig_ports[d].dp.max_sink_lane_count;
     let lane_max = crate::intel_tc::intel_tc_port_max_lane_count(o, d) as i32;
@@ -231,7 +238,7 @@ fn intel_dp_link_config_bw(dp: &intel_dp, lc: &intel_dp_link_config) -> i32 {
 
 /// `intel_dp_link_config_init`: every common rate × lane count, sorted by
 /// bandwidth, then rate.
-fn intel_dp_link_config_init(o: &mut intel_outputs, vbt: &intel_bios::intel_display, d: usize) {
+fn intel_dp_link_config_init(o: &mut intel_outputs, vbt: &intel_bios::intel_bios_display, d: usize) {
     let max_lanes = intel_dp_max_common_lane_count(o, vbt, d);
     if max_lanes <= 0 || (max_lanes & (max_lanes - 1)) != 0 {
         linux::say("warning: DP common lane count is not a power of two");
@@ -275,7 +282,7 @@ fn intel_dp_link_config_init(o: &mut intel_outputs, vbt: &intel_bios::intel_disp
 }
 
 /// `intel_dp_set_common_rates`.
-fn intel_dp_set_common_rates(o: &mut intel_outputs, vbt: &intel_bios::intel_display, d: usize) {
+fn intel_dp_set_common_rates(o: &mut intel_outputs, vbt: &intel_bios::intel_bios_display, d: usize) {
     {
         let dp = &mut o.dig_ports[d].dp;
         if dp.num_source_rates == 0 || dp.num_sink_rates == 0 {
@@ -299,7 +306,7 @@ fn intel_dp_set_common_rates(o: &mut intel_outputs, vbt: &intel_bios::intel_disp
 }
 
 /// `intel_dp_reset_link_params`.
-pub fn intel_dp_reset_link_params(o: &mut intel_outputs, vbt: &intel_bios::intel_display, d: usize) {
+pub fn intel_dp_reset_link_params(o: &mut intel_outputs, vbt: &intel_bios::intel_bios_display, d: usize) {
     let lanes = intel_dp_max_common_lane_count(o, vbt, d);
     let dp = &mut o.dig_ports[d].dp;
     dp.link.max_lane_count = lanes;
@@ -357,7 +364,7 @@ fn _intel_dp_is_port_edp(devdata: Option<&intel_bios::intel_bios_encoder_data>) 
 
 /// `intel_dp_init_connector`.
 pub fn intel_dp_init_connector(i915: &mut drm_i915_private, o: &mut intel_outputs,
-                               vbt: &intel_bios::intel_display, d: usize, pipe_mask: u32) -> bool {
+                               vbt: &intel_bios::intel_bios_display, d: usize, pipe_mask: u32) -> bool {
     let enc = o.dig_ports[d].encoder;
     if o.dig_ports[d].max_lanes < 1 {
         Line::new().s("Not enough lanes (").dec(o.dig_ports[d].max_lanes as u64).s(") for DP on [ENCODER:")
@@ -393,7 +400,7 @@ pub fn intel_dp_init_connector(i915: &mut drm_i915_private, o: &mut intel_output
 
     // intel_connector_attach_encoder; DisplayPort connectors poll on HPD.
     let polled = if type_ != DRM_MODE_CONNECTOR_eDP { DRM_CONNECTOR_POLL_HPD } else { 0 };
-    let Some(c) = o.add_connector(intel_connector { connector_type: type_, encoder: enc, polled, ddc_pin: 0 })
+    let Some(c) = o.add_connector(intel_connector { connector_type: type_, encoder: enc, polled, ddc_pin: 0, ..Default::default() })
     else {
         return false;
     };
@@ -419,8 +426,8 @@ pub fn intel_dp_init_connector(i915: &mut drm_i915_private, o: &mut intel_output
 /// output (`intel_dp_get_dpcd`) needs AUX transfers, which are not ported;
 /// it is reported and skipped. `intel_dp_tunnel_resume` is empty without
 /// CONFIG_DRM_I915_DP_TUNNEL.
-pub fn intel_dp_sync_state(o: &mut intel_outputs, vbt: &intel_bios::intel_display, encoder: usize,
-                           crtc_state: Option<&encoder_crtc_state>) {
+pub fn intel_dp_sync_state(o: &mut intel_outputs, vbt: &intel_bios::intel_bios_display, encoder: usize,
+                           crtc_state: Option<&intel_crtc_state>) {
     let Some(d) = o.dig_port_of(encoder) else {
         return;
     };

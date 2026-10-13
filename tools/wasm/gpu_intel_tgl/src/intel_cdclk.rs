@@ -7,6 +7,7 @@
 //! `display->cdclk` lives in `intel_display_cdclk`, passed explicitly.
 
 use crate::i915_drv::drm_i915_private;
+use crate::intel_display_types::intel_crtc_state;
 use crate::intel_pcode;
 use crate::linux::{self, Line};
 use crate::regs::*;
@@ -447,4 +448,87 @@ pub fn intel_update_max_cdclk(cd: &mut intel_display_cdclk) {
 
     Line::new().s("Max CD clock rate: ").dec(cd.max_cdclk_freq as u64).s(" kHz").say();
     Line::new().s("Max dotclock rate: ").dec(cd.max_dotclk_freq as u64).s(" kHz").say();
+}
+
+/// `DIV_ROUND_UP` on signed values.
+fn div_round_up(n: i32, d: i32) -> i32 {
+    (n + d - 1) / d
+}
+
+/// `intel_pixel_rate_to_cdclk`: two pixels per clock from display version
+/// 10 on, guardband 100 %.
+fn intel_pixel_rate_to_cdclk(crtc_state: &intel_crtc_state) -> i32 {
+    let ppc = 2;
+    let guardband = 100;
+    div_round_up(crtc_state.pixel_rate as i32 * 100, guardband * ppc)
+}
+
+/// `intel_audio_min_cdclk` (display version 12: twice the 96 MHz Azalia
+/// BCLK).
+fn intel_audio_min_cdclk(crtc_state: &intel_crtc_state) -> i32 {
+    if !crtc_state.has_audio {
+        return 0;
+    }
+    2 * 96000
+}
+
+/// `intel_vdsc_min_cdclk`. The joiner bound needs the compressed bpp of
+/// the PPS, which is not read back.
+fn intel_vdsc_min_cdclk(crtc_state: &intel_crtc_state, pipe: u32) -> i32 {
+    if !crtc_state.dsc.compression_enable {
+        return 0;
+    }
+    let num_vdsc_instances = crtc_state.dsc.num_streams
+        * crate::intel_display::intel_crtc_num_joined_pipes(crtc_state, pipe);
+    let min_cdclk = div_round_up(crtc_state.pixel_rate as i32, num_vdsc_instances.max(1));
+    if crtc_state.joiner_pipes != 0 {
+        linux::say("warning: DSC with joiner, its CDCLK bound is not computed");
+    }
+    min_cdclk
+}
+
+/// `intel_planes_min_cdclk`.
+fn intel_planes_min_cdclk(crtc_state: &intel_crtc_state, plane_ids_mask: u8) -> i32 {
+    let mut min_cdclk = 0;
+    for id in 0..I915_MAX_PLANES {
+        if plane_ids_mask & (1 << id) != 0 {
+            min_cdclk = min_cdclk.max(crtc_state.min_cdclk[id as usize]);
+        }
+    }
+    min_cdclk
+}
+
+/// `intel_crtc_compute_min_cdclk`; IPS is BDW-only and DSI is VLV-only.
+fn intel_crtc_compute_min_cdclk(crtc_state: &intel_crtc_state, pipe: u32, plane_ids_mask: u8) -> i32 {
+    if !crtc_state.hw.enable {
+        return 0;
+    }
+    let mut min_cdclk = intel_pixel_rate_to_cdclk(crtc_state);
+    min_cdclk = min_cdclk.max(intel_audio_min_cdclk(crtc_state));
+    min_cdclk = min_cdclk.max(intel_planes_min_cdclk(crtc_state, plane_ids_mask));
+    min_cdclk = min_cdclk.max(intel_vdsc_min_cdclk(crtc_state, pipe));
+    min_cdclk
+}
+
+/// `intel_cdclk_update_hw_state`.
+pub fn intel_cdclk_update_hw_state(i915: &mut drm_i915_private) {
+    let bw_min_cdclk = crate::intel_bw::intel_bw_min_cdclk(i915);
+    let mut obj = i915.display.cdclk.obj;
+    obj.active_pipes = 0;
+
+    for c in 0..I915_MAX_PIPES as usize {
+        if !i915.display.crtc_valid[c] {
+            continue;
+        }
+        let crtc = i915.display.crtcs[c];
+        let pipe = crtc.pipe as usize;
+        if crtc.state.hw.active {
+            obj.active_pipes |= 1 << pipe;
+        }
+        obj.min_cdclk[pipe] = intel_crtc_compute_min_cdclk(&crtc.state, crtc.pipe, crtc.plane_ids_mask);
+        obj.min_voltage_level[pipe] = crtc.state.min_voltage_level;
+    }
+
+    obj.bw_min_cdclk = bw_min_cdclk;
+    i915.display.cdclk.obj = obj;
 }
