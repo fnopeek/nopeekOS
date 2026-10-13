@@ -487,3 +487,18 @@ pub static tgl_plls: [dpll_info; 9] = [
     dpll_info { name: b"TC PLL 5", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x7, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
     dpll_info { name: b"TC PLL 6", funcs: dpll_info_funcs::dkl_pll_funcs, id: 0x8, power_domain: 0x0, always_on: 0x0, is_alt_port_dpll: 0x0 },
 ];
+
+// display/intel_display_power.c
+/// display/intel_display_power.c:2415
+pub static d12_port_domains: [intel_ddi_port_domains; 2] = [
+    intel_ddi_port_domains { port_start: 0x0, port_end: 0x2, aux_ch_start: 0x0, aux_ch_end: 0x2, ddi_lanes: 0x11, ddi_io: 0x1d, aux_io: 0x2f, aux_legacy_usbc: 0x35, aux_tbt: 0x4c },
+    intel_ddi_port_domains { port_start: 0x3, port_end: 0x8, aux_ch_start: 0x3, aux_ch_end: 0x8, ddi_lanes: 0x17, ddi_io: 0x23, aux_io: 0x4c, aux_legacy_usbc: 0x3b, aux_tbt: 0x41 },
+];
+
+// display/intel_hotplug_irq.c
+/// display/intel_hotplug_irq.c
+pub static hpd_icp: [u32; 15] = [0x0, 0x0, 0x0, 0x0, 0x10000, 0x20000, 0x40000, 0x0, 0x0, 0x1000000, 0x2000000, 0x4000000, 0x8000000, 0x10000000, 0x20000000];
+
+// display/intel_dp.c
+/// display/intel_dp.c: `icl_rates` in `intel_dp_set_source_rates`
+pub static icl_rates: [i32; 10] = [162000, 216000, 270000, 324000, 432000, 540000, 648000, 810000, 1000000, 1350000];

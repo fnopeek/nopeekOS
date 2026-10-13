@@ -20,20 +20,25 @@ mod intel_bios;
 mod intel_bw;
 mod intel_cdclk;
 mod intel_combo_phy;
+mod intel_ddi;
 mod intel_de;
 mod intel_display_device;
 mod intel_display_power;
 mod intel_dkl_phy;
+mod intel_dp;
 mod intel_dpll_mgr;
 mod intel_dram;
+mod intel_encoder;
 mod intel_engine;
 mod intel_ggtt;
 mod intel_gmbus;
 mod intel_gt;
+mod intel_hdmi;
 mod intel_opregion;
 mod intel_pch;
 mod intel_pcode;
 mod intel_reset;
+mod intel_tc;
 mod intel_uncore;
 mod linux;
 mod regs;
@@ -44,7 +49,7 @@ use i915_drv::intel_step_info;
 use intel_bios::{bdb_block, gmbus_pin};
 use intel_cdclk::intel_cdclk_vals;
 use intel_combo_phy::icl_procmon;
-use intel_display_power::{buddy_page_mask, power_well_domain, power_well_inst, power_well_inst_ops};
+use intel_display_power::{buddy_page_mask, intel_ddi_port_domains, power_well_domain, power_well_inst, power_well_inst_ops};
 use intel_dpll_mgr::{dpll_info, dpll_info_funcs};
 use intel_gmbus::gmbus_pin_gpio;
 use intel_gt::engine_info;
@@ -215,8 +220,9 @@ pub extern "C" fn _start() {
         intel_cdclk::intel_update_max_cdclk(&mut cd);
         i915.display.cdclk = cd;
     }
-    // intel_hti_init: Tiger Lake has no HTI.
-    const _: () = assert!(regs::TGL_DISPLAY_HAS_HTI == 0);
+    // intel_hti_init, intel_setup_outputs
+    intel_ddi::intel_setup_outputs(&mut i915, &display, &drt);
+    log_outputs(&mut i915, drt.pipe_mask);
 
     // The PLL part of intel_modeset_readout_hw_state, read-only: no CRTC
     // is read out yet, so no pipe is attributed and nothing is sanitized.
@@ -303,6 +309,44 @@ fn intel_display_driver_init_hw(i915: &mut i915_drv::drm_i915_private) {
     intel_cdclk::intel_cdclk_read_hw(i915, &mut cd);
     i915.display.cdclk = cd;
     intel_de::intel_de_rmw(i915, regs::CLKREQ_POLICY, regs::CLKREQ_POLICY_MEM_UP_OVRD, 0);
+}
+
+/// Each encoder and connector `intel_setup_outputs` created, with the
+/// encoder's hardware state (read only) and the TypeC mode.
+fn log_outputs(i915: &mut i915_drv::drm_i915_private, pipes: u32) {
+    let o = i915.display.outputs;
+    for e in 0..o.n_encoders {
+        let enc = o.encoders[e];
+        if matches!(enc.kind, intel_encoder::encoder_kind::dp_mst(..)) {
+            continue;
+        }
+        let mut l = Line::new();
+        l.s("[ENCODER:").s(enc.name()).s("] type ").dec(enc.type_ as u64).s(", hpd pin ")
+            .dec(enc.hpd_pin as u64).s(", possible crtcs ").hex(enc.possible_crtcs);
+        let (pipe_mask, is_mst) = intel_ddi::intel_ddi_get_encoder_pipes(i915, &o, e, pipes);
+        match intel_ddi::intel_encoder_get_hw_state(i915, &o, e, pipes) {
+            Some(p) => l.s(", enabled on pipe ").dec(p as u64),
+            None => l.s(", disabled"),
+        };
+        l.s(" (pipe mask ").hex(pipe_mask as u32).s(if is_mst { ", MST" } else { "" }).s(")");
+        if let Some(d) = o.dig_port_of(e) {
+            l.s(", AUX ").dec(o.dig_ports[d].aux_ch as u64);
+            if o.dig_ports[d].tc.is_some() {
+                l.s(", TC mode ").s(intel_tc::intel_tc_port_mode_name(&o, d));
+            }
+        }
+        l.say();
+    }
+    let n_mst = o.encoders[..o.n_encoders].iter()
+        .filter(|e| matches!(e.kind, intel_encoder::encoder_kind::dp_mst(..))).count();
+    Line::new().s("fake MST encoders: ").dec(n_mst as u64).say();
+    for c in 0..o.n_connectors {
+        let con = o.connectors[c];
+        let on = intel_ddi::intel_ddi_connector_get_hw_state(i915, &o, c, pipes);
+        Line::new().s("connector ").dec(c as u64).s(" type ").dec(con.connector_type as u64).s(" on [ENCODER:")
+            .s(o.encoders[con.encoder].name()).s("], ddc pin ").dec(con.ddc_pin as u64)
+            .s(if on { ", active" } else { ", inactive" }).say();
+    }
 }
 
 fn report(i915: &i915_drv::drm_i915_private, gt: &intel_gt::intel_gt,

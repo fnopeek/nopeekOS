@@ -69,6 +69,9 @@ pub struct intel_display {
     /// `display->pps.mmio_base`.
     pub pps_mmio_base: u32,
     pub dpll: crate::intel_dpll_mgr::intel_display_dpll,
+    /// The encoders, digital ports and connectors `intel_setup_outputs`
+    /// creates.
+    pub outputs: crate::intel_encoder::intel_outputs,
 }
 
 /// `struct drm_i915_private`, as far as this stage needs it.

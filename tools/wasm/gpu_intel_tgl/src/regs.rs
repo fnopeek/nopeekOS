@@ -944,3 +944,125 @@ pub const HIP_INDEX_REG_4: u32 = 0x1010a4; // i915_mmio_reg_offset(HIP_INDEX_REG
 pub const HIP_INDEX_REG_5: u32 = 0x1010a4; // i915_mmio_reg_offset(HIP_INDEX_REG(5)) in display/intel_dpll_mgr.c
 /// display/intel_dkl_phy_regs.h:205
 pub const fn HIP_INDEX_VAL(tc_port: u32, val: u32) -> u32 { ((val) << (8 * ((tc_port) % 4))) }
+
+// outputs (display/intel_ddi.c, intel_tc.c, intel_dp.c, intel_hdmi.c, intel_dp_aux.c, intel_hti.c)
+pub const PORT_TC1: u32 = 0x3; // display/intel_display_limits.h:106
+pub const PHY_C: u32 = 0x2; // display/intel_display.h:168
+pub const TC_PORT_NONE: i32 = -1; // display/intel_display.h:125
+pub const FIA1: u32 = 0x0; // display/intel_display.h:182
+pub const FIA2: u32 = 0x1; // display/intel_display.h:183
+pub const FIA3: u32 = 0x2; // display/intel_display.h:184
+pub const TC_PORT_DISCONNECTED: u32 = 0x0; // display/intel_tc.c:29
+pub const TC_PORT_TBT_ALT: u32 = 0x1; // display/intel_tc.c:30
+pub const TC_PORT_DP_ALT: u32 = 0x2; // display/intel_tc.c:31
+pub const TC_PORT_LEGACY: u32 = 0x3; // display/intel_tc.c:32
+pub const INTEL_TC_PIN_ASSIGNMENT_NONE: u32 = 0x0; // display/intel_tc.h:21
+pub const INTEL_TC_PIN_ASSIGNMENT_A: u32 = 0x1; // display/intel_tc.h:22
+pub const INTEL_TC_PIN_ASSIGNMENT_B: u32 = 0x2; // display/intel_tc.h:23
+pub const INTEL_TC_PIN_ASSIGNMENT_C: u32 = 0x3; // display/intel_tc.h:24
+pub const INTEL_TC_PIN_ASSIGNMENT_D: u32 = 0x4; // display/intel_tc.h:25
+pub const INTEL_TC_PIN_ASSIGNMENT_E: u32 = 0x5; // display/intel_tc.h:26
+pub const INTEL_TC_PIN_ASSIGNMENT_F: u32 = 0x6; // display/intel_tc.h:27
+pub const ICL_PORT_DPLL_DEFAULT: u32 = 0x0; // display/intel_dpll_mgr.h:177
+pub const ICL_PORT_DPLL_MG_PHY: u32 = 0x1; // display/intel_dpll_mgr.h:178
+pub const PORT_TX_DFLEXDPSP_FIA1: u32 = 0x1638a0; // i915_mmio_reg_offset(PORT_TX_DFLEXDPSP(FIA1)) in display/intel_tc.c
+pub const PORT_TX_DFLEXDPSP_FIA2: u32 = 0x16e8a0; // i915_mmio_reg_offset(PORT_TX_DFLEXDPSP(FIA2)) in display/intel_tc.c
+pub const PORT_TX_DFLEXDPSP_FIA3: u32 = 0x16f8a0; // i915_mmio_reg_offset(PORT_TX_DFLEXDPSP(FIA3)) in display/intel_tc.c
+pub const PORT_TX_DFLEXDPPMS_FIA1: u32 = 0x163890; // i915_mmio_reg_offset(PORT_TX_DFLEXDPPMS(FIA1)) in display/intel_tc.c
+pub const PORT_TX_DFLEXDPPMS_FIA2: u32 = 0x16e890; // i915_mmio_reg_offset(PORT_TX_DFLEXDPPMS(FIA2)) in display/intel_tc.c
+pub const PORT_TX_DFLEXDPPMS_FIA3: u32 = 0x16f890; // i915_mmio_reg_offset(PORT_TX_DFLEXDPPMS(FIA3)) in display/intel_tc.c
+pub const PORT_TX_DFLEXDPCSSS_FIA1: u32 = 0x163894; // i915_mmio_reg_offset(PORT_TX_DFLEXDPCSSS(FIA1)) in display/intel_tc.c
+pub const PORT_TX_DFLEXDPCSSS_FIA2: u32 = 0x16e894; // i915_mmio_reg_offset(PORT_TX_DFLEXDPCSSS(FIA2)) in display/intel_tc.c
+pub const PORT_TX_DFLEXDPCSSS_FIA3: u32 = 0x16f894; // i915_mmio_reg_offset(PORT_TX_DFLEXDPCSSS(FIA3)) in display/intel_tc.c
+pub const PORT_TX_DFLEXPA1_FIA1: u32 = 0x163880; // i915_mmio_reg_offset(PORT_TX_DFLEXPA1(FIA1)) in display/intel_tc.c
+pub const PORT_TX_DFLEXPA1_FIA2: u32 = 0x16e880; // i915_mmio_reg_offset(PORT_TX_DFLEXPA1(FIA2)) in display/intel_tc.c
+pub const PORT_TX_DFLEXPA1_FIA3: u32 = 0x16f880; // i915_mmio_reg_offset(PORT_TX_DFLEXPA1(FIA3)) in display/intel_tc.c
+pub const MODULAR_FIA_MASK: u32 = 0x10; // display/intel_display_regs.h:2876
+/// display/intel_display_regs.h:2877
+pub const fn TC_LIVE_STATE_TBT(idx: u32) -> u32 { (1 << ((idx) * 8 + 6)) }
+/// display/intel_display_regs.h:2878
+pub const fn TC_LIVE_STATE_TC(idx: u32) -> u32 { (1 << ((idx) * 8 + 5)) }
+/// display/intel_display_regs.h:2879
+pub const fn DP_LANE_ASSIGNMENT_SHIFT(idx: u32) -> u32 { ((idx) * 8) }
+/// display/intel_display_regs.h:2880
+pub const fn DP_LANE_ASSIGNMENT_MASK(idx: u32) -> u32 { (0xf << ((idx) * 8)) }
+/// display/intel_display_regs.h:2884
+pub const fn DP_PHY_MODE_STATUS_COMPLETED(idx: u32) -> u32 { (1 << (idx)) }
+/// display/intel_display_regs.h:2887
+pub const fn DP_PHY_MODE_STATUS_NOT_SAFE(idx: u32) -> u32 { (1 << (idx)) }
+/// display/intel_display_regs.h:2891
+pub const fn DP_PIN_ASSIGNMENT_MASK(idx: u32) -> u32 { (0xf << ((idx) * 4)) }
+pub const SDEISR: u32 = 0xc4000; // i915_reg.h:1008
+pub const HPD_PORT_A: u32 = 0x4; // display/intel_display_limits.h:126
+pub const HPD_PORT_TC1: u32 = 0x9; // display/intel_display_limits.h:131
+pub const HPD_NUM_PINS: u32 = 0xf; // display/intel_display_limits.h:138
+/// display/intel_display_regs.h:2332
+pub const fn DDI_BUF_CTL(port: u32) -> u32 { (((0x64000) + (port) * ((0x64100) - (0x64000)))) }
+pub const DDI_BUF_CTL_ENABLE: u32 = 0x80000000; // display/intel_display_regs.h:2333
+pub const DDI_BUF_PORT_REVERSAL: u32 = 0x10000; // display/intel_display_regs.h:2344
+pub const DDI_A_4_LANES: u32 = 0x10; // display/intel_display_regs.h:2350
+pub const TGL_TRANS_DDI_PORT_MASK: u32 = 0x78000000; // display/intel_display_regs.h:2226
+/// display/intel_display_regs.h:2228
+pub const fn TGL_TRANS_DDI_SELECT_PORT(x: u32) -> u32 { (((x) + 1) << 27) }
+pub const TRANS_DDI_MODE_SELECT_MASK: u32 = 0x7000000; // display/intel_display_regs.h:2229
+pub const TRANS_DDI_MODE_SELECT_HDMI: u32 = 0x0; // display/intel_display_regs.h:2230
+pub const TRANS_DDI_MODE_SELECT_DVI: u32 = 0x1000000; // display/intel_display_regs.h:2231
+pub const TRANS_DDI_MODE_SELECT_DP_SST: u32 = 0x2000000; // display/intel_display_regs.h:2232
+pub const TRANS_DDI_MODE_SELECT_DP_MST: u32 = 0x3000000; // display/intel_display_regs.h:2233
+pub const TRANS_DDI_MODE_SELECT_FDI_OR_128B132B: u32 = 0x4000000; // display/intel_display_regs.h:2234
+pub const TRANS_DDI_FUNC_CTL_A: u32 = 0x60400; // ({ struct intel_display __d = { .info.__device_info = tgl_desc.info }; i915_mmio_reg_offset(TRANS_DDI_FUNC_CTL(&__d, TRANSCODER_A)); }) in display/intel_display_device.c
+pub const TRANS_DDI_FUNC_CTL_B: u32 = 0x61400; // ({ struct intel_display __d = { .info.__device_info = tgl_desc.info }; i915_mmio_reg_offset(TRANS_DDI_FUNC_CTL(&__d, TRANSCODER_B)); }) in display/intel_display_device.c
+pub const TRANS_DDI_FUNC_CTL_C: u32 = 0x62400; // ({ struct intel_display __d = { .info.__device_info = tgl_desc.info }; i915_mmio_reg_offset(TRANS_DDI_FUNC_CTL(&__d, TRANSCODER_C)); }) in display/intel_display_device.c
+pub const TRANS_DDI_FUNC_CTL_D: u32 = 0x63400; // ({ struct intel_display __d = { .info.__device_info = tgl_desc.info }; i915_mmio_reg_offset(TRANS_DDI_FUNC_CTL(&__d, TRANSCODER_D)); }) in display/intel_display_device.c
+pub const TGL_DISPLAY_HAS_DP_MST: u32 = 0x1; // tgl_desc.info->has_dp_mst in display/intel_display_device.c
+pub const HDPORT_STATE: u32 = 0x45050; // display/intel_hti_regs.h:11
+pub const HDPORT_ENABLED: u32 = 0x1; // display/intel_hti_regs.h:14
+/// display/intel_hti_regs.h:13
+pub const fn HDPORT_DDI_USED(phy: u32) -> u32 { (1 << (2 * (phy) + 1)) }
+/// display/intel_dp_aux_regs.h:26
+pub const fn DP_AUX_CH_CTL(aux_ch: u32) -> u32 { (((0x64010) + (aux_ch) * ((0x64110) - (0x64010)))) }
+/// display/intel_dp_aux_regs.h:80
+pub const fn DP_AUX_CH_DATA(aux_ch: u32, i: u32) -> u32 { (((0x64014) + (aux_ch) * ((0x64114) - (0x64014))) + (i) * 4) }
+pub const INTEL_OUTPUT_UNUSED: u32 = 0x0; // display/intel_display_types.h:73
+pub const INTEL_OUTPUT_DP: u32 = 0x7; // display/intel_display_types.h:80
+pub const INTEL_OUTPUT_HDMI: u32 = 0x6; // display/intel_display_types.h:79
+pub const INTEL_OUTPUT_EDP: u32 = 0x8; // display/intel_display_types.h:81
+pub const INTEL_OUTPUT_DSI: u32 = 0x9; // display/intel_display_types.h:82
+pub const INTEL_OUTPUT_DDI: u32 = 0xa; // display/intel_display_types.h:83
+pub const INTEL_OUTPUT_DP_MST: u32 = 0xb; // display/intel_display_types.h:84
+pub const DRM_MODE_CONNECTOR_DisplayPort: u32 = 0xa; // display/intel_dp_mst.c:1742
+pub const DRM_MODE_CONNECTOR_HDMIA: u32 = 0xb; // display/intel_hdmi.c:3101
+pub const DRM_MODE_CONNECTOR_eDP: u32 = 0xe; // ?
+pub const DRM_MODE_CONNECTOR_VGA: u32 = 0x1; // display/intel_crt.c:1054
+pub const DRM_CONNECTOR_POLL_HPD: u32 = 0x1; // ?
+pub const DP_MAX_SUPPORTED_RATES: u32 = 0x8; // ?
+pub const INTEL_DP_MAX_LINK_CONFIGS: u32 = 0x18; // display/intel_display_types.h:1739
+pub const POWER_DOMAIN_INVALID: u32 = 0x4c; // display/intel_display_power.h:117
+pub const POWER_DOMAIN_TC_COLD_OFF: u32 = 0x4a; // display/intel_display_power.h:113
+pub const POWER_DOMAIN_PORT_DDI_LANES_TC1: u32 = 0x17; // display/intel_display_power.h:54
+pub const POWER_DOMAIN_TRANSCODER_A_: u32 = 0x9; // POWER_DOMAIN_TRANSCODER(TRANSCODER_A) in display/intel_display_power.c
+pub const POWER_DOMAIN_TRANSCODER_B_: u32 = 0xa; // POWER_DOMAIN_TRANSCODER(TRANSCODER_B) in display/intel_display_power.c
+pub const POWER_DOMAIN_TRANSCODER_C_: u32 = 0xb; // POWER_DOMAIN_TRANSCODER(TRANSCODER_C) in display/intel_display_power.c
+pub const POWER_DOMAIN_TRANSCODER_D_: u32 = 0xc; // POWER_DOMAIN_TRANSCODER(TRANSCODER_D) in display/intel_display_power.c
+pub const GMBUS_PIN_1_BXT: u32 = 0x1; // display/intel_gmbus.h:23
+pub const GMBUS_PIN_2_BXT: u32 = 0x2; // display/intel_gmbus.h:24
+pub const GMBUS_PIN_9_TC1_ICP: u32 = 0x9; // display/intel_gmbus.h:28
+pub const AUX_CH_USBC6: u32 = 0x8; // display/intel_display.h:156
+pub const ICL_DPCLKA_CFGCR0: u32 = 0x164280; // display/intel_display_regs.h:2594
+/// display/intel_display_regs.h:2595
+pub const fn ICL_DPCLKA_CFGCR0_DDI_CLK_OFF(phy: u32) -> u32 { (1 << (pick([10, 11, 24, 4, 5], phy))) }
+pub const ICL_DPCLKA_CFGCR0_TC_CLK_OFF_0: u32 = 0x1000; // ICL_DPCLKA_CFGCR0_TC_CLK_OFF(0) in display/intel_ddi.c
+pub const ICL_DPCLKA_CFGCR0_TC_CLK_OFF_1: u32 = 0x2000; // ICL_DPCLKA_CFGCR0_TC_CLK_OFF(1) in display/intel_ddi.c
+pub const ICL_DPCLKA_CFGCR0_TC_CLK_OFF_2: u32 = 0x4000; // ICL_DPCLKA_CFGCR0_TC_CLK_OFF(2) in display/intel_ddi.c
+pub const ICL_DPCLKA_CFGCR0_TC_CLK_OFF_3: u32 = 0x200000; // ICL_DPCLKA_CFGCR0_TC_CLK_OFF(3) in display/intel_ddi.c
+pub const ICL_DPCLKA_CFGCR0_TC_CLK_OFF_4: u32 = 0x400000; // ICL_DPCLKA_CFGCR0_TC_CLK_OFF(4) in display/intel_ddi.c
+pub const ICL_DPCLKA_CFGCR0_TC_CLK_OFF_5: u32 = 0x800000; // ICL_DPCLKA_CFGCR0_TC_CLK_OFF(5) in display/intel_ddi.c
+/// display/intel_display_regs.h:2437
+pub const fn DDI_CLK_SEL(port: u32) -> u32 { (((0x46100) + (port) * ((0x46104) - (0x46100)))) }
+pub const DDI_CLK_SEL_MASK: u32 = 0xf0000000; // display/intel_display_regs.h:2438
+pub const DDI_CLK_SEL_NONE: u32 = 0x0; // display/intel_display_regs.h:2439
+pub const POWER_DOMAIN_PORT_DDI_IO_A: u32 = 0x1d; // display/intel_display_power.h:61
+pub const POWER_DOMAIN_PORT_DDI_LANES_A: u32 = 0x11; // display/intel_display_power.h:47
+pub const POWER_DOMAIN_AUX_IO_A: u32 = 0x2f; // display/intel_display_power.h:82
+pub const POWER_DOMAIN_AUX_A: u32 = 0x35; // display/intel_display_power.h:89
+pub const POWER_DOMAIN_AUX_TBT1: u32 = 0x41; // display/intel_display_power.h:103

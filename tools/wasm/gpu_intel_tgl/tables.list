@@ -44,3 +44,9 @@ tgl_buddy_page_masks: buddy_page_mask { page_mask, ty=type, num_channels }
 gmbus_pins_icp[] => gmbus_pins_icp_gpio: gmbus_pin_gpio { valid=e0.name != 0, gpio=e0.gpio }
 @ display/intel_dpll_mgr.c
 tgl_plls[ARRAY_SIZE(tgl_plls) - 1] => tgl_plls: dpll_info { name=e0.name as str, funcs=e0.funcs as sym, id=e0.id, power_domain=e0.power_domain, always_on=e0.always_on, is_alt_port_dpll=e0.is_alt_port_dpll }
+@ display/intel_display_power.c
+d12_port_domains: intel_ddi_port_domains { port_start, port_end, aux_ch_start, aux_ch_end, ddi_lanes, ddi_io, aux_io, aux_legacy_usbc, aux_tbt }
+@ display/intel_hotplug_irq.c
+hpd_icp: u32
+@ display/intel_dp.c
+intel_dp_set_source_rates::icl_rates: i32
