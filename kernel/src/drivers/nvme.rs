@@ -357,6 +357,8 @@ pub fn init() -> bool {
     crate::kdebug!("[npk] nvme: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] IRQ {}",
         dev.addr.bus, dev.addr.device, dev.addr.function,
         dev.vendor_id, dev.device_id, dev.irq_line);
+    // npkFS lives on this controller; no module may bind it.
+    let _ = pci::claim(dev.addr, pci::Owner::Kernel("nvme"));
 
     // Enable bus mastering for DMA
     pci::enable_bus_master(dev.addr);

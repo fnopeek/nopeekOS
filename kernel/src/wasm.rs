@@ -1088,14 +1088,29 @@ pub(crate) fn release_hw(hw: HwDriverState) {
         // it keeps writing received data into whatever the frames become
         // next. Clearing the bit also stops its MSI writes. Linux does the
         // same, `pci_clear_master` before freeing coherent memory.
+        //
+        // Except on a display controller: its scanout reads memory as a bus
+        // master too, and the picture the kernel falls back to drawing into
+        // is still being scanned out. Bus mastering stays on, so nothing
+        // stops the card from reading the driver's buffers either; they are
+        // kept until reboot instead of going back to the allocator.
+        let display = hw.is_pci && crate::drivers::pci::read8(hw.pci_addr, 0x0B) == 0x03;
         if hw.is_pci {
-            let cmd = crate::drivers::pci::read32(hw.pci_addr, 0x04);
-            crate::drivers::pci::write32(hw.pci_addr, 0x04, cmd & !0x4);
+            if !display {
+                let cmd = crate::drivers::pci::read32(hw.pci_addr, 0x04);
+                crate::drivers::pci::write32(hw.pci_addr, 0x04, cmd & !0x4);
+            }
+            crate::drivers::pci::release_module(hw.pci_addr);
         }
         let mut total_pages = 0usize;
         for &(phys, pages) in &hw.dma_allocs {
-            crate::memory::deallocate_contiguous(phys, pages);
+            if !display {
+                crate::memory::deallocate_contiguous(phys, pages);
+            }
             total_pages += pages;
+        }
+        if display && total_pages > 0 {
+            kprintln!("[npk] driver cleanup: display controller still bus master, {} DMA pages kept", total_pages);
         }
         if hw.registered_as_netdev {
             crate::netdev::unregister_wasm_nic();
@@ -1106,7 +1121,7 @@ pub(crate) fn release_hw(hw: HwDriverState) {
         if hw.irq_vector != 0 {
             crate::irq::release(hw.irq_vector);
         }
-        if !hw.dma_allocs.is_empty() || hw.registered_as_netdev {
+        if !display && (!hw.dma_allocs.is_empty() || hw.registered_as_netdev) {
             kprintln!("[npk] driver cleanup: freed {} DMA buffers ({} pages)",
                 hw.dma_allocs.len(), total_pages);
         }

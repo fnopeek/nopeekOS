@@ -63,6 +63,12 @@ impl GopDriver {
         })
     }
 
+    /// The driver for a framebuffer that is already mapped and scanned
+    /// out, e.g. the one a native driver showed when it handed the card on.
+    pub fn from_framebuffer(fb: FramebufferInfo) -> Self {
+        GopDriver { fb }
+    }
+
     pub fn framebuffer(&self) -> FramebufferInfo {
         self.fb
     }

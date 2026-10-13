@@ -29,6 +29,47 @@ impl PciAddr {
     }
 }
 
+/// Who drives a PCI function. A device has one owner: two drivers on one
+/// register file each assume they alone change it, and a GPU's display,
+/// GGTT and rings all sit behind the same BAR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    /// A driver inside the kernel, by name.
+    Kernel(&'static str),
+    /// A WASM driver module, by pid.
+    Module(u32),
+}
+
+static OWNERS: spin::Mutex<alloc::vec::Vec<(PciAddr, Owner)>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
+
+/// The current owner of `addr`, if any.
+pub fn owner(addr: PciAddr) -> Option<Owner> {
+    OWNERS.lock().iter().find(|(a, _)| *a == addr).map(|&(_, o)| o)
+}
+
+/// Take `addr` for `who`. Succeeds when the device is free or already
+/// `who`'s; otherwise returns the owner that holds it.
+pub fn claim(addr: PciAddr, who: Owner) -> Result<(), Owner> {
+    let mut g = OWNERS.lock();
+    match g.iter().find(|(a, _)| *a == addr) {
+        Some(&(_, o)) if o == who => Ok(()),
+        Some(&(_, o)) => Err(o),
+        None => { g.push((addr, who)); Ok(()) }
+    }
+}
+
+/// Give `addr` back if `who` holds it.
+pub fn release(addr: PciAddr, who: Owner) {
+    OWNERS.lock().retain(|&(a, o)| !(a == addr && o == who));
+}
+
+/// Give `addr` back if a module holds it: the module's driver state ends,
+/// and only the binding module can hold the device.
+pub fn release_module(addr: PciAddr) {
+    OWNERS.lock().retain(|&(a, o)| !(a == addr && matches!(o, Owner::Module(_))));
+}
+
 /// Serialises the CF8/CFC pair (Linux `pci_config_lock`): CF8 selects the
 /// register CFC then reaches, so two cores interleaving their pairs would
 /// read or write another device's register. Held with IF=0 so an ISR on the

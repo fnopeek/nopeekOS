@@ -920,13 +920,14 @@ host_imports! {
 
     // ── Hardware Driver Host Functions ────────────────────────────
 
-    // npk_pci_bind(vendor_id, device_id) -> 0=ok, -1=not found, -2=denied
+    // npk_pci_bind(vendor_id, device_id) -> 0=ok, -1=not found, -2=denied,
+    //   -3=owned by another driver (a device has one owner, see pci::Owner)
     ctx fn npk_pci_bind(vendor: i32, device: i32) -> i32;
 
-    // npk_pci_bind_class(class, subclass) -> 0=ok, -1=not found, -2=denied
+    // npk_pci_bind_class(class, subclass) -> 0=ok, -1=not found, -2=denied, -3=owned
     ctx fn npk_pci_bind_class(class: i32, subclass: i32) -> i32;
 
-    // npk_pci_bind_class_n(class, subclass, index) -> 0=ok, -1=not found, -2=denied
+    // npk_pci_bind_class_n(class, subclass, index) -> 0=ok, -1=not found, -2=denied, -3=owned
     ctx fn npk_pci_bind_class_n(class: i32, subclass: i32, index: i32) -> i32;
 
     // npk_pci_read_config(offset) -> u32 value or -1

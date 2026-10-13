@@ -1297,6 +1297,10 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         kprintln!("[npk] WASM: npk_pci_bind DENIED {:04x}:{:04x}", vid, did);
         return -2;
     }
+    if !take_device(ctx.pid, a) {
+        kprintln!("[npk] WASM: npk_pci_bind {:04x}:{:04x} refused, owned by {:?}", vid, did, pci::owner(a));
+        return -3;
+    }
     crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
     // A new binding replaces the old one: release it, or its buffers and
     // vector stay taken for the rest of the boot.
@@ -1316,6 +1320,24 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
     crate::kdebug!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, vid, did);
     0
+}
+
+/// Make `addr` this module's device: free, already its own, or handed over
+/// by the kernel driver that had it. The GPU is the only kernel-driven
+/// device that hands over (`gpu::yield_to_module`); every other kernel
+/// owner, and any other module, keeps it.
+fn take_device(pid: u32, addr: pci::PciAddr) -> bool {
+    // pid 0 is the shared identity of the inline paths, not an owner.
+    if pid == 0 { return false; }
+    let me = pci::Owner::Module(pid);
+    match pci::owner(addr) {
+        Some(o) if o == me => return true,
+        Some(pci::Owner::Module(_)) => return false,
+        Some(pci::Owner::Kernel(_)) | None => {
+            if !crate::gpu::yield_to_module(addr) { return false; }
+        }
+    }
+    pci::claim(addr, me).is_ok()
 }
 
 pub(crate) fn npk_pci_bind_class(ctx: &mut HostState, class: i32, subclass: i32) -> i32 {
@@ -1341,6 +1363,10 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
         && capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
         kprintln!("[npk] WASM: npk_pci_bind_class DENIED {:02x}:{:02x}", cls, sub);
         return -2;
+    }
+    if !take_device(ctx.pid, a) {
+        kprintln!("[npk] WASM: npk_pci_bind_class {:02x}:{:02x} refused, owned by {:?}", cls, sub, pci::owner(a));
+        return -3;
     }
     crate::kdebug!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, dev.vendor_id, dev.device_id);

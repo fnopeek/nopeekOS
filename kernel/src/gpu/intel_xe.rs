@@ -615,6 +615,10 @@ impl IntelXeDriver {
     /// doesn't paint falls back to the visible CPU/GOP blit, never black.
     /// A newly-added (untested) device ID should be left out of this set until
     /// validated, so it detects + can be brought up manually first.
+    pub fn pci_addr(&self) -> pci::PciAddr {
+        self.pci_addr
+    }
+
     pub fn auto_activate_ok(&self) -> bool {
         is_adln(self.device_id) || matches!(self.device_id, 0x9A78)
     }

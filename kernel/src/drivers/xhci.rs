@@ -544,6 +544,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     crate::kdebug!("[npk] xhci: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         dev.addr.bus, dev.addr.device, dev.addr.function,
         dev.vendor_id, dev.device_id);
+    let _ = pci::claim(dev.addr, pci::Owner::Kernel("xhci"));
 
     pci::enable_bus_master(dev.addr);
     let cmd = pci::read16(dev.addr, 0x04);

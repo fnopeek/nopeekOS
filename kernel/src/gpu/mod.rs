@@ -36,6 +36,8 @@ pub enum GpuError {
     PipelineFailed,
     /// Framebuffer allocation failed
     AllocFailed,
+    /// The device belongs to a driver module
+    Owned,
 }
 
 /// Display mode description.
@@ -170,6 +172,12 @@ static DETECTED_XE: Mutex<Option<intel_xe::IntelXeDriver>> = Mutex::new(None);
 pub fn activate_native() -> Result<FramebufferInfo, GpuError> {
     let mut detected = DETECTED_XE.lock();
     let mut drv = detected.take().ok_or(GpuError::NotFound)?;
+    let addr = drv.pci_addr();
+    if let Err(o) = crate::drivers::pci::claim(addr, NATIVE_OWNER) {
+        crate::kprintln!("[npk] GPU: {:?} drives the card, native driver stays off", o);
+        *detected = Some(drv);
+        return Err(GpuError::Owned);
+    }
 
     match drv.init() {
         Ok(fb) => {
@@ -180,9 +188,45 @@ pub fn activate_native() -> Result<FramebufferInfo, GpuError> {
         }
         Err(e) => {
             crate::kprintln!("[npk] GPU: Intel Xe init failed: {:?}", e);
+            crate::drivers::pci::release(addr, NATIVE_OWNER);
             *detected = Some(drv);
             Err(e)
         }
+    }
+}
+
+/// The kernel driver's name in the PCI owner table.
+const NATIVE_OWNER: crate::drivers::pci::Owner = crate::drivers::pci::Owner::Kernel("intel_xe");
+
+/// Hand the card at `addr` to a driver module. The kernel driver stops
+/// here: under the GPU lock no blit is in flight (`submit_blit` waits for
+/// its own), the active driver becomes the GOP driver on the framebuffer it
+/// was showing, and the compositor's next frame copies on the CPU. Nothing
+/// is written to the card. True when the card is free for the module
+/// afterwards.
+pub fn yield_to_module(addr: crate::drivers::pci::PciAddr) -> bool {
+    use crate::drivers::pci;
+    match pci::owner(addr) {
+        None => {
+            // Detected but never started: drop it, so `gpu init` cannot take
+            // the card back from under the module.
+            let mut det = DETECTED_XE.lock();
+            if det.as_ref().is_some_and(|d| d.pci_addr() == addr) {
+                *det = None;
+            }
+            true
+        }
+        Some(o) if o == NATIVE_OWNER => {
+            let mut gpu = GPU.lock();
+            if let Some(fb) = gpu.as_ref().map(|d| d.framebuffer()) {
+                *gpu = Some(Box::new(gop::GopDriver::from_framebuffer(fb)) as Box<dyn GpuHal>);
+            }
+            drop(gpu);
+            pci::release(addr, NATIVE_OWNER);
+            crate::kprintln!("[npk] GPU: native driver handed the card to a module, compositor copies on the CPU");
+            true
+        }
+        Some(_) => false,
     }
 }
 

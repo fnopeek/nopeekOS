@@ -175,6 +175,7 @@ pub fn init() -> bool {
     kprintln!("[npk] intel-nic: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         dev.addr.bus, dev.addr.device, dev.addr.function,
         dev.vendor_id, dev.device_id);
+    let _ = pci::claim(dev.addr, pci::Owner::Kernel("intel-nic"));
 
     pci::enable_bus_master(dev.addr);
 
