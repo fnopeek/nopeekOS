@@ -12,7 +12,9 @@
 #
 # With PROFILE=1 the profile is written on exit as lw-prof.json in the bundle's
 # home directory ($DIR/tmp/home),
-# with the same settings the guest's `npkprofile` uses.
+# with the same settings the guest's `npkprofile` uses, and the browser's
+# memory map after 20 s as lw-maps.txt beside it: the profile's own library
+# list can be overwritten by a child process writing the same file.
 #
 # The bundle is unpacked once to $DIR (default /tmp/npk-alpine-native) and is
 # writable there, so `tools/alpine_native.sh --apk add jemalloc` installs into it.
@@ -49,6 +51,7 @@ exec unshare --map-root-user --mount sh -c '
     D=$0; R=$1; W=$2; U=$3; P=$4; PE=$5
     mount --rbind /dev "$D/dev" && mount --rbind /proc "$D/proc" && mount --rbind /sys "$D/sys"
     mount --rbind "$R" "$D/tmp/xrt" || exit 1
+    [ -n "$PE" ] && ( sleep 20; cat /proc/$$/maps > "$D/tmp/home/lw-maps.txt" ) &
     exec chroot "$D" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/tmp/home \
         XDG_RUNTIME_DIR=/tmp/xrt WAYLAND_DISPLAY="$W" MOZ_ENABLE_WAYLAND=1 \
         ${P:+LD_PRELOAD=$P} $PE \
