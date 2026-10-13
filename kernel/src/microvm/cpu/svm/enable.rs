@@ -545,6 +545,12 @@ unsafe fn run_guest_once(
             "mov ecx, 0x48",                // MSR_IA32_SPEC_CTRL
             "wrmsr",
             "86:",
+            // Branch history overwritten before the first host indirect
+            // branch (KVM `CLEAR_BRANCH_HISTORY_VMEXIT`).
+            "cmp byte ptr [rip + CLEAR_BHB_ON_EXIT], 0",
+            "je 87f",
+            "call npk_clear_bhb_loop",
+            "87:",
             "add rsp, 48",                          // discard xcr,guest_fpu,host_fpu,host_extra,vmcb,struct
 
             // Restore host callee-saved.

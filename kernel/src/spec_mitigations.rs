@@ -12,10 +12,12 @@
 //!   (`srso_select_mitigation`). Linux sets that bit only while a VM exists;
 //!   here it stays set from boot.
 //!
+//! - BHI on Intel eIBRS parts without `BHI_DIS_S`: `clear_bhb_loop` after
+//!   every VM exit (`CLEAR_BHB_VMEXIT`), ported below.
+//!
 //! IBPB after every VM exit stays wherever Linux would rely on a thunk we do
-//! not have: CPUs without eIBRS, Zen 2/3 (retbleed, SRSO), Intel eIBRS parts
-//! without `BHI_DIS_S` (stands in for `clear_bhb_loop`). The host value of
-//! SPEC_CTRL is restored in the VM-exit asm before the first RET.
+//! not have: CPUs without eIBRS and Zen 2/3 (retbleed, SRSO). The host value
+//! of SPEC_CTRL is restored in the VM-exit asm before the first RET.
 
 use crate::hw::msr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -41,6 +43,7 @@ static HOST_SPEC_CTRL: AtomicU64 = AtomicU64::new(0);
 static AUTOIBRS: AtomicBool = AtomicBool::new(false);
 static BP_SPEC_REDUCE: AtomicBool = AtomicBool::new(false);
 static IBPB_ON_EXIT: AtomicBool = AtomicBool::new(true);
+static CLEAR_BHB_ON_EXIT: AtomicBool = AtomicBool::new(false);
 
 fn cpuid(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
     let r = core::arch::x86_64::__cpuid_count(leaf, sub);
@@ -64,6 +67,11 @@ pub fn ibpb_on_exit() -> bool {
     IBPB_ON_EXIT.load(Ordering::Relaxed)
 }
 
+/// Whether a VM exit needs the branch history overwritten on this CPU.
+pub fn clear_bhb_on_exit() -> bool {
+    CLEAR_BHB_ON_EXIT.load(Ordering::Relaxed)
+}
+
 fn decide() {
     let (_, b, c, d) = cpuid(0, 0);
     let intel = (b, d, c) == (0x756e_6547, 0x4965_6e69, 0x6c65_746e);
@@ -82,11 +90,12 @@ fn decide() {
             let sub2 = cpuid(7, 0).0 >= 2;
             let bhi_ctrl = sub2 && cpuid(7, 2).3 & (1 << 4) != 0;
             host_spec = SPEC_CTRL_IBRS | if bhi_ctrl { SPEC_CTRL_BHI_DIS_S } else { 0 };
-            ibpb = !bhi_ctrl;
+            ibpb = false;
+            CLEAR_BHB_ON_EXIT.store(!bhi_ctrl, Ordering::Relaxed);
             report = if bhi_ctrl {
                 "eIBRS + BHI_DIS_S, no IBPB on VM exit"
             } else {
-                "eIBRS, IBPB on VM exit for BHI"
+                "eIBRS + BHB clearing on VM exit, no IBPB"
             };
         }
     } else if amd && cpuid(0x8000_0000, 0).0 >= 0x8000_0021 {
@@ -135,3 +144,38 @@ pub fn apply() {
         unsafe { msr::write(MSR_AMD64_BP_CFG, msr::read(MSR_AMD64_BP_CFG) | BP_CFG_SPEC_REDUCE) };
     }
 }
+
+// Linux `clear_bhb_loop` (arch/x86/entry/entry_64.S): five rounds of five
+// taken branches each overwrite the branch history before the host executes
+// an indirect branch after a VM exit. The paddings keep each RET in the
+// upper half of its cache line, as Linux's `.skip` does: 27 = 32 - the CALL
+// before `.Lret1`, 14 = 32 - the 18 bytes before `.Lret2`. Clobbers rax, rcx.
+core::arch::global_asm!(
+    ".pushsection .text.npk_clear_bhb_loop, \"ax\", @progbits",
+    ".global npk_clear_bhb_loop",
+    ".p2align 6, 0xcc",
+    "npk_clear_bhb_loop:",
+    "    push rbp",
+    "    mov rbp, rsp",
+    "    mov ecx, 5",
+    "    call 1f",
+    "    jmp 5f",
+    "    .p2align 6, 0xcc",
+    "    .skip 27, 0xcc",
+    "1:  call 2f",
+    "    ret",
+    "    .p2align 6, 0xcc",
+    "    .skip 14, 0xcc",
+    "2:  mov eax, 5",
+    "3:  jmp 4f",
+    "    nop",
+    "4:  sub eax, 1",
+    "    jnz 3b",
+    "    sub ecx, 1",
+    "    jnz 1b",
+    "    ret",
+    "5:  lfence",
+    "    pop rbp",
+    "    ret",
+    ".popsection",
+);

@@ -1399,6 +1399,12 @@ pub(super) unsafe fn run_guest_once(
             "mov ecx, 0x48",                // MSR_IA32_SPEC_CTRL
             "wrmsr",
             "86:",
+            // Branch history overwritten before the first host indirect
+            // branch (KVM `CLEAR_BRANCH_HISTORY_VMEXIT`).
+            "cmp byte ptr [rip + CLEAR_BHB_ON_EXIT], 0",
+            "je 87f",
+            "call npk_clear_bhb_loop",
+            "87:",
 
             // Read VM-exit info now that GPRs are safe.
             "mov rcx, 0x4402",              // VM_EXIT_REASON

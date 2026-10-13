@@ -450,6 +450,11 @@ fn close_requested() -> bool {
 #[unsafe(no_mangle)]
 pub static IBPB_ON_EXIT: AtomicBool = AtomicBool::new(false);
 
+/// Read by the exit path of `run_guest_once` (both vendors), after the host
+/// SPEC_CTRL is back: run `npk_clear_bhb_loop` (`spec_mitigations`).
+#[unsafe(no_mangle)]
+pub static CLEAR_BHB_ON_EXIT: AtomicBool = AtomicBool::new(false);
+
 /// Whether this CPU has the IBPB command (`PRED_CMD`): AMD CPUID
 /// 0x8000_0008 EBX[12], Intel CPUID 7 EDX[26]. Writing it without would #GP.
 fn cpu_has_ibpb() -> bool {
@@ -466,8 +471,11 @@ fn arm_exit_mitigations() {
     let forced = crate::config::get("microvm_ibpb").map(|v| v.trim() == "on");
     let on = cpu_has_ibpb() && forced.unwrap_or_else(crate::spec_mitigations::ibpb_on_exit);
     IBPB_ON_EXIT.store(on, Ordering::Release);
-    crate::kprintln!("[microvm] IBPB on VM exit: {}{}", if on { "on" } else { "off" },
-        if forced.is_some() { " (config)" } else { "" });
+    let bhb = crate::spec_mitigations::clear_bhb_on_exit();
+    CLEAR_BHB_ON_EXIT.store(bhb, Ordering::Release);
+    crate::kprintln!("[microvm] IBPB on VM exit: {}{}{}", if on { "on" } else { "off" },
+        if forced.is_some() { " (config)" } else { "" },
+        if bhb { ", branch history cleared" } else { "" });
 }
 
 fn reset_close_state() {
