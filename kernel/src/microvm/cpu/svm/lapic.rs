@@ -770,6 +770,9 @@ impl LocalApic {
                     let id = self.apic_id as u32;
                     self.w(APIC_ID, id);
                     self.w(APIC_LDR, (id >> 4) << 16 | 1 << (id & 0xF));
+                    if id != 0 {
+                        crate::microvm::boottime::mark("guest: AP switched to x2APIC");
+                    }
                 }
                 Ok((0, None))
             }

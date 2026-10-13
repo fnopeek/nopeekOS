@@ -1069,7 +1069,9 @@ pub fn request_ap_spawn(apic_id: u8, sipi_vector: u8) {
         return;
     }
     AP_SIPI_VECTORS[apic_id as usize].store(sipi_vector, Ordering::Release);
-    AP_SPAWN_REQUESTED.fetch_or(1u32 << apic_id, Ordering::AcqRel);
+    if AP_SPAWN_REQUESTED.fetch_or(1u32 << apic_id, Ordering::AcqRel) & (1u32 << apic_id) == 0 {
+        crate::microvm::boottime::mark("host: SIPI for an AP");
+    }
     // Core 0 spawns it in `vm_poll_slice`.
     crate::intent::wake_shell();
 }
@@ -1570,6 +1572,7 @@ pub fn vm_poll_slice() {
                             "[microvm] spawning AP vCPU fiber apic_id={} on core {} (sipi vec {:#x})",
                             apic_id, c, vec
                         );
+                        crate::microvm::boottime::mark("host: AP fiber admitted");
                         crate::smp::fiber::admit(c, ap_vcpu_fiber_task, apic_id as u64);
                     }
                     None => {
@@ -2104,6 +2107,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
     match detect_vendor() {
         Vendor::Intel => match vmx::vm_open_ap(vector, apic_id) {
             Ok(mut ctx) => {
+                crate::microvm::boottime::mark("host: AP opened, first entry next");
                 loop {
                     if close_requested() {
                         break;
