@@ -12,8 +12,9 @@
 
 const ENOSPC: i32 = 28;
 
-/// Nodes one range can hold before the gpudev side takes over.
-const MAX_NODES: usize = 64;
+/// Nodes one range can hold: the kernel PPGTT holds every buffer gpudev
+/// binds.
+const MAX_NODES: usize = 512;
 
 /// `struct drm_mm_node`, the part a reservation sets.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]

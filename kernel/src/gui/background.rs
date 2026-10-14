@@ -349,6 +349,27 @@ fn blurred_ready() -> bool {
     WALLPAPER_SET.load(Ordering::Acquire) && BLURRED_SET.load(Ordering::Acquire)
 }
 
+/// What a GPU executor of the scene list reads instead of these functions
+/// (`shade::gpu_scene`): the published sharp and blurred planes, screen-sized
+/// with the framebuffer pitch, and the box radius `blur_region` uses.
+pub struct Planes {
+    /// `draw_background_region` copies from it; None: the grey fill.
+    pub wall: Option<*const u8>,
+    /// `draw_glass_backdrop` copies from it; None: it paints nothing.
+    pub blur: Option<*const u8>,
+    /// `glass_source_ptr`.
+    pub glass: Option<*const u8>,
+    pub radius: u32,
+}
+
+pub fn planes() -> Planes {
+    let wp = WALLPAPER.load(Ordering::Acquire);
+    let wall = (has_wallpaper() && !wp.is_null()).then_some(wp as *const u8);
+    let blur = blurred_ready().then(|| BLURRED.load(Ordering::Acquire) as *const u8).filter(|p| !p.is_null());
+    let glass = glass_source_ptr();
+    Planes { wall, blur, glass: (!glass.is_null()).then_some(glass), radius: BLUR_RADIUS.load(Ordering::Relaxed) }
+}
+
 /// Put the blurred wallpaper under a glass window: inside the rounded rect
 /// only, so the corners outside it keep the sharp wallpaper the gap shows.
 /// Painted within `clip`. No wallpaper → nothing to blur, no-op.

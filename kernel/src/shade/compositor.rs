@@ -1703,7 +1703,7 @@ impl Compositor {
     pub fn compose(&mut self, target: *mut u8, info: &FbInfo, mut damage: Vec<Rect>) -> Vec<Rect> {
         let frame = self.build_scene();
         scene::expand_damage(&frame, &mut damage, Rect::new(0, 0, info.width, info.height));
-        scene::execute(&frame, &*self, target, info, &damage);
+        crate::shade::gpu_scene::compose(&frame, &*self, target, info, &damage);
         damage
     }
 

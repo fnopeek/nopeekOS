@@ -1153,7 +1153,25 @@ pub fn intent_uptime() {
     }
 }
 
-pub fn intent_gpu(_args: &str) {
+pub fn intent_gpu(args: &str) {
+    match args.trim() {
+        "verify" => {
+            crate::shade::gpu_scene::request_verify();
+            crate::shade::force_redraw();
+            kprintln!("[npk] gpu: the next whole frame is composed on both and compared");
+            return;
+        }
+        "cpu" => {
+            crate::shade::gpu_scene::force_cpu();
+            kprintln!("[npk] gpu: composing on the CPU until `gpu verify`");
+            return;
+        }
+        "" => {}
+        _ => {
+            kprintln!("usage: gpu [verify | cpu]");
+            return;
+        }
+    }
     kprintln!("  Driver:   {}", crate::gpu::driver_name());
     if let Some(fb) = crate::gpu::framebuffer_info() {
         kprintln!("  Mode:     {}x{} {}bpp, pitch {} bytes, framebuffer {:#x}",
@@ -1167,6 +1185,19 @@ pub fn intent_gpu(_args: &str) {
     }
     if st.copies_done + st.copies_failed > 0 {
         kprintln!("  Copies:   {} on the GPU, {} redone on the CPU", st.copies_done, st.copies_failed);
+    }
+    let sc = crate::shade::gpu_scene::stats();
+    kprintln!("  Compose:  {}", sc.mode);
+    kprintln!("  Scenes:   {} on the GPU ({} failed, redone on the CPU), {} on the CPU",
+        sc.gpu_scenes, sc.gpu_failed, sc.cpu_scenes);
+    for (name, (n, us)) in ["GPU", "CPU"].iter().zip(sc.full) {
+        if n > 0 {
+            kprintln!("  Frames:   {} whole frames on the {}, {} us average", n, name, us);
+        }
+    }
+    if st.owner.is_some() {
+        kprintln!("  Buffers:  {} registered ({} MB), {} waiting to be freed", st.buffers,
+            st.buffer_bytes / (1024 * 1024), st.pending_free);
     }
     if let Some((pa, pb, pages)) = crate::framebuffer::shadow_phys_info() {
         kprintln!("  Shadows:  2 x {} MB at {:#x} and {:#x}", pages * 4 / 1024, pa, pb);

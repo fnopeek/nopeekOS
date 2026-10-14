@@ -9,6 +9,11 @@
 //! Pixels are 32-bit, packed rows (`pitch = width * 4`). Whether the top
 //! byte is alpha is up to the user: widget scenes and terminal text layers
 //! carry alpha, the rest ignore it.
+//!
+//! A buffer the GPU composes from is registered with gpudev on first use.
+//! CPU writes (`deref_mut`, `ptr`, `info`) wait for the GPU job that last
+//! read it, and its frames go back to the allocator only after the module
+//! unbound them (`gpudev::release`).
 
 use core::ops::{Deref, DerefMut};
 
@@ -53,12 +58,23 @@ impl PixelBuffer {
     pub fn height(&self) -> u32 { self.height }
     /// Physical address of the first pixel (also its kernel address).
     pub fn phys(&self) -> u64 { self.phys }
-    pub fn ptr(&self) -> *mut u8 { self.phys() as *mut u8 }
+    /// The pixels for writing through `gui::render`; waits for the GPU.
+    pub fn ptr(&self) -> *mut u8 {
+        crate::gpu::gpudev::wait_cpu_access(self.phys);
+        self.phys() as *mut u8
+    }
 
     /// The buffer as a render target for the `gui::render` and `gui::font`
     /// helpers, which address it in the buffer's own coordinates.
     pub fn info(&self) -> FbInfo {
+        crate::gpu::gpudev::wait_cpu_access(self.phys);
         FbInfo { addr: self.phys, pitch: self.width * 4, width: self.width, height: self.height, bpp: 32 }
+    }
+}
+
+impl Default for PixelBuffer {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
@@ -78,6 +94,7 @@ impl DerefMut for PixelBuffer {
         if self.phys == 0 {
             return &mut [];
         }
+        crate::gpu::gpudev::wait_cpu_access(self.phys);
         // SAFETY: as in `deref`; `&mut self` makes the access exclusive.
         unsafe { core::slice::from_raw_parts_mut(self.phys as *mut u32, (self.width * self.height) as usize) }
     }
@@ -85,7 +102,7 @@ impl DerefMut for PixelBuffer {
 
 impl Drop for PixelBuffer {
     fn drop(&mut self) {
-        if self.phys != 0 {
+        if self.phys != 0 && crate::gpu::gpudev::release(self.phys, self.phys, self.pages) {
             crate::memory::deallocate_contiguous(self.phys, self.pages);
         }
     }

@@ -1,10 +1,14 @@
-//! The module side of gpudev v0 (docs/plan/GPU_STACK.md §3.3): after the
+//! The module side of gpudev v1 (docs/plan/GPU_STACK.md §3.3): after the
 //! probe the module stays resident as the GPU service of its card. It binds
-//! the kernel's buffers into the kernel context's PPGTT, proves a bcs0 copy
-//! with a read-back, reports ready and then serves copy jobs. Not a Linux
-//! file: Linux has no in-kernel blit on TGL; the copy is encoded as
-//! `emit_copy` in gt/intel_migrate.c does it.
+//! the kernel's fixed buffers into the kernel context's PPGTT, proves a bcs0
+//! copy and the GPGPU path with read-backs, reports what it can serve, and
+//! then serves jobs: copies on bcs0, buffers the kernel registers and
+//! retires, and scene lists run by the compose programs on rcs0
+//! (compose.rs). Not a Linux file: Linux has no in-kernel blit on TGL; the
+//! copy is encoded as `emit_copy` in gt/intel_migrate.c does it.
 
+use crate::drm_mm::drm_mm_node;
+use crate::gen8_ppgtt::i915_ppgtt;
 use crate::i915_drv::drm_i915_private;
 use crate::intel_ggtt::i915_ggtt;
 use crate::intel_gt::intel_gt;
@@ -14,11 +18,26 @@ use npk_sys::Dma;
 
 const WAIT_IRQ: i32 = 2;
 const WAIT_GPU_CMD: i32 = 64;
+const VERSION: i32 = 1;
 const OP_COPY_RECT: u32 = 1;
+const OP_BO_ADD: u32 = 2;
+const OP_BO_REMOVE: u32 = 3;
+const OP_SCENE: u32 = 4;
+const CAP_COPY: i32 = 1;
+const CAP_SCENE: i32 = 2;
 const JOB_BYTES: usize = 32;
+const BO_INFO_BYTES: usize = 40;
+/// Buffers 0..NUM_BOS are fixed; the kernel numbers the rest from there.
 const NUM_BOS: usize = 3;
+/// Registered buffers the module holds at once.
+const MAX_DYN: usize = 256;
+/// Where dynamic buffers are bound in the PPGTT: above the fixed ones,
+/// which the kernel names by 32-bit address.
+const DYN_START: u64 = 1 << 32;
+const DYN_END: u64 = 1 << 47;
 const EINVAL: i32 = 22;
 const EIO: i32 = 5;
+const ENOSPC: i32 = 28;
 const ETIME: i32 = 62;
 /// Below the kernel's 100 ms, so a late copy is ours to report.
 const JOB_TIMEOUT_US: u64 = 80_000;
@@ -31,23 +50,74 @@ const STATS_EVERY: u32 = 600;
 /// A kernel buffer bound into the PPGTT.
 #[derive(Clone, Copy, Default)]
 struct bo {
+    id: u32,
+    /// Page of the first pixel.
     phys: u64,
+    /// Bytes from the first pixel.
     size: u64,
     pitch: u32,
     width: u32,
     height: u32,
+    /// Byte offset of the first pixel in its page.
+    offset: u32,
+    pages: u32,
+    /// GPU address of the first pixel.
     va: u64,
+    /// The PPGTT range of a dynamic buffer.
+    node: drm_mm_node,
     bound: bool,
 }
 
 struct service {
     bos: [bo; NUM_BOS],
+    dyn_bos: [Option<bo>; MAX_DYN],
     e: usize,
+    copy_ok: bool,
     jobs: u32,
     sum_us: u64,
     max_us: u64,
+    scenes: u32,
+    scene_sum_us: u64,
+    scene_max_us: u64,
     logged_idle: bool,
     gpgpu: Option<crate::gpgpu::gpgpu>,
+    composer: Option<crate::compose::composer>,
+}
+
+impl service {
+    /// A bound buffer by kernel id.
+    fn bo(&self, id: u32) -> Option<bo> {
+        let b = if (id as usize) < NUM_BOS {
+            Some(self.bos[id as usize])
+        } else {
+            self.dyn_bos.iter().flatten().find(|b| b.id == id).copied()
+        };
+        b.filter(|b| b.bound)
+    }
+}
+
+impl crate::compose::buffers for service {
+    fn surface(&self, id: u32) -> Option<crate::compose::surface> {
+        self.bo(id).map(|b| crate::compose::surface {
+            va: b.va,
+            pitch: b.pitch,
+            width: b.width,
+            height: b.height,
+            size: b.size,
+        })
+    }
+}
+
+/// `npk_gpudev_bo_info`, parsed.
+fn bo_info(id: u32) -> Option<bo> {
+    let mut out = [0u8; BO_INFO_BYTES];
+    if npk_sys::gpudev_bo_info(id as i32, &mut out) != 0 {
+        return None;
+    }
+    let q = |o: usize| u64::from_le_bytes(out[o..o + 8].try_into().unwrap());
+    let d = |o: usize| u32::from_le_bytes(out[o..o + 4].try_into().unwrap());
+    Some(bo { id, phys: q(0), size: q(8), pitch: d(16), width: d(20), height: d(24), offset: d(32), pages: d(36),
+              ..Default::default() })
 }
 
 /// The bcs0 engine's index in `gt.engine`.
@@ -212,18 +282,92 @@ fn log_wakerefs(gt: &intel_gt, when: &str) {
     l.say();
 }
 
-/// One job; the status for `gpudev_complete`.
-fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, job: &[u8]) -> i32 {
-    let w = |i: usize| u32::from_le_bytes(job[i * 4..i * 4 + 4].try_into().unwrap());
-    let (op, a) = (w(1), [w(2), w(3), w(4), w(5), w(6), w(7)]);
-    if op != OP_COPY_RECT {
+/// Binds `pages` pages of buffer `id`, from the kernel's page list, at
+/// `start`: the tree first, then one insert per physically consecutive run.
+fn bind_pages(vm: &mut i915_ppgtt, id: u32, start: u64, pages: u32) -> Result<(), i32> {
+    vm.gen8_ppgtt_alloc(start, pages as u64 * I915_GTT_PAGE_SIZE)?;
+    let mut list = [0u64; 64];
+    let mut at = 0u32;
+    // (first page, its bus address, pages)
+    let mut run: Option<(u32, u64, u32)> = None;
+    while at < pages {
+        let want = ((pages - at) as usize).min(list.len());
+        let n = npk_sys::gpudev_bo_pages(id as i32, at as i32, &mut list[..want]);
+        if n <= 0 || n as usize > want {
+            return Err(-EINVAL);
+        }
+        for &phys in &list[..n as usize] {
+            if phys & (I915_GTT_PAGE_SIZE - 1) != 0 {
+                return Err(-EINVAL);
+            }
+            run = match run {
+                Some((f, p0, len)) if p0 + len as u64 * I915_GTT_PAGE_SIZE == phys => Some((f, p0, len + 1)),
+                prev => {
+                    if let Some((f, p0, len)) = prev {
+                        vm.gen8_ppgtt_insert(start + f as u64 * I915_GTT_PAGE_SIZE, p0,
+                                             len as u64 * I915_GTT_PAGE_SIZE, TGL_PAT_CACHE_LLC, 0)?;
+                    }
+                    Some((at, phys, 1))
+                }
+            };
+            at += 1;
+        }
+    }
+    if let Some((f, p0, len)) = run {
+        vm.gen8_ppgtt_insert(start + f as u64 * I915_GTT_PAGE_SIZE, p0, len as u64 * I915_GTT_PAGE_SIZE,
+                             TGL_PAT_CACHE_LLC, 0)?;
+    }
+    Ok(())
+}
+
+/// `OP_BO_ADD`: the buffer bound into the PPGTT and its address reported.
+fn bo_add(gt: &mut intel_gt, svc: &mut service, id: u32) -> Result<(), i32> {
+    if (id as usize) < NUM_BOS || svc.dyn_bos.iter().flatten().any(|b| b.id == id) {
+        return Err(-EINVAL);
+    }
+    let slot = svc.dyn_bos.iter().position(|b| b.is_none()).ok_or(-ENOSPC)?;
+    let mut b = bo_info(id).ok_or(-EINVAL)?;
+    if b.pages == 0 || b.offset as u64 >= I915_GTT_PAGE_SIZE
+        || b.size + b.offset as u64 > b.pages as u64 * I915_GTT_PAGE_SIZE {
+        return Err(-EINVAL);
+    }
+    let vm = gt.vm.as_mut().ok_or(-EINVAL)?;
+    let size = b.pages as u64 * I915_GTT_PAGE_SIZE;
+    let node = vm.mm.drm_mm_insert_node_in_range_best(size, I915_GTT_PAGE_SIZE, 0, DYN_START, DYN_END)?;
+    if let Err(x) = bind_pages(vm, id, node.start, b.pages) {
+        // A complete tree can be cleared; a partial one keeps its tables.
+        let _ = vm.gen8_ppgtt_clear(node.start, size);
+        vm.mm.drm_mm_remove_node(&node);
+        return Err(x);
+    }
+    b.node = node;
+    b.va = node.start + b.offset as u64;
+    b.bound = true;
+    svc.dyn_bos[slot] = Some(b);
+    npk_sys::gpudev_bo_bound(id as i32, b.va as i64);
+    Ok(())
+}
+
+/// `OP_BO_REMOVE`: unbound (`gen8_ppgtt_clear`) and forgotten. A buffer
+/// whose `OP_BO_ADD` failed is not known and needs nothing.
+fn bo_remove(gt: &mut intel_gt, svc: &mut service, id: u32) -> Result<(), i32> {
+    if (id as usize) < NUM_BOS {
+        return Err(-EINVAL);
+    }
+    let Some(slot) = svc.dyn_bos.iter().position(|b| b.is_some_and(|b| b.id == id)) else { return Ok(()) };
+    let b = svc.dyn_bos[slot].take().unwrap();
+    let vm = gt.vm.as_mut().ok_or(-EINVAL)?;
+    let r = vm.gen8_ppgtt_clear(b.node.start, b.node.size);
+    vm.mm.drm_mm_remove_node(&b.node);
+    r
+}
+
+/// One copy job.
+fn run_copy(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, a: [u32; 6]) -> i32 {
+    if !svc.copy_ok {
         return -EINVAL;
     }
-    let (s, d) = (a[0] as usize, a[1] as usize);
-    if s >= NUM_BOS || d >= NUM_BOS || !svc.bos[s].bound || !svc.bos[d].bound {
-        return -EINVAL;
-    }
-    let (src, dst) = (svc.bos[s], svc.bos[d]);
+    let (Some(src), Some(dst)) = (svc.bo(a[0]), svc.bo(a[1])) else { return -EINVAL };
     let (x, y, wd, ht) = (a[2], a[3], a[4], a[5]);
     if !rect_fits(&src, x, y, wd, ht) || !rect_fits(&dst, x, y, wd, ht) {
         return -EINVAL;
@@ -236,7 +380,7 @@ fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, jo
     svc.max_us = svc.max_us.max(us);
     if svc.jobs == 1 {
         Line::new().s("gpudev: first job, copy ").dec(wd as u64).s("x").dec(ht as u64).s(" bo ")
-            .dec(s as u64).s(" -> bo ").dec(d as u64).s(" in ").dec(us).s(" us").say();
+            .dec(a[0] as u64).s(" -> bo ").dec(a[1] as u64).s(" in ").dec(us).s(" us").say();
         log_wakerefs(gt, "after the first job");
     } else if svc.jobs % STATS_EVERY == 0 {
         Line::new().s("gpudev: ").dec(svc.jobs as u64).s(" jobs, average ")
@@ -251,6 +395,61 @@ fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, jo
     }
 }
 
+/// One scene job.
+fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, seq: u32, a: [u32; 6]) -> i32 {
+    let (Some(gp), Some(c)) = (svc.gpgpu.as_ref(), svc.composer.as_ref()) else { return -EINVAL };
+    let t0 = linux::now_us();
+    let r = crate::compose::run_scene(i915, gt, gp, c, &*svc, seq, a[0], a[1]);
+    let us = linux::now_us() - t0;
+    svc.scenes += 1;
+    svc.scene_sum_us += us;
+    svc.scene_max_us = svc.scene_max_us.max(us);
+    match r {
+        Ok(items) if svc.scenes == 1 => {
+            Line::new().s("gpudev: first scene, ").dec(items as u64).s(" items into bo ").dec(a[0] as u64)
+                .s(" in ").dec(us).s(" us").say();
+        }
+        Err(x) => {
+            Line::new().s("gpudev: scene into bo ").dec(a[0] as u64).s(" failed (").dec((-x) as u64).s(")").say();
+        }
+        _ => {}
+    }
+    if svc.scenes % STATS_EVERY == 0 {
+        Line::new().s("gpudev: ").dec(svc.scenes as u64).s(" scenes, average ")
+            .dec(svc.scene_sum_us / STATS_EVERY as u64).s(" us, max ").dec(svc.scene_max_us).s(" us").say();
+        svc.scene_sum_us = 0;
+        svc.scene_max_us = 0;
+    }
+    match r {
+        Ok(_) => 0,
+        Err(x) => x,
+    }
+}
+
+/// One job; the status for `gpudev_complete`.
+fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, job: &[u8]) -> i32 {
+    let w = |i: usize| u32::from_le_bytes(job[i * 4..i * 4 + 4].try_into().unwrap());
+    let (seq, op, a) = (w(0), w(1), [w(2), w(3), w(4), w(5), w(6), w(7)]);
+    let st = |r: Result<(), i32>| match r {
+        Ok(()) => 0,
+        Err(x) => x,
+    };
+    match op {
+        OP_COPY_RECT => run_copy(i915, gt, svc, a),
+        OP_BO_ADD => {
+            let r = bo_add(gt, svc, a[0]);
+            if let Err(x) = r {
+                Line::new().s("gpudev: buffer ").dec(a[0] as u64).s(" could not be bound (").dec((-x) as u64)
+                    .s(")").say();
+            }
+            st(r)
+        }
+        OP_BO_REMOVE => st(bo_remove(gt, svc, a[0])),
+        OP_SCENE => run_scene(i915, gt, svc, seq, a),
+        _ => -EINVAL,
+    }
+}
+
 /// Serves until the GT is wedged; returns early (before ready) when
 /// registering, binding or the self-test fails. Either way the caller
 /// goes on to hand the card back; on module exit the kernel copies on
@@ -260,27 +459,25 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         linux::say("gpudev: no bcs0, not serving");
         return;
     };
-    let rc = npk_sys::gpudev_register(0);
+    let rc = npk_sys::gpudev_register(VERSION);
     if rc != 0 {
         Line::new().s("gpudev: register failed (").dec((-rc) as u64).s(")").say();
         return;
     }
 
-    let mut svc = service { bos: [bo::default(); NUM_BOS], e, jobs: 0, sum_us: 0, max_us: 0, logged_idle: false,
-                            gpgpu: None };
+    let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: [None; MAX_DYN], e, copy_ok: false, jobs: 0,
+                            sum_us: 0, max_us: 0, scenes: 0, scene_sum_us: 0, scene_max_us: 0, logged_idle: false,
+                            gpgpu: None, composer: None };
     for id in 0..NUM_BOS {
-        let mut out = [0u8; 32];
-        if npk_sys::gpudev_bo_info(id as i32, &mut out) != 0 {
+        let Some(b) = bo_info(id as u32) else {
             Line::new().s("gpudev: no buffer ").dec(id as u64).say();
             npk_sys::gpudev_ready(0);
             return;
-        }
-        let q = |o: usize| u64::from_le_bytes(out[o..o + 8].try_into().unwrap());
-        let d = |o: usize| u32::from_le_bytes(out[o..o + 4].try_into().unwrap());
-        svc.bos[id] = bo { phys: q(0), size: q(8), pitch: d(16), width: d(20), height: d(24), ..Default::default() };
-        Line::new().s("gpudev: bo ").dec(id as u64).s(": phys ").hex((q(0) >> 32) as u32).s("_").hex(q(0) as u32)
-            .s(", size ").hex(q(8) as u32).s(", ").dec(d(20) as u64).s("x").dec(d(24) as u64).s(", pitch ")
-            .dec(d(16) as u64).s(", format ").hex(d(28)).say();
+        };
+        svc.bos[id] = b;
+        Line::new().s("gpudev: bo ").dec(id as u64).s(": phys ").hex((b.phys >> 32) as u32).s("_")
+            .hex(b.phys as u32).s(", size ").hex(b.size as u32).s(", ").dec(b.width as u64).s("x")
+            .dec(b.height as u64).s(", pitch ").dec(b.pitch as u64).say();
     }
 
     // Buffer 0 is the firmware framebuffer taken over by intel_plane_initial:
@@ -296,12 +493,10 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
                 return;
             }
             svc.bos[0].phys = phys;
-            match ppgtt_bind(gt, phys, svc.bos[0].size, v.pat_index) {
-                Ok(va) => {
-                    svc.bos[0].va = va;
-                    svc.bos[0].bound = true;
-                }
-                Err(_) => {}
+            let off = svc.bos[0].offset as u64;
+            if let Ok(va) = ppgtt_bind(gt, phys, svc.bos[0].size + off, v.pat_index) {
+                svc.bos[0].va = va + off;
+                svc.bos[0].bound = true;
             }
         }
         _ => linux::say("gpudev: no taken-over framebuffer matches buffer 0"),
@@ -311,8 +506,8 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         if b.phys == 0 || b.phys & (I915_GTT_PAGE_SIZE - 1) != 0 {
             continue;
         }
-        if let Ok(va) = ppgtt_bind(gt, b.phys, b.size, TGL_PAT_CACHE_LLC) {
-            svc.bos[id].va = va;
+        if let Ok(va) = ppgtt_bind(gt, b.phys, b.size + b.offset as u64, TGL_PAT_CACHE_LLC) {
+            svc.bos[id].va = va + b.offset as u64;
             svc.bos[id].bound = true;
         }
     }
@@ -326,23 +521,34 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         Line::new().s("gpudev: bo ").dec(id as u64).s(" at PPGTT ").hex(svc.bos[id].va as u32).say();
     }
 
-    // The GPGPU path (gpgpu.rs) proves itself before the copy service
-    // starts; a failure is reported and the copies go on without it.
+    // The GPGPU path (gpgpu.rs) proves itself before scenes are offered; a
+    // failure is reported and the copies go on without it.
     svc.gpgpu = crate::gpgpu::gpgpu_init(gt);
+    let mut scene_ok = false;
     match &svc.gpgpu {
         Some(gp) => {
             let ok = crate::gpgpu::gpgpu_self_test(i915, gt, gp);
             Line::new().s("gpgpu: rcs0 self-test ").s(if ok { "passed" } else { "FAILED" }).say();
+            if ok {
+                svc.composer = crate::compose::composer_init(gt);
+                scene_ok = svc.composer.is_some();
+                if !scene_ok {
+                    linux::say("gpgpu: no memory for the scene buffers, scenes stay on the CPU");
+                }
+            }
         }
         None => linux::say("gpgpu: no render engine or heap, not tested"),
     }
 
-    let ok = self_test(i915, gt, e);
-    Line::new().s("gpudev: bcs0 self-test ").s(if ok { "passed" } else { "FAILED" }).say();
-    npk_sys::gpudev_ready(ok as i32);
-    if !ok {
+    svc.copy_ok = self_test(i915, gt, e);
+    Line::new().s("gpudev: bcs0 self-test ").s(if svc.copy_ok { "passed" } else { "FAILED" }).say();
+    let caps = if svc.copy_ok { CAP_COPY } else { 0 } | if scene_ok { CAP_SCENE } else { 0 };
+    npk_sys::gpudev_ready(caps);
+    if caps == 0 {
         return;
     }
+    Line::new().s("gpudev: serving").s(if svc.copy_ok { " copies" } else { "" })
+        .s(if scene_ok { " scenes" } else { "" }).say();
     log_wakerefs(gt, "at ready");
 
     let mut jobs = [0u8; JOB_BYTES * 8];

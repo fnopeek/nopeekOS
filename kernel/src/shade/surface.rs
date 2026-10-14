@@ -22,6 +22,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
+use crate::shade::buffers::PixelBuffer;
+
 /// One window's bitmap content. BGRX (0x00RRGGBB packed as the host
 /// framebuffer expects), `width * height` pixels.
 pub struct GuestSurface {
@@ -62,7 +64,8 @@ pub struct GuestSurface {
 
 #[derive(Default)]
 struct Frame {
-    pixels: Vec<u32>,
+    /// A `PixelBuffer`, so the GPU can compose straight from it.
+    pixels: PixelBuffer,
     width: u32,
     height: u32,
 }
@@ -147,17 +150,17 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
         let surf = map.entry(window_id).or_insert_with(GuestSurface::new);
         (core::mem::take(&mut surf.back), held)
     };
-    if back.pixels.len() != px_count {
+    if back.pixels.width() != width || back.pixels.height() != height {
         // The guest picks the frame size: past the budget, or when the host
         // cannot reserve the memory, the frame is dropped.
         if !surface_fits(held, px_count) {
             return;
         }
-        back.pixels = Vec::new();
-        if back.pixels.try_reserve_exact(px_count).is_err() {
+        back.pixels = PixelBuffer::empty();
+        back.pixels = PixelBuffer::new(width, height);
+        if back.pixels.is_empty() {
             return;
         }
-        back.pixels.resize(px_count, 0);
     }
     back.width = width;
     back.height = height;

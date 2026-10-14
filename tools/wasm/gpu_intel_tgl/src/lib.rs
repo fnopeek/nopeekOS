@@ -22,6 +22,7 @@
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 #![allow(dead_code)]
 
+mod compose;
 mod drm_mm;
 mod gpudev;
 mod gen8_engine_cs;

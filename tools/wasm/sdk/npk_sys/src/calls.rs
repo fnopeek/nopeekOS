@@ -84,6 +84,8 @@ unsafe extern "C" {
     fn npk_netdev_register(mac_ptr: i32) -> i32;
     fn npk_gpudev_register(version: i32) -> i32;
     fn npk_gpudev_bo_info(id: i32, out_ptr: i32) -> i32;
+    fn npk_gpudev_bo_pages(id: i32, first: i32, out_ptr: i32, max: i32) -> i32;
+    fn npk_gpudev_job_data(seq: i32, offset: i32, out_ptr: i32, len: i32) -> i32;
     fn npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
     fn npk_gpudev_ready(ok: i32) -> i32;
     fn npk_gpudev_poll(buf_ptr: i32, max: i32) -> i32;
@@ -420,8 +422,24 @@ impl Dma {
 }
 
 /// The kernel's description of GPU buffer `id` (`npk_gpudev_bo_info`):
-/// `{phys: u64, size: u64, pitch, width, height, format: u32}`.
-pub fn gpudev_bo_info(id: i32, out: &mut [u8; 32]) -> i32 {
-    // SAFETY: FFI; the kernel writes 32 bytes into `out`, borrowed for the call.
+/// `{phys: u64, size: u64, pitch, width, height, format, offset, pages: u32}`.
+pub fn gpudev_bo_info(id: i32, out: &mut [u8; 40]) -> i32 {
+    // SAFETY: FFI; the kernel writes 40 bytes into `out`, borrowed for the call.
     unsafe { npk_gpudev_bo_info(id, out.as_mut_ptr() as i32) }
+}
+
+/// Physical addresses of the pages of GPU buffer `id` from page `first` on
+/// (`npk_gpudev_bo_pages`); the number written, or -1.
+pub fn gpudev_bo_pages(id: i32, first: i32, out: &mut [u64]) -> i32 {
+    // SAFETY: FFI; the kernel writes at most `out.len()` u64s into `out`,
+    // borrowed for the call.
+    unsafe { npk_gpudev_bo_pages(id, first, out.as_mut_ptr() as i32, out.len() as i32) }
+}
+
+/// Bytes of job `seq`'s payload from `offset` on (`npk_gpudev_job_data`);
+/// the number copied, or -1.
+pub fn gpudev_job_data(seq: i32, offset: i32, out: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the kernel writes at most `out.len()` bytes into `out`,
+    // borrowed for the call.
+    unsafe { npk_gpudev_job_data(seq, offset, out.as_mut_ptr() as i32, out.len() as i32) }
 }

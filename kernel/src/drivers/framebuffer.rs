@@ -103,7 +103,7 @@ where
     let mut console = CONSOLE.lock();
     // A GPU copy of the front buffer may still be reading the shadows and
     // writing the framebuffer; one that failed is redone here on the CPU.
-    if !crate::gpu::gpudev::wait_inflight() {
+    if !crate::gpu::gpudev::wait_framebuffer() {
         if let Some(c) = console.as_ref() {
             blit_all(c);
         }

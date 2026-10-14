@@ -14,8 +14,10 @@
 //! from Mesa's genxml and device tables through the generator.
 //!
 //! One heap holds everything a dispatch reads: the batch, the dynamic state
-//! (interface descriptor and CURBE), a zeroed surface-state page for the
-//! surface and bindless bases, and the programs.
+//! (an interface descriptor and CURBE per dispatch), a zeroed surface-state
+//! page for the surface and bindless bases, and the programs. A batch holds
+//! any number of dispatches, each waiting for the one before (the scene
+//! executor in compose.rs runs one batch per scene).
 
 use crate::gen8_engine_cs::Cs;
 use crate::gpgpu_gen::{self as g, Field, Kernel};
@@ -26,21 +28,32 @@ use crate::regs::*;
 use npk_sys::Dma;
 
 /// The programs, in the order `kernel_off` holds them.
-pub const KERNELS: [&Kernel; 1] = [&g::FILL_PATTERN];
+pub const KERNELS: [&Kernel; 4] = [&g::FILL_PATTERN, &g::COMPOSE, &g::BLUR_DOWN, &g::BLUR_BOX];
 pub const K_FILL_PATTERN: usize = 0;
+pub const K_COMPOSE: usize = 1;
+pub const K_BLUR_DOWN: usize = 2;
+pub const K_BLUR_BOX: usize = 3;
 
 const PAGE: u32 = 4096;
+const BATCH_PAGES: u32 = 16;
+const DYN_PAGES: u32 = 16;
 const BATCH_OFF: u32 = 0;
-const DYN_OFF: u32 = PAGE;
-const SURF_OFF: u32 = 2 * PAGE;
-const INSTR_OFF: u32 = 3 * PAGE;
-/// In the dynamic state: the interface descriptor, then the CURBE data.
-const IDD_OFF: u32 = 0;
+const DYN_OFF: u32 = BATCH_PAGES * PAGE;
+const SURF_OFF: u32 = DYN_OFF + DYN_PAGES * PAGE;
+const INSTR_OFF: u32 = SURF_OFF + PAGE;
+/// Dynamic state per dispatch: the interface descriptor, then at
+/// `CURBE_OFF` the CURBE data.
+const DISPATCH_DYN: u32 = 128;
 const CURBE_OFF: u32 = 64;
+/// Dispatches one batch can hold.
+pub const MAX_DISPATCHES: u32 = DYN_PAGES * PAGE / DISPATCH_DYN;
+/// Room the batch end needs (closing PIPE_CONTROL, end, padding).
+const BATCH_TAIL: u32 = 16 * 4;
 const SIMD: u32 = 16;
 const EINVAL: i32 = 22;
 const EIO: i32 = 5;
 const ETIME: i32 = 62;
+const E2BIG: i32 = 7;
 const DISPATCH_TIMEOUT_US: u64 = 80_000;
 
 /// `_3D` and `GPGPU` of PIPELINE_SELECT's Pipeline Selection.
@@ -54,6 +67,14 @@ pub struct gpgpu {
     kernel_off: [u32; KERNELS.len()],
     /// The render engine's index in `gt.engine`.
     e: usize,
+}
+
+/// A batch being written into the heap.
+pub struct batch {
+    /// Bytes of commands written.
+    off: u32,
+    dispatches: u32,
+    subslices: u32,
 }
 
 /// Writes `v` into field `f` of a command. Values of address and offset
@@ -179,7 +200,7 @@ impl gpgpu {
             (B::BindlessSamplerStateMOCS, mocs),
             (B::BindlessSamplerStateBaseAddressModifyEnable, 1),
             (B::DynamicStateBaseAddress, self.addr(DYN_OFF)),
-            (B::DynamicStateBufferSize, 1),
+            (B::DynamicStateBufferSize, DYN_PAGES as u64),
             (B::DynamicStateMOCS, mocs),
             (B::DynamicStateBaseAddressModifyEnable, 1),
             (B::DynamicStateBufferSizeModifyEnable, 1),
@@ -198,15 +219,59 @@ impl gpgpu {
         PIPELINE_GPGPU
     }
 
-    /// The batch for one dispatch of `k` over `groups` workgroups, with its
-    /// interface descriptor and CURBE in the dynamic state.
-    fn build(&self, k: usize, push: &[u8], groups: [u32; 3], subslices: u32) -> Result<(), i32> {
+    /// Appends `cs` to the batch.
+    fn put(&self, b: &mut batch, cs: &Cs) -> Result<(), i32> {
+        let bytes = cs.len() as u32 * 4;
+        if b.off + bytes + BATCH_TAIL > BATCH_PAGES * PAGE {
+            return Err(-E2BIG);
+        }
+        cs.write_to(self.heap, BATCH_OFF + b.off);
+        b.off += bytes;
+        Ok(())
+    }
+
+    /// Starts a batch: state base addresses and the VFE state, sized for
+    /// the largest CURBE of the programs.
+    pub fn begin(&self, gt: &intel_gt) -> Result<batch, i32> {
+        use g::PIPE_CONTROL as P;
+        let subslices = gt.info.sseu.subslice_mask[0].count_ones();
+        let mut b = batch { off: 0, dispatches: 0, subslices };
+        let mut cs = Cs::new();
+        let current = self.state_base_address(&mut cs);
+        // "A stalling PIPE_CONTROL is required before MEDIA_VFE_STATE".
+        pipe_control(&mut cs, current == PIPELINE_GPGPU, &[P::CommandStreamerStallEnable]);
+        let curbe_regs = KERNELS.iter().map(|k| k.cross_thread_regs).max().unwrap_or(0);
+        {
+            use g::MEDIA_VFE_STATE as V;
+            emit(&mut cs, V::LENGTH, V::DEFAULTS, &[
+                (V::StackSize, 0),
+                (V::MaximumNumberofThreads, (g::MAX_CS_THREADS * subslices - 1) as u64),
+                (V::NumberofURBEntries, 2),
+                (V::URBEntryAllocationSize, 2),
+                (V::CURBEAllocationSize, (curbe_regs as u64).next_multiple_of(2)),
+            ]);
+        }
+        self.put(&mut b, &cs)?;
+        Ok(b)
+    }
+
+    /// One dispatch of `k` over `groups` workgroups with `push` as its push
+    /// constants; it starts after the dispatch before it has written
+    /// everything (CS stall, HDC flush).
+    pub fn dispatch(&self, b: &mut batch, k: usize, push: &[u8], groups: [u32; 3]) -> Result<(), i32> {
         use g::PIPE_CONTROL as P;
         let kernel = KERNELS[k];
         let threads = (kernel.local_size[0] * kernel.local_size[1] * kernel.local_size[2]).div_ceil(SIMD);
-        if threads != 1 || push.len() > kernel.push_size as usize {
+        if threads != 1 || push.len() > kernel.push_size as usize || kernel.push_size > DISPATCH_DYN - CURBE_OFF {
             return Err(-EINVAL);
         }
+        if b.dispatches == MAX_DISPATCHES {
+            return Err(-E2BIG);
+        }
+        if groups.iter().any(|&n| n == 0) {
+            return Ok(());
+        }
+        let slot = b.dispatches * DISPATCH_DYN;
 
         // Interface descriptor and CURBE (`genX(emit_simple_shader_dispatch)`).
         let mut idd = [0u32; 8];
@@ -227,41 +292,31 @@ impl gpgpu {
                 pack(&mut idd, f, v);
             }
         }
-        let mut dyn_page = [0u8; 128];
+        let mut dyn_slot = [0u8; DISPATCH_DYN as usize];
         for (i, v) in idd.iter().enumerate() {
-            dyn_page[IDD_OFF as usize + i * 4..IDD_OFF as usize + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            dyn_slot[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
         }
-        dyn_page[CURBE_OFF as usize..CURBE_OFF as usize + push.len()].copy_from_slice(push);
+        dyn_slot[CURBE_OFF as usize..CURBE_OFF as usize + push.len()].copy_from_slice(push);
         let curbe_len = (kernel.push_size as u32).next_multiple_of(64);
-        if !self.heap.write(DYN_OFF, &dyn_page) {
+        if !self.heap.write(DYN_OFF + slot, &dyn_slot) {
             return Err(-EIO);
         }
 
         let mut cs = Cs::new();
-        let current = self.state_base_address(&mut cs);
-        // "A stalling PIPE_CONTROL is required before MEDIA_VFE_STATE".
-        pipe_control(&mut cs, current == PIPELINE_GPGPU, &[P::CommandStreamerStallEnable]);
-        {
-            use g::MEDIA_VFE_STATE as V;
-            emit(&mut cs, V::LENGTH, V::DEFAULTS, &[
-                (V::StackSize, 0),
-                (V::MaximumNumberofThreads, (g::MAX_CS_THREADS * subslices - 1) as u64),
-                (V::NumberofURBEntries, 2),
-                (V::URBEntryAllocationSize, 2),
-                (V::CURBEAllocationSize, (kernel.cross_thread_regs as u64).next_multiple_of(2)),
-            ]);
+        if b.dispatches > 0 {
+            pipe_control(&mut cs, true, &[P::CommandStreamerStallEnable, P::HDCPipelineFlushEnable]);
         }
         {
             use g::MEDIA_INTERFACE_DESCRIPTOR_LOAD as L;
             emit(&mut cs, L::LENGTH, L::DEFAULTS, &[
                 (L::InterfaceDescriptorTotalLength, (g::INTERFACE_DESCRIPTOR_DATA::LENGTH * 4) as u64),
-                (L::InterfaceDescriptorDataStartAddress, IDD_OFF as u64),
+                (L::InterfaceDescriptorDataStartAddress, slot as u64),
             ]);
         }
         {
             use g::MEDIA_CURBE_LOAD as C;
             emit(&mut cs, C::LENGTH, C::DEFAULTS, &[
-                (C::CURBEDataStartAddress, CURBE_OFF as u64),
+                (C::CURBEDataStartAddress, (slot + CURBE_OFF) as u64),
                 (C::CURBETotalDataLength, curbe_len as u64),
             ]);
         }
@@ -285,17 +340,30 @@ impl gpgpu {
             use g::MEDIA_STATE_FLUSH as F;
             emit(&mut cs, F::LENGTH, F::DEFAULTS, &[]);
         }
-        // The program's writes reach memory before the request completes.
+        self.put(b, &cs)?;
+        b.dispatches += 1;
+        Ok(())
+    }
+
+    /// Ends the batch: the programs' writes reach memory before the request
+    /// completes.
+    fn end(&self, b: &mut batch) -> Result<(), i32> {
+        use g::PIPE_CONTROL as P;
+        let mut cs = Cs::new();
         pipe_control(&mut cs, true, &[P::CommandStreamerStallEnable, P::HDCPipelineFlushEnable]);
         {
             use g::MI_BATCH_BUFFER_END as E;
             emit(&mut cs, E::LENGTH, E::DEFAULTS, &[]);
         }
         // `genX(emit_simple_shader_end)`: the batch ends on a qword.
-        if cs.len() % 2 != 0 {
+        if (b.off / 4 + cs.len() as u32) % 2 != 0 {
             cs.push(MI_NOOP);
         }
-        cs.write_to(self.heap, BATCH_OFF);
+        if b.off + cs.len() as u32 * 4 > BATCH_PAGES * PAGE {
+            return Err(-E2BIG);
+        }
+        cs.write_to(self.heap, BATCH_OFF + b.off);
+        b.off += cs.len() as u32 * 4;
         Ok(())
     }
 }
@@ -311,21 +379,17 @@ pub fn gpgpu_init(gt: &mut intel_gt) -> Option<gpgpu> {
         size += ((k.code.len() * 4) as u32).next_multiple_of(64);
     }
     let instr_pages = size.div_ceil(PAGE);
-    let pages = 3 + instr_pages;
+    let pages = INSTR_OFF / PAGE + instr_pages;
     let heap = Dma::alloc(pages as i32)?;
-    let zero = [0u8; PAGE as usize];
-    for p in 0..pages {
-        if !heap.write(p * PAGE, &zero) {
-            return None;
-        }
-    }
     for (i, k) in KERNELS.iter().enumerate() {
         let mut b = [0u8; PAGE as usize];
-        for (j, w) in k.code.iter().enumerate() {
-            b[j * 4..j * 4 + 4].copy_from_slice(&w.to_le_bytes());
-        }
-        if !heap.write(INSTR_OFF + kernel_off[i], &b[..k.code.len() * 4]) {
-            return None;
+        for (c, chunk) in k.code.chunks(PAGE as usize / 4).enumerate() {
+            for (j, w) in chunk.iter().enumerate() {
+                b[j * 4..j * 4 + 4].copy_from_slice(&w.to_le_bytes());
+            }
+            if !heap.write(INSTR_OFF + kernel_off[i] + c as u32 * PAGE, &b[..chunk.len() * 4]) {
+                return None;
+            }
         }
     }
     let va = crate::gpudev::ppgtt_bind(gt, heap.phys, (pages * PAGE) as u64, TGL_PAT_CACHE_LLC).ok()?;
@@ -336,11 +400,18 @@ pub fn gpgpu_init(gt: &mut intel_gt) -> Option<gpgpu> {
 /// one request on the render engine's kernel context, and waits for it.
 pub fn gpgpu_dispatch(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, k: usize, push: &[u8],
                       groups: [u32; 3]) -> Result<(), i32> {
+    let mut b = gp.begin(gt)?;
+    gp.dispatch(&mut b, k, push, groups)?;
+    gpgpu_run(i915, gt, gp, &mut b)
+}
+
+/// Ends `b` and runs it as one request on the render engine's kernel
+/// context, waiting for it.
+pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: &mut batch) -> Result<(), i32> {
     if crate::intel_gt::intel_gt_is_wedged(gt) {
         return Err(-EIO);
     }
-    let subslices = gt.info.sseu.subslice_mask[0].count_ones();
-    gp.build(k, push, groups, subslices)?;
+    gp.end(b)?;
     let e = gp.e;
     let ce = gt.engine[e].and_then(|x| x.kernel_context).ok_or(-EINVAL)? as usize;
 

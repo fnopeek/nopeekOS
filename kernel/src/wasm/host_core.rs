@@ -9,7 +9,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::{
-    HostState, HwDriverState, MAX_APP_BUFS, MAX_DMA_ALLOCS, MAX_DMA_PAGES,
+    HostState, HwDriverState, MAX_APP_BUFS, MAX_DMA_ALLOCS, MAX_DMA_ALLOCS_GPU, MAX_DMA_PAGES, MAX_DMA_PAGES_GPU,
     MAX_DMA_PAGES_PER_CALL, MAX_MMIO_MAPS, app_is_focused, bench_sys_info,
     fsck_sys_info, get_debug_target, pop_app_key, append_entry,
     extract_wasm_custom_section, is_trust_critical_path, spawn_on_worker,
@@ -1980,6 +1980,18 @@ pub(crate) fn npk_mmio_writeq(ctx: &mut HostState, handle: i32, offset: i32, val
     0
 }
 
+/// DMA allocations and pages a module may hold. A GPU driver binds every
+/// buffer the compositor hands it through its own page tables, one page
+/// per 2 MB bound, and keeps a compute heap, scene and blur buffers; the
+/// cap still protects the frame pool from a runaway module.
+fn dma_caps(hw: &HwDriverState) -> (usize, usize) {
+    if hw.is_pci && pci::read8(hw.pci_addr, 0x0B) == 0x03 {
+        (MAX_DMA_ALLOCS_GPU, MAX_DMA_PAGES_GPU)
+    } else {
+        (MAX_DMA_ALLOCS, MAX_DMA_PAGES)
+    }
+}
+
 pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     let hw = match ctx.hw.as_mut() {
         Some(h) => h,
@@ -1987,9 +1999,10 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     };
     if pages <= 0 || pages as usize > MAX_DMA_PAGES_PER_CALL { return -1; }
     let page_count = pages as usize;
-    if hw.dma_allocs.len() >= MAX_DMA_ALLOCS { return -1; }
+    let (max_allocs, max_pages) = dma_caps(hw);
+    if hw.dma_allocs.len() >= max_allocs { return -1; }
     let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
-    if total + page_count > MAX_DMA_PAGES { return -1; }
+    if total + page_count > max_pages { return -1; }
 
     // DMA buffers must be below 4 GB: the PCIe TX BD has a 32-bit address field.
     let phys = match crate::memory::allocate_contiguous_below(page_count, 0x1_0000_0000) {
@@ -2023,9 +2036,10 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     };
     if pages <= 0 || pages as usize > MAX_DMA_PAGES_PER_CALL { return -1; }
     let page_count = pages as usize;
-    if hw.dma_allocs.len() >= MAX_DMA_ALLOCS { return -1; }
+    let (max_allocs, max_pages) = dma_caps(hw);
+    if hw.dma_allocs.len() >= max_allocs { return -1; }
     let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
-    if total + page_count > MAX_DMA_PAGES { return -1; }
+    if total + page_count > max_pages { return -1; }
 
     let limit = if limit_mb <= 0 {
         0x1_0000_0000u64
@@ -4044,19 +4058,37 @@ pub(crate) fn npk_gpudev_register(ctx: &mut HostState, version: i32) -> i32 {
     }
 }
 
-/// `npk_gpudev_bo_info(id, out) -> 0 | -1`: `{phys: u64, size: u64, pitch,
-/// width, height, format: u32}`, 32 bytes.
+/// `npk_gpudev_bo_info(id, out) -> 0 | -1`: `{phys, size: u64, pitch,
+/// width, height, format, offset, pages: u32}`, 40 bytes.
 pub(crate) fn npk_gpudev_bo_info(mem: &mut [u8], ctx: &mut HostState, id: i32, out_ptr: i32) -> i32 {
     let Some(dev) = gpudev_device(ctx) else { return -1 };
-    let Some(bo) = crate::gpu::gpudev::bo_info(dev, id) else { return -1 };
-    let Some(out) = guest_mut(mem, out_ptr, 32) else { return -1 };
-    out[0..8].copy_from_slice(&bo.phys.to_le_bytes());
-    out[8..16].copy_from_slice(&bo.size.to_le_bytes());
-    out[16..20].copy_from_slice(&bo.pitch.to_le_bytes());
-    out[20..24].copy_from_slice(&bo.width.to_le_bytes());
-    out[24..28].copy_from_slice(&bo.height.to_le_bytes());
-    out[28..32].copy_from_slice(&bo.format.to_le_bytes());
+    let Some(info) = crate::gpu::gpudev::bo_info(dev, id) else { return -1 };
+    let Some(out) = guest_mut(mem, out_ptr, info.len()) else { return -1 };
+    out.copy_from_slice(&info);
     0
+}
+
+/// `npk_gpudev_bo_pages(id, first, out_ptr, max) -> pages | -1`: physical
+/// addresses, 8 bytes each.
+pub(crate) fn npk_gpudev_bo_pages(mem: &mut [u8], ctx: &mut HostState, id: i32, first: i32, out_ptr: i32,
+                                  max: i32) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if first < 0 || max <= 0 {
+        return if max == 0 { 0 } else { -1 };
+    }
+    let Some(out) = guest_mut(mem, out_ptr, (max as usize).saturating_mul(8)) else { return -1 };
+    crate::gpu::gpudev::bo_pages(dev, id, first as u32, out)
+}
+
+/// `npk_gpudev_job_data(seq, offset, out_ptr, len) -> bytes | -1`.
+pub(crate) fn npk_gpudev_job_data(mem: &mut [u8], ctx: &mut HostState, seq: i32, offset: i32, out_ptr: i32,
+                                  len: i32) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if offset < 0 || len < 0 {
+        return -1;
+    }
+    let Some(out) = guest_mut(mem, out_ptr, len as usize) else { return -1 };
+    crate::gpu::gpudev::job_data(dev, seq as u32, offset as u32, out)
 }
 
 /// `npk_gpudev_bo_bound(id, gpu_addr) -> 0 | -1`.
@@ -4067,10 +4099,10 @@ pub(crate) fn npk_gpudev_bo_bound(ctx: &mut HostState, id: i32, gpu_addr: i64) -
     }
 }
 
-/// `npk_gpudev_ready(ok) -> 0 | -1`.
-pub(crate) fn npk_gpudev_ready(ctx: &mut HostState, ok: i32) -> i32 {
+/// `npk_gpudev_ready(caps) -> 0 | -1`.
+pub(crate) fn npk_gpudev_ready(ctx: &mut HostState, caps: i32) -> i32 {
     match gpudev_device(ctx) {
-        Some(dev) => crate::gpu::gpudev::ready(dev, ok == 1),
+        Some(dev) => crate::gpu::gpudev::ready(dev, caps),
         None => -1,
     }
 }

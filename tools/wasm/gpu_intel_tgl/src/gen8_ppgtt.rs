@@ -6,7 +6,10 @@
 //! Binding allocates the page-table tree (`gen8_ppgtt_alloc`) and writes
 //! 4K PTEs (`gen8_ppgtt_insert_pte`); the 64K/2M path of
 //! `gen8_ppgtt_insert_huge` is not ported, so contiguous objects are
-//! mapped in 4K pages.
+//! mapped in 4K pages. Unbinding (`gen8_ppgtt_clear`) points the PTEs back
+//! at scratch and releases tables whose use count drops to zero; their
+//! pages go to a stash the next allocation takes from, since DMA pages
+//! cannot be given back to the kernel.
 
 use crate::drm_mm::drm_mm;
 use crate::i915_drv::drm_i915_private;
@@ -20,7 +23,9 @@ const PDES: usize = 512;
 const TOP: usize = 3;
 /// Page-table pages below the top directory one address space holds; the
 /// module has no heap that frees, so they sit in a fixed table.
-const MAX_PT: usize = 192;
+const MAX_PT: usize = 1024;
+/// Released table pages kept for reuse.
+const MAX_STASH: usize = 64;
 
 /// A page-table page below the top directory (`struct i915_page_table` /
 /// `i915_page_directory`): `entry[idx]` of the table at `parent`.
@@ -29,6 +34,8 @@ pub struct pt_node {
     pub parent: u64,
     pub idx: u16,
     pub obj: drm_i915_gem_object,
+    /// `pt->used`: PTEs in use in a page table, entries set in a directory.
+    pub used: u32,
 }
 /// `struct i915_ppgtt`.
 #[derive(Clone, Copy)]
@@ -44,6 +51,8 @@ pub struct i915_ppgtt {
     pub mm: drm_mm,
     /// The allocated tree below `pd`.
     pub pts: [Option<pt_node>; MAX_PT],
+    /// Released table pages (`free_px`), taken by `alloc_pt_dma` first.
+    pub stash: [Option<drm_i915_gem_object>; MAX_STASH],
 }
 
 impl i915_ppgtt {
@@ -54,7 +63,55 @@ impl i915_ppgtt {
 
     /// `pd->entry[idx]` of the table at `parent`.
     fn entry(&self, parent: u64, idx: usize) -> Option<drm_i915_gem_object> {
-        self.pts.iter().flatten().find(|n| n.parent == parent && n.idx as usize == idx).map(|n| n.obj)
+        self.slot(parent, idx).and_then(|i| self.pts[i]).map(|n| n.obj)
+    }
+
+    /// The slot in `pts` of `pd->entry[idx]` of the table at `parent`.
+    fn slot(&self, parent: u64, idx: usize) -> Option<usize> {
+        self.pts.iter().position(|n| n.is_some_and(|n| n.parent == parent && n.idx as usize == idx))
+    }
+
+    /// `px_used(pd)` of the table at `phys`; the top directory is not counted.
+    fn used_add(&mut self, phys: u64, delta: i32) {
+        if let Some(n) = self.pts.iter_mut().flatten().find(|n| n.obj.phys == phys) {
+            n.used = n.used.wrapping_add(delta as u32);
+        }
+    }
+
+    /// `alloc_pt_dma`, from the stash first.
+    fn alloc_pt(&mut self) -> Result<drm_i915_gem_object, i32> {
+        match self.stash.iter_mut().find(|x| x.is_some()) {
+            Some(x) => Ok(x.take().unwrap()),
+            None => alloc_pt_dma(I915_GTT_PAGE_SIZE_4K),
+        }
+    }
+
+    /// `free_px`: the page goes to the stash (lost when it is full).
+    fn free_px(&mut self, obj: drm_i915_gem_object) {
+        if let Some(x) = self.stash.iter_mut().find(|x| x.is_none()) {
+            *x = Some(obj);
+        }
+    }
+
+    /// `set_pd_entry`: link and count.
+    fn set_pd_entry(&mut self, pd: &drm_i915_gem_object, idx: usize, to: &drm_i915_gem_object) -> Result<(), i32> {
+        set_pd_entry(pd, idx, to)?;
+        self.used_add(pd.phys, 1);
+        Ok(())
+    }
+
+    /// `clear_pd_entry`: point entry `idx` of `pd` (at level `lvl`) back at
+    /// scratch, drop the link and the count.
+    fn clear_pd_entry(&mut self, pd: &drm_i915_gem_object, idx: usize, lvl: usize) -> Result<(), i32> {
+        let d = pd.map().ok_or(-ENOMEM)?;
+        if !d.write((idx * 8) as u32, &self.scratch_encode[lvl].to_le_bytes()) {
+            return Err(-ENOMEM);
+        }
+        if let Some(i) = self.slot(pd.phys, idx) {
+            self.pts[i] = None;
+        }
+        self.used_add(pd.phys, -1);
+        Ok(())
     }
 
     /// `__gen8_ppgtt_alloc`: walk `[*start, end)` (in pages) below the
@@ -68,17 +125,22 @@ impl i915_ppgtt {
                 Some(pt) => pt,
                 None => {
                     let slot = self.pts.iter().position(|n| n.is_none()).ok_or(-ENOMEM)?;
-                    let pt = alloc_pt_dma(I915_GTT_PAGE_SIZE_4K)?;
+                    let pt = self.alloc_pt()?;
                     fill_page_dma(&pt, self.scratch_encode[lvl], PDES)?;
-                    self.pts[slot] = Some(pt_node { parent: pd.phys, idx: idx as u16, obj: pt });
-                    set_pd_entry(&pd, idx, &pt)?;
+                    self.pts[slot] = Some(pt_node { parent: pd.phys, idx: idx as u16, obj: pt, used: 0 });
+                    self.set_pd_entry(&pd, idx, &pt)?;
                     pt
                 }
             };
             if lvl > 0 {
-                self.__gen8_ppgtt_alloc(pt, start, end, lvl)?;
+                self.used_add(pt.phys, 1);
+                let r = self.__gen8_ppgtt_alloc(pt, start, end, lvl);
+                self.used_add(pt.phys, -1);
+                r?;
             } else {
-                *start += gen8_pt_count(*start, end);
+                let count = gen8_pt_count(*start, end);
+                self.used_add(pt.phys, count as i32);
+                *start += count;
             }
             idx += 1;
             len -= 1;
@@ -127,9 +189,104 @@ impl i915_ppgtt {
         }
         Ok(())
     }
+
+    /// `__gen8_ppgtt_cleanup`: release the table at `pd` (level `lvl`) and
+    /// everything below it.
+    fn __gen8_ppgtt_cleanup(&mut self, pd: drm_i915_gem_object, lvl: usize) {
+        if lvl > 0 {
+            for idx in 0..PDES {
+                if let Some(i) = self.slot(pd.phys, idx) {
+                    let child = self.pts[i].unwrap().obj;
+                    self.pts[i] = None;
+                    self.__gen8_ppgtt_cleanup(child, lvl - 1);
+                }
+            }
+        }
+        self.free_px(pd);
+    }
+
+    /// `release_pd_entry`: drop one use of `pt` (entry `idx` of `pd` at
+    /// level `lvl`); true when it was the last and the entry is cleared.
+    fn release_pd_entry(&mut self, pd: &drm_i915_gem_object, idx: usize, pt: &drm_i915_gem_object, lvl: usize)
+                        -> Result<bool, i32> {
+        let used = self.pts.iter().flatten().find(|n| n.obj.phys == pt.phys).map(|n| n.used).unwrap_or(0);
+        if used != 1 {
+            self.used_add(pt.phys, -1);
+            return Ok(false);
+        }
+        self.used_add(pt.phys, -1);
+        self.clear_pd_entry(pd, idx, lvl)?;
+        Ok(true)
+    }
+
+    /// `__gen8_ppgtt_clear`.
+    fn __gen8_ppgtt_clear(&mut self, pd: drm_i915_gem_object, mut start: u64, end: u64, lvl: usize)
+                          -> Result<u64, i32> {
+        let scratch_lvl = lvl;
+        let (mut idx, mut len) = gen8_pd_range(start, end, lvl);
+        let lvl = lvl - 1;
+        loop {
+            let Some(i) = self.slot(pd.phys, idx) else { return Err(-EINVAL) };
+            let node = self.pts[i].unwrap();
+            let pt = node.obj;
+            self.pts[i].as_mut().unwrap().used += 1;
+            if node.used >> gen8_pd_shift(1) != 0 && gen8_pd_contains(start, end, lvl) {
+                self.clear_pd_entry(&pd, idx, scratch_lvl)?;
+                self.__gen8_ppgtt_cleanup(pt, lvl);
+                start += (PDES as u64) << gen8_pd_shift(lvl);
+            } else {
+                if lvl > 0 {
+                    start = self.__gen8_ppgtt_clear(pt, start, end, lvl)?;
+                } else {
+                    let count = gen8_pt_count(start, end);
+                    let pte = gen8_pd_index(start, 0);
+                    let mut buf = [0u8; 4096];
+                    for k in 0..count as usize {
+                        buf[k * 8..k * 8 + 8].copy_from_slice(&self.scratch_encode[0].to_le_bytes());
+                    }
+                    let d = pt.map().ok_or(-ENOMEM)?;
+                    if !d.write((pte * 8) as u32, &buf[..count as usize * 8]) {
+                        return Err(-ENOMEM);
+                    }
+                    self.used_add(pt.phys, -(count as i32));
+                    start += count;
+                }
+                if self.release_pd_entry(&pd, idx, &pt, scratch_lvl)? {
+                    self.free_px(pt);
+                }
+            }
+            idx += 1;
+            len -= 1;
+            if len == 0 {
+                return Ok(start);
+            }
+        }
+    }
+
+    /// `gen8_ppgtt_clear`.
+    pub fn gen8_ppgtt_clear(&mut self, start: u64, length: u64) -> Result<(), i32> {
+        if length == 0 || start + length > self.total {
+            return Err(-EINVAL);
+        }
+        let first = start >> GEN8_PTE_SHIFT;
+        let end = first + (length >> GEN8_PTE_SHIFT);
+        let pd = self.pd;
+        self.__gen8_ppgtt_clear(pd, first, end, TOP).map(|_| ())
+    }
 }
 
 const EINVAL: i32 = 22;
+
+/// `gen8_pd_shift(lvl)`.
+fn gen8_pd_shift(lvl: usize) -> u32 {
+    lvl as u32 * GEN8_PDES.trailing_zeros()
+}
+
+/// `gen8_pd_contains`: `[start, end)` covers the whole table at `lvl`.
+fn gen8_pd_contains(start: u64, end: u64, lvl: usize) -> bool {
+    let mask = !0u64 << gen8_pd_shift(lvl + 1);
+    (start ^ end) & mask != 0 && (start & !mask) == 0
+}
 
 /// `gen8_pd_index(i, lvl)`.
 fn gen8_pd_index(i: u64, lvl: usize) -> usize {
@@ -272,7 +429,8 @@ pub fn i915_ppgtt_create(i915: &drm_i915_private) -> Result<i915_ppgtt, i32> {
     let pd = alloc_pt_dma(I915_GTT_PAGE_SIZE_4K)?;
     fill_page_dma(&pd, scratch_encode[TOP], count)?;
 
-    Ok(i915_ppgtt { pd, scratch, scratch_encode, total, mm: drm_mm::drm_mm_init(0, total), pts: [None; MAX_PT] })
+    Ok(i915_ppgtt { pd, scratch, scratch_encode, total, mm: drm_mm::drm_mm_init(0, total), pts: [None; MAX_PT],
+                    stash: [None; MAX_STASH] })
 }
 
 impl i915_ppgtt {

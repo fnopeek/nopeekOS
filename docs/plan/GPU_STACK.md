@@ -302,6 +302,79 @@ sofort, der Compositor faellt auf GOP + CPU-Kopie auf das Firmware-Bild
 zurueck, kein Registerzugriff. Die Schattenpuffer gehoeren dem Kernel und
 bleiben; die Karte liest sie nach dem Tod nicht mehr (kein Auftrag mehr).
 
+**v1, festgelegt 2026-10-14** (A3 + A5). Ersetzt v0; Kernel und Modul
+werden zusammen freigegeben (`npk_gpudev_register(1)`, v0 wird abgelehnt).
+
+*Puffer:* 0, 1, 2 bleiben fest (Firmware-Bild, zwei Schattenpuffer). Ab 3
+vergibt der Kernel Griffe **dynamisch** und nie zweimal: fuer jeden Puffer,
+den eine Szene liest (Fensterpuffer, Terminal-Textebenen, Gast-Fronts,
+scharfe und unscharfe Tapete). Ein Puffer ist eine **Seitenliste** — der
+erste Pixel darf mitten in einer Seite liegen (`offset`). Gibt der Besitzer
+einen angemeldeten Puffer frei, haelt der Kernel die Seiten, bis das Modul
+den Abmeldeauftrag erledigt hat; erst dann gehen sie an den Allokator.
+
+| Aufruf | Bedeutung |
+|---|---|
+| `npk_gpudev_register(1)` | wie v0 |
+| `npk_gpudev_bo_info(id, out) -> 0 \| -1` | 40 Bytes `{phys: u64, size: u64, pitch, width, height, format, offset, pages: u32}`; `phys` = Seite des ersten Pixels (0 bei Puffer 0), `size` = Bytes ab dem ersten Pixel |
+| `npk_gpudev_bo_pages(id, first, out, max) -> n \| -1` | physische Adressen (`u64`) der Seiten `first..`, hoechstens `max`; -1 bei Puffer 0 |
+| `npk_gpudev_bo_bound(id, gpu_addr)` | wo der erste Pixel im PPGTT liegt (Seite + `offset`) |
+| `npk_gpudev_ready(caps)` | Bit 0: Kopien, Bit 1: Szenen; 0 = Selbsttest gescheitert |
+| `npk_gpudev_poll(out, max) -> n` | wie v0, 32 Bytes `{seq, op, a0..a5}` |
+| `npk_gpudev_job_data(seq, offset, out, len) -> n \| -1` | Nutzlast eines abgeholten, noch nicht erledigten Auftrags |
+| `npk_gpudev_complete(seq, status)` | wie v0 |
+
+*Auftraege* (in Reihenfolge erledigt; das Modul arbeitet sie der Reihe nach ab):
+
+| op | Name | Argumente | Bedeutung |
+|---|---|---|---|
+| 1 | `COPY_RECT` | `src, dst, x, y, w, h` | wie v0 |
+| 2 | `BO_ADD` | `id` | Puffer abfragen, binden, `bo_bound` melden; `status < 0`: der Kernel setzt Szenen mit ihm auf der CPU zusammen |
+| 3 | `BO_REMOVE` | `id` | entbinden und vergessen; danach gibt der Kernel die Seiten frei |
+| 4 | `SCENE` | `target, bytes` | eine Szenenliste ausfuehren (Nutzlast unten) in den Puffer `target` |
+
+*Nutzlast von `SCENE`* (alles `u32` LE): Kopf 64 Bytes, dann `n_damage`
+Rechtecke zu 16 Bytes `{x, y, w, h}`, dann `n_items` Eintraege zu 64 Bytes
+(Wort 0 = Art, Woerter 1.. = Felder), dann `glyph_bytes` Alpha-Bytes (auf 4
+aufgefuellt).
+
+| Kopf-Byte | Feld |
+|---|---|
+| 0 | `magic` = `0x314E4353` („SCN1“) |
+| 4, 8, 12 | `n_items`, `n_damage`, `glyph_bytes` |
+| 16 | `flags`: Bit 0 Tapete da, Bit 1 unscharfe Tapete fertig |
+| 20, 24, 28 | Griffe: Tapete scharf, Tapete unscharf, Glasquelle (unscharf, sonst scharf); `0xFFFFFFFF` = keiner |
+| 32 | `blur_radius` (Kastenradius in 4er-Bloecken; 0 = Paneele liegen auf den scharfen Pixeln) |
+| 36, 40, 44 | Glas-Tinte `ceil`, `tint`, `tint_w` (`render::GlassInk`) |
+| 48, 52 | Bildschirm `width`, `height` |
+
+| Art | Eintrag | Felder ab Wort 1 |
+|---|---|---|
+| 1 | `Background` | — |
+| 2 | `Glow` | `x, y, w, h, radius, color, band, alpha` |
+| 3 | `GlassBackdrop` | `x, y, w, h, radius` |
+| 4 | `Chrome` | `x, y, w, h, border_a, border_b, bg, rounding, border, border_opacity, bg_opacity, paint_content` |
+| 5 | `Content` | `x, y, w, h, radius, fit` (0 Scale, 1 Extend)`, src` |
+| 6 | `Panel` | `x, y, w, h, src` |
+| 7 | `Text` | `x, y, w, h, src` |
+| 8 | `Fill` | `x, y, w, h, color, alpha, radius` |
+| 9 | `CloseGlyph` | `x, y, w, h, size` (Kantenlaenge der Glyphe)`, color, glyph_off` |
+
+Bedeutung: genau `scene::execute` — fuer jedes Schadensrechteck (am
+Bildschirm beschnitten) jeder Eintrag der Reihe nach, beschnitten auf das
+Rechteck; Quellmasse sind die des Puffers (`width`, `height`, Zeilen dicht
+ausser bei der Tapete). Das Ergebnis muss Bit fuer Bit (alle 32 Bit) dem
+CPU-Ausfuehrer gleichen; der Kernel prueft das am ersten echten Bild
+(Kopie des Ziels, CPU und GPU je in eine, Vergleich) und schaltet erst bei
+Gleichstand um. Das Modul prueft jeden Griff (gebunden, Masse passen zur
+Groesse) und dass das Ziel bildschirmgross ist.
+
+*Zaeune je Puffer:* jeder Auftrag merkt sich in jedem Puffer, den er liest
+oder schreibt, seine Nummer; wer auf der CPU in einen Puffer schreibt (oder
+den Bildschirm liest), wartet nur auf dessen Zaun. Bis A6 wartet das
+Zusammensetzen selbst auf sein Ergebnis, weil danach der Zeiger auf der CPU
+hineingebacken wird.
+
 **Kernel → Modul:**
 
 | Befehl | Bedeutung |
@@ -487,9 +560,9 @@ einem Fenster wirklich geaendert hat.
 | **A0** | Aufraeumen ohne Verhaltensaenderung: tote Layer weg (63 MB); Widget-Szenen in Fensterkoordinaten rastern (Verschieben rastert nicht mehr neu, Treffertests mit Versatz) | gleiches Bild, weniger Speicher, Dock-Animation ohne Neu-Rastern |
 | **A1** | Fenster als Puffer, **CPU-Weg zuerst**: Terminal rendert in seinen Puffer; alles, was heute in Luecken malt (Glow, Ecken, Dock-Griff, Blitz) wird ein eigener Szeneneintrag; Teilwege werden „Fensterpuffer aendern + Schaden melden“ | gleiches Bild; Bildzeit gemessen vorher/nachher |
 | **A2** | Die Szenenliste als Datenstruktur mit **CPU-Ausfuehrer** (aus dem heutigen Code); Zusammensetzen nur im Schadensbereich; Glas tastet ab, was WIRKLICH darunter liegt | CPU-Referenz fuer A5; Glas auch ueber Fenstern richtig |
-| **A3** | gpudev: Puffer dynamisch anmelden/abmelden (Fenster, Tapete, Unschaerfe, Scanout x2), Seitenlisten statt zusammenhaengend, `OP_SCENE`, Fences je Puffer statt `wait_inflight` | Kernel und Modul tauschen Szenen aus |
+| **A3** (gebaut, Kernel 0.607.0) | gpudev: Puffer dynamisch anmelden/abmelden (Fenster, Tapete, Unschaerfe, Scanout x2), Seitenlisten statt zusammenhaengend, `OP_SCENE`, Fences je Puffer statt `wait_inflight` | Kernel und Modul tauschen Szenen aus |
 | **A4** | Shader-Werkzeug (F8): Bauwerkzeug gegen Mesas `brw_compile_cs` (GLSL-Compute → Gen12-Binaerdaten + Parameterbeschreibung, wie `gen_regs.py` erzeugt) und der GPGPU-Start im Modul (Vorlagen: IGT `gpgpu_fill.c`/`gpu_cmds.c` Gen12, Mesa `genX_simple_shader.c`); Probe: Fuellen + Readback | erstes eigenes GPU-Programm laeuft am NUC |
-| **A5** | Die festen Programme: Viereck mit Textur/Deckkraft/Eckenmaske, Unschaerfe (verkleinern + Box), Glow-Ring, Fuellen; GPU-Ausfuehrer der Szenenliste; Pixelvergleich gegen den CPU-Ausfuehrer als Selbsttest | Desktop setzt auf der GPU zusammen; CPU-Last bei Animation in 4K gemessen |
+| **A5** (gebaut, Modul 0.11.0) | Die festen Programme: Viereck mit Textur/Deckkraft/Eckenmaske, Unschaerfe (verkleinern + Box), Glow-Ring, Fuellen; GPU-Ausfuehrer der Szenenliste; Pixelvergleich gegen den CPU-Ausfuehrer als Selbsttest | Desktop setzt auf der GPU zusammen; CPU-Last bei Animation in 4K gemessen |
 | **A6** | Ebenen: Cursor-Plane (save-under faellt weg, das Stocken mit), Flip zwischen zwei Scanout-Puffern im vblank statt Kopie (PLANE_SURF wie `skl_fixup_initial_plane_config`, Ebenen-Register aus `skl_universal_plane.c`) | Zeiger ruckelfrei, kein Kopieren mehr |
 
 **Reihenfolge, weil:** A0–A2 sind reine CPU-Umbauten mit gleichem Bild und
@@ -539,6 +612,19 @@ Zeiger draengt.
 - **Bewegung:** waehrend Dock-/Tausch-Animationen und Groessen-Zug wird der
   alte Puffer gestreckt (Widgets) bzw. beschnitten (Terminal), neu
   gerastert erst am Ende.
+
+**A3/A5, gebaut (Kernel 0.607.0, gpu_intel_tgl 0.11.0)** — ABI v1 in §3.3.
+Kernel: `gpu/gpudev.rs` (Griffe, Seitenlisten ueber `paging::translate`,
+Zaeune je Puffer, verzoegerte Freigabe), `shade/gpu_scene.rs` (Kodierung,
+Vergleich am ersten ganzen Bild, Rueckfall, `gpu verify` / `gpu cpu`);
+Gast-Fronts sind jetzt `PixelBuffer`. Modul: `compose.rs` (Pruefung, Segmente
+an jedem Paneel, Unschaerfe als `blur_down` + 6 × `blur_box`, alle Aufrufe
+eines Auftrags in einem Stapel auf rcs0), Programme `compose.comp`,
+`blur_down.comp`, `blur_box.comp`; dynamische Puffer liegen im PPGTT ueber
+4 GiB, Abmelden ist `gen8_ppgtt_clear`. Ein GPU-Modul darf 128 MB DMA halten
+(Seitentabellen je gebundenem Puffer). Am Host gegen den CPU-Ausfuehrer
+gepruefte Shader-Logik (C++-Uebersetzung derselben Quellen, 2300 Zufallsszenen,
+0 Abweichungen) — was brw daraus macht, zeigt erst der Vergleich am NUC.
 
 **Bekannte Fallen:** Overlays verlassen sich auf Pixel unter ihren Ecken
 (`compositor.rs:1938`); `render_damaged` zeichnet Fenster darueber nicht neu

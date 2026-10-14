@@ -79,6 +79,9 @@ const MAX_MMIO_MAPS: usize = 4;
 /// slot is a (phys, pages) pair, so the ceiling is bookkeeping, not memory.
 const MAX_DMA_ALLOCS: usize = 1024;
 const MAX_DMA_PAGES: usize = 2048; // 8MB total (iwlwifi FW sections ~1.3MB)
+/// For a display controller's module (`host_core::dma_caps`): 128 MB.
+const MAX_DMA_ALLOCS_GPU: usize = 16384;
+const MAX_DMA_PAGES_GPU: usize = 32768;
 const MAX_DMA_PAGES_PER_CALL: usize = 1024; // 4MB; a single FW section can exceed 256KB
 
 /// Linear memory a wasmi instance may hold. Fixed, unlike forge's rule:

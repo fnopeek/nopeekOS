@@ -1,0 +1,53 @@
+#version 460
+// One box-blur pass of background::box_pass over packed block planes
+// (blur_down.comp): `lines` lines of `len` samples, `step` between the
+// samples of a line, `stride` between lines, edges clamped. Each channel
+// is summed and divided on its own, as on the CPU.
+
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words {
+    uint v[];
+};
+
+layout(push_constant, std430) uniform Params {
+    Words src;
+    Words dst;
+    uint lines;
+    uint len;
+    uint stride;
+    uint step;
+    uint radius;
+} p;
+
+uint at(uint base, int i) {
+    int last = int(p.len) - 1;
+    return p.src.v[base + uint(clamp(i, 0, last)) * p.step];
+}
+
+void main() {
+    uint l = gl_GlobalInvocationID.x;
+    if (l >= p.lines)
+        return;
+    uint base = l * p.stride;
+    int r = int(p.radius);
+    uint n = uint(2 * r + 1);
+    uint sr = 0u, sg = 0u, sb = 0u;
+    for (int i = -r; i <= r; i++) {
+        uint v = at(base, i);
+        sr += (v >> 16) & 255u;
+        sg += (v >> 8) & 255u;
+        sb += v & 255u;
+    }
+    for (int i = 0; i < int(p.len); i++) {
+        p.dst.v[base + uint(i) * p.step] = ((sr / n) << 16) | ((sg / n) << 8) | (sb / n);
+        uint a = at(base, i + r + 1);
+        uint d = at(base, i - r);
+        sr = sr + ((a >> 16) & 255u) - ((d >> 16) & 255u);
+        sg = sg + ((a >> 8) & 255u) - ((d >> 8) & 255u);
+        sb = sb + (a & 255u) - (d & 255u);
+    }
+}

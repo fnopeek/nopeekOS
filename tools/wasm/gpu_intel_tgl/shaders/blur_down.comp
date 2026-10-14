@@ -1,0 +1,48 @@
+#version 460
+// The first step of background::blur_region: the mean of each 4x4 block
+// of the target (clipped at the screen edge) over a block grid, packed as
+// one word per block (each channel mean fits a byte).
+
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words {
+    uint v[];
+};
+
+layout(push_constant, std430) uniform Params {
+    Words target;
+    Words planes;
+    uint pitch_px;
+    uint width;
+    uint height;
+    uint bx0;
+    uint by0;
+    uint sw;
+    uint sh;
+} p;
+
+void main() {
+    uint sx = gl_GlobalInvocationID.x;
+    uint sy = gl_GlobalInvocationID.y;
+    if (sx >= p.sw || sy >= p.sh)
+        return;
+    uint x0 = (p.bx0 + sx) * 4u;
+    uint y0 = (p.by0 + sy) * 4u;
+    uint x1 = min(x0 + 4u, p.width);
+    uint y1 = min(y0 + 4u, p.height);
+    uint r = 0u, g = 0u, b = 0u, n = 0u;
+    for (uint y = y0; y < y1; y++) {
+        for (uint x = x0; x < x1; x++) {
+            uint px = p.target.v[y * p.pitch_px + x];
+            r += (px >> 16) & 255u;
+            g += (px >> 8) & 255u;
+            b += px & 255u;
+            n++;
+        }
+    }
+    n = max(n, 1u);
+    p.planes.v[sy * p.sw + sx] = ((r / n) << 16) | ((g / n) << 8) | (b / n);
+}

@@ -11,6 +11,7 @@ pub mod glass;
 pub mod window;
 pub mod buffers;
 pub mod scene;
+pub mod gpu_scene;
 pub mod compositor;
 pub mod terminal;
 pub mod input;

@@ -1053,13 +1053,17 @@ host_imports! {
     // controller becomes the GPU service. HARDWARE-gated.
     // npk_gpudev_register(version) -> 0 / <0
     ctx fn npk_gpudev_register(version: i32) -> i32;
-    // npk_gpudev_bo_info(id, out_ptr) -> 0 / -1; 32 bytes
-    // {phys u64, size u64, pitch, width, height, format u32}
+    // npk_gpudev_bo_info(id, out_ptr) -> 0 / -1; 40 bytes
+    // {phys u64, size u64, pitch, width, height, format, offset, pages u32}
     mem fn npk_gpudev_bo_info(id: i32, out_ptr: i32) -> i32;
+    // npk_gpudev_bo_pages(id, first, out_ptr, max) -> pages / -1; u64 each
+    mem fn npk_gpudev_bo_pages(id: i32, first: i32, out_ptr: i32, max: i32) -> i32;
+    // npk_gpudev_job_data(seq, offset, out_ptr, len) -> bytes / -1
+    mem fn npk_gpudev_job_data(seq: i32, offset: i32, out_ptr: i32, len: i32) -> i32;
     // npk_gpudev_bo_bound(id, gpu_addr) -> 0 / -1
     ctx fn npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
-    // npk_gpudev_ready(ok) -> 0 / -1; ok = 1 after a passed self-test
-    ctx fn npk_gpudev_ready(ok: i32) -> i32;
+    // npk_gpudev_ready(caps) -> 0 / -1; bit 0 copies, bit 1 scenes
+    ctx fn npk_gpudev_ready(caps: i32) -> i32;
     // npk_gpudev_poll(buf_ptr, max) -> jobs / -1; 32 bytes each
     // {seq, op, a0..a5: u32}
     mem fn npk_gpudev_poll(buf_ptr: i32, max: i32) -> i32;
