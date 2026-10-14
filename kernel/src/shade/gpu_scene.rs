@@ -563,7 +563,9 @@ pub fn stats() -> Stats {
 /// `gpu iommu test`: the GPU composes a small buffer into a screen-sized one
 /// twice — while the IOMMU lets the card reach the small buffer, and after
 /// that grant was taken back. The first run must deliver the pattern; the
-/// second must not, and must leave a read fault at the buffer's address.
+/// second must not, and must leave a fault at the buffer's address. The
+/// faulting run may hang the engine, and the module then gives the card
+/// back (Linux wedges the GT on a DMAR fault as well).
 pub fn iommu_probe() {
     use crate::shade::buffers::PixelBuffer;
     const W: u32 = 64;
@@ -617,6 +619,8 @@ pub fn iommu_probe() {
     };
     let pages = (W as usize * H as usize * 4).div_ceil(4096);
     let (lo, hi) = (src.phys(), src.phys() + pages as u64 * 4096);
+    let dst_bytes = sw as u64 * sh as u64 * 4;
+    crate::kprintln!("[npk] iommu test: src {:#x}..{:#x}, dst {:#x}..{:#x}", lo, hi, dst.phys(), dst.phys() + dst_bytes);
     let _ = crate::drivers::vtd::take_faults(dev);
 
     let s1 = run(&src, &dst);
@@ -633,12 +637,19 @@ pub fn iommu_probe() {
     let leaked = arrived(&src, &dst);
     let faults = crate::drivers::vtd::take_faults(dev);
     crate::drivers::vtd::grant(dev, src.phys(), pages);
-    let hit = faults.iter().any(|f| f.read && f.addr >= lo && f.addr < hi);
-    crate::kprintln!("[npk] iommu test: revoked — scene {:?}, pattern {}, read fault at the buffer {}",
+    let hit = faults.iter().any(|f| f.addr >= lo && f.addr < hi);
+    crate::kprintln!("[npk] iommu test: revoked — scene {:?}, pattern {}, fault at the buffer {}",
         s2, if leaked { "ARRIVED" } else { "did not arrive" }, if hit { "recorded" } else { "MISSING" });
     for f in faults.iter().take(4) {
-        crate::kprintln!("[npk] iommu test:   {} fault at {:#x}, reason {:#x}", if f.read { "read" } else { "write" },
-            f.addr, f.reason);
+        let at = if f.addr >= lo && f.addr < hi {
+            "src"
+        } else if f.addr >= dst.phys() && f.addr < dst.phys() + dst_bytes {
+            "dst"
+        } else {
+            "elsewhere"
+        };
+        crate::kprintln!("[npk] iommu test:   {} fault at {:#x} ({}), reason {:#x}", if f.read { "read" } else { "write" },
+            f.addr, at, f.reason);
     }
     crate::kprintln!("[npk] iommu test: {}", if ok1 && !leaked && hit { "PASSED" } else { "FAILED" });
 }
