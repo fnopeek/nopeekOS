@@ -935,6 +935,12 @@ pub fn intel_gt_init(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut 
     }
     i915.uncore.intel_uncore_forcewake_put(FORCEWAKE_ALL);
 
+    let mut l = Line::new();
+    l.s("GT wakeref after init: ").dec(gt.wakeref_count as u64).s(", engines");
+    for e in gt.engine.iter().flatten() {
+        l.s(" ").s(crate::intel_gt::intel_engine_class_repr(e.class)).dec(e.instance as u64).s("=").dec(e.wakeref_count as u64);
+    }
+    l.say();
     crate::intel_rc6::report(i915, gt, "after init");
     crate::intel_rps::report(i915, gt, "after init");
     if let Err(e) = err {
