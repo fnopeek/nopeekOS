@@ -22,6 +22,8 @@
 
 mod drm_mm;
 mod i915_drv;
+mod i915_gem;
+mod i915_irq;
 mod intel_bios;
 mod intel_bw;
 mod intel_cdclk;
@@ -33,6 +35,7 @@ mod intel_ddi;
 mod intel_de;
 mod intel_display;
 mod intel_display_device;
+mod intel_display_irq;
 mod intel_display_power;
 mod intel_display_types;
 mod intel_dkl_phy;
@@ -46,6 +49,7 @@ mod intel_fb;
 mod intel_ggtt;
 mod intel_gmbus;
 mod intel_gt;
+mod intel_gt_irq;
 mod intel_hdmi;
 mod intel_modeset_setup;
 mod intel_opregion;
@@ -58,6 +62,7 @@ mod intel_uncore;
 mod intel_vdsc;
 mod intel_vga;
 mod intel_vrr;
+mod intel_wopcm;
 mod linux;
 mod regs;
 mod skl_scaler;
@@ -155,6 +160,7 @@ pub extern "C" fn _start() {
         irqs_enabled: false,
         dram_info: Default::default(),
         preserve_bios_swizzle: false,
+        irq: Default::default(),
     };
 
     // i915_driver_early_probe
@@ -230,6 +236,11 @@ pub extern "C" fn _start() {
     let _ = intel_cdclk::intel_cdclk_init(&mut cd);
     i915.display.cdclk = cd;
 
+    if i915_irq::intel_irq_install(&mut i915, &mut gt).is_err() {
+        say("intel_irq_install failed, giving the card back");
+        return;
+    }
+
     // intel_display_driver_probe_nogem. intel_panel_sanitize_ssc only acts
     // on IBX/CPT, intel_fdi_pll_freq_update and intel_update_czclk only on
     // ILK/SNB/IVB and VLV/CHV.
@@ -264,6 +275,13 @@ pub extern "C" fn _start() {
     Line::new().s("GGTT[0] raw ").hex((pte0 >> 32) as u32).s("_").hex(pte0 as u32).s(" before, ")
         .hex((ggtt.regs.readq(ggtt.gsm_offset) >> 32) as u32).s("_").hex(ggtt.regs.readq(ggtt.gsm_offset) as u32)
         .s(" after the takeover").say();
+
+    // i915_gem_init; intel_display_driver_probe (the first commit) is not
+    // part of this stage.
+    let gem_ok = i915_gem::i915_gem_init(&mut i915, &mut gt, &mut ggtt, dsm.as_mut()).is_ok();
+    if !gem_ok {
+        say("i915_gem_init failed");
+    }
 
     Line::new().s("GGTT ").dec(ggtt.total >> 20).s(" MB, aperture ").hex((ggtt.gmadr_start >> 32) as u32)
         .s("_").hex(ggtt.gmadr_start as u32).s(" + ").dec(ggtt.mappable_end >> 20).s(" MB, ")
@@ -308,6 +326,12 @@ pub extern "C" fn _start() {
         }
     }
     on.say();
+
+    // The card is given back: the GT quiesced, interrupts off.
+    if gem_ok {
+        i915_gem::i915_gem_driver_remove(&mut i915, &mut gt, &mut ggtt);
+    }
+    i915_irq::intel_irq_uninstall(&mut i915, &mut gt);
 
     // Forcewake taken for register access is released by its timer; wait
     // for it, so the GT can enter RC6 once the module is gone.

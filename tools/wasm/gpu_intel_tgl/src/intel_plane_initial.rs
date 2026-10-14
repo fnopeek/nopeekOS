@@ -46,11 +46,9 @@ pub struct intel_initial_plane_config {
 /// `mem->min_page_size` of the stolen-system region (PAGE_SIZE).
 const STOLEN_MIN_PAGE_SIZE: u64 = 4096;
 
-/// `intel_plane_initial_vblank_wait` = `intel_crtc_wait_for_next_vblank`.
-/// It waits on the vblank interrupt, which is installed with the IRQ
-/// handler; until then the wait is reported.
-fn intel_plane_initial_vblank_wait(pipe: u32) {
-    Line::new().s("pipe ").dec(pipe as u64).s(": vblank wait after moving the initial fb skipped (no vblank interrupt)").say();
+/// `intel_plane_initial_vblank_wait`.
+fn intel_plane_initial_vblank_wait(i915: &mut drm_i915_private, pipe: u32) {
+    crate::intel_display_irq::intel_crtc_wait_for_next_vblank(i915, pipe);
 }
 
 /// `intel_reuse_initial_plane_obj`: another active pipe already took over
@@ -373,7 +371,7 @@ pub fn intel_initial_plane_config(i915: &mut drm_i915_private, ggtt: &mut i915_g
 
         let pc = plane_configs[pipe as usize];
         if skl_fixup_initial_plane_config(i915, pipe, &pc) {
-            intel_plane_initial_vblank_wait(pipe);
+            intel_plane_initial_vblank_wait(i915, pipe);
         }
     }
     plane_configs

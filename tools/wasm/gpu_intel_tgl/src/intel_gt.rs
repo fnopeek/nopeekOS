@@ -76,6 +76,7 @@ pub struct intel_gt {
     pub clock_period_ns: u32,
     pub engine: [Option<intel_engine_cs>; I915_NUM_ENGINES as usize],
     pub has_logical_contexts: bool,
+    pub wopcm: crate::intel_wopcm::intel_wopcm,
 }
 
 impl intel_gt {
@@ -87,6 +88,7 @@ impl intel_gt {
             clock_period_ns: 0,
             engine: [None; I915_NUM_ENGINES as usize],
             has_logical_contexts: false,
+            wopcm: Default::default(),
         }
     }
 }
@@ -503,3 +505,14 @@ pub fn intel_engine_class_repr(class: u32) -> &'static str {
         _ => "xxx",
     }
 }
+
+/// `intel_gt_init`.
+pub fn intel_gt_init(_i915: &mut drm_i915_private, _gt: &mut intel_gt, _ggtt: &mut crate::intel_ggtt::i915_ggtt,
+                     _dsm: Option<&mut crate::intel_ggtt::i915_dsm>) -> Result<(), i32> {
+    crate::linux::say("intel_gt_init: not ported");
+    Ok(())
+}
+
+/// `intel_gt_driver_remove` + `intel_gt_driver_release`.
+pub fn intel_gt_driver_remove(_i915: &mut drm_i915_private, _gt: &mut intel_gt,
+                              _ggtt: &mut crate::intel_ggtt::i915_ggtt) {}
