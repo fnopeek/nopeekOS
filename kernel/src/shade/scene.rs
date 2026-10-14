@@ -73,11 +73,12 @@ pub enum Source {
 /// How a source fills a destination rectangle of a different size.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fit {
-    /// Stretched to the destination (a window mid-animation shows its
+    /// Stretched to the destination (a window swapping tiles shows its
     /// last pixels until it is rendered at the new size).
     Scale,
     /// 1:1, cropped where larger, its last row/column repeated where
-    /// smaller (a guest frame on its way to a new tile size).
+    /// smaller (a guest frame on its way to a new tile size, a window while
+    /// the dock slides).
     Extend,
 }
 

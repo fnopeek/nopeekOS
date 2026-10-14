@@ -1835,7 +1835,10 @@ impl Compositor {
                     let c = p.content;
                     // A pure move only updates the origin; a new size lays the
                     // scene out again — except mid-motion, where the old
-                    // pixels are stretched until the motion ends.
+                    // pixels stand in until the motion ends: cropped or
+                    // extended at the bottom and right while the dock slides
+                    // or a split is dragged (the content stays where it is),
+                    // stretched while windows swap tiles.
                     let (lw, lh) = if in_motion {
                         crate::shade::widgets::with_scene(p.id.0, |sc| (sc.width, sc.height)).unwrap_or((c.w, c.h))
                     } else {
@@ -1847,8 +1850,8 @@ impl Compositor {
                             |sc| (sc.pixels.width(), sc.pixels.height())).unwrap_or((0, 0));
                         items.push(Item::Panel { src: Source::Widget(p.id.0), dst: Rect::new(c.x, c.y, sw, sh) });
                     } else {
-                        items.push(Item::Content { src: Source::Widget(p.id.0), dst: c, radius: inner_r,
-                            fit: Fit::Scale });
+                        let fit = if self.animation.is_some() { Fit::Scale } else { Fit::Extend };
+                        items.push(Item::Content { src: Source::Widget(p.id.0), dst: c, radius: inner_r, fit });
                     }
                 }
                 WindowKind::Surface => {
