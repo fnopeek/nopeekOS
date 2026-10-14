@@ -345,6 +345,8 @@ pub struct VirtioGpu {
     held: Option<Held>,
     /// Blobs given back by the guest whose pages gpudev may still have bound.
     retired: Vec<Arc<ForeignPixels>>,
+    /// Blob commands logged so far (the first few, and every refusal).
+    blob_log_count: u32,
 }
 
 impl VirtioGpu {
@@ -385,6 +387,7 @@ impl VirtioGpu {
             hold_for: None,
             held: None,
             retired: Vec::new(),
+            blob_log_count: 0,
         }
     }
 
@@ -697,10 +700,12 @@ impl VirtioGpu {
             }
             VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB => {
                 let resp = self.handle_create_blob(&request[24..], mem);
+                self.log_blob("CREATE_BLOB", &request[24..], resp);
                 build_ctrl_hdr(resp, flags, fence_id)
             }
             VIRTIO_GPU_CMD_SET_SCANOUT_BLOB => {
                 let resp = self.handle_set_scanout_blob(&request[24..]);
+                self.log_blob("SET_SCANOUT_BLOB", &request[24..], resp);
                 build_ctrl_hdr(resp, flags, fence_id)
             }
             VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING => {
@@ -784,6 +789,24 @@ impl VirtioGpu {
             });
         }
         true
+    }
+
+    /// Log a blob command: the first few, and every refusal (up to a bound).
+    fn log_blob(&mut self, what: &str, body: &[u8], resp: u32) {
+        let n = self.blob_log_count;
+        if n >= 24 || (n >= 6 && resp == VIRTIO_GPU_RESP_OK_NODATA) {
+            return;
+        }
+        self.blob_log_count = n + 1;
+        let d = |o: usize| body.get(o..o + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        let q = |o: usize| u64::from(d(o)) | u64::from(d(o + 4)) << 32;
+        if what == "CREATE_BLOB" {
+            kprintln!("[gpu] CREATE_BLOB res={} mem={} entries={} size={} first={:#x}+{:#x} -> {:#06x}",
+                d(0), d(4), d(12), q(24), q(32), d(40), resp);
+        } else {
+            kprintln!("[gpu] SET_SCANOUT_BLOB id={} res={} {}x{}+{}+{} of {}x{} fmt={} stride={} offset={} -> {:#06x}",
+                d(16), d(20), d(8), d(12), d(0), d(4), d(24), d(28), d(32), d(40), d(56), resp);
+        }
     }
 
     /// The guest negotiated guest blobs.
@@ -913,6 +936,11 @@ impl VirtioGpu {
         let lit = || gb::lit_percent_at(view.width, view.height, |x, y| view.pixel(x, y));
         crate::microvm::boottime::gpu_lit(lit);
         let hidden = wid != 0 && gb::presenting() && !crate::shade::surface::has_frame(wid) && lit() < gb::LIT_PCT;
+        if self.blob_log_count < 24 && self.dmg_flush_count < 3 {
+            self.blob_log_count += 1;
+            kprintln!("[gpu] blob FLUSH on output {} (window {}): {}x{}, {}% lit, hidden={} present={}",
+                k, wid, view.width, view.height, lit(), hidden, gb::presenting());
+        }
         if hidden || !gb::should_present_with(lit) {
             // Not shown: a picture still shown from the blob before must not
             // change under the window once the guest writes that blob.
@@ -1499,6 +1527,10 @@ impl VirtioGpu {
             CC_DRIVER_FEATURE => {
                 let half = (self.driver_feature_select & 1) as usize;
                 self.driver_features[half] = val as u32;
+                if half == 0 {
+                    kprintln!("[gpu] guest features {:#x} (blob {})", val,
+                        if val as u32 & VIRTIO_GPU_F_RESOURCE_BLOB != 0 { "on" } else { "off" });
+                }
             }
             CC_MSIX_CONFIG => {
                 self.msix_config = val as u16;
