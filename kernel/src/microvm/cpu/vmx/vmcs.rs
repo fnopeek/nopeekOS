@@ -614,6 +614,14 @@ fn invept(eptp: u64) {
     }
 }
 
+/// Drop the translations derived from the current VMCS's EPT on this core
+/// (`ept_sync_context`): after a present EPT entry was cleared.
+pub fn sync_ept() {
+    if let Ok(eptp) = vmread(EPT_POINTER) {
+        invept(eptp);
+    }
+}
+
 /// `vmx_flush_tlb_guest`: the guest's translations on this core. Without
 /// VPID every entry flushes them anyway.
 pub fn flush_guest_tlb() {

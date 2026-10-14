@@ -191,6 +191,12 @@ impl GuestMem {
         Some(host)
     }
 
+    /// The second-level paging format and its root (PML4), for the
+    /// host-visible window (`hostmem`).
+    pub fn second_level(&self) -> (SecondLevel, u64) {
+        (self.sl, self.table_root)
+    }
+
     /// Host physical address of the guest page at `gpa` (page-aligned),
     /// faulted in if the guest has not touched it. The frame belongs to the
     /// VM until its memory is freed at close.

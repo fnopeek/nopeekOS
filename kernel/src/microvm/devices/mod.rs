@@ -9,6 +9,7 @@
 
 pub mod guest_fetch;
 pub mod guest_mem;
+pub mod hostmem;
 pub mod ioapic;
 pub mod insn_decoder;
 pub mod msix;
@@ -23,6 +24,7 @@ pub mod pit8253;
 pub mod blk_image;
 pub mod virtio_blk_pci;
 pub mod virtio_console_pci;
+pub mod virtio_gpu_ctx;
 pub mod virtio_gpu_pci;
 pub mod virtio_input_pci;
 pub mod virtio_input_keymap;

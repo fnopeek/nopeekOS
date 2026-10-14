@@ -1507,6 +1507,11 @@ impl VmContext {
         if !crate::microvm::cpu::entry_irqs_off(kick_gen, host_core, entry_deadline) {
             continue;
         }
+        // The host-visible window lost a mapping since this core last
+        // flushed: drop the stale EPT translations before the entry.
+        if crate::microvm::devices::hostmem::flush_before_entry(host_core) {
+            vmcs::sync_ept();
+        }
         // `vmx_sync_pir_to_irr` after `IN_GUEST_MODE` (vcpu_enter_guest): a
         // post that saw the vCPU outside the guest sent no notification, and
         // is folded in here; one that saw it inside notifies the CPU.
@@ -2057,6 +2062,16 @@ impl VmContext {
                         last_outcome = Some(outcome);
                         continue;
                     }
+                }
+                // The virtio-gpu host-visible window: mapped meanwhile →
+                // enter again; unmapped → the hole (reads 0, writes dropped).
+                if crate::microvm::devices::hostmem::contains(gpa)
+                    && (crate::microvm::devices::hostmem::is_mapped(gpa)
+                        || handle_mmio_ept_dev(&mut self.vcpu.regs,
+                            &mut crate::microvm::devices::hostmem::Hole, &mut sh.pic, gpa, gm))
+                {
+                    last_outcome = Some(outcome);
+                    continue;
                 }
                 // Demand-paged guest RAM. A violation on a gpa
                 // inside the advertised window but above the

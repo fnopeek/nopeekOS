@@ -841,6 +841,37 @@ Legacy-Modus mit Register-Invalidierung (`iommu_set_root_entry`,
 Offen: AMD-Vi (IdeaPad); die Einheit fuer alle uebrigen Geraete
 (INCLUDE_PCI_ALL) — dafuer braeuchten NVMe, Netz und USB eigene Freigaben.
 
+### 8b. Stufe 6 gebaut: native context im virtio-gpu (Kernel 0.612.0)
+
+- `microvm/devices/virtio_gpu_ctx.rs`: der allgemeine Teil von
+  virglrenderer `drm_context.c` — Kontexte, ccmd-Strom aus `SUBMIT_3D`
+  (Laengen- und Ausrichtungspruefung je Befehl), Antwort in den
+  Antwortpuffer des Gastes mit festem `rsp_mem_offset` (nie aus dem
+  gast-beschreibbaren Puffer zurueckgelesen) und der Laenge, die der Gast
+  im Fach hinterlassen hat (einmal gelesen, gegen TOCTOU), Seqno nach
+  jedem Befehl; HOST3D-Blobs (Blob-ID 0 = Antwortpuffer, sonst ein Objekt
+  des Backends). Die i915-Befehle selbst gehen an `trait Backend` — das
+  baut Stufe 7.
+- `virtio_gpu_pci.rs`: Merkmale `VIRGL` + `CONTEXT_INIT` (der Gasttreiber
+  legt Kontexte nur mit `VIRGL` an; seine Dumb-Puffer gehen dann wieder den
+  2D-Weg), Capset `DRM` (Nr. 6), `CTX_CREATE/DESTROY/ATTACH/DETACH`,
+  `SUBMIT_3D` mit Ring-Index und Zaun (Abschluss erst, wenn das Backend den
+  Zaun meldet; der GPU-Arbeiter schaut bei offenen Zaeunen wieder nach),
+  `RESOURCE_MAP_BLOB/UNMAP_BLOB`, BAR2 (64-bit, 1 GiB bei 4 GiB) mit
+  Shared-Memory-Capability (`SHM_ID_HOST_VISIBLE`).
+- `microvm/devices/hostmem.rs` + `ept.rs`/`npt.rs`: Host-Seiten im
+  Fenster ein- und ausblenden; Ausblenden kehrt erst zurueck, wenn keine
+  vCPU die alte Uebersetzung mehr nutzen kann (Generationszaehler, Kick,
+  INVEPT bzw. TLB-Flush vor dem naechsten Eintritt — KVMs
+  `KVM_REQ_TLB_FLUSH`). Nicht abgebildete Fensterseiten lesen 0.
+- Angeboten nur, wenn ein Backend registriert ist (Stufe 7) oder mit
+  `set microvm_gpu test`: dann ein Pruef-Backend mit dem Capset der Karte
+  an 00:02.0, das jeden ccmd mit „kein Geraet" beantwortet. Erwartet im
+  Log: `[gpu] guest features … (… virgl on, context init on)` und
+  `GET_CAPSET drm`. Alpines Mesa hat kein Intel-virtio, faellt also auf
+  llvmpipe — das ist zugleich die Probe fuer den Rueckfall.
+- Gastpatch: Schadensrechtecke bleiben auch fuer HOST3D-Blobs stehen.
+
 ---
 
 ## 9. Stufen
@@ -855,7 +886,7 @@ Jede Stufe hat ein Ergebnis, das man am Geraet sieht oder misst.
 | **1b** | gpudev-Kern (§3.3: Griffe, Abgabe, Fences, Kontexte) + erster Nutzer Bildkopie per bcs0 + Autostart nach dem Login + Readback-Selbsttest; danach **`intel_xe.rs` raus** | NUC | gleiche Bildzeiten wie heute; Hostaufrufe je Bild gezaehlt (forge-Kosten) |
 | **2** | IOMMU (VT-d) fuer die Karte — Voraussetzung fuer fremde Befehlspuffer (F5). **Gebaut (Kernel 0.611.0), NUC-Test offen** — §8a | NUC | Karte erreicht nur freigegebene Seiten; Gegenprobe mit absichtlich falscher Adresse (`gpu iommu test`) |
 | **3–5** | Desktop auf der GPU, in Schritten A0–A6 (§5.4): Fenster als Puffer, Szenenliste mit CPU- und GPU-Ausfuehrer, feste Shader, Cursor-Plane, Flip | NUC | `comp`-Zeit je 4K-Bild vorher/nachher, CPU-Last bei Animation |
-| **6** | virtio-gpu: blob, context init, hostmem, Capset `DRM` | — | Gast sieht das Capset |
+| **6** | virtio-gpu: blob, context init, hostmem, Capset `DRM`. **Gebaut (Kernel 0.612.0), Test offen** — §8b | — | Gast sieht das Capset (`set microvm_gpu test`) |
 | **7** | native context Intel (Wirtsseite i915-Protokoll) + Gast-Mesa mit `intel-virtio-experimental` | NUC | `glxinfo` im Gast nennt iris; WebGL in LibreWolf |
 | **8** | `gpu_amd` Fundament: PSP, Firmware, SDMA, GFX, GPUVM | IdeaPad | SDMA-Selbsttest gruen |
 | **9** | native context AMD (Gast-Mesa von Alpine) | IdeaPad | `glxinfo` im Gast nennt radeonsi |

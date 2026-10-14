@@ -1,15 +1,16 @@
 --- a/drivers/gpu/drm/virtio/virtgpu_plane.c
 +++ b/drivers/gpu/drm/virtio/virtgpu_plane.c
-@@ -113,8 +113,11 @@
+@@ -113,8 +113,12 @@
  	 * Ignore damage clips if the framebuffer attached to the plane's state
  	 * has changed since the last plane update (page-flip). In this case, a
  	 * full plane update should happen because uploads are done per-buffer.
-+	 * A guest blob is not uploaded: the host reads the new framebuffer
-+	 * where it lies, so the damage against the previous frame holds.
++	 * A blob is not uploaded: the host reads the new framebuffer where
++	 * it lies, so the damage against the previous frame holds.
  	 */
 -	if (old_plane_state->fb != new_plane_state->fb)
 +	if (old_plane_state->fb != new_plane_state->fb &&
-+	    !gem_to_virtio_gpu_obj(new_plane_state->fb->obj[0])->guest_blob)
++	    !gem_to_virtio_gpu_obj(new_plane_state->fb->obj[0])->guest_blob &&
++	    !gem_to_virtio_gpu_obj(new_plane_state->fb->obj[0])->host3d_blob)
  		new_plane_state->ignore_damage_clips = true;
  
  	crtc_state = drm_atomic_get_crtc_state(state,

@@ -25,6 +25,16 @@ pub fn lock() -> MutexGuard<'static, VirtioGpu> { GPU.lock() }
 /// Reset the device on VM teardown/start (alongside `net_backend::reset`).
 pub fn reset() {
     *GPU.lock() = VirtioGpu::new();
+    let mode = crate::config::get("microvm_gpu");
+    let mode = mode.as_deref().map(str::trim);
+    if mode == Some("test") && !super::virtio_gpu_ctx::backend_ready() {
+        if let Some(b) = super::virtio_gpu_ctx::ProbeBackend::new() {
+            super::virtio_gpu_ctx::set_backend(Some(alloc::boxed::Box::new(b)));
+        }
+    }
+    // Native contexts for this VM: a backend serves the host's GPU, and
+    // `set microvm_gpu off` does not keep the guest on the CPU.
+    GPU.lock().nativectx = super::virtio_gpu_ctx::backend_ready() && mode != Some("off");
     RESUME_TSC.store(0, Ordering::Release);
     MSIX.reset(super::msix::wanted());
     reset_vectors();
@@ -408,7 +418,11 @@ fn worker_entry(_arg: u64) {
         }
         // Drain the deferred doorbells: the heavy copy + write_frame run on
         // this core, off the vCPU, and the completion goes out as a message.
-        let kicks = GPU_KICK.swap(0, Ordering::AcqRel);
+        let mut kicks = GPU_KICK.swap(0, Ordering::AcqRel);
+        // SUBMIT_3D completions wait for their fences: look again.
+        if GPU.lock().fences_pending() {
+            kicks |= 1;
+        }
         if kicks != 0 {
             if let Some(gm) = crate::microvm::devices::guest_mem::active() {
                 for q in 0..2u16 {

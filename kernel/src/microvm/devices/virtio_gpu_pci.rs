@@ -26,8 +26,13 @@
 //! DETACH_BACKING, reset) or the VM's memory is freed, every picture shown
 //! from it becomes a copy and gpudev unbinds it (`release_blob`).
 //!
-//! Out of scope here: virgl/3D, host blobs.
-//! We advertise 0 capsets so Linux skips virgl probing entirely.
+//! DRM native context (stage 6, `virtio_gpu_ctx`): offered only while a
+//! backend for the host's GPU is registered. Then the device also offers
+//! `VIRGL` (the guest driver creates contexts only with it, and its dumb
+//! buffers then go the 2D way again), `CONTEXT_INIT`, the capset `DRM` and a
+//! host-visible window (BAR2, `hostmem`) that HOST3D blobs are mapped into.
+//!
+//! Out of scope here: virgl command streams.
 
 #![allow(dead_code)]
 
@@ -57,6 +62,10 @@ const CAP_NOTIFY_OFF: u8 = 0x54;
 const CAP_ISR_OFF:    u8 = 0x68;
 const CAP_DEVICE_OFF: u8 = 0x78;
 const CAP_MSIX_OFF:   u8 = 0x88;
+const CAP_SHM_OFF:    u8 = 0x98;
+const VIRTIO_PCI_CAP_SHARED_MEMORY_CFG: u8 = 8;
+/// `VIRTIO_GPU_SHM_ID_HOST_VISIBLE`.
+const SHM_ID_HOST_VISIBLE: u8 = 1;
 
 const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
 const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
@@ -114,6 +123,12 @@ const VIRTIO_GPU_F_EDID: u32 = 1 << 1;
 /// Guest blobs (see the module comment).
 const VIRTIO_GPU_F_RESOURCE_BLOB: u32 = 1 << 3;
 const VIRTIO_GPU_BLOB_MEM_GUEST: u32 = 1;
+/// Native context (`virtio_gpu_ctx`).
+const VIRTIO_GPU_F_VIRGL: u32 = 1 << 0;
+const VIRTIO_GPU_F_CONTEXT_INIT: u32 = 1 << 4;
+const VIRTIO_GPU_BLOB_MEM_HOST3D: u32 = 2;
+const VIRTIO_GPU_FLAG_FENCE: u32 = 1 << 0;
+const VIRTIO_GPU_FLAG_INFO_RING_IDX: u32 = 1 << 1;
 
 // virtio-gpu protocol command/response types
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO:        u32 = 0x0100;
@@ -129,17 +144,31 @@ const VIRTIO_GPU_CMD_GET_CAPSET:              u32 = 0x0109;
 const VIRTIO_GPU_CMD_GET_EDID:                u32 = 0x010a;
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB:    u32 = 0x010c;
 const VIRTIO_GPU_CMD_SET_SCANOUT_BLOB:        u32 = 0x010d;
+const VIRTIO_GPU_CMD_CTX_CREATE:              u32 = 0x0200;
+const VIRTIO_GPU_CMD_CTX_DESTROY:             u32 = 0x0201;
+const VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE:     u32 = 0x0202;
+const VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE:     u32 = 0x0203;
+const VIRTIO_GPU_CMD_SUBMIT_3D:               u32 = 0x0207;
+const VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB:       u32 = 0x0208;
+const VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB:     u32 = 0x0209;
 
 const VIRTIO_GPU_CMD_UPDATE_CURSOR:           u32 = 0x0300;
 const VIRTIO_GPU_CMD_MOVE_CURSOR:             u32 = 0x0301;
 
 const VIRTIO_GPU_RESP_OK_NODATA:           u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO:     u32 = 0x1101;
+const VIRTIO_GPU_RESP_OK_CAPSET_INFO:      u32 = 0x1102;
+const VIRTIO_GPU_RESP_OK_CAPSET:           u32 = 0x1103;
 const VIRTIO_GPU_RESP_OK_EDID:             u32 = 0x1104;
+const VIRTIO_GPU_RESP_OK_MAP_INFO:         u32 = 0x1106;
 const VIRTIO_GPU_RESP_ERR_UNSPEC:          u32 = 0x1200;
 const VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY:   u32 = 0x1201;
 const VIRTIO_GPU_RESP_ERR_INVALID_RES_ID:  u32 = 0x1203;
 const VIRTIO_GPU_RESP_ERR_INVALID_PARAM:   u32 = 0x1205;
+const VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID: u32 = 0x1204;
+pub const RESP_ERR_INVALID_PARAM: u32 = VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+pub const RESP_ERR_OUT_OF_MEMORY: u32 = VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
+pub const RESP_ERR_INVALID_CONTEXT_ID: u32 = VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID;
 
 // Display geometry advertised in GET_DISPLAY_INFO
 const DISPLAY_W: u32 = 1280;
@@ -273,7 +302,7 @@ struct Held {
     head: u16,
     response: Vec<u8>,
     resp_descs: Vec<(u64, u32)>,
-    blob: Arc<ForeignPixels>,
+    blob: Option<Arc<ForeignPixels>>,
     deadline: u64,
 }
 
@@ -342,11 +371,21 @@ pub struct VirtioGpu {
     last_blob: [Option<Arc<ForeignPixels>>; MAX_OUTPUTS],
     /// The blob a FLUSH being served must wait for (`Held`).
     hold_for: Option<Arc<ForeignPixels>>,
+    /// The fence a SUBMIT_3D being served must wait for: (ctx, ring, fence).
+    fence_wait: Option<(u32, u32, u64)>,
     held: Option<Held>,
     /// Blobs given back by the guest whose pages gpudev may still have bound.
     retired: Vec<Arc<ForeignPixels>>,
     /// Blob commands logged so far (the first few, and every refusal).
     blob_log_count: u32,
+    /// Native contexts are offered this VM (decided at its start).
+    pub nativectx: bool,
+    ctxs: super::virtio_gpu_ctx::Contexts,
+    /// SUBMIT_3D completions waiting for their fence: (completion, ctx,
+    /// ring, fence).
+    fenced: Vec<(Held, u32, u32, u64)>,
+    bar2_lo_sized: bool,
+    bar2_hi_sized: bool,
 }
 
 impl VirtioGpu {
@@ -385,9 +424,15 @@ impl VirtioGpu {
             last_flush_res: [0; MAX_OUTPUTS],
             last_blob: [const { None }; MAX_OUTPUTS],
             hold_for: None,
+            fence_wait: None,
             held: None,
             retired: Vec::new(),
             blob_log_count: 0,
+            nativectx: false,
+            ctxs: super::virtio_gpu_ctx::Contexts::new(),
+            fenced: Vec::new(),
+            bar2_lo_sized: false,
+            bar2_hi_sized: false,
         }
     }
 
@@ -427,11 +472,11 @@ impl VirtioGpu {
     /// command type, and write the response into the driver-writable
     /// descriptor(s).
     fn service_controlq(&mut self, mem: &GuestMem) -> bool {
-        // A held FLUSH completes first; until then nothing else is served.
-        let mut completed = false;
+        // SUBMIT_3D completions whose fence is done, in queue order per ring.
+        let mut completed = self.complete_fences(mem);
         if let Some(h) = &self.held {
             let now = crate::interrupts::rdtsc();
-            if super::gpu_backend::full_active() && !blob_unread(&h.blob) && now < h.deadline {
+            if super::gpu_backend::full_active() && h.blob.as_ref().is_some_and(|b| !blob_unread(b)) && now < h.deadline {
                 return false;
             }
             let h = self.held.take().unwrap();
@@ -441,9 +486,31 @@ impl VirtioGpu {
         self.serve_controlq(mem) || completed
     }
 
+    /// Complete the SUBMIT_3D chains whose fences are done.
+    fn complete_fences(&mut self, mem: &GuestMem) -> bool {
+        let mut any = false;
+        let mut i = 0;
+        while i < self.fenced.len() {
+            let (_, ctx, ring, fence) = self.fenced[i];
+            if self.ctxs.fence_done(ctx, ring, fence) {
+                let (h, ..) = self.fenced.remove(i);
+                self.complete(mem, h.head, &h.response, &h.resp_descs);
+                any = true;
+            } else {
+                i += 1;
+            }
+        }
+        any
+    }
+
+    /// Fenced SUBMIT_3D completions still waiting.
+    pub fn fences_pending(&self) -> bool {
+        !self.fenced.is_empty()
+    }
+
     /// The blob that a held FLUSH waits for to be read out, if any.
     pub fn held_blob(&self) -> Option<Arc<ForeignPixels>> {
-        self.held.as_ref().map(|h| h.blob.clone())
+        self.held.as_ref().and_then(|h| h.blob.clone())
     }
 
     /// Write `response` into the chain's writable descriptors and return the
@@ -535,12 +602,18 @@ impl VirtioGpu {
             if let Some(blob) = self.hold_for.take() {
                 if super::gpu_backend::full_active() && !blob_unread(&blob) {
                     self.held = Some(Held {
-                        head, response, resp_descs, blob,
+                        head, response, resp_descs, blob: Some(blob),
                         deadline: now + crate::interrupts::tsc_freq() / 1000 * HOLD_MAX_MS,
                     });
                     last_avail = last_avail.wrapping_add(1);
                     break;
                 }
+            }
+            // A fenced SUBMIT_3D completes when its fence is done.
+            if let Some((ctx, ring, fence)) = self.fence_wait.take() {
+                self.fenced.push((Held { head, response, resp_descs, blob: None, deadline: 0 }, ctx, ring, fence));
+                last_avail = last_avail.wrapping_add(1);
+                continue;
             }
 
             // Write response across the writable descriptors in order.
@@ -690,16 +763,20 @@ impl VirtioGpu {
             VIRTIO_GPU_CMD_RESOURCE_UNREF => {
                 if request.len() >= 24 + 8 {
                     let rid = u32::from_le_bytes([request[24], request[25], request[26], request[27]]);
-                    self.release_blob(rid);
-                    if !self.wait_released(RELEASE_WAIT_MS) {
-                        kprintln!("[gpu] a guest frame given back is still bound on the GPU");
+                    if self.ctxs.host3d.contains_key(&rid) {
+                        self.drop_host3d(rid);
+                    } else {
+                        self.release_blob(rid);
+                        if !self.wait_released(RELEASE_WAIT_MS) {
+                            kprintln!("[gpu] a guest frame given back is still bound on the GPU");
+                        }
+                        self.resources.retain(|r| r.id != rid);
                     }
-                    self.resources.retain(|r| r.id != rid);
                 }
                 build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
             }
             VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB => {
-                let resp = self.handle_create_blob(&request[24..], mem);
+                let resp = self.handle_create_blob(ctx_id, &request[24..], mem);
                 self.log_blob("CREATE_BLOB", &request[24..], resp);
                 build_ctrl_hdr(resp, flags, fence_id)
             }
@@ -737,10 +814,83 @@ impl VirtioGpu {
                 self.handle_flush(&request[24..]);
                 build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
             }
-            VIRTIO_GPU_CMD_GET_CAPSET_INFO | VIRTIO_GPU_CMD_GET_CAPSET => {
-                // We advertise num_capsets=0; Linux shouldn't ask. If
-                // it does, fail clean rather than corrupting.
-                build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, flags, fence_id)
+            VIRTIO_GPU_CMD_GET_CAPSET_INFO => {
+                let index = le32(request, 24);
+                match (self.nativectx, index) {
+                    (true, Some(0)) => {
+                        let mut r = build_ctrl_hdr(VIRTIO_GPU_RESP_OK_CAPSET_INFO, flags, fence_id);
+                        for v in [super::virtio_gpu_ctx::CAPSET_DRM, 0, super::virtio_gpu_ctx::CAPSET_DRM_SIZE, 0] {
+                            r.extend_from_slice(&v.to_le_bytes());
+                        }
+                        r
+                    }
+                    _ => build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, flags, fence_id),
+                }
+            }
+            VIRTIO_GPU_CMD_GET_CAPSET => {
+                let id = le32(request, 24);
+                match (self.nativectx, id, super::virtio_gpu_ctx::capset()) {
+                    (true, Some(super::virtio_gpu_ctx::CAPSET_DRM), Some(data)) => {
+                        self.log_ctx("GET_CAPSET drm", super::virtio_gpu_ctx::CAPSET_DRM, data.len() as u64, true);
+                        let mut r = build_ctrl_hdr(VIRTIO_GPU_RESP_OK_CAPSET, flags, fence_id);
+                        r.extend_from_slice(&data);
+                        r
+                    }
+                    _ => build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, flags, fence_id),
+                }
+            }
+            VIRTIO_GPU_CMD_CTX_CREATE => {
+                let init = le32(request, 28).unwrap_or(0);
+                let ok = self.nativectx && self.ctxs.create(ctx_id, init).is_ok();
+                self.log_ctx("CTX_CREATE", ctx_id, init as u64, ok);
+                build_ctrl_hdr(if ok { VIRTIO_GPU_RESP_OK_NODATA } else { VIRTIO_GPU_RESP_ERR_UNSPEC }, flags, fence_id)
+            }
+            VIRTIO_GPU_CMD_CTX_DESTROY => {
+                for res in self.ctxs.destroy(ctx_id) {
+                    self.drop_host3d(res);
+                }
+                build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
+            }
+            VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE | VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE => {
+                build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
+            }
+            VIRTIO_GPU_CMD_SUBMIT_3D => {
+                let size = le32(request, 24).unwrap_or(0) as usize;
+                let ring = if flags & VIRTIO_GPU_FLAG_INFO_RING_IDX != 0 { request[20] as u32 } else { 0 };
+                let stream = request.get(32..32 + size);
+                match stream.map(|st| self.ctxs.submit(ctx_id, ring, st)) {
+                    Some(Ok(fence)) => {
+                        if flags & VIRTIO_GPU_FLAG_FENCE != 0 && !self.ctxs.fence_done(ctx_id, ring, fence) {
+                            self.fence_wait = Some((ctx_id, ring, fence));
+                        }
+                        build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
+                    }
+                    _ => {
+                        self.log_ctx("SUBMIT_3D refused", ctx_id, size as u64, false);
+                        build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, flags, fence_id)
+                    }
+                }
+            }
+            VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB => {
+                let rid = le32(request, 24).unwrap_or(0);
+                let offset = le64(request, 32).unwrap_or(u64::MAX);
+                match self.map_host3d(rid, offset) {
+                    Ok(map_info) => {
+                        let mut r = build_ctrl_hdr(VIRTIO_GPU_RESP_OK_MAP_INFO, flags, fence_id);
+                        r.extend_from_slice(&map_info.to_le_bytes());
+                        r.extend_from_slice(&0u32.to_le_bytes());
+                        r
+                    }
+                    Err(e) => {
+                        self.log_ctx("MAP_BLOB refused", rid, offset, false);
+                        build_ctrl_hdr(e, flags, fence_id)
+                    }
+                }
+            }
+            VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB => {
+                let rid = le32(request, 24).unwrap_or(0);
+                self.unmap_host3d(rid);
+                build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
             }
             VIRTIO_GPU_CMD_GET_EDID => {
                 // request body: scanout (u32) + padding (u32)
@@ -791,6 +941,78 @@ impl VirtioGpu {
         true
     }
 
+    /// Log a native-context event: the first few, and every refusal.
+    fn log_ctx(&mut self, what: &str, id: u32, arg: u64, ok: bool) {
+        let n = self.blob_log_count;
+        if n >= 24 || (n >= 6 && ok) {
+            return;
+        }
+        self.blob_log_count = n + 1;
+        kprintln!("[gpu] {} {} ({:#x}){}", what, id, arg, if ok { "" } else { " — refused" });
+    }
+
+    /// RESOURCE_CREATE_BLOB with `BLOB_MEM_HOST3D` in context `ctx_id`.
+    fn create_host3d(&mut self, ctx_id: u32, res_id: u32, blob_id: u64, size: u64) -> u32 {
+        if res_id == 0 || self.resources.iter().any(|r| r.id == res_id) || self.resources.len() >= MAX_RESOURCES {
+            return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+        }
+        if let Err(e) = self.ctxs.create_blob(ctx_id, res_id, blob_id, size) {
+            self.log_ctx("CREATE_BLOB host3d", res_id, blob_id, false);
+            return e;
+        }
+        let pages = self.ctxs.host3d.get(&res_id).map(|r| r.pages.clone());
+        self.resources.push(Resource {
+            id: res_id, format: 0, width: 0, height: 0,
+            backing: Vec::new(), host_pixels: None, frame: 0, flushed_frame: 0,
+            dirty: Dirty::Unknown, blob: pages,
+        });
+        self.log_ctx("CREATE_BLOB host3d", res_id, blob_id, true);
+        VIRTIO_GPU_RESP_OK_NODATA
+    }
+
+    /// RESOURCE_MAP_BLOB: the resource's pages at `offset` in the host-
+    /// visible window. Its cache type for the guest mapping.
+    fn map_host3d(&mut self, res_id: u32, offset: u64) -> Result<u32, u32> {
+        let Some(r) = self.ctxs.host3d.get_mut(&res_id) else { return Err(VIRTIO_GPU_RESP_ERR_INVALID_RES_ID) };
+        let pages = r.size.div_ceil(4096) as usize;
+        if r.mapped.is_some() || offset % 4096 != 0
+            || offset.checked_add(pages as u64 * 4096).is_none_or(|e| e > super::hostmem::HOSTMEM_SIZE)
+        {
+            return Err(VIRTIO_GPU_RESP_ERR_INVALID_PARAM);
+        }
+        let cache = match r.map_info {
+            super::virtio_gpu_ctx::MAP_CACHE_WC => super::hostmem::Cache::WriteCombining,
+            super::virtio_gpu_ctx::MAP_CACHE_UNCACHED => super::hostmem::Cache::Uncached,
+            _ => super::hostmem::Cache::WriteBack,
+        };
+        super::hostmem::map(offset, &r.pages.pages[..pages], cache).map_err(|_| VIRTIO_GPU_RESP_ERR_INVALID_PARAM)?;
+        r.mapped = Some(offset);
+        Ok(r.map_info)
+    }
+
+    /// RESOURCE_UNMAP_BLOB, and before a HOST3D resource goes.
+    fn unmap_host3d(&mut self, res_id: u32) {
+        let Some(r) = self.ctxs.host3d.get_mut(&res_id) else { return };
+        if let Some(off) = r.mapped.take() {
+            super::hostmem::unmap(off, r.size.div_ceil(4096) as usize);
+        }
+    }
+
+    /// A HOST3D resource goes: out of the guest's window, off every
+    /// surface and gpudev, then its pages go back. Pages gpudev may still
+    /// have bound stay allocated.
+    fn drop_host3d(&mut self, res_id: u32) {
+        self.unmap_host3d(res_id);
+        self.release_blob(res_id);
+        if !self.wait_released(RELEASE_WAIT_MS) {
+            kprintln!("[gpu] a GPU object is still bound; its pages are kept");
+            self.ctxs.host3d.remove(&res_id);
+        } else {
+            self.ctxs.drop_resource(res_id);
+        }
+        self.resources.retain(|r| r.id != res_id);
+    }
+
     /// Log a blob command: the first few, and every refusal (up to a bound).
     fn log_blob(&mut self, what: &str, body: &[u8], resp: u32) {
         let n = self.blob_log_count;
@@ -816,7 +1038,7 @@ impl VirtioGpu {
 
     /// `RESOURCE_CREATE_BLOB` with `BLOB_MEM_GUEST`: the resource is the
     /// guest pages its entries name, recorded as host frames.
-    fn handle_create_blob(&mut self, body: &[u8], mem: &GuestMem) -> u32 {
+    fn handle_create_blob(&mut self, ctx_id: u32, body: &[u8], mem: &GuestMem) -> u32 {
         if !self.blob_acked() {
             return VIRTIO_GPU_RESP_ERR_UNSPEC;
         }
@@ -826,6 +1048,9 @@ impl VirtioGpu {
         let d = |o: usize| u32::from_le_bytes([body[o], body[o + 1], body[o + 2], body[o + 3]]);
         let q = |o: usize| u64::from(d(o)) | u64::from(d(o + 4)) << 32;
         let (id, blob_mem, nr, size) = (d(0), d(4), d(12) as usize, q(24));
+        if blob_mem == VIRTIO_GPU_BLOB_MEM_HOST3D && self.nativectx {
+            return self.create_host3d(ctx_id, id, q(16), size);
+        }
         if id == 0 || blob_mem != VIRTIO_GPU_BLOB_MEM_GUEST || size == 0 || size > MAX_BLOB_BYTES {
             return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
         }
@@ -1038,6 +1263,11 @@ impl VirtioGpu {
     /// Every blob given back before the guest's memory goes: false when
     /// gpudev still has one bound, so the memory must stay.
     pub fn release_all_blobs(&mut self) -> bool {
+        for res in self.ctxs.clear() {
+            self.drop_host3d(res);
+        }
+        self.fenced.clear();
+        self.fence_wait = None;
         let ids: Vec<u32> = self.resources.iter().filter(|r| r.blob.is_some()).map(|r| r.id).collect();
         for id in ids {
             self.release_blob(id);
@@ -1377,6 +1607,15 @@ impl VirtioGpu {
             0x0C => 0,
             0x10 => if self.bar0_lo_sized { BAR0_SIZE_MASK_LO } else { self.bar0_lo },
             0x14 => if self.bar0_hi_sized { 0xFFFF_FFFF }       else { self.bar0_hi },
+            // BAR2: the host-visible window, 64-bit prefetchable memory.
+            0x18 if self.nativectx => {
+                if self.bar2_lo_sized { !(super::hostmem::HOSTMEM_SIZE as u32 - 1) | 0b1100 }
+                else { super::hostmem::HOSTMEM_GPA as u32 | 0b1100 }
+            }
+            0x1C if self.nativectx => {
+                if self.bar2_hi_sized { !((super::hostmem::HOSTMEM_SIZE - 1) >> 32) as u32 }
+                else { (super::hostmem::HOSTMEM_GPA >> 32) as u32 }
+            }
             0x18..=0x24 => 0,
             0x28 => 0,
             // Subsystem vendor 0x1AF4 / device 0x0010 (display)
@@ -1405,7 +1644,8 @@ impl VirtioGpu {
             0x74 => ISR_LEN,
 
             0x78 => {
-                let next = if super::gpu_backend::msix_offered() { CAP_MSIX_OFF } else { 0 };
+                let next = if super::gpu_backend::msix_offered() { CAP_MSIX_OFF }
+                    else if self.nativectx { CAP_SHM_OFF } else { 0 };
                 0x09 | ((next as u32) << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_DEVICE_CFG as u32) << 24)
             }
             0x7C => 0,
@@ -1413,9 +1653,21 @@ impl VirtioGpu {
             0x84 => DEVICE_LEN,
 
             // MSI-X capability: table + PBA in BAR0.
-            0x88 => super::msix::CAP_ID | ((super::gpu_backend::msix_msgctl() as u32) << 16),
+            0x88 => {
+                let next = if self.nativectx { CAP_SHM_OFF } else { 0 };
+                super::msix::CAP_ID | ((next as u32) << 8) | ((super::gpu_backend::msix_msgctl() as u32) << 16)
+            }
             0x8C => super::msix::TABLE_OFF,
             0x90 => super::msix::PBA_OFF,
+
+            // Shared memory capability (virtio_pci_cap64): the host-visible
+            // window is all of BAR2.
+            0x98 if self.nativectx => 0x09 | (24 << 16) | ((VIRTIO_PCI_CAP_SHARED_MEMORY_CFG as u32) << 24),
+            0x9C if self.nativectx => 2 | ((SHM_ID_HOST_VISIBLE as u32) << 8),
+            0xA0 if self.nativectx => 0,
+            0xA4 if self.nativectx => super::hostmem::HOSTMEM_SIZE as u32,
+            0xA8 if self.nativectx => 0,
+            0xAC if self.nativectx => (super::hostmem::HOSTMEM_SIZE >> 32) as u32,
 
             _ => 0,
         }
@@ -1438,6 +1690,10 @@ impl VirtioGpu {
                 }
             }
             0x88 => super::gpu_backend::msix_set_msgctl((value >> 16) as u16),
+            // BAR2 stays where it is (the window is mapped there); only
+            // sizing is answered.
+            0x18 => self.bar2_lo_sized = value == 0xFFFF_FFFF,
+            0x1C => self.bar2_hi_sized = value == 0xFFFF_FFFF,
             _ => {}
         }
     }
@@ -1490,6 +1746,8 @@ impl VirtioGpu {
                     1 // VIRTIO_F_VERSION_1 (bit 32 → bit 0 of upper half)
                 } else if self.device_feature_select != 0 {
                     0
+                } else if self.nativectx {
+                    (VIRTIO_GPU_F_EDID | VIRTIO_GPU_F_RESOURCE_BLOB | VIRTIO_GPU_F_VIRGL | VIRTIO_GPU_F_CONTEXT_INIT) as u64
                 } else if super::gpu_backend::blob_offered() {
                     (VIRTIO_GPU_F_EDID | VIRTIO_GPU_F_RESOURCE_BLOB) as u64
                 } else {
@@ -1532,8 +1790,9 @@ impl VirtioGpu {
                 let sel = self.driver_feature_select as usize;
                 if sel < 2 { self.driver_features[sel] = val as u32; }
                 if sel == 0 {
-                    kprintln!("[gpu] guest features {:#x} (blob {})", val,
-                        if val as u32 & VIRTIO_GPU_F_RESOURCE_BLOB != 0 { "on" } else { "off" });
+                    let on = |bit: u32| if val as u32 & bit != 0 { "on" } else { "off" };
+                    kprintln!("[gpu] guest features {:#x} (blob {}, virgl {}, context init {})", val,
+                        on(VIRTIO_GPU_F_RESOURCE_BLOB), on(VIRTIO_GPU_F_VIRGL), on(VIRTIO_GPU_F_CONTEXT_INIT));
                 }
             }
             CC_MSIX_CONFIG => {
@@ -1594,7 +1853,7 @@ impl VirtioGpu {
             b[DC_NUM_SCANOUTS as usize..DC_NUM_SCANOUTS as usize + 4]
                 .copy_from_slice(&(MAX_OUTPUTS as u32).to_le_bytes());
             b[DC_NUM_CAPSETS as usize..DC_NUM_CAPSETS as usize + 4]
-                .copy_from_slice(&0u32.to_le_bytes());
+                .copy_from_slice(&(self.nativectx as u32).to_le_bytes());
             b
         };
         if off as usize >= buf.len() { return 0; }
@@ -1896,4 +2155,12 @@ fn blit_to_host_fb(src_pixels: &[u8], src_w: u32, src_h: u32) {
 /// encoded.
 fn blob_unread(blob: &ForeignPixels) -> bool {
     blob.unread() && crate::gpu::gpudev::pages_idle(blob.serial)
+}
+
+fn le32(b: &[u8], at: usize) -> Option<u32> {
+    b.get(at..at + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+}
+
+fn le64(b: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from(le32(b, at)?) | u64::from(le32(b, at + 4)?) << 32)
 }

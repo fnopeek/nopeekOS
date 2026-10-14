@@ -1585,6 +1585,11 @@ impl VmContext {
         if !crate::microvm::cpu::entry_irqs_off(kick_gen, host_core, entry_deadline) {
             continue;
         }
+        // The host-visible window lost a mapping since this core last
+        // flushed: drop the stale nested translations with this entry.
+        if crate::microvm::devices::hostmem::flush_before_entry(host_core) {
+            self.vcpu.vmcb.write_u8(vmcb::OFF_TLB_CTL, vmcb::tlb_flush_guest());
+        }
 
         // Host↔guest FPU save/restore is embedded in run_guest_once's asm.
         self.vcpu.regs.spec_ctrl_host = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
@@ -1957,6 +1962,16 @@ impl VmContext {
                         last_outcome = Some(outcome);
                         continue;
                     }
+                }
+                // The virtio-gpu host-visible window: mapped meanwhile →
+                // enter again; unmapped → the hole (reads 0, writes dropped).
+                if crate::microvm::devices::hostmem::contains(gpa)
+                    && (crate::microvm::devices::hostmem::is_mapped(gpa)
+                        || handle_mmio_npf_dev(&mut *self.vcpu.vmcb, &mut self.vcpu.regs,
+                            &mut crate::microvm::devices::hostmem::Hole, &mut sh.pic, gpa, gm))
+                {
+                    last_outcome = Some(outcome);
+                    continue;
                 }
                 // Demand-paged guest RAM. #NPF on a gpa inside the
                 // advertised window but above the contiguous boot

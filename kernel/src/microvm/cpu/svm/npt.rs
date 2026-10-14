@@ -312,6 +312,109 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64, guest_bytes: u64) -> Option<u64
     }
 }
 
+/// PDPT slot of the host-visible window, [4 GiB, 5 GiB) (`devices::hostmem`).
+pub const WINDOW_PDPT: usize = 4;
+/// Page-level write-through, cache disable and PAT bits of a 4 KB leaf:
+/// they select the host PAT entry (`paging`: 0 WB, 3 UC, 5 WC).
+const NPT_PWT: u64 = 1 << 3;
+const NPT_PCD: u64 = 1 << 4;
+const NPT_PAT_4K: u64 = 1 << 7;
+pub const CACHE_WB: u64 = 0;
+pub const CACHE_UC: u64 = NPT_PCD | NPT_PWT;
+pub const CACHE_WC: u64 = NPT_PAT_4K | NPT_PWT;
+/// No execute, honored with EFER.NXE (the host sets it).
+const NPT_NX: u64 = 1 << 63;
+
+/// The leaf entry for window page `gpa`, creating the PD and PT above it
+/// when `create`. Not-present to present needs no TLB flush.
+///
+/// # Safety
+/// `pml4_phys` is the root of this VM's live NPT; the caller serializes
+/// window changes.
+unsafe fn window_leaf(pml4_phys: u64, gpa: u64, create: bool) -> Option<*mut u64> {
+    // SAFETY: identity-mapped tables of this NPT (caller contract); new
+    // tables are fresh frames, zeroed before they are linked.
+    unsafe {
+        let pdpt = ((pml4_phys as *const u64).read_volatile() & NPT_ADDR_MASK) as *mut u64;
+        let slot = pdpt.add(WINDOW_PDPT);
+        let mut pdpte = slot.read_volatile();
+        if pdpte & NPT_P == 0 {
+            if !create { return None; }
+            let pd = memory::allocate_frame()?;
+            core::ptr::write_bytes(pd as *mut u8, 0, 4096);
+            pdpte = pd | NPT_P | NPT_RW | NPT_US;
+            slot.write_volatile(pdpte);
+        }
+        let pd = (pdpte & NPT_ADDR_MASK) as *mut u64;
+        let pd_slot = pd.add(((gpa % ONE_GB) / TWO_MB) as usize);
+        let mut pde = pd_slot.read_volatile();
+        if pde & NPT_P == 0 {
+            if !create { return None; }
+            let pt = memory::allocate_frame()?;
+            core::ptr::write_bytes(pt as *mut u8, 0, 4096);
+            pde = pt | NPT_P | NPT_RW | NPT_US;
+            pd_slot.write_volatile(pde);
+        }
+        Some(((pde & NPT_ADDR_MASK) as *mut u64).add(((gpa % TWO_MB) / 4096) as usize))
+    }
+}
+
+/// Map host frame `host` read/write, not executable, at window page `gpa`
+/// with the host PAT entry `cache` selects (`CACHE_*`); the guest's PAT
+/// combines with it. Fails if the page is mapped already.
+pub fn window_map(pml4_phys: u64, gpa: u64, host: u64, cache: u64) -> Result<(), &'static str> {
+    // SAFETY: EFER is readable on every x86_64 CPU.
+    let nx = if unsafe { super::rdmsr(0xC000_0080) } & (1 << 11) != 0 { NPT_NX } else { 0 };
+    // SAFETY: caller contract of `devices::hostmem` (live root, serialized).
+    unsafe {
+        let leaf = window_leaf(pml4_phys, gpa, true).ok_or("OOM: NPT window tables")?;
+        if leaf.read_volatile() & NPT_P != 0 {
+            return Err("window page already mapped");
+        }
+        leaf.write_volatile((host & NPT_ADDR_MASK) | NPT_P | NPT_RW | NPT_US | cache | nx);
+    }
+    Ok(())
+}
+
+/// Clear window page `gpa`. True if it was mapped; the caller then makes
+/// every vCPU drop the translation (`devices::hostmem::unmap`).
+pub fn window_unmap(pml4_phys: u64, gpa: u64) -> bool {
+    // SAFETY: as in `window_map`.
+    unsafe {
+        let Some(leaf) = window_leaf(pml4_phys, gpa, false) else { return false };
+        let was = leaf.read_volatile() & NPT_P != 0;
+        leaf.write_volatile(0);
+        was
+    }
+}
+
+/// Whether window page `gpa` is mapped.
+pub fn window_mapped(pml4_phys: u64, gpa: u64) -> bool {
+    // SAFETY: as in `window_map`; read only.
+    unsafe { window_leaf(pml4_phys, gpa, false).is_some_and(|l| l.read_volatile() & NPT_P != 0) }
+}
+
+/// Free the window's PD and PTs. The frames they map belong to GPU objects
+/// and are not freed here.
+///
+/// # Safety
+/// As `release`: nothing uses the NPT any more.
+unsafe fn release_window(pdpt: *const u64) {
+    // SAFETY: caller contract; identity-mapped tables of this NPT.
+    unsafe {
+        let pd_phys = pdpt.add(WINDOW_PDPT).read_volatile() & NPT_ADDR_MASK;
+        if pd_phys == 0 { return; }
+        let pd = pd_phys as *const u64;
+        for i in 0..512usize {
+            let pde = pd.add(i).read_volatile();
+            if pde & NPT_P != 0 {
+                memory::deallocate_frame(pde & NPT_ADDR_MASK);
+            }
+        }
+        memory::deallocate_frame(pd_phys);
+    }
+}
+
 /// Free every demand-faulted 4 KB frame + the demand PT pages + the
 /// fixed tables. The contiguous boot block is freed by the caller.
 /// Mirrors `ept::release`.
@@ -353,6 +456,7 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
             }
             memory::deallocate_frame(pd_phys);
         }
+        release_window(pdpt);
         let pd_high_phys = pdpt.add(3).read_volatile() & NPT_ADDR_MASK;
         if pd_high_phys != 0 {
             let pd_high = pd_high_phys as *const u64;

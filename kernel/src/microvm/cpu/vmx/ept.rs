@@ -291,6 +291,102 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64, guest_bytes: u64) -> Option<u64
     }
 }
 
+/// PDPT slot of the host-visible window, [4 GiB, 5 GiB) (`devices::hostmem`).
+pub const WINDOW_PDPT: usize = 4;
+/// EPT memory types for a window page (SDM Vol. 3C §29.3.7).
+pub const MEMTYPE_UC: u64 = 0;
+pub const MEMTYPE_WC: u64 = 1;
+pub const MEMTYPE_WB: u64 = 6;
+
+/// The leaf entry for window page `gpa`, creating the PD and PT above it
+/// when `create`. Not-present to present needs no INVEPT.
+///
+/// # Safety
+/// `pml4_phys` is the root of this VM's live EPT; the caller serializes
+/// window changes.
+unsafe fn window_leaf(pml4_phys: u64, gpa: u64, create: bool) -> Option<*mut u64> {
+    // SAFETY: identity-mapped tables of this EPT (caller contract); new
+    // tables are fresh frames, zeroed before they are linked.
+    unsafe {
+        let pdpt = ((pml4_phys as *const u64).read_volatile() & EPT_ADDR_MASK) as *mut u64;
+        let slot = pdpt.add(WINDOW_PDPT);
+        let mut pde_tab = slot.read_volatile();
+        if pde_tab & EPT_R == 0 {
+            if !create { return None; }
+            let pd = memory::allocate_frame()?;
+            core::ptr::write_bytes(pd as *mut u8, 0, 4096);
+            pde_tab = pd | EPT_RWX;
+            slot.write_volatile(pde_tab);
+        }
+        let pd = (pde_tab & EPT_ADDR_MASK) as *mut u64;
+        let pd_slot = pd.add(((gpa % ONE_GB) / TWO_MB) as usize);
+        let mut pde = pd_slot.read_volatile();
+        if pde & EPT_R == 0 {
+            if !create { return None; }
+            let pt = memory::allocate_frame()?;
+            core::ptr::write_bytes(pt as *mut u8, 0, 4096);
+            pde = pt | EPT_RWX;
+            pd_slot.write_volatile(pde);
+        }
+        Some(((pde & EPT_ADDR_MASK) as *mut u64).add(((gpa % TWO_MB) / 4096) as usize))
+    }
+}
+
+/// Map host frame `host` read/write, not executable, at window page `gpa`
+/// with memory type `memtype`. IPAT stays clear, so the guest's PAT
+/// combines with it, as KVM does where it honors guest PAT. Fails if the
+/// page is mapped already.
+pub fn window_map(pml4_phys: u64, gpa: u64, host: u64, memtype: u64) -> Result<(), &'static str> {
+    // SAFETY: caller contract of `devices::hostmem` (live root, serialized).
+    unsafe {
+        let leaf = window_leaf(pml4_phys, gpa, true).ok_or("OOM: EPT window tables")?;
+        if leaf.read_volatile() & EPT_R != 0 {
+            return Err("window page already mapped");
+        }
+        leaf.write_volatile((host & EPT_ADDR_MASK) | EPT_R | EPT_W | (memtype << 3));
+    }
+    Ok(())
+}
+
+/// Clear window page `gpa`. True if it was mapped; the caller then makes
+/// every vCPU drop the translation (`devices::hostmem::unmap`).
+pub fn window_unmap(pml4_phys: u64, gpa: u64) -> bool {
+    // SAFETY: as in `window_map`.
+    unsafe {
+        let Some(leaf) = window_leaf(pml4_phys, gpa, false) else { return false };
+        let was = leaf.read_volatile() & EPT_R != 0;
+        leaf.write_volatile(0);
+        was
+    }
+}
+
+/// Whether window page `gpa` is mapped.
+pub fn window_mapped(pml4_phys: u64, gpa: u64) -> bool {
+    // SAFETY: as in `window_map`; read only.
+    unsafe { window_leaf(pml4_phys, gpa, false).is_some_and(|l| l.read_volatile() & EPT_R != 0) }
+}
+
+/// Free the window's PD and PTs. The frames they map belong to GPU objects
+/// and are not freed here.
+///
+/// # Safety
+/// As `release`: nothing uses the EPT any more.
+unsafe fn release_window(pdpt: *const u64) {
+    // SAFETY: caller contract; identity-mapped tables of this EPT.
+    unsafe {
+        let pd_phys = pdpt.add(WINDOW_PDPT).read_volatile() & EPT_ADDR_MASK;
+        if pd_phys == 0 { return; }
+        let pd = pd_phys as *const u64;
+        for i in 0..512usize {
+            let pde = pd.add(i).read_volatile();
+            if pde & EPT_R != 0 {
+                memory::deallocate_frame(pde & EPT_ADDR_MASK);
+            }
+        }
+        memory::deallocate_frame(pd_phys);
+    }
+}
+
 /// Free everything `install_window` allocated for `guest_bytes`: every
 /// demand 2-MB block and 4 KB frame, the demand PT pages, and the fixed tables
 /// (PML4/PDPT/PDs/PD_HIGH/PT_DUMMY/PT_LAPIC/scratch page). Also unwinds a
@@ -337,6 +433,7 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
             }
             memory::deallocate_frame(pd_phys);
         }
+        release_window(pdpt);
         let pd_high_phys = pdpt.add(3).read_volatile() & EPT_ADDR_MASK;
         if pd_high_phys != 0 {
             let pd_high = pd_high_phys as *const u64;
