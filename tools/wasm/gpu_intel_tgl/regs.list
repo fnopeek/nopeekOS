@@ -1740,3 +1740,19 @@ PIPE_CONTROL_STATE_CACHE_INVALIDATE
 # gpudev service (gt/intel_gpu_commands.h)
 GEN9_XY_FAST_COPY_BLT_CMD
 BLT_DEPTH_32
+# engine register dump (gt/intel_engine_cs.c intel_engine_print_registers)
+RING_EXECLIST_STATUS_LO(base)
+RING_START(base)
+RING_CTL(base)
+RING_IMR(base)
+RING_ACTHD(base)
+RING_ACTHD_UDW(base)
+RING_BBADDR(base)
+RING_BBADDR_UDW(base)
+RING_DMA_FADD(base)
+RING_DMA_FADD_UDW(base)
+RING_IPEIR(base)
+RING_IPEHR(base)
+RING_INSTDONE(base)
+RING_WAIT
+RING_WAIT_SEMAPHORE

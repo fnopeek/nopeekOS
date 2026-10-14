@@ -538,7 +538,7 @@ fn gen8_report_fault(fault: u32, fault_data0: u32, fault_data1: u32) {
 }
 
 /// `gen8_check_faults`, GRAPHICS_VER >= 12 registers.
-fn gen8_check_faults(i915: &mut drm_i915_private) {
+pub fn gen8_check_faults(i915: &mut drm_i915_private) {
     let fault = i915.uncore.intel_uncore_read(GEN12_RING_FAULT_REG);
     if fault & RING_FAULT_VALID != 0 {
         let d0 = i915.uncore.intel_uncore_read(GEN12_FAULT_TLB_DATA0);

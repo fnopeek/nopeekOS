@@ -1989,3 +1989,33 @@ pub const PIPE_CONTROL_STATE_CACHE_INVALIDATE: u32 = 0x4; // gt/intel_gpu_comman
 // gpudev service (gt/intel_gpu_commands.h)
 pub const GEN9_XY_FAST_COPY_BLT_CMD: u32 = 0x50800000; // gt/intel_gpu_commands.h:269
 pub const BLT_DEPTH_32: u32 = 0x3000000; // gt/intel_gpu_commands.h:278
+
+// engine register dump (gt/intel_engine_cs.c intel_engine_print_registers)
+/// gt/intel_engine_regs.h:179
+pub const fn RING_EXECLIST_STATUS_LO(base: u32) -> u32 { ((base) + 0x234) }
+/// gt/intel_engine_regs.h:19
+pub const fn RING_START(base: u32) -> u32 { ((base) + 0x38) }
+/// gt/intel_engine_regs.h:20
+pub const fn RING_CTL(base: u32) -> u32 { ((base) + 0x3c) }
+/// gt/intel_engine_regs.h:80
+pub const fn RING_IMR(base: u32) -> u32 { ((base) + 0xa8) }
+/// gt/intel_engine_regs.h:65
+pub const fn RING_ACTHD(base: u32) -> u32 { ((base) + 0x74) }
+/// gt/intel_engine_regs.h:58
+pub const fn RING_ACTHD_UDW(base: u32) -> u32 { ((base) + 0x5c) }
+/// gt/intel_engine_regs.h:113
+pub const fn RING_BBADDR(base: u32) -> u32 { ((base) + 0x140) }
+/// gt/intel_engine_regs.h:115
+pub const fn RING_BBADDR_UDW(base: u32) -> u32 { ((base) + 0x168) }
+/// gt/intel_engine_regs.h:64
+pub const fn RING_DMA_FADD(base: u32) -> u32 { ((base) + 0x78) }
+/// gt/intel_engine_regs.h:59
+pub const fn RING_DMA_FADD_UDW(base: u32) -> u32 { ((base) + 0x60) }
+/// gt/intel_engine_regs.h:60
+pub const fn RING_IPEIR(base: u32) -> u32 { ((base) + 0x64) }
+/// gt/intel_engine_regs.h:61
+pub const fn RING_IPEHR(base: u32) -> u32 { ((base) + 0x68) }
+/// gt/intel_engine_regs.h:62
+pub const fn RING_INSTDONE(base: u32) -> u32 { ((base) + 0x6c) }
+pub const RING_WAIT: u32 = 0x800; // gt/intel_engine_regs.h:30
+pub const RING_WAIT_SEMAPHORE: u32 = 0x400; // gt/intel_engine_regs.h:31

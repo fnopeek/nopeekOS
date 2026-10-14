@@ -235,3 +235,47 @@ pub fn intel_engines_release(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     }
     gt.engines_initialized = false;
 }
+
+/// `intel_engine_print_registers` for an execlists engine on TGL, without
+/// the CSB walk and the request listing. `ENGINE_READ64` is read high,
+/// low, high until the high half is stable, as `__intel_uncore_read64_2x32`
+/// does.
+pub fn intel_engine_print_registers(i915: &mut drm_i915_private, gt: &intel_gt, e: usize) {
+    let Some(engine) = gt.engine[e] else { return };
+    let b = engine.mmio_base;
+    let u = &mut i915.uncore;
+    let mut read64 = |lo: u32, hi: u32| {
+        let mut old = u.intel_uncore_read(hi);
+        loop {
+            let l = u.intel_uncore_read(lo);
+            let h = u.intel_uncore_read(hi);
+            if h == old {
+                return (h as u64) << 32 | l as u64;
+            }
+            old = h;
+        }
+    };
+    let acthd = read64(RING_ACTHD(b), RING_ACTHD_UDW(b));
+    let bbaddr = read64(RING_BBADDR(b), RING_BBADDR_UDW(b));
+    let faddr = read64(RING_DMA_FADD(b), RING_DMA_FADD_UDW(b));
+    let name = crate::intel_gt::intel_engine_class_repr(engine.class);
+    let ctl = u.intel_uncore_read(RING_CTL(b));
+    let mode = u.intel_uncore_read(RING_MI_MODE(b));
+    Line::new().s(name).dec(engine.instance as u64).s(": EL_STAT ").hex(u.intel_uncore_read(RING_EXECLIST_STATUS_HI(b)))
+        .s("_").hex(u.intel_uncore_read(RING_EXECLIST_STATUS_LO(b)))
+        .s(", RING_START ").hex(u.intel_uncore_read(RING_START(b)))
+        .s(", HEAD ").hex(u.intel_uncore_read(RING_HEAD(b)) & HEAD_ADDR)
+        .s(", TAIL ").hex(u.intel_uncore_read(RING_TAIL(b)) & TAIL_ADDR)
+        .s(", CTL ").hex(ctl).s(if ctl & (RING_WAIT | RING_WAIT_SEMAPHORE) != 0 { " [waiting]" } else { "" })
+        .s(", MODE ").hex(mode).s(if mode & MODE_IDLE != 0 { " [idle]" } else { "" }).say();
+    Line::new().s(name).dec(engine.instance as u64).s(": IMR ").hex(u.intel_uncore_read(RING_IMR(b)))
+        .s(", ESR ").hex(u.intel_uncore_read(RING_ESR(b)))
+        .s(", EMR ").hex(u.intel_uncore_read(RING_EMR(b)))
+        .s(", EIR ").hex(u.intel_uncore_read(RING_EIR(b)))
+        .s(", IPEIR ").hex(u.intel_uncore_read(RING_IPEIR(b)))
+        .s(", IPEHR ").hex(u.intel_uncore_read(RING_IPEHR(b)))
+        .s(", INSTDONE ").hex(u.intel_uncore_read(RING_INSTDONE(b))).say();
+    Line::new().s(name).dec(engine.instance as u64).s(": ACTHD ").hex((acthd >> 32) as u32).s("_").hex(acthd as u32)
+        .s(", BBADDR ").hex((bbaddr >> 32) as u32).s("_").hex(bbaddr as u32)
+        .s(", DMA_FADDR ").hex((faddr >> 32) as u32).s("_").hex(faddr as u32).say();
+}

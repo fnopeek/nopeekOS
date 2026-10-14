@@ -119,6 +119,8 @@ fn copy_rect(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, src: u64,
         if linux::now_us() - t0 > JOB_TIMEOUT_US {
             crate::i915_request::i915_request_put(gt, rq);
             linux::say("gpudev: copy on bcs0 timed out, wedging");
+            crate::intel_engine_cs::intel_engine_print_registers(i915, gt, e);
+            crate::intel_gt::gen8_check_faults(i915);
             crate::intel_gt::intel_gt_set_wedged(i915, gt);
             return Err(-ETIME);
         }
