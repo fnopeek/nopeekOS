@@ -27,6 +27,7 @@ pub const OP_COPY_RECT: u32 = 1;
 pub const JOB_BYTES: usize = 32;
 const NUM_BOS: usize = 3;
 const JOB_TIMEOUT_MS: u64 = 100;
+const DRIVER_NAME: &str = "gpudev (driver module)";
 
 #[derive(Clone, Copy)]
 pub struct Bo {
@@ -140,6 +141,13 @@ pub fn bo_bound(dev: PciAddr, id: i32, gpu_addr: i64) -> i32 {
 /// `npk_gpudev_ready`: with a passed self-test and all buffers bound, the
 /// compositor's copies go to the module from the next frame on.
 pub fn ready(dev: PciAddr, ok: bool) -> i32 {
+    if !ok {
+        if !owned_by(dev) {
+            return -1;
+        }
+        crate::kprintln!("[npk] gpudev: module self-test failed, compositor stays on the CPU");
+        return 0;
+    }
     let (fb, a, b) = {
         let st = STATE.lock();
         if st.owner != Some(dev) {
@@ -152,10 +160,6 @@ pub fn ready(dev: PciAddr, ok: bool) -> i32 {
         };
         (fb, a as u32, b as u32)
     };
-    if !ok {
-        crate::kprintln!("[npk] gpudev: module self-test failed, compositor stays on the CPU");
-        return 0;
-    }
     // Lock order of the compositor is framebuffer, then GPU; never both here.
     crate::drivers::framebuffer::set_shadow_ggtt(a, b);
     super::install(Box::new(GpudevDriver { fb }));
@@ -219,9 +223,9 @@ pub fn module_gone(dev: PciAddr) {
         st.bos = [None; NUM_BOS];
         st.fb.take()
     };
-    let was_ready = READY.swap(false, Ordering::AcqRel);
+    READY.store(false, Ordering::Release);
     WAKER.store(NO_WAKER, Ordering::Release);
-    if was_ready {
+    if super::driver_name() == DRIVER_NAME {
         crate::drivers::framebuffer::set_shadow_ggtt(0, 0);
         if let Some(fb) = fb {
             super::install(Box::new(super::gop::GopDriver::from_framebuffer(fb)));
@@ -279,7 +283,7 @@ pub struct GpudevDriver {
 
 impl GpuHal for GpudevDriver {
     fn name(&self) -> &'static str {
-        "gpudev (driver module)"
+        DRIVER_NAME
     }
 
     fn set_mode(&mut self, _width: u32, _height: u32, _hz: u8) -> Result<FramebufferInfo, GpuError> {
