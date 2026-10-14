@@ -130,6 +130,56 @@ daraus, ohne eine Einstellung zu wechseln:
 | `CONTEXT_INIT` + Capset `DRM` | nicht angeboten | nur mit laufendem GPU-Modul **und** IOMMU; ein Schalter `set microvm_gpu off` erzwingt die CPU |
 | Host-visible-Bereich | keiner | Shared-Memory-Capability, nur wenn `CONTEXT_INIT` angeboten |
 
+## 4a. Stand und Bauplan Stufe 7 (2026-10-14)
+
+Gebaut: Stufe 2 (VT-d, Kernel 0.611.0, `set gpu_iommu on`) und die
+Geraeteseite von Stufe 6 (Kernel 0.612.0, `set microvm_gpu test`) —
+`GPU_STACK.md` §8a/§8b. Es fehlt die Kartenseite: virglrenderer reicht
+jeden ccmd als echten i915-ioctl an den Wirtskernel weiter
+(`intel_ioctl(dctx->fd, …)` in `src/drm/i915/i915_ccmd.c`); bei uns ist das
+Modul der i915. Stufe 7 ist darum vor allem **die i915-GEM-uAPI im Modul**,
+1:1 aus Linux portiert:
+
+1. **VMs und Kontexte je Gast-Client.** Heute hat der Port ein PPGTT
+   (`intel_gt.vm`) und Kernel-Kontexte je Engine. Neu: `i915_ppgtt_create`
+   je Client (gibt es), `intel_context` mit eigenem `vm` (der LRC traegt die
+   PDP des Client-PPGTT), Abgabe ueber Execlists wie heute.
+   Linux: `gem/i915_gem_context.c` (Create-Ext mit `VM`, `ENGINES`,
+   `RECOVERABLE`, `PRIORITY`), `gem/i915_gem_vm` (VM_CREATE/DESTROY).
+2. **GEM-Objekte.** Speicher vergibt der **Kernel** (Rahmen, die er auch in
+   das Host-visible-Fenster des Gastes legt), das Modul bekommt sie als
+   gpudev-Seitenliste — damit gilt die IOMMU-Freigabe aus Stufe 2.
+   `GEM_CREATE(_EXT)` → Objekt + Blob-ID; `SET_MMAP_MODE` → Cache-Art
+   (WB auf TGL dank LLC, sonst WC); `BUSY`, `WAIT`, `SET_DOMAIN`,
+   `SET/GET_TILING` aus `gem/i915_gem_*`.
+3. **Execbuffer, nur Softpin.** iris und anv geben auf Gen12 jede
+   Adresse selbst vor (`EXEC_OBJECT_PINNED`, `I915_EXEC_NO_RELOC`); Port des
+   Softpin-Pfads von `gem/i915_gem_execbuffer.c` (Objekte nachschlagen, an
+   der verlangten Adresse ins Client-PPGTT binden, Request auf der gewaehlten
+   Engine, `MI_BATCH_BUFFER_START`, Zaun raus). Relocations: abgelehnt.
+4. **Antworten:** `GETPARAM` (`i915_getparam.c`) und `QUERY`
+   (`i915_query.c`: TOPOLOGY_INFO, ENGINE_INFO, MEMORY_REGIONS,
+   PERF_CONFIG nein) — aus dem, was der Port beim Hochfahren schon misst.
+   `IOCTL_SIMPLE` nur mit der Positivliste aus `i915_ccmd.c`.
+5. **Kernel ↔ Modul:** neue gpudev-Auftraege `OP_CCMD` (Client, ccmd-Bytes
+   als Nutzlast, Antwort als Nutzlast zurueck) und Zaun-Meldungen je
+   Client-Ring; `virtio_gpu_ctx::Backend` im Kernel uebersetzt darauf.
+6. **Grenzen:** IOMMU an (Stufe 2) ist Voraussetzung; Gen12 hat keinen
+   Befehlsparser — die Hardware-Positivliste der Register (F4) und das
+   PPGTT je Client sind die Grenze; Haenger → Engine-Reset, Kontext
+   gesperrt (`banned_ctx_mask` im Antwortpuffer).
+7. **Gast:** Mesa mit `-Dintel-virtio-experimental=true` (F6). Offen und
+   **zu entscheiden**: im Bundle-Build (`microvm-userspace/build.sh`, Mesa
+   aus dem Quelltarball in der gleichen Version wie Alpines, mit dessen
+   Meson-Optionen) oder als eigenes, von uns signiertes apk. Beides bricht
+   „apks kommen signiert von Alpine" fuer genau dieses Paket auf.
+
+Pruefreihenfolge: (a) Stufe 2 am NUC (`gpu iommu test` → PASSED), (b)
+Stufe 6 mit `set microvm_gpu test` (Merkmale, Capset), (c) F6-Mesa im Gast
+gegen das Pruef-Backend — dann laufen Kontext, Antwortpuffer, `MAP_BLOB`
+und die ersten ccmds wirklich durch, bevor Mesa auf llvmpipe faellt, (d)
+Stufe 7 Schritt fuer Schritt: GETPARAM/QUERY → GEM_CREATE → Execbuffer.
+
 ## 5. Offen
 
 - Modultod waehrend einer 3D-Sitzung: der Gastkontext ist dann verloren.
