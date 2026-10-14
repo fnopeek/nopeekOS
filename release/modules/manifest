@@ -1,4 +1,4 @@
-issued=1791955347
+issued=1791958822
 
 [aml]
 version=0.5.1
@@ -36,9 +36,9 @@ size=41674
 sha384=c6d0a51371a245a4e2e2ab38d481bb8889b1ad49f06db64e8debc381cd50cad818ad4c430b754d4b959f93181bacddb0
 
 [gpu_intel_tgl]
-version=0.6.0
-size=183547
-sha384=281a02419caae784a9308bbec7f88acac1e5fca1b9a66cffbc11022e1edf87dae2ddeeb705b3ad5e3da2ece86b1ad0ea
+version=0.7.0
+size=209931
+sha384=110ab17874ff1d34a3ed90e805d07cc680ccfb93e48ba87599a59e2666e802abf1c08b24af3ed71a87bf2d402eded37a
 
 [i2c_hid]
 version=0.28.2
