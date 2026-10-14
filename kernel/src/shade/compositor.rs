@@ -6,7 +6,8 @@
 
 use alloc::vec::Vec;
 use crate::framebuffer::FbInfo;
-use crate::gui::{background, render};
+use super::buffers::PixelBuffer;
+use super::scene::{self, Fit, Item, Rect, Scene, Source};
 
 use super::window::{Window, WindowId, WindowState};
 use super::terminal;
@@ -111,121 +112,16 @@ fn close_button_rect(win: &Window, border: u32, scale: u32)
     Some((bx, by, box_px, box_px))
 }
 
-// ── Terminal chrome cache ──────────────────────────────────────────────
-// The translucent "glass" terminal background (bg_color blended over the
-// wallpaper, per pixel) is the dominant compositor cost, and it is static:
-// only geometry / theme / focus / wallpaper change it, not the text drawn on
-// top. Cache the rendered chrome region (wallpaper+border+glass) and memcpy
-// it back each frame instead of re-blending. One entry (the common case is
-// one focused terminal); a second terminal just thrashes it (still correct,
-// recomputes on miss).
-struct ChromeCache { key: u64, w: u32, h: u32, px: Vec<u32> }
-static CHROME_CACHE: spin::Mutex<Option<ChromeCache>> = spin::Mutex::new(None);
-
-#[allow(clippy::too_many_arguments)]
-fn chrome_key(x: u32, y: u32, w: u32, h: u32, focused: bool,
-              ba: u32, bb: u32, b_op: u32, content_bg: u32, content_opacity: u32,
-              rounding: u32, border: u32) -> u64 {
-    // The wallpaper generation is part of the key: the glass is composited over
-    // the backdrop pixels, so a same-theme wallpaper swap (which leaves every
-    // colour/geometry field unchanged) must still miss the cache and re-blend.
-    let wp_gen = crate::gui::background::wallpaper_generation();
-    let mut k = 0xcbf29ce484222325u64;
-    for v in [x, y, w, h, focused as u32, ba, bb, b_op, content_bg, content_opacity, rounding, border, wp_gen] {
-        k ^= v as u64;
-        k = k.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    k
-}
-
-/// On a cache hit, memcpy the cached chrome region into the back buffer and
-/// return true. The text is drawn over it afterwards (every frame), so only
-/// the static glass background is cached.
-fn chrome_cache_blit(key: u64, x: u32, y: u32, w: u32, h: u32, shadow: *mut u8, info: &FbInfo) -> bool {
-    let cache = CHROME_CACHE.lock();
-    let Some(c) = cache.as_ref() else { return false };
-    if c.key != key || c.w != w || c.h != h { return false; }
-    let pitch = info.pitch as usize;
-    let rows = h.min(info.height.saturating_sub(y));
-    let span = w.min(info.width.saturating_sub(x)) as usize;
-    for row in 0..rows {
-        let dst_off = (y + row) as usize * pitch + x as usize * 4;
-        let src_off = row as usize * w as usize;
-        // SAFETY: dst within fb (clamped), src within px (w*h, row<h).
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                c.px.as_ptr().add(src_off),
-                shadow.add(dst_off) as *mut u32,
-                span,
-            );
-        }
-    }
-    true
-}
-
-/// Capture the just-rendered chrome region from the back buffer into the cache.
-fn chrome_cache_store(key: u64, x: u32, y: u32, w: u32, h: u32, shadow: *const u8, info: &FbInfo) {
-    let mut px = alloc::vec![0u32; (w as usize) * (h as usize)];
-    let pitch = info.pitch as usize;
-    let rows = h.min(info.height.saturating_sub(y));
-    let span = w.min(info.width.saturating_sub(x)) as usize;
-    for row in 0..rows {
-        let src_off = (y + row) as usize * pitch + x as usize * 4;
-        let dst_off = row as usize * w as usize;
-        // SAFETY: src within fb (clamped), dst within px (w*h, row<h).
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                shadow.add(src_off) as *const u32,
-                px.as_mut_ptr().add(dst_off),
-                span,
-            );
-        }
-    }
-    *CHROME_CACHE.lock() = Some(ChromeCache { key, w, h, px });
-}
-
-/// Drop the cached terminal-glass blit. Called on every full redraw: the key
-/// covers geometry, colours and the wallpaper generation, but not every glass
-/// setting (`shade glass`), and a full redraw is when those change.
-pub fn clear_chrome_cache() {
-    *CHROME_CACHE.lock() = None;
-}
-
-/// Paint the platform close button — a bare X — into the shadow buffer,
-/// vertically centred in the window's top menu-bar band. Drawn last in
-/// `render_window` so it sits over the window content. Just the glyph, no
-/// disc or highlight, sized and coloured like the design's `close`: 16 px
-/// in a 26 px box, `OnSurfaceMuted`, so it carries the same weight as the
-/// menu labels beside it and flips with the theme.
-fn draw_close_button(shadow: *mut u8, info: &FbInfo, win: &Window,
-                     border: u32, scale: u32) {
-    let Some((bx, by, bw, bh)) = close_button_rect(win, border, scale) else { return };
-    use crate::shade::widgets::abi::{IconId, Token};
-    // Secondary text weight, like every other piece of window chrome —
-    // the close button shouldn't outshout the menu labels next to it.
-    // On loop's glass it is drawn like everything else on glass: dark theme.
-    let color = if matches!(win.kind, crate::shade::window::WindowKind::Terminal) {
+/// Colour of a window's close glyph: secondary text weight, like the menu
+/// labels beside it; on loop's glass it follows the glass palette.
+fn close_glyph_color(win: &Window) -> u32 {
+    use crate::shade::widgets::abi::Token;
+    let c = if matches!(win.kind, crate::shade::window::WindowKind::Terminal) {
         crate::shade::widgets::palette::resolve_glass(Token::OnSurfaceMuted)
     } else {
         crate::shade::widgets::palette::resolve(Token::OnSurfaceMuted)
-    } & 0x00FF_FFFF;
-    let req = CLOSE_BTN_GLYPH * close_btn_scale(win, scale);
-    crate::gui::icons::with_alpha(IconId::X, req as u16, |asz, glyph| {
-        let asz = asz as u32;
-        if asz > 0 && glyph.len() >= (asz * asz) as usize {
-            let ox = bx + bw.saturating_sub(asz) / 2;
-            let oy = by + bh.saturating_sub(asz) / 2;
-            for row in 0..asz {
-                for col in 0..asz {
-                    let a = glyph[(row * asz + col) as usize] as u32;
-                    if a > 0 {
-                        render::blend_pixel(shadow, info, ox + col, oy + row,
-                            color, a + (a >> 7));
-                    }
-                }
-            }
-        }
-    });
+    };
+    c & 0x00FF_FFFF
 }
 
 /// Swap animation state — windows glide from old to new position.
@@ -374,6 +270,8 @@ pub struct Compositor {
     /// reserves no top band (tiles use the full height). The app renders
     /// itself — there is no native fallback.
     pub top_strut: Option<TopStrut>,
+    /// Text layer of each terminal window, by window id.
+    pub term_layers: alloc::collections::BTreeMap<u32, PixelBuffer>,
 }
 
 #[allow(dead_code)]
@@ -422,6 +320,7 @@ impl Compositor {
             glow_last_tick: 0,
             dock: None,
             top_strut: None,
+            term_layers: alloc::collections::BTreeMap::new(),
         }
     }
 
@@ -512,59 +411,32 @@ impl Compositor {
     }
 
     /// Repaint only the halo band of the focused tile. The flash animates
-    /// nothing inside the window, so redrawing the whole tile 20 times over
-    /// (millions of pixels at 4K, per frame) would be wasted — this touches
-    /// the four gap strips and hands them back as the damage to blit.
-    pub fn render_focus_glow(&self, shadow: *mut u8, info: &FbInfo)
-        -> Vec<(u32, u32, u32, u32)>
-    {
+    /// nothing inside the window, so only the four gap strips and the four
+    /// corner squares (where the halo wraps the arc) are composed.
+    pub fn render_focus_glow(&mut self, target: *mut u8, info: &FbInfo) -> Vec<Rect> {
         let Some(fid) = self.focused else { return Vec::new() };
         let Some(win) = self.windows.iter()
             .find(|w| w.id == fid && w.workspace == self.active_workspace && w.visible)
             else { return Vec::new() };
         let glow = self.glow_for(win);
         if glow.band == 0 { return Vec::new() }
-
         let (x, y, w, h) = (win.x, win.y, win.width, win.height);
         let g = glow.band;
-        let bands = [
-            (x.saturating_sub(g), y.saturating_sub(g), w + 2 * g, g),
-            (x.saturating_sub(g), y + h,               w + 2 * g, g),
-            (x.saturating_sub(g), y,                   g,         h),
-            (x + w,               y,                   g,         h),
-        ];
-        let mut out = Vec::new();
-        for (bx, by, bw, bh) in bands {
-            if bx >= info.width || by >= info.height { continue }
-            let bw = bw.min(info.width - bx);
-            let bh = bh.min(info.height - by);
-            if bw == 0 || bh == 0 { continue }
-            background::draw_background_region(shadow, info, bx, by, bw, bh);
-            out.push((bx, by, bw, bh));
-        }
-        // And the four corner notches: inside the bounding rect, outside the
-        // outline. The halo paints there but the four strips above end at the
-        // box edges and do not cover them, so this incremental path must
-        // restore them too or the bright flash stays behind at each corner.
-        //
-        // Masked, because the window's own arc lies in the same square and a
-        // plain rectangle would wipe it.
         let r = self.rounding.min(w / 2).min(h / 2);
+        let screen = Rect::new(0, 0, info.width, info.height);
+        let mut damage = alloc::vec![
+            Rect::new(x.saturating_sub(g), y.saturating_sub(g), w + 2 * g, g),
+            Rect::new(x.saturating_sub(g), y + h, w + 2 * g, g),
+            Rect::new(x.saturating_sub(g), y, g, h),
+            Rect::new(x + w, y, g, h),
+        ];
         if r > 0 {
-            for (cx, cy) in [(x, y), (x + w - r, y),
-                             (x, y + h - r), (x + w - r, y + h - r)] {
-                if cx >= info.width || cy >= info.height { continue }
-                let cw = r.min(info.width - cx);
-                let ch = r.min(info.height - cy);
-                if cw == 0 || ch == 0 { continue }
-                background::draw_background_region_where(shadow, info, cx, cy, cw, ch,
-                    |px, py| render::rect_coverage_sdf(px, py, x, y, w, h, r) == 0);
-                out.push((cx, cy, cw, ch));
+            for (cx, cy) in [(x, y), (x + w - r, y), (x, y + h - r), (x + w - r, y + h - r)] {
+                damage.push(Rect::new(cx, cy, r, r));
             }
         }
-        render::draw_glow_ring(shadow, info, x, y, w, h, self.rounding,
-            glow.color, glow.band, glow.alpha);
-        out
+        let damage: Vec<Rect> = damage.iter().map(|d| d.intersect(&screen)).filter(|d| !d.is_empty()).collect();
+        self.compose(target, info, damage)
     }
 
     /// Height reserved at the top for the bar strut (0 if no bar registered).
@@ -1795,7 +1667,7 @@ impl Compositor {
     /// motion (`geometry_in_motion`) nothing is pushed: a guest redraws its
     /// whole window for every size, so it gets only the one the motion
     /// ends at, and until then its tile clips or extends its picture. The
-    /// `border` must match render_window's content-rect inset exactly or
+    /// `border` must match the content rect `build_scene` uses exactly or
     /// the guest would render a few px off.
     fn sync_surface_tile_sizes(&self) {
         if self.geometry_in_motion() {
@@ -1813,565 +1685,248 @@ impl Compositor {
         }
     }
 
-    /// Render the full compositor scene to the shadow buffer.
-    pub fn render(&mut self, shadow: *mut u8, info: &FbInfo) {
-        // Only redraw background when needed (expensive at 4K)
-        if !self.aurora_drawn || self.needs_full_redraw {
-            background::draw_background(shadow, info);
-            self.aurora_drawn = true;
-        }
-
-        // Render windows (back to front)
-        let border = self.border;
-        let rounding = self.rounding;
-        let opacity = crate::shade::glass::params().loop_opacity;
-        let scale = self.scale;
-        let mut wc = [0u32; 4]; // terminal, widget, surface, other(panel)
-        for &wid in self.z_order.iter().rev() {
-            if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
-                if win.workspace != self.active_workspace || !win.visible { continue; }
-                match win.kind {
-                    crate::shade::window::WindowKind::Terminal => wc[0] += 1,
-                    crate::shade::window::WindowKind::Widget if !win.is_dock && !win.is_bar => wc[1] += 1,
-                    crate::shade::window::WindowKind::Surface => wc[2] += 1,
-                    _ => wc[3] += 1,
-                }
-
-                let border_color = if win.focused {
-                    self.active_border_color()
-                } else {
-                    self.inactive_border_color()
-                };
-                Self::render_window(shadow, info, win, border, rounding, opacity, scale,
-                    border_color, self.glow_for(win));
-            }
-        }
-        {
-            static COMP_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-            let n = COMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
-            if n % 60 == 0 {
-                if crate::shade::PERF_LOG {
-                crate::kprintln!("[comp] windows: {} terminal | {} widget | {} surface | {} panel/other",
-                    wc[0], wc[1], wc[2], wc[3]);
-                }
-            }
-        }
-
-        // The bar (bar.wasm) draws itself in the window loop above — no
-        // native bar render.
-
-        // Presence handle for a fully-hidden dock.
-        self.render_dock_handle(shadow, info);
-
-        // Last of all, over everything: the screenshot flash.
-        self.render_flash(shadow, info);
-
+    /// The whole frame, composed into `target`.
+    pub fn render(&mut self, target: *mut u8, info: &FbInfo) {
+        self.compose(target, info, alloc::vec![Rect::new(0, 0, info.width, info.height)]);
         for win in &mut self.windows {
             win.dirty = false;
         }
+        self.aurora_drawn = true;
         self.needs_full_redraw = false;
     }
 
-    /// Draw the collapsed-dock presence bar at the resting edge while the
-    /// dock is fully hidden, so the user knows a dock lives there. It
-    /// mirrors the open dock — same width + same translucent SurfaceElevated
-    /// tray colour — but only ~5 px tall: just the grey strip is enough to
-    /// signal "a dock lives here". Drawn over the wallpaper; cleared by the
-    /// full redraw `dock_tick` forces the moment it slides into view.
-    fn render_dock_handle(&self, shadow: *mut u8, info: &FbInfo) {
-        let Some(dock) = self.dock.as_ref() else { return };
-        // Only while fully hidden — once it slides up the window itself
-        // is the affordance.
-        if dock.offset < dock.thickness + dock.gap { return; }
-        // Mirror the dock window's geometry (centred, same width).
-        let Some(win) = self.windows.iter().find(|w| w.id == dock.id) else { return };
-
-        let scale = self.scale.max(1);
-        let hh = DOCK_HANDLE_H * scale;
-        let w = win.width;
-        let x = win.x;
-        let baseline = self.dock_baseline();
-        let y = baseline.saturating_sub(hh);
-
-        // Tray-coloured bar: same token + translucency as the revealed dock.
-        let tray = crate::shade::widgets::palette::resolve_glass(
-            crate::shade::widgets::abi::Token::SurfaceElevated);
-        render::fill_rounded_rect_alpha(shadow, info, x, y, w, hh,
-            tray & 0x00FF_FFFF, hh / 2,
-            crate::shade::widgets::palette::panel_opacity(dock.id.0));
+    /// Compose the frame into `target` within `damage`, grown where glass
+    /// needs what lies beneath it (`scene::expand_damage`). Returns the
+    /// damage painted. Window buffers are brought up to date while the
+    /// scene is built; dirty flags are cleared by the callers that repaint
+    /// those windows (`render`, `render_damaged`).
+    pub fn compose(&mut self, target: *mut u8, info: &FbInfo, mut damage: Vec<Rect>) -> Vec<Rect> {
+        let frame = self.build_scene();
+        scene::expand_damage(&frame, &mut damage, Rect::new(0, 0, info.width, info.height));
+        scene::execute(&frame, &*self, target, info, &damage);
+        damage
     }
 
-    /// Fast render: only the current input line of the focused window.
-    pub fn render_input_line(&self, shadow: *mut u8, info: &FbInfo) -> Option<(u32, u32, u32, u32)> {
-        let fid = self.focused?;
-        let win = self.windows.iter().find(|w| w.id == fid && w.workspace == self.active_workspace)?;
-
-        let border = self.border;
-        let scale = self.scale;
-        let pad = 6 * scale;
-        let cx = win.content_x(border) + pad;
-        let cy = win.content_y(border) + pad;
-        let cw = win.content_w(border).saturating_sub(pad * 2);
-        let ch = win.content_h(border).saturating_sub(pad * 2);
-
-        terminal::render_input_line(shadow, info,
-            cx, cy, cw, ch,
-            win.terminal_idx)
+    /// Text rect of a terminal window: its content rect less the padding.
+    fn term_text_rect(&self, win: &Window) -> Rect {
+        let pad = 6 * self.scale;
+        Rect::new(win.content_x(self.border) + pad, win.content_y(self.border) + pad,
+            win.content_w(self.border).saturating_sub(pad * 2),
+            win.content_h(self.border).saturating_sub(pad * 2))
     }
 
-    /// Render a single window: background overwrite + border blend + content blend + text.
-    pub(crate) fn render_window(shadow: *mut u8, info: &FbInfo, win: &Window,
-                     border: u32, rounding: u32, opacity: u32, scale: u32,
-                     border_color: u32, glow: Glow) {
-        // [rw-phase] per-window timing: wallpaper restore | chrome | content.
-        static RW_BG: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-        static RW_CHROME: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-        static RW_CONTENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-        static RW_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-        let t_rw0 = crate::interrupts::rdtsc();
-        // Overlay windows skip the wallpaper restore — rounded-out
-        // corners keep showing whatever app is underneath instead of
-        // punching a wallpaper-shaped hole into it. The bar is the
-        // exception: it's a translucent overlay that repaints every clock
-        // tick, so it must restore its band from the wallpaper first or
-        // successive blends would stack into an opaque smear.
-        if !win.is_overlay || win.is_bar {
-            // Restore the halo band too, always — also for an unfocused tile,
-            // which is exactly the one that has to paint over the halo it had
-            // while it was focused. The band lives inside the gap, so this
-            // never reaches a neighbour (see `glow_width`).
-            let g = glow.band;
-            background::draw_background_region(shadow, info,
-                win.x.saturating_sub(g), win.y.saturating_sub(g),
-                win.width + g + (win.x - win.x.saturating_sub(g)),
-                win.height + g + (win.y - win.y.saturating_sub(g)));
-        }
-        if win.kind == crate::shade::window::WindowKind::Surface
-            && !crate::shade::surface::has_frame(win.id.0)
-        {
+    /// Bring a terminal window's text layer up to date. While windows are
+    /// in motion a layer of the wrong size is kept (and shown cropped)
+    /// rather than redrawn for every intermediate size.
+    fn update_term_layer(&mut self, id: u32, terminal_idx: u8, w: u32, h: u32, dirty: bool, in_motion: bool) {
+        let stale = self.term_layers.get(&id).is_none_or(|b| b.width() != w || b.height() != h);
+        if stale && in_motion && self.term_layers.contains_key(&id) { return; }
+        if stale {
+            self.term_layers.insert(id, PixelBuffer::new(w, h));
+        } else if !dirty && !self.needs_full_redraw {
             return;
         }
-        if glow.alpha > 0 {
-            render::draw_glow_ring(shadow, info, win.x, win.y, win.width, win.height,
-                rounding, glow.color, glow.band, glow.alpha);
-        }
-        let t_rw_bg = crate::interrupts::rdtsc();
-
-        // 2+3. Single-pass chrome. Terminal windows get the full
-        // layered paint (border + bg_color content). Widget windows
-        // get border-only — the widget supplies its own content + AA
-        // at the inner edge, so the chrome must not bleed `bg_color`
-        // into the inner-fringe band.
-        // The dock is chrome-less: no hard bordered box around it. It
-        // supplies its own soft tray background in the widget tree, so
-        // we skip the chrome pass entirely and blit the widget content
-        // edge-to-edge with the full rounding. Everything else gets the
-        // normal border + bg chrome.
-        let (chrome_border, chrome_round) = if win.is_dock || win.is_bar {
-            (0u32, rounding)
-        } else {
-            (border, rounding.saturating_sub(border))
-        };
-
-        if !win.is_dock && !win.is_bar {
-            let (ba, bb, b_op) = if win.focused {
-                if crate::theme::is_active() {
-                    let (ga, gb) = crate::theme::border_gradient();
-                    (ga, gb, BORDER_ACTIVE_OPACITY)
-                } else {
-                    (border_color, border_color, BORDER_ACTIVE_OPACITY)
-                }
-            } else {
-                (border_color, border_color, BORDER_INACTIVE_OPACITY)
-            };
-            let paint_content = matches!(win.kind, crate::shade::window::WindowKind::Terminal);
-            // Terminal (`loop`) windows track the active theme like the
-            // widget apps — Surface bg + OnSurface text — so light mode is
-            // consistent across every window instead of a lone dark tile.
-            let content_bg = if paint_content {
-                crate::shade::widgets::palette::resolve_glass(
-                    crate::shade::widgets::abi::Token::Surface) & 0x00FF_FFFF
-            } else {
-                win.bg_color
-            };
-            let content_opacity = opacity;
-            if paint_content {
-                // Glass blends over the blurred wallpaper, not the sharp one
-                // (see `background::draw_glass_backdrop`). Inside the cached
-                // region, so a cache hit carries it.
-                background::draw_glass_backdrop(shadow, info,
-                    win.x, win.y, win.width, win.height, rounding);
-                // Terminal glass bg is static + expensive — cache it.
-                let key = chrome_key(win.x, win.y, win.width, win.height, win.focused,
-                    ba, bb, b_op, content_bg, content_opacity, rounding, border);
-                let hit = chrome_cache_blit(key, win.x, win.y, win.width, win.height, shadow, info);
-                {
-                    static HITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                    static MISS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                    use core::sync::atomic::Ordering::Relaxed;
-                    if hit { HITS.fetch_add(1, Relaxed); } else { MISS.fetch_add(1, Relaxed); }
-                    let m = MISS.load(Relaxed);
-                    if crate::shade::PERF_LOG && (HITS.load(Relaxed) + m) % 30 == 0 {
-                        crate::kprintln!("[chrome-cache] hits {} miss {} | geo {}x{}+{}+{} key {:#x}",
-                            HITS.swap(0, Relaxed), MISS.swap(0, Relaxed),
-                            win.width, win.height, win.x, win.y, key);
-                    }
-                }
-                if !hit {
-                    render::fill_rounded_chrome_aa(shadow, info,
-                        win.x, win.y, win.width, win.height,
-                        ba, bb, content_bg,
-                        rounding, border, b_op, content_opacity, paint_content);
-                    chrome_cache_store(key, win.x, win.y, win.width, win.height, shadow, info);
-                }
-            } else {
-                render::fill_rounded_chrome_aa(shadow, info,
-                    win.x, win.y, win.width, win.height,
-                    ba, bb, content_bg,
-                    rounding, border, b_op, content_opacity, paint_content);
-            }
-        }
-
-        let t_rw_chrome = crate::interrupts::rdtsc();
-        let cx = win.content_x(chrome_border);
-        let cy = win.content_y(chrome_border);
-        let cw = win.content_w(chrome_border);
-        let ch = win.content_h(chrome_border);
-        // Inner shape is concentric with the outer at radius
-        // `rounding - border` — see `fill_rounded_chrome_aa`. The
-        // widget-blit AA at the inner edge is computed against this
-        // same inner curve so widget pixels and chrome border meet
-        // pixel-perfectly along the rounded inner curve.
-        let inner_r = chrome_round;
-
-        // 4. Content-kind specific draw.
-        match win.kind {
-            crate::shade::window::WindowKind::Terminal => {
-                let pad = 6 * scale;
-                let text_x = cx + pad;
-                let text_y = cy + pad;
-                let text_w = cw.saturating_sub(pad * 2);
-                let text_h = ch.saturating_sub(pad * 2);
-                if win.focused {
-                    terminal::cache_input_line_bg(shadow, info,
-                        text_x, text_y, text_w, text_h, win.terminal_idx);
-                }
-                terminal::render_to_window(shadow, info,
-                    text_x, text_y, text_w, text_h,
-                    scale, win.terminal_idx);
-
-                // Overlay scrollbar — only when the scrollback overflows.
-                // Mirrors the widget overlay bar; geometry must match
-                // `scroll_hit_at` so the drawn thumb and the drag area agree.
-                if let Some((total, soff)) = terminal::scroll_metrics(win.terminal_idx as usize) {
-                    let (_, char_h) = crate::gui::font::char_size(scale);
-                    let rows = (text_h / char_h.max(1)).max(1) as usize;
-                    if total > rows && text_h > 0 {
-                        let track_h = text_h as u64;
-                        let thumb_h = ((track_h * rows as u64) / total as u64).max(24).min(track_h) as u32;
-                        let travel = track_h - thumb_h as u64;
-                        let max_scroll = (total - rows) as u64;
-                        let soff = (soff as u64).min(max_scroll);
-                        // soff 0 = bottom → thumb at bottom; soff max = top.
-                        let from_top = if max_scroll == 0 { 0 } else { travel * (max_scroll - soff) / max_scroll };
-                        let ty = text_y + from_top as u32;
-                        let tx = text_x + text_w.saturating_sub(6);
-                        let color = crate::shade::widgets::palette::resolve_glass(
-                            crate::shade::widgets::abi::Token::OnSurfaceMuted) & 0x00FF_FFFF;
-                        for py in ty..(ty + thumb_h).min(info.height) {
-                            for px in tx..(tx + 4).min(info.width) {
-                                render::blend_pixel(shadow, info, px, py, color, 200);
-                            }
-                        }
-                    }
-                }
-            }
-            crate::shade::window::WindowKind::Widget => {
-                let _ = crate::shade::widgets::relayout_scene(
-                    win.id.0, cx as i32, cy as i32, cw, ch,
-                );
-                // Widget pixels fill the inner rounded rect. Middle rows
-                // memcpy; rows that touch a corner curve fall through to
-                // a per-pixel SDF blend so widget content and chrome
-                // border meet with proper AA at the inner edge.
-                crate::shade::widgets::with_scene(win.id.0, |scene| {
-                    let pitch = info.pitch as usize;
-                    let fb_w = info.width;
-                    let fb_h = info.height;
-                    let x1 = (cx + scene.width).min(fb_w);
-                    // Defensive: a scene caught mid-resize (e.g. the browser's
-                    // Canvas re-sizing) can report a width/height larger than
-                    // its actual pixel buffer. Clamp the blit to the rows the
-                    // buffer really holds so a rounded-corner index can never
-                    // run past `scene.pixels` — a kernel OOB there halts the OS.
-                    let usable_h = if scene.width > 0 {
-                        (scene.pixels.len() / scene.width as usize) as u32
-                    } else {
-                        0
-                    };
-                    let y1 = (cy + scene.height.min(usable_h)).min(fb_h);
-                    let cw_local = x1.saturating_sub(cx);
-                    let ch_local = y1.saturating_sub(cy);
-                    let r = inner_r.min(cw_local / 2).min(ch_local / 2);
-
-                    // Panels (dock + bar). Both root their tree in a Stack, so
-                    // their scene carries real alpha (transparent where empty,
-                    // chrome-opacity backgrounds, full-coverage glyphs — see
-                    // rasterize_buffer_with_overlays). Composite the scene over
-                    // the wallpaper by per-pixel alpha: translucent tray/pills,
-                    // crisp glyphs, AA corners from the rasteriser, wallpaper in
-                    // the gaps — no halo, no per-pill detection.
-                    if win.is_dock || win.is_bar {
-                        let ink = crate::shade::glass::ink();
-                        for dy in cy..y1 {
-                            let local_y = dy - cy;
-                            for dx in cx..x1 {
-                                let px = scene.pixels[(local_y as usize)
-                                    * (scene.width as usize) + (dx - cx) as usize];
-                                let a = (px >> 24) & 0xFF;
-                                if a == 0 { continue; }  // transparent → wallpaper
-                                // Translucent fill: blend over the blurred
-                                // wallpaper where nothing else is beneath.
-                                if a < 255 {
-                                    let cur = render::read_pixel(shadow, info, dx, dy);
-                                    let base = background::glass_base_at(info, dx, dy, cur);
-                                    render::put_pixel(shadow, info, dx, dy,
-                                        render::glass_blend(ink.fill(px & 0x00FF_FFFF), base, a, ink));
-                                    continue;
-                                }
-                                render::blend_pixel(shadow, info, dx, dy,
-                                    px & 0x00FF_FFFF, a);
-                            }
-                        }
-                        return;
-                    }
-
-                    for dy in cy..y1 {
-                        let local_y = dy - cy;
-                        let in_top    = r > 0 && local_y < r;
-                        let in_bottom = r > 0 && local_y >= ch_local - r;
-
-                        if !in_top && !in_bottom {
-                            // Straight middle: fast memcpy of the full row.
-                            let src_base = (local_y as usize) * (scene.width as usize);
-                            let dst_off  = dy as usize * pitch + cx as usize * 4;
-                            unsafe {
-                                let dst = shadow.add(dst_off) as *mut u32;
-                                core::ptr::copy_nonoverlapping(
-                                    scene.pixels.as_ptr().add(src_base),
-                                    dst,
-                                    cw_local as usize,
-                                );
-                            }
-                            continue;
-                        }
-
-                        // Corner row: r pixels on each side go through
-                        // the SDF blend; the middle is still memcpy.
-                        let mid_lo = r.min(cw_local);
-                        let mid_hi = cw_local.saturating_sub(r).max(mid_lo);
-
-                        for dx in cx..(cx + mid_lo).min(x1) {
-                            let local_x = dx - cx;
-                            let cov = render::rect_coverage_sdf(dx, dy, cx, cy, cw_local, ch_local, r);
-                            if cov == 0 { continue; }
-                            let src_idx = (local_y as usize) * (scene.width as usize) + local_x as usize;
-                            let widget_pixel = scene.pixels[src_idx];
-                            render::blend_pixel(shadow, info, dx, dy, widget_pixel, cov);
-                        }
-
-                        if mid_hi > mid_lo {
-                            let src_base = (local_y as usize) * (scene.width as usize) + mid_lo as usize;
-                            let dst_off  = dy as usize * pitch + (cx + mid_lo) as usize * 4;
-                            let span     = (mid_hi - mid_lo) as usize;
-                            unsafe {
-                                let dst = shadow.add(dst_off) as *mut u32;
-                                core::ptr::copy_nonoverlapping(
-                                    scene.pixels.as_ptr().add(src_base),
-                                    dst,
-                                    span,
-                                );
-                            }
-                        }
-
-                        for dx in (cx + mid_hi).min(x1)..x1 {
-                            let local_x = dx - cx;
-                            let cov = render::rect_coverage_sdf(dx, dy, cx, cy, cw_local, ch_local, r);
-                            if cov == 0 { continue; }
-                            let src_idx = (local_y as usize) * (scene.width as usize) + local_x as usize;
-                            let widget_pixel = scene.pixels[src_idx];
-                            render::blend_pixel(shadow, info, dx, dy, widget_pixel, cov);
-                        }
-                    }
-                });
-            }
-            crate::shade::window::WindowKind::Surface => {
-                // Raw guest framebuffer → tile, 1:1 (no scaling).
-                // The guest compositor gets this content rect as its
-                // output size, so it reflows to the tile size natively —
-                // guest `sw×sh` == `cw×ch` in steady state. While a resize
-                // is on its way a larger frame is clipped, and a smaller
-                // one is extended by its last column and row (never
-                // stretched), so the tile never shows what lies under it.
-                // Same memcpy-middle + SDF-corner-blend shape as the Widget
-                // arm above so the browser tile gets the identical
-                // concentric rounded corners as every other window
-                // and sits flush in the dwindle layout.
-                crate::shade::surface::with_front(win.id.0, |px, sw, sh| {
-                    if px.is_empty() || sw == 0 || sh == 0 || cw == 0 || ch == 0 {
-                        return;
-                    }
-                    let pitch = info.pitch as usize;
-                    // Clip the blit to the content rect and the
-                    // framebuffer — never overdraw the border or a
-                    // neighbour tile.
-                    let x1 = (cx + cw).min(info.width);
-                    let y1 = (cy + ch).min(info.height);
-                    let cw_local = x1.saturating_sub(cx);
-                    let ch_local = y1.saturating_sub(cy);
-                    let r = inner_r.min(cw_local / 2).min(ch_local / 2);
-                    let src = |lx: u32, ly: u32| -> u32 {
-                        px[(ly.min(sh - 1) as usize) * (sw as usize) + lx.min(sw - 1) as usize]
-                    };
-                    // Copy row `ly` into `[from, to)` of the tile row at
-                    // `dy`: the frame's pixels, then its last one repeated.
-                    let copy_span = |dy: u32, ly: u32, from: u32, to: u32| {
-                        let row = (ly.min(sh - 1) as usize) * (sw as usize);
-                        let have = to.min(sw).max(from);
-                        // SAFETY: `dy < y1 <= info.height` and
-                        // `cx + to <= x1 <= info.width`, so every write lies
-                        // in the shadow buffer; `row + have <= px.len()`
-                        // because `have <= sw` and the row is below `sh`.
-                        unsafe {
-                            let dst = shadow.add(dy as usize * pitch + (cx + from) as usize * 4) as *mut u32;
-                            if have > from {
-                                core::ptr::copy_nonoverlapping(
-                                    px.as_ptr().add(row + from as usize), dst, (have - from) as usize);
-                            }
-                            let edge = px[row + sw as usize - 1];
-                            for i in (have - from)..(to - from) {
-                                *dst.add(i as usize) = edge;
-                            }
-                        }
-                    };
-
-                    for dy in cy..y1 {
-                        let local_y = dy - cy;
-                        let in_top    = r > 0 && local_y < r;
-                        let in_bottom = r > 0 && local_y >= ch_local - r;
-
-                        if !in_top && !in_bottom {
-                            copy_span(dy, local_y, 0, cw_local);
-                            continue;
-                        }
-
-                        // Corner row: r pixels on each side go through
-                        // the SDF blend; the middle is still a copy.
-                        let mid_lo = r.min(cw_local);
-                        let mid_hi = cw_local.saturating_sub(r).max(mid_lo);
-
-                        for dx in cx..(cx + mid_lo).min(x1) {
-                            let cov = render::rect_coverage_sdf(dx, dy, cx, cy, cw_local, ch_local, r);
-                            if cov == 0 { continue; }
-                            render::blend_pixel(shadow, info, dx, dy, src(dx - cx, local_y), cov);
-                        }
-
-                        if mid_hi > mid_lo {
-                            copy_span(dy, local_y, mid_lo, mid_hi);
-                        }
-
-                        for dx in (cx + mid_hi).min(x1)..x1 {
-                            let cov = render::rect_coverage_sdf(dx, dy, cx, cy, cw_local, ch_local, r);
-                            if cov == 0 { continue; }
-                            render::blend_pixel(shadow, info, dx, dy, src(dx - cx, local_y), cov);
-                        }
-                    }
-                });
-            }
-        }
-
-        let t_rw_content = crate::interrupts::rdtsc();
-
-        // Platform close button (top-right). Panels return None and are
-        // skipped; everything else gets the mouse-friendly "X".
-        draw_close_button(shadow, info, win, border, scale);
-
-        use core::sync::atomic::Ordering::Relaxed;
-        let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
-        if win.is_dock || win.is_bar {
-            // Panels return early from the widget arm but still flow here.
-            // Time them separately: panels carry their own cost, and
-            // averaging them with the terminal makes the numbers ambiguous.
-            static T_PANEL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-            static N_PANEL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-            T_PANEL.fetch_add(t_rw_content.saturating_sub(t_rw0), Relaxed);
-            let np = N_PANEL.fetch_add(1, Relaxed) + 1;
-            if crate::shade::PERF_LOG && np % 60 == 0 {
-                crate::kprintln!("[rw-panel] avg per-panel render: {}us (dock/bar)",
-                    T_PANEL.swap(0, Relaxed) / 60 / mhz);
-            }
-        } else {
-            RW_BG.fetch_add(t_rw_bg.saturating_sub(t_rw0), Relaxed);
-            RW_CHROME.fetch_add(t_rw_chrome.saturating_sub(t_rw_bg), Relaxed);
-            RW_CONTENT.fetch_add(t_rw_content.saturating_sub(t_rw_chrome), Relaxed);
-            let n = RW_COUNT.fetch_add(1, Relaxed) + 1;
-            if crate::shade::PERF_LOG && n % 60 == 0 {
-                let bg = RW_BG.swap(0, Relaxed) / 60 / mhz;
-                let ch = RW_CHROME.swap(0, Relaxed) / 60 / mhz;
-                let ct = RW_CONTENT.swap(0, Relaxed) / 60 / mhz;
-                crate::kprintln!("[rw-phase] terminal avg: wallpaper {}us | chrome {}us | content {}us", bg, ch, ct);
-            }
-        }
+        let scale = self.scale;
+        let Some(layer) = self.term_layers.get_mut(&id) else { return };
+        layer.fill(0);
+        let info = layer.info();
+        terminal::render_to_window(layer.ptr(), &info, 0, 0, w, h, scale, terminal_idx);
     }
 
-    /// Render only changed regions. Returns list of (x, y, w, h) to blit.
-    pub fn render_damaged(&mut self, shadow: *mut u8, info: &FbInfo) -> Vec<(u32, u32, u32, u32)> {
-        if self.needs_full_redraw {
-            self.render(shadow, info);
-            return alloc::vec![(0, 0, self.screen_w, self.screen_h)];
+    /// The scene of the current frame, back to front. Window buffers that
+    /// are out of date (terminal text, widget layout) are updated first.
+    fn build_scene(&mut self) -> Scene {
+        use crate::shade::window::WindowKind;
+        struct Plan {
+            id: WindowId,
+            win_rect: Rect,
+            kind: WindowKind,
+            panel: bool,
+            focused: bool,
+            dirty: bool,
+            terminal_idx: u8,
+            glow: Glow,
+            border_color: u32,
+            bg: u32,
+            content: Rect,
+            text: Rect,
+            close: Option<(Rect, u32)>,
         }
-
-        let mut regions = Vec::new();
         let border = self.border;
         let rounding = self.rounding;
-        let opacity = crate::shade::glass::params().loop_opacity;
         let scale = self.scale;
+        let opacity = crate::shade::glass::params().loop_opacity;
+        let in_motion = self.geometry_in_motion() || self.animation.is_some();
 
-        for wid_idx in (0..self.z_order.len()).rev() {
-            let wid = self.z_order[wid_idx];
-            let needs_render = self.windows.iter()
-                .find(|w| w.id == wid)
-                .map(|w| w.dirty && w.workspace == self.active_workspace && w.visible)
-                .unwrap_or(false);
+        let mut plans = Vec::new();
+        for &wid in self.z_order.iter().rev() {
+            let Some(win) = self.windows.iter().find(|w| w.id == wid) else { continue };
+            if win.workspace != self.active_workspace || !win.visible { continue; }
+            let panel = win.is_dock || win.is_bar;
+            let cb = if panel { 0 } else { border };
+            plans.push(Plan {
+                id: win.id,
+                win_rect: Rect::new(win.x, win.y, win.width, win.height),
+                kind: win.kind,
+                panel,
+                focused: win.focused,
+                dirty: win.dirty,
+                terminal_idx: win.terminal_idx,
+                glow: self.glow_for(win),
+                border_color: if win.focused { self.active_border_color() } else { self.inactive_border_color() },
+                bg: win.bg_color,
+                content: Rect::new(win.content_x(cb), win.content_y(cb), win.content_w(cb), win.content_h(cb)),
+                text: self.term_text_rect(win),
+                close: close_button_rect(win, border, scale)
+                    .map(|(x, y, w, h)| (Rect::new(x, y, w, h), close_glyph_color(win))),
+            });
+        }
+        let live: Vec<u32> = plans.iter().filter(|p| p.kind == WindowKind::Terminal).map(|p| p.id.0).collect();
+        self.term_layers.retain(|id, _| live.contains(id));
 
-            if needs_render {
-                if let Some(win) = self.windows.iter().find(|w| w.id == wid) {
-                    let border_color = if win.focused {
-                        self.active_border_color()
+        let mut items = Vec::with_capacity(4 + plans.len() * 6);
+        items.push(Item::Background);
+        for p in &plans {
+            if p.kind == WindowKind::Surface && !crate::shade::surface::has_frame(p.id.0) { continue; }
+            if p.glow.alpha > 0 {
+                items.push(Item::Glow { rect: p.win_rect, radius: rounding, color: p.glow.color,
+                    band: p.glow.band, alpha: p.glow.alpha });
+            }
+            // Inner shape concentric with the outer at `rounding - border`,
+            // so content and the chrome border meet along the same curve.
+            let inner_r = if p.panel { rounding } else { rounding.saturating_sub(border) };
+            if !p.panel {
+                let (ba, bb, b_op) = if p.focused {
+                    if crate::theme::is_active() {
+                        let (ga, gb) = crate::theme::border_gradient();
+                        (ga, gb, BORDER_ACTIVE_OPACITY)
                     } else {
-                        self.inactive_border_color()
+                        (p.border_color, p.border_color, BORDER_ACTIVE_OPACITY)
+                    }
+                } else {
+                    (p.border_color, p.border_color, BORDER_INACTIVE_OPACITY)
+                };
+                // Terminal (`loop`) windows are glass with the theme's Surface
+                // colour; widget windows get the border only, their content
+                // fills the inside.
+                let paint_content = p.kind == WindowKind::Terminal;
+                let bg = if paint_content {
+                    crate::shade::widgets::palette::resolve_glass(
+                        crate::shade::widgets::abi::Token::Surface) & 0x00FF_FFFF
+                } else {
+                    p.bg
+                };
+                if paint_content {
+                    // Glass blends over the blurred wallpaper, not the sharp one.
+                    items.push(Item::GlassBackdrop { rect: p.win_rect, radius: rounding });
+                }
+                items.push(Item::Chrome { rect: p.win_rect, border_a: ba, border_b: bb, bg, rounding, border,
+                    border_opacity: b_op, bg_opacity: opacity, paint_content });
+            }
+            match p.kind {
+                WindowKind::Terminal => {
+                    self.update_term_layer(p.id.0, p.terminal_idx, p.text.w, p.text.h, p.dirty, in_motion);
+                    items.push(Item::Text { src: Source::TermText(p.id.0), dst: p.text });
+                    if let Some(bar) = term_scrollbar(p.terminal_idx, p.text, scale) {
+                        items.push(bar);
+                    }
+                }
+                WindowKind::Widget => {
+                    let c = p.content;
+                    // A pure move only updates the origin; a new size lays the
+                    // scene out again — except mid-motion, where the old
+                    // pixels are stretched until the motion ends.
+                    let (lw, lh) = if in_motion {
+                        crate::shade::widgets::with_scene(p.id.0, |sc| (sc.width, sc.height)).unwrap_or((c.w, c.h))
+                    } else {
+                        (c.w, c.h)
                     };
-                    let glow = self.glow_for(win);
-                    Self::render_window(shadow, info, win, border, rounding, opacity, scale,
-                        border_color, glow);
-                    // Damage covers the halo band: the tile that just lost
-                    // focus repaints wallpaper there, and the one that gained
-                    // it paints the halo — neither is inside its own rect.
-                    let g = glow.band;
-                    let rx = win.x.saturating_sub(g);
-                    let ry = win.y.saturating_sub(g);
-                    regions.push((rx, ry,
-                        (win.width + g + (win.x - rx)).min(info.width.saturating_sub(rx)),
-                        (win.height + g + (win.y - ry)).min(info.height.saturating_sub(ry))));
+                    let _ = crate::shade::widgets::relayout_scene(p.id.0, c.x as i32, c.y as i32, lw, lh);
+                    if p.panel {
+                        let (sw, sh) = crate::shade::widgets::with_scene(p.id.0,
+                            |sc| (sc.pixels.width(), sc.pixels.height())).unwrap_or((0, 0));
+                        items.push(Item::Panel { src: Source::Widget(p.id.0), dst: Rect::new(c.x, c.y, sw, sh) });
+                    } else {
+                        items.push(Item::Content { src: Source::Widget(p.id.0), dst: c, radius: inner_r,
+                            fit: Fit::Scale });
+                    }
+                }
+                WindowKind::Surface => {
+                    items.push(Item::Content { src: Source::Surface(p.id.0), dst: p.content, radius: inner_r,
+                        fit: Fit::Extend });
                 }
             }
+            if let Some((rect, color)) = p.close {
+                items.push(Item::CloseGlyph { rect, size: CLOSE_BTN_GLYPH, color });
+            }
         }
+        if let Some(h) = self.dock_handle_item() {
+            items.push(h);
+        }
+        // Last of all, over everything: the screenshot flash.
+        let flash = self.flash_alpha();
+        if flash > 0 {
+            items.push(Item::Fill { rect: Rect::new(0, 0, self.screen_w, self.screen_h), color: 0,
+                alpha: flash.min(255), radius: 0 });
+        }
+        Scene { items }
+    }
 
+    /// The collapsed-dock presence bar at the resting edge while the dock is
+    /// fully hidden: as wide as the dock, in its translucent tray colour,
+    /// ~5 px tall — enough to signal "a dock lives here".
+    fn dock_handle_item(&self) -> Option<Item> {
+        let dock = self.dock.as_ref()?;
+        if dock.offset < dock.thickness + dock.gap { return None; }
+        let win = self.windows.iter().find(|w| w.id == dock.id)?;
+        let hh = DOCK_HANDLE_H * self.scale.max(1);
+        let tray = crate::shade::widgets::palette::resolve_glass(crate::shade::widgets::abi::Token::SurfaceElevated);
+        Some(Item::Fill {
+            rect: Rect::new(win.x, self.dock_baseline().saturating_sub(hh), win.width, hh),
+            color: tray & 0x00FF_FFFF,
+            alpha: crate::shade::widgets::palette::panel_opacity(dock.id.0).min(255),
+            radius: hh / 2,
+        })
+    }
+
+    /// Draw the focused terminal's input line into its text layer; the
+    /// screen rect to compose, if any.
+    pub fn update_input_line(&mut self) -> Option<Rect> {
+        let fid = self.focused?;
+        let win = self.windows.iter().find(|w| w.id == fid && w.workspace == self.active_workspace)?;
+        if win.kind != crate::shade::window::WindowKind::Terminal { return None; }
+        let text = self.term_text_rect(win);
+        let layer = self.term_layers.get(&fid.0)?;
+        if layer.width() != text.w || layer.height() != text.h { return None; }
+        let info = layer.info();
+        let (x, y, w, h) = terminal::render_input_line(layer.ptr(), &info, 0, 0, text.w, text.h,
+            win.terminal_idx)?;
+        Some(Rect::new(text.x + x, text.y + y, w, h))
+    }
+
+    /// Compose the dirty windows (and their halo bands) into `target`.
+    /// Returns the rects painted.
+    pub fn render_damaged(&mut self, target: *mut u8, info: &FbInfo) -> Vec<Rect> {
+        if self.needs_full_redraw {
+            self.render(target, info);
+            return alloc::vec![Rect::new(0, 0, self.screen_w, self.screen_h)];
+        }
+        let screen = Rect::new(0, 0, info.width, info.height);
+        let damage: Vec<Rect> = self.windows.iter()
+            .filter(|w| w.dirty && w.workspace == self.active_workspace && w.visible)
+            .map(|w| {
+                // The halo band too: the tile that just lost focus loses its
+                // halo there, the one that gained it gets it.
+                let g = self.glow_for(w).band;
+                Rect::new(w.x, w.y, w.width, w.height).grow(g).intersect(&screen)
+            })
+            .collect();
+        if damage.is_empty() { return damage; }
+        let painted = self.compose(target, info, damage);
         for win in &mut self.windows {
             win.dirty = false;
         }
-
-        regions
+        painted
     }
 
     /// Get a mutable reference to a window by ID.
@@ -3127,15 +2682,6 @@ impl Compositor {
         a as u32
     }
 
-    /// Paint the flash over the finished frame. Black, not white — the
-    /// screen darkens and comes back.
-    fn render_flash(&self, shadow: *mut u8, info: &FbInfo) {
-        let alpha = self.flash_alpha();
-        if alpha == 0 { return; }
-        render::fill_rounded_rect_alpha(shadow, info, 0, 0,
-            self.screen_w, self.screen_h, 0x0000_0000, 0, alpha);
-    }
-
     /// Instantly complete any active animation.
     fn finish_animation(&mut self) {
         if let Some(anim) = self.animation.take() {
@@ -3258,3 +2804,42 @@ fn parse_hex_color(s: &str) -> Option<u32> {
     u32::from_str_radix(s, 16).ok()
 }
 
+
+/// The overlay scrollbar of a terminal, when its scrollback overflows.
+/// Geometry must match `scroll_hit_at` so the thumb and the drag area agree.
+fn term_scrollbar(terminal_idx: u8, text: Rect, scale: u32) -> Option<Item> {
+    let (total, soff) = terminal::scroll_metrics(terminal_idx as usize)?;
+    let (_, char_h) = crate::gui::font::char_size(scale);
+    let rows = (text.h / char_h.max(1)).max(1) as usize;
+    if total <= rows || text.h == 0 { return None; }
+    let track_h = text.h as u64;
+    let thumb_h = ((track_h * rows as u64) / total as u64).max(24).min(track_h) as u32;
+    let travel = track_h - thumb_h as u64;
+    let max_scroll = (total - rows) as u64;
+    let soff = (soff as u64).min(max_scroll);
+    // soff 0 = bottom → thumb at bottom; soff max = top.
+    let from_top = if max_scroll == 0 { 0 } else { travel * (max_scroll - soff) / max_scroll };
+    let color = crate::shade::widgets::palette::resolve_glass(
+        crate::shade::widgets::abi::Token::OnSurfaceMuted) & 0x00FF_FFFF;
+    // Alpha 200 of 256, as the thumb has always been blended.
+    Some(Item::Fill { rect: Rect::new(text.x + text.w.saturating_sub(6), text.y + from_top as u32, 4, thumb_h),
+        color, alpha: 200 * 255 / 256, radius: 0 })
+}
+
+impl scene::Sources for Compositor {
+    fn with_source(&self, src: Source, f: &mut dyn FnMut(&[u32], u32, u32)) {
+        match src {
+            Source::Widget(id) => {
+                crate::shade::widgets::with_scene(id, |sc| f(&sc.pixels, sc.pixels.width(), sc.pixels.height()));
+            }
+            Source::Surface(id) => {
+                crate::shade::surface::with_front(id, |px, w, h| f(px, w, h));
+            }
+            Source::TermText(id) => {
+                if let Some(b) = self.term_layers.get(&id) {
+                    f(b, b.width(), b.height());
+                }
+            }
+        }
+    }
+}

@@ -35,7 +35,7 @@ mod storage;
 pub use storage::{npkfs, fat32, gpt};
 
 mod gui;
-pub use gui::{theme, layers};
+pub use gui::theme;
 
 // ── Standalone modules ────────────────────────────────────────
 mod interrupts;

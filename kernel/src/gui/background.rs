@@ -73,6 +73,9 @@ static BLURRED_SET: AtomicBool = AtomicBool::new(false);
 /// on a small image and scaled back up.
 const BLUR_DOWN: u32 = 4;
 const BLUR_PASSES: usize = 3;
+/// Box radius of the last wallpaper blur, in BLUR_DOWN blocks; glass over
+/// windows blurs with the same strength.
+static BLUR_RADIUS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Bumped every time the wallpaper pixels change. Mixed into the compositor's
 /// translucent-glass cache key so a same-theme wallpaper swap invalidates it
@@ -152,14 +155,6 @@ pub fn clear_wallpaper() {
     crate::shade::widgets::refresh_all_scenes();
 }
 
-pub fn draw_background(shadow: *mut u8, info: &FbInfo) {
-    if has_wallpaper() {
-        draw_wallpaper(shadow, info);
-    } else {
-        fill_grey(shadow, info, 0, 0, info.width, info.height);
-    }
-}
-
 pub fn draw_background_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32) {
     if has_wallpaper() {
         draw_wallpaper_region(shadow, info, rx, ry, rw, rh);
@@ -176,42 +171,6 @@ fn fill_grey(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32)
         let row = unsafe { shadow.add(y as usize * pitch) as *mut u32 };
         for x in (rx as usize)..x1 {
             unsafe { *row.add(x) = BG_GREY; }
-        }
-    }
-}
-
-fn draw_wallpaper(shadow: *mut u8, info: &FbInfo) {
-    let wp = WALLPAPER.load(Ordering::Acquire);
-    if wp.is_null() { return; }
-    let size = info.height as usize * info.pitch as usize;
-    unsafe { core::ptr::copy_nonoverlapping(wp, shadow, size); }
-}
-
-/// Restore the background in a rect, but only where `want` says so.
-///
-/// The focus halo wraps the rounded corner of a tile, so it also paints the
-/// four corner notches — inside the tile's bounding box, outside its
-/// outline. A plain rect restore there would wipe the window's own arc, so
-/// the caller masks it down to the pixels the halo can reach.
-pub fn draw_background_region_where(shadow: *mut u8, info: &FbInfo,
-                                    rx: u32, ry: u32, rw: u32, rh: u32,
-                                    want: impl Fn(u32, u32) -> bool) {
-    let wp = WALLPAPER.load(Ordering::Acquire);
-    let pitch = info.pitch as usize;
-    let x1 = (rx + rw).min(info.width);
-    let y1 = (ry + rh).min(info.height);
-    for y in ry..y1 {
-        let row = y as usize * pitch;
-        for x in rx..x1 {
-            if !want(x, y) { continue }
-            let off = row + x as usize * 4;
-            // SAFETY: x < info.width and y < info.height, so `off` is inside
-            // the shadow buffer; the wallpaper, when present, is allocated
-            // screen-sized with the same pitch (see `set_wallpaper`).
-            unsafe {
-                let px = if wp.is_null() { BG_GREY } else { *(wp.add(off) as *const u32) };
-                *(shadow.add(off) as *mut u32) = px;
-            }
         }
     }
 }
@@ -295,6 +254,7 @@ fn compute_blur(bufs: &mut Buffers, wp: *const u8, info: &FbInfo, pages: usize) 
 
     let detail = (detail_sum / (sw * sh).max(1) as u64) as u32;
     let radius = crate::shade::glass::blur_radius(detail);
+    BLUR_RADIUS.store(radius as u32, Ordering::Relaxed);
 
     // 2. Separable box blur, a few passes (none at radius 0).
     let mut tmp = alloc::vec![0u32; sw * sh];
@@ -391,20 +351,21 @@ fn blurred_ready() -> bool {
 
 /// Put the blurred wallpaper under a glass window: inside the rounded rect
 /// only, so the corners outside it keep the sharp wallpaper the gap shows.
-/// Call after the sharp restore. No wallpaper → nothing to blur, no-op.
+/// Painted within `clip`. No wallpaper → nothing to blur, no-op.
 pub fn draw_glass_backdrop(shadow: *mut u8, info: &FbInfo,
-                           rx: u32, ry: u32, rw: u32, rh: u32, radius: u32) {
+                           rx: u32, ry: u32, rw: u32, rh: u32, radius: u32,
+                           clip: &crate::shade::scene::Rect) {
     if !blurred_ready() { return; }
     let bl = BLURRED.load(Ordering::Acquire);
     let pitch = info.pitch as usize;
     let r = radius.min(rw / 2).min(rh / 2);
-    let y1 = (ry + rh).min(info.height);
-    for y in ry..y1 {
+    let y1 = (ry + rh).min(info.height).min(clip.y1());
+    for y in ry.max(clip.y)..y1 {
         let ly = y - ry;
         let from_edge = if ly < r { r - ly } else if ly >= rh - r { ly + 1 - (rh - r) } else { 0 };
         let inset = if from_edge == 0 { 0 } else { r - isqrt(r * r - (from_edge * from_edge).min(r * r)) };
-        let x0 = rx + inset;
-        let x1 = (rx + rw).saturating_sub(inset).min(info.width);
+        let x0 = (rx + inset).max(clip.x);
+        let x1 = (rx + rw).saturating_sub(inset).min(info.width).min(clip.x1());
         if x1 <= x0 { continue; }
         let off = y as usize * pitch + x0 as usize * 4;
         // SAFETY: x0..x1 and y lie inside the screen; both buffers are
@@ -413,23 +374,82 @@ pub fn draw_glass_backdrop(shadow: *mut u8, info: &FbInfo,
     }
 }
 
-/// What a glass pixel at (x,y) should blend over. Where the shadow still
-/// holds exactly the wallpaper, nothing else is underneath, and the blurred
-/// copy takes its place; over a window the window stays (the dock can
-/// slide over a tile).
-pub fn glass_base_at(info: &FbInfo, x: u32, y: u32, current: u32) -> u32 {
-    if !blurred_ready() { return current; }
-    let off = y as usize * info.pitch as usize + x as usize * 4;
-    // SAFETY: caller passes on-screen coordinates; both buffers are
-    // screen-sized with the framebuffer pitch.
-    unsafe {
-        let sharp = *(WALLPAPER.load(Ordering::Acquire).add(off) as *const u32);
-        if (sharp ^ current) & 0x00FF_FFFF == 0 {
-            *(BLURRED.load(Ordering::Acquire).add(off) as *const u32)
-        } else {
-            current
+/// How far around a rect `blur_region` reads: the box passes reach this
+/// many pixels out, plus one block for the bilinear upscale.
+pub fn blur_margin() -> u32 {
+    (BLUR_RADIUS.load(Ordering::Relaxed) * BLUR_PASSES as u32 + 2) * BLUR_DOWN
+}
+
+/// The pixels of `rect` in `target`, blurred exactly as the wallpaper is
+/// (`compute_blur`: BLUR_DOWN blocks on the screen grid, box passes,
+/// bilinear back up), reading up to `blur_margin` around it. Row-major,
+/// `rect.w` wide. None when the wallpaper blur is off (radius 0): glass
+/// then sits on the sharp pixels.
+pub fn blur_region(target: *const u8, info: &FbInfo, rect: crate::shade::scene::Rect)
+    -> Option<alloc::vec::Vec<u32>>
+{
+    let radius = BLUR_RADIUS.load(Ordering::Relaxed) as usize;
+    if radius == 0 || rect.is_empty() { return None; }
+    let pitch = info.pitch as usize;
+    let m = blur_margin();
+    // Block grid covering rect + margin, aligned to the screen's grid.
+    let bx0 = rect.x.saturating_sub(m) / BLUR_DOWN;
+    let by0 = rect.y.saturating_sub(m) / BLUR_DOWN;
+    let bx1 = ((rect.x1() + m).min(info.width)).div_ceil(BLUR_DOWN);
+    let by1 = ((rect.y1() + m).min(info.height)).div_ceil(BLUR_DOWN);
+    let (sw, sh) = ((bx1 - bx0) as usize, (by1 - by0) as usize);
+    if sw == 0 || sh == 0 { return None; }
+    let mut planes = [alloc::vec![0u32; sw * sh], alloc::vec![0u32; sw * sh], alloc::vec![0u32; sw * sh]];
+    for sy in 0..sh {
+        for sx in 0..sw {
+            let x0 = (bx0 + sx as u32) * BLUR_DOWN;
+            let y0 = (by0 + sy as u32) * BLUR_DOWN;
+            let (x1, y1) = ((x0 + BLUR_DOWN).min(info.width), (y0 + BLUR_DOWN).min(info.height));
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    // SAFETY: x < width, y < height of the screen-sized target.
+                    let px = unsafe { *(target.add(y as usize * pitch + x as usize * 4) as *const u32) };
+                    r += (px >> 16) & 0xFF; g += (px >> 8) & 0xFF; b += px & 0xFF; n += 1;
+                }
+            }
+            let i = sy * sw + sx;
+            let n = n.max(1);
+            planes[0][i] = r / n;
+            planes[1][i] = g / n;
+            planes[2][i] = b / n;
         }
     }
+    let mut tmp = alloc::vec![0u32; sw * sh];
+    for plane in planes.iter_mut() {
+        for _ in 0..BLUR_PASSES {
+            box_pass(plane, &mut tmp, sw, sh, 1, sw, radius);
+            box_pass(&tmp, plane, sh, sw, sw, 1, radius);
+        }
+    }
+    let half = (BLUR_DOWN / 2) as i32;
+    let mut out = alloc::vec![0u32; (rect.w * rect.h) as usize];
+    for y in rect.y..rect.y1() {
+        let fy = ((y as i32 - half).max(0) as u32 * 256 / BLUR_DOWN) as usize;
+        let gy = (fy >> 8).saturating_sub(by0 as usize);
+        let (y0, wy) = (gy.min(sh - 1), (fy & 0xFF) as u32);
+        let y1 = (y0 + 1).min(sh - 1);
+        for x in rect.x..rect.x1() {
+            let fx = ((x as i32 - half).max(0) as u32 * 256 / BLUR_DOWN) as usize;
+            let gx = (fx >> 8).saturating_sub(bx0 as usize);
+            let (x0, wx) = (gx.min(sw - 1), (fx & 0xFF) as u32);
+            let x1 = (x0 + 1).min(sw - 1);
+            let mut px = 0u32;
+            for (c, plane) in planes.iter().enumerate() {
+                let top = plane[y0 * sw + x0] * (256 - wx) + plane[y0 * sw + x1] * wx;
+                let bot = plane[y1 * sw + x0] * (256 - wx) + plane[y1 * sw + x1] * wx;
+                let v = (top * (256 - wy) + bot * wy) >> 16;
+                px |= v.min(255) << (16 - 8 * c as u32);
+            }
+            out[((y - rect.y) * rect.w + (x - rect.x)) as usize] = px;
+        }
+    }
+    Some(out)
 }
 
 fn isqrt(v: u32) -> u32 {

@@ -250,23 +250,6 @@ fn set_dirty() {
 /// Input cursor position (for rendering blinking cursor on input line).
 static INPUT_CURSOR_POS: AtomicUsize = AtomicUsize::new(0);
 
-/// Background pixels of the input line, saved after a full render so a
-/// keystroke restores them instead of re-blending the window.
-struct InputLineCache {
-    /// BGRA rows, `w * 4` bytes each; allocated on first use.
-    px: alloc::vec::Vec<u8>,
-    x: u32,
-    w: u32,
-    h: u32,
-    valid: bool,
-}
-
-/// 4K width × 4 bytes × 64 px font height.
-const INPUT_LINE_CACHE_MAX: usize = 3840 * 4 * 64;
-
-static INPUT_LINE_CACHE: Mutex<InputLineCache> =
-    Mutex::new(InputLineCache { px: alloc::vec::Vec::new(), x: 0, w: 0, h: 0, valid: false });
-
 /// Set the input cursor position (called from intent loop on every key/move).
 pub fn set_cursor_pos(pos: usize) {
     INPUT_CURSOR_POS.store(pos, Ordering::Relaxed);
@@ -556,12 +539,6 @@ pub fn clear_dirty() {
 fn theme_fg() -> u32 {
     crate::shade::widgets::palette::resolve_glass(
         crate::shade::widgets::abi::Token::OnSurface) & 0x00FF_FFFF
-}
-
-/// Terminal background from the active theme's Surface token.
-fn theme_bg() -> u32 {
-    crate::shade::widgets::palette::resolve_glass(
-        crate::shade::widgets::abi::Token::Surface) & 0x00FF_FFFF
 }
 
 /// Prompt / `[npk]` accent from the active theme. The widget Accent token
@@ -1052,33 +1029,9 @@ pub fn render_input_line(
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
-    // Restore cached background pixels (saved after full render_window).
-    let pitch = info.pitch as usize;
-    let cache = INPUT_LINE_CACHE.lock();
-    if cache.valid {
-        let cx = cache.x as usize;
-        let bytes_per_row = cache.w as usize * 4;
-        let rows_to_copy = (char_h as usize).min(cache.h as usize);
-        for row in 0..rows_to_copy {
-            let cache_off = row * bytes_per_row;
-            let shadow_off = (last_line_y as usize + row) * pitch + cx * 4;
-            if let Some(src) = cache.px.get(cache_off..cache_off + bytes_per_row)
-               && shadow_off + bytes_per_row <= (info.height as usize) * pitch
-            {
-                // SAFETY: the shadow buffer is `info.height * pitch` bytes,
-                // and the range was checked against that above.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src.as_ptr(), shadow.add(shadow_off), bytes_per_row);
-                }
-            }
-        }
-        drop(cache);
-    } else {
-        drop(cache);
-        // No cache — fallback: clear with the theme surface color.
-        crate::gui::render::fill_rect(shadow, info,
-            win_cx, last_line_y, win_cw, char_h, theme_bg());
-    }
+    // The line's rows go back to empty (transparent) before it is drawn
+    // again: the layer holds text only, what is beneath is composed under it.
+    crate::gui::render::fill_rect(shadow, info, win_cx, last_line_y, win_cw, char_h, 0);
 
     let visible_len = byte_at_col(&line_data[..len], cols as usize);
     if visible_len > 0 {
@@ -1102,62 +1055,13 @@ pub fn render_input_line(
     let cur = cols_of(&line_data[..cursor_pos().min(len)]);
     let cursor_x = win_cx + cur as u32 * char_w;
     if cursor_x + 2 <= win_cx + win_cw {
-        let cursor_color = theme_fg();
+        let cursor_color = theme_fg() | 0xFF00_0000;
         crate::gui::render::fill_rect(shadow, info, cursor_x, last_line_y, 2, char_h, cursor_color);
     }
 
     Some((win_cx, last_line_y, win_cw, char_h))
 }
 
-
-/// Cache the input line background from the shadow buffer after a full render.
-/// Called from render_window after drawing the focused window.
-pub fn cache_input_line_bg(
-    shadow: *mut u8,
-    info: &crate::framebuffer::FbInfo,
-    win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
-    terminal_idx: u8,
-) {
-    let total = match term(terminal_idx as usize) { Some(t) => t.total, None => return };
-    let (_, char_h) = crate::gui::font::char_size(1);
-    let rows = win_ch / char_h;
-    if rows == 0 { return; }
-    let visible_count = (rows as usize).min(total + 1);
-    let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
-
-    let pitch = info.pitch as usize;
-    let bytes_per_row = (win_cw as usize) * 4;
-    let total_bytes = bytes_per_row * char_h as usize;
-    if total_bytes > INPUT_LINE_CACHE_MAX { return; }
-    let shadow_end = (last_line_y + char_h) as usize * pitch;
-    if (win_cx as usize * 4 + bytes_per_row) > pitch || shadow_end > info.height as usize * pitch {
-        return;
-    }
-
-    let mut cache = INPUT_LINE_CACHE.lock();
-    if cache.px.len() < total_bytes {
-        cache.px.resize(total_bytes, 0);
-    }
-    for row in 0..char_h as usize {
-        let shadow_off = (last_line_y as usize + row) * pitch + win_cx as usize * 4;
-        let cache_off = row * bytes_per_row;
-        let dst = &mut cache.px[cache_off..cache_off + bytes_per_row];
-        // SAFETY: the row lies inside the shadow buffer (`info.height *
-        // pitch` bytes), checked above; `dst` is a distinct heap slice.
-        unsafe {
-            core::ptr::copy_nonoverlapping(shadow.add(shadow_off), dst.as_mut_ptr(), bytes_per_row);
-        }
-    }
-    cache.x = win_cx;
-    cache.w = win_cw;
-    cache.h = char_h;
-    cache.valid = true;
-}
-
-/// Invalidate the input line cache (call when window layout changes).
-pub fn invalidate_input_cache() {
-    INPUT_LINE_CACHE.lock().valid = false;
-}
 
 /// Scroll the active terminal up (show older content).
 pub fn scroll_up(lines: usize) {

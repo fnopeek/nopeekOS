@@ -9,6 +9,7 @@
 //! to integer Q24.8 fixed-point.
 
 use crate::framebuffer::{FbConsole, FbInfo};
+use crate::shade::scene::Rect;
 
 /// A rectangular dirty region (pixel coordinates).
 #[derive(Clone, Copy)]
@@ -299,13 +300,13 @@ pub fn rrect_distance_sdf(px: u32, py: u32,
 /// keeps `width` inside it, and restores that band before repainting.
 pub fn draw_glow_ring(shadow: *mut u8, info: &FbInfo,
                       x: u32, y: u32, w: u32, h: u32, r: u32,
-                      color: u32, width: u32, alpha: u32) {
+                      color: u32, width: u32, alpha: u32, clip: &Rect) {
     if width == 0 || alpha == 0 || w < 2 || h < 2 { return; }
     let r = r.min(w / 2).min(h / 2);
-    let x0 = x.saturating_sub(width);
-    let y0 = y.saturating_sub(width);
-    let x1 = (x + w + width).min(info.width);
-    let y1 = (y + h + width).min(info.height);
+    let x0 = x.saturating_sub(width).max(clip.x);
+    let y0 = y.saturating_sub(width).max(clip.y);
+    let x1 = (x + w + width).min(info.width).min(clip.x1());
+    let y1 = (y + h + width).min(info.height).min(clip.y1());
     if x1 <= x0 || y1 <= y0 { return; }
 
     let band_q8 = width as i32 * 256;
@@ -335,7 +336,7 @@ pub fn draw_glow_ring(shadow: *mut u8, info: &FbInfo,
         if py < corner_lo || py >= corner_hi {
             for px in x0..x1 { paint(px, py); }
         } else {
-            for px in x0..x.min(x1) { paint(px, py); }
+            for px in x0..x.clamp(x0, x1) { paint(px, py); }
             for px in (x + w).clamp(x0, x1)..x1 { paint(px, py); }
         }
     }
@@ -463,6 +464,7 @@ pub fn fill_rounded_chrome_aa(
     rounding: u32, border: u32,
     border_opacity: u32, bg_opacity: u32,
     paint_content: bool,
+    clip: &Rect,
 ) {
     if w < 2 || h < 2 { return; }
     let r_out = rounding.min(w / 2).min(h / 2);
@@ -472,8 +474,10 @@ pub fn fill_rounded_chrome_aa(
     let inner_w = w - 2 * border_px;
     let inner_h = h - 2 * border_px;
     let r_in = r_out.saturating_sub(border_px).min(inner_w / 2).min(inner_h / 2);
-    let x_max = (x + w).min(info.width);
-    let y_max = (y + h).min(info.height);
+    let x_lo = x.max(clip.x);
+    let x_max = (x + w).min(info.width).min(clip.x1());
+    let y_max = (y + h).min(info.height).min(clip.y1());
+    if x_max <= x_lo { return; }
     let diag_max = (w + h).max(1) as u64;
     let solid = border_a == border_b;
     let bo = border_opacity.min(255);
@@ -550,17 +554,17 @@ pub fn fill_rounded_chrome_aa(
         }
     };
 
-    for py in y..y_max {
+    for py in y.max(clip.y)..y_max {
         let straight = skip_hi > skip_lo && py >= straight_lo && py < straight_hi;
         if !straight {
-            for px in x..x_max { paint_px(px, py); }
+            for px in x_lo..x_max { paint_px(px, py); }
             continue;
         }
         // Straight row: per-pixel border on the left, fast interior, border on
         // the right.
-        for px in x..skip_lo.min(x_max) { paint_px(px, py); }
-        let lo = skip_lo.min(x_max);
-        let hi = skip_hi.min(x_max);
+        let lo = skip_lo.clamp(x_lo, x_max);
+        let hi = skip_hi.clamp(lo, x_max);
+        for px in x_lo..lo { paint_px(px, py); }
         if paint_content && hi > lo {
             let span = (hi - lo) as usize;
             if opaque_fill {
@@ -592,7 +596,7 @@ pub fn fill_rounded_chrome_aa(
                 }
             }
         }
-        for px in skip_hi.max(x)..x_max { paint_px(px, py); }
+        for px in hi..x_max { paint_px(px, py); }
     }
 }
 
@@ -607,52 +611,6 @@ pub fn blend_pixel(shadow: *mut u8, info: &FbInfo, x: u32, y: u32, src: u32, alp
     }
     let dst = read_pixel(shadow, info, x, y);
     put_pixel(shadow, info, x, y, blend(src, dst, alpha));
-}
-
-// ── Layer-aware rendering (writes alpha channel for compositing) ───────
-
-/// Fill a rounded rectangle with color + alpha byte for layer compositing.
-/// Unlike fill_rounded_rect_blend, this does not read existing pixels —
-/// it writes color with the alpha byte set in the high byte.
-/// The layer compositor handles blending with lower layers.
-pub fn fill_rounded_rect_alpha(buf: *mut u8, info: &FbInfo,
-                               x: u32, y: u32, w: u32, h: u32,
-                               color: u32, radius: u32, alpha: u32) {
-    if w < 2 || h < 2 { return; }
-    let r = radius.min(w / 2).min(h / 2);
-    let r_f = r as i32;
-    let base = (alpha.min(255) << 24) | (color & 0x00FFFFFF);
-
-    for py in y..(y + h).min(info.height) {
-        for px in x..(x + w).min(info.width) {
-            let in_x = px.saturating_sub(x);
-            let in_y = py.saturating_sub(y);
-
-            let (corner_dx, corner_dy) = {
-                let dx = if in_x < r { r - in_x } else if in_x >= w - r { in_x - (w - r) + 1 } else { 0 };
-                let dy = if in_y < r { r - in_y } else if in_y >= h - r { in_y - (h - r) + 1 } else { 0 };
-                (dx as i32, dy as i32)
-            };
-
-            if corner_dx > 0 && corner_dy > 0 {
-                let mut coverage = 0u32;
-                for sy in 0..16i32 {
-                    for sx in 0..16i32 {
-                        let sdx = corner_dx * 32 + 2 * sx - 15;
-                        let sdy = corner_dy * 32 + 2 * sy - 15;
-                        if sdx * sdx + sdy * sdy <= r_f * r_f * 1024 {
-                            coverage += 1;
-                        }
-                    }
-                }
-                if coverage == 0 { continue; }
-                let a = (alpha * coverage / 256).min(255);
-                put_pixel(buf, info, px, py, (a << 24) | (color & 0x00FFFFFF));
-            } else {
-                put_pixel(buf, info, px, py, base);
-            }
-        }
-    }
 }
 
 #[cfg(test)]

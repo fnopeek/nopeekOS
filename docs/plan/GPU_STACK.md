@@ -511,6 +511,35 @@ Zeiger draengt.
 - **Der CPU-Ausfuehrer bleibt fuer immer:** ohne Modul (§2.2) setzt er
   dieselbe Szenenliste zusammen.
 
+**A1/A2, gebaut (Kernel 0.606.0) — die Spezifikation, an die A3/A5 anschliessen:**
+- **Puffer** (`shade/buffers.rs`, `PixelBuffer`): seitenausgerichtete,
+  physisch zusammenhaengende Rahmen aus dem Rahmenallokator, dichte Zeilen
+  (`pitch = width * 4`), 32 Bit je Pixel; der Kernel zeichnet ueber die
+  Identitaetsabbildung, A3 meldet denselben Bereich bei gpudev an.
+  Widget-Szenen (`WidgetScene.pixels`) und die Textebene jedes Terminals
+  sind solche Puffer; Gast-Flaechen (Front-Rahmen) sowie scharfe und
+  unscharfe Tapete sind bereits zusammenhaengend und werden als Quelle
+  ueber ihren Besitzer benannt.
+- **Szenenliste** (`shade/scene.rs`): reine Daten, feste Groesse je Eintrag,
+  Quellen ueber den besitzenden Fensterschluessel (`Source::Widget/Surface/
+  TermText`). Eintraege: `Background`, `Glow`, `GlassBackdrop`, `Chrome`,
+  `Content` (Ecken-SDF, `Fit::Scale` fuer Animationen, `Fit::Extend` fuer
+  Gastbilder), `Panel` (Alpha, Glas ueber der Unschaerfe dessen, was
+  darunter liegt), `Text` (Alpha-Ebene), `Fill`, `CloseGlyph`. Der Zeiger
+  ist nicht Teil der Szene (A6: Cursor-Plane).
+- **CPU-Ausfuehrer** (`scene::execute`): malt die Liste innerhalb von
+  Schadensrechtecken in ein bildschirmgrosses Ziel; Schaden, der ein Panel
+  beruehrt, waechst auf Panel plus Unschaerferand (`expand_damage`). Der
+  GPU-Ausfuehrer (A5) muss dasselbe Bild liefern.
+- **Wege:** volles Bild = Szene ueber den ganzen Schirm in den hinteren
+  Puffer; Terminalausgabe, Eingabezeile, Fokus-Glow und `render_damaged`
+  aktualisieren den Puffer des Fensters und setzen nur ihren Schaden im
+  vorderen Puffer neu zusammen. `LAYER_BG`, der Chrome-Cache und der
+  Eingabezeilen-Cache sind entfallen.
+- **Bewegung:** waehrend Dock-/Tausch-Animationen und Groessen-Zug wird der
+  alte Puffer gestreckt (Widgets) bzw. beschnitten (Terminal), neu
+  gerastert erst am Ende.
+
 **Bekannte Fallen:** Overlays verlassen sich auf Pixel unter ihren Ecken
 (`compositor.rs:1938`); `render_damaged` zeichnet Fenster darueber nicht neu
 (`compositor.rs:2340`, heute nur fuer Overlays geflickt); `virtio_gpu_pci.rs:1456`

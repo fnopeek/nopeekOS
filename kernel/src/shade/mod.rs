@@ -9,6 +9,8 @@
 
 pub mod glass;
 pub mod window;
+pub mod buffers;
+pub mod scene;
 pub mod compositor;
 pub mod terminal;
 pub mod input;
@@ -45,30 +47,12 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 #[allow(dead_code)]
 static RENDER_PENDING: AtomicBool = AtomicBool::new(false);
 
-/// Check if layer system is usable (initialized and matches current framebuffer).
-fn layers_usable() -> bool {
-    if !crate::layers::is_initialized() { return false; }
-    let info = framebuffer::get_info();
-    crate::layers::matches_resolution(info.width, info.height, info.pitch)
-}
-
 /// Initialize shade compositor. Call after login + GPU setup.
 pub fn init() {
-    let (screen_w, screen_h, pitch) = framebuffer::with_fb(|fb| {
+    let (screen_w, screen_h) = framebuffer::with_fb(|fb| {
         let info = fb.info();
-        (info.width, info.height, info.pitch)
-    }).unwrap_or((1920, 1080, 1920 * 4));
-
-    // Initialize layer compositor (3 layers: Background, Chrome, Text)
-    crate::layers::init(screen_w, screen_h, pitch);
-
-    // Render background into Layer 0
-    if crate::layers::is_initialized() {
-        if let Some((bg_buf, _w, _h, _p)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-            let info = framebuffer::get_info();
-            crate::gui::background::draw_background(bg_buf, &info);
-        }
-    }
+        (info.width, info.height)
+    }).unwrap_or((1920, 1080));
 
     let scale = font::scale_for(screen_w);
     let comp = Compositor::new(screen_w, screen_h, scale);
@@ -405,22 +389,6 @@ pub fn force_redraw() {
         request_render();
         return;
     }
-    // Invalidate input line cache — will be rebuilt by render_window
-    terminal::invalidate_input_cache();
-
-    // Drop the terminal-glass cache: its key doesn't track the wallpaper behind
-    // the translucent surface, so a same-theme wallpaper swap would keep the old
-    // backdrop until a theme change. A full redraw must re-composite the glass.
-    compositor::clear_chrome_cache();
-
-    // Re-render background into Layer 0 if layers are active
-    if crate::layers::is_initialized() {
-        if let Some((bg_buf, _w, _h, _p)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-            let info = framebuffer::get_info();
-            crate::gui::background::draw_background(bg_buf, &info);
-        }
-    }
-
     with_compositor(|comp| {
         comp.aurora_drawn = false;
         comp.needs_full_redraw = true;
@@ -470,10 +438,8 @@ fn note_shell_fingerprint(fp: Option<u64>) {
 fn render_frame_mode(cursor_only: bool) {
     if cursor_only {
         render_frame_cursor_only();
-    } else if layers_usable() {
-        render_frame_layered();
     } else {
-        render_frame_legacy();
+        render_frame_full();
     }
 }
 
@@ -501,7 +467,7 @@ fn blit_cursor_bbox(fb: &framebuffer::FbConsole, old: (i32, i32), had_old: bool)
 /// (no cursor), swapped to front, then the cursor is saved-under + baked
 /// into the front and the whole frame blitted (cursor included → atomic,
 /// no flicker; incl. the dock reveal animation + the microvm tile).
-fn render_frame_layered() {
+fn render_frame_full() {
     note_render(0);
     let t0 = crate::interrupts::rdtsc();
     framebuffer::with_fb(|fb| {
@@ -510,14 +476,8 @@ fn render_frame_layered() {
         let pitch = fb.info().pitch;
         let info = *fb.info();
         let back = fb.shadow_back();
-
-        // Render scene to back buffer (front stays stable for cursor)
-        if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-            let size = pitch as usize * screen_h as usize;
-            // SAFETY: bg_buf and back are valid for size bytes
-            unsafe { core::ptr::copy_nonoverlapping(bg_buf, back, size); }
-        }
-        let t_bg = crate::interrupts::rdtsc();
+        // The background is the scene's first item now.
+        let t_bg = t0;
 
         let mut fp = None;
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
@@ -568,13 +528,7 @@ fn render_frame_surface() {
         let pitch = fb.info().pitch;
         let info = *fb.info();
         let back = fb.shadow_back();
-
-        if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-            let size = pitch as usize * screen_h as usize;
-            // SAFETY: bg_buf and back are valid for size bytes.
-            unsafe { core::ptr::copy_nonoverlapping(bg_buf, back, size); }
-        }
-        let t_bg = crate::interrupts::rdtsc();
+        let t_bg = t0;
 
         // Recomposite the whole scene into back (correct w.r.t. overlays),
         // collecting Surface tile rects while the lock is held.
@@ -744,42 +698,6 @@ fn record_surface_render(t0: u64, t_bg: u64, t_comp: u64, t_cursor: u64) {
     }
 }
 
-/// Legacy render with double-buffer (fallback when layers not initialized).
-fn render_frame_legacy() {
-    note_render(3);
-    framebuffer::with_fb(|fb| {
-        let screen_w = fb.info().width;
-        let screen_h = fb.info().height;
-        let pitch = fb.info().pitch;
-        let info = *fb.info();
-        let back = fb.shadow_back();
-
-        let mut fp = None;
-        if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            comp.render(back, fb.info());
-            fp = Some(comp.shell_fingerprint());
-        }
-        note_shell_fingerprint(fp);
-
-        fb.swap_buffers();
-        fb.commit_front();
-
-        cursor::save_under_and_bake(fb.front_ptr(), &info);
-
-        let gpu_ok = if crate::gpu::supports_blit() {
-            try_gpu_blit(fb, pitch, screen_w, screen_h)
-        } else {
-            false
-        };
-
-        if !gpu_ok {
-            let mut damage = render::DamageTracker::new(screen_w, screen_h);
-            damage.mark_all();
-            damage.flush(fb);
-        }
-    });
-}
-
 /// Try GPU BCS blit from front shadow → MMIO framebuffer.
 /// Returns true if GPU blit succeeded, false = caller should CPU-blit.
 /// Note: VSync via wait_vblank adds up to 16.7ms latency per render — not suitable
@@ -807,14 +725,10 @@ fn try_gpu_blit(fb: &framebuffer::FbConsole, pitch: u32, _w: u32, h: u32) -> boo
 /// Render only damaged regions (efficient partial update).
 #[allow(dead_code)]
 pub fn render_damaged() {
-    if layers_usable() {
-        render_damaged_layered();
-    } else {
-        render_damaged_legacy();
-    }
+    render_damaged_front();
 }
 
-fn render_damaged_layered() {
+fn render_damaged_front() {
     framebuffer::with_fb(|fb| {
         let info = *fb.info();
         let (shadow, _) = fb.shadow_ptr();
@@ -830,8 +744,8 @@ fn render_damaged_layered() {
             cursor::restore_under(shadow, &info);
             let regions = comp.render_damaged(shadow, &info);
             cursor::save_under_and_bake(shadow, &info);
-            for (x, y, w, h) in regions {
-                framebuffer::blit_rect(fb, x, y, w, h);
+            for r in regions {
+                framebuffer::blit_rect(fb, r.x, r.y, r.w, r.h);
             }
             blit_cursor_bbox(fb, old, had_old);
         }
@@ -856,7 +770,7 @@ fn render_focus_glow() {
         let info = *fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
-        if let Some(ref comp) = *COMPOSITOR.lock() {
+        if let Some(ref mut comp) = *COMPOSITOR.lock() {
             // The cursor is baked into the front buffer. Baking another one
             // per tick (a bare bake) would leave a copy at
             // every position the mouse passed through, since this pass
@@ -868,28 +782,8 @@ fn render_focus_glow() {
             cursor::restore_under(shadow, &info);
             let regions = comp.render_focus_glow(shadow, &info);
             cursor::save_under_and_bake(shadow, &info);
-            for (x, y, w, h) in regions {
-                framebuffer::blit_rect(fb, x, y, w, h);
-            }
-            blit_cursor_bbox(fb, old, had_old);
-        }
-    });
-}
-
-fn render_damaged_legacy() {
-    framebuffer::with_fb(|fb| {
-        let info = *fb.info();
-        let (shadow, _) = fb.shadow_ptr();
-
-        if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            // Same dance as the layered path — see the note there.
-            let old = cursor::saved_pos();
-            let had_old = cursor::save_valid();
-            cursor::restore_under(shadow, &info);
-            let regions = comp.render_damaged(shadow, &info);
-            cursor::save_under_and_bake(shadow, &info);
-            for (x, y, w, h) in regions {
-                framebuffer::blit_rect(fb, x, y, w, h);
+            for r in regions {
+                framebuffer::blit_rect(fb, r.x, r.y, r.w, r.h);
             }
             blit_cursor_bbox(fb, old, had_old);
         }
@@ -1332,43 +1226,33 @@ fn launch_task(arg: u64) {
     }
 }
 
-/// Fast re-render of just the current input line (for live typing feedback).
-/// Uses INPUT_LINE_CACHE from render_window for pixel-perfect background match.
+/// Fast re-render of just the current input line (for live typing feedback):
+/// the line is redrawn in the terminal's text layer and only its rect is
+/// composed again.
 pub fn render_input_line() {
     terminal::clear_dirty();
 
     framebuffer::with_fb(|fb| {
-        let info = fb.info();
-        let (shadow, _) = fb.shadow_ptr();
+        let info = *fb.info();
+        let (front, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            if let Some(fid) = comp.focused {
-                if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
-                    let pad = 6 * comp.scale;
-                    let cx = win.content_x(comp.border) + pad;
-                    let cy = win.content_y(comp.border) + pad;
-                    let cw = win.content_w(comp.border).saturating_sub(pad * 2);
-                    let ch = win.content_h(comp.border).saturating_sub(pad * 2);
-
-                    // Partial repaint → erase, paint, re-bake (see
-                    // `render_damaged_layered`). A bare bake would leave the
-                    // pointer standing wherever it was when someone typed.
-                    let old = cursor::saved_pos();
-                    let had_old = cursor::save_valid();
-                    cursor::restore_under(shadow, &info);
-                    let painted = terminal::render_input_line(
-                        shadow, &info, cx, cy, cw, ch, win.terminal_idx,
-                    );
-                    cursor::save_under_and_bake(shadow, &info);
-                    if let Some((x, y, w, h)) = painted {
-                        framebuffer::blit_rect(fb, x, y, w, h);
-                    }
-                    // Unconditional: the bake above already moved the cursor
-                    // in the shadow, so skipping the blit when nothing was
-                    // painted would strand the old one on screen for good.
-                    blit_cursor_bbox(fb, old, had_old);
+            // Partial repaint → erase, paint, re-bake (see
+            // `render_damaged_front`). A bare bake would leave the pointer
+            // standing wherever it was when someone typed.
+            let old = cursor::saved_pos();
+            let had_old = cursor::save_valid();
+            cursor::restore_under(front, &info);
+            if let Some(line) = comp.update_input_line() {
+                for r in comp.compose(front, &info, alloc::vec![line]) {
+                    framebuffer::blit_rect(fb, r.x, r.y, r.w, r.h);
                 }
             }
+            cursor::save_under_and_bake(front, &info);
+            // Unconditional: the bake above already moved the cursor in the
+            // front buffer, so skipping the blit when nothing was painted
+            // would strand the old one on screen for good.
+            blit_cursor_bbox(fb, old, had_old);
         }
     });
 }
@@ -1483,124 +1367,35 @@ pub fn poll_render() {
     terminal::clear_dirty();
     CURSOR_MOVED.store(false, Ordering::Relaxed);
 
-    // Partial render: only re-render dirty or focused windows (not all).
-    // Focus change marks old+new windows dirty. Terminal output marks focused dirty.
+    // Partial render: the windows whose terminal has new output are
+    // composed again in their rects; everything above them comes along, as
+    // composition always paints the whole stack within the damage.
     framebuffer::with_fb(|fb| {
-        let info = fb.info();
-        let (shadow, _) = fb.shadow_ptr();
+        let info = *fb.info();
+        let (front, _) = fb.shadow_ptr();
 
         // Erase the baked cursor before repainting windows; it's re-baked
         // + blitted at the end so the partial update stays flicker-free.
         let cur_old = cursor::saved_pos();
         let cur_had = cursor::save_valid();
-        cursor::restore_under(shadow, info);
+        cursor::restore_under(front, &info);
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            // Propagate per-terminal dirty flags to window dirty flags
             for win in &mut comp.windows {
                 if terminal::is_term_dirty(win.terminal_idx as usize) {
                     win.dirty = true;
                     terminal::clear_term_dirty(win.terminal_idx as usize);
                 }
             }
-
-            // Any overlay that sits on top of a dirty non-overlay must
-            // repaint too — otherwise the window below paints over it.
-            let dirty_rects: alloc::vec::Vec<(u32, u32, u32, u32)> = comp.windows.iter()
-                .filter(|w| w.dirty && !w.is_overlay
-                    && w.workspace == comp.active_workspace && w.visible)
-                .map(|w| (w.x, w.y, w.width, w.height))
-                .collect();
-            for win in &mut comp.windows {
-                if !win.is_overlay || win.dirty { continue; }
-                for (rx, ry, rw, rh) in &dirty_rects {
-                    if win.x < rx + rw && *rx < win.x + win.width
-                        && win.y < ry + rh && *ry < win.y + win.height
-                    {
-                        win.dirty = true;
-                        break;
-                    }
-                }
-            }
-
-            let focused_id = comp.focused;
-            // Was any window besides the focused one painted? See the reason
-            // after the loop.
-            let mut others_repainted = false;
-            // Render back-to-front so overlays paint last (otherwise a
-            // terminal behind drun would overwrite drun's pixels).
-            let render_order: alloc::vec::Vec<crate::shade::window::WindowId> =
-                comp.z_order.iter().rev().copied().collect();
-            // One source of truth for the tile borders: the palette. It
-            // already folds in the wallpaper accent (`accent = auto`) and
-            // any `set accent` override, so there is no second theme path.
-            let active_border = comp.border_active();
-            let inactive_border = comp.border_inactive();
-            for wid in render_order {
-                // Skip checks and halo up front: the paint below needs a &mut
-                // to clear `dirty`, while the halo has to be resolved against
-                // the whole compositor (gaps, flash state).
-                let glow = match comp.windows.iter().find(|w| w.id == wid) {
-                    Some(w) if w.workspace == comp.active_workspace
-                        && w.visible
-                        && (w.dirty || Some(w.id) == focused_id) => comp.glow_for(w),
-                    _ => continue,
-                };
-                let win = match comp.windows.iter_mut().find(|w| w.id == wid) {
-                    Some(w) => w,
-                    None => continue,
-                };
-                win.dirty = false;
-
-                // Restore window region from BG layer. Overlays skip
-                // this — we want their rounded-out corners to keep
-                // whatever scene (terminal, another app, wallpaper)
-                // sits below in the current shadow state.
-                if !win.is_overlay {
-                    if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-                        let pitch = info.pitch as usize;
-                        let y1 = (win.y + win.height).min(info.height);
-                        let x1 = (win.x + win.width).min(info.width);
-                        let bytes = x1.saturating_sub(win.x) as usize * 4;
-                        if bytes > 0 {
-                            for row in win.y..y1 {
-                                let off = row as usize * pitch + win.x as usize * 4;
-                                unsafe {
-                                    core::ptr::copy_nonoverlapping(
-                                        bg_buf.add(off), shadow.add(off), bytes);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if Some(win.id) != focused_id { others_repainted = true; }
-                let border_color = if win.focused { active_border } else { inactive_border };
-                compositor::Compositor::render_window(shadow, info, win,
-                    comp.border, comp.rounding, crate::shade::glass::params().loop_opacity, comp.scale, border_color,
-                    glow);
-                framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
-            }
-
-            // The halo goes last once any window besides the focused one was
-            // painted. `render_window` restores box + band from the
-            // wallpaper, and the band is the gap (`glow_width` clamps to
-            // `gaps`), i.e. exactly where the neighbour's halo lies. A
-            // neighbour painted after the focused window in this loop would
-            // wipe that halo in the gap, while the corner notches inside the
-            // focused box stay, leaving a wedge at each corner. A full
-            // rebuild paints everything in one go and is not affected.
-            if others_repainted {
-                for (bx, by, bw, bh) in comp.render_focus_glow(shadow, info) {
-                    framebuffer::blit_rect(fb, bx, by, bw, bh);
-                }
+            for r in comp.render_damaged(front, &info) {
+                framebuffer::blit_rect(fb, r.x, r.y, r.w, r.h);
             }
         }
 
         // Re-bake the cursor on top of the repainted windows + blit its
         // region (atomic). Covers a cursor over a just-redrawn window and
         // erases it at the old spot.
-        cursor::save_under_and_bake(shadow, info);
+        cursor::save_under_and_bake(front, &info);
         blit_cursor_bbox(fb, cur_old, cur_had);
     });
 }

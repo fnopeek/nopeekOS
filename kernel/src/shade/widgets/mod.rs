@@ -85,7 +85,7 @@ impl InputEditState {
 // re-render (the app may have already exited).
 
 pub struct WidgetScene {
-    pub pixels:      Vec<u32>,
+    pub pixels:      crate::shade::buffers::PixelBuffer,
     pub width:       u32,
     pub height:      u32,
     /// Screen position of the content rect. Layout and pixels are in
@@ -1094,7 +1094,7 @@ impl RenderJob {
     }
 
     /// Lay out if needed and rasterize. Takes no scene lock.
-    fn run(&self, window_id: u32) -> (Vec<u32>, Option<Relaid>) {
+    fn run(&self, window_id: u32) -> (crate::shade::buffers::PixelBuffer, Option<Relaid>) {
         let (layout_tree, popovers, relaid) = match &self.layout {
             Some((t, p)) => (t.clone(), p.clone(), None),
             None => {
@@ -1132,7 +1132,7 @@ impl RenderJob {
 }
 
 /// Store a finished job's pixels (and fresh geometry, if it laid out).
-fn store_job(s: &mut WidgetScene, job: &RenderJob, pixels: Vec<u32>, relaid: Option<Relaid>,
+fn store_job(s: &mut WidgetScene, job: &RenderJob, pixels: crate::shade::buffers::PixelBuffer, relaid: Option<Relaid>,
              mode: LayoutMode) {
     s.pixels = pixels;
     if let Some(r) = relaid {
@@ -2796,10 +2796,9 @@ fn rasterize_buffer_with_overlays(
     input_edit: Option<&InputEditState>,
     scroll_y: u32,
     scroll_x: u32,
-) -> Vec<u32> {
+) -> crate::shade::buffers::PixelBuffer {
     RASTERIZED.fetch_add(1, Ordering::Relaxed);
-    let pixel_count = (rect.w as usize) * (rect.h as usize);
-    let mut pixels: Vec<u32> = alloc::vec![0u32; pixel_count];
+    let mut pixels = crate::shade::buffers::PixelBuffer::new(rect.w, rect.h);
 
     // Translucent-panel detection: the bar (and only the bar) roots its tree
     // in a `Stack`. Such a scene clears transparent and fills backgrounds at
@@ -2824,7 +2823,7 @@ fn rasterize_buffer_with_overlays(
 
     let pal = palette::for_window(window_id);
     let mut target = abi::RasterTarget {
-        pixels:  &mut pixels,
+        pixels:  &mut pixels[..],
         stride:  rect.w,
         size:    abi::Size { w: rect.w, h: rect.h },
         origin:  abi::Point { x: rect.x, y: rect.y },

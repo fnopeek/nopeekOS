@@ -84,7 +84,9 @@ fn draw_char_with(shadow: *mut u8, info: &FbInfo, font: &FontDesc,
                     None => continue,
                 }
             };
-            render::put_pixel(shadow, info, px_x + gx, px_y + gy, color);
+            // Opaque alpha: a text layer tells text from empty by it; the
+            // screen formats ignore the top byte.
+            render::put_pixel(shadow, info, px_x + gx, px_y + gy, color | 0xFF00_0000);
         }
     }
 }
