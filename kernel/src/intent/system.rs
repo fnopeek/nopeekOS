@@ -107,6 +107,7 @@ pub fn intent_cores() {
     let np0 = crate::microvm::cpu::npf_snapshot();
     let la0 = crate::microvm::cpu::svm::lapic::access_snapshot();
     let gs0 = crate::microvm::devices::gpu_backend::stats_snapshot();
+    let sc0 = crate::shade::surface::copy_stats();
     let wk0 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw0 = crate::smp::fiber::kick_wait_snapshot();
     let kl0 = crate::smp::fiber::kick_latency_snapshot(); // clears max
@@ -149,6 +150,7 @@ pub fn intent_cores() {
     let np1 = crate::microvm::cpu::npf_snapshot();
     let la1 = crate::microvm::cpu::svm::lapic::access_snapshot();
     let gs1 = crate::microvm::devices::gpu_backend::stats_snapshot();
+    let sc1 = crate::shade::surface::copy_stats();
     let wk1 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw1 = crate::smp::fiber::kick_wait_snapshot();
     let kl1 = crate::smp::fiber::kick_latency_snapshot();
@@ -313,6 +315,12 @@ pub fn intent_cores() {
                 }
             }
             if any { kprintln!(); }
+            // Guest frames into their surfaces: copied, against whole frames.
+            let (copied, whole) = (sc1.0.saturating_sub(sc0.0), sc1.1.saturating_sub(sc0.1));
+            if whole > 0 {
+                kprintln!("    surface copy/s: {} KB of {} KB whole frames", copied * 1000 / window_ms / 1024,
+                    whole * 1000 / window_ms / 1024);
+            }
         }
         {
             let labels = crate::microvm::cpu::svm::lapic::ACCESS_LABELS;

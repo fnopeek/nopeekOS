@@ -19,7 +19,7 @@
 extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::shade::buffers::PixelBuffer;
@@ -60,12 +60,23 @@ pub struct GuestSurface {
     /// VM core (`take_display_dirty`), which sends the guest the new size.
     /// Many resizes before one take = one message.
     display_dirty: bool,
+    /// Number of the newest frame written (`Frame::seq`).
+    seq: u64,
+    /// What each of the last frames changed against the one before:
+    /// `(seq, width, height, rect)`, indexed by `seq % HISTORY`.
+    history: [(u64, u32, u32, (u32, u32, u32, u32)); HISTORY],
 }
+
+/// Frames of damage kept per surface. A buffer that missed more frames than
+/// this is copied whole.
+const HISTORY: usize = 8;
 
 #[derive(Default)]
 struct Frame {
     /// A `PixelBuffer`, so the GPU can compose straight from it.
     pixels: PixelBuffer,
+    /// Number of the guest frame it holds; 0: undefined contents.
+    seq: u64,
     width: u32,
     height: u32,
 }
@@ -84,6 +95,8 @@ impl GuestSurface {
             tile_w: 0,
             tile_h: 0,
             display_dirty: false,
+            seq: 0,
+            history: [(0, 0, 0, (0, 0, 0, 0)); HISTORY],
         }
     }
 }
@@ -136,19 +149,25 @@ fn as_bytes_mut(px: &mut [u32]) -> &mut [u8] {
 }
 
 /// Copy a freshly-flushed `w*h` BGRX frame (raw bytes, 4 per pixel)
-/// into the window's surface and mark it dirty. Creates/resizes the
-/// surface on first frame or geometry change. Cheap no-op if `src` is
-/// too small for the claimed geometry (defensive — never panics).
+/// into the window's surface and mark it dirty. `dmg` is what the frame
+/// changed against the one flushed before it. Only what changed since the
+/// frame the reused buffer holds is copied — the buffers rotate, so that is
+/// the union of the damage of the frames it missed. Creates/resizes the
+/// surface on first frame or geometry change. Cheap no-op if `src` is too
+/// small for the claimed geometry (defensive — never panics).
 pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u32, u32, u32, u32)) {
     let px_count = (width as usize).saturating_mul(height as usize);
     if px_count == 0 || src.len() < px_count * 4 {
         return;
     }
-    let (mut back, held) = {
+    let x = dmg.0.min(width);
+    let y = dmg.1.min(height);
+    let own = (x, y, dmg.2.min(width - x), dmg.3.min(height - y));
+    let (mut back, held, seq, history) = {
         let mut map = SURFACES.lock();
         let held: usize = map.values().map(GuestSurface::held_pixels).sum();
         let surf = map.entry(window_id).or_insert_with(GuestSurface::new);
-        (core::mem::take(&mut surf.back), held)
+        (core::mem::take(&mut surf.back), held, surf.seq, surf.history)
     };
     if back.pixels.width() != width || back.pixels.height() != height {
         // The guest picks the frame size: past the budget, or when the host
@@ -158,18 +177,35 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
         }
         back.pixels = PixelBuffer::empty();
         back.pixels = PixelBuffer::new(width, height);
+        back.seq = 0;
         if back.pixels.is_empty() {
             return;
         }
     }
     back.width = width;
     back.height = height;
+    let new_seq = seq + 1;
+    let region = missed(&history, back.seq, seq, width, height)
+        .map(|r| union(r, own))
+        .unwrap_or((0, 0, width, height));
     // The guest sends little-endian BGRX bytes, which on x86 (LE) are the
     // exact in-memory layout of the packed u32 the compositor reads.
-    as_bytes_mut(&mut back.pixels).copy_from_slice(&src[..px_count * 4]);
+    let stride = width as usize * 4;
+    let (rx, ry, rw, rh) = region;
+    let dst = as_bytes_mut(&mut back.pixels);
+    for row in ry as usize..(ry + rh) as usize {
+        let a = row * stride + rx as usize * 4;
+        let b = a + rw as usize * 4;
+        dst[a..b].copy_from_slice(&src[a..b]);
+    }
+    back.seq = new_seq;
+    COPIED.fetch_add(rw as u64 * rh as u64 * 4, Ordering::Relaxed);
+    WHOLE.fetch_add(px_count as u64 * 4, Ordering::Relaxed);
 
     let mut map = SURFACES.lock();
     let Some(surf) = map.get_mut(&window_id) else { return };
+    surf.seq = new_seq;
+    surf.history[new_seq as usize % HISTORY] = (new_seq, width, height, own);
     let first = surf.width == 0;
     let realloc = surf.width != width || surf.height != height;
     surf.width = width;
@@ -224,6 +260,48 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
     } else {
         crate::shade::request_render();
     }
+}
+
+/// The union of what frames `held + 1 ..= newest` changed, all of size
+/// `width` x `height`; None when a buffer holding frame `held` cannot be
+/// brought up to date that way (undefined, too old, or a size in between).
+fn missed(history: &[(u64, u32, u32, (u32, u32, u32, u32)); HISTORY], held: u64, newest: u64, width: u32,
+          height: u32) -> Option<(u32, u32, u32, u32)> {
+    if held == 0 || held > newest || newest - held >= HISTORY as u64 {
+        return None;
+    }
+    let mut r = (0, 0, 0, 0);
+    for s in held + 1..=newest {
+        let (hs, w, h, d) = history[s as usize % HISTORY];
+        if hs != s || w != width || h != height {
+            return None;
+        }
+        r = union(r, d);
+    }
+    Some(r)
+}
+
+fn union(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+    if a.2 == 0 || a.3 == 0 {
+        return b;
+    }
+    if b.2 == 0 || b.3 == 0 {
+        return a;
+    }
+    let x0 = a.0.min(b.0);
+    let y0 = a.1.min(b.1);
+    let x1 = (a.0 + a.2).max(b.0 + b.2);
+    let y1 = (a.1 + a.3).max(b.1 + b.3);
+    (x0, y0, x1 - x0, y1 - y0)
+}
+
+/// Bytes `write_frame` copied, and what whole frames would have been.
+static COPIED: AtomicU64 = AtomicU64::new(0);
+static WHOLE: AtomicU64 = AtomicU64::new(0);
+
+/// `(copied, whole)` bytes since boot, for `cores`.
+pub fn copy_stats() -> (u64, u64) {
+    (COPIED.load(Ordering::Relaxed), WHOLE.load(Ordering::Relaxed))
 }
 
 /// Read the current surface pixels for compositing. `f` gets
