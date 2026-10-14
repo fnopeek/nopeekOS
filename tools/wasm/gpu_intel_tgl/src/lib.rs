@@ -152,7 +152,7 @@ fn intel_gmch_bar_setup() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2c: i915_driver_probe through i915_gem_init (engines not yet)").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2c: i915_driver_probe through i915_gem_init with the engines").say();
 
     // pci_enable_device: bind (the kernel's own driver hands the card over).
     match npk_sys::pci_bind(INTEL_VENDOR as i32, TGL_GT2 as i32) {

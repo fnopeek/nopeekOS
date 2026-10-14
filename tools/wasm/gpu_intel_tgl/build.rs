@@ -11,5 +11,7 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let path = std::path::Path::new(&out_dir).join("app_meta.bin");
     std::fs::write(&path, &bytes).expect("write app_meta.bin");
+    // intel_gt (engines with their contexts) and i915 live on the stack.
+    println!("cargo:rustc-link-arg=-zstack-size=4194304");
     println!("cargo:rerun-if-changed=build.rs");
 }
