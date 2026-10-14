@@ -679,7 +679,10 @@ fn note_render(kind: u8) {
     let c = MIX_CURSOR.load(Ordering::Relaxed);
     let g = MIX_LEGACY.load(Ordering::Relaxed);
     if (l + s + c + g) % 60 == 0 {
-        if PERF_LOG { crate::kprintln!("[render-mix] layered={} surface={} cursor-only={} legacy={}", l, s, c, g); }
+        if PERF_LOG {
+            crate::kprintln!("[render-mix] layered={} surface={} cursor-only={} legacy={}, widget scenes rasterized {}",
+                l, s, c, g, widgets::take_rasterized());
+        }
     }
 }
 
@@ -817,7 +820,7 @@ fn render_damaged_layered() {
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            // Erase → repaint → re-bake, never a bare `draw_cursor_on_shadow`:
+            // Erase → repaint → re-bake, never a bare bake:
             // this is a partial repaint, so nothing here overwrites a cursor
             // baked at the previous position. When this pass is the only one
             // running (e.g. a scrollbar drag consumes the pointer event), a
@@ -855,7 +858,7 @@ fn render_focus_glow() {
 
         if let Some(ref comp) = *COMPOSITOR.lock() {
             // The cursor is baked into the front buffer. Baking another one
-            // per tick (a plain `draw_cursor_on_shadow`) would leave a copy at
+            // per tick (a bare bake) would leave a copy at
             // every position the mouse passed through, since this pass
             // repaints only the halo band. Erase, repaint, bake at the new
             // spot: the same save/restore dance `render_frame_cursor_only`
@@ -1599,74 +1602,6 @@ pub fn poll_render() {
         // erases it at the old spot.
         cursor::save_under_and_bake(shadow, info);
         blit_cursor_bbox(fb, cur_old, cur_had);
-    });
-    return;
-
-    // Legacy partial render path (kept for reference)
-    #[allow(unreachable_code)]
-    if layers_usable() {
-        poll_render_layered();
-    } else {
-        poll_render_legacy();
-    }
-}
-
-fn poll_render_layered() {
-    // Focused window text changed — use BG layer to restore background, then re-render window
-    framebuffer::with_fb(|fb| {
-        let info = fb.info();
-        let (shadow, _) = fb.shadow_ptr();
-
-        if let Some(ref comp) = *COMPOSITOR.lock() {
-            if let Some(fid) = comp.focused {
-                if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
-                    // Restore window region from BG layer
-                    if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
-                        let pitch = info.pitch as usize;
-                        let y1 = (win.y + win.height).min(info.height);
-                        let x1 = (win.x + win.width).min(info.width);
-                        let bytes = x1.saturating_sub(win.x) as usize * 4;
-                        if bytes > 0 {
-                            for row in win.y..y1 {
-                                let off = row as usize * pitch + win.x as usize * 4;
-                                unsafe {
-                                    core::ptr::copy_nonoverlapping(
-                                        bg_buf.add(off), shadow.add(off), bytes);
-                                }
-                            }
-                        }
-                    }
-
-                    // Re-render window chrome + text on clean background
-                    let border_color = if win.focused { comp.border_active() } else { comp.border_inactive() };
-                    compositor::Compositor::render_window(shadow, info, win,
-                        comp.border, comp.rounding, crate::shade::glass::params().loop_opacity, comp.scale, border_color,
-                        comp.glow_for(win));
-                    cursor::draw_cursor_on_shadow(shadow, info);
-                    framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
-                }
-            }
-        }
-    });
-}
-
-fn poll_render_legacy() {
-    framebuffer::with_fb(|fb| {
-        let info = fb.info();
-        let (shadow, _) = fb.shadow_ptr();
-
-        if let Some(ref comp) = *COMPOSITOR.lock() {
-            if let Some(fid) = comp.focused {
-                if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
-                    let border_color = if win.focused { comp.border_active() } else { comp.border_inactive() };
-                    compositor::Compositor::render_window(shadow, info, win,
-                        comp.border, comp.rounding, crate::shade::glass::params().loop_opacity, comp.scale, border_color,
-                        comp.glow_for(win));
-                    cursor::draw_cursor_on_shadow(shadow, info);
-                    framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
-                }
-            }
-        }
     });
 }
 

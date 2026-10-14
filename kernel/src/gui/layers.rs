@@ -1,20 +1,13 @@
-//! Full-screen layer buffers the compositor draws into and reads from.
-//!
-//!   Layer 0 (Background): Wallpaper or aurora, rendered once, cached
-//!   Layer 1 (Chrome):     Window borders, tinted backgrounds, bar
-//!   Layer 2 (Text):       Terminal text, transparent where no text
-//!
-//! Each layer is a BGRA buffer of `pitch * height` bytes. The cursor is not
-//! a layer (see shade/cursor.rs).
+//! The full-screen background layer the compositor starts every full frame
+//! from: the wallpaper (or aurora), rendered once and cached, a BGRA buffer
+//! of `pitch * height` bytes.
 
 use spin::Mutex;
 
 /// Layer indices.
 pub const LAYER_BG: usize = 0;
-pub const LAYER_CHROME: usize = 1;
-pub const LAYER_TEXT: usize = 2;
 /// Number of layers.
-const LAYER_COUNT: usize = 3;
+const LAYER_COUNT: usize = 1;
 
 /// Per-layer state.
 struct Layer {
@@ -48,7 +41,7 @@ struct LayerStack {
 impl LayerStack {
     const fn new() -> Self {
         LayerStack {
-            layers: [Layer::empty(), Layer::empty(), Layer::empty()],
+            layers: [Layer::empty()],
             width: 0,
             height: 0,
             pitch: 0,
@@ -116,15 +109,6 @@ pub fn init(width: u32, height: u32, pitch: u32) {
 /// Check if the layer system is initialized.
 pub fn is_initialized() -> bool {
     LAYERS.lock().initialized
-}
-
-/// Clear a layer (fill with transparent black).
-pub fn clear(layer_idx: usize) {
-    let mut stack = LAYERS.lock();
-    if layer_idx >= LAYER_COUNT || !stack.initialized { return; }
-    let layer = &mut stack.layers[layer_idx];
-    // SAFETY: buffer is valid and sized correctly
-    unsafe { core::ptr::write_bytes(layer.buf, 0, layer.size); }
 }
 
 /// Get raw pointer to a layer buffer for direct writes.

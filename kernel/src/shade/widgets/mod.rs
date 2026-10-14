@@ -88,9 +88,10 @@ pub struct WidgetScene {
     pub pixels:      Vec<u32>,
     pub width:       u32,
     pub height:      u32,
-    /// Content-rect origin in screen coordinates at the time of
-    /// the last render. Used to detect whether a re-render is
-    /// needed when shade redraws the window.
+    /// Screen position of the content rect. Layout and pixels are in
+    /// window-local coordinates (the content rect at 0,0), so moving the
+    /// window changes only this; points arriving in screen coordinates are
+    /// translated by it (`to_local`), rects leaving to the compositor too.
     pub origin_x:    i32,
     pub origin_y:    i32,
     /// Cached tree + layout so the compositor can re-layout on
@@ -103,7 +104,7 @@ pub struct WidgetScene {
     pub layout_scroll_y: u32,
     /// The tree was edited in place since the last layout.
     pub layout_stale: bool,
-    /// NodeId → screen rect, populated for any widget tagged with
+    /// NodeId → layout rect, populated for any widget tagged with
     /// `Modifier::NodeId`. Used by `Widget::Popover`'s anchor lookup
     /// at layout time and by the click-outside-dismiss test in
     /// hit_test (clicks on an anchor must not fire on_dismiss —
@@ -163,8 +164,9 @@ pub struct WidgetScene {
     /// Largest legal `scroll_y` from the last layout (content − viewport
     /// over the tallest vertical Scroll). Zero → nothing scrolls.
     pub max_scroll_y: u32,
-    /// Screen rect of the scrollable viewport (from layout) — the
-    /// compositor hit-tests its right edge for scrollbar dragging.
+    /// Layout rect of the scrollable viewport — the compositor hit-tests
+    /// its right edge for scrollbar dragging (`scroll_viewport_of` hands it
+    /// out in screen coordinates).
     pub scroll_viewport: abi::Rect,
     /// Largest legal `scroll_x` (widest line − text column). Zero → the
     /// document fits sideways and no horizontal bar is drawn.
@@ -183,6 +185,32 @@ pub fn with_scene<F, R>(window_id: u32, f: F) -> Option<R>
 where F: FnOnce(&WidgetScene) -> R,
 {
     SCENES.lock().get(&window_id).map(f)
+}
+
+/// A screen point in `window_id`'s window-local layout coordinates.
+fn to_local(window_id: u32, x: i32, y: i32) -> (i32, i32) {
+    match SCENES.lock().get(&window_id) {
+        Some(s) => (x - s.origin_x, y - s.origin_y),
+        None => (x, y),
+    }
+}
+
+/// A layout rect of `s` in screen coordinates.
+fn to_screen(s: &WidgetScene, r: abi::Rect) -> abi::Rect {
+    abi::Rect { x: r.x + s.origin_x, y: r.y + s.origin_y, ..r }
+}
+
+/// The layout container of a scene: its content rect at the window origin.
+fn local_rect(w: u32, h: u32) -> abi::Rect {
+    abi::Rect { x: 0, y: 0, w, h }
+}
+
+/// Full re-rasterizations of widget scenes, for the render statistics.
+static RASTERIZED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Scenes rasterized since the last call (`shade` logs it with PERF_LOG).
+pub fn take_rasterized() -> u64 {
+    RASTERIZED.swap(0, Ordering::Relaxed)
 }
 
 /// Adjust a widget window's vertical scroll by `delta` px (positive =
@@ -221,7 +249,7 @@ pub fn scroll_viewport_of(window_id: u32) -> Option<(abi::Rect, u32)> {
     let scenes = SCENES.lock();
     let s = scenes.get(&window_id)?;
     if s.max_scroll_y == 0 { return None; }
-    Some((s.scroll_viewport, s.max_scroll_y))
+    Some((to_screen(s, s.scroll_viewport), s.max_scroll_y))
 }
 
 /// Adjust the sideways offset by `delta` px (positive = content moves left).
@@ -259,7 +287,7 @@ pub fn scroll_viewport_x_of(window_id: u32) -> Option<(abi::Rect, u32)> {
     let scenes = SCENES.lock();
     let s = scenes.get(&window_id)?;
     if s.max_scroll_x == 0 { return None; }
-    Some((s.scroll_viewport_x, s.max_scroll_x))
+    Some((to_screen(s, s.scroll_viewport_x), s.max_scroll_x))
 }
 
 /// Drop a scene. Called from compositor::close_window when the
@@ -580,6 +608,7 @@ pub fn finish_pick(session: PickSession, path: alloc::string::String) {
 /// `Modifier::Disabled(_)`, the click is swallowed — disabled widgets
 /// eat events for themselves and their descendants.
 pub fn hit_test(window_id: u32, x: i32, y: i32) -> Option<abi::ActionId> {
+    let (x, y) = to_local(window_id, x, y);
     let scenes = SCENES.lock();
     let scene = scenes.get(&window_id)?;
 
@@ -865,10 +894,8 @@ static CONTEXT_POINT: Mutex<BTreeMap<u32, (i32, i32)>> = Mutex::new(BTreeMap::ne
 
 /// Record a right click at screen `(x, y)` in `window_id`.
 pub fn set_context_point(window_id: u32, x: i32, y: i32) {
-    let origin = SCENES.lock().get(&window_id).map(|s| (s.origin_x, s.origin_y));
-    if let Some((ox, oy)) = origin {
-        CONTEXT_POINT.lock().insert(window_id, (x - ox, y - oy));
-    }
+    if !widget_window_exists(window_id) { return; }
+    CONTEXT_POINT.lock().insert(window_id, to_local(window_id, x, y));
 }
 
 fn context_point(window_id: u32) -> Option<(i32, i32)> {
@@ -889,6 +916,7 @@ fn popover_hover(path: Option<&[u32]>, n: usize) -> Option<&[u32]> {
 }
 
 pub fn update_hover(window_id: u32, x: i32, y: i32) {
+    let (x, y) = to_local(window_id, x, y);
     // One pass under the lock: motion target, hover path and OnHover target
     // all come from the same cached layout. `motion` is `None` when the
     // window has no scene.
@@ -1054,7 +1082,7 @@ impl RenderJob {
         RenderJob {
             tree:        s.tree.clone(),
             layout:      if reuse { Some((s.layout_tree.clone(), s.popovers.clone())) } else { None },
-            rect:        abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
+            rect:        local_rect(s.width, s.height),
             density:     s.density,
             hover_path:  s.hover_path.clone(),
             focus_path:  s.focus_path.clone(),
@@ -1099,7 +1127,7 @@ impl RenderJob {
     /// stale (and the pixel buffer possibly the wrong size).
     fn matches(&self, s: &WidgetScene) -> bool {
         Arc::ptr_eq(&self.tree, &s.tree)
-            && self.rect == (abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height })
+            && self.rect == local_rect(s.width, s.height)
     }
 }
 
@@ -1166,6 +1194,7 @@ fn mark_dirty(window_id: u32) {
 /// click-routing aren't affected by state mechanics).
 #[must_use]
 pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
+    let (x, y) = to_local(window_id, x, y);
     // Focus moves only onto a text widget (or the field row around one);
     // a press anywhere else releases it, so a search box never traps the
     // keyboard with no way out but Tab. Active tracks the press target so
@@ -1948,6 +1977,7 @@ pub fn text_select_cancel() { TEXT_DRAG.store(0, Ordering::Release); }
 /// Position the caret at (x,y) and start a selection there. Returns true if
 /// it began — the press must land inside the focused Input/TextArea.
 pub fn text_select_begin(window_id: u32, x: i32, y: i32) -> bool {
+    let (x, y) = to_local(window_id, x, y);
     let began = {
         let mut scenes = SCENES.lock();
         let scene = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
@@ -1979,6 +2009,7 @@ pub fn text_select_begin(window_id: u32, x: i32, y: i32) -> bool {
 ///
 /// `run` is the result of [`click_run`]: 2 = word, 3 = all.
 pub fn text_select_run(window_id: u32, x: i32, y: i32, run: u8) -> bool {
+    let (x, y) = to_local(window_id, x, y);
     let ok = {
         let mut scenes = SCENES.lock();
         let scene = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
@@ -2013,6 +2044,7 @@ pub fn text_select_run(window_id: u32, x: i32, y: i32, run: u8) -> bool {
 /// changed (caller re-renders). Clamps to content so a drag past the edge
 /// keeps extending.
 pub fn text_select_extend(window_id: u32, x: i32, y: i32) -> bool {
+    let (x, y) = to_local(window_id, x, y);
     let changed = {
         let mut scenes = SCENES.lock();
         let scene = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
@@ -2133,6 +2165,7 @@ pub fn slide_flush() {
 /// A left press at (x,y): start dragging the slider under it, if any.
 /// The press already counts as a move — clicking the track jumps there.
 pub fn slide_begin(window_id: u32, x: i32, y: i32) -> bool {
+    let (x, y) = to_local(window_id, x, y);
     let (action, track, value) = {
         let mut scenes = SCENES.lock();
         let scene = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
@@ -2153,6 +2186,8 @@ pub fn slide_begin(window_id: u32, x: i32, y: i32) -> bool {
 
 /// Pointer moved with the button held.
 pub fn slide_move(x: i32) {
+    let Some(window) = SLIDE.lock().as_ref().map(|d| d.window) else { return };
+    let (x, _) = to_local(window, x, 0);
     let (window, action, value) = {
         let mut g = SLIDE.lock();
         let d = match g.as_mut() { Some(d) => d, None => return };
@@ -2595,7 +2630,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     };
     if win_w == 0 || win_h == 0 { return -3; }
 
-    let layout_rect = abi::Rect { x: win_x, y: win_y, w: win_w, h: win_h };
+    let layout_rect = local_rect(win_w, win_h);
     // Preserve the wheel scroll position across re-commits so an app that
     // re-renders on every event doesn't snap back to the top.
     let prev_scroll_y = SCENES.lock().get(&target_id).map(|s| s.scroll_y).unwrap_or(0);
@@ -2762,6 +2797,7 @@ fn rasterize_buffer_with_overlays(
     scroll_y: u32,
     scroll_x: u32,
 ) -> Vec<u32> {
+    RASTERIZED.fetch_add(1, Ordering::Relaxed);
     let pixel_count = (rect.w as usize) * (rect.h as usize);
     let mut pixels: Vec<u32> = alloc::vec![0u32; pixel_count];
 
@@ -2873,21 +2909,23 @@ pub fn rerender_window_pixels(wid: u32) {
     });
 }
 
-/// Re-render a scene at new dimensions — called by shade when a
-/// widget-kind window's content rect changes (resize / retile).
-/// Uses the cached tree + re-runs layout so we don't need the app
-/// to commit again. Returns false if no scene exists for that id.
+/// Follow a widget-kind window's content rect — called by shade when it
+/// moves or changes size (resize / retile / animation). A move only
+/// updates the origin; a size change re-lays out the cached tree and
+/// re-rasterizes, so the app need not commit again. Returns false if no
+/// scene exists for that id.
 pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h: u32) -> bool {
     let mut guard = SCENES.lock();
     let scene = match guard.get_mut(&window_id) {
         Some(s) => s,
         None    => return false,
     };
-    if scene.width == new_w && scene.height == new_h
-       && scene.origin_x == new_x && scene.origin_y == new_y {
-        return true; // no-op, nothing moved
+    scene.origin_x = new_x;
+    scene.origin_y = new_y;
+    if scene.width == new_w && scene.height == new_h {
+        return true;
     }
-    let new_rect = abi::Rect { x: new_x, y: new_y, w: new_w, h: new_h };
+    let new_rect = local_rect(new_w, new_h);
     let tree = scene.tree.clone();
     let scroll_y = scene.scroll_y;
     let scroll_x = scene.scroll_x;
@@ -2905,8 +2943,6 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     scene.pixels      = new_pixels;
     scene.width       = new_w;
     scene.height      = new_h;
-    scene.origin_x    = new_x;
-    scene.origin_y    = new_y;
     scene.layout_tree = Arc::new(new_lo.tree);
     scene.layout_scroll_y = scroll_y;
     scene.layout_stale = false;
