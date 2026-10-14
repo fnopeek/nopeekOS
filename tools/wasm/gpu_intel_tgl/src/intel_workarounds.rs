@@ -338,3 +338,39 @@ pub fn intel_gt_verify_workarounds(i915: &mut drm_i915_private, gt: &intel_gt, f
     let wal = gt.wa_list;
     wa_list_verify(i915, gt, &wal, from)
 }
+
+// Engine, context and whitelist lists. `class`/`instance`/`mmio_base`
+// identify the engine (`engine->class`, `engine->instance`,
+// `engine->mmio_base`).
+
+/// `intel_engine_init_workarounds`.
+pub fn intel_engine_init_workarounds(_i915: &mut drm_i915_private, _gt: &intel_gt, _class: u32, _instance: u32,
+                                     _mmio_base: u32, wal: &mut i915_wa_list) {
+    wa_init_start(wal, "engine", "");
+    wa_init_finish(wal);
+}
+
+/// `intel_engine_apply_workarounds`.
+pub fn intel_engine_apply_workarounds(i915: &mut drm_i915_private, gt: &intel_gt, wal: &i915_wa_list) {
+    wa_list_apply(i915, gt, wal);
+}
+
+/// `intel_engine_init_whitelist`.
+pub fn intel_engine_init_whitelist(_i915: &mut drm_i915_private, _gt: &intel_gt, _class: u32, _instance: u32,
+                                   _mmio_base: u32, wal: &mut i915_wa_list) {
+    wa_init_start(wal, "whitelist", "");
+    wa_init_finish(wal);
+}
+
+/// `intel_engine_apply_whitelist`.
+pub fn intel_engine_apply_whitelist(_i915: &mut drm_i915_private, _gt: &intel_gt, _mmio_base: u32,
+                                    _wal: &i915_wa_list) {}
+
+/// `intel_engine_init_ctx_wa` (`__intel_engine_init_ctx_wa`): the
+/// context workarounds, emitted into each context by
+/// `intel_engine_emit_ctx_wa`.
+pub fn intel_engine_init_ctx_wa(_i915: &mut drm_i915_private, _gt: &intel_gt, _class: u32, _instance: u32,
+                                _mmio_base: u32, wal: &mut i915_wa_list) {
+    wa_init_start(wal, "context", "");
+    wa_init_finish(wal);
+}
