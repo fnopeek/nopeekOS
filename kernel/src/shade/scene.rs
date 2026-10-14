@@ -112,6 +112,7 @@ pub enum Item {
     CloseGlyph { rect: Rect, size: u32, color: u32 },
 }
 
+#[derive(Clone)]
 pub struct Scene {
     pub items: Vec<Item>,
 }

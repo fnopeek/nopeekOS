@@ -486,6 +486,7 @@ fn render_frame_full() {
             comp.render(back, fb.info());
             fp = Some(comp.shell_fingerprint());
         }
+        crate::shade::gpu_scene::finish();
         note_shell_fingerprint(fp);
         let t_comp = crate::interrupts::rdtsc();
 
@@ -566,6 +567,7 @@ fn render_frame_surface() {
                 }
             }
         }
+        crate::shade::gpu_scene::finish();
 
         let t_comp = crate::interrupts::rdtsc();
 
@@ -734,7 +736,8 @@ fn render_damaged_front() {
         let info = *fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
-        if let Some(ref mut comp) = *COMPOSITOR.lock() {
+        let mut guard = COMPOSITOR.lock();
+        if let Some(comp) = guard.as_mut() {
             // Erase → repaint → re-bake, never a bare bake:
             // this is a partial repaint, so nothing here overwrites a cursor
             // baked at the previous position. When this pass is the only one
@@ -744,13 +747,22 @@ fn render_damaged_front() {
             let had_old = cursor::save_valid();
             cursor::restore_under(shadow, &info);
             let regions = comp.render_damaged(shadow, &info);
-            cursor::save_under_and_bake(shadow, &info);
-            for r in regions {
-                framebuffer::blit_rect(fb, r.x, r.y, r.w, r.h);
-            }
-            blit_cursor_bbox(fb, old, had_old);
+            drop(guard);
+            finish_and_blit(fb, shadow, &info, &regions, old, had_old);
         }
     });
+}
+
+/// After a partial repaint, with the compositor released: wait for the GPU,
+/// re-bake the cursor and blit the regions and the cursor's box.
+fn finish_and_blit(fb: &framebuffer::FbConsole, front: *mut u8, info: &crate::framebuffer::FbInfo,
+                   regions: &[crate::shade::scene::Rect], old: (i32, i32), had_old: bool) {
+    crate::shade::gpu_scene::finish();
+    cursor::save_under_and_bake(front, info);
+    for r in regions {
+        framebuffer::blit_rect(fb, r.x, r.y, r.w, r.h);
+    }
+    blit_cursor_bbox(fb, old, had_old);
 }
 
 /// Fade the focus flash down to the steady halo, repainting only its band —
@@ -771,7 +783,8 @@ fn render_focus_glow() {
         let info = *fb.info();
         let (shadow, _) = fb.shadow_ptr();
 
-        if let Some(ref mut comp) = *COMPOSITOR.lock() {
+        let mut guard = COMPOSITOR.lock();
+        if let Some(comp) = guard.as_mut() {
             // The cursor is baked into the front buffer. Baking another one
             // per tick (a bare bake) would leave a copy at
             // every position the mouse passed through, since this pass
@@ -782,11 +795,8 @@ fn render_focus_glow() {
             let had_old = cursor::save_valid();
             cursor::restore_under(shadow, &info);
             let regions = comp.render_focus_glow(shadow, &info);
-            cursor::save_under_and_bake(shadow, &info);
-            for r in regions {
-                framebuffer::blit_rect(fb, r.x, r.y, r.w, r.h);
-            }
-            blit_cursor_bbox(fb, old, had_old);
+            drop(guard);
+            finish_and_blit(fb, shadow, &info, &regions, old, had_old);
         }
     });
 }
@@ -1238,23 +1248,22 @@ pub fn render_input_line() {
         let info = *fb.info();
         let (front, _) = fb.shadow_ptr();
 
-        if let Some(ref mut comp) = *COMPOSITOR.lock() {
+        let mut guard = COMPOSITOR.lock();
+        if let Some(comp) = guard.as_mut() {
             // Partial repaint → erase, paint, re-bake (see
             // `render_damaged_front`). A bare bake would leave the pointer
             // standing wherever it was when someone typed.
             let old = cursor::saved_pos();
             let had_old = cursor::save_valid();
             cursor::restore_under(front, &info);
-            if let Some(line) = comp.update_input_line() {
-                for r in comp.compose(front, &info, alloc::vec![line]) {
-                    framebuffer::blit_rect(fb, r.x, r.y, r.w, r.h);
-                }
-            }
-            cursor::save_under_and_bake(front, &info);
-            // Unconditional: the bake above already moved the cursor in the
-            // front buffer, so skipping the blit when nothing was painted
-            // would strand the old one on screen for good.
-            blit_cursor_bbox(fb, old, had_old);
+            let regions = match comp.update_input_line() {
+                Some(line) => comp.compose(front, &info, alloc::vec![line]),
+                None => alloc::vec::Vec::new(),
+            };
+            drop(guard);
+            // The cursor box is blitted even when nothing was painted: the
+            // bake has moved the cursor in the front buffer either way.
+            finish_and_blit(fb, front, &info, &regions, old, had_old);
         }
     });
 }
@@ -1315,12 +1324,15 @@ pub fn poll_render() {
     // dwell / hide debounce advance even while the cursor is parked, then
     // advance the slide. Re-render the frame while it's moving.
     let (_, cy) = cursor::atomic_pos();
-    let dock_moving = with_compositor(|comp| {
+    let (dock_moving, full) = with_compositor(|comp| {
         comp.dock_update_reveal(cy);
-        comp.dock_tick()
-    }).unwrap_or(false);
+        let moving = comp.dock_tick();
+        (moving, comp.needs_full_redraw)
+    }).unwrap_or((false, false));
+    // A step of the slide repaints where the dock was and is; the tiles move
+    // (a whole frame) only when the slide starts hiding or ends revealing.
     if dock_moving {
-        render_frame();
+        if full { render_frame(); } else { render_damaged_front(); }
     }
 
     // Process each mouse event with clean cursor restore + redraw
@@ -1382,7 +1394,8 @@ pub fn poll_render() {
         let cur_had = cursor::save_valid();
         cursor::restore_under(front, &info);
 
-        if let Some(ref mut comp) = *COMPOSITOR.lock() {
+        let mut guard = COMPOSITOR.lock();
+        if let Some(comp) = guard.as_mut() {
             for win in &mut comp.windows {
                 if terminal::take_term_dirty(win.terminal_idx as usize) {
                     win.dirty = true;
@@ -1395,16 +1408,16 @@ pub fn poll_render() {
                     terminal::take_term_dirty(idx);
                 }
             }
-            for r in comp.render_damaged(front, &info) {
-                framebuffer::blit_rect(fb, r.x, r.y, r.w, r.h);
-            }
+            let regions = comp.render_damaged(front, &info);
+            drop(guard);
+            // Re-bake the cursor on top of the repainted windows + blit its
+            // region (atomic). Covers a cursor over a just-redrawn window and
+            // erases it at the old spot.
+            finish_and_blit(fb, front, &info, &regions, cur_old, cur_had);
+        } else {
+            cursor::save_under_and_bake(front, &info);
+            blit_cursor_bbox(fb, cur_old, cur_had);
         }
-
-        // Re-bake the cursor on top of the repainted windows + blit its
-        // region (atomic). Covers a cursor over a just-redrawn window and
-        // erases it at the old spot.
-        cursor::save_under_and_bake(front, &info);
-        blit_cursor_bbox(fb, cur_old, cur_had);
     });
 }
 

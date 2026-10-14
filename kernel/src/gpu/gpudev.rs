@@ -116,6 +116,8 @@ struct State {
     /// whose owner frees it meanwhile is removed only after the scene.
     pinning: bool,
     pinned: Vec<u32>,
+    /// `BO_ADD`s queued while pinning.
+    pin_adds: u32,
     deferred: Vec<(u32, (u64, usize))>,
     caps: i32,
 }
@@ -132,6 +134,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     adding: BTreeMap::new(),
     pinning: false,
     pinned: Vec::new(),
+    pin_adds: 0,
     deferred: Vec::new(),
     caps: 0,
 });
@@ -483,6 +486,7 @@ pub fn bo_for(addr: u64, size: u64, width: u32, height: u32, pitch: u32) -> Opti
     st.adding.insert(seq, id);
     if st.pinning {
         st.pinned.push(id);
+        st.pin_adds += 1;
     }
     drop(st);
     wake_module();
@@ -510,7 +514,13 @@ impl ScenePin {
         let mut st = STATE.lock();
         st.pinning = true;
         st.pinned.clear();
+        st.pin_adds = 0;
         ScenePin
+    }
+
+    /// New buffers were queued for binding while pinned.
+    pub fn added(&self) -> bool {
+        STATE.lock().pin_adds > 0
     }
 }
 
@@ -672,36 +682,15 @@ pub fn submit_scene(target: u32, payload: Vec<u8>, sources: &[u32]) -> Option<u3
     Some(seq)
 }
 
-/// Wait until the module has bound every buffer in `ids`. False when one
-/// failed, is gone, or binding outlasts `BIND_TIMEOUT_MS`.
-pub fn wait_bound(ids: &[u32]) -> bool {
-    let end = crate::interrupts::rdtsc() + BIND_TIMEOUT_MS * (crate::interrupts::tsc_freq() / 1000);
-    loop {
-        let pending = {
-            let st = STATE.lock();
-            let mut pending = false;
-            for id in ids {
-                match st.bos.get(id).map(|b| b.state) {
-                    Some(BoState::Bound) => {}
-                    Some(BoState::Adding) => pending = true,
-                    _ => return false,
-                }
-            }
-            pending
-        };
-        if !pending {
-            return true;
-        }
-        if !READY.load(Ordering::Acquire) || crate::interrupts::rdtsc() >= end {
-            return false;
-        }
-        core::hint::spin_loop();
-    }
-}
-
 /// Wait for scene job `seq`: 0 when the module composed it, else why not.
 pub fn wait_scene(seq: u32) -> i32 {
     wait_seq(seq, deadline())
+}
+
+/// `wait_scene` for a scene queued behind new buffers: binding them is a
+/// page walk per 4 KB page in the module, once.
+pub fn wait_scene_bound(seq: u32) -> i32 {
+    wait_seq(seq, crate::interrupts::rdtsc() + BIND_TIMEOUT_MS * (crate::interrupts::tsc_freq() / 1000))
 }
 
 /// The fixed buffer (1 or 2) whose first pixel is at `addr`.

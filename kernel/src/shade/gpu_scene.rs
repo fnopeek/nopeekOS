@@ -42,20 +42,52 @@ static CPU_SCENES: AtomicU64 = AtomicU64::new(0);
 static FULL_FRAMES: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 static FULL_CYCLES: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
-/// Compose `frame` into `target` within `damage`, on the GPU when it is
-/// verified and takes the job, else on the CPU.
+/// A scene handed to the module and not yet waited for. Waiting happens in
+/// `finish`, after the caller let go of the compositor: a widget app that
+/// asks the compositor meanwhile spins on its lock, and on the GPU module's
+/// core that would keep the module from ever completing the scene.
+enum Pending {
+    Scene {
+        seq: u32,
+        scene: Scene,
+        target: usize,
+        info: FbInfo,
+        damage: Vec<Rect>,
+        /// New buffers were queued for binding ahead of it.
+        binding: bool,
+        full: bool,
+        t0: u64,
+    },
+    Verify {
+        seq: Option<u32>,
+        scene: Scene,
+        target: usize,
+        info: FbInfo,
+        copy: u64,
+        pages: usize,
+        cpu: u64,
+        t0: u64,
+    },
+}
+
+// SAFETY: `target` and `copy` are addresses of identity-mapped buffers the
+// compositor owns; the pending scene is finished on the core that made it.
+unsafe impl Send for Pending {}
+
+static PENDING: spin::Mutex<Option<Pending>> = spin::Mutex::new(None);
+
+/// Compose `frame` into `target` within `damage`: on the CPU now, or handed
+/// to the GPU, in which case the caller must call `finish` once it has let
+/// go of the compositor and before it reads `target`.
 pub fn compose(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect]) {
     let t0 = crate::interrupts::rdtsc();
     let full = covers_screen(damage, info);
-    let note = |i: usize| if full {
-        FULL_FRAMES[i].fetch_add(1, Ordering::Relaxed);
-        FULL_CYCLES[i].fetch_add(crate::interrupts::rdtsc() - t0, Ordering::Relaxed);
-    };
+    // A scene still in flight is finished first; the caller should have.
+    finish_with(sources);
     if gpudev::scenes_offered() {
         match MODE.load(Ordering::Acquire) {
             MODE_ON => {
-                if on_gpu(frame, sources, target, info, damage) {
-                    note(0);
+                if submit(frame, sources, target, info, damage, full, t0) {
                     return;
                 }
             }
@@ -68,31 +100,45 @@ pub fn compose(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbI
     }
     scene::execute(frame, sources, target, info, damage);
     CPU_SCENES.fetch_add(1, Ordering::Relaxed);
-    note(1);
+    if full {
+        FULL_FRAMES[1].fetch_add(1, Ordering::Relaxed);
+        FULL_CYCLES[1].fetch_add(crate::interrupts::rdtsc() - t0, Ordering::Relaxed);
+    }
 }
 
 fn covers_screen(damage: &[Rect], info: &FbInfo) -> bool {
     damage.iter().any(|d| d.x == 0 && d.y == 0 && d.w >= info.width && d.h >= info.height)
 }
 
-/// One scene on the GPU into `target`, waited for. False when it did not
-/// happen; the caller composes on the CPU.
-fn on_gpu(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect]) -> bool {
+/// Hand one scene to the module. False when it was not taken; the caller
+/// composes on the CPU.
+fn submit(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect], full: bool,
+          t0: u64) -> bool {
     let Some(tid) = gpudev::shadow_bo(target as u64) else { return false };
-    let status = {
-        let _pin = gpudev::ScenePin::new();
-        match encode(frame, sources, info, damage) {
-            None => Err("a source cannot be handed to the module"),
-            Some((_, srcs)) if !gpudev::wait_bound(&srcs) => Err("a source was not bound"),
-            Some((payload, srcs)) => gpudev::submit_scene(tid, payload, &srcs).ok_or("the scene was refused"),
-        }
+    let pin = gpudev::ScenePin::new();
+    let r = match encode(frame, sources, info, damage) {
+        None => Err("a source cannot be handed to the module"),
+        Some((payload, srcs)) => gpudev::submit_scene(tid, payload, &srcs).ok_or("the scene was refused"),
     };
-    let status = status.map(gpudev::wait_scene);
-    if status == Ok(0) {
-        SCENES_DONE.fetch_add(1, Ordering::Relaxed);
-        FAILURES_IN_ROW.store(0, Ordering::Relaxed);
-        return true;
+    let binding = pin.added();
+    drop(pin);
+    match r {
+        Ok(seq) => {
+            *PENDING.lock() = Some(Pending::Scene {
+                seq, scene: Scene { items: frame.items.clone() }, target: target as usize, info: *info,
+                damage: damage.to_vec(), binding, full, t0,
+            });
+            true
+        }
+        Err(why) => {
+            failed(Err(why));
+            false
+        }
     }
+}
+
+/// Count and report a scene the module did not compose.
+fn failed(status: Result<i32, &str>) {
     if SCENES_FAILED.fetch_add(1, Ordering::Relaxed) < FAILURES_LOGGED {
         match status {
             Err(why) => crate::kprintln!("[npk] gpu: scene on the CPU, {}", why),
@@ -105,7 +151,68 @@ fn on_gpu(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
         crate::kprintln!("[npk] gpu: {} scenes in a row failed on the GPU, composing on the CPU (`gpu verify` retries)",
             FAILURE_LIMIT);
     }
-    false
+}
+
+/// Wait for the scene handed to the module, if any. Call it without holding
+/// the compositor, before reading the target. A failed scene is composed on
+/// the CPU here, which takes the compositor for its sources.
+pub fn finish() {
+    let Some(p) = PENDING.lock().take() else { return };
+    if let Some(redo) = settle(p) {
+        crate::shade::with_compositor(|comp| redo.run(&*comp));
+    }
+}
+
+/// `finish` for a caller that holds the compositor.
+fn finish_with(sources: &dyn Sources) {
+    let Some(p) = PENDING.lock().take() else { return };
+    if let Some(redo) = settle(p) {
+        redo.run(sources);
+    }
+}
+
+/// A scene the CPU has to compose after all.
+struct Redo {
+    scene: Scene,
+    target: usize,
+    info: FbInfo,
+    damage: Vec<Rect>,
+}
+
+impl Redo {
+    fn run(&self, sources: &dyn Sources) {
+        scene::execute(&self.scene, sources, self.target as *mut u8, &self.info, &self.damage);
+        CPU_SCENES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Wait for `p`; what the CPU still has to compose.
+fn settle(p: Pending) -> Option<Redo> {
+    match p {
+        Pending::Scene { seq, scene, target, info, damage, binding, full, t0 } => {
+            let status = if binding { gpudev::wait_scene_bound(seq) } else { gpudev::wait_scene(seq) };
+            if status == 0 {
+                SCENES_DONE.fetch_add(1, Ordering::Relaxed);
+                FAILURES_IN_ROW.store(0, Ordering::Relaxed);
+                if full {
+                    FULL_FRAMES[0].fetch_add(1, Ordering::Relaxed);
+                    FULL_CYCLES[0].fetch_add(crate::interrupts::rdtsc() - t0, Ordering::Relaxed);
+                }
+                return None;
+            }
+            failed(Ok(status));
+            Some(Redo { scene, target, info, damage })
+        }
+        Pending::Verify { seq, scene, target, info, copy, pages, cpu, t0 } => {
+            let ok = seq.map(|s| gpudev::wait_scene_bound(s) == 0);
+            let gpu = crate::interrupts::rdtsc() - t0;
+            judge(&scene, target as *mut u8, &info, copy, ok, gpu, cpu);
+            if gpudev::release(copy, copy, pages) {
+                crate::memory::deallocate_contiguous(copy, pages);
+            }
+            None
+        }
+    }
 }
 
 /// Passes sources through and notes which pixels each one showed, so a
@@ -142,53 +249,60 @@ fn source_key(s: Source) -> (u8, u32) {
     }
 }
 
-/// The first whole frame both ways: the GPU into a copy of `target`, then
-/// the CPU into `target` itself, compared bit for bit. A source that
-/// changed in between leaves the question open for the next whole frame.
+/// The first whole frame both ways: the GPU into a copy of `target`, the
+/// CPU into `target` itself; `finish` compares them bit for bit. A source
+/// that changed in between leaves the question open for the next whole
+/// frame.
 fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect]) {
     let planes_before = plane_ptrs();
     let gpu_rec = Recorder { inner: sources, seen: Default::default() };
     let cpu_rec = Recorder { inner: sources, seen: Default::default() };
     let bytes = info.pitch as usize * info.height as usize;
     let pages = bytes.div_ceil(4096);
-    let gpu_result = crate::memory::allocate_contiguous(pages).and_then(|copy| {
-        // SAFETY: `copy` is `pages` fresh identity-mapped frames, `target`
-        // a screen-sized buffer of `bytes`; they do not overlap.
-        unsafe { core::ptr::copy_nonoverlapping(target, copy as *mut u8, bytes) };
-        let t0 = crate::interrupts::rdtsc();
-        let pin = gpudev::ScenePin::new();
-        // Binding the buffers is a one-time cost and not part of the timing.
-        let job = gpudev::bo_for(copy, bytes as u64, info.width, info.height, info.pitch)
-            .zip(encode(frame, &gpu_rec, info, damage))
-            .filter(|(tid, (_, srcs))| gpudev::wait_bound(srcs) && gpudev::wait_bound(&[*tid]));
-        let bind = crate::interrupts::rdtsc() - t0;
-        let t1 = crate::interrupts::rdtsc();
-        let seq = job.and_then(|(tid, (payload, srcs))| gpudev::submit_scene(tid, payload, &srcs));
-        drop(pin);
-        let r = seq.map(|s| gpudev::wait_scene(s) == 0);
-        Some((copy, r, crate::interrupts::rdtsc() - t1, bind))
-    });
-
-    let t0 = crate::interrupts::rdtsc();
-    scene::execute(frame, &cpu_rec, target, info, damage);
-    let cpu = crate::interrupts::rdtsc() - t0;
-
-    let Some((copy, result, gpu, bind)) = gpu_result else {
+    let Some(copy) = crate::memory::allocate_contiguous(pages) else {
+        scene::execute(frame, sources, target, info, damage);
         crate::kprintln!("[npk] gpu: no memory to verify scenes, composing on the CPU");
         MODE.store(MODE_OFF, Ordering::Release);
         return;
     };
+    // SAFETY: `copy` is `pages` fresh identity-mapped frames, `target` a
+    // screen-sized buffer of `bytes`; they do not overlap.
+    unsafe { core::ptr::copy_nonoverlapping(target, copy as *mut u8, bytes) };
+    let t0 = crate::interrupts::rdtsc();
+    let seq = {
+        let _pin = gpudev::ScenePin::new();
+        gpudev::bo_for(copy, bytes as u64, info.width, info.height, info.pitch)
+            .zip(encode(frame, &gpu_rec, info, damage))
+            .and_then(|(tid, (payload, srcs))| gpudev::submit_scene(tid, payload, &srcs))
+    };
+
+    let t1 = crate::interrupts::rdtsc();
+    scene::execute(frame, &cpu_rec, target, info, damage);
+    let cpu = crate::interrupts::rdtsc() - t1;
+
     // The GPU run asks every source, the CPU only those its damage reaches.
     let gpu_seen = gpu_rec.seen();
-    if cpu_rec.seen().iter().any(|s| !gpu_seen.contains(s)) || plane_ptrs() != planes_before {
+    let changed = cpu_rec.seen().iter().any(|s| !gpu_seen.contains(s)) || plane_ptrs() != planes_before;
+    if changed {
         crate::kdebug!("[npk] gpu: a source changed during the verification, comparing the next whole frame");
+        // The copy stays allocated until the scene that writes it is done.
+        if let Some(s) = seq {
+            gpudev::wait_scene_bound(s);
+        }
         if gpudev::release(copy, copy, pages) {
             crate::memory::deallocate_contiguous(copy, pages);
         }
         return;
     }
+    *PENDING.lock() = Some(Pending::Verify {
+        seq, scene: Scene { items: frame.items.clone() }, target: target as usize, info: *info, copy, pages, cpu, t0,
+    });
+}
+
+/// Compare the verification copy with the CPU's frame and switch.
+fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bool>, gpu: u64, cpu: u64) {
     let us = |c: u64| c * 1000 / (crate::interrupts::tsc_freq() / 1000).max(1);
-    match result {
+    match ok {
         Some(true) => {
             let mut diffs = 0u64;
             let mut shown = Vec::new();
@@ -196,8 +310,8 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
                 let row = y as usize * info.pitch as usize;
                 for x in 0..info.width {
                     let off = row + x as usize * 4;
-                    // SAFETY: both buffers hold `bytes` = pitch * height bytes;
-                    // x < width keeps `off + 4` within the row.
+                    // SAFETY: both buffers hold pitch * height bytes; x < width
+                    // keeps `off + 4` within the row.
                     let (c, g) = unsafe {
                         (*(target.add(off) as *const u32), *((copy as usize + off) as *const u32))
                     };
@@ -212,8 +326,8 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
             if diffs == 0 {
                 MODE.store(MODE_ON, Ordering::Release);
                 FAILURES_IN_ROW.store(0, Ordering::Relaxed);
-                crate::kprintln!("[npk] gpu: scene verified ({} items), GPU {} us vs CPU {} us (binding {} us once) — composing on the GPU",
-                    frame.items.len(), us(gpu), us(cpu), us(bind));
+                crate::kprintln!("[npk] gpu: scene verified ({} items), GPU {} us incl. binding vs CPU {} us — composing on the GPU",
+                    frame.items.len(), us(gpu), us(cpu));
             } else {
                 MODE.store(MODE_OFF, Ordering::Release);
                 crate::kprintln!("[npk] gpu: scene differs in {} of {} pixels, composing on the CPU",
@@ -230,12 +344,8 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
         }
         None => {
             MODE.store(MODE_OFF, Ordering::Release);
-            crate::kprintln!("[npk] gpu: the verification scene could not be handed over (buffers not bound after {} us), composing on the CPU",
-                us(bind));
+            crate::kprintln!("[npk] gpu: the verification scene could not be handed over, composing on the CPU");
         }
-    }
-    if gpudev::release(copy, copy, pages) {
-        crate::memory::deallocate_contiguous(copy, pages);
     }
 }
 

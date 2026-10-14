@@ -244,6 +244,11 @@ pub struct Compositor {
     pub rounding: u32,
     /// Full redraw needed (including aurora background).
     pub needs_full_redraw: bool,
+    /// Screen areas to compose with the next partial repaint besides the
+    /// dirty windows: where the sliding dock was.
+    extra_damage: Vec<Rect>,
+    /// The dock reserve the tiles were last laid out for.
+    dock_reserved: u32,
     /// Background has been drawn (skip on partial updates).
     pub aurora_drawn: bool,
     /// Mouse cursor state.
@@ -307,6 +312,8 @@ impl Compositor {
             border_inactive,
             rounding,
             needs_full_redraw: true,
+            extra_damage: Vec::new(),
+            dock_reserved: 0,
             aurora_drawn: false,
             mouse: {
                 let mut m = MouseState::new();
@@ -457,22 +464,16 @@ impl Compositor {
     }
 
     /// Vertical band the tiling area gives up at the bottom for the
-    /// auto-hide dock. Zero when the dock is fully hidden (so tiles reach
-    /// their normal extent), ramping to the full dock band + a top gap
-    /// matching the dock's floating bottom gap when fully revealed.
-    /// Linear in the reveal fraction so a retile per `dock_tick` makes the
-    /// tiles glide up/down in lockstep with the sliding dock.
+    /// auto-hide dock: the dock band plus a top gap equal to its floating
+    /// bottom gap, once it is fully revealed and meant to stay. While it
+    /// slides it is an overlay over the tiles (docs/archive/DOCK.md §3):
+    /// revealing, the tiles keep their size until the dock is up; hiding,
+    /// they take the space back at once and the dock slides away over them.
+    /// The tiles are laid out once per slide, not per step.
     fn dock_bottom_reserve(&self) -> u32 {
         let Some(dock) = self.dock else { return 0 };
-        let slide = dock.thickness + dock.gap;
-        if slide == 0 { return 0 }
-        // Fully-shown reservation: the dock band plus a top gap equal to its
-        // floating bottom gap (→ equal air above and below), minus the tile
-        // gap the area already leaves above the baseline.
-        let full = (dock.thickness + 2 * dock.gap).saturating_sub(self.gaps);
-        // offset: 0 = shown, `slide` = hidden. risen = how far it has slid up.
-        let risen = slide.saturating_sub(dock.offset.min(slide));
-        (full as u64 * risen as u64 / slide as u64) as u32
+        if !dock.target_shown || dock.offset != 0 { return 0 }
+        (dock.thickness + 2 * dock.gap).saturating_sub(self.gaps)
     }
 
     /// Where a newly opened window hangs in the dwindle tree: it splits the
@@ -1193,7 +1194,14 @@ impl Compositor {
             (dock.id, dock.offset, slide, dock.offset < slide as u32)
         };
 
+        let hh = DOCK_HANDLE_H * self.scale.max(1);
+        let base = self.dock_baseline();
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            // Where it was, and the resting handle, are repainted too.
+            if win.visible {
+                self.extra_damage.push(Rect::new(win.x, win.y, win.width, win.height));
+            }
+            self.extra_damage.push(Rect::new(win.x, base.saturating_sub(hh), win.width, hh));
             win.x = screen_w.saturating_sub(win.width) / 2;
             // Shown (offset 0): top = baseline - slide = baseline - thickness
             // - gap → tray floats `gap` above the edge. Hidden (offset slide):
@@ -1202,11 +1210,20 @@ impl Compositor {
             win.visible = now_visible;
             win.dirty = true;
         }
-        // Reflow tiles to the dock-reserved area at the current offset so the
-        // windows glide up/down together with the sliding dock (the reserve
-        // is keyed off `dock.offset`, which we just stepped).
-        self.retile();
-        self.needs_full_redraw = true;
+        // The tiles move only when the reserve changes: at the start of a
+        // hide, at the end of a reveal.
+        let reserve = self.dock_bottom_reserve();
+        if reserve != self.dock_reserved {
+            self.dock_reserved = reserve;
+            self.retile();
+            self.needs_full_redraw = true;
+        }
+        // The slide is over: what waited for the motion to end (widgets
+        // laid out at their tile size, guests told theirs) happens now.
+        if !self.geometry_in_motion() {
+            self.retile();
+            self.needs_full_redraw = true;
+        }
         true
     }
 
@@ -1687,6 +1704,7 @@ impl Compositor {
 
     /// The whole frame, composed into `target`.
     pub fn render(&mut self, target: *mut u8, info: &FbInfo) {
+        self.extra_damage.clear();
         self.compose(target, info, alloc::vec![Rect::new(0, 0, info.width, info.height)]);
         for win in &mut self.windows {
             win.dirty = false;
@@ -1917,7 +1935,7 @@ impl Compositor {
         }
         let screen = Rect::new(0, 0, info.width, info.height);
         let damage: Vec<Rect> = self.windows.iter()
-            .filter(|w| w.dirty && w.workspace == self.active_workspace && w.visible)
+            .filter(|w| w.dirty && (w.workspace == self.active_workspace || w.is_dock) && w.visible)
             .map(|w| {
                 // The halo band too: the tile that just lost focus loses its
                 // halo there, the one that gained it gets it.
@@ -1925,6 +1943,8 @@ impl Compositor {
                 Rect::new(w.x, w.y, w.width, w.height).grow(g).intersect(&screen)
             })
             .collect();
+        let mut damage = damage;
+        damage.extend(self.extra_damage.drain(..).map(|r| r.intersect(&screen)).filter(|r| !r.is_empty()));
         if damage.is_empty() { return damage; }
         let painted = self.compose(target, info, damage);
         for win in &mut self.windows {

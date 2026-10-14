@@ -626,6 +626,16 @@ eines Auftrags in einem Stapel auf rcs0), Programme `compose.comp`,
 gepruefte Shader-Logik (C++-Uebersetzung derselben Quellen, 2300 Zufallsszenen,
 0 Abweichungen) — was brw daraus macht, zeigt erst der Vergleich am NUC.
 
+**Gelernt am NUC (2026-10-14):** Auf die GPU wird **nie unter dem
+Compositor-Lock** gewartet. Dock und Bar fragen den Compositor nach jedem
+Bild ab und warten aktiv auf seinen Lock; teilen sie den Kern mit dem
+GPU-Modul, kommt das Modul nicht dran, und die Szene laeuft ins Zeitlimit
+(122 ms je Bild bei 17 ms GPU-Arbeit). Deshalb gibt `gpu_scene::compose` nur
+ab, und `gpu_scene::finish` wartet, nachdem der Aufrufer den Lock
+losgelassen hat. Und das Dock ist ein Overlay (`docs/archive/DOCK.md` §3):
+die Kacheln werden einmal je Gleiten neu gelegt, nicht je Schritt, und ein
+Schritt zeichnet nur den Streifen des Docks neu.
+
 **Bekannte Fallen:** Overlays verlassen sich auf Pixel unter ihren Ecken
 (`compositor.rs:1938`); `render_damaged` zeichnet Fenster darueber nicht neu
 (`compositor.rs:2340`, heute nur fuer Overlays geflickt); `virtio_gpu_pci.rs:1456`
