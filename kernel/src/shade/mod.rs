@@ -30,7 +30,7 @@ use alloc::string::String;
 pub const PERF_LOG: bool = false;
 
 use crate::framebuffer::{self};
-use crate::gui::{font, render};
+use crate::gui::font;
 
 #[allow(unused_imports)]
 pub use compositor::Compositor;
@@ -506,104 +506,90 @@ fn render_frame_full() {
         };
 
         if !gpu_ok {
-            let mut damage = render::DamageTracker::new(screen_w, screen_h);
-            damage.mark_all();
-            damage.flush(fb);
+            framebuffer::blit_rect(fb, 0, 0, screen_w, screen_h);
         }
         record_surface_render(t0, t_bg, t_comp, t_cursor);
     });
 }
 
-/// Like `render_frame_layered` but for a Surface-only update (a guest/browser
-/// FLUSH): recomposite the scene (cheap RAM work) yet blit only the surface
-/// tile rect(s) + the cursor to MMIO, not the whole screen. The full-screen
-/// MMIO blit is the dominant cost on a GOP framebuffer; a 60 Hz guest doing
-/// it every frame saturates the framebuffer and starves cursor blits. Only
-/// the surface pixels changed, so the rest of the front buffer already
-/// matches what's on screen.
+/// A Surface-only update (a guest/browser FLUSH): only the guests' damage
+/// is composed again and copied to the screen, with the cursor. Nothing
+/// else changed, so the rest of the front buffer already matches the
+/// screen; a 60 Hz guest composing or blitting the whole 4K frame each time
+/// would saturate the framebuffer and starve cursor blits.
 fn render_frame_surface() {
     note_render(1);
     let t0 = crate::interrupts::rdtsc();
     framebuffer::with_fb(|fb| {
-        let screen_w = fb.info().width;
-        let screen_h = fb.info().height;
-        let pitch = fb.info().pitch;
         let info = *fb.info();
-        let back = fb.shadow_back();
-        let t_bg = t0;
+        let (front, _) = fb.shadow_ptr();
+        let old = cursor::saved_pos();
+        let had_old = cursor::save_valid();
+        cursor::restore_under(front, &info);
 
-        // Recomposite the whole scene into back (correct w.r.t. overlays),
-        // collecting Surface tile rects while the lock is held.
-        let mut surf_rects = [(0u32, 0u32, 0u32, 0u32); 4];
-        let mut n = 0usize;
-        if let Some(ref mut comp) = *COMPOSITOR.lock() {
-            comp.aurora_drawn = true;
-            comp.render(back, fb.info());
-            let border = comp.border;
-            for win in comp.windows.iter() {
-                if win.kind == crate::shade::window::WindowKind::Surface && n < surf_rects.len() {
-                    // Blit only the guest's damage rect (content-clipped,
-                    // translated to screen coords) instead of the whole
-                    // tile — at 4K that's the difference between a tens-of-MB
-                    // MMIO blit and just the changed region. comp.render
-                    // already produced correct pixels in `back` everywhere,
-                    // and nothing but this tile changed, so a partial blit is
-                    // correct. Falls back to the full tile if no damage was
-                    // recorded or the clamp degenerates.
-                    let full = (win.x, win.y, win.width, win.height);
+        // Only the guests' damage is composed again, into the front buffer
+        // like every partial repaint; composing paints the whole stack within
+        // it, so overlays come along.
+        let mut guard = COMPOSITOR.lock();
+        let painted = match guard.as_mut() {
+            Some(comp) => {
+                comp.aurora_drawn = true;
+                let border = comp.border;
+                let mut damage = alloc::vec::Vec::new();
+                for win in comp.windows.iter() {
+                    if win.kind != crate::shade::window::WindowKind::Surface { continue; }
+                    let full = crate::shade::scene::Rect::new(win.x, win.y, win.width, win.height);
                     let cx = win.x + border;
                     let cy = win.y + border;
                     let cw = win.width.saturating_sub(border * 2);
                     let ch = win.height.saturating_sub(border * 2);
-                    surf_rects[n] = match crate::shade::surface::take_damage(win.id.0) {
+                    // The guest's damage rect, content-clipped, in screen
+                    // coordinates; the whole tile when none was recorded.
+                    damage.push(match crate::shade::surface::take_damage(win.id.0) {
                         Some((dx, dy, dw, dh)) if dx < cw && dy < ch => {
                             let rw = dw.min(cw - dx);
                             let rh = dh.min(ch - dy);
-                            if rw > 0 && rh > 0 { (cx + dx, cy + dy, rw, rh) } else { full }
+                            if rw > 0 && rh > 0 {
+                                crate::shade::scene::Rect::new(cx + dx, cy + dy, rw, rh)
+                            } else {
+                                full
+                            }
                         }
                         _ => full,
-                    };
-                    n += 1;
+                    });
                 }
+                comp.compose(front, &info, damage)
             }
-        }
-        crate::shade::gpu_scene::finish();
-
+            None => alloc::vec::Vec::new(),
+        };
+        drop(guard);
         let t_comp = crate::interrupts::rdtsc();
-
-        fb.swap_buffers();
-        fb.commit_front();
-
-        // Capture the old cursor rect (to erase a ghost if it moved this
-        // frame) before save_under_and_bake overwrites the saved position.
-        let old = cursor::saved_pos();
-        let had_old = cursor::save_valid();
-        cursor::save_under_and_bake(fb.front_ptr(), &info);
+        crate::shade::gpu_scene::finish();
+        cursor::save_under_and_bake(front, &info);
         let t_cursor = crate::interrupts::rdtsc();
 
-        // With a GPU driver module serving copies a full blit costs the CPU nothing.
-        // Otherwise (GOP) clip the MMIO blit to the tiles + cursor bbox.
-        let gpu_ok = if crate::gpu::supports_blit() {
-            try_gpu_blit(fb, pitch, screen_w, screen_h)
-        } else {
-            false
+        // One copy of the bounding box on the GPU when a module serves
+        // copies, else the rects and the cursor box on the CPU.
+        let (cw, ch) = cursor::cursor_size();
+        let (cx, cy) = cursor::atomic_pos();
+        let mut bbox = painted.iter().fold(crate::shade::scene::Rect::new(0, 0, 0, 0), |a, r| a.union(r));
+        bbox = bbox.union(&crate::shade::scene::Rect::new(cx.max(0) as u32, cy.max(0) as u32, cw, ch));
+        if had_old {
+            bbox = bbox.union(&crate::shade::scene::Rect::new(old.0.max(0) as u32, old.1.max(0) as u32, cw, ch));
+        }
+        bbox = bbox.intersect(&crate::shade::scene::Rect::new(0, 0, info.width, info.height));
+        let gpu_ok = !bbox.is_empty() && crate::gpu::supports_blit() && {
+            let src = fb.front_ggtt();
+            src != 0 && crate::gpu::gpu_blit_rect(src, info.pitch, crate::gpu::fb_ggtt_offset(), info.pitch,
+                bbox.x, bbox.y, bbox.w, bbox.h)
         };
         if !gpu_ok {
-            let mut damage = render::DamageTracker::new(screen_w, screen_h);
-            for i in 0..n {
-                let (x, y, w, h) = surf_rects[i];
-                damage.mark(x, y, w, h);
+            for r in &painted {
+                framebuffer::blit_rect(fb, r.x, r.y, r.w, r.h);
             }
-            // Cursor bbox (old ∪ new) so a move during this frame ghosts not.
-            let (cw, ch) = cursor::cursor_size();
-            let (cx, cy) = cursor::atomic_pos();
-            damage.mark(cx.max(0) as u32, cy.max(0) as u32, cw, ch);
-            if had_old {
-                damage.mark(old.0.max(0) as u32, old.1.max(0) as u32, cw, ch);
-            }
-            damage.flush(fb);
+            blit_cursor_bbox(fb, old, had_old);
         }
-        record_surface_render(t0, t_bg, t_comp, t_cursor);
+        record_surface_render(t0, t0, t_comp, t_cursor);
     });
 }
 

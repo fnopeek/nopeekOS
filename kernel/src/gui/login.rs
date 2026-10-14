@@ -267,9 +267,7 @@ pub fn run() {
         font::draw_str(shadow, info, &res_str, rx, ry,
             Theme::FG_SECONDARY, None, 1);
         // Full blit
-        let mut damage = render::DamageTracker::new(info.width, info.height);
-        damage.mark_all();
-        damage.flush(fb);
+        crate::framebuffer::blit_rect(fb, 0, 0, info.width, info.height);
     });
 
     // Input loop
@@ -377,9 +375,7 @@ pub fn run() {
                                     draw_status(shadow, info, &layout,
                                         "Too many attempts. System halted.",
                                         Theme::ACCENT_RED);
-                                    let mut damage = render::DamageTracker::new(info.width, info.height);
-                                    damage.mark_all();
-                                    damage.flush(fb);
+                                    crate::framebuffer::blit_rect(fb, 0, 0, info.width, info.height);
                                 });
                                 loop { unsafe { core::arch::asm!("cli; hlt"); } }
                             }

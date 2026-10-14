@@ -1,89 +1,13 @@
-//! Rendering primitives and damage tracking for the GUI layer.
-//!
-//! All drawing targets the shadow buffer. DamageTracker records dirty regions
-//! and flushes them to MMIO via blit_rect.
+//! Rendering primitives for the GUI layer. All drawing targets the shadow
+//! buffer.
 //!
 //! Rounded-rect AA is signed-distance-field based (`arc_coverage_sdf`):
 //! one analytic distance per pixel + smoothstep over a fixed ~1.18 px
 //! band. No supersampling. Same approach as Hyprland's shaders, ported
 //! to integer Q24.8 fixed-point.
 
-use crate::framebuffer::{FbConsole, FbInfo};
+use crate::framebuffer::FbInfo;
 use crate::shade::scene::Rect;
-
-/// A rectangular dirty region (pixel coordinates).
-#[derive(Clone, Copy)]
-pub struct DirtyRect {
-    pub x: u32,
-    pub y: u32,
-    pub w: u32,
-    pub h: u32,
-}
-
-/// Tracks dirty regions, merges on overflow, flushes to MMIO.
-pub struct DamageTracker {
-    rects: [Option<DirtyRect>; 16],
-    count: usize,
-    screen_w: u32,
-    screen_h: u32,
-}
-
-impl DamageTracker {
-    pub fn new(w: u32, h: u32) -> Self {
-        Self {
-            rects: [None; 16],
-            count: 0,
-            screen_w: w,
-            screen_h: h,
-        }
-    }
-
-    pub fn mark(&mut self, x: u32, y: u32, w: u32, h: u32) {
-        if self.count >= 16 {
-            self.merge_all();
-        }
-        self.rects[self.count] = Some(DirtyRect { x, y, w, h });
-        self.count += 1;
-    }
-
-    pub fn mark_all(&mut self) {
-        self.count = 0;
-        self.rects[0] = Some(DirtyRect { x: 0, y: 0, w: self.screen_w, h: self.screen_h });
-        self.count = 1;
-    }
-
-    pub fn flush(&mut self, console: &FbConsole) {
-        for i in 0..self.count {
-            if let Some(r) = self.rects[i] {
-                crate::framebuffer::blit_rect(console, r.x, r.y, r.w, r.h);
-            }
-        }
-        self.count = 0;
-        for r in self.rects.iter_mut() { *r = None; }
-    }
-
-    fn merge_all(&mut self) {
-        let mut min_x = self.screen_w;
-        let mut min_y = self.screen_h;
-        let mut max_x = 0u32;
-        let mut max_y = 0u32;
-        for i in 0..self.count {
-            if let Some(r) = self.rects[i] {
-                min_x = min_x.min(r.x);
-                min_y = min_y.min(r.y);
-                max_x = max_x.max(r.x + r.w);
-                max_y = max_y.max(r.y + r.h);
-            }
-        }
-        for r in self.rects.iter_mut() { *r = None; }
-        self.count = 1;
-        self.rects[0] = Some(DirtyRect {
-            x: min_x, y: min_y,
-            w: max_x.saturating_sub(min_x),
-            h: max_y.saturating_sub(min_y),
-        });
-    }
-}
 
 /// Write a single pixel to the shadow buffer.
 pub fn put_pixel(shadow: *mut u8, info: &FbInfo, x: u32, y: u32, color: u32) {
