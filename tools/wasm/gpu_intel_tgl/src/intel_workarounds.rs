@@ -598,3 +598,42 @@ pub fn intel_engine_apply_whitelist(i915: &mut drm_i915_private, _gt: &intel_gt,
         i += 1;
     }
 }
+
+/// `intel_engine_emit_ctx_wa`: the context workarounds as one
+/// MI_LOAD_REGISTER_IMM between two barrier flushes; a register that is
+/// neither masked nor fully overwritten is read for its other bits. The
+/// MESH_CONTROL step (Wa_14019789679) is DG2/MTL only.
+pub fn intel_engine_emit_ctx_wa(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize) -> Result<(), i32> {
+    let e = gt.requests[rq].engine as usize;
+    let Some(engine) = gt.engine[e] else { return Ok(()) };
+    let wal = engine.ctx_wa_list;
+    if wal.count == 0 {
+        return Ok(());
+    }
+
+    crate::gen8_engine_cs::emit_flush(i915, gt, rq, EMIT_BARRIER)?;
+
+    let fw = wal_get_fw_for_rmw(&i915.uncore, &wal);
+    i915.uncore.intel_uncore_forcewake_get__locked(fw);
+    let mut cs = crate::gen8_engine_cs::Cs::new();
+    cs.push(MI_LOAD_REGISTER_IMM(wal.count as u32));
+    for wa in &wal.list[..wal.count] {
+        let val = if wa.masked_reg || (wa.clr | wa.set) == u32::MAX {
+            wa.set
+        } else {
+            let cur = if wa.is_mcr {
+                intel_gt_mcr_read_any_fw(&i915.uncore, gt, wa.reg)
+            } else {
+                i915.uncore.intel_uncore_read_fw(wa.reg)
+            };
+            (cur & !wa.clr) | wa.set
+        };
+        cs.push(wa.reg);
+        cs.push(val);
+    }
+    cs.push(MI_NOOP);
+    i915.uncore.intel_uncore_forcewake_put__locked(fw);
+    crate::i915_request::intel_ring_emit(i915, gt, rq, &cs)?;
+
+    crate::gen8_engine_cs::emit_flush(i915, gt, rq, EMIT_BARRIER)
+}

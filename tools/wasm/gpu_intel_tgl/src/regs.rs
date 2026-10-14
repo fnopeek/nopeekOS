@@ -1796,3 +1796,192 @@ pub const RING_FORCE_TO_NONPRIV_ACCESS_RD: u32 = 0x10000000; // gt/intel_engine_
 pub const RING_FORCE_TO_NONPRIV_RANGE_4: u32 = 0x1; // gt/intel_engine_regs.h:222
 pub const PS_INVOCATION_COUNT: u32 = 0x2348; // gt/intel_gt_regs.h:268
 pub const GEN7_COMMON_SLICE_CHICKEN1: u32 = 0x7010; // gt/intel_gt_regs.h:457
+
+// engines (gt/intel_engine_cs.c, intel_execlists_submission.c, intel_lrc.c, gen8_engine_cs.c, gen8_ppgtt.c, intel_ring.c, intel_timeline.c, i915_request.c)
+pub const CACHELINE_BYTES: u32 = 0x40; // display/intel_dsb.c:24
+pub const EMIT_INVALIDATE: u64 = 0x1; // gt/intel_engine_types.h:534
+pub const EMIT_FLUSH: u64 = 0x2; // gt/intel_engine_types.h:535
+pub const EMIT_BARRIER: u64 = 0x3; // gt/intel_engine_types.h:536
+pub const I915_ENGINE_HAS_PREEMPTION: u64 = 0x4; // gt/intel_engine_types.h:584
+pub const I915_ENGINE_HAS_SEMAPHORES: u64 = 0x8; // gt/intel_engine_types.h:585
+pub const I915_ENGINE_HAS_TIMESLICES: u64 = 0x10; // gt/intel_engine_types.h:586
+pub const I915_ENGINE_HAS_RELATIVE_MMIO: u64 = 0x40; // gt/intel_engine_types.h:588
+pub const I915_GEM_HWS_PREEMPT: u32 = 0x32; // gt/intel_engine.h:188
+pub const I915_GEM_HWS_PREEMPT_ADDR: u64 = 0xc8; // gt/intel_engine.h:189
+pub const I915_GEM_HWS_SEQNO_ADDR: u64 = 0x100; // gt/intel_engine.h:191
+pub const I915_HWS_CSB_BUF0_INDEX: u32 = 0x10; // gt/intel_engine.h:201
+pub const ICL_HWS_CSB_WRITE_INDEX: u32 = 0x2f; // gt/intel_engine.h:203
+pub const I915_PRIORITY_NORMAL: u32 = 0x0; // i915_priolist_types.h:17
+pub const I915_PRIORITY_BARRIER: u32 = 0x7ffffffe; // i915_priolist_types.h:39
+pub const EXECLISTS_REQUEST_SIZE: u32 = 0x40; // gt/intel_execlists_submission.c:172
+pub const GEN12_CSB_SW_CTX_ID_MASK: u64 = 0x3ff8000; // gt/intel_execlists_submission.c:160
+pub const GEN12_IDLE_CTX_ID: u32 = 0x7ff; // gt/intel_execlists_submission.c:161
+pub const GEN12_CTX_STATUS_SWITCHED_TO_NEW_QUEUE: u32 = 0x1; // gt/intel_execlists_submission.c:158
+pub const GEN11_CSB_ENTRIES: u32 = 0xc; // gt/intel_lrc_reg.h:69
+pub const GEN8_EXECLISTS_STATUS_BUF: u32 = 0x370; // gt/intel_lrc_reg.h:53
+pub const GEN11_EXECLISTS_STATUS_BUF2: u32 = 0x3c0; // gt/intel_lrc_reg.h:54
+pub const GEN12_MAX_CONTEXT_HW_ID: u32 = 0x7ff; // gt/intel_lrc_reg.h:77
+pub const EL_CTRL_LOAD: u32 = 0x1; // gt/intel_engine_regs.h:235
+pub const I915_ERROR_INSTRUCTION: u32 = 0x1; // i915_reg.h:396
+pub const GEN11_GFX_DISABLE_LEGACY_MODE: u32 = 0x8; // gt/intel_engine_regs.h:206
+pub const GEN12_GFX_PREFETCH_DISABLE: u32 = 0x400; // gt/intel_engine_regs.h:199
+pub const STOP_RING: u32 = 0x100; // gt/intel_engine_regs.h:78
+pub const MODE_IDLE: u32 = 0x200; // gt/intel_engine_regs.h:77
+pub const HEAD_ADDR: u32 = 0x1ffffc; // gt/intel_engine_regs.h:17
+pub const TAIL_ADDR: u32 = 0x1ffff8; // gt/intel_engine_regs.h:13
+pub const RING_VALID: u32 = 0x1; // gt/intel_engine_regs.h:28
+/// gt/intel_engine_regs.h:21
+pub const fn RING_CTL_SIZE(size: u32) -> u32 { ((size) - ((1) << 12)) }
+/// gt/intel_engine_regs.h:14
+pub const fn RING_HEAD(base: u32) -> u32 { ((base) + 0x34) }
+/// gt/intel_engine_regs.h:12
+pub const fn RING_TAIL(base: u32) -> u32 { ((base) + 0x30) }
+/// gt/intel_engine_regs.h:73
+pub const fn RING_MI_MODE(base: u32) -> u32 { ((base) + 0x9c) }
+/// gt/intel_engine_regs.h:192
+pub const fn RING_MODE_GEN7(base: u32) -> u32 { ((base) + 0x29c) }
+/// gt/intel_engine_regs.h:66
+pub const fn RING_HWS_PGA(base: u32) -> u32 { ((base) + 0x80) }
+/// gt/intel_engine_regs.h:81
+pub const fn RING_EIR(base: u32) -> u32 { ((base) + 0xb0) }
+/// gt/intel_engine_regs.h:82
+pub const fn RING_EMR(base: u32) -> u32 { ((base) + 0xb4) }
+/// gt/intel_engine_regs.h:83
+pub const fn RING_ESR(base: u32) -> u32 { ((base) + 0xb8) }
+/// gt/intel_engine_regs.h:209
+pub const fn RING_CONTEXT_STATUS_PTR(base: u32) -> u32 { ((base) + 0x3a0) }
+/// gt/intel_engine_regs.h:232
+pub const fn RING_EXECLIST_SQ_CONTENTS(base: u32) -> u32 { ((base) + 0x510) }
+/// gt/intel_engine_regs.h:234
+pub const fn RING_EXECLIST_CONTROL(base: u32) -> u32 { ((base) + 0x550) }
+/// gt/intel_engine_regs.h:180
+pub const fn RING_EXECLIST_STATUS_HI(base: u32) -> u32 { ((base) + 0x234 + 4) }
+/// gt/intel_engine_regs.h:67
+pub const fn RING_CMD_BUF_CCTL(base: u32) -> u32 { ((base) + 0x84) }
+/// gt/intel_engine_regs.h:238
+pub const fn GEN8_RING_CS_GPR(base: u32, n: u32) -> u32 { ((base) + 0x600 + (n) * 8) }
+pub const MSG_IDLE_CS: u32 = 0x8000; // gt/intel_gt_regs.h:888
+pub const MSG_IDLE_BCS: u32 = 0x800c; // gt/intel_gt_regs.h:891
+pub const MSG_IDLE_VCS0: u32 = 0x8004; // gt/intel_gt_regs.h:889
+pub const MSG_IDLE_VCS1: u32 = 0x8008; // gt/intel_gt_regs.h:890
+pub const MSG_IDLE_VCS2: u32 = 0x80c0; // gt/intel_gt_regs.h:893
+pub const MSG_IDLE_VCS3: u32 = 0x80c4; // gt/intel_gt_regs.h:894
+pub const MSG_IDLE_VECS0: u32 = 0x8010; // gt/intel_gt_regs.h:892
+pub const MSG_IDLE_VECS1: u32 = 0x80d8; // gt/intel_gt_regs.h:899
+pub const MSG_IDLE_FW_MASK: u32 = 0x3e00; // gt/intel_gt_regs.h:902
+pub const MSG_IDLE_FW_SHIFT: u32 = 0x9; // gt/intel_gt_regs.h:903
+pub const GEN9_PWRGT_DOMAIN_STATUS: u32 = 0xa2a0; // gt/intel_gt_regs.h:914
+pub const GEN12_GFX_TLB_INV_CR: u32 = 0xced8; // gt/intel_gt_regs.h:1045
+pub const GEN12_VD_TLB_INV_CR: u32 = 0xcedc; // gt/intel_gt_regs.h:1047
+pub const GEN12_VE_TLB_INV_CR: u32 = 0xcee0; // gt/intel_gt_regs.h:1049
+pub const GEN12_BLT_TLB_INV_CR: u32 = 0xcee4; // gt/intel_gt_regs.h:1051
+pub const GEN12_COMPCTX_TLB_INV_CR: u32 = 0xcf04; // gt/intel_gt_regs.h:1053
+pub const GEN11_RPCS_S_CNT_SHIFT: u32 = 0xc; // gt/intel_engine_regs.h:93
+pub const GEN11_RPCS_S_CNT_MASK: u32 = 0x3f000; // gt/intel_engine_regs.h:94
+pub const GEN8_RPCS_ENABLE: i32 = -2147483648; // gt/intel_engine_regs.h:89
+pub const GEN8_RPCS_S_CNT_ENABLE: u32 = 0x40000; // gt/intel_engine_regs.h:90
+pub const GEN12_CCS_AUX_INV: u32 = 0x4208; // gt/intel_gt_regs.h:341
+pub const GEN12_BCS0_AUX_INV: u32 = 0x4248; // gt/intel_gt_regs.h:344
+pub const GEN12_VD0_AUX_INV: u32 = 0x4218; // gt/intel_gt_regs.h:342
+pub const GEN12_VD2_AUX_INV: u32 = 0x4298; // gt/intel_gt_regs.h:354
+pub const GEN12_VE0_AUX_INV: u32 = 0x4238; // gt/intel_gt_regs.h:343
+pub const GEN12_CCS0_AUX_INV: u32 = 0x42c8; // gt/intel_gt_regs.h:355
+pub const AUX_INV: u32 = 0x1; // gt/intel_gt_regs.h:356
+pub const GEN12_CS_DEBUG_MODE2: u32 = 0x20d8; // gt/intel_gt_regs.h:164
+pub const INSTRUCTION_STATE_CACHE_INVALIDATE: u32 = 0x40; // gt/intel_gt_regs.h:165
+pub const TGL_HAS_FLAT_CCS: u32 = 0x0; // tgl_info.has_flat_ccs in i915_pci.c
+pub const TGL_HAS_64K_PAGES: u32 = 0x0; // tgl_info.has_64k_pages in i915_pci.c
+pub const LRC_STATE_OFFSET: u64 = 0x1000; // gt/intel_lrc.h:27
+pub const LRC_PPHWSP_SCRATCH_ADDR: u64 = 0xd0; // gt/intel_lrc.h:31
+pub const DG2_PREDICATE_RESULT_WA: u64 = 0xff8; // gt/intel_lrc.h:140
+pub const DG2_PREDICATE_RESULT_BB: u32 = 0x800; // gt/intel_lrc.h:141
+pub const GEN11_ENGINE_CLASS_SHIFT: u32 = 0x3d; // gt/intel_lrc.h:105
+pub const GEN11_ENGINE_INSTANCE_SHIFT: u32 = 0x30; // gt/intel_lrc.h:107
+pub const GEN11_SW_CTX_ID_SHIFT: u32 = 0x25; // gt/intel_lrc.h:103
+pub const GEN12_CTX_PRIORITY_HIGH: u64 = 0x400; // gt/intel_lrc.h:98
+pub const GEN12_CTX_PRIORITY_NORMAL: u64 = 0x200; // gt/intel_lrc.h:99
+pub const GEN12_CTX_PRIORITY_LOW: u64 = 0x0; // gt/intel_lrc.h:100
+pub const GEN8_CTX_VALID: u32 = 0x1; // gt/intel_lrc.h:91
+pub const GEN8_CTX_PRIVILEGE: u32 = 0x100; // gt/intel_lrc.h:95
+pub const GEN8_CTX_ADDRESSING_MODE_SHIFT: u32 = 0x3; // gt/intel_lrc.h:96
+pub const INTEL_LEGACY_64B_CONTEXT: u32 = 0x3; // gt/intel_lrc.h:80
+pub const CTX_CONTEXT_CONTROL: u32 = 0x3; // i915_perf.c:2636
+pub const CTX_RING_HEAD: u32 = 0x5; // gt/intel_lrc_reg.h:15
+pub const CTX_RING_TAIL: u32 = 0x7; // gt/intel_lrc_reg.h:16
+pub const CTX_RING_START: u32 = 0x9; // gt/intel_lrc_reg.h:17
+pub const CTX_RING_CTL: u32 = 0xb; // gt/intel_lrc_reg.h:18
+pub const CTX_TIMESTAMP: u32 = 0x23; // gt/intel_lrc_reg.h:20
+pub const CTX_PDP0_UDW: u32 = 0x31; // gt/intel_lrc_reg.h:27
+pub const CTX_PDP0_LDW: u32 = 0x33; // gt/intel_lrc_reg.h:28
+pub const CTX_R_PWR_CLK_STATE: u32 = 0x43; // i915_perf.c:2766
+pub const CTX_CTRL_INHIBIT_SYN_CTX_SWITCH: u32 = 0x8; // gt/intel_engine_regs.h:185
+pub const CTX_CTRL_ENGINE_CTX_RESTORE_INHIBIT: u32 = 0x1; // gt/intel_engine_regs.h:182
+pub const CTX_DESC_FORCE_RESTORE: u64 = 0x4; // gt/intel_lrc_reg.h:11
+pub const GEN12_CTX_RCS_INDIRECT_CTX_OFFSET_DEFAULT: u32 = 0xd; // gt/intel_lrc_reg.h:51
+pub const PER_CTX_BB_FORCE: u64 = 0x4; // gt/intel_engine_regs.h:121
+pub const PER_CTX_BB_VALID: u64 = 0x1; // gt/intel_engine_regs.h:122
+pub const GEN8_PTE_SHIFT: u32 = 0xc; // gt/gen8_ppgtt.c:138
+pub const GEN8_PDES: u64 = 0x200; // gt/gen8_ppgtt.c:139
+pub const GEN8_PAGE_RW: u64 = 0x2; // gt/intel_gtt.h:153
+pub const PPAT_UNCACHED: u64 = 0x18; // gt/intel_gtt.h:135
+pub const PPAT_CACHED_PDE: u32 = 0x0; // gt/intel_gtt.h:136
+pub const PTE_READ_ONLY: u64 = 0x1; // gt/intel_gtt.h:316
+pub const GEN12_PPGTT_PTE_LM: u64 = 0x800; // gt/intel_gtt.h:92
+pub const GEN12_PPGTT_PTE_PAT0: u64 = 0x8; // gt/intel_gtt.h:95
+pub const GEN12_PPGTT_PTE_PAT1: u64 = 0x10; // gt/intel_gtt.h:94
+pub const GEN12_PPGTT_PTE_PAT2: u64 = 0x80; // gt/intel_gtt.h:93
+pub const MTL_PPGTT_PTE_PAT3: u64 = 0x4000000000000000; // gt/intel_gtt.h:91
+pub const I915_GTT_PAGE_SIZE_64K: u64 = 0x10000; // i915_pci.c:473
+pub const I915_GEM_STOLEN_BIAS: u32 = 0x20000; // gem/i915_gem_stolen.h:39
+pub const MI_NOOP: u32 = 0x0; // gt/intel_gpu_commands.h:42
+pub const MI_BATCH_BUFFER_END: u32 = 0x5000000; // gt/intel_gpu_commands.h:62
+pub const MI_USER_INTERRUPT: u32 = 0x1000000; // gt/intel_gpu_commands.h:45
+pub const MI_ARB_ON_OFF: u32 = 0x4000000; // gt/intel_gpu_commands.h:59
+pub const MI_ARB_ENABLE: u32 = 0x1; // gt/intel_gpu_commands.h:60
+pub const MI_ARB_CHECK: u32 = 0x2800000; // gt/intel_gpu_commands.h:384
+/// gt/intel_gpu_commands.h:155
+pub const fn MI_LOAD_REGISTER_IMM(x: u32) -> u32 { (((0x0) << 29) | (0x22) << 23 | (2*(x)-1)) }
+pub const MI_LRI_FORCE_POSTED: u32 = 0x1000; // gt/intel_gpu_commands.h:159
+pub const MI_LRI_LRM_CS_MMIO: u32 = 0x80000; // gt/intel_gpu_commands.h:157
+pub const MI_LRI_MMIO_REMAP_EN: u32 = 0x20000; // gt/intel_gpu_commands.h:158
+pub const MI_LOAD_REGISTER_MEM_GEN8: u32 = 0x14800002; // gt/intel_gpu_commands.h:177
+pub const MI_LOAD_REGISTER_REG: u32 = 0x15000001; // gt/intel_gpu_commands.h:178
+pub const MI_LRR_SOURCE_CS_MMIO: u32 = 0x40000; // gt/intel_gpu_commands.h:179
+pub const MI_SRM_LRM_GLOBAL_GTT: u32 = 0x400000; // gt/intel_gpu_commands.h:163
+pub const MI_STORE_DWORD_IMM_GEN4: u32 = 0x10000002; // gt/intel_gpu_commands.h:136
+pub const MI_USE_GGTT: u32 = 0x400000; // gt/intel_gpu_commands.h:139
+pub const MI_SET_PREDICATE: u32 = 0x800000; // gt/intel_gpu_commands.h:43
+pub const MI_SET_PREDICATE_DISABLE: u32 = 0x0; // gt/intel_gpu_commands.h:44
+pub const MI_SEMAPHORE_WAIT_TOKEN: u32 = 0xe000003; // gt/intel_gpu_commands.h:123
+pub const MI_SEMAPHORE_GLOBAL_GTT: u32 = 0x400000; // gt/intel_gpu_commands.h:93
+pub const MI_SEMAPHORE_POLL: u32 = 0x8000; // gt/intel_gpu_commands.h:125
+pub const MI_SEMAPHORE_REGISTER_POLL: u32 = 0x10000; // gt/intel_gpu_commands.h:124
+pub const MI_SEMAPHORE_SAD_EQ_SDD: u32 = 0x4000; // gt/intel_gpu_commands.h:130
+pub const MI_FLUSH_DW: u32 = 0x13000001; // gt/intel_gpu_commands.h:164
+pub const MI_FLUSH_DW_STORE_INDEX: u32 = 0x200000; // gt/intel_gpu_commands.h:166
+pub const MI_FLUSH_DW_OP_STOREDW: u32 = 0x4000; // gt/intel_gpu_commands.h:169
+pub const MI_FLUSH_DW_USE_GTT: u32 = 0x4; // gt/intel_gpu_commands.h:174
+pub const MI_FLUSH_DW_CCS: u32 = 0x10000; // gt/intel_gpu_commands.h:168
+pub const MI_INVALIDATE_TLB: u32 = 0x40000; // gt/intel_gpu_commands.h:167
+pub const MI_INVALIDATE_BSD: u32 = 0x80; // gt/intel_gpu_commands.h:173
+/// gt/intel_gpu_commands.h:287
+pub const fn GFX_OP_PIPE_CONTROL(len: u32) -> u32 { ((0x3<<29)|(0x3<<27)|(0x2<<24)|((len)-2)) }
+pub const PIPE_CONTROL0_HDC_PIPELINE_FLUSH: u32 = 0x200; // gt/intel_gpu_commands.h:310
+pub const PIPE_CONTROL_CS_STALL: u32 = 0x100000; // gt/intel_gpu_commands.h:295
+pub const PIPE_CONTROL_TLB_INVALIDATE: u32 = 0x40000; // gt/intel_gpu_commands.h:297
+pub const PIPE_CONTROL_TILE_CACHE_FLUSH: u32 = 0x10000000; // gt/intel_gpu_commands.h:289
+pub const PIPE_CONTROL_RENDER_TARGET_CACHE_FLUSH: u32 = 0x1000; // gt/intel_gpu_commands.h:306
+pub const PIPE_CONTROL_DEPTH_CACHE_FLUSH: u32 = 0x1; // gt/intel_gpu_commands.h:318
+pub const PIPE_CONTROL_DEPTH_STALL: u32 = 0x2000; // gt/intel_gpu_commands.h:303
+pub const PIPE_CONTROL_DC_FLUSH_ENABLE: u32 = 0x20; // gt/intel_gpu_commands.h:313
+pub const PIPE_CONTROL_FLUSH_ENABLE: u32 = 0x80; // gt/intel_gpu_commands.h:312
+pub const PIPE_CONTROL_FLUSH_L3: u32 = 0x8000000; // gt/intel_gpu_commands.h:290
+pub const PIPE_CONTROL_STORE_DATA_INDEX: u32 = 0x200000; // gt/intel_gpu_commands.h:294
+pub const PIPE_CONTROL_QW_WRITE: u32 = 0x4000; // gt/intel_gpu_commands.h:301
+pub const PIPE_CONTROL_GLOBAL_GTT_IVB: u32 = 0x1000000; // gt/intel_gpu_commands.h:292
+pub const PIPE_CONTROL_COMMAND_CACHE_INVALIDATE: u32 = 0x20000000; // gt/intel_gpu_commands.h:288
+pub const PIPE_CONTROL_INSTRUCTION_CACHE_INVALIDATE: u32 = 0x800; // gt/intel_gpu_commands.h:307
+pub const PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE: u32 = 0x400; // gt/intel_gpu_commands.h:308
+pub const PIPE_CONTROL_VF_CACHE_INVALIDATE: u32 = 0x10; // gt/intel_gpu_commands.h:314
+pub const PIPE_CONTROL_CONST_CACHE_INVALIDATE: u32 = 0x8; // gt/intel_gpu_commands.h:315
+pub const PIPE_CONTROL_STATE_CACHE_INVALIDATE: u32 = 0x4; // gt/intel_gpu_commands.h:316

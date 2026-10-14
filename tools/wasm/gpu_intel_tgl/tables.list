@@ -61,3 +61,6 @@ tgl_allowed_dbufs: dbuf_slice_conf_entry { active_pipes, join_mbus, m0=dbuf_mask
 icl_l3bank_steering_table: intel_mmio_range { start, end }
 @ gt/intel_mocs.c
 tgl_mocs_table: drm_i915_mocs_entry { control_value, l3cc_value, used }
+@ gt/intel_lrc.c
+gen12_rcs_offsets: u8
+gen12_xcs_offsets: u8

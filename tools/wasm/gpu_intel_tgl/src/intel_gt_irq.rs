@@ -17,8 +17,8 @@ pub struct intel_gt_irq_state {
     /// class, taken when the interrupts are installed.
     pub engine_present: [u16; NUM_CLASSES],
     /// `intel_engine_cs_irq(engine, iir)`: the engine interrupts that came
-    /// in, ORed per class and instance. The engine side (breadcrumbs,
-    /// execlists tasklet) is not ported yet; it consumes and clears these.
+    /// in, ORed per class and instance, until
+    /// `intel_gt_requests::intel_engines_cs_irq` hands them to the engines.
     pub engine_iir: [[u16; NUM_INSTANCES]; NUM_CLASSES],
     /// `gen11_rps_irq_handler`: PM interrupts that came in for RPS, which
     /// is not ported yet.

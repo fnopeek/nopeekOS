@@ -1,7 +1,8 @@
 //! drm/drm_mm.c (Linux 6.18.55): the range allocator behind the GGTT
 //! (`vm->mm`) and stolen memory (`i915->mm.stolen`), as far as fixed
 //! reservations need it: `drm_mm_init`, `drm_mm_reserve_node`,
-//! `drm_mm_insert_node_in_range` (DRM_MM_INSERT_LOW, no alignment),
+//! `drm_mm_insert_node_in_range` (DRM_MM_INSERT_LOW without alignment,
+//! DRM_MM_INSERT_BEST and DRM_MM_INSERT_HIGH with it),
 //! `drm_mm_remove_node` and the holes walk of `drm_mm_for_each_hole`.
 //!
 //! The address-space bookkeeping belongs to the gpudev side
@@ -12,7 +13,7 @@
 const ENOSPC: i32 = 28;
 
 /// Nodes one range can hold before the gpudev side takes over.
-const MAX_NODES: usize = 32;
+const MAX_NODES: usize = 64;
 
 /// `struct drm_mm_node`, the part a reservation sets.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -89,6 +90,80 @@ impl drm_mm {
             }
         }
         let start = found.ok_or(-ENOSPC)?;
+        let node = drm_mm_node { start, size, color };
+        self.drm_mm_reserve_node(node)?;
+        Ok(node)
+    }
+
+    /// `drm_mm_insert_node_in_range` with DRM_MM_INSERT_HIGHEST: the top of
+    /// the highest hole in [range_start, range_end), aligned down to
+    /// `alignment`; only that one hole is tried (DRM_MM_INSERT_ONCE).
+    pub fn drm_mm_insert_node_in_range_highest(&mut self, size: u64, alignment: u64, color: u64,
+                                               range_start: u64, range_end: u64) -> Result<drm_mm_node, i32> {
+        if size == 0 {
+            return Err(-ENOSPC);
+        }
+        let mut found = None;
+        let holes: [(u64, u64); MAX_NODES + 1] = {
+            let mut h = [(0u64, 0u64); MAX_NODES + 1];
+            for (i, (s, e, _)) in self.holes().enumerate() {
+                h[i] = (s, e);
+            }
+            h
+        };
+        for &(s, e) in holes.iter().rev() {
+            if e <= s {
+                continue;
+            }
+            let lo = s.max(range_start);
+            let hi = e.min(range_end);
+            if hi <= lo {
+                continue;
+            }
+            if hi - lo >= size {
+                let mut start = hi - size;
+                if alignment > 1 {
+                    start -= start % alignment;
+                }
+                if start >= lo {
+                    found = Some(start);
+                }
+            }
+            break;
+        }
+        let start = found.ok_or(-ENOSPC)?;
+        let node = drm_mm_node { start, size, color };
+        self.drm_mm_reserve_node(node)?;
+        Ok(node)
+    }
+
+    /// `drm_mm_insert_node_in_range` with DRM_MM_INSERT_BEST: the smallest
+    /// hole that fits, the node at its aligned start.
+    pub fn drm_mm_insert_node_in_range_best(&mut self, size: u64, alignment: u64, color: u64,
+                                            range_start: u64, range_end: u64) -> Result<drm_mm_node, i32> {
+        if size == 0 {
+            return Err(-ENOSPC);
+        }
+        let mut best: Option<(u64, u64)> = None;
+        for (s, e, _) in self.holes() {
+            let lo = s.max(range_start);
+            let hi = e.min(range_end);
+            if hi <= lo {
+                continue;
+            }
+            let mut start = lo;
+            if alignment > 1 && start % alignment != 0 {
+                start += alignment - start % alignment;
+            }
+            if start >= hi || hi - start < size {
+                continue;
+            }
+            let hole_size = e - s;
+            if best.is_none_or(|(_, bs)| hole_size < bs) {
+                best = Some((start, hole_size));
+            }
+        }
+        let (start, _) = best.ok_or(-ENOSPC)?;
         let node = drm_mm_node { start, size, color };
         self.drm_mm_reserve_node(node)?;
         Ok(node)

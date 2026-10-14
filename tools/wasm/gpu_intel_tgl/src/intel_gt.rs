@@ -57,6 +57,32 @@ pub struct intel_engine_cs {
     pub timeslice_duration_ms: u64,
     pub context_size: u32,
     pub uabi_capabilities: u32,
+    pub tlb_inv: crate::intel_engine_cs::intel_engine_tlb_inv,
+    pub sseu: crate::intel_context::intel_sseu,
+    /// `engine->status_page.vma`.
+    pub status_page: Option<crate::i915_vma::i915_vma>,
+    /// `engine->kernel_context`, an index into `gt.contexts`.
+    pub kernel_context: Option<u16>,
+    pub wa_list: crate::intel_workarounds::i915_wa_list,
+    pub whitelist: crate::intel_workarounds::i915_wa_list,
+    pub ctx_wa_list: crate::intel_workarounds::i915_wa_list,
+    pub execlists: crate::intel_execlists_submission::intel_engine_execlists,
+    pub sched: crate::intel_execlists_submission::i915_sched_engine,
+    /// `engine->serial` and `engine->wakeref_serial`.
+    pub serial: u32,
+    pub wakeref_serial: u32,
+    /// `engine->wakeref`: its count, and whether it holds the GT awake.
+    pub wakeref_count: u32,
+    pub wakeref_gt: bool,
+    /// `engine->fw_domain`, `engine->fw_active`.
+    pub fw_domain: u32,
+    pub fw_active: u32,
+    pub context_tag: u64,
+    pub irq_enable_mask: u32,
+    pub irq_keep_mask: u32,
+    pub emit_fini_breadcrumb_dw: u32,
+    /// `engine->default_state`: the recorded context image.
+    pub default_state: Option<crate::i915_vma::drm_i915_gem_object>,
 }
 
 /// `struct intel_mmio_range`, a steering table entry.
@@ -108,6 +134,13 @@ pub struct intel_gt {
     pub wedged_on_fini: bool,
     /// `intel_engines_init` has set up the engines' submission backends.
     pub engines_initialized: bool,
+    /// `gt->scratch`.
+    pub scratch: Option<crate::i915_vma::i915_vma>,
+    /// `gt->vm`: the kernel's PPGTT.
+    pub vm: Option<crate::gen8_ppgtt::i915_ppgtt>,
+    /// The contexts and requests the engine side has made.
+    pub contexts: [crate::intel_context::intel_context; crate::intel_context::MAX_CONTEXTS],
+    pub requests: [crate::i915_request::i915_request; crate::i915_request::MAX_REQUESTS],
 }
 
 impl intel_gt {
@@ -135,6 +168,10 @@ impl intel_gt {
             wedged_on_init: false,
             wedged_on_fini: false,
             engines_initialized: false,
+            scratch: None,
+            vm: None,
+            contexts: [Default::default(); crate::intel_context::MAX_CONTEXTS],
+            requests: [Default::default(); crate::i915_request::MAX_REQUESTS],
         }
     }
 }
@@ -616,46 +653,71 @@ pub fn intel_gt_has_unrecoverable_error(gt: &intel_gt) -> bool {
     gt.wedged_on_init || gt.wedged_on_fini
 }
 
-/// `reset_prepare`: per engine a FORCEWAKE_ALL grab (`reset_prepare_engine`);
-/// no engine is awake before the engines are set up. No GuC submission.
-fn reset_prepare(i915: &mut drm_i915_private, gt: &intel_gt) {
-    for _ in gt.engine.iter().flatten() {
+/// `reset_prepare`: per engine, an awake engine is held awake over the
+/// reset, FORCEWAKE_ALL is taken and the backend's `reset.prepare` runs
+/// (`reset_prepare_engine`). No GuC submission. Returns the awake mask.
+fn reset_prepare(i915: &mut drm_i915_private, gt: &mut intel_gt) -> u64 {
+    let mut awake = 0u64;
+    for e in 0..gt.engine.len() {
+        let Some(x) = gt.engine[e] else { continue };
+        // intel_engine_pm_get_if_awake
+        if x.wakeref_count != 0 {
+            if let Some(y) = gt.engine[e].as_mut() {
+                y.wakeref_count += 1;
+            }
+            awake |= x.mask;
+        }
         i915.uncore.intel_uncore_forcewake_get(FORCEWAKE_ALL);
+        if gt.engines_initialized {
+            crate::intel_execlists_submission::execlists_reset_prepare(i915, gt, e);
+        }
     }
-    if gt.engines_initialized {
-        linux::say("not ported yet: engine reset.prepare (execlists)");
-    }
+    awake
 }
 
-/// `reset_finish`.
-fn reset_finish(i915: &mut drm_i915_private, gt: &intel_gt) {
-    if gt.engines_initialized {
-        linux::say("not ported yet: engine reset.finish, breadcrumbs (execlists)");
-    }
-    for _ in gt.engine.iter().flatten() {
+/// `reset_finish`: `reset_finish_engine` per engine, then the awake
+/// engines let go.
+fn reset_finish(i915: &mut drm_i915_private, gt: &mut intel_gt, awake: u64) {
+    for e in 0..gt.engine.len() {
+        let Some(x) = gt.engine[e] else { continue };
+        if gt.engines_initialized {
+            crate::intel_execlists_submission::execlists_reset_finish(i915, gt, e);
+        }
         i915.uncore.intel_uncore_forcewake_put(FORCEWAKE_ALL);
+        if awake & x.mask != 0 {
+            crate::intel_engine_pm::intel_engine_pm_put(i915, gt, e);
+        }
     }
 }
 
 /// `__intel_gt_set_wedged`: stop submission, reset the GT (it does not
-/// clobber the display on TGL), mark wedged, cancel what was in flight.
+/// clobber the display on TGL), fail everything new and in flight.
 fn __intel_gt_set_wedged(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     if gt.wedged {
         return;
     }
 
-    reset_prepare(i915, gt);
+    let awake = reset_prepare(i915, gt);
 
     // Even if the GPU reset fails, it should still stop the engines.
     if !crate::intel_reset::intel_gt_gpu_reset_clobbers_display() {
         let _ = crate::intel_reset::intel_gt_reset_all_engines(i915, gt);
     }
 
-    // engine->submit_request = nop_submit_request, engine->reset.cancel:
-    // the request side, set up with the engines.
+    for x in gt.engine.iter_mut().flatten() {
+        x.sched.submit_nop = true;
+    }
     gt.wedged = true;
 
-    reset_finish(i915, gt);
+    if gt.engines_initialized {
+        for e in 0..gt.engine.len() {
+            if gt.engine[e].is_some() {
+                crate::intel_execlists_submission::execlists_reset_cancel(i915, gt, e);
+            }
+        }
+    }
+
+    reset_finish(i915, gt, awake);
 }
 
 /// `intel_gt_set_wedged`.
@@ -672,11 +734,11 @@ fn intel_gt_set_wedged_on_init(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     gt.wedged_on_init = true;
 }
 
-/// `intel_gt_set_wedged_on_fini`. The error-state capture is not kept, and
-/// retiring requests waits for the request side.
+/// `intel_gt_set_wedged_on_fini`. The error-state capture is not kept.
 fn intel_gt_set_wedged_on_fini(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     intel_gt_set_wedged(i915, gt);
     gt.wedged_on_fini = true;
+    let _ = crate::intel_gt_requests::intel_gt_wait_for_idle(i915, gt, 0);
 }
 
 // ── gt/intel_gt.c ────────────────────────────────────────────────
@@ -703,39 +765,174 @@ pub fn intel_gt_init_hw(i915: &mut drm_i915_private, gt: &mut intel_gt) -> Resul
     Ok(())
 }
 
-/// `intel_gt_init`, the hardware side. Scratch page, kernel address
-/// space, engines and the default context recording are set up with the
-/// engines; no uC and no hwconfig table on TGL (12.55+ / ADL-P);
-/// `__engines_verify_workarounds` only runs under DRM_I915_DEBUG_GEM;
-/// no migrate context (it needs flat CCS).
-pub fn intel_gt_init(i915: &mut drm_i915_private, gt: &mut intel_gt, _ggtt: &mut crate::intel_ggtt::i915_ggtt,
-                     _dsm: Option<&mut crate::intel_ggtt::i915_dsm>) -> Result<(), i32> {
+/// `intel_gt_init_scratch`: no local memory, so stolen (Wa_22018444074 is
+/// MTL's), else an internal page; pinned PIN_HIGH.
+fn intel_gt_init_scratch(gt: &mut intel_gt, ggtt: &mut crate::intel_ggtt::i915_ggtt,
+                         dsm: Option<&mut crate::intel_ggtt::i915_dsm>, size: u64) -> Result<(), i32> {
+    let obj = match crate::i915_vma::i915_gem_object_create_stolen(dsm, size) {
+        Ok(o) => o,
+        Err(_) => match crate::i915_vma::i915_gem_object_create_internal(size) {
+            Ok(o) => o,
+            Err(e) => {
+                linux::drm_err("Failed to allocate scratch page");
+                return Err(e);
+            }
+        },
+    };
+    let vma = crate::i915_vma::i915_ggtt_pin(ggtt, obj, crate::i915_vma::pin_flags { high: true, ..Default::default() })?;
+    Line::new().s("GT scratch: ").s(if obj.is_stolen() { "stolen " } else { "system " }).hex(obj.phys as u32)
+        .s(", GGTT ").hex(vma.ggtt_offset()).say();
+    gt.scratch = Some(vma);
+    Ok(())
+}
+
+/// `kernel_vm`: full PPGTT on TGL.
+fn kernel_vm(i915: &mut drm_i915_private, gt: &mut intel_gt) -> bool {
+    match crate::gen8_ppgtt::i915_ppgtt_create(i915) {
+        Ok(p) => {
+            Line::new().s("kernel PPGTT: 48-bit, top directory ").hex((p.pd_dma() >> 32) as u32).s("_")
+                .hex(p.pd_dma() as u32).s(", scratch page ").dec(p.scratch[0].size >> 10).s(" KB").say();
+            gt.vm = Some(p);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// `__engines_record_defaults`: one request per engine on a fresh context
+/// (restore inhibited, so it starts from the reset values), carrying the
+/// context workarounds — no null render state from GRAPHICS_VER 10 on —
+/// then the GT is idled, which switches every engine back to its kernel
+/// context and so saves each image. The saved image becomes the engine's
+/// default state; Linux copies it to shmem and frees the object, here the
+/// object itself is kept.
+fn __engines_record_defaults(i915: &mut drm_i915_private, gt: &mut intel_gt,
+                             ggtt: &mut crate::intel_ggtt::i915_ggtt) -> Result<(), i32> {
+    let mut requests = [None::<usize>; I915_NUM_ENGINES as usize];
+    let mut err = Ok(());
+
+    for e in 0..gt.engine.len() {
+        if gt.engine[e].is_none() {
+            continue;
+        }
+        let ce = match crate::intel_context::intel_context_create(gt, e as u32) {
+            Ok(c) => c,
+            Err(x) => {
+                err = Err(x);
+                break;
+            }
+        };
+        // intel_renderstate_init: no render state from GRAPHICS_VER 10;
+        // the context is pinned for the request.
+        if let Err(x) = crate::intel_context::intel_context_pin(i915, gt, ggtt, ce) {
+            gt.contexts[ce].used = false;
+            err = Err(x);
+            break;
+        }
+        let rq = match crate::i915_request::i915_request_create(i915, gt, ce) {
+            Ok(r) => r,
+            Err(x) => {
+                crate::intel_context::intel_context_unpin(gt, ce);
+                err = Err(x);
+                break;
+            }
+        };
+        let r = crate::intel_workarounds::intel_engine_emit_ctx_wa(i915, gt, rq);
+        // intel_renderstate_emit: nothing to emit.
+        requests[e] = Some(crate::i915_request::i915_request_get(gt, rq));
+        crate::i915_request::i915_request_add(i915, gt, rq);
+        // intel_renderstate_fini
+        crate::intel_context::intel_context_unpin(gt, ce);
+        if let Err(x) = r {
+            err = Err(x);
+            break;
+        }
+    }
+
+    if err.is_ok() {
+        // Flush the default context image to memory, and enable powersaving.
+        if crate::intel_gt_requests::intel_gt_wait_for_idle(i915, gt, crate::intel_gt_requests::I915_GEM_IDLE_TIMEOUT_MS)
+            .is_err() {
+            linux::say("recording the default contexts timed out");
+            err = Err(-5);
+        }
+    }
+
+    if err.is_ok() {
+        for e in 0..requests.len() {
+            let Some(rq) = requests[e] else { continue };
+            if gt.requests[rq].error != 0 {
+                err = Err(-5);
+                break;
+            }
+            let ce = gt.requests[rq].ce as usize;
+            if let Some(state) = gt.contexts[ce].state_obj {
+                let seqno = gt.requests[rq].seqno;
+                if let Some(x) = gt.engine[e].as_mut() {
+                    x.default_state = Some(state);
+                }
+                let el = gt.engine[e].map(|x| x.execlists).unwrap_or_default();
+                Line::new().s(crate::intel_execlists_submission::engine_name(gt, e))
+                    .s(": default context recorded, seqno ").dec(seqno as u64)
+                    .s(", CSB events ").dec(el.csb_events as u64).s(", interrupts ").dec(el.irqs as u64).say();
+            }
+        }
+    }
+
+    // On failure the engines are expected idle and ready to be torn down;
+    // the quickest way there is wedging.
+    if err.is_err() {
+        intel_gt_set_wedged(i915, gt);
+    }
+
+    for rq in requests.iter().flatten() {
+        crate::i915_request::i915_request_put(gt, *rq);
+    }
+    err
+}
+
+/// `intel_gt_init`. No uC and no hwconfig table on TGL (12.55+ / ADL-P);
+/// `__engines_verify_workarounds` only runs under DRM_I915_DEBUG_GEM; no
+/// migrate context (it needs flat CCS).
+pub fn intel_gt_init(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut crate::intel_ggtt::i915_ggtt,
+                     dsm: Option<&mut crate::intel_ggtt::i915_dsm>) -> Result<(), i32> {
     crate::intel_workarounds::intel_gt_init_workarounds(gt);
 
     // Held over the whole init: the first TLBs the CS uses have been seen
     // stale otherwise.
     i915.uncore.intel_uncore_forcewake_get(FORCEWAKE_ALL);
 
-    linux::say("not ported yet: intel_gt_init_scratch");
-
-    crate::intel_gt_pm::intel_gt_pm_init(i915, gt);
-
-    linux::say("not ported yet: kernel_vm (i915_ppgtt_create)");
-
-    crate::intel_mocs::intel_set_mocs_index(gt);
-
-    linux::say("not ported yet: intel_engines_init");
-
-    let err = crate::intel_gt_pm::intel_gt_resume(i915, gt);
-
+    let mut err = intel_gt_init_scratch(gt, ggtt, dsm, I915_GTT_PAGE_SIZE_4K);
     if err.is_ok() {
-        linux::say("not ported yet: __engines_record_defaults");
-    } else {
-        // err_uc_init, err_engines (nothing set up yet), err_pm.
-        crate::intel_gt_pm::intel_gt_pm_fini(i915, gt);
-        intel_gt_set_wedged_on_init(i915, gt);
+        crate::intel_gt_pm::intel_gt_pm_init(i915, gt);
+
+        if !kernel_vm(i915, gt) {
+            err = Err(-12);
+            crate::intel_gt_pm::intel_gt_pm_fini(i915, gt);
+        } else {
+            crate::intel_mocs::intel_set_mocs_index(gt);
+
+            err = crate::intel_engine_cs::intel_engines_init(i915, gt, ggtt);
+            if err.is_ok() {
+                err = crate::intel_gt_pm::intel_gt_resume(i915, gt);
+                if err.is_ok() {
+                    err = __engines_record_defaults(i915, gt, ggtt);
+                    if err.is_err() {
+                        __intel_gt_disable(i915, gt);
+                    }
+                }
+            }
+            if err.is_err() {
+                // err_engines, err_pm
+                crate::intel_engine_cs::intel_engines_release(i915, gt);
+                crate::intel_gt_pm::intel_gt_pm_fini(i915, gt);
+            }
+        }
     }
 
+    if err.is_err() {
+        intel_gt_set_wedged_on_init(i915, gt);
+    }
     i915.uncore.intel_uncore_forcewake_put(FORCEWAKE_ALL);
 
     crate::intel_rc6::report(i915, gt, "after init");
@@ -751,7 +948,7 @@ fn __intel_gt_disable(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     intel_gt_set_wedged_on_fini(i915, gt);
 
     crate::intel_gt_pm::intel_gt_suspend_prepare(i915, gt);
-    crate::intel_gt_pm::intel_gt_suspend_late(gt);
+    crate::intel_gt_pm::intel_gt_suspend_late(i915, gt);
 
     if crate::intel_gt_pm::intel_gt_pm_is_awake(gt) {
         linux::say("warning: GT awake after disable");
@@ -770,7 +967,15 @@ pub fn intel_gt_driver_remove(i915: &mut drm_i915_private, gt: &mut intel_gt,
     __intel_gt_disable(i915, gt);
 
     if gt.engines_initialized {
-        linux::say("not ported yet: intel_engines_release");
+        crate::intel_engine_cs::intel_engines_release(i915, gt);
+    }
+    for e in 0..gt.engine.len() {
+        let Some(x) = gt.engine[e] else { continue };
+        if x.kernel_context.is_none() && x.status_page.is_some() {
+            Line::new().s(crate::intel_execlists_submission::engine_name(gt, e)).s(": idle at hand-back, ")
+                .s(if x.wakeref_count == 0 { "parked" } else { "STILL AWAKE" }).s(", interrupts ")
+                .dec(x.execlists.irqs as u64).s(", CSB events ").dec(x.execlists.csb_events as u64).say();
+        }
     }
 
     crate::intel_rc6::report(i915, gt, "at hand-back");

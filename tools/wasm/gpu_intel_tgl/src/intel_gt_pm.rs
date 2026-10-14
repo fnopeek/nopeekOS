@@ -98,17 +98,35 @@ fn gt_sanitize(i915: &mut drm_i915_private, gt: &mut intel_gt, force: bool) {
     }
 
     if gt.engines_initialized {
-        linux::say("not ported yet: engine reset.prepare / sanitize (execlists)");
+        for e in 0..gt.engine.len() {
+            if gt.engine[e].is_some() {
+                crate::intel_execlists_submission::execlists_reset_prepare(i915, gt, e);
+                crate::intel_execlists_submission::execlists_sanitize(i915, gt, e);
+            }
+        }
     }
 
     if reset_engines(i915, gt) || force {
-        if gt.engines_initialized {
-            linux::say("not ported yet: __intel_engine_reset (execlists rewind)");
+        // __intel_engine_reset: reset.rewind, and the kernel context lost.
+        for e in 0..gt.engine.len() {
+            if gt.engine[e].is_none() {
+                continue;
+            }
+            if gt.engines_initialized {
+                crate::intel_execlists_submission::execlists_reset_rewind(i915, gt, e);
+            }
+            if let Some(x) = gt.engine[e].as_mut() {
+                x.serial = x.serial.wrapping_add(1);
+            }
         }
     }
 
     if gt.engines_initialized {
-        linux::say("not ported yet: engine reset.finish (execlists)");
+        for e in 0..gt.engine.len() {
+            if gt.engine[e].is_some() {
+                crate::intel_execlists_submission::execlists_reset_finish(i915, gt, e);
+            }
+        }
     }
 
     crate::intel_rps::intel_rps_sanitize(i915, gt);
@@ -150,14 +168,34 @@ pub fn intel_gt_resume(i915: &mut drm_i915_private, gt: &mut intel_gt) -> Result
                 crate::intel_rps::intel_rps_enable(i915, gt);
                 crate::intel_llc::intel_llc_enable(i915, gt);
 
-                // for_each_engine: intel_engine_pm_get, intel_engine_resume
-                // (execlists_resume: engine workarounds, MOCS/L3CC, ring
-                // start), intel_engine_pm_put.
-                linux::say("not ported yet: intel_engine_resume");
+                let mut ok = true;
+                for e in 0..gt.engine.len() {
+                    if gt.engine[e].is_none() || !gt.engines_initialized {
+                        continue;
+                    }
+                    crate::intel_engine_pm::intel_engine_pm_get(i915, gt, e);
+                    // The kernel context is lost.
+                    if let Some(x) = gt.engine[e].as_mut() {
+                        x.serial = x.serial.wrapping_add(1);
+                    }
+                    let r = crate::intel_engine_cs::intel_engine_resume(i915, gt, e);
+                    crate::intel_engine_pm::intel_engine_pm_put(i915, gt, e);
+                    if let Err(x) = r {
+                        crate::linux::Line::new().s("Failed to restart ")
+                            .s(crate::intel_execlists_submission::engine_name(gt, e)).s(" (")
+                            .dec((-x) as u64).s(")").say();
+                        err = Err(x);
+                        crate::intel_gt::intel_gt_set_wedged(i915, gt);
+                        ok = false;
+                        break;
+                    }
+                }
 
-                crate::intel_rc6::intel_rc6_enable(i915, gt);
+                if ok {
+                    crate::intel_rc6::intel_rc6_enable(i915, gt);
 
-                user_forcewake(i915, gt, false);
+                    user_forcewake(i915, gt, false);
+                }
             }
         }
     }
@@ -168,18 +206,25 @@ pub fn intel_gt_resume(i915: &mut drm_i915_private, gt: &mut intel_gt) -> Result
     err
 }
 
-/// `wait_for_suspend`: nothing to wait for while no request is in flight.
-fn wait_for_suspend(gt: &intel_gt) {
+/// `wait_for_suspend`: retire everything; if the GT does not idle in time,
+/// wedge it so the engines are quiet, and retire what that cancelled.
+fn wait_for_suspend(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     if !intel_gt_pm_is_awake(gt) {
         return;
     }
-    linux::say("not ported yet: intel_gt_wait_for_idle");
+    if crate::intel_gt_requests::intel_gt_wait_for_idle(i915, gt, crate::intel_gt_requests::I915_GT_SUSPEND_IDLE_TIMEOUT_MS)
+        .is_err() {
+        linux::say("GT did not idle for suspend; wedging");
+        crate::intel_gt::intel_gt_set_wedged(i915, gt);
+        let _ = crate::intel_gt_requests::intel_gt_wait_for_idle(i915, gt, 0);
+    }
+    // intel_gt_pm_wait_for_idle: the last put parks synchronously here.
 }
 
 /// `intel_gt_suspend_prepare`.
 pub fn intel_gt_suspend_prepare(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     user_forcewake(i915, gt, true);
-    wait_for_suspend(gt);
+    wait_for_suspend(i915, gt);
 }
 
 /// `intel_gt_suspend_late` with `pm_suspend_target() == PM_SUSPEND_TO_IDLE`:
@@ -187,8 +232,8 @@ pub fn intel_gt_suspend_prepare(i915: &mut drm_i915_private, gt: &mut intel_gt) 
 /// management stays on — RC6 armed and parked, RPS at the idle frequency.
 /// The full-suspend branch (RPS, RC6 and LLC off, then `gt_sanitize`)
 /// would leave the GT awake for good once the module is gone.
-pub fn intel_gt_suspend_late(gt: &intel_gt) {
-    wait_for_suspend(gt);
+pub fn intel_gt_suspend_late(i915: &mut drm_i915_private, gt: &mut intel_gt) {
+    wait_for_suspend(i915, gt);
     if gt.awake {
         linux::say("warning: GT still awake at suspend");
     }
