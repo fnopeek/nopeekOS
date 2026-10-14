@@ -56,3 +56,7 @@ __drm_format_info::formats: drm_format_info = struct drm_format_info { format, c
 infoframe_type_to_idx: u8
 @ display/skl_watermark.c
 tgl_allowed_dbufs: dbuf_slice_conf_entry { active_pipes, join_mbus, m0=dbuf_mask[0], m1=dbuf_mask[1], m2=dbuf_mask[2], m3=dbuf_mask[3] }
+@ gt/intel_gt_mcr.c
+icl_l3bank_steering_table: intel_mmio_range { start, end }
+@ gt/intel_mocs.c
+tgl_mocs_table: drm_i915_mocs_entry { control_value, l3cc_value, used }

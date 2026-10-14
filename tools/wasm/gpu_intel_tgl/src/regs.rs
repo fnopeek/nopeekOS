@@ -1454,11 +1454,103 @@ pub const DISPLAY_TYPE_CRT: u32 = 0x0; // display/intel_opregion.c:385
 pub const DISPLAY_TYPE_EXTERNAL_FLAT_PANEL: u32 = 0x2; // display/intel_opregion.c:387
 pub const DISPLAY_TYPE_INTERNAL_FLAT_PANEL: u32 = 0x3; // display/intel_opregion.c:388
 
-// GEM init (i915_gem.c, gt/intel_wopcm.c, gt/intel_gtt.c, gt/intel_ggtt.c, intel_clock_gating.c)
-pub const GEN11_WOPCM_SIZE: u32 = 0x200000; // gt/intel_wopcm.c:44
-/// gt/intel_gt_regs.h:364
-pub const fn GEN12_PAT_INDEX(i: u32) -> u32 { (0x4800 + (i) * 4) }
-pub const GEN8_PPAT_WB: u32 = 0x3; // gt/intel_gtt.h:145
-pub const GEN8_PPAT_WT: u32 = 0x2; // gt/intel_gtt.h:146
-pub const GEN8_PPAT_WC: u32 = 0x1; // gt/intel_gtt.h:147
-pub const GEN8_PPAT_UC: u32 = 0x0; // gt/intel_gtt.h:148
+// GT init (gt/intel_gt.c, intel_workarounds.c, intel_mocs.c, intel_gt_pm.c, intel_rc6.c, intel_rps.c, intel_llc.c)
+pub const GEN8_MCR_SELECTOR: u32 = 0xfdc; // gt/intel_gt_regs.h:69
+/// gt/intel_gt_regs.h:76
+pub const fn GEN11_MCR_SLICE(slice: u32) -> u32 { (((slice) & 0xf) << 27) }
+/// gt/intel_gt_regs.h:78
+pub const fn GEN11_MCR_SUBSLICE(subslice: u32) -> u32 { (((subslice) & 0x7) << 24) }
+pub const GEN11_MCR_SLICE_MASK: u32 = 0x78000000; // gt/intel_gt_regs.h:77
+pub const GEN11_MCR_SUBSLICE_MASK: u32 = 0x7000000; // gt/intel_gt_regs.h:79
+pub const GEN11_MCR_MULTICAST: u32 = 0x80000000; // gt/intel_gt_regs.h:75
+/// gt/intel_engine_regs.h:260
+pub const fn VDBOX_CGCTL3F10(base: u32) -> u32 { ((base) + 0x3f10) }
+pub const IECPUNIT_CLKGATE_DIS: u32 = 0x400000; // gt/intel_engine_regs.h:261
+pub const GEN10_DFR_RATIO_EN_AND_CHICKEN: u32 = 0x9550; // gt/intel_gt_regs.h:751
+pub const DFR_DISABLE: u32 = 0x200; // gt/intel_gt_regs.h:752
+pub const GEN7_MISCCPCTL: u32 = 0x9424; // gt/intel_gt_regs.h:706
+pub const GEN12_DOP_CLOCK_GATE_RENDER_ENABLE: u32 = 0x2; // gt/intel_gt_regs.h:708
+pub const TGL_HAS_RC6P: u32 = 0x0; // tgl_info.has_rc6p in i915_pci.c
+pub const TGL_HAS_L3_CCS_READ: u32 = 0x0; // tgl_info.has_l3_ccs_read in i915_pci.c
+pub const GEN6_RC6_WAKE_RATE_LIMIT: u32 = 0xa09c; // gt/intel_gt_regs.h:839
+pub const GEN10_MEDIA_WAKE_RATE_LIMIT: u32 = 0xa0a0; // gt/intel_gt_regs.h:841
+pub const GEN6_RC_EVALUATION_INTERVAL: u32 = 0xa0a8; // gt/intel_gt_regs.h:842
+pub const GEN6_RC_IDLE_HYSTERSIS: u32 = 0xa0ac; // gt/intel_gt_regs.h:843
+/// gt/intel_engine_regs.h:55
+pub const fn RING_MAX_IDLE(base: u32) -> u32 { ((base) + 0x54) }
+pub const GUC_MAX_IDLE_COUNT: u32 = 0xc3e4; // gt/uc/intel_guc_reg.h:62
+pub const GEN6_RC_SLEEP: u32 = 0xa0b0; // gt/intel_gt_regs.h:844
+pub const GEN6_RC6_THRESHOLD: u32 = 0xa0b8; // gt/intel_gt_regs.h:847
+pub const GEN9_MEDIA_PG_IDLE_HYSTERESIS: u32 = 0xa0c4; // gt/intel_gt_regs.h:851
+pub const GEN9_RENDER_PG_IDLE_HYSTERESIS: u32 = 0xa0c8; // gt/intel_gt_regs.h:852
+pub const GEN6_RC_CTL_RC6_ENABLE: u32 = 0x40000; // gt/intel_gt_regs.h:786
+pub const GEN6_RC_CTL_HW_ENABLE: i32 = -2147483648; // gt/intel_gt_regs.h:792
+/// gt/intel_gt_regs.h:791
+pub const fn GEN6_RC_CTL_EI_MODE(x: u32) -> u32 { ((x) << 27) }
+pub const GEN9_RENDER_PG_ENABLE: u32 = 0x1; // gt/intel_gt_regs.h:870
+pub const GEN9_MEDIA_PG_ENABLE: u32 = 0x2; // gt/intel_gt_regs.h:871
+pub const GEN11_MEDIA_SAMPLER_PG_ENABLE: u32 = 0x4; // gt/intel_gt_regs.h:872
+/// gt/intel_gt_regs.h:873
+pub const fn VDN_HCP_POWERGATE_ENABLE(n: u32) -> u32 { (1 << (3 + 2 * (n))) }
+/// gt/intel_gt_regs.h:874
+pub const fn VDN_MFX_POWERGATE_ENABLE(n: u32) -> u32 { (1 << (4 + 2 * (n))) }
+pub const GEN9_PG_ENABLE: u32 = 0xa210; // gt/intel_gt_regs.h:869
+pub const GEN6_RC_CONTROL: u32 = 0xa090; // gt/intel_gt_regs.h:834
+pub const GEN6_RC_STATE: u32 = 0xa094; // gt/intel_gt_regs.h:835
+pub const RC_SW_TARGET_STATE_SHIFT: u32 = 0x10; // gt/intel_gt_regs.h:836
+pub const GEN6_GT_GFX_RC6_LOCKED: u32 = 0x138104; // gt/intel_gt_regs.h:1537
+pub const GEN6_GT_GFX_RC6: u32 = 0x138108; // gt/intel_gt_regs.h:1544
+pub const GEN6_RP_STATE_CAP: u32 = 0x145998; // i915_mmio_reg_offset(GEN6_RP_STATE_CAP) in gt/intel_llc.c
+pub const GEN10_FREQ_INFO_REC: u32 = 0x145ef0; // i915_mmio_reg_offset(GEN10_FREQ_INFO_REC) in gt/intel_llc.c
+pub const RPE_MASK: u32 = 0xff00; // intel_mchbar_regs.h:221
+pub const GEN9_FREQ_SCALER: u32 = 0x3; // gt/intel_rps.h:16
+pub const GT_FREQUENCY_MULTIPLIER: u32 = 0x32; // gt/intel_rps.h:15
+pub const HSW_PCODE_DYNAMIC_DUTY_CYCLE_CONTROL: u32 = 0x1a; // i915_reg.h:1155
+pub const GEN6_RP_IDLE_HYSTERSIS: u32 = 0xa070; // gt/intel_gt_regs.h:830
+pub const GEN6_PM_RP_UP_THRESHOLD: u32 = 0x20; // gt/intel_gt_regs.h:1457
+pub const GEN6_PM_RP_DOWN_THRESHOLD: u32 = 0x10; // gt/intel_gt_regs.h:1458
+pub const GEN6_PM_RP_DOWN_TIMEOUT: u32 = 0x40; // gt/intel_gt_regs.h:1456
+pub const GEN6_PM_RP_UP_EI_EXPIRED: u32 = 0x4; // gt/intel_gt_regs.h:1459
+pub const GEN6_PM_RPS_EVENTS: u32 = 0x76; // gt/intel_gt_regs.h:1461
+pub const GEN6_RPNSWREQ: u32 = 0xa008; // gt/intel_gt_regs.h:772
+/// gt/intel_gt_regs.h:776
+pub const fn GEN9_FREQUENCY(x: u32) -> u32 { ((x) << 23) }
+pub const GEN6_RP_UP_EI: u32 = 0xa068; // gt/intel_gt_regs.h:828
+pub const GEN6_RP_UP_THRESHOLD: u32 = 0xa02c; // gt/intel_gt_regs.h:816
+pub const GEN6_RP_DOWN_EI: u32 = 0xa06c; // gt/intel_gt_regs.h:829
+pub const GEN6_RP_DOWN_THRESHOLD: u32 = 0xa030; // gt/intel_gt_regs.h:817
+pub const GEN6_RP_CONTROL: u32 = 0xa024; // gt/intel_gt_regs.h:799
+pub const GEN6_RP_MEDIA_HW_NORMAL_MODE: u32 = 0x400; // gt/intel_gt_regs.h:803
+pub const GEN6_RP_MEDIA_IS_GFX: u32 = 0x100; // gt/intel_gt_regs.h:806
+pub const GEN6_RP_ENABLE: u32 = 0x80; // gt/intel_gt_regs.h:807
+pub const GEN6_RP_UP_BUSY_AVG: u32 = 0x10; // gt/intel_gt_regs.h:809
+pub const GEN6_RP_DOWN_IDLE_AVG: u32 = 0x2; // gt/intel_gt_regs.h:811
+pub const GEN6_RP_INTERRUPT_LIMITS: u32 = 0xa014; // gt/intel_gt_regs.h:794
+pub const GEN6_PMINTRMSK: u32 = 0xa168; // gt/intel_gt_regs.h:854
+pub const GEN6_RPSTAT1: u32 = 0xa01c; // gt/intel_gt_regs.h:795
+pub const GEN12_CAGF_MASK: u32 = 0xff800; // gt/intel_gt_regs.h:1556
+pub const GEN11_GPM_WGBOXPERF_INTR_ENABLE: u32 = 0x19003c; // gt/intel_gt_regs.h:1589
+pub const GEN11_GPM_WGBOXPERF_INTR_MASK: u32 = 0x1900ec; // gt/intel_gt_regs.h:1621
+pub const GEN11_GTPM: u32 = 0x10; // gt/intel_gt_regs.h:1566
+/// gt/intel_gt_regs.h:1558
+pub const fn GEN11_GT_INTR_DW(bank: u32) -> u32 { (0x190018 + ((bank) * 4)) }
+/// gt/intel_gt_regs.h:1608
+pub const fn GEN11_IIR_REG_SELECTOR(bank: u32) -> u32 { (0x190070 + ((bank) * 4)) }
+/// gt/intel_gt_regs.h:1594
+pub const fn GEN11_INTR_IDENTITY_REG(bank: u32) -> u32 { (0x190060 + ((bank) * 4)) }
+pub const GEN11_INTR_DATA_VALID: i32 = -2147483648; // gt/intel_gt_regs.h:1595
+pub const I915_ENGINE_SUPPORTS_STATS: u64 = 0x2; // gt/intel_engine_types.h:583
+pub const LOW_POWER: u32 = 0x0; // ?
+pub const BETWEEN: u32 = 0x1; // ?
+pub const HIGH_POWER: u32 = 0x2; // ?
+pub const DCLK: u32 = 0x145e04; // i915_mmio_reg_offset(DCLK) in gt/intel_llc.c
+pub const GEN6_PCODE_WRITE_MIN_FREQ_TABLE: u32 = 0x8; // i915_reg.h:1110
+pub const GEN6_PCODE_FREQ_IA_RATIO_SHIFT: u32 = 0x8; // i915_reg.h:1180
+pub const GEN6_PCODE_FREQ_RING_RATIO_SHIFT: u32 = 0x10; // i915_reg.h:1181
+/// gt/intel_gt_regs.h:295
+pub const fn GEN12_GLOBAL_MOCS(i: u32) -> u32 { (0x4000 + (i) * 4) }
+/// gt/intel_gt_regs.h:960
+pub const fn GEN9_LNCFCMOCS(i: u32) -> u32 { (0xb020 + (i) * 4) }
+pub const GEN9_NUM_MOCS_ENTRIES: u32 = 0x40; // gt/intel_mocs.c:55
+pub const I915_MOCS_PTE: u32 = 0x1; // ?
+pub const POWER_DOMAIN_GT_IRQ: u32 = 0x48; // display/intel_display_power.h:111

@@ -7,6 +7,7 @@
 
 use crate::i915_drv::drm_i915_private;
 use crate::intel_engine::has_engine;
+use crate::intel_uncore::intel_uncore;
 use crate::linux::{self, Line};
 use crate::regs::*;
 use crate::tables;
@@ -58,6 +59,13 @@ pub struct intel_engine_cs {
     pub uabi_capabilities: u32,
 }
 
+/// `struct intel_mmio_range`, a steering table entry.
+#[derive(Clone, Copy)]
+pub struct intel_mmio_range {
+    pub start: u32,
+    pub end: u32,
+}
+
 /// `struct intel_gt_info`.
 #[derive(Clone, Copy, Default)]
 pub struct intel_gt_info {
@@ -77,6 +85,29 @@ pub struct intel_gt {
     pub engine: [Option<intel_engine_cs>; I915_NUM_ENGINES as usize],
     pub has_logical_contexts: bool,
     pub wopcm: crate::intel_wopcm::intel_wopcm,
+    /// `gt->wa_list`, the GT workarounds.
+    pub wa_list: crate::intel_workarounds::i915_wa_list,
+    /// `gt->steering_table[L3BANK]` is set (`icl_l3bank_steering_table`).
+    pub steering_l3bank: bool,
+    /// `gt->default_steering`: (group, instance).
+    pub default_steering: (u8, u8),
+    pub rc6: crate::intel_rc6::intel_rc6,
+    pub rps: crate::intel_rps::intel_rps,
+    pub mocs: crate::intel_mocs::intel_mocs,
+    /// `gt->pm_ier`, `gt->pm_imr`: the PM interrupt enable and mask.
+    pub pm_ier: u32,
+    pub pm_imr: u32,
+    /// `gt->wakeref` count, and `gt->awake` (the GT IRQ power domain held).
+    pub wakeref_count: u32,
+    pub awake: bool,
+    /// `gt->user_wakeref`.
+    pub user_wakeref: u32,
+    /// `gt->reset.flags`: I915_WEDGED, I915_WEDGED_ON_INIT, I915_WEDGED_ON_FINI.
+    pub wedged: bool,
+    pub wedged_on_init: bool,
+    pub wedged_on_fini: bool,
+    /// `intel_engines_init` has set up the engines' submission backends.
+    pub engines_initialized: bool,
 }
 
 impl intel_gt {
@@ -89,6 +120,21 @@ impl intel_gt {
             engine: [None; I915_NUM_ENGINES as usize],
             has_logical_contexts: false,
             wopcm: Default::default(),
+            wa_list: Default::default(),
+            steering_l3bank: false,
+            default_steering: (0, 0),
+            rc6: Default::default(),
+            rps: Default::default(),
+            mocs: Default::default(),
+            pm_ier: 0,
+            pm_imr: 0,
+            wakeref_count: 0,
+            awake: false,
+            user_wakeref: 0,
+            wedged: false,
+            wedged_on_init: false,
+            wedged_on_fini: false,
+            engines_initialized: false,
         }
     }
 }
@@ -226,10 +272,61 @@ fn gen12_sseu_info_init(i915: &mut drm_i915_private, gt: &mut intel_gt) {
 /// `intel_gt_mcr_init`, GRAPHICS_VER 11 up to 12.55: the L3 bank steering
 /// table (`icl_l3bank_steering_table`) and the L3 bank mask from fuses.
 fn intel_gt_mcr_init(i915: &mut drm_i915_private, gt: &mut intel_gt) {
+    gt.steering_l3bank = true;
     gt.info.l3bank_mask = !i915.uncore.intel_uncore_read(GEN10_MIRROR_FUSE3) & GEN10_L3BANK_MASK;
     if gt.info.l3bank_mask == 0 {
         linux::say("warning: L3 bank mask is all zero!");
     }
+}
+
+/// `reg_needs_read_steering`: only the L3 bank table exists below 12.50.
+fn reg_needs_read_steering(gt: &intel_gt, offset: u32) -> bool {
+    if !gt.steering_l3bank {
+        return false;
+    }
+    tables::icl_l3bank_steering_table.iter().take_while(|r| r.end != 0)
+        .any(|r| offset >= r.start && offset <= r.end)
+}
+
+/// `get_nonterminated_steering` for the L3BANK type.
+fn get_nonterminated_steering(gt: &intel_gt) -> (u32, u32) {
+    (0, gt.info.l3bank_mask.trailing_zeros())
+}
+
+/// `rw_with_mcr_steering_fw`, GRAPHICS_VER 11 up to 12.70, read: steer,
+/// read, restore the old steering (implicit steering depends on it).
+/// Reads stay multicast (Wa_22013088509).
+fn rw_with_mcr_steering_fw_read(uncore: &intel_uncore, reg: u32, group: u32, instance: u32) -> u32 {
+    let mcr_mask = GEN11_MCR_SLICE_MASK | GEN11_MCR_SUBSLICE_MASK;
+    let mcr_ss = GEN11_MCR_SLICE(group) | GEN11_MCR_SUBSLICE(instance);
+
+    let mut mcr = uncore.intel_uncore_read_fw(GEN8_MCR_SELECTOR);
+    let old_mcr = mcr;
+    mcr &= !mcr_mask;
+    mcr |= mcr_ss;
+    uncore.intel_uncore_write_fw(GEN8_MCR_SELECTOR, mcr);
+
+    let val = uncore.intel_uncore_read_fw(reg);
+
+    uncore.intel_uncore_write_fw(GEN8_MCR_SELECTOR, old_mcr);
+    val
+}
+
+/// `intel_gt_mcr_read_any_fw`: a value from a non-terminated instance.
+/// The MCR lock is a software lock before 12.70; the module is
+/// single-threaded.
+pub fn intel_gt_mcr_read_any_fw(uncore: &intel_uncore, gt: &intel_gt, reg: u32) -> u32 {
+    if reg_needs_read_steering(gt, reg) {
+        let (group, instance) = get_nonterminated_steering(gt);
+        return rw_with_mcr_steering_fw_read(uncore, reg, group, instance);
+    }
+    uncore.intel_uncore_read_fw(reg)
+}
+
+/// `intel_gt_mcr_multicast_write_fw`: below 12.70 a plain write reaches
+/// every instance.
+pub fn intel_gt_mcr_multicast_write_fw(uncore: &intel_uncore, reg: u32, value: u32) {
+    uncore.intel_uncore_write_fw(reg, value);
 }
 
 // ── gt/intel_engine_cs.c ─────────────────────────────────────────
@@ -506,13 +603,176 @@ pub fn intel_engine_class_repr(class: u32) -> &'static str {
     }
 }
 
-/// `intel_gt_init`.
-pub fn intel_gt_init(_i915: &mut drm_i915_private, _gt: &mut intel_gt, _ggtt: &mut crate::intel_ggtt::i915_ggtt,
-                     _dsm: Option<&mut crate::intel_ggtt::i915_dsm>) -> Result<(), i32> {
-    crate::linux::say("intel_gt_init: not ported");
+
+// ── gt/intel_reset.c (wedging) ───────────────────────────────────
+
+/// `intel_gt_is_wedged`.
+pub fn intel_gt_is_wedged(gt: &intel_gt) -> bool {
+    gt.wedged
+}
+
+/// `intel_gt_has_unrecoverable_error`.
+pub fn intel_gt_has_unrecoverable_error(gt: &intel_gt) -> bool {
+    gt.wedged_on_init || gt.wedged_on_fini
+}
+
+/// `reset_prepare`: per engine a FORCEWAKE_ALL grab (`reset_prepare_engine`);
+/// no engine is awake before the engines are set up. No GuC submission.
+fn reset_prepare(i915: &mut drm_i915_private, gt: &intel_gt) {
+    for _ in gt.engine.iter().flatten() {
+        i915.uncore.intel_uncore_forcewake_get(FORCEWAKE_ALL);
+    }
+    if gt.engines_initialized {
+        linux::say("not ported yet: engine reset.prepare (execlists)");
+    }
+}
+
+/// `reset_finish`.
+fn reset_finish(i915: &mut drm_i915_private, gt: &intel_gt) {
+    if gt.engines_initialized {
+        linux::say("not ported yet: engine reset.finish, breadcrumbs (execlists)");
+    }
+    for _ in gt.engine.iter().flatten() {
+        i915.uncore.intel_uncore_forcewake_put(FORCEWAKE_ALL);
+    }
+}
+
+/// `__intel_gt_set_wedged`: stop submission, reset the GT (it does not
+/// clobber the display on TGL), mark wedged, cancel what was in flight.
+fn __intel_gt_set_wedged(i915: &mut drm_i915_private, gt: &mut intel_gt) {
+    if gt.wedged {
+        return;
+    }
+
+    reset_prepare(i915, gt);
+
+    // Even if the GPU reset fails, it should still stop the engines.
+    if !crate::intel_reset::intel_gt_gpu_reset_clobbers_display() {
+        let _ = crate::intel_reset::intel_gt_reset_all_engines(i915, gt);
+    }
+
+    // engine->submit_request = nop_submit_request, engine->reset.cancel:
+    // the request side, set up with the engines.
+    gt.wedged = true;
+
+    reset_finish(i915, gt);
+}
+
+/// `intel_gt_set_wedged`.
+pub fn intel_gt_set_wedged(i915: &mut drm_i915_private, gt: &mut intel_gt) {
+    if gt.wedged {
+        return;
+    }
+    __intel_gt_set_wedged(i915, gt);
+}
+
+/// `intel_gt_set_wedged_on_init`: non-recoverable.
+fn intel_gt_set_wedged_on_init(i915: &mut drm_i915_private, gt: &mut intel_gt) {
+    intel_gt_set_wedged(i915, gt);
+    gt.wedged_on_init = true;
+}
+
+/// `intel_gt_set_wedged_on_fini`. The error-state capture is not kept, and
+/// retiring requests waits for the request side.
+fn intel_gt_set_wedged_on_fini(i915: &mut drm_i915_private, gt: &mut intel_gt) {
+    intel_gt_set_wedged(i915, gt);
+    gt.wedged_on_fini = true;
+}
+
+// ── gt/intel_gt.c ────────────────────────────────────────────────
+
+/// `intel_gt_init_hw`. On TGL there is no eDRAM hash, no HSW predicate,
+/// swizzling is off from GRAPHICS_VER 8 (`detect_bit_6_swizzle`), no
+/// unused rings need stopping (gen2/3), `gtt_write_workarounds` has no
+/// GRAPHICS_VER 12 entries, PPGTT needs no enable bit, and there is no
+/// GuC/HuC firmware (`uc_expand_default_options`: TGL → enable_guc = 0).
+pub fn intel_gt_init_hw(i915: &mut drm_i915_private, gt: &mut intel_gt) -> Result<(), i32> {
+    i915.uncore.intel_uncore_forcewake_get(FORCEWAKE_ALL);
+
+    // Apply the GT workarounds and determine whether they are sticking.
+    crate::intel_workarounds::intel_gt_apply_workarounds(i915, gt);
+    let ok = crate::intel_workarounds::intel_gt_verify_workarounds(i915, gt, "init");
+    Line::new().s("GT workarounds: ").dec(gt.wa_list.count as u64).s(" registers applied, verify ")
+        .s(if ok { "ok" } else { "FAILED" }).say();
+
+    let n = crate::intel_mocs::intel_mocs_init(i915);
+    Line::new().s("MOCS: ").dec(tables::tgl_mocs_table.len() as u64).s(" table entries, ").dec(n as u64)
+        .s(" global MOCS and ").dec(((n + 1) / 2) as u64).s(" LNCFCMOCS registers written").say();
+
+    i915.uncore.intel_uncore_forcewake_put(FORCEWAKE_ALL);
     Ok(())
 }
 
-/// `intel_gt_driver_remove` + `intel_gt_driver_release`.
-pub fn intel_gt_driver_remove(_i915: &mut drm_i915_private, _gt: &mut intel_gt,
-                              _ggtt: &mut crate::intel_ggtt::i915_ggtt) {}
+/// `intel_gt_init`, the hardware side. Scratch page, kernel address
+/// space, engines and the default context recording are set up with the
+/// engines; no uC and no hwconfig table on TGL (12.55+ / ADL-P);
+/// `__engines_verify_workarounds` only runs under DRM_I915_DEBUG_GEM;
+/// no migrate context (it needs flat CCS).
+pub fn intel_gt_init(i915: &mut drm_i915_private, gt: &mut intel_gt, _ggtt: &mut crate::intel_ggtt::i915_ggtt,
+                     _dsm: Option<&mut crate::intel_ggtt::i915_dsm>) -> Result<(), i32> {
+    crate::intel_workarounds::intel_gt_init_workarounds(gt);
+
+    // Held over the whole init: the first TLBs the CS uses have been seen
+    // stale otherwise.
+    i915.uncore.intel_uncore_forcewake_get(FORCEWAKE_ALL);
+
+    linux::say("not ported yet: intel_gt_init_scratch");
+
+    crate::intel_gt_pm::intel_gt_pm_init(i915, gt);
+
+    linux::say("not ported yet: kernel_vm (i915_ppgtt_create)");
+
+    crate::intel_mocs::intel_set_mocs_index(gt);
+
+    linux::say("not ported yet: intel_engines_init");
+
+    let err = crate::intel_gt_pm::intel_gt_resume(i915, gt);
+
+    if err.is_ok() {
+        linux::say("not ported yet: __engines_record_defaults");
+    } else {
+        // err_uc_init, err_engines (nothing set up yet), err_pm.
+        crate::intel_gt_pm::intel_gt_pm_fini(i915, gt);
+        intel_gt_set_wedged_on_init(i915, gt);
+    }
+
+    i915.uncore.intel_uncore_forcewake_put(FORCEWAKE_ALL);
+
+    crate::intel_rc6::report(i915, gt, "after init");
+    crate::intel_rps::report(i915, gt, "after init");
+    if let Err(e) = err {
+        Line::new().s("intel_gt_init failed: ").dec((-e) as u64).say();
+    }
+    err
+}
+
+/// `__intel_gt_disable`.
+fn __intel_gt_disable(i915: &mut drm_i915_private, gt: &mut intel_gt) {
+    intel_gt_set_wedged_on_fini(i915, gt);
+
+    crate::intel_gt_pm::intel_gt_suspend_prepare(i915, gt);
+    crate::intel_gt_pm::intel_gt_suspend_late(gt);
+
+    if crate::intel_gt_pm::intel_gt_pm_is_awake(gt) {
+        linux::say("warning: GT awake after disable");
+    }
+}
+
+/// `intel_gt_driver_remove`, then of `intel_gt_driver_release` what
+/// touches the hardware. The card is handed back with the display still
+/// scanning out, so the GT is stopped like a suspend-to-idle
+/// (`intel_gt_suspend_late`), not like an unbind: `intel_gt_pm_fini`
+/// (`intel_rc6_fini`) is left out, because with RC6 off and no driver
+/// left nothing would ever let the GT idle again. RC6 stays armed and
+/// parked, RPS at its idle frequency.
+pub fn intel_gt_driver_remove(i915: &mut drm_i915_private, gt: &mut intel_gt,
+                              _ggtt: &mut crate::intel_ggtt::i915_ggtt) {
+    __intel_gt_disable(i915, gt);
+
+    if gt.engines_initialized {
+        linux::say("not ported yet: intel_engines_release");
+    }
+
+    crate::intel_rc6::report(i915, gt, "at hand-back");
+    crate::intel_rps::report(i915, gt, "at hand-back");
+}
