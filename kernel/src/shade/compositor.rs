@@ -1839,7 +1839,8 @@ impl Compositor {
                     // extended at the bottom and right while the dock slides
                     // or a split is dragged (the content stays where it is),
                     // stretched while windows swap tiles.
-                    let (lw, lh) = if in_motion {
+                    // Panels do not tile and always lay out at their size.
+                    let (lw, lh) = if in_motion && !p.panel {
                         crate::shade::widgets::with_scene(p.id.0, |sc| (sc.width, sc.height)).unwrap_or((c.w, c.h))
                     } else {
                         (c.w, c.h)
