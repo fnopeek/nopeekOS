@@ -137,6 +137,21 @@ pub fn emit_flush(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize, mod
     }
 }
 
+/// `gen8_emit_bb_start`, the engine's `emit_bb_start` with semaphores (no
+/// request here is nopreempt). Without I915_DISPATCH_SECURE the batch runs
+/// from the context's PPGTT, unprivileged.
+pub fn gen8_emit_bb_start(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize, offset: u64,
+                          flags: u64) -> Result<(), i32> {
+    let mut cs = Cs::new();
+    cs.push(MI_ARB_ON_OFF | MI_ARB_ENABLE);
+    cs.push(MI_BATCH_BUFFER_START_GEN8 | if flags & I915_DISPATCH_SECURE != 0 { 0 } else { 1 << 8 });
+    cs.push(offset as u32);
+    cs.push((offset >> 32) as u32);
+    cs.push(MI_ARB_ON_OFF | MI_ARB_DISABLE);
+    cs.push(MI_NOOP);
+    crate::i915_request::intel_ring_emit(i915, gt, rq, &cs)
+}
+
 /// `gen12_emit_flush_rcs`. The MTL/DG2 dummy pipe control does not apply;
 /// TGL has the 3D pipeline, and this is the render engine.
 fn gen12_emit_flush_rcs(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize, engine: &intel_engine_cs,

@@ -2019,3 +2019,8 @@ pub const fn RING_IPEHR(base: u32) -> u32 { ((base) + 0x68) }
 pub const fn RING_INSTDONE(base: u32) -> u32 { ((base) + 0x6c) }
 pub const RING_WAIT: u32 = 0x800; // gt/intel_engine_regs.h:30
 pub const RING_WAIT_SEMAPHORE: u32 = 0x400; // gt/intel_engine_regs.h:31
+
+// batch buffers (gt/gen8_engine_cs.c gen8_emit_bb_start)
+pub const MI_BATCH_BUFFER_START_GEN8: u32 = 0x18800001; // gt/intel_gpu_commands.h:188
+pub const MI_ARB_DISABLE: u32 = 0x0; // gt/intel_gpu_commands.h:61
+pub const I915_DISPATCH_SECURE: u64 = 0x1; // gt/intel_engine_types.h:540

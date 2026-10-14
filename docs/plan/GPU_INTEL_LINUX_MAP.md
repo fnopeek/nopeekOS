@@ -73,6 +73,32 @@ Ausgeschlossen und warum:
 | `gt/uc/`, GuC/HuC/GSC | **TGL laedt weder GuC noch HuC** — `uc_expand_default_options`: `IS_TIGERLAKE → enable_guc = 0` |
 | PXP, Perf/OA, PMU, hwmon, debugfs, sysfs, Fehlerabzug | keine Funktion fuer den Betrieb; was davon zaehlt, geht in `npk_driver_report` |
 
+**Eigene GPU-Programme (GPU_STACK.md §5.4 A4).** i915 startet auf TGL kein
+Compute; das tut die Userspace-Seite. Unsere Programme uebersetzt deshalb
+Mesa selbst, beim Bauen: `tools/wasm/gpu_intel_tgl/shaders/gen_shaders.py`
+schreibt `src/gpgpu_gen.rs` (eingecheckt, der normale Modulbau braucht kein
+Mesa). Drei Quellen, nichts von Hand:
+
+- `*.comp` (GLSL compute) → `glslangValidator` → SPIR-V → `brwc` (`brwc.c`,
+  gegen Mesas Compiler-Bibliotheken gelinkt) → Gen12-Binaerprogramm wie
+  anv seine internen Kernel uebersetzt (`anv_internal_kernels.c`); Modell:
+  Push-Konstanten + 64-Bit-Adressen (A64 zustandslos), eine Arbeitsgruppe =
+  ein SIMD16-Thread; Scratch, SLM, Konstantendaten, Relokationen werden
+  abgelehnt.
+- `brwc device`: Threads je Subslice, MOCS (`isl_mocs`) und die Workarounds,
+  die `gpgpu.rs` umsetzt, aus Mesas Geraetetabellen fuer 8086:9a78 Rev. 1.
+- Befehlslayouts aus Mesas genxml (`gen120.xml`, Importe aufgeloest);
+  `packcheck.c` packt je ein Muster mit Mesas generierten Packern und der
+  Generator verweigert das Schreiben bei Abweichung.
+
+Mesa-Baum: 26.2.4 unter `~/.cache/nopeekos/gpu-shaders/src/mesa`, einmal
+mit meson gebaut (nur die Compiler-Bibliotheken; `softpipe`, damit NIR
+vollstaendig gebaut wird, kein LLVM — Aufruf im Kopf von `gen_shaders.py`).
+Der Start (`src/gpgpu.rs`) folgt anv fuer Gen12.0
+(`genX_simple_shader.c` + Pipeline-Wechsel, STATE_BASE_ADDRESS,
+Pipe-Controls aus `genX_cmd_buffer.c`) als unprivilegierter Batch aus dem
+PPGTT des rcs0-Kernelkontexts (`gen8_emit_bb_start`).
+
 ---
 
 ## 1 — Was TGL laut Linux IST

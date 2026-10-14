@@ -47,6 +47,7 @@ struct service {
     sum_us: u64,
     max_us: u64,
     logged_idle: bool,
+    gpgpu: Option<crate::gpgpu::gpgpu>,
 }
 
 /// The bcs0 engine's index in `gt.engine`.
@@ -57,7 +58,7 @@ fn bcs0(gt: &intel_gt) -> Option<usize> {
 /// Binds `size` bytes of contiguous bus addresses from `phys` into the
 /// kernel PPGTT (`i915_vma_pin` with PIN_USER: best fit from the pin bias,
 /// then `gen8_ppgtt_alloc` and `gen8_ppgtt_insert`). Returns the address.
-fn ppgtt_bind(gt: &mut intel_gt, phys: u64, size: u64, pat_index: u32) -> Result<u64, i32> {
+pub(crate) fn ppgtt_bind(gt: &mut intel_gt, phys: u64, size: u64, pat_index: u32) -> Result<u64, i32> {
     let vm = gt.vm.as_mut().ok_or(-EINVAL)?;
     let size = size.next_multiple_of(I915_GTT_PAGE_SIZE);
     // The kernel names its buffers by address and treats 0 as unset, and
@@ -265,7 +266,8 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         return;
     }
 
-    let mut svc = service { bos: [bo::default(); NUM_BOS], e, jobs: 0, sum_us: 0, max_us: 0, logged_idle: false };
+    let mut svc = service { bos: [bo::default(); NUM_BOS], e, jobs: 0, sum_us: 0, max_us: 0, logged_idle: false,
+                            gpgpu: None };
     for id in 0..NUM_BOS {
         let mut out = [0u8; 32];
         if npk_sys::gpudev_bo_info(id as i32, &mut out) != 0 {
@@ -322,6 +324,17 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         }
         npk_sys::gpudev_bo_bound(id as i32, svc.bos[id].va as i64);
         Line::new().s("gpudev: bo ").dec(id as u64).s(" at PPGTT ").hex(svc.bos[id].va as u32).say();
+    }
+
+    // The GPGPU path (gpgpu.rs) proves itself before the copy service
+    // starts; a failure is reported and the copies go on without it.
+    svc.gpgpu = crate::gpgpu::gpgpu_init(gt);
+    match &svc.gpgpu {
+        Some(gp) => {
+            let ok = crate::gpgpu::gpgpu_self_test(i915, gt, gp);
+            Line::new().s("gpgpu: rcs0 self-test ").s(if ok { "passed" } else { "FAILED" }).say();
+        }
+        None => linux::say("gpgpu: no render engine or heap, not tested"),
     }
 
     let ok = self_test(i915, gt, e);

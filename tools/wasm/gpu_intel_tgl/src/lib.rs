@@ -26,6 +26,8 @@ mod drm_mm;
 mod gpudev;
 mod gen8_engine_cs;
 mod gen8_ppgtt;
+mod gpgpu;
+mod gpgpu_gen;
 mod i915_drv;
 mod i915_gem;
 mod i915_irq;
@@ -155,7 +157,7 @@ fn intel_gmch_bar_setup() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 1b: i915_driver_probe, i915_gem_init, then the gpudev service").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 1b + A4: i915_driver_probe, i915_gem_init, the GPGPU self-test, then the gpudev service").say();
 
     // pci_enable_device: bind (the kernel's own driver hands the card over).
     match npk_sys::pci_bind(INTEL_VENDOR as i32, TGL_GT2 as i32) {
