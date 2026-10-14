@@ -15,7 +15,7 @@ const MAX_INPUT: usize = 512;
 
 /// Terminal slots — u8 index range, only pointers stored statically (~2KB).
 /// Actual TerminalBuffers (~264KB each) are heap-allocated on demand.
-const MAX_SLOTS: usize = 256;
+pub const MAX_SLOTS: usize = 256;
 
 /// Terminal text buffer (one per window, heap-allocated on demand).
 pub struct TerminalBuffer {
@@ -486,6 +486,9 @@ pub fn write(s: &str) {
     if let Some(mut t) = term(idx) {
         t.write_str(s);
         drop(t);
+        if idx < MAX_SLOTS {
+            TERM_DIRTY[idx].store(true, Ordering::Release);
+        }
         set_dirty();
     }
     stream_push(idx, s);
@@ -508,14 +511,16 @@ pub fn write_idx(idx: usize, s: &str) {
     stream_push(idx, s);
 }
 
-/// Check if a specific terminal has new content.
-pub fn is_term_dirty(idx: usize) -> bool {
-    if idx < MAX_SLOTS { TERM_DIRTY[idx].load(Ordering::Acquire) } else { false }
+/// Take a terminal's dirty flag: true if it had new content. Read and
+/// cleared in one step, so output written meanwhile sets it again.
+pub fn take_term_dirty(idx: usize) -> bool {
+    idx < MAX_SLOTS && TERM_DIRTY[idx].swap(false, Ordering::AcqRel)
 }
 
-/// Clear per-terminal dirty flag.
-pub fn clear_term_dirty(idx: usize) {
-    if idx < MAX_SLOTS { TERM_DIRTY[idx].store(false, Ordering::Release); }
+/// Some terminal has content not yet rendered. Survives `clear_dirty`,
+/// which the input-line fast path calls.
+pub fn any_term_dirty() -> bool {
+    TERM_DIRTY.iter().any(|d| d.load(Ordering::Acquire))
 }
 
 /// Check if terminal has new content since last render.

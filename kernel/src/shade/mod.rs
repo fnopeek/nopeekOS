@@ -822,6 +822,7 @@ pub fn needs_tick() -> bool {
         || CURSOR_MOVED.load(Ordering::Relaxed)
         || SURFACE_DIRTY.load(Ordering::Relaxed)
         || terminal::is_dirty()
+        || terminal::any_term_dirty()
         || widgets::close_pending()
         || with_compositor_local(|c| c.needs_tick()).unwrap_or(false)
 }
@@ -1364,7 +1365,7 @@ pub fn poll_render() {
         render_frame_cursor_only();
     }
 
-    if !terminal::is_dirty() { return; }
+    if !terminal::is_dirty() && !terminal::any_term_dirty() { return; }
     terminal::clear_dirty();
     CURSOR_MOVED.store(false, Ordering::Relaxed);
 
@@ -1383,9 +1384,15 @@ pub fn poll_render() {
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
             for win in &mut comp.windows {
-                if terminal::is_term_dirty(win.terminal_idx as usize) {
+                if terminal::take_term_dirty(win.terminal_idx as usize) {
                     win.dirty = true;
-                    terminal::clear_term_dirty(win.terminal_idx as usize);
+                }
+            }
+            // Output of a terminal without a window is drawn when one shows
+            // it; its flag must not keep the shell loop ticking.
+            for idx in 0..terminal::MAX_SLOTS {
+                if !comp.windows.iter().any(|w| w.terminal_idx as usize == idx) {
+                    terminal::take_term_dirty(idx);
                 }
             }
             for r in comp.render_damaged(front, &info) {
