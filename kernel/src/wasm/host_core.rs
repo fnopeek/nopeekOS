@@ -768,6 +768,9 @@ const WAIT_WIFI_EVENT: i32 = 16;
 /// RENDER-gated like the calls that read them (`npk_bar_state`,
 /// `npk_battery`).
 const WAIT_STATE: i32 = 32;
+/// Driver registered as the GPU service: the compositor queued a job
+/// (`npk_gpudev_poll`).
+const WAIT_GPU_CMD: i32 = 64;
 
 /// Which of `mask`'s conditions hold right now. Bits the caller may not
 /// wait on (a driver bit without a driver, an event bit without NETCTL)
@@ -792,6 +795,9 @@ fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
         }
         if mask & WAIT_WIFI_CMD != 0 && crate::wifi::cmd_pending() {
             r |= WAIT_WIFI_CMD;
+        }
+        if mask & WAIT_GPU_CMD != 0 && hw.is_pci && crate::gpu::gpudev::pending(hw.pci_addr) {
+            r |= WAIT_GPU_CMD;
         }
     }
     if mask & WAIT_WIFI_EVENT != 0
@@ -826,7 +832,7 @@ fn input_ready(ctx: &HostState) -> bool {
 /// `npk_wait(mask, timeout_ms)` — park until something in `mask` happens,
 /// or `timeout_ms` passes (< 0: no timeout). Returns the bits that fired,
 /// 0 on timeout. Bits: `WAIT_INPUT` 1, `WAIT_IRQ` 2, `WAIT_NET_TX` 4,
-/// `WAIT_WIFI_CMD` 8, `WAIT_WIFI_EVENT` 16, `WAIT_STATE` 32.
+/// `WAIT_WIFI_CMD` 8, `WAIT_WIFI_EVENT` 16, `WAIT_STATE` 32, `WAIT_GPU_CMD` 64.
 ///
 /// The event-driven replacement for `loop { poll; npk_sleep(16) }`: the
 /// app's fiber gives up its core and costs nothing until an event is pushed
@@ -874,6 +880,10 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
             if mask & WAIT_WIFI_CMD != 0 {
                 crate::wifi::set_cmd_waker(w);
                 sig |= SIG_WIFI;
+            }
+            if mask & WAIT_GPU_CMD != 0 && hw.is_pci {
+                crate::gpu::gpudev::set_waker(hw.pci_addr, w);
+                sig |= crate::smp::fiber::SIG_GPU;
             }
         }
         if mask & WAIT_WIFI_EVENT != 0
@@ -4011,4 +4021,74 @@ pub(crate) fn npk_netdev_poll_tx(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
     };
     if max < 0 || (max as usize) < len { return -1; }
     write_bytes(mem, buf_ptr, &frame[..len])
+}
+
+/// The display controller this module drives, if it holds one with
+/// HARDWARE: what every `npk_gpudev_*` call requires.
+fn gpudev_device(ctx: &HostState) -> Option<crate::drivers::pci::PciAddr> {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return None;
+    }
+    let hw = ctx.hw.as_ref()?;
+    if !hw.is_pci || pci::read8(hw.pci_addr, 0x0B) != 0x03 {
+        return None;
+    }
+    Some(hw.pci_addr)
+}
+
+/// `npk_gpudev_register(version) -> 0 | <0` (GPU_STACK.md §3.3).
+pub(crate) fn npk_gpudev_register(ctx: &mut HostState, version: i32) -> i32 {
+    match gpudev_device(ctx) {
+        Some(dev) => crate::gpu::gpudev::register(dev, version),
+        None => -1,
+    }
+}
+
+/// `npk_gpudev_bo_info(id, out) -> 0 | -1`: `{phys: u64, size: u64, pitch,
+/// width, height, format: u32}`, 32 bytes.
+pub(crate) fn npk_gpudev_bo_info(mem: &mut [u8], ctx: &mut HostState, id: i32, out_ptr: i32) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    let Some(bo) = crate::gpu::gpudev::bo_info(dev, id) else { return -1 };
+    let Some(out) = guest_mut(mem, out_ptr, 32) else { return -1 };
+    out[0..8].copy_from_slice(&bo.phys.to_le_bytes());
+    out[8..16].copy_from_slice(&bo.size.to_le_bytes());
+    out[16..20].copy_from_slice(&bo.pitch.to_le_bytes());
+    out[20..24].copy_from_slice(&bo.width.to_le_bytes());
+    out[24..28].copy_from_slice(&bo.height.to_le_bytes());
+    out[28..32].copy_from_slice(&bo.format.to_le_bytes());
+    0
+}
+
+/// `npk_gpudev_bo_bound(id, gpu_addr) -> 0 | -1`.
+pub(crate) fn npk_gpudev_bo_bound(ctx: &mut HostState, id: i32, gpu_addr: i64) -> i32 {
+    match gpudev_device(ctx) {
+        Some(dev) => crate::gpu::gpudev::bo_bound(dev, id, gpu_addr),
+        None => -1,
+    }
+}
+
+/// `npk_gpudev_ready(ok) -> 0 | -1`.
+pub(crate) fn npk_gpudev_ready(ctx: &mut HostState, ok: i32) -> i32 {
+    match gpudev_device(ctx) {
+        Some(dev) => crate::gpu::gpudev::ready(dev, ok == 1),
+        None => -1,
+    }
+}
+
+/// `npk_gpudev_poll(buf_ptr, max) -> jobs | -1`, 32 bytes each.
+pub(crate) fn npk_gpudev_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if max <= 0 {
+        return 0;
+    }
+    let Some(out) = guest_mut(mem, buf_ptr, max as usize) else { return -1 };
+    crate::gpu::gpudev::poll(dev, out)
+}
+
+/// `npk_gpudev_complete(seq, status) -> 0 | -1`.
+pub(crate) fn npk_gpudev_complete(ctx: &mut HostState, seq: i32, status: i32) -> i32 {
+    match gpudev_device(ctx) {
+        Some(dev) => crate::gpu::gpudev::complete(dev, seq as u32, status),
+        None => -1,
+    }
 }

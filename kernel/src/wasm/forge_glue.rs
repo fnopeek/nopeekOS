@@ -1049,6 +1049,23 @@ host_imports! {
     // npk_memory_fence() -> 0
     ctx fn npk_memory_fence() -> i32;
 
+    // gpudev (docs/plan/GPU_STACK.md §3.3): a driver module holding a display
+    // controller becomes the GPU service. HARDWARE-gated.
+    // npk_gpudev_register(version) -> 0 / <0
+    ctx fn npk_gpudev_register(version: i32) -> i32;
+    // npk_gpudev_bo_info(id, out_ptr) -> 0 / -1; 32 bytes
+    // {phys u64, size u64, pitch, width, height, format u32}
+    mem fn npk_gpudev_bo_info(id: i32, out_ptr: i32) -> i32;
+    // npk_gpudev_bo_bound(id, gpu_addr) -> 0 / -1
+    ctx fn npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
+    // npk_gpudev_ready(ok) -> 0 / -1; ok = 1 after a passed self-test
+    ctx fn npk_gpudev_ready(ok: i32) -> i32;
+    // npk_gpudev_poll(buf_ptr, max) -> jobs / -1; 32 bytes each
+    // {seq, op, a0..a5: u32}
+    mem fn npk_gpudev_poll(buf_ptr: i32, max: i32) -> i32;
+    // npk_gpudev_complete(seq, status) -> 0 / -1
+    ctx fn npk_gpudev_complete(seq: i32, status: i32) -> i32;
+
     // npk_netdev_register(mac_ptr) -> 0 or -1
     mem fn npk_netdev_register(mac_ptr: i32) -> i32;
 

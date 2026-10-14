@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 pub mod gop;
+pub mod gpudev;
 mod stolen_ids;
 pub mod intel_xe;
 pub mod ggtt_layout;
@@ -229,6 +230,12 @@ pub fn yield_to_module(addr: crate::drivers::pci::PciAddr) -> bool {
         }
         Some(_) => false,
     }
+}
+
+/// Make `drv` the active GPU driver (gpudev on a module's ready, GOP when
+/// it goes away).
+pub(crate) fn install(drv: Box<dyn GpuHal>) {
+    *GPU.lock() = Some(drv);
 }
 
 /// Dump native GPU registers (Intel Xe specific, debug only).

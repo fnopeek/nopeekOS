@@ -82,6 +82,12 @@ unsafe extern "C" {
     fn npk_driver_report(buf_ptr: i32, len: i32) -> i32;
 
     fn npk_netdev_register(mac_ptr: i32) -> i32;
+    fn npk_gpudev_register(version: i32) -> i32;
+    fn npk_gpudev_bo_info(id: i32, out_ptr: i32) -> i32;
+    fn npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
+    fn npk_gpudev_ready(ok: i32) -> i32;
+    fn npk_gpudev_poll(buf_ptr: i32, max: i32) -> i32;
+    fn npk_gpudev_complete(seq: i32, status: i32) -> i32;
     fn npk_netdev_submit_rx(buf_ptr: i32, len: i32) -> i32;
     fn npk_netdev_rx_deliver(buf_ptr: i32, len: i32) -> i32;
     fn npk_netdev_poll_tx(buf_ptr: i32, max: i32) -> i32;
@@ -179,6 +185,10 @@ plain! {
     fn irq_register_gsi = npk_irq_register_gsi(gsi: i32, flags: i32) -> i32;
     fn irq_arm = npk_irq_arm(vector: i32) -> i64;
     fn irq_wait = npk_irq_wait(vector: i32, since: i64, timeout_ms: i32) -> i32;
+    fn gpudev_register = npk_gpudev_register(version: i32) -> i32;
+    fn gpudev_bo_bound = npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
+    fn gpudev_ready = npk_gpudev_ready(ok: i32) -> i32;
+    fn gpudev_complete = npk_gpudev_complete(seq: i32, status: i32) -> i32;
 
     fn netdev_set_link = npk_netdev_set_link(up: i32) -> i32;
     fn netdev_set_link_state = npk_netdev_set_link_state(carrier: i32, dormant: i32) -> i32;
@@ -250,6 +260,8 @@ fills! {
     fn event_poll = npk_event_poll -> i32;
     fn window_titles = npk_window_titles -> i32;
     fn netdev_poll_tx = npk_netdev_poll_tx -> i32;
+    /// Jobs for the GPU service, 32 bytes each (`gpudev_poll`).
+    fn gpudev_poll = npk_gpudev_poll -> i32;
     fn wifi_poll_cmd = npk_wifi_poll_cmd -> i32;
     fn wifi_poll_event = npk_wifi_poll_event -> i32;
     fn acpi_dsdt = npk_acpi_dsdt -> i32;
@@ -405,4 +417,11 @@ impl Dma {
     pub fn read(self, off: u32, buf: &mut [u8]) -> bool {
         dma_read(self.handle, off as i32, buf) == 0
     }
+}
+
+/// The kernel's description of GPU buffer `id` (`npk_gpudev_bo_info`):
+/// `{phys: u64, size: u64, pitch, width, height, format: u32}`.
+pub fn gpudev_bo_info(id: i32, out: &mut [u8; 32]) -> i32 {
+    // SAFETY: FFI; the kernel writes 32 bytes into `out`, borrowed for the call.
+    unsafe { npk_gpudev_bo_info(id, out.as_mut_ptr() as i32) }
 }

@@ -160,6 +160,8 @@ pub const SIG_TX: u32 = 1 << 3;
 pub const SIG_WIFI: u32 = 1 << 4;
 /// A watched topic changed (`crate::notify`).
 pub const SIG_STATE: u32 = 1 << 5;
+/// The compositor queued a job for the GPU driver module (`gpu::gpudev`).
+pub const SIG_GPU: u32 = 1 << 6;
 
 pub type Waker = u32;
 pub const NO_WAKER: Waker = u32::MAX;

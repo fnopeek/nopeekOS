@@ -1096,6 +1096,9 @@ pub(crate) fn release_hw(hw: HwDriverState) {
         // kept until reboot instead of going back to the allocator.
         let display = hw.is_pci && crate::drivers::pci::read8(hw.pci_addr, 0x0B) == 0x03;
         if hw.is_pci {
+            if display {
+                crate::gpu::gpudev::module_gone(hw.pci_addr);
+            }
             if !display {
                 let cmd = crate::drivers::pci::read32(hw.pci_addr, 0x04);
                 crate::drivers::pci::write32(hw.pci_addr, 0x04, cmd & !0x4);
