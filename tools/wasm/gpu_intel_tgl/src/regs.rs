@@ -1736,3 +1736,63 @@ pub const fn CURBASE(pipe: u32) -> u32 { match pipe { 0 => 0x70084, 1 => 0x71084
 /// display/intel_cursor_regs.h:75, at tgl_desc's display info
 pub const fn CURSURFLIVE(pipe: u32) -> u32 { match pipe { 0 => 0x700ac, 1 => 0x710ac, 2 => 0x720ac, 3 => 0x730ac, _ => panic!("CURSURFLIVE: index not generated") } }
 pub const SDE_PICAINTERRUPT: u32 = 0x80000000; // display/intel_display_regs.h:1656
+
+// engine workarounds (gt/intel_workarounds.c)
+pub const TGL_TUNING_THREAD_RR_AFTER_DEP: u32 = 0x0; // tgl_info.tuning_thread_rr_after_dep in i915_pci.c
+pub const RENDER_RING_BASE: u32 = 0x2000; // i915_reg.h:243
+pub const GEN11_COMMON_SLICE_CHICKEN3: u32 = 0x7304; // gt/intel_gt_regs.h:502
+pub const GEN12_DISABLE_CPS_AWARE_COLOR_PIPE: u32 = 0x200; // gt/intel_gt_regs.h:507
+pub const GEN8_CS_CHICKEN1: u32 = 0x2580; // gt/intel_gt_regs.h:284
+pub const GEN9_PREEMPT_GPGPU_LEVEL_MASK: u32 = 0x6; // gt/intel_gt_regs.h:290
+pub const GEN9_PREEMPT_GPGPU_THREAD_GROUP_LEVEL: u32 = 0x2; // gt/intel_gt_regs.h:288
+pub const GEN12_FF_MODE2: u32 = 0x6604; // gt/intel_gt_regs.h:433
+pub const FF_MODE2_TDS_TIMER_128: u32 = 0x40000; // gt/intel_gt_regs.h:438
+pub const FF_MODE2_GS_TIMER_224: u32 = 0xe0000000; // gt/intel_gt_regs.h:436
+pub const HIZ_CHICKEN: u32 = 0x7018; // gt/intel_gt_regs.h:467
+pub const HZ_DEPTH_TEST_LE_GE_OPT_DISABLE: u32 = 0x2000; // gt/intel_gt_regs.h:470
+pub const COMMON_SLICE_CHICKEN4: u32 = 0x7300; // gt/intel_gt_regs.h:497
+pub const DISABLE_TDC_LOAD_BALANCING_CALC: u32 = 0x40; // gt/intel_gt_regs.h:498
+pub const GEN8_WM_CHICKEN2: u32 = 0x5584; // gt/intel_gt_regs.h:417
+pub const WAIT_ON_DEPTH_STALL_DONE_DISABLE: u32 = 0x20; // gt/intel_gt_regs.h:418
+/// gt/intel_engine_regs.h:136
+pub const fn BLIT_CCTL(base: u32) -> u32 { ((base) + 0x204) }
+pub const BLIT_CCTL_MASK: u32 = 0x7f7f; // gt/intel_engine_regs.h:139
+/// gt/intel_engine_regs.h:141
+pub const fn BLIT_CCTL_MOCS(dst: u32, src: u32) -> u32 { ((((((dst) << 1)) << 8) & 0x7f00) | (((((src) << 1)) << 0) & 0x7f)) }
+/// gt/intel_engine_regs.h:86
+pub const fn RING_CMD_CCTL(base: u32) -> u32 { ((base) + 0xc4) }
+pub const CMD_CCTL_MOCS_MASK: u32 = 0x3fff; // gt/intel_engine_regs.h:156
+/// gt/intel_engine_regs.h:158
+pub const fn CMD_CCTL_MOCS_OVERRIDE(write: u32, read: u32) -> u32 { ((((((write) << 1)) << 7) & 0x3f80) | (((((read) << 1)) << 0) & 0x7f)) }
+pub const GEN9_CS_DEBUG_MODE1: u32 = 0x20ec; // gt/intel_gt_regs.h:175
+pub const FF_DOP_CLOCK_GATE_DISABLE: u32 = 0x2; // gt/intel_gt_regs.h:176
+pub const GEN8_ROW_CHICKEN2: u32 = 0xe4f4; // gt/intel_gt_regs.h:1155
+pub const GEN12_DISABLE_EARLY_READ: u32 = 0x4000; // gt/intel_gt_regs.h:1157
+pub const GEN7_FF_THREAD_MODE: u32 = 0x20a0; // i915_reg.h:565
+pub const GEN12_FF_TESSELATION_DOP_GATE_DISABLE: u64 = 0x80000; // i915_reg.h:568
+pub const GEN10_SAMPLER_MODE: u32 = 0xe18c; // gt/intel_gt_regs.h:1103
+pub const ENABLE_SMALLPL: u32 = 0x8000; // gt/intel_gt_regs.h:1104
+pub const GEN12_PUSH_CONST_DEREF_HOLD_DIS: u32 = 0x100; // gt/intel_gt_regs.h:1159
+pub const GEN9_ROW_CHICKEN4: u32 = 0xe48c; // gt/intel_gt_regs.h:1131
+pub const GEN12_DISABLE_TDL_PUSH: u32 = 0x200; // gt/intel_gt_regs.h:1133
+/// gt/intel_engine_regs.h:47
+pub const fn RING_PSMI_CTL(base: u32) -> u32 { ((base) + 0x50) }
+pub const GEN12_WAIT_FOR_EVENT_POWER_DOWN_DISABLE: u32 = 0x80; // gt/intel_engine_regs.h:50
+pub const GEN8_RC_SEMA_IDLE_MSG_DISABLE: u32 = 0x1000; // gt/intel_engine_regs.h:48
+pub const GEN7_FF_SLICE_CS_CHICKEN1: u32 = 0x20e0; // gt/intel_gt_regs.h:167
+pub const GEN9_FFSC_PERCTX_PREEMPT_CTRL: u32 = 0x4000; // gt/intel_gt_regs.h:168
+pub const GEN8_GARBCNTL: u32 = 0xb004; // gt/intel_gt_regs.h:940
+pub const GEN12_BUS_HASH_CTL_BIT_EXC: u32 = 0x80; // gt/intel_gt_regs.h:942
+pub const GEN11_INDIRECT_STATE_BASE_ADDR_OVERRIDE: u32 = 0x1; // gt/intel_gt_regs.h:1108
+/// gt/intel_engine_regs.h:210
+pub const fn RING_CTX_TIMESTAMP(base: u32) -> u32 { ((base) + 0x3a8) }
+/// gt/intel_engine_regs.h:213
+pub const fn RING_FORCE_TO_NONPRIV(base: u32, i: u32) -> u32 { (((base) + 0x4D0) + (i) * 4) }
+/// gt/intel_engine_regs.h:71
+pub const fn RING_NOPID(base: u32) -> u32 { ((base) + 0x94) }
+pub const RING_MAX_NONPRIV_SLOTS: u32 = 0xc; // gt/intel_engine_regs.h:230
+pub const RING_FORCE_TO_NONPRIV_ACCESS_RW: u32 = 0x0; // gt/intel_engine_regs.h:216
+pub const RING_FORCE_TO_NONPRIV_ACCESS_RD: u32 = 0x10000000; // gt/intel_engine_regs.h:217
+pub const RING_FORCE_TO_NONPRIV_RANGE_4: u32 = 0x1; // gt/intel_engine_regs.h:222
+pub const PS_INVOCATION_COUNT: u32 = 0x2348; // gt/intel_gt_regs.h:268
+pub const GEN7_COMMON_SLICE_CHICKEN1: u32 = 0x7010; // gt/intel_gt_regs.h:457

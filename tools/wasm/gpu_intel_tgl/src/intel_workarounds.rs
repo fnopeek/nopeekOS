@@ -342,11 +342,188 @@ pub fn intel_gt_verify_workarounds(i915: &mut drm_i915_private, gt: &intel_gt, f
 // Engine, context and whitelist lists. `class`/`instance`/`mmio_base`
 // identify the engine (`engine->class`, `engine->instance`,
 // `engine->mmio_base`).
+//
+// Tiger Lake takes one branch of each platform ladder: GRAPHICS_VER 12,
+// GRAPHICS_VER_FULL 12.00 (below 12.55, outside 12.70-12.74),
+// IS_TIGERLAKE, and none of DG1, DG2, RKL, ADL-S, ADL-P or KBL. Only those
+// branches are here; the tgl_info flags they depend on come from
+// i915_pci.c.
 
-/// `intel_engine_init_workarounds`.
-pub fn intel_engine_init_workarounds(_i915: &mut drm_i915_private, _gt: &intel_gt, _class: u32, _instance: u32,
-                                     _mmio_base: u32, wal: &mut i915_wa_list) {
-    wa_init_start(wal, "engine", "");
+/// `engine->name` as `intel_engine_setup` writes it ("%s'%u").
+fn engine_name(class: u32, instance: u32) -> &'static str {
+    const NAMES: [[&str; 8]; 6] = [
+        ["rcs'0", "rcs'1", "rcs'2", "rcs'3", "rcs'4", "rcs'5", "rcs'6", "rcs'7"],
+        ["vcs'0", "vcs'1", "vcs'2", "vcs'3", "vcs'4", "vcs'5", "vcs'6", "vcs'7"],
+        ["vecs'0", "vecs'1", "vecs'2", "vecs'3", "vecs'4", "vecs'5", "vecs'6", "vecs'7"],
+        ["bcs'0", "bcs'1", "bcs'2", "bcs'3", "bcs'4", "bcs'5", "bcs'6", "bcs'7"],
+        ["other'0", "other'1", "other'2", "other'3", "other'4", "other'5", "other'6", "other'7"],
+        ["ccs'0", "ccs'1", "ccs'2", "ccs'3", "ccs'4", "ccs'5", "ccs'6", "ccs'7"],
+    ];
+    let row = match class {
+        RENDER_CLASS => 0,
+        VIDEO_DECODE_CLASS => 1,
+        VIDEO_ENHANCEMENT_CLASS => 2,
+        COPY_ENGINE_CLASS => 3,
+        COMPUTE_CLASS => 5,
+        _ => 4,
+    };
+    NAMES[row][(instance as usize).min(7)]
+}
+
+/// `engine->flags` of the engine `class`/`instance` names.
+fn engine_flags(gt: &intel_gt, class: u32, instance: u32) -> u64 {
+    gt.engine.iter().flatten()
+        .find(|e| e.class == class && e.instance == instance)
+        .map_or(0, |e| e.flags)
+}
+
+/// `gen12_ctx_workarounds_init`; the IS_DG1 exception does not apply.
+fn gen12_ctx_workarounds_init(wal: &mut i915_wa_list) {
+    // Wa_1409142259, Wa_1409347922, Wa_1409252684, Wa_1409217633,
+    // Wa_1409207793, Wa_1409178076, Wa_1408979724, Wa_14010443199,
+    // Wa_14010698770, Wa_1409342910, Wa_22010465259
+    wa_masked_en(wal, GEN11_COMMON_SLICE_CHICKEN3, GEN12_DISABLE_CPS_AWARE_COLOR_PIPE);
+
+    // WaDisableGPGPUMidThreadPreemption:gen12
+    wa_masked_field_set(wal, GEN8_CS_CHICKEN1, GEN9_PREEMPT_GPGPU_LEVEL_MASK,
+                        GEN9_PREEMPT_GPGPU_THREAD_GROUP_LEVEL);
+
+    // Wa_16011163337 (GS timer) and the TDS timer. FF_MODE2 reads back
+    // wrong from the CPU (Wa_1608008084): written whole, not verified.
+    wa_add(wal, GEN12_FF_MODE2, !0, FF_MODE2_TDS_TIMER_128 | FF_MODE2_GS_TIMER_224, 0, false);
+
+    // Wa_1806527549
+    wa_masked_en(wal, HIZ_CHICKEN, HZ_DEPTH_TEST_LE_GE_OPT_DISABLE);
+
+    // Wa_1606376872
+    wa_masked_en(wal, COMMON_SLICE_CHICKEN4, DISABLE_TDC_LOAD_BALANCING_CALC);
+
+    // Needed for the fast-clear performance optimisation.
+    wa_mcr_write_or(wal, GEN8_WM_CHICKEN2, WAIT_ON_DEPTH_STALL_DONE_DISABLE);
+}
+
+/// `gen12_ctx_gt_mocs_init`: blitter commands without a MOCS field use
+/// the index in BLIT_CCTL, programmed to uncached.
+fn gen12_ctx_gt_mocs_init(gt: &intel_gt, class: u32, mmio_base: u32, wal: &mut i915_wa_list) {
+    if class == COPY_ENGINE_CLASS {
+        let mocs = gt.mocs.uc_index as u32;
+        wa_write_clr_set(wal, BLIT_CCTL(mmio_base), BLIT_CCTL_MASK, BLIT_CCTL_MOCS(mocs, mocs));
+    }
+}
+
+/// `gen12_ctx_gt_fake_wa_init`; `fakewa_disable_nestedbb_mode` is for
+/// 12.55 and later.
+fn gen12_ctx_gt_fake_wa_init(i915: &drm_i915_private, gt: &intel_gt, class: u32, mmio_base: u32,
+                             wal: &mut i915_wa_list) {
+    if i915.graphics_ver_full() >= crate::i915_drv::ip_ver(12, 55) {
+        Line::new().s("MISSING_CASE fakewa_disable_nestedbb_mode").say();
+    }
+    gen12_ctx_gt_mocs_init(gt, class, mmio_base, wal);
+}
+
+/// `intel_engine_init_ctx_wa` (`__intel_engine_init_ctx_wa`): the
+/// context workarounds, emitted into each context by
+/// `intel_engine_emit_ctx_wa`.
+pub fn intel_engine_init_ctx_wa(i915: &mut drm_i915_private, gt: &intel_gt, class: u32, instance: u32,
+                                mmio_base: u32, wal: &mut i915_wa_list) {
+    wa_init_start(wal, "context", engine_name(class, instance));
+
+    // Applies to all engines.
+    gen12_ctx_gt_fake_wa_init(i915, gt, class, mmio_base, wal);
+
+    if class == RENDER_CLASS {
+        gen12_ctx_workarounds_init(wal);
+    }
+
+    wa_init_finish(wal);
+}
+
+/// `engine_fake_wa_init`: RING_CMD_CCTL points commands without a MOCS
+/// field at the uncached entry.
+fn engine_fake_wa_init(gt: &intel_gt, class: u32, mmio_base: u32, wal: &mut i915_wa_list) {
+    let mocs_w = gt.mocs.uc_index as u32;
+    let mut mocs_r = gt.mocs.uc_index as u32;
+    if TGL_HAS_L3_CCS_READ != 0 && class == COMPUTE_CLASS {
+        mocs_r = gt.mocs.wb_index as u32;
+    }
+    wa_masked_field_set(wal, RING_CMD_CCTL(mmio_base), CMD_CCTL_MOCS_MASK,
+                        CMD_CCTL_MOCS_OVERRIDE(mocs_w, mocs_r));
+}
+
+/// `rcs_engine_wa_init`: the IS_TIGERLAKE blocks and the
+/// GRAPHICS_VER >= 9 one.
+fn rcs_engine_wa_init(wal: &mut i915_wa_list) {
+    // Wa_1606700617, Wa_22010271021, Wa_14010826681
+    wa_masked_en(wal, GEN9_CS_DEBUG_MODE1, FF_DOP_CLOCK_GATE_DISABLE);
+
+    // Wa_1606931601
+    wa_mcr_masked_en(wal, GEN8_ROW_CHICKEN2, GEN12_DISABLE_EARLY_READ);
+
+    // Wa_1407928979, Wa_18011464164, Wa_22010931296
+    // BIT(19), an unsigned long in i915_reg.h.
+    wa_write_or(wal, GEN7_FF_THREAD_MODE, GEN12_FF_TESSELATION_DOP_GATE_DISABLE as u32);
+
+    // Wa_1406941453
+    wa_mcr_masked_en(wal, GEN10_SAMPLER_MODE, ENABLE_SMALLPL);
+
+    // Wa_1409804808
+    wa_mcr_masked_en(wal, GEN8_ROW_CHICKEN2, GEN12_PUSH_CONST_DEREF_HOLD_DIS);
+
+    // Wa_14010229206
+    wa_mcr_masked_en(wal, GEN9_ROW_CHICKEN4, GEN12_DISABLE_TDL_PUSH);
+
+    // Wa_1607297627, all steppings.
+    wa_masked_en(wal, RING_PSMI_CTL(RENDER_RING_BASE),
+                 GEN12_WAIT_FOR_EVENT_POWER_DOWN_DISABLE | GEN8_RC_SEMA_IDLE_MSG_DISABLE);
+
+    // Object-level preemption is left to userspace (FF_SLICE_CS_CHICKEN1
+    // option 2).
+    wa_masked_en(wal, GEN7_FF_SLICE_CS_CHICKEN1, GEN9_FFSC_PERCTX_PREEMPT_CTRL);
+}
+
+/// `xcs_engine_wa_init`: the KBL semaphore poll and the blitter
+/// scheduling mode of `NEEDS_FASTCOLOR_BLT_WABB` (12.55-12.60) do not
+/// apply.
+fn xcs_engine_wa_init(_wal: &mut i915_wa_list) {}
+
+/// `add_render_compute_tuning_settings`.
+fn add_render_compute_tuning_settings(i915: &drm_i915_private, wal: &mut i915_wa_list) {
+    if TGL_TUNING_THREAD_RR_AFTER_DEP != 0 {
+        Line::new().s("MISSING_CASE tuning_thread_rr_after_dep").say();
+    }
+    if i915.graphics_ver() == 12 && i915.graphics_ver_full() < crate::i915_drv::ip_ver(12, 55) {
+        wa_write_clr(wal, GEN8_GARBCNTL, GEN12_BUS_HASH_CTL_BIT_EXC);
+    }
+}
+
+/// `general_render_compute_wa_init`: registers in the shared render
+/// reset domain, on the first render/compute engine's list only.
+fn general_render_compute_wa_init(i915: &drm_i915_private, wal: &mut i915_wa_list) {
+    add_render_compute_tuning_settings(i915, wal);
+
+    // Sampler border colours relative to DynamicStateBaseAddress.
+    wa_mcr_masked_en(wal, GEN10_SAMPLER_MODE, GEN11_INDIRECT_STATE_BASE_ADDR_OVERRIDE);
+}
+
+/// `intel_engine_init_workarounds` (`engine_init_workarounds`);
+/// `ccs_engine_wa_mode` is DG2's.
+pub fn intel_engine_init_workarounds(i915: &mut drm_i915_private, gt: &intel_gt, class: u32, instance: u32,
+                                     mmio_base: u32, wal: &mut i915_wa_list) {
+    wa_init_start(wal, "engine", engine_name(class, instance));
+
+    engine_fake_wa_init(gt, class, mmio_base, wal);
+
+    if engine_flags(gt, class, instance) & I915_ENGINE_FIRST_RENDER_COMPUTE != 0 {
+        general_render_compute_wa_init(i915, wal);
+    }
+
+    // ccs_engine_wa_init has no entries.
+    if class == RENDER_CLASS {
+        rcs_engine_wa_init(wal);
+    } else if class != COMPUTE_CLASS {
+        xcs_engine_wa_init(wal);
+    }
+
     wa_init_finish(wal);
 }
 
@@ -355,22 +532,69 @@ pub fn intel_engine_apply_workarounds(i915: &mut drm_i915_private, gt: &intel_gt
     wa_list_apply(i915, gt, wal);
 }
 
-/// `intel_engine_init_whitelist`.
-pub fn intel_engine_init_whitelist(_i915: &mut drm_i915_private, _gt: &intel_gt, _class: u32, _instance: u32,
-                                   _mmio_base: u32, wal: &mut i915_wa_list) {
-    wa_init_start(wal, "whitelist", "");
+/// `whitelist_reg_ext`: the access flags travel in the register offset.
+/// The slot and flag checks are GEM_DEBUG_WARN_ON, which compiles to
+/// nothing without CONFIG_DRM_I915_DEBUG_GEM.
+fn whitelist_reg_ext(wal: &mut i915_wa_list, reg: u32, flags: u32) {
+    _wa_add(wal, &i915_wa { reg: reg | flags, ..Default::default() });
+}
+
+/// `whitelist_reg`.
+fn whitelist_reg(wal: &mut i915_wa_list, reg: u32) {
+    whitelist_reg_ext(wal, reg, RING_FORCE_TO_NONPRIV_ACCESS_RW);
+}
+
+/// `allow_read_ctx_timestamp`.
+fn allow_read_ctx_timestamp(class: u32, mmio_base: u32, w: &mut i915_wa_list) {
+    if class != RENDER_CLASS {
+        whitelist_reg_ext(w, RING_CTX_TIMESTAMP(mmio_base), RING_FORCE_TO_NONPRIV_ACCESS_RD);
+    }
+}
+
+/// `tgl_whitelist_build`.
+fn tgl_whitelist_build(class: u32, mmio_base: u32, w: &mut i915_wa_list) {
+    allow_read_ctx_timestamp(class, mmio_base, w);
+
+    if class == RENDER_CLASS {
+        // WaAllowPMDepthAndInvocationCountAccessFromUMD, Wa_1408556865:
+        // PS_INVOCATION_COUNT, its UDW, PS_DEPTH_COUNT and its UDW.
+        whitelist_reg_ext(w, PS_INVOCATION_COUNT,
+                          RING_FORCE_TO_NONPRIV_ACCESS_RD | RING_FORCE_TO_NONPRIV_RANGE_4);
+
+        // Wa_1808121037, Wa_1508744258
+        whitelist_reg(w, GEN7_COMMON_SLICE_CHICKEN1);
+
+        // Wa_1806527549
+        whitelist_reg(w, HIZ_CHICKEN);
+
+        // Needed by a recommended tuning setting.
+        whitelist_reg(w, GEN11_COMMON_SLICE_CHICKEN3);
+    }
+}
+
+/// `intel_engine_init_whitelist`: the primary GT, GRAPHICS_VER 12.
+pub fn intel_engine_init_whitelist(_i915: &mut drm_i915_private, _gt: &intel_gt, class: u32, instance: u32,
+                                   mmio_base: u32, wal: &mut i915_wa_list) {
+    wa_init_start(wal, "whitelist", engine_name(class, instance));
+    tgl_whitelist_build(class, mmio_base, wal);
     wa_init_finish(wal);
 }
 
-/// `intel_engine_apply_whitelist`.
-pub fn intel_engine_apply_whitelist(_i915: &mut drm_i915_private, _gt: &intel_gt, _mmio_base: u32,
-                                    _wal: &i915_wa_list) {}
-
-/// `intel_engine_init_ctx_wa` (`__intel_engine_init_ctx_wa`): the
-/// context workarounds, emitted into each context by
-/// `intel_engine_emit_ctx_wa`.
-pub fn intel_engine_init_ctx_wa(_i915: &mut drm_i915_private, _gt: &intel_gt, _class: u32, _instance: u32,
-                                _mmio_base: u32, wal: &mut i915_wa_list) {
-    wa_init_start(wal, "context", "");
-    wa_init_finish(wal);
+/// `intel_engine_apply_whitelist`: one RING_FORCE_TO_NONPRIV slot per
+/// entry, the rest pointed at RING_NOPID.
+pub fn intel_engine_apply_whitelist(i915: &mut drm_i915_private, _gt: &intel_gt, mmio_base: u32,
+                                    wal: &i915_wa_list) {
+    if wal.count == 0 {
+        return;
+    }
+    let mut i = 0;
+    while i < wal.count as u32 {
+        i915.uncore.intel_uncore_write(RING_FORCE_TO_NONPRIV(mmio_base, i), wal.list[i as usize].reg);
+        i += 1;
+    }
+    // And clear the rest just in case of garbage.
+    while i < RING_MAX_NONPRIV_SLOTS {
+        i915.uncore.intel_uncore_write(RING_FORCE_TO_NONPRIV(mmio_base, i), RING_NOPID(mmio_base));
+        i += 1;
+    }
 }
