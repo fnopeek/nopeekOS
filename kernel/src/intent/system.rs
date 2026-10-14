@@ -1174,9 +1174,28 @@ pub fn intent_gpu(args: &str) {
             kprintln!("[npk] gpu: composing on the CPU until `gpu verify`");
             return;
         }
+        "iommu" => {
+            match crate::drivers::vtd::status() {
+                Some(s) => {
+                    kprintln!("  IOMMU:    {:02x}:{:02x}.{} behind VT-d, {} pages reachable, {} fault(s) since enabled",
+                        s.dev.bus, s.dev.device, s.dev.function, s.pages, s.faults_total);
+                    for f in crate::drivers::vtd::take_faults(s.dev) {
+                        kprintln!("            {} fault at {:#x} from {:#06x}, reason {:#x}",
+                            if f.read { "read" } else { "write" }, f.addr, f.source, f.reason);
+                    }
+                }
+                None => kprintln!("  IOMMU:    off ({})", if crate::gpu::iommu_wanted() {
+                    "wanted; see the boot log for why not" } else { "`set gpu_iommu on`, then reboot" }),
+            }
+            return;
+        }
+        "iommu test" => {
+            crate::shade::gpu_scene::iommu_probe();
+            return;
+        }
         "" => {}
         _ => {
-            kprintln!("usage: gpu [verify | cpu]");
+            kprintln!("usage: gpu [verify | cpu | iommu | iommu test]");
             return;
         }
     }

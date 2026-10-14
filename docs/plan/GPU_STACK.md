@@ -805,6 +805,42 @@ GPU ist eine DMA-Maschine, die Fremde programmieren**. Die Grenzen:
    Abgabe, Engine-Reset, betroffener Kontext wird verworfen, der Compositor
    faellt fuer dieses Bild auf die CPU.
 
+### 8a. Stufe 2 gebaut: VT-d fuer die Grafik (Kernel 0.611.0)
+
+`kernel/src/drivers/vtd.rs`, nach Linux `drivers/iommu/intel/` im
+Legacy-Modus mit Register-Invalidierung (`iommu_set_root_entry`,
+`__iommu_flush_context`, `__iommu_flush_iotlb`, `iommu_flush_write_buffer`,
+`iommu_disable_protect_mem_regions`, `iommu_enable_translation`,
+`dmar_fault`).
+
+- Nur die Einheit, deren Geltungsbereich **allein** die Karte ist (bei Intel
+  hat die Grafik eine eigene DRHD) — sonst wird nichts eingeschaltet und das
+  Log sagt warum. Andere Geraete bleiben unberuehrt.
+- Zweitstufen-Tabelle **1:1** (IOVA = physische Adresse) nur fuer
+  freigegebene Seiten: RMRR der Karte, Stolen Memory (BDSM 0xC0/0xC4, GGC
+  0x50 wie Linux `intel_early_quirks`, GSM direkt darunter), die DMA-Puffer
+  des Moduls (`npk_dma_alloc*`), die gpudev-Puffer samt Gast-Blobs. Das Modul
+  aendert sich nicht; jede andere Adresse ist ein DMAR-Fehler.
+- Eingeschaltet in `npk_pci_enable_bus_master` des Anzeige-Moduls, vor dem
+  ersten DMA. **Nie wieder ausgeschaltet** (Linux
+  `quirk_igfx_skip_te_disable` fuer Gen12-Grafik).
+- gpudev gibt beim Anmelden eines Puffers frei und nimmt zurueck, wenn das
+  Modul die Abmeldung abgeschlossen hat — unter dem gpudev-Lock, damit
+  `pages_released` (VM-Speicher) nie vorher wahr wird. Modultod: alles
+  zurueck.
+- Modulende: die DMA-Puffer der Anzeige gehen jetzt **zurueck an den
+  Allocator** (vorher bis zum Neustart behalten, weil die Karte sie noch
+  erreichen konnte).
+- Fehler werden abgefragt (je 64 Auftraege, bei Fehlschlag, `gpu iommu`),
+  nicht per Interrupt gemeldet.
+- Schalter `set gpu_iommu on` (Vorgabe aus, bis am NUC bewiesen), wirkt beim
+  naechsten Start des Moduls. `gpu iommu` zeigt Stand und Fehler,
+  `gpu iommu test` ist die Gegenprobe (Puffer entziehen, die GPU liest ihn:
+  Muster darf nicht ankommen, Lesefehler an genau der Adresse).
+
+Offen: AMD-Vi (IdeaPad); die Einheit fuer alle uebrigen Geraete
+(INCLUDE_PCI_ALL) — dafuer braeuchten NVMe, Netz und USB eigene Freigaben.
+
 ---
 
 ## 9. Stufen
@@ -817,7 +853,7 @@ Jede Stufe hat ein Ergebnis, das man am Geraet sieht oder misst.
 | **0b** | `gpu`-Ausgabe ohne Treiber korrigieren | beide | kleine Aufraeumarbeit |
 | **1a** ✅ | `gpu_intel_tgl` faehrt die Karte nach Linux hoch: Display-Auslesung, Uebernahme des Firmware-Bildes, GGTT, GT, Workarounds, RC6/RPS, PPGTT, alle Engines mit Execlists, MSI (0.2.0–0.8.0) | NUC | 2026-10-14: `default context recorded` auf rcs0/bcs0/vcs2/vecs0, Bild bleibt |
 | **1b** | gpudev-Kern (§3.3: Griffe, Abgabe, Fences, Kontexte) + erster Nutzer Bildkopie per bcs0 + Autostart nach dem Login + Readback-Selbsttest; danach **`intel_xe.rs` raus** | NUC | gleiche Bildzeiten wie heute; Hostaufrufe je Bild gezaehlt (forge-Kosten) |
-| **2** | IOMMU (VT-d) fuer die Karte — Voraussetzung fuer fremde Befehlspuffer (F5) | NUC | Karte erreicht nur freigegebene Seiten; Gegenprobe mit absichtlich falscher Adresse |
+| **2** | IOMMU (VT-d) fuer die Karte — Voraussetzung fuer fremde Befehlspuffer (F5). **Gebaut (Kernel 0.611.0), NUC-Test offen** — §8a | NUC | Karte erreicht nur freigegebene Seiten; Gegenprobe mit absichtlich falscher Adresse (`gpu iommu test`) |
 | **3–5** | Desktop auf der GPU, in Schritten A0–A6 (§5.4): Fenster als Puffer, Szenenliste mit CPU- und GPU-Ausfuehrer, feste Shader, Cursor-Plane, Flip | NUC | `comp`-Zeit je 4K-Bild vorher/nachher, CPU-Last bei Animation |
 | **6** | virtio-gpu: blob, context init, hostmem, Capset `DRM` | — | Gast sieht das Capset |
 | **7** | native context Intel (Wirtsseite i915-Protokoll) + Gast-Mesa mit `intel-virtio-experimental` | NUC | `glxinfo` im Gast nennt iris; WebGL in LibreWolf |

@@ -1528,6 +1528,20 @@ pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
         // would access 00:00.0.
         _ => return -1,
     };
+    // A display controller goes behind its IOMMU before it masters
+    // anything the driver hands it: from here on it reaches only what the
+    // kernel grants (`drivers::vtd`).
+    if pci::read8(hw.pci_addr, 0x0B) == 0x03 && crate::gpu::iommu_wanted() {
+        match crate::drivers::vtd::protect(hw.pci_addr) {
+            Ok(()) => {
+                for &(phys, pages) in &hw.dma_allocs {
+                    crate::drivers::vtd::grant(hw.pci_addr, phys, pages);
+                }
+            }
+            Err(e) => crate::kprintln!("[npk] iommu: {:02x}:{:02x}.{} not protected: {}",
+                hw.pci_addr.bus, hw.pci_addr.device, hw.pci_addr.function, e),
+        }
+    }
     pci::enable_bus_master(hw.pci_addr);
     // Also enable memory space
     let cmd = pci::read32(hw.pci_addr, 0x04);
@@ -2013,6 +2027,9 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
     let handle = hw.dma_allocs.len();
     hw.dma_allocs.push((phys, page_count));
+    if hw.is_pci {
+        crate::drivers::vtd::grant(hw.pci_addr, phys, page_count);
+    }
     handle as i32
 }
 
@@ -2055,6 +2072,9 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
     let handle = hw.dma_allocs.len();
     hw.dma_allocs.push((phys, page_count));
+    if hw.is_pci {
+        crate::drivers::vtd::grant(hw.pci_addr, phys, page_count);
+    }
     handle as i32
 }
 

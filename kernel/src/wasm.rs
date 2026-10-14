@@ -1098,6 +1098,9 @@ pub(crate) fn release_hw(hw: HwDriverState) {
         // stops the card from reading the driver's buffers either; they are
         // kept until reboot instead of going back to the allocator.
         let display = hw.is_pci && crate::drivers::pci::read8(hw.pci_addr, 0x0B) == 0x03;
+        // Behind its IOMMU the card no longer reaches the buffers once their
+        // grants are gone, so they can go back even while it scans out.
+        let confined = hw.is_pci && crate::drivers::vtd::protected(hw.pci_addr);
         if hw.is_pci {
             if display {
                 crate::gpu::gpudev::module_gone(hw.pci_addr);
@@ -1110,12 +1113,15 @@ pub(crate) fn release_hw(hw: HwDriverState) {
         }
         let mut total_pages = 0usize;
         for &(phys, pages) in &hw.dma_allocs {
-            if !display {
+            if confined {
+                crate::drivers::vtd::revoke(hw.pci_addr, phys, pages);
+            }
+            if !display || confined {
                 crate::memory::deallocate_contiguous(phys, pages);
             }
             total_pages += pages;
         }
-        if display && total_pages > 0 {
+        if display && !confined && total_pages > 0 {
             kprintln!("[npk] driver cleanup: display controller still bus master, {} DMA pages kept", total_pages);
         }
         if hw.registered_as_netdev {
@@ -1127,7 +1133,7 @@ pub(crate) fn release_hw(hw: HwDriverState) {
         if hw.irq_vector != 0 {
             crate::irq::release(hw.irq_vector);
         }
-        if !display && (!hw.dma_allocs.is_empty() || hw.registered_as_netdev) {
+        if (!display || confined) && (!hw.dma_allocs.is_empty() || hw.registered_as_netdev) {
             kprintln!("[npk] driver cleanup: freed {} DMA buffers ({} pages)",
                 hw.dma_allocs.len(), total_pages);
         }

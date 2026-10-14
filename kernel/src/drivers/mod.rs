@@ -19,6 +19,7 @@ pub mod netdev;
 pub mod wifi;
 pub mod report;
 pub mod acpi;
+pub mod vtd;
 pub mod smbus;
 pub mod battery;
 pub mod ec;

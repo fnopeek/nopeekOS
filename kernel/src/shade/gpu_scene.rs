@@ -559,3 +559,86 @@ pub fn stats() -> Stats {
         full,
     }
 }
+
+/// `gpu iommu test`: the GPU composes a small buffer into a screen-sized one
+/// twice — while the IOMMU lets the card reach the small buffer, and after
+/// that grant was taken back. The first run must deliver the pattern; the
+/// second must not, and must leave a read fault at the buffer's address.
+pub fn iommu_probe() {
+    use crate::shade::buffers::PixelBuffer;
+    const W: u32 = 64;
+    const H: u32 = 64;
+    let Some(dev) = gpudev::status().owner else {
+        crate::kprintln!("[npk] iommu test: no GPU module registered");
+        return;
+    };
+    if !crate::drivers::vtd::protected(dev) {
+        crate::kprintln!("[npk] iommu test: the card is not behind its IOMMU (`set gpu_iommu on`, then reboot)");
+        return;
+    }
+    if !gpudev::scenes_offered() {
+        crate::kprintln!("[npk] iommu test: the module runs no scenes");
+        return;
+    }
+    finish();
+    let fb = crate::framebuffer::get_info();
+    let (sw, sh) = (fb.width.max(W), fb.height.max(H));
+    let mut src = PixelBuffer::new(W, H);
+    let mut dst = PixelBuffer::new(sw, sh);
+    if src.is_empty() || dst.is_empty() {
+        crate::kprintln!("[npk] iommu test: no memory for the buffers");
+        return;
+    }
+    for (i, px) in src.iter_mut().enumerate() {
+        *px = 0xFF00_0000 | (i as u32).wrapping_mul(0x9E37_79B9) >> 8 | 1;
+    }
+    struct One<'a>(&'a PixelBuffer);
+    impl Sources for One<'_> {
+        fn with_source(&self, _src: Source, f: &mut dyn FnMut(&[u32], u32, u32)) {
+            f(self.0, self.0.width(), self.0.height());
+        }
+    }
+    let frame = Scene { items: alloc::vec![Item::Content {
+        src: Source::Surface(u32::MAX), dst: Rect::new(0, 0, W, H), radius: 0, fit: Fit::Extend,
+    }] };
+    let damage = [Rect::new(0, 0, W, H)];
+    let info = dst.info();
+    let run = |src: &PixelBuffer, dst: &PixelBuffer| -> Option<i32> {
+        let seq = {
+            let _pin = gpudev::ScenePin::new();
+            let tid = gpudev::bo_for(dst.phys(), sw as u64 * sh as u64 * 4, sw, sh, sw * 4)?;
+            let (payload, srcs) = encode(&frame, &One(src), &info, &damage)?;
+            gpudev::submit_scene(tid, payload, &srcs)?
+        };
+        Some(gpudev::wait_scene_bound(seq))
+    };
+    let arrived = |src: &PixelBuffer, dst: &PixelBuffer| {
+        (0..H as usize).all(|y| dst[y * sw as usize..y * sw as usize + W as usize] == src[y * W as usize..(y + 1) * W as usize])
+    };
+    let pages = (W as usize * H as usize * 4).div_ceil(4096);
+    let (lo, hi) = (src.phys(), src.phys() + pages as u64 * 4096);
+    let _ = crate::drivers::vtd::take_faults(dev);
+
+    let s1 = run(&src, &dst);
+    let ok1 = arrived(&src, &dst);
+    let f1 = crate::drivers::vtd::take_faults(dev).len();
+    crate::kprintln!("[npk] iommu test: granted — scene {:?}, pattern {}, {} fault(s)",
+        s1, if ok1 { "arrived" } else { "MISSING" }, f1);
+
+    for px in dst.iter_mut() {
+        *px = 0;
+    }
+    crate::drivers::vtd::revoke(dev, src.phys(), pages);
+    let s2 = run(&src, &dst);
+    let leaked = arrived(&src, &dst);
+    let faults = crate::drivers::vtd::take_faults(dev);
+    crate::drivers::vtd::grant(dev, src.phys(), pages);
+    let hit = faults.iter().any(|f| f.read && f.addr >= lo && f.addr < hi);
+    crate::kprintln!("[npk] iommu test: revoked — scene {:?}, pattern {}, read fault at the buffer {}",
+        s2, if leaked { "ARRIVED" } else { "did not arrive" }, if hit { "recorded" } else { "MISSING" });
+    for f in faults.iter().take(4) {
+        crate::kprintln!("[npk] iommu test:   {} fault at {:#x}, reason {:#x}", if f.read { "read" } else { "write" },
+            f.addr, f.reason);
+    }
+    crate::kprintln!("[npk] iommu test: {}", if ok1 && !leaked && hit { "PASSED" } else { "FAILED" });
+}

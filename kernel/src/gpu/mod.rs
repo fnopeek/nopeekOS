@@ -144,6 +144,13 @@ pub fn yield_to_module(addr: crate::drivers::pci::PciAddr) -> bool {
     crate::drivers::pci::owner(addr).is_none()
 }
 
+/// Whether a display controller goes behind its IOMMU when its driver
+/// module enables bus mastering: `set gpu_iommu on` (off by default until
+/// it is proven on every machine).
+pub fn iommu_wanted() -> bool {
+    crate::config::get("gpu_iommu").is_some_and(|v| v.trim().eq_ignore_ascii_case("on"))
+}
+
 /// Make `drv` the active GPU driver (gpudev on a module's ready, GOP when
 /// it goes away).
 pub(crate) fn install(drv: Box<dyn GpuHal>) {

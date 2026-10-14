@@ -21,6 +21,9 @@
 //! owner forgets it (`forget_pages`) and keeps the frames until
 //! `pages_released`.
 //!
+//! Behind an IOMMU (`drivers::vtd`) the card reaches a buffer from its
+//! registration on, and no longer once the module completed its removal.
+//!
 //! Jobs are done in the order they are queued. Each buffer remembers the
 //! last job that reads or writes it (its fence); a CPU writer waits only for
 //! that one.
@@ -98,6 +101,31 @@ impl Bo {
     }
 }
 
+/// The pages a buffer lets the card reach, for the IOMMU.
+#[derive(Clone)]
+enum Grant {
+    /// Contiguous frames: first page, count.
+    Range(u64, usize),
+    /// Foreign pages: list, index of the first, count.
+    Pages(Arc<ForeignPixels>, usize, usize),
+}
+
+impl Grant {
+    fn apply(&self, dev: PciAddr, on: bool) {
+        let one = |phys: u64, n: usize| {
+            if on { crate::drivers::vtd::grant(dev, phys, n) } else { crate::drivers::vtd::revoke(dev, phys, n) }
+        };
+        match self {
+            Grant::Range(p, n) => one(*p, *n),
+            Grant::Pages(list, first, n) => {
+                for &p in list.pages.iter().skip(*first).take(*n) {
+                    one(p, 1);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Job {
     seq: u32,
@@ -117,6 +145,8 @@ struct State {
     page_lists: BTreeMap<u32, (Arc<ForeignPixels>, usize)>,
     /// Removals of foreign buffers not yet completed: seq → serial.
     removing: BTreeMap<u32, u64>,
+    /// What the card stops reaching once a removal completes: seq → grant.
+    revoke_on: BTreeMap<u32, Grant>,
     next_id: u32,
     queue: VecDeque<Job>,
     /// Payloads of jobs not yet completed, by sequence number.
@@ -144,6 +174,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     by_serial: BTreeMap::new(),
     page_lists: BTreeMap::new(),
     removing: BTreeMap::new(),
+    revoke_on: BTreeMap::new(),
     next_id: FIXED_BOS,
     queue: VecDeque::new(),
     payloads: BTreeMap::new(),
@@ -215,9 +246,14 @@ pub fn register(dev: PciAddr, version: i32) -> i32 {
     st.by_serial.clear();
     st.page_lists.clear();
     st.removing.clear();
+    st.revoke_on.clear();
     st.bos.insert(0, Bo { addr: 0, size: fb.pitch as u64 * fb.height as u64, ..shadow(0) });
     st.bos.insert(1, shadow(pa));
     st.bos.insert(2, shadow(pb));
+    // Buffer 0 is the framebuffer in stolen memory, which the IOMMU maps
+    // with the device.
+    Grant::Range(pa, pages as usize).apply(dev, true);
+    Grant::Range(pb, pages as usize).apply(dev, true);
     st.queue.clear();
     st.payloads.clear();
     st.adding.clear();
@@ -404,9 +440,17 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
                 }
             }
         }
+        // Before the removal counts as done (`pages_released`) and before
+        // its frames go back: the card must not reach them any more.
+        if let Some(g) = st.revoke_on.remove(&seq) {
+            g.apply(dev, false);
+        }
         st.removing.remove(&seq);
         st.pending_free.remove(&seq)
     };
+    if status < 0 || seq % 64 == 0 {
+        crate::drivers::vtd::poll(dev);
+    }
     STATUS[seq as usize % STATUS.len()].store((seq as u64) << 32 | status as u32 as u64, Ordering::Release);
     COMPLETED.store(seq, Ordering::SeqCst);
     wake_waiters();
@@ -441,6 +485,15 @@ pub fn module_gone(dev: PciAddr) {
         st.owner = None;
         st.queue.clear();
         st.payloads.clear();
+        let ids: Vec<u32> = st.bos.keys().copied().filter(|&id| id != 0).collect();
+        for id in ids {
+            if let Some(g) = grant_of(&st, id) {
+                g.apply(dev, false);
+            }
+        }
+        for g in core::mem::take(&mut st.revoke_on).into_values() {
+            g.apply(dev, false);
+        }
         st.bos.clear();
         st.by_addr.clear();
         st.by_serial.clear();
@@ -534,6 +587,9 @@ pub fn bo_for(addr: u64, size: u64, width: u32, height: u32, pitch: u32) -> Opti
         gpu_addr: None, state: BoState::Adding, fence: 0,
     });
     st.by_addr.insert(addr, id);
+    if let (Some(dev), Some(g)) = (st.owner, grant_of(&st, id)) {
+        g.apply(dev, true);
+    }
     let seq = queue_job(&mut st, OP_BO_ADD, [id, 0, 0, 0, 0, 0], None, &[id]);
     st.adding.insert(seq, id);
     if st.pinning {
@@ -548,15 +604,28 @@ pub fn bo_for(addr: u64, size: u64, width: u32, height: u32, pitch: u32) -> Opti
 /// Queue the removal of buffer `id`; `free` is given back once the module
 /// completed it.
 fn retire(st: &mut State, id: u32, free: Option<(u64, usize)>) {
+    let grant = grant_of(st, id);
     st.bos.remove(&id);
     let list = st.page_lists.remove(&id);
     let seq = queue_job(st, OP_BO_REMOVE, [id, 0, 0, 0, 0, 0], None, &[]);
+    if let Some(g) = grant {
+        st.revoke_on.insert(seq, g);
+    }
     if let Some(f) = free {
         st.pending_free.insert(seq, f);
     }
     if let Some((list, _)) = list {
         st.removing.insert(seq, list.serial);
     }
+}
+
+/// The pages buffer `id` lets the card reach.
+fn grant_of(st: &State, id: u32) -> Option<Grant> {
+    let bo = st.bos.get(&id)?;
+    Some(match st.page_lists.get(&id) {
+        Some((list, first)) => Grant::Pages(list.clone(), *first, ((bo.addr & (PAGE - 1)) + bo.size).div_ceil(PAGE) as usize),
+        None => Grant::Range(bo.first_page().0, bo.pages() as usize),
+    })
 }
 
 /// The handle of the buffer `view` shows, registering it with the module
@@ -602,6 +671,9 @@ pub fn bo_for_pages(view: &ForeignView) -> Option<u32> {
     });
     st.by_serial.insert(serial, id);
     st.page_lists.insert(id, (view.pixels.clone(), first));
+    if let (Some(dev), Some(g)) = (st.owner, grant_of(&st, id)) {
+        g.apply(dev, true);
+    }
     let seq = queue_job(&mut st, OP_BO_ADD, [id, 0, 0, 0, 0, 0], None, &[id]);
     st.adding.insert(seq, id);
     if st.pinning {
