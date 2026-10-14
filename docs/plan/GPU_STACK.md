@@ -483,6 +483,37 @@ Compositor setzt ihn direkt zusammen (GPU) oder legt ihn auf eine Ebene. Die
 drei CPU-Kopien aus §1 fallen weg. Im CPU-Rueckfall bleibt `surface.rs`, wie
 es ist.
 
+**Entscheid 2026-10-14: zuerst Guest-Blobs, ohne Zwischenschritt ueber die
+Kopier-Engine.** Gemessen am NUC (Kernel 0.608.2, LibreWolf in 4K): der Gast
+schickt 58 TRANSFER/s, `xfer-KB` ~870 MB/s, die der GPU-Worker auf Kern 0
+mit der CPU kopiert und Zeile fuer Zeile vergleicht; die Kopie in die
+Gast-Flaeche ist seit 0.608.2 auf den Schaden beschraenkt (115 von 460 MB/s).
+Der Gast-Treiber (6.18.55, nachgelesen) macht den Rest selbst, sobald der
+Wirt `VIRTIO_GPU_F_RESOURCE_BLOB` anbietet (ohne virgl):
+
+- `virtgpu_gem.c:84`: Dumb-Puffer werden `VIRTGPU_BLOB_MEM_GUEST` mit
+  `USE_SHAREABLE` — Bildpuffer im Gastspeicher, am Gast nichts zu aendern.
+- `virtgpu_plane.c`: fuer Guest-Blobs `SET_SCANOUT_BLOB` statt `SET_SCANOUT`;
+  TRANSFER_TO_HOST_2D kommt weiter (`update_dumb_bo`) und wird beim Wirt fuer
+  Blobs zum Nichts; `RESOURCE_FLUSH` traegt einen Zaun, auf den der Gast bis
+  50 ms wartet, bevor er den Puffer wieder beschreibt (`:197ff`, `:368`).
+- QEMU (`blob=true`) und crosvm machen es so: Gastseiten per udmabuf als
+  GPU-Puffer, gezeichnet ohne Kopie.
+
+Bauplan (Stufe 6a, Baustein fuer native context):
+1. virtio-gpu: `F_RESOURCE_BLOB` anbieten **nur wenn gpudev Szenen anbietet**
+   (sonst bleibt der Gast beim 2D-Weg), `RESOURCE_CREATE_BLOB`
+   (`BLOB_MEM_GUEST`), `SET_SCANOUT_BLOB`, TRANSFER fuer Blobs leer.
+2. Die Seiten des Blobs als gpudev-Puffer (Seitenliste ueber die
+   Gast-Speicherabbildung); die Gast-Flaeche nennt diesen Puffer als Quelle
+   (`Source::Surface` → Blob statt Kopie).
+3. Den Flush-Zaun erst melden, wenn die Szene, die den Blob liest, fertig ist.
+4. Rueckfall, wenn das Modul waehrend der Sitzung stirbt: die CPU liest den
+   Schaden aus den Gastseiten in die Flaeche (heutiger `write_frame`-Weg ohne
+   Zwischenpuffer und ohne Zeilenvergleich).
+5. Lebensdauer: Blob-Puffer werden vor dem Freigeben des VM-Speichers bei
+   gpudev abgemeldet und ihre Zaeune abgewartet.
+
 ---
 
 ## 5. Nutzer B: der Desktop
@@ -635,6 +666,22 @@ ab, und `gpu_scene::finish` wartet, nachdem der Aufrufer den Lock
 losgelassen hat. Und das Dock ist ein Overlay (`docs/archive/DOCK.md` §3):
 die Kacheln werden einmal je Gleiten neu gelegt, nicht je Schritt, und ein
 Schritt zeichnet nur den Streifen des Docks neu.
+
+**Stand 2026-10-14 abends (Kernel 0.608.2, gpu_intel_tgl 0.14.0, NUC ✅):**
+3516 Szenen ohne Fehlschlag; Szenen im Schnitt 0,3–2 ms, ganze 4K-Bilder
+7–9 ms. Was den Weg dahin bestimmt hat:
+- Die Szenenausfuehrung: Itemdaten einmal je SIMD16-Thread laden (vorher je
+  Lane und Feld: 95 Speichernachrichten), 64x64-Kacheln mit Verdeckung (auch
+  ueber Paneel-Grenzen, ausser im Lesebereich der Unschaerfe), ein Thread =
+  16x16 px, Kopierpfad fuer Kacheln mit einem deckenden Eintrag, Terminal-Glas
+  im Geradzeilen-Bereich deckend mit eigenem Schnellweg. GPU-Zeitstempel je
+  Aufruf im Log (`gpudev: scene …`, erste 3 und alle ueber 16 ms).
+- Gastbilder setzen nur ihren Schaden zusammen (vorher je Gastbild der ganze
+  Schirm) und kopieren nur ihren Schaden in die Flaeche (`write_frame` mit
+  Schadens-Historie je Puffer).
+- Offen: fairer Vergleich ganzes Bild GPU gegen CPU mit Fenstern (`gpu cpu`);
+  Dock-Gleiten ohne Zeitbasis (geht jetzt praktisch sofort); Groesse beim
+  Ziehen erst beim Loslassen; A6.
 
 **Bekannte Fallen:** Overlays verlassen sich auf Pixel unter ihren Ecken
 (`compositor.rs:1938`); `render_damaged` zeichnet Fenster darueber nicht neu
