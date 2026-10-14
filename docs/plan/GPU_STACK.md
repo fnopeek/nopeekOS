@@ -462,6 +462,62 @@ einem `submit` ab — **ein Hostaufruf je Bild, nicht je Rechteck**. Was der
 Trait heute nicht kennt (Puffer zusammensetzen, Blur, Ebenen), kommt dazu,
 jeweils mit CPU-Umsetzung.
 
+### 5.4 Plan fuer A (2026-10-14, Florian: Desktop zuerst)
+
+**Ist (ausgezaehlt):** alles Zusammensetzen laeuft auf der CPU in EINEN
+Schattenpuffer; ein volles Bild kopiert dafuer `LAYER_BG` (33 MB) und
+setzt jedes Fenster mit `render_window` in Bildschirmkoordinaten neu
+zusammen (`shade/mod.rs:504`, `compositor.rs:1923`). Eigene Puffer haben
+nur Widget-Szenen (`WidgetScene.pixels`) und Gast-Flaechen (`surface.rs`).
+Teilwege (Terminalzeile, Fokus-Glow, Zeiger) schreiben direkt in den
+VORDEREN Puffer. Glas ist eine Heuristik (`glass_base_at`: unscharf nur, wo
+die Tapete sichtbar ist). `LAYER_CHROME`/`LAYER_TEXT` sind tot (63 MB).
+Animationen (Dock, Tausch) aendern jedes Bild die Fenstergroesse und
+erzwingen ein komplettes Neu-Rastern der Widget-Szenen. Die GPU kopiert
+heute nur das fertige Bild (Stufe 1b).
+
+**Ziel:** jedes Fenster und Panel lebt in seinem eigenen Puffer; ein Bild
+ist eine Szenenliste (§5.3); die GPU setzt sie zusammen, direkt in einen
+von zwei Scanout-Puffern, und die Anzeige wechselt per Flip im vblank. Der
+Zeiger liegt auf der Cursor-Plane. Die CPU rastert nur noch, was sich in
+einem Fenster wirklich geaendert hat.
+
+| Schritt | Inhalt | Ergebnis am Geraet |
+|---|---|---|
+| **A0** | Aufraeumen ohne Verhaltensaenderung: tote Layer weg (63 MB); Widget-Szenen in Fensterkoordinaten rastern (Verschieben rastert nicht mehr neu, Treffertests mit Versatz) | gleiches Bild, weniger Speicher, Dock-Animation ohne Neu-Rastern |
+| **A1** | Fenster als Puffer, **CPU-Weg zuerst**: Terminal rendert in seinen Puffer; alles, was heute in Luecken malt (Glow, Ecken, Dock-Griff, Blitz) wird ein eigener Szeneneintrag; Teilwege werden „Fensterpuffer aendern + Schaden melden“ | gleiches Bild; Bildzeit gemessen vorher/nachher |
+| **A2** | Die Szenenliste als Datenstruktur mit **CPU-Ausfuehrer** (aus dem heutigen Code); Zusammensetzen nur im Schadensbereich; Glas tastet ab, was WIRKLICH darunter liegt | CPU-Referenz fuer A5; Glas auch ueber Fenstern richtig |
+| **A3** | gpudev: Puffer dynamisch anmelden/abmelden (Fenster, Tapete, Unschaerfe, Scanout x2), Seitenlisten statt zusammenhaengend, `OP_SCENE`, Fences je Puffer statt `wait_inflight` | Kernel und Modul tauschen Szenen aus |
+| **A4** | Shader-Werkzeug (F8): Bauwerkzeug gegen Mesas `brw_compile_cs` (GLSL-Compute → Gen12-Binaerdaten + Parameterbeschreibung, wie `gen_regs.py` erzeugt) und der GPGPU-Start im Modul (Vorlagen: IGT `gpgpu_fill.c`/`gpu_cmds.c` Gen12, Mesa `genX_simple_shader.c`); Probe: Fuellen + Readback | erstes eigenes GPU-Programm laeuft am NUC |
+| **A5** | Die festen Programme: Viereck mit Textur/Deckkraft/Eckenmaske, Unschaerfe (verkleinern + Box), Glow-Ring, Fuellen; GPU-Ausfuehrer der Szenenliste; Pixelvergleich gegen den CPU-Ausfuehrer als Selbsttest | Desktop setzt auf der GPU zusammen; CPU-Last bei Animation in 4K gemessen |
+| **A6** | Ebenen: Cursor-Plane (save-under faellt weg, das Stocken mit), Flip zwischen zwei Scanout-Puffern im vblank statt Kopie (PLANE_SURF wie `skl_fixup_initial_plane_config`, Ebenen-Register aus `skl_universal_plane.c`) | Zeiger ruckelfrei, kein Kopieren mehr |
+
+**Reihenfolge, weil:** A0–A2 sind reine CPU-Umbauten mit gleichem Bild und
+lassen sich einzeln pruefen — ein Fehler dort ist ein falsches Bild, nicht
+ein GPU-Haenger. A4 ist die groesste Unbekannte (F8) und kann parallel zu
+A1/A2 laufen. A6 haengt nur an A3 und koennte vorgezogen werden, wenn der
+Zeiger draengt.
+
+**Bewusste Entscheidungen:**
+- **Compute statt 3D-Pipeline:** GPGPU braucht keinen Vertex-/Raster-
+  Zustand; Zusammensetzen ist je Pixel eine Schleife ueber die
+  Szeneneintraege, die ihn bedecken. Die 3D-Pipeline bleibt der Gast-Welt.
+- **Animationen skalieren, statt neu zu rastern:** waehrend einer Dock- oder
+  Tausch-Animation wird der alte Fensterpuffer gestreckt oder beschnitten;
+  neu gerastert wird erst am Ende.
+- **Text bleibt auf der CPU** (`font.rs`, fontdue), in den Fensterpuffer.
+- **Alles Zusammensetzen bleibt auf Kern 0** (Invariante heute); Rastern der
+  Widgets laeuft wie bisher auf den App-Kernen.
+- **Der CPU-Ausfuehrer bleibt fuer immer:** ohne Modul (§2.2) setzt er
+  dieselbe Szenenliste zusammen.
+
+**Bekannte Fallen:** Overlays verlassen sich auf Pixel unter ihren Ecken
+(`compositor.rs:1938`); `render_damaged` zeichnet Fenster darueber nicht neu
+(`compositor.rs:2340`, heute nur fuer Overlays geflickt); `virtio_gpu_pci.rs:1456`
+schreibt am Compositor vorbei in den vorderen Puffer; Speicher: neun
+Bildschirmpuffer heute (≈285 MB), mit A0 sieben, danach je Fenster sein
+Inhalt statt eines geteilten Puffers.
+
 ---
 
 ## 6. Nutzer C: Apps
@@ -555,9 +611,7 @@ Jede Stufe hat ein Ergebnis, das man am Geraet sieht oder misst.
 | **1a** ✅ | `gpu_intel_tgl` faehrt die Karte nach Linux hoch: Display-Auslesung, Uebernahme des Firmware-Bildes, GGTT, GT, Workarounds, RC6/RPS, PPGTT, alle Engines mit Execlists, MSI (0.2.0–0.8.0) | NUC | 2026-10-14: `default context recorded` auf rcs0/bcs0/vcs2/vecs0, Bild bleibt |
 | **1b** | gpudev-Kern (§3.3: Griffe, Abgabe, Fences, Kontexte) + erster Nutzer Bildkopie per bcs0 + Autostart nach dem Login + Readback-Selbsttest; danach **`intel_xe.rs` raus** | NUC | gleiche Bildzeiten wie heute; Hostaufrufe je Bild gezaehlt (forge-Kosten) |
 | **2** | IOMMU (VT-d) fuer die Karte — Voraussetzung fuer fremde Befehlspuffer (F5) | NUC | Karte erreicht nur freigegebene Seiten; Gegenprobe mit absichtlich falscher Adresse |
-| **3** | Fenster als Puffer im Compositor (CPU-Weg zuerst) | beide | kein Rueckschritt auf dem CPU-Weg |
-| **4** | Display-Ebenen: Zeiger, dann ein Fenster; Flip statt Kopie | NUC | Zeiger ohne save-under |
-| **5** | Szenenliste + feste Shader (beim Bauen uebersetzt): Zusammensetzen, Glas, Ecken, Animationen | NUC | `comp`-Zeit je 4K-Bild vorher/nachher, CPU-Last bei Animation |
+| **3–5** | Desktop auf der GPU, in Schritten A0–A6 (§5.4): Fenster als Puffer, Szenenliste mit CPU- und GPU-Ausfuehrer, feste Shader, Cursor-Plane, Flip | NUC | `comp`-Zeit je 4K-Bild vorher/nachher, CPU-Last bei Animation |
 | **6** | virtio-gpu: blob, context init, hostmem, Capset `DRM` | — | Gast sieht das Capset |
 | **7** | native context Intel (Wirtsseite i915-Protokoll) + Gast-Mesa mit `intel-virtio-experimental` | NUC | `glxinfo` im Gast nennt iris; WebGL in LibreWolf |
 | **8** | `gpu_amd` Fundament: PSP, Firmware, SDMA, GFX, GPUVM | IdeaPad | SDMA-Selbsttest gruen |
