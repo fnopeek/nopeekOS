@@ -6,8 +6,7 @@
 //! on the wrong DBUF slices or pipe, a pipe without encoder, an encoder
 //! without pipe) is the noatomic disable path of a modeset, which waits
 //! for vblanks and is not ported; each such case is reported and left as
-//! it is. Vblank interrupts (`intel_crtc_vblank_on`) and FIFO underrun
-//! reporting come with the interrupt handler.
+//! it is.
 
 use crate::i915_drv::drm_i915_private;
 use crate::intel_crtc;
@@ -484,6 +483,16 @@ pub fn intel_modeset_setup_hw_state(i915: &mut drm_i915_private, opregion: Optio
 
     // HW state is read out, now sanitize it.
     get_encoder_power_domains(i915);
+
+    // Vblank interrupts come back before anything below may wait for one.
+    // drm_crtc_vblank_reset finds the vblank state fresh; FIFO underrun
+    // reporting starts off and stays so until a commit.
+    for c in 0..I915_MAX_PIPES as usize {
+        if i915.display.crtc_valid[c] && i915.display.crtcs[c].state.hw.active {
+            let pipe = i915.display.crtcs[c].pipe;
+            crate::intel_display_irq::drm_crtc_vblank_on(i915, pipe);
+        }
+    }
 
     crate::intel_fbc::intel_fbc_sanitize(i915);
 

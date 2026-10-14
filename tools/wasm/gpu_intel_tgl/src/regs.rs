@@ -1454,6 +1454,15 @@ pub const DISPLAY_TYPE_CRT: u32 = 0x0; // display/intel_opregion.c:385
 pub const DISPLAY_TYPE_EXTERNAL_FLAT_PANEL: u32 = 0x2; // display/intel_opregion.c:387
 pub const DISPLAY_TYPE_INTERNAL_FLAT_PANEL: u32 = 0x3; // display/intel_opregion.c:388
 
+// GEM init (i915_gem.c, gt/intel_wopcm.c, gt/intel_gtt.c, gt/intel_ggtt.c, intel_clock_gating.c)
+pub const GEN11_WOPCM_SIZE: u32 = 0x200000; // gt/intel_wopcm.c:44
+/// gt/intel_gt_regs.h:364
+pub const fn GEN12_PAT_INDEX(i: u32) -> u32 { (0x4800 + (i) * 4) }
+pub const GEN8_PPAT_WB: u32 = 0x3; // gt/intel_gtt.h:145
+pub const GEN8_PPAT_WT: u32 = 0x2; // gt/intel_gtt.h:146
+pub const GEN8_PPAT_WC: u32 = 0x1; // gt/intel_gtt.h:147
+pub const GEN8_PPAT_UC: u32 = 0x0; // gt/intel_gtt.h:148
+
 // GT init (gt/intel_gt.c, intel_workarounds.c, intel_mocs.c, intel_gt_pm.c, intel_rc6.c, intel_rps.c, intel_llc.c)
 pub const GEN8_MCR_SELECTOR: u32 = 0xfdc; // gt/intel_gt_regs.h:69
 /// gt/intel_gt_regs.h:76
@@ -1554,3 +1563,176 @@ pub const fn GEN9_LNCFCMOCS(i: u32) -> u32 { (0xb020 + (i) * 4) }
 pub const GEN9_NUM_MOCS_ENTRIES: u32 = 0x40; // gt/intel_mocs.c:55
 pub const I915_MOCS_PTE: u32 = 0x1; // ?
 pub const POWER_DOMAIN_GT_IRQ: u32 = 0x48; // display/intel_display_power.h:111
+
+// interrupts (i915_irq.c, gt/intel_gt_irq.c, display/intel_display_irq.c)
+pub const TGL_HAS_HECI_PXP: u32 = 0x0; // tgl_info.has_heci_pxp in i915_pci.c
+pub const TGL_HAS_HECI_GSCFI: u32 = 0x0; // tgl_info.has_heci_gscfi in i915_pci.c
+pub const TGL_DISPLAY_HAS_DSB: u32 = 0x1; // tgl_desc.info->has_dsb in display/intel_display_device.c
+pub const TGL_DISPLAY_HAS_PSR: u32 = 0x1; // tgl_desc.info->has_psr in display/intel_display_device.c
+pub const GEN11_GFX_MSTR_IRQ: u32 = 0x190010; // i915_reg.h:914
+pub const GEN11_MASTER_IRQ: i32 = -2147483648; // i915_reg.h:915
+pub const GEN11_DISPLAY_IRQ: u32 = 0x10000; // i915_reg.h:918
+pub const GEN11_GU_MISC_IRQ: u32 = 0x20000000; // i915_reg.h:917
+/// i915_reg.h:919
+pub const fn GEN11_GT_DW_IRQ(x: u32) -> u32 { (1 << (x)) }
+pub const GEN11_INTR_ENGINE_CLASS_MASK: u32 = 0x70000; // ((GEN11_INTR_ENGINE_CLASS(1u << 0) ? 1u << 0 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 1) ? 1u << 1 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 2) ? 1u << 2 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 3) ? 1u << 3 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 4) ? 1u << 4 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 5) ? 1u << 5 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 6) ? 1u << 6 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 7) ? 1u << 7 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 8) ? 1u << 8 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 9) ? 1u << 9 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 10) ? 1u << 10 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 11) ? 1u << 11 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 12) ? 1u << 12 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 13) ? 1u << 13 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 14) ? 1u << 14 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 15) ? 1u << 15 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 16) ? 1u << 16 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 17) ? 1u << 17 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 18) ? 1u << 18 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 19) ? 1u << 19 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 20) ? 1u << 20 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 21) ? 1u << 21 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 22) ? 1u << 22 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 23) ? 1u << 23 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 24) ? 1u << 24 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 25) ? 1u << 25 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 26) ? 1u << 26 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 27) ? 1u << 27 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 28) ? 1u << 28 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 29) ? 1u << 29 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 30) ? 1u << 30 : 0) | (GEN11_INTR_ENGINE_CLASS(1u << 31) ? 1u << 31 : 0)) in gt/intel_gt_irq.c
+pub const GEN11_INTR_ENGINE_INSTANCE_MASK: u32 = 0x3f00000; // ((GEN11_INTR_ENGINE_INSTANCE(1u << 0) ? 1u << 0 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 1) ? 1u << 1 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 2) ? 1u << 2 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 3) ? 1u << 3 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 4) ? 1u << 4 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 5) ? 1u << 5 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 6) ? 1u << 6 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 7) ? 1u << 7 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 8) ? 1u << 8 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 9) ? 1u << 9 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 10) ? 1u << 10 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 11) ? 1u << 11 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 12) ? 1u << 12 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 13) ? 1u << 13 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 14) ? 1u << 14 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 15) ? 1u << 15 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 16) ? 1u << 16 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 17) ? 1u << 17 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 18) ? 1u << 18 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 19) ? 1u << 19 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 20) ? 1u << 20 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 21) ? 1u << 21 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 22) ? 1u << 22 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 23) ? 1u << 23 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 24) ? 1u << 24 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 25) ? 1u << 25 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 26) ? 1u << 26 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 27) ? 1u << 27 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 28) ? 1u << 28 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 29) ? 1u << 29 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 30) ? 1u << 30 : 0) | (GEN11_INTR_ENGINE_INSTANCE(1u << 31) ? 1u << 31 : 0)) in gt/intel_gt_irq.c
+/// gt/intel_gt_regs.h:1598
+pub const fn GEN11_INTR_ENGINE_INTR(x: u32) -> u32 { ((x) & 0xffff) }
+pub const GEN11_RENDER_COPY_INTR_ENABLE: u32 = 0x190030; // gt/intel_gt_regs.h:1584
+pub const GEN11_VCS_VECS_INTR_ENABLE: u32 = 0x190034; // gt/intel_gt_regs.h:1585
+pub const GEN12_CCS_RSVD_INTR_ENABLE: u32 = 0x190048; // gt/intel_gt_regs.h:1592
+pub const GEN11_GUNIT_CSME_INTR_ENABLE: u32 = 0x190044; // gt/intel_gt_regs.h:1591
+pub const GEN11_RCS0_RSVD_INTR_MASK: u32 = 0x190090; // gt/intel_gt_regs.h:1610
+pub const GEN11_BCS_RSVD_INTR_MASK: u32 = 0x1900a0; // gt/intel_gt_regs.h:1611
+pub const XEHPC_BCS1_BCS2_INTR_MASK: u32 = 0x190110; // gt/intel_gt_regs.h:1626
+pub const XEHPC_BCS3_BCS4_INTR_MASK: u32 = 0x190114; // gt/intel_gt_regs.h:1627
+pub const XEHPC_BCS5_BCS6_INTR_MASK: u32 = 0x190118; // gt/intel_gt_regs.h:1628
+pub const XEHPC_BCS7_BCS8_INTR_MASK: u32 = 0x19011c; // gt/intel_gt_regs.h:1629
+pub const GEN11_VCS0_VCS1_INTR_MASK: u32 = 0x1900a8; // gt/intel_gt_regs.h:1612
+pub const GEN11_VCS2_VCS3_INTR_MASK: u32 = 0x1900ac; // gt/intel_gt_regs.h:1613
+pub const GEN12_VCS4_VCS5_INTR_MASK: u32 = 0x1900b0; // gt/intel_gt_regs.h:1614
+pub const GEN12_VCS6_VCS7_INTR_MASK: u32 = 0x1900b4; // gt/intel_gt_regs.h:1615
+pub const GEN11_VECS0_VECS1_INTR_MASK: u32 = 0x1900d0; // gt/intel_gt_regs.h:1616
+pub const GEN12_VECS2_VECS3_INTR_MASK: u32 = 0x1900d4; // gt/intel_gt_regs.h:1617
+pub const GEN12_CCS0_CCS1_INTR_MASK: u32 = 0x190100; // gt/intel_gt_regs.h:1624
+pub const GEN12_CCS2_CCS3_INTR_MASK: u32 = 0x190104; // gt/intel_gt_regs.h:1625
+pub const GEN11_GUNIT_CSME_INTR_MASK: u32 = 0x1900f4; // gt/intel_gt_regs.h:1623
+pub const GEN12_HECI2_RSVD_INTR_MASK: u32 = 0x1900e4; // gt/intel_gt_regs.h:1618
+pub const ENGINE1_MASK: u32 = 0xffff0000; // gt/intel_gt_regs.h:1587
+pub const GEN11_GUC_SG_INTR_ENABLE: u32 = 0x190038; // gt/intel_gt_regs.h:1586
+pub const GEN11_GUC_SG_INTR_MASK: u32 = 0x1900e8; // gt/intel_gt_regs.h:1619
+pub const GEN11_CRYPTO_RSVD_INTR_ENABLE: u32 = 0x190040; // gt/intel_gt_regs.h:1590
+pub const GEN11_CRYPTO_RSVD_INTR_MASK: u32 = 0x1900f0; // gt/intel_gt_regs.h:1622
+pub const GT_RENDER_USER_INTERRUPT: u32 = 0x1; // i915_reg.h:515
+pub const GT_CS_MASTER_ERROR_INTERRUPT: u32 = 0x8; // i915_reg.h:512
+pub const GT_CONTEXT_SWITCH_INTERRUPT: u32 = 0x100; // i915_reg.h:509
+pub const GT_WAIT_SEMAPHORE_INTERRUPT: u32 = 0x800; // i915_reg.h:508
+/// gt/intel_gsc.h:19
+pub const fn GSC_IRQ_INTF(x: u32) -> u32 { ((((1))) << (15 - (x))) }
+pub const OTHER_GUC_INSTANCE: u32 = 0x0; // gt/intel_gt_regs.h:1600
+pub const OTHER_GTPM_INSTANCE: u32 = 0x1; // gt/intel_gt_regs.h:1601
+pub const OTHER_KCR_INSTANCE: u32 = 0x4; // gt/intel_gt_regs.h:1603
+pub const OTHER_GSC_INSTANCE: u32 = 0x6; // gt/intel_gt_regs.h:1604
+pub const OTHER_GSC_HECI_2_INSTANCE: u32 = 0x3; // gt/intel_gt_regs.h:1602
+pub const OTHER_MEDIA_GUC_INSTANCE: u32 = 0x10; // gt/intel_gt_regs.h:1605
+pub const OTHER_MEDIA_GTPM_INSTANCE: u32 = 0x11; // gt/intel_gt_regs.h:1606
+pub const BCS1: u32 = 0x2; // gt/intel_engine_types.h:114
+pub const BCS2: u32 = 0x3; // gt/intel_engine_types.h:115
+pub const BCS3: u32 = 0x4; // gt/intel_engine_types.h:116
+pub const BCS4: u32 = 0x5; // gt/intel_engine_types.h:117
+pub const BCS5: u32 = 0x6; // gt/intel_engine_types.h:118
+pub const BCS6: u32 = 0x7; // gt/intel_engine_types.h:119
+pub const BCS7: u32 = 0x8; // gt/intel_engine_types.h:120
+pub const BCS8: u32 = 0x9; // gt/intel_engine_types.h:121
+pub const VCS4: u32 = 0xe; // gt/intel_engine_types.h:127
+pub const VCS5: u32 = 0xf; // gt/intel_engine_types.h:128
+pub const VCS6: u32 = 0x10; // gt/intel_engine_types.h:129
+pub const VCS7: u32 = 0x11; // gt/intel_engine_types.h:130
+pub const VECS2: u32 = 0x14; // gt/intel_engine_types.h:134
+pub const VECS3: u32 = 0x15; // gt/intel_engine_types.h:135
+pub const CCS1: u32 = 0x17; // gt/intel_engine_types.h:138
+pub const CCS2: u32 = 0x18; // gt/intel_engine_types.h:139
+pub const CCS3: u32 = 0x19; // gt/intel_engine_types.h:140
+pub const GEN8_PCU_IMR: u32 = 0x444e4; // i915_reg.h:896
+pub const GEN8_PCU_IIR: u32 = 0x444e8; // i915_reg.h:897
+pub const GEN8_PCU_IER: u32 = 0x444ec; // i915_reg.h:898
+pub const GEN11_GU_MISC_IMR: u32 = 0x444f4; // i915_reg.h:905
+pub const GEN11_GU_MISC_IIR: u32 = 0x444f8; // i915_reg.h:906
+pub const GEN11_GU_MISC_IER: u32 = 0x444fc; // i915_reg.h:907
+pub const GEN11_GU_MISC_GSE: u32 = 0x8000000; // i915_reg.h:908
+pub const GEN11_DISPLAY_INT_CTL: u32 = 0x44200; // display/intel_display_regs.h:1336
+pub const GEN11_DISPLAY_IRQ_ENABLE: i32 = -2147483648; // display/intel_display_regs.h:1337
+/// display/intel_display_regs.h:1235
+pub const fn GEN8_DE_PIPE_IMR(pipe: u32) -> u32 { (0x44404 + (0x10 * (pipe))) }
+/// display/intel_display_regs.h:1236
+pub const fn GEN8_DE_PIPE_IIR(pipe: u32) -> u32 { (0x44408 + (0x10 * (pipe))) }
+/// display/intel_display_regs.h:1237
+pub const fn GEN8_DE_PIPE_IER(pipe: u32) -> u32 { (0x4440c + (0x10 * (pipe))) }
+pub const GEN8_DE_PORT_IMR: u32 = 0x44444; // display/intel_display_regs.h:1286
+pub const GEN8_DE_PORT_IIR: u32 = 0x44448; // display/intel_display_regs.h:1287
+pub const GEN8_DE_PORT_IER: u32 = 0x4444c; // display/intel_display_regs.h:1288
+pub const GEN8_DE_MISC_IMR: u32 = 0x44464; // display/intel_display_regs.h:1322
+pub const GEN8_DE_MISC_IIR: u32 = 0x44468; // display/intel_display_regs.h:1323
+pub const GEN8_DE_MISC_IER: u32 = 0x4446c; // display/intel_display_regs.h:1324
+pub const GEN11_DE_HPD_IMR: u32 = 0x44474; // display/intel_display_regs.h:1348
+pub const GEN11_DE_HPD_IIR: u32 = 0x44478; // display/intel_display_regs.h:1349
+pub const GEN11_DE_HPD_IER: u32 = 0x4447c; // display/intel_display_regs.h:1350
+pub const SDEIMR: u32 = 0xc4004; // i915_reg.h:1009
+pub const SDEIIR: u32 = 0xc4008; // i915_reg.h:1010
+pub const SDEIER: u32 = 0xc400c; // i915_reg.h:1011
+/// display/intel_psr_regs.h:70, at tgl_desc's display info
+pub const fn TRANS_PSR_IMR(tran: u32) -> u32 { match tran { 0 => 0x60814, 1 => 0x61814, 2 => 0x62814, 3 => 0x63814, _ => panic!("TRANS_PSR_IMR: index not generated") } }
+/// display/intel_psr_regs.h:71, at tgl_desc's display info
+pub const fn TRANS_PSR_IIR(tran: u32) -> u32 { match tran { 0 => 0x60818, 1 => 0x61818, 2 => 0x62818, 3 => 0x63818, _ => panic!("TRANS_PSR_IIR: index not generated") } }
+pub const GEN8_DE_MISC_IRQ: u32 = 0x400000; // i915_reg.h:865
+pub const GEN11_DE_HPD_IRQ: u32 = 0x200000; // display/intel_display_regs.h:1341
+pub const GEN8_DE_PORT_IRQ: u32 = 0x100000; // i915_reg.h:866
+/// i915_reg.h:870
+pub const fn GEN8_DE_PIPE_IRQ(pipe: u32) -> u32 { (1 << (16 + (pipe))) }
+pub const GEN8_DE_PCH_IRQ: u32 = 0x800000; // i915_reg.h:864
+pub const GEN8_PIPE_VBLANK: u32 = 0x1; // display/intel_display_regs.h:1276
+pub const GEN8_PIPE_FIFO_UNDERRUN: u32 = 0x80000000; // display/intel_display_regs.h:1238
+pub const GEN8_PIPE_CDCLK_CRC_DONE: u32 = 0x10000000; // display/intel_display_regs.h:1240
+pub const GEN9_PIPE_PLANE1_FLIP_DONE: u32 = 0x8; // display/intel_display_regs.h:1271
+/// display/intel_display_regs.h:1257
+pub const fn GEN12_DSB_INT(dsb_id: u32) -> u32 { (1 << (13 + (dsb_id))) }
+pub const INTEL_DSB_0: u32 = 0x0; // display/intel_dsb.h:22
+pub const INTEL_DSB_1: u32 = 0x1; // display/intel_dsb.h:23
+pub const INTEL_DSB_2: u32 = 0x2; // display/intel_dsb.h:24
+pub const GEN12_PIPEDMC_INTERRUPT: u32 = 0x4000000; // display/intel_display_regs.h:1241
+pub const GEN12_PIPEDMC_FAULT: u32 = 0x2000000; // display/intel_display_regs.h:1242
+pub const GEN9_PIPE_CURSOR_FAULT: u32 = 0x800; // display/intel_display_regs.h:1258
+pub const GEN11_PIPE_PLANE7_FAULT: u32 = 0x400000; // display/intel_display_regs.h:1245
+pub const GEN11_PIPE_PLANE6_FAULT: u32 = 0x200000; // display/intel_display_regs.h:1246
+pub const GEN11_PIPE_PLANE5_FAULT: u32 = 0x100000; // display/intel_display_regs.h:1247
+pub const GEN9_PIPE_PLANE4_FAULT: u32 = 0x400; // display/intel_display_regs.h:1259
+pub const GEN9_PIPE_PLANE3_FAULT: u32 = 0x200; // display/intel_display_regs.h:1261
+pub const GEN9_PIPE_PLANE2_FAULT: u32 = 0x100; // display/intel_display_regs.h:1263
+pub const GEN9_PIPE_PLANE1_FAULT: u32 = 0x80; // display/intel_display_regs.h:1265
+pub const TGL_DE_PORT_AUX_DDIA: u32 = 0x1; // display/intel_display_regs.h:1315
+pub const TGL_DE_PORT_AUX_DDIB: u32 = 0x2; // display/intel_display_regs.h:1314
+pub const TGL_DE_PORT_AUX_DDIC: u32 = 0x4; // display/intel_display_regs.h:1313
+pub const TGL_DE_PORT_AUX_USBC1: u32 = 0x100; // display/intel_display_regs.h:1312
+pub const TGL_DE_PORT_AUX_USBC2: u32 = 0x200; // display/intel_display_regs.h:1311
+pub const TGL_DE_PORT_AUX_USBC3: u32 = 0x400; // display/intel_display_regs.h:1310
+pub const TGL_DE_PORT_AUX_USBC4: u32 = 0x800; // display/intel_display_regs.h:1309
+pub const TGL_DE_PORT_AUX_USBC5: u32 = 0x1000; // display/intel_display_regs.h:1307
+pub const TGL_DE_PORT_AUX_USBC6: u32 = 0x2000; // display/intel_display_regs.h:1305
+pub const GEN8_DE_EDP_PSR: u32 = 0x80000; // display/intel_display_regs.h:1328
+pub const GEN8_DE_MISC_GSE: u32 = 0x8000000; // display/intel_display_regs.h:1327
+pub const DSI0_TE: u32 = 0x800000; // display/intel_display_regs.h:1297
+pub const DSI1_TE: u32 = 0x1000000; // display/intel_display_regs.h:1296
+pub const GEN11_DE_TC_HOTPLUG_MASK: u32 = 0x3f0000; // display/intel_display_regs.h:1352
+pub const GEN11_DE_TBT_HOTPLUG_MASK: u32 = 0x3f; // display/intel_display_regs.h:1359
+pub const SDE_GMBUS_ICP: u32 = 0x800000; // display/intel_display_regs.h:1657
+pub const SDE_DDI_HOTPLUG_MASK_ICP: u32 = 0xf0000; // display/intel_display_regs.h:1661
+pub const SDE_TC_HOTPLUG_MASK_ICP: u32 = 0x3f000000; // display/intel_display_regs.h:1665
+pub const SHOTPLUG_CTL_DDI: u32 = 0xc4030; // display/intel_display_regs.h:1735
+pub const SHOTPLUG_CTL_TC: u32 = 0xc4034; // display/intel_display_regs.h:1744
+pub const GEN11_TC_HOTPLUG_CTL: u32 = 0x44038; // display/intel_display_regs.h:1371
+pub const GEN11_TBT_HOTPLUG_CTL: u32 = 0x44030; // display/intel_display_regs.h:1370
+/// display/intel_display_regs.h:1373
+pub const fn GEN11_HOTPLUG_CTL_LONG_DETECT(hpd_pin: u32) -> u32 { (2 << (((hpd_pin) - 0x9) * 4)) }
+/// display/intel_display_regs.h:1741
+pub const fn SHOTPLUG_CTL_DDI_HPD_LONG_DETECT(hpd_pin: u32) -> u32 { (0x2 << (((hpd_pin) - 0x4) * 4)) }
+/// display/intel_display_regs.h:1746
+pub const fn ICP_TC_HPD_LONG_DETECT(hpd_pin: u32) -> u32 { (2 << (((hpd_pin) - 0x9) * 4)) }
+pub const HPD_PORT_B: u32 = 0x5; // display/intel_display_limits.h:127
+pub const HPD_PORT_C: u32 = 0x6; // display/intel_display_limits.h:128
+pub const HPD_PORT_D: u32 = 0x7; // display/intel_display_limits.h:129
+pub const HPD_PORT_TC6: u32 = 0xe; // display/intel_display_limits.h:136
+/// display/skl_universal_plane_regs.h:190
+pub const fn PLANE_SURFLIVE(pipe: u32, plane: u32) -> u32 { (((((((0x701ac))) + ((((pipe)))) * ((((0x711ac))) - (((0x701ac)))))) + ((((plane)))) * ((((((0x702ac))) + ((((pipe)))) * ((((0x712ac))) - (((0x702ac)))))) - (((((0x701ac))) + ((((pipe)))) * ((((0x711ac))) - (((0x701ac))))))))) }
+/// display/intel_pipe_crc_regs.h:150
+pub const fn PIPE_CRC_RES_HSW(pipe: u32) -> u32 { (((0x60064) + ((pipe)) * ((0x61064) - (0x60064)))) }
+pub const PLANE_3: u32 = 0x2; // display/intel_display_limits.h:76
+pub const PLANE_4: u32 = 0x3; // display/intel_display_limits.h:77
+pub const PLANE_5: u32 = 0x4; // display/intel_display_limits.h:78
+pub const PLANE_6: u32 = 0x5; // display/intel_display_limits.h:79
+pub const PLANE_7: u32 = 0x6; // display/intel_display_limits.h:80
+/// display/intel_cursor_regs.h:44, at tgl_desc's display info
+pub const fn CURBASE(pipe: u32) -> u32 { match pipe { 0 => 0x70084, 1 => 0x71084, 2 => 0x72084, 3 => 0x73084, _ => panic!("CURBASE: index not generated") } }
+/// display/intel_cursor_regs.h:75, at tgl_desc's display info
+pub const fn CURSURFLIVE(pipe: u32) -> u32 { match pipe { 0 => 0x700ac, 1 => 0x710ac, 2 => 0x720ac, 3 => 0x730ac, _ => panic!("CURSURFLIVE: index not generated") } }
+pub const SDE_PICAINTERRUPT: u32 = 0x80000000; // display/intel_display_regs.h:1656

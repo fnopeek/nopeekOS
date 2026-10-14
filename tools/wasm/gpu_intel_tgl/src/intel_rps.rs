@@ -76,50 +76,9 @@ fn rps_enable_interrupts(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     i915.uncore.intel_uncore_write(GEN6_PMINTRMSK, rps_pm_mask(&gt.rps, gt.rps.last_freq));
 }
 
-// gt/intel_gt_irq.c: the identity handshake and `gen11_gt_reset_one_iir`,
-// the part of the GT interrupt code the RPS reset needs.
-
-/// `gen11_gt_engine_identity`: select the bit, wait up to ~100 us for the
-/// identity to become valid, then acknowledge it.
-fn gen11_gt_engine_identity(i915: &mut drm_i915_private, bank: u32, bit: u32) -> u32 {
-    let u = &i915.uncore;
-    u.__raw_uncore_write32(GEN11_IIR_REG_SELECTOR(bank), 1 << bit);
-
-    let t0 = linux::now_us();
-    let mut ident;
-    loop {
-        ident = u.__raw_uncore_read32(GEN11_INTR_IDENTITY_REG(bank));
-        if ident & GEN11_INTR_DATA_VALID as u32 != 0 || linux::now_us() - t0 > 100 {
-            break;
-        }
-    }
-
-    if ident & GEN11_INTR_DATA_VALID as u32 == 0 {
-        Line::new().s("error: INTR_IDENTITY_REG").dec(bank as u64).s(":").dec(bit as u64).s(" ").hex(ident)
-            .s(" not valid!").say();
-        return 0;
-    }
-
-    u.__raw_uncore_write32(GEN11_INTR_IDENTITY_REG(bank), GEN11_INTR_DATA_VALID as u32);
-    ident
-}
-
-/// `gen11_gt_reset_one_iir`.
-fn gen11_gt_reset_one_iir(i915: &mut drm_i915_private, bank: u32, bit: u32) -> bool {
-    let dw = i915.uncore.__raw_uncore_read32(GEN11_GT_INTR_DW(bank));
-    if dw & (1 << bit) != 0 {
-        // The DW_IIR bit only clears after the selector and shared IIR
-        // have been serviced.
-        gen11_gt_engine_identity(i915, bank, bit);
-        i915.uncore.__raw_uncore_write32(GEN11_GT_INTR_DW(bank), 1 << bit);
-        return true;
-    }
-    false
-}
-
 /// `gen11_rps_reset_interrupts`.
 fn gen11_rps_reset_interrupts(i915: &mut drm_i915_private) {
-    while gen11_gt_reset_one_iir(i915, 0, GEN11_GTPM) {}
+    while crate::intel_gt_irq::gen11_gt_reset_one_iir(i915, 0, GEN11_GTPM) {}
 }
 
 /// `rps_reset_interrupts`.

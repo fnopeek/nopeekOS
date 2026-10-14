@@ -48,6 +48,7 @@ tgl_plls[ARRAY_SIZE(tgl_plls) - 1] => tgl_plls: dpll_info { name=e0.name as str,
 d12_port_domains: intel_ddi_port_domains { port_start, port_end, aux_ch_start, aux_ch_end, ddi_lanes, ddi_io, aux_io, aux_legacy_usbc, aux_tbt }
 @ display/intel_hotplug_irq.c
 hpd_icp: u32
+hpd_gen11: u32
 @ display/intel_dp.c
 intel_dp_set_source_rates::icl_rates: i32
 @ ../drm_fourcc.c
