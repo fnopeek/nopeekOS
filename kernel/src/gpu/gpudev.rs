@@ -168,6 +168,11 @@ static COMPLETED: AtomicU32 = AtomicU32::new(0);
 static DYN_FENCE: AtomicU32 = AtomicU32::new(0);
 static WAKER: AtomicU32 = AtomicU32::new(NO_WAKER);
 
+/// Longest single halt while waiting for a job.
+const HALT_STEP_US: u64 = 500;
+/// Cores halted in `wait_seq`, one bit each; `complete` wakes them.
+static WAITING_CORES: AtomicU64 = AtomicU64::new(0);
+
 /// Status of the last 64 completed jobs, `seq << 32 | status`.
 static STATUS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
 
@@ -403,7 +408,8 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
         st.pending_free.remove(&seq)
     };
     STATUS[seq as usize % STATUS.len()].store((seq as u64) << 32 | status as u32 as u64, Ordering::Release);
-    COMPLETED.store(seq, Ordering::Release);
+    COMPLETED.store(seq, Ordering::SeqCst);
+    wake_waiters();
     if let Some((phys, pages)) = free {
         crate::memory::deallocate_contiguous(phys, pages);
     }
@@ -449,6 +455,7 @@ pub fn module_gone(dev: PciAddr) {
     READY.store(false, Ordering::Release);
     SCENES.store(false, Ordering::Release);
     WAKER.store(NO_WAKER, Ordering::Release);
+    wake_waiters();
     for (phys, pages) in frees {
         crate::memory::deallocate_contiguous(phys, pages);
     }
@@ -703,6 +710,50 @@ pub fn release(addr: u64, phys: u64, pages: usize) -> bool {
     false
 }
 
+/// Wake every core halted in `wait_seq`; it looks again at what it waits
+/// for. SeqCst against the waiter's bit-then-look in `halt_for`.
+fn wake_waiters() {
+    let mut waiting = WAITING_CORES.load(Ordering::SeqCst);
+    let me = crate::smp::per_core::current_core_id();
+    while waiting != 0 {
+        let c = waiting.trailing_zeros() as usize;
+        waiting &= waiting - 1;
+        if c != me {
+            if let Some(apic) = crate::smp::per_core::core_apic(c) {
+                crate::smp::send_wake_ipi(apic);
+            }
+        }
+    }
+}
+
+/// One round of waiting for job `seq`: halt this core until an interrupt
+/// (`complete` sends one), at the latest until `deadline`. The core sleeps
+/// instead of spinning, and no other fiber runs meanwhile, so a caller that
+/// holds a lock keeps it safely. With interrupts off it only spins.
+fn halt_for(seq: u32, deadline: u64) {
+    let rflags: u64;
+    // SAFETY: reads RFLAGS, no other effect.
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags, options(preserves_flags)) };
+    let cid = crate::smp::per_core::current_core_id();
+    if rflags & (1 << 9) == 0 || cid >= 64 {
+        core::hint::spin_loop();
+        return;
+    }
+    let bit = 1u64 << cid;
+    WAITING_CORES.fetch_or(bit, Ordering::SeqCst);
+    // The look and the halt with IF off: a completion after the look leaves
+    // its IPI pending, and that ends the halt.
+    crate::interrupts::without_interrupts(|| {
+        if !seq_ge(COMPLETED.load(Ordering::SeqCst), seq) && READY.load(Ordering::Acquire) {
+            // In short steps: the halt re-arms the core's one-shot timer, and
+            // a deadline someone else armed earlier is late by one step at most.
+            let step = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / (1_000_000 / HALT_STEP_US);
+            crate::interrupts::halt_until(Some(deadline.min(step)), crate::smp::per_core::WAKE_HLT_FALLBACK);
+        }
+    });
+    WAITING_CORES.fetch_and(!bit, Ordering::SeqCst);
+}
+
 /// Wait until job `seq` is completed, at most until `deadline` (TSC). Its
 /// status: 0, the module's error, or -ETIME (62).
 fn wait_seq(seq: u32, deadline: u64) -> i32 {
@@ -718,7 +769,7 @@ fn wait_seq(seq: u32, deadline: u64) -> i32 {
             st.payloads.remove(&seq);
             return -62;
         }
-        core::hint::spin_loop();
+        halt_for(seq, deadline);
     }
 }
 

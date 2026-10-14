@@ -386,11 +386,12 @@ fn serve(q: u16, gm: &super::guest_mem::GuestMem) {
     let Some(blob) = GPU.lock().held_blob() else { return };
     let t0 = crate::interrupts::rdtsc();
     let deadline = t0 + crate::interrupts::tsc_freq() / 1000 * super::virtio_gpu_pci::HOLD_MAX_MS;
-    while !(blob.unread() && crate::gpu::gpudev::pages_idle(blob.serial))
-        && crate::interrupts::rdtsc() < deadline
-        && !STOP.load(Ordering::Acquire)
-    {
-        crate::smp::fiber::spin_or_yield();
+    // Parked in short steps: the reads it waits for end on other cores and
+    // in the compositor, which runs on this core meanwhile.
+    let step = crate::interrupts::tsc_freq() / 4000;
+    let idle = || blob.unread() && crate::gpu::gpudev::pages_idle(blob.serial);
+    while !idle() && crate::interrupts::rdtsc() < deadline && !STOP.load(Ordering::Acquire) {
+        crate::smp::fiber::park_on_bell((crate::interrupts::rdtsc() + step).min(deadline), idle);
     }
     let us = (crate::interrupts::rdtsc() - t0) * 1_000_000 / crate::interrupts::tsc_freq().max(1);
     note(STAT_HOLD_US, us);

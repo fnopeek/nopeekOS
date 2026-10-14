@@ -190,7 +190,9 @@ fn launch_wayland(kmsg_fd: i64) {
     // `npkscudo=off` restores scudo's default, `npkscudo=<options>` sets others.
     //
     // Standard LibreWolf config — only the prefs this environment
-    // demands (no GPU / GL → software webrender; userChrome.css must
+    // demands (no GPU / GL → software webrender, which reports only what
+    // changed when partial present is on — the host composes guest frames
+    // where they lie and recomposes only that; userChrome.css must
     // load to hide the titlebar buttons that crash the browser when
     // clicked; dark mode). Everything else stays default:
     // e10s, fission, content/RDD/GMP/utility sandboxes, OCSP, telemetry,
@@ -276,6 +278,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  for p in \
                    'layers.gpu-process.enabled|false' \
                    'gfx.webrender.software|true' \
+                   'gfx.webrender.max-partial-present-rects|1' \
                    'gfx.canvas.accelerated|false' \
                    'widget.dmabuf.force-enabled|false' \
                    'browser.shell.checkDefaultBrowser|false' \
