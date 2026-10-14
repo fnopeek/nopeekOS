@@ -2366,17 +2366,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
-        "slab" => {
-            if require_cap(vault, &session, Rights::AUDIT, "slab") {
-                let sub = args.trim();
-                if sub == "test" {
-                    crate::gpu::ggtt_slab::self_test();
-                } else {
-                    crate::gpu::ggtt_slab::dump_stats();
-                }
-            }
-        }
-
         "gc" => {
             if require_cap(vault, &session, Rights::AUDIT, "gc") {
                 match crate::storage::npkfs::fs::gc() {

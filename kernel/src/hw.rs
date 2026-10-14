@@ -65,7 +65,6 @@ impl Mmio {
 
     pub fn base(&self) -> u64 { self.base }
     pub fn len(&self) -> u64 { self.len }
-    pub fn is_empty(&self) -> bool { self.len == 0 }
 
     /// The part `off .. off + len` of this window.
     pub fn sub(&self, off: impl Off, len: u64) -> Mmio {
@@ -93,11 +92,6 @@ impl Mmio {
     pub fn w32(&self, off: impl Off, v: u32) {
         // SAFETY: as in `r8`.
         unsafe { core::ptr::write_volatile(self.at(off, 4) as *mut u32, v) }
-    }
-    /// One 64-bit access.
-    pub fn w64(&self, off: impl Off, v: u64) {
-        // SAFETY: as in `r8`.
-        unsafe { core::ptr::write_volatile(self.at(off, 8) as *mut u64, v) }
     }
     /// Two 32-bit reads, low half first, for devices that decode 64-bit
     /// registers as two dwords.
@@ -221,7 +215,6 @@ impl DmaRegion {
     }
 
     pub fn phys(&self) -> u64 { self.phys }
-    pub fn is_empty(&self) -> bool { self.len == 0 }
 
     /// The part `off .. off + len` of this region.
     pub fn sub(&self, off: impl Off, len: u64) -> DmaRegion {

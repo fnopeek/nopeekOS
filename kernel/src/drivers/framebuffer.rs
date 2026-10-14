@@ -204,7 +204,7 @@ pub fn init_from_gpu() {
     crate::kprintln!("[npk] Framebuffer: {}x{} @ {:#x} ({}bpp, {})",
         width, height, addr, bpp, crate::gpu::driver_name());
 
-    // Map framebuffer pages (for GOP; Intel Xe uses identity-mapped RAM).
+    // Map framebuffer pages.
     // Write-combining is essential: the GOP MMIO framebuffer is otherwise
     // uncached on Intel hardware (firmware MTRR), so every CPU write is a
     // separate UC transaction (QEMU's fb is RAM and hides this). WC batches
@@ -464,16 +464,12 @@ pub fn dump_memory_type() {
     }
     crate::kprintln!("[mtrr] native_gpu={} (WC mapping only applied for GOP)",
         crate::gpu::is_native());
-    // Which display device is this, and did the native (display-only) Xe
-    // driver claim it? An unsupported GPU falls back to the slow GOP UC
-    // blit; the device ID tells whether it is an ID-add (Gen12) or a new
-    // display generation.
+    // Which display device is this, and which driver presents to it.
     if let Some(dev) = crate::pci::find_by_class(0x03, 0x00) {
         crate::kprintln!(
-            "[gfx] display PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] native_detected={} driver={}",
+            "[gfx] display PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] driver={}",
             dev.addr.bus, dev.addr.device, dev.addr.function,
-            dev.vendor_id, dev.device_id, crate::gpu::native_detected(),
-            crate::gpu::native_gpu_name().unwrap_or("GOP fallback (slow UC blit)"),
+            dev.vendor_id, dev.device_id, crate::gpu::driver_name(),
         );
     }
     diagnose_fb_memory_type(addr);

@@ -1153,224 +1153,23 @@ pub fn intent_uptime() {
     }
 }
 
-pub fn intent_gpu(args: &str) {
-    match args.trim() {
-        "dump" | "regs" => {
-            crate::gpu::dump_native();
-        }
-        "test-pll" | "test" => {
-            // Test PLL re-lock with firmware values (kills the display)
-            kprintln!("[npk] WARNING: This will disable the display!");
-            kprintln!("[npk] Log will be saved after test.");
-
-            let _pre_log = crate::serial::stop_capture();
-            crate::serial::start_capture();
-
-            crate::gpu::test_pll();
-
-            let log = crate::serial::stop_capture();
-            crate::serial::start_capture();
-            let log_name = crate::gpu::next_log_name();
-            let _ = crate::npkfs::store(&log_name, log.as_bytes(), [0u8; 32]);
-            kprintln!("[npk] Log saved: {}", log_name);
-        }
-        "init" | "activate" => {
-            if crate::gpu::is_native() {
-                kprintln!("[npk] GPU: native driver already active ({})", crate::gpu::driver_name());
-                return;
-            }
-            if !crate::gpu::native_detected() {
-                kprintln!("[npk] GPU: no native GPU detected");
-                return;
-            }
-
-            // Capture serial output during init (survives black screen)
-            // Stop normal capture, start fresh for GPU init
-            let _pre_log = crate::serial::stop_capture();
-            crate::serial::start_capture();
-
-            kprintln!("[npk] GPU: activating native driver...");
-            let result = crate::gpu::activate_native();
-
-            // Save GPU init log to npkFS (readable after reboot)
-            let gpu_log = crate::serial::stop_capture();
-            // Restore pre-existing capture
-            crate::serial::start_capture();
-
-            // Store log in npkFS (unencrypted, no cap needed — use zero cap)
-            let log_data = alloc::format!("{}\n--- GPU INIT RESULT: {:?} ---\n", gpu_log,
-                result.as_ref().map(|fb| alloc::format!("OK {}x{}", fb.width, fb.height))
-                    .unwrap_or_else(|e| alloc::format!("{:?}", e)));
-            let log_name = crate::gpu::next_log_name();
-            let _ = crate::npkfs::store(&log_name, log_data.as_bytes(), [0u8; 32]);
-            kprintln!("[npk] Log saved: {}", log_name);
-
-            match result {
-                Ok(fb) => {
-                    crate::framebuffer::init_from_gpu();
-                    kprintln!("[npk] GPU: {}x{} active", fb.width, fb.height);
-                }
-                Err(e) => {
-                    kprintln!("[npk] GPU: activation failed: {:?}", e);
-                    kprintln!("[npk] GOP framebuffer unchanged");
-                    kprintln!("[npk] Check log with 'list gpu'");
-                }
-            }
-        }
-        "4k" | "4k30" | "4k60" => {
-            if !crate::gpu::is_native() {
-                kprintln!("[npk] GPU: native driver not active (run 'gpu init' first)");
-                return;
-            }
-
-            let hz: u8 = if args.trim() == "4k60" { 60 } else { 30 };
-
-            let _pre_log = crate::serial::stop_capture();
-            crate::serial::start_capture();
-
-            kprintln!("[npk] GPU: switching to 4K@{}Hz...", hz);
-            let result = crate::gpu::set_mode(3840, 2160, hz);
-
-            let gpu_log = crate::serial::stop_capture();
-            crate::serial::start_capture();
-
-            let log_data = alloc::format!("{}\n--- GPU MODE RESULT: {:?} ---\n", gpu_log,
-                result.as_ref().map(|fb| alloc::format!("OK {}x{}", fb.width, fb.height))
-                    .unwrap_or_else(|e| alloc::format!("{:?}", e)));
-            let log_name = crate::gpu::next_log_name();
-            let _ = crate::npkfs::store(&log_name, log_data.as_bytes(), [0u8; 32]);
-            kprintln!("[npk] Log saved: {}", log_name);
-
-            // Always reinit console — display hardware is already at new mode
-            // even if pipe re-enable timed out
-            crate::framebuffer::init_from_gpu();
-            match result {
-                Ok(fb) => {
-                    kprintln!("[npk] GPU: {}x{} active", fb.width, fb.height);
-                }
-                Err(e) => {
-                    kprintln!("[npk] GPU: mode switch partial: {:?} (display may work)", e);
-                    kprintln!("[npk] Check log with 'list gpu'");
-                }
-            }
-        }
-        "blit init" => {
-            if !crate::gpu::is_native() {
-                kprintln!("[npk] GPU: native driver not active (run 'gpu init' first)");
-                return;
-            }
-            if crate::gpu::supports_blit() {
-                kprintln!("[npk] BCS: already initialized");
-                return;
-            }
-            kprintln!("[npk] Initializing BCS blitter engine...");
-            if crate::gpu::init_blit_engine() {
-                kprintln!("[npk] BCS: blitter engine ready");
-                // Map shadow buffers into GGTT for GPU blit
-                if let Some((phys_a, phys_b, pages)) = crate::framebuffer::shadow_phys_info() {
-                    if pages > 0 {
-                        crate::gpu::map_shadows_for_blit(phys_a, phys_b, pages);
-                        let (ga, gb) = crate::gpu::shadow_ggtt();
-                        crate::framebuffer::set_shadow_ggtt(ga, gb);
-                        kprintln!("[npk] BCS: shadow A GGTT={:#x}, shadow B GGTT={:#x}", ga, gb);
-                    }
-                }
-            } else {
-                kprintln!("[npk] BCS: init failed");
-            }
-        }
-        "blit test" => {
-            if !crate::gpu::supports_blit() {
-                kprintln!("[npk] BCS: not initialized (run 'gpu blit init')");
-                return;
-            }
-            crate::gpu::test_blit();
-        }
-        "blit status" | "blit" => {
-            kprintln!("  BCS:      {}", if crate::gpu::supports_blit() { "ready" } else { "not initialized" });
-            let (ga, gb) = crate::gpu::shadow_ggtt();
-            if ga != 0 {
-                kprintln!("  Shadow A: GGTT {:#x}", ga);
-                kprintln!("  Shadow B: GGTT {:#x}", gb);
-            }
-            let fb_ggtt = crate::gpu::fb_ggtt_offset();
-            if fb_ggtt != 0 {
-                kprintln!("  FB GGTT:  {:#x}", fb_ggtt);
-            }
-        }
-        "status" | "" => {
-            kprintln!("  Driver:   {}", crate::gpu::driver_name());
-            kprintln!("  Native:   {}", if crate::gpu::is_native() { "yes" } else { "no (GOP)" });
-            if let Some(fb) = crate::gpu::framebuffer_info() {
-                kprintln!("  Mode:     {}x{} {}bpp", fb.width, fb.height, fb.bpp);
-                kprintln!("  FB addr:  {:#x}", fb.addr);
-                kprintln!("  Pitch:    {} bytes ({} KB/line)", fb.pitch, fb.pitch / 1024);
-                let fb_mb = (fb.pitch as u64 * fb.height as u64) / (1024 * 1024);
-                kprintln!("  FB size:  {} MB", fb_mb);
-            }
-            let hz = crate::gpu::current_hz();
-            if hz > 0 {
-                kprintln!("  Refresh:  {}Hz", hz);
-            }
-            kprintln!("  VSync:    {}", if crate::gpu::supports_flip() { "planned (PLANE_SURF double-buffer)" } else { "no (GOP)" });
-            kprintln!("  Flip:     {}", if crate::gpu::supports_flip() { "hardware (PLANE_SURF)" } else { "CPU blit" });
-
-            // BCS blitter status
-            let bcs_ok = crate::gpu::supports_blit();
-            kprintln!("  BCS:      {}", if bcs_ok { "active" } else { "off (probe failed)" });
-            // Readback self-test: did the blit actually paint? Distinguishes
-            // "copy broken" (verified=no) from "copy ok but scanout wrong"
-            // (verified=yes but screen black) on Tiger Lake bring-up.
-            kprintln!("  Verified: {} (readback={:#010x})",
-                if crate::gpu::blit_verified() { "YES — blit paints" } else { "no — blit did not paint" },
-                crate::gpu::blit_readback());
-            if bcs_ok {
-                let fb_ggtt = crate::gpu::fb_ggtt_offset();
-                let (ga, gb) = crate::gpu::shadow_ggtt();
-                let front = crate::framebuffer::front_ggtt();
-                kprintln!("  FB GGTT:  {:#x}", fb_ggtt);
-                kprintln!("  Shadow A: GGTT {:#x}", ga);
-                kprintln!("  Shadow B: GGTT {:#x}", gb);
-                kprintln!("  Front:    GGTT {:#x} ({})",
-                    front, if front == ga { "A" } else if front == gb { "B" } else { "?" });
-                kprintln!("  Blit:     GPU (XY_FAST_COPY_BLT)");
-                let mouse = crate::xhci::mouse_available();
-                kprintln!("  Cursor:   {}", if mouse { "GPU-composited (save-under)" } else { "none" });
-            } else {
-                kprintln!("  Blit:     CPU (memcpy)");
-                let mouse = crate::xhci::mouse_available();
-                kprintln!("  Cursor:   {}", if mouse { "MMIO overlay" } else { "none" });
-            }
-
-            // BCS register dump (always, for debug)
-            if crate::gpu::is_native() {
-                kprintln!("  --- BCS regs ---");
-                crate::gpu::dump_bcs_regs();
-            }
-
-            // Shadow buffer info
-            if let Some((pa, pb, pages)) = crate::framebuffer::shadow_phys_info() {
-                kprintln!("  Shadow:   {} pages ({} MB) x2", pages, pages * 4 / 1024);
-                kprintln!("  Phys A:   {:#x}", pa);
-                kprintln!("  Phys B:   {:#x}", pb);
-            }
-
-            if let Some(name) = crate::gpu::native_gpu_name() {
-                if !crate::gpu::is_native() {
-                    kprintln!("  Pending:  {} (use 'gpu init')", name);
-                }
-            }
-            let modes = crate::gpu::supported_modes();
-            if !modes.is_empty() {
-                kprintln!("  Modes:");
-                for m in &modes {
-                    kprintln!("    {}x{} @ {}Hz", m.width, m.height, m.hz);
-                }
-            }
-        }
-        _ => {
-            kprintln!("Usage: gpu [status|init|4k|blit init|blit test|blit status]");
-        }
+pub fn intent_gpu(_args: &str) {
+    kprintln!("  Driver:   {}", crate::gpu::driver_name());
+    if let Some(fb) = crate::gpu::framebuffer_info() {
+        kprintln!("  Mode:     {}x{} {}bpp, pitch {} bytes, framebuffer {:#x}",
+            fb.width, fb.height, fb.bpp, fb.pitch, fb.addr);
+    }
+    let st = crate::gpu::gpudev::status();
+    match st.owner {
+        Some(d) => kprintln!("  Module:   {:02x}:{:02x}.{} registered, {}", d.bus, d.device, d.function,
+            if st.ready { "ready: the GPU copies the frames" } else { "not ready: the CPU copies" }),
+        None => kprintln!("  Module:   none, the CPU copies the frames (GOP)"),
+    }
+    if st.copies_done + st.copies_failed > 0 {
+        kprintln!("  Copies:   {} on the GPU, {} redone on the CPU", st.copies_done, st.copies_failed);
+    }
+    if let Some((pa, pb, pages)) = crate::framebuffer::shadow_phys_info() {
+        kprintln!("  Shadows:  2 x {} MB at {:#x} and {:#x}", pages * 4 / 1024, pa, pb);
     }
 }
 
@@ -1805,7 +1604,6 @@ pub fn intent_help_topic(topic: &str) {
             help_row("cores", "Per-core load and frequency");
             help_row("power [s]", "CPU package watts over s seconds (RAPL)");
             help_row("cpu", "CPU model and features");
-            help_row("slab", "Allocator statistics");
             help_row("history", "Previous intents (history clear wipes them)");
             help_row("clear", "Clear the window");
             help_row("version", "Kernel version (also: uname, about)");

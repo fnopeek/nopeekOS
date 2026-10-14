@@ -5,17 +5,15 @@
 //! The kernel only talks to the trait, never to hardware directly.
 //!
 //! Backends:
-//! - GOP: UEFI Graphics Output Protocol (fallback, bootloader-provided)
-//! - Intel Xe: Native modesetting for Alder Lake / Gen 12.2 (N100)
+//! - GOP: UEFI Graphics Output Protocol, the CPU path every machine has
+//! - gpudev: a GPU driver module that serves the compositor's copies
+//!   (docs/plan/GPU_STACK.md §3.3)
 
 #![allow(dead_code)]
 
 pub mod gop;
 pub mod gpudev;
 mod stolen_ids;
-pub mod intel_xe;
-pub mod ggtt_layout;
-pub mod ggtt_slab;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -70,7 +68,7 @@ pub struct FramebufferInfo {
 /// Hardware Abstraction Layer for GPU drivers.
 /// Implement this trait for any GPU: Intel, AMD, NVIDIA, virtual.
 pub trait GpuHal: Send {
-    /// Human-readable driver name (e.g. "Intel Xe ADL-N").
+    /// Human-readable driver name.
     fn name(&self) -> &'static str;
 
     /// Set display mode. Returns framebuffer info for CPU rendering.
@@ -104,16 +102,8 @@ pub trait GpuHal: Send {
     /// True if the driver supports hardware page flip + vblank sync.
     fn supports_flip(&self) -> bool;
 
-    /// Initialize hardware blit engine (BCS). Returns true on success.
-    fn init_blit_engine(&mut self) -> bool { false }
-
     /// True if hardware blit (BCS) is available.
     fn supports_blit(&self) -> bool { false }
-
-    /// True if the BCS blit passed its readback self-test (pixels land).
-    fn blit_verified(&self) -> bool { false }
-    /// Last readback self-test dst[0] value (diagnostic).
-    fn blit_readback(&self) -> u32 { 0 }
 
     /// Submit a rectangular blit from src GGTT → dst GGTT.
     fn blit_rect_hw(
@@ -122,22 +112,11 @@ pub trait GpuHal: Send {
         x: u32, y: u32, w: u32, h: u32,
     ) -> bool { let _ = (src_ggtt, src_pitch, dst_ggtt, dst_pitch, x, y, w, h); false }
 
-    /// Map physical buffer into GPU address space for blit. Returns GGTT offset.
-    fn map_for_blit(&mut self, phys_a: u64, phys_b: u64, pages: u32) {
-        let _ = (phys_a, phys_b, pages);
-    }
-
     /// Get framebuffer GGTT offset (for BCS destination).
     fn fb_gpu_addr(&self) -> u32 { 0 }
 
     /// Get shadow buffer GGTT offsets (A, B). 0 = not mapped.
     fn shadow_gpu_addr(&self) -> (u32, u32) { (0, 0) }
-
-    /// Visual BCS test — blit a colored square to screen.
-    fn test_blit(&mut self) -> bool { false }
-
-    /// Dump BCS engine registers for debug (printed via kprintln).
-    fn dump_bcs_regs(&self) {}
 }
 
 static GPU: Mutex<Option<Box<dyn GpuHal>>> = Mutex::new(None);
@@ -155,134 +134,20 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
             crate::kprintln!("[npk] GPU: no display available");
         }
     }
-
-    // Detect native GPU (PCI scan only — no hardware init yet)
-    match intel_xe::IntelXeDriver::detect() {
-        Some(drv) => {
-            crate::kprintln!("[npk] GPU: {} available (use 'gpu init' to activate)",
-                drv.name());
-            *DETECTED_XE.lock() = Some(drv);
-        }
-        None => {}
-    }
 }
 
-/// Detected but not yet initialized Intel Xe driver.
-static DETECTED_XE: Mutex<Option<intel_xe::IntelXeDriver>> = Mutex::new(None);
 
-/// Activate native GPU driver (Intel Xe). Call from intent loop, not boot.
-pub fn activate_native() -> Result<FramebufferInfo, GpuError> {
-    let mut detected = DETECTED_XE.lock();
-    let mut drv = detected.take().ok_or(GpuError::NotFound)?;
-    let addr = drv.pci_addr();
-    if let Err(o) = crate::drivers::pci::claim(addr, NATIVE_OWNER) {
-        crate::kprintln!("[npk] GPU: {:?} drives the card, native driver stays off", o);
-        *detected = Some(drv);
-        return Err(GpuError::Owned);
-    }
-
-    match drv.init() {
-        Ok(fb) => {
-            crate::kprintln!("[npk] GPU: {}x{} @ {}Hz (native, HAL)",
-                fb.width, fb.height, drv.current_hz());
-            *GPU.lock() = Some(Box::new(drv) as Box<dyn GpuHal>);
-            Ok(fb)
-        }
-        Err(e) => {
-            crate::kprintln!("[npk] GPU: Intel Xe init failed: {:?}", e);
-            crate::drivers::pci::release(addr, NATIVE_OWNER);
-            *detected = Some(drv);
-            Err(e)
-        }
-    }
-}
-
-/// The kernel driver's name in the PCI owner table.
-const NATIVE_OWNER: crate::drivers::pci::Owner = crate::drivers::pci::Owner::Kernel("intel_xe");
-
-/// Hand the card at `addr` to a driver module. The kernel driver stops
-/// here: under the GPU lock no blit is in flight (`submit_blit` waits for
-/// its own), the active driver becomes the GOP driver on the framebuffer it
-/// was showing, and the compositor's next frame copies on the CPU. Nothing
-/// is written to the card. True when the card is free for the module
-/// afterwards.
+/// Whether a driver module may take the card at `addr`. The kernel drives
+/// no GPU itself (GOP draws without touching the card), so a display
+/// controller nobody owns is free.
 pub fn yield_to_module(addr: crate::drivers::pci::PciAddr) -> bool {
-    use crate::drivers::pci;
-    match pci::owner(addr) {
-        None => {
-            // Detected but never started: drop it, so `gpu init` cannot take
-            // the card back from under the module.
-            let mut det = DETECTED_XE.lock();
-            if det.as_ref().is_some_and(|d| d.pci_addr() == addr) {
-                *det = None;
-            }
-            true
-        }
-        Some(o) if o == NATIVE_OWNER => {
-            let mut gpu = GPU.lock();
-            if let Some(fb) = gpu.as_ref().map(|d| d.framebuffer()) {
-                *gpu = Some(Box::new(gop::GopDriver::from_framebuffer(fb)) as Box<dyn GpuHal>);
-            }
-            drop(gpu);
-            pci::release(addr, NATIVE_OWNER);
-            crate::kprintln!("[npk] GPU: native driver handed the card to a module, compositor copies on the CPU");
-            true
-        }
-        Some(_) => false,
-    }
+    crate::drivers::pci::owner(addr).is_none()
 }
 
 /// Make `drv` the active GPU driver (gpudev on a module's ready, GOP when
 /// it goes away).
 pub(crate) fn install(drv: Box<dyn GpuHal>) {
     *GPU.lock() = Some(drv);
-}
-
-/// Dump native GPU registers (Intel Xe specific, debug only).
-pub fn dump_native() {
-    let detected = DETECTED_XE.lock();
-    if let Some(ref drv) = *detected {
-        drv.dump_registers();
-    } else {
-        crate::kprintln!("[npk] GPU: use before 'gpu init' for register dump");
-    }
-}
-
-/// Test PLL re-lock (Intel Xe specific, debug only).
-pub fn test_pll() {
-    let detected = DETECTED_XE.lock();
-    if let Some(ref drv) = *detected {
-        drv.test_pll();
-    } else {
-        crate::kprintln!("[npk] GPU: no detected GPU for PLL test");
-    }
-}
-
-/// Check if a native GPU was detected (but not necessarily activated).
-pub fn native_detected() -> bool {
-    DETECTED_XE.lock().is_some()
-}
-
-/// Name of detected native GPU (if any).
-pub fn native_gpu_name() -> Option<&'static str> {
-    DETECTED_XE.lock().as_ref().map(|d| d.name())
-}
-
-/// Whether the detected GPU may be auto-activated at boot. Only validated
-/// generations (ADL-N) qualify; others (Tiger Lake) are manual-only for
-/// bring-up so a non-painting BCS blit can't black the desktop at every boot.
-pub fn native_auto_activate_ok() -> bool {
-    DETECTED_XE.lock().as_ref().is_some_and(|d| d.auto_activate_ok())
-}
-
-/// True if the active GPU's BCS blit passed its readback self-test.
-pub fn blit_verified() -> bool {
-    GPU.lock().as_ref().is_some_and(|drv| drv.blit_verified())
-}
-
-/// Last BCS readback self-test dst[0] value (diagnostic).
-pub fn blit_readback() -> u32 {
-    GPU.lock().as_ref().map(|drv| drv.blit_readback()).unwrap_or(0)
 }
 
 /// Get current framebuffer info (if any GPU is active).
@@ -354,17 +219,7 @@ pub fn supports_flip() -> bool {
     }
 }
 
-// ── BCS Blit API ────────────────────────────────────────────────────
-
-/// Initialize hardware blit engine. Call after activate_native().
-pub fn init_blit_engine() -> bool {
-    match GPU.lock().as_mut() {
-        Some(drv) => drv.init_blit_engine(),
-        None => false,
-    }
-}
-
-/// True if hardware blit (BCS) is available.
+/// True if the active driver copies the compositor's frames on the GPU.
 pub fn supports_blit() -> bool {
     match GPU.lock().as_ref() {
         Some(drv) => drv.supports_blit(),
@@ -384,13 +239,6 @@ pub fn gpu_blit_rect(
     }
 }
 
-/// Map shadow buffers into GPU address space for blit.
-pub fn map_shadows_for_blit(phys_a: u64, phys_b: u64, pages: u32) {
-    if let Some(drv) = GPU.lock().as_mut() {
-        drv.map_for_blit(phys_a, phys_b, pages);
-    }
-}
-
 /// Get framebuffer GGTT offset (for BCS destination).
 pub fn fb_ggtt_offset() -> u32 {
     match GPU.lock().as_ref() {
@@ -404,57 +252,6 @@ pub fn shadow_ggtt() -> (u32, u32) {
     match GPU.lock().as_ref() {
         Some(drv) => drv.shadow_gpu_addr(),
         None => (0, 0),
-    }
-}
-
-/// Visual BCS test.
-pub fn test_blit() -> bool {
-    match GPU.lock().as_mut() {
-        Some(drv) => drv.test_blit(),
-        None => false,
-    }
-}
-
-/// Dump BCS register state for debug.
-pub fn dump_bcs_regs() {
-    if let Some(drv) = GPU.lock().as_ref() {
-        drv.dump_bcs_regs();
-    }
-}
-
-/// Auto-incrementing GPU log counter.
-static GPU_LOG_SEQ: Mutex<u32> = Mutex::new(0);
-
-/// Generate a unique GPU log name: gpu-log-NNN-YYYY-MM-DD
-pub fn next_log_name() -> alloc::string::String {
-    let mut seq = GPU_LOG_SEQ.lock();
-    *seq += 1;
-    let n = *seq;
-
-    // Try RTC for date, fallback to seq-only
-    if let Some(unix) = crate::rtc::read_unix_time() {
-        // Convert unix timestamp to date
-        let days = unix / 86400;
-        let mut y = 1970u32;
-        let mut rem = days;
-        loop {
-            let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366u64 } else { 365 };
-            if rem < days_in_year { break; }
-            rem -= days_in_year;
-            y += 1;
-        }
-        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-        let mdays: [u64; 12] = [31, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-        let mut m = 0u32;
-        for md in &mdays {
-            if rem < *md { break; }
-            rem -= *md;
-            m += 1;
-        }
-        let d = rem as u32 + 1;
-        alloc::format!("gpu-log-{:03}-{:04}-{:02}-{:02}", n, y, m + 1, d)
-    } else {
-        alloc::format!("gpu-log-{:03}", n)
     }
 }
 

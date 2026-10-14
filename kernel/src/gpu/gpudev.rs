@@ -268,6 +268,11 @@ fn submit_copy(src_gpu: u32, src_pitch: u32, dst_gpu: u32, dst_pitch: u32,
     true
 }
 
+/// Copies the module completed, and those that failed or timed out (the
+/// CPU redid them), for `gpu`.
+static COPIES_DONE: AtomicU64 = AtomicU64::new(0);
+static COPIES_FAILED: AtomicU64 = AtomicU64::new(0);
+
 /// The copy handed to the module and not yet waited for (0: none).
 static INFLIGHT: AtomicU32 = AtomicU32::new(0);
 static INFLIGHT_DEADLINE: AtomicU64 = AtomicU64::new(0);
@@ -294,7 +299,25 @@ pub fn wait_inflight() -> bool {
         core::hint::spin_loop();
     };
     INFLIGHT.store(0, Ordering::Release);
+    if ok { &COPIES_DONE } else { &COPIES_FAILED }.fetch_add(1, Ordering::Relaxed);
     ok
+}
+
+/// What `gpu` reports about the GPU service.
+pub struct Status {
+    pub owner: Option<PciAddr>,
+    pub ready: bool,
+    pub copies_done: u64,
+    pub copies_failed: u64,
+}
+
+pub fn status() -> Status {
+    Status {
+        owner: STATE.lock().owner,
+        ready: READY.load(Ordering::Acquire),
+        copies_done: COPIES_DONE.load(Ordering::Relaxed),
+        copies_failed: COPIES_FAILED.load(Ordering::Relaxed),
+    }
 }
 
 /// The active GPU driver while a module serves: display state is the
@@ -340,9 +363,6 @@ impl GpuHal for GpudevDriver {
         READY.load(Ordering::Acquire)
     }
 
-    fn blit_verified(&self) -> bool {
-        READY.load(Ordering::Acquire)
-    }
 
     fn blit_rect_hw(&mut self, src_ggtt: u32, src_pitch: u32, dst_ggtt: u32, dst_pitch: u32,
                     x: u32, y: u32, w: u32, h: u32) -> bool {

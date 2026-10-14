@@ -369,37 +369,8 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     } else {
         // === Subsequent boot: Verify passphrase ===
         if framebuffer::is_available() {
-            // Activate native GPU + 4K before login screen, only for
-            // validated generations (ADL-N). Other detected Gen12 (Tiger
-            // Lake) stay on GOP at boot (visible) and are activated manually
-            // via `gpu init` for bring-up, so an unproven BCS scanout can't
-            // black the desktop after every login.
-            if gpu::native_detected() && gpu::native_auto_activate_ok() {
-                match gpu::activate_native() {
-                    Ok(fb) => {
-                        framebuffer::init_from_gpu();
-                        kprintln!("[npk] GPU: {}x{} (native)", fb.width, fb.height);
-                    }
-                    Err(e) => kprintln!("[npk] GPU: native init failed: {:?}, using GOP", e),
-                }
-            }
             // Graphical login screen
             gui::login::run();
-
-            // Auto-upgrade to highest refresh rate if monitor is now connected.
-            // Only on GPUs with a validated modeset path — a blit-only takeover
-            // (non-ADL-N Gen12 / Tiger Lake) must keep the firmware mode, else
-            // the DPLL/pipe reprogram blacks the scanout after login.
-            if gpu::is_native() && gpu::supports_modeset() && gpu::current_hz() < 60 {
-                kprintln!("[npk] GPU: upgrading to 4K@60Hz...");
-                match gpu::set_mode(3840, 2160, 60) {
-                    Ok(fb) => {
-                        framebuffer::init_from_gpu();
-                        kprintln!("[npk] GPU: {}x{}@60Hz active", fb.width, fb.height);
-                    }
-                    Err(_) => kprintln!("[npk] GPU: 4K@60 upgrade failed, staying at 30Hz"),
-                }
-            }
         } else {
             // Fallback: text-mode login (serial only, no framebuffer)
             text_mode_auth();
@@ -442,11 +413,6 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // which is exactly what the OTA path needs and no more.
     tls::certstore::load_store();
 
-    // GGTT slab allocator — bookkeeping for tile / comp-layer / glyph
-    // slots in the GGTT slab region. Pure in-RAM tracker; it writes no
-    // GGTT entries itself.
-    gpu::ggtt_slab::init();
-
     // Create home directory and set as working directory
     intent::setup_home();
 
@@ -473,23 +439,6 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
 
     // Start shade compositor (GUI_MODE already set after login)
     if framebuffer::is_available() {
-        // Initialize BCS blitter engine (GPU blit instead of CPU copy)
-        if gpu::is_native() {
-            if gpu::init_blit_engine() {
-                kprintln!("[npk] BCS: blitter engine ready");
-                if let Some((pa, pb, pages)) = framebuffer::shadow_phys_info() {
-                    if pages > 0 {
-                        gpu::map_shadows_for_blit(pa, pb, pages);
-                        let (ga, gb) = gpu::shadow_ggtt();
-                        framebuffer::set_shadow_ggtt(ga, gb);
-                        kprintln!("[npk] BCS: shadows mapped (A={:#x} B={:#x})", ga, gb);
-                    }
-                }
-            } else {
-                kprintln!("[npk] BCS: init failed, using CPU blit");
-            }
-        }
-
         shade::init();
         // Autostart apps (e.g. the dock) via the widget-spawn path —
         // never via `run`, which would capture input. Names from the

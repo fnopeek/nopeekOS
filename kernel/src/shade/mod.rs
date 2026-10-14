@@ -624,7 +624,7 @@ fn render_frame_surface() {
         cursor::save_under_and_bake(fb.front_ptr(), &info);
         let t_cursor = crate::interrupts::rdtsc();
 
-        // On a HW-blit host (native Xe / BCS) a full blit is cheap → keep it.
+        // With a GPU driver module serving copies a full blit costs the CPU nothing.
         // Otherwise (GOP) clip the MMIO blit to the tiles + cursor bbox.
         let gpu_ok = if crate::gpu::supports_blit() {
             try_gpu_blit(fb, pitch, screen_w, screen_h)
