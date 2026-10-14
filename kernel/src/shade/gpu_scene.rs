@@ -78,7 +78,7 @@ fn covers_screen(damage: &[Rect], info: &FbInfo) -> bool {
 fn on_gpu(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect]) -> bool {
     let Some(tid) = gpudev::shadow_bo(target as u64) else { return false };
     let Some((payload, srcs)) = encode(frame, sources, info, damage) else { return false };
-    let ok = gpudev::submit_scene(tid, payload, &srcs).is_some_and(gpudev::wait_scene);
+    let ok = gpudev::wait_bound(&srcs) && gpudev::submit_scene(tid, payload, &srcs).is_some_and(gpudev::wait_scene);
     if ok {
         SCENES_DONE.fetch_add(1, Ordering::Relaxed);
         FAILURES_IN_ROW.store(0, Ordering::Relaxed);
@@ -141,18 +141,22 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
         // a screen-sized buffer of `bytes`; they do not overlap.
         unsafe { core::ptr::copy_nonoverlapping(target, copy as *mut u8, bytes) };
         let t0 = crate::interrupts::rdtsc();
-        let r = gpudev::bo_for(copy, bytes as u64, info.width, info.height, info.pitch)
+        // Binding the buffers is a one-time cost and not part of the timing.
+        let job = gpudev::bo_for(copy, bytes as u64, info.width, info.height, info.pitch)
             .zip(encode(frame, &gpu_rec, info, damage))
-            .and_then(|(tid, (payload, srcs))| gpudev::submit_scene(tid, payload, &srcs))
+            .filter(|(tid, (_, srcs))| gpudev::wait_bound(srcs) && gpudev::wait_bound(&[*tid]));
+        let bind = crate::interrupts::rdtsc() - t0;
+        let t1 = crate::interrupts::rdtsc();
+        let r = job.and_then(|(tid, (payload, srcs))| gpudev::submit_scene(tid, payload, &srcs))
             .map(gpudev::wait_scene);
-        Some((copy, r, crate::interrupts::rdtsc() - t0))
+        Some((copy, r, crate::interrupts::rdtsc() - t1, bind))
     });
 
     let t0 = crate::interrupts::rdtsc();
     scene::execute(frame, &cpu_rec, target, info, damage);
     let cpu = crate::interrupts::rdtsc() - t0;
 
-    let Some((copy, result, gpu)) = gpu_result else {
+    let Some((copy, result, gpu, bind)) = gpu_result else {
         crate::kprintln!("[npk] gpu: no memory to verify scenes, composing on the CPU");
         MODE.store(MODE_OFF, Ordering::Release);
         return;
@@ -191,8 +195,8 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
             if diffs == 0 {
                 MODE.store(MODE_ON, Ordering::Release);
                 FAILURES_IN_ROW.store(0, Ordering::Relaxed);
-                crate::kprintln!("[npk] gpu: scene verified ({} items), GPU {} us vs CPU {} us — composing on the GPU",
-                    frame.items.len(), us(gpu), us(cpu));
+                crate::kprintln!("[npk] gpu: scene verified ({} items), GPU {} us vs CPU {} us (binding {} us once) — composing on the GPU",
+                    frame.items.len(), us(gpu), us(cpu), us(bind));
             } else {
                 MODE.store(MODE_OFF, Ordering::Release);
                 crate::kprintln!("[npk] gpu: scene differs in {} of {} pixels, composing on the CPU",
@@ -209,7 +213,8 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
         }
         None => {
             MODE.store(MODE_OFF, Ordering::Release);
-            crate::kprintln!("[npk] gpu: the verification scene could not be handed over, composing on the CPU");
+            crate::kprintln!("[npk] gpu: the verification scene could not be handed over (buffers not bound after {} us), composing on the CPU",
+                us(bind));
         }
     }
     if gpudev::release(copy, copy, pages) {

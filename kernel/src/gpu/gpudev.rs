@@ -44,6 +44,8 @@ pub const CAP_COPY: i32 = 1;
 pub const CAP_SCENE: i32 = 2;
 const FIXED_BOS: u32 = 3;
 const JOB_TIMEOUT_MS: u64 = 100;
+/// Binding a new buffer is a page walk per 4 KB page in the module, once.
+const BIND_TIMEOUT_MS: u64 = 2000;
 const DRIVER_NAME: &str = "gpudev (driver module)";
 /// XRGB8888, the only format the compositor writes.
 const FORMAT_XRGB8888: u32 = 0x3432_5258;
@@ -614,6 +616,33 @@ pub fn submit_scene(target: u32, payload: Vec<u8>, sources: &[u32]) -> Option<u3
     };
     wake_module();
     Some(seq)
+}
+
+/// Wait until the module has bound every buffer in `ids`. False when one
+/// failed, is gone, or binding outlasts `BIND_TIMEOUT_MS`.
+pub fn wait_bound(ids: &[u32]) -> bool {
+    let end = crate::interrupts::rdtsc() + BIND_TIMEOUT_MS * (crate::interrupts::tsc_freq() / 1000);
+    loop {
+        let pending = {
+            let st = STATE.lock();
+            let mut pending = false;
+            for id in ids {
+                match st.bos.get(id).map(|b| b.state) {
+                    Some(BoState::Bound) => {}
+                    Some(BoState::Adding) => pending = true,
+                    _ => return false,
+                }
+            }
+            pending
+        };
+        if !pending {
+            return true;
+        }
+        if !READY.load(Ordering::Acquire) || crate::interrupts::rdtsc() >= end {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
 }
 
 /// Wait for scene job `seq`; true when the module composed it.
