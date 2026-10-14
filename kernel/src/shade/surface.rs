@@ -8,6 +8,12 @@
 //!
 //! Keyed by `WindowId`: a VM has one surface per app window.
 //!
+//! A guest that hands its frames over as blobs (`present_blob`) is not
+//! copied at all: the frame stays in guest RAM, the GPU composes from it
+//! there (`front_in_place`), and only a CPU composite copies what it needs.
+//! Before the guest may write or free such a frame again, `detach_blob`
+//! turns every picture still shown from it into a copy.
+//!
 //! Concurrency: the producer (virtio-gpu FLUSH on a vCPU core) and the
 //! consumer (Shade render on Core 0) run on different cores. Three
 //! buffers per surface (back → ready → front): each side copies or blits
@@ -22,7 +28,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
-use crate::shade::buffers::PixelBuffer;
+use crate::shade::buffers::{ForeignView, PixelBuffer};
+use crate::shade::scene::InPlace;
 
 /// One window's bitmap content. BGRX (0x00RRGGBB packed as the host
 /// framebuffer expects), `width * height` pixels.
@@ -62,6 +69,8 @@ pub struct GuestSurface {
     display_dirty: bool,
     /// Number of the newest frame written (`Frame::seq`).
     seq: u64,
+    /// `front` is out with a reader (`with_front`).
+    front_out: bool,
     /// What each of the last frames changed against the one before:
     /// `(seq, width, height, rect)`, indexed by `seq % HISTORY`.
     history: [(u64, u32, u32, (u32, u32, u32, u32)); HISTORY],
@@ -75,10 +84,45 @@ const HISTORY: usize = 8;
 struct Frame {
     /// A `PixelBuffer`, so the GPU can compose straight from it.
     pixels: PixelBuffer,
-    /// Number of the guest frame it holds; 0: undefined contents.
+    /// Number of the guest frame `pixels` holds; 0: undefined contents.
     seq: u64,
     width: u32,
     height: u32,
+    /// A frame that lies in guest pages, and its number; `pixels` is then
+    /// only a copy made for the CPU.
+    blob: Option<(ForeignView, u64)>,
+}
+
+/// Keys of guest frames in guest pages (`Sources::with_source_keyed`).
+const KEY_BLOB: u64 = 1 << 63;
+
+impl Frame {
+    /// Bring `pixels` up to the blob frame: only what changed since the
+    /// frame they hold, if `history` says that. False when there is no
+    /// memory for them; `held` is what all surfaces hold.
+    fn materialize(&mut self, history: &[(u64, u32, u32, (u32, u32, u32, u32)); HISTORY], held: usize) -> bool {
+        let Some((view, n)) = self.blob.as_ref() else { return true };
+        let (w, h) = (view.width, view.height);
+        if self.pixels.width() != w || self.pixels.height() != h {
+            if !surface_fits(held.saturating_sub(self.pixels.len()), w as usize * h as usize) {
+                return false;
+            }
+            self.pixels = PixelBuffer::empty();
+            self.pixels = PixelBuffer::new(w, h);
+            self.seq = 0;
+            if self.pixels.is_empty() {
+                return false;
+            }
+        }
+        if self.seq == *n {
+            return true;
+        }
+        let region = missed(history, self.seq, *n, w, h).unwrap_or((0, 0, w, h));
+        view.copy_into(&mut self.pixels, region);
+        COPIED.fetch_add(region.2 as u64 * region.3 as u64 * 4, Ordering::Relaxed);
+        self.seq = *n;
+        true
+    }
 }
 
 impl GuestSurface {
@@ -96,6 +140,7 @@ impl GuestSurface {
             tile_h: 0,
             display_dirty: false,
             seq: 0,
+            front_out: false,
             history: [(0, 0, 0, (0, 0, 0, 0)); HISTORY],
         }
     }
@@ -111,17 +156,22 @@ impl GuestSurface {
 /// larger than the tile they are headed for.
 const SURFACE_SLACK_PERCENT: usize = 25;
 
-/// Whether a new `px_count`-pixel buffer may join the `held` pixels of all
-/// surfaces. A tile is never larger than the screen, so neither is a frame;
-/// all windows together need at most three screen-sized buffers each. The
-/// host keeps its memory reserve on top.
-fn surface_fits(held: usize, px_count: usize) -> bool {
+/// Most pixels of one guest frame: a tile is never larger than the screen.
+fn frame_max() -> usize {
     let fb = crate::framebuffer::get_info();
     let screen = match (fb.width as usize).saturating_mul(fb.height as usize) {
         0 => 3840 * 2160,
         n => n,
     };
-    let frame_max = screen.saturating_mul(100 + SURFACE_SLACK_PERCENT) / 100;
+    screen.saturating_mul(100 + SURFACE_SLACK_PERCENT) / 100
+}
+
+/// Whether a new `px_count`-pixel buffer may join the `held` pixels of all
+/// surfaces. A tile is never larger than the screen, so neither is a frame;
+/// all windows together need at most three screen-sized buffers each. The
+/// host keeps its memory reserve on top.
+fn surface_fits(held: usize, px_count: usize) -> bool {
+    let frame_max = frame_max();
     let total_max = frame_max
         .saturating_mul(3)
         .saturating_mul(crate::microvm::devices::virtio_gpu_pci::MAX_OUTPUTS as usize);
@@ -204,14 +254,45 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
 
     let mut map = SURFACES.lock();
     let Some(surf) = map.get_mut(&window_id) else { return };
+    core::mem::swap(&mut surf.ready, &mut back);
+    surf.back = back;
+    publish(map, window_id, new_seq, width, height, own);
+}
+
+/// A guest frame that lies in guest pages becomes the window's newest
+/// picture without a copy. `dmg` is what it changed against the frame
+/// presented before it.
+pub fn present_blob(window_id: u32, view: ForeignView, dmg: (u32, u32, u32, u32)) {
+    if !view.fits() || view.width as usize * view.height as usize > frame_max() {
+        return;
+    }
+    let (width, height) = (view.width, view.height);
+    let x = dmg.0.min(width);
+    let y = dmg.1.min(height);
+    let own = (x, y, dmg.2.min(width - x), dmg.3.min(height - y));
+    let mut map = SURFACES.lock();
+    let surf = map.entry(window_id).or_insert_with(GuestSurface::new);
+    let new_seq = surf.seq + 1;
+    // The frame it replaces, if never shown, keeps only its copy's buffer.
+    surf.ready.blob = Some((view, new_seq));
+    surf.ready.width = width;
+    surf.ready.height = height;
+    WHOLE.fetch_add(width as u64 * height as u64 * 4, Ordering::Relaxed);
+    publish(map, window_id, new_seq, width, height, own);
+}
+
+/// `ready` holds frame `new_seq` (`own` changed against the one before):
+/// record it, mark it for the compositor and ask for a render.
+fn publish(mut map: spin::MutexGuard<'_, BTreeMap<u32, GuestSurface>>, window_id: u32, new_seq: u64, width: u32,
+           height: u32, own: (u32, u32, u32, u32)) {
+    let Some(surf) = map.get_mut(&window_id) else { return };
+    let dmg = own;
     surf.seq = new_seq;
     surf.history[new_seq as usize % HISTORY] = (new_seq, width, height, own);
     let first = surf.width == 0;
     let realloc = surf.width != width || surf.height != height;
     surf.width = width;
     surf.height = height;
-    core::mem::swap(&mut surf.ready, &mut back);
-    surf.back = back;
     surf.fresh = true;
     surf.dirty = true;
 
@@ -310,21 +391,112 @@ pub fn with_front<F, R>(window_id: u32, f: F) -> Option<R>
 where
     F: FnOnce(&[u32], u32, u32) -> R,
 {
-    let front = {
+    with_front_keyed(window_id, |px, w, h, _| f(px, w, h))
+}
+
+/// `with_front`, also passing the picture's key: the one `front_in_place`
+/// gives for a frame in guest pages, else the pixels' address. A frame in
+/// guest pages is copied here, as far as it changed since the last copy.
+pub fn with_front_keyed<F, R>(window_id: u32, f: F) -> Option<R>
+where
+    F: FnOnce(&[u32], u32, u32, u64) -> R,
+{
+    let (mut front, history, held) = {
         let mut map = SURFACES.lock();
+        let held: usize = map.values().map(GuestSurface::held_pixels).sum();
         let s = map.get_mut(&window_id)?;
+        if s.front_out {
+            return None;
+        }
         if s.fresh {
             core::mem::swap(&mut s.front, &mut s.ready);
             s.fresh = false;
         }
-        core::mem::take(&mut s.front)
+        s.front_out = true;
+        if let Some((v, _)) = &s.front.blob {
+            v.pixels.hold();
+        }
+        (core::mem::take(&mut s.front), s.history, held)
     };
-    // Blit with the lock released — the producer may publish meanwhile.
-    let r = f(&front.pixels, front.width, front.height);
+    // Copy and blit with the lock released — the producer may publish
+    // meanwhile.
+    let ok = front.materialize(&history, held);
+    let key = match &front.blob {
+        Some((v, n)) => {
+            v.pixels.unhold();
+            KEY_BLOB | n
+        }
+        None => front.pixels.as_ptr() as u64,
+    };
+    let r = ok.then(|| f(&front.pixels, front.width, front.height, key));
     if let Some(s) = SURFACES.lock().get_mut(&window_id) {
-        if s.front.pixels.is_empty() { s.front = front; }
+        if s.front_out {
+            s.front = front;
+            s.front_out = false;
+        }
     }
-    Some(r)
+    r
+}
+
+/// The front picture when it lies in guest pages, registered with gpudev
+/// for the scene being encoded (under the map lock, so `pages_idle` sees it
+/// from the moment the picture is taken).
+pub fn front_in_place(window_id: u32) -> Option<InPlace> {
+    let mut map = SURFACES.lock();
+    let s = map.get_mut(&window_id)?;
+    if s.front_out {
+        return None;
+    }
+    if s.fresh {
+        core::mem::swap(&mut s.front, &mut s.ready);
+        s.fresh = false;
+    }
+    let (view, n) = s.front.blob.as_ref()?;
+    Some(InPlace {
+        bo: crate::gpu::gpudev::bo_for_pages(view),
+        key: KEY_BLOB | n,
+        width: view.width,
+        height: view.height,
+    })
+}
+
+/// The pages with `serial` are about to be written or freed by the guest:
+/// a picture still shown from them becomes a copy, the others forget them.
+/// False when a reader kept the surfaces past the deadline.
+pub fn detach_blob(serial: u64) -> bool {
+    let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 10;
+    loop {
+        let mut map = SURFACES.lock();
+        if map.values().any(|s| s.front_out) {
+            drop(map);
+            if crate::interrupts::rdtsc() >= deadline {
+                return false;
+            }
+            crate::smp::fiber::spin_or_yield();
+            continue;
+        }
+        let mut held: usize = map.values().map(GuestSurface::held_pixels).sum();
+        for s in map.values_mut() {
+            let history = s.history;
+            let fresh = s.fresh;
+            for (frame, shown) in [(&mut s.front, true), (&mut s.ready, fresh), (&mut s.back, false)] {
+                if !frame.blob.as_ref().is_some_and(|(v, _)| v.pixels.serial == serial) {
+                    continue;
+                }
+                let before = frame.pixels.len();
+                let ok = !shown || frame.materialize(&history, held);
+                held = (held + frame.pixels.len()).saturating_sub(before);
+                if !ok {
+                    // No memory for the copy: the window shows nothing.
+                    frame.seq = 0;
+                    frame.width = frame.pixels.width();
+                    frame.height = frame.pixels.height();
+                }
+                frame.blob = None;
+            }
+        }
+        return true;
+    }
 }
 
 /// Take (and clear) the union of damage rects (surface-local coords)

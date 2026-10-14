@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use crate::framebuffer::FbInfo;
 use crate::gpu::gpudev;
-use crate::shade::scene::{self, Fit, Item, Rect, Scene, Source, Sources};
+use crate::shade::scene::{self, Fit, InPlace, Item, Rect, Scene, Source, Sources};
 
 const MAGIC: u32 = 0x314E_4353;
 const HEADER: usize = 64;
@@ -225,10 +225,16 @@ struct Recorder<'a> {
 
 impl Sources for Recorder<'_> {
     fn with_source(&self, src: Source, f: &mut dyn FnMut(&[u32], u32, u32)) {
-        self.inner.with_source(src, &mut |px, w, h| {
-            self.seen.borrow_mut().push((src, px.as_ptr() as usize, w, h));
+        self.inner.with_source_keyed(src, &mut |px, w, h, key| {
+            self.seen.borrow_mut().push((src, key as usize, w, h));
             f(px, w, h);
         });
+    }
+
+    fn in_place(&self, src: Source) -> Option<InPlace> {
+        let p = self.inner.in_place(src)?;
+        self.seen.borrow_mut().push((src, p.key as usize, p.width, p.height));
+        Some(p)
     }
 }
 
@@ -394,6 +400,9 @@ fn plane_bo(p: Option<*const u8>, info: &FbInfo) -> Option<u32> {
 /// none right now (the CPU paints nothing for it). None when it has pixels
 /// the module cannot have.
 fn source_bo(sources: &dyn Sources, src: Source) -> Option<Option<u32>> {
+    if let Some(p) = sources.in_place(src) {
+        return p.bo.map(Some);
+    }
     let mut r = Some(None);
     sources.with_source(src, &mut |px, w, h| {
         if px.is_empty() || w == 0 || h == 0 || px.len() < (w * h) as usize {
@@ -502,6 +511,11 @@ fn encode(frame: &Scene, sources: &dyn Sources, info: &FbInfo, damage: &[Rect])
     srcs.sort_unstable();
     srcs.dedup();
     Some((out, srcs))
+}
+
+/// Scenes may go to the GPU: verified, or not yet tried.
+pub fn may_compose_on_gpu() -> bool {
+    MODE.load(Ordering::Acquire) != MODE_OFF
 }
 
 /// `gpu verify`: compare the next whole frame again.

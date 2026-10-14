@@ -16,17 +16,24 @@
 //! buffer (`release`), the pages stay allocated until the module has
 //! unbound them.
 //!
+//! A buffer in frames the kernel does not own (a guest's framebuffer,
+//! `ForeignPixels`) is named by its serial instead (`bo_for_pages`); its
+//! owner forgets it (`forget_pages`) and keeps the frames until
+//! `pages_released`.
+//!
 //! Jobs are done in the order they are queued. Each buffer remembers the
 //! last job that reads or writes it (its fence); a CPU writer waits only for
 //! that one.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 use super::{FramebufferInfo, GpuError, GpuHal, ModeInfo};
+use crate::shade::buffers::{ForeignPixels, ForeignView};
 use crate::drivers::pci::PciAddr;
 use crate::smp::fiber::{self, Waker, NO_WAKER};
 
@@ -63,7 +70,8 @@ enum BoState {
 #[derive(Clone, Copy)]
 pub struct Bo {
     /// Kernel (identity-mapped) address of the first pixel; 0 for buffer 0,
-    /// which the module finds behind its GGTT node.
+    /// which the module finds behind its GGTT node. For a buffer in foreign
+    /// pages (`page_lists`), the first pixel's offset in its page.
     pub addr: u64,
     /// Bytes from the first pixel.
     pub size: u64,
@@ -103,6 +111,12 @@ struct State {
     bos: BTreeMap<u32, Bo>,
     /// Live dynamic buffers by the address of their first pixel.
     by_addr: BTreeMap<u64, u32>,
+    /// Buffers in foreign pages by `ForeignPixels::serial`, and their pages
+    /// with the index of the page holding the first pixel.
+    by_serial: BTreeMap<u64, u32>,
+    page_lists: BTreeMap<u32, (Arc<ForeignPixels>, usize)>,
+    /// Removals of foreign buffers not yet completed: seq → serial.
+    removing: BTreeMap<u32, u64>,
     next_id: u32,
     queue: VecDeque<Job>,
     /// Payloads of jobs not yet completed, by sequence number.
@@ -118,7 +132,7 @@ struct State {
     pinned: Vec<u32>,
     /// `BO_ADD`s queued while pinning.
     pin_adds: u32,
-    deferred: Vec<(u32, (u64, usize))>,
+    deferred: Vec<(u32, Option<(u64, usize)>)>,
     caps: i32,
 }
 
@@ -127,6 +141,9 @@ static STATE: Mutex<State> = Mutex::new(State {
     fb: None,
     bos: BTreeMap::new(),
     by_addr: BTreeMap::new(),
+    by_serial: BTreeMap::new(),
+    page_lists: BTreeMap::new(),
+    removing: BTreeMap::new(),
     next_id: FIXED_BOS,
     queue: VecDeque::new(),
     payloads: BTreeMap::new(),
@@ -190,6 +207,9 @@ pub fn register(dev: PciAddr, version: i32) -> i32 {
     st.fb = Some(fb);
     st.bos.clear();
     st.by_addr.clear();
+    st.by_serial.clear();
+    st.page_lists.clear();
+    st.removing.clear();
     st.bos.insert(0, Bo { addr: 0, size: fb.pitch as u64 * fb.height as u64, ..shadow(0) });
     st.bos.insert(1, shadow(pa));
     st.bos.insert(2, shadow(pb));
@@ -214,11 +234,20 @@ pub fn bo_info(dev: PciAddr, id: i32) -> Option<[u8; BO_INFO_BYTES]> {
         return None;
     }
     let bo = st.bos.get(&(id as u32))?;
-    let (phys, off) = bo.first_page();
+    let (phys, off, pages) = match st.page_lists.get(&(id as u32)) {
+        Some((list, first)) => {
+            let off = (bo.addr & (PAGE - 1)) as u32;
+            (list.pages[*first], off, (off as u64 + bo.size).div_ceil(PAGE) as u32)
+        }
+        None => {
+            let (phys, off) = bo.first_page();
+            (phys, off, bo.pages())
+        }
+    };
     let mut o = [0u8; BO_INFO_BYTES];
     o[0..8].copy_from_slice(&phys.to_le_bytes());
     o[8..16].copy_from_slice(&bo.size.to_le_bytes());
-    for (i, v) in [bo.pitch, bo.width, bo.height, bo.format, off, bo.pages()].iter().enumerate() {
+    for (i, v) in [bo.pitch, bo.width, bo.height, bo.format, off, pages].iter().enumerate() {
         o[16 + i * 4..20 + i * 4].copy_from_slice(&v.to_le_bytes());
     }
     Some(o)
@@ -228,16 +257,28 @@ pub fn bo_info(dev: PciAddr, id: i32) -> Option<[u8; BO_INFO_BYTES]> {
 /// `id` into `out` (8 bytes each). Buffer 0 has none: the module knows the
 /// framebuffer's pages from its GGTT.
 pub fn bo_pages(dev: PciAddr, id: i32, first: u32, out: &mut [u8]) -> i32 {
-    let bo = {
+    let (bo, list) = {
         let st = STATE.lock();
         if st.owner != Some(dev) || id <= 0 {
             return -1;
         }
         match st.bos.get(&(id as u32)) {
-            Some(b) => *b,
+            Some(b) => (*b, st.page_lists.get(&(id as u32)).cloned()),
             _ => return -1,
         }
     };
+    if let Some((list, base)) = list {
+        let total = ((bo.addr & (PAGE - 1)) + bo.size).div_ceil(PAGE) as usize;
+        let mut n = 0;
+        let mut p = first as usize;
+        while p < total && (n + 1) * 8 <= out.len() {
+            let Some(&phys) = list.pages.get(base + p) else { return -1 };
+            out[n * 8..n * 8 + 8].copy_from_slice(&phys.to_le_bytes());
+            n += 1;
+            p += 1;
+        }
+        return n as i32;
+    }
     let (page0, _) = bo.first_page();
     let total = bo.pages();
     let mut n = 0;
@@ -358,6 +399,7 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
                 }
             }
         }
+        st.removing.remove(&seq);
         st.pending_free.remove(&seq)
     };
     STATUS[seq as usize % STATUS.len()].store((seq as u64) << 32 | status as u32 as u64, Ordering::Release);
@@ -395,10 +437,13 @@ pub fn module_gone(dev: PciAddr) {
         st.payloads.clear();
         st.bos.clear();
         st.by_addr.clear();
+        st.by_serial.clear();
+        st.page_lists.clear();
+        st.removing.clear();
         st.adding.clear();
         st.caps = 0;
         let mut frees: Vec<(u64, usize)> = core::mem::take(&mut st.pending_free).into_values().collect();
-        frees.extend(core::mem::take(&mut st.deferred).into_iter().map(|(_, f)| f));
+        frees.extend(core::mem::take(&mut st.deferred).into_iter().filter_map(|(_, f)| f));
         (st.fb.take(), frees)
     };
     READY.store(false, Ordering::Release);
@@ -497,10 +542,107 @@ pub fn bo_for(addr: u64, size: u64, width: u32, height: u32, pitch: u32) -> Opti
 /// completed it.
 fn retire(st: &mut State, id: u32, free: Option<(u64, usize)>) {
     st.bos.remove(&id);
+    let list = st.page_lists.remove(&id);
     let seq = queue_job(st, OP_BO_REMOVE, [id, 0, 0, 0, 0, 0], None, &[]);
     if let Some(f) = free {
         st.pending_free.insert(seq, f);
     }
+    if let Some((list, _)) = list {
+        st.removing.insert(seq, list.serial);
+    }
+}
+
+/// The handle of the buffer `view` shows, registering it with the module
+/// on first use, as `bo_for` does for the kernel's own buffers. The pages
+/// stay bound until `forget_pages`.
+pub fn bo_for_pages(view: &ForeignView) -> Option<u32> {
+    if !SCENES.load(Ordering::Acquire) || !view.fits() {
+        return None;
+    }
+    let serial = view.pixels.serial;
+    let first = (view.offset as u64 / PAGE) as usize;
+    let in_page = view.offset as u64 % PAGE;
+    let size = view.size();
+    let mut st = STATE.lock();
+    st.owner?;
+    if let Some(&id) = st.by_serial.get(&serial) {
+        let bo = st.bos.get(&id).copied()?;
+        let same_pages = st.page_lists.get(&id).is_some_and(|(_, f)| *f == first);
+        if same_pages && bo.addr == in_page && bo.size == size && bo.width == view.width
+            && bo.height == view.height && bo.pitch == view.pitch
+        {
+            if bo.state == BoState::Failed {
+                return None;
+            }
+            if st.pinning {
+                st.pinned.push(id);
+            }
+            return Some(id);
+        }
+        // The same pages shown with another geometry: bound anew.
+        st.by_serial.remove(&serial);
+        if st.pinned.contains(&id) {
+            st.deferred.push((id, None));
+        } else {
+            retire(&mut st, id, None);
+        }
+    }
+    let id = st.next_id;
+    st.next_id += 1;
+    st.bos.insert(id, Bo {
+        addr: in_page, size, pitch: view.pitch, width: view.width, height: view.height, format: FORMAT_XRGB8888,
+        gpu_addr: None, state: BoState::Adding, fence: 0,
+    });
+    st.by_serial.insert(serial, id);
+    st.page_lists.insert(id, (view.pixels.clone(), first));
+    let seq = queue_job(&mut st, OP_BO_ADD, [id, 0, 0, 0, 0, 0], None, &[id]);
+    st.adding.insert(seq, id);
+    if st.pinning {
+        st.pinned.push(id);
+        st.pin_adds += 1;
+    }
+    drop(st);
+    wake_module();
+    Some(id)
+}
+
+/// The owner of the pages with `serial` is about to give them up: the
+/// module unbinds them. Until `pages_released` the frames must stay.
+pub fn forget_pages(serial: u64) {
+    let mut st = STATE.lock();
+    let Some(id) = st.by_serial.remove(&serial) else { return };
+    if st.owner.is_none() {
+        st.bos.remove(&id);
+        st.page_lists.remove(&id);
+        return;
+    }
+    if st.pinned.contains(&id) {
+        st.deferred.push((id, None));
+        return;
+    }
+    retire(&mut st, id, None);
+    drop(st);
+    wake_module();
+}
+
+/// No job queued or running reads the pages with `serial`, and no scene
+/// being encoded names them: their owner may let them be written.
+pub fn pages_idle(serial: u64) -> bool {
+    let st = STATE.lock();
+    let Some(&id) = st.by_serial.get(&serial) else { return true };
+    if st.pinning && st.pinned.contains(&id) {
+        return false;
+    }
+    st.bos.get(&id).is_none_or(|b| b.fence == 0 || seq_ge(COMPLETED.load(Ordering::Acquire), b.fence))
+}
+
+/// After `forget_pages`: the module no longer has the pages with `serial`
+/// bound, so their frames may be freed.
+pub fn pages_released(serial: u64) -> bool {
+    let st = STATE.lock();
+    !st.by_serial.contains_key(&serial)
+        && !st.removing.values().any(|&s| s == serial)
+        && !st.deferred.iter().any(|(id, _)| st.page_lists.get(id).is_some_and(|(l, _)| l.serial == serial))
 }
 
 /// Held while a scene is encoded and handed over: the buffers `bo_for`
@@ -532,7 +674,7 @@ impl Drop for ScenePin {
         let deferred = core::mem::take(&mut st.deferred);
         let any = !deferred.is_empty();
         for (id, free) in deferred {
-            retire(&mut st, id, Some(free));
+            retire(&mut st, id, free);
         }
         drop(st);
         if any {
@@ -552,7 +694,7 @@ pub fn release(addr: u64, phys: u64, pages: usize) -> bool {
         return true;
     }
     if st.pinned.contains(&id) {
-        st.deferred.push((id, (phys, pages)));
+        st.deferred.push((id, Some((phys, pages))));
         return false;
     }
     retire(&mut st, id, Some((phys, pages)));

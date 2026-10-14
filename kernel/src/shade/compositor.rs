@@ -2866,4 +2866,20 @@ impl scene::Sources for Compositor {
             }
         }
     }
+
+    fn with_source_keyed(&self, src: Source, f: &mut dyn FnMut(&[u32], u32, u32, u64)) {
+        match src {
+            Source::Surface(id) => {
+                crate::shade::surface::with_front_keyed(id, |px, w, h, key| f(px, w, h, key));
+            }
+            _ => self.with_source(src, &mut |px, w, h| f(px, w, h, px.as_ptr() as u64)),
+        }
+    }
+
+    fn in_place(&self, src: Source) -> Option<scene::InPlace> {
+        match src {
+            Source::Surface(id) => crate::shade::surface::front_in_place(id),
+            _ => None,
+        }
+    }
 }

@@ -122,6 +122,27 @@ pub trait Sources {
     /// Calls `f(pixels, width, height)` with the source's pixels, if it has
     /// any right now.
     fn with_source(&self, src: Source, f: &mut dyn FnMut(&[u32], u32, u32));
+
+    /// `with_source`, also passing a key for the picture: the key
+    /// `in_place` gives for the same picture, else the pixels' address.
+    fn with_source_keyed(&self, src: Source, f: &mut dyn FnMut(&[u32], u32, u32, u64)) {
+        self.with_source(src, &mut |px, w, h| f(px, w, h, px.as_ptr() as u64));
+    }
+
+    /// A source the GPU reads where it lies (a guest frame in guest RAM),
+    /// None for one it reads through `with_source`.
+    fn in_place(&self, _src: Source) -> Option<InPlace> {
+        None
+    }
+}
+
+/// A picture the GPU reads where it lies.
+pub struct InPlace {
+    /// Its gpudev handle; None when the module cannot have it.
+    pub bo: Option<u32>,
+    pub key: u64,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Damage that touches a panel covers the panel and a margin around it:

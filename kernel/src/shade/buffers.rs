@@ -107,3 +107,123 @@ impl Drop for PixelBuffer {
         }
     }
 }
+
+/// Pixels in frames the kernel does not own: a guest's framebuffer in its
+/// RAM (virtio-gpu guest blob). The compositor and the GPU read them where
+/// they lie; whoever hands them out must keep the frames alive until
+/// `readers` is 0 and gpudev has let go of them (`gpudev::pages_released`).
+pub struct ForeignPixels {
+    /// Unique for the boot; gpudev names the buffer by it.
+    pub serial: u64,
+    /// Physical address of every 4 KB page, in order.
+    pub pages: alloc::vec::Vec<u64>,
+    /// CPU readers copying from the pages right now.
+    readers: core::sync::atomic::AtomicU32,
+}
+
+static FOREIGN_SERIAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+impl ForeignPixels {
+    /// `pages` must be page-aligned physical addresses of frames that stay
+    /// allocated while this object can be read.
+    pub fn new(pages: alloc::vec::Vec<u64>) -> Self {
+        ForeignPixels {
+            serial: FOREIGN_SERIAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+            pages,
+            readers: core::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.pages.len() as u64 * 4096
+    }
+
+    /// No CPU reader is copying from the pages.
+    pub fn unread(&self) -> bool {
+        self.readers.load(core::sync::atomic::Ordering::Acquire) == 0
+    }
+
+    /// A CPU reader starts; `unread` is false until its `unhold`.
+    pub fn hold(&self) {
+        self.readers.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    }
+
+    pub fn unhold(&self) {
+        self.readers.fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// A picture in `ForeignPixels`: 32-bit pixels, `pitch` bytes per row, the
+/// first at byte `offset`.
+#[derive(Clone)]
+pub struct ForeignView {
+    pub pixels: alloc::sync::Arc<ForeignPixels>,
+    pub offset: u32,
+    pub pitch: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ForeignView {
+    /// The view is valid: every pixel lies in the pages and no pixel
+    /// straddles two of them.
+    pub fn fits(&self) -> bool {
+        if self.width == 0 || self.height == 0 || self.offset % 4 != 0 || self.pitch % 4 != 0
+            || (self.width as u64) * 4 > self.pitch as u64
+        {
+            return false;
+        }
+        let end = self.offset as u64 + (self.height as u64 - 1) * self.pitch as u64 + self.width as u64 * 4;
+        end <= self.pixels.bytes()
+    }
+
+    /// Bytes from the first pixel to the end of the last.
+    pub fn size(&self) -> u64 {
+        (self.height as u64 - 1) * self.pitch as u64 + self.width as u64 * 4
+    }
+
+    fn at(&self, byte: u64) -> *const u8 {
+        let page = self.pixels.pages[(byte / 4096) as usize];
+        (page + byte % 4096) as *const u8
+    }
+
+    /// Pixel `(x, y)`; the view must `fit`.
+    pub fn pixel(&self, x: u32, y: u32) -> u32 {
+        let byte = self.offset as u64 + y as u64 * self.pitch as u64 + x as u64 * 4;
+        // SAFETY: `fits` keeps the pixel inside the pages, 4-aligned within
+        // one page; the frames are identity-mapped and alive while the
+        // caller holds the view (`ForeignPixels`).
+        unsafe { core::ptr::read_volatile(self.at(byte) as *const u32) }
+    }
+
+    /// Copy the rows of `rect` into `dst`, a buffer of the view's size.
+    pub fn copy_into(&self, dst: &mut PixelBuffer, rect: (u32, u32, u32, u32)) {
+        if dst.width() != self.width || dst.height() != self.height || !self.fits() {
+            return;
+        }
+        let (rx, ry, rw, rh) = rect;
+        let rx = rx.min(self.width);
+        let ry = ry.min(self.height);
+        let rw = rw.min(self.width - rx);
+        let rh = rh.min(self.height - ry);
+        let stride = self.width as usize;
+        let out: &mut [u32] = dst;
+        for row in ry..ry + rh {
+            let mut byte = self.offset as u64 + row as u64 * self.pitch as u64 + rx as u64 * 4;
+            let mut i = row as usize * stride + rx as usize;
+            let end = i + rw as usize;
+            while i < end {
+                let in_page = ((4096 - byte % 4096) / 4) as usize;
+                let n = in_page.min(end - i);
+                // SAFETY: the run lies in one identity-mapped page of the
+                // view (`fits`), `out[i..i + n]` lies in the destination row,
+                // and the two do not overlap (the kernel owns `dst`).
+                unsafe {
+                    core::ptr::copy_nonoverlapping(self.at(byte) as *const u32, out[i..].as_mut_ptr(), n);
+                }
+                i += n;
+                byte += n as u64 * 4;
+            }
+        }
+    }
+}

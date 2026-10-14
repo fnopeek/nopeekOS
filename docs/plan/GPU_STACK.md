@@ -514,6 +514,41 @@ Bauplan (Stufe 6a, Baustein fuer native context):
 5. Lebensdauer: Blob-Puffer werden vor dem Freigeben des VM-Speichers bei
    gpudev abgemeldet und ihre Zaeune abgewartet.
 
+**Gebaut (Kernel 0.609.0), NUC-Test offen.** Alle fuenf Punkte, das Modul
+bleibt unveraendert (es bindet schon Seite fuer Seite aus `bo_pages`):
+
+- `shade::buffers::ForeignPixels`/`ForeignView`: Pixel in fremden Rahmen
+  (Host-Seitenliste aus `GuestMem::host_page`), mit Lesezaehler.
+- gpudev: `bo_for_pages` / `forget_pages` / `pages_idle` /
+  `pages_released`, Schluessel ist die Seriennummer statt der Adresse.
+- `scene::Sources` hat `in_place` (die GPU liest die Quelle, wo sie liegt)
+  und `with_source_keyed` (damit die Verifikation dasselbe Bild auf beiden
+  Wegen erkennt). Die Flaeche haelt ein Blob-Bild ohne Kopie; die CPU
+  kopiert nur, wenn sie selbst zusammensetzt, und nur den Schaden seit
+  ihrer letzten Kopie (dieselbe Historie wie 0.608.2).
+- Zaun: der FLUSH-Abschluss wird gehalten, bis der vorher gezeigte Blob
+  weder von der CPU noch von einem GPU-Auftrag noch von einer gerade
+  kodierten Szene gelesen wird (hoechstens 40 ms; der Gast wartet 50).
+  Gewartet wird im GPU-Arbeiter ausserhalb des Geraete-Locks; ohne
+  Arbeiter (INTx) wird nicht gehalten. `cores` zeigt `blob` und `hold-us`.
+- UNREF/DETACH/Reset/VM-Ende: ein noch gezeigtes Bild wird Kopie
+  (`surface::detach_blob`), gpudev bindet ab, erst dann Antwort bzw.
+  Freigabe; bindet gpudev nicht rechtzeitig ab, bleibt der VM-Speicher
+  stehen (`stop_worker` → false).
+- Angeboten nur, wenn gpudev Szenen anbietet und `gpu_scene` nicht auf
+  die CPU zurueckgefallen ist; `set microvm_blob off` erzwingt den
+  2D-Weg.
+
+**Der Gast musste doch angefasst werden:** `virtio_gpu_plane_atomic_check`
+verwirft die Schadensrechtecke bei jedem Pufferwechsel („uploads are done
+per-buffer"), und wlroots wechselt jedes Bild. Ohne den Zeilenvergleich
+des 2D-Wegs saehe der Wirt also jedes Gastbild als ganz neu und setzte das
+ganze Fenster neu zusammen. Fuer Guest-Blobs gilt die Begruendung nicht —
+der Wirt liest den neuen Puffer, wo er liegt, wlroots' Schaden gegen das
+vorige Bild stimmt genau. `microvm-linux/patches/virtio-blob-damage.patch`
+laesst die Rechtecke fuer Guest-Blobs stehen; `microvm-linux/build.sh`
+wendet `patches/*.patch` einmal auf den Quellbaum an.
+
 ---
 
 ## 5. Nutzer B: der Desktop

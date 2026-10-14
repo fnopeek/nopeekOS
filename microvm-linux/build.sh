@@ -2,7 +2,8 @@
 # microvm-linux/build.sh — build the Linux kernel for the nopeekOS MicroVM.
 #
 # Downloads kernel.org source (cached in ~/.cache/nopeekos/linux-src/),
-# applies our config overlay on top of x86_64_defconfig, builds bzImage,
+# applies our patches (patches/*.patch) and our config overlay on top of
+# x86_64_defconfig, builds bzImage,
 # copies the result into release/assets/linux-virt.bzImage where the
 # installer + OTA pipeline pick it up.
 set -euo pipefail
@@ -61,6 +62,17 @@ if [ ! -d "$SRCDIR" ]; then
 fi
 
 cd "$SRCDIR"
+
+# ── Patches ───────────────────────────────────────────────────────
+# Applied once to the cached tree; one that reverses cleanly is in.
+for p in "$SCRIPT_DIR"/patches/*.patch; do
+    [ -f "$p" ] || continue
+    if patch -p1 -R --dry-run -s -f < "$p" > /dev/null 2>&1; then
+        continue
+    fi
+    cyan "patching: $(basename "$p")"
+    patch -p1 -s -f < "$p"
+done
 
 # ── Configure ─────────────────────────────────────────────────────
 # Detect whether the config has changed since last build — if not,

@@ -15,13 +15,26 @@
 //!   * RESOURCE_UNREF / DETACH_BACKING → drop resource
 //!   * Cursor cmds → respond OK_NODATA, no rendering
 //!
-//! Out of scope here: virgl/3D, blob resources.
+//! Guest blobs (`VIRTIO_GPU_F_RESOURCE_BLOB`, offered only while the GPU
+//! module composes scenes): the guest's dumb buffers stay in guest RAM
+//! (`RESOURCE_CREATE_BLOB` with `BLOB_MEM_GUEST`), `SET_SCANOUT_BLOB` says
+//! how a frame lies in them, a TRANSFER is nothing, and a FLUSH hands the
+//! frame to its surface without a copy (`surface::present_blob`). The
+//! guest waits for the FLUSH's fence before it writes the buffer it showed
+//! before, so the fence is completed only once nothing reads that buffer
+//! any more (`held`). Before the guest may reuse a blob's pages (UNREF,
+//! DETACH_BACKING, reset) or the VM's memory is freed, every picture shown
+//! from it becomes a copy and gpudev unbinds it (`release_blob`).
+//!
+//! Out of scope here: virgl/3D, host blobs.
 //! We advertise 0 capsets so Linux skips virgl probing entirely.
 
 #![allow(dead_code)]
 
 extern crate alloc;
 use crate::kprintln;
+use crate::shade::buffers::{ForeignPixels, ForeignView};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use super::guest_mem::GuestMem;
 
@@ -98,6 +111,9 @@ const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1 << 0;
 /// then raises the hotplug event that makes the compositor rescan its
 /// connectors. A new output's preferred mode comes from that EDID.
 const VIRTIO_GPU_F_EDID: u32 = 1 << 1;
+/// Guest blobs (see the module comment).
+const VIRTIO_GPU_F_RESOURCE_BLOB: u32 = 1 << 3;
+const VIRTIO_GPU_BLOB_MEM_GUEST: u32 = 1;
 
 // virtio-gpu protocol command/response types
 const VIRTIO_GPU_CMD_GET_DISPLAY_INFO:        u32 = 0x0100;
@@ -111,6 +127,8 @@ const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
 const VIRTIO_GPU_CMD_GET_CAPSET_INFO:         u32 = 0x0108;
 const VIRTIO_GPU_CMD_GET_CAPSET:              u32 = 0x0109;
 const VIRTIO_GPU_CMD_GET_EDID:                u32 = 0x010a;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB:    u32 = 0x010c;
+const VIRTIO_GPU_CMD_SET_SCANOUT_BLOB:        u32 = 0x010d;
 
 const VIRTIO_GPU_CMD_UPDATE_CURSOR:           u32 = 0x0300;
 const VIRTIO_GPU_CMD_MOVE_CURSOR:             u32 = 0x0301;
@@ -119,6 +137,7 @@ const VIRTIO_GPU_RESP_OK_NODATA:           u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO:     u32 = 0x1101;
 const VIRTIO_GPU_RESP_OK_EDID:             u32 = 0x1104;
 const VIRTIO_GPU_RESP_ERR_UNSPEC:          u32 = 0x1200;
+const VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY:   u32 = 0x1201;
 const VIRTIO_GPU_RESP_ERR_INVALID_RES_ID:  u32 = 0x1203;
 const VIRTIO_GPU_RESP_ERR_INVALID_PARAM:   u32 = 0x1205;
 
@@ -163,6 +182,15 @@ const MAX_HOST_PIXEL_BYTES: usize = 512 * 1024 * 1024;
 
 /// Most bytes of one control request the device reads from the guest.
 const MAX_CTRL_REQUEST: usize = 1024 * 1024;
+/// Largest guest blob: an 8K frame.
+const MAX_BLOB_BYTES: u64 = MAX_RESOURCE_DIM as u64 * MAX_RESOURCE_DIM as u64 * 4;
+/// Guest blobs of all resources together. The host keeps 8 bytes per page.
+const MAX_BLOB_TOTAL: u64 = 2 * 1024 * 1024 * 1024;
+/// How long a FLUSH's fence waits for the buffer shown before to be read
+/// out; the guest itself waits 50 ms for it, then writes regardless.
+pub const HOLD_MAX_MS: u64 = 40;
+/// How long giving a blob's pages back waits for gpudev to unbind them.
+const RELEASE_WAIT_MS: u64 = 200;
 
 impl VirtQueue {
     fn desc_gpa(&self)   -> u64 { ((self.desc_hi   as u64) << 32) | self.desc_lo   as u64 }
@@ -191,6 +219,8 @@ struct Resource {
     /// What the transfers since its last FLUSH changed against the picture
     /// on screen.
     dirty: Dirty,
+    /// A guest blob: the pages of its memory.
+    blob: Option<Arc<ForeignPixels>>,
 }
 
 /// Pixels a resource's transfers changed against the picture the surface
@@ -224,11 +254,27 @@ impl Dirty {
 
 /// Per-scanout binding. We advertise `MAX_OUTPUTS`; a scanout is connected
 /// while a host window shows it.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct Scanout {
     enabled: bool,
     resource_id: u32,
     rect: Rect,
+    /// A blob scanout: where its frame lies.
+    view: Option<ForeignView>,
+}
+
+impl Scanout {
+    const OFF: Scanout = Scanout { enabled: false, resource_id: 0, rect: Rect { x: 0, y: 0, w: 0, h: 0 }, view: None };
+}
+
+/// A FLUSH's completion, kept back until the blob shown before it is no
+/// longer read.
+struct Held {
+    head: u16,
+    response: Vec<u8>,
+    resp_descs: Vec<(u64, u32)>,
+    blob: Arc<ForeignPixels>,
+    deadline: u64,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -292,6 +338,13 @@ pub struct VirtioGpu {
     paused_until: u64,
     /// Per scanout: resource of the last FLUSH that reached its surface.
     last_flush_res: [u32; MAX_OUTPUTS],
+    /// Per scanout: the blob of the last frame presented from guest pages.
+    last_blob: [Option<Arc<ForeignPixels>>; MAX_OUTPUTS],
+    /// The blob a FLUSH being served must wait for (`Held`).
+    hold_for: Option<Arc<ForeignPixels>>,
+    held: Option<Held>,
+    /// Blobs given back by the guest whose pages gpudev may still have bound.
+    retired: Vec<Arc<ForeignPixels>>,
 }
 
 impl VirtioGpu {
@@ -318,7 +371,7 @@ impl VirtioGpu {
             events_read: 0,
             pending_kick_queue: None,
             resources: Vec::new(),
-            scanouts: [Scanout { enabled: false, resource_id: 0, rect: Rect { x: 0, y: 0, w: 0, h: 0 } }; MAX_SCANOUTS],
+            scanouts: [const { Scanout::OFF }; MAX_SCANOUTS],
             flush_log_count: 0,
             transfer_log_count: 0,
             row_scratch: Vec::new(),
@@ -328,6 +381,10 @@ impl VirtioGpu {
             dmg_flush_count: 0,
             paused_until: 0,
             last_flush_res: [0; MAX_OUTPUTS],
+            last_blob: [const { None }; MAX_OUTPUTS],
+            hold_for: None,
+            held: None,
+            retired: Vec::new(),
         }
     }
 
@@ -367,6 +424,46 @@ impl VirtioGpu {
     /// command type, and write the response into the driver-writable
     /// descriptor(s).
     fn service_controlq(&mut self, mem: &GuestMem) -> bool {
+        // A held FLUSH completes first; until then nothing else is served.
+        let mut completed = false;
+        if let Some(h) = &self.held {
+            let now = crate::interrupts::rdtsc();
+            if super::gpu_backend::full_active() && !blob_unread(&h.blob) && now < h.deadline {
+                return false;
+            }
+            let h = self.held.take().unwrap();
+            self.complete(mem, h.head, &h.response, &h.resp_descs);
+            completed = true;
+        }
+        self.serve_controlq(mem) || completed
+    }
+
+    /// The blob that a held FLUSH waits for to be read out, if any.
+    pub fn held_blob(&self) -> Option<Arc<ForeignPixels>> {
+        self.held.as_ref().map(|h| h.blob.clone())
+    }
+
+    /// Write `response` into the chain's writable descriptors and return the
+    /// chain to the guest.
+    fn complete(&mut self, mem: &GuestMem, head: u16, response: &[u8], resp_descs: &[(u64, u32)]) {
+        let mut written: u32 = 0;
+        let mut roff: usize = 0;
+        for (addr, len) in resp_descs {
+            if roff >= response.len() { break; }
+            let n = ((*len) as usize).min(response.len() - roff);
+            if n > 0 {
+                mem.write_bytes(*addr, &response[roff..roff + n]);
+                roff += n;
+                written = written.saturating_add(n as u32);
+            }
+        }
+        let q = &mut self.queues[0];
+        let (device_gpa, qsize) = (q.device_gpa(), q.size);
+        super::virtqueue::used_push(mem, device_gpa, qsize, &mut q.used_idx, head, written);
+        super::gpu_backend::raise_isr(1);
+    }
+
+    fn serve_controlq(&mut self, mem: &GuestMem) -> bool {
         use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_WRITE, chain_next};
 
         let q_idx = 0usize;
@@ -429,6 +526,19 @@ impl VirtioGpu {
                 && u32::from_le_bytes([request[0], request[1], request[2], request[3]])
                     == VIRTIO_GPU_CMD_RESOURCE_FLUSH;
             let response = self.dispatch_control(&request, mem);
+
+            // A blob FLUSH whose fence must wait: the guest writes the buffer
+            // shown before once it completes.
+            if let Some(blob) = self.hold_for.take() {
+                if super::gpu_backend::full_active() && !blob_unread(&blob) {
+                    self.held = Some(Held {
+                        head, response, resp_descs, blob,
+                        deadline: now + crate::interrupts::tsc_freq() / 1000 * HOLD_MAX_MS,
+                    });
+                    last_avail = last_avail.wrapping_add(1);
+                    break;
+                }
+            }
 
             // Write response across the writable descriptors in order.
             let mut written: u32 = 0;
@@ -577,9 +687,21 @@ impl VirtioGpu {
             VIRTIO_GPU_CMD_RESOURCE_UNREF => {
                 if request.len() >= 24 + 8 {
                     let rid = u32::from_le_bytes([request[24], request[25], request[26], request[27]]);
+                    self.release_blob(rid);
+                    if !self.wait_released(RELEASE_WAIT_MS) {
+                        kprintln!("[gpu] a guest frame given back is still bound on the GPU");
+                    }
                     self.resources.retain(|r| r.id != rid);
                 }
                 build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
+            }
+            VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB => {
+                let resp = self.handle_create_blob(&request[24..], mem);
+                build_ctrl_hdr(resp, flags, fence_id)
+            }
+            VIRTIO_GPU_CMD_SET_SCANOUT_BLOB => {
+                let resp = self.handle_set_scanout_blob(&request[24..]);
+                build_ctrl_hdr(resp, flags, fence_id)
             }
             VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING => {
                 self.handle_attach_backing(&request[24..]);
@@ -588,6 +710,10 @@ impl VirtioGpu {
             VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING => {
                 if request.len() >= 24 + 8 {
                     let rid = u32::from_le_bytes([request[24], request[25], request[26], request[27]]);
+                    self.release_blob(rid);
+                    if !self.wait_released(RELEASE_WAIT_MS) {
+                        kprintln!("[gpu] a guest frame given back is still bound on the GPU");
+                    }
                     if let Some(r) = self.resources.iter_mut().find(|r| r.id == rid) {
                         r.backing.clear();
                     }
@@ -645,6 +771,7 @@ impl VirtioGpu {
             return false;
         }
         // Replace if id exists, else push.
+        self.release_blob(id);
         if let Some(r) = self.resources.iter_mut().find(|r| r.id == id) {
             r.format = format; r.width = width; r.height = height;
             r.backing.clear(); r.host_pixels = None; r.frame = 0; r.flushed_frame = 0;
@@ -653,10 +780,247 @@ impl VirtioGpu {
             self.resources.push(Resource {
                 id, format, width, height,
                 backing: Vec::new(), host_pixels: None, frame: 0, flushed_frame: 0,
-                dirty: Dirty::Unknown,
+                dirty: Dirty::Unknown, blob: None,
             });
         }
         true
+    }
+
+    /// The guest negotiated guest blobs.
+    fn blob_acked(&self) -> bool {
+        self.driver_features[0] & VIRTIO_GPU_F_RESOURCE_BLOB != 0
+    }
+
+    /// `RESOURCE_CREATE_BLOB` with `BLOB_MEM_GUEST`: the resource is the
+    /// guest pages its entries name, recorded as host frames.
+    fn handle_create_blob(&mut self, body: &[u8], mem: &GuestMem) -> u32 {
+        if !self.blob_acked() {
+            return VIRTIO_GPU_RESP_ERR_UNSPEC;
+        }
+        if body.len() < 32 {
+            return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+        }
+        let d = |o: usize| u32::from_le_bytes([body[o], body[o + 1], body[o + 2], body[o + 3]]);
+        let q = |o: usize| u64::from(d(o)) | u64::from(d(o + 4)) << 32;
+        let (id, blob_mem, nr, size) = (d(0), d(4), d(12) as usize, q(24));
+        if id == 0 || blob_mem != VIRTIO_GPU_BLOB_MEM_GUEST || size == 0 || size > MAX_BLOB_BYTES {
+            return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+        }
+        if nr.checked_mul(16).and_then(|n| n.checked_add(32)).is_none_or(|end| end > body.len()) {
+            return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+        }
+        self.release_blob(id);
+        let held: u64 = self.resources.iter().filter(|r| r.id != id).filter_map(|r| r.blob.as_ref())
+            .map(|b| b.bytes()).sum();
+        if held + size > MAX_BLOB_TOTAL {
+            return VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
+        }
+        let want = size.div_ceil(4096) as usize;
+        let mut pages = Vec::new();
+        if pages.try_reserve_exact(want).is_err() {
+            return VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
+        }
+        for i in 0..nr {
+            let o = 32 + i * 16;
+            let (addr, len) = (q(o), u64::from(d(o + 8)));
+            if addr & 0xFFF != 0 || addr.checked_add(len).is_none() {
+                return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+            }
+            let mut off = 0;
+            while off < len && pages.len() < want {
+                let Some(host) = mem.host_page(addr + off) else { return VIRTIO_GPU_RESP_ERR_INVALID_PARAM };
+                pages.push(host);
+                off += 4096;
+            }
+            if pages.len() == want {
+                break;
+            }
+            // Only the last entry may end inside a page.
+            if len & 0xFFF != 0 {
+                return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+            }
+        }
+        if pages.len() < want {
+            return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+        }
+        self.resources.retain(|r| r.id != id);
+        if self.resources.len() >= MAX_RESOURCES {
+            return VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
+        }
+        self.resources.push(Resource {
+            id, format: 0, width: 0, height: 0,
+            backing: Vec::new(), host_pixels: None, frame: 0, flushed_frame: 0,
+            dirty: Dirty::Unknown, blob: Some(Arc::new(ForeignPixels::new(pages))),
+        });
+        VIRTIO_GPU_RESP_OK_NODATA
+    }
+
+    /// `SET_SCANOUT_BLOB`: the scanout shows rect `r` of a frame of
+    /// `width` x `height` in a blob, plane 0 at `offsets[0]`, `strides[0]`
+    /// bytes per row.
+    fn handle_set_scanout_blob(&mut self, body: &[u8]) -> u32 {
+        if !self.blob_acked() {
+            return VIRTIO_GPU_RESP_ERR_UNSPEC;
+        }
+        if body.len() < 72 {
+            return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+        }
+        let d = |o: usize| u32::from_le_bytes([body[o], body[o + 1], body[o + 2], body[o + 3]]);
+        let (rx, ry, rw, rh) = (d(0), d(4), d(8), d(12));
+        let (scanout_id, resource_id, width, height) = (d(16), d(20), d(24), d(28));
+        let (stride, offset0) = (d(40), d(56));
+        let idx = scanout_id as usize;
+        if idx >= MAX_SCANOUTS {
+            return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+        }
+        let n = self.set_scanout_log_count;
+        self.set_scanout_log_count = n.saturating_add(1);
+        if n < 2 {
+            kprintln!("[gpu] SET_SCANOUT_BLOB id={} res={} {}x{}+{}+{} of {}x{} stride {} (further silenced)",
+                scanout_id, resource_id, rw, rh, rx, ry, width, height, stride);
+        }
+        if resource_id == 0 {
+            self.scanouts[idx].enabled = false;
+            self.scanouts[idx].view = None;
+            return VIRTIO_GPU_RESP_OK_NODATA;
+        }
+        let Some(blob) = self.resources.iter().find(|r| r.id == resource_id).and_then(|r| r.blob.clone()) else {
+            return VIRTIO_GPU_RESP_ERR_INVALID_RES_ID;
+        };
+        let inside = rx.checked_add(rw).is_some_and(|e| e <= width) && ry.checked_add(rh).is_some_and(|e| e <= height);
+        let offset = offset0 as u64 + ry as u64 * stride as u64 + rx as u64 * 4;
+        if !inside || width > MAX_RESOURCE_DIM || height > MAX_RESOURCE_DIM || offset > u32::MAX as u64 {
+            return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+        }
+        let view = ForeignView { pixels: blob, offset: offset as u32, pitch: stride, width: rw, height: rh };
+        if !view.fits() {
+            return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+        }
+        self.scanouts[idx] = Scanout {
+            enabled: true,
+            resource_id,
+            rect: Rect { x: rx, y: ry, w: rw, h: rh },
+            view: Some(view),
+        };
+        VIRTIO_GPU_RESP_OK_NODATA
+    }
+
+    /// FLUSH on blob scanout `k`: the frame goes to window `wid` where it
+    /// lies. The blob shown before is read out before the fence completes.
+    fn flush_blob(&mut self, k: usize, wid: u32, view: ForeignView, rect: (u32, u32, u32, u32)) {
+        use super::gpu_backend as gb;
+        crate::microvm::boottime::gpu_frame();
+        let lit = || gb::lit_percent_at(view.width, view.height, |x, y| view.pixel(x, y));
+        crate::microvm::boottime::gpu_lit(lit);
+        let hidden = wid != 0 && gb::presenting() && !crate::shade::surface::has_frame(wid) && lit() < gb::LIT_PCT;
+        if hidden || !gb::should_present_with(lit) {
+            // Not shown: a picture still shown from the blob before must not
+            // change under the window once the guest writes that blob.
+            if let Some(prev) = self.last_blob[k].take() {
+                if prev.serial != view.pixels.serial && !crate::shade::surface::detach_blob(prev.serial) {
+                    kprintln!("[gpu] a reader kept the last guest frame, it may change on screen");
+                }
+            }
+            return;
+        }
+        let n = self.flush_log_count;
+        self.flush_log_count = n.saturating_add(1);
+        if n < 1 {
+            kprintln!("[gpu] FLUSH blob {}x{} — guest frames composed where they lie, further silenced",
+                view.width, view.height);
+        }
+        let (x, y, w, h) = rect;
+        let x0 = x.min(view.width);
+        let y0 = y.min(view.height);
+        let dmg = (x0, y0, w.min(view.width - x0), h.min(view.height - y0));
+        self.dmg_area_acc += dmg.2 as u64 * dmg.3 as u64;
+        self.dmg_tile_acc += view.width as u64 * view.height as u64;
+        self.dmg_flush_count = self.dmg_flush_count.wrapping_add(1);
+        if self.dmg_flush_count % DMG_LOG_EVERY == 0 && self.dmg_tile_acc > 0 {
+            if self.dmg_flush_count <= DMG_LOG_EVERY * DMG_LOG_WINDOWS {
+                kprintln!("[gpu-dmg] {} blob flushes: avg damage {}% of tile",
+                    DMG_LOG_EVERY, self.dmg_area_acc.saturating_mul(100) / self.dmg_tile_acc);
+            }
+            self.dmg_area_acc = 0;
+            self.dmg_tile_acc = 0;
+        }
+        let prev = self.last_blob[k].replace(view.pixels.clone());
+        if wid != 0 {
+            gb::note(gb::STAT_BLOB, 1);
+            crate::shade::surface::present_blob(wid, view, dmg);
+        } else if !crate::microvm::vm_has_window() {
+            let mut copy = crate::shade::buffers::PixelBuffer::new(view.width, view.height);
+            view.copy_into(&mut copy, (0, 0, view.width, view.height));
+            let px: &[u32] = &copy;
+            // SAFETY: the u32 pixels reinterpreted as their bytes; u8 has
+            // alignment 1 and the slice borrows `copy` for the call.
+            let bytes = unsafe { core::slice::from_raw_parts(px.as_ptr() as *const u8, px.len() * 4) };
+            blit_to_host_fb(bytes, view.width, view.height);
+        }
+        if let Some(p) = prev {
+            if p.serial != self.last_blob[k].as_ref().map_or(0, |b| b.serial) {
+                self.hold_for = Some(p);
+            }
+        }
+    }
+
+    /// The guest gives resource `rid`'s blob pages back (or replaces it):
+    /// nothing shows them any more and gpudev unbinds them. The frames stay
+    /// the VM's until `wait_released` says gpudev let go of them.
+    fn release_blob(&mut self, rid: u32) {
+        let Some(blob) = self.resources.iter_mut().find(|r| r.id == rid).and_then(|r| r.blob.take()) else { return };
+        let serial = blob.serial;
+        for s in self.scanouts.iter_mut() {
+            if s.view.as_ref().is_some_and(|v| v.pixels.serial == serial) {
+                s.view = None;
+                s.enabled = false;
+            }
+        }
+        for b in self.last_blob.iter_mut() {
+            if b.as_ref().is_some_and(|b| b.serial == serial) {
+                *b = None;
+            }
+        }
+        if self.hold_for.as_ref().is_some_and(|b| b.serial == serial) {
+            self.hold_for = None;
+        }
+        if !crate::shade::surface::detach_blob(serial) {
+            kprintln!("[gpu] a reader kept a guest frame that is being given back");
+        }
+        crate::gpu::gpudev::forget_pages(serial);
+        self.retired.push(blob);
+    }
+
+    /// Wait (yielding, bounded) until no retired blob is read or bound any
+    /// more; those still are stay listed. True when none is left.
+    fn wait_released(&mut self, ms: u64) -> bool {
+        let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000 * ms;
+        loop {
+            self.retired.retain(|b| !(b.unread() && crate::gpu::gpudev::pages_released(b.serial)));
+            if self.retired.is_empty() {
+                return true;
+            }
+            if crate::interrupts::rdtsc() >= deadline {
+                return false;
+            }
+            crate::smp::fiber::spin_or_yield();
+        }
+    }
+
+    /// Every blob given back before the guest's memory goes: false when
+    /// gpudev still has one bound, so the memory must stay.
+    pub fn release_all_blobs(&mut self) -> bool {
+        let ids: Vec<u32> = self.resources.iter().filter(|r| r.blob.is_some()).map(|r| r.id).collect();
+        for id in ids {
+            self.release_blob(id);
+        }
+        self.held = None;
+        self.hold_for = None;
+        let done = self.wait_released(RELEASE_WAIT_MS);
+        if !done {
+            kprintln!("[gpu] {} guest frame(s) still bound on the GPU", self.retired.len());
+        }
+        done
     }
 
     fn handle_attach_backing(&mut self, body: &[u8]) {
@@ -706,11 +1070,13 @@ impl VirtioGpu {
         if idx >= MAX_SCANOUTS { return; }
         if resource_id == 0 {
             self.scanouts[idx].enabled = false;
+            self.scanouts[idx].view = None;
         } else {
             self.scanouts[idx] = Scanout {
                 enabled: true,
                 resource_id,
                 rect: Rect { x, y, w, h },
+                view: None,
             };
         }
     }
@@ -726,6 +1092,10 @@ impl VirtioGpu {
             body[20], body[21], body[22], body[23],
         ]);
         let resource_id = u32::from_le_bytes([body[24], body[25], body[26], body[27]]);
+        // A blob's pixels are read where they lie.
+        if self.resources.iter().any(|r| r.id == resource_id && r.blob.is_some()) {
+            return;
+        }
 
         let others: usize = self.resources.iter()
             .filter(|r| r.id != resource_id)
@@ -863,6 +1233,10 @@ impl VirtioGpu {
             self.scanouts[k].enabled && self.scanouts[k].resource_id == resource_id
         }) else { return };
         let wid = crate::microvm::output_window(k);
+        if let Some(view) = self.scanouts[k].view.clone() {
+            self.flush_blob(k, wid, view, (x, y, w, h));
+            return;
+        }
         let last_res = self.last_flush_res[k];
         let r = match self.resources.iter_mut().find(|r| r.id == resource_id) {
             Some(r) => r, None => return,
@@ -1086,6 +1460,8 @@ impl VirtioGpu {
             CC_DEVICE_FEATURE => {
                 if self.device_feature_select == 1 {
                     1 // VIRTIO_F_VERSION_1 (bit 32 → bit 0 of upper half)
+                } else if super::gpu_backend::blob_offered() {
+                    (VIRTIO_GPU_F_EDID | VIRTIO_GPU_F_RESOURCE_BLOB) as u64
                 } else {
                     VIRTIO_GPU_F_EDID as u64
                 }
@@ -1133,6 +1509,7 @@ impl VirtioGpu {
                 self.device_status = val as u8;
                 let _ = prev;
                 if self.device_status == 0 {
+                    self.release_all_blobs();
                     for q in self.queues.iter_mut() {
                         *q = VirtQueue {
                             size: MAX_QUEUE_SIZE, msix_vec: 0xFFFF, enable: 0,
@@ -1477,4 +1854,10 @@ fn blit_to_host_fb(src_pixels: &[u8], src_w: u32, src_h: u32) {
             );
         }
     }
+}
+
+/// Nothing reads `blob` any more: no CPU copy, no GPU job, no scene being
+/// encoded.
+fn blob_unread(blob: &ForeignPixels) -> bool {
+    blob.unread() && crate::gpu::gpudev::pages_idle(blob.serial)
 }

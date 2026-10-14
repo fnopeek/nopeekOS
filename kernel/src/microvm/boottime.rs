@@ -186,10 +186,15 @@ pub fn gpu_frame() {
 /// The pixels of a presented frame. After app exec, marks the first frame
 /// whose sampled pixels are mostly not black.
 pub fn gpu_pixels(pixels: &[u8], width: u32, height: u32) {
+    gpu_lit(|| crate::microvm::devices::gpu_backend::lit_percent(pixels, width, height));
+}
+
+/// `gpu_pixels` with the frame's lit share computed on demand.
+pub fn gpu_lit(lit: impl FnOnce() -> usize) {
     if !ACTIVE.load(Ordering::Acquire) || WIN_STATE.load(Ordering::Acquire) != WIN_ARMED {
         return;
     }
-    let lit = crate::microvm::devices::gpu_backend::lit_percent(pixels, width, height);
+    let lit = lit();
     if lit >= crate::microvm::devices::gpu_backend::LIT_PCT {
         WIN_STATE.store(WIN_DONE, Ordering::Release);
         kprintln!(

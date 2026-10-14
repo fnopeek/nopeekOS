@@ -191,6 +191,16 @@ impl GuestMem {
         Some(host)
     }
 
+    /// Host physical address of the guest page at `gpa` (page-aligned),
+    /// faulted in if the guest has not touched it. The frame belongs to the
+    /// VM until its memory is freed at close.
+    pub fn host_page(&self, gpa: u64) -> Option<u64> {
+        if gpa & 0xFFF != 0 {
+            return None;
+        }
+        self.page_host(gpa)
+    }
+
     /// Fault the 4 KB page containing `gpa` into the demand region
     /// (no-op for the boot window). Called from the EPT-violation /
     /// #NPF handler: `true` → mapped, re-enter the guest; `false` →

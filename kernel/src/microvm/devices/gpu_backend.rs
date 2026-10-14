@@ -81,6 +81,16 @@ pub fn vblank(now: u64, gm: &super::guest_mem::GuestMem) -> bool {
     lock().service_queues(0, gm) && !notify_queue(0)
 }
 
+/// Whether the device offers guest blobs: only while the GPU module
+/// composes scenes, so guest frames are read where they lie; without it
+/// the CPU would copy every whole frame. `set microvm_blob off` keeps the
+/// copying 2D path.
+pub fn blob_offered() -> bool {
+    crate::gpu::gpudev::scenes_offered()
+        && crate::shade::gpu_scene::may_compose_on_gpu()
+        && !crate::config::get("microvm_blob").is_some_and(|v| v.trim().eq_ignore_ascii_case("off"))
+}
+
 /// Windows came or went (`display_tick`). True = raise IRQ 9.
 pub fn display_tick_intx() -> bool {
     display_tick() && !notify_config()
@@ -105,9 +115,9 @@ pub fn mmio_fast(off: u32, write: Option<u32>) -> Option<u64> {
 
 /// Guest GPU traffic for `cores`: controlq commands by kind, cursorq
 /// commands, and the bytes copied on the TRANSFER and FLUSH paths.
-pub const STAT_BUCKETS: usize = 7;
+pub const STAT_BUCKETS: usize = 9;
 pub const STAT_LABELS: [&str; STAT_BUCKETS] =
-    ["transfer", "flush", "scanout", "other", "cursor", "xfer-KB", "flush-KB"];
+    ["transfer", "flush", "scanout", "other", "cursor", "xfer-KB", "flush-KB", "blob", "hold-us"];
 pub const STAT_TRANSFER: usize = 0;
 pub const STAT_FLUSH: usize = 1;
 pub const STAT_SCANOUT: usize = 2;
@@ -115,6 +125,10 @@ pub const STAT_OTHER: usize = 3;
 pub const STAT_CURSOR: usize = 4;
 pub const STAT_XFER_KB: usize = 5;
 pub const STAT_FLUSH_KB: usize = 6;
+/// Frames presented where they lie (guest blobs), and the time FLUSH fences
+/// waited for the buffer shown before.
+pub const STAT_BLOB: usize = 7;
+pub const STAT_HOLD_US: usize = 8;
 static STATS: [core::sync::atomic::AtomicU64; STAT_BUCKETS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; STAT_BUCKETS];
 pub fn note(kind: usize, n: u64) {
@@ -205,15 +219,20 @@ const SAMPLE_STEP: usize = 4;
 
 /// Percent of sampled pixels (BGRX, `width` per row) that are not black.
 pub fn lit_percent(pixels: &[u8], width: u32, height: u32) -> usize {
-    let stride = width as usize * 4;
-    if stride == 0 {
-        return 0;
-    }
+    let rows = pixels.len() / (width as usize * 4).max(1);
+    lit_percent_at(width, height.min(rows as u32), |x, y| {
+        let o = (y as usize * width as usize + x as usize) * 4;
+        u32::from_le_bytes([pixels[o], pixels[o + 1], pixels[o + 2], pixels[o + 3]])
+    })
+}
+
+/// `lit_percent` of a picture read pixel by pixel.
+pub fn lit_percent_at(width: u32, height: u32, pixel: impl Fn(u32, u32) -> u32) -> usize {
     let (mut lit, mut total) = (0usize, 0usize);
-    for row in pixels.chunks_exact(stride).take(height as usize).step_by(SAMPLE_STEP) {
-        for px in row.chunks_exact(4).step_by(SAMPLE_STEP) {
+    for y in (0..height).step_by(SAMPLE_STEP) {
+        for x in (0..width).step_by(SAMPLE_STEP) {
             total += 1;
-            if px[0] | px[1] | px[2] != 0 {
+            if pixel(x, y) & 0x00FF_FFFF != 0 {
                 lit += 1;
             }
         }
@@ -239,6 +258,11 @@ pub fn presenting() -> bool {
 
 /// Whether this flushed frame goes to the window.
 pub fn should_present(pixels: &[u8], width: u32, height: u32) -> bool {
+    should_present_with(|| lit_percent(pixels, width, height))
+}
+
+/// `should_present` with the frame's `lit_percent` computed on demand.
+pub fn should_present_with(lit: impl FnOnce() -> usize) -> bool {
     match PRESENT.load(Ordering::Acquire) {
         PRESENT_SHOWN => true,
         PRESENT_CLOSING => false,
@@ -246,7 +270,7 @@ pub fn should_present(pixels: &[u8], width: u32, height: u32) -> bool {
             let hz = crate::interrupts::tsc_freq().max(1);
             let waited_ms = crate::interrupts::rdtsc()
                 .saturating_sub(LAUNCH_TSC.load(Ordering::Relaxed)) * 1000 / hz;
-            if waited_ms >= REVEAL_TIMEOUT_MS || lit_percent(pixels, width, height) >= LIT_PCT {
+            if waited_ms >= REVEAL_TIMEOUT_MS || lit() >= LIT_PCT {
                 PRESENT.store(PRESENT_SHOWN, Ordering::Release);
                 true
             } else {
@@ -325,7 +349,7 @@ pub fn start_worker(core: usize) {
 /// if it is still running: then guest memory must not be freed under it.
 #[must_use]
 pub fn stop_worker() -> bool {
-    if !WORKER_RUNNING.load(Ordering::Acquire) { return true; }
+    if !WORKER_RUNNING.load(Ordering::Acquire) { return lock().release_all_blobs(); }
     set_full_active(false);
     STOP.store(true, Ordering::Release);
     // Out of its park now rather than at the next timeout.
@@ -339,7 +363,38 @@ pub fn stop_worker() -> bool {
     GPU_KICK.store(0, Ordering::Release);
     GPU_IRQ_PENDING.store(false, Ordering::Release);
     WORKER_CORE.store(usize::MAX, Ordering::Release);
-    stopped
+    // Guest frames shown or bound on the GPU: let go of them while the
+    // guest's memory still exists.
+    stopped && lock().release_all_blobs()
+}
+
+/// Serve queue `q` and signal its completions. A FLUSH whose fence waits
+/// for the buffer shown before is completed once nothing reads that buffer
+/// any more, waited for here, outside the device lock.
+fn serve(q: u16, gm: &super::guest_mem::GuestMem) {
+    let signal = |advanced: bool| {
+        if advanced && !notify_queue(q) {
+            // The guest left MSI-X while the kick was in flight.
+            raise_irq();
+            crate::microvm::cpu::kick_bsp_net_irq();
+        }
+    };
+    signal(GPU.lock().service_queues(q, gm));
+    if q != 0 {
+        return;
+    }
+    let Some(blob) = GPU.lock().held_blob() else { return };
+    let t0 = crate::interrupts::rdtsc();
+    let deadline = t0 + crate::interrupts::tsc_freq() / 1000 * super::virtio_gpu_pci::HOLD_MAX_MS;
+    while !(blob.unread() && crate::gpu::gpudev::pages_idle(blob.serial))
+        && crate::interrupts::rdtsc() < deadline
+        && !STOP.load(Ordering::Acquire)
+    {
+        crate::smp::fiber::spin_or_yield();
+    }
+    let us = (crate::interrupts::rdtsc() - t0) * 1_000_000 / crate::interrupts::tsc_freq().max(1);
+    note(STAT_HOLD_US, us);
+    signal(GPU.lock().service_queues(0, gm));
 }
 
 fn worker_entry(_arg: u64) {
@@ -356,13 +411,8 @@ fn worker_entry(_arg: u64) {
         if kicks != 0 {
             if let Some(gm) = crate::microvm::devices::guest_mem::active() {
                 for q in 0..2u16 {
-                    if kicks & (1 << q) != 0
-                        && GPU.lock().service_queues(q, gm)
-                        && !notify_queue(q)
-                    {
-                        // The guest left MSI-X while the kick was in flight.
-                        raise_irq();
-                        crate::microvm::cpu::kick_bsp_net_irq();
+                    if kicks & (1 << q) != 0 {
+                        serve(q, gm);
                     }
                 }
             }
