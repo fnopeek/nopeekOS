@@ -125,8 +125,8 @@ fn init_common_regs(regs: &mut [u32; 1024], runtime_last: u32, inhibit: bool) {
 
 /// `init_ppgtt_regs` → `ASSIGN_CTX_PML4`: the 4-level table's top directory.
 fn init_ppgtt_regs(regs: &mut [u32; 1024], pd_dma: u64) {
-    regs[CTX_PDP0_UDW as usize + 1] = (pd_dma >> 32) as u32;
-    regs[CTX_PDP0_LDW as usize + 1] = pd_dma as u32;
+    regs[CTX_PDP0_UDW as usize] = (pd_dma >> 32) as u32;
+    regs[CTX_PDP0_LDW as usize] = pd_dma as u32;
 }
 
 /// `__reset_stop_ring`.

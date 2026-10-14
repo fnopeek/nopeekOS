@@ -360,8 +360,8 @@ fn walk_from_context(gt: &intel_gt, e: usize, va: u64, expect: u64) {
         return;
     };
     let off = LRC_STATE_OFFSET as u32;
-    let lo = state.r32(off + (CTX_PDP0_LDW + 1) * 4);
-    let hi = state.r32(off + (CTX_PDP0_UDW + 1) * 4);
+    let lo = state.r32(off + CTX_PDP0_LDW * 4);
+    let hi = state.r32(off + CTX_PDP0_UDW * 4);
     Line::new().s("gpudev: va ").hex(va as u32).s(" should reach ").hex((expect >> 32) as u32).s("_")
         .hex(expect as u32).s(", context PDP0 ").hex(hi).s("_").hex(lo).say();
     if let Some(vm) = gt.vm.as_ref() {
