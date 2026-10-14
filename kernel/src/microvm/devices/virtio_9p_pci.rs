@@ -463,14 +463,17 @@ impl Virtio9p {
         let v: u64 = match off {
             CC_DEVICE_FEATURE_SELECT => self.device_feature_select as u64,
             CC_DEVICE_FEATURE => {
-                if self.device_feature_select == 1 {
-                    1 // bit 32 = VIRTIO_F_VERSION_1
-                } else {
-                    VIRTIO_9P_F_MOUNT_TAG as u64 // bit 0
+                match self.device_feature_select {
+                    0 => VIRTIO_9P_F_MOUNT_TAG as u64, // bit 0
+                    1 => 1, // bit 32 = VIRTIO_F_VERSION_1
+                    _ => 0,
                 }
             }
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select as u64,
-            CC_DRIVER_FEATURE => self.driver_features[(self.driver_feature_select & 1) as usize] as u64,
+            CC_DRIVER_FEATURE => {
+                let sel = self.driver_feature_select as usize;
+                if sel < 2 { self.driver_features[sel] as u64 } else { 0 }
+            }
             CC_MSIX_CONFIG => self.msix_config as u64,
             CC_NUM_QUEUES => NUM_QUEUES as u64,
             CC_DEVICE_STATUS => self.device_status as u64,
@@ -496,7 +499,12 @@ impl Virtio9p {
         match off {
             CC_DEVICE_FEATURE_SELECT => self.device_feature_select = val as u32,
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select = val as u32,
-            CC_DRIVER_FEATURE => self.driver_features[(self.driver_feature_select & 1) as usize] = val as u32,
+            CC_DRIVER_FEATURE => {
+                // Linux 6.18 writes all four feature windows (128 bits);
+                // only the first two exist here.
+                let sel = self.driver_feature_select as usize;
+                if sel < 2 { self.driver_features[sel] = val as u32; }
+            }
             CC_MSIX_CONFIG => self.msix_config = val as u16,
             CC_DEVICE_STATUS => {
                 self.device_status = val as u8;

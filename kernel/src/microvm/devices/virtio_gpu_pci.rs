@@ -1488,6 +1488,8 @@ impl VirtioGpu {
             CC_DEVICE_FEATURE => {
                 if self.device_feature_select == 1 {
                     1 // VIRTIO_F_VERSION_1 (bit 32 → bit 0 of upper half)
+                } else if self.device_feature_select != 0 {
+                    0
                 } else if super::gpu_backend::blob_offered() {
                     (VIRTIO_GPU_F_EDID | VIRTIO_GPU_F_RESOURCE_BLOB) as u64
                 } else {
@@ -1496,8 +1498,8 @@ impl VirtioGpu {
             }
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select as u64,
             CC_DRIVER_FEATURE => {
-                let half = (self.driver_feature_select & 1) as usize;
-                self.driver_features[half] as u64
+                let sel = self.driver_feature_select as usize;
+                if sel < 2 { self.driver_features[sel] as u64 } else { 0 }
             }
             CC_MSIX_CONFIG => self.msix_config as u64,
             CC_NUM_QUEUES => NUM_QUEUES as u64,
@@ -1525,9 +1527,11 @@ impl VirtioGpu {
             CC_DEVICE_FEATURE_SELECT => self.device_feature_select = val as u32,
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select = val as u32,
             CC_DRIVER_FEATURE => {
-                let half = (self.driver_feature_select & 1) as usize;
-                self.driver_features[half] = val as u32;
-                if half == 0 {
+                // Linux 6.18 writes all four feature windows (128 bits);
+                // only the first two exist here.
+                let sel = self.driver_feature_select as usize;
+                if sel < 2 { self.driver_features[sel] = val as u32; }
+                if sel == 0 {
                     kprintln!("[gpu] guest features {:#x} (blob {})", val,
                         if val as u32 & VIRTIO_GPU_F_RESOURCE_BLOB != 0 { "on" } else { "off" });
                 }

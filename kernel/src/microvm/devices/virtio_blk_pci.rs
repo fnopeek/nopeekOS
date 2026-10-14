@@ -572,6 +572,8 @@ impl VirtioBlk {
                 // Selector 0 = bits 0..31, selector 1 = bits 32..63.
                 if self.device_feature_select == 1 {
                     1 // bit 32 = VIRTIO_F_VERSION_1
+                } else if self.device_feature_select != 0 {
+                    0
                 } else if self.read_only {
                     (VIRTIO_BLK_F_RO | VIRTIO_BLK_F_SEG_MAX) as u64
                 } else {
@@ -580,8 +582,8 @@ impl VirtioBlk {
             }
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select as u64,
             CC_DRIVER_FEATURE => {
-                let half = (self.driver_feature_select & 1) as usize;
-                self.driver_features[half] as u64
+                let sel = self.driver_feature_select as usize;
+                if sel < 2 { self.driver_features[sel] as u64 } else { 0 }
             }
             CC_MSIX_CONFIG => self.msix_config as u64,
             CC_NUM_QUEUES => NUM_QUEUES as u64,
@@ -609,8 +611,10 @@ impl VirtioBlk {
             CC_DEVICE_FEATURE_SELECT => self.device_feature_select = val as u32,
             CC_DRIVER_FEATURE_SELECT => self.driver_feature_select = val as u32,
             CC_DRIVER_FEATURE => {
-                let half = (self.driver_feature_select & 1) as usize;
-                self.driver_features[half] = val as u32;
+                // Linux 6.18 writes all four feature windows (128 bits);
+                // only the first two exist here.
+                let sel = self.driver_feature_select as usize;
+                if sel < 2 { self.driver_features[sel] = val as u32; }
             }
             CC_MSIX_CONFIG => self.msix_config = val as u16,
             CC_DEVICE_STATUS => {
