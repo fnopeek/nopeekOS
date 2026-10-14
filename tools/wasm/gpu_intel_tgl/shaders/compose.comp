@@ -513,6 +513,48 @@ void main() {
             return;
         }
     }
+    // A bin inside a window's glass (fill_rounded_chrome_aa's straight
+    // rows, opaque or tinted from the glass source), with at most text and
+    // fills over it: the glass per pixel, then those, items loaded once.
+    if (opaque && count <= 4u) {
+        Blk list = blk_load(p.bins, off);
+        Blk g0 = blk_load(p.frame, ITEMS + SH(list, 0u) * ITEM_WORDS);
+        Blk g1 = g0;
+        Blk g2 = g0;
+        Blk g3 = g0;
+        if (count > 1u)
+            g1 = blk_load(p.frame, ITEMS + SH(list, 1u) * ITEM_WORDS);
+        if (count > 2u)
+            g2 = blk_load(p.frame, ITEMS + SH(list, 2u) * ITEM_WORDS);
+        if (count > 3u)
+            g3 = blk_load(p.frame, ITEMS + SH(list, 3u) * ITEM_WORDS);
+        uint k1 = count > 1u ? BC(g1, 0) : 0u;
+        uint k2 = count > 2u ? BC(g2, 0) : 0u;
+        uint k3 = count > 3u ? BC(g3, 0) : 0u;
+        bool over = (k1 == 0u || k1 == 7u || k1 == 8u) && (k2 == 0u || k2 == 7u || k2 == 8u)
+            && (k3 == 0u || k3 == 7u || k3 == 8u);
+        if (BC(g0, 0) == 4u && over) {
+            uint bg = BC(g0, 7);
+            uint go = min(BC(g0, 11), 255u);
+            uint glass_fill = ink_fill(bg, g_tint, g_tint_w);
+            for (uint y = y_lo; y < y_hi; y++) {
+                uint c = bg;
+                if (go < 255u) {
+                    uint wpx = inside_x ? g_glass.v[y * g_glass_pitch + x] : 0u;
+                    c = glass_blend(glass_fill, wpx, go, g_ceil);
+                }
+                if (k1 != 0u)
+                    c = k1 == 7u ? text(g1, x, y, c) : fill(g1, x, y, c);
+                if (k2 != 0u)
+                    c = k2 == 7u ? text(g2, x, y, c) : fill(g2, x, y, c);
+                if (k3 != 0u)
+                    c = k3 == 7u ? text(g3, x, y, c) : fill(g3, x, y, c);
+                if (inside_x)
+                    target.v[y * tpitch + x] = c;
+            }
+            return;
+        }
+    }
     for (uint y = y_lo; y < y_hi; y++) {
         uint at = y * tpitch + x;
         uint c = 0u;

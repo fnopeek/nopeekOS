@@ -4,7 +4,7 @@
 //! passes per axis). Each segment is composed over the union of what its
 //! items reach, with a bin table: per 64x64 bin of the screen grid the
 //! items that reach the bin, in order, starting at the last one that covers
-//! it opaquely. A bin that a later segment covers opaquely is left out of
+//! it opaquely (the background, a window's content, a window's glass). A bin that a later segment covers opaquely is left out of
 //! the earlier ones, unless a panel in between blurs it. No GPU access
 //! here; the caller's `sink` turns each step into commands and memory
 //! writes. Not a Linux file.
@@ -14,6 +14,7 @@ pub const E2BIG: i32 = 7;
 
 pub const KIND_BACKGROUND: u8 = 1;
 pub const KIND_GLOW: u8 = 2;
+pub const KIND_CHROME: u8 = 4;
 pub const KIND_CONTENT: u8 = 5;
 pub const KIND_PANEL: u8 = 6;
 
@@ -93,8 +94,9 @@ pub struct item_shape {
 }
 
 impl item_shape {
-    /// From the item's words (kind, x, y, w, h, ...) on a `screen`.
-    pub fn of(w: &[u32], screen: &rect) -> item_shape {
+    /// From the item's words (kind, x, y, w, h, ...) on a `screen`;
+    /// `glass`: the scene has a glass source (blurred or sharp wallpaper).
+    pub fn of(w: &[u32], screen: &rect, glass: bool) -> item_shape {
         let kind = w[0] as u8;
         let r = rect { x: w[1], y: w[2], w: w[3], h: w[4] };
         let reach = match kind {
@@ -111,10 +113,38 @@ impl item_shape {
                 (rect { x: r.x + rr, y: r.y, w: r.w - 2 * rr, h: r.h },
                  rect { x: r.x, y: r.y + rr, w: r.w, h: r.h - 2 * rr })
             }
+            KIND_CHROME => (chrome_interior(w, &r, glass), EMPTY),
             _ => (EMPTY, EMPTY),
         };
         item_shape { kind, reach, cover }
     }
+}
+
+/// Where render::fill_rounded_chrome_aa takes its straight-row path and
+/// writes a value that does not depend on what is beneath: the glass of a
+/// window that paints its content, opaque (`bg`) or tinted from the glass
+/// source. Without a glass source a translucent fill blends over what is
+/// beneath, and the ring, the corner rows and the two fringe columns do
+/// everywhere.
+fn chrome_interior(w: &[u32], r: &rect, glass: bool) -> rect {
+    let paint_content = w[12] != 0;
+    let go = w[11].min(255);
+    if !paint_content || (go < 255 && !glass) || r.w < 2 || r.h < 2 {
+        return EMPTY;
+    }
+    let r_out = w[8].min(r.w / 2).min(r.h / 2);
+    let border_px = w[9].min(r_out).min(r.w / 2).min(r.h / 2);
+    let inner_x = r.x + border_px;
+    let inner_y = r.y + border_px;
+    let inner_w = r.w - 2 * border_px;
+    let inner_h = r.h - 2 * border_px;
+    let r_in = r_out.saturating_sub(border_px).min(inner_w / 2).min(inner_h / 2);
+    let (y0, y1) = (inner_y + r_in, (inner_y + inner_h).saturating_sub(r_in));
+    let (x0, x1) = (inner_x + 2, (inner_x + inner_w).saturating_sub(2));
+    if x1 <= x0 || y1 <= y0 {
+        return EMPTY;
+    }
+    rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
 /// A compose dispatch's bin table: per bin `{list offset, count | opaque <<

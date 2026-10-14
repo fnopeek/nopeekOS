@@ -351,7 +351,7 @@ pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpg
             }
             n_panels += 1;
         }
-        shapes[kept as usize] = item_shape::of(&w, &screen);
+        shapes[kept as usize] = item_shape::of(&w, &screen, glass.is_some());
         for (k, v) in out.iter().enumerate() {
             chunk[in_chunk + k * 4..in_chunk + k * 4 + 4].copy_from_slice(&v.to_le_bytes());
         }
