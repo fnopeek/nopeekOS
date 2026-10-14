@@ -1,6 +1,10 @@
 # GPU-Stack — eine Schnittstelle, die Karte darunter egal
 
-**Stand:** 2026-10-12, Entwurf. Noch nichts gebaut.
+**Stand:** 2026-10-14. `gpu_intel_tgl` 0.8.0 faehrt die Karte am NUC nach
+Linux hoch (Display-Auslesung, Uebernahme des Firmware-Bildes, GT, alle vier
+Engines mit Execlists und Kernelkontexten, MSI). Konzept fuer den Desktop und
+die Vertrauensstufen festgelegt (§2.3, §3.3, §5, §9); gpudev selbst ist noch
+nicht gebaut.
 **Ausloeser:** Florian: „aktuell machen wir kaum gebrauch von einer gpu alles
 laeuft ueber die cpu, microvm, unser system etc." — und dazu: eine
 Schnittstelle, damit die Karte darunter keine Rolle spielt; die microVM bleibt
@@ -22,9 +26,10 @@ Verwandt: `MICROKERNEL_REFACTOR.md` (Treiber als WASM), `MICROVM_V2.md`,
 ```
  microVM (Linux + Mesa)     Desktop (shade)          Apps (WASM)
         │                        │                       │
-  virtio-gpu                eigene kleine            Flaechen wie heute,
-  DRM native context        2D-Befehlsliste          der Compositor
-        │                   (Rasterizer-Trait)       beschleunigt
+  virtio-gpu                Szenenliste              Flaechen wie heute,
+  DRM native context        (Daten, feste Shader     der Compositor
+  (rohe Befehlspuffer,       des Moduls)             beschleunigt
+   eigenes PPGTT je VM)
         └──────────┬─────────────┘
                    ▼
         gpudev — Kernel-Seite: Puffer, Kapabilitaeten, Weiterleitung
@@ -41,8 +46,10 @@ Drei Entscheidungen tragen das Papier:
 1. **Zwei Schnittstellen nach oben, nicht eine.** Die microVM bekommt die
    Kernel-Schnittstelle der Karte durchgereicht (native context), weil im Gast
    ein echtes Mesa laeuft. Unsere eigenen Programme haben kein Mesa und
-   bekommen eine kleine, feste 2D-Befehlsliste. Ein gemeinsames 3D-API fuer
-   beide waere ein eigenes Mesa — genau das, was wir vermeiden.
+   bekommen eine Szenenliste, die das Modul mit eigenen, beim Bauen
+   uebersetzten Shadern ausfuehrt (§5). Ein gemeinsames 3D-API fuer beide
+   waere ein eigenes Mesa — genau das, was wir vermeiden. Rohe
+   Befehlspuffer gibt es nur auf der Fremd-Stufe (§2.3).
 2. **Der Wirt braucht kein Mesa.** Bei native context laeuft der
    kartenspezifische Teil (Shader-Compiler, Befehlsaufbau) IM GAST; der Wirt
    legt Puffer an, reicht Befehlspuffer an die Karte und meldet Fences. Das
@@ -117,6 +124,46 @@ das Modul aus (Absturz, unbekannte Karte, Selbsttest rot), laeuft alles auf
 dem heutigen Weg weiter. Dieselbe Regel wie beim BCS: **erst der
 Readback-Selbsttest, dann darf die GPU das Display treiben** — sonst ist das
 Bild schwarz statt langsam.
+
+### 2.3 Wie Linux es macht, und was wir davon nehmen
+
+Linux teilt die Grafik in drei Schichten: der **Kerneltreiber** (i915,
+amdgpu) besitzt die Hardware, verwaltet Puffer (GEM), gibt jedem Prozess
+einen eigenen GPU-Adressraum (PPGTT/GPUVM) und reicht Befehlspuffer an die
+Engines; der **Userspace-Treiber** (Mesa) in jeder App uebersetzt
+OpenGL/Vulkan in Befehle der Karte und kompiliert die Shader; der
+**Compositor** bekommt die Fensterpuffer als Griffe (dma-buf) und setzt sie
+selbst mit OpenGL/Vulkan auf der GPU zusammen, wo es geht ganz ohne Rechnen
+auf Display-Ebenen (direct scanout, Overlays). Die CPU beschreibt je Bild
+nur noch, WAS gezeichnet wird; die Pixel fasst nur die GPU an.
+
+Die Grenze ist bei Linux die Hardware: jeder Prozess darf **rohe
+Befehlspuffer** abgeben, geschuetzt durch das PPGTT je Prozess, die
+Register-Positivliste der Hardware fuer unprivilegierte Befehlspuffer
+(`intel_workarounds.c` whitelist), Engine-Reset bei Haengern und die IOMMU.
+Einen Befehlsparser gibt es auf Gen12 nicht mehr. Genau diese Flaeche — der
+Kerneltreiber beim Seitenverwalten, Hardwarefehler hinter raffinierten
+Befehlspuffern — ist die groesste Angriffsflaeche im Linux-Grafikstapel.
+
+**Was wir uebernehmen:** die drei Schichten (das GPU-Modul ist der
+Kerneltreiber, Puffergriffe sind Kapabilitaeten, der Compositor setzt auf
+der GPU zusammen und nutzt Ebenen). **Was wir anders machen:** wer rohe
+Befehlspuffer abgeben darf.
+
+| Vertrauensstufe | Wer | Was er der GPU gibt | Grenze |
+|---|---|---|---|
+| **Eigen** | Compositor (shade) | eine **Szenenliste**: Daten, kein Code (§5.3) | das Modul fuehrt sie mit eigenen, festen Shadern aus und prueft jeden Griff und jedes Rechteck |
+| **Eigen, signiert** | native WASM-Apps | Flaechen wie heute; spaeter dieselbe Art Liste | Signatur + Caps: ohne beides kein Zugriff |
+| **Fremd** | microVM-Gast (Mesa im Gast) | **rohe Befehlspuffer** (native context, §4) | eigenes PPGTT je VM, Register-Positivliste der Hardware, Zeitlimit + Engine-Reset + Kontextsperre, IOMMU (§8) |
+
+Native Apps stammen zwangslaeufig von uns — ohne Signatur und Caps gibt es
+keinen Zugriff, das Risiko ist dort klein (Florian, 2026-10-14). Die
+Szenenliste bleibt trotzdem der Weg fuer sie, aus einem Grund, der mit der
+Herkunft des Codes nichts zu tun hat: **eine signierte App kann fremde DATEN
+verarbeiten.** beak rendert Webseiten; ein WebGL-Shader einer Seite ist
+fremder GPU-Code in einer signierten App. Solcher Code gehoert auf die
+Fremd-Stufe (eigener Kontext mit PPGTT, wie ein Gast), nicht auf den Weg des
+Compositors.
 
 ---
 
@@ -206,9 +253,29 @@ Modul den Scanout-Eintrag nie anfasst, solange er im Scanout steht.
 ### 3.3 Die neue ABI: `gpudev`
 
 Analog zu `npk_netdev_register` beim WLAN: das Modul meldet sich als
-GPU-Geraet an und bedient danach einen Befehlsring, den der Kernel fuellt.
+GPU-Geraet an, bleibt resident und bedient danach Auftraege des Kernels. Wie
+bei netdev holt es sie per Hostaufruf ab und wird ueber `npk_wait` geweckt —
+gemeinsam mit seinem MSI-Vektor (F3). Ein Kern dient allen drei Nutzern:
 
-**Kernel → Modul** (Ring im geteilten Speicher, Wecken ueber `npk_wait`):
+| Baustein | Compositor | microVM |
+|---|---|---|
+| Puffergriffe vom Kernel (Kapabilitaeten) | ja | ja |
+| Fences (Sequenznummer + Weckgriff) | ja | ja |
+| Kontext mit eigenem PPGTT | einer | einer je VM |
+| Szenenliste, ausgefuehrt mit festen Shadern des Moduls | ja | nein |
+| roher Befehlspuffer | **nie** | ja, nur in sein PPGTT |
+| Ebenen, Flip, vblank | ja | sein Bild als Textur in der Szene |
+
+**Der erste Schnitt (v0)** baut den Kern und als ersten Nutzer die heutige
+Bildkopie (Schattenpuffer → Firmware-Bild per `XY_FAST_COPY` auf bcs0):
+Gleichstand mit `intel_xe.rs`, der danach entfaellt. Die Kopie ist die
+billigste Probe, ob Griffe, Abgabe und Fences zwischen Kernel und Modul
+tragen — ein Fehler dort zeigt sich sofort am Bild. Synchron je Bild mit
+Zeitlimit wie heute; die Sequenznummer steht trotzdem von Anfang an in der
+ABI, damit spaeteres Pipelining sie nicht bricht. Auftragscodes sind
+versioniert.
+
+**Kernel → Modul:**
 
 | Befehl | Bedeutung |
 |---|---|
@@ -331,20 +398,36 @@ gerastert).
 
 ### 5.2 In welcher Reihenfolge die GPU uebernimmt
 
+Ziel: die CPU beschreibt je Bild nur, was gezeichnet wird; auch in 4K und
+waehrend Animationen fasst sie keine Pixel des Bildes an. Eine Animation
+(Einblenden, Skalieren, Verschieben) ist dann eine andere Zahl in der
+Szenenliste.
+
 1. **Display-Ebenen.** Intel (Universal Planes je Pipe) und AMD (DCN: HUBP +
    MPC) ueberlagern mehrere Ebenen mit Alpha in Hardware. Zeiger auf eine
    eigene Ebene (heute „save-under"), ein Video oder ein Vollbild-VM-Fenster
    ohne Kopie. **Kein Shader noetig.**
 2. **Kopier-Engine** (BCS / SDMA) fuer Fensterpuffer → Bild. Am NUC gibt es
    das schon.
-3. **Feste Compute-Kernel** fuer Blenden, abgerundete Ecken (SDF), Schatten,
-   Blur, Skalieren — **eine Handvoll, je GPU-Familie von Hand geschrieben**,
-   kein Shader-Compiler. Sie sitzen im Modul, der Compositor ruft sie ueber
-   die 2D-Befehlsliste.
+3. **Feste Shader** fuer Textur zeichnen, Blenden, abgerundete Ecken (SDF),
+   Schatten, Glas-Blur, Skalieren — **eine Handvoll, beim BAUEN uebersetzt**
+   mit Mesas Compiler fuer die jeweilige GPU-Familie (Intel: brw fuer Gen12)
+   und als Binaerdaten ins Modul gelegt; dasselbe Prinzip wie `gen_regs.py`,
+   das GCC die Registerwerte rechnen laesst. **Kein Shader-Compiler zur
+   Laufzeit, kein Mesa auf dem Wirt.** Vorbild: Xorgs SNA-Beschleunigung im
+   alten Intel-Treiber, die genau so mit festen GPU-Programmen
+   zusammengesetzt hat. Das Ergebnis landet in einem Puffer, der per **Flip**
+   zum Bild wird — keine Kopie nach GGTT 0 mehr.
 4. **Text** bleibt auf der CPU (Glyphen-Atlas), bis es gemessen einen Grund
    gibt.
 
-### 5.3 Die 2D-Befehlsliste
+### 5.3 Die Szenenliste
+
+Je Bild baut der Compositor eine Liste: Vierecke mit Quellpuffer (Griff),
+Zielrechteck, Deckkraft, Eckenradius, Transformation, Blur-Bereich, Farbe.
+Ein paar hundert Bytes statt 33 MB. Das Modul prueft jeden Eintrag (Griff
+gueltig und fuer diesen Kontext freigegeben, Rechteck im Puffer) und uebersetzt
+ihn in Befehle fuer die eigenen Shader. Die Liste ist Daten, nie Code.
 
 Ausgangspunkt ist der vorhandene `Rasterizer`-Trait: eine GPU-Umsetzung
 schreibt die Aufrufe eines Bildes in einen Befehlspuffer und gibt ihn mit
@@ -442,15 +525,20 @@ Jede Stufe hat ein Ergebnis, das man am Geraet sieht oder misst.
 |---|---|---|---|
 | **0a** | `gpu_amd` Stufe 0: SMU-Postfach + Panel-PWM | IdeaPad | Helligkeit per Fn; Watt vorher/nachher mit `power` |
 | **0b** | `gpu`-Ausgabe ohne Treiber korrigieren | beide | kleine Aufraeumarbeit |
-| **1** | `gpudev`-ABI + `gpu_intel_tgl` uebernimmt die Karte vom Kernel: GGTT, ForceWake, BCS, Flip — **Gleichstand mit `intel_xe.rs`** | NUC | gleiche Bildzeiten wie heute; Hostaufrufe je Bild gezaehlt (forge-Kosten) |
-| **2** | PPGTT je Kontext, GT-Interrupts, RCS, erster Compute-Dispatch mit Readback-Selbsttest | NUC | Selbsttest gruen; Fences per Interrupt |
+| **1a** ✅ | `gpu_intel_tgl` faehrt die Karte nach Linux hoch: Display-Auslesung, Uebernahme des Firmware-Bildes, GGTT, GT, Workarounds, RC6/RPS, PPGTT, alle Engines mit Execlists, MSI (0.2.0–0.8.0) | NUC | 2026-10-14: `default context recorded` auf rcs0/bcs0/vcs2/vecs0, Bild bleibt |
+| **1b** | gpudev-Kern (§3.3: Griffe, Abgabe, Fences, Kontexte) + erster Nutzer Bildkopie per bcs0 + Autostart nach dem Login + Readback-Selbsttest; danach **`intel_xe.rs` raus** | NUC | gleiche Bildzeiten wie heute; Hostaufrufe je Bild gezaehlt (forge-Kosten) |
+| **2** | IOMMU (VT-d) fuer die Karte — Voraussetzung fuer fremde Befehlspuffer (F5) | NUC | Karte erreicht nur freigegebene Seiten; Gegenprobe mit absichtlich falscher Adresse |
 | **3** | Fenster als Puffer im Compositor (CPU-Weg zuerst) | beide | kein Rueckschritt auf dem CPU-Weg |
-| **4** | Display-Ebenen: Zeiger, dann ein Fenster | NUC | Zeiger ohne save-under |
-| **5** | Compute-Kernel: Zusammensetzen, Glas, Ecken | NUC | `comp`-Zeit je 4K-Bild vorher/nachher |
+| **4** | Display-Ebenen: Zeiger, dann ein Fenster; Flip statt Kopie | NUC | Zeiger ohne save-under |
+| **5** | Szenenliste + feste Shader (beim Bauen uebersetzt): Zusammensetzen, Glas, Ecken, Animationen | NUC | `comp`-Zeit je 4K-Bild vorher/nachher, CPU-Last bei Animation |
 | **6** | virtio-gpu: blob, context init, hostmem, Capset `DRM` | — | Gast sieht das Capset |
 | **7** | native context Intel (Wirtsseite i915-Protokoll) + Gast-Mesa mit `intel-virtio-experimental` | NUC | `glxinfo` im Gast nennt iris; WebGL in LibreWolf |
 | **8** | `gpu_amd` Fundament: PSP, Firmware, SDMA, GFX, GPUVM | IdeaPad | SDMA-Selbsttest gruen |
 | **9** | native context AMD (Gast-Mesa von Alpine) | IdeaPad | `glxinfo` im Gast nennt radeonsi |
+
+Stufe 5 und die Stufen 6–7 (microVM) haengen nicht voneinander ab; beide
+brauchen 1b, die microVM zusaetzlich 2. Welche zuerst kommt, entscheidet,
+was die CPU staerker belastet.
 
 Zu Stufe 7 gegen 9: fuer die microVM ist AMD auf der GAST-Seite billiger
 (Alpine liefert das Backend), Intel auf der WIRT-Seite (der Treiber laeuft
@@ -550,6 +638,13 @@ und npkwm laeuft mit `WLR_RENDERER=pixman`. Damit nimmt LibreWolf heute
   oder als eigenes apk? Und wie stabil ist `intel-virtio-experimental` in
   26.2 wirklich — vor Stufe 7 im QEMU auf einem Linux-Wirt mit TGL pruefen,
   bevor wir die Wirtsseite bauen.
+- **F8** Shader beim Bauen: Mesas Intel-Compiler (brw) aus NIR/GLSL fuer
+  Gen12 ausserhalb von Mesa aufrufen — welches Werkzeug, wie gross, und
+  wie die Binaerdaten samt Bindungstabellen ins Modul kommen. Vorab pruefen
+  an einem einzigen Shader (Textur mit Deckkraft).
+- **F9** WebGL in beak: fremder GPU-Code in einer signierten App gehoert auf
+  die Fremd-Stufe (§2.3). Eigener Kontext je Seite wie ein Gast — oder
+  WebGL nur in der microVM?
 - **F7** Videodekodierung: VA-API im Gast ueber native context
   (`radeonsi_drv_video` ist im AMD-MR enthalten, bei Intel `intel-media-driver`
   mit Fremdpatch) — und `tune` auf dem Wirt ueber dieselbe VCS/VCN-Engine.
