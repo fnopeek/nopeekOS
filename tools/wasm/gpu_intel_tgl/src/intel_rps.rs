@@ -54,9 +54,6 @@ pub struct intel_rps {
     /// `rps->timer` armed for this `now_us`; `rps->work` queued.
     pub timer_due: Option<u64>,
     pub work_queued: bool,
-    /// The last frequency the log reported, and when.
-    pub logged_freq: u8,
-    pub logged_at: u64,
 }
 
 /// `BUSY_MAX_EI`, ms.
@@ -629,12 +626,6 @@ pub fn intel_rps_run_pending(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     }
     if core::mem::take(&mut gt.rps.work_queued) {
         rps_work(i915, gt);
-    }
-    let now = linux::now_us();
-    if gt.rps.cur_freq != gt.rps.logged_freq && now.saturating_sub(gt.rps.logged_at) >= 1_000_000 {
-        gt.rps.logged_freq = gt.rps.cur_freq;
-        gt.rps.logged_at = now;
-        report(i915, gt, "now");
     }
 }
 
