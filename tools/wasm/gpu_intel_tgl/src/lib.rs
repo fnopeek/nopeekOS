@@ -11,8 +11,10 @@
 //! display core, CDCLK) and `intel_display_driver_probe_nogem` up to the
 //! hardware state readout and sanitize (`intel_modeset_setup_hw_state`)
 //! and the takeover of the firmware framebuffer (`intel_initial_plane_config`:
-//! its stolen memory reserved, bound at a fixed GGTT offset). It reports
-//! what it found and gives the card back.
+//! its stolen memory reserved, bound at a fixed GGTT offset), and
+//! `i915_gem_init` with the engines. It then stays as the gpudev service
+//! of the card (`gpudev.rs`); when it cannot serve, it reports what it
+//! found and gives the card back.
 
 #![no_std]
 // Linux names are kept as they are (`intel_uncore`, `FORCEWAKE_MT`,
@@ -21,6 +23,7 @@
 #![allow(dead_code)]
 
 mod drm_mm;
+mod gpudev;
 mod gen8_engine_cs;
 mod gen8_ppgtt;
 mod i915_drv;
@@ -152,7 +155,7 @@ fn intel_gmch_bar_setup() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2c: i915_driver_probe through i915_gem_init with the engines").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 1b: i915_driver_probe, i915_gem_init, then the gpudev service").say();
 
     // pci_enable_device: bind (the kernel's own driver hands the card over).
     match npk_sys::pci_bind(INTEL_VENDOR as i32, TGL_GT2 as i32) {
@@ -348,6 +351,12 @@ pub extern "C" fn _start() {
         }
     }
     on.say();
+
+    // The GPU service: from here on the module stays, unless it cannot
+    // serve (or the GT wedges), and then gives the card back below.
+    if gem_ok {
+        gpudev::gpudev_serve(&mut i915, &mut gt, &mut ggtt);
+    }
 
     // The card is given back: the GT quiesced, interrupts off.
     if gem_ok {

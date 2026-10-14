@@ -2,9 +2,13 @@
 //! gt/intel_gtt.c (Linux 6.18.55): the 4-level PPGTT of the kernel's
 //! address space (`gt->vm`) on Tiger Lake, as `i915_ppgtt_create` leaves it:
 //! scratch pages for every level and a top-level directory pointing at
-//! scratch. Nothing is bound into it here; contexts carry its top-level
-//! address (`ASSIGN_CTX_PML4`).
+//! scratch; contexts carry its top-level address (`ASSIGN_CTX_PML4`).
+//! Binding allocates the page-table tree (`gen8_ppgtt_alloc`) and writes
+//! 4K PTEs (`gen8_ppgtt_insert_pte`); the 64K/2M path of
+//! `gen8_ppgtt_insert_huge` is not ported, so contiguous objects are
+//! mapped in 4K pages.
 
+use crate::drm_mm::drm_mm;
 use crate::i915_drv::drm_i915_private;
 use crate::i915_vma::{drm_i915_gem_object, i915_gem_object_create_internal};
 use crate::regs::*;
@@ -14,7 +18,18 @@ const ENOMEM: i32 = 12;
 const PDES: usize = 512;
 /// `vm->top` for a 4-level table.
 const TOP: usize = 3;
+/// Page-table pages below the top directory one address space holds; the
+/// module has no heap that frees, so they sit in a fixed table.
+const MAX_PT: usize = 192;
 
+/// A page-table page below the top directory (`struct i915_page_table` /
+/// `i915_page_directory`): `entry[idx]` of the table at `parent`.
+#[derive(Clone, Copy)]
+pub struct pt_node {
+    pub parent: u64,
+    pub idx: u16,
+    pub obj: drm_i915_gem_object,
+}
 /// `struct i915_ppgtt`.
 #[derive(Clone, Copy)]
 pub struct i915_ppgtt {
@@ -25,6 +40,10 @@ pub struct i915_ppgtt {
     pub scratch_encode: [u64; TOP + 1],
     /// `vm->total`.
     pub total: u64,
+    /// `vm->mm`.
+    pub mm: drm_mm,
+    /// The allocated tree below `pd`.
+    pub pts: [Option<pt_node>; MAX_PT],
 }
 
 impl i915_ppgtt {
@@ -32,6 +51,120 @@ impl i915_ppgtt {
     pub fn pd_dma(&self) -> u64 {
         self.pd.phys
     }
+
+    /// `pd->entry[idx]` of the table at `parent`.
+    fn entry(&self, parent: u64, idx: usize) -> Option<drm_i915_gem_object> {
+        self.pts.iter().flatten().find(|n| n.parent == parent && n.idx as usize == idx).map(|n| n.obj)
+    }
+
+    /// `__gen8_ppgtt_alloc`: walk `[*start, end)` (in pages) below the
+    /// table `pd` at level `lvl`, filling missing tables with the scratch
+    /// of the level below and linking them in (`set_pd_entry`).
+    fn __gen8_ppgtt_alloc(&mut self, pd: drm_i915_gem_object, start: &mut u64, end: u64, lvl: usize) -> Result<(), i32> {
+        let (mut idx, mut len) = gen8_pd_range(*start, end, lvl);
+        let lvl = lvl - 1;
+        loop {
+            let pt = match self.entry(pd.phys, idx) {
+                Some(pt) => pt,
+                None => {
+                    let slot = self.pts.iter().position(|n| n.is_none()).ok_or(-ENOMEM)?;
+                    let pt = alloc_pt_dma(I915_GTT_PAGE_SIZE_4K)?;
+                    fill_page_dma(&pt, self.scratch_encode[lvl], PDES)?;
+                    self.pts[slot] = Some(pt_node { parent: pd.phys, idx: idx as u16, obj: pt });
+                    set_pd_entry(&pd, idx, &pt)?;
+                    pt
+                }
+            };
+            if lvl > 0 {
+                self.__gen8_ppgtt_alloc(pt, start, end, lvl)?;
+            } else {
+                *start += gen8_pt_count(*start, end);
+            }
+            idx += 1;
+            len -= 1;
+            if len == 0 {
+                return Ok(());
+            }
+        }
+    }
+
+    /// `gen8_ppgtt_alloc`.
+    pub fn gen8_ppgtt_alloc(&mut self, start: u64, length: u64) -> Result<(), i32> {
+        let mut first = start >> GEN8_PTE_SHIFT;
+        let end = first + (length >> GEN8_PTE_SHIFT);
+        if length == 0 || start + length > self.total {
+            return Err(-EINVAL);
+        }
+        let pd = self.pd;
+        self.__gen8_ppgtt_alloc(pd, &mut first, end, TOP)
+    }
+
+    /// `gen8_ppgtt_insert` → `gen8_ppgtt_insert_pte` for one contiguous
+    /// range of bus addresses: `size` bytes from `addr` at `start`. The
+    /// tree must have been allocated. PTEs of one table go out in one
+    /// write.
+    pub fn gen8_ppgtt_insert(&mut self, start: u64, addr: u64, size: u64, pat_index: u32, flags: u32) -> Result<(), i32> {
+        let pte_encode = gen12_pte_encode(0, pat_index, flags);
+        let mut idx = start >> GEN8_PTE_SHIFT;
+        let end = idx + (size >> GEN8_PTE_SHIFT);
+        let mut dma = addr;
+        while idx < end {
+            let pdp = self.entry(self.pd.phys, gen8_pd_index(idx, 3)).ok_or(-EINVAL)?;
+            let pd = self.entry(pdp.phys, gen8_pd_index(idx, 2)).ok_or(-EINVAL)?;
+            let pt = self.entry(pd.phys, gen8_pd_index(idx, 1)).ok_or(-EINVAL)?;
+            let first = gen8_pd_index(idx, 0);
+            let n = (PDES - first).min((end - idx) as usize);
+            let mut buf = [0u8; 4096];
+            for i in 0..n {
+                buf[i * 8..i * 8 + 8].copy_from_slice(&(pte_encode | dma).to_le_bytes());
+                dma += I915_GTT_PAGE_SIZE;
+            }
+            let d = pt.map().ok_or(-ENOMEM)?;
+            if !d.write((first * 8) as u32, &buf[..n * 8]) {
+                return Err(-ENOMEM);
+            }
+            idx += n as u64;
+        }
+        Ok(())
+    }
+}
+
+const EINVAL: i32 = 22;
+
+/// `gen8_pd_index(i, lvl)`.
+fn gen8_pd_index(i: u64, lvl: usize) -> usize {
+    ((i >> (lvl as u32 * GEN8_PDES.trailing_zeros())) & (GEN8_PDES - 1)) as usize
+}
+
+/// `gen8_pd_range`: first index and count of entries at `lvl` that
+/// `[start, end)` (in pages) touches.
+fn gen8_pd_range(start: u64, end: u64, lvl: usize) -> (usize, usize) {
+    let bits = GEN8_PDES.trailing_zeros();
+    let shift = lvl as u32 * bits;
+    let mask = !0u64 << ((lvl as u32 + 1) * bits);
+    let end = end + (!mask >> bits);
+    let idx = ((start >> shift) & (GEN8_PDES - 1)) as usize;
+    if (start ^ end) & mask != 0 {
+        (idx, PDES - idx)
+    } else {
+        (idx, ((end >> shift) & (GEN8_PDES - 1)) as usize - idx)
+    }
+}
+
+/// `gen8_pt_count`.
+fn gen8_pt_count(start: u64, end: u64) -> u64 {
+    if (start ^ end) >> GEN8_PDES.trailing_zeros() != 0 {
+        GEN8_PDES - (start & (GEN8_PDES - 1))
+    } else {
+        end - start
+    }
+}
+
+/// `set_pd_entry`: the table's PDE is written cached (`I915_CACHE_LLC`).
+fn set_pd_entry(pd: &drm_i915_gem_object, idx: usize, to: &drm_i915_gem_object) -> Result<(), i32> {
+    let d = pd.map().ok_or(-ENOMEM)?;
+    let pde = gen8_pde_encode(to.phys, I915_CACHE_LLC);
+    if d.write((idx * 8) as u32, &pde.to_le_bytes()) { Ok(()) } else { Err(-ENOMEM) }
 }
 
 /// `gen8_pde_encode`.
@@ -139,5 +272,5 @@ pub fn i915_ppgtt_create(i915: &drm_i915_private) -> Result<i915_ppgtt, i32> {
     let pd = alloc_pt_dma(I915_GTT_PAGE_SIZE_4K)?;
     fill_page_dma(&pd, scratch_encode[TOP], count)?;
 
-    Ok(i915_ppgtt { pd, scratch, scratch_encode, total })
+    Ok(i915_ppgtt { pd, scratch, scratch_encode, total, mm: drm_mm::drm_mm_init(0, total), pts: [None; MAX_PT] })
 }

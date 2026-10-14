@@ -1985,3 +1985,7 @@ pub const PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE: u32 = 0x400; // gt/intel_gpu_co
 pub const PIPE_CONTROL_VF_CACHE_INVALIDATE: u32 = 0x10; // gt/intel_gpu_commands.h:314
 pub const PIPE_CONTROL_CONST_CACHE_INVALIDATE: u32 = 0x8; // gt/intel_gpu_commands.h:315
 pub const PIPE_CONTROL_STATE_CACHE_INVALIDATE: u32 = 0x4; // gt/intel_gpu_commands.h:316
+
+// gpudev service (gt/intel_gpu_commands.h)
+pub const GEN9_XY_FAST_COPY_BLT_CMD: u32 = 0x50800000; // gt/intel_gpu_commands.h:269
+pub const BLT_DEPTH_32: u32 = 0x3000000; // gt/intel_gpu_commands.h:278

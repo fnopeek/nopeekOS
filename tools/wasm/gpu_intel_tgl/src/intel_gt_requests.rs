@@ -76,7 +76,7 @@ fn flush_submission(i915: &mut drm_i915_private, gt: &mut intel_gt) -> bool {
 
 /// `intel_gt_retire_requests_timeout`, one round: retire on every active
 /// timeline; the number still busy.
-fn intel_gt_retire_requests(i915: &mut drm_i915_private, gt: &mut intel_gt) -> u32 {
+pub fn intel_gt_retire_requests(i915: &mut drm_i915_private, gt: &mut intel_gt) -> u32 {
     let mut active_count = 0;
     flush_submission(i915, gt);
     for ce in 0..gt.contexts.len() {

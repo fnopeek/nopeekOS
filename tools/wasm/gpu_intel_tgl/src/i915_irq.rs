@@ -172,6 +172,12 @@ pub fn intel_irq_uninstall(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     i915.irqs_enabled = false;
 }
 
+/// Runs the top-level handler once (`intel_irq_handler`); true if it
+/// handled something.
+pub fn intel_irq_service(i915: &mut drm_i915_private) -> bool {
+    gen11_irq_handler(i915)
+}
+
 /// Waits up to `timeout_ms` for the device's interrupt and runs the
 /// handler; true if it handled something. A pending source raised before
 /// the vector was armed is caught by running the handler once up front.
