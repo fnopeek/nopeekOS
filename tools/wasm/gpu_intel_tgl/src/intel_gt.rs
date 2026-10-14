@@ -83,6 +83,12 @@ pub struct intel_engine_cs {
     pub emit_fini_breadcrumb_dw: u32,
     /// `engine->default_state`: the recorded context image.
     pub default_state: Option<crate::i915_vma::drm_i915_gem_object>,
+    /// `engine->stats.execlists`: contexts in flight, when the engine went
+    /// busy and the busy time before that, in ns; `engine->stats.rps`.
+    pub stats_active: u32,
+    pub stats_start: u64,
+    pub stats_total: u64,
+    pub stats_rps: u64,
 }
 
 /// `struct intel_mmio_range`, a steering table entry.

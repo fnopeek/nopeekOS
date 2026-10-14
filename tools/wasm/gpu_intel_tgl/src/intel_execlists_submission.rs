@@ -212,6 +212,7 @@ fn __execlists_schedule_in(i915: &mut drm_i915_private, gt: &mut intel_gt, e: us
     if fw != 0 && first {
         i915.uncore.intel_uncore_forcewake_get(fw);
     }
+    intel_engine_context_in(gt, e);
 }
 
 /// `execlists_schedule_in`.
@@ -231,10 +232,13 @@ fn __execlists_schedule_out(i915: &mut drm_i915_private, gt: &mut intel_gt, e: u
     ccid >>= GEN11_SW_CTX_ID_SHIFT - 32;
     ccid &= GEN12_MAX_CONTEXT_HW_ID;
 
-    let Some(x) = gt.engine[e].as_mut() else { return };
     if ccid < 64 && ccid != 0 {
-        x.context_tag |= 1u64 << (ccid - 1);
+        if let Some(x) = gt.engine[e].as_mut() {
+            x.context_tag |= 1u64 << (ccid - 1);
+        }
     }
+    intel_engine_context_out(gt, e);
+    let Some(x) = gt.engine[e].as_mut() else { return };
     let fw = x.fw_domain;
     if x.fw_active > 0 {
         x.fw_active -= 1;
@@ -941,4 +945,46 @@ pub fn intel_execlists_submission_setup(i915: &mut drm_i915_private, gt: &mut in
     x.context_tag = (1u64 << 63) - 1;
     x.execlists.ccid |= x.instance << (GEN11_ENGINE_INSTANCE_SHIFT - 32);
     x.execlists.ccid |= x.class << (GEN11_ENGINE_CLASS_SHIFT - 32);
+}
+
+/// `ktime_get`, in ns.
+fn ktime_get() -> u64 {
+    crate::linux::now_us() * 1000
+}
+
+/// `intel_engine_context_in` (gt/intel_engine_stats.h).
+fn intel_engine_context_in(gt: &mut intel_gt, e: usize) {
+    let Some(x) = gt.engine[e].as_mut() else { return };
+    if x.stats_active != 0 {
+        x.stats_active += 1;
+        return;
+    }
+    x.stats_start = ktime_get();
+    x.stats_active += 1;
+}
+
+/// `intel_engine_context_out` (gt/intel_engine_stats.h).
+fn intel_engine_context_out(gt: &mut intel_gt, e: usize) {
+    let Some(x) = gt.engine[e].as_mut() else { return };
+    if x.stats_active == 0 {
+        return;
+    }
+    if x.stats_active > 1 {
+        x.stats_active -= 1;
+        return;
+    }
+    x.stats_active -= 1;
+    x.stats_total += ktime_get().saturating_sub(x.stats_start);
+}
+
+/// `intel_engine_get_busy_time` → `execlists_engine_busyness`: the busy
+/// time so far in ns, and the sampling time in `now`.
+pub fn intel_engine_get_busy_time(gt: &intel_gt, e: usize, now: &mut u64) -> u64 {
+    let Some(x) = gt.engine[e].as_ref() else { return 0 };
+    let mut total = x.stats_total;
+    *now = ktime_get();
+    if x.stats_active != 0 {
+        total += now.saturating_sub(x.stats_start);
+    }
+    total
 }

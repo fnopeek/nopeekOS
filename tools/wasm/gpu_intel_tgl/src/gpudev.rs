@@ -114,6 +114,13 @@ fn copy_rect(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, src: u64,
     let rq = crate::i915_request::i915_request_get(gt, rq);
     crate::i915_request::i915_request_add(i915, gt, rq);
 
+    // The compositor stalls on this copy: boost a request that has not
+    // started, as a waiter in `i915_gem_object_boost` does.
+    if !crate::i915_request::__i915_request_has_started(gt, rq) {
+        crate::intel_rps::intel_rps_boost(gt, rq);
+    }
+    crate::intel_rps::intel_rps_run_pending(i915, gt);
+
     let t0 = linux::now_us();
     while !crate::i915_request::__i915_request_is_complete(gt, rq) {
         if linux::now_us() - t0 > JOB_TIMEOUT_US {
@@ -127,6 +134,7 @@ fn copy_rect(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, src: u64,
         crate::i915_irq::intel_irq_wait(i915, 2);
         crate::intel_gt_requests::intel_engines_cs_irq(i915, gt);
         crate::intel_gt_requests::intel_engine_flush_submission(i915, gt, e);
+        crate::intel_rps::intel_rps_run_pending(i915, gt);
     }
     let failed = gt.requests[rq].error;
     crate::i915_request::i915_request_put(gt, rq);
@@ -231,7 +239,8 @@ fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, jo
         log_wakerefs(gt, "after the first job");
     } else if svc.jobs % STATS_EVERY == 0 {
         Line::new().s("gpudev: ").dec(svc.jobs as u64).s(" jobs, average ")
-            .dec(svc.sum_us / STATS_EVERY as u64).s(" us, max ").dec(svc.max_us).s(" us").say();
+            .dec(svc.sum_us / STATS_EVERY as u64).s(" us, max ").dec(svc.max_us).s(" us, GPU requested ")
+            .dec(crate::intel_rps::intel_rps_requested_mhz(gt) as u64).s(" MHz").say();
         svc.sum_us = 0;
         svc.max_us = 0;
     }
@@ -325,10 +334,19 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
 
     let mut jobs = [0u8; JOB_BYTES * 8];
     loop {
-        // While the GT is awake a missed interrupt must not keep it so.
-        let timeout = if crate::intel_gt_pm::intel_gt_pm_is_awake(gt) { 100 } else { -1 };
+        // While the GT is awake a missed interrupt must not keep it so, and
+        // the RPS timer must run on time.
+        let timeout = if crate::intel_gt_pm::intel_gt_pm_is_awake(gt) {
+            match crate::intel_rps::intel_rps_timer_due(gt) {
+                Some(t) => (t.saturating_sub(linux::now_us()).div_ceil(1000)).min(100) as i32,
+                None => 100,
+            }
+        } else {
+            -1
+        };
         npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout);
         service_interrupts(i915, gt);
+        crate::intel_rps::intel_rps_run_pending(i915, gt);
 
         if !svc.logged_idle && !crate::intel_gt_pm::intel_gt_pm_is_awake(gt) {
             svc.logged_idle = true;

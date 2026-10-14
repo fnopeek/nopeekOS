@@ -48,6 +48,8 @@ pub struct i915_request {
     pub active: bool,
     pub signaled: bool,
     pub retired: bool,
+    /// I915_FENCE_FLAG_BOOST.
+    pub boost: bool,
     /// References besides the timeline's (`i915_request_get`).
     pub refs: u32,
 }
@@ -354,8 +356,12 @@ pub fn i915_request_retire(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: u
         return false;
     }
 
-    gt.requests[rq].signaled = true;
     gt.contexts[ce].ring.head = gt.requests[rq].postfix;
+    gt.requests[rq].signaled = true;
+
+    if core::mem::replace(&mut gt.requests[rq].boost, true) {
+        crate::intel_rps::intel_rps_dec_waiters(gt);
+    }
 
     let engine = gt.requests[rq].engine as usize;
     crate::intel_execlists_submission::remove_from_engine(gt, engine, rq);
