@@ -275,6 +275,33 @@ Zeitlimit wie heute; die Sequenznummer steht trotzdem von Anfang an in der
 ABI, damit spaeteres Pipelining sie nicht bricht. Auftragscodes sind
 versioniert.
 
+**v0, festgelegt 2026-10-14** (Stufe 1b). Hostaufrufe, alle gegated mit
+`Rights::HARDWARE` und einem gebundenen Display-Controller (PCI-Klasse 0x03);
+ein eigenes `Rights::GPU` kommt, wenn der erste Nicht-Treiber gpudev braucht.
+
+| Aufruf | Bedeutung |
+|---|---|
+| `npk_gpudev_register(version) -> 0 \| <0` | das Modul wird der GPU-Dienst seiner Karte; der Kernel legt die Puffer an (unten) |
+| `npk_gpudev_bo_info(id, out) -> 0 \| -1` | schreibt `{phys: u64, size: u64, pitch, width, height, format: u32}`; `phys` 0 bei Puffer 0 |
+| `npk_gpudev_bo_bound(id, gpu_addr: i64)` | wo das Modul den Puffer in seine GGTT gelegt hat (fuer den Kernel nur ein Name, den der Compositor heute als Quelle/Ziel weiterreicht) |
+| `npk_gpudev_ready(ok)` | Selbsttest-Ergebnis; erst mit `ok = 1` schaltet der Kernel den Compositor um |
+| `npk_gpudev_poll(out, max) -> n` | holt Auftraege `{seq, op, a0..a5: u32}` (32 Bytes) |
+| `npk_gpudev_complete(seq, status)` | Auftrag fertig (`status` 0) oder abgelehnt/gescheitert (<0) |
+| `npk_wait(WAIT_GPU_CMD = 64)` | weckt, wenn ein Auftrag wartet |
+
+Puffer in v0: **0** = das uebernommene Firmware-Bild (das Modul kennt es aus
+`intel_plane_initial`), **1/2** = die zwei Schattenpuffer des Compositors
+(physisch zusammenhaengend, seitenausgerichtet). Auftrag v0:
+`OP_COPY_RECT = 1` mit `src_bo, dst_bo, x, y, w, h` — das Modul prueft
+beide Griffe und dass das Rechteck in beiden Puffern liegt, und lehnt sonst
+mit `status < 0` ab. Der Kernel wartet synchron mit Zeitlimit (100 ms) und
+kopiert bei Ablehnung, Zeitueberschreitung oder Modultod auf der CPU.
+
+**Modultod:** `release_hw` meldet gpudev ab: wartende Auftraege scheitern
+sofort, der Compositor faellt auf GOP + CPU-Kopie auf das Firmware-Bild
+zurueck, kein Registerzugriff. Die Schattenpuffer gehoeren dem Kernel und
+bleiben; die Karte liest sie nach dem Tod nicht mehr (kein Auftrag mehr).
+
 **Kernel → Modul:**
 
 | Befehl | Bedeutung |
