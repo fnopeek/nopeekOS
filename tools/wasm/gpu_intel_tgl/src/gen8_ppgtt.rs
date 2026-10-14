@@ -274,3 +274,50 @@ pub fn i915_ppgtt_create(i915: &drm_i915_private) -> Result<i915_ppgtt, i32> {
 
     Ok(i915_ppgtt { pd, scratch, scratch_encode, total, mm: drm_mm::drm_mm_init(0, total), pts: [None; MAX_PT] })
 }
+
+impl i915_ppgtt {
+    /// Walks `va` the way the GPU does, from `top` (the PML4 address taken
+    /// from a context image) down to the PTE, reading every entry back from
+    /// memory, and logs each level. A diagnostic for a copy that never
+    /// completes: it shows which level does not lead where the binding put it.
+    pub fn walk_log(&self, top: u64, va: u64) {
+        let mut l = crate::linux::Line::new();
+        l.s("walk ").hex((va >> 32) as u32).s("_").hex(va as u32).s(": top ").hex((top >> 32) as u32).s("_")
+            .hex(top as u32);
+        if top != self.pd.phys {
+            l.s(" (vm pd ").hex((self.pd.phys >> 32) as u32).s("_").hex(self.pd.phys as u32).s("!)");
+        }
+        let mut table = self.pd;
+        let pfn = va >> GEN8_PTE_SHIFT;
+        for lvl in (0..=TOP).rev() {
+            let idx = gen8_pd_index(pfn, lvl);
+            let Some(d) = table.map() else {
+                l.s(" | L").dec(lvl as u64).s(" unmapped").say();
+                return;
+            };
+            let mut raw = [0u8; 8];
+            if !d.read((idx * 8) as u32, &mut raw) {
+                l.s(" | L").dec(lvl as u64).s(" read failed").say();
+                return;
+            }
+            let e = u64::from_le_bytes(raw);
+            l.s(" | L").dec(lvl as u64).s("[").dec(idx as u64).s("]=").hex((e >> 32) as u32).s("_").hex(e as u32);
+            if lvl == 0 {
+                break;
+            }
+            match self.entry(table.phys, idx) {
+                Some(next) => {
+                    if e & !0xfff & ((1 << 48) - 1) != next.phys {
+                        l.s(" (table at ").hex((next.phys >> 32) as u32).s("_").hex(next.phys as u32).s("!)");
+                    }
+                    table = next;
+                }
+                None => {
+                    l.s(" (no table)").say();
+                    return;
+                }
+            }
+        }
+        l.say();
+    }
+}

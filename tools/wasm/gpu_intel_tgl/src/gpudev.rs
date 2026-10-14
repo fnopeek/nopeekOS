@@ -160,6 +160,8 @@ fn self_test(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) -> bool {
         linux::say("gpudev: self-test buffers could not be bound");
         return false;
     };
+    walk_from_context(gt, e, sva, src.phys);
+    walk_from_context(gt, e, dva, dst.phys);
     if let Err(x) = copy_rect(i915, gt, e, sva, TEST_PITCH, dva, TEST_PITCH, 0, 0, TEST_W, TEST_H) {
         Line::new().s("gpudev: self-test copy failed (").dec((-x) as u64).s(")").say();
         return false;
@@ -346,5 +348,23 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
             linux::say("gpudev: GT wedged, giving the card back");
             return;
         }
+    }
+}
+
+/// Logs the PPGTT walk of `va` from the PML4 the engine's kernel context
+/// image holds (CTX_PDP0), with the page it should reach.
+fn walk_from_context(gt: &intel_gt, e: usize, va: u64, expect: u64) {
+    let Some(ce) = gt.engine[e].and_then(|x| x.kernel_context) else { return };
+    let Some(state) = gt.contexts[ce as usize].state_obj.and_then(|o| o.map()) else {
+        linux::say("gpudev: context image has no CPU mapping, walk skipped");
+        return;
+    };
+    let off = LRC_STATE_OFFSET as u32;
+    let lo = state.r32(off + (CTX_PDP0_LDW + 1) * 4);
+    let hi = state.r32(off + (CTX_PDP0_UDW + 1) * 4);
+    Line::new().s("gpudev: va ").hex(va as u32).s(" should reach ").hex((expect >> 32) as u32).s("_")
+        .hex(expect as u32).s(", context PDP0 ").hex(hi).s("_").hex(lo).say();
+    if let Some(vm) = gt.vm.as_ref() {
+        vm.walk_log((hi as u64) << 32 | lo as u64, va);
     }
 }
