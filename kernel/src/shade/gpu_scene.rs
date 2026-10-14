@@ -24,6 +24,8 @@ const FLAG_WALLPAPER: u32 = 1;
 const FLAG_BLURRED: u32 = 2;
 /// Scenes in a row the module failed before the CPU takes over again.
 const FAILURE_LIMIT: u32 = 8;
+/// Failed scenes that say why in the log.
+const FAILURES_LOGGED: u64 = 16;
 /// Differing pixels the verification lists.
 const DIFFS_SHOWN: usize = 8;
 
@@ -77,14 +79,27 @@ fn covers_screen(damage: &[Rect], info: &FbInfo) -> bool {
 /// happen; the caller composes on the CPU.
 fn on_gpu(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect]) -> bool {
     let Some(tid) = gpudev::shadow_bo(target as u64) else { return false };
-    let Some((payload, srcs)) = encode(frame, sources, info, damage) else { return false };
-    let ok = gpudev::wait_bound(&srcs) && gpudev::submit_scene(tid, payload, &srcs).is_some_and(gpudev::wait_scene);
-    if ok {
+    let status = {
+        let _pin = gpudev::ScenePin::new();
+        match encode(frame, sources, info, damage) {
+            None => Err("a source cannot be handed to the module"),
+            Some((_, srcs)) if !gpudev::wait_bound(&srcs) => Err("a source was not bound"),
+            Some((payload, srcs)) => gpudev::submit_scene(tid, payload, &srcs).ok_or("the scene was refused"),
+        }
+    };
+    let status = status.map(gpudev::wait_scene);
+    if status == Ok(0) {
         SCENES_DONE.fetch_add(1, Ordering::Relaxed);
         FAILURES_IN_ROW.store(0, Ordering::Relaxed);
         return true;
     }
-    SCENES_FAILED.fetch_add(1, Ordering::Relaxed);
+    if SCENES_FAILED.fetch_add(1, Ordering::Relaxed) < FAILURES_LOGGED {
+        match status {
+            Err(why) => crate::kprintln!("[npk] gpu: scene on the CPU, {}", why),
+            Ok(-62) => crate::kprintln!("[npk] gpu: scene on the CPU, the module did not finish in time"),
+            Ok(e) => crate::kprintln!("[npk] gpu: scene on the CPU, the module failed it ({})", e),
+        }
+    }
     if FAILURES_IN_ROW.fetch_add(1, Ordering::Relaxed) + 1 >= FAILURE_LIMIT {
         MODE.store(MODE_OFF, Ordering::Release);
         crate::kprintln!("[npk] gpu: {} scenes in a row failed on the GPU, composing on the CPU (`gpu verify` retries)",
@@ -141,14 +156,16 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
         // a screen-sized buffer of `bytes`; they do not overlap.
         unsafe { core::ptr::copy_nonoverlapping(target, copy as *mut u8, bytes) };
         let t0 = crate::interrupts::rdtsc();
+        let pin = gpudev::ScenePin::new();
         // Binding the buffers is a one-time cost and not part of the timing.
         let job = gpudev::bo_for(copy, bytes as u64, info.width, info.height, info.pitch)
             .zip(encode(frame, &gpu_rec, info, damage))
             .filter(|(tid, (_, srcs))| gpudev::wait_bound(srcs) && gpudev::wait_bound(&[*tid]));
         let bind = crate::interrupts::rdtsc() - t0;
         let t1 = crate::interrupts::rdtsc();
-        let r = job.and_then(|(tid, (payload, srcs))| gpudev::submit_scene(tid, payload, &srcs))
-            .map(gpudev::wait_scene);
+        let seq = job.and_then(|(tid, (payload, srcs))| gpudev::submit_scene(tid, payload, &srcs));
+        drop(pin);
+        let r = seq.map(|s| gpudev::wait_scene(s) == 0);
         Some((copy, r, crate::interrupts::rdtsc() - t1, bind))
     });
 

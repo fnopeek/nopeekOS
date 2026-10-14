@@ -46,6 +46,9 @@ const TEST_W: u32 = 64;
 const TEST_H: u32 = 64;
 const TEST_PITCH: u32 = TEST_W * 4;
 const STATS_EVERY: u32 = 600;
+const SCENE_STATS_EVERY: u32 = 120;
+/// Scenes logged one by one after ready.
+const SCENES_LOGGED: u32 = 5;
 
 /// A kernel buffer bound into the PPGTT.
 #[derive(Clone, Copy, Default)]
@@ -78,6 +81,7 @@ struct service {
     max_us: u64,
     scenes: u32,
     scene_sum_us: u64,
+    scene_gpu_us: u64,
     scene_max_us: u64,
     logged_idle: bool,
     gpgpu: Option<crate::gpgpu::gpgpu>,
@@ -402,22 +406,28 @@ fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, 
     let r = crate::compose::run_scene(i915, gt, gp, c, &*svc, seq, a[0], a[1]);
     let us = linux::now_us() - t0;
     svc.scenes += 1;
-    svc.scene_sum_us += us;
-    svc.scene_max_us = svc.scene_max_us.max(us);
     match r {
-        Ok(items) if svc.scenes == 1 => {
-            Line::new().s("gpudev: first scene, ").dec(items as u64).s(" items into bo ").dec(a[0] as u64)
-                .s(" in ").dec(us).s(" us").say();
+        Ok((items, dispatches, gpu_us)) => {
+            svc.scene_sum_us += us;
+            svc.scene_gpu_us += gpu_us;
+            svc.scene_max_us = svc.scene_max_us.max(us);
+            if svc.scenes <= SCENES_LOGGED {
+                Line::new().s("gpudev: scene ").dec(svc.scenes as u64).s(", ").dec(items as u64).s(" items, ")
+                    .dec(dispatches as u64).s(" dispatches into bo ").dec(a[0] as u64).s(": ").dec(us)
+                    .s(" us, of which the GPU ").dec(gpu_us).s(" us at ")
+                    .dec(crate::intel_rps::intel_rps_requested_mhz(gt) as u64).s(" MHz").say();
+            }
         }
         Err(x) => {
             Line::new().s("gpudev: scene into bo ").dec(a[0] as u64).s(" failed (").dec((-x) as u64).s(")").say();
         }
-        _ => {}
     }
-    if svc.scenes % STATS_EVERY == 0 {
+    if svc.scenes % SCENE_STATS_EVERY == 0 {
         Line::new().s("gpudev: ").dec(svc.scenes as u64).s(" scenes, average ")
-            .dec(svc.scene_sum_us / STATS_EVERY as u64).s(" us, max ").dec(svc.scene_max_us).s(" us").say();
+            .dec(svc.scene_sum_us / SCENE_STATS_EVERY as u64).s(" us (GPU ")
+            .dec(svc.scene_gpu_us / SCENE_STATS_EVERY as u64).s(" us), max ").dec(svc.scene_max_us).s(" us").say();
         svc.scene_sum_us = 0;
+        svc.scene_gpu_us = 0;
         svc.scene_max_us = 0;
     }
     match r {
@@ -466,7 +476,7 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
     }
 
     let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: [None; MAX_DYN], e, copy_ok: false, jobs: 0,
-                            sum_us: 0, max_us: 0, scenes: 0, scene_sum_us: 0, scene_max_us: 0, logged_idle: false,
+                            sum_us: 0, max_us: 0, scenes: 0, scene_sum_us: 0, scene_gpu_us: 0, scene_max_us: 0, logged_idle: false,
                             gpgpu: None, composer: None };
     for id in 0..NUM_BOS {
         let Some(b) = bo_info(id as u32) else {

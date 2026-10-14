@@ -13,6 +13,7 @@
 use crate::gpgpu;
 use crate::gpgpu_gen as g;
 use crate::i915_drv::drm_i915_private;
+use crate::linux;
 use crate::intel_gt::intel_gt;
 use crate::regs::*;
 use npk_sys::Dma;
@@ -127,7 +128,27 @@ impl rect {
     fn is_empty(&self) -> bool {
         self.w == 0 || self.h == 0
     }
+
+    fn union(&self, o: &rect) -> rect {
+        if self.is_empty() {
+            return *o;
+        }
+        if o.is_empty() {
+            return *self;
+        }
+        let x0 = self.x.min(o.x);
+        let y0 = self.y.min(o.y);
+        rect { x: x0, y: y0, w: self.x1().max(o.x1()) - x0, h: self.y1().max(o.y1()) - y0 }
+    }
+
+    fn grow(&self, m: u32) -> rect {
+        let x0 = self.x.saturating_sub(m);
+        let y0 = self.y.saturating_sub(m);
+        rect { x: x0, y: y0, w: self.x1() + m - x0, h: self.y1() + m - y0 }
+    }
 }
+
+const EMPTY: rect = rect { x: 0, y: 0, w: 0, h: 0 };
 
 pub struct composer {
     scene: Dma,
@@ -180,7 +201,7 @@ pub trait buffers {
 
 /// Runs the scene of job `seq` (`bytes` of payload) into `target`.
 pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpgpu, c: &composer, bufs: &dyn buffers,
-                 seq: u32, target_id: u32, bytes: u32) -> Result<u32, i32> {
+                 seq: u32, target_id: u32, bytes: u32) -> Result<(u32, u32, u64), i32> {
     let mut hdr = [0u8; HEADER_BYTES as usize];
     if bytes < HEADER_BYTES {
         return Err(-EINVAL);
@@ -283,6 +304,9 @@ pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpg
     // Items, rewritten with the sources' GPU addresses. An item whose
     // source has no pixels paints nothing on the CPU and is dropped.
     let mut kinds = [0u8; (SCENE_PAGES * PAGE / ITEM_BYTES) as usize];
+    // Where each kept item can paint: a segment's dispatch covers only the
+    // union of its items (pixels outside keep what is beneath).
+    let mut reach = [EMPTY; (SCENE_PAGES * PAGE / ITEM_BYTES) as usize];
     let mut panels = [rect { x: 0, y: 0, w: 0, h: 0 }; 64];
     let mut n_panels = 0usize;
     let mut kept = 0u32;
@@ -372,6 +396,12 @@ pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpg
             n_panels += 1;
         }
         kinds[kept as usize] = kind as u8;
+        let r = rect { x: w[1], y: w[2], w: w[3], h: w[4] };
+        reach[kept as usize] = match kind {
+            KIND_BACKGROUND => rect { x: 0, y: 0, w: width, h: height },
+            KIND_GLOW => r.grow(w[7]),
+            _ => r,
+        };
         for (k, v) in out.iter().enumerate() {
             chunk[in_chunk + k * 4..in_chunk + k * 4 + 4].copy_from_slice(&v.to_le_bytes());
         }
@@ -404,6 +434,7 @@ pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpg
     // The batch: per damage rectangle, the segments between panels.
     let screen = rect { x: 0, y: 0, w: width, h: height };
     let mut b = gp.begin(gt)?;
+    let mut dispatches = 0u32;
     for d in damage.iter().take(n_damage as usize) {
         let clip = d.intersect(&screen);
         if clip.is_empty() {
@@ -412,16 +443,25 @@ pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpg
         let mut seg = 0u32;
         let mut seg_blur = None;
         let mut panel = 0usize;
+        let segment = |b: &mut gpgpu::batch, first: u32, end: u32, blur: Option<grid>| -> Result<u32, i32> {
+            let area = reach[first as usize..end as usize].iter().fold(EMPTY, |a, r| a.union(r)).intersect(&clip);
+            if area.is_empty() {
+                return Ok(0);
+            }
+            compose(gp, b, c, &area, first, end - first, blur)?;
+            Ok(1)
+        };
         for i in 0..kept {
             if kinds[i as usize] as u32 != KIND_PANEL {
                 continue;
             }
             if i > seg {
-                compose(gp, &mut b, c, &clip, seg, i - seg, seg_blur)?;
+                dispatches += segment(&mut b, seg, i, seg_blur)?;
             }
             let dst = panels[panel];
             panel += 1;
             seg_blur = if radius > 0 && !dst.intersect(&clip).is_empty() {
+                dispatches += 7;
                 blur_region(gp, &mut b, c, &target, width, height, &dst, radius)?
             } else {
                 None
@@ -429,11 +469,12 @@ pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpg
             seg = i;
         }
         if kept > seg {
-            compose(gp, &mut b, c, &clip, seg, kept - seg, seg_blur)?;
+            dispatches += segment(&mut b, seg, kept, seg_blur)?;
         }
     }
+    let t0 = linux::now_us();
     gpgpu::gpgpu_run(i915, gt, gp, &mut b)?;
-    Ok(kept)
+    Ok((kept, dispatches, linux::now_us() - t0))
 }
 
 /// The block grid a panel's blur reads: `(bx0, by0, sw, sh)`.

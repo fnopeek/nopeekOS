@@ -112,6 +112,11 @@ struct State {
     pending_free: BTreeMap<u32, (u64, usize)>,
     /// Buffers being added, by the sequence number of their `BO_ADD`.
     adding: BTreeMap<u32, u32>,
+    /// While a scene is encoded (`ScenePin`): the buffers it names. One
+    /// whose owner frees it meanwhile is removed only after the scene.
+    pinning: bool,
+    pinned: Vec<u32>,
+    deferred: Vec<(u32, (u64, usize))>,
     caps: i32,
 }
 
@@ -125,6 +130,9 @@ static STATE: Mutex<State> = Mutex::new(State {
     payloads: BTreeMap::new(),
     pending_free: BTreeMap::new(),
     adding: BTreeMap::new(),
+    pinning: false,
+    pinned: Vec::new(),
+    deferred: Vec::new(),
     caps: 0,
 });
 
@@ -386,7 +394,8 @@ pub fn module_gone(dev: PciAddr) {
         st.by_addr.clear();
         st.adding.clear();
         st.caps = 0;
-        let frees: Vec<(u64, usize)> = core::mem::take(&mut st.pending_free).into_values().collect();
+        let mut frees: Vec<(u64, usize)> = core::mem::take(&mut st.pending_free).into_values().collect();
+        frees.extend(core::mem::take(&mut st.deferred).into_iter().map(|(_, f)| f));
         (st.fb.take(), frees)
     };
     READY.store(false, Ordering::Release);
@@ -450,7 +459,13 @@ pub fn bo_for(addr: u64, size: u64, width: u32, height: u32, pitch: u32) -> Opti
     if let Some(&id) = st.by_addr.get(&addr) {
         let bo = st.bos.get(&id).copied()?;
         if bo.size == size && bo.width == width && bo.height == height && bo.pitch == pitch {
-            return (bo.state != BoState::Failed).then_some(id);
+            if bo.state == BoState::Failed {
+                return None;
+            }
+            if st.pinning {
+                st.pinned.push(id);
+            }
+            return Some(id);
         }
         // Freed without `release` and the address reused for a different
         // buffer: the module forgets the old one.
@@ -466,6 +481,9 @@ pub fn bo_for(addr: u64, size: u64, width: u32, height: u32, pitch: u32) -> Opti
     st.by_addr.insert(addr, id);
     let seq = queue_job(&mut st, OP_BO_ADD, [id, 0, 0, 0, 0, 0], None, &[id]);
     st.adding.insert(seq, id);
+    if st.pinning {
+        st.pinned.push(id);
+    }
     drop(st);
     wake_module();
     Some(id)
@@ -481,6 +499,38 @@ fn retire(st: &mut State, id: u32, free: Option<(u64, usize)>) {
     }
 }
 
+/// Held while a scene is encoded and handed over: the buffers `bo_for`
+/// names stay known to the module until the scene is queued, so a buffer
+/// replaced meanwhile (a widget raster, a guest frame) cannot be removed
+/// ahead of the scene that reads it.
+pub struct ScenePin;
+
+impl ScenePin {
+    pub fn new() -> Self {
+        let mut st = STATE.lock();
+        st.pinning = true;
+        st.pinned.clear();
+        ScenePin
+    }
+}
+
+impl Drop for ScenePin {
+    fn drop(&mut self) {
+        let mut st = STATE.lock();
+        st.pinning = false;
+        st.pinned.clear();
+        let deferred = core::mem::take(&mut st.deferred);
+        let any = !deferred.is_empty();
+        for (id, free) in deferred {
+            retire(&mut st, id, Some(free));
+        }
+        drop(st);
+        if any {
+            wake_module();
+        }
+    }
+}
+
 /// The owner of the frames `phys..+pages`, with its first pixel at `addr`,
 /// gives them up. True when the caller frees them now; false when gpudev
 /// does, after the module unbound them.
@@ -491,26 +541,30 @@ pub fn release(addr: u64, phys: u64, pages: usize) -> bool {
         st.bos.remove(&id);
         return true;
     }
+    if st.pinned.contains(&id) {
+        st.deferred.push((id, (phys, pages)));
+        return false;
+    }
     retire(&mut st, id, Some((phys, pages)));
     drop(st);
     wake_module();
     false
 }
 
-/// Wait until job `seq` is completed, at most until `deadline` (TSC). True
-/// when it completed with status 0.
-fn wait_seq(seq: u32, deadline: u64) -> bool {
+/// Wait until job `seq` is completed, at most until `deadline` (TSC). Its
+/// status: 0, the module's error, or -ETIME (62).
+fn wait_seq(seq: u32, deadline: u64) -> i32 {
     loop {
         if seq_ge(COMPLETED.load(Ordering::Acquire), seq) {
             let s = STATUS[seq as usize % STATUS.len()].load(Ordering::Acquire);
-            return (s >> 32) as u32 == seq && s as u32 as i32 == 0;
+            return if (s >> 32) as u32 == seq { s as u32 as i32 } else { -5 };
         }
         if !READY.load(Ordering::Acquire) || crate::interrupts::rdtsc() >= deadline {
             // A job the module never took must not run after the CPU redid it.
             let mut st = STATE.lock();
             st.queue.retain(|j| j.seq != seq);
             st.payloads.remove(&seq);
-            return false;
+            return -62;
         }
         core::hint::spin_loop();
     }
@@ -586,7 +640,7 @@ pub fn wait_framebuffer() -> bool {
     let copy = COPY_INFLIGHT.swap(0, Ordering::AcqRel);
     let mut ok = true;
     if copy != 0 {
-        ok = wait_seq(copy, COPY_DEADLINE.load(Ordering::Acquire));
+        ok = wait_seq(copy, COPY_DEADLINE.load(Ordering::Acquire)) == 0;
         if ok { &COPIES_DONE } else { &COPIES_FAILED }.fetch_add(1, Ordering::Relaxed);
     }
     let dl = deadline();
@@ -645,8 +699,8 @@ pub fn wait_bound(ids: &[u32]) -> bool {
     }
 }
 
-/// Wait for scene job `seq`; true when the module composed it.
-pub fn wait_scene(seq: u32) -> bool {
+/// Wait for scene job `seq`: 0 when the module composed it, else why not.
+pub fn wait_scene(seq: u32) -> i32 {
     wait_seq(seq, deadline())
 }
 
