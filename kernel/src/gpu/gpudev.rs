@@ -234,11 +234,14 @@ pub fn module_gone(dev: PciAddr) {
     }
 }
 
-/// Hand one copy to the module and wait for it. False on any failure, so
-/// the caller copies on the CPU.
+/// Hand one copy to the module without waiting for it. The copy reads a
+/// shadow buffer and writes the framebuffer, so the CPU must not touch
+/// either until it is done: `framebuffer::with_fb`, the way into both,
+/// calls `wait_inflight` first. False when the job was not taken, so the
+/// caller copies on the CPU now.
 fn submit_copy(src_gpu: u32, src_pitch: u32, dst_gpu: u32, dst_pitch: u32,
                x: u32, y: u32, w: u32, h: u32) -> bool {
-    if !READY.load(Ordering::Acquire) {
+    if !READY.load(Ordering::Acquire) || !wait_inflight() {
         return false;
     }
     let seq = {
@@ -255,24 +258,43 @@ fn submit_copy(src_gpu: u32, src_pitch: u32, dst_gpu: u32, dst_pitch: u32,
         st.queue.push_back(Job { seq, op: OP_COPY_RECT, a: [src as u32, dst as u32, x, y, w, h] });
         seq
     };
+    let freq = crate::interrupts::tsc_freq();
+    INFLIGHT_DEADLINE.store(crate::interrupts::rdtsc() + JOB_TIMEOUT_MS * (freq / 1000), Ordering::Release);
+    INFLIGHT.store(seq, Ordering::Release);
     let w = WAKER.load(Ordering::Acquire);
     if w != NO_WAKER {
         fiber::signal(w, fiber::SIG_GPU);
     }
-    let freq = crate::interrupts::tsc_freq();
-    let deadline = crate::interrupts::rdtsc() + JOB_TIMEOUT_MS * (freq / 1000);
-    loop {
+    true
+}
+
+/// The copy handed to the module and not yet waited for (0: none).
+static INFLIGHT: AtomicU32 = AtomicU32::new(0);
+static INFLIGHT_DEADLINE: AtomicU64 = AtomicU64::new(0);
+
+/// Wait for the copy in flight, if any. False when it failed, timed out or
+/// its module died: the framebuffer may not show the last frame, and the
+/// caller copies it on the CPU.
+pub fn wait_inflight() -> bool {
+    let seq = INFLIGHT.load(Ordering::Acquire);
+    if seq == 0 {
+        return true;
+    }
+    let deadline = INFLIGHT_DEADLINE.load(Ordering::Acquire);
+    let ok = loop {
         let done = DONE.load(Ordering::Acquire);
         if (done >> 32) as u32 == seq {
-            return done as u32 as i32 == 0;
+            break done as u32 as i32 == 0;
         }
         if !READY.load(Ordering::Acquire) || crate::interrupts::rdtsc() >= deadline {
             // A job the module never took must not run after the CPU copy.
             STATE.lock().queue.retain(|j| j.seq != seq);
-            return false;
+            break false;
         }
         core::hint::spin_loop();
-    }
+    };
+    INFLIGHT.store(0, Ordering::Release);
+    ok
 }
 
 /// The active GPU driver while a module serves: display state is the
