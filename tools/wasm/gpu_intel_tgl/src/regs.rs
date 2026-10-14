@@ -1337,6 +1337,13 @@ pub const INTEL_FRONTBUFFER_BITS_PER_PIPE: u32 = 0x8; // display/intel_frontbuff
 pub const ENOMEM: u32 = 0xc; // include/uapi/asm-generic/errno-base.h:16
 pub const INVALID_TRANSCODER: i32 = -1; // display/intel_display_limits.h:27
 
+// initial framebuffer takeover (display/intel_plane_initial.c)
+pub const I915_FORMAT_MOD_4_TILED: u64 = 0x100000000000009; // ?
+pub const I915_GTT_MIN_ALIGNMENT: u64 = 0x1000; // gt/intel_gtt.h:54
+pub const I915_CACHE_WT: u32 = 0x3; // gem/i915_gem_object_types.h:197
+pub const TGL_PAT_CACHE_WT: u32 = 0x2; // tgl_info.cachelevel_to_pat[I915_CACHE_WT] in i915_pci.c
+pub const I915_COLOR_UNEVICTABLE: i32 = -1; // i915_gem_gtt.h:21
+
 // modeset readout and sanitize (display/intel_modeset_setup.c, intel_ddi.c, intel_hdmi.c, skl_watermark.c, intel_fbc.c, intel_vga.c)
 pub const DDI_CLK_SEL_TBT_162: u32 = 0xc0000000; // display/intel_display_regs.h:2441
 pub const DDI_CLK_SEL_TBT_270: u32 = 0xd0000000; // display/intel_display_regs.h:2442

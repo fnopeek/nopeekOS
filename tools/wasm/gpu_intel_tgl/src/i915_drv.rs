@@ -99,6 +99,8 @@ pub struct drm_i915_private {
     pub irqs_enabled: bool,
     /// `i915->dram_info`.
     pub dram_info: crate::intel_dram::dram_info,
+    /// `i915->preserve_bios_swizzle`: the firmware framebuffer is tiled.
+    pub preserve_bios_swizzle: bool,
 }
 
 const BITS_PER_U32: u32 = 32;

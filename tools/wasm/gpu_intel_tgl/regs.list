@@ -1169,6 +1169,12 @@ SKL_NUM_SCALERS @ display/skl_scaler.c
 INTEL_FRONTBUFFER_BITS_PER_PIPE @ display/intel_frontbuffer.c
 ENOMEM
 INVALID_TRANSCODER @ display/intel_crtc.c
+# initial framebuffer takeover (display/intel_plane_initial.c)
+I915_FORMAT_MOD_4_TILED @ display/intel_plane_initial.c
+I915_GTT_MIN_ALIGNMENT
+I915_CACHE_WT
+TGL_PAT_CACHE_WT = tgl_info.cachelevel_to_pat[I915_CACHE_WT] @ i915_pci.c
+I915_COLOR_UNEVICTABLE
 # modeset readout and sanitize (display/intel_modeset_setup.c, intel_ddi.c, intel_hdmi.c, skl_watermark.c, intel_fbc.c, intel_vga.c)
 DDI_CLK_SEL_TBT_162
 DDI_CLK_SEL_TBT_270

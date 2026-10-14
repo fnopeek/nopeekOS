@@ -10,8 +10,9 @@
 //! part of the probe: `intel_display_driver_probe_noirq` (power wells,
 //! display core, CDCLK) and `intel_display_driver_probe_nogem` up to the
 //! hardware state readout and sanitize (`intel_modeset_setup_hw_state`)
-//! and the firmware framebuffer's plane registers. It reports what it
-//! found and gives the card back.
+//! and the takeover of the firmware framebuffer (`intel_initial_plane_config`:
+//! its stolen memory reserved, bound at a fixed GGTT offset). It reports
+//! what it found and gives the card back.
 
 #![no_std]
 // Linux names are kept as they are (`intel_uncore`, `FORCEWAKE_MT`,
@@ -19,6 +20,7 @@
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 #![allow(dead_code)]
 
+mod drm_mm;
 mod i915_drv;
 mod intel_bios;
 mod intel_bw;
@@ -123,7 +125,7 @@ fn intel_gmch_bar_setup() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2b: i915_driver_probe up to the display hardware state readout").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2b: i915_driver_probe up to the display readout and the initial framebuffer takeover").say();
 
     // pci_enable_device: bind (the kernel's own driver hands the card over).
     match npk_sys::pci_bind(INTEL_VENDOR as i32, TGL_GT2 as i32) {
@@ -152,6 +154,7 @@ pub extern "C" fn _start() {
         uncore: intel_uncore::intel_uncore::new(regs),
         irqs_enabled: false,
         dram_info: Default::default(),
+        preserve_bios_swizzle: false,
     };
 
     // i915_driver_early_probe
@@ -203,7 +206,7 @@ pub extern "C" fn _start() {
         }
     };
     intel_ggtt::i915_ggtt_init_hw(&mut i915, &mut ggtt);
-    let dsm = intel_ggtt::i915_gem_init_stolen(&mut i915);
+    let mut dsm = intel_ggtt::i915_gem_init_stolen(&mut i915);
     // i915_ggtt_enable_hw: GRAPHICS_VER >= 6 has nothing to enable.
     if npk_sys::pci_enable_bus_master() != 0 {
         say("bus mastering could not be enabled");
@@ -256,13 +259,15 @@ pub extern "C" fn _start() {
     intel_ddi::intel_setup_outputs(&mut i915, &bios, &drt);
     log_outputs(&i915);
     intel_modeset_setup::intel_modeset_setup_hw_state(&mut i915, opregion.as_ref());
-    log_initial_plane_config(&mut i915);
+    let pte0 = ggtt.regs.readq(ggtt.gsm_offset);
+    log_initial_plane_config(&mut i915, &mut ggtt, dsm.as_mut());
+    Line::new().s("GGTT[0] raw ").hex((pte0 >> 32) as u32).s("_").hex(pte0 as u32).s(" before, ")
+        .hex((ggtt.regs.readq(ggtt.gsm_offset) >> 32) as u32).s("_").hex(ggtt.regs.readq(ggtt.gsm_offset) as u32)
+        .s(" after the takeover").say();
 
     Line::new().s("GGTT ").dec(ggtt.total >> 20).s(" MB, aperture ").hex((ggtt.gmadr_start >> 32) as u32)
         .s("_").hex(ggtt.gmadr_start as u32).s(" + ").dec(ggtt.mappable_end >> 20).s(" MB, ")
         .dec(ggtt.num_fences as u64).s(" fences").say();
-    Line::new().s("GGTT[0] -> ").hex((ggtt.gen8_ggtt_read_entry(0) >> 32) as u32).s("_")
-        .hex(ggtt.gen8_ggtt_read_entry(0) as u32).say();
     match dsm {
         Some(d) => {
             Line::new().s("stolen ").hex((d.stolen_start >> 32) as u32).s("_").hex(d.stolen_start as u32)
@@ -357,8 +362,9 @@ fn log_outputs(i915: &i915_drv::drm_i915_private) {
 
 /// `intel_initial_plane_config`, the register part: where the firmware
 /// framebuffer of each active pipe is.
-fn log_initial_plane_config(i915: &mut i915_drv::drm_i915_private) {
-    let configs = intel_plane_initial::intel_initial_plane_config(i915);
+fn log_initial_plane_config(i915: &mut i915_drv::drm_i915_private, ggtt: &mut intel_ggtt::i915_ggtt,
+                            dsm: Option<&mut intel_ggtt::i915_dsm>) {
+    let configs = intel_plane_initial::intel_initial_plane_config(i915, ggtt, dsm);
     for (pipe, pc) in configs.iter().enumerate() {
         if let Some(fb) = pc.fb {
             Line::new().s("initial fb on pipe ").dec(pipe as u64).s(": GGTT ").hex(pc.base).s(", ")
@@ -366,6 +372,11 @@ fn log_initial_plane_config(i915: &mut i915_drv::drm_i915_private) {
                 .s(", modifier ").hex((fb.modifier >> 32) as u32).s("_").hex(fb.modifier as u32)
                 .s(", stride ").dec(fb.pitch as u64).s(", size ").hex(pc.size).s(", rotation ")
                 .hex(pc.rotation).say();
+            match pc.vma {
+                Some(v) => Line::new().s("  taken over: GGTT ").hex(v.node.start as u32).s(" + ").hex(v.node.size as u32)
+                    .s(", stolen offset ").hex(v.stolen.start as u32).s(", PAT ").dec(v.pat_index as u64).say(),
+                None => say("  not taken over"),
+            }
         }
     }
 }

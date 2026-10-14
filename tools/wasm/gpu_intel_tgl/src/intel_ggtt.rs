@@ -8,6 +8,7 @@
 //! Page-table pages and the scratch page are DMA buffers the kernel
 //! hands out (Linux allocates them as internal GEM objects).
 
+use crate::drm_mm::drm_mm;
 use crate::i915_drv::drm_i915_private;
 use crate::linux::{self, Line};
 use crate::regs::*;
@@ -25,6 +26,21 @@ pub struct i915_ggtt {
     pub scratch: Option<Dma>,
     pub scratch_encode: u64,
     pub num_fences: u32,
+    /// `ggtt->vm.mm`.
+    pub vm_mm: drm_mm,
+}
+
+/// A stolen-memory GEM object bound into the GGTT (`struct i915_vma` with
+/// its `drm_i915_gem_object`), as far as a preallocated object needs it.
+#[derive(Clone, Copy, Default)]
+pub struct i915_vma {
+    /// `vma->node` in `ggtt->vm.mm`.
+    pub node: crate::drm_mm::drm_mm_node,
+    /// `obj->stolen`, offsets from the stolen region's start.
+    pub stolen: crate::drm_mm::drm_mm_node,
+    /// `obj->tiling_and_stride`.
+    pub tiling_and_stride: u32,
+    pub pat_index: u32,
 }
 
 /// `struct intel_graphics_stolen` / `i915->dsm`: stolen memory and the
@@ -36,6 +52,12 @@ pub struct i915_dsm {
     pub reserved_start: u64,
     pub reserved_size: u64,
     pub usable_size: u64,
+    /// `i915->mm.stolen_region->region`: the stolen range without the
+    /// reserved part.
+    pub region_start: u64,
+    pub region_end: u64,
+    /// `i915->mm.stolen`, offsets from `region_start`.
+    pub mm: drm_mm,
 }
 
 const SZ_16M: u32 = 16 << 20;
@@ -75,9 +97,32 @@ impl i915_ggtt {
         self.gsm_offset + ((offset / I915_GTT_PAGE_SIZE) * 8) as u32
     }
 
-    /// `gen8_ggtt_read_entry` + `gen8_ggtt_pte_decode`.
-    pub fn gen8_ggtt_read_entry(&self, offset: u64) -> u64 {
-        self.regs.readq(self.pte_offset(offset)) & GEN12_GGTT_PTE_ADDR_MASK
+    /// `gen8_ggtt_read_entry` + `gen8_ggtt_pte_decode`: (address,
+    /// is_present, is_local).
+    pub fn gen8_ggtt_read_entry(&self, offset: u64) -> (u64, bool, bool) {
+        let pte = self.regs.readq(self.pte_offset(offset));
+        (pte & GEN12_GGTT_PTE_ADDR_MASK, pte & GEN8_PAGE_PRESENT != 0, pte & GEN12_GGTT_PTE_LM != 0)
+    }
+
+    /// `gen8_ggtt_insert_entries` for a physically contiguous object (a
+    /// stolen one is one block): `node_size` bytes from `start`, the object's
+    /// `obj_size` bytes from `addr`, the rest of the node on scratch. No
+    /// guard pages (`vma_res->guard` is 0 without PIN_OFFSET_GUARD).
+    pub fn gen8_ggtt_insert_entries(&self, start: u64, node_size: u64, addr: u64, obj_size: u64,
+                                    pat_index: u32, flags: u32) {
+        let pte_encode = gen8_ggtt_pte_encode(0, pat_index, flags);
+        let mut gte = start;
+        let end = start + node_size;
+        let mut a = addr;
+        while a < addr + obj_size {
+            self.regs.writeq(self.pte_offset(gte), pte_encode | a);
+            gte += I915_GTT_PAGE_SIZE;
+            a += I915_GTT_PAGE_SIZE;
+        }
+        while gte < end {
+            self.regs.writeq(self.pte_offset(gte), self.scratch_encode);
+            gte += I915_GTT_PAGE_SIZE;
+        }
     }
 
     /// `gen8_ggtt_insert_page`; `gen8_ggtt_invalidate` is a no-op on TGL.
@@ -161,6 +206,7 @@ pub fn i915_ggtt_probe_hw(regs: Mmio) -> Result<i915_ggtt, ()> {
         scratch: None,
         scratch_encode: 0,
         num_fences: 0,
+        vm_mm: drm_mm::default(),
     };
     gen8_gmch_probe(&mut ggtt)?;
     if (ggtt.total - 1) >> 32 != 0 {
@@ -198,10 +244,11 @@ fn intel_ggtt_init_fences(i915: &mut drm_i915_private, ggtt: &mut i915_ggtt) {
     }
 }
 
-/// `ggtt_init_hw` / `i915_ggtt_init_hw`. The address-space bookkeeping
-/// (`i915_address_space_init`, the WC io_mapping of the aperture) belongs
-/// to the gpudev side; the hardware part is the fences.
+/// `ggtt_init_hw` / `i915_ggtt_init_hw`: the range allocator of
+/// `i915_address_space_init`, then the fences. The WC io_mapping of the
+/// aperture is the kernel's.
 pub fn i915_ggtt_init_hw(i915: &mut drm_i915_private, ggtt: &mut i915_ggtt) {
+    ggtt.vm_mm = drm_mm::drm_mm_init(0, ggtt.total);
     intel_ggtt_init_fences(i915, ggtt);
 }
 
@@ -289,9 +336,13 @@ pub fn i915_gem_init_stolen(i915: &mut drm_i915_private) -> Option<i915_dsm> {
         linux::say("Skip stolen region: failed to setup");
         return None;
     }
+    // Exclude the reserved region from driver use.
+    dsm.region_start = dsm.stolen_start;
+    dsm.region_end = dsm.reserved_start - 1;
     dsm.usable_size = dsm.reserved_start - dsm.stolen_start;
     if dsm.usable_size == 0 {
         return None;
     }
+    dsm.mm = drm_mm::drm_mm_init(0, dsm.usable_size);
     Some(dsm)
 }

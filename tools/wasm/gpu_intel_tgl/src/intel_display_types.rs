@@ -340,9 +340,25 @@ pub struct intel_plane {
     pub state: intel_plane_state,
 }
 
-/// `struct intel_plane_state`, the readout part.
+/// `struct intel_plane_state`: the readout part and what taking over the
+/// firmware framebuffer sets. `intel_plane_copy_uapi_to_hw_state` makes
+/// `hw` a copy of `uapi` for these fields, so they are kept once.
 #[derive(Clone, Copy, Default)]
 pub struct intel_plane_state {
     /// `uapi.visible`.
     pub visible: bool,
+    /// `uapi.fb` / `hw.fb`.
+    pub fb: Option<crate::intel_plane_initial::intel_initial_fb>,
+    /// `uapi.crtc` / `hw.crtc`: the pipe.
+    pub crtc: Option<u32>,
+    pub rotation: u32,
+    /// `uapi.src_x/y/w/h`, 16.16 fixed point.
+    pub src: [u32; 4],
+    /// `uapi.crtc_x/y/w/h`.
+    pub dst: [i32; 4],
+    pub ggtt_vma: Option<crate::intel_ggtt::i915_vma>,
+    /// `plane_state->surf`: the GGTT offset the plane scans out.
+    pub surf: u32,
+    /// `PLANE_HAS_FENCE`.
+    pub flags: u32,
 }
