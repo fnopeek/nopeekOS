@@ -4,8 +4,10 @@
 //! passes per axis). Each segment is composed over the union of what its
 //! items reach, with a bin table: per 64x64 bin of the screen grid the
 //! items that reach the bin, in order, starting at the last one that covers
-//! it opaquely. No GPU access here; the caller's `sink` turns each step into
-//! commands and memory writes. Not a Linux file.
+//! it opaquely. A bin that a later segment covers opaquely is left out of
+//! the earlier ones, unless a panel in between blurs it. No GPU access
+//! here; the caller's `sink` turns each step into commands and memory
+//! writes. Not a Linux file.
 
 pub const EINVAL: i32 = 22;
 pub const E2BIG: i32 = 7;
@@ -160,6 +162,20 @@ pub fn plan(s: &mut dyn sink, lim: &limits, screen: &rect, damage: &[rect], item
         if clip.is_empty() {
             continue;
         }
+        // Where each panel's blur reads the target in this pass.
+        let mut reads = [(0usize, EMPTY); 64];
+        let mut n_reads = 0usize;
+        for (i, it) in items.iter().enumerate() {
+            if it.kind != KIND_PANEL || radius == 0 || it.reach.intersect(&clip).is_empty() {
+                continue;
+            }
+            if n_reads == reads.len() {
+                return Err(-E2BIG);
+            }
+            reads[n_reads] = (i, blur_reads(screen, &it.reach, radius));
+            n_reads += 1;
+        }
+        let pass = pass { clip, items, reads: &reads[..n_reads] };
         let mut seg = 0usize;
         let mut seg_blur = None;
         for i in 0..items.len() {
@@ -167,7 +183,7 @@ pub fn plan(s: &mut dyn sink, lim: &limits, screen: &rect, damage: &[rect], item
                 continue;
             }
             if i > seg {
-                segment(s, lim, &mut bins_at, &clip, items, seg, i, seg_blur)?;
+                segment(s, lim, &mut bins_at, &pass, seg, i, seg_blur)?;
             }
             let dst = items[i].reach;
             seg_blur = if radius > 0 && !dst.intersect(&clip).is_empty() {
@@ -178,27 +194,52 @@ pub fn plan(s: &mut dyn sink, lim: &limits, screen: &rect, damage: &[rect], item
             seg = i;
         }
         if items.len() > seg {
-            segment(s, lim, &mut bins_at, &clip, items, seg, items.len(), seg_blur)?;
+            segment(s, lim, &mut bins_at, &pass, seg, items.len(), seg_blur)?;
         }
     }
     Ok(())
 }
 
-/// Items `first..end` over the part of `clip` they reach.
-fn segment(s: &mut dyn sink, lim: &limits, bins_at: &mut u32, clip: &rect, items: &[item_shape], first: usize,
-           end: usize, blur: Option<grid>) -> Result<(), i32> {
-    let area = items[first..end].iter().fold(EMPTY, |a, it| a.union(&it.reach)).intersect(clip);
+/// One damage rectangle's pass over the items.
+struct pass<'a> {
+    clip: rect,
+    items: &'a [item_shape],
+    /// Panels that blur in this pass, by item index, and the target pixels
+    /// their blur reads.
+    reads: &'a [(usize, rect)],
+}
+
+impl pass<'_> {
+    /// Whether `bin` (within the clip) is painted over opaquely by an item
+    /// from `end` on, with no panel in between reading it for its blur:
+    /// then nothing before `end` shows there.
+    fn hidden_after(&self, bin: &rect, end: usize) -> bool {
+        for (k, it) in self.items.iter().enumerate().skip(end) {
+            if it.cover.0.contains(bin) || it.cover.1.contains(bin) {
+                return !self.reads.iter().any(|&(p, r)| p >= end && p < k && !r.intersect(bin).is_empty());
+            }
+        }
+        false
+    }
+}
+
+/// Items `first..end` over the part of the clip they reach.
+fn segment(s: &mut dyn sink, lim: &limits, bins_at: &mut u32, ps: &pass, first: usize, end: usize,
+           blur: Option<grid>) -> Result<(), i32> {
+    let items = ps.items;
+    let area = items[first..end].iter().fold(EMPTY, |a, it| a.union(&it.reach)).intersect(&ps.clip);
     if area.is_empty() {
         return Ok(());
     }
-    let t = write_bins(s, lim, *bins_at, &area, &items[..end], first)?;
+    let t = write_bins(s, lim, *bins_at, &area, ps, first, end)?;
     *bins_at += t.words;
     s.compose(&area, &t, blur)
 }
 
-/// The bin table of items `first..items.len()` over `area`, at word `at`.
-fn write_bins(s: &mut dyn sink, lim: &limits, at: u32, area: &rect, items: &[item_shape], first: usize)
+/// The bin table of items `first..end` over `area`, at word `at`.
+fn write_bins(s: &mut dyn sink, lim: &limits, at: u32, area: &rect, ps: &pass, first: usize, end: usize)
               -> Result<bin_table, i32> {
+    let items = &ps.items[..end];
     let bin_x0 = area.x / BIN;
     let bin_y0 = area.y / BIN;
     let nbx = area.x1().div_ceil(BIN) - bin_x0;
@@ -216,10 +257,11 @@ fn write_bins(s: &mut dyn sink, lim: &limits, at: u32, area: &rect, items: &[ite
     let mut listed = 0u32;
     for by in 0..nby {
         for bx in 0..nbx {
-            let br = rect { x: (bin_x0 + bx) * BIN, y: (bin_y0 + by) * BIN, w: BIN, h: BIN }.intersect(area);
+            let bin = rect { x: (bin_x0 + bx) * BIN, y: (bin_y0 + by) * BIN, w: BIN, h: BIN };
+            let br = bin.intersect(area);
             let mut n = 0usize;
             let mut opaque = false;
-            if !br.is_empty() {
+            if !br.is_empty() && !ps.hidden_after(&bin.intersect(&ps.clip), end) {
                 for (i, it) in items.iter().enumerate().skip(first) {
                     if it.reach.intersect(&br).is_empty() {
                         continue;
@@ -261,17 +303,34 @@ fn write_bins(s: &mut dyn sink, lim: &limits, at: u32, area: &rect, items: &[ite
     Ok(bin_table { at, words: nb as u32 * 2 + written + BLOCK_SLACK, bin_x0, bin_y0, nbx, listed })
 }
 
+/// The block grid `blur_region` uses for a panel at `r`: `(bx0, by0, bx1,
+/// by1)` in 4x4 blocks.
+fn blur_blocks(screen: &rect, r: &rect, radius: u32) -> (u32, u32, u32, u32) {
+    let m = (radius * BLUR_PASSES + 2) * BLUR_DOWN;
+    let bx0 = r.x.saturating_sub(m) / BLUR_DOWN;
+    let by0 = r.y.saturating_sub(m) / BLUR_DOWN;
+    let bx1 = (r.x1() + m).min(screen.w).div_ceil(BLUR_DOWN);
+    let by1 = (r.y1() + m).min(screen.h).div_ceil(BLUR_DOWN);
+    (bx0, by0, bx1, by1)
+}
+
+/// The target pixels a panel's blur reads.
+fn blur_reads(screen: &rect, r: &rect, radius: u32) -> rect {
+    let (bx0, by0, bx1, by1) = blur_blocks(screen, r, radius);
+    if bx1 <= bx0 || by1 <= by0 {
+        return EMPTY;
+    }
+    rect { x: bx0 * BLUR_DOWN, y: by0 * BLUR_DOWN, w: (bx1 - bx0) * BLUR_DOWN, h: (by1 - by0) * BLUR_DOWN }
+        .intersect(screen)
+}
+
 /// background::blur_region of `r` in the target into the planes; None
 /// where the CPU returns None (the panel then sits on the pixel beneath).
 fn blur_region(s: &mut dyn sink, lim: &limits, screen: &rect, r: &rect, radius: u32) -> Result<Option<grid>, i32> {
     if r.is_empty() {
         return Ok(None);
     }
-    let m = (radius * BLUR_PASSES + 2) * BLUR_DOWN;
-    let bx0 = r.x.saturating_sub(m) / BLUR_DOWN;
-    let by0 = r.y.saturating_sub(m) / BLUR_DOWN;
-    let bx1 = (r.x1() + m).min(screen.w).div_ceil(BLUR_DOWN);
-    let by1 = (r.y1() + m).min(screen.h).div_ceil(BLUR_DOWN);
+    let (bx0, by0, bx1, by1) = blur_blocks(screen, r, radius);
     if bx1 <= bx0 || by1 <= by0 {
         return Ok(None);
     }

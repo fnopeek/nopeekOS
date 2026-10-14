@@ -1,10 +1,11 @@
 #version 460
-// One segment of a scene list (compose.rs) over one area: a thread is a row
-// of 16 pixels inside one 64x64 bin, and runs only the items compose.rs
-// listed for that bin, in order, on a colour held in a register. A list
-// that starts with an item covering the bin opaquely skips the read of the
-// target. Item and frame words are uniform per thread: each lane loads one
-// word of a 16-word block in one message, the words are then broadcast.
+// One segment of a scene list (compose.rs) over one area: a thread is a
+// column of 16 pixels by ROWS rows inside one 64x64 bin, and runs only the
+// items compose.rs listed for that bin, in order, on a colour held in a
+// register, row by row. A list that starts with an item covering the bin
+// opaquely skips the read of the target. Item and frame words are uniform
+// per thread: each lane loads one word of a 16-word block in one message,
+// the words are then broadcast.
 // A bit-exact port of the kernel's CPU executor (kernel/src/shade/scene.rs
 // `paint` and the helpers it calls in gui/render.rs, gui/background.rs and
 // gui/theme.rs); comments name the function each part mirrors.
@@ -34,6 +35,8 @@ layout(push_constant, std430) uniform Params {
     uint clip_h;
     // First 16-pixel column of the area, in 16s.
     uint gx0;
+    // First run of ROWS rows of the area, in ROWS.
+    uint gy0;
     // First bin of the area, in 64s, and bins per row.
     uint bin_x0;
     uint bin_y0;
@@ -65,6 +68,9 @@ const uint ITEM_WORDS = 16u;
 const uint FLAG_WALL = 1u;
 const uint FLAG_BLURRED = 2u;
 const uint FLAG_GLASS = 4u;
+
+// Rows per thread; divides the bin height, so a thread stays in its bin.
+const uint ROWS = 16u;
 
 // BLOCKS-BEGIN
 // A 16-word block: lane k holds word k. `BC` reads word k (constant), `SH`
@@ -424,8 +430,8 @@ uint close_glyph(Blk it, uint x, uint y, uint c) {
 void main() {
     uint x0 = (p.gx0 + gl_WorkGroupID.x) * 16u;
     uint x = x0 + gl_LocalInvocationID.x;
-    uint y = p.clip_y + gl_WorkGroupID.y;
-    uint bin = ((y >> 6) - p.bin_y0) * p.nbx + ((x0 >> 6) - p.bin_x0);
+    uint ry0 = (p.gy0 + gl_WorkGroupID.y) * ROWS;
+    uint bin = ((ry0 >> 6) - p.bin_y0) * p.nbx + ((x0 >> 6) - p.bin_x0);
     Blk hdr = blk_load(p.bins, bin * 2u);
     uint off = BC(hdr, 0);
     uint head = BC(hdr, 1);
@@ -446,39 +452,94 @@ void main() {
     g_glass_pitch = BC(f0, F_GLASS_PITCH);
     g_glyphs = mkaddr(BC(f1, F_GLYPHS - 16u), BC(f1, F_GLYPHS - 15u));
     Words target = mkaddr(BC(f0, F_TARGET), BC(f0, F_TARGET + 1u));
-    uint at = y * BC(f0, F_TARGET_PITCH) + x;
-    bool inside = x >= p.clip_x && x < p.clip_x + p.clip_w;
+    uint tpitch = BC(f0, F_TARGET_PITCH);
+    bool inside_x = x >= p.clip_x && x < p.clip_x + p.clip_w;
+    bool opaque = (head >> 31) != 0u;
 
-    uint c = 0u;
-    if ((head >> 31) == 0u && inside)
-        c = target.v[at];
-    for (uint n = 0u; n < count; n += 16u) {
-        Blk list = blk_load(p.bins, off + n);
-        uint m = min(16u, count - n);
-        for (uint j = 0u; j < m; j++) {
-            Blk it = blk_load(p.frame, ITEMS + SH(list, j) * ITEM_WORDS);
-            uint kind = BC(it, 0);
-            if (!inside)
-                continue;
-            switch (kind) {
-            case 1u:
-                if ((g_flags & FLAG_WALL) != 0u)
-                    c = g_wall.v[y * g_wall_pitch + x];
-                else
-                    c = 0xFF181820u;
-                break;
-            case 2u: c = glow(it, x, y, c); break;
-            case 3u: c = glass_backdrop(it, x, y, c); break;
-            case 4u: c = chrome(it, x, y, c); break;
-            case 5u: c = content(it, x, y, c); break;
-            case 6u: c = panel(it, x, y, c); break;
-            case 7u: c = text(it, x, y, c); break;
-            case 8u: c = fill(it, x, y, c); break;
-            case 9u: c = close_glyph(it, x, y, c); break;
-            default: break;
+
+    uint y_lo = max(ry0, p.clip_y);
+    uint y_hi = min(ry0 + ROWS, p.clip_y + p.clip_h);
+
+    // A bin that one item covers opaquely is a copy: the wallpaper, or a
+    // window's pixels (scene::content's straight rows), loaded once.
+    if (opaque && count == 1u) {
+        Blk list = blk_load(p.bins, off);
+        Blk it = blk_load(p.frame, ITEMS + SH(list, 0u) * ITEM_WORDS);
+        uint kind = BC(it, 0);
+        if (kind == 1u && inside_x) {
+            if ((g_flags & FLAG_WALL) == 0u) {
+                for (uint y = y_lo; y < y_hi; y++)
+                    target.v[y * tpitch + x] = 0xFF181820u;
+                return;
             }
+            // Four rows per step: their loads are in flight together.
+            for (uint y = y_lo; y < y_hi; y += 4u) {
+                uint v0 = g_wall.v[y * g_wall_pitch + x];
+                uint v1 = y + 1u < y_hi ? g_wall.v[(y + 1u) * g_wall_pitch + x] : 0u;
+                uint v2 = y + 2u < y_hi ? g_wall.v[(y + 2u) * g_wall_pitch + x] : 0u;
+                uint v3 = y + 3u < y_hi ? g_wall.v[(y + 3u) * g_wall_pitch + x] : 0u;
+                target.v[y * tpitch + x] = v0;
+                if (y + 1u < y_hi)
+                    target.v[(y + 1u) * tpitch + x] = v1;
+                if (y + 2u < y_hi)
+                    target.v[(y + 2u) * tpitch + x] = v2;
+                if (y + 3u < y_hi)
+                    target.v[(y + 3u) * tpitch + x] = v3;
+            }
+            return;
+        }
+        if (kind == 5u && inside_x) {
+            uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
+            uint fit = BC(it, 6);
+            Words src = mkaddr(BC(it, 7), BC(it, 8));
+            uint sw = BC(it, 9), sh = BC(it, 10), spitch = BC(it, 11);
+            bool scale = fit == 0u && (sw != dw || sh != dh);
+            uint sx = x - dx;
+            if (scale)
+                sx = sx * sw / max(dw, 1u);
+            sx = min(sx, sw - 1u);
+            uint v[4];
+            for (uint y = y_lo; y < y_hi; y += 4u) {
+                for (uint k = 0u; k < 4u; k++) {
+                    uint sy = y + k - dy;
+                    if (scale)
+                        sy = sy * sh / max(dh, 1u);
+                    v[k] = y + k < y_hi ? src.v[min(sy, sh - 1u) * spitch + sx] : 0u;
+                }
+                for (uint k = 0u; k < 4u; k++)
+                    if (y + k < y_hi)
+                        target.v[(y + k) * tpitch + x] = v[k];
+            }
+            return;
         }
     }
-    if (inside)
-        target.v[at] = c;
+    for (uint y = y_lo; y < y_hi; y++) {
+        uint at = y * tpitch + x;
+        uint c = 0u;
+        if (!opaque && inside_x)
+            c = target.v[at];
+        for (uint n = 0u; n < count; n += 16u) {
+            Blk list = blk_load(p.bins, off + n);
+            uint m = min(16u, count - n);
+            for (uint j = 0u; j < m; j++) {
+                Blk it = blk_load(p.frame, ITEMS + SH(list, j) * ITEM_WORDS);
+                switch (BC(it, 0)) {
+                case 1u:
+                    c = (g_flags & FLAG_WALL) != 0u ? g_wall.v[y * g_wall_pitch + x] : 0xFF181820u;
+                    break;
+                case 2u: c = glow(it, x, y, c); break;
+                case 3u: c = glass_backdrop(it, x, y, c); break;
+                case 4u: c = chrome(it, x, y, c); break;
+                case 5u: c = content(it, x, y, c); break;
+                case 6u: c = panel(it, x, y, c); break;
+                case 7u: c = text(it, x, y, c); break;
+                case 8u: c = fill(it, x, y, c); break;
+                case 9u: c = close_glyph(it, x, y, c); break;
+                default: break;
+                }
+            }
+        }
+        if (inside_x)
+            target.v[at] = c;
+    }
 }

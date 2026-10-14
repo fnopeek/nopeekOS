@@ -80,6 +80,8 @@ const PLANE_PAGES: u32 = 128;
 const PLANE_BLOCKS: u32 = PLANE_PAGES * PAGE / 4;
 
 const SIMD_W: u32 = 16;
+/// Rows a compose thread runs (compose.comp ROWS).
+const ROWS: u32 = 16;
 
 /// A buffer as a scene reads or writes it.
 #[derive(Clone, Copy)]
@@ -508,6 +510,7 @@ impl plan::sink for gpu_sink<'_> {
         put(&mut push, g::COMPOSE_PUSH_CLIP_W, area.w as u64);
         put(&mut push, g::COMPOSE_PUSH_CLIP_H, area.h as u64);
         put(&mut push, g::COMPOSE_PUSH_GX0, (area.x / SIMD_W) as u64);
+        put(&mut push, g::COMPOSE_PUSH_GY0, (area.y / ROWS) as u64);
         put(&mut push, g::COMPOSE_PUSH_BIN_X0, t.bin_x0 as u64);
         put(&mut push, g::COMPOSE_PUSH_BIN_Y0, t.bin_y0 as u64);
         put(&mut push, g::COMPOSE_PUSH_NBX, t.nbx as u64);
@@ -517,7 +520,8 @@ impl plan::sink for gpu_sink<'_> {
         put(&mut push, g::COMPOSE_PUSH_BSW, sw as u64);
         put(&mut push, g::COMPOSE_PUSH_BSH, sh as u64);
         let cols = area.x1().div_ceil(SIMD_W) - area.x / SIMD_W;
-        self.gp.dispatch(&mut self.b, gpgpu::K_COMPOSE, &push[..g::COMPOSE.push_size as usize], [cols, area.h, 1])?;
+        let runs = area.y1().div_ceil(ROWS) - area.y / ROWS;
+        self.gp.dispatch(&mut self.b, gpgpu::K_COMPOSE, &push[..g::COMPOSE.push_size as usize], [cols, runs, 1])?;
         self.log.push(gpgpu::K_COMPOSE, area, t.listed);
         Ok(())
     }
