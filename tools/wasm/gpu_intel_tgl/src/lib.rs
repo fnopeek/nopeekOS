@@ -23,6 +23,7 @@
 #![allow(dead_code)]
 
 mod compose;
+mod plan;
 mod drm_mm;
 mod gpudev;
 mod gen8_engine_cs;

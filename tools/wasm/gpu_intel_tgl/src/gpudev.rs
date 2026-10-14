@@ -48,7 +48,11 @@ const TEST_PITCH: u32 = TEST_W * 4;
 const STATS_EVERY: u32 = 600;
 const SCENE_STATS_EVERY: u32 = 120;
 /// Scenes logged one by one after ready.
-const SCENES_LOGGED: u32 = 5;
+const SCENES_LOGGED: u32 = 3;
+/// A scene whose GPU part takes longer is logged with its dispatches, at
+/// most `SLOW_SCENES_LOGGED` times.
+const SLOW_SCENE_US: u64 = 16_000;
+const SLOW_SCENES_LOGGED: u32 = 8;
 
 /// A kernel buffer bound into the PPGTT.
 #[derive(Clone, Copy, Default)]
@@ -82,6 +86,7 @@ struct service {
     scenes: u32,
     scene_sum_us: u64,
     scene_gpu_us: u64,
+    slow_logged: u32,
     scene_max_us: u64,
     logged_idle: bool,
     gpgpu: Option<crate::gpgpu::gpgpu>,
@@ -406,16 +411,19 @@ fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, 
     let r = crate::compose::run_scene(i915, gt, gp, c, &*svc, seq, a[0], a[1]);
     let us = linux::now_us() - t0;
     svc.scenes += 1;
-    match r {
-        Ok((items, dispatches, gpu_us)) => {
+    match &r {
+        Ok(rep) => {
             svc.scene_sum_us += us;
-            svc.scene_gpu_us += gpu_us;
+            svc.scene_gpu_us += rep.gpu_us;
             svc.scene_max_us = svc.scene_max_us.max(us);
-            if svc.scenes <= SCENES_LOGGED {
-                Line::new().s("gpudev: scene ").dec(svc.scenes as u64).s(", ").dec(items as u64).s(" items, ")
-                    .dec(dispatches as u64).s(" dispatches into bo ").dec(a[0] as u64).s(": ").dec(us)
-                    .s(" us, of which the GPU ").dec(gpu_us).s(" us at ")
+            let slow = rep.gpu_us > SLOW_SCENE_US && svc.slow_logged < SLOW_SCENES_LOGGED;
+            if svc.scenes <= SCENES_LOGGED || slow {
+                svc.slow_logged += slow as u32;
+                Line::new().s("gpudev: scene ").dec(svc.scenes as u64).s(", ").dec(rep.items as u64).s(" items, ")
+                    .dec(rep.dispatches as u64).s(" dispatches into bo ").dec(a[0] as u64).s(": ").dec(us)
+                    .s(" us, of which the GPU ").dec(rep.gpu_us).s(" us at ")
                     .dec(crate::intel_rps::intel_rps_requested_mhz(gt) as u64).s(" MHz").say();
+                rep.log.say(Some(gt.clock_frequency));
             }
         }
         Err(x) => {
@@ -476,7 +484,7 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
     }
 
     let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: [None; MAX_DYN], e, copy_ok: false, jobs: 0,
-                            sum_us: 0, max_us: 0, scenes: 0, scene_sum_us: 0, scene_gpu_us: 0, scene_max_us: 0, logged_idle: false,
+                            sum_us: 0, max_us: 0, scenes: 0, scene_sum_us: 0, scene_gpu_us: 0, slow_logged: 0, scene_max_us: 0, logged_idle: false,
                             gpgpu: None, composer: None };
     for id in 0..NUM_BOS {
         let Some(b) = bo_info(id as u32) else {

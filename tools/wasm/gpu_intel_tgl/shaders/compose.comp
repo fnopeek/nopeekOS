@@ -1,12 +1,19 @@
 #version 460
-// One segment of a scene list (compose.rs) over one clip rectangle: every
-// pixel runs the segment's items in order on a colour held in a register.
+// One segment of a scene list (compose.rs) over one area: a thread is a row
+// of 16 pixels inside one 64x64 bin, and runs only the items compose.rs
+// listed for that bin, in order, on a colour held in a register. A list
+// that starts with an item covering the bin opaquely skips the read of the
+// target. Item and frame words are uniform per thread: each lane loads one
+// word of a 16-word block in one message, the words are then broadcast.
 // A bit-exact port of the kernel's CPU executor (kernel/src/shade/scene.rs
 // `paint` and the helpers it calls in gui/render.rs, gui/background.rs and
 // gui/theme.rs); comments name the function each part mirrors.
 
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_shuffle : require
 
 layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
 
@@ -15,16 +22,22 @@ layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words {
 };
 
 layout(push_constant, std430) uniform Params {
-    // Frame parameters (compose.rs PARAM_*), the items follow at ITEMS.
+    // Frame block and items (compose.rs F_*, ITEMS).
     Words frame;
     // The blurred planes of the panel this segment starts with.
     Words planes;
+    // Per bin {list offset, count | opaque << 31}, then the lists.
+    Words bins;
     uint clip_x;
     uint clip_y;
     uint clip_w;
     uint clip_h;
-    uint first;
-    uint count;
+    // First 16-pixel column of the area, in 16s.
+    uint gx0;
+    // First bin of the area, in 64s, and bins per row.
+    uint bin_x0;
+    uint bin_y0;
+    uint nbx;
     uint bx0;
     uint by0;
     // 0: no blur, the panel sits on the pixel beneath.
@@ -45,8 +58,6 @@ const uint F_GLASS_PITCH = 12u;
 const uint F_INK_CEIL = 13u;
 const uint F_INK_TINT = 14u;
 const uint F_INK_TINT_W = 15u;
-const uint F_WIDTH = 16u;
-const uint F_HEIGHT = 17u;
 const uint F_GLYPHS = 18u;
 const uint ITEMS = 32u;
 const uint ITEM_WORDS = 16u;
@@ -55,9 +66,33 @@ const uint FLAG_WALL = 1u;
 const uint FLAG_BLURRED = 2u;
 const uint FLAG_GLASS = 4u;
 
-Words addr(uint w) {
-    return Words(uint64_t(p.frame.v[w]) | (uint64_t(p.frame.v[w + 1u]) << 32));
+// BLOCKS-BEGIN
+// A 16-word block: lane k holds word k. `BC` reads word k (constant), `SH`
+// word n (dynamically uniform).
+#define Blk uint
+Blk blk_load(Words w, uint base) {
+    return w.v[base + gl_SubgroupInvocationID];
 }
+#define BC(b, k) subgroupBroadcast(b, k)
+#define SH(b, n) subgroupShuffle(b, n)
+// BLOCKS-END
+
+Words mkaddr(uint lo, uint hi) {
+    return Words(uint64_t(lo) | (uint64_t(hi) << 32));
+}
+
+// The frame block, uniform per dispatch.
+uint g_flags;
+uint g_ceil;
+uint g_tint;
+uint g_tint_w;
+Words g_wall;
+uint g_wall_pitch;
+Words g_blur;
+uint g_blur_pitch;
+Words g_glass;
+uint g_glass_pitch;
+Words g_glyphs;
 
 // render::blend, alpha 0..=256.
 uint blend(uint fg, uint bg, uint a) {
@@ -101,8 +136,20 @@ uint lerp_color(uint a, uint b, uint t) {
     return (r << 16) | (g << 8) | bl;
 }
 
+// Floor of the square root of a 32-bit value: a float estimate, corrected.
+uint isqrt32(uint n) {
+    uint x = min(uint(sqrt(float(n))), 65535u);
+    for (int i = 0; i < 4 && x * x > n; i++)
+        x--;
+    for (int i = 0; i < 4 && x < 65535u && (x + 1u) * (x + 1u) <= n; i++)
+        x++;
+    return x;
+}
+
 // Floor of the square root (render::isqrt_u64, background::isqrt).
 uint isqrt(uint64_t n) {
+    if (n <= 0xFFFFFFFFul)
+        return isqrt32(uint(n));
     uint x = uint(sqrt(float(n)));
     for (int i = 0; i < 8 && uint64_t(x) * uint64_t(x) > n; i++)
         x--;
@@ -113,9 +160,8 @@ uint isqrt(uint64_t n) {
 
 // render::arc_coverage_sdf.
 uint arc_coverage(int cdx, int cdy, int r_q8) {
-    int64_t dx = int64_t(cdx);
-    int64_t dy = int64_t(cdy);
-    int d = int(isqrt(uint64_t(dx * dx + dy * dy)));
+    uint64_t d2 = uint64_t(int64_t(cdx) * int64_t(cdx)) + uint64_t(int64_t(cdy) * int64_t(cdy));
+    int d = int(isqrt(d2));
     int s = d - r_q8;
     if (s <= -150)
         return 256u;
@@ -165,14 +211,10 @@ int rrect_distance(uint px, uint py, uint rx, uint ry, uint rw, uint rh, uint r)
     return int(isqrt(uint64_t(qx * qx + qy * qy))) - int(r) * 256;
 }
 
-uint word(uint i, uint k) {
-    return p.frame.v[ITEMS + i * ITEM_WORDS + k];
-}
-
 // render::draw_glow_ring at one pixel.
-uint glow(uint i, uint x, uint y, uint c) {
-    uint rx = word(i, 1u), ry = word(i, 2u), rw = word(i, 3u), rh = word(i, 4u);
-    uint r = word(i, 5u), color = word(i, 6u), width = word(i, 7u), alpha = word(i, 8u);
+uint glow(Blk it, uint x, uint y, uint c) {
+    uint rx = BC(it, 1), ry = BC(it, 2), rw = BC(it, 3), rh = BC(it, 4);
+    uint r = BC(it, 5), color = BC(it, 6), width = BC(it, 7), alpha = BC(it, 8);
     if (width == 0u || alpha == 0u || rw < 2u || rh < 2u)
         return c;
     r = min(r, min(rw / 2u, rh / 2u));
@@ -192,11 +234,11 @@ uint glow(uint i, uint x, uint y, uint c) {
 }
 
 // background::draw_glass_backdrop at one pixel.
-uint glass_backdrop(uint i, uint x, uint y, uint c) {
-    if ((p.frame.v[F_FLAGS] & FLAG_BLURRED) == 0u)
+uint glass_backdrop(Blk it, uint x, uint y, uint c) {
+    if ((g_flags & FLAG_BLURRED) == 0u)
         return c;
-    uint rx = word(i, 1u), ry = word(i, 2u), rw = word(i, 3u), rh = word(i, 4u);
-    uint r = min(word(i, 5u), min(rw / 2u, rh / 2u));
+    uint rx = BC(it, 1), ry = BC(it, 2), rw = BC(it, 3), rh = BC(it, 4);
+    uint r = min(BC(it, 5), min(rw / 2u, rh / 2u));
     if (y < ry || y >= ry + rh)
         return c;
     uint ly = y - ry;
@@ -206,19 +248,19 @@ uint glass_backdrop(uint i, uint x, uint y, uint c) {
     uint x1 = rx + rw >= inset ? rx + rw - inset : 0u;
     if (x < x0 || x >= x1)
         return c;
-    return addr(F_BLUR).v[y * p.frame.v[F_BLUR_PITCH] + x];
+    return g_blur.v[y * g_blur_pitch + x];
 }
 
 // render::fill_rounded_chrome_aa at one pixel.
-uint chrome(uint i, uint px, uint py, uint c) {
-    uint x = word(i, 1u), y = word(i, 2u), w = word(i, 3u), h = word(i, 4u);
+uint chrome(Blk it, uint px, uint py, uint c) {
+    uint x = BC(it, 1), y = BC(it, 2), w = BC(it, 3), h = BC(it, 4);
     if (w < 2u || h < 2u || px < x || py < y || px >= x + w || py >= y + h)
         return c;
-    uint border_a = word(i, 5u), border_b = word(i, 6u), bg = word(i, 7u);
-    uint rounding = word(i, 8u), border = word(i, 9u);
-    uint bo = min(word(i, 10u), 255u);
-    uint go = min(word(i, 11u), 255u);
-    bool paint_content = word(i, 12u) != 0u;
+    uint border_a = BC(it, 5), border_b = BC(it, 6), bg = BC(it, 7);
+    uint rounding = BC(it, 8), border = BC(it, 9);
+    uint bo = min(BC(it, 10), 255u);
+    uint go = min(BC(it, 11), 255u);
+    bool paint_content = BC(it, 12) != 0u;
     uint r_out = min(rounding, min(w / 2u, h / 2u));
     uint border_px = min(min(border, r_out), min(w / 2u, h / 2u));
     uint inner_x = x + border_px;
@@ -227,9 +269,9 @@ uint chrome(uint i, uint px, uint py, uint c) {
     uint inner_h = h - 2u * border_px;
     uint r_in = min(r_out >= border_px ? r_out - border_px : 0u, min(inner_w / 2u, inner_h / 2u));
     bool solid = border_a == border_b;
-    uint ceil_ = paint_content ? p.frame.v[F_INK_CEIL] : 255u;
-    uint tint_w = paint_content ? p.frame.v[F_INK_TINT_W] : 0u;
-    uint glass_fill = ink_fill(bg, p.frame.v[F_INK_TINT], tint_w);
+    uint ceil_ = paint_content ? g_ceil : 255u;
+    uint tint_w = paint_content ? g_tint_w : 0u;
+    uint glass_fill = ink_fill(bg, g_tint, tint_w);
     uint diag_max = max(w + h, 1u);
 
     uint straight_lo = inner_y + r_in;
@@ -241,8 +283,8 @@ uint chrome(uint i, uint px, uint py, uint c) {
             return c;
         if (go >= 255u)
             return bg;
-        if ((p.frame.v[F_FLAGS] & FLAG_GLASS) != 0u) {
-            uint wpx = addr(F_GLASS).v[py * p.frame.v[F_GLASS_PITCH] + px];
+        if ((g_flags & FLAG_GLASS) != 0u) {
+            uint wpx = g_glass.v[py * g_glass_pitch + px];
             return glass_blend(glass_fill, wpx, go, ceil_);
         }
         uint bc = solid ? border_a : lerp_color(border_a, border_b, ((px - x) + (py - y)) * 1000u / diag_max);
@@ -267,13 +309,13 @@ uint chrome(uint i, uint px, uint py, uint c) {
 }
 
 // scene::content at one pixel.
-uint content(uint i, uint x, uint y, uint c) {
-    uint dx = word(i, 1u), dy = word(i, 2u), dw = word(i, 3u), dh = word(i, 4u);
+uint content(Blk it, uint x, uint y, uint c) {
+    uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
     if (x < dx || y < dy || x >= dx + dw || y >= dy + dh)
         return c;
-    uint radius = word(i, 5u), fit = word(i, 6u);
-    Words src = Words(uint64_t(word(i, 7u)) | (uint64_t(word(i, 8u)) << 32));
-    uint sw = word(i, 9u), sh = word(i, 10u), spitch = word(i, 11u);
+    uint radius = BC(it, 5), fit = BC(it, 6);
+    Words src = mkaddr(BC(it, 7), BC(it, 8));
+    uint sw = BC(it, 9), sh = BC(it, 10), spitch = BC(it, 11);
     uint r = min(radius, min(dw / 2u, dh / 2u));
     uint cov = rect_coverage(x, y, dx, dy, dw, dh, r);
     if (cov == 0u)
@@ -290,11 +332,11 @@ uint content(uint i, uint x, uint y, uint c) {
     return cov >= 256u ? v : blend(v, c, cov);
 }
 
-// scene::panel at one pixel; `base` is the blurred pixel beneath.
-uint panel(uint i, uint x, uint y, uint c) {
-    uint dx = word(i, 1u), dy = word(i, 2u), dw = word(i, 3u), dh = word(i, 4u);
-    Words src = Words(uint64_t(word(i, 5u)) | (uint64_t(word(i, 6u)) << 32));
-    uint sw = word(i, 7u), sh = word(i, 8u), spitch = word(i, 9u);
+// scene::panel at one pixel; the base is the blurred pixel beneath.
+uint panel(Blk it, uint x, uint y, uint c) {
+    uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
+    Words src = mkaddr(BC(it, 5), BC(it, 6));
+    uint sw = BC(it, 7), sh = BC(it, 8), spitch = BC(it, 9);
     if (x < dx || y < dy || x >= dx + dw || y >= dy + dh || x >= dx + sw || y >= dy + sh)
         return c;
     uint pv = src.v[(y - dy) * spitch + (x - dx)];
@@ -328,17 +370,17 @@ uint panel(uint i, uint x, uint y, uint c) {
                 base |= min(v, 255u) << sh_;
             }
         }
-        uint fill = ink_fill(pv & 0xFFFFFFu, p.frame.v[F_INK_TINT], p.frame.v[F_INK_TINT_W]);
-        return glass_blend(fill, base, a, p.frame.v[F_INK_CEIL]);
+        uint fill = ink_fill(pv & 0xFFFFFFu, g_tint, g_tint_w);
+        return glass_blend(fill, base, a, g_ceil);
     }
     return blend(pv & 0xFFFFFFu, c, a);
 }
 
 // scene::text at one pixel.
-uint text(uint i, uint x, uint y, uint c) {
-    uint dx = word(i, 1u), dy = word(i, 2u), dw = word(i, 3u), dh = word(i, 4u);
-    Words src = Words(uint64_t(word(i, 5u)) | (uint64_t(word(i, 6u)) << 32));
-    uint sw = word(i, 7u), sh = word(i, 8u), spitch = word(i, 9u);
+uint text(Blk it, uint x, uint y, uint c) {
+    uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
+    Words src = mkaddr(BC(it, 5), BC(it, 6));
+    uint sw = BC(it, 7), sh = BC(it, 8), spitch = BC(it, 9);
     if (x < dx || y < dy || x >= dx + dw || y >= dy + dh || x >= dx + sw || y >= dy + sh)
         return c;
     uint pv = src.v[(y - dy) * spitch + (x - dx)];
@@ -346,9 +388,9 @@ uint text(uint i, uint x, uint y, uint c) {
 }
 
 // Item::Fill at one pixel.
-uint fill(uint i, uint x, uint y, uint c) {
-    uint rx = word(i, 1u), ry = word(i, 2u), rw = word(i, 3u), rh = word(i, 4u);
-    uint color = word(i, 5u), alpha = word(i, 6u), radius = word(i, 7u);
+uint fill(Blk it, uint x, uint y, uint c) {
+    uint rx = BC(it, 1), ry = BC(it, 2), rw = BC(it, 3), rh = BC(it, 4);
+    uint color = BC(it, 5), alpha = BC(it, 6), radius = BC(it, 7);
     if (alpha == 0u || x < rx || y < ry || x >= rx + rw || y >= ry + rh)
         return c;
     uint r = min(radius, min(rw / 2u, rh / 2u));
@@ -362,9 +404,9 @@ uint fill(uint i, uint x, uint y, uint c) {
 }
 
 // Item::CloseGlyph at one pixel.
-uint close_glyph(uint i, uint x, uint y, uint c) {
-    uint rx = word(i, 1u), ry = word(i, 2u), rw = word(i, 3u), rh = word(i, 4u);
-    uint asz = word(i, 5u), color = word(i, 6u), off = word(i, 7u);
+uint close_glyph(Blk it, uint x, uint y, uint c) {
+    uint rx = BC(it, 1), ry = BC(it, 2), rw = BC(it, 3), rh = BC(it, 4);
+    uint asz = BC(it, 5), color = BC(it, 6), off = BC(it, 7);
     if (x < rx || y < ry || x >= rx + rw || y >= ry + rh)
         return c;
     uint ox = rx + (rw >= asz ? rw - asz : 0u) / 2u;
@@ -372,7 +414,7 @@ uint close_glyph(uint i, uint x, uint y, uint c) {
     if (x < ox || y < oy || x >= ox + asz || y >= oy + asz)
         return c;
     uint b = off + (y - oy) * asz + (x - ox);
-    uint a = (addr(F_GLYPHS).v[b >> 2] >> ((b & 3u) * 8u)) & 255u;
+    uint a = (g_glyphs.v[b >> 2] >> ((b & 3u) * 8u)) & 255u;
     if (a == 0u)
         return c;
     a += a >> 7;
@@ -380,34 +422,63 @@ uint close_glyph(uint i, uint x, uint y, uint c) {
 }
 
 void main() {
-    uint gx = gl_GlobalInvocationID.x;
-    uint gy = gl_GlobalInvocationID.y;
-    if (gx >= p.clip_w || gy >= p.clip_h)
+    uint x0 = (p.gx0 + gl_WorkGroupID.x) * 16u;
+    uint x = x0 + gl_LocalInvocationID.x;
+    uint y = p.clip_y + gl_WorkGroupID.y;
+    uint bin = ((y >> 6) - p.bin_y0) * p.nbx + ((x0 >> 6) - p.bin_x0);
+    Blk hdr = blk_load(p.bins, bin * 2u);
+    uint off = BC(hdr, 0);
+    uint head = BC(hdr, 1);
+    uint count = head & 0x7FFFFFFFu;
+    if (count == 0u)
         return;
-    uint x = p.clip_x + gx;
-    uint y = p.clip_y + gy;
-    Words target = addr(F_TARGET);
-    uint at = y * p.frame.v[F_TARGET_PITCH] + x;
-    uint c = target.v[at];
-    for (uint n = 0u; n < p.count; n++) {
-        uint i = p.first + n;
-        switch (word(i, 0u)) {
-        case 1u:
-            if ((p.frame.v[F_FLAGS] & FLAG_WALL) != 0u)
-                c = addr(F_WALL).v[y * p.frame.v[F_WALL_PITCH] + x];
-            else
-                c = 0xFF181820u;
-            break;
-        case 2u: c = glow(i, x, y, c); break;
-        case 3u: c = glass_backdrop(i, x, y, c); break;
-        case 4u: c = chrome(i, x, y, c); break;
-        case 5u: c = content(i, x, y, c); break;
-        case 6u: c = panel(i, x, y, c); break;
-        case 7u: c = text(i, x, y, c); break;
-        case 8u: c = fill(i, x, y, c); break;
-        case 9u: c = close_glyph(i, x, y, c); break;
-        default: break;
+    Blk f0 = blk_load(p.frame, 0u);
+    Blk f1 = blk_load(p.frame, 16u);
+    g_flags = BC(f0, F_FLAGS);
+    g_ceil = BC(f0, F_INK_CEIL);
+    g_tint = BC(f0, F_INK_TINT);
+    g_tint_w = BC(f0, F_INK_TINT_W);
+    g_wall = mkaddr(BC(f0, F_WALL), BC(f0, F_WALL + 1u));
+    g_wall_pitch = BC(f0, F_WALL_PITCH);
+    g_blur = mkaddr(BC(f0, F_BLUR), BC(f0, F_BLUR + 1u));
+    g_blur_pitch = BC(f0, F_BLUR_PITCH);
+    g_glass = mkaddr(BC(f0, F_GLASS), BC(f0, F_GLASS + 1u));
+    g_glass_pitch = BC(f0, F_GLASS_PITCH);
+    g_glyphs = mkaddr(BC(f1, F_GLYPHS - 16u), BC(f1, F_GLYPHS - 15u));
+    Words target = mkaddr(BC(f0, F_TARGET), BC(f0, F_TARGET + 1u));
+    uint at = y * BC(f0, F_TARGET_PITCH) + x;
+    bool inside = x >= p.clip_x && x < p.clip_x + p.clip_w;
+
+    uint c = 0u;
+    if ((head >> 31) == 0u && inside)
+        c = target.v[at];
+    for (uint n = 0u; n < count; n += 16u) {
+        Blk list = blk_load(p.bins, off + n);
+        uint m = min(16u, count - n);
+        for (uint j = 0u; j < m; j++) {
+            Blk it = blk_load(p.frame, ITEMS + SH(list, j) * ITEM_WORDS);
+            uint kind = BC(it, 0);
+            if (!inside)
+                continue;
+            switch (kind) {
+            case 1u:
+                if ((g_flags & FLAG_WALL) != 0u)
+                    c = g_wall.v[y * g_wall_pitch + x];
+                else
+                    c = 0xFF181820u;
+                break;
+            case 2u: c = glow(it, x, y, c); break;
+            case 3u: c = glass_backdrop(it, x, y, c); break;
+            case 4u: c = chrome(it, x, y, c); break;
+            case 5u: c = content(it, x, y, c); break;
+            case 6u: c = panel(it, x, y, c); break;
+            case 7u: c = text(it, x, y, c); break;
+            case 8u: c = fill(it, x, y, c); break;
+            case 9u: c = close_glyph(it, x, y, c); break;
+            default: break;
+            }
         }
     }
-    target.v[at] = c;
+    if (inside)
+        target.v[at] = c;
 }

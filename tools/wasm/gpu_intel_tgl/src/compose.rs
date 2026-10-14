@@ -4,16 +4,15 @@
 //! blur_box.comp in one batch on the render engine. Not a Linux file.
 //!
 //! The kernel's CPU executor is the reference (kernel/src/shade/scene.rs):
-//! for each damage rectangle, every item in order. A panel blurs what lies
-//! beneath it, so the list is cut at every panel: the items before it are
-//! composed, then the blur of the target around the panel is computed
-//! (background::blur_region: 4x4 block means, three box passes per axis),
-//! then the items from the panel on.
+//! for each damage rectangle, every item in order. plan.rs turns the
+//! checked items into dispatches and bin tables; this file checks the
+//! scene, writes the GPU's view of it and emits the commands.
 
 use crate::gpgpu;
 use crate::gpgpu_gen as g;
 use crate::i915_drv::drm_i915_private;
-use crate::linux;
+use crate::linux::{self, Line};
+use crate::plan::{self, EMPTY, bin_table, grid, item_shape, rect};
 use crate::intel_gt::intel_gt;
 use crate::regs::*;
 use npk_sys::Dma;
@@ -30,6 +29,7 @@ const ITEM_WORDS: usize = 16;
 const ITEM_BYTES: u32 = 64;
 const NONE: u32 = 0xFFFF_FFFF;
 const MAX_DAMAGE: usize = 64;
+const MAX_PANELS: usize = 64;
 /// Coordinates and sizes beyond this are refused; the programs compute in
 /// 32-bit Q24.8.
 const MAX_COORD: u32 = 1 << 16;
@@ -70,12 +70,15 @@ const HDR_WALL: u32 = 1;
 const HDR_BLURRED: u32 = 2;
 
 const SCENE_PAGES: u32 = 16;
+/// Items a scene buffer holds after its frame block.
+const MAX_ITEMS: usize = ((SCENE_PAGES * PAGE - FRAME_BYTES) / ITEM_BYTES) as usize;
+/// Bin tables of one batch: per bin a header, then the item lists.
+const BINS_PAGES: u32 = 128;
+const BINS_WORDS: u32 = BINS_PAGES * PAGE / 4;
 /// Blocks one plane buffer holds: the blur grid of the largest panel.
 const PLANE_PAGES: u32 = 128;
 const PLANE_BLOCKS: u32 = PLANE_PAGES * PAGE / 4;
 
-const BLUR_DOWN: u32 = 4;
-const BLUR_PASSES: u32 = 3;
 const SIMD_W: u32 = 16;
 
 /// A buffer as a scene reads or writes it.
@@ -100,55 +103,6 @@ impl surface {
     }
 }
 
-#[derive(Clone, Copy)]
-struct rect {
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
-}
-
-impl rect {
-    fn x1(&self) -> u32 {
-        self.x + self.w
-    }
-
-    fn y1(&self) -> u32 {
-        self.y + self.h
-    }
-
-    fn intersect(&self, o: &rect) -> rect {
-        let x0 = self.x.max(o.x);
-        let y0 = self.y.max(o.y);
-        let x1 = self.x1().min(o.x1());
-        let y1 = self.y1().min(o.y1());
-        if x1 <= x0 || y1 <= y0 { rect { x: x0, y: y0, w: 0, h: 0 } } else { rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.w == 0 || self.h == 0
-    }
-
-    fn union(&self, o: &rect) -> rect {
-        if self.is_empty() {
-            return *o;
-        }
-        if o.is_empty() {
-            return *self;
-        }
-        let x0 = self.x.min(o.x);
-        let y0 = self.y.min(o.y);
-        rect { x: x0, y: y0, w: self.x1().max(o.x1()) - x0, h: self.y1().max(o.y1()) - y0 }
-    }
-
-    fn grow(&self, m: u32) -> rect {
-        let x0 = self.x.saturating_sub(m);
-        let y0 = self.y.saturating_sub(m);
-        rect { x: x0, y: y0, w: self.x1() + m - x0, h: self.y1() + m - y0 }
-    }
-}
-
-const EMPTY: rect = rect { x: 0, y: 0, w: 0, h: 0 };
 
 pub struct composer {
     scene: Dma,
@@ -156,21 +110,25 @@ pub struct composer {
     planes: Dma,
     planes_va: u64,
     tmp_va: u64,
+    bins: Dma,
+    bins_va: u64,
 }
 
-/// The scene buffer and the two blur plane buffers, bound into the kernel
-/// PPGTT.
+/// The scene buffer, the two blur plane buffers and the bin tables, bound
+/// into the kernel PPGTT.
 pub fn composer_init(gt: &mut intel_gt) -> Option<composer> {
     let scene = Dma::alloc(SCENE_PAGES as i32)?;
     let planes = Dma::alloc(PLANE_PAGES as i32)?;
     let tmp = Dma::alloc(PLANE_PAGES as i32)?;
+    let bins = Dma::alloc(BINS_PAGES as i32)?;
     let bind = |gt: &mut intel_gt, d: Dma, pages: u32| {
         crate::gpudev::ppgtt_bind(gt, d.phys, (pages * PAGE) as u64, TGL_PAT_CACHE_LLC).ok()
     };
     let scene_va = bind(gt, scene, SCENE_PAGES)?;
     let planes_va = bind(gt, planes, PLANE_PAGES)?;
     let tmp_va = bind(gt, tmp, PLANE_PAGES)?;
-    Some(composer { scene, scene_va, planes, planes_va, tmp_va })
+    let bins_va = bind(gt, bins, BINS_PAGES)?;
+    Some(composer { scene, scene_va, planes, planes_va, tmp_va, bins, bins_va })
 }
 
 fn put(push: &mut [u8], (off, size): (usize, usize), v: u64) {
@@ -201,7 +159,7 @@ pub trait buffers {
 
 /// Runs the scene of job `seq` (`bytes` of payload) into `target`.
 pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpgpu, c: &composer, bufs: &dyn buffers,
-                 seq: u32, target_id: u32, bytes: u32) -> Result<(u32, u32, u64), i32> {
+                 seq: u32, target_id: u32, bytes: u32) -> Result<scene_report, i32> {
     let mut hdr = [0u8; HEADER_BYTES as usize];
     if bytes < HEADER_BYTES {
         return Err(-EINVAL);
@@ -303,11 +261,8 @@ pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpg
 
     // Items, rewritten with the sources' GPU addresses. An item whose
     // source has no pixels paints nothing on the CPU and is dropped.
-    let mut kinds = [0u8; (SCENE_PAGES * PAGE / ITEM_BYTES) as usize];
-    // Where each kept item can paint: a segment's dispatch covers only the
-    // union of its items (pixels outside keep what is beneath).
-    let mut reach = [EMPTY; (SCENE_PAGES * PAGE / ITEM_BYTES) as usize];
-    let mut panels = [rect { x: 0, y: 0, w: 0, h: 0 }; 64];
+    let screen = rect { x: 0, y: 0, w: width, h: height };
+    let mut shapes = [item_shape { kind: 0, reach: EMPTY, cover: (EMPTY, EMPTY) }; MAX_ITEMS];
     let mut n_panels = 0usize;
     let mut kept = 0u32;
     let items_off = HEADER_BYTES + n_damage * 16;
@@ -389,19 +344,12 @@ pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpg
             _ => {}
         }
         if kind == KIND_PANEL {
-            if n_panels == panels.len() {
+            if n_panels == MAX_PANELS {
                 return Err(-E2BIG);
             }
-            panels[n_panels] = rect { x: w[1], y: w[2], w: w[3], h: w[4] };
             n_panels += 1;
         }
-        kinds[kept as usize] = kind as u8;
-        let r = rect { x: w[1], y: w[2], w: w[3], h: w[4] };
-        reach[kept as usize] = match kind {
-            KIND_BACKGROUND => rect { x: 0, y: 0, w: width, h: height },
-            KIND_GLOW => r.grow(w[7]),
-            _ => r,
-        };
+        shapes[kept as usize] = item_shape::of(&w, &screen);
         for (k, v) in out.iter().enumerate() {
             chunk[in_chunk + k * 4..in_chunk + k * 4 + 4].copy_from_slice(&v.to_le_bytes());
         }
@@ -431,110 +379,168 @@ pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpg
         off += n;
     }
 
-    // The batch: per damage rectangle, the segments between panels.
-    let screen = rect { x: 0, y: 0, w: width, h: height };
-    let mut b = gp.begin(gt)?;
-    let mut dispatches = 0u32;
-    for d in damage.iter().take(n_damage as usize) {
-        let clip = d.intersect(&screen);
-        if clip.is_empty() {
-            continue;
-        }
-        let mut seg = 0u32;
-        let mut seg_blur = None;
-        let mut panel = 0usize;
-        let segment = |b: &mut gpgpu::batch, first: u32, end: u32, blur: Option<grid>| -> Result<u32, i32> {
-            let area = reach[first as usize..end as usize].iter().fold(EMPTY, |a, r| a.union(r)).intersect(&clip);
-            if area.is_empty() {
-                return Ok(0);
-            }
-            compose(gp, b, c, &area, first, end - first, blur)?;
-            Ok(1)
-        };
-        for i in 0..kept {
-            if kinds[i as usize] as u32 != KIND_PANEL {
-                continue;
-            }
-            if i > seg {
-                dispatches += segment(&mut b, seg, i, seg_blur)?;
-            }
-            let dst = panels[panel];
-            panel += 1;
-            seg_blur = if radius > 0 && !dst.intersect(&clip).is_empty() {
-                dispatches += 7;
-                blur_region(gp, &mut b, c, &target, width, height, &dst, radius)?
-            } else {
-                None
-            };
-            seg = i;
-        }
-        if kept > seg {
-            dispatches += segment(&mut b, seg, kept, seg_blur)?;
-        }
-    }
+    // The batch.
+    let mut log = dispatch_log::default();
+    let mut s = gpu_sink { gp, b: gp.begin(gt)?, c, target, width, height, radius, log: &mut log };
+    let lim = plan::limits { bins_words: BINS_WORDS, plane_blocks: PLANE_BLOCKS };
+    plan::plan(&mut s, &lim, &screen, &damage[..n_damage as usize], &shapes[..kept as usize], radius)?;
+    let mut b = s.b;
     let t0 = linux::now_us();
-    gpgpu::gpgpu_run(i915, gt, gp, &mut b)?;
-    Ok((kept, dispatches, linux::now_us() - t0))
+    let r = gpgpu::gpgpu_run(i915, gt, gp, &mut b, &mut || {
+        log.say_items(&shapes[..kept as usize]);
+        log.say(None);
+    });
+    let us = linux::now_us() - t0;
+    r?;
+    let n = gp.dispatch_ticks(&b, &mut log.ticks);
+    log.n_ticks = n;
+    Ok(scene_report { items: kept, dispatches: log.n, gpu_us: us, log })
 }
 
-/// The block grid a panel's blur reads: `(bx0, by0, sw, sh)`.
-type grid = (u32, u32, u32, u32);
-
-/// One compose dispatch: items `first..first + count` over `clip`.
-fn compose(gp: &gpgpu::gpgpu, b: &mut gpgpu::batch, c: &composer, clip: &rect, first: u32, count: u32,
-           blur: Option<grid>) -> Result<(), i32> {
-    let mut push = [0u8; 64];
-    put(&mut push, g::COMPOSE_PUSH_FRAME, c.scene_va);
-    put(&mut push, g::COMPOSE_PUSH_PLANES, c.planes_va);
-    put(&mut push, g::COMPOSE_PUSH_CLIP_X, clip.x as u64);
-    put(&mut push, g::COMPOSE_PUSH_CLIP_Y, clip.y as u64);
-    put(&mut push, g::COMPOSE_PUSH_CLIP_W, clip.w as u64);
-    put(&mut push, g::COMPOSE_PUSH_CLIP_H, clip.h as u64);
-    put(&mut push, g::COMPOSE_PUSH_FIRST, first as u64);
-    put(&mut push, g::COMPOSE_PUSH_COUNT, count as u64);
-    let (bx0, by0, sw, sh) = blur.unwrap_or((0, 0, 0, 0));
-    put(&mut push, g::COMPOSE_PUSH_BX0, bx0 as u64);
-    put(&mut push, g::COMPOSE_PUSH_BY0, by0 as u64);
-    put(&mut push, g::COMPOSE_PUSH_BSW, sw as u64);
-    put(&mut push, g::COMPOSE_PUSH_BSH, sh as u64);
-    let k = &g::COMPOSE;
-    gp.dispatch(b, gpgpu::K_COMPOSE, &push[..k.push_size as usize], [clip.w.div_ceil(SIMD_W), clip.h, 1])
+/// What one scene did, for the log.
+pub struct scene_report {
+    pub items: u32,
+    pub dispatches: u32,
+    pub gpu_us: u64,
+    pub log: dispatch_log,
 }
 
-/// background::blur_region of `rect` in the target: block means, then the
-/// box passes; the result is in the planes buffer. None where the CPU
-/// returns None (the panel then sits on the pixel beneath).
-fn blur_region(gp: &gpgpu::gpgpu, b: &mut gpgpu::batch, c: &composer, target: &surface, width: u32, height: u32,
-               r: &rect, radius: u32) -> Result<Option<grid>, i32> {
-    if r.is_empty() {
-        return Ok(None);
+const LOGGED: usize = 64;
+
+/// The dispatches of a batch: program, area, and for a compose the list
+/// entries over all bins.
+#[derive(Clone, Copy)]
+pub struct dispatch_log {
+    n: u32,
+    kernel: [u8; LOGGED],
+    area: [rect; LOGGED],
+    listed: [u32; LOGGED],
+    ticks: [u64; gpgpu::MAX_DISPATCHES as usize],
+    n_ticks: usize,
+}
+
+impl Default for dispatch_log {
+    fn default() -> Self {
+        Self { n: 0, kernel: [0; LOGGED], area: [EMPTY; LOGGED], listed: [0; LOGGED],
+               ticks: [0; gpgpu::MAX_DISPATCHES as usize], n_ticks: 0 }
     }
-    let m = (radius * BLUR_PASSES + 2) * BLUR_DOWN;
-    let bx0 = r.x.saturating_sub(m) / BLUR_DOWN;
-    let by0 = r.y.saturating_sub(m) / BLUR_DOWN;
-    let bx1 = (r.x1() + m).min(width).div_ceil(BLUR_DOWN);
-    let by1 = (r.y1() + m).min(height).div_ceil(BLUR_DOWN);
-    if bx1 <= bx0 || by1 <= by0 {
-        return Ok(None);
-    }
-    let (sw, sh) = (bx1 - bx0, by1 - by0);
-    if sw * sh > PLANE_BLOCKS {
-        return Err(-E2BIG);
+}
+
+impl dispatch_log {
+    fn push(&mut self, k: usize, area: &rect, listed: u32) {
+        if (self.n as usize) < LOGGED {
+            self.kernel[self.n as usize] = k as u8;
+            self.area[self.n as usize] = *area;
+            self.listed[self.n as usize] = listed;
+        }
+        self.n += 1;
     }
 
-    let mut push = [0u8; 64];
-    put(&mut push, g::BLUR_DOWN_PUSH_TARGET, target.va);
-    put(&mut push, g::BLUR_DOWN_PUSH_PLANES, c.planes_va);
-    put(&mut push, g::BLUR_DOWN_PUSH_PITCH_PX, (target.pitch / 4) as u64);
-    put(&mut push, g::BLUR_DOWN_PUSH_WIDTH, width as u64);
-    put(&mut push, g::BLUR_DOWN_PUSH_HEIGHT, height as u64);
-    put(&mut push, g::BLUR_DOWN_PUSH_BX0, bx0 as u64);
-    put(&mut push, g::BLUR_DOWN_PUSH_BY0, by0 as u64);
-    put(&mut push, g::BLUR_DOWN_PUSH_SW, sw as u64);
-    put(&mut push, g::BLUR_DOWN_PUSH_SH, sh as u64);
-    gp.dispatch(b, gpgpu::K_BLUR_DOWN, &push[..g::BLUR_DOWN.push_size as usize], [sw.div_ceil(SIMD_W), sh, 1])?;
+    /// One line per dispatch; with the GT clock, its GPU time.
+    pub fn say(&self, clock_hz: Option<u32>) {
+        for i in 0..(self.n as usize).min(LOGGED) {
+            let a = self.area[i];
+            let mut l = Line::new();
+            l.s("gpudev:   ").s(match self.kernel[i] as usize {
+                gpgpu::K_COMPOSE => "compose",
+                gpgpu::K_BLUR_DOWN => "blur_down",
+                gpgpu::K_BLUR_BOX => "blur_box",
+                _ => "?",
+            }).s(" ").dec(a.w as u64).s("x").dec(a.h as u64).s("+").dec(a.x as u64).s("+").dec(a.y as u64);
+            if self.kernel[i] as usize == gpgpu::K_COMPOSE {
+                l.s(", ").dec(self.listed[i] as u64).s(" list entries");
+            }
+            match clock_hz {
+                Some(hz) if i < self.n_ticks && self.ticks[i] != u64::MAX => {
+                    l.s(": ").dec(self.ticks[i] * 1_000_000 / hz.max(1) as u64).s(" us");
+                }
+                Some(_) => {
+                    l.s(": not finished");
+                }
+                None => {}
+            }
+            l.say();
+        }
+    }
 
-    let pass = |b: &mut gpgpu::batch, src: u64, dst: u64, lines: u32, len: u32, stride: u32, step: u32| {
+    fn say_items(&self, items: &[item_shape]) {
+        for (i, it) in items.iter().enumerate() {
+            let r = it.reach;
+            Line::new().s("gpudev:   item ").dec(i as u64).s(" kind ").dec(it.kind as u64).s(" reach ")
+                .dec(r.w as u64).s("x").dec(r.h as u64).s("+").dec(r.x as u64).s("+").dec(r.y as u64).say();
+        }
+    }
+}
+
+/// Emits plan.rs's steps into one batch.
+struct gpu_sink<'a> {
+    gp: &'a gpgpu::gpgpu,
+    b: gpgpu::batch,
+    c: &'a composer,
+    target: surface,
+    width: u32,
+    height: u32,
+    radius: u32,
+    log: &'a mut dispatch_log,
+}
+
+impl plan::sink for gpu_sink<'_> {
+    fn bins(&mut self, at: u32, words: &[u32]) -> Result<(), i32> {
+        let mut buf = [0u8; PAGE as usize];
+        for (i, chunk) in words.chunks(PAGE as usize / 4).enumerate() {
+            for (k, v) in chunk.iter().enumerate() {
+                buf[k * 4..k * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            if !self.c.bins.write((at + (i * PAGE as usize / 4) as u32) * 4, &buf[..chunk.len() * 4]) {
+                return Err(-ENOMEM);
+            }
+        }
+        Ok(())
+    }
+
+    fn compose(&mut self, area: &rect, t: &bin_table, blur: Option<grid>) -> Result<(), i32> {
+        let mut push = [0u8; 128];
+        put(&mut push, g::COMPOSE_PUSH_FRAME, self.c.scene_va);
+        put(&mut push, g::COMPOSE_PUSH_PLANES, self.c.planes_va);
+        put(&mut push, g::COMPOSE_PUSH_BINS, self.c.bins_va + t.at as u64 * 4);
+        put(&mut push, g::COMPOSE_PUSH_CLIP_X, area.x as u64);
+        put(&mut push, g::COMPOSE_PUSH_CLIP_Y, area.y as u64);
+        put(&mut push, g::COMPOSE_PUSH_CLIP_W, area.w as u64);
+        put(&mut push, g::COMPOSE_PUSH_CLIP_H, area.h as u64);
+        put(&mut push, g::COMPOSE_PUSH_GX0, (area.x / SIMD_W) as u64);
+        put(&mut push, g::COMPOSE_PUSH_BIN_X0, t.bin_x0 as u64);
+        put(&mut push, g::COMPOSE_PUSH_BIN_Y0, t.bin_y0 as u64);
+        put(&mut push, g::COMPOSE_PUSH_NBX, t.nbx as u64);
+        let (bx0, by0, sw, sh) = blur.unwrap_or((0, 0, 0, 0));
+        put(&mut push, g::COMPOSE_PUSH_BX0, bx0 as u64);
+        put(&mut push, g::COMPOSE_PUSH_BY0, by0 as u64);
+        put(&mut push, g::COMPOSE_PUSH_BSW, sw as u64);
+        put(&mut push, g::COMPOSE_PUSH_BSH, sh as u64);
+        let cols = area.x1().div_ceil(SIMD_W) - area.x / SIMD_W;
+        self.gp.dispatch(&mut self.b, gpgpu::K_COMPOSE, &push[..g::COMPOSE.push_size as usize], [cols, area.h, 1])?;
+        self.log.push(gpgpu::K_COMPOSE, area, t.listed);
+        Ok(())
+    }
+
+    fn blur_down(&mut self, (bx0, by0, sw, sh): grid) -> Result<(), i32> {
+        let mut push = [0u8; 64];
+        put(&mut push, g::BLUR_DOWN_PUSH_TARGET, self.target.va);
+        put(&mut push, g::BLUR_DOWN_PUSH_PLANES, self.c.planes_va);
+        put(&mut push, g::BLUR_DOWN_PUSH_PITCH_PX, (self.target.pitch / 4) as u64);
+        put(&mut push, g::BLUR_DOWN_PUSH_WIDTH, self.width as u64);
+        put(&mut push, g::BLUR_DOWN_PUSH_HEIGHT, self.height as u64);
+        put(&mut push, g::BLUR_DOWN_PUSH_BX0, bx0 as u64);
+        put(&mut push, g::BLUR_DOWN_PUSH_BY0, by0 as u64);
+        put(&mut push, g::BLUR_DOWN_PUSH_SW, sw as u64);
+        put(&mut push, g::BLUR_DOWN_PUSH_SH, sh as u64);
+        self.gp.dispatch(&mut self.b, gpgpu::K_BLUR_DOWN, &push[..g::BLUR_DOWN.push_size as usize],
+                         [sw.div_ceil(SIMD_W), sh, 1])?;
+        self.log.push(gpgpu::K_BLUR_DOWN, &rect { x: bx0, y: by0, w: sw, h: sh }, 0);
+        Ok(())
+    }
+
+    fn blur_box(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32> {
+        let (src, dst) = if to_tmp { (self.c.planes_va, self.c.tmp_va) } else { (self.c.tmp_va, self.c.planes_va) };
         let mut push = [0u8; 64];
         put(&mut push, g::BLUR_BOX_PUSH_SRC, src);
         put(&mut push, g::BLUR_BOX_PUSH_DST, dst);
@@ -542,13 +548,10 @@ fn blur_region(gp: &gpgpu::gpgpu, b: &mut gpgpu::batch, c: &composer, target: &s
         put(&mut push, g::BLUR_BOX_PUSH_LEN, len as u64);
         put(&mut push, g::BLUR_BOX_PUSH_STRIDE, stride as u64);
         put(&mut push, g::BLUR_BOX_PUSH_STEP, step as u64);
-        put(&mut push, g::BLUR_BOX_PUSH_RADIUS, radius as u64);
-        gp.dispatch(b, gpgpu::K_BLUR_BOX, &push[..g::BLUR_BOX.push_size as usize], [lines.div_ceil(SIMD_W), 1, 1])
-    };
-    for _ in 0..BLUR_PASSES {
-        // Columns, then rows (box_pass in compute_blur and blur_region).
-        pass(b, c.planes_va, c.tmp_va, sw, sh, 1, sw)?;
-        pass(b, c.tmp_va, c.planes_va, sh, sw, sw, 1)?;
+        put(&mut push, g::BLUR_BOX_PUSH_RADIUS, self.radius as u64);
+        self.gp.dispatch(&mut self.b, gpgpu::K_BLUR_BOX, &push[..g::BLUR_BOX.push_size as usize],
+                         [len.div_ceil(SIMD_W), lines, 1])?;
+        self.log.push(gpgpu::K_BLUR_BOX, &rect { x: 0, y: 0, w: len, h: lines }, 0);
+        Ok(())
     }
-    Ok(Some((bx0, by0, sw, sh)))
 }

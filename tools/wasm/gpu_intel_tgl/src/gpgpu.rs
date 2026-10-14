@@ -40,13 +40,17 @@ const DYN_PAGES: u32 = 16;
 const BATCH_OFF: u32 = 0;
 const DYN_OFF: u32 = BATCH_PAGES * PAGE;
 const SURF_OFF: u32 = DYN_OFF + DYN_PAGES * PAGE;
-const INSTR_OFF: u32 = SURF_OFF + PAGE;
+/// GPU timestamps: one before the first dispatch, one after each.
+const TS_OFF: u32 = SURF_OFF + PAGE;
+const INSTR_OFF: u32 = TS_OFF + PAGE;
 /// Dynamic state per dispatch: the interface descriptor, then at
 /// `CURBE_OFF` the CURBE data.
-const DISPATCH_DYN: u32 = 128;
+const DISPATCH_DYN: u32 = 256;
 const CURBE_OFF: u32 = 64;
 /// Dispatches one batch can hold.
 pub const MAX_DISPATCHES: u32 = DYN_PAGES * PAGE / DISPATCH_DYN;
+/// RING_TIMESTAMP is 36 bits wide on Gen12.
+const TIMESTAMP_MASK: u64 = (1 << 36) - 1;
 /// Room the batch end needs (closing PIPE_CONTROL, end, padding).
 const BATCH_TAIL: u32 = 16 * 4;
 const SIMD: u32 = 16;
@@ -125,6 +129,19 @@ fn pipe_control(cs: &mut Cs, gpgpu_mode: bool, bits: &[Field]) {
         n += 1;
     }
     emit(cs, P::LENGTH, P::DEFAULTS, &f[..n]);
+}
+
+/// A stalling PIPE_CONTROL that writes the GPU timestamp to `addr` once
+/// everything before it is done (anv's `emit_query_pc_availability` with
+/// `WriteTimestamp`).
+fn pipe_control_timestamp(cs: &mut Cs, addr: u64) {
+    use g::PIPE_CONTROL as P;
+    emit(cs, P::LENGTH, P::DEFAULTS, &[
+        (P::CommandStreamerStallEnable, 1),
+        (P::PostSyncOperation, 3),
+        (P::DestinationAddressType, 0),
+        (P::Address, addr),
+    ]);
 }
 
 /// `emit_pipeline_select`: Gen12 masks, the media sampler DOP clock gate on.
@@ -251,8 +268,29 @@ impl gpgpu {
                 (V::CURBEAllocationSize, (curbe_regs as u64).next_multiple_of(2)),
             ]);
         }
+        pipe_control_timestamp(&mut cs, self.addr(TS_OFF));
+        // A dispatch that never ends keeps a zero after it.
+        if !self.heap.write(TS_OFF, &[0u8; 8 * (MAX_DISPATCHES as usize + 1)]) {
+            return Err(-EIO);
+        }
         self.put(&mut b, &cs)?;
         Ok(b)
+    }
+
+    /// The GPU time of each dispatch of the batch that ran last, in GT
+    /// clock ticks, into `out` (`u64::MAX`: not finished); the number
+    /// written.
+    pub fn dispatch_ticks(&self, b: &batch, out: &mut [u64]) -> usize {
+        let n = (b.dispatches as usize).min(out.len());
+        let mut buf = [0u8; 8 * (MAX_DISPATCHES as usize + 1)];
+        if !self.heap.read(TS_OFF, &mut buf[..(n + 1) * 8]) {
+            return 0;
+        }
+        let ts = |i: usize| u64::from_le_bytes(buf[i * 8..i * 8 + 8].try_into().unwrap());
+        for (i, o) in out.iter_mut().take(n).enumerate() {
+            *o = if ts(i + 1) == 0 { u64::MAX } else { ts(i + 1).wrapping_sub(ts(i)) & TIMESTAMP_MASK };
+        }
+        n
     }
 
     /// One dispatch of `k` over `groups` workgroups with `push` as its push
@@ -340,6 +378,7 @@ impl gpgpu {
             use g::MEDIA_STATE_FLUSH as F;
             emit(&mut cs, F::LENGTH, F::DEFAULTS, &[]);
         }
+        pipe_control_timestamp(&mut cs, self.addr(TS_OFF + 8 * (b.dispatches + 1)));
         self.put(b, &cs)?;
         b.dispatches += 1;
         Ok(())
@@ -402,12 +441,14 @@ pub fn gpgpu_dispatch(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu
                       groups: [u32; 3]) -> Result<(), i32> {
     let mut b = gp.begin(gt)?;
     gp.dispatch(&mut b, k, push, groups)?;
-    gpgpu_run(i915, gt, gp, &mut b)
+    gpgpu_run(i915, gt, gp, &mut b, &mut || {})
 }
 
 /// Ends `b` and runs it as one request on the render engine's kernel
-/// context, waiting for it.
-pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: &mut batch) -> Result<(), i32> {
+/// context, waiting for it. `on_timeout` runs before a late request wedges
+/// the GT, so the caller can say what the batch held.
+pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: &mut batch,
+                 on_timeout: &mut dyn FnMut()) -> Result<(), i32> {
     if crate::intel_gt::intel_gt_is_wedged(gt) {
         return Err(-EIO);
     }
@@ -436,6 +477,19 @@ pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: 
         if linux::now_us() - t0 > DISPATCH_TIMEOUT_US {
             crate::i915_request::i915_request_put(gt, rq);
             linux::say("gpgpu: dispatch on rcs0 timed out, wedging");
+            on_timeout();
+            let mut ticks = [0u64; MAX_DISPATCHES as usize];
+            let n = gp.dispatch_ticks(b, &mut ticks);
+            let mut l = Line::new();
+            l.s("gpgpu: dispatches done before the timeout (GT ticks):");
+            for &t in &ticks[..n] {
+                if t == u64::MAX {
+                    l.s(" -");
+                } else {
+                    l.s(" ").dec(t);
+                }
+            }
+            l.say();
             crate::intel_engine_cs::intel_engine_print_registers(i915, gt, e);
             crate::intel_gt::gen8_check_faults(i915);
             crate::intel_gt::intel_gt_set_wedged(i915, gt);
