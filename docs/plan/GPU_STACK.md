@@ -837,6 +837,9 @@ der grosse Posten ist.
 
 ## 9a. Wo getestet wird
 
+Weg der GPU in die microVM, Video und die Schalter fuer GPU/CPU im selben
+Gastimage: `GPU_IN_VM.md`.
+
 QEMU ist schnell, aber nopeekOS sieht dort nur eine nachgebaute Karte ohne
 Recheneinheit. Der Entwicklungsrechner bringt mehr mit (abgefragt
 2026-10-12, nur lesend):

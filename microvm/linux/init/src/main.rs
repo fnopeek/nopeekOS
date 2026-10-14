@@ -196,9 +196,11 @@ fn launch_wayland(kmsg_fd: i64) {
     // load to hide the titlebar buttons that crash the browser when
     // clicked; dark mode). Everything else stays default:
     // e10s, fission, content/RDD/GMP/utility sandboxes, OCSP, telemetry,
-    // addons — like a fresh install. Its `glxtest` and `vaapitest` helpers are
-    // replaced by /bin/false: they probe GL and VA-API, there is no GPU here,
-    // and to probe they load Mesa and LLVM (230 MB), about 0.6 s per start.
+    // addons — like a fresh install. Its `gfxtest` helper (GL and VA-API
+    // probe) is replaced by /bin/false unless the host offers a GPU (virtio-gpu
+    // negotiated CONTEXT_INIT, feature bit 4): without one it only finds
+    // llvmpipe, and to get there it loads Mesa and LLVM (230 MB), about 0.6 s
+    // per start. A failed probe is the browser's own CPU fallback.
     // npkwm runs as `wl` (uid 1001) and the app as `app` (uid 1000); PID 1,
     // seatd and the control process stay root. Only `wl` can open the
     // npk.windows port and only through seatd does it get the GPU and input
@@ -321,7 +323,10 @@ fn launch_wayland(kmsg_fd: i64) {
                    { cat /usr/lib/librewolf/defaults/pref/channel-prefs.js; echo 'pref(\"general.config.sandbox_enabled\", false);'; } > /tmp/channel-prefs.js \
                      && mount --bind /tmp/channel-prefs.js /usr/lib/librewolf/defaults/pref/channel-prefs.js 2>/dev/null; \
                  fi; \
-                 for t in glxtest vaapitest; do mount --bind /bin/false /usr/lib/librewolf/$t 2>/dev/null; done; \
+                 GPU=0; for d in /sys/bus/virtio/devices/*; do \
+                   [ \"$(cat $d/device 2>/dev/null)\" = 0x0010 ] && [ \"$(cut -c5 $d/features 2>/dev/null)\" = 1 ] && GPU=1; \
+                 done; \
+                 [ $GPU = 1 ] || mount --bind /bin/false /usr/lib/librewolf/gfxtest 2>/dev/null; \
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  ( sleep 15; while true; do sync 2>/dev/null; sleep 3; done ) & \
