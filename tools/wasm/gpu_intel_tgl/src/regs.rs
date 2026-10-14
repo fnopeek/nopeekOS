@@ -1453,3 +1453,12 @@ pub const SWSCI_SBCB_DISPLAY_POWER_STATE: u32 = 0x80c; // display/intel_opregion
 pub const DISPLAY_TYPE_CRT: u32 = 0x0; // display/intel_opregion.c:385
 pub const DISPLAY_TYPE_EXTERNAL_FLAT_PANEL: u32 = 0x2; // display/intel_opregion.c:387
 pub const DISPLAY_TYPE_INTERNAL_FLAT_PANEL: u32 = 0x3; // display/intel_opregion.c:388
+
+// GEM init (i915_gem.c, gt/intel_wopcm.c, gt/intel_gtt.c, gt/intel_ggtt.c, intel_clock_gating.c)
+pub const GEN11_WOPCM_SIZE: u32 = 0x200000; // gt/intel_wopcm.c:44
+/// gt/intel_gt_regs.h:364
+pub const fn GEN12_PAT_INDEX(i: u32) -> u32 { (0x4800 + (i) * 4) }
+pub const GEN8_PPAT_WB: u32 = 0x3; // gt/intel_gtt.h:145
+pub const GEN8_PPAT_WT: u32 = 0x2; // gt/intel_gtt.h:146
+pub const GEN8_PPAT_WC: u32 = 0x1; // gt/intel_gtt.h:147
+pub const GEN8_PPAT_UC: u32 = 0x0; // gt/intel_gtt.h:148

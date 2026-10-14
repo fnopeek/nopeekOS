@@ -8,7 +8,7 @@
 //! Page-table pages and the scratch page are DMA buffers the kernel
 //! hands out (Linux allocates them as internal GEM objects).
 
-use crate::drm_mm::drm_mm;
+use crate::drm_mm::{drm_mm, drm_mm_node};
 use crate::i915_drv::drm_i915_private;
 use crate::linux::{self, Line};
 use crate::regs::*;
@@ -28,6 +28,10 @@ pub struct i915_ggtt {
     pub num_fences: u32,
     /// `ggtt->vm.mm`.
     pub vm_mm: drm_mm,
+    /// `ggtt->pin_bias`.
+    pub pin_bias: u64,
+    /// `ggtt->error_capture`.
+    pub error_capture: Option<crate::drm_mm::drm_mm_node>,
 }
 
 /// A stolen-memory GEM object bound into the GGTT (`struct i915_vma` with
@@ -207,6 +211,8 @@ pub fn i915_ggtt_probe_hw(regs: Mmio) -> Result<i915_ggtt, ()> {
         scratch_encode: 0,
         num_fences: 0,
         vm_mm: drm_mm::default(),
+        pin_bias: 0,
+        error_capture: None,
     };
     gen8_gmch_probe(&mut ggtt)?;
     if (ggtt.total - 1) >> 32 != 0 {
@@ -345,4 +351,46 @@ pub fn i915_gem_init_stolen(i915: &mut drm_i915_private) -> Option<i915_dsm> {
     }
     dsm.mm = drm_mm::drm_mm_init(0, dsm.usable_size);
     Some(dsm)
+}
+
+/// `init_ggtt`. On TGL `vm.clear_range` is `nop_clear_range` and
+/// `vm.scratch_range` is `gen8_ggtt_clear_range` (gen8_gmch_probe): the
+/// holes are left as they are, only the error-capture slot is pointed at
+/// scratch. No GuC, so no top reservation; no vGPU, so no balloon.
+fn init_ggtt(ggtt: &mut i915_ggtt, wopcm: &crate::intel_wopcm::intel_wopcm) -> Result<(), i32> {
+    // A small bias even without GuC: ring wraparound at offset 0
+    // sometimes hangs.
+    ggtt.pin_bias = I915_GTT_PAGE_SIZE.max(crate::intel_wopcm::intel_wopcm_guc_size(wopcm) as u64);
+
+    if ggtt.mappable_end != 0 {
+        // A mappable slot for the lockless error capture, preferably at 0;
+        // 0 may hold the firmware framebuffer, then the lowest free slot.
+        // Two pages: the CPU may read speculatively past the first.
+        let color = I915_COLOR_UNEVICTABLE as u64;
+        let at0 = drm_mm_node { start: 0, size: 2 * I915_GTT_PAGE_SIZE, color };
+        ggtt.error_capture = if ggtt.vm_mm.drm_mm_reserve_node(at0).is_ok() {
+            Some(at0)
+        } else {
+            ggtt.vm_mm.drm_mm_insert_node_in_range_low(at0.size, color, 0, ggtt.mappable_end).ok()
+        };
+    }
+    if let Some(n) = ggtt.error_capture {
+        ggtt.gen8_ggtt_clear_range(n.start, n.size);
+        Line::new().s("Reserved GGTT:[").hex(n.start as u32).s(", ").hex((n.start + n.size) as u32)
+            .s("] for use by error capture").say();
+    }
+
+    // Clear any non-preallocated blocks: nop_clear_range.
+    for (hole_start, hole_end, _) in ggtt.vm_mm.holes() {
+        Line::new().s("clearing unused GTT space: [").hex((hole_start >> 32) as u32).s("_").hex(hole_start as u32)
+            .s(", ").hex((hole_end >> 32) as u32).s("_").hex(hole_end as u32).s("] (nop_clear_range)").say();
+    }
+    // And finally the reserved guard page, also through nop_clear_range.
+    Ok(())
+}
+
+/// `i915_init_ggtt`. INTEL_PPGTT is full on TGL, so there is no aliasing
+/// PPGTT.
+pub fn i915_init_ggtt(ggtt: &mut i915_ggtt, wopcm: &crate::intel_wopcm::intel_wopcm) -> Result<(), i32> {
+    init_ggtt(ggtt, wopcm)
 }

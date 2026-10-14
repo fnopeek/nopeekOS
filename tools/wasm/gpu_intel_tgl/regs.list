@@ -1266,3 +1266,10 @@ SWSCI_SBCB_DISPLAY_POWER_STATE @ display/intel_opregion.c
 DISPLAY_TYPE_CRT @ display/intel_opregion.c
 DISPLAY_TYPE_EXTERNAL_FLAT_PANEL @ display/intel_opregion.c
 DISPLAY_TYPE_INTERNAL_FLAT_PANEL @ display/intel_opregion.c
+# GEM init (i915_gem.c, gt/intel_wopcm.c, gt/intel_gtt.c, gt/intel_ggtt.c, intel_clock_gating.c)
+GEN11_WOPCM_SIZE @ gt/intel_wopcm.c
+GEN12_PAT_INDEX(i) samples 0 1 7
+GEN8_PPAT_WB
+GEN8_PPAT_WT
+GEN8_PPAT_WC
+GEN8_PPAT_UC

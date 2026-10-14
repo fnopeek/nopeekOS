@@ -1,6 +1,7 @@
 //! drm/drm_mm.c (Linux 6.18.55): the range allocator behind the GGTT
 //! (`vm->mm`) and stolen memory (`i915->mm.stolen`), as far as fixed
 //! reservations need it: `drm_mm_init`, `drm_mm_reserve_node`,
+//! `drm_mm_insert_node_in_range` (DRM_MM_INSERT_LOW, no alignment),
 //! `drm_mm_remove_node` and the holes walk of `drm_mm_for_each_hole`.
 //!
 //! The address-space bookkeeping belongs to the gpudev side
@@ -69,6 +70,33 @@ impl drm_mm {
         self.nodes[at] = node;
         self.n += 1;
         Ok(())
+    }
+
+    /// `drm_mm_insert_node_in_range` with DRM_MM_INSERT_LOW and no
+    /// alignment: the lowest place in [range_start, range_end) that fits.
+    pub fn drm_mm_insert_node_in_range_low(&mut self, size: u64, color: u64, range_start: u64, range_end: u64)
+                                           -> Result<drm_mm_node, i32> {
+        if size == 0 {
+            return Err(-ENOSPC);
+        }
+        let mut found = None;
+        for (s, e, _) in self.holes() {
+            let adj_start = s.max(range_start);
+            let adj_end = e.min(range_end);
+            if adj_end > adj_start && adj_end - adj_start >= size {
+                found = Some(adj_start);
+                break;
+            }
+        }
+        let start = found.ok_or(-ENOSPC)?;
+        let node = drm_mm_node { start, size, color };
+        self.drm_mm_reserve_node(node)?;
+        Ok(node)
+    }
+
+    /// `drm_mm_for_each_node`.
+    pub fn nodes(&self) -> &[drm_mm_node] {
+        &self.nodes[..self.n]
     }
 
     /// `drm_mm_remove_node`.
