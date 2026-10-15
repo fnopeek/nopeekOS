@@ -586,6 +586,14 @@ fn worker_entry(_arg: u64) {
         if let Some(gm) = crate::microvm::devices::guest_mem::active() {
             service_full(gm);
         }
+        // vhost: a pass ends at its weight and the worker lets the rest of
+        // the core run (`vhost_exceeds_weight`, `cond_resched`). Under a
+        // saturated link there is always more work, so without this the
+        // fibers sharing the core (a driver, the GPU module) never run again.
+        if crate::smp::fiber::yield_ready() {
+            crate::microvm::devices::net_backend::set_worker_core(
+                crate::smp::per_core::current_core_id());
+        }
 
         // Host-originated TCP timers (OTA/https) at most ~100 Hz — never per-wake.
         let now = crate::interrupts::ticks();

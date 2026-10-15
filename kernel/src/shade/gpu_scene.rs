@@ -115,6 +115,9 @@ fn covers_screen(damage: &[Rect], info: &FbInfo) -> bool {
 fn submit(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect], full: bool,
           t0: u64) -> bool {
     let Some(tid) = gpudev::shadow_bo(target as u64) else { return false };
+    if gpudev::stalled_now() {
+        return false;
+    }
     let pin = gpudev::ScenePin::new();
     let r = match encode(frame, sources, info, damage) {
         None => Err("a source cannot be handed to the module"),

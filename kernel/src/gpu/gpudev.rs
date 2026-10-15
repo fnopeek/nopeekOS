@@ -997,6 +997,12 @@ fn stalled() -> bool {
     STALLED.load(Ordering::Acquire)
 }
 
+/// The module holds a job past its deadline: the compositor composes on
+/// the CPU without asking, and that is no failure of the GPU path.
+pub fn stalled_now() -> bool {
+    stalled()
+}
+
 fn deadline() -> u64 {
     crate::interrupts::rdtsc() + JOB_TIMEOUT_MS * (crate::interrupts::tsc_freq() / 1000)
 }
