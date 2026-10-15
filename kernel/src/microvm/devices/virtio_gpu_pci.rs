@@ -184,6 +184,9 @@ const MAX_QUEUE_SIZE: u16 = 16;
 /// The display refresh the controlq is paced to (see `service_controlq`).
 const VBLANK_HZ: u64 = 60;
 const MAX_SCANOUTS: usize = 16;   // protocol max
+/// Blobs per output whose damage is tracked; a guest compositor swaps
+/// between two to four. One beyond is read whole.
+const BLOB_DAMAGE_KEPT: usize = 8;
 /// Scanouts offered to the guest: one per app window (`MAX_OUTPUTS` in the
 /// guest compositor, npkwm). Output k is scanout k.
 pub const MAX_OUTPUTS: usize = 8;
@@ -389,6 +392,9 @@ pub struct VirtioGpu {
     last_flush_res: [u32; MAX_OUTPUTS],
     /// Per scanout: the blob of the last frame presented from guest pages.
     last_blob: [Option<Arc<ForeignPixels>>; MAX_OUTPUTS],
+    /// Per output, the blobs flushed on it and what the guest has damaged
+    /// since each was last read here (by serial).
+    blob_damage: [Vec<(u64, (u32, u32, u32, u32))>; MAX_OUTPUTS],
     /// The blob a FLUSH being served must wait for (`Held`).
     hold_for: Option<Arc<ForeignPixels>>,
     /// A SUBMIT_3D taken off the controlq whose ccmds run outside the
@@ -446,6 +452,7 @@ impl VirtioGpu {
             paused_until: 0,
             last_flush_res: [0; MAX_OUTPUTS],
             last_blob: [const { None }; MAX_OUTPUTS],
+            blob_damage: [const { Vec::new() }; MAX_OUTPUTS],
             hold_for: None,
             pending_submit: None,
             submit_running: false,
@@ -1255,10 +1262,32 @@ impl VirtioGpu {
         // A host3d buffer is written by the card, for a scanout past the
         // caches (an uncached MOCS, as for a display engine): drop the stale
         // lines before the CPU or the compositor's LLC-cached reads see it.
-        // Until a frame is shown the whole buffer is read for the lit check.
+        // The guest's compositor repaints a buffer where anything changed
+        // since that buffer was last shown (buffer age), not only where this
+        // frame changed: what is dropped is every frame's damage since this
+        // blob was last read here. A blob not seen before, and every frame
+        // until one is shown (the lit check reads it all), goes whole.
         if self.ctxs.host3d.contains_key(&self.scanouts[k].resource_id) {
             let whole = wid == 0 || !crate::shade::surface::has_frame(wid);
-            view.clflush_rect(if whole { (0, 0, view.width, view.height) } else { rect });
+            let full = (0, 0, view.width, view.height);
+            let own = clamp_rect(rect, view.width, view.height);
+            let serial = view.pixels.serial;
+            let list = &mut self.blob_damage[k];
+            let mine = list.iter().position(|e| e.0 == serial);
+            let region = match mine {
+                Some(i) if !whole => union_rect(list[i].1, own),
+                _ => full,
+            };
+            for e in list.iter_mut() {
+                e.1 = if e.0 == serial { (0, 0, 0, 0) } else { union_rect(e.1, own) };
+            }
+            if mine.is_none() {
+                if list.len() == BLOB_DAMAGE_KEPT {
+                    list.remove(0);
+                }
+                list.push((serial, (0, 0, 0, 0)));
+            }
+            view.clflush_rect(region);
         }
         let lit = || gb::lit_percent_at(view.width, view.height, |x, y| view.pixel(x, y));
         crate::microvm::boottime::gpu_lit(lit);
@@ -2289,4 +2318,26 @@ fn le32(b: &[u8], at: usize) -> Option<u32> {
 
 fn le64(b: &[u8], at: usize) -> Option<u64> {
     Some(u64::from(le32(b, at)?) | u64::from(le32(b, at + 4)?) << 32)
+}
+
+/// `r` (x, y, w, h) clipped to a `w` × `h` buffer.
+fn clamp_rect(r: (u32, u32, u32, u32), w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let x = r.0.min(w);
+    let y = r.1.min(h);
+    (x, y, r.2.min(w - x), r.3.min(h - y))
+}
+
+/// The bounding box of two rectangles; an empty one adds nothing.
+fn union_rect(a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+    if a.2 == 0 || a.3 == 0 {
+        return b;
+    }
+    if b.2 == 0 || b.3 == 0 {
+        return a;
+    }
+    let x0 = a.0.min(b.0);
+    let y0 = a.1.min(b.1);
+    let x1 = (a.0 + a.2).max(b.0 + b.2);
+    let y1 = (a.1 + a.3).max(b.1 + b.3);
+    (x0, y0, x1 - x0, y1 - y0)
 }
