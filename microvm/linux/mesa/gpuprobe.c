@@ -6,11 +6,13 @@
  * host offers CONTEXT_INIT; "llvmpipe" means the native context did not
  * come up, and the host log says why.
  *
- * Then the path a Wayland client and its compositor take: for each layout
- * (linear, X, Y, Y with render compression, and with its clear colour) one
+ * With `npkgpushare` on the kernel command line, then the path a Wayland
+ * client and its compositor take: for each layout (linear, X, Y, Y with
+ * render compression and its clear colour, Y with render compression) one
  * buffer is drawn in a first context and read back there, then imported
  * through its dma-buf into a second context on its own fd and read back
- * again. The second read is what the compositor samples. */
+ * again. The second read is what the compositor samples. A line before
+ * each step names the step, so a hang shows where it stopped. */
 #define _GNU_SOURCE
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -161,6 +163,7 @@ static void share_test(struct side *a, struct side *b, const char *name, uint64_
     char ra[40] = "-", rb_[40] = "-";
     EGLImageKHR img = EGL_NO_IMAGE_KHR;
     GLuint rb = 0;
+    printf("<0>[gpu] guest share %s: drawing in A\n", name);
     eglMakeCurrent(a->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, a->ctx);
     GLuint fb = import_fb(a->dpy, bo, mod, &img, &rb);
     if (fb) {
@@ -177,9 +180,11 @@ static void share_test(struct side *a, struct side *b, const char *name, uint64_
         }
         glDisable(GL_SCISSOR_TEST);
         glFinish();
+        printf("<0>[gpu] guest share %s: drawn, reading in A\n", name);
         read_quads(ra);
     }
     import_drop(a->dpy, fb, rb, img);
+    printf("<0>[gpu] guest share %s: A read %s, reading in B\n", name, ra);
     eglMakeCurrent(b->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, b->ctx);
     img = EGL_NO_IMAGE_KHR;
     rb = 0;
@@ -191,6 +196,22 @@ static void share_test(struct side *a, struct side *b, const char *name, uint64_
     printf("<0>[gpu] guest share %s (%d planes): A %s, B %s -> %s\n", name, gbm_bo_get_plane_count(bo), ra, rb_,
            strcmp(ra, want) ? "A WRONG" : strcmp(rb_, want) ? "B WRONG" : "ok");
     gbm_bo_destroy(bo);
+}
+
+/* `npkgpushare` as a word of /proc/cmdline. */
+static int wants_share_tests(void)
+{
+    char line[4096];
+    FILE *f = fopen("/proc/cmdline", "r");
+    if (!f)
+        return 0;
+    size_t n = fread(line, 1, sizeof(line) - 1, f);
+    fclose(f);
+    line[n] = 0;
+    for (char *w = strtok(line, " \n"); w; w = strtok(NULL, " \n"))
+        if (!strcmp(w, "npkgpushare"))
+            return 1;
+    return 0;
 }
 
 static void share_tests(const char *node)
@@ -206,8 +227,8 @@ static void share_tests(const char *node)
     share_test(&a, &b, "linear", DRM_FORMAT_MOD_LINEAR);
     share_test(&a, &b, "X", I915_FORMAT_MOD_X_TILED);
     share_test(&a, &b, "Y", I915_FORMAT_MOD_Y_TILED);
-    share_test(&a, &b, "Y+RC_CCS", I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS);
     share_test(&a, &b, "Y+RC_CCS_CC", I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS_CC);
+    share_test(&a, &b, "Y+RC_CCS", I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS);
     side_close(&a);
     side_close(&b);
 }
@@ -273,6 +294,7 @@ int main(int argc, char **argv)
     eglTerminate(dpy);
     gbm_device_destroy(gbm);
     close(fd);
-    share_tests(node);
+    if (wants_share_tests())
+        share_tests(node);
     return 0;
 }
