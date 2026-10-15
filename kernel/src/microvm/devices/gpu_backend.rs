@@ -103,7 +103,44 @@ pub fn vblank(now: u64, gm: &super::guest_mem::GuestMem) -> bool {
         note_gpu_kick(0);
         return false;
     }
-    lock().service_queues(0, gm) && !notify_queue(0)
+    let mut gpu = lock();
+    let advanced = gpu.service_queues(0, gm);
+    (advanced | after_inline_service(&mut gpu, gm)) && !notify_queue(0)
+}
+
+/// After a vCPU served the controlq itself: a SUBMIT_3D it stopped at
+/// goes to the worker if there is one, so the vCPU does not wait for the
+/// GPU driver. Without a worker it runs here, under the device lock the
+/// caller holds. True when a chain went back to the guest.
+pub fn after_inline_service(gpu: &mut super::virtio_gpu_pci::VirtioGpu, gm: &super::guest_mem::GuestMem) -> bool {
+    if !gpu.has_pending_submit() {
+        return false;
+    }
+    if WORKER_RUNNING.load(Ordering::Acquire) {
+        note_gpu_kick(0);
+        return false;
+    }
+    let mut advanced = false;
+    while let Some(p) = gpu.take_pending_submit() {
+        let r = super::virtio_gpu_ctx::run_submit(&p.job, p.stream(), crate::gpu::gpudev::submit_deadline());
+        advanced |= gpu.finish_submit(p, r, gm);
+        advanced |= gpu.service_queues(0, gm);
+    }
+    advanced
+}
+
+/// Serve the controlq. A SUBMIT_3D stops serving; its ccmds, which wait for
+/// the GPU driver, run here without the device lock — vCPUs take that lock
+/// on their exits — and serving then goes on in queue order.
+fn serve_controlq(gm: &super::guest_mem::GuestMem) -> bool {
+    let mut advanced = GPU.lock().service_queues(0, gm);
+    loop {
+        let Some(p) = GPU.lock().take_pending_submit() else { return advanced };
+        let r = super::virtio_gpu_ctx::run_submit(&p.job, p.stream(), crate::gpu::gpudev::submit_deadline());
+        let mut gpu = GPU.lock();
+        advanced |= gpu.finish_submit(p, r, gm);
+        advanced |= gpu.service_queues(0, gm);
+    }
 }
 
 /// Whether the device offers guest blobs: only while the GPU module
@@ -185,12 +222,19 @@ pub fn take_resume(now: u64) -> bool {
 pub fn display_tick() -> bool {
     use super::virtio_console_pci as console;
     use super::virtio_gpu_pci::MAX_OUTPUTS;
+    // The worker may hold the device: retried next tick, never spun on.
     if reveal_due() {
-        lock().reveal();
+        REVEAL_PENDING.store(true, Ordering::Release);
     }
-    let changed = crate::microvm::take_outputs_changed();
-    if changed {
-        lock().signal_outputs_changed();
+    let mut changed = false;
+    if let Some(mut gpu) = GPU.try_lock() {
+        if REVEAL_PENDING.swap(false, Ordering::AcqRel) {
+            gpu.reveal();
+        }
+        changed = crate::microvm::take_outputs_changed();
+        if changed {
+            gpu.signal_outputs_changed();
+        }
     }
     if console::take_resend_sizes() {
         for k in 0..MAX_OUTPUTS {
@@ -268,9 +312,13 @@ pub fn lit_percent_at(width: u32, height: u32, pixel: impl Fn(u32, u32) -> u32) 
     if total == 0 { 0 } else { lit * 100 / total }
 }
 
+/// `reveal_due` fired and the frames are still to be shown (`display_tick`).
+static REVEAL_PENDING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// A launch begins: hide guest frames until the app paints.
 pub fn present_reset() {
     LAUNCH_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+    REVEAL_PENDING.store(false, Ordering::Release);
     PRESENT.store(PRESENT_HIDDEN, Ordering::Release);
 }
 
@@ -420,10 +468,11 @@ fn serve(q: u16, gm: &super::guest_mem::GuestMem) {
             crate::microvm::cpu::kick_bsp_net_irq();
         }
     };
-    signal(GPU.lock().service_queues(q, gm));
     if q != 0 {
+        signal(GPU.lock().service_queues(q, gm));
         return;
     }
+    signal(serve_controlq(gm));
     let Some(blob) = GPU.lock().held_blob() else { return };
     let t0 = crate::interrupts::rdtsc();
     let deadline = t0 + crate::interrupts::tsc_freq() / 1000 * super::virtio_gpu_pci::HOLD_MAX_MS;
@@ -436,7 +485,7 @@ fn serve(q: u16, gm: &super::guest_mem::GuestMem) {
     }
     let us = (crate::interrupts::rdtsc() - t0) * 1_000_000 / crate::interrupts::tsc_freq().max(1);
     note(STAT_HOLD_US, us);
-    signal(GPU.lock().service_queues(0, gm));
+    signal(serve_controlq(gm));
 }
 
 fn worker_entry(_arg: u64) {

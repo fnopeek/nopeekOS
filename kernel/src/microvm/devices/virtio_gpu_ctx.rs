@@ -58,11 +58,12 @@ pub trait Backend: Send {
     /// Run one ccmd: `req` is exactly the guest's bytes, starting with its
     /// `vdrm_ccmd_req` header; a shorter request than the backend knows is
     /// zero-extended by the backend. A response, if any, is pushed to `rsp`
-    /// starting with its `vdrm_ccmd_rsp` (len) header. A failed driver call
+    /// starting with its `vdrm_ccmd_rsp` (len) header, by `deadline` (TSC,
+    /// shared by the ccmds of one SUBMIT_3D). A failed driver call
     /// is an `Ok` with the positive errno in the response's `ret`, as
     /// `intel_ioctl` reports it; `Err` is a malformed request only: the
     /// sequence number then stays put and the guest's waiter never returns.
-    fn ccmd(&mut self, ctx: u32, req: &[u8], rsp: &mut Vec<u8>) -> Result<(), i32>;
+    fn ccmd(&mut self, ctx: u32, req: &[u8], rsp: &mut Vec<u8>, deadline: u64) -> Result<(), i32>;
     /// The pages of object `blob_id` a ccmd created in `ctx`, taken out of
     /// the backend's blob table (a blob id names one resource) to become
     /// resource `res_id`, with its cache type for the guest mapping.
@@ -250,44 +251,15 @@ impl Contexts {
         }
     }
 
-    /// SUBMIT_3D: the ccmd stream of context `ctx_id` (port of
-    /// `drm_context_submit_cmd`). Returns the fence started after it on
-    /// `ring`, if the backend knows the context.
-    pub fn submit(&mut self, ctx_id: u32, ring: u32, stream: &[u8]) -> Result<u64, ()> {
-        let Some(c) = self.ctxs.get(&ctx_id) else { return Err(()) };
+    /// What SUBMIT_3D on `ring` of context `ctx_id` needs to run its ccmds
+    /// later, without the device: None if there is no such context or ring.
+    pub fn prepare_submit(&self, ctx_id: u32, ring: u32) -> Option<SubmitJob> {
+        let c = self.ctxs.get(&ctx_id)?;
         if ring >= c.rings {
-            return Err(());
+            return None;
         }
         let shmem = c.shmem.and_then(|id| self.host3d.get(&id)).map(|r| r.pages.clone());
-        let mut guard = BACKEND.lock();
-        let b = guard.as_mut().ok_or(())?;
-        let align = b.ccmd_alignment() as usize;
-        let mut off = 0;
-        while stream.len() - off >= 16 {
-            let hdr = &stream[off..];
-            let word = |o: usize| u32::from_le_bytes([hdr[o], hdr[o + 1], hdr[o + 2], hdr[o + 3]]);
-            let (len, seqno, rsp_off) = (word(4) as usize, word(8), word(12) as usize);
-            if len > stream.len() - off || len < 16 || len % align != 0 || rsp_off % align != 0 {
-                return Err(());
-            }
-            let mut rsp = Vec::new();
-            b.ccmd(c.handle, &stream[off..off + len], &mut rsp).map_err(|_| ())?;
-            let (set, clear) = b.banned(c.handle);
-            if let Some(sh) = &shmem {
-                write_response(sh, rsp_off, &rsp);
-                if set | clear != 0 {
-                    let mask = (shm_read32(sh, 8) as u64 | (shm_read32(sh, 12) as u64) << 32) & !clear | set;
-                    shm_write32(sh, 8, mask as u32);
-                    shm_write32(sh, 12, (mask >> 32) as u32);
-                }
-                shm_write32(sh, 0, seqno);
-            }
-            off += len;
-        }
-        if off != stream.len() {
-            return Err(());
-        }
-        Ok(b.submit_fence(c.handle, ring))
+        Some(SubmitJob { handle: c.handle, ring, shmem })
     }
 
     pub fn fence_done(&mut self, ctx_id: u32, ring: u32, fence: u64) -> bool {
@@ -305,6 +277,50 @@ impl Contexts {
         }
         res
     }
+}
+
+/// A SUBMIT_3D taken off the controlq, to run without the device lock.
+pub struct SubmitJob {
+    handle: u32,
+    ring: u32,
+    /// The context's response buffer, if it has one yet.
+    shmem: Option<Arc<ForeignPixels>>,
+}
+
+/// SUBMIT_3D: the ccmd stream of a context (port of `drm_context_submit_cmd`),
+/// all by `deadline`. Takes only the backend lock, never the device's: the
+/// ccmds wait for the GPU driver, and vCPUs take the device lock on their
+/// exits. Returns the fence started after it on the job's ring.
+pub fn run_submit(job: &SubmitJob, stream: &[u8], deadline: u64) -> Result<u64, ()> {
+    let mut guard = BACKEND.lock();
+    let b = guard.as_mut().ok_or(())?;
+    let align = b.ccmd_alignment() as usize;
+    let mut off = 0;
+    while stream.len() - off >= 16 {
+        let hdr = &stream[off..];
+        let word = |o: usize| u32::from_le_bytes([hdr[o], hdr[o + 1], hdr[o + 2], hdr[o + 3]]);
+        let (len, seqno, rsp_off) = (word(4) as usize, word(8), word(12) as usize);
+        if len > stream.len() - off || len < 16 || len % align != 0 || rsp_off % align != 0 {
+            return Err(());
+        }
+        let mut rsp = Vec::new();
+        b.ccmd(job.handle, &stream[off..off + len], &mut rsp, deadline).map_err(|_| ())?;
+        let (set, clear) = b.banned(job.handle);
+        if let Some(sh) = &job.shmem {
+            write_response(sh, rsp_off, &rsp);
+            if set | clear != 0 {
+                let mask = (shm_read32(sh, 8) as u64 | (shm_read32(sh, 12) as u64) << 32) & !clear | set;
+                shm_write32(sh, 8, mask as u32);
+                shm_write32(sh, 12, (mask >> 32) as u32);
+            }
+            shm_write32(sh, 0, seqno);
+        }
+        off += len;
+    }
+    if off != stream.len() {
+        return Err(());
+    }
+    Ok(b.submit_fence(job.handle, job.ring))
 }
 
 fn shm_write32(sh: &ForeignPixels, off: usize, v: u32) {
@@ -418,7 +434,7 @@ impl Backend for ProbeBackend {
         4
     }
 
-    fn ccmd(&mut self, _ctx: u32, req: &[u8], rsp: &mut Vec<u8>) -> Result<(), i32> {
+    fn ccmd(&mut self, _ctx: u32, req: &[u8], rsp: &mut Vec<u8>, _deadline: u64) -> Result<(), i32> {
         const ENODEV: i32 = 19;
         let cmd = u32::from_le_bytes([req[0], req[1], req[2], req[3]]);
         crate::kprintln!("[gpu] native context probe: ccmd {} ({} bytes) has no backend", cmd, req.len());

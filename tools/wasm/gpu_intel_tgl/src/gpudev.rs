@@ -193,6 +193,8 @@ fn copy_rect(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, src: u64,
     let rq = crate::i915_request::i915_request_create(i915, gt, ce);
     crate::intel_engine_pm::intel_engine_pm_put(i915, gt, e);
     let rq = rq?;
+    // The compositor waits for it (I915_PRIORITY_DISPLAY).
+    gt.requests[rq].prio = crate::i915_request::I915_PRIORITY_DISPLAY;
 
     let mut err = crate::gen8_engine_cs::emit_flush(i915, gt, rq, EMIT_INVALIDATE);
     if err.is_ok() {
@@ -225,6 +227,12 @@ fn copy_rect(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, src: u64,
         let now = linux::now_us();
         if started.is_none() && crate::intel_execlists_submission::execlists_running(gt, e, rq) {
             started = Some(now);
+        }
+        // Still queued behind other work after the job's time: give it up
+        // (it runs as MI_NOOPs and retires), the kernel copies on the CPU.
+        if started.is_none() && now - t0 > JOB_TIMEOUT_US && crate::i915_request::i915_request_cancel(gt, rq) {
+            crate::i915_request::i915_request_put(gt, rq);
+            return Err(-ETIME);
         }
         if started.is_some_and(|s| now - s > JOB_TIMEOUT_US) || now - t0 > START_TIMEOUT_US {
             crate::i915_request::i915_request_put(gt, rq);
@@ -545,7 +553,7 @@ fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i915_ggtt,
                     None => -EINVAL,
                 }
             } else {
-                match crate::i915_gem_context::obj_detach(st, gt, a[0], a[1]) {
+                match crate::i915_gem_context::obj_detach(st, i915, gt, a[0], a[1]) {
                     Ok(s) => s,
                     Err(x) => x,
                 }

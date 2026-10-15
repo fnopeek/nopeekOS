@@ -89,6 +89,7 @@ mod intel_ring;
 mod intel_rps;
 mod intel_tc;
 mod intel_timeline;
+mod intel_tlb;
 mod intel_uncore;
 mod intel_vdsc;
 mod intel_vga;

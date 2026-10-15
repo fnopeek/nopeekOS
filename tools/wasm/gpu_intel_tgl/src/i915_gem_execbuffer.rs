@@ -251,13 +251,15 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
                 }
             }
         }
+        // The old translations of what was unbound go before the new one.
+        st.tlb_flush(d.i915, d.gt);
         st.obj_bind(v.obj, vm, v.offset).map_err(|e| -e)?;
     }
 
     // eb_pin_engine, eb_throttle: the request must fit without waiting.
     let ce = st.ctx_engine(d, x, engine).map_err(|e| -e)?;
     crate::intel_gt_requests::retire_requests(d.i915, d.gt, ce);
-    if !st.can_submit(d.gt, engine as usize, Some(ce)) || d.gt.contexts[ce].ring.intel_ring_update_space() < 4096 {
+    if !st.can_submit(d.gt, Some(ce)) || d.gt.contexts[ce].ring.intel_ring_update_space() < 4096 {
         return Err(EAGAIN);
     }
 

@@ -17,8 +17,9 @@ use crate::intel_workarounds::{masked_bit_disable, masked_bit_enable};
 use crate::regs::*;
 
 const PORTS: usize = 2;
-/// Requests an engine's queue and active list hold.
-pub const SCHED_MAX: usize = 64;
+/// Requests an engine's queue and active list hold: every request that can
+/// exist, so neither can overflow (Linux's priority lists are unbounded).
+pub const SCHED_MAX: usize = crate::i915_request::MAX_REQUESTS;
 
 /// `struct intel_engine_execlists`, as far as the hardware sees it.
 #[derive(Clone, Copy, Default)]
@@ -118,8 +119,10 @@ pub fn add_to_engine(gt: &mut intel_gt, e: usize, rq: usize) {
         if s.nrequests < SCHED_MAX {
             s.requests[s.nrequests] = rq as u16;
             s.nrequests += 1;
+            return;
         }
     }
+    linux::say("BUG: engine request list full");
 }
 
 /// `remove_from_engine`.
@@ -143,13 +146,16 @@ fn queue_prio(gt: &intel_gt, e: usize) -> i32 {
 /// priority.
 fn queue_request(gt: &mut intel_gt, e: usize, rq: usize) {
     let prio = gt.requests[rq].prio;
+    if gt.engine[e].is_some_and(|x| x.sched.nqueue == SCHED_MAX) {
+        // Cannot happen (SCHED_MAX holds every request); never lose one
+        // silently: it fails and completes.
+        linux::say("BUG: engine queue full, the request fails");
+        crate::i915_request::i915_request_mark_eio(gt, rq);
+        return;
+    }
     let reqs = gt.requests;
     let Some(x) = gt.engine[e].as_mut() else { return };
     let s = &mut x.sched;
-    if s.nqueue == SCHED_MAX {
-        linux::say("warning: engine queue full");
-        return;
-    }
     let at = s.queue[..s.nqueue].iter().position(|&r| reqs[r as usize].prio < prio).unwrap_or(s.nqueue);
     s.queue.copy_within(at..s.nqueue, at + 1);
     s.queue[at] = rq as u16;
@@ -366,6 +372,18 @@ fn execlists_dequeue(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) {
             break;
         }
         let rq = s.queue[0] as usize;
+        // Display work does not go into a port behind another context's
+        // unfinished request: without preemption it could not be taken
+        // back, and in the queue its waiter may still cancel it
+        // (`i915_request_cancel`). Linux preempts instead.
+        if let Some(l) = last {
+            if gt.requests[rq].prio >= crate::i915_request::I915_PRIORITY_DISPLAY
+                && gt.requests[l].ce != gt.requests[rq].ce
+                && !__i915_request_is_complete(gt, l)
+            {
+                break;
+            }
+        }
         let mut merge = true;
         if let Some(l) = last {
             if !can_merge_rq(gt, l, rq) {

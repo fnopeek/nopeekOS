@@ -16,10 +16,17 @@ use crate::linux::Line;
 use crate::regs::*;
 
 pub const MAX_REQUESTS: usize = 128;
+/// Requests only the module's own work may use: a guest filling the table
+/// must not keep the desktop's scenes and copies out.
+pub const KERNEL_RESERVE: usize = 8;
+/// `I915_PRIORITY_DISPLAY` (i915_priolist_types.h:24):
+/// I915_CONTEXT_MAX_USER_PRIORITY + 3.
+pub const I915_PRIORITY_DISPLAY: i32 = 1026;
 
 const ENOMEM: i32 = 12;
 const ENOSPC: i32 = 28;
 const EIO: i32 = 5;
+const ECANCELED: i32 = 125;
 
 /// `struct i915_request`.
 #[derive(Clone, Copy, Default)]
@@ -121,6 +128,17 @@ fn i915_request_set_error_once(gt: &mut intel_gt, rq: usize, error: i32) -> bool
     true
 }
 
+/// `i915_request_cancel` for a request still in the engine's queue: it
+/// fails, and `__i915_request_submit` turns its payload into MI_NOOPs, so
+/// it runs only its breadcrumbs and retires as usual. False once it went
+/// to the hardware (no preemption is ported to take it back).
+pub fn i915_request_cancel(gt: &mut intel_gt, rq: usize) -> bool {
+    if !gt.requests[rq].pqueue || __i915_request_is_complete(gt, rq) {
+        return false;
+    }
+    i915_request_set_error_once(gt, rq, -ECANCELED)
+}
+
 /// `i915_request_mark_eio`: an unfinished request fails with -EIO and is
 /// marked complete. Returns whether it was unfinished.
 pub fn i915_request_mark_eio(gt: &mut intel_gt, rq: usize) -> bool {
@@ -212,6 +230,9 @@ fn wait_for_space(i915: &mut drm_i915_private, gt: &mut intel_gt, ce: usize, byt
 /// `__i915_request_create`: seqno from the timeline, the ring position, the
 /// backend's preamble (`execlists_request_alloc`), and onto the timeline.
 pub fn __i915_request_create(i915: &mut drm_i915_private, gt: &mut intel_gt, ce: usize) -> Result<usize, i32> {
+    if gt.contexts[ce].timeline.nrequests >= crate::intel_timeline::TIMELINE_MAX_REQUESTS {
+        return Err(-ENOSPC);
+    }
     crate::intel_context::__intel_context_pin(gt, ce);
 
     let Some(rq) = gt.requests.iter().position(|r| !r.used) else {

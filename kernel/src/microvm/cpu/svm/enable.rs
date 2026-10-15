@@ -2499,7 +2499,10 @@ fn handle_mmio_npf_gpu(
             // GPU worker's own core, which signals the completion by MSI-X.
             crate::microvm::devices::gpu_backend::note_gpu_kick(qidx);
         } else {
-            let advanced = gpu.service_queues(qidx, mem);
+            let mut advanced = gpu.service_queues(qidx, mem);
+            if qidx == 0 {
+                advanced |= crate::microvm::devices::gpu_backend::after_inline_service(&mut gpu, mem);
+            }
             if advanced && !crate::microvm::devices::gpu_backend::notify_queue(qidx) {
                 pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
             }

@@ -174,6 +174,8 @@ pub struct nctx {
     /// Zombie objects, and clients closing.
     nzombies: u32,
     nclosing: u32,
+    /// PTEs were cleared since the last TLB invalidation (`tlb_flush`).
+    tlb_dirty: bool,
 }
 
 pub static NCTX: Single<nctx> = Single::new(nctx {
@@ -187,6 +189,7 @@ pub static NCTX: Single<nctx> = Single::new(nctx {
     npool: 0,
     nzombies: 0,
     nclosing: 0,
+    tlb_dirty: false,
 });
 
 /// The GPU side every call needs.
@@ -291,7 +294,8 @@ impl nctx {
 
     /// Whether object `i` is still used by a request.
     pub fn obj_busy(&self, gt: &intel_gt, i: usize) -> bool {
-        self.objs[i].busy.iter().any(|&(ce, s)| !seqno_done(gt, ce, s))
+        // Wedged, no request runs again (Linux fails and retires them all).
+        !crate::intel_gt::intel_gt_is_wedged(gt) && self.objs[i].busy.iter().any(|&(ce, s)| !seqno_done(gt, ce, s))
     }
 
     /// `i915_gem_busy_ioctl`'s answer: readers in the high half by uabi
@@ -359,6 +363,16 @@ impl nctx {
             let _ = p.gen8_ppgtt_clear(o.start[k], o.pages as u64 * I915_GTT_PAGE_SIZE);
         }
         self.objs[i].vm[k] = NONE8;
+        self.tlb_dirty = true;
+    }
+
+    /// `vma_invalidate_tlb` after unbinding: no engine may keep a
+    /// translation to pages that are about to go back.
+    pub fn tlb_flush(&mut self, i915: &mut drm_i915_private, gt: &intel_gt) {
+        if self.tlb_dirty {
+            crate::intel_tlb::intel_gt_invalidate_tlb_full(i915, gt);
+            self.tlb_dirty = false;
+        }
     }
 
     /// Object `i` bound at `start` of `vm` (`i915_vma_pin` with
@@ -450,9 +464,10 @@ impl nctx {
 
     /// A zombie whose requests are done: unbound, freed, and its buffer
     /// handed back to the kernel.
-    fn obj_release(&mut self, i: usize) {
+    fn obj_release(&mut self, i915: &mut drm_i915_private, gt: &intel_gt, i: usize) {
         let bo = self.objs[i].bo;
         self.obj_free(i);
+        self.tlb_flush(i915, gt);
         npk_sys::gpudev_released(bo as i32);
     }
 
@@ -580,9 +595,11 @@ impl nctx {
     }
 
     /// Whether a request can be added for client work without overflowing
-    /// a table: a pending slot, a request slot, room on the engine.
-    pub fn can_submit(&self, gt: &intel_gt, engine: usize, ce: Option<usize>) -> bool {
-        if !self.pend.iter().any(|p| !p.used) || !gt.requests.iter().any(|r| !r.used) {
+    /// a table: a pending slot, a request slot outside the module's own
+    /// reserve (`KERNEL_RESERVE`), room on the context's timeline.
+    pub fn can_submit(&self, gt: &intel_gt, ce: Option<usize>) -> bool {
+        use crate::i915_request::KERNEL_RESERVE;
+        if !self.pend.iter().any(|p| !p.used) || gt.requests.iter().filter(|r| !r.used).count() <= KERNEL_RESERVE {
             return false;
         }
         if let Some(ce) = ce {
@@ -590,10 +607,7 @@ impl nctx {
                 return false;
             }
         }
-        gt.engine[engine].is_some_and(|e| {
-            e.sched.nqueue < crate::intel_execlists_submission::SCHED_MAX
-                && e.sched.nrequests < crate::intel_execlists_submission::SCHED_MAX
-        })
+        true
     }
 
     /// The fence counters of client slot `c`, ring `ring`, to the kernel.
@@ -653,7 +667,7 @@ impl nctx {
         if self.nzombies != 0 {
             for i in 0..MAX_OBJECTS {
                 if self.objs[i].used && self.objs[i].zombie && !self.obj_busy(gt, i) {
-                    self.obj_release(i);
+                    self.obj_release(i915, gt, i);
                 }
             }
         }
@@ -663,7 +677,7 @@ impl nctx {
                 if self.clients[c].used && self.clients[c].closing
                     && !self.pend.iter().any(|p| p.used && p.client == c8) {
                     crate::intel_gt_requests::intel_gt_retire_requests(i915, gt);
-                    self.client_teardown(gt, c);
+                    self.client_teardown(i915, gt, c);
                 }
             }
         }
@@ -756,7 +770,7 @@ impl nctx {
     /// and objects go. Objects the kernel already detached (zombies) are
     /// reported released; the others the kernel detaches later and finds
     /// gone.
-    fn client_teardown(&mut self, gt: &mut intel_gt, c: usize) {
+    fn client_teardown(&mut self, i915: &mut drm_i915_private, gt: &mut intel_gt, c: usize) {
         let c8 = c as u8;
         for x in 0..MAX_GEM_CTX {
             if self.ctxs[x].used && self.ctxs[x].client == c8 && !self.ctx_reap(gt, x) {
@@ -775,12 +789,8 @@ impl nctx {
             }
         }
         for i in 0..MAX_OBJECTS {
-            if self.objs[i].used && self.objs[i].client == c8 {
-                if self.objs[i].zombie {
-                    self.obj_release(i);
-                } else {
-                    self.obj_free(i);
-                }
+            if self.objs[i].used && self.objs[i].client == c8 && !self.objs[i].zombie {
+                self.obj_free(i);
             }
         }
         for v in 0..MAX_VMS {
@@ -789,6 +799,12 @@ impl nctx {
                 self.vm_put(v as u8);
             }
         }
+        for i in 0..MAX_OBJECTS {
+            if self.objs[i].used && self.objs[i].client == c8 && self.objs[i].zombie {
+                self.obj_release(i915, gt, i);
+            }
+        }
+        self.tlb_flush(i915, gt);
         self.clients[c] = client::EMPTY;
         self.nclosing -= 1;
     }
@@ -799,11 +815,21 @@ impl nctx {
 /// kernel gets it back with `npk_gpudev_released` once its requests are
 /// done (1), as Linux keeps a closed GEM object alive through its active
 /// VMAs. Nothing waits for the GPU here.
-pub fn obj_detach(st: &mut nctx, gt: &intel_gt, id: u32, res_id: u32) -> Result<i32, i32> {
-    let Some(c) = st.client_slot(id) else { return Ok(0) };
-    let Some(i) = st.obj(c as u8, res_id) else { return Ok(0) };
+pub fn obj_detach(st: &mut nctx, i915: &mut drm_i915_private, gt: &intel_gt, id: u32, res_id: u32)
+                  -> Result<i32, i32> {
+    // Whatever was unbound before is invalidated before the kernel may
+    // free pages on a 0 here.
+    let Some(c) = st.client_slot(id) else {
+        st.tlb_flush(i915, gt);
+        return Ok(0);
+    };
+    let Some(i) = st.obj(c as u8, res_id) else {
+        st.tlb_flush(i915, gt);
+        return Ok(0);
+    };
     if !st.obj_busy(gt, i) {
         st.obj_free(i);
+        st.tlb_flush(i915, gt);
         return Ok(0);
     }
     st.obj_unlink(i);

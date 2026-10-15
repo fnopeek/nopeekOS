@@ -306,6 +306,26 @@ struct Held {
     deadline: u64,
 }
 
+/// A SUBMIT_3D chain taken off the controlq (`take_pending_submit`).
+pub struct PendingSubmit {
+    head: u16,
+    resp_descs: Vec<(u64, u32)>,
+    request: Vec<u8>,
+    size: usize,
+    flags: u32,
+    fence_id: u64,
+    ctx_id: u32,
+    ring: u32,
+    pub job: super::virtio_gpu_ctx::SubmitJob,
+}
+
+impl PendingSubmit {
+    /// The ccmd stream.
+    pub fn stream(&self) -> &[u8] {
+        &self.request[32..32 + self.size]
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 struct Rect { x: u32, y: u32, w: u32, h: u32 }
 
@@ -371,8 +391,11 @@ pub struct VirtioGpu {
     last_blob: [Option<Arc<ForeignPixels>>; MAX_OUTPUTS],
     /// The blob a FLUSH being served must wait for (`Held`).
     hold_for: Option<Arc<ForeignPixels>>,
-    /// The fence a SUBMIT_3D being served must wait for: (ctx, ring, fence).
-    fence_wait: Option<(u32, u32, u64)>,
+    /// A SUBMIT_3D taken off the controlq whose ccmds run outside the
+    /// device lock (`gpu_backend`); serving stops behind it until
+    /// `finish_submit`. `submit_running` while its ccmds run.
+    pending_submit: Option<PendingSubmit>,
+    submit_running: bool,
     held: Option<Held>,
     /// Blobs given back by the guest whose pages gpudev may still have bound.
     retired: Vec<Arc<ForeignPixels>>,
@@ -424,7 +447,8 @@ impl VirtioGpu {
             last_flush_res: [0; MAX_OUTPUTS],
             last_blob: [const { None }; MAX_OUTPUTS],
             hold_for: None,
-            fence_wait: None,
+            pending_submit: None,
+            submit_running: false,
             held: None,
             retired: Vec::new(),
             blob_log_count: 0,
@@ -472,6 +496,10 @@ impl VirtioGpu {
     /// command type, and write the response into the driver-writable
     /// descriptor(s).
     fn service_controlq(&mut self, mem: &GuestMem) -> bool {
+        // Nothing behind a SUBMIT_3D whose ccmds have not run yet.
+        if self.pending_submit.is_some() || self.submit_running {
+            return false;
+        }
         // SUBMIT_3D completions whose fence is done, in queue order per ring.
         let mut completed = self.complete_fences(mem);
         if let Some(h) = &self.held {
@@ -501,6 +529,48 @@ impl VirtioGpu {
             }
         }
         any
+    }
+
+    /// The SUBMIT_3D serving stopped at, to run its ccmds without the
+    /// device lock; serving stays stopped until `finish_submit`.
+    pub fn take_pending_submit(&mut self) -> Option<PendingSubmit> {
+        let p = self.pending_submit.take();
+        self.submit_running |= p.is_some();
+        p
+    }
+
+    pub fn has_pending_submit(&self) -> bool {
+        self.pending_submit.is_some()
+    }
+
+    /// The ccmds of `p` ran (`virtio_gpu_ctx::run_submit`): complete its
+    /// chain, or keep it until its fence is done. True when a chain went
+    /// back to the guest.
+    pub fn finish_submit(&mut self, p: PendingSubmit, result: Result<u64, ()>, mem: &GuestMem) -> bool {
+        if !self.submit_running {
+            // The device was reset meanwhile; the chain is gone with it.
+            return false;
+        }
+        self.submit_running = false;
+        match result {
+            Ok(fence) => {
+                let response = build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, p.flags, p.fence_id);
+                if p.flags & VIRTIO_GPU_FLAG_FENCE != 0 && !self.ctxs.fence_done(p.ctx_id, p.ring, fence) {
+                    let held = Held { head: p.head, response, resp_descs: p.resp_descs, blob: None, deadline: 0 };
+                    self.fenced.push((held, p.ctx_id, p.ring, fence));
+                    false
+                } else {
+                    self.complete(mem, p.head, &response, &p.resp_descs);
+                    true
+                }
+            }
+            Err(()) => {
+                self.log_ctx("SUBMIT_3D refused", p.ctx_id, p.size as u64, false);
+                let response = build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, p.flags, p.fence_id);
+                self.complete(mem, p.head, &response, &p.resp_descs);
+                true
+            }
+        }
     }
 
     /// Fenced SUBMIT_3D completions still waiting.
@@ -590,6 +660,14 @@ impl VirtioGpu {
                 idx = match chain_next(&d, &mut hops, qsize) { Some(n) => n, None => break };
             }
 
+            // A SUBMIT_3D of a known context stops serving here: its ccmds
+            // run without the device lock, then serving goes on in order.
+            if let Some(p) = self.take_submit(head, &resp_descs, &request) {
+                self.pending_submit = Some(p);
+                last_avail = last_avail.wrapping_add(1);
+                break;
+            }
+
             // Dispatch the command + build the response payload (incl.
             // the 24-byte virtio_gpu_ctrl_hdr).
             flushed = request.len() >= 4
@@ -609,13 +687,6 @@ impl VirtioGpu {
                     break;
                 }
             }
-            // A fenced SUBMIT_3D completes when its fence is done.
-            if let Some((ctx, ring, fence)) = self.fence_wait.take() {
-                self.fenced.push((Held { head, response, resp_descs, blob: None, deadline: 0 }, ctx, ring, fence));
-                last_avail = last_avail.wrapping_add(1);
-                continue;
-            }
-
             // Write response across the writable descriptors in order.
             let mut written: u32 = 0;
             let mut roff: usize = 0;
@@ -862,21 +933,10 @@ impl VirtioGpu {
                 build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
             }
             VIRTIO_GPU_CMD_SUBMIT_3D => {
-                let size = le32(request, 24).unwrap_or(0) as usize;
-                let ring = if flags & VIRTIO_GPU_FLAG_INFO_RING_IDX != 0 { request[20] as u32 } else { 0 };
-                let stream = request.get(32..32 + size);
-                match stream.map(|st| self.ctxs.submit(ctx_id, ring, st)) {
-                    Some(Ok(fence)) => {
-                        if flags & VIRTIO_GPU_FLAG_FENCE != 0 && !self.ctxs.fence_done(ctx_id, ring, fence) {
-                            self.fence_wait = Some((ctx_id, ring, fence));
-                        }
-                        build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
-                    }
-                    _ => {
-                        self.log_ctx("SUBMIT_3D refused", ctx_id, size as u64, false);
-                        build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, flags, fence_id)
-                    }
-                }
+                // Reached only when `take_submit` refused it.
+                let size = le32(request, 24).unwrap_or(0);
+                self.log_ctx("SUBMIT_3D refused", ctx_id, size as u64, false);
+                build_ctrl_hdr(VIRTIO_GPU_RESP_ERR_INVALID_PARAM, flags, fence_id)
             }
             VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB => {
                 let rid = le32(request, 24).unwrap_or(0);
@@ -950,6 +1010,27 @@ impl VirtioGpu {
     }
 
     /// Log a native-context event: the first few, and every refusal.
+    /// A well-formed SUBMIT_3D of a known context and ring, as a pending
+    /// submit; None leaves it to `dispatch_control`, which refuses it.
+    fn take_submit(&self, head: u16, resp_descs: &[(u64, u32)], request: &[u8]) -> Option<PendingSubmit> {
+        if le32(request, 0)? != VIRTIO_GPU_CMD_SUBMIT_3D {
+            return None;
+        }
+        let flags = le32(request, 4)?;
+        let fence_id = le64(request, 8)?;
+        let ctx_id = le32(request, 16)?;
+        let ring = if flags & VIRTIO_GPU_FLAG_INFO_RING_IDX != 0 { request[20] as u32 } else { 0 };
+        let size = le32(request, 24)? as usize;
+        if request.len() < 32 || request.len() - 32 < size {
+            return None;
+        }
+        let job = self.ctxs.prepare_submit(ctx_id, ring)?;
+        super::gpu_backend::note(super::gpu_backend::STAT_OTHER, 1);
+        Some(PendingSubmit {
+            head, resp_descs: resp_descs.to_vec(), request: request.to_vec(), size, flags, fence_id, ctx_id, ring, job,
+        })
+    }
+
     fn log_ctx(&mut self, what: &str, id: u32, arg: u64, ok: bool) {
         let n = self.blob_log_count;
         if n >= 24 || (n >= 6 && ok) {
@@ -1288,7 +1369,8 @@ impl VirtioGpu {
             self.drop_host3d(res);
         }
         self.fenced.clear();
-        self.fence_wait = None;
+        self.pending_submit = None;
+        self.submit_running = false;
         let ids: Vec<u32> = self.resources.iter().filter(|r| r.blob.is_some()).map(|r| r.id).collect();
         for id in ids {
             self.release_blob(id);

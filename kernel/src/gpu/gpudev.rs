@@ -1338,9 +1338,10 @@ pub enum Answer {
     Failed,
 }
 
-/// Run guest ccmd `req` for `client` in the module and wait for its answer.
-pub fn ccmd(client: u32, req: &[u8]) -> Answer {
-    if !READY.load(Ordering::Acquire) || !NATIVE.load(Ordering::Acquire) {
+/// Run guest ccmd `req` for `client` in the module and wait for its answer,
+/// at most until `deadline` (TSC).
+pub fn ccmd(client: u32, req: &[u8], deadline: u64) -> Answer {
+    if !READY.load(Ordering::Acquire) || !NATIVE.load(Ordering::Acquire) || stalled() {
         return Answer::Failed;
     }
     let seq = {
@@ -1353,13 +1354,31 @@ pub fn ccmd(client: u32, req: &[u8]) -> Answer {
         seq
     };
     wake_module();
-    let status = wait_seq_yield(seq, native_deadline());
+    // Behind a job the module holds past its deadline nothing comes back in
+    // time: fail now instead of waiting out the submit's deadline.
+    let status = loop {
+        if let Some(s) = seq_done(seq, deadline) {
+            break s;
+        }
+        if stalled() {
+            let mut st = STATE.lock();
+            st.queue.retain(|j| j.seq != seq);
+            st.payloads.remove(&seq);
+            break -62;
+        }
+        fiber::spin_or_yield();
+    };
     let reply = STATE.lock().replies.remove(&seq).flatten();
     match status {
         0 => Answer::Reply(reply.unwrap_or_default()),
         -62 | -5 => Answer::Failed,
         _ => Answer::Malformed,
     }
+}
+
+/// The deadline of one SUBMIT_3D's ccmds together.
+pub fn submit_deadline() -> u64 {
+    native_deadline()
 }
 
 /// What `gpu` reports about the GPU service.

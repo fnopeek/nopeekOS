@@ -460,6 +460,9 @@ pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: 
     let rq = crate::i915_request::i915_request_create(i915, gt, ce);
     crate::intel_engine_pm::intel_engine_pm_put(i915, gt, e);
     let rq = rq?;
+    // The desktop waits for it (I915_PRIORITY_DISPLAY, as Linux raises
+    // work a flip waits for).
+    gt.requests[rq].prio = crate::i915_request::I915_PRIORITY_DISPLAY;
 
     let mut err = crate::gen8_engine_cs::emit_flush(i915, gt, rq, EMIT_INVALIDATE);
     if err.is_ok() {
@@ -479,6 +482,12 @@ pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: 
         let now = linux::now_us();
         if started.is_none() && crate::intel_execlists_submission::execlists_running(gt, e, rq) {
             started = Some(now);
+        }
+        // Still queued behind other work after the job's time: give it up
+        // (it runs as MI_NOOPs and retires), the kernel does it on the CPU.
+        if started.is_none() && now - t0 > DISPATCH_TIMEOUT_US && crate::i915_request::i915_request_cancel(gt, rq) {
+            crate::i915_request::i915_request_put(gt, rq);
+            return Err(-ETIME);
         }
         if started.is_some_and(|s| now - s > DISPATCH_TIMEOUT_US) || now - t0 > crate::gpudev::START_TIMEOUT_US {
             crate::i915_request::i915_request_put(gt, rq);

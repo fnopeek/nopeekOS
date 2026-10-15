@@ -270,7 +270,7 @@ impl GpudevBackend {
 
     /// A ccmd the module runs; a failed or missing answer is EIO in the
     /// reply, as a failed ioctl would be.
-    fn forward(&mut self, ctx: u32, cmd: u32, req: &[u8], rsp: &mut Vec<u8>) -> Result<(), i32> {
+    fn forward(&mut self, ctx: u32, cmd: u32, req: &[u8], rsp: &mut Vec<u8>, deadline: u64) -> Result<(), i32> {
         if cmd == CCMD_IOCTL_SIMPLE && d32(req, 16) == IOCTL_GEM_CONTEXT_DESTROY {
             let id = d32(req, 24);
             if id < 64 {
@@ -279,7 +279,7 @@ impl GpudevBackend {
                 }
             }
         }
-        match gpudev::ccmd(ctx, req) {
+        match gpudev::ccmd(ctx, req, deadline) {
             Answer::Reply(r) => *rsp = r,
             Answer::Malformed => return Err(-EINVAL),
             Answer::Failed => *rsp = i915_error_response(cmd, EIO),
@@ -330,7 +330,7 @@ impl Backend for GpudevBackend {
         4
     }
 
-    fn ccmd(&mut self, ctx: u32, req: &[u8], rsp: &mut Vec<u8>) -> Result<(), i32> {
+    fn ccmd(&mut self, ctx: u32, req: &[u8], rsp: &mut Vec<u8>, deadline: u64) -> Result<(), i32> {
         if req.len() < 16 || self.clients.get(&ctx).is_none_or(|c| c.closed) {
             return Err(-EINVAL);
         }
@@ -339,7 +339,7 @@ impl Backend for GpudevBackend {
             CCMD_GEM_CREATE => self.gem_create(ctx, req),
             CCMD_GEM_CREATE_EXT => self.gem_create_ext(ctx, req),
             CCMD_GEM_SET_MMAP_MODE => self.gem_set_mmap_mode(ctx, req),
-            1..=CCMD_GEM_EXECBUFFER2_V2 => self.forward(ctx, cmd, req, rsp),
+            1..=CCMD_GEM_EXECBUFFER2_V2 => self.forward(ctx, cmd, req, rsp, deadline),
             _ => Err(-EINVAL),
         }
     }
