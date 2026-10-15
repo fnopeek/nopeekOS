@@ -13,6 +13,9 @@
 # packages with this output, and only if the versions match: libEGL, libgbm
 # and libgallium share an internal ABI and must come from one build.
 #
+# Also builds npk-gpuprobe (gpuprobe.c) against this Mesa: one log line per
+# session with the driver the guest got.
+#
 # Output: ~/.cache/nopeekos/mesa/mesa-<ver>-npk.tar.gz (paths below usr/).
 
 set -euo pipefail
@@ -75,6 +78,7 @@ tar -xzf "$ALPINE_CACHE/$TARBALL" -C "$STAGE"
 echo "nameserver 1.1.1.1" > "$STAGE/etc/resolv.conf"
 mkdir -p "$STAGE/src" "$STAGE/var/cache/apk" "$STAGE/out"
 tar -xJf "$CACHE/$MESA_TARBALL" -C "$STAGE/src"
+cp "$SCRIPT_DIR/gpuprobe.c" "$STAGE/src/"
 for p in "$SCRIPT_DIR"/patches/*.patch; do
     patch -d "$STAGE/src/mesa-${MESA_VERSION}" -p1 -s < "$p"
 done
@@ -99,18 +103,23 @@ unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c "
         PATH=\"\$PATH:/usr/lib/llvm${MESA_LLVM}/bin\" meson setup output $(echo $MESON_OPTS) >/dev/null
         meson compile -C output -j $JOBS >/dev/null
         DESTDIR=/out meson install --no-rebuild -C output >/dev/null
+        mkdir -p /out/usr/bin
+        cc -std=c11 -O2 -Wall -Wextra -Werror -I/out/usr/include \$(pkg-config --cflags libdrm) \
+            /src/gpuprobe.c -o /out/usr/bin/npk-gpuprobe -L/out/usr/lib -Wl,-rpath-link,/out/usr/lib -lEGL -lGLESv2 -lgbm -ldrm
     '
 "
 
 # Exactly the runtime files of Alpine's mesa, mesa-egl, mesa-gl, mesa-gles
-# and mesa-gbm; headers, pkg-config files and dev symlinks stay out.
+# and mesa-gbm, plus the probe; headers, pkg-config files and dev symlinks
+# stay out.
 (
     cd "$STAGE/out"
     find usr/lib/libgallium-*.so usr/lib/gbm/dri_gbm.so usr/share/drirc.d \
          usr/lib/libEGL.so.1* usr/lib/libGL.so.1* usr/lib/libGLESv1_CM.so.1* \
-         usr/lib/libGLESv2.so.2* usr/lib/libgbm.so.1* \
+         usr/lib/libGLESv2.so.2* usr/lib/libgbm.so.1* usr/bin/npk-gpuprobe \
          \( -type f -o -type l \) -print | LC_ALL=C sort > "$STAGE/files"
     find usr/lib -name '*.so*' -type f -exec strip --strip-unneeded {} +
+    strip usr/bin/npk-gpuprobe
     tar --owner=0 --group=0 --mtime=@0 -czf "$OUT.tmp" -T "$STAGE/files"
 )
 mv "$OUT.tmp" "$OUT"

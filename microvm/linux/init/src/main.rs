@@ -201,6 +201,8 @@ fn launch_wayland(kmsg_fd: i64) {
     // negotiated CONTEXT_INIT, feature bit 4): without one it only finds
     // llvmpipe, and to get there it loads Mesa and LLVM (230 MB), about 0.6 s
     // per start. A failed probe is the browser's own CPU fallback.
+    // With a GPU, npk-gpuprobe logs which driver the guest's Mesa got
+    // (iris/radeonsi or the llvmpipe fallback), in parallel to the session.
     // npkwm runs as `wl` (uid 1001) and the app as `app` (uid 1000); PID 1,
     // seatd and the control process stay root. Only `wl` can open the
     // npk.windows port and only through seatd does it get the GPU and input
@@ -327,6 +329,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    [ \"$(cat $d/device 2>/dev/null)\" = 0x0010 ] && [ \"$(cut -c5 $d/features 2>/dev/null)\" = 1 ] && GPU=1; \
                  done; \
                  [ $GPU = 1 ] || mount --bind /bin/false /usr/lib/librewolf/gfxtest 2>/dev/null; \
+                 [ $GPU = 1 ] && [ -x /usr/bin/npk-gpuprobe ] && su -s /bin/sh app -c /usr/bin/npk-gpuprobe & \
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  ( sleep 15; while true; do sync 2>/dev/null; sleep 3; done ) & \

@@ -170,7 +170,7 @@ esac
 awk '/^P:/{p=substr($0,3)} /^F:/{d=substr($0,3)} /^R:/{if(p ~ /^mesa(-egl|-gl|-gles|-gbm)?$/) print d"/"substr($0,3)}' "$APK_DB" \
     | while read -r f; do rm -f "$STAGE/$f"; done
 tar -xzf "$MESA_OVERLAY" -C "$STAGE"
-for so in $(tar -tzf "$MESA_OVERLAY" | grep '\.so'); do
+for so in $(tar -tzf "$MESA_OVERLAY" | grep -E '\.so|^usr/bin/'); do
     [ -L "$STAGE/$so" ] && continue
     for lib in $(readelf -d "$STAGE/$so" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
         [ -e "$STAGE/usr/lib/$lib" ] || [ -e "$STAGE/lib/$lib" ] \
