@@ -3,11 +3,13 @@
 //! completion and retirement.
 //!
 //! Requests sit in a fixed table in `intel_gt` and are referred to by
-//! index. Fences, the scheduler's dependency graph and RCU are bookkeeping
-//! and not kept: requests here are created and submitted one after the
-//! other, so the order a dependency would enforce is the submission order.
-//! A table entry is freed when the request is retired and nothing (the
-//! execlists ports, a caller) holds it any more.
+//! index. A fence is named by its timeline (the context) and seqno; a
+//! request's submit fence waits for the foreign fences it was given
+//! (`i915_request_await`), and until they signal the committed request
+//! waits in `gt.waiters` instead of the engine's queue. Later requests of
+//! the same timeline wait behind it, as `__i915_request_add_to_timeline`
+//! orders them. RCU is not kept. A table entry is freed when the request is
+//! retired and nothing (the execlists ports, a caller) holds it any more.
 
 use crate::gen8_engine_cs::Cs;
 use crate::i915_drv::drm_i915_private;
@@ -22,6 +24,8 @@ pub const KERNEL_RESERVE: usize = 8;
 /// `I915_PRIORITY_DISPLAY` (i915_priolist_types.h:24):
 /// I915_CONTEXT_MAX_USER_PRIORITY + 3.
 pub const I915_PRIORITY_DISPLAY: i32 = 1026;
+/// Foreign fences one request may wait for (one per timeline).
+pub const MAX_DEPS: usize = 8;
 
 const ENOMEM: i32 = 12;
 const ENOSPC: i32 = 28;
@@ -59,6 +63,11 @@ pub struct i915_request {
     pub boost: bool,
     /// References besides the timeline's (`i915_request_get`).
     pub refs: u32,
+    /// `rq->submit`: the foreign fences (context, seqno) it waits for, and
+    /// whether it is held in `gt.waiters`.
+    pub deps: [(u16, u32); MAX_DEPS],
+    pub ndeps: u8,
+    pub waiting: bool,
 }
 
 /// `i915_seqno_passed`.
@@ -304,12 +313,115 @@ pub fn __i915_request_queue(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: 
     crate::intel_execlists_submission::submit_request(i915, gt, engine, rq);
 }
 
-/// `i915_request_add`.
+/// `i915_request_add`: queued now, or held until its submit fence signals
+/// when it waits for a foreign fence or an earlier request of its timeline
+/// is held.
 pub fn i915_request_add(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize) {
     if __i915_request_commit(i915, gt, rq).is_err() {
         crate::linux::say("warning: no ring space for the closing breadcrumb");
     }
-    __i915_request_queue(i915, gt, rq);
+    let ce = gt.requests[rq].ce;
+    let behind = gt.waiters[..gt.nwaiters].iter().any(|&w| gt.requests[w as usize].ce == ce);
+    if !behind && deps_done(gt, rq) {
+        gt.requests[rq].ndeps = 0;
+        __i915_request_queue(i915, gt, rq);
+        return;
+    }
+    gt.requests[rq].waiting = true;
+    gt.waiters[gt.nwaiters] = rq as u16;
+    gt.nwaiters += 1;
+    let prio = gt.requests[rq].prio;
+    i915_request_boost_deps(i915, gt, rq, prio);
+}
+
+/// Whether the fence (context `ce`, `seqno`) has signalled.
+pub fn fence_signaled(gt: &intel_gt, ce: u16, seqno: u32) -> bool {
+    ce == u16::MAX || i915_seqno_passed(gt.contexts[ce as usize].timeline.read_hwsp_seqno(), seqno)
+}
+
+fn deps_done(gt: &intel_gt, rq: usize) -> bool {
+    let r = &gt.requests[rq];
+    gt.wedged || r.deps[..r.ndeps as usize].iter().all(|&(ce, s)| fence_signaled(gt, ce, s))
+}
+
+/// `i915_request_await_dma_fence`: `rq` is submitted only after the fence
+/// (context `ce`, `seqno`) signals. A fence of its own timeline is ordered
+/// already; one per timeline is kept, the later. False when `rq` cannot
+/// take another timeline.
+pub fn i915_request_await(gt: &mut intel_gt, rq: usize, ce: u16, seqno: u32) -> bool {
+    if ce == gt.requests[rq].ce || fence_signaled(gt, ce, seqno) {
+        return true;
+    }
+    let r = &mut gt.requests[rq];
+    let n = r.ndeps as usize;
+    if let Some(d) = r.deps[..n].iter_mut().find(|d| d.0 == ce) {
+        if i915_seqno_passed(seqno, d.1) {
+            d.1 = seqno;
+        }
+        return true;
+    }
+    if n == MAX_DEPS {
+        return false;
+    }
+    r.deps[n] = (ce, seqno);
+    r.ndeps += 1;
+    true
+}
+
+/// `__i915_schedule` for a held request: the requests it waits for, held
+/// or queued, run at its priority at least (priority inheritance).
+fn i915_request_boost_deps(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize, prio: i32) {
+    let mut stack = [0u16; MAX_REQUESTS];
+    let mut n = 1;
+    stack[0] = rq as u16;
+    while n > 0 {
+        n -= 1;
+        let w = gt.requests[stack[n] as usize];
+        for &(ce, seqno) in &w.deps[..w.ndeps as usize] {
+            let Some(d) = gt.requests.iter().position(|r| r.used && !r.retired && r.ce == ce && r.seqno == seqno)
+            else {
+                continue;
+            };
+            if gt.requests[d].prio >= prio {
+                continue;
+            }
+            gt.requests[d].prio = prio;
+            if gt.requests[d].pqueue {
+                let e = gt.requests[d].engine as usize;
+                crate::intel_execlists_submission::requeue_request(i915, gt, e, d);
+            } else if gt.requests[d].waiting && n < stack.len() {
+                stack[n] = d as u16;
+                n += 1;
+            }
+        }
+    }
+}
+
+/// `i915_sw_fence` completion for the held requests: in submission order,
+/// each whose fences have signalled and that has no held request of its
+/// timeline before it goes to the engine. Once wedged every one goes (to
+/// the nop submission).
+pub fn i915_request_release_waiters(i915: &mut drm_i915_private, gt: &mut intel_gt) {
+    let mut held_ce = [0u16; MAX_REQUESTS];
+    let mut nheld = 0;
+    let mut i = 0;
+    while i < gt.nwaiters {
+        let rq = gt.waiters[i] as usize;
+        let ce = gt.requests[rq].ce;
+        if held_ce[..nheld].contains(&ce) || !deps_done(gt, rq) {
+            if !held_ce[..nheld].contains(&ce) {
+                held_ce[nheld] = ce;
+                nheld += 1;
+            }
+            i += 1;
+            continue;
+        }
+        gt.waiters.copy_within(i + 1..gt.nwaiters, i);
+        gt.nwaiters -= 1;
+        gt.requests[rq].waiting = false;
+        gt.requests[rq].ndeps = 0;
+        __i915_request_queue(i915, gt, rq);
+    }
 }
 
 /// `__i915_request_skip`: a failed request's payload becomes MI_NOOPs.

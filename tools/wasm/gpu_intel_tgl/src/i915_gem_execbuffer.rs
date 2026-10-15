@@ -7,7 +7,9 @@
 //! would need one is refused: the module cannot write the guest's pages),
 //! placing an unpinned object, the command parser (Gen12 has none),
 //! fences in and out of the guest (the guest kernel waits for its in-fences;
-//! the out-fence is the ring's counter, `npk_gpudev_ring`). Where Linux
+//! the out-fence is the ring's counter, `npk_gpudev_ring`). Implicit sync
+//! is kept: a request waits for the fences in its objects' reservations,
+//! shared with every client that imported the buffer. Where Linux
 //! would wait for an object, a ring or the request table, the guest is told
 //! EAGAIN, which Mesa's `intel_ioctl` repeats.
 
@@ -263,6 +265,20 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
         return Err(EAGAIN);
     }
 
+    // eb_move_to_gpu's implicit sync: the fences each object's reservation
+    // makes the request wait for (none for EXEC_OBJECT_ASYNC), and room for
+    // the request's own. Where Linux would grow a table, EAGAIN.
+    let mut awaits = await_list::EMPTY;
+    for v in &vmas[..count] {
+        let write = v.flags & EXEC_OBJECT_WRITE != 0;
+        if v.flags & EXEC_OBJECT_ASYNC == 0 && !st.resv_await(d.gt, v.obj, ce as u16, write, &mut awaits) {
+            return Err(EAGAIN);
+        }
+        if !st.resv_room(d.gt, v.obj, ce as u16, write) {
+            return Err(EAGAIN);
+        }
+    }
+
     // i915_request_create, eb_request_submit, i915_request_add.
     crate::intel_engine_pm::intel_engine_pm_get(d.i915, d.gt, engine as usize);
     let rq = crate::i915_request::i915_request_create(d.i915, d.gt, ce);
@@ -282,20 +298,17 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
         // eb_requests_add after a failed submit: the payload is skipped.
         d.gt.requests[rq].error = e;
     }
+    for &(fce, fseqno) in &awaits.f[..awaits.n] {
+        crate::i915_request::i915_request_await(d.gt, rq, fce, fseqno);
+    }
     let rq = crate::i915_request::i915_request_get(d.gt, rq);
     let seqno = d.gt.requests[rq].seqno;
     crate::i915_request::i915_request_add(d.i915, d.gt, rq);
 
     // eb_move_to_gpu: the request in each object's reservation.
-    let class = d.gt.engine[engine as usize].map(|e| uabi_class(e.class)).unwrap_or(0) as usize;
+    let class = d.gt.engine[engine as usize].map(|e| uabi_class(e.class)).unwrap_or(0) as u8;
     for v in &vmas[..count] {
-        let o = &mut st.objs[v.obj];
-        if class < o.busy.len() {
-            o.busy[class] = (ce as u16, seqno);
-            if v.flags & EXEC_OBJECT_WRITE != 0 {
-                o.write_class = class as u8;
-            }
-        }
+        st.resv_add(d.gt, v.obj, ce as u16, seqno, class, v.flags & EXEC_OBJECT_WRITE != 0);
     }
     st.pend_add(c, ring, rq, x, engine);
     st.report_ring(c, ring);

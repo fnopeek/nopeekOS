@@ -163,6 +163,26 @@ fn queue_request(gt: &mut intel_gt, e: usize, rq: usize) {
     gt.requests[rq].pqueue = true;
 }
 
+/// `ipi_priority` / `__i915_schedule` for a queued request whose priority
+/// was raised: it moves up the queue, and the engine is kicked when it now
+/// beats the queue's hint.
+pub fn requeue_request(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, rq: usize) {
+    let Some(x) = gt.engine[e].as_mut() else { return };
+    let s = &mut x.sched;
+    let Some(at) = s.queue[..s.nqueue].iter().position(|&r| r as usize == rq) else { return };
+    s.queue.copy_within(at + 1..s.nqueue, at);
+    s.nqueue -= 1;
+    queue_request(gt, e, rq);
+    let prio = gt.requests[rq].prio;
+    let hint = gt.engine[e].map(|x| x.sched.queue_priority_hint).unwrap_or(i32::MIN);
+    if prio > hint {
+        if let Some(x) = gt.engine[e].as_mut() {
+            x.sched.queue_priority_hint = prio;
+        }
+        execlists_submission_tasklet(i915, gt, e);
+    }
+}
+
 /// `engine->submit_request`: `execlists_submit_request`, or once wedged
 /// `nop_submit_request`.
 pub fn submit_request(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, rq: usize) {

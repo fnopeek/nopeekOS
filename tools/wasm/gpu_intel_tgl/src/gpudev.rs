@@ -167,7 +167,8 @@ pub(crate) fn ppgtt_bind(gt: &mut intel_gt, phys: u64, size: u64, pat_index: u32
 }
 
 /// Runs everything the interrupt delivered: the handler, the engines'
-/// tasklets, then a retire pass, which parks the GT once it is idle.
+/// tasklets, the held requests whose fences have signalled, then a retire
+/// pass, which parks the GT once it is idle.
 pub(crate) fn service_interrupts(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     crate::i915_irq::intel_irq_service(i915);
     crate::intel_gt_requests::intel_engines_cs_irq(i915, gt);
@@ -175,6 +176,9 @@ pub(crate) fn service_interrupts(i915: &mut drm_i915_private, gt: &mut intel_gt)
         if gt.engine[e].is_some() && gt.engines_initialized && crate::intel_gt_pm::intel_gt_pm_is_awake(gt) {
             crate::intel_gt_requests::intel_engine_flush_submission(i915, gt, e);
         }
+    }
+    if gt.nwaiters != 0 {
+        crate::i915_request::i915_request_release_waiters(i915, gt);
     }
     crate::intel_gt_requests::intel_gt_retire_requests(i915, gt);
 }

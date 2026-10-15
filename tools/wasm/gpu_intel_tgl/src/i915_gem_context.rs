@@ -128,9 +128,12 @@ pub struct gem_obj {
     /// Bindings: vm slot (NONE8 when unbound) and start.
     pub vm: [u8; 2],
     pub start: [u64; 2],
-    /// `dma_resv` as far as busy needs it: (context, seqno) per uabi class.
-    pub busy: [(u16, u32); 4],
-    pub write_class: u8,
+    /// `obj->base.resv`: the fences of this client's requests on it.
+    pub fences: [resv_fence; RESV_FENCES],
+    /// The next object on the same kernel buffer, a ring (itself when the
+    /// buffer is not shared). An import is the same GEM object in Linux, so
+    /// the fences of the whole ring are its reservation.
+    pub share: u16,
     pub next: u16,
     /// Detached while busy: no longer named by its client, unbound and
     /// reported released (`npk_gpudev_released`) once idle.
@@ -139,8 +142,53 @@ pub struct gem_obj {
 
 impl gem_obj {
     const EMPTY: gem_obj = gem_obj { used: false, client: 0, res_id: 0, bo: 0, size: 0, pages: 0, tiling: 0, stride: 0,
-                                     vm: [NONE8; 2], start: [0; 2], busy: [(NONE16, 0); 4], write_class: NONE8,
-                                     next: NONE16, zombie: false };
+                                     vm: [NONE8; 2], start: [0; 2], fences: [resv_fence::EMPTY; RESV_FENCES],
+                                     share: NONE16, next: NONE16, zombie: false };
+}
+
+/// Fences one object keeps: one per timeline and usage.
+pub const RESV_FENCES: usize = 8;
+
+/// A fence in a reservation (`dma_resv_add_fence` with
+/// DMA_RESV_USAGE_WRITE or _READ): the request's context and seqno and the
+/// uabi class of its engine.
+#[derive(Clone, Copy)]
+pub struct resv_fence {
+    pub ce: u16,
+    pub seqno: u32,
+    pub class: u8,
+    pub write: bool,
+}
+
+impl resv_fence {
+    const EMPTY: resv_fence = resv_fence { ce: NONE16, seqno: 0, class: 0, write: false };
+}
+
+/// Fences a new request has to wait for, one per timeline.
+#[derive(Clone, Copy)]
+pub struct await_list {
+    pub n: usize,
+    pub f: [(u16, u32); crate::i915_request::MAX_DEPS],
+}
+
+impl await_list {
+    pub const EMPTY: await_list = await_list { n: 0, f: [(NONE16, 0); crate::i915_request::MAX_DEPS] };
+
+    /// One per timeline, the later seqno; false when full.
+    fn add(&mut self, ce: u16, seqno: u32) -> bool {
+        if let Some(d) = self.f[..self.n].iter_mut().find(|d| d.0 == ce) {
+            if crate::i915_request::i915_seqno_passed(seqno, d.1) {
+                d.1 = seqno;
+            }
+            return true;
+        }
+        if self.n == self.f.len() {
+            return false;
+        }
+        self.f[self.n] = (ce, seqno);
+        self.n += 1;
+        true
+    }
 }
 
 /// A client request whose fence is not signalled yet.
@@ -292,26 +340,75 @@ impl nctx {
         self.clients[c as usize].vm_ids.iter().find(|x| x.1 != NONE8 && x.0 == id).map(|x| x.1)
     }
 
-    /// Whether object `i` is still used by a request.
+    /// Whether object `i` is still used by a request of its client (its
+    /// bindings and pages are that client's).
     pub fn obj_busy(&self, gt: &intel_gt, i: usize) -> bool {
         // Wedged, no request runs again (Linux fails and retires them all).
-        !crate::intel_gt::intel_gt_is_wedged(gt) && self.objs[i].busy.iter().any(|&(ce, s)| !seqno_done(gt, ce, s))
+        !crate::intel_gt::intel_gt_is_wedged(gt) && self.objs[i].fences.iter().any(|f| !seqno_done(gt, f.ce, f.seqno))
     }
 
-    /// `i915_gem_busy_ioctl`'s answer: readers in the high half by uabi
-    /// class, the writer's class + 1 in the low.
+    /// The objects sharing the buffer of object `i`, `i` first.
+    fn share_ring(&self, i: usize) -> impl Iterator<Item = usize> + '_ {
+        let mut at = Some(i);
+        core::iter::from_fn(move || {
+            let cur = at?;
+            let next = self.objs[cur].share as usize;
+            at = if next == i || self.objs[cur].share == NONE16 { None } else { Some(next) };
+            Some(cur)
+        })
+    }
+
+    /// `i915_gem_busy_ioctl`'s answer over the reservation: every reader's
+    /// uabi class in the high half, a writer's class + 1 in the low.
     pub fn obj_busy_flags(&self, gt: &intel_gt, i: usize) -> u32 {
-        let o = &self.objs[i];
+        if crate::intel_gt::intel_gt_is_wedged(gt) {
+            return 0;
+        }
         let mut busy = 0u32;
-        for (class, &(ce, s)) in o.busy.iter().enumerate() {
-            if !seqno_done(gt, ce, s) {
-                busy |= 1 << (16 + class);
-                if o.write_class as usize == class {
-                    busy |= class as u32 + 1;
+        for j in self.share_ring(i) {
+            for f in &self.objs[j].fences {
+                if !seqno_done(gt, f.ce, f.seqno) {
+                    busy |= 1 << (16 + f.class as u32);
+                    if f.write {
+                        busy = (busy & !0xffff) | (f.class as u32 + 1);
+                    }
                 }
             }
         }
         busy
+    }
+
+    /// `i915_request_await_object`: the fences a request on context `ce`
+    /// waits for when it reads (the writers) or writes (all) object `i`.
+    /// False when `list` is full.
+    pub fn resv_await(&self, gt: &intel_gt, i: usize, ce: u16, write: bool, list: &mut await_list) -> bool {
+        for j in self.share_ring(i) {
+            for f in &self.objs[j].fences {
+                if f.ce != ce && (write || f.write) && !seqno_done(gt, f.ce, f.seqno) && !list.add(f.ce, f.seqno) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether `resv_add` for context `ce` will find a place in object `i`.
+    pub fn resv_room(&self, gt: &intel_gt, i: usize, ce: u16, write: bool) -> bool {
+        self.objs[i].fences.iter().any(|f| f.ce == NONE16 || seqno_done(gt, f.ce, f.seqno) || (f.ce == ce && (write || !f.write)))
+    }
+
+    /// `dma_resv_add_fence`: a fence of the same timeline replaces an older
+    /// one of no stronger usage, a signalled one makes room.
+    pub fn resv_add(&mut self, gt: &intel_gt, i: usize, ce: u16, seqno: u32, class: u8, write: bool) {
+        let new = resv_fence { ce, seqno, class, write };
+        let fences = &mut self.objs[i].fences;
+        if let Some(f) = fences.iter_mut().find(|f| f.ce == ce && (write || !f.write)) {
+            *f = new;
+            return;
+        }
+        if let Some(f) = fences.iter_mut().find(|f| f.ce == NONE16 || seqno_done(gt, f.ce, f.seqno)) {
+            *f = new;
+        }
     }
 
     /// `i915_ppgtt_create`, or an emptied address space kept from before.
@@ -427,6 +524,14 @@ impl nctx {
         let h = hash_of(c, res_id);
         self.objs[i] = gem_obj { used: true, client: c, res_id, bo, size, pages, next: self.hash[h], ..gem_obj::EMPTY };
         self.hash[h] = i as u16;
+        // Another client's object on the same buffer: one reservation.
+        match self.objs.iter().enumerate().position(|(j, o)| j != i && o.used && o.bo == bo) {
+            Some(j) => {
+                self.objs[i].share = self.objs[j].share;
+                self.objs[j].share = i as u16;
+            }
+            None => self.objs[i].share = i as u16,
+        }
         Ok(())
     }
 
@@ -434,6 +539,14 @@ impl nctx {
     pub fn obj_free(&mut self, i: usize) {
         for k in 0..2 {
             self.obj_unbind(i, k);
+        }
+        let next = self.objs[i].share;
+        if next != NONE16 && next as usize != i {
+            let mut p = next as usize;
+            while self.objs[p].share as usize != i {
+                p = self.objs[p].share as usize;
+            }
+            self.objs[p].share = next;
         }
         if self.objs[i].zombie {
             self.nzombies -= 1;
@@ -617,11 +730,15 @@ impl nctx {
         npk_sys::gpudev_ring(cl.id as i32, ring as i32, r.submitted as i64, r.completed as i64);
     }
 
-    /// What the service loop does after the interrupts: signal the fences
-    /// of completed client requests in ring order, note a request that runs
+    /// What the service loop does after the interrupts: submit held
+    /// requests whose fences have signalled, signal the fences of completed
+    /// client requests in ring order, note a request that runs
     /// past the hang limit (the GT is wedged then; returns true), and reap
     /// destroyed contexts.
     pub fn poll(&mut self, i915: &mut drm_i915_private, gt: &mut intel_gt) -> bool {
+        if gt.nwaiters != 0 {
+            crate::i915_request::i915_request_release_waiters(i915, gt);
+        }
         let now = linux::now_us();
         let mut hung = None;
         let mut touched = [(NONE8, 0u8); 16];

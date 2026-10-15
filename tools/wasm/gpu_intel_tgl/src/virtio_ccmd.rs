@@ -300,8 +300,9 @@ fn set_tiling(st: &mut nctx, d: &mut drm, i: usize, p: &mut [u8]) -> i32 {
     0
 }
 
-/// `i915_gem_set_domain_ioctl`: it waits for the GPU; here a busy object
-/// answers EAGAIN, and Mesa asks again.
+/// `i915_gem_set_domain_ioctl`: it waits for the GPU (the whole
+/// reservation, another client's requests on a shared buffer too); here a
+/// busy object answers EAGAIN, and Mesa asks again.
 fn set_domain(st: &mut nctx, d: &mut drm, i: usize, p: &[u8]) -> i32 {
     let (read, write) = (rd32(p, 4), rd32(p, 8));
     // I915_GEM_GPU_DOMAINS may not be asked for.
@@ -309,7 +310,9 @@ fn set_domain(st: &mut nctx, d: &mut drm, i: usize, p: &[u8]) -> i32 {
     if (write | read) & GPU_DOMAINS != 0 || (write != 0 && read != write) {
         return EINVAL;
     }
-    if st.obj_busy(d.gt, i) {
+    // A read waits for the writers, a write for everyone.
+    let busy = st.obj_busy_flags(d.gt, i);
+    if (write != 0 && busy != 0) || busy & 0xffff != 0 {
         return EAGAIN;
     }
     0

@@ -147,6 +147,10 @@ pub struct intel_gt {
     /// The contexts and requests the engine side has made.
     pub contexts: [crate::intel_context::intel_context; crate::intel_context::MAX_CONTEXTS],
     pub requests: [crate::i915_request::i915_request; crate::i915_request::MAX_REQUESTS],
+    /// Committed requests whose submit fence has not signalled yet, in
+    /// submission order (`i915_request_add` → `i915_sw_fence_commit`).
+    pub waiters: [u16; crate::i915_request::MAX_REQUESTS],
+    pub nwaiters: usize,
 }
 
 impl intel_gt {
@@ -178,6 +182,8 @@ impl intel_gt {
             vm: None,
             contexts: [Default::default(); crate::intel_context::MAX_CONTEXTS],
             requests: [Default::default(); crate::i915_request::MAX_REQUESTS],
+            waiters: [0; crate::i915_request::MAX_REQUESTS],
+            nwaiters: 0,
         }
     }
 }
@@ -724,6 +730,8 @@ fn __intel_gt_set_wedged(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     }
 
     reset_finish(i915, gt, awake);
+    // Requests still waiting for a fence go through the nop submission.
+    crate::i915_request::i915_request_release_waiters(i915, gt);
 }
 
 /// `intel_gt_set_wedged`.

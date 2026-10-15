@@ -162,6 +162,7 @@ pub const I915_EXEC_UNKNOWN_FLAGS: u64 = !((I915_EXEC_USE_EXTENSIONS << 1) - 1);
 pub const EXEC_OBJECT_WRITE: u64 = 1 << 2;
 pub const EXEC_OBJECT_PINNED: u64 = 1 << 4;
 pub const EXEC_OBJECT_PAD_TO_SIZE: u64 = 1 << 5;
+pub const EXEC_OBJECT_ASYNC: u64 = 1 << 6;
 pub const EXEC_OBJECT_CAPTURE: u64 = 1 << 7;
 /// `__EXEC_OBJECT_UNKNOWN_FLAGS`.
 pub const EXEC_OBJECT_UNKNOWN_FLAGS: u64 = !((EXEC_OBJECT_CAPTURE << 1) - 1);
