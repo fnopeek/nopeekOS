@@ -115,6 +115,21 @@ fn log_execbuffer(c: u8, ring: u32, count: usize, batch_len: u32, ret: i32) {
     }
 }
 
+/// Earlier batches of address space `vm` that wrote through an unbound
+/// address, seen in its poisoned scratch page; a fixed number of lines.
+fn report_scratch_writes(st: &nctx, vm: u8, c: u8, ctx_id: u32) {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    const MAX_LINES: u32 = 8;
+    static LINES: AtomicU32 = AtomicU32::new(0);
+    let Some(p) = st.vms[vm as usize].ppgtt.as_ref() else { return };
+    if let Some((off, val)) = p.scratch_written()
+        && LINES.fetch_add(1, Ordering::Relaxed) < MAX_LINES {
+        linux::Line::new().s("native context: client slot ").dec(c as u64).s(" context ").dec(ctx_id as u64)
+            .s(": an earlier batch wrote through an unbound address (scratch page byte ").hex(off)
+            .s(" = ").hex(val as u32).s(")").say();
+    }
+}
+
 /// `i915_gem_do_execbuffer` for softpinned objects; Err is the positive
 /// errno for `ret`.
 #[allow(clippy::too_many_arguments)]
@@ -217,6 +232,7 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
     // binding elsewhere, or another object in the way, is unbound once idle
     // (`i915_gem_evict_for_node`); one of this request in the way is a clash.
     let vm = st.ctxs[x].vm;
+    report_scratch_writes(st, vm, c, ctx_id);
     for i in 0..count {
         let v = vmas[i];
         let size = st.objs[v.obj].pages as u64 * I915_GTT_PAGE_SIZE;

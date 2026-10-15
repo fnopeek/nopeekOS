@@ -403,9 +403,51 @@ fn alloc_pt_dma(size: u64) -> Result<drm_i915_gem_object, i32> {
     i915_gem_object_create_internal(size)
 }
 
+/// `POISON_FREE`, the scratch fill of a CONFIG_DRM_I915_DEBUG_GEM build:
+/// a byte that is no longer this was written by the GPU through an
+/// address nothing is bound at.
+const SCRATCH_POISON: u8 = 0x6b;
+
+/// `poison_scratch_page`, as with CONFIG_DRM_I915_DEBUG_GEM.
+fn poison_scratch_page(obj: &drm_i915_gem_object) -> Result<(), i32> {
+    let d = obj.map().ok_or(-ENOMEM)?;
+    let page = [SCRATCH_POISON; 4096];
+    let mut off = 0u64;
+    while off < obj.size {
+        if !d.write(off as u32, &page) {
+            return Err(-ENOMEM);
+        }
+        off += 4096;
+    }
+    Ok(())
+}
+
+impl i915_ppgtt {
+    /// The first byte of the scratch page that lost its poison, and its
+    /// value; the page is poisoned again so that later writes show too.
+    pub fn scratch_written(&self) -> Option<(u32, u8)> {
+        let obj = &self.scratch[0];
+        let d = obj.map()?;
+        let mut page = [0u8; 4096];
+        let mut off = 0u64;
+        while off < obj.size {
+            if !d.read(off as u32, &mut page) {
+                return None;
+            }
+            if let Some(i) = page.iter().position(|&b| b != SCRATCH_POISON) {
+                let _ = poison_scratch_page(obj);
+                return Some((off as u32 + i as u32, page[i]));
+            }
+            off += 4096;
+        }
+        None
+    }
+}
+
 /// `setup_scratch_page`: 64K on a 4-level table when the platform has 64K
 /// pages but not 64K-only tables, and only if it comes out contiguous and
-/// aligned; otherwise 4K. The page stays cleared (no DRM_I915_DEBUG_GEM).
+/// aligned; otherwise 4K. The page is poisoned as with
+/// CONFIG_DRM_I915_DEBUG_GEM, so that stray GPU writes can be seen.
 fn setup_scratch_page(i915: &drm_i915_private) -> Result<drm_i915_gem_object, i32> {
     let mut size = I915_GTT_PAGE_SIZE_4K;
     if i915.runtime.page_sizes as u64 & I915_GTT_PAGE_SIZE_64K != 0 && TGL_HAS_64K_PAGES == 0 {
@@ -414,6 +456,7 @@ fn setup_scratch_page(i915: &drm_i915_private) -> Result<drm_i915_gem_object, i3
     loop {
         if let Ok(obj) = alloc_pt_dma(size) {
             if obj.phys & (size - 1) == 0 {
+                poison_scratch_page(&obj)?;
                 return Ok(obj);
             }
         }
