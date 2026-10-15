@@ -140,8 +140,11 @@ impl Grant {
         match self {
             Grant::Range(p, n) => one(*p, *n),
             Grant::Pages(list, first, n) => {
-                for &p in list.pages.iter().skip(*first).take(*n) {
-                    one(p, 1);
+                let pages = &list.pages[(*first).min(list.pages.len())..(*first + *n).min(list.pages.len())];
+                if on {
+                    crate::drivers::vtd::grant_list(dev, pages);
+                } else {
+                    crate::drivers::vtd::revoke_list(dev, pages);
                 }
             }
         }

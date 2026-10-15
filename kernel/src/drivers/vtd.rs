@@ -507,6 +507,56 @@ pub fn protected(dev: PciAddr) -> bool {
     STATE.lock().domain.as_ref().is_some_and(|d| d.dev == dev)
 }
 
+/// Let `dev` reach every page of `list` (page addresses), with one flush
+/// for the lot. No-op for an unprotected device.
+pub fn grant_list(dev: PciAddr, list: &[u64]) {
+    let mut st = STATE.lock();
+    let Some(d) = st.domain.as_mut().filter(|d| d.dev == dev) else { return };
+    let mut fresh = false;
+    for &p in list {
+        let p = p & VTD_PAGE_MASK;
+        let n = d.granted.entry(p).or_insert(0);
+        *n += 1;
+        if *n == 1 {
+            fresh = true;
+            if !d.set_leaf(p, true) {
+                crate::kprintln!("[npk] iommu: no memory for the page table, {:#x} stays unreachable", p);
+            }
+        }
+    }
+    if fresh {
+        let r = if cap_caching_mode(d.cap) { d.flush_iotlb(DMA_TLB_DSI_FLUSH) } else { d.flush_write_buffer() };
+        if let Err(e) = r {
+            crate::kprintln!("[npk] iommu: {}", e);
+        }
+    }
+}
+
+/// Take back one grant of every page of `list`, with one IOTLB flush for
+/// the lot (Linux gathers an unmap and flushes once, `iommu_iotlb_gather`).
+/// When it returns, the device no longer reaches the pages whose last grant
+/// this was.
+pub fn revoke_list(dev: PciAddr, list: &[u64]) {
+    let mut st = STATE.lock();
+    let Some(d) = st.domain.as_mut().filter(|d| d.dev == dev) else { return };
+    let mut gone = false;
+    for &p in list {
+        let p = p & VTD_PAGE_MASK;
+        let Some(n) = d.granted.get_mut(&p) else { continue };
+        *n -= 1;
+        if *n == 0 {
+            d.granted.remove(&p);
+            d.set_leaf(p, false);
+            gone = true;
+        }
+    }
+    if gone {
+        if let Err(e) = d.flush_iotlb(DMA_TLB_DSI_FLUSH) {
+            crate::kprintln!("[npk] iommu: {}", e);
+        }
+    }
+}
+
 /// Let `dev` reach `pages` pages from `phys`. No-op for an unprotected device.
 pub fn grant(dev: PciAddr, phys: u64, pages: usize) {
     let mut st = STATE.lock();
