@@ -312,6 +312,15 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
     }
     st.pend_add(c, ring, rq, x, engine);
     st.report_ring(c, ring);
+    // Once per boot, with a client's work on the engine: the registers its
+    // batches depend on, read back.
+    {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        static VERIFIED: AtomicBool = AtomicBool::new(false);
+        if !VERIFIED.swap(true, Ordering::Relaxed) {
+            crate::intel_workarounds::verify_all(d.i915, d.gt, "first client batch");
+        }
+    }
     if let Err(e) = err {
         linux::say("native context: a batch could not be emitted, its request is skipped");
         return Err(-e);

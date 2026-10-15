@@ -637,3 +637,35 @@ pub fn intel_engine_emit_ctx_wa(i915: &mut drm_i915_private, gt: &mut intel_gt, 
 
     crate::gen8_engine_cs::emit_flush(i915, gt, rq, EMIT_BARRIER)
 }
+
+/// Every workaround list read back from the hardware, and every engine's
+/// RING_FORCE_TO_NONPRIV slots against its whitelist (what
+/// `intel_gt_verify_workarounds` and `intel_engine_verify_workarounds` check,
+/// plus the whitelist a client's batch depends on). A lost one is logged by
+/// `wa_verify`; the summary says how many lists held.
+pub fn verify_all(i915: &mut drm_i915_private, gt: &intel_gt, from: &str) {
+    let mut lists = 0u32;
+    let mut held = 0u32;
+    lists += 1;
+    held += intel_gt_verify_workarounds(i915, gt, from) as u32;
+    for e in 0..gt.engine.len() {
+        let Some(x) = gt.engine[e] else { continue };
+        lists += 1;
+        held += wa_list_verify(i915, gt, &x.wa_list, from) as u32;
+        let w = &x.whitelist;
+        lists += 1;
+        let mut ok = true;
+        for i in 0..RING_MAX_NONPRIV_SLOTS {
+            let cur = i915.uncore.intel_uncore_read(RING_FORCE_TO_NONPRIV(x.mmio_base, i));
+            let want = if (i as usize) < w.count { w.list[i as usize].reg } else { RING_NOPID(x.mmio_base) };
+            if cur != want {
+                ok = false;
+                Line::new().s("error: whitelist ").s(w.engine_name).s(" slot ").dec(i as u64).s(" = ").hex(cur)
+                    .s(", expected ").hex(want).s(" on ").s(from).say();
+            }
+        }
+        held += ok as u32;
+    }
+    Line::new().s("workarounds on ").s(from).s(": ").dec(held as u64).s(" of ").dec(lists as u64)
+        .s(" lists hold").say();
+}
