@@ -12,8 +12,10 @@
  * in a first context the way a window surface is, read back there, then
  * imported through its dma-buf into a second context on its own fd and
  * read there as a renderbuffer, sampled as a texture the way the
- * compositor composes it, and imported without its modifier. A line before
- * each step names the step, so a hang shows where it stopped. */
+ * compositor composes it, and imported without its modifier. Then what a
+ * browser does within its own context: a large texture uploaded by the CPU
+ * and sampled, and a texture rendered to and sampled. A line before each
+ * step names the step, so a hang shows where it stopped. */
 #define _GNU_SOURCE
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -22,6 +24,8 @@
 #include <fcntl.h>
 #include <drm_fourcc.h>
 #include <gbm.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
@@ -296,6 +300,157 @@ static int wants_share_tests(void)
     return 0;
 }
 
+/* A program drawing texture unit 0 (sampler2D) over a full-screen quad. */
+static GLuint tex_program(void)
+{
+    static const char *vs = "attribute vec2 p; varying vec2 t;"
+                            "void main() { t = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }";
+    static const char *fs = "precision mediump float; varying vec2 t; uniform sampler2D s;"
+                            "void main() { gl_FragColor = texture2D(s, t); }";
+    GLuint sh[2] = { glCreateShader(GL_VERTEX_SHADER), glCreateShader(GL_FRAGMENT_SHADER) };
+    glShaderSource(sh[0], 1, &vs, NULL);
+    glShaderSource(sh[1], 1, &fs, NULL);
+    glCompileShader(sh[0]);
+    glCompileShader(sh[1]);
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, sh[0]);
+    glAttachShader(prog, sh[1]);
+    glBindAttribLocation(prog, 0, "p");
+    glLinkProgram(prog);
+    glDeleteShader(sh[0]);
+    glDeleteShader(sh[1]);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    return ok ? prog : 0;
+}
+
+/* `tex` drawn into a new w x h renderbuffer; that framebuffer stays bound
+ * for reading. Returns the framebuffer, 0 when incomplete. */
+static GLuint draw_tex(GLuint prog, GLuint tex, int w, int h, GLuint *rb)
+{
+    static const GLfloat quad[] = { -1, -1, 1, -1, -1, 1, 1, 1 };
+    GLuint fb;
+    glGenRenderbuffers(1, rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, *rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8_OES, w, h);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, *rb);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        glDeleteFramebuffers(1, &fb);
+        return 0;
+    }
+    glViewport(0, 0, w, h);
+    glUseProgram(prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad);
+    glEnableVertexAttribArray(0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glFinish();
+    return fb;
+}
+
+#define UP 2048
+
+static uint32_t up_pixel(int x, int y)
+{
+    return (uint32_t)(x & 255) | (uint32_t)(y & 255) << 8 | (uint32_t)((x >> 8) | (y >> 8) << 4) << 16 | 0xffu << 24;
+}
+
+/* What a browser does with glyphs and images: a large texture written by
+ * the CPU (glTexImage2D, staged through a buffer the CPU maps), then
+ * sampled on the card; 16 points spread over it must hold the pattern.
+ * Then render to texture: quadrants cleared into a texture, sampled into
+ * another target, read back. */
+static void upload_tests(struct side *a)
+{
+    eglMakeCurrent(a->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, a->ctx);
+    GLuint prog = tex_program();
+    if (!prog) {
+        printf("<0>[gpu] guest upload: no program\n");
+        return;
+    }
+    uint32_t *img = malloc((size_t)UP * UP * 4);
+    if (!img)
+        return;
+    for (int y = 0; y < UP; y++)
+        for (int x = 0; x < UP; x++)
+            img[(size_t)y * UP + x] = up_pixel(x, y);
+    GLuint tex, rb;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, UP, UP, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+    free(img);
+    GLuint fb = draw_tex(prog, tex, UP, UP, &rb);
+    int bad = 0, first_x = -1, first_y = -1;
+    uint32_t got_first = 0;
+    for (int i = 0; fb && i < 16; i++) {
+        int x = (i * 523 + 17) % UP, y = (i * 977 + 31) % UP;
+        uint32_t px = 0;
+        glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &px);
+        if (px != up_pixel(x, y) && bad++ == 0) {
+            first_x = x;
+            first_y = y;
+            got_first = px;
+        }
+    }
+    if (!fb)
+        printf("<0>[gpu] guest upload %dx%d: framebuffer incomplete\n", UP, UP);
+    else if (bad)
+        printf("<0>[gpu] guest upload %dx%d: %d of 16 WRONG, first at %d,%d: %08x want %08x\n", UP, UP, bad,
+               first_x, first_y, got_first, up_pixel(first_x, first_y));
+    else
+        printf("<0>[gpu] guest upload %dx%d: 16 of 16 ok\n", UP, UP);
+    if (fb)
+        glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &rb);
+
+    /* Render to texture. */
+    GLuint rt, rtfb;
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1024, 1024, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    rt = tex;
+    glGenFramebuffers(1, &rtfb);
+    glBindFramebuffer(GL_FRAMEBUFFER, rtfb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+    char out[40] = "fb incomplete";
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        glViewport(0, 0, 1024, 1024);
+        glDisable(GL_SCISSOR_TEST);
+        glClearColor(0x20 / 255.0f, 0x40 / 255.0f, 0x60 / 255.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_SCISSOR_TEST);
+        static const int q[3][2] = { { 512, 0 }, { 0, 512 }, { 512, 512 } };
+        static const float c[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+        for (int i = 0; i < 3; i++) {
+            glScissor(q[i][0], q[i][1], 512, 512);
+            glClearColor(c[i][0], c[i][1], c[i][2], 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+        glDisable(GL_SCISSOR_TEST);
+        GLuint fb2 = draw_tex(prog, rt, 1024, 1024, &rb);
+        if (fb2) {
+            static const int at[4][2] = { { 256, 256 }, { 768, 256 }, { 256, 768 }, { 768, 768 } };
+            for (int i = 0; i < 4; i++) {
+                unsigned char px[4] = { 0 };
+                glReadPixels(at[i][0], at[i][1], 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                sprintf(out + i * 9, "%02x%02x%02x%02x%c", px[0], px[1], px[2], px[3], i < 3 ? '/' : 0);
+            }
+            glDeleteFramebuffers(1, &fb2);
+        }
+        glDeleteRenderbuffers(1, &rb);
+    }
+    printf("<0>[gpu] guest render to texture: %s -> %s\n", out,
+           strcmp(out, "204060ff/ff0000ff/00ff00ff/0000ffff") ? "WRONG" : "ok");
+    glDeleteFramebuffers(1, &rtfb);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(prog);
+    eglMakeCurrent(a->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+}
+
 static void share_tests(const char *node)
 {
     struct side a, b;
@@ -310,6 +465,7 @@ static void share_tests(const char *node)
     share_test(&a, &b, "linear", DRM_FORMAT_MOD_LINEAR);
     share_test(&a, &b, "Y", I915_FORMAT_MOD_Y_TILED);
     share_test(&a, &b, "Y+RC_CCS_CC", I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS_CC);
+    upload_tests(&a);
     side_close(&a);
     side_close(&b);
 }
