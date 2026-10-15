@@ -445,7 +445,6 @@ extern "C" fn refuel(ctx: *mut u64) {
             *ctx.add(vmctx::FUEL as usize / 8) = total as u64;
             return;
         }
-        crate::watchdog::touch_here();
         crate::smp::fiber::yield_if_contended();
         let slice = total.min(FUEL_SLICE);
         *ctx.add(vmctx::FUEL_RESERVE as usize / 8) = (total - slice) as u64;

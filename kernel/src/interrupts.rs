@@ -357,31 +357,12 @@ extern "x86-interrupt" fn divide_error_handler(frame: InterruptStackFrame) {
 /// an NMI may land while the console lock is held.
 pub static NMI_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// A panicking core stops the others with an NMI (`fatal::begin`); the
-/// watchdog's counter overflows arrive here too (`watchdog::nmi`).
-extern "x86-interrupt" fn nmi_handler(frame: InterruptStackFrame) {
+/// A panicking core stops the others with an NMI (`fatal::begin`).
+extern "x86-interrupt" fn nmi_handler(_frame: InterruptStackFrame) {
     if crate::fatal::is_panicking() {
         crate::fatal::halt();
     }
-    let f = crate::watchdog::Frame {
-        rip: frame.instruction_pointer,
-        cs: frame.code_segment,
-        rflags: frame.cpu_flags,
-        rsp: frame.stack_pointer,
-    };
-    if crate::watchdog::nmi(f) {
-        return;
-    }
     NMI_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-}
-
-/// A host NMI that ended a VMX guest run (NMI exiting) and was consumed by
-/// the exit: run the NMI handler for it, whose IRET also lifts the NMI
-/// blocking the exit left (KVM `vmx_do_nmi_irqoff`, formerly `int $2`).
-pub fn nmi_after_vmexit() {
-    // SAFETY: vector 2 is the NMI gate installed in `init`; the software
-    // interrupt runs the same handler on the current stack.
-    unsafe { core::arch::asm!("int 2", options(nomem)) };
 }
 
 extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
@@ -792,7 +773,6 @@ pub fn init_worker_timer() {
     if cid < 256 {
         ARMED[cid].store(0, Ordering::Relaxed);
     }
-    crate::watchdog::init_core();
 }
 
 /// Write IA32_TSC_DEADLINE; 0 disarms. A no-op on a CPU without
