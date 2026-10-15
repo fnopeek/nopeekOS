@@ -95,15 +95,17 @@ pub struct gem_ctx {
     pub user_engines: bool,
     pub n_engines: u8,
     pub engines: [u8; MAX_USER_ENGINES],
-    /// The hardware context per engine id, in `gt.contexts`.
-    pub ce: [u16; ENGINES],
+    /// The hardware context per engine slot (`ctx->engines`), in
+    /// `gt.contexts`: a slot of the user engine map, or the engine id
+    /// for the legacy map. Two slots naming one engine have two contexts.
+    pub ce: [u16; MAX_USER_ENGINES],
 }
 
 impl gem_ctx {
     const EMPTY: gem_ctx = gem_ctx { used: false, closed: false, client: 0, id: 0, vm: NONE8, priority: 0, recoverable: true,
                                      bannable: true, persistent: true, no_error_capture: false, banned: false, guilty: 0,
                                      innocent: 0, user_engines: false, n_engines: 0, engines: [NONE8; MAX_USER_ENGINES],
-                                     ce: [NONE16; ENGINES] };
+                                     ce: [NONE16; MAX_USER_ENGINES] };
 }
 
 /// `struct i915_address_space`: a client's PPGTT. `ppgtt` stays when the
@@ -642,12 +644,12 @@ impl nctx {
         Ok(())
     }
 
-    /// The hardware context of gem context `x` on engine `engine`
-    /// (`i915_gem_context_get_engine`): created on first use, from the
-    /// pool when an idle one is there, with the context's address space and
-    /// a 16K ring (`intel_context_set_gem`).
-    pub fn ctx_engine(&mut self, d: &mut drm, x: usize, engine: u8) -> Result<usize, i32> {
-        let have = self.ctxs[x].ce[engine as usize];
+    /// The hardware context of gem context `x` in engine slot `slot`, on
+    /// engine `engine` (`i915_gem_context_get_engine`): created on first
+    /// use, from the pool when an idle one is there, with the context's
+    /// address space and a 16K ring (`intel_context_set_gem`).
+    pub fn ctx_engine(&mut self, d: &mut drm, x: usize, slot: u8, engine: u8) -> Result<usize, i32> {
+        let have = self.ctxs[x].ce[slot as usize];
         if have != NONE16 {
             return Ok(have as usize);
         }
@@ -672,7 +674,7 @@ impl nctx {
             self.npool += 1;
             return Err(e);
         }
-        self.ctxs[x].ce[engine as usize] = ce as u16;
+        self.ctxs[x].ce[slot as usize] = ce as u16;
         Ok(ce)
     }
 
@@ -693,8 +695,8 @@ impl nctx {
                 }
             }
         }
-        for e in 0..ENGINES {
-            let ce = self.ctxs[x].ce[e];
+        for k in 0..MAX_USER_ENGINES {
+            let ce = self.ctxs[x].ce[k];
             if ce != NONE16 {
                 crate::intel_context::intel_context_unpin(gt, ce as usize);
                 self.pool[self.npool] = ce;

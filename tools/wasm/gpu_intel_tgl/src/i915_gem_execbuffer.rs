@@ -203,14 +203,17 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
     if st.ctxs[x].banned {
         return Err(EIO);
     }
-    let engine = if st.ctxs[x].user_engines {
+    // The slot names the hardware context: two slots on one engine are two
+    // contexts, each with its own image (Linux creates one per slot).
+    let (slot, engine) = if st.ctxs[x].user_engines {
         let idx = (flags & I915_EXEC_RING_MASK) as usize;
         if idx >= st.ctxs[x].n_engines as usize || st.ctxs[x].engines[idx] == NONE8 {
             return Err(EINVAL);
         }
-        st.ctxs[x].engines[idx]
+        (idx as u8, st.ctxs[x].engines[idx])
     } else {
-        eb_select_legacy_ring(d.gt, flags)?
+        let e = eb_select_legacy_ring(d.gt, flags)?;
+        (e, e)
     };
     if crate::intel_gt::intel_gt_is_wedged(d.gt) {
         return Err(EIO);
@@ -275,7 +278,7 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
     }
 
     // eb_pin_engine, eb_throttle: the request must fit without waiting.
-    let ce = st.ctx_engine(d, x, engine).map_err(|e| -e)?;
+    let ce = st.ctx_engine(d, x, slot, engine).map_err(|e| -e)?;
     crate::intel_gt_requests::retire_requests(d.i915, d.gt, ce);
     if !st.can_submit(d.gt, Some(ce)) || d.gt.contexts[ce].ring.intel_ring_update_space() < 4096 {
         return Err(EAGAIN);
