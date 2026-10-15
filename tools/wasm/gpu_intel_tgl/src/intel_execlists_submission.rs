@@ -359,7 +359,13 @@ fn execlists_dequeue(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) {
         let hint = gt.engine[e].map(|y| y.sched.queue_priority_hint).unwrap_or(i32::MIN);
         if gt.requests[l].prio.max(I915_PRIORITY_NORMAL as i32 - 1) < hint
             && gt.engine[e].map(|y| y.flags & I915_ENGINE_HAS_SEMAPHORES != 0).unwrap_or(false) {
-            linux::say("warning: preemption wanted, not ported; continuing in order");
+            // Logged once: display work waits behind a running guest request
+            // until preemption is ported.
+            use core::sync::atomic::{AtomicU32, Ordering};
+            static WANTED: AtomicU32 = AtomicU32::new(0);
+            if WANTED.fetch_add(1, Ordering::Relaxed) == 0 {
+                linux::say("warning: preemption wanted, not ported; continuing in order (logged once)");
+            }
         }
         if x.inflight[active + 1].is_some() {
             return;
