@@ -2,9 +2,10 @@
  * does without a compositor (GBM platform), make a GLES2 context current,
  * print the driver Mesa ended up on, then clear a small renderbuffer to a
  * known colour and read it back: that runs a batch on the card and shows
- * whether its result reaches memory. Run once per guest session when the
- * host offers CONTEXT_INIT; "llvmpipe" means the native context did not
- * come up, and the host log says why.
+ * whether its result reaches memory, and a depth-tested draw (the test
+ * every 3D client relies on; on Intel it goes through HiZ). Run once per
+ * guest session when the host offers CONTEXT_INIT; "llvmpipe" means the
+ * native context did not come up, and the host log says why.
  *
  * With `npkgpushare` on the kernel command line, then the path a Wayland
  * client and its compositor take: for each layout (linear, Y, Y with
@@ -470,6 +471,85 @@ static void share_tests(const char *node)
     side_close(&b);
 }
 
+/* A program drawing a full-screen quad at depth `z` in colour `c`. */
+static GLuint flat_program(GLint *z, GLint *c)
+{
+    static const char *vs = "attribute vec2 p; uniform float z;"
+                            "void main() { gl_Position = vec4(p, z, 1.0); }";
+    static const char *fs = "precision mediump float; uniform vec4 c;"
+                            "void main() { gl_FragColor = c; }";
+    GLuint sh[2] = { glCreateShader(GL_VERTEX_SHADER), glCreateShader(GL_FRAGMENT_SHADER) };
+    glShaderSource(sh[0], 1, &vs, NULL);
+    glShaderSource(sh[1], 1, &fs, NULL);
+    glCompileShader(sh[0]);
+    glCompileShader(sh[1]);
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, sh[0]);
+    glAttachShader(prog, sh[1]);
+    glBindAttribLocation(prog, 0, "p");
+    glLinkProgram(prog);
+    glDeleteShader(sh[0]);
+    glDeleteShader(sh[1]);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    *z = glGetUniformLocation(prog, "z");
+    *c = glGetUniformLocation(prog, "c");
+    return ok ? prog : 0;
+}
+
+/* What every 3D client does: a depth buffer cleared to 1.0, GL_LESS. A
+ * red quad at z 0 passes, a green one behind it at 0.5 is discarded, a blue
+ * one in front at -0.5 passes: the centre must end blue. Drawn once on a
+ * fresh buffer and once more after a second clear, as a frame loop does. */
+static void depth_test(void)
+{
+    static const GLfloat quad[] = { -1, -1, 1, -1, -1, 1, 1, 1 };
+    GLint uz, uc;
+    GLuint prog = flat_program(&uz, &uc);
+    GLuint rb[2], fb;
+    glGenRenderbuffers(2, rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8_OES, 256, 256);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, 256, 256);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+    char out[2][16] = { "-", "-" };
+    if (prog && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        glViewport(0, 0, 256, 256);
+        glUseProgram(prog);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad);
+        glEnableVertexAttribArray(0);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        static const float zs[3] = { 0.0f, 0.5f, -0.5f };
+        static const float cs[3][4] = { { 1, 0, 0, 1 }, { 0, 1, 0, 1 }, { 0, 0, 1, 1 } };
+        for (int round = 0; round < 2; round++) {
+            glClearColor(0, 0, 0, 1);
+            glClearDepthf(1.0f);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            for (int i = 0; i < 3; i++) {
+                glUniform1f(uz, zs[i]);
+                glUniform4fv(uc, 1, cs[i]);
+                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            }
+            glFinish();
+            unsigned char px[4] = { 0 };
+            glReadPixels(128, 128, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            sprintf(out[round], "%02x%02x%02x%02x", px[0], px[1], px[2], px[3]);
+        }
+        glDisable(GL_DEPTH_TEST);
+    }
+    printf("<0>[gpu] guest depth test (LESS, cleared 1.0): first %s, second %s (want 0000ffff) -> %s\n", out[0],
+           out[1], strcmp(out[0], "0000ffff") || strcmp(out[1], "0000ffff") ? "WRONG" : "ok");
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(2, rb);
+    if (prog)
+        glDeleteProgram(prog);
+}
+
 int main(int argc, char **argv)
 {
     const char *node = argc > 1 ? argv[1] : "/dev/dri/renderD128";
@@ -525,6 +605,7 @@ int main(int argc, char **argv)
            px[0], px[1], px[2], px[3], glGetError(), ms_since(&t0));
     glDeleteFramebuffers(1, &fb);
     glDeleteRenderbuffers(1, &rb);
+    depth_test();
 
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroyContext(dpy, ctx);
