@@ -58,7 +58,10 @@ pub trait Backend: Send {
     /// Run one ccmd: `req` is exactly the guest's bytes, starting with its
     /// `vdrm_ccmd_req` header; a shorter request than the backend knows is
     /// zero-extended by the backend. A response, if any, is pushed to `rsp`
-    /// starting with its `vdrm_ccmd_rsp` (len) header.
+    /// starting with its `vdrm_ccmd_rsp` (len) header. A failed driver call
+    /// is an `Ok` with the positive errno in the response's `ret`, as
+    /// `intel_ioctl` reports it; `Err` is a malformed request only: the
+    /// sequence number then stays put and the guest's waiter never returns.
     fn ccmd(&mut self, ctx: u32, req: &[u8], rsp: &mut Vec<u8>) -> Result<(), i32>;
     /// The pages of object `blob_id` a ccmd created in `ctx`, taken out of
     /// the backend's blob table (a blob id names one resource), with its
@@ -339,10 +342,14 @@ impl Backend for ProbeBackend {
         4
     }
 
-    fn ccmd(&mut self, _ctx: u32, req: &[u8], _rsp: &mut Vec<u8>) -> Result<(), i32> {
+    fn ccmd(&mut self, _ctx: u32, req: &[u8], rsp: &mut Vec<u8>) -> Result<(), i32> {
+        const ENODEV: i32 = 19;
         let cmd = u32::from_le_bytes([req[0], req[1], req[2], req[3]]);
         crate::kprintln!("[gpu] native context probe: ccmd {} ({} bytes) has no backend", cmd, req.len());
-        Err(-19)
+        // `struct i915_ccmd_rsp`: the vdrm header (len) and `ret`.
+        rsp.extend_from_slice(&8u32.to_le_bytes());
+        rsp.extend_from_slice(&ENODEV.to_le_bytes());
+        Ok(())
     }
 
     fn take_blob(&mut self, _ctx: u32, _blob_id: u64) -> Option<(Arc<ForeignPixels>, u32)> {

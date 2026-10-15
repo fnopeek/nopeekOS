@@ -876,6 +876,7 @@ impl VirtioGpu {
                 let offset = le64(request, 32).unwrap_or(u64::MAX);
                 match self.map_host3d(rid, offset) {
                     Ok(map_info) => {
+                        self.log_ctx("MAP_BLOB", rid, offset, true);
                         let mut r = build_ctrl_hdr(VIRTIO_GPU_RESP_OK_MAP_INFO, flags, fence_id);
                         r.extend_from_slice(&map_info.to_le_bytes());
                         r.extend_from_slice(&0u32.to_le_bytes());
