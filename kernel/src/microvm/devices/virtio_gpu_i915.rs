@@ -110,6 +110,10 @@ impl GpudevBackend {
             };
             // SAFETY: a frame just allocated, identity-mapped, owned here.
             unsafe { core::ptr::write_bytes(p as *mut u8, 0, PAGE as usize) };
+            // The card may write it past the caches (an uncached MOCS); a
+            // dirty line written back later would overwrite that (Linux:
+            // `cache_dirty` on new shmem pages, flushed before GPU use).
+            crate::mm::clflush_range(p, PAGE);
             list.push(p);
         }
         let frames = Arc::new(ForeignPixels::new(list));

@@ -1164,6 +1164,14 @@ impl VirtioGpu {
     fn flush_blob(&mut self, k: usize, wid: u32, view: ForeignView, rect: (u32, u32, u32, u32)) {
         use super::gpu_backend as gb;
         crate::microvm::boottime::gpu_frame();
+        // A host3d buffer is written by the card, for a scanout past the
+        // caches (an uncached MOCS, as for a display engine): drop the stale
+        // lines before the CPU or the compositor's LLC-cached reads see it.
+        // Until a frame is shown the whole buffer is read for the lit check.
+        if self.ctxs.host3d.contains_key(&self.scanouts[k].resource_id) {
+            let whole = wid == 0 || !crate::shade::surface::has_frame(wid);
+            view.clflush_rect(if whole { (0, 0, view.width, view.height) } else { rect });
+        }
         let lit = || gb::lit_percent_at(view.width, view.height, |x, y| view.pixel(x, y));
         crate::microvm::boottime::gpu_lit(lit);
         let hidden = wid != 0 && gb::presenting() && !crate::shade::surface::has_frame(wid) && lit() < gb::LIT_PCT;

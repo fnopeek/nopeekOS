@@ -187,6 +187,25 @@ impl ForeignView {
         (page + byte % 4096) as *const u8
     }
 
+    /// Drop the CPU's cached copy of the rows of `rect`, for pages a device
+    /// writes past the caches; the view must `fit`.
+    pub fn clflush_rect(&self, rect: (u32, u32, u32, u32)) {
+        let (x, y, w, h) = rect;
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let w = w.min(self.width - x) as u64 * 4;
+        for row in y..y + h.min(self.height - y) {
+            let mut byte = self.offset as u64 + row as u64 * self.pitch as u64 + x as u64 * 4;
+            let end = byte + w;
+            while byte < end {
+                let n = (4096 - byte % 4096).min(end - byte);
+                crate::mm::clflush_range(self.at(byte) as u64, n);
+                byte += n;
+            }
+        }
+    }
+
     /// Pixel `(x, y)`; the view must `fit`.
     pub fn pixel(&self, x: u32, y: u32) -> u32 {
         let byte = self.offset as u64 + y as u64 * self.pitch as u64 + x as u64 * 4;
