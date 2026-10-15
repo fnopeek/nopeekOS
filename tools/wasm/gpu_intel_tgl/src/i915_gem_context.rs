@@ -686,8 +686,11 @@ impl nctx {
         }
         for &ce in self.ctxs[x].ce.iter() {
             if ce != NONE16 {
+                // Its image is reused for another context: not before the
+                // hardware has switched it out and saved it (Linux keeps an
+                // image until its context is out of the ports).
                 let c = &gt.contexts[ce as usize];
-                if c.timeline.nrequests != 0 || c.active_count != 0 {
+                if c.timeline.nrequests != 0 || c.active_count != 0 || c.inflight != 0 {
                     return false;
                 }
             }

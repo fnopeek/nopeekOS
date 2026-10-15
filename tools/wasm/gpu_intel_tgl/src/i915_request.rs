@@ -320,6 +320,10 @@ pub fn i915_request_add(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usiz
     if __i915_request_commit(i915, gt, rq).is_err() {
         crate::linux::say("warning: no ring space for the closing breadcrumb");
     }
+    // __i915_request_ensure_ordering: the timeline's earlier requests run
+    // first, so they run at this one's priority at least.
+    let prio = gt.requests[rq].prio;
+    i915_request_boost(i915, gt, rq, prio);
     let ce = gt.requests[rq].ce;
     let behind = gt.waiters[..gt.nwaiters].iter().any(|&w| gt.requests[w as usize].ce == ce);
     if !behind && deps_done(gt, rq) {
@@ -330,8 +334,6 @@ pub fn i915_request_add(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usiz
     gt.requests[rq].waiting = true;
     gt.waiters[gt.nwaiters] = rq as u16;
     gt.nwaiters += 1;
-    let prio = gt.requests[rq].prio;
-    i915_request_boost_deps(i915, gt, rq, prio);
 }
 
 /// Whether the fence (context `ce`, `seqno`) has signalled.
@@ -368,32 +370,51 @@ pub fn i915_request_await(gt: &mut intel_gt, rq: usize, ce: u16, seqno: u32) -> 
     true
 }
 
-/// `__i915_schedule` for a held request: the requests it waits for, held
-/// or queued, run at its priority at least (priority inheritance).
-fn i915_request_boost_deps(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize, prio: i32) {
+/// `__i915_schedule`: request `rq` and everything it depends on run at
+/// `prio` at least — the requests before it on its timeline and, for a held
+/// request, the fences it waits for, transitively. A raised request that is
+/// queued moves up its engine's queue.
+fn i915_request_boost(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize, prio: i32) {
     let mut stack = [0u16; MAX_REQUESTS];
     let mut n = 1;
     stack[0] = rq as u16;
     while n > 0 {
         n -= 1;
         let w = gt.requests[stack[n] as usize];
-        for &(ce, seqno) in &w.deps[..w.ndeps as usize] {
-            let Some(d) = gt.requests.iter().position(|r| r.used && !r.retired && r.ce == ce && r.seqno == seqno)
-            else {
-                continue;
-            };
-            if gt.requests[d].prio >= prio {
+        // The timeline's earlier requests not yet submitted.
+        for d in 0..MAX_REQUESTS {
+            let r = gt.requests[d];
+            if !r.used || r.retired || r.ce != w.ce || !i915_seqno_passed(w.seqno, r.seqno) || r.seqno == w.seqno
+                || r.prio >= prio || !(r.pqueue || r.waiting) {
                 continue;
             }
-            gt.requests[d].prio = prio;
-            if gt.requests[d].pqueue {
-                let e = gt.requests[d].engine as usize;
-                crate::intel_execlists_submission::requeue_request(i915, gt, e, d);
-            } else if gt.requests[d].waiting && n < stack.len() {
-                stack[n] = d as u16;
-                n += 1;
+            raise(i915, gt, d, prio, &mut stack, &mut n);
+        }
+        // The foreign fences it waits for.
+        if w.ndeps != 0 {
+            for &(ce, seqno) in &w.deps[..w.ndeps as usize] {
+                if let Some(d) = gt.requests.iter().position(|r| r.used && !r.retired && r.ce == ce && r.seqno == seqno) {
+                    if gt.requests[d].prio < prio {
+                        raise(i915, gt, d, prio, &mut stack, &mut n);
+                    }
+                }
             }
         }
+    }
+}
+
+/// One request of `i915_request_boost` raised to `prio`, and kept for its
+/// own dependencies.
+fn raise(i915: &mut drm_i915_private, gt: &mut intel_gt, d: usize, prio: i32, stack: &mut [u16; MAX_REQUESTS],
+         n: &mut usize) {
+    gt.requests[d].prio = prio;
+    if gt.requests[d].pqueue {
+        let e = gt.requests[d].engine as usize;
+        crate::intel_execlists_submission::requeue_request(i915, gt, e, d);
+    }
+    if *n < stack.len() {
+        stack[*n] = d as u16;
+        *n += 1;
     }
 }
 
