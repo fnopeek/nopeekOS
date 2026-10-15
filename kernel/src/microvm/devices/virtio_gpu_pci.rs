@@ -974,9 +974,14 @@ impl VirtioGpu {
     /// RESOURCE_MAP_BLOB: the resource's pages at `offset` in the host-
     /// visible window. Its cache type for the guest mapping.
     fn map_host3d(&mut self, res_id: u32, offset: u64) -> Result<u32, u32> {
+        if self.ctxs.host3d.get(&res_id).is_some_and(|r| r.mapped.is_some()) {
+            return Err(VIRTIO_GPU_RESP_ERR_INVALID_PARAM);
+        }
+        let Some(map_info) = self.ctxs.map_info(res_id) else { return Err(VIRTIO_GPU_RESP_ERR_INVALID_RES_ID) };
         let Some(r) = self.ctxs.host3d.get_mut(&res_id) else { return Err(VIRTIO_GPU_RESP_ERR_INVALID_RES_ID) };
+        r.map_info = map_info;
         let pages = r.size.div_ceil(4096) as usize;
-        if r.mapped.is_some() || offset % 4096 != 0
+        if offset % 4096 != 0
             || offset.checked_add(pages as u64 * 4096).is_none_or(|e| e > super::hostmem::HOSTMEM_SIZE)
         {
             return Err(VIRTIO_GPU_RESP_ERR_INVALID_PARAM);

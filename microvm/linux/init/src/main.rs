@@ -120,7 +120,8 @@ unsafe extern "C" fn rust_main() -> ! {
 
     // Hand the framebuffer to the Wayland stack: npkwm (our wlroots
     // compositor) running LibreWolf, rendered through the pixman
-    // software renderer + wlroots DRM backend → /dev/dri/card0 →
+    // software renderer (GLES2 when the host offers a GPU) + wlroots DRM
+    // backend → /dev/dri/card0 →
     // virtio-gpu → our Shade Surface tile. On success PID-1 becomes
     // the supervising shell and never returns. It returns only if the
     // bundle has no wlroots (degraded/minimal initramfs) — then just
@@ -202,7 +203,12 @@ fn launch_wayland(kmsg_fd: i64) {
     // llvmpipe, and to get there it loads Mesa and LLVM (230 MB), about 0.6 s
     // per start. A failed probe is the browser's own CPU fallback.
     // With a GPU, npk-gpuprobe logs which driver the guest's Mesa got
-    // (iris/radeonsi or the llvmpipe fallback), in parallel to the session.
+    // (iris/radeonsi or the llvmpipe fallback), in parallel to the session,
+    // the compositor is the bundle's npkwm-gles2 (GLES2 renderer, clients
+    // get linux-dmabuf with the render node; it falls back to pixman itself
+    // when the GL device is software), and the four prefs that force the
+    // CPU path (software WebRender, canvas, dmabuf, GPU process) are left
+    // out, so the browser's own probe decides.
     // npkwm runs as `wl` (uid 1001) and the app as `app` (uid 1000); PID 1,
     // seatd and the control process stay root. Only `wl` can open the
     // npk.windows port and only through seatd does it get the GPU and input
@@ -239,16 +245,21 @@ fn launch_wayland(kmsg_fd: i64) {
                  udevadm settle --timeout=10 2>/dev/null; \
                  W=; for p in /sys/class/virtio-ports/*; do [ \"$(cat $p/name 2>/dev/null)\" = npk.windows ] && W=/dev/${p##*/}; done; \
                  [ -n \"$W\" ] && chown 1001 \"$W\" && chmod 0600 \"$W\"; \
+                 GPU=0; for d in /sys/bus/virtio/devices/*; do \
+                   [ \"$(cat $d/device 2>/dev/null)\" = 0x0010 ] && [ \"$(cut -c5 $d/features 2>/dev/null)\" = 1 ] && GPU=1; \
+                 done; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp/app HOME=/tmp/app \
                  MOZ_ENABLE_WAYLAND=1; \
                  grep -q npkswcursor /proc/cmdline && export WLR_NO_HARDWARE_CURSORS=1; \
+                 WM=/tmp/npkwm; \
+                 if [ $GPU = 1 ] && [ -x /usr/libexec/npk/npkwm-gles2 ]; then WM=/usr/libexec/npk/npkwm-gles2; unset WLR_RENDERER; fi; \
                  seatd -g wl > /tmp/seatd.log 2>&1 & \
                  i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do usleep 5000; i=$((i+1)); done; \
-                 echo \"<0>[wl] npkwm start (seatd after ${i}x5ms)\" > /dev/kmsg; \
-                 su -s /bin/sh wl -c \"XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec /tmp/npkwm\" > /tmp/npkwm.log 2>&1 & \
+                 echo \"<0>[wl] ${WM##*/} start (seatd after ${i}x5ms)\" > /dev/kmsg; \
+                 su -s /bin/sh wl -c \"XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec $WM\" > /tmp/npkwm.log 2>&1 & \
                  WLPID=$!; \
                  nice -n 19 sh -c 'for r in 0 64 128; do dd if=/usr/lib/librewolf/libxul.so of=/dev/null bs=1M skip=$r count=64 2>/dev/null & done; \
                    cat /usr/lib/librewolf/omni.ja /usr/lib/librewolf/browser/omni.ja /usr/lib/librewolf/libgkcodecs.so /usr/lib/libgtk-3.so.0 > /dev/null 2>&1; \
@@ -307,6 +318,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    'browser.download.useDownloadDir|true' \
                    'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
                  do k=${p%|*}; v=${p#*|}; \
+                   case $k in gfx.webrender.software|gfx.canvas.accelerated|widget.dmabuf.force-enabled|layers.gpu-process.enabled) [ $GPU = 1 ] && continue;; esac; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
                  echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
@@ -325,9 +337,6 @@ fn launch_wayland(kmsg_fd: i64) {
                    { cat /usr/lib/librewolf/defaults/pref/channel-prefs.js; echo 'pref(\"general.config.sandbox_enabled\", false);'; } > /tmp/channel-prefs.js \
                      && mount --bind /tmp/channel-prefs.js /usr/lib/librewolf/defaults/pref/channel-prefs.js 2>/dev/null; \
                  fi; \
-                 GPU=0; for d in /sys/bus/virtio/devices/*; do \
-                   [ \"$(cat $d/device 2>/dev/null)\" = 0x0010 ] && [ \"$(cut -c5 $d/features 2>/dev/null)\" = 1 ] && GPU=1; \
-                 done; \
                  [ $GPU = 1 ] || mount --bind /bin/false /usr/lib/librewolf/gfxtest 2>/dev/null; \
                  [ $GPU = 1 ] && [ -x /usr/bin/npk-gpuprobe ] && su -s /bin/sh app -c /usr/bin/npk-gpuprobe & \
                  mkdir -p /tmp/moz/chrome; \

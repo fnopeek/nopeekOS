@@ -46,6 +46,7 @@
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/render/allocator.h>
+#include <wlr/render/pixman.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor.h>
@@ -1169,6 +1170,12 @@ int main(void) {
 		return 1;
 	}
 	server.renderer = wlr_renderer_autocreate(server.backend);
+	/* With a render node wlroots' autocreate never tries pixman, and its
+	 * GLES2 renderer refuses a software GL device (a guest whose native
+	 * context did not come up): compose on the CPU then. */
+	if (server.renderer == NULL) {
+		server.renderer = wlr_pixman_renderer_create();
+	}
 	if (server.renderer == NULL) {
 		fprintf(stderr, "npkwm: no renderer\n");
 		return 1;

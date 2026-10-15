@@ -15,7 +15,7 @@ use crate::intel_gt::intel_gt;
 use crate::linux::Line;
 use crate::regs::*;
 
-pub const MAX_REQUESTS: usize = 32;
+pub const MAX_REQUESTS: usize = 128;
 
 const ENOMEM: i32 = 12;
 const ENOSPC: i32 = 28;
@@ -63,6 +63,14 @@ pub fn i915_seqno_passed(seq1: u32, seq2: u32) -> bool {
 fn hwsp_seqno(gt: &intel_gt, rq: usize) -> u32 {
     let ce = gt.requests[rq].ce as usize;
     gt.contexts[ce].timeline.hwsp_obj.and_then(|o| o.map()).map(|d| d.r32(gt.requests[rq].hwsp_seqno)).unwrap_or(0)
+}
+
+/// `hwsp_offset(rq)`: the GGTT address of the request's seqno slot, the
+/// timeline page's address and the slot.
+pub fn hwsp_offset(gt: &intel_gt, rq: usize) -> u32 {
+    let tl = gt.contexts[gt.requests[rq].ce as usize].timeline;
+    let page = tl.hwsp_offset & !(I915_GTT_PAGE_SIZE as u32 - 1);
+    page + (gt.requests[rq].hwsp_seqno & (I915_GTT_PAGE_SIZE as u32 - 1))
 }
 
 /// `__i915_request_is_complete`.
@@ -317,10 +325,7 @@ pub fn __i915_request_submit(_i915: &mut drm_i915_private, gt: &mut intel_gt, rq
 
         let ce = gt.requests[rq].ce as usize;
         let e = gt.engine[engine].unwrap_or_default();
-        let tl = gt.contexts[ce].timeline;
-        // hwsp_offset(rq): the timeline page's GGTT address and the slot.
-        let page = tl.hwsp_offset & !(I915_GTT_PAGE_SIZE as u32 - 1);
-        let hwsp = page + (gt.requests[rq].hwsp_seqno & (I915_GTT_PAGE_SIZE as u32 - 1));
+        let hwsp = hwsp_offset(gt, rq);
         let preempt = e.status_page.map(|v| v.ggtt_offset()).unwrap_or(0) + I915_GEM_HWS_PREEMPT_ADDR as u32;
         let fb = crate::gen8_engine_cs::emit_fini_breadcrumb(&e, gt.requests[rq].seqno, hwsp, preempt);
         let ring = gt.contexts[ce].ring;

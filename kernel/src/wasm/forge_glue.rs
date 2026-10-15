@@ -1069,6 +1069,10 @@ host_imports! {
     mem fn npk_gpudev_poll(buf_ptr: i32, max: i32) -> i32;
     // npk_gpudev_complete(seq, status) -> 0 / -1
     ctx fn npk_gpudev_complete(seq: i32, status: i32) -> i32;
+    // npk_gpudev_reply(seq, ptr, len) -> 0 / -1; reply of an OP_CCMD job, <= 64 KB
+    mem fn npk_gpudev_reply(seq: i32, ptr: i32, len: i32) -> i32;
+    // npk_gpudev_ring(client, ring, submitted, completed) -> 0 / -1
+    ctx fn npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
 
     // npk_netdev_register(mac_ptr) -> 0 or -1
     mem fn npk_netdev_register(mac_ptr: i32) -> i32;

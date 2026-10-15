@@ -4144,3 +4144,23 @@ pub(crate) fn npk_gpudev_complete(ctx: &mut HostState, seq: i32, status: i32) ->
         None => -1,
     }
 }
+
+/// `npk_gpudev_reply(seq, ptr, len) -> 0 | -1`: the reply of `OP_CCMD` job
+/// `seq`, at most `gpudev::MAX_REPLY` bytes, before `npk_gpudev_complete`.
+pub(crate) fn npk_gpudev_reply(mem: &mut [u8], ctx: &mut HostState, seq: i32, ptr: i32, len: i32) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if len < 0 || len as usize > crate::gpu::gpudev::MAX_REPLY {
+        return -1;
+    }
+    let Some(data) = guest_mut(mem, ptr, len as usize) else { return -1 };
+    crate::gpu::gpudev::reply(dev, seq as u32, data)
+}
+
+/// `npk_gpudev_ring(client, ring, submitted, completed) -> 0 | -1`.
+pub(crate) fn npk_gpudev_ring(ctx: &mut HostState, client: i32, ring: i32, submitted: i64, completed: i64) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if ring < 0 || submitted < 0 || completed < 0 {
+        return -1;
+    }
+    crate::gpu::gpudev::ring(dev, client as u32, ring as u32, submitted as u64, completed as u64)
+}

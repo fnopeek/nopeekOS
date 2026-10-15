@@ -10,7 +10,15 @@
 # links (libdrm, libinput, libudev, libseat, pixman, xkbcommon, wayland,
 # libdisplay-info) are in the userspace bundle.
 #
-# Output: microvm/linux/npkwm/npkwm (committed; PID 1 embeds it).
+# `build.sh gles2` builds the variant for a guest with a GPU: the same
+# source with wlroots' GLES2 renderer and GBM allocator, so clients get
+# linux-dmabuf with a render node and npkwm composes on the GPU. It links
+# Mesa (libEGL, libGLESv2, libgbm) and pays that load time; the guest's init
+# runs it only when the host offers native contexts. Without a usable GPU
+# wlroots' autocreate refuses a software GL device and falls back to pixman.
+#
+# Output: microvm/linux/npkwm/npkwm (committed; PID 1 embeds it), or
+# microvm/linux/npkwm/npkwm-gles2 (committed; the userspace bundle carries it).
 
 set -euo pipefail
 
@@ -20,7 +28,13 @@ source "$REPO_ROOT/microvm-userspace/alpine.env"
 
 CACHE="${HOME}/.cache/nopeekos/alpine"
 TARBALL="alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
-OUT="$SCRIPT_DIR/npkwm"
+VARIANT="${1:-}"
+case "$VARIANT" in
+    "")    NAME=npkwm;       WLR_RENDER="-Drenderers=[] -Dallocators=[]"; EXTRA_PACKAGES="" ;;
+    gles2) NAME=npkwm-gles2; WLR_RENDER="-Drenderers=gles2 -Dallocators=gbm"; EXTRA_PACKAGES="mesa-dev" ;;
+    *) echo "usage: $0 [gles2]" >&2; exit 1 ;;
+esac
+OUT="$SCRIPT_DIR/$NAME"
 
 # The wlroots of the pinned Alpine branch, from the URL and with the sha512
 # of its APKBUILD (community/wlroots0.20).
@@ -29,7 +43,7 @@ WLR_TARBALL="wlroots-${WLR_VERSION}.tar.gz"
 WLR_URL="https://gitlab.freedesktop.org/wlroots/wlroots/-/archive/${WLR_VERSION}/${WLR_TARBALL}"
 WLR_SHA512=e96523a2b215e7d1f36bbe5e7fa3e65d15cb87e2f0d9c304d3c2fdc81b0ac0c7202cd955635c01072b34e70f08c6c00fa2cde8c277bd73fcabdcb19f7b579a12
 
-BUILD_PACKAGES="build-base pkgconf meson wayland-dev wayland-protocols libxkbcommon-dev libdrm-dev pixman-dev libinput-dev eudev-dev libseat-dev hwdata-dev libdisplay-info-dev"
+BUILD_PACKAGES="build-base pkgconf meson wayland-dev wayland-protocols libxkbcommon-dev libdrm-dev pixman-dev libinput-dev eudev-dev libseat-dev hwdata-dev libdisplay-info-dev $EXTRA_PACKAGES"
 
 fetch() {
     [ -f "$CACHE/$2" ] && return
@@ -64,7 +78,7 @@ unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c "
         cd /src/wlroots-${WLR_VERSION}
         meson setup build --prefix=/opt/wlr --buildtype=release \
             -Ddefault_library=static -Dexamples=false \
-            -Drenderers=[] -Dallocators=[] -Dbackends=drm,libinput \
+            $WLR_RENDER -Dbackends=drm,libinput \
             -Dsession=enabled -Dxwayland=disabled -Dxcb-errors=disabled \
             -Dcolor-management=disabled -Dlibliftoff=disabled >/dev/null
         meson compile -C build >/dev/null
@@ -74,11 +88,11 @@ unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c "
         wayland-scanner server-header \$P/stable/xdg-shell/xdg-shell.xml xdg-shell-protocol.h
         export PKG_CONFIG_PATH=/opt/wlr/lib/pkgconfig
         cc -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter \
-            -DWLR_USE_UNSTABLE -I. npkwm.c -o npkwm -Wl,--as-needed \
+            -DWLR_USE_UNSTABLE -I. npkwm.c -o $NAME -Wl,--as-needed \
             \$(pkg-config --static --cflags --libs wlroots-0.20 wayland-server xkbcommon)
-        strip npkwm
+        strip $NAME
     '
 "
-cp "$STAGE/src/npkwm" "$OUT"
+cp "$STAGE/src/$NAME" "$OUT"
 touch -d @0 "$OUT"
-echo "npkwm: $(stat -c%s "$OUT") bytes"
+echo "$NAME: $(stat -c%s "$OUT") bytes"

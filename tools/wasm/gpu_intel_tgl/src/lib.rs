@@ -32,6 +32,10 @@ mod gpgpu;
 mod gpgpu_gen;
 mod i915_drv;
 mod i915_gem;
+mod i915_gem_context;
+mod i915_gem_execbuffer;
+mod i915_getparam;
+mod i915_uapi;
 mod i915_irq;
 mod i915_request;
 mod i915_vma;
@@ -97,6 +101,7 @@ mod skl_scaler;
 mod skl_universal_plane;
 mod skl_watermark;
 mod tables;
+mod virtio_ccmd;
 
 use i915_drv::intel_step_info;
 use intel_bios::{bdb_block, gmbus_pin};

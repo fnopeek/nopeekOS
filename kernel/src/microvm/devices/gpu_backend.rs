@@ -27,9 +27,24 @@ pub fn reset() {
     *GPU.lock() = VirtioGpu::new();
     let mode = crate::config::get("microvm_gpu");
     let mode = mode.as_deref().map(str::trim);
-    if mode == Some("test") && !super::virtio_gpu_ctx::backend_ready() {
-        if let Some(b) = super::virtio_gpu_ctx::ProbeBackend::new() {
-            super::virtio_gpu_ctx::set_backend(Some(alloc::boxed::Box::new(b)));
+    // Chosen per VM, with no context left from the one before: the GPU
+    // module's i915 when it serves native contexts behind the IOMMU, else the
+    // probe for `set microvm_gpu test`, else none.
+    super::virtio_gpu_ctx::set_backend(None);
+    if let Some(dev) = crate::gpu::gpudev::native_device() {
+        super::virtio_gpu_ctx::set_backend(Some(alloc::boxed::Box::new(super::virtio_gpu_i915::GpudevBackend::new(dev))));
+        if mode != Some("off") {
+            crate::kprintln!("[gpu] native contexts offered: i915 on {:02x}:{:02x}.{} through the GPU module",
+                dev.bus, dev.device, dev.function);
+        }
+    } else {
+        if let Some(why) = crate::gpu::gpudev::native_refused() {
+            crate::kprintln!("[gpu] no native contexts: {}", why);
+        }
+        if mode == Some("test") {
+            if let Some(b) = super::virtio_gpu_ctx::ProbeBackend::new() {
+                super::virtio_gpu_ctx::set_backend(Some(alloc::boxed::Box::new(b)));
+            }
         }
     }
     // Native contexts for this VM: a backend serves the host's GPU, and

@@ -18,7 +18,7 @@ use crate::regs::*;
 
 const PORTS: usize = 2;
 /// Requests an engine's queue and active list hold.
-const SCHED_MAX: usize = 16;
+pub const SCHED_MAX: usize = 64;
 
 /// `struct intel_engine_execlists`, as far as the hardware sees it.
 #[derive(Clone, Copy, Default)]
@@ -102,6 +102,13 @@ fn ring_set_paused(gt: &intel_gt, e: usize, state: u32) {
     if let Some(d) = status_page(gt, e) {
         d.w32(I915_GEM_HWS_PREEMPT * 4, state);
     }
+}
+
+/// Whether request `rq` is what engine `e` runs: the context in the active
+/// port has it as its last request (`*execlists->active`).
+pub fn execlists_running(gt: &intel_gt, e: usize, rq: usize) -> bool {
+    let x = el(gt, e);
+    x.inflight.get(x.active).copied().flatten() == Some(rq as u16)
 }
 
 /// `add_to_engine`.

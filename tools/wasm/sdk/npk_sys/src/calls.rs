@@ -90,6 +90,8 @@ unsafe extern "C" {
     fn npk_gpudev_ready(ok: i32) -> i32;
     fn npk_gpudev_poll(buf_ptr: i32, max: i32) -> i32;
     fn npk_gpudev_complete(seq: i32, status: i32) -> i32;
+    fn npk_gpudev_reply(seq: i32, ptr: i32, len: i32) -> i32;
+    fn npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
     fn npk_netdev_submit_rx(buf_ptr: i32, len: i32) -> i32;
     fn npk_netdev_rx_deliver(buf_ptr: i32, len: i32) -> i32;
     fn npk_netdev_poll_tx(buf_ptr: i32, max: i32) -> i32;
@@ -191,6 +193,8 @@ plain! {
     fn gpudev_bo_bound = npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
     fn gpudev_ready = npk_gpudev_ready(ok: i32) -> i32;
     fn gpudev_complete = npk_gpudev_complete(seq: i32, status: i32) -> i32;
+    /// Fence counters of `ring` of native-context client `client`.
+    fn gpudev_ring = npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
 
     fn netdev_set_link = npk_netdev_set_link(up: i32) -> i32;
     fn netdev_set_link_state = npk_netdev_set_link_state(carrier: i32, dormant: i32) -> i32;
@@ -434,6 +438,13 @@ pub fn gpudev_bo_pages(id: i32, first: i32, out: &mut [u64]) -> i32 {
     // SAFETY: FFI; the kernel writes at most `out.len()` u64s into `out`,
     // borrowed for the call.
     unsafe { npk_gpudev_bo_pages(id, first, out.as_mut_ptr() as i32, out.len() as i32) }
+}
+
+/// The response of job `seq` (`npk_gpudev_reply`), before it completes;
+/// 0, or -1 if the kernel refused it.
+pub fn gpudev_reply(seq: i32, data: &[u8]) -> i32 {
+    // SAFETY: FFI; `data` is borrowed for the call.
+    unsafe { npk_gpudev_reply(seq, data.as_ptr() as i32, data.len() as i32) }
 }
 
 /// Bytes of job `seq`'s payload from `offset` on (`npk_gpudev_job_data`);

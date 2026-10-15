@@ -64,9 +64,18 @@ pub trait Backend: Send {
     /// sequence number then stays put and the guest's waiter never returns.
     fn ccmd(&mut self, ctx: u32, req: &[u8], rsp: &mut Vec<u8>) -> Result<(), i32>;
     /// The pages of object `blob_id` a ccmd created in `ctx`, taken out of
-    /// the backend's blob table (a blob id names one resource), with its
-    /// cache type for the guest mapping.
-    fn take_blob(&mut self, ctx: u32, blob_id: u64) -> Option<(Arc<ForeignPixels>, u32)>;
+    /// the backend's blob table (a blob id names one resource) to become
+    /// resource `res_id`, with its cache type for the guest mapping.
+    fn take_blob(&mut self, ctx: u32, blob_id: u64, res_id: u32) -> Option<(Arc<ForeignPixels>, u32)>;
+    /// The cache type of resource `res_id` as it is mapped now (MAP_BLOB),
+    /// when the backend decides it; ccmds may change it until then.
+    fn map_info(&mut self, _ctx: u32, _res_id: u32) -> Option<u32> {
+        None
+    }
+    /// Bits of `banned_ctx_mask` the ccmd just run sets and clears.
+    fn banned(&mut self, _ctx: u32) -> (u64, u64) {
+        (0, 0)
+    }
     /// The guest let go of a resource that was object `blob_id`.
     fn release_blob(&mut self, ctx: u32, pages: &Arc<ForeignPixels>);
     /// Whether `fence` queued on `ring` of `ctx` is done; `submit_fence`
@@ -176,7 +185,7 @@ impl Contexts {
             return Ok(());
         }
         let handle = c.handle;
-        let (pages, map_info) = BACKEND.lock().as_mut().and_then(|b| b.take_blob(handle, blob_id))
+        let (pages, map_info) = BACKEND.lock().as_mut().and_then(|b| b.take_blob(handle, blob_id, res_id))
             .ok_or(RESP_ERR_INVALID_PARAM)?;
         if pages.bytes() < size {
             return Err(RESP_ERR_INVALID_PARAM);
@@ -185,6 +194,17 @@ impl Contexts {
             ctx: ctx_id, pages, size, map_info, mapped: None, owned: false, shmem: false,
         });
         Ok(())
+    }
+
+    /// The cache type HOST3D resource `res_id` is mapped with now.
+    pub fn map_info(&mut self, res_id: u32) -> Option<u32> {
+        let r = self.host3d.get(&res_id)?;
+        if r.shmem {
+            return Some(r.map_info);
+        }
+        let handle = self.ctxs.get(&r.ctx)?.handle;
+        let own = r.map_info;
+        Some(BACKEND.lock().as_mut().and_then(|b| b.map_info(handle, res_id)).unwrap_or(own))
     }
 
     /// The guest dropped HOST3D resource `res_id`; it must be unmapped.
@@ -226,8 +246,14 @@ impl Contexts {
             }
             let mut rsp = Vec::new();
             b.ccmd(c.handle, &stream[off..off + len], &mut rsp).map_err(|_| ())?;
+            let (set, clear) = b.banned(c.handle);
             if let Some(sh) = &shmem {
                 write_response(sh, rsp_off, &rsp);
+                if set | clear != 0 {
+                    let mask = (shm_read32(sh, 8) as u64 | (shm_read32(sh, 12) as u64) << 32) & !clear | set;
+                    shm_write32(sh, 8, mask as u32);
+                    shm_write32(sh, 12, (mask >> 32) as u32);
+                }
                 shm_write32(sh, 0, seqno);
             }
             off += len;
@@ -293,6 +319,44 @@ fn write_response(sh: &ForeignPixels, rsp_off: usize, rsp: &[u8]) {
     shm_write32(sh, start, len as u32);
 }
 
+/// The capset of an i915 card at `dev` (virglrenderer `i915_renderer_probe`).
+pub fn i915_capset(dev: crate::drivers::pci::PciAddr, out: &mut [u8]) {
+    use crate::drivers::pci;
+    let put = |out: &mut [u8], at: usize, v: u32| out[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    // wire_format_version, drm version 1.6.0 (i915), context_type.
+    put(out, 0, 2);
+    put(out, 4, 1);
+    put(out, 8, 6);
+    put(out, 12, 0);
+    put(out, 16, CONTEXT_I915);
+    // u.intel: bus, dev, func, revision, domain, device id.
+    put(out, 24, dev.bus as u32);
+    put(out, 28, dev.device as u32);
+    put(out, 32, dev.function as u32);
+    put(out, 36, pci::read8(dev, 0x08) as u32);
+    put(out, 40, 0);
+    put(out, 44, pci::read16(dev, 0x02) as u32);
+}
+
+/// The response of i915 ccmd `cmd` for a driver call that failed with
+/// positive `errno`. Layouts of Mesa's i915_proto.h: IOCTL_SIMPLE (1),
+/// GEM_EXECBUFFER2 (7) and GEM_EXECBUFFER2_V2 (10) carry `ret` right after
+/// the vdrm header (len), GETPARAM (2), QUERYPARAM (3), GEM_CONTEXT_CREATE
+/// (6) and GEM_BUSY (9) after a pad word, with one more word behind it; the
+/// others have no response, and it is empty.
+pub fn i915_error_response(cmd: u32, errno: i32) -> Vec<u8> {
+    let ret_at = match cmd {
+        1 | 7 | 10 => 4,
+        2 | 3 | 6 | 9 => 8,
+        _ => return Vec::new(),
+    };
+    let len = ret_at + 8;
+    let mut rsp = alloc::vec![0u8; len];
+    rsp[..4].copy_from_slice(&(len as u32).to_le_bytes());
+    rsp[ret_at..ret_at + 4].copy_from_slice(&errno.to_le_bytes());
+    rsp
+}
+
 /// `set microvm_gpu test`: offers the capset of the host's display
 /// controller and answers every ccmd with "no device", so the guest's side
 /// (features, capset, contexts, the response buffer, the host-visible
@@ -314,21 +378,7 @@ impl ProbeBackend {
 
 impl Backend for ProbeBackend {
     fn capset(&self, out: &mut [u8]) {
-        use crate::drivers::pci;
-        let put = |out: &mut [u8], at: usize, v: u32| out[at..at + 4].copy_from_slice(&v.to_le_bytes());
-        // wire_format_version, drm version 1.6.0 (i915), context_type.
-        put(out, 0, 2);
-        put(out, 4, 1);
-        put(out, 8, 6);
-        put(out, 12, 0);
-        put(out, 16, CONTEXT_I915);
-        // u.intel: bus, dev, func, revision, domain, device id.
-        put(out, 24, self.dev.bus as u32);
-        put(out, 28, self.dev.device as u32);
-        put(out, 32, self.dev.function as u32);
-        put(out, 36, pci::read8(self.dev, 0x08) as u32);
-        put(out, 40, 0);
-        put(out, 44, pci::read16(self.dev, 0x02) as u32);
+        i915_capset(self.dev, out);
     }
 
     fn create(&mut self) -> Result<u32, i32> {
@@ -346,24 +396,11 @@ impl Backend for ProbeBackend {
         const ENODEV: i32 = 19;
         let cmd = u32::from_le_bytes([req[0], req[1], req[2], req[3]]);
         crate::kprintln!("[gpu] native context probe: ccmd {} ({} bytes) has no backend", cmd, req.len());
-        // Response layouts of Mesa's i915_proto.h: IOCTL_SIMPLE (1) and
-        // GEM_EXECBUFFER2 (7) carry `ret` right after the vdrm header (len),
-        // GETPARAM (2), QUERYPARAM (3), GEM_CONTEXT_CREATE (6) and GEM_BUSY
-        // (9) after a pad word, with one more word behind it; the others
-        // have no response, and nothing is written for them.
-        let ret_at = match cmd {
-            1 | 7 => 4,
-            2 | 3 | 6 | 9 => 8,
-            _ => return Ok(()),
-        };
-        let len = ret_at + 8;
-        rsp.resize(len, 0);
-        rsp[..4].copy_from_slice(&(len as u32).to_le_bytes());
-        rsp[ret_at..ret_at + 4].copy_from_slice(&ENODEV.to_le_bytes());
+        *rsp = i915_error_response(cmd, ENODEV);
         Ok(())
     }
 
-    fn take_blob(&mut self, _ctx: u32, _blob_id: u64) -> Option<(Arc<ForeignPixels>, u32)> {
+    fn take_blob(&mut self, _ctx: u32, _blob_id: u64, _res_id: u32) -> Option<(Arc<ForeignPixels>, u32)> {
         None
     }
 

@@ -27,9 +27,15 @@
 //! Jobs are done in the order they are queued. Each buffer remembers the
 //! last job that reads or writes it (its fence); a CPU writer waits only for
 //! that one.
+//!
+//! v2 adds native contexts for guests (docs/plan/GPU_IN_VM.md §4b): clients
+//! (`OP_CLIENT`), GEM objects in kernel frames handed to a client by
+//! resource id (`OP_OBJECT`), and the guest's ccmds (`OP_CCMD`) with a reply
+//! (`reply`). The module reports per client and ring how many submissions it
+//! took and how many are done (`ring`).
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -40,11 +46,21 @@ use crate::shade::buffers::{ForeignPixels, ForeignView};
 use crate::drivers::pci::PciAddr;
 use crate::smp::fiber::{self, Waker, NO_WAKER};
 
-pub const VERSION: i32 = 1;
+pub const VERSION: i32 = 2;
 pub const OP_COPY_RECT: u32 = 1;
 pub const OP_BO_ADD: u32 = 2;
 pub const OP_BO_REMOVE: u32 = 3;
 pub const OP_SCENE: u32 = 4;
+/// `a0` client, `a1` 1 = open, 0 = close.
+pub const OP_CLIENT: u32 = 5;
+/// `a0` client, `a1` resource id, `a2` buffer, `a3` 1 = attach, 0 = detach.
+pub const OP_OBJECT: u32 = 6;
+/// `a0` client, `a1` length; the payload is the guest's ccmd.
+pub const OP_CCMD: u32 = 7;
+/// Largest reply to a ccmd (`npk_gpudev_reply`).
+pub const MAX_REPLY: usize = 64 * 1024;
+/// Rings a client may report (`virtio_gpu_ctx::MAX_RINGS`).
+const MAX_CLIENT_RINGS: u32 = 64;
 /// Bytes per job as `npk_gpudev_poll` writes it: `seq, op, a0..a5`.
 pub const JOB_BYTES: usize = 32;
 /// Bytes `npk_gpudev_bo_info` writes.
@@ -52,6 +68,7 @@ pub const BO_INFO_BYTES: usize = 40;
 /// `npk_gpudev_ready` capabilities.
 pub const CAP_COPY: i32 = 1;
 pub const CAP_SCENE: i32 = 2;
+pub const CAP_NATIVE: i32 = 4;
 const FIXED_BOS: u32 = 3;
 const JOB_TIMEOUT_MS: u64 = 100;
 /// Binding a new buffer is a page walk per 4 KB page in the module, once.
@@ -164,6 +181,12 @@ struct State {
     pin_adds: u32,
     deferred: Vec<(u32, Option<(u64, usize)>)>,
     caps: i32,
+    /// Clients the module opened.
+    clients: BTreeSet<u32>,
+    /// Replies of `OP_CCMD` jobs whose waiter still looks, by sequence number.
+    replies: BTreeMap<u32, Option<Vec<u8>>>,
+    /// GEM object frames given back once the module detached the object.
+    pending_frames: BTreeMap<u32, Arc<ForeignPixels>>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -185,12 +208,20 @@ static STATE: Mutex<State> = Mutex::new(State {
     pin_adds: 0,
     deferred: Vec::new(),
     caps: 0,
+    clients: BTreeSet::new(),
+    replies: BTreeMap::new(),
+    pending_frames: BTreeMap::new(),
 });
+
+/// Per client and ring: submissions the module took, and those done.
+static RINGS: Mutex<BTreeMap<(u32, u32), (u64, u64)>> = Mutex::new(BTreeMap::new());
 
 /// The module serves jobs (registered, self-test passed, not dead).
 static READY: AtomicBool = AtomicBool::new(false);
 /// It also runs scene lists (`CAP_SCENE`).
 static SCENES: AtomicBool = AtomicBool::new(false);
+/// It also serves guest native contexts (`CAP_NATIVE`).
+static NATIVE: AtomicBool = AtomicBool::new(false);
 static NEXT_SEQ: AtomicU32 = AtomicU32::new(1);
 /// Highest sequence number completed; jobs complete in order.
 static COMPLETED: AtomicU32 = AtomicU32::new(0);
@@ -258,6 +289,8 @@ pub fn register(dev: PciAddr, version: i32) -> i32 {
     st.payloads.clear();
     st.adding.clear();
     st.caps = 0;
+    st.clients.clear();
+    st.replies.clear();
     crate::kprintln!("[npk] gpudev: {:02x}:{:02x}.{} registered, {}x{} framebuffer, 2 shadow buffers",
         dev.bus, dev.device, dev.function, fb.width, fb.height);
     0
@@ -383,8 +416,12 @@ pub fn ready(dev: PciAddr, caps: i32) -> i32 {
     super::install(Box::new(GpudevDriver { fb }));
     READY.store(true, Ordering::Release);
     SCENES.store(caps & CAP_SCENE != 0, Ordering::Release);
-    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}",
-        if caps & CAP_SCENE != 0 { ", scenes offered" } else { "" });
+    NATIVE.store(caps & CAP_NATIVE != 0, Ordering::Release);
+    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}",
+        if caps & CAP_SCENE != 0 { ", scenes offered" } else { "" },
+        if caps & CAP_NATIVE == 0 { "" }
+        else if crate::drivers::vtd::protected(dev) { ", native contexts for guests" }
+        else { ", native contexts need the IOMMU (set gpu_iommu on)" });
     0
 }
 
@@ -446,6 +483,9 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
             g.apply(dev, false);
         }
         st.removing.remove(&seq);
+        if let Some(frames) = st.pending_frames.remove(&seq) {
+            free_frames(&frames);
+        }
         st.pending_free.remove(&seq)
     };
     if status < 0 || seq % 64 == 0 {
@@ -501,14 +541,23 @@ pub fn module_gone(dev: PciAddr) {
         st.removing.clear();
         st.adding.clear();
         st.caps = 0;
+        st.clients.clear();
+        st.replies.clear();
+        for frames in core::mem::take(&mut st.pending_frames).into_values() {
+            free_frames(&frames);
+        }
         let mut frees: Vec<(u64, usize)> = core::mem::take(&mut st.pending_free).into_values().collect();
         frees.extend(core::mem::take(&mut st.deferred).into_iter().filter_map(|(_, f)| f));
         (st.fb.take(), frees)
     };
     READY.store(false, Ordering::Release);
     SCENES.store(false, Ordering::Release);
+    NATIVE.store(false, Ordering::Release);
+    RINGS.lock().clear();
     WAKER.store(NO_WAKER, Ordering::Release);
     wake_waiters();
+    // Waiting submissions see the module gone and complete.
+    crate::microvm::devices::gpu_backend::note_gpu_kick(0);
     for (phys, pages) in frees {
         crate::memory::deallocate_contiguous(phys, pages);
     }
@@ -830,19 +879,40 @@ fn halt_for(seq: u32, deadline: u64) {
 /// status: 0, the module's error, or -ETIME (62).
 fn wait_seq(seq: u32, deadline: u64) -> i32 {
     loop {
-        if seq_ge(COMPLETED.load(Ordering::Acquire), seq) {
-            let s = STATUS[seq as usize % STATUS.len()].load(Ordering::Acquire);
-            return if (s >> 32) as u32 == seq { s as u32 as i32 } else { -5 };
-        }
-        if !READY.load(Ordering::Acquire) || crate::interrupts::rdtsc() >= deadline {
-            // A job the module never took must not run after the CPU redid it.
-            let mut st = STATE.lock();
-            st.queue.retain(|j| j.seq != seq);
-            st.payloads.remove(&seq);
-            return -62;
+        if let Some(s) = seq_done(seq, deadline) {
+            return s;
         }
         halt_for(seq, deadline);
     }
+}
+
+/// `wait_seq`, yielding to the core's other fibers instead of halting: a
+/// guest's ccmd waits on the virtio-gpu worker, which may share its core
+/// with the module.
+fn wait_seq_yield(seq: u32, deadline: u64) -> i32 {
+    loop {
+        if let Some(s) = seq_done(seq, deadline) {
+            return s;
+        }
+        fiber::spin_or_yield();
+    }
+}
+
+/// Job `seq`'s status once it is completed, or -ETIME once it cannot be any
+/// more; None while it may still be.
+fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
+    if seq_ge(COMPLETED.load(Ordering::Acquire), seq) {
+        let s = STATUS[seq as usize % STATUS.len()].load(Ordering::Acquire);
+        return Some(if (s >> 32) as u32 == seq { s as u32 as i32 } else { -5 });
+    }
+    if !READY.load(Ordering::Acquire) || crate::interrupts::rdtsc() >= deadline {
+        // A job the module never took must not run after the CPU redid it.
+        let mut st = STATE.lock();
+        st.queue.retain(|j| j.seq != seq);
+        st.payloads.remove(&seq);
+        return Some(-62);
+    }
+    None
 }
 
 fn deadline() -> u64 {
@@ -966,6 +1036,208 @@ pub fn shadow_bo(addr: u64) -> Option<u32> {
 
 pub fn scenes_offered() -> bool {
     SCENES.load(Ordering::Acquire)
+}
+
+/// The card a module serves guest native contexts for: it reported
+/// `CAP_NATIVE` and the IOMMU confines the card to the pages granted to it.
+pub fn native_device() -> Option<PciAddr> {
+    if !READY.load(Ordering::Acquire) || !NATIVE.load(Ordering::Acquire) {
+        return None;
+    }
+    let owner = STATE.lock().owner?;
+    crate::drivers::vtd::protected(owner).then_some(owner)
+}
+
+/// Why a module that serves native contexts is not used for them.
+pub fn native_refused() -> Option<&'static str> {
+    if !READY.load(Ordering::Acquire) || !NATIVE.load(Ordering::Acquire) {
+        return None;
+    }
+    native_device().is_none().then_some("the card is not behind the IOMMU (set gpu_iommu on)")
+}
+
+/// `npk_gpudev_reply`: the reply of `OP_CCMD` job `seq`, before its
+/// completion.
+pub fn reply(dev: PciAddr, seq: u32, data: &[u8]) -> i32 {
+    if data.len() > MAX_REPLY {
+        return -1;
+    }
+    let mut st = STATE.lock();
+    if st.owner != Some(dev) {
+        return -1;
+    }
+    match st.replies.get_mut(&seq) {
+        Some(r) => {
+            *r = Some(data.to_vec());
+            0
+        }
+        None => -1,
+    }
+}
+
+/// `npk_gpudev_ring`: client `client` has had `submitted` submissions on
+/// `ring` taken, `completed` of them done. Completions waiting for that
+/// ring are looked at again.
+pub fn ring(dev: PciAddr, client: u32, ring: u32, submitted: u64, completed: u64) -> i32 {
+    if ring >= MAX_CLIENT_RINGS || completed > submitted {
+        return -1;
+    }
+    {
+        let st = STATE.lock();
+        if st.owner != Some(dev) || !st.clients.contains(&client) {
+            return -1;
+        }
+    }
+    RINGS.lock().insert((client, ring), (submitted, completed));
+    crate::microvm::devices::gpu_backend::note_gpu_kick(0);
+    0
+}
+
+/// What the module last reported for `client`'s `ring`.
+pub fn ring_state(client: u32, ring: u32) -> (u64, u64) {
+    RINGS.lock().get(&(client, ring)).copied().unwrap_or((0, 0))
+}
+
+fn native_deadline() -> u64 {
+    crate::interrupts::rdtsc() + BIND_TIMEOUT_MS * (crate::interrupts::tsc_freq() / 1000)
+}
+
+/// Open client `client` in the module (its own GPU address space).
+pub fn client_open(client: u32) -> bool {
+    if native_device().is_none() {
+        return false;
+    }
+    let seq = {
+        let mut st = STATE.lock();
+        if st.owner.is_none() || st.clients.contains(&client) {
+            return false;
+        }
+        st.clients.insert(client);
+        queue_job(&mut st, OP_CLIENT, [client, 1, 0, 0, 0, 0], None, &[])
+    };
+    wake_module();
+    let ok = wait_seq_yield(seq, native_deadline()) == 0;
+    if !ok {
+        client_close(client);
+    }
+    ok
+}
+
+/// Close client `client`: the module waits for its work and lets go of its
+/// address space and contexts.
+pub fn client_close(client: u32) {
+    let seq = {
+        let mut st = STATE.lock();
+        if !st.clients.remove(&client) || st.owner.is_none() {
+            None
+        } else {
+            Some(queue_job(&mut st, OP_CLIENT, [client, 0, 0, 0, 0, 0], None, &[]))
+        }
+    };
+    RINGS.lock().retain(|&(c, _), _| c != client);
+    if let Some(seq) = seq {
+        wake_module();
+        wait_seq_yield(seq, native_deadline());
+    }
+}
+
+/// Register a GEM object's frames as a buffer the card may reach. Not named
+/// by serial: a scan-out of the same pages registers them separately.
+pub fn object_add(frames: &Arc<ForeignPixels>, size: u64) -> Option<u32> {
+    let mut st = STATE.lock();
+    let dev = st.owner?;
+    let id = st.next_id;
+    st.next_id += 1;
+    st.bos.insert(id, Bo {
+        addr: 0, size, pitch: 0, width: 0, height: 0, format: 0,
+        gpu_addr: None, state: BoState::Bound, fence: 0,
+    });
+    st.page_lists.insert(id, (frames.clone(), 0));
+    if let Some(g) = grant_of(&st, id) {
+        g.apply(dev, true);
+    }
+    Some(id)
+}
+
+/// Hand GEM object `id` to `client` under resource id `res_id`.
+pub fn object_attach(client: u32, res_id: u32, id: u32) {
+    {
+        let mut st = STATE.lock();
+        if st.owner.is_none() || !st.bos.contains_key(&id) {
+            return;
+        }
+        queue_job(&mut st, OP_OBJECT, [client, res_id, id, 1, 0, 0], None, &[]);
+    }
+    wake_module();
+}
+
+/// GEM object `id` goes. Attached (`attached`: client, resource id), the
+/// module detaches it first; the card stops reaching its frames and they
+/// are freed once that is done. Otherwise both happen now.
+pub fn object_remove(id: u32, attached: Option<(u32, u32)>, frames: Arc<ForeignPixels>) {
+    let mut st = STATE.lock();
+    let grant = grant_of(&st, id);
+    let known = st.bos.remove(&id).is_some();
+    st.page_lists.remove(&id);
+    match (st.owner, attached, known) {
+        (Some(_), Some((client, res_id)), true) => {
+            let seq = queue_job(&mut st, OP_OBJECT, [client, res_id, id, 0, 0, 0], None, &[]);
+            if let Some(g) = grant {
+                st.revoke_on.insert(seq, g);
+            }
+            st.pending_frames.insert(seq, frames);
+            drop(st);
+            wake_module();
+        }
+        (owner, _, _) => {
+            if let (Some(dev), Some(g), true) = (owner, grant, known) {
+                g.apply(dev, false);
+            }
+            drop(st);
+            free_frames(&frames);
+        }
+    }
+}
+
+/// Give back frames allocated one by one for a GEM object.
+fn free_frames(frames: &ForeignPixels) {
+    for &p in &frames.pages {
+        crate::memory::deallocate_frame(p);
+    }
+}
+
+/// The module's answer to a guest ccmd.
+pub enum Answer {
+    /// Done; the reply (empty for ccmds without one).
+    Reply(Vec<u8>),
+    /// The module rejected the request as malformed.
+    Malformed,
+    /// No answer: the module is gone or did not answer in time.
+    Failed,
+}
+
+/// Run guest ccmd `req` for `client` in the module and wait for its answer.
+pub fn ccmd(client: u32, req: &[u8]) -> Answer {
+    if !READY.load(Ordering::Acquire) || !NATIVE.load(Ordering::Acquire) {
+        return Answer::Failed;
+    }
+    let seq = {
+        let mut st = STATE.lock();
+        if st.owner.is_none() || !st.clients.contains(&client) {
+            return Answer::Failed;
+        }
+        let seq = queue_job(&mut st, OP_CCMD, [client, req.len() as u32, 0, 0, 0, 0], Some(req.to_vec()), &[]);
+        st.replies.insert(seq, None);
+        seq
+    };
+    wake_module();
+    let status = wait_seq_yield(seq, native_deadline());
+    let reply = STATE.lock().replies.remove(&seq).flatten();
+    match status {
+        0 => Answer::Reply(reply.unwrap_or_default()),
+        -62 | -5 => Answer::Failed,
+        _ => Answer::Malformed,
+    }
 }
 
 /// What `gpu` reports about the GPU service.

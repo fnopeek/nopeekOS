@@ -11,8 +11,9 @@ use crate::intel_ring::intel_ring;
 use crate::intel_timeline::intel_timeline;
 
 /// Contexts the table holds: a kernel context and a recording context per
-/// engine, with room to spare.
-pub const MAX_CONTEXTS: usize = 16;
+/// engine, and the contexts of native-context clients
+/// (`i915_gem_context.rs`), which are kept and reused.
+pub const MAX_CONTEXTS: usize = 128;
 
 const ENOSPC: i32 = 28;
 
@@ -65,6 +66,9 @@ pub struct intel_context {
     pub tag: u32,
     /// `ce->wakeref`: the GT wakeref taken on entering.
     pub wakeref: bool,
+    /// `ce->vm`: the top-level directory of a client's PPGTT; 0 is the
+    /// kernel's (`gt->vm`).
+    pub vm_pd: u64,
 }
 
 impl intel_context {

@@ -198,6 +198,71 @@ gegen das Pruef-Backend — dann laufen Kontext, Antwortpuffer, `MAP_BLOB`
 und die ersten ccmds wirklich durch, bevor Mesa auf llvmpipe faellt, (d)
 Stufe 7 Schritt fuer Schritt: GETPARAM/QUERY → GEM_CREATE → Execbuffer.
 
+## 4b. Stufe 7 — die Schnittstelle (festgelegt 2026-10-15)
+
+Vorbild ist virglrenderer `src/drm/drm_context.c` + `src/drm/i915/i915_ccmd.c`:
+dort spielt der Wirt jeden ccmd als ioctl auf seinem i915 nach. Bei uns ist
+das Modul der i915; die Speicherseite (GEM-Objekte, Abbildung in den Gast)
+gehoert dem Kernel. Teilung:
+
+| ccmd (Mesa `i915_proto.h`) | wer | Antwort (`ret` an) |
+|---|---|---|
+| 1 IOCTL_SIMPLE (Positivliste aus `i915_ccmd.c`) | Modul | 4, dahinter die Nutzlast |
+| 2 GETPARAM | Modul (`i915_getparam.c`; MMAP_GTT_VERSION auf 4 klemmen) | 8 |
+| 3 QUERYPARAM | Modul (`i915_query.c`) | 8 |
+| 4 GEM_CREATE, 5 GEM_CREATE_EXT | **Kernel**: Rahmen anlegen (genullt), unter `blob_id` parken | keine |
+| 6 GEM_CONTEXT_CREATE (+ext wie `i915_ccmd.c`) | Modul (`gem/i915_gem_context.c`) | 8 |
+| 7/10 GEM_EXECBUFFER2(_V2) | Modul (`gem/i915_gem_execbuffer.c`, nur Softpin) | 4; bei EIO setzt der **Kernel** `banned_ctx_mask` |
+| 8 GEM_SET_MMAP_MODE | **Kernel** (Cache-Art der Gastabbildung) | keine |
+| 9 GEM_BUSY | Modul | 8 |
+
+**gpudev v2** (`VERSION = 2`, Kernel und Modul gemeinsam; `CAP_NATIVE = 4`
+bei `npk_gpudev_ready`):
+
+- `OP_CLIENT = 5`: `a0` Client (Kernel-Kontext-Handle), `a1` 1 = oeffnen,
+  0 = schliessen. Oeffnen legt das PPGTT des Clients an
+  (`i915_ppgtt_create`); Schliessen wartet die Requests ab, loest alle
+  Bindungen, gibt Kontexte und PPGTT frei.
+- `OP_OBJECT = 6`: `a0` Client, `a1` res_id, `a2` gpudev-Puffer-Id,
+  `a3` 1 = anhaengen, 0 = loesen. Der Kernel meldet das Objekt beim
+  `CREATE_BLOB host3d` an (`take_blob` bekommt dafuer die res_id) und loest
+  es beim Freigeben; ist der Auftrag fertig, haelt das Modul keine Bindung
+  und keinen Request mehr darauf — erst dann `OP_BO_REMOVE`, Entzug der
+  IOMMU-Freigabe, Rahmen zurueck. Die Seiten holt das Modul mit
+  `npk_gpudev_bo_pages`.
+- `OP_CCMD = 7`: `a0` Client, `a1` Laenge, Nutzlast = der ccmd des Gastes
+  samt `vdrm_ccmd_req`-Kopf. Das Modul schreibt die Antwort mit
+  **`npk_gpudev_reply(seq, ptr, len)`** (neu, ≤ 64 KB) und meldet dann
+  `complete(seq, 0)`; ein gescheiterter Treiberaufruf steht als positives
+  errno in `ret`. `complete(seq, <0)` heisst „kaputte Anfrage“ (der Kernel
+  lehnt den SUBMIT_3D ab). Ein Execbuffer wartet NIE auf die GPU.
+- Zaeune: **`npk_gpudev_ring(client, ring, submitted, completed)`** (neu,
+  64-Bit-Zaehler je Client und `ring_idx` wie in `i915_ccmd.c`). Das Modul
+  ruft es nach jedem Execbuffer (submitted +1) und wenn ein Request des
+  Clients fertig wird; der Kernel weckt dann den virtio-gpu-Arbeiter.
+  `submit_fence` = submitted zum Zeitpunkt des SUBMIT_3D, `fence_done` =
+  completed ≥ Zaun.
+
+**Modul** (Linux-Namen: `i915_getparam.rs`, `i915_query.rs`,
+`i915_gem_context.rs`, `i915_gem_execbuffer.rs`, Verteiler
+`virtio_ccmd.rs` nach `i915_ccmd.c`): je Client PPGTT, Kontexte (ctx_id →
+Kontext je Engine, Standard-Engine-Karte wie Linux ohne ENGINES-Param),
+Objekte res_id → Puffer + Bindungen. `intel_context` bekommt sein VM
+(`lrc` nimmt dessen PD statt `gt.vm`). Softpin: jedes Objekt an seiner
+`offset` ins Client-PPGTT (Ueberlappung = alte Bindung loesen, wie
+`i915_vma_pin` mit `PIN_OFFSET_FIXED`), Request auf der Engine, Invalidate,
+`MI_BATCH_BUFFER_START` (ppGTT, nicht sicher), Breadcrumb. Haenger: Request
+mit EIO, Kontext gesperrt (EIO bei jedem weiteren Execbuffer).
+
+**Kernel**: `GpudevBackend` impl `Backend` — wird gesetzt, wenn gpudev
+`CAP_NATIVE` meldet **und** die IOMMU die Karte schuetzt; GEM-Speicher je VM
+gedeckelt (Schutz, nicht Rechnung); `SET_SCANOUT_BLOB` auf host3d-Ressourcen.
+
+**Gast**: npkwm in zwei Fassungen — die heutige (pixman, ohne Mesa
+gelinkt) und `npkwm-gles2` (wlroots mit gles2-Renderer, gbm-Allokator,
+linux-dmabuf v4 mit Feedback) im Bundle; das init nimmt die zweite nur
+bei Bit 4. Mit GPU fallen die Firefox-Schalter aus §4 weg.
+
 ## 5. Offen
 
 - Modultod waehrend einer 3D-Sitzung: der Gastkontext ist dann verloren.

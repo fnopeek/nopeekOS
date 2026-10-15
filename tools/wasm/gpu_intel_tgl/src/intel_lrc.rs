@@ -165,11 +165,19 @@ fn write_page(d: Dma, off: u32, page: &[u32; 1024]) {
     let _ = d.write(off, &b);
 }
 
+/// `px_dma(ppgtt->pd)` of `ce->vm`.
+fn ce_vm_pd(gt: &intel_gt, ce: usize) -> u64 {
+    match gt.contexts[ce].vm_pd {
+        0 => gt.vm.as_ref().map(|v| v.pd_dma()).unwrap_or(0),
+        pd => pd,
+    }
+}
+
 /// `lrc_init_regs`.
 pub fn lrc_init_regs(gt: &intel_gt, ce: usize, inhibit: bool) {
     let Some(regs) = regs_of(gt, ce) else { return };
     let Some(engine) = gt.engine[gt.contexts[ce].engine as usize] else { return };
-    let pd = gt.vm.map(|v| v.pd_dma()).unwrap_or(0);
+    let pd = ce_vm_pd(gt, ce);
     let mut page = [0u32; 1024];
     read_page(regs.d, LRC_STATE_OFFSET as u32, &mut page);
     __lrc_init_regs(&mut page, &engine, gt.contexts[ce].runtime_last, pd, inhibit);
@@ -210,7 +218,7 @@ pub fn lrc_init_state(_i915: &mut drm_i915_private, gt: &mut intel_gt, ce: usize
         write_page(state, gt.contexts[ce].wa_bb_page * PAGE, &zero);
     }
 
-    let pd = gt.vm.map(|v| v.pd_dma()).unwrap_or(0);
+    let pd = ce_vm_pd(gt, ce);
     let mut page = [0u32; 1024];
     read_page(state, LRC_STATE_OFFSET as u32, &mut page);
     __lrc_init_regs(&mut page, &engine, gt.contexts[ce].runtime_last, pd, inhibit);

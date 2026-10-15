@@ -22,10 +22,12 @@ const PDES: usize = 512;
 /// `vm->top` for a 4-level table.
 const TOP: usize = 3;
 /// Page-table pages below the top directory one address space holds; the
-/// module has no heap that frees, so they sit in a fixed table.
-const MAX_PT: usize = 1024;
-/// Released table pages kept for reuse.
-const MAX_STASH: usize = 64;
+/// module has no heap that frees, so they sit in a fixed table. 2048 page
+/// tables map 4 GB in 4K pages.
+const MAX_PT: usize = 2048;
+/// Released table pages kept for reuse; as many as there can be tables, so
+/// none is lost when a client's address space is emptied.
+const MAX_STASH: usize = MAX_PT;
 
 /// A page-table page below the top directory (`struct i915_page_table` /
 /// `i915_page_directory`): `entry[idx]` of the table at `parent`.
@@ -186,6 +188,33 @@ impl i915_ppgtt {
                 return Err(-ENOMEM);
             }
             idx += n as u64;
+        }
+        Ok(())
+    }
+
+    /// `gen8_ppgtt_insert_pte` for a list of pages, as from a
+    /// scatterlist: page `i` of `pages` at `start + i * 4K`. The tree must
+    /// have been allocated.
+    pub fn gen8_ppgtt_insert_pages(&mut self, start: u64, pages: &[u64], pat_index: u32, flags: u32) -> Result<(), i32> {
+        let pte_encode = gen12_pte_encode(0, pat_index, flags);
+        let mut idx = start >> GEN8_PTE_SHIFT;
+        let mut at = 0usize;
+        while at < pages.len() {
+            let pdp = self.entry(self.pd.phys, gen8_pd_index(idx, 3)).ok_or(-EINVAL)?;
+            let pd = self.entry(pdp.phys, gen8_pd_index(idx, 2)).ok_or(-EINVAL)?;
+            let pt = self.entry(pd.phys, gen8_pd_index(idx, 1)).ok_or(-EINVAL)?;
+            let first = gen8_pd_index(idx, 0);
+            let n = (PDES - first).min(pages.len() - at);
+            let mut buf = [0u8; 4096];
+            for i in 0..n {
+                buf[i * 8..i * 8 + 8].copy_from_slice(&(pte_encode | pages[at + i]).to_le_bytes());
+            }
+            let d = pt.map().ok_or(-ENOMEM)?;
+            if !d.write((first * 8) as u32, &buf[..n * 8]) {
+                return Err(-ENOMEM);
+            }
+            idx += n as u64;
+            at += n;
         }
         Ok(())
     }

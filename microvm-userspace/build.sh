@@ -179,9 +179,16 @@ for so in $(tar -tzf "$MESA_OVERLAY" | grep -E '\.so|^usr/bin/'); do
 done
 cyan "mesa ${MESA_VERSION} with intel-virtio over Alpine's ${ALPINE_MESA}"
 
-# npkwm is embedded in PID-1 and loads its libraries from this image: every
-# library it needs must be here, or the session never starts.
-for lib in $(readelf -d "$REPO_ROOT/microvm/linux/npkwm/npkwm" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+# The compositor for a guest with a GPU (microvm/linux/npkwm/build.sh gles2);
+# the init runs it instead of PID-1's npkwm when the host offers native
+# contexts.
+mkdir -p "$STAGE/usr/libexec/npk"
+install -m 0755 "$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2" "$STAGE/usr/libexec/npk/npkwm-gles2"
+
+# npkwm is embedded in PID-1 and loads its libraries from this image, as
+# does npkwm-gles2: every library they need must be here, or the session
+# never starts.
+for lib in $(readelf -d "$REPO_ROOT/microvm/linux/npkwm/npkwm" "$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort -u); do
     [ -e "$STAGE/usr/lib/$lib" ] || [ -L "$STAGE/usr/lib/$lib" ] || [ -e "$STAGE/lib/$lib" ] || [ -L "$STAGE/lib/$lib" ] \
         || { red "npkwm needs $lib, not in the image"; exit 1; }
 done

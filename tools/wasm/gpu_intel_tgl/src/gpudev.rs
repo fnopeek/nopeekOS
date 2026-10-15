@@ -6,6 +6,10 @@
 //! retires, and scene lists run by the compose programs on rcs0
 //! (compose.rs). Not a Linux file: Linux has no in-kernel blit on TGL; the
 //! copy is encoded as `emit_copy` in gt/intel_migrate.c does it.
+//!
+//! gpudev v2 adds native contexts (docs/plan/GPU_IN_VM.md §4b): clients,
+//! their objects and their ccmds (`i915_gem_context.rs`, `virtio_ccmd.rs`),
+//! whose fences are reported per ring after every pass of the loop.
 
 use crate::drm_mm::drm_mm_node;
 use crate::gen8_ppgtt::i915_ppgtt;
@@ -18,13 +22,22 @@ use npk_sys::Dma;
 
 const WAIT_IRQ: i32 = 2;
 const WAIT_GPU_CMD: i32 = 64;
-const VERSION: i32 = 1;
+const VERSION: i32 = 2;
 const OP_COPY_RECT: u32 = 1;
 const OP_BO_ADD: u32 = 2;
 const OP_BO_REMOVE: u32 = 3;
 const OP_SCENE: u32 = 4;
+const OP_CLIENT: u32 = 5;
+const OP_OBJECT: u32 = 6;
+const OP_CCMD: u32 = 7;
 const CAP_COPY: i32 = 1;
 const CAP_SCENE: i32 = 2;
+const CAP_NATIVE: i32 = 4;
+/// The largest ccmd the module takes (2048 exec objects and their
+/// relocation entries fit), and the largest response (`npk_gpudev_reply`).
+const CCMD_MAX: usize = 256 * 1024;
+const REPLY_MAX: usize = 64 * 1024;
+const ENOMEM: i32 = 12;
 const JOB_BYTES: usize = 32;
 const BO_INFO_BYTES: usize = 40;
 /// Buffers 0..NUM_BOS are fixed; the kernel numbers the rest from there.
@@ -39,8 +52,13 @@ const EINVAL: i32 = 22;
 const EIO: i32 = 5;
 const ENOSPC: i32 = 28;
 const ETIME: i32 = 62;
-/// Below the kernel's 100 ms, so a late copy is ours to report.
+/// Below the kernel's 100 ms, so a late copy is ours to report. It counts
+/// from when the request reached the engine's active port: a client batch
+/// may run ahead of it.
 const JOB_TIMEOUT_US: u64 = 80_000;
+/// How long a kernel request may wait to start behind client work before
+/// the engine counts as hung.
+pub const START_TIMEOUT_US: u64 = 10_000_000;
 /// Self-test surface: 64x64 XRGB8888.
 const TEST_W: u32 = 64;
 const TEST_H: u32 = 64;
@@ -150,7 +168,7 @@ pub(crate) fn ppgtt_bind(gt: &mut intel_gt, phys: u64, size: u64, pat_index: u32
 
 /// Runs everything the interrupt delivered: the handler, the engines'
 /// tasklets, then a retire pass, which parks the GT once it is idle.
-fn service_interrupts(i915: &mut drm_i915_private, gt: &mut intel_gt) {
+pub(crate) fn service_interrupts(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     crate::i915_irq::intel_irq_service(i915);
     crate::intel_gt_requests::intel_engines_cs_irq(i915, gt);
     for e in 0..gt.engine.len() {
@@ -202,8 +220,13 @@ fn copy_rect(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, src: u64,
     crate::intel_rps::intel_rps_run_pending(i915, gt);
 
     let t0 = linux::now_us();
+    let mut started = None;
     while !crate::i915_request::__i915_request_is_complete(gt, rq) {
-        if linux::now_us() - t0 > JOB_TIMEOUT_US {
+        let now = linux::now_us();
+        if started.is_none() && crate::intel_execlists_submission::execlists_running(gt, e, rq) {
+            started = Some(now);
+        }
+        if started.is_some_and(|s| now - s > JOB_TIMEOUT_US) || now - t0 > START_TIMEOUT_US {
             crate::i915_request::i915_request_put(gt, rq);
             linux::say("gpudev: copy on bcs0 timed out, wedging");
             crate::intel_engine_cs::intel_engine_print_registers(i915, gt, e);
@@ -444,8 +467,52 @@ fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, 
     }
 }
 
+/// `OP_CCMD`: the guest's command from the job's payload, dispatched, its
+/// response handed to the kernel before the job completes.
+fn run_ccmd(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i915_ggtt, seq: u32, client: u32, len: u32) -> i32 {
+    let len = len as usize;
+    if len > CCMD_MAX {
+        return -EINVAL;
+    }
+    CCMD_BUF.with(|b| {
+        let (req, rsp) = (&mut b.req, &mut b.rsp);
+        let mut at = 0usize;
+        while at < len {
+            let n = npk_sys::gpudev_job_data(seq as i32, at as i32, &mut req[at..len]);
+            if n <= 0 {
+                return -EINVAL;
+            }
+            at += n as usize;
+        }
+        // Zero-extended to the largest request struct (drm_context_submit_cmd_dispatch).
+        req[len..(len + 64).min(CCMD_MAX)].fill(0);
+        crate::i915_gem_context::NCTX.with(|st| {
+            let Some(c) = st.client_slot(client) else { return -EINVAL };
+            let mut d = crate::i915_gem_context::drm { i915, gt, ggtt };
+            match crate::virtio_ccmd::dispatch(st, &mut d, c as u8, &mut req[..], len, &mut rsp[..]) {
+                Ok(n) => {
+                    if npk_sys::gpudev_reply(seq as i32, &rsp[..n]) != 0 {
+                        -ENOMEM
+                    } else {
+                        0
+                    }
+                }
+                Err(e) => e,
+            }
+        })
+    })
+}
+
+struct ccmd_buf {
+    req: [u8; CCMD_MAX + 64],
+    rsp: [u8; REPLY_MAX],
+}
+
+static CCMD_BUF: npk_sys::cell::Single<ccmd_buf> =
+    npk_sys::cell::Single::new(ccmd_buf { req: [0; CCMD_MAX + 64], rsp: [0; REPLY_MAX] });
+
 /// One job; the status for `gpudev_complete`.
-fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, job: &[u8]) -> i32 {
+fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i915_ggtt, svc: &mut service, job: &[u8]) -> i32 {
     let w = |i: usize| u32::from_le_bytes(job[i * 4..i * 4 + 4].try_into().unwrap());
     let (seq, op, a) = (w(0), w(1), [w(2), w(3), w(4), w(5), w(6), w(7)]);
     let st = |r: Result<(), i32>| match r {
@@ -464,7 +531,32 @@ fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, jo
         }
         OP_BO_REMOVE => st(bo_remove(gt, svc, a[0])),
         OP_SCENE => run_scene(i915, gt, svc, seq, a),
+        OP_CLIENT => crate::i915_gem_context::NCTX.with(|st| {
+            if a[1] != 0 {
+                st_status(crate::i915_gem_context::client_open(st, i915, a[0]))
+            } else {
+                st_status(crate::i915_gem_context::client_close(st, i915, gt, a[0]))
+            }
+        }),
+        OP_OBJECT => crate::i915_gem_context::NCTX.with(|st| {
+            if a[3] != 0 {
+                match st.client_slot(a[0]) {
+                    Some(c) => st_status(st.obj_attach(c as u8, a[1], a[2])),
+                    None => -EINVAL,
+                }
+            } else {
+                st_status(crate::i915_gem_context::obj_detach(st, i915, gt, a[0], a[1]))
+            }
+        }),
+        OP_CCMD => run_ccmd(i915, gt, ggtt, seq, a[0], a[1]),
         _ => -EINVAL,
+    }
+}
+
+fn st_status(r: Result<(), i32>) -> i32 {
+    match r {
+        Ok(()) => 0,
+        Err(x) => x,
     }
 }
 
@@ -560,13 +652,17 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
 
     svc.copy_ok = self_test(i915, gt, e);
     Line::new().s("gpudev: bcs0 self-test ").s(if svc.copy_ok { "passed" } else { "FAILED" }).say();
-    let caps = if svc.copy_ok { CAP_COPY } else { 0 } | if scene_ok { CAP_SCENE } else { 0 };
+    // Native contexts need the render engine's submission, which the GPGPU
+    // self-test has just proven.
+    let native_ok = scene_ok;
+    let caps = if svc.copy_ok { CAP_COPY } else { 0 } | if scene_ok { CAP_SCENE } else { 0 }
+        | if native_ok { CAP_NATIVE } else { 0 };
     npk_sys::gpudev_ready(caps);
     if caps == 0 {
         return;
     }
     Line::new().s("gpudev: serving").s(if svc.copy_ok { " copies" } else { "" })
-        .s(if scene_ok { " scenes" } else { "" }).say();
+        .s(if scene_ok { " scenes" } else { "" }).s(if native_ok { " native contexts" } else { "" }).say();
     log_wakerefs(gt, "at ready");
 
     let mut jobs = [0u8; JOB_BYTES * 8];
@@ -595,9 +691,10 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         for j in 0..n.max(0) as usize {
             let job = &jobs[j * JOB_BYTES..(j + 1) * JOB_BYTES];
             let seq = u32::from_le_bytes(job[0..4].try_into().unwrap());
-            let status = run_job(i915, gt, &mut svc, job);
+            let status = run_job(i915, gt, ggtt, &mut svc, job);
             npk_sys::gpudev_complete(seq as i32, status);
         }
+        crate::i915_gem_context::NCTX.with(|st| st.poll(i915, gt));
 
         if crate::intel_gt::intel_gt_is_wedged(gt) {
             linux::say("gpudev: GT wedged, giving the card back");

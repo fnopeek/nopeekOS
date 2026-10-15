@@ -472,9 +472,15 @@ pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: 
     }
     crate::intel_rps::intel_rps_run_pending(i915, gt);
 
+    // The timeout counts from the start: a client batch may run ahead of it.
     let t0 = linux::now_us();
+    let mut started = None;
     while !crate::i915_request::__i915_request_is_complete(gt, rq) {
-        if linux::now_us() - t0 > DISPATCH_TIMEOUT_US {
+        let now = linux::now_us();
+        if started.is_none() && crate::intel_execlists_submission::execlists_running(gt, e, rq) {
+            started = Some(now);
+        }
+        if started.is_some_and(|s| now - s > DISPATCH_TIMEOUT_US) || now - t0 > crate::gpudev::START_TIMEOUT_US {
             crate::i915_request::i915_request_put(gt, rq);
             linux::say("gpgpu: dispatch on rcs0 timed out, wedging");
             on_timeout();
