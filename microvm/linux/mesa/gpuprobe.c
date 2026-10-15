@@ -1,12 +1,15 @@
 /* npk-gpuprobe: open the virtio-gpu render node the way an EGL client
- * does without a compositor (GBM platform), make a GLES2 context current
- * and print one line with the driver Mesa ended up on. Run once per guest
- * session when the host offers CONTEXT_INIT; "llvmpipe" there means the
- * native context did not come up, and the host log says why. */
+ * does without a compositor (GBM platform), make a GLES2 context current,
+ * print the driver Mesa ended up on, then clear a small renderbuffer to a
+ * known colour and read it back: that runs a batch on the card and shows
+ * whether its result reaches memory. Run once per guest session when the
+ * host offers CONTEXT_INIT; "llvmpipe" means the native context did not
+ * come up, and the host log says why. */
 #define _GNU_SOURCE
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
 #include <fcntl.h>
 #include <gbm.h>
 #include <stdio.h>
@@ -62,6 +65,26 @@ int main(int argc, char **argv)
 
     printf("<0>[gpu] guest EGL: renderer \"%s\", %s, %ld ms\n",
            (const char *)glGetString(GL_RENDERER), (const char *)glGetString(GL_VERSION), ms_since(&t0));
+
+    GLuint rb, fb;
+    glGenRenderbuffers(1, &rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8_OES, 64, 64);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        printf("<0>[gpu] guest EGL: framebuffer incomplete\n");
+        return 1;
+    }
+    glClearColor(0x40 / 255.0f, 0x80 / 255.0f, 0xc0 / 255.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    unsigned char px[4] = { 0 };
+    glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    printf("<0>[gpu] guest EGL: clear and read back %02x%02x%02x%02x (want 4080c0ff), gl error 0x%x, %ld ms\n",
+           px[0], px[1], px[2], px[3], glGetError(), ms_since(&t0));
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &rb);
 
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroyContext(dpy, ctx);

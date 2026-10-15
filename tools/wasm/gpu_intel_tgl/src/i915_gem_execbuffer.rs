@@ -93,7 +93,24 @@ pub fn i915_ccmd_gem_execbuffer2(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], 
         Err(e) => e,
     };
     wr32(rsp, 4, ret as u32);
+    log_execbuffer(c, ring as u32, buffer_count, batch_len, ret);
     Ok(8)
+}
+
+/// The first execbuffers of the boot, then only the failed ones, up to a
+/// fixed number of lines.
+fn log_execbuffer(c: u8, ring: u32, count: usize, batch_len: u32, ret: i32) {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    const FIRST: u32 = 8;
+    const MAX_LINES: u32 = 40;
+    static SEEN: AtomicU32 = AtomicU32::new(0);
+    static LINES: AtomicU32 = AtomicU32::new(0);
+    let n = SEEN.fetch_add(1, Ordering::Relaxed);
+    if (n < FIRST || ret != 0) && LINES.fetch_add(1, Ordering::Relaxed) < MAX_LINES {
+        linux::Line::new().s("native context: execbuffer ").dec(n as u64 + 1).s(" client slot ").dec(c as u64)
+            .s(" ring ").dec(ring as u64).s(", ").dec(count as u64).s(" objects, batch ").dec(batch_len as u64)
+            .s(" bytes -> ret ").dec(ret as u64).say();
+    }
 }
 
 /// `i915_gem_do_execbuffer` for softpinned objects; Err is the positive

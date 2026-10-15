@@ -1492,6 +1492,29 @@ impl VirtioGpu {
         }
     }
 
+    /// The reveal timeout passed (`gpu_backend::reveal_due`): every output
+    /// shows the last frame its guest sent, whole.
+    pub fn reveal(&mut self) {
+        for k in 0..MAX_OUTPUTS {
+            if !self.scanouts[k].enabled {
+                continue;
+            }
+            let res = self.scanouts[k].resource_id;
+            let size = match &self.scanouts[k].view {
+                Some(v) => Some((v.width, v.height)),
+                None => self.resources.iter().find(|r| r.id == res).map(|r| (r.width, r.height)),
+            };
+            let Some((w, h)) = size else { continue };
+            // Not "the screen shows this already": nothing was shown.
+            self.last_flush_res[k] = 0;
+            let mut body = [0u8; 24];
+            body[8..12].copy_from_slice(&w.to_le_bytes());
+            body[12..16].copy_from_slice(&h.to_le_bytes());
+            body[16..20].copy_from_slice(&res.to_le_bytes());
+            self.handle_flush(&body);
+        }
+    }
+
     fn handle_flush(&mut self, body: &[u8]) {
         if body.len() < 24 { return; }
         let x = u32::from_le_bytes([body[0],  body[1],  body[2],  body[3]]);

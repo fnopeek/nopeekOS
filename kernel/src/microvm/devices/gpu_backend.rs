@@ -185,6 +185,9 @@ pub fn take_resume(now: u64) -> bool {
 pub fn display_tick() -> bool {
     use super::virtio_console_pci as console;
     use super::virtio_gpu_pci::MAX_OUTPUTS;
+    if reveal_due() {
+        lock().reveal();
+    }
     let changed = crate::microvm::take_outputs_changed();
     if changed {
         lock().signal_outputs_changed();
@@ -236,7 +239,7 @@ const PRESENT_CLOSING: u8 = 2;
 static PRESENT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(PRESENT_SHOWN);
 static LAUNCH_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 /// How long a launch may stay hidden without a lit frame.
-const REVEAL_TIMEOUT_MS: u64 = 8000;
+const REVEAL_TIMEOUT_MS: u64 = 3000;
 /// Share of sampled pixels, in percent, that makes a frame the app's.
 pub const LIT_PCT: usize = 50;
 /// Sample every n-th pixel of every n-th row.
@@ -269,6 +272,19 @@ pub fn lit_percent_at(width: u32, height: u32, pixel: impl Fn(u32, u32) -> u32) 
 pub fn present_reset() {
     LAUNCH_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
     PRESENT.store(PRESENT_HIDDEN, Ordering::Release);
+}
+
+/// The reveal timeout passed with the window still hidden: frames show
+/// from now on. True once, for the caller to show the frames the guest
+/// already sent, since a guest whose screen stays black sends no more.
+pub fn reveal_due() -> bool {
+    if PRESENT.load(Ordering::Acquire) != PRESENT_HIDDEN {
+        return false;
+    }
+    let hz = crate::interrupts::tsc_freq().max(1);
+    let waited_ms = crate::interrupts::rdtsc().saturating_sub(LAUNCH_TSC.load(Ordering::Relaxed)) * 1000 / hz;
+    waited_ms >= REVEAL_TIMEOUT_MS
+        && PRESENT.compare_exchange(PRESENT_HIDDEN, PRESENT_SHOWN, Ordering::AcqRel, Ordering::Acquire).is_ok()
 }
 
 /// The app has exited: keep the last frame, drop the teardown.
