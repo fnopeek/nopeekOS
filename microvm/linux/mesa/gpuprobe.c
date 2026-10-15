@@ -499,53 +499,76 @@ static GLuint flat_program(GLint *z, GLint *c)
 
 /* What every 3D client does: a depth buffer cleared to 1.0, GL_LESS. A
  * red quad at z 0 passes, a green one behind it at 0.5 is discarded, a blue
- * one in front at -0.5 passes: the centre must end blue. Drawn once on a
- * fresh buffer and once more after a second clear, as a frame loop does. */
+ * one in front at -0.5 passes: the centre must end blue. Three ways, each on
+ * a fresh buffer, each frame twice:
+ *   batches - glClear, glFinish, again (a frame loop);
+ *   one     - both frames in one batch, read at the end;
+ *   drawn   - the second frame resets depth by drawing at z 1 with
+ *             GL_ALWAYS instead of glClear (no HiZ fast clear). */
 static void depth_test(void)
 {
     static const GLfloat quad[] = { -1, -1, 1, -1, -1, 1, 1, 1 };
+    static const float zs[3] = { 0.0f, 0.5f, -0.5f };
+    static const float cs[3][4] = { { 1, 0, 0, 1 }, { 0, 1, 0, 1 }, { 0, 0, 1, 1 } };
+    static const char *names[3] = { "batches", "one", "drawn" };
     GLint uz, uc;
     GLuint prog = flat_program(&uz, &uc);
-    GLuint rb[2], fb;
-    glGenRenderbuffers(2, rb);
-    glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8_OES, 256, 256);
-    glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, 256, 256);
-    glGenFramebuffers(1, &fb);
-    glBindFramebuffer(GL_FRAMEBUFFER, fb);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
-    char out[2][16] = { "-", "-" };
-    if (prog && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-        glViewport(0, 0, 256, 256);
-        glUseProgram(prog);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad);
-        glEnableVertexAttribArray(0);
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_LESS);
-        static const float zs[3] = { 0.0f, 0.5f, -0.5f };
-        static const float cs[3][4] = { { 1, 0, 0, 1 }, { 0, 1, 0, 1 }, { 0, 0, 1, 1 } };
-        for (int round = 0; round < 2; round++) {
-            glClearColor(0, 0, 0, 1);
-            glClearDepthf(1.0f);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            for (int i = 0; i < 3; i++) {
-                glUniform1f(uz, zs[i]);
-                glUniform4fv(uc, 1, cs[i]);
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    char line[256];
+    int n = snprintf(line, sizeof(line), "LESS, cleared 1.0:");
+    int bad = 0;
+    for (int mode = 0; mode < 3; mode++) {
+        GLuint rb[2], fb;
+        glGenRenderbuffers(2, rb);
+        glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8_OES, 256, 256);
+        glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, 256, 256);
+        glGenFramebuffers(1, &fb);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+        char out[2][16] = { "-", "-" };
+        if (prog && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+            glViewport(0, 0, 256, 256);
+            glUseProgram(prog);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad);
+            glEnableVertexAttribArray(0);
+            glEnable(GL_DEPTH_TEST);
+            for (int round = 0; round < 2; round++) {
+                glClearColor(0, 0, 0, 1);
+                if (mode == 2 && round == 1) {
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glDepthFunc(GL_ALWAYS);
+                    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                    glUniform1f(uz, 1.0f);
+                    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                } else {
+                    glClearDepthf(1.0f);
+                    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                }
+                glDepthFunc(GL_LESS);
+                for (int i = 0; i < 3; i++) {
+                    glUniform1f(uz, zs[i]);
+                    glUniform4fv(uc, 1, cs[i]);
+                    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                }
+                if (mode != 1 || round == 1) {
+                    glFinish();
+                    unsigned char px[4] = { 0 };
+                    glReadPixels(128, 128, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                    sprintf(out[round], "%02x%02x%02x%02x", px[0], px[1], px[2], px[3]);
+                }
             }
-            glFinish();
-            unsigned char px[4] = { 0 };
-            glReadPixels(128, 128, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-            sprintf(out[round], "%02x%02x%02x%02x", px[0], px[1], px[2], px[3]);
+            glDisable(GL_DEPTH_TEST);
         }
-        glDisable(GL_DEPTH_TEST);
+        int ok = (mode == 1 || !strcmp(out[0], "0000ffff")) && !strcmp(out[1], "0000ffff");
+        bad += !ok;
+        n += snprintf(line + n, sizeof(line) - n, " %s %s/%s %s;", names[mode], out[0], out[1], ok ? "ok" : "WRONG");
+        glDeleteFramebuffers(1, &fb);
+        glDeleteRenderbuffers(2, rb);
     }
-    printf("<0>[gpu] guest depth test (LESS, cleared 1.0): first %s, second %s (want 0000ffff) -> %s\n", out[0],
-           out[1], strcmp(out[0], "0000ffff") || strcmp(out[1], "0000ffff") ? "WRONG" : "ok");
-    glDeleteFramebuffers(1, &fb);
-    glDeleteRenderbuffers(2, rb);
+    printf("<0>[gpu] guest depth test (%s) -> %s\n", line, bad ? "WRONG" : "ok");
     if (prog)
         glDeleteProgram(prog);
 }
