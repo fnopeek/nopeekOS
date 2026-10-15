@@ -535,17 +535,20 @@ fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i915_ggtt,
             if a[1] != 0 {
                 st_status(crate::i915_gem_context::client_open(st, i915, a[0]))
             } else {
-                st_status(crate::i915_gem_context::client_close(st, i915, gt, a[0]))
+                st_status(crate::i915_gem_context::client_close(st, a[0]))
             }
         }),
         OP_OBJECT => crate::i915_gem_context::NCTX.with(|st| {
             if a[3] != 0 {
-                match st.client_slot(a[0]) {
+                match st.client_slot(a[0]).filter(|&c| !st.clients[c].closing) {
                     Some(c) => st_status(st.obj_attach(c as u8, a[1], a[2])),
                     None => -EINVAL,
                 }
             } else {
-                st_status(crate::i915_gem_context::obj_detach(st, i915, gt, a[0], a[1]))
+                match crate::i915_gem_context::obj_detach(st, gt, a[0], a[1]) {
+                    Ok(s) => s,
+                    Err(x) => x,
+                }
             }
         }),
         OP_CCMD => run_ccmd(i915, gt, ggtt, seq, a[0], a[1]),

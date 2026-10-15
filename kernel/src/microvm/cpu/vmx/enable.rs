@@ -1591,6 +1591,9 @@ impl VmContext {
             }
         }
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
+        if basic == 0 && (vmcs::read_exit_intr_info().unwrap_or(0) >> 8) & 0x7 == 2 {
+            crate::interrupts::nmi_after_vmexit();
+        }
         self.vcpu.trace.record(basic, outcome.exit_qualification);
         // A host interrupt preempted the running guest: its RIP is an
         // unbiased sample of what the vCPU executes (as on SVM).
@@ -1749,9 +1752,8 @@ impl VmContext {
 
         match basic {
             0 if (vmcs::read_exit_intr_info().unwrap_or(0) >> 8) & 0x7 == 2 => {
-                // Host NMI while the guest ran (NMI exiting): the NMI is
-                // consumed by the exit. Counted like the host handler does.
-                crate::interrupts::NMI_COUNT.fetch_add(1, Ordering::Relaxed);
+                // Host NMI while the guest ran (NMI exiting): handled right
+                // after the exit (`nmi_after_vmexit`).
                 last_outcome = Some(outcome);
             }
             0 if matches!(

@@ -67,8 +67,19 @@ pub fn die(args: fmt::Arguments) -> ! {
     halt()
 }
 
+/// A writer for last words that are not a panic (the watchdog's report):
+/// it does not stop the other cores. `None` once a core is panicking.
+pub fn emergency() -> Option<Writer> {
+    (!is_panicking()).then_some(Writer { col: 0, row: 0 })
+}
+
 /// NMI to every other core; their NMI handler sees `PANICKING` and halts.
 fn stop_other_cores() {
+    nmi_others();
+}
+
+/// An NMI to every core but this one.
+pub fn nmi_others() {
     use crate::interrupts::{LAPIC_ICR_HI, LAPIC_ICR_LO};
     let lapic = crate::interrupts::lapic();
     // Bounded: a wedged LAPIC must not keep the message from being written.

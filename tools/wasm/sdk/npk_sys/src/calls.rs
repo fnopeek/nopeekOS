@@ -92,6 +92,7 @@ unsafe extern "C" {
     fn npk_gpudev_complete(seq: i32, status: i32) -> i32;
     fn npk_gpudev_reply(seq: i32, ptr: i32, len: i32) -> i32;
     fn npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
+    fn npk_gpudev_released(id: i32) -> i32;
     fn npk_netdev_submit_rx(buf_ptr: i32, len: i32) -> i32;
     fn npk_netdev_rx_deliver(buf_ptr: i32, len: i32) -> i32;
     fn npk_netdev_poll_tx(buf_ptr: i32, max: i32) -> i32;
@@ -195,6 +196,7 @@ plain! {
     fn gpudev_complete = npk_gpudev_complete(seq: i32, status: i32) -> i32;
     /// Fence counters of `ring` of native-context client `client`.
     fn gpudev_ring = npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
+    fn gpudev_released = npk_gpudev_released(id: i32) -> i32;
 
     fn netdev_set_link = npk_netdev_set_link(up: i32) -> i32;
     fn netdev_set_link_state = npk_netdev_set_link_state(carrier: i32, dormant: i32) -> i32;

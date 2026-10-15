@@ -2403,6 +2403,18 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
+        // The hard-lockup watchdog: state, on/off, and a deliberate lockup
+        // that must end in a reset and a report on the next boot.
+        "watchdog" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "watchdog") {
+                crate::watchdog::intent(args);
+            }
+        }
+        // The watchdog's report from the last boot, again.
+        "lockup" => {
+            crate::watchdog::print_saved(true);
+        }
+
         "update" | "upgrade" => {
             if require_cap(vault, &session, Rights::EXECUTE, "update") {
                 update::intent_update(args);

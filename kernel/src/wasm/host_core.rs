@@ -4156,6 +4156,16 @@ pub(crate) fn npk_gpudev_reply(mem: &mut [u8], ctx: &mut HostState, seq: i32, pt
     crate::gpu::gpudev::reply(dev, seq as u32, data)
 }
 
+/// `npk_gpudev_released(id) -> 0 | -1`: the module let go of a GEM object
+/// it kept past its detach.
+pub(crate) fn npk_gpudev_released(ctx: &mut HostState, id: i32) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if id < 0 {
+        return -1;
+    }
+    crate::gpu::gpudev::released(dev, id as u32)
+}
+
 /// `npk_gpudev_ring(client, ring, submitted, completed) -> 0 | -1`.
 pub(crate) fn npk_gpudev_ring(ctx: &mut HostState, client: i32, ring: i32, submitted: i64, completed: i64) -> i32 {
     let Some(dev) = gpudev_device(ctx) else { return -1 };

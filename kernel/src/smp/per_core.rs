@@ -124,6 +124,7 @@ static CORE_HALT_COUNT: [AtomicU64; 256] = {
 /// there the core really is busy.
 pub fn record_halt(core_id: usize, cycles: u64) {
     if core_id >= 256 { return; }
+    crate::watchdog::touch(core_id);
     // Clear the in-progress mark before adding: a concurrent snapshot then
     // at worst misses this halt once (and sees it next time), never counts
     // it twice.

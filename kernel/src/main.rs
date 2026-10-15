@@ -50,6 +50,7 @@ mod config;
 mod vga;
 mod hw;
 mod fatal;
+mod watchdog;
 mod forge_rt;
 mod forge_tests;
 mod wasm;
@@ -105,6 +106,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
 
     // Start capturing boot log for debug shell (needs heap)
     serial::start_capture();
+    watchdog::print_saved(false);
 
     paging::init();
 

@@ -170,6 +170,11 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
     // omits this range but firmware quirks happen.
     alloc.mark_region_used(0, 0x100000);
 
+    // The watchdog's report region, kept over a warm reset.
+    if let Some((base, len)) = crate::watchdog::pstore_init(boot_info) {
+        alloc.mark_region_used(base, len);
+    }
+
     // The kernel image itself is the EfiLoaderCode/EfiLoaderData
     // region in the UEFI map — already left as "used" by the loop
     // above. The boot_info struct lives in BSS (= part of the kernel

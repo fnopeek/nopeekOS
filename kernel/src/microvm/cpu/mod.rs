@@ -1290,6 +1290,7 @@ pub fn entry_irqs_off(kick_gen: u64, host_core: usize, deadline: u64) -> bool {
     // wake, then reads this flag. Either we see its change here, or it sees
     // the flag and sends the IPI, which stays pending under IF=0 and ends
     // the entry at once.
+    crate::watchdog::touch(host_core);
     if host_core < IN_GUEST.len() {
         IN_GUEST[host_core].store(true, Ordering::SeqCst);
     }

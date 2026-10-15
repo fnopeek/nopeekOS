@@ -397,6 +397,7 @@ pub fn run_core_fibers(cid: usize) {
         return;
     }
     loop {
+        crate::watchdog::touch(cid);
         crate::mm::paging::sync_tlb();
         let now = crate::interrupts::rdtsc();
         // Check out the next runnable fiber (FIFO). Lock dropped before the

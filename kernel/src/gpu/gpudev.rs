@@ -32,7 +32,9 @@
 //! (`OP_CLIENT`), GEM objects in kernel frames handed to a client by
 //! resource id (`OP_OBJECT`), and the guest's ccmds (`OP_CCMD`) with a reply
 //! (`reply`). The module reports per client and ring how many submissions it
-//! took and how many are done (`ring`).
+//! took and how many are done (`ring`). A detach never waits for the GPU:
+//! a busy object stays with the module until its requests are done
+//! (`released`), and only then does the card lose its frames.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -55,6 +57,9 @@ pub const OP_SCENE: u32 = 4;
 pub const OP_CLIENT: u32 = 5;
 /// `a0` client, `a1` resource id, `a2` buffer, `a3` 1 = attach, 0 = detach.
 pub const OP_OBJECT: u32 = 6;
+/// Status of an `OP_OBJECT` detach whose object the module keeps until
+/// its requests are done; `npk_gpudev_released` follows.
+pub const DETACH_DEFERRED: i32 = 1;
 /// `a0` client, `a1` length; the payload is the guest's ccmd.
 pub const OP_CCMD: u32 = 7;
 /// Largest reply to a ccmd (`npk_gpudev_reply`).
@@ -185,8 +190,25 @@ struct State {
     clients: BTreeSet<u32>,
     /// Replies of `OP_CCMD` jobs whose waiter still looks, by sequence number.
     replies: BTreeMap<u32, Option<Vec<u8>>>,
-    /// GEM object frames given back once the module detached the object.
-    pending_frames: BTreeMap<u32, Arc<ForeignPixels>>,
+    /// `OP_OBJECT` detach jobs in flight: sequence number → buffer id.
+    detaching: BTreeMap<u32, u32>,
+    /// The owner's detach of each object being removed: buffer id → seq.
+    owner_seq: BTreeMap<u32, u32>,
+    /// GEM objects the module may still reach, by buffer id.
+    held: BTreeMap<u32, Held>,
+}
+
+/// A GEM object on its way out. The module completes a detach at once and
+/// keeps a busy object as a zombie until its requests are done
+/// (`npk_gpudev_released`); the owner's and every importer's zombie must be
+/// released before the card stops reaching the frames and they are freed.
+#[derive(Default)]
+struct Held {
+    /// Zombies the module still holds.
+    zombies: u32,
+    /// The owner's detach is done; its frames and their IOMMU grant.
+    owner_done: bool,
+    frames: Option<(Arc<ForeignPixels>, Option<Grant>)>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -210,7 +232,9 @@ static STATE: Mutex<State> = Mutex::new(State {
     caps: 0,
     clients: BTreeSet::new(),
     replies: BTreeMap::new(),
-    pending_frames: BTreeMap::new(),
+    detaching: BTreeMap::new(),
+    owner_seq: BTreeMap::new(),
+    held: BTreeMap::new(),
 });
 
 /// Per client and ring: submissions the module took, and those done.
@@ -483,8 +507,17 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
             g.apply(dev, false);
         }
         st.removing.remove(&seq);
-        if let Some(frames) = st.pending_frames.remove(&seq) {
-            free_frames(&frames);
+        if let Some(id) = st.detaching.remove(&seq) {
+            let owner = st.owner_seq.get(&id) == Some(&seq);
+            if owner {
+                st.owner_seq.remove(&id);
+            }
+            let h = st.held.entry(id).or_default();
+            if status == DETACH_DEFERRED {
+                h.zombies += 1;
+            }
+            h.owner_done |= owner;
+            release_held(&mut st, dev, id);
         }
         st.pending_free.remove(&seq)
     };
@@ -543,8 +576,15 @@ pub fn module_gone(dev: PciAddr) {
         st.caps = 0;
         st.clients.clear();
         st.replies.clear();
-        for frames in core::mem::take(&mut st.pending_frames).into_values() {
-            free_frames(&frames);
+        st.detaching.clear();
+        st.owner_seq.clear();
+        for h in core::mem::take(&mut st.held).into_values() {
+            if let Some((frames, grant)) = h.frames {
+                if let Some(g) = grant {
+                    g.apply(dev, false);
+                }
+                free_frames(&frames);
+            }
         }
         let mut frees: Vec<(u64, usize)> = core::mem::take(&mut st.pending_free).into_values().collect();
         frees.extend(core::mem::take(&mut st.deferred).into_iter().filter_map(|(_, f)| f));
@@ -1179,7 +1219,8 @@ pub fn object_detach(client: u32, res_id: u32, id: u32) {
         if st.owner.is_none() || !st.bos.contains_key(&id) {
             return;
         }
-        queue_job(&mut st, OP_OBJECT, [client, res_id, id, 0, 0, 0], None, &[]);
+        let seq = queue_job(&mut st, OP_OBJECT, [client, res_id, id, 0, 0, 0], None, &[]);
+        st.detaching.insert(seq, id);
     }
     wake_module();
 }
@@ -1195,10 +1236,9 @@ pub fn object_remove(id: u32, attached: Option<(u32, u32)>, frames: Arc<ForeignP
     match (st.owner, attached, known) {
         (Some(_), Some((client, res_id)), true) => {
             let seq = queue_job(&mut st, OP_OBJECT, [client, res_id, id, 0, 0, 0], None, &[]);
-            if let Some(g) = grant {
-                st.revoke_on.insert(seq, g);
-            }
-            st.pending_frames.insert(seq, frames);
+            st.detaching.insert(seq, id);
+            st.owner_seq.insert(id, seq);
+            st.held.entry(id).or_default().frames = Some((frames, grant));
             drop(st);
             wake_module();
         }
@@ -1209,6 +1249,36 @@ pub fn object_remove(id: u32, attached: Option<(u32, u32)>, frames: Arc<ForeignP
             drop(st);
             free_frames(&frames);
         }
+    }
+}
+
+/// `npk_gpudev_released`: the module let go of a zombie of buffer `id`.
+pub fn released(dev: PciAddr, id: u32) -> i32 {
+    let mut st = STATE.lock();
+    if st.owner != Some(dev) {
+        return -1;
+    }
+    let Some(h) = st.held.get_mut(&id) else { return -1 };
+    if h.zombies == 0 {
+        return -1;
+    }
+    h.zombies -= 1;
+    release_held(&mut st, dev, id);
+    0
+}
+
+/// Buffer `id` once nothing in the module reaches it: the card loses it,
+/// then its frames go back.
+fn release_held(st: &mut State, dev: PciAddr, id: u32) {
+    let Some(h) = st.held.get(&id) else { return };
+    if h.zombies != 0 || (h.frames.is_some() && !h.owner_done) {
+        return;
+    }
+    if let Some((frames, grant)) = st.held.remove(&id).and_then(|h| h.frames) {
+        if let Some(g) = grant {
+            g.apply(dev, false);
+        }
+        free_frames(&frames);
     }
 }
 

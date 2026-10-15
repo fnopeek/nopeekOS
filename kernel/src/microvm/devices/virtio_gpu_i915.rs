@@ -139,8 +139,8 @@ impl GpudevBackend {
     }
 
     fn object_free(&mut self, o: Object, attached: Option<(u32, u32)>) {
-        // Importers let go first; the module serves jobs in order, so the
-        // owner's removal below completes after theirs.
+        // Importers let go first; gpudev frees the frames once the owner's
+        // detach and every zombie the module kept are done.
         let users: Vec<(u32, u32)> = self.imports.iter().filter(|(_, id)| **id == o.id).map(|(k, _)| *k).collect();
         for (ctx, res_id) in users {
             self.imports.remove(&(ctx, res_id));

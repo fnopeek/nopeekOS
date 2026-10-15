@@ -31,7 +31,9 @@ SECTIONS {
     . = 0x10001000;
 
     .text ALIGN(4K) : {
+        __text_start = .;
         *(.text .text.*)
+        __text_end = .;
     }
 
     .rodata ALIGN(4K) : {

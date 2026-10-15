@@ -39,9 +39,6 @@ pub const NONE8: u8 = u8::MAX;
 /// Requests of a client context are given this long once running; then the
 /// GT is wedged, since an engine reset is not ported.
 const HANG_FALLBACK_MS: u64 = 6000;
-/// `OP_CLIENT` close waits this long for the client's requests (the kernel
-/// waits 2 s for the job).
-const CLOSE_WAIT_US: u64 = 1_500_000;
 
 /// The counters of one fence ring (`npk_gpudev_ring`).
 #[derive(Clone, Copy)]
@@ -63,11 +60,14 @@ pub struct client {
     pub vm_ids: [(u32, u8); MAX_VM_IDS],
     pub next_vm_id: u32,
     pub rings: [fence_ring; MAX_RINGS],
+    /// Closed by the kernel; torn down once its requests are done.
+    pub closing: bool,
 }
 
 impl client {
     const EMPTY: client = client { used: false, id: 0, default_vm: NONE8, next_ctx_id: 1, vm_ids: [(0, NONE8); MAX_VM_IDS],
-                                   next_vm_id: 1, rings: [fence_ring { submitted: 0, completed: 0 }; MAX_RINGS] };
+                                   next_vm_id: 1, rings: [fence_ring { submitted: 0, completed: 0 }; MAX_RINGS],
+                                   closing: false };
 }
 
 /// `struct i915_gem_context`.
@@ -132,12 +132,15 @@ pub struct gem_obj {
     pub busy: [(u16, u32); 4],
     pub write_class: u8,
     pub next: u16,
+    /// Detached while busy: no longer named by its client, unbound and
+    /// reported released (`npk_gpudev_released`) once idle.
+    pub zombie: bool,
 }
 
 impl gem_obj {
     const EMPTY: gem_obj = gem_obj { used: false, client: 0, res_id: 0, bo: 0, size: 0, pages: 0, tiling: 0, stride: 0,
                                      vm: [NONE8; 2], start: [0; 2], busy: [(NONE16, 0); 4], write_class: NONE8,
-                                     next: NONE16 };
+                                     next: NONE16, zombie: false };
 }
 
 /// A client request whose fence is not signalled yet.
@@ -168,6 +171,9 @@ pub struct nctx {
     /// Idle client contexts in `gt.contexts`, for any engine.
     pool: [u16; crate::intel_context::MAX_CONTEXTS],
     npool: usize,
+    /// Zombie objects, and clients closing.
+    nzombies: u32,
+    nclosing: u32,
 }
 
 pub static NCTX: Single<nctx> = Single::new(nctx {
@@ -179,6 +185,8 @@ pub static NCTX: Single<nctx> = Single::new(nctx {
     pend: [pending::EMPTY; MAX_PENDING],
     pool: [0; crate::intel_context::MAX_CONTEXTS],
     npool: 0,
+    nzombies: 0,
+    nclosing: 0,
 });
 
 /// The GPU side every call needs.
@@ -413,6 +421,16 @@ impl nctx {
         for k in 0..2 {
             self.obj_unbind(i, k);
         }
+        if self.objs[i].zombie {
+            self.nzombies -= 1;
+        } else {
+            self.obj_unlink(i);
+        }
+        self.objs[i] = gem_obj::EMPTY;
+    }
+
+    /// Object `i` no longer found by its client's res_id.
+    fn obj_unlink(&mut self, i: usize) {
         let o = self.objs[i];
         let h = hash_of(o.client, o.res_id);
         if self.hash[h] == i as u16 {
@@ -427,7 +445,15 @@ impl nctx {
                 j = self.objs[j as usize].next;
             }
         }
-        self.objs[i] = gem_obj::EMPTY;
+        self.objs[i].next = NONE16;
+    }
+
+    /// A zombie whose requests are done: unbound, freed, and its buffer
+    /// handed back to the kernel.
+    fn obj_release(&mut self, i: usize) {
+        let bo = self.objs[i].bo;
+        self.obj_free(i);
+        npk_sys::gpudev_released(bo as i32);
     }
 
     /// `i915_gem_create_context` with the proto context's settings: a
@@ -624,6 +650,23 @@ impl nctx {
                 self.ctx_reap(gt, x);
             }
         }
+        if self.nzombies != 0 {
+            for i in 0..MAX_OBJECTS {
+                if self.objs[i].used && self.objs[i].zombie && !self.obj_busy(gt, i) {
+                    self.obj_release(i);
+                }
+            }
+        }
+        if self.nclosing != 0 {
+            for c in 0..MAX_CLIENTS {
+                let c8 = c as u8;
+                if self.clients[c].used && self.clients[c].closing
+                    && !self.pend.iter().any(|p| p.used && p.client == c8) {
+                    crate::intel_gt_requests::intel_gt_retire_requests(i915, gt);
+                    self.client_teardown(gt, c);
+                }
+            }
+        }
         if let Some(k) = hung {
             let p = self.pend[k];
             let cx = &mut self.ctxs[p.ctx as usize];
@@ -670,22 +713,6 @@ impl nctx {
     }
 }
 
-/// Runs the service until `done` or `deadline` (in `now_us`); false on the
-/// deadline.
-pub fn wait_until(i915: &mut drm_i915_private, gt: &mut intel_gt, deadline: u64, done: &mut dyn FnMut(&mut intel_gt) -> bool)
-                  -> bool {
-    loop {
-        if done(gt) {
-            return true;
-        }
-        if linux::now_us() > deadline || crate::intel_gt::intel_gt_is_wedged(gt) {
-            return done(gt);
-        }
-        crate::i915_irq::intel_irq_wait(i915, 2);
-        crate::gpudev::service_interrupts(i915, gt);
-    }
-}
-
 /// `OP_CLIENT` open: `i915_gem_context_open`, context 0 with an address
 /// space of its own.
 pub fn client_open(st: &mut nctx, i915: &drm_i915_private, id: u32) -> Result<(), i32> {
@@ -706,93 +733,81 @@ pub fn client_open(st: &mut nctx, i915: &drm_i915_private, id: u32) -> Result<()
     }
 }
 
-/// `OP_CLIENT` close: `i915_gem_context_close` and the file's objects. The
-/// client's requests get `CLOSE_WAIT_US`; a client still busy then is hung,
-/// and the GT is wedged, so no request can touch its pages afterwards.
-pub fn client_close(st: &mut nctx, i915: &mut drm_i915_private, gt: &mut intel_gt, id: u32) -> Result<(), i32> {
+/// `OP_CLIENT` close (`i915_gem_context_close`): the client's contexts can
+/// no longer be named and take no work; the rest goes once its requests are
+/// done (`nctx::poll`), as Linux frees a context's VM after its last request.
+pub fn client_close(st: &mut nctx, id: u32) -> Result<(), i32> {
     let Some(c) = st.client_slot(id) else { return Ok(()) };
-    let c8 = c as u8;
-    let deadline = linux::now_us() + CLOSE_WAIT_US;
-    let idle = wait_until(i915, gt, deadline, &mut |gt| {
-        st.poll_quiet(gt);
-        !st.pend.iter().any(|p| p.used && p.client == c8)
-    });
-    if !idle {
-        linux::say("native context: a closing client stays busy, wedging the GT");
-        crate::intel_gt::intel_gt_set_wedged(i915, gt);
+    if st.clients[c].closing {
+        return Ok(());
     }
-    st.pend.iter_mut().filter(|p| p.used && p.client == c8).for_each(|p| {
-        crate::i915_request::i915_request_put(gt, p.rq as usize);
-        p.used = false;
-    });
+    st.clients[c].closing = true;
+    st.nclosing += 1;
     for x in 0..MAX_GEM_CTX {
-        if st.ctxs[x].used && st.ctxs[x].client == c8 {
+        if st.ctxs[x].used && st.ctxs[x].client == c as u8 {
             st.ctxs[x].closed = true;
         }
     }
-    crate::intel_gt_requests::intel_gt_retire_requests(i915, gt);
-    for x in 0..MAX_GEM_CTX {
-        if st.ctxs[x].used && st.ctxs[x].client == c8 && !st.ctx_reap(gt, x) {
-            // Not idle (only after a wedge): its hardware contexts are
-            // dropped from the pool rather than reused.
-            let vm = st.ctxs[x].vm;
-            st.ctxs[x] = gem_ctx::EMPTY;
-            st.vm_put(vm);
-        }
-    }
-    for k in 0..MAX_VM_IDS {
-        let (_, vm) = st.clients[c].vm_ids[k];
-        if vm != NONE8 {
-            st.clients[c].vm_ids[k] = (0, NONE8);
-            st.vm_put(vm);
-        }
-    }
-    for i in 0..MAX_OBJECTS {
-        if st.objs[i].used && st.objs[i].client == c8 {
-            st.obj_free(i);
-        }
-    }
-    for v in 0..MAX_VMS {
-        if st.vms[v].used && st.vms[v].client == c8 {
-            st.vms[v].refs = 1;
-            st.vm_put(v as u8);
-        }
-    }
-    st.clients[c] = client::EMPTY;
     Ok(())
 }
 
 impl nctx {
-    /// `poll` without the fence report, for waits inside a job.
-    fn poll_quiet(&mut self, gt: &mut intel_gt) {
-        for k in 0..MAX_PENDING {
-            let p = self.pend[k];
-            if p.used && crate::i915_request::__i915_request_is_complete(gt, p.rq as usize) {
-                crate::i915_request::i915_request_put(gt, p.rq as usize);
-                self.pend[k].used = false;
-                if self.advance(p.client, p.ring) {
-                    self.report_ring(p.client, p.ring);
+    /// A closing client with no request left: its contexts, address spaces
+    /// and objects go. Objects the kernel already detached (zombies) are
+    /// reported released; the others the kernel detaches later and finds
+    /// gone.
+    fn client_teardown(&mut self, gt: &mut intel_gt, c: usize) {
+        let c8 = c as u8;
+        for x in 0..MAX_GEM_CTX {
+            if self.ctxs[x].used && self.ctxs[x].client == c8 && !self.ctx_reap(gt, x) {
+                // Not idle (only after a wedge): its hardware contexts are
+                // dropped from the pool rather than reused.
+                let vm = self.ctxs[x].vm;
+                self.ctxs[x] = gem_ctx::EMPTY;
+                self.vm_put(vm);
+            }
+        }
+        for k in 0..MAX_VM_IDS {
+            let (_, vm) = self.clients[c].vm_ids[k];
+            if vm != NONE8 {
+                self.clients[c].vm_ids[k] = (0, NONE8);
+                self.vm_put(vm);
+            }
+        }
+        for i in 0..MAX_OBJECTS {
+            if self.objs[i].used && self.objs[i].client == c8 {
+                if self.objs[i].zombie {
+                    self.obj_release(i);
+                } else {
+                    self.obj_free(i);
                 }
             }
         }
+        for v in 0..MAX_VMS {
+            if self.vms[v].used && self.vms[v].client == c8 {
+                self.vms[v].refs = 1;
+                self.vm_put(v as u8);
+            }
+        }
+        self.clients[c] = client::EMPTY;
+        self.nclosing -= 1;
     }
 }
 
-/// `OP_OBJECT` detach: the object is waited idle (it may be named by a
-/// request still running), then unbound and forgotten; a client already
-/// closed has nothing left of it.
-pub fn obj_detach(st: &mut nctx, i915: &mut drm_i915_private, gt: &mut intel_gt, id: u32, res_id: u32) -> Result<(), i32> {
-    let Some(c) = st.client_slot(id) else { return Ok(()) };
-    let Some(i) = st.obj(c as u8, res_id) else { return Ok(()) };
-    if st.obj_busy(gt, i) {
-        let deadline = linux::now_us() + hang_us(gt, 0);
-        let st_ref = &*st;
-        let idle = wait_until(i915, gt, deadline, &mut |gt| !st_ref.obj_busy(gt, i));
-        if !idle {
-            linux::say("native context: a released object stays busy, wedging the GT");
-            crate::intel_gt::intel_gt_set_wedged(i915, gt);
-        }
+/// `OP_OBJECT` detach: an idle object is unbound and forgotten now (0); a
+/// busy one stays as a zombie its client can no longer name, and the
+/// kernel gets it back with `npk_gpudev_released` once its requests are
+/// done (1), as Linux keeps a closed GEM object alive through its active
+/// VMAs. Nothing waits for the GPU here.
+pub fn obj_detach(st: &mut nctx, gt: &intel_gt, id: u32, res_id: u32) -> Result<i32, i32> {
+    let Some(c) = st.client_slot(id) else { return Ok(0) };
+    let Some(i) = st.obj(c as u8, res_id) else { return Ok(0) };
+    if !st.obj_busy(gt, i) {
+        st.obj_free(i);
+        return Ok(0);
     }
-    st.obj_free(i);
-    Ok(())
+    st.obj_unlink(i);
+    st.objs[i].zombie = true;
+    st.nzombies += 1;
+    Ok(1)
 }
