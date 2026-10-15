@@ -71,6 +71,9 @@ fn vcpu_core_clocks() -> [(u64, u64); MAX_FREQ_VCPUS] {
 }
 /// Guest console line after which the next full repaint is the app.
 const APP_EXEC_LABEL: &str = "session: app exec";
+/// The session's line right before it starts the app: the window shows from
+/// here on.
+const APP_EXEC_LINE: &str = "[wl] librewolf exec";
 /// Guest console line after which the app is gone and its window closing.
 const APP_EXITED_LABEL: &str = "session: browser exited";
 
@@ -85,7 +88,7 @@ const GUEST_MARKS: &[(&str, &str)] = &[
     ("[9p] npkhome mounted", "session: mounts done"),
     ("[wl] npkwm start", "session: compositor start"),
     ("[wl] npkwm up", "session: compositor up"),
-    ("[wl] librewolf exec", "session: app exec"),
+    (APP_EXEC_LINE, "session: app exec"),
     ("browser exited", "session: browser exited"),
 ];
 
@@ -132,6 +135,9 @@ pub fn guest_byte() {
 
 /// Print a completed guest console line, timed while a timeline runs.
 pub fn guest_line(s: &str) {
+    if s.contains(APP_EXEC_LINE) {
+        crate::microvm::devices::gpu_backend::present_app_started();
+    }
     if !ACTIVE.load(Ordering::Acquire) {
         kprintln!("[guest] {}", s);
         return;

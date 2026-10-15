@@ -223,9 +223,6 @@ pub fn display_tick() -> bool {
     use super::virtio_console_pci as console;
     use super::virtio_gpu_pci::MAX_OUTPUTS;
     // The worker may hold the device: retried next tick, never spun on.
-    if reveal_due() {
-        REVEAL_PENDING.store(true, Ordering::Release);
-    }
     let mut changed = false;
     if let Some(mut gpu) = GPU.try_lock() {
         if REVEAL_PENDING.swap(false, Ordering::AcqRel) {
@@ -268,23 +265,19 @@ pub fn bar0_in_range(gpa: u64) -> bool {
 
 // ── When guest frames reach the window ──
 //
-// A launch shows the window's own background until the app has painted:
-// the guest console and the compositor's empty output are black, and an
-// app starting looks like a black window with a console behind it. The
-// first frame after launch that is mostly not black is the app; from then
-// on every frame shows. If none comes within `REVEAL_TIMEOUT_MS` (a failed
-// start, an app that is black) the frames show anyway, so the failure is
-// visible. Once the app has exited, the compositor's black teardown frames
-// are dropped and the window keeps the app's last frame until it closes.
+// A launch shows the window's own background while the guest boots: its
+// console and the compositor's empty output are not the app. Frames show
+// from the moment the session starts the app, whatever they look like (a
+// dark page, a small window on black). Once the app has exited, the
+// compositor's black teardown frames are dropped and the window keeps the
+// app's last frame until it closes.
 
 const PRESENT_HIDDEN: u8 = 0;
 const PRESENT_SHOWN: u8 = 1;
 const PRESENT_CLOSING: u8 = 2;
 static PRESENT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(PRESENT_SHOWN);
-static LAUNCH_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-/// How long a launch may stay hidden without a lit frame.
-const REVEAL_TIMEOUT_MS: u64 = 3000;
-/// Share of sampled pixels, in percent, that makes a frame the app's.
+/// Share of sampled pixels, in percent, that `boottime` takes for the
+/// app's first painted frame.
 pub const LIT_PCT: usize = 50;
 /// Sample every n-th pixel of every n-th row.
 const SAMPLE_STEP: usize = 4;
@@ -312,27 +305,24 @@ pub fn lit_percent_at(width: u32, height: u32, pixel: impl Fn(u32, u32) -> u32) 
     if total == 0 { 0 } else { lit * 100 / total }
 }
 
-/// `reveal_due` fired and the frames are still to be shown (`display_tick`).
+/// The app started and the frames are still to be shown (`display_tick`).
 static REVEAL_PENDING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// A launch begins: hide guest frames until the app paints.
+/// A launch begins: guest frames stay hidden until the app is started, so
+/// the window does not show the guest booting.
 pub fn present_reset() {
-    LAUNCH_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
     REVEAL_PENDING.store(false, Ordering::Release);
     PRESENT.store(PRESENT_HIDDEN, Ordering::Release);
 }
 
-/// The reveal timeout passed with the window still hidden: frames show
-/// from now on. True once, for the caller to show the frames the guest
-/// already sent, since a guest whose screen stays black sends no more.
-pub fn reveal_due() -> bool {
-    if PRESENT.load(Ordering::Acquire) != PRESENT_HIDDEN {
-        return false;
+/// The session started the app (the guest's "[wl] librewolf exec" line,
+/// written before any app runs): frames show from now on, and the next
+/// display tick shows the last one each output sent, since a guest whose
+/// picture does not change sends no more.
+pub fn present_app_started() {
+    if PRESENT.compare_exchange(PRESENT_HIDDEN, PRESENT_SHOWN, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        REVEAL_PENDING.store(true, Ordering::Release);
     }
-    let hz = crate::interrupts::tsc_freq().max(1);
-    let waited_ms = crate::interrupts::rdtsc().saturating_sub(LAUNCH_TSC.load(Ordering::Relaxed)) * 1000 / hz;
-    waited_ms >= REVEAL_TIMEOUT_MS
-        && PRESENT.compare_exchange(PRESENT_HIDDEN, PRESENT_SHOWN, Ordering::AcqRel, Ordering::Acquire).is_ok()
 }
 
 /// The app has exited: keep the last frame, drop the teardown.
@@ -345,28 +335,9 @@ pub fn presenting() -> bool {
     PRESENT.load(Ordering::Acquire) == PRESENT_SHOWN
 }
 
-/// Whether this flushed frame goes to the window.
-pub fn should_present(pixels: &[u8], width: u32, height: u32) -> bool {
-    should_present_with(|| lit_percent(pixels, width, height))
-}
-
-/// `should_present` with the frame's `lit_percent` computed on demand.
-pub fn should_present_with(lit: impl FnOnce() -> usize) -> bool {
-    match PRESENT.load(Ordering::Acquire) {
-        PRESENT_SHOWN => true,
-        PRESENT_CLOSING => false,
-        _ => {
-            let hz = crate::interrupts::tsc_freq().max(1);
-            let waited_ms = crate::interrupts::rdtsc()
-                .saturating_sub(LAUNCH_TSC.load(Ordering::Relaxed)) * 1000 / hz;
-            if waited_ms >= REVEAL_TIMEOUT_MS || lit() >= LIT_PCT {
-                PRESENT.store(PRESENT_SHOWN, Ordering::Release);
-                true
-            } else {
-                false
-            }
-        }
-    }
+/// Whether a flushed frame goes to the window.
+pub fn should_present() -> bool {
+    PRESENT.load(Ordering::Acquire) == PRESENT_SHOWN
 }
 
 // ── Off-vCPU worker: queue doorbell defer ──

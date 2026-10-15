@@ -1291,13 +1291,12 @@ impl VirtioGpu {
         }
         let lit = || gb::lit_percent_at(view.width, view.height, |x, y| view.pixel(x, y));
         crate::microvm::boottime::gpu_lit(lit);
-        let hidden = wid != 0 && gb::presenting() && !crate::shade::surface::has_frame(wid) && lit() < gb::LIT_PCT;
         if self.blob_log_count < 24 && self.dmg_flush_count < 3 {
             self.blob_log_count += 1;
-            kprintln!("[gpu] blob FLUSH on output {} (window {}): {}x{}, {}% lit, hidden={} present={}",
-                k, wid, view.width, view.height, lit(), hidden, gb::presenting());
+            kprintln!("[gpu] blob FLUSH on output {} (window {}): {}x{}, {}% lit, present={}",
+                k, wid, view.width, view.height, lit(), gb::presenting());
         }
-        if hidden || !gb::should_present_with(lit) {
+        if !gb::should_present() {
             // Not shown: a picture still shown from the blob before must not
             // change under the window once the guest writes that blob.
             if let Some(prev) = self.last_blob[k].take() {
@@ -1610,7 +1609,7 @@ impl VirtioGpu {
         }
     }
 
-    /// The reveal timeout passed (`gpu_backend::reveal_due`): every output
+    /// The app started (`gpu_backend::present_app_started`): every output
     /// shows the last frame its guest sent, whole.
     pub fn reveal(&mut self) {
         for k in 0..MAX_OUTPUTS {
@@ -1679,16 +1678,7 @@ impl VirtioGpu {
         let r = &*r;
         let pix = match &r.host_pixels { Some(p) => p, None => return };
         crate::microvm::boottime::gpu_pixels(pix, r.width, r.height);
-        // A window opened while the app runs appears with its first
-        // picture, not with the black its output starts with.
-        if wid != 0
-            && super::gpu_backend::presenting()
-            && !crate::shade::surface::has_frame(wid)
-            && super::gpu_backend::lit_percent(pix, r.width, r.height) < super::gpu_backend::LIT_PCT
-        {
-            return;
-        }
-        if !super::gpu_backend::should_present(pix, r.width, r.height) {
+        if !super::gpu_backend::should_present() {
             return;
         }
 
