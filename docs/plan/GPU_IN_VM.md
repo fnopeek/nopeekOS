@@ -174,6 +174,24 @@ Modul der i915. Stufe 7 ist darum vor allem **die i915-GEM-uAPI im Modul**,
    Meson-Optionen) oder als eigenes, von uns signiertes apk. Beides bricht
    „apks kommen signiert von Alpine" fuer genau dieses Paket auf.
 
+**Stand 2026-10-15 (Kernel 0.612.4, Bundle librewolf-0.7.1): (a)–(c)
+bestanden.** F6 ist entschieden: Bundle-Build (`microvm/linux/mesa/build.sh`,
+Alpines Release, Tarball und Optionen plus `intel-virtio-experimental`,
+Treiber iris/radeonsi/virgl/llvmpipe), vom Bundle ueber Alpines Mesa-Dateien
+gelegt, nur bei gleicher Version. Gegen das Pruef-Backend am NUC: Capset,
+Kontext, Antwortpuffer, `MAP_BLOB`, ein GETPARAM mit `ENODEV`, Rueckfall auf
+llvmpipe in 118 ms (`npk-gpuprobe`, eine Logzeile je Sitzung mit GPU).
+Gelernt dabei: (1) ein gescheiterter Treiberaufruf ist eine ANTWORT mit
+`ret` (positives errno), kein abgelehnter Submit — sonst bleibt die
+Sequenznummer stehen und `vdrm_host_sync` wartet ewig; (2) die
+i915-Antworten haben verschiedene Formen (`ret` an Offset 8 nach einem
+Polsterwort bei GETPARAM/QUERYPARAM/CONTEXT_CREATE/BUSY, an 4 bei
+IOCTL_SIMPLE/EXECBUFFER2, keine Antwort bei GEM_CREATE(_EXT)/SET_MMAP_MODE);
+(3) **Firefox kommt so noch nicht an die GPU**: Mesas EGL unter Wayland
+oeffnet ein DRM-Geraet nur, wenn der Compositor eines nennt
+(linux-dmabuf-Feedback `main_device` oder `wl_drm`). npkwm braucht dafuer
+den gles2-Renderer und linux-dmabuf v4 — Teil von Stufe 7.
+
 Pruefreihenfolge: (a) Stufe 2 am NUC (`gpu iommu test` → PASSED), (b)
 Stufe 6 mit `set microvm_gpu test` (Merkmale, Capset), (c) F6-Mesa im Gast
 gegen das Pruef-Backend — dann laufen Kontext, Antwortpuffer, `MAP_BLOB`
