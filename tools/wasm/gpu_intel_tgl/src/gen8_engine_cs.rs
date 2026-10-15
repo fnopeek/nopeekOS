@@ -146,12 +146,14 @@ pub fn gen8_emit_init_breadcrumb(i915: &mut drm_i915_private, gt: &mut intel_gt,
         return Ok(());
     }
     let mut cs = Cs::new();
-    cs.push(MI_ARB_CHECK);
-    cs.push(MI_NOOP);
     cs.push(MI_STORE_DWORD_IMM_GEN4 | MI_USE_GGTT);
     cs.push(crate::i915_request::hwsp_offset(gt, rq));
     cs.push(0);
     cs.push(gt.requests[rq].seqno.wrapping_sub(1));
+    // A preemption point before the payload; from here the request counts
+    // as started.
+    cs.push(MI_NOOP);
+    cs.push(MI_ARB_CHECK);
     crate::i915_request::intel_ring_emit(i915, gt, rq, &cs)?;
     gt.requests[rq].infix = gt.contexts[ce].ring.emit;
     Ok(())
