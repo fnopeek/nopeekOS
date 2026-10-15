@@ -218,7 +218,8 @@ fn launch_wayland(kmsg_fd: i64) {
     // devices; the app reaches npkwm through its socket (the runtime dir
     // /tmp/wlrt is setgid `app`). The app owns its profile, runtime dir and
     // the sound devices.
-    // Each `npkenv=NAME=value` on the command line is exported to the app.
+    // Each `npkenv=NAME=value` on the command line is exported to the app,
+    // each `npkwmenv=NAME=value` to npkwm.
     // `npklogs` on the command line streams the app's and npkwm's output
     // to the console (`set microvm_cmdline npklogs`).
     // `npkprofile=<ip>:<port>` on the command line runs the app under the
@@ -265,7 +266,9 @@ fn launch_wayland(kmsg_fd: i64) {
                  seatd -g wl > /tmp/seatd.log 2>&1 & \
                  i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do usleep 5000; i=$((i+1)); done; \
                  echo \"<0>[wl] ${WM##*/} start (seatd after ${i}x5ms)\" > /dev/kmsg; \
-                 su -s /bin/sh wl -c \"XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec $WM\" > /tmp/npkwm.log 2>&1 & \
+                 WMENV=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkwmenv=//p' | tr '\\n' ' '); \
+                 [ -n \"$WMENV\" ] && echo \"<0>[wl] npkwm env $WMENV\" > /dev/kmsg; \
+                 su -s /bin/sh wl -c \"$WMENV XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec $WM\" > /tmp/npkwm.log 2>&1 & \
                  WLPID=$!; \
                  nice -n 19 sh -c 'for r in 0 64 128; do dd if=/usr/lib/librewolf/libxul.so of=/dev/null bs=1M skip=$r count=64 2>/dev/null & done; \
                    cat /usr/lib/librewolf/omni.ja /usr/lib/librewolf/browser/omni.ja /usr/lib/librewolf/libgkcodecs.so /usr/lib/libgtk-3.so.0 > /dev/null 2>&1; \
@@ -370,7 +373,8 @@ fn launch_wayland(kmsg_fd: i64) {
                    echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
                  for e in $(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p'); do \
                    echo \"export $e\" >> /tmp/app.sh; echo \"<0>[wl] app env $e\" > /dev/kmsg; done; \
-                 echo 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; [ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' >> /tmp/app.sh; \
+                 echo '[ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' >> /tmp/app.sh; \
+                 echo \"<0>[wl] librewolf exec\" > /dev/kmsg; \
                  su -s /bin/sh app -c 'WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 exec sh /tmp/app.sh' \
                    > /tmp/app.log 2>&1; \
                  rc=$?; echo \"<0>[wl] browser exited rc=$rc\" > /dev/kmsg; \
