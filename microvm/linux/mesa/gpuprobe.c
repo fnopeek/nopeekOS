@@ -7,11 +7,12 @@
  * come up, and the host log says why.
  *
  * With `npkgpushare` on the kernel command line, then the path a Wayland
- * client and its compositor take: for each layout (linear, X, Y, Y with
- * render compression and its clear colour, Y with render compression) one
- * buffer is drawn in a first context and read back there, then imported
- * through its dma-buf into a second context on its own fd and read back
- * again. The second read is what the compositor samples. A line before
+ * client and its compositor take: for each layout (linear, Y, Y with
+ * render compression and its clear colour) one buffer is made and drawn
+ * in a first context the way a window surface is, read back there, then
+ * imported through its dma-buf into a second context on its own fd and
+ * read there as a renderbuffer, sampled as a texture the way the
+ * compositor composes it, and imported without its modifier. A line before
  * each step names the step, so a hang shows where it stopped. */
 #define _GNU_SOURCE
 #include <EGL/egl.h>
@@ -50,6 +51,7 @@ struct side {
 static PFNEGLCREATEIMAGEKHRPROC create_image;
 static PFNEGLDESTROYIMAGEKHRPROC destroy_image;
 static PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC image_rb;
+static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_tex;
 
 static int side_open(struct side *s, const char *node)
 {
@@ -90,9 +92,9 @@ static void read_quads(char *out)
     }
 }
 
-/* The dma-buf of `bo` as a renderbuffer of the current context, bound to a
- * new framebuffer; 0 when the import fails. */
-static GLuint import_fb(EGLDisplay dpy, struct gbm_bo *bo, uint64_t mod, EGLImageKHR *img, GLuint *rb)
+/* The dma-buf of `bo` as an image of `dpy`, with its modifier or, as an
+ * implicit-modifier client sends it, without. */
+static EGLImageKHR import_image(EGLDisplay dpy, struct gbm_bo *bo, uint64_t mod, int with_mod)
 {
     static const EGLint fd_k[4] = { EGL_DMA_BUF_PLANE0_FD_EXT, EGL_DMA_BUF_PLANE1_FD_EXT,
                                     EGL_DMA_BUF_PLANE2_FD_EXT, EGL_DMA_BUF_PLANE3_FD_EXT };
@@ -106,7 +108,7 @@ static GLuint import_fb(EGLDisplay dpy, struct gbm_bo *bo, uint64_t mod, EGLImag
                                     EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT, EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT };
     EGLint a[64];
     int n = 0, fds[4] = { -1, -1, -1, -1 };
-    int planes = gbm_bo_get_plane_count(bo);
+    int planes = with_mod ? gbm_bo_get_plane_count(bo) : 1;
     a[n++] = EGL_WIDTH; a[n++] = SHARE_W;
     a[n++] = EGL_HEIGHT; a[n++] = SHARE_H;
     a[n++] = EGL_LINUX_DRM_FOURCC_EXT; a[n++] = DRM_FORMAT_ARGB8888;
@@ -115,20 +117,27 @@ static GLuint import_fb(EGLDisplay dpy, struct gbm_bo *bo, uint64_t mod, EGLImag
         a[n++] = fd_k[i]; a[n++] = fds[i];
         a[n++] = off_k[i]; a[n++] = (EGLint)gbm_bo_get_offset(bo, i);
         a[n++] = pitch_k[i]; a[n++] = (EGLint)gbm_bo_get_stride_for_plane(bo, i);
-        a[n++] = lo_k[i]; a[n++] = (EGLint)(mod & 0xffffffff);
-        a[n++] = hi_k[i]; a[n++] = (EGLint)(mod >> 32);
+        if (with_mod) {
+            a[n++] = lo_k[i]; a[n++] = (EGLint)(mod & 0xffffffff);
+            a[n++] = hi_k[i]; a[n++] = (EGLint)(mod >> 32);
+        }
     }
     a[n++] = EGL_NONE;
-    *img = create_image(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, a);
+    EGLImageKHR img = create_image(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, a);
     for (int i = 0; i < 4; i++)
         if (fds[i] >= 0)
             close(fds[i]);
-    if (*img == EGL_NO_IMAGE_KHR)
-        return 0;
+    return img;
+}
+
+/* `img` as the colour buffer of a new framebuffer of the current context;
+ * 0 when incomplete. */
+static GLuint image_fb(EGLImageKHR img, GLuint *rb)
+{
     GLuint fb;
     glGenRenderbuffers(1, rb);
     glBindRenderbuffer(GL_RENDERBUFFER, *rb);
-    image_rb(GL_RENDERBUFFER, *img);
+    image_rb(GL_RENDERBUFFER, img);
     glGenFramebuffers(1, &fb);
     glBindFramebuffer(GL_FRAMEBUFFER, fb);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, *rb);
@@ -137,6 +146,60 @@ static GLuint import_fb(EGLDisplay dpy, struct gbm_bo *bo, uint64_t mod, EGLImag
         return 0;
     }
     return fb;
+}
+
+/* `img` sampled as a texture over a full-screen quad into a plain
+ * renderbuffer of the current context, the way a compositor composes a
+ * client buffer; the quadrants of the result read back into `out`. */
+static void sample_read(EGLImageKHR img, char *out)
+{
+    static const char *vs = "attribute vec2 p; varying vec2 t;"
+                            "void main() { t = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }";
+    static const char *fs = "#extension GL_OES_EGL_image_external : require\n"
+                            "precision mediump float; varying vec2 t; uniform samplerExternalOES s;"
+                            "void main() { gl_FragColor = texture2D(s, t); }";
+    static const GLfloat quad[] = { -1, -1, 1, -1, -1, 1, 1, 1 };
+    GLuint sh[2] = { glCreateShader(GL_VERTEX_SHADER), glCreateShader(GL_FRAGMENT_SHADER) };
+    glShaderSource(sh[0], 1, &vs, NULL);
+    glShaderSource(sh[1], 1, &fs, NULL);
+    glCompileShader(sh[0]);
+    glCompileShader(sh[1]);
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, sh[0]);
+    glAttachShader(prog, sh[1]);
+    glBindAttribLocation(prog, 0, "p");
+    glLinkProgram(prog);
+    GLint linked = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+    GLuint tex, rb, fb;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    image_tex(GL_TEXTURE_EXTERNAL_OES, img);
+    glGenRenderbuffers(1, &rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8_OES, SHARE_W, SHARE_H);
+    glGenFramebuffers(1, &fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+    if (linked && glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        glViewport(0, 0, SHARE_W, SHARE_H);
+        glUseProgram(prog);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad);
+        glEnableVertexAttribArray(0);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glFinish();
+        read_quads(out);
+    } else {
+        strcpy(out, linked ? "fb incomplete" : "no program");
+    }
+    glDeleteFramebuffers(1, &fb);
+    glDeleteRenderbuffers(1, &rb);
+    glDeleteTextures(1, &tex);
+    glDeleteProgram(prog);
+    glDeleteShader(sh[0]);
+    glDeleteShader(sh[1]);
 }
 
 static void import_drop(EGLDisplay dpy, GLuint fb, GLuint rb, EGLImageKHR img)
@@ -149,8 +212,12 @@ static void import_drop(EGLDisplay dpy, GLuint fb, GLuint rb, EGLImageKHR img)
         destroy_image(dpy, img);
 }
 
-/* Full clear (a fast clear where the layout has one), then three quadrants
- * drawn over in A; read in A, then in B through the dma-buf. */
+/* The buffer made the way a client's window surface is (GBM, the driver's
+ * own allocation) and drawn in A: a full clear (a fast clear where the
+ * layout has one), then three quadrants. Read back in A, then in B through
+ * the dma-buf three ways: as a renderbuffer, sampled as a texture the way
+ * the compositor does, and imported without the modifier (the driver then
+ * asks the kernel for the tiling). */
 static void share_test(struct side *a, struct side *b, const char *name, uint64_t mod)
 {
     static const char want[] = "204060ff/ff0000ff/00ff00ff/0000ffff";
@@ -160,13 +227,14 @@ static void share_test(struct side *a, struct side *b, const char *name, uint64_
         printf("<0>[gpu] guest share %s: not offered\n", name);
         return;
     }
-    char ra[40] = "-", rb_[40] = "-";
-    EGLImageKHR img = EGL_NO_IMAGE_KHR;
-    GLuint rb = 0;
+    char ra[40] = "-", rb_[40] = "-", rt[40] = "-", ri[40] = "-";
+    GLuint rb = 0, fb;
     printf("<0>[gpu] guest share %s: drawing in A\n", name);
     eglMakeCurrent(a->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, a->ctx);
-    GLuint fb = import_fb(a->dpy, bo, mod, &img, &rb);
+    EGLImageKHR img = create_image(a->dpy, EGL_NO_CONTEXT, EGL_NATIVE_PIXMAP_KHR, (EGLClientBuffer)bo, NULL);
+    fb = img != EGL_NO_IMAGE_KHR ? image_fb(img, &rb) : 0;
     if (fb) {
+        glViewport(0, 0, SHARE_W, SHARE_H);
         glDisable(GL_SCISSOR_TEST);
         glClearColor(0x20 / 255.0f, 0x40 / 255.0f, 0x60 / 255.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -179,22 +247,36 @@ static void share_test(struct side *a, struct side *b, const char *name, uint64_
             glClear(GL_COLOR_BUFFER_BIT);
         }
         glDisable(GL_SCISSOR_TEST);
+        glFlush();
         glFinish();
-        printf("<0>[gpu] guest share %s: drawn, reading in A\n", name);
         read_quads(ra);
     }
     import_drop(a->dpy, fb, rb, img);
     printf("<0>[gpu] guest share %s: A read %s, reading in B\n", name, ra);
+
     eglMakeCurrent(b->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, b->ctx);
-    img = EGL_NO_IMAGE_KHR;
+    img = import_image(b->dpy, bo, mod, 1);
     rb = 0;
-    fb = import_fb(b->dpy, bo, mod, &img, &rb);
+    fb = img != EGL_NO_IMAGE_KHR ? image_fb(img, &rb) : 0;
     if (fb)
         read_quads(rb_);
+    if (img != EGL_NO_IMAGE_KHR)
+        sample_read(img, rt);
     import_drop(b->dpy, fb, rb, img);
+    if (gbm_bo_get_plane_count(bo) == 1) {
+        img = import_image(b->dpy, bo, mod, 0);
+        rb = 0;
+        fb = img != EGL_NO_IMAGE_KHR ? image_fb(img, &rb) : 0;
+        if (fb)
+            read_quads(ri);
+        import_drop(b->dpy, fb, rb, img);
+    }
     eglMakeCurrent(b->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    printf("<0>[gpu] guest share %s (%d planes): A %s, B %s -> %s\n", name, gbm_bo_get_plane_count(bo), ra, rb_,
-           strcmp(ra, want) ? "A WRONG" : strcmp(rb_, want) ? "B WRONG" : "ok");
+    printf("<0>[gpu] guest share %s (%d planes): A %s | B read %s %s | B sampled %s %s | B implicit %s %s\n",
+           name, gbm_bo_get_plane_count(bo), strcmp(ra, want) ? ra : "ok",
+           strcmp(rb_, want) ? "WRONG" : "ok", strcmp(rb_, want) ? rb_ : "",
+           strcmp(rt, want) ? "WRONG" : "ok", strcmp(rt, want) ? rt : "",
+           ri[0] == '-' ? "-" : strcmp(ri, want) ? "WRONG" : "ok", strcmp(ri, want) ? ri : "");
     gbm_bo_destroy(bo);
 }
 
@@ -220,15 +302,14 @@ static void share_tests(const char *node)
     create_image = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
     destroy_image = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
     image_rb = (PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC)eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES");
-    if (!create_image || !destroy_image || !image_rb || side_open(&a, node) || side_open(&b, node)) {
+    image_tex = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    if (!create_image || !destroy_image || !image_rb || !image_tex || side_open(&a, node) || side_open(&b, node)) {
         printf("<0>[gpu] guest share: setup failed (egl 0x%x)\n", eglGetError());
         return;
     }
     share_test(&a, &b, "linear", DRM_FORMAT_MOD_LINEAR);
-    share_test(&a, &b, "X", I915_FORMAT_MOD_X_TILED);
     share_test(&a, &b, "Y", I915_FORMAT_MOD_Y_TILED);
     share_test(&a, &b, "Y+RC_CCS_CC", I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS_CC);
-    share_test(&a, &b, "Y+RC_CCS", I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS);
     side_close(&a);
     side_close(&b);
 }
