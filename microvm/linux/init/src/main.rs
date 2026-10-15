@@ -218,6 +218,7 @@ fn launch_wayland(kmsg_fd: i64) {
     // devices; the app reaches npkwm through its socket (the runtime dir
     // /tmp/wlrt is setgid `app`). The app owns its profile, runtime dir and
     // the sound devices.
+    // Each `npkenv=NAME=value` on the command line is exported to the app.
     // `npklogs` on the command line streams the app's and npkwm's output
     // to the console (`set microvm_cmdline npklogs`).
     // `npkprofile=<ip>:<port>` on the command line runs the app under the
@@ -367,6 +368,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ -n \"$SCU\" ] || SCU=release_to_os_interval_ms=-1; \
                  [ \"$SCU\" = off ] || { echo \"export SCUDO_OPTIONS=$SCU\" >> /tmp/app.sh; \
                    echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
+                 for e in $(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p'); do \
+                   echo \"export $e\" >> /tmp/app.sh; echo \"<0>[wl] app env $e\" > /dev/kmsg; done; \
                  echo 'echo \"<0>[wl] librewolf exec\" > /dev/kmsg; [ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' >> /tmp/app.sh; \
                  su -s /bin/sh app -c 'WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 exec sh /tmp/app.sh' \
                    > /tmp/app.log 2>&1; \
