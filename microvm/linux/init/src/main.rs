@@ -218,9 +218,10 @@ fn launch_wayland(kmsg_fd: i64) {
     // devices; the app reaches npkwm through its socket (the runtime dir
     // /tmp/wlrt is setgid `app`). The app owns its profile, runtime dir and
     // the sound devices.
-    // Each `npkenv=NAME=value` on the command line is exported to the app,
-    // each `npkwmenv=NAME=value` to npkwm; `npkapp=NAME` runs /usr/bin/NAME
-    // instead of the browser (a test client such as es2gears_wayland).
+    // Each `npkenv=NAME=value` on the command line is exported to the app
+    // and to npk-gpuprobe, each `npkwmenv=NAME=value` to npkwm; `npkapp=NAME`
+    // runs /usr/bin/NAME instead of the browser (a test client such as
+    // es2gears_wayland).
     // `npklogs` on the command line streams the app's and npkwm's output
     // to the console (`set microvm_cmdline npklogs`).
     // `npkprofile=<ip>:<port>` on the command line runs the app under the
@@ -348,7 +349,8 @@ fn launch_wayland(kmsg_fd: i64) {
                      && mount --bind /tmp/channel-prefs.js /usr/lib/librewolf/defaults/pref/channel-prefs.js 2>/dev/null; \
                  fi; \
                  [ $GPU = 1 ] || mount --bind /bin/false /usr/lib/librewolf/gfxtest 2>/dev/null; \
-                 [ $GPU = 1 ] && [ -x /usr/bin/npk-gpuprobe ] && su -s /bin/sh app -c /usr/bin/npk-gpuprobe & \
+                 APPENV=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p' | tr '\\n' ' '); \
+                 [ $GPU = 1 ] && [ -x /usr/bin/npk-gpuprobe ] && su -s /bin/sh app -c \"env $APPENV /usr/bin/npk-gpuprobe\" & \
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  ( sleep 15; while true; do sync 2>/dev/null; sleep 3; done ) & \
