@@ -1171,6 +1171,19 @@ pub fn object_attach(client: u32, res_id: u32, id: u32) {
     wake_module();
 }
 
+/// `client` lets go of GEM object `id`, which another client owns: the
+/// module drops its bindings; the frames stay with the owner.
+pub fn object_detach(client: u32, res_id: u32, id: u32) {
+    {
+        let mut st = STATE.lock();
+        if st.owner.is_none() || !st.bos.contains_key(&id) {
+            return;
+        }
+        queue_job(&mut st, OP_OBJECT, [client, res_id, id, 0, 0, 0], None, &[]);
+    }
+    wake_module();
+}
+
 /// GEM object `id` goes. Attached (`attached`: client, resource id), the
 /// module detaches it first; the card stops reaching its frames and they
 /// are freed once that is done. Otherwise both happen now.

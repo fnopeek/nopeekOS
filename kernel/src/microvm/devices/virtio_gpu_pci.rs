@@ -852,6 +852,13 @@ impl VirtioGpu {
                 build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
             }
             VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE | VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE => {
+                if let Some(rid) = le32(request, 24) {
+                    if cmd_type == VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE {
+                        self.ctxs.attach_resource(ctx_id, rid);
+                    } else {
+                        self.ctxs.detach_resource(ctx_id, rid);
+                    }
+                }
                 build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
             }
             VIRTIO_GPU_CMD_SUBMIT_3D => {

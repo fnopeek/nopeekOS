@@ -78,6 +78,11 @@ pub trait Backend: Send {
     }
     /// The guest let go of a resource that was object `blob_id`.
     fn release_blob(&mut self, ctx: u32, pages: &Arc<ForeignPixels>);
+    /// Context `ctx` uses resource `res_id`, an object of another context
+    /// (`i915_renderer_attach_resource`: imported under the same res_id).
+    fn attach_resource(&mut self, _ctx: u32, _res_id: u32, _pages: &Arc<ForeignPixels>) {}
+    /// Context `ctx` no longer uses that resource.
+    fn detach_resource(&mut self, _ctx: u32, _res_id: u32) {}
     /// Whether `fence` queued on `ring` of `ctx` is done; `submit_fence`
     /// starts one after the ccmds of a SUBMIT_3D.
     fn submit_fence(&mut self, ctx: u32, ring: u32) -> u64;
@@ -149,6 +154,27 @@ impl Contexts {
 
     /// CTX_DESTROY: the backend context and every HOST3D resource it made.
     /// Returns the resources the caller must unmap and drop first.
+    /// CTX_ATTACH_RESOURCE: a HOST3D resource of another context becomes
+    /// usable in `ctx_id` (`drm_context` attach_resource).
+    pub fn attach_resource(&mut self, ctx_id: u32, res_id: u32) {
+        let (Some(c), Some(r)) = (self.ctxs.get(&ctx_id), self.host3d.get(&res_id)) else { return };
+        if r.ctx != ctx_id && !r.shmem {
+            if let Some(b) = BACKEND.lock().as_mut() {
+                b.attach_resource(c.handle, res_id, &r.pages);
+            }
+        }
+    }
+
+    /// CTX_DETACH_RESOURCE (`drm_context_detach_resource`).
+    pub fn detach_resource(&mut self, ctx_id: u32, res_id: u32) {
+        let (Some(c), Some(r)) = (self.ctxs.get(&ctx_id), self.host3d.get(&res_id)) else { return };
+        if r.ctx != ctx_id {
+            if let Some(b) = BACKEND.lock().as_mut() {
+                b.detach_resource(c.handle, res_id);
+            }
+        }
+    }
+
     pub fn destroy(&mut self, ctx_id: u32) -> Vec<u32> {
         let Some(c) = self.ctxs.remove(&ctx_id) else { return Vec::new() };
         if let Some(b) = BACKEND.lock().as_mut() {

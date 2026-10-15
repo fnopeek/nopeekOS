@@ -78,13 +78,16 @@ struct Client {
 pub struct GpudevBackend {
     dev: PciAddr,
     clients: BTreeMap<u32, Client>,
+    /// Objects used by a client other than their owner: (client, res_id) →
+    /// gpudev buffer id.
+    imports: BTreeMap<(u32, u32), u32>,
     gem_bytes: u64,
     refused_logged: bool,
 }
 
 impl GpudevBackend {
     pub fn new(dev: PciAddr) -> Self {
-        GpudevBackend { dev, clients: BTreeMap::new(), gem_bytes: 0, refused_logged: false }
+        GpudevBackend { dev, clients: BTreeMap::new(), imports: BTreeMap::new(), gem_bytes: 0, refused_logged: false }
     }
 
     /// A zeroed object of `size` bytes, its frames granted to the card.
@@ -136,6 +139,13 @@ impl GpudevBackend {
     }
 
     fn object_free(&mut self, o: Object, attached: Option<(u32, u32)>) {
+        // Importers let go first; the module serves jobs in order, so the
+        // owner's removal below completes after theirs.
+        let users: Vec<(u32, u32)> = self.imports.iter().filter(|(_, id)| **id == o.id).map(|(k, _)| *k).collect();
+        for (ctx, res_id) in users {
+            self.imports.remove(&(ctx, res_id));
+            gpudev::object_detach(ctx, res_id, o.id);
+        }
         self.gem_bytes -= o.size;
         gpudev::object_remove(o.id, attached, o.frames);
     }
@@ -303,6 +313,7 @@ impl Backend for GpudevBackend {
 
     fn destroy(&mut self, ctx: u32) {
         gpudev::client_close(ctx);
+        self.imports.retain(|&(c, _), _| c != ctx);
         let Some(c) = self.clients.get_mut(&ctx) else { return };
         c.closed = true;
         let parked = core::mem::take(&mut c.parked);
@@ -367,6 +378,23 @@ impl Backend for GpudevBackend {
             self.clients.remove(&ctx);
         }
         self.object_free(o, Some((ctx, res_id)));
+    }
+
+    fn attach_resource(&mut self, ctx: u32, res_id: u32, pages: &Arc<ForeignPixels>) {
+        if self.imports.contains_key(&(ctx, res_id)) || !self.clients.get(&ctx).is_some_and(|c| !c.closed) {
+            return;
+        }
+        let owner = self.clients.values().flat_map(|c| c.objects.values()).find(|o| o.frames.serial == pages.serial);
+        if let Some(id) = owner.map(|o| o.id) {
+            gpudev::object_attach(ctx, res_id, id);
+            self.imports.insert((ctx, res_id), id);
+        }
+    }
+
+    fn detach_resource(&mut self, ctx: u32, res_id: u32) {
+        if let Some(id) = self.imports.remove(&(ctx, res_id)) {
+            gpudev::object_detach(ctx, res_id, id);
+        }
     }
 
     fn submit_fence(&mut self, ctx: u32, ring: u32) -> u64 {
