@@ -889,6 +889,7 @@ fn __engines_record_defaults(i915: &mut drm_i915_private, gt: &mut intel_gt,
                 Line::new().s(crate::intel_execlists_submission::engine_name(gt, e))
                     .s(": default context recorded, seqno ").dec(seqno as u64)
                     .s(", CSB events ").dec(el.csb_events as u64).s(", interrupts ").dec(el.irqs as u64).say();
+                log_default_ctx_wa(gt, e, state);
             }
         }
     }
@@ -1000,4 +1001,45 @@ pub fn intel_gt_driver_remove(i915: &mut drm_i915_private, gt: &mut intel_gt,
 
     crate::intel_rc6::report(i915, gt, "at hand-back");
     crate::intel_rps::report(i915, gt, "at hand-back");
+}
+
+/// Each context workaround as the recorded default image holds it: the
+/// register's (offset, value) pair in the image, and whether the value
+/// carries the bits the workaround sets. Every new context starts from this
+/// image, so a workaround missing here is missing in every client.
+fn log_default_ctx_wa(gt: &intel_gt, e: usize, state: crate::i915_vma::drm_i915_gem_object) {
+    let Some(engine) = gt.engine[e] else { return };
+    let wal = engine.ctx_wa_list;
+    let Some(d) = state.map() else { return };
+    let pages = engine.context_size.div_ceil(4096);
+    for wa in &wal.list[..wal.count] {
+        let mut found: Option<u32> = None;
+        let mut b = [0u8; 4096];
+        'pages: for p in 0..pages {
+            if !d.read(p * 4096, &mut b) {
+                break;
+            }
+            for i in 0..1023usize {
+                let w = u32::from_le_bytes([b[i * 4], b[i * 4 + 1], b[i * 4 + 2], b[i * 4 + 3]]);
+                if w == wa.reg {
+                    let o = (i + 1) * 4;
+                    found = Some(u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]));
+                    break 'pages;
+                }
+            }
+        }
+        let mut l = Line::new();
+        l.s(crate::intel_execlists_submission::engine_name(gt, e)).s(": default image ctx wa ").hex(wa.reg);
+        match found {
+            Some(v) => {
+                let ok = v & wa.read == wa.set & wa.read;
+                l.s(" = ").hex(v).s(", want ").hex(wa.set & wa.read).s(" of ").hex(wa.read)
+                    .s(if ok { " ok" } else { " WRONG" });
+            }
+            None => {
+                l.s(" not in the image");
+            }
+        }
+        l.say();
+    }
 }
