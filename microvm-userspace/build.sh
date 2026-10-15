@@ -154,6 +154,31 @@ if [ -n "$APK_PACKAGES" ]; then
     : > "$STAGE/etc/resolv.conf"
 fi
 
+# Mesa with the Intel native-context backend (microvm/linux/mesa/build.sh)
+# replaces the runtime files of Alpine's mesa packages. Same release only:
+# libEGL, libgbm and libgallium share an internal ABI.
+source "$REPO_ROOT/microvm/linux/mesa/mesa.env"
+MESA_OVERLAY="${HOME}/.cache/nopeekos/mesa/mesa-${MESA_VERSION}-npk.tar.gz"
+[ -f "$MESA_OVERLAY" ] \
+    || { red "missing $MESA_OVERLAY — run microvm/linux/mesa/build.sh"; exit 1; }
+APK_DB="$STAGE/lib/apk/db/installed"
+ALPINE_MESA="$(awk '/^P:mesa$/{f=1} f&&/^V:/{print substr($0,3); exit}' "$APK_DB")"
+case "$ALPINE_MESA" in
+    "${MESA_VERSION}"-r*) ;;
+    *) red "Alpine mesa is $ALPINE_MESA, mesa.env pins $MESA_VERSION"; exit 1 ;;
+esac
+awk '/^P:/{p=substr($0,3)} /^F:/{d=substr($0,3)} /^R:/{if(p ~ /^mesa(-egl|-gl|-gles|-gbm)?$/) print d"/"substr($0,3)}' "$APK_DB" \
+    | while read -r f; do rm -f "$STAGE/$f"; done
+tar -xzf "$MESA_OVERLAY" -C "$STAGE"
+for so in $(tar -tzf "$MESA_OVERLAY" | grep '\.so'); do
+    [ -L "$STAGE/$so" ] && continue
+    for lib in $(readelf -d "$STAGE/$so" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+        [ -e "$STAGE/usr/lib/$lib" ] || [ -e "$STAGE/lib/$lib" ] \
+            || { red "mesa ($so) needs $lib, not in the image"; exit 1; }
+    done
+done
+cyan "mesa ${MESA_VERSION} with intel-virtio over Alpine's ${ALPINE_MESA}"
+
 # npkwm is embedded in PID-1 and loads its libraries from this image: every
 # library it needs must be here, or the session never starts.
 for lib in $(readelf -d "$REPO_ROOT/microvm/linux/npkwm/npkwm" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
