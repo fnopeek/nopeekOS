@@ -346,9 +346,20 @@ impl Backend for ProbeBackend {
         const ENODEV: i32 = 19;
         let cmd = u32::from_le_bytes([req[0], req[1], req[2], req[3]]);
         crate::kprintln!("[gpu] native context probe: ccmd {} ({} bytes) has no backend", cmd, req.len());
-        // `struct i915_ccmd_rsp`: the vdrm header (len) and `ret`.
-        rsp.extend_from_slice(&8u32.to_le_bytes());
-        rsp.extend_from_slice(&ENODEV.to_le_bytes());
+        // Response layouts of Mesa's i915_proto.h: IOCTL_SIMPLE (1) and
+        // GEM_EXECBUFFER2 (7) carry `ret` right after the vdrm header (len),
+        // GETPARAM (2), QUERYPARAM (3), GEM_CONTEXT_CREATE (6) and GEM_BUSY
+        // (9) after a pad word, with one more word behind it; the others
+        // have no response, and nothing is written for them.
+        let ret_at = match cmd {
+            1 | 7 => 4,
+            2 | 3 | 6 | 9 => 8,
+            _ => return Ok(()),
+        };
+        let len = ret_at + 8;
+        rsp.resize(len, 0);
+        rsp[..4].copy_from_slice(&(len as u32).to_le_bytes());
+        rsp[ret_at..ret_at + 4].copy_from_slice(&ENODEV.to_le_bytes());
         Ok(())
     }
 
