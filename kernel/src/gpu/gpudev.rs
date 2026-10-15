@@ -249,6 +249,13 @@ static NATIVE: AtomicBool = AtomicBool::new(false);
 static NEXT_SEQ: AtomicU32 = AtomicU32::new(1);
 /// Highest sequence number completed; jobs complete in order.
 static COMPLETED: AtomicU32 = AtomicU32::new(0);
+/// The module took a job and let its deadline pass: until it completes
+/// that job (`STALL_SEQ`), nothing on the desktop's path waits for it and
+/// the CPU does its scenes and copies.
+static STALLED: AtomicBool = AtomicBool::new(false);
+static STALL_SEQ: AtomicU32 = AtomicU32::new(0);
+static STALL_TSC: AtomicU64 = AtomicU64::new(0);
+static STALLS: AtomicU64 = AtomicU64::new(0);
 /// Highest sequence number of a job that touches a dynamic buffer: while
 /// it is completed, no CPU writer of a dynamic buffer needs to look further.
 static DYN_FENCE: AtomicU32 = AtomicU32::new(0);
@@ -526,6 +533,13 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
     }
     STATUS[seq as usize % STATUS.len()].store((seq as u64) << 32 | status as u32 as u64, Ordering::Release);
     COMPLETED.store(seq, Ordering::SeqCst);
+    if STALLED.load(Ordering::Acquire) && seq_ge(seq, STALL_SEQ.load(Ordering::Acquire)) {
+        STALLED.store(false, Ordering::Release);
+        let hz = crate::interrupts::tsc_freq().max(1);
+        let ms = crate::interrupts::rdtsc().saturating_sub(STALL_TSC.load(Ordering::Relaxed)) * 1000 / hz;
+        crate::kprintln!("[npk] gpu: the module held job {} for {} ms past its deadline; the CPU composed meanwhile",
+            STALL_SEQ.load(Ordering::Relaxed), ms);
+    }
     wake_waiters();
     if let Some((phys, pages)) = free {
         crate::memory::deallocate_contiguous(phys, pages);
@@ -556,6 +570,7 @@ pub fn module_gone(dev: PciAddr) {
             return;
         }
         st.owner = None;
+        STALLED.store(false, Ordering::Release);
         st.queue.clear();
         st.payloads.clear();
         let ids: Vec<u32> = st.bos.keys().copied().filter(|&id| id != 0).collect();
@@ -922,6 +937,9 @@ fn wait_seq(seq: u32, deadline: u64) -> i32 {
         if let Some(s) = seq_done(seq, deadline) {
             return s;
         }
+        if stalled() {
+            return -62;
+        }
         halt_for(seq, deadline);
     }
 }
@@ -948,11 +966,32 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
     if !READY.load(Ordering::Acquire) || crate::interrupts::rdtsc() >= deadline {
         // A job the module never took must not run after the CPU redid it.
         let mut st = STATE.lock();
+        let queued = st.queue.len();
         st.queue.retain(|j| j.seq != seq);
+        let taken = st.queue.len() == queued;
         st.payloads.remove(&seq);
+        drop(st);
+        if taken && READY.load(Ordering::Acquire) {
+            stall(seq);
+        }
         return Some(-62);
     }
     None
+}
+
+/// The module holds job `seq` past its deadline. Not printed: a waiter
+/// may hold the console (`framebuffer::with_fb`); `complete` reports it.
+fn stall(seq: u32) {
+    if !STALLED.swap(true, Ordering::AcqRel) {
+        STALL_SEQ.store(seq, Ordering::Release);
+        STALL_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+        STALLS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Whether the desktop's path must not wait for the module now.
+fn stalled() -> bool {
+    STALLED.load(Ordering::Acquire)
 }
 
 fn deadline() -> u64 {
@@ -993,7 +1032,7 @@ static COPY_DEADLINE: AtomicU64 = AtomicU64::new(0);
 /// caller copies on the CPU now.
 fn submit_copy(src_gpu: u32, src_pitch: u32, dst_gpu: u32, dst_pitch: u32,
                x: u32, y: u32, w: u32, h: u32) -> bool {
-    if !READY.load(Ordering::Acquire) || !wait_framebuffer() {
+    if !READY.load(Ordering::Acquire) || stalled() || !wait_framebuffer() {
         return false;
     }
     let seq = {
@@ -1041,7 +1080,7 @@ pub fn wait_framebuffer() -> bool {
 /// buffer `target` (a shadow, or a registered copy of one), reading
 /// `sources`. Returns the job's sequence number.
 pub fn submit_scene(target: u32, payload: Vec<u8>, sources: &[u32]) -> Option<u32> {
-    if !SCENES.load(Ordering::Acquire) || target == 0 {
+    if !SCENES.load(Ordering::Acquire) || target == 0 || stalled() {
         return None;
     }
     let seq = {
@@ -1333,6 +1372,10 @@ pub struct Status {
     pub buffers: usize,
     pub buffer_bytes: u64,
     pub pending_free: usize,
+    /// Whether the module holds a job past its deadline now, the job, and
+    /// how often that happened since boot.
+    pub stalled: Option<u32>,
+    pub stalls: u64,
 }
 
 pub fn status() -> Status {
@@ -1346,6 +1389,8 @@ pub fn status() -> Status {
         buffers: st.bos.len().saturating_sub(FIXED_BOS as usize),
         buffer_bytes: st.bos.iter().filter(|(id, _)| **id >= FIXED_BOS).map(|(_, b)| b.size).sum(),
         pending_free: st.pending_free.len(),
+        stalled: stalled().then(|| STALL_SEQ.load(Ordering::Acquire)),
+        stalls: STALLS.load(Ordering::Relaxed),
     }
 }
 

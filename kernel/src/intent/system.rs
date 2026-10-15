@@ -1225,6 +1225,12 @@ pub fn intent_gpu(args: &str) {
     if st.owner.is_some() {
         kprintln!("  Buffers:  {} registered ({} MB), {} waiting to be freed", st.buffers,
             st.buffer_bytes / (1024 * 1024), st.pending_free);
+        match st.stalled {
+            Some(seq) => kprintln!("  Stalled:  the module holds job {} past its deadline, the CPU composes ({} since boot)",
+                seq, st.stalls),
+            None if st.stalls > 0 => kprintln!("  Stalled:  {} times since boot, not now", st.stalls),
+            None => {}
+        }
     }
     if let Some((pa, pb, pages)) = crate::framebuffer::shadow_phys_info() {
         kprintln!("  Shadows:  2 x {} MB at {:#x} and {:#x}", pages * 4 / 1024, pa, pb);
