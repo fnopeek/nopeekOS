@@ -50,7 +50,9 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 # alsa-lib: libasound for LibreWolf's cubeb ALSA backend (no PulseAudio /
 # PipeWire in the bundle). cubeb opens the ALSA "default" PCM, which is
 # the virtio-snd card (card 0) backed by the host audio path.
-APK_PACKAGES="${APK_PACKAGES:-librewolf seatd libseat libinput eudev mesa-gbm wayland-libs-server libdisplay-info font-dejavu font-noto alsa-lib}"
+# mesa-demos: es2gears_wayland and friends, GL test clients the session
+# runs instead of the browser with npkapp= on the guest command line.
+APK_PACKAGES="${APK_PACKAGES:-librewolf seatd libseat libinput eudev mesa-gbm wayland-libs-server libdisplay-info font-dejavu font-noto alsa-lib mesa-demos}"
 
 # ── Paths ────────────────────────────────────────────────────────
 

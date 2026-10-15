@@ -219,7 +219,8 @@ fn launch_wayland(kmsg_fd: i64) {
     // /tmp/wlrt is setgid `app`). The app owns its profile, runtime dir and
     // the sound devices.
     // Each `npkenv=NAME=value` on the command line is exported to the app,
-    // each `npkwmenv=NAME=value` to npkwm.
+    // each `npkwmenv=NAME=value` to npkwm; `npkapp=NAME` runs /usr/bin/NAME
+    // instead of the browser (a test client such as es2gears_wayland).
     // `npklogs` on the command line streams the app's and npkwm's output
     // to the console (`set microvm_cmdline npklogs`).
     // `npkprofile=<ip>:<port>` on the command line runs the app under the
@@ -373,7 +374,10 @@ fn launch_wayland(kmsg_fd: i64) {
                    echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
                  for e in $(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p'); do \
                    echo \"export $e\" >> /tmp/app.sh; echo \"<0>[wl] app env $e\" > /dev/kmsg; done; \
-                 echo '[ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' >> /tmp/app.sh; \
+                 NPKAPP=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkapp=//p' | head -1); \
+                 if [ -n \"$NPKAPP\" ]; then echo \"exec /usr/bin/$NPKAPP\" >> /tmp/app.sh; \
+                   echo \"<0>[wl] app replaced by $NPKAPP\" > /dev/kmsg; \
+                 else echo '[ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' >> /tmp/app.sh; fi; \
                  echo \"<0>[wl] librewolf exec\" > /dev/kmsg; \
                  su -s /bin/sh app -c 'WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 exec sh /tmp/app.sh' \
                    > /tmp/app.log 2>&1; \
