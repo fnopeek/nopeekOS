@@ -7,7 +7,7 @@ aom-libs-3.15.2-r0
 apk-tools-3.0.8-r0
 at-spi2-core-2.62.0-r0
 at-spi2-core-libs-2.62.0-r0
-avahi-libs-0.9_rc5-r0
+avahi-libs-0.9_rc5-r1
 brotli-libs-1.2.0-r1
 bubblewrap-0.13.1-r0
 busybox-1.38.0-r7
