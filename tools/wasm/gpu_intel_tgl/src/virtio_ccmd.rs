@@ -121,6 +121,7 @@ fn ioctl_simple(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: usize, r
                     DRM_IOCTL_I915_GEM_SET_TILING => set_tiling(st, d, i, &mut p),
                     DRM_IOCTL_I915_GEM_GET_TILING => {
                         // i915_gem_get_tiling_ioctl; TGL does no bit-6 swizzling.
+                        // The tiling is the buffer's, set by any of its clients.
                         let o = st.objs[i];
                         wr32(&mut p, 4, o.tiling);
                         wr32(&mut p, 8, I915_BIT_6_SWIZZLE_NONE);
@@ -289,11 +290,11 @@ fn set_tiling(st: &mut nctx, d: &mut drm, i: usize, p: &mut [u8]) -> i32 {
     if mode == I915_TILING_NONE {
         stride = 0;
     }
-    if st.obj_busy(d.gt, i) {
+    if st.obj_busy_flags(d.gt, i) != 0 {
         return EBUSY;
     }
-    st.objs[i].tiling = mode;
-    st.objs[i].stride = stride;
+    // One GEM object in Linux: every client's object on the buffer.
+    st.set_tiling_shared(i, mode, stride);
     wr32(p, 4, mode);
     wr32(p, 8, stride);
     wr32(p, 12, I915_BIT_6_SWIZZLE_NONE);

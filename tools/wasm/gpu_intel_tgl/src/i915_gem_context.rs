@@ -358,6 +358,20 @@ impl nctx {
         })
     }
 
+    /// The tiling of the buffer of object `i`, on every object sharing it.
+    pub fn set_tiling_shared(&mut self, i: usize, mode: u32, stride: u32) {
+        let mut j = i;
+        loop {
+            self.objs[j].tiling = mode;
+            self.objs[j].stride = stride;
+            let next = self.objs[j].share;
+            if next == NONE16 || next as usize == i {
+                break;
+            }
+            j = next as usize;
+        }
+    }
+
     /// `i915_gem_busy_ioctl`'s answer over the reservation: every reader's
     /// uabi class in the high half, a writer's class + 1 in the low.
     pub fn obj_busy_flags(&self, gt: &intel_gt, i: usize) -> u32 {
@@ -524,11 +538,14 @@ impl nctx {
         let h = hash_of(c, res_id);
         self.objs[i] = gem_obj { used: true, client: c, res_id, bo, size, pages, next: self.hash[h], ..gem_obj::EMPTY };
         self.hash[h] = i as u16;
-        // Another client's object on the same buffer: one reservation.
+        // Another client's object on the same buffer: one reservation, one
+        // tiling.
         match self.objs.iter().enumerate().position(|(j, o)| j != i && o.used && o.bo == bo) {
             Some(j) => {
                 self.objs[i].share = self.objs[j].share;
                 self.objs[j].share = i as u16;
+                self.objs[i].tiling = self.objs[j].tiling;
+                self.objs[i].stride = self.objs[j].stride;
             }
             None => self.objs[i].share = i as u16,
         }
