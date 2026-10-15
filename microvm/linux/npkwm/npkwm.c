@@ -70,6 +70,8 @@
 #include <wlr/util/log.h>
 #include <drm_fourcc.h>
 #include <wlr/render/wlr_texture.h>
+#include <wlr/render/dmabuf.h>
+#include <wlr/types/wlr_buffer.h>
 #include <xkbcommon/xkbcommon.h>
 
 /* Host -> guest. */
@@ -407,6 +409,14 @@ static void check_edge(struct wlr_surface *surface, int sx, int sy, void *data) 
 	struct edge_check *c = data;
 	struct wlr_texture *tex = wlr_surface_get_texture(surface);
 	if (c->painted || tex == NULL) {
+		return;
+	}
+	/* A GPU client's buffer is not read back: that would make it a render
+	 * target of this context (the driver may resolve its compression in
+	 * place) and stall on the client's rendering. Its size has to do. */
+	struct wlr_dmabuf_attributes dmabuf;
+	if (surface->buffer != NULL && wlr_buffer_get_dmabuf(&surface->buffer->base, &dmabuf)) {
+		c->painted = true;
 		return;
 	}
 	int at = c->column ? c->at - sx : c->at - sy;

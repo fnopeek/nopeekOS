@@ -202,9 +202,9 @@ fn launch_wayland(kmsg_fd: i64) {
     // negotiated CONTEXT_INIT, feature bit 4): without one it only finds
     // llvmpipe, and to get there it loads Mesa and LLVM (230 MB), about 0.6 s
     // per start. A failed probe is the browser's own CPU fallback.
-    // With a GPU the software switches are also taken out of the profile's
-    // prefs.js, where an earlier user.js left them; Firefox's own defaults
-    // apply then.
+    // With a GPU the software switches (partial present among them) are also
+    // taken out of the profile's prefs.js, where an earlier user.js left
+    // them; Firefox's own defaults apply then.
     // With a GPU, npk-gpuprobe logs which driver the guest's Mesa got
     // (iris/radeonsi or the llvmpipe fallback), in parallel to the session,
     // the compositor is the bundle's npkwm-gles2 (GLES2 renderer, clients
@@ -324,7 +324,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    'browser.download.useDownloadDir|true' \
                    'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
                  do k=${p%|*}; v=${p#*|}; \
-                   case $k in gfx.webrender.software|gfx.canvas.accelerated|widget.dmabuf.force-enabled|layers.gpu-process.enabled) [ $GPU = 1 ] && { sed -i \"/\\\"$k\\\"/d\" /tmp/moz/prefs.js 2>/dev/null; chown 1000:1000 /tmp/moz/prefs.js 2>/dev/null; continue; };; esac; \
+                   case $k in gfx.webrender.software|gfx.webrender.max-partial-present-rects|gfx.canvas.accelerated|widget.dmabuf.force-enabled|layers.gpu-process.enabled) [ $GPU = 1 ] && { sed -i \"/\\\"$k\\\"/d\" /tmp/moz/prefs.js 2>/dev/null; chown 1000:1000 /tmp/moz/prefs.js 2>/dev/null; continue; };; esac; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
                  echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
