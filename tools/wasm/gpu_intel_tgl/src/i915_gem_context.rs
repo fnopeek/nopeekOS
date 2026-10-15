@@ -62,12 +62,15 @@ pub struct client {
     pub rings: [fence_ring; MAX_RINGS],
     /// Closed by the kernel; torn down once its requests are done.
     pub closing: bool,
+    /// When it was closed, and whether what holds it was reported.
+    pub closing_us: u64,
+    pub closing_told: bool,
 }
 
 impl client {
     const EMPTY: client = client { used: false, id: 0, default_vm: NONE8, next_ctx_id: 1, vm_ids: [(0, NONE8); MAX_VM_IDS],
                                    next_vm_id: 1, rings: [fence_ring { submitted: 0, completed: 0 }; MAX_RINGS],
-                                   closing: false };
+                                   closing: false, closing_us: 0, closing_told: false };
 }
 
 /// `struct i915_gem_context`.
@@ -806,10 +809,21 @@ impl nctx {
         if self.nclosing != 0 {
             for c in 0..MAX_CLIENTS {
                 let c8 = c as u8;
-                if self.clients[c].used && self.clients[c].closing
-                    && !self.pend.iter().any(|p| p.used && p.client == c8) {
+                if !self.clients[c].used || !self.clients[c].closing {
+                    continue;
+                }
+                if !self.pend.iter().any(|p| p.used && p.client == c8) {
                     crate::intel_gt_requests::intel_gt_retire_requests(i915, gt);
+                    let id = self.clients[c].id;
+                    let held = now.saturating_sub(self.clients[c].closing_us);
                     self.client_teardown(i915, gt, c);
+                    if held > CLOSE_REPORT_US {
+                        Line::new().s("native context: client ").dec(id as u64).s(" torn down ")
+                            .dec(held / 1000).s(" ms after its close").say();
+                    }
+                } else if !self.clients[c].closing_told && now.saturating_sub(self.clients[c].closing_us) > CLOSE_REPORT_US {
+                    self.clients[c].closing_told = true;
+                    self.report_closing(gt, c);
                 }
             }
         }
@@ -888,6 +902,8 @@ pub fn client_close(st: &mut nctx, id: u32) -> Result<(), i32> {
         return Ok(());
     }
     st.clients[c].closing = true;
+    st.clients[c].closing_us = linux::now_us();
+    st.clients[c].closing_told = false;
     st.nclosing += 1;
     for x in 0..MAX_GEM_CTX {
         if st.ctxs[x].used && st.ctxs[x].client == c as u8 {
@@ -897,7 +913,37 @@ pub fn client_close(st: &mut nctx, id: u32) -> Result<(), i32> {
     Ok(())
 }
 
+/// A closing client still held after this long has what holds it logged.
+const CLOSE_REPORT_US: u64 = 2_000_000;
+
 impl nctx {
+    /// What keeps closing client `c` from going: each of its pending
+    /// fences' request (held, queued, in the ports, started, complete),
+    /// and what a held one waits for.
+    fn report_closing(&self, gt: &intel_gt, c: usize) {
+        let c8 = c as u8;
+        let n = self.pend.iter().filter(|p| p.used && p.client == c8).count();
+        Line::new().s("native context: client ").dec(self.clients[c].id as u64).s(" closed ")
+            .dec(CLOSE_REPORT_US / 1000).s(" ms ago, still ").dec(n as u64).s(" request(s); held ")
+            .dec(gt.nwaiters as u64).s(", zombies ").dec(self.nzombies as u64).say();
+        for p in self.pend.iter().filter(|p| p.used && p.client == c8).take(6) {
+            let rq = p.rq as usize;
+            let r = gt.requests[rq];
+            let mut l = Line::new();
+            l.s("  rq ").dec(rq as u64).s(" ctx ").dec(r.ce as u64).s(" seqno ").dec(r.seqno as u64)
+                .s(" engine ").dec(p.engine as u64).s(": used ").dec(r.used as u64).s(" held ").dec(r.waiting as u64)
+                .s(" queued ").dec(r.pqueue as u64).s(" active ").dec(r.active as u64)
+                .s(" started ").dec(crate::i915_request::__i915_request_has_started(gt, rq) as u64)
+                .s(" complete ").dec(crate::i915_request::__i915_request_is_complete(gt, rq) as u64)
+                .s(" hwsp ").dec(gt.contexts[r.ce as usize].timeline.read_hwsp_seqno() as u64);
+            for &(ce, seqno) in &r.deps[..r.ndeps as usize] {
+                l.s(" waits ").dec(ce as u64).s("/").dec(seqno as u64)
+                    .s(if crate::i915_request::fence_signaled(gt, ce, seqno) { "(done)" } else { "(open)" });
+            }
+            l.say();
+        }
+    }
+
     /// A closing client with no request left: its contexts, address spaces
     /// and objects go. Objects the kernel already detached (zombies) are
     /// reported released; the others the kernel detaches later and finds
