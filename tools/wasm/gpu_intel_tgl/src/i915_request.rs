@@ -336,9 +336,15 @@ pub fn i915_request_add(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usiz
     gt.nwaiters += 1;
 }
 
-/// Whether the fence (context `ce`, `seqno`) has signalled.
+/// Whether the fence (context `ce`, `seqno`) has signalled: its request
+/// is complete or gone. A fence is its request (`rq->fence`), not a place
+/// on a timeline: a hardware context goes back to the pool and its timeline
+/// may start over, and a seqno compared against that would never pass.
 pub fn fence_signaled(gt: &intel_gt, ce: u16, seqno: u32) -> bool {
-    ce == u16::MAX || i915_seqno_passed(gt.contexts[ce as usize].timeline.read_hwsp_seqno(), seqno)
+    ce == u16::MAX
+        || !gt.requests.iter().enumerate().any(|(i, r)| {
+            r.used && !r.retired && r.ce == ce && r.seqno == seqno && !__i915_request_is_complete(gt, i)
+        })
 }
 
 fn deps_done(gt: &intel_gt, rq: usize) -> bool {

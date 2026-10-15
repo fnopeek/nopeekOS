@@ -295,14 +295,9 @@ pub fn intel_engine_lookup_user(gt: &intel_gt, class: u16, instance: u16) -> Opt
         .nth(instance as usize)
 }
 
-/// Whether request `seqno` of context `ce` has completed (the timeline's
-/// HWSP slot has passed it).
+/// Whether request `seqno` of context `ce` has completed or is gone.
 pub fn seqno_done(gt: &intel_gt, ce: u16, seqno: u32) -> bool {
-    if ce == NONE16 {
-        return true;
-    }
-    let tl = gt.contexts[ce as usize].timeline;
-    crate::i915_request::i915_seqno_passed(tl.read_hwsp_seqno(), seqno)
+    crate::i915_request::fence_signaled(gt, ce, seqno)
 }
 
 /// The hang limit of an engine: Linux sends a heartbeat every interval and
