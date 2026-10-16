@@ -105,10 +105,6 @@ pub const SQFS_BAR0_BASE: u64 = 0xFE01_0000;
 pub const SQFS_IRQ_LINE: u8 = 5;
 /// IRQ line for the home image (slot 1).
 pub const HOME_IRQ_LINE: u8 = 11;
-/// npkFS object holding the userspace `.sqfs`, delivered as an OTA asset.
-/// If absent → empty backing → guest squashfs mount fails → PID-1 falls
-/// back.
-pub const SQFS_PATH: &str = "sys/microvm/userspace.sqfs";
 
 /// Per-queue state.
 #[derive(Default, Clone, Copy)]
@@ -167,6 +163,8 @@ pub struct VirtioBlk {
     /// Whether `save()` persists the backing to npkFS. The sqfs
     /// bundle is immutable, distributed via OTA — never persisted.
     persist: bool,
+    /// The npkFS object the backing came from (and a home image goes to).
+    path: &'static str,
 
     /// Backing store for the virtual disk, sized to capacity. Chunks are
     /// read from npkFS on first touch; `save()` writes the changed ones.
@@ -210,14 +208,16 @@ const GROW_INTERVAL_TICKS: u64 = 30 * 100;
 const GROW_TAIL_USED_PCT: usize = 25;
 
 impl VirtioBlk {
-    /// Slot 1 — the read-write, npkFS-persisted per-app home image.
-    /// PID-1 mounts it ext4 as the guest user home so the app's profile
-    /// (LibreWolf cookies/history/bookmarks/prefs/extensions) survives
-    /// reboots. Cache stays in tmpfs to keep the image small.
+    /// Slot 1 — the read-write, npkFS-persisted home image of the app
+    /// being launched (`microvm::app`). PID-1 mounts it ext4 as the guest
+    /// user home so the app's profile (cookies/history/bookmarks/prefs/
+    /// extensions) survives reboots. Cache stays in tmpfs to keep the image
+    /// small.
     pub fn new() -> Self {
-        let backing = load_or_init_backing();
+        let path = crate::microvm::app::current().home;
+        let backing = load_or_init_backing(path);
         let sectors = (backing.len() / 512) as u64;
-        let mut dev = Self::with(BAR0_BASE, HOME_IRQ_LINE, false, true, backing, sectors);
+        let mut dev = Self::with(BAR0_BASE, HOME_IRQ_LINE, false, true, path, backing, sectors);
         dev.grow_at_pct = crate::config::get("microvm_home_grow_at")
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|p| (1..=99).contains(p))
@@ -286,8 +286,9 @@ impl VirtioBlk {
     /// with a tiny zero buffer so the guest's squashfs mount cleanly
     /// fails and PID-1 falls back to the smoke path.
     pub fn new_sqfs() -> Self {
-        let (backing, sectors) = load_sqfs_backing();
-        Self::with(SQFS_BAR0_BASE, SQFS_IRQ_LINE, true, false, backing, sectors)
+        let path = crate::microvm::app::current().sqfs;
+        let (backing, sectors) = load_sqfs_backing(path);
+        Self::with(SQFS_BAR0_BASE, SQFS_IRQ_LINE, true, false, path, backing, sectors)
     }
 
     fn with(
@@ -295,6 +296,7 @@ impl VirtioBlk {
         irq_line: u8,
         read_only: bool,
         persist: bool,
+        path: &'static str,
         backing: BlkImage,
         capacity_sectors: u64,
     ) -> Self {
@@ -324,6 +326,7 @@ impl VirtioBlk {
             irq_line,
             read_only,
             persist,
+            path,
             backing,
             pending_kick_queue: None,
             grow_refused: false,
@@ -359,7 +362,7 @@ impl VirtioBlk {
         if !self.persist {
             return; // read-only sqfs bundle — nothing to write back.
         }
-        match self.backing.save(PROFILE_PATH) {
+        match self.backing.save(self.path) {
             Ok((written, reused)) => kprintln!(
                 "[virtio-blk] saved home image ({} chunks written, {} reused)",
                 written, reused,
@@ -687,11 +690,6 @@ const fn width_mask(width: u8) -> u64 {
     }
 }
 
-/// Where the encrypted per-app home image lives in npkFS. Keyed per app
-/// (hardcoded "browser"; other apps would get their own
-/// `apps/<app>/home.img`).
-const PROFILE_PATH: &str = "sys/microvm/apps/browser/home.img";
-
 /// Embedded sparse template of a freshly-mke2fs'd empty 512 MiB ext4.
 /// Format: `"NHT1" | image_size:u32 | num_entries:u32 | (sector_idx:u32,
 /// data:[u8;512])*` — only the non-zero sectors of the fresh fs (133 of
@@ -705,16 +703,16 @@ static HOME_TEMPLATE: &[u8] = include_bytes!("home_template.bin");
 /// chunk-wise reads, whatever size it has grown to. Without one (or with
 /// one no disk can be), seed a fresh empty ext4 from `HOME_TEMPLATE` so
 /// PID-1's first `mount -t ext4 /dev/vda` succeeds.
-fn load_or_init_backing() -> BlkImage {
+fn load_or_init_backing(path: &'static str) -> BlkImage {
     let fresh = (CAPACITY_SECTORS * 512) as usize;
     let usable = |len: usize| len >= fresh && len % 512 == 0;
-    if let Some(img) = BlkImage::open_lazy(PROFILE_PATH, false) {
+    if let Some(img) = BlkImage::open_lazy(path, false) {
         if usable(img.len()) {
             kprintln!("[virtio-blk] home image opened ({} MiB, chunks on demand) /dev/vda", img.len() >> 20);
             return img;
         }
         kprintln!("[virtio-blk] home image of {} bytes cannot be a disk, reseeding", img.len());
-    } else if let Ok((data, _hash)) = crate::npkfs::fetch(PROFILE_PATH) {
+    } else if let Ok((data, _hash)) = crate::npkfs::fetch(path) {
         if usable(data.len()) {
             kprintln!("[virtio-blk] loaded home image ({} MiB) /dev/vda", data.len() >> 20);
             return BlkImage::resident(data);
@@ -761,10 +759,9 @@ fn seed_home_image(cap: usize) -> alloc::vec::Vec<u8> {
 /// `(backing, capacity_512_sectors)`. On miss, a one-sector zero
 /// buffer — the guest's `mount -t squashfs /dev/vdb` then fails its
 /// superblock-magic check and PID-1 falls back to the smoke path.
-fn load_sqfs_backing() -> (BlkImage, u64) {
+fn load_sqfs_backing(path: &'static str) -> (BlkImage, u64) {
     // mksquashfs pads to 4 KiB, so the length is already 512-aligned;
     // round up defensively regardless.
-    let path = SQFS_PATH;
     if let Some(img) = BlkImage::open_lazy(path, true) {
         let sectors = (img.len() as u64).div_ceil(512);
         kprintln!(

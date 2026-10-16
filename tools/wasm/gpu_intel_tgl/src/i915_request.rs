@@ -24,8 +24,11 @@ pub const KERNEL_RESERVE: usize = 8;
 /// `I915_PRIORITY_DISPLAY` (i915_priolist_types.h:24):
 /// I915_CONTEXT_MAX_USER_PRIORITY + 3.
 pub const I915_PRIORITY_DISPLAY: i32 = 1026;
-/// Foreign fences one request may wait for (one per timeline).
+/// Foreign fences one request may wait for (one per timeline) from its
+/// objects' reservations; a request keeps two more, for its context's
+/// previous request (single timeline, virtual engine).
 pub const MAX_DEPS: usize = 8;
+const REQ_DEPS: usize = MAX_DEPS + 2;
 
 const ENOMEM: i32 = 12;
 const ENOSPC: i32 = 28;
@@ -65,9 +68,13 @@ pub struct i915_request {
     pub refs: u32,
     /// `rq->submit`: the foreign fences (context, seqno) it waits for, and
     /// whether it is held in `gt.waiters`.
-    pub deps: [(u16, u32); MAX_DEPS],
+    pub deps: [(u16, u32); REQ_DEPS],
     pub ndeps: u8,
     pub waiting: bool,
+    /// `i915_request_await_execution`: the request (context, seqno) it is
+    /// submitted together with, once that one is in an execlist port and has
+    /// started (I915_EXEC_FENCE_SUBMIT).
+    pub exec_dep: Option<(u16, u32)>,
 }
 
 /// `i915_seqno_passed`.
@@ -250,7 +257,8 @@ pub fn __i915_request_create(i915: &mut drm_i915_private, gt: &mut intel_gt, ce:
     };
     let engine = gt.contexts[ce].engine;
     let seqno = crate::intel_timeline::intel_timeline_get_seqno(&mut gt.contexts[ce].timeline);
-    let fini_dw = gt.engine[engine as usize].map(|e| e.emit_fini_breadcrumb_dw).unwrap_or(0);
+    let fini_dw = crate::intel_context::ce_engine(gt, ce).and_then(|e| gt.engine[e])
+        .map(|e| e.emit_fini_breadcrumb_dw).unwrap_or(0);
 
     gt.requests[rq] = i915_request {
         used: true,
@@ -297,20 +305,37 @@ pub fn i915_request_create(i915: &mut drm_i915_private, gt: &mut intel_gt, ce: u
 /// `__i915_request_commit`: the closing breadcrumb's space is taken now
 /// (written at submission); the request becomes the timeline's last.
 pub fn __i915_request_commit(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize) -> Result<(), i32> {
-    let engine = gt.requests[rq].engine as usize;
-    let fini_dw = gt.engine[engine].map(|e| e.emit_fini_breadcrumb_dw).unwrap_or(0);
+    let fini_dw = crate::intel_context::rq_engine_cs(gt, rq).map(|e| e.emit_fini_breadcrumb_dw).unwrap_or(0);
     gt.requests[rq].reserved_space = 0;
     let at = intel_ring_begin(i915, gt, rq, fini_dw)?;
     let ce = gt.requests[rq].ce as usize;
     gt.requests[rq].postfix = gt.contexts[ce].ring.intel_ring_wrap(at);
+    // __i915_request_add_to_timeline: on a virtual engine the previous
+    // request may run on another sibling, so this one waits for it to
+    // complete (only one request goes through a virtual engine at a time).
+    if let Some(prev) = gt.contexts[ce].timeline.last_request.map(|p| p as usize)
+        && crate::intel_execlists_submission::is_virtual(gt.requests[rq].engine)
+        && !__i915_request_is_complete(gt, prev) {
+        let (pce, pseq) = (gt.requests[prev].ce, gt.requests[prev].seqno);
+        let r = &mut gt.requests[rq];
+        if (r.ndeps as usize) < REQ_DEPS {
+            r.deps[r.ndeps as usize] = (pce, pseq);
+            r.ndeps += 1;
+        }
+    }
     gt.contexts[ce].timeline.last_request = Some(rq as u16);
     Ok(())
 }
 
-/// `__i915_request_queue` → `submit_notify` → `engine->submit_request`.
+/// `__i915_request_queue` → `submit_notify` → `engine->submit_request`:
+/// `virtual_submit_request` for a virtual engine.
 pub fn __i915_request_queue(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize) {
-    let engine = gt.requests[rq].engine as usize;
-    crate::intel_execlists_submission::submit_request(i915, gt, engine, rq);
+    let engine = gt.requests[rq].engine;
+    if crate::intel_execlists_submission::is_virtual(engine) {
+        crate::intel_execlists_submission::virtual_submit_request(i915, gt, engine, rq);
+    } else {
+        crate::intel_execlists_submission::submit_request(i915, gt, engine as usize, rq);
+    }
 }
 
 /// `i915_request_add`: queued now, or held until its submit fence signals
@@ -328,6 +353,7 @@ pub fn i915_request_add(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usiz
     let behind = gt.waiters[..gt.nwaiters].iter().any(|&w| gt.requests[w as usize].ce == ce);
     if !behind && deps_done(gt, rq) {
         gt.requests[rq].ndeps = 0;
+        gt.requests[rq].exec_dep = None;
         __i915_request_queue(i915, gt, rq);
         return;
     }
@@ -349,7 +375,29 @@ pub fn fence_signaled(gt: &intel_gt, ce: u16, seqno: u32) -> bool {
 
 fn deps_done(gt: &intel_gt, rq: usize) -> bool {
     let r = &gt.requests[rq];
-    gt.wedged || r.deps[..r.ndeps as usize].iter().all(|&(ce, s)| fence_signaled(gt, ce, s))
+    gt.wedged || (r.deps[..r.ndeps as usize].iter().all(|&(ce, s)| fence_signaled(gt, ce, s))
+                  && r.exec_dep.is_none_or(|(ce, s)| executing(gt, ce, s)))
+}
+
+/// Whether request (context `ce`, `seqno`) runs or has run: the execute
+/// callback fires when it is submitted to the hardware (`__await_execution`)
+/// and the request before it on its timeline has completed
+/// (`i915_request_await_start`).
+fn executing(gt: &intel_gt, ce: u16, seqno: u32) -> bool {
+    match gt.requests.iter().position(|r| r.used && !r.retired && r.ce == ce && r.seqno == seqno) {
+        None => true,
+        Some(i) => __i915_request_is_complete(gt, i) || (gt.requests[i].active && __i915_request_has_started(gt, i)),
+    }
+}
+
+/// `i915_request_await_execution` with an i915 request of another context:
+/// `rq` goes to the hardware once that one is there and has started.
+pub fn i915_request_await_execution(gt: &mut intel_gt, rq: usize, signal: usize) {
+    let (ce, seqno) = (gt.requests[signal].ce, gt.requests[signal].seqno);
+    if ce == gt.requests[rq].ce || __i915_request_is_complete(gt, signal) {
+        return;
+    }
+    gt.requests[rq].exec_dep = Some((ce, seqno));
 }
 
 /// `i915_request_await_dma_fence`: `rq` is submitted only after the fence
@@ -368,7 +416,7 @@ pub fn i915_request_await(gt: &mut intel_gt, rq: usize, ce: u16, seqno: u32) -> 
         }
         return true;
     }
-    if n == MAX_DEPS {
+    if n >= REQ_DEPS - 1 {
         return false;
     }
     r.deps[n] = (ce, seqno);
@@ -396,9 +444,17 @@ fn i915_request_boost(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize,
             }
             raise(i915, gt, d, prio, &mut stack, &mut n);
         }
-        // The foreign fences it waits for.
-        if w.ndeps != 0 {
-            for &(ce, seqno) in &w.deps[..w.ndeps as usize] {
+        // The foreign fences it waits for, and the request it is submitted
+        // with (a weak dependency in Linux, raised all the same).
+        let mut all = w.deps;
+        let mut na = w.ndeps as usize;
+        if let Some(d) = w.exec_dep
+            && na < all.len() {
+            all[na] = d;
+            na += 1;
+        }
+        if na != 0 {
+            for &(ce, seqno) in &all[..na] {
                 if let Some(d) = gt.requests.iter().position(|r| r.used && !r.retired && r.ce == ce && r.seqno == seqno) {
                     if gt.requests[d].prio < prio {
                         raise(i915, gt, d, prio, &mut stack, &mut n);
@@ -414,9 +470,11 @@ fn i915_request_boost(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize,
 fn raise(i915: &mut drm_i915_private, gt: &mut intel_gt, d: usize, prio: i32, stack: &mut [u16; MAX_REQUESTS],
          n: &mut usize) {
     gt.requests[d].prio = prio;
+    let e = gt.requests[d].engine;
     if gt.requests[d].pqueue {
-        let e = gt.requests[d].engine as usize;
-        crate::intel_execlists_submission::requeue_request(i915, gt, e, d);
+        crate::intel_execlists_submission::requeue_request(i915, gt, e as usize, d);
+    } else if crate::intel_execlists_submission::is_virtual(e) {
+        crate::intel_execlists_submission::virtual_kick(i915, gt, e, d, prio);
     }
     if *n < stack.len() {
         stack[*n] = d as u16;
@@ -447,6 +505,7 @@ pub fn i915_request_release_waiters(i915: &mut drm_i915_private, gt: &mut intel_
         gt.nwaiters -= 1;
         gt.requests[rq].waiting = false;
         gt.requests[rq].ndeps = 0;
+        gt.requests[rq].exec_dep = None;
         __i915_request_queue(i915, gt, rq);
     }
 }

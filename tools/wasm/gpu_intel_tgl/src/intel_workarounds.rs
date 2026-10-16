@@ -604,8 +604,7 @@ pub fn intel_engine_apply_whitelist(i915: &mut drm_i915_private, _gt: &intel_gt,
 /// neither masked nor fully overwritten is read for its other bits. The
 /// MESH_CONTROL step (Wa_14019789679) is DG2/MTL only.
 pub fn intel_engine_emit_ctx_wa(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize) -> Result<(), i32> {
-    let e = gt.requests[rq].engine as usize;
-    let Some(engine) = gt.engine[e] else { return Ok(()) };
+    let Some(engine) = crate::intel_context::rq_engine_cs(gt, rq) else { return Ok(()) };
     let wal = engine.ctx_wa_list;
     if wal.count == 0 {
         return Ok(());

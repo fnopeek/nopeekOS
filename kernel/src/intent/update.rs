@@ -78,6 +78,8 @@ const ASSETS: &[AssetSpec] = &[
     // a tmpfs initramfs. The RAM-efficient path; supersedes the cpio entry
     // above once it is the only shipped form.
     AssetSpec { section: "microvm:userspace-sqfs", npkfs_path: "sys/microvm/userspace.sqfs" },
+    // The Firefox image (`firefox`): its own squashfs beside LibreWolf's.
+    AssetSpec { section: "microvm:firefox-sqfs", npkfs_path: "sys/microvm/firefox.sqfs" },
     // CPython's standard library, as one zip. Stored uncompressed on
     // purpose: this interpreter has no zlib, so a deflated zip raises
     // ZipImportError at the first import. It also saves decompressing on

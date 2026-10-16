@@ -129,7 +129,7 @@ pub fn gen12_emit_aux_table_inv(engine: &intel_engine_cs, cs: &mut Cs) {
 /// `engine->emit_flush`: `gen12_emit_flush_rcs` for render,
 /// `gen12_emit_flush_xcs` otherwise.
 pub fn emit_flush(i915: &mut drm_i915_private, gt: &mut intel_gt, rq: usize, mode: u64) -> Result<(), i32> {
-    let engine = gt.engine[gt.requests[rq].engine as usize].ok_or(-19)?;
+    let engine = crate::intel_context::rq_engine_cs(gt, rq).ok_or(-19)?;
     if engine.flags & I915_ENGINE_HAS_RCS_REG_STATE != 0 {
         gen12_emit_flush_rcs(i915, gt, rq, &engine, mode)
     } else {

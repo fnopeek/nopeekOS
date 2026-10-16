@@ -29,6 +29,8 @@ fn req_size(cmd: u32) -> usize {
         I915_CCMD_GEM_CONTEXT_CREATE => 24,
         I915_CCMD_GEM_EXECBUFFER2 | I915_CCMD_GEM_EXECBUFFER2_V2 => 48,
         I915_CCMD_GEM_BUSY => 24,
+        I915_CCMD_NPK_CONTEXT_SETPARAM | I915_CCMD_NPK_CONTEXT_GETPARAM => 48,
+        I915_CCMD_NPK_GEM_EXECBUFFER2 => 64,
         _ => 0,
     }
 }
@@ -73,8 +75,17 @@ pub fn dispatch(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: usize, r
         }
         I915_CCMD_GEM_CONTEXT_CREATE => gem_context_create(st, d, c, req, len, rsp),
         I915_CCMD_GEM_EXECBUFFER2 | I915_CCMD_GEM_EXECBUFFER2_V2 => {
-            crate::i915_gem_execbuffer::i915_ccmd_gem_execbuffer2(st, d, c, req, cmd == I915_CCMD_GEM_EXECBUFFER2_V2, rsp)
+            let kind = if cmd == I915_CCMD_GEM_EXECBUFFER2_V2 {
+                crate::i915_gem_execbuffer::EXEC_V2
+            } else {
+                crate::i915_gem_execbuffer::EXEC_V1
+            };
+            crate::i915_gem_execbuffer::i915_ccmd_gem_execbuffer2(st, d, c, req, kind, rsp)
         }
+        I915_CCMD_NPK_CONTEXT_SETPARAM | I915_CCMD_NPK_CONTEXT_GETPARAM => {
+            npk_context_param(st, d, c, req, len, cmd == I915_CCMD_NPK_CONTEXT_GETPARAM, rsp)
+        }
+        I915_CCMD_NPK_GEM_EXECBUFFER2 => crate::i915_gem_execbuffer::i915_ccmd_npk_gem_execbuffer2(st, d, c, req, rsp),
         I915_CCMD_GEM_BUSY => {
             wr32(rsp, 0, 16);
             match st.obj(c, rd32(req, 16)) {
@@ -135,9 +146,9 @@ fn ioctl_simple(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: usize, r
             if rd32(&p, 4) != 0 {
                 EINVAL
             } else {
-                match st.ctx(c, rd32(&p, 0)) {
-                    None => ENOENT,
-                    Some(x) => {
+                match st.ctx_lookup(d, c, rd32(&p, 0)) {
+                    Err(e) => -e,
+                    Ok(x) => {
                         wr32(&mut p, 8, 0);
                         wr32(&mut p, 12, st.ctxs[x].guilty);
                         wr32(&mut p, 16, st.ctxs[x].innocent);
@@ -147,12 +158,16 @@ fn ioctl_simple(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: usize, r
             }
         }
         DRM_IOCTL_I915_GEM_CONTEXT_CREATE => {
-            // The legacy create: no flags, no extensions.
-            if rd32(&p, 4) & !(I915_CONTEXT_CREATE_FLAGS_USE_EXTENSIONS | I915_CONTEXT_CREATE_FLAGS_SINGLE_TIMELINE) != 0 {
+            // i915_gem_context_create_ioctl with the legacy struct: its pad
+            // is the flags, and there are no extensions to follow.
+            let flags = rd32(&p, 4);
+            if flags & !(I915_CONTEXT_CREATE_FLAGS_USE_EXTENSIONS | I915_CONTEXT_CREATE_FLAGS_SINGLE_TIMELINE) != 0 {
                 EINVAL
+            } else if crate::intel_gt::intel_gt_is_wedged(d.gt) {
+                EIO
             } else {
                 let id = st.next_ctx_id(c);
-                match st.ctx_create(d.i915, c, None, id) {
+                match st.proto_create(c, id, flags & I915_CONTEXT_CREATE_FLAGS_SINGLE_TIMELINE != 0) {
                     Ok(_) => {
                         wr32(&mut p, 0, id);
                         0
@@ -168,8 +183,12 @@ fn ioctl_simple(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: usize, r
             } else if id == 0 {
                 ENOENT
             } else {
-                match st.ctx(c, id) {
+                match st.ctx_or_proto(c, id) {
                     None => ENOENT,
+                    Some(x) if st.ctxs[x].proto => {
+                        st.proto_close(x);
+                        0
+                    }
                     Some(x) => {
                         st.ctx_destroy(d.gt, x);
                         0
@@ -178,21 +197,25 @@ fn ioctl_simple(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: usize, r
             }
         }
         DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM | DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM => {
-            let param = rd64(&p, 8);
-            let value = rd64(&p, 16);
-            if !matches!(param, I915_CONTEXT_PARAM_PRIORITY | I915_CONTEXT_PARAM_RECOVERABLE
+            // virglrenderer passes these four only; a parameter with data
+            // comes as I915_CCMD_NPK_CONTEXT_*PARAM.
+            let param = ctx_param { size: rd32(&p, 4), param: rd64(&p, 8), value: rd64(&p, 16), data: &[] };
+            if !matches!(param.param, I915_CONTEXT_PARAM_PRIORITY | I915_CONTEXT_PARAM_RECOVERABLE
                          | I915_CONTEXT_PARAM_GTT_SIZE | I915_CONTEXT_PARAM_VM) {
                 return Err(-EINVAL);
             }
-            if param == I915_CONTEXT_PARAM_PRIORITY && value as i64 > I915_CONTEXT_DEFAULT_PRIORITY
-                && cmd == DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM {
-                EPERM
-            } else {
-                match st.ctx(c, rd32(&p, 0)) {
-                    None => ENOENT,
-                    Some(x) if cmd == DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM => ctx_getparam(st, x, &mut p),
-                    Some(x) => ctx_setparam(st, x, &p),
+            let ctx_id = rd32(&p, 0);
+            if cmd == DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM {
+                match context_getparam(st, d, c, ctx_id, &param, &mut []) {
+                    Ok((size, value)) => {
+                        wr32(&mut p, 4, size);
+                        wr64(&mut p, 16, value);
+                        0
+                    }
+                    Err(e) => e,
                 }
+            } else {
+                context_setparam(st, d, c, ctx_id, &param)
             }
         }
         DRM_IOCTL_I915_GEM_VM_CREATE | DRM_IOCTL_I915_GEM_VM_DESTROY => {
@@ -316,53 +339,150 @@ fn set_domain(st: &mut nctx, d: &mut drm, i: usize, p: &[u8]) -> i32 {
     0
 }
 
-/// `I915_CONTEXT_PARAM_*` read (`i915_gem_context_getparam_ioctl`).
-fn ctx_getparam(st: &mut nctx, x: usize, p: &mut [u8]) -> i32 {
-    let param = rd64(p, 8);
-    let value: u64 = match param {
-        I915_CONTEXT_PARAM_GTT_SIZE => st.vms.get(st.ctxs[x].vm as usize).and_then(|v| v.as_ref()).map(|v| v.ppgtt.total)
-            .unwrap_or(0),
-        I915_CONTEXT_PARAM_RECOVERABLE => st.ctxs[x].recoverable as u64,
-        I915_CONTEXT_PARAM_PRIORITY => st.ctxs[x].priority as i64 as u64,
+/// `struct drm_i915_gem_context_param`, with the data a pointer-valued
+/// parameter points at inline (`I915_CCMD_NPK_CONTEXT_*PARAM`; empty from
+/// IOCTL_SIMPLE). For an engine map the data is the map, then its
+/// extension chain, each extension whole and in order.
+pub struct ctx_param<'a> {
+    pub size: u32,
+    pub param: u64,
+    pub value: u64,
+    pub data: &'a [u8],
+}
+
+const EFAULT: i32 = 14;
+const E2BIG: i32 = 7;
+/// `i915_user_extensions`' limit on a chain.
+const MAX_EXTENSIONS: u32 = 512;
+
+/// `i915_gem_context_getparam_ioctl` on the finalized context `x`: Ok is
+/// (size, value); `out` takes what a pointer-valued parameter writes back.
+fn ctx_getparam(st: &mut nctx, d: &drm, x: usize, p: &ctx_param, out: &mut [u8]) -> Result<(u32, u64), i32> {
+    let cx = st.ctxs[x];
+    let value = match p.param {
+        I915_CONTEXT_PARAM_GTT_SIZE => {
+            st.vms.get(cx.vm as usize).and_then(|v| v.as_ref()).map(|v| v.ppgtt.total).unwrap_or(0)
+        }
+        I915_CONTEXT_PARAM_NO_ERROR_CAPTURE => cx.no_error_capture as u64,
+        I915_CONTEXT_PARAM_BANNABLE => cx.bannable as u64,
+        I915_CONTEXT_PARAM_RECOVERABLE => cx.recoverable as u64,
+        I915_CONTEXT_PARAM_PRIORITY => cx.priority as i64 as u64,
+        I915_CONTEXT_PARAM_SSEU => return get_sseu(st, d, x, p, out).map(|size| (size, p.value)),
         // get_ppgtt: a new id for the context's address space.
-        _ => {
-            let (c, vm) = (st.ctxs[x].client, st.ctxs[x].vm);
-            match st.vm_id_add(c, vm) {
-                Ok(id) => id as u64,
-                Err(e) => return -e,
+        I915_CONTEXT_PARAM_VM => match st.vm_id_add(cx.client, cx.vm) {
+            Ok(id) => id as u64,
+            Err(e) => return Err(-e),
+        },
+        I915_CONTEXT_PARAM_PERSISTENCE => cx.persistent as u64,
+        // get_protected: no context uses protected content.
+        I915_CONTEXT_PARAM_PROTECTED_CONTENT => 0,
+        _ => return Err(EINVAL),
+    };
+    Ok((0, value))
+}
+
+/// `get_sseu`: the slice configuration of one of the context's engines,
+/// `ce->sseu` (the engine's, from `intel_context_init`; a virtual engine's
+/// is empty). Returns the size written.
+fn get_sseu(st: &nctx, d: &drm, x: usize, p: &ctx_param, out: &mut [u8]) -> Result<u32, i32> {
+    if p.size == 0 {
+        return Ok(PARAM_SSEU_BYTES as u32);
+    }
+    if (p.size as usize) < PARAM_SSEU_BYTES {
+        return Err(EINVAL);
+    }
+    let u = p.data.get(..PARAM_SSEU_BYTES).ok_or(EFAULT)?;
+    let (class, instance, flags) = (rd16(u, 0), rd16(u, 2), rd32(u, 4));
+    if rd32(u, 28) != 0 || flags & !I915_CONTEXT_SSEU_FLAG_ENGINE_INDEX != 0 {
+        return Err(EINVAL);
+    }
+    // lookup_user_engine + i915_gem_context_get_engine.
+    let cx = &st.ctxs[x];
+    let by_index = flags & I915_CONTEXT_SSEU_FLAG_ENGINE_INDEX != 0;
+    if by_index != (cx.num_user_engines >= 0) {
+        return Err(EINVAL);
+    }
+    let sseu = if by_index {
+        let idx = instance as usize;
+        if idx >= cx.num_user_engines as usize {
+            return Err(EINVAL);
+        }
+        match cx.user_engines[idx].kind {
+            ENGINE_TYPE_INVALID => return Err(ENOENT),
+            ENGINE_TYPE_PHYSICAL => d.gt.engine[cx.user_engines[idx].engine as usize].map(|e| e.sseu).unwrap_or_default(),
+            _ => Default::default(),
+        }
+    } else {
+        let e = intel_engine_lookup_user(d.gt, class, instance).ok_or(EINVAL)?;
+        d.gt.engine[e as usize].map(|e| e.sseu).unwrap_or_default()
+    };
+    let o = out.get_mut(..PARAM_SSEU_BYTES).ok_or(EFAULT)?;
+    o.copy_from_slice(u);
+    wr64(o, 8, sseu.slice_mask as u64);
+    wr64(o, 16, sseu.subslice_mask as u64);
+    o[24..26].copy_from_slice(&(sseu.min_eus_per_subslice as u16).to_le_bytes());
+    o[26..28].copy_from_slice(&(sseu.max_eus_per_subslice as u16).to_le_bytes());
+    Ok(PARAM_SSEU_BYTES as u32)
+}
+
+fn rd16(b: &[u8], o: usize) -> u16 {
+    u16::from_le_bytes([b[o], b[o + 1]])
+}
+
+/// `ctx_setparam` on the finalized context `x`; the positive errno or 0.
+fn ctx_setparam(st: &mut nctx, x: usize, p: &ctx_param) -> i32 {
+    let cx = &mut st.ctxs[x];
+    match p.param {
+        I915_CONTEXT_PARAM_NO_ERROR_CAPTURE => {
+            if p.size != 0 {
+                return EINVAL;
+            }
+            cx.no_error_capture = p.value != 0;
+        }
+        I915_CONTEXT_PARAM_BANNABLE => {
+            if p.size != 0 {
+                return EINVAL;
+            }
+            // Clearing it needs CAP_SYS_ADMIN.
+            if p.value == 0 {
+                return EPERM;
+            }
+            cx.bannable = true;
+        }
+        I915_CONTEXT_PARAM_RECOVERABLE => {
+            if p.size != 0 {
+                return EINVAL;
+            }
+            cx.recoverable = p.value != 0;
+        }
+        I915_CONTEXT_PARAM_PRIORITY => match validate_priority(p) {
+            Ok(v) => cx.priority = v,
+            Err(e) => return e,
+        },
+        // set_sseu: only GRAPHICS_VER 11 reconfigures slices.
+        I915_CONTEXT_PARAM_SSEU => return if (p.size as usize) < PARAM_SSEU_BYTES { EINVAL } else { ENODEV },
+        I915_CONTEXT_PARAM_PERSISTENCE => {
+            if p.size != 0 {
+                return EINVAL;
+            }
+            // __context_set_persistence: cancelling a context needs
+            // I915_SCHEDULER_CAP_PREEMPTION.
+            if p.value == 0 && cx.persistent {
+                return ENODEV;
             }
         }
-    };
-    wr32(p, 4, 0);
-    wr64(p, 16, value);
+        // set_context_image needs CONFIG_DRM_I915_REPLAY_GPU_HANGS_API.
+        _ => return EINVAL,
+    }
     0
 }
 
-/// `I915_CONTEXT_PARAM_*` written (`ctx_setparam`).
-fn ctx_setparam(st: &mut nctx, x: usize, p: &[u8]) -> i32 {
-    let (size, param, value) = (rd32(p, 4), rd64(p, 8), rd64(p, 16));
-    match param {
-        I915_CONTEXT_PARAM_PRIORITY => match set_priority(value as i64) {
-            Ok(v) => {
-                st.ctxs[x].priority = v;
-                0
-            }
-            Err(e) => e,
-        },
-        I915_CONTEXT_PARAM_RECOVERABLE => {
-            if size != 0 {
-                EINVAL
-            } else {
-                st.ctxs[x].recoverable = value != 0;
-                0
-            }
-        }
-        _ => EINVAL,
-    }
-}
-
 /// `validate_priority`; above the default needs CAP_SYS_NICE.
-fn set_priority(prio: i64) -> Result<i32, i32> {
+fn validate_priority(p: &ctx_param) -> Result<i32, i32> {
+    if p.size != 0 {
+        return Err(EINVAL);
+    }
+    let prio = p.value as i64;
     if !(I915_CONTEXT_MIN_USER_PRIORITY..=I915_CONTEXT_MAX_USER_PRIORITY).contains(&prio) {
         return Err(EINVAL);
     }
@@ -372,81 +492,357 @@ fn set_priority(prio: i64) -> Result<i32, i32> {
     Ok(prio as i32)
 }
 
-/// The settings a proto context collects (`struct i915_gem_proto_context`).
-struct proto {
-    vm: Option<u16>,
-    priority: i32,
-    recoverable: bool,
-    bannable: bool,
-    persistent: bool,
-    no_error_capture: bool,
-    user_engines: bool,
-    n_engines: u8,
-    engines: [u8; MAX_USER_ENGINES],
+/// `set_proto_ctx_param` on the proto context `x`; the positive errno or 0.
+/// Ok carries the size written back (SSEU).
+fn set_proto_ctx_param(st: &mut nctx, d: &drm, c: u8, x: usize, p: &ctx_param) -> i32 {
+    match p.param {
+        I915_CONTEXT_PARAM_NO_ERROR_CAPTURE => {
+            if p.size != 0 {
+                return EINVAL;
+            }
+            st.ctxs[x].no_error_capture = p.value != 0;
+        }
+        I915_CONTEXT_PARAM_BANNABLE => {
+            if p.size != 0 {
+                return EINVAL;
+            }
+            if p.value == 0 {
+                return EPERM;
+            }
+            st.ctxs[x].bannable = true;
+        }
+        // Only with GuC submission.
+        I915_CONTEXT_PARAM_LOW_LATENCY => return EINVAL,
+        I915_CONTEXT_PARAM_RECOVERABLE => {
+            if p.size != 0 {
+                return EINVAL;
+            }
+            st.ctxs[x].recoverable = p.value != 0;
+        }
+        I915_CONTEXT_PARAM_PRIORITY => match validate_priority(p) {
+            Ok(v) => st.ctxs[x].priority = v,
+            Err(e) => return e,
+        },
+        // set_proto_ctx_sseu: only GRAPHICS_VER 11.
+        I915_CONTEXT_PARAM_SSEU => return if (p.size as usize) < PARAM_SSEU_BYTES { EINVAL } else { ENODEV },
+        // set_proto_ctx_vm.
+        I915_CONTEXT_PARAM_VM => {
+            if p.size != 0 {
+                return EINVAL;
+            }
+            if p.value >> 32 != 0 {
+                return ENOENT;
+            }
+            let Some(vm) = st.vm_lookup(c, p.value as u32) else { return ENOENT };
+            st.vm_get(vm);
+            let old = core::mem::replace(&mut st.ctxs[x].vm, vm);
+            if old != NONE16 {
+                st.vm_put(old);
+            }
+        }
+        I915_CONTEXT_PARAM_ENGINES => return set_proto_ctx_engines(st, d, x, p),
+        I915_CONTEXT_PARAM_PERSISTENCE => {
+            if p.size != 0 {
+                return EINVAL;
+            }
+            // proto_context_set_persistence: cancelling needs preemption.
+            if p.value == 0 {
+                return ENODEV;
+            }
+            st.ctxs[x].persistent = true;
+        }
+        // proto_context_set_protected: no PXP.
+        I915_CONTEXT_PARAM_PROTECTED_CONTENT => {
+            if p.value != 0 {
+                return ENODEV;
+            }
+        }
+        _ => return EINVAL,
+    }
+    0
+}
+
+/// `set_proto_ctx_engines`: the engine map and, through its extension
+/// chain, balanced, bonded and parallel slots. All or nothing.
+fn set_proto_ctx_engines(st: &mut nctx, d: &drm, x: usize, p: &ctx_param) -> i32 {
+    if st.ctxs[x].num_user_engines >= 0 {
+        return EINVAL;
+    }
+    let size = p.size as usize;
+    if size < 8 || (size - 8) % 4 != 0 {
+        return EINVAL;
+    }
+    let num = (size - 8) / 4;
+    if num > MAX_USER_ENGINES {
+        return EINVAL;
+    }
+    let Some(map) = p.data.get(..size) else { return EFAULT };
+    let mut set = [proto_engine::INVALID; MAX_USER_ENGINES];
+    for (n, pe) in set[..num].iter_mut().enumerate() {
+        let (class, instance) = (rd16(map, 8 + n * 4), rd16(map, 10 + n * 4));
+        if class == I915_ENGINE_CLASS_INVALID && instance == I915_ENGINE_CLASS_INVALID_NONE {
+            continue;
+        }
+        match intel_engine_lookup_user(d.gt, class, instance) {
+            Some(e) => *pe = proto_engine { kind: ENGINE_TYPE_PHYSICAL, engine: e, ..proto_engine::INVALID },
+            None => return ENOENT,
+        }
+    }
+    // i915_user_extensions over the chain that follows the map.
+    if rd64(map, 0) != 0 {
+        let mut pos = size;
+        let mut depth = MAX_EXTENSIONS;
+        loop {
+            if depth == 0 {
+                return E2BIG;
+            }
+            depth -= 1;
+            let Some(base) = p.data.get(pos..pos + USER_EXTENSION_BYTES) else { return EFAULT };
+            if (12..USER_EXTENSION_BYTES).step_by(4).any(|o| rd32(base, o) != 0) {
+                return EINVAL;
+            }
+            let next = rd64(base, 0);
+            let r = match rd32(base, 8) {
+                I915_CONTEXT_ENGINES_EXT_LOAD_BALANCE => engines_balance(d, &p.data[pos..], &mut set[..num]),
+                I915_CONTEXT_ENGINES_EXT_BOND => engines_bond(d, &p.data[pos..], &set[..num]),
+                I915_CONTEXT_ENGINES_EXT_PARALLEL_SUBMIT => engines_parallel(d, &p.data[pos..], &mut set[..num]),
+                _ => Err(EINVAL),
+            };
+            match r {
+                Ok(len) => pos += len,
+                Err(e) => return e,
+            }
+            if next == 0 {
+                break;
+            }
+        }
+    }
+    st.ctxs[x].num_user_engines = num as i16;
+    st.ctxs[x].user_engines = set;
+    0
+}
+
+/// The engines listed at `at` in an extension, looked up: EFAULT past its
+/// end, EINVAL for one the GT does not have.
+fn ext_engines(d: &drm, ext: &[u8], at: usize, n: usize, out: &mut [u8; MAX_SIBLINGS]) -> Result<(), i32> {
+    let list = ext.get(at..at + n * 4).ok_or(EFAULT)?;
+    for k in 0..n {
+        let e = intel_engine_lookup_user(d.gt, rd16(list, k * 4), rd16(list, k * 4 + 2)).ok_or(EINVAL)?;
+        if k < MAX_SIBLINGS {
+            out[k] = e;
+        }
+    }
+    Ok(())
+}
+
+/// `set_proto_ctx_engines_balance`; Ok is the extension's length.
+fn engines_balance(d: &drm, ext: &[u8], set: &mut [proto_engine]) -> Result<usize, i32> {
+    let head = ext.get(..LOAD_BALANCE_BYTES).ok_or(EFAULT)?;
+    let idx = rd16(head, 32) as usize;
+    if idx >= set.len() {
+        return Err(EINVAL);
+    }
+    if set[idx].kind != ENGINE_TYPE_INVALID {
+        return Err(EEXIST);
+    }
+    let num_siblings = rd16(head, 34) as usize;
+    if rd32(head, 36) != 0 || rd64(head, 40) != 0 {
+        return Err(EINVAL);
+    }
+    let len = LOAD_BALANCE_BYTES + num_siblings * 4;
+    if num_siblings == 0 {
+        return Ok(len);
+    }
+    let mut siblings = [NONE8; MAX_SIBLINGS];
+    ext_engines(d, ext, LOAD_BALANCE_BYTES, num_siblings, &mut siblings)?;
+    set[idx] = if num_siblings == 1 {
+        proto_engine { kind: ENGINE_TYPE_PHYSICAL, engine: siblings[0], ..proto_engine::INVALID }
+    } else {
+        proto_engine { kind: ENGINE_TYPE_BALANCED, num_siblings: num_siblings.min(MAX_SIBLINGS) as u8, siblings,
+                       too_many: num_siblings > MAX_SIBLINGS, ..proto_engine::INVALID }
+    };
+    Ok(len)
+}
+
+/// `set_proto_ctx_engines_bond`: checked, and nothing kept (bonds are
+/// no longer acted upon in Linux).
+fn engines_bond(d: &drm, ext: &[u8], set: &[proto_engine]) -> Result<usize, i32> {
+    let head = ext.get(..BOND_BYTES).ok_or(EFAULT)?;
+    let idx = rd16(head, 36) as usize;
+    if idx >= set.len() {
+        return Err(EINVAL);
+    }
+    if set[idx].kind != ENGINE_TYPE_PHYSICAL {
+        // Invalid, or a virtual engine: neither may be bonded.
+        return Err(EINVAL);
+    }
+    if rd64(head, 40) != 0 || (48..80).step_by(8).any(|o| rd64(head, o) != 0) {
+        return Err(EINVAL);
+    }
+    intel_engine_lookup_user(d.gt, rd16(head, 32), rd16(head, 34)).ok_or(EINVAL)?;
+    let num_bonds = rd16(head, 38) as usize;
+    let mut bonds = [NONE8; MAX_SIBLINGS];
+    ext_engines(d, ext, BOND_BYTES, num_bonds, &mut bonds)?;
+    Ok(BOND_BYTES + num_bonds * 4)
+}
+
+/// `set_proto_ctx_engines_parallel_submit` without GuC: one sibling per
+/// child, on consecutive logical engines of one class.
+fn engines_parallel(d: &drm, ext: &[u8], set: &mut [proto_engine]) -> Result<usize, i32> {
+    let head = ext.get(..PARALLEL_SUBMIT_BYTES).ok_or(EFAULT)?;
+    let (slot, width, num_siblings) = (rd16(head, 32) as usize, rd16(head, 34) as usize, rd16(head, 36) as usize);
+    if num_siblings != 1 {
+        return Err(EINVAL);
+    }
+    if slot >= set.len() || set[slot].kind != ENGINE_TYPE_INVALID {
+        return Err(EINVAL);
+    }
+    if rd64(head, 40) != 0 || (48..72).step_by(8).any(|o| rd64(head, o) != 0) {
+        return Err(EINVAL);
+    }
+    if width < 2 {
+        return Err(EINVAL);
+    }
+    let n = width * num_siblings;
+    let list = ext.get(PARALLEL_SUBMIT_BYTES..PARALLEL_SUBMIT_BYTES + n * 4).ok_or(EFAULT)?;
+    let mut siblings = [NONE8; MAX_SIBLINGS];
+    let (mut prev_class, mut prev_mask) = (0u16, 0u32);
+    for i in 0..width {
+        let mut mask = 0u32;
+        for j in 0..num_siblings {
+            let k = i * num_siblings + j;
+            let class = rd16(list, k * 4);
+            let e = intel_engine_lookup_user(d.gt, class, rd16(list, k * 4 + 2)).ok_or(EINVAL)?;
+            let eng = d.gt.engine[e as usize].ok_or(EINVAL)?;
+            // No breadcrumb handshake on these classes.
+            if eng.class == crate::regs::RENDER_CLASS || eng.class == crate::regs::COMPUTE_CLASS {
+                return Err(EINVAL);
+            }
+            if k != 0 && class != prev_class {
+                return Err(EINVAL);
+            }
+            prev_class = class;
+            mask |= eng.logical_mask;
+            if k < MAX_SIBLINGS {
+                siblings[k] = e;
+            }
+        }
+        if i > 0 && mask != prev_mask << 1 {
+            return Err(EINVAL);
+        }
+        prev_mask = mask;
+    }
+    set[slot] = proto_engine { kind: ENGINE_TYPE_PARALLEL, num_siblings: num_siblings as u8, width: width as u8,
+                               siblings, too_many: n > MAX_SIBLINGS, ..proto_engine::INVALID };
+    Ok(PARALLEL_SUBMIT_BYTES + n * 4)
+}
+
+/// `i915_gem_context_setparam_ioctl`: a proto context takes it as a
+/// creation parameter, a finalized one as `ctx_setparam`.
+pub fn context_setparam(st: &mut nctx, d: &drm, c: u8, ctx_id: u32, p: &ctx_param) -> i32 {
+    match st.ctx_or_proto(c, ctx_id) {
+        None => ENOENT,
+        Some(x) if st.ctxs[x].proto => set_proto_ctx_param(st, d, c, x, p),
+        Some(x) => ctx_setparam(st, x, p),
+    }
+}
+
+/// `i915_gem_context_getparam_ioctl`: the context is finalized first.
+pub fn context_getparam(st: &mut nctx, d: &mut drm, c: u8, ctx_id: u32, p: &ctx_param, out: &mut [u8])
+                        -> Result<(u32, u64), i32> {
+    let x = st.ctx_lookup(d, c, ctx_id).map_err(|e| -e)?;
+    ctx_getparam(st, d, x, p, out)
+}
+
+/// `I915_CCMD_NPK_CONTEXT_SETPARAM` / `_GETPARAM`: ctx_id, size, param,
+/// value, the data's length and the data. The response is ret, size, value
+/// and what a get writes back.
+fn npk_context_param(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], len: usize, get: bool, rsp: &mut [u8])
+                     -> Result<usize, i32> {
+    const HEAD: usize = 48;
+    let data_len = rd32(req, 40) as usize;
+    if len != HEAD.checked_add(data_len).ok_or(-EINVAL)? {
+        return Err(-EINVAL);
+    }
+    let ctx_id = rd32(req, 16);
+    let p = ctx_param { size: rd32(req, 20), param: rd64(req, 24), value: rd64(req, 32), data: &req[HEAD..len] };
+    let room = rsp.len().checked_sub(24).ok_or(-EINVAL)?;
+    let (ret, size, value, out_len) = if get {
+        let mut out = alloc::vec![0u8; data_len.min(room)];
+        match context_getparam(st, d, c, ctx_id, &p, &mut out) {
+            Ok((size, value)) => {
+                let n = (size as usize).min(out.len());
+                rsp[24..24 + n].copy_from_slice(&out[..n]);
+                (0, size, value, n)
+            }
+            Err(e) => (e, p.size, p.value, 0),
+        }
+    } else {
+        (context_setparam(st, d, c, ctx_id, &p), p.size, p.value, 0)
+    };
+    wr32(rsp, 0, (24 + out_len) as u32);
+    wr32(rsp, 4, ret as u32);
+    wr32(rsp, 8, size);
+    wr32(rsp, 12, 0);
+    wr64(rsp, 16, value);
+    Ok(24 + out_len)
 }
 
 /// `i915_ccmd_gem_context_create`: virglrenderer walks the setparam chain
-/// in the request; then `i915_gem_context_create_ioctl` with each
-/// `set_proto_ctx_param`.
+/// in the request; then `i915_gem_context_create_ioctl`, which on
+/// GRAPHICS_VER 12 registers a proto context and applies each parameter
+/// with `set_proto_ctx_param`. A parameter's data follows it inline; an
+/// engine map's extension chain cannot (it is a pointer), and the guest
+/// sets such a map afterwards with `I915_CCMD_NPK_CONTEXT_SETPARAM`.
 fn gem_context_create(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: usize, rsp: &mut [u8]) -> Result<usize, i32> {
     let flags = rd32(req, 16);
     let mut params_size = rd32(req, 20) as i64;
     if len as i64 != 24 + params_size {
         return Err(-EINVAL);
     }
-    if flags > 3 {
-        return Err(-EINVAL);
-    }
     wr32(rsp, 0, 16);
-    let mut pc = proto { vm: None, priority: 0, recoverable: true, bannable: true, persistent: true,
-                         no_error_capture: false, user_engines: false, n_engines: 0, engines: [NONE8; MAX_USER_ENGINES] };
+    if flags & !(I915_CONTEXT_CREATE_FLAGS_USE_EXTENSIONS | I915_CONTEXT_CREATE_FLAGS_SINGLE_TIMELINE) != 0 {
+        wr32(rsp, RET8, EINVAL as u32);
+        return Ok(16);
+    }
+    if crate::intel_gt::intel_gt_is_wedged(d.gt) {
+        wr32(rsp, RET8, EIO as u32);
+        return Ok(16);
+    }
+    let id = st.next_ctx_id(c);
+    let x = match st.proto_create(c, id, flags & I915_CONTEXT_CREATE_FLAGS_SINGLE_TIMELINE != 0) {
+        Ok(x) => x,
+        Err(e) => {
+            wr32(rsp, RET8, (-e) as u32);
+            return Ok(16);
+        }
+    };
     let mut ptr = 24usize;
     let mut err = 0i32;
-    if flags & I915_CONTEXT_CREATE_FLAGS_USE_EXTENSIONS != 0 {
+    if flags & I915_CONTEXT_CREATE_FLAGS_USE_EXTENSIONS != 0 && params_size > 0 {
         loop {
             if params_size < SETPARAM_BYTES as i64 {
+                st.proto_close(x);
                 return Err(-EINVAL);
             }
             let sp = ptr;
             ptr += SETPARAM_BYTES;
             params_size -= SETPARAM_BYTES as i64;
             let size = rd32(req, sp + 36) as i64;
-            let param = rd64(req, sp + 40);
-            let value = rd64(req, sp + 48);
-            if size > params_size || size % 4 != 0 || size > 128 {
+            if size > params_size {
+                st.proto_close(x);
                 return Err(-EINVAL);
             }
-            match param {
-                I915_CONTEXT_PARAM_PRIORITY if value as i64 > I915_CONTEXT_DEFAULT_PRIORITY => {
-                    wr32(rsp, RET8, EPERM as u32);
-                    return Ok(16);
-                }
-                I915_CONTEXT_PARAM_ENGINES => {
-                    if size < 8 {
-                        return Err(-EINVAL);
-                    }
-                    if rd64(req, ptr) != 0 {
-                        return Err(-EINVAL);
-                    }
-                }
-                I915_CONTEXT_PARAM_NO_ERROR_CAPTURE | I915_CONTEXT_PARAM_BANNABLE | I915_CONTEXT_PARAM_SSEU
-                | I915_CONTEXT_PARAM_RECOVERABLE | I915_CONTEXT_PARAM_VM | I915_CONTEXT_PARAM_PERSISTENCE
-                | I915_CONTEXT_PARAM_PRIORITY | I915_CONTEXT_PARAM_PROTECTED_CONTENT => {}
-                // set_proto_ctx_param: NO_ZEROMAP, BAN_PERIOD, RINGSIZE and the
-                // rest answer -EINVAL.
-                _ => {
-                    if err == 0 {
-                        err = EINVAL;
-                    }
-                }
-            }
-            // The base extension's name is I915_CONTEXT_CREATE_EXT_SETPARAM,
-            // and a setparam names no context.
-            if err == 0 && (rd32(req, sp + 8) != 0 || rd32(req, sp + 32) != 0) {
-                err = EINVAL;
-            }
+            // create_setparam: the extension's name is SETPARAM and its
+            // parameter names no context; the base's flags and rsvd are zero.
             if err == 0 {
-                err = set_proto_ctx_param(st, d, c, &mut pc, size as usize, param, value, &req[ptr..ptr + size as usize]);
+                if rd32(req, sp + 8) != 0 || (12..32).step_by(4).any(|o| rd32(req, sp + o) != 0) || rd32(req, sp + 32) != 0 {
+                    err = EINVAL;
+                } else {
+                    let p = ctx_param { size: size as u32, param: rd64(req, sp + 40), value: rd64(req, sp + 48),
+                                        data: &req[ptr..ptr + size as usize] };
+                    err = set_proto_ctx_param(st, d, c, x, &p);
+                }
             }
             ptr += size as usize;
             params_size -= size;
@@ -456,117 +852,14 @@ fn gem_context_create(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: us
         }
     }
     if params_size != 0 {
+        st.proto_close(x);
         return Err(-EINVAL);
     }
     if err != 0 {
+        st.proto_close(x);
         wr32(rsp, RET8, err as u32);
         return Ok(16);
     }
-    let id = st.next_ctx_id(c);
-    match st.ctx_create(d.i915, c, pc.vm, id) {
-        Ok(x) => {
-            let cx = &mut st.ctxs[x];
-            cx.priority = pc.priority;
-            cx.recoverable = pc.recoverable;
-            cx.bannable = pc.bannable;
-            cx.persistent = pc.persistent;
-            cx.no_error_capture = pc.no_error_capture;
-            cx.user_engines = pc.user_engines;
-            cx.n_engines = pc.n_engines;
-            cx.engines = pc.engines;
-            wr32(rsp, 12, id);
-        }
-        Err(e) => wr32(rsp, RET8, (-e) as u32),
-    }
+    wr32(rsp, 12, id);
     Ok(16)
-}
-
-/// `set_proto_ctx_param`; the positive errno, or 0.
-#[allow(clippy::too_many_arguments)]
-fn set_proto_ctx_param(st: &mut nctx, d: &mut drm, c: u8, pc: &mut proto, size: usize, param: u64, value: u64,
-                       data: &[u8]) -> i32 {
-    match param {
-        I915_CONTEXT_PARAM_NO_ERROR_CAPTURE => {
-            if size != 0 {
-                return EINVAL;
-            }
-            pc.no_error_capture = value != 0;
-        }
-        I915_CONTEXT_PARAM_BANNABLE => {
-            if size != 0 {
-                return EINVAL;
-            }
-            // Clearing it needs CAP_SYS_ADMIN.
-            if value == 0 {
-                return EPERM;
-            }
-            pc.bannable = true;
-        }
-        I915_CONTEXT_PARAM_RECOVERABLE => {
-            if size != 0 {
-                return EINVAL;
-            }
-            pc.recoverable = value != 0;
-        }
-        I915_CONTEXT_PARAM_PRIORITY => match set_priority(value as i64) {
-            Ok(v) => pc.priority = v,
-            Err(e) => return e,
-        },
-        I915_CONTEXT_PARAM_VM => {
-            if size != 0 {
-                return EINVAL;
-            }
-            match st.vm_lookup(c, value as u32) {
-                Some(vm) => pc.vm = Some(vm),
-                None => return ENOENT,
-            }
-        }
-        I915_CONTEXT_PARAM_ENGINES => {
-            // set_proto_ctx_engines; no load balancing, bonds or parallel
-            // submission (their extensions are refused above).
-            if size == 0 {
-                pc.user_engines = false;
-                return 0;
-            }
-            if (size - 8) % 4 != 0 {
-                return EINVAL;
-            }
-            let n = (size - 8) / 4;
-            if n > MAX_USER_ENGINES {
-                return EINVAL;
-            }
-            for k in 0..n {
-                let class = u16::from_le_bytes([data[8 + k * 4], data[9 + k * 4]]);
-                let instance = u16::from_le_bytes([data[10 + k * 4], data[11 + k * 4]]);
-                if class == I915_ENGINE_CLASS_INVALID_NONE && instance == I915_ENGINE_CLASS_INVALID_NONE {
-                    pc.engines[k] = NONE8;
-                    continue;
-                }
-                match intel_engine_lookup_user(d.gt, class, instance) {
-                    Some(id) => pc.engines[k] = id,
-                    None => return EINVAL,
-                }
-            }
-            pc.user_engines = true;
-            pc.n_engines = n as u8;
-        }
-        I915_CONTEXT_PARAM_PERSISTENCE => {
-            if size != 0 {
-                return EINVAL;
-            }
-            // A non-persistent context is cancelled by preempt-to-idle,
-            // which needs I915_SCHEDULER_CAP_PREEMPTION.
-            if value == 0 {
-                return ENODEV;
-            }
-            pc.persistent = true;
-        }
-        // proto_context_set_protected: no PXP.
-        I915_CONTEXT_PARAM_PROTECTED_CONTENT => return ENODEV,
-        // set_proto_ctx_sseu reconfigures the render slice set, which is
-        // not ported.
-        I915_CONTEXT_PARAM_SSEU => return EINVAL,
-        _ => return EINVAL,
-    }
-    0
 }

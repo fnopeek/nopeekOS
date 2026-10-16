@@ -2758,6 +2758,10 @@ pub(crate) fn npk_run_intent(mem: &mut [u8], ctx: &mut HostState, verb_ptr: i32,
             crate::intent::launch_browser();
             0
         }
+        "firefox" => {
+            crate::intent::launch_app(&crate::microvm::app::FIREFOX);
+            0
+        }
         _ => -1,
     }
 }

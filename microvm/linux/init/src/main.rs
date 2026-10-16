@@ -224,6 +224,12 @@ fn launch_wayland(kmsg_fd: i64) {
     // and to npk-gpuprobe, each `npkwmenv=NAME=value` to npkwm; `npkapp=NAME`
     // runs /usr/bin/NAME instead of the browser (a test client such as
     // es2gears_wayland).
+    // The app is the browser the image carries: Firefox when it has
+    // /usr/lib/firefox, else LibreWolf; its directory holds the preloaded
+    // libraries, the autoconfig (`<app>.cfg`) and the GPU probes. With a
+    // GPU, Firefox decodes video through VA-API, Intel's media driver over
+    // the native context (`LIBVA_DRIVER_NAME=iHD`: the render node is
+    // virtio_gpu, which names no VA driver); LibreWolf through Vulkan Video.
     // `npklogs` on the command line streams the app's and npkwm's output
     // to the console (`set microvm_cmdline npklogs`). `npksupport` writes
     // the graphics and media sections of about:support to it as `[about]`
@@ -278,9 +284,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ -n \"$WMENV\" ] && echo \"<0>[wl] npkwm env $WMENV\" > /dev/kmsg; \
                  su -s /bin/sh wl -c \"$WMENV XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec $WM\" > /tmp/npkwm.log 2>&1 & \
                  WLPID=$!; \
-                 nice -n 19 sh -c 'for r in 0 64 128; do dd if=/usr/lib/librewolf/libxul.so of=/dev/null bs=1M skip=$r count=64 2>/dev/null & done; \
-                   cat /usr/lib/librewolf/omni.ja /usr/lib/librewolf/browser/omni.ja /usr/lib/librewolf/libgkcodecs.so /usr/lib/libgtk-3.so.0 > /dev/null 2>&1; \
-                   wait' & \
+                 APP=librewolf; [ -x /usr/lib/firefox/firefox ] && APP=firefox; ADIR=/usr/lib/$APP; \
+                 nice -n 19 sh -c \"for r in 0 64 128; do dd if=$ADIR/libxul.so of=/dev/null bs=1M skip=\\$r count=64 2>/dev/null & done; \
+                   cat $ADIR/omni.ja $ADIR/browser/omni.ja $ADIR/libgkcodecs.so /usr/lib/libgtk-3.so.0 > /dev/null 2>&1; \
+                   wait\" & \
                  IFACE=$(for d in /sys/class/net/*; do n=${d##*/}; [ \"$n\" = lo ] || { echo $n; break; }; done); \
                  ip link set \"$IFACE\" up 2>/dev/null \
                    || ifconfig \"$IFACE\" up 2>/dev/null; \
@@ -338,10 +345,9 @@ fn launch_wayland(kmsg_fd: i64) {
                    case $k in gfx.webrender.software|gfx.webrender.max-partial-present-rects|gfx.canvas.accelerated|widget.dmabuf.force-enabled|layers.gpu-process.enabled|media.av1.enabled) [ $GPU = 1 ] && { sed -i \"/\\\"$k\\\"/d\" /tmp/moz/prefs.js 2>/dev/null; chown 1000:1000 /tmp/moz/prefs.js 2>/dev/null; continue; };; esac; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
-                 [ $GPU = 1 ] && for p in \
-                   'media.hardware-video-decoding-vulkan.enabled|true' \
-                   'media.hardware-video-decoding-vulkan.force-enabled|true' \
-                   'webgl.disabled|false'; \
+                 if [ $APP = firefox ]; then VPREFS='media.ffmpeg.vaapi.enabled|true media.hardware-video-decoding.force-enabled|true'; \
+                 else VPREFS='media.hardware-video-decoding-vulkan.enabled|true media.hardware-video-decoding-vulkan.force-enabled|true'; fi; \
+                 [ $GPU = 1 ] && for p in $VPREFS 'webgl.disabled|false'; \
                  do echo \"user_pref(\\\"${p%|*}\\\", ${p#*|});\" >> /tmp/moz/user.js; done; \
                  echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"browser.download.dir\", \"/tmp/npkhome/downloads\");' >> /tmp/moz/user.js; \
@@ -352,16 +358,16 @@ fn launch_wayland(kmsg_fd: i64) {
                  chown -h 1000:1000 /tmp/moz /tmp/moz/user.js /tmp/moz/datareporting 2>/dev/null; \
                  chown 1000:1000 /tmp/bcache /tmp/gleandb; \
                  chown 1000:1000 /dev/snd/* 2>/dev/null; \
-                 if grep -qE 'npkstats|npksupport' /proc/cmdline && [ -f /usr/lib/librewolf/librewolf.cfg ]; then \
+                 if grep -qE 'npkstats|npksupport' /proc/cmdline && [ -f $ADIR/$APP.cfg ]; then \
                    chgrp app /dev/kmsg; chmod 0620 /dev/kmsg; \
                    grep -q npkstats /proc/cmdline || : > /tmp/lw-probe.js; \
                    grep -q npksupport /proc/cmdline || : > /tmp/lw-support.js; \
-                   cat /usr/lib/librewolf/librewolf.cfg /tmp/lw-probe.js /tmp/lw-support.js > /tmp/librewolf.cfg \
-                     && mount --bind /tmp/librewolf.cfg /usr/lib/librewolf/librewolf.cfg 2>/dev/null; \
-                   { cat /usr/lib/librewolf/defaults/pref/channel-prefs.js; echo 'pref(\"general.config.sandbox_enabled\", false);'; } > /tmp/channel-prefs.js \
-                     && mount --bind /tmp/channel-prefs.js /usr/lib/librewolf/defaults/pref/channel-prefs.js 2>/dev/null; \
+                   cat $ADIR/$APP.cfg /tmp/lw-probe.js /tmp/lw-support.js > /tmp/app.cfg \
+                     && mount --bind /tmp/app.cfg $ADIR/$APP.cfg 2>/dev/null; \
+                   { cat $ADIR/defaults/pref/channel-prefs.js; echo 'pref(\"general.config.sandbox_enabled\", false);'; } > /tmp/channel-prefs.js \
+                     && mount --bind /tmp/channel-prefs.js $ADIR/defaults/pref/channel-prefs.js 2>/dev/null; \
                  fi; \
-                 [ $GPU = 1 ] || mount --bind /bin/false /usr/lib/librewolf/gfxtest 2>/dev/null; \
+                 [ $GPU = 1 ] || for t in gfxtest glxtest vaapitest; do [ -e $ADIR/$t ] && mount --bind /bin/false $ADIR/$t 2>/dev/null; done; \
                  APPENV=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p' | tr '\\n' ' '); \
                  [ $GPU = 1 ] && [ -x /usr/bin/npk-gpuprobe ] && su -s /bin/sh app -c \"env $APPENV /usr/bin/npk-gpuprobe\" & \
                  mkdir -p /tmp/moz/chrome; \
@@ -388,14 +394,15 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ -n \"$SCU\" ] || SCU=release_to_os_interval_ms=-1; \
                  [ \"$SCU\" = off ] || { echo \"export SCUDO_OPTIONS=$SCU\" >> /tmp/app.sh; \
                    echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
-                 [ $GPU = 1 ] && echo 'export ANV_DEBUG=video-decode' >> /tmp/app.sh; \
+                 if [ $APP = firefox ]; then [ $GPU = 1 ] && echo 'export LIBVA_DRIVER_NAME=iHD' >> /tmp/app.sh; \
+                 else [ $GPU = 1 ] && echo 'export ANV_DEBUG=video-decode' >> /tmp/app.sh; fi; \
                  for e in $(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p'); do \
                    echo \"export $e\" >> /tmp/app.sh; echo \"<0>[wl] app env $e\" > /dev/kmsg; done; \
                  NPKAPP=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkapp=//p' | head -1); \
                  if [ -n \"$NPKAPP\" ]; then echo \"exec /usr/bin/$NPKAPP\" >> /tmp/app.sh; \
                    echo \"<0>[wl] app replaced by $NPKAPP\" > /dev/kmsg; \
-                 else echo '[ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh $$ & exec librewolf --no-remote --profile /tmp/moz' >> /tmp/app.sh; fi; \
-                 echo \"<0>[wl] librewolf exec\" > /dev/kmsg; \
+                 else echo \"[ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh \\$\\$ & exec $APP --no-remote --profile /tmp/moz\" >> /tmp/app.sh; fi; \
+                 echo \"<0>[wl] app exec $APP\" > /dev/kmsg; \
                  su -s /bin/sh app -c 'WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 exec sh /tmp/app.sh' \
                    > /tmp/app.log 2>&1; \
                  rc=$?; echo \"<0>[wl] browser exited rc=$rc\" > /dev/kmsg; \

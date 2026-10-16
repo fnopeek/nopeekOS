@@ -55,7 +55,28 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 # vulkan-loader: libvulkan for anv (our Mesa) and Vulkan Video in ffmpeg.
 # vulkan-tools, ffmpeg: vulkaninfo and `ffmpeg -hwaccel vulkan`, run with
 # npkapp= to check the decoder without the browser.
-APK_PACKAGES="${APK_PACKAGES:-librewolf seatd libseat libinput eudev mesa-gbm wayland-libs-server libdisplay-info font-dejavu font-noto alsa-lib mesa-demos vulkan-loader vulkan-tools ffmpeg gdb}"
+#
+# The firefox bundle (BUNDLE_NAME=firefox) carries Firefox instead, and
+# decodes video through VA-API: libva, Intel's media driver (replaced by
+# our build over the native context, below), libva-utils for `vainfo`,
+# ffmpeg for Firefox's decoder and `ffmpeg -hwaccel vaapi`. No Vulkan.
+# gdb stays in both while the GPU paths are new (`npkgdb`).
+COMMON_APKS="seatd libseat libinput eudev mesa-gbm wayland-libs-server libdisplay-info font-dejavu font-noto alsa-lib mesa-demos ffmpeg gdb"
+case "$BUNDLE_NAME" in
+    firefox) DEFAULT_APKS="firefox libva libva-utils intel-media-driver $COMMON_APKS" ;;
+    *)       DEFAULT_APKS="librewolf vulkan-loader vulkan-tools $COMMON_APKS" ;;
+esac
+APK_PACKAGES="${APK_PACKAGES:-$DEFAULT_APKS}"
+case "$BUNDLE_NAME" in
+    librewolf) PKG_LIST="$(dirname "$0")/packages.txt" ;;
+    *)         PKG_LIST="$(dirname "$0")/packages-${BUNDLE_NAME}.txt" ;;
+esac
+# The OTA asset name: the LibreWolf image keeps `microvm-userspace`
+# (section microvm:userspace-sqfs), others are `microvm-<name>`.
+case "$BUNDLE_NAME" in
+    librewolf) ASSET_NAME="microvm-userspace" ;;
+    *)         ASSET_NAME="microvm-${BUNDLE_NAME}" ;;
+esac
 
 # ── Paths ────────────────────────────────────────────────────────
 
@@ -148,7 +169,7 @@ if [ -n "$APK_PACKAGES" ]; then
             # or every app start rescans all fonts into a tmpfs cache.
             find '$STAGE/usr/share/fonts' -type d -exec touch -h -d @0 {} +
             chroot '$STAGE' /usr/bin/fc-cache -f 2>&1 | tail -3 || true
-            chroot '$STAGE' /sbin/apk info -v 2>/dev/null | LC_ALL=C sort > '$SCRIPT_DIR/packages.txt'
+            chroot '$STAGE' /sbin/apk info -v 2>/dev/null | LC_ALL=C sort > '$PKG_LIST'
         "
 
     # Apk leaves /var/cache/apk populated with symlinks/copies; wipe
@@ -184,6 +205,41 @@ for so in $(tar -tzf "$MESA_OVERLAY" | grep -E '\.so|^usr/bin/'); do
     done
 done
 cyan "mesa ${MESA_VERSION} with intel-virtio over Alpine's ${ALPINE_MESA}"
+
+# Intel's media driver built against that Mesa's libnpk_intel_virtio
+# (microvm/linux/mesa/build.sh) replaces Alpine's intel-media-driver files,
+# same release only.
+if grep -q '^P:intel-media-driver$' "$APK_DB"; then
+    source "$REPO_ROOT/microvm/linux/ihd/ihd.env"
+    IHD_OVERLAY="${HOME}/.cache/nopeekos/ihd/ihd-${IHD_VERSION}-npk.tar.gz"
+    [ -f "$IHD_OVERLAY" ] \
+        || { red "missing $IHD_OVERLAY — run microvm/linux/mesa/build.sh"; exit 1; }
+    ALPINE_IHD="$(awk '/^P:intel-media-driver$/{f=1} f&&/^V:/{print substr($0,3); exit}' "$APK_DB")"
+    case "$ALPINE_IHD" in
+        "${IHD_VERSION}"-r*) ;;
+        *) red "Alpine intel-media-driver is $ALPINE_IHD, ihd.env pins $IHD_VERSION"; exit 1 ;;
+    esac
+    awk '/^P:/{p=substr($0,3)} /^F:/{d=substr($0,3)} /^R:/{if(p == "intel-media-driver") print d"/"substr($0,3)}' "$APK_DB" \
+        | while read -r f; do rm -f "$STAGE/$f"; done
+    tar -xzf "$IHD_OVERLAY" -C "$STAGE"
+    for so in $(tar -tzf "$IHD_OVERLAY" | grep -E '\.so'); do
+        [ -L "$STAGE/$so" ] && continue
+        for lib in $(readelf -d "$STAGE/$so" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+            [ -e "$STAGE/usr/lib/$lib" ] || [ -e "$STAGE/lib/$lib" ] \
+                || { red "iHD ($so) needs $lib, not in the image"; exit 1; }
+        done
+    done
+    cyan "intel-media-driver ${IHD_VERSION} with intel-virtio over Alpine's ${ALPINE_IHD}"
+fi
+
+# Firefox's autoconfig, which the session extends with `npkstats` and
+# `npksupport` (LibreWolf ships its own, librewolf.cfg).
+if [ -x "$STAGE/usr/lib/firefox/firefox" ]; then
+    mkdir -p "$STAGE/usr/lib/firefox/defaults/pref"
+    printf '%s\n' 'pref("general.config.filename", "firefox.cfg");' 'pref("general.config.obscure_value", 0);' \
+        > "$STAGE/usr/lib/firefox/defaults/pref/autoconfig.js"
+    printf '%s\n' '// nopeekOS: the session appends its probes here.' > "$STAGE/usr/lib/firefox/firefox.cfg"
+fi
 
 # The compositor for a guest with a GPU (microvm/linux/npkwm/build.sh gles2);
 # the init runs it instead of PID-1's npkwm when the host offers native
@@ -293,14 +349,14 @@ cyan  "       sha256: ${SHA}"
 # into `large/` and use `release-large`.
 SIZE_BYTES=$(stat -c%s "$OUT")
 if [ "$SIZE_BYTES" -lt $((30 * 1024 * 1024)) ]; then
-    OTA_SLOT="$REPO_ROOT/release/assets/microvm-userspace.cpio.gz"
+    OTA_SLOT="$REPO_ROOT/release/assets/${ASSET_NAME}.cpio.gz"
     cp "$OUT" "$OTA_SLOT"
     cyan  "       staged to OTA (small lane): ${OTA_SLOT}"
     cyan  "       sign with: ./build.sh release"
 else
     LARGE_DIR="$REPO_ROOT/release/assets/large"
     mkdir -p "$LARGE_DIR"
-    OTA_SLOT="$LARGE_DIR/microvm-userspace.cpio.gz"
+    OTA_SLOT="$LARGE_DIR/${ASSET_NAME}.cpio.gz"
     cp "$OUT" "$OTA_SLOT"
     cyan  "       staged to OTA (large lane, ${SIZE_BYTES} bytes): ${OTA_SLOT}"
     cyan  "       upload with: ./build.sh release-large assets/<your-tag>"
@@ -339,16 +395,17 @@ green "built squashfs: ${SQFS_SIZE} bytes → ${SQFS_OUT}"
 cyan  "       sha256: ${SQFS_SHA}"
 
 # Same two-lane staging as the cpio. `microvm-userspace.sqfs` maps to
-# AssetSpec [microvm:userspace-sqfs] (build.sh release signs it).
+# AssetSpec [microvm:userspace-sqfs], `microvm-firefox.sqfs` to
+# [microvm:firefox-sqfs] (build.sh release signs it).
 if [ "$SQFS_SIZE" -lt $((30 * 1024 * 1024)) ]; then
-    SQFS_SLOT="$REPO_ROOT/release/assets/microvm-userspace.sqfs"
+    SQFS_SLOT="$REPO_ROOT/release/assets/${ASSET_NAME}.sqfs"
     cp "$SQFS_OUT" "$SQFS_SLOT"
     cyan  "       staged to OTA (small lane): ${SQFS_SLOT}"
     cyan  "       sign with: ./build.sh release"
 else
     LARGE_DIR="$REPO_ROOT/release/assets/large"
     mkdir -p "$LARGE_DIR"
-    SQFS_SLOT="$LARGE_DIR/microvm-userspace.sqfs"
+    SQFS_SLOT="$LARGE_DIR/${ASSET_NAME}.sqfs"
     cp "$SQFS_OUT" "$SQFS_SLOT"
     cyan  "       staged to OTA (large lane, ${SQFS_SIZE} bytes): ${SQFS_SLOT}"
     cyan  "       upload with: ./build.sh release-large assets/<your-tag>"

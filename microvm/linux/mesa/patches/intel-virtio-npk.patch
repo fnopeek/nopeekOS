@@ -1,0 +1,656 @@
+diff --git a/src/intel/dev/meson.build b/src/intel/dev/meson.build
+index ad18130..c37365a 100644
+--- a/src/intel/dev/meson.build
++++ b/src/intel/dev/meson.build
+@@ -70,6 +70,22 @@ libintel_dev = static_library(
+   link_with : [link_intel_dev_virtio],
+ )
+ 
++if with_intel_virtio
++  # nopeekOS: the backend for drivers outside Mesa (Intel's media driver).
++  libnpk_intel_virtio = shared_library(
++    'npk_intel_virtio',
++    files('virtio/npk_intel_virtio.c'),
++    include_directories : [inc_include, inc_src, inc_intel, inc_intel_dev_virtio],
++    dependencies : [dep_libdrm, idep_mesautil, idep_intel_dev_wa, idep_intel_dev_info_gen],
++    c_args : [no_override_init_args],
++    gnu_symbol_visibility : 'hidden',
++    link_with : [libintel_dev],
++    version : '0.1.0',
++    install : true,
++  )
++  install_headers('virtio/npk_intel_virtio.h')
++endif
++
+ idep_intel_dev = declare_dependency(
+   link_with : libintel_dev,
+   dependencies : [idep_intel_dev_wa, idep_intel_dev_info_gen, idep_mesautil],
+diff --git a/src/intel/dev/virtio/i915_proto.h b/src/intel/dev/virtio/i915_proto.h
+index 31ed50d..64f457b 100644
+--- a/src/intel/dev/virtio/i915_proto.h
++++ b/src/intel/dev/virtio/i915_proto.h
+@@ -29,6 +29,12 @@ enum i915_ccmd {
+    I915_CCMD_GEM_EXECBUFFER2,
+    I915_CCMD_GEM_SET_MMAP_MODE,
+    I915_CCMD_GEM_BUSY,
++
++   /* nopeekOS: what the i915 uAPI passes by pointer and the commands
++    * above cannot carry. Numbered away from upstream's. */
++   I915_CCMD_NPK_CONTEXT_SETPARAM = 0x100,
++   I915_CCMD_NPK_CONTEXT_GETPARAM = 0x101,
++   I915_CCMD_NPK_GEM_EXECBUFFER2 = 0x102,
+ };
+ 
+ #define I915_CCMD(_cmd, _len) (struct vdrm_ccmd_req){    \
+@@ -213,6 +219,63 @@ struct i915_ccmd_gem_busy_rsp {
+ };
+ I915_STATIC_ASSERT_SIZE(i915_ccmd_gem_busy_rsp)
+ 
++/*
++ * I915_CCMD_NPK_CONTEXT_SETPARAM / I915_CCMD_NPK_CONTEXT_GETPARAM
++ *
++ * One drm_i915_gem_context_param with what its value points at inline:
++ * `size` bytes of the parameter's struct and, for an engine map, its
++ * extension chain after it, each extension whole and in chain order (a
++ * non-zero next_extension says another follows). A get returns what the
++ * kernel writes back to the struct.
++ */
++struct i915_ccmd_npk_context_param_req {
++   struct vdrm_ccmd_req hdr;
++
++   uint32_t ctx_id;
++   uint32_t size;
++   uint64_t param;
++   uint64_t value;
++   uint32_t data_len;
++   uint32_t pad;
++   uint8_t payload[];
++};
++I915_DEFINE_CAST(vdrm_ccmd_req, i915_ccmd_npk_context_param_req)
++
++struct i915_ccmd_npk_context_param_rsp {
++   struct vdrm_ccmd_rsp hdr;
++
++   int32_t ret;
++   uint32_t size;
++   uint32_t pad;
++   uint64_t value;
++   uint8_t payload[];
++};
++I915_STATIC_ASSERT_SIZE(i915_ccmd_npk_context_param_rsp)
++
++/*
++ * I915_CCMD_NPK_GEM_EXECBUFFER2
++ *
++ * I915_CCMD_GEM_EXECBUFFER2 and, for I915_EXEC_FENCE_SUBMIT, the ring and
++ * the ticket (the count of execbuffers on that ring of this context,
++ * starting at 1) of the earlier execbuffer whose request this one starts
++ * with; ticket 0 for none.
++ */
++struct i915_ccmd_npk_gem_execbuffer2_req {
++   struct vdrm_ccmd_req hdr;
++
++   uint64_t flags;
++   uint64_t context_id;
++   uint32_t buffer_count;
++   uint32_t batch_start_offset;
++   uint32_t batch_len;
++   uint32_t relocs_count;
++   uint32_t submit_ring;
++   uint32_t pad;
++   uint64_t submit_ticket;
++   uint8_t payload[];
++};
++I915_DEFINE_CAST(vdrm_ccmd_req, i915_ccmd_npk_gem_execbuffer2_req)
++
+ #ifdef __GNUC__
+ # pragma GCC diagnostic pop
+ #endif
+diff --git a/src/intel/dev/virtio/i915_virtio_ccmd.c b/src/intel/dev/virtio/i915_virtio_ccmd.c
+index 32bbda5..2bff63e 100644
+--- a/src/intel/dev/virtio/i915_virtio_ccmd.c
++++ b/src/intel/dev/virtio/i915_virtio_ccmd.c
+@@ -247,6 +247,157 @@ i915_virtio_gem_close(struct intel_virtio_device *dev,
+    return 0;
+ }
+ 
++/* The length of one extension of an engine map, whole. An unknown one is
++ * sent as its header alone; the host refuses it by name. */
++static size_t
++npk_engines_ext_size(const struct i915_user_extension *ext)
++{
++   switch (ext->name) {
++   case I915_CONTEXT_ENGINES_EXT_LOAD_BALANCE: {
++      const struct i915_context_engines_load_balance *lb = (const void *)ext;
++      return sizeof(*lb) + lb->num_siblings * sizeof(lb->engines[0]);
++   }
++   case I915_CONTEXT_ENGINES_EXT_BOND: {
++      const struct i915_context_engines_bond *b = (const void *)ext;
++      return sizeof(*b) + b->num_bonds * sizeof(b->engines[0]);
++   }
++   case I915_CONTEXT_ENGINES_EXT_PARALLEL_SUBMIT: {
++      const struct i915_context_engines_parallel_submit *ps = (const void *)ext;
++      return sizeof(*ps) + ps->width * ps->num_siblings * sizeof(ps->engines[0]);
++   }
++   default:
++      return sizeof(*ext);
++   }
++}
++
++/* i915_user_extensions stops a longer chain with -E2BIG. */
++#define NPK_MAX_EXTENSIONS 513
++
++/* The extension chain of an engine map: its length inline, and whether
++ * there is one. */
++static size_t
++npk_engines_chain_size(const struct drm_i915_gem_context_param *param)
++{
++   const struct i915_context_param_engines *e = (void *)(uintptr_t)param->value;
++   size_t len = 0;
++   unsigned n = 0;
++
++   if (param->param != I915_CONTEXT_PARAM_ENGINES || param->size < sizeof(*e) || !e)
++      return 0;
++
++   for (const struct i915_user_extension *ext = (void *)(uintptr_t)e->extensions;
++        ext && n < NPK_MAX_EXTENSIONS; ext = (void *)(uintptr_t)ext->next_extension, n++)
++      len += npk_engines_ext_size(ext);
++
++   return len;
++}
++
++/* I915_CCMD_NPK_CONTEXT_SETPARAM / _GETPARAM: the parameter's data inline,
++ * an engine map's extension chain after it. */
++static int
++i915_virtio_npk_context_param(struct intel_virtio_device *dev, bool get,
++                              struct drm_i915_gem_context_param *param)
++{
++   void *data = (void *)(uintptr_t)param->value;
++   size_t size = data ? param->size : 0;
++   size_t chain = get ? 0 : npk_engines_chain_size(param);
++   size_t req_len = sizeof(struct i915_ccmd_npk_context_param_req) + size + chain;
++   struct i915_ccmd_npk_context_param_req *req;
++   struct i915_ccmd_npk_context_param_rsp *rsp;
++   int err;
++
++   req = calloc(1, req_len);
++   if (!req)
++      return ENOMEM;
++
++   req->hdr = get ? I915_CCMD(NPK_CONTEXT_GETPARAM, req_len) :
++                    I915_CCMD(NPK_CONTEXT_SETPARAM, req_len);
++   req->ctx_id = param->ctx_id;
++   req->size = param->size;
++   req->param = param->param;
++   req->value = param->value;
++   req->data_len = size + chain;
++   if (size)
++      memcpy(req->payload, data, size);
++
++   if (chain) {
++      const struct i915_context_param_engines *e = data;
++      uint8_t *out = req->payload + size;
++      unsigned n = 0;
++
++      for (const struct i915_user_extension *ext = (void *)(uintptr_t)e->extensions;
++           ext && n < NPK_MAX_EXTENSIONS; ext = (void *)(uintptr_t)ext->next_extension, n++) {
++         size_t len = npk_engines_ext_size(ext);
++         struct i915_user_extension *copy = (void *)out;
++
++         memcpy(out, ext, len);
++         copy->next_extension = ext->next_extension ? 1 : 0;
++         out += len;
++      }
++   }
++
++   rsp = vdrm_alloc_rsp(dev->vdrm, &req->hdr, sizeof(*rsp) + (get ? size : 0));
++
++   err = vdrm_send_req(dev->vdrm, &req->hdr, true);
++   free(req);
++   if (err)
++      return errno;
++
++   if (rsp->ret)
++      return rsp->ret;
++
++   if (get) {
++      if (size)
++         memcpy(data, rsp->payload, MIN2(size, rsp->size));
++      else
++         param->value = rsp->value;
++   }
++   param->size = rsp->size;
++
++   return 0;
++}
++
++/* i915_gem_context_create_ioctl with its create_extensions applied one by
++ * one: a bad extension or a refused parameter destroys the context, and
++ * its error is the call's. */
++static int
++i915_virtio_gem_context_create_split(struct intel_virtio_device *dev,
++                                     struct drm_i915_gem_context_create_ext *create)
++{
++   struct drm_i915_gem_context_create bare = {
++      .pad = create->flags & ~I915_CONTEXT_CREATE_FLAGS_USE_EXTENSIONS,
++   };
++   int err;
++
++   err = i915_virtio_simple_ioctl(dev, DRM_IOCTL_I915_GEM_CONTEXT_CREATE, &bare);
++   if (err)
++      return err;
++
++   for (struct drm_i915_gem_context_create_ext_setparam *sp = (void *)(uintptr_t)create->extensions;
++        sp; sp = (void *)(uintptr_t)sp->base.next_extension) {
++      struct drm_i915_gem_context_param p = sp->param;
++      bool mbz = !sp->base.flags;
++
++      for (unsigned i = 0; i < ARRAY_SIZE(sp->base.rsvd); i++)
++         mbz &= !sp->base.rsvd[i];
++
++      if (!mbz || sp->base.name != I915_CONTEXT_CREATE_EXT_SETPARAM || p.ctx_id)
++         err = EINVAL;
++      else {
++         p.ctx_id = bare.ctx_id;
++         err = i915_virtio_npk_context_param(dev, false, &p);
++      }
++      if (err) {
++         struct drm_i915_gem_context_destroy destroy = { .ctx_id = bare.ctx_id };
++         i915_virtio_simple_ioctl(dev, DRM_IOCTL_I915_GEM_CONTEXT_DESTROY, &destroy);
++         return err;
++      }
++   }
++
++   create->ctx_id = bare.ctx_id;
++   return 0;
++}
++
+ static int
+ i915_virtio_gem_context_create_ext(struct intel_virtio_device *dev,
+                                    struct drm_i915_gem_context_create_ext *create)
+@@ -261,6 +412,15 @@ i915_virtio_gem_context_create_ext(struct intel_virtio_device *dev,
+       return i915_virtio_simple_ioctl(dev, DRM_IOCTL_I915_GEM_CONTEXT_CREATE,
+                                       create);
+ 
++   /* An engine map's extension chain cannot go inline in the create
++    * command: the context is created bare and every parameter set in order
++    * on the proto context, which is what the kernel does with the chain. */
++   for (setparam = (void *)(uintptr_t)create->extensions; setparam;
++        setparam = (void *)(uintptr_t)setparam->base.next_extension) {
++      if (npk_engines_chain_size(&setparam->param))
++         return i915_virtio_gem_context_create_split(dev, create);
++   }
++
+    setparam = (void *)(uintptr_t)create->extensions;
+ 
+    while (setparam) {
+@@ -336,12 +496,17 @@ i915_virtio_gem_context_param(struct intel_virtio_device *dev,
+    case I915_CONTEXT_PARAM_PRIORITY:
+    case I915_CONTEXT_PARAM_GTT_SIZE:
+    case I915_CONTEXT_PARAM_VM:
+-      return i915_virtio_simple_ioctl(dev, cmd, param);
++      if (!param->size)
++         return i915_virtio_simple_ioctl(dev, cmd, param);
++      break;
+ 
+    default:
+-      mesa_loge("unsupported context param");
+-      return EINVAL;
++      break;
+    }
++
++   return i915_virtio_npk_context_param(dev,
++                                        cmd == DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM,
++                                        param);
+ }
+ 
+ static int
+@@ -797,6 +962,7 @@ intel_virtio_ioctl(int fd, unsigned long cmd, void *req)
+       break;
+ 
+    case IOC_MASKED(DRM_IOCTL_I915_GEM_EXECBUFFER2):
++   case IOC_MASKED(DRM_IOCTL_I915_GEM_EXECBUFFER2_WR):
+       errno = i915_virtio_gem_execbuffer2(dev, req);
+       break;
+ 
+diff --git a/src/intel/dev/virtio/i915_virtio_ccmd_execbuf.c b/src/intel/dev/virtio/i915_virtio_ccmd_execbuf.c
+index 3a0478b..24bf828 100644
+--- a/src/intel/dev/virtio/i915_virtio_ccmd_execbuf.c
++++ b/src/intel/dev/virtio/i915_virtio_ccmd_execbuf.c
+@@ -18,8 +18,50 @@ struct virtio_gem_execbuffer_params {
+ 
+    uint32_t *bo_handles;
+    unsigned num_bo_handles;
++
++   /* I915_EXEC_FENCE_IN (or a submit fence that is not one of ours): a
++    * sync_file the guest kernel waits for; I915_EXEC_FENCE_OUT. */
++   int in_fence_fd;
++   bool out_fence;
++
++   /* I915_EXEC_FENCE_SUBMIT on one of our out-fences. */
++   uint32_t submit_ring;
++   uint64_t submit_ticket;
+ };
+ 
++/* Out-fences that have signalled are of no further use as submit fences. */
++static void
++npk_out_fences_prune(struct intel_virtio_device *dev)
++{
++   struct npk_out_fence *f = util_dynarray_begin(&dev->npk_fences);
++   unsigned n = util_dynarray_num_elements(&dev->npk_fences, struct npk_out_fence);
++
++   for (unsigned i = 0; i < n;) {
++      if (sync_wait(f[i].fd, 0) == 0) {
++         close(f[i].fd);
++         f[i] = f[--n];
++      } else {
++         i++;
++      }
++   }
++   dev->npk_fences.size = n * sizeof(struct npk_out_fence);
++}
++
++/* The ring and ticket of the execbuffer whose out-fence `fd` is. */
++static bool
++npk_out_fence_lookup(struct intel_virtio_device *dev, int fd,
++                     uint32_t *ring, uint64_t *ticket)
++{
++   util_dynarray_foreach(&dev->npk_fences, struct npk_out_fence, f) {
++      if (os_same_file_description(f->fd, fd) == 0) {
++         *ring = f->ring;
++         *ticket = f->ticket;
++         return true;
++      }
++   }
++   return false;
++}
++
+ static int
+ i915_virtio_gem_execbuffer2_submit(struct virtio_gem_execbuffer_params *params)
+ {
+@@ -43,16 +85,21 @@ i915_virtio_gem_execbuffer2_submit(struct virtio_gem_execbuffer_params *params)
+    size_t buffers_size = sizeof(*buffers) * exec->buffer_count;
+    size_t relocations_size = sizeof(struct drm_i915_gem_relocation_entry) * relocs_count;
+ 
+-   unsigned req_len = sizeof(struct i915_ccmd_gem_execbuffer2_req);
+-   req_len += buffers_size + relocations_size;
++   /* A submit fence of ours goes as the nopeekOS command, which names the
++    * request; the layout is the upstream one with two fields more. */
++   bool npk = params->submit_ticket != 0;
++   unsigned head = npk ? sizeof(struct i915_ccmd_npk_gem_execbuffer2_req) :
++                         sizeof(struct i915_ccmd_gem_execbuffer2_req);
++   unsigned req_len = head + buffers_size + relocations_size;
+ 
+    uint8_t buf[req_len];
+    struct i915_ccmd_gem_execbuffer2_req *req = (void *)buf;
+-   memcpy(req->payload, buffers, buffers_size);
++   uint8_t *payload = buf + head;
++   memcpy(payload, buffers, buffers_size);
+ 
+    uint32_t bo_handles[exec->buffer_count + 1];
+-   buffers = (void *)req->payload;
+-   relocs = (void *)(req->payload + buffers_size);
++   buffers = (void *)payload;
++   relocs = (void *)(payload + buffers_size);
+ 
+    for (int i = 0; i < exec->buffer_count; i++) {
+       memcpy(relocs, (void *)(uintptr_t)buffers[i].relocs_ptr,
+@@ -72,16 +119,24 @@ i915_virtio_gem_execbuffer2_submit(struct virtio_gem_execbuffer_params *params)
+    allowed_flags |= I915_EXEC_GEN7_SOL_RESET;
+    allowed_flags |= I915_EXEC_NO_RELOC;
+    allowed_flags |= I915_EXEC_HANDLE_LUT;
+-   allowed_flags |= I915_EXEC_BSD_MASK << I915_EXEC_BSD_SHIFT;
++   allowed_flags |= I915_EXEC_BSD_MASK;
+    allowed_flags |= I915_EXEC_BATCH_FIRST;
+ 
+    /* XXX: sanity-check flags, might be removed in a release version */
+-   if (flags & ~(allowed_flags | I915_EXEC_FENCE_ARRAY | I915_EXEC_USE_EXTENSIONS)) {
++   if (flags & ~(allowed_flags | I915_EXEC_FENCE_ARRAY | I915_EXEC_USE_EXTENSIONS |
++                 I915_EXEC_FENCE_IN | I915_EXEC_FENCE_OUT | I915_EXEC_FENCE_SUBMIT)) {
+       mesa_loge("unsupported flags");
+       return EINVAL;
+    }
+ 
+-   req->hdr = I915_CCMD(GEM_EXECBUFFER2, req_len);
++   req->hdr = npk ? I915_CCMD(NPK_GEM_EXECBUFFER2, req_len) :
++                    I915_CCMD(GEM_EXECBUFFER2, req_len);
++   if (npk) {
++      struct i915_ccmd_npk_gem_execbuffer2_req *nreq = (void *)buf;
++      nreq->submit_ring = params->submit_ring;
++      nreq->pad = 0;
++      nreq->submit_ticket = params->submit_ticket;
++   }
+    req->relocs_count = relocs_count;
+    req->buffer_count = exec->buffer_count;
+    req->batch_start_offset = exec->batch_start_offset;
+@@ -91,18 +146,45 @@ i915_virtio_gem_execbuffer2_submit(struct virtio_gem_execbuffer_params *params)
+ 
+    rsp = vdrm_alloc_rsp(dev->vdrm, &req->hdr, sizeof(*rsp));
+ 
++   uint32_t ring = 1 + (flags & I915_EXEC_RING_MASK);
+    struct vdrm_execbuf_params p = {
+       .req = &req->hdr,
+-      .ring_idx = 1 + (flags & I915_EXEC_RING_MASK),
++      .ring_idx = ring,
+       .in_syncobjs = params->in_syncobjs,
+       .num_in_syncobjs = params->num_in_syncobjs,
+       .out_syncobjs = params->out_syncobjs,
+       .num_out_syncobjs = params->num_out_syncobjs,
+       .handles = params->bo_handles,
+       .num_handles = params->num_bo_handles,
++      .has_in_fence_fd = params->in_fence_fd >= 0,
++      .needs_out_fence_fd = params->out_fence,
++      .fence_fd = params->in_fence_fd,
+    };
+ 
+-   return vdrm_execbuf(dev->vdrm, &p);
++   /* The host counts this execbuffer on its ring when the command reaches
++    * it, in submission order: count it here in the same order. */
++   simple_mtx_lock(&dev->npk_lock);
++   int ret = vdrm_execbuf(dev->vdrm, &p);
++   if (ret) {
++      simple_mtx_unlock(&dev->npk_lock);
++      return ret;
++   }
++   uint64_t ticket = ++dev->npk_ring_tickets[ring];
++
++   if (params->out_fence) {
++      /* The kernel's out-fence is the upper half of rsvd2 (_WR). */
++      exec->rsvd2 = (exec->rsvd2 & 0xffffffff) | ((uint64_t)p.fence_fd << 32);
++
++      npk_out_fences_prune(dev);
++      int dup = os_dupfd_cloexec(p.fence_fd);
++      if (dup >= 0) {
++         struct npk_out_fence f = { .fd = dup, .ring = ring, .ticket = ticket };
++         util_dynarray_append(&dev->npk_fences, f);
++      }
++   }
++   simple_mtx_unlock(&dev->npk_lock);
++
++   return 0;
+ }
+ 
+ int
+@@ -117,6 +199,29 @@ i915_virtio_gem_execbuffer2(struct intel_virtio_device *dev,
+    int ret;
+ 
+    memset(&params, 0, sizeof(params));
++   params.in_fence_fd = -1;
++
++   /* i915_gem_do_execbuffer: an in-fence and a submit fence exclude each
++    * other; a submit fence the guest did not hand out (not an i915 fence)
++    * is waited for, as i915_request_await_external does. */
++   if (exec->flags & I915_EXEC_FENCE_IN)
++      params.in_fence_fd = (int)(exec->rsvd2 & 0xffffffff);
++
++   if (exec->flags & I915_EXEC_FENCE_SUBMIT) {
++      int fd = (int)(exec->rsvd2 & 0xffffffff);
++
++      if (exec->flags & I915_EXEC_FENCE_IN)
++         return EINVAL;
++
++      simple_mtx_lock(&dev->npk_lock);
++      bool ours = npk_out_fence_lookup(dev, fd, &params.submit_ring,
++                                       &params.submit_ticket);
++      simple_mtx_unlock(&dev->npk_lock);
++      if (!ours)
++         params.in_fence_fd = fd;
++   }
++
++   params.out_fence = !!(exec->flags & I915_EXEC_FENCE_OUT);
+ 
+    if (exec->flags & I915_EXEC_USE_EXTENSIONS) {
+       ext = (void *)(uintptr_t)exec->cliprects_ptr;
+diff --git a/src/intel/dev/virtio/intel_virtio_device.c b/src/intel/dev/virtio/intel_virtio_device.c
+index 07dda2a..89e05a7 100644
+--- a/src/intel/dev/virtio/intel_virtio_device.c
++++ b/src/intel/dev/virtio/intel_virtio_device.c
+@@ -124,6 +124,9 @@ int intel_virtio_init_fd(int fd)
+ 
+    dev->fd = os_dupfd_cloexec(fd);
+ 
++   simple_mtx_init(&dev->npk_lock, mtx_plain);
++   util_dynarray_init(&dev->npk_fences, NULL);
++
+    p_atomic_set(&dev->refcnt, 1);
+ 
+    simple_mtx_lock(&dev_list_lock);
+@@ -152,6 +155,10 @@ void intel_virtio_unref_fd(int fd)
+ 
+       dev->sync->finalize(dev->sync);
+       vdrm_device_close(dev->vdrm);
++      util_dynarray_foreach(&dev->npk_fences, struct npk_out_fence, f)
++         close(f->fd);
++      util_dynarray_fini(&dev->npk_fences);
++      simple_mtx_destroy(&dev->npk_lock);
+       close(dev->fd);
+       free(dev);
+    }
+diff --git a/src/intel/dev/virtio/intel_virtio_priv.h b/src/intel/dev/virtio/intel_virtio_priv.h
+index f520beb..901e68d 100644
+--- a/src/intel/dev/virtio/intel_virtio_priv.h
++++ b/src/intel/dev/virtio/intel_virtio_priv.h
+@@ -27,6 +27,7 @@
+ #include "util/macros.h"
+ #include "util/os_file.h"
+ #include "util/simple_mtx.h"
++#include "util/u_dynarray.h"
+ #include "util/u_atomic.h"
+ #include "util/u_debug.h"
+ #include "util/u_math.h"
+@@ -57,6 +58,19 @@ struct intel_virtio_device {
+    uint32_t refcnt;
+ 
+    bool vpipe;
++
++   /* nopeekOS: the host numbers each ring's execbuffers from 1 (its
++    * tickets); an out-fence the guest handed out names the request of one
++    * of them, so I915_EXEC_FENCE_SUBMIT can name it to the host. */
++   simple_mtx_t npk_lock;
++   uint64_t npk_ring_tickets[I915_EXEC_RING_MASK + 2];
++   struct util_dynarray npk_fences; /* struct npk_out_fence */
++};
++
++struct npk_out_fence {
++   int fd;
++   uint32_t ring;
++   uint64_t ticket;
+ };
+ 
+ struct intel_virtio_device *fd_to_intel_virtio_device(int fd);
+diff --git a/src/intel/dev/virtio/npk_intel_virtio.c b/src/intel/dev/virtio/npk_intel_virtio.c
+new file mode 100644
+index 0000000..61d4ff0
+--- /dev/null
++++ b/src/intel/dev/virtio/npk_intel_virtio.c
+@@ -0,0 +1,47 @@
++/*
++ * nopeekOS: the Intel virtio backend for a driver outside Mesa (Intel's
++ * media driver, iHD), which speaks the i915 uAPI on a render node that is
++ * virtio_gpu in the guest. The same calls iris and anv make.
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "intel_virtio_priv.h"
++#include "npk_intel_virtio.h"
++
++#define NPK_EXPORT __attribute__((visibility("default")))
++
++NPK_EXPORT int
++npk_intel_virtio_init_fd(int fd)
++{
++   return intel_virtio_init_fd(fd);
++}
++
++NPK_EXPORT void
++npk_intel_virtio_ref_fd(int fd)
++{
++   intel_virtio_ref_fd(fd);
++}
++
++NPK_EXPORT void
++npk_intel_virtio_unref_fd(int fd)
++{
++   intel_virtio_unref_fd(fd);
++}
++
++NPK_EXPORT bool
++npk_is_intel_virtio_fd(int fd)
++{
++   return is_intel_virtio_fd(fd);
++}
++
++NPK_EXPORT int
++npk_intel_virtio_ioctl(int fd, unsigned long request, void *arg)
++{
++   return intel_ioctl(fd, request, arg);
++}
++
++NPK_EXPORT void *
++npk_intel_virtio_bo_mmap(int fd, uint32_t handle, size_t size)
++{
++   return intel_virtio_bo_mmap(fd, handle, size, NULL);
++}
+diff --git a/src/intel/dev/virtio/npk_intel_virtio.h b/src/intel/dev/virtio/npk_intel_virtio.h
+new file mode 100644
+index 0000000..d0c2a58
+--- /dev/null
++++ b/src/intel/dev/virtio/npk_intel_virtio.h
+@@ -0,0 +1,37 @@
++/*
++ * nopeekOS: libnpk_intel_virtio, the Intel virtio backend for drivers
++ * outside Mesa.
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef NPK_INTEL_VIRTIO_H_
++#define NPK_INTEL_VIRTIO_H_
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* 1 when `fd` is a virtio_gpu render node now served by this library, 0
++ * when it is not virtio_gpu, negative on failure. Balanced by unref. */
++int npk_intel_virtio_init_fd(int fd);
++void npk_intel_virtio_ref_fd(int fd);
++void npk_intel_virtio_unref_fd(int fd);
++bool npk_is_intel_virtio_fd(int fd);
++
++/* An i915 ioctl (or GEM_CLOSE, PRIME, SYNCOBJ) on `fd`, retried on EINTR
++ * and EAGAIN; on a fd this library does not serve, the kernel's ioctl. */
++int npk_intel_virtio_ioctl(int fd, unsigned long request, void *arg);
++
++/* The CPU mapping of GEM object `handle`; MAP_FAILED on failure. The
++ * caching mode is the one set with I915_GEM_MMAP_OFFSET. */
++void *npk_intel_virtio_bo_mmap(int fd, uint32_t handle, size_t size);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* NPK_INTEL_VIRTIO_H_ */

@@ -54,6 +54,8 @@ pub struct intel_context {
     /// `intel_context_inflight_count`, and whether the context is on an engine.
     pub inflight: u32,
     pub inflight_engine: bool,
+    /// `intel_context_inflight`: the engine it is on.
+    pub inflight_on: Option<u8>,
     /// `ce->lrc.lrca`, `ce->lrc.ccid`; `ce->lrc.desc` is the two together.
     pub lrca: u32,
     pub ccid: u32,
@@ -85,6 +87,28 @@ impl intel_context {
     /// `intel_context_is_pinned`.
     pub fn intel_context_is_pinned(&self) -> bool {
         self.pin_count > 0
+    }
+}
+
+/// The physical engine behind context `ce`: its own, or for a virtual
+/// engine's the first sibling, whose image and registers it uses.
+pub fn ce_engine(gt: &intel_gt, ce: usize) -> Option<usize> {
+    let e = gt.contexts[ce].engine;
+    if crate::intel_execlists_submission::is_virtual(e) {
+        crate::intel_execlists_submission::virtual_first_sibling(gt, e)
+    } else {
+        Some(e as usize)
+    }
+}
+
+/// `rq->engine` as a request is built on it: a physical engine, or a
+/// virtual engine's `ve->base`.
+pub fn rq_engine_cs(gt: &intel_gt, rq: usize) -> Option<crate::intel_gt::intel_engine_cs> {
+    let e = gt.requests[rq].engine;
+    if crate::intel_execlists_submission::is_virtual(e) {
+        crate::intel_execlists_submission::virtual_base(gt, e)
+    } else {
+        gt.engine[e as usize]
     }
 }
 
@@ -160,8 +184,12 @@ pub fn intel_context_enter(i915: &mut drm_i915_private, gt: &mut intel_gt, ce: u
     if gt.contexts[ce].active_count > 1 {
         return;
     }
-    let engine = gt.contexts[ce].engine as usize;
-    crate::intel_engine_pm::intel_engine_pm_get(i915, gt, engine);
+    // virtual_context_enter: every sibling's wakeref.
+    let engine = gt.contexts[ce].engine;
+    let (sib, n) = engine_list(gt, engine);
+    for &e in &sib[..n] {
+        crate::intel_engine_pm::intel_engine_pm_get(i915, gt, e as usize);
+    }
     crate::intel_timeline::intel_timeline_enter(&mut gt.contexts[ce].timeline);
     crate::intel_gt_pm::intel_gt_pm_get(i915, gt);
     gt.contexts[ce].wakeref = true;
@@ -186,6 +214,21 @@ pub fn intel_context_exit(i915: &mut drm_i915_private, gt: &mut intel_gt, ce: us
         crate::intel_gt_pm::intel_gt_pm_put(i915, gt);
     }
     crate::intel_timeline::intel_timeline_exit(&mut gt.contexts[ce].timeline);
-    let engine = gt.contexts[ce].engine as usize;
-    crate::intel_engine_pm::intel_engine_pm_put(i915, gt, engine);
+    let engine = gt.contexts[ce].engine;
+    let (sib, n) = engine_list(gt, engine);
+    for &e in &sib[..n] {
+        crate::intel_engine_pm::intel_engine_pm_put(i915, gt, e as usize);
+    }
+}
+
+/// The physical engines of engine id `e`: itself, or a virtual engine's
+/// siblings.
+pub fn engine_list(gt: &intel_gt, e: u32) -> ([u8; crate::i915_gem_context::MAX_SIBLINGS], usize) {
+    if crate::intel_execlists_submission::is_virtual(e) {
+        crate::intel_execlists_submission::virtual_siblings(gt, e)
+    } else {
+        let mut l = [0u8; crate::i915_gem_context::MAX_SIBLINGS];
+        l[0] = e as u8;
+        (l, 1)
+    }
 }

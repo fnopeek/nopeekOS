@@ -584,7 +584,7 @@ fn is_core0_intent(verb: &str) -> bool {
                    // with error 8 (invalid host-state) because their
                    // TR is null. `browser` is just `microvm linux`
                    // under a user-friendly name, same constraint.
-                   "microvm" | "browser")
+                   "microvm" | "browser" | "firefox")
 }
 
 
@@ -2009,6 +2009,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 }
             } else if sub == "linux" {
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm linux") {
+                    crate::microvm::app::set(&crate::microvm::app::BROWSER);
                     microvm_linux(b"", None);
                 }
             } else if let Some(rest) = sub.strip_prefix("benchvm") {
@@ -2018,6 +2019,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 // rate. Isolates the bridge from the browser userspace.
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm benchvm") {
                     let mb: u32 = rest.trim().parse().unwrap_or(1000);
+                    crate::microvm::app::set(&crate::microvm::app::BROWSER);
                     microvm_linux(b"", Some(mb));
                 }
             } else if let Some(rest) = sub.strip_prefix("shell") {
@@ -2033,6 +2035,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                     let mut buf = alloc::vec::Vec::with_capacity(line.len() + 1);
                     buf.extend_from_slice(line.as_bytes());
                     buf.push(b'\n');
+                    crate::microvm::app::set(&crate::microvm::app::BROWSER);
                     microvm_linux(&buf, None);
                 }
             } else {
@@ -2046,7 +2049,13 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             // (substrate self-test + bare-boot diag); `browser` is what
             // the user types or what drun spawns.
             if require_cap(vault, &session, Rights::EXECUTE, "browser") {
-                microvm_linux(b"", None);
+                launch_app(&crate::microvm::app::BROWSER);
+            }
+        }
+        "firefox" => {
+            // Firefox in its own image and with its own home image.
+            if require_cap(vault, &session, Rights::EXECUTE, "firefox") {
+                launch_app(&crate::microvm::app::FIREFOX);
             }
         }
         "caps" | "capabilities" => {
@@ -2597,6 +2606,17 @@ fn microvm_linux_info() {
 /// `vm_open` needs BSP state and fails from a worker; the host function
 /// then returns -1 and the user must type `browser` at a Core-0 prompt.
 pub fn launch_browser() {
+    launch_app(&crate::microvm::app::BROWSER);
+}
+
+/// Start `app`'s microvm (`browser`, `firefox`). An app whose image is not
+/// installed says so instead of booting into PID-1's fallback.
+pub fn launch_app(app: &'static crate::microvm::app::App) {
+    if app.name != crate::microvm::app::BROWSER.name && !crate::npkfs::exists(app.sqfs) {
+        kprintln!("[microvm] {}: no image at {} — `update` fetches it", app.name, app.sqfs);
+        return;
+    }
+    crate::microvm::app::set(app);
     microvm_linux(b"", None);
 }
 
@@ -2770,10 +2790,10 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
     //     tmpfs. Kept until the sqfs bundle is the only shipped form.
     //
     //  3. neither → minimal PID-1-only substrate.
-    let have_sqfs = crate::npkfs::exists(crate::microvm::devices::virtio_blk_pci::SQFS_PATH);
+    let sqfs_path = crate::microvm::app::current().sqfs;
+    let have_sqfs = crate::npkfs::exists(sqfs_path);
     let initramfs = if have_sqfs {
-        kprintln!("[microvm] sqfs bundle at {} — booting tiny PID-1 (mounts /dev/vdb)",
-                  crate::microvm::devices::virtio_blk_pci::SQFS_PATH);
+        kprintln!("[microvm] sqfs bundle at {} — booting tiny PID-1 (mounts /dev/vdb)", sqfs_path);
         match crate::npkfs::fetch(INITRAMFS_PATH) {
             Ok((b, _hash)) => {
                 kprintln!("[microvm] loaded initramfs ({} bytes)", b.len());

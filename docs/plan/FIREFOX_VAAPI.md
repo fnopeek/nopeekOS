@@ -124,3 +124,58 @@ Dekoder-Prozesses; nur im LibreWolf-Image, gdb ist dort drin),
 `INTEL_DEBUG=perf` (Mesas vk_error-Meldungen), Mesa-Symbole in
 `~/.cache/nopeekos/mesa/symbols/` (Offset = pc − gdb-„From“ +
 `.text`-Adresse, `addr2line -f`).
+
+## Gebaut (2026-10-16, ungetestet)
+
+Entscheid Florian: alles in einem Zug, eigene ccmd-Nummern erlaubt.
+
+**Was iHD vom Wirt braucht und Mesas Protokoll nicht trägt** (gemessen an
+iHD 26.2.4, `mos_bufmgr.c` / `mos_gpucontext_specific_next.cpp`):
+
+- iHD legt einen Kontext an und setzt danach per `CONTEXT_SETPARAM` erst
+  `VM`, dann `ENGINES` mit `LOAD_BALANCE` über alle VCS. Linux nimmt das
+  an, weil ein Kontext bis zur ersten Benutzung ein *Proto-Kontext* ist.
+  Kann der Balancer nicht gesetzt werden, legt iHD gar keinen Videokontext an.
+- Bei zwei VCS zusätzlich Master/Slave-Kontexte mit `BOND`; ab 4K mit
+  Kachelspalten koppelt iHD Master und Slaves mit `I915_EXEC_FENCE_SUBMIT`
+  (beide laufen gleichzeitig, per Semaphor verbunden). Eine virtio-Fence
+  sagt nur „fertig“, so käme ein Deadlock heraus.
+
+**Wirt (gpu_intel_tgl 0.23.0):** Proto-Kontexte mit Finalisieren beim ersten
+Lookup (`ctx_lookup`), `set_proto_ctx_param`/`ctx_setparam`/
+`getparam` vollständig nach 6.18, Engine-Map mit LOAD_BALANCE/BOND/PARALLEL;
+virtuelle Engine nach `intel_execlists_submission.c` (ein Request zur Zeit,
+Bäume je Geschwister, `kick_siblings`, Abbruch beim Wedge), single_timeline
+(`ctx->syncobj`), `gen8_dispatch_bsd_engine`, `i915_request_await_execution`.
+Parallele Slots (`execlists_create_parallel`, mehrere Batches in einem
+Execbuffer) sind **nicht** portiert und antworten beim Finalisieren
+-ENODEV; iHD fragt danach auf TGL nicht, weil BOND gelingt.
+
+**Protokoll** (`i915_proto.h`, Modul `i915_uapi.rs`):
+`I915_CCMD_NPK_CONTEXT_SETPARAM`/`_GETPARAM` (0x100/0x101: Parameterdaten
+inline, eine Engine-Map samt Erweiterungskette am Stück) und
+`I915_CCMD_NPK_GEM_EXECBUFFER2` (0x102: wie V1, plus Ring und Ticket des
+Execbuffers, mit dem dieser startet). Das Ticket ist die Nummer des
+Execbuffers auf seinem Ring, die der Wirt ohnehin zählt; der Gast zählt
+mit, in derselben Reihenfolge.
+
+**Gast-Mesa** (`microvm/linux/mesa/patches/intel-virtio-npk.patch`): die
+zwei ccmds, `EXECBUFFER2_WR` mit FENCE_IN/OUT/SUBMIT (eine fremde Submit-
+Fence wird wie in Linux abgewartet), Anlegen mit Engine-Kette als „nackt
+anlegen, dann jeden Parameter“, und `libnpk_intel_virtio.so` mit sechs
+exportierten Aufrufen. Nebenbei: `I915_EXEC_BSD_MASK` war in Mesa doppelt
+verschoben (BSD-Ringwahl abgelehnt) — korrigiert.
+
+**iHD** (`microvm/linux/ihd/patches/virtio-npk.patch`): `mosdrmIoctl` leitet
+i915-ioctls (+ GEM_CLOSE/FLINK/OPEN, PRIME, SYNCOBJ) auf einem virtio-fd an
+die Bibliothek, `mos_query_device_type` erkennt virtio als i915, mmap über
+`npk_intel_virtio_bo_mmap`, eine Referenz je `vaInitialize`/`vaTerminate`.
+Gebaut in `microvm/linux/mesa/build.sh` im selben Chroot nach Mesa.
+
+**Image + Kernel:** `BUNDLE_NAME=firefox microvm-userspace/build.sh` →
+`microvm-firefox.sqfs` (`[microvm:firefox-sqfs]` → `sys/microvm/firefox.sqfs`),
+Home `sys/microvm/apps/firefox/home.img`, Intent `firefox` (`microvm/app.rs`).
+Init 0.12.0 leitet die App aus dem Image ab (`/usr/lib/firefox`), Firefox
+mit GPU: `media.ffmpeg.vaapi.enabled`, `media.hardware-video-decoding.force-enabled`,
+`LIBVA_DRIVER_NAME=iHD`. `release-large <tag> <datei>` lädt nur die genannte
+Datei hoch und lässt die übrigen Einträge in `manifest.large` stehen.

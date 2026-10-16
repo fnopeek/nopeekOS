@@ -36,6 +36,14 @@ pub const I915_CCMD_GEM_CONTEXT_CREATE: u32 = 6;
 pub const I915_CCMD_GEM_EXECBUFFER2: u32 = 7;
 pub const I915_CCMD_GEM_BUSY: u32 = 9;
 pub const I915_CCMD_GEM_EXECBUFFER2_V2: u32 = 10;
+/// nopeekOS' own commands, numbered away from virglrenderer's: what the
+/// i915 uAPI passes through pointers and Mesa's protocol cannot carry.
+/// `CONTEXT_SETPARAM`/`_GETPARAM` with the parameter's data inline (an
+/// engine map followed by its extension chain), and an execbuffer that may
+/// name a request of the same client to start with (`I915_EXEC_FENCE_SUBMIT`).
+pub const I915_CCMD_NPK_CONTEXT_SETPARAM: u32 = 0x100;
+pub const I915_CCMD_NPK_CONTEXT_GETPARAM: u32 = 0x101;
+pub const I915_CCMD_NPK_GEM_EXECBUFFER2: u32 = 0x102;
 /// `sizeof(struct vdrm_ccmd_req)`: cmd, len, seqno, rsp_off.
 pub const VDRM_CCMD_REQ: usize = 16;
 
@@ -117,7 +125,23 @@ pub const I915_ENGINE_CLASS_RENDER: u16 = 0;
 pub const I915_ENGINE_CLASS_COPY: u16 = 1;
 pub const I915_ENGINE_CLASS_VIDEO: u16 = 2;
 pub const I915_ENGINE_CLASS_VIDEO_ENHANCE: u16 = 3;
+pub const I915_ENGINE_CLASS_INVALID: u16 = 0xffff;
 pub const I915_ENGINE_CLASS_INVALID_NONE: u16 = 0xffff;
+pub const I915_ENGINE_CLASS_INVALID_VIRTUAL: u16 = 0xfffe;
+
+// The extensions of I915_CONTEXT_PARAM_ENGINES, and their sizes before
+// the trailing engine list (`struct i915_context_engines_*`).
+pub const I915_CONTEXT_ENGINES_EXT_LOAD_BALANCE: u32 = 0;
+pub const I915_CONTEXT_ENGINES_EXT_BOND: u32 = 1;
+pub const I915_CONTEXT_ENGINES_EXT_PARALLEL_SUBMIT: u32 = 2;
+pub const LOAD_BALANCE_BYTES: usize = 48;
+pub const BOND_BYTES: usize = 80;
+pub const PARALLEL_SUBMIT_BYTES: usize = 72;
+/// `sizeof(struct i915_user_extension)`.
+pub const USER_EXTENSION_BYTES: usize = 32;
+/// `sizeof(struct drm_i915_gem_context_param_sseu)`.
+pub const PARAM_SSEU_BYTES: usize = 32;
+pub const I915_CONTEXT_SSEU_FLAG_ENGINE_INDEX: u32 = 1 << 0;
 
 pub const I915_CONTEXT_CREATE_FLAGS_USE_EXTENSIONS: u32 = 1 << 0;
 pub const I915_CONTEXT_CREATE_FLAGS_SINGLE_TIMELINE: u32 = 1 << 1;
@@ -130,7 +154,12 @@ pub const I915_CONTEXT_PARAM_RECOVERABLE: u64 = 0x8;
 pub const I915_CONTEXT_PARAM_VM: u64 = 0x9;
 pub const I915_CONTEXT_PARAM_ENGINES: u64 = 0xa;
 pub const I915_CONTEXT_PARAM_PERSISTENCE: u64 = 0xb;
+pub const I915_CONTEXT_PARAM_RINGSIZE: u64 = 0xc;
 pub const I915_CONTEXT_PARAM_PROTECTED_CONTENT: u64 = 0xd;
+pub const I915_CONTEXT_PARAM_LOW_LATENCY: u64 = 0xe;
+pub const I915_CONTEXT_PARAM_CONTEXT_IMAGE: u64 = 0xf;
+pub const I915_CONTEXT_PARAM_BAN_PERIOD: u64 = 0x1;
+pub const I915_CONTEXT_PARAM_NO_ZEROMAP: u64 = 0x2;
 pub const I915_CONTEXT_DEFAULT_PRIORITY: i64 = 0;
 pub const I915_CONTEXT_MAX_USER_PRIORITY: i64 = 1023;
 pub const I915_CONTEXT_MIN_USER_PRIORITY: i64 = -1023;
@@ -152,6 +181,7 @@ pub const I915_EXEC_BSD_DEFAULT: u64 = 0;
 pub const I915_EXEC_BSD_RING1: u64 = 1 << I915_EXEC_BSD_SHIFT;
 pub const I915_EXEC_BSD_RING2: u64 = 2 << I915_EXEC_BSD_SHIFT;
 pub const I915_EXEC_FENCE_IN: u64 = 1 << 16;
+pub const I915_EXEC_FENCE_OUT: u64 = 1 << 17;
 pub const I915_EXEC_BATCH_FIRST: u64 = 1 << 18;
 pub const I915_EXEC_FENCE_ARRAY: u64 = 1 << 19;
 pub const I915_EXEC_FENCE_SUBMIT: u64 = 1 << 20;
@@ -186,6 +216,7 @@ pub const EPERM: i32 = 1;
 pub const EIO: i32 = 5;
 pub const EAGAIN: i32 = 11;
 pub const EBUSY: i32 = 16;
+pub const EEXIST: i32 = 17;
 
 /// Little-endian fields of a request or response.
 pub fn rd32(b: &[u8], o: usize) -> u32 {

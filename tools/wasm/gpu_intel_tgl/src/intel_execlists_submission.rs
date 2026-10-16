@@ -3,11 +3,17 @@
 //! buffer, and the engine reset hooks, for GRAPHICS_VER 12 below 12.55.
 //!
 //! The tasklet runs synchronously wherever Linux schedules it; the module
-//! is single-threaded. Not kept: virtual engines, timeslicing and the
-//! preemption timer (no timers run here; a request is only queued behind
-//! completed ones, so neither comes up), GVT, error capture. An engine
-//! error (a CS error interrupt or an impossible CSB event) wedges the GT
-//! instead of Linux's per-engine reset.
+//! is single-threaded; a tasklet kicked while it runs runs again after it,
+//! as a scheduled tasklet would. Not kept: timeslicing and the preemption
+//! timer (no timers run here; a request is only queued behind completed
+//! ones, so neither comes up), parallel contexts, GVT, error capture. An
+//! engine error (a CS error interrupt or an impossible CSB event) wedges
+//! the GT instead of Linux's per-engine reset.
+//!
+//! Virtual engines (`execlists_create_virtual`) live in
+//! `gt.virtual_engines`; their ids start at `VIRTUAL_ENGINE_BASE`, where
+//! Linux gives them none. A request on one has that id until a sibling
+//! takes it in `execlists_dequeue`.
 
 use crate::i915_drv::drm_i915_private;
 use crate::i915_request::{__i915_request_is_complete, i915_request_get, i915_request_put};
@@ -60,6 +66,9 @@ pub struct i915_sched_engine {
     pub tasklet_nop: bool,
     /// `engine->submit_request = nop_submit_request` once wedged.
     pub submit_nop: bool,
+    /// The tasklet is running, and was kicked meanwhile.
+    pub running: bool,
+    pub rerun: bool,
 }
 
 impl Default for i915_sched_engine {
@@ -73,11 +82,349 @@ impl Default for i915_sched_engine {
             tasklet_disabled: 0,
             tasklet_nop: false,
             submit_nop: false,
+            running: false,
+            rerun: false,
         }
     }
 }
 
 const ERROR_CSB: u32 = 1 << 31;
+
+/// Engine ids from here name `gt.virtual_engines[id - VIRTUAL_ENGINE_BASE]`.
+pub const VIRTUAL_ENGINE_BASE: u32 = 0x100;
+const MAX_SIBLINGS: usize = crate::i915_gem_context::MAX_SIBLINGS;
+const NUM_ENGINES: usize = I915_NUM_ENGINES as usize;
+const EINVAL: i32 = 22;
+const ENODEV: i32 = 19;
+
+pub fn is_virtual(e: u32) -> bool {
+    e >= VIRTUAL_ENGINE_BASE
+}
+
+/// `struct virtual_engine`: what of `ve->base` the module needs, the
+/// context, the one request let through at a time, and its place in each
+/// sibling's tree of virtual engines (`ve->nodes`).
+#[derive(Clone, Copy)]
+pub struct virtual_engine {
+    pub used: bool,
+    /// `ve->context`, in `gt.contexts`.
+    pub context: u16,
+    /// `ve->request`.
+    pub request: Option<u16>,
+    /// `ve->base.sched_engine->queue_priority_hint`, `ve->base.mask`,
+    /// `ve->base.class`.
+    pub queue_priority_hint: i32,
+    pub mask: u64,
+    pub class: u32,
+    pub num_siblings: usize,
+    pub siblings: [u8; MAX_SIBLINGS],
+    /// `ve->nodes[engine->id]`: in that sibling's `execlists->virtual`
+    /// tree, at a priority; the sequence number places it after the equal
+    /// priorities already there, as the rb-tree insertion does.
+    pub node: [Option<(i32, u64)>; NUM_ENGINES],
+    /// The tasklet is running, and was kicked meanwhile.
+    pub running: bool,
+    pub rerun: bool,
+}
+
+impl virtual_engine {
+    const EMPTY: virtual_engine = virtual_engine { used: false, context: u16::MAX, request: None,
+                                                   queue_priority_hint: i32::MIN, mask: 0, class: OTHER_CLASS,
+                                                   num_siblings: 0, siblings: [u8::MAX; MAX_SIBLINGS],
+                                                   node: [None; NUM_ENGINES], running: false, rerun: false };
+}
+
+fn ve_index(e: u32) -> usize {
+    (e - VIRTUAL_ENGINE_BASE) as usize
+}
+
+/// `ve->base` for building a request: the first sibling's emission and
+/// flags, the virtual engine's mask, and no id (`ve->base.id = -1`), so
+/// no engine-specific register is named.
+pub fn virtual_base(gt: &intel_gt, e: u32) -> Option<crate::intel_gt::intel_engine_cs> {
+    let ve = gt.virtual_engines.get(ve_index(e))?;
+    let mut b = gt.engine[ve.siblings[0] as usize]?;
+    b.id = u32::MAX;
+    b.mask = ve.mask;
+    b.status_page = None;
+    b.kernel_context = None;
+    Some(b)
+}
+
+/// What `execlists_create_virtual` refuses: an engine listed twice
+/// ("duplicate entry in load balancer"), or engines of two classes.
+/// `too_many` is a list longer than a slot keeps, which repeats one.
+pub fn virtual_siblings_ok(gt: &intel_gt, siblings: &[u8], too_many: bool) -> Result<(), i32> {
+    if too_many {
+        return Err(-EINVAL);
+    }
+    let (mut mask, mut class) = (0u64, OTHER_CLASS);
+    for &s in siblings {
+        let e = gt.engine[s as usize].ok_or(-EINVAL)?;
+        if e.mask & mask != 0 {
+            return Err(-EINVAL);
+        }
+        mask |= e.mask;
+        if class != OTHER_CLASS && class != e.class {
+            return Err(-EINVAL);
+        }
+        class = e.class;
+    }
+    Ok(())
+}
+
+/// `execlists_create_virtual` + `virtual_engine_initial_hint`: a virtual
+/// engine over `siblings`, the first sibling picked at random to spread
+/// the load. Returns its id; its context is attached by the caller.
+pub fn execlists_create_virtual(gt: &mut intel_gt, siblings: &[u8]) -> Result<u32, i32> {
+    virtual_siblings_ok(gt, siblings, false)?;
+    if siblings.is_empty() || siblings.len() > MAX_SIBLINGS {
+        return Err(-EINVAL);
+    }
+    let mut ve = virtual_engine { used: true, num_siblings: siblings.len(), ..virtual_engine::EMPTY };
+    ve.siblings[..siblings.len()].copy_from_slice(siblings);
+    for &s in siblings {
+        let e = gt.engine[s as usize].ok_or(-EINVAL)?;
+        ve.mask |= e.mask;
+        ve.class = e.class;
+    }
+    let mut r = [0u8; 4];
+    if npk_sys::random_bytes(&mut r) < 0 {
+        r = [0; 4];
+    }
+    let swp = u32::from_le_bytes(r) as usize % ve.num_siblings;
+    ve.siblings.swap(0, swp);
+    let k = match gt.virtual_engines.iter().position(|v| !v.used) {
+        Some(k) => {
+            gt.virtual_engines[k] = ve;
+            k
+        }
+        None => {
+            gt.virtual_engines.push(ve);
+            gt.virtual_engines.len() - 1
+        }
+    };
+    Ok(VIRTUAL_ENGINE_BASE + k as u32)
+}
+
+/// `virtual_context_destroy`: the engine goes; trailing free slots too.
+pub fn virtual_engine_destroy(gt: &mut intel_gt, e: u32) {
+    let k = ve_index(e);
+    if let Some(v) = gt.virtual_engines.get_mut(k) {
+        *v = virtual_engine::EMPTY;
+    }
+    while gt.virtual_engines.last().is_some_and(|v| !v.used) {
+        gt.virtual_engines.pop();
+    }
+}
+
+/// `ve->context` is the hardware context `ce`.
+pub fn virtual_set_context(gt: &mut intel_gt, e: u32, ce: usize) {
+    if let Some(v) = gt.virtual_engines.get_mut(ve_index(e)) {
+        v.context = ce as u16;
+    }
+}
+
+/// The virtual engine's first sibling, which the context's image and
+/// emission follow (`virtual_context_alloc`/`_pin` use `siblings[0]`).
+pub fn virtual_first_sibling(gt: &intel_gt, e: u32) -> Option<usize> {
+    gt.virtual_engines.get(ve_index(e)).filter(|v| v.used).map(|v| v.siblings[0] as usize)
+}
+
+/// The siblings of a virtual engine (`virtual_context_enter`/`_exit` take
+/// each one's wakeref).
+pub fn virtual_siblings(gt: &intel_gt, e: u32) -> ([u8; MAX_SIBLINGS], usize) {
+    gt.virtual_engines.get(ve_index(e)).map(|v| (v.siblings, v.num_siblings)).unwrap_or(([0; MAX_SIBLINGS], 0))
+}
+
+/// Puts sibling `sib`, if present, first, so the context's image is that
+/// engine's when its last use was there.
+pub fn virtual_prefer(gt: &mut intel_gt, e: u32, sib: u8) {
+    if let Some(v) = gt.virtual_engines.get_mut(ve_index(e)) {
+        if let Some(n) = v.siblings[..v.num_siblings].iter().position(|&s| s == sib) {
+            v.siblings.swap(0, n);
+        }
+    }
+}
+
+/// `virtual_matches`: the request may run on `engine`, and the context is
+/// not in flight on another one (its image would still be saved there).
+fn virtual_matches(gt: &intel_gt, k: usize, engine: usize) -> bool {
+    let ve = &gt.virtual_engines[k];
+    if ve.request.is_none() {
+        return false;
+    }
+    let emask = gt.engine[engine].map(|x| x.mask).unwrap_or(0);
+    if ve.mask & emask == 0 {
+        return false;
+    }
+    gt.contexts[ve.context as usize].inflight_on.is_none_or(|on| on as usize == engine)
+}
+
+/// The first virtual engine in `engine`'s tree: highest priority, then
+/// first inserted.
+fn virtual_tree_first(gt: &intel_gt, engine: usize) -> Option<usize> {
+    let mut best: Option<(usize, i32, u64)> = None;
+    for (k, v) in gt.virtual_engines.iter().enumerate() {
+        if let Some((prio, seq)) = v.used.then_some(v.node[engine]).flatten() {
+            if best.is_none_or(|(_, bp, bs)| prio > bp || (prio == bp && seq < bs)) {
+                best = Some((k, prio, seq));
+            }
+        }
+    }
+    best.map(|b| b.0)
+}
+
+/// `first_virtual_engine`: stale entries (handled by another sibling, or
+/// not runnable here) are dropped on the way.
+fn first_virtual_engine(gt: &mut intel_gt, engine: usize) -> Option<usize> {
+    while let Some(k) = virtual_tree_first(gt, engine) {
+        if !virtual_matches(gt, k, engine) {
+            gt.virtual_engines[k].node[engine] = None;
+            continue;
+        }
+        return Some(k);
+    }
+    None
+}
+
+/// `virtual_xfer_context`: the sibling that takes the request goes first
+/// for the next one. TGL engines address their registers relative to the
+/// engine, so the image needs no new offsets (`lrc_update_offsets`).
+fn virtual_xfer_context(gt: &mut intel_gt, k: usize, engine: usize) {
+    let ve = &mut gt.virtual_engines[k];
+    if ve.siblings[0] as usize == engine {
+        return;
+    }
+    if let Some(n) = (1..ve.num_siblings).find(|&n| ve.siblings[n] as usize == engine) {
+        ve.siblings.swap(0, n);
+    }
+}
+
+/// `virtual_submit_request`: the request becomes the virtual engine's one,
+/// and the siblings are told. Once wedged it fails at once, as a request on
+/// a physical engine does through `nop_submit_request`.
+pub fn virtual_submit_request(i915: &mut drm_i915_private, gt: &mut intel_gt, e: u32, rq: usize) {
+    let k = ve_index(e);
+    if gt.wedged {
+        crate::i915_request::i915_request_mark_eio(gt, rq);
+    }
+    if __i915_request_is_complete(gt, rq) {
+        crate::i915_request::__i915_request_submit(i915, gt, rq);
+        return;
+    }
+    if let Some(prev) = gt.virtual_engines[k].request.take() {
+        // Background completion from preempt-to-busy.
+        crate::i915_request::__i915_request_submit(i915, gt, prev as usize);
+        i915_request_put(gt, prev as usize);
+    }
+    gt.virtual_engines[k].queue_priority_hint = gt.requests[rq].prio;
+    gt.virtual_engines[k].request = Some(i915_request_get(gt, rq) as u16);
+    virtual_submission_tasklet(i915, gt, k);
+}
+
+/// `virtual_submission_tasklet`: the virtual engine goes into each
+/// sibling's tree at the request's priority, and a sibling it now leads is
+/// kicked. It stops once the context is in flight: only that sibling may
+/// take the next request.
+fn virtual_submission_tasklet(i915: &mut drm_i915_private, gt: &mut intel_gt, k: usize) {
+    if gt.virtual_engines[k].running {
+        gt.virtual_engines[k].rerun = true;
+        return;
+    }
+    gt.virtual_engines[k].running = true;
+    loop {
+        gt.virtual_engines[k].rerun = false;
+        __virtual_submission_tasklet(i915, gt, k);
+        if !gt.virtual_engines[k].rerun {
+            break;
+        }
+    }
+    gt.virtual_engines[k].running = false;
+}
+
+fn __virtual_submission_tasklet(i915: &mut drm_i915_private, gt: &mut intel_gt, k: usize) {
+    if gt.virtual_engines[k].request.is_none() {
+        return;
+    }
+    let prio = gt.virtual_engines[k].queue_priority_hint;
+    // virtual_submission_mask: rq->execution_mask is the virtual engine's.
+    let mask = gt.virtual_engines[k].mask;
+    for n in 0..gt.virtual_engines[k].num_siblings {
+        let ve = gt.virtual_engines[k];
+        if ve.request.is_none() {
+            break;
+        }
+        let sibling = ve.siblings[n] as usize;
+        let smask = gt.engine[sibling].map(|x| x.mask).unwrap_or(0);
+        if mask & smask == 0 {
+            gt.virtual_engines[k].node[sibling] = None;
+        } else {
+            let mut first = false;
+            let keep = match ve.node[sibling] {
+                Some((p, _)) => {
+                    first = virtual_tree_first(gt, sibling) == Some(k);
+                    prio == p || (prio > p && first)
+                }
+                None => false,
+            };
+            if !keep {
+                // Inserted after every node of at least its priority.
+                gt.virtual_engines[k].node[sibling] = None;
+                first = !gt.virtual_engines.iter().any(|v| v.used && v.node[sibling].is_some_and(|(p, _)| p >= prio));
+                gt.virtual_seq += 1;
+                let seq = gt.virtual_seq;
+                gt.virtual_engines[k].node[sibling] = Some((prio, seq));
+            }
+            if let Some((_, seq)) = gt.virtual_engines[k].node[sibling] {
+                gt.virtual_engines[k].node[sibling] = Some((prio, seq));
+            }
+            let hint = gt.engine[sibling].map(|x| x.sched.queue_priority_hint).unwrap_or(i32::MIN);
+            if first && prio > hint {
+                execlists_submission_tasklet(i915, gt, sibling);
+            }
+        }
+        let ce = gt.virtual_engines[k].context as usize;
+        if gt.contexts[ce].inflight_on.is_some() {
+            break;
+        }
+    }
+}
+
+/// `kick_execlists` on a virtual engine: its request was raised to `prio`,
+/// so its place in the siblings' trees moves up.
+pub fn virtual_kick(i915: &mut drm_i915_private, gt: &mut intel_gt, e: u32, rq: usize, prio: i32) {
+    let k = ve_index(e);
+    let Some(ve) = gt.virtual_engines.get(k) else { return };
+    if ve.request != Some(rq as u16) || prio <= ve.queue_priority_hint {
+        return;
+    }
+    gt.virtual_engines[k].queue_priority_hint = prio;
+    virtual_submission_tasklet(i915, gt, k);
+}
+
+/// `kick_siblings`: the virtual context left `engine`. A request of it put
+/// back in this engine's queue (by a reset) returns to the virtual engine,
+/// and a waiting request is offered to the siblings again.
+fn kick_siblings(i915: &mut drm_i915_private, gt: &mut intel_gt, engine: usize, rq: usize, ve_id: u32) {
+    let k = ve_index(ve_id);
+    if gt.requests[rq].pqueue {
+        // resubmit_virtual_request.
+        if let Some(x) = gt.engine[engine].as_mut() {
+            let s = &mut x.sched;
+            if let Some(at) = s.queue[..s.nqueue].iter().position(|&r| r as usize == rq) {
+                s.queue.copy_within(at + 1..s.nqueue, at);
+                s.nqueue -= 1;
+            }
+        }
+        gt.requests[rq].pqueue = false;
+        gt.requests[rq].engine = ve_id;
+        virtual_submit_request(i915, gt, ve_id, rq);
+    }
+    if gt.virtual_engines.get(k).is_some_and(|v| v.request.is_some()) {
+        virtual_submission_tasklet(i915, gt, k);
+    }
+}
 
 fn el(gt: &intel_gt, e: usize) -> intel_engine_execlists {
     gt.engine[e].map(|x| x.execlists).unwrap_or_default()
@@ -112,8 +459,12 @@ pub fn execlists_running(gt: &intel_gt, e: usize, rq: usize) -> bool {
     x.inflight.get(x.active).copied().flatten() == Some(rq as u16)
 }
 
-/// `add_to_engine`.
+/// `add_to_engine`. A request completed while still on a virtual engine
+/// joins no physical engine's list.
 pub fn add_to_engine(gt: &mut intel_gt, e: usize, rq: usize) {
+    if is_virtual(e as u32) {
+        return;
+    }
     if let Some(x) = gt.engine[e].as_mut() {
         let s = &mut x.sched;
         if s.nrequests < SCHED_MAX {
@@ -127,6 +478,9 @@ pub fn add_to_engine(gt: &mut intel_gt, e: usize, rq: usize) {
 
 /// `remove_from_engine`.
 pub fn remove_from_engine(gt: &mut intel_gt, e: usize, rq: usize) {
+    if is_virtual(e as u32) {
+        return;
+    }
     if let Some(x) = gt.engine[e].as_mut() {
         let s = &mut x.sched;
         if let Some(i) = s.requests[..s.nrequests].iter().position(|&r| r as usize == rq) {
@@ -254,6 +608,7 @@ fn execlists_schedule_in(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usiz
     if gt.contexts[ce].inflight == 0 {
         __execlists_schedule_in(i915, gt, e, rq);
         gt.contexts[ce].inflight_engine = true;
+        gt.contexts[ce].inflight_on = Some(e as u8);
     }
     gt.contexts[ce].inflight += 1;
 }
@@ -282,6 +637,14 @@ fn __execlists_schedule_out(i915: &mut drm_i915_private, gt: &mut intel_gt, e: u
     }
     crate::intel_gt_pm::intel_gt_pm_put(i915, gt);
     gt.contexts[ce].inflight_engine = false;
+    gt.contexts[ce].inflight_on = None;
+    // A virtual context's next request may have waited for it to leave
+    // this engine (after `ce->inflight` is cleared: the kick runs as a
+    // tasklet would, later).
+    let owner = gt.contexts[ce].engine;
+    if is_virtual(owner) {
+        kick_siblings(i915, gt, e, rq, owner);
+    }
 }
 
 /// `execlists_schedule_out`.
@@ -392,6 +755,34 @@ fn execlists_dequeue(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) {
         }
     }
 
+    // A virtual engine's request goes first ("XXX virtual is always taking
+    // precedence"); one per dequeue.
+    while let Some(k) = first_virtual_engine(gt, e) {
+        let Some(rq) = gt.virtual_engines[k].request.map(|r| r as usize) else { break };
+        if gt.requests[rq].prio < queue_prio(gt, e) {
+            break;
+        }
+        if let Some(l) = last {
+            if !can_merge_rq(gt, l, rq) {
+                // Left for another sibling.
+                return;
+            }
+        }
+        gt.virtual_engines[k].request = None;
+        gt.virtual_engines[k].queue_priority_hint = i32::MIN;
+        gt.virtual_engines[k].node[e] = None;
+        gt.requests[rq].engine = e as u32;
+        if crate::i915_request::__i915_request_submit(i915, gt, rq) {
+            virtual_xfer_context(gt, k, e);
+            submit = true;
+            last = Some(rq);
+        }
+        i915_request_put(gt, rq);
+        if submit {
+            break;
+        }
+    }
+
     loop {
         let s = gt.engine[e].map(|y| y.sched).unwrap_or_default();
         if s.nqueue == 0 {
@@ -417,6 +808,11 @@ fn execlists_dequeue(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) {
                     break;
                 }
                 if gt.requests[l].ce == gt.requests[rq].ce {
+                    break;
+                }
+                // A virtual request stays out of the second port, free to
+                // move to another engine instead of waiting here.
+                if is_virtual(gt.contexts[gt.requests[rq].ce as usize].engine) {
                     break;
                 }
                 merge = false;
@@ -582,7 +978,29 @@ fn post_process_csb(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, in
 }
 
 /// `execlists_submission_tasklet` (or `nop_submission_tasklet` once wedged).
+/// Kicked while it runs, it runs once more after.
 pub fn execlists_submission_tasklet(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) {
+    let Some(x) = gt.engine[e].as_mut() else { return };
+    if x.sched.running {
+        x.sched.rerun = true;
+        return;
+    }
+    x.sched.running = true;
+    loop {
+        if let Some(x) = gt.engine[e].as_mut() {
+            x.sched.rerun = false;
+        }
+        __execlists_submission_tasklet(i915, gt, e);
+        if !gt.engine[e].is_some_and(|x| x.sched.rerun) {
+            break;
+        }
+    }
+    if let Some(x) = gt.engine[e].as_mut() {
+        x.sched.running = false;
+    }
+}
+
+fn __execlists_submission_tasklet(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) {
     let Some(s) = gt.engine[e].map(|x| x.sched) else { return };
     if s.tasklet_disabled > 0 {
         return;
@@ -937,6 +1355,19 @@ pub fn execlists_reset_cancel(i915: &mut drm_i915_private, gt: &mut intel_gt, e:
         x.sched.nqueue = 0;
         x.sched.queue_priority_hint = i32::MIN;
         x.sched.tasklet_nop = true;
+    }
+
+    // Cancel all attached virtual engines.
+    while let Some(k) = virtual_tree_first(gt, e) {
+        gt.virtual_engines[k].node[e] = None;
+        if let Some(r) = gt.virtual_engines[k].request.take() {
+            let r = r as usize;
+            gt.requests[r].engine = e as u32;
+            crate::i915_request::i915_request_mark_eio(gt, r);
+            crate::i915_request::__i915_request_submit(i915, gt, r);
+            i915_request_put(gt, r);
+            gt.virtual_engines[k].queue_priority_hint = i32::MIN;
+        }
     }
 }
 

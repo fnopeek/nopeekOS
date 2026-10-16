@@ -42,8 +42,9 @@ const MAX_FRAME: usize = 4096;
 
 const PORT_NAME: &[u8] = b"npk.control";
 const PORTS_DIR: &[u8] = b"/sys/class/virtio-ports\0";
-/// The process that gets SIGTERM on quit (its `comm`).
-const APP_COMM: &[u8] = b"librewolf";
+/// The processes that get SIGTERM on quit (their `comm`): the browser the
+/// image carries.
+const APP_COMMS: &[&[u8]] = &[b"librewolf", b"firefox"];
 
 /// Fork the control process; the parent returns at once.
 pub unsafe fn spawn(kmsg_fd: i64) {
@@ -254,7 +255,7 @@ unsafe fn quit_app(kmsg_fd: i64) {
                 let mut p = [0u8; 32];
                 let len = join(&mut p, &[b"/proc/", digits(name), b"/comm\0"]);
                 let mut comm = [0u8; 32];
-                if len > 0 && unsafe { read_file(&p, &mut comm) }.is_some_and(|c| same(trim(&comm[..c]), APP_COMM)) {
+                if len > 0 && unsafe { read_file(&p, &mut comm) }.is_some_and(|c| APP_COMMS.iter().any(|a| same(trim(&comm[..c]), a))) {
                     let _ = unsafe { syscall2(SYS_KILL, pid, SIGTERM) };
                     sent += 1;
                 }

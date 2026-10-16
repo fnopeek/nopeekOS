@@ -176,7 +176,7 @@ fn ce_vm_pd(gt: &intel_gt, ce: usize) -> u64 {
 /// `lrc_init_regs`.
 pub fn lrc_init_regs(gt: &intel_gt, ce: usize, inhibit: bool) {
     let Some(regs) = regs_of(gt, ce) else { return };
-    let Some(engine) = gt.engine[gt.contexts[ce].engine as usize] else { return };
+    let Some(engine) = crate::intel_context::ce_engine(gt, ce).and_then(|e| gt.engine[e]) else { return };
     let pd = ce_vm_pd(gt, ce);
     let mut page = [0u32; 1024];
     read_page(regs.d, LRC_STATE_OFFSET as u32, &mut page);
@@ -197,7 +197,7 @@ pub fn lrc_reset_regs(gt: &intel_gt, ce: usize) {
 /// workaround-batch page cleared, then the register state.
 pub fn lrc_init_state(_i915: &mut drm_i915_private, gt: &mut intel_gt, ce: usize) {
     let Some(state) = gt.contexts[ce].state_obj.and_then(|o| o.map()) else { return };
-    let Some(engine) = gt.engine[gt.contexts[ce].engine as usize] else { return };
+    let Some(engine) = crate::intel_context::ce_engine(gt, ce).and_then(|e| gt.engine[e]) else { return };
     let mut inhibit = true;
 
     if let Some(def) = gt.contexts[ce].default_state.and_then(|o| o.map()) {
@@ -313,7 +313,7 @@ fn setup_predicate_disable_wa(cs: &mut crate::gen8_engine_cs::Cs, indirect_bb: u
 /// No OA stream is open (`i915_oa_init_reg_state` writes nothing).
 pub fn lrc_update_regs(_i915: &mut drm_i915_private, gt: &mut intel_gt, ce: usize, head: u32) -> u32 {
     let Some(regs) = regs_of(gt, ce) else { return 0 };
-    let Some(engine) = gt.engine[gt.contexts[ce].engine as usize] else { return 0 };
+    let Some(engine) = crate::intel_context::ce_engine(gt, ce).and_then(|e| gt.engine[e]) else { return 0 };
     let ring = gt.contexts[ce].ring;
 
     regs.w(CTX_RING_START, ring.ggtt_offset());
@@ -388,8 +388,7 @@ fn __lrc_alloc_state(gt: &mut intel_gt, ce: usize, engine: &intel_engine_cs) -> 
 /// `lrc_alloc`: image, ring and timeline (the engine's status page for a
 /// perma-pinned context, a page of its own otherwise).
 pub fn lrc_alloc(gt: &mut intel_gt, ce: usize) -> Result<(), i32> {
-    let engine_id = gt.contexts[ce].engine as usize;
-    let Some(engine) = gt.engine[engine_id] else { return Err(-19) };
+    let Some(engine) = crate::intel_context::ce_engine(gt, ce).and_then(|e| gt.engine[e]) else { return Err(-19) };
 
     gt.contexts[ce].default_state = engine.default_state;
     __lrc_alloc_state(gt, ce, &engine)?;

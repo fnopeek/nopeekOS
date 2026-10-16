@@ -315,7 +315,7 @@ pub fn present_reset() {
     PRESENT.store(PRESENT_HIDDEN, Ordering::Release);
 }
 
-/// The session started the app (the guest's "[wl] librewolf exec" line,
+/// The session started the app (the guest's "[wl] app exec" line,
 /// written before any app runs): frames show from now on, and the next
 /// display tick shows the last one each output sent, since a guest whose
 /// picture does not change sends no more.

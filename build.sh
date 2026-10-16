@@ -1404,9 +1404,14 @@ sha384=${MOD_SHA}
         #      points at the github.com/.../releases/download URL.
         #      The kernel follows the 302 redirect chain via the
         #      `https_get_streaming` path.
+        #   Named files after the tag (`release-large <tag> microvm-firefox.sqfs`)
+        #   upload only those; the sections of the others stay in
+        #   manifest.large as they were.
         TAG="${2:-}"
+        shift 2 2>/dev/null || shift $#
+        ONLY="$*"
         if [ -z "$TAG" ]; then
-            err "usage: ./build.sh release-large <tag>"
+            err "usage: ./build.sh release-large <tag> [file...]"
             err "example: ./build.sh release-large assets/alpine-wayland-mesa-0.1.0"
             exit 1
         fi
@@ -1466,12 +1471,16 @@ sha384=${MOD_SHA}
 
         LARGE_MANIFEST=""
         UPLOADED=0
+        SECTIONS=""
         for asset in "$LARGE_DIR"/*; do
             [ -f "$asset" ] || continue
             # Skip any pre-existing .sig; it is regenerated.
             case "$asset" in *.sig) continue;; esac
 
             NAME=$(basename "$asset")
+            if [ -n "$ONLY" ]; then
+                case " $ONLY " in *" $NAME "*) ;; *) continue ;; esac
+            fi
             SIZE=$(stat -c%s "$asset")
             SHA=$(openssl dgst -sha384 -hex "$asset" 2>/dev/null | awk '{print $NF}')
 
@@ -1483,6 +1492,7 @@ sha384=${MOD_SHA}
             case "$NAME" in
                 microvm-userspace.cpio.gz) SECTION="microvm:userspace" ;;
                 microvm-userspace.sqfs)    SECTION="microvm:userspace-sqfs" ;;
+                microvm-firefox.sqfs)      SECTION="microvm:firefox-sqfs" ;;
                 *)
                     err "unknown large asset filename: $NAME"
                     err "add an AssetSpec entry in kernel/src/intent/update.rs and a case here"
@@ -1499,6 +1509,7 @@ url=${URL}
 
 "
 
+            SECTIONS="$SECTIONS [$SECTION]"
             log "Uploading $NAME ($SIZE bytes) + .sig..."
             gh release upload "$TAG" --repo "$REPO" --clobber "$asset" "${asset}.sig"
             ok "Uploaded $NAME"
@@ -1512,6 +1523,15 @@ url=${URL}
 
         # Make sure the assets dir exists before writing manifest.large
         mkdir -p "$RELEASE_DIR/assets"
+        # Sections not uploaded now keep their entries.
+        if [ -f "$RELEASE_DIR/assets/manifest.large" ]; then
+            KEPT=$(awk -v drop="$SECTIONS" '
+                /^\[/ { keep = index(" " drop " ", " " $0 " ") == 0 }
+                keep' "$RELEASE_DIR/assets/manifest.large")
+            [ -n "$KEPT" ] && LARGE_MANIFEST="${KEPT}
+
+${LARGE_MANIFEST}"
+        fi
         printf '%s' "$LARGE_MANIFEST" > "$RELEASE_DIR/assets/manifest.large"
         ok "Wrote $RELEASE_DIR/assets/manifest.large ($UPLOADED entries)"
         log "Run ./build.sh release to merge into the canonical asset manifest, then commit + push."

@@ -1,0 +1,263 @@
+diff --git a/media_driver/linux/common/ddi/media_libva.cpp b/media_driver/linux/common/ddi/media_libva.cpp
+index 9917cdd..b28fad9 100755
+--- a/media_driver/linux/common/ddi/media_libva.cpp
++++ b/media_driver/linux/common/ddi/media_libva.cpp
+@@ -24,6 +24,7 @@
+ //! \brief    libva(and its extension) interface implementaion.
+ //!
+ 
++#include <npk_intel_virtio.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -1684,10 +1685,24 @@ VAStatus DdiMedia__Initialize (
+         return VA_STATUS_ERROR_ALLOCATION_FAILED;
+     }
+ 
++    // nopeekOS: on a virtio_gpu render node the i915 uAPI goes through
++    // npk_intel_virtio; one reference per vaInitialize, released by
++    // vaTerminate (or below on failure).
++    if (npk_is_intel_virtio_fd(devicefd))
++    {
++        npk_intel_virtio_ref_fd(devicefd);
++    }
++    else if (npk_intel_virtio_init_fd(devicefd) < 0)
++    {
++        DDI_ASSERTMESSAGE("virtio_gpu render node without the Intel native context");
++        return VA_STATUS_ERROR_ALLOCATION_FAILED;
++    }
++
+     status           = DdiMedia_InitMediaContext(ctx, devicefd, major_version, minor_version, apoDdiEnabled);
+     if(status != VA_STATUS_SUCCESS)
+     {
+         DDI_ASSERTMESSAGE("Failed to init media context");
++        npk_intel_virtio_unref_fd(devicefd);
+         return status;
+     }
+ 
+@@ -1696,6 +1711,7 @@ VAStatus DdiMedia__Initialize (
+         if(DdiMedia_LoadFuncion(ctx) != VA_STATUS_SUCCESS)
+         {
+             DDI_ASSERTMESSAGE("Failed to load function pointer");
++            npk_intel_virtio_unref_fd(devicefd);
+             return VA_STATUS_ERROR_ALLOCATION_FAILED;
+         }
+     }
+@@ -1704,6 +1720,7 @@ VAStatus DdiMedia__Initialize (
+         if(MediaLibvaInterface::LoadFunction(ctx) != VA_STATUS_SUCCESS)
+         {
+             DDI_ASSERTMESSAGE("Failed to load function pointer");
++            npk_intel_virtio_unref_fd(devicefd);
+             return VA_STATUS_ERROR_ALLOCATION_FAILED;
+         }
+     }
+@@ -2208,6 +2225,8 @@ VAStatus DdiMedia_Terminate (
+ 
+     PDDI_MEDIA_CONTEXT mediaCtx   = DdiMedia_GetMediaContext(ctx);
+     DDI_CHK_NULL(mediaCtx, "nullptr mediaCtx", VA_STATUS_ERROR_INVALID_CONTEXT);
++    // nopeekOS: the reference DdiMedia__Initialize took on the device.
++    int npkFd = mediaCtx->fd;
+ 
+     DdiMediaUtil_LockMutex(&GlobalMutex);
+ 
+@@ -2298,6 +2317,7 @@ VAStatus DdiMedia_Terminate (
+     {
+         mediaCtx->uiRef--;
+         DdiMediaUtil_UnLockMutex(&GlobalMutex);
++        npk_intel_virtio_unref_fd(npkFd);
+ 
+         return VA_STATUS_SUCCESS;
+     }
+@@ -2311,6 +2331,7 @@ VAStatus DdiMedia_Terminate (
+     ctx->pDriverData = nullptr;
+ 
+     DdiMediaUtil_UnLockMutex(&GlobalMutex);
++    npk_intel_virtio_unref_fd(npkFd);
+ 
+     return VA_STATUS_SUCCESS;
+ }
+diff --git a/media_driver/media_top_cmake.cmake b/media_driver/media_top_cmake.cmake
+index 2dcd0fb..9f2931d 100755
+--- a/media_driver/media_top_cmake.cmake
++++ b/media_driver/media_top_cmake.cmake
+@@ -643,6 +643,8 @@ set_target_properties(${LIB_NAME}        PROPERTIES PREFIX "")
+ set_target_properties(${LIB_NAME_STATIC} PROPERTIES PREFIX "")
+ 
+ target_link_libraries(${LIB_NAME} ${MEDIA_GMM_INTERFACE_LIBS})
++# nopeekOS: the i915 uAPI over virtio_gpu (Mesa's libnpk_intel_virtio).
++target_link_libraries(${LIB_NAME} npk_intel_virtio)
+ target_link_libraries(${LIB_NAME_STATIC} ${MEDIA_GMM_INTERFACE_LIBS})
+ 
+ set(MEDIA_LINK_EXTERNAL_LIBS "${PKG_PCIACCESS_LIBRARIES} m pthread dl")
+diff --git a/media_softlet/linux/common/ddi/media_libva_interface_next.cpp b/media_softlet/linux/common/ddi/media_libva_interface_next.cpp
+index 77de622..e20d59f 100644
+--- a/media_softlet/linux/common/ddi/media_libva_interface_next.cpp
++++ b/media_softlet/linux/common/ddi/media_libva_interface_next.cpp
+@@ -25,6 +25,7 @@
+ //!
+ 
+ #if !defined(ANDROID) && defined(X11_FOUND)
++#include <npk_intel_virtio.h>
+ #include <X11/Xutil.h>
+ #include "media_libva_putsurface_linux.h"
+ #endif
+@@ -709,6 +710,8 @@ VAStatus MediaLibvaInterfaceNext::Terminate(VADriverContextP ctx)
+ 
+     mosCtx.fd               = mediaCtx->fd;
+     mosCtx.m_userSettingPtr = mediaCtx->m_userSettingPtr;
++    // nopeekOS: the reference DdiMedia__Initialize took on the device.
++    int npkFd               = mediaCtx->fd;
+ 
+     MosUtilities::MosLockMutex(&m_GlobalMutex);
+ 
+@@ -763,6 +766,7 @@ VAStatus MediaLibvaInterfaceNext::Terminate(VADriverContextP ctx)
+     {
+         mediaCtx->uiRef--;
+         MosUtilities::MosUnlockMutex(&m_GlobalMutex);
++        npk_intel_virtio_unref_fd(npkFd);
+ 
+         return VA_STATUS_SUCCESS;
+     }
+@@ -776,6 +780,7 @@ VAStatus MediaLibvaInterfaceNext::Terminate(VADriverContextP ctx)
+     ctx->pDriverData = nullptr;
+ 
+     MosUtilities::MosUnlockMutex(&m_GlobalMutex);
++    npk_intel_virtio_unref_fd(npkFd);
+ 
+     return VA_STATUS_SUCCESS;
+ }
+diff --git a/media_softlet/linux/common/os/i915/include/mos_bufmgr_api.h b/media_softlet/linux/common/os/i915/include/mos_bufmgr_api.h
+index 4e67df8..3df8976 100644
+--- a/media_softlet/linux/common/os/i915/include/mos_bufmgr_api.h
++++ b/media_softlet/linux/common/os/i915/include/mos_bufmgr_api.h
+@@ -418,6 +418,13 @@ int mos_get_device_id(int fd, uint32_t *deviceId);
+ extern "C" {
+ #endif
+ extern drm_export int drmIoctl(int fd, unsigned long request, void *arg);
++#if defined(__cplusplus)
++}
++#endif
++#include <npk_intel_virtio.h>
++#if defined(__cplusplus)
++extern "C" {
++#endif
+ 
+ static inline int mos_query_device_type(int fd)
+ {
+@@ -443,6 +450,11 @@ static inline int mos_query_device_type(int fd)
+     {
+         device_type = DEVICE_TYPE_XE;
+     }
++    else if(npk_is_intel_virtio_fd(fd))
++    {
++        // nopeekOS: virtio_gpu carrying the i915 uAPI (npk_intel_virtio).
++        device_type = DEVICE_TYPE_I915;
++    }
+     else
+     {
+         fprintf(stderr, "DRM_IOCTL_VERSION, unsupported drm device by media driver: %s\n", name);
+diff --git a/media_softlet/linux/common/os/i915/mos_bufmgr.c b/media_softlet/linux/common/os/i915/mos_bufmgr.c
+index bca411b..aa99629 100644
+--- a/media_softlet/linux/common/os/i915/mos_bufmgr.c
++++ b/media_softlet/linux/common/os/i915/mos_bufmgr.c
+@@ -1633,6 +1633,21 @@ mos_gem_bo_free(struct mos_linux_bo *bo)
+     free(bo);
+ }
+ 
++/*
++ * nopeekOS: the CPU mapping of an object after I915_GEM_MMAP_OFFSET (or
++ * MMAP_GTT) chose its caching. On virtio_gpu the object is a blob mapped
++ * through the virtio backend, as iris does (intel_virtio_bo_mmap).
++ */
++static void *
++mos_gem_bo_mmap(struct mos_bufmgr_gem *bufmgr_gem, struct mos_bo_gem *bo_gem,
++                size_t size, uint64_t offset)
++{
++    if (npk_is_intel_virtio_fd(bufmgr_gem->fd))
++        return npk_intel_virtio_bo_mmap(bufmgr_gem->fd, bo_gem->gem_handle, size);
++    return drm_mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED,
++                    bufmgr_gem->fd, offset);
++}
++
+ static void
+ mos_gem_bo_mark_mmaps_incoherent(struct mos_linux_bo *bo)
+ {
+@@ -1825,8 +1840,7 @@ map_wc(struct mos_linux_bo *bo)
+         }
+ 
+         /* and mmap it */
+-        bo_gem->mem_wc_virtual = drm_mmap(0, bo->size, PROT_READ | PROT_WRITE,
+-                           MAP_SHARED, bufmgr_gem->fd,
++        bo_gem->mem_wc_virtual = mos_gem_bo_mmap(bufmgr_gem, bo_gem, bo->size,
+                            mmap_arg.offset);
+         if (bo_gem->mem_wc_virtual == MAP_FAILED) {
+             bo_gem->mem_wc_virtual = nullptr;
+@@ -1985,8 +1999,7 @@ drm_export int mos_gem_bo_map(struct mos_linux_bo *bo, int write_enable)
+             }
+ 
+             /* and mmap it */
+-            bo_gem->mem_virtual = drm_mmap(0, bo->size, PROT_READ | PROT_WRITE,
+-                MAP_SHARED, bufmgr_gem->fd,
++            bo_gem->mem_virtual = mos_gem_bo_mmap(bufmgr_gem, bo_gem, bo->size,
+                 mmap_arg.offset);
+             if (bo_gem->mem_virtual == MAP_FAILED) {
+                 bo_gem->mem_virtual = nullptr;
+@@ -2123,8 +2136,7 @@ map_gtt(struct mos_linux_bo *bo)
+         }
+ 
+         /* and mmap it */
+-        bo_gem->gtt_virtual = drm_mmap(0, bo->size, PROT_READ | PROT_WRITE,
+-                           MAP_SHARED, bufmgr_gem->fd,
++        bo_gem->gtt_virtual = mos_gem_bo_mmap(bufmgr_gem, bo_gem, bo->size,
+                            offset);
+         if (bo_gem->gtt_virtual == MAP_FAILED) {
+             bo_gem->gtt_virtual = nullptr;
+diff --git a/media_softlet/linux/common/os/i915/xf86drm.c b/media_softlet/linux/common/os/i915/xf86drm.c
+index 9b2412c..0d17947 100644
+--- a/media_softlet/linux/common/os/i915/xf86drm.c
++++ b/media_softlet/linux/common/os/i915/xf86drm.c
+@@ -53,6 +53,7 @@
+ #include <sys/ioctl.h>
+ #include <sys/time.h>
+ #include <stdarg.h>
++#include <npk_intel_virtio.h>
+ #ifdef HAVE_SYS_MKDEV_H
+ # include <sys/mkdev.h> /* defines major(), minor(), and makedev() on Solaris */
+ #endif
+@@ -162,11 +163,36 @@ void drmFree(void *pt)
+ #if defined(__cplusplus)
+ extern "C" {
+ #endif
++/*
++ * nopeekOS: on a virtio_gpu render node the i915 ioctls, and the generic
++ * ones a GEM driver issues (GEM_CLOSE, FLINK, OPEN, PRIME, SYNCOBJ), go
++ * to Mesa's Intel virtio backend, as iris and anv send them; the rest
++ * (VERSION, GET_CAP, ...) is the virtio_gpu kernel driver's.
++ */
++static int
++npk_virtio_routed(unsigned long request)
++{
++    unsigned int nr = _IOC_NR(request);
++
++    if (nr >= DRM_COMMAND_BASE && nr < DRM_COMMAND_END)
++        return 1;
++    switch (nr) {
++    case 0x09: case 0x0a: case 0x0b:   /* GEM_CLOSE, GEM_FLINK, GEM_OPEN */
++    case 0x2d: case 0x2e:              /* PRIME_HANDLE_TO_FD, PRIME_FD_TO_HANDLE */
++        return 1;
++    default:
++        return nr >= 0xbf && nr <= 0xcd; /* SYNCOBJ_* */
++    }
++}
++
+ drm_export int
+ mosdrmIoctl(int fd, unsigned long request, void *arg)
+ {
+     int    ret;
+ 
++    if (npk_virtio_routed(request) && npk_is_intel_virtio_fd(fd))
++        return npk_intel_virtio_ioctl(fd, request, arg);
++
+     do {
+     ret = ioctl(fd, request, arg);
+     } while (ret == -1 && (errno == EINTR || errno == EAGAIN));

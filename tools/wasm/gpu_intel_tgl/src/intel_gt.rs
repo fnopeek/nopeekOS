@@ -151,6 +151,10 @@ pub struct intel_gt {
     /// submission order (`i915_request_add` → `i915_sw_fence_commit`).
     pub waiters: [u16; crate::i915_request::MAX_REQUESTS],
     pub nwaiters: usize,
+    /// The virtual engines of balanced contexts, and the count that orders
+    /// their places in each sibling's tree.
+    pub virtual_engines: alloc::vec::Vec<crate::intel_execlists_submission::virtual_engine>,
+    pub virtual_seq: u64,
 }
 
 impl intel_gt {
@@ -184,6 +188,8 @@ impl intel_gt {
             requests: [Default::default(); crate::i915_request::MAX_REQUESTS],
             waiters: [0; crate::i915_request::MAX_REQUESTS],
             nwaiters: 0,
+            virtual_engines: alloc::vec::Vec::new(),
+            virtual_seq: 0,
         }
     }
 }

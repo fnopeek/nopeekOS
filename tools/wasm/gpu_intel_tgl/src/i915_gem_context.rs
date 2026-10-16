@@ -55,6 +55,8 @@ pub struct client {
     /// `file_priv->vm_xa`: (id, vm slot).
     pub vm_ids: alloc::vec::Vec<(u32, u16)>,
     pub rings: [fence_ring; MAX_RINGS],
+    /// `file_priv->bsd_engine`: -1 until chosen.
+    pub bsd_engine: i16,
     /// Closed by the kernel; torn down once its requests are done.
     pub closing: bool,
     /// When it was closed, and whether what holds it was reported.
@@ -65,15 +67,46 @@ pub struct client {
 impl client {
     const EMPTY: client = client { used: false, id: 0, default_vm: NONE16, vm_ids: alloc::vec::Vec::new(),
                                    rings: [fence_ring { submitted: 0, completed: 0 }; MAX_RINGS],
-                                   closing: false, closing_us: 0, closing_told: false };
+                                   bsd_engine: -1, closing: false, closing_us: 0, closing_told: false };
 }
 
-/// `struct i915_gem_context`.
+/// `enum i915_gem_engine_type`.
+pub const ENGINE_TYPE_INVALID: u8 = 0;
+pub const ENGINE_TYPE_PHYSICAL: u8 = 1;
+pub const ENGINE_TYPE_BALANCED: u8 = 2;
+pub const ENGINE_TYPE_PARALLEL: u8 = 3;
+/// Siblings one slot keeps. The GT has fewer engines than this, so a
+/// longer list names one twice, which `execlists_create_virtual` refuses
+/// when the context is made; `too_many` carries that refusal there.
+pub const MAX_SIBLINGS: usize = 8;
+
+/// `struct i915_gem_proto_engine`: one slot of a user engine map.
+#[derive(Clone, Copy)]
+pub struct proto_engine {
+    pub kind: u8,
+    /// ENGINE_TYPE_PHYSICAL: the engine id.
+    pub engine: u8,
+    pub num_siblings: u8,
+    pub width: u8,
+    pub siblings: [u8; MAX_SIBLINGS],
+    pub too_many: bool,
+}
+
+impl proto_engine {
+    pub const INVALID: proto_engine = proto_engine { kind: ENGINE_TYPE_INVALID, engine: NONE8, num_siblings: 0, width: 0,
+                                                     siblings: [NONE8; MAX_SIBLINGS], too_many: false };
+}
+
+/// `struct i915_gem_context`, and before its first use the
+/// `i915_gem_proto_context` it is made from (`proto`).
 #[derive(Clone, Copy)]
 pub struct gem_ctx {
     pub used: bool,
     /// Destroyed by the client; recycled once its requests are done.
     pub closed: bool,
+    /// Not finalized yet (`file_priv->proto_context_xa`): parameters may
+    /// still be set, nothing runs on it, and `vm` may be unset.
+    pub proto: bool,
     pub client: u8,
     pub id: u32,
     pub vm: u16,
@@ -83,23 +116,29 @@ pub struct gem_ctx {
     pub persistent: bool,
     pub no_error_capture: bool,
     pub banned: bool,
+    /// I915_CONTEXT_CREATE_FLAGS_SINGLE_TIMELINE: every request waits for
+    /// the context's previous one (`ctx->syncobj`), which `syncobj` names.
+    pub single_timeline: bool,
+    pub syncobj: (u16, u32),
     /// `ctx->guilty_count`, `ctx->active_count`.
     pub guilty: u32,
     pub innocent: u32,
-    /// `I915_CONTEXT_PARAM_ENGINES`: slot → engine id, or the legacy map.
-    pub user_engines: bool,
-    pub n_engines: u8,
-    pub engines: [u8; MAX_USER_ENGINES],
+    /// `I915_CONTEXT_PARAM_ENGINES`: -1 for the legacy map.
+    pub num_user_engines: i16,
+    pub user_engines: [proto_engine; MAX_USER_ENGINES],
     /// The hardware context per engine slot (`ctx->engines`), in
     /// `gt.contexts`: a slot of the user engine map, or the engine id
-    /// for the legacy map. Two slots naming one engine have two contexts.
+    /// for the legacy map. Two slots naming one engine have two contexts;
+    /// a balanced slot's is the virtual engine's context.
     pub ce: [u16; MAX_USER_ENGINES],
 }
 
 impl gem_ctx {
-    const EMPTY: gem_ctx = gem_ctx { used: false, closed: false, client: 0, id: 0, vm: NONE16, priority: 0, recoverable: true,
-                                     bannable: true, persistent: true, no_error_capture: false, banned: false, guilty: 0,
-                                     innocent: 0, user_engines: false, n_engines: 0, engines: [NONE8; MAX_USER_ENGINES],
+    const EMPTY: gem_ctx = gem_ctx { used: false, closed: false, proto: false, client: 0, id: 0, vm: NONE16, priority: 0,
+                                     recoverable: true, bannable: true, persistent: true, no_error_capture: false,
+                                     banned: false, single_timeline: false, syncobj: (NONE16, 0), guilty: 0,
+                                     innocent: 0, num_user_engines: -1,
+                                     user_engines: [proto_engine::INVALID; MAX_USER_ENGINES],
                                      ce: [NONE16; MAX_USER_ENGINES] };
 }
 
@@ -200,13 +239,12 @@ pub struct pending {
     pub ticket: u64,
     pub rq: u16,
     pub ctx: u16,
-    pub engine: u8,
     /// When it was first seen running.
     pub started_us: u64,
 }
 
 impl pending {
-    const EMPTY: pending = pending { used: false, client: 0, ring: 0, ticket: 0, rq: 0, ctx: 0, engine: 0, started_us: 0 };
+    const EMPTY: pending = pending { used: false, client: 0, ring: 0, ticket: 0, rq: 0, ctx: 0, started_us: 0 };
 }
 
 /// An execbuffer waiting for room: where Linux blocks the caller
@@ -217,7 +255,8 @@ pub struct held_exec {
     pub client: u8,
     pub ring: u8,
     pub ticket: u64,
-    pub v2: bool,
+    /// `EXEC_V1`, `EXEC_V2` or `EXEC_NPK`.
+    pub kind: u8,
     pub req: alloc::vec::Vec<u8>,
     pub objs: alloc::vec::Vec<u16>,
 }
@@ -357,9 +396,53 @@ impl nctx {
         None
     }
 
-    /// `i915_gem_context_lookup`.
+    /// `__context_lookup`: a finalized context of client `c`.
     pub fn ctx(&self, c: u8, id: u32) -> Option<usize> {
+        self.ctxs.iter().position(|x| x.used && !x.closed && !x.proto && x.client == c && x.id == id)
+    }
+
+    /// A context of client `c`, finalized or still a proto context (an id
+    /// of `file_priv->context_xa`).
+    pub fn ctx_or_proto(&self, c: u8, id: u32) -> Option<usize> {
         self.ctxs.iter().position(|x| x.used && !x.closed && x.client == c && x.id == id)
+    }
+
+    /// `i915_gem_context_lookup`: a proto context is finalized on its first
+    /// use. Errors are negative.
+    pub fn ctx_lookup(&mut self, d: &mut drm, c: u8, id: u32) -> Result<usize, i32> {
+        let x = self.ctx_or_proto(c, id).ok_or(-ENOENT)?;
+        if self.ctxs[x].proto {
+            self.finalize(d, x)?;
+        }
+        Ok(x)
+    }
+
+    /// `finalize_create_context_locked` → `i915_gem_create_context`: the
+    /// proto context's address space, a new one if it named none, and its
+    /// engines. `user_engines` creates a virtual engine per balanced slot
+    /// here; the module makes it with the slot's hardware context
+    /// (`ctx_engine`), so only what `execlists_create_virtual` refuses is
+    /// checked now. Parallel slots (`execlists_create_parallel`, a request
+    /// per child in one execbuffer) are not ported and answer -ENODEV, as
+    /// a backend without them does. On failure it stays a proto context.
+    fn finalize(&mut self, d: &mut drm, x: usize) -> Result<(), i32> {
+        let n = self.ctxs[x].num_user_engines.max(0) as usize;
+        for k in 0..n {
+            let pe = self.ctxs[x].user_engines[k];
+            match pe.kind {
+                ENGINE_TYPE_BALANCED => {
+                    crate::intel_execlists_submission::virtual_siblings_ok(d.gt, &pe.siblings[..pe.num_siblings as usize],
+                                                                           pe.too_many)?
+                }
+                ENGINE_TYPE_PARALLEL => return Err(-ENODEV),
+                _ => {}
+            }
+        }
+        if self.ctxs[x].vm == NONE16 {
+            self.ctxs[x].vm = self.vm_create(d.i915, self.ctxs[x].client)?;
+        }
+        self.ctxs[x].proto = false;
+        Ok(())
     }
 
     /// `i915_gem_vm_lookup`.
@@ -661,32 +744,49 @@ impl nctx {
         npk_sys::gpudev_released(bo as i32);
     }
 
-    /// `i915_gem_create_context` with the proto context's settings: a
-    /// context without a VM gets an address space of its own.
-    pub fn ctx_create(&mut self, i915: &drm_i915_private, c: u8, vm: Option<u16>, id: u32) -> Result<usize, i32> {
-        let slot = match self.ctxs.iter().position(|x| !x.used) {
-            Some(k) => k,
+    /// A free context slot.
+    fn ctx_slot(&mut self) -> Result<usize, i32> {
+        match self.ctxs.iter().position(|x| !x.used) {
+            Some(k) => Ok(k),
             None if self.ctxs.len() < NONE16 as usize => {
                 self.ctxs.push(gem_ctx::EMPTY);
-                self.ctxs.len() - 1
+                Ok(self.ctxs.len() - 1)
             }
-            None => return Err(-ENOMEM),
-        };
-        let vm = match vm {
-            Some(v) => {
-                self.vm_get(v);
-                v
-            }
-            None => self.vm_create(i915, c)?,
-        };
+            None => Err(-ENOMEM),
+        }
+    }
+
+    /// `i915_gem_create_context` with the default proto context: the
+    /// file's context 0, with an address space of its own.
+    pub fn ctx_create(&mut self, i915: &drm_i915_private, c: u8, id: u32) -> Result<usize, i32> {
+        let slot = self.ctx_slot()?;
+        let vm = self.vm_create(i915, c)?;
         self.ctxs[slot] = gem_ctx { used: true, client: c, id, vm, ..gem_ctx::EMPTY };
         Ok(slot)
+    }
+
+    /// `proto_context_create` + `proto_context_register` (GRAPHICS_VER
+    /// 12): the context is finalized on its first use.
+    pub fn proto_create(&mut self, c: u8, id: u32, single_timeline: bool) -> Result<usize, i32> {
+        let slot = self.ctx_slot()?;
+        self.ctxs[slot] = gem_ctx { used: true, proto: true, client: c, id, single_timeline, ..gem_ctx::EMPTY };
+        Ok(slot)
+    }
+
+    /// `proto_context_close`: a proto context goes, with its hold on the
+    /// address space it named.
+    pub fn proto_close(&mut self, x: usize) {
+        let vm = self.ctxs[x].vm;
+        self.ctxs[x] = gem_ctx::EMPTY;
+        if vm != NONE16 {
+            self.vm_put(vm);
+        }
     }
 
     /// The next context id of client `c`: `xa_alloc` in a
     /// `XA_FLAGS_ALLOC1` array, the lowest free id from 1.
     pub fn next_ctx_id(&mut self, c: u8) -> u32 {
-        (1..).find(|&id| self.ctx(c, id).is_none()).unwrap_or(1)
+        (1..).find(|&id| self.ctx_or_proto(c, id).is_none()).unwrap_or(1)
     }
 
     /// `__assign_ppgtt`'s id: a new entry in `file_priv->vm_xa`.
@@ -707,17 +807,40 @@ impl nctx {
         Ok(())
     }
 
-    /// The hardware context of gem context `x` in engine slot `slot`, on
-    /// engine `engine` (`i915_gem_context_get_engine`): created on first
-    /// use, from the pool when an idle one is there, with the context's
-    /// address space and a 16K ring (`intel_context_set_gem`).
-    pub fn ctx_engine(&mut self, d: &mut drm, x: usize, slot: u8, engine: u8) -> Result<usize, i32> {
+    /// The hardware context of gem context `x` in engine slot `slot`
+    /// (`i915_gem_context_get_engine`): created on first use, from the pool
+    /// when an idle one is there, with the context's address space and a
+    /// 16K ring (`intel_context_set_gem`). A balanced slot's is a virtual
+    /// engine's context (`intel_engine_create_virtual`), made on the
+    /// virtual engine's first sibling. The legacy map's slot is the engine id.
+    pub fn ctx_engine(&mut self, d: &mut drm, x: usize, slot: u8) -> Result<usize, i32> {
         let have = self.ctxs[x].ce[slot as usize];
         if have != NONE16 {
             return Ok(have as usize);
         }
         let pd = self.vms.get(self.ctxs[x].vm as usize).and_then(|v| v.as_ref()).map(|v| v.ppgtt.pd_dma())
             .ok_or(-EINVAL)?;
+        let (engine, virt) = if self.ctxs[x].num_user_engines < 0 {
+            (slot, None)
+        } else {
+            let pe = self.ctxs[x].user_engines[slot as usize];
+            match pe.kind {
+                ENGINE_TYPE_PHYSICAL => (pe.engine, None),
+                ENGINE_TYPE_BALANCED => {
+                    let v = crate::intel_execlists_submission::execlists_create_virtual(
+                        d.gt, &pe.siblings[..pe.num_siblings as usize])?;
+                    // Its image comes from a pooled context of a sibling when
+                    // there is one; that sibling then goes first.
+                    let sib = &pe.siblings[..pe.num_siblings as usize];
+                    if let Some(&c) = self.pool[..self.npool].iter()
+                        .find(|&&c| sib.contains(&(d.gt.contexts[c as usize].engine as u8))) {
+                        crate::intel_execlists_submission::virtual_prefer(d.gt, v, d.gt.contexts[c as usize].engine as u8);
+                    }
+                    (crate::intel_execlists_submission::virtual_first_sibling(d.gt, v).ok_or(-EINVAL)? as u8, Some(v))
+                }
+                _ => return Err(-EINVAL),
+            }
+        };
         let ce = match self.pool[..self.npool].iter().position(|&c| d.gt.contexts[c as usize].engine == engine as u32) {
             Some(k) => {
                 let ce = self.pool[k] as usize;
@@ -725,21 +848,48 @@ impl nctx {
                 self.npool -= 1;
                 ce
             }
-            None => {
-                let ce = crate::intel_context::intel_context_create(d.gt, engine as u32)?;
-                d.gt.contexts[ce].ring_size = 16 * 1024;
-                ce
-            }
+            None => match crate::intel_context::intel_context_create(d.gt, engine as u32) {
+                Ok(ce) => {
+                    d.gt.contexts[ce].ring_size = 16 * 1024;
+                    ce
+                }
+                Err(e) => {
+                    if let Some(v) = virt {
+                        crate::intel_execlists_submission::virtual_engine_destroy(d.gt, v);
+                    }
+                    return Err(e);
+                }
+            },
         };
+        if let Some(v) = virt {
+            // intel_context_init(&ve->context, &ve->base): no SSEU of its own.
+            d.gt.contexts[ce].engine = v;
+            d.gt.contexts[ce].sseu = Default::default();
+            crate::intel_execlists_submission::virtual_set_context(d.gt, v, ce);
+        }
         d.gt.contexts[ce].vm_pd = pd;
         d.gt.contexts[ce].init = false;
         if let Err(e) = crate::intel_context::intel_context_pin(d.i915, d.gt, d.ggtt, ce) {
-            self.pool[self.npool] = ce as u16;
-            self.npool += 1;
+            self.pool_put(d.gt, ce);
             return Err(e);
         }
         self.ctxs[x].ce[slot as usize] = ce as u16;
         Ok(ce)
+    }
+
+    /// An idle hardware context back to the pool. A virtual engine's goes
+    /// with its engine (`virtual_context_destroy`) and is kept as a context
+    /// of the sibling its image was last on.
+    fn pool_put(&mut self, gt: &mut intel_gt, ce: usize) {
+        let e = gt.contexts[ce].engine;
+        if crate::intel_execlists_submission::is_virtual(e) {
+            let first = crate::intel_execlists_submission::virtual_first_sibling(gt, e).unwrap_or(0);
+            crate::intel_execlists_submission::virtual_engine_destroy(gt, e);
+            gt.contexts[ce].engine = first as u32;
+            gt.contexts[ce].sseu = gt.engine[first].map(|x| x.sseu).unwrap_or_default();
+        }
+        self.pool[self.npool] = ce as u16;
+        self.npool += 1;
     }
 
     /// A destroyed context whose requests are all done goes: its hardware
@@ -763,13 +913,14 @@ impl nctx {
             let ce = self.ctxs[x].ce[k];
             if ce != NONE16 {
                 crate::intel_context::intel_context_unpin(gt, ce as usize);
-                self.pool[self.npool] = ce;
-                self.npool += 1;
+                self.pool_put(gt, ce as usize);
             }
         }
         let vm = self.ctxs[x].vm;
         self.ctxs[x] = gem_ctx::EMPTY;
-        self.vm_put(vm);
+        if vm != NONE16 {
+            self.vm_put(vm);
+        }
         true
     }
 
@@ -789,10 +940,30 @@ impl nctx {
     }
 
     /// The pending fence `ticket` on `ring` of client `c` for request `rq`.
-    pub fn pend_add(&mut self, c: u8, ring: u8, rq: usize, ctx: usize, engine: u8, ticket: u64) {
+    pub fn pend_add(&mut self, c: u8, ring: u8, rq: usize, ctx: usize, ticket: u64) {
         if let Some(p) = self.pend.iter_mut().find(|p| !p.used) {
-            *p = pending { used: true, client: c, ring, ticket, rq: rq as u16, ctx: ctx as u16, engine, started_us: 0 };
+            *p = pending { used: true, client: c, ring, ticket, rq: rq as u16, ctx: ctx as u16, started_us: 0 };
         }
+    }
+
+    /// The request of client `c`'s execbuffer `ticket` on `ring`, while its
+    /// fence is open; None once it signalled or when it made none.
+    pub fn pending_request(&self, c: u8, ring: u8, ticket: u64) -> Option<usize> {
+        self.pend.iter().find(|p| p.used && p.client == c && p.ring == ring && p.ticket == ticket).map(|p| p.rq as usize)
+    }
+
+    /// `gen8_dispatch_bsd_engine`: the video engine instance client `c`
+    /// sends BSD work to, picked at random among `count` on first use.
+    pub fn bsd_engine(&mut self, c: u8, count: u16) -> u16 {
+        let cl = &mut self.clients[c as usize];
+        if cl.bsd_engine < 0 {
+            let mut r = [0u8; 4];
+            if npk_sys::random_bytes(&mut r) < 0 {
+                r = [0; 4];
+            }
+            cl.bsd_engine = (u32::from_le_bytes(r) % count.max(1) as u32) as i16;
+        }
+        cl.bsd_engine as u16
     }
 
     /// Whether a request can be added for client work without overflowing
@@ -854,7 +1025,7 @@ impl nctx {
             if crate::i915_request::__i915_request_has_started(gt, rq) {
                 if p.started_us == 0 {
                     self.pend[k].started_us = now.max(1);
-                } else if now - p.started_us > hang_us(gt, p.engine as usize) {
+                } else if now - p.started_us > hang_us(gt, gt.requests[rq].engine as usize) {
                     hung = Some(k);
                 }
             }
@@ -905,15 +1076,16 @@ impl nctx {
         }
         if let Some(k) = hung {
             let p = self.pend[k];
+            let engine = gt.requests[p.rq as usize].engine as usize;
             let cx = &mut self.ctxs[p.ctx as usize];
             cx.guilty += 1;
             if cx.bannable {
                 cx.banned = true;
             }
             Line::new().s("native context: client ").dec(self.clients[p.client as usize].id as u64).s(" context ")
-                .dec(cx.id as u64).s(" hung on engine ").dec(p.engine as u64)
+                .dec(cx.id as u64).s(" hung on engine ").dec(engine as u64)
                 .s("; no engine reset is ported, wedging the GT").say();
-            crate::intel_engine_cs::intel_engine_print_registers(i915, gt, p.engine as usize);
+            crate::intel_engine_cs::intel_engine_print_registers(i915, gt, engine);
             crate::intel_gt::gen8_check_faults(i915);
             crate::intel_gt::intel_gt_set_wedged(i915, gt);
             return true;
@@ -967,7 +1139,7 @@ pub fn client_open(st: &mut nctx, i915: &drm_i915_private, id: u32) -> Result<()
         None => return Err(-ENOMEM),
     };
     st.clients[c] = client { used: true, id, ..client::EMPTY };
-    match st.ctx_create(i915, c as u8, None, 0) {
+    match st.ctx_create(i915, c as u8, 0) {
         Ok(x) => {
             st.clients[c].default_vm = st.ctxs[x].vm;
             Ok(())
@@ -1017,7 +1189,7 @@ impl nctx {
             let r = gt.requests[rq];
             let mut l = Line::new();
             l.s("  rq ").dec(rq as u64).s(" ctx ").dec(r.ce as u64).s(" seqno ").dec(r.seqno as u64)
-                .s(" engine ").dec(p.engine as u64).s(": used ").dec(r.used as u64).s(" held ").dec(r.waiting as u64)
+                .s(" engine ").dec(r.engine as u64).s(": used ").dec(r.used as u64).s(" held ").dec(r.waiting as u64)
                 .s(" queued ").dec(r.pqueue as u64).s(" active ").dec(r.active as u64)
                 .s(" started ").dec(crate::i915_request::__i915_request_has_started(gt, rq) as u64)
                 .s(" complete ").dec(crate::i915_request::__i915_request_is_complete(gt, rq) as u64)
@@ -1039,10 +1211,19 @@ impl nctx {
         for x in 0..self.ctxs.len() {
             if self.ctxs[x].used && self.ctxs[x].client == c8 && !self.ctx_reap(gt, x) {
                 // Not idle (only after a wedge): its hardware contexts are
-                // dropped from the pool rather than reused.
+                // dropped from the pool rather than reused, its virtual
+                // engines go.
+                for &ce in self.ctxs[x].ce.iter().filter(|&&ce| ce != NONE16) {
+                    let e = gt.contexts[ce as usize].engine;
+                    if crate::intel_execlists_submission::is_virtual(e) {
+                        crate::intel_execlists_submission::virtual_engine_destroy(gt, e);
+                    }
+                }
                 let vm = self.ctxs[x].vm;
                 self.ctxs[x] = gem_ctx::EMPTY;
-                self.vm_put(vm);
+                if vm != NONE16 {
+                    self.vm_put(vm);
+                }
             }
         }
         for (_, vm) in core::mem::take(&mut self.clients[c].vm_ids) {

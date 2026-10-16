@@ -73,7 +73,7 @@ fn vcpu_core_clocks() -> [(u64, u64); MAX_FREQ_VCPUS] {
 const APP_EXEC_LABEL: &str = "session: app exec";
 /// The session's line right before it starts the app: the window shows from
 /// here on.
-const APP_EXEC_LINE: &str = "[wl] librewolf exec";
+const APP_EXEC_LINE: &str = "[wl] app exec";
 /// Guest console line after which the app is gone and its window closing.
 const APP_EXITED_LABEL: &str = "session: browser exited";
 
