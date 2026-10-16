@@ -259,6 +259,15 @@ pub struct i915_ppgtt {
 }
 
 impl i915_ppgtt {
+    /// `gen8_ppgtt_cleanup`: the tree and the scratch pages go back after
+    /// the next full TLB invalidation.
+    pub fn cleanup(self) {
+        __gen8_ppgtt_cleanup(self.pd);
+        for obj in self.scratch {
+            free_px(obj);
+        }
+    }
+
     /// `px_dma(ppgtt->pd)`.
     pub fn pd_dma(&self) -> u64 {
         self.pd.obj.phys

@@ -12,6 +12,8 @@
 //! for the next client when one goes: an address space is emptied (its
 //! page tables go to its stash), a context waits idle in a pool.
 
+use alloc::collections::BTreeMap;
+
 use crate::gen8_ppgtt::i915_ppgtt;
 use crate::i915_drv::drm_i915_private;
 use crate::i915_uapi::*;
@@ -21,9 +23,6 @@ use crate::linux::{self, Line};
 use crate::regs::{COPY_ENGINE_CLASS, I915_GTT_PAGE_SIZE, I915_NUM_ENGINES, RENDER_CLASS, TGL_PAT_CACHE_LLC, VIDEO_DECODE_CLASS, VIDEO_ENHANCEMENT_CLASS};
 use npk_sys::cell::Single;
 
-pub const MAX_CLIENTS: usize = 8;
-pub const MAX_VMS: usize = 8;
-pub const MAX_GEM_CTX: usize = 64;
 pub const MAX_OBJECTS: usize = 8192;
 /// Fence rings per client (virglrenderer's 64 timelines).
 pub const MAX_RINGS: usize = 64;
@@ -31,7 +30,6 @@ pub const MAX_RINGS: usize = 64;
 pub const MAX_USER_ENGINES: usize = 64;
 /// In-flight requests of all clients.
 pub const MAX_PENDING: usize = crate::i915_request::MAX_REQUESTS;
-const MAX_VM_IDS: usize = 16;
 const HASH: usize = 4096;
 const ENGINES: usize = I915_NUM_ENGINES as usize;
 pub const NONE16: u16 = u16::MAX;
@@ -48,15 +46,14 @@ pub struct fence_ring {
 }
 
 /// `struct drm_i915_file_private`.
-#[derive(Clone, Copy)]
 pub struct client {
     pub used: bool,
     /// The kernel's handle.
     pub id: u32,
     /// The address space of context 0.
-    pub default_vm: u8,
+    pub default_vm: u16,
     /// `file_priv->vm_xa`: (id, vm slot).
-    pub vm_ids: [(u32, u8); MAX_VM_IDS],
+    pub vm_ids: alloc::vec::Vec<(u32, u16)>,
     pub rings: [fence_ring; MAX_RINGS],
     /// Closed by the kernel; torn down once its requests are done.
     pub closing: bool,
@@ -66,7 +63,7 @@ pub struct client {
 }
 
 impl client {
-    const EMPTY: client = client { used: false, id: 0, default_vm: NONE8, vm_ids: [(0, NONE8); MAX_VM_IDS],
+    const EMPTY: client = client { used: false, id: 0, default_vm: NONE16, vm_ids: alloc::vec::Vec::new(),
                                    rings: [fence_ring { submitted: 0, completed: 0 }; MAX_RINGS],
                                    closing: false, closing_us: 0, closing_told: false };
 }
@@ -79,7 +76,7 @@ pub struct gem_ctx {
     pub closed: bool,
     pub client: u8,
     pub id: u32,
-    pub vm: u8,
+    pub vm: u16,
     pub priority: i32,
     pub recoverable: bool,
     pub bannable: bool,
@@ -100,7 +97,7 @@ pub struct gem_ctx {
 }
 
 impl gem_ctx {
-    const EMPTY: gem_ctx = gem_ctx { used: false, closed: false, client: 0, id: 0, vm: NONE8, priority: 0, recoverable: true,
+    const EMPTY: gem_ctx = gem_ctx { used: false, closed: false, client: 0, id: 0, vm: NONE16, priority: 0, recoverable: true,
                                      bannable: true, persistent: true, no_error_capture: false, banned: false, guilty: 0,
                                      innocent: 0, user_engines: false, n_engines: 0, engines: [NONE8; MAX_USER_ENGINES],
                                      ce: [NONE16; MAX_USER_ENGINES] };
@@ -109,11 +106,15 @@ impl gem_ctx {
 /// `struct i915_address_space`: a client's PPGTT. `ppgtt` stays when the
 /// slot is freed and is reused empty.
 pub struct vm_slot {
-    pub used: bool,
     pub client: u8,
     /// Context 0, the id table and every context using it.
     pub refs: u32,
-    pub ppgtt: Option<i915_ppgtt>,
+    pub ppgtt: i915_ppgtt,
+    /// The VMAs of this address space (`obj->vma.tree` per vm): object →
+    /// start.
+    pub vma: BTreeMap<u16, u64>,
+    /// `vm->mm`'s nodes: start → (object, size).
+    pub nodes: BTreeMap<u64, (u16, u64)>,
 }
 
 /// One object, with the requests that last used it per engine class.
@@ -127,10 +128,6 @@ pub struct gem_obj {
     pub pages: u32,
     pub tiling: u32,
     pub stride: u32,
-    /// Bindings, at most one per address space (a VMA per object and VM):
-    /// vm slot (NONE8 when unbound) and start.
-    pub vm: [u8; MAX_VMS],
-    pub start: [u64; MAX_VMS],
     /// `obj->base.resv`: the fences of this client's requests on it.
     pub fences: [resv_fence; RESV_FENCES],
     /// The next object on the same kernel buffer, a ring (itself when the
@@ -145,7 +142,7 @@ pub struct gem_obj {
 
 impl gem_obj {
     const EMPTY: gem_obj = gem_obj { used: false, client: 0, res_id: 0, bo: 0, size: 0, pages: 0, tiling: 0, stride: 0,
-                                     vm: [NONE8; MAX_VMS], start: [0; MAX_VMS], fences: [resv_fence::EMPTY; RESV_FENCES],
+                                     fences: [resv_fence::EMPTY; RESV_FENCES],
                                      share: NONE16, next: NONE16, zombie: false };
 }
 
@@ -226,9 +223,12 @@ pub struct held_exec {
 }
 
 pub struct nctx {
-    pub clients: [client; MAX_CLIENTS],
-    pub ctxs: [gem_ctx; MAX_GEM_CTX],
-    pub vms: [vm_slot; MAX_VMS],
+    /// `drm_file`s, and every client's GEM contexts; unused slots are
+    /// reused, trailing ones dropped.
+    pub clients: alloc::vec::Vec<client>,
+    pub ctxs: alloc::vec::Vec<gem_ctx>,
+    /// The address spaces (`i915_address_space`); None where one went.
+    pub vms: alloc::vec::Vec<Option<vm_slot>>,
     pub objs: [gem_obj; MAX_OBJECTS],
     hash: [u16; HASH],
     pub pend: [pending; MAX_PENDING],
@@ -244,9 +244,9 @@ pub struct nctx {
 }
 
 pub static NCTX: Single<nctx> = Single::new(nctx {
-    clients: [client::EMPTY; MAX_CLIENTS],
-    ctxs: [gem_ctx::EMPTY; MAX_GEM_CTX],
-    vms: [const { vm_slot { used: false, client: 0, refs: 0, ppgtt: None } }; MAX_VMS],
+    clients: alloc::vec::Vec::new(),
+    ctxs: alloc::vec::Vec::new(),
+    vms: alloc::vec::Vec::new(),
     objs: [gem_obj::EMPTY; MAX_OBJECTS],
     hash: [NONE16; HASH],
     pend: [pending::EMPTY; MAX_PENDING],
@@ -327,7 +327,7 @@ fn hang_us(gt: &intel_gt, engine: usize) -> u64 {
 
 /// A page-table tree that could not be built: the tables the address space
 /// holds and those pooled; a fixed number of lines.
-fn log_bind_failure(p: &crate::gen8_ppgtt::i915_ppgtt, vm: u8, start: u64, pages: u32, e: i32) {
+fn log_bind_failure(p: &crate::gen8_ppgtt::i915_ppgtt, vm: u16, start: u64, pages: u32, e: i32) {
     use core::sync::atomic::{AtomicU32, Ordering};
     const MAX_LINES: u32 = 8;
     static LINES: AtomicU32 = AtomicU32::new(0);
@@ -363,8 +363,8 @@ impl nctx {
     }
 
     /// `i915_gem_vm_lookup`.
-    pub fn vm_lookup(&self, c: u8, id: u32) -> Option<u8> {
-        self.clients[c as usize].vm_ids.iter().find(|x| x.1 != NONE8 && x.0 == id).map(|x| x.1)
+    pub fn vm_lookup(&self, c: u8, id: u32) -> Option<u16> {
+        self.clients[c as usize].vm_ids.iter().find(|x| x.0 == id).map(|x| x.1)
     }
 
     /// Whether object `i` is still used by a request of its client (its
@@ -464,56 +464,74 @@ impl nctx {
         }
     }
 
-    /// `i915_ppgtt_create`, or an emptied address space kept from before.
-    pub fn vm_create(&mut self, i915: &drm_i915_private, c: u8) -> Result<u8, i32> {
-        let slot = self.vms.iter().position(|v| !v.used && v.ppgtt.is_some())
-            .or_else(|| self.vms.iter().position(|v| !v.used))
-            .ok_or(-ENOMEM)?;
-        if self.vms[slot].ppgtt.is_none() {
-            self.vms[slot].ppgtt = Some(crate::gen8_ppgtt::i915_ppgtt_create(i915)?);
+    /// `i915_ppgtt_create`: a new address space in the first free slot.
+    pub fn vm_create(&mut self, i915: &drm_i915_private, c: u8) -> Result<u16, i32> {
+        let slot = match self.vms.iter().position(|v| v.is_none()) {
+            Some(k) => k,
+            None if self.vms.len() < NONE16 as usize => {
+                self.vms.push(None);
+                self.vms.len() - 1
+            }
+            None => return Err(-ENOMEM),
+        };
+        let ppgtt = crate::gen8_ppgtt::i915_ppgtt_create(i915)?;
+        self.vms[slot] = Some(vm_slot { client: c, refs: 1, ppgtt, vma: BTreeMap::new(), nodes: BTreeMap::new() });
+        Ok(slot as u16)
+    }
+
+    pub fn vm_get(&mut self, vm: u16) {
+        if let Some(Some(v)) = self.vms.get_mut(vm as usize) {
+            v.refs += 1;
         }
-        let v = &mut self.vms[slot];
-        v.used = true;
-        v.client = c;
-        v.refs = 1;
-        Ok(slot as u8)
     }
 
-    pub fn vm_get(&mut self, vm: u8) {
-        self.vms[vm as usize].refs += 1;
-    }
-
-    /// `i915_vm_put`: on the last reference every binding goes
-    /// (`i915_vm_close`), and the empty address space waits for reuse.
-    pub fn vm_put(&mut self, vm: u8) {
-        let v = &mut self.vms[vm as usize];
+    /// `i915_vm_put`: on the last reference its bindings go with it
+    /// (`i915_vm_close`) and the tree is released (`gen8_ppgtt_cleanup`)
+    /// after the next TLB invalidation.
+    pub fn vm_put(&mut self, vm: u16) {
+        let Some(Some(v)) = self.vms.get_mut(vm as usize) else { return };
         if v.refs > 1 {
             v.refs -= 1;
             return;
         }
-        v.refs = 0;
-        for i in 0..MAX_OBJECTS {
-                for k in 0..MAX_VMS {
-                if self.objs[i].vm[k] == vm {
-                    self.obj_unbind(i, k);
-                }
-            }
+        if let Some(v) = self.vms[vm as usize].take() {
+            v.ppgtt.cleanup();
+            self.tlb_dirty = true;
         }
-        self.vms[vm as usize].used = false;
+        while matches!(self.vms.last(), Some(None)) {
+            self.vms.pop();
+        }
     }
 
-    /// Binding `k` of object `i` cleared (`gen8_ppgtt_clear`).
-    pub fn obj_unbind(&mut self, i: usize, k: usize) {
-        let o = self.objs[i];
-        let vm = o.vm[k];
-        if vm == NONE8 {
-            return;
-        }
-        if let Some(p) = self.vms[vm as usize].ppgtt.as_mut() {
-            let _ = p.gen8_ppgtt_clear(o.start[k], o.pages as u64 * I915_GTT_PAGE_SIZE);
-        }
-        self.objs[i].vm[k] = NONE8;
+    /// The binding of object `i` in `vm` cleared (`gen8_ppgtt_clear`).
+    pub fn obj_unbind(&mut self, i: usize, vm: u16) {
+        let pages = self.objs[i].pages;
+        let Some(Some(v)) = self.vms.get_mut(vm as usize) else { return };
+        let Some(start) = v.vma.remove(&(i as u16)) else { return };
+        v.nodes.remove(&start);
+        let _ = v.ppgtt.gen8_ppgtt_clear(start, pages as u64 * I915_GTT_PAGE_SIZE);
         self.tlb_dirty = true;
+    }
+
+    /// Where object `i` is bound in `vm`.
+    pub fn obj_start(&self, i: usize, vm: u16) -> Option<u64> {
+        self.vms.get(vm as usize)?.as_ref()?.vma.get(&(i as u16)).copied()
+    }
+
+    /// The objects bound in `vm` that overlap `[start, start + size)`
+    /// (`drm_mm_for_each_node_in_range`).
+    pub fn vm_nodes_in_range(&self, vm: u16, start: u64, size: u64) -> alloc::vec::Vec<usize> {
+        let mut found = alloc::vec::Vec::new();
+        if let Some(Some(v)) = self.vms.get(vm as usize) {
+            // The nodes do not overlap, so their ends ascend with their starts.
+            for (&s, &(j, len)) in v.nodes.range(..start + size).rev() {
+                if s + len <= start {
+                    break;
+                }
+                found.push(j as usize);
+            }
+        }
+        found
     }
 
     /// `vma_invalidate_tlb` after unbinding: no engine may keep a
@@ -527,11 +545,11 @@ impl nctx {
 
     /// Object `i` bound at `start` of `vm` (`i915_vma_pin` with
     /// PIN_OFFSET_FIXED): the tree, then the pages from the kernel's list.
-    pub fn obj_bind(&mut self, i: usize, vm: u8, start: u64) -> Result<(), i32> {
+    pub fn obj_bind(&mut self, i: usize, vm: u16, start: u64) -> Result<(), i32> {
         let o = self.objs[i];
-        let k = o.vm.iter().position(|&x| x == NONE8).ok_or(-ENOSPC)?;
         let size = o.pages as u64 * I915_GTT_PAGE_SIZE;
-        let p = self.vms[vm as usize].ppgtt.as_mut().ok_or(-EINVAL)?;
+        let v = self.vms.get_mut(vm as usize).and_then(|v| v.as_mut()).ok_or(-EINVAL)?;
+        let p = &mut v.ppgtt;
         if let Err(e) = p.gen8_ppgtt_alloc(start, size) {
             log_bind_failure(p, vm, start, o.pages, e);
             return Err(e);
@@ -557,8 +575,8 @@ impl nctx {
             let _ = p.gen8_ppgtt_clear(start, size);
             return r;
         }
-        self.objs[i].vm[k] = vm;
-        self.objs[i].start[k] = start;
+        v.vma.insert(i as u16, start);
+        v.nodes.insert(start, (i as u16, size));
         Ok(())
     }
 
@@ -596,8 +614,8 @@ impl nctx {
 
     /// Object `i` unbound everywhere and forgotten.
     pub fn obj_free(&mut self, i: usize) {
-        for k in 0..MAX_VMS {
-            self.obj_unbind(i, k);
+        for vm in 0..self.vms.len() {
+            self.obj_unbind(i, vm as u16);
         }
         let next = self.objs[i].share;
         if next != NONE16 && next as usize != i {
@@ -645,8 +663,15 @@ impl nctx {
 
     /// `i915_gem_create_context` with the proto context's settings: a
     /// context without a VM gets an address space of its own.
-    pub fn ctx_create(&mut self, i915: &drm_i915_private, c: u8, vm: Option<u8>, id: u32) -> Result<usize, i32> {
-        let slot = self.ctxs.iter().position(|x| !x.used).ok_or(-ENOMEM)?;
+    pub fn ctx_create(&mut self, i915: &drm_i915_private, c: u8, vm: Option<u16>, id: u32) -> Result<usize, i32> {
+        let slot = match self.ctxs.iter().position(|x| !x.used) {
+            Some(k) => k,
+            None if self.ctxs.len() < NONE16 as usize => {
+                self.ctxs.push(gem_ctx::EMPTY);
+                self.ctxs.len() - 1
+            }
+            None => return Err(-ENOMEM),
+        };
         let vm = match vm {
             Some(v) => {
                 self.vm_get(v);
@@ -665,21 +690,19 @@ impl nctx {
     }
 
     /// `__assign_ppgtt`'s id: a new entry in `file_priv->vm_xa`.
-    pub fn vm_id_add(&mut self, c: u8, vm: u8) -> Result<u32, i32> {
+    pub fn vm_id_add(&mut self, c: u8, vm: u16) -> Result<u32, i32> {
         let cl = &mut self.clients[c as usize];
-        let k = cl.vm_ids.iter().position(|x| x.1 == NONE8).ok_or(-ENOMEM)?;
         // xa_alloc in an XA_FLAGS_ALLOC1 array: the lowest free id from 1.
-        let id = (1..).find(|&id| !cl.vm_ids.iter().any(|x| x.1 != NONE8 && x.0 == id)).unwrap_or(1);
-        cl.vm_ids[k] = (id, vm);
+        let id = (1..).find(|&id| !cl.vm_ids.iter().any(|x| x.0 == id)).unwrap_or(1);
+        cl.vm_ids.push((id, vm));
         self.vm_get(vm);
         Ok(id)
     }
 
     /// `I915_GEM_VM_DESTROY`.
     pub fn vm_id_remove(&mut self, c: u8, id: u32) -> Result<(), i32> {
-        let k = self.clients[c as usize].vm_ids.iter().position(|x| x.1 != NONE8 && x.0 == id).ok_or(-ENOENT)?;
-        let vm = self.clients[c as usize].vm_ids[k].1;
-        self.clients[c as usize].vm_ids[k] = (0, NONE8);
+        let k = self.clients[c as usize].vm_ids.iter().position(|x| x.0 == id).ok_or(-ENOENT)?;
+        let (_, vm) = self.clients[c as usize].vm_ids.swap_remove(k);
         self.vm_put(vm);
         Ok(())
     }
@@ -693,7 +716,8 @@ impl nctx {
         if have != NONE16 {
             return Ok(have as usize);
         }
-        let pd = self.vms[self.ctxs[x].vm as usize].ppgtt.as_ref().map(|p| p.pd_dma()).ok_or(-EINVAL)?;
+        let pd = self.vms.get(self.ctxs[x].vm as usize).and_then(|v| v.as_ref()).map(|v| v.ppgtt.pd_dma())
+            .ok_or(-EINVAL)?;
         let ce = match self.pool[..self.npool].iter().position(|&c| d.gt.contexts[c as usize].engine == engine as u32) {
             Some(k) => {
                 let ce = self.pool[k] as usize;
@@ -840,10 +864,13 @@ impl nctx {
                 self.report_ring(c, ring);
             }
         }
-        for x in 0..MAX_GEM_CTX {
+        for x in 0..self.ctxs.len() {
             if self.ctxs[x].used && self.ctxs[x].closed {
                 self.ctx_reap(gt, x);
             }
+        }
+        while self.ctxs.last().is_some_and(|x| !x.used) {
+            self.ctxs.pop();
         }
         if self.nzombies != 0 {
             for i in 0..MAX_OBJECTS {
@@ -853,7 +880,7 @@ impl nctx {
             }
         }
         if self.nclosing != 0 {
-            for c in 0..MAX_CLIENTS {
+            for c in 0..self.clients.len() {
                 let c8 = c as u8;
                 if !self.clients[c].used || !self.clients[c].closing {
                     continue;
@@ -871,6 +898,9 @@ impl nctx {
                     self.clients[c].closing_told = true;
                     self.report_closing(gt, c);
                 }
+            }
+            while self.clients.last().is_some_and(|c| !c.used) {
+                self.clients.pop();
             }
         }
         if let Some(k) = hung {
@@ -907,7 +937,7 @@ impl nctx {
     }
 
     fn advance_all(&mut self) {
-        for c in 0..MAX_CLIENTS {
+        for c in 0..self.clients.len() {
             if !self.clients[c].used {
                 continue;
             }
@@ -927,7 +957,15 @@ pub fn client_open(st: &mut nctx, i915: &drm_i915_private, id: u32) -> Result<()
     if st.client_slot(id).is_some() {
         return Err(-EINVAL);
     }
-    let c = st.clients.iter().position(|c| !c.used).ok_or(-ENOMEM)?;
+    // The slot is the client's u8 index in every table.
+    let c = match st.clients.iter().position(|c| !c.used) {
+        Some(k) => k,
+        None if st.clients.len() < NONE8 as usize => {
+            st.clients.push(client::EMPTY);
+            st.clients.len() - 1
+        }
+        None => return Err(-ENOMEM),
+    };
     st.clients[c] = client { used: true, id, ..client::EMPTY };
     match st.ctx_create(i915, c as u8, None, 0) {
         Ok(x) => {
@@ -953,7 +991,7 @@ pub fn client_close(st: &mut nctx, id: u32) -> Result<(), i32> {
     st.clients[c].closing_us = linux::now_us();
     st.clients[c].closing_told = false;
     st.nclosing += 1;
-    for x in 0..MAX_GEM_CTX {
+    for x in 0..st.ctxs.len() {
         if st.ctxs[x].used && st.ctxs[x].client == c as u8 {
             st.ctxs[x].closed = true;
         }
@@ -998,7 +1036,7 @@ impl nctx {
     /// gone.
     fn client_teardown(&mut self, i915: &mut drm_i915_private, gt: &mut intel_gt, c: usize) {
         let c8 = c as u8;
-        for x in 0..MAX_GEM_CTX {
+        for x in 0..self.ctxs.len() {
             if self.ctxs[x].used && self.ctxs[x].client == c8 && !self.ctx_reap(gt, x) {
                 // Not idle (only after a wedge): its hardware contexts are
                 // dropped from the pool rather than reused.
@@ -1007,23 +1045,22 @@ impl nctx {
                 self.vm_put(vm);
             }
         }
-        for k in 0..MAX_VM_IDS {
-            let (_, vm) = self.clients[c].vm_ids[k];
-            if vm != NONE8 {
-                self.clients[c].vm_ids[k] = (0, NONE8);
-                self.vm_put(vm);
-            }
+        for (_, vm) in core::mem::take(&mut self.clients[c].vm_ids) {
+            self.vm_put(vm);
         }
         for i in 0..MAX_OBJECTS {
             if self.objs[i].used && self.objs[i].client == c8 && !self.objs[i].zombie {
                 self.obj_free(i);
             }
         }
-        for v in 0..MAX_VMS {
-            if self.vms[v].used && self.vms[v].client == c8 {
-                self.vms[v].refs = 1;
-                self.vm_put(v as u8);
+        let mut v = 0;
+        while v < self.vms.len() {
+            if let Some(s) = self.vms[v].as_mut()
+                && s.client == c8 {
+                s.refs = 1;
+                self.vm_put(v as u16);
             }
+            v += 1;
         }
         for i in 0..MAX_OBJECTS {
             if self.objs[i].used && self.objs[i].client == c8 && self.objs[i].zombie {

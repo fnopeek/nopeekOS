@@ -320,7 +320,8 @@ fn set_domain(st: &mut nctx, d: &mut drm, i: usize, p: &[u8]) -> i32 {
 fn ctx_getparam(st: &mut nctx, x: usize, p: &mut [u8]) -> i32 {
     let param = rd64(p, 8);
     let value: u64 = match param {
-        I915_CONTEXT_PARAM_GTT_SIZE => st.vms[st.ctxs[x].vm as usize].ppgtt.as_ref().map(|v| v.total).unwrap_or(0),
+        I915_CONTEXT_PARAM_GTT_SIZE => st.vms.get(st.ctxs[x].vm as usize).and_then(|v| v.as_ref()).map(|v| v.ppgtt.total)
+            .unwrap_or(0),
         I915_CONTEXT_PARAM_RECOVERABLE => st.ctxs[x].recoverable as u64,
         I915_CONTEXT_PARAM_PRIORITY => st.ctxs[x].priority as i64 as u64,
         // get_ppgtt: a new id for the context's address space.
@@ -373,7 +374,7 @@ fn set_priority(prio: i64) -> Result<i32, i32> {
 
 /// The settings a proto context collects (`struct i915_gem_proto_context`).
 struct proto {
-    vm: Option<u8>,
+    vm: Option<u16>,
     priority: i32,
     recoverable: bool,
     bannable: bool,

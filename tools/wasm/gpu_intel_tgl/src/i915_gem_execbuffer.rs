@@ -233,11 +233,12 @@ fn log_execbuffer(c: u8, ring: u32, count: usize, batch_len: u32, ret: i32) {
 
 /// Earlier batches of address space `vm` that wrote through an unbound
 /// address, seen in its poisoned scratch page; a fixed number of lines.
-fn report_scratch_writes(st: &nctx, vm: u8, c: u8, ctx_id: u32) {
+fn report_scratch_writes(st: &nctx, vm: u16, c: u8, ctx_id: u32) {
     use core::sync::atomic::{AtomicU32, Ordering};
     const MAX_LINES: u32 = 8;
     static LINES: AtomicU32 = AtomicU32::new(0);
-    let Some(p) = st.vms[vm as usize].ppgtt.as_ref() else { return };
+    let Some(Some(v)) = st.vms.get(vm as usize) else { return };
+    let p = &v.ppgtt;
     if let Some((off, val)) = p.scratch_written()
         && LINES.fetch_add(1, Ordering::Relaxed) < MAX_LINES {
         linux::Line::new().s("native context: client slot ").dec(c as u64).s(" context ").dec(ctx_id as u64)
@@ -354,38 +355,24 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], p: exec_params, tic
     for i in 0..count {
         let v = vmas[i];
         let size = st.objs[v.obj].pages as u64 * I915_GTT_PAGE_SIZE;
-        let o = st.objs[v.obj];
-        if (0..MAX_VMS).any(|k| o.vm[k] == vm && o.start[k] == v.offset) {
-            continue;
-        }
-        for k in 0..MAX_VMS {
-            if o.vm[k] == vm {
+        match st.obj_start(v.obj, vm) {
+            Some(start) if start == v.offset => continue,
+            Some(_) => {
                 if st.obj_busy(d.gt, v.obj) {
                     return Err(why(EAGAIN, "moving a busy object"));
                 }
-                st.obj_unbind(v.obj, k);
+                st.obj_unbind(v.obj, vm);
             }
+            None => {}
         }
-        for j in 0..MAX_OBJECTS {
-            let other = st.objs[j];
-            if !other.used || j == v.obj {
-                continue;
+        for j in st.vm_nodes_in_range(vm, v.offset, size) {
+            if vmas[..i].iter().any(|w| w.obj == j) {
+                return Err(why(ENOSPC, "two objects of the request overlap"));
             }
-            for k in 0..MAX_VMS {
-                if other.vm[k] != vm {
-                    continue;
-                }
-                let (s, e) = (other.start[k], other.start[k] + other.pages as u64 * I915_GTT_PAGE_SIZE);
-                if s < v.offset + size && v.offset < e {
-                    if vmas[..i].iter().any(|w| w.obj == j) {
-                        return Err(why(ENOSPC, "two objects of the request overlap"));
-                    }
-                    if st.obj_busy(d.gt, j) {
-                        return Err(why(EAGAIN, "a busy object in the way"));
-                    }
-                    st.obj_unbind(j, k);
-                }
+            if st.obj_busy(d.gt, j) {
+                return Err(why(EAGAIN, "a busy object in the way"));
             }
+            st.obj_unbind(j, vm);
         }
         // The old translations of what was unbound go before the new one.
         st.tlb_flush(d.i915, d.gt);

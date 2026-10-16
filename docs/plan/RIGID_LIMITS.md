@@ -28,6 +28,7 @@ Stellen ohne Pfadpräfix: `tools/wasm/gpu_intel_tgl/src/` (Modul) bzw.
 | DMA nur unter 4 GB | Kernel 0.615.13 / Modul 0.19.1 — DMA-Maske je Gerät |
 | Screenshot: 33-MB-Puffer auf dem Kernel-Heap | Kernel 0.615.11 — zeilenweise in die App |
 | `get_info()` nahm `CONSOLE` unter `with_fb` (Selbstverklemmung) | Kernel 0.615.12 |
+| 2.1, 2.2, 2.3, 2.7, 2.8: Clients, Adressräume, GEM-Kontexte, Bindungen, VM-Ids fest | Modul 0.22.0 — wachsende Tabellen; jede VM hält ihre VMAs und `drm_mm`-Knoten, gibt ihren Baum beim letzten Put zurück (`gen8_ppgtt_cleanup`). Am Gerät gefunden: der neunte `VM_CREATE` (Firefox' Video-Dekoder) scheiterte, Mesa gab danach doppelt frei |
 | Rechtsklick nahm die Compositor-Sperre zweimal | Kernel 0.615.12 |
 | `CTX_DESTROY` verwarf seine Ressourcen ohne Freigabe (GEM-Leck) | Kernel 0.615.14 — Ressourcen gehören dem Gerät (virglrenderer) |
 | `MAX_RESOURCES` 256 für HOST3D | Kernel 0.615.14 — keine Zählgrenze |
