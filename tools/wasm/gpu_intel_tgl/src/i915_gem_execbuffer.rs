@@ -248,7 +248,9 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
 
     // eb_reserve with PIN_OFFSET_FIXED: each object at its offset. A
     // binding elsewhere, or another object in the way, is unbound once idle
-    // (`i915_gem_evict_for_node`); one of this request in the way is a clash.
+    // (`i915_gem_evict_for_node`), also one of this request that has not
+    // been placed yet (Mesa may give a cached object a new address); one
+    // already placed for this request is pinned there, and that is -ENOSPC.
     let vm = st.ctxs[x].vm;
     report_scratch_writes(st, vm, c, ctx_id);
     for i in 0..count {
@@ -277,8 +279,8 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
                 }
                 let (s, e) = (other.start[k], other.start[k] + other.pages as u64 * I915_GTT_PAGE_SIZE);
                 if s < v.offset + size && v.offset < e {
-                    if vmas[..count].iter().any(|w| w.obj == j) {
-                        return Err(why(EINVAL, "two objects of the request overlap"));
+                    if vmas[..i].iter().any(|w| w.obj == j) {
+                        return Err(why(ENOSPC, "two objects of the request overlap"));
                     }
                     if st.obj_busy(d.gt, j) {
                         return Err(why(EAGAIN, "a busy object in the way"));

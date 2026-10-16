@@ -83,33 +83,38 @@ pub struct GpudevBackend {
     imports: BTreeMap<(u32, u32), u32>,
     gem_bytes: u64,
     refused_logged: bool,
+    /// Lines `ccmd_failed` has written for this VM.
+    failed_lines: u32,
 }
 
 impl GpudevBackend {
     pub fn new(dev: PciAddr) -> Self {
-        GpudevBackend { dev, clients: BTreeMap::new(), imports: BTreeMap::new(), gem_bytes: 0, refused_logged: false }
+        GpudevBackend { dev, clients: BTreeMap::new(), imports: BTreeMap::new(), gem_bytes: 0, refused_logged: false, failed_lines: 0 }
     }
 
     /// A zeroed object of `size` bytes, its frames granted to the card.
-    fn object_create(&mut self, size: u64) -> Option<Object> {
-        let size = size.div_ceil(PAGE).checked_mul(PAGE)?;
-        if size == 0 || size > MAX_OBJECT || self.gem_bytes + size > MAX_GEM_BYTES {
+    fn object_create(&mut self, size: u64) -> Result<Object, &'static str> {
+        let size = size.div_ceil(PAGE).checked_mul(PAGE).ok_or("size")?;
+        if size == 0 || size > MAX_OBJECT {
+            return Err("size");
+        }
+        if self.gem_bytes + size > MAX_GEM_BYTES {
             self.log_refused(size);
-            return None;
+            return Err("the VM holds its GEM limit");
         }
         let pages = (size / PAGE) as usize;
         if super::guest_mem::frames_spare() < pages {
             self.log_refused(size);
-            return None;
+            return Err("host memory down to its reserve");
         }
         let mut list = Vec::new();
-        list.try_reserve_exact(pages).ok()?;
+        list.try_reserve_exact(pages).map_err(|_| "no heap for the page list")?;
         for _ in 0..pages {
             let Some(p) = crate::memory::allocate_frame() else {
                 for &q in &list {
                     crate::memory::deallocate_frame(q);
                 }
-                return None;
+                return Err("no free frame");
             };
             // SAFETY: a frame just allocated, identity-mapped, owned here.
             unsafe { core::ptr::write_bytes(p as *mut u8, 0, PAGE as usize) };
@@ -124,10 +129,10 @@ impl GpudevBackend {
             for &q in &frames.pages {
                 crate::memory::deallocate_frame(q);
             }
-            return None;
+            return Err("no GPU module");
         };
         self.gem_bytes += size;
-        Some(Object { id, frames, size, map_info: MAP_CACHE_CACHED, mmap_configured: false, mapped: false })
+        Ok(Object { id, frames, size, map_info: MAP_CACHE_CACHED, mmap_configured: false, mapped: false })
     }
 
     fn log_refused(&mut self, size: u64) {
@@ -155,13 +160,26 @@ impl GpudevBackend {
         blob_id != 0 && self.clients.get(&ctx).is_some_and(|c| !c.parked.contains_key(&blob_id))
     }
 
+    /// `drm_err` of a failed ccmd, with why; a fixed number of lines per VM.
+    fn ccmd_failed(&mut self, cmd: &str, why: &str, e: i32) -> i32 {
+        const MAX_LINES: u32 = 16;
+        if self.failed_lines < MAX_LINES {
+            self.failed_lines += 1;
+            crate::kprintln!("[gpu] native context: {} failed ({}): {}", cmd, e, why);
+        }
+        e
+    }
+
     /// `i915_ccmd_gem_create`.
     fn gem_create(&mut self, ctx: u32, req: &[u8]) -> Result<(), i32> {
         let (size, blob_id) = (q64(req, 16), d32(req, 24));
         if !self.blob_id_valid(ctx, blob_id) {
-            return Err(-EINVAL);
+            return Err(self.ccmd_failed("GEM_CREATE", "blob id 0 or already in use", -EINVAL));
         }
-        let o = self.object_create(size).ok_or(-ENOMEM)?;
+        let o = match self.object_create(size) {
+            Ok(o) => o,
+            Err(why) => return Err(self.ccmd_failed("GEM_CREATE", why, -ENOMEM)),
+        };
         self.park(ctx, blob_id, o);
         Ok(())
     }
@@ -171,10 +189,10 @@ impl GpudevBackend {
         const HDR: usize = 40;
         let (size, blob_id, ext_size) = (q64(req, 16), d32(req, 24), d32(req, 32) as usize);
         if d32(req, 4) as usize != HDR + ext_size || req.len() < HDR + ext_size {
-            return Err(-EINVAL);
+            return Err(self.ccmd_failed("GEM_CREATE_EXT", "request length", -EINVAL));
         }
         if !self.blob_id_valid(ctx, blob_id) {
-            return Err(-EINVAL);
+            return Err(self.ccmd_failed("GEM_CREATE_EXT", "blob id 0 or already in use", -EINVAL));
         }
         let payload = &req[HDR..HDR + ext_size];
         let mut ext_size = ext_size as i64;
@@ -185,7 +203,7 @@ impl GpudevBackend {
         while ext_size > 0 {
             // `struct i915_user_extension`: next_extension, name, flags, rsvd[4].
             if ext_size < 32 || ext + 32 > payload.len() {
-                return Err(-EINVAL);
+                return Err(self.ccmd_failed("GEM_CREATE_EXT", "extension header", -EINVAL));
             }
             match d32(payload, ext + 8) {
                 EXT_MEMORY_REGIONS => {
@@ -216,14 +234,17 @@ impl GpudevBackend {
                     }
                     ptr += 40;
                 }
-                _ => return Err(-EINVAL),
+                _ => return Err(self.ccmd_failed("GEM_CREATE_EXT", "unknown extension", -EINVAL)),
             }
             ext = ptr;
         }
         if ext_size != 0 {
-            return Err(-EINVAL);
+            return Err(self.ccmd_failed("GEM_CREATE_EXT", "extension sizes do not add up", -EINVAL));
         }
-        let mut o = self.object_create(size).ok_or(-ENOMEM)?;
+        let mut o = match self.object_create(size) {
+            Ok(o) => o,
+            Err(why) => return Err(self.ccmd_failed("GEM_CREATE_EXT", why, -ENOMEM)),
+        };
         if pat_index > -1 {
             o.mmap_configured = true;
             o.map_info = if pat_index == 1 { MAP_CACHE_WC } else { MAP_CACHE_CACHED };
@@ -339,8 +360,9 @@ impl Backend for GpudevBackend {
             CCMD_GEM_CREATE => self.gem_create(ctx, req),
             CCMD_GEM_CREATE_EXT => self.gem_create_ext(ctx, req),
             CCMD_GEM_SET_MMAP_MODE => self.gem_set_mmap_mode(ctx, req),
-            1..=CCMD_GEM_EXECBUFFER2_V2 => self.forward(ctx, cmd, req, rsp, deadline),
-            _ => Err(-EINVAL),
+            1..=CCMD_GEM_EXECBUFFER2_V2 => self.forward(ctx, cmd, req, rsp, deadline)
+                .map_err(|e| self.ccmd_failed("ccmd", "malformed", e)),
+            _ => Err(self.ccmd_failed("ccmd", "unknown command", -EINVAL)),
         }
     }
 

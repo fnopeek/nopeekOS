@@ -924,9 +924,7 @@ impl VirtioGpu {
                 build_ctrl_hdr(if ok { VIRTIO_GPU_RESP_OK_NODATA } else { VIRTIO_GPU_RESP_ERR_UNSPEC }, flags, fence_id)
             }
             VIRTIO_GPU_CMD_CTX_DESTROY => {
-                for res in self.ctxs.destroy(ctx_id) {
-                    self.drop_host3d(res);
-                }
+                self.ctxs.destroy(ctx_id);
                 build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
             }
             VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE | VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE => {
@@ -1049,7 +1047,9 @@ impl VirtioGpu {
 
     /// RESOURCE_CREATE_BLOB with `BLOB_MEM_HOST3D` in context `ctx_id`.
     fn create_host3d(&mut self, ctx_id: u32, res_id: u32, blob_id: u64, size: u64) -> u32 {
-        if res_id == 0 || self.resources.iter().any(|r| r.id == res_id) || self.resources.len() >= MAX_RESOURCES {
+        // No count limit (virglrenderer has none): the object's memory is
+        // held against the GEM limits when it is created.
+        if res_id == 0 || self.resources.iter().any(|r| r.id == res_id) {
             return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
         }
         if let Err(e) = self.ctxs.create_blob(ctx_id, res_id, blob_id, size) {

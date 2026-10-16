@@ -114,6 +114,9 @@ pub fn capset() -> Option<Vec<u8>> {
 /// visible window on MAP_BLOB.
 pub struct Host3d {
     pub ctx: u32,
+    /// The backend client of `ctx`: the resource outlives its context
+    /// (virglrenderer keeps resources per device), and is released there.
+    handle: u32,
     pub pages: Arc<ForeignPixels>,
     pub size: u64,
     pub map_info: u32,
@@ -176,12 +179,13 @@ impl Contexts {
         }
     }
 
-    pub fn destroy(&mut self, ctx_id: u32) -> Vec<u32> {
-        let Some(c) = self.ctxs.remove(&ctx_id) else { return Vec::new() };
+    /// CTX_DESTROY (`drm_context_destroy`): the context goes, its
+    /// resources stay until the guest unrefs them.
+    pub fn destroy(&mut self, ctx_id: u32) {
+        let Some(c) = self.ctxs.remove(&ctx_id) else { return };
         if let Some(b) = BACKEND.lock().as_mut() {
             b.destroy(c.handle);
         }
-        self.host3d.iter().filter(|(_, r)| r.ctx == ctx_id).map(|(id, _)| *id).collect()
     }
 
     /// RESOURCE_CREATE_BLOB with `BLOB_MEM_HOST3D` in context `ctx_id`.
@@ -205,8 +209,9 @@ impl Contexts {
             unsafe { core::ptr::write_volatile((phys + 4) as *mut u32, RSP_MEM_OFFSET as u32) };
             let list = (0..pages as u64).map(|i| phys + i * 4096).collect();
             c.shmem = Some(res_id);
+            let handle = c.handle;
             self.host3d.insert(res_id, Host3d {
-                ctx: ctx_id, pages: Arc::new(ForeignPixels::new(list)), size, map_info: MAP_CACHE_CACHED,
+                ctx: ctx_id, handle, pages: Arc::new(ForeignPixels::new(list)), size, map_info: MAP_CACHE_CACHED,
                 mapped: None, owned: true, shmem: true,
             });
             return Ok(());
@@ -218,7 +223,7 @@ impl Contexts {
             return Err(RESP_ERR_INVALID_PARAM);
         }
         self.host3d.insert(res_id, Host3d {
-            ctx: ctx_id, pages, size, map_info, mapped: None, owned: false, shmem: false,
+            ctx: ctx_id, handle, pages, size, map_info, mapped: None, owned: false, shmem: false,
         });
         Ok(())
     }
@@ -246,8 +251,8 @@ impl Contexts {
             if let Some(&first) = r.pages.pages.first() {
                 crate::memory::deallocate_contiguous(first, r.pages.pages.len());
             }
-        } else if let (Some(c), Some(b)) = (self.ctxs.get(&r.ctx), BACKEND.lock().as_mut()) {
-            b.release_blob(c.handle, &r.pages);
+        } else if let Some(b) = BACKEND.lock().as_mut() {
+            b.release_blob(r.handle, &r.pages);
         }
     }
 
@@ -267,15 +272,14 @@ impl Contexts {
         BACKEND.lock().as_mut().is_none_or(|b| b.fence_done(c.handle, ring, fence))
     }
 
-    /// Every context gone (device reset, VM end): what the caller unmaps
-    /// and drops first.
+    /// Every context gone (device reset, VM end); the HOST3D resources,
+    /// which the caller unmaps and drops.
     pub fn clear(&mut self) -> Vec<u32> {
         let ids: Vec<u32> = self.ctxs.keys().copied().collect();
-        let mut res = Vec::new();
         for id in ids {
-            res.extend(self.destroy(id));
+            self.destroy(id);
         }
-        res
+        self.host3d.keys().copied().collect()
     }
 }
 

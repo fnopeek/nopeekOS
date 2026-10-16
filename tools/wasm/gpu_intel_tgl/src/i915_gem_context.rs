@@ -55,10 +55,8 @@ pub struct client {
     pub id: u32,
     /// The address space of context 0.
     pub default_vm: u8,
-    pub next_ctx_id: u32,
     /// `file_priv->vm_xa`: (id, vm slot).
     pub vm_ids: [(u32, u8); MAX_VM_IDS],
-    pub next_vm_id: u32,
     pub rings: [fence_ring; MAX_RINGS],
     /// Closed by the kernel; torn down once its requests are done.
     pub closing: bool,
@@ -68,8 +66,8 @@ pub struct client {
 }
 
 impl client {
-    const EMPTY: client = client { used: false, id: 0, default_vm: NONE8, next_ctx_id: 1, vm_ids: [(0, NONE8); MAX_VM_IDS],
-                                   next_vm_id: 1, rings: [fence_ring { submitted: 0, completed: 0 }; MAX_RINGS],
+    const EMPTY: client = client { used: false, id: 0, default_vm: NONE8, vm_ids: [(0, NONE8); MAX_VM_IDS],
+                                   rings: [fence_ring { submitted: 0, completed: 0 }; MAX_RINGS],
                                    closing: false, closing_us: 0, closing_told: false };
 }
 
@@ -632,20 +630,18 @@ impl nctx {
         Ok(slot)
     }
 
-    /// The next context id of client `c` (`xa_alloc_cyclic` from 1).
+    /// The next context id of client `c`: `xa_alloc` in a
+    /// `XA_FLAGS_ALLOC1` array, the lowest free id from 1.
     pub fn next_ctx_id(&mut self, c: u8) -> u32 {
-        let cl = &mut self.clients[c as usize];
-        let id = cl.next_ctx_id;
-        cl.next_ctx_id = cl.next_ctx_id.wrapping_add(1).max(1);
-        id
+        (1..).find(|&id| self.ctx(c, id).is_none()).unwrap_or(1)
     }
 
     /// `__assign_ppgtt`'s id: a new entry in `file_priv->vm_xa`.
     pub fn vm_id_add(&mut self, c: u8, vm: u8) -> Result<u32, i32> {
         let cl = &mut self.clients[c as usize];
         let k = cl.vm_ids.iter().position(|x| x.1 == NONE8).ok_or(-ENOMEM)?;
-        let id = cl.next_vm_id;
-        cl.next_vm_id = cl.next_vm_id.wrapping_add(1).max(1);
+        // xa_alloc in an XA_FLAGS_ALLOC1 array: the lowest free id from 1.
+        let id = (1..).find(|&id| !cl.vm_ids.iter().any(|x| x.1 != NONE8 && x.0 == id)).unwrap_or(1);
         cl.vm_ids[k] = (id, vm);
         self.vm_get(vm);
         Ok(id)
