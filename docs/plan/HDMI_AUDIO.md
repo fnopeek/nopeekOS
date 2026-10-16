@@ -33,11 +33,11 @@ analogen Ausgang. Alles nach Linux 6.18.55 1:1.
 
 ## Stand
 
-Schritte 1, 2, 3 und 5 sind gebaut (gpu_intel_tgl 0.25.0, audio_hda 0.6.0):
-am NUC kommt der Ton über DP→HDMI aus dem Monitor, auch aus der microVM.
-Offen ist Schritt 4; bis dahin liest audio_hda die Präsenz am Pin und nimmt
-den Verbindungstyp aus den Pin-Fähigkeiten, und audio_hda muss im Autostart
-hinter gpu_intel_tgl stehen.
+Alle fünf Schritte sind gebaut (Kernel 0.620.0, gpu_intel_tgl 0.26.0,
+audio_hda 0.7.0); am NUC kommt der Ton über DP→HDMI aus dem Monitor, auch
+aus der microVM. Offen: das Codec-Wecken und die Audio-Stromdomäne auf
+Anfrage des Audiotreibers (`get_power`, `codec_wake_override`); heute hält
+die Anzeige den Strom, solange ein Sink Ton kann.
 
 ## Schritte
 

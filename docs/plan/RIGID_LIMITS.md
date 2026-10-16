@@ -126,7 +126,7 @@ Zeitüberschreitungen werden so zu Einfrierern oder zu dauerhaftem Schaden
 | 5.7 | `gpu/gpudev.rs:78`, `virtio_gpu_pci.rs:223` | GPU-Auftrag > 100 ms → CPU; FLUSH-Zaun ≤ 40 ms | Desktop auf CPU unter Last | zaungetrieben, Fristen nur zur Diagnose | M |
 | 5.8 | `gpudev.rs:58,61` | Desktop-Kopien: 80 ms Warteschlange, 10 s Start | blockiert die Dienstschleife | ohne Blockieren abschicken | M |
 | 5.9 | `virtio_gpu_pci.rs:183,719` | controlq 16; nach **jedem** FLUSH globale 1/60-s-Pause | alle Fenster teilen 60 Bilder/s, GL-Submits warten hinter Flushes | Zaun je Ausgabe bis zu deren vblank; Queue 256 | M |
-| 5.10 | `shade/mod.rs:1435` | Gastbilder ≤ 50 Hz, 20 Hz bei Mausbewegung | 60-fps-Video ruckelt | an vblank / GPU-Fertigmeldung takten | S |
+| 5.10 | `shade/mod.rs` | ~~Gastbilder ≤ 50 Hz, 20 Hz bei Mausbewegung~~ **Kernel 0.620.0:** mit GPU-Compositing 60 Hz, Weckzeit auf den Termin | 60-fps-Video ruckelte | offen: an die echte vblank takten | S |
 | 5.11 | `microvm/cpu/mod.rs:544,549` | 3 s bis QUIT, 10 s hart | Sitzungsspeichern abgeschnitten | fortschrittsabhängig | S |
 
 ## W6. Feste Zahlen statt aus dem RAM abgeleitet
