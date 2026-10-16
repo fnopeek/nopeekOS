@@ -407,6 +407,14 @@ impl FpuArea {
 /// [`MIN`, cap], floor to the 2-MB EPT/NPT leaf granularity. With enough
 /// free memory this is exactly the cap; it only shrinks on a RAM-starved
 /// host instead of failing `allocate_contiguous`.
+/// The guest's physical address width: the host's, which CPUID leaf
+/// 0x8000_0008 passes through.
+pub fn guest_phys_bits() -> u32 {
+    // Leaf 0x8000_0008 exists on every CPU with VMX or SVM.
+    let eax = core::arch::x86_64::__cpuid(0x8000_0008).eax;
+    (eax & 0xff).clamp(36, 52)
+}
+
 pub fn choose_guest_ram_bytes() -> u64 {
     const RESERVE_MB: usize = 256;
     const MIN_MB: usize = 256;

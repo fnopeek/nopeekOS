@@ -312,8 +312,6 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64, guest_bytes: u64) -> Option<u64
     }
 }
 
-/// PDPT slot of the host-visible window, [4 GiB, 5 GiB) (`devices::hostmem`).
-pub const WINDOW_PDPT: usize = 4;
 /// Page-level write-through, cache disable and PAT bits of a 4 KB leaf:
 /// they select the host PAT entry (`paging`: 0 WB, 3 UC, 5 WC).
 const NPT_PWT: u64 = 1 << 3;
@@ -336,7 +334,7 @@ unsafe fn window_leaf(pml4_phys: u64, gpa: u64, create: bool) -> Option<*mut u64
     // tables are fresh frames, zeroed before they are linked.
     unsafe {
         let pdpt = ((pml4_phys as *const u64).read_volatile() & NPT_ADDR_MASK) as *mut u64;
-        let slot = pdpt.add(WINDOW_PDPT);
+        let slot = pdpt.add((gpa / (1 << 30)) as usize);
         let mut pdpte = slot.read_volatile();
         if pdpte & NPT_P == 0 {
             if !create { return None; }
@@ -400,18 +398,20 @@ pub fn window_mapped(pml4_phys: u64, gpa: u64) -> bool {
 /// # Safety
 /// As `release`: nothing uses the NPT any more.
 unsafe fn release_window(pdpt: *const u64) {
-    // SAFETY: caller contract; identity-mapped tables of this NPT.
+    // SAFETY: caller contract; identity-mapped tables of this table tree.
     unsafe {
-        let pd_phys = pdpt.add(WINDOW_PDPT).read_volatile() & NPT_ADDR_MASK;
-        if pd_phys == 0 { return; }
-        let pd = pd_phys as *const u64;
-        for i in 0..512usize {
-            let pde = pd.add(i).read_volatile();
-            if pde & NPT_P != 0 {
-                memory::deallocate_frame(pde & NPT_ADDR_MASK);
+        for slot in crate::microvm::devices::hostmem::pdpt_slots() {
+            let pd_phys = pdpt.add(slot).read_volatile() & NPT_ADDR_MASK;
+            if pd_phys == 0 { continue; }
+            let pd = pd_phys as *const u64;
+            for i in 0..512usize {
+                let pde = pd.add(i).read_volatile();
+                if pde & NPT_P != 0 {
+                    memory::deallocate_frame(pde & NPT_ADDR_MASK);
+                }
             }
+            memory::deallocate_frame(pd_phys);
         }
-        memory::deallocate_frame(pd_phys);
     }
 }
 

@@ -302,6 +302,11 @@ pub fn reserve_region(base: u64, length: u64) {
     ALLOCATOR.lock().mark_region_used(base, length);
 }
 
+/// The top of physical memory: one past the highest frame there is.
+pub fn memory_top_bytes() -> u64 {
+    (ALLOCATOR.lock().memory_top * PAGE_SIZE) as u64
+}
+
 pub fn stats() -> (usize, usize) {
     let alloc = ALLOCATOR.lock();
     (alloc.free_count, alloc.free_count * PAGE_SIZE / (1024 * 1024))

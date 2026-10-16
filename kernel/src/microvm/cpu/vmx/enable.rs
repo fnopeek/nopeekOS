@@ -679,6 +679,7 @@ impl VmContext {
 
         // Everything past here is in VMX root: VMXOFF on any error.
         let build = || -> Result<VmContext, &'static str> {
+            crate::microvm::devices::hostmem::configure();
             let guest_bytes = crate::microvm::cpu::choose_guest_ram_bytes();
             let (boot_base, eptp, ept_pml4, guest_raw_base) =
                 alloc_guest_ram_and_ept(guest_bytes)?;

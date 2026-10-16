@@ -1,8 +1,11 @@
 //! The host-visible window of virtio-gpu (`VIRTIO_GPU_SHM_ID_HOST_VISIBLE`,
 //! docs/plan/GPU_STACK.md §4.3): host frames of GPU objects mapped straight
 //! into guest-physical space, so the guest maps a GPU buffer without a copy
-//! (`RESOURCE_MAP_BLOB`). The window is PDPT slot 4 of the EPT or NPT,
-//! [4 GiB, 5 GiB), outside guest RAM and the MMIO hole.
+//! (`RESOURCE_MAP_BLOB`). It is as large as the host's memory, rounded up
+//! to a power of two, so it fills no sooner than the memory it maps; a BAR
+//! lies at a multiple of its size, so the window does too, from 4 GiB on,
+//! above guest RAM and the MMIO hole (`configure`). It spans whole PDPT
+//! slots of the EPT or NPT.
 //!
 //! Mapping only adds entries (not present → present) and needs no flush.
 //! Unmapping removes them, and every core that ran a vCPU may still hold the
@@ -23,9 +26,42 @@ use spin::Mutex;
 
 use super::guest_mem::SecondLevel;
 
-pub const HOSTMEM_GPA: u64 = 0x1_0000_0000;
-pub const HOSTMEM_SIZE: u64 = 1 << 30;
 const PAGE: u64 = 4096;
+const ONE_GB: u64 = 1 << 30;
+const FOUR_GB: u64 = 4 << 30;
+
+/// Where the window lies and how large it is, set at `vm_open`.
+static WINDOW_GPA: AtomicU64 = AtomicU64::new(FOUR_GB);
+static WINDOW_SIZE: AtomicU64 = AtomicU64::new(ONE_GB);
+
+/// Size and place the window for the next VM: the host's memory top,
+/// rounded up to a power of two and at least 1 GiB, at a multiple of that
+/// from 4 GiB on, inside the guest's physical address width.
+pub fn configure() {
+    let phys_bits = crate::microvm::cpu::guest_phys_bits();
+    let limit = 1u64 << phys_bits;
+    let mut size = crate::memory::memory_top_bytes().max(ONE_GB).next_power_of_two();
+    while size > ONE_GB && size.max(FOUR_GB) + size > limit {
+        size /= 2;
+    }
+    WINDOW_SIZE.store(size, Ordering::Release);
+    WINDOW_GPA.store(size.max(FOUR_GB), Ordering::Release);
+}
+
+/// Guest-physical base of the window.
+pub fn gpa() -> u64 {
+    WINDOW_GPA.load(Ordering::Acquire)
+}
+
+/// Size of the window in bytes.
+pub fn size() -> u64 {
+    WINDOW_SIZE.load(Ordering::Acquire)
+}
+
+/// The PDPT slots the window spans.
+pub fn pdpt_slots() -> core::ops::Range<usize> {
+    (gpa() / ONE_GB) as usize..((gpa() + size()) / ONE_GB) as usize
+}
 /// Host cores whose "in guest" state is tracked (`cpu::in_guest`).
 const CORES: usize = 32;
 
@@ -45,7 +81,7 @@ static GEN: AtomicU64 = AtomicU64::new(0);
 static SEEN: [AtomicU64; CORES] = [const { AtomicU64::new(0) }; CORES];
 
 pub fn contains(gpa: u64) -> bool {
-    (HOSTMEM_GPA..HOSTMEM_GPA + HOSTMEM_SIZE).contains(&gpa)
+    (self::gpa()..self::gpa() + size()).contains(&gpa)
 }
 
 fn root() -> Option<(SecondLevel, u64)> {
@@ -57,7 +93,7 @@ fn root() -> Option<(SecondLevel, u64)> {
 /// made if a page is mapped already; the caller unmaps what it mapped.
 pub fn map(gpa_off: u64, host_phys: &[u64], cache: Cache) -> Result<(), &'static str> {
     let len = host_phys.len() as u64 * PAGE;
-    if gpa_off % PAGE != 0 || gpa_off.checked_add(len).is_none_or(|e| e > HOSTMEM_SIZE) {
+    if gpa_off % PAGE != 0 || gpa_off.checked_add(len).is_none_or(|e| e > size()) {
         return Err("outside the host-visible window");
     }
     if host_phys.iter().any(|p| p % PAGE != 0) {
@@ -66,7 +102,7 @@ pub fn map(gpa_off: u64, host_phys: &[u64], cache: Cache) -> Result<(), &'static
     let (sl, pml4) = root().ok_or("no microVM running")?;
     let _g = LOCK.lock();
     for (i, &host) in host_phys.iter().enumerate() {
-        let gpa = HOSTMEM_GPA + gpa_off + i as u64 * PAGE;
+        let gpa = self::gpa() + gpa_off + i as u64 * PAGE;
         match sl {
             SecondLevel::Ept => {
                 use crate::microvm::cpu::vmx::ept;
@@ -99,10 +135,10 @@ pub fn unmap(gpa_off: u64, pages: usize) {
     let mut removed = false;
     for i in 0..pages as u64 {
         let off = gpa_off + i * PAGE;
-        if off >= HOSTMEM_SIZE {
+        if off >= size() {
             break;
         }
-        let gpa = HOSTMEM_GPA + off;
+        let gpa = self::gpa() + off;
         removed |= match sl {
             SecondLevel::Ept => crate::microvm::cpu::vmx::ept::window_unmap(pml4, gpa),
             SecondLevel::Npt => crate::microvm::cpu::svm::npt::window_unmap(pml4, gpa),
@@ -179,7 +215,7 @@ pub fn flush_before_entry(host_core: usize) -> bool {
 pub struct Hole;
 
 impl super::MmioDevice for Hole {
-    fn bar0_base(&self) -> u64 { HOSTMEM_GPA }
+    fn bar0_base(&self) -> u64 { gpa() }
     fn mmio_read(&mut self, _off: u32, _width: u8) -> u64 { 0 }
     fn mmio_write(&mut self, _off: u32, _width: u8, _value: u64) {}
     fn take_pending_kick(&mut self) -> Option<u16> { None }

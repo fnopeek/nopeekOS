@@ -291,8 +291,6 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64, guest_bytes: u64) -> Option<u64
     }
 }
 
-/// PDPT slot of the host-visible window, [4 GiB, 5 GiB) (`devices::hostmem`).
-pub const WINDOW_PDPT: usize = 4;
 /// EPT memory types for a window page (SDM Vol. 3C §29.3.7).
 pub const MEMTYPE_UC: u64 = 0;
 pub const MEMTYPE_WC: u64 = 1;
@@ -309,7 +307,7 @@ unsafe fn window_leaf(pml4_phys: u64, gpa: u64, create: bool) -> Option<*mut u64
     // tables are fresh frames, zeroed before they are linked.
     unsafe {
         let pdpt = ((pml4_phys as *const u64).read_volatile() & EPT_ADDR_MASK) as *mut u64;
-        let slot = pdpt.add(WINDOW_PDPT);
+        let slot = pdpt.add((gpa / (1 << 30)) as usize);
         let mut pde_tab = slot.read_volatile();
         if pde_tab & EPT_R == 0 {
             if !create { return None; }
@@ -372,18 +370,20 @@ pub fn window_mapped(pml4_phys: u64, gpa: u64) -> bool {
 /// # Safety
 /// As `release`: nothing uses the EPT any more.
 unsafe fn release_window(pdpt: *const u64) {
-    // SAFETY: caller contract; identity-mapped tables of this EPT.
+    // SAFETY: caller contract; identity-mapped tables of this table tree.
     unsafe {
-        let pd_phys = pdpt.add(WINDOW_PDPT).read_volatile() & EPT_ADDR_MASK;
-        if pd_phys == 0 { return; }
-        let pd = pd_phys as *const u64;
-        for i in 0..512usize {
-            let pde = pd.add(i).read_volatile();
-            if pde & EPT_R != 0 {
-                memory::deallocate_frame(pde & EPT_ADDR_MASK);
+        for slot in crate::microvm::devices::hostmem::pdpt_slots() {
+            let pd_phys = pdpt.add(slot).read_volatile() & EPT_ADDR_MASK;
+            if pd_phys == 0 { continue; }
+            let pd = pd_phys as *const u64;
+            for i in 0..512usize {
+                let pde = pd.add(i).read_volatile();
+                if pde & EPT_R != 0 {
+                    memory::deallocate_frame(pde & EPT_ADDR_MASK);
+                }
             }
+            memory::deallocate_frame(pd_phys);
         }
-        memory::deallocate_frame(pd_phys);
     }
 }
 

@@ -1077,7 +1077,7 @@ impl VirtioGpu {
         r.map_info = map_info;
         let pages = r.size.div_ceil(4096) as usize;
         if offset % 4096 != 0
-            || offset.checked_add(pages as u64 * 4096).is_none_or(|e| e > super::hostmem::HOSTMEM_SIZE)
+            || offset.checked_add(pages as u64 * 4096).is_none_or(|e| e > super::hostmem::size())
         {
             return Err(VIRTIO_GPU_RESP_ERR_INVALID_PARAM);
         }
@@ -1754,12 +1754,12 @@ impl VirtioGpu {
             0x14 => if self.bar0_hi_sized { 0xFFFF_FFFF }       else { self.bar0_hi },
             // BAR2: the host-visible window, 64-bit prefetchable memory.
             0x18 if self.nativectx => {
-                if self.bar2_lo_sized { !(super::hostmem::HOSTMEM_SIZE as u32 - 1) | 0b1100 }
-                else { super::hostmem::HOSTMEM_GPA as u32 | 0b1100 }
+                if self.bar2_lo_sized { !((super::hostmem::size() - 1) as u32) | 0b1100 }
+                else { super::hostmem::gpa() as u32 | 0b1100 }
             }
             0x1C if self.nativectx => {
-                if self.bar2_hi_sized { !((super::hostmem::HOSTMEM_SIZE - 1) >> 32) as u32 }
-                else { (super::hostmem::HOSTMEM_GPA >> 32) as u32 }
+                if self.bar2_hi_sized { !((super::hostmem::size() - 1) >> 32) as u32 }
+                else { (super::hostmem::gpa() >> 32) as u32 }
             }
             0x18..=0x24 => 0,
             0x28 => 0,
@@ -1810,9 +1810,9 @@ impl VirtioGpu {
             0x98 if self.nativectx => 0x09 | (24 << 16) | ((VIRTIO_PCI_CAP_SHARED_MEMORY_CFG as u32) << 24),
             0x9C if self.nativectx => 2 | ((SHM_ID_HOST_VISIBLE as u32) << 8),
             0xA0 if self.nativectx => 0,
-            0xA4 if self.nativectx => super::hostmem::HOSTMEM_SIZE as u32,
+            0xA4 if self.nativectx => super::hostmem::size() as u32,
             0xA8 if self.nativectx => 0,
-            0xAC if self.nativectx => (super::hostmem::HOSTMEM_SIZE >> 32) as u32,
+            0xAC if self.nativectx => (super::hostmem::size() >> 32) as u32,
 
             _ => 0,
         }

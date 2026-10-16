@@ -834,6 +834,7 @@ impl VmContext {
         // per-core on the first VMRUN (`ensure_core_host_state`).
         enable_efer_svme()?;
 
+        crate::microvm::devices::hostmem::configure();
         let guest_bytes = crate::microvm::cpu::choose_guest_ram_bytes();
         let (boot_base, npt_root, guest_raw_base) = alloc_guest_ram_and_npt(guest_bytes)?;
         let gm = GuestMem::new(
