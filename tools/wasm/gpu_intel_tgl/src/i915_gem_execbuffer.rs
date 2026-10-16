@@ -355,10 +355,10 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], p: exec_params, tic
         let v = vmas[i];
         let size = st.objs[v.obj].pages as u64 * I915_GTT_PAGE_SIZE;
         let o = st.objs[v.obj];
-        if (0..2).any(|k| o.vm[k] == vm && o.start[k] == v.offset) {
+        if (0..MAX_VMS).any(|k| o.vm[k] == vm && o.start[k] == v.offset) {
             continue;
         }
-        for k in 0..2 {
+        for k in 0..MAX_VMS {
             if o.vm[k] == vm {
                 if st.obj_busy(d.gt, v.obj) {
                     return Err(why(EAGAIN, "moving a busy object"));
@@ -371,7 +371,7 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], p: exec_params, tic
             if !other.used || j == v.obj {
                 continue;
             }
-            for k in 0..2 {
+            for k in 0..MAX_VMS {
                 if other.vm[k] != vm {
                     continue;
                 }

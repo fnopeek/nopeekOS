@@ -127,9 +127,10 @@ pub struct gem_obj {
     pub pages: u32,
     pub tiling: u32,
     pub stride: u32,
-    /// Bindings: vm slot (NONE8 when unbound) and start.
-    pub vm: [u8; 2],
-    pub start: [u64; 2],
+    /// Bindings, at most one per address space (a VMA per object and VM):
+    /// vm slot (NONE8 when unbound) and start.
+    pub vm: [u8; MAX_VMS],
+    pub start: [u64; MAX_VMS],
     /// `obj->base.resv`: the fences of this client's requests on it.
     pub fences: [resv_fence; RESV_FENCES],
     /// The next object on the same kernel buffer, a ring (itself when the
@@ -144,7 +145,7 @@ pub struct gem_obj {
 
 impl gem_obj {
     const EMPTY: gem_obj = gem_obj { used: false, client: 0, res_id: 0, bo: 0, size: 0, pages: 0, tiling: 0, stride: 0,
-                                     vm: [NONE8; 2], start: [0; 2], fences: [resv_fence::EMPTY; RESV_FENCES],
+                                     vm: [NONE8; MAX_VMS], start: [0; MAX_VMS], fences: [resv_fence::EMPTY; RESV_FENCES],
                                      share: NONE16, next: NONE16, zombie: false };
 }
 
@@ -492,7 +493,7 @@ impl nctx {
         }
         v.refs = 0;
         for i in 0..MAX_OBJECTS {
-                for k in 0..2 {
+                for k in 0..MAX_VMS {
                 if self.objs[i].vm[k] == vm {
                     self.obj_unbind(i, k);
                 }
@@ -595,7 +596,7 @@ impl nctx {
 
     /// Object `i` unbound everywhere and forgotten.
     pub fn obj_free(&mut self, i: usize) {
-        for k in 0..2 {
+        for k in 0..MAX_VMS {
             self.obj_unbind(i, k);
         }
         let next = self.objs[i].share;
