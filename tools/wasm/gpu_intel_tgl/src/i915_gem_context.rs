@@ -335,7 +335,7 @@ fn log_bind_failure(p: &crate::gen8_ppgtt::i915_ppgtt, vm: u8, start: u64, pages
         crate::linux::Line::new().s("native context: binding ").dec(pages as u64).s(" pages at ")
             .hex((start >> 32) as u32).s("_").hex(start as u32).s(" in address space ").dec(vm as u64)
             .s(" failed (").dec((-e) as u64).s("): ").dec(p.tables() as u64).s(" tables in it, ")
-            .dec(crate::gen8_ppgtt::pooled_tables() as u64).s(" pooled").say();
+            .dec(crate::gen8_ppgtt::retired_tables() as u64).s(" retired").say();
     }
 }
 

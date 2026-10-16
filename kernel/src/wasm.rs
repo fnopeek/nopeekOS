@@ -78,6 +78,13 @@ pub(crate) struct HwDriverState {
     dma_limit: u64,
 }
 
+impl HwDriverState {
+    /// DMA buffers the driver holds (`npk_dma_free` empties a slot).
+    pub(crate) fn dma_live(&self) -> usize {
+        self.dma_allocs.iter().filter(|&&(_, p)| p != 0).count()
+    }
+}
+
 const MAX_MMIO_MAPS: usize = 4;
 /// Per-module DMA allocation slots. A WiFi driver needs many one-page
 /// receive buffers plus its rings (Linux allocates 2048 for the AX200). Each
@@ -1130,7 +1137,7 @@ pub(crate) fn release_hw(hw: HwDriverState) {
             crate::drivers::pci::release_module(hw.pci_addr);
         }
         let mut total_pages = 0usize;
-        for &(phys, pages) in &hw.dma_allocs {
+        for &(phys, pages) in hw.dma_allocs.iter().filter(|&&(_, p)| p != 0) {
             if confined {
                 crate::drivers::vtd::revoke(hw.pci_addr, phys, pages);
             }
@@ -1151,9 +1158,9 @@ pub(crate) fn release_hw(hw: HwDriverState) {
         if hw.irq_vector != 0 {
             crate::irq::release(hw.irq_vector);
         }
-        if (!display || confined) && (!hw.dma_allocs.is_empty() || hw.registered_as_netdev) {
+        if (!display || confined) && (hw.dma_live() != 0 || hw.registered_as_netdev) {
             kprintln!("[npk] driver cleanup: freed {} DMA buffers ({} pages)",
-                hw.dma_allocs.len(), total_pages);
+                hw.dma_live(), total_pages);
         }
     }
 }

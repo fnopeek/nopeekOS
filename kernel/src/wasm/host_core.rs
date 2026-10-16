@@ -2028,6 +2028,37 @@ pub(crate) fn npk_dma_set_mask(ctx: &mut HostState, bits: i32) -> i32 {
     0
 }
 
+/// A handle for the new buffer `phys`: a slot `npk_dma_free` emptied, else
+/// a new one.
+fn dma_slot(hw: &mut HwDriverState, phys: u64, pages: usize) -> usize {
+    match hw.dma_allocs.iter().position(|&(_, p)| p == 0) {
+        Some(h) => {
+            hw.dma_allocs[h] = (phys, pages);
+            h
+        }
+        None => {
+            hw.dma_allocs.push((phys, pages));
+            hw.dma_allocs.len() - 1
+        }
+    }
+}
+
+/// `dma_free_coherent`: the driver's buffer `handle` goes back. Behind
+/// VT-d the device loses it first; the handle is then empty and every
+/// access through it fails. 0, or -1 for a handle that holds nothing.
+pub(crate) fn npk_dma_free(ctx: &mut HostState, handle: i32) -> i32 {
+    let Some(hw) = ctx.hw.as_mut() else { return -1 };
+    let Some(&(phys, pages)) = usize::try_from(handle).ok().and_then(|h| hw.dma_allocs.get(h)) else { return -1 };
+    if pages == 0 { return -1; }
+    if hw.is_pci {
+        crate::drivers::vtd::revoke(hw.pci_addr, phys, pages);
+    }
+    crate::memory::deallocate_contiguous(phys, pages);
+    hw.dma_allocs[handle as usize] = (0, 0);
+    hw.dma_pages -= pages;
+    0
+}
+
 pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     let hw = match ctx.hw.as_mut() {
         Some(h) => h,
@@ -2036,7 +2067,7 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     if pages <= 0 || pages as usize > MAX_DMA_PAGES_PER_CALL { return -1; }
     let page_count = pages as usize;
     let (max_allocs, max_pages) = dma_caps(hw);
-    if hw.dma_allocs.len() >= max_allocs { return -1; }
+    if hw.dma_live() >= max_allocs { return -1; }
     if hw.dma_pages + page_count > max_pages { return -1; }
 
     // Below the device's DMA mask.
@@ -2046,8 +2077,7 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     };
     // SAFETY: zeroing freshly allocated DMA memory
     unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
-    let handle = hw.dma_allocs.len();
-    hw.dma_allocs.push((phys, page_count));
+    let handle = dma_slot(hw, phys, page_count);
     hw.dma_pages += page_count;
     if hw.is_pci {
         crate::drivers::vtd::grant(hw.pci_addr, phys, page_count);
@@ -2076,7 +2106,7 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     if pages <= 0 || pages as usize > MAX_DMA_PAGES_PER_CALL { return -1; }
     let page_count = pages as usize;
     let (max_allocs, max_pages) = dma_caps(hw);
-    if hw.dma_allocs.len() >= max_allocs { return -1; }
+    if hw.dma_live() >= max_allocs { return -1; }
     if hw.dma_pages + page_count > max_pages { return -1; }
 
     let limit = if limit_mb <= 0 {
@@ -2091,8 +2121,7 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     };
     // SAFETY: zeroing freshly allocated DMA memory
     unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
-    let handle = hw.dma_allocs.len();
-    hw.dma_allocs.push((phys, page_count));
+    let handle = dma_slot(hw, phys, page_count);
     hw.dma_pages += page_count;
     if hw.is_pci {
         crate::drivers::vtd::grant(hw.pci_addr, phys, page_count);
@@ -3075,9 +3104,9 @@ fn dma_range(ctx: &HostState, handle: i32, off: i32, len: i32) -> Option<(u64, u
 pub(crate) fn npk_dma_read(mem: &mut [u8], ctx: &mut HostState, handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32 {
     let Some((phys, len)) = dma_range(ctx, handle, dma_off, len) else { return -1 };
     let Some(dst) = guest_mut(mem, wasm_ptr, len) else { return -1 };
-    // SAFETY: `phys .. phys + len` lies inside one of this module's own DMA
-    // allocations (`dma_range`), which stay allocated while the module runs
-    // and are identity-mapped. The device may write it concurrently; the
+    // SAFETY: `phys .. phys + len` lies inside one of this module's own live
+    // DMA allocations (`dma_range`; a freed one has no pages), which are
+    // identity-mapped. The device may write it concurrently; the
     // bytes are copied as they are.
     let src = unsafe { core::slice::from_raw_parts(phys as *const u8, len) };
     dst.copy_from_slice(src);

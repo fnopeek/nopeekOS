@@ -1031,6 +1031,10 @@ host_imports! {
     // npk_dma_alloc(page_count) -> handle or -1
     ctx fn npk_dma_alloc(pages: i32) -> i32;
 
+    // npk_dma_free(handle) -> 0 or -1: the buffer goes back (behind VT-d
+    // the device loses it first); the handle is empty afterwards.
+    ctx fn npk_dma_free(handle: i32) -> i32;
+
     // npk_dma_set_mask(bits) -> 0 or -1: the device's DMA mask
     // (`dma_set_mask`); later buffers lie below `1 << bits`.
     ctx fn npk_dma_set_mask(bits: i32) -> i32;

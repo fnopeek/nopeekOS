@@ -269,8 +269,11 @@ const HALT_STEP_US: u64 = 500;
 /// Cores halted in `wait_seq`, one bit each; `complete` wakes them.
 static WAITING_CORES: AtomicU64 = AtomicU64::new(0);
 
-/// Status of the last 64 completed jobs, `seq << 32 | status`.
-static STATUS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+/// Failed jobs and their status, until the waiter reads it; a completed job
+/// that is not here succeeded. One nobody reads goes once every deadline
+/// that could wait for it has passed (`ERRORS_KEPT` jobs later).
+static ERRORS: Mutex<BTreeMap<u32, i32>> = Mutex::new(BTreeMap::new());
+const ERRORS_KEPT: u32 = 1 << 16;
 
 /// `a` is at or after `b` in sequence-number order.
 fn seq_ge(a: u32, b: u32) -> bool {
@@ -534,7 +537,11 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
     if status < 0 || seq % 64 == 0 {
         crate::drivers::vtd::poll(dev);
     }
-    STATUS[seq as usize % STATUS.len()].store((seq as u64) << 32 | status as u32 as u64, Ordering::Release);
+    if status != 0 {
+        let mut e = ERRORS.lock();
+        e.retain(|&s, _| seq.wrapping_sub(s) < ERRORS_KEPT);
+        e.insert(seq, status);
+    }
     COMPLETED.store(seq, Ordering::SeqCst);
     if STALLED.load(Ordering::Acquire) && seq_ge(seq, STALL_SEQ.load(Ordering::Acquire)) {
         STALLED.store(false, Ordering::Release);
@@ -963,8 +970,7 @@ fn wait_seq_yield(seq: u32, deadline: u64) -> i32 {
 /// more; None while it may still be.
 fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
     if seq_ge(COMPLETED.load(Ordering::Acquire), seq) {
-        let s = STATUS[seq as usize % STATUS.len()].load(Ordering::Acquire);
-        return Some(if (s >> 32) as u32 == seq { s as u32 as i32 } else { -5 });
+        return Some(ERRORS.lock().remove(&seq).unwrap_or(0));
     }
     if !READY.load(Ordering::Acquire) || crate::interrupts::rdtsc() >= deadline {
         // A job the module never took must not run after the CPU redid it.
@@ -1186,8 +1192,11 @@ pub fn ring_state(client: u32, ring: u32) -> (u64, u64) {
     RINGS.lock().get(&(client, ring)).copied().unwrap_or((0, 0))
 }
 
+/// Native work waits for the module as an ioctl waits for its driver:
+/// only the module's end stops it. A hang on the card is the module's to
+/// find (it wedges the GT and hands the card back).
 fn native_deadline() -> u64 {
-    crate::interrupts::rdtsc() + BIND_TIMEOUT_MS * (crate::interrupts::tsc_freq() / 1000)
+    u64::MAX
 }
 
 /// Open client `client` in the module (its own GPU address space).
@@ -1350,7 +1359,7 @@ pub enum Answer {
 /// Run guest ccmd `req` for `client` in the module and wait for its answer,
 /// at most until `deadline` (TSC).
 pub fn ccmd(client: u32, req: &[u8], deadline: u64) -> Answer {
-    if !READY.load(Ordering::Acquire) || !NATIVE.load(Ordering::Acquire) || stalled() {
+    if !READY.load(Ordering::Acquire) || !NATIVE.load(Ordering::Acquire) {
         return Answer::Failed;
     }
     let seq = {
@@ -1363,17 +1372,11 @@ pub fn ccmd(client: u32, req: &[u8], deadline: u64) -> Answer {
         seq
     };
     wake_module();
-    // Behind a job the module holds past its deadline nothing comes back in
-    // time: fail now instead of waiting out the submit's deadline.
+    // A desktop job the module holds late does not concern the guest: its
+    // ccmd waits behind it, as the ioctl would.
     let status = loop {
         if let Some(s) = seq_done(seq, deadline) {
             break s;
-        }
-        if stalled() {
-            let mut st = STATE.lock();
-            st.queue.retain(|j| j.seq != seq);
-            st.payloads.remove(&seq);
-            break -62;
         }
         fiber::spin_or_yield();
     };

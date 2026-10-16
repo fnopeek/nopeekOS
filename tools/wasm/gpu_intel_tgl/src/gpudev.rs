@@ -402,9 +402,11 @@ fn bo_add(gt: &mut intel_gt, svc: &mut service, id: u32) -> Result<(), i32> {
     Ok(())
 }
 
-/// `OP_BO_REMOVE`: unbound (`gen8_ppgtt_clear`) and forgotten. A buffer
-/// whose `OP_BO_ADD` failed is not known and needs nothing.
-fn bo_remove(gt: &mut intel_gt, svc: &mut service, id: u32) -> Result<(), i32> {
+/// `OP_BO_REMOVE`: unbound (`gen8_ppgtt_clear`), the TLBs invalidated
+/// before the kernel frees its pages (`vma_invalidate_tlb`), and
+/// forgotten. A buffer whose `OP_BO_ADD` failed is not known and needs
+/// nothing.
+fn bo_remove(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, id: u32) -> Result<(), i32> {
     if (id as usize) < NUM_BOS {
         return Err(-EINVAL);
     }
@@ -413,6 +415,7 @@ fn bo_remove(gt: &mut intel_gt, svc: &mut service, id: u32) -> Result<(), i32> {
     let vm = gt.vm.as_mut().ok_or(-EINVAL)?;
     let r = vm.gen8_ppgtt_clear(b.node.start, b.node.size);
     vm.mm.drm_mm_remove_node(&b.node);
+    crate::intel_tlb::intel_gt_invalidate_tlb_full(i915, gt);
     r
 }
 
@@ -551,7 +554,7 @@ fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i915_ggtt,
             }
             st(r)
         }
-        OP_BO_REMOVE => st(bo_remove(gt, svc, a[0])),
+        OP_BO_REMOVE => st(bo_remove(i915, gt, svc, a[0])),
         OP_SCENE => run_scene(i915, gt, svc, seq, a),
         OP_CLIENT => crate::i915_gem_context::NCTX.with(|st| {
             if a[1] != 0 {

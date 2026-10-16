@@ -16,10 +16,14 @@ const TLB_INVAL_TIMEOUT_US: u32 = 100;
 const TLB_INVAL_TIMEOUT_MS: u32 = 4;
 
 /// `intel_gt_invalidate_tlb_full`: every awake engine drops its TLB.
+/// Table pages taken out of a tree go back once it is done; a parked or
+/// wedged GT keeps no translation.
 pub fn intel_gt_invalidate_tlb_full(i915: &mut drm_i915_private, gt: &intel_gt) {
     if crate::intel_gt::intel_gt_is_wedged(gt) || !crate::intel_gt_pm::intel_gt_pm_is_awake(gt) {
+        crate::gen8_ppgtt::release_retired();
         return;
     }
+    let mut done = true;
     let uncore = &mut i915.uncore;
     uncore.intel_uncore_forcewake_get(FORCEWAKE_ALL);
     let mut awake = 0u64;
@@ -47,7 +51,11 @@ pub fn intel_gt_invalidate_tlb_full(i915: &mut drm_i915_private, gt: &intel_gt) 
         {
             Line::new().s("engine ").dec(id as u64).s(" TLB invalidation did not complete in ")
                 .dec(TLB_INVAL_TIMEOUT_MS as u64).s(" ms").say();
+            done = false;
         }
     }
     uncore.intel_uncore_forcewake_put_delayed(FORCEWAKE_ALL);
+    if done {
+        crate::gen8_ppgtt::release_retired();
+    }
 }

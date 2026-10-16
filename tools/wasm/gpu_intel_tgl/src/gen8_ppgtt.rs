@@ -8,9 +8,11 @@
 //! (`gen8_ppgtt_insert_pte`); the 64K/2M path of `gen8_ppgtt_insert_huge`
 //! is not ported, so contiguous objects are mapped in 4K pages. Unbinding
 //! (`gen8_ppgtt_clear`) points the PTEs back at scratch and releases tables
-//! whose use count drops to zero. DMA pages are not given back to the
-//! kernel, so a released table page goes to a pool every address space
-//! takes from first (`free_px`).
+//! whose use count drops to zero. A released table page goes back to the
+//! kernel once no engine can reach it through its TLB: it waits for the
+//! next full invalidation (`release_retired`, after
+//! `intel_gt_invalidate_tlb_full`); a stashed page the walk did not take
+//! never reached the card and goes back at once.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -54,26 +56,37 @@ impl i915_page_directory {
     }
 }
 
-/// Table pages no table uses: every address space allocates from here
-/// before asking the kernel.
-static POOL: spin::Mutex<Vec<drm_i915_gem_object>> = spin::Mutex::new(Vec::new());
+/// Table pages taken out of a tree, waiting for a TLB invalidation.
+static RETIRED: spin::Mutex<Vec<drm_i915_gem_object>> = spin::Mutex::new(Vec::new());
 
-/// `alloc_pt` / `alloc_pd`: a page from the pool, else a new one.
+/// `alloc_pt` / `alloc_pd`.
 fn alloc_pt() -> Result<drm_i915_gem_object, i32> {
-    match POOL.lock().pop() {
-        Some(obj) => Ok(obj),
-        None => alloc_pt_dma(I915_GTT_PAGE_SIZE_4K),
+    alloc_pt_dma(I915_GTT_PAGE_SIZE_4K)
+}
+
+/// `free_px`: the page leaves the tree; it goes back to the kernel after
+/// the next full TLB invalidation.
+fn free_px(obj: drm_i915_gem_object) {
+    RETIRED.lock().push(obj);
+}
+
+/// A page the card never reached goes back now.
+fn free_unused(obj: drm_i915_gem_object) {
+    if let Some(d) = obj.map() {
+        d.free();
     }
 }
 
-/// `free_px`: the page goes back to the pool.
-fn free_px(obj: drm_i915_gem_object) {
-    POOL.lock().push(obj);
+/// After a full TLB invalidation: every retired table page goes back.
+pub fn release_retired() {
+    for obj in RETIRED.lock().drain(..) {
+        free_unused(obj);
+    }
 }
 
-/// Table pages in the pool.
-pub fn pooled_tables() -> usize {
-    POOL.lock().len()
+/// Table pages waiting for a TLB invalidation.
+pub fn retired_tables() -> usize {
+    RETIRED.lock().len()
 }
 
 /// `struct i915_vm_pt_stash`: the tables a bind may need, taken before the
@@ -92,7 +105,7 @@ fn pd_count(size: u64, shift: u32) -> u64 {
 fn i915_vm_free_pt_stash(stash: &mut i915_vm_pt_stash) {
     for l in stash.pt.iter_mut() {
         for obj in l.drain(..) {
-            free_px(obj);
+            free_unused(obj);
         }
     }
 }

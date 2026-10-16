@@ -22,7 +22,9 @@ const ITEM: usize = 64;
 const NONE: u32 = u32::MAX;
 const FLAG_WALLPAPER: u32 = 1;
 const FLAG_BLURRED: u32 = 2;
-/// Scenes in a row the module failed before the CPU takes over again.
+/// Scenes in a row the module failed before the CPU takes over again. A
+/// scene that was late is not one: the desktop composes on the CPU while
+/// the module is stalled, and goes back to it when the late job is done.
 const FAILURE_LIMIT: u32 = 8;
 /// Failed scenes that say why in the log.
 const FAILURES_LOGGED: u64 = 16;
@@ -148,6 +150,9 @@ fn failed(status: Result<i32, &str>) {
             Ok(-62) => crate::kprintln!("[npk] gpu: scene on the CPU, the module did not finish in time"),
             Ok(e) => crate::kprintln!("[npk] gpu: scene on the CPU, the module failed it ({})", e),
         }
+    }
+    if status == Ok(-62) {
+        return;
     }
     if FAILURES_IN_ROW.fetch_add(1, Ordering::Relaxed) + 1 >= FAILURE_LIMIT {
         MODE.store(MODE_OFF, Ordering::Release);

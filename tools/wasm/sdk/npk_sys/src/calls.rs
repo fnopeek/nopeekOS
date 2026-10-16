@@ -71,6 +71,7 @@ unsafe extern "C" {
     fn npk_dma_alloc(pages: i32) -> i32;
     fn npk_dma_alloc_below(pages: i32, limit_mb: i32) -> i32;
     fn npk_dma_set_mask(bits: i32) -> i32;
+    fn npk_dma_free(handle: i32) -> i32;
     fn npk_dma_phys_addr(handle: i32) -> i64;
     fn npk_dma_read32(handle: i32, offset: i32) -> i32;
     fn npk_dma_write32(handle: i32, offset: i32, value: i32) -> i32;
@@ -186,6 +187,8 @@ plain! {
     fn dma_alloc_below = npk_dma_alloc_below(pages: i32, limit_mb: i32) -> i32;
     /// `dma_set_mask(DMA_BIT_MASK(bits))`: later DMA buffers lie below `1 << bits`.
     fn dma_set_mask = npk_dma_set_mask(bits: i32) -> i32;
+    /// `dma_free_coherent`: the buffer goes back; its handle is empty after.
+    fn dma_free = npk_dma_free(handle: i32) -> i32;
     fn dma_phys_addr = npk_dma_phys_addr(handle: i32) -> i64;
     fn dma_read32 = npk_dma_read32(handle: i32, offset: i32) -> i32;
     fn dma_write32 = npk_dma_write32(handle: i32, offset: i32, value: i32) -> i32;
@@ -404,6 +407,12 @@ impl Dma {
     }
 
     /// `pages` zeroed pages below `limit_mb` MiB (0: 4 GiB).
+    /// Give the buffer back (`dma_free_coherent`). The device must no longer
+    /// reach it; the handle is empty afterwards.
+    pub fn free(self) {
+        dma_free(self.handle);
+    }
+
     pub fn alloc_below(pages: i32, limit_mb: i32) -> Option<Dma> {
         Self::from_handle(dma_alloc_below(pages, limit_mb))
     }
