@@ -203,6 +203,7 @@ icon_ids! {
     FileAudio             = 49,
     ArrowCounterClockwise = 50,
     PlayCircle            = 51,
+    Fire                  = 52,
 }
 
 // ── Accessibility roles ───────────────────────────────────────────────

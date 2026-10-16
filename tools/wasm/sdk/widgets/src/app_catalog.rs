@@ -33,7 +33,7 @@ unsafe extern "C" {
 pub enum EntryKind {
     /// A WASM module under `sys/wasm/<name>` — spawn via `npk_spawn_module`.
     Module,
-    /// A built-in system intent (e.g. "browser") — invoke via `npk_run_intent`.
+    /// A built-in system intent (e.g. "firefox") — invoke via `npk_run_intent`.
     Intent,
 }
 
@@ -98,10 +98,17 @@ pub fn load(exclude: &[&str]) -> Vec<AppEntry> {
 pub fn builtin_intents() -> Vec<AppEntry> {
     alloc::vec![
         AppEntry {
-            launch_name:  "browser".to_string(),
-            display_name: "Browser".to_string(),
+            launch_name:  "librewolf".to_string(),
+            display_name: "LibreWolf".to_string(),
             description:  "LibreWolf in a sandboxed MicroVM".to_string(),
             icon:         IconId::Globe,
+            kind:         EntryKind::Intent,
+        },
+        AppEntry {
+            launch_name:  "firefox".to_string(),
+            display_name: "Firefox".to_string(),
+            description:  "Firefox in a sandboxed MicroVM, video on the GPU".to_string(),
+            icon:         IconId::Fire,
             kind:         EntryKind::Intent,
         },
     ]

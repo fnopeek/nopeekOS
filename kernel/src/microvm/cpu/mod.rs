@@ -538,8 +538,6 @@ static OUTPUTS_CHANGED: AtomicBool = AtomicBool::new(false);
 /// none told yet.
 static FOCUS_SENT: AtomicU32 = AtomicU32::new(NO_FOCUS);
 const NO_FOCUS: u32 = u32::MAX;
-/// Name of every window of a VM; the dock recognises the app by it.
-pub const VM_WINDOW_TITLE: &str = "microvm";
 
 /// Set when the user closes the VM's window so the next slice tears
 /// the guest down instead of running it headless.
@@ -1165,7 +1163,7 @@ fn sync_vm_windows() {
     let (open, closed) = console::take_output_requests();
     for k in 0..MAX_OUTPUTS {
         if open & (1 << k) != 0 && output_window(k) == 0 {
-            if let Some(wid) = crate::shade::create_surface_window(VM_WINDOW_TITLE) {
+            if let Some(wid) = crate::shade::create_surface_window(crate::microvm::app::current().name) {
                 OUT_WINDOWS[k].store(wid.0, Ordering::Release);
                 OUTPUTS_CHANGED.store(true, Ordering::Release);
                 note_device_work();

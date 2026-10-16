@@ -4,7 +4,8 @@
 use core::sync::atomic::{AtomicU8, Ordering};
 
 pub struct App {
-    /// The intent that starts it.
+    /// The intent that starts it, and the title of its windows: the dock
+    /// matches its entry against it.
     pub name: &'static str,
     /// npkFS object of its read-only squashfs image.
     pub sqfs: &'static str,
@@ -12,9 +13,9 @@ pub struct App {
     pub home: &'static str,
 }
 
-/// LibreWolf, the image `browser` has always started.
-pub static BROWSER: App = App {
-    name: "browser",
+/// LibreWolf, frozen; its image is part of every install.
+pub static LIBREWOLF: App = App {
+    name: "librewolf",
     sqfs: "sys/microvm/userspace.sqfs",
     home: "sys/microvm/apps/browser/home.img",
 };
@@ -26,7 +27,7 @@ pub static FIREFOX: App = App {
     home: "sys/microvm/apps/firefox/home.img",
 };
 
-static APPS: [&App; 2] = [&BROWSER, &FIREFOX];
+static APPS: [&App; 2] = [&LIBREWOLF, &FIREFOX];
 
 static CURRENT: AtomicU8 = AtomicU8::new(0);
 

@@ -48,7 +48,8 @@ iris                     # Image viewer (PNG)
 tune                     # Audio player (MP3, WAV) — folder as playlist
 snap                     # Screenshot → npkFS
 beak [url]               # Native web browser (from scratch, no Linux, own JS)
-browser                  # LibreWolf in a Linux microVM (compatibility browser)
+firefox                  # Firefox in a Linux microVM, video decoded on the GPU
+librewolf                # LibreWolf in a Linux microVM (compatibility browser)
 
 # The intent loop (terminal)
 npk> status              # System overview (cores, RAM, disk, net)

@@ -2754,12 +2754,12 @@ pub(crate) fn npk_run_intent(mem: &mut [u8], ctx: &mut HostState, verb_ptr: i32,
         return -1;
     }
     match verb.as_str() {
-        "browser" => {
-            crate::intent::launch_browser();
-            0
-        }
         "firefox" => {
             crate::intent::launch_app(&crate::microvm::app::FIREFOX);
+            0
+        }
+        "librewolf" => {
+            crate::intent::launch_app(&crate::microvm::app::LIBREWOLF);
             0
         }
         _ => -1,

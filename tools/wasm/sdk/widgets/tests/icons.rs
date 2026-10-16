@@ -43,6 +43,7 @@ fn numbers_are_contiguous_from_zero() {
 fn wire_is_what_the_enum_wrote() {
     // A variant index and a u16 are the same varint in postcard.
     assert_eq!(postcard::to_allocvec(&IconId::PlayCircle).unwrap(), vec![51]);
+    assert_eq!(postcard::to_allocvec(&IconId::Fire).unwrap(), vec![52]);
     assert_eq!(postcard::to_allocvec(&IconId(300)).unwrap(), vec![0xAC, 0x02]);
 }
 

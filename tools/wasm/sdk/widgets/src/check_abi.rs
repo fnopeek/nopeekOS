@@ -100,6 +100,7 @@ const _: () = {
     assert!(IconId::FileAudio.0         == 49);
     assert!(IconId::ArrowCounterClockwise.0 == 50);
     assert!(IconId::PlayCircle.0        == 51);
+    assert!(IconId::Fire.0              == 52);
 
     // Align / Axis
     assert!(Align::Start   as u8 == 0);

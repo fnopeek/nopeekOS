@@ -584,7 +584,7 @@ fn is_core0_intent(verb: &str) -> bool {
                    // with error 8 (invalid host-state) because their
                    // TR is null. `browser` is just `microvm linux`
                    // under a user-friendly name, same constraint.
-                   "microvm" | "browser" | "firefox")
+                   "microvm" | "firefox" | "librewolf")
 }
 
 
@@ -2009,7 +2009,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 }
             } else if sub == "linux" {
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm linux") {
-                    crate::microvm::app::set(&crate::microvm::app::BROWSER);
+                    crate::microvm::app::set(&crate::microvm::app::LIBREWOLF);
                     microvm_linux(b"", None);
                 }
             } else if let Some(rest) = sub.strip_prefix("benchvm") {
@@ -2019,7 +2019,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 // rate. Isolates the bridge from the browser userspace.
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm benchvm") {
                     let mb: u32 = rest.trim().parse().unwrap_or(1000);
-                    crate::microvm::app::set(&crate::microvm::app::BROWSER);
+                    crate::microvm::app::set(&crate::microvm::app::LIBREWOLF);
                     microvm_linux(b"", Some(mb));
                 }
             } else if let Some(rest) = sub.strip_prefix("shell") {
@@ -2035,7 +2035,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                     let mut buf = alloc::vec::Vec::with_capacity(line.len() + 1);
                     buf.extend_from_slice(line.as_bytes());
                     buf.push(b'\n');
-                    crate::microvm::app::set(&crate::microvm::app::BROWSER);
+                    crate::microvm::app::set(&crate::microvm::app::LIBREWOLF);
                     microvm_linux(&buf, None);
                 }
             } else {
@@ -2043,19 +2043,18 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 kprintln!("[microvm] available: test, linux-info, linux, shell");
             }
         }
-        "browser" => {
-            // User-facing alias for `microvm linux` — launches the
-            // LibreWolf bundle. `microvm` stays as the dev/test surface
-            // (substrate self-test + bare-boot diag); `browser` is what
-            // the user types or what drun spawns.
-            if require_cap(vault, &session, Rights::EXECUTE, "browser") {
-                launch_app(&crate::microvm::app::BROWSER);
-            }
-        }
         "firefox" => {
-            // Firefox in its own image and with its own home image.
+            // The browsers are microvm apps, each with its own image and
+            // home image; what the user types or what drun spawns.
+            // `microvm` stays the dev/test surface (substrate self-test +
+            // bare-boot diag).
             if require_cap(vault, &session, Rights::EXECUTE, "firefox") {
                 launch_app(&crate::microvm::app::FIREFOX);
+            }
+        }
+        "librewolf" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "librewolf") {
+                launch_app(&crate::microvm::app::LIBREWOLF);
             }
         }
         "caps" | "capabilities" => {
@@ -2598,21 +2597,18 @@ fn microvm_linux_info() {
     }
 }
 
-/// Entry for the host function `npk_run_intent("browser")`, so a launcher
-/// can spawn the browser microvm without the Core-0 shell prompt. Safe from
-/// a worker when the dedicated VM core is active: `vm_open` only queues a
-/// PENDING_VM request (atomic + mutex), and VMXON / VMRUN happen later on
-/// that core via `vm_core_serve`. On the cooperative path (≤ 2 cores)
-/// `vm_open` needs BSP state and fails from a worker; the host function
-/// then returns -1 and the user must type `browser` at a Core-0 prompt.
-pub fn launch_browser() {
-    launch_app(&crate::microvm::app::BROWSER);
-}
-
-/// Start `app`'s microvm (`browser`, `firefox`). An app whose image is not
-/// installed says so instead of booting into PID-1's fallback.
+/// Start `app`'s microvm (`firefox`, `librewolf`). An app whose image is
+/// not installed says so instead of booting into PID-1's fallback.
+///
+/// Also the entry for the host function `npk_run_intent`, so a launcher
+/// can spawn it without the Core-0 shell prompt. Safe from a worker when
+/// the dedicated VM core is active: `vm_open` only queues a PENDING_VM
+/// request (atomic + mutex), and VMXON / VMRUN happen later on that core
+/// via `vm_core_serve`. On the cooperative path (≤ 2 cores) `vm_open`
+/// needs BSP state and fails from a worker; the host function then
+/// returns -1 and the user types the intent at a Core-0 prompt.
 pub fn launch_app(app: &'static crate::microvm::app::App) {
-    if app.name != crate::microvm::app::BROWSER.name && !crate::npkfs::exists(app.sqfs) {
+    if !core::ptr::eq(app, &crate::microvm::app::LIBREWOLF) && !crate::npkfs::exists(app.sqfs) {
         kprintln!("[microvm] {}: no image at {} — `update` fetches it", app.name, app.sqfs);
         return;
     }
@@ -2847,7 +2843,7 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
             // teardown path closes it on guest exit / window close.
             // Without a compositor (serial-only boot) we stay unbound
             // and virtio-gpu falls back to the fullscreen blit.
-            match crate::shade::create_surface_window(crate::microvm::VM_WINDOW_TITLE) {
+            match crate::shade::create_surface_window(crate::microvm::app::current().name) {
                 Some(wid) => {
                     crate::microvm::vm_bind_window(wid.0);
                     // The window stays hidden, and unfocused, until the
