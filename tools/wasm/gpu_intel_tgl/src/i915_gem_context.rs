@@ -239,12 +239,13 @@ pub struct pending {
     pub ticket: u64,
     pub rq: u16,
     pub ctx: u16,
-    /// When it was first seen running.
+    /// When it was submitted and first seen running.
+    pub submit_us: u64,
     pub started_us: u64,
 }
 
 impl pending {
-    const EMPTY: pending = pending { used: false, client: 0, ring: 0, ticket: 0, rq: 0, ctx: 0, started_us: 0 };
+    const EMPTY: pending = pending { used: false, client: 0, ring: 0, ticket: 0, rq: 0, ctx: 0, submit_us: 0, started_us: 0 };
 }
 
 /// An execbuffer waiting for room: where Linux blocks the caller
@@ -280,7 +281,95 @@ pub struct nctx {
     nclosing: u32,
     /// PTEs were cleared since the last TLB invalidation (`tlb_flush`).
     tlb_dirty: bool,
+    pub stats: native_stats,
 }
+
+/// Where a client request's time goes, summed per engine class over
+/// `STATS_US` and logged while clients submit.
+#[derive(Clone, Copy)]
+pub struct native_stats {
+    since_us: u64,
+    reqs: [u32; 4],
+    /// Submit to fence report, and first seen running to fence report.
+    total_sum_us: [u64; 4],
+    total_max_us: [u64; 4],
+    run_max_us: [u64; 4],
+    held: u32,
+    /// The last `poll` with requests pending and the widest gap between
+    /// two such polls: how late a completed request can be noticed.
+    poll_us: u64,
+    poll_gap_us: u64,
+    /// The longest service loop pass: how long a guest command can wait.
+    loop_max_us: u64,
+}
+
+impl native_stats {
+    const EMPTY: native_stats = native_stats {
+        since_us: 0, reqs: [0; 4], total_sum_us: [0; 4], total_max_us: [0; 4], run_max_us: [0; 4], held: 0,
+        poll_us: 0, poll_gap_us: 0, loop_max_us: 0,
+    };
+
+    pub fn note_held(&mut self) {
+        self.held += 1;
+    }
+
+    pub fn note_loop(&mut self, us: u64) {
+        self.loop_max_us = self.loop_max_us.max(us);
+    }
+
+    fn note_done(&mut self, class: usize, p: &pending, now: u64) {
+        let k = class.min(3);
+        let total = now.saturating_sub(p.submit_us);
+        self.reqs[k] += 1;
+        self.total_sum_us[k] += total;
+        self.total_max_us[k] = self.total_max_us[k].max(total);
+        if p.started_us != 0 {
+            self.run_max_us[k] = self.run_max_us[k].max(now.saturating_sub(p.started_us));
+        }
+    }
+
+    /// A completed request is only seen at a poll, so the gap between polls
+    /// is how late its fence can be.
+    fn note_poll(&mut self, pending: bool, now: u64) {
+        if !pending {
+            self.poll_us = 0;
+            return;
+        }
+        if self.poll_us != 0 {
+            self.poll_gap_us = self.poll_gap_us.max(now - self.poll_us);
+        }
+        self.poll_us = now;
+    }
+
+    pub fn report(&mut self, now: u64) {
+        if self.since_us == 0 {
+            self.since_us = now;
+            return;
+        }
+        if now - self.since_us < STATS_US {
+            return;
+        }
+        if self.reqs.iter().any(|&n| n != 0) {
+            const NAMES: [&str; 4] = ["rcs", "vcs", "vecs", "bcs"];
+            let mut l = Line::new();
+            l.s("native context, ").dec((now - self.since_us) / 1_000_000).s(" s:");
+            for k in 0..4 {
+                if self.reqs[k] == 0 {
+                    continue;
+                }
+                l.s(" ").s(NAMES[k]).s(" ").dec(self.reqs[k] as u64).s(" req, avg ")
+                    .dec(self.total_sum_us[k] / self.reqs[k] as u64).s(" us, max ")
+                    .dec(self.total_max_us[k] / 1000).s(" ms (running ").dec(self.run_max_us[k] / 1000).s(" ms);");
+            }
+            l.s(" poll gap max ").dec(self.poll_gap_us / 1000).s(" ms, loop pass max ").dec(self.loop_max_us / 1000)
+                .s(" ms, held ").dec(self.held as u64).say();
+        }
+        *self = native_stats { since_us: now, poll_us: self.poll_us, ..native_stats::EMPTY };
+    }
+}
+
+/// The span `native_stats` sums over.
+const STATS_US: u64 = 10_000_000;
 
 pub static NCTX: Single<nctx> = Single::new(nctx {
     clients: alloc::vec::Vec::new(),
@@ -295,7 +384,14 @@ pub static NCTX: Single<nctx> = Single::new(nctx {
     nzombies: 0,
     nclosing: 0,
     tlb_dirty: false,
+    stats: native_stats::EMPTY,
 });
+
+/// Fences are reported while the service blocks on its own request; not
+/// when the caller already holds the state.
+pub fn poll_native(i915: &mut drm_i915_private, gt: &mut intel_gt) {
+    NCTX.try_with(|st| st.poll(i915, gt));
+}
 
 /// The GPU side every call needs.
 pub struct drm<'a> {
@@ -942,7 +1038,8 @@ impl nctx {
     /// The pending fence `ticket` on `ring` of client `c` for request `rq`.
     pub fn pend_add(&mut self, c: u8, ring: u8, rq: usize, ctx: usize, ticket: u64) {
         if let Some(p) = self.pend.iter_mut().find(|p| !p.used) {
-            *p = pending { used: true, client: c, ring, ticket, rq: rq as u16, ctx: ctx as u16, started_us: 0 };
+            *p = pending { used: true, client: c, ring, ticket, rq: rq as u16, ctx: ctx as u16,
+                           submit_us: linux::now_us(), started_us: 0 };
         }
     }
 
@@ -999,6 +1096,8 @@ impl nctx {
             crate::i915_request::i915_request_release_waiters(i915, gt);
         }
         let now = linux::now_us();
+        let busy = self.pend.iter().any(|p| p.used);
+        self.stats.note_poll(busy, now);
         let mut hung = None;
         let mut touched = [(NONE8, 0u8); 16];
         let mut nt = 0;
@@ -1012,6 +1111,8 @@ impl nctx {
                 if gt.requests[rq].error == -EIO && !gt.wedged {
                     self.ctxs[p.ctx as usize].innocent += 1;
                 }
+                let class = crate::intel_context::rq_engine_cs(gt, rq).map(|x| x.class as usize).unwrap_or(0);
+                self.stats.note_done(class, &p, now);
                 crate::i915_request::i915_request_put(gt, rq);
                 self.pend[k].used = false;
                 if nt < touched.len() && !touched[..nt].contains(&(p.client, p.ring)) {

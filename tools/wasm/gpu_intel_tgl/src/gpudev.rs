@@ -257,6 +257,7 @@ fn copy_rect(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, src: u64,
         crate::intel_gt_requests::intel_engines_cs_irq(i915, gt);
         crate::intel_gt_requests::intel_engine_flush_submission(i915, gt, e);
         crate::intel_rps::intel_rps_run_pending(i915, gt);
+        crate::i915_gem_context::poll_native(i915, gt);
     }
     let failed = gt.requests[rq].error;
     crate::i915_request::i915_request_put(gt, rq);
@@ -709,6 +710,7 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         let held = crate::i915_gem_context::NCTX.with(|st| !st.held.is_empty());
         let timeout = if held && (timeout < 0 || timeout > 1) { 1 } else { timeout };
         npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout);
+        let pass_us = linux::now_us();
         service_interrupts(i915, gt);
         crate::intel_rps::intel_rps_run_pending(i915, gt);
 
@@ -729,6 +731,9 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
             st.poll(i915, gt);
             let mut d = crate::i915_gem_context::drm { i915: &mut *i915, gt: &mut *gt, ggtt: &mut *ggtt };
             crate::i915_gem_execbuffer::run_held(st, &mut d);
+            let now = linux::now_us();
+            st.stats.note_loop(now - pass_us);
+            st.stats.report(now);
         });
 
         if crate::intel_gt::intel_gt_is_wedged(gt) {

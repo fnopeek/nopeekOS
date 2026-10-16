@@ -29,6 +29,14 @@ impl<T> Single<T> {
         self.busy.set(false);
         r
     }
+
+    /// `with`, or None when the value is already borrowed further up.
+    pub fn try_with<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        if self.busy.get() {
+            return None;
+        }
+        Some(self.with(f))
+    }
 }
 
 impl<T: Copy> Single<T> {

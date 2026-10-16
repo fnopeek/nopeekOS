@@ -514,6 +514,7 @@ pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: 
         crate::intel_gt_requests::intel_engines_cs_irq(i915, gt);
         crate::intel_gt_requests::intel_engine_flush_submission(i915, gt, e);
         crate::intel_rps::intel_rps_run_pending(i915, gt);
+        crate::i915_gem_context::poll_native(i915, gt);
     }
     let failed = gt.requests[rq].error;
     crate::i915_request::i915_request_put(gt, rq);

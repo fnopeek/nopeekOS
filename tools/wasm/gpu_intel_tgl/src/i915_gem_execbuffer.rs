@@ -185,6 +185,7 @@ fn hold(st: &mut nctx, c: u8, req: &[u8], kind: u8, p: exec_params, ticket: u64,
     let objs = (0..p.count).filter_map(|i| st.obj(c, rd32(req, p.head + i * EXEC_OBJECT2_BYTES)))
         .map(|i| i as u16).collect();
     st.held.push(held_exec { client: c, ring: p.ring, ticket, kind, req: req[..len].to_vec(), objs });
+    st.stats.note_held();
     log_held(c, p.ring, reason);
 }
 
