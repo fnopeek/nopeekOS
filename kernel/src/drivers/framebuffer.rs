@@ -9,6 +9,8 @@ use spin::Mutex;
 /// Framebuffer info parsed from Multiboot2.
 #[derive(Clone, Copy)]
 pub struct FbInfo {
+    /// Where the CPU reaches the framebuffer (`paging::ioremap`), not its
+    /// physical address.
     pub addr: u64,
     pub pitch: u32,
     pub width: u32,
@@ -196,32 +198,33 @@ pub fn init_from_gpu() {
         }
     };
 
-    let addr = gpu_fb.addr;
     let pitch = gpu_fb.pitch;
     let width = gpu_fb.width;
     let height = gpu_fb.height;
     let bpp = gpu_fb.bpp;
 
     crate::kprintln!("[npk] Framebuffer: {}x{} @ {:#x} ({}bpp, {})",
-        width, height, addr, bpp, crate::gpu::driver_name());
+        width, height, gpu_fb.addr, bpp, crate::gpu::driver_name());
 
-    // Map framebuffer pages.
+    // Map the framebuffer for the CPU; `addr` below is the mapped address.
     // Write-combining is essential: the GOP MMIO framebuffer is otherwise
     // uncached on Intel hardware (firmware MTRR), so every CPU write is a
     // separate UC transaction (QEMU's fb is RAM and hides this). WC batches
     // writes into bursts. PAT index 5 = WC is programmed in paging::init.
-    if !crate::gpu::is_native() {
-        let fb_size = pitch as u64 * height as u64;
-        for page_off in (0..fb_size).step_by(4096) {
-            let pa = addr + page_off;
-            let _ = crate::paging::map_page(
-                pa, pa,
-                crate::paging::PageFlags::PRESENT
-                    | crate::paging::PageFlags::WRITABLE
-                    | crate::paging::PageFlags::WRITE_COMBINE,
-            );
+    let addr = if crate::gpu::is_native() {
+        gpu_fb.addr
+    } else {
+        let flags = crate::paging::PageFlags::PRESENT
+            | crate::paging::PageFlags::WRITABLE
+            | crate::paging::PageFlags::WRITE_COMBINE;
+        match crate::paging::ioremap(gpu_fb.addr, pitch as u64 * height as u64, flags) {
+            Ok(a) => a,
+            Err(e) => {
+                crate::kprintln!("[npk] Framebuffer: cannot map it: {}", e);
+                return;
+            }
         }
-    }
+    };
 
     let info = FbInfo { addr, pitch, width, height, bpp };
     // 2x pixel scaling for 4K (each glyph pixel → 2×2 block).

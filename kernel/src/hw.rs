@@ -35,23 +35,15 @@ impl Mmio {
         Mmio { base: 0, len: 0 }
     }
 
-    /// Map `len` bytes of device registers at physical `phys` uncached,
-    /// identity-mapped.
+    /// Map `len` bytes of device registers at physical `phys` uncached
+    /// (`paging::ioremap`).
     ///
     /// # Safety
     /// `phys .. phys + len` must be device registers (a BAR or a fixed
     /// device window) that this driver owns, not RAM.
     pub unsafe fn map(phys: u64, len: u64) -> Result<Self, PagingError> {
-        let mut off = 0;
-        while off < len {
-            match paging::map_page(phys + off, phys + off,
-                PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE) {
-                Ok(()) | Err(PagingError::AlreadyMapped) => {}
-                Err(e) => return Err(e),
-            }
-            off += PAGE;
-        }
-        Ok(Mmio { base: phys, len })
+        let base = paging::ioremap(phys, len, PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE)?;
+        Ok(Mmio { base, len })
     }
 
     /// A window that is already mapped.

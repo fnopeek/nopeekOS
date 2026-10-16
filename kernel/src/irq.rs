@@ -301,20 +301,14 @@ fn ensure_msi_deliverable() {
         crate::kprintln!("[npk] irq: DMAR present (flags={:#x}) but no DRHD regbase", flags);
         return;
     }
-    // Map the IOMMU register page (defensive, uncached).
-    let page = (regbase as usize) & !0xFFF;
-    let _ = crate::paging::map_page(
-        page as u64,
-        page as u64,
-        crate::paging::PageFlags::PRESENT
-            | crate::paging::PageFlags::WRITABLE
-            | crate::paging::PageFlags::NO_CACHE,
-    );
     const GCMD: u64 = 0x18; // Global Command Register
     const GSTS: u64 = 0x1C; // Global Status Register
-    // SAFETY: the DRHD register base is VT-d remapping-hardware MMIO; its
-    // page was mapped uncached above and lies in the identity map anyway.
-    let regs = unsafe { crate::hw::Mmio::from_mapped(regbase, GSTS + 4) };
+    // SAFETY: the DRHD register base is VT-d remapping-hardware MMIO.
+    let Ok(page) = (unsafe { crate::hw::Mmio::map(regbase & !0xFFF, 0x1000) }) else {
+        crate::kprintln!("[npk] irq: DRHD registers at {:#x} cannot be mapped", regbase);
+        return;
+    };
+    let regs = page.sub(regbase & 0xFFF, GSTS + 4);
     let gsts = regs.r32(GSTS);
     let ires = (gsts >> 25) & 1; // Interrupt Remapping Enable Status
     crate::kprintln!(

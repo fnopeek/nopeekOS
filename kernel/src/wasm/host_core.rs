@@ -1720,21 +1720,21 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
             return -1;
         }
     }
-    for i in 0..page_count {
-        let addr = bar_base + (i * 4096) as u64;
-        // SAFETY: identity-mapped MMIO region for bound PCI device BAR.
-        // map_page splits huge pages to set NO_CACHE for MMIO access.
-        if let Err(e) = crate::paging::map_page(
-            addr, addr,
-            crate::paging::PageFlags::PRESENT
-                | crate::paging::PageFlags::WRITABLE
-                | crate::paging::PageFlags::NO_CACHE,
-        ) {
-            kprintln!("[npk] WASM MMIO map {:#x}: {}", addr, e);
+    // The BAR of the bound device, uncached; a refusal is the caller's -1.
+    let virt = match crate::paging::ioremap(
+        bar_base, (page_count * 4096) as u64,
+        crate::paging::PageFlags::PRESENT
+            | crate::paging::PageFlags::WRITABLE
+            | crate::paging::PageFlags::NO_CACHE,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            kprintln!("[npk] WASM MMIO map BAR{} at {:#x}: {}", bar_idx, bar_base, e);
+            return -1;
         }
-    }
+    };
     let handle = hw.mmio_maps.len();
-    hw.mmio_maps.push((bar_base, page_count));
+    hw.mmio_maps.push((virt, page_count));
     crate::kdebug!("[npk] WASM driver: MMIO BAR{} mapped at {:#x} — BAR size {:#x}, requested {} pages, mapped {} pages",
         bar_idx, bar_base, bar_size, requested, page_count);
     handle as i32
@@ -1834,22 +1834,22 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
     if hw.mmio_maps.len() >= MAX_MMIO_MAPS { return -1; }
 
-    for i in 0..n {
-        let a = base + (i * 4096) as u64;
-        // SAFETY: checked above to be neither RAM nor an interrupt
-        // controller. NO_CACHE because device registers must not be cached.
-        if let Err(e) = crate::paging::map_page(
-            a, a,
-            crate::paging::PageFlags::PRESENT
-                | crate::paging::PageFlags::WRITABLE
-                | crate::paging::PageFlags::NO_CACHE,
-        ) {
-            kprintln!("[npk] WASM: npk_mmio_map_phys map {:#x}: {}", a, e);
+    // Checked above to be neither RAM nor an interrupt controller. NO_CACHE
+    // because device registers must not be cached.
+    let virt = match crate::paging::ioremap(
+        base, (n * 4096) as u64,
+        crate::paging::PageFlags::PRESENT
+            | crate::paging::PageFlags::WRITABLE
+            | crate::paging::PageFlags::NO_CACHE,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            kprintln!("[npk] WASM: npk_mmio_map_phys map {:#x}: {}", base, e);
             return -1;
         }
-    }
+    };
     let handle = hw.mmio_maps.len();
-    hw.mmio_maps.push((base, n));
+    hw.mmio_maps.push((virt, n));
     crate::kdebug!("[npk] WASM driver: MMIO {:#x}+{:#x} mapped (handle {})",
         base, n * 4096, handle);
     handle as i32

@@ -44,6 +44,8 @@ pub enum PagingError {
     NotMapped,
     HugePageConflict,
     FrameAllocationFailed,
+    /// The device-memory window (`ioremap`) has no room left.
+    NoAddressSpace,
 }
 
 impl core::fmt::Display for PagingError {
@@ -54,8 +56,79 @@ impl core::fmt::Display for PagingError {
             PagingError::NotMapped => write!(f, "page not mapped"),
             PagingError::HugePageConflict => write!(f, "conflicts with 2MB huge page"),
             PagingError::FrameAllocationFailed => write!(f, "frame allocation failed"),
+            PagingError::NoAddressSpace => write!(f, "no room in the device-memory window"),
         }
     }
+}
+
+/// End of the identity map: below it every physical address is mapped at
+/// itself (`init`). Above it the address space belongs to forge's instances
+/// (from 64 GB), its code, the device window and the kernel stacks.
+pub const IDENTITY_END: u64 = 64 << 30;
+
+/// The window device memory above `IDENTITY_END` is mapped into (Linux
+/// `ioremap`): 32 TiB up to 48 TiB, clear of forge (below 17 TiB) and the
+/// kernel stacks (from 64 TiB).
+const IOREMAP_BASE: u64 = 32 << 40;
+const IOREMAP_END: u64 = 48 << 40;
+
+/// One `ioremap` mapping: page-aligned physical start and length, the
+/// virtual start and the flags.
+struct IoMap {
+    phys: u64,
+    len: u64,
+    virt: u64,
+    flags: PageFlags,
+}
+
+/// The next free address of the window and the mappings made. Device
+/// windows are mapped for good; a range mapped again with the same flags
+/// gets the same address.
+static IOMAPS: spin::Mutex<(u64, alloc::vec::Vec<IoMap>)> = spin::Mutex::new((IOREMAP_BASE, alloc::vec::Vec::new()));
+
+/// `ioremap`: map `len` bytes of device memory at `phys` with `flags` and
+/// return the CPU address of `phys`. Below `IDENTITY_END` that is `phys`
+/// itself; above it a range of the device window, so that a BAR or
+/// framebuffer high in the physical space never lands on another user of
+/// that virtual address. A page already mapped to something else is an
+/// error, never a success.
+pub fn ioremap(phys: u64, len: u64, flags: PageFlags) -> Result<u64, PagingError> {
+    let start = phys & !0xFFF;
+    let end = phys.checked_add(len.max(1)).ok_or(PagingError::NoAddressSpace)?.next_multiple_of(0x1000);
+    if end <= IDENTITY_END {
+        let mut a = start;
+        while a < end {
+            map_page(a, a, flags)?;
+            a += 0x1000;
+        }
+        return Ok(phys);
+    }
+    let mut maps = IOMAPS.lock();
+    if let Some(m) = maps.1.iter().find(|m| m.flags == flags && m.phys <= start && end <= m.phys + m.len) {
+        return Ok(m.virt + (phys - m.phys));
+    }
+    let size = end - start;
+    let virt = maps.0;
+    // A page of unmapped space after each mapping: running off its end
+    // faults instead of reaching the next device.
+    if virt + size + 0x1000 > IOREMAP_END {
+        return Err(PagingError::NoAddressSpace);
+    }
+    let mut off = 0;
+    while off < size {
+        if let Err(e) = map_page(virt + off, start + off, flags) {
+            let mut undo = 0;
+            while undo < off {
+                let _ = unmap_page(virt + undo);
+                undo += 0x1000;
+            }
+            return Err(e);
+        }
+        off += 0x1000;
+    }
+    maps.0 = virt + size + 0x1000;
+    maps.1.push(IoMap { phys: start, len: size, virt, flags });
+    Ok(virt + (phys - start))
 }
 
 // === Address decomposition ===
