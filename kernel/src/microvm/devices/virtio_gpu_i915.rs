@@ -32,6 +32,11 @@ const CCMD_GEM_CREATE_EXT: u32 = 5;
 const CCMD_GEM_EXECBUFFER2: u32 = 7;
 const CCMD_GEM_SET_MMAP_MODE: u32 = 8;
 const CCMD_GEM_EXECBUFFER2_V2: u32 = 10;
+/// nopeekOS' own commands (the module's `I915_CCMD_NPK_*`): context
+/// parameters with their data inline, an execbuffer that starts with an
+/// earlier one.
+const CCMD_NPK_CONTEXT_SETPARAM: u32 = 0x100;
+const CCMD_NPK_GEM_EXECBUFFER2: u32 = 0x102;
 /// `DRM_IOCTL_I915_GEM_CONTEXT_DESTROY`.
 const IOCTL_GEM_CONTEXT_DESTROY: u32 = 0x4008_646e;
 /// `I915_GEM_CREATE_EXT_*`.
@@ -306,7 +311,8 @@ impl GpudevBackend {
             Answer::Failed => *rsp = i915_error_response(cmd, EIO),
         }
         // `i915_ccmd_gem_execbuffer2`: EIO bans the context.
-        if (cmd == CCMD_GEM_EXECBUFFER2 || cmd == CCMD_GEM_EXECBUFFER2_V2) && d32(rsp, 4) as i32 == EIO {
+        if matches!(cmd, CCMD_GEM_EXECBUFFER2 | CCMD_GEM_EXECBUFFER2_V2 | CCMD_NPK_GEM_EXECBUFFER2)
+            && d32(rsp, 4) as i32 == EIO {
             let id = q64(req, 24);
             if id < 64 {
                 if let Some(c) = self.clients.get_mut(&ctx) {
@@ -360,7 +366,7 @@ impl Backend for GpudevBackend {
             CCMD_GEM_CREATE => self.gem_create(ctx, req),
             CCMD_GEM_CREATE_EXT => self.gem_create_ext(ctx, req),
             CCMD_GEM_SET_MMAP_MODE => self.gem_set_mmap_mode(ctx, req),
-            1..=CCMD_GEM_EXECBUFFER2_V2 => self.forward(ctx, cmd, req, rsp, deadline)
+            1..=CCMD_GEM_EXECBUFFER2_V2 | CCMD_NPK_CONTEXT_SETPARAM..=CCMD_NPK_GEM_EXECBUFFER2 => self.forward(ctx, cmd, req, rsp, deadline)
                 .map_err(|e| self.ccmd_failed("ccmd", "malformed", e)),
             _ => Err(self.ccmd_failed("ccmd", "unknown command", -EINVAL)),
         }

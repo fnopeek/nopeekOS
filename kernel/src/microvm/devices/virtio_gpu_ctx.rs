@@ -392,12 +392,13 @@ pub fn i915_capset(dev: crate::drivers::pci::PciAddr, out: &mut [u8]) {
 /// (6) and GEM_BUSY (9) after a pad word, with one more word behind it; the
 /// others have no response, and it is empty.
 pub fn i915_error_response(cmd: u32, errno: i32) -> Vec<u8> {
-    let ret_at = match cmd {
-        1 | 7 | 10 => 4,
-        2 | 3 | 6 | 9 => 8,
+    // The nopeekOS context-parameter commands answer ret, size, pad, value.
+    let (ret_at, len) = match cmd {
+        1 | 7 | 10 | 0x102 => (4, 12),
+        2 | 3 | 6 | 9 => (8, 16),
+        0x100 | 0x101 => (4, 24),
         _ => return Vec::new(),
     };
-    let len = ret_at + 8;
     let mut rsp = alloc::vec![0u8; len];
     rsp[..4].copy_from_slice(&(len as u32).to_le_bytes());
     rsp[ret_at..ret_at + 4].copy_from_slice(&errno.to_le_bytes());
