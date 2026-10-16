@@ -687,10 +687,16 @@ pub fn write_byte(byte: u8) {
 /// Clear the framebuffer screen (both shadow buffers + MMIO).
 pub fn clear() {
     let mut console = CONSOLE.lock();
+    // As in `with_fb`: a GPU copy still writing the framebuffer would put
+    // the old frame back over the cleared one.
+    crate::gpu::gpudev::wait_framebuffer();
     let console = match console.as_mut() {
         Some(c) => c,
         None => return,
     };
+    // SAFETY: shadow and shadow_b are this console's own buffers of
+    // shadow_size bytes, and the framebuffer holds pitch * height bytes,
+    // which shadow_size equals; CONSOLE is held, and the GPU copy is done.
     unsafe {
         core::ptr::write_bytes(console.shadow, 0, console.shadow_size);
         core::ptr::write_bytes(console.shadow_b, 0, console.shadow_size);
