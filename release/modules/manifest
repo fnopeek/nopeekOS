@@ -1,4 +1,4 @@
-issued=1792174185
+issued=1792176137
 
 [aml]
 version=0.5.1
@@ -6,9 +6,9 @@ size=123187
 sha384=b4893fc8de2ab6a013af3cb0daaaa7fd8e3cb87a875cc1ffc262cb44e355c6cb13d9865575a53c38abbee5ff87f1d879
 
 [audio_hda]
-version=0.5.4
-size=6989
-sha384=1e90d378169e67bc472b15f9e541124a08d2bf7790f65c51b501bd099b27caaebe8eb62da91b8162f9019a2cf767efc3
+version=0.6.0
+size=9788
+sha384=d97533d1af2c8ca2076d5c9bdeee637d631b4a3250a23972579ddb9d4dc6dfdf2a504186cf82390ceebfec567b9fe6e6
 
 [bar]
 version=0.11.1
