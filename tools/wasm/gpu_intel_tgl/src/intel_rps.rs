@@ -330,9 +330,6 @@ pub fn intel_rps_init(i915: &mut drm_i915_private, gt: &mut intel_gt) {
     // Derive initial user preferences/limits from the hardware limits.
     rps.max_freq_softlimit = rps.max_freq;
     rps.min_freq_softlimit = rps.min_freq;
-    // MEASUREMENT BUILD: the floor at the maximum, as `gt_min_freq_mhz`
-    // set to RP0 through sysfs would; reverted after one device run.
-    rps.min_freq_softlimit = rps.max_freq;
 
     rps.up_threshold = 95;
     rps.down_threshold = 85;

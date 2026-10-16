@@ -1,6 +1,6 @@
 [package]
 name = "gpu_intel_tgl"
-version = "0.23.5"
+version = "0.23.6"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 
