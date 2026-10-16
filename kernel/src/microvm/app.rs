@@ -13,20 +13,20 @@ pub struct App {
 }
 
 /// LibreWolf, the image `browser` has always started.
-pub const BROWSER: App = App {
+pub static BROWSER: App = App {
     name: "browser",
     sqfs: "sys/microvm/userspace.sqfs",
     home: "sys/microvm/apps/browser/home.img",
 };
 
 /// Firefox, with video through VA-API (Intel's media driver).
-pub const FIREFOX: App = App {
+pub static FIREFOX: App = App {
     name: "firefox",
     sqfs: "sys/microvm/firefox.sqfs",
     home: "sys/microvm/apps/firefox/home.img",
 };
 
-const APPS: [&App; 2] = [&BROWSER, &FIREFOX];
+static APPS: [&App; 2] = [&BROWSER, &FIREFOX];
 
 static CURRENT: AtomicU8 = AtomicU8::new(0);
 
