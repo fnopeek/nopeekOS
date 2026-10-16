@@ -12,6 +12,7 @@
 #![no_std]
 
 mod host;
+mod intelhdmi;
 mod regs;
 use host::*;
 use regs::*;
@@ -226,6 +227,12 @@ fn setup_codec(mmio: i32, cad: u32) -> (u32, bool) {
     dbghexln("[audio_hda] AFG nid=0x", afg);
     codec_cmd(mmio, cad, afg, vset_power(0)); // D0
 
+    // An Intel display codec takes its own path: its pins are display
+    // ports, and which one carries a sink is the display driver's to say.
+    if intelhdmi::is_tgl_hdmi(mmio, cad) {
+        return (intelhdmi::setup(mmio, cad, afg, STREAM_TAG, FMT_48K_S16_STEREO), false);
+    }
+
     // Widgets under the AFG.
     let w = get_param(mmio, cad, afg, PARAM_SUB_NODE_COUNT);
     let w_start = (w >> 16) & 0xFF;
@@ -323,7 +330,8 @@ fn bring_up() -> Option<(i32, u32, bool)> {
     if oss == 0 { log("[audio_hda] no output streams\n"); return None; }
 
     let statests = mmio_r16(mmio, STATESTS) as u32;
-    dbghexln("[audio_hda] STATESTS=0x", statests);
+    loghex("[audio_hda] codecs present (STATESTS) 0x", statests);
+    log("\n");
     if statests == 0 { log("[audio_hda] no codec detected\n"); return None; }
     let mut cad = 0u32;
     while cad < 15 && statests & (1 << cad) == 0 { cad += 1; }
