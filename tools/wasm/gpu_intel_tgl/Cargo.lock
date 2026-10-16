@@ -31,7 +31,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "gpu_intel_tgl"
-version = "0.23.3"
+version = "0.23.4"
 dependencies = [
  "nopeek_widgets",
  "npk_sys",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "npk_sys",
  "postcard",
