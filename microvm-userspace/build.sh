@@ -55,7 +55,7 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 # vulkan-loader: libvulkan for anv (our Mesa) and Vulkan Video in ffmpeg.
 # vulkan-tools, ffmpeg: vulkaninfo and `ffmpeg -hwaccel vulkan`, run with
 # npkapp= to check the decoder without the browser.
-APK_PACKAGES="${APK_PACKAGES:-librewolf seatd libseat libinput eudev mesa-gbm wayland-libs-server libdisplay-info font-dejavu font-noto alsa-lib mesa-demos vulkan-loader vulkan-tools ffmpeg}"
+APK_PACKAGES="${APK_PACKAGES:-librewolf seatd libseat libinput eudev mesa-gbm wayland-libs-server libdisplay-info font-dejavu font-noto alsa-lib mesa-demos vulkan-loader vulkan-tools ffmpeg gdb}"
 
 # ── Paths ────────────────────────────────────────────────────────
 

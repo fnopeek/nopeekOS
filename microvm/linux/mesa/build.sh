@@ -121,6 +121,10 @@ unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c "
          usr/lib/libGLESv2.so.2* usr/lib/libgbm.so.1* usr/bin/npk-gpuprobe usr/bin/npk-vkprobe \
          usr/lib/libvulkan_intel.so usr/share/vulkan/icd.d/intel_icd.x86_64.json \
          \( -type f -o -type l \) -print | LC_ALL=C sort > "$STAGE/files"
+    # Unstripped copies stay in the cache, to name the frames of a backtrace
+    # (`npkgdb`) from the guest's stripped libraries.
+    rm -rf "$CACHE/symbols" && mkdir -p "$CACHE/symbols"
+    cp usr/lib/libvulkan_intel.so usr/lib/libgallium-*.so "$CACHE/symbols/"
     find usr/lib -name '*.so*' -type f -exec strip --strip-unneeded {} +
     strip usr/bin/npk-gpuprobe
     tar --owner=0 --group=0 --mtime=@0 -czf "$OUT.tmp" -T "$STAGE/files"
