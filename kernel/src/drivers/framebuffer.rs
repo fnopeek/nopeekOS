@@ -121,6 +121,16 @@ pub fn set_gui_mode(active: bool) {
     GUI_MODE.store(active, Ordering::Release);
 }
 
+pub fn gui_mode() -> bool {
+    GUI_MODE.load(Ordering::Acquire)
+}
+
+/// Whether text output stays off the framebuffer: in GUI mode, and always
+/// while the compositor runs, whose frames are drawn under `CONSOLE`.
+fn text_console_off() -> bool {
+    GUI_MODE.load(Ordering::Relaxed) || crate::shade::is_active()
+}
+
 /// The console's `FbInfo`, outside `CONSOLE`: rendering runs under
 /// `with_fb`, and anything it reaches may ask for the screen size.
 static INFO: Mutex<Option<FbInfo>> = Mutex::new(None);
@@ -590,7 +600,7 @@ fn emit_char(console: &mut FbConsole, byte: u8, fg: u32,
 /// Write a string to the framebuffer console.
 pub fn write_str(s: &str) {
     // GUI owns the framebuffer — skip text console writes
-    if GUI_MODE.load(Ordering::Relaxed) { return; }
+    if text_console_off() { return; }
     let mut console = CONSOLE.lock();
     let console = match console.as_mut() {
         Some(c) => c,
@@ -636,7 +646,7 @@ pub fn write_str(s: &str) {
 
 /// Write a single byte to framebuffer (for echo from serial read).
 pub fn write_byte(byte: u8) {
-    if GUI_MODE.load(Ordering::Relaxed) { return; }
+    if text_console_off() { return; }
     let mut console = CONSOLE.lock();
     let console = match console.as_mut() {
         Some(c) => c,
