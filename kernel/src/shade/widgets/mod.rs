@@ -306,24 +306,47 @@ pub fn remove_scene(window_id: u32) {
 // here: mouse clicks after hit-testing against the scene's layout
 // tree, keyboard-forwarded keys once focused, focus changes.
 //
-// Queue is bounded; on overflow we drop the oldest entry so a slow
-// app can't wedge the compositor.
+// Motion and wheel events are coalesced and are the first to go when the
+// queue is long; keys, buttons and the rest are kept until an app has
+// stopped reading altogether.
 
+/// Queued events past which the oldest motion or wheel event is dropped.
 const MAX_EVENTS_PER_WINDOW: usize = 64;
+/// Queued events past which the oldest of any kind is dropped: an app that
+/// reads nothing must not grow the queue without end.
+const MAX_EVENTS_UNREAD: usize = 4096;
 
 static EVENT_QUEUES: Mutex<BTreeMap<u32, VecDeque<abi::Event>>> =
     Mutex::new(BTreeMap::new());
 
-/// Push an event into the window's queue. Oldest is dropped on
-/// overflow (bounded queue).
+fn is_motion(e: &abi::Event) -> bool {
+    matches!(e, abi::Event::MouseMove { .. } | abi::Event::Wheel { .. })
+}
+
+/// Push an event into the window's queue.
 pub fn push_event(window_id: u32, event: abi::Event) {
     {
         let mut queues = EVENT_QUEUES.lock();
         let q = queues.entry(window_id).or_insert_with(VecDeque::new);
-        if q.len() >= MAX_EVENTS_PER_WINDOW {
-            q.pop_front();
+        match (q.back_mut(), &event) {
+            (Some(abi::Event::MouseMove { x, y }), abi::Event::MouseMove { x: nx, y: ny }) => {
+                (*x, *y) = (*nx, *ny);
+            }
+            (Some(abi::Event::Wheel { dy }), abi::Event::Wheel { dy: ndy }) => {
+                *dy = dy.saturating_add(*ndy);
+            }
+            _ => {
+                if q.len() >= MAX_EVENTS_PER_WINDOW {
+                    if let Some(i) = q.iter().position(is_motion) {
+                        q.remove(i);
+                    }
+                }
+                if q.len() >= MAX_EVENTS_UNREAD {
+                    q.pop_front();
+                }
+                q.push_back(event);
+            }
         }
-        q.push_back(event);
     }
     wake_window_app(window_id);
 }

@@ -118,23 +118,63 @@ const MAX_QUEUE_SIZE: u16 = 256;
 
 /// Pending host→guest input events (type, code, value), pushed by the
 /// Shade Surface-window branch (Core 0) and drained into the eventq
-/// by `drain_injected` on the timer tick. Bounded — drop oldest on
-/// overflow (a wedged guest must not OOM the host). Single global:
-/// one focused Surface VM at a time.
+/// by `drain_injected` on the timer tick. Only whole reports (up to
+/// SYN_REPORT) are ever taken out, as QEMU's `virtio_input_send` does:
+/// a pointer-only report replaces the one before it, and a long queue
+/// loses its oldest pointer-only report first. Single global: one
+/// focused Surface VM at a time.
 static INPUT_Q: spin::Mutex<alloc::collections::VecDeque<(u16, u16, u32)>> =
     spin::Mutex::new(alloc::collections::VecDeque::new());
 
+/// Queued events past which the oldest pointer-only report is dropped.
 const INPUT_Q_CAP: usize = 256;
+/// Queued events past which the oldest report of any kind is dropped: a
+/// guest that takes nothing must not grow the host's queue without end.
+const INPUT_Q_UNREAD: usize = 16384;
+
+/// Whether a queued event ends a report.
+fn ends_report(t: u16, c: u16) -> bool {
+    t == EV_SYN as u16 && c == SYN_REPORT
+}
+
+/// The complete reports in `q`, as index ranges; a trailing partial one is
+/// left out.
+fn reports(q: &alloc::collections::VecDeque<(u16, u16, u32)>) -> alloc::vec::Vec<core::ops::Range<usize>> {
+    let mut out = alloc::vec::Vec::new();
+    let mut start = 0;
+    for (i, &(t, c, _)) in q.iter().enumerate() {
+        if ends_report(t, c) {
+            out.push(start..i + 1);
+            start = i + 1;
+        }
+    }
+    out
+}
+
+/// A report that only moves the absolute pointer.
+fn pointer_only(q: &alloc::collections::VecDeque<(u16, u16, u32)>, r: &core::ops::Range<usize>) -> bool {
+    r.clone().all(|i| q[i].0 == EV_ABS as u16 || q[i].0 == EV_SYN as u16)
+}
 
 /// Queue one evdev event for delivery to the guest's virtio-input
 /// eventq. Caller (Shade) pushes EV_KEY then EV_SYN(SYN_REPORT) so
 /// the guest's evdev dispatches it.
 pub fn push_input_event(etype: u16, code: u16, value: u32) {
     let mut q = INPUT_Q.lock();
-    if q.len() >= INPUT_Q_CAP {
-        q.pop_front();
-    }
     q.push_back((etype, code, value));
+    if ends_report(etype, code) {
+        let rs = reports(&q);
+        if let [.., prev, last] = rs.as_slice()
+            && pointer_only(&q, prev) && pointer_only(&q, last) {
+            q.drain(prev.clone());
+        } else if q.len() > INPUT_Q_CAP {
+            if let Some(r) = rs.iter().find(|r| pointer_only(&q, r)) {
+                q.drain(r.clone());
+            } else if q.len() > INPUT_Q_UNREAD {
+                q.drain(rs[0].clone());
+            }
+        }
+    }
     drop(q);
     // The BSP moves it into the eventq and raises IRQ 12; wake it.
     crate::microvm::cpu::kick_bsp_net_irq();
@@ -266,26 +306,29 @@ impl VirtioInput {
         let avail_top = q.last_avail_idx
             .wrapping_add(super::virtqueue::avail_pending(q.last_avail_idx, avail_top, q.size));
 
+        // Whole reports only (QEMU `virtio_input_send`): one goes when the
+        // guest has a buffer for every event of it, so the queue always
+        // starts at a report.
         let mut any = false;
-        while q.last_avail_idx != avail_top {
-            let (etype, code, value) = match pending.pop_front() {
-                Some(e) => e,
-                None => break, // no more events; leave buffers queued
-            };
-            let head = match avail_ring(mem, q.driver_gpa(), q.size, q.last_avail_idx) {
-                Some(v) => v,
-                None => break,
-            };
-            if let Some(d) = read_desc(mem, q.desc_gpa(), head, q.size) {
-                if d.len >= 8 {
-                    mem.write_u16(d.addr, etype);
-                    mem.write_u16(d.addr + 2, code);
-                    mem.write_u32(d.addr + 4, value);
-                }
+        'reports: while let Some(len) = pending.iter().position(|&(t, c, _)| ends_report(t, c)).map(|i| i + 1) {
+            let room = avail_top.wrapping_sub(q.last_avail_idx) as usize;
+            if len > room {
+                break;
             }
-            used_push(mem, q.device_gpa(), q.size, &mut q.used_idx, head, 8);
-            q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
-            any = true;
+            for _ in 0..len {
+                let Some(head) = avail_ring(mem, q.driver_gpa(), q.size, q.last_avail_idx) else { break 'reports };
+                let Some((etype, code, value)) = pending.pop_front() else { break 'reports };
+                if let Some(d) = read_desc(mem, q.desc_gpa(), head, q.size) {
+                    if d.len >= 8 {
+                        mem.write_u16(d.addr, etype);
+                        mem.write_u16(d.addr + 2, code);
+                        mem.write_u32(d.addr + 4, value);
+                    }
+                }
+                used_push(mem, q.device_gpa(), q.size, &mut q.used_idx, head, 8);
+                q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
+                any = true;
+            }
         }
 
         if any {
