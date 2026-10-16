@@ -106,6 +106,32 @@ pub enum SecondLevel {
 /// Serialises demand fault-in (see `page_host`).
 static DEMAND_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
+/// Serialises `reclaim` and `pin_page`: a frame is pinned only while it is
+/// mapped, and reclaim decides with the pins it sees.
+static RECLAIM_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
+/// Host frames of guest pages the host keeps using beyond one access (a
+/// guest blob the GPU reads), with their count: the page refcount KVM's
+/// free page reporting respects. `reclaim` leaves them mapped.
+static PINS: spin::Mutex<alloc::collections::BTreeMap<u64, u32>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Guest pages given back to the host by free page reporting, this boot.
+pub static RECLAIMED_PAGES: AtomicU64 = AtomicU64::new(0);
+
+/// Drop one pin of each of `frames` (`GuestMem::pin_page`).
+pub fn unpin_frames(frames: &[u64]) {
+    let mut pins = PINS.lock();
+    for f in frames {
+        if let Some(n) = pins.get_mut(f) {
+            *n -= 1;
+            if *n == 0 {
+                pins.remove(f);
+            }
+        }
+    }
+}
+
 /// Translates guest-physical addresses to host memory for one VM.
 ///
 /// Hybrid: `[0, boot_bytes)` is one contiguous host block
@@ -124,12 +150,17 @@ pub struct GuestMem {
     sl: SecondLevel,
     /// Software TLB for the demand region: caches the page-table walk
     /// (`demand_fault_in`) that `page_host` would otherwise repeat on every
-    /// access. The demand map is stable once faulted (a guest page → one
-    /// host frame for the VM's life), so entries never need invalidation.
+    /// access. A guest page keeps its frame until free page reporting takes
+    /// it back (`reclaim`, which clears its slot).
     /// Each slot is one atomic u64 packing `(page>>12)<<32 | (host>>12)` →
     /// lock-free, no torn reads, safe for concurrent AP-vCPU access.
     /// 0 = empty. RX buffers are reused, so the hit rate is near 100%.
     tlb: [AtomicU64; TLB_SIZE],
+    /// Host accesses through a demand-region translation, counted per
+    /// epoch: `reclaim` frees a frame only after every access that may
+    /// have translated it before its entries went has ended.
+    epoch: AtomicU64,
+    accessing: [core::sync::atomic::AtomicU32; 2],
 }
 
 impl GuestMem {
@@ -143,7 +174,80 @@ impl GuestMem {
         Self {
             boot_base, boot_bytes, len, table_root, sl,
             tlb: [const { AtomicU64::new(0) }; TLB_SIZE],
+            epoch: AtomicU64::new(0),
+            accessing: [const { core::sync::atomic::AtomicU32::new(0) }; 2],
         }
+    }
+
+    /// A host access through demand-region translations begins; `leave`
+    /// with the returned index when it is over.
+    fn enter(&self) -> usize {
+        let i = (self.epoch.load(Ordering::SeqCst) & 1) as usize;
+        self.accessing[i].fetch_add(1, Ordering::SeqCst);
+        i
+    }
+
+    fn leave(&self, i: usize) {
+        self.accessing[i].fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Free page reporting (virtio-balloon `F_REPORTING`): the guest no
+    /// longer uses `[gpa, gpa + len)`. Its demand pages go back to the host
+    /// and fault in zeroed on the next touch, as `MADV_DONTNEED` does under
+    /// KVM. The boot window stays (one contiguous host block, freed whole
+    /// with the VM), and so do pinned frames. The frames are freed once no
+    /// vCPU and no host access can still reach them. Returns the pages
+    /// given back.
+    pub fn reclaim(&self, gpa: u64, len: u64) -> u64 {
+        let _r = RECLAIM_LOCK.lock();
+        let mut freed = alloc::vec::Vec::new();
+        let taken = {
+            let _g = DEMAND_LOCK.lock();
+            let pins = PINS.lock();
+            let pinned = |f: u64| pins.contains_key(&f);
+            let taken = match self.sl {
+                SecondLevel::Ept => crate::microvm::cpu::vmx::ept::demand_reclaim(
+                    self.table_root, gpa, len, self.len, &pinned, &mut freed),
+                SecondLevel::Npt => crate::microvm::cpu::svm::npt::demand_reclaim(
+                    self.table_root, gpa, len, self.len, &pinned, &mut freed),
+            };
+            if taken != 0 {
+                let (first, last) = (gpa >> 12, gpa.saturating_add(len) >> 12);
+                for slot in &self.tlb {
+                    let pn = slot.load(Ordering::Relaxed) >> 32;
+                    if (first..last).contains(&pn) {
+                        slot.store(0, Ordering::Relaxed);
+                    }
+                }
+            }
+            taken
+        };
+        if freed.is_empty() {
+            return taken;
+        }
+        crate::microvm::devices::hostmem::flush_guest_translations();
+        // Accesses that began before the entries went counted in the old
+        // epoch; later ones translate afresh.
+        let old = (self.epoch.fetch_add(1, Ordering::SeqCst) & 1) as usize;
+        while self.accessing[old].load(Ordering::SeqCst) != 0 {
+            core::hint::spin_loop();
+        }
+        for f in freed {
+            crate::memory::deallocate_frame(f);
+        }
+        RECLAIMED_PAGES.fetch_add(taken, Ordering::Relaxed);
+        taken
+    }
+
+    /// `host_page`, and the frame stays the guest page's until the pin is
+    /// dropped (`unpin_frames`): free page reporting will not take it.
+    pub fn pin_page(&self, gpa: u64) -> Option<u64> {
+        let _r = RECLAIM_LOCK.lock();
+        let host = self.host_page(gpa)?;
+        if gpa >= self.boot_bytes {
+            *PINS.lock().entry(host).or_insert(0) += 1;
+        }
+        Some(host)
     }
 
     /// Advertised guest RAM size in bytes.
@@ -281,11 +385,17 @@ impl GuestMem {
         if gpa >= self.len {
             return None;
         }
-        let host = self.page_host(gpa & !0xFFF)? + (gpa & 0xFFF);
-        // SAFETY: `host` lies in the mapped frame of this guest page, which
-        // stays mapped for the VM's life; a byte has no alignment.
-        let a = unsafe { core::sync::atomic::AtomicU8::from_ptr(host as *mut u8) };
-        Some(a.swap(val, Ordering::AcqRel))
+        let e = self.enter();
+        let r = self.page_host(gpa & !0xFFF).map(|h| {
+            let host = h + (gpa & 0xFFF);
+            // SAFETY: `host` lies in the mapped frame of this guest page,
+            // which `reclaim` does not free while the access counts; a byte
+            // has no alignment.
+            let a = unsafe { core::sync::atomic::AtomicU8::from_ptr(host as *mut u8) };
+            a.swap(val, Ordering::AcqRel)
+        });
+        self.leave(e);
+        r
     }
 
     pub fn write_u8(&self, gpa: u64, val: u8) -> bool {
@@ -325,6 +435,7 @@ impl GuestMem {
         if !gpa.checked_add(total).is_some_and(|end| end <= self.len) {
             return false;
         }
+        let e = self.enter();
         let mut done: usize = 0;
         while (done as u64) < total {
             let cur = gpa + done as u64;
@@ -332,7 +443,10 @@ impl GuestMem {
             let off = (cur & 0xFFF) as usize;
             let host = match self.page_host(page) {
                 Some(h) => h,
-                None => return false,
+                None => {
+                    self.leave(e);
+                    return false;
+                }
             };
             let take = core::cmp::min(total as usize - done, 4096 - off);
             // SAFETY: `host` is the mapped frame of this guest page and
@@ -346,6 +460,7 @@ impl GuestMem {
             }
             done += take;
         }
+        self.leave(e);
         true
     }
 
@@ -359,6 +474,7 @@ impl GuestMem {
         if !gpa.checked_add(total).is_some_and(|end| end <= self.len) {
             return false;
         }
+        let e = self.enter();
         let mut done: usize = 0;
         while (done as u64) < total {
             let cur = gpa + done as u64;
@@ -366,7 +482,10 @@ impl GuestMem {
             let off = (cur & 0xFFF) as usize;
             let host = match self.page_host(page) {
                 Some(h) => h,
-                None => return false,
+                None => {
+                    self.leave(e);
+                    return false;
+                }
             };
             let take = core::cmp::min(total as usize - done, 4096 - off);
             // SAFETY: as in `read_bytes`.
@@ -379,6 +498,7 @@ impl GuestMem {
             }
             done += take;
         }
+        self.leave(e);
         true
     }
 }

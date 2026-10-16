@@ -145,7 +145,7 @@ pub fn unmap(gpa_off: u64, pages: usize) {
         };
     }
     if removed {
-        flush_all_vcpus();
+        flush_all_vcpus(true);
     }
 }
 
@@ -160,11 +160,20 @@ pub fn is_mapped(gpa: u64) -> bool {
     }
 }
 
+/// After second-level entries of guest RAM were removed: no vCPU uses
+/// them any more once this returns (`flush_all_vcpus`). Waits without
+/// yielding, for callers that hold the VM's device state.
+pub fn flush_guest_translations() {
+    flush_all_vcpus(false);
+}
+
 /// Bump the generation and wait until every core in the guest has flushed
 /// or left it. Store, then look (`cpu::entry_irqs_off` stores "in guest",
 /// then looks here): either the vCPU sees the new generation before it
-/// enters, or this sees it in the guest and kicks it out.
-fn flush_all_vcpus() {
+/// enters, or this sees it in the guest and kicks it out. A kicked vCPU
+/// leaves within microseconds; `yielding` lets the core's other fibers run
+/// meanwhile.
+fn flush_all_vcpus(yielding: bool) {
     let generation = GEN.fetch_add(1, Ordering::SeqCst) + 1;
     let hz = crate::interrupts::tsc_freq();
     let dl_warn = crate::interrupts::rdtsc() + hz;
@@ -190,7 +199,11 @@ fn flush_all_vcpus() {
             warned = true;
             crate::kprintln!("[microvm] hostmem: a vCPU has not left the guest for 1 s after an unmap");
         }
-        crate::smp::fiber::spin_or_yield();
+        if yielding {
+            crate::smp::fiber::spin_or_yield();
+        } else {
+            core::hint::spin_loop();
+        }
     }
 }
 
