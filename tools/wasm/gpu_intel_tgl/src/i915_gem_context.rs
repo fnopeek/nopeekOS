@@ -211,6 +211,19 @@ impl pending {
     const EMPTY: pending = pending { used: false, client: 0, ring: 0, ticket: 0, rq: 0, ctx: 0, engine: 0, started_us: 0 };
 }
 
+/// An execbuffer waiting for room: where Linux blocks the caller
+/// (`eb_throttle`, `i915_gem_evict_for_node`, the request's sw fences), it
+/// waits here in ring order. Its ticket is taken, so the guest's fence
+/// stays open until it has run, and its objects count as busy meanwhile.
+pub struct held_exec {
+    pub client: u8,
+    pub ring: u8,
+    pub ticket: u64,
+    pub v2: bool,
+    pub req: alloc::vec::Vec<u8>,
+    pub objs: alloc::vec::Vec<u16>,
+}
+
 pub struct nctx {
     pub clients: [client; MAX_CLIENTS],
     pub ctxs: [gem_ctx; MAX_GEM_CTX],
@@ -218,6 +231,7 @@ pub struct nctx {
     pub objs: [gem_obj; MAX_OBJECTS],
     hash: [u16; HASH],
     pub pend: [pending; MAX_PENDING],
+    pub held: alloc::vec::Vec<held_exec>,
     /// Idle client contexts in `gt.contexts`, for any engine.
     pool: [u16; crate::intel_context::MAX_CONTEXTS],
     npool: usize,
@@ -235,6 +249,7 @@ pub static NCTX: Single<nctx> = Single::new(nctx {
     objs: [gem_obj::EMPTY; MAX_OBJECTS],
     hash: [NONE16; HASH],
     pend: [pending::EMPTY; MAX_PENDING],
+    held: alloc::vec::Vec::new(),
     pool: [0; crate::intel_context::MAX_CONTEXTS],
     npool: 0,
     nzombies: 0,
@@ -358,6 +373,17 @@ impl nctx {
         !crate::intel_gt::intel_gt_is_wedged(gt) && self.objs[i].fences.iter().any(|f| !seqno_done(gt, f.ce, f.seqno))
     }
 
+    /// Whether an execbuffer waiting in `held` names the buffer of object `i`.
+    pub fn obj_held(&self, i: usize) -> bool {
+        !self.held.is_empty() && self.share_ring(i).any(|j| self.held.iter().any(|h| h.objs.contains(&(j as u16))))
+    }
+
+    /// `obj_busy`, or named by a waiting execbuffer: what the guest and the
+    /// object's release see.
+    pub fn obj_in_use(&self, gt: &intel_gt, i: usize) -> bool {
+        self.obj_busy(gt, i) || self.obj_held(i)
+    }
+
     /// The objects sharing the buffer of object `i`, `i` first.
     fn share_ring(&self, i: usize) -> impl Iterator<Item = usize> + '_ {
         let mut at = Some(i);
@@ -389,7 +415,8 @@ impl nctx {
         if crate::intel_gt::intel_gt_is_wedged(gt) {
             return 0;
         }
-        let mut busy = 0u32;
+        // A waiting execbuffer may write it on the render engine.
+        let mut busy = if self.obj_held(i) { 1 << 16 | 1 } else { 0u32 };
         for j in self.share_ring(i) {
             for f in &self.objs[j].fences {
                 if !seqno_done(gt, f.ce, f.seqno) {
@@ -728,15 +755,19 @@ impl nctx {
         self.ctx_reap(gt, x);
     }
 
-    /// A new pending fence on `ring` of client `c` for request `rq`.
-    pub fn pend_add(&mut self, c: u8, ring: u8, rq: usize, ctx: usize, engine: u8) -> u64 {
+    /// The next fence of `ring` of client `c`: an execbuffer takes it when
+    /// it comes in, whether it runs, waits or fails.
+    pub fn ticket_take(&mut self, c: u8, ring: u8) -> u64 {
         let r = &mut self.clients[c as usize].rings[ring as usize];
         r.submitted += 1;
-        let ticket = r.submitted;
+        r.submitted
+    }
+
+    /// The pending fence `ticket` on `ring` of client `c` for request `rq`.
+    pub fn pend_add(&mut self, c: u8, ring: u8, rq: usize, ctx: usize, engine: u8, ticket: u64) {
         if let Some(p) = self.pend.iter_mut().find(|p| !p.used) {
             *p = pending { used: true, client: c, ring, ticket, rq: rq as u16, ctx: ctx as u16, engine, started_us: 0 };
         }
-        ticket
     }
 
     /// Whether a request can be added for client work without overflowing
@@ -815,7 +846,7 @@ impl nctx {
         }
         if self.nzombies != 0 {
             for i in 0..MAX_OBJECTS {
-                if self.objs[i].used && self.objs[i].zombie && !self.obj_busy(gt, i) {
+                if self.objs[i].used && self.objs[i].zombie && !self.obj_in_use(gt, i) {
                     self.obj_release(i915, gt, i);
                 }
             }
@@ -826,7 +857,7 @@ impl nctx {
                 if !self.clients[c].used || !self.clients[c].closing {
                     continue;
                 }
-                if !self.pend.iter().any(|p| p.used && p.client == c8) {
+                if !self.pend.iter().any(|p| p.used && p.client == c8) && !self.held.iter().any(|h| h.client == c8) {
                     crate::intel_gt_requests::intel_gt_retire_requests(i915, gt);
                     let id = self.clients[c].id;
                     let held = now.saturating_sub(self.clients[c].closing_us);
@@ -859,10 +890,12 @@ impl nctx {
         false
     }
 
-    /// `completed` of a ring: every ticket below the oldest still pending.
-    /// Returns whether it moved.
-    fn advance(&mut self, c: u8, ring: u8) -> bool {
-        let oldest = self.pend.iter().filter(|p| p.used && p.client == c && p.ring == ring).map(|p| p.ticket).min();
+    /// `completed` of a ring: every ticket below the oldest still pending
+    /// or waiting. Returns whether it moved.
+    pub fn advance(&mut self, c: u8, ring: u8) -> bool {
+        let running = self.pend.iter().filter(|p| p.used && p.client == c && p.ring == ring).map(|p| p.ticket);
+        let waiting = self.held.iter().filter(|h| h.client == c && h.ring == ring).map(|h| h.ticket);
+        let oldest = running.chain(waiting).min();
         let r = &mut self.clients[c as usize].rings[ring as usize];
         let done = oldest.map(|t| t - 1).unwrap_or(r.submitted);
         if done != r.completed {
@@ -1019,7 +1052,7 @@ pub fn obj_detach(st: &mut nctx, i915: &mut drm_i915_private, gt: &intel_gt, id:
         st.tlb_flush(i915, gt);
         return Ok(0);
     };
-    if !st.obj_busy(gt, i) {
+    if !st.obj_in_use(gt, i) {
         st.obj_free(i);
         st.tlb_flush(i915, gt);
         return Ok(0);

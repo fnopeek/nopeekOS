@@ -702,6 +702,9 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         } else {
             -1
         };
+        // A held execbuffer is retried at least every millisecond.
+        let held = crate::i915_gem_context::NCTX.with(|st| !st.held.is_empty());
+        let timeout = if held && (timeout < 0 || timeout > 1) { 1 } else { timeout };
         npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout);
         service_interrupts(i915, gt);
         crate::intel_rps::intel_rps_run_pending(i915, gt);
@@ -719,7 +722,11 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
             let status = run_job(i915, gt, ggtt, &mut svc, job);
             npk_sys::gpudev_complete(seq as i32, status);
         }
-        crate::i915_gem_context::NCTX.with(|st| st.poll(i915, gt));
+        crate::i915_gem_context::NCTX.with(|st| {
+            st.poll(i915, gt);
+            let mut d = crate::i915_gem_context::drm { i915: &mut *i915, gt: &mut *gt, ggtt: &mut *ggtt };
+            crate::i915_gem_execbuffer::run_held(st, &mut d);
+        });
 
         if crate::intel_gt::intel_gt_is_wedged(gt) {
             linux::say("gpudev: GT wedged, giving the card back");

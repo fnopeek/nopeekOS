@@ -9,9 +9,16 @@
 //! fences in and out of the guest (the guest kernel waits for its in-fences;
 //! the out-fence is the ring's counter, `npk_gpudev_ring`). Implicit sync
 //! is kept: a request waits for the fences in its objects' reservations,
-//! shared with every client that imported the buffer. Where Linux
-//! would wait for an object, a ring or the request table, the guest is told
-//! EAGAIN, which Mesa's `intel_ioctl` repeats.
+//! shared with every client that imported the buffer.
+//!
+//! The guest does not read the response: Mesa's `i915_virtio_gem_execbuffer2`
+//! returns the status of the virtio submit, and the batch's fence is the
+//! ring's counter. A refusal is a lost batch whose fence signals. So where
+//! Linux blocks the caller (`eb_throttle`, `i915_gem_evict_for_node`, the
+//! request's sw fences), the execbuffer waits in `nctx::held` with its fence
+//! taken, and the client's later ones wait behind it, as they would behind
+//! the blocked ioctl; they run in order once there is room (`run_held`).
+//! What Linux refuses is refused.
 
 use crate::i915_gem_context::*;
 use crate::i915_uapi::*;
@@ -62,42 +69,136 @@ struct eb_vma {
     flags: u64,
 }
 
-/// `I915_CCMD_GEM_EXECBUFFER2(_V2)`. Writes the response (`ret` at 4) and
-/// returns its length; Err is a malformed request.
-pub fn i915_ccmd_gem_execbuffer2(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], v2: bool, rsp: &mut [u8])
-                                 -> Result<usize, i32> {
-    let flags = rd64(req, 16);
-    let context_id = rd64(req, 24);
-    let buffer_count = rd32(req, 32) as usize;
-    let batch_start_offset = rd32(req, 36);
-    let batch_len = rd32(req, 40);
-    let relocs_count = rd32(req, 44) as usize;
-    let len = rd32(req, 4) as usize;
-    let buffers_size = buffer_count.checked_mul(EXEC_OBJECT2_BYTES).ok_or(-EINVAL)?;
-    let relocs_size = relocs_count.checked_mul(RELOCATION_ENTRY_BYTES).ok_or(-EINVAL)?;
-    if len != REQ_BYTES + buffers_size + relocs_size || req.len() < len {
+/// The fixed part of an execbuffer request.
+#[derive(Clone, Copy)]
+struct exec_params {
+    flags: u64,
+    context_id: u32,
+    count: usize,
+    batch_start_offset: u32,
+    batch_len: u32,
+    relocs_count: usize,
+    ring: u8,
+}
+
+/// The header of `req`, checked: Err is a malformed request. V2 numbers
+/// the rings per context (`ring += (ctx - 1) * 8`), so its context id must
+/// keep the ring in range; V1 names the ring with the flags alone.
+fn exec_params(req: &[u8], v2: bool) -> Result<exec_params, i32> {
+    if req.len() < REQ_BYTES {
         return Err(-EINVAL);
     }
-    if context_id == 0 || context_id > 8 {
+    let flags = rd64(req, 16);
+    let context_id = rd64(req, 24);
+    let count = rd32(req, 32) as usize;
+    let relocs_count = rd32(req, 44) as usize;
+    let len = rd32(req, 4) as usize;
+    let buffers_size = count.checked_mul(EXEC_OBJECT2_BYTES).ok_or(-EINVAL)?;
+    let relocs_size = relocs_count.checked_mul(RELOCATION_ENTRY_BYTES).ok_or(-EINVAL)?;
+    if len != REQ_BYTES + buffers_size + relocs_size || req.len() < len || context_id > u32::MAX as u64 {
         return Err(-EINVAL);
     }
     let mut ring = 1 + (flags & I915_EXEC_RING_MASK);
     if v2 {
+        if context_id == 0 {
+            return Err(-EINVAL);
+        }
         ring += (context_id - 1) * 8;
     }
     if ring >= MAX_RINGS as u64 {
         return Err(-EINVAL);
     }
+    Ok(exec_params { flags, context_id: context_id as u32, count, batch_start_offset: rd32(req, 36),
+                     batch_len: rd32(req, 40), relocs_count, ring: ring as u8 })
+}
+
+/// `I915_CCMD_GEM_EXECBUFFER2(_V2)`. Writes the response (`ret` at 4) and
+/// returns its length; Err is a malformed request. The batch runs now, or
+/// waits behind the client's held ones or for room.
+pub fn i915_ccmd_gem_execbuffer2(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], v2: bool, rsp: &mut [u8])
+                                 -> Result<usize, i32> {
+    let p = exec_params(req, v2)?;
     wr32(rsp, 0, 8);
     *REASON.lock() = "";
-    let ret = match execbuffer(st, d, c, req, flags, context_id as u32, buffer_count, batch_start_offset, batch_len,
-                               relocs_count, ring as u8) {
-        Ok(()) => 0,
-        Err(e) => e,
+    let ticket = st.ticket_take(c, p.ring);
+    let queued = st.held.iter().any(|h| h.client == c);
+    let ret = if queued {
+        hold(st, c, req, v2, p, ticket, "behind held ones");
+        0
+    } else {
+        match execbuffer(st, d, c, req, p, ticket) {
+            Ok(()) => 0,
+            Err(EAGAIN) => {
+                hold(st, c, req, v2, p, ticket, *REASON.lock());
+                0
+            }
+            Err(e) => e,
+        }
     };
     wr32(rsp, 4, ret as u32);
-    log_execbuffer(c, ring as u32, buffer_count, batch_len, ret);
+    log_execbuffer(c, p.ring as u32, p.count, p.batch_len, ret);
+    st.advance(c, p.ring);
+    st.report_ring(c, p.ring);
     Ok(8)
+}
+
+/// The execbuffer waits in `held`: its request and the objects it names.
+fn hold(st: &mut nctx, c: u8, req: &[u8], v2: bool, p: exec_params, ticket: u64, reason: &'static str) {
+    let len = rd32(req, 4) as usize;
+    let objs = (0..p.count).filter_map(|i| st.obj(c, rd32(req, REQ_BYTES + i * EXEC_OBJECT2_BYTES)))
+        .map(|i| i as u16).collect();
+    st.held.push(held_exec { client: c, ring: p.ring, ticket, v2, req: req[..len].to_vec(), objs });
+    log_held(c, p.ring, reason);
+}
+
+/// The held execbuffers in order: each client runs as far as it can; one
+/// that fails as Linux would fail is dropped, and its fence signals.
+pub fn run_held(st: &mut nctx, d: &mut drm) {
+    if st.held.is_empty() {
+        return;
+    }
+    let mut waiting = core::mem::take(&mut st.held);
+    let mut keep = alloc::vec::Vec::with_capacity(waiting.len());
+    let mut blocked: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut moved: alloc::vec::Vec<(u8, u8)> = alloc::vec::Vec::new();
+    for h in waiting.drain(..) {
+        if blocked.contains(&h.client) {
+            keep.push(h);
+            continue;
+        }
+        *REASON.lock() = "";
+        match exec_params(&h.req, h.v2).and_then(|p| execbuffer(st, d, h.client, &h.req, p, h.ticket)) {
+            Err(EAGAIN) => {
+                blocked.push(h.client);
+                keep.push(h);
+            }
+            r => {
+                if let Err(e) = r {
+                    log_execbuffer(h.client, h.ring as u32, 0, 0, e);
+                }
+                if !moved.contains(&(h.client, h.ring)) {
+                    moved.push((h.client, h.ring));
+                }
+            }
+        }
+    }
+    // Only now, with every waiting ticket back in place, may a fence move.
+    st.held = keep;
+    for (c, ring) in moved {
+        st.advance(c, ring);
+        st.report_ring(c, ring);
+    }
+}
+
+/// The first held execbuffers of the boot, with why; a fixed number of lines.
+fn log_held(c: u8, ring: u8, reason: &str) {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    const MAX_LINES: u32 = 16;
+    static LINES: AtomicU32 = AtomicU32::new(0);
+    if LINES.fetch_add(1, Ordering::Relaxed) < MAX_LINES {
+        linux::Line::new().s("native context: execbuffer of client slot ").dec(c as u64).s(" ring ").dec(ring as u64)
+            .s(" waits (").s(reason).s(")").say();
+    }
 }
 
 /// Why the last execbuffer was refused.
@@ -148,13 +249,10 @@ fn report_scratch_writes(st: &nctx, vm: u8, c: u8, ctx_id: u32) {
 /// `i915_gem_do_execbuffer` for softpinned objects; Err is the positive
 /// errno for `ret`.
 #[allow(clippy::too_many_arguments)]
-fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id: u32, count: usize,
-              batch_start_offset: u32, batch_len: u32, relocs_count: usize, ring: u8) -> Result<(), i32> {
+fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], p: exec_params, ticket: u64) -> Result<(), i32> {
+    let exec_params { flags, context_id: ctx_id, count, batch_start_offset, batch_len, relocs_count, ring } = p;
     // virglrenderer: res_ids to objects, relocation counts against the total.
-    let mut vmas = [eb_vma { obj: 0, offset: 0, flags: 0 }; 2048];
-    if count > vmas.len() {
-        return Err(why(EINVAL, "more than 2048 objects"));
-    }
+    let mut vmas = alloc::vec![eb_vma { obj: 0, offset: 0, flags: 0 }; count];
     let mut relocs = 0usize;
     for i in 0..count {
         let e = &req[REQ_BYTES + i * EXEC_OBJECT2_BYTES..];
@@ -346,7 +444,7 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
     for v in &vmas[..count] {
         st.resv_add(d.gt, v.obj, ce as u16, seqno, class, v.flags & EXEC_OBJECT_WRITE != 0);
     }
-    st.pend_add(c, ring, rq, x, engine);
+    st.pend_add(c, ring, rq, x, engine, ticket);
     st.report_ring(c, ring);
     // Once per boot, with a client's work on the engine: the registers its
     // batches depend on, read back.
