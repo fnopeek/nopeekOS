@@ -243,8 +243,11 @@ pub extern "C" fn _start() {
     // i915_driver_hw_probe, without the display parts (OpRegion, bandwidth)
     // and MSI, which comes with the interrupt handler.
     intel_dram::intel_dram_edram_detect(&mut i915);
-    // i915_set_dma_info: TGL_DMA_MASK_SIZE bits; DMA buffers come from
-    // below 4 GB, inside the mask.
+    // i915_set_dma_info: the card reaches TGL_DMA_MASK_SIZE bits, so its
+    // buffers may lie anywhere below that.
+    if npk_sys::dma_set_mask(regs::TGL_DMA_MASK_SIZE as i32) != 0 {
+        say("i915_set_dma_info: the kernel refused the DMA mask, buffers stay below 4 GB");
+    }
     let mut ggtt = match intel_ggtt::i915_ggtt_probe_hw(regs) {
         Ok(g) => g,
         Err(()) => {

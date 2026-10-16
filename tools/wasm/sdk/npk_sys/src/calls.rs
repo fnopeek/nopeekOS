@@ -70,6 +70,7 @@ unsafe extern "C" {
     fn npk_memory_fence() -> i32;
     fn npk_dma_alloc(pages: i32) -> i32;
     fn npk_dma_alloc_below(pages: i32, limit_mb: i32) -> i32;
+    fn npk_dma_set_mask(bits: i32) -> i32;
     fn npk_dma_phys_addr(handle: i32) -> i64;
     fn npk_dma_read32(handle: i32, offset: i32) -> i32;
     fn npk_dma_write32(handle: i32, offset: i32, value: i32) -> i32;
@@ -183,6 +184,8 @@ plain! {
     fn memory_fence = npk_memory_fence() -> i32;
     fn dma_alloc = npk_dma_alloc(pages: i32) -> i32;
     fn dma_alloc_below = npk_dma_alloc_below(pages: i32, limit_mb: i32) -> i32;
+    /// `dma_set_mask(DMA_BIT_MASK(bits))`: later DMA buffers lie below `1 << bits`.
+    fn dma_set_mask = npk_dma_set_mask(bits: i32) -> i32;
     fn dma_phys_addr = npk_dma_phys_addr(handle: i32) -> i64;
     fn dma_read32 = npk_dma_read32(handle: i32, offset: i32) -> i32;
     fn dma_write32 = npk_dma_write32(handle: i32, offset: i32, value: i32) -> i32;

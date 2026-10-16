@@ -1031,6 +1031,10 @@ host_imports! {
     // npk_dma_alloc(page_count) -> handle or -1
     ctx fn npk_dma_alloc(pages: i32) -> i32;
 
+    // npk_dma_set_mask(bits) -> 0 or -1: the device's DMA mask
+    // (`dma_set_mask`); later buffers lie below `1 << bits`.
+    ctx fn npk_dma_set_mask(bits: i32) -> i32;
+
     // npk_dma_phys_addr(handle) -> physical address as i64
     ctx fn npk_dma_phys_addr(handle: i32) -> i64;
 

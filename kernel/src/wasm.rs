@@ -71,6 +71,9 @@ pub(crate) struct HwDriverState {
     irq_vector: u8,
     /// `irq::fired_count` of that vector when `npk_wait` last reported it.
     irq_seen: u64,
+    /// The device's DMA mask as a limit (`dma_set_mask`): its buffers lie
+    /// below it. 4 GB until the driver names a wider one.
+    dma_limit: u64,
 }
 
 const MAX_MMIO_MAPS: usize = 4;

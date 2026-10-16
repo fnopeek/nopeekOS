@@ -1326,6 +1326,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         registered_as_netdev: false,
         irq_vector: 0,
         irq_seen: 0,
+        dma_limit: DMA_LIMIT_DEFAULT,
     });
     crate::kdebug!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, vid, did);
@@ -1395,6 +1396,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
         registered_as_netdev: false,
         irq_vector: 0,
         irq_seen: 0,
+        dma_limit: DMA_LIMIT_DEFAULT,
     });
     0
 }
@@ -1615,6 +1617,7 @@ pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
             registered_as_netdev: false,
             irq_vector: 0,
             irq_seen: 0,
+            dma_limit: DMA_LIMIT_DEFAULT,
         });
     }
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
@@ -1821,6 +1824,7 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
             registered_as_netdev: false,
             irq_vector: 0,
             irq_seen: 0,
+            dma_limit: DMA_LIMIT_DEFAULT,
         });
     }
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
@@ -2006,6 +2010,20 @@ fn dma_caps(hw: &HwDriverState) -> (usize, usize) {
     }
 }
 
+/// DMA limit of a driver that names no mask: 32-bit descriptors (a PCIe TX
+/// BD has a 32-bit address field), as Linux's default mask.
+const DMA_LIMIT_DEFAULT: u64 = 0x1_0000_0000;
+
+/// `dma_set_mask(DMA_BIT_MASK(bits))`: the device reaches `bits` of
+/// address, so its later buffers may lie anywhere below `1 << bits`. 0, or
+/// -1 for a width outside 32..=64.
+pub(crate) fn npk_dma_set_mask(ctx: &mut HostState, bits: i32) -> i32 {
+    let Some(hw) = ctx.hw.as_mut() else { return -1 };
+    if !(32..=64).contains(&bits) { return -1; }
+    hw.dma_limit = if bits == 64 { u64::MAX } else { 1u64 << bits };
+    0
+}
+
 pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     let hw = match ctx.hw.as_mut() {
         Some(h) => h,
@@ -2018,8 +2036,8 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
     if total + page_count > max_pages { return -1; }
 
-    // DMA buffers must be below 4 GB: the PCIe TX BD has a 32-bit address field.
-    let phys = match crate::memory::allocate_contiguous_below(page_count, 0x1_0000_0000) {
+    // Below the device's DMA mask.
+    let phys = match crate::memory::allocate_contiguous_below(page_count, hw.dma_limit) {
         Some(p) => p,
         None => return -1,
     };
@@ -2041,8 +2059,8 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
 /// master abort on what looks like valid RAM.
 ///
 /// Which addresses a device can reach is device knowledge and belongs in
-/// the driver. `limit_mb <= 0` means 4 GB; nothing above 4 GB is allowed,
-/// since devices with 32-bit descriptors would silently break.
+/// the driver. `limit_mb <= 0` means the DMA mask (`npk_dma_set_mask`, 4 GB
+/// unless set); the limit never goes above the mask.
 ///
 /// Same path, caps and bitmap as `npk_dma_alloc`. The caller picks a limit,
 /// not an address, so it cannot select foreign memory.
@@ -2059,9 +2077,9 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     if total + page_count > max_pages { return -1; }
 
     let limit = if limit_mb <= 0 {
-        0x1_0000_0000u64
+        hw.dma_limit
     } else {
-        ((limit_mb as u64) * 1024 * 1024).min(0x1_0000_0000)
+        ((limit_mb as u64) * 1024 * 1024).min(hw.dma_limit)
     };
 
     let phys = match crate::memory::allocate_contiguous_below(page_count, limit) {
