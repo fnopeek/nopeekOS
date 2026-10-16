@@ -163,6 +163,7 @@ fn launch_wayland(kmsg_fd: i64) {
     }
     say(kmsg_fd, b"[microvm-init] starting Wayland session\n");
     write_file(b"/tmp/lw-probe.js\0", LW_PROBE, 0o644);
+    write_file(b"/tmp/lw-support.js\0", LW_SUPPORT, 0o644);
     write_file(b"/tmp/lw-sample.sh\0", LW_SAMPLE, 0o644);
     write_file(b"/tmp/load-sample.sh\0", LOAD_SAMPLE, 0o644);
     write_file(b"/tmp/npkwm\0", NPKWM, 0o755);
@@ -223,7 +224,9 @@ fn launch_wayland(kmsg_fd: i64) {
     // runs /usr/bin/NAME instead of the browser (a test client such as
     // es2gears_wayland).
     // `npklogs` on the command line streams the app's and npkwm's output
-    // to the console (`set microvm_cmdline npklogs`).
+    // to the console (`set microvm_cmdline npklogs`). `npksupport` writes
+    // the graphics and media sections of about:support to it as `[about]`
+    // lines, 20 s and 90 s after the browser started.
     // `npkprofile=<ip>:<port>` on the command line runs the app under the
     // Gecko startup profiler and, after it exits, sends the gzipped profile
     // to that address (`nc -l` on the receiving side).
@@ -341,9 +344,11 @@ fn launch_wayland(kmsg_fd: i64) {
                  chown -h 1000:1000 /tmp/moz /tmp/moz/user.js /tmp/moz/datareporting 2>/dev/null; \
                  chown 1000:1000 /tmp/bcache /tmp/gleandb; \
                  chown 1000:1000 /dev/snd/* 2>/dev/null; \
-                 if grep -q npkstats /proc/cmdline && [ -f /usr/lib/librewolf/librewolf.cfg ]; then \
+                 if grep -qE 'npkstats|npksupport' /proc/cmdline && [ -f /usr/lib/librewolf/librewolf.cfg ]; then \
                    chgrp app /dev/kmsg; chmod 0620 /dev/kmsg; \
-                   cat /usr/lib/librewolf/librewolf.cfg /tmp/lw-probe.js > /tmp/librewolf.cfg \
+                   grep -q npkstats /proc/cmdline || : > /tmp/lw-probe.js; \
+                   grep -q npksupport /proc/cmdline || : > /tmp/lw-support.js; \
+                   cat /usr/lib/librewolf/librewolf.cfg /tmp/lw-probe.js /tmp/lw-support.js > /tmp/librewolf.cfg \
                      && mount --bind /tmp/librewolf.cfg /usr/lib/librewolf/librewolf.cfg 2>/dev/null; \
                    { cat /usr/lib/librewolf/defaults/pref/channel-prefs.js; echo 'pref(\"general.config.sandbox_enabled\", false);'; } > /tmp/channel-prefs.js \
                      && mount --bind /tmp/channel-prefs.js /usr/lib/librewolf/defaults/pref/channel-prefs.js 2>/dev/null; \
@@ -668,6 +673,10 @@ fn open_console_kmsg() -> (i64, i64) {
 /// the host's timeline. It needs the autoconfig sandbox off, which the
 /// session script turns off for that run alone.
 const LW_PROBE: &[u8] = include_bytes!("lw_probe.js");
+
+/// Appended to LibreWolf's autoconfig with `npksupport`: the graphics and
+/// media sections of about:support as `[about]` lines on /dev/kmsg.
+const LW_SUPPORT: &[u8] = include_bytes!("lw_support.js");
 
 /// With `npkstats` on the command line, samples the app process's faults,
 /// CPU time and waits for its first second.
