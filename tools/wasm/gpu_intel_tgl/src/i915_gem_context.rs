@@ -294,6 +294,11 @@ pub struct native_stats {
     total_sum_us: [u64; 4],
     total_max_us: [u64; 4],
     run_max_us: [u64; 4],
+    /// Per client slot: its kernel id, requests on rcs, and their summed
+    /// running time; who loads the render engine.
+    client_id: [u32; STATS_CLIENTS],
+    client_rcs: [u32; STATS_CLIENTS],
+    client_run_us: [u64; STATS_CLIENTS],
     held: u32,
     /// The last `poll` with requests pending and the widest gap between
     /// two such polls: how late a completed request can be noticed.
@@ -305,7 +310,8 @@ pub struct native_stats {
 
 impl native_stats {
     const EMPTY: native_stats = native_stats {
-        since_us: 0, reqs: [0; 4], total_sum_us: [0; 4], total_max_us: [0; 4], run_max_us: [0; 4], held: 0,
+        since_us: 0, reqs: [0; 4], total_sum_us: [0; 4], total_max_us: [0; 4], run_max_us: [0; 4],
+        client_id: [0; STATS_CLIENTS], client_rcs: [0; STATS_CLIENTS], client_run_us: [0; STATS_CLIENTS], held: 0,
         poll_us: 0, poll_gap_us: 0, loop_max_us: 0,
     };
 
@@ -317,8 +323,16 @@ impl native_stats {
         self.loop_max_us = self.loop_max_us.max(us);
     }
 
-    fn note_done(&mut self, class: usize, p: &pending, now: u64) {
+    fn note_done(&mut self, class: usize, client_id: u32, p: &pending, now: u64) {
         let k = class.min(3);
+        let c = p.client as usize;
+        if k == 0 && c < STATS_CLIENTS {
+            self.client_id[c] = client_id;
+            self.client_rcs[c] += 1;
+            if p.started_us != 0 {
+                self.client_run_us[c] += now.saturating_sub(p.started_us);
+            }
+        }
         let total = now.saturating_sub(p.submit_us);
         self.reqs[k] += 1;
         self.total_sum_us[k] += total;
@@ -363,6 +377,16 @@ impl native_stats {
             }
             l.s(" poll gap max ").dec(self.poll_gap_us / 1000).s(" ms, loop pass max ").dec(self.loop_max_us / 1000)
                 .s(" ms, held ").dec(self.held as u64).say();
+            let mut l = Line::new();
+            l.s("native context, rcs by client:");
+            for c in 0..STATS_CLIENTS {
+                if self.client_rcs[c] == 0 {
+                    continue;
+                }
+                l.s(" ").dec(self.client_id[c] as u64).s(": ").dec(self.client_rcs[c] as u64).s(" req, running ")
+                    .dec(self.client_run_us[c] / 1000).s(" ms;");
+            }
+            l.say();
         }
         *self = native_stats { since_us: now, poll_us: self.poll_us, ..native_stats::EMPTY };
     }
@@ -370,6 +394,8 @@ impl native_stats {
 
 /// The span `native_stats` sums over.
 const STATS_US: u64 = 10_000_000;
+/// Client slots `native_stats` tells apart.
+const STATS_CLIENTS: usize = 8;
 
 pub static NCTX: Single<nctx> = Single::new(nctx {
     clients: alloc::vec::Vec::new(),
@@ -1112,7 +1138,8 @@ impl nctx {
                     self.ctxs[p.ctx as usize].innocent += 1;
                 }
                 let class = crate::intel_context::rq_engine_cs(gt, rq).map(|x| x.class as usize).unwrap_or(0);
-                self.stats.note_done(class, &p, now);
+                let id = self.clients.get(p.client as usize).map(|x| x.id).unwrap_or(0);
+                self.stats.note_done(class, id, &p, now);
                 crate::i915_request::i915_request_put(gt, rq);
                 self.pend[k].used = false;
                 if nt < touched.len() && !touched[..nt].contains(&(p.client, p.ring)) {
