@@ -160,6 +160,7 @@ Dazu fehlt eine gemeinsame Abrechnung über Gast, Module und Heap.
 | 7.8 | `microvm/cpu/mod.rs:687` | eine microVM systemweit (Globale) | zweite App-VM unmöglich | Gerätezustand je VM | L |
 | 7.9 | `microvm/devices/virtio_input_pci.rs:127`, `shade/widgets/mod.rs:312` | 256 / 64 Ereignisse, älteste verworfen | hängende Taste | Bewegung zusammenfassen, Loslassen nie verwerfen | S |
 | 7.10 | Gast-Init `microvm/linux/init/src/main.rs:322,339,356` | `sync` alle 3 s, Plattencache aus, 2 s Audio-Latenz | Folgen von 7.4/7.6 auf der Gastseite | fallen mit 7.4/7.6 weg | — |
+| 7.11 | Gast-Konsole über 8250 (`console=ttyS0`) | ein VM-Exit je Byte; `npklogs`/MOZ_LOG lassen den Gast stehen, Video stockt im Takt des Logs | Diagnose verfälscht die Messung | virtio-console mit gebündelten Puffern (crosvm/QEMU) | M |
 
 ## W8. Echte Fehler und stille falsche Ergebnisse
 
@@ -172,6 +173,8 @@ Dazu fehlt eine gemeinsame Abrechnung über Gast, Module und Heap.
 | 8.5 | `smp/fiber.rs:168` | 1024 Wecker; voll → `NO_WAKER` | Fiber wird nie geweckt | Tabelle wachsen lassen oder Spawn scheitern | S |
 | 8.6 | `gpudev.rs` `FAILURE_LIMIT` (s. 5.4) | 8 Fehlschläge rasten ein | GPU-Compositing aus bis `gpu verify` | abklingen | S |
 | 8.7 | `shade/terminal.rs:13,18` | 256 Spalten (4K-Zeile ~400), Platz 255 = „kein Terminal" | abgeschnittene Zeilen; Fehlmarkierungen | dynamisch, `Option` | S |
+| 8.8 | `microvm/devices/virtio_gpu_ctx.rs` `run_submit`/`write_response` | leere oder nicht schreibbare Antwort, Sequenznummer läuft trotzdem weiter | Gast liest alten Antwortslot; bei QUERY ein Heap-Überlauf im Gast *(v, heute kein Auslöser bekannt)* | ohne Antwort keine Sequenznummer, sichtbar scheitern | S |
+| 8.9 | `virtio_ccmd.rs` (fehlerhaft = `Err`) | unbekannter ioctl/Parameter, QUERY > 64 KB → keine Antwort, keine Sequenznummer | Gast wartet ewig in `vdrm_host_sync` | virglrenderer tut dasselbe; wo Linux ein errno hat, errno antworten (Kontextparameter in 0.21.1 erledigt) | S |
 
 ## W9. Langsame Suchen auf heißen Pfaden
 
