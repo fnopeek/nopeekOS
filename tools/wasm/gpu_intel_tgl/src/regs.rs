@@ -2125,3 +2125,78 @@ pub const I2C_M_RD: u32 = 0x1; // ?
 pub const I2C_M_STOP: u32 = 0x8000; // ?
 pub const DRM_ELD_SUPPORTS_AI: u32 = 0x2; // ?
 pub const DP_SINK_OUI: u32 = 0x400; // ?
+
+// audio codec enable (display/intel_audio.c, intel_audio_regs.h)
+/// display/intel_audio_regs.h:85
+pub const fn HSW_AUD_CFG(trans: u32) -> u32 { (((0x65000) + (trans) * ((0x65100) - (0x65000)))) }
+/// display/intel_audio_regs.h:93
+pub const fn HSW_AUD_M_CTS_ENABLE(trans: u32) -> u32 { (((0x65028) + (trans) * ((0x65128) - (0x65028)))) }
+/// display/intel_audio_regs.h:117
+pub const fn AUDIO_ELD_VALID(trans: u32) -> u32 { ((1 << 0) << ((trans) * 4)) }
+pub const AUD_CONFIG_BE: u32 = 0x65ef0; // display/intel_audio_regs.h:136
+/// display/intel_audio_regs.h:138
+pub const fn HBLANK_EARLY_ENABLE_TGL(pipe: u32) -> u32 { (0x1 << (24 + (pipe))) }
+/// display/intel_audio_regs.h:139
+pub const fn HBLANK_START_COUNT_MASK(pipe: u32) -> u32 { (0x7 << (3 + ((pipe) * 6))) }
+/// display/intel_audio_regs.h:140
+pub const fn HBLANK_START_COUNT(pipe: u32, val: u32) -> u32 { (((val) & 0x7) << (3 + ((pipe)) * 6)) }
+/// display/intel_audio_regs.h:141
+pub const fn NUMBER_SAMPLES_PER_LINE_MASK(pipe: u32) -> u32 { (0x3 << ((pipe) * 6)) }
+/// display/intel_audio_regs.h:142
+pub const fn NUMBER_SAMPLES_PER_LINE(pipe: u32, val: u32) -> u32 { (((val) & 0x3) << ((pipe) * 6)) }
+pub const HBLANK_START_COUNT_32: u32 = 0x2; // display/intel_audio_regs.h:146
+pub const HBLANK_START_COUNT_64: u32 = 0x3; // display/intel_audio_regs.h:147
+pub const HBLANK_START_COUNT_96: u32 = 0x4; // display/intel_audio_regs.h:148
+pub const HBLANK_START_COUNT_128: u32 = 0x5; // display/intel_audio_regs.h:149
+pub const AUD_FREQ_CNTRL: u32 = 0x65900; // display/intel_audio_regs.h:127
+pub const AUD_FREQ_GEN12: u64 = 0x8010; // display/intel_audio.c:1314
+pub const AUD_FREQ_TGL_BROKEN: u64 = 0x9010; // display/intel_audio.c:1315
+pub const AUD_PIN_BUF_CTL: u32 = 0x48414; // display/intel_audio_regs.h:128
+pub const AUD_PIN_BUF_ENABLE: u32 = 0x80000000; // display/intel_audio_regs.h:129
+pub const HSW_AUD_CHICKENBIT: u32 = 0x65f10; // display/intel_audio_regs.h:124
+pub const SKL_AUD_CODEC_WAKE_SIGNAL: u32 = 0x8000; // display/intel_audio_regs.h:125
+pub const AUD_CONFIG_N_VALUE_INDEX: u32 = 0x20000000; // display/intel_audio_regs.h:58
+pub const AUD_CONFIG_N_PROG_ENABLE: u32 = 0x10000000; // display/intel_audio_regs.h:59
+pub const AUD_CONFIG_UPPER_N_MASK: u32 = 0xff00000; // display/intel_audio_regs.h:60
+pub const AUD_CONFIG_LOWER_N_MASK: u32 = 0xfff0; // display/intel_audio_regs.h:61
+pub const AUD_CONFIG_PIXEL_CLOCK_HDMI_MASK: u32 = 0xf0000; // display/intel_audio_regs.h:66
+pub const POWER_DOMAIN_AUDIO_PLAYBACK: u32 = 0x2e; // display/intel_display_power.h:80
+
+// DSC PPS readout (display/intel_vdsc.c, intel_vdsc_regs.h)
+pub const ICL_DSC0_PPS_0_A: u32 = 0x78070; // i915_mmio_reg_offset(ICL_DSC0_PPS(PIPE_A, 0)) in display/intel_vdsc.c
+pub const ICL_DSC0_PPS_0_B: u32 = 0x78270; // i915_mmio_reg_offset(ICL_DSC0_PPS(PIPE_B, 0)) in display/intel_vdsc.c
+pub const ICL_DSC0_PPS_0_C: u32 = 0x78470; // i915_mmio_reg_offset(ICL_DSC0_PPS(PIPE_C, 0)) in display/intel_vdsc.c
+pub const ICL_DSC0_PPS_0_D: u32 = 0x78670; // i915_mmio_reg_offset(ICL_DSC0_PPS(PIPE_D, 0)) in display/intel_vdsc.c
+pub const ICL_DSC1_PPS_0_A: u32 = 0x78170; // i915_mmio_reg_offset(ICL_DSC1_PPS(PIPE_A, 0)) in display/intel_vdsc.c
+pub const ICL_DSC1_PPS_0_B: u32 = 0x78370; // i915_mmio_reg_offset(ICL_DSC1_PPS(PIPE_B, 0)) in display/intel_vdsc.c
+pub const ICL_DSC1_PPS_0_C: u32 = 0x78570; // i915_mmio_reg_offset(ICL_DSC1_PPS(PIPE_C, 0)) in display/intel_vdsc.c
+pub const ICL_DSC1_PPS_0_D: u32 = 0x78770; // i915_mmio_reg_offset(ICL_DSC1_PPS(PIPE_D, 0)) in display/intel_vdsc.c
+pub const DSC_PPS0_BPC_MASK: u32 = 0xf00; // display/intel_vdsc_regs.h:95
+pub const DSC_PPS0_LINE_BUF_DEPTH_MASK: u32 = 0xf000; // display/intel_vdsc_regs.h:93
+pub const DSC_PPS0_BLOCK_PREDICTION: u32 = 0x10000; // display/intel_vdsc_regs.h:92
+pub const DSC_PPS0_COLOR_SPACE_CONVERSION: u32 = 0x20000; // display/intel_vdsc_regs.h:91
+pub const DSC_PPS0_422_ENABLE: u32 = 0x40000; // display/intel_vdsc_regs.h:90
+pub const DSC_PPS0_NATIVE_422_ENABLE: u32 = 0x800000; // display/intel_vdsc_regs.h:86
+pub const DSC_PPS0_NATIVE_420_ENABLE: u32 = 0x400000; // display/intel_vdsc_regs.h:87
+pub const DSC_PPS0_VBR_ENABLE: u32 = 0x80000; // display/intel_vdsc_regs.h:89
+pub const DSC_PPS1_BPP_MASK: u32 = 0x3ff; // display/intel_vdsc_regs.h:103
+pub const DSC_PPS2_PIC_WIDTH_MASK: u32 = 0xffff0000; // display/intel_vdsc_regs.h:107
+pub const DSC_PPS2_PIC_HEIGHT_MASK: u32 = 0xffff; // display/intel_vdsc_regs.h:108
+pub const DSC_PPS3_SLICE_WIDTH_MASK: u32 = 0xffff0000; // display/intel_vdsc_regs.h:113
+pub const DSC_PPS3_SLICE_HEIGHT_MASK: u32 = 0xffff; // display/intel_vdsc_regs.h:114
+pub const DSC_PPS4_INITIAL_DEC_DELAY_MASK: u32 = 0xffff0000; // display/intel_vdsc_regs.h:119
+pub const DSC_PPS4_INITIAL_XMIT_DELAY_MASK: u32 = 0x3ff; // display/intel_vdsc_regs.h:120
+pub const DSC_PPS5_SCALE_DEC_INT_MASK: u32 = 0xfff0000; // display/intel_vdsc_regs.h:127
+pub const DSC_PPS5_SCALE_INC_INT_MASK: u32 = 0xffff; // display/intel_vdsc_regs.h:128
+pub const DSC_PPS6_INITIAL_SCALE_VALUE_MASK: u32 = 0x3f; // display/intel_vdsc_regs.h:136
+pub const DSC_PPS6_FIRST_LINE_BPG_OFFSET_MASK: u32 = 0x1f00; // display/intel_vdsc_regs.h:135
+pub const DSC_PPS6_FLATNESS_MIN_QP_MASK: u32 = 0x1f0000; // display/intel_vdsc_regs.h:134
+pub const DSC_PPS6_FLATNESS_MAX_QP_MASK: u32 = 0x1f000000; // display/intel_vdsc_regs.h:133
+pub const DSC_PPS7_NFL_BPG_OFFSET_MASK: u32 = 0xffff0000; // display/intel_vdsc_regs.h:145
+pub const DSC_PPS7_SLICE_BPG_OFFSET_MASK: u32 = 0xffff; // display/intel_vdsc_regs.h:146
+pub const DSC_PPS8_INITIAL_OFFSET_MASK: u32 = 0xffff0000; // display/intel_vdsc_regs.h:151
+pub const DSC_PPS8_FINAL_OFFSET_MASK: u32 = 0xffff; // display/intel_vdsc_regs.h:152
+pub const DSC_PPS9_RC_MODEL_SIZE_MASK: u32 = 0xffff; // display/intel_vdsc_regs.h:160
+pub const DSC_PPS10_RC_QUANT_INC_LIMIT0_MASK: u32 = 0x1f; // display/intel_vdsc_regs.h:170
+pub const DSC_PPS10_RC_QUANT_INC_LIMIT1_MASK: u32 = 0x1f00; // display/intel_vdsc_regs.h:169
+pub const DSC_PPS16_SLICE_CHUNK_SIZE_MASK: u32 = 0xffff; // display/intel_vdsc_regs.h:181

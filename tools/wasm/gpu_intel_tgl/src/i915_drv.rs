@@ -86,6 +86,8 @@ pub struct intel_display {
     pub dbuf_state: crate::skl_watermark::intel_dbuf_state,
     /// `display->bw.obj.state`.
     pub bw_state: crate::intel_bw::intel_bw_state,
+    /// `display->audio`.
+    pub audio: crate::intel_audio::intel_audio,
     /// Per connector, what the detect read from the sink's EDID.
     pub connector_audio: [connector_audio; crate::intel_encoder::MAX_CONNECTORS],
 }

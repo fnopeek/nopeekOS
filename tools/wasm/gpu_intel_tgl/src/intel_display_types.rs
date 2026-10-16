@@ -100,12 +100,48 @@ pub struct intel_pch_pfit {
     pub force_thru: bool,
 }
 
-/// `crtc_state->dsc`, without the PPS (`intel_dsc_get_pps_config` is not
-/// ported).
+/// `struct drm_dsc_config`, the fields `intel_dsc_get_pps_config` reads
+/// back (display version 12, so not PPS 17 and 18).
+#[derive(Clone, Copy, Default)]
+pub struct drm_dsc_config {
+    pub bits_per_component: u8,
+    pub line_buf_depth: u8,
+    pub block_pred_enable: bool,
+    pub convert_rgb: bool,
+    pub simple_422: bool,
+    pub native_422: bool,
+    pub native_420: bool,
+    pub vbr_enable: bool,
+    pub bits_per_pixel: u16,
+    pub pic_width: u16,
+    pub pic_height: u16,
+    pub slice_width: u16,
+    pub slice_height: u16,
+    pub initial_dec_delay: u16,
+    pub initial_xmit_delay: u16,
+    pub scale_decrement_interval: u16,
+    pub scale_increment_interval: u16,
+    pub initial_scale_value: u16,
+    pub first_line_bpg_offset: u8,
+    pub flatness_min_qp: u8,
+    pub flatness_max_qp: u8,
+    pub nfl_bpg_offset: u16,
+    pub slice_bpg_offset: u16,
+    pub initial_offset: u16,
+    pub final_offset: u16,
+    pub rc_model_size: u16,
+    pub rc_quant_incr_limit0: u8,
+    pub rc_quant_incr_limit1: u8,
+    pub slice_chunk_size: u16,
+}
+
+/// `crtc_state->dsc`.
 #[derive(Clone, Copy, Default)]
 pub struct intel_crtc_dsc {
     pub compression_enable: bool,
     pub num_streams: i32,
+    pub compressed_bpp_x16: u16,
+    pub config: drm_dsc_config,
 }
 
 /// `crtc_state->vrr`.
