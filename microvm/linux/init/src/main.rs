@@ -166,6 +166,7 @@ fn launch_wayland(kmsg_fd: i64) {
     write_file(b"/tmp/lw-support.js\0", LW_SUPPORT, 0o644);
     write_file(b"/tmp/lw-sample.sh\0", LW_SAMPLE, 0o644);
     write_file(b"/tmp/load-sample.sh\0", LOAD_SAMPLE, 0o644);
+    write_file(b"/tmp/rdd-gdb.sh\0", RDD_GDB, 0o644);
     write_file(b"/tmp/npkwm\0", NPKWM, 0o755);
 
     let prog = b"/bin/sh\0".as_ptr();
@@ -226,7 +227,8 @@ fn launch_wayland(kmsg_fd: i64) {
     // `npklogs` on the command line streams the app's and npkwm's output
     // to the console (`set microvm_cmdline npklogs`). `npksupport` writes
     // the graphics and media sections of about:support to it as `[about]`
-    // lines, 20 s and 90 s after the browser started.
+    // lines, 20 s and 90 s after the browser started. `npkgdb` writes the
+    // backtrace of a crashing media decoder process as `[gdb]` lines.
     // `npkprofile=<ip>:<port>` on the command line runs the app under the
     // Gecko startup profiler and, after it exits, sends the gzipped profile
     // to that address (`nc -l` on the receiving side).
@@ -365,6 +367,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  ( sleep 15; while true; do sync 2>/dev/null; sleep 3; done ) & \
                  grep -q npkload /proc/cmdline && sh /tmp/load-sample.sh /dev/kmsg & \
+                 grep -q npkgdb /proc/cmdline && [ -x /usr/bin/gdb ] && sh /tmp/rdd-gdb.sh & \
                  if grep -q npkbench_cpu /proc/cmdline; then \
                    t() { read u _ < /proc/uptime; echo \"${u%.*}${u#*.}\"; }; \
                    a=$(t); i=0; while [ $i -lt 1000000 ]; do i=$((i+1)); done; b=$(t); \
@@ -690,6 +693,9 @@ const LW_SAMPLE: &[u8] = include_bytes!("lw_sample.sh");
 
 /// System load per second (`npkload` on the cmdline).
 const LOAD_SAMPLE: &[u8] = include_bytes!("load_sample.sh");
+
+/// Backtraces of crashing media decoder processes (`npkgdb` on the cmdline).
+const RDD_GDB: &[u8] = include_bytes!("rdd_gdb.sh");
 
 /// The guest compositor, built by `microvm/linux/npkwm/build.sh`.
 const NPKWM: &[u8] = include_bytes!("../../npkwm/npkwm");

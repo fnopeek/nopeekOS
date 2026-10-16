@@ -113,10 +113,7 @@ fn ioctl_simple(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: usize, r
         }
         DRM_IOCTL_I915_GEM_SET_TILING | DRM_IOCTL_I915_GEM_GET_TILING | DRM_IOCTL_I915_GEM_SET_DOMAIN => {
             match st.obj(c, rd32(&p, 0)) {
-                None => {
-                    wr32(rsp, 4, EINVAL as u32);
-                    return Ok(rsp_len);
-                }
+                None => EINVAL,
                 Some(i) => match cmd {
                     DRM_IOCTL_I915_GEM_SET_TILING => set_tiling(st, d, i, &mut p),
                     DRM_IOCTL_I915_GEM_GET_TILING => {
@@ -183,19 +180,19 @@ fn ioctl_simple(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: usize, r
         DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM | DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM => {
             let param = rd64(&p, 8);
             let value = rd64(&p, 16);
-            if param == I915_CONTEXT_PARAM_PRIORITY && value as i64 > I915_CONTEXT_DEFAULT_PRIORITY
-                && cmd == DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM {
-                wr32(rsp, 4, EPERM as u32);
-                return Ok(rsp_len);
-            }
             if !matches!(param, I915_CONTEXT_PARAM_PRIORITY | I915_CONTEXT_PARAM_RECOVERABLE
                          | I915_CONTEXT_PARAM_GTT_SIZE | I915_CONTEXT_PARAM_VM) {
                 return Err(-EINVAL);
             }
-            match st.ctx(c, rd32(&p, 0)) {
-                None => ENOENT,
-                Some(x) if cmd == DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM => ctx_getparam(st, x, &mut p),
-                Some(x) => ctx_setparam(st, x, &p),
+            if param == I915_CONTEXT_PARAM_PRIORITY && value as i64 > I915_CONTEXT_DEFAULT_PRIORITY
+                && cmd == DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM {
+                EPERM
+            } else {
+                match st.ctx(c, rd32(&p, 0)) {
+                    None => ENOENT,
+                    Some(x) if cmd == DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM => ctx_getparam(st, x, &mut p),
+                    Some(x) => ctx_setparam(st, x, &p),
+                }
             }
         }
         DRM_IOCTL_I915_GEM_VM_CREATE | DRM_IOCTL_I915_GEM_VM_DESTROY => {
@@ -434,7 +431,13 @@ fn gem_context_create(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: us
                 I915_CONTEXT_PARAM_NO_ERROR_CAPTURE | I915_CONTEXT_PARAM_BANNABLE | I915_CONTEXT_PARAM_SSEU
                 | I915_CONTEXT_PARAM_RECOVERABLE | I915_CONTEXT_PARAM_VM | I915_CONTEXT_PARAM_PERSISTENCE
                 | I915_CONTEXT_PARAM_PRIORITY | I915_CONTEXT_PARAM_PROTECTED_CONTENT => {}
-                _ => return Err(-EINVAL),
+                // set_proto_ctx_param: NO_ZEROMAP, BAN_PERIOD, RINGSIZE and the
+                // rest answer -EINVAL.
+                _ => {
+                    if err == 0 {
+                        err = EINVAL;
+                    }
+                }
             }
             // The base extension's name is I915_CONTEXT_CREATE_EXT_SETPARAM,
             // and a setparam names no context.
