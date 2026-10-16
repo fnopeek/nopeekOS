@@ -119,6 +119,9 @@ pub struct ForeignPixels {
     pub pages: alloc::vec::Vec<u64>,
     /// CPU readers copying from the pages right now.
     readers: core::sync::atomic::AtomicU32,
+    /// The pages are guest pages pinned for this object
+    /// (`GuestMem::pin_page`); the pins go with it.
+    pinned: bool,
 }
 
 static FOREIGN_SERIAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
@@ -131,7 +134,16 @@ impl ForeignPixels {
             serial: FOREIGN_SERIAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
             pages,
             readers: core::sync::atomic::AtomicU32::new(0),
+            pinned: false,
         }
+    }
+
+    /// `new` for guest pages each pinned once (`GuestMem::pin_page`), which
+    /// this object unpins when it goes.
+    pub fn new_pinned(pages: alloc::vec::Vec<u64>) -> Self {
+        let mut f = Self::new(pages);
+        f.pinned = true;
+        f
     }
 
     pub fn bytes(&self) -> u64 {
@@ -150,6 +162,14 @@ impl ForeignPixels {
 
     pub fn unhold(&self) {
         self.readers.fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+impl Drop for ForeignPixels {
+    fn drop(&mut self) {
+        if self.pinned {
+            crate::microvm::devices::guest_mem::unpin_frames(&self.pages);
+        }
     }
 }
 

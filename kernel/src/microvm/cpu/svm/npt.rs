@@ -312,6 +312,83 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64, guest_bytes: u64) -> Option<u64
     }
 }
 
+/// Free page reporting: take the demand pages of `[gpa, gpa + len)` out of
+/// the guest. Their entries go not present and their frames, with every
+/// page table left empty, are pushed to `freed`; the caller frees them once
+/// no translation of them is left, and the next touch faults in a zeroed
+/// frame again. A 2-MB leaf covered in part, or holding a page `pinned`
+/// says the host still reaches, is split into 4 KB pages first. Pages
+/// outside the demand region, unbacked or pinned stay. Returns the pages
+/// taken. The caller serializes with fault-in.
+pub fn demand_reclaim(pml4_phys: u64, gpa: u64, len: u64, guest_bytes: u64, pinned: &dyn Fn(u64) -> bool,
+                      freed: &mut alloc::vec::Vec<u64>) -> u64 {
+    use core::sync::atomic::Ordering::Relaxed;
+    let start = gpa.max(boot_window_bytes(guest_bytes)).next_multiple_of(4096);
+    let end = gpa.saturating_add(len).min(guest_bytes) & !0xFFF;
+    let mut taken = 0;
+    let mut block = start & !(TWO_MB - 1);
+    // SAFETY: our own NPT, identity-mapped tables; the caller holds the
+    // fault-in lock, so no entry changes under us.
+    unsafe {
+        let pml4 = pml4_phys as *const u64;
+        let pdpt = (pml4.read_volatile() & NPT_ADDR_MASK) as *const u64;
+        while block < end {
+            let (lo, hi) = (start.max(block), end.min(block + TWO_MB));
+            let pdpt_idx = (block / ONE_GB) as usize;
+            if pdpt_idx >= 3 {
+                break;
+            }
+            let pdpt_entry = pdpt.add(pdpt_idx).read_volatile();
+            let pd = (pdpt_entry & NPT_ADDR_MASK) as *mut u64;
+            let slot = if pdpt_entry == 0 { None } else { Some(pd.add(((block % ONE_GB) / TWO_MB) as usize)) };
+            block += TWO_MB;
+            let Some(slot) = slot else { continue };
+            let pde = slot.read_volatile();
+            if pde & NPT_P == 0 {
+                continue;
+            }
+            if pde & NPT_PS != 0 {
+                let host = pde & NPT_2M_ADDR_MASK;
+                let whole = lo == block - TWO_MB && hi == block;
+                if whole && !(0..512u64).any(|j| pinned(host + j * 4096)) {
+                    slot.write_volatile(0);
+                    freed.extend((0..512u64).map(|j| host + j * 4096));
+                    taken += 512;
+                    DEMAND_2M.fetch_sub(1, Relaxed);
+                    continue;
+                }
+                let Some(pt) = memory::allocate_frame() else { continue };
+                let t = pt as *mut u64;
+                for j in 0..512u64 {
+                    t.add(j as usize).write_volatile((host + j * 4096) | NPT_P | NPT_RW | NPT_US);
+                }
+                slot.write_volatile(pt | NPT_P | NPT_RW | NPT_US);
+                DEMAND_2M.fetch_sub(1, Relaxed);
+                DEMAND_4K_BLOCKS.fetch_add(1, Relaxed);
+            }
+            let pt_phys = slot.read_volatile() & NPT_ADDR_MASK;
+            let pt = pt_phys as *mut u64;
+            let mut p = lo;
+            while p < hi {
+                let e = pt.add(((p % TWO_MB) / 4096) as usize);
+                let pte = e.read_volatile();
+                if pte & NPT_P != 0 && !pinned(pte & NPT_ADDR_MASK) {
+                    e.write_volatile(0);
+                    freed.push(pte & NPT_ADDR_MASK);
+                    taken += 1;
+                }
+                p += 4096;
+            }
+            if (0..512usize).all(|j| pt.add(j).read_volatile() & NPT_P == 0) {
+                slot.write_volatile(0);
+                freed.push(pt_phys);
+                DEMAND_4K_BLOCKS.fetch_sub(1, Relaxed);
+            }
+        }
+    }
+    taken
+}
+
 /// Page-level write-through, cache disable and PAT bits of a 4 KB leaf:
 /// they select the host PAT entry (`paging`: 0 WB, 3 UC, 5 WC).
 const NPT_PWT: u64 = 1 << 3;

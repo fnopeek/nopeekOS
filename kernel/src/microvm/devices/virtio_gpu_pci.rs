@@ -1169,15 +1169,23 @@ impl VirtioGpu {
         if pages.try_reserve_exact(want).is_err() {
             return VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
         }
+        // Pinned while the blob lives: free page reporting must not take a
+        // frame the card may still read.
+        let fail = |pages: &Vec<u64>, e: u32| {
+            crate::microvm::devices::guest_mem::unpin_frames(pages);
+            e
+        };
         for i in 0..nr {
             let o = 32 + i * 16;
             let (addr, len) = (q(o), u64::from(d(o + 8)));
             if addr & 0xFFF != 0 || addr.checked_add(len).is_none() {
-                return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+                return fail(&pages, VIRTIO_GPU_RESP_ERR_INVALID_PARAM);
             }
             let mut off = 0;
             while off < len && pages.len() < want {
-                let Some(host) = mem.host_page(addr + off) else { return VIRTIO_GPU_RESP_ERR_INVALID_PARAM };
+                let Some(host) = mem.pin_page(addr + off) else {
+                    return fail(&pages, VIRTIO_GPU_RESP_ERR_INVALID_PARAM);
+                };
                 pages.push(host);
                 off += 4096;
             }
@@ -1186,20 +1194,20 @@ impl VirtioGpu {
             }
             // Only the last entry may end inside a page.
             if len & 0xFFF != 0 {
-                return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+                return fail(&pages, VIRTIO_GPU_RESP_ERR_INVALID_PARAM);
             }
         }
         if pages.len() < want {
-            return VIRTIO_GPU_RESP_ERR_INVALID_PARAM;
+            return fail(&pages, VIRTIO_GPU_RESP_ERR_INVALID_PARAM);
         }
         self.resources.retain(|r| r.id != id);
         if self.resources.len() >= MAX_RESOURCES {
-            return VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
+            return fail(&pages, VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY);
         }
         self.resources.push(Resource {
             id, format: 0, width: 0, height: 0,
             backing: Vec::new(), host_pixels: None, frame: 0, flushed_frame: 0,
-            dirty: Dirty::Unknown, blob: Some(Arc::new(ForeignPixels::new(pages))),
+            dirty: Dirty::Unknown, blob: Some(Arc::new(ForeignPixels::new_pinned(pages))),
         });
         VIRTIO_GPU_RESP_OK_NODATA
     }

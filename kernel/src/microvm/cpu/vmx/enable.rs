@@ -1092,6 +1092,9 @@ impl VmContext {
             let mut dev = self.shared.dev.lock();
             dev.pci.virtio_blk.save();
             dev.pci.virtio_blk_sqfs.save();
+            let (reports, pages) = dev.pci.virtio_balloon.stats();
+            crate::kprintln!("[virtio-balloon] guest gave back {} MB in {} reports",
+                pages * 4096 / (1024 * 1024), reports);
         }
         // SAFETY: this vCPU entered VMX root on this core → VMXOFF is valid.
         unsafe { vmx_exit_root(); }
@@ -2060,6 +2063,11 @@ impl VmContext {
                     }
                 } else if sh.pci.virtio_console.bar0_in_range(gpa) {
                     if handle_mmio_ept_dev(&mut self.vcpu.regs, &mut sh.pci.virtio_console, &mut sh.pic, gpa, gm) {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
+                } else if sh.pci.virtio_balloon.bar0_in_range(gpa) {
+                    if handle_mmio_ept_dev(&mut self.vcpu.regs, &mut sh.pci.virtio_balloon, &mut sh.pic, gpa, gm) {
                         last_outcome = Some(outcome);
                         continue;
                     }
