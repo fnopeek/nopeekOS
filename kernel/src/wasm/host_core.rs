@@ -2509,22 +2509,28 @@ pub(crate) fn npk_capture_screen(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
     // windows + cursor) that's physically on screen. The shadow
     // double-buffer can be mid-swap when we (on a worker core)
     // read it, yielding a stale background-only frame.
-    // Row-by-row into a tight BGRA temp (pitch may exceed w*4).
-    let mut tmp = alloc::vec![0u8; need];
+    // Row by row straight into the guest (pitch may exceed w*4): a
+    // screen-sized kernel buffer would need a contiguous heap grow. The
+    // reads are uncached, so other fibers of this core get a turn between
+    // bands.
+    let Some(dst) = guest_mut(mem, buf_ptr, need) else { return -1 };
     let src = info.addr as *const u8;
     for y in 0..h {
         // SAFETY: the GOP framebuffer is identity-mapped and valid
-        // for pitch*height bytes; we read w*4 ≤ pitch per row.
+        // for pitch*height bytes; we read w*4 <= pitch per row.
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                src.add(y * pitch),
-                tmp.as_mut_ptr().add(y * w * 4),
-                w * 4,
-            );
+            core::ptr::copy_nonoverlapping(src.add(y * pitch), dst.as_mut_ptr().add(y * w * 4), w * 4);
+        }
+        if y % CAPTURE_BAND == CAPTURE_BAND - 1 {
+            crate::smp::fiber::yield_if_contended();
         }
     }
-    write_bytes(mem, buf_ptr, &tmp[..])
+    need as i32
 }
+
+/// Rows `npk_capture_screen` copies between two looks at the other fibers
+/// of its core.
+const CAPTURE_BAND: usize = 64;
 
 pub(crate) fn npk_event_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
