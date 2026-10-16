@@ -113,6 +113,8 @@ pub fn capset() -> Option<Vec<u8>> {
 /// A HOST3D resource: pages the host owns, mapped into the guest's host-
 /// visible window on MAP_BLOB.
 pub struct Host3d {
+    /// The context that made it. The guest reuses a destroyed context's id,
+    /// so the id alone does not name that context once it is gone.
     pub ctx: u32,
     /// The backend client of `ctx`: the resource outlives its context
     /// (virglrenderer keeps resources per device), and is released there.
@@ -162,7 +164,7 @@ impl Contexts {
     /// usable in `ctx_id` (`drm_context` attach_resource).
     pub fn attach_resource(&mut self, ctx_id: u32, res_id: u32) {
         let (Some(c), Some(r)) = (self.ctxs.get(&ctx_id), self.host3d.get(&res_id)) else { return };
-        if r.ctx != ctx_id && !r.shmem {
+        if r.handle != c.handle && !r.shmem {
             if let Some(b) = BACKEND.lock().as_mut() {
                 b.attach_resource(c.handle, res_id, &r.pages);
             }
@@ -172,7 +174,7 @@ impl Contexts {
     /// CTX_DETACH_RESOURCE (`drm_context_detach_resource`).
     pub fn detach_resource(&mut self, ctx_id: u32, res_id: u32) {
         let (Some(c), Some(r)) = (self.ctxs.get(&ctx_id), self.host3d.get(&res_id)) else { return };
-        if r.ctx != ctx_id {
+        if r.handle != c.handle {
             if let Some(b) = BACKEND.lock().as_mut() {
                 b.detach_resource(c.handle, res_id);
             }
@@ -234,18 +236,17 @@ impl Contexts {
         if r.shmem {
             return Some(r.map_info);
         }
-        let handle = self.ctxs.get(&r.ctx)?.handle;
         let own = r.map_info;
-        Some(BACKEND.lock().as_mut().and_then(|b| b.map_info(handle, res_id)).unwrap_or(own))
+        Some(BACKEND.lock().as_mut().and_then(|b| b.map_info(r.handle, res_id)).unwrap_or(own))
     }
 
     /// The guest dropped HOST3D resource `res_id`; it must be unmapped.
     pub fn drop_resource(&mut self, res_id: u32) {
         let Some(r) = self.host3d.remove(&res_id) else { return };
-        if r.shmem {
-            if let Some(c) = self.ctxs.get_mut(&r.ctx) {
-                c.shmem = None;
-            }
+        if r.shmem
+            && let Some(c) = self.ctxs.get_mut(&r.ctx)
+            && c.shmem == Some(res_id) {
+            c.shmem = None;
         }
         if r.owned {
             if let Some(&first) = r.pages.pages.first() {
