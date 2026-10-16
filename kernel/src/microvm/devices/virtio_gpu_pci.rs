@@ -511,13 +511,23 @@ impl VirtioGpu {
     fn service_controlq(&mut self, mem: &GuestMem) -> bool {
         // Nothing behind a SUBMIT_3D whose ccmds have not run yet.
         if self.pending_submit.is_some() || self.submit_running {
+            self.arm_flush_resume();
             return false;
         }
         // SUBMIT_3D completions whose fence is done, in queue order per ring.
         let mut completed = self.complete_fences(mem);
         completed |= self.complete_flushes(mem);
-        let served = self.serve_controlq(mem);
-        completed |= self.complete_flushes(mem);
+        let mut served = false;
+        // A FLUSH completed after serving may free a fenced command that
+        // stopped behind it: serve again until nothing more completes.
+        loop {
+            served |= self.serve_controlq(mem);
+            let c = self.complete_flushes(mem);
+            completed |= c;
+            if !c || self.pending_submit.is_some() {
+                break;
+            }
+        }
         served || completed
     }
 
@@ -537,14 +547,19 @@ impl VirtioGpu {
             self.complete(mem, h.head, &h.response, &h.resp_descs);
             any = true;
         }
-        // The next look: its refresh, or while its blob is still read a
-        // quarter millisecond on (up to its deadline).
+        self.arm_flush_resume();
+        any
+    }
+
+    /// The next look at the FLUSHes kept back: the first one's refresh, or
+    /// while its blob is still read a quarter millisecond on (up to its
+    /// deadline); none when nothing is kept back.
+    fn arm_flush_resume(&self) {
         let now = crate::interrupts::rdtsc();
         let next = self.flushes.front().map_or(0, |h| {
             if now < h.not_before { h.not_before } else { (now + crate::interrupts::tsc_freq() / 4000).min(h.deadline) }
         });
         super::gpu_backend::set_resume_tsc(next);
-        any
     }
 
     /// Complete the SUBMIT_3D chains whose fences are done.
