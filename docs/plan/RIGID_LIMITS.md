@@ -125,7 +125,7 @@ Zeitüberschreitungen werden so zu Einfrierern oder zu dauerhaftem Schaden
 | 5.6 | `intel_execlists_submission.rs` | kein Timeslicing, keine Preemption, kein Engine-Reset | jeder Hänger/CS-Fehler wedged die GT bis Neustart | Linux: Timeslice ~1 ms, Preempt-to-busy, `intel_engine_reset`, Unwedge | L |
 | 5.7 | `gpu/gpudev.rs:78`, `virtio_gpu_pci.rs:223` | GPU-Auftrag > 100 ms → CPU; FLUSH-Zaun ≤ 40 ms | Desktop auf CPU unter Last | zaungetrieben, Fristen nur zur Diagnose | M |
 | 5.8 | `gpudev.rs:58,61` | Desktop-Kopien: 80 ms Warteschlange, 10 s Start | blockiert die Dienstschleife | ohne Blockieren abschicken | M |
-| 5.9 | `virtio_gpu_pci.rs` | ~~controlq 16; nach **jedem** FLUSH globale 1/60-s-Pause~~ **Kernel 0.621.0:** nur die FLUSH-Antwort wartet, je Ausgabe bis zum nächsten Bildwechsel; Queue 256 | GL-Submits warteten hinter Flushes | offen: an die echte vblank takten | M |
+| 5.9 | `virtio_gpu_pci.rs:183,719` | controlq 16; nach **jedem** FLUSH globale 1/60-s-Pause | alle Fenster teilen 60 Bilder/s, GL-Submits warten hinter Flushes | Zaun je Ausgabe bis zu deren vblank; Queue 256. **0.621.0/.1 so gebaut und am NUC deutlich schlechter (Maus ruckelt beim Firefox-Start, Video pausiert sekundenlang) → 0.621.2 zurück auf 0.620; Ursache offen** | M |
 | 5.10 | `shade/mod.rs` | ~~Gastbilder ≤ 50 Hz, 20 Hz bei Mausbewegung~~ **Kernel 0.620.0:** mit GPU-Compositing 60 Hz, Weckzeit auf den Termin | 60-fps-Video ruckelte | offen: an die echte vblank takten | S |
 | 5.11 | `microvm/cpu/mod.rs:544,549` | 3 s bis QUIT, 10 s hart | Sitzungsspeichern abgeschnitten | fortschrittsabhängig | S |
 
