@@ -511,16 +511,15 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
     }
     let entry_addr = bar_base + tbl_off + (entry as u64) * 16;
 
-    // Defensively identity-map the MSI-X table page NO_CACHE — the device's
-    // BAR may not be mapped if its driver only mapped a register window.
-    // A mapping error is ignored: the page may already lie in a huge mapping.
-    let page = entry_addr & !0xFFF;
+    // The device's BAR may not be mapped if its driver only mapped a
+    // register window, so the table's page is mapped here.
     // SAFETY: `entry_addr` is entry `entry` (bounds-checked against the table
     // size above) of the MSI-X table the capability places in an assigned
-    // BAR: device registers. The page is mapped here.
-    let e = unsafe {
-        let _ = Mmio::map(page, 4096);
-        Mmio::from_mapped(entry_addr, 16)
+    // BAR: device registers.
+    let Some(e) = (unsafe { msix_entry(entry_addr) }) else {
+        kprintln!("[npk] msix: {:02x}:{:02x}.{} table at {:#x} cannot be mapped",
+            dev.bus, dev.device, dev.function, entry_addr);
+        return false;
     };
 
     // MSI-X table entry: addr_lo, addr_hi, data, vector-control (bit0 = mask).
@@ -574,10 +573,21 @@ pub fn msix_set_dest(dev: PciAddr, entry: u16, dest_apic: u32) {
     let entry_addr = bar_base + tbl_off + (entry as u64) * 16;
     let msg_addr_lo: u32 = 0xFEE0_0000 | ((dest_apic & 0xFF) << 12);
     // SAFETY: MSI-X table entry in an assigned BAR; `irq` only re-points
-    // entries `program_msix` has programmed, which mapped the page.
-    let e = unsafe { Mmio::from_mapped(entry_addr, 16) };
+    // entries `program_msix` has programmed.
+    let Some(e) = (unsafe { msix_entry(entry_addr) }) else { return };
     // Re-points delivery; no enable/mask change.
     e.w32(0u64, msg_addr_lo);
+}
+
+/// The 16-byte MSI-X table entry at physical `entry_addr`, its page mapped
+/// uncached; a page mapped again gets the same address.
+///
+/// # Safety
+/// `entry_addr` must be an MSI-X table entry in an assigned BAR.
+unsafe fn msix_entry(entry_addr: u64) -> Option<Mmio> {
+    // SAFETY: the caller's guarantee: the page holds device registers.
+    let page = unsafe { Mmio::map(entry_addr & !0xFFF, 4096) }.ok()?;
+    Some(page.sub(entry_addr & 0xFFF, 16))
 }
 
 /// Offset of capability `id` in `dev`'s list, or 0 if it has none.
@@ -706,9 +716,8 @@ pub fn msix_debug(dev: PciAddr, entry: u16) -> Option<MsixDebug> {
         (bar_lo as u64) & !0xF
     };
     let entry_addr = bar_base + tbl_off + (entry as u64) * 16;
-    // SAFETY: MSI-X table entry in the device's BAR, mapped when
-    // `program_msix` ran for it; only read here.
-    let e = unsafe { Mmio::from_mapped(entry_addr, 16) };
+    // SAFETY: MSI-X table entry in the device's BAR; only read here.
+    let e = unsafe { msix_entry(entry_addr) }?;
     let (e_addr, e_data, e_vctrl) = (e.r32(0u64), e.r32(8u64), e.r32(12u64));
     Some(MsixDebug {
         cap,

@@ -1327,6 +1327,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         irq_vector: 0,
         irq_seen: 0,
         dma_limit: DMA_LIMIT_DEFAULT,
+        dma_pages: 0,
     });
     crate::kdebug!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, vid, did);
@@ -1397,6 +1398,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
         irq_vector: 0,
         irq_seen: 0,
         dma_limit: DMA_LIMIT_DEFAULT,
+        dma_pages: 0,
     });
     0
 }
@@ -1618,6 +1620,7 @@ pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
             irq_vector: 0,
             irq_seen: 0,
             dma_limit: DMA_LIMIT_DEFAULT,
+            dma_pages: 0,
         });
     }
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
@@ -1717,21 +1720,21 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
             return -1;
         }
     }
-    for i in 0..page_count {
-        let addr = bar_base + (i * 4096) as u64;
-        // SAFETY: identity-mapped MMIO region for bound PCI device BAR.
-        // map_page splits huge pages to set NO_CACHE for MMIO access.
-        if let Err(e) = crate::paging::map_page(
-            addr, addr,
-            crate::paging::PageFlags::PRESENT
-                | crate::paging::PageFlags::WRITABLE
-                | crate::paging::PageFlags::NO_CACHE,
-        ) {
-            kprintln!("[npk] WASM MMIO map {:#x}: {}", addr, e);
+    // The BAR of the bound device, uncached; a refusal is the caller's -1.
+    let virt = match crate::paging::ioremap(
+        bar_base, (page_count * 4096) as u64,
+        crate::paging::PageFlags::PRESENT
+            | crate::paging::PageFlags::WRITABLE
+            | crate::paging::PageFlags::NO_CACHE,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            kprintln!("[npk] WASM MMIO map BAR{} at {:#x}: {}", bar_idx, bar_base, e);
+            return -1;
         }
-    }
+    };
     let handle = hw.mmio_maps.len();
-    hw.mmio_maps.push((bar_base, page_count));
+    hw.mmio_maps.push((virt, page_count));
     crate::kdebug!("[npk] WASM driver: MMIO BAR{} mapped at {:#x} — BAR size {:#x}, requested {} pages, mapped {} pages",
         bar_idx, bar_base, bar_size, requested, page_count);
     handle as i32
@@ -1825,27 +1828,28 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
             irq_vector: 0,
             irq_seen: 0,
             dma_limit: DMA_LIMIT_DEFAULT,
+            dma_pages: 0,
         });
     }
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
     if hw.mmio_maps.len() >= MAX_MMIO_MAPS { return -1; }
 
-    for i in 0..n {
-        let a = base + (i * 4096) as u64;
-        // SAFETY: checked above to be neither RAM nor an interrupt
-        // controller. NO_CACHE because device registers must not be cached.
-        if let Err(e) = crate::paging::map_page(
-            a, a,
-            crate::paging::PageFlags::PRESENT
-                | crate::paging::PageFlags::WRITABLE
-                | crate::paging::PageFlags::NO_CACHE,
-        ) {
-            kprintln!("[npk] WASM: npk_mmio_map_phys map {:#x}: {}", a, e);
+    // Checked above to be neither RAM nor an interrupt controller. NO_CACHE
+    // because device registers must not be cached.
+    let virt = match crate::paging::ioremap(
+        base, (n * 4096) as u64,
+        crate::paging::PageFlags::PRESENT
+            | crate::paging::PageFlags::WRITABLE
+            | crate::paging::PageFlags::NO_CACHE,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            kprintln!("[npk] WASM: npk_mmio_map_phys map {:#x}: {}", base, e);
             return -1;
         }
-    }
+    };
     let handle = hw.mmio_maps.len();
-    hw.mmio_maps.push((base, n));
+    hw.mmio_maps.push((virt, n));
     crate::kdebug!("[npk] WASM driver: MMIO {:#x}+{:#x} mapped (handle {})",
         base, n * 4096, handle);
     handle as i32
@@ -2033,8 +2037,7 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     let page_count = pages as usize;
     let (max_allocs, max_pages) = dma_caps(hw);
     if hw.dma_allocs.len() >= max_allocs { return -1; }
-    let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
-    if total + page_count > max_pages { return -1; }
+    if hw.dma_pages + page_count > max_pages { return -1; }
 
     // Below the device's DMA mask.
     let phys = match crate::memory::allocate_contiguous_below(page_count, hw.dma_limit) {
@@ -2045,6 +2048,7 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
     let handle = hw.dma_allocs.len();
     hw.dma_allocs.push((phys, page_count));
+    hw.dma_pages += page_count;
     if hw.is_pci {
         crate::drivers::vtd::grant(hw.pci_addr, phys, page_count);
     }
@@ -2073,8 +2077,7 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     let page_count = pages as usize;
     let (max_allocs, max_pages) = dma_caps(hw);
     if hw.dma_allocs.len() >= max_allocs { return -1; }
-    let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
-    if total + page_count > max_pages { return -1; }
+    if hw.dma_pages + page_count > max_pages { return -1; }
 
     let limit = if limit_mb <= 0 {
         hw.dma_limit
@@ -2090,6 +2093,7 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
     let handle = hw.dma_allocs.len();
     hw.dma_allocs.push((phys, page_count));
+    hw.dma_pages += page_count;
     if hw.is_pci {
         crate::drivers::vtd::grant(hw.pci_addr, phys, page_count);
     }

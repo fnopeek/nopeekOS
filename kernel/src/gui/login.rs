@@ -230,8 +230,10 @@ fn idle_halt() {
 /// Run the graphical login screen. Returns once the disk is unlocked;
 /// halts on lockout.
 pub fn run() {
-    // Enable GUI mode (kprintln skips framebuffer, only serial)
+    // Enable GUI mode (kprintln skips framebuffer, only serial); `lock`
+    // calls this with the compositor running and gets its mode back.
     // Color scheme already selected in main.rs after csprng::init()
+    let was_gui = framebuffer::gui_mode();
     framebuffer::set_gui_mode(true);
 
     // Read screen dimensions
@@ -359,9 +361,14 @@ pub fn run() {
                                 idle_halt();
                             }
 
-                            // Exit GUI mode, clear screen for loop
-                            framebuffer::set_gui_mode(false);
-                            framebuffer::clear();
+                            // Back to the mode found: the text console after
+                            // boot, the compositor's next frame after `lock`.
+                            framebuffer::set_gui_mode(was_gui);
+                            if crate::shade::is_active() {
+                                crate::shade::force_redraw();
+                            } else {
+                                framebuffer::clear();
+                            }
                             return;
                         }
                         false => {

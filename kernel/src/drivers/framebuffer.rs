@@ -9,6 +9,8 @@ use spin::Mutex;
 /// Framebuffer info parsed from Multiboot2.
 #[derive(Clone, Copy)]
 pub struct FbInfo {
+    /// Where the CPU reaches the framebuffer (`paging::ioremap`), not its
+    /// physical address.
     pub addr: u64,
     pub pitch: u32,
     pub width: u32,
@@ -121,6 +123,16 @@ pub fn set_gui_mode(active: bool) {
     GUI_MODE.store(active, Ordering::Release);
 }
 
+pub fn gui_mode() -> bool {
+    GUI_MODE.load(Ordering::Acquire)
+}
+
+/// Whether text output stays off the framebuffer: in GUI mode, and always
+/// while the compositor runs, whose frames are drawn under `CONSOLE`.
+fn text_console_off() -> bool {
+    GUI_MODE.load(Ordering::Relaxed) || crate::shade::is_active()
+}
+
 /// The console's `FbInfo`, outside `CONSOLE`: rendering runs under
 /// `with_fb`, and anything it reaches may ask for the screen size.
 static INFO: Mutex<Option<FbInfo>> = Mutex::new(None);
@@ -186,32 +198,33 @@ pub fn init_from_gpu() {
         }
     };
 
-    let addr = gpu_fb.addr;
     let pitch = gpu_fb.pitch;
     let width = gpu_fb.width;
     let height = gpu_fb.height;
     let bpp = gpu_fb.bpp;
 
     crate::kprintln!("[npk] Framebuffer: {}x{} @ {:#x} ({}bpp, {})",
-        width, height, addr, bpp, crate::gpu::driver_name());
+        width, height, gpu_fb.addr, bpp, crate::gpu::driver_name());
 
-    // Map framebuffer pages.
+    // Map the framebuffer for the CPU; `addr` below is the mapped address.
     // Write-combining is essential: the GOP MMIO framebuffer is otherwise
     // uncached on Intel hardware (firmware MTRR), so every CPU write is a
     // separate UC transaction (QEMU's fb is RAM and hides this). WC batches
     // writes into bursts. PAT index 5 = WC is programmed in paging::init.
-    if !crate::gpu::is_native() {
-        let fb_size = pitch as u64 * height as u64;
-        for page_off in (0..fb_size).step_by(4096) {
-            let pa = addr + page_off;
-            let _ = crate::paging::map_page(
-                pa, pa,
-                crate::paging::PageFlags::PRESENT
-                    | crate::paging::PageFlags::WRITABLE
-                    | crate::paging::PageFlags::WRITE_COMBINE,
-            );
+    let addr = if crate::gpu::is_native() {
+        gpu_fb.addr
+    } else {
+        let flags = crate::paging::PageFlags::PRESENT
+            | crate::paging::PageFlags::WRITABLE
+            | crate::paging::PageFlags::WRITE_COMBINE;
+        match crate::paging::ioremap(gpu_fb.addr, pitch as u64 * height as u64, flags) {
+            Ok(a) => a,
+            Err(e) => {
+                crate::kprintln!("[npk] Framebuffer: cannot map it: {}", e);
+                return;
+            }
         }
-    }
+    };
 
     let info = FbInfo { addr, pitch, width, height, bpp };
     // 2x pixel scaling for 4K (each glyph pixel → 2×2 block).
@@ -590,7 +603,7 @@ fn emit_char(console: &mut FbConsole, byte: u8, fg: u32,
 /// Write a string to the framebuffer console.
 pub fn write_str(s: &str) {
     // GUI owns the framebuffer — skip text console writes
-    if GUI_MODE.load(Ordering::Relaxed) { return; }
+    if text_console_off() { return; }
     let mut console = CONSOLE.lock();
     let console = match console.as_mut() {
         Some(c) => c,
@@ -636,7 +649,7 @@ pub fn write_str(s: &str) {
 
 /// Write a single byte to framebuffer (for echo from serial read).
 pub fn write_byte(byte: u8) {
-    if GUI_MODE.load(Ordering::Relaxed) { return; }
+    if text_console_off() { return; }
     let mut console = CONSOLE.lock();
     let console = match console.as_mut() {
         Some(c) => c,
@@ -677,10 +690,16 @@ pub fn write_byte(byte: u8) {
 /// Clear the framebuffer screen (both shadow buffers + MMIO).
 pub fn clear() {
     let mut console = CONSOLE.lock();
+    // As in `with_fb`: a GPU copy still writing the framebuffer would put
+    // the old frame back over the cleared one.
+    crate::gpu::gpudev::wait_framebuffer();
     let console = match console.as_mut() {
         Some(c) => c,
         None => return,
     };
+    // SAFETY: shadow and shadow_b are this console's own buffers of
+    // shadow_size bytes, and the framebuffer holds pitch * height bytes,
+    // which shadow_size equals; CONSOLE is held, and the GPU copy is done.
     unsafe {
         core::ptr::write_bytes(console.shadow, 0, console.shadow_size);
         core::ptr::write_bytes(console.shadow_b, 0, console.shadow_size);

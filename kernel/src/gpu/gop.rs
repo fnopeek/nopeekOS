@@ -45,19 +45,8 @@ impl GopDriver {
         let height = boot_info.fb_height;
         let bpp = boot_info.fb_bpp;
 
-        // Map framebuffer pages identity. UEFI already exposed them at
-        // their physical address, but we install our own page tables
-        // later and need the entries.
-        let fb_size = pitch as u64 * height as u64;
-        for page_off in (0..fb_size).step_by(4096) {
-            let pa = addr + page_off;
-            let _ = crate::paging::map_page(
-                pa, pa,
-                crate::paging::PageFlags::PRESENT
-                    | crate::paging::PageFlags::WRITABLE,
-            );
-        }
-
+        // `addr` is physical; the console maps it for the CPU
+        // (`framebuffer::init_from_gpu`).
         Some(GopDriver {
             fb: FramebufferInfo { addr, pitch, width, height, bpp },
         })

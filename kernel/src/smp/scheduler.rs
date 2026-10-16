@@ -33,6 +33,9 @@ pub struct Task {
     /// TSC when it was queued: a task no core has taken for long is taken
     /// by any core that takes work at all (`per_core::accepts`).
     pub queued: u64,
+    /// Called with `arg` instead of `func` when the fiber cannot be made
+    /// (no stack, no waker), so the spawner can let go of what it set up.
+    pub dropped: Option<fn(u64)>,
 }
 
 // ── Global Scheduler State ─────────────────────────────────────
@@ -67,22 +70,25 @@ pub fn init(num_workers: usize) {
 
 /// Queue a native run-to-completion task (an intent). Callable from any core.
 pub fn spawn(name: &'static str, func: fn(u64), arg: u64) {
-    spawn_inner(name, func, arg, false, false);
+    spawn_inner(name, func, arg, false, false, None);
 }
 
 /// Like `spawn`, but the task runs as a stackful fiber on the worker core
 /// (`smp::fiber`). Used for `wasm_worker_task` so apps run on their own
 /// stack and yield at `npk_sleep` instead of pinning the core.
 pub fn spawn_fiber(func: fn(u64), arg: u64) {
-    spawn_inner("fiber", func, arg, true, false);
+    spawn_inner("fiber", func, arg, true, false, None);
 }
 
-/// Like `spawn_fiber`, for a background app that shares the app core.
-pub fn spawn_fiber_shared(func: fn(u64), arg: u64) {
-    spawn_inner("fiber", func, arg, true, true);
+/// `spawn_fiber` with `dropped(arg)` called in place of `func` when no
+/// fiber can be made for it; `shared`: a background app that shares the
+/// app core.
+pub fn spawn_fiber_or(func: fn(u64), arg: u64, shared: bool, dropped: fn(u64)) {
+    spawn_inner("fiber", func, arg, true, shared, Some(dropped));
 }
 
-fn spawn_inner(name: &'static str, func: fn(u64), arg: u64, is_fiber: bool, shared: bool) {
+fn spawn_inner(name: &'static str, func: fn(u64), arg: u64, is_fiber: bool, shared: bool,
+               dropped: Option<fn(u64)>) {
     if WORKER_COUNT.load(Ordering::Acquire) == 0 {
         func(arg);
         return;
@@ -90,7 +96,7 @@ fn spawn_inner(name: &'static str, func: fn(u64), arg: u64, is_fiber: bool, shar
     let queued = crate::interrupts::rdtsc();
     {
         let mut inbox = INBOX.lock();
-        inbox.push_back(Task { name, func, arg, is_fiber, shared, queued });
+        inbox.push_back(Task { name, func, arg, is_fiber, shared, queued, dropped });
         INBOX_LEN.store(inbox.len(), Ordering::Release);
     }
     TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);

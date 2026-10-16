@@ -63,6 +63,8 @@ pub(crate) struct HwDriverState {
     device_id: u16,
     mmio_maps: Vec<(u64, usize)>,   // handle -> (base_virt, page_count)
     dma_allocs: Vec<(u64, usize)>,  // handle -> (phys_addr, page_count)
+    /// Pages in `dma_allocs`.
+    dma_pages: usize,
     bus_master_enabled: bool,
     registered_as_netdev: bool,
     /// The device-IRQ vector this driver registered, 0 = none. A driver
@@ -499,13 +501,26 @@ fn spawn_on_worker_inner_engine(
     // Run the app on a fiber (own stack) so it can yield at npk_sleep /
     // npk_event_wait instead of pinning its worker core — see smp::fiber
     // + docs/plan/SCHEDULER_FIBERS.md. Native intents still use plain `spawn`.
-    if shared_core {
-        crate::smp::scheduler::spawn_fiber_shared(wasm_worker_task, slot as u64);
-    } else {
-        crate::smp::scheduler::spawn_fiber(wasm_worker_task, slot as u64);
-    }
+    crate::smp::scheduler::spawn_fiber_or(wasm_worker_task, slot as u64, shared_core, wasm_job_dropped);
 
     true
+}
+
+/// No fiber could be made for job `slot`: the slot is freed, the terminal
+/// gets its prompt back, and a caller waiting on `JOB_DONE` returns.
+fn wasm_job_dropped(arg: u64) {
+    let slot = arg as usize;
+    if slot >= MAX_WASM_JOBS { return; }
+    let job = WASM_JOBS.lock()[slot].take();
+    if let Some(job) = job {
+        kprintln!("[npk] WASM: {} not started, no fiber for it",
+            core::str::from_utf8(&job.name[..job.name_len as usize]).unwrap_or("?"));
+        if (job.terminal_idx as usize) < MAX_APP_BUFS {
+            APP_RUNNING[job.terminal_idx as usize].store(false, AtOrd::Release);
+            crate::intent::wake_shell();
+        }
+    }
+    JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
 }
 
 /// Worker-core entry: runs WASM module, signals completion.
