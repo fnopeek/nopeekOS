@@ -31,6 +31,14 @@ analogen Ausgang. Alles nach Linux 6.18.55 1:1.
   freischalten (`intel_haswell_enable_all_pins`), DP1.2-Fixup, Pin↔Port,
   Wandler wählen, Kanäle, Audio-Infoframe (DIP über Codec-Verben).
 
+## Stand
+
+Schritte 1, 2, 3 und 5 sind gebaut (gpu_intel_tgl 0.25.0, audio_hda 0.6.0):
+am NUC kommt der Ton über DP→HDMI aus dem Monitor, auch aus der microVM.
+Offen ist Schritt 4; bis dahin liest audio_hda die Präsenz am Pin und nimmt
+den Verbindungstyp aus den Pin-Fähigkeiten, und audio_hda muss im Autostart
+hinter gpu_intel_tgl stehen.
+
 ## Schritte
 
 1. **DP-AUX** (`intel_dp_aux.c`, `drm_dp_helper.c`): native Transfers
