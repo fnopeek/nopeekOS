@@ -121,28 +121,19 @@ pub fn set_gui_mode(active: bool) {
     GUI_MODE.store(active, Ordering::Release);
 }
 
+/// The console's `FbInfo`, outside `CONSOLE`: rendering runs under
+/// `with_fb`, and anything it reaches may ask for the screen size.
+static INFO: Mutex<Option<FbInfo>> = Mutex::new(None);
+
 /// Get the current framebuffer resolution.
 pub fn get_resolution() -> (u32, u32) {
-    let console = CONSOLE.lock();
-    match console.as_ref() {
-        Some(c) => (c.info.width, c.info.height),
-        None => (0, 0),
-    }
+    let info = get_info();
+    (info.width, info.height)
 }
 
 /// Get a copy of the current FbInfo.
 pub fn get_info() -> FbInfo {
-    let console = CONSOLE.lock();
-    match console.as_ref() {
-        Some(c) => FbInfo {
-            addr: c.info.addr,
-            pitch: c.info.pitch,
-            width: c.info.width,
-            height: c.info.height,
-            bpp: c.info.bpp,
-        },
-        None => FbInfo { addr: 0, pitch: 0, width: 0, height: 0, bpp: 0 },
-    }
+    INFO.lock().unwrap_or(FbInfo { addr: 0, pitch: 0, width: 0, height: 0, bpp: 0 })
 }
 
 /// Get shadow buffer physical addresses + page count (for GPU GGTT mapping).
@@ -234,6 +225,7 @@ pub fn init_from_gpu() {
     // Free old shadow buffers before allocating new ones (prevents OOM on mode switch)
     {
         SHADOW_FRONT_CACHED.store(core::ptr::null_mut(), Ordering::Release);
+        *INFO.lock() = None;
         let old = CONSOLE.lock().take();
         if let Some(old_console) = old {
             let old_layout = alloc::alloc::Layout::from_size_align(
@@ -276,6 +268,7 @@ pub fn init_from_gpu() {
         col: 0, row: 0, cols, rows, scale,
         shadow_a_ggtt: 0, shadow_b_ggtt: 0,
     });
+    *INFO.lock() = Some(info);
 }
 
 /// Initialize the framebuffer from BootInfo. Delegates to `gpu::init`

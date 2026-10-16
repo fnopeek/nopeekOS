@@ -892,9 +892,10 @@ fn set_input_value_at(tree: &mut abi::Widget, path: &[u32], value: &str) -> bool
 /// which every commit replaces.
 static CONTEXT_POINT: Mutex<BTreeMap<u32, (i32, i32)>> = Mutex::new(BTreeMap::new());
 
-/// Record a right click at screen `(x, y)` in `window_id`.
+/// Record a right click at screen `(x, y)` in widget window `window_id`.
+/// The caller holds the compositor and has checked the window, so this
+/// must not ask the compositor again.
 pub fn set_context_point(window_id: u32, x: i32, y: i32) {
-    if !widget_window_exists(window_id) { return; }
     CONTEXT_POINT.lock().insert(window_id, to_local(window_id, x, y));
 }
 
