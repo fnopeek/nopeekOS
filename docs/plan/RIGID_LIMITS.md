@@ -192,17 +192,22 @@ umbauen.
 
 ## Vorschlag zur Reihenfolge
 
-1. **W1 (zurückstellen statt ablehnen)** — die Hänger am Gerät kommen daher;
+1. **W1 (zurückstellen statt ablehnen)** — Modul 0.20.0 — die Hänger am Gerät kommen daher;
    sonst bleibt jede andere Zeile in W1/W2 ein Absturz statt einer Wartezeit.
-2. **5.3, 5.4, 8.6** (S) — sperren heute unschuldige Kontexte bzw. schalten
+2. **4.1 (`npk_dma_free`) und 4.2 (Balloon / free page reporting)** — die
+   zwei Stellen, an denen ein langer Betrieb sicher vollläuft (Florian
+   2026-10-16: „sonst laufen wir ja zwangsläufig irgendwann mal voll").
+   Regel dahinter: was je Benutzung belegt wird, geht beim Ende zurück;
+   ein Pool nur, wenn sein Höchststand durch eine echte Größe begrenzt ist.
+3. **5.3, 5.4, 8.6** (S) — sperren heute unschuldige Kontexte bzw. schalten
    die GPU ab.
-3. **8.1, 8.2, 8.3** (S) — echte Fehler.
-4. **W2** — mit dem neuen Heap direkt; zusammen mit 9.1/9.2.
-5. **6.1 + 4.2 + 7.1** — Gast-RAM dynamisch, mit Rückgabe, mit Layout über
-   4 GB; 6.4 (BAR2) fällt dabei mit ab.
-6. **3.1** (Heap ohne Zusammenhang) und **4.1** (`npk_dma_free`) — die zwei
-   Kernel-Wurzeln, an denen viele W3/W4/W6-Zeilen hängen.
-7. **5.6** Preemption + Engine-Reset — groß, aber erst danach ist ein
+4. **8.1, 8.2, 8.3** (S) — echte Fehler (8.1, 8.3 in Kernel 0.616.0).
+5. **W2** — mit dem neuen Heap direkt; zusammen mit 9.1/9.2.
+6. **6.1 + 7.1** — Gast-RAM dynamisch, mit Layout über 4 GB (6.4, das
+   GPU-Fenster, ist in Kernel 0.616.0 schon so groß wie der Wirts-RAM).
+7. **3.1** (Heap ohne Zusammenhang) — die Kernel-Wurzel, an der viele
+   W3/W4/W6-Zeilen hängen.
+8. **5.6** Preemption + Engine-Reset — groß, aber erst danach ist ein
    Gast-Hänger kein Ende der GPU für alle mehr.
 
 Der Rest einzeln nach Bedarf.
