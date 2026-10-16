@@ -3,10 +3,11 @@
 //! parts of `hdmi.c`, `hdmi_chmap.c` and `jack.c` one stereo PCM stream to
 //! one pin goes through.
 //!
-//! The pin is the one whose presence detect the display driver has set
-//! (`AUDIO_OUTPUT_ENABLE`). The connection type the audio infoframe needs
-//! comes from the ELD in Linux; until the display's ELD reaches this driver
-//! it is taken from the pin: DisplayPort when the pin can do it.
+//! The display driver reports each port's ELD through the kernel, as i915
+//! does through the audio component (`pin_eld_notify`, `get_eld`): the port
+//! with an ELD is the pin to use, and the ELD names the connection type.
+//! Before the display driver has reported once, the pin is the one whose
+//! presence detect it set.
 
 use crate::host::*;
 use crate::regs::*;
@@ -67,6 +68,25 @@ const AMP_OUT_UNMUTE: u16 = 0xb000;
 
 /// `union audio_infoframe`: the HDMI layout is the larger, 11 bytes.
 const AUDIO_INFOFRAME_BYTES: usize = 11;
+
+/// drm_eld.h: the connection type in the ELD.
+const DRM_ELD_SAD_COUNT_CONN_TYPE: usize = 5;
+const DRM_ELD_CONN_TYPE_MASK: u8 = 3 << 2;
+const DRM_ELD_CONN_TYPE_DP: u8 = 1 << 2;
+const MAX_ELD_BYTES: usize = 128;
+
+/// The codec this driver set up, and the display report it followed; a new
+/// report sets the codec up again (`intel_pin_eld_notify`).
+struct routed {
+    mmio: i32,
+    cad: u32,
+    afg: u32,
+    stream_tag: u32,
+    format: u16,
+    generation: i32,
+}
+
+static ROUTED: npk_sys::cell::Single<Option<routed>> = npk_sys::cell::Single::new(None);
 
 /// A short verb: 12-bit id and an 8-bit payload.
 fn verb(id: u32, payload: u32) -> u32 {
@@ -234,6 +254,22 @@ fn hdmi_pin_setup_infoframe(mmio: i32, cad: u32, pin_nid: u32, dev_id: u32, dp: 
     write(mmio, cad, pin_nid, AC_VERB_SET_HDMI_DIP_XMIT, AC_DIPXMIT_BEST);
 }
 
+/// A new display report since the last setup: route the stream again, as
+/// `intel_pin_eld_notify` → `check_presence_and_report` does. Called from
+/// the streaming loop.
+pub fn poll() {
+    let Some(r) = ROUTED.with(|g| match g.as_ref() {
+        Some(r) if npk_sys::display_audio_generation() != r.generation => {
+            Some((r.mmio, r.cad, r.afg, r.stream_tag, r.format))
+        }
+        _ => None,
+    }) else {
+        return;
+    };
+    log("[audio_hda] the display reported a change\n");
+    setup(r.0, r.1, r.2, r.3, r.4);
+}
+
 /// Set up the codec for one stereo stream to the pin a display reports
 /// present: the Tiger Lake probe (all pins and converters, DP 1.2), the
 /// pin, its converter (`i915_pin_cvt_fixup`), the stream
@@ -254,31 +290,52 @@ pub fn setup(mmio: i32, cad: u32, afg: u32, stream_tag: u32, format: u16) -> u32
         return 0;
     }
 
-    // The display driver's presence detect names the pin; non-MST, device 0.
+    let generation = npk_sys::display_audio_generation();
+    ROUTED.with(|r| *r = Some(routed { mmio, cad, afg, stream_tag, format, generation }));
+
+    // Non-MST: device 0 of the pin.
     let dev_id = 0;
     let mut pin_nid = 0;
-    for (port, &nid) in PORT_MAP.iter().enumerate() {
-        if widget_type(mmio, cad, nid) != WTYPE_PIN {
-            continue;
+    let mut dp = false;
+    if generation > 0 {
+        // The display driver's report: the port whose sink has an ELD.
+        let mut eld = [0u8; MAX_ELD_BYTES];
+        for (port, &nid) in PORT_MAP.iter().enumerate() {
+            let len = npk_sys::display_audio_get(port as i32, &mut eld);
+            if len > DRM_ELD_SAD_COUNT_CONN_TYPE as i32 && pin_nid == 0 {
+                pin_nid = nid;
+                dp = eld[DRM_ELD_SAD_COUNT_CONN_TYPE] & DRM_ELD_CONN_TYPE_MASK == DRM_ELD_CONN_TYPE_DP;
+                loghex("[audio_hda] display on port ", port as u32);
+                loghex(", pin 0x", nid);
+                loghex(", ELD bytes 0x", len as u32);
+                log("\n");
+            }
         }
-        let sense = read_pin_sense(mmio, cad, nid, dev_id);
-        if sense & AC_PINSENSE_PRESENCE != 0 && pin_nid == 0 {
-            pin_nid = nid;
-            loghex("[audio_hda] display on port ", port as u32);
-            loghex(", pin 0x", nid);
-            log(if sense & AC_PINSENSE_ELDV != 0 { ", ELD valid" } else { ", no ELD" });
-            log("\n");
+    } else {
+        // No report yet: the presence detect the display driver set.
+        for (port, &nid) in PORT_MAP.iter().enumerate() {
+            if widget_type(mmio, cad, nid) != WTYPE_PIN {
+                continue;
+            }
+            let sense = read_pin_sense(mmio, cad, nid, dev_id);
+            if sense & AC_PINSENSE_PRESENCE != 0 && pin_nid == 0 {
+                pin_nid = nid;
+                dp = get_param(mmio, cad, nid, PARAM_PIN_CAP) & AC_PINCAP_DP != 0;
+                loghex("[audio_hda] display on port ", port as u32);
+                loghex(", pin 0x", nid);
+                log(if sense & AC_PINSENSE_ELDV != 0 { ", ELD valid" } else { ", no ELD" });
+                log("\n");
+            }
         }
     }
     if pin_nid == 0 {
-        log("[audio_hda] no display pin reports a sink\n");
-        return 0;
+        log("[audio_hda] no display reports a sink\n");
+        return cvts[0];
     }
 
     let cvt_nid = cvts[0];
     let mux_idx = 0;
     let pincap = get_param(mmio, cad, pin_nid, PARAM_PIN_CAP);
-    let dp = pincap & AC_PINCAP_DP != 0;
 
     hdmi_init_pin(mmio, cad, pin_nid);
 
@@ -312,7 +369,7 @@ pub fn setup(mmio: i32, cad: u32, afg: u32, stream_tag: u32, format: u16) -> u32
 
     loghex("[audio_hda] HDMI/DP: converter 0x", cvt_nid);
     loghex(" -> pin 0x", pin_nid);
-    log(if dp { " (DisplayPort infoframe)" } else if pincap & AC_PINCAP_HDMI != 0 { " (HDMI infoframe)" } else { "" });
+    log(if dp { " (DisplayPort infoframe)" } else if pincap & AC_PINCAP_HDMI != 0 { " (HDMI infoframe)" } else { " (HDMI infoframe, pin without HDMI)" });
     log("\n");
     cvt_nid
 }

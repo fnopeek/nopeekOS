@@ -98,7 +98,7 @@ pub fn skl_pcode_request(i915: &mut drm_i915_private, mbox: u32, request: u32, r
             skl_pcode_try_request(i915, mbox, request, reply_mask, reply, &mut status)
         });
         if ret.is_err() {
-            Line::new().s("PCODE timeout, retrying with preemption disabled").say();
+            Line::new().s("PCODE timeout, retrying with preemption disabled").dbg();
             if timeout_base_ms > 3 {
                 Line::new().s("warning: pcode request base timeout ").dec(timeout_base_ms as u64)
                     .s(" ms above 3").say();

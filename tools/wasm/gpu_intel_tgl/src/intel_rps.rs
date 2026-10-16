@@ -402,7 +402,7 @@ pub fn intel_rps_enable(i915: &mut drm_i915_private, gt: &mut intel_gt) {
         .dec(intel_gpu_freq(r.efficient_freq as u32) as u64).s(" MHz, RP1 ")
         .dec(intel_gpu_freq(r.rp1_freq as u32) as u64).s(" MHz, RP0 ")
         .dec(intel_gpu_freq(r.rp0_freq as u32) as u64).s(" MHz, thresholds ")
-        .dec(r.up_threshold as u64).s("/").dec(r.down_threshold as u64).s("%").say();
+        .dec(r.up_threshold as u64).s("/").dec(r.down_threshold as u64).s("%").dbg();
 
     // GRAPHICS_VER 12: the timer when engines report busyness; interrupts
     // are only used from 6 to 11.
@@ -447,7 +447,7 @@ pub fn report(i915: &mut drm_i915_private, gt: &intel_gt, when: &str) {
     let cagf = read_cagf(i915);
     Line::new().s("RPS ").s(when).s(": enabled ").dec(gt.rps.enabled as u64).s(", requested ")
         .dec(intel_gpu_freq(swreq >> 23) as u64).s(" MHz, actual ").dec(intel_gpu_freq(cagf) as u64)
-        .s(" MHz, RP_CONTROL ").hex(ctl).say();
+        .s(" MHz, RP_CONTROL ").hex(ctl).dbg();
 }
 
 /// `intel_rps_read_rpstat` + `intel_rps_get_cagf` (graphics version 12).

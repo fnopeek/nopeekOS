@@ -166,7 +166,7 @@ pub fn drm_edid_read_ddc(aux: &mut drm_dp_aux) -> Option<drm_edid> {
     let mut edid = alloc::vec![0u8; ELEN];
     let status = edid_block_read(aux, &mut edid, 0);
     if !edid_block_status_valid(status, edid[0]) {
-        crate::linux::Line::new().s("EDID: base block not valid (").dec(status as u64).s(")").say();
+        crate::linux::Line::new().s("EDID: base block not valid (").dec(status as u64).s(")").dbg();
         return None;
     }
 

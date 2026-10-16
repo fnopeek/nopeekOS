@@ -120,7 +120,7 @@ fn enabled_joiner_pipes(i915: &mut drm_i915_private, pipe: u32, primary_pipe: &m
     if secondary_bigjoiner_pipes != expected_bigjoiner_secondary_pipes(primary_bigjoiner_pipes) {
         Line::new().s("Wrong secondary bigjoiner pipes(expected ")
             .hex(expected_bigjoiner_secondary_pipes(primary_bigjoiner_pipes) as u32)
-            .s(", current ").hex(secondary_bigjoiner_pipes as u32).s(")").say();
+            .s(", current ").hex(secondary_bigjoiner_pipes as u32).s(")").dbg();
     }
 
     *primary_pipe = 0;
@@ -132,7 +132,7 @@ fn enabled_joiner_pipes(i915: &mut drm_i915_private, pipe: u32, primary_pipe: &m
         if expected_bigjoiner_secondary_pipes(*primary_pipe) != *secondary_pipes {
             Line::new().s("Wrong bigjoiner secondary pipes for primary_pipe ").hex(*primary_pipe as u32)
                 .s(" (expected ").hex(expected_bigjoiner_secondary_pipes(*primary_pipe) as u32)
-                .s(", current ").hex(*secondary_pipes as u32).s(")").say();
+                .s(", current ").hex(*secondary_pipes as u32).s(")").dbg();
         }
     }
 }

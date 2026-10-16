@@ -217,7 +217,7 @@ pub fn intel_display_device_probe(revision: u8) -> intel_display {
         ..Default::default()
     };
     Line::new().s("Found TIGERLAKE/UY (device ID 9a78) integrated display version 12.00 stepping ")
-        .s(intel_step_name(d.step)).say();
+        .s(intel_step_name(d.step)).dbg();
     d
 }
 

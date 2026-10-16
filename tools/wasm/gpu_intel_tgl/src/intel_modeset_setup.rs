@@ -126,7 +126,7 @@ fn intel_modeset_readout_hw_state(i915: &mut drm_i915_private) {
         let enc = i915.display.outputs.encoders[e];
         Line::new().s("[ENCODER:").s(enc.name()).s("] hw state readout: ")
             .s(if enc.crtc.is_some() { "enabled" } else { "disabled" }).s(", pipe ")
-            .dec(pipe_seen as u64).say();
+            .dec(pipe_seen as u64).dbg();
     }
 
     // intel_dpll_readout_hw_state: a PLL belongs to every active crtc whose
@@ -175,7 +175,7 @@ fn intel_modeset_readout_hw_state(i915: &mut drm_i915_private) {
         }
 
         Line::new().s("[CONNECTOR:").dec(k as u64).s("] hw state readout: ")
-            .s(if i915.display.outputs.connectors[k].attached.is_some() { "enabled" } else { "disabled" }).say();
+            .s(if i915.display.outputs.connectors[k].attached.is_some() { "enabled" } else { "disabled" }).dbg();
     }
 
     for c in crtcs(i915) {
@@ -203,7 +203,7 @@ fn intel_modeset_readout_hw_state(i915: &mut drm_i915_private) {
                 cs.min_cdclk[plane.id as usize] = cs.pixel_rate.div_ceil(2) as i32;
             }
             Line::new().s("plane ").dec(plane.id as u64 + 1).s(" pipe ").dec(pipe as u64).s(": min_cdclk ")
-                .dec(cs.min_cdclk[plane.id as usize] as u64).s(" kHz").say();
+                .dec(cs.min_cdclk[plane.id as usize] as u64).s(" kHz").dbg();
         }
     }
 
@@ -241,7 +241,7 @@ fn intel_sanitize_encoder(i915: &mut drm_i915_private, opregion: Option<&intel_o
 
     let connector = intel_encoder_find_connector(&i915.display.outputs, e);
     if let (Some(k), false) = (connector, has_active_crtc) {
-        Line::new().s("[ENCODER:").s(enc.name()).s("] has active connectors but no active pipe!").say();
+        Line::new().s("[ENCODER:").s(enc.name()).s("] has active connectors but no active pipe!").dbg();
         if crtc.is_some() {
             Line::new().s("[ENCODER:").s(enc.name())
                 .s("] would be disabled by hand (encoder disable/post_disable), not ported").say();
@@ -350,7 +350,7 @@ fn intel_crtc_state_dump(i915: &drm_i915_private, c: usize) {
     let crtc = &i915.display.crtcs[c];
     let cs = &crtc.state;
     if !cs.hw.active {
-        Line::new().s("pipe ").dec(crtc.pipe as u64).s(": setup_hw_state: disabled").say();
+        Line::new().s("pipe ").dec(crtc.pipe as u64).s(": setup_hw_state: disabled").dbg();
         return;
     }
     let m = &cs.hw.adjusted_mode;
@@ -370,12 +370,12 @@ fn intel_crtc_state_dump(i915: &drm_i915_private, c: usize) {
             l.s(", [ENCODER:").s(o.encoders[e].name()).s("]");
         }
     }
-    l.say();
+    l.dbg();
     if let Some(p) = cs.intel_dpll {
         let pll = &i915.display.dpll.dplls[p];
         if pll.info.map(|i| i.funcs) != Some(intel_dpll_mgr::dpll_info_funcs::tbt_pll_funcs) {
             Line::new().s("pipe ").dec(crtc.pipe as u64).s(": ").s(intel_dpll_mgr::dpll_name(pll)).s(" at ")
-                .dec(intel_dpll_mgr::intel_dpll_get_freq(i915, pll, &cs.dpll_hw_state) as u64).s(" kHz").say();
+                .dec(intel_dpll_mgr::intel_dpll_get_freq(i915, pll, &cs.dpll_hw_state) as u64).s(" kHz").dbg();
         }
         intel_dpll_mgr::intel_dpll_dump_hw_state(&cs.dpll_hw_state);
     }
@@ -384,7 +384,7 @@ fn intel_crtc_state_dump(i915: &drm_i915_private, c: usize) {
         .dec(cs.dp_m_n.link_m as u64).s("/").dec(cs.dp_m_n.link_n as u64).s(", enhanced framing ")
         .dec(cs.enhanced_framing as u64).s(", fec ").dec(cs.fec_enable as u64).s(", audio ")
         .dec(cs.has_audio as u64).s(", infoframes ").hex(cs.infoframes.enable).s(", min voltage ")
-        .dec(cs.min_voltage_level as u64).say();
+        .dec(cs.min_voltage_level as u64).dbg();
 }
 
 /// `intel_sanitize_all_crtcs`. A crtc forced off can unstick the HPD state

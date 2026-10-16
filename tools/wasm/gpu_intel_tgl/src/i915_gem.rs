@@ -24,7 +24,7 @@ pub fn i915_gem_init(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut 
     for i in 0..8 {
         pat.s(" ").hex(i915.uncore.intel_uncore_read(GEN12_PAT_INDEX(i)));
     }
-    pat.say();
+    pat.dbg();
 
     crate::intel_ggtt::i915_init_ggtt(ggtt, &gt.wopcm)?;
     let mut nodes = Line::new();
@@ -32,7 +32,7 @@ pub fn i915_gem_init(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut 
     for n in ggtt.vm_mm.nodes() {
         nodes.s(" [").hex(n.start as u32).s(" + ").hex(n.size as u32).s("]");
     }
-    nodes.say();
+    nodes.dbg();
 
     // Clock gating, display and GT workarounds alike: nop on TGL.
     crate::intel_clock_gating::intel_clock_gating_init(i915);

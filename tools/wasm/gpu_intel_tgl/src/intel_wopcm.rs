@@ -15,7 +15,7 @@ pub struct intel_wopcm {
 /// `intel_wopcm_init_early`: HAS_GT_UC, graphics version 11 and later.
 pub fn intel_wopcm_init_early(wopcm: &mut intel_wopcm) {
     wopcm.size = GEN11_WOPCM_SIZE;
-    crate::linux::Line::new().s("WOPCM: ").dec(wopcm.size as u64 / 1024).s("K").say();
+    crate::linux::Line::new().s("WOPCM: ").dec(wopcm.size as u64 / 1024).s("K").dbg();
 }
 
 /// `intel_wopcm_init`: it returns at once when the GuC upload size is 0,

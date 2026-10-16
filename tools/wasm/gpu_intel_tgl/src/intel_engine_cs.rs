@@ -195,7 +195,7 @@ fn report(gt: &intel_gt) {
             .s(", ring (system memory) GGTT ").hex(ce.ring.ggtt_offset())
             .s(", breadcrumb ").dec(x.emit_fini_breadcrumb_dw as u64).s(" dw, workarounds ")
             .dec(x.wa_list.count as u64).s("/").dec(x.whitelist.count as u64).s("/").dec(x.ctx_wa_list.count as u64)
-            .say();
+            .dbg();
     }
 }
 
@@ -267,15 +267,15 @@ pub fn intel_engine_print_registers(i915: &mut drm_i915_private, gt: &intel_gt, 
         .s(", HEAD ").hex(u.intel_uncore_read(RING_HEAD(b)) & HEAD_ADDR)
         .s(", TAIL ").hex(u.intel_uncore_read(RING_TAIL(b)) & TAIL_ADDR)
         .s(", CTL ").hex(ctl).s(if ctl & (RING_WAIT | RING_WAIT_SEMAPHORE) != 0 { " [waiting]" } else { "" })
-        .s(", MODE ").hex(mode).s(if mode & MODE_IDLE != 0 { " [idle]" } else { "" }).say();
+        .s(", MODE ").hex(mode).s(if mode & MODE_IDLE != 0 { " [idle]" } else { "" }).dbg();
     Line::new().s(name).dec(engine.instance as u64).s(": IMR ").hex(u.intel_uncore_read(RING_IMR(b)))
         .s(", ESR ").hex(u.intel_uncore_read(RING_ESR(b)))
         .s(", EMR ").hex(u.intel_uncore_read(RING_EMR(b)))
         .s(", EIR ").hex(u.intel_uncore_read(RING_EIR(b)))
         .s(", IPEIR ").hex(u.intel_uncore_read(RING_IPEIR(b)))
         .s(", IPEHR ").hex(u.intel_uncore_read(RING_IPEHR(b)))
-        .s(", INSTDONE ").hex(u.intel_uncore_read(RING_INSTDONE(b))).say();
+        .s(", INSTDONE ").hex(u.intel_uncore_read(RING_INSTDONE(b))).dbg();
     Line::new().s(name).dec(engine.instance as u64).s(": ACTHD ").hex((acthd >> 32) as u32).s("_").hex(acthd as u32)
         .s(", BBADDR ").hex((bbaddr >> 32) as u32).s("_").hex(bbaddr as u32)
-        .s(", DMA_FADDR ").hex((faddr >> 32) as u32).s("_").hex(faddr as u32).say();
+        .s(", DMA_FADDR ").hex((faddr >> 32) as u32).s("_").hex(faddr as u32).dbg();
 }

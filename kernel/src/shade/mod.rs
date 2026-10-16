@@ -1343,16 +1343,14 @@ pub fn poll_render() {
         // cursor stays smooth — the gaps are filled with the cheap
         // cursor-only render. Coalescing is free: SURFACE_DIRTY stays set and
         // we render the latest frame when due.
-        let now = crate::interrupts::ticks();
-        let since = now.wrapping_sub(LAST_SURFACE_TICK.load(Ordering::Relaxed));
-        let cap = if CURSOR_MOVED.load(Ordering::Relaxed) {
-            SURFACE_MAX_STALE_TICKS
-        } else {
-            SURFACE_MIN_TICKS
-        };
-        if since >= cap {
+        // With the GPU composing, the blit costs Core 0 nothing and the cap
+        // is the display's refresh: a frame per refresh period, so 30 and
+        // 60 fps land evenly instead of on a 50 Hz grid.
+        let now = crate::interrupts::rdtsc();
+        let since = now.wrapping_sub(LAST_SURFACE_TSC.load(Ordering::Relaxed));
+        if since >= surface_cap() {
             SURFACE_DIRTY.store(false, Ordering::Relaxed);
-            LAST_SURFACE_TICK.store(now, Ordering::Relaxed);
+            LAST_SURFACE_TSC.store(now, Ordering::Relaxed);
             render_frame_surface();
             CURSOR_MOVED.store(false, Ordering::Relaxed);
         } else if CURSOR_MOVED.swap(false, Ordering::Relaxed) {
@@ -1423,15 +1421,42 @@ static CURSOR_MOVED: AtomicBool = AtomicBool::new(false);
 /// MMIO blit can be clipped to the tile rect instead of the whole screen.
 static SURFACE_DIRTY: AtomicBool = AtomicBool::new(false);
 
-/// Last tick (100 Hz) at which a Surface (guest) frame was actually
-/// composited+blit. poll_render throttles the expensive 4K-tile surface
-/// render in favour of the cheap cursor-only path while the host mouse is
-/// moving, so a busy guest can't starve the cursor across all windows.
-static LAST_SURFACE_TICK: AtomicU64 = AtomicU64::new(0);
+/// TSC at which a Surface (guest) frame was last composited+blit. Without
+/// the GPU, poll_render throttles the expensive 4K-tile surface render in
+/// favour of the cheap cursor-only path while the host mouse is moving, so
+/// a busy guest can't starve the cursor across all windows.
+static LAST_SURFACE_TSC: AtomicU64 = AtomicU64::new(0);
 
-/// Min ticks (100 Hz) between full-tile surface blits when the mouse is
-/// idle — FPS-caps the 4K MMIO blit so a 60 Hz guest can't peg Core 0
-/// (which also drains the NIC RX ring).
+/// The display refresh a guest frame is shown at when the GPU composes, and
+/// the slack (1/n s) by which a frame may come early: the main loop wakes
+/// a little after the period, never exactly on it.
+const SURFACE_REFRESH_HZ: u64 = 60;
+const SURFACE_REFRESH_SLACK: u64 = 500;
+
+/// TSC cycles a guest frame waits after the last one was shown.
+fn surface_cap() -> u64 {
+    let freq = crate::interrupts::tsc_freq();
+    if crate::gpu::gpudev::scenes_offered() {
+        freq / SURFACE_REFRESH_HZ - freq / SURFACE_REFRESH_SLACK
+    } else if CURSOR_MOVED.load(Ordering::Relaxed) {
+        SURFACE_MAX_STALE_TICKS * freq / 100
+    } else {
+        SURFACE_MIN_TICKS * freq / 100
+    }
+}
+
+/// When a waiting guest frame is due, for the shell loop's wake-up: a
+/// 10 ms tick would round a refresh period up to 20 ms.
+pub fn surface_due_tsc() -> Option<u64> {
+    if !SURFACE_DIRTY.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(LAST_SURFACE_TSC.load(Ordering::Relaxed).wrapping_add(surface_cap()))
+}
+
+/// Min ticks (100 Hz) between full-tile surface blits on the CPU when the
+/// mouse is idle — FPS-caps the 4K MMIO blit so a 60 Hz guest can't peg
+/// Core 0 (which also drains the NIC RX ring).
 const SURFACE_MIN_TICKS: u64 = 2;
 /// Min ticks between surface blits while the mouse is actively moving, so
 /// the cheap cursor-only path can keep the cursor smooth in the gaps.

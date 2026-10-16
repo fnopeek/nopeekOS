@@ -69,7 +69,7 @@ pub fn wa_init_finish(wal: &i915_wa_list) {
         return;
     }
     Line::new().s("Initialized ").dec(wal.wa_count as u64).s(" ").s(wal.name).s(" workarounds on ")
-        .s(wal.engine_name).say();
+        .s(wal.engine_name).dbg();
 }
 
 /// `wal_get_fw_for_rmw`.
@@ -666,5 +666,5 @@ pub fn verify_all(i915: &mut drm_i915_private, gt: &intel_gt, from: &str) {
         held += ok as u32;
     }
     Line::new().s("workarounds on ").s(from).s(": ").dec(held as u64).s(" of ").dec(lists as u64)
-        .s(" lists hold").say();
+        .s(" lists hold").dbg();
 }

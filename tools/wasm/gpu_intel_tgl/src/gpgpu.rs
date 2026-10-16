@@ -504,7 +504,7 @@ pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: 
                     l.s(" ").dec(t);
                 }
             }
-            l.say();
+            l.dbg();
             crate::intel_engine_cs::intel_engine_print_registers(i915, gt, e);
             crate::intel_gt::gen8_check_faults(i915);
             crate::intel_gt::intel_gt_set_wedged(i915, gt);
@@ -569,13 +569,13 @@ pub fn gpgpu_self_test(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgp
             let v = u32::from_le_bytes(row[(x * 4) as usize..(x * 4 + 4) as usize].try_into().unwrap());
             if v != want {
                 Line::new().s("gpgpu: self-test read back ").hex(v).s(" at ").dec(x as u64).s(",").dec(y as u64)
-                    .s(", expected ").hex(want).say();
+                    .s(", expected ").hex(want).dbg();
                 return false;
             }
         }
     }
     Line::new().s("gpgpu: fill_pattern 64x64 on rcs0 in ").dec(us).s(" us, SIMD16, ")
         .dec(k.code.len() as u64 * 4).s(" bytes of program, ").dec(gt.info.sseu.subslice_mask[0].count_ones() as u64)
-        .s(" subslices").say();
+        .s(" subslices").dbg();
     true
 }

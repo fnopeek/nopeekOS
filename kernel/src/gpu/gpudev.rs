@@ -617,6 +617,7 @@ pub fn module_gone(dev: PciAddr) {
     };
     READY.store(false, Ordering::Release);
     SCENES.store(false, Ordering::Release);
+    crate::audio::display_audio_clear();
     NATIVE.store(false, Ordering::Release);
     RINGS.lock().clear();
     WAKER.store(NO_WAKER, Ordering::Release);

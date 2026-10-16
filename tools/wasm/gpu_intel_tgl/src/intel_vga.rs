@@ -15,5 +15,5 @@ pub fn intel_vga_disable(i915: &mut drm_i915_private) {
     if tmp & VGA_DISP_DISABLE != 0 {
         return;
     }
-    Line::new().s("VGA plane on pipe A is enabled; disabling it needs the VGA sequencer, not done").say();
+    Line::new().s("VGA plane on pipe A is enabled; disabling it needs the VGA sequencer, not done").dbg();
 }

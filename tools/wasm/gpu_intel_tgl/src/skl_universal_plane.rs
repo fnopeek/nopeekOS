@@ -125,7 +125,7 @@ pub fn skl_get_initial_plane_config(i915: &mut drm_i915_private, c: usize,
     }
 
     if i915.display.crtcs[c].state.joiner_pipes != 0 {
-        Line::new().s("pipe ").dec(crtc_pipe as u64).s(": unsupported joiner configuration for initial FB").say();
+        Line::new().s("pipe ").dec(crtc_pipe as u64).s(": unsupported joiner configuration for initial FB").dbg();
         return;
     }
 
@@ -137,7 +137,7 @@ pub fn skl_get_initial_plane_config(i915: &mut drm_i915_private, c: usize,
 
     let fourcc = skl_format_to_fourcc(pixel_format, val & PLANE_CTL_ORDER_RGBX != 0, alpha != 0);
     let Some(cpp) = intel_fb::drm_format_info_cpp(fourcc) else {
-        Line::new().s("no format info for fourcc ").hex(fourcc).say();
+        Line::new().s("no format info for fourcc ").hex(fourcc).dbg();
         return;
     };
 
@@ -220,5 +220,5 @@ pub fn skl_get_initial_plane_config(i915: &mut drm_i915_private, c: usize,
 
     Line::new().s("pipe ").dec(crtc_pipe as u64).s(" plane ").dec(plane_id as u64 + 1).s(" with fb: size=")
         .dec(width as u64).s("x").dec(height as u64).s("@").dec(cpp as u64 * 8).s(", offset=").hex(base)
-        .s(", pitch ").dec(pitch as u64).s(", size ").hex(plane_config.size).say();
+        .s(", pitch ").dec(pitch as u64).s(", size ").hex(plane_config.size).dbg();
 }

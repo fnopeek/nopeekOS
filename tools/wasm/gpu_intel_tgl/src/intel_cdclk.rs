@@ -377,7 +377,7 @@ fn bxt_sanitize_cdclk(i915: &mut drm_i915_private, cd: &mut intel_display_cdclk)
         }
     }
 
-    Line::new().s("Sanitizing cdclk programmed by pre-os").say();
+    Line::new().s("Sanitizing cdclk programmed by pre-os").dbg();
     // Force cdclk programming and a full PLL disable + enable.
     cd.hw.cdclk = 0;
     cd.hw.vco = !0;
@@ -415,7 +415,7 @@ pub fn intel_cdclk_dump_config(cdclk_config: &intel_cdclk_config, context: &str)
     Line::new().s(context).s(" ").dec(cdclk_config.cdclk as u64).s(" kHz, VCO ")
         .dec(cdclk_config.vco as u64).s(" kHz, ref ").dec(cdclk_config.r#ref as u64)
         .s(" kHz, bypass ").dec(cdclk_config.bypass as u64).s(" kHz, voltage level ")
-        .dec(cdclk_config.voltage_level as u64).say();
+        .dec(cdclk_config.voltage_level as u64).dbg();
 }
 
 /// `intel_cdclk_read_hw`.
@@ -446,8 +446,8 @@ pub fn intel_update_max_cdclk(cd: &mut intel_display_cdclk) {
     cd.max_cdclk_freq = if cd.hw.r#ref == 24000 { 648000 } else { 652800 };
     cd.max_dotclk_freq = intel_compute_max_dotclk(cd);
 
-    Line::new().s("Max CD clock rate: ").dec(cd.max_cdclk_freq as u64).s(" kHz").say();
-    Line::new().s("Max dotclock rate: ").dec(cd.max_dotclk_freq as u64).s(" kHz").say();
+    Line::new().s("Max CD clock rate: ").dec(cd.max_cdclk_freq as u64).s(" kHz").dbg();
+    Line::new().s("Max dotclock rate: ").dec(cd.max_dotclk_freq as u64).s(" kHz").dbg();
 }
 
 /// `DIV_ROUND_UP` on signed values.

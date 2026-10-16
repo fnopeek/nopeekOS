@@ -501,6 +501,7 @@ pub extern "C" fn _start() {
     // Scratch buffer for one mailbox poll -> one ring half.
     let mut mix = [0u8; HALF_BYTES];
     loop {
+        intelhdmi::poll();
         let lpib = (mmio_r32(mmio, base + SD_LPIB) as usize) % RING_BYTES;
         ticks += 1;
         if host::verbose() && reports > 0 && ticks % 250 == 0 {

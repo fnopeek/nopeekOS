@@ -101,7 +101,7 @@ pub fn intel_pch_detect(has_display: bool) -> i32 {
         let id = (id_reg >> 16) & INTEL_PCH_DEVICE_ID_MASK;
         let (t, name, tgl_ok) = intel_pch_type(id);
         if t != PCH_NONE as i32 {
-            Line::new().s("Found ").s(name).say();
+            Line::new().s("Found ").s(name).dbg();
             if !tgl_ok {
                 linux::say("warning: PCH does not belong to a Tiger Lake display");
             }
@@ -120,7 +120,7 @@ pub fn intel_pch_detect(has_display: bool) -> i32 {
         pch_type = PCH_NOP;
     } else if pch.is_none() {
         // i915_run_as_guest() is false on bare metal.
-        linux::say("No PCH found.");
+        linux::dbg("No PCH found.");
     }
     pch_type
 }

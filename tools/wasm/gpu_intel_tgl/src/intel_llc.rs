@@ -63,7 +63,7 @@ fn gen6_update_ring_freq(i915: &mut drm_i915_private, gt: &intel_gt) {
     }
     Line::new().s("LLC: ring frequency table, ").dec(written).s(" entries (GPU ")
         .dec(consts.min_gpu_freq as u64 * 50).s("-").dec(consts.max_gpu_freq as u64 * 50)
-        .s(" MHz, DDR floor ").dec(consts.min_ring_freq as u64).s(")").say();
+        .s(" MHz, DDR floor ").dec(consts.min_ring_freq as u64).s(")").dbg();
 }
 
 /// `intel_llc_enable`.

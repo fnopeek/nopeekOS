@@ -307,7 +307,7 @@ fn self_test(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) -> bool {
             let v = u32::from_le_bytes(got[(x * 4) as usize..(x * 4 + 4) as usize].try_into().unwrap());
             if v != want {
                 Line::new().s("gpudev: self-test read back ").hex(v).s(" at ").dec(x as u64).s(",")
-                    .dec(y as u64).s(", expected ").hex(want).say();
+                    .dec(y as u64).s(", expected ").hex(want).dbg();
                 return false;
             }
         }
@@ -331,7 +331,7 @@ fn log_wakerefs(gt: &intel_gt, when: &str) {
         l.s(" ").s(crate::intel_gt::intel_engine_class_repr(x.class)).dec(x.instance as u64).s("=")
             .dec(x.wakeref_count as u64);
     }
-    l.say();
+    l.dbg();
 }
 
 /// Inserts `pages` pages of buffer `id`, from the kernel's page list, at
@@ -438,12 +438,12 @@ fn run_copy(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, a
     svc.max_us = svc.max_us.max(us);
     if svc.jobs == 1 {
         Line::new().s("gpudev: first job, copy ").dec(wd as u64).s("x").dec(ht as u64).s(" bo ")
-            .dec(a[0] as u64).s(" -> bo ").dec(a[1] as u64).s(" in ").dec(us).s(" us").say();
+            .dec(a[0] as u64).s(" -> bo ").dec(a[1] as u64).s(" in ").dec(us).s(" us").dbg();
         log_wakerefs(gt, "after the first job");
     } else if svc.jobs % STATS_EVERY == 0 {
         Line::new().s("gpudev: ").dec(svc.jobs as u64).s(" jobs, average ")
             .dec(svc.sum_us / STATS_EVERY as u64).s(" us, max ").dec(svc.max_us).s(" us, GPU requested ")
-            .dec(crate::intel_rps::intel_rps_requested_mhz(gt) as u64).s(" MHz").say();
+            .dec(crate::intel_rps::intel_rps_requested_mhz(gt) as u64).s(" MHz").dbg();
         svc.sum_us = 0;
         svc.max_us = 0;
     }
@@ -471,8 +471,10 @@ fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, 
                 Line::new().s("gpudev: scene ").dec(svc.scenes as u64).s(", ").dec(rep.items as u64).s(" items, ")
                     .dec(rep.dispatches as u64).s(" dispatches into bo ").dec(a[0] as u64).s(": ").dec(us)
                     .s(" us, of which the GPU ").dec(rep.gpu_us).s(" us at ")
-                    .dec(crate::intel_rps::intel_rps_requested_mhz(gt) as u64).s(" MHz").say();
-                rep.log.say(Some(gt.clock_frequency));
+                    .dec(crate::intel_rps::intel_rps_requested_mhz(gt) as u64).s(" MHz").dbg();
+                if linux::debug_enabled() {
+                    rep.log.say(Some(gt.clock_frequency));
+                }
             }
         }
         Err(x) => {
@@ -482,7 +484,7 @@ fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, 
     if svc.scenes % SCENE_STATS_EVERY == 0 {
         Line::new().s("gpudev: ").dec(svc.scenes as u64).s(" scenes, average ")
             .dec(svc.scene_sum_us / SCENE_STATS_EVERY as u64).s(" us (GPU ")
-            .dec(svc.scene_gpu_us / SCENE_STATS_EVERY as u64).s(" us), max ").dec(svc.scene_max_us).s(" us").say();
+            .dec(svc.scene_gpu_us / SCENE_STATS_EVERY as u64).s(" us), max ").dec(svc.scene_max_us).s(" us").dbg();
         svc.scene_sum_us = 0;
         svc.scene_gpu_us = 0;
         svc.scene_max_us = 0;
@@ -609,14 +611,14 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
                             gpgpu: None, composer: None };
     for id in 0..NUM_BOS {
         let Some(b) = bo_info(id as u32) else {
-            Line::new().s("gpudev: no buffer ").dec(id as u64).say();
+            Line::new().s("gpudev: no buffer ").dec(id as u64).dbg();
             npk_sys::gpudev_ready(0);
             return;
         };
         svc.bos[id] = b;
         Line::new().s("gpudev: bo ").dec(id as u64).s(": phys ").hex((b.phys >> 32) as u32).s("_")
             .hex(b.phys as u32).s(", size ").hex(b.size as u32).s(", ").dec(b.width as u64).s("x")
-            .dec(b.height as u64).s(", pitch ").dec(b.pitch as u64).say();
+            .dec(b.height as u64).s(", pitch ").dec(b.pitch as u64).dbg();
     }
 
     // Buffer 0 is the firmware framebuffer taken over by intel_plane_initial:
@@ -627,7 +629,7 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         Some(v) if v.node.size >= svc.bos[0].size => {
             let (phys, present, _) = ggtt.gen8_ggtt_read_entry(v.node.start);
             if !present {
-                linux::say("gpudev: framebuffer PTE not present");
+                linux::dbg("gpudev: framebuffer PTE not present");
                 npk_sys::gpudev_ready(0);
                 return;
             }
@@ -638,7 +640,7 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
                 svc.bos[0].bound = true;
             }
         }
-        _ => linux::say("gpudev: no taken-over framebuffer matches buffer 0"),
+        _ => linux::dbg("gpudev: no taken-over framebuffer matches buffer 0"),
     }
     for id in 1..NUM_BOS {
         let b = svc.bos[id];
@@ -657,7 +659,7 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
             return;
         }
         npk_sys::gpudev_bo_bound(id as i32, svc.bos[id].va as i64);
-        Line::new().s("gpudev: bo ").dec(id as u64).s(" at PPGTT ").hex(svc.bos[id].va as u32).say();
+        Line::new().s("gpudev: bo ").dec(id as u64).s(" at PPGTT ").hex(svc.bos[id].va as u32).dbg();
     }
 
     // The GPGPU path (gpgpu.rs) proves itself before scenes are offered; a
@@ -672,11 +674,11 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
                 svc.composer = crate::compose::composer_init(gt);
                 scene_ok = svc.composer.is_some();
                 if !scene_ok {
-                    linux::say("gpgpu: no memory for the scene buffers, scenes stay on the CPU");
+                    linux::dbg("gpgpu: no memory for the scene buffers, scenes stay on the CPU");
                 }
             }
         }
-        None => linux::say("gpgpu: no render engine or heap, not tested"),
+        None => linux::dbg("gpgpu: no render engine or heap, not tested"),
     }
 
     svc.copy_ok = self_test(i915, gt, e);
@@ -758,7 +760,7 @@ fn walk_from_context(gt: &intel_gt, e: usize, va: u64, expect: u64) {
     let lo = state.r32(off + CTX_PDP0_LDW * 4);
     let hi = state.r32(off + CTX_PDP0_UDW * 4);
     Line::new().s("gpudev: va ").hex(va as u32).s(" should reach ").hex((expect >> 32) as u32).s("_")
-        .hex(expect as u32).s(", context PDP0 ").hex(hi).s("_").hex(lo).say();
+        .hex(expect as u32).s(", context PDP0 ").hex(hi).s("_").hex(lo).dbg();
     if let Some(vm) = gt.vm.as_ref() {
         vm.walk_log((hi as u64) << 32 | lo as u64, va);
     }

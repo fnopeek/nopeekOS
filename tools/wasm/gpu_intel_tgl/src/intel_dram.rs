@@ -25,7 +25,7 @@ pub fn intel_dram_edram_detect(i915: &mut drm_i915_private) {
     if edram_cap & EDRAM_ENABLED == 0 {
         return;
     }
-    Line::new().s("eDRAM reported enabled (cap ").hex(edram_cap).s("), size not computed").say();
+    Line::new().s("eDRAM reported enabled (cap ").hex(edram_cap).s("), size not computed").dbg();
 }
 
 /// `icl_pcode_read_mem_global_info`, GRAPHICS_VER 12.

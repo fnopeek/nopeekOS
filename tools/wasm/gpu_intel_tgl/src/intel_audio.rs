@@ -246,8 +246,7 @@ fn hsw_audio_codec_enable(i915: &mut drm_i915_private, c: usize) {
 }
 
 /// `intel_audio_codec_enable`, after the transcoder, the port and the link
-/// are up. The audio driver's `pin_eld_notify` is told through the kernel's
-/// audio channel, which is not there yet.
+/// are up.
 pub fn intel_audio_codec_enable(i915: &mut drm_i915_private, c: usize, encoder: usize, eld: &[u8; ELD_BYTES]) {
     let cs = i915.display.crtcs[c].state;
     if !cs.has_audio {
@@ -258,6 +257,14 @@ pub fn intel_audio_codec_enable(i915: &mut drm_i915_private, c: usize, encoder: 
 
     let t = cs.cpu_transcoder as usize;
     i915.display.audio.state[t] = intel_audio_state { encoder: Some(encoder), eld: *eld };
+
+    // pin_eld_notify: the audio driver learns the port and reads the ELD
+    // (`get_eld`) through the kernel.
+    let port = i915.display.outputs.encoders[encoder].port;
+    let len = crate::drm_edid::drm_eld_size(eld).min(eld.len());
+    if npk_sys::display_audio_set(port as i32, &eld[..len]) != 0 {
+        Line::new().s("audio: the kernel refused the ELD of port ").dec(port as u64).say();
+    }
 
     Line::new().s("audio: enabled on [ENCODER:").s(i915.display.outputs.encoders[encoder].name())
         .s("], transcoder ").dec(t as u64).s(", ").dec(crate::drm_edid::drm_eld_size(eld) as u64)

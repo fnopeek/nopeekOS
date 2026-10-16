@@ -390,7 +390,7 @@ pub fn intel_dpll_crtc_get(pll: &intel_dpll, pipe: u32, dpll_state: &mut intel_d
         crate::linux::say("warning: DPLL already reserved by this pipe");
     }
     dpll_state.pipe_mask |= 1 << pipe;
-    Line::new().s("[CRTC pipe ").dec(pipe as u64).s("] reserving ").s(dpll_name(pll)).say();
+    Line::new().s("[CRTC pipe ").dec(pipe as u64).s("] reserving ").s(dpll_name(pll)).dbg();
 }
 
 /// `readout_dpll_hw_state`. `active_pipes` gives, for a PLL index, the
@@ -420,7 +420,7 @@ fn readout_dpll_hw_state(i915: &mut drm_i915_private, vbt: &intel_vbt_data, idx:
     pll.active_mask = pll.state.pipe_mask;
 
     Line::new().s(dpll_name(&pll)).s(" hw state readout: pipe_mask ").hex(pll.state.pipe_mask as u32)
-        .s(", on ").dec(pll.on as u64).say();
+        .s(", on ").dec(pll.on as u64).dbg();
     i915.display.dpll.dplls[idx] = pll;
 }
 
@@ -438,14 +438,14 @@ fn icl_pll_disable(i915: &mut drm_i915_private, pll: &intel_dpll, enable_reg: u3
 
     // Timeout is actually 1us.
     if intel_de_wait_for_clear(i915, enable_reg, PLL_LOCK, 1).is_err() {
-        Line::new().s("PLL ").dec(info(pll).id as u64).s(" locked").say();
+        Line::new().s("PLL ").dec(info(pll).id as u64).s(" locked").dbg();
     }
 
     intel_de_rmw(i915, enable_reg, PLL_POWER_ENABLE, 0);
 
     // The spec says "wait" but also that it is immediate.
     if intel_de_wait_for_clear(i915, enable_reg, PLL_POWER_STATE, 1).is_err() {
-        Line::new().s("PLL ").dec(info(pll).id as u64).s(" Power not disabled").say();
+        Line::new().s("PLL ").dec(info(pll).id as u64).s(" Power not disabled").dbg();
     }
 }
 
@@ -478,7 +478,7 @@ fn sanitize_dpll_state(i915: &mut drm_i915_private, idx: usize) {
     if !pll.on || pll.active_mask != 0 {
         return;
     }
-    Line::new().s(dpll_name(&pll)).s(" enabled but not in use, disabling").say();
+    Line::new().s(dpll_name(&pll)).s(" enabled but not in use, disabling").dbg();
     _intel_disable_shared_dpll(i915, idx);
 }
 
@@ -495,11 +495,11 @@ pub fn intel_dpll_sanitize_state(i915: &mut drm_i915_private) {
 pub fn intel_dpll_dump_hw_state(dpll_hw_state: &intel_dpll_hw_state) {
     let h = &dpll_hw_state.icl;
     Line::new().s("dpll_hw_state: cfgcr0: ").hex(h.cfgcr0).s(", cfgcr1: ").hex(h.cfgcr1)
-        .s(", div0: ").hex(h.div0).s(", mg_refclkin_ctl: ").hex(h.mg_refclkin_ctl).say();
+        .s(", div0: ").hex(h.div0).s(", mg_refclkin_ctl: ").hex(h.mg_refclkin_ctl).dbg();
     Line::new().s("  hg_clktop2_coreclkctl1: ").hex(h.mg_clktop2_coreclkctl1)
         .s(", mg_clktop2_hsclkctl: ").hex(h.mg_clktop2_hsclkctl)
-        .s(", mg_pll_div0: ").hex(h.mg_pll_div0).s(", mg_pll_div2: ").hex(h.mg_pll_div1).say();
+        .s(", mg_pll_div0: ").hex(h.mg_pll_div0).s(", mg_pll_div2: ").hex(h.mg_pll_div1).dbg();
     Line::new().s("  mg_pll_lf: ").hex(h.mg_pll_lf).s(", mg_pll_frac_lock: ").hex(h.mg_pll_frac_lock)
         .s(", mg_pll_ssc: ").hex(h.mg_pll_ssc).s(", mg_pll_bias: ").hex(h.mg_pll_bias)
-        .s(", mg_pll_tdc_coldst_bias: ").hex(h.mg_pll_tdc_coldst_bias).say();
+        .s(", mg_pll_tdc_coldst_bias: ").hex(h.mg_pll_tdc_coldst_bias).dbg();
 }

@@ -84,7 +84,7 @@ fn intel_reuse_initial_plane_obj(i915: &drm_i915_private, this_pipe: u32,
 fn initial_plane_phys(ggtt: &i915_ggtt, dsm: Option<&i915_dsm>,
                       plane_config: &mut intel_initial_plane_config) -> bool {
     let Some(mem) = dsm else {
-        linux::say("Initial plane memory region (type stolen-system) not initialized");
+        linux::dbg("Initial plane memory region (type stolen-system) not initialized");
         return false;
     };
 
@@ -111,7 +111,7 @@ fn initial_plane_phys(ggtt: &i915_ggtt, dsm: Option<&i915_dsm>,
     }
 
     Line::new().s("Using dma_addr=").hex((dma_addr >> 32) as u32).s("_").hex(dma_addr as u32)
-        .s(", based on initial plane programming").say();
+        .s(", based on initial plane programming").dbg();
 
     plane_config.phys_base = dma_addr - mem.region_start;
     true
@@ -134,7 +134,7 @@ fn i915_gem_object_create_stolen_at(dsm: &mut i915_dsm, offset: u64, size: u64) 
         return None;
     }
     Line::new().s("creating preallocated stolen object: stolen_offset=").hex(offset as u32)
-        .s(", size=").hex(size as u32).say();
+        .s(", size=").hex(size as u32).dbg();
     let stolen = drm_mm_node { start: offset, size, color: 0 };
     dsm.mm.drm_mm_reserve_node(stolen).ok()?;
     Some(stolen)
@@ -250,7 +250,7 @@ fn initial_plane_vma(ggtt: &mut i915_ggtt, dsm: Option<&mut i915_dsm>,
     }
 
     Line::new().s("Initial plane fb bound to ").hex(vma.node.start as u32).s(" in the ggtt (original ")
-        .hex(plane_config.base).s(")").say();
+        .hex(plane_config.base).s(")").dbg();
 
     Some(vma)
 }
@@ -264,7 +264,7 @@ fn intel_alloc_initial_plane_obj(ggtt: &mut i915_ggtt, dsm: Option<&mut i915_dsm
     match fb.modifier {
         DRM_FORMAT_MOD_LINEAR | I915_FORMAT_MOD_X_TILED | I915_FORMAT_MOD_Y_TILED | I915_FORMAT_MOD_4_TILED => {}
         m => {
-            Line::new().s("Unsupported modifier for initial FB: ").hex((m >> 32) as u32).s("_").hex(m as u32).say();
+            Line::new().s("Unsupported modifier for initial FB: ").hex((m >> 32) as u32).s("_").hex(m as u32).dbg();
             return false;
         }
     }
@@ -298,7 +298,7 @@ fn intel_find_initial_plane_obj(i915: &mut drm_i915_private, ggtt: &mut i915_ggt
         // which waits for vblanks; without the vblank interrupt the plane is
         // left scanning out what the firmware set up.
         Line::new().s("pipe ").dec(pipe as u64)
-            .s(": initial FB not reconstructed, plane left as is (intel_plane_disable_noatomic needs vblank)").say();
+            .s(": initial FB not reconstructed, plane left as is (intel_plane_disable_noatomic needs vblank)").dbg();
         return;
     };
 

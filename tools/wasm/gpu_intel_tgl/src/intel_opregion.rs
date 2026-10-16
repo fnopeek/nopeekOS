@@ -85,7 +85,7 @@ impl intel_opregion {
             dslp = 50;
         } else if dslp > MAX_DSLP {
             Line::new().s("ACPI BIOS requests an excessive sleep of ").dec(dslp as u64)
-                .s(" ms, using ").dec(MAX_DSLP as u64).s(" ms instead").say();
+                .s(" ms, using ").dec(MAX_DSLP as u64).s(" ms instead").dbg();
             dslp = MAX_DSLP;
         }
 
@@ -114,7 +114,7 @@ impl intel_opregion {
             scic & SWSCI_SCIC_INDICATOR == 0
         });
         if polled.is_err() {
-            linux::say("SWSCI request timed out");
+            linux::dbg("SWSCI request timed out");
             return Err(-(ETIMEDOUT as i32));
         }
         let status = (scic & SWSCI_SCIC_EXIT_STATUS_MASK) >> SWSCI_SCIC_EXIT_STATUS_SHIFT;
@@ -144,7 +144,7 @@ impl intel_opregion {
 
         if port > 4 {
             Line::new().s("[ENCODER:").s(e.name()).s("] port index ").dec(port as u64)
-                .s(" out of bounds for display power state notification").say();
+                .s(" out of bounds for display power state notification").dbg();
             return Err(-(EINVAL as i32));
         }
 
@@ -189,14 +189,14 @@ impl intel_opregion {
                 let req = self.swsci_sbcb_sub_functions;
                 if req & tmp != req {
                     Line::new().s("SWSCI BIOS requested (").hex(req)
-                        .s(") SBCB callbacks that are not supported (").hex(tmp).s(")").say();
+                        .s(") SBCB callbacks that are not supported (").hex(tmp).s(")").dbg();
                 }
             } else {
                 self.swsci_sbcb_sub_functions |= tmp;
             }
         }
         Line::new().s("SWSCI GBDA callbacks ").hex(self.swsci_gbda_sub_functions)
-            .s(", SBCB callbacks ").hex(self.swsci_sbcb_sub_functions).say();
+            .s(", SBCB callbacks ").hex(self.swsci_sbcb_sub_functions).dbg();
     }
 }
 
@@ -255,7 +255,7 @@ pub fn vbt<R>(len: usize, f: impl FnOnce(&[u8]) -> R) -> R {
 pub fn intel_opregion_setup() -> Option<intel_opregion> {
     let asls = npk_sys::pci_read_config(ASLS as i32) as u32;
     if asls == 0 {
-        linux::say("ACPI OpRegion not supported!");
+        linux::dbg("ACPI OpRegion not supported!");
         return None;
     }
     let base = Mmio::map_phys(asls as u64 & !0xfff, ((OPREGION_SIZE as u64 + (asls as u64 & 0xfff)).div_ceil(4096)) as i32)?;
@@ -265,7 +265,7 @@ pub fn intel_opregion_setup() -> Option<intel_opregion> {
 
     let sig: [u8; 16] = core::array::from_fn(|i| rd8(base, at(i as u64)));
     if sig[..] != OPREGION_SIGNATURE[..16] {
-        linux::say("opregion signature mismatch");
+        linux::dbg("opregion signature mismatch");
         return None;
     }
     let mut op = intel_opregion {
@@ -286,7 +286,7 @@ pub fn intel_opregion_setup() -> Option<intel_opregion> {
         vbt_source: "",
     };
     Line::new().s("ACPI OpRegion version ").dec(op.major as u64).s(".").dec(op.minor as u64)
-        .s(".").dec(op.revision as u64).s(", mailboxes ").hex(op.mboxes).say();
+        .s(".").dec(op.revision as u64).s(", mailboxes ").hex(op.mboxes).dbg();
 
     if op.mboxes & MBOX_ACPI as u32 != 0 {
         op.has_acpi = true;
@@ -326,7 +326,7 @@ pub fn intel_opregion_setup() -> Option<intel_opregion> {
                 op.vbt_source = "ACPI OpRegion (RVDA)";
                 return Some(op);
             }
-            linux::say("Invalid VBT in ACPI OpRegion (RVDA)");
+            linux::dbg("Invalid VBT in ACPI OpRegion (RVDA)");
         }
     }
 
@@ -336,7 +336,7 @@ pub fn intel_opregion_setup() -> Option<intel_opregion> {
         op.vbt_len = len;
         op.vbt_source = "ACPI OpRegion (Mailbox #4)";
     } else {
-        linux::say("Invalid VBT in ACPI OpRegion (Mailbox #4)");
+        linux::dbg("Invalid VBT in ACPI OpRegion (Mailbox #4)");
     }
     Some(op)
 }

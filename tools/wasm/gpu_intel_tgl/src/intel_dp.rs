@@ -86,13 +86,13 @@ pub fn intel_dp_aux_ch(o: &intel_outputs, vbt: &intel_bios::intel_bios_display, 
     if let Some(other) = get_encoder_by_aux_ch(o, encoder, aux_ch) {
         let mut l = Line::new();
         l.s("[ENCODER:").s(e.name()).s("] AUX CH ");
-        aux_ch_name(&mut l, aux_ch).s(" already claimed by [ENCODER:").s(o.encoders[other].name()).s("]").say();
+        aux_ch_name(&mut l, aux_ch).s(" already claimed by [ENCODER:").s(o.encoders[other].name()).s("]").dbg();
         return AUX_CH_NONE;
     }
 
     let mut l = Line::new();
     l.s("[ENCODER:").s(e.name()).s("] Using AUX CH ");
-    aux_ch_name(&mut l, aux_ch).s(" (").s(source).s(")").say();
+    aux_ch_name(&mut l, aux_ch).s(" (").s(source).s(")").dbg();
     aux_ch
 }
 
@@ -369,7 +369,7 @@ pub fn intel_dp_init_connector(i915: &mut drm_i915_private, o: &mut intel_output
     let enc = o.dig_ports[d].encoder;
     if o.dig_ports[d].max_lanes < 1 {
         Line::new().s("Not enough lanes (").dec(o.dig_ports[d].max_lanes as u64).s(") for DP on [ENCODER:")
-            .s(o.encoders[enc].name()).s("]").say();
+            .s(o.encoders[enc].name()).s("]").dbg();
         return false;
     }
 
@@ -397,7 +397,7 @@ pub fn intel_dp_init_connector(i915: &mut drm_i915_private, o: &mut intel_output
     intel_dp_aux_init(o, d);
 
     Line::new().s("Adding ").s(if type_ == DRM_MODE_CONNECTOR_eDP { "eDP" } else { "DP" })
-        .s(" connector on [ENCODER:").s(o.encoders[enc].name()).s("]").say();
+        .s(" connector on [ENCODER:").s(o.encoders[enc].name()).s("]").dbg();
 
     // intel_connector_attach_encoder; DisplayPort connectors poll on HPD.
     let polled = if type_ != DRM_MODE_CONNECTOR_eDP { DRM_CONNECTOR_POLL_HPD } else { 0 };

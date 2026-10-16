@@ -69,18 +69,18 @@ fn intel_hdmi_ddc_pin(o: &intel_outputs, vbt: &intel_bios::intel_bios_display, e
     }
 
     if !intel_bios::intel_gmbus_is_valid_pin(vbt, ddc_pin as u32) {
-        Line::new().s("[ENCODER:").s(e.name()).s("] Invalid DDC pin ").dec(ddc_pin as u64).say();
+        Line::new().s("[ENCODER:").s(e.name()).s("] Invalid DDC pin ").dec(ddc_pin as u64).dbg();
         return 0;
     }
 
     if let Some(other) = get_encoder_by_ddc_pin(o, encoder, ddc_pin) {
         Line::new().s("[ENCODER:").s(e.name()).s("] DDC pin ").dec(ddc_pin as u64)
-            .s(" already claimed by [ENCODER:").s(o.encoders[other].name()).s("]").say();
+            .s(" already claimed by [ENCODER:").s(o.encoders[other].name()).s("]").dbg();
         return 0;
     }
 
     Line::new().s("[ENCODER:").s(e.name()).s("] Using DDC pin ").hex(ddc_pin as u32)
-        .s(" (").s(source).s(")").say();
+        .s(" (").s(source).s(")").dbg();
     ddc_pin
 }
 
@@ -88,11 +88,11 @@ fn intel_hdmi_ddc_pin(o: &intel_outputs, vbt: &intel_bios::intel_bios_display, e
 pub fn intel_hdmi_init_connector(o: &mut intel_outputs, vbt: &intel_bios::intel_bios_display, d: usize) -> bool {
     let enc = o.dig_ports[d].encoder;
 
-    Line::new().s("Adding HDMI connector on [ENCODER:").s(o.encoders[enc].name()).s("]").say();
+    Line::new().s("Adding HDMI connector on [ENCODER:").s(o.encoders[enc].name()).s("]").dbg();
 
     if o.dig_ports[d].max_lanes < 4 {
         Line::new().s("Not enough lanes (").dec(o.dig_ports[d].max_lanes as u64).s(") for HDMI on [ENCODER:")
-            .s(o.encoders[enc].name()).s("]").say();
+            .s(o.encoders[enc].name()).s("]").dbg();
         return false;
     }
 

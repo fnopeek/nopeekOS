@@ -144,7 +144,7 @@ fn intel_ddi_init(i915: &mut drm_i915_private, o: &mut intel_outputs, vbt: &inte
     let pname = core::str::from_utf8(&pn).unwrap_or("?");
 
     if !port_strap_detected(port) {
-        Line::new().s("Port ").s(pname).s(" strap not detected").say();
+        Line::new().s("Port ").s(pname).s(" strap not detected").dbg();
         return;
     }
 
@@ -153,7 +153,7 @@ fn intel_ddi_init(i915: &mut drm_i915_private, o: &mut intel_outputs, vbt: &inte
     }
 
     if port_in_use(o, port) {
-        Line::new().s("Port ").s(pname).s(" already claimed").say();
+        Line::new().s("Port ").s(pname).s(" already claimed").dbg();
         return;
     }
 
@@ -167,7 +167,7 @@ fn intel_ddi_init(i915: &mut drm_i915_private, o: &mut intel_outputs, vbt: &inte
 
     // HTI (HDPORT) may have taken PHYs over at boot.
     if intel_hti_uses_phy(hti_state, phy) {
-        Line::new().s("PORT ").s(pname).s(" reserved by HTI").say();
+        Line::new().s("PORT ").s(pname).s(" reserved by HTI").dbg();
         return;
     }
 
@@ -179,11 +179,11 @@ fn intel_ddi_init(i915: &mut drm_i915_private, o: &mut intel_outputs, vbt: &inte
         // An LSPCON is driven as DP with its own detection sequence.
         init_dp = true;
         init_hdmi = false;
-        Line::new().s("VBT says port ").s(pname).s(" has lspcon").say();
+        Line::new().s("VBT says port ").s(pname).s(" has lspcon").dbg();
     }
 
     if !init_dp && !init_hdmi {
-        Line::new().s("VBT says port ").s(pname).s(" is not DVI/HDMI/DP compatible, respect it").say();
+        Line::new().s("VBT says port ").s(pname).s(" is not DVI/HDMI/DP compatible, respect it").dbg();
         return;
     }
 
@@ -243,7 +243,7 @@ fn intel_ddi_init(i915: &mut drm_i915_private, o: &mut intel_outputs, vbt: &inte
             is_legacy = !init_dp;
             Line::new().s("VBT says port ").s(pname).s(" is non-legacy TC and has HDMI (with DP: ")
                 .s(if init_dp { "yes" } else { "no" }).s("), assume it's ")
-                .s(if is_legacy { "legacy" } else { "non-legacy" }).say();
+                .s(if is_legacy { "legacy" } else { "non-legacy" }).dbg();
         }
 
         if intel_tc::intel_tc_port_init(i915, o, d, is_legacy).is_err() {
@@ -406,18 +406,18 @@ pub fn intel_ddi_get_encoder_pipes(i915: &mut drm_i915_private, o: &intel_output
         }
 
         if pipe_mask == 0 {
-            Line::new().s("No pipe for [ENCODER:").s(e.name()).s("] found").say();
+            Line::new().s("No pipe for [ENCODER:").s(e.name()).s("] found").dbg();
         }
 
         if mst_pipe_mask == 0 && pipe_mask.count_ones() > 1 {
             Line::new().s("Multiple pipes for [ENCODER:").s(e.name()).s("] (pipe_mask ").hex(pipe_mask as u32)
-                .s(")").say();
+                .s(")").dbg();
             pipe_mask = 1 << pipe_mask.trailing_zeros();
         }
 
         if mst_pipe_mask != 0 && mst_pipe_mask != pipe_mask {
             Line::new().s("Conflicting MST and non-MST state for [ENCODER:").s(e.name()).s("] (pipe masks: all ")
-                .hex(pipe_mask as u32).s(", MST ").hex(mst_pipe_mask as u32).s(", 128b/132b 0)").say();
+                .hex(pipe_mask as u32).s(", MST ").hex(mst_pipe_mask as u32).s(", 128b/132b 0)").dbg();
         } else {
             is_dp_mst = mst_pipe_mask != 0;
         }
@@ -635,7 +635,7 @@ pub fn intel_ddi_sanitize_encoder_pll_mapping(i915: &mut drm_i915_private, o: &i
         return;
     }
 
-    Line::new().s("[ENCODER:").s(e.name()).s("] is disabled/in DSI mode with an ungated DDI clock, gate it").say();
+    Line::new().s("[ENCODER:").s(e.name()).s("] is disabled/in DSI mode with an ungated DDI clock, gate it").dbg();
     intel_ddi_disable_clock(i915, &e);
 }
 
@@ -968,13 +968,13 @@ fn intel_ddi_get_config(i915: &mut drm_i915_private, e: &intel_encoder, pipe: u3
         & !intel_hdmi::intel_hdmi_infoframe_enable(HDMI_PACKET_TYPE_GENERAL_CONTROL);
     if payloads != 0 {
         Line::new().s("[ENCODER:").s(e.name()).s("] infoframe/SDP payloads ").hex(payloads)
-            .s(" not read back").say();
+            .s(" not read back").dbg();
     }
 
     bdw_get_trans_port_sync_config(i915, crtc_state);
 
     if crtc_state.has_audio {
-        Line::new().s("[ENCODER:").s(e.name()).s("] audio on, codec config not read back").say();
+        Line::new().s("[ENCODER:").s(e.name()).s("] audio on, codec config not read back").dbg();
     }
 }
 
@@ -999,7 +999,7 @@ pub fn intel_encoder_get_config(i915: &mut drm_i915_private, encoder: usize, c: 
             icl_ddi_tc_get_clock(i915, &vbt, &e, &mut cs, pll);
         }
         ddi_clock_ops::none => {
-            Line::new().s("[ENCODER:").s(e.name()).s("] has no get_config").say();
+            Line::new().s("[ENCODER:").s(e.name()).s("] has no get_config").dbg();
             return;
         }
     }

@@ -8,7 +8,7 @@
 //! the log. Struct layouts, bit-fields and enum values are GCC's (regs.rs).
 
 use crate::intel_opregion;
-use crate::linux::{drm_err, say, Line};
+use crate::linux::{dbg, drm_err, say, Line};
 use crate::regs::*;
 use crate::tables;
 use npk_sys::cell::Single;
@@ -456,7 +456,7 @@ fn generate_lfp_data_ptrs(version: u32, bdb: &[u8]) -> Option<[u8; 3 + LFP_PTRS_
 
     let block = find_raw_section(bdb, BDB_LFP_DATA)?;
 
-    say("Generating LFP data table pointers");
+    dbg("Generating LFP data table pointers");
 
     let block_size = get_blocksize(bdb, block) as i32;
 
@@ -584,7 +584,7 @@ fn init_bdb_blocks(version: u32, bdb: &[u8]) {
         for e in &a.blocks[..a.n] {
             l.s(" ").dec(e.section_id as u64).s("/").dec((e.len - 3) as u64);
         }
-        l.say();
+        l.dbg();
     });
 }
 
@@ -642,13 +642,13 @@ fn parse_general_features(display: &mut intel_bios_display) {
         .s(" lvds_use_ssc ").dec(v.lvds_use_ssc as u64)
         .s(" lvds_ssc_freq ").dec(v.lvds_ssc_freq as u64)
         .s(" display_clock_mode ").dec(v.display_clock_mode as u64)
-        .s(" fdi_rx_polarity_inverted ").dec(v.fdi_rx_polarity_inverted as u64).say();
+        .s(" fdi_rx_polarity_inverted ").dec(v.fdi_rx_polarity_inverted as u64).dbg();
 }
 
 /// `parse_sdvo_device_mapping`: SDVO exists on display versions 3 to 7 only.
 fn parse_sdvo_device_mapping(display: &intel_bios_display) {
     if !(3..=7).contains(&display.ver) {
-        say("Skipping SDVO device mapping");
+        dbg("Skipping SDVO device mapping");
         return;
     }
     drm_err("SDVO device mapping is not ported");
@@ -679,11 +679,11 @@ fn parse_compression_parameters(display: &mut intel_bios_display) {
     if let Some((p, block_size)) = &params {
         // Sanity checks
         if rd16(p, BDB_COMPRESSION_PARAMETERS_ENTRY_SIZE as usize) != DSC_SIZE as u32 {
-            say("VBT: unsupported compression param entry size");
+            dbg("VBT: unsupported compression param entry size");
             return;
         }
         if (*block_size as u16 as usize) < SIZE {
-            say("VBT: expected 16 compression param entries");
+            dbg("VBT: expected 16 compression param entries");
             return;
         }
     }
@@ -693,11 +693,11 @@ fn parse_compression_parameters(display: &mut intel_bios_display) {
             continue;
         }
         let Some((p, _)) = &params else {
-            say("VBT: compression params not available");
+            dbg("VBT: compression params not available");
             continue;
         };
         if child(devdata, CHILD_COMPRESSION_METHOD_CPS) != 0 {
-            say("VBT: CPS compression not supported");
+            dbg("VBT: CPS compression not supported");
             continue;
         }
 
@@ -714,7 +714,7 @@ fn translate_iboost(val: u32) -> u32 {
     let mapping = [IBOOST_0, IBOOST_1, IBOOST_2];
     if val as usize >= mapping.len() {
         Line::new().s("Unsupported I_boost value found in VBT (").dec(val as u64)
-            .s("), display may not work properly").say();
+            .s("), display may not work properly").dbg();
         return 0;
     }
     mapping[val as usize]
@@ -730,7 +730,7 @@ fn map_ddc_pin(_display: &intel_bios_display, vbt_pin: u32) -> u32 {
         }
     }
     Line::new().s("Ignoring alternate pin: VBT claims DDC pin ").dec(vbt_pin as u64)
-        .s(", which is not valid for this platform").say();
+        .s(", which is not valid for this platform").dbg();
     0
 }
 
@@ -859,7 +859,7 @@ fn sanitize_device_type(display: &intel_bios_display, devdata: &mut intel_bios_e
     }
     let is_hdmi = intel_bios_encoder_supports_hdmi(devdata);
     Line::new().s("VBT claims port A supports DVI").s(if is_hdmi { "/HDMI" } else { "" })
-        .s(", ignoring").say();
+        .s(", ignoring").dbg();
 
     let t = child(devdata, CHILD_DEVICE_TYPE);
     let t = (t & !DEVICE_TYPE_TMDS_DVI_SIGNALING) | DEVICE_TYPE_NOT_HDMI_OUTPUT;
@@ -961,7 +961,7 @@ fn map_aux_ch(_display: &intel_bios_display, aux_channel: u32) -> i32 {
         }
     }
     Line::new().s("Ignoring alternate AUX CH: VBT claims AUX ").hex(aux_channel)
-        .s(", which is not valid for this platform").say();
+        .s(", which is not valid for this platform").dbg();
     AUX_CH_NONE
 }
 
@@ -1044,7 +1044,7 @@ fn print_ddi_port(display: &intel_bios_display, devdata: &intel_bios_encoder_dat
         .s(" LSPCON:").dec(b(intel_bios_encoder_is_lspcon(display, devdata)))
         .s(" USB-Type-C:").dec(b(intel_bios_encoder_supports_typec_usb(display, devdata)))
         .s(" TBT:").dec(b(intel_bios_encoder_supports_tbt(display, devdata)))
-        .s(" DSC:").dec(b(devdata.dsc.is_some())).say();
+        .s(" DSC:").dec(b(devdata.dsc.is_some())).dbg();
 
     let mut l = Line::new();
     l.s("Port ").s(p).s(" VBT AUX CH ");
@@ -1054,33 +1054,33 @@ fn print_ddi_port(display: &intel_bios_display, devdata: &intel_bios_encoder_dat
     } else {
         aux_ch_name(&mut l, aux_ch);
     }
-    l.s(", DDC pin ").dec(intel_bios_hdmi_ddc_pin(display, devdata) as u64).say();
+    l.s(", DDC pin ").dec(intel_bios_hdmi_ddc_pin(display, devdata) as u64).dbg();
 
     let hdmi_level_shift = intel_bios_hdmi_level_shift(display, devdata);
     if hdmi_level_shift >= 0 {
-        Line::new().s("Port ").s(p).s(" VBT HDMI level shift: ").dec(hdmi_level_shift as u64).say();
+        Line::new().s("Port ").s(p).s(" VBT HDMI level shift: ").dec(hdmi_level_shift as u64).dbg();
     }
 
     let max_tmds_clock = intel_bios_hdmi_max_tmds_clock(display, devdata);
     if max_tmds_clock != 0 {
         Line::new().s("Port ").s(p).s(" VBT HDMI max TMDS clock: ").dec(max_tmds_clock as u64)
-            .s(" kHz").say();
+            .s(" kHz").dbg();
     }
 
     // I_boost config for SKL and above
     let dp_boost_level = intel_bios_dp_boost_level(display, devdata);
     if dp_boost_level != 0 {
-        Line::new().s("Port ").s(p).s(" VBT (e)DP boost level: ").dec(dp_boost_level as u64).say();
+        Line::new().s("Port ").s(p).s(" VBT (e)DP boost level: ").dec(dp_boost_level as u64).dbg();
     }
 
     let hdmi_boost_level = intel_bios_hdmi_boost_level(display, devdata);
     if hdmi_boost_level != 0 {
-        Line::new().s("Port ").s(p).s(" VBT HDMI boost level: ").dec(hdmi_boost_level as u64).say();
+        Line::new().s("Port ").s(p).s(" VBT HDMI boost level: ").dec(hdmi_boost_level as u64).dbg();
     }
 
     let dp_max_link_rate = intel_bios_dp_max_link_rate(display, devdata);
     if dp_max_link_rate != 0 {
-        Line::new().s("Port ").s(p).s(" VBT DP max link rate: ").dec(dp_max_link_rate as u64).say();
+        Line::new().s("Port ").s(p).s(" VBT DP max link rate: ").dec(dp_max_link_rate as u64).dbg();
     }
 
     // VBT vswing/preemph tables are not implemented, in Linux either.
@@ -1148,7 +1148,7 @@ fn child_device_size_valid(display: &intel_bios_display, size: i32) -> bool {
     if expected_size < 0 {
         expected_size = CHILD_SIZE as i32;
         Line::new().s("Expected child device config size for VBT version ").dec(display.vbt.version as u64)
-            .s(" not known; assuming ").dec(expected_size as u64).say();
+            .s(" not known; assuming ").dec(expected_size as u64).dbg();
     }
 
     // Flag an error for unexpected size, but continue anyway.
@@ -1160,7 +1160,7 @@ fn child_device_size_valid(display: &intel_bios_display, size: i32) -> bool {
 
     // The legacy sized child device config is the minimum we need.
     if size < LEGACY_CHILD_DEVICE_CONFIG_SIZE as i32 {
-        Line::new().s("Child device config size ").dec(size as u64).s(" is too small.").say();
+        Line::new().s("Child device config size ").dec(size as u64).s(" is too small.").dbg();
         return false;
     }
 
@@ -1178,19 +1178,19 @@ pub fn intel_gmbus_is_valid_pin(_display: &intel_bios_display, pin: u32) -> bool
 fn parse_general_definitions(display: &mut intel_bios_display) {
     BDB.with(|a| {
         let Some(defs) = bdb_find_section(a, BDB_GENERAL_DEFINITIONS) else {
-            say("No general definition block is found, no devices defined.");
+            dbg("No general definition block is found, no devices defined.");
             return;
         };
         let d = &a.data;
 
         let block_size = get_blocksize(d, defs) as u16 as usize;
         if block_size < BDB_GENERAL_DEFINITIONS_SIZE as usize {
-            Line::new().s("General definitions block too small (").dec(block_size as u64).s(")").say();
+            Line::new().s("General definitions block too small (").dec(block_size as u64).s(")").dbg();
             return;
         }
 
         let bus_pin = rd8(d, defs + BDB_GENERAL_DEFINITIONS_CRT_DDC_GMBUS_PIN as usize);
-        Line::new().s("crt_ddc_bus_pin: ").dec(bus_pin as u64).say();
+        Line::new().s("crt_ddc_bus_pin: ").dec(bus_pin as u64).dbg();
         if intel_gmbus_is_valid_pin(display, bus_pin) {
             display.vbt.crt_ddc_pin = bus_pin;
         }
@@ -1210,7 +1210,7 @@ fn parse_general_definitions(display: &mut intel_bios_display) {
                 continue;
             }
 
-            Line::new().s("Found VBT child device with type ").hex(device_type).say();
+            Line::new().s("Found VBT child device with type ").hex(device_type).dbg();
 
             // Copy as much as we know and is available; reads depend on the version.
             let mut devdata = intel_bios_encoder_data::new();
@@ -1223,7 +1223,7 @@ fn parse_general_definitions(display: &mut intel_bios_display) {
         }
 
         if display.vbt.n_display_devices == 0 {
-            say("no child dev is parsed from VBT");
+            dbg("no child dev is parsed from VBT");
         }
     });
 }
@@ -1243,7 +1243,7 @@ fn init_vbt_defaults(display: &mut intel_bios_display) {
     display.vbt.lvds_use_ssc = 1;
     // Core/SandyBridge/IvyBridge use alternative (120MHz) reference clock for LVDS.
     display.vbt.lvds_ssc_freq = intel_bios_ssc_frequency(display, !HAS_PCH_SPLIT(display));
-    Line::new().s("Set default to SSC at ").dec(display.vbt.lvds_ssc_freq as u64).s(" kHz").say();
+    Line::new().s("Set default to SSC at ").dec(display.vbt.lvds_ssc_freq as u64).s(" kHz").dbg();
 }
 
 /// `intel_port_to_phy` of intel_display.c: display version 12, not ADL-S,
@@ -1306,7 +1306,7 @@ fn init_vbt_missing_defaults(display: &mut intel_bios_display) {
         }
 
         Line::new().s("Generating default VBT child device with type ").hex(device_type)
-            .s(" on port ").s(chr(&port_name(port as i32))).say();
+            .s(" on port ").s(chr(&port_name(port as i32))).dbg();
     }
 
     // Bypass some minimum baseline VBT version checks
@@ -1319,7 +1319,7 @@ fn init_vbt_missing_defaults(display: &mut intel_bios_display) {
 fn intel_bios_get_vbt(opregion: Option<&intel_opregion::intel_opregion>) -> Option<usize> {
     let len = opregion.map_or(0, |op| op.vbt_len);
     if len == 0 {
-        say("VBT in the PCI ROM is not reachable from a module");
+        dbg("VBT in the PCI ROM is not reachable from a module");
         return None;
     }
     Some(len)
@@ -1349,7 +1349,7 @@ pub fn intel_bios_init(display: &mut intel_bios_display, opregion: Option<&intel
             let sig = &vbt[..VBT_HEADER_SIGNATURE_SIZE as usize];
             let sig_len = sig.iter().position(|&c| c == 0).unwrap_or(sig.len());
             Line::new().s("VBT signature \"").s(core::str::from_utf8(&sig[..sig_len]).unwrap_or("?"))
-                .s("\", BDB version ").dec(display.vbt.version as u64).say();
+                .s("\", BDB version ").dec(display.vbt.version as u64).dbg();
 
             init_bdb_blocks(display.vbt.version, bdb);
         });

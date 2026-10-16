@@ -220,7 +220,7 @@ fn get_allowed_dc_mask(i915: &drm_i915_private, params: &intel_display_params, e
     } else if enable_dc > max_dc && enable_dc <= 4 {
         max_dc
     } else {
-        Line::new().s("Unexpected value for enable_dc (").dec(enable_dc as u64).s(")").say();
+        Line::new().s("Unexpected value for enable_dc (").dec(enable_dc as u64).s(")").dbg();
         max_dc
     };
 
@@ -497,7 +497,7 @@ pub fn intel_power_domains_sanitize_state(i915: &mut drm_i915_private) {
         if inst(&pw).always_on != 0 || pw.count != 0 || !intel_power_well_is_enabled(i915, w) {
             continue;
         }
-        Line::new().s("BIOS left unused ").s(name(&pw)).s(" power well enabled, disabling it").say();
+        Line::new().s("BIOS left unused ").s(name(&pw)).s(" power well enabled, disabling it").dbg();
         intel_power_well_disable(i915, w);
     }
 }
@@ -571,7 +571,7 @@ fn gen9_dbuf_slice_set(i915: &mut drm_i915_private, slice: u32, enable: bool) {
     let state = intel_de_read(i915, reg) & DBUF_POWER_STATE != 0;
     if enable != state {
         Line::new().s("DBuf slice ").dec(slice as u64).s(" power ")
-            .s(if enable { "enable" } else { "disable" }).s(" timeout!").say();
+            .s(if enable { "enable" } else { "disable" }).s(" timeout!").dbg();
     }
 }
 
@@ -585,7 +585,7 @@ pub fn gen9_dbuf_slices_update(i915: &mut drm_i915_private, req_slices: u8) {
     let slice_mask = TGL_DISPLAY_DBUF_SLICE_MASK as u8;
     if req_slices & !slice_mask != 0 {
         Line::new().s("Invalid set of dbuf slices (").hex(req_slices as u32)
-            .s(") requested (total dbuf slices ").hex(slice_mask as u32).s(")").say();
+            .s(") requested (total dbuf slices ").hex(slice_mask as u32).s(")").dbg();
     }
     for slice in dbuf_slices() {
         gen9_dbuf_slice_set(i915, slice, req_slices as u32 & (1 << slice) != 0);
@@ -881,7 +881,7 @@ fn hsw_wait_for_power_well_enable(i915: &mut drm_i915_private, w: usize, timeout
 
     // Timeout for PW1:10 us, AUX:not specified, other PWs:20 us.
     if intel_de_wait_for_set(i915, regs.driver, HSW_PWR_WELL_CTL_STATE(i.hsw_idx), timeout).is_err() {
-        Line::new().s(name(&pw)).s(" power well enable timeout").say();
+        Line::new().s(name(&pw)).s(" power well enable timeout").dbg();
         if !timeout_expected {
             linux::say("warning: power well enable timed out");
         }
@@ -1038,7 +1038,7 @@ fn gen9_write_dc_state(i915: &mut drm_i915_private, state: u32) {
         Line::new().s("Writing dc state to ").hex(state).s(" failed, now ").hex(v).say();
     }
     if rewrites > 1 {
-        Line::new().s("Rewrote dc state to ").hex(state).s(" ").dec(rewrites as u64).s(" times").say();
+        Line::new().s("Rewrote dc state to ").hex(state).s(" ").dec(rewrites as u64).s(" times").dbg();
     }
 }
 
@@ -1073,11 +1073,11 @@ pub fn gen9_set_dc_state(i915: &mut drm_i915_private, mut state: u32) {
 
     let mut val = intel_de_read(i915, DC_STATE_EN);
     let mask = gen9_dc_mask();
-    Line::new().s("Setting DC state from ").hex(val & mask).s(" to ").hex(state).say();
+    Line::new().s("Setting DC state from ").hex(val & mask).s(" to ").hex(state).dbg();
 
     // Check if DMC is ignoring our DC state requests
     if val & mask != pd.dc_state {
-        Line::new().s("DC state mismatch (").hex(pd.dc_state).s(" -> ").hex(val & mask).s(")").say();
+        Line::new().s("DC state mismatch (").hex(pd.dc_state).s(" -> ").hex(val & mask).s(")").dbg();
     }
 
     val &= !mask;
@@ -1108,7 +1108,7 @@ fn gen9_assert_dbuf_enabled(i915: &mut drm_i915_private) {
     let enabled_dbuf_slices = i915.display.dbuf_enabled_slices;
     if hw_enabled_dbuf_slices != enabled_dbuf_slices {
         Line::new().s("Unexpected DBuf power power state (").hex(hw_enabled_dbuf_slices as u32)
-            .s(", expected ").hex(enabled_dbuf_slices as u32).s(")").say();
+            .s(", expected ").hex(enabled_dbuf_slices as u32).s(")").dbg();
     }
 }
 

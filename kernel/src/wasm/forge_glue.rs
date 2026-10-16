@@ -740,6 +740,14 @@ host_imports! {
     // npk_audio_poll_mix(ptr, max) -> bytes written (driver side).
     mem fn npk_audio_poll_mix(ptr: i32, max: i32) -> i32;
 
+    // npk_display_audio_set(port, ptr, len) -> 0 (display driver);
+    // npk_display_audio_get(port, ptr, max) -> ELD length (audio driver);
+    // npk_display_audio_generation() -> count of reports. Gated by
+    // HARDWARE and the class of the PCI device the caller owns.
+    mem fn npk_display_audio_set(port: i32, ptr: i32, len: i32) -> i32;
+    mem fn npk_display_audio_get(port: i32, ptr: i32, max: i32) -> i32;
+    ctx fn npk_display_audio_generation() -> i32;
+
     // npk_audio_set_volume(pct) -> 0; npk_audio_get_volume() -> 0..=100.
     ctx fn npk_audio_set_volume(pct: i32) -> i32;
     ctx fn npk_audio_get_volume() -> i32;

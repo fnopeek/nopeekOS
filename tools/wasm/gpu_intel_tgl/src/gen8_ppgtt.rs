@@ -588,7 +588,7 @@ impl i915_ppgtt {
         for lvl in (0..=TOP).rev() {
             let idx = gen8_pd_index(pfn, lvl);
             let Some(d) = table.obj.map() else {
-                l.s(" | L").dec(lvl as u64).s(" unmapped").say();
+                l.s(" | L").dec(lvl as u64).s(" unmapped").dbg();
                 return;
             };
             let mut raw = [0u8; 8];
@@ -609,11 +609,11 @@ impl i915_ppgtt {
                     table = next;
                 }
                 None => {
-                    l.s(" (no table)").say();
+                    l.s(" (no table)").dbg();
                     return;
                 }
             }
         }
-        l.say();
+        l.dbg();
     }
 }

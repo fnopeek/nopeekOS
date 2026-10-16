@@ -124,13 +124,13 @@ fn icl_get_qgv_points(i915: &mut drm_i915_private, qi: &mut intel_qgv_info, is_y
         qi.points[i] = sp;
         Line::new().s("QGV ").dec(i as u64).s(": DCLK=").dec(sp.dclk as u64).s(" tRP=").dec(sp.t_rp as u64)
             .s(" tRDPRE=").dec(sp.t_rdpre as u64).s(" tRAS=").dec(sp.t_ras as u64)
-            .s(" tRCD=").dec(sp.t_rcd as u64).s(" tRC=").dec(sp.t_rc as u64).say();
+            .s(" tRCD=").dec(sp.t_rcd as u64).s(" tRC=").dec(sp.t_rc as u64).dbg();
     }
 
     if qi.num_psf_points > 0 {
         // adls_pcode_read_psf_gv_point_info is not ported; PCH TGP reports
         // no PSF points.
-        Line::new().s("Failed to read PSF point data; PSF points will not be considered in bandwidth calculations.").say();
+        Line::new().s("Failed to read PSF point data; PSF points will not be considered in bandwidth calculations.").dbg();
         qi.num_psf_points = 0;
     }
     Ok(())
@@ -175,7 +175,7 @@ fn tgl_get_bw_info(i915: &mut drm_i915_private) -> Result<(), i32> {
         qi.deinterleave = div_round_up(qi.deinterleave as i64, 2).max(1) as u8;
     }
     if num_channels > qi.max_numchannels as i64 {
-        Line::new().s("Number of channels exceeds max number of channels.").say();
+        Line::new().s("Number of channels exceeds max number of channels.").dbg();
     }
     if qi.max_numchannels != 0 {
         num_channels = (num_channels as u8).min(qi.max_numchannels) as i64;
@@ -216,7 +216,7 @@ fn tgl_get_bw_info(i915: &mut drm_i915_private) -> Result<(), i32> {
 
             Line::new().s("BW").dec(i as u64).s(" / QGV ").dec(j as u64).s(": num_planes=")
                 .dec(bi.num_planes as u64).s(" deratedbw=").dec(bi.deratedbw[j] as u64)
-                .s(" peakbw: ").dec(bi.peakbw[j] as u64).say();
+                .s(" peakbw: ").dec(bi.peakbw[j] as u64).dbg();
         }
 
         for j in 0..qi.num_psf_points as usize {

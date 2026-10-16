@@ -1285,7 +1285,10 @@ fn core0_wait() {
         || crate::keyboard::needs_poll()
         || !crate::shade::is_active()
         || crate::microvm::vm_active();
-    let d = crate::interrupts::rdtsc() + if busy { freq / 100 } else { freq };
+    let mut d = crate::interrupts::rdtsc() + if busy { freq / 100 } else { freq };
+    if let Some(due) = crate::shade::surface_due_tsc() {
+        d = d.min(due);
+    }
     if crate::smp::fiber::wait(crate::smp::fiber::SIG_EVENT, d).is_none() {
         // Not in a fiber (never after boot): halt to the same deadline.
         crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);

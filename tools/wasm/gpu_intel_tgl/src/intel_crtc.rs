@@ -72,7 +72,7 @@ pub fn intel_modeset_readout_crtcs(i915: &mut drm_i915_private) {
         let state = &mut i915.display.crtcs[c].state;
         state.hw.enable = state.hw.active;
         Line::new().s("pipe ").dec(c as u64).s(": hw state readout: ")
-            .s(if state.hw.active { "enabled" } else { "disabled" }).say();
+            .s(if state.hw.active { "enabled" } else { "disabled" }).dbg();
     }
 
     readout_plane_state(i915);
@@ -124,7 +124,7 @@ pub fn readout_plane_state(i915: &mut drm_i915_private) {
         let plane = i915.display.planes[p];
         if visible {
             Line::new().s("plane ").dec(plane.id as u64 + 1).s(" pipe ").dec(pipe as u64)
-                .s(": hw state readout: enabled").say();
+                .s(": hw state readout: enabled").dbg();
         }
     }
 

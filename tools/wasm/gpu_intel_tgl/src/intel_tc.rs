@@ -271,7 +271,7 @@ fn tc_port_fixup_legacy_flag(o: &mut intel_outputs, d: usize, live_status_mask: 
     // If live status mismatches the VBT flag, trust the live status.
     let mut l = Line::new();
     port_name_line(&mut l, o, d).s(": live status ").hex(live_status_mask)
-        .s(" mismatches the legacy port flag ").hex(valid_hpd_mask).s(", fixing flag").say();
+        .s(" mismatches the legacy port flag ").hex(valid_hpd_mask).s(", fixing flag").dbg();
     let t = tc(o, d);
     t.legacy_port = !t.legacy_port;
 }
@@ -305,7 +305,7 @@ fn icl_tc_phy_hpd_live_status(i915: &mut drm_i915_private, o: &mut intel_outputs
 
     if fia_isr == 0xffffffff {
         let mut l = Line::new();
-        port_name_line(&mut l, o, d).s(": PHY in TCCOLD, nothing connected").say();
+        port_name_line(&mut l, o, d).s(": PHY in TCCOLD, nothing connected").dbg();
         return mask;
     }
 
@@ -330,7 +330,7 @@ fn icl_tc_phy_is_ready(i915: &mut drm_i915_private, o: &mut intel_outputs, d: us
     let val = intel_de_read(i915, dflexdppms(fia));
     if val == 0xffffffff {
         let mut l = Line::new();
-        port_name_line(&mut l, o, d).s(": PHY in TCCOLD, assuming not ready").say();
+        port_name_line(&mut l, o, d).s(": PHY in TCCOLD, assuming not ready").dbg();
         return false;
     }
     val & DP_PHY_MODE_STATUS_COMPLETED(idx) != 0
@@ -345,7 +345,7 @@ fn icl_tc_phy_take_ownership(i915: &mut drm_i915_private, o: &mut intel_outputs,
     if val == 0xffffffff {
         let mut l = Line::new();
         port_name_line(&mut l, o, d).s(": PHY in TCCOLD, can't ")
-            .s(if take { "take" } else { "release" }).s(" ownership").say();
+            .s(if take { "take" } else { "release" }).s(" ownership").dbg();
         return false;
     }
 
@@ -365,7 +365,7 @@ fn icl_tc_phy_is_owned(i915: &mut drm_i915_private, o: &mut intel_outputs, d: us
     let val = intel_de_read(i915, dflexdpcsss(fia));
     if val == 0xffffffff {
         let mut l = Line::new();
-        port_name_line(&mut l, o, d).s(": PHY in TCCOLD, assume not owned").say();
+        port_name_line(&mut l, o, d).s(": PHY in TCCOLD, assume not owned").dbg();
         return false;
     }
     val & DP_PHY_MODE_STATUS_NOT_SAFE(idx) != 0
@@ -404,14 +404,14 @@ fn tc_phy_verify_legacy_or_dp_alt_mode(i915: &mut drm_i915_private, o: &mut inte
     // second look.
     if tc_phy_hpd_live_status(i915, o, d) & (1 << TC_PORT_DP_ALT) == 0 {
         let mut l = Line::new();
-        port_name_line(&mut l, o, d).s(": PHY sudden disconnect").say();
+        port_name_line(&mut l, o, d).s(": PHY sudden disconnect").dbg();
         return false;
     }
 
     if max_lanes < required_lanes {
         let mut l = Line::new();
         port_name_line(&mut l, o, d).s(": PHY max lanes ").dec(max_lanes as u64)
-            .s(" < required lanes ").dec(required_lanes as u64).say();
+            .s(" < required lanes ").dec(required_lanes as u64).dbg();
         return false;
     }
     true
@@ -435,7 +435,7 @@ fn icl_tc_phy_connect(i915: &mut drm_i915_private, o: &mut intel_outputs, d: usi
             let ready = icl_tc_phy_is_ready(i915, o, d);
             let mut l = Line::new();
             port_name_line(&mut l, o, d).s(": can't take PHY ownership (ready ")
-                .s(if ready { "yes" } else { "no" }).s(")").say();
+                .s(if ready { "yes" } else { "no" }).s(")").dbg();
             let w = core::mem::take(&mut tc(o, d).lock_wakeref);
             tc_cold_unblock(i915, w);
             return false;
@@ -530,7 +530,7 @@ pub fn tc_phy_is_connected(i915: &mut drm_i915_private, o: &mut intel_outputs, d
     let mut l = Line::new();
     port_name_line(&mut l, o, d).s(": PHY connected: ").s(yn(is_connected)).s(" (ready: ")
         .s(yn(phy_is_ready)).s(", owned: ").s(yn(phy_is_owned)).s(", pll_type: ")
-        .s(if port_pll_type == ICL_PORT_DPLL_DEFAULT { "tbt" } else { "non-tbt" }).s(")").say();
+        .s(if port_pll_type == ICL_PORT_DPLL_DEFAULT { "tbt" } else { "non-tbt" }).s(")").dbg();
     is_connected
 }
 
@@ -539,7 +539,7 @@ fn tc_phy_wait_for_ready(i915: &mut drm_i915_private, o: &mut intel_outputs, d: 
     let ret = linux::_wait_for(500 * 1000, 1000, 1000, || tc_phy_is_ready(i915, o, d));
     if ret.is_err() {
         let mut l = Line::new();
-        port_name_line(&mut l, o, d).s(": timeout waiting for PHY ready").say();
+        port_name_line(&mut l, o, d).s(": timeout waiting for PHY ready").dbg();
         return false;
     }
     true
@@ -612,7 +612,7 @@ fn tc_phy_get_current_mode(i915: &mut drm_i915_private, o: &mut intel_outputs, d
     let mut l = Line::new();
     port_name_line(&mut l, o, d).s(": PHY mode: ").s(tc_port_mode_name(mode)).s(" (ready: ")
         .s(yn(phy_is_ready)).s(", owned: ").s(yn(phy_is_owned)).s(", HPD: ")
-        .s(tc_port_mode_name(live_mode)).s(")").say();
+        .s(tc_port_mode_name(live_mode)).s(")").dbg();
     mode
 }
 
@@ -683,7 +683,7 @@ fn intel_tc_port_reset_mode(i915: &mut drm_i915_private, o: &mut intel_outputs, 
         let aux_domain = intel_aux_power_domain(o, d);
         if intel_display_power_is_enabled(i915, aux_domain) {
             let mut l = Line::new();
-            port_name_line(&mut l, o, d).s(": AUX unexpectedly powered").say();
+            port_name_line(&mut l, o, d).s(": AUX unexpectedly powered").dbg();
         }
     }
 
@@ -697,7 +697,7 @@ fn intel_tc_port_reset_mode(i915: &mut drm_i915_private, o: &mut intel_outputs, 
     let mut l = Line::new();
     port_name_line(&mut l, o, d).s(": TC port mode reset (").s(tc_port_mode_name(old_tc_mode))
         .s(" -> ").s(tc_port_mode_name(t.mode)).s(") pin assignment: ")
-        .s(core::str::from_utf8(&pin).unwrap_or("?")).s(" max lanes: ").dec(t.max_lane_count as u64).say();
+        .s(core::str::from_utf8(&pin).unwrap_or("?")).s(" max lanes: ").dec(t.max_lane_count as u64).dbg();
 }
 
 /// `intel_tc_port_needs_reset`.
@@ -767,7 +767,7 @@ pub fn intel_tc_port_init_mode(i915: &mut drm_i915_private, o: &mut intel_output
             linux::say("warning: non-legacy TC port enabled with the PHY disconnected");
         }
         let mut l = Line::new();
-        port_name_line(&mut l, o, d).s(": PHY disconnected on enabled port, connecting it").say();
+        port_name_line(&mut l, o, d).s(": PHY disconnected on enabled port, connecting it").dbg();
         update_mode = true;
     }
 
@@ -797,7 +797,7 @@ fn tc_port_has_active_streams(i915: &mut drm_i915_private, o: &mut intel_outputs
     if active_streams != 0 && !tc_phy_is_connected(i915, o, d, pll_type) {
         let mut l = Line::new();
         port_name_line(&mut l, o, d).s(": PHY disconnected with ").dec(active_streams as u64)
-            .s(" active stream(s)").say();
+            .s(" active stream(s)").dbg();
     }
     active_streams
 }
@@ -819,7 +819,7 @@ pub fn intel_tc_port_sanitize_mode(i915: &mut drm_i915_private, o: &mut intel_ou
         if init_mode != TC_PORT_TBT_ALT && init_mode != TC_PORT_DISCONNECTED {
             let mut l = Line::new();
             port_name_line(&mut l, o, d).s(": PHY left in ").s(tc_port_mode_name(init_mode))
-                .s(" mode on disabled port, disconnecting it").say();
+                .s(" mode on disabled port, disconnecting it").dbg();
         }
         tc_phy_disconnect(i915, o, d);
         __intel_tc_port_put_link(o, d);
@@ -830,7 +830,7 @@ pub fn intel_tc_port_sanitize_mode(i915: &mut drm_i915_private, o: &mut intel_ou
     let mut l = Line::new();
     port_name_line(&mut l, o, d).s(": sanitize mode (").s(tc_port_mode_name(t.mode))
         .s(") pin assignment: ").s(core::str::from_utf8(&pin).unwrap_or("?"))
-        .s(" max lanes: ").dec(t.max_lane_count as u64).say();
+        .s(" max lanes: ").dec(t.max_lane_count as u64).dbg();
 
     tc(o, d).locked = false;
 }

@@ -2889,6 +2889,52 @@ pub(crate) fn npk_audio_poll_mix(mem: &mut [u8], ctx: &mut HostState, ptr: i32, 
     crate::audio::poll_mix(out) as i32
 }
 
+/// The PCI class (config 0x0B) of the device this driver owns, if it owns
+/// one.
+fn owned_pci_class(ctx: &HostState) -> Option<u8> {
+    let hw = ctx.hw.as_ref().filter(|h| h.is_pci)?;
+    (pci::owner(hw.pci_addr) == Some(pci::Owner::Module(ctx.pid))).then(|| pci::read8(hw.pci_addr, 0x0b))
+}
+
+/// The display driver reports the ELD of `port`'s sink, `len` 0 for none
+/// (`pin_eld_notify` of Linux' audio component). Only the driver of a
+/// display device may.
+pub(crate) fn npk_display_audio_set(mem: &mut [u8], ctx: &mut HostState, port: i32, ptr: i32, len: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err()
+        || owned_pci_class(ctx) != Some(0x03)
+    {
+        return -1;
+    }
+    if port < 0 || ptr < 0 || len < 0 || len as usize > crate::audio::ELD_MAX { return -1; }
+    let Some(eld) = guest_mut(mem, ptr, len as usize) else { return -1 };
+    if crate::audio::display_audio_set(port as usize, eld) { 0 } else { -1 }
+}
+
+/// The audio driver reads the ELD of `port` (`get_eld`): its length, 0 when
+/// no sink is there. Only the driver of a multimedia device may.
+pub(crate) fn npk_display_audio_get(mem: &mut [u8], ctx: &mut HostState, port: i32, ptr: i32, max: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err()
+        || owned_pci_class(ctx) != Some(0x04)
+    {
+        return -1;
+    }
+    if port < 0 || ptr < 0 || max < 0 { return -1; }
+    let Some(out) = guest_mut(mem, ptr, max as usize) else { return -1 };
+    match crate::audio::display_audio_get(port as usize, out) {
+        Some(n) => n as i32,
+        None => -1,
+    }
+}
+
+/// 0 until the display driver reported once, then a count that moves with
+/// every report.
+pub(crate) fn npk_display_audio_generation(ctx: &mut HostState) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    crate::audio::display_audio_generation() as i32
+}
+
 pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::READ).is_err() {

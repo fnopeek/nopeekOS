@@ -31,7 +31,7 @@ pub fn intel_fbc_sanitize(i915: &mut drm_i915_private) {
             continue;
         }
         if ilk_fbc_is_active(i915, fbc_id) {
-            Line::new().s("FBC ").dec(fbc_id as u64).s(" was active, deactivating").say();
+            Line::new().s("FBC ").dec(fbc_id as u64).s(" was active, deactivating").dbg();
             ilk_fbc_deactivate(i915, fbc_id);
         }
     }

@@ -25,7 +25,7 @@ pub fn intel_has_sagv(i915: &drm_i915_private) -> bool {
 fn intel_sagv_block_time(i915: &mut drm_i915_private) -> u32 {
     let mut val = 0u32;
     if intel_pcode::snb_pcode_read(i915, GEN12_PCODE_READ_SAGV_BLOCK_TIME_US, &mut val, None).is_err() {
-        Line::new().s("Couldn't read SAGV block time!").say();
+        Line::new().s("Couldn't read SAGV block time!").dbg();
         return 0;
     }
     val
@@ -41,12 +41,12 @@ fn intel_sagv_init(i915: &mut drm_i915_private) {
     i915.display.sagv_block_time_us = intel_sagv_block_time(i915);
 
     Line::new().s("SAGV supported: ").s(if intel_has_sagv(i915) { "yes" } else { "no" })
-        .s(", original SAGV block time: ").dec(i915.display.sagv_block_time_us as u64).s(" us").say();
+        .s(", original SAGV block time: ").dec(i915.display.sagv_block_time_us as u64).s(" us").dbg();
 
     // Avoid overflow when adding with wm0 latency/etc.
     if i915.display.sagv_block_time_us > u16::MAX as u32 {
         Line::new().s("Excessive SAGV block time ").dec(i915.display.sagv_block_time_us as u64)
-            .s(", ignoring").say();
+            .s(", ignoring").dbg();
         i915.display.sagv_block_time_us = 0;
     }
 
@@ -121,7 +121,7 @@ fn intel_print_wm_latency(i915: &drm_i915_private, name: &str, wm: &[u16; NUM_LA
     for level in 0..i915.display.wm_num_levels {
         l.s(" ").dec(wm[level] as u64);
     }
-    l.s(" us").say();
+    l.s(" us").dbg();
 }
 
 /// `skl_setup_wm_latency` (no HW SAGV watermarks before display version 13).
@@ -364,7 +364,7 @@ pub fn skl_wm_get_hw_state(i915: &mut drm_i915_private) {
 
         Line::new().s("pipe ").dec(pipe as u64).s(": dbuf slices ").hex(dbuf_state.slices[pipe] as u32)
             .s(", ddb (").dec(dbuf_state.ddb[pipe].start as u64).s(" - ").dec(dbuf_state.ddb[pipe].end as u64)
-            .s("), active pipes ").hex(dbuf_state.active_pipes as u32).s(", mbus joined: no").say();
+            .s("), active pipes ").hex(dbuf_state.active_pipes as u32).s(", mbus joined: no").dbg();
 
         i915.display.crtcs[c].state = cs;
     }

@@ -444,7 +444,7 @@ fn engine_mask_apply_media_fuses(i915: &mut drm_i915_private, gt: &mut intel_gt)
         }
         if (1 << i) & vdbox_mask == 0 {
             gt.info.engine_mask &= !(1u64 << _VCS(i));
-            Line::new().s("vcs").dec(i as u64).s(" fused off").say();
+            Line::new().s("vcs").dec(i as u64).s(" fused off").dbg();
             continue;
         }
         if gen11_vdbox_has_sfc(gt, i, vdbox_mask) {
@@ -458,7 +458,7 @@ fn engine_mask_apply_media_fuses(i915: &mut drm_i915_private, gt: &mut intel_gt)
         }
         if (1 << i) & vebox_mask == 0 {
             gt.info.engine_mask &= !(1u64 << _VECS(i));
-            Line::new().s("vecs").dec(i as u64).s(" fused off").say();
+            Line::new().s("vecs").dec(i as u64).s(" fused off").dbg();
         }
     }
 }
@@ -552,7 +552,7 @@ fn gen8_report_fault(fault: u32, fault_data0: u32, fault_data1: u32) {
         .s(if fault_data1 & FAULT_GTT_SEL != 0 { " GGTT" } else { " PPGTT" })
         .s(" engine ").dec(reg_field_get(RING_FAULT_ENGINE_ID_MASK, fault) as u64)
         .s(" source ").dec(reg_field_get(RING_FAULT_SRCID_MASK, fault) as u64)
-        .s(" type ").dec(reg_field_get(RING_FAULT_FAULT_TYPE_MASK, fault) as u64).say();
+        .s(" type ").dec(reg_field_get(RING_FAULT_FAULT_TYPE_MASK, fault) as u64).dbg();
 }
 
 /// `gen8_check_faults`, GRAPHICS_VER >= 12 registers.
@@ -573,7 +573,7 @@ pub fn intel_gt_clear_error_registers(i915: &mut drm_i915_private) {
     u.intel_uncore_write(EIR, 0);
     let eir = u.intel_uncore_read(EIR);
     if eir != 0 {
-        Line::new().s("EIR stuck: ").hex(eir).s(", masking").say();
+        Line::new().s("EIR stuck: ").hex(eir).s(", masking").dbg();
         u.intel_uncore_rmw(EMR, 0, eir);
         u.intel_uncore_write(GEN2_IIR, I915_MASTER_ERROR_INTERRUPT);
     }
@@ -779,7 +779,7 @@ pub fn intel_gt_init_hw(i915: &mut drm_i915_private, gt: &mut intel_gt) -> Resul
 
     let n = crate::intel_mocs::intel_mocs_init(i915);
     Line::new().s("MOCS: ").dec(tables::tgl_mocs_table.len() as u64).s(" table entries, ").dec(n as u64)
-        .s(" global MOCS and ").dec(((n + 1) / 2) as u64).s(" LNCFCMOCS registers written").say();
+        .s(" global MOCS and ").dec(((n + 1) / 2) as u64).s(" LNCFCMOCS registers written").dbg();
 
     i915.uncore.intel_uncore_forcewake_put(FORCEWAKE_ALL);
     Ok(())
@@ -801,7 +801,7 @@ fn intel_gt_init_scratch(gt: &mut intel_gt, ggtt: &mut crate::intel_ggtt::i915_g
     };
     let vma = crate::i915_vma::i915_ggtt_pin(ggtt, obj, crate::i915_vma::pin_flags { high: true, ..Default::default() })?;
     Line::new().s("GT scratch: ").s(if obj.is_stolen() { "stolen " } else { "system " }).hex(obj.phys as u32)
-        .s(", GGTT ").hex(vma.ggtt_offset()).say();
+        .s(", GGTT ").hex(vma.ggtt_offset()).dbg();
     gt.scratch = Some(vma);
     Ok(())
 }
@@ -811,7 +811,7 @@ fn kernel_vm(i915: &mut drm_i915_private, gt: &mut intel_gt) -> bool {
     match crate::gen8_ppgtt::i915_ppgtt_create(i915) {
         Ok(p) => {
             Line::new().s("kernel PPGTT: 48-bit, top directory ").hex((p.pd_dma() >> 32) as u32).s("_")
-                .hex(p.pd_dma() as u32).s(", scratch page ").dec(p.scratch[0].size >> 10).s(" KB").say();
+                .hex(p.pd_dma() as u32).s(", scratch page ").dec(p.scratch[0].size >> 10).s(" KB").dbg();
             gt.vm = Some(p);
             true
         }
@@ -894,7 +894,7 @@ fn __engines_record_defaults(i915: &mut drm_i915_private, gt: &mut intel_gt,
                 let el = gt.engine[e].map(|x| x.execlists).unwrap_or_default();
                 Line::new().s(crate::intel_execlists_submission::engine_name(gt, e))
                     .s(": default context recorded, seqno ").dec(seqno as u64)
-                    .s(", CSB events ").dec(el.csb_events as u64).s(", interrupts ").dec(el.irqs as u64).say();
+                    .s(", CSB events ").dec(el.csb_events as u64).s(", interrupts ").dec(el.irqs as u64).dbg();
                 log_default_ctx_wa(gt, e, state);
             }
         }
@@ -961,7 +961,7 @@ pub fn intel_gt_init(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut 
     for e in gt.engine.iter().flatten() {
         l.s(" ").s(crate::intel_gt::intel_engine_class_repr(e.class)).dec(e.instance as u64).s("=").dec(e.wakeref_count as u64);
     }
-    l.say();
+    l.dbg();
     crate::intel_rc6::report(i915, gt, "after init");
     crate::intel_rps::report(i915, gt, "after init");
     if let Err(e) = err {
@@ -1001,7 +1001,7 @@ pub fn intel_gt_driver_remove(i915: &mut drm_i915_private, gt: &mut intel_gt,
         if x.kernel_context.is_none() && x.status_page.is_some() {
             Line::new().s(crate::intel_execlists_submission::engine_name(gt, e)).s(": idle at hand-back, ")
                 .s(if x.wakeref_count == 0 { "parked" } else { "STILL AWAKE" }).s(", interrupts ")
-                .dec(x.execlists.irqs as u64).s(", CSB events ").dec(x.execlists.csb_events as u64).say();
+                .dec(x.execlists.irqs as u64).s(", CSB events ").dec(x.execlists.csb_events as u64).dbg();
         }
     }
 
@@ -1046,6 +1046,6 @@ fn log_default_ctx_wa(gt: &intel_gt, e: usize, state: crate::i915_vma::drm_i915_
                 l.s(" not in the image");
             }
         }
-        l.say();
+        l.dbg();
     }
 }

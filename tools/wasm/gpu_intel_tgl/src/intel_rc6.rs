@@ -219,5 +219,5 @@ pub fn report(i915: &mut drm_i915_private, gt: &intel_gt, when: &str) {
     let res = if gt.rc6.supported { u.intel_uncore_read(gt.rc6.res_reg[INTEL_RC6_RES_RC6]) } else { 0 };
     Line::new().s("RC6 ").s(when).s(": supported ").dec(gt.rc6.supported as u64).s(", enabled ")
         .dec(gt.rc6.enabled as u64).s(", RC_CONTROL ").hex(ctl).s(", RC_STATE ").hex(state)
-        .s(", residency ").hex(res).say();
+        .s(", residency ").hex(res).dbg();
 }

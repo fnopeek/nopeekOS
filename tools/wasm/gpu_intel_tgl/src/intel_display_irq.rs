@@ -332,7 +332,7 @@ fn intel_bios_is_dsi_present(i915: &drm_i915_private) -> bool {
         }
         // dsi_dvo_port_to_port, display version 11 and later.
         if dvo_port != DVO_PORT_MIPIA && dvo_port != DVO_PORT_MIPIC {
-            Line::new().s("VBT has unsupported DSI port ").dec((dvo_port - DVO_PORT_MIPIA) as u64).say();
+            Line::new().s("VBT has unsupported DSI port ").dec((dvo_port - DVO_PORT_MIPIA) as u64).dbg();
             continue;
         }
         return true;
@@ -391,7 +391,7 @@ fn intel_get_hpd_pins(pin_mask: &mut u32, long_mask: &mut u32, hotplug_trigger: 
         }
     }
     Line::new().s("hotplug event received, stat ").hex(hotplug_trigger).s(", dig ").hex(dig_hotplug_reg)
-        .s(", pins ").hex(*pin_mask).s(", long ").hex(*long_mask).say();
+        .s(", pins ").hex(*pin_mask).s(", long ").hex(*long_mask).dbg();
 }
 
 /// `intel_hpd_irq_handler`: the pins are kept for the hotplug side.

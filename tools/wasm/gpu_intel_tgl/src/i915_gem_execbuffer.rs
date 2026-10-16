@@ -235,7 +235,7 @@ fn log_held(c: u8, ring: u8, reason: &str) {
     static LINES: AtomicU32 = AtomicU32::new(0);
     if LINES.fetch_add(1, Ordering::Relaxed) < MAX_LINES {
         linux::Line::new().s("native context: execbuffer of client slot ").dec(c as u64).s(" ring ").dec(ring as u64)
-            .s(" waits (").s(reason).s(")").say();
+            .s(" waits (").s(reason).s(")").dbg();
     }
 }
 
@@ -265,7 +265,7 @@ fn log_execbuffer(c: u8, ring: u32, count: usize, batch_len: u32, ret: i32) {
         if ret != 0 {
             l.s(" (").s(*REASON.lock()).s(")");
         }
-        l.say();
+        l.dbg();
     }
 }
 
@@ -281,7 +281,7 @@ fn report_scratch_writes(st: &nctx, vm: u16, c: u8, ctx_id: u32) {
         && LINES.fetch_add(1, Ordering::Relaxed) < MAX_LINES {
         linux::Line::new().s("native context: client slot ").dec(c as u64).s(" context ").dec(ctx_id as u64)
             .s(": an earlier batch wrote through an unbound address (scratch page byte ").hex(off)
-            .s(" = ").hex(val as u32).s(")").say();
+            .s(" = ").hex(val as u32).s(")").dbg();
     }
 }
 

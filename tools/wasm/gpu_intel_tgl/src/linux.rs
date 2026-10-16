@@ -138,10 +138,27 @@ impl Line {
     pub fn say(&self) {
         npk_sys::log(&self.buf[..self.len]);
     }
+
+    /// `drm_dbg` / `drm_dbg_kms`: to the log only with `set log.drivers 1`.
+    pub fn dbg(&self) {
+        if debug_enabled() {
+            self.say();
+        }
+    }
 }
 
 pub fn say(s: &str) {
     Line::new().s(s).say();
+}
+
+pub fn dbg(s: &str) {
+    Line::new().s(s).dbg();
+}
+
+/// `set log.drivers 1`, asked at each debug line so it can be switched while
+/// the module runs.
+pub fn debug_enabled() -> bool {
+    npk_sys::sys_info(50) == 1
 }
 
 /// `drm_err`, `drm_WARN` with a true condition, `drm_info`.

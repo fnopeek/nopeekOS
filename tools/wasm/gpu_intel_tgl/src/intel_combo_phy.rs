@@ -59,7 +59,7 @@ fn check_phy_reg(i915: &mut drm_i915_private, phy: u32, reg: u32, mask: u32, exp
     let val = intel_de_read(i915, reg);
     if val & mask != expected_val {
         Line::new().s("Combo PHY ").s(phy_name(phy)).s(" reg ").hex(reg).s(" state mismatch: current ")
-            .hex(val).s(" mask ").hex(mask).s(" expected ").hex(expected_val).say();
+            .hex(val).s(" mask ").hex(mask).s(" expected ").hex(expected_val).dbg();
         return false;
     }
     true
@@ -125,7 +125,7 @@ fn icl_combo_phys_init(i915: &mut drm_i915_private) {
 
         let procmon = icl_get_procmon_ref_values(i915, phy);
         Line::new().s("Initializing combo PHY ").s(phy_name(phy)).s(" (Voltage/Process Info : ")
-            .s(core::str::from_utf8(procmon.name).unwrap_or("?")).s(")").say();
+            .s(core::str::from_utf8(procmon.name).unwrap_or("?")).s(")").dbg();
 
         if has_phy_misc(phy) {
             let mut val = intel_de_read(i915, ICL_PHY_MISC(phy));

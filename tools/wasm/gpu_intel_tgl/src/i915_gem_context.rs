@@ -398,10 +398,10 @@ impl native_stats {
                     .dec(self.total_max_us[k] / 1000).s(" ms (running ").dec(self.run_max_us[k] / 1000).s(" ms);");
             }
             l.s(" poll gap max ").dec(self.poll_gap_us / 1000).s(" ms, loop pass max ").dec(self.loop_max_us / 1000)
-                .s(" ms, held ").dec(self.held as u64).say();
+                .s(" ms, held ").dec(self.held as u64).dbg();
             if self.mhz_n != 0 {
                 Line::new().s("native context, GPU actual avg ").dec(self.mhz_sum / self.mhz_n as u64).s(" MHz, min ")
-                    .dec(self.mhz_min as u64).s(", limit reasons ").hex(self.limits).say();
+                    .dec(self.mhz_min as u64).s(", limit reasons ").hex(self.limits).dbg();
             }
             let mut l = Line::new();
             l.s("native context, rcs by client:");
@@ -412,7 +412,7 @@ impl native_stats {
                 l.s(" ").dec(self.client_id[c] as u64).s(": ").dec(self.client_rcs[c] as u64).s(" req, running ")
                     .dec(self.client_run_us[c] / 1000).s(" ms;");
             }
-            l.say();
+            l.dbg();
         }
         *self = native_stats { since_us: now, poll_us: self.poll_us, ..native_stats::EMPTY };
     }
@@ -1219,7 +1219,7 @@ impl nctx {
                     self.client_teardown(i915, gt, c);
                     if held > CLOSE_REPORT_US {
                         Line::new().s("native context: client ").dec(id as u64).s(" torn down ")
-                            .dec(held / 1000).s(" ms after its close").say();
+                            .dec(held / 1000).s(" ms after its close").dbg();
                     }
                 } else if !self.clients[c].closing_told && now.saturating_sub(self.clients[c].closing_us) > CLOSE_REPORT_US {
                     self.clients[c].closing_told = true;
@@ -1339,7 +1339,7 @@ impl nctx {
         let n = self.pend.iter().filter(|p| p.used && p.client == c8).count();
         Line::new().s("native context: client ").dec(self.clients[c].id as u64).s(" closed ")
             .dec(CLOSE_REPORT_US / 1000).s(" ms ago, still ").dec(n as u64).s(" request(s); held ")
-            .dec(gt.nwaiters as u64).s(", zombies ").dec(self.nzombies as u64).say();
+            .dec(gt.nwaiters as u64).s(", zombies ").dec(self.nzombies as u64).dbg();
         for p in self.pend.iter().filter(|p| p.used && p.client == c8).take(6) {
             let rq = p.rq as usize;
             let r = gt.requests[rq];
@@ -1354,7 +1354,7 @@ impl nctx {
                 l.s(" waits ").dec(ce as u64).s("/").dec(seqno as u64)
                     .s(if crate::i915_request::fence_signaled(gt, ce, seqno) { "(done)" } else { "(open)" });
             }
-            l.say();
+            l.dbg();
         }
     }
 

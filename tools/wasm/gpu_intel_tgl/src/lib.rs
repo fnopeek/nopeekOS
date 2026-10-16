@@ -153,11 +153,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     if let Some(loc) = info.location() {
         l.s(" at ").s(loc.file()).s(":").dec(loc.line() as u64);
     }
-    l.say();
+    l.dbg();
     core::arch::wasm32::unreachable()
 }
 
-use linux::{say, Line};
+use linux::{dbg, say, Line};
 
 /// `intel_gmch_bridge_setup` + `intel_gmch_bar_setup`: the host bridge at
 /// 00:00.0 must have MCHBAR enabled. Linux enables it when the firmware
@@ -217,7 +217,7 @@ pub extern "C" fn _start() {
         .dec(i915.runtime.graphics_ip.rel as u64).s(" stepping ")
         .s(i915_drv::intel_step_name(i915.runtime.step.graphics_step))
         .s(", display stepping ").s(i915_drv::intel_step_name(i915.display.step))
-        .s(", PCH type ").dec(pch_type as u64).say();
+        .s(", PCH type ").dec(pch_type as u64).dbg();
 
     // i915_driver_mmio_probe
     let has_rcs = intel_engine::has_engine(gt.info.engine_mask, regs::RCS0);
@@ -326,7 +326,7 @@ pub extern "C" fn _start() {
     log_initial_plane_config(&mut i915, &mut ggtt, dsm.as_mut());
     Line::new().s("GGTT[0] raw ").hex((pte0 >> 32) as u32).s("_").hex(pte0 as u32).s(" before, ")
         .hex((ggtt.regs.readq(ggtt.gsm_offset) >> 32) as u32).s("_").hex(ggtt.regs.readq(ggtt.gsm_offset) as u32)
-        .s(" after the takeover").say();
+        .s(" after the takeover").dbg();
 
     // i915_gem_init; intel_display_driver_probe (the first commit) is not
     // part of this stage.
@@ -337,15 +337,15 @@ pub extern "C" fn _start() {
 
     Line::new().s("GGTT ").dec(ggtt.total >> 20).s(" MB, aperture ").hex((ggtt.gmadr_start >> 32) as u32)
         .s("_").hex(ggtt.gmadr_start as u32).s(" + ").dec(ggtt.mappable_end >> 20).s(" MB, ")
-        .dec(ggtt.num_fences as u64).s(" fences").say();
+        .dec(ggtt.num_fences as u64).s(" fences").dbg();
     match dsm {
         Some(d) => {
             Line::new().s("stolen ").hex((d.stolen_start >> 32) as u32).s("_").hex(d.stolen_start as u32)
                 .s(" + ").dec((d.stolen_end - d.stolen_start + 1) >> 20).s(" MB, reserved ")
                 .hex(d.reserved_start as u32).s(" + ").dec(d.reserved_size >> 20).s(" MB, usable ")
-                .dec(d.usable_size >> 20).s(" MB").say();
+                .dec(d.usable_size >> 20).s(" MB").dbg();
         }
-        None => say("no stolen memory"),
+        None => dbg("no stolen memory"),
     }
     match &opregion {
         Some(op) if op.vbt_len != 0 => {
@@ -356,20 +356,20 @@ pub extern "C" fn _start() {
                 (le16(bdb + regs::BDB_HEADER_VERSION as usize), le16(bdb + regs::BDB_HEADER_BDB_SIZE as usize))
             });
             Line::new().s("VBT from ").s(op.vbt_source).s(": ").dec(op.vbt_len as u64)
-                .s(" bytes, BDB version ").dec(ver as u64).s(", BDB size ").dec(bdb_size as u64).say();
+                .s(" bytes, BDB version ").dec(ver as u64).s(", BDB size ").dec(bdb_size as u64).dbg();
         }
-        Some(_) => say("OpRegion without a valid VBT"),
-        None => say("no OpRegion"),
+        Some(_) => dbg("OpRegion without a valid VBT"),
+        None => dbg("no OpRegion"),
     }
     Line::new().s("DRAM ").s(dram.type_name).s(", ").dec(dram.num_channels as u64).s(" channels, ")
         .dec(dram.num_qgv_points as u64).s(" QGV points, ").dec(dram.num_psf_gv_points as u64)
-        .s(" PSF GV points").say();
+        .s(" PSF GV points").dbg();
 
     let pd = i915.display.power;
     Line::new().s("power domains: allowed DC mask ").hex(pd.allowed_dc_mask).s(", target ")
         .hex(pd.target_dc_state).s(", DC_STATE_EN ").hex(intel_de::intel_de_read(&mut i915, regs::DC_STATE_EN))
         .s(", dbuf slices ").hex(i915.display.dbuf_enabled_slices as u32)
-        .s(", max CDCLK ").dec(i915.display.cdclk.max_cdclk_freq as u64).s(" kHz").say();
+        .s(", max CDCLK ").dec(i915.display.cdclk.max_cdclk_freq as u64).s(" kHz").dbg();
     let mut on = Line::new();
     on.s("wells on:");
     for w in 0..pd.power_well_count {
@@ -377,7 +377,7 @@ pub extern "C" fn _start() {
             on.s(" ").s(intel_display_power::power_well_name(&i915, w));
         }
     }
-    on.say();
+    on.dbg();
 
     // The GPU service: from here on the module stays, unless it cannot
     // serve (or the GT wedges), and then gives the card back below.
@@ -398,7 +398,7 @@ pub extern "C" fn _start() {
         npk_sys::sleep(1);
         i915.uncore.run_timers();
     }
-    Line::new().s("forcewake held at exit: ").hex(i915.uncore.fw_domains_active).say();
+    Line::new().s("forcewake held at exit: ").hex(i915.uncore.fw_domains_active).dbg();
 }
 
 /// `intel_display_driver_init_hw`: `intel_cdclk_read_hw`, then
@@ -430,15 +430,15 @@ fn log_outputs(i915: &i915_drv::drm_i915_private) {
                 l.s(", TC mode ").s(intel_tc::intel_tc_port_mode_name(o, d));
             }
         }
-        l.say();
+        l.dbg();
     }
     let n_mst = o.encoders[..o.n_encoders].iter()
         .filter(|e| matches!(e.kind, intel_encoder::encoder_kind::dp_mst(..))).count();
-    Line::new().s("fake MST encoders: ").dec(n_mst as u64).say();
+    Line::new().s("fake MST encoders: ").dec(n_mst as u64).dbg();
     for c in 0..o.n_connectors {
         let con = o.connectors[c];
         Line::new().s("connector ").dec(c as u64).s(" type ").dec(con.connector_type as u64).s(" on [ENCODER:")
-            .s(o.encoders[con.encoder].name()).s("], ddc pin ").dec(con.ddc_pin as u64).say();
+            .s(o.encoders[con.encoder].name()).s("], ddc pin ").dec(con.ddc_pin as u64).dbg();
     }
 }
 
@@ -453,11 +453,11 @@ fn log_initial_plane_config(i915: &mut i915_drv::drm_i915_private, ggtt: &mut in
                 .dec(fb.width as u64).s("x").dec(fb.height as u64).s(", format ").hex(fb.format)
                 .s(", modifier ").hex((fb.modifier >> 32) as u32).s("_").hex(fb.modifier as u32)
                 .s(", stride ").dec(fb.pitch as u64).s(", size ").hex(pc.size).s(", rotation ")
-                .hex(pc.rotation).say();
+                .hex(pc.rotation).dbg();
             match pc.vma {
                 Some(v) => Line::new().s("  taken over: GGTT ").hex(v.node.start as u32).s(" + ").hex(v.node.size as u32)
-                    .s(", stolen offset ").hex(v.stolen.start as u32).s(", PAT ").dec(v.pat_index as u64).say(),
-                None => say("  not taken over"),
+                    .s(", stolen offset ").hex(v.stolen.start as u32).s(", PAT ").dec(v.pat_index as u64).dbg(),
+                None => dbg("  not taken over"),
             }
         }
     }
@@ -465,20 +465,20 @@ fn log_initial_plane_config(i915: &mut i915_drv::drm_i915_private, ggtt: &mut in
 
 fn report(i915: &i915_drv::drm_i915_private, gt: &intel_gt::intel_gt,
           drt: &intel_display_device::intel_display_runtime_info) {
-    Line::new().s("forcewake domains ").hex(i915.uncore.fw_domains).say();
+    Line::new().s("forcewake domains ").hex(i915.uncore.fw_domains).dbg();
     Line::new().s("GT clock ").dec(gt.clock_frequency as u64).s(" Hz, period ")
-        .dec(gt.clock_period_ns as u64).s(" ns").say();
+        .dec(gt.clock_period_ns as u64).s(" ns").dbg();
     let s = &gt.info.sseu;
     Line::new().s("slices ").hex(s.slice_mask).s(", subslices ").hex(s.subslice_mask[0])
         .s(", EUs ").dec(s.eu_total as u64).s(" (").dec(s.eu_per_subslice as u64)
-        .s(" per subslice), L3 banks ").hex(gt.info.l3bank_mask).say();
+        .s(" per subslice), L3 banks ").hex(gt.info.l3bank_mask).dbg();
     let mut l = Line::new();
     l.s("engines ").hex(gt.info.engine_mask as u32).s(":");
     for e in gt.engine.iter().flatten() {
         l.s(" ").s(intel_gt::intel_engine_class_repr(e.class)).dec(e.instance as u64)
             .s("@").hex(e.mmio_base);
     }
-    l.say();
+    l.dbg();
     Line::new().s("display pipes ").hex(drt.pipe_mask).s(", dmc ").dec(drt.has_dmc as u64)
-        .s(", rawclk ").dec(drt.rawclk_freq as u64).s(" kHz").say();
+        .s(", rawclk ").dec(drt.rawclk_freq as u64).s(" kHz").dbg();
 }

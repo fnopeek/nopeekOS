@@ -383,7 +383,7 @@ fn init_ggtt(ggtt: &mut i915_ggtt, wopcm: &crate::intel_wopcm::intel_wopcm) -> R
     // Clear any non-preallocated blocks: nop_clear_range.
     for (hole_start, hole_end, _) in ggtt.vm_mm.holes() {
         Line::new().s("clearing unused GTT space: [").hex((hole_start >> 32) as u32).s("_").hex(hole_start as u32)
-            .s(", ").hex((hole_end >> 32) as u32).s("_").hex(hole_end as u32).s("] (nop_clear_range)").say();
+            .s(", ").hex((hole_end >> 32) as u32).s("_").hex(hole_end as u32).s("] (nop_clear_range)").dbg();
     }
     // And finally the reserved guard page, also through nop_clear_range.
     Ok(())

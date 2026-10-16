@@ -226,3 +226,61 @@ pub fn set_volume(pct: u8) {
 pub fn get_volume() -> u8 {
     VOLUME.load(Ordering::Relaxed)
 }
+
+/// Display ports the display side can report audio for; i915's port index
+/// (A = 0) is the index.
+pub const DISPLAY_AUDIO_PORTS: usize = 9;
+/// `MAX_ELD_BYTES`.
+pub const ELD_MAX: usize = 128;
+
+/// What Linux' audio component carries from i915 to snd-hda: the ELD each
+/// port's sink has (`get_eld`), and a count that moves whenever one changes
+/// (`pin_eld_notify`).
+struct DisplayAudio {
+    generation: u32,
+    eld: [([u8; ELD_MAX], usize); DISPLAY_AUDIO_PORTS],
+}
+
+static DISPLAY_AUDIO: Mutex<DisplayAudio> =
+    Mutex::new(DisplayAudio { generation: 0, eld: [([0; ELD_MAX], 0); DISPLAY_AUDIO_PORTS] });
+
+/// The display driver says what sink `port` has: its ELD, empty for none.
+pub fn display_audio_set(port: usize, eld: &[u8]) -> bool {
+    if port >= DISPLAY_AUDIO_PORTS || eld.len() > ELD_MAX {
+        return false;
+    }
+    let mut d = DISPLAY_AUDIO.lock();
+    let slot = &mut d.eld[port];
+    slot.0[..eld.len()].copy_from_slice(eld);
+    slot.0[eld.len()..].fill(0);
+    slot.1 = eld.len();
+    d.generation = d.generation.wrapping_add(1).max(1);
+    true
+}
+
+/// The ELD of `port` into `out`; its length, 0 when there is no sink.
+pub fn display_audio_get(port: usize, out: &mut [u8]) -> Option<usize> {
+    if port >= DISPLAY_AUDIO_PORTS {
+        return None;
+    }
+    let d = DISPLAY_AUDIO.lock();
+    let (eld, len) = &d.eld[port];
+    let n = (*len).min(out.len());
+    out[..n].copy_from_slice(&eld[..n]);
+    Some(*len)
+}
+
+/// 0 until the display side reported once, then a count that moves with
+/// every report.
+pub fn display_audio_generation() -> u32 {
+    DISPLAY_AUDIO.lock().generation
+}
+
+/// The display driver is gone: no port has a sink any more.
+pub fn display_audio_clear() {
+    let mut d = DISPLAY_AUDIO.lock();
+    for slot in d.eld.iter_mut() {
+        *slot = ([0; ELD_MAX], 0);
+    }
+    d.generation = d.generation.wrapping_add(1).max(1);
+}

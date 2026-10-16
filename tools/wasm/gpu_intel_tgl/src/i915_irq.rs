@@ -155,7 +155,7 @@ pub fn intel_irq_install(i915: &mut drm_i915_private, gt: &mut intel_gt) -> Resu
 
     intel_irq_postinstall(i915, gt);
 
-    Line::new().s("interrupts installed, MSI vector ").hex(vector as u32).say();
+    Line::new().s("interrupts installed, MSI vector ").hex(vector as u32).dbg();
     Ok(())
 }
 
