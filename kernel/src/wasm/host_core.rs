@@ -1327,6 +1327,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         irq_vector: 0,
         irq_seen: 0,
         dma_limit: DMA_LIMIT_DEFAULT,
+        dma_pages: 0,
     });
     crate::kdebug!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, vid, did);
@@ -1397,6 +1398,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
         irq_vector: 0,
         irq_seen: 0,
         dma_limit: DMA_LIMIT_DEFAULT,
+        dma_pages: 0,
     });
     0
 }
@@ -1618,6 +1620,7 @@ pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
             irq_vector: 0,
             irq_seen: 0,
             dma_limit: DMA_LIMIT_DEFAULT,
+            dma_pages: 0,
         });
     }
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
@@ -1825,6 +1828,7 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
             irq_vector: 0,
             irq_seen: 0,
             dma_limit: DMA_LIMIT_DEFAULT,
+            dma_pages: 0,
         });
     }
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
@@ -2033,8 +2037,7 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     let page_count = pages as usize;
     let (max_allocs, max_pages) = dma_caps(hw);
     if hw.dma_allocs.len() >= max_allocs { return -1; }
-    let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
-    if total + page_count > max_pages { return -1; }
+    if hw.dma_pages + page_count > max_pages { return -1; }
 
     // Below the device's DMA mask.
     let phys = match crate::memory::allocate_contiguous_below(page_count, hw.dma_limit) {
@@ -2045,6 +2048,7 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
     let handle = hw.dma_allocs.len();
     hw.dma_allocs.push((phys, page_count));
+    hw.dma_pages += page_count;
     if hw.is_pci {
         crate::drivers::vtd::grant(hw.pci_addr, phys, page_count);
     }
@@ -2073,8 +2077,7 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     let page_count = pages as usize;
     let (max_allocs, max_pages) = dma_caps(hw);
     if hw.dma_allocs.len() >= max_allocs { return -1; }
-    let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
-    if total + page_count > max_pages { return -1; }
+    if hw.dma_pages + page_count > max_pages { return -1; }
 
     let limit = if limit_mb <= 0 {
         hw.dma_limit
@@ -2090,6 +2093,7 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
     let handle = hw.dma_allocs.len();
     hw.dma_allocs.push((phys, page_count));
+    hw.dma_pages += page_count;
     if hw.is_pci {
         crate::drivers::vtd::grant(hw.pci_addr, phys, page_count);
     }

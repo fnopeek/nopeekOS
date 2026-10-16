@@ -1014,7 +1014,11 @@ fn admit_fiber_task(cid: usize, task: super::scheduler::Task) {
     if task.shared && !app_core_usable(APP_CORE.load(Ordering::Acquire)) {
         APP_CORE.store(cid, Ordering::Release);
     }
-    super::fiber::admit_movable(cid, task.func, task.arg);
+    if !super::fiber::admit_movable(cid, task.func, task.arg) {
+        if let Some(dropped) = task.dropped {
+            dropped(task.arg);
+        }
+    }
 }
 
 /// Whether core `c` may take over fibers from busy cores when it has nothing

@@ -165,7 +165,11 @@ pub const SIG_GPU: u32 = 1 << 6;
 
 pub type Waker = u32;
 pub const NO_WAKER: Waker = u32::MAX;
-const MAX_WAKERS: usize = 1024;
+/// Wakers per chunk of the table; chunks are added as fibers are, and stay.
+const WAKER_CHUNK: usize = 1024;
+/// Chunk pointers: a bound of the index, not of use. Every fiber holds a
+/// stack, so memory runs out long before a million fibers.
+const MAX_WAKER_CHUNKS: usize = 1024;
 
 struct WakerSlot {
     signals: core::sync::atomic::AtomicU32,
@@ -177,43 +181,74 @@ struct WakerSlot {
     movable: core::sync::atomic::AtomicBool,
 }
 
-static WAKERS: [WakerSlot; MAX_WAKERS] = [const {
-    WakerSlot {
+impl WakerSlot {
+    const EMPTY: WakerSlot = WakerSlot {
         signals: core::sync::atomic::AtomicU32::new(0),
         core: core::sync::atomic::AtomicU32::new(0),
         used: core::sync::atomic::AtomicBool::new(false),
         movable: core::sync::atomic::AtomicBool::new(false),
-    }
-}; MAX_WAKERS];
+    };
+}
 
+type WakerChunk = [WakerSlot; WAKER_CHUNK];
+
+/// The waker table: chunks published once and never freed, so a lookup
+/// takes no lock and works from interrupt context.
+static WAKER_CHUNKS: [core::sync::atomic::AtomicPtr<WakerChunk>; MAX_WAKER_CHUNKS] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; MAX_WAKER_CHUNKS];
+
+/// The slot of waker `w`, if its chunk exists.
+fn slot(w: Waker) -> Option<&'static WakerSlot> {
+    let chunk = WAKER_CHUNKS.get(w as usize / WAKER_CHUNK)?.load(Ordering::Acquire);
+    // SAFETY: a published chunk is a leaked Box that is never freed.
+    (!chunk.is_null()).then(|| unsafe { &(*chunk)[w as usize % WAKER_CHUNK] })
+}
+
+/// A free waker, adding a chunk once every existing one is in use;
+/// `NO_WAKER` only when all chunks are taken.
 fn alloc_waker(cid: usize, movable: bool) -> Waker {
-    for (i, w) in WAKERS.iter().enumerate() {
-        if w.used.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-            w.signals.store(0, Ordering::Relaxed);
-            w.movable.store(movable, Ordering::Relaxed);
-            w.core.store(cid as u32, Ordering::Release);
-            return i as Waker;
+    for (c, cell) in WAKER_CHUNKS.iter().enumerate() {
+        let mut chunk = cell.load(Ordering::Acquire);
+        if chunk.is_null() {
+            let fresh = Box::into_raw(Box::new([const { WakerSlot::EMPTY }; WAKER_CHUNK]));
+            match cell.compare_exchange(core::ptr::null_mut(), fresh, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => chunk = fresh,
+                Err(other) => {
+                    // SAFETY: `fresh` came from Box::into_raw and was never published.
+                    drop(unsafe { Box::from_raw(fresh) });
+                    chunk = other;
+                }
+            }
+        }
+        // SAFETY: a published chunk is a leaked Box that is never freed.
+        for (i, w) in unsafe { &*chunk }.iter().enumerate() {
+            if w.used.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                w.signals.store(0, Ordering::Relaxed);
+                w.movable.store(movable, Ordering::Relaxed);
+                w.core.store(cid as u32, Ordering::Release);
+                return (c * WAKER_CHUNK + i) as Waker;
+            }
         }
     }
-    NO_WAKER // table full: the fiber can still sleep, just not be signalled
+    NO_WAKER
 }
 
 fn free_waker(w: Waker) {
     crate::notify::forget(w);
-    if let Some(slot) = WAKERS.get(w as usize) {
+    if let Some(slot) = slot(w) {
         slot.signals.store(0, Ordering::Relaxed);
         slot.used.store(false, Ordering::Release);
     }
 }
 
 fn pending(w: Waker, mask: u32) -> bool {
-    WAKERS.get(w as usize).is_some_and(|s| s.signals.load(Ordering::Acquire) & mask != 0)
+    slot(w).is_some_and(|s| s.signals.load(Ordering::Acquire) & mask != 0)
 }
 
 /// Set `bits` on waker `w` and wake the core its fiber lives on. Callable
 /// from any core and from interrupt context (lock-free).
 pub fn signal(w: Waker, bits: u32) {
-    let Some(slot) = WAKERS.get(w as usize) else { return };
+    let Some(slot) = slot(w) else { return };
     if !slot.used.load(Ordering::Acquire) {
         return;
     }
@@ -262,7 +297,7 @@ pub fn wait(mask: u32, deadline: u64) -> Option<u32> {
     // SAFETY: f is the running fiber (owned by run_core_fibers' frame).
     let w = unsafe { (*f).waker };
     let take = |w: Waker| -> u32 {
-        WAKERS.get(w as usize)
+        slot(w)
             .map_or(0, |s| s.signals.fetch_and(!mask, Ordering::AcqRel) & mask)
     };
     let got = take(w);
@@ -297,45 +332,51 @@ static FIBER_QUEUES: [Mutex<VecDeque<Box<Fiber>>>; MAX_CORES] =
     [const { Mutex::new(VecDeque::new()) }; MAX_CORES];
 
 /// Admit a freshly-spawned app as a Ready fiber on this core. Called from
-/// the worker loop (`smp_ap_entry`) for `is_fiber` tasks.
-pub fn admit(cid: usize, func: fn(u64), arg: u64) {
-    admit_with_stack(cid, func, arg, DEFAULT_STACK_BYTES);
+/// the worker loop (`smp_ap_entry`) for `is_fiber` tasks. False when the
+/// fiber could not be made (no stack, no waker): `func` never runs.
+pub fn admit(cid: usize, func: fn(u64), arg: u64) -> bool {
+    admit_with_stack(cid, func, arg, DEFAULT_STACK_BYTES)
 }
 
 /// Like `admit` but with an explicit stack size, for workers with deep call
 /// chains (e.g. the 9p persist worker: AES + B-tree COW + journal).
-pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize) {
-    admit_inner(cid, func, arg, stack_bytes, false);
+pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize) -> bool {
+    admit_inner(cid, func, arg, stack_bytes, false)
 }
 
 /// Like `admit`, for a fiber an idle core may take over while it waits,
 /// runnable, behind a busy one: an app from the inbox. It stops being
 /// movable once it binds an interrupt (`pin_current`).
-pub fn admit_movable(cid: usize, func: fn(u64), arg: u64) {
-    admit_inner(cid, func, arg, DEFAULT_STACK_BYTES, true);
+pub fn admit_movable(cid: usize, func: fn(u64), arg: u64) -> bool {
+    admit_inner(cid, func, arg, DEFAULT_STACK_BYTES, true)
 }
 
 /// `admit_movable` with an explicit stack size, for a kernel worker that
 /// keeps no state tied to its core (woken through a `Doorbell`).
-pub fn admit_movable_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize) {
-    admit_inner(cid, func, arg, stack_bytes, true);
+pub fn admit_movable_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize) -> bool {
+    admit_inner(cid, func, arg, stack_bytes, true)
 }
 
-fn admit_inner(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize, movable: bool) {
+fn admit_inner(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize, movable: bool) -> bool {
     if cid >= MAX_CORES {
         func(arg); // degenerate (no per-core queue) → run inline
-        return;
+        return true;
     }
     let Some(fiber) = Fiber::new(stack_bytes, fiber_app_entry, 0) else {
         crate::kprintln!("[fiber] no memory for a {} KiB stack, task dropped", stack_bytes / 1024);
-        return;
+        return false;
     };
+    let waker = alloc_waker(cid, movable);
+    if waker == NO_WAKER {
+        crate::kprintln!("[fiber] every waker is in use, task dropped");
+        return false;
+    }
     let mut fiber = Box::new(fiber);
     fiber.app_func = Some(func);
     fiber.app_arg = arg;
     fiber.state = FiberState::Ready;
     fiber.movable = movable;
-    fiber.waker = alloc_waker(cid, movable);
+    fiber.waker = waker;
     FIBER_COUNT[cid].fetch_add(1, Ordering::Relaxed);
     FIBER_QUEUES[cid].lock().push_back(fiber);
     // A fiber placed on another core (the microVM's AP vCPUs, the fetch /
@@ -344,6 +385,7 @@ fn admit_inner(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize, movable:
     // fiber in its idle re-check (`earliest_deadline`) or gets the IPI.
     core::sync::atomic::fence(Ordering::SeqCst);
     crate::smp::per_core::wake_fiber_core(cid);
+    true
 }
 
 /// Resident fibers per core, readable from any core. The queue length is not:
@@ -474,7 +516,7 @@ pub fn pin_current() {
         let f = CURRENT_FIBER[cid];
         if !f.is_null() && (*f).movable {
             (*f).movable = false;
-            if let Some(slot) = WAKERS.get((*f).waker as usize) {
+            if let Some(slot) = slot((*f).waker) {
                 slot.movable.store(false, Ordering::Relaxed);
             }
         }
@@ -536,7 +578,7 @@ pub fn steal_for(thief: usize, preemptible_only: bool) -> bool {
         let Some(fiber) = taken else { continue };
         FIBER_COUNT[victim].fetch_sub(1, Ordering::Relaxed);
         FIBER_COUNT[thief].fetch_add(1, Ordering::Relaxed);
-        if let Some(slot) = WAKERS.get(fiber.waker as usize) {
+        if let Some(slot) = slot(fiber.waker) {
             slot.core.store(thief as u32, Ordering::SeqCst);
         }
         STEALS.fetch_add(1, Ordering::Relaxed);

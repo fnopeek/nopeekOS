@@ -38,8 +38,16 @@ pub struct KernelStack {
     lo: u64,
     /// One past the highest usable address; the initial stack pointer.
     top: u64,
-    phys: u64,
-    pages: usize,
+    /// The frames behind it, one per page: the stack is only ever reached
+    /// through its mapping, so they need not be contiguous.
+    frames: Vec<u64>,
+}
+
+/// Give `frames` back to the frame allocator.
+fn free_frames(frames: &[u64]) {
+    for &f in frames {
+        memory::deallocate_frame(f);
+    }
 }
 
 impl KernelStack {
@@ -50,7 +58,17 @@ impl KernelStack {
         if (pages as u64 + 1) * PAGE_SIZE as u64 > SLOT_BYTES {
             return None;
         }
-        let phys = memory::allocate_contiguous(pages)?;
+        let mut frames = Vec::new();
+        frames.try_reserve_exact(pages).ok()?;
+        for _ in 0..pages {
+            match memory::allocate_frame() {
+                Some(f) => frames.push(f),
+                None => {
+                    free_frames(&frames);
+                    return None;
+                }
+            }
+        }
         let slot = match FREE.lock().pop() {
             Some(s) => s,
             None => {
@@ -62,13 +80,13 @@ impl KernelStack {
         };
         let lo = REGION_BASE + slot * SLOT_BYTES + PAGE_SIZE as u64;
         let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
-        for i in 0..pages {
+        for (i, &frame) in frames.iter().enumerate() {
             let off = (i * PAGE_SIZE) as u64;
-            if paging::map_page(lo + off, phys + off, flags).is_err() {
+            if paging::map_page(lo + off, frame, flags).is_err() {
                 for j in 0..i {
                     let _ = paging::unmap_page(lo + (j * PAGE_SIZE) as u64);
                 }
-                memory::deallocate_contiguous(phys, pages);
+                free_frames(&frames);
                 FREE.lock().push(slot);
                 return None;
             }
@@ -77,7 +95,7 @@ impl KernelStack {
         // SAFETY: lo..top was mapped writable just above, to frames this
         // stack owns exclusively.
         unsafe { core::ptr::write_bytes(lo as *mut u8, 0, pages * PAGE_SIZE) };
-        Some(KernelStack { slot, lo, top, phys, pages })
+        Some(KernelStack { slot, lo, top, frames })
     }
 
     pub fn lo(&self) -> u64 { self.lo }
@@ -87,10 +105,10 @@ impl KernelStack {
 impl Drop for KernelStack {
     /// The owner guarantees nothing runs on the stack any more.
     fn drop(&mut self) {
-        for i in 0..self.pages {
+        for i in 0..self.frames.len() {
             let _ = paging::unmap_page(self.lo + (i * PAGE_SIZE) as u64);
         }
-        memory::deallocate_contiguous(self.phys, self.pages);
+        free_frames(&self.frames);
         FREE.lock().push(self.slot);
     }
 }
