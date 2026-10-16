@@ -89,6 +89,7 @@ pub fn i915_ccmd_gem_execbuffer2(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], 
         return Err(-EINVAL);
     }
     wr32(rsp, 0, 8);
+    *REASON.lock() = "";
     let ret = match execbuffer(st, d, c, req, flags, context_id as u32, buffer_count, batch_start_offset, batch_len,
                                relocs_count, ring as u8) {
         Ok(()) => 0,
@@ -99,8 +100,17 @@ pub fn i915_ccmd_gem_execbuffer2(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], 
     Ok(8)
 }
 
+/// Why the last execbuffer was refused.
+static REASON: spin::Mutex<&'static str> = spin::Mutex::new("");
+
+/// `e`, with `reason` kept for the log line.
+fn why(e: i32, reason: &'static str) -> i32 {
+    *REASON.lock() = reason;
+    e
+}
+
 /// The first execbuffers of the boot, then only the failed ones, up to a
-/// fixed number of lines.
+/// fixed number of lines; a refusal names its reason.
 fn log_execbuffer(c: u8, ring: u32, count: usize, batch_len: u32, ret: i32) {
     use core::sync::atomic::{AtomicU32, Ordering};
     const FIRST: u32 = 8;
@@ -109,9 +119,14 @@ fn log_execbuffer(c: u8, ring: u32, count: usize, batch_len: u32, ret: i32) {
     static LINES: AtomicU32 = AtomicU32::new(0);
     let n = SEEN.fetch_add(1, Ordering::Relaxed);
     if (n < FIRST || ret != 0) && LINES.fetch_add(1, Ordering::Relaxed) < MAX_LINES {
-        linux::Line::new().s("native context: execbuffer ").dec(n as u64 + 1).s(" client slot ").dec(c as u64)
+        let mut l = linux::Line::new();
+        l.s("native context: execbuffer ").dec(n as u64 + 1).s(" client slot ").dec(c as u64)
             .s(" ring ").dec(ring as u64).s(", ").dec(count as u64).s(" objects, batch ").dec(batch_len as u64)
-            .s(" bytes -> ret ").dec(ret as u64).say();
+            .s(" bytes -> ret ").dec(ret as u64);
+        if ret != 0 {
+            l.s(" (").s(*REASON.lock()).s(")");
+        }
+        l.say();
     }
 }
 
@@ -138,64 +153,64 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
     // virglrenderer: res_ids to objects, relocation counts against the total.
     let mut vmas = [eb_vma { obj: 0, offset: 0, flags: 0 }; 2048];
     if count > vmas.len() {
-        return Err(EINVAL);
+        return Err(why(EINVAL, "more than 2048 objects"));
     }
     let mut relocs = 0usize;
     for i in 0..count {
         let e = &req[REQ_BYTES + i * EXEC_OBJECT2_BYTES..];
-        let obj = st.obj(c, rd32(e, 0)).ok_or(EINVAL)?;
+        let obj = st.obj(c, rd32(e, 0)).ok_or(why(EINVAL, "unknown object"))?;
         let nreloc = rd32(e, 4) as usize;
-        relocs = relocs.checked_add(nreloc).filter(|&r| r <= relocs_count).ok_or(EINVAL)?;
+        relocs = relocs.checked_add(nreloc).filter(|&r| r <= relocs_count).ok_or(why(EINVAL, "relocation count"))?;
         vmas[i] = eb_vma { obj, offset: rd64(e, 24), flags: rd64(e, 32) };
         if nreloc != 0 && flags & I915_EXEC_NO_RELOC == 0 {
             // eb_relocate_parse would write into the object.
-            return Err(EINVAL);
+            return Err(why(EINVAL, "relocations"));
         }
         let pad_to_size = rd64(e, 40);
         // eb_validate_vma
         let f = vmas[i].flags;
         if f & EXEC_OBJECT_UNKNOWN_FLAGS != 0 {
-            return Err(EINVAL);
+            return Err(why(EINVAL, "unknown object flags"));
         }
         let alignment = rd64(e, 16);
         if alignment != 0 && !alignment.is_power_of_two() {
-            return Err(EINVAL);
+            return Err(why(EINVAL, "alignment"));
         }
         if f & EXEC_OBJECT_PINNED == 0 {
             // eb_reserve would place it; the guest could not learn where.
-            return Err(EINVAL);
+            return Err(why(EINVAL, "object not pinned"));
         }
         if vmas[i].offset != canonical(vmas[i].offset & !(I915_GTT_PAGE_SIZE - 1)) {
-            return Err(EINVAL);
+            return Err(why(EINVAL, "offset not canonical or not page-aligned"));
         }
         if f & EXEC_OBJECT_PAD_TO_SIZE != 0 && pad_to_size & (I915_GTT_PAGE_SIZE - 1) != 0 {
-            return Err(EINVAL);
+            return Err(why(EINVAL, "pad_to_size"));
         }
         vmas[i].offset = noncanonical(vmas[i].offset);
         if alignment != 0 && vmas[i].offset & (alignment - 1) != 0 {
-            return Err(EINVAL);
+            return Err(why(EINVAL, "offset misaligned"));
         }
         if vmas[i].offset + st.objs[obj].pages as u64 * I915_GTT_PAGE_SIZE > VM_TOTAL {
-            return Err(EINVAL);
+            return Err(why(EINVAL, "object past the address space"));
         }
         // eb_lookup_vmas: an object named twice.
         if vmas[..i].iter().any(|v| v.obj == obj) {
-            return Err(EINVAL);
+            return Err(why(EINVAL, "object named twice"));
         }
     }
 
     // i915_gem_check_execbuffer and the flags.
     if flags & I915_EXEC_UNKNOWN_FLAGS != 0 || (batch_start_offset | batch_len) & 7 != 0 {
-        return Err(EINVAL);
+        return Err(why(EINVAL, "flags or batch alignment"));
     }
     if flags & (I915_EXEC_FENCE_IN | I915_EXEC_FENCE_SUBMIT | I915_EXEC_FENCE_ARRAY | I915_EXEC_USE_EXTENSIONS) != 0 {
-        return Err(EINVAL);
+        return Err(why(EINVAL, "fences or extensions"));
     }
     if flags & I915_EXEC_SECURE != 0 {
         return Err(EPERM);
     }
     if count < 1 {
-        return Err(EINVAL);
+        return Err(why(EINVAL, "no objects"));
     }
 
     // eb_select_context, eb_select_engine.
@@ -208,11 +223,11 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
     let (slot, engine) = if st.ctxs[x].user_engines {
         let idx = (flags & I915_EXEC_RING_MASK) as usize;
         if idx >= st.ctxs[x].n_engines as usize || st.ctxs[x].engines[idx] == NONE8 {
-            return Err(EINVAL);
+            return Err(why(EINVAL, "engine slot"));
         }
         (idx as u8, st.ctxs[x].engines[idx])
     } else {
-        let e = eb_select_legacy_ring(d.gt, flags)?;
+        let e = eb_select_legacy_ring(d.gt, flags).map_err(|e| why(e, "legacy ring"))?;
         (e, e)
     };
     if crate::intel_gt::intel_gt_is_wedged(d.gt) {
@@ -223,12 +238,12 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
     let bi = if flags & I915_EXEC_BATCH_FIRST != 0 { 0 } else { count - 1 };
     let batch = vmas[bi];
     if batch.flags & EXEC_OBJECT_WRITE != 0 {
-        return Err(EINVAL);
+        return Err(why(EINVAL, "batch written"));
     }
     let bsize = st.objs[batch.obj].size;
     let blen = if batch_len == 0 { bsize.saturating_sub(batch_start_offset as u64) } else { batch_len as u64 };
     if batch_start_offset as u64 + blen > bsize || blen == 0 {
-        return Err(EINVAL);
+        return Err(why(EINVAL, "batch outside its object"));
     }
 
     // eb_reserve with PIN_OFFSET_FIXED: each object at its offset. A
@@ -246,7 +261,7 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
         for k in 0..2 {
             if o.vm[k] == vm {
                 if st.obj_busy(d.gt, v.obj) {
-                    return Err(EAGAIN);
+                    return Err(why(EAGAIN, "moving a busy object"));
                 }
                 st.obj_unbind(v.obj, k);
             }
@@ -263,10 +278,10 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
                 let (s, e) = (other.start[k], other.start[k] + other.pages as u64 * I915_GTT_PAGE_SIZE);
                 if s < v.offset + size && v.offset < e {
                     if vmas[..count].iter().any(|w| w.obj == j) {
-                        return Err(EINVAL);
+                        return Err(why(EINVAL, "two objects of the request overlap"));
                     }
                     if st.obj_busy(d.gt, j) {
-                        return Err(EAGAIN);
+                        return Err(why(EAGAIN, "a busy object in the way"));
                     }
                     st.obj_unbind(j, k);
                 }
@@ -274,14 +289,14 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
         }
         // The old translations of what was unbound go before the new one.
         st.tlb_flush(d.i915, d.gt);
-        st.obj_bind(v.obj, vm, v.offset).map_err(|e| -e)?;
+        st.obj_bind(v.obj, vm, v.offset).map_err(|e| why(-e, "bind"))?;
     }
 
     // eb_pin_engine, eb_throttle: the request must fit without waiting.
-    let ce = st.ctx_engine(d, x, slot, engine).map_err(|e| -e)?;
+    let ce = st.ctx_engine(d, x, slot, engine).map_err(|e| why(-e, "hardware context"))?;
     crate::intel_gt_requests::retire_requests(d.i915, d.gt, ce);
     if !st.can_submit(d.gt, Some(ce)) || d.gt.contexts[ce].ring.intel_ring_update_space() < 4096 {
-        return Err(EAGAIN);
+        return Err(why(EAGAIN, "ring or request table full"));
     }
 
     // eb_move_to_gpu's implicit sync: the fences each object's reservation
@@ -291,10 +306,10 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
     for v in &vmas[..count] {
         let write = v.flags & EXEC_OBJECT_WRITE != 0;
         if v.flags & EXEC_OBJECT_ASYNC == 0 && !st.resv_await(d.gt, v.obj, ce as u16, write, &mut awaits) {
-            return Err(EAGAIN);
+            return Err(why(EAGAIN, "too many fences to wait for"));
         }
         if !st.resv_room(d.gt, v.obj, ce as u16, write) {
-            return Err(EAGAIN);
+            return Err(why(EAGAIN, "reservation full"));
         }
     }
 
@@ -304,8 +319,8 @@ fn execbuffer(st: &mut nctx, d: &mut drm, c: u8, req: &[u8], flags: u64, ctx_id:
     crate::intel_engine_pm::intel_engine_pm_put(d.i915, d.gt, engine as usize);
     let rq = match rq {
         Ok(rq) => rq,
-        Err(e) if e == -ENOMEM || e == -ENOSPC => return Err(EAGAIN),
-        Err(e) => return Err(-e),
+        Err(e) if e == -ENOMEM || e == -ENOSPC => return Err(why(EAGAIN, "no request free")),
+        Err(e) => return Err(why(-e, "request")),
     };
     d.gt.requests[rq].prio = st.ctxs[x].priority;
     let mut err = crate::gen8_engine_cs::gen8_emit_init_breadcrumb(d.i915, d.gt, rq);

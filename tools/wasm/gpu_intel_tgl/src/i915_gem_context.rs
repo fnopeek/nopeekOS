@@ -110,7 +110,6 @@ impl gem_ctx {
 
 /// `struct i915_address_space`: a client's PPGTT. `ppgtt` stays when the
 /// slot is freed and is reused empty.
-#[derive(Clone, Copy)]
 pub struct vm_slot {
     pub used: bool,
     pub client: u8,
@@ -234,7 +233,7 @@ pub struct nctx {
 pub static NCTX: Single<nctx> = Single::new(nctx {
     clients: [client::EMPTY; MAX_CLIENTS],
     ctxs: [gem_ctx::EMPTY; MAX_GEM_CTX],
-    vms: [vm_slot { used: false, client: 0, refs: 0, ppgtt: None }; MAX_VMS],
+    vms: [const { vm_slot { used: false, client: 0, refs: 0, ppgtt: None } }; MAX_VMS],
     objs: [gem_obj::EMPTY; MAX_OBJECTS],
     hash: [NONE16; HASH],
     pend: [pending::EMPTY; MAX_PENDING],
@@ -310,6 +309,20 @@ pub fn seqno_done(gt: &intel_gt, ce: u16, seqno: u32) -> bool {
 fn hang_us(gt: &intel_gt, engine: usize) -> u64 {
     let ms = gt.engine[engine].map(|e| 2 * e.heartbeat_interval_ms + e.preempt_timeout_ms).unwrap_or(0);
     (if ms == 0 { HANG_FALLBACK_MS } else { ms }) * 1000
+}
+
+/// A page-table tree that could not be built: the tables the address space
+/// holds and those pooled; a fixed number of lines.
+fn log_bind_failure(p: &crate::gen8_ppgtt::i915_ppgtt, vm: u8, start: u64, pages: u32, e: i32) {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    const MAX_LINES: u32 = 8;
+    static LINES: AtomicU32 = AtomicU32::new(0);
+    if LINES.fetch_add(1, Ordering::Relaxed) < MAX_LINES {
+        crate::linux::Line::new().s("native context: binding ").dec(pages as u64).s(" pages at ")
+            .hex((start >> 32) as u32).s("_").hex(start as u32).s(" in address space ").dec(vm as u64)
+            .s(" failed (").dec((-e) as u64).s("): ").dec(p.tables() as u64).s(" tables in it, ")
+            .dec(crate::gen8_ppgtt::pooled_tables() as u64).s(" pooled").say();
+    }
 }
 
 impl nctx {
@@ -493,7 +506,10 @@ impl nctx {
         let k = o.vm.iter().position(|&x| x == NONE8).ok_or(-ENOSPC)?;
         let size = o.pages as u64 * I915_GTT_PAGE_SIZE;
         let p = self.vms[vm as usize].ppgtt.as_mut().ok_or(-EINVAL)?;
-        p.gen8_ppgtt_alloc(start, size)?;
+        if let Err(e) = p.gen8_ppgtt_alloc(start, size) {
+            log_bind_failure(p, vm, start, o.pages, e);
+            return Err(e);
+        }
         let mut list = [0u64; 512];
         let mut at = 0u32;
         let mut r = Ok(());

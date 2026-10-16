@@ -161,8 +161,15 @@ pub(crate) fn ppgtt_bind(gt: &mut intel_gt, phys: u64, size: u64, pat_index: u32
     // The kernel names its buffers by address and treats 0 as unset, and
     // takes only 32-bit names.
     let node = vm.mm.drm_mm_insert_node_in_range_best(size, I915_GTT_PAGE_SIZE, 0, I915_GTT_PAGE_SIZE, 1 << 32)?;
-    vm.gen8_ppgtt_alloc(node.start, size)?;
-    vm.gen8_ppgtt_insert(node.start, phys, size, pat_index, 0)?;
+    if let Err(e) = vm.gen8_ppgtt_alloc(node.start, size) {
+        vm.mm.drm_mm_remove_node(&node);
+        return Err(e);
+    }
+    if let Err(e) = vm.gen8_ppgtt_insert(node.start, phys, size, pat_index, 0) {
+        let _ = vm.gen8_ppgtt_clear(node.start, size);
+        vm.mm.drm_mm_remove_node(&node);
+        return Err(e);
+    }
     Ok(node.start)
 }
 
@@ -326,10 +333,10 @@ fn log_wakerefs(gt: &intel_gt, when: &str) {
     l.say();
 }
 
-/// Binds `pages` pages of buffer `id`, from the kernel's page list, at
-/// `start`: the tree first, then one insert per physically consecutive run.
-fn bind_pages(vm: &mut i915_ppgtt, id: u32, start: u64, pages: u32) -> Result<(), i32> {
-    vm.gen8_ppgtt_alloc(start, pages as u64 * I915_GTT_PAGE_SIZE)?;
+/// Inserts `pages` pages of buffer `id`, from the kernel's page list, at
+/// `start`, one insert per physically consecutive run; the tree must have
+/// been allocated.
+fn insert_pages(vm: &mut i915_ppgtt, id: u32, start: u64, pages: u32) -> Result<(), i32> {
     let mut list = [0u64; 64];
     let mut at = 0u32;
     // (first page, its bus address, pages)
@@ -378,8 +385,11 @@ fn bo_add(gt: &mut intel_gt, svc: &mut service, id: u32) -> Result<(), i32> {
     let vm = gt.vm.as_mut().ok_or(-EINVAL)?;
     let size = b.pages as u64 * I915_GTT_PAGE_SIZE;
     let node = vm.mm.drm_mm_insert_node_in_range_best(size, I915_GTT_PAGE_SIZE, 0, DYN_START, DYN_END)?;
-    if let Err(x) = bind_pages(vm, id, node.start, b.pages) {
-        // A complete tree can be cleared; a partial one keeps its tables.
+    if let Err(x) = vm.gen8_ppgtt_alloc(node.start, size) {
+        vm.mm.drm_mm_remove_node(&node);
+        return Err(x);
+    }
+    if let Err(x) = insert_pages(vm, id, node.start, b.pages) {
         let _ = vm.gen8_ppgtt_clear(node.start, size);
         vm.mm.drm_mm_remove_node(&node);
         return Err(x);

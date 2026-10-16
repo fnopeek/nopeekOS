@@ -22,6 +22,8 @@
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 #![allow(dead_code)]
 
+extern crate alloc;
+
 mod compose;
 mod plan;
 mod drm_mm;
@@ -136,6 +138,10 @@ const INTEL_VENDOR: u16 = 0x8086;
 const TGL_GT2: u16 = 0x9a78;
 /// GTTMMADR: registers in the lower half, the GGTT in the upper.
 const BAR0_PAGES: i32 = 16 * 1024 * 1024 / 4096;
+
+// The SDK's growing heap, for the page-table trees.
+#[global_allocator]
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
