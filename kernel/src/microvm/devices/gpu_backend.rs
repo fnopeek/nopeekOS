@@ -95,8 +95,8 @@ static ISR: AtomicU8 = AtomicU8::new(0);
 pub fn raise_isr(bits: u8) { ISR.fetch_or(bits, Ordering::AcqRel); }
 pub fn take_isr() -> u8 { ISR.swap(0, Ordering::AcqRel) }
 
-/// The BSP at vblank: a paused controlq runs its next frame — on the worker
-/// as a doorbell, else here. True = raise IRQ 9.
+/// The BSP at the refresh a kept-back FLUSH waits for: the controlq is
+/// served — on the worker as a doorbell, else here. True = raise IRQ 9.
 pub fn vblank(now: u64, gm: &super::guest_mem::GuestMem) -> bool {
     if !take_resume(now) { return false; }
     if full_active() {
@@ -200,9 +200,9 @@ pub fn stats_snapshot() -> [u64; STAT_BUCKETS] {
     core::array::from_fn(|i| STATS[i].load(Ordering::Relaxed))
 }
 
-/// When a vblank-paused controlq may run again (`VirtioGpu::paused_until`),
-/// 0 = not paused. Lock-free, so the vCPU asks on every loop without the
-/// device lock, and its timer deadline includes it.
+/// When the first FLUSH kept back is due (`VirtioGpu::flushes`), 0 = none.
+/// Lock-free, so the vCPU asks on every loop without the device lock, and
+/// its timer deadline includes it.
 static RESUME_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(super) fn set_resume_tsc(t: u64) { RESUME_TSC.store(t, Ordering::Release); }
 pub fn resume_tsc() -> Option<u64> {
