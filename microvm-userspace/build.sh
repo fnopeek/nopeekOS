@@ -52,7 +52,10 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 # the virtio-snd card (card 0) backed by the host audio path.
 # mesa-demos: es2gears_wayland and friends, GL test clients the session
 # runs instead of the browser with npkapp= on the guest command line.
-APK_PACKAGES="${APK_PACKAGES:-librewolf seatd libseat libinput eudev mesa-gbm wayland-libs-server libdisplay-info font-dejavu font-noto alsa-lib mesa-demos}"
+# vulkan-loader: libvulkan for anv (our Mesa) and Vulkan Video in ffmpeg.
+# vulkan-tools, ffmpeg: vulkaninfo and `ffmpeg -hwaccel vulkan`, run with
+# npkapp= to check the decoder without the browser.
+APK_PACKAGES="${APK_PACKAGES:-librewolf seatd libseat libinput eudev mesa-gbm wayland-libs-server libdisplay-info font-dejavu font-noto alsa-lib mesa-demos vulkan-loader vulkan-tools ffmpeg}"
 
 # ── Paths ────────────────────────────────────────────────────────
 
@@ -174,6 +177,7 @@ awk '/^P:/{p=substr($0,3)} /^F:/{d=substr($0,3)} /^R:/{if(p ~ /^mesa(-egl|-gl|-g
 tar -xzf "$MESA_OVERLAY" -C "$STAGE"
 for so in $(tar -tzf "$MESA_OVERLAY" | grep -E '\.so|^usr/bin/'); do
     [ -L "$STAGE/$so" ] && continue
+    [ "$(head -c 4 "$STAGE/$so")" = "$(printf '\177ELF')" ] || continue
     for lib in $(readelf -d "$STAGE/$so" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
         [ -e "$STAGE/usr/lib/$lib" ] || [ -e "$STAGE/lib/$lib" ] \
             || { red "mesa ($so) needs $lib, not in the image"; exit 1; }
