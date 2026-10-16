@@ -127,13 +127,15 @@ index 77de622..e20d59f 100644
      return VA_STATUS_SUCCESS;
  }
 diff --git a/media_softlet/linux/common/os/i915/include/mos_bufmgr_api.h b/media_softlet/linux/common/os/i915/include/mos_bufmgr_api.h
-index 4e67df8..3df8976 100644
+index 4e67df8..9c7fe14 100644
 --- a/media_softlet/linux/common/os/i915/include/mos_bufmgr_api.h
 +++ b/media_softlet/linux/common/os/i915/include/mos_bufmgr_api.h
-@@ -418,6 +418,13 @@ int mos_get_device_id(int fd, uint32_t *deviceId);
+@@ -417,7 +417,14 @@ int mos_get_device_id(int fd, uint32_t *deviceId);
+ #if defined(__cplusplus)
  extern "C" {
  #endif
- extern drm_export int drmIoctl(int fd, unsigned long request, void *arg);
+-extern drm_export int drmIoctl(int fd, unsigned long request, void *arg);
++extern int drmIoctl(int fd, unsigned long request, void *arg);
 +#if defined(__cplusplus)
 +}
 +#endif
@@ -156,6 +158,21 @@ index 4e67df8..3df8976 100644
      else
      {
          fprintf(stderr, "DRM_IOCTL_VERSION, unsupported drm device by media driver: %s\n", name);
+diff --git a/media_softlet/linux/common/os/i915/include/xf86drm.h b/media_softlet/linux/common/os/i915/include/xf86drm.h
+index 1a27858..81f2c01 100644
+--- a/media_softlet/linux/common/os/i915/include/xf86drm.h
++++ b/media_softlet/linux/common/os/i915/include/xf86drm.h
+@@ -118,8 +118,8 @@ typedef struct drmHashEntry {
+     void     *tagTable;
+ } drmHashEntry;
+ 
+-extern drm_export int mosdrmIoctl(int fd, unsigned long request, void *arg);
+-extern drm_export int drmIoctl(int fd, unsigned long request, void *arg);
++extern int mosdrmIoctl(int fd, unsigned long request, void *arg);
++extern int drmIoctl(int fd, unsigned long request, void *arg);
+ extern void *drmGetHashTable(void);
+ extern drmHashEntry *drmGetEntry(int fd);
+ 
 diff --git a/media_softlet/linux/common/os/i915/mos_bufmgr.c b/media_softlet/linux/common/os/i915/mos_bufmgr.c
 index bca411b..aa99629 100644
 --- a/media_softlet/linux/common/os/i915/mos_bufmgr.c
@@ -213,7 +230,7 @@ index bca411b..aa99629 100644
          if (bo_gem->gtt_virtual == MAP_FAILED) {
              bo_gem->gtt_virtual = nullptr;
 diff --git a/media_softlet/linux/common/os/i915/xf86drm.c b/media_softlet/linux/common/os/i915/xf86drm.c
-index 9b2412c..0d17947 100644
+index 9b2412c..914e717 100644
 --- a/media_softlet/linux/common/os/i915/xf86drm.c
 +++ b/media_softlet/linux/common/os/i915/xf86drm.c
 @@ -53,6 +53,7 @@
@@ -224,10 +241,11 @@ index 9b2412c..0d17947 100644
  #ifdef HAVE_SYS_MKDEV_H
  # include <sys/mkdev.h> /* defines major(), minor(), and makedev() on Solaris */
  #endif
-@@ -162,11 +163,36 @@ void drmFree(void *pt)
+@@ -162,17 +163,47 @@ void drmFree(void *pt)
  #if defined(__cplusplus)
  extern "C" {
  #endif
+-drm_export int
 +/*
 + * nopeekOS: on a virtio_gpu render node the i915 ioctls, and the generic
 + * ones a GEM driver issues (GEM_CLOSE, FLINK, OPEN, PRIME, SYNCOBJ), go
@@ -250,7 +268,12 @@ index 9b2412c..0d17947 100644
 +    }
 +}
 +
- drm_export int
++/*
++ * nopeekOS: not exported. libnpk_intel_virtio is loaded with this driver,
++ * and its libdrm calls (drmIoctl on the virtio_gpu fd) would resolve to an
++ * exported drmIoctl here first, and loop back into the routing below.
++ */
++int
  mosdrmIoctl(int fd, unsigned long request, void *arg)
  {
      int    ret;
@@ -261,3 +284,23 @@ index 9b2412c..0d17947 100644
      do {
      ret = ioctl(fd, request, arg);
      } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+     return ret;
+ }
+-drm_export int
++int
+ drmIoctl(int fd, unsigned long request, void *arg)
+ {
+     return mosdrmIoctl(fd,request,arg);
+diff --git a/media_softlet/linux/common/os/xe/include/mos_bufmgr_xe.h b/media_softlet/linux/common/os/xe/include/mos_bufmgr_xe.h
+index fdad7b3..53b0ba6 100644
+--- a/media_softlet/linux/common/os/xe/include/mos_bufmgr_xe.h
++++ b/media_softlet/linux/common/os/xe/include/mos_bufmgr_xe.h
+@@ -47,7 +47,7 @@
+ #if defined(__cplusplus)
+ extern "C" {
+ #endif
+-extern drm_export int drmIoctl(int fd, unsigned long request, void *arg);
++extern int drmIoctl(int fd, unsigned long request, void *arg);
+ 
+ #if (_DEBUG || _RELEASE_INTERNAL)
+ /**
