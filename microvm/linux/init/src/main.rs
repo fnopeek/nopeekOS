@@ -228,7 +228,8 @@ fn launch_wayland(kmsg_fd: i64) {
     // to the console (`set microvm_cmdline npklogs`). `npksupport` writes
     // the graphics and media sections of about:support to it as `[about]`
     // lines, 20 s and 90 s after the browser started. `npkgdb` writes the
-    // backtrace of a crashing media decoder process as `[gdb]` lines.
+    // backtrace of a crashing media decoder process as `[gdb]` lines;
+    // `npkgdb=SECONDS` also the stacks of its media threads after that long.
     // `npkprofile=<ip>:<port>` on the command line runs the app under the
     // Gecko startup profiler and, after it exits, sends the gzipped profile
     // to that address (`nc -l` on the receiving side).
@@ -694,7 +695,7 @@ const LW_SAMPLE: &[u8] = include_bytes!("lw_sample.sh");
 /// System load per second (`npkload` on the cmdline).
 const LOAD_SAMPLE: &[u8] = include_bytes!("load_sample.sh");
 
-/// Backtraces of crashing media decoder processes (`npkgdb` on the cmdline).
+/// Backtraces of crashing or hanging media decoder processes (`npkgdb`).
 const RDD_GDB: &[u8] = include_bytes!("rdd_gdb.sh");
 
 /// The guest compositor, built by `microvm/linux/npkwm/build.sh`.
