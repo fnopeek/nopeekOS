@@ -398,12 +398,11 @@ impl native_stats {
                     .dec(self.total_max_us[k] / 1000).s(" ms (running ").dec(self.run_max_us[k] / 1000).s(" ms);");
             }
             l.s(" poll gap max ").dec(self.poll_gap_us / 1000).s(" ms, loop pass max ").dec(self.loop_max_us / 1000)
-                .s(" ms, held ").dec(self.held as u64);
+                .s(" ms, held ").dec(self.held as u64).say();
             if self.mhz_n != 0 {
-                l.s("; GPU actual avg ").dec(self.mhz_sum / self.mhz_n as u64).s(" MHz, min ").dec(self.mhz_min as u64)
-                    .s(", limit reasons ").hex(self.limits);
+                Line::new().s("native context, GPU actual avg ").dec(self.mhz_sum / self.mhz_n as u64).s(" MHz, min ")
+                    .dec(self.mhz_min as u64).s(", limit reasons ").hex(self.limits).say();
             }
-            l.say();
             let mut l = Line::new();
             l.s("native context, rcs by client:");
             for c in 0..STATS_CLIENTS {
