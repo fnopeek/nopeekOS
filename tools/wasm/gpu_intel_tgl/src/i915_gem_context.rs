@@ -300,6 +300,13 @@ pub struct native_stats {
     client_rcs: [u32; STATS_CLIENTS],
     client_run_us: [u64; STATS_CLIENTS],
     held: u32,
+    /// The actual GPU frequency sampled while awake (sum, samples, min),
+    /// the last sample, and every throttle reason seen.
+    mhz_sum: u64,
+    mhz_n: u32,
+    mhz_min: u32,
+    mhz_at_us: u64,
+    limits: u32,
     /// The last `poll` with requests pending and the widest gap between
     /// two such polls: how late a completed request can be noticed.
     poll_us: u64,
@@ -312,6 +319,7 @@ impl native_stats {
     const EMPTY: native_stats = native_stats {
         since_us: 0, reqs: [0; 4], total_sum_us: [0; 4], total_max_us: [0; 4], run_max_us: [0; 4],
         client_id: [0; STATS_CLIENTS], client_rcs: [0; STATS_CLIENTS], client_run_us: [0; STATS_CLIENTS], held: 0,
+        mhz_sum: 0, mhz_n: 0, mhz_min: u32::MAX, mhz_at_us: 0, limits: 0,
         poll_us: 0, poll_gap_us: 0, loop_max_us: 0,
     };
 
@@ -321,6 +329,20 @@ impl native_stats {
 
     pub fn note_loop(&mut self, us: u64) {
         self.loop_max_us = self.loop_max_us.max(us);
+    }
+
+    /// Samples the actual frequency at most every `MHZ_SAMPLE_US` while
+    /// requests are pending.
+    pub fn note_freq(&mut self, i915: &mut drm_i915_private, now: u64) {
+        if self.poll_us == 0 || now - self.mhz_at_us < MHZ_SAMPLE_US {
+            return;
+        }
+        self.mhz_at_us = now;
+        let mhz = crate::intel_rps::intel_rps_read_actual_frequency(i915);
+        self.mhz_sum += mhz as u64;
+        self.mhz_n += 1;
+        self.mhz_min = self.mhz_min.min(mhz);
+        self.limits |= crate::intel_rps::perf_limit_reasons(i915);
     }
 
     fn note_done(&mut self, class: usize, client_id: u32, p: &pending, now: u64) {
@@ -376,7 +398,12 @@ impl native_stats {
                     .dec(self.total_max_us[k] / 1000).s(" ms (running ").dec(self.run_max_us[k] / 1000).s(" ms);");
             }
             l.s(" poll gap max ").dec(self.poll_gap_us / 1000).s(" ms, loop pass max ").dec(self.loop_max_us / 1000)
-                .s(" ms, held ").dec(self.held as u64).say();
+                .s(" ms, held ").dec(self.held as u64);
+            if self.mhz_n != 0 {
+                l.s("; GPU actual avg ").dec(self.mhz_sum / self.mhz_n as u64).s(" MHz, min ").dec(self.mhz_min as u64)
+                    .s(", limit reasons ").hex(self.limits);
+            }
+            l.say();
             let mut l = Line::new();
             l.s("native context, rcs by client:");
             for c in 0..STATS_CLIENTS {
@@ -394,6 +421,8 @@ impl native_stats {
 
 /// The span `native_stats` sums over.
 const STATS_US: u64 = 10_000_000;
+/// How often `note_freq` reads the frequency.
+const MHZ_SAMPLE_US: u64 = 5_000;
 /// Client slots `native_stats` tells apart.
 const STATS_CLIENTS: usize = 8;
 

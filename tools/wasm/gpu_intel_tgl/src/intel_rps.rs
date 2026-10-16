@@ -443,12 +443,27 @@ pub fn intel_rps_get_max_raw_freq(gt: &intel_gt) -> u32 {
 pub fn report(i915: &mut drm_i915_private, gt: &intel_gt, when: &str) {
     let u = &mut i915.uncore;
     let swreq = u.intel_uncore_read(GEN6_RPNSWREQ);
-    let rpstat = u.intel_uncore_read(GEN6_RPSTAT1);
     let ctl = u.intel_uncore_read(GEN6_RP_CONTROL);
-    let cagf = crate::intel_gt::reg_field_get(GEN12_CAGF_MASK, rpstat);
+    let cagf = read_cagf(i915);
     Line::new().s("RPS ").s(when).s(": enabled ").dec(gt.rps.enabled as u64).s(", requested ")
         .dec(intel_gpu_freq(swreq >> 23) as u64).s(" MHz, actual ").dec(intel_gpu_freq(cagf) as u64)
         .s(" MHz, RP_CONTROL ").hex(ctl).say();
+}
+
+/// `intel_rps_read_rpstat` + `intel_rps_get_cagf` (graphics version 12).
+fn read_cagf(i915: &mut drm_i915_private) -> u32 {
+    let rpstat = i915.uncore.intel_uncore_read(GEN12_RPSTAT1);
+    crate::intel_gt::reg_field_get(GEN12_CAGF_MASK, rpstat)
+}
+
+/// `intel_rps_read_actual_frequency`, in MHz.
+pub fn intel_rps_read_actual_frequency(i915: &mut drm_i915_private) -> u32 {
+    intel_gpu_freq(read_cagf(i915))
+}
+
+/// `GT0_PERF_LIMIT_REASONS`: why the frequency is held below the request.
+pub fn perf_limit_reasons(i915: &mut drm_i915_private) -> u32 {
+    i915.uncore.intel_uncore_read(GT0_PERF_LIMIT_REASONS) & GT0_PERF_LIMIT_REASONS_MASK
 }
 
 /// `ktime_get`, in ns.

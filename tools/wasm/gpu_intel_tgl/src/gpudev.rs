@@ -733,6 +733,9 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
             crate::i915_gem_execbuffer::run_held(st, &mut d);
             let now = linux::now_us();
             st.stats.note_loop(now - pass_us);
+            if crate::intel_gt_pm::intel_gt_pm_is_awake(gt) {
+                st.stats.note_freq(i915, now);
+            }
             st.stats.report(now);
         });
 
