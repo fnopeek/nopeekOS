@@ -46,8 +46,11 @@ Der Arbeitsbaum fuer `tools/wasm/gpu_intel_tgl/gen_regs.py` ist
 `~/.cache/nopeekos/i915-work` (include/, arch/x86/include/,
 drivers/gpu/drm/i915/ aus dem Tarball plus die erzeugten Header eines
 `CONFIG_DRM_I915=m`-Builds in `kb/`) **und zusaetzlich
-`drivers/gpu/drm/drm_fourcc.c`** (Formattabelle, Bytes je Pixel), kopiert
-aus `~/.cache/nopeekos/linux-src/linux-6.18.55`. Ein voller Lauf dauert
+`drivers/gpu/drm/drm_fourcc.c`** (Formattabelle, Bytes je Pixel),
+**`drm_edid.c`** mit `drm_crtc_internal.h`, `drm_displayid_internal.h`,
+`drm_internal.h` und **`display/drm_dp_helper.c`** mit
+`drm_dp_helper_internal.h` (EDID/ELD und AUX-Konstanten), kopiert aus
+`~/.cache/nopeekos/linux-src/linux-6.18.55`. Ein voller Lauf dauert
 rund zwei Minuten.
 
 Zwei Stufen der Plattformwahl, beide maschinell:

@@ -2027,3 +2027,101 @@ pub const RING_WAIT_SEMAPHORE: u32 = 0x400; // gt/intel_engine_regs.h:31
 pub const MI_BATCH_BUFFER_START_GEN8: u32 = 0x18800001; // gt/intel_gpu_commands.h:188
 pub const MI_ARB_DISABLE: u32 = 0x0; // gt/intel_gpu_commands.h:61
 pub const I915_DISPATCH_SECURE: u64 = 0x1; // gt/intel_engine_types.h:540
+
+// DP AUX transfers (display/intel_dp_aux.c, intel_dp_aux_regs.h, include/drm/display/drm_dp.h)
+pub const DP_AUX_CH_CTL_SEND_BUSY: u32 = 0x80000000; // display/intel_dp_aux_regs.h:46
+pub const DP_AUX_CH_CTL_DONE: u32 = 0x40000000; // display/intel_dp_aux_regs.h:47
+pub const DP_AUX_CH_CTL_INTERRUPT: u32 = 0x20000000; // display/intel_dp_aux_regs.h:48
+pub const DP_AUX_CH_CTL_TIME_OUT_ERROR: u32 = 0x10000000; // display/intel_dp_aux_regs.h:49
+pub const DP_AUX_CH_CTL_TIME_OUT_MAX: u32 = 0xc000000; // display/intel_dp_aux_regs.h:54
+pub const DP_AUX_CH_CTL_RECEIVE_ERROR: u32 = 0x2000000; // display/intel_dp_aux_regs.h:55
+pub const DP_AUX_CH_CTL_MESSAGE_SIZE_MASK: u32 = 0x1f00000; // display/intel_dp_aux_regs.h:56
+/// display/intel_dp_aux_regs.h:57
+pub const fn DP_AUX_CH_CTL_MESSAGE_SIZE(sz: u32) -> u32 { (((((sz))) << 20) & 0x1f00000) }
+/// display/intel_dp_aux_regs.h:74
+pub const fn DP_AUX_CH_CTL_FW_SYNC_PULSE_SKL(c: u32) -> u32 { (((((c) - 1)) << 5) & 0x3e0) }
+/// display/intel_dp_aux_regs.h:76
+pub const fn DP_AUX_CH_CTL_SYNC_PULSE_SKL(c: u32) -> u32 { (((((c) - 1)) << 0) & 0x1f) }
+pub const DP_AUX_CH_CTL_TBT_IO: u32 = 0x800; // display/intel_dp_aux_regs.h:70
+pub const DP_AUX_NATIVE_WRITE: u32 = 0x8; // ?
+pub const DP_AUX_NATIVE_READ: u32 = 0x9; // ?
+pub const DP_AUX_I2C_WRITE: u32 = 0x0; // ?
+pub const DP_AUX_I2C_READ: u32 = 0x1; // ?
+pub const DP_AUX_I2C_WRITE_STATUS_UPDATE: u32 = 0x2; // ?
+pub const DP_AUX_I2C_MOT: u32 = 0x4; // ?
+pub const DP_AUX_NATIVE_REPLY_ACK: u32 = 0x0; // ?
+pub const DP_AUX_NATIVE_REPLY_NACK: u32 = 0x1; // ?
+pub const DP_AUX_NATIVE_REPLY_DEFER: u32 = 0x2; // ?
+pub const DP_AUX_NATIVE_REPLY_MASK: u32 = 0x3; // ?
+pub const DP_AUX_I2C_REPLY_ACK: u32 = 0x0; // ?
+pub const DP_AUX_I2C_REPLY_NACK: u32 = 0x4; // ?
+pub const DP_AUX_I2C_REPLY_DEFER: u32 = 0x8; // ?
+pub const DP_AUX_I2C_REPLY_MASK: u32 = 0xc; // ?
+pub const DP_AUX_MAX_PAYLOAD_BYTES: u32 = 0x10; // ?
+pub const DP_DPCD_REV: u32 = 0x0; // ?
+pub const DP_RECEIVER_CAP_SIZE: u32 = 0xf; // ?
+pub const DP_DOWNSTREAMPORT_PRESENT: u32 = 0x5; // ?
+pub const DP_DWN_STRM_PORT_PRESENT: u32 = 0x1; // ?
+pub const DP_DWN_STRM_PORT_TYPE_MASK: u32 = 0x6; // ?
+pub const DP_DOWNSTREAM_PORT_0: u32 = 0x80; // ?
+pub const DP_DS_PORT_TYPE_MASK: u32 = 0x7; // ?
+pub const DP_DS_PORT_TYPE_HDMI: u32 = 0x3; // ?
+pub const DP_DS_PORT_TYPE_DP_DUALMODE: u32 = 0x5; // ?
+pub const DP_LANE0_1_STATUS: u32 = 0x202; // ?
+pub const DP_TRAINING_AUX_RD_INTERVAL: u32 = 0xe; // ?
+pub const DP_EXTENDED_RECEIVER_CAP_FIELD_PRESENT: u32 = 0x80; // ?
+pub const DP_DP13_DPCD_REV: u32 = 0x2200; // ?
+pub const DP_SINK_COUNT: u32 = 0x200; // ?
+pub const DP_BRANCH_OUI: u32 = 0x500; // ?
+pub const DP_BRANCH_ID: u32 = 0x503; // ?
+
+// EDID and ELD (drm_edid.c, include/drm/drm_edid.h)
+pub const DDC_ADDR: u32 = 0x50; // ?
+pub const DDC_SEGMENT_ADDR: u32 = 0x30; // ?
+pub const EDID_LENGTH: u32 = 0x80; // ?
+pub const CEA_EXT: u32 = 0x2; // ?
+pub const CTA_DB_AUDIO: u32 = 0x1; // ?
+pub const CTA_DB_VENDOR: u32 = 0x3; // ?
+pub const CTA_DB_SPEAKER: u32 = 0x4; // ?
+pub const CTA_DB_EXTENDED_TAG: u32 = 0x7; // ?
+pub const EDID_DETAIL_MONITOR_NAME: u32 = 0xfc; // ?
+pub const MAX_ELD_BYTES: u32 = 0x80; // ?
+pub const DRM_ELD_VER: u32 = 0x0; // ?
+pub const DRM_ELD_VER_SHIFT: u32 = 0x3; // ?
+pub const DRM_ELD_VER_CEA861D: u32 = 0x10; // ?
+pub const DRM_ELD_BASELINE_ELD_LEN: u32 = 0x2; // ?
+pub const DRM_ELD_HEADER_BLOCK_SIZE: u32 = 0x4; // ?
+pub const DRM_ELD_CEA_EDID_VER_MNL: u32 = 0x4; // ?
+pub const DRM_ELD_CEA_EDID_VER_SHIFT: u32 = 0x5; // ?
+pub const DRM_ELD_MNL_SHIFT: u32 = 0x0; // ?
+pub const DRM_ELD_SAD_COUNT_CONN_TYPE: u32 = 0x5; // ?
+pub const DRM_ELD_SAD_COUNT_SHIFT: u32 = 0x4; // ?
+pub const DRM_ELD_CONN_TYPE_DP: u32 = 0x4; // ?
+pub const DRM_ELD_SPEAKER: u32 = 0x7; // ?
+pub const DRM_ELD_PORT_ID: u32 = 0x8; // ?
+pub const DRM_ELD_MANUFACTURER_NAME0: u32 = 0x10; // ?
+pub const DRM_ELD_PRODUCT_CODE0: u32 = 0x12; // ?
+pub const DRM_ELD_MONITOR_NAME_STRING: u32 = 0x14; // ?
+pub const AUX_RETRY_INTERVAL: u32 = 0x1f4; // ?
+pub const DP_DS_PORT_HPD: u32 = 0x8; // ?
+pub const DP_DS_PORT_TYPE_VGA: u32 = 0x1; // ?
+pub const DP_DS_PORT_TYPE_NON_EDID: u32 = 0x4; // ?
+pub const DP_DWN_STRM_PORT_TYPE_ANALOG: u32 = 0x2; // ?
+pub const DP_DWN_STRM_PORT_TYPE_OTHER: u32 = 0x6; // ?
+pub const DP_DETAILED_CAP_INFO_AVAILABLE: u32 = 0x10; // ?
+pub const DP_DPCD_REV_10: u32 = 0x10; // ?
+pub const DP_DPCD_REV_11: u32 = 0x11; // ?
+pub const DP_MAX_DOWNSTREAM_PORTS: u32 = 0x10; // ?
+pub const DP_DOWN_STREAM_PORT_COUNT: u32 = 0x7; // ?
+pub const DP_PORT_COUNT_MASK: u32 = 0xf; // ?
+pub const DP_TRAINING_PATTERN_SET: u32 = 0x102; // ?
+pub const DRM_ELD_CONN_TYPE_HDMI: u32 = 0x0; // ?
+pub const DRM_ELD_MANUFACTURER_NAME1: u32 = 0x11; // ?
+pub const DRM_ELD_PRODUCT_CODE1: u32 = 0x13; // ?
+pub const DRM_ELD_MNL_MASK: u32 = 0x1f; // ?
+pub const DRM_ELD_SAD_COUNT_MASK: u32 = 0xf0; // ?
+pub const EDID_BASIC_AUDIO: u32 = 0x40; // ?
+pub const I2C_M_RD: u32 = 0x1; // ?
+pub const I2C_M_STOP: u32 = 0x8000; // ?
+pub const DRM_ELD_SUPPORTS_AI: u32 = 0x2; // ?
+pub const DP_SINK_OUI: u32 = 0x400; // ?

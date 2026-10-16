@@ -565,7 +565,7 @@ pub fn intel_ddi_sync_state(i915: &mut drm_i915_private, o: &mut intel_outputs, 
     }
 
     if crtc_state.is_some_and(|cs| cs.has_dp_encoder()) || (crtc_state.is_none() && intel_encoder_is_dp(o, encoder)) {
-        intel_dp::intel_dp_sync_state(o, vbt, encoder, crtc_state);
+        intel_dp::intel_dp_sync_state(i915, o, vbt, encoder, crtc_state);
     }
 }
 

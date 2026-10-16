@@ -25,6 +25,8 @@
 extern crate alloc;
 
 mod compose;
+mod drm_edid;
+mod intel_dp_aux;
 mod plan;
 mod drm_mm;
 mod gpudev;
@@ -314,6 +316,9 @@ pub extern "C" fn _start() {
     intel_ddi::intel_setup_outputs(&mut i915, &bios, &drt);
     log_outputs(&i915);
     intel_modeset_setup::intel_modeset_setup_hw_state(&mut i915, opregion.as_ref());
+    // The client's first probe (drm_client_modeset_probe): every connector
+    // is detected once.
+    intel_dp::intel_dp_detect_all(&mut i915);
     let pte0 = ggtt.regs.readq(ggtt.gsm_offset);
     log_initial_plane_config(&mut i915, &mut ggtt, dsm.as_mut());
     Line::new().s("GGTT[0] raw ").hex((pte0 >> 32) as u32).s("_").hex(pte0 as u32).s(" before, ")

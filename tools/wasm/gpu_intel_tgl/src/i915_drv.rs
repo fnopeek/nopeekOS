@@ -86,6 +86,23 @@ pub struct intel_display {
     pub dbuf_state: crate::skl_watermark::intel_dbuf_state,
     /// `display->bw.obj.state`.
     pub bw_state: crate::intel_bw::intel_bw_state,
+    /// Per connector, what the detect read from the sink's EDID.
+    pub connector_audio: [connector_audio; crate::intel_encoder::MAX_CONNECTORS],
+}
+
+/// `connector->display_info.has_audio`, `connector->eld` and the HDMI
+/// VSDB latencies.
+#[derive(Clone, Copy)]
+pub struct connector_audio {
+    pub has_audio: bool,
+    pub eld: [u8; crate::regs::MAX_ELD_BYTES as usize],
+    pub latency: crate::drm_edid::av_latency,
+}
+
+impl Default for connector_audio {
+    fn default() -> Self {
+        connector_audio { has_audio: false, eld: [0; crate::regs::MAX_ELD_BYTES as usize], latency: Default::default() }
+    }
 }
 
 /// `struct drm_i915_private`, as far as this stage needs it.

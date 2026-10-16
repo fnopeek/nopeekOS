@@ -5,7 +5,8 @@
 //!
 //! What the init only registers with DRM (connector funcs, properties,
 //! the MST topology manager, HDCP, PSR works, the CPU latency request) has
-//! no hardware side and is left out; nothing here talks AUX yet.
+//! no hardware side and is left out. `intel_dp_detect` reads the DPCD and
+//! the EDID over AUX.
 
 use crate::i915_drv::drm_i915_private;
 use crate::intel_bios;
@@ -422,18 +423,24 @@ pub fn intel_dp_init_connector(i915: &mut drm_i915_private, o: &mut intel_output
     true
 }
 
-/// `intel_dp_sync_state`. The DPCD read that Linux does for an active
-/// output (`intel_dp_get_dpcd`) needs AUX transfers, which are not ported;
-/// it is reported and skipped. `intel_dp_tunnel_resume` is empty without
+/// `intel_dp_sync_state`. `intel_dp_tunnel_resume` is empty without
 /// CONFIG_DRM_I915_DP_TUNNEL.
-pub fn intel_dp_sync_state(o: &mut intel_outputs, vbt: &intel_bios::intel_bios_display, encoder: usize,
-                           crtc_state: Option<&intel_crtc_state>) {
+pub fn intel_dp_sync_state(i915: &mut drm_i915_private, o: &mut intel_outputs, vbt: &intel_bios::intel_bios_display,
+                           encoder: usize, crtc_state: Option<&intel_crtc_state>) {
     let Some(d) = o.dig_port_of(encoder) else {
         return;
     };
-    if crtc_state.is_some() && o.dig_ports[d].dp.dpcd_rev == 0 {
-        Line::new().s("[ENCODER:").s(o.encoders[encoder].name())
-            .s("] intel_dp_get_dpcd skipped: AUX transfers are not ported").say();
+    // Don't clobber DPCD if it's been already read out during output setup
+    // (eDP) or detect.
+    if crtc_state.is_some() && o.dig_ports[d].dp.dpcd[DP_DPCD_REV as usize] == 0 {
+        let connector_type = o.dig_ports[d].dp.attached_connector
+            .map(|c| o.connectors[c].connector_type).unwrap_or(DRM_MODE_CONNECTOR_DisplayPort);
+        let mut dp = o.dig_ports[d].dp;
+        let mut aux = crate::intel_dp_aux::drm_dp_aux {
+            i915, o: &mut *o, d, dpcd_probe_disabled: false, i2c_nack_count: 0, i2c_defer_count: 0,
+        };
+        intel_dp_get_dpcd(&mut aux, &mut dp, connector_type);
+        o.dig_ports[d].dp = dp;
     }
 
     if let Some(cs) = crtc_state {
@@ -441,5 +448,213 @@ pub fn intel_dp_sync_state(o: &mut intel_outputs, vbt: &intel_bios::intel_bios_d
         let dp = &mut o.dig_ports[d].dp;
         intel_dp_set_link_params(dp, cs.port_clock, cs.lane_count);
         dp.link.active = true;
+    }
+}
+
+/// `drm_dp_read_desc`: the sink's or branch's OUI and identity.
+fn drm_dp_read_desc(aux: &mut crate::intel_dp_aux::drm_dp_aux, is_branch: bool, ident: &mut [u8; 12]) -> i32 {
+    let offset = if is_branch { DP_BRANCH_OUI } else { DP_SINK_OUI };
+    crate::intel_dp_aux::drm_dp_dpcd_read_data(aux, offset, ident)
+}
+
+/// `intel_dp_has_sink_count`.
+fn intel_dp_has_sink_count(dp: &intel_dp, connector_type: u32) -> bool {
+    crate::intel_dp_aux::drm_dp_read_sink_count_cap(connector_type, &dp.dpcd)
+}
+
+/// `intel_dp_get_dpcd`. LTTPRs are not detected (the DPCD is read through
+/// them in transparent mode); colorimetry and the sink's link rates are
+/// left to the link training, which is not ported.
+fn intel_dp_get_dpcd(aux: &mut crate::intel_dp_aux::drm_dp_aux, dp: &mut intel_dp, connector_type: u32) -> bool {
+    let mut dpcd = [0u8; DP_RECEIVER_CAP_SIZE as usize];
+    if crate::intel_dp_aux::drm_dp_read_dpcd_caps(aux, &mut dpcd) < 0 {
+        return false;
+    }
+    dp.dpcd = dpcd;
+    dp.dpcd_rev = dpcd[DP_DPCD_REV as usize];
+
+    let mut ident = [0u8; 12];
+    if drm_dp_read_desc(aux, crate::intel_dp_aux::drm_dp_is_branch(&dpcd), &mut ident) == 0 {
+        dp.desc_ident = ident;
+    }
+
+    if intel_dp_has_sink_count(dp, connector_type) {
+        let ret = crate::intel_dp_aux::drm_dp_read_sink_count(aux);
+        if ret < 0 {
+            return false;
+        }
+        dp.sink_count = ret;
+        // SINK_COUNT == 0 with a downstream port: a dongle without a display.
+        if dp.sink_count == 0 {
+            return false;
+        }
+    }
+
+    let mut ports = [0u8; DP_MAX_DOWNSTREAM_PORTS as usize];
+    let ok = crate::intel_dp_aux::drm_dp_read_downstream_info(aux, &dpcd, &mut ports) == 0;
+    dp.downstream_ports = ports;
+    ok
+}
+
+/// `drm_probe_ddc`: a one-byte read at the EDID address.
+fn drm_probe_ddc(aux: &mut crate::intel_dp_aux::drm_dp_aux) -> bool {
+    let mut offset = [0u8; 1];
+    let mut byte = [0u8; 1];
+    let mut msgs = [
+        crate::intel_dp_aux::i2c_msg { addr: DDC_ADDR, flags: 0, buf: &mut offset },
+        crate::intel_dp_aux::i2c_msg { addr: DDC_ADDR, flags: I2C_M_RD, buf: &mut byte },
+    ];
+    crate::intel_dp_aux::drm_dp_i2c_xfer(aux, &mut msgs) == 2
+}
+
+/// `enum drm_connector_status`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum connector_status {
+    connected,
+    disconnected,
+    unknown,
+}
+
+/// `intel_dp_detect_dpcd`. No LSPCON on this board, and MST is not
+/// detected (the topology manager is not ported).
+fn intel_dp_detect_dpcd(aux: &mut crate::intel_dp_aux::drm_dp_aux, dp: &mut intel_dp, connector_type: u32)
+                        -> connector_status {
+    if !intel_dp_get_dpcd(aux, dp, connector_type) {
+        return connector_status::disconnected;
+    }
+
+    // if there's no downstream port, we're done
+    if !crate::intel_dp_aux::drm_dp_is_branch(&dp.dpcd) {
+        return connector_status::connected;
+    }
+
+    // If we're HPD-aware, SINK_COUNT changes dynamically.
+    if intel_dp_has_sink_count(dp, connector_type) && dp.downstream_ports[0] & DP_DS_PORT_HPD as u8 != 0 {
+        return if dp.sink_count != 0 { connector_status::connected } else { connector_status::disconnected };
+    }
+
+    // If no HPD, poke DDC gently.
+    if drm_probe_ddc(aux) {
+        return connector_status::connected;
+    }
+
+    // Well we tried, say unknown for unreliable port types.
+    if dp.dpcd[DP_DPCD_REV as usize] >= 0x11 {
+        let type_ = dp.downstream_ports[0] as u32 & DP_DS_PORT_TYPE_MASK;
+        if type_ == DP_DS_PORT_TYPE_VGA || type_ == DP_DS_PORT_TYPE_NON_EDID {
+            return connector_status::unknown;
+        }
+    } else {
+        let type_ = dp.dpcd[DP_DOWNSTREAMPORT_PRESENT as usize] as u32 & DP_DWN_STRM_PORT_TYPE_MASK;
+        if type_ == DP_DWN_STRM_PORT_TYPE_ANALOG || type_ == DP_DWN_STRM_PORT_TYPE_OTHER {
+            return connector_status::unknown;
+        }
+    }
+
+    // Anything else is out of spec.
+    connector_status::disconnected
+}
+
+/// Short audio descriptor rates (`cea_sad.freq` bits), in Hz.
+const SAD_RATES: [u32; 7] = [32000, 44100, 48000, 88200, 96000, 176400, 192000];
+
+/// One line naming what was found: DPCD, branch, EDID and audio.
+fn log_detect(name: &str, dp: &intel_dp, monitor: &[u8], blocks: usize, a: &crate::i915_drv::connector_audio,
+              sads: usize) {
+    let mut l = Line::new();
+    l.s("[CONNECTOR:").s(name).s("] DPCD ").dec((dp.dpcd_rev >> 4) as u64).s(".").dec((dp.dpcd_rev & 0xf) as u64);
+    if crate::intel_dp_aux::drm_dp_is_branch(&dp.dpcd) {
+        let id = &dp.desc_ident;
+        l.s(", branch OUI ").hex(((id[0] as u32) << 16) | ((id[1] as u32) << 8) | id[2] as u32).s(" \"");
+        for &b in &id[3..9] {
+            if (0x20..0x7f).contains(&b) {
+                l.s(core::str::from_utf8(&[b]).unwrap_or("?"));
+            }
+        }
+        l.s("\", port type ").dec(((dp.downstream_ports[0] as u32 & DP_DS_PORT_TYPE_MASK) >> 0) as u64)
+            .s(", sink count ").dec(dp.sink_count as u64);
+    }
+    l.s("; EDID \"").s(core::str::from_utf8(monitor).unwrap_or("?")).s("\", ").dec(blocks as u64).s(" blocks, audio ")
+        .s(if a.has_audio { "yes" } else { "no" }).s(", ").dec(sads as u64).s(" SADs");
+    l.say();
+    let mnl = (a.eld[DRM_ELD_CEA_EDID_VER_MNL as usize] as usize) & DRM_ELD_MNL_MASK as usize;
+    for i in 0..sads {
+        let sad = &a.eld[20 + mnl + 3 * i..20 + mnl + 3 * i + 3];
+        let mut l = Line::new();
+        l.s("  SAD ").dec(i as u64).s(": format ").dec(((sad[0] >> 3) & 0xf) as u64).s(", ")
+            .dec(((sad[0] & 7) + 1) as u64).s(" ch,");
+        for (b, r) in SAD_RATES.iter().enumerate() {
+            if sad[1] & (1 << b) != 0 {
+                l.s(" ").dec(*r as u64);
+            }
+        }
+        l.s(" Hz").say();
+    }
+}
+
+/// `intel_dp_detect` for one DisplayPort connector, the parts with a
+/// hardware side: the port's connection, the DPCD, and the EDID with the
+/// display info's audio and the ELD (`intel_dp_set_edid` →
+/// `drm_edid_connector_update`). PSR, DSC and SDP caps, MST and the link
+/// state check are not ported.
+fn intel_dp_detect(i915: &mut drm_i915_private, c: usize) {
+    let mut o = i915.display.outputs;
+    let enc = o.connectors[c].encoder;
+    let connector_type = o.connectors[c].connector_type;
+    let Some(d) = o.dig_port_of(enc) else { return };
+    let name: alloc::string::String = o.encoders[enc].name().into();
+
+    let mut aux = crate::intel_dp_aux::drm_dp_aux {
+        i915: &mut *i915, o: &mut o, d, dpcd_probe_disabled: false, i2c_nack_count: 0, i2c_defer_count: 0,
+    };
+
+    // The DPCD probe is on for this detect (intel_dp_dpcd_set_probe at
+    // init), as for any first detect.
+    let status = if crate::intel_dp_aux::intel_digital_port_connected(aux.i915, aux.o, d) {
+        let mut dp = aux.o.dig_ports[d].dp;
+        let st = intel_dp_detect_dpcd(&mut aux, &mut dp, connector_type);
+        aux.o.dig_ports[d].dp = dp;
+        st
+    } else {
+        connector_status::disconnected
+    };
+
+    let mut a = crate::i915_drv::connector_audio::default();
+    if status == connector_status::disconnected {
+        i915.display.outputs = o;
+        i915.display.connector_audio[c] = a;
+        return;
+    }
+
+    // intel_dp_set_edid
+    let edid = crate::drm_edid::drm_edid_read_ddc(&mut aux);
+    let dp = aux.o.dig_ports[d].dp;
+    let mut monitor = [0u8; 13];
+    let mut mnl = 0;
+    let mut blocks = 0;
+    let mut sads = 0;
+    if let Some(e) = edid.as_ref() {
+        blocks = e.edid.len() / EDID_LENGTH as usize;
+        mnl = crate::drm_edid::monitor_name(e, &mut monitor);
+        a.has_audio = crate::drm_edid::drm_detect_monitor_audio(e);
+        let is_dp = connector_type == DRM_MODE_CONNECTOR_DisplayPort || connector_type == DRM_MODE_CONNECTOR_eDP;
+        sads = crate::drm_edid::drm_edid_to_eld(e, is_dp, &mut a.eld, &mut a.latency);
+    } else {
+        Line::new().s("[CONNECTOR:").s(&name).s("] connected, but no EDID").say();
+    }
+    i915.display.outputs = o;
+    i915.display.connector_audio[c] = a;
+    if edid.is_some() {
+        log_detect(&name, &dp, &monitor[..mnl], blocks, &a, sads);
+    }
+}
+
+/// Detect every DisplayPort connector once, as the first client probe does.
+pub fn intel_dp_detect_all(i915: &mut drm_i915_private) {
+    for c in 0..i915.display.outputs.n_connectors {
+        let t = i915.display.outputs.connectors[c].connector_type;
+        if t == DRM_MODE_CONNECTOR_DisplayPort {
+            intel_dp_detect(i915, c);
+        }
     }
 }

@@ -1763,3 +1763,96 @@ RING_WAIT_SEMAPHORE
 MI_BATCH_BUFFER_START_GEN8
 MI_ARB_DISABLE
 I915_DISPATCH_SECURE
+# DP AUX transfers (display/intel_dp_aux.c, intel_dp_aux_regs.h, include/drm/display/drm_dp.h)
+DP_AUX_CH_CTL_SEND_BUSY
+DP_AUX_CH_CTL_DONE
+DP_AUX_CH_CTL_INTERRUPT
+DP_AUX_CH_CTL_TIME_OUT_ERROR
+DP_AUX_CH_CTL_TIME_OUT_MAX
+DP_AUX_CH_CTL_RECEIVE_ERROR
+DP_AUX_CH_CTL_MESSAGE_SIZE_MASK
+DP_AUX_CH_CTL_MESSAGE_SIZE(sz) samples 1 3 20
+DP_AUX_CH_CTL_FW_SYNC_PULSE_SKL(c) samples 1 18 32
+DP_AUX_CH_CTL_SYNC_PULSE_SKL(c) samples 1 18 32
+DP_AUX_CH_CTL_TBT_IO
+DP_AUX_NATIVE_WRITE @ display/intel_dp_aux.c
+DP_AUX_NATIVE_READ @ display/intel_dp_aux.c
+DP_AUX_I2C_WRITE @ display/intel_dp_aux.c
+DP_AUX_I2C_READ @ display/intel_dp_aux.c
+DP_AUX_I2C_WRITE_STATUS_UPDATE @ display/intel_dp_aux.c
+DP_AUX_I2C_MOT @ display/intel_dp_aux.c
+DP_AUX_NATIVE_REPLY_ACK @ display/intel_dp_aux.c
+DP_AUX_NATIVE_REPLY_NACK @ display/intel_dp_aux.c
+DP_AUX_NATIVE_REPLY_DEFER @ display/intel_dp_aux.c
+DP_AUX_NATIVE_REPLY_MASK @ display/intel_dp_aux.c
+DP_AUX_I2C_REPLY_ACK @ display/intel_dp_aux.c
+DP_AUX_I2C_REPLY_NACK @ display/intel_dp_aux.c
+DP_AUX_I2C_REPLY_DEFER @ display/intel_dp_aux.c
+DP_AUX_I2C_REPLY_MASK @ display/intel_dp_aux.c
+DP_AUX_MAX_PAYLOAD_BYTES @ display/intel_dp_aux.c
+DP_DPCD_REV @ display/intel_dp_aux.c
+DP_RECEIVER_CAP_SIZE @ display/intel_dp_aux.c
+DP_DOWNSTREAMPORT_PRESENT @ display/intel_dp_aux.c
+DP_DWN_STRM_PORT_PRESENT @ display/intel_dp_aux.c
+DP_DWN_STRM_PORT_TYPE_MASK @ display/intel_dp_aux.c
+DP_DOWNSTREAM_PORT_0 @ display/intel_dp_aux.c
+DP_DS_PORT_TYPE_MASK @ display/intel_dp_aux.c
+DP_DS_PORT_TYPE_HDMI @ display/intel_dp_aux.c
+DP_DS_PORT_TYPE_DP_DUALMODE @ display/intel_dp_aux.c
+DP_LANE0_1_STATUS @ display/intel_dp_aux.c
+DP_TRAINING_AUX_RD_INTERVAL @ display/intel_dp_aux.c
+DP_EXTENDED_RECEIVER_CAP_FIELD_PRESENT @ display/intel_dp_aux.c
+DP_DP13_DPCD_REV @ display/intel_dp_aux.c
+DP_SINK_COUNT @ display/intel_dp_aux.c
+DP_BRANCH_OUI @ display/intel_dp_aux.c
+DP_BRANCH_ID @ display/intel_dp_aux.c
+# EDID and ELD (drm_edid.c, include/drm/drm_edid.h)
+DDC_ADDR @ ../drm_edid.c
+DDC_SEGMENT_ADDR @ ../drm_edid.c
+EDID_LENGTH @ ../drm_edid.c
+CEA_EXT @ ../drm_edid.c
+CTA_DB_AUDIO @ ../drm_edid.c
+CTA_DB_VENDOR @ ../drm_edid.c
+CTA_DB_SPEAKER @ ../drm_edid.c
+CTA_DB_EXTENDED_TAG @ ../drm_edid.c
+EDID_DETAIL_MONITOR_NAME @ ../drm_edid.c
+MAX_ELD_BYTES @ ../drm_edid.c
+DRM_ELD_VER @ ../drm_edid.c
+DRM_ELD_VER_SHIFT @ ../drm_edid.c
+DRM_ELD_VER_CEA861D @ ../drm_edid.c
+DRM_ELD_BASELINE_ELD_LEN @ ../drm_edid.c
+DRM_ELD_HEADER_BLOCK_SIZE @ ../drm_edid.c
+DRM_ELD_CEA_EDID_VER_MNL @ ../drm_edid.c
+DRM_ELD_CEA_EDID_VER_SHIFT @ ../drm_edid.c
+DRM_ELD_MNL_SHIFT @ ../drm_edid.c
+DRM_ELD_SAD_COUNT_CONN_TYPE @ ../drm_edid.c
+DRM_ELD_SAD_COUNT_SHIFT @ ../drm_edid.c
+DRM_ELD_CONN_TYPE_DP @ ../drm_edid.c
+DRM_ELD_SPEAKER @ ../drm_edid.c
+DRM_ELD_PORT_ID @ ../drm_edid.c
+DRM_ELD_MANUFACTURER_NAME0 @ ../drm_edid.c
+DRM_ELD_PRODUCT_CODE0 @ ../drm_edid.c
+DRM_ELD_MONITOR_NAME_STRING @ ../drm_edid.c
+AUX_RETRY_INTERVAL @ ../display/drm_dp_helper.c
+DP_DS_PORT_HPD @ display/intel_dp_aux.c
+DP_DS_PORT_TYPE_VGA @ display/intel_dp_aux.c
+DP_DS_PORT_TYPE_NON_EDID @ display/intel_dp_aux.c
+DP_DWN_STRM_PORT_TYPE_ANALOG @ display/intel_dp_aux.c
+DP_DWN_STRM_PORT_TYPE_OTHER @ display/intel_dp_aux.c
+DP_DETAILED_CAP_INFO_AVAILABLE @ display/intel_dp_aux.c
+DP_DPCD_REV_10 @ display/intel_dp_aux.c
+DP_DPCD_REV_11 @ display/intel_dp_aux.c
+DP_MAX_DOWNSTREAM_PORTS @ display/intel_dp_aux.c
+DP_DOWN_STREAM_PORT_COUNT @ display/intel_dp_aux.c
+DP_PORT_COUNT_MASK @ display/intel_dp_aux.c
+DP_TRAINING_PATTERN_SET @ display/intel_dp_aux.c
+DRM_ELD_CONN_TYPE_HDMI @ ../drm_edid.c
+DRM_ELD_MANUFACTURER_NAME1 @ ../drm_edid.c
+DRM_ELD_PRODUCT_CODE1 @ ../drm_edid.c
+DRM_ELD_MNL_MASK @ ../drm_edid.c
+DRM_ELD_SAD_COUNT_MASK @ ../drm_edid.c
+EDID_BASIC_AUDIO @ ../drm_edid.c
+I2C_M_RD @ ../drm_edid.c
+I2C_M_STOP @ ../drm_edid.c
+DRM_ELD_SUPPORTS_AI @ ../drm_edid.c
+DP_SINK_OUI @ display/intel_dp_aux.c

@@ -168,8 +168,13 @@ pub struct intel_dp {
     /// `intel_dp_mst_source_support`: `mst.mgr.cbs` is set.
     pub mst_source_support: bool,
     pub mst_stream_encoders: [Option<usize>; I915_MAX_PIPES as usize],
-    /// `dpcd[DP_DPCD_REV]`; nothing reads the DPCD yet.
+    /// `dpcd[DP_DPCD_REV]`, 0 until a detect has read the DPCD.
     pub dpcd_rev: u8,
+    pub dpcd: [u8; DP_RECEIVER_CAP_SIZE as usize],
+    pub downstream_ports: [u8; DP_MAX_DOWNSTREAM_PORTS as usize],
+    pub sink_count: i32,
+    /// `intel_dp->desc.ident`: OUI, device id, hardware and software revision.
+    pub desc_ident: [u8; 12],
     pub is_mst: bool,
     pub mso_link_count: i32,
     pub port_clock: i32,
