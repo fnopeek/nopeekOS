@@ -332,9 +332,14 @@ fn launch_wayland(kmsg_fd: i64) {
                    'browser.download.useDownloadDir|true' \
                    'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
                  do k=${p%|*}; v=${p#*|}; \
-                   case $k in gfx.webrender.software|gfx.webrender.max-partial-present-rects|gfx.canvas.accelerated|widget.dmabuf.force-enabled|layers.gpu-process.enabled) [ $GPU = 1 ] && { sed -i \"/\\\"$k\\\"/d\" /tmp/moz/prefs.js 2>/dev/null; chown 1000:1000 /tmp/moz/prefs.js 2>/dev/null; continue; };; esac; \
+                   case $k in gfx.webrender.software|gfx.webrender.max-partial-present-rects|gfx.canvas.accelerated|widget.dmabuf.force-enabled|layers.gpu-process.enabled|media.av1.enabled) [ $GPU = 1 ] && { sed -i \"/\\\"$k\\\"/d\" /tmp/moz/prefs.js 2>/dev/null; chown 1000:1000 /tmp/moz/prefs.js 2>/dev/null; continue; };; esac; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
+                 [ $GPU = 1 ] && for p in \
+                   'media.hardware-video-decoding-vulkan.enabled|true' \
+                   'media.hardware-video-decoding-vulkan.force-enabled|true' \
+                   'webgl.disabled|false'; \
+                 do echo \"user_pref(\\\"${p%|*}\\\", ${p#*|});\" >> /tmp/moz/user.js; done; \
                  echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"browser.download.dir\", \"/tmp/npkhome/downloads\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.cubeb.backend\", \"alsa\");' >> /tmp/moz/user.js; \
@@ -379,6 +384,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ -n \"$SCU\" ] || SCU=release_to_os_interval_ms=-1; \
                  [ \"$SCU\" = off ] || { echo \"export SCUDO_OPTIONS=$SCU\" >> /tmp/app.sh; \
                    echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
+                 [ $GPU = 1 ] && echo 'export ANV_DEBUG=video-decode' >> /tmp/app.sh; \
                  for e in $(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p'); do \
                    echo \"export $e\" >> /tmp/app.sh; echo \"<0>[wl] app env $e\" > /dev/kmsg; done; \
                  NPKAPP=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkapp=//p' | head -1); \
