@@ -1,0 +1,23 @@
+--- a/src/intel/vulkan/anv_device.c
++++ b/src/intel/vulkan/anv_device.c
+@@ -1356,6 +1356,9 @@
+  fail_context_id:
+    anv_device_destroy_context_or_vm(device);
+  fail_fd:
++   /* The sync provider belongs to the virtio device the unref releases. */
++   if (physical_device->info.is_virtio)
++      device->vk.sync = NULL;
+    intel_virtio_unref_fd(device->fd);
+    close(device->fd);
+  fail_device:
+@@ -1510,6 +1513,10 @@
+       }
+    }
+ 
++   /* The sync provider belongs to the virtio device the unref releases. */
++   if (pdevice->info.is_virtio)
++      device->vk.sync = NULL;
++   intel_virtio_unref_fd(device->fd);
+    close(device->fd);
+ 
+    vk_device_finish(&device->vk);
