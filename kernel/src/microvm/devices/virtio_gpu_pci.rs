@@ -175,12 +175,18 @@ const DISPLAY_W: u32 = 1280;
 const DISPLAY_H: u32 = 720;
 
 const NUM_QUEUES: u16 = 2;
-/// Small on purpose: the guest's virtio-gpu driver creates no fence for a
-/// dumb primary buffer and emulates no vblank, so the only thing that paces
-/// its compositor is a full controlq (`virtio_gpu_queue_ctrl_sgs` sleeps
-/// for space). 16 descriptors ≈ two frames (TRANSFER + SET_SCANOUT + FLUSH,
-/// two descriptors each); a larger queue lets it render many frames ahead.
+/// Without native contexts, small on purpose: the guest's virtio-gpu driver
+/// creates no fence for a dumb primary buffer and emulates no vblank, so
+/// the only thing that paces its compositor is a full controlq
+/// (`virtio_gpu_queue_ctrl_sgs` sleeps for space). 16 descriptors ≈ two
+/// frames (TRANSFER + SET_SCANOUT + FLUSH, two descriptors each).
 const MAX_QUEUE_SIZE: u16 = 16;
+/// With native contexts, QEMU's 256: the compositor's FLUSH is fenced and
+/// paced by its completion (`Held`), and every client's SUBMIT_3D (three
+/// descriptors) and fenced completion share this queue. With 16, a held
+/// FLUSH and a few fenced submits filled it, and a video decoder's
+/// execbuffer slept in the guest until the next refresh freed a slot.
+const MAX_QUEUE_SIZE_NATIVE: u16 = 256;
 /// The display refresh the controlq is paced to (see `service_controlq`).
 const VBLANK_HZ: u64 = 60;
 const MAX_SCANOUTS: usize = 16;   // protocol max
@@ -467,6 +473,20 @@ impl VirtioGpu {
             bar2_lo_sized: false,
             bar2_hi_sized: false,
         }
+    }
+
+    /// Native contexts for this VM, decided at its start; the queues are
+    /// offered at the size that goes with it.
+    pub fn set_nativectx(&mut self, on: bool) {
+        self.nativectx = on;
+        let max = self.max_queue_size();
+        for q in self.queues.iter_mut() {
+            q.size = max;
+        }
+    }
+
+    fn max_queue_size(&self) -> u16 {
+        if self.nativectx { MAX_QUEUE_SIZE_NATIVE } else { MAX_QUEUE_SIZE }
     }
 
     pub fn bar0_base(&self) -> u64 {
@@ -1986,9 +2006,10 @@ impl VirtioGpu {
                 let _ = prev;
                 if self.device_status == 0 {
                     self.release_all_blobs();
+                    let max_queue = self.max_queue_size();
                     for q in self.queues.iter_mut() {
                         *q = VirtQueue {
-                            size: MAX_QUEUE_SIZE, msix_vec: 0xFFFF, enable: 0,
+                            size: max_queue, msix_vec: 0xFFFF, enable: 0,
                             desc_lo: 0, desc_hi: 0,
                             driver_lo: 0, driver_hi: 0,
                             device_lo: 0, device_hi: 0,
@@ -2008,7 +2029,10 @@ impl VirtioGpu {
                 }
             }
             CC_QUEUE_SELECT => self.queue_select = val as u16,
-            CC_QUEUE_SIZE => self.q_mut().size = (val as u16).min(MAX_QUEUE_SIZE),
+            CC_QUEUE_SIZE => {
+                let max = self.max_queue_size();
+                self.q_mut().size = (val as u16).min(max);
+            }
             CC_QUEUE_MSIX_VECTOR => {
                 self.q_mut().msix_vec = val as u16;
                 super::gpu_backend::set_queue_vector(self.queue_select, val as u16);
