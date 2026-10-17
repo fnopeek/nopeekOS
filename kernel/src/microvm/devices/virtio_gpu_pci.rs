@@ -297,15 +297,18 @@ impl Scanout {
     const OFF: Scanout = Scanout { enabled: false, resource_id: 0, rect: Rect { x: 0, y: 0, w: 0, h: 0 }, view: None };
 }
 
-/// A FLUSH's completion, kept back until the next refresh and until the
-/// blob shown before it is no longer read. The frame is presented at once
-/// and the commands behind it are served meanwhile; the guest waits for
-/// this completion before its next FLUSH, which paces it to the display.
+/// A FLUSH's completion, kept back until the desktop took the frame (or,
+/// for a copied frame, the next refresh) and until the blob shown before it
+/// is no longer read. The frame is presented at once and the commands
+/// behind it are served meanwhile; the guest waits for this completion
+/// before its next FLUSH, which paces it to the display.
 struct Held {
     head: u16,
     response: Vec<u8>,
     resp_descs: Vec<(u64, u32)>,
     blob: Option<Arc<ForeignPixels>>,
+    /// The window the frame went to, until the compositor takes it; 0 = none.
+    window: u32,
     deadline: u64,
     /// When it was kept back (TSC).
     since: u64,
@@ -397,6 +400,8 @@ pub struct VirtioGpu {
     blob_damage: [Vec<(u64, (u32, u32, u32, u32))>; MAX_OUTPUTS],
     /// The blob a FLUSH being served must wait for (`Held`).
     hold_for: Option<Arc<ForeignPixels>>,
+    /// The window the FLUSH being served presented a blob frame to.
+    presented_to: u32,
     /// A SUBMIT_3D taken off the controlq whose ccmds run outside the
     /// device lock (`gpu_backend`); serving stops behind it until
     /// `finish_submit`. `submit_running` while its ccmds run.
@@ -455,6 +460,7 @@ impl VirtioGpu {
             last_blob: [const { None }; MAX_OUTPUTS],
             blob_damage: [const { Vec::new() }; MAX_OUTPUTS],
             hold_for: None,
+            presented_to: 0,
             pending_submit: None,
             submit_running: false,
             held: None,
@@ -512,18 +518,12 @@ impl VirtioGpu {
         self.reap_released();
         // SUBMIT_3D completions whose fence is done, in queue order per ring.
         let mut completed = self.complete_fences(mem);
-        if let Some(h) = &self.held {
-            let now = crate::interrupts::rdtsc();
-            let read = !super::gpu_backend::full_active() || h.blob.as_ref().is_none_or(|b| blob_unread(b))
-                || now >= h.deadline;
-            if now >= h.not_before && read {
-                let h = self.held.take().unwrap();
-                if h.blob.is_some() {
-                    super::gpu_backend::note(super::gpu_backend::STAT_HOLD_US, super::gpu_backend::us_since(h.since));
-                }
-                self.complete(mem, h.head, &h.response, &h.resp_descs);
-                completed = true;
+        if let Some(h) = self.held.take_if(|h| held_done(h)) {
+            if h.blob.is_some() || h.window != 0 {
+                super::gpu_backend::note(super::gpu_backend::STAT_HOLD_US, super::gpu_backend::us_since(h.since));
             }
+            self.complete(mem, h.head, &h.response, &h.resp_descs);
+            completed = true;
         }
         self.serve_controlq(mem) || completed
     }
@@ -573,7 +573,7 @@ impl VirtioGpu {
                 let response = build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, p.flags, p.fence_id);
                 if p.flags & VIRTIO_GPU_FLAG_FENCE != 0 && !self.ctxs.fence_done(p.ctx_id, p.ring, fence) {
                     let held = Held {
-                        head: p.head, response, resp_descs: p.resp_descs, blob: None, deadline: 0,
+                        head: p.head, response, resp_descs: p.resp_descs, blob: None, window: 0, deadline: 0,
                         since: crate::interrupts::rdtsc(), not_before: 0,
                     };
                     self.fenced.push((held, p.ctx_id, p.ring, fence));
@@ -597,25 +597,15 @@ impl VirtioGpu {
         !self.fenced.is_empty()
     }
 
-    /// The blob that a held FLUSH waits for to be read out, if any.
-    pub fn held_blob(&self) -> Option<Arc<ForeignPixels>> {
-        self.held.as_ref().and_then(|h| h.blob.clone())
+    /// A FLUSH completion is kept back.
+    pub fn held_pending(&self) -> bool {
+        self.held.is_some()
     }
 
     /// Write `response` into the chain's writable descriptors and return the
     /// chain to the guest.
     fn complete(&mut self, mem: &GuestMem, head: u16, response: &[u8], resp_descs: &[(u64, u32)]) {
-        let mut written: u32 = 0;
-        let mut roff: usize = 0;
-        for (addr, len) in resp_descs {
-            if roff >= response.len() { break; }
-            let n = ((*len) as usize).min(response.len() - roff);
-            if n > 0 {
-                mem.write_bytes(*addr, &response[roff..roff + n]);
-                roff += n;
-                written = written.saturating_add(n as u32);
-            }
-        }
+        let written = respond(mem, response, resp_descs);
         let q = &mut self.queues[0];
         let (device_gpa, qsize) = (q.device_gpa(), q.size);
         super::virtqueue::used_push(mem, device_gpa, qsize, &mut q.used_idx, head, written);
@@ -695,20 +685,20 @@ impl VirtioGpu {
             // Dispatch the command + build the response payload (incl.
             // the 24-byte virtio_gpu_ctrl_hdr).
             let response = self.dispatch_control(&request, mem);
-            // A frame went out. A blob frame completes once the blob shown
-            // before it is no longer read (the guest writes that buffer
-            // next), as QEMU completes once the display took the frame;
-            // reading it paces the guest to the desktop. A copied frame has
-            // no such reader and waits for the next refresh, on one grid as
-            // a display's vblanks are. Serving goes on behind a held one.
-            let shown = if flush {
-                self.hold_for.take().filter(|_| super::gpu_backend::full_active())
-            } else {
-                None
-            };
-            let blob_frame = shown.is_some();
-            let blob = shown.filter(|b| !blob_unread(b));
-            if flush && !(blob_frame && blob.is_none()) {
+            // A frame went out. A blob frame completes once the desktop took
+            // it and the blob shown before it is no longer read (the guest
+            // writes that buffer next), as QEMU completes once the display
+            // took the frame: the desktop's refresh paces the guest. A copied
+            // frame has no such reader and waits for the next refresh, on
+            // one grid as a display's vblanks are. Serving goes on behind a
+            // held one.
+            if flush {
+                let (shown, window) = if super::gpu_backend::full_active() {
+                    (self.hold_for.take(), core::mem::take(&mut self.presented_to))
+                } else {
+                    (None, 0)
+                };
+                let blob_frame = shown.is_some() || window != 0;
                 let t = crate::interrupts::rdtsc();
                 let not_before = if blob_frame {
                     t
@@ -720,27 +710,24 @@ impl VirtioGpu {
                         (at - t) * 1_000_000 / crate::interrupts::tsc_freq().max(1));
                     at
                 };
-                self.held = Some(Held {
-                    head, response, resp_descs, blob,
+                let held = Held {
+                    head, response, resp_descs, blob: shown.filter(|b| !blob_unread(b)), window,
                     deadline: now + crate::interrupts::tsc_freq() / 1000 * HOLD_MAX_MS,
                     since: now, not_before,
-                });
+                };
                 last_avail = last_avail.wrapping_add(1);
+                if held_done(&held) {
+                    let w = respond(mem, &held.response, &held.resp_descs);
+                    used_push(mem, device_gpa, qsize, &mut used_idx, held.head, w);
+                    any = true;
+                } else {
+                    self.held = Some(held);
+                }
                 continue;
             }
             self.hold_for = None;
-            // Write response across the writable descriptors in order.
-            let mut written: u32 = 0;
-            let mut roff: usize = 0;
-            for (addr, len) in &resp_descs {
-                if roff >= response.len() { break; }
-                let n = ((*len) as usize).min(response.len() - roff);
-                if n > 0 {
-                    mem.write_bytes(*addr, &response[roff..roff + n]);
-                    roff += n;
-                    written = written.saturating_add(n as u32);
-                }
-            }
+            self.presented_to = 0;
+            let written = respond(mem, &response, &resp_descs);
 
             used_push(mem, device_gpa, qsize, &mut used_idx, head, written);
             last_avail = last_avail.wrapping_add(1);
@@ -1362,6 +1349,7 @@ impl VirtioGpu {
         if wid != 0 {
             gb::note(gb::STAT_BLOB, 1);
             crate::shade::surface::present_blob(wid, view, dmg);
+            self.presented_to = wid;
         } else if !crate::microvm::vm_has_window() {
             let mut copy = crate::shade::buffers::PixelBuffer::new(view.width, view.height);
             view.copy_into(&mut copy, (0, 0, view.width, view.height));
@@ -2343,6 +2331,34 @@ fn blit_to_host_fb(src_pixels: &[u8], src_w: u32, src_h: u32) {
             );
         }
     }
+}
+
+/// A held FLUSH may complete: the desktop took its frame, the blob before
+/// it is no longer read and its refresh came, or its deadline passed.
+fn held_done(h: &Held) -> bool {
+    let now = crate::interrupts::rdtsc();
+    if now >= h.deadline {
+        return now >= h.not_before;
+    }
+    let read = !super::gpu_backend::full_active() || h.blob.as_ref().is_none_or(|b| blob_unread(b));
+    let taken = h.window == 0 || crate::shade::surface::frame_taken(h.window);
+    now >= h.not_before && read && taken
+}
+
+/// Write `response` into the writable descriptors in order; the bytes written.
+fn respond(mem: &GuestMem, response: &[u8], resp_descs: &[(u64, u32)]) -> u32 {
+    let mut written: u32 = 0;
+    let mut roff: usize = 0;
+    for (addr, len) in resp_descs {
+        if roff >= response.len() { break; }
+        let n = ((*len) as usize).min(response.len() - roff);
+        if n > 0 {
+            mem.write_bytes(*addr, &response[roff..roff + n]);
+            roff += n;
+            written = written.saturating_add(n as u32);
+        }
+    }
+    written
 }
 
 /// Nothing reads `blob` any more: no CPU copy, no GPU job, no scene being

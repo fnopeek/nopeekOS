@@ -483,7 +483,7 @@ fn worker_entry(_arg: u64) {
         let (fences, held) = {
             let mut g = GPU.lock();
             g.reap_released();
-            (g.fences_pending(), g.held_blob().is_some())
+            (g.fences_pending(), g.held_pending())
         };
         if fences || held {
             kicks |= 1;
