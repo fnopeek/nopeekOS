@@ -716,8 +716,13 @@ impl VirtioGpu {
         q.used_idx = used_idx;
 
         // A frame went out: the next command waits for the next refresh.
+        // Refreshes lie on one grid, as a display's vblanks do: the work for
+        // the next frame runs inside the period, not after a full period
+        // counted from this FLUSH, which would lower the rate by that work.
         if flushed {
-            self.paused_until = now + crate::interrupts::tsc_freq() / VBLANK_HZ;
+            let period = (crate::interrupts::tsc_freq() / VBLANK_HZ).max(1);
+            let t = crate::interrupts::rdtsc();
+            self.paused_until = (t / period + 1) * period;
             super::gpu_backend::set_resume_tsc(self.paused_until);
         }
 
