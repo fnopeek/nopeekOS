@@ -379,14 +379,13 @@ fn deps_done(gt: &intel_gt, rq: usize) -> bool {
                   && r.exec_dep.is_none_or(|(ce, s)| executing(gt, ce, s)))
 }
 
-/// Whether request (context `ce`, `seqno`) runs or has run: the execute
-/// callback fires when it is submitted to the hardware (`__await_execution`)
-/// and the request before it on its timeline has completed
-/// (`i915_request_await_start`).
+/// Whether request (context `ce`, `seqno`) has been submitted to the
+/// hardware: `__await_execution` fires its execute callback in
+/// `__i915_request_submit` (`i915_request_is_active`), not once it runs.
 fn executing(gt: &intel_gt, ce: u16, seqno: u32) -> bool {
     match gt.requests.iter().position(|r| r.used && !r.retired && r.ce == ce && r.seqno == seqno) {
         None => true,
-        Some(i) => __i915_request_is_complete(gt, i) || (gt.requests[i].active && __i915_request_has_started(gt, i)),
+        Some(i) => __i915_request_is_complete(gt, i) || gt.requests[i].active,
     }
 }
 

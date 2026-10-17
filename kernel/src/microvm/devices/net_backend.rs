@@ -50,6 +50,22 @@ pub fn note_tx_kick() {
     }
 }
 
+/// The worker waits for the guest to post RX buffers (`vhost_enable_notify`
+/// on the RX ring): a frame in the tap is no work until the guest kicks.
+static RX_NOBUF: AtomicBool = AtomicBool::new(false);
+
+/// Worker: the next tap frame does not fit the guest's RX buffers.
+pub fn set_rx_nobuf(on: bool) { RX_NOBUF.store(on, Ordering::Release); }
+pub fn rx_nobuf() -> bool { RX_NOBUF.load(Ordering::Acquire) }
+
+/// vCPU: the guest kicked RX (q0), it posted buffers. Wake a worker that
+/// waits for them.
+pub fn note_rx_kick() {
+    if RX_NOBUF.swap(false, Ordering::AcqRel) {
+        NET_BELL.ring();
+    }
+}
+
 /// TSC of the first guest TX kick not yet followed by a pickup; 0 = none.
 static TX_KICK_TSC: AtomicU64 = AtomicU64::new(0);
 

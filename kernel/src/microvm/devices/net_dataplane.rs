@@ -23,13 +23,14 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// True iff there is RX or TX work right now — a frame in the tap or a queued
-/// guest TX kick. Lock-free and card-neutral (it never looks at a NIC's
-/// ring, whose index may not be meaningful for every card).
+/// True iff there is RX or TX work right now — a frame in the tap the guest
+/// has buffers for, or a queued guest TX kick. Lock-free and card-neutral
+/// (it never looks at a NIC's ring, whose index may not be meaningful for
+/// every card).
 #[inline]
 fn has_work() -> bool {
     use crate::microvm::devices::{guest_mem, nat, net_backend};
-    nat::tap_len() > 0
+    (nat::tap_len() > 0 && !net_backend::rx_nobuf())
         || nat::egress_pending()
         || net_backend::tx_kick_pending()
         || guest_mem::active().is_some_and(net_backend::tx_ring_pending)
@@ -286,6 +287,13 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
         while rx_frames < RX_PKT_WEIGHT {
             if dev.rx_avail_count(gm) == 0 {   // get_rx_bufs -> 0
                 nat::flight_rx_wait(nat::FLIGHT_NOBUF, nat::tap_len());
+                // vhost handle_rx: wait for the guest's refill kick, unless
+                // buffers came in while notifications were off.
+                net_backend::set_rx_nobuf(true);
+                if dev.rx_enable_notify(gm) {
+                    net_backend::set_rx_nobuf(false);
+                    continue;
+                }
                 break;
             }
             let Some(frame) = nat::tap_pop_rx(gro) else { break };
@@ -300,6 +308,11 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
                 // so this frame was never consumed. Return it to the head and
                 // stop — the guest must run before retrying is worth anything.
                 nat::tap_push_front(frame);
+                net_backend::set_rx_nobuf(true);
+                if dev.rx_enable_notify(gm) {
+                    net_backend::set_rx_nobuf(false);
+                    continue;
+                }
                 break;
             }
         }
@@ -578,6 +591,7 @@ fn arm_tx_early() {
 
 fn worker_entry(_arg: u64) {
     crate::microvm::devices::net_backend::NET_BELL.bind();
+    crate::microvm::devices::net_backend::set_rx_nobuf(false);
     ACTIVE.store(true, Ordering::Release);
     crate::microvm::devices::net_backend::set_worker_core(
         crate::smp::per_core::current_core_id());

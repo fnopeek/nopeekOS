@@ -499,7 +499,7 @@ impl VirtioNet {
             // RX kick: the guest added buffers. We poll RX (via inject_rx from the
             // pump), so we don't service here — but suppress further RX kicks by
             // pushing avail_event far ahead (EVENT_IDX). Nothing to deliver now.
-            0 => { self.arm_rx_no_kick(mem); false }
+            0 => { self.arm_rx_no_kick(mem); super::net_backend::note_rx_kick(); false }
             _ => false,
         }
     }
@@ -518,6 +518,23 @@ impl VirtioNet {
             // used.flags |= NO_NOTIFY
             mem.write_u16(q.used_gpa(), VRING_USED_F_NO_NOTIFY);
         }
+    }
+
+    /// `vhost_enable_notify` for the RX ring, once a frame did not fit the
+    /// buffers the guest has posted: the guest kicks when it adds one past
+    /// those seen now. True = it added some meanwhile, so retry instead of
+    /// waiting for the kick.
+    pub fn rx_enable_notify(&mut self, mem: &GuestMem) -> bool {
+        let q = self.queues[0];
+        if !q.ready() { return false; }
+        let Some(seen) = avail_idx(mem, q.avail_gpa()) else { return false };
+        if self.event_idx_on() {
+            set_avail_event(mem, q.used_gpa(), q.size, seen);
+        } else {
+            mem.write_u16(q.used_gpa(), 0);
+        }
+        fence(Ordering::SeqCst);
+        avail_idx(mem, q.avail_gpa()).is_some_and(|top| top != seen)
     }
 
     // ── RX: deliver one frame into the guest, mergeable buffers ──
