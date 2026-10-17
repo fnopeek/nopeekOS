@@ -181,7 +181,7 @@ const NUM_QUEUES: u16 = 2;
 /// for space). 16 descriptors ≈ two frames (TRANSFER + SET_SCANOUT + FLUSH,
 /// two descriptors each); a larger queue lets it render many frames ahead.
 const MAX_QUEUE_SIZE: u16 = 16;
-/// The display refresh the controlq is paced to (see `service_controlq`).
+/// The display refresh a copied frame's FLUSH is paced to (`serve_controlq`).
 const VBLANK_HZ: u64 = 60;
 const MAX_SCANOUTS: usize = 16;   // protocol max
 /// Blobs per output whose damage is tracked; a guest compositor swaps
@@ -695,18 +695,31 @@ impl VirtioGpu {
             // Dispatch the command + build the response payload (incl.
             // the 24-byte virtio_gpu_ctrl_hdr).
             let response = self.dispatch_control(&request, mem);
-            // A frame went out: its completion waits for the next refresh,
-            // on one grid as a display's vblanks are, and for the blob shown
-            // before it to be read out (the guest writes that buffer next).
-            // Serving goes on behind it.
-            if flush {
-                let period = (crate::interrupts::tsc_freq() / VBLANK_HZ).max(1);
+            // A frame went out. A blob frame completes once the blob shown
+            // before it is no longer read (the guest writes that buffer
+            // next), as QEMU completes once the display took the frame;
+            // reading it paces the guest to the desktop. A copied frame has
+            // no such reader and waits for the next refresh, on one grid as
+            // a display's vblanks are. Serving goes on behind a held one.
+            let shown = if flush {
+                self.hold_for.take().filter(|_| super::gpu_backend::full_active())
+            } else {
+                None
+            };
+            let blob_frame = shown.is_some();
+            let blob = shown.filter(|b| !blob_unread(b));
+            if flush && !(blob_frame && blob.is_none()) {
                 let t = crate::interrupts::rdtsc();
-                let not_before = (t / period + 1) * period;
-                super::gpu_backend::set_resume_tsc(not_before);
-                super::gpu_backend::note(super::gpu_backend::STAT_PAUSE_US,
-                    (not_before - t) * 1_000_000 / crate::interrupts::tsc_freq().max(1));
-                let blob = self.hold_for.take().filter(|b| super::gpu_backend::full_active() && !blob_unread(b));
+                let not_before = if blob_frame {
+                    t
+                } else {
+                    let period = (crate::interrupts::tsc_freq() / VBLANK_HZ).max(1);
+                    let at = (t / period + 1) * period;
+                    super::gpu_backend::set_resume_tsc(at);
+                    super::gpu_backend::note(super::gpu_backend::STAT_PAUSE_US,
+                        (at - t) * 1_000_000 / crate::interrupts::tsc_freq().max(1));
+                    at
+                };
                 self.held = Some(Held {
                     head, response, resp_descs, blob,
                     deadline: now + crate::interrupts::tsc_freq() / 1000 * HOLD_MAX_MS,
