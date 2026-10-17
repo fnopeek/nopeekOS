@@ -471,7 +471,11 @@ fn worker_entry(_arg: u64) {
         // this core, off the vCPU, and the completion goes out as a message.
         let mut kicks = GPU_KICK.swap(0, Ordering::AcqRel);
         // SUBMIT_3D completions wait for their fences: look again.
-        if GPU.lock().fences_pending() {
+        let (fences, held) = {
+            let g = GPU.lock();
+            (g.fences_pending(), g.held_blob().is_some())
+        };
+        if fences {
             kicks |= 1;
         }
         if kicks != 0 {
@@ -483,10 +487,14 @@ fn worker_entry(_arg: u64) {
                 }
             }
         }
-        // Park until the next doorbell (`note_gpu_kick`), with a 2 ms safety
-        // re-check on a quiet display. A doorbell that rang since the swap
-        // above ends the park at once.
-        let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 500;
+        // Park until the next doorbell (`note_gpu_kick`: a guest kick, a ring
+        // the module reported, the end of a vblank pause). While a fence, a
+        // held FLUSH or a pause is open the park re-checks every 2 ms; a
+        // quiet display only every 100 ms. A doorbell that rang since the
+        // swap above ends the park at once.
+        let timed = fences || held || resume_tsc().is_some();
+        let hz = if timed { 500 } else { 10 };
+        let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / hz;
         crate::smp::fiber::park_on_bell(deadline, || {
             GPU_KICK.load(Ordering::Acquire) != 0 || STOP.load(Ordering::Acquire)
         });
