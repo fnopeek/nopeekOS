@@ -167,6 +167,7 @@ fn launch_wayland(kmsg_fd: i64) {
     write_file(b"/tmp/lw-sample.sh\0", LW_SAMPLE, 0o644);
     write_file(b"/tmp/load-sample.sh\0", LOAD_SAMPLE, 0o644);
     write_file(b"/tmp/rdd-gdb.sh\0", RDD_GDB, 0o644);
+    write_file(b"/tmp/app-log.awk\0", APP_LOG_AWK, 0o644);
     write_file(b"/tmp/npkwm\0", NPKWM, 0o755);
 
     let prog = b"/bin/sh\0".as_ptr();
@@ -233,7 +234,11 @@ fn launch_wayland(kmsg_fd: i64) {
     // `npklogs` on the command line streams the app's and npkwm's output
     // to the console (`set microvm_cmdline npklogs`); `npklogs=REGEX` only
     // the lines that match it (an awk ERE, no spaces), so a verbose MOZ_LOG
-    // costs the guest no console exits for the rest. `npksupport` writes
+    // costs the guest no console exits for the rest. `npkframes` logs
+    // Firefox's video decode times (FFmpegVideo:4) as one `[frames]` line a
+    // second plus every frame over 40 ms as `[frame] SLOW` (app_log.awk).
+    // Either sends the app's output through a FIFO, so each line goes out as
+    // it is written, not at tail's one-second poll. `npksupport` writes
     // the graphics and media sections of about:support to it as `[about]`
     // lines, 20 s and 90 s after the browser started. `npkgdb` writes the
     // backtrace of a crashing media decoder process as `[gdb]` lines;
@@ -389,12 +394,14 @@ fn launch_wayland(kmsg_fd: i64) {
                  i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do usleep 5000; i=$((i+1)); done; \
                  echo \"<0>[wl] npkwm up after ${i}x5ms\" > /dev/kmsg; \
                  LOGPAT=$(sed -n 's/.*npklogs=\\([^ ]*\\).*/\\1/p' /proc/cmdline); \
-                 grep -q npklogs /proc/cmdline && { : >> /tmp/app.log; \
-                   if [ -n \"$LOGPAT\" ]; then \
-                     tail -F /tmp/app.log /tmp/npkwm.log 2>/dev/null | awk -v p=\"$LOGPAT\" '$0 ~ p { print \"<0>[log] \" $0 > \"/dev/kmsg\"; fflush(\"/dev/kmsg\") }' & \
-                   else \
-                     tail -F /tmp/app.log /tmp/npkwm.log 2>/dev/null | while read -r l; do echo \"<0>[log] $l\" > /dev/kmsg; done & \
-                   fi; }; \
+                 ALL=0; grep -qE 'npklogs( |$)' /proc/cmdline && ALL=1; \
+                 FR=0; grep -q npkframes /proc/cmdline && FR=1; \
+                 APPOUT=/tmp/app.log; \
+                 if grep -qE 'npklogs|npkframes' /proc/cmdline; then \
+                   : >> /tmp/app.log; rm -f /tmp/app.fifo; mkfifo /tmp/app.fifo && APPOUT=/tmp/app.fifo; \
+                   ( tee -a /tmp/app.log < /tmp/app.fifo | awk -v p=\"$LOGPAT\" -v all=$ALL -v frames=$FR -f /tmp/app-log.awk ) & \
+                 fi; \
+                 grep -q npklogs /proc/cmdline && tail -F /tmp/npkwm.log 2>/dev/null | awk -v p=\"$LOGPAT\" -v all=$ALL -v frames=0 -f /tmp/app-log.awk & \
                  grep -q npkstats /proc/cmdline || : > /tmp/lw-sample.sh; \
                  PROF=$(sed -n 's/.*npkprofile=\\([0-9.]*:[0-9]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$PROF\" ] && echo 'export MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_STARTUP_INTERVAL=1 MOZ_PROFILER_STARTUP_ENTRIES=16777216 MOZ_PROFILER_STARTUP_FILTERS=GeckoMain,Socket,Worker,Timer,StreamTrans,IPC,RemoteLzy,File,BgIO,BackgroundThreadPool,Renderer MOZ_PROFILER_STARTUP_FEATURES=js,stackwalk,cpu,fileio MOZ_PROFILER_SHUTDOWN=/tmp/bcache/lw-prof.json' > /tmp/app.sh || : > /tmp/app.sh; \
@@ -404,6 +411,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
                  if [ $APP = firefox ]; then [ $GPU = 1 ] && echo 'export LIBVA_DRIVER_NAME=iHD' >> /tmp/app.sh; \
                  else [ $GPU = 1 ] && echo 'export ANV_DEBUG=video-decode' >> /tmp/app.sh; fi; \
+                 [ $FR = 1 ] && echo 'export MOZ_LOG=FFmpegVideo:4' >> /tmp/app.sh; \
                  for e in $(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p'); do \
                    echo \"export $e\" >> /tmp/app.sh; echo \"<0>[wl] app env $e\" > /dev/kmsg; done; \
                  NPKAPP=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkapp=//p' | head -1); \
@@ -412,7 +420,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  else echo \"[ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh \\$\\$ & exec $APP --no-remote --profile /tmp/moz\" >> /tmp/app.sh; fi; \
                  echo \"<0>[wl] app exec $APP\" > /dev/kmsg; \
                  su -s /bin/sh app -c 'WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 exec sh /tmp/app.sh' \
-                   > /tmp/app.log 2>&1; \
+                   > $APPOUT 2>&1; \
                  rc=$?; echo \"<0>[wl] browser exited rc=$rc\" > /dev/kmsg; \
                  if [ -n \"$PROF\" ]; then \
                    if [ -s /tmp/bcache/lw-prof.json ]; then \
@@ -709,6 +717,7 @@ const LW_SAMPLE: &[u8] = include_bytes!("lw_sample.sh");
 
 /// System load per second (`npkload` on the cmdline).
 const LOAD_SAMPLE: &[u8] = include_bytes!("load_sample.sh");
+const APP_LOG_AWK: &[u8] = include_bytes!("app_log.awk");
 
 /// Backtraces of crashing or hanging media decoder processes (`npkgdb`).
 const RDD_GDB: &[u8] = include_bytes!("rdd_gdb.sh");
