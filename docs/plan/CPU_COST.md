@@ -32,7 +32,7 @@ Interrupt-Moderation. Genutzt war nur TSO für Gast-Superframes.
 | N8 | `igc.rs:337` | EITR fest 648 (~6000/s), kein Budget je NAPI-Lauf | adaptives ITR, Budget 64 | S–M |
 | N9 | `nat.rs:698`, `TX_LIMIT` 256 KB | TSO abgelehnt → Software-Zerlegung in ~44 Segmente | — (Linux wartet in der qdisc) | M |
 | N10 | `igc.rs` `tx_reserve` | spinnt bis 200 µs unter `DEVICE` (nur Host-Senden) | `netif_stop_queue` | S |
-| N11 | `net/ipv4.rs`, `net/tcp.rs` | Host-Stack prüft eingehende Prüfsummen GAR NICHT (Korrektheit, nicht CPU) | `tcp_v4_rcv` → `skb_checksum_init` | S |
+| N11 ✅ | `net/ipv4.rs`, `net/tcp.rs` | Host-Stack prüft eingehende Prüfsummen GAR NICHT (Korrektheit, nicht CPU) | `tcp_v4_rcv` → `skb_checksum_init` | S |
 | N12 | `intent/http.rs` | native HTTPS-Abholung pollt mit 10 kHz und hält den Kern | Socket-Warteschlange, NAPI weckt | S–M |
 
 ## G. GPU

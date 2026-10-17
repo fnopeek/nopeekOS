@@ -45,9 +45,11 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool) {
 
     let total_len = u16::from_be_bytes([data[2], data[3]]) as usize;
     if total_len < ihl || total_len > data.len() { return; }
+    // ip_rcv_core: a header whose checksum does not hold is dropped.
+    if super::csum::fold(super::csum::sum(&data[..ihl])) != 0xFFFF { return; }
 
     let protocol = data[9];
-    let _src_ip = &data[12..16];
+    let src_ip = <[u8; 4]>::try_from(&data[12..16]).unwrap();
     let dst_ip = <[u8; 4]>::try_from(&data[16..20]).unwrap();
 
     // The microvm tap gets first refusal, before the filter below. A guest
@@ -64,12 +66,42 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool) {
     if dst_ip != our_ip && dst_ip != [255, 255, 255, 255] && our_ip != [0, 0, 0, 0] { return; }
 
     let payload = &data[ihl..total_len];
+    // The L4 checksum, unless the card verified it (skb_checksum_init). A
+    // fragment is not whole, so its checksum cannot be checked yet.
+    let fragment = u16::from_be_bytes([data[6], data[7]]) & 0x3FFF != 0;
+    if !csum_ok && !fragment && !l4_checksum_holds(protocol, src_ip, dst_ip, payload) {
+        return;
+    }
 
     match protocol {
         PROTO_ICMP => super::icmp::handle_icmp(data, payload),
         PROTO_UDP => super::udp::handle_udp(data, payload),
         PROTO_TCP => super::tcp::handle_tcp(data, payload),
         _ => {}
+    }
+}
+
+/// `tcp_v4_rcv`, `udp_rcv`, `icmp_rcv`: the payload's checksum holds. A
+/// UDP datagram without one (0) is accepted, as RFC 768 allows over IPv4.
+fn l4_checksum_holds(protocol: u8, src: [u8; 4], dst: [u8; 4], payload: &[u8]) -> bool {
+    use super::csum::{fold, pseudo, sum};
+    match protocol {
+        PROTO_TCP => fold(pseudo(src, dst, PROTO_TCP, payload.len()) + sum(payload)) == 0xFFFF,
+        PROTO_UDP => {
+            if payload.len() < 8 {
+                return false;
+            }
+            if payload[6] == 0 && payload[7] == 0 {
+                return true;
+            }
+            let ulen = u16::from_be_bytes([payload[4], payload[5]]) as usize;
+            if ulen < 8 || ulen > payload.len() {
+                return false;
+            }
+            fold(pseudo(src, dst, PROTO_UDP, ulen) + sum(&payload[..ulen])) == 0xFFFF
+        }
+        PROTO_ICMP => fold(sum(payload)) == 0xFFFF,
+        _ => true,
     }
 }
 
