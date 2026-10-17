@@ -1181,13 +1181,13 @@ fn common_prefix(strings: &[String]) -> String {
 /// keyboard / mouse / net IRQs wake it immediately.
 #[inline]
 fn core0_idle_tick() {
-    // The PS/2 mouse is polled (IRQ12 masked on UEFI machines), so halting
-    // until the 100 Hz timer caps the pointer sample and cursor-redraw rate at
-    // ~100 Hz, which feels laggy. While the pointer is moving, don't halt:
-    // return so the loop spins and drains the mouse at its full rate. Once
-    // motion stops (no PS/2 byte for ~40 ms) we halt again, so idle power is
-    // unchanged. No-op on USB/IRQ-mouse hosts (mouse_active_within stays false).
-    if crate::keyboard::mouse_active_within(40) {
+    // A polled PS/2 mouse (no i8042 interrupt): halting until the 100 Hz
+    // timer caps the pointer sample and cursor-redraw rate at ~100 Hz, which
+    // feels laggy. While the pointer is moving, don't halt: return so the
+    // loop spins and drains the mouse at its full rate. Once motion stops (no
+    // PS/2 byte for ~40 ms) we halt again. With the i8042 interrupt routed
+    // every byte wakes the core, and halting costs nothing.
+    if crate::keyboard::needs_poll() && crate::keyboard::mouse_active_within(40) {
         // Deliberate spin; it must not be recorded as a halt, because the
         // core really is busy and the usage figure should say so.
         return;
