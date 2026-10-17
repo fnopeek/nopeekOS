@@ -11,7 +11,9 @@ nach jedem Paket am NUC messen: `cores` (Busy-% je Kern, `net worker`
 irq/timeout/polled/busy, Exits/s, vCPU-Phase), `set microvm_stats on`
 (`VT_DEVLOCK`), `npkbench_vm` im Gast-cmdline.
 
-Erledigt in **Kernel 0.622.0** (Paket A) ist mit ✅ markiert.
+Erledigt ist mit ✅ markiert: Paket A in **Kernel 0.622.0** (released);
+G9, G12, V5 halb, V9 und R in **Kernel 0.623.0 / gpu_intel_tgl 0.27.0**
+(lokal committet, **nicht released**).
 
 ## N. Netz — die Karte kann es, wir lassen sie nicht
 
@@ -49,10 +51,10 @@ Engpass. Es sind Serialisierung und die CPU-Arbeit drumherum.
 | G6 | `virtio_gpu_pci.rs`, `shade/mod.rs`, `gpudev.rs:1460` | drei 60-Hz-Uhren, echte vblank kommt nie an (`flip`/`wait_vblank` Stubs), controlq 16 | Zaun je Ausgabe bis zur vblank, Queue 256 (RIGID 5.9 — **erst nach G4 neu versuchen**) | M |
 | G7 | `shade/mod.rs:692` | kein Pageflip, Software-Cursor wartet hinter bcs-Kopie | Ebenenflip, Cursor-Ebene | M / L |
 | G8 | `shade/mod.rs:489` | Core 0 wartet auf die Szene und hält `CONSOLE` (RIGID 5.1 halb) | Zaun aus der Ereignisschleife | M |
-| G9 | `virtio_ccmd.rs:337` | `set_domain` belegt → EAGAIN, Mesa/iHD wiederholen sofort (RIGID 1.9) | `i915_gem_object_wait` | S–M |
+| G9 ✅ | `virtio_ccmd.rs:337` | `set_domain` belegt → EAGAIN, Mesa/iHD wiederholen sofort (RIGID 1.9) | `i915_gem_object_wait` | S–M |
 | G10 | `virtio_gpu_i915.rs:115` | GEM_CREATE nullt + clflusht je 4K synchron, VT-d je Seite | Seiten bei Bedarf, kohärent ohne Flush | S–M |
 | G11 | Modul `i915_request.rs:86` | jede Zaunabfrage ein Hostcall; keine Semaphore zwischen Engines | HWSP als Speicherlesen, `emit_semaphore_wait` | S–M / M |
-| G12 | `gpu_backend.rs:486` | GPU-Arbeiter weckt alle 2 ms — **trägt heute das Abholen der Zäune**, erst Zaun-Glocke bauen, dann verlängern | eventfd | S |
+| G12 ✅ | `gpu_backend.rs:486` | GPU-Arbeiter weckte alle 2 ms; Zaunberichte des Moduls läuten die Glocke schon (`note_gpu_kick`), jetzt 2 ms nur bei offenem Zaun/gehaltenem FLUSH/vblank-Pause, sonst 100 ms | eventfd | S |
 
 ## V. Hypervisor
 
@@ -62,11 +64,11 @@ Engpass. Es sind Serialisierung und die CPU-Arbeit drumherum.
 | V2 | `VmShared::dev` | eine Sperre für fast jeden Exit (auch CPUID/HLT, lockfreie Doorbells, Demand-Fault); blk/sqfs laufen darunter synchron inkl. NVMe + Entschlüsseln | `kvm_io_bus` lockfrei, ioeventfd, Sperre je Gerät | M |
 | V3 | `drivers/nvme.rs:272` | MSI-X eingerichtet, Abschluss trotzdem per Spin | IRQ-getrieben | M |
 | V4 | `spec_mitigations.rs` | IBPB je Exit (nur Zen 2) ≈ halbe Exitkosten | Return-Thunks — `RETURN_THUNKS.md` | L |
-| V5 | `ept.rs:218` | Demand-Fault nullt 2 MB bzw. 511×4K unter globalen Sperren | THP-Fault ohne globale Sperre | S–M |
+| V5 (✅ halb) | `ept.rs:218` | Demand-Fault nullt 2 MB bzw. 511×4K unter globalen Sperren. **Kernel 0.623.0:** läuft vor der Gerätesperre; Nullen und `ALLOCATOR` bleiben | THP-Fault ohne globale Sperre | S–M |
 | V6 | `run_guest_once` | FPU-Tausch je Exit, `current_core_id` per xAPIC-MMIO | Gast-FPU über ganze `KVM_RUN`, RDPID/GS | M–L |
 | V7 | Timer/IRQ | Gast-Deadline als Host-One-Shot (Exit + Inject); AMD ohne AVIC | VMX-Preemption-Timer; AVIC | M / L |
 | V8 | diverse | 2-ms/3-ms/8-ms-Sicherheitswecker (Netz ✅ jetzt 100 ms bzw. 10 ms mit TCP-Timern, GPU G12, vCPU) | eventgetrieben | S |
-| V9 | `intent/mod.rs:1183` | PS/2-Maus hält Core 0 40 ms aus dem Parken | — | S |
+| V9 ✅ | `intent/mod.rs:1183` | PS/2-Maus hält Core 0 40 ms aus dem Parken | — | S |
 
 ## R. Gast-RAM
 

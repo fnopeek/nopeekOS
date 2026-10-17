@@ -1750,6 +1750,17 @@ impl VmContext {
                 last_outcome = Some(outcome);
                 continue;
             }
+            // First touch of demand-paged RAM: guest memory has its own
+            // lock, and no device lies in RAM (`RamLayout`).
+            EXIT_NPF => {
+                let gpa = self.vcpu.vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
+                let gm = self.shared.guest_mem;
+                if gm.layout().contains(gpa) && gm.ensure(gpa) {
+                    crate::microvm::cpu::record_npf(crate::microvm::cpu::NPF_RAM);
+                    last_outcome = Some(outcome);
+                    continue;
+                }
+            }
             _ => {}
         }
 
