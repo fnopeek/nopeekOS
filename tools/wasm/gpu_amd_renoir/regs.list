@@ -1,0 +1,162 @@
+# The register window before the IP bases are known (amdgpu_discovery.c)
+mmMM_INDEX @ amdgpu_discovery.c
+mmMM_INDEX_HI @ amdgpu_discovery.c
+mmMM_DATA @ amdgpu_discovery.c
+mmRCC_CONFIG_MEMSIZE @ amdgpu_discovery.c
+mmMP0_SMN_C2PMSG_33 @ amdgpu_discovery.c
+# The discovery binary (amdgpu_discovery.h, discovery.h)
+DISCOVERY_TMR_SIZE
+DISCOVERY_TMR_OFFSET
+BINARY_SIGNATURE
+DISCOVERY_TABLE_SIGNATURE
+GC_TABLE_ID
+HARVEST_TABLE_SIGNATURE
+VCN_INFO_TABLE_ID
+IP_DISCOVERY
+GC
+HARVEST_INFO
+VCN_INFO
+TOTAL_TABLES
+# Layouts of the discovery binary (discovery.h)
+BINARY_HEADER_SIZE = sizeof(struct binary_header) @ amdgpu_discovery.c
+BHDR_SIGNATURE = offsetof(struct binary_header, binary_signature) @ amdgpu_discovery.c
+BHDR_VERSION_MAJOR = offsetof(struct binary_header, version_major) @ amdgpu_discovery.c
+BHDR_VERSION_MINOR = offsetof(struct binary_header, version_minor) @ amdgpu_discovery.c
+BHDR_CHECKSUM = offsetof(struct binary_header, binary_checksum) @ amdgpu_discovery.c
+BHDR_SIZE = offsetof(struct binary_header, binary_size) @ amdgpu_discovery.c
+BHDR_TABLE_LIST = offsetof(struct binary_header, table_list) @ amdgpu_discovery.c
+TABLE_INFO_SIZE = sizeof(struct table_info) @ amdgpu_discovery.c
+TABLE_INFO_OFFSET = offsetof(struct table_info, offset) @ amdgpu_discovery.c
+TABLE_INFO_CHECKSUM = offsetof(struct table_info, checksum) @ amdgpu_discovery.c
+IHDR_SIGNATURE = offsetof(struct ip_discovery_header, signature) @ amdgpu_discovery.c
+IHDR_VERSION = offsetof(struct ip_discovery_header, version) @ amdgpu_discovery.c
+IHDR_SIZE = offsetof(struct ip_discovery_header, size) @ amdgpu_discovery.c
+IHDR_NUM_DIES = offsetof(struct ip_discovery_header, num_dies) @ amdgpu_discovery.c
+IHDR_DIE_INFO = offsetof(struct ip_discovery_header, die_info) @ amdgpu_discovery.c
+IHDR_FLAGS = offsetof(struct ip_discovery_header, padding) @ amdgpu_discovery.c
+DIE_INFO_SIZE = sizeof(struct die_info) @ amdgpu_discovery.c
+DIE_INFO_OFFSET = offsetof(struct die_info, die_offset) @ amdgpu_discovery.c
+DIE_HEADER_SIZE = sizeof(struct die_header) @ amdgpu_discovery.c
+DHDR_DIE_ID = offsetof(struct die_header, die_id) @ amdgpu_discovery.c
+DHDR_NUM_IPS = offsetof(struct die_header, num_ips) @ amdgpu_discovery.c
+IP_V4_HW_ID = offsetof(struct ip_v4, hw_id) @ amdgpu_discovery.c
+IP_V4_INSTANCE = offsetof(struct ip_v4, instance_number) @ amdgpu_discovery.c
+IP_V4_NUM_BASE = offsetof(struct ip_v4, num_base_address) @ amdgpu_discovery.c
+IP_V4_MAJOR = offsetof(struct ip_v4, major) @ amdgpu_discovery.c
+IP_V4_MINOR = offsetof(struct ip_v4, minor) @ amdgpu_discovery.c
+IP_V4_REVISION = offsetof(struct ip_v4, revision) @ amdgpu_discovery.c
+IP_V4_BASE_ADDRESS = offsetof(struct ip_v4, base_address) @ amdgpu_discovery.c
+GPU_INFO_HEADER_SIZE = sizeof(struct gpu_info_header) @ amdgpu_discovery.c
+GHDR_TABLE_ID = offsetof(struct gpu_info_header, table_id) @ amdgpu_discovery.c
+GHDR_VERSION_MAJOR = offsetof(struct gpu_info_header, version_major) @ amdgpu_discovery.c
+GHDR_VERSION_MINOR = offsetof(struct gpu_info_header, version_minor) @ amdgpu_discovery.c
+GHDR_SIZE = offsetof(struct gpu_info_header, size) @ amdgpu_discovery.c
+HHDR_SIGNATURE = offsetof(struct harvest_info_header, signature) @ amdgpu_discovery.c
+HARVEST_TABLE_SIZE = sizeof(struct harvest_table) @ amdgpu_discovery.c
+VHDR_TABLE_ID = offsetof(struct vcn_info_header, table_id) @ amdgpu_discovery.c
+VHDR_SIZE_BYTES = offsetof(struct vcn_info_header, size_bytes) @ amdgpu_discovery.c
+# Limits (amdgpu.h)
+HWIP_MAX_INSTANCE
+HW_ID_MAX
+MAX_HWIP
+# Hardware IPs (amdgpu.h)
+GC_HWIP
+HDP_HWIP
+SDMA0_HWIP
+SDMA1_HWIP
+MMHUB_HWIP
+ATHUB_HWIP
+NBIO_HWIP
+MP0_HWIP
+MP1_HWIP
+UVD_HWIP
+VCN_HWIP
+JPEG_HWIP
+VCN1_HWIP
+VCE_HWIP
+DF_HWIP
+DCE_HWIP
+OSSSYS_HWIP
+SMUIO_HWIP
+PWR_HWIP
+NBIF_HWIP
+THM_HWIP
+CLK_HWIP
+UMC_HWIP
+RSMU_HWIP
+XGMI_HWIP
+DCI_HWIP
+PCIE_HWIP
+ISP_HWIP
+# Hardware IDs of the discovery table (soc15_hw_ip.h)
+MP1_HWID
+MP2_HWID
+THM_HWID
+SMUIO_HWID
+FUSE_HWID
+CLKA_HWID
+PWR_HWID
+GC_HWID
+UVD_HWID
+VCN_HWID
+AUDIO_AZ_HWID
+ACP_HWID
+DCI_HWID
+DMU_HWID
+DCO_HWID
+DIO_HWID
+XDMA_HWID
+DCEAZ_HWID
+DAZ_HWID
+SDPMUX_HWID
+NTB_HWID
+IOHC_HWID
+L2IMU_HWID
+VCE_HWID
+MMHUB_HWID
+ATHUB_HWID
+DBGU_NBIO_HWID
+DFX_HWID
+DBGU0_HWID
+DBGU1_HWID
+OSSSYS_HWID
+HDP_HWID
+SDMA0_HWID
+SDMA1_HWID
+SDMA2_HWID
+SDMA3_HWID
+VPE_HWID
+ISP_HWID
+DBGU_IO_HWID
+DF_HWID
+CLKB_HWID
+FCH_HWID
+DFX_DAP_HWID
+L1IMU_PCIE_HWID
+L1IMU_NBIF_HWID
+L1IMU_IOAGR_HWID
+WAFLC_HWID
+FCH_USB_PD_HWID
+PCIE_HWID
+PCS_HWID
+DDCL_HWID
+SST_HWID
+IOAGR_HWID
+NBIF_HWID
+IOAPIC_HWID
+SYSTEMHUB_HWID
+NTBCCP_HWID
+UMC_HWID
+SATA_HWID
+USB_HWID
+CCXSEC_HWID
+XGMI_HWID
+XGBE_HWID
+MP0_HWID
+# APU flags (amd_shared.h)
+AMD_APU_IS_RENOIR
+AMD_APU_IS_GREEN_SARDINE
+# Driver limits the discovery checks against (amdgpu.h, amdgpu_vcn.h, amdgpu_sdma.h)
+AMDGPU_MAX_VCN_INSTANCES
+AMDGPU_MAX_SDMA_INSTANCES
+AMDGPU_MAX_VPE_INSTANCES

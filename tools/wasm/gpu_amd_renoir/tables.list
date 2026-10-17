@@ -1,0 +1,2 @@
+@ amdgpu_discovery.c
+hw_id_map: i32

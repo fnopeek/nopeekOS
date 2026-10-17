@@ -7,6 +7,7 @@ exclude = [
     "tools/wasm/wifi_ax200",
     "tools/wasm/wifi_rtl8822ce",
     "tools/wasm/gpu_intel_tgl",
+    "tools/wasm/gpu_amd_renoir",
     "tools/wasm/audio_hda",
     "tools/wasm/debug",
     "tools/wasm/sdk/widgets",
