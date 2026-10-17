@@ -305,6 +305,8 @@ struct Held {
     resp_descs: Vec<(u64, u32)>,
     blob: Option<Arc<ForeignPixels>>,
     deadline: u64,
+    /// When it was kept back (TSC).
+    since: u64,
 }
 
 /// A SUBMIT_3D chain taken off the controlq (`take_pending_submit`).
@@ -527,6 +529,8 @@ impl VirtioGpu {
             let (_, ctx, ring, fence) = self.fenced[i];
             if self.ctxs.fence_done(ctx, ring, fence) {
                 let (h, ..) = self.fenced.remove(i);
+                super::gpu_backend::note(super::gpu_backend::STAT_FENCE, 1);
+                super::gpu_backend::note(super::gpu_backend::STAT_FENCE_US, super::gpu_backend::us_since(h.since));
                 self.complete(mem, h.head, &h.response, &h.resp_descs);
                 any = true;
             } else {
@@ -561,7 +565,10 @@ impl VirtioGpu {
             Ok(fence) => {
                 let response = build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, p.flags, p.fence_id);
                 if p.flags & VIRTIO_GPU_FLAG_FENCE != 0 && !self.ctxs.fence_done(p.ctx_id, p.ring, fence) {
-                    let held = Held { head: p.head, response, resp_descs: p.resp_descs, blob: None, deadline: 0 };
+                    let held = Held {
+                        head: p.head, response, resp_descs: p.resp_descs, blob: None, deadline: 0,
+                        since: crate::interrupts::rdtsc(),
+                    };
                     self.fenced.push((held, p.ctx_id, p.ring, fence));
                     false
                 } else {
@@ -687,6 +694,7 @@ impl VirtioGpu {
                     self.held = Some(Held {
                         head, response, resp_descs, blob: Some(blob),
                         deadline: now + crate::interrupts::tsc_freq() / 1000 * HOLD_MAX_MS,
+                        since: now,
                     });
                     last_avail = last_avail.wrapping_add(1);
                     break;
@@ -723,6 +731,8 @@ impl VirtioGpu {
             let period = (crate::interrupts::tsc_freq() / VBLANK_HZ).max(1);
             let t = crate::interrupts::rdtsc();
             self.paused_until = (t / period + 1) * period;
+            super::gpu_backend::note(super::gpu_backend::STAT_PAUSE_US,
+                (self.paused_until - t) * 1_000_000 / crate::interrupts::tsc_freq().max(1));
             super::gpu_backend::set_resume_tsc(self.paused_until);
         }
 

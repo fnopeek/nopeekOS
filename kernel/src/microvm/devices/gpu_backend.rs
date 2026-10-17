@@ -177,9 +177,10 @@ pub fn mmio_fast(off: u32, write: Option<u32>) -> Option<u64> {
 
 /// Guest GPU traffic for `cores`: controlq commands by kind, cursorq
 /// commands, and the bytes copied on the TRANSFER and FLUSH paths.
-pub const STAT_BUCKETS: usize = 9;
+pub const STAT_BUCKETS: usize = 17;
 pub const STAT_LABELS: [&str; STAT_BUCKETS] =
-    ["transfer", "flush", "scanout", "other", "cursor", "xfer-KB", "flush-KB", "blob", "hold-us"];
+    ["transfer", "flush", "scanout", "other", "cursor", "xfer-KB", "flush-KB", "blob", "hold-us",
+     "submit", "ccmd", "submit-us", "pause-us", "scene", "scene-us", "fence", "fence-us"];
 pub const STAT_TRANSFER: usize = 0;
 pub const STAT_FLUSH: usize = 1;
 pub const STAT_SCANOUT: usize = 2;
@@ -191,6 +192,23 @@ pub const STAT_FLUSH_KB: usize = 6;
 /// waited for the buffer shown before.
 pub const STAT_BLOB: usize = 7;
 pub const STAT_HOLD_US: usize = 8;
+/// Where a guest frame's time goes: SUBMIT_3D streams, their ccmds and the
+/// time spent running them; the time the controlq waited for the next
+/// refresh; the desktop's scenes and the time it waited for them.
+pub const STAT_SUBMIT: usize = 9;
+pub const STAT_CCMD: usize = 10;
+pub const STAT_SUBMIT_US: usize = 11;
+pub const STAT_PAUSE_US: usize = 12;
+pub const STAT_SCENE: usize = 13;
+pub const STAT_SCENE_US: usize = 14;
+/// Fenced SUBMIT_3D chains and how long each waited for its fence.
+pub const STAT_FENCE: usize = 15;
+pub const STAT_FENCE_US: usize = 16;
+
+/// Microseconds since `t0` (TSC).
+pub fn us_since(t0: u64) -> u64 {
+    crate::interrupts::rdtsc().saturating_sub(t0) * 1_000_000 / crate::interrupts::tsc_freq().max(1)
+}
 static STATS: [core::sync::atomic::AtomicU64; STAT_BUCKETS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; STAT_BUCKETS];
 pub fn note(kind: usize, n: u64) {

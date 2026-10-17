@@ -297,6 +297,15 @@ pub struct SubmitJob {
 /// ccmds wait for the GPU driver, and vCPUs take the device lock on their
 /// exits. Returns the fence started after it on the job's ring.
 pub fn run_submit(job: &SubmitJob, stream: &[u8], deadline: u64) -> Result<u64, ()> {
+    use super::gpu_backend::{note, us_since, STAT_SUBMIT, STAT_SUBMIT_US};
+    let t0 = crate::interrupts::rdtsc();
+    let r = run_submit_inner(job, stream, deadline);
+    note(STAT_SUBMIT, 1);
+    note(STAT_SUBMIT_US, us_since(t0));
+    r
+}
+
+fn run_submit_inner(job: &SubmitJob, stream: &[u8], deadline: u64) -> Result<u64, ()> {
     let mut guard = BACKEND.lock();
     let b = guard.as_mut().ok_or(())?;
     let align = b.ccmd_alignment() as usize;
@@ -309,6 +318,7 @@ pub fn run_submit(job: &SubmitJob, stream: &[u8], deadline: u64) -> Result<u64, 
             return Err(());
         }
         let mut rsp = Vec::new();
+        super::gpu_backend::note(super::gpu_backend::STAT_CCMD, 1);
         b.ccmd(job.handle, &stream[off..off + len], &mut rsp, deadline).map_err(|_| ())?;
         let (set, clear) = b.banned(job.handle);
         if let Some(sh) = &job.shmem {

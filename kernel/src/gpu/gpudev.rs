@@ -1207,13 +1207,26 @@ pub fn submit_scene(target: u32, payload: Vec<u8>, sources: &[u32]) -> Option<u3
 
 /// Wait for scene job `seq`: 0 when the module composed it, else why not.
 pub fn wait_scene(seq: u32) -> i32 {
-    wait_seq(seq, deadline())
+    let t0 = crate::interrupts::rdtsc();
+    let r = wait_seq(seq, deadline());
+    note_scene_wait(t0);
+    r
+}
+
+/// For `cores`: a scene the desktop waited for, and how long.
+fn note_scene_wait(t0: u64) {
+    use crate::microvm::devices::gpu_backend::{note, us_since, STAT_SCENE, STAT_SCENE_US};
+    note(STAT_SCENE, 1);
+    note(STAT_SCENE_US, us_since(t0));
 }
 
 /// `wait_scene` for a scene queued behind new buffers: binding them is a
 /// page walk per 4 KB page in the module, once.
 pub fn wait_scene_bound(seq: u32) -> i32 {
-    wait_seq(seq, crate::interrupts::rdtsc() + BIND_TIMEOUT_MS * (crate::interrupts::tsc_freq() / 1000))
+    let t0 = crate::interrupts::rdtsc();
+    let r = wait_seq(seq, t0 + BIND_TIMEOUT_MS * (crate::interrupts::tsc_freq() / 1000));
+    note_scene_wait(t0);
+    r
 }
 
 /// The fixed buffer (1 or 2) whose first pixel is at `addr`.
