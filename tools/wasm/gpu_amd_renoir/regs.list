@@ -160,3 +160,23 @@ AMD_APU_IS_GREEN_SARDINE
 AMDGPU_MAX_VCN_INSTANCES
 AMDGPU_MAX_SDMA_INSTANCES
 AMDGPU_MAX_VPE_INSTANCES
+# The VBIOS from ACPI VFCT (amdgpu_bios.c, atombios.h)
+VFCT_SIZE = sizeof(UEFI_ACPI_VFCT) @ amdgpu_bios.c
+VFCT_VBIOS_IMAGE_OFFSET = offsetof(UEFI_ACPI_VFCT, VBIOSImageOffset) @ amdgpu_bios.c
+VFCT_IMAGE_HEADER_SIZE = sizeof(VFCT_IMAGE_HEADER) @ amdgpu_bios.c
+VHDR_PCI_BUS = offsetof(VFCT_IMAGE_HEADER, PCIBus) @ amdgpu_bios.c
+VHDR_PCI_DEVICE = offsetof(VFCT_IMAGE_HEADER, PCIDevice) @ amdgpu_bios.c
+VHDR_PCI_FUNCTION = offsetof(VFCT_IMAGE_HEADER, PCIFunction) @ amdgpu_bios.c
+VHDR_VENDOR_ID = offsetof(VFCT_IMAGE_HEADER, VendorID) @ amdgpu_bios.c
+VHDR_DEVICE_ID = offsetof(VFCT_IMAGE_HEADER, DeviceID) @ amdgpu_bios.c
+VHDR_IMAGE_LENGTH = offsetof(VFCT_IMAGE_HEADER, ImageLength) @ amdgpu_bios.c
+GOP_VBIOS_CONTENT_OFFSET = offsetof(GOP_VBIOS_CONTENT, VbiosContent) @ amdgpu_bios.c
+ACPI_TABLE_HEADER_LENGTH = offsetof(struct acpi_table_header, length) @ amdgpu_bios.c
+# The fixed IP bases of DC on Renoir (renoir_ip_offset.h)
+MAX_INSTANCE @ renoir_ip_offset.h
+MAX_SEGMENT @ renoir_ip_offset.h
+# nbio_v7_0_get_rev_id (nbio_7_0_offset.h, nbio_7_0_sh_mask.h)
+mmRCC_DEV0_EPF0_STRAP0 @ nbio_v7_0.c
+mmRCC_DEV0_EPF0_STRAP0_BASE_IDX @ nbio_v7_0.c
+RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0_MASK @ nbio_v7_0.c
+RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0__SHIFT @ nbio_v7_0.c

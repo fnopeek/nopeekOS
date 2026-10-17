@@ -112,8 +112,8 @@ impl amdgpu_device {
     }
 }
 
-/// `amdgpu_device_ip_early_init`: the APU flags of CHIP_RENOIR.
-pub fn amdgpu_device_renoir_apu_flags(adev: &mut amdgpu_device) {
+/// `amdgpu_device_init_apu_flags`, the CHIP_RENOIR case.
+pub fn amdgpu_device_init_apu_flags(adev: &mut amdgpu_device) {
     if adev.device == 0x1636 || adev.device == 0x164c {
         adev.apu_flags |= AMD_APU_IS_RENOIR;
     } else {

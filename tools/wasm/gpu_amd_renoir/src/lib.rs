@@ -5,9 +5,11 @@
 //! start of `amdgpu_device_init` up to `amdgpu_discovery_reg_base_init`:
 //! the register BAR, the APU flags, and the IP discovery binary from the top
 //! of VRAM, checked and parsed into the version and register bases of every
-//! IP. It reports what it found, keeps the binary in its private area and
-//! gives the card back; nothing is written to the card but the MM_INDEX
-//! window it reads VRAM through.
+//! IP, the revision `soc15_common_early_init` derives from NBIO, and the
+//! VBIOS from ACPI VFCT (`amdgpu_get_bios_apu`). It compares the bases with
+//! the fixed ones DC uses (renoir_ip_offset.h), keeps the binaries in its
+//! private area and gives the card back; nothing is written to the card but
+//! the MM_INDEX window it reads VRAM through.
 
 #![no_std]
 // Linux names are kept as they are (`amdgpu_device`, `mmMM_INDEX`), so a
@@ -17,8 +19,10 @@
 
 extern crate alloc;
 
+mod amdgpu_bios;
 mod amdgpu_device;
 mod amdgpu_discovery;
+mod nbio_v7_0;
 mod linux;
 mod regs;
 mod tables;
@@ -98,7 +102,7 @@ pub extern "C" fn _start() {
         return;
     };
     let mut adev = amdgpu_device::amdgpu_device::new(LUCIENNE, revision, rmmio, rmmio_size as u32);
-    amdgpu_device::amdgpu_device_renoir_apu_flags(&mut adev);
+    amdgpu_device::amdgpu_device_init_apu_flags(&mut adev);
     Line::new().s("apu_flags ").hex(adev.apu_flags).s(if adev.apu_flags & regs::AMD_APU_IS_RENOIR != 0 {
         " (AMD_APU_IS_RENOIR: renoir_* firmware)"
     } else {
@@ -123,7 +127,86 @@ pub extern "C" fn _start() {
     } else {
         "could not be stored"
     }).say();
+
+    // soc15_common_early_init: rev_id from NBIO, external_rev_id for GC 9.3.0
+    // (soc15.c:1162-1166).
+    if nbio_v7_0::serves(&adev) {
+        match nbio_v7_0::nbio_v7_0_get_rev_id(&adev) {
+            Some(rev_id) => {
+                let ext = if adev.apu_flags & regs::AMD_APU_IS_RENOIR != 0 { rev_id + 0x91 } else { rev_id + 0xa1 };
+                Line::new().s("rev_id ").hex(rev_id).s(", external_rev_id ").hex(ext).say();
+            }
+            None => say("RCC_DEV0_EPF0_STRAP0 lies outside BAR5 or NBIO has no base"),
+        }
+    } else {
+        say("NBIO is not a version nbio_v7_0_funcs serve; rev_id not read");
+    }
+
+    compare_dc_bases(&adev);
+
+    // amdgpu_get_bios_apu: VFCT first.
+    match find_self().and_then(|(b, d, f)| amdgpu_bios::amdgpu_acpi_vfct_bios(AMD_VENDOR, LUCIENNE, b, d, f)) {
+        Some(bios) => {
+            let hdr = bios[0x48] as usize | (bios[0x49] as usize) << 8;
+            let rc = npk_sys::store(b"priv/gpu_amd_renoir/vbios.bin", &bios);
+            Line::new().s("Fetched VBIOS from VFCT: ").dec(bios.len() as u64).s(" bytes, ATOM header at ")
+                .hex(hdr as u32).s(if rc >= 0 { ", kept in priv/gpu_amd_renoir/vbios.bin" } else { ", could not be stored" })
+                .say();
+        }
+        None => say("no VBIOS from VFCT (the VRAM BAR, ROM and platform paths come later)"),
+    }
     say("stage 0 done, giving the card back");
+}
+
+/// The bus, slot and function of this card: the only 1002:164c.
+fn find_self() -> Option<(u8, u8, u8)> {
+    for bus in 0..=255u32 {
+        for slot in 0..32u32 {
+            let bdf = (bus << 8 | slot << 3) as i32;
+            let id = npk_sys::pci_read_config_at(bdf, 0) as u32;
+            if id == (LUCIENNE as u32) << 16 | AMD_VENDOR as u32 {
+                return Some((bus as u8, slot as u8, 0));
+            }
+        }
+    }
+    None
+}
+
+/// The register bases from the discovery table against the fixed ones of
+/// renoir_ip_offset.h, which DC (and only DC) uses.
+fn compare_dc_bases(adev: &amdgpu_device::amdgpu_device) {
+    use regs::*;
+    use tables::*;
+    let seg = MAX_SEGMENT as usize;
+    let list: &[(u32, &str, &[u32])] = &[
+        (ATHUB_HWIP, "ATHUB", &ATHUB_BASE), (DF_HWIP, "DF", &DF_BASE), (DCE_HWIP, "DCE/DMU", &DMU_BASE),
+        (GC_HWIP, "GC", &GC_BASE), (HDP_HWIP, "HDP", &HDP_BASE), (MMHUB_HWIP, "MMHUB", &MMHUB_BASE),
+        (MP0_HWIP, "MP0", &MP0_BASE), (MP1_HWIP, "MP1", &MP1_BASE), (NBIO_HWIP, "NBIO/NBIF0", &NBIF0_BASE),
+        (OSSSYS_HWIP, "OSSSYS", &OSSSYS_BASE), (SDMA0_HWIP, "SDMA0", &SDMA0_BASE), (SMUIO_HWIP, "SMUIO", &SMUIO_BASE),
+        (THM_HWIP, "THM", &THM_BASE), (UMC_HWIP, "UMC", &UMC_BASE), (UVD_HWIP, "UVD/VCN", &UVD0_BASE),
+    ];
+    let mut same = 0;
+    for &(ip, name, fixed) in list {
+        let found = &adev.reg_offset[ip as usize][0];
+        let want = &fixed[..seg];
+        let n = want.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+        if found.len() >= n && found[..n] == want[..n] {
+            same += 1;
+            continue;
+        }
+        let mut l = Line::new();
+        l.s("base ").s(name).s(" differs: discovery");
+        for &b in found.iter().take(seg) {
+            l.s(" ").hex(b);
+        }
+        l.s(", renoir_ip_offset.h");
+        for &b in &want[..n] {
+            l.s(" ").hex(b);
+        }
+        l.say();
+    }
+    Line::new().s("register bases: ").dec(same as u64).s(" of ").dec(list.len() as u64)
+        .s(" IPs as in renoir_ip_offset.h").say();
 }
 
 /// `adev->ip_versions` by hardware IP, as the IP blocks will be chosen

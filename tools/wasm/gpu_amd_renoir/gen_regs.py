@@ -14,8 +14,9 @@ array of a .c file, compiled as is, and read off the data GCC emits for it.
 regs.list, one per line: `NAME` for a constant of the headers below,
 `NAME @ file.c` for a constant a .c file defines (compiled with that file),
 `NAME = expr @ file.c` for a value read out of that file. `# ` lines group
-the output. tables.list: `@ file.c`, then `name: u8|u16|u32|i32` per array
-of integers in that file.
+the output. tables.list: `@ file`, then `name: u8|u16|u32|i32` per static
+array of integers in that file, or per static struct made only of integers,
+which comes out flat, in memory order.
 
 The tree is the call-graph build of docs/plan/GPU_AMD_LINUX_MAP.md:
 ~/.cache/nopeekos/amdgpu-callgraph/linux-6.18.55, configured with
@@ -123,7 +124,10 @@ def where(name, files):
 def search_files(extra=None):
     out = []
     if extra:
-        out.append(os.path.join(DRV, extra))
+        for d in (DRV, os.path.join(AMD, "include")):
+            if os.path.exists(os.path.join(d, extra)):
+                out.append(os.path.join(d, extra))
+                break
     for d in (DRV, os.path.join(AMD, "include")):
         for dp, _, fs in sorted(os.walk(d)):
             out += [os.path.join(dp, f) for f in sorted(fs) if f.endswith(".h")]
@@ -180,7 +184,7 @@ def table_data(f, names):
     GCC emits for them."""
     src = PRELUDE + f'#include "{f}"\n'
     for n in names:
-        src += f"const void *t_{n}(void);\nconst void *t_{n}(void) {{ return {n}; }}\n"
+        src += f"const void *t_{n}(void);\nconst void *t_{n}(void) {{ return &{n}; }}\n"
     asm = gcc(src, ["-S"])
     out, label, cur = {}, None, None
     sym_of = {}

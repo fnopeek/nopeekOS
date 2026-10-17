@@ -323,3 +323,43 @@ pub const AMDGPU_MAX_VCN_INSTANCES: u32 = 0x4;
 pub const AMDGPU_MAX_SDMA_INSTANCES: u32 = 0x10;
 /// amdgpu/amdgpu_vpe.h:30
 pub const AMDGPU_MAX_VPE_INSTANCES: u32 = 0x2;
+
+// The VBIOS from ACPI VFCT (amdgpu_bios.c, atombios.h)
+/// The value of `sizeof(UEFI_ACPI_VFCT)` in amdgpu_bios.c
+pub const VFCT_SIZE: u32 = 0x4c;
+/// The value of `offsetof(UEFI_ACPI_VFCT, VBIOSImageOffset)` in amdgpu_bios.c
+pub const VFCT_VBIOS_IMAGE_OFFSET: u32 = 0x34;
+/// The value of `sizeof(VFCT_IMAGE_HEADER)` in amdgpu_bios.c
+pub const VFCT_IMAGE_HEADER_SIZE: u32 = 0x1c;
+/// The value of `offsetof(VFCT_IMAGE_HEADER, PCIBus)` in amdgpu_bios.c
+pub const VHDR_PCI_BUS: u32 = 0x0;
+/// The value of `offsetof(VFCT_IMAGE_HEADER, PCIDevice)` in amdgpu_bios.c
+pub const VHDR_PCI_DEVICE: u32 = 0x4;
+/// The value of `offsetof(VFCT_IMAGE_HEADER, PCIFunction)` in amdgpu_bios.c
+pub const VHDR_PCI_FUNCTION: u32 = 0x8;
+/// The value of `offsetof(VFCT_IMAGE_HEADER, VendorID)` in amdgpu_bios.c
+pub const VHDR_VENDOR_ID: u32 = 0xc;
+/// The value of `offsetof(VFCT_IMAGE_HEADER, DeviceID)` in amdgpu_bios.c
+pub const VHDR_DEVICE_ID: u32 = 0xe;
+/// The value of `offsetof(VFCT_IMAGE_HEADER, ImageLength)` in amdgpu_bios.c
+pub const VHDR_IMAGE_LENGTH: u32 = 0x18;
+/// The value of `offsetof(GOP_VBIOS_CONTENT, VbiosContent)` in amdgpu_bios.c
+pub const GOP_VBIOS_CONTENT_OFFSET: u32 = 0x1c;
+/// The value of `offsetof(struct acpi_table_header, length)` in amdgpu_bios.c
+pub const ACPI_TABLE_HEADER_LENGTH: u32 = 0x4;
+
+// The fixed IP bases of DC on Renoir (renoir_ip_offset.h)
+/// include/renoir_ip_offset.h:24
+pub const MAX_INSTANCE: u32 = 0x7;
+/// include/renoir_ip_offset.h:25
+pub const MAX_SEGMENT: u32 = 0x5;
+
+// nbio_v7_0_get_rev_id (nbio_7_0_offset.h, nbio_7_0_sh_mask.h)
+/// include/asic_reg/nbif/nbif_6_1_offset.h:1069
+pub const mmRCC_DEV0_EPF0_STRAP0: u32 = 0xf;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:1070
+pub const mmRCC_DEV0_EPF0_STRAP0_BASE_IDX: u32 = 0x2;
+/// include/asic_reg/nbio/nbio_2_3_sh_mask.h:592
+pub const RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0_MASK: u32 = 0xf000000;
+/// include/asic_reg/nbif/nbif_6_1_sh_mask.h:2770
+pub const RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0__SHIFT: u32 = 0x18;
