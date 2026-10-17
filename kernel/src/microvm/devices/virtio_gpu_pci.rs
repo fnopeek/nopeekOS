@@ -384,9 +384,9 @@ pub struct VirtioGpu {
     dmg_tile_acc: u64,
     dmg_flush_count: u32,
 
-    /// vblank pacing: the controlq takes no further command before this TSC
-    /// once a FLUSH was served (0 = not paused). What a display does: one
-    /// scan-out per refresh, the rest waits.
+    /// vblank pacing: once a FLUSH was served, the next one waits until
+    /// this TSC (0 = never paused). What a display does: one scan-out per
+    /// refresh; the commands before the next FLUSH are served meanwhile.
     paused_until: u64,
     /// Per scanout: resource of the last FLUSH that reached its surface.
     last_flush_res: [u32; MAX_OUTPUTS],
@@ -640,11 +640,9 @@ impl VirtioGpu {
         let mut used_idx = q.used_idx;
 
         let now = crate::interrupts::rdtsc();
-        if now < self.paused_until { return false; }
 
         let mut any = false;
-        let mut flushed = false;
-        while last_avail != avail_top && !flushed {
+        while last_avail != avail_top {
             let head = match avail_ring(mem, driver_gpa, qsize, last_avail) {
                 Some(v) => v, None => break,
             };
@@ -672,6 +670,15 @@ impl VirtioGpu {
                 idx = match chain_next(&d, &mut hops, qsize) { Some(n) => n, None => break };
             }
 
+            // vblank pacing: the next frame's FLUSH waits for the next
+            // refresh, as a display scans out once per refresh; the commands
+            // before it (the guest's decode and render work) do not.
+            let flush = le32(&request, 0) == Some(VIRTIO_GPU_CMD_RESOURCE_FLUSH);
+            if flush && crate::interrupts::rdtsc() < self.paused_until {
+                super::gpu_backend::set_resume_tsc(self.paused_until);
+                break;
+            }
+
             // A SUBMIT_3D of a known context stops serving here: its ccmds
             // run without the device lock, then serving goes on in order.
             if let Some(p) = self.take_submit(head, &resp_descs, &request) {
@@ -682,10 +689,17 @@ impl VirtioGpu {
 
             // Dispatch the command + build the response payload (incl.
             // the 24-byte virtio_gpu_ctrl_hdr).
-            flushed = request.len() >= 4
-                && u32::from_le_bytes([request[0], request[1], request[2], request[3]])
-                    == VIRTIO_GPU_CMD_RESOURCE_FLUSH;
             let response = self.dispatch_control(&request, mem);
+            // A frame went out: the next FLUSH waits for the next refresh.
+            // Refreshes lie on one grid, as a display's vblanks do.
+            if flush {
+                let period = (crate::interrupts::tsc_freq() / VBLANK_HZ).max(1);
+                let t = crate::interrupts::rdtsc();
+                self.paused_until = (t / period + 1) * period;
+                super::gpu_backend::set_resume_tsc(self.paused_until);
+                super::gpu_backend::note(super::gpu_backend::STAT_PAUSE_US,
+                    (self.paused_until - t) * 1_000_000 / crate::interrupts::tsc_freq().max(1));
+            }
 
             // A blob FLUSH whose fence must wait: the guest writes the buffer
             // shown before once it completes.
@@ -722,19 +736,6 @@ impl VirtioGpu {
         let q = &mut self.queues[q_idx];
         q.last_avail_idx = last_avail;
         q.used_idx = used_idx;
-
-        // A frame went out: the next command waits for the next refresh.
-        // Refreshes lie on one grid, as a display's vblanks do: the work for
-        // the next frame runs inside the period, not after a full period
-        // counted from this FLUSH, which would lower the rate by that work.
-        if flushed {
-            let period = (crate::interrupts::tsc_freq() / VBLANK_HZ).max(1);
-            let t = crate::interrupts::rdtsc();
-            self.paused_until = (t / period + 1) * period;
-            super::gpu_backend::note(super::gpu_backend::STAT_PAUSE_US,
-                (self.paused_until - t) * 1_000_000 / crate::interrupts::tsc_freq().max(1));
-            super::gpu_backend::set_resume_tsc(self.paused_until);
-        }
 
         if any { super::gpu_backend::raise_isr(1); }
         any
