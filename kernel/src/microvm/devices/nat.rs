@@ -113,7 +113,6 @@ impl Default for NetCaps {
 use crate::net::ipv4::Forwarded;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtOrd};
 
-const L3_MAX: usize = 1024;
 
 // ── Throughput / NAT-usage instrumentation ──
 // Cheap relaxed counters, reported by `netstat`. Window counters reset each
@@ -241,26 +240,30 @@ struct L3Map {
 /// Masquerade table plus a bit per host port in `[L3_PORT_LO, L3_PORT_HI)`
 /// and two indexes into it, as conntrack hashes both tuple directions, so
 /// no packet walks the table linearly. One lock over all of it, so no index
-/// can disagree with the table.
+/// can disagree with the table. The table grows with the flows the VM opens,
+/// up to one per host port, and goes back with `l3_reset`.
 struct L3Table {
-    maps: [Option<L3Map>; L3_MAX],
+    maps: Vec<Option<L3Map>>,
+    /// Slots of `maps` released for reuse.
+    free: Vec<u16>,
     used: [u64; PORT_WORDS],
     /// Inbound: host port → slot. A host port belongs to one flow at a time
     /// (the `used` bitmap is shared by all protocols).
     by_port: [u16; PORT_RANGE],
     /// Outbound: open-addressed hash of (proto, guest port, remote) → slot,
-    /// linear probing, half full at most.
-    by_flow: [u16; FLOW_BUCKETS],
+    /// linear probing, half full at most; a power of two long.
+    by_flow: Vec<u16>,
 }
 
 const NO_SLOT: u16 = u16::MAX;
-const FLOW_BUCKETS: usize = L3_MAX * 2;
+/// Buckets of the first outbound index; it doubles as the table grows.
+const FLOW_BUCKETS_MIN: usize = 64;
 
 fn flow_hash(proto: u8, gport: u16, rip: [u8; 4], rport: u16) -> usize {
     let k = (u32::from_be_bytes(rip) as u64) << 32
         | (gport as u64) << 16 | rport as u64;
     let h = (k ^ (proto as u64) << 56).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    (h >> 40) as usize & (FLOW_BUCKETS - 1)
+    (h >> 32) as usize
 }
 
 const PORT_RANGE: usize = (L3_PORT_HI - L3_PORT_LO) as usize;
@@ -273,16 +276,23 @@ const NAT_MAX_ATTEMPTS: usize = 128;
 impl L3Table {
     const fn new() -> Self {
         L3Table {
-            maps: [const { None }; L3_MAX], used: [0; PORT_WORDS],
-            by_port: [NO_SLOT; PORT_RANGE], by_flow: [NO_SLOT; FLOW_BUCKETS],
+            maps: Vec::new(), free: Vec::new(), used: [0; PORT_WORDS],
+            by_port: [NO_SLOT; PORT_RANGE], by_flow: Vec::new(),
         }
     }
-    fn flow_key(m: &L3Map) -> usize {
-        flow_hash(m.proto, m.guest_port, m.remote_ip, m.remote_port)
+    fn mask(&self) -> usize {
+        self.by_flow.len() - 1
+    }
+    fn flow_key(&self, m: &L3Map) -> usize {
+        flow_hash(m.proto, m.guest_port, m.remote_ip, m.remote_port) & self.mask()
     }
     /// Slot of the outbound flow, if mapped.
     fn find_flow(&self, proto: u8, gport: u16, rip: [u8; 4], rport: u16) -> Option<usize> {
-        let mut b = flow_hash(proto, gport, rip, rport);
+        if self.by_flow.is_empty() {
+            return None;
+        }
+        let mask = self.mask();
+        let mut b = flow_hash(proto, gport, rip, rport) & mask;
         loop {
             let slot = self.by_flow[b];
             if slot == NO_SLOT { return None; }
@@ -293,14 +303,50 @@ impl L3Table {
                     return Some(slot as usize);
                 }
             }
-            b = (b + 1) & (FLOW_BUCKETS - 1);
+            b = (b + 1) & mask;
         }
     }
-    /// Occupy slot `i` with `m` and index it.
-    fn insert(&mut self, i: usize, m: L3Map) {
-        let mut b = Self::flow_key(&m);
-        while self.by_flow[b] != NO_SLOT { b = (b + 1) & (FLOW_BUCKETS - 1); }
+    /// A free slot, the table grown by one if none is (None: a slot per
+    /// host port is taken). The outbound index stays at most half full.
+    fn alloc_slot(&mut self) -> Option<usize> {
+        if let Some(i) = self.free.pop() {
+            return Some(i as usize);
+        }
+        if self.maps.len() >= PORT_RANGE || self.maps.try_reserve(1).is_err() {
+            return None;
+        }
+        self.maps.push(None);
+        if self.maps.len() * 2 > self.by_flow.len() && !self.grow_index() {
+            self.maps.pop();
+            return None;
+        }
+        Some(self.maps.len() - 1)
+    }
+    /// Double the outbound index and hash every flow into it again.
+    fn grow_index(&mut self) -> bool {
+        let n = (self.by_flow.len() * 2).max(FLOW_BUCKETS_MIN);
+        let mut fresh = Vec::new();
+        if fresh.try_reserve_exact(n).is_err() {
+            return false;
+        }
+        fresh.resize(n, NO_SLOT);
+        self.by_flow = fresh;
+        for i in 0..self.maps.len() {
+            if let Some(m) = self.maps[i] {
+                self.index_flow(i, &m);
+            }
+        }
+        true
+    }
+    fn index_flow(&mut self, i: usize, m: &L3Map) {
+        let mask = self.mask();
+        let mut b = self.flow_key(m);
+        while self.by_flow[b] != NO_SLOT { b = (b + 1) & mask; }
         self.by_flow[b] = i as u16;
+    }
+    /// Occupy slot `i` (from `alloc_slot`) with `m` and index it.
+    fn insert(&mut self, i: usize, m: L3Map) {
+        self.index_flow(i, &m);
         self.by_port[(m.host_port - L3_PORT_LO) as usize] = i as u16;
         self.set_port(m.host_port, true);
         self.maps[i] = Some(m);
@@ -308,19 +354,20 @@ impl L3Table {
     /// Take slot `i` out of the flow hash: backward-shift deletion, so a
     /// probe chain never breaks and no tombstones pile up.
     fn unindex_flow(&mut self, i: usize, key: usize) {
+        let mask = self.mask();
         let mut b = key;
-        while self.by_flow[b] as usize != i { b = (b + 1) & (FLOW_BUCKETS - 1); }
+        while self.by_flow[b] as usize != i { b = (b + 1) & mask; }
         let mut hole = b;
         let mut j = b;
         loop {
-            j = (j + 1) & (FLOW_BUCKETS - 1);
+            j = (j + 1) & mask;
             let slot = self.by_flow[j];
             if slot == NO_SLOT { break; }
             let Some(m) = &self.maps[slot as usize] else { break };
-            let home = Self::flow_key(m);
+            let home = self.flow_key(m);
             // Move j into the hole unless its home lies cyclically in (hole, j].
-            let dist_home = j.wrapping_sub(home) & (FLOW_BUCKETS - 1);
-            let dist_hole = j.wrapping_sub(hole) & (FLOW_BUCKETS - 1);
+            let dist_home = j.wrapping_sub(home) & mask;
+            let dist_hole = j.wrapping_sub(hole) & mask;
             if dist_home >= dist_hole {
                 self.by_flow[hole] = slot;
                 hole = j;
@@ -342,10 +389,12 @@ impl L3Table {
     /// Free slot `i` and its port together.
     fn release(&mut self, i: usize) {
         let Some(m) = self.maps[i] else { return };
-        self.unindex_flow(i, Self::flow_key(&m));
+        let key = self.flow_key(&m);
+        self.unindex_flow(i, key);
         self.by_port[(m.host_port - L3_PORT_LO) as usize] = NO_SLOT;
         self.set_port(m.host_port, false);
         self.maps[i] = None;
+        self.free.push(i as u16);
     }
 }
 
@@ -388,7 +437,7 @@ fn note_table_full() {
     let n = NS_DROP_TABLE.fetch_add(1, AtOrd::Relaxed);
     if n < 4 {
         kprintln!("[nat] masquerade table full ({} flows) - no new connection \
-                   can open; see netstat", L3_MAX);
+                   can open; see netstat", PORT_RANGE);
     }
 }
 
@@ -426,7 +475,7 @@ fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Opti
         off = (off + PORT_RANGE / 2 + 1) % PORT_RANGE;
     }
     let hp = hp?;
-    let slot = (0..L3_MAX).find(|&i| tbl.maps[i].is_none())?;
+    let slot = tbl.alloc_slot()?;
     tbl.insert(slot, L3Map { proto, guest_port: gport, remote_ip: rip,
                              remote_port: rport, host_ip: our_ip,
                              host_port: hp, last_tick: now });
@@ -1548,13 +1597,24 @@ pub fn path_id() -> &'static str { "tap-v1" }
 /// never contends with the worker on the hot path). The worker owns RX+TX; the
 /// vCPU owns guest execution + IRQ injection. That's the single, unified path.
 pub fn housekeep() {
-    l3_reap(crate::interrupts::ticks());
+    // Idle limits are 30 s and 2 min: one scan a second is plenty, and the
+    // table may hold a flow per host port.
+    let now = crate::interrupts::ticks();
+    let last = LAST_REAP.load(AtOrd::Relaxed);
+    if now.wrapping_sub(last) < REAP_EVERY_TICKS {
+        return;
+    }
+    LAST_REAP.store(now, AtOrd::Relaxed);
+    l3_reap(now);
 }
+
+static LAST_REAP: AtomicU64 = AtomicU64::new(0);
+const REAP_EVERY_TICKS: u64 = 100;
 
 /// Drop idle mappings so the table can't fill over a long session.
 fn l3_reap(now: u64) {
     let mut tbl = L3.lock();
-    for i in 0..L3_MAX {
+    for i in 0..tbl.maps.len() {
         let Some(m) = tbl.maps[i].as_ref() else { continue };
         let idle = now.wrapping_sub(m.last_tick);
         let max = if m.proto == PROTO_TCP { L3_TCP_IDLE_TICKS }
@@ -1566,13 +1626,14 @@ fn l3_reap(now: u64) {
 /// Tear down all L3 state (VM stopped). Idempotent.
 pub fn l3_reset() {
     L3_ACTIVE.store(false, AtOrd::Release);
-    // In place: a fresh `L3Table` is ~80 KB, too much for a fiber stack.
+    // In place: a fresh `L3Table` is ~50 KB, too much for a fiber stack.
     {
         let mut t = L3.lock();
-        t.maps.fill(None);
+        t.maps = Vec::new();
+        t.free = Vec::new();
         t.used.fill(0);
         t.by_port.fill(NO_SLOT);
-        t.by_flow.fill(NO_SLOT);
+        t.by_flow = Vec::new();
     }
     tap_reset();
     *FRAME_POOL.lock() = Vec::new(); // release recycled buffers
@@ -2101,7 +2162,7 @@ pub fn bridge_stats() -> BridgeStats {
         window_ms,
         flows_tcp: NS_TCP_FLOWS.load(AtOrd::Relaxed),
         flows_udp: NS_UDP_FLOWS.load(AtOrd::Relaxed),
-        live: L3.lock().maps.iter().flatten().count(), cap: L3_MAX,
+        live: L3.lock().maps.iter().flatten().count(), cap: PORT_RANGE,
         drop_table: NS_DROP_TABLE.load(AtOrd::Relaxed),
         drop_egress: NS_DROP_EGRESS.load(AtOrd::Relaxed),
         inject_false: NS_INJECT_FALSE.load(AtOrd::Relaxed),
