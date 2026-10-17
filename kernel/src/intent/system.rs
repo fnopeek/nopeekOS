@@ -107,6 +107,7 @@ pub fn intent_cores() {
     let np0 = crate::microvm::cpu::npf_snapshot();
     let la0 = crate::microvm::cpu::svm::lapic::access_snapshot();
     let gs0 = crate::microvm::devices::gpu_backend::stats_snapshot();
+    let gp0 = crate::gpu::gpudev::gpu_stats_snapshot();
     let sc0 = crate::shade::surface::copy_stats();
     let wk0 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw0 = crate::smp::fiber::kick_wait_snapshot();
@@ -150,6 +151,7 @@ pub fn intent_cores() {
     let np1 = crate::microvm::cpu::npf_snapshot();
     let la1 = crate::microvm::cpu::svm::lapic::access_snapshot();
     let gs1 = crate::microvm::devices::gpu_backend::stats_snapshot();
+    let gp1 = crate::gpu::gpudev::gpu_stats_snapshot();
     let sc1 = crate::shade::surface::copy_stats();
     let wk1 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw1 = crate::smp::fiber::kick_wait_snapshot();
@@ -259,6 +261,30 @@ pub fn intent_cores() {
             if crate::smp::per_core::driver_cores() & (1 << c) != 0 { kprint!(" [driver]"); }
             if crate::smp::per_core::app_core() == Some(c) { kprint!(" [apps]"); }
             kprintln!();
+        }
+    }
+
+    // GPU engines as the i915 PMU counts them, from the module's counters.
+    {
+        use crate::gpu::gpudev::{GPU_STAT_ACT_MHZ, GPU_STAT_AWAKE, GPU_STAT_BUSY, GPU_STAT_ENGINES,
+                                 GPU_STAT_REQ_MHZ, GPU_STAT_TIME};
+        let d = |i: usize| gp1[i].saturating_sub(gp0[i]);
+        let dt = d(GPU_STAT_TIME);
+        if gp1[GPU_STAT_TIME] != 0 {
+            kprint!("  GPU:");
+            if dt == 0 {
+                kprintln!(" idle (no counters in the window)");
+            } else {
+                for (k, name) in GPU_STAT_ENGINES.iter().enumerate() {
+                    kprint!(" {} {}%", name, (d(GPU_STAT_BUSY + k) * 100 / dt).min(100));
+                }
+                let awake = d(GPU_STAT_AWAKE);
+                kprint!(" | awake {}%", (awake * 100 / dt).min(100));
+                if awake > 0 {
+                    kprint!(" | {} MHz (req {})", d(GPU_STAT_ACT_MHZ) / awake, d(GPU_STAT_REQ_MHZ) / awake);
+                }
+                kprintln!();
+            }
         }
     }
 

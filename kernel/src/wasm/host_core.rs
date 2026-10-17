@@ -4273,6 +4273,20 @@ pub(crate) fn npk_gpudev_released(ctx: &mut HostState, id: i32) -> i32 {
     crate::gpu::gpudev::released(dev, id as u32)
 }
 
+/// `npk_gpudev_stats(ptr, len) -> 0 | -1`: the module's cumulative GPU
+/// counters (`gpudev::GPU_STATS_WORDS` little-endian u64s), for `cores`.
+pub(crate) fn npk_gpudev_stats(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
+    use crate::gpu::gpudev::GPU_STATS_WORDS;
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if len != (GPU_STATS_WORDS * 8) as i32 {
+        return -1;
+    }
+    let Some(data) = guest_mut(mem, ptr, len as usize) else { return -1 };
+    let words: [u64; GPU_STATS_WORDS] =
+        core::array::from_fn(|i| u64::from_le_bytes(data[i * 8..i * 8 + 8].try_into().unwrap()));
+    crate::gpu::gpudev::stats(dev, words)
+}
+
 /// `npk_gpudev_ring(client, ring, submitted, completed) -> 0 | -1`.
 pub(crate) fn npk_gpudev_ring(ctx: &mut HostState, client: i32, ring: i32, submitted: i64, completed: i64) -> i32 {
     let Some(dev) = gpudev_device(ctx) else { return -1 };

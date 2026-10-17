@@ -95,6 +95,7 @@ unsafe extern "C" {
     fn npk_gpudev_reply(seq: i32, ptr: i32, len: i32) -> i32;
     fn npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
     fn npk_gpudev_released(id: i32) -> i32;
+    fn npk_gpudev_stats(ptr: i32, len: i32) -> i32;
     fn npk_netdev_submit_rx(buf_ptr: i32, len: i32) -> i32;
     fn npk_netdev_rx_deliver(buf_ptr: i32, len: i32) -> i32;
     fn npk_netdev_poll_tx(buf_ptr: i32, max: i32) -> i32;
@@ -471,6 +472,13 @@ pub fn gpudev_bo_pages(id: i32, first: i32, out: &mut [u64]) -> i32 {
     // SAFETY: FFI; the kernel writes at most `out.len()` u64s into `out`,
     // borrowed for the call.
     unsafe { npk_gpudev_bo_pages(id, first, out.as_mut_ptr() as i32, out.len() as i32) }
+}
+
+/// The module's cumulative GPU counters for `cores` (`npk_gpudev_stats`);
+/// 0, or -1 if the kernel refused them.
+pub fn gpudev_stats(words: &[u64]) -> i32 {
+    // SAFETY: FFI; `words` is borrowed for the call.
+    unsafe { npk_gpudev_stats(words.as_ptr() as i32, (words.len() * 8) as i32) }
 }
 
 /// The response of job `seq` (`npk_gpudev_reply`), before it completes;

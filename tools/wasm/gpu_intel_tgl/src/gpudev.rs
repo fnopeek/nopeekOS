@@ -532,6 +532,52 @@ fn note_scene(gt: &intel_gt, svc: &mut service, target: u32, us: u64, r: &Result
     }
 }
 
+/// The GPU counters `cores` shows, cumulative like the i915 PMU's: busy
+/// time per engine (`intel_engine_get_busy_time`), time awake, and actual
+/// and requested frequency times time awake (`frequency_sample`).
+struct gt_stats {
+    last_us: u64,
+    awake_ns: u64,
+    act_mhz_ns: u64,
+    req_mhz_ns: u64,
+}
+
+/// Engines in the kernel's order (`GPU_STAT_ENGINES`): class, instance.
+const STAT_ENGINES: [(u32, u32); 5] = [
+    (RENDER_CLASS, 0), (COPY_ENGINE_CLASS, 0), (VIDEO_DECODE_CLASS, 0), (VIDEO_DECODE_CLASS, 1),
+    (VIDEO_ENHANCEMENT_CLASS, 0),
+];
+/// How often the counters go to the kernel.
+const GT_STATS_US: u64 = 100_000;
+
+/// Sample the frequency over the time since the last call and hand the
+/// counters to the kernel, at most every `GT_STATS_US`.
+fn push_gt_stats(i915: &mut drm_i915_private, gt: &intel_gt, s: &mut gt_stats) {
+    let now = linux::now_us();
+    if s.last_us != 0 && now - s.last_us < GT_STATS_US {
+        return;
+    }
+    let dt_ns = if s.last_us == 0 { 0 } else { (now - s.last_us) * 1000 };
+    s.last_us = now;
+    if crate::intel_gt_pm::intel_gt_pm_is_awake(gt) {
+        s.awake_ns += dt_ns;
+        s.act_mhz_ns += crate::intel_rps::intel_rps_read_actual_frequency(i915) as u64 * dt_ns;
+        s.req_mhz_ns += crate::intel_rps::intel_rps_requested_mhz(gt) as u64 * dt_ns;
+    }
+    let mut words = [0u64; 4 + STAT_ENGINES.len()];
+    words[0] = now * 1000;
+    words[1] = s.awake_ns;
+    words[2] = s.act_mhz_ns;
+    words[3] = s.req_mhz_ns;
+    for (k, &(class, instance)) in STAT_ENGINES.iter().enumerate() {
+        let Some(e) = gt.engine.iter().position(|x| x.is_some_and(|x| x.class == class && x.instance == instance))
+        else { continue };
+        let mut t = 0;
+        words[4 + k] = crate::intel_execlists_submission::intel_engine_get_busy_time(gt, e, &mut t);
+    }
+    npk_sys::gpudev_stats(&words);
+}
+
 /// `OP_CCMD`: the guest's command from the job's payload, dispatched, its
 /// response handed to the kernel before the job completes.
 fn run_ccmd(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i915_ggtt, seq: u32, client: u32, len: u32) -> i32 {
@@ -778,6 +824,7 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
     log_wakerefs(gt, "at ready");
 
     let mut jobs = [0u8; JOB_BYTES * 8];
+    let mut gts = gt_stats { last_us: 0, awake_ns: 0, act_mhz_ns: 0, req_mhz_ns: 0 };
     loop {
         // While the GT is awake a missed interrupt must not keep it so, and
         // the RPS timer must run on time.
@@ -829,6 +876,7 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
             }
             st.stats.report(now);
         });
+        push_gt_stats(i915, gt, &mut gts);
         run_waiting(i915, gt, ggtt);
 
         if crate::intel_gt::intel_gt_is_wedged(gt) {

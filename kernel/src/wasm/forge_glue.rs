@@ -1091,6 +1091,8 @@ host_imports! {
     ctx fn npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
     // npk_gpudev_released(id) -> 0 / -1; a GEM object kept past its detach
     ctx fn npk_gpudev_released(id: i32) -> i32;
+    // npk_gpudev_stats(ptr, len) -> 0 / -1; GPU_STATS_WORDS cumulative u64s
+    mem fn npk_gpudev_stats(ptr: i32, len: i32) -> i32;
 
     // npk_netdev_register(mac_ptr) -> 0 or -1
     mem fn npk_netdev_register(mac_ptr: i32) -> i32;
