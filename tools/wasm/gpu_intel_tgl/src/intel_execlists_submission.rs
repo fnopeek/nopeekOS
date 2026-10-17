@@ -915,7 +915,8 @@ fn execlists_dequeue(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) {
         let mut x = el(gt, e);
         x.yield_ = u32::MAX;
         set_el(gt, e, x);
-        set_preempt_timeout(gt, e, x.inflight[x.active].map(|r| r as usize));
+        // `*active`: the running request past the completed ones.
+        set_preempt_timeout(gt, e, x.inflight.get(active).copied().flatten().map(|r| r as usize));
         execlists_submit_ports(i915, gt, e);
     } else {
         ring_set_paused(gt, e, 0);
