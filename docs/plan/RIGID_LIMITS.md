@@ -45,9 +45,10 @@ Deckel 16384/128 MB jetzt Live-Grenzen) · 4.2 (Balloon mit `F_REPORTING`;
 kein `DEFLATE_ON_OOM`, Scudo `-1`, Startfenster 256 MB nie zurück) · 4.8 ·
 5.10 · 7.1 (BAR2 wandert schon, RAM noch < 3 GB) · 8.6 · 8.9 · 9.1.
 **Kernel 0.623.0:** 6.1 und der RAM-Teil von 7.1 (Gast-RAM = halber
-Wirts-RAM, über 4 GiB geteilt). 1.9/1.10 brauchen zuerst Abschlüsse je
-`seq` im Kernel (`CPU_COST.md` G9).
-**Offen:** alles andere, insbesondere 1.9/1.10, 2.4–2.6, 2.9, W3, 6.2, 6.3,
+Wirts-RAM, über 4 GiB geteilt).
+**Kernel 0.624.0 + gpu_intel_tgl 0.27.0:** 1.9, 1.10 (Abschlüsse je `seq`,
+`CPU_COST.md` G9).
+**Offen:** alles andere, insbesondere 2.4–2.6, 2.9, W3, 6.2, 6.3,
 6.5–6.10, 7.2–7.8, 7.11. CPU-Kosten stehen getrennt in `CPU_COST.md`.
 
 ## W1. Ablehnen, wo das Original wartet — **die Wurzel der Hänger**

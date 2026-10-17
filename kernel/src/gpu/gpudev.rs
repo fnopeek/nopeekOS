@@ -250,8 +250,13 @@ static SCENES: AtomicBool = AtomicBool::new(false);
 /// It also serves guest native contexts (`CAP_NATIVE`).
 static NATIVE: AtomicBool = AtomicBool::new(false);
 static NEXT_SEQ: AtomicU32 = AtomicU32::new(1);
-/// Highest sequence number completed; jobs complete in order.
+/// Every job up to this sequence number is completed. Jobs that touch a
+/// buffer complete in order; a job without buffers (a guest's ccmd waiting
+/// for the GPU) may complete after later ones, and those wait in `AHEAD`.
 static COMPLETED: AtomicU32 = AtomicU32::new(0);
+/// Completed jobs after the first open one. `COMPLETED` moves under this
+/// lock, so a look at both under it is consistent.
+static AHEAD: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 /// The module took a job and let its deadline pass: until it completes
 /// that job (`STALL_SEQ`), nothing on the desktop's path waits for it and
 /// the CPU does its scenes and copies.
@@ -284,6 +289,41 @@ const ERRORS_KEPT: u32 = 1 << 16;
 /// `a` is at or after `b` in sequence-number order.
 fn seq_ge(a: u32, b: u32) -> bool {
     a.wrapping_sub(b) as i32 >= 0
+}
+
+/// Job `seq` is completed (or will never run).
+fn is_done(seq: u32) -> bool {
+    if seq_ge(COMPLETED.load(Ordering::SeqCst), seq) {
+        return true;
+    }
+    let ahead = AHEAD.lock();
+    seq_ge(COMPLETED.load(Ordering::SeqCst), seq) || ahead.contains(&seq)
+}
+
+/// Record job `seq` as completed. False when it already was.
+fn mark_done(seq: u32) -> bool {
+    let mut ahead = AHEAD.lock();
+    let mut low = COMPLETED.load(Ordering::SeqCst);
+    if seq_ge(low, seq) {
+        return false;
+    }
+    if seq != low.wrapping_add(1) {
+        return ahead.insert(seq);
+    }
+    low = seq;
+    while ahead.remove(&low.wrapping_add(1)) {
+        low = low.wrapping_add(1);
+    }
+    COMPLETED.store(low, Ordering::SeqCst);
+    true
+}
+
+/// Every job queued so far is done: the module that could complete them is
+/// gone.
+fn mark_all_done() {
+    let mut ahead = AHEAD.lock();
+    ahead.clear();
+    COMPLETED.store(NEXT_SEQ.load(Ordering::SeqCst).wrapping_sub(1), Ordering::SeqCst);
 }
 
 /// `npk_gpudev_register`: the module that owns the display controller at
@@ -334,6 +374,7 @@ pub fn register(dev: PciAddr, version: i32) -> i32 {
     st.caps = 0;
     st.clients.clear();
     st.replies.clear();
+    mark_all_done();
     crate::kprintln!("[npk] gpudev: {:02x}:{:02x}.{} registered, {}x{} framebuffer, 2 shadow buffers",
         dev.bus, dev.device, dev.function, fb.width, fb.height);
     0
@@ -511,6 +552,9 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
         if st.owner != Some(dev) {
             return -1;
         }
+        if is_done(seq) || !seq_ge(NEXT_SEQ.load(Ordering::SeqCst).wrapping_sub(1), seq) {
+            return -1;
+        }
         st.payloads.remove(&seq);
         // A buffer the module could not bind fails every scene that names it.
         if let Some(id) = st.adding.remove(&seq) {
@@ -548,8 +592,8 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
         e.retain(|&s, _| seq.wrapping_sub(s) < ERRORS_KEPT);
         e.insert(seq, status);
     }
-    COMPLETED.store(seq, Ordering::SeqCst);
-    if STALLED.load(Ordering::Acquire) && seq_ge(seq, STALL_SEQ.load(Ordering::Acquire)) {
+    mark_done(seq);
+    if STALLED.load(Ordering::Acquire) && is_done(STALL_SEQ.load(Ordering::Acquire)) {
         STALLED.store(false, Ordering::Release);
         let hz = crate::interrupts::tsc_freq().max(1);
         let ms = crate::interrupts::rdtsc().saturating_sub(STALL_TSC.load(Ordering::Relaxed)) * 1000 / hz;
@@ -557,7 +601,7 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
             STALL_SEQ.load(Ordering::Relaxed), ms);
     }
     wake_waiters();
-    wake_parked(Some(seq));
+    wake_parked(false);
     if let Some((phys, pages)) = free {
         crate::memory::deallocate_contiguous(phys, pages);
     }
@@ -623,13 +667,14 @@ pub fn module_gone(dev: PciAddr) {
         (st.fb.take(), frees)
     };
     READY.store(false, Ordering::Release);
+    mark_all_done();
     SCENES.store(false, Ordering::Release);
     crate::audio::display_audio_clear();
     NATIVE.store(false, Ordering::Release);
     RINGS.lock().clear();
     WAKER.store(NO_WAKER, Ordering::Release);
     wake_waiters();
-    wake_parked(None);
+    wake_parked(true);
     // Waiting submissions see the module gone and complete.
     crate::microvm::devices::gpu_backend::note_gpu_kick(0);
     for (phys, pages) in frees {
@@ -835,7 +880,7 @@ pub fn pages_idle(serial: u64) -> bool {
     if st.pinning && st.pinned.contains(&id) {
         return false;
     }
-    st.bos.get(&id).is_none_or(|b| b.fence == 0 || seq_ge(COMPLETED.load(Ordering::Acquire), b.fence))
+    st.bos.get(&id).is_none_or(|b| b.fence == 0 || is_done(b.fence))
 }
 
 /// After `forget_pages`: the module no longer has the pages with `serial`
@@ -939,7 +984,7 @@ fn halt_for(seq: u32, deadline: u64) {
     // The look and the halt with IF off: a completion after the look leaves
     // its IPI pending, and that ends the halt.
     crate::interrupts::without_interrupts(|| {
-        if !seq_ge(COMPLETED.load(Ordering::SeqCst), seq) && READY.load(Ordering::Acquire) {
+        if !is_done(seq) && READY.load(Ordering::Acquire) {
             // In short steps: the halt re-arms the core's one-shot timer, and
             // a deadline someone else armed earlier is late by one step at most.
             let step = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / (1_000_000 / HALT_STEP_US);
@@ -963,11 +1008,11 @@ fn wait_seq(seq: u32, deadline: u64) -> i32 {
     }
 }
 
-/// Signal the parked fibers whose job is done (`Some(completed)`), or all
-/// of them (`None`: the module is gone).
-fn wake_parked(completed: Option<u32>) {
+/// Signal the parked fibers whose job is done, or all of them (`all`: the
+/// module is gone).
+fn wake_parked(all: bool) {
     PARKED.lock().retain(|&(s, w)| {
-        if completed.is_some_and(|c| !seq_ge(c, s)) {
+        if !all && !is_done(s) {
             return true;
         }
         fiber::signal(w, fiber::SIG_GPU_DONE);
@@ -1003,7 +1048,7 @@ fn wait_seq_yield(seq: u32, deadline: u64) -> i32 {
                 p.push((seq, w));
             }
         }
-        if seq_ge(COMPLETED.load(Ordering::SeqCst), seq) {
+        if is_done(seq) {
             continue;
         }
         let step = crate::interrupts::rdtsc()
@@ -1015,7 +1060,7 @@ fn wait_seq_yield(seq: u32, deadline: u64) -> i32 {
 /// Job `seq`'s status once it is completed, or -ETIME once it cannot be any
 /// more; None while it may still be.
 fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
-    if seq_ge(COMPLETED.load(Ordering::Acquire), seq) {
+    if is_done(seq) {
         return Some(ERRORS.lock().remove(&seq).unwrap_or(0));
     }
     if !READY.load(Ordering::Acquire) || crate::interrupts::rdtsc() >= deadline {
@@ -1026,6 +1071,9 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
         let taken = st.queue.len() == queued;
         st.payloads.remove(&seq);
         drop(st);
+        if !taken {
+            mark_done(seq);
+        }
         if taken && READY.load(Ordering::Acquire) {
             stall(seq);
         }
