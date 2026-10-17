@@ -1497,14 +1497,14 @@ pub fn submit_deadline() -> u64 {
 
 /// The module's GPU counters, cumulative like the i915 PMU's: when taken,
 /// ns the GT was awake, actual and requested MHz times ns awake, and the
-/// busy ns of rcs0, bcs0, vcs0, vcs1 and vecs0 (`GPU_STAT_*`).
+/// busy ns of rcs0, bcs0, vcs0, vcs2 and vecs0 (TGL's engines) (`GPU_STAT_*`).
 pub const GPU_STATS_WORDS: usize = 9;
 pub const GPU_STAT_TIME: usize = 0;
 pub const GPU_STAT_AWAKE: usize = 1;
 pub const GPU_STAT_ACT_MHZ: usize = 2;
 pub const GPU_STAT_REQ_MHZ: usize = 3;
 pub const GPU_STAT_BUSY: usize = 4;
-pub const GPU_STAT_ENGINES: [&str; 5] = ["rcs", "bcs", "vcs0", "vcs1", "vecs"];
+pub const GPU_STAT_ENGINES: [&str; 5] = ["rcs", "bcs", "vcs0", "vcs2", "vecs"];
 static GPU_STATS: Mutex<[u64; GPU_STATS_WORDS]> = Mutex::new([0; GPU_STATS_WORDS]);
 
 /// `npk_gpudev_stats`.

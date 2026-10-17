@@ -544,7 +544,7 @@ struct gt_stats {
 
 /// Engines in the kernel's order (`GPU_STAT_ENGINES`): class, instance.
 const STAT_ENGINES: [(u32, u32); 5] = [
-    (RENDER_CLASS, 0), (COPY_ENGINE_CLASS, 0), (VIDEO_DECODE_CLASS, 0), (VIDEO_DECODE_CLASS, 1),
+    (RENDER_CLASS, 0), (COPY_ENGINE_CLASS, 0), (VIDEO_DECODE_CLASS, 0), (VIDEO_DECODE_CLASS, 2),
     (VIDEO_ENHANCEMENT_CLASS, 0),
 ];
 /// How often the counters go to the kernel.
