@@ -20,6 +20,7 @@ pub mod wifi;
 pub mod report;
 pub mod acpi;
 pub mod vtd;
+pub mod amd_vi;
 pub mod smbus;
 pub mod battery;
 pub mod ec;

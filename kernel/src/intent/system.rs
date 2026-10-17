@@ -1213,6 +1213,10 @@ pub fn intent_gpu(args: &str) {
                 None => kprintln!("  IOMMU:    off ({})", if crate::gpu::iommu_wanted() {
                     "wanted; see the boot log for why not" } else { "`set gpu_iommu on`, then reboot" }),
             }
+            // AMD-Vi is read only so far: what the firmware describes.
+            if crate::drivers::amd_vi::present() {
+                crate::drivers::amd_vi::dump();
+            }
             return;
         }
         "iommu test" => {
