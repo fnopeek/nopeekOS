@@ -147,7 +147,8 @@ fn i915_request_set_error_once(gt: &mut intel_gt, rq: usize, error: i32) -> bool
 /// `i915_request_cancel` for a request still in the engine's queue: it
 /// fails, and `__i915_request_submit` turns its payload into MI_NOOPs, so
 /// it runs only its breadcrumbs and retires as usual. False once it went
-/// to the hardware (no preemption is ported to take it back).
+/// to the hardware: taking it off there (`intel_context_cancel_request`,
+/// a heartbeat pulse) is not ported.
 pub fn i915_request_cancel(gt: &mut intel_gt, rq: usize) -> bool {
     if !gt.requests[rq].pqueue || __i915_request_is_complete(gt, rq) {
         return false;

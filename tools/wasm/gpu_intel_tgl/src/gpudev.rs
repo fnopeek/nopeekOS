@@ -813,9 +813,18 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         // A scene in flight is looked at on its interrupt, at the latest
         // after 2 ms as `gpgpu_run` does.
         let timeout = if svc.scene.is_some() && (timeout < 0 || timeout > 2) { 2 } else { timeout };
+        // An engine's timeslice or preemption timer.
+        let timeout = match crate::intel_execlists_submission::execlists_next_timer(gt) {
+            Some(t) => {
+                let ms = t.saturating_sub(linux::now_us()).div_ceil(1000) as i32;
+                if timeout < 0 { ms } else { timeout.min(ms) }
+            }
+            None => timeout,
+        };
         npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout);
         let pass_us = linux::now_us();
         service_interrupts(i915, gt);
+        crate::intel_execlists_submission::execlists_run_timers(i915, gt);
         poll_scene(i915, gt, &mut svc);
         crate::intel_rps::intel_rps_run_pending(i915, gt);
 

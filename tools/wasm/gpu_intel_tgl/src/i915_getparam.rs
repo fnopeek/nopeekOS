@@ -4,8 +4,9 @@
 //! Not ported, and answered as Linux answers a kernel without it: perf
 //! (`I915_PARAM_PERF_REVISION`, `_OA_TIMESTAMP_FREQUENCY` and the perf
 //! query), HuC and PXP (no firmware is loaded), GuC submission. The
-//! scheduler reports what execlists does here: enabled and priority
-//! ordered, without preemption, semaphores or timeslices.
+//! scheduler reports what execlists does here: enabled, priority ordered
+//! and preemptive; not semaphores (no request waits on another engine
+//! with MI_SEMAPHORE_WAIT here) nor engine busy stats (no PMU).
 
 use crate::i915_drv::drm_i915_private;
 use crate::i915_gem_context::{intel_engine_lookup_user, uabi_class, uabi_engines};
@@ -17,7 +18,7 @@ use crate::intel_gt::intel_gt;
 const TGL_GT2: u32 = 0x9a78;
 /// `INTEL_PPGTT_FULL`.
 const INTEL_PPGTT_FULL: i32 = 2;
-const SCHEDULER_CAPS: i32 = I915_SCHEDULER_CAP_ENABLED | I915_SCHEDULER_CAP_PRIORITY;
+const SCHEDULER_CAPS: i32 = I915_SCHEDULER_CAP_ENABLED | I915_SCHEDULER_CAP_PRIORITY | I915_SCHEDULER_CAP_PREEMPTION;
 
 /// `i915_getparam_ioctl`: the value, or a negative errno.
 pub fn i915_getparam(i915: &drm_i915_private, gt: &intel_gt, ggtt: &i915_ggtt, param: u32) -> Result<i32, i32> {

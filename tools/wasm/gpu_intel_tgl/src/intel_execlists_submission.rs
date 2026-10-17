@@ -4,11 +4,12 @@
 //!
 //! The tasklet runs synchronously wherever Linux schedules it; the module
 //! is single-threaded; a tasklet kicked while it runs runs again after it,
-//! as a scheduled tasklet would. Not kept: timeslicing and the preemption
-//! timer (no timers run here; a request is only queued behind completed
-//! ones, so neither comes up), parallel contexts, GVT, error capture. An
-//! engine error (a CS error interrupt or an impossible CSB event) wedges
-//! the GT instead of Linux's per-engine reset.
+//! as a scheduled tasklet would. The timeslice and preemption timers are
+//! deadlines the module's loop waits for (`execlists_next_timer`) and
+//! fires (`execlists_run_timers`). Not kept: parallel contexts, GVT, error
+//! capture, and the engine reset: a preemption that times out waits on, as
+//! Linux does without `intel_has_reset_engine`, and an engine error (a CS
+//! error interrupt or an impossible CSB event) wedges the GT.
 //!
 //! Virtual engines (`execlists_create_virtual`) live in
 //! `gt.virtual_engines`; their ids start at `VIRTUAL_ENGINE_BASE`, where
@@ -46,6 +47,11 @@ pub struct intel_engine_execlists {
     pub yield_: u32,
     pub reset_ccid: u32,
     pub port_mask: u32,
+    /// `execlists->timer` (the timeslice) and `execlists->preempt`.
+    pub timer: el_timer,
+    pub preempt: el_timer,
+    /// `execlists->preempt_target`: the request a preemption must move.
+    pub preempt_target: Option<u16>,
     /// For the report: CSB events read, interrupts seen.
     pub csb_events: u32,
     pub irqs: u32,
@@ -89,6 +95,43 @@ impl Default for i915_sched_engine {
 }
 
 const ERROR_CSB: u32 = 1 << 31;
+const ERROR_PREEMPT: u32 = 1 << 30;
+
+/// A `timer_list` of i915_utils.h: `expires` 0 when inactive, else a
+/// deadline in us; `fired` once its callback (a tasklet kick) has run.
+#[derive(Clone, Copy, Default)]
+pub struct el_timer {
+    pub expires: u64,
+    pub fired: bool,
+}
+
+impl el_timer {
+    /// `timer_active`.
+    fn active(&self) -> bool {
+        self.expires != 0
+    }
+    /// `timer_pending`: armed and not yet run.
+    fn pending(&self) -> bool {
+        self.active() && !self.fired
+    }
+    /// `timer_expired`: armed, and its time has come.
+    fn expired(&self) -> bool {
+        self.active() && (self.fired || linux::now_us() >= self.expires)
+    }
+    /// `cancel_timer`.
+    fn cancel(&mut self) {
+        *self = el_timer::default();
+    }
+    /// `set_timer_ms`: 0 cancels.
+    fn set_ms(&mut self, ms: u64) {
+        if ms == 0 {
+            self.cancel();
+            return;
+        }
+        self.expires = linux::now_us() + ms * 1000;
+        self.fired = false;
+    }
+}
 
 /// Engine ids from here name `gt.virtual_engines[id - VIRTUAL_ENGINE_BASE]`.
 pub const VIRTUAL_ENGINE_BASE: u32 = 0x100;
@@ -499,6 +542,11 @@ fn queue_prio(gt: &intel_gt, e: usize) -> i32 {
 /// `queue_request`: into the queue after every request of at least its
 /// priority.
 fn queue_request(gt: &mut intel_gt, e: usize, rq: usize) {
+    queue_request_at(gt, e, rq, false);
+}
+
+/// Into the queue at the tail of its priority, or at its head (`head`).
+fn queue_request_at(gt: &mut intel_gt, e: usize, rq: usize, head: bool) {
     let prio = gt.requests[rq].prio;
     if gt.engine[e].is_some_and(|x| x.sched.nqueue == SCHED_MAX) {
         // Cannot happen (SCHED_MAX holds every request); never lose one
@@ -510,7 +558,9 @@ fn queue_request(gt: &mut intel_gt, e: usize, rq: usize) {
     let reqs = gt.requests;
     let Some(x) = gt.engine[e].as_mut() else { return };
     let s = &mut x.sched;
-    let at = s.queue[..s.nqueue].iter().position(|&r| reqs[r as usize].prio < prio).unwrap_or(s.nqueue);
+    let at = s.queue[..s.nqueue].iter()
+        .position(|&r| if head { reqs[r as usize].prio <= prio } else { reqs[r as usize].prio < prio })
+        .unwrap_or(s.nqueue);
     s.queue.copy_within(at..s.nqueue, at + 1);
     s.queue[at] = rq as u16;
     s.nqueue += 1;
@@ -527,12 +577,26 @@ pub fn requeue_request(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize,
     s.queue.copy_within(at + 1..s.nqueue, at);
     s.nqueue -= 1;
     queue_request(gt, e, rq);
-    let prio = gt.requests[rq].prio;
+    kick_execlists(i915, gt, e, rq, gt.requests[rq].prio);
+}
+
+/// `kick_execlists`: a request raised to `prio` is worth a dequeue when it
+/// beats the hint and is not the running context; low priority does not
+/// preempt low priority.
+fn kick_execlists(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, rq: usize, prio: i32) {
     let hint = gt.engine[e].map(|x| x.sched.queue_priority_hint).unwrap_or(i32::MIN);
-    if prio > hint {
-        if let Some(x) = gt.engine[e].as_mut() {
-            x.sched.queue_priority_hint = prio;
-        }
+    if prio <= hint {
+        return;
+    }
+    let x = el(gt, e);
+    let Some(inflight) = x.inflight[x.active].map(|r| r as usize) else { return };
+    if gt.requests[inflight].ce == gt.requests[rq].ce {
+        return;
+    }
+    if let Some(y) = gt.engine[e].as_mut() {
+        y.sched.queue_priority_hint = prio;
+    }
+    if prio >= (I915_PRIORITY_NORMAL as i32).max(gt.requests[inflight].prio) {
         execlists_submission_tasklet(i915, gt, e);
     }
 }
@@ -737,20 +801,23 @@ fn execlists_dequeue(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) {
     let mut last = x.inflight[active].map(|r| r as usize);
 
     if let Some(l) = last {
-        // need_preempt / timeslice_expired: requests are only queued behind
-        // completed ones here, so neither triggers.
-        let hint = gt.engine[e].map(|y| y.sched.queue_priority_hint).unwrap_or(i32::MIN);
-        if gt.requests[l].prio.max(I915_PRIORITY_NORMAL as i32 - 1) < hint
-            && gt.engine[e].map(|y| y.flags & I915_ENGINE_HAS_SEMAPHORES != 0).unwrap_or(false) {
-            // Logged once: display work waits behind a running guest request
-            // until preemption is ported.
-            use core::sync::atomic::{AtomicU32, Ordering};
-            static WANTED: AtomicU32 = AtomicU32::new(0);
-            if WANTED.fetch_add(1, Ordering::Relaxed) == 0 {
-                linux::say("warning: preemption wanted, not ported; continuing in order (logged once)");
-            }
-        }
-        if x.inflight[active + 1].is_some() {
+        if need_preempt(gt, e, l) {
+            // RING_HEAD stays before the breadcrumb while the requests are
+            // unwound and until they are submitted again; some of them may
+            // still complete meanwhile.
+            ring_set_paused(gt, e, 1);
+            __unwind_incomplete_requests(gt, e);
+            last = None;
+        } else if timeslice_expired(gt, e, l) {
+            // This timeslice is used up; submitting the same pair again
+            // gets a full new one.
+            x.timer.cancel();
+            set_el(gt, e, x);
+            ring_set_paused(gt, e, 1);
+            defer_active(gt, e);
+            last = None;
+        } else if x.inflight[active + 1].is_some() {
+            // Wait for the next CS event before queueing more.
             return;
         }
     }
@@ -789,18 +856,6 @@ fn execlists_dequeue(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) {
             break;
         }
         let rq = s.queue[0] as usize;
-        // Display work does not go into a port behind another context's
-        // unfinished request: without preemption it could not be taken
-        // back, and in the queue its waiter may still cancel it
-        // (`i915_request_cancel`). Linux preempts instead.
-        if let Some(l) = last {
-            if gt.requests[rq].prio >= crate::i915_request::I915_PRIORITY_DISPLAY
-                && gt.requests[l].ce != gt.requests[rq].ce
-                && !__i915_request_is_complete(gt, l)
-            {
-                break;
-            }
-        }
         let mut merge = true;
         if let Some(l) = last {
             if !can_merge_rq(gt, l, rq) {
@@ -860,6 +915,7 @@ fn execlists_dequeue(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) {
         let mut x = el(gt, e);
         x.yield_ = u32::MAX;
         set_el(gt, e, x);
+        set_preempt_timeout(gt, e, x.inflight[x.active].map(|r| r as usize));
         execlists_submit_ports(i915, gt, e);
     } else {
         ring_set_paused(gt, e, 0);
@@ -924,6 +980,7 @@ fn process_csb(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, inactiv
         return;
     }
     x.csb_head = tail;
+    let prev = x.inflight[x.active];
 
     loop {
         head += 1;
@@ -966,6 +1023,10 @@ fn process_csb(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize, inactiv
         if head == tail {
             break;
         }
+    }
+    // new_timeslice, unless it was a lite-restore of the same request.
+    if prev != x.inflight[x.active] {
+        x.timer.cancel();
     }
     set_el(gt, e, x);
 }
@@ -1016,8 +1077,36 @@ fn __execlists_submission_tasklet(i915: &mut drm_i915_private, gt: &mut intel_gt
     let mut n = 0;
     process_csb(i915, gt, e, &mut inactive, &mut n);
 
+    // preempt_timeout: still on the request the preemption was meant to
+    // move, or a switch happened and the new context gets its own time.
+    let mut x = el(gt, e);
+    if x.preempt.expired() && x.pending[0].is_some() {
+        x.preempt.cancel();
+        let rq = x.inflight[x.active];
+        if rq.is_some() && rq == x.preempt_target {
+            x.error_interrupt |= ERROR_PREEMPT;
+        } else {
+            set_el(gt, e, x);
+            set_preempt_timeout(gt, e, rq.map(|r| r as usize));
+            x = el(gt, e);
+        }
+    }
+    set_el(gt, e, x);
+
     let err = el(gt, e).error_interrupt;
-    if err != 0 {
+    if err == ERROR_PREEMPT {
+        // execlists_reset without intel_has_reset_engine: nothing; the
+        // context leaves at its next arbitration point.
+        let mut x = el(gt, e);
+        x.error_interrupt = 0;
+        set_el(gt, e, x);
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static LOGGED: AtomicU32 = AtomicU32::new(0);
+        if LOGGED.fetch_add(1, Ordering::Relaxed) < 4 {
+            Line::new().s("engine ").s(engine_name(gt, e))
+                .s(": preemption time out; no engine reset is ported, waiting on").say();
+        }
+    } else if err != 0 {
         let msg = if err & 0xffff != 0 {
             "CS error"
         } else if err & ERROR_CSB != 0 {
@@ -1037,9 +1126,132 @@ fn __execlists_submission_tasklet(i915: &mut drm_i915_private, gt: &mut intel_gt
 
     if el(gt, e).pending[0].is_none() {
         execlists_dequeue(i915, gt, e);
+        start_timeslice(i915, gt, e);
     }
 
     post_process_csb(i915, gt, e, &inactive[..n]);
+}
+
+/// `need_preempt`: the queue (or the second port, or a virtual engine)
+/// holds something of higher priority than the running request; not at
+/// equal priority, which keeps FIFO order.
+fn need_preempt(gt: &intel_gt, e: usize, rq: usize) -> bool {
+    let Some(engine) = gt.engine[e] else { return false };
+    if engine.flags & I915_ENGINE_HAS_SEMAPHORES == 0 {
+        return false;
+    }
+    let last_prio = gt.requests[rq].prio.max(I915_PRIORITY_NORMAL as i32 - 1);
+    if engine.sched.queue_priority_hint <= last_prio {
+        return false;
+    }
+    let s = engine.sched;
+    if let Some(i) = s.requests[..s.nrequests].iter().position(|&r| r as usize == rq) {
+        if i + 1 < s.nrequests && gt.requests[s.requests[i + 1] as usize].prio > last_prio {
+            return true;
+        }
+    }
+    virtual_prio(gt, e).max(queue_prio(gt, e)) > last_prio
+}
+
+/// `virtual_prio`: the first virtual engine of the engine's tree.
+fn virtual_prio(gt: &intel_gt, e: usize) -> i32 {
+    virtual_tree_first(gt, e).and_then(|k| gt.virtual_engines[k].node[e]).map(|(p, _)| p).unwrap_or(i32::MIN)
+}
+
+/// `timeslice_yield`: the running context once busy-waited on a semaphore.
+fn timeslice_yield(gt: &intel_gt, e: usize, rq: usize) -> bool {
+    gt.contexts[gt.requests[rq].ce as usize].ccid == el(gt, e).yield_
+}
+
+/// `needs_timeslice`: another context is waiting for this engine.
+fn needs_timeslice(gt: &intel_gt, e: usize, rq: Option<usize>) -> bool {
+    let Some(engine) = gt.engine[e] else { return false };
+    if engine.flags & I915_ENGINE_HAS_TIMESLICES == 0 {
+        return false;
+    }
+    let Some(rq) = rq.filter(|&r| !__i915_request_is_complete(gt, r)) else { return false };
+    if engine.execlists.pending[0].is_some() {
+        return false;
+    }
+    let s = engine.sched;
+    if s.requests[..s.nrequests].last().is_some_and(|&r| r as usize != rq)
+        && s.requests[..s.nrequests].iter().any(|&r| r as usize == rq) {
+        return true;
+    }
+    if s.nqueue != 0 {
+        return true;
+    }
+    virtual_tree_first(gt, e).is_some()
+}
+
+/// `timeslice_expired`.
+fn timeslice_expired(gt: &intel_gt, e: usize, rq: usize) -> bool {
+    if !needs_timeslice(gt, e, Some(rq)) {
+        return false;
+    }
+    el(gt, e).timer.expired() || timeslice_yield(gt, e, rq)
+}
+
+/// `start_timeslice`: armed while another context waits, and not prolonged
+/// while running; a slice already used up kicks the tasklet again.
+fn start_timeslice(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize) {
+    let mut x = el(gt, e);
+    let mut duration = 0;
+    if needs_timeslice(gt, e, x.inflight[x.active].map(|r| r as usize)) {
+        if x.timer.active() {
+            if !x.timer.pending() {
+                execlists_submission_tasklet(i915, gt, e);
+            }
+            return;
+        }
+        duration = gt.engine[e].map(|y| y.timeslice_duration_ms).unwrap_or(0);
+    }
+    x.timer.set_ms(duration);
+    set_el(gt, e, x);
+}
+
+/// `set_preempt_timeout` with `active_preempt_timeout`: the preemption of
+/// the running request must happen within the engine's timeout.
+fn set_preempt_timeout(gt: &mut intel_gt, e: usize, rq: Option<usize>) {
+    let mut x = el(gt, e);
+    let ms = match rq {
+        None => 0,
+        Some(r) => {
+            x.preempt_target = Some(r as u16);
+            gt.engine[e].map(|y| y.preempt_timeout_ms).unwrap_or(0)
+        }
+    };
+    x.preempt.set_ms(ms);
+    set_el(gt, e, x);
+}
+
+/// The earliest deadline of an engine's timeslice or preemption timer that
+/// has not fired, in us.
+pub fn execlists_next_timer(gt: &intel_gt) -> Option<u64> {
+    gt.engine.iter().flatten()
+        .flat_map(|y| [y.execlists.timer, y.execlists.preempt])
+        .filter(|t| t.pending())
+        .map(|t| t.expires)
+        .min()
+}
+
+/// `execlists_timeslice` / `execlists_preempt`: an expired timer kicks its
+/// engine's tasklet once.
+pub fn execlists_run_timers(i915: &mut drm_i915_private, gt: &mut intel_gt) {
+    let now = linux::now_us();
+    for e in 0..gt.engine.len() {
+        let Some(y) = gt.engine[e].as_mut() else { continue };
+        let mut kick = false;
+        for t in [&mut y.execlists.timer, &mut y.execlists.preempt] {
+            if t.pending() && now >= t.expires {
+                t.fired = true;
+                kick = true;
+            }
+        }
+        if kick {
+            execlists_submission_tasklet(i915, gt, e);
+        }
+    }
 }
 
 /// `execlists_irq_handler`.
@@ -1061,6 +1273,11 @@ pub fn execlists_irq_handler(i915: &mut drm_i915_private, gt: &mut intel_gt, e: 
     }
     if iir as u32 & GT_WAIT_SEMAPHORE_INTERRUPT != 0 {
         x.yield_ = i915.uncore.intel_uncore_read_fw(RING_EXECLIST_STATUS_HI(base));
+        // timer_delete: a pending slice ends now.
+        if x.timer.pending() {
+            x.timer.fired = true;
+            tasklet = true;
+        }
     }
     if iir as u32 & GT_CONTEXT_SWITCH_INTERRUPT != 0 {
         tasklet = true;
@@ -1312,9 +1529,12 @@ fn execlists_reset_csb(i915: &mut drm_i915_private, gt: &mut intel_gt, e: usize)
 }
 
 /// `__unwind_incomplete_requests`: what was submitted and has not
-/// completed goes back to the queue.
-fn __unwind_incomplete_requests(gt: &mut intel_gt, e: usize) {
+/// completed goes back to the queue, newest first, each to the head of its
+/// priority (`list_move`), so their order is kept ahead of what waited
+/// there. Returns the oldest one unwound.
+fn __unwind_incomplete_requests(gt: &mut intel_gt, e: usize) -> Option<usize> {
     let s = gt.engine[e].map(|x| x.sched).unwrap_or_default();
+    let mut active = None;
     for i in (0..s.nrequests).rev() {
         let rq = s.requests[i] as usize;
         remove_from_engine(gt, e, rq);
@@ -1322,12 +1542,64 @@ fn __unwind_incomplete_requests(gt: &mut intel_gt, e: usize) {
             continue;
         }
         crate::i915_request::__i915_request_unsubmit(gt, rq);
-        queue_request(gt, e, rq);
+        queue_request_at(gt, e, rq, true);
         let ce = gt.requests[rq].ce as usize;
         let ring = gt.contexts[ce].ring;
         if ring.intel_ring_direction(gt.requests[rq].tail, ring.tail.wrapping_add(8)) > 0 {
             gt.contexts[ce].lrca |= CTX_DESC_FORCE_RESTORE as u32;
         }
+        active = Some(rq);
+    }
+    active
+}
+
+/// `defer_request`: the interrupted request goes to the back of its
+/// priority, and with it the requests on this engine that wait for it and
+/// run at its priority or above — here the later requests of its
+/// timeline: a foreign fence of a queued request has signalled already.
+fn defer_request(gt: &mut intel_gt, e: usize, rq: usize) {
+    let mut list = [0u16; SCHED_MAX];
+    let (mut head, mut tail) = (0usize, 0usize);
+    let mut cur = Some(rq);
+    while let Some(r) = cur {
+        move_to_tail(gt, e, r);
+        let (ce, seqno, prio) = (gt.requests[r].ce, gt.requests[r].seqno, gt.requests[r].prio);
+        let s = gt.engine[e].map(|x| x.sched).unwrap_or_default();
+        for &w in &s.queue[..s.nqueue] {
+            let wr = &gt.requests[w as usize];
+            if wr.ce != ce || wr.seqno == seqno || !crate::i915_request::i915_seqno_passed(wr.seqno, seqno)
+                || wr.prio < prio || list[..tail].contains(&w) {
+                continue;
+            }
+            if tail < list.len() {
+                list[tail] = w;
+                tail += 1;
+            }
+        }
+        cur = (head < tail).then(|| {
+            head += 1;
+            list[head - 1] as usize
+        });
+    }
+}
+
+/// `list_move_tail` onto its priority: after every queued request of at
+/// least its priority.
+fn move_to_tail(gt: &mut intel_gt, e: usize, rq: usize) {
+    if let Some(x) = gt.engine[e].as_mut() {
+        let s = &mut x.sched;
+        if let Some(at) = s.queue[..s.nqueue].iter().position(|&r| r as usize == rq) {
+            s.queue.copy_within(at + 1..s.nqueue, at);
+            s.nqueue -= 1;
+        }
+    }
+    queue_request_at(gt, e, rq, false);
+}
+
+/// `defer_active`.
+fn defer_active(gt: &mut intel_gt, e: usize) {
+    if let Some(rq) = __unwind_incomplete_requests(gt, e) {
+        defer_request(gt, e, rq);
     }
 }
 
@@ -1385,9 +1657,11 @@ pub fn execlists_reset_finish(i915: &mut drm_i915_private, gt: &mut intel_gt, e:
     }
 }
 
-/// `execlists_park`: no timers; the priority hint reset.
+/// `execlists_park`: the timers off, the priority hint reset.
 pub fn execlists_park(gt: &mut intel_gt, e: usize) {
     if let Some(x) = gt.engine[e].as_mut() {
+        x.execlists.timer.cancel();
+        x.execlists.preempt.cancel();
         x.sched.queue_priority_hint = i32::MIN;
     }
 }
