@@ -381,7 +381,7 @@ fn wait_for_link(mmio: &Mmio) {
 }
 
 /// TCPv4 segmentation offload — I225/I226 only.
-pub fn tso_capable() -> bool { IS_IGC.load(Ordering::Acquire) }
+pub fn tso_capable() -> bool { IS_IGC.load(Ordering::Acquire) && igc::tso_ok() }
 
 pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result<(), NetError> {
     if !tso_capable() { return Err(NetError::NotInitialized); }

@@ -355,7 +355,10 @@ pub fn init(dev: pci::PciAddr, mmio: Mmio) -> bool {
     // Without the super-frame buffers the card still runs: every TSO frame
     // is then refused and the caller segments in software.
     let (tso_data, tso_free) = match alloc_zeroed(TSO_SLOTS * TSO_SLOT_SIZE) {
-        Some(r) => (r, ((1u64 << TSO_SLOTS) - 1) as u32),
+        Some(r) => {
+            TSO_OK.store(true, Ordering::Release);
+            (r, ((1u64 << TSO_SLOTS) - 1) as u32)
+        }
         None => {
             crate::kprintln!("[npk] igc: no memory for TSO buffers, segmenting in software");
             let Some(r) = alloc_zeroed(4096) else { return false };
@@ -585,19 +588,26 @@ fn tx_clean(d: &mut Igc) {
     }
 }
 
+/// The super-frame buffers exist: the card takes TSO frames.
+static TSO_OK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+pub fn tso_ok() -> bool { TSO_OK.load(Ordering::Acquire) }
+
 /// `TX_WAKE_THRESHOLD` (igc.h): `DESC_NEEDED * 2`, `DESC_NEEDED` being
 /// `MAX_SKB_FRAGS + 4` with 17 fragments.
 const TX_WAKE_THRESHOLD: u16 = 42;
 
 /// `igc_clean_tx_irq`'s wake test, from the interrupt's poll: the finished
 /// packets are retired, and true when a stopped sender may go on
-/// (`netif_wake_subqueue`).
+/// (`netif_wake_subqueue`). The TSO slots and the byte limit are ours.
 pub fn tx_room() -> bool {
     let mut lock = DEVICE.lock();
     let Some(d) = lock.as_mut() else { return true };
     tx_clean(d);
-    let lim = TX_LIMIT.load(Ordering::Relaxed);
-    tx_unused(d) >= TX_WAKE_THRESHOLD && (lim == 0 || d.tx_inflight < lim)
+    // Room for what a stopped sender may hold: a super-frame needs a free
+    // TSO slot and, past the first packet, its bytes under the limit.
+    let lim = TX_LIMIT.load(Ordering::Relaxed) as usize;
+    tx_unused(d) >= TX_WAKE_THRESHOLD && (d.tso_free != 0 || !tso_ok())
+        && (lim == 0 || d.tx_inflight == 0 || d.tx_inflight as usize + TSO_SLOT_SIZE <= lim)
 }
 
 /// Bytes the non-waiting senders may keep on the ring; 0 = the ring's size.

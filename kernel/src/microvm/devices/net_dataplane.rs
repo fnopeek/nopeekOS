@@ -32,8 +32,10 @@ fn has_work() -> bool {
     use crate::microvm::devices::{guest_mem, nat, net_backend};
     (nat::tap_len() > 0 && net_backend::rx_ready(guest_mem::active()))
         || nat::egress_pending()
-        || net_backend::tx_kick_pending()
-        || guest_mem::active().is_some_and(net_backend::tx_ring_pending)
+        // vhost handle_tx takes nothing while the socket is not writable.
+        || (!nat::egress_backlog()
+            && (net_backend::tx_kick_pending()
+                || guest_mem::active().is_some_and(net_backend::tx_ring_pending)))
 }
 
 /// Worker wakeup attribution (surfaced in `cores`): irq = host RX MSI-X woke us
@@ -171,12 +173,12 @@ const PARK_TCP_TIMERS_MS: u64 = 10;
 const PARK_SAFETY_MS: u64 = 100;
 
 /// Busy-poll window (µs) before the HLT park, adapted like KVM
-/// `grow_halt_poll_ns`/`shrink_halt_poll_ns`: a park that ended within the cap
-/// would have been caught by polling, so the window grows; a park longer than
-/// the cap means polling only burns the core, so it shrinks. A transfer whose
-/// RX→ACK gaps fit the cap keeps its ACKs prompt (no Tail-Loss-Probe), a slow
-/// stream polls nothing.
-const BUSY_POLL_MAX_US: u64 = 1000;
+/// `kvm_vcpu_halt`: a park longer than the window but within the cap would
+/// have been caught by polling a little longer, so the window grows; a park
+/// longer than the cap means polling only burns the core, so it shrinks.
+/// The cap is KVM's `halt_poll_ns` default (200 us); vhost itself polls
+/// nothing (`busyloop_timeout` 0). A slow stream polls nothing.
+const BUSY_POLL_MAX_US: u64 = 200;
 const BUSY_POLL_GROW_START_US: u64 = 10;
 
 fn poll_grow(us: u64) -> u64 {
@@ -716,7 +718,7 @@ fn worker_entry(_arg: u64) {
             / (freq / 1_000_000).max(1);
         if !woke || parked_us > BUSY_POLL_MAX_US {
             poll_us = poll_shrink(poll_us);
-        } else if poll_us < BUSY_POLL_MAX_US {
+        } else if parked_us > poll_us && poll_us < BUSY_POLL_MAX_US {
             poll_us = poll_grow(poll_us);
         }
         // It may have woken on another core (`fiber::steal_for`).

@@ -536,11 +536,11 @@ fn csum_update(old_check: u16, changes: &[(u16, u16)]) -> u16 {
 /// backpressure, not loss. A dropped segment is loss to the guest, whose TCP
 /// cuts its window each time; an upload then starts at line rate and settles
 /// at half.
-struct Egress {
-    dst: [u8; 4],
-    proto: u8,
-    seg: Vec<u8>,
-    head: Forwarded,
+/// A super-frame the card segments waits whole, as the qdisc keeps a GSO
+/// skb (`dev_requeue_skb`): a full ring is no reason to cut it in software.
+enum Egress {
+    Seg { dst: [u8; 4], proto: u8, seg: Vec<u8>, head: Forwarded },
+    Tso { frame: Vec<u8>, mss: u16, l4_off: usize, hdr_len: usize, segs: u64, bytes: u64 },
 }
 static EGRESS: Mutex<alloc::collections::VecDeque<Egress>> =
     Mutex::new(alloc::collections::VecDeque::new());
@@ -611,7 +611,7 @@ fn egress(dst: [u8; 4], proto: u8, seg: Vec<u8>, head: Forwarded) {
         NS_DROP_EGRESS.fetch_add(1, AtOrd::Relaxed);
         return;
     }
-    q.push_back(Egress { dst, proto, seg, head });
+    q.push_back(Egress::Seg { dst, proto, seg, head });
     EGRESS_LEN.store(q.len() as u64, AtOrd::Release);
     NS_EGRESS_DEFERRED.fetch_add(1, AtOrd::Relaxed);
     drop(q);
@@ -625,7 +625,17 @@ pub fn egress_flush() -> bool {
     let mut q = EGRESS.lock();
     if EGRESS_BLOCKED.load(AtOrd::Acquire) { return false; }
     while let Some(e) = q.front() {
-        match egress_send(e.dst, e.proto, &e.seg, e.head) {
+        let r = match e {
+            Egress::Seg { dst, proto, seg, head } => egress_send(*dst, *proto, seg, *head),
+            Egress::Tso { frame, mss, l4_off, hdr_len, segs, bytes } => {
+                crate::netdev::send_tso(frame, *mss, *l4_off, *hdr_len).map(|()| {
+                    NS_TX_PKTS.fetch_add(*segs, AtOrd::Relaxed);
+                    NS_TX_BYTES.fetch_add(*bytes, AtOrd::Relaxed);
+                    true
+                })
+            }
+        };
+        match r {
             Err(NetError::QueueFull) => {
                 drop(q);
                 block_egress();
@@ -640,6 +650,10 @@ pub fn egress_flush() -> bool {
     EGRESS_LEN.store(q.len() as u64, AtOrd::Release);
     q.is_empty()
 }
+
+/// Packets wait for the host card, blocked or not: the worker takes nothing
+/// new from the guest meanwhile.
+pub fn egress_backlog() -> bool { EGRESS_LEN.load(AtOrd::Acquire) != 0 }
 
 /// Packets are waiting for the host card, and it has room for them: work
 /// for the worker. A blocked backlog waits for `egress_room`.
@@ -743,8 +757,8 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
 
     // The card segments it: one super-frame instead of many software-cut
     // segments, each with a full checksum and its own trip through ipv4::send.
-    // Not past a backlog: the super-frame would overtake the parked segments.
-    if crate::netdev::tso_capable() && EGRESS_LEN.load(AtOrd::Acquire) == 0
+    // Behind a backlog or for a full ring it waits whole (`emit_tcp_tso`).
+    if crate::netdev::tso_capable()
         && emit_tcp_tso(hp, our_ip, dst_ip, l4, thlen, gso_size, head)
     {
         return;
@@ -1133,12 +1147,31 @@ fn emit_tcp_tso(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4], l4: &[u8],
     let seed = pseudo_seed(PROTO_TCP, our_ip, dst_ip, l4.len());
     f[l4_off + 16..l4_off + 18].copy_from_slice(&seed.to_be_bytes());
 
-    if crate::netdev::send_tso(&f, mss, l4_off, l4_off + thlen).is_err() {
-        return false;
+    let segs = (l4.len() - thlen).div_ceil(mss as usize) as u64;
+    let bytes = l4.len() as u64;
+    // Behind a backlog, or refused for a full ring: it waits whole, in order.
+    if EGRESS_LEN.load(AtOrd::Acquire) == 0 {
+        match crate::netdev::send_tso(&f, mss, l4_off, l4_off + thlen) {
+            Ok(()) => {
+                NS_TX_PKTS.fetch_add(segs, AtOrd::Relaxed);
+                NS_TX_BYTES.fetch_add(bytes, AtOrd::Relaxed);
+                return true;
+            }
+            Err(crate::virtio_net::NetError::QueueFull) => {}
+            Err(_) => return false,
+        }
     }
-    let payload = l4.len() - thlen;
-    NS_TX_PKTS.fetch_add(payload.div_ceil(mss as usize) as u64, AtOrd::Relaxed);
-    NS_TX_BYTES.fetch_add(l4.len() as u64, AtOrd::Relaxed);
+    let mut q = EGRESS.lock();
+    if q.len() >= EGRESS_MAX {
+        drop(q);
+        NS_DROP_EGRESS.fetch_add(1, AtOrd::Relaxed);
+        return true;
+    }
+    q.push_back(Egress::Tso { frame: f, mss, l4_off, hdr_len: l4_off + thlen, segs, bytes });
+    EGRESS_LEN.store(q.len() as u64, AtOrd::Release);
+    NS_EGRESS_DEFERRED.fetch_add(1, AtOrd::Relaxed);
+    drop(q);
+    block_egress();
     true
 }
 
