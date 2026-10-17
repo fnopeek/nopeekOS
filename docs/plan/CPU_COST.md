@@ -62,7 +62,7 @@ Engpass. Es sind Serialisierung und die CPU-Arbeit drumherum.
 |---|---|---|---|---|
 | V1 ✅ | `vmx/enable.rs`, `svm/enable.rs` `halt_poll` | Gast pollt selbst (`cpuidle_haltpoll`) und schreibt `MSR_KVM_POLL_CONTROL=0`; der Wirt pollte trotzdem bis 200 µs je HLT | `kvm_arch_no_poll` | S |
 | V2 | `VmShared::dev` | eine Sperre für fast jeden Exit (auch CPUID/HLT, lockfreie Doorbells, Demand-Fault); blk/sqfs laufen darunter synchron inkl. NVMe + Entschlüsseln | `kvm_io_bus` lockfrei, ioeventfd, Sperre je Gerät | M |
-| V3 | `drivers/nvme.rs:272` | MSI-X eingerichtet, Abschluss trotzdem per Spin | IRQ-getrieben | M |
+| V3 ✅ | `drivers/nvme.rs` `io_reap` | MSI-X eingerichtet, Abschluss trotzdem per Spin. **0.624.0:** sobald der MSI-X bestätigt feuert, hält der wartende Kern an (IRQ dorthin geroutet, Schritte ≤ 100 µs, flach genug für keinen tiefen C-State); die Sperre bleibt gehalten, weil auf dem Kern nichts anderes läuft. Ganz IRQ-getrieben (Fiber parkt, Sperre frei) bleibt offen | IRQ-getrieben | M |
 | V4 | `spec_mitigations.rs` | IBPB je Exit (nur Zen 2) ≈ halbe Exitkosten | Return-Thunks — `RETURN_THUNKS.md` | L |
 | V5 (✅ halb) | `ept.rs:218` | Demand-Fault nullt 2 MB bzw. 511×4K unter globalen Sperren. **Kernel 0.623.0:** läuft vor der Gerätesperre; Nullen und `ALLOCATOR` bleiben | THP-Fault ohne globale Sperre | S–M |
 | V6 | `run_guest_once` | FPU-Tausch je Exit, `current_core_id` per xAPIC-MMIO | Gast-FPU über ganze `KVM_RUN`, RDPID/GS | M–L |

@@ -248,6 +248,9 @@ fn admin_command(state: &mut NvmeState, mut cmd: SqEntry) -> Result<CqEntry, Blk
 /// How long one I/O completion may take before the queue is given up,
 /// as Linux's default `nvme_io_timeout`.
 const IO_TIMEOUT_SECS: u64 = 30;
+/// Longest single halt while waiting for a completion; short enough that
+/// the core stays out of deep C-states, whose exit would delay the I/O.
+const HALT_STEP_US: u64 = 100;
 
 impl NvmeState {
     /// Queue one I/O command without ringing the doorbell. Returns its id.
@@ -272,7 +275,15 @@ impl NvmeState {
     fn io_reap(&mut self) -> Result<(u16, u16), BlkError> {
         let t0 = crate::interrupts::rdtsc();
         let deadline = t0.saturating_add(crate::interrupts::tsc_freq().saturating_mul(IO_TIMEOUT_SECS));
+        let halt = self.msix_vector != 0 && MSIX_CONFIRMED.load(Ordering::Relaxed);
+        if halt {
+            // The completion's MSI-X must wake this core.
+            crate::irq::route_to_current(self.msix_vector);
+        }
         loop {
+            if halt {
+                self.halt_for_completion(deadline);
+            }
             let entry = cq_read(&self.io_cq, self.io_cq_head);
             if ((entry.status & 1) != 0) == self.io_phase {
                 self.io_cq_head = (self.io_cq_head + 1) % IO_QUEUE_SIZE;
@@ -290,6 +301,30 @@ impl NvmeState {
             }
             core::hint::spin_loop();
         }
+    }
+
+    /// Halt this core until an interrupt (the completion's MSI-X), at most
+    /// `HALT_STEP_US`, unless the next completion is already posted. The
+    /// core sleeps instead of spinning and runs no other fiber meanwhile, so
+    /// the caller keeps holding the controller's lock safely. With
+    /// interrupts off it returns at once and the caller spins.
+    fn halt_for_completion(&self, deadline: u64) {
+        let rflags: u64;
+        // SAFETY: reads RFLAGS, no other effect.
+        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags, options(preserves_flags)) };
+        if rflags & (1 << 9) == 0 {
+            return;
+        }
+        // The look and the halt with IF off: a completion after the look
+        // leaves its interrupt pending, and that ends the halt.
+        crate::interrupts::without_interrupts(|| {
+            let entry = cq_read(&self.io_cq, self.io_cq_head);
+            if ((entry.status & 1) != 0) != self.io_phase {
+                let step = crate::interrupts::rdtsc()
+                    + crate::interrupts::tsc_freq() / (1_000_000 / HALT_STEP_US);
+                crate::interrupts::halt_until(Some(deadline.min(step)), crate::smp::per_core::WAKE_HLT_FALLBACK);
+            }
+        });
     }
 
     /// Wait for every command in flight. Reports the first error status,
