@@ -405,6 +405,8 @@ pub struct VirtioGpu {
     held: Option<Held>,
     /// Blobs given back by the guest whose pages gpudev may still have bound.
     retired: Vec<Arc<ForeignPixels>>,
+    /// HOST3D resources given back whose blob is still in `retired`.
+    dying: Vec<super::virtio_gpu_ctx::Host3d>,
     /// Blob commands logged so far (the first few, and every refusal).
     blob_log_count: u32,
     /// Native contexts are offered this VM (decided at its start).
@@ -458,6 +460,7 @@ impl VirtioGpu {
             submit_running: false,
             held: None,
             retired: Vec::new(),
+            dying: Vec::new(),
             blob_log_count: 0,
             nativectx: false,
             ctxs: super::virtio_gpu_ctx::Contexts::new(),
@@ -507,6 +510,7 @@ impl VirtioGpu {
         if self.pending_submit.is_some() || self.submit_running {
             return false;
         }
+        self.reap_released();
         // SUBMIT_3D completions whose fence is done, in queue order per ring.
         let mut completed = self.complete_fences(mem);
         if let Some(h) = &self.held {
@@ -859,9 +863,6 @@ impl VirtioGpu {
                         self.drop_host3d(rid);
                     } else {
                         self.release_blob(rid);
-                        if !self.wait_released(RELEASE_WAIT_MS) {
-                            kprintln!("[gpu] a guest frame given back is still bound on the GPU");
-                        }
                         self.resources.retain(|r| r.id != rid);
                     }
                 }
@@ -885,9 +886,6 @@ impl VirtioGpu {
                 if request.len() >= 24 + 8 {
                     let rid = u32::from_le_bytes([request[24], request[25], request[26], request[27]]);
                     self.release_blob(rid);
-                    if !self.wait_released(RELEASE_WAIT_MS) {
-                        kprintln!("[gpu] a guest frame given back is still bound on the GPU");
-                    }
                     if let Some(r) = self.resources.iter_mut().find(|r| r.id == rid) {
                         r.backing.clear();
                     }
@@ -1114,18 +1112,16 @@ impl VirtioGpu {
     }
 
     /// A HOST3D resource goes: out of the guest's window, off every
-    /// surface and gpudev, then its pages go back. Pages gpudev may still
-    /// have bound stay allocated.
+    /// surface and gpudev; its pages go back once gpudev let go of them
+    /// (`reap_released`).
     fn drop_host3d(&mut self, res_id: u32) {
         self.unmap_host3d(res_id);
         self.release_blob(res_id);
-        if !self.wait_released(RELEASE_WAIT_MS) {
-            kprintln!("[gpu] a GPU object is still bound; its pages are kept");
-            self.ctxs.host3d.remove(&res_id);
-        } else {
-            self.ctxs.drop_resource(res_id);
+        if let Some(r) = self.ctxs.take_resource(res_id) {
+            self.dying.push(r);
         }
         self.resources.retain(|r| r.id != res_id);
+        self.reap_released();
     }
 
     /// Log a blob command: the first few, and every refusal (up to a bound).
@@ -1398,13 +1394,31 @@ impl VirtioGpu {
         self.retired.push(blob);
     }
 
+    /// Let go of the retired blobs nothing reads or binds any more, and
+    /// free the HOST3D resources whose blob is among them. The guest was
+    /// answered when it gave them back, as virglrenderer does: the pages
+    /// stay pinned (guest blobs) or allocated (HOST3D) until here.
+    pub fn reap_released(&mut self) {
+        self.retired.retain(|b| !(b.unread() && crate::gpu::gpudev::pages_released(b.serial)));
+        let mut i = 0;
+        while i < self.dying.len() {
+            let serial = self.dying[i].pages.serial;
+            if self.retired.iter().any(|b| b.serial == serial) {
+                i += 1;
+            } else {
+                let r = self.dying.swap_remove(i);
+                self.ctxs.free_resource(r);
+            }
+        }
+    }
+
     /// Wait (yielding, bounded) until no retired blob is read or bound any
     /// more; those still are stay listed. True when none is left.
     fn wait_released(&mut self, ms: u64) -> bool {
         let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000 * ms;
         loop {
-            self.retired.retain(|b| !(b.unread() && crate::gpu::gpudev::pages_released(b.serial)));
-            if self.retired.is_empty() {
+            self.reap_released();
+            if self.retired.is_empty() && self.dying.is_empty() {
                 return true;
             }
             if crate::interrupts::rdtsc() >= deadline {

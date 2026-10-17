@@ -7,16 +7,10 @@
 //! SET_MMAP_MODE are the kernel's; they never arrive here.
 //!
 //! A command's response starts with its length; `ret` is a positive errno.
-//! Err is a malformed request: the kernel then refuses the submit, except
-//! `CCMD_WAIT`.
+//! Err is a malformed request: the kernel then refuses the submit.
 
 use crate::i915_gem_context::*;
 use crate::i915_uapi::*;
-
-/// A command that waits for the GPU before it answers, as the ioctl sleeps
-/// in `i915_gem_object_wait`: the module keeps it and dispatches it again
-/// once the object is idle (`gpudev::run_waiting`).
-pub const CCMD_WAIT: i32 = i32::MIN;
 
 /// The response of IOCTL_SIMPLE: length, `ret`, the payload from 8.
 const SIMPLE_RSP: usize = 8;
@@ -142,7 +136,7 @@ fn ioctl_simple(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: usize, r
                         wr32(&mut p, 12, I915_BIT_6_SWIZZLE_NONE);
                         0
                     }
-                    _ => set_domain(st, d, i, &p),
+                    _ => set_domain(&p),
                 },
             }
         }
@@ -253,9 +247,6 @@ fn ioctl_simple(st: &mut nctx, d: &mut drm, c: u8, req: &mut [u8], len: usize, r
         }
         _ => return Err(-EINVAL),
     };
-    if ret == CCMD_WAIT {
-        return Err(CCMD_WAIT);
-    }
     wr32(rsp, 4, ret as u32);
     if cmd & IOC_OUT != 0 {
         rsp[SIMPLE_RSP..SIMPLE_RSP + payload_len].copy_from_slice(&p[..payload_len]);
@@ -319,31 +310,31 @@ fn set_tiling(st: &mut nctx, d: &mut drm, i: usize, p: &mut [u8]) -> i32 {
     if mode == I915_TILING_NONE {
         stride = 0;
     }
-    // i915_gem_object_set_tiling waits for the object's users first.
-    if st.obj_busy_flags(d.gt, i) != 0 {
-        return CCMD_WAIT;
+    // i915_gem_object_set_tiling: an unchanged tiling returns at once; a
+    // new one only has to fit the object's GGTT fences, and a guest object
+    // has none, so nothing waits for the GPU.
+    let o = st.objs[i];
+    if o.tiling != mode || o.stride != stride {
+        // One GEM object in Linux: every client's object on the buffer.
+        st.set_tiling_shared(i, mode, stride);
     }
-    // One GEM object in Linux: every client's object on the buffer.
-    st.set_tiling_shared(i, mode, stride);
     wr32(p, 4, mode);
     wr32(p, 8, stride);
     wr32(p, 12, I915_BIT_6_SWIZZLE_NONE);
     0
 }
 
-/// `i915_gem_set_domain_ioctl`: it waits for the GPU (the whole
-/// reservation, another client's requests on a shared buffer too).
-fn set_domain(st: &mut nctx, d: &mut drm, i: usize, p: &[u8]) -> i32 {
+/// `i915_gem_set_domain_ioctl`. Mesa sends it without waiting for the
+/// answer (an `_IOW` ioctl, `i915_virtio_simple_ioctl`), so its wait for
+/// the GPU would hold up only the commands queued behind it, never the
+/// guest's CPU access; the guest waits with GEM_WAIT. On an LLC part the
+/// domain change itself flushes nothing.
+fn set_domain(p: &[u8]) -> i32 {
     let (read, write) = (rd32(p, 4), rd32(p, 8));
     // I915_GEM_GPU_DOMAINS may not be asked for.
     const GPU_DOMAINS: u32 = 0x02 | 0x04 | 0x08 | 0x10 | 0x20;
     if (write | read) & GPU_DOMAINS != 0 || (write != 0 && read != write) {
         return EINVAL;
-    }
-    // A read waits for the writers, a write for everyone.
-    let busy = st.obj_busy_flags(d.gt, i);
-    if (write != 0 && busy != 0) || busy & 0xffff != 0 {
-        return CCMD_WAIT;
     }
     0
 }

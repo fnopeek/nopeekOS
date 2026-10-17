@@ -494,7 +494,8 @@ fn worker_entry(_arg: u64) {
         }
         // SUBMIT_3D completions wait for their fences: look again.
         let (fences, held) = {
-            let g = GPU.lock();
+            let mut g = GPU.lock();
+            g.reap_released();
             (g.fences_pending(), g.held_blob().is_some())
         };
         if fences {

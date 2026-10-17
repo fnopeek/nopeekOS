@@ -240,14 +240,21 @@ impl Contexts {
         Some(BACKEND.lock().as_mut().and_then(|b| b.map_info(r.handle, res_id)).unwrap_or(own))
     }
 
-    /// The guest dropped HOST3D resource `res_id`; it must be unmapped.
-    pub fn drop_resource(&mut self, res_id: u32) {
-        let Some(r) = self.host3d.remove(&res_id) else { return };
+    /// The guest dropped HOST3D resource `res_id`, which must be unmapped:
+    /// it leaves the guest's namespace (its id may be reused at once); its
+    /// pages go with `free_resource`.
+    pub fn take_resource(&mut self, res_id: u32) -> Option<Host3d> {
+        let r = self.host3d.remove(&res_id)?;
         if r.shmem
             && let Some(c) = self.ctxs.get_mut(&r.ctx)
             && c.shmem == Some(res_id) {
             c.shmem = None;
         }
+        Some(r)
+    }
+
+    /// Free a resource `take_resource` gave out.
+    pub fn free_resource(&mut self, r: Host3d) {
         if r.owned {
             if let Some(&first) = r.pages.pages.first() {
                 crate::memory::deallocate_contiguous(first, r.pages.pages.len());
