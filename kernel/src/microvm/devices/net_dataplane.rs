@@ -30,7 +30,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[inline]
 fn has_work() -> bool {
     use crate::microvm::devices::{guest_mem, nat, net_backend};
-    (nat::tap_len() > 0 && !net_backend::rx_nobuf())
+    (nat::tap_len() > 0 && net_backend::rx_ready(guest_mem::active()))
         || nat::egress_pending()
         || net_backend::tx_kick_pending()
         || guest_mem::active().is_some_and(net_backend::tx_ring_pending)

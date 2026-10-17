@@ -528,6 +528,7 @@ impl VirtioNet {
         let q = self.queues[0];
         if !q.ready() { return false; }
         let Some(seen) = avail_idx(mem, q.avail_gpa()) else { return false };
+        super::net_backend::set_rx_seen(q.avail_gpa(), seen);
         if self.event_idx_on() {
             set_avail_event(mem, q.used_gpa(), q.size, seen);
         } else {

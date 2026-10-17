@@ -56,7 +56,26 @@ static RX_NOBUF: AtomicBool = AtomicBool::new(false);
 
 /// Worker: the next tap frame does not fit the guest's RX buffers.
 pub fn set_rx_nobuf(on: bool) { RX_NOBUF.store(on, Ordering::Release); }
-pub fn rx_nobuf() -> bool { RX_NOBUF.load(Ordering::Acquire) }
+
+/// The RX avail ring and its index when the worker started waiting.
+static RX_AVAIL_GPA: AtomicU64 = AtomicU64::new(0);
+static RX_SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+pub fn set_rx_seen(avail_gpa: u64, seen: u16) {
+    RX_AVAIL_GPA.store(avail_gpa, Ordering::Release);
+    RX_SEEN.store(seen as u32, Ordering::Release);
+}
+
+/// A tap frame is RX work: the guest has buffers, or posted some since the
+/// worker found too few (seen by a busy-polling worker before the kick, as
+/// vhost's busyloop peeks the ring).
+pub fn rx_ready(mem: Option<&super::guest_mem::GuestMem>) -> bool {
+    if !RX_NOBUF.load(Ordering::Acquire) {
+        return true;
+    }
+    let gpa = RX_AVAIL_GPA.load(Ordering::Acquire);
+    gpa != 0 && mem.is_some_and(|m| m.read_u16(gpa + 2)
+        .is_some_and(|top| top as u32 != RX_SEEN.load(Ordering::Acquire)))
+}
 
 /// vCPU: the guest kicked RX (q0), it posted buffers. Wake a worker that
 /// waits for them.
@@ -245,6 +264,8 @@ pub fn bar0_in_range(gpa: u64) -> bool {
 pub fn reset() {
     *NET.lock() = VirtioNet::new();
     TX_AVAIL_GPA.store(0, Ordering::Release);
+    RX_AVAIL_GPA.store(0, Ordering::Release);
+    RX_NOBUF.store(false, Ordering::Release);
     msix_reset();
     ISR.store(0, Ordering::Release);
     NET_IRQ_PENDING.store(false, Ordering::Release);
