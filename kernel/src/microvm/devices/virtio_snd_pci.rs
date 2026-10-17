@@ -113,11 +113,6 @@ const D_OUTPUT: u8 = 0;
 /// is tiny and bounded by the free_space ceiling.
 const BYTES_PER_TICK: u64 = 192_000 / 100;
 
-/// Fixed buffering downstream of the mailbox: audio_hda's HDA ring is 2 halves of
-/// 2048 frames = 16384 bytes sitting between poll_mix and the speaker. Added to
-/// the reported latency so the guest's A/V sync accounts for it too.
-const HDA_RING_BYTES: u64 = 16_384;
-
 /// PCM playback rate in bytes/sec (48 kHz × 2 ch × 2 bytes). The TSC-based
 /// real-time budget uses this directly.
 const PLAYBACK_BYTES_PER_SEC: u64 = 192_000;
@@ -125,18 +120,21 @@ const PLAYBACK_BYTES_PER_SEC: u64 = 192_000;
 /// How far ahead of real-time playback we keep the mailbox filled (~43 ms).
 /// audio_hda refills in bursts (one worker-timer period of drain at once),
 /// so a burst pull against a near-empty mailbox would drain it to silence.
-/// This lead keeps a cushion; it's reported to the guest as latency_bytes
-/// so A/V stays synced. Frame-aligned.
+/// This lead keeps a cushion. Frame-aligned.
 const LEAD: u64 = 8_192;
 
-/// Hard cap on mailbox fill (~107 ms). The CPU TSC can run slightly faster
-/// than the HDA codec crystal, so `bytes_completed` (TSC-paced) creeps
-/// ahead of what audio_hda drains and the mailbox slowly fills. With the
-/// lead it never bottoms out, so the drift would accumulate until the
-/// `free_space` ceiling throttles completion to the drain rate and the
-/// guest clock creeps slow. Capping the fill here bleeds the drift off
-/// continuously. Must be > LEAD.
-const MAX_FILL: u64 = 20_480;
+/// The CPU TSC can run slightly faster than the HDA codec crystal, so
+/// `bytes_completed` (TSC-paced) creeps ahead of what audio_hda drains and
+/// the mailbox slowly fills. When its lowest fill over `DRIFT_WINDOW_MS`
+/// stays above this, the clock is held back by `DRIFT_TRIM_MS` (192 B/s of
+/// correction against a drift of tens of bytes per second). Completions
+/// never wait for audio_hda's pulls, so the guest's clock stays smooth.
+const DRIFT_FILL: u64 = LEAD + 4_096;
+const DRIFT_WINDOW_MS: u64 = 1_000;
+const DRIFT_TRIM_MS: u64 = 1;
+/// Mailbox fill at which completions stop: a safety bound well above the
+/// drift correction's working range, never reached in steady playback.
+const MAX_FILL: u64 = 65_536;
 
 
 #[derive(Default, Clone, Copy)]
@@ -199,6 +197,9 @@ pub struct VirtioSnd {
     /// handed back as one instant burst on resume → hw_ptr jump → underrun.
     /// Clamping keeps resume paced.
     period_bytes: u32,
+    /// Lowest mailbox fill since `drift_since` (TSC), for the drift trim.
+    fill_min: u64,
+    drift_since: u64,
 }
 
 impl VirtioSnd {
@@ -229,6 +230,8 @@ impl VirtioSnd {
             play_start_tsc: 0,
             bytes_completed: 0,
             period_bytes: 0,
+            fill_min: u64::MAX,
+            drift_since: 0,
         }
     }
 
@@ -380,6 +383,8 @@ impl VirtioSnd {
                 self.started = true;
                 self.play_start_tsc = crate::interrupts::rdtsc();
                 self.bytes_completed = 0;
+                self.fill_min = u64::MAX;
+                self.drift_since = self.play_start_tsc;
                 put32(resp, 0, S_OK);
                 4
             }
@@ -483,9 +488,19 @@ impl VirtioSnd {
         // real-time sink instead of an instant drain.
         let tsc_now = crate::interrupts::rdtsc();
         let tsc_hz = crate::interrupts::tsc_freq().max(1);
+        // Clock drift against the HDA crystal: the mailbox never ran low
+        // over the last window, so the TSC clock runs ahead; hold it back.
+        self.fill_min = self.fill_min.min(crate::audio::buffered(slot) as u64);
+        if tsc_now.wrapping_sub(self.drift_since) >= tsc_hz / 1000 * DRIFT_WINDOW_MS {
+            if self.fill_min != u64::MAX && self.fill_min > DRIFT_FILL {
+                self.play_start_tsc = self.play_start_tsc.wrapping_add(tsc_hz / 1000 * DRIFT_TRIM_MS);
+            }
+            self.fill_min = u64::MAX;
+            self.drift_since = tsc_now;
+        }
         // Real-time playback position (bytes that should have reached the speaker
         // by now), from the TSC.
-        let position = ((tsc_now.wrapping_sub(self.play_start_tsc) as u128)
+        let mut position = ((tsc_now.wrapping_sub(self.play_start_tsc) as u128)
             .saturating_mul(PLAYBACK_BYTES_PER_SEC as u128) / tsc_hz as u128) as u64;
 
         // Complete up to LEAD ahead of real playback so the mailbox keeps a
@@ -506,6 +521,7 @@ impl VirtioSnd {
                 / PLAYBACK_BYTES_PER_SEC as u128) as u64;
             self.play_start_tsc = tsc_now.wrapping_sub(pos_cycles);
             budget = target;
+            position = target.wrapping_sub(LEAD);
         }
 
         while last != avail_top {
@@ -547,10 +563,8 @@ impl VirtioSnd {
             if self.bytes_completed.wrapping_add(pcm_len as u64) > budget {
                 break; // too early; retry next pump tick
             }
-            // Fill cap: bound mailbox occupancy at MAX_FILL so the TSC-vs-HDA
-            // crystal drift can't slowly fill it to the brim (→ free_space
-            // throttle → guest clock creeps slow). Also guarantees room to submit
-            // the whole buffer (MAX_FILL ≪ SLOT_BYTES), so no partial-submit drop.
+            // Safety bound, so the whole buffer always fits (MAX_FILL ≪
+            // SLOT_BYTES) and nothing is dropped half-submitted.
             if (crate::audio::buffered(slot) as u64).wrapping_add(pcm_len as u64) > MAX_FILL {
                 break;
             }
@@ -566,21 +580,20 @@ impl VirtioSnd {
                 }
             }
 
-            // Write the status response (S_OK + real latency) + complete the
-            // buffer. latency_bytes = PCM received-but-not-yet-played = what is
-            // currently buffered in the mailbox plus audio_hda's HDA ring. Linux
-            // feeds this into runtime->delay (sound/virtio/virtio_pcm_msg.c) →
-            // snd_pcm_delay → cubeb's A/V clock accounts for our hidden buffer.
+            // Write the status response (S_OK + latency) + complete the
+            // buffer. latency_bytes is what QEMU reports: bytes taken from the
+            // guest and not yet played, on the clock that paces completions.
+            // Linux feeds it into runtime->delay (sound/virtio/virtio_pcm_msg.c),
+            // so cubeb's A/V clock reads that clock's position, smooth.
+            self.bytes_completed = self.bytes_completed.wrapping_add(pcm_len as u64);
             if status_addr != 0 {
                 let mut st = [0u8; 8];
                 put32(&mut st, 0, S_OK);
-                let latency = (crate::audio::buffered(slot) as u64)
-                    .saturating_add(HDA_RING_BYTES);
+                let latency = self.bytes_completed.saturating_sub(position);
                 put32(&mut st, 4, latency.min(u32::MAX as u64) as u32);
                 mem.write_bytes(status_addr, &st);
             }
             used_push(mem, q.device_gpa(), q.size, &mut used, head, 8);
-            self.bytes_completed = self.bytes_completed.wrapping_add(pcm_len as u64);
             last = last.wrapping_add(1);
             any = true;
         }

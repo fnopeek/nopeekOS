@@ -2695,6 +2695,11 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
     if crate::microvm::cpu::steal_time::configured() {
         let _ = write!(s, " cpuidle_haltpoll.force=1");
     }
+    // The guest's audio clock (snd_pcm_delay, which cubeb and Firefox's
+    // A/V sync read) moves once per completed period: 10 ms steps instead
+    // of the 40 ms alsa-lib picks from the 160 ms buffer, a whole video
+    // frame at 25 fps.
+    let _ = write!(s, " virtio_snd.pcm_period_ms_max=10");
     // `nolapic` unless the LAPIC is actually emulated for this host. LAPIC
     // emulation is SVM-only (svm/lapic.rs); on Intel/VMX there is none, so the
     // guest must fall back to the PIT IRQ0 the VMX path injects — otherwise it
