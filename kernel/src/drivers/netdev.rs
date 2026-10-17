@@ -441,6 +441,15 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); })
 }
 
+/// TX completions retired: true when a sender `try_send` refused may try
+/// again. A card without an interrupt-driven wake says yes at once.
+pub fn tx_room() -> bool {
+    match active() {
+        Active::Intel => intel_nic::tx_room(),
+        _ => true,
+    }
+}
+
 /// `send` for a caller that keeps a refused frame and retries: the virtio
 /// card and the I225/I226 refuse a full ring at once instead of spinning on
 /// it. Other cards behave as in `send`.

@@ -547,6 +547,28 @@ static EGRESS: Mutex<alloc::collections::VecDeque<Egress>> =
 static EGRESS_LEN: AtomicU64 = AtomicU64::new(0);
 /// Packets parked because the card's ring was full (healthy in moderation).
 static NS_EGRESS_DEFERRED: AtomicU64 = AtomicU64::new(0);
+/// The card refused the backlog's head: it waits for TX completions (the
+/// stopped queue of `netif_stop_subqueue`), not for the worker to retry.
+static EGRESS_BLOCKED: AtomicBool = AtomicBool::new(false);
+
+/// The card's ring was full: wait for `egress_room`, unless room came back
+/// before the flag was seen.
+fn block_egress() {
+    EGRESS_BLOCKED.store(true, AtOrd::SeqCst);
+    if crate::netdev::tx_room() {
+        EGRESS_BLOCKED.store(false, AtOrd::SeqCst);
+    }
+}
+
+/// From the host NIC's interrupt poll (`igc_poll` cleans TX first): a
+/// blocked backlog whose ring has room again wakes the worker, as
+/// `netif_wake_subqueue` wakes the stopped sender.
+pub fn egress_room() {
+    if EGRESS_BLOCKED.load(AtOrd::Acquire) && crate::netdev::tx_room() {
+        EGRESS_BLOCKED.store(false, AtOrd::SeqCst);
+        super::net_backend::NET_BELL.ring();
+    }
+}
 /// Bound on the backlog. The worker stops draining the guest at the first
 /// parked packet and one pass takes at most `TX_PASS_BYTES`, so this is only
 /// reached by the inline path or a wedged card.
@@ -592,6 +614,8 @@ fn egress(dst: [u8; 4], proto: u8, seg: Vec<u8>, head: Forwarded) {
     q.push_back(Egress { dst, proto, seg, head });
     EGRESS_LEN.store(q.len() as u64, AtOrd::Release);
     NS_EGRESS_DEFERRED.fetch_add(1, AtOrd::Relaxed);
+    drop(q);
+    block_egress();
 }
 
 /// Send what the card will take now. True when nothing is left waiting.
@@ -599,9 +623,14 @@ pub fn egress_flush() -> bool {
     use crate::virtio_net::NetError;
     if EGRESS_LEN.load(AtOrd::Acquire) == 0 { return true; }
     let mut q = EGRESS.lock();
+    if EGRESS_BLOCKED.load(AtOrd::Acquire) { return false; }
     while let Some(e) = q.front() {
         match egress_send(e.dst, e.proto, &e.seg, e.head) {
-            Err(NetError::QueueFull) => break,
+            Err(NetError::QueueFull) => {
+                drop(q);
+                block_egress();
+                return false;
+            }
             Ok(true) => {}
             Ok(false) => { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
             Err(_) => { NS_DROP_EGRESS.fetch_add(1, AtOrd::Relaxed); }
@@ -612,8 +641,11 @@ pub fn egress_flush() -> bool {
     q.is_empty()
 }
 
-/// Packets are waiting for the host card.
-pub fn egress_pending() -> bool { EGRESS_LEN.load(AtOrd::Acquire) != 0 }
+/// Packets are waiting for the host card, and it has room for them: work
+/// for the worker. A blocked backlog waits for `egress_room`.
+pub fn egress_pending() -> bool {
+    EGRESS_LEN.load(AtOrd::Acquire) != 0 && !EGRESS_BLOCKED.load(AtOrd::Acquire)
+}
 
 /// (deferred, refused) since boot, for `cores`.
 pub fn egress_stats() -> (u64, u64) {
@@ -712,7 +744,7 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
     // The card segments it: one super-frame instead of many software-cut
     // segments, each with a full checksum and its own trip through ipv4::send.
     // Not past a backlog: the super-frame would overtake the parked segments.
-    if crate::netdev::tso_capable() && !egress_pending()
+    if crate::netdev::tso_capable() && EGRESS_LEN.load(AtOrd::Acquire) == 0
         && emit_tcp_tso(hp, our_ip, dst_ip, l4, thlen, gso_size, head)
     {
         return;

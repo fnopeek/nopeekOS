@@ -585,6 +585,21 @@ fn tx_clean(d: &mut Igc) {
     }
 }
 
+/// `TX_WAKE_THRESHOLD` (igc.h): `DESC_NEEDED * 2`, `DESC_NEEDED` being
+/// `MAX_SKB_FRAGS + 4` with 17 fragments.
+const TX_WAKE_THRESHOLD: u16 = 42;
+
+/// `igc_clean_tx_irq`'s wake test, from the interrupt's poll: the finished
+/// packets are retired, and true when a stopped sender may go on
+/// (`netif_wake_subqueue`).
+pub fn tx_room() -> bool {
+    let mut lock = DEVICE.lock();
+    let Some(d) = lock.as_mut() else { return true };
+    tx_clean(d);
+    let lim = TX_LIMIT.load(Ordering::Relaxed);
+    tx_unused(d) >= TX_WAKE_THRESHOLD && (lim == 0 || d.tx_inflight < lim)
+}
+
 /// Bytes the non-waiting senders may keep on the ring; 0 = the ring's size.
 /// `set microvm_txq_kb`, read at each microVM launch.
 static TX_LIMIT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);

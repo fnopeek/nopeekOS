@@ -122,6 +122,8 @@ static LAST_TCP_TICK: core::sync::atomic::AtomicU64 =
 pub fn poll_rx_only() {
     use core::sync::atomic::Ordering::Relaxed;
     let rd = crate::interrupts::rdtsc;
+    // `igc_poll` cleans TX before RX: a sender stopped on a full ring goes on.
+    crate::microvm::devices::nat::egress_room();
     if POLLING
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()

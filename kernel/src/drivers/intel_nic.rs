@@ -487,6 +487,12 @@ pub fn debug_stats() {
     crate::kprintln!("[npk] intel-nic: TX={} RX={}", tx, rx);
 }
 
+/// The TX ring has room again for a sender that found it full (igc); the
+/// e1000 path never refuses one.
+pub fn tx_room() -> bool {
+    !IS_IGC.load(Ordering::Acquire) || igc::tx_room()
+}
+
 /// A frame's length, and whether the card verified its L4 checksum (igc;
 /// the e1000 path leaves it to the stack).
 pub fn recv(buf: &mut [u8; MTU]) -> Option<(usize, bool)> {
