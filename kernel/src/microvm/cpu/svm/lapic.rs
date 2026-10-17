@@ -499,6 +499,11 @@ impl LocalApic {
 
     pub fn is_x2apic(&self) -> bool { self.x2apic }
 
+    /// `kvm_arch_no_poll`: a guest that polls itself (cpuidle-haltpoll)
+    /// clears the enable bit of `MSR_KVM_POLL_CONTROL`, and the host then
+    /// blocks at once instead of polling a second time.
+    pub fn host_poll_allowed(&self) -> bool { self.poll_control & 1 != 0 }
+
     /// Hand delivery to the CPU (`vmx_refresh_apicv_exec_ctrl`). PV-EOI is
     /// never armed again (`apic_sync_pv_eoi_to_guest`). Returns the highest
     /// in-service vector, the initial SVI.

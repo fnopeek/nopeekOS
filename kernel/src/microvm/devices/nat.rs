@@ -457,64 +457,12 @@ fn l3_map_in(proto: u8, dst_ip: [u8; 4], hport: u16, rip: [u8; 4], rport: u16,
     None
 }
 
-/// Recompute the TCP/UDP checksum after an address/port rewrite.
-///
-/// UDP is not zeroed even though a zero checksum is legal for UDP-over-IPv4
-/// (RFC 768): the datagram arrived with a checksum, and handing on a packet
-/// that claims to be unprotected is damage, not translation. Most of a
-/// browser's flows are QUIC, i.e. UDP.
-///
-/// Outbound we must compute in full: with `VIRTIO_NET_F_CSUM` negotiated the
-/// guest hands us CHECKSUM_PARTIAL, so the field holds a pseudo-header seed and
-/// not a checksum. Inbound the datagram arrives complete and could be updated
-/// incrementally, but the same full pass keeps one implementation for both
-/// directions.
-fn fix_l4_checksum(proto: u8, src_ip: [u8; 4], dst_ip: [u8; 4], l4: &mut [u8]) {
-    if proto == PROTO_TCP {
-        if l4.len() < TCP_HDR_LEN { return; }
-        l4[16] = 0; l4[17] = 0;
-        let c = tcp_checksum(src_ip, dst_ip, l4);
-        l4[16..18].copy_from_slice(&c.to_be_bytes());
-    } else if proto == PROTO_UDP {
-        if l4.len() < UDP_HDR_LEN { return; }
-        // The length FIELD is the authority, not the slice: a minimum-size
-        // ethernet frame carries padding that is not part of the datagram, and
-        // checksumming it would produce a value the receiver cannot reproduce.
-        let declared = u16::from_be_bytes([l4[4], l4[5]]) as usize;
-        let len = if declared >= UDP_HDR_LEN && declared <= l4.len() {
-            declared
-        } else {
-            l4.len()
-        };
-        l4[6] = 0; l4[7] = 0;
-        let c = udp_checksum(src_ip, dst_ip, &l4[..len]);
-        l4[6..8].copy_from_slice(&c.to_be_bytes());
-    }
-}
-
 /// UDP checksum over the IPv4 pseudo-header + datagram (RFC 768). A computed
 /// zero goes on the wire as 0xFFFF, because zero is the "no checksum" escape and
 /// would undo the whole point.
 fn udp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], udp: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-    sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
-    sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
-    sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
-    sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
-    sum += PROTO_UDP as u32;
-    sum += udp.len() as u32;
-    let mut i = 0;
-    while i + 1 < udp.len() {
-        sum += u16::from_be_bytes([udp[i], udp[i + 1]]) as u32;
-        i += 2;
-    }
-    if i < udp.len() {
-        sum += (udp[i] as u32) << 8;
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    let c = !(sum as u16);
+    use crate::net::csum;
+    let c = !csum::fold(csum::pseudo(src_ip, dst_ip, PROTO_UDP, udp.len()) + csum::sum(udp));
     if c == 0 { 0xFFFF } else { c }
 }
 
@@ -555,6 +503,19 @@ static NS_EGRESS_DEFERRED: AtomicU64 = AtomicU64::new(0);
 /// reached by the inline path or a wedged card.
 const EGRESS_MAX: usize = 4096;
 
+/// One packet to the card. A TCP or UDP check holds the pseudo-header seed
+/// (`CHECKSUM_PARTIAL`, as the guest handed it over with `VIRTIO_NET_F_CSUM`),
+/// and the card or `netdev::checksum_help` completes it.
+fn egress_send(dst: [u8; 4], proto: u8, seg: &[u8], head: Forwarded)
+    -> Result<bool, crate::virtio_net::NetError>
+{
+    if proto == PROTO_TCP || proto == PROTO_UDP {
+        crate::net::ipv4::try_send_partial(dst, proto, seg, head)
+    } else {
+        crate::net::ipv4::try_send(dst, proto, seg, head)
+    }
+}
+
 /// Hand one masqueraded packet to the host card, or park it behind the ones
 /// already waiting.
 fn egress(dst: [u8; 4], proto: u8, seg: Vec<u8>, head: Forwarded) {
@@ -566,7 +527,7 @@ fn egress(dst: [u8; 4], proto: u8, seg: Vec<u8>, head: Forwarded) {
         return;
     }
     if EGRESS_LEN.load(AtOrd::Acquire) == 0 {
-        match crate::net::ipv4::try_send(dst, proto, &seg, head) {
+        match egress_send(dst, proto, &seg, head) {
             Ok(true) => return,
             Ok(false) => { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); return; }
             Err(NetError::QueueFull) => {}
@@ -590,7 +551,7 @@ pub fn egress_flush() -> bool {
     if EGRESS_LEN.load(AtOrd::Acquire) == 0 { return true; }
     let mut q = EGRESS.lock();
     while let Some(e) = q.front() {
-        match crate::net::ipv4::try_send(e.dst, e.proto, &e.seg, e.head) {
+        match egress_send(e.dst, e.proto, &e.seg, e.head) {
             Err(NetError::QueueFull) => break,
             Ok(true) => {}
             Ok(false) => { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
@@ -639,11 +600,10 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
     };
     let our_ip = crate::net::arp::our_ip();
     if proto == PROTO_TCP {
-        // TCP: software TSO segmentation (gso_size > 0 + payload past one MSS) or
-        // a single segment. Either way the TCP checksum is recomputed in full:
-        // with VIRTIO_NET_F_CSUM negotiated the guest offloads its checksum
-        // (CHECKSUM_PARTIAL: the field holds only the pseudo-header seed), so
-        // an incremental update has no valid base.
+        // TCP: card TSO, software segmentation, or a single segment. With
+        // VIRTIO_NET_F_CSUM the guest offloads its checksum (CHECKSUM_PARTIAL:
+        // the field holds only the pseudo-header seed), so an incremental
+        // update has no valid base; every segment leaves with a new seed.
         emit_tcp_out(hp, our_ip, dst_ip, l4, gso_size, head);
     } else {
         // UDP (and anything else routed here): single datagram, port rewrite +
@@ -652,7 +612,16 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
         NS_TX_BYTES.fetch_add(l4.len() as u64, AtOrd::Relaxed);
         let mut seg = l4.to_vec();
         seg[0..2].copy_from_slice(&hp.to_be_bytes());        // src port → host port
-        fix_l4_checksum(proto, our_ip, dst_ip, &mut seg);
+        if proto == PROTO_UDP && seg.len() >= UDP_HDR_LEN {
+            // The length FIELD is the authority, not the slice: a short
+            // frame's padding is not part of the datagram.
+            let declared = u16::from_be_bytes([seg[4], seg[5]]) as usize;
+            if declared >= UDP_HDR_LEN && declared <= seg.len() {
+                seg.truncate(declared);
+            }
+            let seed = pseudo_seed(PROTO_UDP, our_ip, dst_ip, seg.len());
+            seg[6..8].copy_from_slice(&seed.to_be_bytes());
+        }
         egress(dst_ip, proto, seg, head);
     }
     L3_ACTIVE.store(true, AtOrd::Release);
@@ -663,8 +632,8 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
 /// into `gso_size`-byte segments when needed. Ports the field math of Linux's
 /// `tcp_gso_segment` (net/ipv4/tcp_offload.c): per segment, seq advances by the
 /// payload already emitted; FIN/PSH are kept only on the last; CWR is cleared on
-/// every segment but the first; the TCP checksum is computed in full over each
-/// independent segment. The IP layer (`ipv4::send`) builds the per-segment IPv4
+/// every segment but the first; each segment carries its own pseudo-header
+/// seed and the card completes the checksum. The IP layer (`ipv4::send`) builds the per-segment IPv4
 /// header (src/total-len/checksum), so we only fix up the TCP header here.
 fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
                 l4: &[u8], gso_size: u16, head: Forwarded) {
@@ -683,9 +652,8 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
     if mss == 0 || payload.len() <= mss {
         let mut seg = l4.to_vec();
         seg[0..2].copy_from_slice(&hp.to_be_bytes());        // src port → host port
-        seg[16] = 0; seg[17] = 0;
-        let c = tcp_checksum(our_ip, dst_ip, &seg);
-        seg[16..18].copy_from_slice(&c.to_be_bytes());
+        let seed = pseudo_seed(PROTO_TCP, our_ip, dst_ip, seg.len());
+        seg[16..18].copy_from_slice(&seed.to_be_bytes());
         NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
         NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
         egress(dst_ip, PROTO_TCP, seg, head);
@@ -723,9 +691,8 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
         if k != 0 { flags &= !TCP_CWR; }
         seg[13] = flags;
 
-        seg[16] = 0; seg[17] = 0;                             // full TCP checksum
-        let c = tcp_checksum(our_ip, dst_ip, &seg);
-        seg[16..18].copy_from_slice(&c.to_be_bytes());
+        let seed = pseudo_seed(PROTO_TCP, our_ip, dst_ip, seg.len());
+        seg[16..18].copy_from_slice(&seed.to_be_bytes());
 
         NS_TX_PKTS.fetch_add(1, AtOrd::Relaxed);
         NS_TX_BYTES.fetch_add(seg.len() as u64, AtOrd::Relaxed);
@@ -1082,14 +1049,8 @@ fn emit_tcp_tso(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4], l4: &[u8],
     let l4_off = f.len();
     f.extend_from_slice(l4);
     f[l4_off..l4_off + 2].copy_from_slice(&hp.to_be_bytes()); // src port → host port
-    // Seed = folded pseudo-header sum, not complemented; the card adds the
-    // segment's own sum and complements (`~tcp_v4_check(len, s, d, 0)`).
-    let mut sum: u32 = PROTO_TCP as u32 + l4.len() as u32;
-    for w in [our_ip, dst_ip] {
-        sum += u16::from_be_bytes([w[0], w[1]]) as u32 + u16::from_be_bytes([w[2], w[3]]) as u32;
-    }
-    while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
-    f[l4_off + 16..l4_off + 18].copy_from_slice(&(sum as u16).to_be_bytes());
+    let seed = pseudo_seed(PROTO_TCP, our_ip, dst_ip, l4.len());
+    f[l4_off + 16..l4_off + 18].copy_from_slice(&seed.to_be_bytes());
 
     if crate::netdev::send_tso(&f, mss, l4_off, l4_off + thlen).is_err() {
         return false;
@@ -1307,6 +1268,13 @@ fn tcp_seg(f: &[u8]) -> Option<TcpSeg> {
     })
 }
 
+/// The segment's TCP checksum holds: the card verified it (`tap_inbound`
+/// set DATA_VALID and kept the checksum valid across the rewrite), or it is
+/// checked here.
+fn csum_valid(f: &[u8], s: &TcpSeg) -> bool {
+    f[0] & VNET_F_DATA_VALID != 0 || tcp_csum_ok(f, s)
+}
+
 /// The segment's TCP checksum holds (as rewritten by `tap_inbound`).
 fn tcp_csum_ok(f: &[u8], s: &TcpSeg) -> bool {
     let ip = VNET_HDR_LEN + ETH_HDR_LEN;
@@ -1339,10 +1307,12 @@ fn gro_continues(a: &[u8], sa: &TcpSeg, b: &[u8], sb: &TcpSeg, mss: usize, next_
 pub fn tap_pop_rx(gro: bool) -> Option<Vec<u8>> {
     let mut first = tap_pop()?;
     if !gro {
+        // Without GUEST_CSUM the header flags must be zero.
+        first[0] = 0;
         return Some(first);
     }
     let Some(s0) = tcp_seg(&first) else { return Some(first) };
-    if !tcp_csum_ok(&first, &s0) {
+    if !csum_valid(&first, &s0) {
         return Some(first); // the guest checks it and drops it
     }
     first[0] = VNET_F_DATA_VALID;
@@ -1377,7 +1347,7 @@ pub fn tap_pop_rx(gro: bool) -> Option<Vec<u8>> {
         };
         let Some(b) = next else { break };
         let sb = tcp_seg(&b).unwrap();
-        if !tcp_csum_ok(&b, &sb) {
+        if !csum_valid(&b, &sb) {
             tap_push_front(b);
             break;
         }
@@ -1475,7 +1445,9 @@ pub fn tap_reset() {
 ///
 /// Returns true if the packet was guest traffic and is now the tap's problem —
 /// the host stack must not also process it. A cheap `false` when no VM is up.
-pub fn tap_inbound(ip: &[u8]) -> bool {
+/// `csum_ok`: the card verified the TCP/UDP checksum; the frame then reaches
+/// the guest as DATA_VALID (`CHECKSUM_UNNECESSARY`) without a software pass.
+pub fn tap_inbound(ip: &[u8], csum_ok: bool) -> bool {
     if !L3_ACTIVE.load(AtOrd::Acquire) { return false; }
     if ip.len() < IPV4_HDR_LEN { return false; }
     let ihl = (ip[0] & 0x0F) as usize * 4;
@@ -1522,6 +1494,9 @@ pub fn tap_inbound(ip: &[u8]) -> bool {
 
     let mut frame = frame_pool_get(VNET_HDR_LEN + ETH_HDR_LEN + ip.len());
     frame[..VNET_HDR_LEN].fill(0); // empty virtio-net header
+    if csum_ok && proto != PROTO_ICMP {
+        frame[0] = VNET_F_DATA_VALID;
+    }
     write_eth(&mut frame, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
     let ip_off = VNET_HDR_LEN + ETH_HDR_LEN;
     frame[ip_off..].copy_from_slice(ip);
@@ -1543,9 +1518,20 @@ pub fn tap_inbound(ip: &[u8]) -> bool {
         ]);
         frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
         frame[l4_off + 16..l4_off + 18].copy_from_slice(&new_check.to_be_bytes());
-    } else {
+    } else if proto == PROTO_UDP && frame[l4_off..].len() >= UDP_HDR_LEN {
+        // `udp_manip_pkt`: incremental, and a datagram sent without a
+        // checksum stays without one.
+        let old_check = u16::from_be_bytes([frame[l4_off + 6], frame[l4_off + 7]]);
         frame[l4_off + 2..l4_off + 4].copy_from_slice(&gport.to_be_bytes());
-        fix_l4_checksum(proto, src_ip, GUEST_IP, &mut frame[l4_off..]);
+        if old_check != 0 {
+            let c = csum_update(old_check, &[
+                (u16::from_be_bytes([dst_ip[0], dst_ip[1]]), u16::from_be_bytes([GUEST_IP[0], GUEST_IP[1]])),
+                (u16::from_be_bytes([dst_ip[2], dst_ip[3]]), u16::from_be_bytes([GUEST_IP[2], GUEST_IP[3]])),
+                (host_port, gport),
+            ]);
+            let c = if c == 0 { 0xFFFF } else { c };
+            frame[l4_off + 6..l4_off + 8].copy_from_slice(&c.to_be_bytes());
+        }
     }
     tap_push(frame);
     true
@@ -1958,26 +1944,15 @@ fn cap_reject(proto: &str, ip: [u8; 4], port: u16) {
 /// the segment itself. Caller passes the same src/dst IPs that go in
 /// the IPv4 header.
 fn tcp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_segment: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-    // pseudo-header
-    sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
-    sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
-    sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
-    sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
-    sum += PROTO_TCP as u32;
-    sum += tcp_segment.len() as u32;
-    let mut i = 0;
-    while i + 1 < tcp_segment.len() {
-        sum += u16::from_be_bytes([tcp_segment[i], tcp_segment[i + 1]]) as u32;
-        i += 2;
-    }
-    if i < tcp_segment.len() {
-        sum += (tcp_segment[i] as u32) << 8;
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
+    use crate::net::csum;
+    !csum::fold(csum::pseudo(src_ip, dst_ip, PROTO_TCP, tcp_segment.len()) + csum::sum(tcp_segment))
+}
+
+/// `CHECKSUM_PARTIAL` seed: the folded pseudo-header sum, not complemented;
+/// the card (or `netdev::checksum_help`) adds the segment and complements
+/// (`~tcp_v4_check(len, s, d, 0)`).
+fn pseudo_seed(proto: u8, src_ip: [u8; 4], dst_ip: [u8; 4], len: usize) -> u16 {
+    crate::net::csum::fold(crate::net::csum::pseudo(src_ip, dst_ip, proto, len))
 }
 
 /// Guest timer-IRQ injections this window (PIT IRQ0 + LAPIC LVTT). Should

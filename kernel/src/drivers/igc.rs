@@ -31,6 +31,7 @@ const IGC_EIAC: u32 = 0x152C;
 const IGC_EIAM: u32 = 0x1530;
 const IGC_IVAR0: u32 = 0x1700;
 const IGC_RCTL: u32 = 0x0100;
+const IGC_RXCSUM: u32 = 0x5000;
 const IGC_TCTL: u32 = 0x0400;
 const fn igc_eitr(n: u32) -> u32 { 0x1680 + 4 * n }
 const IGC_SRRCTL0: u32 = 0xC00C;
@@ -86,6 +87,13 @@ const IGC_RXDCTL_WTHRESH: u32 = 4;
 const IGC_RXDCTL_QUEUE_ENABLE: u32 = 0x0200_0000;
 const IGC_TXDCTL_QUEUE_ENABLE: u32 = 1 << 25;
 const IGC_RXD_STAT_EOP: u32 = 0x02;
+const IGC_RXD_STAT_IXSM: u32 = 0x04;
+const IGC_RXD_STAT_UDPCS: u32 = 0x10;
+const IGC_RXD_STAT_TCPCS: u32 = 0x20;
+const IGC_RXDEXT_STATERR_L4E: u32 = 0x2000_0000;
+const IGC_RXDEXT_STATERR_IPE: u32 = 0x4000_0000;
+const IGC_RXCSUM_CRCOFL: u32 = 0x0000_0800;
+const IGC_RXCSUM_PCSD: u32 = 0x0000_2000;
 const IGC_RXDEXT_STATERR_RXE: u32 = 0x8000_0000;
 const IGC_TXD_STAT_DD: u32 = 0x1;
 const IGC_ADVTXD_DTYP_DATA: u32 = 0x0030_0000;
@@ -271,6 +279,11 @@ pub fn init(dev: pci::PciAddr, mmio: Mmio) -> bool {
     tctl |= IGC_TCTL_EN;
     mmio.w32(IGC_TCTL, tctl);
 
+    // igc_setup_mrqc, the checksum part: TCP/UDP/IP receive checksum
+    // offload is on by reset default (TUOFL, IPOFL); PCSD puts the RSS hash
+    // in the descriptor instead of the raw packet checksum.
+    mmio.w32(IGC_RXCSUM, mmio.r32(IGC_RXCSUM) | IGC_RXCSUM_PCSD | IGC_RXCSUM_CRCOFL);
+
     // igc_setup_rctl (mc_filter_type 0; RSS off — one queue)
     let mut rctl = mmio.r32(IGC_RCTL);
     rctl &= !(3 << IGC_RCTL_MO_SHIFT);
@@ -379,11 +392,20 @@ fn rx_refill(d: &mut Igc) {
     d.rx_cleaned = 0;
 }
 
-/// One frame of `igc_clean_rx_irq`. At the empty ring it returns the batch
-/// and re-enables the queue interrupt (`napi_complete_done` +
+/// `igc_rx_checksum`: the card verified the frame's TCP or UDP checksum
+/// (`CHECKSUM_UNNECESSARY`). An error bit leaves the check to the stack.
+fn rx_csum_valid(status: u32) -> bool {
+    status & IGC_RXD_STAT_IXSM == 0
+        && status & (IGC_RXDEXT_STATERR_L4E | IGC_RXDEXT_STATERR_IPE) == 0
+        && status & (IGC_RXD_STAT_TCPCS | IGC_RXD_STAT_UDPCS) != 0
+}
+
+/// One frame of `igc_clean_rx_irq`: its length, and whether the card
+/// verified its L4 checksum. At the empty ring it returns the batch and
+/// re-enables the queue interrupt (`napi_complete_done` +
 /// `igc_ring_irq_enable`); a frame that lands meanwhile is left pending in
 /// EICR and fires when EIMS unmasks it.
-pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
+pub fn recv(buf: &mut [u8; MTU]) -> Option<(usize, bool)> {
     let mut lock = DEVICE.lock();
     let d = lock.as_mut()?;
     loop {
@@ -412,7 +434,7 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
         d.rx_next_to_clean = (i + 1) % IGC_DEFAULT_RXD as u16;
         d.rx_cleaned += 1;
         // A frame spanning buffers or flagged bad is dropped.
-        if good { return Some(n); }
+        if good { return Some((n, rx_csum_valid(status))); }
     }
 }
 
@@ -489,7 +511,7 @@ fn tx_bump_tail(d: &mut Igc, next: u16) {
 
 /// `igc_xmit_frame_ring` for a single-buffer frame.
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
-    send_inner(frame, true)
+    send_inner(frame, true, None)
 }
 
 /// `send` without waiting for completions: a full ring is `QueueFull` at
@@ -497,28 +519,60 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
 /// (`nat`'s egress backlog). Waiting would hold `DEVICE`, which the receive
 /// path needs for the ACKs that free the ring.
 pub fn try_send(frame: &[u8]) -> Result<(), NetError> {
-    send_inner(frame, false)
+    send_inner(frame, false, None)
 }
 
-fn send_inner(frame: &[u8], wait: bool) -> Result<(), NetError> {
+/// Where the card inserts a TCP or UDP checksum (`CHECKSUM_PARTIAL`): the
+/// IPv4 header starts after the Ethernet header, the L4 header at `l4_off`,
+/// and its check field holds the pseudo-header seed.
+#[derive(Clone, Copy)]
+pub struct TxCsum {
+    pub l4_off: usize,
+    pub tcp: bool,
+}
+
+/// `try_send` with checksum insertion by the card (`igc_tx_csum`).
+pub fn try_send_csum(frame: &[u8], csum: TxCsum) -> Result<(), NetError> {
+    send_inner(frame, false, Some(csum))
+}
+
+fn send_inner(frame: &[u8], wait: bool, csum: Option<TxCsum>) -> Result<(), NetError> {
     if frame.len() > MTU { return Err(NetError::FrameTooLarge); }
     let mut lock = DEVICE.lock();
     let d = lock.as_mut().ok_or(NetError::NotInitialized)?;
+    let need = if csum.is_some() { 2 } else { 1 };
     if wait {
-        tx_reserve(d, 1)?;
+        tx_reserve(d, need)?;
     } else {
         tx_clean(d);
-        if tx_unused(d) < 1 || over_limit(d, frame.len()) { return Err(NetError::QueueFull); }
+        if tx_unused(d) < need || over_limit(d, frame.len()) { return Err(NetError::QueueFull); }
     }
-    let i = d.tx_next_to_use;
-    note_queued(d, i, frame.len());
+    let n = IGC_DEFAULT_TXD as u16;
+    let first = d.tx_next_to_use;
+    let mut i = first;
+    let mut olinfo = (frame.len() as u32) << IGC_ADVTXD_PAYLEN_SHIFT;
+    if let Some(c) = csum {
+        // igc_tx_csum + igc_tx_ctxtdesc: IP header length and MAC length;
+        // L4T_TCP for a TCP check, nothing for UDP; no MSS.
+        let ctx = desc_off(i);
+        let ip_len = (c.l4_off - 14) as u32;
+        d.tx_descs.w32(ctx, ip_len | (14 << IGC_ADVTXD_MACLEN_SHIFT));
+        d.tx_descs.w32(ctx + 4, 0);
+        d.tx_descs.w32(ctx + 8, IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DTYP_CTXT
+            | if c.tcp { IGC_ADVTXD_TUCMD_L4T_TCP } else { 0 });
+        d.tx_descs.w32(ctx + 12, 0);
+        // igc_tx_olinfo_status: TXSM only; the IPv4 check is the stack's.
+        olinfo |= IGC_TXD_POPTS_TXSM << 8;
+        i = (i + 1) % n;
+    }
+    note_queued(d, first, frame.len());
     write_data_desc(d, i, frame,
         IGC_ADVTXD_DTYP_DATA | IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DCMD_IFCS
         | IGC_ADVTXD_DCMD_EOP | IGC_ADVTXD_DCMD_RS,
-        (frame.len() as u32) << IGC_ADVTXD_PAYLEN_SHIFT);
-    d.tx_eop[i as usize] = i;
+        olinfo);
+    d.tx_eop[first as usize] = i;
     STAT_QUEUED.fetch_add(1, Ordering::Relaxed);
-    tx_bump_tail(d, (i + 1) % IGC_DEFAULT_TXD as u16);
+    tx_bump_tail(d, (i + 1) % n);
     Ok(())
 }
 

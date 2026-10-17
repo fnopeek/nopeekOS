@@ -35,6 +35,18 @@ Stellen ohne Pfadpräfix: `tools/wasm/gpu_intel_tgl/src/` (Modul) bzw.
 | Kontext-/VM-Nummern zählten nur hoch, ≤ 8 | Modul 0.19.2 — `xa_alloc` ALLOC1 |
 | „Overlap" durch ein Objekt mit neuer Adresse | Modul 0.19.2 — `i915_gem_evict_for_node` |
 
+## Stand 2026-10-17 (am Code nachgeprüft)
+
+**Erledigt:** 1.1, 1.6, 1.8 (Modul 0.20.0: zurückstellen statt ablehnen) ·
+2.1–2.3, 2.7, 2.8 · 3.5 · 5.3, 5.4 · 6.4 · 7.9 · 8.1–8.3, 8.5 · 9.6.
+**Teilweise:** 1.2–1.5 (wartet jetzt, die Zahlen 16/128/8/8 stehen noch) ·
+1.7 (2048-Objekte weg, `CCMD_MAX` 256 KB steht) · 4.1 (`npk_dma_free` da,
+Deckel 16384/128 MB jetzt Live-Grenzen) · 4.2 (Balloon mit `F_REPORTING`;
+kein `DEFLATE_ON_OOM`, Scudo `-1`, Startfenster 256 MB nie zurück) · 4.8 ·
+5.10 · 7.1 (BAR2 wandert schon, RAM noch < 3 GB) · 8.6 · 8.9 · 9.1.
+**Offen:** alles andere, insbesondere 1.9/1.10, 2.4–2.6, 2.9, W3, 6.1–6.3,
+6.5–6.10, 7.2–7.8, 7.11. CPU-Kosten stehen getrennt in `CPU_COST.md`.
+
 ## W1. Ablehnen, wo das Original wartet — **die Wurzel der Hänger**
 
 **Der Befund, der alle Zeilen hier ernst macht:** Mesa im Gast liest die

@@ -388,6 +388,17 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
     igc::send_tso(frame, mss, l4_off, hdr_len)
 }
 
+/// The card inserts TCP/UDP checksums (igc).
+pub fn csum_capable() -> bool { IS_IGC.load(Ordering::Acquire) }
+
+pub fn try_send_csum(frame: &[u8], csum: igc::TxCsum) -> Result<(), NetError> {
+    if !csum_capable() { return Err(NetError::NotInitialized); }
+    if frame.len() > MTU { return Err(NetError::FrameTooLarge); }
+    let r = igc::try_send_csum(frame, csum);
+    if r.is_ok() { TX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
+    r
+}
+
 /// LAPIC vector of the RX interrupt; 0 for the polled e1000 path.
 pub fn rx_irq_vector() -> u8 {
     if IS_IGC.load(Ordering::Acquire) { igc::rx_irq_vector() } else { 0 }
@@ -476,7 +487,9 @@ pub fn debug_stats() {
     crate::kprintln!("[npk] intel-nic: TX={} RX={}", tx, rx);
 }
 
-pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
+/// A frame's length, and whether the card verified its L4 checksum (igc;
+/// the e1000 path leaves it to the stack).
+pub fn recv(buf: &mut [u8; MTU]) -> Option<(usize, bool)> {
     if IS_IGC.load(Ordering::Acquire) { return igc::recv(buf); }
     let mut lock = DEVICE.lock();
     let dev = lock.as_mut()?;
@@ -502,7 +515,7 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     dev.rx_cur = (i + 1) % NUM_RX_DESC;
     dev.mmio.w32(dev.regs.rdt, old_cur as u32);
 
-    Some(len)
+    Some((len, false))
 }
 
 /// Read MAC address from EEPROM (for NICs that don't expose it via RAL/RAH).

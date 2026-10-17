@@ -36,7 +36,7 @@ pub fn arp_target_for(dst_ip: [u8; 4]) -> [u8; 4] {
     if src_masked == dst_masked { dst_ip } else { *GATEWAY.lock() }
 }
 
-pub fn handle_ipv4(data: &[u8]) {
+pub fn handle_ipv4(data: &[u8], csum_ok: bool) {
     if data.len() < HEADER_LEN { return; }
 
     let version = data[0] >> 4;
@@ -55,7 +55,7 @@ pub fn handle_ipv4(data: &[u8]) {
     // address first would drop its replies whenever that address moved (DHCP
     // renewal, carrier blink). The tap matches against its own mappings.
     // Cheap no-op when no VM is up.
-    if crate::microvm::devices::nat::tap_inbound(&data[..total_len]) {
+    if crate::microvm::devices::nat::tap_inbound(&data[..total_len], csum_ok) {
         return;
     }
 
@@ -82,7 +82,7 @@ pub fn send(dst_ip: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
 
 /// Send an IPv4 packet with custom TTL (for traceroute)
 pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> bool {
-    transmit(dst_ip, protocol, payload, ttl, false, Forwarded::default()).0
+    transmit(dst_ip, protocol, payload, ttl, Tx::Wait, Forwarded::default()).0
 }
 
 /// The header fields a forwarded packet keeps from its sender: TOS (with the
@@ -100,13 +100,32 @@ pub struct Forwarded {
 pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
     -> Result<bool, crate::virtio_net::NetError>
 {
-    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, true, head);
+    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, Tx::Try, head);
     sent.map(|()| resolved)
 }
 
+/// `try_send` for a TCP or UDP payload whose check field holds the
+/// pseudo-header seed (`CHECKSUM_PARTIAL`); the card completes it.
+pub fn try_send_partial(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
+    -> Result<bool, crate::virtio_net::NetError>
+{
+    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, Tx::TryPartial, head);
+    sent.map(|()| resolved)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Tx {
+    /// Wait briefly for ring space.
+    Wait,
+    /// Refuse a full ring at once.
+    Try,
+    /// As `Try`, with the L4 checksum left to the card.
+    TryPartial,
+}
+
 /// Build and hand over one packet. Returns whether the next hop's MAC was
-/// known, and the card's verdict. `try_` refuses a full ring at once.
-fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, try_: bool,
+/// known, and the card's verdict.
+fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
             head: Forwarded)
     -> (bool, Result<(), crate::virtio_net::NetError>)
 {
@@ -156,10 +175,11 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, try_: bool,
         }
     };
 
-    let sent = if try_ {
-        eth::try_send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt)
-    } else {
-        eth::send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt)
+    let sent = match tx {
+        Tx::Wait => eth::send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt),
+        Tx::Try => eth::try_send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt),
+        Tx::TryPartial => eth::try_send_frame_csum(&dst_mac, eth::ETHERTYPE_IPV4, &pkt,
+            HEADER_LEN, protocol == PROTO_TCP),
     };
     (resolved, sent)
 }

@@ -7,13 +7,14 @@ pub const ETHERTYPE_IPV4: u16 = 0x0800;
 pub const BROADCAST: [u8; 6] = [0xFF; 6];
 pub const HEADER_LEN: usize = 14;
 
-pub fn handle_frame(frame: &[u8]) {
+/// `csum_ok`: the card verified the frame's TCP/UDP checksum.
+pub fn handle_frame(frame: &[u8], csum_ok: bool) {
     if frame.len() < HEADER_LEN { return; }
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
 
     match ethertype {
         ETHERTYPE_ARP => super::arp::handle_arp(&frame[HEADER_LEN..]),
-        ETHERTYPE_IPV4 => super::ipv4::handle_ipv4(&frame[HEADER_LEN..]),
+        ETHERTYPE_IPV4 => super::ipv4::handle_ipv4(&frame[HEADER_LEN..], csum_ok),
         _ => {} // ignore unknown
     }
 }
@@ -26,6 +27,14 @@ pub fn send_frame(dst: &[u8; 6], ethertype: u16, payload: &[u8]) -> Result<(), c
 /// `send_frame` through `netdev::try_send`: a full ring is refused at once.
 pub fn try_send_frame(dst: &[u8; 6], ethertype: u16, payload: &[u8]) -> Result<(), crate::virtio_net::NetError> {
     netdev::try_send(&build_frame(dst, ethertype, payload))
+}
+
+/// `try_send_frame` for an IPv4 packet whose TCP/UDP check holds the
+/// pseudo-header seed; `l4_off` is the L4 header's offset in `payload`.
+pub fn try_send_frame_csum(dst: &[u8; 6], ethertype: u16, payload: &[u8], l4_off: usize,
+                           tcp: bool) -> Result<(), crate::virtio_net::NetError> {
+    let mut frame = build_frame(dst, ethertype, payload);
+    netdev::try_send_csum(&mut frame, HEADER_LEN + l4_off, tcp)
 }
 
 fn build_frame(dst: &[u8; 6], ethertype: u16, payload: &[u8]) -> alloc::vec::Vec<u8> {

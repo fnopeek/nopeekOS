@@ -4,6 +4,7 @@
 //! Layers: Ethernet → ARP → IPv4 → ICMP/UDP/TCP
 //! Every connection requires a capability token.
 
+pub mod csum;
 pub mod eth;
 pub mod fq_codel;
 pub mod arp;
@@ -80,10 +81,10 @@ pub fn poll() {
             .is_ok()
     {
         let mut buf = [0u8; netdev::MTU];
-        while let Some(len) = netdev::recv(&mut buf) {
+        while let Some((len, csum_ok)) = netdev::recv(&mut buf) {
             NIC_FRAMES.fetch_add(1, Ordering::Relaxed);
             if len >= 14 {
-                eth::handle_frame(&buf[..len]);
+                eth::handle_frame(&buf[..len], csum_ok);
             }
         }
         tcp::tick_connections();
@@ -132,9 +133,9 @@ pub fn poll_rx_only() {
             let b = rd();
             PROF_NETDEV.fetch_add(b.wrapping_sub(a), Relaxed);
             match r {
-                Some(len) => {
+                Some((len, csum_ok)) => {
                     NIC_FRAMES.fetch_add(1, Ordering::Relaxed);
-                    if len >= 14 { eth::handle_frame(&buf[..len]); }
+                    if len >= 14 { eth::handle_frame(&buf[..len], csum_ok); }
                     PROF_STACK.fetch_add(rd().wrapping_sub(b), Relaxed);
                     PROF_PKTS.fetch_add(1, Relaxed);
                 }
@@ -189,11 +190,11 @@ pub fn wasm_deliver_rx(frame: &[u8]) {
         let mut buf = [0u8; netdev::MTU];
         while let Some(len) = netdev::wasm_nic_poll_rx(&mut buf) {
             if len >= 14 {
-                eth::handle_frame(&buf[..len]);
+                eth::handle_frame(&buf[..len], false);
             }
         }
         netdev::note_rx_available(1);
-        eth::handle_frame(frame);
+        eth::handle_frame(frame, false);
         POLLING.store(false, Ordering::Release);
     } else {
         netdev::wasm_nic_submit_rx(frame);

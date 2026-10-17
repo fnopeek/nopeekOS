@@ -161,16 +161,31 @@ pub fn active() -> bool { ACTIVE.load(Ordering::Acquire) }
 /// guard page. 512 KiB is generous headroom.
 const WORKER_STACK_BYTES: usize = 512 * 1024;
 
-/// Park safety cap (ms). The real wake is the tap doorbell or a guest TX kick;
-/// this only bounds a quiet link so a held state still re-checks, and it is what
-/// paces the poll of a card that raises no interrupt.
-const PARK_SAFETY_MS: u64 = 2;
+/// Park safety caps (ms). The real wake is the tap doorbell or a guest TX
+/// kick; a cap only bounds a quiet link. A card that raises no interrupt is
+/// paced by it, and while host TCP runs timers the worker is their ticker
+/// (Core 0 leaves the drain to it while a VM runs).
+const PARK_POLLED_MS: u64 = 2;
+const PARK_TCP_TIMERS_MS: u64 = 10;
+const PARK_SAFETY_MS: u64 = 100;
 
-/// Halt-poll budget (µs) during an active transfer before falling to the HLT
-/// park — the KVM `halt_poll_ns` analogue. ~1 ms bridges the natural inter-burst
-/// gap so an ACK never waits long enough to trip the server's Tail-Loss-Probe
-/// (~2×SRTT). Only spent while `recently_active`, on the reserved worker core.
-const BUSY_POLL_US: u64 = 1000;
+/// Busy-poll window (µs) before the HLT park, adapted like KVM
+/// `grow_halt_poll_ns`/`shrink_halt_poll_ns`: a park that ended within the cap
+/// would have been caught by polling, so the window grows; a park longer than
+/// the cap means polling only burns the core, so it shrinks. A transfer whose
+/// RX→ACK gaps fit the cap keeps its ACKs prompt (no Tail-Loss-Probe), a slow
+/// stream polls nothing.
+const BUSY_POLL_MAX_US: u64 = 1000;
+const BUSY_POLL_GROW_START_US: u64 = 10;
+
+fn poll_grow(us: u64) -> u64 {
+    (us * 2).clamp(BUSY_POLL_GROW_START_US, BUSY_POLL_MAX_US)
+}
+
+fn poll_shrink(us: u64) -> u64 {
+    let v = us / 2;
+    if v < BUSY_POLL_GROW_START_US { 0 } else { v }
+}
 
 /// Spawn the data-plane fiber on `core` (load-aware, never Core 0). Idempotent
 /// within a VM session. `full` = the off-vCPU vhost path (RX+TX on this core).
@@ -569,6 +584,7 @@ fn worker_entry(_arg: u64) {
     crate::microvm::devices::net_backend::set_full_active(true);
     let mut last_tick = crate::interrupts::ticks();
     let mut trace = None;
+    let mut poll_us: u64 = 0;
     loop {
         trace_tick(&mut trace);
         if STOP.load(Ordering::Acquire) {
@@ -609,12 +625,12 @@ fn worker_entry(_arg: u64) {
         // granularity: a delayed ACK makes the server fire a Tail-Loss-Probe,
         // a spurious retransmit that confuses its cwnd/pacing and collapses
         // throughput. So busy-poll the lock-free has_work() condition for up
-        // to BUSY_POLL_US; the instant RX arrives or an ACK is queued, loop
-        // and service it. Between events this reads only two atomics +
-        // cpu_relax, never the device lock. Reserved worker core + gated on
-        // recently_active (idle → HLT at once, no core burn).
+        // to `poll_us`; the instant RX arrives or an ACK is queued, loop and
+        // service it. Between events this reads only two atomics + cpu_relax,
+        // never the device lock. Gated on recently_active (idle → HLT at
+        // once).
         let gm = crate::microvm::devices::guest_mem::active();
-        if crate::microvm::devices::nat::recently_active() {
+        if poll_us > 0 && crate::microvm::devices::nat::recently_active() {
             // Polling: the guest need not kick TX — this loop reads the ring.
             if let Some(gm) = gm {
                 phase(PH_NOTIFY_OFF_LOCK);
@@ -622,7 +638,7 @@ fn worker_entry(_arg: u64) {
             }
             let freq = crate::interrupts::tsc_freq();
             let deadline = crate::interrupts::rdtsc()
-                + BUSY_POLL_US.saturating_mul((freq / 1_000_000).max(1));
+                + poll_us.saturating_mul((freq / 1_000_000).max(1));
             let mut got = false;
             loop {
                 if polled { crate::net::poll_rx_only(); }
@@ -664,11 +680,28 @@ fn worker_entry(_arg: u64) {
             crate::microvm::devices::nat::set_worker_parked(false);
             continue;
         }
-        let deadline = crate::interrupts::rdtsc()
-            + PARK_SAFETY_MS.saturating_mul(crate::interrupts::tsc_freq() / 1000);
+        let cap_ms = if polled {
+            PARK_POLLED_MS
+        } else if crate::net::tcp::has_timers() {
+            PARK_TCP_TIMERS_MS
+        } else {
+            PARK_SAFETY_MS
+        };
+        let freq = crate::interrupts::tsc_freq();
+        let parked_at = crate::interrupts::rdtsc();
+        let deadline = parked_at + cap_ms.saturating_mul(freq / 1000);
         phase(PH_PARK);
         let woke = crate::smp::fiber::park_on_bell(deadline, has_work);
         crate::microvm::devices::nat::set_worker_parked(false);
+        // `kvm_vcpu_halt`'s window update: only a real wake says anything
+        // about the gap; a short one grows the window, a long one shrinks it.
+        let parked_us = crate::interrupts::rdtsc().wrapping_sub(parked_at)
+            / (freq / 1_000_000).max(1);
+        if !woke || parked_us > BUSY_POLL_MAX_US {
+            poll_us = poll_shrink(poll_us);
+        } else if poll_us < BUSY_POLL_MAX_US {
+            poll_us = poll_grow(poll_us);
+        }
         // It may have woken on another core (`fiber::steal_for`).
         crate::microvm::devices::net_backend::set_worker_core(
             crate::smp::per_core::current_core_id());

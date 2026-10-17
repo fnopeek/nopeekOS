@@ -1045,6 +1045,9 @@ impl VmContext {
         if self.event_pending() {
             return true;
         }
+        if !self.vcpu.lapic.host_poll_allowed() {
+            return false;
+        }
         let cid = crate::smp::per_core::current_core_id();
         let kick_gen = crate::smp::fiber::net_kick_gen(cid);
         let deadline = self.next_timer_deadline_tsc();

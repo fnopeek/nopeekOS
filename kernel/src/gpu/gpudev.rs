@@ -268,6 +268,12 @@ static WAKER: AtomicU32 = AtomicU32::new(NO_WAKER);
 const HALT_STEP_US: u64 = 500;
 /// Cores halted in `wait_seq`, one bit each; `complete` wakes them.
 static WAITING_CORES: AtomicU64 = AtomicU64::new(0);
+/// Fibers parked in `wait_seq_yield`, with the job each waits for;
+/// `complete` signals those whose job it finished.
+static PARKED: Mutex<Vec<(u32, Waker)>> = Mutex::new(Vec::new());
+/// Longest park before a parked fiber looks again on its own (the module
+/// went away, a deadline passed).
+const PARK_STEP_MS: u64 = 5;
 
 /// Failed jobs and their status, until the waiter reads it; a completed job
 /// that is not here succeeded. One nobody reads goes once every deadline
@@ -551,6 +557,7 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
             STALL_SEQ.load(Ordering::Relaxed), ms);
     }
     wake_waiters();
+    wake_parked(Some(seq));
     if let Some((phys, pages)) = free {
         crate::memory::deallocate_contiguous(phys, pages);
     }
@@ -581,6 +588,7 @@ pub fn module_gone(dev: PciAddr) {
         }
         st.owner = None;
         STALLED.store(false, Ordering::Release);
+        wake_parked(None);
         st.queue.clear();
         st.payloads.clear();
         let ids: Vec<u32> = st.bos.keys().copied().filter(|&id| id != 0).collect();
@@ -955,15 +963,52 @@ fn wait_seq(seq: u32, deadline: u64) -> i32 {
     }
 }
 
-/// `wait_seq`, yielding to the core's other fibers instead of halting: a
-/// guest's ccmd waits on the virtio-gpu worker, which may share its core
-/// with the module.
+/// Signal the parked fibers whose job is done (`Some(completed)`), or all
+/// of them (`None`: the module is gone).
+fn wake_parked(completed: Option<u32>) {
+    PARKED.lock().retain(|&(s, w)| {
+        if completed.is_some_and(|c| !seq_ge(c, s)) {
+            return true;
+        }
+        fiber::signal(w, fiber::SIG_GPU_DONE);
+        false
+    });
+}
+
+/// `wait_seq`, letting the core's other fibers run instead of halting it:
+/// a guest's ccmd waits on the virtio-gpu worker, which may share its core
+/// with the module. With nothing else ready the fiber parks until
+/// `complete` signals it (the ioctl sleeping on its fence), instead of
+/// spinning the core.
 fn wait_seq_yield(seq: u32, deadline: u64) -> i32 {
+    let waker = fiber::current_waker();
     loop {
         if let Some(s) = seq_done(seq, deadline) {
+            if let Some(w) = waker {
+                PARKED.lock().retain(|&(_, x)| x != w);
+            }
             return s;
         }
-        fiber::spin_or_yield();
+        if fiber::yield_ready() {
+            continue;
+        }
+        let Some(w) = waker else {
+            core::hint::spin_loop();
+            continue;
+        };
+        // Registered before the look, so a completion after it finds us.
+        {
+            let mut p = PARKED.lock();
+            if !p.iter().any(|&(_, x)| x == w) {
+                p.push((seq, w));
+            }
+        }
+        if seq_ge(COMPLETED.load(Ordering::SeqCst), seq) {
+            continue;
+        }
+        let step = crate::interrupts::rdtsc()
+            + PARK_STEP_MS * (crate::interrupts::tsc_freq() / 1000);
+        fiber::wait(fiber::SIG_GPU_DONE, deadline.min(step));
     }
 }
 
@@ -1375,12 +1420,7 @@ pub fn ccmd(client: u32, req: &[u8], deadline: u64) -> Answer {
     wake_module();
     // A desktop job the module holds late does not concern the guest: its
     // ccmd waits behind it, as the ioctl would.
-    let status = loop {
-        if let Some(s) = seq_done(seq, deadline) {
-            break s;
-        }
-        fiber::spin_or_yield();
-    };
+    let status = wait_seq_yield(seq, deadline);
     let reply = STATE.lock().replies.remove(&seq).flatten();
     match status {
         0 => Answer::Reply(reply.unwrap_or_default()),

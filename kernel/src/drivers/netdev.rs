@@ -454,6 +454,29 @@ pub fn try_send(frame: &[u8]) -> Result<(), NetError> {
     }
 }
 
+/// `try_send` for a frame whose TCP or UDP check holds the pseudo-header
+/// seed (`CHECKSUM_PARTIAL`): the card inserts the checksum, or, on a card
+/// that cannot, it is computed here first (`skb_checksum_help`).
+pub fn try_send_csum(frame: &mut [u8], l4_off: usize, tcp: bool) -> Result<(), NetError> {
+    if matches!(active(), Active::Intel) && active_link_up() && intel_nic::csum_capable() {
+        return intel_nic::try_send_csum(frame, super::igc::TxCsum { l4_off, tcp })
+            .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); });
+    }
+    checksum_help(frame, l4_off, if tcp { 16 } else { 6 });
+    try_send(frame)
+}
+
+/// Complete a partial checksum in software: the ones-complement sum from
+/// `l4_off` to the end, seed included, stored at `l4_off + csum_off`. A
+/// result of zero goes out as 0xFFFF (`CSUM_MANGLED_0`).
+pub fn checksum_help(frame: &mut [u8], l4_off: usize, csum_off: usize) {
+    let Some(l4) = frame.get_mut(l4_off..) else { return };
+    if l4.len() < csum_off + 2 { return; }
+    let c = !crate::net::csum::fold(crate::net::csum::sum(l4));
+    let c = if c == 0 { 0xFFFF } else { c };
+    l4[csum_off..csum_off + 2].copy_from_slice(&c.to_be_bytes());
+}
+
 /// Can the active card segment + checksum a TCPv4 GSO super-frame itself?
 pub fn tso_capable() -> bool {
     match active() {
@@ -490,14 +513,16 @@ pub fn tx_reject_stats() -> (u32, u32) {
 static TX_REJECT_NO_LINK: AtomicU32 = AtomicU32::new(0);
 static TX_ERR: AtomicU32 = AtomicU32::new(0);
 
-pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
+/// A frame's length, and whether the card verified its TCP/UDP checksum
+/// (`CHECKSUM_UNNECESSARY`).
+pub fn recv(buf: &mut [u8; MTU]) -> Option<(usize, bool)> {
     match active() {
         // Already counted at `wasm_nic_submit_rx` / `note_rx_available`.
-        Active::Wasm => WASM_NIC_RX.lock().pop(buf),
+        Active::Wasm => WASM_NIC_RX.lock().pop(buf).map(|n| (n, false)),
         Active::Intel => intel_nic::recv(buf).inspect(|_| { bump_rx_seq(); }),
-        Active::Rtl => rtl8153::recv(buf).inspect(|_| { bump_rx_seq(); }),
+        Active::Rtl => rtl8153::recv(buf).inspect(|_| { bump_rx_seq(); }).map(|n| (n, false)),
         // Sequence comes from the device's own used.idx — see `rx_seq`.
-        Active::Virtio | Active::None => virtio_net::recv(buf),
+        Active::Virtio | Active::None => virtio_net::recv(buf).map(|n| (n, false)),
     }
 }
 
