@@ -423,6 +423,16 @@ static PS2_ROUTED: AtomicBool = AtomicBool::new(false);
 /// An i8042 answered (status register not 0xFF).
 static PS2_PRESENT: AtomicBool = AtomicBool::new(false);
 
+/// The mouse's IRQ 12 is routed too.
+static AUX_ROUTED: AtomicBool = AtomicBool::new(false);
+
+/// Is a PS/2 mouse drained only by polling (no IRQ 12 tells of its bytes)?
+pub fn mouse_needs_poll() -> bool {
+    PS2_PRESENT.load(Ordering::Relaxed)
+        && PS2_MOUSE_ENABLED.load(Ordering::Relaxed)
+        && !AUX_ROUTED.load(Ordering::Relaxed)
+}
+
 /// Must Core 0 poll the i8042 because no interrupt tells it of a byte?
 pub fn needs_poll() -> bool {
     PS2_PRESENT.load(Ordering::Relaxed) && !PS2_ROUTED.load(Ordering::Relaxed)
@@ -477,6 +487,7 @@ pub fn enable_irq() {
         crate::ioapic::unmask(gsi);
         if let Some(g) = aux_gsi {
             crate::ioapic::unmask(g);
+            AUX_ROUTED.store(true, Ordering::Release);
         }
     });
     crate::kdebug!("[npk] ps2: IRQ 1 -> GSI {} ({}) on vector {}{} — keyboard by interrupt",

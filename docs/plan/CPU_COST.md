@@ -12,8 +12,8 @@ irq/timeout/polled/busy, Exits/s, vCPU-Phase), `set microvm_stats on`
 (`VT_DEVLOCK`), `npkbench_vm` im Gast-cmdline.
 
 Erledigt ist mit ✅ markiert: Paket A in **Kernel 0.622.0** (released);
-G9, G12, V5 halb, V9 und R in **Kernel 0.623.0 / gpu_intel_tgl 0.27.0**
-(lokal committet, **nicht released**).
+G12, V5 halb, V9 und R in **Kernel 0.623.0** (lokal committet, **nicht
+released**).
 
 ## N. Netz — die Karte kann es, wir lassen sie nicht
 
@@ -51,7 +51,7 @@ Engpass. Es sind Serialisierung und die CPU-Arbeit drumherum.
 | G6 | `virtio_gpu_pci.rs`, `shade/mod.rs`, `gpudev.rs:1460` | drei 60-Hz-Uhren, echte vblank kommt nie an (`flip`/`wait_vblank` Stubs), controlq 16 | Zaun je Ausgabe bis zur vblank, Queue 256 (RIGID 5.9 — **erst nach G4 neu versuchen**) | M |
 | G7 | `shade/mod.rs:692` | kein Pageflip, Software-Cursor wartet hinter bcs-Kopie | Ebenenflip, Cursor-Ebene | M / L |
 | G8 | `shade/mod.rs:489` | Core 0 wartet auf die Szene und hält `CONSOLE` (RIGID 5.1 halb) | Zaun aus der Ereignisschleife | M |
-| G9 ✅ | `virtio_ccmd.rs:337` | `set_domain` belegt → EAGAIN, Mesa/iHD wiederholen sofort (RIGID 1.9) | `i915_gem_object_wait` | S–M |
+| G9 | `virtio_ccmd.rs:337` | `set_domain` belegt → EAGAIN, Mesa/iHD wiederholen sofort (RIGID 1.9). **Versuch gpu_intel_tgl 0.27.0 zurückgenommen:** den Auftrag im Modul offen halten geht erst, wenn der Kernel Abschlüsse je `seq` führt — `COMPLETED` ist eine Hochwassermarke in Reihenfolge, und der nächste fertige Desktop-Job hätte den offenen ccmd als erledigt gemeldet. Dazu blockiert ein wartender ccmd die ganze controlq (ein Arbeiter) | `i915_gem_object_wait` | M |
 | G10 | `virtio_gpu_i915.rs:115` | GEM_CREATE nullt + clflusht je 4K synchron, VT-d je Seite | Seiten bei Bedarf, kohärent ohne Flush | S–M |
 | G11 | Modul `i915_request.rs:86` | jede Zaunabfrage ein Hostcall; keine Semaphore zwischen Engines | HWSP als Speicherlesen, `emit_semaphore_wait` | S–M / M |
 | G12 ✅ | `gpu_backend.rs:486` | GPU-Arbeiter weckte alle 2 ms; Zaunberichte des Moduls läuten die Glocke schon (`note_gpu_kick`), jetzt 2 ms nur bei offenem Zaun/gehaltenem FLUSH/vblank-Pause, sonst 100 ms | eventfd | S |

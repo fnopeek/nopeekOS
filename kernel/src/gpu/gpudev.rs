@@ -588,7 +588,6 @@ pub fn module_gone(dev: PciAddr) {
         }
         st.owner = None;
         STALLED.store(false, Ordering::Release);
-        wake_parked(None);
         st.queue.clear();
         st.payloads.clear();
         let ids: Vec<u32> = st.bos.keys().copied().filter(|&id| id != 0).collect();
@@ -630,6 +629,7 @@ pub fn module_gone(dev: PciAddr) {
     RINGS.lock().clear();
     WAKER.store(NO_WAKER, Ordering::Release);
     wake_waiters();
+    wake_parked(None);
     // Waiting submissions see the module gone and complete.
     crate::microvm::devices::gpu_backend::note_gpu_kick(0);
     for (phys, pages) in frees {

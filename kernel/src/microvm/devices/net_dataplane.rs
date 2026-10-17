@@ -630,7 +630,10 @@ fn worker_entry(_arg: u64) {
         // never the device lock. Gated on recently_active (idle → HLT at
         // once).
         let gm = crate::microvm::devices::guest_mem::active();
-        if poll_us > 0 && crate::microvm::devices::nat::recently_active() {
+        // A card without an RX interrupt rings no doorbell, so its parks end
+        // on the timeout and say nothing about the gap: it polls the cap.
+        let window = if polled { BUSY_POLL_MAX_US } else { poll_us };
+        if window > 0 && crate::microvm::devices::nat::recently_active() {
             // Polling: the guest need not kick TX — this loop reads the ring.
             if let Some(gm) = gm {
                 phase(PH_NOTIFY_OFF_LOCK);
@@ -638,7 +641,7 @@ fn worker_entry(_arg: u64) {
             }
             let freq = crate::interrupts::tsc_freq();
             let deadline = crate::interrupts::rdtsc()
-                + poll_us.saturating_mul((freq / 1_000_000).max(1));
+                + window.saturating_mul((freq / 1_000_000).max(1));
             let mut got = false;
             loop {
                 if polled { crate::net::poll_rx_only(); }

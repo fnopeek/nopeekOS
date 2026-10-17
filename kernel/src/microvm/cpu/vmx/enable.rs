@@ -1737,9 +1737,10 @@ impl VmContext {
             // First touch of demand-paged RAM: guest memory has its own
             // lock, and no device lies in RAM (`RamLayout`).
             48 => {
-                let gpa = vmcs::read_guest_phys_addr().unwrap_or(0);
                 let gm = self.shared.guest_mem;
-                if gm.layout().contains(gpa) && gm.ensure(gpa) {
+                if let Ok(gpa) = vmcs::read_guest_phys_addr()
+                    && gm.layout().contains(gpa) && gm.ensure(gpa)
+                {
                     crate::microvm::cpu::record_npf(crate::microvm::cpu::NPF_RAM);
                     last_outcome = Some(outcome);
                     continue;
