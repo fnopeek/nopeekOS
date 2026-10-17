@@ -65,6 +65,9 @@ pub struct PciBus {
     pub virtio_9p: Virtio9p,
     /// Slot 7 — virtio-sound: bridges guest audio → kernel audio mailbox.
     pub virtio_snd: VirtioSnd,
+    /// Slot 7 is offered; `set microvm_snd off` leaves the guest without a
+    /// sound card (decided at VM start).
+    snd: bool,
     /// Slot 8 — virtio-console: the control channel and the window port.
     pub virtio_console: VirtioConsole,
     /// Slot 9 — virtio-balloon: the guest gives freed pages back.
@@ -80,6 +83,7 @@ impl PciBus {
             virtio_blk_sqfs: VirtioBlk::new_sqfs(),
             virtio_9p: Virtio9p::new(),
             virtio_snd: VirtioSnd::new(),
+            snd: !crate::config::get("microvm_snd").is_some_and(|v| v.trim().eq_ignore_ascii_case("off")),
             virtio_console: VirtioConsole::new(),
             virtio_balloon: VirtioBalloon::new(),
         }
@@ -159,7 +163,7 @@ fn read_pci_dword(bus: &PciBus, bus_num: u8, slot: u8, func: u8, reg: u8) -> u32
         4 => bus.virtio_input.pci_read_dword(reg),
         5 => bus.virtio_blk_sqfs.pci_read_dword(reg),
         6 => bus.virtio_9p.pci_read_dword(reg),
-        7 => bus.virtio_snd.pci_read_dword(reg),
+        7 if bus.snd => bus.virtio_snd.pci_read_dword(reg),
         8 => bus.virtio_console.pci_read_dword(reg),
         9 => bus.virtio_balloon.pci_read_dword(reg),
         _ => NO_DEVICE,
@@ -177,7 +181,7 @@ fn write_pci_dword(bus: &mut PciBus, bus_num: u8, slot: u8, func: u8, reg: u8, v
         4 => bus.virtio_input.pci_write_dword(reg, val),
         5 => bus.virtio_blk_sqfs.pci_write_dword(reg, val),
         6 => bus.virtio_9p.pci_write_dword(reg, val),
-        7 => bus.virtio_snd.pci_write_dword(reg, val),
+        7 if bus.snd => bus.virtio_snd.pci_write_dword(reg, val),
         8 => bus.virtio_console.pci_write_dword(reg, val),
         9 => bus.virtio_balloon.pci_write_dword(reg, val),
         _ => {}
