@@ -400,13 +400,6 @@ impl FpuArea {
 // the exit: every component the host uses is then saved and replaced,
 // whatever subset the guest enabled.
 
-/// Guest-RAM size for the next VM, chosen at `vm_open` from live host
-/// free memory.
-///
-/// Policy: take host free RAM minus a host reserve, clamp to
-/// [`MIN`, cap], floor to the 2-MB EPT/NPT leaf granularity. With enough
-/// free memory this is exactly the cap; it only shrinks on a RAM-starved
-/// host instead of failing `allocate_contiguous`.
 /// The guest's physical address width: the host's, which CPUID leaf
 /// 0x8000_0008 passes through.
 pub fn guest_phys_bits() -> u32 {
@@ -415,11 +408,18 @@ pub fn guest_phys_bits() -> u32 {
     (eax & 0xff).clamp(36, 52)
 }
 
+/// Guest-RAM size for the next VM, chosen at `vm_open` from live host
+/// free memory.
+///
+/// Policy: take host free RAM minus a host reserve, clamp to
+/// [`MIN`, cap], floor to the 2-MB EPT/NPT leaf granularity. The cap is
+/// half the host's RAM (WSL2's default): RAM is backed on first touch and
+/// free page reporting returns what the guest frees, but its page cache
+/// keeps what it read, so a guest may come to hold all it was given.
 pub fn choose_guest_ram_bytes() -> u64 {
     const RESERVE_MB: usize = 256;
     const MIN_MB: usize = 256;
-    let cap_mb =
-        (crate::microvm::devices::guest_mem::GUEST_RAM_BYTES / (1024 * 1024)) as usize;
+    let cap_mb = (crate::mm::memory::usable_bytes() / 2 / (1024 * 1024)) as usize;
 
     let (_free_frames, free_mb) = crate::mm::memory::stats();
     let mb = free_mb

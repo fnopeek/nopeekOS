@@ -150,15 +150,17 @@ use crate::microvm::devices::guest_mem::GuestMem;
 // Standard PC layout for the e820 we present to Linux:
 //   [0x000000, 0x09F000) RAM (640 KB lower memory)
 //   [0x09F000, 0x100000) RESERVED (BIOS area + EBDA)
-//   [0x100000, mem.len()) RAM ("extended memory")
+//   [0x100000, low end) RAM ("extended memory")
+//   [4 GiB, high end) RAM, when the guest has more than fits below
+//   the MMIO hole (`RamLayout`)
 //
 // Linux's early-boot direct-map setup walks the e820 and builds the
 // kernel's identity/direct mappings. A single contiguous
 // `[0, RAM_TOTAL) RAM` entry omits the BIOS hole, which on some kernel
 // paths trips memory-layout assumptions and leaves the direct-map L4
 // entry empty for low-RAM regions. Splitting per PC convention works
-// around it. The extended-memory size is `mem.len()` — the guest-RAM
-// size chosen at VM open.
+// around it. The sizes come from `mem.layout()` — the guest-RAM size
+// chosen at VM open.
 
 /// Linux loadflags bits we need.
 const LOADFLAG_LOADED_HIGH: u8 = 1 << 0;
@@ -220,11 +222,12 @@ pub fn load_into_guest_ram(
     if setup_size + prot_size > bzimage.len() {
         return Err("bzImage truncated (setup + kernel exceeds bytes)");
     }
-    if KERNEL_GUEST_PHYS + (prot_size as u64) > mem.len() {
+    let low = mem.layout().low;
+    if KERNEL_GUEST_PHYS + (prot_size as u64) > low {
         return Err("kernel image overflows guest RAM window");
     }
     if let Some(ir) = initramfs {
-        if INITRAMFS_GUEST_PHYS + ir.len() as u64 > mem.len() {
+        if INITRAMFS_GUEST_PHYS + ir.len() as u64 > low {
             return Err("initramfs overflows guest RAM window");
         }
     }
@@ -275,15 +278,22 @@ pub fn load_into_guest_ram(
     bp[0x218..0x21C].copy_from_slice(&ramdisk_image.to_le_bytes());
     bp[0x21C..0x220].copy_from_slice(&ramdisk_size.to_le_bytes());
 
-    // Three e820 entries — standard PC layout.
-    bp[OFF_E820_ENTRIES] = 3;
+    // Standard PC layout, and the RAM above the MMIO hole as a fourth entry.
+    let layout = mem.layout();
     let entries = [
         E820Entry { addr: 0,         size: 0x09_F000,                 typ: E820_TYPE_RAM },
         E820Entry { addr: 0x09_F000, size: 0x10_0000 - 0x09_F000,     typ: E820_TYPE_RESERVED },
-        E820Entry { addr: 0x10_0000, size: mem.len() - 0x10_0000, typ: E820_TYPE_RAM },
+        E820Entry { addr: 0x10_0000, size: layout.low - 0x10_0000, typ: E820_TYPE_RAM },
+        E820Entry {
+            addr: crate::microvm::devices::guest_mem::HIGH_RAM_BASE,
+            size: layout.high(),
+            typ: E820_TYPE_RAM,
+        },
     ];
+    let count = if layout.high() == 0 { 3 } else { 4 };
+    bp[OFF_E820_ENTRIES] = count as u8;
     let entry_size = core::mem::size_of::<E820Entry>();
-    for (i, entry) in entries.iter().enumerate() {
+    for (i, entry) in entries[..count].iter().enumerate() {
         let start = OFF_E820_TABLE + i * entry_size;
         let entry_bytes: &[u8] = unsafe {
             core::slice::from_raw_parts(

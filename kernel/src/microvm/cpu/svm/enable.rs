@@ -709,7 +709,7 @@ fn npf_kind(sh: &VmDevices, guest_len: u64, gpa: u64) -> usize {
     else if (crate::microvm::devices::ioapic::IOAPIC_BASE
         ..crate::microvm::devices::ioapic::IOAPIC_BASE + crate::microvm::devices::ioapic::IOAPIC_SIZE)
         .contains(&gpa) { c::NPF_IOAPIC }
-    else if gpa < guest_len { c::NPF_RAM }
+    else if crate::microvm::devices::guest_mem::RamLayout::new(guest_len).contains(gpa) { c::NPF_RAM }
     else { c::NPF_OTHER }
 }
 
@@ -834,8 +834,9 @@ impl VmContext {
         // per-core on the first VMRUN (`ensure_core_host_state`).
         enable_efer_svme()?;
 
-        crate::microvm::devices::hostmem::configure();
         let guest_bytes = crate::microvm::cpu::choose_guest_ram_bytes();
+        crate::microvm::devices::hostmem::configure(
+            crate::microvm::devices::guest_mem::RamLayout::new(guest_bytes).top());
         let (boot_base, npt_root, guest_raw_base) = alloc_guest_ram_and_npt(guest_bytes)?;
         let gm = GuestMem::new(
             boot_base,

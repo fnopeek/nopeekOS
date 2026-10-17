@@ -6,14 +6,16 @@
 //! addresses. The low boot window is one contiguous block of 2-MB leaves;
 //! the rest of guest RAM is demand-paged on EPT violation, a 2-MB leaf per
 //! first-touched block where the host has an aligned 2-MB block free and
-//! 4-KB pages otherwise (as `svm::npt`). The high
-//! MMIO range [3 GiB, 4 GiB) has its own PD (scratch page, trapped
-//! LAPIC/IOAPIC pages).
+//! 4-KB pages otherwise (as `svm::npt`). RAM lies as `RamLayout` says:
+//! below 3 GiB and from 4 GiB on, one PD per GiB. The MMIO range
+//! [3 GiB, 4 GiB) has its own PD (scratch page, trapped LAPIC/IOAPIC
+//! pages).
 //!
 //! Reference: Intel SDM Vol. 3C §28.2 (EPT Mechanism), Vol. 3D
 //! Appendix A.10 (VPID and EPT Capabilities).
 
 use crate::mm::memory;
+use crate::microvm::devices::guest_mem::RamLayout;
 
 // EPT entry permission + attribute bits.
 const EPT_R: u64 = 1 << 0;
@@ -31,12 +33,8 @@ const EPTP_WALK_LENGTH_4: u64 = 3 << 3; // 4 levels = walk length 3
 
 const TWO_MB: u64 = 2 * 1024 * 1024;
 const ONE_GB: u64 = 1024 * 1024 * 1024;
-/// Maximum guest RAM we can map: PDPT slots [0, 1, 2] each cover 1 GiB
-/// of guest physical, PDPT[3] is reserved for the MMIO scratch range
-/// (IOAPIC/HPET/LAPIC). 3 GiB hard cap; bumping past that needs either
-/// rearranging the MMIO hole or growing the EPT to a second PDPT.
-const MAX_GUEST_BYTES: u64 = 3 * ONE_GB;
-// Canonical size lives in `guest_mem`; this is its EPT-window twin.
+/// PDPT slot of the MMIO hole [3 GiB, 4 GiB).
+const MMIO_PDPT_SLOT: usize = 3;
 /// Slack frames `boot_frames_for` adds so `allocate_contiguous` can be
 /// rounded up to a 2-MB boundary for the boot-window 2-MB leaves.
 const GUEST_RAM_ALIGN_SLACK: usize = 511;
@@ -88,8 +86,8 @@ pub fn boot_frames_for(guest_bytes: u64) -> usize {
 /// Build the EPT. Maps:
 ///   - guest-physical [0, boot window) → host-physical
 ///     [boot_base, +boot window) via 2-MB leaf entries;
-///   - [boot window, guest_bytes) not present, faulted in on demand
-///     (`demand_fault_in`);
+///   - the rest of the RAM of `RamLayout::new(guest_bytes)` not present,
+///     faulted in on demand (`demand_fault_in`);
 ///   - guest-physical [0xFEC00000, 0xFF000000) (IOAPIC, HPET, LAPIC) →
 ///     a 4 KB scratch page via PT-level mapping, except the trapped
 ///     IOAPIC page and (with LAPIC emulation) the LAPIC page, which are
@@ -104,13 +102,14 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
     if guest_bytes == 0 || guest_bytes & (TWO_MB - 1) != 0 {
         return Err("EPT: guest_bytes must be a non-zero multiple of 2 MB");
     }
-    if guest_bytes > MAX_GUEST_BYTES {
-        return Err("EPT: guest_bytes > 3 GiB (PDPT[3] reserved for MMIO)");
+    let layout = RamLayout::new(guest_bytes);
+    if crate::microvm::devices::hostmem::pdpt_slots().start < layout.top().div_ceil(ONE_GB) as usize {
+        return Err("EPT: guest RAM overlaps the host-visible window");
     }
     let boot_leaves = boot_window_bytes(guest_bytes) / TWO_MB;
-    // One PD covers 1 GiB (512 × 2-MB leaves). Allocate as many PDs
-    // as the guest needs, chained off PDPT[0..num_pds).
-    let num_pds = ((guest_bytes + ONE_GB - 1) / ONE_GB) as usize;
+    // One PD covers 1 GiB (512 × 2-MB leaves), one per RAM slot of the PDPT.
+    let slots: alloc::vec::Vec<usize> = layout.pdpt_slots().collect();
+    let num_pds = slots.len();
 
     // Trap the guest LAPIC page (0xFEE00000) into the emulator (vmx::lapic)
     // by leaving it EPT-not-present. Only when LAPIC emulation is on;
@@ -121,7 +120,7 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
     // Fixed tables: PML4, PDPT, PD_HIGH, PT_DUMMY, the scratch page, the
     // guest-RAM PDs and (trapping) PT_LAPIC. All or none.
     let nfixed = 5 + num_pds + lapic_trap as usize;
-    let mut fixed = [0u64; 9];
+    let mut fixed = alloc::vec![0u64; nfixed];
     for i in 0..nfixed {
         match memory::allocate_frame() {
             Some(f) => fixed[i] = f,
@@ -145,12 +144,12 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
         pml4.add(0).write_volatile(pdpt_phys | EPT_RWX);
 
         let pdpt = pdpt_phys as *mut u64;
-        // PDPT[0..num_pds] → guest-RAM PDs (each covers 1 GiB).
-        for p in 0..num_pds {
-            pdpt.add(p).write_volatile(pd_physs[p] | EPT_RWX);
+        // The RAM slots → guest-RAM PDs (each covers 1 GiB).
+        for (i, &p) in slots.iter().enumerate() {
+            pdpt.add(p).write_volatile(pd_physs[i] | EPT_RWX);
         }
         // PDPT[3] → PD_HIGH (MMIO scratch lives in [3 GiB, 4 GiB)).
-        pdpt.add(3).write_volatile(pd_high_phys | EPT_RWX);
+        pdpt.add(MMIO_PDPT_SLOT).write_volatile(pd_high_phys | EPT_RWX);
 
         // PD_HIGH[502] → PT_DUMMY (covers [0xFEC00000, 0xFEE00000):
         // IOAPIC + HPET, scratch). PD_HIGH[503] covers [0xFEE00000,
@@ -191,8 +190,8 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
         // not-present -> present change, which needs no INVEPT, so a present
         // entry is never replaced.
         const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
-        for p in 0..num_pds {
-            let pd = pd_physs[p] as *mut u64;
+        for (i, &p) in slots.iter().enumerate() {
+            let pd = pd_physs[i] as *mut u64;
             let base_leaf = (p as u64) * LEAVES_PER_PD;
             let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(boot_leaves);
             for leaf in base_leaf..end_leaf {
@@ -217,19 +216,16 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
 /// spare. Mirrors `svm::npt::demand_fault_in`.
 pub fn demand_fault_in(pml4_phys: u64, gpa: u64, guest_bytes: u64) -> Option<u64> {
     // The demand PDEs and those past the end of guest RAM are both empty:
-    // only the bounds tell them apart.
-    if gpa < boot_window_bytes(guest_bytes) || gpa >= guest_bytes {
+    // only the layout tells them apart.
+    if gpa < boot_window_bytes(guest_bytes) || !RamLayout::new(guest_bytes).contains(gpa) {
         return None;
     }
     // SAFETY: our own freshly-built EPT, identity-mapped tables.
     unsafe {
         let pml4 = pml4_phys as *const u64;
         let pdpt = (pml4.read_volatile() & EPT_ADDR_MASK) as *const u64;
-        // PDPT[0..3] holds the guest-RAM PDs (1 GiB each); pick by gpa.
+        // The guest-RAM PDs (1 GiB each); `gpa` is RAM, so not the hole.
         let pdpt_idx = (gpa / ONE_GB) as usize;
-        if pdpt_idx >= 3 {
-            return None; // PDPT[3] is the MMIO hole, never demand-faulted
-        }
         let pdpt_entry = pdpt.add(pdpt_idx).read_volatile();
         if pdpt_entry == 0 {
             return None; // PD not present (gpa beyond advertised guest_bytes)
@@ -302,8 +298,9 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64, guest_bytes: u64) -> Option<u64
 pub fn demand_reclaim(pml4_phys: u64, gpa: u64, len: u64, guest_bytes: u64, pinned: &dyn Fn(u64) -> bool,
                       freed: &mut alloc::vec::Vec<u64>) -> u64 {
     use core::sync::atomic::Ordering::Relaxed;
+    let layout = RamLayout::new(guest_bytes);
     let start = gpa.max(boot_window_bytes(guest_bytes)).next_multiple_of(4096);
-    let end = gpa.saturating_add(len).min(guest_bytes) & !0xFFF;
+    let end = gpa.saturating_add(len).min(layout.top()) & !0xFFF;
     let mut taken = 0;
     let mut block = start & !(TWO_MB - 1);
     // SAFETY: our own EPT, identity-mapped tables; the caller holds the
@@ -313,10 +310,11 @@ pub fn demand_reclaim(pml4_phys: u64, gpa: u64, len: u64, guest_bytes: u64, pinn
         let pdpt = (pml4.read_volatile() & EPT_ADDR_MASK) as *const u64;
         while block < end {
             let (lo, hi) = (start.max(block), end.min(block + TWO_MB));
-            let pdpt_idx = (block / ONE_GB) as usize;
-            if pdpt_idx >= 3 {
-                break;
+            if !layout.contains(block) {
+                block += TWO_MB;
+                continue;
             }
+            let pdpt_idx = (block / ONE_GB) as usize;
             let pdpt_entry = pdpt.add(pdpt_idx).read_volatile();
             let pd = (pdpt_entry & EPT_ADDR_MASK) as *mut u64;
             let slot = if pdpt_entry == 0 { None } else { Some(pd.add(((block % ONE_GB) / TWO_MB) as usize)) };
@@ -471,8 +469,6 @@ unsafe fn release_window(pdpt: *const u64) {
 /// block is freed separately by the caller (it owns `boot_raw_base`).
 pub fn release(pml4_phys: u64, guest_bytes: u64) {
     let boot_leaves = boot_window_bytes(guest_bytes) / TWO_MB;
-    let guest_leaves = guest_bytes / TWO_MB;
-    let num_pds = ((guest_bytes + ONE_GB - 1) / ONE_GB) as usize;
     const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
     // SAFETY: our own EPT; nothing else references these frames after
     // VMXOFF + window teardown.
@@ -480,16 +476,15 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
         let pml4 = pml4_phys as *const u64;
         let pdpt_phys = pml4.read_volatile() & EPT_ADDR_MASK;
         let pdpt = pdpt_phys as *const u64;
-        // Walk PDPT[0..num_pds] and free each guest-RAM PD + its demand
-        // PTs + demand frames.
-        for p in 0..num_pds {
+        // Free each guest-RAM PD + its demand PTs + demand frames. A RAM
+        // PD maps nothing but RAM, so every present entry is the guest's.
+        for p in RamLayout::new(guest_bytes).pdpt_slots() {
             let pdpt_entry = pdpt.add(p).read_volatile();
             if pdpt_entry == 0 { continue; }
             let pd_phys = pdpt_entry & EPT_ADDR_MASK;
             let pd = pd_phys as *const u64;
             let base_leaf = (p as u64) * LEAVES_PER_PD;
-            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(guest_leaves);
-            for leaf in base_leaf..end_leaf {
+            for leaf in base_leaf..base_leaf + LEAVES_PER_PD {
                 if leaf < boot_leaves { continue; }
                 let local = (leaf - base_leaf) as usize;
                 let pde = pd.add(local).read_volatile();
@@ -511,7 +506,7 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
             memory::deallocate_frame(pd_phys);
         }
         release_window(pdpt);
-        let pd_high_phys = pdpt.add(3).read_volatile() & EPT_ADDR_MASK;
+        let pd_high_phys = pdpt.add(MMIO_PDPT_SLOT).read_volatile() & EPT_ADDR_MASK;
         if pd_high_phys != 0 {
             let pd_high = pd_high_phys as *const u64;
             let pt_dummy_phys = pd_high.add(502).read_volatile() & EPT_ADDR_MASK;

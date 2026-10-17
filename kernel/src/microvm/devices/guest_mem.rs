@@ -5,12 +5,11 @@
 //! here, so callers must not assume linearity or that a multi-page
 //! buffer is contiguous in host memory; use the accessors.
 //!
-//! All accessors bounds-check against `len` (the advertised guest RAM
-//! size) so a buggy/malicious guest descriptor can't drag us into
-//! kernel memory.
+//! All accessors bounds-check against the RAM layout (`RamLayout`) so a
+//! buggy/malicious guest descriptor can't drag us into kernel memory.
 //!
-//! `GUEST_RAM_BYTES` is the canonical guest-RAM size; `guest_fetch`,
-//! `vmx::ept`, svm `npt` and `bzimage` reference it rather than keeping
+//! `RamLayout` is the one description of where guest RAM lies; `vmx::ept`,
+//! svm `npt`, `bzimage` and `hostmem` derive from it rather than keeping
 //! copies, since a stale copy silently turns every virtio DMA / insn
 //! fetch above its bound into a no-op.
 
@@ -81,12 +80,62 @@ pub fn clear_active() {
 /// net hot path reuses. 8 KiB per VM.
 const TLB_SIZE: usize = 1024;
 
-/// Canonical guest-RAM size: 2 GiB. Browsers (Firefox/LibreWolf with
-/// e10s + content sandboxing) routinely reach 1 GiB resident with a
-/// couple of moderate tabs. With demand paging on, only the 256 MiB
-/// boot window is committed contiguously at vm_open; the rest is
-/// faulted in 4 KiB at a time as the guest touches it.
-pub const GUEST_RAM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const ONE_GB: u64 = 1 << 30;
+
+/// Guest RAM below the MMIO hole ends here at most; [3 GiB, 4 GiB) holds
+/// the virtio BARs, IOAPIC, HPET and LAPIC.
+pub const LOW_RAM_MAX: u64 = 3 * ONE_GB;
+/// The rest of a larger guest starts here (QEMU's above-4G RAM).
+pub const HIGH_RAM_BASE: u64 = 4 * ONE_GB;
+
+/// Where a guest of `total` bytes of RAM has it: `[0, low)` and, past the
+/// hole, `[HIGH_RAM_BASE, high_end)` — QEMU's below_4g/above_4g split.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RamLayout {
+    pub low: u64,
+    pub high_end: u64,
+}
+
+impl RamLayout {
+    pub fn new(total: u64) -> Self {
+        let low = total.min(LOW_RAM_MAX);
+        Self { low, high_end: HIGH_RAM_BASE + (total - low) }
+    }
+
+    /// RAM above the hole, in bytes.
+    pub fn high(&self) -> u64 {
+        self.high_end - HIGH_RAM_BASE
+    }
+
+    pub fn total(&self) -> u64 {
+        self.low + self.high()
+    }
+
+    /// One past the highest RAM address.
+    pub fn top(&self) -> u64 {
+        if self.high() == 0 { self.low } else { self.high_end }
+    }
+
+    pub fn contains(&self, gpa: u64) -> bool {
+        gpa < self.low || (HIGH_RAM_BASE..self.high_end).contains(&gpa)
+    }
+
+    /// `[gpa, gpa + n)` lies in one RAM region; a range across the hole
+    /// is no buffer of the guest.
+    pub fn contains_range(&self, gpa: u64, n: u64) -> bool {
+        match gpa.checked_add(n) {
+            Some(end) => end <= self.low || (gpa >= HIGH_RAM_BASE && end <= self.high_end),
+            None => false,
+        }
+    }
+
+    /// The 1-GiB PDPT slots that hold RAM, low ones first.
+    pub fn pdpt_slots(&self) -> impl Iterator<Item = usize> {
+        let low = self.low.div_ceil(ONE_GB) as usize;
+        let first_high = (HIGH_RAM_BASE / ONE_GB) as usize;
+        (0..low).chain(first_high..first_high + self.high().div_ceil(ONE_GB) as usize)
+    }
+}
 
 /// Demand-paging master switch. `false` → the whole guest is one
 /// contiguous block (boot window = full guest, no demand PTs, no
@@ -146,6 +195,7 @@ pub struct GuestMem {
     boot_base: u64,
     boot_bytes: u64,
     len: u64,
+    layout: RamLayout,
     table_root: u64,
     sl: SecondLevel,
     /// Software TLB for the demand region: caches the page-table walk
@@ -172,7 +222,7 @@ impl GuestMem {
         sl: SecondLevel,
     ) -> Self {
         Self {
-            boot_base, boot_bytes, len, table_root, sl,
+            boot_base, boot_bytes, len, layout: RamLayout::new(len), table_root, sl,
             tlb: [const { AtomicU64::new(0) }; TLB_SIZE],
             epoch: AtomicU64::new(0),
             accessing: [const { core::sync::atomic::AtomicU32::new(0) }; 2],
@@ -256,12 +306,18 @@ impl GuestMem {
         self.len
     }
 
+    /// Where that RAM lies in guest-physical space.
+    #[inline]
+    pub fn layout(&self) -> RamLayout {
+        self.layout
+    }
+
     /// Host phys of the 4 KB page containing `page` (must be
     /// page-aligned). Boot window → linear; demand region → walk +
     /// fault-in. `None` only if `page` is outside the window.
     #[inline]
     fn page_host(&self, page: u64) -> Option<u64> {
-        if page >= self.len {
+        if !self.layout.contains(page) {
             return None;
         }
         if page < self.boot_bytes {
@@ -382,7 +438,7 @@ impl GuestMem {
     /// Atomic exchange of one guest byte, against the guest's own atomics on
     /// it from another vCPU.
     pub fn xchg_u8(&self, gpa: u64, val: u8) -> Option<u8> {
-        if gpa >= self.len {
+        if !self.layout.contains(gpa) {
             return None;
         }
         let e = self.enter();
@@ -423,7 +479,7 @@ impl GuestMem {
     /// Per-page scatter copy. The boot window is one contiguous span
     /// (fast memcpy); the demand region is walked page-by-page (each
     /// 4 KB may be a different scattered host frame, faulted in on
-    /// first touch). `false` iff `[gpa, gpa+len)` leaves the window.
+    /// first touch). `false` iff `[gpa, gpa+len)` is not within one RAM region.
     pub fn read_bytes(&self, gpa: u64, dst: &mut [u8]) -> bool {
         let total = dst.len() as u64;
         if let Some(h) = self.contig(gpa, total) {
@@ -432,7 +488,7 @@ impl GuestMem {
             unsafe { core::ptr::copy_nonoverlapping(h as *const u8, dst.as_mut_ptr(), dst.len()) };
             return true;
         }
-        if !gpa.checked_add(total).is_some_and(|end| end <= self.len) {
+        if !self.layout.contains_range(gpa, total) {
             return false;
         }
         let e = self.enter();
@@ -471,7 +527,7 @@ impl GuestMem {
             unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), h as *mut u8, src.len()) };
             return true;
         }
-        if !gpa.checked_add(total).is_some_and(|end| end <= self.len) {
+        if !self.layout.contains_range(gpa, total) {
             return false;
         }
         let e = self.enter();
@@ -500,5 +556,28 @@ impl GuestMem {
         }
         self.leave(e);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_splits_at_the_hole() {
+        let small = RamLayout::new(2 * ONE_GB);
+        assert_eq!((small.low, small.high(), small.top()), (2 * ONE_GB, 0, 2 * ONE_GB));
+        assert!(!small.contains(HIGH_RAM_BASE));
+        assert_eq!(small.pdpt_slots().collect::<alloc::vec::Vec<_>>(), [0, 1]);
+
+        let big = RamLayout::new(8 * ONE_GB);
+        assert_eq!((big.low, big.high(), big.top()), (3 * ONE_GB, 5 * ONE_GB, 9 * ONE_GB));
+        assert!(big.contains(3 * ONE_GB - 1) && !big.contains(3 * ONE_GB));
+        assert!(!big.contains(4 * ONE_GB - 1) && big.contains(4 * ONE_GB));
+        assert!(!big.contains(9 * ONE_GB));
+        assert!(!big.contains_range(3 * ONE_GB - 4096, 8192));
+        assert!(big.contains_range(4 * ONE_GB, 4096));
+        assert_eq!(big.pdpt_slots().collect::<alloc::vec::Vec<_>>(), [0, 1, 2, 4, 5, 6, 7, 8]);
+        assert_eq!(big.total(), 8 * ONE_GB);
     }
 }

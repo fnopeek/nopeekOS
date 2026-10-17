@@ -70,13 +70,14 @@ Engpass. Es sind Serialisierung und die CPU-Arbeit drumherum.
 
 ## R. Gast-RAM
 
-Die 2 GB sind eine Konstante (`guest_mem.rs:89`); Speicher wird in
-2-MB-Blöcken bei Bedarf belegt und per Balloon-Reporting zurückgegeben —
-eine größere Zahl kostet nichts, bis der Gast sie benutzt.
+✅ **Kernel 0.623.0 (nicht released):** Speicher wird in 2-MB-Blöcken bei
+Bedarf belegt und per Balloon-Reporting zurückgegeben, eine größere Zahl
+kostet also nichts, bis der Gast sie benutzt. Die feste 2-GB-Konstante ist
+weg: Deckel = halber Wirts-RAM (WSL2-Vorgabe; der Seitencache des Gastes
+behält, was er gelesen hat), NUC also 8 GB. `RamLayout` teilt wie QEMU:
+`[0, 3 GiB)` und ab 4 GiB; e820 mit vierten Eintrag, EPT/NPT je RAM-Slot ein
+PD, Bereichsprüfung in `GuestMem`, das GPU-Fenster liegt über dem RAM-Ende
+(`hostmem::configure`, pci-hole64).
 
-- **≤ 3 GB:** nur die Konstante (S).
-- **> 3 GB** (RIGID 7.1): RAM geteilt unter 3 GB und ab 4 GB wie QEMU;
-  e820 mit vier Einträgen, PDPT[4..] in EPT/NPT, Bereichsprüfung in
-  `GuestMem`, `MAX_GUEST_BYTES` und die `fixed[9]`-Felder weg, BAR2 über das
-  RAM-Ende (`hostmem::configure`). Dazu Scudo im Gast
-  (`release_to_os_interval_ms=-1`) und `MAX_BLOB_TOTAL`/`MAX_GEM_BYTES`.
+Offen daneben: Scudo im Gast (`release_to_os_interval_ms=-1`),
+`MAX_BLOB_TOTAL` 2 GB, `MAX_GEM_BYTES` 4 GB, kein `DEFLATE_ON_OOM`.

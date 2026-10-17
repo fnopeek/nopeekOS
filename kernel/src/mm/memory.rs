@@ -188,6 +188,7 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
     }
 
     let free = alloc.free_count;
+    USABLE_FRAMES.store(free, core::sync::atomic::Ordering::Relaxed);
     let free_mb = free * PAGE_SIZE / (1024 * 1024);
     let total_mb = alloc.memory_top * PAGE_SIZE / (1024 * 1024);
 
@@ -300,6 +301,15 @@ pub fn firmware_ram_in(base: u64, length: u64) -> bool {
 
 pub fn reserve_region(base: u64, length: u64) {
     ALLOCATOR.lock().mark_region_used(base, length);
+}
+
+/// Frames free when the allocator came up: the RAM this machine has for
+/// everything after the kernel image.
+static USABLE_FRAMES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// RAM the allocator manages, in bytes (`USABLE_FRAMES`).
+pub fn usable_bytes() -> u64 {
+    (USABLE_FRAMES.load(core::sync::atomic::Ordering::Relaxed) * PAGE_SIZE) as u64
 }
 
 /// The top of physical memory: one past the highest frame there is.

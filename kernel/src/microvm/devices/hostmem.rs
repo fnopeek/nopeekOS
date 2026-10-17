@@ -3,9 +3,9 @@
 //! into guest-physical space, so the guest maps a GPU buffer without a copy
 //! (`RESOURCE_MAP_BLOB`). It is as large as the host's memory, rounded up
 //! to a power of two, so it fills no sooner than the memory it maps; a BAR
-//! lies at a multiple of its size, so the window does too, from 4 GiB on,
-//! above guest RAM and the MMIO hole (`configure`). It spans whole PDPT
-//! slots of the EPT or NPT.
+//! lies at a multiple of its size, so the window does too, above guest RAM
+//! and the MMIO hole (`configure`, QEMU's pci-hole64). It spans whole PDPT
+//! slots of the EPT or NPT, all in the first PML4 entry.
 //!
 //! Mapping only adds entries (not present → present) and needs no flush.
 //! Unmapping removes them, and every core that ran a vCPU may still hold the
@@ -34,18 +34,24 @@ const FOUR_GB: u64 = 4 << 30;
 static WINDOW_GPA: AtomicU64 = AtomicU64::new(FOUR_GB);
 static WINDOW_SIZE: AtomicU64 = AtomicU64::new(ONE_GB);
 
-/// Size and place the window for the next VM: the host's memory top,
-/// rounded up to a power of two and at least 1 GiB, at a multiple of that
-/// from 4 GiB on, inside the guest's physical address width.
-pub fn configure() {
+/// One PML4 entry of the EPT/NPT: the window's tables hang off its PDPT.
+const PML4_SPAN: u64 = 512 << 30;
+
+/// Size and place the window for the next VM, whose RAM ends at `ram_top`:
+/// the host's memory top, rounded up to a power of two and at least 1 GiB,
+/// at the first multiple of that from 4 GiB and from `ram_top` on, inside
+/// the guest's physical address width.
+pub fn configure(ram_top: u64) {
     let phys_bits = crate::microvm::cpu::guest_phys_bits();
-    let limit = 1u64 << phys_bits;
+    let limit = (1u64 << phys_bits).min(PML4_SPAN);
+    let base = ram_top.max(FOUR_GB);
+    let place = |size: u64| base.next_multiple_of(size);
     let mut size = crate::memory::memory_top_bytes().max(ONE_GB).next_power_of_two();
-    while size > ONE_GB && size.max(FOUR_GB) + size > limit {
+    while size > ONE_GB && place(size) + size > limit {
         size /= 2;
     }
     WINDOW_SIZE.store(size, Ordering::Release);
-    WINDOW_GPA.store(size.max(FOUR_GB), Ordering::Release);
+    WINDOW_GPA.store(place(size), Ordering::Release);
 }
 
 /// Guest-physical base of the window.

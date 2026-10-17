@@ -44,7 +44,9 @@ Stellen ohne Pfadpräfix: `tools/wasm/gpu_intel_tgl/src/` (Modul) bzw.
 Deckel 16384/128 MB jetzt Live-Grenzen) · 4.2 (Balloon mit `F_REPORTING`;
 kein `DEFLATE_ON_OOM`, Scudo `-1`, Startfenster 256 MB nie zurück) · 4.8 ·
 5.10 · 7.1 (BAR2 wandert schon, RAM noch < 3 GB) · 8.6 · 8.9 · 9.1.
-**Offen:** alles andere, insbesondere 1.9/1.10, 2.4–2.6, 2.9, W3, 6.1–6.3,
+**Kernel 0.623.0:** 6.1 und der RAM-Teil von 7.1 (Gast-RAM = halber
+Wirts-RAM, über 4 GiB geteilt).
+**Offen:** alles andere, insbesondere 1.9/1.10, 2.4–2.6, 2.9, W3, 6.2, 6.3,
 6.5–6.10, 7.2–7.8, 7.11. CPU-Kosten stehen getrennt in `CPU_COST.md`.
 
 ## W1. Ablehnen, wo das Original wartet — **die Wurzel der Hänger**
