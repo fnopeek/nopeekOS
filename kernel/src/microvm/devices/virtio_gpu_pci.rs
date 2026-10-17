@@ -297,8 +297,10 @@ impl Scanout {
     const OFF: Scanout = Scanout { enabled: false, resource_id: 0, rect: Rect { x: 0, y: 0, w: 0, h: 0 }, view: None };
 }
 
-/// A FLUSH's completion, kept back until the blob shown before it is no
-/// longer read.
+/// A FLUSH's completion, kept back until the next refresh and until the
+/// blob shown before it is no longer read. The frame is presented at once
+/// and the commands behind it are served meanwhile; the guest waits for
+/// this completion before its next FLUSH, which paces it to the display.
 struct Held {
     head: u16,
     response: Vec<u8>,
@@ -307,6 +309,8 @@ struct Held {
     deadline: u64,
     /// When it was kept back (TSC).
     since: u64,
+    /// The refresh it completes at, at the earliest (TSC).
+    not_before: u64,
 }
 
 /// A SUBMIT_3D chain taken off the controlq (`take_pending_submit`).
@@ -384,10 +388,6 @@ pub struct VirtioGpu {
     dmg_tile_acc: u64,
     dmg_flush_count: u32,
 
-    /// vblank pacing: once a FLUSH was served, the next one waits until
-    /// this TSC (0 = never paused). What a display does: one scan-out per
-    /// refresh; the commands before the next FLUSH are served meanwhile.
-    paused_until: u64,
     /// Per scanout: resource of the last FLUSH that reached its surface.
     last_flush_res: [u32; MAX_OUTPUTS],
     /// Per scanout: the blob of the last frame presented from guest pages.
@@ -451,7 +451,6 @@ impl VirtioGpu {
             dmg_area_acc: 0,
             dmg_tile_acc: 0,
             dmg_flush_count: 0,
-            paused_until: 0,
             last_flush_res: [0; MAX_OUTPUTS],
             last_blob: [const { None }; MAX_OUTPUTS],
             blob_damage: [const { Vec::new() }; MAX_OUTPUTS],
@@ -515,12 +514,16 @@ impl VirtioGpu {
         let mut completed = self.complete_fences(mem);
         if let Some(h) = &self.held {
             let now = crate::interrupts::rdtsc();
-            if super::gpu_backend::full_active() && h.blob.as_ref().is_some_and(|b| !blob_unread(b)) && now < h.deadline {
-                return false;
+            let read = !super::gpu_backend::full_active() || h.blob.as_ref().is_none_or(|b| blob_unread(b))
+                || now >= h.deadline;
+            if now >= h.not_before && read {
+                let h = self.held.take().unwrap();
+                if h.blob.is_some() {
+                    super::gpu_backend::note(super::gpu_backend::STAT_HOLD_US, super::gpu_backend::us_since(h.since));
+                }
+                self.complete(mem, h.head, &h.response, &h.resp_descs);
+                completed = true;
             }
-            let h = self.held.take().unwrap();
-            self.complete(mem, h.head, &h.response, &h.resp_descs);
-            completed = true;
         }
         self.serve_controlq(mem) || completed
     }
@@ -571,7 +574,7 @@ impl VirtioGpu {
                 if p.flags & VIRTIO_GPU_FLAG_FENCE != 0 && !self.ctxs.fence_done(p.ctx_id, p.ring, fence) {
                     let held = Held {
                         head: p.head, response, resp_descs: p.resp_descs, blob: None, deadline: 0,
-                        since: crate::interrupts::rdtsc(),
+                        since: crate::interrupts::rdtsc(), not_before: 0,
                     };
                     self.fenced.push((held, p.ctx_id, p.ring, fence));
                     false
@@ -674,12 +677,10 @@ impl VirtioGpu {
                 idx = match chain_next(&d, &mut hops, qsize) { Some(n) => n, None => break };
             }
 
-            // vblank pacing: the next frame's FLUSH waits for the next
-            // refresh, as a display scans out once per refresh; the commands
-            // before it (the guest's decode and render work) do not.
+            // One FLUSH completion is kept back at a time; a FLUSH the guest
+            // sends without waiting for the last one waits for it here.
             let flush = le32(&request, 0) == Some(VIRTIO_GPU_CMD_RESOURCE_FLUSH);
-            if flush && crate::interrupts::rdtsc() < self.paused_until {
-                super::gpu_backend::set_resume_tsc(self.paused_until);
+            if flush && self.held.is_some() {
                 break;
             }
 
@@ -694,30 +695,27 @@ impl VirtioGpu {
             // Dispatch the command + build the response payload (incl.
             // the 24-byte virtio_gpu_ctrl_hdr).
             let response = self.dispatch_control(&request, mem);
-            // A frame went out: the next FLUSH waits for the next refresh.
-            // Refreshes lie on one grid, as a display's vblanks do.
+            // A frame went out: its completion waits for the next refresh,
+            // on one grid as a display's vblanks are, and for the blob shown
+            // before it to be read out (the guest writes that buffer next).
+            // Serving goes on behind it.
             if flush {
                 let period = (crate::interrupts::tsc_freq() / VBLANK_HZ).max(1);
                 let t = crate::interrupts::rdtsc();
-                self.paused_until = (t / period + 1) * period;
-                super::gpu_backend::set_resume_tsc(self.paused_until);
+                let not_before = (t / period + 1) * period;
+                super::gpu_backend::set_resume_tsc(not_before);
                 super::gpu_backend::note(super::gpu_backend::STAT_PAUSE_US,
-                    (self.paused_until - t) * 1_000_000 / crate::interrupts::tsc_freq().max(1));
+                    (not_before - t) * 1_000_000 / crate::interrupts::tsc_freq().max(1));
+                let blob = self.hold_for.take().filter(|b| super::gpu_backend::full_active() && !blob_unread(b));
+                self.held = Some(Held {
+                    head, response, resp_descs, blob,
+                    deadline: now + crate::interrupts::tsc_freq() / 1000 * HOLD_MAX_MS,
+                    since: now, not_before,
+                });
+                last_avail = last_avail.wrapping_add(1);
+                continue;
             }
-
-            // A blob FLUSH whose fence must wait: the guest writes the buffer
-            // shown before once it completes.
-            if let Some(blob) = self.hold_for.take() {
-                if super::gpu_backend::full_active() && !blob_unread(&blob) {
-                    self.held = Some(Held {
-                        head, response, resp_descs, blob: Some(blob),
-                        deadline: now + crate::interrupts::tsc_freq() / 1000 * HOLD_MAX_MS,
-                        since: now,
-                    });
-                    last_avail = last_avail.wrapping_add(1);
-                    break;
-                }
-            }
+            self.hold_for = None;
             // Write response across the writable descriptors in order.
             let mut written: u32 = 0;
             let mut roff: usize = 0;
