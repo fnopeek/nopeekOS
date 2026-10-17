@@ -4,7 +4,7 @@ sha384=1afb827e01e4a11e87f76f489806f3157d6ee26cf8b4b778b2340a23d55033a05226c6b92
 url=https://github.com/fnopeek/nopeekOS/releases/download/assets/librewolf-0.9.2/microvm-userspace.sqfs
 
 [microvm:firefox-sqfs]
-size=383336448
-sha384=78854e4de9d70fdd5166c0c18fa0dcbcfe481b395633a0a8d084a3b8b7914274c89a98bfda21a3ff5f398183c9d6f348
-url=https://github.com/fnopeek/nopeekOS/releases/download/assets/firefox-0.1.1/microvm-firefox.sqfs
+size=383348736
+sha384=e5498c588b7f274362468022e39d09889bc01fa40fd01c70edefafc01a677cb5ee87a65b839854d189890ab628a991af
+url=https://github.com/fnopeek/nopeekOS/releases/download/assets/firefox-0.1.2/microvm-firefox.sqfs
 
