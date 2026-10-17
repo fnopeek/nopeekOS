@@ -29,7 +29,7 @@ Interrupt-Moderation. Genutzt war nur TSO für Gast-Superframes.
 | N5 ✅ | `nat.rs` UDP eingehend | volle Neuberechnung (verdeckte auch kaputte Datagramme) | `udp_manip_pkt` inkrementell | S |
 | N6 | `igc.rs` | 1 Queue, kein RSS, ein Vektor; NAPI-Kern und Arbeiterkern reichen jedes Paket über `TAP` weiter | bis 4 Queues, RSS, Vektor je Queue | L |
 | N7 | `nat.rs`, `ipv4.rs`, `eth.rs` | Kopien: RX 4, TX-TSO 4, ACK 6 (+3–4 Allokationen, 2 Nullungen); GRO-Akku 64 KB je Rahmen neu | build_skb, Seiten wiederverwenden, frags | M |
-| N8 | `igc.rs:337` | EITR fest 648 (~6000/s), kein Budget je NAPI-Lauf | adaptives ITR, Budget 64 | S–M |
+| N8 ✅ | `igc.rs` | EITR fest 648 (~6000/s). **0.624.0:** `igc_set_itr` konservativ (20000/s bei kleinen Paketen, 4000/s bei Bulk, unter 1 Gbit fest 4000), geschrieben am Anfang des nächsten Polls; Budget je Lauf weiter offen | adaptives ITR, Budget 64 | S–M |
 | N9 | `nat.rs:698`, `TX_LIMIT` 256 KB | TSO abgelehnt → Software-Zerlegung in ~44 Segmente | — (Linux wartet in der qdisc) | M |
 | N10 | `igc.rs` `tx_reserve` | spinnt bis 200 µs unter `DEVICE` (nur Host-Senden) | `netif_stop_queue` | S |
 | N11 ✅ | `net/ipv4.rs`, `net/tcp.rs` | Host-Stack prüft eingehende Prüfsummen GAR NICHT (Korrektheit, nicht CPU) | `tcp_v4_rcv` → `skb_checksum_init` | S |

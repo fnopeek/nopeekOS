@@ -57,6 +57,13 @@ const IGC_GPIE_EIAME: u32 = 0x4000_0000;
 const IGC_GPIE_PBA: u32 = 0x8000_0000;
 const IGC_IVAR_VALID: u32 = 0x80;
 const IGC_START_ITR: u32 = 648; // ~6000 ints/s
+const IGC_4K_ITR: u32 = 980;
+const IGC_20K_ITR: u32 = 196;
+const IGC_ITR_VAL_MASK: u32 = 0x04;
+// enum latency_range
+const LOWEST_LATENCY: u8 = 0;
+const LOW_LATENCY: u8 = 1;
+const BULK_LATENCY: u8 = 2;
 const IGC_QVECTOR_MASK: u32 = 0x7FFC;
 const IGC_EITR_CNT_IGNR: u32 = 0x8000_0000;
 const IGC_RCTL_EN: u32 = 0x0000_0002;
@@ -158,8 +165,113 @@ struct Igc {
     /// packets on the ring (BQL's `num_queued - num_completed`).
     tx_len: [u32; IGC_DEFAULT_TXD],
     tx_inflight: u32,
+    /// For the first slot of each packet, its bytes on the wire and its
+    /// segments (`bytecount`, `gso_segs`).
+    tx_bytecount: [u32; IGC_DEFAULT_TXD],
+    tx_segs: [u16; IGC_DEFAULT_TXD],
     /// EIMS bit of the queue vector; 0 = no interrupt, polled.
     eims_value: u32,
+    /// `q_vector`: the interrupt rate in EITR units, whether it changed and
+    /// is written at the next poll, and the work since the last update.
+    itr_val: u32,
+    set_itr: bool,
+    rx_itr: ItrRing,
+    tx_itr: ItrRing,
+    /// Inside a poll: `recv` has not reached the empty ring yet.
+    polling: bool,
+    /// Link below 1000 Mbit/s: the rate stays at 4000/s.
+    slow_link: bool,
+}
+
+/// `igc_ring_container`: packets and bytes since the last `set_itr`, and
+/// the latency class they put the ring in.
+#[derive(Clone, Copy, Default)]
+struct ItrRing {
+    total_packets: u32,
+    total_bytes: u32,
+    itr: u8,
+}
+
+/// `igc_update_itr`.
+fn update_itr(ring: &mut ItrRing) {
+    let (packets, bytes) = (ring.total_packets, ring.total_bytes);
+    if packets == 0 {
+        return;
+    }
+    let mut itrval = ring.itr;
+    match itrval {
+        LOWEST_LATENCY => {
+            if bytes / packets > 8000 {
+                itrval = BULK_LATENCY;
+            } else if packets < 5 && bytes > 512 {
+                itrval = LOW_LATENCY;
+            }
+        }
+        LOW_LATENCY => {
+            if bytes > 10000 {
+                if bytes / packets > 8000 {
+                    itrval = BULK_LATENCY;
+                } else if packets < 10 || bytes / packets > 1200 {
+                    itrval = BULK_LATENCY;
+                } else if packets > 35 {
+                    itrval = LOWEST_LATENCY;
+                }
+            } else if bytes / packets > 2000 {
+                itrval = BULK_LATENCY;
+            } else if packets <= 2 && bytes < 512 {
+                itrval = LOWEST_LATENCY;
+            }
+        }
+        BULK_LATENCY => {
+            if bytes > 25000 {
+                if packets > 35 {
+                    itrval = LOW_LATENCY;
+                }
+            } else if bytes < 1500 {
+                itrval = LOW_LATENCY;
+            }
+        }
+        _ => {}
+    }
+    *ring = ItrRing { total_packets: 0, total_bytes: 0, itr: itrval };
+}
+
+/// `igc_set_itr` with `rx_itr_setting` 3 (`IGC_DEFAULT_ITR`, conservative:
+/// no lowest_latency). The new rate is written at the next poll.
+fn set_itr(d: &mut Igc) {
+    let mut new_itr = if d.slow_link {
+        IGC_4K_ITR
+    } else {
+        update_itr(&mut d.tx_itr);
+        update_itr(&mut d.rx_itr);
+        match d.rx_itr.itr.max(d.tx_itr.itr) {
+            LOWEST_LATENCY | LOW_LATENCY => IGC_20K_ITR,
+            BULK_LATENCY => IGC_4K_ITR,
+            _ => d.itr_val,
+        }
+    };
+    if new_itr != d.itr_val {
+        // Biased towards bulk: intermediate steps while the rate rises.
+        if new_itr > d.itr_val {
+            new_itr = ((new_itr * d.itr_val) / (new_itr + (d.itr_val >> 2))).max(new_itr);
+        }
+        d.itr_val = new_itr;
+        d.set_itr = true;
+    }
+}
+
+/// `igc_write_itr`: at the start of a poll, where the interrupt fired, so
+/// the write does not restart the card's timer midway.
+fn write_itr(d: &mut Igc) {
+    if !d.set_itr {
+        return;
+    }
+    let mut v = d.itr_val & IGC_QVECTOR_MASK;
+    if v == 0 {
+        v = IGC_ITR_VAL_MASK;
+    }
+    d.mmio.w32(igc_eitr(QUEUE_MSIX_ENTRY as u32), v | IGC_EITR_CNT_IGNR);
+    d.set_itr = false;
 }
 
 static DEVICE: Mutex<Option<Igc>> = Mutex::new(None);
@@ -328,7 +440,11 @@ pub fn init(dev: pci::PciAddr, mmio: Mmio) -> bool {
         tso_data, tso_free,
         tso_slot_of: [NO_TSO_SLOT; IGC_DEFAULT_TXD],
         tx_len: [0; IGC_DEFAULT_TXD], tx_inflight: 0,
+        tx_bytecount: [0; IGC_DEFAULT_TXD], tx_segs: [0; IGC_DEFAULT_TXD],
         eims_value: 0,
+        itr_val: IGC_START_ITR, set_itr: false,
+        rx_itr: ItrRing::default(), tx_itr: ItrRing::default(),
+        polling: false, slow_link: speed < 1000,
     };
 
     // igc_alloc_rx_buffers(ring, igc_desc_unused) — all but one descriptor.
@@ -408,6 +524,10 @@ fn rx_csum_valid(status: u32) -> bool {
 pub fn recv(buf: &mut [u8; MTU]) -> Option<(usize, bool)> {
     let mut lock = DEVICE.lock();
     let d = lock.as_mut()?;
+    if d.eims_value != 0 && !d.polling {
+        d.polling = true;
+        write_itr(d);
+    }
     loop {
         if d.rx_cleaned >= IGC_RX_BUFFER_WRITE { rx_refill(d); }
         let i = d.rx_next_to_clean;
@@ -415,9 +535,12 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<(usize, bool)> {
         let (status, len) = (upper as u32, ((upper >> 32) & 0xFFFF) as usize);
         if len == 0 {
             rx_refill(d);
+            // igc_ring_irq_enable
             if d.eims_value != 0 {
+                set_itr(d);
                 d.mmio.w32(IGC_EIMS, d.eims_value);
             }
+            d.polling = false;
             return None;
         }
         core::sync::atomic::fence(Ordering::Acquire); // dma_rmb()
@@ -434,7 +557,11 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<(usize, bool)> {
         d.rx_next_to_clean = (i + 1) % IGC_DEFAULT_RXD as u16;
         d.rx_cleaned += 1;
         // A frame spanning buffers or flagged bad is dropped.
-        if good { return Some((n, rx_csum_valid(status))); }
+        if good {
+            d.rx_itr.total_packets += 1;
+            d.rx_itr.total_bytes += n as u32;
+            return Some((n, rx_csum_valid(status)));
+        }
     }
 }
 
@@ -448,6 +575,8 @@ fn tx_clean(d: &mut Igc) {
         let status = d.tx_descs.r32(desc_off(eop) + 12);
         if status & IGC_TXD_STAT_DD == 0 { break; }
         d.tx_inflight -= core::mem::replace(&mut d.tx_len[first], 0);
+        d.tx_itr.total_bytes += d.tx_bytecount[first];
+        d.tx_itr.total_packets += d.tx_segs[first] as u32;
         let slot = core::mem::replace(&mut d.tso_slot_of[first], NO_TSO_SLOT);
         if slot != NO_TSO_SLOT {
             d.tso_free |= 1 << slot;
@@ -468,9 +597,11 @@ fn over_limit(d: &Igc, len: usize) -> bool {
     lim != 0 && d.tx_inflight != 0 && d.tx_inflight as usize + len > lim as usize
 }
 
-fn note_queued(d: &mut Igc, first: u16, len: usize) {
+fn note_queued(d: &mut Igc, first: u16, len: usize, segs: u16, hdr_len: usize) {
     d.tx_len[first as usize] = len as u32;
     d.tx_inflight += len as u32;
+    d.tx_segs[first as usize] = segs;
+    d.tx_bytecount[first as usize] = (len + (segs as usize - 1) * hdr_len) as u32;
 }
 
 /// Descriptors free for a new packet (one always stays unused).
@@ -565,7 +696,7 @@ fn send_inner(frame: &[u8], wait: bool, csum: Option<TxCsum>) -> Result<(), NetE
         olinfo |= IGC_TXD_POPTS_TXSM << 8;
         i = (i + 1) % n;
     }
-    note_queued(d, first, frame.len());
+    note_queued(d, first, frame.len(), 1, 0);
     write_data_desc(d, i, frame,
         IGC_ADVTXD_DTYP_DATA | IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DCMD_IFCS
         | IGC_ADVTXD_DCMD_EOP | IGC_ADVTXD_DCMD_RS,
@@ -645,8 +776,9 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
         i = (i + 1) % n;
     }
     d.tso_slot_of[first as usize] = slot as u8;
-    note_queued(d, first, frame.len());
-    STAT_QUEUED.fetch_add((frame.len() - hdr_len).div_ceil(mss as usize) as u64, Ordering::Relaxed);
+    let segs = (frame.len() - hdr_len).div_ceil(mss as usize).max(1);
+    note_queued(d, first, frame.len(), segs as u16, hdr_len);
+    STAT_QUEUED.fetch_add(segs as u64, Ordering::Relaxed);
     tx_bump_tail(d, i);
     Ok(())
 }
