@@ -231,7 +231,9 @@ fn launch_wayland(kmsg_fd: i64) {
     // the native context (`LIBVA_DRIVER_NAME=iHD`: the render node is
     // virtio_gpu, which names no VA driver); LibreWolf through Vulkan Video.
     // `npklogs` on the command line streams the app's and npkwm's output
-    // to the console (`set microvm_cmdline npklogs`). `npksupport` writes
+    // to the console (`set microvm_cmdline npklogs`); `npklogs=REGEX` only
+    // the lines that match it (an awk ERE, no spaces), so a verbose MOZ_LOG
+    // costs the guest no console exits for the rest. `npksupport` writes
     // the graphics and media sections of about:support to it as `[about]`
     // lines, 20 s and 90 s after the browser started. `npkgdb` writes the
     // backtrace of a crashing media decoder process as `[gdb]` lines;
@@ -386,7 +388,13 @@ fn launch_wayland(kmsg_fd: i64) {
                  fi; \
                  i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do usleep 5000; i=$((i+1)); done; \
                  echo \"<0>[wl] npkwm up after ${i}x5ms\" > /dev/kmsg; \
-                 grep -q npklogs /proc/cmdline && { : >> /tmp/app.log; tail -F /tmp/app.log /tmp/npkwm.log 2>/dev/null | while read -r l; do echo \"<0>[log] $l\" > /dev/kmsg; done & }; \
+                 LOGPAT=$(sed -n 's/.*npklogs=\\([^ ]*\\).*/\\1/p' /proc/cmdline); \
+                 grep -q npklogs /proc/cmdline && { : >> /tmp/app.log; \
+                   if [ -n \"$LOGPAT\" ]; then \
+                     tail -F /tmp/app.log /tmp/npkwm.log 2>/dev/null | awk -v p=\"$LOGPAT\" '$0 ~ p { print \"<0>[log] \" $0 > \"/dev/kmsg\"; fflush(\"/dev/kmsg\") }' & \
+                   else \
+                     tail -F /tmp/app.log /tmp/npkwm.log 2>/dev/null | while read -r l; do echo \"<0>[log] $l\" > /dev/kmsg; done & \
+                   fi; }; \
                  grep -q npkstats /proc/cmdline || : > /tmp/lw-sample.sh; \
                  PROF=$(sed -n 's/.*npkprofile=\\([0-9.]*:[0-9]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$PROF\" ] && echo 'export MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_STARTUP_INTERVAL=1 MOZ_PROFILER_STARTUP_ENTRIES=16777216 MOZ_PROFILER_STARTUP_FILTERS=GeckoMain,Socket,Worker,Timer,StreamTrans,IPC,RemoteLzy,File,BgIO,BackgroundThreadPool,Renderer MOZ_PROFILER_STARTUP_FEATURES=js,stackwalk,cpu,fileio MOZ_PROFILER_SHUTDOWN=/tmp/bcache/lw-prof.json' > /tmp/app.sh || : > /tmp/app.sh; \
