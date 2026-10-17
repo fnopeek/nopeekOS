@@ -411,7 +411,6 @@ where
         if s.fresh {
             core::mem::swap(&mut s.front, &mut s.ready);
             s.fresh = false;
-            took_frame(&s.front);
         }
         s.front_out = true;
         if let Some((v, _)) = &s.front.blob {
@@ -451,7 +450,6 @@ pub fn front_in_place(window_id: u32) -> Option<InPlace> {
     if s.fresh {
         core::mem::swap(&mut s.front, &mut s.ready);
         s.fresh = false;
-        took_frame(&s.front);
     }
     let (view, n) = s.front.blob.as_ref()?;
     Some(InPlace {
@@ -460,20 +458,6 @@ pub fn front_in_place(window_id: u32) -> Option<InPlace> {
         width: view.width,
         height: view.height,
     })
-}
-
-/// The compositor took the window's newest frame: a guest waiting for that
-/// (its FLUSH completion) is looked at again.
-fn took_frame(front: &Frame) {
-    if front.blob.is_some() {
-        crate::microvm::devices::gpu_backend::note_gpu_kick(0);
-    }
-}
-
-/// Whether the compositor took the window's newest frame (or the window has
-/// none).
-pub fn frame_taken(window_id: u32) -> bool {
-    SURFACES.lock().get(&window_id).is_none_or(|s| !s.fresh)
 }
 
 /// The pages with `serial` are about to be written or freed by the guest:

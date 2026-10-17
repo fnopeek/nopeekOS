@@ -90,6 +90,8 @@
 #define TITLE_MAX 200
 /* How long an output waits for the app to draw at a new size. */
 #define RESIZE_WAIT_MS 200
+/* The output's refresh when its mode names none, in mHz. */
+#define DEFAULT_REFRESH_MHZ 60000
 /* Outputs (host windows) at most; the host offers as many scanouts. */
 #define MAX_OUTPUTS 8
 /* Outputs sit side by side in the layout, this far apart, so none overlap
@@ -155,6 +157,11 @@ struct output {
 	 * the output keeps its mode until then (`resize_output`). */
 	int pend_w, pend_h;
 	struct wl_event_source *pend_timer;
+	/* The output's own frame clock (`output_frame`): the next refresh,
+	 * and its timer. */
+	int64_t next_ns;
+	struct wl_event_source *frame_timer;
+	bool frame_armed;
 	struct wl_listener frame;
 	struct wl_listener request_state;
 	struct wl_listener destroy;
@@ -823,8 +830,22 @@ static void cursor_frame(struct wl_listener *listener, void *data) {
 
 /* ── Outputs ─────────────────────────────────────────────────────── */
 
-static void output_frame(struct wl_listener *listener, void *data) {
-	struct output *output = wl_container_of(listener, output, frame);
+static int64_t now_ns(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+static int64_t frame_period_ns(struct output *output) {
+	int mhz = output->wlr_output->refresh > 0 ? output->wlr_output->refresh : DEFAULT_REFRESH_MHZ;
+	return 1000000000000LL / mhz;
+}
+
+static void output_draw(struct output *output) {
+	/* Refreshes follow one another a period apart; after an idle spell
+	 * the clock starts over from now. */
+	int64_t t = now_ns(), period = frame_period_ns(output);
+	output->next_ns = t - output->next_ns < period ? output->next_ns + period : t + period;
 	/* Every commit of the app (a subsurface's too, which no toplevel
 	 * listener sees) damages the output and brings a frame. While a resize
 	 * waits, the output shows nothing new — the host keeps the last whole
@@ -854,6 +875,31 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	wlr_scene_output_send_frame_done(scene_output, &now);
 }
 
+/* The output draws at most once a refresh, on its own clock. A page flip
+ * completes as soon as the host has the frame, so the flip is no clock: a
+ * frame event before the next refresh waits for it on a timer, and the
+ * apps get their frame callbacks at the output's rate whatever they draw. */
+static void output_frame(struct wl_listener *listener, void *data) {
+	struct output *output = wl_container_of(listener, output, frame);
+	if (output->frame_armed) {
+		return;
+	}
+	int64_t wait = output->next_ns - now_ns();
+	if (wait > 0) {
+		output->frame_armed = true;
+		wl_event_source_timer_update(output->frame_timer, (int)((wait + 999999) / 1000000));
+		return;
+	}
+	output_draw(output);
+}
+
+static int frame_timeout(void *data) {
+	struct output *output = data;
+	output->frame_armed = false;
+	output_draw(output);
+	return 0;
+}
+
 static void output_request_state(struct wl_listener *listener, void *data) {
 	struct output *output = wl_container_of(listener, output, request_state);
 	const struct wlr_output_event_request_state *event = data;
@@ -869,6 +915,7 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&output->request_state.link);
 	wl_list_remove(&output->destroy.link);
 	wl_event_source_remove(output->pend_timer);
+	wl_event_source_remove(output->frame_timer);
 	free(output);
 	server->outputs[k] = NULL;
 	if (server->released[k]) {
@@ -910,6 +957,8 @@ static void new_output(struct wl_listener *listener, void *data) {
 	output->index = k;
 	output->pend_timer = wl_event_loop_add_timer(wl_display_get_event_loop(server->display),
 		pending_timeout, output);
+	output->frame_timer = wl_event_loop_add_timer(wl_display_get_event_loop(server->display),
+		frame_timeout, output);
 	output->frame.notify = output_frame;
 	wl_signal_add(&wlr_output->events.frame, &output->frame);
 	output->request_state.notify = output_request_state;
