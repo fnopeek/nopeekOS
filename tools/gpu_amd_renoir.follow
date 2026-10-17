@@ -1,0 +1,210 @@
+# Indirect calls in amdgpu resolved for Renoir/Lucienne (1002:164c), Linux 6.18.55.
+# DRAFT — pending the device's IP discovery table.
+# Assumed: GC 9.3.0, SDMA 4.1.2, VCN 2.2.0, DCN 2.1.0, MP0 11.0.3, MP1 12.0.x,
+#   OSSSYS 4.x, HDP 4.x, NBIO in {7.0.0,7.0.1,2.5.0}, load_type PSP, no SR-IOV.
+
+# --- ip_block funcs: amdgpu_discovery_set_ip_blocks order (amdgpu_discovery.c:3099-3153)
+#     COMMON GMC IH PSP SMC DCE GFX SDMA VCN JPEG
+@amdgpu_device.c:2933 = soc15_common_early_init
+@amdgpu_device.c:2933 = gmc_v9_0_early_init
+@amdgpu_device.c:2933 = vega10_ih_early_init
+@amdgpu_device.c:2933 = psp_early_init
+@amdgpu_device.c:2933 = smu_early_init
+@amdgpu_device.c:2933 = dm_early_init
+@amdgpu_device.c:2933 = gfx_v9_0_early_init
+@amdgpu_device.c:2933 = sdma_v4_0_early_init
+@amdgpu_device.c:2933 = vcn_v2_0_early_init
+@amdgpu_device.c:2933 = jpeg_v2_0_early_init
+@amdgpu_device.c:3201 = soc15_common_sw_init
+@amdgpu_device.c:3201 = gmc_v9_0_sw_init
+@amdgpu_device.c:3201 = vega10_ih_sw_init
+@amdgpu_device.c:3201 = psp_sw_init
+@amdgpu_device.c:3201 = smu_sw_init
+@amdgpu_device.c:3201 = dm_sw_init
+@amdgpu_device.c:3201 = gfx_v9_0_sw_init
+@amdgpu_device.c:3201 = sdma_v4_0_sw_init
+@amdgpu_device.c:3201 = vcn_v2_0_sw_init
+@amdgpu_device.c:3201 = jpeg_v2_0_sw_init
+# COMMON then GMC early (amdgpu_device.c:3216-3238)
+@amdgpu_device.c:3218 = soc15_common_hw_init
+@amdgpu_device.c:3238 = gmc_v9_0_hw_init
+# hw_init_phase1: COMMON + IH
+@amdgpu_device.c:3021 = soc15_common_hw_init
+@amdgpu_device.c:3021 = vega10_ih_hw_init
+# fw_loading: PSP (asic_type >= CHIP_VEGA10)
+@amdgpu_device.c:3088 = psp_hw_init
+# hw_init_phase2: rest in block order
+@amdgpu_device.c:3048 = smu_hw_init
+@amdgpu_device.c:3048 = dm_hw_init
+@amdgpu_device.c:3048 = gfx_v9_0_hw_init
+@amdgpu_device.c:3048 = sdma_v4_0_hw_init
+@amdgpu_device.c:3048 = vcn_v2_0_hw_init
+@amdgpu_device.c:3048 = jpeg_v2_0_hw_init
+@amdgpu_device.c:3570 = soc15_common_late_init
+@amdgpu_device.c:3570 = gmc_v9_0_late_init
+@amdgpu_device.c:3570 = smu_late_init
+@amdgpu_device.c:3570 = dm_late_init
+@amdgpu_device.c:3570 = gfx_v9_0_late_init
+@amdgpu_device.c:3570 = sdma_v4_0_late_init
+# set_clockgating_state / set_powergating_state follow the same tables
+#   (soc15.c:1513, gmc_v9_0.c:2362, vega10_ih.c:624, amdgpu_psp.c:4473,
+#    amdgpu_smu.c:2744, amdgpu_dm.c:3696, gfx_v9_0.c:7419, sdma_v4_0.c:2393,
+#    vcn_v2_0.c:2096, jpeg_v2_0.c:785)
+
+# --- asic: soc15.c:1160-1161 GC 9.3.0 -> soc15_asic_funcs (soc15.c:900)
+@amdgpu_device.c:463  = soc15_supports_baco
+@amdgpu_device.c:1448 = soc15_pre_asic_init
+@amdgpu_device.c:1830 = soc15_get_config_memsize
+@amdgpu_device.c:4777 = soc15_need_reset_on_init
+# soc15_need_reset_on_init returns true for CHIP_RENOIR (soc15.c:856-858)
+@amdgpu_device.c:4791 = soc15_asic_reset
+@amdgpu_doorbell_mgr.c:207 = vega10_doorbell_index_init
+@amdgpu_bios.c:176 = amdgpu_soc15_read_bios_from_rom
+@amdgpu_bios.c:197 = amdgpu_soc15_read_bios_from_rom
+@amdgpu_bios.c:355 = soc15_read_disabled_bios
+# soc15_asic_funcs has no flush_hdp/invalidate_hdp -> hdp.funcs (amdgpu.h:1540-1544)
+@amdgpu_device.c:7403 = amdgpu_hdp_generic_flush
+@amdgpu_device.c:7416 = hdp_v4_0_invalidate_hdp
+
+# --- indirect register access: soc15_common_early_init (soc15.c:971-978)
+@amdgpu_device.c:744 = amdgpu_device_indirect_rreg
+@amdgpu_device.c:871 = amdgpu_device_indirect_wreg
+
+# --- NBIO ? (amdgpu_discovery.c:2907-2911 -> nbio_v7_0_funcs, nbio_v7_0.c:302)
+@amdgpu_device.c:991  = nbio_v7_0_get_pcie_index_offset
+@amdgpu_device.c:992  = nbio_v7_0_get_pcie_data_offset
+# nbio_v7_0_funcs has no get_pcie_index_hi_offset: amdgpu_device.c:999 not taken
+@amdgpu_device.c:1278 = nbio_v7_0_get_rev_id
+get_memsize        = nbio_v7_0_get_memsize
+ih_control         = nbio_v7_0_ih_control
+init_registers     = nbio_v7_0_init_registers
+set_reg_remap      = nbio_v7_0_set_reg_remap
+remap_hdp_registers = nbio_v7_0_remap_hdp_registers
+sdma_doorbell_range = nbio_v7_0_sdma_doorbell_range
+vcn_doorbell_range = nbio_v7_0_vcn_doorbell_range
+ih_doorbell_range  = nbio_v7_0_ih_doorbell_range
+enable_doorbell_aperture = nbio_v7_0_enable_doorbell_aperture
+enable_doorbell_selfring_aperture = nbio_v7_0_enable_doorbell_selfring_aperture
+mc_access_enable   = nbio_v7_0_mc_access_enable
+# --- HDP 4.x (amdgpu_discovery.c:2982)
+init_registers     = hdp_v4_0_init_registers
+# --- DF ? (amdgpu_discovery.c:3019, df_v1_7.c:121)
+sw_init            = df_v1_7_sw_init
+enable_broadcast_mode = df_v1_7_enable_broadcast_mode
+get_fb_channel_number = df_v1_7_get_fb_channel_number
+# --- SMUIO ? (amdgpu_discovery.c:3041, smuio_v9_0.c:72)
+get_rom_index_offset = smuio_v9_0_get_rom_index_offset
+get_rom_data_offset  = smuio_v9_0_get_rom_data_offset
+# amdgpu_discovery.c:3067 (get_pkg_type) only for SMUIO 13.0.3/13.0.11: not taken
+
+# --- GMC: gmc_v9_0.c:1410, 1481, 1513, 761
+@amdgpu_gmc.c:682 = gmc_v9_0_flush_gpu_tlb
+@amdgpu_gmc.c:686 = gmc_v9_0_flush_gpu_tlb
+@amdgpu_gmc.c:689 = gmc_v9_0_flush_gpu_tlb
+@amdgpu_gmc.c:128 = gmc_v9_0_get_vm_pde
+get_vbios_fb_size  = gmc_v9_0_get_vbios_fb_size
+need_reset_on_init = gmc_v9_0_need_reset_on_init
+get_fb_location    = mmhub_v1_0_get_fb_location
+init               = mmhub_v1_0_init
+gart_enable        = mmhub_v1_0_gart_enable
+gart_enable        = gfxhub_v1_0_gart_enable
+init               = gfxhub_v1_0_init
+get_mc_fb_offset   = gfxhub_v1_0_get_mc_fb_offset
+setup_vm_pt_regs   = mmhub_v1_0_setup_vm_pt_regs
+setup_vm_pt_regs   = gfxhub_v1_0_setup_vm_pt_regs
+set_fault_enable_default = mmhub_v1_0_set_fault_enable_default
+set_fault_enable_default = gfxhub_v1_0_set_fault_enable_default
+@amdgpu_device.c:4731 = gfxhub_v1_1_get_xgmi_info
+# umc.funcs stays NULL unless UMC 6.0.0 (gmc_v9_0.c:1414-1417)
+
+# --- IH: vega10_ih.c:649 -> vega10_ih_funcs (vega10_ih.c:640)
+get_wptr  = vega10_ih_get_wptr
+decode_iv = amdgpu_ih_decode_iv_helper
+set_rptr  = vega10_ih_set_rptr
+
+# --- PSP: amdgpu_psp.c:205-207 -> psp_v12_0_funcs (psp_v12_0.c:280)
+init_microcode         = psp_v12_0_init_microcode
+bootloader_load_sysdrv = psp_v12_0_bootloader_load_sysdrv
+bootloader_load_sos    = psp_v12_0_bootloader_load_sos
+ring_create            = psp_v12_0_ring_create
+ring_stop              = psp_v12_0_ring_stop
+@amdgpu_psp.c:3455 = psp_v12_0_ring_get_wptr
+@amdgpu_psp.c:3487 = psp_v12_0_ring_set_wptr
+@amdgpu_psp.c:3418 = psp_v12_0_mode1_reset
+# psp_v12_0_funcs has no wait_for_bootloader: amdgpu_psp.c:2453 not taken
+
+# --- SMU: amdgpu_smu.c:727-729 -> renoir_ppt_funcs (renoir_ppt.c:1450),
+#     amdgpu_smu.c:814 pp_funcs = swsmu_pm_funcs (amdgpu_smu.c:3910)
+@pm/amdgpu_dpm.c:530 = smu_read_sensor
+# pm/amdgpu_dpm.c:682 (load_firmware) not reached: APU + swSMU returns at :677-679
+check_fw_status        = smu_v12_0_check_fw_status
+check_fw_version       = smu_v12_0_check_fw_version
+send_smc_msg_with_param = smu_cmn_send_smc_msg_with_param
+send_smc_msg           = smu_cmn_send_smc_msg
+init_smc_tables        = renoir_init_smc_tables
+set_default_dpm_table  = smu_v12_0_set_default_dpm_tables
+set_driver_table_location = smu_v12_0_set_driver_table_location
+get_enabled_mask       = renoir_get_enabled_mask
+is_dpm_running         = renoir_is_dpm_running
+get_vbios_bootup_values = smu_v12_0_get_vbios_bootup_values
+gfx_off_control        = smu_v12_0_gfx_off_control
+set_gfx_cgpg           = smu_v12_0_set_gfx_cgpg
+powergate_sdma         = smu_v12_0_powergate_sdma
+dpm_set_vcn_enable     = renoir_dpm_set_vcn_enable
+dpm_set_jpeg_enable    = renoir_dpm_set_jpeg_enable
+set_watermarks_table   = renoir_set_watermarks_table
+get_dpm_clock_table    = renoir_get_dpm_clock_table
+mode2_reset            = smu_v12_0_mode2_reset
+
+# --- GFX 9.3.0: gfx_v9_0.c:4833, 7696-7698, 1093, 7629-7640
+#     no MEC2 blob (gfx_v9_0.c:1538-1545)
+get_gpu_clock_counter = gfx_v9_0_get_gpu_clock_counter
+select_se_sh       = gfx_v9_0_select_se_sh
+init               = gfx_v9_0_rlc_init
+resume             = gfx_v9_0_rlc_resume
+start              = gfx_v9_0_rlc_start
+stop               = gfx_v9_0_rlc_stop
+reset              = gfx_v9_0_rlc_reset
+is_rlc_enabled     = gfx_v9_0_is_rlc_enabled
+set_safe_mode      = gfx_v9_0_set_safe_mode
+unset_safe_mode    = gfx_v9_0_unset_safe_mode
+get_csb_size       = gfx_v9_0_get_csb_size
+get_csb_buffer     = gfx_v9_0_get_csb_buffer
+get_cp_table_num   = gfx_v9_0_cp_jump_table_num
+set_wptr           = gfx_v9_0_ring_set_wptr_gfx
+set_wptr           = gfx_v9_0_ring_set_wptr_compute
+insert_nop         = gfx_v9_ring_insert_nop
+insert_nop         = amdgpu_ring_insert_nop
+emit_fence         = gfx_v9_0_ring_emit_fence
+emit_fence         = gfx_v9_0_ring_emit_fence_kiq
+@amdgpu_gfx.c:1100 = gfx_v9_0_ring_emit_rreg
+@amdgpu_gfx.c:1172 = gfx_v9_0_ring_emit_wreg
+emit_hdp_flush     = gfx_v9_0_ring_emit_hdp_flush
+test_ring          = gfx_v9_0_ring_test_ring
+begin_use          = amdgpu_gfx_enforce_isolation_ring_begin_use
+end_use            = amdgpu_gfx_enforce_isolation_ring_end_use
+
+# --- SDMA 4.1.2: one ring per instance, no page queue
+#     (sdma_v4_0_fw_support_paging_queue default false, sdma_v4_0.c:1737-1752)
+set_wptr           = sdma_v4_0_ring_set_wptr
+insert_nop         = sdma_v4_0_ring_insert_nop
+emit_fence         = sdma_v4_0_ring_emit_fence
+emit_hdp_flush     = sdma_v4_0_ring_emit_hdp_flush
+test_ring          = sdma_v4_0_ring_test_ring
+test_ib            = sdma_v4_0_ring_test_ib
+pad_ib             = sdma_v4_0_ring_pad_ib
+@amdgpu_ttm.c:243  = sdma_v4_0_emit_copy_buffer
+@amdgpu_ttm.c:2391 = sdma_v4_0_emit_fill_buffer
+
+# --- VCN 2.0 / JPEG 2.0 rings: vcn_v2_0.c:2178-2197, jpeg_v2_0.c:836-847
+#     (vcn_v2_0_dec_ring_vm_funcs, vcn_v2_0_enc_ring_vm_funcs, jpeg_v2_0_dec_ring_vm_funcs)
+
+# --- display: amdgpu_dm.c:5762-5765 DMCUB fw, :2517 DMUB_ASIC_DCN21,
+#     dc_resource.c:159-160 DCN_VERSION_2_1 -> dcn21_create_resource_pool (:289-290)
+#     -> dcn21_hw_sequencer_construct (dcn21_resource.c:1680),
+#     clk_mgr.c:231-233 rn_clk_mgr_construct. DC tables are their own pass.
+
+# Not taken on Renoir: every SR-IOV branch (amdgpu_virt.c:*),
+# XCP (amdgpu_xcp.c:*, aqua_vanjaram only, amdgpu_discovery.c:2494-2505),
+# RAS/ACA/MCA/CPER (no RAS on this APU — to confirm with the device's
+# ras_hw_enabled), userq, MES rreg/wreg (no MES on GC 9).

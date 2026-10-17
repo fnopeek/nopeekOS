@@ -1,0 +1,11 @@
+# The IP versions of the IdeaPad's Lucienne (1002:164c) that
+# tools/amdgpu-renoir-specialize.py pins. One line per IP: `HWIP major.minor.rev`.
+# An IP without a line stays a run-time value in the pinned copy.
+# Source: docs/plan/GPU_AMD_RENOIR_IP_DRAFT.md (from the Linux source, strong
+# evidence only); replace with the table the device reports (gpu_amd_renoir
+# stage 0) and rerun.
+GC_HWIP 9.3.0
+SDMA0_HWIP 4.1.2
+UVD_HWIP 2.2.0
+DCE_HWIP 2.1.0
+MP0_HWIP 11.0.3
