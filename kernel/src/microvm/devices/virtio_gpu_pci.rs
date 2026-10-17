@@ -216,8 +216,6 @@ const MAX_HOST_PIXEL_BYTES: usize = 512 * 1024 * 1024;
 const MAX_CTRL_REQUEST: usize = 1024 * 1024;
 /// Largest guest blob: an 8K frame.
 const MAX_BLOB_BYTES: u64 = MAX_RESOURCE_DIM as u64 * MAX_RESOURCE_DIM as u64 * 4;
-/// Guest blobs of all resources together. The host keeps 8 bytes per page.
-const MAX_BLOB_TOTAL: u64 = 2 * 1024 * 1024 * 1024;
 /// How long a FLUSH's fence waits for the buffer shown before to be read
 /// out; the guest itself waits 50 ms for it, then writes regardless.
 pub const HOLD_MAX_MS: u64 = 40;
@@ -1161,7 +1159,9 @@ impl VirtioGpu {
         self.release_blob(id);
         let held: u64 = self.resources.iter().filter(|r| r.id != id).filter_map(|r| r.blob.as_ref())
             .map(|b| b.bytes()).sum();
-        if held + size > MAX_BLOB_TOTAL {
+        // Blobs name guest pages, so together they need not exceed its RAM;
+        // the host keeps 8 bytes per page of them.
+        if held + size > mem.layout().total() {
             return VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
         }
         let want = size.div_ceil(4096) as usize;

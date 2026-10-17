@@ -48,7 +48,10 @@ kein `DEFLATE_ON_OOM`, Scudo `-1`, Startfenster 256 MB nie zurück) · 4.8 ·
 Wirts-RAM, über 4 GiB geteilt).
 **Kernel 0.624.0 + gpu_intel_tgl 0.27.0:** 1.9, 1.10 (Abschlüsse je `seq`,
 `CPU_COST.md` G9).
-**Offen:** alles andere, insbesondere 2.4–2.6, 2.9, W3, 6.2, 6.3,
+**Kernel 0.624.0:** 6.3 (GEM-Deckel weg, `frames_spare` schützt) und der
+Blob-Teil von 6.5 (Gast-Blobs zusammen ≤ Gast-RAM; Wirtspixel 512 MB und
+8192 px stehen noch).
+**Offen:** alles andere, insbesondere 2.4–2.6, 2.9, W3, 6.2,
 6.5–6.10, 7.2–7.8, 7.11. CPU-Kosten stehen getrennt in `CPU_COST.md`.
 
 ## W1. Ablehnen, wo das Original wartet — **die Wurzel der Hänger**

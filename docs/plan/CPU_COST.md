@@ -82,4 +82,4 @@ PD, Bereichsprüfung in `GuestMem`, das GPU-Fenster liegt über dem RAM-Ende
 (`hostmem::configure`, pci-hole64).
 
 Offen daneben: Scudo im Gast (`release_to_os_interval_ms=-1`),
-`MAX_BLOB_TOTAL` 2 GB, `MAX_GEM_BYTES` 4 GB, kein `DEFLATE_ON_OOM`.
+kein `DEFLATE_ON_OOM`. (`MAX_GEM_BYTES` ist weg, `MAX_BLOB_TOTAL` = Gast-RAM, Kernel 0.624.0.)

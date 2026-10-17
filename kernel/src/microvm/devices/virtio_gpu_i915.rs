@@ -20,9 +20,6 @@ const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
 const EIO: i32 = 5;
 const PAGE: u64 = 4096;
-/// GEM bytes one VM may hold: protection against a runaway guest, the
-/// host's reserve is checked per allocation as well.
-const MAX_GEM_BYTES: u64 = 4 << 30;
 const MAX_OBJECT: u64 = 1 << 32;
 
 /// Mesa `i915_proto.h` ccmd numbers (and virglrenderer's EXECBUFFER2_V2).
@@ -102,10 +99,6 @@ impl GpudevBackend {
         let size = size.div_ceil(PAGE).checked_mul(PAGE).ok_or("size")?;
         if size == 0 || size > MAX_OBJECT {
             return Err("size");
-        }
-        if self.gem_bytes + size > MAX_GEM_BYTES {
-            self.log_refused(size);
-            return Err("the VM holds its GEM limit");
         }
         let pages = (size / PAGE) as usize;
         if super::guest_mem::frames_spare() < pages {
