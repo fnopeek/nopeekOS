@@ -449,6 +449,29 @@ pub fn gpgpu_dispatch(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu
 /// the GT, so the caller can say what the batch held.
 pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: &mut batch,
                  on_timeout: &mut dyn FnMut()) -> Result<(), i32> {
+    let mut f = gpgpu_submit(i915, gt, gp, b)?;
+    loop {
+        if let Some(r) = gpgpu_poll(i915, gt, gp, &mut f, b, on_timeout) {
+            return r;
+        }
+        crate::i915_irq::intel_irq_wait(i915, 2);
+        crate::intel_rps::intel_rps_run_pending(i915, gt);
+        crate::i915_gem_context::poll_native(i915, gt);
+    }
+}
+
+/// A batch on the render engine (`gpgpu_submit`) until `gpgpu_poll` says
+/// it is done.
+pub struct inflight {
+    rq: usize,
+    t0: u64,
+    started: Option<u64>,
+    err: Result<(), i32>,
+}
+
+/// Ends `b` and adds it as one request on the render engine's kernel
+/// context, without waiting for it.
+pub fn gpgpu_submit(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: &mut batch) -> Result<inflight, i32> {
     if crate::intel_gt::intel_gt_is_wedged(gt) {
         return Err(-EIO);
     }
@@ -474,22 +497,29 @@ pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: 
         crate::intel_rps::intel_rps_boost(gt, rq);
     }
     crate::intel_rps::intel_rps_run_pending(i915, gt);
-
     // The timeout counts from the start: a client batch may run ahead of it.
-    let t0 = linux::now_us();
-    let mut started = None;
-    while !crate::i915_request::__i915_request_is_complete(gt, rq) {
+    Ok(inflight { rq, t0: linux::now_us(), started: None, err })
+}
+
+/// The outcome of `f` once its request is complete, None while it is not.
+/// A request still queued behind other work after the job's time is given
+/// up (it runs as MI_NOOPs and retires; the kernel does the job on the
+/// CPU); one that runs too long wedges the GT after `on_timeout`.
+pub fn gpgpu_poll(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, f: &mut inflight, b: &batch,
+                  on_timeout: &mut dyn FnMut()) -> Option<Result<(), i32>> {
+    let (e, rq) = (gp.e, f.rq);
+    crate::intel_gt_requests::intel_engines_cs_irq(i915, gt);
+    crate::intel_gt_requests::intel_engine_flush_submission(i915, gt, e);
+    if !crate::i915_request::__i915_request_is_complete(gt, rq) {
         let now = linux::now_us();
-        if started.is_none() && crate::intel_execlists_submission::execlists_running(gt, e, rq) {
-            started = Some(now);
+        if f.started.is_none() && crate::intel_execlists_submission::execlists_running(gt, e, rq) {
+            f.started = Some(now);
         }
-        // Still queued behind other work after the job's time: give it up
-        // (it runs as MI_NOOPs and retires), the kernel does it on the CPU.
-        if started.is_none() && now - t0 > DISPATCH_TIMEOUT_US && crate::i915_request::i915_request_cancel(gt, rq) {
+        if f.started.is_none() && now - f.t0 > DISPATCH_TIMEOUT_US && crate::i915_request::i915_request_cancel(gt, rq) {
             crate::i915_request::i915_request_put(gt, rq);
-            return Err(-ETIME);
+            return Some(Err(-ETIME));
         }
-        if started.is_some_and(|s| now - s > DISPATCH_TIMEOUT_US) || now - t0 > crate::gpudev::START_TIMEOUT_US {
+        if f.started.is_some_and(|s| now - s > DISPATCH_TIMEOUT_US) || now - f.t0 > crate::gpudev::START_TIMEOUT_US {
             crate::i915_request::i915_request_put(gt, rq);
             linux::say("gpgpu: dispatch on rcs0 timed out, wedging");
             on_timeout();
@@ -508,19 +538,14 @@ pub fn gpgpu_run(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu, b: 
             crate::intel_engine_cs::intel_engine_print_registers(i915, gt, e);
             crate::intel_gt::gen8_check_faults(i915);
             crate::intel_gt::intel_gt_set_wedged(i915, gt);
-            return Err(-ETIME);
+            return Some(Err(-ETIME));
         }
-        crate::i915_irq::intel_irq_wait(i915, 2);
-        crate::intel_gt_requests::intel_engines_cs_irq(i915, gt);
-        crate::intel_gt_requests::intel_engine_flush_submission(i915, gt, e);
-        crate::intel_rps::intel_rps_run_pending(i915, gt);
-        crate::i915_gem_context::poll_native(i915, gt);
+        return None;
     }
     let failed = gt.requests[rq].error;
     crate::i915_request::i915_request_put(gt, rq);
     crate::intel_gt_requests::intel_gt_retire_requests(i915, gt);
-    err?;
-    if failed != 0 { Err(failed) } else { Ok(()) }
+    Some(f.err.and_then(|_| if failed != 0 { Err(failed) } else { Ok(()) }))
 }
 
 /// The self-test: `fill_pattern` writes (seed << 24) | (y << 12) | x into a

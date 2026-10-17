@@ -160,8 +160,8 @@ pub trait buffers {
 }
 
 /// Runs the scene of job `seq` (`bytes` of payload) into `target`.
-pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpgpu, c: &composer, bufs: &dyn buffers,
-                 seq: u32, target_id: u32, bytes: u32) -> Result<scene_report, i32> {
+pub fn submit_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpgpu, c: &composer, bufs: &dyn buffers,
+                    seq: u32, target_id: u32, bytes: u32) -> Result<scene_inflight, i32> {
     let mut hdr = [0u8; HEADER_BYTES as usize];
     if bytes < HEADER_BYTES {
         return Err(-EINVAL);
@@ -388,15 +388,36 @@ pub fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpg
     plan::plan(&mut s, &lim, &screen, &damage[..n_damage as usize], &shapes[..kept as usize], radius)?;
     let mut b = s.b;
     let t0 = linux::now_us();
-    let r = gpgpu::gpgpu_run(i915, gt, gp, &mut b, &mut || {
-        log.say_items(&shapes[..kept as usize]);
+    let f = gpgpu::gpgpu_submit(i915, gt, gp, &mut b)?;
+    let shapes = shapes[..kept as usize].to_vec();
+    Ok(scene_inflight { f, b, log, shapes, items: kept, t0 })
+}
+
+/// A scene on the render engine (`submit_scene`): its batch, buffers and
+/// the composer's scene block stay in use until `poll_scene` reports it.
+pub struct scene_inflight {
+    f: gpgpu::inflight,
+    b: gpgpu::batch,
+    log: dispatch_log,
+    shapes: alloc::vec::Vec<item_shape>,
+    items: u32,
+    t0: u64,
+}
+
+/// The report of scene `s` once it is done, None while it runs.
+pub fn poll_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, gp: &gpgpu::gpgpu, s: &mut scene_inflight)
+                  -> Option<Result<scene_report, i32>> {
+    let (log, shapes) = (s.log, &s.shapes);
+    let r = gpgpu::gpgpu_poll(i915, gt, gp, &mut s.f, &s.b, &mut || {
+        log.say_items(shapes);
         log.say(None);
-    });
-    let us = linux::now_us() - t0;
-    r?;
-    let n = gp.dispatch_ticks(&b, &mut log.ticks);
-    log.n_ticks = n;
-    Ok(scene_report { items: kept, dispatches: log.n, gpu_us: us, log })
+    })?;
+    let us = linux::now_us() - s.t0;
+    Some(r.map(|()| {
+        let mut log = s.log;
+        log.n_ticks = gp.dispatch_ticks(&s.b, &mut log.ticks);
+        scene_report { items: s.items, dispatches: log.n, gpu_us: us, log }
+    }))
 }
 
 /// What one scene did, for the log.

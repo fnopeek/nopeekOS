@@ -109,6 +109,9 @@ struct service {
     logged_idle: bool,
     gpgpu: Option<crate::gpgpu::gpgpu>,
     composer: Option<crate::compose::composer>,
+    /// The scene on the render engine, its job still open: its job's seq
+    /// and target buffer, and when the job began.
+    scene: Option<(u32, u32, u64, crate::compose::scene_inflight)>,
 }
 
 impl service {
@@ -453,14 +456,52 @@ fn run_copy(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, a
     }
 }
 
-/// One scene job.
+/// One scene job: handed to the render engine, its job left open until
+/// `poll_scene` sees it done. The service goes on meanwhile; the guests'
+/// commands do not wait for the desktop's scene.
 fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, seq: u32, a: [u32; 6]) -> i32 {
+    drain_scene(i915, gt, svc);
     let (Some(gp), Some(c)) = (svc.gpgpu.as_ref(), svc.composer.as_ref()) else { return -EINVAL };
     let t0 = linux::now_us();
-    let r = crate::compose::run_scene(i915, gt, gp, c, &*svc, seq, a[0], a[1]);
-    let us = linux::now_us() - t0;
+    match crate::compose::submit_scene(i915, gt, gp, c, &*svc, seq, a[0], a[1]) {
+        Ok(s) => {
+            svc.scene = Some((seq, a[0], t0, s));
+            JOB_OPEN
+        }
+        Err(x) => {
+            note_scene(gt, svc, a[0], linux::now_us() - t0, &Err(x));
+            x
+        }
+    }
+}
+
+/// Complete the scene's job once its request is done. True when it was.
+fn poll_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service) -> bool {
+    let (Some(gp), Some((_, _, _, s))) = (svc.gpgpu.as_ref(), svc.scene.as_mut()) else { return false };
+    let Some(r) = crate::compose::poll_scene(i915, gt, gp, s) else { return false };
+    let (seq, target, t0, _) = svc.scene.take().unwrap();
+    note_scene(gt, svc, target, linux::now_us() - t0, &r);
+    npk_sys::gpudev_complete(seq as i32, match r {
+        Ok(_) => 0,
+        Err(x) => x,
+    });
+    true
+}
+
+/// Wait for the scene on the render engine: a job that touches the
+/// desktop's buffers runs, and completes, after it.
+fn drain_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service) {
+    while svc.scene.is_some() && !poll_scene(i915, gt, svc) {
+        crate::i915_irq::intel_irq_wait(i915, 2);
+        crate::intel_rps::intel_rps_run_pending(i915, gt);
+        crate::i915_gem_context::poll_native(i915, gt);
+    }
+}
+
+/// Counters and log lines of a finished scene.
+fn note_scene(gt: &intel_gt, svc: &mut service, target: u32, us: u64, r: &Result<crate::compose::scene_report, i32>) {
     svc.scenes += 1;
-    match &r {
+    match r {
         Ok(rep) => {
             svc.scene_sum_us += us;
             svc.scene_gpu_us += rep.gpu_us;
@@ -469,7 +510,7 @@ fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, 
             if svc.scenes <= SCENES_LOGGED || slow {
                 svc.slow_logged += slow as u32;
                 Line::new().s("gpudev: scene ").dec(svc.scenes as u64).s(", ").dec(rep.items as u64).s(" items, ")
-                    .dec(rep.dispatches as u64).s(" dispatches into bo ").dec(a[0] as u64).s(": ").dec(us)
+                    .dec(rep.dispatches as u64).s(" dispatches into bo ").dec(target as u64).s(": ").dec(us)
                     .s(" us, of which the GPU ").dec(rep.gpu_us).s(" us at ")
                     .dec(crate::intel_rps::intel_rps_requested_mhz(gt) as u64).s(" MHz").dbg();
                 if linux::debug_enabled() {
@@ -478,7 +519,7 @@ fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, 
             }
         }
         Err(x) => {
-            Line::new().s("gpudev: scene into bo ").dec(a[0] as u64).s(" failed (").dec((-x) as u64).s(")").say();
+            Line::new().s("gpudev: scene into bo ").dec(target as u64).s(" failed (").dec((-x) as u64).s(")").say();
         }
     }
     if svc.scenes % SCENE_STATS_EVERY == 0 {
@@ -488,10 +529,6 @@ fn run_scene(i915: &mut drm_i915_private, gt: &mut intel_gt, svc: &mut service, 
         svc.scene_sum_us = 0;
         svc.scene_gpu_us = 0;
         svc.scene_max_us = 0;
-    }
-    match r {
-        Ok(_) => 0,
-        Err(x) => x,
     }
 }
 
@@ -585,6 +622,12 @@ fn run_job(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i915_ggtt,
         Ok(()) => 0,
         Err(x) => x,
     };
+    // Jobs on the desktop's buffers follow the scene in flight, on the
+    // card and in their completion: the kernel takes a buffer's last job
+    // as done only when every earlier one on it is.
+    if matches!(op, OP_COPY_RECT | OP_BO_ADD | OP_BO_REMOVE) {
+        drain_scene(i915, gt, svc);
+    }
     match op {
         OP_COPY_RECT => run_copy(i915, gt, svc, a),
         OP_BO_ADD => {
@@ -646,7 +689,7 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
 
     let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: [None; MAX_DYN], e, copy_ok: false, jobs: 0,
                             sum_us: 0, max_us: 0, scenes: 0, scene_sum_us: 0, scene_gpu_us: 0, slow_logged: 0, scene_max_us: 0, logged_idle: false,
-                            gpgpu: None, composer: None };
+                            gpgpu: None, composer: None, scene: None };
     for id in 0..NUM_BOS {
         let Some(b) = bo_info(id as u32) else {
             Line::new().s("gpudev: no buffer ").dec(id as u64).dbg();
@@ -751,9 +794,13 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         let held = crate::i915_gem_context::NCTX.with(|st| !st.held.is_empty())
             || WAITING.with(|w| !w.is_empty());
         let timeout = if held && (timeout < 0 || timeout > 1) { 1 } else { timeout };
+        // A scene in flight is looked at on its interrupt, at the latest
+        // after 2 ms as `gpgpu_run` does.
+        let timeout = if svc.scene.is_some() && (timeout < 0 || timeout > 2) { 2 } else { timeout };
         npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout);
         let pass_us = linux::now_us();
         service_interrupts(i915, gt);
+        poll_scene(i915, gt, &mut svc);
         crate::intel_rps::intel_rps_run_pending(i915, gt);
 
         if !svc.logged_idle && !crate::intel_gt_pm::intel_gt_pm_is_awake(gt) {
