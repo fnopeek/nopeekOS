@@ -49,7 +49,7 @@ pub fn reset() {
     }
     // Native contexts for this VM: a backend serves the host's GPU, and
     // `set microvm_gpu off` does not keep the guest on the CPU.
-    GPU.lock().set_nativectx(super::virtio_gpu_ctx::backend_ready() && mode != Some("off"));
+    GPU.lock().nativectx = super::virtio_gpu_ctx::backend_ready() && mode != Some("off");
     RESUME_TSC.store(0, Ordering::Release);
     MSIX.reset(super::msix::wanted());
     reset_vectors();
