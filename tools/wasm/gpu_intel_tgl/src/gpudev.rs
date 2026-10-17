@@ -503,70 +503,32 @@ fn run_ccmd(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i915_ggtt
         return -EINVAL;
     }
     CCMD_BUF.with(|b| {
+        let (req, rsp) = (&mut b.req, &mut b.rsp);
         let mut at = 0usize;
         while at < len {
-            let n = npk_sys::gpudev_job_data(seq as i32, at as i32, &mut b.req[at..len]);
+            let n = npk_sys::gpudev_job_data(seq as i32, at as i32, &mut req[at..len]);
             if n <= 0 {
                 return -EINVAL;
             }
             at += n as usize;
         }
-        answer_ccmd(i915, gt, ggtt, b, seq, client, len)
-    })
-}
-
-/// Dispatch the `len` bytes in `b.req` and reply. A command that waits for
-/// the GPU goes to `WAITING` with its bytes, and its job stays open.
-fn answer_ccmd(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i915_ggtt, b: &mut ccmd_buf,
-               seq: u32, client: u32, len: usize) -> i32 {
-    let (req, rsp) = (&mut b.req, &mut b.rsp);
-    // Zero-extended to the largest request struct (drm_context_submit_cmd_dispatch).
-    req[len..(len + 64).min(CCMD_MAX)].fill(0);
-    crate::i915_gem_context::NCTX.with(|st| {
-        let Some(c) = st.client_slot(client) else { return -EINVAL };
-        let mut d = crate::i915_gem_context::drm { i915, gt, ggtt };
-        match crate::virtio_ccmd::dispatch(st, &mut d, c as u8, &mut req[..], len, &mut rsp[..]) {
-            Ok(n) => {
-                if npk_sys::gpudev_reply(seq as i32, &rsp[..n]) != 0 {
-                    -ENOMEM
-                } else {
-                    0
+        // Zero-extended to the largest request struct (drm_context_submit_cmd_dispatch).
+        req[len..(len + 64).min(CCMD_MAX)].fill(0);
+        crate::i915_gem_context::NCTX.with(|st| {
+            let Some(c) = st.client_slot(client) else { return -EINVAL };
+            let mut d = crate::i915_gem_context::drm { i915, gt, ggtt };
+            match crate::virtio_ccmd::dispatch(st, &mut d, c as u8, &mut req[..], len, &mut rsp[..]) {
+                Ok(n) => {
+                    if npk_sys::gpudev_reply(seq as i32, &rsp[..n]) != 0 {
+                        -ENOMEM
+                    } else {
+                        0
+                    }
                 }
+                Err(e) => e,
             }
-            Err(crate::virtio_ccmd::CCMD_WAIT) => {
-                WAITING.with(|w| w.push(waiting_ccmd { seq, client, req: req[..len].to_vec() }));
-                JOB_OPEN
-            }
-            Err(e) => e,
-        }
+        })
     })
-}
-
-/// A ccmd waiting for the GPU (`virtio_ccmd::CCMD_WAIT`).
-struct waiting_ccmd {
-    seq: u32,
-    client: u32,
-    req: alloc::vec::Vec<u8>,
-}
-
-static WAITING: npk_sys::cell::Single<alloc::vec::Vec<waiting_ccmd>> =
-    npk_sys::cell::Single::new(alloc::vec::Vec::new());
-
-/// `run_job`'s status for a job that is not done yet: no completion now.
-const JOB_OPEN: i32 = i32::MIN;
-
-/// Dispatch the waiting ccmds again; those that no longer wait complete.
-fn run_waiting(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i915_ggtt) {
-    let waiting = WAITING.with(core::mem::take);
-    for w in waiting {
-        let status = CCMD_BUF.with(|b| {
-            b.req[..w.req.len()].copy_from_slice(&w.req);
-            answer_ccmd(i915, gt, ggtt, b, w.seq, w.client, w.req.len())
-        });
-        if status != JOB_OPEN {
-            npk_sys::gpudev_complete(w.seq as i32, status);
-        }
-    }
 }
 
 struct ccmd_buf {
@@ -746,10 +708,8 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
         } else {
             -1
         };
-        // A held execbuffer or a waiting ccmd is retried at least every
-        // millisecond.
-        let held = crate::i915_gem_context::NCTX.with(|st| !st.held.is_empty())
-            || WAITING.with(|w| !w.is_empty());
+        // A held execbuffer is retried at least every millisecond.
+        let held = crate::i915_gem_context::NCTX.with(|st| !st.held.is_empty());
         let timeout = if held && (timeout < 0 || timeout > 1) { 1 } else { timeout };
         npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout);
         let pass_us = linux::now_us();
@@ -767,9 +727,7 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
             let job = &jobs[j * JOB_BYTES..(j + 1) * JOB_BYTES];
             let seq = u32::from_le_bytes(job[0..4].try_into().unwrap());
             let status = run_job(i915, gt, ggtt, &mut svc, job);
-            if status != JOB_OPEN {
-                npk_sys::gpudev_complete(seq as i32, status);
-            }
+            npk_sys::gpudev_complete(seq as i32, status);
         }
         crate::i915_gem_context::NCTX.with(|st| {
             st.poll(i915, gt);
@@ -782,7 +740,6 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
             }
             st.stats.report(now);
         });
-        run_waiting(i915, gt, ggtt);
 
         if crate::intel_gt::intel_gt_is_wedged(gt) {
             linux::say("gpudev: GT wedged, giving the card back");
