@@ -1,0 +1,102 @@
+# The constants kernel/src/drivers/amd_vi.rs uses, from Linux 6.18.55
+# drivers/iommu/amd, computed by GCC (tools/amd-vi-regs.py). `NAME @ file`
+# or `NAME = expr @ file`; file is relative to drivers/iommu/amd.
+# MMIO registers and their fields (amd_iommu_types.h)
+MMIO_DEV_TABLE_OFFSET @ amd_iommu_types.h
+MMIO_CMD_BUF_OFFSET @ amd_iommu_types.h
+MMIO_EVT_BUF_OFFSET @ amd_iommu_types.h
+MMIO_CONTROL_OFFSET @ amd_iommu_types.h
+MMIO_EXCL_BASE_OFFSET @ amd_iommu_types.h
+MMIO_EXCL_LIMIT_OFFSET @ amd_iommu_types.h
+MMIO_EXT_FEATURES @ amd_iommu_types.h
+MMIO_CMD_HEAD_OFFSET @ amd_iommu_types.h
+MMIO_CMD_TAIL_OFFSET @ amd_iommu_types.h
+MMIO_EVT_HEAD_OFFSET @ amd_iommu_types.h
+MMIO_EVT_TAIL_OFFSET @ amd_iommu_types.h
+MMIO_STATUS_OFFSET @ amd_iommu_types.h
+MMIO_EXCL_ENABLE_MASK @ amd_iommu_types.h
+MMIO_CMD_SIZE_512 @ amd_iommu_types.h
+MMIO_STATUS_EVT_OVERFLOW_MASK @ amd_iommu_types.h
+MMIO_STATUS_EVT_RUN_MASK @ amd_iommu_types.h
+MMIO_STATUS_COM_WAIT_INT_MASK @ amd_iommu_types.h
+# Control register bits (amd_iommu_types.h)
+CONTROL_IOMMU_EN @ amd_iommu_types.h
+CONTROL_HT_TUN_EN @ amd_iommu_types.h
+CONTROL_EVT_LOG_EN @ amd_iommu_types.h
+CONTROL_EVT_INT_EN @ amd_iommu_types.h
+CONTROL_INV_TIMEOUT @ amd_iommu_types.h
+CONTROL_PASSPW_EN @ amd_iommu_types.h
+CONTROL_RESPASSPW_EN @ amd_iommu_types.h
+CONTROL_COHERENT_EN @ amd_iommu_types.h
+CONTROL_ISOC_EN @ amd_iommu_types.h
+CONTROL_CMDBUF_EN @ amd_iommu_types.h
+CONTROL_PPRLOG_EN @ amd_iommu_types.h
+CONTROL_PPRINT_EN @ amd_iommu_types.h
+CONTROL_GT_EN @ amd_iommu_types.h
+CONTROL_GA_EN @ amd_iommu_types.h
+CONTROL_GALOG_EN @ amd_iommu_types.h
+CONTROL_GAINT_EN @ amd_iommu_types.h
+CONTROL_EPH_EN @ amd_iommu_types.h
+CTRL_INV_TO_MASK @ amd_iommu_types.h
+CTRL_INV_TO_1S @ amd_iommu_types.h
+# Features (amd_iommu_types.h)
+FEATURE_GT @ amd_iommu_types.h
+FEATURE_IA @ amd_iommu_types.h
+FEATURE_EPHSUP @ amd_iommu_types.h
+FEATURE_GAM_VAPIC @ amd_iommu_types.h
+# Buffers (amd_iommu_types.h)
+CMD_BUFFER_SIZE @ amd_iommu_types.h
+EVTLOG_SIZE_DEF @ amd_iommu_types.h
+EVTLOG_LEN_MASK_DEF @ amd_iommu_types.h
+EVTLOG_ENTRY_SIZE @ amd_iommu_types.h
+LOOP_TIMEOUT @ amd_iommu_types.h
+DEV_TABLE_ENTRY_SIZE = sizeof(struct dev_table_entry) @ amd_iommu_types.h
+IOMMU_CMD_SIZE = sizeof(struct iommu_cmd) @ amd_iommu_types.h
+# Commands (amd_iommu_types.h)
+CMD_COMPL_WAIT @ amd_iommu_types.h
+CMD_INV_ALL @ amd_iommu_types.h
+CMD_COMPL_WAIT_STORE_MASK @ amd_iommu_types.h
+# Events (amd_iommu_types.h)
+EVENT_TYPE_SHIFT @ amd_iommu_types.h
+EVENT_TYPE_MASK @ amd_iommu_types.h
+EVENT_DEVID_SHIFT @ amd_iommu_types.h
+EVENT_DEVID_MASK @ amd_iommu_types.h
+EVENT_DOMID_MASK_HI @ amd_iommu_types.h
+EVENT_DOMID_MASK_LO @ amd_iommu_types.h
+EVENT_FLAGS_SHIFT @ amd_iommu_types.h
+EVENT_FLAGS_MASK @ amd_iommu_types.h
+EVENT_TYPE_ILL_DEV @ amd_iommu_types.h
+EVENT_TYPE_IO_FAULT @ amd_iommu_types.h
+EVENT_TYPE_DEV_TAB_ERR @ amd_iommu_types.h
+EVENT_TYPE_PAGE_TAB_ERR @ amd_iommu_types.h
+EVENT_TYPE_ILL_CMD @ amd_iommu_types.h
+EVENT_TYPE_CMD_HARD_ERR @ amd_iommu_types.h
+EVENT_TYPE_IOTLB_INV_TO @ amd_iommu_types.h
+EVENT_TYPE_INV_DEV_REQ @ amd_iommu_types.h
+EVENT_TYPE_INV_PPR_REQ @ amd_iommu_types.h
+EVENT_TYPE_RMP_FAULT @ amd_iommu_types.h
+EVENT_TYPE_RMP_HW_ERR @ amd_iommu_types.h
+EVENT_FLAG_RW @ amd_iommu_types.h
+EVENT_FLAG_I @ amd_iommu_types.h
+# Device table entry bits (amd_iommu_types.h)
+DEV_ENTRY_INIT_PASS @ amd_iommu_types.h
+DEV_ENTRY_EINT_PASS @ amd_iommu_types.h
+DEV_ENTRY_NMI_PASS @ amd_iommu_types.h
+DEV_ENTRY_SYSMGT1 @ amd_iommu_types.h
+DEV_ENTRY_SYSMGT2 @ amd_iommu_types.h
+DEV_ENTRY_LINT0_PASS @ amd_iommu_types.h
+DEV_ENTRY_LINT1_PASS @ amd_iommu_types.h
+DTE_FLAG_IW @ amd_iommu_types.h
+DTE_DATA1_SYSMGT_MASK @ amd_iommu_types.h
+# IVHD and IVHD entry flags (init.c)
+IVHD_FLAG_HT_TUN_EN_MASK @ init.c
+IVHD_FLAG_PASSPW_EN_MASK @ init.c
+IVHD_FLAG_RESPASSPW_EN_MASK @ init.c
+IVHD_FLAG_ISOC_EN_MASK @ init.c
+ACPI_DEVFLAG_INITPASS @ init.c
+ACPI_DEVFLAG_EXTINT @ init.c
+ACPI_DEVFLAG_NMI @ init.c
+ACPI_DEVFLAG_SYSMGT1 @ init.c
+ACPI_DEVFLAG_SYSMGT2 @ init.c
+ACPI_DEVFLAG_LINT0 @ init.c
+ACPI_DEVFLAG_LINT1 @ init.c

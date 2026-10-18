@@ -251,6 +251,34 @@ pub fn allocate_contiguous_below(count: usize, limit_bytes: u64) -> Option<u64> 
     }
 }
 
+/// Allocate `count` contiguous frames whose base is a multiple of `align`
+/// frames (a power of two), wholly below `limit_bytes`: what Linux's
+/// buddy allocator gives a `GFP_DMA32` request of a power-of-two size, for
+/// hardware that wants its tables naturally aligned under 4 GiB.
+pub fn allocate_contiguous_aligned_below(count: usize, align: usize, limit_bytes: u64) -> Option<u64> {
+    if count == 0 || align == 0 || !align.is_power_of_two() {
+        return None;
+    }
+    let mut alloc = ALLOCATOR.lock();
+    let top = ((limit_bytes / PAGE_SIZE as u64) as usize).min(alloc.memory_top);
+    if count > top {
+        return None;
+    }
+    let mut start = (top - count) & !(align - 1);
+    loop {
+        if (start..start + count).all(|f| alloc.bitmap[f / 8] & (1 << (f % 8)) == 0) {
+            for f in start..start + count {
+                alloc.set_used(f);
+            }
+            return Some((start * PAGE_SIZE) as u64);
+        }
+        if start < align {
+            return None;
+        }
+        start -= align;
+    }
+}
+
 /// Allocate `count` contiguous physical frames, searching from the top of
 /// memory, where RAM is almost always free. Returns the base address.
 pub fn allocate_contiguous(count: usize) -> Option<u64> {

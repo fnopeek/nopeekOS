@@ -1,13 +1,21 @@
-//! AMD-Vi (the AMD IOMMU), stage 0 of docs/plan/AMD_VI.md: the IVRS table
-//! and the IOMMU's registers read the way Linux 6.18.55
-//! drivers/iommu/amd/init.c reads them, and printed in the shape of its
-//! `amd_iommu_dump` lines. Nothing is written: no device table, no command
-//! buffer, translation stays as the firmware left it.
+//! AMD-Vi (the AMD IOMMU), after Linux 6.18.55 drivers/iommu/amd.
+//!
+//! Stage 0 of docs/plan/AMD_VI.md (`dump`): the IVRS table and the IOMMU's
+//! registers read the way init.c reads them, printed in the shape of its
+//! `amd_iommu_dump` lines.
+//!
+//! Stage 1 (`enable`): the IOMMU switched on as `state_next` does it up to
+//! the event buffer, with a device table whose entries are all `V = 0`.
+//! A DTE without V is passed through untranslated, so no device's reach
+//! changes; the entries carry only the IVHD's persistent flags.
+//! `init_device_table_dma`, which blocks every device without a domain,
+//! is stage 6. Events are polled; `EVT_INT_EN` stays off.
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::hw::Mmio;
+use crate::hw::{DmaRegion, Mmio};
 use crate::kprintln;
+use super::amd_vi_regs as r;
 
 /// init.c:43
 const IVRS_HEADER_LENGTH: usize = 48;
@@ -399,26 +407,9 @@ pub fn dump() {
 /// The IOMMU's registers, read only: Control (translation must still be off),
 /// Status, EFR and EFR2 from MMIO next to the IVHD's copy.
 fn mmio(phys: u64, end: u64, ivhd_efr: Option<(u64, u64)>) {
-    let regs = {
-        let mut mapped = MAPPED.lock();
-        match mapped.iter().find(|m| m.0 == phys) {
-            Some(m) => m.1,
-            None => {
-                // SAFETY: the IVHD names this window as the IOMMU's registers
-                // (reserved as platform MMIO by acpi::platform_mmio_ranges);
-                // it is only read.
-                match unsafe { Mmio::map(phys & !0xfff, end) } {
-                    Ok(r) => {
-                        mapped.push((phys, r));
-                        r
-                    }
-                    Err(_) => {
-                        kprintln!("[amd-vi] the register window at {:#x} could not be mapped", phys);
-                        return;
-                    }
-                }
-            }
-        }
+    let Some(regs) = map_regs(phys, end) else {
+        kprintln!("[amd-vi] the register window at {:#x} could not be mapped", phys);
+        return;
     };
     let control = regs.r64_lo_hi(MMIO_CONTROL_OFFSET);
     let status = regs.r64_lo_hi(MMIO_STATUS_OFFSET);
@@ -432,4 +423,610 @@ fn mmio(phys: u64, end: u64, ivhd_efr: Option<(u64, u64)>) {
     }
     let hats = (efr & FEATURE_HATS_MASK) >> FEATURE_HATS_SHIFT;
     kprintln!("[amd-vi] HATS {}: host page table up to {} levels (amd_iommu_hpt_level = HATS + 4)", hats, hats + 4);
+}
+
+/// The IOMMU's register window, mapped once and kept.
+fn map_regs(phys: u64, end: u64) -> Option<Mmio> {
+    let mut mapped = MAPPED.lock();
+    if let Some(m) = mapped.iter().find(|m| m.0 == phys) {
+        return Some(m.1);
+    }
+    // SAFETY: the IVHD names this window as the IOMMU's registers, reserved
+    // as platform MMIO by acpi::platform_mmio_ranges; only this driver
+    // touches it.
+    let regs = unsafe { Mmio::map(phys & !0xfff, end) }.ok()?;
+    mapped.push((phys, regs));
+    Some(regs)
+}
+
+/// `find_last_devid_acpi` (init.c:606): the highest devid the IVHDs of the
+/// chosen type name.
+fn find_last_devid_acpi(t: &[u8], target: u8) -> u32 {
+    let mut last_bdf = 0u32;
+    let mut p = IVRS_HEADER_LENGTH;
+    while p + IVHD_LENGTH + 2 <= t.len() {
+        let len = u16_at(t, p + IVHD_LENGTH) as usize;
+        if len == 0 {
+            break;
+        }
+        if u8_at(t, p + IVHD_TYPE) == target {
+            let d = find_last_devid_from_ivhd(t, p);
+            if d > last_bdf as i32 {
+                last_bdf = d as u32;
+            }
+        }
+        p += len;
+    }
+    last_bdf
+}
+
+/// One event of the event log (`iommu_print_event`, iommu.c:886).
+#[derive(Clone, Copy)]
+pub struct Event {
+    pub kind: u32,
+    pub devid: u16,
+    pub pasid: u32,
+    pub flags: u32,
+    pub address: u64,
+}
+
+/// What `status` reports for `gpu iommu`.
+pub struct Status {
+    pub mmio_phys: u64,
+    pub devid: u16,
+    pub last_bdf: u32,
+    pub control: u64,
+    pub status: u64,
+    pub events_total: u64,
+    pub completion_waits: u64,
+}
+
+/// The IOMMU after stage 1.
+struct Iommu {
+    regs: Mmio,
+    mmio_phys: u64,
+    devid: u16,
+    /// `acpi_flags`: the IVHD's recommended feature bits.
+    acpi_flags: u8,
+    efr: u64,
+    last_bdf: u32,
+    dev_table: DmaRegion,
+    dev_table_size: u64,
+    /// `alias_table[devid]`, identity where the IVHD names no alias.
+    alias_table: Vec<u16>,
+    /// The IVHD's persistent DTE flags, `amd_ivhd_dev_flags_list`:
+    /// (first, last, dte).
+    ivhd_dte_flags: Vec<(u16, u16, [u64; 4])>,
+    cmd_buf: DmaRegion,
+    cmd_buf_head: u32,
+    cmd_buf_tail: u32,
+    cmd_sem: DmaRegion,
+    cmd_sem_val: u64,
+    need_sync: bool,
+    evt_buf: DmaRegion,
+    events: Vec<Event>,
+    events_total: u64,
+    completion_waits: u64,
+}
+
+static IOMMU: spin::Mutex<Option<Iommu>> = spin::Mutex::new(None);
+
+/// `udelay`.
+fn udelay(us: u64) {
+    let freq = crate::interrupts::tsc_freq();
+    if freq == 0 {
+        for _ in 0..(us * 100) { core::hint::spin_loop(); }
+        return;
+    }
+    let deadline = crate::interrupts::rdtsc() + freq / 1_000_000 * us;
+    while crate::interrupts::rdtsc() < deadline { core::hint::spin_loop(); }
+}
+
+impl Iommu {
+    /// `iommu_feature_set` (init.c:421).
+    fn feature_set(&self, val: u64, mask: u64, shift: u32) {
+        let mut ctrl = self.regs.r64(r::MMIO_CONTROL_OFFSET);
+        let mask = mask << shift;
+        ctrl &= !mask;
+        ctrl |= (val << shift) & mask;
+        self.regs.w64(r::MMIO_CONTROL_OFFSET, ctrl);
+    }
+
+    /// `iommu_feature_enable`.
+    fn feature_enable(&self, bit: u32) {
+        self.feature_set(1, 1, bit);
+    }
+
+    /// `iommu_feature_disable`.
+    fn feature_disable(&self, bit: u32) {
+        self.feature_set(0, 1, bit);
+    }
+
+    /// `iommu_disable` (init.c:449).
+    fn disable(&self) {
+        // Disable command buffer
+        self.feature_disable(r::CONTROL_CMDBUF_EN);
+        // Disable event logging and event interrupts
+        self.feature_disable(r::CONTROL_EVT_INT_EN);
+        self.feature_disable(r::CONTROL_EVT_LOG_EN);
+        // Disable IOMMU GA_LOG
+        self.feature_disable(r::CONTROL_GALOG_EN);
+        self.feature_disable(r::CONTROL_GAINT_EN);
+        // Disable IOMMU PPR logging
+        self.feature_disable(r::CONTROL_PPRLOG_EN);
+        self.feature_disable(r::CONTROL_PPRINT_EN);
+        // Disable IOMMU hardware itself
+        self.feature_disable(r::CONTROL_IOMMU_EN);
+    }
+
+    /// `iommu_init_flags` (init.c:2773).
+    fn init_flags(&self) {
+        let f = self.acpi_flags as u32;
+        let set = |mask: u32, bit: u32| if f & mask != 0 { self.feature_enable(bit) } else { self.feature_disable(bit) };
+        set(r::IVHD_FLAG_HT_TUN_EN_MASK, r::CONTROL_HT_TUN_EN);
+        set(r::IVHD_FLAG_PASSPW_EN_MASK, r::CONTROL_PASSPW_EN);
+        set(r::IVHD_FLAG_RESPASSPW_EN_MASK, r::CONTROL_RESPASSPW_EN);
+        set(r::IVHD_FLAG_ISOC_EN_MASK, r::CONTROL_ISOC_EN);
+        // make IOMMU memory accesses cache coherent
+        self.feature_enable(r::CONTROL_COHERENT_EN);
+        // Set IOTLB invalidation timeout to 1s
+        self.feature_set(r::CTRL_INV_TO_1S as u64, r::CTRL_INV_TO_MASK as u64, r::CONTROL_INV_TIMEOUT);
+        // Enable Enhanced Peripheral Page Request Handling
+        if self.efr & r::FEATURE_EPHSUP as u64 != 0 {
+            self.feature_enable(r::CONTROL_EPH_EN);
+        }
+    }
+
+    /// `iommu_set_device_table` (init.c:404).
+    fn set_device_table(&self) {
+        let entry = self.dev_table.phys() | ((self.dev_table_size >> 12) - 1);
+        self.regs.w64(r::MMIO_DEV_TABLE_OFFSET, entry);
+    }
+
+    /// `amd_iommu_reset_cmd_buffer` (init.c:805).
+    fn reset_cmd_buffer(&mut self) {
+        self.feature_disable(r::CONTROL_CMDBUF_EN);
+        self.regs.w32(r::MMIO_CMD_HEAD_OFFSET, 0);
+        self.regs.w32(r::MMIO_CMD_TAIL_OFFSET, 0);
+        self.cmd_buf_head = 0;
+        self.cmd_buf_tail = 0;
+        self.feature_enable(r::CONTROL_CMDBUF_EN);
+    }
+
+    /// `iommu_enable_command_buffer` (init.c:821).
+    fn enable_command_buffer(&mut self) {
+        let entry = self.cmd_buf.phys() | r::MMIO_CMD_SIZE_512;
+        self.regs.w64(r::MMIO_CMD_BUF_OFFSET, entry);
+        self.reset_cmd_buffer();
+    }
+
+    /// `iommu_enable_gt` (init.c:1139).
+    fn enable_gt(&self) {
+        if self.efr & r::FEATURE_GT as u64 == 0 {
+            return;
+        }
+        self.feature_enable(r::CONTROL_GT_EN);
+    }
+
+    /// `iommu_enable_ga` (init.c:2847). `amd_iommu_guest_ir` is
+    /// AMD_IOMMU_GUEST_IR_VAPIC by default and stays so with GAM_VAPIC
+    /// (early_amd_iommu_init); the 128-bit IRTE format matters only to
+    /// interrupt remapping, which is stage 5.
+    fn enable_ga(&self) {
+        if self.efr & r::FEATURE_GAM_VAPIC as u64 != 0 {
+            self.feature_enable(r::CONTROL_GA_EN);
+        }
+    }
+
+    /// `copy_cmd_to_buffer` (iommu.c:1182).
+    fn copy_cmd_to_buffer(&mut self, cmd: [u32; 4]) {
+        let tail = self.cmd_buf_tail;
+        self.cmd_buf.write_obj(tail as u64, cmd);
+        let tail = (tail + r::IOMMU_CMD_SIZE) % r::CMD_BUFFER_SIZE;
+        self.cmd_buf_tail = tail;
+        // Tell the IOMMU about it
+        self.regs.w32(r::MMIO_CMD_TAIL_OFFSET, tail);
+    }
+
+    /// `__iommu_queue_command_sync` (iommu.c:1338).
+    fn queue_command_sync(&mut self, cmd: [u32; 4], sync: bool) -> Result<(), &'static str> {
+        let mut count = 0u32;
+        let next_tail = (self.cmd_buf_tail + r::IOMMU_CMD_SIZE) % r::CMD_BUFFER_SIZE;
+        loop {
+            let left = self.cmd_buf_head.wrapping_sub(next_tail) % r::CMD_BUFFER_SIZE;
+            if left > 0x20 {
+                break;
+            }
+            // Skip udelay() the first time around
+            if count > 0 {
+                if count == r::LOOP_TIMEOUT {
+                    kprintln!("[amd-vi] Command buffer timeout");
+                    return Err("command buffer timeout");
+                }
+                udelay(1);
+            }
+            count += 1;
+            // Update head and recheck remaining space
+            self.cmd_buf_head = self.regs.r32(r::MMIO_CMD_HEAD_OFFSET);
+        }
+        self.copy_cmd_to_buffer(cmd);
+        // Do we need to make sure all commands are processed?
+        self.need_sync = sync;
+        Ok(())
+    }
+
+    /// `wait_on_sem` (iommu.c:1160).
+    fn wait_on_sem(&self, data: u64) -> Result<(), &'static str> {
+        let mut i = 0;
+        while (self.cmd_sem.r64(0u64).wrapping_sub(data) as i64) < 0 && i < r::LOOP_TIMEOUT {
+            udelay(1);
+            i += 1;
+        }
+        if i == r::LOOP_TIMEOUT {
+            kprintln!("[amd-vi] Completion-Wait loop timed out");
+            return Err("completion wait timed out");
+        }
+        Ok(())
+    }
+
+    /// `iommu_completion_wait` with `build_completion_wait` (iommu.c:1404,
+    /// 1200): the IOMMU stores `data` at the semaphore when every command
+    /// before it is done.
+    fn completion_wait(&mut self) -> Result<(), &'static str> {
+        if !self.need_sync {
+            return Ok(());
+        }
+        self.cmd_sem_val += 1;
+        let data = self.cmd_sem_val;
+        let paddr = self.cmd_sem.phys();
+        let cmd = [
+            paddr as u32 | r::CMD_COMPL_WAIT_STORE_MASK,
+            (paddr >> 32) as u32 | r::CMD_COMPL_WAIT << 28,
+            data as u32,
+            (data >> 32) as u32,
+        ];
+        self.queue_command_sync(cmd, false)?;
+        self.completion_waits += 1;
+        self.wait_on_sem(data)
+    }
+
+    /// `amd_iommu_flush_all_caches` (iommu.c:1547): with FEATURE_IA one
+    /// INVALIDATE_ALL (`amd_iommu_flush_all`, `build_inv_all`).
+    fn flush_all_caches(&mut self) -> Result<(), &'static str> {
+        if self.efr & r::FEATURE_IA as u64 == 0 {
+            return Err("the IOMMU has no INVALIDATE_ALL; flushing entry by entry is not ported");
+        }
+        self.queue_command_sync([0, r::CMD_INV_ALL << 28, 0, 0], true)?;
+        self.completion_wait()
+    }
+
+    /// `iommu_enable_event_buffer` (init.c:888).
+    fn enable_event_buffer(&self) {
+        let entry = self.evt_buf.phys() | r::EVTLOG_LEN_MASK_DEF;
+        self.regs.w64(r::MMIO_EVT_BUF_OFFSET, entry);
+        // set head and tail to zero manually
+        self.regs.w32(r::MMIO_EVT_HEAD_OFFSET, 0);
+        self.regs.w32(r::MMIO_EVT_TAIL_OFFSET, 0);
+        self.feature_enable(r::CONTROL_EVT_LOG_EN);
+    }
+
+    /// `iommu_print_event` (iommu.c:886): one entry, recorded and printed.
+    fn print_event(&mut self, at: u32) {
+        let mut count = 0;
+        let ev = loop {
+            let e: [u32; 4] = self.evt_buf.read_obj(at as u64);
+            let kind = (e[1] >> r::EVENT_TYPE_SHIFT) & r::EVENT_TYPE_MASK;
+            if kind != 0 {
+                break e;
+            }
+            // Did we hit the erratum?
+            count += 1;
+            if count == r::LOOP_TIMEOUT {
+                kprintln!("[amd-vi] No event written to event log");
+                return;
+            }
+            udelay(1);
+        };
+        let event = Event {
+            kind: (ev[1] >> r::EVENT_TYPE_SHIFT) & r::EVENT_TYPE_MASK,
+            devid: ((ev[0] >> r::EVENT_DEVID_SHIFT) & r::EVENT_DEVID_MASK) as u16,
+            pasid: (ev[0] & r::EVENT_DOMID_MASK_HI) | (ev[1] & r::EVENT_DOMID_MASK_LO),
+            flags: (ev[1] >> r::EVENT_FLAGS_SHIFT) & r::EVENT_FLAGS_MASK,
+            address: (ev[3] as u64) << 32 | ev[2] as u64,
+        };
+        let d = bdf(event.devid as u32);
+        let name = match event.kind {
+            r::EVENT_TYPE_IO_FAULT => "IO_PAGE_FAULT",
+            r::EVENT_TYPE_ILL_DEV => "ILLEGAL_DEV_TABLE_ENTRY",
+            r::EVENT_TYPE_DEV_TAB_ERR => "DEV_TAB_HARDWARE_ERROR",
+            r::EVENT_TYPE_PAGE_TAB_ERR => "PAGE_TAB_HARDWARE_ERROR",
+            r::EVENT_TYPE_ILL_CMD => "ILLEGAL_COMMAND_ERROR",
+            r::EVENT_TYPE_CMD_HARD_ERR => "COMMAND_HARDWARE_ERROR",
+            r::EVENT_TYPE_IOTLB_INV_TO => "IOTLB_INV_TIMEOUT",
+            r::EVENT_TYPE_INV_DEV_REQ => "INVALID_DEVICE_REQUEST",
+            r::EVENT_TYPE_INV_PPR_REQ => "INVALID_PPR_REQUEST",
+            r::EVENT_TYPE_RMP_FAULT => "RMP_PAGE_FAULT",
+            r::EVENT_TYPE_RMP_HW_ERR => "RMP_HW_ERROR",
+            _ => "UNKNOWN",
+        };
+        kprintln!("[amd-vi] Event logged [{} device=0000:{} pasid={:#07x} address={:#x} flags={:#06x}]",
+            name, d, event.pasid, event.address, event.flags);
+        self.events.push(event);
+        self.events_total += 1;
+        // To detect the hardware errata 732 we need to clear the entry back
+        // to zero; an IO_PAGE_FAULT returns before that in Linux.
+        if event.kind != r::EVENT_TYPE_IO_FAULT {
+            self.evt_buf.write_obj(at as u64, [0u32; 4]);
+        }
+    }
+
+    /// `iommu_poll_events` (iommu.c:984).
+    fn poll_events(&mut self) {
+        let mut head = self.regs.r32(r::MMIO_EVT_HEAD_OFFSET);
+        let tail = self.regs.r32(r::MMIO_EVT_TAIL_OFFSET);
+        while head != tail {
+            self.print_event(head);
+            // Update head pointer of hardware ring-buffer
+            head = (head + r::EVTLOG_ENTRY_SIZE) % r::EVTLOG_SIZE_DEF;
+            self.regs.w32(r::MMIO_EVT_HEAD_OFFSET, head);
+        }
+    }
+
+    /// `early_enable_iommu` (init.c:2901).
+    fn early_enable(&mut self) -> Result<(), &'static str> {
+        self.disable();
+        self.init_flags();
+        self.set_device_table();
+        self.enable_command_buffer();
+        // iommu_set_exclusion_range: exclusion_start is never set.
+        self.enable_gt();
+        self.enable_ga();
+        // iommu_enable_xt: x2APIC mode only with interrupt remapping.
+        // iommu_enable_irtcachedis: amd_iommu_irtcachedis is off.
+        // iommu_enable_2k_int: EFR2 without NUM_INT_REMAP_SUP_2K on Renoir;
+        // it belongs to interrupt remapping like the two above.
+        self.feature_enable(r::CONTROL_IOMMU_EN);
+        self.flush_all_caches()
+    }
+}
+
+/// `set_dte_bit` (init.c:1148).
+fn set_dte_bit(dte: &mut [u64; 4], bit: u32) {
+    dte[((bit >> 6) & 3) as usize] |= 1u64 << (bit & 0x3f);
+}
+
+/// `set_dev_entry_from_acpi_range` (init.c:1289): the IVHD's flags as
+/// DTE bits, into the table and the persistent list, for `first..=last`.
+fn set_dev_entry_from_acpi_range(io: &mut Iommu, first: u32, last: u32, flags: u8) {
+    if flags == 0 {
+        return;
+    }
+    if io.ivhd_dte_flags.iter().any(|e| e.0 as u32 == first && e.1 as u32 == last) {
+        return;
+    }
+    let mut dte = [0u64; 4];
+    let f = flags as u32;
+    let bits = [
+        (r::ACPI_DEVFLAG_INITPASS, r::DEV_ENTRY_INIT_PASS), (r::ACPI_DEVFLAG_EXTINT, r::DEV_ENTRY_EINT_PASS),
+        (r::ACPI_DEVFLAG_NMI, r::DEV_ENTRY_NMI_PASS), (r::ACPI_DEVFLAG_SYSMGT1, r::DEV_ENTRY_SYSMGT1),
+        (r::ACPI_DEVFLAG_SYSMGT2, r::DEV_ENTRY_SYSMGT2), (r::ACPI_DEVFLAG_LINT0, r::DEV_ENTRY_LINT0_PASS),
+        (r::ACPI_DEVFLAG_LINT1, r::DEV_ENTRY_LINT1_PASS),
+    ];
+    for (mask, bit) in bits {
+        if f & mask != 0 {
+            set_dte_bit(&mut dte, bit);
+        }
+    }
+    // Apply erratum 63, which needs info in initial_dte
+    let mask = r::DTE_DATA1_SYSMGT_MASK;
+    if (dte[1] & mask) >> mask.trailing_zeros() == 0x1 {
+        dte[0] |= r::DTE_FLAG_IW;
+    }
+    io.ivhd_dte_flags.push((first as u16, last as u16, dte));
+    for i in first..=last.min(io.last_bdf) {
+        let at = i as u64 * r::DEV_TABLE_ENTRY_SIZE as u64;
+        for (k, d) in dte.iter().enumerate() {
+            io.dev_table.w64(at + 8 * k as u64, *d);
+        }
+    }
+}
+
+/// `init_iommu_from_acpi` (init.c:1461): the entries' flags and aliases.
+fn init_iommu_from_acpi(io: &mut Iommu, t: &[u8], h: usize) -> Result<(), &'static str> {
+    let ty = u8_at(t, h + IVHD_TYPE);
+    io.acpi_flags = u8_at(t, h + IVHD_FLAGS);
+    let size = get_ivhd_header_size(ty);
+    if size == 0 {
+        return Err("unsupported IVHD type");
+    }
+    let (mut p, end) = (h + size, h + u16_at(t, h + IVHD_LENGTH) as usize);
+    let (mut devid_start, mut devid_to, mut flags, mut alias) = (0u32, 0u32, 0u8, false);
+    while p < end {
+        let e_ty = u8_at(t, p);
+        let devid = u16_at(t, p + IVHD_ENTRY_DEVID) as u32;
+        let e_flags = u8_at(t, p + IVHD_ENTRY_FLAGS);
+        let ext = u32_at(t, p + IVHD_ENTRY_EXT);
+        match e_ty {
+            IVHD_DEV_ALL => set_dev_entry_from_acpi_range(io, 0, io.last_bdf, e_flags),
+            IVHD_DEV_SELECT | IVHD_DEV_EXT_SELECT => set_dev_entry_from_acpi_range(io, devid, devid, e_flags),
+            IVHD_DEV_SELECT_RANGE_START | IVHD_DEV_EXT_SELECT_RANGE => {
+                devid_start = devid;
+                flags = e_flags;
+                alias = false;
+            }
+            IVHD_DEV_ALIAS => {
+                let to = (ext >> 8) & 0xffff;
+                set_dev_entry_from_acpi_range(io, devid, devid, e_flags);
+                set_dev_entry_from_acpi_range(io, to, to, e_flags);
+                if let Some(a) = io.alias_table.get_mut(devid as usize) {
+                    *a = to as u16;
+                }
+            }
+            IVHD_DEV_ALIAS_RANGE => {
+                devid_start = devid;
+                flags = e_flags;
+                devid_to = (ext >> 8) & 0xffff;
+                alias = true;
+            }
+            IVHD_DEV_RANGE_END => {
+                if alias {
+                    for d in devid_start..=devid {
+                        if let Some(a) = io.alias_table.get_mut(d as usize) {
+                            *a = devid_to as u16;
+                        }
+                    }
+                    set_dev_entry_from_acpi_range(io, devid_to, devid_to, flags);
+                }
+                set_dev_entry_from_acpi_range(io, devid_start, devid, flags);
+            }
+            IVHD_DEV_SPECIAL => {
+                let special = (ext >> 8) & 0xffff;
+                set_dev_entry_from_acpi_range(io, special, special, e_flags);
+            }
+            IVHD_DEV_ACPI_HID if ty == 0x40 => set_dev_entry_from_acpi_range(io, devid, devid, e_flags),
+            _ => {}
+        }
+        let n = ivhd_entry_length(t, p);
+        if n == 0 {
+            break;
+        }
+        p += n;
+    }
+    Ok(())
+}
+
+/// Stage 1: the IOMMU on, every device passed through. Idempotent.
+pub fn enable() -> Result<(), &'static str> {
+    if IOMMU.lock().is_some() {
+        return Ok(());
+    }
+    let ivrs = crate::drivers::acpi::table(b"IVRS").ok_or("no IVRS table")?;
+    let t = ivrs.bytes();
+    if !check_ivrs_checksum(t) {
+        return Err("IVRS invalid checksum");
+    }
+    let ivinfo = u32_at(t, IOMMU_IVINFO_OFFSET);
+    let target = get_highest_supported_ivhd_type(t);
+    let last_bdf = find_last_devid_acpi(t, target);
+
+    // The one IVHD of the target type; a second IOMMU is not ported.
+    let mut ivhds = Vec::new();
+    let mut p = IVRS_HEADER_LENGTH;
+    while p + IVHD_LENGTH + 2 <= t.len() {
+        let len = u16_at(t, p + IVHD_LENGTH) as usize;
+        if len == 0 {
+            break;
+        }
+        if u8_at(t, p + IVHD_TYPE) == target {
+            ivhds.push(p);
+        }
+        p += len;
+    }
+    let h = match ivhds.as_slice() {
+        [h] => *h,
+        [] => return Err("no IVHD of the target type"),
+        _ => return Err("more than one IOMMU: not ported"),
+    };
+
+    // alloc_pci_segment (init.c:1723): device table and alias table.
+    let dev_table_size = (((last_bdf as u64 + 1) * r::DEV_TABLE_ENTRY_SIZE as u64).next_power_of_two()).max(4096);
+    let dev_table = DmaRegion::alloc_zeroed_dma32_aligned((dev_table_size / 4096) as usize)
+        .ok_or("no memory for the device table")?;
+    let alias_table: Vec<u16> = (0..=last_bdf as u16).collect();
+
+    // init_iommu_one (init.c:1891) with early_iommu_features_init (305).
+    let ty = u8_at(t, h + IVHD_TYPE);
+    let mmio_phys = u64_at(t, h + IVHD_MMIO_PHYS);
+    let efr_attr = u32_at(t, h + IVHD_EFR_ATTR);
+    let (end, ivhd_efr) = match ty {
+        0x10 => {
+            let cntr = efr_attr != 0 && efr_attr & (0xf << 13) != 0 && efr_attr & (0x3f << 17) != 0;
+            (if cntr { MMIO_REG_END_OFFSET } else { MMIO_CNTR_CONF_OFFSET }, None)
+        }
+        _ => {
+            let efr_reg = u64_at(t, h + IVHD_EFR_REG);
+            if efr_attr & (1 << IOMMU_IVHD_ATTR_HATDIS_SHIFT) != 0 {
+                return Err("Host Address Translation is not supported");
+            }
+            (if efr_reg & (1 << 9) != 0 { MMIO_REG_END_OFFSET } else { MMIO_CNTR_CONF_OFFSET },
+             (ivinfo & IOMMU_IVINFO_EFRSUP != 0).then(|| (efr_reg, u64_at(t, h + IVHD_EFR_REG2))))
+        }
+    };
+    let regs = map_regs(mmio_phys, end).ok_or("cannot map the IOMMU's registers")?;
+    let efr = ivhd_efr.map_or_else(|| regs.r64(r::MMIO_EXT_FEATURES), |(e, _)| e);
+
+    // init_iommu_one_late (init.c:1970): alloc_iommu_buffers.
+    let cmd_sem = DmaRegion::alloc_zeroed_dma32_aligned(1).ok_or("no memory for the completion semaphore")?;
+    let cmd_buf = DmaRegion::alloc_zeroed_dma32_aligned((r::CMD_BUFFER_SIZE / 4096) as usize)
+        .ok_or("no memory for the command buffer")?;
+    let evt_buf = DmaRegion::alloc_zeroed_dma32_aligned((r::EVTLOG_SIZE_DEF / 4096) as usize)
+        .ok_or("no memory for the event buffer")?;
+    let mut io = Iommu {
+        regs, mmio_phys, devid: u16_at(t, h + IVHD_DEVID), acpi_flags: 0, efr, last_bdf,
+        dev_table, dev_table_size, alias_table, ivhd_dte_flags: Vec::new(),
+        cmd_buf, cmd_buf_head: 0, cmd_buf_tail: 0, cmd_sem, cmd_sem_val: 0, need_sync: false,
+        evt_buf, events: Vec::new(), events_total: 0, completion_waits: 0,
+    };
+    init_iommu_from_acpi(&mut io, t, h)?;
+
+    // init_translation_status (init.c:245): translation left on by the
+    // firmware is switched off (not a kdump kernel).
+    if io.regs.r64(r::MMIO_CONTROL_OFFSET) & (1 << r::CONTROL_IOMMU_EN) != 0 {
+        kprintln!("[amd-vi] Translation was enabled for IOMMU but we are not in kdump mode");
+        io.disable();
+    }
+    // early_amd_iommu_init: CMPXCHG16B is required for 256-bit DTE updates.
+    if core::arch::x86_64::__cpuid(1).ecx & (1 << 13) == 0 {
+        return Err("CMPXCHG16B is required");
+    }
+    // disable_iommus, then early_enable_iommus.
+    io.disable();
+    io.early_enable()?;
+    // alloc_event_buffer + iommu_enable_event_buffer (state IOMMU_ENABLED).
+    io.enable_event_buffer();
+    // iommu_init_pci / late_iommu_features_init: EFR from MMIO against the IVHD's.
+    let mmio_efr = io.regs.r64(r::MMIO_EXT_FEATURES);
+    if ivhd_efr.is_some_and(|(e, _)| e != mmio_efr) {
+        kprintln!("[amd-vi] [Firmware Bug]: EFR mismatch. Use IVHD EFR ({:#x} : {:#x}).", io.efr, mmio_efr);
+    }
+    // init_device_table_dma (block devices without a domain) is stage 6.
+    let control = io.regs.r64(r::MMIO_CONTROL_OFFSET);
+    kprintln!("[amd-vi] enabled: device table {:#x} ({} KiB, {} devids, {} persistent DTE flag ranges), \
+               control {:#018x}, {} completion wait(s) OK",
+        io.dev_table.phys(), io.dev_table_size >> 10, io.last_bdf + 1, io.ivhd_dte_flags.len(), control,
+        io.completion_waits);
+    io.poll_events();
+    *IOMMU.lock() = Some(io);
+    Ok(())
+}
+
+/// Read the event log (polled; no event interrupt).
+pub fn poll() {
+    if let Some(io) = IOMMU.lock().as_mut() {
+        io.poll_events();
+    }
+}
+
+/// One more `INVALIDATE_ALL` and completion wait, for a check that the
+/// command path still runs.
+pub fn flush_all() -> Result<(), &'static str> {
+    match IOMMU.lock().as_mut() {
+        Some(io) => io.flush_all_caches(),
+        None => Err("AMD-Vi is off"),
+    }
+}
+
+/// The IOMMU's state after stage 1, `None` while it is off.
+pub fn status() -> Option<Status> {
+    let g = IOMMU.lock();
+    let io = g.as_ref()?;
+    Some(Status {
+        mmio_phys: io.mmio_phys,
+        devid: io.devid,
+        last_bdf: io.last_bdf,
+        control: io.regs.r64(r::MMIO_CONTROL_OFFSET),
+        status: io.regs.r64(r::MMIO_STATUS_OFFSET),
+        events_total: io.events_total,
+        completion_waits: io.completion_waits,
+    })
 }

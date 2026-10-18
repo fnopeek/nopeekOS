@@ -85,6 +85,16 @@ impl Mmio {
         // SAFETY: as in `r8`.
         unsafe { core::ptr::write_volatile(self.at(off, 4) as *mut u32, v) }
     }
+    /// One 64-bit read (Linux `readq`).
+    pub fn r64(&self, off: impl Off) -> u64 {
+        // SAFETY: as in `r8`.
+        unsafe { core::ptr::read_volatile(self.at(off, 8) as *const u64) }
+    }
+    /// One 64-bit write (Linux `writeq`).
+    pub fn w64(&self, off: impl Off, v: u64) {
+        // SAFETY: as in `r8`.
+        unsafe { core::ptr::write_volatile(self.at(off, 8) as *mut u64, v) }
+    }
     /// Two 32-bit reads, low half first, for devices that decode 64-bit
     /// registers as two dwords.
     pub fn r64_lo_hi(&self, off: impl Off) -> u64 {
@@ -192,6 +202,15 @@ impl DmaRegion {
     /// `pages` zeroed pages anywhere in RAM.
     pub fn alloc_zeroed(pages: usize) -> Option<Self> {
         let phys = crate::memory::allocate_contiguous(pages)?;
+        let r = DmaRegion { phys, len: pages as u64 * PAGE };
+        r.zero();
+        Some(r)
+    }
+
+    /// `pages` zeroed pages, aligned to their own size rounded up to a
+    /// power of two and below 4 GiB, as Linux allocates `GFP_DMA32` tables.
+    pub fn alloc_zeroed_dma32_aligned(pages: usize) -> Option<Self> {
+        let phys = crate::memory::allocate_contiguous_aligned_below(pages, pages.next_power_of_two(), 1 << 32)?;
         let r = DmaRegion { phys, len: pages as u64 * PAGE };
         r.zero();
         Some(r)

@@ -1213,9 +1213,33 @@ pub fn intent_gpu(args: &str) {
                 None => kprintln!("  IOMMU:    off ({})", if crate::gpu::iommu_wanted() {
                     "wanted; see the boot log for why not" } else { "`set gpu_iommu on`, then reboot" }),
             }
-            // AMD-Vi is read only so far: what the firmware describes.
             if crate::drivers::amd_vi::present() {
-                crate::drivers::amd_vi::dump();
+                crate::drivers::amd_vi::poll();
+                match crate::drivers::amd_vi::status() {
+                    Some(s) => kprintln!("  AMD-Vi:   on at {:#x} (IOMMU {:02x}:{:02x}.{}), {} devids passed through, \
+                                          control {:#018x}, status {:#x}, {} completion wait(s), {} event(s)",
+                        s.mmio_phys, s.devid >> 8, s.devid >> 3 & 0x1f, s.devid & 7, s.last_bdf + 1,
+                        s.control, s.status, s.completion_waits, s.events_total),
+                    None => crate::drivers::amd_vi::dump(),
+                }
+            }
+            return;
+        }
+        "iommu enable" => {
+            if !crate::drivers::amd_vi::present() {
+                kprintln!("[npk] gpu: no AMD IOMMU described by the firmware");
+            } else if !crate::gpu::iommu_wanted() {
+                kprintln!("[npk] gpu: `set gpu_iommu on` first");
+            } else {
+                let r = match crate::drivers::amd_vi::status() {
+                    Some(_) => crate::drivers::amd_vi::flush_all(),
+                    None => crate::drivers::amd_vi::enable(),
+                };
+                match r {
+                    Ok(()) => kprintln!("[npk] gpu: AMD-Vi on, every device passed through"),
+                    Err(e) => kprintln!("[npk] gpu: AMD-Vi: {}", e),
+                }
+                crate::drivers::amd_vi::poll();
             }
             return;
         }
@@ -1225,7 +1249,7 @@ pub fn intent_gpu(args: &str) {
         }
         "" => {}
         _ => {
-            kprintln!("usage: gpu [verify | cpu | iommu | iommu test]");
+            kprintln!("usage: gpu [verify | cpu | iommu | iommu enable | iommu test]");
             return;
         }
     }
