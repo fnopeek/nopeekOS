@@ -1,12 +1,12 @@
 # gpu_amd_renoir gegen Linux — die Karte
 
-**Stand:** 2026-10-17 · Modul `gpu_amd_renoir` 0.1.1 (Stufe 0) · Referenz **Linux 6.18.55**, amdgpu
+**Stand:** 2026-10-18 · Modul `gpu_amd_renoir` 0.1.1 (Stufe 0) · Referenz **Linux 6.18.55**, amdgpu
 **Geraet:** IdeaPad, Ryzen 5 5500U, iGPU `1002:164c` Lucienne = `CHIP_RENOIR | AMD_IS_APU`, `AMD_APU_IS_RENOIR`
 **Papier darueber:** `GPU_STACK.md` §7.2 und §9 (Stufen 8, 9), `GPU_IN_VM.md`
 **Vorlage:** `GPU_INTEL_LINUX_MAP.md` — dieselbe Regel: jede Linux-Funktion auf
 dem Weg wird vollstaendig portiert, auch die „vermutlich no-op".
 **IP-Bloecke, Versionen, Firmware aus der Quelle:** `GPU_AMD_RENOIR_IP_DRAFT.md`
-(Entwurf, bis die Discovery-Tabelle des Geraets ihn bestaetigt).
+(aus der Quelle; die Discovery-Tabelle des Geraets bestaetigt ihn, §2).
 
 ---
 
@@ -59,9 +59,8 @@ Renoir hat **keine feste IP-Tabelle im Treiber**: `amdgpu_discovery_set_ip_block
 nimmt fuer CHIP_RENOIR den `default`-Zweig (`amdgpu_discovery_reg_base_init`).
 Versionen und Registerbasen jedes IP-Blocks kommen zur Laufzeit aus der
 Discovery-Tabelle oben im Carve-out. Die Festlegung laeuft deshalb ueber
-`amdgpu_ip_version()`, und die Versionen sind erst nach dem Geraetelauf
-von Stufe 0 belegt. Bis dahin legt `.ipversions` nur die stark belegten fest
-(GC 9.3.0, SDMA 4.1.2, VCN 2.2.0, DCN 2.1.0, MP0 11.0.3).
+`amdgpu_ip_version()`; `.ipversions` traegt die 19 Versionen, die das Geraet
+in Stufe 0 meldet (§2).
 
 **DC (Anzeige) rechnet nicht mit den Discovery-Basen**, sondern mit
 `include/renoir_ip_offset.h`. Stufe 0 vergleicht beide am Geraet.
@@ -74,9 +73,11 @@ Schalter in `dc_create_resource_pool`. `external_rev_id` aus Stufe 0 muss dazu
 passen. Jede Ersetzung haelt die Zeilenzahl, damit die `file:line`-Stellen der
 `.follow`-Datei in beiden Baeumen gelten.
 
-**Stand des Graphen (Entwurf, 2026-10-17):** `reach amdgpu_pci_probe` mit
+**Stand des Graphen (2026-10-18, Geraeteversionen):** `reach amdgpu_pci_probe` mit
 `tools/gpu_amd_renoir.follow` — ungefiltert 2636 Funktionen, festgelegt
-**1709**; von DC bleiben `dcn21` und die `dcn20`-Teile, die DCN 2.1 in Linux
+**1636** (mit den fuenf Entwurfsversionen waren es 1709; die Geraetewerte
+fuer MP1, UMC und MMHUB nehmen die SMU-Zweige fremder Chips und die
+RAS-EEPROM-Pfade heraus); von DC bleiben `dcn21` und die `dcn20`-Teile, die DCN 2.1 in Linux
 mitbenutzt. Liste und Baum: `GPU_AMD_RENOIR_FUNCTIONS.txt`,
 `GPU_AMD_RENOIR_TREE.txt` (Klassen A/B/N noch nicht vergeben; RAS, XCP, ACA,
 CPER, MCA sind dabei und gehoeren gemessen, ob Renoir sie durchlaeuft).
@@ -114,15 +115,23 @@ Jede Stufe hat ein Ergebnis am Geraet. Reihenfolge = `amdgpu_device_init`.
 
 ---
 
-## 2 — Offene Fragen, die der Geraetelauf von Stufe 0 beantwortet
+## 2 — Was der Geraetelauf von Stufe 0 beantwortet hat (2026-10-18)
 
-1. Die IP-Versionen, vor allem MP0 (11.0.3 oder 12.0.1), NBIO, OSSSYS, HDP,
-   MMHUB, ATHUB, DF, SMUIO, UMC, THM, CLK → `.ipversions` fuellen, Baum neu
-   festlegen, Graph neu.
-2. Stimmen die Discovery-Basen mit `renoir_ip_offset.h`?
-3. `rev_id` / `external_rev_id`.
-4. Liefert VFCT das VBIOS? (Sonst VRAM-BAR, ROM, Plattform — Stufe 1.)
-5. SDMA- und VCN-Instanzen.
+1. **IP-Versionen** (Discovery v1.1, Tabelle v2, 1124 Bytes, ein Die, 41 IPs):
+   GC 9.3.0 · HDP 4.1.2 · SDMA0 4.1.2 · MMHUB 1.5.0 · ATHUB 1.5.0 ·
+   NBIO/NBIF 2.5.0 · **MP0 11.0.3** · MP1 12.0.0 · VCN 2.2.0 · DF 3.5.1 ·
+   DCE 2.1.0 · OSSSYS 4.3.0 · SMUIO 10.0.2 · THM 10.1.1 · CLK 10.0.2 ·
+   UMC 7.6.0 (2 Instanzen) · PCIE 5.1.0 · ISP 2.1.0. Damit `renoir_asd/ta`,
+   nicht `green_sardine_*`. Die Entwuerfe in `.follow` stimmen:
+   NBIO → `nbio_v7_0`, DF → `df_v1_7`, SMUIO → `smuio_v9_0`.
+2. **Basen:** 14 von 15 wie `renoir_ip_offset.h`. MP1 weicht ab, die Tabelle
+   meldet fuer MP1 die Basen von MP0; Segment 0 (`0x16000`) ist in beiden
+   gleich, und jedes MP1-Register, das Linux benutzt, hat `BASE_IDX 0`.
+   Linux nimmt die Discovery-Basen, wir auch.
+3. `rev_id` 0, `external_rev_id` **0x91 = RENOIR_A0**, wie die DC-Festlegung
+   annimmt. PCI-Revision 0xc1.
+4. **VFCT liefert das VBIOS:** 55296 Bytes, ATOM-Kopf bei 0x18a.
+5. SDMA 1 Instanz, VCN 1, GC-XCC-Maske 1, UMC 2. `RCC_CONFIG_MEMSIZE` 512 MB.
 
 ## 3 — Was Stufe 0 bewusst noch nicht tut
 

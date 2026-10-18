@@ -70,7 +70,7 @@
 @amdgpu_device.c:744 = amdgpu_device_indirect_rreg
 @amdgpu_device.c:871 = amdgpu_device_indirect_wreg
 
-# --- NBIO ? (amdgpu_discovery.c:2907-2911 -> nbio_v7_0_funcs, nbio_v7_0.c:302)
+# --- NBIO 2.5.0 (amdgpu_discovery.c:2907-2911 -> nbio_v7_0_funcs, nbio_v7_0.c:302)
 @amdgpu_device.c:991  = nbio_v7_0_get_pcie_index_offset
 @amdgpu_device.c:992  = nbio_v7_0_get_pcie_data_offset
 # nbio_v7_0_funcs has no get_pcie_index_hi_offset: amdgpu_device.c:999 not taken
@@ -88,11 +88,11 @@ enable_doorbell_selfring_aperture = nbio_v7_0_enable_doorbell_selfring_aperture
 mc_access_enable   = nbio_v7_0_mc_access_enable
 # --- HDP 4.x (amdgpu_discovery.c:2982)
 init_registers     = hdp_v4_0_init_registers
-# --- DF ? (amdgpu_discovery.c:3019, df_v1_7.c:121)
+# --- DF 3.5.1 (amdgpu_discovery.c:3019, df_v1_7.c:121)
 sw_init            = df_v1_7_sw_init
 enable_broadcast_mode = df_v1_7_enable_broadcast_mode
 get_fb_channel_number = df_v1_7_get_fb_channel_number
-# --- SMUIO ? (amdgpu_discovery.c:3041, smuio_v9_0.c:72)
+# --- SMUIO 10.0.2 (amdgpu_discovery.c:3041, smuio_v9_0.c:72)
 get_rom_index_offset = smuio_v9_0_get_rom_index_offset
 get_rom_data_offset  = smuio_v9_0_get_rom_data_offset
 # amdgpu_discovery.c:3067 (get_pkg_type) only for SMUIO 13.0.3/13.0.11: not taken
