@@ -52,6 +52,18 @@ if diff -u "$B/gmc.linux" "$B/gmc.port"; then
 else
     fail=1
 fi
+# The VRAM manager: the same requests through Linux's buddy.c and
+# amdgpu_vram_mgr_new and through the port. A failed allocation takes no
+# id on either side, so the frees stay matched.
+rustc $RF "$HERE/vram_check.rs" -o "$B/vram_check"
+python3 -I "$HERE/vram_ops.py" 0x20000000 400 > "$B/vram.ops"
+"$B/oracle_vram" 0x20000000 0x20000000 < "$B/vram.ops" > "$B/vram.linux"
+"$B/vram_check" 0x20000000 0x20000000 < "$B/vram.ops" > "$B/vram.port"
+if diff -u "$B/vram.linux" "$B/vram.port" | head -20; [ "$(cmp -s "$B/vram.linux" "$B/vram.port"; echo $?)" = 0 ]; then
+    echo "vram: port = Linux ($(wc -l < "$B/vram.linux") lines)"
+else
+    fail=1
+fi
 rustc $RF "$HERE/stage1_run.rs" -o "$B/stage1_run"
 echo "--- the run on the host (the log the card run prints; a fake SMU answers OK):"
 "$B/stage1_run" "$DISC" "$BIOS" "$FW"

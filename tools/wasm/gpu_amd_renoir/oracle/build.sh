@@ -118,3 +118,22 @@ gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_common.c" -o "$B/oracle_common"
 gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_gc.c" -o "$B/hub_gc.o"
 gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_mm.c" -o "$B/hub_mm.o"
 gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_gmc.c" "$B/hub_gc.o" "$B/hub_mm.o" -o "$B/oracle_gmc"
+# The VRAM manager: buddy.c and tools/lib/rbtree.c whole, amdgpu_vram_mgr.c's functions.
+mkdir -p "$B/buddy/linux"
+cp "$L/include/linux/gpu_buddy.h" "$B/buddy/linux/"
+cp "$L/drivers/gpu/buddy.c" "$B/buddy/"
+$X "$L/include/linux/overflow.h" '#range_overflows' > "$B/buddy/range_overflows.h"
+{
+    $X "$L/include/drm/ttm/ttm_bo.h" ttm_bo_type
+    $X "$AMD/amdgpu/amdgpu_vm.h" '#AMDGPU_VM_RESERVED_VRAM'
+} > "$B/buddy/vram_mgr_types.h"
+{
+    $X "$AMD/amdgpu/amdgpu_vram_mgr.h" amdgpu_vram_mgr_block_start amdgpu_vram_mgr_block_size \
+        to_amdgpu_vram_mgr_resource
+    $X "$AMD/amdgpu/amdgpu_vram_mgr.c" to_vram_mgr to_amdgpu_device amdgpu_vram_mgr_first_block \
+        amdgpu_is_vram_mgr_blocks_contiguous amdgpu_vram_mgr_blocks_size amdgpu_vram_mgr_vis_size \
+        amdgpu_vram_mgr_do_reserve amdgpu_vram_mgr_del amdgpu_vram_mgr_new
+} > "$B/buddy/vram_mgr_extracted.c"
+gcc -O0 -w -include "$HERE/shim_buddy/buddy_kern.h" -I "$HERE/shim_buddy" -I "$B/buddy" -I "$L/tools/include" \
+    -I "$AMD/include" -include "$L/include/uapi/drm/amdgpu_drm.h" -include "$L/include/drm/ttm/ttm_placement.h" \
+    "$HERE/main_vram.c" "$L/tools/lib/rbtree.c" -o "$B/oracle_vram"

@@ -1024,3 +1024,45 @@ MM_CTX_DISTANCE = mmVM_CONTEXT1_CNTL - mmVM_CONTEXT0_CNTL @ mmhub_v1_0.c
 MM_CTX_ADDR_DISTANCE = mmVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 - mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 @ mmhub_v1_0.c
 MM_ENG_DISTANCE = mmVM_INVALIDATE_ENG1_REQ - mmVM_INVALIDATE_ENG0_REQ @ mmhub_v1_0.c
 MM_ENG_ADDR_DISTANCE = mmVM_INVALIDATE_ENG1_ADDR_RANGE_LO32 - mmVM_INVALIDATE_ENG0_ADDR_RANGE_LO32 @ mmhub_v1_0.c
+# TTM and the amdgpu buffer objects (ttm_placement.h, ttm_bo.h, amdgpu_ttm.h, amdgpu_drm.h, amdgpu_object.h)
+TTM_PL_SYSTEM @ amdgpu_ttm.c
+TTM_PL_TT @ amdgpu_ttm.c
+TTM_PL_VRAM @ amdgpu_ttm.c
+TTM_PL_PRIV @ amdgpu_ttm.c
+TTM_NUM_MEM_TYPES @ amdgpu_ttm.c
+TTM_PL_FLAG_CONTIGUOUS @ amdgpu_ttm.c
+TTM_PL_FLAG_TOPDOWN @ amdgpu_ttm.c
+TTM_PL_FLAG_FALLBACK @ amdgpu_ttm.c
+TTM_PL_FLAG_DESIRED @ amdgpu_ttm.c
+TTM_PL_FLAG_TEMPORARY @ amdgpu_ttm.c
+AMDGPU_PL_GDS @ amdgpu_ttm.c
+AMDGPU_PL_GWS @ amdgpu_ttm.c
+AMDGPU_PL_OA @ amdgpu_ttm.c
+AMDGPU_PL_PREEMPT @ amdgpu_ttm.c
+AMDGPU_PL_DOORBELL @ amdgpu_ttm.c
+AMDGPU_PL_MMIO_REMAP @ amdgpu_ttm.c
+ttm_bo_type_device @ amdgpu_ttm.c
+ttm_bo_type_kernel @ amdgpu_ttm.c
+ttm_bo_type_sg @ amdgpu_ttm.c
+AMDGPU_GEM_DOMAIN_CPU @ amdgpu_ttm.c
+AMDGPU_GEM_DOMAIN_GTT @ amdgpu_ttm.c
+AMDGPU_GEM_DOMAIN_VRAM @ amdgpu_ttm.c
+AMDGPU_GEM_DOMAIN_GDS @ amdgpu_ttm.c
+AMDGPU_GEM_DOMAIN_GWS @ amdgpu_ttm.c
+AMDGPU_GEM_DOMAIN_OA @ amdgpu_ttm.c
+AMDGPU_GEM_DOMAIN_DOORBELL @ amdgpu_ttm.c
+AMDGPU_GEM_DOMAIN_MMIO_REMAP @ amdgpu_ttm.c
+AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED @ amdgpu_ttm.c
+AMDGPU_GEM_CREATE_NO_CPU_ACCESS @ amdgpu_ttm.c
+AMDGPU_GEM_CREATE_CPU_GTT_USWC @ amdgpu_ttm.c
+AMDGPU_GEM_CREATE_VRAM_CLEARED @ amdgpu_ttm.c
+AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS @ amdgpu_ttm.c
+AMDGPU_GEM_CREATE_VM_ALWAYS_VALID @ amdgpu_ttm.c
+AMDGPU_GEM_CREATE_EXPLICIT_SYNC @ amdgpu_ttm.c
+AMDGPU_GEM_CREATE_ENCRYPTED @ amdgpu_ttm.c
+AMDGPU_GEM_CREATE_PREEMPTIBLE @ amdgpu_ttm.c
+AMDGPU_GEM_CREATE_DISCARDABLE @ amdgpu_ttm.c
+AMDGPU_GEM_CREATE_GFX12_DCC @ amdgpu_ttm.c
+AMDGPU_BO_MAX_PLACEMENTS @ amdgpu_ttm.c
+AMDGPU_BO_INVALID_OFFSET @ amdgpu_ttm.c
+AMDGPU_VM_RESERVED_VRAM @ amdgpu_ttm.c

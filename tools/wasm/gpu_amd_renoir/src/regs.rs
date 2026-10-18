@@ -2051,3 +2051,87 @@ pub const MM_CTX_ADDR_DISTANCE: u32 = 0x2;
 pub const MM_ENG_DISTANCE: u32 = 0x1;
 /// The value of `mmVM_INVALIDATE_ENG1_ADDR_RANGE_LO32 - mmVM_INVALIDATE_ENG0_ADDR_RANGE_LO32` in mmhub_v1_0.c
 pub const MM_ENG_ADDR_DISTANCE: u32 = 0x2;
+
+// TTM and the amdgpu buffer objects (ttm_placement.h, ttm_bo.h, amdgpu_ttm.h, amdgpu_drm.h, amdgpu_object.h)
+/// ?
+pub const TTM_PL_SYSTEM: u32 = 0x0;
+/// ?
+pub const TTM_PL_TT: u32 = 0x1;
+/// ?
+pub const TTM_PL_VRAM: u32 = 0x2;
+/// ?
+pub const TTM_PL_PRIV: u32 = 0x3;
+/// ?
+pub const TTM_NUM_MEM_TYPES: u32 = 0x9;
+/// ?
+pub const TTM_PL_FLAG_CONTIGUOUS: u32 = 0x1;
+/// ?
+pub const TTM_PL_FLAG_TOPDOWN: u32 = 0x2;
+/// ?
+pub const TTM_PL_FLAG_FALLBACK: u32 = 0x10;
+/// ?
+pub const TTM_PL_FLAG_DESIRED: u32 = 0x8;
+/// ?
+pub const TTM_PL_FLAG_TEMPORARY: u32 = 0x4;
+/// amdgpu/amdgpu_ttm.h:32
+pub const AMDGPU_PL_GDS: u32 = 0x3;
+/// amdgpu/amdgpu_ttm.h:33
+pub const AMDGPU_PL_GWS: u32 = 0x4;
+/// amdgpu/amdgpu_ttm.h:34
+pub const AMDGPU_PL_OA: u32 = 0x5;
+/// amdgpu/amdgpu_ttm.h:35
+pub const AMDGPU_PL_PREEMPT: u32 = 0x6;
+/// amdgpu/amdgpu_ttm.h:36
+pub const AMDGPU_PL_DOORBELL: u32 = 0x7;
+/// amdgpu/amdgpu_ttm.h:37
+pub const AMDGPU_PL_MMIO_REMAP: u32 = 0x8;
+/// ?
+pub const ttm_bo_type_device: u32 = 0x0;
+/// ?
+pub const ttm_bo_type_kernel: u32 = 0x1;
+/// ?
+pub const ttm_bo_type_sg: u32 = 0x2;
+/// ?
+pub const AMDGPU_GEM_DOMAIN_CPU: u32 = 0x1;
+/// amdgpu/amdgpu_ttm.c:2153
+pub const AMDGPU_GEM_DOMAIN_GTT: u32 = 0x2;
+/// ?
+pub const AMDGPU_GEM_DOMAIN_VRAM: u32 = 0x4;
+/// ?
+pub const AMDGPU_GEM_DOMAIN_GDS: u32 = 0x8;
+/// ?
+pub const AMDGPU_GEM_DOMAIN_GWS: u32 = 0x10;
+/// ?
+pub const AMDGPU_GEM_DOMAIN_OA: u32 = 0x20;
+/// ?
+pub const AMDGPU_GEM_DOMAIN_DOORBELL: u32 = 0x40;
+/// ?
+pub const AMDGPU_GEM_DOMAIN_MMIO_REMAP: u32 = 0x80;
+/// ?
+pub const AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED: u32 = 0x1;
+/// ?
+pub const AMDGPU_GEM_CREATE_NO_CPU_ACCESS: u32 = 0x2;
+/// ?
+pub const AMDGPU_GEM_CREATE_CPU_GTT_USWC: u32 = 0x4;
+/// ?
+pub const AMDGPU_GEM_CREATE_VRAM_CLEARED: u32 = 0x8;
+/// ?
+pub const AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS: u32 = 0x20;
+/// ?
+pub const AMDGPU_GEM_CREATE_VM_ALWAYS_VALID: u32 = 0x40;
+/// ?
+pub const AMDGPU_GEM_CREATE_EXPLICIT_SYNC: u32 = 0x80;
+/// ?
+pub const AMDGPU_GEM_CREATE_ENCRYPTED: u32 = 0x400;
+/// ?
+pub const AMDGPU_GEM_CREATE_PREEMPTIBLE: u32 = 0x800;
+/// ?
+pub const AMDGPU_GEM_CREATE_DISCARDABLE: u32 = 0x1000;
+/// ?
+pub const AMDGPU_GEM_CREATE_GFX12_DCC: u32 = 0x10000;
+/// amdgpu/amdgpu_object.h:40
+pub const AMDGPU_BO_MAX_PLACEMENTS: u32 = 0x3;
+/// amdgpu/amdgpu_object.h:39
+pub const AMDGPU_BO_INVALID_OFFSET: u64 = 0x7fffffffffffffff;
+/// amdgpu/amdgpu_vm.h:149
+pub const AMDGPU_VM_RESERVED_VRAM: u32 = 0x800000;

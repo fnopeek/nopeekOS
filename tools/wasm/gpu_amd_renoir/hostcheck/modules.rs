@@ -59,3 +59,11 @@ mod amdgpu_vm;
 mod gfxhub_v1_0;
 #[path = "../src/mmhub_v1_0.rs"]
 mod mmhub_v1_0;
+#[path = "../src/gpu_buddy.rs"]
+mod gpu_buddy;
+#[path = "../src/ttm.rs"]
+mod ttm;
+#[path = "../src/drm_mm.rs"]
+mod drm_mm;
+#[path = "../src/amdgpu_vram_mgr.rs"]
+mod amdgpu_vram_mgr;
