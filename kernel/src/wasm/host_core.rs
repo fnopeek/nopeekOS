@@ -1757,8 +1757,10 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
 ///  * Never LAPIC or IOAPIC. A write to `0xFEE0_0000` is an interrupt to
 ///    any vector on any core, i.e. code execution in the kernel; the IOAPIC
 ///    routes other devices' interrupts.
-///  * Caps on the span (16 pages = 64 KiB) and on the number of mappings
-///    (`MAX_MMIO_MAPS`), as for a BAR.
+///  * Caps on the span and on the number of mappings (`MAX_MMIO_MAPS`): a
+///    span inside one region the firmware typed as not RAM may be as long
+///    as that region (an APU's frame buffer), any other at most
+///    `MMIO_MAP_PAGES_UNDECLARED` pages.
 /// Platform ranges no driver may map (ECAM, HPET, IOMMU), read once from
 /// the ACPI tables.
 static PLATFORM_MMIO: spin::Mutex<Option<Vec<(u64, u64)>>> = spin::Mutex::new(None);
@@ -1782,16 +1784,30 @@ fn mmio_refusal(a: u64) -> Option<&'static str> {
     None
 }
 
+/// The most pages one `npk_mmio_map_phys` maps outside a firmware region.
+const MMIO_MAP_PAGES_UNDECLARED: i32 = 16;
+
 pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
         kprintln!("[npk] WASM: npk_mmio_map_phys DENIED — needs HARDWARE");
         return -1;
     }
-    if pages <= 0 || pages > 16 { return -1; }
+    if pages <= 0 { return -1; }
     let base = ((hi as u32 as u64) << 32) | (lo as u32 as u64);
     if base == 0 || base & 0xFFF != 0 { return -1; }
     let n = pages as usize;
+    // More than a few pages only inside one region the firmware declared:
+    // an address no region covers also passes the per-page check, and a
+    // mapping of it as large as the module asks would cost page tables
+    // without bound.
+    if pages > MMIO_MAP_PAGES_UNDECLARED
+        && !crate::memory::is_firmware_device_region(base, (n * 4096) as u64)
+    {
+        kprintln!("[npk] WASM: npk_mmio_map_phys refused {:#x}+{} pages: not inside one firmware region",
+            base, pages);
+        return -1;
+    }
 
     for i in 0..n {
         let a = match base.checked_add((i * 4096) as u64) { Some(a) => a, None => return -1 };

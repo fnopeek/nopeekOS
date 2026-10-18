@@ -149,6 +149,22 @@ pub fn is_device_window(addr: u64) -> bool {
     }
 }
 
+/// Whether `[base, base + len)` lies inside one region the firmware typed
+/// as not RAM, such as the frame buffer an APU's firmware carves out of
+/// memory. Only such a region may be mapped by a module in one large
+/// piece: its size is the firmware's, not the module's.
+pub fn is_firmware_device_region(base: u64, len: u64) -> bool {
+    let Some(end) = base.checked_add(len) else { return false };
+    // SAFETY: linker-provided symbols; only their addresses are taken.
+    let (image_lo, image_hi) = unsafe {
+        (&__image_base as *const u8 as u64, &__heap_start as *const u8 as u64)
+    };
+    if base < image_hi && image_lo < end { return false; }
+    let map = FIRMWARE_MAP.lock();
+    map.regions[..map.count].iter()
+        .any(|&(b, l, t)| !is_ram_type(t) && base >= b && end <= b.saturating_add(l))
+}
+
 pub fn init(boot_info: &crate::boot_info::BootInfo) {
     let mut alloc = ALLOCATOR.lock();
     alloc.mark_all_used();
