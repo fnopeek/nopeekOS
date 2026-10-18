@@ -22,6 +22,7 @@ unsafe extern "C" {
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
+    fn npk_config_get(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_fs_delete(name_ptr: i32, name_len: i32) -> i32;
     fn npk_fs_mkdir(name_ptr: i32, name_len: i32) -> i32;
     fn npk_fs_rename(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
@@ -335,6 +336,14 @@ pub fn fs_copy(old: &[u8], new: &[u8]) -> i32 {
 }
 
 /// Size (8 bytes LE), directory flag (1), mtime (8 bytes LE) into `out`.
+/// A `set` value of this module's own namespace (`<module>.<name>`) into
+/// `buf`: its length, 0 when unset, -1 for another namespace or a short
+/// buffer.
+pub fn config_get(key: &[u8], buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; both ranges are borrowed for the call.
+    unsafe { npk_config_get(key.as_ptr() as i32, key.len() as i32, buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
 pub fn fs_stat(name: &[u8], out: &mut [u8; 17]) -> i32 {
     // SAFETY: FFI; `out` is the 17 bytes the kernel writes.
     unsafe { npk_fs_stat(name.as_ptr() as i32, name.len() as i32, out.as_mut_ptr() as i32) }

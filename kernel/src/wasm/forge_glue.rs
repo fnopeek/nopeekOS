@@ -788,6 +788,10 @@ host_imports! {
     // mtime is UTC seconds since the Unix epoch — zero means unknown.
     mem fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
 
+    // npk_config_get(key_ptr, key_len, buf_ptr, buf_max) -> len, 0 or -1
+    // A `set` value of the module's own namespace (`<module>.<name>`).
+    mem fn npk_config_get(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+
     // npk_fs_delete(name_ptr, name_len) -> i32
     // Delete a single npkFS key. WRITE-gated. Returns 0 on success,
     // -1 on cap / not found / fs error.

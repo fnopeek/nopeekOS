@@ -3035,6 +3035,24 @@ pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, 
     write_bytes(mem, out_ptr, &out[..])
 }
 
+/// `npk_config_get(key, buf)`: a `set` value of the module's own
+/// namespace, `<module>.<name>`; its length, 0 when the key is unset, -1
+/// for a key outside the namespace or a buffer too short. Read only: the
+/// user sets it, the module reads it.
+pub(crate) fn npk_config_get(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
+    let Some(key) = read_str(mem, key_ptr, key_len) else { return -1 };
+    let Some(name) = key.strip_prefix(ctx.module_name.as_str()).and_then(|r| r.strip_prefix('.')) else { return -1 };
+    if name.is_empty() || ctx.module_name.is_empty() {
+        return -1;
+    }
+    let Some(value) = crate::config::get(&key) else { return 0 };
+    let Some(max) = glen(buf_max) else { return -1 };
+    if value.len() > max {
+        return -1;
+    }
+    write_bytes(mem, buf_ptr, value.as_bytes())
+}
+
 pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, out_ptr: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
