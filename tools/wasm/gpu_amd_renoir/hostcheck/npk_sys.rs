@@ -104,6 +104,11 @@ pub fn fetch(name: &[u8], buf: &mut [u8]) -> i32 {
     n as i32
 }
 
+/// `npk_pci_read_config_at`: no device answers on the host.
+pub fn pci_read_config_at(_bdf: i32, _offset: i32) -> i32 {
+    -1
+}
+
 pub fn log(b: &[u8]) {
     let s = String::from_utf8_lossy(b);
     println!("{}", s.strip_prefix("[gpu_amd_renoir] ").unwrap_or(&s));

@@ -1,10 +1,11 @@
-//! Stage 1 of the port (docs/plan/GPU_AMD_LINUX_MAP.md §1), parts a and b:
-//! `amdgpu_device_init` through `amdgpu_device_ip_early_init`. The IP
+//! Stage 1 of the port (docs/plan/GPU_AMD_LINUX_MAP.md §1): `amdgpu_device_init`
+//! up to `amdgpu_device_ip_init`, the reset on init decided but not taken. The IP
 //! discovery, the IP block list, `soc15_common_early_init`, the VBIOS from
 //! VFCT, `amdgpu_atombios_init`, and the early_init of the nine blocks
-//! after COMMON, which request and read their microcode; then what it
-//! found, for the device log. Nothing is written to the card but the
-//! MM_INDEX window VRAM is read through.
+//! after COMMON, which request and read their microcode, the doorbells, the
+//! PCIe caps, need_post and the clocks; then what it found, for the device
+//! log. Nothing is written to the card but the MM_INDEX window VRAM is read
+//! through.
 
 use crate::amdgpu_device::{self as dev, amdgpu_device};
 use crate::atom::cstr;
@@ -12,35 +13,72 @@ use crate::linux::Line;
 use crate::regs;
 
 /// The stage on a bound card whose BAR5 is mapped; `bdf` is its bus
-/// address, for matching the VFCT image.
-pub fn run(adev: &mut amdgpu_device, bdf: (u8, u8, u8)) {
-    dev::amdgpu_device_init_apu_flags(adev);
-    Line::new().s("apu_flags ").hex(adev.apu_flags).s(if adev.apu_flags & regs::AMD_APU_IS_RENOIR != 0 {
-        " (AMD_APU_IS_RENOIR: renoir_* firmware)"
-    } else {
-        ""
-    }).say();
-    // amdgpu_device_check_arguments: the firmware load type.
-    adev.firmware.load_type = dev::amdgpu_ucode_get_load_type(crate::tables::amdgpu_fw_load_type[0]);
-    dev::amdgpu_device_set_mcbp(adev);
-
-    let r = dev::amdgpu_device_ip_early_init(adev, bdf);
+/// address, `bar2` the doorbell BAR's bus address and length.
+pub fn run(adev: &mut amdgpu_device, bdf: (u8, u8, u8), bar2: (u64, u64)) {
+    // amdgpu_pciidlist: 0x164C is CHIP_RENOIR | AMD_IS_APU
+    let r = dev::amdgpu_device_init(adev, regs::CHIP_RENOIR | regs::AMD_IS_APU, bdf, bar2);
     if !adev.mman.discovery_bin.is_empty() {
         report_ip_versions(adev);
         compare_dc_bases(adev);
     }
     match r {
-        Ok(n) => {
+        Ok(reset) => {
             report(adev);
             report_microcode(adev);
+            report_device_init(adev, &reset);
             let valid = adev.ip_blocks.iter().filter(|b| b.status.valid).count();
-            Line::new().s("stage 1b done: early_init of ").dec(n as u64).s(" blocks, ").dec(valid as u64)
-                .s(" valid").say();
+            Line::new().s("stage 1c done: amdgpu_device_init up to amdgpu_device_ip_init, ")
+                .dec(adev.ip_blocks.len() as u64).s(" blocks, ").dec(valid as u64).s(" valid").say();
         }
         Err(e) => {
-            Line::new().s("amdgpu_device_ip_early_init failed (").dec((-e) as u64).s(")").say();
+            Line::new().s("amdgpu_device_init failed (").dec((-e) as u64).s(")").say();
         }
     }
+}
+
+/// The PCIe link registers `amdgpu_device_get_pcie_info` read, raw.
+fn report_pcie(l: &mut Line, name: &str, d: &crate::linux::pci_dev) {
+    let cap = d.pcie_cap();
+    l.s(name).s(" ").hex((d.bus as u32) << 8 | d.devfn as u32).s(" vendor ").hex(d.vendor() as u32);
+    if cap == 0 {
+        l.s(" no pcie cap");
+        return;
+    }
+    l.s(" flags ").hex(d.read_word(cap + regs::PCI_EXP_FLAGS) as u32).s(" lnkcap ")
+        .hex(d.read_dword(cap + regs::PCI_EXP_LNKCAP)).s(" lnkcap2 ").hex(d.read_dword(cap + regs::PCI_EXP_LNKCAP2));
+}
+
+/// What the rest of `amdgpu_device_init` decided.
+fn report_device_init(adev: &amdgpu_device, reset: &dev::reset_on_init) {
+    let mut l = Line::new();
+    report_pcie(&mut l, "pcie: gpu", &adev.pdev);
+    match adev.pdev.upstream_bridge() {
+        Some(b) => report_pcie(&mut l, ", bridge", &b),
+        None => {
+            l.s(", on the root bus");
+        }
+    }
+    l.say();
+    Line::new().s("pcie_gen_mask ").hex(adev.pm.pcie_gen_mask).s(", pcie_mlw_mask ").hex(adev.pm.pcie_mlw_mask)
+        .s(", tmz ").s(if adev.gmc.tmz_enabled { "on" } else { "off" }).s(", noretry ").dec(adev.gmc.noretry as u64)
+        .s(", atomics ").s(if adev.have_atomics_support { "yes" } else { "no" }).s(", timeouts gfx ")
+        .dec(adev.gfx_timeout).s(" ms").say();
+    let d = &adev.doorbell;
+    Line::new().s("doorbell: BAR2 ").hex((d.base >> 32) as u32).s(":").hex(d.base as u32).s(", ")
+        .dec(d.size >> 10).s(" KiB, ").dec(d.num_kernel_doorbells as u64).s(" kernel doorbells, max_assignment ")
+        .dec(adev.doorbell_index.max_assignment as u64).say();
+    let method = match reset.method {
+        m if m == regs::AMD_RESET_METHOD_MODE2 => "MODE2",
+        m if m == regs::AMD_RESET_METHOD_MODE1 => "MODE1",
+        _ => "?",
+    };
+    Line::new().s("reset on init: ").s(if reset.needed { "needed, " } else { "not needed" })
+        .s(if reset.needed { method } else { "" })
+        .s(if reset.needed { " (SMU GfxDeviceDriverReset) - not taken in stage 1c" } else { "" }).say();
+    let c = &adev.clock;
+    Line::new().s("need_post: no (bios scratch 7 has ASIC_INIT_COMPLETE); clocks: sclk ").dec((c.default_sclk / 100) as u64)
+        .s(" MHz, mclk ").dec((c.default_mclk / 100) as u64).s(" MHz, spll ref ").dec((c.spll.reference_freq / 100) as u64)
+        .s(" MHz").say();
 }
 
 /// What the COMMON block and `amdgpu_atombios_init` left in `adev`.

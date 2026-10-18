@@ -73,6 +73,12 @@ pub struct amdgpu_pm {
     pub current_sclk: u32,
     pub current_mclk: u32,
     pub pp_feature: u32,
+    /// `power_supply_is_system_supplied() > 0`; `None` while the kernel
+    /// offers no power-supply query to a module.
+    pub ac_power: Option<bool>,
+    pub pcie_gen_mask: u32,
+    pub pcie_mlw_mask: u32,
+    pub smu_prv_buffer_size: u32,
 }
 
 /// `struct amdgpu_ip_block_status`.
@@ -103,6 +109,55 @@ pub enum amdgpu_df_funcs { df_v1_7 }
 pub enum amdgpu_smuio_funcs { smuio_v9_0 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum amdgpu_asic_funcs { soc15 }
+
+/// `struct amdgpu_virt`, the part bare metal sets.
+#[derive(Default)]
+pub struct amdgpu_virt {
+    pub caps: u32,
+}
+
+/// `struct amdgpu_doorbell`.
+#[derive(Default)]
+pub struct amdgpu_doorbell {
+    pub base: u64,
+    pub size: u64,
+    pub num_kernel_doorbells: u32,
+}
+
+/// `struct amdgpu_doorbell_index`, as `vega10_doorbell_index_init` fills it.
+#[derive(Default)]
+pub struct amdgpu_doorbell_index {
+    pub kiq: u32,
+    pub mec_ring0: u32,
+    pub mec_ring1: u32,
+    pub mec_ring2: u32,
+    pub mec_ring3: u32,
+    pub mec_ring4: u32,
+    pub mec_ring5: u32,
+    pub mec_ring6: u32,
+    pub mec_ring7: u32,
+    pub userqueue_start: u32,
+    pub userqueue_end: u32,
+    pub gfx_ring0: u32,
+    pub sdma_engine: [u32; 8],
+    pub ih: u32,
+    pub uvd_ring0_1: u32,
+    pub uvd_ring2_3: u32,
+    pub uvd_ring4_5: u32,
+    pub uvd_ring6_7: u32,
+    pub vce_ring0_1: u32,
+    pub vce_ring2_3: u32,
+    pub vce_ring4_5: u32,
+    pub vce_ring6_7: u32,
+    pub vcn_ring0_1: u32,
+    pub vcn_ring2_3: u32,
+    pub vcn_ring4_5: u32,
+    pub vcn_ring6_7: u32,
+    pub first_non_cp: u32,
+    pub last_non_cp: u32,
+    pub max_assignment: u32,
+    pub sdma_doorbell_range: u32,
+}
 
 /// `adev->rmmio_remap`.
 #[derive(Default)]
@@ -208,6 +263,9 @@ pub struct amdgpu_gfx {
     pub bad_op_irq: amdgpu_irq_src,
     pub priv_inst_irq: amdgpu_irq_src,
     pub cp_ecc_error_irq: amdgpu_irq_src,
+    pub gfx_off_req_count: u32,
+    pub gfx_off_residency: u32,
+    pub gfx_off_entrycount: u64,
 }
 
 /// `struct amdgpu_xgmi`, the part early_init reads and sets.
@@ -234,6 +292,9 @@ pub struct amdgpu_gmc {
     pub private_aperture_start: u64,
     pub private_aperture_end: u64,
     pub noretry_flags: u64,
+    pub gart_size: u64,
+    pub tmz_enabled: bool,
+    pub noretry: u32,
 }
 
 /// `struct amdgpu_sdma`.
@@ -338,6 +399,25 @@ pub struct amdgpu_device {
     pub vcn: amdgpu_vcn,
     pub jpeg: amdgpu_jpeg,
     pub vpe: amdgpu_vpe,
+    pub pdev: crate::linux::pci_dev,
+    pub shutdown: bool,
+    pub asic_type: u32,
+    pub usec_timeout: u32,
+    pub accel_working: bool,
+    pub num_rings: u32,
+    /// `adev->gfx_timeout` and its siblings, in milliseconds.
+    pub gfx_timeout: u64,
+    pub compute_timeout: u64,
+    pub sdma_timeout: u64,
+    pub video_timeout: u64,
+    /// `adev->init_lvl`, by the name of the level.
+    pub init_lvl: &'static str,
+    pub enforce_isolation: [u32; MAX_XCP as usize],
+    pub virt: amdgpu_virt,
+    pub have_atomics_support: bool,
+    pub has_hw_reset: bool,
+    pub doorbell: amdgpu_doorbell,
+    pub doorbell_index: amdgpu_doorbell_index,
     /// `adev->flags` (AMD_IS_APU …), `adev->family`.
     pub flags: u32,
     pub family: u32,
@@ -410,6 +490,23 @@ impl amdgpu_device {
             vcn: amdgpu_vcn::default(),
             jpeg: amdgpu_jpeg::default(),
             vpe: amdgpu_vpe::default(),
+            pdev: crate::linux::pci_dev::new(0, 0, 0),
+            shutdown: false,
+            asic_type: 0,
+            usec_timeout: 0,
+            accel_working: false,
+            num_rings: 0,
+            gfx_timeout: 0,
+            compute_timeout: 0,
+            sdma_timeout: 0,
+            video_timeout: 0,
+            init_lvl: "",
+            enforce_isolation: [0; MAX_XCP as usize],
+            virt: amdgpu_virt::default(),
+            have_atomics_support: false,
+            has_hw_reset: false,
+            doorbell: amdgpu_doorbell::default(),
+            doorbell_index: amdgpu_doorbell_index::default(),
             flags: 0,
             family: 0,
             rev_id: 0,
@@ -655,4 +752,440 @@ pub fn amdgpu_device_ip_early_init(adev: &mut amdgpu_device, bdf: (u8, u8, u8)) 
         return Err(-19);
     }
     Ok(adev.ip_blocks.len())
+}
+
+/// `amdgpu_device_check_arguments`. The module parameters are Linux's
+/// defaults (tables.rs); a check that rewrites one only warns here.
+fn amdgpu_device_check_arguments(adev: &mut amdgpu_device) -> i32 {
+    use crate::tables::*;
+    let warn = |s: &str| Line::new().s(s).say();
+    let sj = amdgpu_sched_jobs[0];
+    if sj < 4 {
+        warn("sched jobs must be at least 4");
+    } else if !(sj as u32).is_power_of_two() {
+        warn("sched jobs must be a power of 2");
+    }
+    if amdgpu_gart_size[0] != -1 && amdgpu_gart_size[0] < 32 {
+        warn("gart size too small");
+    }
+    if amdgpu_gtt_size[0] != -1 && amdgpu_gtt_size[0] < 32 {
+        warn("gtt size too small");
+    }
+    let vf = amdgpu_vm_fragment_size[0];
+    if vf != -1 && !(4..=9).contains(&vf) {
+        warn("valid range is between 4 and 9");
+    }
+    let hw = amdgpu_sched_hw_submission[0];
+    if hw < 2 {
+        warn("sched hw submission jobs must be at least 2");
+    } else if !(hw as u32).is_power_of_two() {
+        warn("sched hw submission jobs must be a power of 2");
+    }
+    if !(-1..=4).contains(&amdgpu_reset_method[0]) {
+        warn("invalid option for reset method, reverting to default");
+    }
+
+    // amdgpu_device_check_smu_prv_buffer_size: amdgpu_smu_memory_pool_size 0
+    if amdgpu_smu_memory_pool_size[0] != 0 {
+        warn("smu memory pool size: not ported for a non-zero amdgpu_smu_memory_pool_size");
+    }
+    // amdgpu_device_check_vm_size, amdgpu_device_check_block_size: -1
+    if amdgpu_vm_size[0] != -1 && amdgpu_vm_size[0] < 1 {
+        warn("VM size too small, min is 1GB");
+    }
+    if amdgpu_vm_block_size[0] != -1 && amdgpu_vm_block_size[0] < 9 {
+        warn("VM page table size too small");
+    }
+
+    adev.firmware.load_type = amdgpu_ucode_get_load_type(amdgpu_fw_load_type[0]);
+
+    for i in 0..MAX_XCP as usize {
+        adev.enforce_isolation[i] = match amdgpu_enforce_isolation[0] {
+            1 => AMDGPU_ENFORCE_ISOLATION_ENABLE,
+            2 => AMDGPU_ENFORCE_ISOLATION_ENABLE_LEGACY,
+            3 => AMDGPU_ENFORCE_ISOLATION_NO_CLEANER_SHADER,
+            // -1, 0, default: disable
+            _ => AMDGPU_ENFORCE_ISOLATION_DISABLE,
+        };
+    }
+    0
+}
+
+/// `amdgpu_virt_init`: CHIP_RENOIR has no SR-IOV register
+/// (`amdgpu_virt_init_detect_asic` reads none, 0), and nopeekOS runs on
+/// the bare machine, so `is_virtual_machine()` is false: no caps.
+fn amdgpu_virt_init(adev: &mut amdgpu_device) {
+    adev.virt.caps = 0;
+}
+
+/// `amdgpu_device_partner_bandwidth`: the first upstream bridge that is
+/// not ATI's.
+fn amdgpu_device_partner_bandwidth(adev: &amdgpu_device) -> (u32, u32) {
+    let mut speed = PCI_SPEED_UNKNOWN;
+    let mut width = PCIE_LNK_WIDTH_UNKNOWN;
+    if amdgpu_device_pcie_dynamic_switching_supported(adev) {
+        let mut parent = adev.pdev;
+        while let Some(p) = parent.upstream_bridge() {
+            parent = p;
+            // skip upstream/downstream switches internal to dGPU
+            if p.vendor() as u32 == PCI_VENDOR_ID_ATI {
+                continue;
+            }
+            speed = p.pcie_get_speed_cap();
+            width = p.pcie_get_width_cap();
+            break;
+        }
+    }
+    (speed, width)
+}
+
+/// `amdgpu_device_gpu_bandwidth`.
+fn amdgpu_device_gpu_bandwidth(adev: &amdgpu_device) -> (u32, u32) {
+    match adev.pdev.upstream_bridge() {
+        Some(p) if p.vendor() as u32 == PCI_VENDOR_ID_ATI => {
+            // use the upstream/downstream switches internal to dGPU
+            let (mut speed, mut width) = (p.pcie_get_speed_cap(), p.pcie_get_width_cap());
+            let mut parent = p;
+            while let Some(q) = parent.upstream_bridge() {
+                parent = q;
+                if q.vendor() as u32 == PCI_VENDOR_ID_ATI {
+                    speed = q.pcie_get_speed_cap();
+                    width = q.pcie_get_width_cap();
+                }
+            }
+            (speed, width)
+        }
+        // use the device itself
+        _ => (adev.pdev.pcie_get_speed_cap(), adev.pdev.pcie_get_width_cap()),
+    }
+}
+
+/// `amdgpu_device_get_pcie_info`. Bare metal, not passthrough.
+fn amdgpu_device_get_pcie_info(adev: &mut amdgpu_device) {
+    use crate::tables::{amdgpu_pcie_gen_cap, amdgpu_pcie_lane_cap};
+    if amdgpu_pcie_gen_cap[0] != 0 {
+        adev.pm.pcie_gen_mask = amdgpu_pcie_gen_cap[0];
+    }
+    if amdgpu_pcie_lane_cap[0] != 0 {
+        adev.pm.pcie_mlw_mask = amdgpu_pcie_lane_cap[0];
+    }
+    // covers APUs as well
+    if adev.pdev.on_root_bus() {
+        if adev.pm.pcie_gen_mask == 0 {
+            adev.pm.pcie_gen_mask = AMDGPU_DEFAULT_PCIE_GEN_MASK;
+        }
+        if adev.pm.pcie_mlw_mask == 0 {
+            adev.pm.pcie_mlw_mask = AMDGPU_DEFAULT_PCIE_MLW_MASK;
+        }
+        return;
+    }
+    if adev.pm.pcie_gen_mask != 0 && adev.pm.pcie_mlw_mask != 0 {
+        return;
+    }
+    let (platform_speed_cap, platform_link_width) = amdgpu_device_partner_bandwidth(adev);
+    let (speed_cap, link_width) = amdgpu_device_gpu_bandwidth(adev);
+
+    let asic_gen = [CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_GEN1, CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_GEN2,
+                    CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_GEN3, CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_GEN4,
+                    CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_GEN5];
+    let plat_gen = [CAIL_PCIE_LINK_SPEED_SUPPORT_GEN1, CAIL_PCIE_LINK_SPEED_SUPPORT_GEN2,
+                    CAIL_PCIE_LINK_SPEED_SUPPORT_GEN3, CAIL_PCIE_LINK_SPEED_SUPPORT_GEN4,
+                    CAIL_PCIE_LINK_SPEED_SUPPORT_GEN5];
+    // Gen 1 up to the generation of a speed.
+    let gens = |speed: u32| -> usize {
+        if speed == PCIE_SPEED_32_0GT { 5 }
+        else if speed == PCIE_SPEED_16_0GT { 4 }
+        else if speed == PCIE_SPEED_8_0GT { 3 }
+        else if speed == PCIE_SPEED_5_0GT { 2 }
+        else { 1 }
+    };
+    if adev.pm.pcie_gen_mask == 0 {
+        // asic caps
+        let n = if speed_cap == PCI_SPEED_UNKNOWN { 3 } else { gens(speed_cap) };
+        for g in &asic_gen[..n] {
+            adev.pm.pcie_gen_mask |= g;
+        }
+        // platform caps
+        let n = if platform_speed_cap == PCI_SPEED_UNKNOWN { 2 } else { gens(platform_speed_cap) };
+        for g in &plat_gen[..n] {
+            adev.pm.pcie_gen_mask |= g;
+        }
+    }
+    if adev.pm.pcie_mlw_mask == 0 {
+        let asic_w = [CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X1, CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X2,
+                      CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X4, CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X8,
+                      CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X12, CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X16,
+                      CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X32];
+        let plat_w = [CAIL_PCIE_LINK_WIDTH_SUPPORT_X1, CAIL_PCIE_LINK_WIDTH_SUPPORT_X2,
+                      CAIL_PCIE_LINK_WIDTH_SUPPORT_X4, CAIL_PCIE_LINK_WIDTH_SUPPORT_X8,
+                      CAIL_PCIE_LINK_WIDTH_SUPPORT_X12, CAIL_PCIE_LINK_WIDTH_SUPPORT_X16,
+                      CAIL_PCIE_LINK_WIDTH_SUPPORT_X32];
+        // X1 up to a width; 0 for a width the switch has no case for.
+        let widths = |w: u32| -> usize {
+            if w == PCIE_LNK_X32 { 7 } else if w == PCIE_LNK_X16 { 6 } else if w == PCIE_LNK_X12 { 5 }
+            else if w == PCIE_LNK_X8 { 4 } else if w == PCIE_LNK_X4 { 3 } else if w == PCIE_LNK_X2 { 2 }
+            else if w == PCIE_LNK_X1 { 1 } else { 0 }
+        };
+        // asic caps
+        if link_width == PCIE_LNK_WIDTH_UNKNOWN {
+            adev.pm.pcie_mlw_mask |= AMDGPU_DEFAULT_ASIC_PCIE_MLW_MASK;
+        } else {
+            for w in &asic_w[..widths(link_width)] {
+                adev.pm.pcie_mlw_mask |= w;
+            }
+        }
+        // platform caps
+        if platform_link_width == PCIE_LNK_WIDTH_UNKNOWN {
+            adev.pm.pcie_mlw_mask |= AMDGPU_DEFAULT_PCIE_MLW_MASK;
+        } else {
+            for w in &plat_w[..widths(platform_link_width)] {
+                adev.pm.pcie_mlw_mask |= w;
+            }
+        }
+    }
+}
+
+/// `amdgpu_device_get_job_timeout_settings`: `amdgpu_lockup_timeout` is
+/// empty, so 10 s for every kind of job.
+fn amdgpu_device_get_job_timeout_settings(adev: &mut amdgpu_device) -> i32 {
+    adev.gfx_timeout = 10000;
+    adev.compute_timeout = 10000;
+    adev.sdma_timeout = adev.gfx_timeout;
+    adev.video_timeout = adev.gfx_timeout;
+    if crate::tables::amdgpu_lockup_timeout[0] != 0 {
+        Line::new().s("lockup_timeout parameter: not ported for a set value").say();
+        return -22;
+    }
+    0
+}
+
+/// `amdgpu_gmc_tmz_set` (amdgpu_gmc.c), GC 9.3.0: "RENOIR looks like RAVEN".
+fn amdgpu_gmc_tmz_set(adev: &mut amdgpu_device) {
+    if crate::tables::amdgpu_tmz[0] == 0 {
+        adev.gmc.tmz_enabled = false;
+        Line::new().s("Trusted Memory Zone (TMZ) feature disabled (cmd line)").say();
+    } else {
+        adev.gmc.tmz_enabled = true;
+        Line::new().s("Trusted Memory Zone (TMZ) feature enabled").say();
+    }
+}
+
+/// `amdgpu_gmc_noretry_set` (amdgpu_gmc.c). Bare metal, so
+/// `amdgpu_sriov_xnack_support` is true; GC 9.3.0 is not in the
+/// noretry-by-default list.
+fn amdgpu_gmc_noretry_set(adev: &mut amdgpu_device) {
+    let noretry_default = false;
+    let n = crate::tables::amdgpu_noretry[0];
+    adev.gmc.noretry = if n == -1 { noretry_default as u32 } else { n as u32 };
+}
+
+/// `vega10_doorbell_index_init` (vega10_reg_init.c), soc15's
+/// `init_doorbell_index`.
+fn vega10_doorbell_index_init(adev: &mut amdgpu_device) {
+    let d = &mut adev.doorbell_index;
+    d.kiq = AMDGPU_DOORBELL64_KIQ;
+    d.mec_ring0 = AMDGPU_DOORBELL64_MEC_RING0;
+    d.mec_ring1 = AMDGPU_DOORBELL64_MEC_RING1;
+    d.mec_ring2 = AMDGPU_DOORBELL64_MEC_RING2;
+    d.mec_ring3 = AMDGPU_DOORBELL64_MEC_RING3;
+    d.mec_ring4 = AMDGPU_DOORBELL64_MEC_RING4;
+    d.mec_ring5 = AMDGPU_DOORBELL64_MEC_RING5;
+    d.mec_ring6 = AMDGPU_DOORBELL64_MEC_RING6;
+    d.mec_ring7 = AMDGPU_DOORBELL64_MEC_RING7;
+    d.userqueue_start = AMDGPU_DOORBELL64_USERQUEUE_START;
+    d.userqueue_end = AMDGPU_DOORBELL64_USERQUEUE_END;
+    d.gfx_ring0 = AMDGPU_DOORBELL64_GFX_RING0;
+    d.sdma_engine[0] = AMDGPU_DOORBELL64_sDMA_ENGINE0;
+    d.sdma_engine[1] = AMDGPU_DOORBELL64_sDMA_ENGINE1;
+    d.ih = AMDGPU_DOORBELL64_IH;
+    d.uvd_ring0_1 = AMDGPU_DOORBELL64_UVD_RING0_1;
+    d.uvd_ring2_3 = AMDGPU_DOORBELL64_UVD_RING2_3;
+    d.uvd_ring4_5 = AMDGPU_DOORBELL64_UVD_RING4_5;
+    d.uvd_ring6_7 = AMDGPU_DOORBELL64_UVD_RING6_7;
+    d.vce_ring0_1 = AMDGPU_DOORBELL64_VCE_RING0_1;
+    d.vce_ring2_3 = AMDGPU_DOORBELL64_VCE_RING2_3;
+    d.vce_ring4_5 = AMDGPU_DOORBELL64_VCE_RING4_5;
+    d.vce_ring6_7 = AMDGPU_DOORBELL64_VCE_RING6_7;
+    d.vcn_ring0_1 = AMDGPU_DOORBELL64_VCN0_1;
+    d.vcn_ring2_3 = AMDGPU_DOORBELL64_VCN2_3;
+    d.vcn_ring4_5 = AMDGPU_DOORBELL64_VCN4_5;
+    d.vcn_ring6_7 = AMDGPU_DOORBELL64_VCN6_7;
+    d.first_non_cp = AMDGPU_DOORBELL64_FIRST_NON_CP;
+    d.last_non_cp = AMDGPU_DOORBELL64_LAST_NON_CP;
+    // In unit of dword doorbell
+    d.max_assignment = AMDGPU_DOORBELL64_MAX_ASSIGNMENT << 1;
+    d.sdma_doorbell_range = 4;
+}
+
+/// `amdgpu_doorbell_init` (amdgpu_doorbell_mgr.c): BAR2.
+fn amdgpu_doorbell_init(adev: &mut amdgpu_device, bar2_start: u64, bar2_len: u64) -> i32 {
+    // pci_resource_flags(pdev, 2) & IORESOURCE_UNSET: an unassigned BAR
+    if bar2_start == 0 || bar2_len == 0 {
+        return -22;
+    }
+    vega10_doorbell_index_init(adev);
+    adev.doorbell.base = bar2_start;
+    adev.doorbell.size = bar2_len;
+    adev.doorbell.num_kernel_doorbells =
+        ((adev.doorbell.size / 4).min(u32::MAX as u64) as u32).min(adev.doorbell_index.max_assignment + 1);
+    if adev.doorbell.num_kernel_doorbells == 0 {
+        return -22;
+    }
+    // For Vega, reserve and map two pages on doorbell BAR since SDMA
+    // paging queue doorbell use the second page.
+    adev.doorbell.num_kernel_doorbells += 0x400;
+    0
+}
+
+/// `soc15_asic_reset_method` for MP1 12.0.0 with `amdgpu_reset_method`
+/// forced to NONE by the caller: MODE2.
+fn soc15_asic_reset_method(adev: &amdgpu_device) -> u32 {
+    if adev.ip_version(MP1_HWIP, 0) == 12 << 24 {
+        AMD_RESET_METHOD_MODE2
+    } else {
+        AMD_RESET_METHOD_MODE1
+    }
+}
+
+/// `amdgpu_atombios_scratch_need_asic_init` (amdgpu_atombios.c).
+fn amdgpu_atombios_scratch_need_asic_init(adev: &amdgpu_device) -> bool {
+    let tmp = adev.rreg32(adev.bios_scratch_reg_offset + 7).unwrap_or(0);
+    tmp & ATOM_S7_ASIC_INIT_COMPLETE_MASK == 0
+}
+
+/// `amdgpu_device_need_post`. Bare metal, no AIDs (vbios flags 0), not
+/// passthrough, default init level, CIK+: the BIOS scratch register says.
+pub fn amdgpu_device_need_post(adev: &mut amdgpu_device) -> bool {
+    if adev.has_hw_reset {
+        adev.has_hw_reset = false;
+        return true;
+    }
+    amdgpu_atombios_scratch_need_asic_init(adev)
+}
+
+/// The step `amdgpu_device_init` takes when `amdgpu_asic_need_reset_on_init`
+/// is true, decided as Linux decides it.
+pub struct reset_on_init {
+    pub needed: bool,
+    pub method: u32,
+}
+
+/// `amdgpu_device_init` up to `amdgpu_device_ip_init`, Renoir's path.
+/// `flags` is the pci id table's `CHIP_RENOIR | AMD_IS_APU`. The reset on
+/// init (`soc15_need_reset_on_init` is true for CHIP_RENOIR) is decided
+/// and returned, not taken: it is a MODE2 reset through the SMU, the
+/// first write that changes the card's state.
+pub fn amdgpu_device_init(adev: &mut amdgpu_device, flags: u32, bdf: (u8, u8, u8), bar2: (u64, u64))
+    -> Result<reset_on_init, i32>
+{
+    adev.shutdown = false;
+    adev.flags = flags;
+    adev.asic_type = if crate::tables::amdgpu_force_asic_type[0] >= 0 {
+        crate::tables::amdgpu_force_asic_type[0] as u32
+    } else {
+        flags & AMD_ASIC_MASK
+    };
+    adev.usec_timeout = AMDGPU_MAX_USEC_TIMEOUT;
+    if crate::tables::amdgpu_emu_mode[0] == 1 {
+        adev.usec_timeout *= 10;
+    }
+    adev.gmc.gart_size = 512 * 1024 * 1024;
+    adev.accel_working = false;
+    adev.num_rings = 0;
+    adev.mman.buffer_funcs = None;
+    adev.mman.buffer_funcs_ring = None;
+    adev.vm_manager.vm_pte_funcs = None;
+    adev.vm_manager.vm_pte_num_scheds = 0;
+    adev.gmc.gmc_funcs = None;
+    adev.harvest_ip_mask = 0;
+    // The register access hooks start as amdgpu_invalid_rreg/_wreg; the
+    // port calls the access functions directly.
+    adev.pdev = crate::linux::pci_dev::new(bdf.0, bdf.1, bdf.2);
+
+    Line::new().s("initializing kernel modesetting (")
+        .bytes(crate::tables::amdgpu_asic_name.get(adev.asic_type as usize).copied().unwrap_or(b"?"))
+        .s(" 0x1002:0x").hexw(adev.device as u32, 4).s(" 0x").hexw(adev.subsystem_vendor as u32, 4).s(":0x")
+        .hexw(adev.subsystem_device as u32, 4).s(" 0x").hexw(adev.revision as u32, 2).s(").").say();
+
+    // Mutexes, spinlocks, lists, work items and the throttling ratelimit
+    // guard and schedule what one thread does here in turn.
+
+    amdgpu_device_init_apu_flags(adev);
+    let r = amdgpu_device_check_arguments(adev);
+    if r != 0 {
+        return Err(r);
+    }
+
+    adev.gfx.gfx_off_req_count = 1;
+    adev.gfx.gfx_off_residency = 0;
+    adev.gfx.gfx_off_entrycount = 0;
+    adev.pm.ac_power = None;
+
+    // Registers mapping: BAR5 (CHIP_BONAIRE and later), mapped by the caller.
+    Line::new().s("register mmio base: ").hex(adev.rmmio_base as u32).say();
+    Line::new().s("register mmio size: ").dec(adev.rmmio_size as u64).say();
+
+    // amdgpu_reset_create_reset_domain: one device, one thread.
+
+    // detect hw virtualization here
+    amdgpu_virt_init(adev);
+    amdgpu_device_get_pcie_info(adev);
+    let r = amdgpu_device_get_job_timeout_settings(adev);
+    if r != 0 {
+        Line::new().s("invalid lockup_timeout parameter syntax").say();
+        return Err(r);
+    }
+    amdgpu_device_set_mcbp(adev);
+    adev.init_lvl = "amdgpu_init_default";
+
+    // early init functions
+    amdgpu_device_ip_early_init(adev, bdf)?;
+
+    // aperture_remove_conflicting_pci_devices: the kernel's framebuffer
+    // stays until DC takes the display over.
+
+    // Enable TMZ based on IP_VERSION
+    amdgpu_gmc_tmz_set(adev);
+    amdgpu_gmc_noretry_set(adev);
+    // No XGMI: gfxhub get_xgmi_info is not called.
+
+    // APUs w/ gfx9 onwards doesn't reply on PCIe atomics, rather it is a
+    // internal path natively support atomics, set have_atomics_support to true.
+    if adev.flags & AMD_IS_APU != 0 && adev.ip_version(GC_HWIP, 0) > 9 << 24 {
+        adev.have_atomics_support = true;
+    }
+    if !adev.have_atomics_support {
+        Line::new().s("PCIE atomic ops is not supported").say();
+    }
+
+    // doorbell bar mapping and doorbell index init
+    let r = amdgpu_doorbell_init(adev, bar2.0, bar2.1);
+    if r != 0 {
+        Line::new().s("amdgpu_doorbell_init failed (").dec((-r) as u64).s(")").say();
+    }
+
+    // amdgpu_reset_init: MP1 12.0.0 has no reset handler of its own.
+    // amdgpu_device_detect_sriov_bios: bare metal.
+
+    // check if we need to reset the asic: soc15_need_reset_on_init,
+    // "CP hangs in IGT reloading test on RN, reset to WA"
+    let reset = reset_on_init { needed: adev.asic_type == CHIP_RENOIR, method: soc15_asic_reset_method(adev) };
+
+    // Post card if necessary
+    if amdgpu_device_need_post(adev) {
+        Line::new().s("GPU posting now... (amdgpu_device_asic_init: the ATOM interpreter is not ported)").say();
+        return Err(-22);
+    }
+
+    if adev.mode_info.atom_context.is_some() && adev.is_atom_fw {
+        // Initialize clocks
+        let r = crate::amdgpu_atomfirmware::amdgpu_atomfirmware_get_clock_info(adev);
+        if r != 0 {
+            Line::new().s("amdgpu_atomfirmware_get_clock_info failed").say();
+            return Err(r);
+        }
+    }
+
+    // amdgpu_fence_driver_sw_init: 0. drm_mode_config_init: DRM's.
+    Ok(reset)
 }

@@ -1479,3 +1479,267 @@ pub const mmMP1_SMN_C2PMSG_90: u32 = 0x29a;
 pub const mmMP1_SMN_C2PMSG_90_BASE_IDX: u32 = 0x0;
 /// amdgpu/amdgpu_vcn.h:36
 pub const AMDGPU_MAX_VCN_ENC_RINGS: u32 = 0xc;
+
+// amdgpu_device_init through amdgpu_device_ip_init (stage 1c)
+/// amdgpu/amdgpu.h:282
+pub const AMDGPU_MAX_USEC_TIMEOUT: u32 = 0x186a0;
+/// include/amd_shared.h:38
+pub const AMD_ASIC_MASK: u32 = 0xffff;
+/// amdgpu/amdgpu_xcp.h:32
+pub const MAX_XCP: u32 = 0x8;
+/// ?
+pub const CHIP_RENOIR: u32 = 0x18;
+/// amdgpu/amdgpu.h:946
+pub const AMDGPU_ENFORCE_ISOLATION_DISABLE: u32 = 0x0;
+/// amdgpu/amdgpu.h:947
+pub const AMDGPU_ENFORCE_ISOLATION_ENABLE: u32 = 0x1;
+/// amdgpu/amdgpu.h:948
+pub const AMDGPU_ENFORCE_ISOLATION_ENABLE_LEGACY: u32 = 0x2;
+/// amdgpu/amdgpu.h:949
+pub const AMDGPU_ENFORCE_ISOLATION_NO_CLEANER_SHADER: u32 = 0x3;
+/// include/amd_pcie.h:45
+pub const AMDGPU_DEFAULT_PCIE_GEN_MASK: u32 = 0x30007;
+/// include/amd_pcie.h:74
+pub const AMDGPU_DEFAULT_PCIE_MLW_MASK: u32 = 0x2f0000;
+/// include/amd_pcie.h:80
+pub const AMDGPU_DEFAULT_ASIC_PCIE_MLW_MASK: u32 = 0x2f;
+/// ?
+pub const PCI_VENDOR_ID_ATI: u32 = 0x1002;
+/// include/atombios.h:7075
+pub const ATOM_S7_ASIC_INIT_COMPLETE_MASK: u32 = 0x200;
+/// amdgpu/amdgpu.h:624
+pub const AMD_RESET_METHOD_NONE: u64 = 0xffffffffffffffff;
+/// amdgpu/amdgpu.h:626
+pub const AMD_RESET_METHOD_MODE0: u32 = 0x1;
+/// amdgpu/amdgpu.h:627
+pub const AMD_RESET_METHOD_MODE1: u32 = 0x2;
+/// amdgpu/amdgpu.h:628
+pub const AMD_RESET_METHOD_MODE2: u32 = 0x3;
+/// amdgpu/amdgpu.h:630
+pub const AMD_RESET_METHOD_BACO: u32 = 0x5;
+/// amdgpu/amdgpu.h:631
+pub const AMD_RESET_METHOD_PCI: u32 = 0x6;
+/// amdgpu/amdgpu.h:629
+pub const AMD_RESET_METHOD_LINK: u32 = 0x4;
+
+// PCI Express capability (pci_regs.h, linux/pci.h)
+/// ?
+pub const PCI_STATUS: u32 = 0x6;
+/// ?
+pub const PCI_STATUS_CAP_LIST: u32 = 0x10;
+/// ?
+pub const PCI_CAPABILITY_LIST: u32 = 0x34;
+/// ?
+pub const PCI_CAP_ID_EXP: u32 = 0x10;
+/// ?
+pub const PCI_HEADER_TYPE: u32 = 0xe;
+/// ?
+pub const PCI_HEADER_TYPE_MASK: u32 = 0x7f;
+/// ?
+pub const PCI_HEADER_TYPE_BRIDGE: u32 = 0x1;
+/// ?
+pub const PCI_SECONDARY_BUS: u32 = 0x19;
+/// ?
+pub const PCI_EXP_FLAGS: u32 = 0x2;
+/// ?
+pub const PCI_EXP_FLAGS_TYPE: u32 = 0xf0;
+/// ?
+pub const PCI_EXP_FLAGS_VERS: u32 = 0xf;
+/// ?
+pub const PCI_EXP_LNKCAP: u32 = 0xc;
+/// ?
+pub const PCI_EXP_LNKCAP2: u32 = 0x2c;
+/// ?
+pub const PCI_EXP_LNKCAP_SLS: u32 = 0xf;
+/// ?
+pub const PCI_EXP_LNKCAP_SLS_2_5GB: u32 = 0x1;
+/// ?
+pub const PCI_EXP_LNKCAP_SLS_5_0GB: u32 = 0x2;
+/// ?
+pub const PCI_EXP_LNKCAP_MLW: u32 = 0x3f0;
+/// ?
+pub const PCI_EXP_LNKCAP2_SLS: u32 = 0xfe;
+/// ?
+pub const PCI_EXP_LNKCAP2_SLS_2_5GB: u32 = 0x2;
+/// ?
+pub const PCI_EXP_LNKCAP2_SLS_5_0GB: u32 = 0x4;
+/// ?
+pub const PCI_EXP_LNKCAP2_SLS_8_0GB: u32 = 0x8;
+/// ?
+pub const PCI_EXP_LNKCAP2_SLS_16_0GB: u32 = 0x10;
+/// ?
+pub const PCI_EXP_LNKCAP2_SLS_32_0GB: u32 = 0x20;
+/// ?
+pub const PCI_EXP_LNKCAP2_SLS_64_0GB: u32 = 0x40;
+/// ?
+pub const PCI_EXP_TYPE_ENDPOINT: u32 = 0x0;
+/// ?
+pub const PCI_EXP_TYPE_LEG_END: u32 = 0x1;
+/// ?
+pub const PCI_EXP_TYPE_ROOT_PORT: u32 = 0x4;
+/// ?
+pub const PCI_EXP_TYPE_UPSTREAM: u32 = 0x5;
+/// ?
+pub const PCI_EXP_TYPE_DOWNSTREAM: u32 = 0x6;
+/// ?
+pub const PCI_EXP_TYPE_PCI_BRIDGE: u32 = 0x7;
+/// ?
+pub const PCI_EXP_TYPE_PCIE_BRIDGE: u32 = 0x8;
+/// ?
+pub const PCIE_SPEED_2_5GT: u32 = 0x14;
+/// ?
+pub const PCIE_SPEED_5_0GT: u32 = 0x15;
+/// ?
+pub const PCIE_SPEED_8_0GT: u32 = 0x16;
+/// ?
+pub const PCIE_SPEED_16_0GT: u32 = 0x17;
+/// ?
+pub const PCIE_SPEED_32_0GT: u32 = 0x18;
+/// ?
+pub const PCIE_SPEED_64_0GT: u32 = 0x19;
+/// ?
+pub const PCI_SPEED_UNKNOWN: u32 = 0xff;
+/// ?
+pub const PCIE_LNK_X1: u32 = 0x1;
+/// ?
+pub const PCIE_LNK_X2: u32 = 0x2;
+/// ?
+pub const PCIE_LNK_X4: u32 = 0x4;
+/// ?
+pub const PCIE_LNK_X8: u32 = 0x8;
+/// ?
+pub const PCIE_LNK_X12: u32 = 0xc;
+/// ?
+pub const PCIE_LNK_X16: u32 = 0x10;
+/// ?
+pub const PCIE_LNK_X32: u32 = 0x20;
+/// ?
+pub const PCIE_LNK_WIDTH_UNKNOWN: u32 = 0xff;
+
+// CAIL PCIe masks (amd_pcie.h)
+/// include/amd_pcie.h:27
+pub const CAIL_PCIE_LINK_SPEED_SUPPORT_GEN1: u32 = 0x10000;
+/// include/amd_pcie.h:28
+pub const CAIL_PCIE_LINK_SPEED_SUPPORT_GEN2: u32 = 0x20000;
+/// include/amd_pcie.h:29
+pub const CAIL_PCIE_LINK_SPEED_SUPPORT_GEN3: u32 = 0x40000;
+/// include/amd_pcie.h:30
+pub const CAIL_PCIE_LINK_SPEED_SUPPORT_GEN4: u32 = 0x80000;
+/// include/amd_pcie.h:31
+pub const CAIL_PCIE_LINK_SPEED_SUPPORT_GEN5: u32 = 0x100000;
+/// include/amd_pcie.h:32
+pub const CAIL_PCIE_LINK_SPEED_SUPPORT_MASK: u32 = 0xffff0000;
+/// include/amd_pcie.h:33
+pub const CAIL_PCIE_LINK_SPEED_SUPPORT_SHIFT: u32 = 0x10;
+/// include/amd_pcie.h:36
+pub const CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_GEN1: u32 = 0x1;
+/// include/amd_pcie.h:37
+pub const CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_GEN2: u32 = 0x2;
+/// include/amd_pcie.h:38
+pub const CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_GEN3: u32 = 0x4;
+/// include/amd_pcie.h:39
+pub const CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_GEN4: u32 = 0x8;
+/// include/amd_pcie.h:40
+pub const CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_GEN5: u32 = 0x10;
+/// include/amd_pcie.h:41
+pub const CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_MASK: u32 = 0xffff;
+/// include/amd_pcie.h:42
+pub const CAIL_ASIC_PCIE_LINK_SPEED_SUPPORT_SHIFT: u32 = 0x0;
+/// include/amd_pcie.h:53
+pub const CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X1: u32 = 0x1;
+/// include/amd_pcie.h:54
+pub const CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X2: u32 = 0x2;
+/// include/amd_pcie.h:55
+pub const CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X4: u32 = 0x4;
+/// include/amd_pcie.h:56
+pub const CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X8: u32 = 0x8;
+/// include/amd_pcie.h:57
+pub const CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X12: u32 = 0x10;
+/// include/amd_pcie.h:58
+pub const CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X16: u32 = 0x20;
+/// include/amd_pcie.h:59
+pub const CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X32: u32 = 0x40;
+/// include/amd_pcie.h:60
+pub const CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_MASK: u32 = 0xffff;
+/// include/amd_pcie.h:61
+pub const CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_SHIFT: u32 = 0x0;
+/// include/amd_pcie.h:63
+pub const CAIL_PCIE_LINK_WIDTH_SUPPORT_X1: u32 = 0x10000;
+/// include/amd_pcie.h:64
+pub const CAIL_PCIE_LINK_WIDTH_SUPPORT_X2: u32 = 0x20000;
+/// include/amd_pcie.h:65
+pub const CAIL_PCIE_LINK_WIDTH_SUPPORT_X4: u32 = 0x40000;
+/// include/amd_pcie.h:66
+pub const CAIL_PCIE_LINK_WIDTH_SUPPORT_X8: u32 = 0x80000;
+/// include/amd_pcie.h:67
+pub const CAIL_PCIE_LINK_WIDTH_SUPPORT_X12: u32 = 0x100000;
+/// include/amd_pcie.h:68
+pub const CAIL_PCIE_LINK_WIDTH_SUPPORT_X16: u32 = 0x200000;
+/// include/amd_pcie.h:69
+pub const CAIL_PCIE_LINK_WIDTH_SUPPORT_X32: u32 = 0x400000;
+/// include/amd_pcie.h:70
+pub const CAIL_PCIE_LINK_WIDTH_SUPPORT_MASK: u32 = 0xffff0000;
+/// include/amd_pcie.h:71
+pub const CAIL_PCIE_LINK_WIDTH_SUPPORT_SHIFT: u32 = 0x10;
+
+// Doorbells (vega10_doorbell_index_init, amdgpu_doorbell.h)
+/// amdgpu/amdgpu_doorbell.h:251
+pub const AMDGPU_DOORBELL64_KIQ: u32 = 0x0;
+/// amdgpu/amdgpu_doorbell.h:258
+pub const AMDGPU_DOORBELL64_MEC_RING0: u32 = 0x3;
+/// amdgpu/amdgpu_doorbell.h:259
+pub const AMDGPU_DOORBELL64_MEC_RING1: u32 = 0x4;
+/// amdgpu/amdgpu_doorbell.h:260
+pub const AMDGPU_DOORBELL64_MEC_RING2: u32 = 0x5;
+/// amdgpu/amdgpu_doorbell.h:261
+pub const AMDGPU_DOORBELL64_MEC_RING3: u32 = 0x6;
+/// amdgpu/amdgpu_doorbell.h:262
+pub const AMDGPU_DOORBELL64_MEC_RING4: u32 = 0x7;
+/// amdgpu/amdgpu_doorbell.h:263
+pub const AMDGPU_DOORBELL64_MEC_RING5: u32 = 0x8;
+/// amdgpu/amdgpu_doorbell.h:264
+pub const AMDGPU_DOORBELL64_MEC_RING6: u32 = 0x9;
+/// amdgpu/amdgpu_doorbell.h:265
+pub const AMDGPU_DOORBELL64_MEC_RING7: u32 = 0xa;
+/// amdgpu/amdgpu_doorbell.h:268
+pub const AMDGPU_DOORBELL64_USERQUEUE_START: u32 = 0xb;
+/// amdgpu/amdgpu_doorbell.h:269
+pub const AMDGPU_DOORBELL64_USERQUEUE_END: u32 = 0x8a;
+/// amdgpu/amdgpu_doorbell.h:272
+pub const AMDGPU_DOORBELL64_GFX_RING0: u32 = 0x8b;
+/// amdgpu/amdgpu_doorbell.h:284
+pub const AMDGPU_DOORBELL64_sDMA_ENGINE0: u32 = 0xf0;
+/// amdgpu/amdgpu_doorbell.h:286
+pub const AMDGPU_DOORBELL64_sDMA_ENGINE1: u32 = 0xf2;
+/// amdgpu/amdgpu_doorbell.h:290
+pub const AMDGPU_DOORBELL64_IH: u32 = 0xf4;
+/// amdgpu/amdgpu_doorbell.h:303
+pub const AMDGPU_DOORBELL64_UVD_RING0_1: u32 = 0xf8;
+/// amdgpu/amdgpu_doorbell.h:304
+pub const AMDGPU_DOORBELL64_UVD_RING2_3: u32 = 0xf9;
+/// amdgpu/amdgpu_doorbell.h:305
+pub const AMDGPU_DOORBELL64_UVD_RING4_5: u32 = 0xfa;
+/// amdgpu/amdgpu_doorbell.h:306
+pub const AMDGPU_DOORBELL64_UVD_RING6_7: u32 = 0xfb;
+/// amdgpu/amdgpu_doorbell.h:308
+pub const AMDGPU_DOORBELL64_VCE_RING0_1: u32 = 0xfc;
+/// amdgpu/amdgpu_doorbell.h:309
+pub const AMDGPU_DOORBELL64_VCE_RING2_3: u32 = 0xfd;
+/// amdgpu/amdgpu_doorbell.h:310
+pub const AMDGPU_DOORBELL64_VCE_RING4_5: u32 = 0xfe;
+/// amdgpu/amdgpu_doorbell.h:311
+pub const AMDGPU_DOORBELL64_VCE_RING6_7: u32 = 0xff;
+/// amdgpu/amdgpu_doorbell.h:295
+pub const AMDGPU_DOORBELL64_VCN0_1: u32 = 0xf8;
+/// amdgpu/amdgpu_doorbell.h:296
+pub const AMDGPU_DOORBELL64_VCN2_3: u32 = 0xf9;
+/// amdgpu/amdgpu_doorbell.h:297
+pub const AMDGPU_DOORBELL64_VCN4_5: u32 = 0xfa;
+/// amdgpu/amdgpu_doorbell.h:298
+pub const AMDGPU_DOORBELL64_VCN6_7: u32 = 0xfb;
+/// amdgpu/amdgpu_doorbell.h:313
+pub const AMDGPU_DOORBELL64_FIRST_NON_CP: u32 = 0xf0;
+/// amdgpu/amdgpu_doorbell.h:314
+pub const AMDGPU_DOORBELL64_LAST_NON_CP: u32 = 0xff;
+/// amdgpu/amdgpu_doorbell.h:316
+pub const AMDGPU_DOORBELL64_MAX_ASSIGNMENT: u32 = 0xff;

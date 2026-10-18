@@ -83,3 +83,57 @@ pub static amdgpu_mcbp: [i32; 1] = [-1];
 
 /// `amdgpu_num_kcq` in amdgpu_drv.c
 pub static amdgpu_num_kcq: [i32; 1] = [-1];
+
+/// `amdgpu_tmz` in amdgpu_drv.c
+pub static amdgpu_tmz: [i32; 1] = [-1];
+
+/// `amdgpu_noretry` in amdgpu_drv.c
+pub static amdgpu_noretry: [i32; 1] = [-1];
+
+/// `amdgpu_pcie_gen_cap` in amdgpu_drv.c
+pub static amdgpu_pcie_gen_cap: [u32; 1] = [0];
+
+/// `amdgpu_pcie_lane_cap` in amdgpu_drv.c
+pub static amdgpu_pcie_lane_cap: [u32; 1] = [0];
+
+/// `amdgpu_reset_method` in amdgpu_drv.c
+pub static amdgpu_reset_method: [i32; 1] = [-1];
+
+/// `amdgpu_sched_jobs` in amdgpu_drv.c
+pub static amdgpu_sched_jobs: [i32; 1] = [32];
+
+/// `amdgpu_gart_size` in amdgpu_drv.c
+pub static amdgpu_gart_size: [i32; 1] = [-1];
+
+/// `amdgpu_gtt_size` in amdgpu_drv.c
+pub static amdgpu_gtt_size: [i32; 1] = [-1];
+
+/// `amdgpu_vm_fragment_size` in amdgpu_drv.c
+pub static amdgpu_vm_fragment_size: [i32; 1] = [-1];
+
+/// `amdgpu_sched_hw_submission` in amdgpu_drv.c
+pub static amdgpu_sched_hw_submission: [i32; 1] = [2];
+
+/// `amdgpu_smu_memory_pool_size` in amdgpu_drv.c
+pub static amdgpu_smu_memory_pool_size: [u32; 1] = [0];
+
+/// `amdgpu_vm_size` in amdgpu_drv.c
+pub static amdgpu_vm_size: [i32; 1] = [-1];
+
+/// `amdgpu_vm_block_size` in amdgpu_drv.c
+pub static amdgpu_vm_block_size: [i32; 1] = [-1];
+
+/// `amdgpu_enforce_isolation` in amdgpu_drv.c
+pub static amdgpu_enforce_isolation: [i32; 1] = [-1];
+
+/// `amdgpu_emu_mode` in amdgpu_drv.c
+pub static amdgpu_emu_mode: [i32; 1] = [0];
+
+/// `amdgpu_force_asic_type` in amdgpu_drv.c
+pub static amdgpu_force_asic_type: [i32; 1] = [-1];
+
+/// `amdgpu_lockup_timeout` in amdgpu_drv.c
+pub static amdgpu_lockup_timeout: [u8; 256] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+/// `amdgpu_asic_name` in amdgpu_device.c
+pub static amdgpu_asic_name: [&[u8]; 38] = [b"TAHITI", b"PITCAIRN", b"VERDE", b"OLAND", b"HAINAN", b"BONAIRE", b"KAVERI", b"KABINI", b"HAWAII", b"MULLINS", b"TOPAZ", b"TONGA", b"FIJI", b"CARRIZO", b"STONEY", b"POLARIS10", b"POLARIS11", b"POLARIS12", b"VEGAM", b"VEGA10", b"VEGA12", b"VEGA20", b"RAVEN", b"ARCTURUS", b"RENOIR", b"ALDEBARAN", b"NAVI10", b"CYAN_SKILLFISH", b"NAVI14", b"NAVI12", b"SIENNA_CICHLID", b"NAVY_FLOUNDER", b"VANGOGH", b"DIMGREY_CAVEFISH", b"BEIGE_GOBY", b"YELLOW_CARP", b"IP DISCOVERY", b"LAST"];

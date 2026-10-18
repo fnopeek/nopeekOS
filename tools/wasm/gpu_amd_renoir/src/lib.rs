@@ -77,7 +77,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 1: amdgpu_device_init through amdgpu_device_ip_early_init").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 1: amdgpu_device_init up to amdgpu_device_ip_init").say();
 
     match npk_sys::pci_bind(AMD_VENDOR as i32, LUCIENNE as i32) {
         0 => {}
@@ -122,7 +122,11 @@ pub extern "C" fn _start() {
     };
     adev.subsystem_vendor = subsys as u16;
     adev.subsystem_device = (subsys >> 16) as u16;
-    stage1::run(&mut adev, bdf);
+    // BAR2, the doorbells: a 64-bit memory BAR (BAR2/BAR3).
+    let bar2_lo = npk_sys::pci_read_config(0x18) as u32;
+    let bar2_hi = if bar2_lo & 0x6 == 0x4 { npk_sys::pci_read_config(0x1c) as u32 } else { 0 };
+    let bar2 = (((bar2_hi as u64) << 32) | (bar2_lo & !0xf) as u64, npk_sys::pci_bar_size(2).max(0) as u64);
+    stage1::run(&mut adev, bdf, bar2);
     say("giving the card back");
 }
 

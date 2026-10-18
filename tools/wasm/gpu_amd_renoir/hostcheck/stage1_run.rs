@@ -32,6 +32,9 @@ fn main() {
     let mut regs = std::collections::HashMap::new();
     regs.insert(mmRCC_CONFIG_MEMSIZE, VRAM_MB);
     regs.insert(mmMP0_SMN_C2PMSG_33, 0x8000_0000);
+    // BIOS scratch 7 (atomfirmware bios_scratch_reg_startaddr 0x4c + 7) as
+    // a posted APU leaves it; the card run reads the real one.
+    regs.insert(0x4c + 7, ATOM_S7_ASIC_INIT_COMPLETE_MASK);
     let mut vram = disc;
     vram.resize(DISCOVERY_TMR_SIZE as usize, 0);
     npk_sys::fake_card(npk_sys::FakeCard {
@@ -62,5 +65,5 @@ fn main() {
     adev.rmmio_base = 0xfd40_0000;
     adev.subsystem_vendor = 0x17aa;
     adev.subsystem_device = 0x3806;
-    stage1::run(&mut adev, BDF);
+    stage1::run(&mut adev, BDF, (0xfc00_0000, 2 << 20));
 }

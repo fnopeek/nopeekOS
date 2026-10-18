@@ -17,7 +17,8 @@ regs.list, one per line: `NAME` for a constant of the headers below,
 or `NAME$ = expr @ file.c` for a string, read off the `.string` GCC emits. `# ` lines group
 the output. tables.list: `@ file`, then `name: u8|u16|u32|i32` per static
 array of integers in that file, or per static struct made only of integers,
-which comes out flat, in memory order.
+which comes out flat, in memory order; `name: str` for an array of string
+pointers.
 
 The tree is the call-graph build of docs/plan/GPU_AMD_LINUX_MAP.md:
 ~/.cache/nopeekos/amdgpu-callgraph/linux-6.18.55, configured with
@@ -260,6 +261,10 @@ def table_data(f, names):
         if m:
             data[sym_of[sym]].append(int(m.group(2)))
             continue
+        m = re.match(r"\s+\.quad\s+(\.LC\d+)$", line)
+        if m:
+            data[sym_of[sym]].append(("str", m.group(1)))
+            continue
         m = re.match(r"\s+\.zero\s+(\d+)$", line)
         if m:
             data[sym_of[sym]].append(("zero", int(m.group(1))))
@@ -269,6 +274,19 @@ def table_data(f, names):
     missing = set(names) - set(data)
     if missing:
         sys.exit(f"no data from GCC for: {sorted(missing)}")
+    import codecs
+    labels, label = {}, None
+    for line in asm.splitlines():
+        m = re.match(r"^(\.LC\d+):$", line)
+        if m:
+            label = m.group(1)
+            continue
+        m = re.match(r'\s+\.string\s+"(.*)"$', line)
+        if label and m:
+            labels[label] = codecs.escape_decode(m.group(1).encode())[0]
+        label = None
+    for n in data:
+        data[n] = [labels[v[1]] if isinstance(v, tuple) and v[0] == "str" else v for v in data[n]]
     return data
 
 
@@ -285,13 +303,13 @@ def gen_tables():
                 blocks.append((f, items))
             f, items = line[2:].strip(), []
             continue
-        m = re.match(r"^(\w+)\s*:\s*(u8|u16|u32|i32)$", line)
+        m = re.match(r"^(\w+)\s*:\s*(u8|u16|u32|i32|str)$", line)
         if not m:
             sys.exit(f"tables.list: cannot read: {line}")
         items.append((m.group(1), m.group(2)))
     if f:
         blocks.append((f, items))
-    width = {"u8": 1, "u16": 2, "u32": 4, "i32": 4}
+    width = {"u8": 1, "u16": 2, "u32": 4, "i32": 4, "str": 8}
     for f, items in blocks:
         data = table_data(f, [n for n, _ in items])
         for n, t in items:
@@ -301,6 +319,12 @@ def gen_tables():
                     vals += [0] * (v[1] // width[t])
                 else:
                     vals.append(v & ((1 << (8 * width[t])) - 1) if t.startswith("u") else v)
+            if t == "str":
+                body = ", ".join(rust_bytes(v) if isinstance(v, bytes) else 'b""' for v in vals)
+                out.append(f"/// `{n}` in {f}")
+                out.append(f"pub static {n}: [&[u8]; {len(vals)}] = [{body}];")
+                out.append("")
+                continue
             body = ", ".join(str(v) for v in vals)
             out.append(f"/// `{n}` in {f}")
             out.append(f"pub static {n}: [{t}; {len(vals)}] = [{body}];")
