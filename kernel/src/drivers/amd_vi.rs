@@ -10,10 +10,19 @@
 //! changes; the entries carry only the IVHD's persistent flags.
 //! `init_device_table_dma`, which blocks every device without a domain,
 //! is stage 6. Events are polled; `EVT_INT_EN` stays off.
+//!
+//! Stage 2 (`protect`): one device in a protection domain with a v1 page
+//! table, IOVA = phys, reaching its IVMD ranges and what `grant` adds.
+//! Every other DTE stays `V = 0`. No ATS (`DTE_FLAG_IOTLB` stays clear):
+//! a device with its own translations is what a module is not trusted
+//! with.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use crate::drivers::pci::{self, PciAddr};
 use crate::hw::{DmaRegion, Mmio};
+use super::iommu::Fault;
 use crate::kprintln;
 use super::amd_vi_regs as r;
 
@@ -261,25 +270,63 @@ fn ivhd_entries(t: &[u8], h: usize, seg: u16, last_bdf: u32, aliases: &mut Vec<(
 
 /// `init_unity_map_range`'s line for one IVMD (init.c:2645), for the ones
 /// `init_memory_definitions` (init.c:2708) takes.
-fn ivmd(t: &[u8], m: usize, last_bdf: u32) {
+/// A `struct unity_map_entry`: memory the devices of the range reach 1:1.
+#[derive(Clone, Copy)]
+struct UnityMap {
+    devid_start: u32,
+    devid_end: u32,
+    address_start: u64,
+    address_end: u64,
+    prot: u8,
+}
+
+/// `init_unity_map_range` (init.c:2645), for an entry whose flags name a
+/// unity map or an exclusion range; with the name of its type.
+fn unity_map_range(t: &[u8], m: usize, last_bdf: u32) -> Option<(UnityMap, &'static str)> {
     let (ty, flags) = (u8_at(t, m), u8_at(t, m + IVMD_FLAGS));
-    if flags & (IVMD_FLAG_UNITY_MAP | IVMD_FLAG_EXCL_RANGE) == 0 {
-        return;
-    }
     let devid = u16_at(t, m + IVMD_DEVID) as u32;
-    let (s, start, end) = match ty {
+    let (s, devid_start, devid_end) = match ty {
         ACPI_IVMD_TYPE => ("IVMD_TYPEi", devid, devid),
         ACPI_IVMD_TYPE_ALL => ("IVMD_TYPE_ALL", 0, last_bdf),
         ACPI_IVMD_TYPE_RANGE => ("IVMD_TYPE_RANGE", devid, u16_at(t, m + IVMD_AUX) as u32),
-        _ => return,
+        _ => return None,
     };
     let page_align = |a: u64| (a + 0xfff) & !0xfff;
     let address_start = page_align(u64_at(t, m + IVMD_RANGE_START));
     let address_end = address_start + page_align(u64_at(t, m + IVMD_RANGE_LENGTH));
+    // Treat per-device exclusion ranges as r/w unity-mapped regions.
     let prot = if flags & IVMD_FLAG_EXCL_RANGE != 0 { (IVMD_FLAG_IW | IVMD_FLAG_IR) >> 1 } else { flags >> 1 };
+    Some((UnityMap { devid_start, devid_end, address_start, address_end, prot }, s))
+}
+
+/// `init_memory_definitions` (init.c:2708).
+fn init_memory_definitions(t: &[u8], last_bdf: u32) -> Vec<UnityMap> {
+    let mut maps = Vec::new();
+    let mut p = IVRS_HEADER_LENGTH;
+    while p + IVMD_LENGTH + 2 <= t.len() {
+        let len = u16_at(t, p + IVMD_LENGTH) as usize;
+        if len == 0 {
+            break;
+        }
+        if u8_at(t, p + IVMD_FLAGS) & (IVMD_FLAG_UNITY_MAP | IVMD_FLAG_EXCL_RANGE) != 0 {
+            if let Some((e, _)) = unity_map_range(t, p, last_bdf) {
+                maps.push(e);
+            }
+        }
+        p += len;
+    }
+    maps
+}
+
+fn ivmd(t: &[u8], m: usize, last_bdf: u32) {
+    let flags = u8_at(t, m + IVMD_FLAGS);
+    if flags & (IVMD_FLAG_UNITY_MAP | IVMD_FLAG_EXCL_RANGE) == 0 {
+        return;
+    }
+    let Some((e, s)) = unity_map_range(t, m, last_bdf) else { return };
     let seg = u16_at(t, m + IVMD_PCI_SEG);
     kprintln!("[amd-vi] {} devid_start: {:04x}:{} devid_end: {:04x}:{} range_start: {:016x} range_end: {:016x} flags: {:x} (prot {:x})",
-        s, seg, bdf(start), seg, bdf(end), address_start, address_end, flags, prot);
+        s, seg, bdf(e.devid_start), seg, bdf(e.devid_end), e.address_start, e.address_end, flags, e.prot);
 }
 
 /// `print_iommu_info`'s feature line (init.c:2283).
@@ -479,6 +526,131 @@ pub struct Status {
     pub status: u64,
     pub events_total: u64,
     pub completion_waits: u64,
+    /// The protected device and the pages it reaches.
+    pub domain: Option<(PciAddr, usize)>,
+}
+
+/// The one protection domain's id; Linux allocates them from 1.
+const DOMAIN_ID: u16 = 1;
+/// Fault records kept for `take_faults`, and events printed in full.
+const FAULTS_KEPT: usize = 16;
+const PAGE: u64 = 4096;
+
+/// A protection domain with its v1 page table (`struct protection_domain`
+/// with `struct amd_io_pgtable`).
+struct Domain {
+    dev: PciAddr,
+    devid: u16,
+    /// `pgtable->root` (identity-mapped) and `pgtable->mode`.
+    root: u64,
+    mode: u64,
+    /// `amd_iommu_hpt_level`.
+    hpt_level: u64,
+    /// The device's DTE is written: from here on a new root needs
+    /// `amd_iommu_update_and_flush_device_table` (`domain->dev_list`).
+    attached: bool,
+    /// Table pages; freed only with the domain, like `free_sub_pt`.
+    tables: Vec<DmaRegion>,
+    granted: BTreeMap<u64, u32>,
+    faults: Vec<Fault>,
+    faults_total: u64,
+}
+
+fn pm_level_shift(x: u64) -> u64 {
+    12 + x * 9
+}
+
+fn pm_level_size(x: u64) -> u64 {
+    if x < 6 { (1u64 << pm_level_shift(x)) - 1 } else { u64::MAX }
+}
+
+fn pm_level_index(x: u64, a: u64) -> u64 {
+    (a >> pm_level_shift(x)) & 0x1ff
+}
+
+fn pm_level_enc(x: u64) -> u64 {
+    (x << 9) & 0xe00
+}
+
+fn pm_level_pde(x: u64, a: u64) -> u64 {
+    a | pm_level_enc(x) | r::IOMMU_PTE_PR | r::IOMMU_PTE_IR | r::IOMMU_PTE_IW
+}
+
+fn pm_pte_level(pte: u64) -> u64 {
+    (pte >> 9) & 7
+}
+
+fn pte_read(at: u64) -> u64 {
+    // SAFETY: `at` is an entry of a table page this driver allocated
+    // (identity-mapped, 8-byte aligned).
+    unsafe { core::ptr::read_volatile(at as *const u64) }
+}
+
+fn pte_write(at: u64, v: u64) {
+    // SAFETY: as in `pte_read`.
+    unsafe { core::ptr::write_volatile(at as *mut u64, v) }
+}
+
+/// `amd_iommu_atomic128_set`: one 128-bit store, as the IOMMU reads the
+/// DTE in a single 256-bit transaction.
+fn atomic128_set(at: u64, lo: u64, hi: u64) {
+    let p = at as *mut u64;
+    // SAFETY: `at` is a 16-byte aligned half of a DTE in the device table
+    // (identity-mapped, owned by this driver, IOMMU lock held). CMPXCHG16B
+    // was checked in `enable`. rbx is reserved by LLVM, so `lo` travels
+    // in a scratch register and is swapped in around the instruction.
+    unsafe {
+        let (mut old_lo, mut old_hi) = (core::ptr::read_volatile(p), core::ptr::read_volatile(p.add(1)));
+        core::arch::asm!(
+            "xchg {lo}, rbx",
+            "cmpxchg16b [{p}]",
+            "mov rbx, {lo}",
+            p = in(reg) p,
+            lo = inout(reg) lo => _,
+            inout("rax") old_lo,
+            inout("rdx") old_hi,
+            in("rcx") hi,
+            options(nostack),
+        );
+        let _ = (old_lo, old_hi);
+    }
+}
+
+/// `build_inv_address` (iommu.c:1225).
+fn build_inv_address(mut address: u64, size: u64) -> u64 {
+    let pages = ((address & (PAGE - 1)) + size).div_ceil(PAGE);
+    if pages == 1 {
+        return address & !(PAGE - 1);
+    }
+    let end = address + size - 1;
+    // msb_diff would hold the index of the most significant bit that
+    // flipped between the start and the end.
+    let msb_diff = 63 - (end ^ address).leading_zeros() as u64;
+    // Bits 63:52 are sign extended. If for some reason bit 51 is
+    // different between the start and the end, invalidate everything.
+    if msb_diff > 51 {
+        address = r::CMD_INV_IOMMU_ALL_PAGES_ADDRESS;
+    } else {
+        // The msb-bit must be clear on the address. Just set all the
+        // lower bits.
+        address |= (1u64 << msb_diff) - 1;
+    }
+    // Clear bits 11:0
+    address &= !(PAGE - 1);
+    // Set the size bit - we flush more than one 4kb page
+    address | r::CMD_INV_IOMMU_PAGES_SIZE_MASK as u64
+}
+
+/// `build_inv_iommu_pages` (iommu.c:1263), host table, no PASID.
+fn build_inv_iommu_pages(address: u64, size: u64, domid: u16) -> [u32; 4] {
+    let inv_address = build_inv_address(address, size);
+    [
+        0,
+        domid as u32 | r::CMD_INV_IOMMU_PAGES << 28,
+        // PDE bit - we want to flush everything, not only the PTEs
+        inv_address as u32 | r::CMD_INV_IOMMU_PAGES_PDE_MASK,
+        (inv_address >> 32) as u32,
+    ]
 }
 
 /// The IOMMU after stage 1.
@@ -507,6 +679,11 @@ struct Iommu {
     events: Vec<Event>,
     events_total: u64,
     completion_waits: u64,
+    /// `amd_iommu_np_cache`: the IOMMU caches non-present entries.
+    np_cache: bool,
+    /// `pci_seg->unity_map`.
+    unity_map: Vec<UnityMap>,
+    domain: Option<Domain>,
 }
 
 static IOMMU: spin::Mutex<Option<Iommu>> = spin::Mutex::new(None);
@@ -572,7 +749,7 @@ impl Iommu {
         // Set IOTLB invalidation timeout to 1s
         self.feature_set(r::CTRL_INV_TO_1S as u64, r::CTRL_INV_TO_MASK as u64, r::CONTROL_INV_TIMEOUT);
         // Enable Enhanced Peripheral Page Request Handling
-        if self.efr & r::FEATURE_EPHSUP as u64 != 0 {
+        if self.efr & r::FEATURE_EPHSUP != 0 {
             self.feature_enable(r::CONTROL_EPH_EN);
         }
     }
@@ -602,7 +779,7 @@ impl Iommu {
 
     /// `iommu_enable_gt` (init.c:1139).
     fn enable_gt(&self) {
-        if self.efr & r::FEATURE_GT as u64 == 0 {
+        if self.efr & r::FEATURE_GT == 0 {
             return;
         }
         self.feature_enable(r::CONTROL_GT_EN);
@@ -613,7 +790,7 @@ impl Iommu {
     /// (early_amd_iommu_init); the 128-bit IRTE format matters only to
     /// interrupt remapping, which is stage 5.
     fn enable_ga(&self) {
-        if self.efr & r::FEATURE_GAM_VAPIC as u64 != 0 {
+        if self.efr & r::FEATURE_GAM_VAPIC != 0 {
             self.feature_enable(r::CONTROL_GA_EN);
         }
     }
@@ -622,7 +799,7 @@ impl Iommu {
     fn copy_cmd_to_buffer(&mut self, cmd: [u32; 4]) {
         let tail = self.cmd_buf_tail;
         self.cmd_buf.write_obj(tail as u64, cmd);
-        let tail = (tail + r::IOMMU_CMD_SIZE) % r::CMD_BUFFER_SIZE;
+        let tail = (tail + r::IOMMU_CMD_SIZE as u32) % r::CMD_BUFFER_SIZE;
         self.cmd_buf_tail = tail;
         // Tell the IOMMU about it
         self.regs.w32(r::MMIO_CMD_TAIL_OFFSET, tail);
@@ -631,7 +808,7 @@ impl Iommu {
     /// `__iommu_queue_command_sync` (iommu.c:1338).
     fn queue_command_sync(&mut self, cmd: [u32; 4], sync: bool) -> Result<(), &'static str> {
         let mut count = 0u32;
-        let next_tail = (self.cmd_buf_tail + r::IOMMU_CMD_SIZE) % r::CMD_BUFFER_SIZE;
+        let next_tail = (self.cmd_buf_tail + r::IOMMU_CMD_SIZE as u32) % r::CMD_BUFFER_SIZE;
         loop {
             let left = self.cmd_buf_head.wrapping_sub(next_tail) % r::CMD_BUFFER_SIZE;
             if left > 0x20 {
@@ -693,7 +870,7 @@ impl Iommu {
     /// `amd_iommu_flush_all_caches` (iommu.c:1547): with FEATURE_IA one
     /// INVALIDATE_ALL (`amd_iommu_flush_all`, `build_inv_all`).
     fn flush_all_caches(&mut self) -> Result<(), &'static str> {
-        if self.efr & r::FEATURE_IA as u64 == 0 {
+        if self.efr & r::FEATURE_IA == 0 {
             return Err("the IOMMU has no INVALIDATE_ALL; flushing entry by entry is not ported");
         }
         self.queue_command_sync([0, r::CMD_INV_ALL << 28, 0, 0], true)?;
@@ -734,6 +911,25 @@ impl Iommu {
             flags: (ev[1] >> r::EVENT_FLAGS_SHIFT) & r::EVENT_FLAGS_MASK,
             address: (ev[3] as u64) << 32 | ev[2] as u64,
         };
+        self.events_total += 1;
+        if event.kind == r::EVENT_TYPE_IO_FAULT {
+            if let Some(dom) = self.domain.as_mut().filter(|d| d.devid == event.devid) {
+                dom.faults_total += 1;
+                if dom.faults.len() >= FAULTS_KEPT {
+                    dom.faults.remove(0);
+                }
+                dom.faults.push(Fault {
+                    addr: event.address,
+                    source: event.devid,
+                    reason: event.flags as u16,
+                    read: event.flags & r::EVENT_FLAG_RW == 0,
+                });
+            }
+        }
+        if self.events.len() >= FAULTS_KEPT {
+            self.events.remove(0);
+        }
+        self.events.push(event);
         let d = bdf(event.devid as u32);
         let name = match event.kind {
             r::EVENT_TYPE_IO_FAULT => "IO_PAGE_FAULT",
@@ -749,10 +945,11 @@ impl Iommu {
             r::EVENT_TYPE_RMP_HW_ERR => "RMP_HW_ERROR",
             _ => "UNKNOWN",
         };
-        kprintln!("[amd-vi] Event logged [{} device=0000:{} pasid={:#07x} address={:#x} flags={:#06x}]",
-            name, d, event.pasid, event.address, event.flags);
-        self.events.push(event);
-        self.events_total += 1;
+        // Linux rate-limits these lines; past the first few only the count grows.
+        if self.events_total <= FAULTS_KEPT as u64 {
+            kprintln!("[amd-vi] Event logged [{} device=0000:{} pasid={:#07x} address={:#x} flags={:#06x}]",
+                name, d, event.pasid, event.address, event.flags);
+        }
         // To detect the hardware errata 732 we need to clear the entry back
         // to zero; an IO_PAGE_FAULT returns before that in Linux.
         if event.kind != r::EVENT_TYPE_IO_FAULT {
@@ -770,6 +967,333 @@ impl Iommu {
             head = (head + r::EVTLOG_ENTRY_SIZE) % r::EVTLOG_SIZE_DEF;
             self.regs.w32(r::MMIO_EVT_HEAD_OFFSET, head);
         }
+    }
+
+    /// `iommu_queue_command`: queued with a completion wait owed.
+    fn queue_command(&mut self, cmd: [u32; 4]) -> Result<(), &'static str> {
+        self.queue_command_sync(cmd, true)
+    }
+
+    /// `iommu_flush_dte` + `iommu_completion_wait` (iommu.c:1455-1470).
+    fn flush_dte_sync(&mut self, devid: u16) -> Result<(), &'static str> {
+        self.queue_command([devid as u32, r::CMD_INV_DEV_ENTRY << 28, 0, 0])?;
+        self.completion_wait()
+    }
+
+    /// `device_flush_dte` (iommu.c:1584): the devid and its alias.
+    fn device_flush_dte(&mut self, devid: u16) -> Result<(), &'static str> {
+        self.queue_command([devid as u32, r::CMD_INV_DEV_ENTRY << 28, 0, 0])?;
+        let alias = self.alias_table.get(devid as usize).copied().unwrap_or(devid);
+        if alias != devid {
+            self.queue_command([alias as u32, r::CMD_INV_DEV_ENTRY << 28, 0, 0])?;
+        }
+        Ok(())
+    }
+
+    /// `amd_iommu_flush_tlb_domid` (iommu.c).
+    fn flush_tlb_domid(&mut self, domid: u16) -> Result<(), &'static str> {
+        self.queue_command(build_inv_iommu_pages(0, r::CMD_INV_IOMMU_ALL_PAGES_ADDRESS, domid))?;
+        self.completion_wait()
+    }
+
+    /// `amd_iommu_get_ivhd_dte_flags`: the persistent bits for `devid`.
+    fn ivhd_dte_flags(&self, devid: u16) -> Option<[u64; 4]> {
+        self.ivhd_dte_flags.iter().find(|e| devid >= e.0 && devid <= e.1).map(|e| e.2)
+    }
+
+    /// `update_dte256` (iommu.c:134) for a host-table DTE: V written last
+    /// when it was clear, and both halves before a flush.
+    fn update_dte256(&mut self, devid: u16, mut new: [u64; 4]) -> Result<(), &'static str> {
+        let at = devid as u64 * r::DEV_TABLE_ENTRY_SIZE;
+        let ptr = self.dev_table.phys() + at;
+        let old2 = self.dev_table.r64(at + 16);
+        // write_dte_upper128: preserve DTE_DATA2_INTR_MASK.
+        let upper = |new: &mut [u64; 4]| {
+            new[2] &= !r::DTE_DATA2_INTR_MASK;
+            new[2] |= old2 & r::DTE_DATA2_INTR_MASK;
+            atomic128_set(ptr + 16, new[2], new[3]);
+        };
+        if self.dev_table.r64(at) & r::DTE_FLAG_V == 0 {
+            // Existing DTE is not valid.
+            upper(&mut new);
+            atomic128_set(ptr, new[0], new[1]);
+        } else if new[0] & r::DTE_FLAG_V == 0 {
+            // Existing DTE is valid. New DTE is not valid.
+            atomic128_set(ptr, new[0], new[1]);
+            upper(&mut new);
+        } else {
+            // Both DTEs are valid; neither has a guest page table.
+            upper(&mut new);
+            atomic128_set(ptr, new[0], new[1]);
+        }
+        self.flush_dte_sync(devid)
+    }
+
+    /// `set_dte_entry` with `make_clear_dte` (iommu.c:2074, 2030).
+    fn set_dte_entry(&mut self) -> Result<(), &'static str> {
+        let d = self.domain.as_ref().ok_or("no domain")?;
+        let devid = d.devid;
+        // All existing DTE must have V bit set
+        let mut new = [r::DTE_FLAG_V, 0, 0, 0];
+        if d.mode != r::PAGE_MODE_NONE as u64 {
+            new[0] |= d.root;
+        }
+        new[0] |= (d.mode & r::DEV_ENTRY_MODE_MASK as u64) << r::DEV_ENTRY_MODE_SHIFT;
+        new[0] |= r::DTE_FLAG_IR | r::DTE_FLAG_IW;
+        new[0] |= r::DTE_FLAG_TV;
+        let at = devid as u64 * r::DEV_TABLE_ENTRY_SIZE;
+        let old_domid = (self.dev_table.r64(at + 8) & r::DEV_DOMID_MASK) as u16;
+        new[1] |= DOMAIN_ID as u64;
+        // Restore cached persistent DTE bits from the IVRS table.
+        if let Some(initial) = self.ivhd_dte_flags(devid) {
+            for (n, i) in new.iter_mut().zip(initial) {
+                *n |= i;
+            }
+        }
+        self.update_dte256(devid, new)?;
+        if old_domid != 0 {
+            self.flush_tlb_domid(old_domid)?;
+        }
+        Ok(())
+    }
+
+    /// `amd_iommu_update_and_flush_device_table` (iommu.c:1797).
+    fn update_and_flush_device_table(&mut self) -> Result<(), &'static str> {
+        let Some(devid) = self.domain.as_ref().filter(|d| d.attached).map(|d| d.devid) else { return Ok(()) };
+        self.set_dte_entry()?;
+        self.device_flush_dte(devid)?;
+        self.completion_wait()
+    }
+
+    /// `__domain_flush_pages` with `domain_flush_pages_v1` (iommu.c:1669,
+    /// 1641); no device has ATS.
+    fn domain_flush_pages_once(&mut self, address: u64, size: u64) -> Result<(), &'static str> {
+        self.queue_command(build_inv_iommu_pages(address, size, DOMAIN_ID))
+    }
+
+    /// `amd_iommu_domain_flush_pages` (iommu.c:1697), then
+    /// `domain_flush_complete`.
+    fn domain_flush_pages(&mut self, mut address: u64, mut size: u64) -> Result<(), &'static str> {
+        if !self.np_cache || size >= 1 << 52 {
+            self.domain_flush_pages_once(address, size)?;
+            return self.completion_wait();
+        }
+        // With NpCache, repeated flushes of naturally aligned ranges.
+        while size != 0 {
+            let addr_alignment = address.trailing_zeros();
+            let size_alignment = 63 - size.leading_zeros();
+            let min_alignment = if address != 0 { addr_alignment.min(size_alignment) } else { size_alignment };
+            let flush_size = 1u64 << min_alignment;
+            self.domain_flush_pages_once(address, flush_size)?;
+            address += flush_size;
+            size -= flush_size;
+        }
+        self.completion_wait()
+    }
+
+    /// A zeroed table page for the domain.
+    fn alloc_table(&mut self) -> Option<u64> {
+        let page = DmaRegion::alloc_zeroed(1)?;
+        let d = self.domain.as_mut()?;
+        d.tables.push(page);
+        Some(page.phys())
+    }
+
+    /// `increase_address_space` (io_pgtable.c:106) for 4K pages.
+    fn increase_address_space(&mut self, address: u64) -> bool {
+        let Some(d) = self.domain.as_ref() else { return false };
+        if address <= pm_level_size(d.mode) && d.mode >= 1 {
+            return true;
+        }
+        if d.mode == d.hpt_level {
+            kprintln!("[amd-vi] the page table is at its deepest level ({})", d.mode);
+            return false;
+        }
+        let Some(pte) = self.alloc_table() else { return false };
+        let d = self.domain.as_mut().unwrap();
+        pte_write(pte, pm_level_pde(d.mode, d.root));
+        d.root = pte;
+        d.mode += 1;
+        if let Err(e) = self.update_and_flush_device_table() {
+            kprintln!("[amd-vi] {}", e);
+        }
+        true
+    }
+
+    /// `alloc_pte` (io_pgtable.c:151) for a 4K page: the leaf entry,
+    /// with the directories on the way allocated.
+    fn alloc_pte(&mut self, address: u64, updated: &mut bool) -> Option<u64> {
+        let last_addr = address + (PAGE - 1);
+        while last_addr > pm_level_size(self.domain.as_ref()?.mode) {
+            if !self.increase_address_space(last_addr) {
+                return None;
+            }
+        }
+        let d = self.domain.as_ref()?;
+        let mut level = d.mode - 1;
+        let mut pte = d.root + 8 * pm_level_index(level, address);
+        while level > 0 {
+            let cur = pte_read(pte);
+            let pte_level = pm_pte_level(cur);
+            let present = cur & r::IOMMU_PTE_PR != 0;
+            // This driver maps 4K pages only, so a large PTE is never there.
+            if present && pte_level == r::PAGE_MODE_7_LEVEL as u64 {
+                return None;
+            }
+            if !present || pte_level == r::PAGE_MODE_NONE as u64 {
+                let page = self.alloc_table()?;
+                pte_write(pte, pm_level_pde(level, page));
+                if present {
+                    *updated = true;
+                }
+                continue;
+            }
+            // No level skipping support yet
+            if pte_level != level {
+                return None;
+            }
+            level -= 1;
+            pte = (cur & r::PM_ADDR_MASK) + 8 * pm_level_index(level, address);
+        }
+        Some(pte)
+    }
+
+    /// `fetch_pte` (io_pgtable.c:258) for a 4K leaf.
+    fn fetch_pte(&self, address: u64) -> Option<u64> {
+        let d = self.domain.as_ref()?;
+        if address > pm_level_size(d.mode) {
+            return None;
+        }
+        let mut level = d.mode - 1;
+        let mut pte = d.root + 8 * pm_level_index(level, address);
+        while level > 0 {
+            let cur = pte_read(pte);
+            // Not Present
+            if cur & r::IOMMU_PTE_PR == 0 {
+                return None;
+            }
+            let l = pm_pte_level(cur);
+            if l == r::PAGE_MODE_7_LEVEL as u64 || l == r::PAGE_MODE_NONE as u64 || l != level {
+                return None;
+            }
+            level -= 1;
+            pte = (cur & r::PM_ADDR_MASK) + 8 * pm_level_index(level, address);
+        }
+        Some(pte)
+    }
+
+    /// `iommu_v1_map_pages` (io_pgtable.c:337) for one 4K page at IOVA =
+    /// phys. False when the table could not grow.
+    fn map_page(&mut self, paddr: u64, prot: u32, updated: &mut bool) -> bool {
+        if prot & (r::IOMMU_PROT_IR | r::IOMMU_PROT_IW) == 0 {
+            return false;
+        }
+        let Some(pte) = self.alloc_pte(paddr, updated) else { return false };
+        // free_clear_pte: a 4K leaf has no sub-table to free.
+        let mut v = paddr | r::IOMMU_PTE_PR | r::IOMMU_PTE_FC;
+        if prot & r::IOMMU_PROT_IR != 0 {
+            v |= r::IOMMU_PTE_IR;
+        }
+        if prot & r::IOMMU_PROT_IW != 0 {
+            v |= r::IOMMU_PTE_IW;
+        }
+        pte_write(pte, v);
+        true
+    }
+
+    /// `iommu_v1_unmap_pages` (io_pgtable.c:414) for one 4K page.
+    fn unmap_page(&mut self, iova: u64) {
+        if let Some(pte) = self.fetch_pte(iova) {
+            pte_write(pte, 0);
+        }
+    }
+
+    /// One more grant of each page; the flush `iommu_v1_map_pages` owes
+    /// when it replaced an entry, or every time with NpCache
+    /// (`amd_iommu_iotlb_sync_map`).
+    fn grant_pages(&mut self, pages: &mut dyn Iterator<Item = u64>, prot: u32) {
+        let (mut lo, mut hi, mut updated, mut fresh) = (u64::MAX, 0, false, false);
+        for p in pages {
+            let p = p & !(PAGE - 1);
+            let Some(d) = self.domain.as_mut() else { return };
+            let n = d.granted.entry(p).or_insert(0);
+            *n += 1;
+            if *n != 1 {
+                continue;
+            }
+            if !self.map_page(p, prot, &mut updated) {
+                kprintln!("[npk] iommu: no memory for the page table, {:#x} stays unreachable", p);
+            }
+            fresh = true;
+            lo = lo.min(p);
+            hi = hi.max(p + PAGE);
+        }
+        if fresh && (updated || self.np_cache) {
+            if let Err(e) = self.domain_flush_pages(lo, hi - lo) {
+                kprintln!("[npk] iommu: {}", e);
+            }
+        }
+    }
+
+    /// One grant less of each page; the pages whose last grant this was
+    /// are unmapped and flushed as one gathered range
+    /// (`amd_iommu_iotlb_sync`).
+    fn revoke_pages(&mut self, pages: &mut dyn Iterator<Item = u64>) {
+        let (mut lo, mut hi) = (u64::MAX, 0);
+        for p in pages {
+            let p = p & !(PAGE - 1);
+            let Some(d) = self.domain.as_mut() else { return };
+            let Some(n) = d.granted.get_mut(&p) else { continue };
+            *n -= 1;
+            if *n == 0 {
+                d.granted.remove(&p);
+                self.unmap_page(p);
+                lo = lo.min(p);
+                hi = hi.max(p + PAGE);
+            }
+        }
+        if hi > lo {
+            if let Err(e) = self.domain_flush_pages(lo, hi - lo) {
+                kprintln!("[npk] iommu: {}", e);
+            }
+        }
+    }
+
+    /// `protection_domain_alloc` + `v1_alloc_pgtable` + the IVMD ranges
+    /// (`amd_iommu_get_resv_regions`, mapped 1:1 like the IOMMU core's
+    /// direct mappings) + `attach_device`.
+    fn attach(&mut self, dev: PciAddr) -> Result<usize, &'static str> {
+        let devid = (dev.bus as u16) << 8 | (dev.device as u16) << 3 | dev.function as u16;
+        if devid as u32 > self.last_bdf {
+            return Err("the IVHD does not name this device");
+        }
+        if self.alias_table[devid as usize] != devid
+            || self.alias_table.iter().enumerate().any(|(i, a)| *a == devid && i != devid as usize) {
+            return Err("the device shares its requester ID through an IVHD alias");
+        }
+        let hats = (self.efr & r::FEATURE_HATS) >> r::FEATURE_HATS.trailing_zeros();
+        if hats == 3 {
+            return Err("invalid host translation level (HATS 3)");
+        }
+        let root = DmaRegion::alloc_zeroed(1).ok_or("no memory for the page table")?;
+        self.domain = Some(Domain {
+            dev, devid, root: root.phys(), mode: r::PAGE_MODE_3_LEVEL as u64,
+            hpt_level: hats + r::PAGE_MODE_4_LEVEL as u64, attached: false, tables: alloc::vec![root],
+            granted: BTreeMap::new(), faults: Vec::new(), faults_total: 0,
+        });
+        let maps: Vec<UnityMap> = self.unity_map.iter()
+            .filter(|u| devid as u32 >= u.devid_start && devid as u32 <= u.devid_end).copied().collect();
+        let mut pages = 0;
+        for u in &maps {
+            let mut it = (u.address_start..u.address_end).step_by(PAGE as usize);
+            self.grant_pages(&mut it, u.prot as u32);
+            pages += ((u.address_end - u.address_start) / PAGE) as usize;
+        }
+        self.set_dte_entry()?;
+        self.device_flush_dte(devid)?;
+        self.completion_wait()?;
+        self.domain.as_mut().unwrap().attached = true;
+        Ok(pages)
     }
 
     /// `early_enable_iommu` (init.c:2901).
@@ -824,7 +1348,7 @@ fn set_dev_entry_from_acpi_range(io: &mut Iommu, first: u32, last: u32, flags: u
     }
     io.ivhd_dte_flags.push((first as u16, last as u16, dte));
     for i in first..=last.min(io.last_bdf) {
-        let at = i as u64 * r::DEV_TABLE_ENTRY_SIZE as u64;
+        let at = i as u64 * r::DEV_TABLE_ENTRY_SIZE;
         for (k, d) in dte.iter().enumerate() {
             io.dev_table.w64(at + 8 * k as u64, *d);
         }
@@ -929,7 +1453,7 @@ pub fn enable() -> Result<(), &'static str> {
     };
 
     // alloc_pci_segment (init.c:1723): device table and alias table.
-    let dev_table_size = (((last_bdf as u64 + 1) * r::DEV_TABLE_ENTRY_SIZE as u64).next_power_of_two()).max(4096);
+    let dev_table_size = (((last_bdf as u64 + 1) * r::DEV_TABLE_ENTRY_SIZE).next_power_of_two()).max(4096);
     let dev_table = DmaRegion::alloc_zeroed_dma32_aligned((dev_table_size / 4096) as usize)
         .ok_or("no memory for the device table")?;
     let alias_table: Vec<u16> = (0..=last_bdf as u16).collect();
@@ -966,7 +1490,16 @@ pub fn enable() -> Result<(), &'static str> {
         dev_table, dev_table_size, alias_table, ivhd_dte_flags: Vec::new(),
         cmd_buf, cmd_buf_head: 0, cmd_buf_tail: 0, cmd_sem, cmd_sem_val: 0, need_sync: false,
         evt_buf, events: Vec::new(), events_total: 0, completion_waits: 0,
+        np_cache: false, unity_map: init_memory_definitions(t, last_bdf), domain: None,
     };
+    // iommu_init_pci (init.c:2185): the capability header.
+    let id = io.devid;
+    let iommu_pci = PciAddr { bus: (id >> 8) as u8, device: (id >> 3 & 0x1f) as u8, function: (id & 7) as u8 };
+    let cap = pci::read32(iommu_pci, (u16_at(t, h + IVHD_CAP_PTR) as u32 + r::MMIO_CAP_HDR_OFFSET) as u8);
+    if cap & (1 << r::IOMMU_CAP_NPCACHE) != 0 {
+        kprintln!("[amd-vi] Using strict mode due to virtualization");
+        io.np_cache = true;
+    }
     init_iommu_from_acpi(&mut io, t, h)?;
 
     // init_translation_status (init.c:245): translation left on by the
@@ -1028,5 +1561,81 @@ pub fn status() -> Option<Status> {
         status: io.regs.r64(r::MMIO_STATUS_OFFSET),
         events_total: io.events_total,
         completion_waits: io.completion_waits,
+        domain: io.domain.as_ref().map(|d| (d.dev, d.granted.len())),
     })
+}
+
+/// Put `dev` behind the IOMMU (enabling it first). Afterwards the device
+/// reaches its IVMD ranges and what `grant` adds; every other device stays
+/// passed through. Translation stays on until reboot.
+pub fn protect(dev: PciAddr) -> Result<(), &'static str> {
+    enable()?;
+    let mut g = IOMMU.lock();
+    let io = g.as_mut().ok_or("AMD-Vi is off")?;
+    if let Some(d) = io.domain.as_ref() {
+        return if d.dev == dev { Ok(()) } else { Err("another device is protected already") };
+    }
+    match io.attach(dev) {
+        Ok(pages) => {
+            let d = io.domain.as_ref().unwrap();
+            kprintln!("[npk] iommu: {:02x}:{:02x}.{} behind AMD-Vi @ {:#x} (domain {}, {}-level, HATS {}), {} pages direct-mapped",
+                dev.bus, dev.device, dev.function, io.mmio_phys, DOMAIN_ID, d.mode, d.hpt_level, pages);
+            io.poll_events();
+            Ok(())
+        }
+        Err(e) => {
+            io.domain = None;
+            Err(e)
+        }
+    }
+}
+
+fn with_domain(dev: PciAddr, f: impl FnOnce(&mut Iommu)) {
+    let mut g = IOMMU.lock();
+    if let Some(io) = g.as_mut().filter(|io| io.domain.as_ref().is_some_and(|d| d.dev == dev)) {
+        f(io);
+    }
+}
+
+pub fn protected(dev: PciAddr) -> bool {
+    IOMMU.lock().as_ref().is_some_and(|io| io.domain.as_ref().is_some_and(|d| d.dev == dev))
+}
+
+/// Let `dev` reach `pages` pages from `phys`. No-op for an unprotected device.
+pub fn grant(dev: PciAddr, phys: u64, pages: usize) {
+    let base = phys & !(PAGE - 1);
+    with_domain(dev, |io| io.grant_pages(&mut (0..pages as u64).map(|i| base + i * PAGE),
+        r::IOMMU_PROT_IR | r::IOMMU_PROT_IW));
+}
+
+/// Let `dev` reach every page of `list`, with one flush for the lot.
+pub fn grant_list(dev: PciAddr, list: &[u64]) {
+    with_domain(dev, |io| io.grant_pages(&mut list.iter().copied(), r::IOMMU_PROT_IR | r::IOMMU_PROT_IW));
+}
+
+/// Take back one grant of `pages` pages from `phys`. When it returns, the
+/// device no longer reaches the pages whose last grant this was.
+pub fn revoke(dev: PciAddr, phys: u64, pages: usize) {
+    let base = phys & !(PAGE - 1);
+    with_domain(dev, |io| io.revoke_pages(&mut (0..pages as u64).map(|i| base + i * PAGE)));
+}
+
+/// Take back one grant of every page of `list`, with one flush.
+pub fn revoke_list(dev: PciAddr, list: &[u64]) {
+    with_domain(dev, |io| io.revoke_pages(&mut list.iter().copied()));
+}
+
+/// New IO page faults of the protected device since the last call.
+pub fn take_faults(dev: PciAddr) -> Vec<Fault> {
+    let mut out = Vec::new();
+    with_domain(dev, |io| {
+        io.poll_events();
+        out = core::mem::take(&mut io.domain.as_mut().unwrap().faults);
+    });
+    out
+}
+
+/// IO page faults of the protected device since it was protected.
+pub fn faults_total() -> u64 {
+    IOMMU.lock().as_ref().and_then(|io| io.domain.as_ref()).map_or(0, |d| d.faults_total)
 }

@@ -21,7 +21,7 @@
 //! owner forgets it (`forget_pages`) and keeps the frames until
 //! `pages_released`.
 //!
-//! Behind an IOMMU (`drivers::vtd`) the card reaches a buffer from its
+//! Behind an IOMMU (`drivers::iommu`) the card reaches a buffer from its
 //! registration on, and no longer once the module completed its removal.
 //!
 //! Jobs are done in the order they are queued. Each buffer remembers the
@@ -135,16 +135,16 @@ enum Grant {
 impl Grant {
     fn apply(&self, dev: PciAddr, on: bool) {
         let one = |phys: u64, n: usize| {
-            if on { crate::drivers::vtd::grant(dev, phys, n) } else { crate::drivers::vtd::revoke(dev, phys, n) }
+            if on { crate::drivers::iommu::grant(dev, phys, n) } else { crate::drivers::iommu::revoke(dev, phys, n) }
         };
         match self {
             Grant::Range(p, n) => one(*p, *n),
             Grant::Pages(list, first, n) => {
                 let pages = &list.pages[(*first).min(list.pages.len())..(*first + *n).min(list.pages.len())];
                 if on {
-                    crate::drivers::vtd::grant_list(dev, pages);
+                    crate::drivers::iommu::grant_list(dev, pages);
                 } else {
-                    crate::drivers::vtd::revoke_list(dev, pages);
+                    crate::drivers::iommu::revoke_list(dev, pages);
                 }
             }
         }
@@ -504,7 +504,7 @@ pub fn ready(dev: PciAddr, caps: i32) -> i32 {
     crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}",
         if caps & CAP_SCENE != 0 { ", scenes offered" } else { "" },
         if caps & CAP_NATIVE == 0 { "" }
-        else if crate::drivers::vtd::protected(dev) { ", native contexts for guests" }
+        else if crate::drivers::iommu::protected(dev) { ", native contexts for guests" }
         else { ", native contexts need the IOMMU (set gpu_iommu on)" });
     0
 }
@@ -585,7 +585,7 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
         st.pending_free.remove(&seq)
     };
     if status < 0 || seq % 64 == 0 {
-        crate::drivers::vtd::poll(dev);
+        crate::drivers::iommu::poll(dev);
     }
     if status != 0 {
         let mut e = ERRORS.lock();
@@ -1246,7 +1246,7 @@ pub fn native_device() -> Option<PciAddr> {
         return None;
     }
     let owner = STATE.lock().owner?;
-    crate::drivers::vtd::protected(owner).then_some(owner)
+    crate::drivers::iommu::protected(owner).then_some(owner)
 }
 
 /// Why a module that serves native contexts is not used for them.

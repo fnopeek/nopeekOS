@@ -1534,12 +1534,12 @@ pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
     };
     // A display controller goes behind its IOMMU before it masters
     // anything the driver hands it: from here on it reaches only what the
-    // kernel grants (`drivers::vtd`).
+    // kernel grants (`drivers::iommu`).
     if pci::read8(hw.pci_addr, 0x0B) == 0x03 && crate::gpu::iommu_wanted() {
-        match crate::drivers::vtd::protect(hw.pci_addr) {
+        match crate::drivers::iommu::protect(hw.pci_addr) {
             Ok(()) => {
                 for &(phys, pages) in &hw.dma_allocs {
-                    crate::drivers::vtd::grant(hw.pci_addr, phys, pages);
+                    crate::drivers::iommu::grant(hw.pci_addr, phys, pages);
                 }
             }
             Err(e) => crate::kprintln!("[npk] iommu: {:02x}:{:02x}.{} not protected: {}",
@@ -2043,15 +2043,15 @@ fn dma_slot(hw: &mut HwDriverState, phys: u64, pages: usize) -> usize {
     }
 }
 
-/// `dma_free_coherent`: the driver's buffer `handle` goes back. Behind
-/// VT-d the device loses it first; the handle is then empty and every
+/// `dma_free_coherent`: the driver's buffer `handle` goes back. Behind an
+/// IOMMU the device loses it first; the handle is then empty and every
 /// access through it fails. 0, or -1 for a handle that holds nothing.
 pub(crate) fn npk_dma_free(ctx: &mut HostState, handle: i32) -> i32 {
     let Some(hw) = ctx.hw.as_mut() else { return -1 };
     let Some(&(phys, pages)) = usize::try_from(handle).ok().and_then(|h| hw.dma_allocs.get(h)) else { return -1 };
     if pages == 0 { return -1; }
     if hw.is_pci {
-        crate::drivers::vtd::revoke(hw.pci_addr, phys, pages);
+        crate::drivers::iommu::revoke(hw.pci_addr, phys, pages);
     }
     crate::memory::deallocate_contiguous(phys, pages);
     hw.dma_allocs[handle as usize] = (0, 0);
@@ -2080,7 +2080,7 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     let handle = dma_slot(hw, phys, page_count);
     hw.dma_pages += page_count;
     if hw.is_pci {
-        crate::drivers::vtd::grant(hw.pci_addr, phys, page_count);
+        crate::drivers::iommu::grant(hw.pci_addr, phys, page_count);
     }
     handle as i32
 }
@@ -2124,7 +2124,7 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     let handle = dma_slot(hw, phys, page_count);
     hw.dma_pages += page_count;
     if hw.is_pci {
-        crate::drivers::vtd::grant(hw.pci_addr, phys, page_count);
+        crate::drivers::iommu::grant(hw.pci_addr, phys, page_count);
     }
     handle as i32
 }

@@ -26,15 +26,15 @@ pub const MMIO_EVT_TAIL_OFFSET: u32 = 0x2018;
 /// drivers/iommu/amd/amd_iommu_types.h:77
 pub const MMIO_STATUS_OFFSET: u32 = 0x2020;
 /// drivers/iommu/amd/amd_iommu_types.h:52
-pub const MMIO_EXCL_ENABLE_MASK: u32 = 0x1;
+pub const MMIO_EXCL_ENABLE_MASK: u64 = 0x1;
 /// drivers/iommu/amd/amd_iommu_types.h:249
 pub const MMIO_CMD_SIZE_512: u64 = 0x900000000000000;
 /// drivers/iommu/amd/amd_iommu_types.h:128
-pub const MMIO_STATUS_EVT_OVERFLOW_MASK: u32 = 0x1;
+pub const MMIO_STATUS_EVT_OVERFLOW_MASK: u64 = 0x1;
 /// drivers/iommu/amd/amd_iommu_types.h:131
-pub const MMIO_STATUS_EVT_RUN_MASK: u32 = 0x8;
+pub const MMIO_STATUS_EVT_RUN_MASK: u64 = 0x8;
 /// drivers/iommu/amd/amd_iommu_types.h:130
-pub const MMIO_STATUS_COM_WAIT_INT_MASK: u32 = 0x4;
+pub const MMIO_STATUS_COM_WAIT_INT_MASK: u64 = 0x4;
 
 // Control register bits (amd_iommu_types.h)
 /// drivers/iommu/amd/amd_iommu_types.h:163
@@ -78,13 +78,13 @@ pub const CTRL_INV_TO_1S: u32 = 0x4;
 
 // Features (amd_iommu_types.h)
 /// drivers/iommu/amd/amd_iommu_types.h:93
-pub const FEATURE_GT: u32 = 0x10;
+pub const FEATURE_GT: u64 = 0x10;
 /// drivers/iommu/amd/amd_iommu_types.h:94
-pub const FEATURE_IA: u32 = 0x40;
+pub const FEATURE_IA: u64 = 0x40;
 /// drivers/iommu/amd/amd_iommu_types.h:105
 pub const FEATURE_EPHSUP: u64 = 0x4000000000000;
 /// drivers/iommu/amd/amd_iommu_types.h:101
-pub const FEATURE_GAM_VAPIC: u32 = 0x200000;
+pub const FEATURE_GAM_VAPIC: u64 = 0x200000;
 
 // Buffers (amd_iommu_types.h)
 /// drivers/iommu/amd/amd_iommu_types.h:245
@@ -98,9 +98,9 @@ pub const EVTLOG_ENTRY_SIZE: u32 = 0x10;
 /// drivers/iommu/amd/amd_iommu_types.h:480
 pub const LOOP_TIMEOUT: u32 = 0x186a0;
 /// The value of `sizeof(struct dev_table_entry)` in amd_iommu_types.h
-pub const DEV_TABLE_ENTRY_SIZE: u32 = 0x20;
+pub const DEV_TABLE_ENTRY_SIZE: u64 = 0x20;
 /// The value of `sizeof(struct iommu_cmd)` in amd_iommu_types.h
-pub const IOMMU_CMD_SIZE: u32 = 0x10;
+pub const IOMMU_CMD_SIZE: u64 = 0x10;
 
 // Commands (amd_iommu_types.h)
 /// drivers/iommu/amd/amd_iommu_types.h:201
@@ -197,3 +197,61 @@ pub const ACPI_DEVFLAG_SYSMGT2: u32 = 0x20;
 pub const ACPI_DEVFLAG_LINT0: u32 = 0x40;
 /// drivers/iommu/amd/init.c:84
 pub const ACPI_DEVFLAG_LINT1: u32 = 0x80;
+
+// Commands for invalidation (amd_iommu_types.h)
+/// drivers/iommu/amd/amd_iommu_types.h:202
+pub const CMD_INV_DEV_ENTRY: u32 = 0x2;
+/// drivers/iommu/amd/amd_iommu_types.h:203
+pub const CMD_INV_IOMMU_PAGES: u32 = 0x3;
+/// drivers/iommu/amd/amd_iommu_types.h:211
+pub const CMD_INV_IOMMU_PAGES_SIZE_MASK: u32 = 0x1;
+/// drivers/iommu/amd/amd_iommu_types.h:212
+pub const CMD_INV_IOMMU_PAGES_PDE_MASK: u32 = 0x2;
+/// drivers/iommu/amd/amd_iommu_types.h:218
+pub const CMD_INV_IOMMU_ALL_PAGES_ADDRESS: u64 = 0x7fffffffffffffff;
+
+// The v1 host page table (amd_iommu_types.h)
+/// drivers/iommu/amd/amd_iommu_types.h:333
+pub const PAGE_MODE_NONE: u32 = 0x0;
+/// drivers/iommu/amd/amd_iommu_types.h:336
+pub const PAGE_MODE_3_LEVEL: u32 = 0x3;
+/// drivers/iommu/amd/amd_iommu_types.h:337
+pub const PAGE_MODE_4_LEVEL: u32 = 0x4;
+/// drivers/iommu/amd/amd_iommu_types.h:340
+pub const PAGE_MODE_7_LEVEL: u32 = 0x7;
+/// drivers/iommu/amd/amd_iommu_types.h:356
+pub const PM_ADDR_MASK: u64 = 0xffffffffff000;
+/// drivers/iommu/amd/amd_iommu_types.h:409
+pub const IOMMU_PTE_PR: u64 = 0x1;
+/// drivers/iommu/amd/amd_iommu_types.h:412
+pub const IOMMU_PTE_FC: u64 = 0x1000000000000000;
+/// drivers/iommu/amd/amd_iommu_types.h:413
+pub const IOMMU_PTE_IR: u64 = 0x2000000000000000;
+/// drivers/iommu/amd/amd_iommu_types.h:414
+pub const IOMMU_PTE_IW: u64 = 0x4000000000000000;
+/// drivers/iommu/amd/amd_iommu_types.h:451
+pub const IOMMU_PROT_IR: u32 = 0x1;
+/// drivers/iommu/amd/amd_iommu_types.h:452
+pub const IOMMU_PROT_IW: u32 = 0x2;
+
+// A device table entry with translation (amd_iommu_types.h)
+/// drivers/iommu/amd/amd_iommu_types.h:419
+pub const DTE_FLAG_V: u64 = 0x1;
+/// drivers/iommu/amd/amd_iommu_types.h:420
+pub const DTE_FLAG_TV: u64 = 0x2;
+/// drivers/iommu/amd/amd_iommu_types.h:425
+pub const DTE_FLAG_IR: u64 = 0x2000000000000000;
+/// drivers/iommu/amd/amd_iommu_types.h:239
+pub const DEV_ENTRY_MODE_MASK: u32 = 0x7;
+/// drivers/iommu/amd/amd_iommu_types.h:240
+pub const DEV_ENTRY_MODE_SHIFT: u32 = 0x9;
+/// drivers/iommu/amd/amd_iommu_types.h:430
+pub const DEV_DOMID_MASK: u64 = 0xffff;
+/// drivers/iommu/amd/amd_iommu_types.h:442
+pub const DTE_DATA2_INTR_MASK: u64 = 0xff0fffffffffffff;
+/// drivers/iommu/amd/amd_iommu_types.h:98
+pub const FEATURE_HATS: u64 = 0xc00;
+/// drivers/iommu/amd/amd_iommu_types.h:35
+pub const MMIO_CAP_HDR_OFFSET: u32 = 0x0;
+/// drivers/iommu/amd/amd_iommu_types.h:458
+pub const IOMMU_CAP_NPCACHE: u32 = 0x1a;

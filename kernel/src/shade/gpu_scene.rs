@@ -582,7 +582,7 @@ pub fn iommu_probe() {
         crate::kprintln!("[npk] iommu test: no GPU module registered");
         return;
     };
-    if !crate::drivers::vtd::protected(dev) {
+    if !crate::drivers::iommu::protected(dev) {
         crate::kprintln!("[npk] iommu test: the card is not behind its IOMMU (`set gpu_iommu on`, then reboot)");
         return;
     }
@@ -629,22 +629,22 @@ pub fn iommu_probe() {
     let (lo, hi) = (src.phys(), src.phys() + pages as u64 * 4096);
     let dst_bytes = sw as u64 * sh as u64 * 4;
     crate::kprintln!("[npk] iommu test: src {:#x}..{:#x}, dst {:#x}..{:#x}", lo, hi, dst.phys(), dst.phys() + dst_bytes);
-    let _ = crate::drivers::vtd::take_faults(dev);
+    let _ = crate::drivers::iommu::take_faults(dev);
 
     let s1 = run(&src, &dst);
     let ok1 = arrived(&src, &dst);
-    let f1 = crate::drivers::vtd::take_faults(dev).len();
+    let f1 = crate::drivers::iommu::take_faults(dev).len();
     crate::kprintln!("[npk] iommu test: granted — scene {:?}, pattern {}, {} fault(s)",
         s1, if ok1 { "arrived" } else { "MISSING" }, f1);
 
     for px in dst.iter_mut() {
         *px = 0;
     }
-    crate::drivers::vtd::revoke(dev, src.phys(), pages);
+    crate::drivers::iommu::revoke(dev, src.phys(), pages);
     let s2 = run(&src, &dst);
     let leaked = arrived(&src, &dst);
-    let faults = crate::drivers::vtd::take_faults(dev);
-    crate::drivers::vtd::grant(dev, src.phys(), pages);
+    let faults = crate::drivers::iommu::take_faults(dev);
+    crate::drivers::iommu::grant(dev, src.phys(), pages);
     let hit = faults.iter().any(|f| f.addr >= lo && f.addr < hi);
     crate::kprintln!("[npk] iommu test: revoked — scene {:?}, pattern {}, fault at the buffer {}",
         s2, if leaked { "ARRIVED" } else { "did not arrive" }, if hit { "recorded" } else { "MISSING" });

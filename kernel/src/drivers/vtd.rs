@@ -28,6 +28,7 @@ use spin::Mutex;
 
 use crate::drivers::pci::{self, PciAddr};
 use crate::hw::{DmaRegion, Mmio};
+use super::iommu::Fault;
 
 const DMAR_CAP_REG: u32 = 0x08;
 const DMAR_ECAP_REG: u32 = 0x10;
@@ -104,15 +105,6 @@ struct Rmrr {
     base: u64,
     limit: u64,
     devices: Vec<PciAddr>,
-}
-
-/// A recorded DMA remapping fault.
-#[derive(Clone, Copy)]
-pub struct Fault {
-    pub addr: u64,
-    pub source: u16,
-    pub reason: u8,
-    pub read: bool,
 }
 
 /// The protected device's unit and its second-level table.
@@ -352,7 +344,7 @@ impl Domain {
                 let f = Fault {
                     addr: self.regs.r64_lo_hi(at) & VTD_PAGE_MASK,
                     source: (self.regs.r32(at + 8) & 0xffff) as u16,
-                    reason: (data & 0xff) as u8,
+                    reason: (data & 0xff) as u16,
                     read: (data >> 30) & 1 != 0,
                 };
                 self.regs.w32(at + 12, DMA_FRCD_F);

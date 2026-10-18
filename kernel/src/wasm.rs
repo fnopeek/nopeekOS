@@ -1125,7 +1125,7 @@ pub(crate) fn release_hw(hw: HwDriverState) {
         let display = hw.is_pci && crate::drivers::pci::read8(hw.pci_addr, 0x0B) == 0x03;
         // Behind its IOMMU the card no longer reaches the buffers once their
         // grants are gone, so they can go back even while it scans out.
-        let confined = hw.is_pci && crate::drivers::vtd::protected(hw.pci_addr);
+        let confined = hw.is_pci && crate::drivers::iommu::protected(hw.pci_addr);
         if hw.is_pci {
             if display {
                 crate::gpu::gpudev::module_gone(hw.pci_addr);
@@ -1139,7 +1139,7 @@ pub(crate) fn release_hw(hw: HwDriverState) {
         let mut total_pages = 0usize;
         for &(phys, pages) in hw.dma_allocs.iter().filter(|&&(_, p)| p != 0) {
             if confined {
-                crate::drivers::vtd::revoke(hw.pci_addr, phys, pages);
+                crate::drivers::iommu::revoke(hw.pci_addr, phys, pages);
             }
             if !display || confined {
                 crate::memory::deallocate_contiguous(phys, pages);

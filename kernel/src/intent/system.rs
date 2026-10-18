@@ -1201,27 +1201,44 @@ pub fn intent_gpu(args: &str) {
             return;
         }
         "iommu" => {
-            match crate::drivers::vtd::status() {
+            match crate::drivers::iommu::status() {
                 Some(s) => {
-                    kprintln!("  IOMMU:    {:02x}:{:02x}.{} behind VT-d, {} pages reachable, {} fault(s) since enabled",
-                        s.dev.bus, s.dev.device, s.dev.function, s.pages, s.faults_total);
-                    for f in crate::drivers::vtd::take_faults(s.dev) {
-                        kprintln!("            {} fault at {:#x} from {:#06x}, reason {:#x}",
-                            if f.read { "read" } else { "write" }, f.addr, f.source, f.reason);
+                    kprintln!("  IOMMU:    {:02x}:{:02x}.{} behind {}, {} pages reachable, {} fault(s) since enabled",
+                        s.dev.bus, s.dev.device, s.dev.function, s.kind, s.pages, s.faults_total);
+                    for f in crate::drivers::iommu::take_faults(s.dev) {
+                        kprintln!("            {} fault at {:#x} from {:#06x}, {} {:#x}",
+                            if f.read { "read" } else { "write" }, f.addr, f.source,
+                            if s.kind == "AMD-Vi" { "flags" } else { "reason" }, f.reason);
                     }
                 }
-                None => kprintln!("  IOMMU:    off ({})", if crate::gpu::iommu_wanted() {
-                    "wanted; see the boot log for why not" } else { "`set gpu_iommu on`, then reboot" }),
+                None if !crate::gpu::iommu_wanted() => kprintln!("  IOMMU:    off (`set gpu_iommu on`, then reboot)"),
+                None => kprintln!("  IOMMU:    no device protected (a display driver's bus master does it; \
+                                   see the boot log if it should have)"),
             }
             if crate::drivers::amd_vi::present() {
                 crate::drivers::amd_vi::poll();
                 match crate::drivers::amd_vi::status() {
-                    Some(s) => kprintln!("  AMD-Vi:   on at {:#x} (IOMMU {:02x}:{:02x}.{}), {} devids passed through, \
+                    Some(s) => kprintln!("  AMD-Vi:   on at {:#x} (IOMMU {:02x}:{:02x}.{}), {} devids, \
                                           control {:#018x}, status {:#x}, {} completion wait(s), {} event(s)",
                         s.mmio_phys, s.devid >> 8, s.devid >> 3 & 0x1f, s.devid & 7, s.last_bdf + 1,
                         s.control, s.status, s.completion_waits, s.events_total),
                     None => crate::drivers::amd_vi::dump(),
                 }
+            }
+            return;
+        }
+        "iommu protect" => {
+            if !crate::gpu::iommu_wanted() {
+                kprintln!("[npk] gpu: `set gpu_iommu on` first");
+                return;
+            }
+            let Some(dev) = crate::drivers::pci::find_by_class(0x03, 0x00) else {
+                kprintln!("[npk] gpu: no display controller");
+                return;
+            };
+            if let Err(e) = crate::drivers::iommu::protect(dev.addr) {
+                kprintln!("[npk] gpu: {:02x}:{:02x}.{} not protected: {}", dev.addr.bus, dev.addr.device,
+                    dev.addr.function, e);
             }
             return;
         }
@@ -1249,7 +1266,7 @@ pub fn intent_gpu(args: &str) {
         }
         "" => {}
         _ => {
-            kprintln!("usage: gpu [verify | cpu | iommu | iommu enable | iommu test]");
+            kprintln!("usage: gpu [verify | cpu | iommu | iommu enable | iommu protect | iommu test]");
             return;
         }
     }

@@ -100,3 +100,32 @@ ACPI_DEVFLAG_SYSMGT1 @ init.c
 ACPI_DEVFLAG_SYSMGT2 @ init.c
 ACPI_DEVFLAG_LINT0 @ init.c
 ACPI_DEVFLAG_LINT1 @ init.c
+# Commands for invalidation (amd_iommu_types.h)
+CMD_INV_DEV_ENTRY @ amd_iommu_types.h
+CMD_INV_IOMMU_PAGES @ amd_iommu_types.h
+CMD_INV_IOMMU_PAGES_SIZE_MASK @ amd_iommu_types.h
+CMD_INV_IOMMU_PAGES_PDE_MASK @ amd_iommu_types.h
+CMD_INV_IOMMU_ALL_PAGES_ADDRESS @ amd_iommu_types.h
+# The v1 host page table (amd_iommu_types.h)
+PAGE_MODE_NONE @ amd_iommu_types.h
+PAGE_MODE_3_LEVEL @ amd_iommu_types.h
+PAGE_MODE_4_LEVEL @ amd_iommu_types.h
+PAGE_MODE_7_LEVEL @ amd_iommu_types.h
+PM_ADDR_MASK @ amd_iommu_types.h
+IOMMU_PTE_PR @ amd_iommu_types.h
+IOMMU_PTE_FC @ amd_iommu_types.h
+IOMMU_PTE_IR @ amd_iommu_types.h
+IOMMU_PTE_IW @ amd_iommu_types.h
+IOMMU_PROT_IR @ amd_iommu_types.h
+IOMMU_PROT_IW @ amd_iommu_types.h
+# A device table entry with translation (amd_iommu_types.h)
+DTE_FLAG_V @ amd_iommu_types.h
+DTE_FLAG_TV @ amd_iommu_types.h
+DTE_FLAG_IR @ amd_iommu_types.h
+DEV_ENTRY_MODE_MASK @ amd_iommu_types.h
+DEV_ENTRY_MODE_SHIFT @ amd_iommu_types.h
+DEV_DOMID_MASK @ amd_iommu_types.h
+DTE_DATA2_INTR_MASK @ amd_iommu_types.h
+FEATURE_HATS @ amd_iommu_types.h
+MMIO_CAP_HDR_OFFSET @ amd_iommu_types.h
+IOMMU_CAP_NPCACHE @ amd_iommu_types.h

@@ -45,6 +45,9 @@ def main():
     for _, items in groups:
         for name, expr, f in items:
             by_file.setdefault(f, {})[name] = expr
+            # The C type's width decides the Rust type: a BIT_ULL is u64
+            # even when its value fits in 32 bits.
+            by_file[f][f"{name}__sizeof"] = f"sizeof({expr})"
     vals = {}
     for f, exprs in by_file.items():
         rel = os.path.relpath(os.path.join(IOMMU, f), g.DRV)
@@ -58,7 +61,8 @@ def main():
                 src = os.path.relpath(os.path.join(g.AMD, src), g.L)
             v = vals[name]
             out.append(f"/// {src or f}")
-            out.append(f"pub const {name}: {g.rust_type(v)} = {v:#x};")
+            ty = "u64" if vals[f"{name}__sizeof"] == 8 else g.rust_type(v)
+            out.append(f"pub const {name}: {ty} = {v:#x};")
         out.append("")
     text = "\n".join(out)
     if check:

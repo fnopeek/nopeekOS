@@ -23,6 +23,7 @@ pub mod vtd;
 pub mod amd_vi;
 #[allow(dead_code)]
 pub mod amd_vi_regs;
+pub mod iommu;
 pub mod smbus;
 pub mod battery;
 pub mod ec;
