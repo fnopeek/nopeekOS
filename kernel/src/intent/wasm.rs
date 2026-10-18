@@ -224,17 +224,6 @@ pub fn intent_run_driver(args: &str) {
     };
     let bdf_arg = parts.next().unwrap_or("").trim();
 
-    // One card, one driver. A second instance would map the same MMIO, reset
-    // the card and reload its firmware under the running one, post its own
-    // RX rings and double the DMA budget; the result looks like corrupt RX
-    // frames rather than a duplicate driver.
-    if crate::drivers::netdev::wasm_nic_available() {
-        kprintln!("[npk] a WASM network driver is already registered — refusing \
-                   a second instance (it would reset the card under the running \
-                   one). Stop the first, or use `wlan` to inspect it.");
-        return;
-    }
-
     // Load WASM module from npkFS
     let sys_path = alloc::format!("sys/wasm/{}", module_name);
     let resolved = resolve_path(module_name);
@@ -273,6 +262,19 @@ pub fn intent_run_driver(args: &str) {
             return;
         }
     };
+
+    // One card, one driver. A second instance would map the same MMIO, reset
+    // the card and reload its firmware under the running one, post its own
+    // RX rings and double the DMA budget; the result looks like corrupt RX
+    // frames rather than a duplicate driver. Other cards stay free.
+    if let Some(pci::Owner::Module(pid)) = pci::owner(dev.addr) {
+        let a = dev.addr;
+        kprintln!("[npk] {:02x}:{:02x}.{} already has a driver (module pid {}) — \
+                   refusing a second instance (it would reset the card under the \
+                   running one). Stop the first, or use `wlan` to inspect a \
+                   network driver.", a.bus, a.device, a.function, pid);
+        return;
+    }
 
     // A capability for this PCI device, plus what the module declares in
     // `.npk.caps` (as on the `run` path): without that a driver started here
