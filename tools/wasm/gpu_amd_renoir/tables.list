@@ -49,3 +49,5 @@ amdgpu_force_asic_type: i32
 amdgpu_lockup_timeout: u8
 @ amdgpu_device.c
 amdgpu_asic_name: str
+@ ../pm/swsmu/smu12/renoir_ppt.c
+renoir_message_map: i32

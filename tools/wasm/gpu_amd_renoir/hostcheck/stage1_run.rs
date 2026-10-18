@@ -44,6 +44,10 @@ fn main() {
         mm_data: mmMM_DATA,
         vram_base: vram_size - DISCOVERY_TMR_OFFSET as u64,
         vram,
+        // The SMU mailbox (MP1 segment 0 + C2PMSG_66 / C2PMSG_90): a
+        // message written is answered with SMU_RESP_OK.
+        on_write: vec![(0x16000 + mmMP1_SMN_C2PMSG_66, 0x16000 + mmMP1_SMN_C2PMSG_90, SMU_RESP_OK)],
+        writes: Vec::new(),
     });
 
     let mut vfct = vec![0u8; VFCT_SIZE as usize];
@@ -66,4 +70,10 @@ fn main() {
     adev.subsystem_vendor = 0x17aa;
     adev.subsystem_device = 0x3806;
     stage1::run(&mut adev, BDF, (0xfc00_0000, 2 << 20));
+    // Every write but the MM_INDEX window VRAM is read through.
+    for (reg, v) in npk_sys::fake_card_writes() {
+        if reg != mmMM_INDEX && reg != mmMM_INDEX_HI {
+            println!("write reg {:#x} = {:#x}", reg, v);
+        }
+    }
 }

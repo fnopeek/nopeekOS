@@ -16,6 +16,16 @@ pub struct FakeCard {
     /// VRAM bytes at `vram_base`.
     pub vram_base: u64,
     pub vram: Vec<u8>,
+    /// A write to the first register sets the second to the value: a
+    /// mailbox that answers.
+    pub on_write: Vec<(u32, u32, u32)>,
+    /// Every write, (register, value), in order.
+    pub writes: Vec<(u32, u32)>,
+}
+
+/// The writes the card has seen.
+pub fn fake_card_writes() -> Vec<(u32, u32)> {
+    CARD.with(|c| c.borrow().as_ref().map_or(Vec::new(), |c| c.writes.clone()))
 }
 
 thread_local! {
@@ -67,7 +77,14 @@ impl Mmio {
     pub fn w32(self, off: u32, v: u32) {
         CARD.with(|c| {
             if let Some(c) = c.borrow_mut().as_mut() {
-                c.regs.insert(off / 4, v);
+                let reg = off / 4;
+                c.regs.insert(reg, v);
+                c.writes.push((reg, v));
+                let answers: Vec<(u32, u32)> =
+                    c.on_write.iter().filter(|w| w.0 == reg).map(|w| (w.1, w.2)).collect();
+                for (r, val) in answers {
+                    c.regs.insert(r, val);
+                }
             }
         })
     }
@@ -109,6 +126,20 @@ pub fn pci_read_config_at(_bdf: i32, _offset: i32) -> i32 {
     -1
 }
 
+/// `npk_config_get`: the environment variable named like the key with
+/// `.` as `__` (NPK has no environment; the host check sets it).
+pub fn config_get(key: &[u8], buf: &mut [u8]) -> i32 {
+    let Ok(key) = std::str::from_utf8(key) else { return -1 };
+    match std::env::var(key.replace('.', "__")) {
+        Ok(v) if v.len() <= buf.len() => {
+            buf[..v.len()].copy_from_slice(v.as_bytes());
+            v.len() as i32
+        }
+        Ok(_) => -1,
+        Err(_) => 0,
+    }
+}
+
 pub fn log(b: &[u8]) {
     let s = String::from_utf8_lossy(b);
     println!("{}", s.strip_prefix("[gpu_amd_renoir] ").unwrap_or(&s));
@@ -119,7 +150,8 @@ pub fn sys_info(_key: i32) -> i64 {
 }
 
 pub fn now_us() -> i64 {
-    0
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros() as i64)
 }
 
 pub fn sleep(_ms: i32) -> i32 {

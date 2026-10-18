@@ -28,6 +28,8 @@ fn main() {
         mm_data: mmMM_DATA,
         vram_base: vram_size - DISCOVERY_TMR_OFFSET as u64,
         vram,
+        on_write: Vec::new(),
+        writes: Vec::new(),
     });
 
     let mut adev = Adev::new(0x164c, 0xc1, npk_sys::Mmio(0), 512 << 10);

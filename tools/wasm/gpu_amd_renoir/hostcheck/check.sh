@@ -33,4 +33,6 @@ check ucode oracle_ucode ucode_check "$FW"
 rustc $RF "$HERE/stage1_run.rs" -o "$B/stage1_run"
 echo "--- stage 1 on the host (the log the card run prints):"
 "$B/stage1_run" "$DISC" "$BIOS" "$FW"
+echo "--- the same with gpu_amd_renoir.reset_on_init 1 (a fake SMU that answers OK):"
+gpu_amd_renoir__reset_on_init=1 "$B/stage1_run" "$DISC" "$BIOS" "$FW" | grep -E "reset|SMU|write reg|stage 1"
 exit $fail

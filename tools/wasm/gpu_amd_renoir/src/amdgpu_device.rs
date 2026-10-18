@@ -1064,19 +1064,35 @@ pub fn amdgpu_device_need_post(adev: &mut amdgpu_device) -> bool {
 }
 
 /// The step `amdgpu_device_init` takes when `amdgpu_asic_need_reset_on_init`
-/// is true, decided as Linux decides it.
+/// is true, decided as Linux decides it, and whether it was taken.
 pub struct reset_on_init {
     pub needed: bool,
     pub method: u32,
+    pub taken: Option<i32>,
+}
+
+/// `soc15_asic_reset`: not Raven, not resuming from S3, so the reset method.
+fn soc15_asic_reset(adev: &mut amdgpu_device) -> i32 {
+    match soc15_asic_reset_method(adev) {
+        AMD_RESET_METHOD_MODE2 => {
+            Line::new().s("MODE2 reset").say();
+            crate::amdgpu_smu::amdgpu_dpm_mode2_reset(adev)
+        }
+        _ => {
+            Line::new().s("MODE1 reset: not ported").say();
+            -95
+        }
+    }
 }
 
 /// `amdgpu_device_init` up to `amdgpu_device_ip_init`, Renoir's path.
 /// `flags` is the pci id table's `CHIP_RENOIR | AMD_IS_APU`. The reset on
-/// init (`soc15_need_reset_on_init` is true for CHIP_RENOIR) is decided
-/// and returned, not taken: it is a MODE2 reset through the SMU, the
-/// first write that changes the card's state.
-pub fn amdgpu_device_init(adev: &mut amdgpu_device, flags: u32, bdf: (u8, u8, u8), bar2: (u64, u64))
-    -> Result<reset_on_init, i32>
+/// init (`soc15_need_reset_on_init` is true for CHIP_RENOIR) is a MODE2
+/// reset through the SMU, the first write that changes the card's state
+/// while it drives the screen: taken only with `take_reset`, otherwise
+/// decided and returned.
+pub fn amdgpu_device_init(adev: &mut amdgpu_device, flags: u32, bdf: (u8, u8, u8), bar2: (u64, u64),
+                          take_reset: bool) -> Result<reset_on_init, i32>
 {
     adev.shutdown = false;
     adev.flags = flags;
@@ -1169,7 +1185,21 @@ pub fn amdgpu_device_init(adev: &mut amdgpu_device, flags: u32, bdf: (u8, u8, u8
 
     // check if we need to reset the asic: soc15_need_reset_on_init,
     // "CP hangs in IGT reloading test on RN, reset to WA"
-    let reset = reset_on_init { needed: adev.asic_type == CHIP_RENOIR, method: soc15_asic_reset_method(adev) };
+    let mut reset = reset_on_init {
+        needed: adev.asic_type == CHIP_RENOIR,
+        method: soc15_asic_reset_method(adev),
+        taken: None,
+    };
+    if reset.needed && take_reset {
+        // No XGMI hive, MP1 is not 13.0.10: amdgpu_asic_reset with
+        // amdgpu_reset_method forced to NONE for the call.
+        let r = soc15_asic_reset(adev);
+        reset.taken = Some(r);
+        if r != 0 {
+            Line::new().s("asic reset on init failed").say();
+            return Err(r);
+        }
+    }
 
     // Post card if necessary
     if amdgpu_device_need_post(adev) {

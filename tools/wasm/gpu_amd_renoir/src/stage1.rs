@@ -16,7 +16,11 @@ use crate::regs;
 /// address, `bar2` the doorbell BAR's bus address and length.
 pub fn run(adev: &mut amdgpu_device, bdf: (u8, u8, u8), bar2: (u64, u64)) {
     // amdgpu_pciidlist: 0x164C is CHIP_RENOIR | AMD_IS_APU
-    let r = dev::amdgpu_device_init(adev, regs::CHIP_RENOIR | regs::AMD_IS_APU, bdf, bar2);
+    // `set gpu_amd_renoir.reset_on_init 1` takes the reset on init.
+    let mut v = [0u8; 8];
+    let n = npk_sys::config_get(b"gpu_amd_renoir.reset_on_init", &mut v);
+    let take_reset = n == 1 && v[0] == b'1';
+    let r = dev::amdgpu_device_init(adev, regs::CHIP_RENOIR | regs::AMD_IS_APU, bdf, bar2, take_reset);
     if !adev.mman.discovery_bin.is_empty() {
         report_ip_versions(adev);
         compare_dc_bases(adev);
@@ -52,10 +56,12 @@ fn report_pcie(l: &mut Line, name: &str, d: &crate::linux::pci_dev) {
 fn report_device_init(adev: &amdgpu_device, reset: &dev::reset_on_init) {
     let mut l = Line::new();
     report_pcie(&mut l, "pcie: gpu", &adev.pdev);
+    l.say();
+    let mut l = Line::new();
     match adev.pdev.upstream_bridge() {
-        Some(b) => report_pcie(&mut l, ", bridge", &b),
+        Some(b) => report_pcie(&mut l, "pcie: bridge", &b),
         None => {
-            l.s(", on the root bus");
+            l.s("pcie: gpu on the root bus");
         }
     }
     l.say();
@@ -72,9 +78,19 @@ fn report_device_init(adev: &amdgpu_device, reset: &dev::reset_on_init) {
         m if m == regs::AMD_RESET_METHOD_MODE1 => "MODE1",
         _ => "?",
     };
-    Line::new().s("reset on init: ").s(if reset.needed { "needed, " } else { "not needed" })
-        .s(if reset.needed { method } else { "" })
-        .s(if reset.needed { " (SMU GfxDeviceDriverReset) - not taken in stage 1c" } else { "" }).say();
+    let mut l = Line::new();
+    l.s("reset on init: ");
+    if !reset.needed {
+        l.s("not needed");
+    } else {
+        l.s("needed, ").s(method).s(" (SMU GfxDeviceDriverReset) ");
+        match reset.taken {
+            Some(0) => l.s("- taken, SMU answered OK"),
+            Some(r) => l.s("- taken, failed ").dec((-r) as u64),
+            None => l.s("- not taken (set gpu_amd_renoir.reset_on_init 1 takes it)"),
+        };
+    }
+    l.say();
     let c = &adev.clock;
     Line::new().s("need_post: no (bios scratch 7 has ASIC_INIT_COMPLETE); clocks: sclk ").dec((c.default_sclk / 100) as u64)
         .s(" MHz, mclk ").dec((c.default_mclk / 100) as u64).s(" MHz, spll ref ").dec((c.spll.reference_freq / 100) as u64)

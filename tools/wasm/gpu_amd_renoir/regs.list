@@ -870,3 +870,24 @@ AMDGPU_DOORBELL64_VCN6_7 @ vega10_reg_init.c
 AMDGPU_DOORBELL64_FIRST_NON_CP @ vega10_reg_init.c
 AMDGPU_DOORBELL64_LAST_NON_CP @ vega10_reg_init.c
 AMDGPU_DOORBELL64_MAX_ASSIGNMENT @ vega10_reg_init.c
+# SMU messages (smu_cmn.c, renoir_ppt.c, amdgpu_smu.h)
+SMU_RESP_NONE @ ../pm/swsmu/smu_cmn.c
+SMU_RESP_OK @ ../pm/swsmu/smu_cmn.c
+SMU_RESP_CMD_FAIL @ ../pm/swsmu/smu_cmn.c
+SMU_RESP_CMD_UNKNOWN @ ../pm/swsmu/smu_cmn.c
+SMU_RESP_CMD_BAD_PREREQ @ ../pm/swsmu/smu_cmn.c
+SMU_RESP_BUSY_OTHER @ ../pm/swsmu/smu_cmn.c
+SMU_RESP_DEBUG_END @ ../pm/swsmu/smu_cmn.c
+SMU_RESP_UNEXP @ ../pm/swsmu/smu_cmn.c
+MP1_C2PMSG_90__CONTENT_MASK @ ../pm/swsmu/smu_cmn.c
+SMU_FW_INIT @ ../pm/swsmu/smu_cmn.c
+SMU_FW_RUNTIME @ ../pm/swsmu/smu_cmn.c
+SMU_FW_HANG @ ../pm/swsmu/smu_cmn.c
+SMU_MSG_MAX_COUNT @ ../pm/swsmu/smu_cmn.c
+SMU_MSG_GfxDeviceDriverReset @ ../pm/swsmu/smu_cmn.c
+SMU_RESET_MODE_2 @ ../pm/swsmu/smu12/smu_v12_0.c
+GfxDeviceDriverReset_NAME$ = __smu_message_names[SMU_MSG_GfxDeviceDriverReset] @ ../pm/swsmu/smu_cmn.c
+CMN2ASIC_MSG_MAPPING_SIZE = sizeof(struct cmn2asic_msg_mapping) @ ../pm/swsmu/smu12/renoir_ppt.c
+CMN2ASIC_MSG_MAPPING_map_to = offsetof(struct cmn2asic_msg_mapping, map_to) @ ../pm/swsmu/smu12/renoir_ppt.c
+CMN2ASIC_MSG_MAPPING_valid_mapping = offsetof(struct cmn2asic_msg_mapping, valid_mapping) @ ../pm/swsmu/smu12/renoir_ppt.c
+CMN2ASIC_MSG_MAPPING_flags = offsetof(struct cmn2asic_msg_mapping, flags) @ ../pm/swsmu/smu12/renoir_ppt.c

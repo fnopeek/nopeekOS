@@ -1743,3 +1743,45 @@ pub const AMDGPU_DOORBELL64_FIRST_NON_CP: u32 = 0xf0;
 pub const AMDGPU_DOORBELL64_LAST_NON_CP: u32 = 0xff;
 /// amdgpu/amdgpu_doorbell.h:316
 pub const AMDGPU_DOORBELL64_MAX_ASSIGNMENT: u32 = 0xff;
+
+// SMU messages (smu_cmn.c, renoir_ppt.c, amdgpu_smu.h)
+/// pm/swsmu/smu_cmn.c:81
+pub const SMU_RESP_NONE: u32 = 0x0;
+/// pm/swsmu/smu_cmn.c:82
+pub const SMU_RESP_OK: u32 = 0x1;
+/// pm/swsmu/smu_cmn.c:83
+pub const SMU_RESP_CMD_FAIL: u32 = 0xff;
+/// pm/swsmu/smu_cmn.c:84
+pub const SMU_RESP_CMD_UNKNOWN: u32 = 0xfe;
+/// pm/swsmu/smu_cmn.c:85
+pub const SMU_RESP_CMD_BAD_PREREQ: u32 = 0xfd;
+/// pm/swsmu/smu_cmn.c:86
+pub const SMU_RESP_BUSY_OTHER: u32 = 0xfc;
+/// pm/swsmu/smu_cmn.c:87
+pub const SMU_RESP_DEBUG_END: u32 = 0xfb;
+/// pm/swsmu/smu_cmn.c:89
+pub const SMU_RESP_UNEXP: u32 = 0xffffffff;
+/// pm/swsmu/smu_cmn.c:40
+pub const MP1_C2PMSG_90__CONTENT_MASK: u32 = 0xffffffff;
+/// ?
+pub const SMU_FW_INIT: u32 = 0x0;
+/// ?
+pub const SMU_FW_RUNTIME: u32 = 0x1;
+/// ?
+pub const SMU_FW_HANG: u32 = 0x2;
+/// ?
+pub const SMU_MSG_MAX_COUNT: u32 = 0x100;
+/// ?
+pub const SMU_MSG_GfxDeviceDriverReset: u32 = 0x36;
+/// ?
+pub const SMU_RESET_MODE_2: u32 = 0x2;
+/// The value of `__smu_message_names[SMU_MSG_GfxDeviceDriverReset]` in ../pm/swsmu/smu_cmn.c
+pub const GfxDeviceDriverReset_NAME: &[u8] = b"GfxDeviceDriverReset";
+/// The value of `sizeof(struct cmn2asic_msg_mapping)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const CMN2ASIC_MSG_MAPPING_SIZE: u32 = 0xc;
+/// The value of `offsetof(struct cmn2asic_msg_mapping, map_to)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const CMN2ASIC_MSG_MAPPING_map_to: u32 = 0x4;
+/// The value of `offsetof(struct cmn2asic_msg_mapping, valid_mapping)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const CMN2ASIC_MSG_MAPPING_valid_mapping: u32 = 0x0;
+/// The value of `offsetof(struct cmn2asic_msg_mapping, flags)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const CMN2ASIC_MSG_MAPPING_flags: u32 = 0x8;
