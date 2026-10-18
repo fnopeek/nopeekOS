@@ -19,9 +19,12 @@
 
 extern crate alloc;
 
+mod amdgpu_atombios;
+mod amdgpu_atomfirmware;
 mod amdgpu_bios;
 mod amdgpu_device;
 mod amdgpu_discovery;
+mod atom;
 mod nbio_v7_0;
 mod linux;
 mod regs;

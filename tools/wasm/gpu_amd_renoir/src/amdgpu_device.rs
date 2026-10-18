@@ -1,6 +1,7 @@
 //! amdgpu/amdgpu_device.c (Linux 6.18.55): the device, register access and
 //! VRAM access as they work before the IP blocks are known.
 
+use crate::atom::atom_context;
 use crate::regs::*;
 use alloc::vec::Vec;
 use npk_sys::Mmio;
@@ -9,10 +10,51 @@ use npk_sys::Mmio;
 pub const MAX_HWIP: usize = crate::regs::MAX_HWIP as usize;
 pub const HWIP_MAX_INSTANCE: usize = crate::regs::HWIP_MAX_INSTANCE as usize;
 
-/// `struct amdgpu_mman`, the part `amdgpu_discovery_init` fills.
+/// `struct amdgpu_mman`, the part `amdgpu_discovery_init` and
+/// `amdgpu_atomfirmware_allocate_fb_scratch` fill.
 pub struct amdgpu_mman {
     pub discovery_tmr_size: u32,
     pub discovery_bin: Vec<u8>,
+    pub fw_vram_usage_start_offset: u64,
+    pub fw_vram_usage_size: u64,
+    pub drv_vram_usage_start_offset: u64,
+    pub drv_vram_usage_size: u64,
+}
+
+/// `struct amdgpu_mode_info`, the ATOM part.
+pub struct amdgpu_mode_info {
+    pub atom_context: Option<atom_context>,
+    pub firmware_flags: u32,
+}
+
+/// `struct amdgpu_pll`, the fields `amdgpu_atomfirmware_get_clock_info` sets.
+#[derive(Default, Clone, Copy)]
+pub struct amdgpu_pll {
+    pub reference_freq: u32,
+    pub reference_div: u32,
+    pub min_post_div: u32,
+    pub max_post_div: u32,
+    pub min_ref_div: u32,
+    pub max_ref_div: u32,
+    pub min_feedback_div: u32,
+    pub max_feedback_div: u32,
+    pub best_vco: u32,
+}
+
+/// `struct amdgpu_clock`: boot clocks in 10 kHz.
+#[derive(Default)]
+pub struct amdgpu_clock {
+    pub spll: amdgpu_pll,
+    pub mpll: amdgpu_pll,
+    pub default_sclk: u32,
+    pub default_mclk: u32,
+}
+
+/// `struct amdgpu_pm`, the current clocks.
+#[derive(Default)]
+pub struct amdgpu_pm {
+    pub current_sclk: u32,
+    pub current_mclk: u32,
 }
 
 /// `struct amdgpu_device`, the part the discovery needs.
@@ -38,6 +80,13 @@ pub struct amdgpu_device {
     pub num_umc: u32,
     pub umc_node_inst_num: u32,
     pub vpe_num_instances: u32,
+    /// `adev->bios`, from `amdgpu_get_bios`.
+    pub bios: Vec<u8>,
+    pub is_atom_fw: bool,
+    pub mode_info: amdgpu_mode_info,
+    pub bios_scratch_reg_offset: u32,
+    pub clock: amdgpu_clock,
+    pub pm: amdgpu_pm,
 }
 
 impl amdgpu_device {
@@ -48,7 +97,14 @@ impl amdgpu_device {
             apu_flags: 0,
             rmmio,
             rmmio_size,
-            mman: amdgpu_mman { discovery_tmr_size: 0, discovery_bin: Vec::new() },
+            mman: amdgpu_mman {
+                discovery_tmr_size: 0,
+                discovery_bin: Vec::new(),
+                fw_vram_usage_start_offset: 0,
+                fw_vram_usage_size: 0,
+                drv_vram_usage_start_offset: 0,
+                drv_vram_usage_size: 0,
+            },
             ip_versions: [[0; HWIP_MAX_INSTANCE]; MAX_HWIP],
             reg_offset: core::array::from_fn(|_| core::array::from_fn(|_| Vec::new())),
             num_vcn_inst: 0,
@@ -60,6 +116,12 @@ impl amdgpu_device {
             num_umc: 0,
             umc_node_inst_num: 0,
             vpe_num_instances: 0,
+            bios: Vec::new(),
+            is_atom_fw: false,
+            mode_info: amdgpu_mode_info { atom_context: None, firmware_flags: 0 },
+            bios_scratch_reg_offset: 0,
+            clock: amdgpu_clock::default(),
+            pm: amdgpu_pm::default(),
         }
     }
 

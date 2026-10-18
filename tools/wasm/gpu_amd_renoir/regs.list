@@ -180,3 +180,53 @@ mmRCC_DEV0_EPF0_STRAP0 @ nbio_v7_0.c
 mmRCC_DEV0_EPF0_STRAP0_BASE_IDX @ nbio_v7_0.c
 RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0_MASK @ nbio_v7_0.c
 RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0__SHIFT @ nbio_v7_0.c
+# The ATOM image (atom.h, atomfirmware.h)
+ATOM_BIOS_MAGIC @ atom.c
+ATOM_ATI_MAGIC_PTR @ atom.c
+ATOM_ATI_MAGIC$ @ atom.c
+ATOM_ROM_TABLE_PTR @ atom.c
+ATOM_ROM_MAGIC$ @ atom.c
+ATOM_ROM_MAGIC_PTR @ atom.c
+ATOM_ROM_CFG_PTR @ atom.c
+ATOM_ROM_CMD_PTR @ atom.c
+ATOM_ROM_DATA_PTR @ atom.c
+ATOM_DATA_IIO_PTR @ atom.c
+ATOM_IIO_START @ atom.c
+ATOM_IIO_END @ atom.c
+STRLEN_NORMAL @ atom.c
+STRLEN_LONG @ atom.c
+BIOS_ATOM_PREFIX$ @ atom.c
+BIOS_VERSION_PREFIX$ @ atom.c
+BIOS_STRING_LENGTH @ atom.c
+OFFSET_TO_ATOM_ROM_HEADER_POINTER @ atom.c
+OFFSET_TO_GET_ATOMBIOS_NUMBER_OF_STRINGS @ atom.c
+OFFSET_TO_GET_ATOMBIOS_STRING_START @ atom.c
+OFFSET_TO_VBIOS_PART_NUMBER @ atom.c
+OFFSET_TO_VBIOS_DATE @ atom.c
+# Layouts amdgpu_atom_parse reads (atombios.h)
+ROM_HEADER_MASTER_DATA_TABLE = offsetof(ATOM_ROM_HEADER, usMasterDataTableOffset) @ atom.c
+MASTER_DATA_FIRMWARE_INFO = offsetof(ATOM_MASTER_DATA_TABLE, ListOfDataTables.FirmwareInfo) @ atom.c
+FIRMWARE_INFO_REVISION = offsetof(ATOM_FIRMWARE_INFO, ulFirmwareRevision) @ atom.c
+# The data tables amdgpu_atomfirmware reads (atomfirmware.h)
+IDX_firmwareinfo = offsetof(struct atom_master_list_of_data_tables_v2_1, firmwareinfo) / sizeof(uint16_t) @ amdgpu_atomfirmware.c
+IDX_vram_usagebyfirmware = offsetof(struct atom_master_list_of_data_tables_v2_1, vram_usagebyfirmware) / sizeof(uint16_t) @ amdgpu_atomfirmware.c
+IDX_smu_info = offsetof(struct atom_master_list_of_data_tables_v2_1, smu_info) / sizeof(uint16_t) @ amdgpu_atomfirmware.c
+IDX_umc_info = offsetof(struct atom_master_list_of_data_tables_v2_1, umc_info) / sizeof(uint16_t) @ amdgpu_atomfirmware.c
+FWI31_FIRMWARE_CAPABILITY = offsetof(struct atom_firmware_info_v3_1, firmware_capability) @ amdgpu_atomfirmware.c
+FWI31_BIOS_SCRATCH_REG_STARTADDR = offsetof(struct atom_firmware_info_v3_1, bios_scratch_reg_startaddr) @ amdgpu_atomfirmware.c
+FWI31_BOOTUP_SCLK_IN10KHZ = offsetof(struct atom_firmware_info_v3_1, bootup_sclk_in10khz) @ amdgpu_atomfirmware.c
+FWI31_BOOTUP_MCLK_IN10KHZ = offsetof(struct atom_firmware_info_v3_1, bootup_mclk_in10khz) @ amdgpu_atomfirmware.c
+VUF21_START_ADDRESS_IN_KB = offsetof(struct vram_usagebyfirmware_v2_1, start_address_in_kb) @ amdgpu_atomfirmware.c
+VUF21_USED_BY_FIRMWARE_IN_KB = offsetof(struct vram_usagebyfirmware_v2_1, used_by_firmware_in_kb) @ amdgpu_atomfirmware.c
+VUF21_USED_BY_DRIVER_IN_KB = offsetof(struct vram_usagebyfirmware_v2_1, used_by_driver_in_kb) @ amdgpu_atomfirmware.c
+VUF22_FW_REGION_START_ADDRESS_IN_KB = offsetof(struct vram_usagebyfirmware_v2_2, fw_region_start_address_in_kb) @ amdgpu_atomfirmware.c
+VUF22_USED_BY_FIRMWARE_IN_KB = offsetof(struct vram_usagebyfirmware_v2_2, used_by_firmware_in_kb) @ amdgpu_atomfirmware.c
+VUF22_DRIVER_REGION0_START_ADDRESS_IN_KB = offsetof(struct vram_usagebyfirmware_v2_2, driver_region0_start_address_in_kb) @ amdgpu_atomfirmware.c
+VUF22_USED_BY_DRIVER_REGION0_IN_KB = offsetof(struct vram_usagebyfirmware_v2_2, used_by_driver_region0_in_kb) @ amdgpu_atomfirmware.c
+SMU31_CORE_REFCLK_10KHZ = offsetof(struct atom_smu_info_v3_1, core_refclk_10khz) @ amdgpu_atomfirmware.c
+SMU40_CORE_REFCLK_10KHZ = offsetof(struct atom_smu_info_v4_0, core_refclk_10khz) @ amdgpu_atomfirmware.c
+UMC31_MEM_REFCLK_10KHZ = offsetof(struct atom_umc_info_v3_1, mem_refclk_10khz) @ amdgpu_atomfirmware.c
+ATOM_VRAM_OPERATION_FLAGS_MASK @ amdgpu_atomfirmware.c
+ATOM_VRAM_OPERATION_FLAGS_SHIFT @ amdgpu_atomfirmware.c
+ATOM_VRAM_BLOCK_NEEDS_NO_RESERVATION @ amdgpu_atomfirmware.c
+ATOM_VRAM_BLOCK_SRIOV_MSG_SHARE_RESERVATION @ amdgpu_atomfirmware.c

@@ -53,3 +53,6 @@ pub static UMC_BASE: [u32; 35] = [81920, 37902336, 0, 0, 0, 344064, 37903360, 0,
 
 /// `UVD0_BASE` in renoir_ip_offset.h
 pub static UVD0_BASE: [u32; 35] = [30720, 32256, 37761024, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+/// `atom_iio_len` in atom.c
+pub static atom_iio_len: [i32; 10] = [1, 2, 3, 3, 3, 3, 4, 4, 4, 3];

@@ -18,3 +18,5 @@ SMUIO_BASE: u32
 THM_BASE: u32
 UMC_BASE: u32
 UVD0_BASE: u32
+@ atom.c
+atom_iio_len: i32

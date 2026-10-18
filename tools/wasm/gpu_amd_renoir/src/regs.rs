@@ -363,3 +363,103 @@ pub const mmRCC_DEV0_EPF0_STRAP0_BASE_IDX: u32 = 0x2;
 pub const RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0_MASK: u32 = 0xf000000;
 /// include/asic_reg/nbif/nbif_6_1_sh_mask.h:2770
 pub const RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0__SHIFT: u32 = 0x18;
+
+// The ATOM image (atom.h, atomfirmware.h)
+/// amdgpu/atom.h:32
+pub const ATOM_BIOS_MAGIC: u32 = 0xaa55;
+/// amdgpu/atom.h:33
+pub const ATOM_ATI_MAGIC_PTR: u32 = 0x30;
+/// amdgpu/atom.h:34
+pub const ATOM_ATI_MAGIC: &[u8] = b" 761295520";
+/// amdgpu/atom.h:35
+pub const ATOM_ROM_TABLE_PTR: u32 = 0x48;
+/// amdgpu/atom.h:37
+pub const ATOM_ROM_MAGIC: &[u8] = b"ATOM";
+/// amdgpu/atom.h:38
+pub const ATOM_ROM_MAGIC_PTR: u32 = 0x4;
+/// amdgpu/atom.h:40
+pub const ATOM_ROM_CFG_PTR: u32 = 0xc;
+/// amdgpu/atom.h:42
+pub const ATOM_ROM_CMD_PTR: u32 = 0x1e;
+/// amdgpu/atom.h:43
+pub const ATOM_ROM_DATA_PTR: u32 = 0x20;
+/// amdgpu/atom.h:52
+pub const ATOM_DATA_IIO_PTR: u32 = 0x32;
+/// amdgpu/atom.h:100
+pub const ATOM_IIO_START: u32 = 0x1;
+/// amdgpu/atom.h:108
+pub const ATOM_IIO_END: u32 = 0x9;
+/// amdgpu/atom.h:115
+pub const STRLEN_NORMAL: u32 = 0x20;
+/// amdgpu/atom.h:116
+pub const STRLEN_LONG: u32 = 0x40;
+/// include/atomfirmware.h:202
+pub const BIOS_ATOM_PREFIX: &[u8] = b"ATOMBIOS";
+/// include/atomfirmware.h:203
+pub const BIOS_VERSION_PREFIX: &[u8] = b"ATOMBIOSBK-AMD";
+/// include/atomfirmware.h:204
+pub const BIOS_STRING_LENGTH: u32 = 0x2b;
+/// include/atomfirmware.h:217
+pub const OFFSET_TO_ATOM_ROM_HEADER_POINTER: u32 = 0x48;
+/// include/atomfirmware.h:221
+pub const OFFSET_TO_GET_ATOMBIOS_NUMBER_OF_STRINGS: u32 = 0x2f;
+/// include/atomfirmware.h:222
+pub const OFFSET_TO_GET_ATOMBIOS_STRING_START: u32 = 0x6e;
+/// include/atomfirmware.h:223
+pub const OFFSET_TO_VBIOS_PART_NUMBER: u32 = 0x80;
+/// include/atomfirmware.h:224
+pub const OFFSET_TO_VBIOS_DATE: u32 = 0x50;
+
+// Layouts amdgpu_atom_parse reads (atombios.h)
+/// The value of `offsetof(ATOM_ROM_HEADER, usMasterDataTableOffset)` in atom.c
+pub const ROM_HEADER_MASTER_DATA_TABLE: u32 = 0x20;
+/// The value of `offsetof(ATOM_MASTER_DATA_TABLE, ListOfDataTables.FirmwareInfo)` in atom.c
+pub const MASTER_DATA_FIRMWARE_INFO: u32 = 0xc;
+/// The value of `offsetof(ATOM_FIRMWARE_INFO, ulFirmwareRevision)` in atom.c
+pub const FIRMWARE_INFO_REVISION: u32 = 0x4;
+
+// The data tables amdgpu_atomfirmware reads (atomfirmware.h)
+/// The value of `offsetof(struct atom_master_list_of_data_tables_v2_1, firmwareinfo) / sizeof(uint16_t)` in amdgpu_atomfirmware.c
+pub const IDX_firmwareinfo: u32 = 0x4;
+/// The value of `offsetof(struct atom_master_list_of_data_tables_v2_1, vram_usagebyfirmware) / sizeof(uint16_t)` in amdgpu_atomfirmware.c
+pub const IDX_vram_usagebyfirmware: u32 = 0xb;
+/// The value of `offsetof(struct atom_master_list_of_data_tables_v2_1, smu_info) / sizeof(uint16_t)` in amdgpu_atomfirmware.c
+pub const IDX_smu_info: u32 = 0x8;
+/// The value of `offsetof(struct atom_master_list_of_data_tables_v2_1, umc_info) / sizeof(uint16_t)` in amdgpu_atomfirmware.c
+pub const IDX_umc_info: u32 = 0x18;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, firmware_capability)` in amdgpu_atomfirmware.c
+pub const FWI31_FIRMWARE_CAPABILITY: u32 = 0x10;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, bios_scratch_reg_startaddr)` in amdgpu_atomfirmware.c
+pub const FWI31_BIOS_SCRATCH_REG_STARTADDR: u32 = 0x18;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, bootup_sclk_in10khz)` in amdgpu_atomfirmware.c
+pub const FWI31_BOOTUP_SCLK_IN10KHZ: u32 = 0x8;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, bootup_mclk_in10khz)` in amdgpu_atomfirmware.c
+pub const FWI31_BOOTUP_MCLK_IN10KHZ: u32 = 0xc;
+/// The value of `offsetof(struct vram_usagebyfirmware_v2_1, start_address_in_kb)` in amdgpu_atomfirmware.c
+pub const VUF21_START_ADDRESS_IN_KB: u32 = 0x4;
+/// The value of `offsetof(struct vram_usagebyfirmware_v2_1, used_by_firmware_in_kb)` in amdgpu_atomfirmware.c
+pub const VUF21_USED_BY_FIRMWARE_IN_KB: u32 = 0x8;
+/// The value of `offsetof(struct vram_usagebyfirmware_v2_1, used_by_driver_in_kb)` in amdgpu_atomfirmware.c
+pub const VUF21_USED_BY_DRIVER_IN_KB: u32 = 0xa;
+/// The value of `offsetof(struct vram_usagebyfirmware_v2_2, fw_region_start_address_in_kb)` in amdgpu_atomfirmware.c
+pub const VUF22_FW_REGION_START_ADDRESS_IN_KB: u32 = 0x4;
+/// The value of `offsetof(struct vram_usagebyfirmware_v2_2, used_by_firmware_in_kb)` in amdgpu_atomfirmware.c
+pub const VUF22_USED_BY_FIRMWARE_IN_KB: u32 = 0x8;
+/// The value of `offsetof(struct vram_usagebyfirmware_v2_2, driver_region0_start_address_in_kb)` in amdgpu_atomfirmware.c
+pub const VUF22_DRIVER_REGION0_START_ADDRESS_IN_KB: u32 = 0xc;
+/// The value of `offsetof(struct vram_usagebyfirmware_v2_2, used_by_driver_region0_in_kb)` in amdgpu_atomfirmware.c
+pub const VUF22_USED_BY_DRIVER_REGION0_IN_KB: u32 = 0x10;
+/// The value of `offsetof(struct atom_smu_info_v3_1, core_refclk_10khz)` in amdgpu_atomfirmware.c
+pub const SMU31_CORE_REFCLK_10KHZ: u32 = 0x10;
+/// The value of `offsetof(struct atom_smu_info_v4_0, core_refclk_10khz)` in amdgpu_atomfirmware.c
+pub const SMU40_CORE_REFCLK_10KHZ: u32 = 0x10;
+/// The value of `offsetof(struct atom_umc_info_v3_1, mem_refclk_10khz)` in amdgpu_atomfirmware.c
+pub const UMC31_MEM_REFCLK_10KHZ: u32 = 0x1c;
+/// include/atombios.h:4298
+pub const ATOM_VRAM_OPERATION_FLAGS_MASK: u32 = 0xc0000000;
+/// include/atombios.h:4299
+pub const ATOM_VRAM_OPERATION_FLAGS_SHIFT: u32 = 0x1e;
+/// include/atombios.h:4300
+pub const ATOM_VRAM_BLOCK_NEEDS_NO_RESERVATION: u32 = 0x1;
+/// include/atombios.h:4302
+pub const ATOM_VRAM_BLOCK_SRIOV_MSG_SHARE_RESERVATION: u32 = 0x2;

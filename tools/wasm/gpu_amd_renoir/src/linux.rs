@@ -110,6 +110,14 @@ impl Line {
         self
     }
 
+    /// Raw bytes, as `%s` prints them.
+    pub fn bytes(&mut self, b: &[u8]) -> &mut Self {
+        let n = b.len().min(self.buf.len() - self.len);
+        self.buf[self.len..self.len + n].copy_from_slice(&b[..n]);
+        self.len += n;
+        self
+    }
+
     pub fn hex(&mut self, v: u32) -> &mut Self {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut b = *b"0x00000000";
