@@ -55,6 +55,11 @@ pub struct psp_context {
     pub rap_context: psp_ta_context,
     pub securedisplay_context: psp_ta_context,
     pub ta_fw_version: u32,
+    /// `psp->cmd`: the command built in memory, then copied to `cmd_buf_mem`.
+    pub cmd: alloc::vec::Vec<u8>,
+    pub xgmi_supports_extended_data: bool,
+    pub enable_mem_training: bool,
+    pub buf: psp_buffers,
 }
 
 /// `psp_v12_0_set_psp_funcs`.
@@ -249,4 +254,55 @@ pub fn psp_early_init(adev: &mut amdgpu_device) -> i32 {
 
     // Bare metal: psp_init_microcode, `funcs->init_microcode`.
     psp_v12_0_init_microcode(adev)
+}
+
+/// The buffers `psp_sw_init` creates.
+#[derive(Default, Clone, Copy)]
+pub struct psp_buffers {
+    pub fw_pri_bo: Option<usize>,
+    pub fw_pri_mc_addr: u64,
+    pub fw_pri_buf: Option<crate::amdgpu_object::amdgpu_kptr>,
+    pub fence_buf_bo: Option<usize>,
+    pub fence_buf_mc_addr: u64,
+    pub fence_buf: Option<crate::amdgpu_object::amdgpu_kptr>,
+    pub cmd_buf_bo: Option<usize>,
+    pub cmd_buf_mc_addr: u64,
+    pub cmd_buf_mem: Option<crate::amdgpu_object::amdgpu_kptr>,
+}
+
+/// One `amdgpu_bo_create_kernel` with its GPU address and mapping.
+fn create(adev: &mut amdgpu_device, size: u64, align: u64, domain: u32)
+          -> Result<(Option<usize>, u64, Option<crate::amdgpu_object::amdgpu_kptr>), i32> {
+    let h = crate::amdgpu_object::amdgpu_bo_create_kernel(adev, size, align, domain, true)?;
+    let Some(h) = h else { return Ok((None, 0, None)) };
+    Ok((Some(h), crate::amdgpu_object::amdgpu_bo_gpu_offset(adev, h), crate::amdgpu_object::bo(adev, h).kptr))
+}
+
+/// `psp_sw_init`: an APU has no PSP runtime database, so SCPM is off and
+/// two-stage memory training is asked for; `psp_memory_training_init`
+/// finds no reservation and psp_v12_0 has no `mem_training`.
+pub fn psp_sw_init(adev: &mut amdgpu_device) -> i32 {
+    adev.psp.cmd = alloc::vec![0u8; PSP_GFX_CMD_RESP_SIZE as usize];
+    adev.psp.xgmi_supports_extended_data = false;
+    adev.scpm_enabled = false;
+    adev.scpm_status = 0;
+    adev.psp.enable_mem_training = true;
+    let gtt = AMDGPU_GEM_DOMAIN_GTT;
+    let both = AMDGPU_GEM_DOMAIN_VRAM | AMDGPU_GEM_DOMAIN_GTT;
+    match create(adev, PSP_1_MEG as u64, PSP_1_MEG as u64, gtt) {
+        Ok((b, a, p)) => (adev.psp.buf.fw_pri_bo, adev.psp.buf.fw_pri_mc_addr, adev.psp.buf.fw_pri_buf) = (b, a, p),
+        Err(r) => return r,
+    }
+    match create(adev, PSP_FENCE_BUFFER_SIZE as u64, 4096, both) {
+        Ok((b, a, p)) => (adev.psp.buf.fence_buf_bo, adev.psp.buf.fence_buf_mc_addr, adev.psp.buf.fence_buf) = (b, a, p),
+        Err(r) => {
+            crate::amdgpu_object::amdgpu_bo_free_kernel(adev, &mut adev.psp.buf.fw_pri_bo.clone());
+            return r;
+        }
+    }
+    match create(adev, PSP_CMD_BUFFER_SIZE as u64, 4096, both) {
+        Ok((b, a, p)) => (adev.psp.buf.cmd_buf_bo, adev.psp.buf.cmd_buf_mc_addr, adev.psp.buf.cmd_buf_mem) = (b, a, p),
+        Err(r) => return r,
+    }
+    0
 }

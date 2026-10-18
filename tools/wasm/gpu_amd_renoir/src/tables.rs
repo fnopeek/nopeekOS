@@ -158,3 +158,6 @@ pub static amdgpu_vm_update_mode: [i32; 1] = [-1];
 
 /// `amdgpu_vm_fault_stop` in amdgpu_drv.c
 pub static amdgpu_vm_fault_stop: [i32; 1] = [0];
+
+/// `amdgpu_msi` in amdgpu_drv.c
+pub static amdgpu_msi: [i32; 1] = [-1];

@@ -308,3 +308,9 @@ pub fn sleep(_ms: i32) -> i32 {
 pub fn dma_set_mask(bits: i32) -> i32 {
     if (32..=64).contains(&bits) { 0 } else { -1 }
 }
+
+/// `npk_irq_register`: vector 48 for the first entry, as the kernel hands
+/// out its first device vector.
+pub fn irq_register(_entry: i32) -> i32 {
+    48
+}

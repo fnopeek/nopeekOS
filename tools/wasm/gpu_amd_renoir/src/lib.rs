@@ -39,6 +39,7 @@ mod amdgpu_ras;
 mod amdgpu_smu;
 mod amdgpu_ucode;
 mod atom;
+mod atom_exec;
 mod gfx_v9_0;
 mod gmc_v9_0;
 mod ip_blocks;

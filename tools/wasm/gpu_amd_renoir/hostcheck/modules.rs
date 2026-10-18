@@ -13,6 +13,8 @@ mod amdgpu_device;
 mod amdgpu_discovery;
 #[path = "../src/atom.rs"]
 mod atom;
+#[path = "../src/atom_exec.rs"]
+mod atom_exec;
 #[path = "../src/ip_blocks.rs"]
 mod ip_blocks;
 #[path = "../src/linux.rs"]

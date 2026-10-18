@@ -1,6 +1,5 @@
 //! amdgpu/atom.c (Linux 6.18.55): the ATOM image, parsed. The command
-//! table interpreter (`amdgpu_atom_execute_table`) is not here yet; this is
-//! what `amdgpu_atombios_init` and the table lookups need.
+//! table interpreter is `atom_exec`.
 //!
 //! Linux reads the image through `CU8`/`CU16`/`CU32` without bounds; a read
 //! past the end of the image gives 0 here.
@@ -29,6 +28,16 @@ pub struct atom_context {
     pub vbios_ver_str: [u8; STRLEN_N],
     pub date: [u8; STRLEN_N],
     pub build_num: [u8; STRLEN_N],
+    pub reg_block: u16,
+    pub io_mode: u32,
+    pub data_block: u16,
+    pub fb_base: u32,
+    pub divmul: [u32; 2],
+    pub shift: u8,
+    pub io_attr: u16,
+    pub cs_equal: bool,
+    pub cs_above: bool,
+    pub execute_depth: u32,
 }
 
 impl atom_context {
@@ -248,6 +257,16 @@ pub fn amdgpu_atom_parse(bios: Vec<u8>) -> Option<atom_context> {
         vbios_ver_str: [0; STRLEN_N],
         date: [0; STRLEN_N],
         build_num: [0; STRLEN_N],
+        reg_block: 0,
+        io_mode: 0,
+        data_block: 0,
+        fb_base: 0,
+        divmul: [0; 2],
+        shift: 0,
+        io_attr: 0,
+        cs_equal: false,
+        cs_above: false,
+        execute_depth: 0,
     };
 
     if ctx.cu16(0) as u32 != ATOM_BIOS_MAGIC {

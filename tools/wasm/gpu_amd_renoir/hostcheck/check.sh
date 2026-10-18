@@ -30,6 +30,34 @@ check() {
 check atom oracle_atom atom_check "$BIOS"
 check discovery oracle_discovery discovery_check "$DISC"
 check ucode oracle_ucode ucode_check "$FW"
+# The ATOM interpreter: the clock tables smu_v12_0 runs, every register
+# access compared. Linux prefixes DRM_ERROR, the port's log does not.
+rustc $RF "$HERE/atomexec_check.rs" -o "$B/atomexec_check"
+for seed in ones zeros hash; do
+    "$B/oracle_atomexec" "$BIOS" $seed | sed 's/^DRM_ERROR: //' > "$B/atomexec_$seed.linux"
+    "$B/atomexec_check" "$BIOS" $seed > "$B/atomexec_$seed.port"
+    if diff -u "$B/atomexec_$seed.linux" "$B/atomexec_$seed.port" | head -30; cmp -s "$B/atomexec_$seed.linux" "$B/atomexec_$seed.port"; then
+        echo "atom exec ($seed): port = Linux ($(grep -c '^[RW] ' "$B/atomexec_$seed.linux") register accesses)"
+    else
+        fail=1
+    fi
+done
+# Every command table of the image alone; a table that polls stops at the
+# read cap on both sides.
+n=0; acc=0
+for seed in ones zeros hash; do
+    for t in $(grep -o '^cmd\[[0-9]*\]' "$B/atom.linux" | tr -dc '0-9\n'); do
+        "$B/oracle_atomexec" "$BIOS" $seed $t | sed 's/^DRM_ERROR: //' > "$B/table.linux"
+        "$B/atomexec_check" "$BIOS" $seed $t > "$B/table.port"
+        if ! cmp -s "$B/table.linux" "$B/table.port"; then
+            echo "atom table $t ($seed): port differs"
+            diff -u "$B/table.linux" "$B/table.port" | head -10
+            fail=1
+        fi
+        n=$((n + 1)); acc=$((acc + $(grep -c '^[RW] ' "$B/table.linux" || true)))
+    done
+done
+echo "atom tables: port = Linux ($n runs, $acc register accesses)"
 # Stage 2: the oracle reads the discovery binary, the port runs the whole
 # amdgpu_device_init on the fake card first.
 # Registers never written read all ones (a bit cleared shows), all zeros

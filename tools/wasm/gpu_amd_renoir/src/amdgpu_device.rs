@@ -462,6 +462,12 @@ pub struct amdgpu_irq {
     pub self_irq: amdgpu_irq_src,
     /// `client[client_id]`, filled by `amdgpu_irq_add_id`.
     pub client: Vec<crate::amdgpu_irq::amdgpu_irq_client>,
+    pub ih: crate::vega10_ih::amdgpu_ih_ring,
+    pub ih_soft: crate::vega10_ih::amdgpu_ih_ring,
+    pub msi_enabled: bool,
+    pub installed: bool,
+    /// The interrupt vector the kernel gave.
+    pub irq: u32,
 }
 
 /// `struct amdgpu_vpe`.
@@ -518,6 +524,8 @@ pub struct amdgpu_device {
     /// BAR2 mapped, for the doorbell buffer's kernel mapping.
     pub doorbell_mmio: Option<npk_sys::Mmio>,
     pub apu_prefer_gtt: bool,
+    pub scpm_enabled: bool,
+    pub scpm_status: u32,
     pub wb: amdgpu_wb,
     pub seq64: amdgpu_seq64,
     /// `adev->mem_scratch`: the buffer, its GPU address and mapping.
@@ -622,6 +630,8 @@ impl amdgpu_device {
             dummy_page_addr: 0,
             doorbell_mmio: None,
             apu_prefer_gtt: false,
+            scpm_enabled: false,
+            scpm_status: 0,
             wb: amdgpu_wb::default(),
             seq64: amdgpu_seq64::default(),
             mem_scratch_robj: None,

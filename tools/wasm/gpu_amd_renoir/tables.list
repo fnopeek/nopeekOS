@@ -61,3 +61,5 @@ amdgpu_vram_names: str
 amdgpu_vm_update_mode: i32
 @ amdgpu_drv.c
 amdgpu_vm_fault_stop: i32
+@ amdgpu_drv.c
+amdgpu_msi: i32
