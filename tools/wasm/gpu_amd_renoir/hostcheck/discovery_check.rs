@@ -30,6 +30,7 @@ fn main() {
         vram,
         on_write: Vec::new(),
         writes: Vec::new(),
+        psp_wptr: None,
     });
 
     let mut adev = Adev::new(0x164c, 0xc1, npk_sys::Mmio(0), 512 << 10);

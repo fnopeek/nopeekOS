@@ -134,6 +134,50 @@ fn ip_init_sw(adev: &mut amdgpu_device) {
     Line::new().s("fw_size ").dec(adev.firmware.fw_size as u64).s(", ")
         .dec(adev.mman.bos.iter().flatten().count() as u64).s(" kernel buffers").say();
     Line::new().s("stage 3b done: sw_init of every block").say();
+    ip_init_fw_loading(adev);
+}
+
+/// Stage 4: the IB pools, the firmware buffer, IH up (and with it bus
+/// mastering, so the IOMMU), and the PSP loading every block's firmware.
+fn ip_init_fw_loading(adev: &mut amdgpu_device) {
+    let r = dev::amdgpu_device_ib_pool_init_logged(adev);
+    if r != 0 {
+        return;
+    }
+    let r = crate::amdgpu_ucode::amdgpu_ucode_create_bo(adev);
+    if r != 0 {
+        Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
+        return;
+    }
+    let r = dev::amdgpu_device_ip_hw_init_phase1(adev);
+    if r != 0 {
+        Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
+        return;
+    }
+    let ih = &adev.irq.ih;
+    Line::new().s("ih: ring ").hex64(ih.gpu_addr).s(" size ").dec(ih.ring_size as u64).s(" doorbell ")
+        .hex(ih.doorbell_index).s(", enabled ").dec(ih.enabled as u64).s(", msi ").dec(adev.irq.msi_enabled as u64)
+        .say();
+    let r = dev::amdgpu_device_fw_loading(adev);
+    let p = &adev.psp;
+    Line::new().s("psp: ring ").hex64(p.km_ring.ring_mem_mc_addr).s(", ").dec(p.fence_value as u64)
+        .s(" commands, tmr ").hex64(p.tmr_mc_addr).say();
+    let mut l = Line::new();
+    l.s("psp loaded:");
+    for u in adev.firmware.ucode.iter() {
+        if u.fw.is_some() && u.ucode_size != 0 {
+            l.s(" ").dec(u.ucode_id as u64).s("@").hex(u.tmr_mc_addr_lo);
+        }
+    }
+    l.say();
+    Line::new().s("ta: asd ").dec(p.asd_context.initialized as u64).s(" hdcp ")
+        .dec(p.hdcp_context.context.initialized as u64).s(" dtm ").dec(p.dtm_context.context.initialized as u64)
+        .s(" securedisplay ").dec(p.securedisplay_context.context.initialized as u64).say();
+    if r != 0 {
+        Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
+        return;
+    }
+    Line::new().s("stage 4 done: amdgpu_device_fw_loading").say();
 }
 
 /// The PCIe link registers `amdgpu_device_get_pcie_info` read, raw.

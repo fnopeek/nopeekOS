@@ -99,3 +99,33 @@ pub fn nbio_v7_0_get_pcie_data_offset(adev: &amdgpu_device) -> Option<u32> {
 pub fn nbio_v7_0_get_memsize(adev: &amdgpu_device) -> u32 {
     rreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmRCC_CONFIG_MEMSIZE_BASE_IDX, NBIO_mmRCC_CONFIG_MEMSIZE).unwrap_or(0)
 }
+
+/// `nbio_v7_0_ih_control`.
+pub fn nbio_v7_0_ih_control(adev: &amdgpu_device) {
+    // setup interrupt control
+    wreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmINTERRUPT_CNTL2_BASE_IDX, NBIO_mmINTERRUPT_CNTL2,
+        (adev.dummy_page_addr >> 8) as u32);
+    let Some(mut interrupt_cntl) =
+        rreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmINTERRUPT_CNTL_BASE_IDX, NBIO_mmINTERRUPT_CNTL) else { return };
+    // IH_DUMMY_RD_OVERRIDE 0: dummy read disabled with msi, enabled without
+    interrupt_cntl = reg_set_field(interrupt_cntl, NBIO_INTERRUPT_CNTL__IH_DUMMY_RD_OVERRIDE_MASK,
+        NBIO_INTERRUPT_CNTL__IH_DUMMY_RD_OVERRIDE__SHIFT, 0);
+    // IH_REQ_NONSNOOP_EN 1 if ring is in non-cacheable memory, e.g., vram
+    interrupt_cntl = reg_set_field(interrupt_cntl, NBIO_INTERRUPT_CNTL__IH_REQ_NONSNOOP_EN_MASK,
+        NBIO_INTERRUPT_CNTL__IH_REQ_NONSNOOP_EN__SHIFT, 0);
+    wreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmINTERRUPT_CNTL_BASE_IDX, NBIO_mmINTERRUPT_CNTL, interrupt_cntl);
+}
+
+/// `nbio_v7_0_ih_doorbell_range`.
+pub fn nbio_v7_0_ih_doorbell_range(adev: &amdgpu_device, use_doorbell: bool, doorbell_index: u32) {
+    let Some(mut r) = rreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmBIF_IH_DOORBELL_RANGE_BASE_IDX,
+        NBIO_mmBIF_IH_DOORBELL_RANGE) else { return };
+    if use_doorbell {
+        r = reg_set_field(r, NBIO_BIF_IH_DOORBELL_RANGE__OFFSET_MASK, NBIO_BIF_IH_DOORBELL_RANGE__OFFSET__SHIFT,
+            doorbell_index);
+        r = reg_set_field(r, NBIO_BIF_IH_DOORBELL_RANGE__SIZE_MASK, NBIO_BIF_IH_DOORBELL_RANGE__SIZE__SHIFT, 2);
+    } else {
+        r = reg_set_field(r, NBIO_BIF_IH_DOORBELL_RANGE__SIZE_MASK, NBIO_BIF_IH_DOORBELL_RANGE__SIZE__SHIFT, 0);
+    }
+    wreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmBIF_IH_DOORBELL_RANGE_BASE_IDX, NBIO_mmBIF_IH_DOORBELL_RANGE, r);
+}

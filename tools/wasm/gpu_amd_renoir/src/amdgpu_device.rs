@@ -673,6 +673,8 @@ pub struct amdgpu_device {
     /// `adev->dm.dmub_fw`.
     pub dm_dmub_fw: Option<crate::linux::firmware>,
     pub dm: crate::amdgpu_dm::amdgpu_display_manager,
+    pub ib_pool_ready: bool,
+    pub ib_pools: [amdgpu_sa_manager; AMDGPU_IB_POOL_MAX as usize],
     pub enable_mes_kiq: bool,
     pub debug_disable_gpu_ring_reset: bool,
     pub debug_disable_soft_recovery: bool,
@@ -778,6 +780,8 @@ impl amdgpu_device {
             dc_enabled: false,
             dm_dmub_fw: None,
             dm: Default::default(),
+            ib_pool_ready: false,
+            ib_pools: Default::default(),
             enable_mes_kiq: false,
             debug_disable_gpu_ring_reset: false,
             debug_disable_soft_recovery: false,
@@ -1640,6 +1644,131 @@ pub fn amdgpu_device_ip_init_sw(adev: &mut amdgpu_device) -> i32 {
             return r;
         }
         adev.ip_blocks[i].status.sw = true;
+    }
+    0
+}
+
+/// `struct amdgpu_sa_manager` with the `drm_suballoc_manager` it embeds,
+/// as `drm_suballoc_manager_init` leaves it: nothing handed out yet.
+#[derive(Default, Clone, Copy)]
+pub struct amdgpu_sa_manager {
+    pub bo: Option<usize>,
+    pub gpu_addr: u64,
+    pub cpu_ptr: Option<crate::amdgpu_object::amdgpu_kptr>,
+    pub size: u32,
+    pub align: u32,
+}
+
+/// `amdgpu_sa_bo_manager_init`.
+fn amdgpu_sa_bo_manager_init(adev: &mut amdgpu_device, size: u32, suballoc_align: u32, domain: u32)
+                             -> Result<amdgpu_sa_manager, i32> {
+    let h = match crate::amdgpu_object::amdgpu_bo_create_kernel(adev, size as u64, AMDGPU_GPU_PAGE_SIZE as u64, domain, true) {
+        Ok(Some(h)) => h,
+        Ok(None) => return Err(-12),
+        Err(r) => {
+            Line::new().s("(").dec((-r) as u64).s(") failed to allocate bo for manager").say();
+            return Err(r);
+        }
+    };
+    let m = amdgpu_sa_manager {
+        bo: Some(h),
+        gpu_addr: crate::amdgpu_object::amdgpu_bo_gpu_offset(adev, h),
+        cpu_ptr: crate::amdgpu_object::bo(adev, h).kptr,
+        size,
+        align: suballoc_align,
+    };
+    if let Some(k) = m.cpu_ptr {
+        crate::amdgpu_gart::kptr_fill32(adev, k, 0, size as u64, 0);
+    }
+    Ok(m)
+}
+
+/// `amdgpu_ib_pool_init`.
+pub fn amdgpu_ib_pool_init(adev: &mut amdgpu_device) -> i32 {
+    if adev.ib_pool_ready {
+        return 0;
+    }
+    for i in 0..AMDGPU_IB_POOL_MAX as usize {
+        match amdgpu_sa_bo_manager_init(adev, AMDGPU_IB_POOL_SIZE, 256, AMDGPU_GEM_DOMAIN_GTT) {
+            Ok(m) => adev.ib_pools[i] = m,
+            Err(r) => {
+                for j in (0..i).rev() {
+                    // amdgpu_sa_bo_manager_fini
+                    let mut bo = adev.ib_pools[j].bo.take();
+                    crate::amdgpu_object::amdgpu_bo_free_kernel(adev, &mut bo);
+                    adev.ib_pools[j] = amdgpu_sa_manager::default();
+                }
+                return r;
+            }
+        }
+    }
+    adev.ib_pool_ready = true;
+    0
+}
+
+/// `amdgpu_ib_pool_init` with the message `amdgpu_device_ip_init` gives.
+pub fn amdgpu_device_ib_pool_init_logged(adev: &mut amdgpu_device) -> i32 {
+    let r = amdgpu_ib_pool_init(adev);
+    if r != 0 {
+        Line::new().s("IB initialization failed (").dec((-r) as u64).s(").").say();
+    }
+    r
+}
+
+/// `amdgpu_device_ip_hw_init_phase1`: bare metal, COMMON (done already)
+/// and IH.
+pub fn amdgpu_device_ip_hw_init_phase1(adev: &mut amdgpu_device) -> i32 {
+    for i in 0..adev.ip_blocks.len() {
+        let st = adev.ip_blocks[i].status;
+        if !st.sw || st.hw {
+            continue;
+        }
+        let t = adev.ip_blocks[i].version.type_;
+        if !amdgpu_ip_member_of_hwini(adev, t) {
+            continue;
+        }
+        if t == AMD_IP_BLOCK_TYPE_COMMON || t == AMD_IP_BLOCK_TYPE_IH {
+            let r = if t == AMD_IP_BLOCK_TYPE_IH {
+                crate::vega10_ih::vega10_ih_hw_init(adev)
+            } else {
+                crate::soc15::soc15_common_hw_init(adev)
+            };
+            if r != 0 {
+                Line::new().s("hw_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                    .s("> failed ").dec((-r) as u64).say();
+                return r;
+            }
+            adev.ip_blocks[i].status.hw = true;
+        }
+    }
+    0
+}
+
+/// `amdgpu_device_fw_loading`: the PSP block's hw_init.
+/// `amdgpu_pm_load_smu_firmware` does nothing for an APU on swSMU.
+pub fn amdgpu_device_fw_loading(adev: &mut amdgpu_device) -> i32 {
+    for i in 0..adev.ip_blocks.len() {
+        if adev.ip_blocks[i].version.type_ != AMD_IP_BLOCK_TYPE_PSP {
+            continue;
+        }
+        if !amdgpu_ip_member_of_hwini(adev, AMD_IP_BLOCK_TYPE_PSP) {
+            break;
+        }
+        if !adev.ip_blocks[i].status.sw {
+            continue;
+        }
+        // no need to do the fw loading again if already done
+        if adev.ip_blocks[i].status.hw {
+            break;
+        }
+        let r = crate::amdgpu_psp::psp_hw_init(adev);
+        if r != 0 {
+            Line::new().s("hw_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                .s("> failed ").dec((-r) as u64).say();
+            return r;
+        }
+        adev.ip_blocks[i].status.hw = true;
+        break;
     }
     0
 }

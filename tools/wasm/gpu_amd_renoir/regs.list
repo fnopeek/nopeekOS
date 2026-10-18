@@ -1887,3 +1887,214 @@ CS_EXTENT_7_REG_INDEX = gfx9_SECT_CONTEXT_defs[7].reg_index @ gfx_v9_0.c
 CS_EXTENT_7_REG_COUNT = gfx9_SECT_CONTEXT_defs[7].reg_count @ gfx_v9_0.c
 CS_EXTENT_7_IS_DEF_8 = gfx9_SECT_CONTEXT_defs[7].extent == gfx9_SECT_CONTEXT_def_8 @ gfx_v9_0.c
 CS_EXTENT_8_END = gfx9_SECT_CONTEXT_defs[8].extent == 0 @ gfx_v9_0.c
+# vega10_ih_hw_init and the NBIO IH control it calls
+OSS_mmIH_CHICKEN = mmIH_CHICKEN @ vega10_ih.c
+OSS_mmIH_CHICKEN_BASE_IDX = mmIH_CHICKEN_BASE_IDX @ vega10_ih.c
+OSS_IH_CHICKEN__MC_SPACE_GPA_ENABLE_MASK = IH_CHICKEN__MC_SPACE_GPA_ENABLE_MASK @ vega10_ih.c
+OSS_IH_CHICKEN__MC_SPACE_GPA_ENABLE__SHIFT = IH_CHICKEN__MC_SPACE_GPA_ENABLE__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__RPTR_REARM_MASK = IH_RB_CNTL__RPTR_REARM_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__RPTR_REARM__SHIFT = IH_RB_CNTL__RPTR_REARM__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__RB_FULL_DRAIN_ENABLE_MASK = IH_RB_CNTL__RB_FULL_DRAIN_ENABLE_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__RB_FULL_DRAIN_ENABLE__SHIFT = IH_RB_CNTL__RB_FULL_DRAIN_ENABLE__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__RB_ENABLE_MASK = IH_RB_CNTL__RB_ENABLE_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__RB_ENABLE__SHIFT = IH_RB_CNTL__RB_ENABLE__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__RB_GPU_TS_ENABLE_MASK = IH_RB_CNTL__RB_GPU_TS_ENABLE_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__RB_GPU_TS_ENABLE__SHIFT = IH_RB_CNTL__RB_GPU_TS_ENABLE__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__ENABLE_INTR_MASK = IH_RB_CNTL__ENABLE_INTR_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__ENABLE_INTR__SHIFT = IH_RB_CNTL__ENABLE_INTR__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__MC_SPACE_MASK = IH_RB_CNTL__MC_SPACE_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__MC_SPACE__SHIFT = IH_RB_CNTL__MC_SPACE__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__WPTR_OVERFLOW_CLEAR_MASK = IH_RB_CNTL__WPTR_OVERFLOW_CLEAR_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__WPTR_OVERFLOW_CLEAR__SHIFT = IH_RB_CNTL__WPTR_OVERFLOW_CLEAR__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__WPTR_OVERFLOW_ENABLE_MASK = IH_RB_CNTL__WPTR_OVERFLOW_ENABLE_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__WPTR_OVERFLOW_ENABLE__SHIFT = IH_RB_CNTL__WPTR_OVERFLOW_ENABLE__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__RB_SIZE_MASK = IH_RB_CNTL__RB_SIZE_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__RB_SIZE__SHIFT = IH_RB_CNTL__RB_SIZE__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__WPTR_WRITEBACK_ENABLE_MASK = IH_RB_CNTL__WPTR_WRITEBACK_ENABLE_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__WPTR_WRITEBACK_ENABLE__SHIFT = IH_RB_CNTL__WPTR_WRITEBACK_ENABLE__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__MC_SNOOP_MASK = IH_RB_CNTL__MC_SNOOP_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__MC_SNOOP__SHIFT = IH_RB_CNTL__MC_SNOOP__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__MC_RO_MASK = IH_RB_CNTL__MC_RO_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__MC_RO__SHIFT = IH_RB_CNTL__MC_RO__SHIFT @ vega10_ih.c
+OSS_IH_RB_CNTL__MC_VMID_MASK = IH_RB_CNTL__MC_VMID_MASK @ vega10_ih.c
+OSS_IH_RB_CNTL__MC_VMID__SHIFT = IH_RB_CNTL__MC_VMID__SHIFT @ vega10_ih.c
+OSS_IH_DOORBELL_RPTR__OFFSET_MASK = IH_DOORBELL_RPTR__OFFSET_MASK @ vega10_ih.c
+OSS_IH_DOORBELL_RPTR__OFFSET__SHIFT = IH_DOORBELL_RPTR__OFFSET__SHIFT @ vega10_ih.c
+OSS_IH_DOORBELL_RPTR__ENABLE_MASK = IH_DOORBELL_RPTR__ENABLE_MASK @ vega10_ih.c
+OSS_IH_DOORBELL_RPTR__ENABLE__SHIFT = IH_DOORBELL_RPTR__ENABLE__SHIFT @ vega10_ih.c
+NBIO_mmINTERRUPT_CNTL2 = mmINTERRUPT_CNTL2 @ nbio_v7_0.c
+NBIO_mmINTERRUPT_CNTL2_BASE_IDX = mmINTERRUPT_CNTL2_BASE_IDX @ nbio_v7_0.c
+NBIO_mmINTERRUPT_CNTL = mmINTERRUPT_CNTL @ nbio_v7_0.c
+NBIO_mmINTERRUPT_CNTL_BASE_IDX = mmINTERRUPT_CNTL_BASE_IDX @ nbio_v7_0.c
+NBIO_mmBIF_IH_DOORBELL_RANGE = mmBIF_IH_DOORBELL_RANGE @ nbio_v7_0.c
+NBIO_mmBIF_IH_DOORBELL_RANGE_BASE_IDX = mmBIF_IH_DOORBELL_RANGE_BASE_IDX @ nbio_v7_0.c
+NBIO_INTERRUPT_CNTL__IH_DUMMY_RD_OVERRIDE_MASK = INTERRUPT_CNTL__IH_DUMMY_RD_OVERRIDE_MASK @ nbio_v7_0.c
+NBIO_INTERRUPT_CNTL__IH_DUMMY_RD_OVERRIDE__SHIFT = INTERRUPT_CNTL__IH_DUMMY_RD_OVERRIDE__SHIFT @ nbio_v7_0.c
+NBIO_INTERRUPT_CNTL__IH_REQ_NONSNOOP_EN_MASK = INTERRUPT_CNTL__IH_REQ_NONSNOOP_EN_MASK @ nbio_v7_0.c
+NBIO_INTERRUPT_CNTL__IH_REQ_NONSNOOP_EN__SHIFT = INTERRUPT_CNTL__IH_REQ_NONSNOOP_EN__SHIFT @ nbio_v7_0.c
+NBIO_BIF_IH_DOORBELL_RANGE__OFFSET_MASK = BIF_IH_DOORBELL_RANGE__OFFSET_MASK @ nbio_v7_0.c
+NBIO_BIF_IH_DOORBELL_RANGE__OFFSET__SHIFT = BIF_IH_DOORBELL_RANGE__OFFSET__SHIFT @ nbio_v7_0.c
+NBIO_BIF_IH_DOORBELL_RANGE__SIZE_MASK = BIF_IH_DOORBELL_RANGE__SIZE_MASK @ nbio_v7_0.c
+NBIO_BIF_IH_DOORBELL_RANGE__SIZE__SHIFT = BIF_IH_DOORBELL_RANGE__SIZE__SHIFT @ nbio_v7_0.c
+AMDGPU_IB_POOL_MAX @ amdgpu_ib.c
+AMDGPU_IB_POOL_SIZE @ amdgpu_ib.c
+# psp_hw_init: the command ring, TMR, IP firmware and TA loads (amdgpu_psp.c, psp_v12_0.c)
+MP0_mmMP0_SMN_C2PMSG_69 = mmMP0_SMN_C2PMSG_69 @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_69_BASE_IDX = mmMP0_SMN_C2PMSG_69_BASE_IDX @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_70 = mmMP0_SMN_C2PMSG_70 @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_70_BASE_IDX = mmMP0_SMN_C2PMSG_70_BASE_IDX @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_71 = mmMP0_SMN_C2PMSG_71 @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_71_BASE_IDX = mmMP0_SMN_C2PMSG_71_BASE_IDX @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_64 = mmMP0_SMN_C2PMSG_64 @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_64_BASE_IDX = mmMP0_SMN_C2PMSG_64_BASE_IDX @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_101 = mmMP0_SMN_C2PMSG_101 @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_101_BASE_IDX = mmMP0_SMN_C2PMSG_101_BASE_IDX @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_102 = mmMP0_SMN_C2PMSG_102 @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_102_BASE_IDX = mmMP0_SMN_C2PMSG_102_BASE_IDX @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_67 = mmMP0_SMN_C2PMSG_67 @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_67_BASE_IDX = mmMP0_SMN_C2PMSG_67_BASE_IDX @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_81 = mmMP0_SMN_C2PMSG_81 @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_81_BASE_IDX = mmMP0_SMN_C2PMSG_81_BASE_IDX @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_35 = mmMP0_SMN_C2PMSG_35 @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_35_BASE_IDX = mmMP0_SMN_C2PMSG_35_BASE_IDX @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_36 = mmMP0_SMN_C2PMSG_36 @ psp_v12_0.c
+MP0_mmMP0_SMN_C2PMSG_36_BASE_IDX = mmMP0_SMN_C2PMSG_36_BASE_IDX @ psp_v12_0.c
+PSP_RING_TYPE__KM @ amdgpu_psp.c
+MBOX_TOS_RESP_FLAG @ amdgpu_psp.c
+MBOX_TOS_RESP_MASK @ amdgpu_psp.c
+PSP_WAITREG_CHANGED @ amdgpu_psp.c
+PSP_WAITREG_NOVERBOSE @ amdgpu_psp.c
+GFX_CMD_ID_SETUP_TMR @ amdgpu_psp.c
+GFX_CMD_ID_LOAD_IP_FW @ amdgpu_psp.c
+GFX_CMD_ID_LOAD_TA @ amdgpu_psp.c
+GFX_CMD_ID_LOAD_ASD @ amdgpu_psp.c
+GFX_CMD_ID_INVOKE_CMD @ amdgpu_psp.c
+GFX_CTRL_CMD_ID_DESTROY_RINGS @ amdgpu_psp.c
+GFX_FW_TYPE_REG_LIST @ amdgpu_psp.c
+PSP_ASD_SHARED_MEM_SIZE @ amdgpu_psp.c
+PSP_HDCP_SHARED_MEM_SIZE @ amdgpu_psp.c
+PSP_DTM_SHARED_MEM_SIZE @ amdgpu_psp.c
+PSP_RAP_SHARED_MEM_SIZE @ amdgpu_psp.c
+PSP_SECUREDISPLAY_SHARED_MEM_SIZE @ amdgpu_psp.c
+PSP_RAS_SHARED_MEM_SIZE @ amdgpu_psp.c
+PSP_TMR_ALIGNMENT @ amdgpu_psp.c
+TEE_ERROR_NOT_SUPPORTED @ amdgpu_psp.c
+PSP_ERR_UNKNOWN_COMMAND @ amdgpu_psp.c
+TA_SECUREDISPLAY_COMMAND__QUERY_TA @ amdgpu_psp.c
+TA_SECUREDISPLAY_STATUS__SUCCESS @ amdgpu_psp.c
+TA_SECUREDISPLAY_STATUS__GENERIC_FAILURE @ amdgpu_psp.c
+TA_CMD_RAP__INITIALIZE @ amdgpu_psp.c
+TA_RAP_STATUS__SUCCESS @ amdgpu_psp.c
+METHOD_A @ amdgpu_psp.c
+PSP_TMR_SIZE_RENOIR = PSP_TMR_SIZE(&(struct amdgpu_device){ .asic_type = CHIP_RENOIR }) @ amdgpu_psp.c
+GFX_FW_TYPE_CAP @ amdgpu_psp.c
+GFX_FW_TYPE_CP_CE @ amdgpu_psp.c
+GFX_FW_TYPE_CP_ME @ amdgpu_psp.c
+GFX_FW_TYPE_CP_MEC @ amdgpu_psp.c
+GFX_FW_TYPE_CP_MEC_ME1 @ amdgpu_psp.c
+GFX_FW_TYPE_CP_MEC_ME2 @ amdgpu_psp.c
+GFX_FW_TYPE_CP_MES @ amdgpu_psp.c
+GFX_FW_TYPE_CP_MES_KIQ @ amdgpu_psp.c
+GFX_FW_TYPE_CP_PFP @ amdgpu_psp.c
+GFX_FW_TYPE_DMCU_ERAM @ amdgpu_psp.c
+GFX_FW_TYPE_DMCU_ISR @ amdgpu_psp.c
+GFX_FW_TYPE_DMUB @ amdgpu_psp.c
+GFX_FW_TYPE_GLOBAL_TAP_DELAYS @ amdgpu_psp.c
+GFX_FW_TYPE_IMU_D @ amdgpu_psp.c
+GFX_FW_TYPE_IMU_I @ amdgpu_psp.c
+GFX_FW_TYPE_ISP @ amdgpu_psp.c
+GFX_FW_TYPE_JPEG_RAM @ amdgpu_psp.c
+GFX_FW_TYPE_MES_KIQ_STACK @ amdgpu_psp.c
+GFX_FW_TYPE_MES_STACK @ amdgpu_psp.c
+GFX_FW_TYPE_P2S_TABLE @ amdgpu_psp.c
+GFX_FW_TYPE_PPTABLE @ amdgpu_psp.c
+GFX_FW_TYPE_RLC_DRAM_BOOT @ amdgpu_psp.c
+GFX_FW_TYPE_RLC_G @ amdgpu_psp.c
+GFX_FW_TYPE_RLC_IRAM @ amdgpu_psp.c
+GFX_FW_TYPE_RLC_P @ amdgpu_psp.c
+GFX_FW_TYPE_RLC_RESTORE_LIST_GPM_MEM @ amdgpu_psp.c
+GFX_FW_TYPE_RLC_RESTORE_LIST_SRM_CNTL @ amdgpu_psp.c
+GFX_FW_TYPE_RLC_RESTORE_LIST_SRM_MEM @ amdgpu_psp.c
+GFX_FW_TYPE_RLC_V @ amdgpu_psp.c
+GFX_FW_TYPE_RS64_ME @ amdgpu_psp.c
+GFX_FW_TYPE_RS64_MEC @ amdgpu_psp.c
+GFX_FW_TYPE_RS64_MEC_P0_STACK @ amdgpu_psp.c
+GFX_FW_TYPE_RS64_MEC_P1_STACK @ amdgpu_psp.c
+GFX_FW_TYPE_RS64_MEC_P2_STACK @ amdgpu_psp.c
+GFX_FW_TYPE_RS64_MEC_P3_STACK @ amdgpu_psp.c
+GFX_FW_TYPE_RS64_ME_P0_STACK @ amdgpu_psp.c
+GFX_FW_TYPE_RS64_ME_P1_STACK @ amdgpu_psp.c
+GFX_FW_TYPE_RS64_PFP @ amdgpu_psp.c
+GFX_FW_TYPE_RS64_PFP_P0_STACK @ amdgpu_psp.c
+GFX_FW_TYPE_RS64_PFP_P1_STACK @ amdgpu_psp.c
+GFX_FW_TYPE_SDMA0 @ amdgpu_psp.c
+GFX_FW_TYPE_SDMA1 @ amdgpu_psp.c
+GFX_FW_TYPE_SDMA2 @ amdgpu_psp.c
+GFX_FW_TYPE_SDMA3 @ amdgpu_psp.c
+GFX_FW_TYPE_SDMA4 @ amdgpu_psp.c
+GFX_FW_TYPE_SDMA5 @ amdgpu_psp.c
+GFX_FW_TYPE_SDMA6 @ amdgpu_psp.c
+GFX_FW_TYPE_SDMA7 @ amdgpu_psp.c
+GFX_FW_TYPE_SDMA_UCODE_TH0 @ amdgpu_psp.c
+GFX_FW_TYPE_SDMA_UCODE_TH1 @ amdgpu_psp.c
+GFX_FW_TYPE_SE0_TAP_DELAYS @ amdgpu_psp.c
+GFX_FW_TYPE_SE1_TAP_DELAYS @ amdgpu_psp.c
+GFX_FW_TYPE_SE2_TAP_DELAYS @ amdgpu_psp.c
+GFX_FW_TYPE_SE3_TAP_DELAYS @ amdgpu_psp.c
+GFX_FW_TYPE_SMU @ amdgpu_psp.c
+GFX_FW_TYPE_UMSCH_CMD_BUFFER @ amdgpu_psp.c
+GFX_FW_TYPE_UMSCH_DATA @ amdgpu_psp.c
+GFX_FW_TYPE_UMSCH_UCODE @ amdgpu_psp.c
+GFX_FW_TYPE_UVD @ amdgpu_psp.c
+GFX_FW_TYPE_UVD1 @ amdgpu_psp.c
+GFX_FW_TYPE_VCE @ amdgpu_psp.c
+GFX_FW_TYPE_VCN @ amdgpu_psp.c
+GFX_FW_TYPE_VCN0_RAM @ amdgpu_psp.c
+GFX_FW_TYPE_VCN1 @ amdgpu_psp.c
+GFX_FW_TYPE_VCN1_RAM @ amdgpu_psp.c
+GFX_FW_TYPE_VPE @ amdgpu_psp.c
+GFX_FW_TYPE_VPEC_FW1 @ amdgpu_psp.c
+GFX_FW_TYPE_VPEC_FW2 @ amdgpu_psp.c
+SIZEOF_psp_gfx_cmd_resp = sizeof(struct psp_gfx_cmd_resp) @ amdgpu_psp.c
+SIZEOF_psp_gfx_resp = sizeof(struct psp_gfx_resp) @ amdgpu_psp.c
+SIZEOF_psp_gfx_rb_frame = sizeof(struct psp_gfx_rb_frame) @ amdgpu_psp.c
+CMDRESP_CMD_ID = offsetof(struct psp_gfx_cmd_resp, cmd_id) @ amdgpu_psp.c
+CMDRESP_CMD = offsetof(struct psp_gfx_cmd_resp, cmd) @ amdgpu_psp.c
+CMDRESP_RESP = offsetof(struct psp_gfx_cmd_resp, resp) @ amdgpu_psp.c
+RESP_STATUS = offsetof(struct psp_gfx_resp, status) @ amdgpu_psp.c
+RESP_SESSION_ID = offsetof(struct psp_gfx_resp, session_id) @ amdgpu_psp.c
+RESP_FW_ADDR_LO = offsetof(struct psp_gfx_resp, fw_addr_lo) @ amdgpu_psp.c
+RESP_FW_ADDR_HI = offsetof(struct psp_gfx_resp, fw_addr_hi) @ amdgpu_psp.c
+LOADIPFW_FW_PHY_ADDR_LO = offsetof(struct psp_gfx_cmd_load_ip_fw, fw_phy_addr_lo) @ amdgpu_psp.c
+LOADIPFW_FW_PHY_ADDR_HI = offsetof(struct psp_gfx_cmd_load_ip_fw, fw_phy_addr_hi) @ amdgpu_psp.c
+LOADIPFW_FW_SIZE = offsetof(struct psp_gfx_cmd_load_ip_fw, fw_size) @ amdgpu_psp.c
+LOADIPFW_FW_TYPE = offsetof(struct psp_gfx_cmd_load_ip_fw, fw_type) @ amdgpu_psp.c
+SETUPTMR_BUF_PHY_ADDR_LO = offsetof(struct psp_gfx_cmd_setup_tmr, buf_phy_addr_lo) @ amdgpu_psp.c
+SETUPTMR_BUF_PHY_ADDR_HI = offsetof(struct psp_gfx_cmd_setup_tmr, buf_phy_addr_hi) @ amdgpu_psp.c
+SETUPTMR_BUF_SIZE = offsetof(struct psp_gfx_cmd_setup_tmr, buf_size) @ amdgpu_psp.c
+SETUPTMR_TMR_FLAGS = offsetof(struct psp_gfx_cmd_setup_tmr, tmr_flags) @ amdgpu_psp.c
+SETUPTMR_SYSTEM_PHY_ADDR_LO = offsetof(struct psp_gfx_cmd_setup_tmr, system_phy_addr_lo) @ amdgpu_psp.c
+SETUPTMR_SYSTEM_PHY_ADDR_HI = offsetof(struct psp_gfx_cmd_setup_tmr, system_phy_addr_hi) @ amdgpu_psp.c
+SETUPTMR_VIRT_PHY_ADDR_FLAG = ((struct psp_gfx_cmd_setup_tmr){ .bitfield.virt_phy_addr = 1 }).tmr_flags @ amdgpu_psp.c
+LOADTA_APP_PHY_ADDR_LO = offsetof(struct psp_gfx_cmd_load_ta, app_phy_addr_lo) @ amdgpu_psp.c
+LOADTA_APP_PHY_ADDR_HI = offsetof(struct psp_gfx_cmd_load_ta, app_phy_addr_hi) @ amdgpu_psp.c
+LOADTA_APP_LEN = offsetof(struct psp_gfx_cmd_load_ta, app_len) @ amdgpu_psp.c
+LOADTA_CMD_BUF_PHY_ADDR_LO = offsetof(struct psp_gfx_cmd_load_ta, cmd_buf_phy_addr_lo) @ amdgpu_psp.c
+LOADTA_CMD_BUF_PHY_ADDR_HI = offsetof(struct psp_gfx_cmd_load_ta, cmd_buf_phy_addr_hi) @ amdgpu_psp.c
+LOADTA_CMD_BUF_LEN = offsetof(struct psp_gfx_cmd_load_ta, cmd_buf_len) @ amdgpu_psp.c
+INVOKE_SESSION_ID = offsetof(struct psp_gfx_cmd_invoke_cmd, session_id) @ amdgpu_psp.c
+INVOKE_TA_CMD_ID = offsetof(struct psp_gfx_cmd_invoke_cmd, ta_cmd_id) @ amdgpu_psp.c
+FRAME_CMD_BUF_ADDR_LO = offsetof(struct psp_gfx_rb_frame, cmd_buf_addr_lo) @ amdgpu_psp.c
+FRAME_CMD_BUF_ADDR_HI = offsetof(struct psp_gfx_rb_frame, cmd_buf_addr_hi) @ amdgpu_psp.c
+FRAME_FENCE_ADDR_LO = offsetof(struct psp_gfx_rb_frame, fence_addr_lo) @ amdgpu_psp.c
+FRAME_FENCE_ADDR_HI = offsetof(struct psp_gfx_rb_frame, fence_addr_hi) @ amdgpu_psp.c
+FRAME_FENCE_VALUE = offsetof(struct psp_gfx_rb_frame, fence_value) @ amdgpu_psp.c
+SIZEOF_ta_securedisplay_cmd = sizeof(struct ta_securedisplay_cmd) @ amdgpu_psp.c
+SECUREDISPLAY_CMD_ID = offsetof(struct ta_securedisplay_cmd, cmd_id) @ amdgpu_psp.c
+SECUREDISPLAY_STATUS = offsetof(struct ta_securedisplay_cmd, status) @ amdgpu_psp.c
+SECUREDISPLAY_QUERY_CMD_RET = offsetof(struct ta_securedisplay_cmd, securedisplay_out_message.query_ta.query_cmd_ret) @ amdgpu_psp.c
+SIZEOF_ta_rap_shared_memory = sizeof(struct ta_rap_shared_memory) @ amdgpu_psp.c
+RAP_CMD_ID = offsetof(struct ta_rap_shared_memory, cmd_id) @ amdgpu_psp.c
+RAP_VALIDATION_METHOD_ID = offsetof(struct ta_rap_shared_memory, validation_method_id) @ amdgpu_psp.c
+RAP_STATUS = offsetof(struct ta_rap_shared_memory, rap_status) @ amdgpu_psp.c
+SDMA_HDR_V2_CTX_UCODE_SIZE = offsetof(struct sdma_firmware_header_v2_0, ctx_ucode_size_bytes) @ amdgpu_ucode.c

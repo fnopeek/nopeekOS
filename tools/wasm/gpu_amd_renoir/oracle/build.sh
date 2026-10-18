@@ -151,11 +151,32 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
         dmub_srv_calc_regions_for_memory_type dmub_srv_calc_region_info dmub_srv_calc_mem_info
 } > "$B/dmub_funcs.c"
 
+# The PSP's command path: amdgpu_psp.c's functions from the ring submit
+# up to the TA loads, with the types amdgpu_psp.h gives them.
+{
+    $X "$AMD/amdgpu/amdgpu_psp.h" '#PSP_FENCE_BUFFER_SIZE' '#PSP_CMD_BUFFER_SIZE' '#PSP_1_MEG' '#PSP_TMR_SIZE' \
+        '#PSP_TMR_ALIGNMENT' '#PSP_WAITREG_CHANGED' '#PSP_WAITREG_NOVERBOSE' '#psp_ring_get_wptr' '#psp_ring_set_wptr' \
+        '#psp_smu_reload_quirk' psp_shared_mem_size ta_type_id psp_ring_type psp_ring psp_bin_desc ta_mem_context \
+        ta_context ta_cp_context
+    $X "$L/include/uapi/drm/amdgpu_drm.h" '#AMDGPU_GEM_DOMAIN_GTT' '#AMDGPU_GEM_DOMAIN_VRAM'
+} > "$B/psp_types.c"
+{
+    $X "$AMD/amdgpu/amdgpu_securedisplay.c" psp_securedisplay_parse_resp_status psp_prep_securedisplay_cmd_buf
+    $X "$AMD/amdgpu/amdgpu_psp.c" acquire_psp_cmd_buf release_psp_cmd_buf psp_err_warn psp_ring_cmd_submit \
+        psp_cmd_submit_buf psp_prep_tmr_cmd_buf psp_skip_tmr psp_tmr_load psp_get_fw_type psp_prep_load_ip_fw_cmd_buf \
+        psp_execute_ip_fw_load psp_load_smu_fw psp_load_p2s_table fw_load_skip_check psp_load_non_psp_fw \
+        psp_copy_fw psp_prep_ta_load_cmd_buf psp_ta_load psp_asd_initialize psp_ta_init_shared_buf \
+        psp_prep_ta_invoke_cmd_buf psp_ta_invoke psp_prep_ta_unload_cmd_buf psp_ta_unload psp_ta_free_shared_buf \
+        psp_hdcp_initialize psp_dtm_initialize psp_securedisplay_invoke psp_securedisplay_terminate \
+        psp_securedisplay_initialize
+} > "$B/psp_funcs.c"
+
 CF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
 gcc $CF -c "$B/atom.c" -o "$B/atom.o"
 gcc $CF "$HERE/main.c" "$B/atom.o" -o "$B/oracle_atom"
 gcc $CF "$HERE/main_atomexec.c" "$B/atom.o" -o "$B/oracle_atomexec"
 gcc $CF "$HERE/main_dmub.c" -o "$B/oracle_dmub"
+gcc $CF "$HERE/main_psp.c" -o "$B/oracle_psp"
 gcc $CF "$HERE/main_discovery.c" -o "$B/oracle_discovery"
 gcc $CF -I "$AMD/display/include" "$HERE/main_ucode.c" -o "$B/oracle_ucode"
 gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_common.c" -o "$B/oracle_common"

@@ -3777,3 +3777,425 @@ pub const CS_EXTENT_7_REG_COUNT: u32 = 0x9b;
 pub const CS_EXTENT_7_IS_DEF_8: u32 = 0x1;
 /// The value of `gfx9_SECT_CONTEXT_defs[8].extent == 0` in gfx_v9_0.c
 pub const CS_EXTENT_8_END: u32 = 0x1;
+
+// vega10_ih_hw_init and the NBIO IH control it calls
+/// The value of `mmIH_CHICKEN` in vega10_ih.c
+pub const OSS_mmIH_CHICKEN: u32 = 0x18c;
+/// The value of `mmIH_CHICKEN_BASE_IDX` in vega10_ih.c
+pub const OSS_mmIH_CHICKEN_BASE_IDX: u32 = 0x0;
+/// The value of `IH_CHICKEN__MC_SPACE_GPA_ENABLE_MASK` in vega10_ih.c
+pub const OSS_IH_CHICKEN__MC_SPACE_GPA_ENABLE_MASK: u32 = 0x10;
+/// The value of `IH_CHICKEN__MC_SPACE_GPA_ENABLE__SHIFT` in vega10_ih.c
+pub const OSS_IH_CHICKEN__MC_SPACE_GPA_ENABLE__SHIFT: u32 = 0x4;
+/// The value of `IH_RB_CNTL__RPTR_REARM_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__RPTR_REARM_MASK: u32 = 0x200000;
+/// The value of `IH_RB_CNTL__RPTR_REARM__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__RPTR_REARM__SHIFT: u32 = 0x15;
+/// The value of `IH_RB_CNTL__RB_FULL_DRAIN_ENABLE_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__RB_FULL_DRAIN_ENABLE_MASK: u32 = 0x200;
+/// The value of `IH_RB_CNTL__RB_FULL_DRAIN_ENABLE__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__RB_FULL_DRAIN_ENABLE__SHIFT: u32 = 0x9;
+/// The value of `IH_RB_CNTL__RB_ENABLE_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__RB_ENABLE_MASK: u32 = 0x1;
+/// The value of `IH_RB_CNTL__RB_ENABLE__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__RB_ENABLE__SHIFT: u32 = 0x0;
+/// The value of `IH_RB_CNTL__RB_GPU_TS_ENABLE_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__RB_GPU_TS_ENABLE_MASK: u32 = 0x80;
+/// The value of `IH_RB_CNTL__RB_GPU_TS_ENABLE__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__RB_GPU_TS_ENABLE__SHIFT: u32 = 0x7;
+/// The value of `IH_RB_CNTL__ENABLE_INTR_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__ENABLE_INTR_MASK: u32 = 0x20000;
+/// The value of `IH_RB_CNTL__ENABLE_INTR__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__ENABLE_INTR__SHIFT: u32 = 0x11;
+/// The value of `IH_RB_CNTL__MC_SPACE_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__MC_SPACE_MASK: u32 = 0x70000000;
+/// The value of `IH_RB_CNTL__MC_SPACE__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__MC_SPACE__SHIFT: u32 = 0x1c;
+/// The value of `IH_RB_CNTL__WPTR_OVERFLOW_CLEAR_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__WPTR_OVERFLOW_CLEAR_MASK: u32 = 0x80000000;
+/// The value of `IH_RB_CNTL__WPTR_OVERFLOW_CLEAR__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__WPTR_OVERFLOW_CLEAR__SHIFT: u32 = 0x1f;
+/// The value of `IH_RB_CNTL__WPTR_OVERFLOW_ENABLE_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__WPTR_OVERFLOW_ENABLE_MASK: u32 = 0x10000;
+/// The value of `IH_RB_CNTL__WPTR_OVERFLOW_ENABLE__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__WPTR_OVERFLOW_ENABLE__SHIFT: u32 = 0x10;
+/// The value of `IH_RB_CNTL__RB_SIZE_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__RB_SIZE_MASK: u32 = 0x3e;
+/// The value of `IH_RB_CNTL__RB_SIZE__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__RB_SIZE__SHIFT: u32 = 0x1;
+/// The value of `IH_RB_CNTL__WPTR_WRITEBACK_ENABLE_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__WPTR_WRITEBACK_ENABLE_MASK: u32 = 0x100;
+/// The value of `IH_RB_CNTL__WPTR_WRITEBACK_ENABLE__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__WPTR_WRITEBACK_ENABLE__SHIFT: u32 = 0x8;
+/// The value of `IH_RB_CNTL__MC_SNOOP_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__MC_SNOOP_MASK: u32 = 0x100000;
+/// The value of `IH_RB_CNTL__MC_SNOOP__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__MC_SNOOP__SHIFT: u32 = 0x14;
+/// The value of `IH_RB_CNTL__MC_RO_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__MC_RO_MASK: u32 = 0x400000;
+/// The value of `IH_RB_CNTL__MC_RO__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__MC_RO__SHIFT: u32 = 0x16;
+/// The value of `IH_RB_CNTL__MC_VMID_MASK` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__MC_VMID_MASK: u32 = 0xf000000;
+/// The value of `IH_RB_CNTL__MC_VMID__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_CNTL__MC_VMID__SHIFT: u32 = 0x18;
+/// The value of `IH_DOORBELL_RPTR__OFFSET_MASK` in vega10_ih.c
+pub const OSS_IH_DOORBELL_RPTR__OFFSET_MASK: u32 = 0x3ffffff;
+/// The value of `IH_DOORBELL_RPTR__OFFSET__SHIFT` in vega10_ih.c
+pub const OSS_IH_DOORBELL_RPTR__OFFSET__SHIFT: u32 = 0x0;
+/// The value of `IH_DOORBELL_RPTR__ENABLE_MASK` in vega10_ih.c
+pub const OSS_IH_DOORBELL_RPTR__ENABLE_MASK: u32 = 0x10000000;
+/// The value of `IH_DOORBELL_RPTR__ENABLE__SHIFT` in vega10_ih.c
+pub const OSS_IH_DOORBELL_RPTR__ENABLE__SHIFT: u32 = 0x1c;
+/// The value of `mmINTERRUPT_CNTL2` in nbio_v7_0.c
+pub const NBIO_mmINTERRUPT_CNTL2: u32 = 0xf2;
+/// The value of `mmINTERRUPT_CNTL2_BASE_IDX` in nbio_v7_0.c
+pub const NBIO_mmINTERRUPT_CNTL2_BASE_IDX: u32 = 0x2;
+/// The value of `mmINTERRUPT_CNTL` in nbio_v7_0.c
+pub const NBIO_mmINTERRUPT_CNTL: u32 = 0xf1;
+/// The value of `mmINTERRUPT_CNTL_BASE_IDX` in nbio_v7_0.c
+pub const NBIO_mmINTERRUPT_CNTL_BASE_IDX: u32 = 0x2;
+/// The value of `mmBIF_IH_DOORBELL_RANGE` in nbio_v7_0.c
+pub const NBIO_mmBIF_IH_DOORBELL_RANGE: u32 = 0x1d2;
+/// The value of `mmBIF_IH_DOORBELL_RANGE_BASE_IDX` in nbio_v7_0.c
+pub const NBIO_mmBIF_IH_DOORBELL_RANGE_BASE_IDX: u32 = 0x2;
+/// The value of `INTERRUPT_CNTL__IH_DUMMY_RD_OVERRIDE_MASK` in nbio_v7_0.c
+pub const NBIO_INTERRUPT_CNTL__IH_DUMMY_RD_OVERRIDE_MASK: u32 = 0x1;
+/// The value of `INTERRUPT_CNTL__IH_DUMMY_RD_OVERRIDE__SHIFT` in nbio_v7_0.c
+pub const NBIO_INTERRUPT_CNTL__IH_DUMMY_RD_OVERRIDE__SHIFT: u32 = 0x0;
+/// The value of `INTERRUPT_CNTL__IH_REQ_NONSNOOP_EN_MASK` in nbio_v7_0.c
+pub const NBIO_INTERRUPT_CNTL__IH_REQ_NONSNOOP_EN_MASK: u32 = 0x8;
+/// The value of `INTERRUPT_CNTL__IH_REQ_NONSNOOP_EN__SHIFT` in nbio_v7_0.c
+pub const NBIO_INTERRUPT_CNTL__IH_REQ_NONSNOOP_EN__SHIFT: u32 = 0x3;
+/// The value of `BIF_IH_DOORBELL_RANGE__OFFSET_MASK` in nbio_v7_0.c
+pub const NBIO_BIF_IH_DOORBELL_RANGE__OFFSET_MASK: u32 = 0xffc;
+/// The value of `BIF_IH_DOORBELL_RANGE__OFFSET__SHIFT` in nbio_v7_0.c
+pub const NBIO_BIF_IH_DOORBELL_RANGE__OFFSET__SHIFT: u32 = 0x2;
+/// The value of `BIF_IH_DOORBELL_RANGE__SIZE_MASK` in nbio_v7_0.c
+pub const NBIO_BIF_IH_DOORBELL_RANGE__SIZE_MASK: u32 = 0x1f0000;
+/// The value of `BIF_IH_DOORBELL_RANGE__SIZE__SHIFT` in nbio_v7_0.c
+pub const NBIO_BIF_IH_DOORBELL_RANGE__SIZE__SHIFT: u32 = 0x10;
+/// amdgpu/amdgpu_ring.h:96
+pub const AMDGPU_IB_POOL_MAX: u32 = 0x3;
+/// amdgpu/amdgpu_ib.c:347
+pub const AMDGPU_IB_POOL_SIZE: u32 = 0x100000;
+
+// psp_hw_init: the command ring, TMR, IP firmware and TA loads (amdgpu_psp.c, psp_v12_0.c)
+/// The value of `mmMP0_SMN_C2PMSG_69` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_69: u32 = 0x85;
+/// The value of `mmMP0_SMN_C2PMSG_69_BASE_IDX` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_69_BASE_IDX: u32 = 0x0;
+/// The value of `mmMP0_SMN_C2PMSG_70` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_70: u32 = 0x86;
+/// The value of `mmMP0_SMN_C2PMSG_70_BASE_IDX` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_70_BASE_IDX: u32 = 0x0;
+/// The value of `mmMP0_SMN_C2PMSG_71` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_71: u32 = 0x87;
+/// The value of `mmMP0_SMN_C2PMSG_71_BASE_IDX` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_71_BASE_IDX: u32 = 0x0;
+/// The value of `mmMP0_SMN_C2PMSG_64` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_64: u32 = 0x80;
+/// The value of `mmMP0_SMN_C2PMSG_64_BASE_IDX` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_64_BASE_IDX: u32 = 0x0;
+/// The value of `mmMP0_SMN_C2PMSG_101` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_101: u32 = 0xa5;
+/// The value of `mmMP0_SMN_C2PMSG_101_BASE_IDX` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_101_BASE_IDX: u32 = 0x0;
+/// The value of `mmMP0_SMN_C2PMSG_102` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_102: u32 = 0xa6;
+/// The value of `mmMP0_SMN_C2PMSG_102_BASE_IDX` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_102_BASE_IDX: u32 = 0x0;
+/// The value of `mmMP0_SMN_C2PMSG_67` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_67: u32 = 0x83;
+/// The value of `mmMP0_SMN_C2PMSG_67_BASE_IDX` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_67_BASE_IDX: u32 = 0x0;
+/// The value of `mmMP0_SMN_C2PMSG_81` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_81: u32 = 0x91;
+/// The value of `mmMP0_SMN_C2PMSG_81_BASE_IDX` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_81_BASE_IDX: u32 = 0x0;
+/// The value of `mmMP0_SMN_C2PMSG_35` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_35: u32 = 0x63;
+/// The value of `mmMP0_SMN_C2PMSG_35_BASE_IDX` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_35_BASE_IDX: u32 = 0x0;
+/// The value of `mmMP0_SMN_C2PMSG_36` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_36: u32 = 0x64;
+/// The value of `mmMP0_SMN_C2PMSG_36_BASE_IDX` in psp_v12_0.c
+pub const MP0_mmMP0_SMN_C2PMSG_36_BASE_IDX: u32 = 0x0;
+/// amdgpu/amdgpu_psp.h:116
+pub const PSP_RING_TYPE__KM: u32 = 0x2;
+/// amdgpu/amdgpu_psp.h:62
+pub const MBOX_TOS_RESP_FLAG: u32 = 0x80000000;
+/// amdgpu/amdgpu_psp.h:63
+pub const MBOX_TOS_RESP_MASK: u32 = 0x8000ffff;
+/// amdgpu/amdgpu_psp.h:137
+pub const PSP_WAITREG_CHANGED: u32 = 0x1;
+/// amdgpu/amdgpu_psp.h:138
+pub const PSP_WAITREG_NOVERBOSE: u32 = 0x2;
+/// amdgpu/psp_gfx_if.h:93
+pub const GFX_CMD_ID_SETUP_TMR: u32 = 0x5;
+/// amdgpu/psp_gfx_if.h:94
+pub const GFX_CMD_ID_LOAD_IP_FW: u32 = 0x6;
+/// amdgpu/psp_gfx_if.h:89
+pub const GFX_CMD_ID_LOAD_TA: u32 = 0x1;
+/// amdgpu/psp_gfx_if.h:92
+pub const GFX_CMD_ID_LOAD_ASD: u32 = 0x4;
+/// amdgpu/psp_gfx_if.h:91
+pub const GFX_CMD_ID_INVOKE_CMD: u32 = 0x3;
+/// amdgpu/psp_gfx_if.h:44
+pub const GFX_CTRL_CMD_ID_DESTROY_RINGS: u32 = 0x30000;
+/// amdgpu/psp_gfx_if.h:271
+pub const GFX_FW_TYPE_REG_LIST: u32 = 0x43;
+/// amdgpu/amdgpu_psp.h:68
+pub const PSP_ASD_SHARED_MEM_SIZE: u32 = 0x0;
+/// amdgpu/amdgpu_psp.h:71
+pub const PSP_HDCP_SHARED_MEM_SIZE: u32 = 0x4000;
+/// amdgpu/amdgpu_psp.h:72
+pub const PSP_DTM_SHARED_MEM_SIZE: u32 = 0x4000;
+/// amdgpu/amdgpu_psp.h:73
+pub const PSP_RAP_SHARED_MEM_SIZE: u32 = 0x4000;
+/// amdgpu/amdgpu_psp.h:74
+pub const PSP_SECUREDISPLAY_SHARED_MEM_SIZE: u32 = 0x4000;
+/// amdgpu/amdgpu_psp.h:70
+pub const PSP_RAS_SHARED_MEM_SIZE: u32 = 0x4000;
+/// amdgpu/amdgpu_psp.c:893
+pub const PSP_TMR_ALIGNMENT: u32 = 0x100000;
+/// amdgpu/psp_gfx_if.h:499
+pub const TEE_ERROR_NOT_SUPPORTED: u32 = 0xffff000a;
+/// amdgpu/psp_gfx_if.h:494
+pub const PSP_ERR_UNKNOWN_COMMAND: u32 = 0x100;
+/// amdgpu/ta_secureDisplay_if.h:35
+pub const TA_SECUREDISPLAY_COMMAND__QUERY_TA: u32 = 0x1;
+/// amdgpu/ta_secureDisplay_if.h:48
+pub const TA_SECUREDISPLAY_STATUS__SUCCESS: u32 = 0x0;
+/// amdgpu/ta_secureDisplay_if.h:49
+pub const TA_SECUREDISPLAY_STATUS__GENERIC_FAILURE: u32 = 0x1;
+/// amdgpu/ta_rap_if.h:45
+pub const TA_CMD_RAP__INITIALIZE: u32 = 0x1;
+/// amdgpu/ta_rap_if.h:32
+pub const TA_RAP_STATUS__SUCCESS: u32 = 0x1;
+/// amdgpu/ta_rap_if.h:50
+pub const METHOD_A: u32 = 0x1;
+/// The value of `PSP_TMR_SIZE(&(struct amdgpu_device){ .asic_type = CHIP_RENOIR })` in amdgpu_psp.c
+pub const PSP_TMR_SIZE_RENOIR: u32 = 0x400000;
+/// amdgpu/psp_gfx_if.h:268
+pub const GFX_FW_TYPE_CAP: u32 = 0x3e;
+/// amdgpu/psp_gfx_if.h:212
+pub const GFX_FW_TYPE_CP_CE: u32 = 0x3;
+/// amdgpu/psp_gfx_if.h:210
+pub const GFX_FW_TYPE_CP_ME: u32 = 0x1;
+/// amdgpu/psp_gfx_if.h:213
+pub const GFX_FW_TYPE_CP_MEC: u32 = 0x4;
+/// amdgpu/psp_gfx_if.h:214
+pub const GFX_FW_TYPE_CP_MEC_ME1: u32 = 0x5;
+/// amdgpu/psp_gfx_if.h:215
+pub const GFX_FW_TYPE_CP_MEC_ME2: u32 = 0x6;
+/// amdgpu/psp_gfx_if.h:242
+pub const GFX_FW_TYPE_CP_MES: u32 = 0x21;
+/// amdgpu/psp_gfx_if.h:285
+pub const GFX_FW_TYPE_CP_MES_KIQ: u32 = 0x51;
+/// amdgpu/psp_gfx_if.h:211
+pub const GFX_FW_TYPE_CP_PFP: u32 = 0x2;
+/// amdgpu/psp_gfx_if.h:220
+pub const GFX_FW_TYPE_DMCU_ERAM: u32 = 0xb;
+/// amdgpu/psp_gfx_if.h:221
+pub const GFX_FW_TYPE_DMCU_ISR: u32 = 0xc;
+/// amdgpu/psp_gfx_if.h:260
+pub const GFX_FW_TYPE_DMUB: u32 = 0x33;
+/// amdgpu/psp_gfx_if.h:236
+pub const GFX_FW_TYPE_GLOBAL_TAP_DELAYS: u32 = 0x1b;
+/// amdgpu/psp_gfx_if.h:273
+pub const GFX_FW_TYPE_IMU_D: u32 = 0x45;
+/// amdgpu/psp_gfx_if.h:272
+pub const GFX_FW_TYPE_IMU_I: u32 = 0x44;
+/// amdgpu/psp_gfx_if.h:225
+pub const GFX_FW_TYPE_ISP: u32 = 0x10;
+/// amdgpu/psp_gfx_if.h:305
+pub const GFX_FW_TYPE_JPEG_RAM: u32 = 0x80;
+/// amdgpu/psp_gfx_if.h:286
+pub const GFX_FW_TYPE_MES_KIQ_STACK: u32 = 0x52;
+/// amdgpu/psp_gfx_if.h:243
+pub const GFX_FW_TYPE_MES_STACK: u32 = 0x22;
+/// amdgpu/psp_gfx_if.h:306
+pub const GFX_FW_TYPE_P2S_TABLE: u32 = 0x81;
+/// amdgpu/psp_gfx_if.h:277
+pub const GFX_FW_TYPE_PPTABLE: u32 = 0x49;
+/// amdgpu/psp_gfx_if.h:257
+pub const GFX_FW_TYPE_RLC_DRAM_BOOT: u32 = 0x30;
+/// amdgpu/psp_gfx_if.h:217
+pub const GFX_FW_TYPE_RLC_G: u32 = 0x8;
+/// amdgpu/psp_gfx_if.h:235
+pub const GFX_FW_TYPE_RLC_IRAM: u32 = 0x1a;
+/// amdgpu/psp_gfx_if.h:234
+pub const GFX_FW_TYPE_RLC_P: u32 = 0x19;
+/// amdgpu/psp_gfx_if.h:229
+pub const GFX_FW_TYPE_RLC_RESTORE_LIST_GPM_MEM: u32 = 0x14;
+/// amdgpu/psp_gfx_if.h:231
+pub const GFX_FW_TYPE_RLC_RESTORE_LIST_SRM_CNTL: u32 = 0x16;
+/// amdgpu/psp_gfx_if.h:230
+pub const GFX_FW_TYPE_RLC_RESTORE_LIST_SRM_MEM: u32 = 0x15;
+/// amdgpu/psp_gfx_if.h:216
+pub const GFX_FW_TYPE_RLC_V: u32 = 0x7;
+/// amdgpu/psp_gfx_if.h:292
+pub const GFX_FW_TYPE_RS64_ME: u32 = 0x58;
+/// amdgpu/psp_gfx_if.h:293
+pub const GFX_FW_TYPE_RS64_MEC: u32 = 0x59;
+/// amdgpu/psp_gfx_if.h:298
+pub const GFX_FW_TYPE_RS64_MEC_P0_STACK: u32 = 0x5e;
+/// amdgpu/psp_gfx_if.h:299
+pub const GFX_FW_TYPE_RS64_MEC_P1_STACK: u32 = 0x5f;
+/// amdgpu/psp_gfx_if.h:300
+pub const GFX_FW_TYPE_RS64_MEC_P2_STACK: u32 = 0x60;
+/// amdgpu/psp_gfx_if.h:301
+pub const GFX_FW_TYPE_RS64_MEC_P3_STACK: u32 = 0x61;
+/// amdgpu/psp_gfx_if.h:296
+pub const GFX_FW_TYPE_RS64_ME_P0_STACK: u32 = 0x5c;
+/// amdgpu/psp_gfx_if.h:297
+pub const GFX_FW_TYPE_RS64_ME_P1_STACK: u32 = 0x5d;
+/// amdgpu/psp_gfx_if.h:291
+pub const GFX_FW_TYPE_RS64_PFP: u32 = 0x57;
+/// amdgpu/psp_gfx_if.h:294
+pub const GFX_FW_TYPE_RS64_PFP_P0_STACK: u32 = 0x5a;
+/// amdgpu/psp_gfx_if.h:295
+pub const GFX_FW_TYPE_RS64_PFP_P1_STACK: u32 = 0x5b;
+/// amdgpu/psp_gfx_if.h:218
+pub const GFX_FW_TYPE_SDMA0: u32 = 0x9;
+/// amdgpu/psp_gfx_if.h:219
+pub const GFX_FW_TYPE_SDMA1: u32 = 0xa;
+/// amdgpu/psp_gfx_if.h:261
+pub const GFX_FW_TYPE_SDMA2: u32 = 0x34;
+/// amdgpu/psp_gfx_if.h:262
+pub const GFX_FW_TYPE_SDMA3: u32 = 0x35;
+/// amdgpu/psp_gfx_if.h:263
+pub const GFX_FW_TYPE_SDMA4: u32 = 0x36;
+/// amdgpu/psp_gfx_if.h:264
+pub const GFX_FW_TYPE_SDMA5: u32 = 0x37;
+/// amdgpu/psp_gfx_if.h:265
+pub const GFX_FW_TYPE_SDMA6: u32 = 0x38;
+/// amdgpu/psp_gfx_if.h:266
+pub const GFX_FW_TYPE_SDMA7: u32 = 0x39;
+/// amdgpu/psp_gfx_if.h:275
+pub const GFX_FW_TYPE_SDMA_UCODE_TH0: u32 = 0x47;
+/// amdgpu/psp_gfx_if.h:276
+pub const GFX_FW_TYPE_SDMA_UCODE_TH1: u32 = 0x48;
+/// amdgpu/psp_gfx_if.h:237
+pub const GFX_FW_TYPE_SE0_TAP_DELAYS: u32 = 0x1c;
+/// amdgpu/psp_gfx_if.h:238
+pub const GFX_FW_TYPE_SE1_TAP_DELAYS: u32 = 0x1d;
+/// amdgpu/psp_gfx_if.h:269
+pub const GFX_FW_TYPE_SE2_TAP_DELAYS: u32 = 0x41;
+/// amdgpu/psp_gfx_if.h:270
+pub const GFX_FW_TYPE_SE3_TAP_DELAYS: u32 = 0x42;
+/// amdgpu/psp_gfx_if.h:227
+pub const GFX_FW_TYPE_SMU: u32 = 0x12;
+/// amdgpu/psp_gfx_if.h:289
+pub const GFX_FW_TYPE_UMSCH_CMD_BUFFER: u32 = 0x55;
+/// amdgpu/psp_gfx_if.h:287
+pub const GFX_FW_TYPE_UMSCH_DATA: u32 = 0x53;
+/// amdgpu/psp_gfx_if.h:288
+pub const GFX_FW_TYPE_UMSCH_UCODE: u32 = 0x54;
+/// amdgpu/psp_gfx_if.h:223
+pub const GFX_FW_TYPE_UVD: u32 = 0xe;
+/// amdgpu/psp_gfx_if.h:232
+pub const GFX_FW_TYPE_UVD1: u32 = 0x17;
+/// amdgpu/psp_gfx_if.h:224
+pub const GFX_FW_TYPE_VCE: u32 = 0xf;
+/// amdgpu/psp_gfx_if.h:222
+pub const GFX_FW_TYPE_VCN: u32 = 0xd;
+/// amdgpu/psp_gfx_if.h:258
+pub const GFX_FW_TYPE_VCN0_RAM: u32 = 0x31;
+/// amdgpu/psp_gfx_if.h:267
+pub const GFX_FW_TYPE_VCN1: u32 = 0x3a;
+/// amdgpu/psp_gfx_if.h:259
+pub const GFX_FW_TYPE_VCN1_RAM: u32 = 0x32;
+/// amdgpu/psp_gfx_if.h:304
+pub const GFX_FW_TYPE_VPE: u32 = 0x66;
+/// amdgpu/psp_gfx_if.h:302
+pub const GFX_FW_TYPE_VPEC_FW1: u32 = 0x64;
+/// amdgpu/psp_gfx_if.h:303
+pub const GFX_FW_TYPE_VPEC_FW2: u32 = 0x65;
+/// The value of `sizeof(struct psp_gfx_cmd_resp)` in amdgpu_psp.c
+pub const SIZEOF_psp_gfx_cmd_resp: u32 = 0x400;
+/// The value of `sizeof(struct psp_gfx_resp)` in amdgpu_psp.c
+pub const SIZEOF_psp_gfx_resp: u32 = 0x60;
+/// The value of `sizeof(struct psp_gfx_rb_frame)` in amdgpu_psp.c
+pub const SIZEOF_psp_gfx_rb_frame: u32 = 0x40;
+/// The value of `offsetof(struct psp_gfx_cmd_resp, cmd_id)` in amdgpu_psp.c
+pub const CMDRESP_CMD_ID: u32 = 0x8;
+/// The value of `offsetof(struct psp_gfx_cmd_resp, cmd)` in amdgpu_psp.c
+pub const CMDRESP_CMD: u32 = 0x1c;
+/// The value of `offsetof(struct psp_gfx_cmd_resp, resp)` in amdgpu_psp.c
+pub const CMDRESP_RESP: u32 = 0x360;
+/// The value of `offsetof(struct psp_gfx_resp, status)` in amdgpu_psp.c
+pub const RESP_STATUS: u32 = 0x0;
+/// The value of `offsetof(struct psp_gfx_resp, session_id)` in amdgpu_psp.c
+pub const RESP_SESSION_ID: u32 = 0x4;
+/// The value of `offsetof(struct psp_gfx_resp, fw_addr_lo)` in amdgpu_psp.c
+pub const RESP_FW_ADDR_LO: u32 = 0x8;
+/// The value of `offsetof(struct psp_gfx_resp, fw_addr_hi)` in amdgpu_psp.c
+pub const RESP_FW_ADDR_HI: u32 = 0xc;
+/// The value of `offsetof(struct psp_gfx_cmd_load_ip_fw, fw_phy_addr_lo)` in amdgpu_psp.c
+pub const LOADIPFW_FW_PHY_ADDR_LO: u32 = 0x0;
+/// The value of `offsetof(struct psp_gfx_cmd_load_ip_fw, fw_phy_addr_hi)` in amdgpu_psp.c
+pub const LOADIPFW_FW_PHY_ADDR_HI: u32 = 0x4;
+/// The value of `offsetof(struct psp_gfx_cmd_load_ip_fw, fw_size)` in amdgpu_psp.c
+pub const LOADIPFW_FW_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct psp_gfx_cmd_load_ip_fw, fw_type)` in amdgpu_psp.c
+pub const LOADIPFW_FW_TYPE: u32 = 0xc;
+/// The value of `offsetof(struct psp_gfx_cmd_setup_tmr, buf_phy_addr_lo)` in amdgpu_psp.c
+pub const SETUPTMR_BUF_PHY_ADDR_LO: u32 = 0x0;
+/// The value of `offsetof(struct psp_gfx_cmd_setup_tmr, buf_phy_addr_hi)` in amdgpu_psp.c
+pub const SETUPTMR_BUF_PHY_ADDR_HI: u32 = 0x4;
+/// The value of `offsetof(struct psp_gfx_cmd_setup_tmr, buf_size)` in amdgpu_psp.c
+pub const SETUPTMR_BUF_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct psp_gfx_cmd_setup_tmr, tmr_flags)` in amdgpu_psp.c
+pub const SETUPTMR_TMR_FLAGS: u32 = 0xc;
+/// The value of `offsetof(struct psp_gfx_cmd_setup_tmr, system_phy_addr_lo)` in amdgpu_psp.c
+pub const SETUPTMR_SYSTEM_PHY_ADDR_LO: u32 = 0x10;
+/// The value of `offsetof(struct psp_gfx_cmd_setup_tmr, system_phy_addr_hi)` in amdgpu_psp.c
+pub const SETUPTMR_SYSTEM_PHY_ADDR_HI: u32 = 0x14;
+/// The value of `((struct psp_gfx_cmd_setup_tmr){ .bitfield.virt_phy_addr = 1 }).tmr_flags` in amdgpu_psp.c
+pub const SETUPTMR_VIRT_PHY_ADDR_FLAG: u32 = 0x2;
+/// The value of `offsetof(struct psp_gfx_cmd_load_ta, app_phy_addr_lo)` in amdgpu_psp.c
+pub const LOADTA_APP_PHY_ADDR_LO: u32 = 0x0;
+/// The value of `offsetof(struct psp_gfx_cmd_load_ta, app_phy_addr_hi)` in amdgpu_psp.c
+pub const LOADTA_APP_PHY_ADDR_HI: u32 = 0x4;
+/// The value of `offsetof(struct psp_gfx_cmd_load_ta, app_len)` in amdgpu_psp.c
+pub const LOADTA_APP_LEN: u32 = 0x8;
+/// The value of `offsetof(struct psp_gfx_cmd_load_ta, cmd_buf_phy_addr_lo)` in amdgpu_psp.c
+pub const LOADTA_CMD_BUF_PHY_ADDR_LO: u32 = 0xc;
+/// The value of `offsetof(struct psp_gfx_cmd_load_ta, cmd_buf_phy_addr_hi)` in amdgpu_psp.c
+pub const LOADTA_CMD_BUF_PHY_ADDR_HI: u32 = 0x10;
+/// The value of `offsetof(struct psp_gfx_cmd_load_ta, cmd_buf_len)` in amdgpu_psp.c
+pub const LOADTA_CMD_BUF_LEN: u32 = 0x14;
+/// The value of `offsetof(struct psp_gfx_cmd_invoke_cmd, session_id)` in amdgpu_psp.c
+pub const INVOKE_SESSION_ID: u32 = 0x0;
+/// The value of `offsetof(struct psp_gfx_cmd_invoke_cmd, ta_cmd_id)` in amdgpu_psp.c
+pub const INVOKE_TA_CMD_ID: u32 = 0x4;
+/// The value of `offsetof(struct psp_gfx_rb_frame, cmd_buf_addr_lo)` in amdgpu_psp.c
+pub const FRAME_CMD_BUF_ADDR_LO: u32 = 0x0;
+/// The value of `offsetof(struct psp_gfx_rb_frame, cmd_buf_addr_hi)` in amdgpu_psp.c
+pub const FRAME_CMD_BUF_ADDR_HI: u32 = 0x4;
+/// The value of `offsetof(struct psp_gfx_rb_frame, fence_addr_lo)` in amdgpu_psp.c
+pub const FRAME_FENCE_ADDR_LO: u32 = 0xc;
+/// The value of `offsetof(struct psp_gfx_rb_frame, fence_addr_hi)` in amdgpu_psp.c
+pub const FRAME_FENCE_ADDR_HI: u32 = 0x10;
+/// The value of `offsetof(struct psp_gfx_rb_frame, fence_value)` in amdgpu_psp.c
+pub const FRAME_FENCE_VALUE: u32 = 0x14;
+/// The value of `sizeof(struct ta_securedisplay_cmd)` in amdgpu_psp.c
+pub const SIZEOF_ta_securedisplay_cmd: u32 = 0x30;
+/// The value of `offsetof(struct ta_securedisplay_cmd, cmd_id)` in amdgpu_psp.c
+pub const SECUREDISPLAY_CMD_ID: u32 = 0x0;
+/// The value of `offsetof(struct ta_securedisplay_cmd, status)` in amdgpu_psp.c
+pub const SECUREDISPLAY_STATUS: u32 = 0x4;
+/// The value of `offsetof(struct ta_securedisplay_cmd, securedisplay_out_message.query_ta.query_cmd_ret)` in amdgpu_psp.c
+pub const SECUREDISPLAY_QUERY_CMD_RET: u32 = 0x20;
+/// The value of `sizeof(struct ta_rap_shared_memory)` in amdgpu_psp.c
+pub const SIZEOF_ta_rap_shared_memory: u32 = 0x70;
+/// The value of `offsetof(struct ta_rap_shared_memory, cmd_id)` in amdgpu_psp.c
+pub const RAP_CMD_ID: u32 = 0x0;
+/// The value of `offsetof(struct ta_rap_shared_memory, validation_method_id)` in amdgpu_psp.c
+pub const RAP_VALIDATION_METHOD_ID: u32 = 0x4;
+/// The value of `offsetof(struct ta_rap_shared_memory, rap_status)` in amdgpu_psp.c
+pub const RAP_STATUS: u32 = 0xc;
+/// The value of `offsetof(struct sdma_firmware_header_v2_0, ctx_ucode_size_bytes)` in amdgpu_ucode.c
+pub const SDMA_HDR_V2_CTX_UCODE_SIZE: u32 = 0x24;

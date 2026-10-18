@@ -21,6 +21,12 @@ pub struct FakeCard {
     pub on_write: Vec<(u32, u32, u32)>,
     /// Every write, (register, value), in order.
     pub writes: Vec<(u32, u32)>,
+    /// The PSP's C2PMSG_67, the KM ring's write pointer: a write signals
+    /// the fence of the frame before it. The ring's address is in
+    /// C2PMSG_69/70 and its size in C2PMSG_71, as psp_v12_0 writes them;
+    /// GPU addresses are offsets into the VRAM window (VRAM at 0, the
+    /// aperture at 0, as the fake card puts them).
+    pub psp_wptr: Option<u32>,
 }
 
 /// The writes the card has seen.
@@ -183,6 +189,13 @@ impl Mmio {
                 for (r, val) in answers {
                     c.regs.insert(r, val);
                 }
+                if c.psp_wptr == Some(reg) {
+                    let base = c.regs.get(&(reg + 2)).copied().unwrap_or(0) as u64
+                        | (c.regs.get(&(reg + 3)).copied().unwrap_or(0) as u64) << 32;
+                    let size_dw = c.regs.get(&(reg + 4)).copied().unwrap_or(0x1000) / 4;
+                    let frame = (v + size_dw - 16) % size_dw;
+                    fake_psp_fence(base + frame as u64 * 4);
+                }
             }
         })
     }
@@ -336,4 +349,50 @@ pub fn dma_set_mask(bits: i32) -> i32 {
 /// out its first device vector.
 pub fn irq_register(_entry: i32) -> i32 {
     48
+}
+
+/// `npk_pci_enable_bus_master`: granted.
+pub fn pci_enable_bus_master() -> i32 {
+    0
+}
+
+/// The window holding GPU address `addr` (see `FakeCard::psp_wptr`): the
+/// largest at bus address 0, the VRAM aperture.
+fn vram_window(addr: u64) -> Option<i32> {
+    WINDOWS.with(|w| {
+        let w = w.borrow();
+        w.iter().enumerate().filter(|(_, (bus, b))| *bus == 0 && (addr as usize) < b.len())
+            .max_by_key(|(_, (_, b))| b.len()).map(|(i, _)| i as i32 + 1)
+    })
+}
+
+/// The PSP answering one KM ring frame: the fence value to the fence
+/// address. `psp_gfx_rb_frame`: cmd_buf_addr_lo at 0x00, _hi at 0x04,
+/// fence_addr_lo at 0x0c, _hi at 0x10, fence_value at 0x14.
+fn fake_psp_fence(frame: u64) {
+    let Some(h) = vram_window(frame) else { return };
+    let dw: Vec<u32> = (0..16).map(|i| win_r32(h, frame as u32 + i * 4)).collect();
+    let cmd = dw[0] as u64 | (dw[1] as u64) << 32;
+    let cmd_dw: Vec<u32> = match vram_window(cmd) {
+        Some(c) => (0..0x100).map(|i| win_r32(c, cmd as u32 + i * 4)).collect(),
+        None => Vec::new(),
+    };
+    PSP_LOG.with(|l| l.borrow_mut().push((dw.clone(), cmd_dw)));
+    let lo = dw[3] as u64;
+    let hi = dw[4] as u64;
+    let value = dw[5];
+    let fence = lo | hi << 32;
+    if let Some(f) = vram_window(fence) {
+        win_w32(f, fence as u32, value);
+    }
+}
+
+thread_local! {
+    static PSP_LOG: RefCell<Vec<(Vec<u32>, Vec<u32>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Every KM ring frame the fake PSP answered, with the first 1 KiB of the
+/// command buffer it names (`struct psp_gfx_cmd_resp`), in order.
+pub fn fake_psp_log() -> Vec<(Vec<u32>, Vec<u32>)> {
+    PSP_LOG.with(|l| l.borrow().clone())
 }

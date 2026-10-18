@@ -116,6 +116,19 @@ if diff -u "$B/vram.linux" "$B/vram.port" | head -20; [ "$(cmp -s "$B/vram.linux
 else
     fail=1
 fi
+# psp_hw_init: the port's run on the fake card, whose PSP signals every
+# frame; Linux's command path builds its frames and commands from the
+# run's inputs (buffers, TMR, ucode table, TAs). Every frame and every
+# command dword is compared.
+rustc $RF "$HERE/psp_check.rs" -o "$B/psp_check"
+"$B/psp_check" "$DISC" "$BIOS" "$FW" > "$B/psp.out"
+sed -n '/^--- psp/,$p' "$B/psp.out" > "$B/psp.port"
+sed -n '1,/^--- psp/p' "$B/psp.out" | grep -v '^--- psp' | "$B/oracle_psp" 2>/dev/null | sed '/^ret /d' > "$B/psp.linux"
+if diff -u "$B/psp.linux" "$B/psp.port" | head -30; cmp -s "$B/psp.linux" "$B/psp.port"; then
+    echo "psp: port = Linux ($(grep -c '^cmd ' "$B/psp.linux") commands)"
+else
+    fail=1
+fi
 rustc $RF "$HERE/stage1_run.rs" -o "$B/stage1_run"
 "$B/stage1_run" "$DISC" "$BIOS" "$FW" > "$B/run.log"
 # The VRAM requests of the run itself, through Linux's VRAM manager.

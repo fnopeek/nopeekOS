@@ -37,8 +37,14 @@ fn fake_renoir() -> amdgpu_device::amdgpu_device {
         vram,
         // The SMU mailbox (MP1 segment 0 + C2PMSG_66 / C2PMSG_90): a
         // message written is answered with SMU_RESP_OK.
-        on_write: vec![(0x16000 + mmMP1_SMN_C2PMSG_66, 0x16000 + mmMP1_SMN_C2PMSG_90, SMU_RESP_OK)],
+        on_write: vec![
+            (0x16000 + mmMP1_SMN_C2PMSG_66, 0x16000 + mmMP1_SMN_C2PMSG_90, SMU_RESP_OK),
+            // The PSP (MP0 segment 0): a ring command on C2PMSG_64 is
+            // answered with the response flag.
+            (0x16000 + MP0_mmMP0_SMN_C2PMSG_64, 0x16000 + MP0_mmMP0_SMN_C2PMSG_64, MBOX_TOS_RESP_FLAG),
+        ],
         writes: Vec::new(),
+        psp_wptr: Some(0x16000 + MP0_mmMP0_SMN_C2PMSG_67),
     });
 
     let mut vfct = vec![0u8; VFCT_SIZE as usize];

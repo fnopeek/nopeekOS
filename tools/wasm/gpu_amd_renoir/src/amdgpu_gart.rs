@@ -144,8 +144,19 @@ pub fn kptr_r32(adev: &amdgpu_device, k: amdgpu_kptr, off: u64) -> u32 {
     }
 }
 
-/// `memset_io` / `memset32` over `len` bytes at `off`.
+/// `memset_io` / `memset32` over `len` bytes at `off`. A DMA buffer is
+/// written a page at a time.
 pub fn kptr_fill32(adev: &amdgpu_device, k: amdgpu_kptr, off: u64, len: u64, v: u32) {
+    if let amdgpu_kptr::gtt(_) = k {
+        let page: alloc::vec::Vec<u8> = (0..1024).flat_map(|_| v.to_le_bytes()).collect();
+        let mut o = 0;
+        while o < len {
+            let n = (len - o).min(4096) as usize;
+            kptr_write(adev, k, off + o, &page[..n]);
+            o += n as u64;
+        }
+        return;
+    }
     let mut o = 0;
     while o < len {
         kptr_w32(adev, k, off + o, v);
