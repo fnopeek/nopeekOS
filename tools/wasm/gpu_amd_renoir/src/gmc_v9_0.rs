@@ -362,3 +362,72 @@ pub fn gmc_v9_0_sw_init(adev: &mut amdgpu_device) -> i32 {
     // gmc_v9_0_save_registers: DCE 1.0.x only.
     amdgpu_gmc_ras_sw_init(adev)
 }
+
+/// `gmc_v9_0_gart_enable`: not pdb0, not in s0ix.
+fn gmc_v9_0_gart_enable(adev: &mut amdgpu_device) -> i32 {
+    if adev.gart.bo.is_none() {
+        crate::linux::Line::new().s("No VRAM object for PCIE GART.").say();
+        return -22;
+    }
+    crate::amdgpu_ttm::amdgpu_gtt_mgr_recover(adev);
+    let r = crate::gfxhub_v1_0::gfxhub_v1_0_gart_enable(adev);
+    if r != 0 {
+        return r;
+    }
+    let r = crate::mmhub_v1_0::mmhub_v1_0_gart_enable(adev);
+    if r != 0 {
+        return r;
+    }
+    crate::linux::Line::new().s("PCIE GART of ").dec(adev.gmc.gart_size >> 20).s("M enabled.").say();
+    let ptb = crate::amdgpu_object::amdgpu_bo_gpu_offset(adev, adev.gart.bo.unwrap());
+    crate::linux::Line::new().s("PTB located at ").hex64(ptb).say();
+    0
+}
+
+/// `WREG32_FIELD15(DCE, 0, reg, field, val)`.
+fn dce_field15(adev: &amdgpu_device, idx: u32, reg: u32, mask: u32, shift: u32, val: u32) {
+    use crate::nbio_v7_0::{rreg32_soc15, wreg32_soc15};
+    let v = rreg32_soc15(adev, DCE_HWIP, 0, idx, reg).unwrap_or(0);
+    wreg32_soc15(adev, DCE_HWIP, 0, idx, reg, (v & !mask) | val << shift);
+}
+
+/// `gmc_v9_0_hw_init`: no golden registers for MMHUB 1.5.0, no UMC
+/// funcs, no XGMI, not in s0ix; an APU flushes no HDP.
+pub fn gmc_v9_0_hw_init(adev: &mut amdgpu_device) -> i32 {
+    adev.gmc.flush_pasid_uses_kiq = true;
+    // Vega20+XGMI caches PTEs in TC and TLB: not GC 9.3.
+    adev.gmc.flush_tlb_needs_extra_type_2 = false;
+    // The sequence of these two function calls matters.
+    // gmc_v9_0_init_golden_registers: MMHUB 1.5.0 is the default case.
+    if adev.mode_info.num_crtc != 0 {
+        // Lockout access through VGA aperture
+        dce_field15(adev, DCE_mmVGA_HDP_CONTROL_BASE_IDX, DCE_mmVGA_HDP_CONTROL,
+                    DCE_VGA_HDP_CONTROL__VGA_MEMORY_DISABLE_MASK, DCE_VGA_HDP_CONTROL__VGA_MEMORY_DISABLE__SHIFT, 1);
+        // disable VGA render
+        dce_field15(adev, DCE_mmVGA_RENDER_CONTROL_BASE_IDX, DCE_mmVGA_RENDER_CONTROL,
+                    DCE_VGA_RENDER_CONTROL__VGA_VSTATUS_CNTL_MASK, DCE_VGA_RENDER_CONTROL__VGA_VSTATUS_CNTL__SHIFT, 0);
+    }
+    if crate::mmhub_v1_0::mmhub_v1_0_update_power_gating(adev, true) {
+        // amdgpu_dpm_set_powergating_by_smu before the SMU's hw_init.
+        crate::linux::Line::new().s("MMHUB power gating through the SMU: not ported").say();
+    }
+    crate::hdp_v4_0::hdp_v4_0_init_registers(adev);
+    // After HDP is initialized, flush HDP: an APU has none to flush.
+    let value = crate::tables::amdgpu_vm_fault_stop[0] != AMDGPU_VM_FAULT_STOP_ALWAYS as i32;
+    crate::gfxhub_v1_0::gfxhub_v1_0_set_fault_enable_default(adev, value);
+    crate::mmhub_v1_0::mmhub_v1_0_set_fault_enable_default(adev, value);
+    for i in 0..AMDGPU_MAX_VMHUBS {
+        if adev.vmhubs_mask & (1 << i) != 0 {
+            gmc_v9_0_flush_gpu_tlb(adev, 0, i, 0);
+        }
+    }
+    let r = gmc_v9_0_gart_enable(adev);
+    if r != 0 {
+        return r;
+    }
+    if crate::tables::amdgpu_emu_mode[0] == 1 {
+        crate::linux::Line::new().s("amdgpu_gmc_vram_checking: emulation only, not ported").say();
+        return -22;
+    }
+    0
+}

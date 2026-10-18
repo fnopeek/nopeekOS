@@ -17,7 +17,7 @@ static char seed_rule;
 #define SEED(reg) (seed_rule == 'o' ? 0xffffffffu : seed_rule == 'z' ? 0u : \
 		   (((u32)(reg) * 0x9e3779b1u) ^ 0xa5a5a5a5u))
 struct regfile { u32 reg, v; };
-static struct regfile direct[64], indirect[64];
+static struct regfile direct[8192], indirect[1024];
 static int ndirect, nindirect;
 static u32 pcie_index, pcie_data;
 
@@ -36,8 +36,13 @@ static void file_set(struct regfile *f, int *n, u32 reg, u32 v)
 	for (i = 0; i < *n; i++)
 		if (f[i].reg == reg)
 			break;
-	if (i == *n)
+	if (i == *n) {
+		if (*n == 8192) {
+			printf("register file full\n");
+			abort();
+		}
 		(*n)++;
+	}
 	f[i].reg = reg;
 	f[i].v = v;
 }

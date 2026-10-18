@@ -131,3 +131,29 @@ pub fn amdgpu_gmc_get_vbios_allocations(adev: &mut amdgpu_device) {
         adev.mman.stolen_extended_size = 0;
     }
 }
+
+/// `amdgpu_gmc_vram_mc2pa`.
+pub fn amdgpu_gmc_vram_mc2pa(adev: &amdgpu_device, mc_addr: u64) -> u64 {
+    mc_addr.wrapping_sub(adev.gmc.vram_start).wrapping_add(adev.vm_manager.vram_base_offset)
+}
+
+/// `amdgpu_gmc_pd_addr` with `amdgpu_gmc_get_pde_for_bo` and
+/// `gmc_v9_0_get_vm_pde` at level -1 (no translate_further on GC 9.3).
+pub fn amdgpu_gmc_pd_addr(adev: &amdgpu_device, h: usize) -> u64 {
+    let b = crate::amdgpu_object::bo(adev, h);
+    let res = b.tbo.resource.as_ref().unwrap();
+    let mut addr = match res.mem_type {
+        t if t == TTM_PL_TT => b.tbo.ttm.map_or(0, |t| t.dma_address(0)),
+        t if t == TTM_PL_VRAM => crate::amdgpu_object::amdgpu_bo_gpu_offset(adev, h),
+        _ => 0,
+    };
+    let mut flags = crate::amdgpu_ttm::amdgpu_ttm_tt_pde_flags(b.tbo.ttm.as_ref(), Some(res));
+    if flags & AMDGPU_PDE_PTE as u64 == 0 && flags & AMDGPU_PTE_SYSTEM as u64 == 0 {
+        addr = amdgpu_gmc_vram_mc2pa(adev, addr);
+    }
+    if adev.gmc.translate_further {
+        // PDB1/PDB0 levels only; the GART root is level -1.
+        let _ = &mut flags;
+    }
+    addr | flags
+}

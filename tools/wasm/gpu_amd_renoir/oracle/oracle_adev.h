@@ -21,15 +21,26 @@ struct amdgpu_device;
  * amdgpu_mmhub.h, amdgpu_gmc.h) the GMC functions call. */
 struct amdgpu_gfxhub_funcs {
 	u64 (*get_mc_fb_offset)(struct amdgpu_device *adev);
+	int (*gart_enable)(struct amdgpu_device *adev);
+	void (*set_fault_enable_default)(struct amdgpu_device *adev, bool value);
 	void (*init)(struct amdgpu_device *adev);
 };
 struct amdgpu_mmhub_funcs {
 	u64 (*get_fb_location)(struct amdgpu_device *adev);
 	void (*init)(struct amdgpu_device *adev);
+	int (*gart_enable)(struct amdgpu_device *adev);
+	void (*set_fault_enable_default)(struct amdgpu_device *adev, bool value);
+	void (*update_power_gating)(struct amdgpu_device *adev, bool enable);
 };
 struct amdgpu_gmc_funcs {
 	unsigned int (*get_vbios_fb_size)(struct amdgpu_device *adev);
 };
+struct amdgpu_hdp_funcs {
+	void (*init_registers)(struct amdgpu_device *adev);
+};
+/* What gmc_v9_0_hw_init reads of a buffer object: the GART table's page
+ * directory address and GPU offset, given by the port's run. */
+struct amdgpu_bo { u64 pd_addr, gpu_offset; };
 
 struct amdgpu_device;
 /* The members of struct amdgpu_nbio_funcs (amdgpu_nbio.h) soc15_common_hw_init calls. */
@@ -73,6 +84,7 @@ struct amdgpu_device {
 		} config;
 		struct { u32 wave_front_size, max_waves_per_simd, max_scratch_slots_per_cu, lds_size; } cu_info;
 		struct { void *funcs; int rlcg_reg_access_supported; } rlc;
+		struct { struct { struct { bool ready; } sched; } ring; } kiq[1];
 	} gfx;
 	struct amdgpu_gmc {
 		u32 num_umc; u64 mall_size; u32 m_half_use;
@@ -86,6 +98,11 @@ struct amdgpu_device {
 		u64 mc_mask, mc_vram_size, real_vram_size, visible_vram_size, aper_base, aper_size;
 		u64 fb_start, fb_end, vram_start, vram_end, gart_size, gart_start, gart_end;
 		u64 agp_start, agp_end, agp_size;
+		u32 vmid0_page_table_depth, vmid0_page_table_block_size;
+		int noretry;
+		bool flush_pasid_uses_kiq, flush_tlb_needs_extra_type_2;
+		struct amdgpu_bo *pdb0_bo;
+		int invalidate_lock;
 	} gmc;
 	struct { u32 smu_prv_buffer_size; } pm;
 	struct { const struct amdgpu_gfxhub_funcs *funcs; } gfxhub;
@@ -96,12 +113,20 @@ struct amdgpu_device {
 		 u32 first_kfd_vmid; } vm_manager;
 	struct { struct amdgpu_irq_client client[AMDGPU_IRQ_CLIENTID_MAX]; } irq;
 	void *bios;
+	struct { struct amdgpu_bo *bo; } gart;
+	struct { u64 gpu_addr; } mem_scratch;
+	u64 dummy_page_addr;
+	u32 pg_flags, usec_timeout;
+	bool in_s0ix;
+	struct { const struct amdgpu_hdp_funcs *funcs; } hdp;
+	struct { int num_crtc; } mode_info;
+	struct { void *logical_to_dev_inst, *logical_to_dev_mask; } ip_map;
 	u32 aid_mask;
 	u32 rev_id;
 	struct { const struct { int (*get_hbm_channel_number)(struct amdgpu_device *adev); } *funcs; } df;
 	bool need_swiotlb;
 	struct { u32 num_instances, sdma_mask; } sdma;
-	struct { u32 node_inst_num, active_mask; } umc;
+	struct { u32 node_inst_num, active_mask; const struct { void (*init_registers)(struct amdgpu_device *); } *funcs; } umc;
 	struct { u32 num_vcn_inst, inst_mask, harvest_config; struct amdgpu_vcn_inst inst[AMDGPU_MAX_VCN_INSTANCES]; } vcn;
 	struct { u32 inst_mask, harvest_config; } jpeg;
 	struct { u32 num_instances; } vpe;

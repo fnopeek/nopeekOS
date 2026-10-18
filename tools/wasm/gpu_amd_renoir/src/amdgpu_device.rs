@@ -336,6 +336,8 @@ pub struct amdgpu_gmc {
     pub gart_size: u64,
     pub tmz_enabled: bool,
     pub noretry: u32,
+    pub flush_pasid_uses_kiq: bool,
+    pub flush_tlb_needs_extra_type_2: bool,
     pub vram_width: u32,
     pub vram_type: u32,
     pub vram_vendor: u32,
@@ -516,6 +518,12 @@ pub struct amdgpu_device {
     /// BAR2 mapped, for the doorbell buffer's kernel mapping.
     pub doorbell_mmio: Option<npk_sys::Mmio>,
     pub apu_prefer_gtt: bool,
+    pub wb: amdgpu_wb,
+    pub seq64: amdgpu_seq64,
+    /// `adev->mem_scratch`: the buffer, its GPU address and mapping.
+    pub mem_scratch_robj: Option<usize>,
+    pub mem_scratch_gpu_addr: u64,
+    pub mem_scratch_ptr: Option<crate::amdgpu_object::amdgpu_kptr>,
     /// `adev->ras_list`: the RAS blocks registered, by name.
     pub ras_list: Vec<&'static str>,
     /// `adev->mes.db_start_dw_offset`.
@@ -614,6 +622,11 @@ impl amdgpu_device {
             dummy_page_addr: 0,
             doorbell_mmio: None,
             apu_prefer_gtt: false,
+            wb: amdgpu_wb::default(),
+            seq64: amdgpu_seq64::default(),
+            mem_scratch_robj: None,
+            mem_scratch_gpu_addr: 0,
+            mem_scratch_ptr: None,
             ras_list: Vec::new(),
             mes_db_start_dw_offset: 0,
             bar0: (0, 0),
@@ -1451,7 +1464,118 @@ pub fn amdgpu_device_ip_init_gmc(adev: &mut amdgpu_device) -> i32 {
             return r;
         }
         adev.ip_blocks[i].status.sw = true;
+        // need to do gmc hw init early so we can allocate gpu mem
+        let r = amdgpu_device_mem_scratch_init(adev);
+        if r != 0 {
+            Line::new().s("amdgpu_mem_scratch_init failed ").dec((-r) as u64).say();
+            return r;
+        }
+        let r = crate::gmc_v9_0::gmc_v9_0_hw_init(adev);
+        if r != 0 {
+            Line::new().s("hw_init ").dec(i as u64).s(" failed ").dec((-r) as u64).say();
+            return r;
+        }
+        let r = amdgpu_device_wb_init(adev);
+        if r != 0 {
+            Line::new().s("amdgpu_device_wb_init failed ").dec((-r) as u64).say();
+            return r;
+        }
+        adev.ip_blocks[i].status.hw = true;
+        // right after GMC hw init, we create CSA: only with MCBP.
+        if adev.gfx.mcbp {
+            Line::new().s("allocate CSA: MCBP is not Renoir's default, not ported").say();
+            return -22;
+        }
+        let r = amdgpu_seq64_init(adev);
+        if r != 0 {
+            Line::new().s("allocate seq64 failed ").dec((-r) as u64).say();
+            return r;
+        }
         return 0;
     }
     -22
+}
+
+/// `amdgpu_device_mem_scratch_init`.
+pub fn amdgpu_device_mem_scratch_init(adev: &mut amdgpu_device) -> i32 {
+    match crate::amdgpu_object::amdgpu_bo_create_kernel(adev, AMDGPU_GPU_PAGE_SIZE as u64, 4096,
+        AMDGPU_GEM_DOMAIN_VRAM | AMDGPU_GEM_DOMAIN_GTT, true) {
+        Ok(Some(h)) => {
+            adev.mem_scratch_robj = Some(h);
+            adev.mem_scratch_gpu_addr = crate::amdgpu_object::amdgpu_bo_gpu_offset(adev, h);
+            adev.mem_scratch_ptr = crate::amdgpu_object::bo(adev, h).kptr;
+            0
+        }
+        Ok(None) => -12,
+        Err(r) => r,
+    }
+}
+
+/// `amdgpu_device_wb_init`: AMDGPU_MAX_WB 256-bit slots in GTT.
+fn amdgpu_device_wb_init(adev: &mut amdgpu_device) -> i32 {
+    if adev.wb.wb_obj.is_none() {
+        let size = AMDGPU_MAX_WB as u64 * 4 * 8;
+        match crate::amdgpu_object::amdgpu_bo_create_kernel(adev, size, 4096, AMDGPU_GEM_DOMAIN_GTT, true) {
+            Ok(Some(h)) => {
+                adev.wb.wb_obj = Some(h);
+                adev.wb.gpu_addr = crate::amdgpu_object::amdgpu_bo_gpu_offset(adev, h);
+                adev.wb.wb = crate::amdgpu_object::bo(adev, h).kptr;
+            }
+            Ok(None) => return -12,
+            Err(r) => {
+                Line::new().s("(").dec((-r) as u64).s(") create WB bo failed").say();
+                return r;
+            }
+        }
+        adev.wb.num_wb = AMDGPU_MAX_WB;
+        adev.wb.used = [0; (AMDGPU_MAX_WB as usize).div_ceil(64)];
+        // clear wb memory
+        crate::amdgpu_gart::kptr_fill32(adev, adev.wb.wb.unwrap(), 0, size, 0);
+    }
+    0
+}
+
+/// `amdgpu_seq64_init` (amdgpu_seq64.c).
+fn amdgpu_seq64_init(adev: &mut amdgpu_device) -> i32 {
+    if adev.seq64.sbo.is_some() {
+        return 0;
+    }
+    let size = AMDGPU_VA_RESERVED_SEQ64_SIZE as u64;
+    match crate::amdgpu_object::amdgpu_bo_create_kernel(adev, size, 4096, AMDGPU_GEM_DOMAIN_GTT, true) {
+        Ok(Some(h)) => {
+            adev.seq64.sbo = Some(h);
+            adev.seq64.gpu_addr = crate::amdgpu_object::amdgpu_bo_gpu_offset(adev, h);
+            adev.seq64.cpu_base_addr = crate::amdgpu_object::bo(adev, h).kptr;
+        }
+        Ok(None) => return -12,
+        Err(r) => {
+            Line::new().s("(").dec((-r) as u64).s(") create seq64 failed").say();
+            return r;
+        }
+    }
+    crate::amdgpu_gart::kptr_fill32(adev, adev.seq64.cpu_base_addr.unwrap(), 0, size, 0);
+    adev.seq64.num_sem = AMDGPU_MAX_SEQ64_SLOTS;
+    adev.seq64.used = alloc::vec![0; (AMDGPU_MAX_SEQ64_SLOTS as usize).div_ceil(64)];
+    0
+}
+
+/// `struct amdgpu_wb`.
+#[derive(Default)]
+pub struct amdgpu_wb {
+    pub wb_obj: Option<usize>,
+    pub wb: Option<crate::amdgpu_object::amdgpu_kptr>,
+    pub gpu_addr: u64,
+    pub num_wb: u32,
+    pub used: [u64; (AMDGPU_MAX_WB as usize).div_ceil(64)],
+}
+
+/// `struct amdgpu_seq64`.
+#[derive(Default)]
+pub struct amdgpu_seq64 {
+    pub sbo: Option<usize>,
+    pub gpu_addr: u64,
+    pub cpu_base_addr: Option<crate::amdgpu_object::amdgpu_kptr>,
+    pub num_sem: u32,
+    /// The slot bitmap.
+    pub used: Vec<u64>,
 }

@@ -413,7 +413,7 @@ pub fn amdgpu_ttm_domain_start(adev: &amdgpu_device, type_: u32) -> u64 {
 }
 
 /// `amdgpu_ttm_tt_pde_flags`.
-fn amdgpu_ttm_tt_pde_flags(tt: Option<&ttm_tt>, mem: Option<&ttm_resource>) -> u64 {
+pub fn amdgpu_ttm_tt_pde_flags(tt: Option<&ttm_tt>, mem: Option<&ttm_resource>) -> u64 {
     let mut flags = 0u64;
     if let Some(mem) = mem {
         if mem.mem_type != TTM_PL_SYSTEM {

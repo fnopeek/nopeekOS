@@ -11,6 +11,7 @@
 #include "ivsrcid/vmc/irqsrcs_vmc_1_0.h"
 #include "dce/dce_12_0_offset.h"
 #include "dce/dce_12_0_sh_mask.h"
+#include "gc/gc_9_0_sh_mask.h"
 
 u32 oracle_rreg32(struct amdgpu_device *adev, u32 reg) { return RREG32(reg); }
 void oracle_wreg32(struct amdgpu_device *adev, u32 reg, u32 v) { WREG32(reg, v); }
@@ -18,6 +19,7 @@ void oracle_gc_presets(struct amdgpu_device *adev);
 void oracle_mm_presets(struct amdgpu_device *adev);
 extern const struct amdgpu_gfxhub_funcs oracle_gfxhub_v1_0_funcs;
 extern const struct amdgpu_mmhub_funcs oracle_mmhub_v1_0_funcs;
+extern const struct amdgpu_hdp_funcs oracle_hdp_v4_0_funcs;
 
 #undef dev_info
 #define dev_info(d, ...) printf(__VA_ARGS__)
@@ -64,6 +66,39 @@ static void amdgpu_vm_manager_init(struct amdgpu_device *adev) { abort(); }
 static void gmc_v9_0_save_registers(struct amdgpu_device *adev) { abort(); }
 static int amdgpu_gmc_ras_sw_init(struct amdgpu_device *adev) { abort(); }
 static void amdgpu_gmc_sysfs_init(struct amdgpu_device *adev) { abort(); }
+/* gmc_v9_0_hw_init's world on bare metal before the rings: no KIQ, no
+ * reset in flight, no PDB0, no VRAM check outside emulation. */
+#define AMDGPU_REGS_NO_KIQ (1 << 1)
+#define RREG32_NO_KIQ(r) RREG32(r)
+#define amdgpu_sriov_runtime(adev) false
+#define spin_lock(l) ((void)0)
+#define spin_unlock(l) ((void)0)
+#define udelay(n) ((void)0)
+#define DRM_INFO(...) printf(__VA_ARGS__)
+#undef DRM_ERROR
+#define DRM_ERROR(...) printf(__VA_ARGS__)
+#define BUG_ON(c) ((void)0)
+#define for_each_set_bit(bit, addr, size) for ((bit) = 0; (bit) < (size); (bit)++) if (((addr)[0] >> (bit)) & 1)
+struct amdgpu_ring { const struct { void *emit_hdp_flush; } *funcs; };
+#define amdgpu_gmc_fw_reg_write_reg_wait(adev, req, ack, inv, mask, inst) abort()
+#define amdgpu_gmc_init_pdb0(adev) abort()
+#define amdgpu_gmc_vram_checking(adev) (abort(), 0)
+#define amdgpu_asic_flush_hdp(adev, ring) abort()
+#define amdgpu_ring_emit_hdp_flush(ring) abort()
+/* The GART's pages are not registers; gtt_mgr_recover writes only PTEs. */
+#define amdgpu_gtt_mgr_recover(mgr) ((void)0)
+#define amdgpu_bo_gpu_offset(bo) ((bo)->gpu_offset)
+static int amdgpu_vm_fault_stop;
+/* MMHUB 1.5.0 has no golden settings; the tables name MMHUB registers,
+ * which cannot meet the GC headers in this unit. */
+static void gmc_v9_0_init_golden_registers(struct amdgpu_device *adev)
+{
+	u32 v = amdgpu_ip_version(adev, MMHUB_HWIP, 0);
+
+	if (v == IP_VERSION(9, 0, 0) || v == IP_VERSION(9, 4, 0) || v == IP_VERSION(9, 1, 0) ||
+	    v == IP_VERSION(9, 2, 0))
+		abort();
+}
 #include "gmc_extracted.c"
 
 static const struct amdgpu_irq_src_funcs *const oracle_funcs = (void *)1;
@@ -107,6 +142,32 @@ int main(int argc, char **argv)
 	static struct amdgpu_ip_block gmc_block;
 	gmc_block.adev = adev;
 	int r = gmc_v9_0_sw_init(&gmc_block);
+	if (argc > 2) {
+		/* hw mode: the inputs as gmc_hw_check.rs printed them. */
+		static struct amdgpu_bo gart_bo;
+
+		gart_bo.pd_addr = strtoull(argv[2], NULL, 0);
+		gart_bo.gpu_offset = strtoull(argv[3], NULL, 0);
+		a.gart.bo = &gart_bo;
+		a.mem_scratch.gpu_addr = strtoull(argv[4], NULL, 0);
+		a.dummy_page_addr = strtoull(argv[5], NULL, 0);
+		a.hdp.funcs = &oracle_hdp_v4_0_funcs;
+		a.mode_info.num_crtc = 4;
+		a.usec_timeout = 100000;
+		a.pg_flags = strtoul(argv[6], NULL, 0);
+		a.gmc.noretry = strtoul(argv[7], NULL, 0);
+		for (int h = 0; h < AMDGPU_MAX_VMHUBS; h++) {
+			struct amdgpu_vmhub *v = &a.vmhub[h];
+
+			if (!v->ctx0_ptb_addr_lo32)
+				continue;
+			WREG32(v->vm_inv_eng0_sem + v->eng_distance * 17, 1);
+			WREG32(v->vm_inv_eng0_ack + v->eng_distance * 17, 0xffffffff);
+		}
+		printf("--- hw_init\n");
+		printf("gmc_v9_0_hw_init %d\n", gmc_v9_0_hw_init(&gmc_block));
+		return 0;
+	}
 	printf("gmc_v9_0_sw_init up to amdgpu_bo_init: %d\n", r == -1000 ? 0 : r);
 	struct amdgpu_gmc *mc = &a.gmc;
 	printf("mc_mask 0x%llx mc_vram_size 0x%llx real 0x%llx visible 0x%llx aper 0x%llx+0x%llx\n",

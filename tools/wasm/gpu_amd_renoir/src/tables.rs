@@ -155,3 +155,6 @@ pub static amdgpu_vram_names: [&[u8]; 14] = [b"UNKNOWN", b"GDDR1", b"DDR2", b"GD
 
 /// `amdgpu_vm_update_mode` in amdgpu_drv.c
 pub static amdgpu_vm_update_mode: [i32; 1] = [-1];
+
+/// `amdgpu_vm_fault_stop` in amdgpu_drv.c
+pub static amdgpu_vm_fault_stop: [i32; 1] = [0];

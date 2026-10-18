@@ -73,3 +73,5 @@ mod amdgpu_object;
 mod amdgpu_ttm;
 #[path = "../src/amdgpu_gart.rs"]
 mod amdgpu_gart;
+#[path = "../src/hdp_v4_0.rs"]
+mod hdp_v4_0;

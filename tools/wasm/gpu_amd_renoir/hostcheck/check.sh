@@ -55,6 +55,19 @@ fi
 # The VRAM manager: the same requests through Linux's buddy.c and
 # amdgpu_vram_mgr_new and through the port. A failed allocation takes no
 # id on either side, so the frees stay matched.
+# gmc_v9_0_hw_init: the port runs as on the card and names the inputs that
+# hang on memory (GART table, scratch, dummy page); Linux's side programs
+# the hubs with the same inputs. Every register write is compared.
+rustc $RF "$HERE/gmc_hw_check.rs" -o "$B/gmc_hw_check"
+"$B/gmc_hw_check" "$DISC" "$BIOS" "$FW" > "$B/gmc_hw.out"
+inputs=$(grep '^inputs ' "$B/gmc_hw.out" | cut -d' ' -f2-)
+sed -n '/^--- hw_init/,$p' "$B/gmc_hw.out" > "$B/gmc_hw.port"
+"$B/oracle_gmc" "$DISC" $inputs | sed -n '/^--- hw_init/,$p' > "$B/gmc_hw.linux"
+if diff -u "$B/gmc_hw.linux" "$B/gmc_hw.port" | head -30; cmp -s "$B/gmc_hw.linux" "$B/gmc_hw.port"; then
+    echo "gmc hw_init: port = Linux ($(grep -c '^write' "$B/gmc_hw.linux") register writes)"
+else
+    fail=1
+fi
 rustc $RF "$HERE/vram_check.rs" -o "$B/vram_check"
 python3 -I "$HERE/vram_ops.py" 0x20000000 400 > "$B/vram.ops"
 "$B/oracle_vram" 0x20000000 0x20000000 < "$B/vram.ops" > "$B/vram.linux"

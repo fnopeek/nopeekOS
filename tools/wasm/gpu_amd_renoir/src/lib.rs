@@ -19,6 +19,7 @@ mod amdgpu_atombios;
 mod amdgpu_atomfirmware;
 mod amdgpu_bios;
 mod amdgpu_device;
+mod hdp_v4_0;
 mod amdgpu_gart;
 mod amdgpu_ttm;
 mod amdgpu_object;

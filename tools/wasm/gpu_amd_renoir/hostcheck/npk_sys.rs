@@ -35,6 +35,15 @@ pub fn fake_card_unset(rule: fn(u32) -> u32, index_data: (u32, u32)) {
     UNSET.with(|u| *u.borrow_mut() = Some((rule, index_data)));
 }
 
+thread_local! {
+    static ECHO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// From here on every register write is printed as it happens.
+pub fn fake_card_echo(on: bool) {
+    ECHO.with(|e| e.set(on));
+}
+
 /// Forget the writes seen so far.
 pub fn fake_card_clear_writes() {
     CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.writes.clear() });
@@ -158,6 +167,9 @@ impl Mmio {
             if let Some(c) = c.borrow_mut().as_mut() {
                 let reg = off / 4;
                 c.writes.push((reg, v));
+                if ECHO.with(|e| e.get()) {
+                    println!("write reg {:#x} = {:#x}", reg, v);
+                }
                 if let Some((rule, (index, data))) = UNSET.with(|u| *u.borrow()) {
                     if reg == data {
                         let a = c.regs.get(&index).copied().unwrap_or_else(|| rule(index));

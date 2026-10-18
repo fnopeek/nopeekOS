@@ -80,14 +80,32 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
 
 {
     $X "$AMD/amdgpu/amdgpu_irq.h" '#AMDGPU_MAX_IRQ_SRC_ID' '#AMDGPU_IRQ_CLIENTID_MAX' amdgpu_irq_src amdgpu_irq_client
-    $X "$AMD/amdgpu/amdgpu_vm.h" '#AMDGPU_MAX_VMHUBS' '#AMDGPU_GFXHUB_START' '#AMDGPU_MMHUB0_START' \
+    $X "$AMD/amdgpu/amdgpu_vm.h" '#AMDGPU_VM_FAULT_STOP_ALWAYS' '#AMDGPU_MAX_VMHUBS' '#AMDGPU_GFXHUB_START' '#AMDGPU_MMHUB0_START' \
         '#AMDGPU_MMHUB1_START' '#AMDGPU_GFXHUB' '#AMDGPU_MMHUB0' '#AMDGPU_MMHUB1' amdgpu_vm_level
     $X "$AMD/amdgpu/amdgpu_gart.h" '#AMDGPU_GPU_PAGE_SHIFT'
     $X "$AMD/amdgpu/amdgpu_gmc.h" '#AMDGPU_GMC_HOLE_START' amdgpu_gart_placement amdgpu_vmhub
     $X "$AMD/amdgpu/amdgpu.h" '#AMDGPU_VBIOS_VGA_ALLOCATION'
 } > "$B/gmc_types.h"
-$X "$AMD/amdgpu/gfxhub_v1_0.c" gfxhub_v1_0_get_mc_fb_offset gfxhub_v1_0_init > "$B/hub_gc_extracted.c"
-$X "$AMD/amdgpu/mmhub_v1_0.c" mmhub_v1_0_get_fb_location mmhub_v1_0_init > "$B/hub_mm_extracted.c"
+{
+    $X "$AMD/amdgpu/amdgpu.h" amdgpu_ip_version
+    $X "$AMD/amdgpu/gfxhub_v1_0.c" gfxhub_v1_0_get_mc_fb_offset gfxhub_v1_0_init gfxhub_v1_0_setup_vm_pt_regs \
+        gfxhub_v1_0_init_gart_aperture_regs gfxhub_v1_0_init_system_aperture_regs gfxhub_v1_0_init_tlb_regs \
+        gfxhub_v1_0_init_cache_regs gfxhub_v1_0_enable_system_domain gfxhub_v1_0_disable_identity_aperture \
+        gfxhub_v1_0_setup_vmid_config gfxhub_v1_0_program_invalidation gfxhub_v1_0_gart_enable \
+        gfxhub_v1_0_set_fault_enable_default
+} > "$B/hub_gc_extracted.c"
+{
+    $X "$AMD/amdgpu/amdgpu.h" amdgpu_ip_version
+    $X "$AMD/amdgpu/mmhub_v1_0.c" mmhub_v1_0_get_fb_location mmhub_v1_0_init mmhub_v1_0_setup_vm_pt_regs \
+        mmhub_v1_0_init_gart_aperture_regs mmhub_v1_0_init_system_aperture_regs mmhub_v1_0_init_tlb_regs \
+        mmhub_v1_0_init_cache_regs mmhub_v1_0_enable_system_domain mmhub_v1_0_disable_identity_aperture \
+        mmhub_v1_0_init_saw mmhub_v1_0_setup_vmid_config mmhub_v1_0_program_invalidation \
+        mmhub_v1_0_update_power_gating mmhub_v1_0_gart_enable mmhub_v1_0_set_fault_enable_default
+} > "$B/hub_mm_extracted.c"
+{
+    $X "$AMD/amdgpu/amdgpu.h" amdgpu_ip_version
+    $X "$AMD/amdgpu/hdp_v4_0.c" hdp_v4_0_init_registers
+} > "$B/hub_hdp_extracted.c"
 {
     $X "$AMD/amdgpu/amdgpu.h" amdgpu_is_multi_aid '#REG_GET_FIELD'
     $X "$AMD/amdgpu/amdgpu_gmc.h" '#amdgpu_gmc_get_vbios_fb_size'
@@ -98,6 +116,8 @@ $X "$AMD/amdgpu/mmhub_v1_0.c" mmhub_v1_0_get_fb_location mmhub_v1_0_init > "$B/h
     $X "$AMD/amdgpu/amdgpu_gmc.c" four_gb amdgpu_gmc_is_pdb0_enabled amdgpu_gmc_set_agp_default \
         amdgpu_gmc_sysvm_location amdgpu_gmc_vram_location amdgpu_gmc_gart_location amdgpu_gmc_agp_location \
         amdgpu_gmc_get_vbios_allocations
+    $X "$AMD/amdgpu/amdgpu_gmc.c" amdgpu_gmc_vram_mc2pa
+    $X "$AMD/amdgpu/amdgpu_device.c" amdgpu_device_flush_hdp
     $X "$AMD/amdgpu/gmc_v9_0.c" '#mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION' \
         '#mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_BASE_IDX' \
         '#HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION__PRI_VIEWPORT_WIDTH__SHIFT' \
@@ -106,7 +126,8 @@ $X "$AMD/amdgpu/mmhub_v1_0.c" mmhub_v1_0_get_fb_location mmhub_v1_0_init > "$B/h
         '#HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION__PRI_VIEWPORT_HEIGHT_MASK' \
         '#mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_DCN2' '#mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_DCN2_BASE_IDX' \
         gmc_v9_0_get_vbios_fb_size gmc_v9_0_vram_gtt_location gmc_v9_0_mc_init gmc_v9_4_3_init_vram_info \
-        gmc_v9_0_sw_init
+        gmc_v9_0_sw_init gmc_v9_0_use_invalidate_semaphore gmc_v9_0_get_invalidate_req gmc_v9_0_flush_gpu_tlb \
+        gmc_v9_0_gart_enable gmc_v9_0_hw_init
 } > "$B/gmc_extracted.c"
 
 CF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
@@ -117,7 +138,8 @@ gcc $CF -I "$AMD/display/include" "$HERE/main_ucode.c" -o "$B/oracle_ucode"
 gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_common.c" -o "$B/oracle_common"
 gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_gc.c" -o "$B/hub_gc.o"
 gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_mm.c" -o "$B/hub_mm.o"
-gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_gmc.c" "$B/hub_gc.o" "$B/hub_mm.o" -o "$B/oracle_gmc"
+gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_hdp.c" -o "$B/hub_hdp.o"
+gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_gmc.c" "$B/hub_gc.o" "$B/hub_mm.o" "$B/hub_hdp.o" -o "$B/oracle_gmc"
 # The VRAM manager: buddy.c and tools/lib/rbtree.c whole, amdgpu_vram_mgr.c's functions.
 mkdir -p "$B/buddy/linux"
 cp "$L/include/linux/gpu_buddy.h" "$B/buddy/linux/"
