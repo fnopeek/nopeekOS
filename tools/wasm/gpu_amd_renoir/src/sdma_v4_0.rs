@@ -1,5 +1,5 @@
 //! amdgpu/sdma_v4_0.c and amdgpu_sdma.c (Linux 6.18.55): the SDMA block's
-//! early_init, which requests and reads the SDMA microcode.
+//! early_init, which requests and reads the SDMA microcode, and its sw_init.
 
 use crate::amdgpu_device::amdgpu_device;
 use crate::amdgpu_ucode::{amdgpu_ucode_ip_version_decode, amdgpu_ucode_request, fw_source, le16, le32, page_align};
@@ -18,6 +18,9 @@ pub struct amdgpu_sdma_instance {
     pub ring_me: u32,
     pub page_funcs: Option<&'static str>,
     pub page_me: u32,
+    /// Indices into `adev.rings`.
+    pub ring: Option<usize>,
+    pub page: Option<usize>,
 }
 
 /// `amdgpu_sdma_init_inst_ctx`.
@@ -135,5 +138,78 @@ pub fn sdma_v4_0_early_init(adev: &mut amdgpu_device) -> i32 {
     adev.sdma.doorbell_invalid_irq.funcs = Some("sdma_v4_0_doorbell_invalid_irq_funcs");
     adev.sdma.pool_timeout_irq.funcs = Some("sdma_v4_0_pool_timeout_irq_funcs");
     adev.sdma.srbm_write_irq.funcs = Some("sdma_v4_0_srbm_write_irq_funcs");
+    0
+}
+
+/// `sdma_v4_0_seq_to_irq_id`.
+fn sdma_v4_0_seq_to_irq_id(seq_num: u32) -> u32 {
+    match seq_num {
+        0 => SOC15_IH_CLIENTID_SDMA0,
+        1 => SOC15_IH_CLIENTID_SDMA1,
+        _ => (-22i32) as u32,
+    }
+}
+
+/// `sdma_v4_0_sw_init`: SDMA 4.1.2, one instance on MMHUB 0, no page
+/// queue, no RAS block.
+pub fn sdma_v4_0_sw_init(adev: &mut amdgpu_device) -> i32 {
+    use crate::amdgpu_irq::amdgpu_irq_add_id;
+    let n = adev.sdma.num_instances;
+    let trap = adev.sdma.trap_irq;
+    let ecc = adev.sdma.ecc_irq;
+    let vm_hole = adev.sdma.vm_hole_irq;
+    let doorbell_invalid = adev.sdma.doorbell_invalid_irq;
+    let pool_timeout = adev.sdma.pool_timeout_irq;
+    let srbm_write = adev.sdma.srbm_write_irq;
+    // SDMA trap event
+    for i in 0..n {
+        let r = amdgpu_irq_add_id(adev, sdma_v4_0_seq_to_irq_id(i), SDMA0_4_0__SRCID__SDMA_TRAP, &trap, "sdma.trap_irq");
+        if r != 0 {
+            return r;
+        }
+    }
+    // SDMA SRAM ECC event
+    for i in 0..n {
+        let r = amdgpu_irq_add_id(adev, sdma_v4_0_seq_to_irq_id(i), SDMA0_4_0__SRCID__SDMA_SRAM_ECC, &ecc, "sdma.ecc_irq");
+        if r != 0 {
+            return r;
+        }
+    }
+    // SDMA VM_HOLE/DOORBELL_INV/POLL_TIMEOUT/SRBM_WRITE_PROTECTION event
+    for i in 0..n {
+        for (src_id, src, name) in [
+            (SDMA0_4_0__SRCID__SDMA_VM_HOLE, &vm_hole, "sdma.vm_hole_irq"),
+            (SDMA0_4_0__SRCID__SDMA_DOORBELL_INVALID, &doorbell_invalid, "sdma.doorbell_invalid_irq"),
+            (SDMA0_4_0__SRCID__SDMA_POLL_TIMEOUT, &pool_timeout, "sdma.pool_timeout_irq"),
+            (SDMA0_4_0__SRCID__SDMA_SRBMWRITE, &srbm_write, "sdma.srbm_write_irq"),
+        ] {
+            let r = amdgpu_irq_add_id(adev, sdma_v4_0_seq_to_irq_id(i), src_id, src, name);
+            if r != 0 {
+                return r;
+            }
+        }
+    }
+
+    if adev.ip_version(SDMA0_HWIP, 0) == 4 << 24 | 2 << 16 | 2 << 8 || adev.sdma.has_page_queue {
+        Line::new().s("sdma_v4_0_sw_init: Arcturus hubs and page queues are not ported").say();
+        return -22;
+    }
+    for i in 0..n as usize {
+        let Some(funcs) = crate::amdgpu_ring::ring_funcs(adev.sdma.instance[i].ring_funcs) else { return -22 };
+        let mut ring = crate::amdgpu_ring::amdgpu_ring::new(funcs, alloc::format!("sdma{}", i));
+        ring.me = adev.sdma.instance[i].ring_me;
+        ring.use_doorbell = true;
+        // doorbell size is 2 dwords, get DWORD offset
+        ring.doorbell_index = adev.doorbell_index.sdma_engine[i] << 1;
+        ring.vm_hub = AMDGPU_MMHUB0_0_;
+        match crate::amdgpu_ring::amdgpu_ring_init(adev, ring, 1024, crate::amdgpu_ring::amdgpu_irq_src_id::sdma_trap,
+            AMDGPU_SDMA_IRQ_INSTANCE0 + i as u32, AMDGPU_RING_PRIO_DEFAULT) {
+            Ok(k) => adev.sdma.instance[i].ring = Some(k),
+            Err(r) => return r,
+        }
+    }
+    // amdgpu_sdma_ras_sw_init: no adev->sdma.ras.
+    // Allocate memory for SDMA IP Dump buffer
+    adev.sdma.ip_dump = alloc::vec![0; (n * SDMA_REG_LIST_4_0_COUNT) as usize];
     0
 }

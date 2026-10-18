@@ -10,7 +10,7 @@ use crate::ttm::{ttm_buffer_object, ttm_place};
 use alloc::vec::Vec;
 
 const PAGE_SHIFT: u32 = 12;
-const PAGE_SIZE: u64 = 1 << PAGE_SHIFT;
+pub const PAGE_SIZE: u64 = 1 << PAGE_SHIFT;
 
 /// Where a kernel mapping of a buffer points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -102,6 +102,38 @@ fn ip_init_gmc(adev: &mut amdgpu_device) {
     }
     l.s(", ").dec(adev.mman.bos.iter().flatten().count() as u64).s(" kernel buffers").say();
     Line::new().s("stage 3a done: gmc_v9_0_sw_init").say();
+    ip_init_sw(adev);
+}
+
+/// Stage 3b: the sw_init of the remaining blocks.
+fn ip_init_sw(adev: &mut amdgpu_device) {
+    let r = dev::amdgpu_device_ip_init_sw(adev);
+    if r != 0 {
+        Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
+        return;
+    }
+    let mut l = Line::new();
+    l.s("rings:");
+    for ring in adev.rings.iter() {
+        l.s(" ").s(&ring.name);
+    }
+    l.say();
+    for ring in adev.rings.iter() {
+        Line::new().s("ring ").dec(ring.idx as u64).s(" ").s(&ring.name).s(" size ").dec(ring.ring_size as u64)
+            .s(" gpu ").hex64(ring.gpu_addr).s(" doorbell ").hex(ring.doorbell_index).s(" me/pipe/queue ")
+            .dec(ring.me as u64).s("/").dec(ring.pipe as u64).s("/").dec(ring.queue as u64).dbg();
+    }
+    let b = &adev.smu.smu_table.boot_values;
+    Line::new().s("smu boot: gfxclk ").dec(b.gfxclk as u64).s(" uclk ").dec(b.uclk as u64).s(" socclk ")
+        .dec(b.socclk as u64).s(" dcefclk ").dec(b.dcefclk as u64).s(" vclk ").dec(b.vclk as u64).s(" dclk ")
+        .dec(b.dclk as u64).s(" fclk ").dec(b.fclk as u64).s(" (10 kHz)").say();
+    if let Some(f) = adev.dm.dmub_fb_info.as_ref() {
+        Line::new().s("dmub: fb ").hex64(adev.dm.dmub_bo_gpu_addr).s(" windows ").dec(f.num_fb as u64)
+            .s(", fw 0x").hexw(adev.dm.dmcub_fw_version, 8).say();
+    }
+    Line::new().s("fw_size ").dec(adev.firmware.fw_size as u64).s(", ")
+        .dec(adev.mman.bos.iter().flatten().count() as u64).s(" kernel buffers").say();
+    Line::new().s("stage 3b done: sw_init of every block").say();
 }
 
 /// The PCIe link registers `amdgpu_device_get_pcie_info` read, raw.

@@ -106,6 +106,7 @@ pub struct amdgpu_pm {
     pub pcie_gen_mask: u32,
     pub pcie_mlw_mask: u32,
     pub smu_prv_buffer_size: u32,
+    pub no_fan: bool,
 }
 
 /// `struct amdgpu_ip_block_status`.
@@ -239,6 +240,25 @@ pub struct amdgpu_gfx_config {
     pub gc_tcc_size: u32,
     pub gc_tcc_cache_line_size: u32,
     pub gc_num_cu_per_sqc: u32,
+    pub max_hw_contexts: u32,
+    pub sc_prim_fifo_size_frontend: u32,
+    pub sc_prim_fifo_size_backend: u32,
+    pub sc_hiz_tile_fifo_size: u32,
+    pub sc_earlyz_tile_fifo_size: u32,
+    pub gb_addr_config: u32,
+    pub gb_addr_config_fields: amdgpu_gb_addr_config,
+    pub max_tile_pipes: u32,
+}
+
+/// `struct gb_addr_config`.
+#[derive(Default, Clone, Copy)]
+pub struct amdgpu_gb_addr_config {
+    pub pipe_interleave_size: u32,
+    pub num_pipes: u32,
+    pub max_compress_frags: u32,
+    pub num_banks: u32,
+    pub num_se: u32,
+    pub num_rb_per_se: u32,
 }
 
 /// `struct amdgpu_cu_info`, the part the GC info table fills.
@@ -304,6 +324,24 @@ pub struct amdgpu_gfx {
     pub gfx_off_req_count: u32,
     pub gfx_off_residency: u32,
     pub gfx_off_entrycount: u64,
+    pub mec: crate::gfx_v9_0::amdgpu_mec,
+    /// `mec_bitmap[0].queue_bitmap`.
+    pub mec_queue_bitmap: [u64; (AMDGPU_MAX_COMPUTE_QUEUES as usize).div_ceil(64)],
+    pub kiq: crate::gfx_v9_0::amdgpu_kiq,
+    /// Indices into `adev.rings`.
+    pub gfx_ring: Vec<usize>,
+    pub compute_ring: Vec<usize>,
+    pub gfx_current_status: u32,
+    pub enable_cleaner_shader: bool,
+    pub cleaner_shader_size: u32,
+    pub cleaner_shader_obj: Option<usize>,
+    pub cleaner_shader_gpu_addr: u64,
+    pub cleaner_shader_cpu_ptr: Option<crate::amdgpu_object::amdgpu_kptr>,
+    pub gfx_supported_reset: u32,
+    pub compute_supported_reset: u32,
+    pub ce_ram_size: u32,
+    pub ip_dump_core: Vec<u32>,
+    pub ip_dump_compute_queues: Vec<u32>,
 }
 
 /// `struct amdgpu_xgmi`, the part early_init reads and sets.
@@ -411,6 +449,7 @@ pub struct amdgpu_sdma {
     pub doorbell_invalid_irq: amdgpu_irq_src,
     pub pool_timeout_irq: amdgpu_irq_src,
     pub srbm_write_irq: amdgpu_irq_src,
+    pub ip_dump: Vec<u32>,
 }
 
 /// `struct amdgpu_umc`.
@@ -432,6 +471,47 @@ pub struct amdgpu_vcn_inst {
     pub ring_dec_funcs: Option<&'static str>,
     pub ring_enc_funcs: [Option<&'static str>; AMDGPU_MAX_VCN_ENC_RINGS as usize],
     pub irq: amdgpu_irq_src,
+    pub indirect_sram: bool,
+    pub using_unified_queue: bool,
+    pub fw_version: u32,
+    pub vcpu_bo: Option<usize>,
+    pub gpu_addr: u64,
+    pub cpu_addr: Option<crate::amdgpu_object::amdgpu_kptr>,
+    pub fw_shared: amdgpu_vcn_fw_shared,
+    pub dpg_sram_bo: Option<usize>,
+    pub dpg_sram_gpu_addr: u64,
+    pub dpg_sram_cpu_addr: Option<crate::amdgpu_object::amdgpu_kptr>,
+    /// Indices into `adev.rings`.
+    pub ring_dec: Option<usize>,
+    pub ring_enc: [Option<usize>; AMDGPU_MAX_VCN_ENC_RINGS as usize],
+    pub internal: amdgpu_vcn_reg,
+    pub external: amdgpu_vcn_reg,
+}
+
+/// `struct amdgpu_vcn_fw_shared`: `cpu_addr` is a byte offset into the
+/// VCPU buffer's mapping.
+#[derive(Default)]
+pub struct amdgpu_vcn_fw_shared {
+    pub cpu_off: u64,
+    pub gpu_addr: u64,
+    pub mem_size: u32,
+    pub log_offset: u32,
+}
+
+/// `struct amdgpu_vcn_reg`.
+#[derive(Default)]
+pub struct amdgpu_vcn_reg {
+    pub data0: u32,
+    pub data1: u32,
+    pub cmd: u32,
+    pub nop: u32,
+    pub context_id: u32,
+    pub ib_vmid: u32,
+    pub ib_bar_low: u32,
+    pub ib_bar_high: u32,
+    pub ib_size: u32,
+    pub gp_scratch8: u32,
+    pub scratch9: u32,
 }
 
 /// `struct amdgpu_vcn`.
@@ -441,6 +521,10 @@ pub struct amdgpu_vcn {
     pub inst_mask: u32,
     pub harvest_config: u32,
     pub inst: [amdgpu_vcn_inst; AMDGPU_MAX_VCN_INSTANCES as usize],
+    pub fw_version: u32,
+    pub supported_reset: u32,
+    pub ip_dump: Vec<u32>,
+    pub reg_count: u32,
 }
 
 /// `struct amdgpu_jpeg`.
@@ -453,6 +537,15 @@ pub struct amdgpu_jpeg {
     /// `inst[0].ring_dec[0].funcs`, `inst[0].irq`.
     pub inst0_ring_dec_funcs: Option<&'static str>,
     pub inst0_irq: amdgpu_irq_src,
+    pub indirect_sram: bool,
+    /// `inst[0].ring_dec[0]`, an index into `adev.rings`.
+    pub inst0_ring_dec: Option<usize>,
+    /// `internal.jpeg_pitch[0]`, `inst[0].external.jpeg_pitch[0]`.
+    pub internal_jpeg_pitch0: u32,
+    pub inst0_external_jpeg_pitch0: u32,
+    pub ip_dump: Vec<u32>,
+    pub reg_count: u32,
+    pub supported_reset: u32,
 }
 
 /// `struct amdgpu_irq`, the part early_init and the sw_inits set.
@@ -579,6 +672,14 @@ pub struct amdgpu_device {
     pub dc_enabled: bool,
     /// `adev->dm.dmub_fw`.
     pub dm_dmub_fw: Option<crate::linux::firmware>,
+    pub dm: crate::amdgpu_dm::amdgpu_display_manager,
+    pub enable_mes_kiq: bool,
+    pub debug_disable_gpu_ring_reset: bool,
+    pub debug_disable_soft_recovery: bool,
+    /// `adev->rings`, by `ring->idx`.
+    pub rings: Vec<crate::amdgpu_ring::amdgpu_ring>,
+    /// `gpu_sched[hw_ip][hw_prio]`: the rings each scheduler list holds.
+    pub gpu_sched: [[Vec<usize>; AMDGPU_RING_PRIO_MAX as usize]; AMDGPU_HW_IP_NUM as usize],
     pub ip_blocks: Vec<amdgpu_ip_block>,
     /// `adev->bios`, from `amdgpu_get_bios`.
     pub bios: Vec<u8>,
@@ -676,6 +777,12 @@ impl amdgpu_device {
             powerplay_pp_funcs: None,
             dc_enabled: false,
             dm_dmub_fw: None,
+            dm: Default::default(),
+            enable_mes_kiq: false,
+            debug_disable_gpu_ring_reset: false,
+            debug_disable_soft_recovery: false,
+            rings: Vec::new(),
+            gpu_sched: Default::default(),
             ip_blocks: Vec::new(),
             bios: Vec::new(),
             is_atom_fw: false,
@@ -1504,6 +1611,37 @@ pub fn amdgpu_device_ip_init_gmc(adev: &mut amdgpu_device) -> i32 {
         return 0;
     }
     -22
+}
+
+/// `amdgpu_device_ip_init`, the sw_init loop after the GMC block: IH, PSP,
+/// SMU, DM, GFX, SDMA, VCN, JPEG, each by its block type.
+pub fn amdgpu_device_ip_init_sw(adev: &mut amdgpu_device) -> i32 {
+    for i in 0..adev.ip_blocks.len() {
+        if !adev.ip_blocks[i].status.valid || adev.ip_blocks[i].status.sw {
+            continue;
+        }
+        let r = match adev.ip_blocks[i].version.type_ {
+            AMD_IP_BLOCK_TYPE_IH => crate::vega10_ih::vega10_ih_sw_init(adev),
+            AMD_IP_BLOCK_TYPE_PSP => crate::amdgpu_psp::psp_sw_init(adev),
+            AMD_IP_BLOCK_TYPE_SMC => crate::amdgpu_smu::smu_sw_init(adev),
+            AMD_IP_BLOCK_TYPE_DCE => crate::amdgpu_dm::dm_sw_init(adev),
+            AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_sw_init(adev),
+            AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_sw_init(adev),
+            AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::vcn_v2_0_sw_init(adev),
+            AMD_IP_BLOCK_TYPE_JPEG => crate::jpeg_v2_0::jpeg_v2_0_sw_init(adev),
+            t => {
+                Line::new().s("sw_init of IP block type ").dec(t as u64).s(": not ported").say();
+                -22
+            }
+        };
+        if r != 0 {
+            Line::new().s("sw_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                .s("> failed ").dec((-r) as u64).say();
+            return r;
+        }
+        adev.ip_blocks[i].status.sw = true;
+    }
+    0
 }
 
 /// `amdgpu_device_mem_scratch_init`.

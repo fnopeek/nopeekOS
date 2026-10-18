@@ -3211,3 +3211,569 @@ pub const SMU12_SYSPLL0_VCLK_ID: u32 = 0x5;
 pub const SMU12_SYSPLL0_DCLK_ID: u32 = 0x7;
 /// include/atomfirmware.h:3949
 pub const SMU12_SYSPLL3_0_FCLK_ID: u32 = 0x0;
+
+// smu_sw_init for Renoir (amdgpu_smu.c, renoir_ppt.c, smu_v12_0.c)
+/// ?
+pub const SMU_TABLE_WATERMARKS: u32 = 0x1;
+/// ?
+pub const SMU_TABLE_DPMCLOCKS: u32 = 0x3;
+/// ?
+pub const SMU_TABLE_SMU_METRICS: u32 = 0x8;
+/// ?
+pub const SMU_TABLE_PMSTATUSLOG: u32 = 0x7;
+/// ?
+pub const SMU_TABLE_COUNT: u32 = 0x14;
+/// ?
+pub const SMU_FEATURE_MAX: u32 = 0x40;
+/// ?
+pub const SMU_MEMORY_POOL_SIZE_ZERO: u32 = 0x0;
+/// include/kgd_pp_interface.h:181
+pub const PP_SMC_POWER_PROFILE_BOOTUP_DEFAULT: u32 = 0x0;
+/// include/kgd_pp_interface.h:191
+pub const PP_SMC_POWER_PROFILE_COUNT: u32 = 0xa;
+/// include/kgd_pp_interface.h:56
+pub const AMD_DPM_FORCED_LEVEL_AUTO: u32 = 0x1;
+/// The value of `sizeof(Watermarks_t)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SIZEOF_Watermarks_t: u32 = 0x7c;
+/// The value of `sizeof(DpmClocks_t)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SIZEOF_DpmClocks_t: u32 = 0x148;
+/// The value of `sizeof(SmuMetrics_t)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SIZEOF_SmuMetrics_t: u32 = 0x94;
+/// The value of `sizeof(struct gpu_metrics_v2_2)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SIZEOF_gpu_metrics_v2_2: u32 = 0x80;
+/// The value of `offsetof(struct atom_master_list_of_data_tables_v2_1, firmwareinfo) / sizeof(uint16_t)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const IDX_firmwareinfo_v2_1: u32 = 0x4;
+/// The value of `offsetof(struct atom_common_table_header, format_revision)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const ATH_FORMAT_REVISION: u32 = 0x2;
+/// The value of `offsetof(struct atom_common_table_header, content_revision)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const ATH_CONTENT_REVISION: u32 = 0x3;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, firmware_revision)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI31_SMU_FIRMWARE_REVISION: u32 = 0x4;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, bootup_sclk_in10khz)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI31_SMU_BOOTUP_SCLK_IN10KHZ: u32 = 0x8;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, bootup_mclk_in10khz)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI31_SMU_BOOTUP_MCLK_IN10KHZ: u32 = 0xc;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, bootup_vddc_mv)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI31_SMU_BOOTUP_VDDC_MV: u32 = 0x1c;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, bootup_vddci_mv)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI31_SMU_BOOTUP_VDDCI_MV: u32 = 0x1e;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, bootup_mvddc_mv)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI31_SMU_BOOTUP_MVDDC_MV: u32 = 0x20;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, bootup_vddgfx_mv)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI31_SMU_BOOTUP_VDDGFX_MV: u32 = 0x22;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, coolingsolution_id)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI31_SMU_COOLINGSOLUTION_ID: u32 = 0x25;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, firmware_capability)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI31_SMU_FIRMWARE_CAPABILITY: u32 = 0x10;
+/// The value of `offsetof(struct atom_firmware_info_v3_3, firmware_revision)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI33_SMU_FIRMWARE_REVISION: u32 = 0x4;
+/// The value of `offsetof(struct atom_firmware_info_v3_3, bootup_sclk_in10khz)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI33_SMU_BOOTUP_SCLK_IN10KHZ: u32 = 0x8;
+/// The value of `offsetof(struct atom_firmware_info_v3_3, bootup_mclk_in10khz)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI33_SMU_BOOTUP_MCLK_IN10KHZ: u32 = 0xc;
+/// The value of `offsetof(struct atom_firmware_info_v3_3, bootup_vddc_mv)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI33_SMU_BOOTUP_VDDC_MV: u32 = 0x1c;
+/// The value of `offsetof(struct atom_firmware_info_v3_3, bootup_vddci_mv)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI33_SMU_BOOTUP_VDDCI_MV: u32 = 0x1e;
+/// The value of `offsetof(struct atom_firmware_info_v3_3, bootup_mvddc_mv)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI33_SMU_BOOTUP_MVDDC_MV: u32 = 0x20;
+/// The value of `offsetof(struct atom_firmware_info_v3_3, bootup_vddgfx_mv)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI33_SMU_BOOTUP_VDDGFX_MV: u32 = 0x22;
+/// The value of `offsetof(struct atom_firmware_info_v3_3, coolingsolution_id)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI33_SMU_COOLINGSOLUTION_ID: u32 = 0x25;
+/// The value of `offsetof(struct atom_firmware_info_v3_3, firmware_capability)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI33_SMU_FIRMWARE_CAPABILITY: u32 = 0x10;
+/// The value of `offsetof(struct atom_firmware_info_v3_3, pplib_pptable_id)` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const FWI33_SMU_PPLIB_PPTABLE_ID: u32 = 0x3c;
+
+// dm_dmub_sw_init (amdgpu_dm.c, dmub_srv.c)
+/// display/amdgpu_dm/amdgpu_dm.c:156
+pub const PSP_HEADER_BYTES: u32 = 0x100;
+/// display/amdgpu_dm/amdgpu_dm.c:159
+pub const PSP_FOOTER_BYTES: u32 = 0x100;
+/// The value of `offsetof(struct dmcub_firmware_header_v1_0, inst_const_bytes)` in ../display/amdgpu_dm/amdgpu_dm.c
+pub const DMCUB_HDR_INST_CONST_BYTES: u32 = 0x20;
+/// The value of `offsetof(struct dmcub_firmware_header_v1_0, bss_data_bytes)` in ../display/amdgpu_dm/amdgpu_dm.c
+pub const DMCUB_HDR_BSS_DATA_BYTES: u32 = 0x24;
+/// The value of `offsetof(struct common_firmware_header, ucode_version)` in ../display/amdgpu_dm/amdgpu_dm.c
+pub const UCODE_HDR_UCODE_VERSION: u32 = 0x10;
+/// The value of `offsetof(struct common_firmware_header, ucode_array_offset_bytes)` in ../display/amdgpu_dm/amdgpu_dm.c
+pub const UCODE_HDR_UCODE_ARRAY_OFFSET_BYTES: u32 = 0x18;
+/// ?
+pub const DMUB_ASIC_DCN21: u32 = 0x2;
+/// ?
+pub const DMUB_WINDOW_TOTAL: u32 = 0xb;
+/// ?
+pub const DMUB_WINDOW_0_INST_CONST: u32 = 0x0;
+/// ?
+pub const DMUB_WINDOW_1_STACK: u32 = 0x1;
+/// ?
+pub const DMUB_WINDOW_2_BSS_DATA: u32 = 0x2;
+/// ?
+pub const DMUB_WINDOW_3_VBIOS: u32 = 0x3;
+/// ?
+pub const DMUB_WINDOW_4_MAILBOX: u32 = 0x4;
+/// ?
+pub const DMUB_WINDOW_5_TRACEBUFF: u32 = 0x5;
+/// ?
+pub const DMUB_WINDOW_6_FW_STATE: u32 = 0x6;
+/// ?
+pub const DMUB_WINDOW_7_SCRATCH_MEM: u32 = 0x7;
+/// ?
+pub const DMUB_WINDOW_IB_MEM: u32 = 0x8;
+/// ?
+pub const DMUB_WINDOW_SHARED_STATE: u32 = 0x9;
+/// ?
+pub const DMUB_WINDOW_LSDMA_BUFFER: u32 = 0xa;
+/// display/amdgpu_dm/amdgpu_dm.c:2503
+pub const DMUB_WINDOW_MEMORY_TYPE_FB: u32 = 0x0;
+/// ?
+pub const DMUB_WINDOW_MEMORY_TYPE_GART: u32 = 0x1;
+/// ?
+pub const DMUB_STATUS_OK: u32 = 0x0;
+/// ?
+pub const DMUB_STATUS_INVALID: u32 = 0x4;
+/// display/dmub/src/dmub_srv.c:54
+pub const DMUB_STACK_SIZE: u32 = 0x20000;
+/// display/dmub/src/dmub_srv.c:57
+pub const DMUB_CONTEXT_SIZE: u32 = 0x80000;
+/// display/dmub/src/dmub_srv.c:60
+pub const DMUB_MAILBOX_SIZE: u32 = 0x4000;
+/// display/dmub/src/dmub_srv.c:63
+pub const DMUB_FW_STATE_SIZE: u32 = 0x10000;
+/// display/dmub/src/dmub_srv.c:66
+pub const DMUB_SCRATCH_MEM_SIZE: u32 = 0x400;
+/// display/dmub/src/dmub_srv.c:69
+pub const DMUB_IB_MEM_SIZE: u32 = 0x500;
+/// display/dmub/src/dmub_srv.c:72
+pub const DMUB_LSDMA_RB_SIZE: u32 = 0x10000;
+/// display/dmub/src/dmub_srv.c:75
+pub const DMUB_NUM_WINDOWS: u32 = 0xb;
+/// ?
+pub const DMUB_TRACE_BUFFER_SIZE: u32 = 0x10000;
+/// ?
+pub const DMUB_FW_HEADER_SHARED_STATE_SIZE: u32 = 0x500;
+/// ?
+pub const DMUB_FW_META_MAGIC: u32 = 0x444d5542;
+/// ?
+pub const DMUB_FW_META_OFFSET: u32 = 0x24;
+/// The value of `sizeof(union dmub_fw_meta)` in ../display/dmub/src/dmub_srv.c
+pub const SIZEOF_dmub_fw_meta: u32 = 0x40;
+/// The value of `offsetof(struct dmub_fw_meta_info, magic_value)` in ../display/dmub/src/dmub_srv.c
+pub const FWMETA_MAGIC_VALUE: u32 = 0x0;
+/// The value of `offsetof(struct dmub_fw_meta_info, fw_region_size)` in ../display/dmub/src/dmub_srv.c
+pub const FWMETA_FW_REGION_SIZE: u32 = 0x4;
+/// The value of `offsetof(struct dmub_fw_meta_info, trace_buffer_size)` in ../display/dmub/src/dmub_srv.c
+pub const FWMETA_TRACE_BUFFER_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct dmub_fw_meta_info, fw_version)` in ../display/dmub/src/dmub_srv.c
+pub const FWMETA_FW_VERSION: u32 = 0xc;
+/// The value of `offsetof(struct dmub_fw_meta_info, shared_state_size)` in ../display/dmub/src/dmub_srv.c
+pub const FWMETA_SHARED_STATE_SIZE: u32 = 0x14;
+
+// The rings: amdgpu_ring.c and the ring funcs tables they read
+/// amdgpu/amdgpu_ring.h:40
+pub const AMDGPU_MAX_RINGS: u32 = 0x95;
+/// ?
+pub const AMDGPU_HW_IP_NUM: u32 = 0xa;
+/// amdgpu/amdgpu_ring.h:52
+pub const AMDGPU_RING_PRIO_DEFAULT: u32 = 0x1;
+/// amdgpu/amdgpu_ring.h:50
+pub const AMDGPU_RING_PRIO_0: u32 = 0x0;
+/// amdgpu/amdgpu_ring.h:51
+pub const AMDGPU_RING_PRIO_1: u32 = 0x1;
+/// amdgpu/amdgpu_ring.h:53
+pub const AMDGPU_RING_PRIO_2: u32 = 0x2;
+/// amdgpu/amdgpu_ring.h:54
+pub const AMDGPU_RING_PRIO_MAX: u32 = 0x3;
+/// amdgpu/amdgpu_ring.h:72
+pub const AMDGPU_RING_TYPE_GFX: u32 = 0x0;
+/// amdgpu/amdgpu_ring.h:73
+pub const AMDGPU_RING_TYPE_COMPUTE: u32 = 0x1;
+/// amdgpu/amdgpu_ring.h:74
+pub const AMDGPU_RING_TYPE_SDMA: u32 = 0x2;
+/// amdgpu/amdgpu_ring.h:75
+pub const AMDGPU_RING_TYPE_UVD: u32 = 0x3;
+/// amdgpu/amdgpu_ring.h:78
+pub const AMDGPU_RING_TYPE_VCN_DEC: u32 = 0x6;
+/// amdgpu/amdgpu_ring.h:79
+pub const AMDGPU_RING_TYPE_VCN_ENC: u32 = 0x7;
+/// amdgpu/amdgpu_ring.h:80
+pub const AMDGPU_RING_TYPE_VCN_JPEG: u32 = 0x8;
+/// amdgpu/amdgpu_ring.h:82
+pub const AMDGPU_RING_TYPE_KIQ: u32 = 0xa;
+/// amdgpu/amdgpu_ring.h:83
+pub const AMDGPU_RING_TYPE_MES: u32 = 0xb;
+/// amdgpu/amdgpu_ring.h:85
+pub const AMDGPU_RING_TYPE_CPER: u32 = 0xd;
+/// amdgpu/amdgpu.h:311
+pub const AMDGPU_RESET_TYPE_FULL: u32 = 0x1;
+/// amdgpu/amdgpu.h:312
+pub const AMDGPU_RESET_TYPE_SOFT_RESET: u32 = 0x2;
+/// amdgpu/amdgpu.h:313
+pub const AMDGPU_RESET_TYPE_PER_QUEUE: u32 = 0x4;
+/// amdgpu/amdgpu.h:314
+pub const AMDGPU_RESET_TYPE_PER_PIPE: u32 = 0x8;
+/// The value of `gfx_v9_0_ring_funcs_gfx.type` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_gfx_type: u32 = 0x0;
+/// The value of `gfx_v9_0_ring_funcs_gfx.align_mask` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_gfx_align_mask: u32 = 0xff;
+/// The value of `gfx_v9_0_ring_funcs_gfx.nop` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_gfx_nop: u32 = 0xffff1000;
+/// The value of `gfx_v9_0_ring_funcs_gfx.support_64bit_ptrs` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_gfx_support_64bit_ptrs: u32 = 0x1;
+/// The value of `gfx_v9_0_ring_funcs_gfx.emit_frame_size` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_gfx_emit_frame_size: u32 = 0xc1;
+/// The value of `gfx_v9_0_ring_funcs_gfx.emit_ib_size` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_gfx_emit_ib_size: u32 = 0x4;
+/// The value of `gfx_v9_0_ring_funcs_gfx.extra_bytes` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_gfx_extra_bytes: u32 = 0x0;
+/// The value of `gfx_v9_0_ring_funcs_compute.type` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_compute_type: u32 = 0x1;
+/// The value of `gfx_v9_0_ring_funcs_compute.align_mask` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_compute_align_mask: u32 = 0xff;
+/// The value of `gfx_v9_0_ring_funcs_compute.nop` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_compute_nop: u32 = 0xffff1000;
+/// The value of `gfx_v9_0_ring_funcs_compute.support_64bit_ptrs` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_compute_support_64bit_ptrs: u32 = 0x1;
+/// The value of `gfx_v9_0_ring_funcs_compute.emit_frame_size` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_compute_emit_frame_size: u32 = 0x8f;
+/// The value of `gfx_v9_0_ring_funcs_compute.emit_ib_size` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_compute_emit_ib_size: u32 = 0x7;
+/// The value of `gfx_v9_0_ring_funcs_compute.extra_bytes` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_compute_extra_bytes: u32 = 0x0;
+/// The value of `gfx_v9_0_ring_funcs_kiq.type` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_kiq_type: u32 = 0xa;
+/// The value of `gfx_v9_0_ring_funcs_kiq.align_mask` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_kiq_align_mask: u32 = 0xff;
+/// The value of `gfx_v9_0_ring_funcs_kiq.nop` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_kiq_nop: u32 = 0xffff1000;
+/// The value of `gfx_v9_0_ring_funcs_kiq.support_64bit_ptrs` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_kiq_support_64bit_ptrs: u32 = 0x1;
+/// The value of `gfx_v9_0_ring_funcs_kiq.emit_frame_size` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_kiq_emit_frame_size: u32 = 0x72;
+/// The value of `gfx_v9_0_ring_funcs_kiq.emit_ib_size` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_kiq_emit_ib_size: u32 = 0x7;
+/// The value of `gfx_v9_0_ring_funcs_kiq.extra_bytes` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_kiq_extra_bytes: u32 = 0x0;
+/// The value of `sdma_v4_0_ring_funcs.type` in sdma_v4_0.c
+pub const RF_sdma_v4_0_ring_funcs_type: u32 = 0x2;
+/// The value of `sdma_v4_0_ring_funcs.align_mask` in sdma_v4_0.c
+pub const RF_sdma_v4_0_ring_funcs_align_mask: u32 = 0xff;
+/// The value of `sdma_v4_0_ring_funcs.nop` in sdma_v4_0.c
+pub const RF_sdma_v4_0_ring_funcs_nop: u32 = 0x0;
+/// The value of `sdma_v4_0_ring_funcs.support_64bit_ptrs` in sdma_v4_0.c
+pub const RF_sdma_v4_0_ring_funcs_support_64bit_ptrs: u32 = 0x1;
+/// The value of `sdma_v4_0_ring_funcs.emit_frame_size` in sdma_v4_0.c
+pub const RF_sdma_v4_0_ring_funcs_emit_frame_size: u32 = 0x51;
+/// The value of `sdma_v4_0_ring_funcs.emit_ib_size` in sdma_v4_0.c
+pub const RF_sdma_v4_0_ring_funcs_emit_ib_size: u32 = 0xd;
+/// The value of `sdma_v4_0_ring_funcs.extra_bytes` in sdma_v4_0.c
+pub const RF_sdma_v4_0_ring_funcs_extra_bytes: u32 = 0x0;
+/// The value of `sdma_v4_0_page_ring_funcs.type` in sdma_v4_0.c
+pub const RF_sdma_v4_0_page_ring_funcs_type: u32 = 0x2;
+/// The value of `sdma_v4_0_page_ring_funcs.align_mask` in sdma_v4_0.c
+pub const RF_sdma_v4_0_page_ring_funcs_align_mask: u32 = 0xff;
+/// The value of `sdma_v4_0_page_ring_funcs.nop` in sdma_v4_0.c
+pub const RF_sdma_v4_0_page_ring_funcs_nop: u32 = 0x0;
+/// The value of `sdma_v4_0_page_ring_funcs.support_64bit_ptrs` in sdma_v4_0.c
+pub const RF_sdma_v4_0_page_ring_funcs_support_64bit_ptrs: u32 = 0x1;
+/// The value of `sdma_v4_0_page_ring_funcs.emit_frame_size` in sdma_v4_0.c
+pub const RF_sdma_v4_0_page_ring_funcs_emit_frame_size: u32 = 0x51;
+/// The value of `sdma_v4_0_page_ring_funcs.emit_ib_size` in sdma_v4_0.c
+pub const RF_sdma_v4_0_page_ring_funcs_emit_ib_size: u32 = 0xd;
+/// The value of `sdma_v4_0_page_ring_funcs.extra_bytes` in sdma_v4_0.c
+pub const RF_sdma_v4_0_page_ring_funcs_extra_bytes: u32 = 0x0;
+/// The value of `vcn_v2_0_dec_ring_vm_funcs.type` in vcn_v2_0.c
+pub const RF_vcn_v2_0_dec_ring_vm_funcs_type: u32 = 0x6;
+/// The value of `vcn_v2_0_dec_ring_vm_funcs.align_mask` in vcn_v2_0.c
+pub const RF_vcn_v2_0_dec_ring_vm_funcs_align_mask: u32 = 0xf;
+/// The value of `vcn_v2_0_dec_ring_vm_funcs.nop` in vcn_v2_0.c
+pub const RF_vcn_v2_0_dec_ring_vm_funcs_nop: u32 = 0x0;
+/// The value of `vcn_v2_0_dec_ring_vm_funcs.support_64bit_ptrs` in vcn_v2_0.c
+pub const RF_vcn_v2_0_dec_ring_vm_funcs_support_64bit_ptrs: u32 = 0x0;
+/// The value of `vcn_v2_0_dec_ring_vm_funcs.emit_frame_size` in vcn_v2_0.c
+pub const RF_vcn_v2_0_dec_ring_vm_funcs_emit_frame_size: u32 = 0x66;
+/// The value of `vcn_v2_0_dec_ring_vm_funcs.emit_ib_size` in vcn_v2_0.c
+pub const RF_vcn_v2_0_dec_ring_vm_funcs_emit_ib_size: u32 = 0x8;
+/// The value of `vcn_v2_0_dec_ring_vm_funcs.extra_bytes` in vcn_v2_0.c
+pub const RF_vcn_v2_0_dec_ring_vm_funcs_extra_bytes: u32 = 0x0;
+/// The value of `vcn_v2_0_enc_ring_vm_funcs.type` in vcn_v2_0.c
+pub const RF_vcn_v2_0_enc_ring_vm_funcs_type: u32 = 0x7;
+/// The value of `vcn_v2_0_enc_ring_vm_funcs.align_mask` in vcn_v2_0.c
+pub const RF_vcn_v2_0_enc_ring_vm_funcs_align_mask: u32 = 0x3f;
+/// The value of `vcn_v2_0_enc_ring_vm_funcs.nop` in vcn_v2_0.c
+pub const RF_vcn_v2_0_enc_ring_vm_funcs_nop: u32 = 0x0;
+/// The value of `vcn_v2_0_enc_ring_vm_funcs.support_64bit_ptrs` in vcn_v2_0.c
+pub const RF_vcn_v2_0_enc_ring_vm_funcs_support_64bit_ptrs: u32 = 0x0;
+/// The value of `vcn_v2_0_enc_ring_vm_funcs.emit_frame_size` in vcn_v2_0.c
+pub const RF_vcn_v2_0_enc_ring_vm_funcs_emit_frame_size: u32 = 0x2d;
+/// The value of `vcn_v2_0_enc_ring_vm_funcs.emit_ib_size` in vcn_v2_0.c
+pub const RF_vcn_v2_0_enc_ring_vm_funcs_emit_ib_size: u32 = 0x5;
+/// The value of `vcn_v2_0_enc_ring_vm_funcs.extra_bytes` in vcn_v2_0.c
+pub const RF_vcn_v2_0_enc_ring_vm_funcs_extra_bytes: u32 = 0x0;
+/// The value of `jpeg_v2_0_dec_ring_vm_funcs.type` in jpeg_v2_0.c
+pub const RF_jpeg_v2_0_dec_ring_vm_funcs_type: u32 = 0x8;
+/// The value of `jpeg_v2_0_dec_ring_vm_funcs.align_mask` in jpeg_v2_0.c
+pub const RF_jpeg_v2_0_dec_ring_vm_funcs_align_mask: u32 = 0xf;
+/// The value of `jpeg_v2_0_dec_ring_vm_funcs.nop` in jpeg_v2_0.c
+pub const RF_jpeg_v2_0_dec_ring_vm_funcs_nop: u32 = 0x0;
+/// The value of `jpeg_v2_0_dec_ring_vm_funcs.support_64bit_ptrs` in jpeg_v2_0.c
+pub const RF_jpeg_v2_0_dec_ring_vm_funcs_support_64bit_ptrs: u32 = 0x0;
+/// The value of `jpeg_v2_0_dec_ring_vm_funcs.emit_frame_size` in jpeg_v2_0.c
+pub const RF_jpeg_v2_0_dec_ring_vm_funcs_emit_frame_size: u32 = 0x80;
+/// The value of `jpeg_v2_0_dec_ring_vm_funcs.emit_ib_size` in jpeg_v2_0.c
+pub const RF_jpeg_v2_0_dec_ring_vm_funcs_emit_ib_size: u32 = 0x18;
+/// The value of `jpeg_v2_0_dec_ring_vm_funcs.extra_bytes` in jpeg_v2_0.c
+pub const RF_jpeg_v2_0_dec_ring_vm_funcs_extra_bytes: u32 = 0x0;
+/// The value of `gfx_v9_0_ring_funcs_gfx.soft_recovery != 0` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_gfx_soft_recovery: u32 = 0x1;
+/// The value of `gfx_v9_0_ring_funcs_compute.soft_recovery != 0` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_compute_soft_recovery: u32 = 0x1;
+/// The value of `gfx_v9_0_ring_funcs_kiq.soft_recovery != 0` in gfx_v9_0.c
+pub const RF_gfx_v9_0_ring_funcs_kiq_soft_recovery: u32 = 0x0;
+/// The value of `sdma_v4_0_ring_funcs.soft_recovery != 0` in sdma_v4_0.c
+pub const RF_sdma_v4_0_ring_funcs_soft_recovery: u32 = 0x0;
+/// The value of `sdma_v4_0_page_ring_funcs.soft_recovery != 0` in sdma_v4_0.c
+pub const RF_sdma_v4_0_page_ring_funcs_soft_recovery: u32 = 0x0;
+/// The value of `vcn_v2_0_dec_ring_vm_funcs.soft_recovery != 0` in vcn_v2_0.c
+pub const RF_vcn_v2_0_dec_ring_vm_funcs_soft_recovery: u32 = 0x0;
+/// The value of `vcn_v2_0_enc_ring_vm_funcs.soft_recovery != 0` in vcn_v2_0.c
+pub const RF_vcn_v2_0_enc_ring_vm_funcs_soft_recovery: u32 = 0x0;
+/// The value of `jpeg_v2_0_dec_ring_vm_funcs.soft_recovery != 0` in jpeg_v2_0.c
+pub const RF_jpeg_v2_0_dec_ring_vm_funcs_soft_recovery: u32 = 0x0;
+
+// gfx_v9_0_sw_init
+/// amdgpu/gfx_v9_0.c:62
+pub const GFX9_MEC_HPD_SIZE: u32 = 0x1000;
+/// amdgpu/amdgpu_gfx.h:40
+pub const AMDGPU_GFX_NORMAL_MODE: u32 = 0x0;
+/// include/soc15_ih_clientid.h:53
+pub const SOC15_IH_CLIENTID_GRBM_CP: u32 = 0x14;
+/// include/ivsrcid/gfx/irqsrcs_gfx_9_0.h:34
+pub const GFX_9_0__SRCID__CP_EOP_INTERRUPT: u32 = 0xb5;
+/// amdgpu/gfx_v9_0.c:2283
+pub const GFX_9_0__SRCID__CP_BAD_OPCODE_ERROR: u32 = 0xb7;
+/// include/ivsrcid/gfx/irqsrcs_gfx_9_0.h:36
+pub const GFX_9_0__SRCID__CP_PRIV_REG_FAULT: u32 = 0xb8;
+/// include/ivsrcid/gfx/irqsrcs_gfx_9_0.h:37
+pub const GFX_9_0__SRCID__CP_PRIV_INSTR_FAULT: u32 = 0xb9;
+/// include/ivsrcid/gfx/irqsrcs_gfx_9_0.h:46
+pub const GFX_9_0__SRCID__CP_ECC_ERROR: u32 = 0xc5;
+/// include/ivsrcid/gfx/irqsrcs_gfx_9_0.h:49
+pub const GFX_9_0__SRCID__CP_FUE_ERROR: u32 = 0xc9;
+/// amdgpu/gfx_v9_0.c:2345
+pub const AMDGPU_CP_IRQ_GFX_ME0_PIPE0_EOP: u32 = 0x0;
+/// amdgpu/amdgpu.h:340
+pub const AMDGPU_CP_IRQ_COMPUTE_MEC1_PIPE0_EOP: u32 = 0x2;
+/// amdgpu/amdgpu.h:360
+pub const AMDGPU_CP_KIQ_IRQ_DRIVER0: u32 = 0x0;
+/// amdgpu/amdgpu_gfx.h:50
+pub const AMDGPU_MAX_COMPUTE_QUEUES: u32 = 0x80;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:2849
+pub const mmGB_ADDR_CONFIG: u32 = 0x63e;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:2850
+pub const mmGB_ADDR_CONFIG_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/gc/gc_10_1_0_sh_mask.h:9746
+pub const GB_ADDR_CONFIG__NUM_PIPES__SHIFT: u32 = 0x0;
+/// include/asic_reg/gc/gc_10_1_0_sh_mask.h:9751
+pub const GB_ADDR_CONFIG__NUM_PIPES_MASK: u32 = 0x7;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:5325
+pub const GB_ADDR_CONFIG__NUM_BANKS__SHIFT: u32 = 0xc;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:5338
+pub const GB_ADDR_CONFIG__NUM_BANKS_MASK: u32 = 0x7000;
+/// include/asic_reg/gc/gc_10_1_0_sh_mask.h:9748
+pub const GB_ADDR_CONFIG__MAX_COMPRESSED_FRAGS__SHIFT: u32 = 0x6;
+/// include/asic_reg/gc/gc_10_1_0_sh_mask.h:9753
+pub const GB_ADDR_CONFIG__MAX_COMPRESSED_FRAGS_MASK: u32 = 0xc0;
+/// include/asic_reg/gc/gc_10_1_0_sh_mask.h:9750
+pub const GB_ADDR_CONFIG__NUM_RB_PER_SE__SHIFT: u32 = 0x1a;
+/// include/asic_reg/gc/gc_10_1_0_sh_mask.h:9755
+pub const GB_ADDR_CONFIG__NUM_RB_PER_SE_MASK: u32 = 0xc000000;
+/// include/asic_reg/gc/gc_10_1_0_sh_mask.h:9749
+pub const GB_ADDR_CONFIG__NUM_SHADER_ENGINES__SHIFT: u32 = 0x13;
+/// include/asic_reg/gc/gc_10_1_0_sh_mask.h:9754
+pub const GB_ADDR_CONFIG__NUM_SHADER_ENGINES_MASK: u32 = 0x180000;
+/// include/asic_reg/gc/gc_10_1_0_sh_mask.h:9747
+pub const GB_ADDR_CONFIG__PIPE_INTERLEAVE_SIZE__SHIFT: u32 = 0x3;
+/// include/asic_reg/gc/gc_10_1_0_sh_mask.h:9752
+pub const GB_ADDR_CONFIG__PIPE_INTERLEAVE_SIZE_MASK: u32 = 0x38;
+/// The value of `AMDGPU_GFXHUB(0)` in gfx_v9_0.c
+pub const AMDGPU_GFXHUB_0_: u32 = 0x0;
+/// The value of `AMDGPU_MMHUB0(0)` in gfx_v9_0.c
+pub const AMDGPU_MMHUB0_0_: u32 = 0x8;
+/// The value of `sizeof(struct v9_mqd_allocation)` in gfx_v9_0.c
+pub const SIZEOF_v9_mqd_allocation: u32 = 0x810;
+/// The value of `sizeof(gfx_9_4_2_cleaner_shader_hex)` in gfx_v9_0.c
+pub const SIZEOF_gfx_9_4_2_cleaner_shader_hex: u32 = 0x130;
+/// The value of `ARRAY_SIZE(gc_reg_list_9)` in gfx_v9_0.c
+pub const GC_REG_LIST_9_COUNT: u32 = 0x66;
+/// The value of `ARRAY_SIZE(gc_cp_reg_list_9)` in gfx_v9_0.c
+pub const GC_CP_REG_LIST_9_COUNT: u32 = 0x2d;
+/// The value of `offsetof(struct gfx_firmware_header_v1_0, jt_offset)` in gfx_v9_0.c
+pub const GFX_HDR_JT_OFFSET: u32 = 0x24;
+/// The value of `offsetof(struct gfx_firmware_header_v1_0, jt_size)` in gfx_v9_0.c
+pub const GFX_HDR_JT_SIZE: u32 = 0x28;
+/// The value of `offsetof(struct common_firmware_header, ucode_size_bytes)` in gfx_v9_0.c
+pub const UCODE_HDR_UCODE_SIZE_BYTES: u32 = 0x14;
+
+// sdma_v4_0_sw_init
+/// amdgpu/sdma_v4_0.c:1806
+pub const SDMA0_4_0__SRCID__SDMA_TRAP: u32 = 0xe0;
+/// amdgpu/sdma_v4_0.c:1815
+pub const SDMA0_4_0__SRCID__SDMA_SRAM_ECC: u32 = 0xe4;
+/// amdgpu/sdma_v4_0.c:1824
+pub const SDMA0_4_0__SRCID__SDMA_VM_HOLE: u32 = 0xf2;
+/// amdgpu/sdma_v4_0.c:1830
+pub const SDMA0_4_0__SRCID__SDMA_DOORBELL_INVALID: u32 = 0xf4;
+/// amdgpu/sdma_v4_0.c:1836
+pub const SDMA0_4_0__SRCID__SDMA_POLL_TIMEOUT: u32 = 0xf6;
+/// amdgpu/sdma_v4_0.c:1842
+pub const SDMA0_4_0__SRCID__SDMA_SRBMWRITE: u32 = 0xf7;
+/// include/soc15_ih_clientid.h:41
+pub const SOC15_IH_CLIENTID_SDMA0: u32 = 0x8;
+/// include/soc15_ih_clientid.h:42
+pub const SOC15_IH_CLIENTID_SDMA1: u32 = 0x9;
+/// amdgpu/amdgpu_sdma.h:32
+pub const AMDGPU_SDMA_IRQ_INSTANCE0: u32 = 0x0;
+/// The value of `ARRAY_SIZE(sdma_reg_list_4_0)` in sdma_v4_0.c
+pub const SDMA_REG_LIST_4_0_COUNT: u32 = 0x2c;
+
+// vcn_v2_0_sw_init, jpeg_v2_0_sw_init
+/// include/soc15_ih_clientid.h:68
+pub const SOC15_IH_CLIENTID_VCN: u32 = 0x10;
+/// amdgpu/vcn_v2_0.c:144
+pub const VCN_2_0__SRCID__UVD_SYSTEM_MESSAGE_INTERRUPT: u32 = 0x7c;
+/// include/ivsrcid/vcn/irqsrcs_vcn_2_0.h:26
+pub const VCN_2_0__SRCID__UVD_ENC_GENERAL_PURPOSE: u32 = 0x77;
+/// amdgpu/amdgpu_vcn.h:29
+pub const AMDGPU_VCN_STACK_SIZE: u32 = 0x20000;
+/// amdgpu/amdgpu_vcn.h:30
+pub const AMDGPU_VCN_CONTEXT_SIZE: u32 = 0x80000;
+/// amdgpu/amdgpu_vcn.h:219
+pub const AMDGPU_VCN_MULTI_QUEUE_FLAG: u32 = 0x100;
+/// amdgpu/amdgpu.h:262
+pub const AMDGPU_VCNFW_LOG_SIZE: u32 = 0x8000;
+/// amdgpu/vcn_v2_0.c:44
+pub const mmUVD_CONTEXT_ID_INTERNAL_OFFSET: u32 = 0x1fd;
+/// amdgpu/vcn_v2_0.c:52
+pub const mmUVD_LMI_RBC_IB_VMID_INTERNAL_OFFSET: u32 = 0x1e1;
+/// amdgpu/vcn_v2_0.c:54
+pub const mmUVD_LMI_RBC_IB_64BIT_BAR_LOW_INTERNAL_OFFSET: u32 = 0x5a7;
+/// amdgpu/vcn_v2_0.c:53
+pub const mmUVD_LMI_RBC_IB_64BIT_BAR_HIGH_INTERNAL_OFFSET: u32 = 0x5a6;
+/// amdgpu/vcn_v2_0.c:55
+pub const mmUVD_RBC_IB_SIZE_INTERNAL_OFFSET: u32 = 0x1e2;
+/// amdgpu/vcn_v2_0.c:49
+pub const mmUVD_GP_SCRATCH8_INTERNAL_OFFSET: u32 = 0x54a;
+/// amdgpu/vcn_v2_0.c:50
+pub const mmUVD_SCRATCH9_INTERNAL_OFFSET: u32 = 0xc01d;
+/// amdgpu/vcn_v2_0.c:46
+pub const mmUVD_GPCOM_VCPU_DATA0_INTERNAL_OFFSET: u32 = 0x504;
+/// amdgpu/vcn_v2_0.c:47
+pub const mmUVD_GPCOM_VCPU_DATA1_INTERNAL_OFFSET: u32 = 0x505;
+/// amdgpu/vcn_v2_0.c:45
+pub const mmUVD_GPCOM_VCPU_CMD_INTERNAL_OFFSET: u32 = 0x503;
+/// amdgpu/vcn_v2_0.c:48
+pub const mmUVD_NO_OP_INTERNAL_OFFSET: u32 = 0x53f;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:60
+pub const mmUVD_SCRATCH9: u32 = 0x1d;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:61
+pub const mmUVD_SCRATCH9_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:31
+pub const mmUVD_GPCOM_VCPU_DATA0: u32 = 0x584;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:57
+pub const mmUVD_GPCOM_VCPU_DATA0_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:32
+pub const mmUVD_GPCOM_VCPU_DATA1: u32 = 0x585;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:59
+pub const mmUVD_GPCOM_VCPU_DATA1_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:30
+pub const mmUVD_GPCOM_VCPU_CMD: u32 = 0x583;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:55
+pub const mmUVD_GPCOM_VCPU_CMD_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:37
+pub const mmUVD_NO_OP: u32 = 0x5bf;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:81
+pub const mmUVD_NO_OP_BASE_IDX: u32 = 0x1;
+/// The value of `sizeof(struct amdgpu_fw_shared)` in vcn_v2_0.c
+pub const SIZEOF_amdgpu_fw_shared: u32 = 0x5c;
+/// The value of `offsetof(struct amdgpu_fw_shared, present_flag_0)` in vcn_v2_0.c
+pub const FW_SHARED_PRESENT_FLAG_0: u32 = 0x0;
+/// The value of `ARRAY_SIZE(vcn_reg_list_2_0)` in vcn_v2_0.c
+pub const VCN_REG_LIST_2_0_COUNT: u32 = 0x21;
+/// amdgpu/jpeg_v2_0.c:91
+pub const VCN_2_0__SRCID__JPEG_DECODE: u32 = 0x99;
+/// amdgpu/jpeg_v2_0.h:43
+pub const mmUVD_JPEG_PITCH_INTERNAL_OFFSET: u32 = 0x401f;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:112
+pub const mmUVD_JPEG_PITCH: u32 = 0x9f;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:113
+pub const mmUVD_JPEG_PITCH_BASE_IDX: u32 = 0x0;
+/// include/amd_shared.h:182
+pub const AMD_PG_SUPPORT_JPEG_DPG: u32 = 0x80000;
+/// The value of `ARRAY_SIZE(jpeg_reg_list_2_0)` in jpeg_v2_0.c
+pub const JPEG_REG_LIST_2_0_COUNT: u32 = 0xd;
+
+// clearstate_gfx9.h, the clear state gfx_v9_0_get_csb_size and _buffer walk
+/// amdgpu/clearstate_defs.h:28
+pub const SECT_CONTEXT: u32 = 0x1;
+/// The value of `ARRAY_SIZE(gfx9_cs_data)` in gfx_v9_0.c
+pub const CS_SECTIONS: u32 = 0x2;
+/// The value of `gfx9_cs_data[0].id` in gfx_v9_0.c
+pub const CS_SECTION_0_ID: u32 = 0x1;
+/// The value of `gfx9_cs_data[0].section == gfx9_SECT_CONTEXT_defs` in gfx_v9_0.c
+pub const CS_SECTION_0_IS_CONTEXT_DEFS: u32 = 0x1;
+/// The value of `gfx9_cs_data[1].section == 0` in gfx_v9_0.c
+pub const CS_SECTION_1_END: u32 = 0x1;
+/// The value of `ARRAY_SIZE(gfx9_SECT_CONTEXT_defs)` in gfx_v9_0.c
+pub const CS_EXTENTS: u32 = 0x9;
+/// The value of `gfx9_SECT_CONTEXT_defs[0].reg_index` in gfx_v9_0.c
+pub const CS_EXTENT_0_REG_INDEX: u32 = 0xa000;
+/// The value of `gfx9_SECT_CONTEXT_defs[0].reg_count` in gfx_v9_0.c
+pub const CS_EXTENT_0_REG_COUNT: u32 = 0xd4;
+/// The value of `gfx9_SECT_CONTEXT_defs[0].extent == gfx9_SECT_CONTEXT_def_1` in gfx_v9_0.c
+pub const CS_EXTENT_0_IS_DEF_1: u32 = 0x1;
+/// The value of `gfx9_SECT_CONTEXT_defs[1].reg_index` in gfx_v9_0.c
+pub const CS_EXTENT_1_REG_INDEX: u32 = 0xa0d6;
+/// The value of `gfx9_SECT_CONTEXT_defs[1].reg_count` in gfx_v9_0.c
+pub const CS_EXTENT_1_REG_COUNT: u32 = 0x11a;
+/// The value of `gfx9_SECT_CONTEXT_defs[1].extent == gfx9_SECT_CONTEXT_def_2` in gfx_v9_0.c
+pub const CS_EXTENT_1_IS_DEF_2: u32 = 0x1;
+/// The value of `gfx9_SECT_CONTEXT_defs[2].reg_index` in gfx_v9_0.c
+pub const CS_EXTENT_2_REG_INDEX: u32 = 0xa1f5;
+/// The value of `gfx9_SECT_CONTEXT_defs[2].reg_count` in gfx_v9_0.c
+pub const CS_EXTENT_2_REG_COUNT: u32 = 0x4;
+/// The value of `gfx9_SECT_CONTEXT_defs[2].extent == gfx9_SECT_CONTEXT_def_3` in gfx_v9_0.c
+pub const CS_EXTENT_2_IS_DEF_3: u32 = 0x1;
+/// The value of `gfx9_SECT_CONTEXT_defs[3].reg_index` in gfx_v9_0.c
+pub const CS_EXTENT_3_REG_INDEX: u32 = 0xa200;
+/// The value of `gfx9_SECT_CONTEXT_defs[3].reg_count` in gfx_v9_0.c
+pub const CS_EXTENT_3_REG_COUNT: u32 = 0x9d;
+/// The value of `gfx9_SECT_CONTEXT_defs[3].extent == gfx9_SECT_CONTEXT_def_4` in gfx_v9_0.c
+pub const CS_EXTENT_3_IS_DEF_4: u32 = 0x1;
+/// The value of `gfx9_SECT_CONTEXT_defs[4].reg_index` in gfx_v9_0.c
+pub const CS_EXTENT_4_REG_INDEX: u32 = 0xa2a0;
+/// The value of `gfx9_SECT_CONTEXT_defs[4].reg_count` in gfx_v9_0.c
+pub const CS_EXTENT_4_REG_COUNT: u32 = 0x2;
+/// The value of `gfx9_SECT_CONTEXT_defs[4].extent == gfx9_SECT_CONTEXT_def_5` in gfx_v9_0.c
+pub const CS_EXTENT_4_IS_DEF_5: u32 = 0x1;
+/// The value of `gfx9_SECT_CONTEXT_defs[5].reg_index` in gfx_v9_0.c
+pub const CS_EXTENT_5_REG_INDEX: u32 = 0xa2a3;
+/// The value of `gfx9_SECT_CONTEXT_defs[5].reg_count` in gfx_v9_0.c
+pub const CS_EXTENT_5_REG_COUNT: u32 = 0x1;
+/// The value of `gfx9_SECT_CONTEXT_defs[5].extent == gfx9_SECT_CONTEXT_def_6` in gfx_v9_0.c
+pub const CS_EXTENT_5_IS_DEF_6: u32 = 0x1;
+/// The value of `gfx9_SECT_CONTEXT_defs[6].reg_index` in gfx_v9_0.c
+pub const CS_EXTENT_6_REG_INDEX: u32 = 0xa2a5;
+/// The value of `gfx9_SECT_CONTEXT_defs[6].reg_count` in gfx_v9_0.c
+pub const CS_EXTENT_6_REG_COUNT: u32 = 0x42;
+/// The value of `gfx9_SECT_CONTEXT_defs[6].extent == gfx9_SECT_CONTEXT_def_7` in gfx_v9_0.c
+pub const CS_EXTENT_6_IS_DEF_7: u32 = 0x1;
+/// The value of `gfx9_SECT_CONTEXT_defs[7].reg_index` in gfx_v9_0.c
+pub const CS_EXTENT_7_REG_INDEX: u32 = 0xa2f5;
+/// The value of `gfx9_SECT_CONTEXT_defs[7].reg_count` in gfx_v9_0.c
+pub const CS_EXTENT_7_REG_COUNT: u32 = 0x9b;
+/// The value of `gfx9_SECT_CONTEXT_defs[7].extent == gfx9_SECT_CONTEXT_def_8` in gfx_v9_0.c
+pub const CS_EXTENT_7_IS_DEF_8: u32 = 0x1;
+/// The value of `gfx9_SECT_CONTEXT_defs[8].extent == 0` in gfx_v9_0.c
+pub const CS_EXTENT_8_END: u32 = 0x1;

@@ -40,6 +40,9 @@ amdgpu_gart_size: i32
 amdgpu_gtt_size: i32
 amdgpu_vm_fragment_size: i32
 amdgpu_sched_hw_submission: i32
+amdgpu_compute_multipipe: i32
+amdgpu_vcnfw_log: i32
+amdgpu_gpu_recovery: i32
 amdgpu_smu_memory_pool_size: u32
 amdgpu_vm_size: i32
 amdgpu_vm_block_size: i32
@@ -63,3 +66,12 @@ amdgpu_vm_update_mode: i32
 amdgpu_vm_fault_stop: i32
 @ amdgpu_drv.c
 amdgpu_msi: i32
+@ gfx_v9_0.c
+gfx9_SECT_CONTEXT_def_1: u32
+gfx9_SECT_CONTEXT_def_2: u32
+gfx9_SECT_CONTEXT_def_3: u32
+gfx9_SECT_CONTEXT_def_4: u32
+gfx9_SECT_CONTEXT_def_5: u32
+gfx9_SECT_CONTEXT_def_6: u32
+gfx9_SECT_CONTEXT_def_7: u32
+gfx9_SECT_CONTEXT_def_8: u32

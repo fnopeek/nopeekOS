@@ -31,6 +31,8 @@ mod soc15;
 mod tables;
 #[path = "../src/amdgpu_dm.rs"]
 mod amdgpu_dm;
+#[path = "../src/dmub_srv.rs"]
+mod dmub_srv;
 #[path = "../src/amdgpu_psp.rs"]
 mod amdgpu_psp;
 #[path = "../src/amdgpu_ras.rs"]
@@ -77,3 +79,5 @@ mod amdgpu_ttm;
 mod amdgpu_gart;
 #[path = "../src/hdp_v4_0.rs"]
 mod hdp_v4_0;
+#[path = "../src/amdgpu_ring.rs"]
+mod amdgpu_ring;

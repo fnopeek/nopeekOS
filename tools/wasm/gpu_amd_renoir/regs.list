@@ -1604,3 +1604,286 @@ SMU12_SYSPLL1_DCFCLK_ID @ ../pm/swsmu/smu12/smu_v12_0.c
 SMU12_SYSPLL0_VCLK_ID @ ../pm/swsmu/smu12/smu_v12_0.c
 SMU12_SYSPLL0_DCLK_ID @ ../pm/swsmu/smu12/smu_v12_0.c
 SMU12_SYSPLL3_0_FCLK_ID @ ../pm/swsmu/smu12/smu_v12_0.c
+# smu_sw_init for Renoir (amdgpu_smu.c, renoir_ppt.c, smu_v12_0.c)
+SMU_TABLE_WATERMARKS @ ../pm/swsmu/amdgpu_smu.c
+SMU_TABLE_DPMCLOCKS @ ../pm/swsmu/amdgpu_smu.c
+SMU_TABLE_SMU_METRICS @ ../pm/swsmu/amdgpu_smu.c
+SMU_TABLE_PMSTATUSLOG @ ../pm/swsmu/amdgpu_smu.c
+SMU_TABLE_COUNT @ ../pm/swsmu/amdgpu_smu.c
+SMU_FEATURE_MAX @ ../pm/swsmu/amdgpu_smu.c
+SMU_MEMORY_POOL_SIZE_ZERO @ ../pm/swsmu/amdgpu_smu.c
+PP_SMC_POWER_PROFILE_BOOTUP_DEFAULT @ ../pm/swsmu/amdgpu_smu.c
+PP_SMC_POWER_PROFILE_COUNT @ ../pm/swsmu/amdgpu_smu.c
+AMD_DPM_FORCED_LEVEL_AUTO @ ../pm/swsmu/amdgpu_smu.c
+SIZEOF_Watermarks_t = sizeof(Watermarks_t) @ ../pm/swsmu/smu12/renoir_ppt.c
+SIZEOF_DpmClocks_t = sizeof(DpmClocks_t) @ ../pm/swsmu/smu12/renoir_ppt.c
+SIZEOF_SmuMetrics_t = sizeof(SmuMetrics_t) @ ../pm/swsmu/smu12/renoir_ppt.c
+SIZEOF_gpu_metrics_v2_2 = sizeof(struct gpu_metrics_v2_2) @ ../pm/swsmu/smu12/renoir_ppt.c
+IDX_firmwareinfo_v2_1 = offsetof(struct atom_master_list_of_data_tables_v2_1, firmwareinfo) / sizeof(uint16_t) @ ../pm/swsmu/smu12/smu_v12_0.c
+ATH_FORMAT_REVISION = offsetof(struct atom_common_table_header, format_revision) @ ../pm/swsmu/smu12/smu_v12_0.c
+ATH_CONTENT_REVISION = offsetof(struct atom_common_table_header, content_revision) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI31_SMU_FIRMWARE_REVISION = offsetof(struct atom_firmware_info_v3_1, firmware_revision) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI31_SMU_BOOTUP_SCLK_IN10KHZ = offsetof(struct atom_firmware_info_v3_1, bootup_sclk_in10khz) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI31_SMU_BOOTUP_MCLK_IN10KHZ = offsetof(struct atom_firmware_info_v3_1, bootup_mclk_in10khz) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI31_SMU_BOOTUP_VDDC_MV = offsetof(struct atom_firmware_info_v3_1, bootup_vddc_mv) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI31_SMU_BOOTUP_VDDCI_MV = offsetof(struct atom_firmware_info_v3_1, bootup_vddci_mv) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI31_SMU_BOOTUP_MVDDC_MV = offsetof(struct atom_firmware_info_v3_1, bootup_mvddc_mv) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI31_SMU_BOOTUP_VDDGFX_MV = offsetof(struct atom_firmware_info_v3_1, bootup_vddgfx_mv) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI31_SMU_COOLINGSOLUTION_ID = offsetof(struct atom_firmware_info_v3_1, coolingsolution_id) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI31_SMU_FIRMWARE_CAPABILITY = offsetof(struct atom_firmware_info_v3_1, firmware_capability) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI33_SMU_FIRMWARE_REVISION = offsetof(struct atom_firmware_info_v3_3, firmware_revision) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI33_SMU_BOOTUP_SCLK_IN10KHZ = offsetof(struct atom_firmware_info_v3_3, bootup_sclk_in10khz) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI33_SMU_BOOTUP_MCLK_IN10KHZ = offsetof(struct atom_firmware_info_v3_3, bootup_mclk_in10khz) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI33_SMU_BOOTUP_VDDC_MV = offsetof(struct atom_firmware_info_v3_3, bootup_vddc_mv) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI33_SMU_BOOTUP_VDDCI_MV = offsetof(struct atom_firmware_info_v3_3, bootup_vddci_mv) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI33_SMU_BOOTUP_MVDDC_MV = offsetof(struct atom_firmware_info_v3_3, bootup_mvddc_mv) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI33_SMU_BOOTUP_VDDGFX_MV = offsetof(struct atom_firmware_info_v3_3, bootup_vddgfx_mv) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI33_SMU_COOLINGSOLUTION_ID = offsetof(struct atom_firmware_info_v3_3, coolingsolution_id) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI33_SMU_FIRMWARE_CAPABILITY = offsetof(struct atom_firmware_info_v3_3, firmware_capability) @ ../pm/swsmu/smu12/smu_v12_0.c
+FWI33_SMU_PPLIB_PPTABLE_ID = offsetof(struct atom_firmware_info_v3_3, pplib_pptable_id) @ ../pm/swsmu/smu12/smu_v12_0.c
+# dm_dmub_sw_init (amdgpu_dm.c, dmub_srv.c)
+PSP_HEADER_BYTES @ ../display/amdgpu_dm/amdgpu_dm.c
+PSP_FOOTER_BYTES @ ../display/amdgpu_dm/amdgpu_dm.c
+DMCUB_HDR_INST_CONST_BYTES = offsetof(struct dmcub_firmware_header_v1_0, inst_const_bytes) @ ../display/amdgpu_dm/amdgpu_dm.c
+DMCUB_HDR_BSS_DATA_BYTES = offsetof(struct dmcub_firmware_header_v1_0, bss_data_bytes) @ ../display/amdgpu_dm/amdgpu_dm.c
+UCODE_HDR_UCODE_VERSION = offsetof(struct common_firmware_header, ucode_version) @ ../display/amdgpu_dm/amdgpu_dm.c
+UCODE_HDR_UCODE_ARRAY_OFFSET_BYTES = offsetof(struct common_firmware_header, ucode_array_offset_bytes) @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_ASIC_DCN21 @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_TOTAL @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_0_INST_CONST @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_1_STACK @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_2_BSS_DATA @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_3_VBIOS @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_4_MAILBOX @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_5_TRACEBUFF @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_6_FW_STATE @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_7_SCRATCH_MEM @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_IB_MEM @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_SHARED_STATE @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_LSDMA_BUFFER @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_MEMORY_TYPE_FB @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_WINDOW_MEMORY_TYPE_GART @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_STATUS_OK @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_STATUS_INVALID @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_STACK_SIZE @ ../display/dmub/src/dmub_srv.c
+DMUB_CONTEXT_SIZE @ ../display/dmub/src/dmub_srv.c
+DMUB_MAILBOX_SIZE @ ../display/dmub/src/dmub_srv.c
+DMUB_FW_STATE_SIZE @ ../display/dmub/src/dmub_srv.c
+DMUB_SCRATCH_MEM_SIZE @ ../display/dmub/src/dmub_srv.c
+DMUB_IB_MEM_SIZE @ ../display/dmub/src/dmub_srv.c
+DMUB_LSDMA_RB_SIZE @ ../display/dmub/src/dmub_srv.c
+DMUB_NUM_WINDOWS @ ../display/dmub/src/dmub_srv.c
+DMUB_TRACE_BUFFER_SIZE @ ../display/dmub/src/dmub_srv.c
+DMUB_FW_HEADER_SHARED_STATE_SIZE @ ../display/dmub/src/dmub_srv.c
+DMUB_FW_META_MAGIC @ ../display/dmub/src/dmub_srv.c
+DMUB_FW_META_OFFSET @ ../display/dmub/src/dmub_srv.c
+SIZEOF_dmub_fw_meta = sizeof(union dmub_fw_meta) @ ../display/dmub/src/dmub_srv.c
+FWMETA_MAGIC_VALUE = offsetof(struct dmub_fw_meta_info, magic_value) @ ../display/dmub/src/dmub_srv.c
+FWMETA_FW_REGION_SIZE = offsetof(struct dmub_fw_meta_info, fw_region_size) @ ../display/dmub/src/dmub_srv.c
+FWMETA_TRACE_BUFFER_SIZE = offsetof(struct dmub_fw_meta_info, trace_buffer_size) @ ../display/dmub/src/dmub_srv.c
+FWMETA_FW_VERSION = offsetof(struct dmub_fw_meta_info, fw_version) @ ../display/dmub/src/dmub_srv.c
+FWMETA_SHARED_STATE_SIZE = offsetof(struct dmub_fw_meta_info, shared_state_size) @ ../display/dmub/src/dmub_srv.c
+# The rings: amdgpu_ring.c and the ring funcs tables they read
+AMDGPU_MAX_RINGS @ amdgpu_ring.c
+AMDGPU_HW_IP_NUM @ amdgpu_ring.c
+AMDGPU_RING_PRIO_DEFAULT @ amdgpu_ring.c
+AMDGPU_RING_PRIO_0 @ amdgpu_ring.c
+AMDGPU_RING_PRIO_1 @ amdgpu_ring.c
+AMDGPU_RING_PRIO_2 @ amdgpu_ring.c
+AMDGPU_RING_PRIO_MAX @ amdgpu_ring.c
+AMDGPU_RING_TYPE_GFX @ amdgpu_ring.c
+AMDGPU_RING_TYPE_COMPUTE @ amdgpu_ring.c
+AMDGPU_RING_TYPE_SDMA @ amdgpu_ring.c
+AMDGPU_RING_TYPE_UVD @ amdgpu_ring.c
+AMDGPU_RING_TYPE_VCN_DEC @ amdgpu_ring.c
+AMDGPU_RING_TYPE_VCN_ENC @ amdgpu_ring.c
+AMDGPU_RING_TYPE_VCN_JPEG @ amdgpu_ring.c
+AMDGPU_RING_TYPE_KIQ @ amdgpu_ring.c
+AMDGPU_RING_TYPE_MES @ amdgpu_ring.c
+AMDGPU_RING_TYPE_CPER @ amdgpu_ring.c
+AMDGPU_RESET_TYPE_FULL @ amdgpu_ring.c
+AMDGPU_RESET_TYPE_SOFT_RESET @ amdgpu_ring.c
+AMDGPU_RESET_TYPE_PER_QUEUE @ amdgpu_ring.c
+AMDGPU_RESET_TYPE_PER_PIPE @ amdgpu_ring.c
+RF_gfx_v9_0_ring_funcs_gfx_type = gfx_v9_0_ring_funcs_gfx.type @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_gfx_align_mask = gfx_v9_0_ring_funcs_gfx.align_mask @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_gfx_nop = gfx_v9_0_ring_funcs_gfx.nop @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_gfx_support_64bit_ptrs = gfx_v9_0_ring_funcs_gfx.support_64bit_ptrs @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_gfx_emit_frame_size = gfx_v9_0_ring_funcs_gfx.emit_frame_size @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_gfx_emit_ib_size = gfx_v9_0_ring_funcs_gfx.emit_ib_size @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_gfx_extra_bytes = gfx_v9_0_ring_funcs_gfx.extra_bytes @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_compute_type = gfx_v9_0_ring_funcs_compute.type @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_compute_align_mask = gfx_v9_0_ring_funcs_compute.align_mask @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_compute_nop = gfx_v9_0_ring_funcs_compute.nop @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_compute_support_64bit_ptrs = gfx_v9_0_ring_funcs_compute.support_64bit_ptrs @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_compute_emit_frame_size = gfx_v9_0_ring_funcs_compute.emit_frame_size @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_compute_emit_ib_size = gfx_v9_0_ring_funcs_compute.emit_ib_size @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_compute_extra_bytes = gfx_v9_0_ring_funcs_compute.extra_bytes @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_kiq_type = gfx_v9_0_ring_funcs_kiq.type @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_kiq_align_mask = gfx_v9_0_ring_funcs_kiq.align_mask @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_kiq_nop = gfx_v9_0_ring_funcs_kiq.nop @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_kiq_support_64bit_ptrs = gfx_v9_0_ring_funcs_kiq.support_64bit_ptrs @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_kiq_emit_frame_size = gfx_v9_0_ring_funcs_kiq.emit_frame_size @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_kiq_emit_ib_size = gfx_v9_0_ring_funcs_kiq.emit_ib_size @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_kiq_extra_bytes = gfx_v9_0_ring_funcs_kiq.extra_bytes @ gfx_v9_0.c
+RF_sdma_v4_0_ring_funcs_type = sdma_v4_0_ring_funcs.type @ sdma_v4_0.c
+RF_sdma_v4_0_ring_funcs_align_mask = sdma_v4_0_ring_funcs.align_mask @ sdma_v4_0.c
+RF_sdma_v4_0_ring_funcs_nop = sdma_v4_0_ring_funcs.nop @ sdma_v4_0.c
+RF_sdma_v4_0_ring_funcs_support_64bit_ptrs = sdma_v4_0_ring_funcs.support_64bit_ptrs @ sdma_v4_0.c
+RF_sdma_v4_0_ring_funcs_emit_frame_size = sdma_v4_0_ring_funcs.emit_frame_size @ sdma_v4_0.c
+RF_sdma_v4_0_ring_funcs_emit_ib_size = sdma_v4_0_ring_funcs.emit_ib_size @ sdma_v4_0.c
+RF_sdma_v4_0_ring_funcs_extra_bytes = sdma_v4_0_ring_funcs.extra_bytes @ sdma_v4_0.c
+RF_sdma_v4_0_page_ring_funcs_type = sdma_v4_0_page_ring_funcs.type @ sdma_v4_0.c
+RF_sdma_v4_0_page_ring_funcs_align_mask = sdma_v4_0_page_ring_funcs.align_mask @ sdma_v4_0.c
+RF_sdma_v4_0_page_ring_funcs_nop = sdma_v4_0_page_ring_funcs.nop @ sdma_v4_0.c
+RF_sdma_v4_0_page_ring_funcs_support_64bit_ptrs = sdma_v4_0_page_ring_funcs.support_64bit_ptrs @ sdma_v4_0.c
+RF_sdma_v4_0_page_ring_funcs_emit_frame_size = sdma_v4_0_page_ring_funcs.emit_frame_size @ sdma_v4_0.c
+RF_sdma_v4_0_page_ring_funcs_emit_ib_size = sdma_v4_0_page_ring_funcs.emit_ib_size @ sdma_v4_0.c
+RF_sdma_v4_0_page_ring_funcs_extra_bytes = sdma_v4_0_page_ring_funcs.extra_bytes @ sdma_v4_0.c
+RF_vcn_v2_0_dec_ring_vm_funcs_type = vcn_v2_0_dec_ring_vm_funcs.type @ vcn_v2_0.c
+RF_vcn_v2_0_dec_ring_vm_funcs_align_mask = vcn_v2_0_dec_ring_vm_funcs.align_mask @ vcn_v2_0.c
+RF_vcn_v2_0_dec_ring_vm_funcs_nop = vcn_v2_0_dec_ring_vm_funcs.nop @ vcn_v2_0.c
+RF_vcn_v2_0_dec_ring_vm_funcs_support_64bit_ptrs = vcn_v2_0_dec_ring_vm_funcs.support_64bit_ptrs @ vcn_v2_0.c
+RF_vcn_v2_0_dec_ring_vm_funcs_emit_frame_size = vcn_v2_0_dec_ring_vm_funcs.emit_frame_size @ vcn_v2_0.c
+RF_vcn_v2_0_dec_ring_vm_funcs_emit_ib_size = vcn_v2_0_dec_ring_vm_funcs.emit_ib_size @ vcn_v2_0.c
+RF_vcn_v2_0_dec_ring_vm_funcs_extra_bytes = vcn_v2_0_dec_ring_vm_funcs.extra_bytes @ vcn_v2_0.c
+RF_vcn_v2_0_enc_ring_vm_funcs_type = vcn_v2_0_enc_ring_vm_funcs.type @ vcn_v2_0.c
+RF_vcn_v2_0_enc_ring_vm_funcs_align_mask = vcn_v2_0_enc_ring_vm_funcs.align_mask @ vcn_v2_0.c
+RF_vcn_v2_0_enc_ring_vm_funcs_nop = vcn_v2_0_enc_ring_vm_funcs.nop @ vcn_v2_0.c
+RF_vcn_v2_0_enc_ring_vm_funcs_support_64bit_ptrs = vcn_v2_0_enc_ring_vm_funcs.support_64bit_ptrs @ vcn_v2_0.c
+RF_vcn_v2_0_enc_ring_vm_funcs_emit_frame_size = vcn_v2_0_enc_ring_vm_funcs.emit_frame_size @ vcn_v2_0.c
+RF_vcn_v2_0_enc_ring_vm_funcs_emit_ib_size = vcn_v2_0_enc_ring_vm_funcs.emit_ib_size @ vcn_v2_0.c
+RF_vcn_v2_0_enc_ring_vm_funcs_extra_bytes = vcn_v2_0_enc_ring_vm_funcs.extra_bytes @ vcn_v2_0.c
+RF_jpeg_v2_0_dec_ring_vm_funcs_type = jpeg_v2_0_dec_ring_vm_funcs.type @ jpeg_v2_0.c
+RF_jpeg_v2_0_dec_ring_vm_funcs_align_mask = jpeg_v2_0_dec_ring_vm_funcs.align_mask @ jpeg_v2_0.c
+RF_jpeg_v2_0_dec_ring_vm_funcs_nop = jpeg_v2_0_dec_ring_vm_funcs.nop @ jpeg_v2_0.c
+RF_jpeg_v2_0_dec_ring_vm_funcs_support_64bit_ptrs = jpeg_v2_0_dec_ring_vm_funcs.support_64bit_ptrs @ jpeg_v2_0.c
+RF_jpeg_v2_0_dec_ring_vm_funcs_emit_frame_size = jpeg_v2_0_dec_ring_vm_funcs.emit_frame_size @ jpeg_v2_0.c
+RF_jpeg_v2_0_dec_ring_vm_funcs_emit_ib_size = jpeg_v2_0_dec_ring_vm_funcs.emit_ib_size @ jpeg_v2_0.c
+RF_jpeg_v2_0_dec_ring_vm_funcs_extra_bytes = jpeg_v2_0_dec_ring_vm_funcs.extra_bytes @ jpeg_v2_0.c
+RF_gfx_v9_0_ring_funcs_gfx_soft_recovery = gfx_v9_0_ring_funcs_gfx.soft_recovery != 0 @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_compute_soft_recovery = gfx_v9_0_ring_funcs_compute.soft_recovery != 0 @ gfx_v9_0.c
+RF_gfx_v9_0_ring_funcs_kiq_soft_recovery = gfx_v9_0_ring_funcs_kiq.soft_recovery != 0 @ gfx_v9_0.c
+RF_sdma_v4_0_ring_funcs_soft_recovery = sdma_v4_0_ring_funcs.soft_recovery != 0 @ sdma_v4_0.c
+RF_sdma_v4_0_page_ring_funcs_soft_recovery = sdma_v4_0_page_ring_funcs.soft_recovery != 0 @ sdma_v4_0.c
+RF_vcn_v2_0_dec_ring_vm_funcs_soft_recovery = vcn_v2_0_dec_ring_vm_funcs.soft_recovery != 0 @ vcn_v2_0.c
+RF_vcn_v2_0_enc_ring_vm_funcs_soft_recovery = vcn_v2_0_enc_ring_vm_funcs.soft_recovery != 0 @ vcn_v2_0.c
+RF_jpeg_v2_0_dec_ring_vm_funcs_soft_recovery = jpeg_v2_0_dec_ring_vm_funcs.soft_recovery != 0 @ jpeg_v2_0.c
+# gfx_v9_0_sw_init
+GFX9_MEC_HPD_SIZE @ gfx_v9_0.c
+AMDGPU_GFX_NORMAL_MODE @ gfx_v9_0.c
+SOC15_IH_CLIENTID_GRBM_CP @ gfx_v9_0.c
+GFX_9_0__SRCID__CP_EOP_INTERRUPT @ gfx_v9_0.c
+GFX_9_0__SRCID__CP_BAD_OPCODE_ERROR @ gfx_v9_0.c
+GFX_9_0__SRCID__CP_PRIV_REG_FAULT @ gfx_v9_0.c
+GFX_9_0__SRCID__CP_PRIV_INSTR_FAULT @ gfx_v9_0.c
+GFX_9_0__SRCID__CP_ECC_ERROR @ gfx_v9_0.c
+GFX_9_0__SRCID__CP_FUE_ERROR @ gfx_v9_0.c
+AMDGPU_CP_IRQ_GFX_ME0_PIPE0_EOP @ gfx_v9_0.c
+AMDGPU_CP_IRQ_COMPUTE_MEC1_PIPE0_EOP @ gfx_v9_0.c
+AMDGPU_CP_KIQ_IRQ_DRIVER0 @ gfx_v9_0.c
+AMDGPU_MAX_COMPUTE_QUEUES @ gfx_v9_0.c
+mmGB_ADDR_CONFIG @ gfx_v9_0.c
+mmGB_ADDR_CONFIG_BASE_IDX @ gfx_v9_0.c
+GB_ADDR_CONFIG__NUM_PIPES__SHIFT @ gfx_v9_0.c
+GB_ADDR_CONFIG__NUM_PIPES_MASK @ gfx_v9_0.c
+GB_ADDR_CONFIG__NUM_BANKS__SHIFT @ gfx_v9_0.c
+GB_ADDR_CONFIG__NUM_BANKS_MASK @ gfx_v9_0.c
+GB_ADDR_CONFIG__MAX_COMPRESSED_FRAGS__SHIFT @ gfx_v9_0.c
+GB_ADDR_CONFIG__MAX_COMPRESSED_FRAGS_MASK @ gfx_v9_0.c
+GB_ADDR_CONFIG__NUM_RB_PER_SE__SHIFT @ gfx_v9_0.c
+GB_ADDR_CONFIG__NUM_RB_PER_SE_MASK @ gfx_v9_0.c
+GB_ADDR_CONFIG__NUM_SHADER_ENGINES__SHIFT @ gfx_v9_0.c
+GB_ADDR_CONFIG__NUM_SHADER_ENGINES_MASK @ gfx_v9_0.c
+GB_ADDR_CONFIG__PIPE_INTERLEAVE_SIZE__SHIFT @ gfx_v9_0.c
+GB_ADDR_CONFIG__PIPE_INTERLEAVE_SIZE_MASK @ gfx_v9_0.c
+AMDGPU_GFXHUB_0_ = AMDGPU_GFXHUB(0) @ gfx_v9_0.c
+AMDGPU_MMHUB0_0_ = AMDGPU_MMHUB0(0) @ gfx_v9_0.c
+SIZEOF_v9_mqd_allocation = sizeof(struct v9_mqd_allocation) @ gfx_v9_0.c
+SIZEOF_gfx_9_4_2_cleaner_shader_hex = sizeof(gfx_9_4_2_cleaner_shader_hex) @ gfx_v9_0.c
+GC_REG_LIST_9_COUNT = ARRAY_SIZE(gc_reg_list_9) @ gfx_v9_0.c
+GC_CP_REG_LIST_9_COUNT = ARRAY_SIZE(gc_cp_reg_list_9) @ gfx_v9_0.c
+GFX_HDR_JT_OFFSET = offsetof(struct gfx_firmware_header_v1_0, jt_offset) @ gfx_v9_0.c
+GFX_HDR_JT_SIZE = offsetof(struct gfx_firmware_header_v1_0, jt_size) @ gfx_v9_0.c
+UCODE_HDR_UCODE_SIZE_BYTES = offsetof(struct common_firmware_header, ucode_size_bytes) @ gfx_v9_0.c
+# sdma_v4_0_sw_init
+SDMA0_4_0__SRCID__SDMA_TRAP @ sdma_v4_0.c
+SDMA0_4_0__SRCID__SDMA_SRAM_ECC @ sdma_v4_0.c
+SDMA0_4_0__SRCID__SDMA_VM_HOLE @ sdma_v4_0.c
+SDMA0_4_0__SRCID__SDMA_DOORBELL_INVALID @ sdma_v4_0.c
+SDMA0_4_0__SRCID__SDMA_POLL_TIMEOUT @ sdma_v4_0.c
+SDMA0_4_0__SRCID__SDMA_SRBMWRITE @ sdma_v4_0.c
+SOC15_IH_CLIENTID_SDMA0 @ sdma_v4_0.c
+SOC15_IH_CLIENTID_SDMA1 @ sdma_v4_0.c
+AMDGPU_SDMA_IRQ_INSTANCE0 @ sdma_v4_0.c
+SDMA_REG_LIST_4_0_COUNT = ARRAY_SIZE(sdma_reg_list_4_0) @ sdma_v4_0.c
+# vcn_v2_0_sw_init, jpeg_v2_0_sw_init
+SOC15_IH_CLIENTID_VCN @ vcn_v2_0.c
+VCN_2_0__SRCID__UVD_SYSTEM_MESSAGE_INTERRUPT @ vcn_v2_0.c
+VCN_2_0__SRCID__UVD_ENC_GENERAL_PURPOSE @ vcn_v2_0.c
+AMDGPU_VCN_STACK_SIZE @ vcn_v2_0.c
+AMDGPU_VCN_CONTEXT_SIZE @ vcn_v2_0.c
+AMDGPU_VCN_MULTI_QUEUE_FLAG @ vcn_v2_0.c
+AMDGPU_VCNFW_LOG_SIZE @ vcn_v2_0.c
+mmUVD_CONTEXT_ID_INTERNAL_OFFSET @ vcn_v2_0.c
+mmUVD_LMI_RBC_IB_VMID_INTERNAL_OFFSET @ vcn_v2_0.c
+mmUVD_LMI_RBC_IB_64BIT_BAR_LOW_INTERNAL_OFFSET @ vcn_v2_0.c
+mmUVD_LMI_RBC_IB_64BIT_BAR_HIGH_INTERNAL_OFFSET @ vcn_v2_0.c
+mmUVD_RBC_IB_SIZE_INTERNAL_OFFSET @ vcn_v2_0.c
+mmUVD_GP_SCRATCH8_INTERNAL_OFFSET @ vcn_v2_0.c
+mmUVD_SCRATCH9_INTERNAL_OFFSET @ vcn_v2_0.c
+mmUVD_GPCOM_VCPU_DATA0_INTERNAL_OFFSET @ vcn_v2_0.c
+mmUVD_GPCOM_VCPU_DATA1_INTERNAL_OFFSET @ vcn_v2_0.c
+mmUVD_GPCOM_VCPU_CMD_INTERNAL_OFFSET @ vcn_v2_0.c
+mmUVD_NO_OP_INTERNAL_OFFSET @ vcn_v2_0.c
+mmUVD_SCRATCH9 @ vcn_v2_0.c
+mmUVD_SCRATCH9_BASE_IDX @ vcn_v2_0.c
+mmUVD_GPCOM_VCPU_DATA0 @ vcn_v2_0.c
+mmUVD_GPCOM_VCPU_DATA0_BASE_IDX @ vcn_v2_0.c
+mmUVD_GPCOM_VCPU_DATA1 @ vcn_v2_0.c
+mmUVD_GPCOM_VCPU_DATA1_BASE_IDX @ vcn_v2_0.c
+mmUVD_GPCOM_VCPU_CMD @ vcn_v2_0.c
+mmUVD_GPCOM_VCPU_CMD_BASE_IDX @ vcn_v2_0.c
+mmUVD_NO_OP @ vcn_v2_0.c
+mmUVD_NO_OP_BASE_IDX @ vcn_v2_0.c
+SIZEOF_amdgpu_fw_shared = sizeof(struct amdgpu_fw_shared) @ vcn_v2_0.c
+FW_SHARED_PRESENT_FLAG_0 = offsetof(struct amdgpu_fw_shared, present_flag_0) @ vcn_v2_0.c
+VCN_REG_LIST_2_0_COUNT = ARRAY_SIZE(vcn_reg_list_2_0) @ vcn_v2_0.c
+VCN_2_0__SRCID__JPEG_DECODE @ jpeg_v2_0.c
+mmUVD_JPEG_PITCH_INTERNAL_OFFSET @ jpeg_v2_0.c
+mmUVD_JPEG_PITCH @ jpeg_v2_0.c
+mmUVD_JPEG_PITCH_BASE_IDX @ jpeg_v2_0.c
+AMD_PG_SUPPORT_JPEG_DPG @ jpeg_v2_0.c
+JPEG_REG_LIST_2_0_COUNT = ARRAY_SIZE(jpeg_reg_list_2_0) @ jpeg_v2_0.c
+# clearstate_gfx9.h, the clear state gfx_v9_0_get_csb_size and _buffer walk
+SECT_CONTEXT @ gfx_v9_0.c
+CS_SECTIONS = ARRAY_SIZE(gfx9_cs_data) @ gfx_v9_0.c
+CS_SECTION_0_ID = gfx9_cs_data[0].id @ gfx_v9_0.c
+CS_SECTION_0_IS_CONTEXT_DEFS = gfx9_cs_data[0].section == gfx9_SECT_CONTEXT_defs @ gfx_v9_0.c
+CS_SECTION_1_END = gfx9_cs_data[1].section == 0 @ gfx_v9_0.c
+CS_EXTENTS = ARRAY_SIZE(gfx9_SECT_CONTEXT_defs) @ gfx_v9_0.c
+CS_EXTENT_0_REG_INDEX = gfx9_SECT_CONTEXT_defs[0].reg_index @ gfx_v9_0.c
+CS_EXTENT_0_REG_COUNT = gfx9_SECT_CONTEXT_defs[0].reg_count @ gfx_v9_0.c
+CS_EXTENT_0_IS_DEF_1 = gfx9_SECT_CONTEXT_defs[0].extent == gfx9_SECT_CONTEXT_def_1 @ gfx_v9_0.c
+CS_EXTENT_1_REG_INDEX = gfx9_SECT_CONTEXT_defs[1].reg_index @ gfx_v9_0.c
+CS_EXTENT_1_REG_COUNT = gfx9_SECT_CONTEXT_defs[1].reg_count @ gfx_v9_0.c
+CS_EXTENT_1_IS_DEF_2 = gfx9_SECT_CONTEXT_defs[1].extent == gfx9_SECT_CONTEXT_def_2 @ gfx_v9_0.c
+CS_EXTENT_2_REG_INDEX = gfx9_SECT_CONTEXT_defs[2].reg_index @ gfx_v9_0.c
+CS_EXTENT_2_REG_COUNT = gfx9_SECT_CONTEXT_defs[2].reg_count @ gfx_v9_0.c
+CS_EXTENT_2_IS_DEF_3 = gfx9_SECT_CONTEXT_defs[2].extent == gfx9_SECT_CONTEXT_def_3 @ gfx_v9_0.c
+CS_EXTENT_3_REG_INDEX = gfx9_SECT_CONTEXT_defs[3].reg_index @ gfx_v9_0.c
+CS_EXTENT_3_REG_COUNT = gfx9_SECT_CONTEXT_defs[3].reg_count @ gfx_v9_0.c
+CS_EXTENT_3_IS_DEF_4 = gfx9_SECT_CONTEXT_defs[3].extent == gfx9_SECT_CONTEXT_def_4 @ gfx_v9_0.c
+CS_EXTENT_4_REG_INDEX = gfx9_SECT_CONTEXT_defs[4].reg_index @ gfx_v9_0.c
+CS_EXTENT_4_REG_COUNT = gfx9_SECT_CONTEXT_defs[4].reg_count @ gfx_v9_0.c
+CS_EXTENT_4_IS_DEF_5 = gfx9_SECT_CONTEXT_defs[4].extent == gfx9_SECT_CONTEXT_def_5 @ gfx_v9_0.c
+CS_EXTENT_5_REG_INDEX = gfx9_SECT_CONTEXT_defs[5].reg_index @ gfx_v9_0.c
+CS_EXTENT_5_REG_COUNT = gfx9_SECT_CONTEXT_defs[5].reg_count @ gfx_v9_0.c
+CS_EXTENT_5_IS_DEF_6 = gfx9_SECT_CONTEXT_defs[5].extent == gfx9_SECT_CONTEXT_def_6 @ gfx_v9_0.c
+CS_EXTENT_6_REG_INDEX = gfx9_SECT_CONTEXT_defs[6].reg_index @ gfx_v9_0.c
+CS_EXTENT_6_REG_COUNT = gfx9_SECT_CONTEXT_defs[6].reg_count @ gfx_v9_0.c
+CS_EXTENT_6_IS_DEF_7 = gfx9_SECT_CONTEXT_defs[6].extent == gfx9_SECT_CONTEXT_def_7 @ gfx_v9_0.c
+CS_EXTENT_7_REG_INDEX = gfx9_SECT_CONTEXT_defs[7].reg_index @ gfx_v9_0.c
+CS_EXTENT_7_REG_COUNT = gfx9_SECT_CONTEXT_defs[7].reg_count @ gfx_v9_0.c
+CS_EXTENT_7_IS_DEF_8 = gfx9_SECT_CONTEXT_defs[7].extent == gfx9_SECT_CONTEXT_def_8 @ gfx_v9_0.c
+CS_EXTENT_8_END = gfx9_SECT_CONTEXT_defs[8].extent == 0 @ gfx_v9_0.c

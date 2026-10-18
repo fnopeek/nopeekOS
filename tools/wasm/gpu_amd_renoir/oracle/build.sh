@@ -130,10 +130,32 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
         gmc_v9_0_gart_enable gmc_v9_0_hw_init
 } > "$B/gmc_extracted.c"
 
+# The DMUB region layout: dmub_srv.c's functions with the types they use.
+{
+    $X "$AMD/display/dmub/dmub_srv.h" dmub_window_id dmub_window_memory_type dmub_status dmub_asic dmub_region \
+        dmub_fb dmub_srv_region_params dmub_srv_region_info dmub_srv_memory_params dmub_srv_fb_info \
+        '#DMUB_TRACE_BUFFER_SIZE'
+    echo '#pragma pack(push, 1)'
+    $X "$AMD/display/dmub/inc/dmub_cmd.h" '#DMUB_FW_META_MAGIC' '#DMUB_FW_META_OFFSET' dmub_fw_meta_feature_bits \
+        dmub_fw_meta_info dmub_fw_meta
+    echo '#pragma pack(pop)'
+    $X "$AMD/display/dmub/inc/dmub_cmd.h" dmub_shared_state_feature_id '#DMUB_FW_HEADER_SHARED_STATE_SIZE' \
+        '#DMUB_RB_CMD_SIZE' '#DMUB_RB_MAX_ENTRY' '#DMUB_RB_SIZE'
+    $X "$AMD/amdgpu/amdgpu_ucode.h" common_firmware_header dmcub_firmware_header_v1_0
+    $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" '#PSP_HEADER_BYTES' '#PSP_FOOTER_BYTES'
+} > "$B/dmub_types.c"
+{
+    $X "$AMD/display/dmub/src/dmub_srv.c" '#DMUB_STACK_SIZE' '#DMUB_CONTEXT_SIZE' '#DMUB_MAILBOX_SIZE' \
+        '#DMUB_FW_STATE_SIZE' '#DMUB_SCRATCH_MEM_SIZE' '#DMUB_IB_MEM_SIZE' '#DMUB_LSDMA_RB_SIZE' \
+        '#DMUB_NUM_WINDOWS' dmub_align dmub_get_fw_meta_info_from_blob dmub_get_fw_meta_info \
+        dmub_srv_calc_regions_for_memory_type dmub_srv_calc_region_info dmub_srv_calc_mem_info
+} > "$B/dmub_funcs.c"
+
 CF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
 gcc $CF -c "$B/atom.c" -o "$B/atom.o"
 gcc $CF "$HERE/main.c" "$B/atom.o" -o "$B/oracle_atom"
 gcc $CF "$HERE/main_atomexec.c" "$B/atom.o" -o "$B/oracle_atomexec"
+gcc $CF "$HERE/main_dmub.c" -o "$B/oracle_dmub"
 gcc $CF "$HERE/main_discovery.c" -o "$B/oracle_discovery"
 gcc $CF -I "$AMD/display/include" "$HERE/main_ucode.c" -o "$B/oracle_ucode"
 gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_common.c" -o "$B/oracle_common"

@@ -29,7 +29,7 @@ pub struct amdgpu_firmware_info {
 /// Where an `amdgpu_firmware_info.fw` points.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum fw_source {
-    gfx_pfp, gfx_me, gfx_ce, gfx_mec, gfx_mec2, gfx_rlc, sdma(u32),
+    gfx_pfp, gfx_me, gfx_ce, gfx_mec, gfx_mec2, gfx_rlc, sdma(u32), dm_dmub, vcn(u32),
 }
 
 /// `struct amdgpu_firmware`, the part early_init fills.

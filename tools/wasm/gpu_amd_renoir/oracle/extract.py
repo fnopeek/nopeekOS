@@ -40,8 +40,9 @@ for name in sys.argv[2:]:
         starts = [i for i, l in enumerate(src) if rx.match(l)
                   and not next(src[k] for k in range(i, len(src)) if src[k].rstrip().endswith((";", "{", ")"))).rstrip().endswith(";")]
         if not starts:
-            # The return type on a line of its own: `int\nname(`.
-            rx2 = re.compile(r"^%s\(" % n)
+            # The return type on a line of its own: `int\nname(`, the name
+            # line possibly indented.
+            rx2 = re.compile(r"^\s*%s\(" % n)
             starts = [i - 1 for i, l in enumerate(src) if i > 0 and rx2.match(l)
                       and re.match(r"^(?:static )?[\w ]+\*?\s*$", src[i - 1])
                       and not next(src[k] for k in range(i, len(src))

@@ -293,6 +293,29 @@ impl Dma {
     pub fn w32(self, off: u32, v: u32) {
         win_w32(self.handle, off, v)
     }
+
+    pub fn write(self, off: u32, data: &[u8]) -> bool {
+        for (i, c) in data.chunks(4).enumerate() {
+            let mut w = [0u8; 4];
+            w[..c.len()].copy_from_slice(c);
+            let at = off + i as u32 * 4;
+            if c.len() < 4 {
+                let old = win_r32(self.handle, at).to_le_bytes();
+                w[c.len()..].copy_from_slice(&old[c.len()..]);
+            }
+            win_w32(self.handle, at, u32::from_le_bytes(w));
+        }
+        true
+    }
+
+    pub fn read(self, off: u32, buf: &mut [u8]) -> bool {
+        for (i, c) in buf.chunks_mut(4).enumerate() {
+            let w = win_r32(self.handle, off + i as u32 * 4).to_le_bytes();
+            let n = c.len();
+            c.copy_from_slice(&w[..n]);
+        }
+        true
+    }
 }
 
 pub fn now_us() -> i64 {

@@ -58,6 +58,17 @@ for seed in ones zeros hash; do
     done
 done
 echo "atom tables: port = Linux ($n runs, $acc register accesses)"
+# dm_dmub_sw_init's region layout on the DMCUB image, rebased on a
+# framebuffer address.
+rustc $RF "$HERE/dmub_check.rs" -o "$B/dmub_check"
+VBIOS_SIZE=$(stat -c %s "$BIOS")
+"$B/oracle_dmub" "$FW/amdgpu/renoir_dmcub.bin" $VBIOS_SIZE 0xf400100000 > "$B/dmub.linux"
+"$B/dmub_check" "$FW/amdgpu/renoir_dmcub.bin" $VBIOS_SIZE 0xf400100000 > "$B/dmub.port"
+if diff -u "$B/dmub.linux" "$B/dmub.port"; then
+    echo "dmub regions: port = Linux ($(grep -c '^fb ' "$B/dmub.linux") windows)"
+else
+    fail=1
+fi
 # Stage 2: the oracle reads the discovery binary, the port runs the whole
 # amdgpu_device_init on the fake card first.
 # Registers never written read all ones (a bit cleared shows), all zeros

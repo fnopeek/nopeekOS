@@ -152,3 +152,25 @@ pub fn kptr_fill32(adev: &amdgpu_device, k: amdgpu_kptr, off: u64, len: u64, v: 
         o += 4;
     }
 }
+
+/// `memcpy_toio` / `memcpy` of `data` to `off`.
+pub fn kptr_write(adev: &amdgpu_device, k: amdgpu_kptr, off: u64, data: &[u8]) {
+    match k {
+        amdgpu_kptr::gtt(h) => {
+            if !(npk_sys::Dma { handle: h, phys: 0 }).write(off as u32, data) {
+                crate::linux::Line::new().s("kptr_write: DMA write refused").say();
+            }
+        }
+        _ => {
+            for (i, c) in data.chunks(4).enumerate() {
+                let mut w = [0u8; 4];
+                w[..c.len()].copy_from_slice(c);
+                if c.len() < 4 {
+                    let old = kptr_r32(adev, k, off + i as u64 * 4).to_le_bytes();
+                    w[c.len()..].copy_from_slice(&old[c.len()..]);
+                }
+                kptr_w32(adev, k, off + i as u64 * 4, u32::from_le_bytes(w));
+            }
+        }
+    }
+}
