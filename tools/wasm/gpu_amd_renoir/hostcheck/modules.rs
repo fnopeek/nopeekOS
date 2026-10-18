@@ -27,3 +27,23 @@ mod soc15;
 #[path = "../src/tables.rs"]
 #[allow(dead_code, non_upper_case_globals)]
 mod tables;
+#[path = "../src/amdgpu_dm.rs"]
+mod amdgpu_dm;
+#[path = "../src/amdgpu_psp.rs"]
+mod amdgpu_psp;
+#[path = "../src/amdgpu_smu.rs"]
+mod amdgpu_smu;
+#[path = "../src/amdgpu_ucode.rs"]
+mod amdgpu_ucode;
+#[path = "../src/gfx_v9_0.rs"]
+mod gfx_v9_0;
+#[path = "../src/gmc_v9_0.rs"]
+mod gmc_v9_0;
+#[path = "../src/jpeg_v2_0.rs"]
+mod jpeg_v2_0;
+#[path = "../src/sdma_v4_0.rs"]
+mod sdma_v4_0;
+#[path = "../src/vcn_v2_0.rs"]
+mod vcn_v2_0;
+#[path = "../src/vega10_ih.rs"]
+mod vega10_ih;

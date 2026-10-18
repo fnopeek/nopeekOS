@@ -77,3 +77,9 @@ pub static amdgpu_dc: [i32; 1] = [-1];
 
 /// `amdgpu_dpm` in amdgpu_drv.c
 pub static amdgpu_dpm: [i32; 1] = [-1];
+
+/// `amdgpu_mcbp` in amdgpu_drv.c
+pub static amdgpu_mcbp: [i32; 1] = [-1];
+
+/// `amdgpu_num_kcq` in amdgpu_drv.c
+pub static amdgpu_num_kcq: [i32; 1] = [-1];

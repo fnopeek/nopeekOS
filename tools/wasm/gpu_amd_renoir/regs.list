@@ -74,6 +74,7 @@ VCN_HWIP
 JPEG_HWIP
 VCN1_HWIP
 VCE_HWIP
+VPE_HWIP
 DF_HWIP
 DCE_HWIP
 OSSSYS_HWIP
@@ -444,3 +445,296 @@ AMD_PG_SUPPORT_SDMA @ soc15.c
 AMD_PG_SUPPORT_VCN @ soc15.c
 AMD_PG_SUPPORT_JPEG @ soc15.c
 AMD_PG_SUPPORT_VCN_DPG @ soc15.c
+# Firmware header layouts (amdgpu_ucode.h): every field, by offsetof
+COMMON_FIRMWARE_HEADER_SIZE = sizeof(struct common_firmware_header) @ amdgpu_ucode.c
+COMMON_FIRMWARE_HEADER_size_bytes = offsetof(struct common_firmware_header, size_bytes) @ amdgpu_ucode.c
+COMMON_FIRMWARE_HEADER_header_size_bytes = offsetof(struct common_firmware_header, header_size_bytes) @ amdgpu_ucode.c
+COMMON_FIRMWARE_HEADER_header_version_major = offsetof(struct common_firmware_header, header_version_major) @ amdgpu_ucode.c
+COMMON_FIRMWARE_HEADER_header_version_minor = offsetof(struct common_firmware_header, header_version_minor) @ amdgpu_ucode.c
+COMMON_FIRMWARE_HEADER_ip_version_major = offsetof(struct common_firmware_header, ip_version_major) @ amdgpu_ucode.c
+COMMON_FIRMWARE_HEADER_ip_version_minor = offsetof(struct common_firmware_header, ip_version_minor) @ amdgpu_ucode.c
+COMMON_FIRMWARE_HEADER_ucode_version = offsetof(struct common_firmware_header, ucode_version) @ amdgpu_ucode.c
+COMMON_FIRMWARE_HEADER_ucode_size_bytes = offsetof(struct common_firmware_header, ucode_size_bytes) @ amdgpu_ucode.c
+COMMON_FIRMWARE_HEADER_ucode_array_offset_bytes = offsetof(struct common_firmware_header, ucode_array_offset_bytes) @ amdgpu_ucode.c
+COMMON_FIRMWARE_HEADER_crc32 = offsetof(struct common_firmware_header, crc32) @ amdgpu_ucode.c
+PSP_FW_LEGACY_BIN_DESC_SIZE = sizeof(struct psp_fw_legacy_bin_desc) @ amdgpu_ucode.c
+PSP_FW_LEGACY_BIN_DESC_fw_version = offsetof(struct psp_fw_legacy_bin_desc, fw_version) @ amdgpu_ucode.c
+PSP_FW_LEGACY_BIN_DESC_offset_bytes = offsetof(struct psp_fw_legacy_bin_desc, offset_bytes) @ amdgpu_ucode.c
+PSP_FW_LEGACY_BIN_DESC_size_bytes = offsetof(struct psp_fw_legacy_bin_desc, size_bytes) @ amdgpu_ucode.c
+PSP_FIRMWARE_HEADER_V1_0_SIZE = sizeof(struct psp_firmware_header_v1_0) @ amdgpu_ucode.c
+PSP_FIRMWARE_HEADER_V1_0_header = offsetof(struct psp_firmware_header_v1_0, header) @ amdgpu_ucode.c
+PSP_FIRMWARE_HEADER_V1_0_sos = offsetof(struct psp_firmware_header_v1_0, sos) @ amdgpu_ucode.c
+TA_FIRMWARE_HEADER_V1_0_SIZE = sizeof(struct ta_firmware_header_v1_0) @ amdgpu_ucode.c
+TA_FIRMWARE_HEADER_V1_0_header = offsetof(struct ta_firmware_header_v1_0, header) @ amdgpu_ucode.c
+TA_FIRMWARE_HEADER_V1_0_xgmi = offsetof(struct ta_firmware_header_v1_0, xgmi) @ amdgpu_ucode.c
+TA_FIRMWARE_HEADER_V1_0_ras = offsetof(struct ta_firmware_header_v1_0, ras) @ amdgpu_ucode.c
+TA_FIRMWARE_HEADER_V1_0_hdcp = offsetof(struct ta_firmware_header_v1_0, hdcp) @ amdgpu_ucode.c
+TA_FIRMWARE_HEADER_V1_0_dtm = offsetof(struct ta_firmware_header_v1_0, dtm) @ amdgpu_ucode.c
+TA_FIRMWARE_HEADER_V1_0_securedisplay = offsetof(struct ta_firmware_header_v1_0, securedisplay) @ amdgpu_ucode.c
+PSP_FW_BIN_DESC_SIZE = sizeof(struct psp_fw_bin_desc) @ amdgpu_ucode.c
+PSP_FW_BIN_DESC_fw_type = offsetof(struct psp_fw_bin_desc, fw_type) @ amdgpu_ucode.c
+PSP_FW_BIN_DESC_fw_version = offsetof(struct psp_fw_bin_desc, fw_version) @ amdgpu_ucode.c
+PSP_FW_BIN_DESC_offset_bytes = offsetof(struct psp_fw_bin_desc, offset_bytes) @ amdgpu_ucode.c
+PSP_FW_BIN_DESC_size_bytes = offsetof(struct psp_fw_bin_desc, size_bytes) @ amdgpu_ucode.c
+TA_FIRMWARE_HEADER_V2_0_SIZE = sizeof(struct ta_firmware_header_v2_0) @ amdgpu_ucode.c
+TA_FIRMWARE_HEADER_V2_0_header = offsetof(struct ta_firmware_header_v2_0, header) @ amdgpu_ucode.c
+TA_FIRMWARE_HEADER_V2_0_ta_fw_bin_count = offsetof(struct ta_firmware_header_v2_0, ta_fw_bin_count) @ amdgpu_ucode.c
+TA_FIRMWARE_HEADER_V2_0_ta_fw_bin = offsetof(struct ta_firmware_header_v2_0, ta_fw_bin) @ amdgpu_ucode.c
+GFX_FIRMWARE_HEADER_V1_0_SIZE = sizeof(struct gfx_firmware_header_v1_0) @ amdgpu_ucode.c
+GFX_FIRMWARE_HEADER_V1_0_header = offsetof(struct gfx_firmware_header_v1_0, header) @ amdgpu_ucode.c
+GFX_FIRMWARE_HEADER_V1_0_ucode_feature_version = offsetof(struct gfx_firmware_header_v1_0, ucode_feature_version) @ amdgpu_ucode.c
+GFX_FIRMWARE_HEADER_V1_0_jt_offset = offsetof(struct gfx_firmware_header_v1_0, jt_offset) @ amdgpu_ucode.c
+GFX_FIRMWARE_HEADER_V1_0_jt_size = offsetof(struct gfx_firmware_header_v1_0, jt_size) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_SIZE = sizeof(struct rlc_firmware_header_v2_0) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_header = offsetof(struct rlc_firmware_header_v2_0, header) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_ucode_feature_version = offsetof(struct rlc_firmware_header_v2_0, ucode_feature_version) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_jt_offset = offsetof(struct rlc_firmware_header_v2_0, jt_offset) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_jt_size = offsetof(struct rlc_firmware_header_v2_0, jt_size) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_save_and_restore_offset = offsetof(struct rlc_firmware_header_v2_0, save_and_restore_offset) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_clear_state_descriptor_offset = offsetof(struct rlc_firmware_header_v2_0, clear_state_descriptor_offset) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_avail_scratch_ram_locations = offsetof(struct rlc_firmware_header_v2_0, avail_scratch_ram_locations) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_reg_restore_list_size = offsetof(struct rlc_firmware_header_v2_0, reg_restore_list_size) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_reg_list_format_start = offsetof(struct rlc_firmware_header_v2_0, reg_list_format_start) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_reg_list_format_separate_start = offsetof(struct rlc_firmware_header_v2_0, reg_list_format_separate_start) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_starting_offsets_start = offsetof(struct rlc_firmware_header_v2_0, starting_offsets_start) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_reg_list_format_size_bytes = offsetof(struct rlc_firmware_header_v2_0, reg_list_format_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_reg_list_format_array_offset_bytes = offsetof(struct rlc_firmware_header_v2_0, reg_list_format_array_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_reg_list_size_bytes = offsetof(struct rlc_firmware_header_v2_0, reg_list_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_reg_list_array_offset_bytes = offsetof(struct rlc_firmware_header_v2_0, reg_list_array_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_reg_list_format_separate_size_bytes = offsetof(struct rlc_firmware_header_v2_0, reg_list_format_separate_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_reg_list_format_separate_array_offset_bytes = offsetof(struct rlc_firmware_header_v2_0, reg_list_format_separate_array_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_reg_list_separate_size_bytes = offsetof(struct rlc_firmware_header_v2_0, reg_list_separate_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_0_reg_list_separate_array_offset_bytes = offsetof(struct rlc_firmware_header_v2_0, reg_list_separate_array_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_SIZE = sizeof(struct rlc_firmware_header_v2_1) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_v2_0 = offsetof(struct rlc_firmware_header_v2_1, v2_0) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_reg_list_format_direct_reg_list_length = offsetof(struct rlc_firmware_header_v2_1, reg_list_format_direct_reg_list_length) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_cntl_ucode_ver = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_cntl_ucode_ver) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_cntl_feature_ver = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_cntl_feature_ver) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_cntl_size_bytes = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_cntl_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_cntl_offset_bytes = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_cntl_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_gpm_ucode_ver = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_gpm_ucode_ver) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_gpm_feature_ver = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_gpm_feature_ver) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_gpm_size_bytes = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_gpm_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_gpm_offset_bytes = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_gpm_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_srm_ucode_ver = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_srm_ucode_ver) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_srm_feature_ver = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_srm_feature_ver) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_srm_size_bytes = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_srm_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_1_save_restore_list_srm_offset_bytes = offsetof(struct rlc_firmware_header_v2_1, save_restore_list_srm_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_2_SIZE = sizeof(struct rlc_firmware_header_v2_2) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_2_v2_1 = offsetof(struct rlc_firmware_header_v2_2, v2_1) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_2_rlc_iram_ucode_size_bytes = offsetof(struct rlc_firmware_header_v2_2, rlc_iram_ucode_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_2_rlc_iram_ucode_offset_bytes = offsetof(struct rlc_firmware_header_v2_2, rlc_iram_ucode_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_2_rlc_dram_ucode_size_bytes = offsetof(struct rlc_firmware_header_v2_2, rlc_dram_ucode_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_2_rlc_dram_ucode_offset_bytes = offsetof(struct rlc_firmware_header_v2_2, rlc_dram_ucode_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_3_SIZE = sizeof(struct rlc_firmware_header_v2_3) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_3_v2_2 = offsetof(struct rlc_firmware_header_v2_3, v2_2) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_3_rlcp_ucode_version = offsetof(struct rlc_firmware_header_v2_3, rlcp_ucode_version) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_3_rlcp_ucode_feature_version = offsetof(struct rlc_firmware_header_v2_3, rlcp_ucode_feature_version) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_3_rlcp_ucode_size_bytes = offsetof(struct rlc_firmware_header_v2_3, rlcp_ucode_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_3_rlcp_ucode_offset_bytes = offsetof(struct rlc_firmware_header_v2_3, rlcp_ucode_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_3_rlcv_ucode_version = offsetof(struct rlc_firmware_header_v2_3, rlcv_ucode_version) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_3_rlcv_ucode_feature_version = offsetof(struct rlc_firmware_header_v2_3, rlcv_ucode_feature_version) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_3_rlcv_ucode_size_bytes = offsetof(struct rlc_firmware_header_v2_3, rlcv_ucode_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_3_rlcv_ucode_offset_bytes = offsetof(struct rlc_firmware_header_v2_3, rlcv_ucode_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_SIZE = sizeof(struct rlc_firmware_header_v2_4) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_v2_3 = offsetof(struct rlc_firmware_header_v2_4, v2_3) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_global_tap_delays_ucode_size_bytes = offsetof(struct rlc_firmware_header_v2_4, global_tap_delays_ucode_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_global_tap_delays_ucode_offset_bytes = offsetof(struct rlc_firmware_header_v2_4, global_tap_delays_ucode_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_se0_tap_delays_ucode_size_bytes = offsetof(struct rlc_firmware_header_v2_4, se0_tap_delays_ucode_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_se0_tap_delays_ucode_offset_bytes = offsetof(struct rlc_firmware_header_v2_4, se0_tap_delays_ucode_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_se1_tap_delays_ucode_size_bytes = offsetof(struct rlc_firmware_header_v2_4, se1_tap_delays_ucode_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_se1_tap_delays_ucode_offset_bytes = offsetof(struct rlc_firmware_header_v2_4, se1_tap_delays_ucode_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_se2_tap_delays_ucode_size_bytes = offsetof(struct rlc_firmware_header_v2_4, se2_tap_delays_ucode_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_se2_tap_delays_ucode_offset_bytes = offsetof(struct rlc_firmware_header_v2_4, se2_tap_delays_ucode_offset_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_se3_tap_delays_ucode_size_bytes = offsetof(struct rlc_firmware_header_v2_4, se3_tap_delays_ucode_size_bytes) @ amdgpu_ucode.c
+RLC_FIRMWARE_HEADER_V2_4_se3_tap_delays_ucode_offset_bytes = offsetof(struct rlc_firmware_header_v2_4, se3_tap_delays_ucode_offset_bytes) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V1_0_SIZE = sizeof(struct sdma_firmware_header_v1_0) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V1_0_header = offsetof(struct sdma_firmware_header_v1_0, header) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V1_0_ucode_feature_version = offsetof(struct sdma_firmware_header_v1_0, ucode_feature_version) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V1_0_ucode_change_version = offsetof(struct sdma_firmware_header_v1_0, ucode_change_version) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V1_0_jt_offset = offsetof(struct sdma_firmware_header_v1_0, jt_offset) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V1_0_jt_size = offsetof(struct sdma_firmware_header_v1_0, jt_size) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V2_0_SIZE = sizeof(struct sdma_firmware_header_v2_0) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V2_0_header = offsetof(struct sdma_firmware_header_v2_0, header) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V2_0_ucode_feature_version = offsetof(struct sdma_firmware_header_v2_0, ucode_feature_version) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V2_0_ctx_ucode_size_bytes = offsetof(struct sdma_firmware_header_v2_0, ctx_ucode_size_bytes) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V2_0_ctx_jt_offset = offsetof(struct sdma_firmware_header_v2_0, ctx_jt_offset) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V2_0_ctx_jt_size = offsetof(struct sdma_firmware_header_v2_0, ctx_jt_size) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V2_0_ctl_ucode_offset = offsetof(struct sdma_firmware_header_v2_0, ctl_ucode_offset) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V2_0_ctl_ucode_size_bytes = offsetof(struct sdma_firmware_header_v2_0, ctl_ucode_size_bytes) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V2_0_ctl_jt_offset = offsetof(struct sdma_firmware_header_v2_0, ctl_jt_offset) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V2_0_ctl_jt_size = offsetof(struct sdma_firmware_header_v2_0, ctl_jt_size) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V3_0_SIZE = sizeof(struct sdma_firmware_header_v3_0) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V3_0_header = offsetof(struct sdma_firmware_header_v3_0, header) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V3_0_ucode_feature_version = offsetof(struct sdma_firmware_header_v3_0, ucode_feature_version) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V3_0_ucode_offset_bytes = offsetof(struct sdma_firmware_header_v3_0, ucode_offset_bytes) @ amdgpu_ucode.c
+SDMA_FIRMWARE_HEADER_V3_0_ucode_size_bytes = offsetof(struct sdma_firmware_header_v3_0, ucode_size_bytes) @ amdgpu_ucode.c
+# AMDGPU_UCODE_ID (amdgpu_ucode.h)
+AMDGPU_UCODE_ID_CAP @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SDMA0 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SDMA1 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SDMA2 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SDMA3 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SDMA4 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SDMA5 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SDMA6 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SDMA7 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SDMA_UCODE_TH0 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SDMA_UCODE_TH1 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SDMA_RS64 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_CE @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_PFP @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_ME @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_RS64_PFP @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_RS64_ME @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_RS64_MEC @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_RS64_PFP_P0_STACK @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_RS64_PFP_P1_STACK @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_RS64_ME_P0_STACK @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_RS64_ME_P1_STACK @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_RS64_MEC_P0_STACK @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_RS64_MEC_P1_STACK @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_RS64_MEC_P2_STACK @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_RS64_MEC_P3_STACK @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_MEC1 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_MEC1_JT @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_MEC2 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_MEC2_JT @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_MES @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_MES_DATA @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_MES1 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_CP_MES1_DATA @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_IMU_I @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_IMU_D @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_GLOBAL_TAP_DELAYS @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SE0_TAP_DELAYS @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SE1_TAP_DELAYS @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SE2_TAP_DELAYS @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SE3_TAP_DELAYS @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_RLC_RESTORE_LIST_CNTL @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_RLC_RESTORE_LIST_GPM_MEM @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_RLC_RESTORE_LIST_SRM_MEM @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_RLC_IRAM @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_RLC_DRAM @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_RLC_P @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_RLC_V @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_RLC_G @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_STORAGE @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_SMC @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_PPTABLE @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_UVD @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_UVD1 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_VCE @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_VCN @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_VCN1 @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_DMCU_ERAM @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_DMCU_INTV @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_VCN0_RAM @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_VCN1_RAM @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_DMCUB @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_VPE_CTX @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_VPE_CTL @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_VPE @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_UMSCH_MM_UCODE @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_UMSCH_MM_DATA @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_UMSCH_MM_CMD_BUFFER @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_P2S_TABLE @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_JPEG_RAM @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_ISP @ amdgpu_ucode.c
+AMDGPU_UCODE_ID_MAXIMUM @ amdgpu_ucode.c
+# TA types (amdgpu_ucode.h)
+TA_FW_TYPE_UNKOWN @ amdgpu_ucode.c
+TA_FW_TYPE_PSP_ASD @ amdgpu_ucode.c
+TA_FW_TYPE_PSP_XGMI @ amdgpu_ucode.c
+TA_FW_TYPE_PSP_RAS @ amdgpu_ucode.c
+TA_FW_TYPE_PSP_HDCP @ amdgpu_ucode.c
+TA_FW_TYPE_PSP_DTM @ amdgpu_ucode.c
+TA_FW_TYPE_PSP_RAP @ amdgpu_ucode.c
+TA_FW_TYPE_PSP_SECUREDISPLAY @ amdgpu_ucode.c
+TA_FW_TYPE_PSP_XGMI_AUX @ amdgpu_ucode.c
+TA_FW_TYPE_MAX_INDEX @ amdgpu_ucode.c
+UCODE_MAX_PSP_PACKAGING @ amdgpu_ucode.c
+AMDGPU_UCODE_REQUIRED @ amdgpu_ucode.c
+AMDGPU_UCODE_OPTIONAL @ amdgpu_ucode.c
+AMDGPU_UCODE_NAME_MAX @ amdgpu_ucode.c
+KICKER_DEVICE_LIST_COUNT = sizeof(kicker_device_list) / sizeof(kicker_device_list[0]) @ amdgpu_ucode.c
+KICKER_DEVICE_0_device = kicker_device_list[0].device @ amdgpu_ucode.c
+KICKER_DEVICE_0_revision = kicker_device_list[0].revision @ amdgpu_ucode.c
+KICKER_DEVICE_1_device = kicker_device_list[1].device @ amdgpu_ucode.c
+KICKER_DEVICE_1_revision = kicker_device_list[1].revision @ amdgpu_ucode.c
+# gfx_v9_0 (gfx_v9_0.c, soc15d.h, amdgpu_ring.h, amdgpu_gfx.h)
+GFX9_NUM_GFX_RINGS @ gfx_v9_0.c
+GFX9_NUM_SW_GFX_RINGS @ gfx_v9_0.c
+AMDGPU_MAX_COMPUTE_RINGS @ gfx_v9_0.c
+AMDGPU_MAX_GFX_RINGS @ gfx_v9_0.c
+AMDGPU_CP_IRQ_LAST @ gfx_v9_0.c
+PP_OVERDRIVE_MASK @ gfx_v9_0.c
+AMD_PG_SUPPORT_GFX_PG @ gfx_v9_0.c
+AMD_PG_SUPPORT_CP @ gfx_v9_0.c
+AMD_PG_SUPPORT_RLC_SMU_HS @ gfx_v9_0.c
+GFXOFF_QUIRK_COUNT = sizeof(amdgpu_gfxoff_quirk_list) / sizeof(amdgpu_gfxoff_quirk_list[0]) @ gfx_v9_0.c
+GFXOFF_QUIRK_0_chip_vendor = amdgpu_gfxoff_quirk_list[0].chip_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_0_chip_device = amdgpu_gfxoff_quirk_list[0].chip_device @ gfx_v9_0.c
+GFXOFF_QUIRK_0_subsys_vendor = amdgpu_gfxoff_quirk_list[0].subsys_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_0_subsys_device = amdgpu_gfxoff_quirk_list[0].subsys_device @ gfx_v9_0.c
+GFXOFF_QUIRK_0_revision = amdgpu_gfxoff_quirk_list[0].revision @ gfx_v9_0.c
+GFXOFF_QUIRK_1_chip_vendor = amdgpu_gfxoff_quirk_list[1].chip_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_1_chip_device = amdgpu_gfxoff_quirk_list[1].chip_device @ gfx_v9_0.c
+GFXOFF_QUIRK_1_subsys_vendor = amdgpu_gfxoff_quirk_list[1].subsys_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_1_subsys_device = amdgpu_gfxoff_quirk_list[1].subsys_device @ gfx_v9_0.c
+GFXOFF_QUIRK_1_revision = amdgpu_gfxoff_quirk_list[1].revision @ gfx_v9_0.c
+GFXOFF_QUIRK_2_chip_vendor = amdgpu_gfxoff_quirk_list[2].chip_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_2_chip_device = amdgpu_gfxoff_quirk_list[2].chip_device @ gfx_v9_0.c
+GFXOFF_QUIRK_2_subsys_vendor = amdgpu_gfxoff_quirk_list[2].subsys_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_2_subsys_device = amdgpu_gfxoff_quirk_list[2].subsys_device @ gfx_v9_0.c
+GFXOFF_QUIRK_2_revision = amdgpu_gfxoff_quirk_list[2].revision @ gfx_v9_0.c
+GFXOFF_QUIRK_3_chip_vendor = amdgpu_gfxoff_quirk_list[3].chip_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_3_chip_device = amdgpu_gfxoff_quirk_list[3].chip_device @ gfx_v9_0.c
+GFXOFF_QUIRK_3_subsys_vendor = amdgpu_gfxoff_quirk_list[3].subsys_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_3_subsys_device = amdgpu_gfxoff_quirk_list[3].subsys_device @ gfx_v9_0.c
+GFXOFF_QUIRK_3_revision = amdgpu_gfxoff_quirk_list[3].revision @ gfx_v9_0.c
+GFXOFF_QUIRK_4_chip_vendor = amdgpu_gfxoff_quirk_list[4].chip_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_4_chip_device = amdgpu_gfxoff_quirk_list[4].chip_device @ gfx_v9_0.c
+GFXOFF_QUIRK_4_subsys_vendor = amdgpu_gfxoff_quirk_list[4].subsys_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_4_subsys_device = amdgpu_gfxoff_quirk_list[4].subsys_device @ gfx_v9_0.c
+GFXOFF_QUIRK_4_revision = amdgpu_gfxoff_quirk_list[4].revision @ gfx_v9_0.c
+GFXOFF_QUIRK_5_chip_vendor = amdgpu_gfxoff_quirk_list[5].chip_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_5_chip_device = amdgpu_gfxoff_quirk_list[5].chip_device @ gfx_v9_0.c
+GFXOFF_QUIRK_5_subsys_vendor = amdgpu_gfxoff_quirk_list[5].subsys_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_5_subsys_device = amdgpu_gfxoff_quirk_list[5].subsys_device @ gfx_v9_0.c
+GFXOFF_QUIRK_5_revision = amdgpu_gfxoff_quirk_list[5].revision @ gfx_v9_0.c
+GFXOFF_QUIRK_6_chip_vendor = amdgpu_gfxoff_quirk_list[6].chip_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_6_chip_device = amdgpu_gfxoff_quirk_list[6].chip_device @ gfx_v9_0.c
+GFXOFF_QUIRK_6_subsys_vendor = amdgpu_gfxoff_quirk_list[6].subsys_vendor @ gfx_v9_0.c
+GFXOFF_QUIRK_6_subsys_device = amdgpu_gfxoff_quirk_list[6].subsys_device @ gfx_v9_0.c
+GFXOFF_QUIRK_6_revision = amdgpu_gfxoff_quirk_list[6].revision @ gfx_v9_0.c
+mmSCRATCH_REG0 @ gfx_v9_0.c
+mmSCRATCH_REG0_BASE_IDX @ gfx_v9_0.c
+mmSCRATCH_REG1 @ gfx_v9_0.c
+mmSCRATCH_REG1_BASE_IDX @ gfx_v9_0.c
+mmSCRATCH_REG2 @ gfx_v9_0.c
+mmSCRATCH_REG2_BASE_IDX @ gfx_v9_0.c
+mmSCRATCH_REG3 @ gfx_v9_0.c
+mmSCRATCH_REG3_BASE_IDX @ gfx_v9_0.c
+mmGRBM_GFX_CNTL @ gfx_v9_0.c
+mmGRBM_GFX_CNTL_BASE_IDX @ gfx_v9_0.c
+mmGRBM_GFX_INDEX @ gfx_v9_0.c
+mmGRBM_GFX_INDEX_BASE_IDX @ gfx_v9_0.c
+mmRLC_SPARE_INT @ gfx_v9_0.c
+mmRLC_SPARE_INT_BASE_IDX @ gfx_v9_0.c
+# gmc_v9_0, dm, smu (gmc_v9_0.c, amdgpu_dm.c, renoir_ppt.c)
+AMDGPU_VM_NORETRY_FLAGS_TF @ gmc_v9_0.c
+FIRMWARE_RENOIR_DMUB$ @ ../display/amdgpu_dm/amdgpu_dm.c
+FIRMWARE_GREEN_SARDINE_DMUB$ @ ../display/amdgpu_dm/amdgpu_dm.c
+GREEN_SARDINE_A0 @ ../display/amdgpu_dm/amdgpu_dm.c
+DATA_TABLE_Object_Header = GetIndexIntoMasterTable(DATA, Object_Header) @ ../display/amdgpu_dm/amdgpu_dm.c
+SMU12_DRIVER_IF_VERSION @ ../pm/swsmu/smu12/renoir_ppt.c
+PP_SMC_POWER_PROFILE_UNKNOWN @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_BACO_STATE_NONE @ ../pm/swsmu/smu12/renoir_ppt.c
+mmMP1_SMN_C2PMSG_82 @ ../pm/swsmu/smu12/renoir_ppt.c
+mmMP1_SMN_C2PMSG_82_BASE_IDX @ ../pm/swsmu/smu12/renoir_ppt.c
+mmMP1_SMN_C2PMSG_66 @ ../pm/swsmu/smu12/renoir_ppt.c
+mmMP1_SMN_C2PMSG_66_BASE_IDX @ ../pm/swsmu/smu12/renoir_ppt.c
+mmMP1_SMN_C2PMSG_90 @ ../pm/swsmu/smu12/renoir_ppt.c
+mmMP1_SMN_C2PMSG_90_BASE_IDX @ ../pm/swsmu/smu12/renoir_ppt.c
+AMDGPU_MAX_VCN_ENC_RINGS @ vcn_v2_0.c

@@ -173,3 +173,32 @@ pub fn debug_enabled() -> bool {
 pub fn drm_err(s: &str) {
     Line::new().s("error: ").s(s).say();
 }
+
+/// `struct firmware`: the bytes of one firmware file.
+pub struct firmware {
+    pub data: alloc::vec::Vec<u8>,
+}
+
+/// `request_firmware(fw, name, dev)`: `name` as Linux names it
+/// ("amdgpu/renoir_pfp.bin"), read from sys/firmware/, where `install`
+/// puts the files the module's manifest entry lists. -ENOENT when absent.
+pub fn request_firmware(name: &[u8]) -> Result<firmware, i32> {
+    let mut path = alloc::vec::Vec::with_capacity(13 + name.len());
+    path.extend_from_slice(b"sys/firmware/");
+    path.extend_from_slice(name);
+    let mut st = [0u8; 17];
+    if npk_sys::fs_stat(&path, &mut st) <= 0 || st[8] != 0 {
+        return Err(-2);
+    }
+    let size = u64::from_le_bytes(st[..8].try_into().unwrap_or([0; 8])) as usize;
+    let mut data = alloc::vec![0u8; size];
+    if size == 0 || npk_sys::fetch(&path, &mut data) != size as i32 {
+        return Err(-2);
+    }
+    Ok(firmware { data })
+}
+
+/// `drm_info`.
+pub fn drm_info(s: &str) {
+    Line::new().s(s).say();
+}

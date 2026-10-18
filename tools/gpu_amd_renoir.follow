@@ -124,6 +124,8 @@ set_rptr  = vega10_ih_set_rptr
 
 # --- PSP: amdgpu_psp.c:205-207 -> psp_v12_0_funcs (psp_v12_0.c:280)
 init_microcode         = psp_v12_0_init_microcode
+# psp_init_microcode is a macro (amdgpu_psp.h:461): the site has no ->member
+@amdgpu_psp.c:275      = psp_v12_0_init_microcode
 bootloader_load_sysdrv = psp_v12_0_bootloader_load_sysdrv
 bootloader_load_sos    = psp_v12_0_bootloader_load_sos
 ring_create            = psp_v12_0_ring_create
@@ -208,3 +210,7 @@ pad_ib             = sdma_v4_0_ring_pad_ib
 # XCP (amdgpu_xcp.c:*, aqua_vanjaram only, amdgpu_discovery.c:2494-2505),
 # RAS/ACA/MCA/CPER (no RAS on this APU — to confirm with the device's
 # ras_hw_enabled), userq, MES rreg/wreg (no MES on GC 9).
+
+# --- early_init sites behind macros or not taken (stage 1b)
+# gmc_v9_0.c:1598 (smuio is_host_gpu_xgmi_supported) only for XGMI 6.1.0: not taken
+# pm/swsmu/amdgpu_smu.c:819 (smu_init_microcode, smu_internal.h:33): renoir_ppt_funcs has no init_microcode, 0

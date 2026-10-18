@@ -1,13 +1,14 @@
-//! Stage 1a end to end on the host: stage1a::run as _start calls it, on a
+//! Stage 1 end to end on the host: stage1::run as _start calls it, on a
 //! fake card with the device's IP discovery binary at the top of VRAM and
 //! an ACPI VFCT holding the device's VBIOS, built to the layouts
-//! amdgpu_acpi_vfct_bios reads. Prints the log the device would print.
+//! amdgpu_acpi_vfct_bios reads, and the staged firmware as sys/firmware/.
+//! Prints the log the card run prints.
 
 extern crate alloc;
 
 include!("modules.rs");
-#[path = "../src/stage1a.rs"]
-mod stage1a;
+#[path = "../src/stage1.rs"]
+mod stage1;
 
 use regs::*;
 
@@ -25,6 +26,7 @@ fn put32(b: &mut [u8], at: u32, v: u32) {
 fn main() {
     let disc = std::fs::read(std::env::args().nth(1).expect("ip_discovery.bin")).expect("read");
     let bios = std::fs::read(std::env::args().nth(2).expect("vbios.bin")).expect("read");
+    npk_sys::fake_firmware_dir(&std::env::args().nth(3).expect("firmware dir"));
 
     let vram_size = (VRAM_MB as u64) << 20;
     let mut regs = std::collections::HashMap::new();
@@ -58,5 +60,7 @@ fn main() {
 
     let mut adev = amdgpu_device::amdgpu_device::new(0x164c, 0xc1, npk_sys::Mmio(0), 512 << 10);
     adev.rmmio_base = 0xfd40_0000;
-    stage1a::run(&mut adev, BDF);
+    adev.subsystem_vendor = 0x17aa;
+    adev.subsystem_device = 0x3806;
+    stage1::run(&mut adev, BDF);
 }

@@ -1,7 +1,14 @@
 //! amdgpu/amdgpu_device.c (Linux 6.18.55): the device, register access and
 //! VRAM access as they work before the IP blocks are known.
 
+use crate::amdgpu_psp::psp_context;
+use crate::amdgpu_smu::smu_context;
+use crate::amdgpu_ucode::amdgpu_firmware;
 use crate::atom::atom_context;
+use crate::gfx_v9_0::{amdgpu_gds, amdgpu_rlc};
+use crate::gmc_v9_0::amdgpu_irq_src;
+use crate::linux::firmware;
+use crate::sdma_v4_0::amdgpu_sdma_instance;
 use crate::ip_blocks::{amdgpu_ip_block_version, ip_block_name};
 use crate::linux::Line;
 use crate::regs::*;
@@ -22,12 +29,19 @@ pub struct amdgpu_mman {
     pub fw_vram_usage_size: u64,
     pub drv_vram_usage_start_offset: u64,
     pub drv_vram_usage_size: u64,
+    pub buffer_funcs: Option<&'static str>,
+    pub buffer_funcs_ring: Option<&'static str>,
 }
 
-/// `struct amdgpu_mode_info`, the ATOM part.
+/// `struct amdgpu_mode_info`, the ATOM part and what DM sets.
+#[derive(Default)]
 pub struct amdgpu_mode_info {
     pub atom_context: Option<atom_context>,
     pub firmware_flags: u32,
+    pub num_crtc: u32,
+    pub num_hpd: u32,
+    pub num_dig: u32,
+    pub funcs: Option<&'static str>,
 }
 
 /// `struct amdgpu_pll`, the fields `amdgpu_atomfirmware_get_clock_info` sets.
@@ -143,12 +157,65 @@ pub struct amdgpu_cu_info {
     pub lds_size: u32,
 }
 
-/// `struct amdgpu_gfx`.
+/// `struct amdgpu_gfx`, the part discovery and early_init fill.
 #[derive(Default)]
 pub struct amdgpu_gfx {
     pub xcc_mask: u32,
     pub config: amdgpu_gfx_config,
     pub cu_info: amdgpu_cu_info,
+    pub funcs: Option<&'static str>,
+    pub mcbp: bool,
+    pub num_gfx_rings: u32,
+    pub num_compute_rings: u32,
+    pub pfp_fw: Option<firmware>,
+    pub me_fw: Option<firmware>,
+    pub ce_fw: Option<firmware>,
+    pub rlc_fw: Option<firmware>,
+    pub mec_fw: Option<firmware>,
+    pub mec2_fw: Option<firmware>,
+    pub pfp_fw_version: u32,
+    pub pfp_feature_version: u32,
+    pub me_fw_version: u32,
+    pub me_feature_version: u32,
+    pub ce_fw_version: u32,
+    pub ce_feature_version: u32,
+    pub rlc_fw_version: u32,
+    pub rlc_feature_version: u32,
+    pub rlc_srlc_fw_version: u32,
+    pub rlc_srlc_feature_version: u32,
+    pub rlc_srlg_fw_version: u32,
+    pub rlc_srlg_feature_version: u32,
+    pub rlc_srls_fw_version: u32,
+    pub rlc_srls_feature_version: u32,
+    pub rlcp_ucode_version: u32,
+    pub rlcp_ucode_feature_version: u32,
+    pub rlcv_ucode_version: u32,
+    pub rlcv_ucode_feature_version: u32,
+    pub mec_fw_version: u32,
+    pub mec_feature_version: u32,
+    pub mec2_fw_version: u32,
+    pub mec2_feature_version: u32,
+    pub me_fw_write_wait: bool,
+    pub mec_fw_write_wait: bool,
+    pub rlc: amdgpu_rlc,
+    pub kiq0_pmf: Option<&'static str>,
+    pub kiq0_ring_funcs: Option<&'static str>,
+    pub gfx_ring_funcs: [Option<&'static str>; AMDGPU_MAX_GFX_RINGS as usize],
+    pub sw_gfx_ring_funcs: [Option<&'static str>; GFX9_NUM_SW_GFX_RINGS as usize],
+    pub compute_ring_funcs: [Option<&'static str>; AMDGPU_MAX_COMPUTE_RINGS as usize],
+    pub eop_irq: amdgpu_irq_src,
+    pub priv_reg_irq: amdgpu_irq_src,
+    pub bad_op_irq: amdgpu_irq_src,
+    pub priv_inst_irq: amdgpu_irq_src,
+    pub cp_ecc_error_irq: amdgpu_irq_src,
+}
+
+/// `struct amdgpu_xgmi`, the part early_init reads and sets.
+#[derive(Default)]
+pub struct amdgpu_xgmi {
+    pub supported: bool,
+    pub connected_to_cpu: bool,
+    pub ras: Option<&'static str>,
 }
 
 /// `struct amdgpu_gmc`.
@@ -157,6 +224,16 @@ pub struct amdgpu_gmc {
     pub num_umc: u32,
     pub mall_size: u64,
     pub m_half_use: u32,
+    pub xgmi: amdgpu_xgmi,
+    pub is_app_apu: bool,
+    pub gmc_funcs: Option<&'static str>,
+    pub vm_fault: amdgpu_irq_src,
+    pub ecc_irq: amdgpu_irq_src,
+    pub shared_aperture_start: u64,
+    pub shared_aperture_end: u64,
+    pub private_aperture_start: u64,
+    pub private_aperture_end: u64,
+    pub noretry_flags: u64,
 }
 
 /// `struct amdgpu_sdma`.
@@ -164,6 +241,15 @@ pub struct amdgpu_gmc {
 pub struct amdgpu_sdma {
     pub num_instances: u32,
     pub sdma_mask: u32,
+    pub has_page_queue: bool,
+    pub instance: [amdgpu_sdma_instance; AMDGPU_MAX_SDMA_INSTANCES as usize],
+    pub trap_irq: amdgpu_irq_src,
+    pub ecc_irq: amdgpu_irq_src,
+    pub illegal_inst_irq: amdgpu_irq_src,
+    pub vm_hole_irq: amdgpu_irq_src,
+    pub doorbell_invalid_irq: amdgpu_irq_src,
+    pub pool_timeout_irq: amdgpu_irq_src,
+    pub srbm_write_irq: amdgpu_irq_src,
 }
 
 /// `struct amdgpu_umc`.
@@ -173,11 +259,18 @@ pub struct amdgpu_umc {
     pub active_mask: u32,
 }
 
-/// `struct amdgpu_vcn_inst`, the discovery part.
-#[derive(Default, Clone, Copy)]
+/// `struct amdgpu_vcn_inst`, the part discovery and early_init fill.
+#[derive(Default)]
 pub struct amdgpu_vcn_inst {
     pub vcn_config: u32,
     pub vcn_codec_disable_mask: u32,
+    pub inst: u32,
+    pub num_enc_rings: u32,
+    pub fw: Option<crate::linux::firmware>,
+    pub set_pg_state: Option<&'static str>,
+    pub ring_dec_funcs: Option<&'static str>,
+    pub ring_enc_funcs: [Option<&'static str>; AMDGPU_MAX_VCN_ENC_RINGS as usize],
+    pub irq: amdgpu_irq_src,
 }
 
 /// `struct amdgpu_vcn`.
@@ -194,6 +287,25 @@ pub struct amdgpu_vcn {
 pub struct amdgpu_jpeg {
     pub inst_mask: u32,
     pub harvest_config: u32,
+    pub num_jpeg_inst: u32,
+    pub num_jpeg_rings: u32,
+    /// `inst[0].ring_dec[0].funcs`, `inst[0].irq`.
+    pub inst0_ring_dec_funcs: Option<&'static str>,
+    pub inst0_irq: amdgpu_irq_src,
+}
+
+/// `struct amdgpu_irq`, the part early_init sets.
+#[derive(Default)]
+pub struct amdgpu_irq {
+    pub ih_funcs: Option<&'static str>,
+    pub self_irq: amdgpu_irq_src,
+}
+
+/// `struct amdgpu_vm_manager`, the part early_init sets.
+#[derive(Default)]
+pub struct amdgpu_vm_manager {
+    pub vm_pte_funcs: Option<&'static str>,
+    pub vm_pte_num_scheds: u32,
 }
 
 /// `struct amdgpu_vpe`.
@@ -204,9 +316,11 @@ pub struct amdgpu_vpe {
 
 /// `struct amdgpu_device`, the part ported so far.
 pub struct amdgpu_device {
-    /// `pdev->device`, `pdev->revision`.
+    /// `pdev->device`, `pdev->revision`, `pdev->subsystem_*`.
     pub device: u16,
     pub revision: u8,
+    pub subsystem_vendor: u16,
+    pub subsystem_device: u16,
     pub apu_flags: u32,
     /// `adev->rmmio`, BAR5, and its length.
     pub rmmio: Mmio,
@@ -240,8 +354,22 @@ pub struct amdgpu_device {
     pub smuio_funcs: Option<amdgpu_smuio_funcs>,
     pub asic_funcs: Option<amdgpu_asic_funcs>,
     pub enable_virtual_display: bool,
-    /// `adev->firmware.load_type`.
-    pub firmware_load_type: u32,
+    pub firmware: amdgpu_firmware,
+    pub aid_mask: u32,
+    pub gds: amdgpu_gds,
+    pub irq: amdgpu_irq,
+    pub vm_manager: amdgpu_vm_manager,
+    pub mmhub_funcs: Option<&'static str>,
+    pub gfxhub_funcs: Option<&'static str>,
+    pub hdp_ras: Option<&'static str>,
+    pub psp: psp_context,
+    pub psp_timeout: u32,
+    /// `adev->powerplay.pp_handle` and `pp_funcs`.
+    pub smu: smu_context,
+    pub powerplay_pp_funcs: Option<&'static str>,
+    pub dc_enabled: bool,
+    /// `adev->dm.dmub_fw`.
+    pub dm_dmub_fw: Option<crate::linux::firmware>,
     pub ip_blocks: Vec<amdgpu_ip_block>,
     /// `adev->bios`, from `amdgpu_get_bios`.
     pub bios: Vec<u8>,
@@ -257,6 +385,8 @@ impl amdgpu_device {
         amdgpu_device {
             device,
             revision,
+            subsystem_vendor: 0,
+            subsystem_device: 0,
             apu_flags: 0,
             rmmio,
             rmmio_size,
@@ -267,6 +397,8 @@ impl amdgpu_device {
                 fw_vram_usage_size: 0,
                 drv_vram_usage_start_offset: 0,
                 drv_vram_usage_size: 0,
+                buffer_funcs: None,
+                buffer_funcs_ring: None,
             },
             ip_versions: [[0; HWIP_MAX_INSTANCE]; MAX_HWIP],
             reg_offset: core::array::from_fn(|_| core::array::from_fn(|_| Vec::new())),
@@ -292,11 +424,24 @@ impl amdgpu_device {
             smuio_funcs: None,
             asic_funcs: None,
             enable_virtual_display: false,
-            firmware_load_type: 0,
+            firmware: amdgpu_firmware::default(),
+            aid_mask: 0,
+            gds: amdgpu_gds::default(),
+            irq: amdgpu_irq::default(),
+            vm_manager: amdgpu_vm_manager::default(),
+            mmhub_funcs: None,
+            gfxhub_funcs: None,
+            hdp_ras: None,
+            psp: psp_context::default(),
+            psp_timeout: 0,
+            smu: smu_context::default(),
+            powerplay_pp_funcs: None,
+            dc_enabled: false,
+            dm_dmub_fw: None,
             ip_blocks: Vec::new(),
             bios: Vec::new(),
             is_atom_fw: false,
-            mode_info: amdgpu_mode_info { atom_context: None, firmware_flags: 0 },
+            mode_info: amdgpu_mode_info::default(),
             bios_scratch_reg_offset: 0,
             clock: amdgpu_clock::default(),
             pm: amdgpu_pm::default(),
@@ -420,9 +565,38 @@ pub fn amdgpu_device_has_dc_support(adev: &amdgpu_device) -> bool {
     amdgpu_device_asic_has_dc_support()
 }
 
-/// `amdgpu_device_ip_early_init`, through the COMMON block and the VBIOS.
-/// The `early_init` of the blocks after COMMON (gmc_v9_0 … jpeg_v2_0) is
-/// stage 1b; this returns before the first of them with their count.
+/// `amdgpu_device_set_mcbp`: bare metal, `amdgpu_mcbp` -1 leaves it as it is.
+pub fn amdgpu_device_set_mcbp(adev: &mut amdgpu_device) {
+    match crate::tables::amdgpu_mcbp[0] {
+        1 => adev.gfx.mcbp = true,
+        0 => adev.gfx.mcbp = false,
+        _ => {}
+    }
+    if adev.gfx.mcbp {
+        Line::new().s("MCBP is enabled").say();
+    }
+}
+
+/// The block's `funcs->early_init`, by its type: the ten blocks
+/// `amdgpu_discovery_set_ip_blocks` adds on Renoir.
+fn early_init(adev: &mut amdgpu_device, type_: u32) -> i32 {
+    match type_ {
+        AMD_IP_BLOCK_TYPE_COMMON => crate::soc15::soc15_common_early_init(adev),
+        AMD_IP_BLOCK_TYPE_GMC => crate::gmc_v9_0::gmc_v9_0_early_init(adev),
+        AMD_IP_BLOCK_TYPE_IH => crate::vega10_ih::vega10_ih_early_init(adev),
+        AMD_IP_BLOCK_TYPE_PSP => crate::amdgpu_psp::psp_early_init(adev),
+        AMD_IP_BLOCK_TYPE_SMC => crate::amdgpu_smu::smu_early_init(adev),
+        AMD_IP_BLOCK_TYPE_DCE => crate::amdgpu_dm::dm_early_init(adev),
+        AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_early_init(adev),
+        AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_early_init(adev),
+        AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::vcn_v2_0_early_init(adev),
+        AMD_IP_BLOCK_TYPE_JPEG => crate::jpeg_v2_0::jpeg_v2_0_early_init(adev),
+        _ => -22,
+    }
+}
+
+/// `amdgpu_device_ip_early_init`: the IP blocks, each block's early_init,
+/// and the VBIOS after COMMON's. Returns the number of blocks.
 pub fn amdgpu_device_ip_early_init(adev: &mut amdgpu_device, bdf: (u8, u8, u8)) -> Result<usize, i32> {
     amdgpu_device_enable_virtual_display(adev);
 
@@ -450,8 +624,8 @@ pub fn amdgpu_device_ip_early_init(adev: &mut amdgpu_device, bdf: (u8, u8, u8)) 
             Line::new().s("disabled ip block: ").dec(i as u64).s(" <").bytes(adev.ip_blocks[i].version.funcs_name)
                 .s(">").say();
             adev.ip_blocks[i].status.valid = false;
-        } else if t == AMD_IP_BLOCK_TYPE_COMMON {
-            let r = crate::soc15::soc15_common_early_init(adev);
+        } else {
+            let r = early_init(adev, t);
             if r == -2 {
                 adev.ip_blocks[i].status.valid = false;
             } else if r != 0 {
@@ -461,8 +635,6 @@ pub fn amdgpu_device_ip_early_init(adev: &mut amdgpu_device, bdf: (u8, u8, u8)) 
             } else {
                 adev.ip_blocks[i].status.valid = true;
             }
-        } else {
-            return if total { Ok(i) } else { Err(-19) };
         }
 
         // get the vbios after the asic_funcs are set up

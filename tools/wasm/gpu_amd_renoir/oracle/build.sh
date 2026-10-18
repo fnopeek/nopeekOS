@@ -19,7 +19,8 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
     gfx_info amdgpu_atomfirmware_get_clock_info > "$B/fw_extracted.c"
 
 {
-    $X "$AMD/amdgpu/amdgpu.h" amd_hw_ip_block_type '#HWIP_MAX_INSTANCE' '#HW_ID_MAX' '#IP_VERSION_FULL' '#IP_VERSION'
+    $X "$AMD/amdgpu/amdgpu.h" amd_hw_ip_block_type '#HWIP_MAX_INSTANCE' '#HW_ID_MAX' '#IP_VERSION_FULL' '#IP_VERSION' \
+        '#IP_VERSION_MAJ' '#IP_VERSION_MIN' '#IP_VERSION_REV'
     $X "$AMD/amdgpu/amdgpu_vcn.h" '#AMDGPU_MAX_VCN_INSTANCES' '#AMDGPU_VCN_HARVEST_VCN0' '#AMDGPU_VCN_HARVEST_VCN1'
     $X "$AMD/amdgpu/amdgpu_sdma.h" '#AMDGPU_MAX_SDMA_INSTANCES'
     $X "$AMD/amdgpu/amdgpu_vpe.h" '#AMDGPU_MAX_VPE_INSTANCES'
@@ -36,7 +37,28 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
         amdgpu_discovery_get_vcn_info
 } > "$B/discovery_extracted.c"
 
+{
+    $X "$AMD/amdgpu/amdgpu_ucode.c" '#AMDGPU_UCODE_NAME_MAX' kicker_device_list amdgpu_ucode_validate amdgpu_ucode_legacy_naming \
+        amdgpu_is_kicker_fw amdgpu_ucode_ip_version_decode amdgpu_ucode_request amdgpu_ucode_release
+    $X "$AMD/amdgpu/amdgpu_psp.c" psp_init_asd_microcode is_ta_fw_applicable parse_ta_bin_descriptor \
+        parse_ta_v1_microcode parse_ta_v2_microcode psp_init_ta_microcode
+    $X "$AMD/amdgpu/psp_v12_0.c" psp_v12_0_init_microcode
+    $X "$AMD/amdgpu/amdgpu_gfx.c" amdgpu_gfx_cp_init_microcode
+    $X "$AMD/amdgpu/amdgpu_rlc.c" amdgpu_gfx_rlc_init_microcode_v2_0 amdgpu_gfx_rlc_init_microcode_v2_1 \
+        amdgpu_gfx_rlc_init_microcode_v2_2 amdgpu_gfx_rlc_init_microcode_v2_3 amdgpu_gfx_rlc_init_microcode_v2_4 \
+        amdgpu_gfx_rlc_init_microcode
+    $X "$AMD/amdgpu/gfx_v9_0.c" amdgpu_gfxoff_quirk amdgpu_gfxoff_quirk_list gfx_v9_0_init_cp_gfx_microcode gfx_v9_0_init_rlc_microcode \
+        gfx_v9_0_load_mec2_fw_bin_support gfx_v9_0_should_disable_gfxoff gfx_v9_0_check_if_need_gfxoff \
+        gfx_v9_0_check_fw_write_wait gfx_v9_0_init_cp_compute_microcode gfx_v9_0_init_microcode
+    $X "$AMD/amdgpu/amdgpu_sdma.c" amdgpu_sdma_init_inst_ctx amdgpu_sdma_destroy_inst_ctx amdgpu_sdma_init_microcode
+    $X "$AMD/amdgpu/sdma_v4_0.c" sdma_v4_0_init_microcode sdma_v4_0_fw_support_paging_queue
+    $X "$AMD/amdgpu/amdgpu_vcn.c" amdgpu_vcn_early_init
+    grep -E '^#define FIRMWARE_[A-Z0-9_]+ +"' "$AMD/display/amdgpu_dm/amdgpu_dm.c"
+    $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" dm_init_microcode
+} > "$B/ucode_extracted.c"
+
 CF="-O0 -w -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
 gcc $CF -c "$B/atom.c" -o "$B/atom.o"
 gcc $CF "$HERE/main.c" "$B/atom.o" -o "$B/oracle_atom"
 gcc $CF "$HERE/main_discovery.c" -o "$B/oracle_discovery"
+gcc $CF -I "$AMD/display/include" "$HERE/main_ucode.c" -o "$B/oracle_ucode"

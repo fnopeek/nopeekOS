@@ -1,10 +1,10 @@
 //! gpu_amd_renoir: AMD Renoir/Lucienne graphics, ported from Linux 6.18.55
 //! amdgpu.
 //!
-//! The port follows docs/plan/GPU_AMD_LINUX_MAP.md. This is stage 1a
-//! (`stage1a.rs`): `amdgpu_device_init` through `amdgpu_device_ip_early_init`
-//! up to the `early_init` of the first block after COMMON, then the card is
-//! given back. Nothing is written to the card but the MM_INDEX window VRAM
+//! The port follows docs/plan/GPU_AMD_LINUX_MAP.md. This is stage 1
+//! (`stage1.rs`): `amdgpu_device_init` through `amdgpu_device_ip_early_init`,
+//! the early_init of every block with its microcode, then the card is given
+//! back. Nothing is written to the card but the MM_INDEX window VRAM
 //! is read through. hostcheck/check.sh holds the port against Linux's own
 //! code on the binaries read off the device.
 
@@ -21,14 +21,24 @@ mod amdgpu_atomfirmware;
 mod amdgpu_bios;
 mod amdgpu_device;
 mod amdgpu_discovery;
+mod amdgpu_dm;
+mod amdgpu_psp;
+mod amdgpu_smu;
+mod amdgpu_ucode;
 mod atom;
+mod gfx_v9_0;
+mod gmc_v9_0;
 mod ip_blocks;
+mod jpeg_v2_0;
 mod nbio_v7_0;
 mod linux;
 mod regs;
+mod sdma_v4_0;
 mod soc15;
-mod stage1a;
+mod stage1;
 mod tables;
+mod vcn_v2_0;
+mod vega10_ih;
 
 use linux::{say, Line};
 
@@ -67,7 +77,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 1a: amdgpu_device_init through the COMMON block and the VBIOS").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 1: amdgpu_device_init through amdgpu_device_ip_early_init").say();
 
     match npk_sys::pci_bind(AMD_VENDOR as i32, LUCIENNE as i32) {
         0 => {}
@@ -110,7 +120,9 @@ pub extern "C" fn _start() {
         say("1002:164c not found by its bus address");
         return;
     };
-    stage1a::run(&mut adev, bdf);
+    adev.subsystem_vendor = subsys as u16;
+    adev.subsystem_device = (subsys >> 16) as u16;
+    stage1::run(&mut adev, bdf);
     say("giving the card back");
 }
 

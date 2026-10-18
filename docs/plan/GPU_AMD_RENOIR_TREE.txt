@@ -299,6 +299,28 @@
 -         psp_early_init  amdgpu_psp.c:165:12  [->@amdgpu_device.c:2933]
 -           psp_v12_0_set_psp_funcs  psp_v12_0.c:292:6
 -           psp_check_pmfw_centralized_cstate_management  amdgpu_psp.c:95:13
+-           psp_v12_0_init_microcode  psp_v12_0.c:45:12  [->@amdgpu_psp.c:275]
+-             amdgpu_ucode_ip_version_decode  amdgpu_ucode.c:1411:6
+-               amdgpu_ip_version  amdgpu.h:1325:24
+-               amdgpu_ucode_legacy_naming  amdgpu_ucode.c:1186:20
+-                 ^amdgpu_ip_version  amdgpu.h:1325:24
+-                 ^amdgpu_ip_version  amdgpu.h:1325:24
+-                 ^amdgpu_ip_version  amdgpu.h:1325:24
+-                 ^amdgpu_ip_version  amdgpu.h:1325:24
+-                 ^amdgpu_ip_version  amdgpu.h:1325:24
+-                 ^amdgpu_ip_version  amdgpu.h:1325:24
+-             psp_init_asd_microcode  amdgpu_psp.c:3491:5
+-               amdgpu_ucode_request  amdgpu_ucode.c:1470:5
+-                 amdgpu_ucode_validate  amdgpu_ucode.c:513:12
+-               amdgpu_ucode_release  amdgpu_ucode.c:1512:6
+-             psp_init_ta_microcode  amdgpu_psp.c:3965:5
+-               amdgpu_is_kicker_fw  amdgpu_ucode.c:1398:6
+-               ^amdgpu_ucode_request  amdgpu_ucode.c:1470:5
+-               ^amdgpu_ucode_request  amdgpu_ucode.c:1470:5
+-               parse_ta_v1_microcode  amdgpu_psp.c:3882:12
+-               parse_ta_v2_microcode  amdgpu_psp.c:3937:12
+-                 parse_ta_bin_descriptor  amdgpu_psp.c:3817:12
+-               ^amdgpu_ucode_release  amdgpu_ucode.c:1512:6
 -         smu_early_init  pm/swsmu/amdgpu_smu.c:792:12  [->@amdgpu_device.c:2933]
 -           smu_set_funcs  pm/swsmu/amdgpu_smu.c:708:12
 -             renoir_set_ppt_funcs  pm/swsmu/smu12/renoir_ppt.c:1491:6
@@ -312,8 +334,7 @@
 -             ^get_u8  include/atom-bits.h:28:23
 -           adev_to_drm  amdgpu/amdgpu.h:1346:34
 -           dm_init_microcode  display/amdgpu_dm/amdgpu_dm.c:5756:12
--             amdgpu_ucode_request  amdgpu_ucode.c:1470:5
--               amdgpu_ucode_validate  amdgpu_ucode.c:513:12
+-             ^amdgpu_ucode_request  amdgpu_ucode.c:1470:5
 -         gfx_v9_0_early_init  gfx_v9_0.c:4829:12  [->@amdgpu_device.c:2933]
 -           amdgpu_gfx_get_num_kcq  amdgpu_gfx.c:1215:5
 -           gfx_v9_0_set_kiq_pm4_funcs  gfx_v9_0.c:1091:13
@@ -323,15 +344,7 @@
 -           gfx_v9_0_set_rlc_funcs  gfx_v9_0.c:7687:13
 -           gfx_v9_0_init_rlcg_reg_access_ctrl  gfx_v9_0.c:1820:13
 -           gfx_v9_0_init_microcode  gfx_v9_0.c:1597:12
--             amdgpu_ucode_ip_version_decode  amdgpu_ucode.c:1411:6
--               amdgpu_ip_version  amdgpu.h:1325:24
--               amdgpu_ucode_legacy_naming  amdgpu_ucode.c:1186:20
--                 ^amdgpu_ip_version  amdgpu.h:1325:24
--                 ^amdgpu_ip_version  amdgpu.h:1325:24
--                 ^amdgpu_ip_version  amdgpu.h:1325:24
--                 ^amdgpu_ip_version  amdgpu.h:1325:24
--                 ^amdgpu_ip_version  amdgpu.h:1325:24
--                 ^amdgpu_ip_version  amdgpu.h:1325:24
+-             ^amdgpu_ucode_ip_version_decode  amdgpu_ucode.c:1411:6
 -             gfx_v9_0_init_cp_gfx_microcode  gfx_v9_0.c:1454:12
 -               ^amdgpu_ucode_request  amdgpu_ucode.c:1470:5
 -               amdgpu_gfx_cp_init_microcode  amdgpu_gfx.c:1226:6
@@ -339,7 +352,7 @@
 -               ^amdgpu_gfx_cp_init_microcode  amdgpu_gfx.c:1226:6
 -               ^amdgpu_ucode_request  amdgpu_ucode.c:1470:5
 -               ^amdgpu_gfx_cp_init_microcode  amdgpu_gfx.c:1226:6
--               amdgpu_ucode_release  amdgpu_ucode.c:1512:6
+-               ^amdgpu_ucode_release  amdgpu_ucode.c:1512:6
 -               ^amdgpu_ucode_release  amdgpu_ucode.c:1512:6
 -               ^amdgpu_ucode_release  amdgpu_ucode.c:1512:6
 -             gfx_v9_0_init_rlc_microcode  gfx_v9_0.c:1489:12

@@ -151,6 +151,8 @@ pub const JPEG_HWIP: u32 = 0x11;
 pub const VCN1_HWIP: u32 = 0x12;
 /// amdgpu/amdgpu.h:782
 pub const VCE_HWIP: u32 = 0x13;
+/// amdgpu/amdgpu.h:783
+pub const VPE_HWIP: u32 = 0x14;
 /// amdgpu/amdgpu.h:784
 pub const DF_HWIP: u32 = 0x15;
 /// amdgpu/amdgpu.h:785
@@ -891,3 +893,589 @@ pub const AMD_PG_SUPPORT_VCN: u32 = 0x4000;
 pub const AMD_PG_SUPPORT_JPEG: u32 = 0x20000;
 /// include/amd_shared.h:178
 pub const AMD_PG_SUPPORT_VCN_DPG: u32 = 0x8000;
+
+// Firmware header layouts (amdgpu_ucode.h): every field, by offsetof
+/// The value of `sizeof(struct common_firmware_header)` in amdgpu_ucode.c
+pub const COMMON_FIRMWARE_HEADER_SIZE: u32 = 0x20;
+/// The value of `offsetof(struct common_firmware_header, size_bytes)` in amdgpu_ucode.c
+pub const COMMON_FIRMWARE_HEADER_size_bytes: u32 = 0x0;
+/// The value of `offsetof(struct common_firmware_header, header_size_bytes)` in amdgpu_ucode.c
+pub const COMMON_FIRMWARE_HEADER_header_size_bytes: u32 = 0x4;
+/// The value of `offsetof(struct common_firmware_header, header_version_major)` in amdgpu_ucode.c
+pub const COMMON_FIRMWARE_HEADER_header_version_major: u32 = 0x8;
+/// The value of `offsetof(struct common_firmware_header, header_version_minor)` in amdgpu_ucode.c
+pub const COMMON_FIRMWARE_HEADER_header_version_minor: u32 = 0xa;
+/// The value of `offsetof(struct common_firmware_header, ip_version_major)` in amdgpu_ucode.c
+pub const COMMON_FIRMWARE_HEADER_ip_version_major: u32 = 0xc;
+/// The value of `offsetof(struct common_firmware_header, ip_version_minor)` in amdgpu_ucode.c
+pub const COMMON_FIRMWARE_HEADER_ip_version_minor: u32 = 0xe;
+/// The value of `offsetof(struct common_firmware_header, ucode_version)` in amdgpu_ucode.c
+pub const COMMON_FIRMWARE_HEADER_ucode_version: u32 = 0x10;
+/// The value of `offsetof(struct common_firmware_header, ucode_size_bytes)` in amdgpu_ucode.c
+pub const COMMON_FIRMWARE_HEADER_ucode_size_bytes: u32 = 0x14;
+/// The value of `offsetof(struct common_firmware_header, ucode_array_offset_bytes)` in amdgpu_ucode.c
+pub const COMMON_FIRMWARE_HEADER_ucode_array_offset_bytes: u32 = 0x18;
+/// The value of `offsetof(struct common_firmware_header, crc32)` in amdgpu_ucode.c
+pub const COMMON_FIRMWARE_HEADER_crc32: u32 = 0x1c;
+/// The value of `sizeof(struct psp_fw_legacy_bin_desc)` in amdgpu_ucode.c
+pub const PSP_FW_LEGACY_BIN_DESC_SIZE: u32 = 0xc;
+/// The value of `offsetof(struct psp_fw_legacy_bin_desc, fw_version)` in amdgpu_ucode.c
+pub const PSP_FW_LEGACY_BIN_DESC_fw_version: u32 = 0x0;
+/// The value of `offsetof(struct psp_fw_legacy_bin_desc, offset_bytes)` in amdgpu_ucode.c
+pub const PSP_FW_LEGACY_BIN_DESC_offset_bytes: u32 = 0x4;
+/// The value of `offsetof(struct psp_fw_legacy_bin_desc, size_bytes)` in amdgpu_ucode.c
+pub const PSP_FW_LEGACY_BIN_DESC_size_bytes: u32 = 0x8;
+/// The value of `sizeof(struct psp_firmware_header_v1_0)` in amdgpu_ucode.c
+pub const PSP_FIRMWARE_HEADER_V1_0_SIZE: u32 = 0x2c;
+/// The value of `offsetof(struct psp_firmware_header_v1_0, header)` in amdgpu_ucode.c
+pub const PSP_FIRMWARE_HEADER_V1_0_header: u32 = 0x0;
+/// The value of `offsetof(struct psp_firmware_header_v1_0, sos)` in amdgpu_ucode.c
+pub const PSP_FIRMWARE_HEADER_V1_0_sos: u32 = 0x20;
+/// The value of `sizeof(struct ta_firmware_header_v1_0)` in amdgpu_ucode.c
+pub const TA_FIRMWARE_HEADER_V1_0_SIZE: u32 = 0x5c;
+/// The value of `offsetof(struct ta_firmware_header_v1_0, header)` in amdgpu_ucode.c
+pub const TA_FIRMWARE_HEADER_V1_0_header: u32 = 0x0;
+/// The value of `offsetof(struct ta_firmware_header_v1_0, xgmi)` in amdgpu_ucode.c
+pub const TA_FIRMWARE_HEADER_V1_0_xgmi: u32 = 0x20;
+/// The value of `offsetof(struct ta_firmware_header_v1_0, ras)` in amdgpu_ucode.c
+pub const TA_FIRMWARE_HEADER_V1_0_ras: u32 = 0x2c;
+/// The value of `offsetof(struct ta_firmware_header_v1_0, hdcp)` in amdgpu_ucode.c
+pub const TA_FIRMWARE_HEADER_V1_0_hdcp: u32 = 0x38;
+/// The value of `offsetof(struct ta_firmware_header_v1_0, dtm)` in amdgpu_ucode.c
+pub const TA_FIRMWARE_HEADER_V1_0_dtm: u32 = 0x44;
+/// The value of `offsetof(struct ta_firmware_header_v1_0, securedisplay)` in amdgpu_ucode.c
+pub const TA_FIRMWARE_HEADER_V1_0_securedisplay: u32 = 0x50;
+/// The value of `sizeof(struct psp_fw_bin_desc)` in amdgpu_ucode.c
+pub const PSP_FW_BIN_DESC_SIZE: u32 = 0x10;
+/// The value of `offsetof(struct psp_fw_bin_desc, fw_type)` in amdgpu_ucode.c
+pub const PSP_FW_BIN_DESC_fw_type: u32 = 0x0;
+/// The value of `offsetof(struct psp_fw_bin_desc, fw_version)` in amdgpu_ucode.c
+pub const PSP_FW_BIN_DESC_fw_version: u32 = 0x4;
+/// The value of `offsetof(struct psp_fw_bin_desc, offset_bytes)` in amdgpu_ucode.c
+pub const PSP_FW_BIN_DESC_offset_bytes: u32 = 0x8;
+/// The value of `offsetof(struct psp_fw_bin_desc, size_bytes)` in amdgpu_ucode.c
+pub const PSP_FW_BIN_DESC_size_bytes: u32 = 0xc;
+/// The value of `sizeof(struct ta_firmware_header_v2_0)` in amdgpu_ucode.c
+pub const TA_FIRMWARE_HEADER_V2_0_SIZE: u32 = 0x24;
+/// The value of `offsetof(struct ta_firmware_header_v2_0, header)` in amdgpu_ucode.c
+pub const TA_FIRMWARE_HEADER_V2_0_header: u32 = 0x0;
+/// The value of `offsetof(struct ta_firmware_header_v2_0, ta_fw_bin_count)` in amdgpu_ucode.c
+pub const TA_FIRMWARE_HEADER_V2_0_ta_fw_bin_count: u32 = 0x20;
+/// The value of `offsetof(struct ta_firmware_header_v2_0, ta_fw_bin)` in amdgpu_ucode.c
+pub const TA_FIRMWARE_HEADER_V2_0_ta_fw_bin: u32 = 0x24;
+/// The value of `sizeof(struct gfx_firmware_header_v1_0)` in amdgpu_ucode.c
+pub const GFX_FIRMWARE_HEADER_V1_0_SIZE: u32 = 0x2c;
+/// The value of `offsetof(struct gfx_firmware_header_v1_0, header)` in amdgpu_ucode.c
+pub const GFX_FIRMWARE_HEADER_V1_0_header: u32 = 0x0;
+/// The value of `offsetof(struct gfx_firmware_header_v1_0, ucode_feature_version)` in amdgpu_ucode.c
+pub const GFX_FIRMWARE_HEADER_V1_0_ucode_feature_version: u32 = 0x20;
+/// The value of `offsetof(struct gfx_firmware_header_v1_0, jt_offset)` in amdgpu_ucode.c
+pub const GFX_FIRMWARE_HEADER_V1_0_jt_offset: u32 = 0x24;
+/// The value of `offsetof(struct gfx_firmware_header_v1_0, jt_size)` in amdgpu_ucode.c
+pub const GFX_FIRMWARE_HEADER_V1_0_jt_size: u32 = 0x28;
+/// The value of `sizeof(struct rlc_firmware_header_v2_0)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_SIZE: u32 = 0x68;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, header)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_header: u32 = 0x0;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, ucode_feature_version)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_ucode_feature_version: u32 = 0x20;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, jt_offset)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_jt_offset: u32 = 0x24;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, jt_size)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_jt_size: u32 = 0x28;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, save_and_restore_offset)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_save_and_restore_offset: u32 = 0x2c;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, clear_state_descriptor_offset)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_clear_state_descriptor_offset: u32 = 0x30;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, avail_scratch_ram_locations)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_avail_scratch_ram_locations: u32 = 0x34;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, reg_restore_list_size)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_reg_restore_list_size: u32 = 0x38;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, reg_list_format_start)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_reg_list_format_start: u32 = 0x3c;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, reg_list_format_separate_start)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_reg_list_format_separate_start: u32 = 0x40;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, starting_offsets_start)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_starting_offsets_start: u32 = 0x44;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, reg_list_format_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_reg_list_format_size_bytes: u32 = 0x48;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, reg_list_format_array_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_reg_list_format_array_offset_bytes: u32 = 0x4c;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, reg_list_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_reg_list_size_bytes: u32 = 0x50;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, reg_list_array_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_reg_list_array_offset_bytes: u32 = 0x54;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, reg_list_format_separate_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_reg_list_format_separate_size_bytes: u32 = 0x58;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, reg_list_format_separate_array_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_reg_list_format_separate_array_offset_bytes: u32 = 0x5c;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, reg_list_separate_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_reg_list_separate_size_bytes: u32 = 0x60;
+/// The value of `offsetof(struct rlc_firmware_header_v2_0, reg_list_separate_array_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_0_reg_list_separate_array_offset_bytes: u32 = 0x64;
+/// The value of `sizeof(struct rlc_firmware_header_v2_1)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_SIZE: u32 = 0x9c;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, v2_0)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_v2_0: u32 = 0x0;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, reg_list_format_direct_reg_list_length)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_reg_list_format_direct_reg_list_length: u32 = 0x68;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_cntl_ucode_ver)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_cntl_ucode_ver: u32 = 0x6c;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_cntl_feature_ver)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_cntl_feature_ver: u32 = 0x70;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_cntl_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_cntl_size_bytes: u32 = 0x74;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_cntl_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_cntl_offset_bytes: u32 = 0x78;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_gpm_ucode_ver)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_gpm_ucode_ver: u32 = 0x7c;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_gpm_feature_ver)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_gpm_feature_ver: u32 = 0x80;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_gpm_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_gpm_size_bytes: u32 = 0x84;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_gpm_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_gpm_offset_bytes: u32 = 0x88;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_srm_ucode_ver)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_srm_ucode_ver: u32 = 0x8c;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_srm_feature_ver)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_srm_feature_ver: u32 = 0x90;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_srm_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_srm_size_bytes: u32 = 0x94;
+/// The value of `offsetof(struct rlc_firmware_header_v2_1, save_restore_list_srm_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_1_save_restore_list_srm_offset_bytes: u32 = 0x98;
+/// The value of `sizeof(struct rlc_firmware_header_v2_2)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_2_SIZE: u32 = 0xac;
+/// The value of `offsetof(struct rlc_firmware_header_v2_2, v2_1)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_2_v2_1: u32 = 0x0;
+/// The value of `offsetof(struct rlc_firmware_header_v2_2, rlc_iram_ucode_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_2_rlc_iram_ucode_size_bytes: u32 = 0x9c;
+/// The value of `offsetof(struct rlc_firmware_header_v2_2, rlc_iram_ucode_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_2_rlc_iram_ucode_offset_bytes: u32 = 0xa0;
+/// The value of `offsetof(struct rlc_firmware_header_v2_2, rlc_dram_ucode_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_2_rlc_dram_ucode_size_bytes: u32 = 0xa4;
+/// The value of `offsetof(struct rlc_firmware_header_v2_2, rlc_dram_ucode_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_2_rlc_dram_ucode_offset_bytes: u32 = 0xa8;
+/// The value of `sizeof(struct rlc_firmware_header_v2_3)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_3_SIZE: u32 = 0xcc;
+/// The value of `offsetof(struct rlc_firmware_header_v2_3, v2_2)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_3_v2_2: u32 = 0x0;
+/// The value of `offsetof(struct rlc_firmware_header_v2_3, rlcp_ucode_version)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_3_rlcp_ucode_version: u32 = 0xac;
+/// The value of `offsetof(struct rlc_firmware_header_v2_3, rlcp_ucode_feature_version)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_3_rlcp_ucode_feature_version: u32 = 0xb0;
+/// The value of `offsetof(struct rlc_firmware_header_v2_3, rlcp_ucode_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_3_rlcp_ucode_size_bytes: u32 = 0xb4;
+/// The value of `offsetof(struct rlc_firmware_header_v2_3, rlcp_ucode_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_3_rlcp_ucode_offset_bytes: u32 = 0xb8;
+/// The value of `offsetof(struct rlc_firmware_header_v2_3, rlcv_ucode_version)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_3_rlcv_ucode_version: u32 = 0xbc;
+/// The value of `offsetof(struct rlc_firmware_header_v2_3, rlcv_ucode_feature_version)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_3_rlcv_ucode_feature_version: u32 = 0xc0;
+/// The value of `offsetof(struct rlc_firmware_header_v2_3, rlcv_ucode_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_3_rlcv_ucode_size_bytes: u32 = 0xc4;
+/// The value of `offsetof(struct rlc_firmware_header_v2_3, rlcv_ucode_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_3_rlcv_ucode_offset_bytes: u32 = 0xc8;
+/// The value of `sizeof(struct rlc_firmware_header_v2_4)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_SIZE: u32 = 0xf4;
+/// The value of `offsetof(struct rlc_firmware_header_v2_4, v2_3)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_v2_3: u32 = 0x0;
+/// The value of `offsetof(struct rlc_firmware_header_v2_4, global_tap_delays_ucode_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_global_tap_delays_ucode_size_bytes: u32 = 0xcc;
+/// The value of `offsetof(struct rlc_firmware_header_v2_4, global_tap_delays_ucode_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_global_tap_delays_ucode_offset_bytes: u32 = 0xd0;
+/// The value of `offsetof(struct rlc_firmware_header_v2_4, se0_tap_delays_ucode_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_se0_tap_delays_ucode_size_bytes: u32 = 0xd4;
+/// The value of `offsetof(struct rlc_firmware_header_v2_4, se0_tap_delays_ucode_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_se0_tap_delays_ucode_offset_bytes: u32 = 0xd8;
+/// The value of `offsetof(struct rlc_firmware_header_v2_4, se1_tap_delays_ucode_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_se1_tap_delays_ucode_size_bytes: u32 = 0xdc;
+/// The value of `offsetof(struct rlc_firmware_header_v2_4, se1_tap_delays_ucode_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_se1_tap_delays_ucode_offset_bytes: u32 = 0xe0;
+/// The value of `offsetof(struct rlc_firmware_header_v2_4, se2_tap_delays_ucode_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_se2_tap_delays_ucode_size_bytes: u32 = 0xe4;
+/// The value of `offsetof(struct rlc_firmware_header_v2_4, se2_tap_delays_ucode_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_se2_tap_delays_ucode_offset_bytes: u32 = 0xe8;
+/// The value of `offsetof(struct rlc_firmware_header_v2_4, se3_tap_delays_ucode_size_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_se3_tap_delays_ucode_size_bytes: u32 = 0xec;
+/// The value of `offsetof(struct rlc_firmware_header_v2_4, se3_tap_delays_ucode_offset_bytes)` in amdgpu_ucode.c
+pub const RLC_FIRMWARE_HEADER_V2_4_se3_tap_delays_ucode_offset_bytes: u32 = 0xf0;
+/// The value of `sizeof(struct sdma_firmware_header_v1_0)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V1_0_SIZE: u32 = 0x30;
+/// The value of `offsetof(struct sdma_firmware_header_v1_0, header)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V1_0_header: u32 = 0x0;
+/// The value of `offsetof(struct sdma_firmware_header_v1_0, ucode_feature_version)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V1_0_ucode_feature_version: u32 = 0x20;
+/// The value of `offsetof(struct sdma_firmware_header_v1_0, ucode_change_version)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V1_0_ucode_change_version: u32 = 0x24;
+/// The value of `offsetof(struct sdma_firmware_header_v1_0, jt_offset)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V1_0_jt_offset: u32 = 0x28;
+/// The value of `offsetof(struct sdma_firmware_header_v1_0, jt_size)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V1_0_jt_size: u32 = 0x2c;
+/// The value of `sizeof(struct sdma_firmware_header_v2_0)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V2_0_SIZE: u32 = 0x40;
+/// The value of `offsetof(struct sdma_firmware_header_v2_0, header)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V2_0_header: u32 = 0x0;
+/// The value of `offsetof(struct sdma_firmware_header_v2_0, ucode_feature_version)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V2_0_ucode_feature_version: u32 = 0x20;
+/// The value of `offsetof(struct sdma_firmware_header_v2_0, ctx_ucode_size_bytes)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V2_0_ctx_ucode_size_bytes: u32 = 0x24;
+/// The value of `offsetof(struct sdma_firmware_header_v2_0, ctx_jt_offset)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V2_0_ctx_jt_offset: u32 = 0x28;
+/// The value of `offsetof(struct sdma_firmware_header_v2_0, ctx_jt_size)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V2_0_ctx_jt_size: u32 = 0x2c;
+/// The value of `offsetof(struct sdma_firmware_header_v2_0, ctl_ucode_offset)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V2_0_ctl_ucode_offset: u32 = 0x30;
+/// The value of `offsetof(struct sdma_firmware_header_v2_0, ctl_ucode_size_bytes)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V2_0_ctl_ucode_size_bytes: u32 = 0x34;
+/// The value of `offsetof(struct sdma_firmware_header_v2_0, ctl_jt_offset)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V2_0_ctl_jt_offset: u32 = 0x38;
+/// The value of `offsetof(struct sdma_firmware_header_v2_0, ctl_jt_size)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V2_0_ctl_jt_size: u32 = 0x3c;
+/// The value of `sizeof(struct sdma_firmware_header_v3_0)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V3_0_SIZE: u32 = 0x2c;
+/// The value of `offsetof(struct sdma_firmware_header_v3_0, header)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V3_0_header: u32 = 0x0;
+/// The value of `offsetof(struct sdma_firmware_header_v3_0, ucode_feature_version)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V3_0_ucode_feature_version: u32 = 0x20;
+/// The value of `offsetof(struct sdma_firmware_header_v3_0, ucode_offset_bytes)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V3_0_ucode_offset_bytes: u32 = 0x24;
+/// The value of `offsetof(struct sdma_firmware_header_v3_0, ucode_size_bytes)` in amdgpu_ucode.c
+pub const SDMA_FIRMWARE_HEADER_V3_0_ucode_size_bytes: u32 = 0x28;
+
+// AMDGPU_UCODE_ID (amdgpu_ucode.h)
+/// amdgpu/amdgpu_ucode.h:469
+pub const AMDGPU_UCODE_ID_CAP: u32 = 0x0;
+/// amdgpu/amdgpu_ucode.h:470
+pub const AMDGPU_UCODE_ID_SDMA0: u32 = 0x1;
+/// amdgpu/amdgpu_ucode.h:471
+pub const AMDGPU_UCODE_ID_SDMA1: u32 = 0x2;
+/// amdgpu/amdgpu_ucode.h:472
+pub const AMDGPU_UCODE_ID_SDMA2: u32 = 0x3;
+/// amdgpu/amdgpu_ucode.h:473
+pub const AMDGPU_UCODE_ID_SDMA3: u32 = 0x4;
+/// amdgpu/amdgpu_ucode.h:474
+pub const AMDGPU_UCODE_ID_SDMA4: u32 = 0x5;
+/// amdgpu/amdgpu_ucode.h:475
+pub const AMDGPU_UCODE_ID_SDMA5: u32 = 0x6;
+/// amdgpu/amdgpu_ucode.h:476
+pub const AMDGPU_UCODE_ID_SDMA6: u32 = 0x7;
+/// amdgpu/amdgpu_ucode.h:477
+pub const AMDGPU_UCODE_ID_SDMA7: u32 = 0x8;
+/// amdgpu/amdgpu_ucode.h:478
+pub const AMDGPU_UCODE_ID_SDMA_UCODE_TH0: u32 = 0x9;
+/// amdgpu/amdgpu_ucode.h:479
+pub const AMDGPU_UCODE_ID_SDMA_UCODE_TH1: u32 = 0xa;
+/// amdgpu/amdgpu_ucode.h:480
+pub const AMDGPU_UCODE_ID_SDMA_RS64: u32 = 0xb;
+/// amdgpu/amdgpu_ucode.h:481
+pub const AMDGPU_UCODE_ID_CP_CE: u32 = 0xc;
+/// amdgpu/amdgpu_ucode.h:482
+pub const AMDGPU_UCODE_ID_CP_PFP: u32 = 0xd;
+/// amdgpu/amdgpu_ucode.h:483
+pub const AMDGPU_UCODE_ID_CP_ME: u32 = 0xe;
+/// amdgpu/amdgpu_ucode.h:484
+pub const AMDGPU_UCODE_ID_CP_RS64_PFP: u32 = 0xf;
+/// amdgpu/amdgpu_ucode.h:485
+pub const AMDGPU_UCODE_ID_CP_RS64_ME: u32 = 0x10;
+/// amdgpu/amdgpu_ucode.h:486
+pub const AMDGPU_UCODE_ID_CP_RS64_MEC: u32 = 0x11;
+/// amdgpu/amdgpu_ucode.h:487
+pub const AMDGPU_UCODE_ID_CP_RS64_PFP_P0_STACK: u32 = 0x12;
+/// amdgpu/amdgpu_ucode.h:488
+pub const AMDGPU_UCODE_ID_CP_RS64_PFP_P1_STACK: u32 = 0x13;
+/// amdgpu/amdgpu_ucode.h:489
+pub const AMDGPU_UCODE_ID_CP_RS64_ME_P0_STACK: u32 = 0x14;
+/// amdgpu/amdgpu_ucode.h:490
+pub const AMDGPU_UCODE_ID_CP_RS64_ME_P1_STACK: u32 = 0x15;
+/// amdgpu/amdgpu_ucode.h:491
+pub const AMDGPU_UCODE_ID_CP_RS64_MEC_P0_STACK: u32 = 0x16;
+/// amdgpu/amdgpu_ucode.h:492
+pub const AMDGPU_UCODE_ID_CP_RS64_MEC_P1_STACK: u32 = 0x17;
+/// amdgpu/amdgpu_ucode.h:493
+pub const AMDGPU_UCODE_ID_CP_RS64_MEC_P2_STACK: u32 = 0x18;
+/// amdgpu/amdgpu_ucode.h:494
+pub const AMDGPU_UCODE_ID_CP_RS64_MEC_P3_STACK: u32 = 0x19;
+/// amdgpu/amdgpu_ucode.h:495
+pub const AMDGPU_UCODE_ID_CP_MEC1: u32 = 0x1a;
+/// amdgpu/amdgpu_ucode.h:496
+pub const AMDGPU_UCODE_ID_CP_MEC1_JT: u32 = 0x1b;
+/// amdgpu/amdgpu_ucode.h:497
+pub const AMDGPU_UCODE_ID_CP_MEC2: u32 = 0x1c;
+/// amdgpu/amdgpu_ucode.h:498
+pub const AMDGPU_UCODE_ID_CP_MEC2_JT: u32 = 0x1d;
+/// amdgpu/amdgpu_ucode.h:499
+pub const AMDGPU_UCODE_ID_CP_MES: u32 = 0x1e;
+/// amdgpu/amdgpu_ucode.h:500
+pub const AMDGPU_UCODE_ID_CP_MES_DATA: u32 = 0x1f;
+/// amdgpu/amdgpu_ucode.h:501
+pub const AMDGPU_UCODE_ID_CP_MES1: u32 = 0x20;
+/// amdgpu/amdgpu_ucode.h:502
+pub const AMDGPU_UCODE_ID_CP_MES1_DATA: u32 = 0x21;
+/// amdgpu/amdgpu_ucode.h:503
+pub const AMDGPU_UCODE_ID_IMU_I: u32 = 0x22;
+/// amdgpu/amdgpu_ucode.h:504
+pub const AMDGPU_UCODE_ID_IMU_D: u32 = 0x23;
+/// amdgpu/amdgpu_ucode.h:505
+pub const AMDGPU_UCODE_ID_GLOBAL_TAP_DELAYS: u32 = 0x24;
+/// amdgpu/amdgpu_ucode.h:506
+pub const AMDGPU_UCODE_ID_SE0_TAP_DELAYS: u32 = 0x25;
+/// amdgpu/amdgpu_ucode.h:507
+pub const AMDGPU_UCODE_ID_SE1_TAP_DELAYS: u32 = 0x26;
+/// amdgpu/amdgpu_ucode.h:508
+pub const AMDGPU_UCODE_ID_SE2_TAP_DELAYS: u32 = 0x27;
+/// amdgpu/amdgpu_ucode.h:509
+pub const AMDGPU_UCODE_ID_SE3_TAP_DELAYS: u32 = 0x28;
+/// amdgpu/amdgpu_ucode.h:510
+pub const AMDGPU_UCODE_ID_RLC_RESTORE_LIST_CNTL: u32 = 0x29;
+/// amdgpu/amdgpu_ucode.h:511
+pub const AMDGPU_UCODE_ID_RLC_RESTORE_LIST_GPM_MEM: u32 = 0x2a;
+/// amdgpu/amdgpu_ucode.h:512
+pub const AMDGPU_UCODE_ID_RLC_RESTORE_LIST_SRM_MEM: u32 = 0x2b;
+/// amdgpu/amdgpu_ucode.h:513
+pub const AMDGPU_UCODE_ID_RLC_IRAM: u32 = 0x2c;
+/// amdgpu/amdgpu_ucode.h:514
+pub const AMDGPU_UCODE_ID_RLC_DRAM: u32 = 0x2d;
+/// amdgpu/amdgpu_ucode.h:515
+pub const AMDGPU_UCODE_ID_RLC_P: u32 = 0x2e;
+/// amdgpu/amdgpu_ucode.h:516
+pub const AMDGPU_UCODE_ID_RLC_V: u32 = 0x2f;
+/// amdgpu/amdgpu_ucode.h:517
+pub const AMDGPU_UCODE_ID_RLC_G: u32 = 0x30;
+/// amdgpu/amdgpu_ucode.h:518
+pub const AMDGPU_UCODE_ID_STORAGE: u32 = 0x31;
+/// amdgpu/amdgpu_ucode.h:519
+pub const AMDGPU_UCODE_ID_SMC: u32 = 0x32;
+/// amdgpu/amdgpu_ucode.h:520
+pub const AMDGPU_UCODE_ID_PPTABLE: u32 = 0x33;
+/// amdgpu/amdgpu_ucode.h:521
+pub const AMDGPU_UCODE_ID_UVD: u32 = 0x34;
+/// amdgpu/amdgpu_ucode.h:522
+pub const AMDGPU_UCODE_ID_UVD1: u32 = 0x35;
+/// amdgpu/amdgpu_ucode.h:523
+pub const AMDGPU_UCODE_ID_VCE: u32 = 0x36;
+/// amdgpu/amdgpu_ucode.h:524
+pub const AMDGPU_UCODE_ID_VCN: u32 = 0x37;
+/// amdgpu/amdgpu_ucode.h:525
+pub const AMDGPU_UCODE_ID_VCN1: u32 = 0x38;
+/// amdgpu/amdgpu_ucode.h:526
+pub const AMDGPU_UCODE_ID_DMCU_ERAM: u32 = 0x39;
+/// amdgpu/amdgpu_ucode.h:527
+pub const AMDGPU_UCODE_ID_DMCU_INTV: u32 = 0x3a;
+/// amdgpu/amdgpu_ucode.h:528
+pub const AMDGPU_UCODE_ID_VCN0_RAM: u32 = 0x3b;
+/// amdgpu/amdgpu_ucode.h:529
+pub const AMDGPU_UCODE_ID_VCN1_RAM: u32 = 0x3c;
+/// amdgpu/amdgpu_ucode.h:530
+pub const AMDGPU_UCODE_ID_DMCUB: u32 = 0x3d;
+/// amdgpu/amdgpu_ucode.h:531
+pub const AMDGPU_UCODE_ID_VPE_CTX: u32 = 0x3e;
+/// amdgpu/amdgpu_ucode.h:532
+pub const AMDGPU_UCODE_ID_VPE_CTL: u32 = 0x3f;
+/// amdgpu/amdgpu_ucode.h:533
+pub const AMDGPU_UCODE_ID_VPE: u32 = 0x40;
+/// amdgpu/amdgpu_ucode.h:534
+pub const AMDGPU_UCODE_ID_UMSCH_MM_UCODE: u32 = 0x41;
+/// amdgpu/amdgpu_ucode.h:535
+pub const AMDGPU_UCODE_ID_UMSCH_MM_DATA: u32 = 0x42;
+/// amdgpu/amdgpu_ucode.h:536
+pub const AMDGPU_UCODE_ID_UMSCH_MM_CMD_BUFFER: u32 = 0x43;
+/// amdgpu/amdgpu_ucode.h:537
+pub const AMDGPU_UCODE_ID_P2S_TABLE: u32 = 0x44;
+/// amdgpu/amdgpu_ucode.h:538
+pub const AMDGPU_UCODE_ID_JPEG_RAM: u32 = 0x45;
+/// amdgpu/amdgpu_ucode.h:539
+pub const AMDGPU_UCODE_ID_ISP: u32 = 0x46;
+/// amdgpu/amdgpu_ucode.h:540
+pub const AMDGPU_UCODE_ID_MAXIMUM: u32 = 0x47;
+
+// TA types (amdgpu_ucode.h)
+/// amdgpu/amdgpu_ucode.h:161
+pub const TA_FW_TYPE_UNKOWN: u32 = 0x0;
+/// amdgpu/amdgpu_ucode.h:162
+pub const TA_FW_TYPE_PSP_ASD: u32 = 0x1;
+/// amdgpu/amdgpu_ucode.h:163
+pub const TA_FW_TYPE_PSP_XGMI: u32 = 0x2;
+/// amdgpu/amdgpu_ucode.h:164
+pub const TA_FW_TYPE_PSP_RAS: u32 = 0x3;
+/// amdgpu/amdgpu_ucode.h:165
+pub const TA_FW_TYPE_PSP_HDCP: u32 = 0x4;
+/// amdgpu/amdgpu_ucode.h:166
+pub const TA_FW_TYPE_PSP_DTM: u32 = 0x5;
+/// amdgpu/amdgpu_ucode.h:167
+pub const TA_FW_TYPE_PSP_RAP: u32 = 0x6;
+/// amdgpu/amdgpu_ucode.h:168
+pub const TA_FW_TYPE_PSP_SECUREDISPLAY: u32 = 0x7;
+/// amdgpu/amdgpu_ucode.h:169
+pub const TA_FW_TYPE_PSP_XGMI_AUX: u32 = 0x8;
+/// amdgpu/amdgpu_ucode.h:170
+pub const TA_FW_TYPE_MAX_INDEX: u32 = 0x9;
+/// amdgpu/amdgpu_ucode.h:463
+pub const UCODE_MAX_PSP_PACKAGING: u32 = 0x1a;
+/// amdgpu/amdgpu_ucode.h:559
+pub const AMDGPU_UCODE_REQUIRED: u32 = 0x1;
+/// amdgpu/amdgpu_ucode.h:558
+pub const AMDGPU_UCODE_OPTIONAL: u32 = 0x0;
+/// amdgpu/amdgpu_ucode.c:31
+pub const AMDGPU_UCODE_NAME_MAX: u32 = 0x80;
+/// The value of `sizeof(kicker_device_list) / sizeof(kicker_device_list[0])` in amdgpu_ucode.c
+pub const KICKER_DEVICE_LIST_COUNT: u32 = 0x2;
+/// The value of `kicker_device_list[0].device` in amdgpu_ucode.c
+pub const KICKER_DEVICE_0_device: u32 = 0x744b;
+/// The value of `kicker_device_list[0].revision` in amdgpu_ucode.c
+pub const KICKER_DEVICE_0_revision: u32 = 0x0;
+/// The value of `kicker_device_list[1].device` in amdgpu_ucode.c
+pub const KICKER_DEVICE_1_device: u32 = 0x7551;
+/// The value of `kicker_device_list[1].revision` in amdgpu_ucode.c
+pub const KICKER_DEVICE_1_revision: u32 = 0xc8;
+
+// gfx_v9_0 (gfx_v9_0.c, soc15d.h, amdgpu_ring.h, amdgpu_gfx.h)
+/// amdgpu/gfx_v9_0.c:60
+pub const GFX9_NUM_GFX_RINGS: u32 = 0x1;
+/// amdgpu/gfx_v9_0.c:61
+pub const GFX9_NUM_SW_GFX_RINGS: u32 = 0x2;
+/// amdgpu/amdgpu_ring.h:44
+pub const AMDGPU_MAX_COMPUTE_RINGS: u32 = 0x8;
+/// amdgpu/amdgpu_ring.h:42
+pub const AMDGPU_MAX_GFX_RINGS: u32 = 0x2;
+/// amdgpu/amdgpu.h:349
+pub const AMDGPU_CP_IRQ_LAST: u32 = 0xa;
+/// include/amd_shared.h:228
+pub const PP_OVERDRIVE_MASK: u32 = 0x4000;
+/// include/amd_shared.h:163
+pub const AMD_PG_SUPPORT_GFX_PG: u32 = 0x1;
+/// include/amd_shared.h:168
+pub const AMD_PG_SUPPORT_CP: u32 = 0x20;
+/// include/amd_shared.h:170
+pub const AMD_PG_SUPPORT_RLC_SMU_HS: u32 = 0x80;
+/// The value of `sizeof(amdgpu_gfxoff_quirk_list) / sizeof(amdgpu_gfxoff_quirk_list[0])` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_COUNT: u32 = 0x7;
+/// The value of `amdgpu_gfxoff_quirk_list[0].chip_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_0_chip_vendor: u32 = 0x1002;
+/// The value of `amdgpu_gfxoff_quirk_list[0].chip_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_0_chip_device: u32 = 0x15dd;
+/// The value of `amdgpu_gfxoff_quirk_list[0].subsys_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_0_subsys_vendor: u32 = 0x1002;
+/// The value of `amdgpu_gfxoff_quirk_list[0].subsys_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_0_subsys_device: u32 = 0x15dd;
+/// The value of `amdgpu_gfxoff_quirk_list[0].revision` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_0_revision: u32 = 0xc8;
+/// The value of `amdgpu_gfxoff_quirk_list[1].chip_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_1_chip_vendor: u32 = 0x1002;
+/// The value of `amdgpu_gfxoff_quirk_list[1].chip_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_1_chip_device: u32 = 0x15dd;
+/// The value of `amdgpu_gfxoff_quirk_list[1].subsys_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_1_subsys_vendor: u32 = 0x103c;
+/// The value of `amdgpu_gfxoff_quirk_list[1].subsys_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_1_subsys_device: u32 = 0x83e7;
+/// The value of `amdgpu_gfxoff_quirk_list[1].revision` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_1_revision: u32 = 0xd3;
+/// The value of `amdgpu_gfxoff_quirk_list[2].chip_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_2_chip_vendor: u32 = 0x1002;
+/// The value of `amdgpu_gfxoff_quirk_list[2].chip_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_2_chip_device: u32 = 0x15dd;
+/// The value of `amdgpu_gfxoff_quirk_list[2].subsys_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_2_subsys_vendor: u32 = 0x1002;
+/// The value of `amdgpu_gfxoff_quirk_list[2].subsys_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_2_subsys_device: u32 = 0x15dd;
+/// The value of `amdgpu_gfxoff_quirk_list[2].revision` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_2_revision: u32 = 0xc6;
+/// The value of `amdgpu_gfxoff_quirk_list[3].chip_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_3_chip_vendor: u32 = 0x1002;
+/// The value of `amdgpu_gfxoff_quirk_list[3].chip_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_3_chip_device: u32 = 0x69af;
+/// The value of `amdgpu_gfxoff_quirk_list[3].subsys_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_3_subsys_vendor: u32 = 0x106b;
+/// The value of `amdgpu_gfxoff_quirk_list[3].subsys_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_3_subsys_device: u32 = 0x19a;
+/// The value of `amdgpu_gfxoff_quirk_list[3].revision` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_3_revision: u32 = 0xc0;
+/// The value of `amdgpu_gfxoff_quirk_list[4].chip_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_4_chip_vendor: u32 = 0x1002;
+/// The value of `amdgpu_gfxoff_quirk_list[4].chip_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_4_chip_device: u32 = 0x15d8;
+/// The value of `amdgpu_gfxoff_quirk_list[4].subsys_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_4_subsys_vendor: u32 = 0x19e5;
+/// The value of `amdgpu_gfxoff_quirk_list[4].subsys_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_4_subsys_device: u32 = 0x3e14;
+/// The value of `amdgpu_gfxoff_quirk_list[4].revision` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_4_revision: u32 = 0xc2;
+/// The value of `amdgpu_gfxoff_quirk_list[5].chip_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_5_chip_vendor: u32 = 0x1002;
+/// The value of `amdgpu_gfxoff_quirk_list[5].chip_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_5_chip_device: u32 = 0x15dd;
+/// The value of `amdgpu_gfxoff_quirk_list[5].subsys_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_5_subsys_vendor: u32 = 0x103c;
+/// The value of `amdgpu_gfxoff_quirk_list[5].subsys_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_5_subsys_device: u32 = 0x8464;
+/// The value of `amdgpu_gfxoff_quirk_list[5].revision` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_5_revision: u32 = 0xd6;
+/// The value of `amdgpu_gfxoff_quirk_list[6].chip_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_6_chip_vendor: u32 = 0x0;
+/// The value of `amdgpu_gfxoff_quirk_list[6].chip_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_6_chip_device: u32 = 0x0;
+/// The value of `amdgpu_gfxoff_quirk_list[6].subsys_vendor` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_6_subsys_vendor: u32 = 0x0;
+/// The value of `amdgpu_gfxoff_quirk_list[6].subsys_device` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_6_subsys_device: u32 = 0x0;
+/// The value of `amdgpu_gfxoff_quirk_list[6].revision` in gfx_v9_0.c
+pub const GFXOFF_QUIRK_6_revision: u32 = 0x0;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:7125
+pub const mmSCRATCH_REG0: u32 = 0x2040;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:7126
+pub const mmSCRATCH_REG0_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:7127
+pub const mmSCRATCH_REG1: u32 = 0x2041;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:7128
+pub const mmSCRATCH_REG1_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:7129
+pub const mmSCRATCH_REG2: u32 = 0x2042;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:7130
+pub const mmSCRATCH_REG2_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:7131
+pub const mmSCRATCH_REG3: u32 = 0x2043;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:7132
+pub const mmSCRATCH_REG3_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:2089
+pub const mmGRBM_GFX_CNTL: u32 = 0x22;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:2090
+pub const mmGRBM_GFX_CNTL_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:7433
+pub const mmGRBM_GFX_INDEX: u32 = 0x2200;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:7434
+pub const mmGRBM_GFX_INDEX_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:9601
+pub const mmRLC_SPARE_INT: u32 = 0x4ccc;
+/// include/asic_reg/gc/gc_10_1_0_offset.h:9602
+pub const mmRLC_SPARE_INT_BASE_IDX: u32 = 0x1;
+
+// gmc_v9_0, dm, smu (gmc_v9_0.c, amdgpu_dm.c, renoir_ppt.c)
+/// amdgpu/amdgpu_vm.h:94
+pub const AMDGPU_VM_NORETRY_FLAGS_TF: u64 = 0x8000000000003;
+/// display/amdgpu_dm/amdgpu_dm.c:109
+pub const FIRMWARE_RENOIR_DMUB: &[u8] = b"amdgpu/renoir_dmcub.bin";
+/// display/amdgpu_dm/amdgpu_dm.c:115
+pub const FIRMWARE_GREEN_SARDINE_DMUB: &[u8] = b"amdgpu/green_sardine_dmcub.bin";
+/// ?
+pub const GREEN_SARDINE_A0: u32 = 0xa1;
+/// The value of `GetIndexIntoMasterTable(DATA, Object_Header)` in ../display/amdgpu_dm/amdgpu_dm.c
+pub const DATA_TABLE_Object_Header: u32 = 0x16;
+/// ?
+pub const SMU12_DRIVER_IF_VERSION: u32 = 0xe;
+/// include/kgd_pp_interface.h:180
+pub const PP_SMC_POWER_PROFILE_UNKNOWN: u64 = 0xffffffffffffffff;
+/// ?
+pub const SMU_BACO_STATE_NONE: u32 = 0x2;
+/// pm/swsmu/smu12/renoir_ppt.c:47
+pub const mmMP1_SMN_C2PMSG_82: u32 = 0x292;
+/// pm/swsmu/smu12/renoir_ppt.c:48
+pub const mmMP1_SMN_C2PMSG_82_BASE_IDX: u32 = 0x0;
+/// pm/swsmu/smu12/renoir_ppt.c:44
+pub const mmMP1_SMN_C2PMSG_66: u32 = 0x282;
+/// pm/swsmu/smu12/renoir_ppt.c:45
+pub const mmMP1_SMN_C2PMSG_66_BASE_IDX: u32 = 0x0;
+/// pm/swsmu/smu12/renoir_ppt.c:50
+pub const mmMP1_SMN_C2PMSG_90: u32 = 0x29a;
+/// pm/swsmu/smu12/renoir_ppt.c:51
+pub const mmMP1_SMN_C2PMSG_90_BASE_IDX: u32 = 0x0;
+/// amdgpu/amdgpu_vcn.h:36
+pub const AMDGPU_MAX_VCN_ENC_RINGS: u32 = 0xc;

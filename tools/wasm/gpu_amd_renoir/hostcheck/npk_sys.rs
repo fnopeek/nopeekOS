@@ -73,6 +73,37 @@ impl Mmio {
     }
 }
 
+thread_local! {
+    static FIRMWARE_DIR: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Where `sys/firmware/<path>` is read from: a staged `<module>.fw/`.
+pub fn fake_firmware_dir(dir: &str) {
+    FIRMWARE_DIR.with(|d| *d.borrow_mut() = Some(std::path::PathBuf::from(dir)));
+}
+
+fn host_path(name: &[u8]) -> Option<std::path::PathBuf> {
+    let name = std::str::from_utf8(name).ok()?;
+    let rel = name.strip_prefix("sys/firmware/")?;
+    FIRMWARE_DIR.with(|d| d.borrow().as_ref().map(|d| d.join(rel)))
+}
+
+/// `npk_fs_stat`: size, directory flag, mtime; 0 when absent.
+pub fn fs_stat(name: &[u8], out: &mut [u8; 17]) -> i32 {
+    let Some(m) = host_path(name).and_then(|p| std::fs::metadata(p).ok()) else { return 0 };
+    out[..8].copy_from_slice(&m.len().to_le_bytes());
+    out[8] = m.is_dir() as u8;
+    17
+}
+
+/// `npk_fetch`: the bytes into `buf`, their count; -1 when absent.
+pub fn fetch(name: &[u8], buf: &mut [u8]) -> i32 {
+    let Some(data) = host_path(name).and_then(|p| std::fs::read(p).ok()) else { return -1 };
+    let n = data.len().min(buf.len());
+    buf[..n].copy_from_slice(&data[..n]);
+    n as i32
+}
+
 pub fn log(b: &[u8]) {
     let s = String::from_utf8_lossy(b);
     println!("{}", s.strip_prefix("[gpu_amd_renoir] ").unwrap_or(&s));

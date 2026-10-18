@@ -1,9 +1,10 @@
-//! Stage 1a of the port (docs/plan/GPU_AMD_LINUX_MAP.md §1): from
-//! `amdgpu_device_init` through `amdgpu_device_ip_early_init` up to the
-//! `early_init` of the first block after COMMON. The IP discovery, the IP
-//! block list, `soc15_common_early_init`, the VBIOS from VFCT and
-//! `amdgpu_atombios_init`; then what it found, for the device log. Nothing
-//! is written to the card but the MM_INDEX window VRAM is read through.
+//! Stage 1 of the port (docs/plan/GPU_AMD_LINUX_MAP.md §1), parts a and b:
+//! `amdgpu_device_init` through `amdgpu_device_ip_early_init`. The IP
+//! discovery, the IP block list, `soc15_common_early_init`, the VBIOS from
+//! VFCT, `amdgpu_atombios_init`, and the early_init of the nine blocks
+//! after COMMON, which request and read their microcode; then what it
+//! found, for the device log. Nothing is written to the card but the
+//! MM_INDEX window VRAM is read through.
 
 use crate::amdgpu_device::{self as dev, amdgpu_device};
 use crate::atom::cstr;
@@ -20,7 +21,8 @@ pub fn run(adev: &mut amdgpu_device, bdf: (u8, u8, u8)) {
         ""
     }).say();
     // amdgpu_device_check_arguments: the firmware load type.
-    adev.firmware_load_type = dev::amdgpu_ucode_get_load_type(crate::tables::amdgpu_fw_load_type[0]);
+    adev.firmware.load_type = dev::amdgpu_ucode_get_load_type(crate::tables::amdgpu_fw_load_type[0]);
+    dev::amdgpu_device_set_mcbp(adev);
 
     let r = dev::amdgpu_device_ip_early_init(adev, bdf);
     if !adev.mman.discovery_bin.is_empty() {
@@ -28,17 +30,12 @@ pub fn run(adev: &mut amdgpu_device, bdf: (u8, u8, u8)) {
         compare_dc_bases(adev);
     }
     match r {
-        Ok(next) => {
+        Ok(n) => {
             report(adev);
-            let mut l = Line::new();
-            l.s("stage 1a done: ");
-            if let Some(b) = adev.ip_blocks.get(next) {
-                l.s("early_init of <").bytes(b.version.funcs_name).s("> and the ")
-                    .dec((adev.ip_blocks.len() - next - 1) as u64).s(" blocks after it is stage 1b");
-            } else {
-                l.s("every block's early_init ran");
-            }
-            l.say();
+            report_microcode(adev);
+            let valid = adev.ip_blocks.iter().filter(|b| b.status.valid).count();
+            Line::new().s("stage 1b done: early_init of ").dec(n as u64).s(" blocks, ").dec(valid as u64)
+                .s(" valid").say();
         }
         Err(e) => {
             Line::new().s("amdgpu_device_ip_early_init failed (").dec((-e) as u64).s(")").say();
@@ -130,4 +127,51 @@ fn report_ip_versions(adev: &amdgpu_device) {
     Line::new().s("instances: sdma ").dec(adev.sdma.num_instances as u64).s(" (mask ").hex(adev.sdma.sdma_mask)
         .s("), vcn ").dec(adev.vcn.num_vcn_inst as u64).s(" (mask ").hex(adev.vcn.inst_mask).s("), gc xcc mask ")
         .hex(adev.gfx.xcc_mask).s(", umc ").dec(adev.gmc.num_umc as u64).say();
+}
+
+/// One firmware image: its name, header version and size.
+fn image(l: &mut Line, name: &str, fw: Option<&crate::linux::firmware>) {
+    use crate::amdgpu_ucode::le16;
+    l.s(name);
+    match fw {
+        Some(f) => {
+            l.s(" v").dec(le16(f, regs::COMMON_FIRMWARE_HEADER_header_version_major) as u64).s(".")
+                .dec(le16(f, regs::COMMON_FIRMWARE_HEADER_header_version_minor) as u64).s(" ")
+                .dec(f.data.len() as u64).s("B");
+        }
+        None => {
+            l.s(" -");
+        }
+    }
+}
+
+/// The microcode early_init requested, and what PSP will load.
+fn report_microcode(adev: &amdgpu_device) {
+    let g = &adev.gfx;
+    Line::new().s("gfx: pfp ").hex(g.pfp_fw_version).s("/").dec(g.pfp_feature_version as u64).s(", me ")
+        .hex(g.me_fw_version).s("/").dec(g.me_feature_version as u64).s(", ce ").hex(g.ce_fw_version).s("/")
+        .dec(g.ce_feature_version as u64).s(", mec ").hex(g.mec_fw_version).s("/").dec(g.mec_feature_version as u64)
+        .s(", rlc ").hex(g.rlc_fw_version).s("/").dec(g.rlc_feature_version as u64).say();
+    Line::new().s("rlc: v2.1 ").s(if g.rlc.is_rlc_v2_1 { "yes" } else { "no" }).s(", srlc ").hex(g.rlc_srlc_fw_version)
+        .s(", srlg ").hex(g.rlc_srlg_fw_version).s(", srls ").hex(g.rlc_srls_fw_version).s(", lists ")
+        .dec(g.rlc.reg_list_format_size_bytes as u64).s("+").dec(g.rlc.reg_list_size_bytes as u64).s(" bytes")
+        .s(", write_wait me ").s(if g.me_fw_write_wait { "1" } else { "0" }).s(" mec ")
+        .s(if g.mec_fw_write_wait { "1" } else { "0" }).say();
+    let s = &adev.sdma.instance[0];
+    let p = &adev.psp;
+    Line::new().s("sdma0 ").hex(s.fw_version).s("/").dec(s.feature_version as u64).s(" burst_nop ")
+        .s(if s.burst_nop { "1" } else { "0" }).s(", asd ").hex(p.asd_context.bin_desc.fw_version).s(" ")
+        .dec(p.asd_context.bin_desc.size_bytes as u64).s("B, ta ").hex(p.ta_fw_version).s(" (hdcp ")
+        .hex(p.hdcp_context.context.bin_desc.fw_version).s(", dtm ").hex(p.dtm_context.context.bin_desc.fw_version)
+        .s(", securedisplay ").hex(p.securedisplay_context.context.bin_desc.fw_version).s(")").say();
+    let mut l = Line::new();
+    l.s("images: ");
+    image(&mut l, "dmcub", adev.dm_dmub_fw.as_ref());
+    l.s(", ");
+    image(&mut l, "vcn", adev.vcn.inst[0].fw.as_ref());
+    l.say();
+    let ids = adev.firmware.ucode.iter().filter(|u| u.fw.is_some()).count();
+    Line::new().s("psp load list: ").dec(ids as u64).s(" ucode ids, fw_size ").dec(adev.firmware.fw_size as u64)
+        .s(" bytes; pg_flags ").hex(adev.pg_flags).s(", pp_feature ").hex(adev.pm.pp_feature).s(", num_crtc ")
+        .dec(adev.mode_info.num_crtc as u64).say();
 }

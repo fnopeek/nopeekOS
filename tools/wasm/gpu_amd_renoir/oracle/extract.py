@@ -28,7 +28,9 @@ for name in sys.argv[2:]:
             r"|(?:static )?(?:const )?[\w ]+\*?\s*\b%s\s*\[[^\]]*\]\s*=\s*\{"
             r"|(?:static )?[\w ]+\*?\b%s\()" % (n, n, n)
         )
-        starts = [i for i, l in enumerate(src) if rx.match(l)]
+        # A prototype ends with `;`, on its own line or a continuation.
+        starts = [i for i, l in enumerate(src) if rx.match(l)
+                  and not next(src[k] for k in range(i, len(src)) if src[k].rstrip().endswith((";", "{", ")"))).rstrip().endswith(";")]
         if len(starts) != 1:
             sys.exit(f"{name}: {len(starts)} matches")
         i = starts[0]

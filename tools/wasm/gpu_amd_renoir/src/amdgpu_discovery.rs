@@ -816,13 +816,13 @@ pub fn amdgpu_discovery_set_ip_blocks(adev: &mut amdgpu_device) -> i32 {
     if r != 0 {
         return r;
     }
-    if adev.firmware_load_type == AMDGPU_FW_LOAD_PSP {
+    if adev.firmware.load_type == AMDGPU_FW_LOAD_PSP {
         let r = amdgpu_discovery_set_psp_ip_blocks(adev);
         if r != 0 {
             return r;
         }
     }
-    if adev.firmware_load_type == AMDGPU_FW_LOAD_PSP {
+    if adev.firmware.load_type == AMDGPU_FW_LOAD_PSP {
         let r = amdgpu_discovery_set_smu_ip_blocks(adev);
         if r != 0 {
             return r;
@@ -841,8 +841,8 @@ pub fn amdgpu_discovery_set_ip_blocks(adev: &mut amdgpu_device) -> i32 {
         return r;
     }
     // Bare metal, so `!amdgpu_sriov_vf` holds.
-    if adev.firmware_load_type == AMDGPU_FW_LOAD_DIRECT
-        || (adev.firmware_load_type == AMDGPU_FW_LOAD_RLC_BACKDOOR_AUTO && amdgpu_dpm[0] == 1)
+    if adev.firmware.load_type == AMDGPU_FW_LOAD_DIRECT
+        || (adev.firmware.load_type == AMDGPU_FW_LOAD_RLC_BACKDOOR_AUTO && amdgpu_dpm[0] == 1)
     {
         let r = amdgpu_discovery_set_smu_ip_blocks(adev);
         if r != 0 {

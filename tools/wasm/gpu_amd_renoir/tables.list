@@ -28,3 +28,5 @@ amdgpu_fw_load_type: i32
 amdgpu_umsch_mm: i32
 amdgpu_dc: i32
 amdgpu_dpm: i32
+amdgpu_mcbp: i32
+amdgpu_num_kcq: i32

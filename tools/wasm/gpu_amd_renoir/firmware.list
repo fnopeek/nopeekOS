@@ -1,0 +1,19 @@
+# The firmware amdgpu requests on Renoir (AMD_APU_IS_RENOIR), from
+# linux-firmware; staged by tools/stage-module.sh, installed with the module
+# under sys/firmware/. Up to stage 1b: the early_init requests.
+# psp_v12_0_init_microcode
+amdgpu/renoir_asd.bin
+amdgpu/renoir_ta.bin
+# dm_init_microcode
+amdgpu/renoir_dmcub.bin
+# gfx_v9_0_init_microcode (GC 9.3.0 loads no mec2)
+amdgpu/renoir_pfp.bin
+amdgpu/renoir_me.bin
+amdgpu/renoir_ce.bin
+amdgpu/renoir_rlc.bin
+amdgpu/renoir_mec.bin
+# amdgpu_sdma_init_microcode
+amdgpu/renoir_sdma.bin
+# amdgpu_vcn_early_init
+amdgpu/renoir_vcn.bin
+amdgpu/LICENSE.amdgpu /usr/share/licenses/linux-firmware-amdgpu/LICENSE.amdgpu

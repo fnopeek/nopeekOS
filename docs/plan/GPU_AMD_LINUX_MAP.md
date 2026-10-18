@@ -92,7 +92,7 @@ Jede Stufe hat ein Ergebnis am Geraet. Reihenfolge = `amdgpu_device_init`.
 |---|---|---|
 | **0** ✅ gebaut | `amdgpu_device_init` bis `amdgpu_discovery_reg_base_init`: BAR5, `amdgpu_device_init_apu_flags`, `amdgpu_discovery_read_binary_from_mem` (C2PMSG_33, RCC_CONFIG_MEMSIZE, VRAM ueber MM_INDEX/MM_DATA), alle Pruefungen von `amdgpu_discovery_init`, die Die-/IP-Schleife; dazu `nbio_v7_0_get_rev_id` + `external_rev_id`, `amdgpu_acpi_vfct_bios` + `check_atom_bios`, Vergleich mit `renoir_ip_offset.h` | Log mit jeder IP-Version und Basis; `priv/gpu_amd_renoir/ip_discovery.bin` und `vbios.bin` |
 | **1a** ✅ gebaut, Host ✅ | `amdgpu_device_ip_early_init` bis vor das `early_init` des ersten Blocks nach COMMON: `amdgpu_discovery_set_ip_blocks` ganz (harvest, gfx/mall/vcn info, Familie, nbio/hdp/df/smuio-funcs, alle `set_*_ip_blocks` → zehn Bloecke), `soc15_common_early_init`, `amdgpu_get_bios` (VFCT), `amdgpu_atombios_init` (`amdgpu_atom_parse`, atomfirmware scratch/fb/capability) | Log: Bloecke wie Linux, family/flags/rev, cg/pg, ATOM-Name/-Version, fw caps |
-| 1b | `early_init` von gmc_v9_0, vega10_ih, psp_v12_0, smu_v12_0, dm, gfx_v9_0, sdma_v4_0, vcn_v2_0, jpeg_v2_0 — darin die Microcode-Anforderungen (gfx/rlc/sdma/dmcub), also zuerst die Firmware als Assets | jeder Block `valid`, Microcode-Versionen im Log |
+| **1b** ✅ gebaut, Host ✅ | `early_init` von gmc_v9_0, vega10_ih, psp_v12_0 (`psp_v12_0_init_microcode`: asd, ta v2), smu_v12_0 (renoir_ppt), dm (dmcub), gfx_v9_0 (pfp, me, ce, rlc v2.1, mec; keine mec2 auf GC 9.3.0), sdma_v4_0, vcn_v2_0, jpeg_v2_0; davor `amdgpu_device_set_mcbp` | Log: Microcode-Versionen, PSP-Ladeliste (10 ucode ids, fw_size), alle Bloecke `valid` |
 | 1c | Rest von `amdgpu_device_init` bis `amdgpu_device_ip_init`: Doorbell, `reset_init`, `need_reset_on_init`, `amdgpu_device_need_post` (APU: nein), `amdgpu_atomfirmware_get_clock_info` | Log: Doorbell, Takte; kein Schreiben ausser Lesefenstern |
 | 2 | `amdgpu_device_ip_init` Phase 1: COMMON (`soc15_common_hw_init`: NBIO-Register, Doorbell-Apertur), IH (`vega10_ih`, Ring im Systemspeicher, MSI) | IRQ-Ring laeuft, ein Interrupt kommt an |
 | 3 | GMC (`gmc_v9_0`: GART, GFXHUB/MMHUB v1, VMID 0), PSP 12 (`psp_v12_0`: Ring, ASD + TA laden, Firmware ueber den PSP), SMU 12 (`renoir_ppt`: Postfach, Takte, GFXOFF) | PSP meldet ASD geladen; SMU antwortet; GART-Seite lesbar |
@@ -151,10 +151,26 @@ Linux' eigenen Code, auf `vbios.bin` und `ip_discovery.bin` vom Geraet
 - Verglichen werden Zeilen: atom 66/66, discovery 91/91. Danach laeuft
   Stufe 1a am Stueck (`stage1a_run.rs`) und druckt das Log des Geraets.
 
+- Drittes Orakel (`main_ucode.c`): die Microcode-Funktionen aus
+  amdgpu_ucode.c, amdgpu_psp.c, psp_v12_0.c, amdgpu_gfx.c, amdgpu_rlc.c,
+  gfx_v9_0.c, amdgpu_sdma.c, sdma_v4_0.c, amdgpu_vcn.c, amdgpu_dm.c auf den
+  bereitgestellten Firmware-Dateien: 45/45 Zeilen (Versionen, Offsets der
+  Teil-Images, Hash ueber die RLC-Registerliste, PSP-Ladeliste, fw_size).
+
 **Grenze:** geprueft ist, was die Daten des Geraets durchlaufen. Die
 GC-Tabelle des Geraets ist v2.0 — eine Mutation im v1-Zweig faellt nicht
 auf, eine im v2-Zweig sofort. Zweige fuer andere Tabellenversionen sind
-gegen die Quelle gelesen, nicht ausgefuehrt.
+gegen die Quelle gelesen, nicht ausgefuehrt. `fw_size` summiert
+seitengerundete Groessen: ein Fehler in der MEC-Sprungtabelle unter einer
+Seite rundet sich weg (gemessen); die genauen Groessen prueft erst Stufe 3,
+wenn die PSP laedt.
+
+**Firmware:** `tools/wasm/gpu_amd_renoir/firmware.list` nennt die Dateien
+aus linux-firmware; `tools/stage-module.sh` packt sie nach
+`release/modules/gpu_amd_renoir.fw/`, das Modul-Manifest fuehrt je Datei eine
+Zeile `firmware=<pfad> <groesse> <sha384>`, und `install` legt sie (vor dem
+Modul) nach `sys/firmware/<pfad>` — schreibgeschuetzt fuer Module
+(`is_trust_critical_path`). `uninstall` nimmt sie mit.
 
 ## 3 — Was Stufe 0 bewusst noch nicht tut
 

@@ -16,3 +16,5 @@ typedef uint16_t __le16; typedef uint32_t __le32; typedef uint64_t __le64;
 #define __counted_by(x)
 #define le64_to_cpu(x) (x)
 #define DECLARE_FLEX_ARRAY(TYPE, NAME) struct { struct { } __empty_##NAME; TYPE NAME[]; }
+struct firmware { size_t size; const u8 *data; };
+#define __printf(a, b) __attribute__((format(printf, a, b)))
