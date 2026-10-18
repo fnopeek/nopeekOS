@@ -98,3 +98,26 @@ pub fn amdgpu_acpi_vfct_bios(vendor: u16, device: u16, bus: u8, slot: u8, func: 
     Line::new().s("ACPI VFCT table present but broken (too short #2),skipping").say();
     None
 }
+
+/// `amdgpu_get_bios_apu`: VFCT first. The VRAM BAR, ROM BAR and platform
+/// sources after it are not ported; an APU whose firmware has no VFCT stops
+/// here.
+fn amdgpu_get_bios_apu(adev: &mut crate::amdgpu_device::amdgpu_device, bus: u8, slot: u8, func: u8) -> bool {
+    if let Some(bios) = amdgpu_acpi_vfct_bios(0x1002, adev.device, bus, slot, func) {
+        Line::new().s("Fetched VBIOS from VFCT").say();
+        adev.bios = bios;
+        return true;
+    }
+    Line::new().s("Unable to locate a BIOS ROM (VFCT only; VRAM BAR, ROM BAR and platform are not ported)").say();
+    false
+}
+
+/// `amdgpu_get_bios`: an APU, so `amdgpu_get_bios_apu`; CHIP_RENOIR is past
+/// CHIP_VEGA10, so the image is atomfirmware.
+pub fn amdgpu_get_bios(adev: &mut crate::amdgpu_device::amdgpu_device, bus: u8, slot: u8, func: u8) -> bool {
+    let found = amdgpu_get_bios_apu(adev, bus, slot, func);
+    if found {
+        adev.is_atom_fw = true;
+    }
+    found
+}

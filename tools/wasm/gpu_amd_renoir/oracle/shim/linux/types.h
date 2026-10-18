@@ -14,3 +14,5 @@ typedef uint16_t __le16; typedef uint32_t __le32; typedef uint64_t __le64;
 #define cpu_to_le32(x) (x)
 #define __packed __attribute__((packed))
 #define __counted_by(x)
+#define le64_to_cpu(x) (x)
+#define DECLARE_FLEX_ARRAY(TYPE, NAME) struct { struct { } __empty_##NAME; TYPE NAME[]; }

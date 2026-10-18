@@ -463,3 +463,431 @@ pub const ATOM_VRAM_OPERATION_FLAGS_SHIFT: u32 = 0x1e;
 pub const ATOM_VRAM_BLOCK_NEEDS_NO_RESERVATION: u32 = 0x1;
 /// include/atombios.h:4302
 pub const ATOM_VRAM_BLOCK_SRIOV_MSG_SHARE_RESERVATION: u32 = 0x2;
+
+// The GC info table (discovery.h), the fields amdgpu_discovery_get_gfx_info reads
+/// The value of `offsetof(struct gc_info_v1_0, header.version_major)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_header_version_major: u32 = 0x4;
+/// The value of `offsetof(struct gc_info_v1_0, gc_num_se)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_num_se: u32 = 0xc;
+/// The value of `offsetof(struct gc_info_v1_0, gc_num_wgp0_per_sa)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_num_wgp0_per_sa: u32 = 0x10;
+/// The value of `offsetof(struct gc_info_v1_0, gc_num_wgp1_per_sa)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_num_wgp1_per_sa: u32 = 0x14;
+/// The value of `offsetof(struct gc_info_v1_0, gc_num_sa_per_se)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_num_sa_per_se: u32 = 0x4c;
+/// The value of `offsetof(struct gc_info_v1_0, gc_num_rb_per_se)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_num_rb_per_se: u32 = 0x18;
+/// The value of `offsetof(struct gc_info_v1_0, gc_num_gl2c)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_num_gl2c: u32 = 0x1c;
+/// The value of `offsetof(struct gc_info_v1_0, gc_num_gprs)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_num_gprs: u32 = 0x20;
+/// The value of `offsetof(struct gc_info_v1_0, gc_num_max_gs_thds)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_num_max_gs_thds: u32 = 0x24;
+/// The value of `offsetof(struct gc_info_v1_0, gc_gs_table_depth)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_gs_table_depth: u32 = 0x28;
+/// The value of `offsetof(struct gc_info_v1_0, gc_gsprim_buff_depth)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_gsprim_buff_depth: u32 = 0x2c;
+/// The value of `offsetof(struct gc_info_v1_0, gc_double_offchip_lds_buffer)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_double_offchip_lds_buffer: u32 = 0x34;
+/// The value of `offsetof(struct gc_info_v1_0, gc_wave_size)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_wave_size: u32 = 0x38;
+/// The value of `offsetof(struct gc_info_v1_0, gc_max_waves_per_simd)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_max_waves_per_simd: u32 = 0x3c;
+/// The value of `offsetof(struct gc_info_v1_0, gc_max_scratch_slots_per_cu)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_max_scratch_slots_per_cu: u32 = 0x40;
+/// The value of `offsetof(struct gc_info_v1_0, gc_lds_size)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_lds_size: u32 = 0x44;
+/// The value of `offsetof(struct gc_info_v1_0, gc_num_sc_per_se)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_num_sc_per_se: u32 = 0x48;
+/// The value of `offsetof(struct gc_info_v1_0, gc_num_packer_per_sc)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_gc_num_packer_per_sc: u32 = 0x50;
+/// The value of `offsetof(struct gc_info_v1_0, header.version_minor)` in amdgpu_discovery.c
+pub const GC_INFO_V1_0_header_version_minor: u32 = 0x6;
+/// The value of `offsetof(struct gc_info_v1_1, gc_num_tcp_per_sa)` in amdgpu_discovery.c
+pub const GC_INFO_V1_1_gc_num_tcp_per_sa: u32 = 0x58;
+/// The value of `offsetof(struct gc_info_v1_1, gc_num_sdp_interface)` in amdgpu_discovery.c
+pub const GC_INFO_V1_1_gc_num_sdp_interface: u32 = 0x5c;
+/// The value of `offsetof(struct gc_info_v1_1, gc_num_tcps)` in amdgpu_discovery.c
+pub const GC_INFO_V1_1_gc_num_tcps: u32 = 0x60;
+/// The value of `offsetof(struct gc_info_v1_2, gc_num_tcp_per_wpg)` in amdgpu_discovery.c
+pub const GC_INFO_V1_2_gc_num_tcp_per_wpg: u32 = 0x64;
+/// The value of `offsetof(struct gc_info_v1_2, gc_tcp_l1_size)` in amdgpu_discovery.c
+pub const GC_INFO_V1_2_gc_tcp_l1_size: u32 = 0x68;
+/// The value of `offsetof(struct gc_info_v1_2, gc_num_sqc_per_wgp)` in amdgpu_discovery.c
+pub const GC_INFO_V1_2_gc_num_sqc_per_wgp: u32 = 0x6c;
+/// The value of `offsetof(struct gc_info_v1_2, gc_l1_instruction_cache_size_per_sqc)` in amdgpu_discovery.c
+pub const GC_INFO_V1_2_gc_l1_instruction_cache_size_per_sqc: u32 = 0x70;
+/// The value of `offsetof(struct gc_info_v1_2, gc_l1_data_cache_size_per_sqc)` in amdgpu_discovery.c
+pub const GC_INFO_V1_2_gc_l1_data_cache_size_per_sqc: u32 = 0x74;
+/// The value of `offsetof(struct gc_info_v1_2, gc_gl1c_per_sa)` in amdgpu_discovery.c
+pub const GC_INFO_V1_2_gc_gl1c_per_sa: u32 = 0x78;
+/// The value of `offsetof(struct gc_info_v1_2, gc_gl1c_size_per_instance)` in amdgpu_discovery.c
+pub const GC_INFO_V1_2_gc_gl1c_size_per_instance: u32 = 0x7c;
+/// The value of `offsetof(struct gc_info_v1_2, gc_gl2c_per_gpu)` in amdgpu_discovery.c
+pub const GC_INFO_V1_2_gc_gl2c_per_gpu: u32 = 0x80;
+/// The value of `offsetof(struct gc_info_v1_3, gc_tcp_size_per_cu)` in amdgpu_discovery.c
+pub const GC_INFO_V1_3_gc_tcp_size_per_cu: u32 = 0x84;
+/// The value of `offsetof(struct gc_info_v1_3, gc_tcp_cache_line_size)` in amdgpu_discovery.c
+pub const GC_INFO_V1_3_gc_tcp_cache_line_size: u32 = 0x88;
+/// The value of `offsetof(struct gc_info_v1_3, gc_instruction_cache_size_per_sqc)` in amdgpu_discovery.c
+pub const GC_INFO_V1_3_gc_instruction_cache_size_per_sqc: u32 = 0x8c;
+/// The value of `offsetof(struct gc_info_v1_3, gc_instruction_cache_line_size)` in amdgpu_discovery.c
+pub const GC_INFO_V1_3_gc_instruction_cache_line_size: u32 = 0x90;
+/// The value of `offsetof(struct gc_info_v1_3, gc_scalar_data_cache_size_per_sqc)` in amdgpu_discovery.c
+pub const GC_INFO_V1_3_gc_scalar_data_cache_size_per_sqc: u32 = 0x94;
+/// The value of `offsetof(struct gc_info_v1_3, gc_scalar_data_cache_line_size)` in amdgpu_discovery.c
+pub const GC_INFO_V1_3_gc_scalar_data_cache_line_size: u32 = 0x98;
+/// The value of `offsetof(struct gc_info_v1_3, gc_tcc_size)` in amdgpu_discovery.c
+pub const GC_INFO_V1_3_gc_tcc_size: u32 = 0x9c;
+/// The value of `offsetof(struct gc_info_v1_3, gc_tcc_cache_line_size)` in amdgpu_discovery.c
+pub const GC_INFO_V1_3_gc_tcc_cache_line_size: u32 = 0xa0;
+/// The value of `offsetof(struct gc_info_v2_0, gc_num_se)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_num_se: u32 = 0xc;
+/// The value of `offsetof(struct gc_info_v2_0, gc_num_cu_per_sh)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_num_cu_per_sh: u32 = 0x10;
+/// The value of `offsetof(struct gc_info_v2_0, gc_num_sh_per_se)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_num_sh_per_se: u32 = 0x14;
+/// The value of `offsetof(struct gc_info_v2_0, gc_num_rb_per_se)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_num_rb_per_se: u32 = 0x18;
+/// The value of `offsetof(struct gc_info_v2_0, gc_num_tccs)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_num_tccs: u32 = 0x1c;
+/// The value of `offsetof(struct gc_info_v2_0, gc_num_gprs)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_num_gprs: u32 = 0x20;
+/// The value of `offsetof(struct gc_info_v2_0, gc_num_max_gs_thds)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_num_max_gs_thds: u32 = 0x24;
+/// The value of `offsetof(struct gc_info_v2_0, gc_gs_table_depth)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_gs_table_depth: u32 = 0x28;
+/// The value of `offsetof(struct gc_info_v2_0, gc_gsprim_buff_depth)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_gsprim_buff_depth: u32 = 0x2c;
+/// The value of `offsetof(struct gc_info_v2_0, gc_double_offchip_lds_buffer)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_double_offchip_lds_buffer: u32 = 0x34;
+/// The value of `offsetof(struct gc_info_v2_0, gc_wave_size)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_wave_size: u32 = 0x38;
+/// The value of `offsetof(struct gc_info_v2_0, gc_max_waves_per_simd)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_max_waves_per_simd: u32 = 0x3c;
+/// The value of `offsetof(struct gc_info_v2_0, gc_max_scratch_slots_per_cu)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_max_scratch_slots_per_cu: u32 = 0x40;
+/// The value of `offsetof(struct gc_info_v2_0, gc_lds_size)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_lds_size: u32 = 0x44;
+/// The value of `offsetof(struct gc_info_v2_0, gc_num_sc_per_se)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_num_sc_per_se: u32 = 0x48;
+/// The value of `offsetof(struct gc_info_v2_0, gc_num_packer_per_sc)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_gc_num_packer_per_sc: u32 = 0x4c;
+/// The value of `offsetof(struct gc_info_v2_0, header.version_minor)` in amdgpu_discovery.c
+pub const GC_INFO_V2_0_header_version_minor: u32 = 0x6;
+/// The value of `offsetof(struct gc_info_v2_1, gc_num_tcp_per_sh)` in amdgpu_discovery.c
+pub const GC_INFO_V2_1_gc_num_tcp_per_sh: u32 = 0x50;
+/// The value of `offsetof(struct gc_info_v2_1, gc_tcp_size_per_cu)` in amdgpu_discovery.c
+pub const GC_INFO_V2_1_gc_tcp_size_per_cu: u32 = 0x54;
+/// The value of `offsetof(struct gc_info_v2_1, gc_num_sdp_interface)` in amdgpu_discovery.c
+pub const GC_INFO_V2_1_gc_num_sdp_interface: u32 = 0x58;
+/// The value of `offsetof(struct gc_info_v2_1, gc_num_cu_per_sqc)` in amdgpu_discovery.c
+pub const GC_INFO_V2_1_gc_num_cu_per_sqc: u32 = 0x5c;
+/// The value of `offsetof(struct gc_info_v2_1, gc_instruction_cache_size_per_sqc)` in amdgpu_discovery.c
+pub const GC_INFO_V2_1_gc_instruction_cache_size_per_sqc: u32 = 0x60;
+/// The value of `offsetof(struct gc_info_v2_1, gc_scalar_data_cache_size_per_sqc)` in amdgpu_discovery.c
+pub const GC_INFO_V2_1_gc_scalar_data_cache_size_per_sqc: u32 = 0x64;
+/// The value of `offsetof(struct gc_info_v2_1, gc_tcc_size)` in amdgpu_discovery.c
+pub const GC_INFO_V2_1_gc_tcc_size: u32 = 0x68;
+
+// The MALL and VCN info tables (discovery.h)
+/// The value of `offsetof(struct mall_info_v1_0, header.version_major)` in amdgpu_discovery.c
+pub const MALL_INFO_V1_0_header_version_major: u32 = 0x4;
+/// The value of `offsetof(struct mall_info_v1_0, mall_size_per_m)` in amdgpu_discovery.c
+pub const MALL_INFO_V1_0_mall_size_per_m: u32 = 0xc;
+/// The value of `offsetof(struct mall_info_v1_0, m_s_present)` in amdgpu_discovery.c
+pub const MALL_INFO_V1_0_m_s_present: u32 = 0x10;
+/// The value of `offsetof(struct mall_info_v1_0, m_half_use)` in amdgpu_discovery.c
+pub const MALL_INFO_V1_0_m_half_use: u32 = 0x14;
+/// The value of `offsetof(struct mall_info_v2_0, mall_size_per_umc)` in amdgpu_discovery.c
+pub const MALL_INFO_V2_0_mall_size_per_umc: u32 = 0xc;
+/// The value of `offsetof(struct mall_info_v1_0, header.version_minor)` in amdgpu_discovery.c
+pub const MALL_INFO_V1_0_header_version_minor: u32 = 0x6;
+/// The value of `offsetof(struct vcn_info_v1_0, header.version_major)` in amdgpu_discovery.c
+pub const VCN_INFO_V1_0_header_version_major: u32 = 0x4;
+/// The value of `offsetof(struct vcn_info_v1_0, header.version_minor)` in amdgpu_discovery.c
+pub const VCN_INFO_V1_0_header_version_minor: u32 = 0x6;
+/// The value of `offsetof(struct vcn_info_v1_0, instance_info)` in amdgpu_discovery.c
+pub const VCN_INFO_V1_0_instance_info: u32 = 0x10;
+/// The value of `sizeof(struct vcn_instance_info_v1_0)` in amdgpu_discovery.c
+pub const VCN_INSTANCE_INFO_V1_0_SIZE: u32 = 0x10;
+/// The value of `offsetof(struct vcn_instance_info_v1_0, fuse_data.all_bits)` in amdgpu_discovery.c
+pub const VCN_INSTANCE_INFO_V1_0_fuse_data_all_bits: u32 = 0x4;
+/// include/discovery.h:393
+pub const VCN_INFO_TABLE_MAX_NUM_INSTANCES: u32 = 0x4;
+/// include/discovery.h:41
+pub const MALL_INFO: u32 = 0x4;
+
+// The harvest table and the v1/v2 IP entry (discovery.h)
+/// The value of `offsetof(struct harvest_table, list)` in amdgpu_discovery.c
+pub const HARVEST_TABLE_list: u32 = 0x8;
+/// The value of `sizeof(struct harvest_info)` in amdgpu_discovery.c
+pub const HARVEST_INFO_SIZE: u32 = 0x4;
+/// The value of `offsetof(struct harvest_info, hw_id)` in amdgpu_discovery.c
+pub const HARVEST_INFO_hw_id: u32 = 0x0;
+/// The value of `offsetof(struct harvest_info, number_instance)` in amdgpu_discovery.c
+pub const HARVEST_INFO_number_instance: u32 = 0x2;
+/// The value of `sizeof(struct ip)` in amdgpu_discovery.c
+pub const IP_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct ip, hw_id)` in amdgpu_discovery.c
+pub const IP_hw_id: u32 = 0x0;
+/// The value of `offsetof(struct ip, number_instance)` in amdgpu_discovery.c
+pub const IP_number_instance: u32 = 0x2;
+/// The value of `offsetof(struct ip, num_base_address)` in amdgpu_discovery.c
+pub const IP_num_base_address: u32 = 0x3;
+/// The value of `((union { struct ip s; uint64_t q; }){ .s.harvest = 0xf }).q` in amdgpu_discovery.c
+pub const IP_HARVEST_MASK64: u64 = 0xf00000000000000;
+/// The value of `sizeof(((struct ip_discovery_header *)0)->version)` in amdgpu_discovery.c
+pub const IHDR_VERSION_SIZE: u32 = 0x2;
+
+// Harvest masks (amd_shared.h, amdgpu_vcn.h)
+/// include/amd_shared.h:237
+pub const AMD_HARVEST_IP_VCN_MASK: u32 = 0x1;
+/// include/amd_shared.h:238
+pub const AMD_HARVEST_IP_JPEG_MASK: u32 = 0x2;
+/// include/amd_shared.h:239
+pub const AMD_HARVEST_IP_DMU_MASK: u32 = 0x4;
+/// amdgpu/amdgpu_vcn.h:38
+pub const AMDGPU_VCN_HARVEST_VCN0: u32 = 0x1;
+/// amdgpu/amdgpu_vcn.h:39
+pub const AMDGPU_VCN_HARVEST_VCN1: u32 = 0x2;
+
+// The IP block types and their names (amd_shared.h, amdgpu_device.c)
+/// amdgpu/amdgpu_device.c:4004
+pub const AMD_IP_BLOCK_TYPE_COMMON: u32 = 0x0;
+/// amdgpu/amdgpu_device.c:4005
+pub const AMD_IP_BLOCK_TYPE_GMC: u32 = 0x1;
+/// amdgpu/amdgpu_device.c:4007
+pub const AMD_IP_BLOCK_TYPE_IH: u32 = 0x2;
+/// amdgpu/amdgpu_device.c:4042
+pub const AMD_IP_BLOCK_TYPE_SMC: u32 = 0x3;
+/// amdgpu/amdgpu_device.c:4006
+pub const AMD_IP_BLOCK_TYPE_PSP: u32 = 0x4;
+/// amdgpu/amdgpu_device.c:4043
+pub const AMD_IP_BLOCK_TYPE_DCE: u32 = 0x5;
+/// amdgpu/amdgpu_device.c:4044
+pub const AMD_IP_BLOCK_TYPE_GFX: u32 = 0x6;
+/// amdgpu/amdgpu_device.c:4045
+pub const AMD_IP_BLOCK_TYPE_SDMA: u32 = 0x7;
+/// amdgpu/amdgpu_device.c:4047
+pub const AMD_IP_BLOCK_TYPE_UVD: u32 = 0x8;
+/// amdgpu/amdgpu_device.c:4048
+pub const AMD_IP_BLOCK_TYPE_VCE: u32 = 0x9;
+/// include/amd_shared.h:105
+pub const AMD_IP_BLOCK_TYPE_ACP: u32 = 0xa;
+/// amdgpu/amdgpu_device.c:4049
+pub const AMD_IP_BLOCK_TYPE_VCN: u32 = 0xb;
+/// amdgpu/amdgpu_device.c:4046
+pub const AMD_IP_BLOCK_TYPE_MES: u32 = 0xc;
+/// amdgpu/amdgpu_device.c:4050
+pub const AMD_IP_BLOCK_TYPE_JPEG: u32 = 0xd;
+/// include/amd_shared.h:109
+pub const AMD_IP_BLOCK_TYPE_VPE: u32 = 0xe;
+/// include/amd_shared.h:110
+pub const AMD_IP_BLOCK_TYPE_UMSCH_MM: u32 = 0xf;
+/// include/amd_shared.h:111
+pub const AMD_IP_BLOCK_TYPE_ISP: u32 = 0x10;
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_COMMON]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_COMMON: &[u8] = b"common";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_GMC]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_GMC: &[u8] = b"gmc";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_IH]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_IH: &[u8] = b"ih";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_SMC]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_SMC: &[u8] = b"smu";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_PSP]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_PSP: &[u8] = b"psp";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_DCE]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_DCE: &[u8] = b"dce";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_GFX]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_GFX: &[u8] = b"gfx";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_SDMA]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_SDMA: &[u8] = b"sdma";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_UVD]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_UVD: &[u8] = b"uvd";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_VCE]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_VCE: &[u8] = b"vce";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_ACP]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_ACP: &[u8] = b"acp";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_VCN]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_VCN: &[u8] = b"vcn";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_MES]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_MES: &[u8] = b"mes";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_JPEG]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_JPEG: &[u8] = b"jpeg";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_VPE]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_VPE: &[u8] = b"vpe";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_UMSCH_MM]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_UMSCH_MM: &[u8] = b"umsch_mm";
+/// The value of `ip_block_names[AMD_IP_BLOCK_TYPE_ISP]` in amdgpu_device.c
+pub const IP_BLOCK_NAME_ISP: &[u8] = b"isp";
+
+// The IP blocks Renoir gets (amdgpu_discovery_set_*_ip_blocks)
+/// The value of `vega10_common_ip_block.type` in soc15.c
+pub const VEGA10_COMMON_IP_BLOCK_type: u32 = 0x0;
+/// The value of `vega10_common_ip_block.major` in soc15.c
+pub const VEGA10_COMMON_IP_BLOCK_major: u32 = 0x2;
+/// The value of `vega10_common_ip_block.minor` in soc15.c
+pub const VEGA10_COMMON_IP_BLOCK_minor: u32 = 0x0;
+/// The value of `vega10_common_ip_block.rev` in soc15.c
+pub const VEGA10_COMMON_IP_BLOCK_rev: u32 = 0x0;
+/// The value of `vega10_common_ip_block.funcs->name` in soc15.c
+pub const VEGA10_COMMON_IP_BLOCK_funcs_name: &[u8] = b"soc15_common";
+/// The value of `gmc_v9_0_ip_block.type` in gmc_v9_0.c
+pub const GMC_V9_0_IP_BLOCK_type: u32 = 0x1;
+/// The value of `gmc_v9_0_ip_block.major` in gmc_v9_0.c
+pub const GMC_V9_0_IP_BLOCK_major: u32 = 0x9;
+/// The value of `gmc_v9_0_ip_block.minor` in gmc_v9_0.c
+pub const GMC_V9_0_IP_BLOCK_minor: u32 = 0x0;
+/// The value of `gmc_v9_0_ip_block.rev` in gmc_v9_0.c
+pub const GMC_V9_0_IP_BLOCK_rev: u32 = 0x0;
+/// The value of `gmc_v9_0_ip_block.funcs->name` in gmc_v9_0.c
+pub const GMC_V9_0_IP_BLOCK_funcs_name: &[u8] = b"gmc_v9_0";
+/// The value of `vega10_ih_ip_block.type` in vega10_ih.c
+pub const VEGA10_IH_IP_BLOCK_type: u32 = 0x2;
+/// The value of `vega10_ih_ip_block.major` in vega10_ih.c
+pub const VEGA10_IH_IP_BLOCK_major: u32 = 0x4;
+/// The value of `vega10_ih_ip_block.minor` in vega10_ih.c
+pub const VEGA10_IH_IP_BLOCK_minor: u32 = 0x0;
+/// The value of `vega10_ih_ip_block.rev` in vega10_ih.c
+pub const VEGA10_IH_IP_BLOCK_rev: u32 = 0x0;
+/// The value of `vega10_ih_ip_block.funcs->name` in vega10_ih.c
+pub const VEGA10_IH_IP_BLOCK_funcs_name: &[u8] = b"vega10_ih";
+/// The value of `psp_v12_0_ip_block.type` in amdgpu_psp.c
+pub const PSP_V12_0_IP_BLOCK_type: u32 = 0x4;
+/// The value of `psp_v12_0_ip_block.major` in amdgpu_psp.c
+pub const PSP_V12_0_IP_BLOCK_major: u32 = 0xc;
+/// The value of `psp_v12_0_ip_block.minor` in amdgpu_psp.c
+pub const PSP_V12_0_IP_BLOCK_minor: u32 = 0x0;
+/// The value of `psp_v12_0_ip_block.rev` in amdgpu_psp.c
+pub const PSP_V12_0_IP_BLOCK_rev: u32 = 0x0;
+/// The value of `psp_v12_0_ip_block.funcs->name` in amdgpu_psp.c
+pub const PSP_V12_0_IP_BLOCK_funcs_name: &[u8] = b"psp";
+/// The value of `smu_v12_0_ip_block.type` in ../pm/swsmu/amdgpu_smu.c
+pub const SMU_V12_0_IP_BLOCK_type: u32 = 0x3;
+/// The value of `smu_v12_0_ip_block.major` in ../pm/swsmu/amdgpu_smu.c
+pub const SMU_V12_0_IP_BLOCK_major: u32 = 0xc;
+/// The value of `smu_v12_0_ip_block.minor` in ../pm/swsmu/amdgpu_smu.c
+pub const SMU_V12_0_IP_BLOCK_minor: u32 = 0x0;
+/// The value of `smu_v12_0_ip_block.rev` in ../pm/swsmu/amdgpu_smu.c
+pub const SMU_V12_0_IP_BLOCK_rev: u32 = 0x0;
+/// The value of `smu_v12_0_ip_block.funcs->name` in ../pm/swsmu/amdgpu_smu.c
+pub const SMU_V12_0_IP_BLOCK_funcs_name: &[u8] = b"smu";
+/// The value of `dm_ip_block.type` in ../display/amdgpu_dm/amdgpu_dm.c
+pub const DM_IP_BLOCK_type: u32 = 0x5;
+/// The value of `dm_ip_block.major` in ../display/amdgpu_dm/amdgpu_dm.c
+pub const DM_IP_BLOCK_major: u32 = 0x1;
+/// The value of `dm_ip_block.minor` in ../display/amdgpu_dm/amdgpu_dm.c
+pub const DM_IP_BLOCK_minor: u32 = 0x0;
+/// The value of `dm_ip_block.rev` in ../display/amdgpu_dm/amdgpu_dm.c
+pub const DM_IP_BLOCK_rev: u32 = 0x0;
+/// The value of `dm_ip_block.funcs->name` in ../display/amdgpu_dm/amdgpu_dm.c
+pub const DM_IP_BLOCK_funcs_name: &[u8] = b"dm";
+/// The value of `gfx_v9_0_ip_block.type` in gfx_v9_0.c
+pub const GFX_V9_0_IP_BLOCK_type: u32 = 0x6;
+/// The value of `gfx_v9_0_ip_block.major` in gfx_v9_0.c
+pub const GFX_V9_0_IP_BLOCK_major: u32 = 0x9;
+/// The value of `gfx_v9_0_ip_block.minor` in gfx_v9_0.c
+pub const GFX_V9_0_IP_BLOCK_minor: u32 = 0x0;
+/// The value of `gfx_v9_0_ip_block.rev` in gfx_v9_0.c
+pub const GFX_V9_0_IP_BLOCK_rev: u32 = 0x0;
+/// The value of `gfx_v9_0_ip_block.funcs->name` in gfx_v9_0.c
+pub const GFX_V9_0_IP_BLOCK_funcs_name: &[u8] = b"gfx_v9_0";
+/// The value of `sdma_v4_0_ip_block.type` in sdma_v4_0.c
+pub const SDMA_V4_0_IP_BLOCK_type: u32 = 0x7;
+/// The value of `sdma_v4_0_ip_block.major` in sdma_v4_0.c
+pub const SDMA_V4_0_IP_BLOCK_major: u32 = 0x4;
+/// The value of `sdma_v4_0_ip_block.minor` in sdma_v4_0.c
+pub const SDMA_V4_0_IP_BLOCK_minor: u32 = 0x0;
+/// The value of `sdma_v4_0_ip_block.rev` in sdma_v4_0.c
+pub const SDMA_V4_0_IP_BLOCK_rev: u32 = 0x0;
+/// The value of `sdma_v4_0_ip_block.funcs->name` in sdma_v4_0.c
+pub const SDMA_V4_0_IP_BLOCK_funcs_name: &[u8] = b"sdma_v4_0";
+/// The value of `vcn_v2_0_ip_block.type` in vcn_v2_0.c
+pub const VCN_V2_0_IP_BLOCK_type: u32 = 0xb;
+/// The value of `vcn_v2_0_ip_block.major` in vcn_v2_0.c
+pub const VCN_V2_0_IP_BLOCK_major: u32 = 0x2;
+/// The value of `vcn_v2_0_ip_block.minor` in vcn_v2_0.c
+pub const VCN_V2_0_IP_BLOCK_minor: u32 = 0x0;
+/// The value of `vcn_v2_0_ip_block.rev` in vcn_v2_0.c
+pub const VCN_V2_0_IP_BLOCK_rev: u32 = 0x0;
+/// The value of `vcn_v2_0_ip_block.funcs->name` in vcn_v2_0.c
+pub const VCN_V2_0_IP_BLOCK_funcs_name: &[u8] = b"vcn_v2_0";
+/// The value of `jpeg_v2_0_ip_block.type` in jpeg_v2_0.c
+pub const JPEG_V2_0_IP_BLOCK_type: u32 = 0xd;
+/// The value of `jpeg_v2_0_ip_block.major` in jpeg_v2_0.c
+pub const JPEG_V2_0_IP_BLOCK_major: u32 = 0x2;
+/// The value of `jpeg_v2_0_ip_block.minor` in jpeg_v2_0.c
+pub const JPEG_V2_0_IP_BLOCK_minor: u32 = 0x0;
+/// The value of `jpeg_v2_0_ip_block.rev` in jpeg_v2_0.c
+pub const JPEG_V2_0_IP_BLOCK_rev: u32 = 0x0;
+/// The value of `jpeg_v2_0_ip_block.funcs->name` in jpeg_v2_0.c
+pub const JPEG_V2_0_IP_BLOCK_funcs_name: &[u8] = b"jpeg_v2_0";
+
+// The SoC (soc15.c, nbio_v7_0.c, amdgpu.h, amd_shared.h)
+/// ?
+pub const AMDGPU_FAMILY_RV: u32 = 0x8e;
+/// include/amd_shared.h:41
+pub const AMD_IS_APU: u32 = 0x20000;
+/// amdgpu/amdgpu_ucode.h:551
+pub const AMDGPU_FW_LOAD_DIRECT: u32 = 0x0;
+/// amdgpu/amdgpu_ucode.h:552
+pub const AMDGPU_FW_LOAD_PSP: u32 = 0x1;
+/// amdgpu/amdgpu_ucode.h:554
+pub const AMDGPU_FW_LOAD_RLC_BACKDOOR_AUTO: u32 = 0x3;
+/// include/amd_shared.h:229
+pub const PP_GFXOFF_MASK: u32 = 0x8000;
+/// include/amd_shared.h:216
+pub const PP_PCIE_DPM_MASK: u32 = 0x4;
+/// include/kgd_kfd_interface.h:103
+pub const KFD_SCHED_POLICY_NO_HWS: u32 = 0x2;
+/// amdgpu/nbio_v7_0.c:288
+pub const MMIO_REG_HOLE_OFFSET: u32 = 0x7f000;
+
+// cg_flags and pg_flags of GC 9.3.0 (soc15_common_early_init)
+/// include/amd_shared.h:128
+pub const AMD_CG_SUPPORT_GFX_MGCG: u32 = 0x1;
+/// include/amd_shared.h:129
+pub const AMD_CG_SUPPORT_GFX_MGLS: u32 = 0x2;
+/// include/amd_shared.h:148
+pub const AMD_CG_SUPPORT_GFX_3D_CGCG: u32 = 0x100000;
+/// include/amd_shared.h:149
+pub const AMD_CG_SUPPORT_GFX_3D_CGLS: u32 = 0x200000;
+/// include/amd_shared.h:130
+pub const AMD_CG_SUPPORT_GFX_CGCG: u32 = 0x4;
+/// include/amd_shared.h:131
+pub const AMD_CG_SUPPORT_GFX_CGLS: u32 = 0x8;
+/// include/amd_shared.h:134
+pub const AMD_CG_SUPPORT_GFX_CP_LS: u32 = 0x40;
+/// include/amd_shared.h:137
+pub const AMD_CG_SUPPORT_MC_MGCG: u32 = 0x200;
+/// include/amd_shared.h:136
+pub const AMD_CG_SUPPORT_MC_LS: u32 = 0x100;
+/// include/amd_shared.h:139
+pub const AMD_CG_SUPPORT_SDMA_MGCG: u32 = 0x800;
+/// include/amd_shared.h:138
+pub const AMD_CG_SUPPORT_SDMA_LS: u32 = 0x400;
+/// include/amd_shared.h:140
+pub const AMD_CG_SUPPORT_BIF_LS: u32 = 0x1000;
+/// include/amd_shared.h:143
+pub const AMD_CG_SUPPORT_HDP_LS: u32 = 0x8000;
+/// include/amd_shared.h:152
+pub const AMD_CG_SUPPORT_VCN_MGCG: u32 = 0x1000000;
+/// include/amd_shared.h:158
+pub const AMD_CG_SUPPORT_JPEG_MGCG: u32 = 0x40000000;
+/// include/amd_shared.h:155
+pub const AMD_CG_SUPPORT_IH_CG: u32 = 0x8000000;
+/// include/amd_shared.h:156
+pub const AMD_CG_SUPPORT_ATHUB_LS: u32 = 0x10000000;
+/// include/amd_shared.h:157
+pub const AMD_CG_SUPPORT_ATHUB_MGCG: u32 = 0x20000000;
+/// include/amd_shared.h:151
+pub const AMD_CG_SUPPORT_DF_MGCG: u32 = 0x800000;
+/// include/amd_shared.h:171
+pub const AMD_PG_SUPPORT_SDMA: u32 = 0x100;
+/// include/amd_shared.h:177
+pub const AMD_PG_SUPPORT_VCN: u32 = 0x4000;
+/// include/amd_shared.h:180
+pub const AMD_PG_SUPPORT_JPEG: u32 = 0x20000;
+/// include/amd_shared.h:178
+pub const AMD_PG_SUPPORT_VCN_DPG: u32 = 0x8000;

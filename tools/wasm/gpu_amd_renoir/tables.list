@@ -20,3 +20,11 @@ UMC_BASE: u32
 UVD0_BASE: u32
 @ atom.c
 atom_iio_len: i32
+@ amdgpu_drv.c
+amdgpu_ip_block_mask: u32
+amdgpu_pp_feature_mask: u32
+sched_policy: i32
+amdgpu_fw_load_type: i32
+amdgpu_umsch_mm: i32
+amdgpu_dc: i32
+amdgpu_dpm: i32

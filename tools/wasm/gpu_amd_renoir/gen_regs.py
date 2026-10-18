@@ -14,7 +14,7 @@ array of a .c file, compiled as is, and read off the data GCC emits for it.
 regs.list, one per line: `NAME` for a constant of the headers below,
 `NAME @ file.c` for a constant a .c file defines (compiled with that file),
 `NAME = expr @ file.c` for a value read out of that file, `NAME$ @ file.c`
-for a string constant, read off the `.string` GCC emits. `# ` lines group
+or `NAME$ = expr @ file.c` for a string, read off the `.string` GCC emits. `# ` lines group
 the output. tables.list: `@ file`, then `name: u8|u16|u32|i32` per static
 array of integers in that file, or per static struct made only of integers,
 which comes out flat, in memory order.
@@ -112,11 +112,12 @@ def values(exprs, prelude):
     return out
 
 
-def strings(names, prelude):
-    """{name: bytes} for string constants, read off the data GCC emits."""
+def strings(exprs, prelude):
+    """{name: bytes} for string expressions, read off the data GCC emits."""
+    names = list(exprs)
     src = prelude
-    for n in names:
-        src += f"const char *s_{n}(void);\nconst char *s_{n}(void) {{ return {n}; }}\n"
+    for n, e in exprs.items():
+        src += f"const char *s_{n}(void);\nconst char *s_{n}(void) {{ return {e}; }}\n"
     asm = gcc(src, ["-S"])
     label_of, cur = {}, None
     for line in asm.splitlines():
@@ -187,9 +188,9 @@ def gen_regs():
                 groups.append(cur)
             cur = [line[2:], []]
             continue
-        m = re.match(r"^(\w+)\s*=\s*(.+?)\s*@\s*(\S+)$", line)
+        m = re.match(r"^(\w+)(\$?)\s*=\s*(.+?)\s*@\s*(\S+)$", line)
         if m:
-            cur[1].append((m.group(1), m.group(2), m.group(3)))
+            cur[1].append((m.group(1), m.group(3) + m.group(2), m.group(4)))
             continue
         m = re.match(r"^(\w+)(\$?)(?:\s*@\s*(\S+))?$", line)
         if not m:
@@ -199,8 +200,9 @@ def gen_regs():
     by_file, str_by_file = {}, {}
     for _, items in groups:
         for name, expr, f in items:
-            if expr == name + "$":
-                str_by_file.setdefault(f, []).append(name)
+            if expr.endswith("$"):
+                e = expr[:-1]
+                str_by_file.setdefault(f, {})[name] = name if e == name else e
             else:
                 by_file.setdefault(f, {})[name] = expr
     vals = {}
@@ -215,7 +217,7 @@ def gen_regs():
         if title:
             out.append(f"// {title}")
         for name, expr, f in items:
-            src = where(name, search_files(f)) if expr in (name, name + "$") else f"The value of `{expr}` in {f}"
+            src = where(name, search_files(f)) if expr in (name, name + "$") else f"The value of `{expr.rstrip('$')}` in {f}"
             v = vals[name]
             out.append(f"/// {src or '?'}")
             if isinstance(v, bytes):
@@ -298,7 +300,7 @@ def gen_tables():
                 if isinstance(v, tuple):
                     vals += [0] * (v[1] // width[t])
                 else:
-                    vals.append(v)
+                    vals.append(v & ((1 << (8 * width[t])) - 1) if t.startswith("u") else v)
             body = ", ".join(str(v) for v in vals)
             out.append(f"/// `{n}` in {f}")
             out.append(f"pub static {n}: [{t}; {len(vals)}] = [{body}];")

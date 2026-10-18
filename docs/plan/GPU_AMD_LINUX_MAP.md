@@ -91,7 +91,9 @@ Jede Stufe hat ein Ergebnis am Geraet. Reihenfolge = `amdgpu_device_init`.
 | Stufe | Inhalt (Linux) | Ergebnis |
 |---|---|---|
 | **0** ✅ gebaut | `amdgpu_device_init` bis `amdgpu_discovery_reg_base_init`: BAR5, `amdgpu_device_init_apu_flags`, `amdgpu_discovery_read_binary_from_mem` (C2PMSG_33, RCC_CONFIG_MEMSIZE, VRAM ueber MM_INDEX/MM_DATA), alle Pruefungen von `amdgpu_discovery_init`, die Die-/IP-Schleife; dazu `nbio_v7_0_get_rev_id` + `external_rev_id`, `amdgpu_acpi_vfct_bios` + `check_atom_bios`, Vergleich mit `renoir_ip_offset.h` | Log mit jeder IP-Version und Basis; `priv/gpu_amd_renoir/ip_discovery.bin` und `vbios.bin` |
-| 1 | Rest von `amdgpu_device_ip_early_init` und `amdgpu_discovery_set_ip_blocks` mit den echten Versionen: `soc15_common_early_init`, `nbio`, `hdp`, `df`, `smuio`-funcs, `amdgpu_get_bios` + AtomBIOS-Parser (`amdgpu_atom_parse`, `amdgpu_atomfirmware_*`: vram/firmware/clock info), `amdgpu_device_need_post` (APU: nein), Doorbell-BAR | Log: VBIOS-Version, Takte, Carve-out, Doorbell; kein Schreiben ausser Lesefenstern |
+| **1a** ✅ gebaut, Host ✅ | `amdgpu_device_ip_early_init` bis vor das `early_init` des ersten Blocks nach COMMON: `amdgpu_discovery_set_ip_blocks` ganz (harvest, gfx/mall/vcn info, Familie, nbio/hdp/df/smuio-funcs, alle `set_*_ip_blocks` → zehn Bloecke), `soc15_common_early_init`, `amdgpu_get_bios` (VFCT), `amdgpu_atombios_init` (`amdgpu_atom_parse`, atomfirmware scratch/fb/capability) | Log: Bloecke wie Linux, family/flags/rev, cg/pg, ATOM-Name/-Version, fw caps |
+| 1b | `early_init` von gmc_v9_0, vega10_ih, psp_v12_0, smu_v12_0, dm, gfx_v9_0, sdma_v4_0, vcn_v2_0, jpeg_v2_0 — darin die Microcode-Anforderungen (gfx/rlc/sdma/dmcub), also zuerst die Firmware als Assets | jeder Block `valid`, Microcode-Versionen im Log |
+| 1c | Rest von `amdgpu_device_init` bis `amdgpu_device_ip_init`: Doorbell, `reset_init`, `need_reset_on_init`, `amdgpu_device_need_post` (APU: nein), `amdgpu_atomfirmware_get_clock_info` | Log: Doorbell, Takte; kein Schreiben ausser Lesefenstern |
 | 2 | `amdgpu_device_ip_init` Phase 1: COMMON (`soc15_common_hw_init`: NBIO-Register, Doorbell-Apertur), IH (`vega10_ih`, Ring im Systemspeicher, MSI) | IRQ-Ring laeuft, ein Interrupt kommt an |
 | 3 | GMC (`gmc_v9_0`: GART, GFXHUB/MMHUB v1, VMID 0), PSP 12 (`psp_v12_0`: Ring, ASD + TA laden, Firmware ueber den PSP), SMU 12 (`renoir_ppt`: Postfach, Takte, GFXOFF) | PSP meldet ASD geladen; SMU antwortet; GART-Seite lesbar |
 | 4 | GFX 9 (`gfx_v9_0`: RLC, CP pfp/me/ce/mec ueber PSP, KIQ, GFX- und Compute-Ring), SDMA 4 (`sdma_v4_0`) | Ring-Test und IB-Test wie Linux (`amdgpu_ring_test_helper`), SDMA-Selbsttest — **GPU_STACK §9 Stufe 8** |
@@ -132,6 +134,27 @@ Jede Stufe hat ein Ergebnis am Geraet. Reihenfolge = `amdgpu_device_init`.
    annimmt. PCI-Revision 0xc1.
 4. **VFCT liefert das VBIOS:** 55296 Bytes, ATOM-Kopf bei 0x18a.
 5. SDMA 1 Instanz, VCN 1, GC-XCC-Maske 1, UMC 2. `RCC_CONFIG_MEMSIZE` 512 MB.
+
+## 2a — Wie gegen Linux geprueft wird
+
+`tools/wasm/gpu_amd_renoir/hostcheck/check.sh` haelt die Portierung gegen
+Linux' eigenen Code, auf `vbios.bin` und `ip_discovery.bin` vom Geraet
+(`~/.cache/nopeekos/amd-device/`):
+
+- `oracle/build.sh` baut die Orakel aus dem Graph-Baum: `atom.c` ganz, mit
+  duennen Ersatzheadern, und die amdgpu-Funktionen, die `oracle/extract.py`
+  zur Bauzeit woertlich herausschneidet (atomfirmware, discovery von
+  `reg_base_init` bis `get_vcn_info`). Im Repo liegt kein Linux-Quelltext.
+- Die Rust-Dateien des Moduls werden mit `rustc` auf dem Host gebaut;
+  `npk_sys` ist dort `hostcheck/npk_sys.rs`, eine Ersatzkarte (Register,
+  VRAM ueber MM_INDEX/MM_DATA) und eine Ersatz-ACPI (VFCT).
+- Verglichen werden Zeilen: atom 66/66, discovery 91/91. Danach laeuft
+  Stufe 1a am Stueck (`stage1a_run.rs`) und druckt das Log des Geraets.
+
+**Grenze:** geprueft ist, was die Daten des Geraets durchlaufen. Die
+GC-Tabelle des Geraets ist v2.0 — eine Mutation im v1-Zweig faellt nicht
+auf, eine im v2-Zweig sofort. Zweige fuer andere Tabellenversionen sind
+gegen die Quelle gelesen, nicht ausgefuehrt.
 
 ## 3 — Was Stufe 0 bewusst noch nicht tut
 

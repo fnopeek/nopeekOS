@@ -3,22 +3,7 @@
 
 extern crate alloc;
 
-#[path = "../src/amdgpu_atombios.rs"]
-mod amdgpu_atombios;
-#[path = "../src/amdgpu_atomfirmware.rs"]
-mod amdgpu_atomfirmware;
-#[path = "../src/amdgpu_device.rs"]
-mod amdgpu_device;
-#[path = "../src/atom.rs"]
-mod atom;
-#[path = "../src/linux.rs"]
-mod linux;
-#[path = "../src/regs.rs"]
-#[allow(dead_code, non_upper_case_globals)]
-mod regs;
-#[path = "../src/tables.rs"]
-#[allow(dead_code, non_upper_case_globals)]
-mod tables;
+include!("modules.rs");
 
 use amdgpu_device::{amdgpu_device as Adev, amdgpu_pll};
 use atom::{amdgpu_atom_parse_cmd_header, amdgpu_atom_parse_data_header, cstr};

@@ -56,3 +56,24 @@ pub static UVD0_BASE: [u32; 35] = [30720, 32256, 37761024, 0, 0, 0, 0, 0, 0, 0, 
 
 /// `atom_iio_len` in atom.c
 pub static atom_iio_len: [i32; 10] = [1, 2, 3, 3, 3, 3, 4, 4, 4, 3];
+
+/// `amdgpu_ip_block_mask` in amdgpu_drv.c
+pub static amdgpu_ip_block_mask: [u32; 1] = [4294967295];
+
+/// `amdgpu_pp_feature_mask` in amdgpu_drv.c
+pub static amdgpu_pp_feature_mask: [u32; 1] = [4294426623];
+
+/// `sched_policy` in amdgpu_drv.c
+pub static sched_policy: [i32; 1] = [0];
+
+/// `amdgpu_fw_load_type` in amdgpu_drv.c
+pub static amdgpu_fw_load_type: [i32; 1] = [-1];
+
+/// `amdgpu_umsch_mm` in amdgpu_drv.c
+pub static amdgpu_umsch_mm: [i32; 1] = [0];
+
+/// `amdgpu_dc` in amdgpu_drv.c
+pub static amdgpu_dc: [i32; 1] = [-1];
+
+/// `amdgpu_dpm` in amdgpu_drv.c
+pub static amdgpu_dpm: [i32; 1] = [-1];
