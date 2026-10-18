@@ -29,6 +29,11 @@ pub struct amdgpu_mman {
     pub fw_vram_usage_size: u64,
     pub drv_vram_usage_start_offset: u64,
     pub drv_vram_usage_size: u64,
+    pub stolen_reserved_offset: u64,
+    pub stolen_reserved_size: u64,
+    pub keep_stolen_vga_memory: bool,
+    pub stolen_vga_size: u64,
+    pub stolen_extended_size: u64,
     pub buffer_funcs: Option<&'static str>,
     pub buffer_funcs_ring: Option<&'static str>,
 }
@@ -282,6 +287,9 @@ pub struct amdgpu_xgmi {
     pub supported: bool,
     pub connected_to_cpu: bool,
     pub ras: Option<&'static str>,
+    pub num_physical_nodes: u32,
+    pub physical_node_id: u32,
+    pub node_segment_size: u64,
 }
 
 /// `struct amdgpu_gmc`.
@@ -303,6 +311,59 @@ pub struct amdgpu_gmc {
     pub gart_size: u64,
     pub tmz_enabled: bool,
     pub noretry: u32,
+    pub vram_width: u32,
+    pub vram_type: u32,
+    pub vram_vendor: u32,
+    pub translate_further: bool,
+    /// The GPU's internal address space and where VRAM, GART and AGP sit in it.
+    pub mc_mask: u64,
+    pub mc_vram_size: u64,
+    pub real_vram_size: u64,
+    pub visible_vram_size: u64,
+    pub aper_base: u64,
+    pub aper_size: u64,
+    pub fb_start: u64,
+    pub fb_end: u64,
+    pub vram_start: u64,
+    pub vram_end: u64,
+    pub gart_start: u64,
+    pub gart_end: u64,
+    pub agp_start: u64,
+    pub agp_end: u64,
+    pub agp_size: u64,
+    pub vmid0_page_table_depth: u32,
+    pub vmid0_page_table_block_size: u32,
+}
+
+/// `struct amdgpu_vmhub`, the registers `*_init` records.
+#[derive(Default, Clone, Copy)]
+pub struct amdgpu_vmhub {
+    pub ctx0_ptb_addr_lo32: u32,
+    pub ctx0_ptb_addr_hi32: u32,
+    pub vm_inv_eng0_sem: u32,
+    pub vm_inv_eng0_req: u32,
+    pub vm_inv_eng0_ack: u32,
+    pub vm_context0_cntl: u32,
+    pub vm_l2_pro_fault_status: u32,
+    pub vm_l2_pro_fault_cntl: u32,
+    pub ctx_distance: u32,
+    pub ctx_addr_distance: u32,
+    pub eng_distance: u32,
+    pub eng_addr_distance: u32,
+}
+
+/// `struct amdgpu_vm_manager`, the part early_init and GMC set.
+#[derive(Default)]
+pub struct amdgpu_vm_manager {
+    pub vm_pte_funcs: Option<&'static str>,
+    pub vm_pte_num_scheds: u32,
+    pub max_pfn: u64,
+    pub num_level: u32,
+    pub root_level: u32,
+    pub block_size: u32,
+    pub fragment_size: u32,
+    pub vram_base_offset: u64,
+    pub first_kfd_vmid: u32,
 }
 
 /// `struct amdgpu_sdma`.
@@ -363,18 +424,13 @@ pub struct amdgpu_jpeg {
     pub inst0_irq: amdgpu_irq_src,
 }
 
-/// `struct amdgpu_irq`, the part early_init sets.
+/// `struct amdgpu_irq`, the part early_init and the sw_inits set.
 #[derive(Default)]
 pub struct amdgpu_irq {
     pub ih_funcs: Option<&'static str>,
     pub self_irq: amdgpu_irq_src,
-}
-
-/// `struct amdgpu_vm_manager`, the part early_init sets.
-#[derive(Default)]
-pub struct amdgpu_vm_manager {
-    pub vm_pte_funcs: Option<&'static str>,
-    pub vm_pte_num_scheds: u32,
+    /// `client[client_id]`, filled by `amdgpu_irq_add_id`.
+    pub client: Vec<crate::amdgpu_irq::amdgpu_irq_client>,
 }
 
 /// `struct amdgpu_vpe`.
@@ -423,6 +479,11 @@ pub struct amdgpu_device {
     /// `adev->pcie_rreg`/`pcie_wreg` are `amdgpu_device_indirect_*`.
     pub pcie_reg_indirect: bool,
     pub ras_hw_enabled: u32,
+    pub vmhub: [amdgpu_vmhub; AMDGPU_MAX_VMHUBS as usize],
+    pub vmhubs_mask: u64,
+    pub need_swiotlb: bool,
+    /// `pci_resource_start/len(pdev, 0)`: the VRAM BAR.
+    pub bar0: (u64, u64),
     pub ras_enabled: u32,
     /// `adev->df.hash_status`.
     pub df_hash_status: amdgpu_df_hash_status,
@@ -491,6 +552,11 @@ impl amdgpu_device {
                 fw_vram_usage_size: 0,
                 drv_vram_usage_start_offset: 0,
                 drv_vram_usage_size: 0,
+                stolen_reserved_offset: 0,
+                stolen_reserved_size: 0,
+                keep_stolen_vga_memory: false,
+                stolen_vga_size: 0,
+                stolen_extended_size: 0,
                 buffer_funcs: None,
                 buffer_funcs_ring: None,
             },
@@ -517,6 +583,10 @@ impl amdgpu_device {
             init_lvl: "",
             pcie_reg_indirect: false,
             ras_hw_enabled: 0,
+            vmhub: [amdgpu_vmhub::default(); AMDGPU_MAX_VMHUBS as usize],
+            vmhubs_mask: 0,
+            need_swiotlb: false,
+            bar0: (0, 0),
             ras_enabled: 0,
             df_hash_status: amdgpu_df_hash_status::default(),
             enforce_isolation: [0; MAX_XCP as usize],

@@ -198,3 +198,8 @@ pub fn now_us() -> i64 {
 pub fn sleep(_ms: i32) -> i32 {
     0
 }
+
+/// `npk_dma_set_mask`: accepted, as the kernel does for 32..=64 bits.
+pub fn dma_set_mask(bits: i32) -> i32 {
+    if (32..=64).contains(&bits) { 0 } else { -1 }
+}

@@ -49,3 +49,13 @@ mod sdma_v4_0;
 mod vcn_v2_0;
 #[path = "../src/vega10_ih.rs"]
 mod vega10_ih;
+#[path = "../src/amdgpu_gmc.rs"]
+mod amdgpu_gmc;
+#[path = "../src/amdgpu_irq.rs"]
+mod amdgpu_irq;
+#[path = "../src/amdgpu_vm.rs"]
+mod amdgpu_vm;
+#[path = "../src/gfxhub_v1_0.rs"]
+mod gfxhub_v1_0;
+#[path = "../src/mmhub_v1_0.rs"]
+mod mmhub_v1_0;

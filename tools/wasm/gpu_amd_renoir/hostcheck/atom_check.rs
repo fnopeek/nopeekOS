@@ -86,6 +86,13 @@ fn main() {
     pll("spll", &adev.clock.spll);
     pll("mpll", &adev.clock.mpll);
 
+    adev.flags = regs::CHIP_RENOIR | regs::AMD_IS_APU;
+    let (w, t, v, r) = match amdgpu_atomfirmware::amdgpu_atomfirmware_get_vram_info(&adev) {
+        Ok((w, t, v)) => (w, t, v, 0),
+        Err(e) => (0, 0, 0, e),
+    };
+    println!("get_vram_info {} width {} type {} vendor {}", r, w, t, v);
+
     // amdgpu_atombios_init as the driver runs it gives the same context.
     let mut again = Adev::new(0x164c, 0xc1, npk_sys::Mmio(0), 0);
     again.bios = adev.bios.clone();

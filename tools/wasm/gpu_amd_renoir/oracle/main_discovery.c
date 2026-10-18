@@ -6,14 +6,7 @@
  *
  * struct amdgpu_device carries only the fields those functions touch; the
  * device is 1002:164c rev 0xc1, CHIP_RENOIR, AMD_APU_IS_RENOIR. */
-#include <linux/sched.h>
-#include <linux/slab.h>
-#include <drm/amd_asic_type.h>
-#include "amd_shared.h"
-#include "amdgpu_discovery.h"
-#include "soc15_hw_ip.h"
-#include "discovery.h"
-#include "amdgpu_extracted.h"
+#include "oracle_adev.h"
 
 #define dev_err(d, ...) printf("dev_err: " __VA_ARGS__)
 #define dev_info(d, ...) printf("dev_info: " __VA_ARGS__)
@@ -28,46 +21,6 @@
 #define amdgpu_discovery_read_binary_from_file(adev, bin, name) (-ENOENT)
 static int amdgpu_discovery = -1;
 
-struct amdgpu_vcn_inst { u32 vcn_config, vcn_codec_disable_mask; };
-struct amdgpu_device {
-	void *dev;
-	struct { u16 device; u8 revision; } *pdev;
-	enum amd_asic_type asic_type;
-	u32 apu_flags;
-	u32 harvest_ip_mask;
-	struct { u32 discovery_tmr_size; u8 *discovery_bin; } mman;
-	u32 ip_versions[MAX_HWIP][HWIP_MAX_INSTANCE];
-	u32 *reg_offset[MAX_HWIP][HWIP_MAX_INSTANCE];
-	struct {
-		u32 xcc_mask;
-		struct {
-			u32 max_shader_engines, max_cu_per_sh, max_sh_per_se, max_backends_per_se;
-			u32 max_texture_channel_caches, max_gprs, max_gs_threads, gs_vgt_table_depth;
-			u32 gs_prim_buffer_depth, double_offchip_lds_buf, num_sc_per_sh, num_packer_per_sc;
-			u32 gc_num_tcp_per_sa, gc_num_sdp_interface, gc_num_tcps, gc_num_tcp_per_wpg;
-			u32 gc_tcp_l1_size, gc_num_sqc_per_wgp, gc_l1_instruction_cache_size_per_sqc;
-			u32 gc_l1_data_cache_size_per_sqc, gc_gl1c_per_sa, gc_gl1c_size_per_instance;
-			u32 gc_gl2c_per_gpu, gc_tcp_size_per_cu, gc_tcp_cache_line_size;
-			u32 gc_instruction_cache_size_per_sqc, gc_instruction_cache_line_size;
-			u32 gc_scalar_data_cache_size_per_sqc, gc_scalar_data_cache_line_size;
-			u32 gc_tcc_size, gc_tcc_cache_line_size, gc_num_cu_per_sqc;
-		} config;
-		struct { u32 wave_front_size, max_waves_per_simd, max_scratch_slots_per_cu, lds_size; } cu_info;
-#ifdef ORACLE_GFX_FIELDS
-		ORACLE_GFX_FIELDS
-#endif
-	} gfx;
-	struct { u32 num_umc; u64 mall_size; u32 m_half_use; } gmc;
-	struct { u32 num_instances, sdma_mask; } sdma;
-	struct { u32 node_inst_num, active_mask; } umc;
-	struct { u32 num_vcn_inst, inst_mask, harvest_config; struct amdgpu_vcn_inst inst[AMDGPU_MAX_VCN_INSTANCES]; } vcn;
-	struct { u32 inst_mask, harvest_config; } jpeg;
-	struct { u32 num_instances; } vpe;
-	struct { u32 harvest_config; } isp;
-#ifdef ORACLE_DEVICE_FIELDS
-	ORACLE_DEVICE_FIELDS
-#endif
-};
 
 static const char *bin_path;
 
@@ -83,6 +36,7 @@ static int amdgpu_discovery_read_binary_from_mem(struct amdgpu_device *adev, uin
 
 #include "discovery_extracted.c"
 
+#ifndef ORACLE_DISCOVERY_LIBRARY
 int main(int argc, char **argv)
 {
 	static struct { u16 device; u8 revision; } pdev = { 0x164c, 0xc1 };
@@ -142,3 +96,4 @@ int main(int argc, char **argv)
 	U(wave_front_size); U(max_waves_per_simd); U(max_scratch_slots_per_cu); U(lds_size);
 	return 0;
 }
+#endif

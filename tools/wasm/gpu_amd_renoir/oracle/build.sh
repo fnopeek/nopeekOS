@@ -12,11 +12,19 @@ mkdir -p "$B/drm"
 cp "$AMD/amdgpu/atom.c" "$AMD/amdgpu/atom.h" "$B/"
 cp "$L/include/drm/amd_asic_type.h" "$B/drm/"
 echo '#pragma once' > "$B/amdgpu.h"
+{
+    $X "$L/include/uapi/drm/amdgpu_drm.h" '#AMDGPU_VRAM_TYPE_UNKNOWN' '#AMDGPU_VRAM_TYPE_DDR2' \
+        '#AMDGPU_VRAM_TYPE_GDDR5' '#AMDGPU_VRAM_TYPE_HBM' '#AMDGPU_VRAM_TYPE_DDR3' '#AMDGPU_VRAM_TYPE_DDR4' \
+        '#AMDGPU_VRAM_TYPE_GDDR6' '#AMDGPU_VRAM_TYPE_DDR5' '#AMDGPU_VRAM_TYPE_LPDDR4' '#AMDGPU_VRAM_TYPE_LPDDR5' \
+        '#AMDGPU_VRAM_TYPE_HBM3E'
+    $X "$AMD/amdgpu/amdgpu.h" '#IP_VERSION_FULL' '#IP_VERSION'
+} > "$B/vram_types.h"
 
 $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_firmware_capability \
     amdgpu_atomfirmware_scratch_regs_init amdgpu_atomfirmware_allocate_fb_v2_1 \
     amdgpu_atomfirmware_allocate_fb_v2_2 amdgpu_atomfirmware_allocate_fb_scratch smu_info umc_info \
-    gfx_info amdgpu_atomfirmware_get_clock_info > "$B/fw_extracted.c"
+    gfx_info amdgpu_atomfirmware_get_clock_info igp_info umc_info vram_info vram_module \
+    convert_atom_mem_type_to_vram_type amdgpu_atomfirmware_get_vram_info > "$B/fw_extracted.c"
 
 {
     $X "$AMD/amdgpu/amdgpu.h" amd_hw_ip_block_type '#HWIP_MAX_INSTANCE' '#HW_ID_MAX' '#IP_VERSION_FULL' '#IP_VERSION' \
@@ -70,9 +78,43 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
     $X "$AMD/amdgpu/soc15.c" soc15_program_aspm soc15_sdma_doorbell_range_init soc15_common_hw_init
 } > "$B/common_extracted.c"
 
-CF="-O0 -w -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
+{
+    $X "$AMD/amdgpu/amdgpu_irq.h" '#AMDGPU_MAX_IRQ_SRC_ID' '#AMDGPU_IRQ_CLIENTID_MAX' amdgpu_irq_src amdgpu_irq_client
+    $X "$AMD/amdgpu/amdgpu_vm.h" '#AMDGPU_MAX_VMHUBS' '#AMDGPU_GFXHUB_START' '#AMDGPU_MMHUB0_START' \
+        '#AMDGPU_MMHUB1_START' '#AMDGPU_GFXHUB' '#AMDGPU_MMHUB0' '#AMDGPU_MMHUB1' amdgpu_vm_level
+    $X "$AMD/amdgpu/amdgpu_gart.h" '#AMDGPU_GPU_PAGE_SHIFT'
+    $X "$AMD/amdgpu/amdgpu_gmc.h" '#AMDGPU_GMC_HOLE_START' amdgpu_gart_placement amdgpu_vmhub
+    $X "$AMD/amdgpu/amdgpu.h" '#AMDGPU_VBIOS_VGA_ALLOCATION'
+} > "$B/gmc_types.h"
+$X "$AMD/amdgpu/gfxhub_v1_0.c" gfxhub_v1_0_get_mc_fb_offset gfxhub_v1_0_init > "$B/hub_gc_extracted.c"
+$X "$AMD/amdgpu/mmhub_v1_0.c" mmhub_v1_0_get_fb_location mmhub_v1_0_init > "$B/hub_mm_extracted.c"
+{
+    $X "$AMD/amdgpu/amdgpu.h" amdgpu_is_multi_aid '#REG_GET_FIELD'
+    $X "$AMD/amdgpu/amdgpu_gmc.h" '#amdgpu_gmc_get_vbios_fb_size'
+    $X "$AMD/amdgpu/nbio_v7_0.c" nbio_v7_0_get_memsize
+    $X "$AMD/amdgpu/amdgpu_irq.c" amdgpu_irq_add_id
+    $X "$AMD/amdgpu/amdgpu_vm.c" amdgpu_vm_get_block_size amdgpu_vm_adjust_size
+    $X "$AMD/amdgpu/amdgpu_device.c" amdgpu_device_has_display_hardware
+    $X "$AMD/amdgpu/amdgpu_gmc.c" four_gb amdgpu_gmc_is_pdb0_enabled amdgpu_gmc_set_agp_default \
+        amdgpu_gmc_sysvm_location amdgpu_gmc_vram_location amdgpu_gmc_gart_location amdgpu_gmc_agp_location \
+        amdgpu_gmc_get_vbios_allocations
+    $X "$AMD/amdgpu/gmc_v9_0.c" '#mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION' \
+        '#mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_BASE_IDX' \
+        '#HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION__PRI_VIEWPORT_WIDTH__SHIFT' \
+        '#HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION__PRI_VIEWPORT_HEIGHT__SHIFT' \
+        '#HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION__PRI_VIEWPORT_WIDTH_MASK' \
+        '#HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION__PRI_VIEWPORT_HEIGHT_MASK' \
+        '#mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_DCN2' '#mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_DCN2_BASE_IDX' \
+        gmc_v9_0_get_vbios_fb_size gmc_v9_0_vram_gtt_location gmc_v9_0_mc_init gmc_v9_4_3_init_vram_info \
+        gmc_v9_0_sw_init
+} > "$B/gmc_extracted.c"
+
+CF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
 gcc $CF -c "$B/atom.c" -o "$B/atom.o"
 gcc $CF "$HERE/main.c" "$B/atom.o" -o "$B/oracle_atom"
 gcc $CF "$HERE/main_discovery.c" -o "$B/oracle_discovery"
 gcc $CF -I "$AMD/display/include" "$HERE/main_ucode.c" -o "$B/oracle_ucode"
 gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_common.c" -o "$B/oracle_common"
+gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_gc.c" -o "$B/hub_gc.o"
+gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_mm.c" -o "$B/hub_mm.o"
+gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_gmc.c" "$B/hub_gc.o" "$B/hub_mm.o" -o "$B/oracle_gmc"

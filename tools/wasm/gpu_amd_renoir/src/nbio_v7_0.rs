@@ -94,3 +94,8 @@ pub fn nbio_v7_0_get_pcie_index_offset(adev: &amdgpu_device) -> Option<u32> {
 pub fn nbio_v7_0_get_pcie_data_offset(adev: &amdgpu_device) -> Option<u32> {
     Some(*adev.reg_offset[NBIO_HWIP as usize][0].get(mmPCIE_DATA2_BASE_IDX as usize)? + mmPCIE_DATA2)
 }
+
+/// `nbio_v7_0_get_memsize`: in MB.
+pub fn nbio_v7_0_get_memsize(adev: &amdgpu_device) -> u32 {
+    rreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmRCC_CONFIG_MEMSIZE_BASE_IDX, NBIO_mmRCC_CONFIG_MEMSIZE).unwrap_or(0)
+}

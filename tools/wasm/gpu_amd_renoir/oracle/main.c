@@ -19,12 +19,18 @@ struct amdgpu_pll {
 };
 struct amdgpu_device {
 	enum amd_asic_type asic_type;
+	u32 flags;
 	struct amdgpu_mode_info { struct atom_context *atom_context; u32 firmware_flags; } mode_info;
 	u32 bios_scratch_reg_offset;
 	struct { u64 fw_vram_usage_start_offset, fw_vram_usage_size, drv_vram_usage_start_offset, drv_vram_usage_size; } mman;
 	struct { u32 default_sclk, default_mclk; struct amdgpu_pll spll, mpll; } clock;
 	struct { u32 current_sclk, current_mclk; } pm;
 };
+#include "amd_shared.h"
+#include "vram_types.h"
+/* Only the dGPU branches of get_vram_info read these; Renoir is an APU. */
+#define RREG32(r) 0u
+#define amdgpu_ip_version(adev, ip, inst) 0u
 #include "fw_extracted.c"
 
 static void pll(const char *n, struct amdgpu_pll *p)
@@ -49,7 +55,7 @@ int main(int argc, char **argv)
 	size_t n = fread(bios, 1, sizeof(bios), f);
 	fclose(f);
 	static struct card_info card;
-	static struct amdgpu_device adev = { .asic_type = CHIP_RENOIR };
+	static struct amdgpu_device adev = { .asic_type = CHIP_RENOIR, .flags = CHIP_RENOIR | AMD_IS_APU };
 
 	/* amdgpu_atombios_init, is_atom_fw */
 	struct atom_context *ctx = amdgpu_atom_parse(&card, bios);
@@ -98,6 +104,11 @@ int main(int argc, char **argv)
 	       adev.clock.default_sclk, adev.clock.default_mclk, adev.pm.current_sclk, adev.pm.current_mclk);
 	pll("spll", &adev.clock.spll);
 	pll("mpll", &adev.clock.mpll);
+
+	/* gmc_v9_0_sw_init */
+	int vram_width = 0, vram_type = 0, vram_vendor = 0;
+	r = amdgpu_atomfirmware_get_vram_info(&adev, &vram_width, &vram_type, &vram_vendor);
+	printf("get_vram_info %d width %d type %d vendor %d\n", r, vram_width, vram_type, vram_vendor);
 
 	/* atom_check.rs runs amdgpu_atombios_init once more, whole */
 	amdgpu_atom_parse(&card, bios);

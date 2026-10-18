@@ -51,3 +51,7 @@ amdgpu_lockup_timeout: u8
 amdgpu_asic_name: str
 @ ../pm/swsmu/smu12/renoir_ppt.c
 renoir_message_map: i32
+@ amdgpu_drv.c
+amdgpu_vis_vram_limit: i32
+amdgpu_vram_limit: i32
+amdgpu_agp: i32

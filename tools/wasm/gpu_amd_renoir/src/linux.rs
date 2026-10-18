@@ -138,6 +138,11 @@ impl Line {
         self.s(core::str::from_utf8(&b[..n]).unwrap_or("?"))
     }
 
+    /// `0x%016llX`.
+    pub fn hex64(&mut self, v: u64) -> &mut Self {
+        self.s("0x").hexw((v >> 32) as u32, 8).hexw(v as u32, 8)
+    }
+
     pub fn dec(&mut self, mut v: u64) -> &mut Self {
         let mut b = [0u8; 20];
         let mut i = b.len();
@@ -402,4 +407,24 @@ impl pci_dev {
     pub fn upstream_bridge(&self) -> Option<pci_dev> {
         self.parent_bridge()
     }
+}
+
+/// `fls64`: the 1-based index of the highest set bit, 0 for 0.
+pub fn fls64(x: u64) -> u32 {
+    64 - x.leading_zeros()
+}
+
+/// `ilog2`, of a non-zero value.
+pub fn ilog2(x: u64) -> u32 {
+    63 - x.leading_zeros()
+}
+
+/// `roundup_pow_of_two`.
+pub fn roundup_pow_of_two(x: u64) -> u64 {
+    1u64 << fls64(x - 1)
+}
+
+/// `ALIGN`: `x` rounded up to the power of two `a`.
+pub fn align(x: u64, a: u64) -> u64 {
+    (x + a - 1) & !(a - 1)
 }

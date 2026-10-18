@@ -446,3 +446,34 @@ lockerer; Befehls-, Ereignis- und Geraetetabelle sowie die Seitentabellen
 liegen in Kernelspeicher, der nie freigegeben wird und den nie ein Modul
 erreicht (insbesondere nicht als `grant` — das muss `grant` pruefen, wie es
 bei VT-d fuer Wurzel- und Kontexttabelle gilt).
+
+---
+
+## 6 — Vertrauensmodell: was die IOMMU auf einer APU schuetzt und was nicht
+
+Die IOMMU sperrt die **DMA der Karte** ein: was die GPU-Engines (GFX, SDMA,
+VCN, IH, DCN aus Systemspeicher) lesen und schreiben, geht durch den DTE von
+04:00.0. Das ist die Gefahr, die zaehlt, sobald Gaeste ueber native Kontexte
+Befehlspuffer einreichen: ein Befehlsstrom aus dem Gast darf die Karte nur
+auf freigegebene Seiten lenken.
+
+**Nicht** eingesperrt ist das Modul `gpu_amd_renoir` selbst, und das laesst
+sich auf einer APU auch nicht mit der IOMMU leisten:
+
+- BAR5 enthaelt das PCIe-Index/Data-Paar (`PCIE_INDEX2`/`PCIE_DATA2`), und
+  das erreicht den SMN des ganzen Chips — Stufe 2 schreibt darueber ein
+  NBIO-Strap auf `0x10134c10`.
+- Die SMU (MP1) bekommt vom Treiber DRAM-Adressen genannt
+  (`smu_v12_0_set_driver_table_location`, `SetDriverDramAddrHigh/Low`) und
+  greift selbst darauf zu; die PSP (MP0) ebenso fuer ihren Ring und die TMR.
+  Beide sind Koprozessoren des SoC und stehen nicht hinter dem DTE der GPU.
+
+Ein Filter auf den Index-Registern wuerde also nichts schliessen: ein
+boeswilliger Treiber naehme den Weg ueber die SMU. **Der AMD-Treiber ist
+vertrauter Code** — von uns portiert, mit dem Update-Schluessel signiert —,
+so wie amdgpu im Linux-Kernel. Die WASM-Sandbox haelt Fehler des Moduls aus
+dem Kernelspeicher (kein Zeiger, keine Seitentabelle), die IOMMU haelt die
+Karte aus fremdem Speicher. Ein Modul, das diese Karte bekommt, muss
+signiert sein; ein fremdes Modul fuer 1002:164c waere eine Vertrauensfrage,
+keine Sandboxfrage. Beim NUC gilt dasselbe in kleinerem Umfang (GuC/HuC,
+GGTT).

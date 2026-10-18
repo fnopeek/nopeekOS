@@ -44,6 +44,14 @@ for seed in ones zeros hash; do
         fail=1
     fi
 done
+rustc $RF "$HERE/gmc_check.rs" -o "$B/gmc_check"
+"$B/oracle_gmc" "$DISC" > "$B/gmc.linux"
+"$B/gmc_check" "$DISC" "$BIOS" "$FW" > "$B/gmc.port"
+if diff -u "$B/gmc.linux" "$B/gmc.port"; then
+    echo "gmc: port = Linux ($(wc -l < "$B/gmc.linux") lines)"
+else
+    fail=1
+fi
 rustc $RF "$HERE/stage1_run.rs" -o "$B/stage1_run"
 echo "--- the run on the host (the log the card run prints; a fake SMU answers OK):"
 "$B/stage1_run" "$DISC" "$BIOS" "$FW"

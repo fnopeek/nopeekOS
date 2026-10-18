@@ -19,6 +19,11 @@ mod amdgpu_atombios;
 mod amdgpu_atomfirmware;
 mod amdgpu_bios;
 mod amdgpu_device;
+mod mmhub_v1_0;
+mod gfxhub_v1_0;
+mod amdgpu_vm;
+mod amdgpu_irq;
+mod amdgpu_gmc;
 mod amdgpu_discovery;
 mod amdgpu_dm;
 mod amdgpu_psp;
@@ -126,6 +131,10 @@ pub extern "C" fn _start() {
     let bar2_lo = npk_sys::pci_read_config(0x18) as u32;
     let bar2_hi = if bar2_lo & 0x6 == 0x4 { npk_sys::pci_read_config(0x1c) as u32 } else { 0 };
     let bar2 = (((bar2_hi as u64) << 32) | (bar2_lo & !0xf) as u64, npk_sys::pci_bar_size(2).max(0) as u64);
+    // BAR0, the VRAM aperture: a 64-bit memory BAR (BAR0/BAR1).
+    let bar0_lo = npk_sys::pci_read_config(0x10) as u32;
+    let bar0_hi = if bar0_lo & 0x6 == 0x4 { npk_sys::pci_read_config(0x14) as u32 } else { 0 };
+    adev.bar0 = (((bar0_hi as u64) << 32) | (bar0_lo & !0xf) as u64, npk_sys::pci_bar_size(0).max(0) as u64);
     stage1::run(&mut adev, bdf, bar2);
     say("giving the card back");
 }

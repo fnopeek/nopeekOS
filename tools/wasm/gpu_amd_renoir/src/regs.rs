@@ -1847,3 +1847,207 @@ pub const mmPCIE_INDEX2_BASE_IDX: u32 = 0x0;
 pub const mmPCIE_DATA2: u32 = 0xf;
 /// include/asic_reg/nbif/nbif_6_1_offset.h:684
 pub const mmPCIE_DATA2_BASE_IDX: u32 = 0x0;
+
+// gmc_v9_0_sw_init up to amdgpu_bo_init (gmc_v9_0.c and the headers it includes)
+/// The value of `offsetof(struct atom_master_list_of_data_tables_v2_1, integratedsysteminfo) / sizeof(uint16_t)` in amdgpu_atomfirmware.c
+pub const IDX_integratedsysteminfo: u32 = 0x1e;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, umachannelnumber)` in amdgpu_atomfirmware.c
+pub const IGP11_UMACHANNELNUMBER: u32 = 0x2b;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, memorytype)` in amdgpu_atomfirmware.c
+pub const IGP11_MEMORYTYPE: u32 = 0x2a;
+/// The value of `offsetof(struct atom_integrated_system_info_v2_1, umachannelnumber)` in amdgpu_atomfirmware.c
+pub const IGP21_UMACHANNELNUMBER: u32 = 0x1b;
+/// The value of `offsetof(struct atom_integrated_system_info_v2_1, memorytype)` in amdgpu_atomfirmware.c
+pub const IGP21_MEMORYTYPE: u32 = 0x1a;
+/// The value of `offsetof(struct atom_integrated_system_info_v2_3, umachannelnumber)` in amdgpu_atomfirmware.c
+pub const IGP23_UMACHANNELNUMBER: u32 = 0x1b;
+/// The value of `offsetof(struct atom_integrated_system_info_v2_3, memorytype)` in amdgpu_atomfirmware.c
+pub const IGP23_MEMORYTYPE: u32 = 0x1a;
+/// include/atomfirmware.h:1758
+pub const Ddr2MemType: u32 = 0x13;
+/// include/atomfirmware.h:1764
+pub const LpDdr2MemType: u32 = 0x1c;
+/// include/atomfirmware.h:1760
+pub const Ddr3MemType: u32 = 0x18;
+/// include/atomfirmware.h:1765
+pub const LpDdr3MemType: u32 = 0x1d;
+/// include/atomfirmware.h:1762
+pub const Ddr4MemType: u32 = 0x1a;
+/// include/atomfirmware.h:1766
+pub const LpDdr4MemType: u32 = 0x1e;
+/// include/atomfirmware.h:1770
+pub const Ddr5MemType: u32 = 0x22;
+/// include/atomfirmware.h:1771
+pub const LpDdr5MemType: u32 = 0x23;
+/// ?
+pub const AMDGPU_VRAM_TYPE_UNKNOWN: u32 = 0x0;
+/// ?
+pub const AMDGPU_VRAM_TYPE_DDR2: u32 = 0x2;
+/// ?
+pub const AMDGPU_VRAM_TYPE_DDR3: u32 = 0x7;
+/// ?
+pub const AMDGPU_VRAM_TYPE_DDR4: u32 = 0x8;
+/// ?
+pub const AMDGPU_VRAM_TYPE_LPDDR4: u32 = 0xb;
+/// ?
+pub const AMDGPU_VRAM_TYPE_DDR5: u32 = 0xa;
+/// ?
+pub const AMDGPU_VRAM_TYPE_LPDDR5: u32 = 0xc;
+/// ?
+pub const AMDGPU_VRAM_TYPE_HBM: u32 = 0x6;
+/// amdgpu/amdgpu_vm.h:193
+pub const AMDGPU_VM_PDB0: u32 = 0x2;
+/// amdgpu/amdgpu_vm.h:192
+pub const AMDGPU_VM_PDB1: u32 = 0x1;
+/// amdgpu/amdgpu_vm.h:191
+pub const AMDGPU_VM_PDB2: u32 = 0x0;
+/// amdgpu/amdgpu_gart.h:37
+pub const AMDGPU_GPU_PAGE_SHIFT: u32 = 0xc;
+/// The value of `AMDGPU_GFXHUB(0)` in gmc_v9_0.c
+pub const AMDGPU_GFXHUB_0: u32 = 0x0;
+/// The value of `AMDGPU_MMHUB0(0)` in gmc_v9_0.c
+pub const AMDGPU_MMHUB0_0: u32 = 0x8;
+/// amdgpu/amdgpu_vm.h:155
+pub const AMDGPU_MAX_VMHUBS: u32 = 0xd;
+/// include/soc15_ih_clientid.h:51
+pub const SOC15_IH_CLIENTID_VMC: u32 = 0x12;
+/// include/soc15_ih_clientid.h:60
+pub const SOC15_IH_CLIENTID_UTCL2: u32 = 0x1b;
+/// include/soc15_ih_clientid.h:56
+pub const SOC15_IH_CLIENTID_DF: u32 = 0x17;
+/// include/ivsrcid/vmc/irqsrcs_vmc_1_0.h:30
+pub const VMC_1_0__SRCID__VM_FAULT: u32 = 0x0;
+/// include/ivsrcid/vmc/irqsrcs_vmc_1_0.h:34
+pub const UTCL2_1_0__SRCID__FAULT: u32 = 0x0;
+/// amdgpu/amdgpu_irq.h:35
+pub const AMDGPU_IRQ_CLIENTID_MAX: u32 = 0x20;
+/// amdgpu/amdgpu_irq.h:31
+pub const AMDGPU_MAX_IRQ_SRC_ID: u32 = 0x100;
+/// amdgpu/amdgpu_gmc.h:36
+pub const AMDGPU_GMC_HOLE_START: u64 = 0x800000000000;
+/// amdgpu/amdgpu.h:288
+pub const AMDGPU_VBIOS_VGA_ALLOCATION: u32 = 0x900000;
+/// amdgpu/amdgpu_gmc.h:206
+pub const AMDGPU_GART_PLACEMENT_BEST_FIT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_d.h:6027
+pub const mmD1VGA_CONTROL: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_offset.h:575
+pub const mmD1VGA_CONTROL_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:11409
+pub const D1VGA_CONTROL__D1VGA_MODE_ENABLE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:11410
+pub const D1VGA_CONTROL__D1VGA_MODE_ENABLE__SHIFT: u32 = 0x0;
+/// amdgpu/gmc_v9_0.c:78
+pub const mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_DCN2: u32 = 0x5ea;
+/// amdgpu/gmc_v9_0.c:79
+pub const mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_DCN2_BASE_IDX: u32 = 0x2;
+/// amdgpu/gmc_v9_0.c:73
+pub const HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION__PRI_VIEWPORT_WIDTH_MASK: u32 = 0x3fff;
+/// amdgpu/gmc_v9_0.c:71
+pub const HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION__PRI_VIEWPORT_WIDTH__SHIFT: u32 = 0x0;
+/// amdgpu/gmc_v9_0.c:74
+pub const HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION__PRI_VIEWPORT_HEIGHT_MASK: u32 = 0x3fff0000;
+/// amdgpu/gmc_v9_0.c:72
+pub const HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION__PRI_VIEWPORT_HEIGHT__SHIFT: u32 = 0x10;
+/// The value of `mmRCC_CONFIG_MEMSIZE` in nbio_v7_0.c
+pub const NBIO_mmRCC_CONFIG_MEMSIZE: u32 = 0xc3;
+/// The value of `mmRCC_CONFIG_MEMSIZE_BASE_IDX` in nbio_v7_0.c
+pub const NBIO_mmRCC_CONFIG_MEMSIZE_BASE_IDX: u32 = 0x2;
+
+// The VM hubs: gfxhub_v1_0.c (gc_9_0) and mmhub_v1_0.c (mmhub_1_0) name their registers alike
+/// The value of `mmMC_VM_FB_OFFSET` in gfxhub_v1_0.c
+pub const GC_mmMC_VM_FB_OFFSET: u32 = 0x96b;
+/// The value of `mmMC_VM_FB_OFFSET_BASE_IDX` in gfxhub_v1_0.c
+pub const GC_mmMC_VM_FB_OFFSET_BASE_IDX: u32 = 0x0;
+/// The value of `mmMC_VM_FB_LOCATION_BASE` in mmhub_v1_0.c
+pub const MM_mmMC_VM_FB_LOCATION_BASE: u32 = 0x82c;
+/// The value of `mmMC_VM_FB_LOCATION_BASE_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmMC_VM_FB_LOCATION_BASE_BASE_IDX: u32 = 0x0;
+/// The value of `mmMC_VM_FB_LOCATION_TOP` in mmhub_v1_0.c
+pub const MM_mmMC_VM_FB_LOCATION_TOP: u32 = 0x82d;
+/// The value of `mmMC_VM_FB_LOCATION_TOP_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmMC_VM_FB_LOCATION_TOP_BASE_IDX: u32 = 0x0;
+/// The value of `MC_VM_FB_LOCATION_BASE__FB_BASE_MASK` in mmhub_v1_0.c
+pub const MM_MC_VM_FB_LOCATION_BASE__FB_BASE_MASK: u32 = 0xffffff;
+/// The value of `MC_VM_FB_LOCATION_TOP__FB_TOP_MASK` in mmhub_v1_0.c
+pub const MM_MC_VM_FB_LOCATION_TOP__FB_TOP_MASK: u32 = 0xffffff;
+/// The value of `mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32` in gfxhub_v1_0.c
+pub const GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x8eb;
+/// The value of `mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX` in gfxhub_v1_0.c
+pub const GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32` in gfxhub_v1_0.c
+pub const GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x8ec;
+/// The value of `mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX` in gfxhub_v1_0.c
+pub const GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_INVALIDATE_ENG0_SEM` in gfxhub_v1_0.c
+pub const GC_mmVM_INVALIDATE_ENG0_SEM: u32 = 0x891;
+/// The value of `mmVM_INVALIDATE_ENG0_SEM_BASE_IDX` in gfxhub_v1_0.c
+pub const GC_mmVM_INVALIDATE_ENG0_SEM_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_INVALIDATE_ENG0_REQ` in gfxhub_v1_0.c
+pub const GC_mmVM_INVALIDATE_ENG0_REQ: u32 = 0x8a3;
+/// The value of `mmVM_INVALIDATE_ENG0_REQ_BASE_IDX` in gfxhub_v1_0.c
+pub const GC_mmVM_INVALIDATE_ENG0_REQ_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_INVALIDATE_ENG0_ACK` in gfxhub_v1_0.c
+pub const GC_mmVM_INVALIDATE_ENG0_ACK: u32 = 0x8b5;
+/// The value of `mmVM_INVALIDATE_ENG0_ACK_BASE_IDX` in gfxhub_v1_0.c
+pub const GC_mmVM_INVALIDATE_ENG0_ACK_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_CONTEXT0_CNTL` in gfxhub_v1_0.c
+pub const GC_mmVM_CONTEXT0_CNTL: u32 = 0x880;
+/// The value of `mmVM_CONTEXT0_CNTL_BASE_IDX` in gfxhub_v1_0.c
+pub const GC_mmVM_CONTEXT0_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_L2_PROTECTION_FAULT_STATUS` in gfxhub_v1_0.c
+pub const GC_mmVM_L2_PROTECTION_FAULT_STATUS: u32 = 0x84b;
+/// The value of `mmVM_L2_PROTECTION_FAULT_STATUS_BASE_IDX` in gfxhub_v1_0.c
+pub const GC_mmVM_L2_PROTECTION_FAULT_STATUS_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_L2_PROTECTION_FAULT_CNTL` in gfxhub_v1_0.c
+pub const GC_mmVM_L2_PROTECTION_FAULT_CNTL: u32 = 0x847;
+/// The value of `mmVM_L2_PROTECTION_FAULT_CNTL_BASE_IDX` in gfxhub_v1_0.c
+pub const GC_mmVM_L2_PROTECTION_FAULT_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_CONTEXT1_CNTL - mmVM_CONTEXT0_CNTL` in gfxhub_v1_0.c
+pub const GC_CTX_DISTANCE: u32 = 0x1;
+/// The value of `mmVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 - mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32` in gfxhub_v1_0.c
+pub const GC_CTX_ADDR_DISTANCE: u32 = 0x2;
+/// The value of `mmVM_INVALIDATE_ENG1_REQ - mmVM_INVALIDATE_ENG0_REQ` in gfxhub_v1_0.c
+pub const GC_ENG_DISTANCE: u32 = 0x1;
+/// The value of `mmVM_INVALIDATE_ENG1_ADDR_RANGE_LO32 - mmVM_INVALIDATE_ENG0_ADDR_RANGE_LO32` in gfxhub_v1_0.c
+pub const GC_ENG_ADDR_DISTANCE: u32 = 0x2;
+/// The value of `mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32` in mmhub_v1_0.c
+pub const MM_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x72b;
+/// The value of `mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32` in mmhub_v1_0.c
+pub const MM_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x72c;
+/// The value of `mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_INVALIDATE_ENG0_SEM` in mmhub_v1_0.c
+pub const MM_mmVM_INVALIDATE_ENG0_SEM: u32 = 0x6d1;
+/// The value of `mmVM_INVALIDATE_ENG0_SEM_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmVM_INVALIDATE_ENG0_SEM_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_INVALIDATE_ENG0_REQ` in mmhub_v1_0.c
+pub const MM_mmVM_INVALIDATE_ENG0_REQ: u32 = 0x6e3;
+/// The value of `mmVM_INVALIDATE_ENG0_REQ_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmVM_INVALIDATE_ENG0_REQ_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_INVALIDATE_ENG0_ACK` in mmhub_v1_0.c
+pub const MM_mmVM_INVALIDATE_ENG0_ACK: u32 = 0x6f5;
+/// The value of `mmVM_INVALIDATE_ENG0_ACK_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmVM_INVALIDATE_ENG0_ACK_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_CONTEXT0_CNTL` in mmhub_v1_0.c
+pub const MM_mmVM_CONTEXT0_CNTL: u32 = 0x6c0;
+/// The value of `mmVM_CONTEXT0_CNTL_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmVM_CONTEXT0_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_L2_PROTECTION_FAULT_STATUS` in mmhub_v1_0.c
+pub const MM_mmVM_L2_PROTECTION_FAULT_STATUS: u32 = 0x68b;
+/// The value of `mmVM_L2_PROTECTION_FAULT_STATUS_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmVM_L2_PROTECTION_FAULT_STATUS_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_L2_PROTECTION_FAULT_CNTL` in mmhub_v1_0.c
+pub const MM_mmVM_L2_PROTECTION_FAULT_CNTL: u32 = 0x687;
+/// The value of `mmVM_L2_PROTECTION_FAULT_CNTL_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmVM_L2_PROTECTION_FAULT_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmVM_CONTEXT1_CNTL - mmVM_CONTEXT0_CNTL` in mmhub_v1_0.c
+pub const MM_CTX_DISTANCE: u32 = 0x1;
+/// The value of `mmVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 - mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32` in mmhub_v1_0.c
+pub const MM_CTX_ADDR_DISTANCE: u32 = 0x2;
+/// The value of `mmVM_INVALIDATE_ENG1_REQ - mmVM_INVALIDATE_ENG0_REQ` in mmhub_v1_0.c
+pub const MM_ENG_DISTANCE: u32 = 0x1;
+/// The value of `mmVM_INVALIDATE_ENG1_ADDR_RANGE_LO32 - mmVM_INVALIDATE_ENG0_ADDR_RANGE_LO32` in mmhub_v1_0.c
+pub const MM_ENG_ADDR_DISTANCE: u32 = 0x2;

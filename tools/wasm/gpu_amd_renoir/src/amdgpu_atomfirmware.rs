@@ -136,3 +136,38 @@ pub fn amdgpu_atomfirmware_get_clock_info(adev: &mut amdgpu_device) -> i32 {
 
     ret
 }
+
+/// `convert_atom_mem_type_to_vram_type`, the APU table.
+fn convert_atom_mem_type_to_vram_type(atom_mem_type: u32) -> u32 {
+    match atom_mem_type {
+        t if t == Ddr2MemType || t == LpDdr2MemType => AMDGPU_VRAM_TYPE_DDR2,
+        t if t == Ddr3MemType || t == LpDdr3MemType => AMDGPU_VRAM_TYPE_DDR3,
+        t if t == Ddr4MemType => AMDGPU_VRAM_TYPE_DDR4,
+        t if t == LpDdr4MemType => AMDGPU_VRAM_TYPE_LPDDR4,
+        t if t == Ddr5MemType => AMDGPU_VRAM_TYPE_DDR5,
+        t if t == LpDdr5MemType => AMDGPU_VRAM_TYPE_LPDDR5,
+        _ => AMDGPU_VRAM_TYPE_UNKNOWN,
+    }
+}
+
+/// `amdgpu_atomfirmware_get_vram_info` for an APU: the
+/// integratedsysteminfo table, v1.11/1.12, 2.1/2.2 or 2.3. Returns
+/// (vram_width, vram_type, vram_vendor) or -EINVAL; an APU sets no vendor.
+pub fn amdgpu_atomfirmware_get_vram_info(adev: &amdgpu_device) -> Result<(u32, u32, u32), i32> {
+    let Some(ctx) = adev.mode_info.atom_context.as_ref() else { return Ok((0, 0, 0)) };
+    let Some(h) = amdgpu_atom_parse_data_header(ctx, IDX_integratedsysteminfo) else { return Ok((0, 0, 0)) };
+    let at = h.data_start as u32;
+    let (ch, ty) = match (h.frev, h.crev) {
+        (1, 11) | (1, 12) => (IGP11_UMACHANNELNUMBER, IGP11_MEMORYTYPE),
+        (2, 1) | (2, 2) => (IGP21_UMACHANNELNUMBER, IGP21_MEMORYTYPE),
+        (2, 3) => (IGP23_UMACHANNELNUMBER, IGP23_MEMORYTYPE),
+        _ => return Err(-22),
+    };
+    let mut mem_channel_number = ctx.cu8(at + ch) as u32;
+    if mem_channel_number == 0 {
+        mem_channel_number = 1;
+    }
+    let mem_type = ctx.cu8(at + ty) as u32;
+    let mem_channel_width = if mem_type == LpDdr5MemType { 32 } else { 64 };
+    Ok((mem_channel_number * mem_channel_width, convert_atom_mem_type_to_vram_type(mem_type), 0))
+}

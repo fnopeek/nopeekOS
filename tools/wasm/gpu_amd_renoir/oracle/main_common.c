@@ -6,35 +6,8 @@
  * which a register never written reads SEED(reg), by the rule argv[2] names
  * (ones, zeros or hash), as the port's host check reads them; every write
  * is printed. */
-#include <linux/types.h>
-typedef u64 resource_size_t;
-#include "amdgpu_doorbell.h"
-
-struct amdgpu_device;
-/* The members of struct amdgpu_nbio_funcs (amdgpu_nbio.h) soc15_common_hw_init calls. */
-struct amdgpu_nbio_funcs {
-	void (*init_registers)(struct amdgpu_device *adev);
-	void (*remap_hdp_registers)(struct amdgpu_device *adev);
-	void (*enable_doorbell_aperture)(struct amdgpu_device *adev, bool enable);
-	void (*sdma_doorbell_range)(struct amdgpu_device *adev, int instance, bool use_doorbell,
-				    int doorbell_index, int doorbell_size);
-	void (*program_aspm)(struct amdgpu_device *adev);
-	u32 (*get_pcie_index_offset)(struct amdgpu_device *adev);
-	u32 (*get_pcie_data_offset)(struct amdgpu_device *adev);
-};
-#define ORACLE_GFX_FIELDS struct { void *funcs; int rlcg_reg_access_supported; } rlc;
-#define ORACLE_DEVICE_FIELDS \
-	u32 flags; \
-	struct { const struct amdgpu_nbio_funcs *funcs; } nbio; \
-	struct { u32 reg_offset; u64 bus_addr; } rmmio_remap; \
-	u64 rmmio_base; \
-	void *rmmio; \
-	u32 rmmio_size; \
-	int pcie_idx_lock; \
-	struct amdgpu_doorbell_index doorbell_index;
-#define main discovery_main
+#define ORACLE_DISCOVERY_LIBRARY
 #include "main_discovery.c"
-#undef main
 
 #include "soc15_common.h"
 #include "nbio/nbio_7_0_offset.h"
@@ -125,6 +98,7 @@ static const struct amdgpu_nbio_funcs nbio_v7_0_funcs = {
 	.get_pcie_data_offset = nbio_v7_0_get_pcie_data_offset,
 };
 
+#ifndef ORACLE_COMMON_LIBRARY
 int main(int argc, char **argv)
 {
 	static struct { u16 device; u8 revision; } pdev = { 0x164c, 0xc1 };
@@ -153,3 +127,4 @@ int main(int argc, char **argv)
 	printf("soc15_common_hw_init %d\n", r);
 	return 0;
 }
+#endif
