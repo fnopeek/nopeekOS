@@ -30,9 +30,21 @@ check() {
 check atom oracle_atom atom_check "$BIOS"
 check discovery oracle_discovery discovery_check "$DISC"
 check ucode oracle_ucode ucode_check "$FW"
+# Stage 2: the oracle reads the discovery binary, the port runs the whole
+# amdgpu_device_init on the fake card first.
+# Registers never written read all ones (a bit cleared shows), all zeros
+# (a field set shows) and a hash (mixed).
+rustc $RF "$HERE/common_check.rs" -o "$B/common_check"
+for seed in ones zeros hash; do
+    "$B/oracle_common" "$DISC" $seed > "$B/common_$seed.linux"
+    "$B/common_check" "$DISC" "$BIOS" "$FW" $seed > "$B/common_$seed.port"
+    if diff -u "$B/common_$seed.linux" "$B/common_$seed.port"; then
+        echo "common ($seed): port = Linux ($(wc -l < "$B/common_$seed.linux") lines)"
+    else
+        fail=1
+    fi
+done
 rustc $RF "$HERE/stage1_run.rs" -o "$B/stage1_run"
-echo "--- stage 1 on the host (the log the card run prints):"
+echo "--- the run on the host (the log the card run prints; a fake SMU answers OK):"
 "$B/stage1_run" "$DISC" "$BIOS" "$FW"
-echo "--- the same with gpu_amd_renoir.reset_on_init 1 (a fake SMU that answers OK):"
-gpu_amd_renoir__reset_on_init=1 "$B/stage1_run" "$DISC" "$BIOS" "$FW" | grep -E "reset|SMU|write reg|stage 1"
 exit $fail

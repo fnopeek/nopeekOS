@@ -95,8 +95,9 @@ Jede Stufe hat ein Ergebnis am Geraet. Reihenfolge = `amdgpu_device_init`.
 | **1b** ✅ gebaut, Host ✅ | `early_init` von gmc_v9_0, vega10_ih, psp_v12_0 (`psp_v12_0_init_microcode`: asd, ta v2), smu_v12_0 (renoir_ppt), dm (dmcub), gfx_v9_0 (pfp, me, ce, rlc v2.1, mec; keine mec2 auf GC 9.3.0), sdma_v4_0, vcn_v2_0, jpeg_v2_0; davor `amdgpu_device_set_mcbp` | Log: Microcode-Versionen, PSP-Ladeliste (10 ucode ids, fw_size), alle Bloecke `valid` |
 | **1c** ✅ gebaut, Host ✅ | `amdgpu_device_init` bis vor `amdgpu_device_ip_init`: Felder und `check_arguments`, `virt_init` (blankes Metall), `get_pcie_info` (Link-Faehigkeiten von GPU und vorgeschalteter Bridge, `drivers/pci`), Timeouts, `set_mcbp`, `ip_early_init`, TMZ, noretry, Atomics, `amdgpu_doorbell_init` (BAR2, `vega10_doorbell_index_init`), `need_post` (BIOS-Scratch 7), `get_clock_info`. Der **Reset beim Start** (`soc15_need_reset_on_init` ist fuer CHIP_RENOIR immer wahr: MODE2 ueber die SMU) wird entschieden und gemeldet, **nicht ausgefuehrt** | Log: PCIe-Rohwerte und Masken, Doorbells, Reset-Entscheid, Takte |
 | **1d** ✅ gebaut, Host ✅ | Der Reset beim Start: `soc15_asic_reset` → `amdgpu_dpm_mode2_reset` → `smu_mode2_reset` → `smu_v12_0_mode2_reset` → `smu_cmn_send_smc_msg_with_param` (Nachricht 30 aus `renoir_message_map`, Parameter 2; Antwortregister loeschen, Parameter, Nachricht, Antwort abwarten; die erste Nachricht nach dem Start fragt den alten Wert nicht ab). Nur mit `set gpu_amd_renoir.reset_on_init 1` (Kernel 0.646: `npk_config_get`, ein Modul liest nur `<modul>.*`). Auf dem Host mit einer Ersatz-SMU: genau drei Schreibzugriffe, C2PMSG_90=0, C2PMSG_82=2, C2PMSG_66=0x1e | Bild bleibt oder nicht; SMU antwortet OK |
-| 2 | `amdgpu_device_ip_init` Phase 1: COMMON (`soc15_common_hw_init`: NBIO-Register, Doorbell-Apertur), IH (`vega10_ih`, Ring im Systemspeicher, MSI) | IRQ-Ring laeuft, ein Interrupt kommt an |
-| 3 | GMC (`gmc_v9_0`: GART, GFXHUB/MMHUB v1, VMID 0), PSP 12 (`psp_v12_0`: Ring, ASD + TA laden, Firmware ueber den PSP), SMU 12 (`renoir_ppt`: Postfach, Takte, GFXOFF) | PSP meldet ASD geladen; SMU antwortet; GART-Seite lesbar |
+| **2** ✅ gebaut, Host ✅ | `amdgpu_device_ip_init` bis zum Ende des COMMON-Blocks: `amdgpu_ras_init` (CHIP_RENOIR ist keine RAS-ASIC: `ras_enabled = 0`, Kontext wieder weg), `soc15_common_sw_init` (`df_v1_7_sw_init`), sofort `soc15_common_hw_init` (APU: kein ASPM; `nbio_v7_0_init_registers` loescht Bit 23 von `RCC_DEV0_EPF6_STRAP4` — **ueber das PCIe-Index/Data-Paar**, es liegt jenseits von BAR5, deshalb jetzt `amdgpu_device_indirect_rreg/wreg`; HDP-Remap ins MMIO-Loch, Doorbell-Apertur an, SDMA0-Doorbell-Bereich). Dazu wird der **Reset beim Start Vorgabe** wie in Linux (Schalter entfaellt) | Log: die fuenf NBIO-Register vorher/nachher |
+| 3 | GMC: `gmc_v9_0_sw_init` (VRAM-Info, `amdgpu_bo_init` = TTM, VRAM- und GTT-Manager, GART-Tabelle), dann sofort `amdgpu_device_mem_scratch_init`, `gmc_v9_0_hw_init` (GART an, GFXHUB/MMHUB v1, VMID 0), `amdgpu_device_wb_init`, `amdgpu_seq64_init` | GART-Seite lesbar |
+| 3b | `sw_init` der uebrigen Bloecke (IH: Ring im Systemspeicher + `amdgpu_irq_init`, PSP, SMU, DM, GFX, SDMA, VCN, JPEG), `amdgpu_ib_pool_init`, `amdgpu_ucode_create_bo`, dann `hw_init_phase1` (COMMON, **IH**: `vega10_ih_irq_init` schaltet hier Bus-Mastering ein → GPU hinter AMD-Vi), `amdgpu_device_fw_loading` (PSP 12: Ring, ASD + TA, Firmware ueber den PSP; SMU 12) | IRQ-Ring laeuft; PSP meldet ASD geladen; SMU antwortet |
 | 4 | GFX 9 (`gfx_v9_0`: RLC, CP pfp/me/ce/mec ueber PSP, KIQ, GFX- und Compute-Ring), SDMA 4 (`sdma_v4_0`) | Ring-Test und IB-Test wie Linux (`amdgpu_ring_test_helper`), SDMA-Selbsttest — **GPU_STACK §9 Stufe 8** |
 | 5 | gpudev-Dienst: Kopie und Szenen wie bei Intel; Fences, GPUVM je Kontext | Desktop-Kopie per SDMA |
 | 6 | VCN 2.2 + JPEG 2.0 | Video-Engine-Ringtest |
@@ -157,6 +158,17 @@ Linux' eigenen Code, auf `vbios.bin` und `ip_discovery.bin` vom Geraet
   gfx_v9_0.c, amdgpu_sdma.c, sdma_v4_0.c, amdgpu_vcn.c, amdgpu_dm.c auf den
   bereitgestellten Firmware-Dateien: 45/45 Zeilen (Versionen, Offsets der
   Teil-Images, Hash ueber die RLC-Registerliste, PSP-Ladeliste, fw_size).
+
+- Viertes Orakel (`main_common.c`, Stufe 2): `soc15_common_hw_init` mit
+  den nbio_v7_0-Funktionen und `amdgpu_device_indirect_rreg/wreg`, auf den
+  Registerbasen, die `amdgpu_discovery_reg_base_init` aus dem
+  Discovery-Binary setzt. Die Ersatzkarte beider Seiten bildet das
+  PCIe-Index/Data-Paar als eigenen Registerraum nach. Ein nie
+  geschriebenes Register liest nach einer von drei Regeln — lauter Einsen
+  (ein geloeschtes Bit faellt auf), lauter Nullen (ein gesetztes Feld
+  faellt auf), ein Streuwert —, verglichen wird jeder Schreibzugriff: 3×9
+  Zeilen. Eine Mutation „Bit 22 statt 23" sieht nur die Einsen-Regel; mit
+  dem Streuwert allein (an beiden Bits 0) fiel sie nicht auf.
 
 **Grenze:** geprueft ist, was die Daten des Geraets durchlaufen. Die
 GC-Tabelle des Geraets ist v2.0 — eine Mutation im v1-Zweig faellt nicht

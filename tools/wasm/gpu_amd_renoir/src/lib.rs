@@ -1,12 +1,11 @@
 //! gpu_amd_renoir: AMD Renoir/Lucienne graphics, ported from Linux 6.18.55
 //! amdgpu.
 //!
-//! The port follows docs/plan/GPU_AMD_LINUX_MAP.md. This is stage 1
-//! (`stage1.rs`): `amdgpu_device_init` through `amdgpu_device_ip_early_init`,
-//! the early_init of every block with its microcode, then the card is given
-//! back. Nothing is written to the card but the MM_INDEX window VRAM
-//! is read through. hostcheck/check.sh holds the port against Linux's own
-//! code on the binaries read off the device.
+//! The port follows docs/plan/GPU_AMD_LINUX_MAP.md. This is stage 2
+//! (`stage1.rs`): `amdgpu_device_init` with the reset on init, then
+//! `amdgpu_device_ip_init` through the COMMON block, then the card is given
+//! back. hostcheck/check.sh holds the port against Linux's own code on the
+//! binaries read off the device.
 
 #![no_std]
 // Linux names are kept as they are (`amdgpu_device`, `mmMM_INDEX`), so a
@@ -23,6 +22,7 @@ mod amdgpu_device;
 mod amdgpu_discovery;
 mod amdgpu_dm;
 mod amdgpu_psp;
+mod amdgpu_ras;
 mod amdgpu_smu;
 mod amdgpu_ucode;
 mod atom;
@@ -77,7 +77,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 1: amdgpu_device_init up to amdgpu_device_ip_init").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2: amdgpu_device_ip_init through COMMON").say();
 
     match npk_sys::pci_bind(AMD_VENDOR as i32, LUCIENNE as i32) {
         0 => {}

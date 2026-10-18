@@ -1489,6 +1489,16 @@ pub const AMD_ASIC_MASK: u32 = 0xffff;
 pub const MAX_XCP: u32 = 0x8;
 /// ?
 pub const CHIP_RENOIR: u32 = 0x18;
+/// ?
+pub const CHIP_VEGA10: u32 = 0x13;
+/// ?
+pub const CHIP_VEGA20: u32 = 0x15;
+/// ?
+pub const CHIP_ARCTURUS: u32 = 0x17;
+/// ?
+pub const CHIP_ALDEBARAN: u32 = 0x19;
+/// ?
+pub const CHIP_SIENNA_CICHLID: u32 = 0x1e;
 /// amdgpu/amdgpu.h:946
 pub const AMDGPU_ENFORCE_ISOLATION_DISABLE: u32 = 0x0;
 /// amdgpu/amdgpu.h:947
@@ -1785,3 +1795,55 @@ pub const CMN2ASIC_MSG_MAPPING_map_to: u32 = 0x4;
 pub const CMN2ASIC_MSG_MAPPING_valid_mapping: u32 = 0x0;
 /// The value of `offsetof(struct cmn2asic_msg_mapping, flags)` in ../pm/swsmu/smu12/renoir_ppt.c
 pub const CMN2ASIC_MSG_MAPPING_flags: u32 = 0x8;
+
+// soc15_common_hw_init (nbio_v7_0.c, nbio_7_0_offset.h, nbio_7_0_sh_mask.h, kfd_ioctl.h)
+/// amdgpu/nbio_v7_0.c:273
+pub const regRCC_DEV0_EPF6_STRAP4: u32 = 0xd304;
+/// amdgpu/nbio_v7_0.c:274
+pub const regRCC_DEV0_EPF6_STRAP4_BASE_IDX: u32 = 0x5;
+/// include/asic_reg/bif/bif_5_0_d.h:153
+pub const mmREMAP_HDP_MEM_FLUSH_CNTL: u32 = 0x12d;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:910
+pub const mmREMAP_HDP_MEM_FLUSH_CNTL_BASE_IDX: u32 = 0x2;
+/// include/asic_reg/bif/bif_5_0_d.h:154
+pub const mmREMAP_HDP_REG_FLUSH_CNTL: u32 = 0x12e;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:912
+pub const mmREMAP_HDP_REG_FLUSH_CNTL_BASE_IDX: u32 = 0x2;
+/// ?
+pub const KFD_MMIO_REMAP_HDP_MEM_FLUSH_CNTL: u32 = 0x0;
+/// ?
+pub const KFD_MMIO_REMAP_HDP_REG_FLUSH_CNTL: u32 = 0x4;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:1159
+pub const mmRCC_DOORBELL_APER_EN: u32 = 0xc0;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:1160
+pub const mmRCC_DOORBELL_APER_EN_BASE_IDX: u32 = 0x2;
+/// include/asic_reg/nbio/nbio_7_0_sh_mask.h:117426
+pub const RCC_DOORBELL_APER_EN__BIF_DOORBELL_APER_EN_MASK: u32 = 0x1;
+/// include/asic_reg/nbif/nbif_6_1_sh_mask.h:3001
+pub const RCC_DOORBELL_APER_EN__BIF_DOORBELL_APER_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:363
+pub const mmBIF_SDMA0_DOORBELL_RANGE: u32 = 0x1d0;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:364
+pub const mmBIF_SDMA0_DOORBELL_RANGE_BASE_IDX: u32 = 0x2;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:365
+pub const mmBIF_SDMA1_DOORBELL_RANGE: u32 = 0x1d1;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:366
+pub const mmBIF_SDMA1_DOORBELL_RANGE_BASE_IDX: u32 = 0x2;
+/// include/asic_reg/nbio/nbio_2_3_sh_mask.h:2212
+pub const BIF_SDMA0_DOORBELL_RANGE__OFFSET_MASK: u32 = 0xffc;
+/// include/asic_reg/nbif/nbif_6_1_sh_mask.h:1283
+pub const BIF_SDMA0_DOORBELL_RANGE__OFFSET__SHIFT: u32 = 0x2;
+/// include/asic_reg/nbio/nbio_2_3_sh_mask.h:2213
+pub const BIF_SDMA0_DOORBELL_RANGE__SIZE_MASK: u32 = 0x1f0000;
+/// include/asic_reg/nbif/nbif_6_1_sh_mask.h:1284
+pub const BIF_SDMA0_DOORBELL_RANGE__SIZE__SHIFT: u32 = 0x10;
+
+// amdgpu_device_indirect_rreg/wreg through NBIO (nbio_v7_0.c, nbio_7_0_offset.h)
+/// include/asic_reg/nbif/nbif_6_1_offset.h:681
+pub const mmPCIE_INDEX2: u32 = 0xe;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:682
+pub const mmPCIE_INDEX2_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:683
+pub const mmPCIE_DATA2: u32 = 0xf;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:684
+pub const mmPCIE_DATA2_BASE_IDX: u32 = 0x0;

@@ -1,11 +1,10 @@
-//! Stage 1 of the port (docs/plan/GPU_AMD_LINUX_MAP.md §1): `amdgpu_device_init`
-//! up to `amdgpu_device_ip_init`, the reset on init decided but not taken. The IP
-//! discovery, the IP block list, `soc15_common_early_init`, the VBIOS from
-//! VFCT, `amdgpu_atombios_init`, and the early_init of the nine blocks
-//! after COMMON, which request and read their microcode, the doorbells, the
-//! PCIe caps, need_post and the clocks; then what it found, for the device
-//! log. Nothing is written to the card but the MM_INDEX window VRAM is read
-//! through.
+//! The run of the port (docs/plan/GPU_AMD_LINUX_MAP.md §1), up to stage 2:
+//! `amdgpu_device_init` with the IP discovery, the IP block list,
+//! `soc15_common_early_init`, the VBIOS from VFCT, `amdgpu_atombios_init`,
+//! the early_init of the nine blocks after COMMON (their microcode), the
+//! doorbells, the PCIe caps, the reset on init, need_post and the clocks;
+//! then `amdgpu_device_ip_init` through the COMMON block, whose hw_init
+//! writes the NBIO registers. What it found goes to the device log.
 
 use crate::amdgpu_device::{self as dev, amdgpu_device};
 use crate::atom::cstr;
@@ -15,12 +14,16 @@ use crate::regs;
 /// The stage on a bound card whose BAR5 is mapped; `bdf` is its bus
 /// address, `bar2` the doorbell BAR's bus address and length.
 pub fn run(adev: &mut amdgpu_device, bdf: (u8, u8, u8), bar2: (u64, u64)) {
+    if device_init(adev, bdf, bar2) {
+        ip_init_common(adev);
+    }
+}
+
+/// `amdgpu_device_init` up to `amdgpu_device_ip_init`, reported; true when
+/// it got there.
+pub fn device_init(adev: &mut amdgpu_device, bdf: (u8, u8, u8), bar2: (u64, u64)) -> bool {
     // amdgpu_pciidlist: 0x164C is CHIP_RENOIR | AMD_IS_APU
-    // `set gpu_amd_renoir.reset_on_init 1` takes the reset on init.
-    let mut v = [0u8; 8];
-    let n = npk_sys::config_get(b"gpu_amd_renoir.reset_on_init", &mut v);
-    let take_reset = n == 1 && v[0] == b'1';
-    let r = dev::amdgpu_device_init(adev, regs::CHIP_RENOIR | regs::AMD_IS_APU, bdf, bar2, take_reset);
+    let r = dev::amdgpu_device_init(adev, regs::CHIP_RENOIR | regs::AMD_IS_APU, bdf, bar2);
     if !adev.mman.discovery_bin.is_empty() {
         report_ip_versions(adev);
         compare_dc_bases(adev);
@@ -31,12 +34,47 @@ pub fn run(adev: &mut amdgpu_device, bdf: (u8, u8, u8), bar2: (u64, u64)) {
             report_microcode(adev);
             report_device_init(adev, &reset);
             let valid = adev.ip_blocks.iter().filter(|b| b.status.valid).count();
-            Line::new().s("stage 1c done: amdgpu_device_init up to amdgpu_device_ip_init, ")
+            Line::new().s("amdgpu_device_init up to amdgpu_device_ip_init, ")
                 .dec(adev.ip_blocks.len() as u64).s(" blocks, ").dec(valid as u64).s(" valid").say();
+            true
         }
         Err(e) => {
             Line::new().s("amdgpu_device_init failed (").dec((-e) as u64).s(")").say();
+            false
         }
+    }
+}
+
+/// The registers `soc15_common_hw_init` writes, read back.
+fn common_regs(adev: &amdgpu_device, l: &mut Line) {
+    use crate::nbio_v7_0::rreg32_soc15;
+    let rd = |idx, reg| rreg32_soc15(adev, regs::NBIO_HWIP, 0, idx, reg).unwrap_or(0);
+    l.s("strap4 ").hex(rd(regs::regRCC_DEV0_EPF6_STRAP4_BASE_IDX, regs::regRCC_DEV0_EPF6_STRAP4))
+        .s(", remap_hdp mem ").hex(rd(regs::mmREMAP_HDP_MEM_FLUSH_CNTL_BASE_IDX, regs::mmREMAP_HDP_MEM_FLUSH_CNTL))
+        .s(" reg ").hex(rd(regs::mmREMAP_HDP_REG_FLUSH_CNTL_BASE_IDX, regs::mmREMAP_HDP_REG_FLUSH_CNTL))
+        .s(", doorbell aper ").hex(rd(regs::mmRCC_DOORBELL_APER_EN_BASE_IDX, regs::mmRCC_DOORBELL_APER_EN))
+        .s(", sdma0 doorbell range ").hex(rd(regs::mmBIF_SDMA0_DOORBELL_RANGE_BASE_IDX, regs::mmBIF_SDMA0_DOORBELL_RANGE));
+}
+
+/// Stage 2: `amdgpu_device_ip_init` through the COMMON block.
+pub fn ip_init_common(adev: &mut amdgpu_device) {
+    let mut l = Line::new();
+    l.s("common before: ");
+    common_regs(adev, &mut l);
+    l.say();
+    let r = dev::amdgpu_device_ip_init_common(adev);
+    let mut l = Line::new();
+    l.s("common after:  ");
+    common_regs(adev, &mut l);
+    l.say();
+    Line::new().s("ras_hw_enabled ").hex(adev.ras_hw_enabled).s(", ras_enabled ").hex(adev.ras_enabled)
+        .s(", df hash 64k/2m/1g ").dec(adev.df_hash_status.hash_64k as u64).s("/")
+        .dec(adev.df_hash_status.hash_2m as u64).s("/").dec(adev.df_hash_status.hash_1g as u64).say();
+    if r == 0 {
+        Line::new().s("stage 2 done: amdgpu_device_ip_init through COMMON (sw ")
+            .dec(adev.ip_blocks[0].status.sw as u64).s(", hw ").dec(adev.ip_blocks[0].status.hw as u64).s(")").say();
+    } else {
+        Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
     }
 }
 
@@ -87,7 +125,7 @@ fn report_device_init(adev: &amdgpu_device, reset: &dev::reset_on_init) {
         match reset.taken {
             Some(0) => l.s("- taken, SMU answered OK"),
             Some(r) => l.s("- taken, failed ").dec((-r) as u64),
-            None => l.s("- not taken (set gpu_amd_renoir.reset_on_init 1 takes it)"),
+            None => l.s("- not taken"),
         };
     }
     l.say();

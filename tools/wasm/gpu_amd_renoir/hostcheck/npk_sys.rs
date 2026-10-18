@@ -28,7 +28,21 @@ pub fn fake_card_writes() -> Vec<(u32, u32)> {
     CARD.with(|c| c.borrow().as_ref().map_or(Vec::new(), |c| c.writes.clone()))
 }
 
+/// From here on a register never written reads `rule(reg)`, and the
+/// PCIe index/data pair (dword numbers) reaches a register space of its
+/// own, where an address never written reads `rule(address)`.
+pub fn fake_card_unset(rule: fn(u32) -> u32, index_data: (u32, u32)) {
+    UNSET.with(|u| *u.borrow_mut() = Some((rule, index_data)));
+}
+
+/// Forget the writes seen so far.
+pub fn fake_card_clear_writes() {
+    CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.writes.clear() });
+}
+
 thread_local! {
+    static UNSET: RefCell<Option<(fn(u32) -> u32, (u32, u32))>> = const { RefCell::new(None) };
+    static INDIRECT: RefCell<HashMap<u32, u32>> = RefCell::new(HashMap::new());
     static CARD: RefCell<Option<FakeCard>> = const { RefCell::new(None) };
     static ACPI: RefCell<Vec<([u8; 4], Vec<u8>)>> = const { RefCell::new(Vec::new()) };
 }
@@ -70,6 +84,14 @@ impl Mmio {
                 let pos = (hi << 31 | lo as u64).wrapping_sub(c.vram_base) as usize;
                 return c.vram.get(pos..pos + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
             }
+            let unset = UNSET.with(|u| *u.borrow());
+            if let Some((rule, (index, data))) = unset {
+                if reg == data {
+                    let a = c.regs.get(&index).copied().unwrap_or_else(|| rule(index));
+                    return INDIRECT.with(|i| i.borrow().get(&a).copied().unwrap_or_else(|| rule(a)));
+                }
+                return c.regs.get(&reg).copied().unwrap_or_else(|| rule(reg));
+            }
             c.regs.get(&reg).copied().unwrap_or(0)
         })
     }
@@ -78,8 +100,15 @@ impl Mmio {
         CARD.with(|c| {
             if let Some(c) = c.borrow_mut().as_mut() {
                 let reg = off / 4;
-                c.regs.insert(reg, v);
                 c.writes.push((reg, v));
+                if let Some((rule, (index, data))) = UNSET.with(|u| *u.borrow()) {
+                    if reg == data {
+                        let a = c.regs.get(&index).copied().unwrap_or_else(|| rule(index));
+                        INDIRECT.with(|i| i.borrow_mut().insert(a, v));
+                        return;
+                    }
+                }
+                c.regs.insert(reg, v);
                 let answers: Vec<(u32, u32)> =
                     c.on_write.iter().filter(|w| w.0 == reg).map(|w| (w.1, w.2)).collect();
                 for (r, val) in answers {
@@ -140,7 +169,19 @@ pub fn config_get(key: &[u8], buf: &mut [u8]) -> i32 {
     }
 }
 
+thread_local! {
+    static QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether `log` prints; the previous setting.
+pub fn quiet(on: bool) -> bool {
+    QUIET.with(|q| q.replace(on))
+}
+
 pub fn log(b: &[u8]) {
+    if QUIET.with(|q| q.get()) {
+        return;
+    }
     let s = String::from_utf8_lossy(b);
     println!("{}", s.strip_prefix("[gpu_amd_renoir] ").unwrap_or(&s));
 }

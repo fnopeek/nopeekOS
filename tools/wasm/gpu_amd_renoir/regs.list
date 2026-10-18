@@ -743,6 +743,11 @@ AMDGPU_MAX_USEC_TIMEOUT @ amdgpu_device.c
 AMD_ASIC_MASK @ amdgpu_device.c
 MAX_XCP @ amdgpu_device.c
 CHIP_RENOIR @ amdgpu_device.c
+CHIP_VEGA10 @ amdgpu_device.c
+CHIP_VEGA20 @ amdgpu_device.c
+CHIP_ARCTURUS @ amdgpu_device.c
+CHIP_ALDEBARAN @ amdgpu_device.c
+CHIP_SIENNA_CICHLID @ amdgpu_device.c
 AMDGPU_ENFORCE_ISOLATION_DISABLE @ amdgpu_device.c
 AMDGPU_ENFORCE_ISOLATION_ENABLE @ amdgpu_device.c
 AMDGPU_ENFORCE_ISOLATION_ENABLE_LEGACY @ amdgpu_device.c
@@ -891,3 +896,29 @@ CMN2ASIC_MSG_MAPPING_SIZE = sizeof(struct cmn2asic_msg_mapping) @ ../pm/swsmu/sm
 CMN2ASIC_MSG_MAPPING_map_to = offsetof(struct cmn2asic_msg_mapping, map_to) @ ../pm/swsmu/smu12/renoir_ppt.c
 CMN2ASIC_MSG_MAPPING_valid_mapping = offsetof(struct cmn2asic_msg_mapping, valid_mapping) @ ../pm/swsmu/smu12/renoir_ppt.c
 CMN2ASIC_MSG_MAPPING_flags = offsetof(struct cmn2asic_msg_mapping, flags) @ ../pm/swsmu/smu12/renoir_ppt.c
+# soc15_common_hw_init (nbio_v7_0.c, nbio_7_0_offset.h, nbio_7_0_sh_mask.h, kfd_ioctl.h)
+regRCC_DEV0_EPF6_STRAP4 @ nbio_v7_0.c
+regRCC_DEV0_EPF6_STRAP4_BASE_IDX @ nbio_v7_0.c
+mmREMAP_HDP_MEM_FLUSH_CNTL @ nbio_v7_0.c
+mmREMAP_HDP_MEM_FLUSH_CNTL_BASE_IDX @ nbio_v7_0.c
+mmREMAP_HDP_REG_FLUSH_CNTL @ nbio_v7_0.c
+mmREMAP_HDP_REG_FLUSH_CNTL_BASE_IDX @ nbio_v7_0.c
+KFD_MMIO_REMAP_HDP_MEM_FLUSH_CNTL @ nbio_v7_0.c
+KFD_MMIO_REMAP_HDP_REG_FLUSH_CNTL @ nbio_v7_0.c
+mmRCC_DOORBELL_APER_EN @ nbio_v7_0.c
+mmRCC_DOORBELL_APER_EN_BASE_IDX @ nbio_v7_0.c
+RCC_DOORBELL_APER_EN__BIF_DOORBELL_APER_EN_MASK @ nbio_v7_0.c
+RCC_DOORBELL_APER_EN__BIF_DOORBELL_APER_EN__SHIFT @ nbio_v7_0.c
+mmBIF_SDMA0_DOORBELL_RANGE @ nbio_v7_0.c
+mmBIF_SDMA0_DOORBELL_RANGE_BASE_IDX @ nbio_v7_0.c
+mmBIF_SDMA1_DOORBELL_RANGE @ nbio_v7_0.c
+mmBIF_SDMA1_DOORBELL_RANGE_BASE_IDX @ nbio_v7_0.c
+BIF_SDMA0_DOORBELL_RANGE__OFFSET_MASK @ nbio_v7_0.c
+BIF_SDMA0_DOORBELL_RANGE__OFFSET__SHIFT @ nbio_v7_0.c
+BIF_SDMA0_DOORBELL_RANGE__SIZE_MASK @ nbio_v7_0.c
+BIF_SDMA0_DOORBELL_RANGE__SIZE__SHIFT @ nbio_v7_0.c
+# amdgpu_device_indirect_rreg/wreg through NBIO (nbio_v7_0.c, nbio_7_0_offset.h)
+mmPCIE_INDEX2 @ nbio_v7_0.c
+mmPCIE_INDEX2_BASE_IDX @ nbio_v7_0.c
+mmPCIE_DATA2 @ nbio_v7_0.c
+mmPCIE_DATA2_BASE_IDX @ nbio_v7_0.c

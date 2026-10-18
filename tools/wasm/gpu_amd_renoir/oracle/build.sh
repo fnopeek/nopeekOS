@@ -57,8 +57,22 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
     $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" dm_init_microcode
 } > "$B/ucode_extracted.c"
 
+{
+    $X "$L/include/uapi/linux/kfd_ioctl.h" kfd_mmio_remap
+    $X "$AMD/amdgpu/amdgpu.h" '#REG_FIELD_SHIFT' '#REG_FIELD_MASK' '#REG_SET_FIELD'
+    $X "$AMD/amdgpu/nbio_v7_0.c" '#regRCC_DEV0_EPF6_STRAP4' '#regRCC_DEV0_EPF6_STRAP4_BASE_IDX' '#MMIO_REG_HOLE_OFFSET' \
+        nbio_v7_0_set_reg_remap nbio_v7_0_init_registers nbio_v7_0_remap_hdp_registers \
+        nbio_v7_0_enable_doorbell_aperture nbio_v7_0_sdma_doorbell_range \
+        nbio_v7_0_get_pcie_index_offset nbio_v7_0_get_pcie_data_offset
+    $X "$AMD/amdgpu/amdgpu_device.c" amdgpu_device_should_use_aspm amdgpu_device_indirect_rreg \
+        amdgpu_device_indirect_wreg
+    $X "$AMD/amdgpu/vega10_reg_init.c" vega10_doorbell_index_init
+    $X "$AMD/amdgpu/soc15.c" soc15_program_aspm soc15_sdma_doorbell_range_init soc15_common_hw_init
+} > "$B/common_extracted.c"
+
 CF="-O0 -w -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
 gcc $CF -c "$B/atom.c" -o "$B/atom.o"
 gcc $CF "$HERE/main.c" "$B/atom.o" -o "$B/oracle_atom"
 gcc $CF "$HERE/main_discovery.c" -o "$B/oracle_discovery"
 gcc $CF -I "$AMD/display/include" "$HERE/main_ucode.c" -o "$B/oracle_ucode"
+gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_common.c" -o "$B/oracle_common"

@@ -91,6 +91,14 @@ pub struct amdgpu_ip_block_status {
     pub hang: bool,
 }
 
+/// `struct amdgpu_df_hash_status`.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct amdgpu_df_hash_status {
+    pub hash_64k: bool,
+    pub hash_2m: bool,
+    pub hash_1g: bool,
+}
+
 /// `struct amdgpu_ip_block`.
 pub struct amdgpu_ip_block {
     pub status: amdgpu_ip_block_status,
@@ -412,6 +420,12 @@ pub struct amdgpu_device {
     pub video_timeout: u64,
     /// `adev->init_lvl`, by the name of the level.
     pub init_lvl: &'static str,
+    /// `adev->pcie_rreg`/`pcie_wreg` are `amdgpu_device_indirect_*`.
+    pub pcie_reg_indirect: bool,
+    pub ras_hw_enabled: u32,
+    pub ras_enabled: u32,
+    /// `adev->df.hash_status`.
+    pub df_hash_status: amdgpu_df_hash_status,
     pub enforce_isolation: [u32; MAX_XCP as usize],
     pub virt: amdgpu_virt,
     pub have_atomics_support: bool,
@@ -501,6 +515,10 @@ impl amdgpu_device {
             sdma_timeout: 0,
             video_timeout: 0,
             init_lvl: "",
+            pcie_reg_indirect: false,
+            ras_hw_enabled: 0,
+            ras_enabled: 0,
+            df_hash_status: amdgpu_df_hash_status::default(),
             enforce_isolation: [0; MAX_XCP as usize],
             virt: amdgpu_virt::default(),
             have_atomics_support: false,
@@ -553,20 +571,25 @@ impl amdgpu_device {
 
     /// `amdgpu_device_rreg`: a register inside BAR5 is read there; one past
     /// it goes through the PCIe index/data pair (`adev->pcie_rreg`), which
-    /// NBIO provides once its IP block is set and is not ported yet.
+    /// `soc15_common_early_init` sets. None before that: Linux has
+    /// `amdgpu_invalid_rreg` there.
     pub fn rreg32(&self, reg: u32) -> Option<u32> {
         if (reg as u64) * 4 < self.rmmio_size as u64 {
             Some(self.rmmio.r32(reg * 4))
+        } else if self.pcie_reg_indirect {
+            amdgpu_device_indirect_rreg(self, reg.wrapping_mul(4))
         } else {
             None
         }
     }
 
-    /// `amdgpu_device_wreg`, the BAR5 part (see `rreg32`).
+    /// `amdgpu_device_wreg` (see `rreg32`).
     pub fn wreg32(&self, reg: u32, v: u32) -> bool {
         if (reg as u64) * 4 < self.rmmio_size as u64 {
             self.rmmio.w32(reg * 4, v);
             true
+        } else if self.pcie_reg_indirect {
+            amdgpu_device_indirect_wreg(self, reg.wrapping_mul(4), v)
         } else {
             false
         }
@@ -1088,11 +1111,9 @@ fn soc15_asic_reset(adev: &mut amdgpu_device) -> i32 {
 /// `amdgpu_device_init` up to `amdgpu_device_ip_init`, Renoir's path.
 /// `flags` is the pci id table's `CHIP_RENOIR | AMD_IS_APU`. The reset on
 /// init (`soc15_need_reset_on_init` is true for CHIP_RENOIR) is a MODE2
-/// reset through the SMU, the first write that changes the card's state
-/// while it drives the screen: taken only with `take_reset`, otherwise
-/// decided and returned.
-pub fn amdgpu_device_init(adev: &mut amdgpu_device, flags: u32, bdf: (u8, u8, u8), bar2: (u64, u64),
-                          take_reset: bool) -> Result<reset_on_init, i32>
+/// reset through the SMU; what it did is returned.
+pub fn amdgpu_device_init(adev: &mut amdgpu_device, flags: u32, bdf: (u8, u8, u8), bar2: (u64, u64))
+                          -> Result<reset_on_init, i32>
 {
     adev.shutdown = false;
     adev.flags = flags;
@@ -1190,7 +1211,7 @@ pub fn amdgpu_device_init(adev: &mut amdgpu_device, flags: u32, bdf: (u8, u8, u8
         method: soc15_asic_reset_method(adev),
         taken: None,
     };
-    if reset.needed && take_reset {
+    if reset.needed {
         // No XGMI hive, MP1 is not 13.0.10: amdgpu_asic_reset with
         // amdgpu_reset_method forced to NONE for the call.
         let r = soc15_asic_reset(adev);
@@ -1218,4 +1239,75 @@ pub fn amdgpu_device_init(adev: &mut amdgpu_device, flags: u32, bdf: (u8, u8, u8
 
     // amdgpu_fence_driver_sw_init: 0. drm_mode_config_init: DRM's.
     Ok(reset)
+}
+
+/// `amdgpu_ip_member_of_hwini`: the default init level has every block.
+fn amdgpu_ip_member_of_hwini(adev: &amdgpu_device, _block: u32) -> bool {
+    adev.init_lvl == "amdgpu_init_default"
+}
+
+/// `amdgpu_device_ip_init` up to the end of the COMMON block: RAS, then the
+/// sw_init of COMMON and, because it is COMMON, its hw_init right away
+/// ("need to do common hw init early so everything is set up for gmc").
+/// The loop stops before the GMC block, which is stage 3.
+pub fn amdgpu_device_ip_init_common(adev: &mut amdgpu_device) -> i32 {
+    let r = crate::amdgpu_ras::amdgpu_ras_init(adev);
+    if r != 0 {
+        return r;
+    }
+    for i in 0..adev.ip_blocks.len() {
+        if !adev.ip_blocks[i].status.valid {
+            continue;
+        }
+        let t = adev.ip_blocks[i].version.type_;
+        if t != AMD_IP_BLOCK_TYPE_COMMON {
+            break;
+        }
+        let r = crate::soc15::soc15_common_sw_init(adev);
+        if r != 0 {
+            Line::new().s("sw_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                .s("> failed ").dec((-r) as u64).say();
+            return r;
+        }
+        adev.ip_blocks[i].status.sw = true;
+        if !amdgpu_ip_member_of_hwini(adev, t) {
+            continue;
+        }
+        let r = crate::soc15::soc15_common_hw_init(adev);
+        if r != 0 {
+            Line::new().s("hw_init ").dec(i as u64).s(" failed ").dec((-r) as u64).say();
+            return r;
+        }
+        adev.ip_blocks[i].status.hw = true;
+    }
+    0
+}
+
+/// The PCIe index and data registers, `nbio.funcs->get_pcie_index_offset`
+/// and `get_pcie_data_offset`.
+fn pcie_index_data(adev: &amdgpu_device) -> Option<(u32, u32)> {
+    match adev.nbio_funcs? {
+        amdgpu_nbio_funcs::nbio_v7_0 => Some((
+            crate::nbio_v7_0::nbio_v7_0_get_pcie_index_offset(adev)?,
+            crate::nbio_v7_0::nbio_v7_0_get_pcie_data_offset(adev)?,
+        )),
+    }
+}
+
+/// `amdgpu_device_indirect_rreg`.
+pub fn amdgpu_device_indirect_rreg(adev: &amdgpu_device, reg_addr: u32) -> Option<u32> {
+    let (pcie_index, pcie_data) = pcie_index_data(adev)?;
+    adev.rmmio.w32(pcie_index * 4, reg_addr);
+    adev.rmmio.r32(pcie_index * 4);
+    Some(adev.rmmio.r32(pcie_data * 4))
+}
+
+/// `amdgpu_device_indirect_wreg`.
+pub fn amdgpu_device_indirect_wreg(adev: &amdgpu_device, reg_addr: u32, reg_data: u32) -> bool {
+    let Some((pcie_index, pcie_data)) = pcie_index_data(adev) else { return false };
+    adev.rmmio.w32(pcie_index * 4, reg_addr);
+    adev.rmmio.r32(pcie_index * 4);
+    adev.rmmio.w32(pcie_data * 4, reg_data);
+    adev.rmmio.r32(pcie_data * 4);
+    true
 }

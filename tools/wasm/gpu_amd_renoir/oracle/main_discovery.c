@@ -53,6 +53,9 @@ struct amdgpu_device {
 			u32 gc_tcc_size, gc_tcc_cache_line_size, gc_num_cu_per_sqc;
 		} config;
 		struct { u32 wave_front_size, max_waves_per_simd, max_scratch_slots_per_cu, lds_size; } cu_info;
+#ifdef ORACLE_GFX_FIELDS
+		ORACLE_GFX_FIELDS
+#endif
 	} gfx;
 	struct { u32 num_umc; u64 mall_size; u32 m_half_use; } gmc;
 	struct { u32 num_instances, sdma_mask; } sdma;
@@ -61,6 +64,9 @@ struct amdgpu_device {
 	struct { u32 inst_mask, harvest_config; } jpeg;
 	struct { u32 num_instances; } vpe;
 	struct { u32 harvest_config; } isp;
+#ifdef ORACLE_DEVICE_FIELDS
+	ORACLE_DEVICE_FIELDS
+#endif
 };
 
 static const char *bin_path;

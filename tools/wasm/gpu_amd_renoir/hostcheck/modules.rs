@@ -31,6 +31,8 @@ mod tables;
 mod amdgpu_dm;
 #[path = "../src/amdgpu_psp.rs"]
 mod amdgpu_psp;
+#[path = "../src/amdgpu_ras.rs"]
+mod amdgpu_ras;
 #[path = "../src/amdgpu_smu.rs"]
 mod amdgpu_smu;
 #[path = "../src/amdgpu_ucode.rs"]
