@@ -72,8 +72,62 @@ pub fn fake_card(card: FakeCard) {
 #[derive(Clone, Copy, Debug)]
 pub struct Mmio(pub i32);
 
+thread_local! {
+    /// Memory windows: Mmio(1..) and DMA buffers, by handle - 1.
+    static WINDOWS: RefCell<Vec<(u64, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn window(bus: u64, len: usize) -> i32 {
+    WINDOWS.with(|w| {
+        let mut w = w.borrow_mut();
+        w.push((bus, vec![0; len]));
+        w.len() as i32
+    })
+}
+
+fn win_r32(h: i32, off: u32) -> u32 {
+    WINDOWS.with(|w| {
+        let w = w.borrow();
+        let b = &w[h as usize - 1].1;
+        b.get(off as usize..off as usize + 4).map_or(0, |x| u32::from_le_bytes(x.try_into().unwrap()))
+    })
+}
+
+fn win_w32(h: i32, off: u32, v: u32) {
+    WINDOWS.with(|w| {
+        let mut w = w.borrow_mut();
+        let b = &mut w[h as usize - 1].1;
+        if let Some(x) = b.get_mut(off as usize..off as usize + 4) {
+            x.copy_from_slice(&v.to_le_bytes());
+        }
+    })
+}
+
+/// The bytes of a memory window, for a check that reads what was written.
+pub fn window_bytes(h: i32) -> Vec<u8> {
+    WINDOWS.with(|w| w.borrow()[h as usize - 1].1.clone())
+}
+
 impl Mmio {
+    /// `pages` pages of physical memory at `phys`: a window of zeroes.
+    pub fn map_phys(phys: u64, pages: i32) -> Option<Mmio> {
+        (pages > 0).then(|| Mmio(window(phys, pages as usize * 4096)))
+    }
+
+    /// BAR `bar` of the card: a window of zeroes.
+    pub fn map_bar(_bar: i32, pages: i32) -> Option<Mmio> {
+        (pages > 0).then(|| Mmio(window(0, pages as usize * 4096)))
+    }
+
+    pub fn writeq(self, off: u32, v: u64) {
+        self.w32(off, v as u32);
+        self.w32(off + 4, (v >> 32) as u32);
+    }
+
     pub fn r32(self, off: u32) -> u32 {
+        if self.0 != 0 {
+            return win_r32(self.0, off);
+        }
         CARD.with(|c| {
             let c = c.borrow();
             let Some(c) = c.as_ref() else { return 0 };
@@ -97,6 +151,9 @@ impl Mmio {
     }
 
     pub fn w32(self, off: u32, v: u32) {
+        if self.0 != 0 {
+            return win_w32(self.0, off, v);
+        }
         CARD.with(|c| {
             if let Some(c) = c.borrow_mut().as_mut() {
                 let reg = off / 4;
@@ -186,8 +243,44 @@ pub fn log(b: &[u8]) {
     println!("{}", s.strip_prefix("[gpu_amd_renoir] ").unwrap_or(&s));
 }
 
-pub fn sys_info(_key: i32) -> i64 {
-    0
+/// `npk_sys_info`: key 2 is the RAM in MB, as the IdeaPad has it.
+pub fn sys_info(key: i32) -> i64 {
+    if key == 2 { 15_360 } else { 0 }
+}
+
+/// A DMA buffer: a memory window with a made-up bus address.
+#[derive(Clone, Copy, Debug)]
+pub struct Dma {
+    pub handle: i32,
+    pub phys: u64,
+}
+
+thread_local! {
+    static NEXT_BUS: std::cell::Cell<u64> = const { std::cell::Cell::new(0x1_0000_0000) };
+}
+
+impl Dma {
+    pub fn alloc(pages: i32) -> Option<Dma> {
+        if pages <= 0 {
+            return None;
+        }
+        let phys = NEXT_BUS.with(|n| {
+            let p = n.get();
+            n.set(p + pages as u64 * 4096);
+            p
+        });
+        Some(Dma { handle: window(phys, pages as usize * 4096), phys })
+    }
+
+    pub fn free(self) {}
+
+    pub fn r32(self, off: u32) -> u32 {
+        win_r32(self.handle, off)
+    }
+
+    pub fn w32(self, off: u32, v: u32) {
+        win_w32(self.handle, off, v)
+    }
 }
 
 pub fn now_us() -> i64 {

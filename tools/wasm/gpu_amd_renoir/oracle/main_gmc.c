@@ -38,7 +38,7 @@ static int fls64(u64 x) { return x ? 64 - __builtin_clzll(x) : 0; }
 static u64 roundup_pow_of_two(u64 x) { return 1ULL << fls64(x - 1); }
 #define ilog2(x) (63 - __builtin_clzll(x))
 struct sysinfo { unsigned long totalram; unsigned int mem_unit; };
-/* The port's host stub reports no RAM, as here. */
+/* Any RAM below 87 TiB clamps vm_size to its minimum, so none will do. */
 static void si_meminfo(struct sysinfo *si) { si->totalram = 0; si->mem_unit = 1; }
 #define kcalloc(n, s, f) calloc(n, s)
 #define spin_lock_init(l) ((void)0)

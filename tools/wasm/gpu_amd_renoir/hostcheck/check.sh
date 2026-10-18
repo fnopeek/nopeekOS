@@ -65,6 +65,15 @@ else
     fail=1
 fi
 rustc $RF "$HERE/stage1_run.rs" -o "$B/stage1_run"
+"$B/stage1_run" "$DISC" "$BIOS" "$FW" > "$B/run.log"
+# The VRAM requests of the run itself, through Linux's VRAM manager.
+grep -E '^(vram |  block )' "$B/run.log" > "$B/run_vram.port" || true
+grep -E '^vram ' "$B/run.log" | "$B/oracle_vram" 0x20000000 0x20000000 > "$B/run_vram.linux"
+if diff -u "$B/run_vram.linux" "$B/run_vram.port"; then
+    echo "run vram: port = Linux ($(grep -c '^vram' "$B/run_vram.linux") requests)"
+else
+    fail=1
+fi
 echo "--- the run on the host (the log the card run prints; a fake SMU answers OK):"
-"$B/stage1_run" "$DISC" "$BIOS" "$FW"
+grep -vE '^(vram |  block )' "$B/run.log"
 exit $fail

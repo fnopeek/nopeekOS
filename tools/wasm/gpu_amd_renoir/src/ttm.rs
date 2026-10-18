@@ -77,3 +77,42 @@ impl ttm_resource_manager {
         self.usage = 0;
     }
 }
+
+/// `struct ttm_tt` with `struct amdgpu_ttm_tt`: the system pages behind a
+/// TT buffer. The pool hands out one physically contiguous DMA buffer per
+/// TT, so `dma_address[i]` is its bus address plus `i` pages.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ttm_tt {
+    pub num_pages: u64,
+    pub page_flags: u32,
+    pub caching: ttm_caching,
+    pub populated: bool,
+    /// The pages: the DMA buffer's handle and bus address.
+    pub dma: Option<(i32, u64)>,
+    /// `amdgpu_ttm_tt.offset`: the GART offset, or AMDGPU_BO_INVALID_OFFSET.
+    pub offset: u64,
+    pub bound: bool,
+}
+
+impl ttm_tt {
+    /// `ttm->dma_address[i]`.
+    pub fn dma_address(&self, i: u64) -> u64 {
+        self.dma.map_or(0, |(_, phys)| phys + (i << 12))
+    }
+}
+
+/// `struct ttm_buffer_object`, the part kernel buffers use.
+#[derive(Clone, Debug, Default)]
+pub struct ttm_buffer_object {
+    /// `base.size`.
+    pub size: u64,
+    pub type_: u32,
+    pub page_alignment: u32,
+    pub priority: u32,
+    pub pin_count: u32,
+    pub resource: Option<ttm_resource>,
+    pub ttm: Option<ttm_tt>,
+}
+
+/// `struct ttm_placement`.
+pub type ttm_placement = Vec<ttm_place>;

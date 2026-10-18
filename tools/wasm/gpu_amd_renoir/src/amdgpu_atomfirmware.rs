@@ -171,3 +171,26 @@ pub fn amdgpu_atomfirmware_get_vram_info(adev: &amdgpu_device) -> Result<(u32, u
     let mem_channel_width = if mem_type == LpDdr5MemType { 32 } else { 64 };
     Ok((mem_channel_number * mem_channel_width, convert_atom_mem_type_to_vram_type(mem_type), 0))
 }
+
+/// `amdgpu_atomfirmware_mem_training_supported`.
+pub fn amdgpu_atomfirmware_mem_training_supported(adev: &amdgpu_device) -> bool {
+    adev.mode_info.firmware_flags & ATOM_FIRMWARE_CAP_ENABLE_2STAGE_BIST_TRAINING != 0
+}
+
+/// `amdgpu_atomfirmware_get_fw_reserved_fb_size`.
+pub fn amdgpu_atomfirmware_get_fw_reserved_fb_size(adev: &amdgpu_device) -> i32 {
+    let Some(ctx) = adev.mode_info.atom_context.as_ref() else { return 0 };
+    let Some(h) = amdgpu_atom_parse_data_header(ctx, IDX_firmwareinfo) else {
+        // fail to parse data_header
+        return 0;
+    };
+    if h.frev != 3 {
+        return -22;
+    }
+    let at = h.data_start as u32;
+    match h.crev {
+        4 => (ctx.cu32(at + FWI34_FW_RESERVED_SIZE_IN_KB) << 10) as i32,
+        5 => (ctx.cu32(at + FWI35_FW_RESERVED_SIZE_IN_KB) << 10) as i32,
+        _ => 0,
+    }
+}

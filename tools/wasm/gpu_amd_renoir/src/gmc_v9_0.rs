@@ -203,3 +203,162 @@ pub fn gmc_v9_0_sw_init_layout(adev: &mut amdgpu_device) -> i32 {
     crate::amdgpu_gmc::amdgpu_gmc_get_vbios_allocations(adev);
     0
 }
+
+/// `gmc_v9_0_use_invalidate_semaphore`: the MMHUB of anything but a
+/// Picasso, on bare metal.
+fn gmc_v9_0_use_invalidate_semaphore(adev: &amdgpu_device, vmhub: u32) -> bool {
+    if adev.ip_version(GC_HWIP, 0) == 9 << 24 | 4 << 16 | 2 << 8 || adev.aid_mask != 0 {
+        return false;
+    }
+    vmhub == AMDGPU_MMHUB0_0
+        && !(adev.apu_flags & AMD_APU_IS_RAVEN2 == 0 && adev.apu_flags & AMD_APU_IS_PICASSO != 0)
+}
+
+/// `REG_SET_FIELD`.
+fn set_field(v: u32, mask: u32, shift: u32, f: u32) -> u32 {
+    (v & !mask) | (mask & (f << shift))
+}
+
+/// `gmc_v9_0_get_invalidate_req`.
+fn gmc_v9_0_get_invalidate_req(vmid: u32, flush_type: u32) -> u32 {
+    let mut req = 0;
+    req = set_field(req, VM_INVALIDATE_ENG0_REQ__PER_VMID_INVALIDATE_REQ_MASK,
+        VM_INVALIDATE_ENG0_REQ__PER_VMID_INVALIDATE_REQ__SHIFT, 1 << vmid);
+    req = set_field(req, VM_INVALIDATE_ENG0_REQ__FLUSH_TYPE_MASK, VM_INVALIDATE_ENG0_REQ__FLUSH_TYPE__SHIFT, flush_type);
+    req = set_field(req, VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PTES_MASK, VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PTES__SHIFT, 1);
+    req = set_field(req, VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE0_MASK, VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE0__SHIFT, 1);
+    req = set_field(req, VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE1_MASK, VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE1__SHIFT, 1);
+    req = set_field(req, VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE2_MASK, VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE2__SHIFT, 1);
+    req = set_field(req, VM_INVALIDATE_ENG0_REQ__INVALIDATE_L1_PTES_MASK, VM_INVALIDATE_ENG0_REQ__INVALIDATE_L1_PTES__SHIFT, 1);
+    set_field(req, VM_INVALIDATE_ENG0_REQ__CLEAR_PROTECTION_FAULT_STATUS_ADDR_MASK,
+        VM_INVALIDATE_ENG0_REQ__CLEAR_PROTECTION_FAULT_STATUS_ADDR__SHIFT, 0)
+}
+
+/// `gmc_v9_0_flush_gpu_tlb`, the MMIO path (before KIQ/MES/GFXOFF). The
+/// hub's registers are absolute (`*_IP_NO_KIQ` with one GC instance).
+pub fn gmc_v9_0_flush_gpu_tlb(adev: &mut amdgpu_device, vmid: u32, vmhub: u32, flush_type: u32) {
+    let use_semaphore = gmc_v9_0_use_invalidate_semaphore(adev, vmhub);
+    const ENG: u32 = 17;
+    let hub = adev.vmhub[vmhub as usize];
+    let inv_req = gmc_v9_0_get_invalidate_req(vmid, flush_type);
+    let sem = hub.vm_inv_eng0_sem + hub.eng_distance * ENG;
+    let req = hub.vm_inv_eng0_req + hub.eng_distance * ENG;
+    let ack = hub.vm_inv_eng0_ack + hub.eng_distance * ENG;
+    // It may lose gpuvm invalidate acknowldege state across power-gating
+    // off cycle, add semaphore acquire before invalidation and semaphore
+    // release after invalidation to avoid entering power gated state to
+    // WA the Issue
+    if use_semaphore {
+        let mut j = 0;
+        while j < adev.usec_timeout {
+            // a read return value of 1 means semaphore acquire
+            if adev.rreg32(sem).unwrap_or(0) & 1 != 0 {
+                break;
+            }
+            crate::linux::udelay(1);
+            j += 1;
+        }
+        if j >= adev.usec_timeout {
+            crate::linux::Line::new().s("Timeout waiting for sem acquire in VM flush!").say();
+        }
+    }
+    adev.wreg32(req, inv_req);
+    // Issue a dummy read to wait for the ACK register to be cleared to
+    // avoid a false ACK due to the new fast GRBM interface.
+    if vmhub == AMDGPU_GFXHUB_0 && adev.ip_version(GC_HWIP, 0) < 9 << 24 | 4 << 16 | 2 << 8 {
+        adev.rreg32(req);
+    }
+    let mut j = 0;
+    while j < adev.usec_timeout {
+        if adev.rreg32(ack).unwrap_or(0) & (1 << vmid) != 0 {
+            break;
+        }
+        crate::linux::udelay(1);
+        j += 1;
+    }
+    if use_semaphore {
+        // add semaphore release after invalidation, write with 0 means
+        // semaphore release
+        adev.wreg32(sem, 0);
+    }
+    if j < adev.usec_timeout {
+        return;
+    }
+    crate::linux::Line::new().s("Timeout waiting for VM flush ACK!").say();
+}
+
+/// `gmc_v9_0_gart_init`: not pdb0; the table lives in VRAM.
+fn gmc_v9_0_gart_init(adev: &mut amdgpu_device) -> i32 {
+    if adev.gart.bo.is_some() {
+        crate::linux::Line::new().s("VEGA10 PCIE GART already initialized").say();
+        return 0;
+    }
+    adev.gmc.vmid0_page_table_depth = 0;
+    adev.gmc.vmid0_page_table_block_size = 0;
+    // Initialize common gart structure
+    let r = crate::amdgpu_gart::amdgpu_gart_init(adev);
+    if r != 0 {
+        return r;
+    }
+    adev.gart.table_size = adev.gart.num_gpu_pages as u64 * 8;
+    adev.gart.gart_pte_flags = AMDGPU_GART_PTE_FLAGS_UC;
+    crate::amdgpu_gart::amdgpu_gart_table_vram_alloc(adev)
+}
+
+/// `amdgpu_vm_manager_init` (amdgpu_vm.c) with `amdgpu_vmid_mgr_init`.
+fn amdgpu_vm_manager_init(adev: &mut amdgpu_device) {
+    // Concurrent flushes are only possible starting with Vega10 and are
+    // broken on Navi10 and Navi14.
+    adev.vm_manager.concurrent_flush =
+        !(adev.asic_type < CHIP_VEGA10 || adev.asic_type == CHIP_NAVI10 || adev.asic_type == CHIP_NAVI14);
+    for i in 0..AMDGPU_MAX_VMHUBS as usize {
+        // for GC <10, SDMA uses MMHUB so use first_kfd_vmid for both GC and
+        // MM: manage only VMIDs not used by KFD
+        adev.vm_manager.num_ids[i] = adev.vm_manager.first_kfd_vmid;
+    }
+    // CONFIG_X86_64: only in large BAR systems Compute VM tables will be
+    // updated by CPU.
+    if crate::tables::amdgpu_vm_update_mode[0] == -1 {
+        adev.vm_manager.vm_update_mode =
+            if adev.gmc.visible_vram_size >= adev.gmc.real_vram_size { AMDGPU_VM_USE_CPU_FOR_COMPUTE } else { 0 };
+    } else {
+        adev.vm_manager.vm_update_mode = crate::tables::amdgpu_vm_update_mode[0] as u32;
+    }
+}
+
+/// `amdgpu_gmc_ras_sw_init` (amdgpu_gmc.c): Renoir has HDP and XGMI RAS
+/// funcs (gmc_v9_0_early_init), no UMC, MMHUB or MCA ones.
+fn amdgpu_gmc_ras_sw_init(adev: &mut amdgpu_device) -> i32 {
+    if adev.hdp_ras.is_some() {
+        adev.ras_list.push("hdp");
+    }
+    if adev.gmc.xgmi.ras.is_some() {
+        adev.ras_list.push("xgmi_wafl");
+    }
+    0
+}
+
+/// `gmc_v9_0_sw_init`.
+pub fn gmc_v9_0_sw_init(adev: &mut amdgpu_device) -> i32 {
+    let r = gmc_v9_0_sw_init_layout(adev);
+    if r != 0 {
+        return r;
+    }
+    // Memory manager
+    let r = crate::amdgpu_object::amdgpu_bo_init(adev);
+    if r != 0 {
+        return r;
+    }
+    let r = gmc_v9_0_gart_init(adev);
+    if r != 0 {
+        return r;
+    }
+    // gmc_v9_0_init_nps_details: an APU has no NPS modes.
+    // number of VMs: VMID 0 is reserved for System, amdgpu graphics/compute
+    // will use VMIDs 1..n-1, amdkfd will use VMIDs n..15. The first KFD VMID
+    // is 8 for GPUs with graphics.
+    adev.vm_manager.first_kfd_vmid = 8;
+    amdgpu_vm_manager_init(adev);
+    // gmc_v9_0_save_registers: DCE 1.0.x only.
+    amdgpu_gmc_ras_sw_init(adev)
+}

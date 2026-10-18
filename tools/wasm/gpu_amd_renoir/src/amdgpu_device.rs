@@ -20,8 +20,9 @@ use npk_sys::Mmio;
 pub const MAX_HWIP: usize = crate::regs::MAX_HWIP as usize;
 pub const HWIP_MAX_INSTANCE: usize = crate::regs::HWIP_MAX_INSTANCE as usize;
 
-/// `struct amdgpu_mman`, the part `amdgpu_discovery_init` and
-/// `amdgpu_atomfirmware_allocate_fb_scratch` fill.
+/// `struct amdgpu_mman`: what discovery and atomfirmware fill, and the
+/// buffer objects with their managers.
+#[derive(Default)]
 pub struct amdgpu_mman {
     pub discovery_tmr_size: u32,
     pub discovery_bin: Vec<u8>,
@@ -36,6 +37,27 @@ pub struct amdgpu_mman {
     pub stolen_extended_size: u64,
     pub buffer_funcs: Option<&'static str>,
     pub buffer_funcs_ring: Option<&'static str>,
+    pub initialized: bool,
+    pub buffer_funcs_enabled: bool,
+    /// The resource managers by placement (`bdev->man_drv`).
+    pub vram_mgr: Option<crate::amdgpu_vram_mgr::amdgpu_vram_mgr>,
+    pub gtt_mgr: Option<crate::amdgpu_ttm::amdgpu_gtt_mgr>,
+    pub preempt_mgr: Option<crate::ttm::ttm_resource_manager>,
+    /// `ttm_range_man_init` managers, by mem_type (doorbell, MMIO remap, GDS, GWS, OA).
+    pub range_mgrs: alloc::vec::Vec<(u32, crate::ttm::ttm_resource_manager, crate::drm_mm::drm_mm)>,
+    /// The system manager TTM always has.
+    pub sys_mgr: crate::ttm::ttm_resource_manager,
+    /// Every buffer object, by handle.
+    pub bos: alloc::vec::Vec<Option<crate::amdgpu_object::amdgpu_bo>>,
+    /// `aper_base_kaddr`: the stolen memory, mapped.
+    pub aper_base_kaddr: Option<npk_sys::Mmio>,
+    pub fw_vram_usage_reserved_bo: Option<usize>,
+    pub drv_vram_usage_reserved_bo: Option<usize>,
+    pub fw_reserved_memory: Option<usize>,
+    pub stolen_vga_memory: Option<usize>,
+    pub stolen_extended_memory: Option<usize>,
+    pub stolen_reserved_memory: Option<usize>,
+    pub sdma_access_bo: Option<usize>,
 }
 
 /// `struct amdgpu_mode_info`, the ATOM part and what DM sets.
@@ -135,6 +157,8 @@ pub struct amdgpu_doorbell {
     pub base: u64,
     pub size: u64,
     pub num_kernel_doorbells: u32,
+    pub kernel_doorbells: Option<usize>,
+    pub cpu_addr: Option<crate::amdgpu_object::amdgpu_kptr>,
 }
 
 /// `struct amdgpu_doorbell_index`, as `vega10_doorbell_index_init` fills it.
@@ -177,6 +201,7 @@ pub struct amdgpu_doorbell_index {
 pub struct amdgpu_mmio_remap {
     pub reg_offset: u32,
     pub bus_addr: u64,
+    pub bo: Option<usize>,
 }
 
 /// `struct amdgpu_gfx_config`, the part the GC info table fills.
@@ -364,6 +389,10 @@ pub struct amdgpu_vm_manager {
     pub fragment_size: u32,
     pub vram_base_offset: u64,
     pub first_kfd_vmid: u32,
+    pub concurrent_flush: bool,
+    pub vm_update_mode: u32,
+    /// `id_mgr[hub].num_ids`.
+    pub num_ids: [u32; AMDGPU_MAX_VMHUBS as usize],
 }
 
 /// `struct amdgpu_sdma`.
@@ -482,6 +511,15 @@ pub struct amdgpu_device {
     pub vmhub: [amdgpu_vmhub; AMDGPU_MAX_VMHUBS as usize],
     pub vmhubs_mask: u64,
     pub need_swiotlb: bool,
+    pub gart: crate::amdgpu_gart::amdgpu_gart,
+    pub dummy_page_addr: u64,
+    /// BAR2 mapped, for the doorbell buffer's kernel mapping.
+    pub doorbell_mmio: Option<npk_sys::Mmio>,
+    pub apu_prefer_gtt: bool,
+    /// `adev->ras_list`: the RAS blocks registered, by name.
+    pub ras_list: Vec<&'static str>,
+    /// `adev->mes.db_start_dw_offset`.
+    pub mes_db_start_dw_offset: u32,
     /// `pci_resource_start/len(pdev, 0)`: the VRAM BAR.
     pub bar0: (u64, u64),
     pub ras_enabled: u32,
@@ -545,21 +583,7 @@ impl amdgpu_device {
             apu_flags: 0,
             rmmio,
             rmmio_size,
-            mman: amdgpu_mman {
-                discovery_tmr_size: 0,
-                discovery_bin: Vec::new(),
-                fw_vram_usage_start_offset: 0,
-                fw_vram_usage_size: 0,
-                drv_vram_usage_start_offset: 0,
-                drv_vram_usage_size: 0,
-                stolen_reserved_offset: 0,
-                stolen_reserved_size: 0,
-                keep_stolen_vga_memory: false,
-                stolen_vga_size: 0,
-                stolen_extended_size: 0,
-                buffer_funcs: None,
-                buffer_funcs_ring: None,
-            },
+            mman: amdgpu_mman::default(),
             ip_versions: [[0; HWIP_MAX_INSTANCE]; MAX_HWIP],
             reg_offset: core::array::from_fn(|_| core::array::from_fn(|_| Vec::new())),
             harvest_ip_mask: 0,
@@ -586,6 +610,12 @@ impl amdgpu_device {
             vmhub: [amdgpu_vmhub::default(); AMDGPU_MAX_VMHUBS as usize],
             vmhubs_mask: 0,
             need_swiotlb: false,
+            gart: crate::amdgpu_gart::amdgpu_gart::default(),
+            dummy_page_addr: 0,
+            doorbell_mmio: None,
+            apu_prefer_gtt: false,
+            ras_list: Vec::new(),
+            mes_db_start_dw_offset: 0,
             bar0: (0, 0),
             ras_enabled: 0,
             df_hash_status: amdgpu_df_hash_status::default(),
@@ -1319,7 +1349,7 @@ fn amdgpu_ip_member_of_hwini(adev: &amdgpu_device, _block: u32) -> bool {
 /// `amdgpu_device_ip_init` up to the end of the COMMON block: RAS, then the
 /// sw_init of COMMON and, because it is COMMON, its hw_init right away
 /// ("need to do common hw init early so everything is set up for gmc").
-/// The loop stops before the GMC block, which is stage 3.
+/// The loop stops before the GMC block.
 pub fn amdgpu_device_ip_init_common(adev: &mut amdgpu_device) -> i32 {
     let r = crate::amdgpu_ras::amdgpu_ras_init(adev);
     if r != 0 {
@@ -1380,4 +1410,48 @@ pub fn amdgpu_device_indirect_wreg(adev: &amdgpu_device, reg_addr: u32, reg_data
     adev.rmmio.w32(pcie_data * 4, reg_data);
     adev.rmmio.r32(pcie_data * 4);
     true
+}
+
+/// `amdgpu_doorbell_create_kernel_doorbells` (amdgpu_doorbell_mgr.c).
+pub fn amdgpu_doorbell_create_kernel_doorbells(adev: &mut amdgpu_device) -> i32 {
+    // SI HW does not have doorbells, skip allocation
+    if adev.doorbell.num_kernel_doorbells == 0 {
+        return 0;
+    }
+    // Reserve first num_kernel_doorbells (page-aligned) for kernel ops
+    let mut size = crate::linux::align(adev.doorbell.num_kernel_doorbells as u64 * 4, 4096);
+    // Allocate an extra page for MES kernel usages (ring test)
+    adev.mes_db_start_dw_offset = (size / 4) as u32;
+    size += 4096;
+    match crate::amdgpu_object::amdgpu_bo_create_kernel(adev, size, 4096, AMDGPU_GEM_DOMAIN_DOORBELL, true) {
+        Ok(h) => {
+            adev.doorbell.kernel_doorbells = h;
+            adev.doorbell.cpu_addr = h.and_then(|h| crate::amdgpu_object::bo(adev, h).kptr);
+        }
+        Err(r) => {
+            Line::new().s("Failed to allocate kernel doorbells, err=").dec((-r) as u64).say();
+            return r;
+        }
+    }
+    adev.doorbell.num_kernel_doorbells = (size / 4) as u32;
+    0
+}
+
+/// `amdgpu_device_ip_init` from the GMC block on, as far as the port
+/// goes: GMC's sw_init.
+pub fn amdgpu_device_ip_init_gmc(adev: &mut amdgpu_device) -> i32 {
+    for i in 0..adev.ip_blocks.len() {
+        if !adev.ip_blocks[i].status.valid || adev.ip_blocks[i].version.type_ != AMD_IP_BLOCK_TYPE_GMC {
+            continue;
+        }
+        let r = crate::gmc_v9_0::gmc_v9_0_sw_init(adev);
+        if r != 0 {
+            Line::new().s("sw_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                .s("> failed ").dec((-r) as u64).say();
+            return r;
+        }
+        adev.ip_blocks[i].status.sw = true;
+        return 0;
+    }
+    -22
 }

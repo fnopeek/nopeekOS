@@ -149,3 +149,9 @@ pub static amdgpu_vram_limit: [i32; 1] = [-1];
 
 /// `amdgpu_agp` in amdgpu_drv.c
 pub static amdgpu_agp: [i32; 1] = [-1];
+
+/// `amdgpu_vram_names` in amdgpu_object.c
+pub static amdgpu_vram_names: [&[u8]; 14] = [b"UNKNOWN", b"GDDR1", b"DDR2", b"GDDR3", b"GDDR4", b"GDDR5", b"HBM", b"DDR3", b"DDR4", b"GDDR6", b"DDR5", b"LPDDR4", b"LPDDR5", b"HBM3E"];
+
+/// `amdgpu_vm_update_mode` in amdgpu_drv.c
+pub static amdgpu_vm_update_mode: [i32; 1] = [-1];

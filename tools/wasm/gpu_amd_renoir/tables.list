@@ -55,3 +55,7 @@ renoir_message_map: i32
 amdgpu_vis_vram_limit: i32
 amdgpu_vram_limit: i32
 amdgpu_agp: i32
+@ amdgpu_object.c
+amdgpu_vram_names: str
+@ amdgpu_drv.c
+amdgpu_vm_update_mode: i32

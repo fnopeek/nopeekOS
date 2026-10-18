@@ -70,12 +70,38 @@ pub fn ip_init_common(adev: &mut amdgpu_device) {
     Line::new().s("ras_hw_enabled ").hex(adev.ras_hw_enabled).s(", ras_enabled ").hex(adev.ras_enabled)
         .s(", df hash 64k/2m/1g ").dec(adev.df_hash_status.hash_64k as u64).s("/")
         .dec(adev.df_hash_status.hash_2m as u64).s("/").dec(adev.df_hash_status.hash_1g as u64).say();
-    if r == 0 {
-        Line::new().s("stage 2 done: amdgpu_device_ip_init through COMMON (sw ")
-            .dec(adev.ip_blocks[0].status.sw as u64).s(", hw ").dec(adev.ip_blocks[0].status.hw as u64).s(")").say();
-    } else {
+    if r != 0 {
         Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
+        return;
     }
+    Line::new().s("stage 2 done: amdgpu_device_ip_init through COMMON (sw ")
+        .dec(adev.ip_blocks[0].status.sw as u64).s(", hw ").dec(adev.ip_blocks[0].status.hw as u64).s(")").say();
+    ip_init_gmc(adev);
+}
+
+/// Stage 3a: the GMC block's sw_init.
+fn ip_init_gmc(adev: &mut amdgpu_device) {
+    let r = dev::amdgpu_device_ip_init_gmc(adev);
+    if r != 0 {
+        Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
+        return;
+    }
+    let g = &adev.gmc;
+    Line::new().s("gmc: vram ").hex64(g.vram_start).s("-").hex64(g.vram_end).s(" aper ").hex64(g.aper_base)
+        .s(" gart ").hex64(g.gart_start).say();
+    let mut l = Line::new();
+    l.s("gmc: gart table ");
+    match adev.gart.bo {
+        Some(h) => {
+            l.hex64(crate::amdgpu_object::amdgpu_bo_gpu_offset(adev, h)).s(" (").dec(adev.gart.table_size >> 10)
+                .s(" KiB)");
+        }
+        None => {
+            l.s("none");
+        }
+    }
+    l.s(", ").dec(adev.mman.bos.iter().flatten().count() as u64).s(" kernel buffers").say();
+    Line::new().s("stage 3a done: gmc_v9_0_sw_init").say();
 }
 
 /// The PCIe link registers `amdgpu_device_get_pcie_info` read, raw.

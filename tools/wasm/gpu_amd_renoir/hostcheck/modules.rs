@@ -67,3 +67,9 @@ mod ttm;
 mod drm_mm;
 #[path = "../src/amdgpu_vram_mgr.rs"]
 mod amdgpu_vram_mgr;
+#[path = "../src/amdgpu_object.rs"]
+mod amdgpu_object;
+#[path = "../src/amdgpu_ttm.rs"]
+mod amdgpu_ttm;
+#[path = "../src/amdgpu_gart.rs"]
+mod amdgpu_gart;

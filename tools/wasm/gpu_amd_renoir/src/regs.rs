@@ -2135,3 +2135,85 @@ pub const AMDGPU_BO_MAX_PLACEMENTS: u32 = 0x3;
 pub const AMDGPU_BO_INVALID_OFFSET: u64 = 0x7fffffffffffffff;
 /// amdgpu/amdgpu_vm.h:149
 pub const AMDGPU_VM_RESERVED_VRAM: u32 = 0x800000;
+
+// GART and the PTE flags (amdgpu_gart.h, amdgpu_vm.h, amdgpu_gtt_mgr.c, amdgpu_ttm.h, ttm_tt.h)
+/// amdgpu/amdgpu_gart.h:35
+pub const AMDGPU_GPU_PAGE_SIZE: u32 = 0x1000;
+/// amdgpu/amdgpu_gart.h:40
+pub const AMDGPU_GPU_PAGES_IN_CPU_PAGE: u32 = 0x1;
+/// amdgpu/amdgpu_ttm.h:40
+pub const AMDGPU_GTT_MAX_TRANSFER_SIZE: u32 = 0x200;
+/// amdgpu/amdgpu_ttm.h:41
+pub const AMDGPU_GTT_NUM_TRANSFER_WINDOWS: u32 = 0x2;
+/// amdgpu/amdgpu_vm.h:57
+pub const AMDGPU_PTE_VALID: u32 = 0x1;
+/// amdgpu/amdgpu_vm.h:58
+pub const AMDGPU_PTE_SYSTEM: u32 = 0x2;
+/// amdgpu/amdgpu_vm.h:59
+pub const AMDGPU_PTE_SNOOPED: u32 = 0x4;
+/// amdgpu/amdgpu_vm.h:65
+pub const AMDGPU_PTE_EXECUTABLE: u32 = 0x10;
+/// amdgpu/amdgpu_vm.h:67
+pub const AMDGPU_PTE_READABLE: u32 = 0x20;
+/// amdgpu/amdgpu_vm.h:68
+pub const AMDGPU_PTE_WRITEABLE: u32 = 0x40;
+/// amdgpu/amdgpu_vm.h:62
+pub const AMDGPU_PTE_TMZ: u32 = 0x8;
+/// ?
+pub const AMDGPU_GEM_CREATE_CP_MQD_GFX9: u32 = 0x100;
+/// The value of `AMDGPU_PTE_MTYPE_VG10(0ULL, MTYPE_UC) | AMDGPU_PTE_EXECUTABLE` in gmc_v9_0.c
+pub const AMDGPU_GART_PTE_FLAGS_UC: u64 = 0x600000000000010;
+/// ?
+pub const TTM_TT_FLAG_ZERO_ALLOC: u32 = 0x2;
+/// ?
+pub const TTM_TT_FLAG_EXTERNAL: u32 = 0x4;
+/// amdgpu/amdgpu_gmc.h:37
+pub const AMDGPU_GMC_HOLE_END: u64 = 0xffff800000000000;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7737
+pub const VM_INVALIDATE_ENG0_REQ__PER_VMID_INVALIDATE_REQ_MASK: u32 = 0xffff;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7729
+pub const VM_INVALIDATE_ENG0_REQ__PER_VMID_INVALIDATE_REQ__SHIFT: u32 = 0x0;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7738
+pub const VM_INVALIDATE_ENG0_REQ__FLUSH_TYPE_MASK: u32 = 0x30000;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7730
+pub const VM_INVALIDATE_ENG0_REQ__FLUSH_TYPE__SHIFT: u32 = 0x10;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7739
+pub const VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PTES_MASK: u32 = 0x40000;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7731
+pub const VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PTES__SHIFT: u32 = 0x12;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7740
+pub const VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE0_MASK: u32 = 0x80000;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7732
+pub const VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE0__SHIFT: u32 = 0x13;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7741
+pub const VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE1_MASK: u32 = 0x100000;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7733
+pub const VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE1__SHIFT: u32 = 0x14;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7742
+pub const VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE2_MASK: u32 = 0x200000;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7734
+pub const VM_INVALIDATE_ENG0_REQ__INVALIDATE_L2_PDE2__SHIFT: u32 = 0x15;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7743
+pub const VM_INVALIDATE_ENG0_REQ__INVALIDATE_L1_PTES_MASK: u32 = 0x400000;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7735
+pub const VM_INVALIDATE_ENG0_REQ__INVALIDATE_L1_PTES__SHIFT: u32 = 0x16;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7744
+pub const VM_INVALIDATE_ENG0_REQ__CLEAR_PROTECTION_FAULT_STATUS_ADDR_MASK: u32 = 0x800000;
+/// include/asic_reg/gc/gc_9_0_sh_mask.h:7736
+pub const VM_INVALIDATE_ENG0_REQ__CLEAR_PROTECTION_FAULT_STATUS_ADDR__SHIFT: u32 = 0x17;
+/// include/amd_shared.h:48
+pub const AMD_APU_IS_RAVEN2: u32 = 0x2;
+/// include/amd_shared.h:49
+pub const AMD_APU_IS_PICASSO: u32 = 0x4;
+/// include/atomfirmware.h:509
+pub const ATOM_FIRMWARE_CAP_ENABLE_2STAGE_BIST_TRAINING: u32 = 0x400;
+/// The value of `offsetof(struct atom_firmware_info_v3_4, fw_reserved_size_in_kb)` in amdgpu_atomfirmware.c
+pub const FWI34_FW_RESERVED_SIZE_IN_KB: u32 = 0x54;
+/// The value of `offsetof(struct atom_firmware_info_v3_5, fw_reserved_size_in_kb)` in amdgpu_atomfirmware.c
+pub const FWI35_FW_RESERVED_SIZE_IN_KB: u32 = 0x54;
+/// amdgpu/amdgpu_vm.h:185
+pub const AMDGPU_VM_USE_CPU_FOR_COMPUTE: u32 = 0x2;
+/// ?
+pub const CHIP_NAVI10: u32 = 0x1a;
+/// ?
+pub const CHIP_NAVI14: u32 = 0x1c;
