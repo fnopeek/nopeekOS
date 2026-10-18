@@ -1217,13 +1217,16 @@ pub(crate) fn is_own_private(name: &str, module: &str) -> bool {
     !module.is_empty() && private_area_owner(name) == Some(module)
 }
 
-/// True if `name` targets the module store (`sys/wasm/…`) or the trust
-/// store (`sys/certs/…`) — the two directories where a write is a
-/// privilege escalation rather than a file operation.
+/// True if `name` targets the module store (`sys/wasm/…`), the trust
+/// store (`sys/certs/…`) or the firmware store (`sys/firmware/…`) — the
+/// directories where a write is a privilege escalation rather than a file
+/// operation.
 ///
 /// Modules are not re-verified at launch, so an app that could overwrite a
 /// module (or plant one with caps=ALL) would escalate to arbitrary rights.
-/// A file under `sys/certs/` becomes a root CA the whole system honours.
+/// A file under `sys/certs/` becomes a root CA the whole system honours. A
+/// file under `sys/firmware/` runs on a device's own processors, past the
+/// signature its driver was installed with.
 /// The install/update intents reach npkFS directly, not through these host
 /// functions. The paths layer rejects `.`/`..` segments, so after trimming
 /// slashes a literal prefix is the only way to land in either store.
@@ -1235,8 +1238,9 @@ fn is_trust_critical_path(name: &str) -> bool {
     // Prefix match on a path segment — a plain `starts_with` would also
     // catch a sibling like `sys/certsomething`, and missing the trailing
     // separator is how this class of guard usually leaks.
-    let certs = crate::tls::certstore::STORE_DIR;
-    c == certs || (c.starts_with(certs) && c.as_bytes().get(certs.len()) == Some(&b'/'))
+    let under = |dir: &str| c == dir || (c.starts_with(dir) && c.as_bytes().get(dir.len()) == Some(&b'/'));
+    // Firmware is loaded into the hardware: only `install` writes it.
+    under(crate::tls::certstore::STORE_DIR) || under(crate::intent::install::FIRMWARE_DIR)
 }
 
 /// Extract a WASM custom section's payload by name, walking the module header.

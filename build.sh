@@ -73,6 +73,19 @@ sign_manifest() {
         | openssl dgst -sha384 -sign "$3" -out "$2.sig"
 }
 
+# The firmware a module brings: one `firmware=<path> <size> <sha384>` line
+# per file under release/modules/<module>.fw/ (staged by stage-module.sh
+# from the module's firmware.list). `install` puts each at
+# sys/firmware/<path>.
+module_firmware_lines() {
+    fw_dir="$RELEASE_DIR/modules/$1.fw"
+    [ -d "$fw_dir" ] || return 0
+    (cd "$fw_dir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | while read -r rel; do
+        f="$fw_dir/$rel"
+        echo "firmware=$rel $(stat -c%s "$f") $(openssl dgst -sha384 -hex "$f" | awk '{print $NF}')"
+    done
+}
+
 # Copy every artifact a manifest names to release/blobs/<sha384>, the path
 # the kernel downloads from. A new version is a new name, so the CDN in
 # front of raw.githubusercontent.com cannot pair a fresh manifest with a
@@ -96,6 +109,8 @@ def entries(text):
             sha, url = None, False
         elif line.startswith("sha384="):
             sha = line[7:].strip()
+        elif line.startswith("firmware="):
+            out.append((line.split()[2], False))
         elif line.startswith("url="):
             url = True
     return out
@@ -1054,11 +1069,13 @@ case "${1:-}" in
             MOD_SIZE=$(stat -c%s "$wasm_file")
             MOD_SHA=$(openssl dgst -sha384 -hex "$wasm_file" 2>/dev/null | awk '{print $NF}')
             MOD_VER=$(head -1 "$RELEASE_DIR/modules/${MOD_NAME}.version" 2>/dev/null || echo "0.1.0")
+            MOD_FW=$(module_firmware_lines "$MOD_NAME")
             MODULE_MANIFEST="${MODULE_MANIFEST}[${MOD_NAME}]
 version=${MOD_VER}
 size=${MOD_SIZE}
 sha384=${MOD_SHA}
-
+${MOD_FW:+$MOD_FW
+}
 "
             PREV_SHA=$(awk -v m="[$MOD_NAME]" '$0==m{f=1;next} f&&/^sha384=/{sub("sha384=","");print;exit} f&&/^\[/{exit}' "$OLD_MANIFEST" 2>/dev/null || true)
             if [ "$PREV_SHA" = "$MOD_SHA" ] && [ -f "$RELEASE_DIR/modules/${MOD_NAME}.sig" ]; then
@@ -1359,13 +1376,15 @@ sha384=${USQ_SHA}
                 MOD_NAME=$(basename "$wasm_file" .wasm)
                 MOD_SIZE=$(stat -c%s "$wasm_file")
                 MOD_SHA=$(openssl dgst -sha384 -hex "$wasm_file" 2>/dev/null | awk '{print $NF}')
+                MOD_FW=$(module_firmware_lines "$MOD_NAME")
                 MOD_VER=$(head -1 "$RELEASE_DIR/modules/${MOD_NAME}.version" 2>/dev/null || echo "0.1.0")
 
                 MODULE_MANIFEST="${MODULE_MANIFEST}[${MOD_NAME}]
 version=${MOD_VER}
 size=${MOD_SIZE}
 sha384=${MOD_SHA}
-
+${MOD_FW:+$MOD_FW
+}
 "
                 if [ -f "$KEY_FILE" ]; then
                     openssl dgst -sha384 -sign "$KEY_FILE" -out "$RELEASE_DIR/modules/${MOD_NAME}.sig" "$wasm_file"

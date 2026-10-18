@@ -2,7 +2,8 @@
 //!
 //! Downloads WASM modules from GitHub release/modules/, checks each against
 //! its entry in the signed module manifest (`update::fetch_manifest`),
-//! stores in npkFS under sys/wasm/<name>.
+//! stores in npkFS under sys/wasm/<name>. The firmware a module's entry
+//! names comes with it, checked the same way, under sys/firmware/<path>.
 
 use crate::{kprintln, kprint};
 use alloc::string::{String, ToString};
@@ -12,13 +13,44 @@ const MODULE_HOST: &str = "raw.githubusercontent.com";
 const MODULE_BASE: &str = "/fnopeek/nopeekOS/main/release/modules";
 const MAX_MODULE_SIZE: usize = 16 * 1024 * 1024; // 16 MB (buffer is min(content_length, cap), so no waste)
 const MAX_MANIFEST_SIZE: usize = 8192;
+const MAX_FIRMWARE_SIZE: usize = 4 * 1024 * 1024;
 
+/// Where a module's firmware lives; module writes are refused there
+/// (`wasm::is_trust_critical_path`).
+pub const FIRMWARE_DIR: &str = "sys/firmware";
+
+/// One `firmware=<path> <size> <sha384>` line of a module's entry.
+#[derive(Clone)]
+struct FirmwareEntry {
+    path: String,
+    size: usize,
+    sha384: [u8; 48],
+}
 
 struct ModuleEntry {
     name: String,
     version: String,
     size: usize,
     sha384: [u8; 48],
+    firmware: Vec<FirmwareEntry>,
+}
+
+/// A firmware path: one to three segments, each an asset name.
+fn safe_firmware_path(p: &str) -> bool {
+    let n = p.split('/').count();
+    (1..=3).contains(&n) && p.split('/').all(super::update::safe_asset_name)
+}
+
+/// `firmware=<path> <size> <sha384>`.
+fn parse_firmware(val: &str) -> Option<FirmwareEntry> {
+    let mut it = val.split_whitespace();
+    let path = it.next()?;
+    let size = it.next()?.parse::<usize>().ok()?;
+    let sha384 = hex_to_bytes48(it.next()?).ok()?;
+    if it.next().is_some() || !safe_firmware_path(path) || size == 0 || size > MAX_FIRMWARE_SIZE {
+        return None;
+    }
+    Some(FirmwareEntry { path: String::from(path), size, sha384 })
 }
 
 /// Parse the module manifest (one module per block, separated by blank lines).
@@ -36,21 +68,24 @@ fn parse_manifest(data: &[u8]) -> Result<Vec<ModuleEntry>, &'static str> {
     let mut version: Option<String> = None;
     let mut size: Option<usize> = None;
     let mut sha384: Option<[u8; 48]> = None;
+    let mut firmware: Vec<FirmwareEntry> = Vec::new();
 
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             // End of block — flush if complete
             if let (Some(n), Some(v), Some(s), Some(h)) = (name.take(), version.take(), size.take(), sha384.take()) {
-                modules.push(ModuleEntry { name: n, version: v, size: s, sha384: h });
+                modules.push(ModuleEntry { name: n, version: v, size: s, sha384: h, firmware: core::mem::take(&mut firmware) });
             }
+            firmware.clear();
             continue;
         }
         if line.starts_with('[') && line.ends_with(']') {
             // Flush previous if any
             if let (Some(n), Some(v), Some(s), Some(h)) = (name.take(), version.take(), size.take(), sha384.take()) {
-                modules.push(ModuleEntry { name: n, version: v, size: s, sha384: h });
+                modules.push(ModuleEntry { name: n, version: v, size: s, sha384: h, firmware: core::mem::take(&mut firmware) });
             }
+            firmware.clear();
             name = Some(String::from(&line[1..line.len() - 1]));
             version = None;
             size = None;
@@ -62,13 +97,20 @@ fn parse_manifest(data: &[u8]) -> Result<Vec<ModuleEntry>, &'static str> {
                 "version" => version = Some(String::from(val.trim())),
                 "size" => size = val.trim().parse::<usize>().ok(),
                 "sha384" => sha384 = hex_to_bytes48(val.trim()).ok(),
+                // A malformed line drops the whole module: installed
+                // without part of its firmware, it would fail at its first
+                // request at run time, with no hint why.
+                "firmware" => match parse_firmware(val) {
+                    Some(f) => firmware.push(f),
+                    None => { name = None; }
+                },
                 _ => {}
             }
         }
     }
     // Flush last block
     if let (Some(n), Some(v), Some(s), Some(h)) = (name, version, size, sha384) {
-        modules.push(ModuleEntry { name: n, version: v, size: s, sha384: h });
+        modules.push(ModuleEntry { name: n, version: v, size: s, sha384: h, firmware });
     }
 
     // The name becomes an npkFS path and a download URL.
@@ -90,6 +132,61 @@ fn hex_to_bytes48(hex: &str) -> Result<[u8; 48], &'static str> {
             .map_err(|_| "sha384: invalid hex")?;
     }
     Ok(out)
+}
+
+fn firmware_store_path(f: &FirmwareEntry) -> String {
+    alloc::format!("{}/{}", FIRMWARE_DIR, f.path)
+}
+
+fn firmware_list_key(name: &str) -> String {
+    alloc::format!("sys/wasm/{}.firmware", name)
+}
+
+/// Whether the copy in npkFS is the one the manifest names.
+fn firmware_current(f: &FirmwareEntry) -> bool {
+    crate::npkfs::fetch(&firmware_store_path(f)).ok()
+        .is_some_and(|(data, _)| crate::tls::sha256::sha384(&data) == f.sha384)
+}
+
+/// Fetch, check and store every firmware file of a module that is not
+/// current yet, then record the list for `uninstall`. Files a previous
+/// version had and this one has not are removed. Prints one line per file
+/// written; `Err` names the first file that failed. A path two modules
+/// list goes with the first of them to be removed.
+fn install_firmware(name: &str, firmware: &[FirmwareEntry]) -> Result<usize, String> {
+    let mut written = 0;
+    for f in firmware {
+        if firmware_current(f) {
+            continue;
+        }
+        kprintln!("[npk]   + firmware {:<28} {} bytes", f.path, f.size);
+        let data = super::http::https_get_resumable(MODULE_HOST, &super::update::blob_path(&f.sha384), f.size)
+            .map_err(|e| alloc::format!("{}: download: {}", f.path, e))?;
+        if data.len() != f.size {
+            return Err(alloc::format!("{}: short download ({} of {})", f.path, data.len(), f.size));
+        }
+        if crate::tls::sha256::sha384(&data) != f.sha384 {
+            return Err(alloc::format!("{}: checksum mismatch", f.path));
+        }
+        crate::npkfs::upsert(&firmware_store_path(f), &data, crate::capability::CAP_NULL)
+            .map_err(|e| alloc::format!("{}: store: {:?}", f.path, e))?;
+        written += 1;
+    }
+    let key = firmware_list_key(name);
+    if let Ok((old, _)) = crate::npkfs::fetch(&key) {
+        for p in core::str::from_utf8(&old).unwrap_or("").lines() {
+            if safe_firmware_path(p) && !firmware.iter().any(|f| f.path == p) {
+                let _ = crate::npkfs::delete(&alloc::format!("{}/{}", FIRMWARE_DIR, p));
+            }
+        }
+    }
+    if firmware.is_empty() {
+        let _ = crate::npkfs::delete(&key);
+    } else {
+        let list = firmware.iter().map(|f| f.path.as_str()).collect::<Vec<_>>().join("\n");
+        let _ = crate::npkfs::upsert(&key, list.as_bytes(), crate::capability::CAP_NULL);
+    }
+    Ok(written)
 }
 
 /// `install <name>` — download and install a WASM module.
@@ -130,7 +227,12 @@ pub fn intent_install(args: &str) {
     if let Ok((ver_data, _)) = crate::npkfs::fetch(&version_key) {
         if let Ok(installed_ver) = core::str::from_utf8(&ver_data) {
             if installed_ver.trim() == entry.version.trim() {
-                kprintln!("[npk] {} v{} already installed.", name, entry.version);
+                match install_firmware(name, &entry.firmware) {
+                    Ok(0) => kprintln!("[npk] {} v{} already installed.", name, entry.version),
+                    Ok(n) => kprintln!("[npk] {} v{} already installed, {} firmware file(s) brought up to date.",
+                        name, entry.version, n),
+                    Err(e) => kprintln!("[npk] {} v{}: firmware {}", name, entry.version, e),
+                }
                 return;
             }
             kprintln!("[npk] Updating {} v{} -> v{}", name, installed_ver.trim(), entry.version);
@@ -168,6 +270,12 @@ pub fn intent_install(args: &str) {
     }
     kprintln!("OK");
 
+    // The firmware first: a module is never in place without it.
+    if let Err(e) = install_firmware(name, &entry.firmware) {
+        kprintln!("[npk] Firmware {} — install rejected.", e);
+        return;
+    }
+
     // Replaced in place: the old module stays until the new one is written.
     if let Err(e) = crate::npkfs::upsert(&store_name, &wasm_data, crate::capability::CAP_NULL) {
         kprintln!("[npk] Failed to store module: {:?}", e);
@@ -186,6 +294,7 @@ pub struct ModulePlan {
     pub remote: String,
     pub size: usize,
     sha384: [u8; 48],
+    firmware: Vec<FirmwareEntry>,
 }
 
 /// Compare installed modules against the release manifest WITHOUT touching
@@ -227,7 +336,7 @@ pub fn plan_modules() -> (Vec<ModulePlan>, usize) {
             .and_then(|(data, _)| core::str::from_utf8(&data).ok().map(|s| String::from(s.trim())));
         let remote_ver = String::from(remote.version.trim());
 
-        if local.as_deref() == Some(remote_ver.as_str()) {
+        if local.as_deref() == Some(remote_ver.as_str()) && remote.firmware.iter().all(firmware_current) {
             current += 1;
             continue;
         }
@@ -237,6 +346,7 @@ pub fn plan_modules() -> (Vec<ModulePlan>, usize) {
             remote: remote_ver,
             size: remote.size,
             sha384: remote.sha384,
+            firmware: remote.firmware.clone(),
         });
     }
 
@@ -275,6 +385,11 @@ pub fn apply_module(p: &ModulePlan) -> bool {
     let hash = crate::tls::sha256::sha384(&wasm_data);
     if hash != p.sha384 {
         return fail(format_args!("checksum mismatch"));
+    }
+
+    // The firmware first: a module is never in place without it.
+    if let Err(e) = install_firmware(&p.name, &p.firmware) {
+        return fail(format_args!("firmware {}", e));
     }
 
     // Replaced in place: the old module stays until the new one is written.
@@ -355,6 +470,8 @@ pub fn intent_uninstall(args: &str) {
     match crate::npkfs::delete(&store_name) {
         Ok(()) => {
             let _ = crate::npkfs::delete(&version_key);
+            // What the module brought, it takes along.
+            let _ = install_firmware(name, &[]);
             if bundled {
                 kprintln!("[npk] {} removed (bundled — recover with `install {}`).",
                           name, name);
