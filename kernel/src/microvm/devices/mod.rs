@@ -27,6 +27,7 @@ pub mod virtio_blk_pci;
 pub mod virtio_console_pci;
 pub mod virtio_gpu_ctx;
 pub mod virtio_gpu_i915;
+pub mod virtio_gpu_amdgpu;
 pub mod virtio_gpu_pci;
 pub mod virtio_input_pci;
 pub mod virtio_input_keymap;

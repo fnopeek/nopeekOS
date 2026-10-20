@@ -62,6 +62,8 @@ pub const OP_OBJECT: u32 = 6;
 pub const DETACH_DEFERRED: i32 = 1;
 /// `a0` client, `a1` length; the payload is the guest's ccmd.
 pub const OP_CCMD: u32 = 7;
+/// Largest capset (`npk_gpudev_capset`), `virtio_gpu_ctx::CAPSET_DRM_SIZE`.
+pub const MAX_CAPSET: usize = 1024;
 /// Largest reply to a ccmd (`npk_gpudev_reply`).
 pub const MAX_REPLY: usize = 64 * 1024;
 /// Rings a client may report (`virtio_gpu_ctx::MAX_RINGS`).
@@ -199,6 +201,9 @@ struct State {
     owner_seq: BTreeMap<u32, u32>,
     /// GEM objects the module may still reach, by buffer id.
     held: BTreeMap<u32, Held>,
+    /// The capset the module reported (`npk_gpudev_capset`), for a card
+    /// whose capset only its driver knows.
+    capset: Option<Vec<u8>>,
 }
 
 /// A GEM object on its way out. The module completes a detach at once and
@@ -238,6 +243,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     detaching: BTreeMap::new(),
     owner_seq: BTreeMap::new(),
     held: BTreeMap::new(),
+    capset: None,
 });
 
 /// Per client and ring: submissions the module took, and those done.
@@ -374,6 +380,7 @@ pub fn register(dev: PciAddr, version: i32) -> i32 {
     st.caps = 0;
     st.clients.clear();
     st.replies.clear();
+    st.capset = None;
     mark_all_done();
     crate::kprintln!("[npk] gpudev: {:02x}:{:02x}.{} registered, {}x{} framebuffer, 2 shadow buffers",
         dev.bus, dev.device, dev.function, fb.width, fb.height);
@@ -650,6 +657,7 @@ pub fn module_gone(dev: PciAddr) {
         st.caps = 0;
         st.clients.clear();
         st.replies.clear();
+        st.capset = None;
         st.detaching.clear();
         st.owner_seq.clear();
         for h in core::mem::take(&mut st.held).into_values() {
@@ -1253,6 +1261,26 @@ pub fn native_refused() -> Option<&'static str> {
         return None;
     }
     native_device().is_none().then_some("the card is not behind the IOMMU (set gpu_iommu on)")
+}
+
+/// `npk_gpudev_capset`: the capset of the card (`struct
+/// virgl_renderer_capset_drm`), set before `npk_gpudev_ready`.
+pub fn set_capset(dev: PciAddr, data: &[u8]) -> i32 {
+    if data.len() < 24 || data.len() > MAX_CAPSET {
+        return -1;
+    }
+    let mut st = STATE.lock();
+    if st.owner != Some(dev) || READY.load(Ordering::Acquire) {
+        return -1;
+    }
+    st.capset = Some(data.to_vec());
+    0
+}
+
+/// The capset the module of `native_device` reported, if it did.
+pub fn native_capset() -> Option<Vec<u8>> {
+    native_device()?;
+    STATE.lock().capset.clone()
 }
 
 /// `npk_gpudev_reply`: the reply of `OP_CCMD` job `seq`, before its

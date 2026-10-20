@@ -94,6 +94,7 @@ unsafe extern "C" {
     fn npk_gpudev_poll(buf_ptr: i32, max: i32) -> i32;
     fn npk_gpudev_complete(seq: i32, status: i32) -> i32;
     fn npk_gpudev_reply(seq: i32, ptr: i32, len: i32) -> i32;
+    fn npk_gpudev_capset(ptr: i32, len: i32) -> i32;
     fn npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
     fn npk_gpudev_released(id: i32) -> i32;
     fn npk_gpudev_stats(ptr: i32, len: i32) -> i32;
@@ -495,6 +496,13 @@ pub fn gpudev_stats(words: &[u64]) -> i32 {
 pub fn gpudev_reply(seq: i32, data: &[u8]) -> i32 {
     // SAFETY: FFI; `data` is borrowed for the call.
     unsafe { npk_gpudev_reply(seq, data.as_ptr() as i32, data.len() as i32) }
+}
+
+/// The card's DRM capset for guest native contexts
+/// (`npk_gpudev_capset`), before `gpudev_ready`; 0, or -1.
+pub fn gpudev_capset(data: &[u8]) -> i32 {
+    // SAFETY: FFI; `data` is borrowed for the call.
+    unsafe { npk_gpudev_capset(data.as_ptr() as i32, data.len() as i32) }
 }
 
 /// Bytes of job `seq`'s payload from `offset` on (`npk_gpudev_job_data`);

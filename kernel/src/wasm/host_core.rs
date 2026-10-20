@@ -4367,6 +4367,17 @@ pub(crate) fn npk_gpudev_reply(mem: &mut [u8], ctx: &mut HostState, seq: i32, pt
     crate::gpu::gpudev::reply(dev, seq as u32, data)
 }
 
+/// `npk_gpudev_capset(ptr, len) -> 0 | -1`: the card's DRM capset, for
+/// native contexts, before `npk_gpudev_ready`.
+pub(crate) fn npk_gpudev_capset(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if len < 0 || len as usize > crate::gpu::gpudev::MAX_CAPSET {
+        return -1;
+    }
+    let Some(data) = guest_mut(mem, ptr, len as usize) else { return -1 };
+    crate::gpu::gpudev::set_capset(dev, data)
+}
+
 /// `npk_gpudev_released(id) -> 0 | -1`: the module let go of a GEM object
 /// it kept past its detach.
 pub(crate) fn npk_gpudev_released(ctx: &mut HostState, id: i32) -> i32 {

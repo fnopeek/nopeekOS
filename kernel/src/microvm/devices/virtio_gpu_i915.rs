@@ -350,6 +350,10 @@ impl Backend for GpudevBackend {
         4
     }
 
+    fn rsp_mem_offset(&self) -> usize {
+        super::virtio_gpu_ctx::I915_RSP_MEM_OFFSET
+    }
+
     fn ccmd(&mut self, ctx: u32, req: &[u8], rsp: &mut Vec<u8>, deadline: u64) -> Result<(), i32> {
         if req.len() < 16 || self.clients.get(&ctx).is_none_or(|c| c.closed) {
             return Err(-EINVAL);

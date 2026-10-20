@@ -32,10 +32,25 @@ pub fn reset() {
     // probe for `set microvm_gpu test`, else none.
     super::virtio_gpu_ctx::set_backend(None);
     if let Some(dev) = crate::gpu::gpudev::native_device() {
-        super::virtio_gpu_ctx::set_backend(Some(alloc::boxed::Box::new(super::virtio_gpu_i915::GpudevBackend::new(dev))));
-        if mode != Some("off") {
-            crate::kprintln!("[gpu] native contexts offered: i915 on {:02x}:{:02x}.{} through the GPU module",
-                dev.bus, dev.device, dev.function);
+        // The card's vendor picks the protocol; an AMD card's capset comes
+        // from its module.
+        let backend: Option<(alloc::boxed::Box<dyn super::virtio_gpu_ctx::Backend>, &str)> =
+            if crate::drivers::pci::read16(dev, 0) == 0x1002 {
+                crate::gpu::gpudev::native_capset()
+                    .and_then(|c| super::virtio_gpu_amdgpu::AmdgpuBackend::new(dev, c))
+                    .map(|b| (alloc::boxed::Box::new(b) as _, "amdgpu"))
+            } else {
+                Some((alloc::boxed::Box::new(super::virtio_gpu_i915::GpudevBackend::new(dev)), "i915"))
+            };
+        match backend {
+            Some((b, name)) => {
+                super::virtio_gpu_ctx::set_backend(Some(b));
+                if mode != Some("off") {
+                    crate::kprintln!("[gpu] native contexts offered: {} on {:02x}:{:02x}.{} through the GPU module",
+                        name, dev.bus, dev.device, dev.function);
+                }
+            }
+            None => crate::kprintln!("[gpu] no native contexts: the GPU module reported no amdgpu capset"),
         }
     } else {
         if let Some(why) = crate::gpu::gpudev::native_refused() {

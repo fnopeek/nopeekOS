@@ -25,7 +25,8 @@ pub const CAPSET_DRM: u32 = 6;
 /// two, and the tail past the card's member is zero, which the struct
 /// defines as "not supported by the host".
 pub const CAPSET_DRM_SIZE: u32 = 1024;
-/// `VIRTGPU_DRM_CONTEXT_I915`.
+/// `VIRTGPU_DRM_CONTEXT_AMDGPU`, `VIRTGPU_DRM_CONTEXT_I915`.
+pub const CONTEXT_AMDGPU: u32 = 2;
 pub const CONTEXT_I915: u32 = 3;
 /// virtio `map_info` cache types (`VIRTIO_GPU_MAP_CACHE_*`).
 pub const MAP_CACHE_CACHED: u32 = 1;
@@ -39,10 +40,9 @@ const MAX_SHMEM: u64 = 1 << 20;
 const MAX_OBJECT: u64 = 1 << 32;
 /// Contexts per guest.
 const MAX_CONTEXTS: usize = 64;
-/// `vdrm_shmem.rsp_mem_offset` this side sets: the i915 header (seqno,
-/// rsp_mem_offset, banned_ctx_mask) is 16 bytes. Kept here, never read back
-/// from the guest-writable buffer.
-const RSP_MEM_OFFSET: usize = 16;
+/// `vdrm_shmem.rsp_mem_offset` of i915: its header (seqno, rsp_mem_offset,
+/// banned_ctx_mask) is 16 bytes.
+pub const I915_RSP_MEM_OFFSET: usize = 16;
 
 /// What the GPU driver side does for native contexts. Every call comes
 /// from the virtio-gpu worker with the device lock held.
@@ -55,6 +55,15 @@ pub trait Backend: Send {
     fn destroy(&mut self, ctx: u32);
     /// Byte alignment of ccmds and response offsets (4 for i915).
     fn ccmd_alignment(&self) -> u32;
+    /// `vdrm_shmem.rsp_mem_offset`: the size of the card's shmem header.
+    /// Kept by this side, never read back from the guest-writable buffer.
+    fn rsp_mem_offset(&self) -> usize;
+    /// Words of the card's shmem header to write now (offset, value), after
+    /// each ccmd and, with `heap`, when an object becomes a resource
+    /// (amdgpu's `async_error` and heap usage).
+    fn shmem_update(&mut self, _ctx: u32, _heap: bool) -> Vec<(usize, u32)> {
+        Vec::new()
+    }
     /// Run one ccmd: `req` is exactly the guest's bytes, starting with its
     /// `vdrm_ccmd_req` header; a shorter request than the backend knows is
     /// zero-extended by the backend. A response, if any, is pushed to `rsp`
@@ -200,7 +209,10 @@ impl Contexts {
             return Err(RESP_ERR_INVALID_PARAM);
         }
         if blob_id == 0 {
-            if c.shmem.is_some() || size > MAX_SHMEM || size < 16 {
+            let mut guard = BACKEND.lock();
+            let b = guard.as_mut().ok_or(RESP_ERR_INVALID_PARAM)?;
+            let rsp_mem_offset = b.rsp_mem_offset();
+            if c.shmem.is_some() || size > MAX_SHMEM || size <= rsp_mem_offset as u64 {
                 return Err(RESP_ERR_INVALID_PARAM);
             }
             let pages = size.div_ceil(4096) as usize;
@@ -208,21 +220,29 @@ impl Contexts {
             // SAFETY: freshly allocated, identity-mapped frames.
             unsafe { core::ptr::write_bytes(phys as *mut u8, 0, pages * 4096) };
             // SAFETY: as above, within the first page.
-            unsafe { core::ptr::write_volatile((phys + 4) as *mut u32, RSP_MEM_OFFSET as u32) };
+            unsafe { core::ptr::write_volatile((phys + 4) as *mut u32, rsp_mem_offset as u32) };
             let list = (0..pages as u64).map(|i| phys + i * 4096).collect();
             c.shmem = Some(res_id);
             let handle = c.handle;
+            let pages = Arc::new(ForeignPixels::new(list));
+            shm_apply(&pages, rsp_mem_offset, &b.shmem_update(handle, true));
             self.host3d.insert(res_id, Host3d {
-                ctx: ctx_id, handle, pages: Arc::new(ForeignPixels::new(list)), size, map_info: MAP_CACHE_CACHED,
-                mapped: None, owned: true, shmem: true,
+                ctx: ctx_id, handle, pages, size, map_info: MAP_CACHE_CACHED, mapped: None, owned: true, shmem: true,
             });
             return Ok(());
         }
         let handle = c.handle;
-        let (pages, map_info) = BACKEND.lock().as_mut().and_then(|b| b.take_blob(handle, blob_id, res_id))
-            .ok_or(RESP_ERR_INVALID_PARAM)?;
+        let shmem = c.shmem.and_then(|id| self.host3d.get(&id)).map(|r| r.pages.clone());
+        let mut guard = BACKEND.lock();
+        let b = guard.as_mut().ok_or(RESP_ERR_INVALID_PARAM)?;
+        let (pages, map_info) = b.take_blob(handle, blob_id, res_id).ok_or(RESP_ERR_INVALID_PARAM)?;
         if pages.bytes() < size {
+            b.release_blob(handle, &pages);
             return Err(RESP_ERR_INVALID_PARAM);
+        }
+        if let Some(sh) = shmem {
+            let words = b.shmem_update(handle, true);
+            shm_apply(&sh, b.rsp_mem_offset(), &words);
         }
         self.host3d.insert(res_id, Host3d {
             ctx: ctx_id, handle, pages, size, map_info, mapped: None, owned: false, shmem: false,
@@ -316,6 +336,7 @@ fn run_submit_inner(job: &SubmitJob, stream: &[u8], deadline: u64) -> Result<u64
     let mut guard = BACKEND.lock();
     let b = guard.as_mut().ok_or(())?;
     let align = b.ccmd_alignment() as usize;
+    let rsp_mem_offset = b.rsp_mem_offset();
     let mut off = 0;
     while stream.len() - off >= 16 {
         let hdr = &stream[off..];
@@ -326,10 +347,17 @@ fn run_submit_inner(job: &SubmitJob, stream: &[u8], deadline: u64) -> Result<u64
         }
         let mut rsp = Vec::new();
         super::gpu_backend::note(super::gpu_backend::STAT_CCMD, 1);
-        b.ccmd(job.handle, &stream[off..off + len], &mut rsp, deadline).map_err(|_| ())?;
+        let ran = b.ccmd(job.handle, &stream[off..off + len], &mut rsp, deadline);
+        // The header (amdgpu's `async_error`) is written even when the
+        // handler failed: the guest reads it to see the context lost.
+        let words = b.shmem_update(job.handle, false);
+        if let Some(sh) = &job.shmem {
+            shm_apply(sh, rsp_mem_offset, &words);
+        }
+        ran.map_err(|_| ())?;
         let (set, clear) = b.banned(job.handle);
         if let Some(sh) = &job.shmem {
-            write_response(sh, rsp_off, &rsp);
+            write_response(sh, rsp_mem_offset, rsp_off, &rsp);
             if set | clear != 0 {
                 let mask = (shm_read32(sh, 8) as u64 | (shm_read32(sh, 12) as u64) << 32) & !clear | set;
                 shm_write32(sh, 8, mask as u32);
@@ -358,20 +386,29 @@ fn shm_read32(sh: &ForeignPixels, off: usize) -> u32 {
     unsafe { core::ptr::read_volatile((page + (off % 4096) as u64) as *const u32) }
 }
 
+/// Header words of the shmem buffer, each inside the header.
+fn shm_apply(sh: &ForeignPixels, rsp_mem_offset: usize, words: &[(usize, u32)]) {
+    for &(off, v) in words {
+        if off % 4 == 0 && off + 4 <= rsp_mem_offset {
+            shm_write32(sh, off, v);
+        }
+    }
+}
+
 /// Copy a response into the guest's response memory at `rsp_off`, bounded
 /// by the buffer and by the length the guest left in the slot (read once:
 /// the guest may change it meanwhile), as `drm_context_submit_cmd_dispatch`
 /// does with its shadow buffer.
-fn write_response(sh: &ForeignPixels, rsp_off: usize, rsp: &[u8]) {
+fn write_response(sh: &ForeignPixels, rsp_mem_offset: usize, rsp_off: usize, rsp: &[u8]) {
     if rsp.len() < 4 {
         return;
     }
     let total = sh.pages.len() * 4096;
-    let rsp_mem = total - RSP_MEM_OFFSET;
+    let rsp_mem = total - rsp_mem_offset;
     if rsp_off > rsp_mem || rsp.len() > rsp_mem - rsp_off {
         return;
     }
-    let start = RSP_MEM_OFFSET + rsp_off;
+    let start = rsp_mem_offset + rsp_off;
     let untrusted = shm_read32(sh, start) as usize;
     let len = rsp.len().min(untrusted);
     for (i, &byte) in rsp[..len].iter().enumerate() {
@@ -455,6 +492,10 @@ impl Backend for ProbeBackend {
 
     fn ccmd_alignment(&self) -> u32 {
         4
+    }
+
+    fn rsp_mem_offset(&self) -> usize {
+        I915_RSP_MEM_OFFSET
     }
 
     fn ccmd(&mut self, _ctx: u32, req: &[u8], rsp: &mut Vec<u8>, _deadline: u64) -> Result<(), i32> {
