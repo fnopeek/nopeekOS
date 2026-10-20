@@ -7003,3 +7003,39 @@ pub const AMDGPU_TILING_TILE_SPLIT_MASK: u32 = 0x7;
 pub const AMDGPU_GEM_METADATA_OP_SET_METADATA: u32 = 0x1;
 /// ?
 pub const AMDGPU_GEM_METADATA_OP_GET_METADATA: u32 = 0x2;
+
+// A client's jobs on the GFX ring (gfx_v9_0.c, amdgpu_ib.c)
+/// amdgpu/nvd.h:557
+pub const PACKET3_FRAME_CONTROL: u32 = 0x90;
+/// amdgpu/nvd.h:558
+pub const FRAME_TMZ: u32 = 0x1;
+/// The value of `FRAME_CMD(1)` in gfx_v9_0.c
+pub const FRAME_CMD_1: u32 = 0x10000000;
+/// amdgpu/amdgpu_job.h:37
+pub const AMDGPU_IB_PREEMPTED: u32 = 0x8;
+/// ?
+pub const AMDGPU_IB_FLAG_PREEMPT: u32 = 0x4;
+/// amdgpu/amdgpu_csa.h:28
+pub const AMDGPU_CSA_SIZE: u32 = 0x20000;
+/// The value of `INDIRECT_BUFFER_PRE_ENB(1)` in gfx_v9_0.c
+pub const INDIRECT_BUFFER_PRE_ENB_1: u32 = 0x200000;
+/// The value of `INDIRECT_BUFFER_PRE_RESUME(1)` in gfx_v9_0.c
+pub const INDIRECT_BUFFER_PRE_RESUME_1: u32 = 0x40000000;
+/// The value of `WRITE_DATA_ENGINE_SEL(2)` in gfx_v9_0.c
+pub const WRITE_DATA_ENGINE_SEL_2: u64 = 0xffffffff80000000;
+/// The value of `WRITE_DATA_DST_SEL(8)` in gfx_v9_0.c
+pub const WRITE_DATA_DST_SEL_8: u32 = 0x800;
+/// The value of `WRITE_DATA_CACHE_POLICY(0)` in gfx_v9_0.c
+pub const WRITE_DATA_CACHE_POLICY_0: u32 = 0x0;
+/// The value of `sizeof(struct v9_ce_ib_state)` in gfx_v9_0.c
+pub const SIZEOF_v9_ce_ib_state: u32 = 0x28;
+/// The value of `sizeof(struct v9_de_ib_state)` in gfx_v9_0.c
+pub const SIZEOF_v9_de_ib_state: u32 = 0x6c;
+/// The value of `offsetof(struct v9_gfx_meta_data, ce_payload)` in gfx_v9_0.c
+pub const V9_META_CE_PAYLOAD: u32 = 0x0;
+/// The value of `offsetof(struct v9_gfx_meta_data, de_payload)` in gfx_v9_0.c
+pub const V9_META_DE_PAYLOAD: u32 = 0x100;
+/// The value of `offsetof(struct v9_de_ib_state, gds_backup_addrlo)` in gfx_v9_0.c
+pub const V9_DE_GDS_BACKUP_ADDRLO: u32 = 0x58;
+/// The value of `offsetof(struct v9_de_ib_state, gds_backup_addrhi)` in gfx_v9_0.c
+pub const V9_DE_GDS_BACKUP_ADDRHI: u32 = 0x5c;

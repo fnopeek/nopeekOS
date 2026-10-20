@@ -2434,14 +2434,99 @@ pub fn gfx_v9_0_ring_emit_init_cond_exec(adev: &mut amdgpu_device, r: usize, add
 }
 
 /// `gfx_v9_0_ring_emit_ib_gfx` without a job (VMID 0, no preemption).
-pub fn gfx_v9_0_ring_emit_ib_gfx(adev: &mut amdgpu_device, r: usize, ib: &crate::amdgpu_ib::amdgpu_ib, _flags: u32) {
-    let vmid = 0u32;
+/// `amdgpu_csa_vaddr`: the CSA at the top of every client's VM.
+pub fn amdgpu_csa_vaddr(adev: &amdgpu_device) -> u64 {
+    // AMDGPU_VA_RESERVED_CSA_START
+    let addr = (adev.vm_manager.max_pfn << AMDGPU_GPU_PAGE_SHIFT) - AMDGPU_VA_RESERVED_CSA_SIZE as u64;
+    crate::amdgpu_object::amdgpu_gmc_sign_extend(addr)
+}
+
+/// A WRITE_DATA of a zeroed metadata payload of `bytes` to `addr`. On
+/// resume Linux writes the CSA's saved copy, which only exists with MCBP,
+/// off on bare metal.
+fn emit_meta(adev: &mut amdgpu_device, r: usize, engine: u32, addr: u64, payload: &[u32]) {
+    let cnt = payload.len() as u32 + 4 - 2;
+    rw(adev, r, PACKET3(PACKET3_WRITE_DATA, cnt));
+    rw(adev, r, (engine | WRITE_DATA_DST_SEL_8 as u32 | WR_CONFIRM) | WRITE_DATA_CACHE_POLICY_0 as u32);
+    rw(adev, r, addr as u32);
+    rw(adev, r, (addr >> 32) as u32);
+    // amdgpu_ring_ib_on_emit_ce/_de: not a software ring.
+    for &w in payload {
+        rw(adev, r, w);
+    }
+}
+
+/// `gfx_v9_0_ring_emit_ce_meta`.
+fn gfx_v9_0_ring_emit_ce_meta(adev: &mut amdgpu_device, r: usize, _resume: bool) {
+    let addr = amdgpu_csa_vaddr(adev) + V9_META_CE_PAYLOAD as u64;
+    let payload = alloc::vec![0u32; (SIZEOF_v9_ce_ib_state / 4) as usize];
+    emit_meta(adev, r, WRITE_DATA_ENGINE_SEL_2 as u32, addr, &payload);
+}
+
+/// `gfx_v9_0_ring_emit_de_meta`.
+fn gfx_v9_0_ring_emit_de_meta(adev: &mut amdgpu_device, r: usize, _resume: bool, usegds: bool) {
+    let csa = amdgpu_csa_vaddr(adev);
+    let addr = csa + V9_META_DE_PAYLOAD as u64;
+    let gds_addr = crate::linux::align(csa + AMDGPU_CSA_SIZE as u64 - adev.gds.gds_size as u64,
+                                       crate::amdgpu_object::PAGE_SIZE);
+    let mut payload = alloc::vec![0u32; (SIZEOF_v9_de_ib_state / 4) as usize];
+    if usegds {
+        payload[(V9_DE_GDS_BACKUP_ADDRLO / 4) as usize] = gds_addr as u32;
+        payload[(V9_DE_GDS_BACKUP_ADDRHI / 4) as usize] = (gds_addr >> 32) as u32;
+    }
+    emit_meta(adev, r, WRITE_DATA_ENGINE_SEL_1, addr, &payload);
+}
+
+/// `gfx_v9_ring_emit_cntxcntl`.
+pub fn gfx_v9_ring_emit_cntxcntl(adev: &mut amdgpu_device, r: usize, flags: u32) {
+    gfx_v9_0_ring_emit_ce_meta(adev, r, flags & AMDGPU_IB_PREEMPTED != 0);
+    let mut dw2 = 0x80000000u32; // set load_enable otherwise this package is just NOPs
+    if flags & AMDGPU_HAVE_CTX_SWITCH != 0 {
+        // set load_global_config & load_global_uconfig
+        dw2 |= 0x8001;
+        // set load_cs_sh_regs
+        dw2 |= 0x01000000;
+        // set load_per_context_state & load_gfx_sh_regs for GFX
+        dw2 |= 0x10002;
+        // set load_ce_ram if preamble presented
+        if flags & AMDGPU_PREAMBLE_IB_PRESENT != 0 {
+            dw2 |= 0x10000000;
+        }
+    } else if flags & AMDGPU_PREAMBLE_IB_PRESENT_FIRST != 0 {
+        // still load_ce_ram if this is the first time preamble presented
+        // although there is no context switch happens.
+        dw2 |= 0x10000000;
+    }
+    rw(adev, r, PACKET3(PACKET3_CONTEXT_CONTROL, 1));
+    rw(adev, r, dw2);
+    rw(adev, r, 0);
+}
+
+/// `gfx_v9_0_ring_emit_frame_cntl`.
+pub fn gfx_v9_0_ring_emit_frame_cntl(adev: &mut amdgpu_device, r: usize, start: bool, secure: bool) {
+    let v = if secure { FRAME_TMZ } else { 0 };
+    rw(adev, r, PACKET3(PACKET3_FRAME_CONTROL, 0));
+    rw(adev, r, v | if start { 0 } else { FRAME_CMD_1 });
+}
+
+/// `gfx_v9_0_ring_emit_ib_gfx`; `gds` is whether the job uses GDS.
+pub fn gfx_v9_0_ring_emit_ib_gfx(adev: &mut amdgpu_device, r: usize, vmid: u32, gds: bool,
+                                 ib: &crate::amdgpu_ib::amdgpu_ib, flags: u32) {
     let header = if ib.flags & AMDGPU_IB_FLAG_CE != 0 {
         PACKET3(PACKET3_INDIRECT_BUFFER_CONST, 2)
     } else {
         PACKET3(PACKET3_INDIRECT_BUFFER, 2)
     };
-    let control = ib.length_dw | (vmid << 24);
+    let mut control = ib.length_dw | (vmid << 24);
+    if ib.flags & AMDGPU_IB_FLAG_PREEMPT != 0 {
+        control |= INDIRECT_BUFFER_PRE_ENB_1;
+        if flags & AMDGPU_IB_PREEMPTED != 0 {
+            control |= INDIRECT_BUFFER_PRE_RESUME_1;
+        }
+        if ib.flags & AMDGPU_IB_FLAG_CE == 0 && vmid != 0 {
+            gfx_v9_0_ring_emit_de_meta(adev, r, flags & AMDGPU_IB_PREEMPTED != 0, gds);
+        }
+    }
     rw(adev, r, header);
     if ib.gpu_addr & 0x3 != 0 {
         Line::new().s("WARNING: IB not dword aligned").say();

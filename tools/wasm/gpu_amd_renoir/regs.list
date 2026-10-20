@@ -3500,3 +3500,21 @@ AMDGPU_TILING_TILE_SPLIT_SHIFT @ amdgpu_gem.c
 AMDGPU_TILING_TILE_SPLIT_MASK @ amdgpu_gem.c
 AMDGPU_GEM_METADATA_OP_SET_METADATA @ amdgpu_gem.c
 AMDGPU_GEM_METADATA_OP_GET_METADATA @ amdgpu_gem.c
+# A client's jobs on the GFX ring (gfx_v9_0.c, amdgpu_ib.c)
+PACKET3_FRAME_CONTROL @ gfx_v9_0.c
+FRAME_TMZ @ gfx_v9_0.c
+FRAME_CMD_1 = FRAME_CMD(1) @ gfx_v9_0.c
+AMDGPU_IB_PREEMPTED @ gfx_v9_0.c
+AMDGPU_IB_FLAG_PREEMPT @ gfx_v9_0.c
+AMDGPU_CSA_SIZE @ gfx_v9_0.c
+INDIRECT_BUFFER_PRE_ENB_1 = INDIRECT_BUFFER_PRE_ENB(1) @ gfx_v9_0.c
+INDIRECT_BUFFER_PRE_RESUME_1 = INDIRECT_BUFFER_PRE_RESUME(1) @ gfx_v9_0.c
+WRITE_DATA_ENGINE_SEL_2 = WRITE_DATA_ENGINE_SEL(2) @ gfx_v9_0.c
+WRITE_DATA_DST_SEL_8 = WRITE_DATA_DST_SEL(8) @ gfx_v9_0.c
+WRITE_DATA_CACHE_POLICY_0 = WRITE_DATA_CACHE_POLICY(0) @ gfx_v9_0.c
+SIZEOF_v9_ce_ib_state = sizeof(struct v9_ce_ib_state) @ gfx_v9_0.c
+SIZEOF_v9_de_ib_state = sizeof(struct v9_de_ib_state) @ gfx_v9_0.c
+V9_META_CE_PAYLOAD = offsetof(struct v9_gfx_meta_data, ce_payload) @ gfx_v9_0.c
+V9_META_DE_PAYLOAD = offsetof(struct v9_gfx_meta_data, de_payload) @ gfx_v9_0.c
+V9_DE_GDS_BACKUP_ADDRLO = offsetof(struct v9_de_ib_state, gds_backup_addrlo) @ gfx_v9_0.c
+V9_DE_GDS_BACKUP_ADDRHI = offsetof(struct v9_de_ib_state, gds_backup_addrhi) @ gfx_v9_0.c

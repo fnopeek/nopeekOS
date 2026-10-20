@@ -320,10 +320,6 @@ pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[amdgpu_ib],
         Line::new().s("secure submissions not supported on ring <").s(&name).s(">").say();
         return Err(-22);
     }
-    if job.is_some() && adev.rings[r].funcs.ops == ring::ring_ops::gfx_v9_0_gfx {
-        Line::new().s("a job on the GFX ring is not ported").say();
-        return Err(-22);
-    }
     let f = adev.rings[r].funcs;
     let alloc_size = f.emit_frame_size + ibs.len() as u32 * f.emit_ib_size;
     let ret = ring::amdgpu_ring_alloc(adev, r, alloc_size);
@@ -363,10 +359,38 @@ pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[amdgpu_ib],
     if need_ctx_switch {
         status |= AMDGPU_HAVE_CTX_SWITCH;
     }
+    // emit_cntxcntl and emit_frame_cntl are the GFX ring's.
+    let gfx = adev.rings[r].funcs.ops == ring::ring_ops::gfx_v9_0_gfx;
+    let (preamble, preemption, gds) = match job {
+        Some(j) => {
+            let jb = adev.jobs.get(&j).unwrap();
+            (jb.preamble_status, jb.preemption_status, jb.gds_size > 0 && jb.gds_base != 0)
+        }
+        None => (0, 0, false),
+    };
+    if job.is_some() && gfx {
+        status |= preamble;
+        status |= preemption;
+        crate::gfx_v9_0::gfx_v9_ring_emit_cntxcntl(adev, r, status);
+    }
+    // Setup initial TMZiness and send it off.
+    let mut secure = false;
+    if job.is_some() && gfx {
+        secure = ib.flags & AMDGPU_IB_FLAGS_SECURE != 0;
+        crate::gfx_v9_0::gfx_v9_0_ring_emit_frame_cntl(adev, r, true, secure);
+    }
     for i in ibs {
         ib = i;
-        ring::amdgpu_ring_emit_ib(adev, r, vmid, ib, status);
+        if job.is_some() && gfx && secure != (ib.flags & AMDGPU_IB_FLAGS_SECURE != 0) {
+            crate::gfx_v9_0::gfx_v9_0_ring_emit_frame_cntl(adev, r, false, secure);
+            secure = !secure;
+            crate::gfx_v9_0::gfx_v9_0_ring_emit_frame_cntl(adev, r, true, secure);
+        }
+        ring::amdgpu_ring_emit_ib(adev, r, vmid, gds, ib, status);
         status &= !AMDGPU_HAVE_CTX_SWITCH;
+    }
+    if job.is_some() && gfx {
+        crate::gfx_v9_0::gfx_v9_0_ring_emit_frame_cntl(adev, r, false, secure);
     }
     // amdgpu_device_invalidate_hdp: nothing on an APU.
     let mut fence_flags = 0;

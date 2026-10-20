@@ -134,8 +134,31 @@ pub fn amdgpu_vm_bo_find(adev: &amdgpu_device, vm: usize, bo: usize) -> Option<u
     None
 }
 
-/// `struct amdgpu_cs_parser`, the part IB chunks use.
+/// A chunk of `drm_amdgpu_cs`, as `amdgpu_cs_pass1` copies it in.
+pub enum cs_chunk {
+    ib(drm_amdgpu_cs_chunk_ib),
+    /// The buffers of the submission (`AMDGPU_CHUNK_ID_BO_HANDLES`).
+    bo_handles(Vec<usize>),
+    /// The user fence: a one-page buffer and the offset in it.
+    fence { bo: usize, offset: u32 },
+    /// `drm_amdgpu_cs_chunk_dep`s; `scheduled` for SCHEDULED_DEPENDENCIES.
+    dependencies { deps: Vec<cs_dep>, scheduled: bool },
+}
+
+/// `struct drm_amdgpu_cs_chunk_dep`.
+#[derive(Clone, Copy)]
+pub struct cs_dep {
+    pub ip_type: u32,
+    pub ip_instance: u32,
+    pub ring: u32,
+    pub ctx_id: u32,
+    pub handle: u64,
+}
+
+/// `struct amdgpu_cs_parser`.
 struct amdgpu_cs_parser {
+    /// The user fence buffer, referenced.
+    uf_bo: Option<usize>,
     ctx_id: u32,
     entities: Vec<usize>,
     jobs: Vec<Option<u64>>,
@@ -192,20 +215,29 @@ fn amdgpu_cs_bo_validate(adev: &mut amdgpu_device, bo: usize) -> i32 {
 
 /// `amdgpu_cs_ioctl` for `ibs` on context `ctx_id`, with the buffers in
 /// `bo_list`: the submission's sequence number and fence.
+/// `amdgpu_cs_ioctl` with IB chunks and a buffer list, as the compositor
+/// submits.
 pub fn amdgpu_cs_ioctl(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, ctx_id: u32,
                        ibs: &[drm_amdgpu_cs_chunk_ib], bo_list: &[usize]) -> Result<(u64, Fence), i32> {
+    let mut chunks: Vec<cs_chunk> = ibs.iter().map(|&i| cs_chunk::ib(i)).collect();
+    chunks.push(cs_chunk::bo_handles(bo_list.to_vec()));
+    amdgpu_cs_ioctl_chunks(adev, fpriv, ctx_id, &chunks)
+}
+
+/// `amdgpu_cs_ioctl`: the sequence number of the gang leader's job and
+/// its fence.
+pub fn amdgpu_cs_ioctl_chunks(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, ctx_id: u32, chunks: &[cs_chunk])
+                              -> Result<(u64, Fence), i32> {
     if !adev.accel_working {
         return Err(-16);
     }
     // amdgpu_cs_parser_init
-    if ibs.is_empty() {
-        return Err(-22);
-    }
     let ctx = fpriv.ctx_mgr.ctx_handles.get(&ctx_id).ok_or(-22)?;
     if ctx.guilty.get() != 0 {
         return Err(-125);
     }
     let mut p = amdgpu_cs_parser {
+        uf_bo: None,
         ctx_id,
         entities: Vec::new(),
         jobs: Vec::new(),
@@ -216,11 +248,10 @@ pub fn amdgpu_cs_ioctl(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, ctx_i
         locked: Vec::new(),
     };
     let r = (|| -> Result<u64, i32> {
-        amdgpu_cs_pass1(adev, fpriv, &mut p, ibs, bo_list)?;
-        amdgpu_cs_pass2(adev, fpriv, &mut p, ibs)?;
+        amdgpu_cs_pass1(adev, fpriv, &mut p, chunks)?;
+        amdgpu_cs_pass2(adev, fpriv, &mut p, chunks)?;
         amdgpu_cs_parser_bos(adev, fpriv, &mut p)?;
-        // amdgpu_cs_patch_jobs: compute and SDMA rings neither parse nor
-        // patch the IBs.
+        // amdgpu_cs_patch_jobs: no ring here parses or patches the IBs.
         amdgpu_cs_vm_handling(adev, fpriv, &mut p)?;
         amdgpu_cs_sync_rings(adev, fpriv, &mut p)?;
         amdgpu_cs_submit(adev, fpriv, &mut p)
@@ -232,21 +263,40 @@ pub fn amdgpu_cs_ioctl(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, ctx_i
 }
 
 /// `amdgpu_cs_pass1`: the jobs, one per entity the IBs name.
-fn amdgpu_cs_pass1(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut amdgpu_cs_parser,
-                   ibs: &[drm_amdgpu_cs_chunk_ib], bo_list: &[usize]) -> Result<(), i32> {
+fn amdgpu_cs_pass1(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut amdgpu_cs_parser, chunks: &[cs_chunk])
+                   -> Result<(), i32> {
     let mut num_ibs = [0u32; AMDGPU_CS_GANG_SIZE as usize];
-    for chunk_ib in ibs {
-        // amdgpu_cs_p1_ib
-        let r = amdgpu_cs_job_idx(adev, fpriv, p, chunk_ib)?;
-        // the IP type is taken as a ring type, as Linux does
-        if num_ibs[r] >= crate::amdgpu_ring::amdgpu_ring_max_ibs(chunk_ib.ip_type) {
-            return Err(-22);
+    let mut uf_offset = 0;
+    for c in chunks {
+        match c {
+            cs_chunk::ib(chunk_ib) => {
+                // amdgpu_cs_p1_ib
+                let r = amdgpu_cs_job_idx(adev, fpriv, p, chunk_ib)?;
+                // the IP type is taken as a ring type, as Linux does
+                if num_ibs[r] >= crate::amdgpu_ring::amdgpu_ring_max_ibs(chunk_ib.ip_type) {
+                    return Err(-22);
+                }
+                num_ibs[r] += 1;
+                p.gang_leader_idx = r;
+            }
+            cs_chunk::fence { bo, offset } => {
+                // Only a single user fence is allowed to simplify handling.
+                if p.uf_bo.is_some() {
+                    return Err(-22);
+                }
+                // amdgpu_cs_p1_user_fence
+                p.uf_bo = Some(obj::amdgpu_bo_ref(adev, *bo));
+                let size = obj::amdgpu_bo_size(adev, *bo);
+                if size != obj::PAGE_SIZE || *offset as u64 > size - 8 {
+                    return Err(-22);
+                }
+                uf_offset = *offset;
+            }
+            // amdgpu_cs_p1_bo_handles
+            cs_chunk::bo_handles(list) => p.bo_list = list.iter().map(|&b| (b, None)).collect(),
+            cs_chunk::dependencies { .. } => {}
         }
-        num_ibs[r] += 1;
-        p.gang_leader_idx = r;
     }
-    // amdgpu_cs_p1_bo_handles
-    p.bo_list = bo_list.iter().map(|&b| (b, None)).collect();
     if p.entities.is_empty() {
         return Err(-22);
     }
@@ -265,14 +315,26 @@ fn amdgpu_cs_pass1(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut a
     if generation != amdgpu_job::job(adev, leader).generation {
         return Err(-125);
     }
+    if p.uf_bo.is_some() {
+        amdgpu_job::job(adev, leader).uf_addr = uf_offset as u64;
+    }
     Ok(())
 }
 
 /// `amdgpu_cs_pass2` with `amdgpu_cs_p2_ib`: the IBs point at the
 /// client's buffer, nothing is copied.
-fn amdgpu_cs_pass2(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut amdgpu_cs_parser,
-                   ibs: &[drm_amdgpu_cs_chunk_ib]) -> Result<(), i32> {
-    for chunk_ib in ibs {
+fn amdgpu_cs_pass2(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut amdgpu_cs_parser, chunks: &[cs_chunk])
+                   -> Result<(), i32> {
+    let (mut ce_preempt, mut de_preempt) = (0, 0);
+    for c in chunks {
+        let chunk_ib = match c {
+            cs_chunk::ib(i) => i,
+            cs_chunk::dependencies { deps, scheduled } => {
+                amdgpu_cs_p2_dependencies(adev, fpriv, p, deps, *scheduled)?;
+                continue;
+            }
+            _ => continue,
+        };
         let r = amdgpu_cs_job_idx(adev, fpriv, p, chunk_ib)?;
         let j = p.jobs[r].unwrap();
         let e = p.entities[r];
@@ -284,10 +346,16 @@ fn amdgpu_cs_pass2(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut a
         if chunk_ib.ib_bytes / 4 > AMDGPU_GFX_SDMA_IB_PACKET_SIZE_MAX_DW {
             return Err(-22);
         }
-        let t = adev.rings[ring].funcs.type_;
-        if t != AMDGPU_RING_TYPE_COMPUTE && t != AMDGPU_RING_TYPE_SDMA {
-            return Err(-22);
+        // no_user_submission and no_user_fence are set for none of these
+        // rings.
+        if chunk_ib.ip_type == AMDGPU_HW_IP_GFX && chunk_ib.flags & AMDGPU_IB_FLAG_PREEMPT != 0 {
+            if chunk_ib.flags & AMDGPU_IB_FLAG_CE != 0 { ce_preempt += 1 } else { de_preempt += 1 }
+            // Each GFX command submit allows only 1 IB max preemptible for CE & DE
+            if ce_preempt > 1 || de_preempt > 1 {
+                return Err(-22);
+            }
         }
+        let _ = ring;
         let job = amdgpu_job::job(adev, j);
         let n = job.num_ibs as usize;
         job.num_ibs += 1;
@@ -305,6 +373,26 @@ fn amdgpu_cs_pass2(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut a
 
 /// `amdgpu_cs_parser_bos`: the buffers locked and validated, the VM's
 /// evicted tables too.
+/// `amdgpu_cs_p2_dependencies`.
+fn amdgpu_cs_p2_dependencies(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut amdgpu_cs_parser,
+                             deps: &[cs_dep], scheduled: bool) -> Result<(), i32> {
+    for d in deps {
+        let ctx = fpriv.ctx_mgr.ctx_handles.get_mut(&d.ctx_id).ok_or(-22)?;
+        crate::amdgpu_ctx::amdgpu_ctx_get_entity(adev, ctx, d.ip_type, d.ip_instance, d.ring)?;
+        let Some(fence) = crate::amdgpu_ctx::amdgpu_ctx_get_fence(ctx, d.ip_type, d.ring, d.handle)? else { continue };
+        let fence = if scheduled {
+            crate::drm_sched::to_drm_sched_fence(&fence).map_or(fence.clone(), |s| s.scheduled.clone())
+        } else {
+            fence
+        };
+        let r = crate::amdgpu_sync::amdgpu_sync_fence(adev, &mut p.sync, Some(&fence));
+        if r != 0 {
+            return Err(r);
+        }
+    }
+    Ok(())
+}
+
 fn amdgpu_cs_parser_bos(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut amdgpu_cs_parser)
                         -> Result<(), i32> {
     let vm = fpriv.vm;
@@ -322,11 +410,24 @@ fn amdgpu_cs_parser_bos(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &
         Line::new().s("amdgpu_vm_validate() failed.").say();
         return Err(r);
     }
+    if let Some(uf) = p.uf_bo {
+        if !p.locked.contains(&uf) {
+            p.locked.push(uf);
+        }
+    }
     for &bo in &p.locked.clone() {
         let r = amdgpu_cs_bo_validate(adev, bo);
         if r != 0 {
             return Err(r);
         }
+    }
+    if let Some(uf) = p.uf_bo {
+        let r = crate::amdgpu_ttm::amdgpu_ttm_alloc_gart(adev, uf);
+        if r != 0 {
+            return Err(r);
+        }
+        let leader = p.jobs[p.gang_leader_idx].unwrap();
+        amdgpu_job::job(adev, leader).uf_addr += obj::amdgpu_bo_gpu_offset(adev, uf);
     }
     Ok(())
 }
@@ -498,6 +599,9 @@ fn amdgpu_cs_submit(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut 
 /// `amdgpu_cs_parser_fini`: jobs not pushed are freed.
 fn amdgpu_cs_parser_fini(adev: &mut amdgpu_device, p: &mut amdgpu_cs_parser) {
     crate::amdgpu_sync::amdgpu_sync_free(&mut p.sync);
+    if let Some(uf) = p.uf_bo.take() {
+        obj::amdgpu_bo_unref(adev, uf);
+    }
     p.fence = None;
     for j in p.jobs.iter_mut().filter_map(|j| j.take()) {
         amdgpu_job::amdgpu_job_free(adev, j);

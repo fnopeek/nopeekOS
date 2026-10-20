@@ -155,6 +155,22 @@ pub fn amdgpu_ctx_free(adev: &mut amdgpu_device, mgr: &mut amdgpu_ctx_mgr, id: u
     0
 }
 
+/// `amdgpu_ctx_get_fence`: the fence of submission `seq` of `entity`;
+/// Err for one not made yet, None for one too old to be kept.
+pub fn amdgpu_ctx_get_fence(ctx: &amdgpu_ctx, hw_ip: u32, ring: u32, seq: u64) -> Result<Option<Fence>, i32> {
+    let Some(c) = ctx.entities.get(hw_ip as usize).and_then(|e| e.get(ring as usize)).and_then(|c| c.as_ref()) else {
+        return Ok(None);
+    };
+    let seq = if seq == !0 { c.sequence - 1 } else { seq };
+    if seq >= c.sequence {
+        return Err(-22);
+    }
+    if seq + (AMDGPU_SCHED_JOBS as u64) < c.sequence {
+        return Ok(None);
+    }
+    Ok(c.fences[(seq as usize) & (AMDGPU_SCHED_JOBS - 1)].clone())
+}
+
 /// `amdgpu_ctx_alloc`: the new context's handle.
 pub fn amdgpu_ctx_alloc(adev: &mut amdgpu_device, mgr: &mut amdgpu_ctx_mgr, vm: usize, priority: i32)
                         -> Result<u32, i32> {

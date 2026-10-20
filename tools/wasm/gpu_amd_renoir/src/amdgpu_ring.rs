@@ -681,11 +681,11 @@ pub fn amdgpu_ring_patch_cond_exec(adev: &mut amdgpu_device, r: usize, offset: O
     crate::amdgpu_gart::kptr_w32(adev, k, offset as u64 * 4, end - start);
 }
 
-/// `amdgpu_ring_emit_ib`; the GFX ring runs no job here, so its VMID is 0.
-pub fn amdgpu_ring_emit_ib(adev: &mut amdgpu_device, r: usize, vmid: u32, ib: &crate::amdgpu_ib::amdgpu_ib,
+/// `amdgpu_ring_emit_ib`: `gds` is whether the job uses GDS.
+pub fn amdgpu_ring_emit_ib(adev: &mut amdgpu_device, r: usize, vmid: u32, gds: bool, ib: &crate::amdgpu_ib::amdgpu_ib,
                            flags: u32) {
     match adev.rings[r].funcs.ops {
-        ring_ops::gfx_v9_0_gfx => crate::gfx_v9_0::gfx_v9_0_ring_emit_ib_gfx(adev, r, ib, flags),
+        ring_ops::gfx_v9_0_gfx => crate::gfx_v9_0::gfx_v9_0_ring_emit_ib_gfx(adev, r, vmid, gds, ib, flags),
         ring_ops::gfx_v9_0_compute => crate::gfx_v9_0::gfx_v9_0_ring_emit_ib_compute(adev, r, vmid, ib, flags),
         ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => {
             crate::sdma_v4_0::sdma_v4_0_ring_emit_ib(adev, r, vmid, ib, flags)
