@@ -332,7 +332,9 @@ Gemessen:
 
 Offen, in dieser Reihenfolge:
 1. **0.16.3 am Geraet**: blockiert WebGL beim Bewegen der Maus noch?
-2. **Fehlende Buchstaben/Elemente**, nur manchmal (zweiter Start im
+2. **Fehlende Buchstaben/Elemente** (mit 0.16.3 weiterhin, Florian: „manchmal
+   beim Mausbewegen gewisse Elemente nicht richtig gerendert oder Buchstaben
+   fehlen" — die Mausbewegung loest die Szene aus), nur manchmal (zweiter Start im
    Vollbild sauber) — also Timing, nicht Layout. Verdacht: Lesen vor dem
    Ende der Gastarbeit. Implizite Sync ist im CS-Port Linux-treu
    (radeonsi setzt nie EXPLICIT_SYNC, geteilte BOs stehen in jeder
