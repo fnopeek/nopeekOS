@@ -323,8 +323,21 @@ fn is_motion(e: &abi::Event) -> bool {
     matches!(e, abi::Event::MouseMove { .. } | abi::Event::Wheel { .. })
 }
 
+/// Popup window → the window it belongs to. A popup has no queue of its
+/// own: its events go to its parent's, which the app polls.
+static POPUP_PARENT: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
+
+pub fn set_popup_parent(popup: u32, parent: Option<u32>) {
+    let mut m = POPUP_PARENT.lock();
+    match parent {
+        Some(p) => { m.insert(popup, p); }
+        None => { m.remove(&popup); }
+    }
+}
+
 /// Push an event into the window's queue.
 pub fn push_event(window_id: u32, event: abi::Event) {
+    let window_id = POPUP_PARENT.lock().get(&window_id).copied().unwrap_or(window_id);
     {
         let mut queues = EVENT_QUEUES.lock();
         let q = queues.entry(window_id).or_insert_with(VecDeque::new);
@@ -402,6 +415,23 @@ pub fn widget_window_exists(window_id: u32) -> bool {
 
 /// Called by compositor::close_window alongside remove_scene to
 /// drop the now-orphaned queue.
+/// The size a committed tree wants, for a popup window. `None` when the
+/// bytes do not decode.
+pub fn commit_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let (&version, body) = bytes.split_first()?;
+    if version != abi::WIRE_VERSION { return None; }
+    let tree: abi::Widget = postcard::from_bytes(body).ok()?;
+    Some(layout::intrinsic_size(&tree))
+}
+
+/// Screen rectangle of anchor `node` in `window_id`'s last layout.
+pub fn anchor_rect(window_id: u32, node: u32) -> Option<(i32, i32, u32, u32)> {
+    let scenes = SCENES.lock();
+    let s = scenes.get(&window_id)?;
+    let r = s.anchors.get(&node)?;
+    Some((s.origin_x + r.x, s.origin_y + r.y, r.w, r.h))
+}
+
 pub fn remove_event_queue(window_id: u32) {
     EVENT_QUEUES.lock().remove(&window_id);
     // The app may be parked in `npk_wait`: wake it so it sees the window is
@@ -2640,10 +2670,10 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
 
     let rect = crate::shade::with_compositor(|c| {
         let win = c.windows.iter().find(|w| w.id.0 == target_id)?;
-        // The same content rect `build_scene` draws with: a panel has no
-        // border. Laid out any other way, every commit lands at the wrong
-        // size and offset until the next frame lays it out again.
-        let border = if win.is_dock || win.is_bar { 0 } else { c.border };
+        // The same content rect `build_scene` draws with: a panel or a
+        // popup has no border. Laid out any other way, every commit lands at
+        // the wrong size and offset until the next frame lays it out again.
+        let border = if win.is_dock || win.is_bar || win.popup_of.is_some() { 0 } else { c.border };
         Some((
             win.content_x(border) as i32,
             win.content_y(border) as i32,

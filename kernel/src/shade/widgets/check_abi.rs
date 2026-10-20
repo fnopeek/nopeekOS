@@ -237,6 +237,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::Zoom { .. }       => 13,
         Event::WheelX { .. }     => 14,
         Event::Slide { .. }      => 15,
+        Event::PopupDone { .. }  => 16,
     }
 }
 

@@ -107,6 +107,11 @@ pub struct Window {
     /// (opt-in via `npk_window_set_light_dismiss`). Used by transient
     /// overlays like the volume slider. Independent of `modal`.
     pub light_dismiss: bool,
+    /// A popup (`npk_popup`): the window it belongs to and the app's number
+    /// for it. Floating, as large as its content, placed by the compositor
+    /// next to an anchor in the parent; see docs/plan/POPUP.md.
+    pub popup_of: Option<WindowId>,
+    pub popup_slot: u8,
 }
 
 #[allow(dead_code)]
@@ -139,6 +144,8 @@ impl Window {
             is_dock: false,
             is_bar: false,
             light_dismiss: false,
+            popup_of: None,
+            popup_slot: 0,
         }
     }
 

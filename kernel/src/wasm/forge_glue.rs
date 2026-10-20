@@ -649,8 +649,7 @@ host_imports! {
     // npk_window_set_panel(edge, behavior, w, h) -> i32
     // Generalised edge panel (see docs/spec/PANEL.md): edge 0=Bottom 1=Top,
     // behavior 0=AutoHide overlay (dock) 1=Strut (bar; at the bottom the
-    // deck) 2=Raised (the bottom strut grown to `h` over the tiles, with
-    // the keyboard, for a menu; Strut again lowers it). Creates/promotes
+    // deck). Creates/promotes
     // the caller's widget window without grabbing focus (like the dock),
     // then hands it to the compositor's panel config. `set_dock` above is
     // the (Bottom, AutoHide) wrapper of this.
@@ -678,6 +677,18 @@ host_imports! {
     // `id` (from npk_window_titles) and focus it. Panels and overlays are
     // refused. 0 / -1.
     ctx fn npk_window_activate(id: i32) -> i32;
+
+    // npk_popup(popup, anchor, gap, ptr, len) -> i32 — open or update popup
+    // `popup` (0..7) of the app's window: a window as large as the scene
+    // tree at ptr..ptr+len, placed next to NodeId `anchor` of the app's own
+    // tree, `gap` px away, flipped and slid to stay on screen. It takes the
+    // keyboard; its events go to the app's queue; a press outside or the
+    // focus moving elsewhere closes it with Event::PopupDone.
+    // docs/plan/POPUP.md. 0 / -1.
+    mem fn npk_popup(popup: i32, anchor: i32, gap: i32, ptr: i32, len: i32) -> i32;
+
+    // npk_popup_close(popup) -> i32 — close popup `popup`; no PopupDone.
+    ctx fn npk_popup_close(popup: i32) -> i32;
 
     // npk_battery() -> i32 — battery state for the bar plugin. Returns -1
     // when no battery is known (desktops/QEMU → segment stays empty), else

@@ -10,11 +10,11 @@
 //! out: narrower buttons, then one button per app, then icons, then "+N"
 //! (`plan_tasks`); a group and the "+N" open a list of their windows.
 //!
-//! While a menu or a list is open the panel is raised (`Bottom, Raised`):
-//! its window grows upward over the tiles and takes the keyboard. It lowers
-//! again on Esc, on a launch, on a click outside the menu, and when the
-//! compositor moves the focus elsewhere (`Event::Focus(false)`). See
-//! docs/spec/PANEL.md.
+//! Menus and lists are popups (`npk_popup`): windows of their own, exactly
+//! as large as their content, anchored at the bar card or at a button. A
+//! popup holds the keyboard while open; it closes on Esc, on a launch, and
+//! by the compositor on a press outside or when the focus moves elsewhere
+//! (`Event::PopupDone`). See docs/spec/PANEL.md, docs/plan/POPUP.md.
 
 #![no_std]
 
@@ -47,6 +47,8 @@ use nopeek_widgets::host;
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_window_set_panel(edge: i32, behavior: i32, w: i32, h: i32) -> i32;
+    fn npk_popup(popup: i32, anchor: i32, gap: i32, ptr: i32, len: i32) -> i32;
+    fn npk_popup_close(popup: i32) -> i32;
     fn npk_window_activate(id: i32) -> i32;
     fn npk_bar_state(buf_ptr: i32, max: i32) -> i32;
     fn npk_battery() -> i32;
@@ -55,9 +57,20 @@ unsafe extern "C" {
     fn npk_launch(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
 }
 
-fn window_set_panel(behavior: i32, w: i32, h: i32) {
+fn window_set_panel(w: i32, h: i32) {
     // SAFETY: FFI without pointers.
-    unsafe { npk_window_set_panel(EDGE_BOTTOM, behavior, w, h) };
+    unsafe { npk_window_set_panel(EDGE_BOTTOM, BEHAVIOR_STRUT, w, h) };
+}
+
+/// Open or update popup `n` with `tree`, next to node `anchor`.
+fn popup(n: i32, anchor: u32, gap: u16, tree: &[u8]) -> bool {
+    // SAFETY: FFI; the kernel validates the range, borrowed for the call.
+    unsafe { npk_popup(n, anchor as i32, gap as i32, tree.as_ptr() as i32, tree.len() as i32) == 0 }
+}
+
+fn popup_close(n: i32) {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_popup_close(n) };
 }
 
 fn window_activate(id: u32) {
@@ -160,15 +173,13 @@ fn s() -> &'static Strings {
 // Panel edge/behavior (docs/spec/PANEL.md).
 const EDGE_BOTTOM: i32 = 0;
 const BEHAVIOR_STRUT: i32 = 1;
-const BEHAVIOR_RAISED: i32 = 2;
+/// The one popup the deck shows at a time: the launcher menu or a list.
+const POPUP: i32 = 0;
 
 /// Panel window height: the 36 px band plus the card's 4 px padding.
 const PANEL_H: i32 = 44;
 /// Content band inside the card.
 const BAND_H: u16 = 36;
-/// Window height while the menu is open. The menu is a popover that flips
-/// above its anchor, so this only has to hold it plus the panel.
-const RAISED_H: i32 = 520;
 /// Launcher button and workspace cells.
 const BTN: u16 = 32;
 const WS_W: u16 = 28;
@@ -227,7 +238,6 @@ const LAUNCHER: u32 = 90_000;
 const POWER: u32 = 90_001;
 const SHOT: u32 = 90_002;
 const VOL_OPEN: u32 = 90_003;
-const MENU_DISMISS: u32 = 90_004;
 const OVERFLOW: u32 = 90_005;
 const GROUP_BASE: u32 = 70_000;      // + slot index
 const NODE_BAR: u32 = 100_000;
@@ -387,9 +397,9 @@ struct Deck {
     catalog: Vec<AppEntry>,
     user: String,
     menu: Option<Menu>,
-    /// Raised on every open: the search field's `FocusRequest`. The click
-    /// on the launcher has just put the focus on the button, so
-    /// `Autofocus` would not take it.
+    /// Raised on every open: the search field's `FocusRequest`. The popup
+    /// stays open when a window list turns into the menu, and `Autofocus`
+    /// takes the focus only on a scene's first commit.
     focus_n: u32,
     query: String,
     filtered: Vec<usize>,
@@ -443,9 +453,15 @@ impl Deck {
         true
     }
 
+    /// The bar, then the popup: its anchor must be laid out first.
     fn commit(&self) {
         match wire::encode(&self.render()) {
             Ok(bytes) => { if !host::scene_commit(&bytes) { log("[deck] commit failed"); } }
+            Err(_) => log("[deck] encode failed"),
+        }
+        let Some((anchor, tree, gap)) = self.render_popup() else { return };
+        match wire::encode(&tree) {
+            Ok(bytes) => { if !popup(POPUP, anchor, gap, &bytes) { log("[deck] popup failed"); } }
             Err(_) => log("[deck] encode failed"),
         }
     }
@@ -455,12 +471,10 @@ impl Deck {
         self.focus_n = self.focus_n.wrapping_add(1).max(1);
         self.query.clear();
         self.refilter();
-        window_set_panel(BEHAVIOR_RAISED, self.screen_w, RAISED_H);
     }
 
     fn close_menu(&mut self) {
-        if self.menu.take().is_none() { return; }
-        window_set_panel(BEHAVIOR_STRUT, self.screen_w, PANEL_H);
+        if self.menu.take().is_some() { popup_close(POPUP); }
     }
 
     /// Open the window list above `anchor`; a second click on the same
@@ -470,9 +484,7 @@ impl Deck {
             self.close_menu();
             return;
         }
-        let was_open = self.menu.is_some();
         self.menu = Some(Menu::Windows { anchor, ids });
-        if !was_open { window_set_panel(BEHAVIOR_RAISED, self.screen_w, RAISED_H); }
     }
 
     /// Close a window list whose windows are all gone.
@@ -567,7 +579,8 @@ impl Deck {
                 }
                 false
             }
-            Event::Focus(false) => { self.close_menu(); true }
+            // The compositor closed it already: forget it, do not close again.
+            Event::PopupDone { popup } if popup == POPUP as u32 => { self.menu = None; true }
             Event::Key(KeyCode::Escape) if self.menu.is_some() => { self.close_menu(); true }
             Event::Key(k) if self.launcher_open() => match k {
                 KeyCode::Enter => { self.launch_selected(); self.close_menu(); true }
@@ -615,7 +628,6 @@ impl Deck {
                 self.toggle_windows(NODE_SLOT_BASE + slot as u32, ids);
                 true
             }
-            MENU_DISMISS => { self.close_menu(); true }
             POWER => { power(); false }
             SHOT => { launch("snap", "region"); false }
             VOL_OPEN => { launch("volume", ""); false }
@@ -697,39 +709,23 @@ impl Deck {
             ],
         };
 
-        // The bar sits at the bottom of the window whatever its height: the
-        // compositor lays the last tree out again at the raised size before
-        // the next commit arrives, and the bar must not move meanwhile.
-        let column = Widget::Column {
-            children: alloc::vec![Widget::Spacer { flex: 1 }, bar],
-            spacing: 0,
-            align: Align::Stretch,
-            modifiers: Vec::new(),
-        };
-        // A popover flips to end at its anchor's top. The launcher menu is
-        // anchored at the card, flush with its left edge; a window list at
-        // its button, which sits `BTN_INSET` inside the card — the gap
-        // below each covers that, so neither overlaps the card.
-        let (anchor, content, gap) = match &self.menu {
-            None => return Widget::Stack { children: alloc::vec![column], modifiers: Vec::new() },
-            Some(Menu::Launcher) => (NODE_BAR, self.render_menu(), MENU_GAP),
+        Widget::Stack { children: alloc::vec![bar], modifiers: Vec::new() }
+    }
+
+    /// The open popup: anchor, tree, gap. The compositor flips it above the
+    /// anchor, since the bar sits at the bottom. The launcher menu is
+    /// anchored at the card, flush with its left edge; a window list at its
+    /// button, which sits `BTN_INSET` inside the card, so its gap adds that
+    /// and neither overlaps the card.
+    fn render_popup(&self) -> Option<(u32, Widget, u16)> {
+        match &self.menu {
+            None => None,
+            Some(Menu::Launcher) => Some((NODE_BAR, self.render_menu(), MENU_GAP)),
             Some(Menu::Windows { anchor, ids }) => {
-                (*anchor, self.render_windows(&wins, ids), MENU_GAP + BTN_INSET)
+                let wins = parse_windows(core::str::from_utf8(&self.wins).unwrap_or(""));
+                Some((*anchor, self.render_windows(&wins, ids), MENU_GAP + BTN_INSET))
             }
-        };
-        let menu = Widget::Column {
-            children: alloc::vec![content, prefab::mark(1, gap, None)],
-            spacing: 0,
-            align: Align::Start,
-            modifiers: Vec::new(),
-        };
-        let popover = Widget::Popover {
-            anchor: NodeId(anchor),
-            child: alloc::boxed::Box::new(menu),
-            on_dismiss: ActionId(MENU_DISMISS),
-            modifiers: Vec::new(),
-        };
-        Widget::Stack { children: alloc::vec![column, popover], modifiers: Vec::new() }
+        }
     }
 
     /// One button of the window list.
@@ -1224,7 +1220,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let mut deck = Deck::new();
-    window_set_panel(BEHAVIOR_STRUT, deck.screen_w, PANEL_H);
+    window_set_panel(deck.screen_w, PANEL_H);
     deck.refresh();
     deck.commit();
 

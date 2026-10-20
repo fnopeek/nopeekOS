@@ -821,6 +821,9 @@ pub enum Event {
     /// when the value changed), `done: true` once on release — apps that
     /// do expensive work (seeking) wait for that one.
     Slide { action: ActionId, value: u16, done: bool },
+    /// The compositor closed popup `popup` (`npk_popup`): a press outside
+    /// it, or the keyboard went elsewhere. Wayland's `xdg_popup.popup_done`.
+    PopupDone { popup: u32 },
     // Appended only.
 }
 

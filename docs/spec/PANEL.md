@@ -127,12 +127,9 @@ Kernel side:
 - `set_panel(Bottom, Strut, w, h)` — a strut at the bottom: the compositor
   reserves `margin + h` there (`BottomStrut`, `bottom_band()`) and lays the
   tiles above it. Independent of the top strut; both may exist.
-- `set_panel(Bottom, Raised, w, h)` — the launcher menu. The window grows
-  upward to `h` over the tiles, the band and the tiling stay, and the panel
-  takes the keyboard (the one case a panel may hold the focus). Strut again
-  lowers it and hands the focus back to the window that had it. If the focus
-  moves elsewhere meanwhile (a click on a tile, Mod+number), the app gets
-  `Event::Focus(false)` and lowers itself.
+- Menus are popups (`npk_popup`, docs/plan/POPUP.md): windows of their
+  own, as large as their content, anchored at a node of the panel's tree.
+  The panel itself never grows and never holds the keyboard.
 - `npk_window_titles` lines carry two more columns:
   `<flags>\t<workspace>\t<title>\t<id>\t<caption>` — the window id and
   what the bar shows for it, for a SHELL caller only (a caption is another
@@ -147,12 +144,13 @@ app with the most windows first; then icons only; then a "+N" button. The
 clock and the readouts never move: the deck computes the list's budget from
 the screen width minus fixed cell widths, since the layout engine does not
 shrink children and the app cannot measure text. The focused window always
-keeps a place. A group and "+N" open a list of their windows in a popover.
+keeps a place. A group and "+N" open a list of their windows in a popup.
 
-The menu is a `Popover` anchored at the bar card, so a click outside
-it dismisses it without app code. Its search field takes the focus through
-`FocusRequest`: the click on the button has just put the focus there, and
-`Autofocus` only fires when nothing holds it.
+The launcher menu is a popup anchored at the bar card, a window list one
+anchored at its button; the compositor dismisses either on a press outside
+(`Event::PopupDone`). The search field takes the focus through
+`FocusRequest`: the popup stays open when a list turns into the menu, and
+`Autofocus` only fires on a scene's first commit.
 
 Open: a files section in the menu (needs the extension → app table that
 `loft` keeps, shared through the SDK instead of copied), a settings app for

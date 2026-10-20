@@ -1092,6 +1092,11 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 }
 
 fn cleanup_instance_state(state: &mut HostState) {
+    // An app's popups do not outlive it, even when its window does.
+    if state.widget_window_id != 0 {
+        let parent = crate::shade::WindowId(state.widget_window_id);
+        crate::shade::with_compositor(|c| c.close_popups_of(parent, false));
+    }
     // A dead driver's snapshot must not read as live numbers.
     crate::drivers::report::clear(&state.module_name);
     // Otherwise an app closed mid-load holds its fetch slots and reserved

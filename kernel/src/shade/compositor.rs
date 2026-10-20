@@ -226,20 +226,14 @@ fn display_title(w: &Window) -> alloc::string::String {
 
 /// Bottom strut panel registered via `npk_window_set_panel(Bottom, Strut)`:
 /// a bar and a dock in one (`deck.wasm`). Reserves a `margin + pill_h` band
-/// at the bottom like `TopStrut` does at the top. `Bottom, Raised` grows the
-/// window upward over the tiles for a menu and gives it the keyboard; the
-/// band stays as it is.
+/// at the bottom like `TopStrut` does at the top. Its menus are popups.
 #[derive(Clone, Copy)]
 pub struct BottomStrut {
     pub id: WindowId,
-    /// Band height in px (set_panel `h` with behavior Strut).
+    /// Band height in px (set_panel `h`).
     pub pill_h: u32,
     /// Gap to the screen edge / tiles (px).
     pub margin: u32,
-    /// Window height while raised; 0 = lowered.
-    pub raised: u32,
-    /// Focus before the raise, given back on lowering.
-    pub prev_focus: Option<WindowId>,
 }
 
 /// Compositor manages all windows, the bar, and rendering state.
@@ -308,6 +302,8 @@ pub struct Compositor {
     pub top_strut: Option<TopStrut>,
     /// Bottom strut panel, if a deck app has registered one.
     pub bottom_strut: Option<BottomStrut>,
+    /// The window that had the keyboard before the first popup took it.
+    pub popup_prev_focus: Option<WindowId>,
     /// Text layer of each terminal window, by window id.
     pub term_layers: alloc::collections::BTreeMap<u32, PixelBuffer>,
 }
@@ -361,6 +357,7 @@ impl Compositor {
             dock: None,
             top_strut: None,
             bottom_strut: None,
+            popup_prev_focus: None,
             term_layers: alloc::collections::BTreeMap::new(),
         }
     }
@@ -485,8 +482,7 @@ impl Compositor {
         self.top_strut.map(|s| s.margin + s.pill_h).unwrap_or(0)
     }
 
-    /// Height reserved at the bottom for the deck strut (0 if none). The
-    /// raised height is an overlay and reserves nothing.
+    /// Height reserved at the bottom for the deck strut (0 if none).
     fn bottom_band(&self) -> u32 {
         self.bottom_strut.map(|s| s.margin + s.pill_h).unwrap_or(0)
     }
@@ -887,22 +883,20 @@ impl Compositor {
 
     /// `npk_window_set_panel` host fn — configure `id` as an edge panel.
     /// `edge`: 0=Bottom, 1=Top. `behavior`: 0=AutoHide overlay (dock),
-    /// 1=Strut (bar), 2=Raised (a bottom strut grown upward for a menu).
-    /// Bottom+AutoHide is the dock (slide + handle); Top+Strut is the bar;
-    /// Bottom+Strut is the deck. Returns false for other combinations.
+    /// 1=Strut (bar). Bottom+AutoHide is the dock (slide + handle);
+    /// Top+Strut is the bar; Bottom+Strut is the deck. Returns false for
+    /// other combinations.
     pub fn set_panel(&mut self, id: WindowId, edge: u8, behavior: u8, w: u32, h: u32) -> bool {
         match (edge, behavior) {
             (0, 0) => self.set_dock_panel(id, w, h),
             (1, 1) => self.set_bar_panel(id, w, h),
             (0, 1) => self.set_bottom_panel(id, h),
-            (0, 2) => self.raise_bottom_panel(id, h),
             _ => false,
         }
     }
 
     /// Bottom strut: full width minus the margin, always visible, global
-    /// across workspaces. A second call on a raised panel lowers it and
-    /// gives the keyboard back to the window that had it.
+    /// across workspaces, never focused.
     fn set_bottom_panel(&mut self, id: WindowId, h: u32) -> bool {
         let screen_w = self.screen_w;
         let screen_h = self.screen_h;
@@ -911,7 +905,6 @@ impl Compositor {
             .unwrap_or(6);
         let pill_h = h.max(22);
         let active_ws = self.active_workspace;
-        let prev = self.bottom_strut.filter(|s| s.id == id);
 
         let found = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
             win.state = crate::shade::window::WindowState::Floating;
@@ -931,45 +924,10 @@ impl Compositor {
         };
         if !found { return false; }
 
-        self.bottom_strut = Some(BottomStrut { id, pill_h, margin, raised: 0, prev_focus: None });
+        self.bottom_strut = Some(BottomStrut { id, pill_h, margin });
         crate::shade::widgets::palette::set_deck_window(Some(id.0));
-        if let Some(p) = prev.filter(|p| p.raised != 0) {
-            let back = p.prev_focus.filter(|f| self.windows.iter()
-                .any(|w| w.id == *f && w.workspace == self.active_workspace && w.visible));
-            match back {
-                Some(f) => self.focus_window(f),
-                None => self.refocus_active_workspace(),
-            }
-        }
         if self.focused == Some(id) { self.focused = None; }
         self.retile();
-        self.z_order.retain(|&wid| wid != id);
-        self.z_order.insert(0, id);
-        self.pin_overlays_to_front();
-        self.needs_full_redraw = true;
-        true
-    }
-
-    /// Grow the bottom strut window upward to `h` px over the tiles and
-    /// give it the keyboard (a menu with a search field). The band and the
-    /// tiling stay as they are. Lowered again by `set_bottom_panel`; the app
-    /// learns of a focus moved elsewhere through `Event::Focus(false)`.
-    fn raise_bottom_panel(&mut self, id: WindowId, h: u32) -> bool {
-        let Some(mut s) = self.bottom_strut.filter(|s| s.id == id) else { return false };
-        let raised = h.max(s.pill_h).min(self.screen_h.saturating_sub(2 * s.margin));
-        if s.raised == 0 {
-            s.prev_focus = self.focused.filter(|f| *f != id);
-        }
-        s.raised = raised;
-        self.bottom_strut = Some(s);
-        let screen_h = self.screen_h;
-        if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
-            win.y = screen_h.saturating_sub(s.margin + raised);
-            win.height = raised;
-            win.dirty = true;
-        }
-        self.focused = Some(id);
-        self.set_focused_flag(id);
         self.z_order.retain(|&wid| wid != id);
         self.z_order.insert(0, id);
         self.pin_overlays_to_front();
@@ -1413,6 +1371,13 @@ impl Compositor {
             self.close_window(WindowId(picker));
         }
 
+        // A popup closes as a popup; a window takes its popups with it.
+        if self.windows.iter().any(|w| w.id == id && w.popup_of.is_some()) {
+            self.close_popup(id, true);
+            return;
+        }
+        self.close_popups_of(id, false);
+
         // If the dock app's window goes away, forget the dock so the
         // reveal/tick machinery no-ops.
         if self.dock.map(|d| d.id) == Some(id) {
@@ -1541,8 +1506,7 @@ impl Compositor {
         // Panels (dock / bar) are never focusable — focusing them would
         // route keyboard input into a window that ignores it (the shell
         // appears to hang). Refuse, no matter which path asked.
-        let raised_deck = self.bottom_strut.is_some_and(|s| s.id == id && s.raised != 0);
-        if !raised_deck && self.windows.iter().any(|w| w.id == id && (w.is_dock || w.is_bar)) {
+        if self.windows.iter().any(|w| w.id == id && (w.is_dock || w.is_bar)) {
             return;
         }
         self.focused = Some(id);
@@ -1579,12 +1543,144 @@ impl Compositor {
         true
     }
 
+    // === Popups — docs/plan/POPUP.md, after xdg_popup ===
+
+    /// Popup `slot` of `parent`, if it is open.
+    pub fn popup_window(&self, parent: WindowId, slot: u8) -> Option<WindowId> {
+        self.windows.iter()
+            .find(|w| w.popup_of == Some(parent) && w.popup_slot == slot)
+            .map(|w| w.id)
+    }
+
+    /// Open popup `slot` of `parent`: a floating widget window, hidden until
+    /// `place_popup`, holding the keyboard (`xdg_popup.grab`).
+    pub fn open_popup(&mut self, parent: WindowId, slot: u8) -> Option<WindowId> {
+        let (ws, title, panel) = self.windows.iter().find(|w| w.id == parent)
+            .map(|w| (w.workspace, w.title.clone(), w.is_bar || w.is_dock))?;
+        let id = WindowId(self.next_id);
+        self.next_id += 1;
+        let mut win = Window::new(id, &title, 0, 0, 1, 1);
+        win.kind = crate::shade::window::WindowKind::Widget;
+        win.terminal_idx = 255;
+        win.state = WindowState::Floating;
+        win.is_overlay = true;
+        win.workspace = ws;
+        win.visible = false;
+        win.popup_of = Some(parent);
+        win.popup_slot = slot;
+        let first = !self.windows.iter().any(|w| w.popup_of.is_some());
+        self.windows.push(win);
+        self.z_order.insert(0, id);
+        crate::shade::widgets::set_popup_parent(id.0, Some(parent.0));
+        crate::shade::widgets::palette::set_popup_panel(id.0, panel);
+        if first { self.popup_prev_focus = self.focused; }
+        self.focus_window(id);
+        self.pin_overlays_to_front();
+        Some(id)
+    }
+
+    /// Size and place a popup next to `anchor` (screen rectangle): below
+    /// it at `gap`, flipped above when it does not fit (`flip_y`), slid
+    /// sideways to stay on screen (`slide_x`).
+    pub fn place_popup(&mut self, id: WindowId, anchor: (i32, i32, u32, u32), w: u32, h: u32, gap: u32) {
+        let (sw, sh) = (self.screen_w as i32, self.screen_h as i32);
+        let w = w.clamp(1, self.screen_w);
+        let h = h.clamp(1, self.screen_h);
+        let (ax, ay, _aw, ah) = anchor;
+        let below = ay + ah as i32 + gap as i32;
+        let above = ay - gap as i32 - h as i32;
+        let y = if below + h as i32 <= sh {
+            below
+        } else if above >= 0 {
+            above
+        } else {
+            (sh - h as i32).max(0)
+        };
+        let x = ax.clamp(0, (sw - w as i32).max(0));
+        let Some(win) = self.windows.iter_mut().find(|win| win.id == id) else { return };
+        // Only a popup that appears, moves or changes size uncovers what was
+        // behind it; otherwise its own damage is enough.
+        let moved = !win.visible || (win.x, win.y, win.width, win.height) != (x as u32, y as u32, w, h);
+        win.x = x as u32;
+        win.y = y as u32;
+        win.width = w;
+        win.height = h;
+        win.visible = true;
+        win.dirty = true;
+        if moved { self.needs_full_redraw = true; }
+    }
+
+    /// Take a popup off the screen, telling its app when `done`. Focus is
+    /// the caller's business.
+    fn drop_popup(&mut self, id: WindowId, done: bool) {
+        let Some((parent, slot)) = self.windows.iter().find(|w| w.id == id)
+            .and_then(|w| w.popup_of.map(|p| (p, w.popup_slot))) else { return };
+        if done {
+            crate::shade::widgets::push_event(parent.0,
+                crate::shade::widgets::abi::Event::PopupDone { popup: slot as u32 });
+        }
+        crate::shade::widgets::remove_scene(id.0);
+        crate::shade::widgets::remove_event_queue(id.0);
+        crate::shade::widgets::set_popup_parent(id.0, None);
+        crate::shade::widgets::palette::set_popup_panel(id.0, false);
+        self.windows.retain(|w| w.id != id);
+        self.z_order.retain(|&w| w != id);
+        if self.focused == Some(id) { self.focused = None; }
+        self.needs_full_redraw = true;
+    }
+
+    /// Close a popup. The keyboard goes to another popup if one is left,
+    /// else back to the window that had it before the first one opened.
+    pub fn close_popup(&mut self, id: WindowId, done: bool) {
+        let had_focus = self.focused == Some(id);
+        self.drop_popup(id, done);
+        if !had_focus { return; }
+        if let Some(other) = self.windows.iter().find(|w| w.popup_of.is_some()).map(|w| w.id) {
+            self.focus_window(other);
+            return;
+        }
+        let back = self.popup_prev_focus.take().filter(|f| self.windows.iter()
+            .any(|w| w.id == *f && w.workspace == self.active_workspace && w.visible));
+        match back {
+            Some(f) => self.focus_window(f),
+            None => self.refocus_active_workspace(),
+        }
+    }
+
+    /// Close every popup of `parent`.
+    pub fn close_popups_of(&mut self, parent: WindowId, done: bool) {
+        let ids: Vec<WindowId> = self.windows.iter()
+            .filter(|w| w.popup_of == Some(parent)).map(|w| w.id).collect();
+        for id in ids { self.close_popup(id, done); }
+    }
+
+    /// A press outside every popup dismisses them all and is consumed.
+    /// True when it did.
+    fn popup_dismiss_at(&mut self, x: i32, y: i32) -> bool {
+        let popups: Vec<(WindowId, bool)> = self.windows.iter()
+            .filter(|w| w.popup_of.is_some() && w.visible)
+            .map(|w| (w.id, x >= w.x as i32 && x < (w.x + w.width) as i32
+                && y >= w.y as i32 && y < (w.y + w.height) as i32))
+            .collect();
+        if popups.is_empty() || popups.iter().any(|&(_, inside)| inside) { return false; }
+        for (id, _) in popups { self.close_popup(id, true); }
+        true
+    }
+
     /// Keep the dock window at the front of the z-order (topmost). Render
     /// passes iterate `z_order.rev()`, drawing index 0 last → on top.
     fn pin_overlays_to_front(&mut self) {
         if let Some(dock) = self.dock {
             self.z_order.retain(|&wid| wid != dock.id);
             self.z_order.insert(0, dock.id);
+        }
+        // Popups above every panel and window they open from.
+        let popups: Vec<WindowId> = self.z_order.iter().rev().copied()
+            .filter(|id| self.windows.iter().any(|w| w.id == *id && w.popup_of.is_some()))
+            .collect();
+        for id in popups {
+            self.z_order.retain(|&wid| wid != id);
+            self.z_order.insert(0, id);
         }
         // A modal dialog must sit above everything, and this is not
         // cosmetic: `modal_blocks` swallows every click outside it, so a
@@ -1600,6 +1696,9 @@ impl Compositor {
     /// Switch to workspace.
     pub fn switch_workspace(&mut self, ws: u8) {
         if ws == self.active_workspace { return; }
+        let popups: Vec<WindowId> = self.windows.iter()
+            .filter(|w| w.popup_of.is_some()).map(|w| w.id).collect();
+        for id in popups { self.close_popup(id, true); }
         // The keys go up to 9; only the workspaces the bar actually shows
         // exist, and switching past them would leave it with nothing to mark.
         if ws >= self.workspace_count { return; }
@@ -1930,7 +2029,7 @@ impl Compositor {
         for &wid in self.z_order.iter().rev() {
             let Some(win) = self.windows.iter().find(|w| w.id == wid) else { continue };
             if win.workspace != self.active_workspace || !win.visible { continue; }
-            let panel = win.is_dock || win.is_bar;
+            let panel = win.is_dock || win.is_bar || win.popup_of.is_some();
             let cb = if panel { 0 } else { border };
             plans.push(Plan {
                 id: win.id,
@@ -2131,12 +2230,15 @@ impl Compositor {
                 if win.focused { gained = true; }
             }
         }
-        // A raised deck that lost the keyboard closes its menu.
-        if let Some(s) = self.bottom_strut.as_mut() {
-            if s.raised != 0 && s.id != focused_id {
-                s.prev_focus = None;
-                crate::shade::widgets::push_event(
-                    s.id.0, crate::shade::widgets::abi::Event::Focus(false));
+        // The keyboard went to a window that is not a popup: the user looks
+        // elsewhere, and every popup is dismissed (`xdg_popup.popup_done`).
+        let to_popup = self.windows.iter().any(|w| w.id == focused_id && w.popup_of.is_some());
+        if !to_popup {
+            let popups: Vec<WindowId> = self.windows.iter()
+                .filter(|w| w.popup_of.is_some()).map(|w| w.id).collect();
+            if !popups.is_empty() {
+                self.popup_prev_focus = None;
+                for p in popups { self.drop_popup(p, true); }
             }
         }
         // Flash only on a real change of focus — every path routes through
@@ -2234,6 +2336,12 @@ impl Compositor {
             && self.modal_blocks(mx, my)
         {
             return false;
+        }
+
+        if self.drag.is_none() && (self.mouse.left_clicked() || self.mouse.right_clicked())
+            && self.popup_dismiss_at(mx, my)
+        {
+            return true;
         }
 
         let mod_held = crate::keyboard::is_super_held();
@@ -2334,6 +2442,12 @@ impl Compositor {
         let mx = self.mouse.x;
         let my = self.mouse.y;
         let mod_held = crate::keyboard::is_super_held();
+
+        if self.drag.is_none() && (self.mouse.left_clicked() || self.mouse.right_clicked())
+            && self.popup_dismiss_at(mx, my)
+        {
+            return true;
+        }
 
         // Active drag
         if let Some(mut drag) = self.drag {

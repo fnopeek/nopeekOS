@@ -272,6 +272,12 @@ pub(super) const SLIDER_THUMB: u32 = 14;
 /// MinWidth/MaxWidth modifiers clamp the width *after* intrinsic
 /// measurement so containers see the constrained value during flex
 /// distribution.
+/// The size a tree wants: what a popup window is made as large as.
+pub fn intrinsic_size(w: &Widget) -> (u32, u32) {
+    let s = measure(w);
+    (s.w, s.h)
+}
+
 fn measure(w: &Widget) -> Size {
     let intrinsic = measure_intrinsic(w);
     apply_size_constraints(intrinsic, mods_of_widget(w))

@@ -239,7 +239,24 @@ pub fn for_window(window_id: u32) -> Palette {
 pub fn is_panel(window_id: u32) -> bool {
     window_id != 0 && (BAR_WINDOW.load(Ordering::Relaxed) == window_id
         || DOCK_WINDOW.load(Ordering::Relaxed) == window_id
-        || DECK_WINDOW.load(Ordering::Relaxed) == window_id)
+        || DECK_WINDOW.load(Ordering::Relaxed) == window_id
+        || PANEL_POPUPS.iter().any(|p| p.load(Ordering::Relaxed) == window_id))
+}
+
+/// Popups of a panel, which share its glass palette. A popup past the
+/// slots takes the desktop's palette, which is legible too.
+static PANEL_POPUPS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+
+pub fn set_popup_panel(window_id: u32, on: bool) {
+    if on {
+        for p in PANEL_POPUPS.iter() {
+            if p.compare_exchange(0, window_id, Ordering::Relaxed, Ordering::Relaxed).is_ok() { return; }
+        }
+    } else {
+        for p in PANEL_POPUPS.iter() {
+            let _ = p.compare_exchange(window_id, 0, Ordering::Relaxed, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Opacity (0..255) of floating chrome — the bar card and the dock tray.

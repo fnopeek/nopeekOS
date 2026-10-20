@@ -437,12 +437,10 @@ pub(crate) fn npk_window_set_panel(ctx: &mut HostState, edge: i32, behavior: i32
     }
     if w <= 0 || h <= 0 || edge < 0 || behavior < 0 { return -1; }
     // A panel is a strip along an edge, and its size becomes a pixel buffer
-    // on the next commit: clamp it to a strip of the screen. A raised one
-    // holds a menu and may take the height of the screen, like the dock.
+    // on the next commit: clamp it to a strip of the screen.
     let fb = crate::framebuffer::get_info();
     let w = (w as u32).min(fb.width) as i32;
-    let h_max = if behavior == 2 { fb.height } else { fb.height / 4 };
-    let h = (h as u32).min(h_max) as i32;
+    let h = (h as u32).min(fb.height / 4) as i32;
 
     let mut wid = ctx.widget_window_id;
     if wid == 0 {
@@ -619,6 +617,63 @@ pub(crate) fn npk_workspace_switch(ctx: &mut HostState, n: i32) -> i32 {
     }
     if !(0..=255).contains(&n) { return -1; }
     crate::shade::with_compositor(|c| c.switch_workspace(n as u8));
+    crate::shade::request_render();
+    0
+}
+
+/// Popups an app may hold open at once (`npk_popup`'s number).
+const MAX_POPUPS: i32 = 8;
+
+/// Open or update popup `popup` of the app's window: a window of its own,
+/// as large as `ptr..ptr+len` (a scene tree) wants, next to anchor node
+/// `anchor` in the app's own tree, `gap` px away. docs/plan/POPUP.md.
+pub(crate) fn npk_popup(mem: &mut [u8], ctx: &mut HostState, popup: i32, anchor: i32, gap: i32,
+    ptr: i32, len: i32) -> i32
+{
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+        return -1;
+    }
+    let parent = ctx.widget_window_id;
+    if parent == 0 || !(0..MAX_POPUPS).contains(&popup) || !(0..=256).contains(&gap) { return -1; }
+    // The same cap as a scene commit.
+    const MAX_SCENE_BYTES: usize = 16 * 1024 * 1024;
+    let payload: alloc::vec::Vec<u8> = match glen(len)
+        .filter(|&n| n <= MAX_SCENE_BYTES)
+        .and_then(|n| guest(mem, ptr, n))
+    {
+        Some(b) if !b.is_empty() => b.to_vec(),
+        _ => return -1,
+    };
+    let Some((w, h)) = crate::shade::widgets::commit_size(&payload) else { return -1 };
+    let Some(rect) = crate::shade::widgets::anchor_rect(parent, anchor as u32) else { return -1 };
+    let parent_id = crate::shade::WindowId(parent);
+    let slot = popup as u8;
+    let id = crate::shade::with_compositor(|c| {
+        let id = c.popup_window(parent_id, slot).or_else(|| c.open_popup(parent_id, slot))?;
+        c.place_popup(id, rect, w, h, gap as u32);
+        Some(id)
+    }).flatten();
+    let Some(id) = id else { return -1 };
+    let module_name = ctx.module_name.clone();
+    let r = crate::shade::widgets::scene_commit(&payload, id.0, &module_name);
+    crate::shade::request_render();
+    if r >= 0 { 0 } else { -1 }
+}
+
+/// Close popup `popup` of the app's window. No `PopupDone`: the app asked.
+pub(crate) fn npk_popup_close(ctx: &mut HostState, popup: i32) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+        return -1;
+    }
+    let parent = ctx.widget_window_id;
+    if parent == 0 || !(0..MAX_POPUPS).contains(&popup) { return -1; }
+    crate::shade::with_compositor(|c| {
+        if let Some(id) = c.popup_window(crate::shade::WindowId(parent), popup as u8) {
+            c.close_popup(id, false);
+        }
+    });
     crate::shade::request_render();
     0
 }
