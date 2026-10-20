@@ -540,6 +540,41 @@ fn ccmd_reserve_vmid(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> R
     Ok(r)
 }
 
+/// The guest object whose VRAM is exactly `offsets` (one per page, from
+/// the start of VRAM): what `drm_gem_prime_import` hands back for a dma-buf
+/// this device exported itself.
+pub fn guest_vram_object(adev: &amdgpu_device, vc: &vclients, offsets: &[u64]) -> Option<usize> {
+    const PAGE_SIZE: u64 = 4096;
+    for c in vc.clients.values() {
+        for o in c.resources.values() {
+            let b = crate::amdgpu_object::bo(adev, o.bo);
+            let res = b.tbo.resource.as_ref();
+            if res.is_none_or(|r| r.mem_type != TTM_PL_VRAM) {
+                continue;
+            }
+            let size = crate::amdgpu_object::amdgpu_bo_size(adev, o.bo);
+            if size != offsets.len() as u64 * PAGE_SIZE {
+                continue;
+            }
+            let mut i = 0;
+            let mut same = true;
+            let mut cur = crate::amdgpu_res_cursor::amdgpu_res_first(adev, res, 0, size);
+            while same && cur.remaining != 0 {
+                for p in 0..cur.size / PAGE_SIZE {
+                    same &= offsets.get(i) == Some(&(cur.start + p * PAGE_SIZE));
+                    i += 1;
+                }
+                let n = cur.size;
+                crate::amdgpu_res_cursor::amdgpu_res_next(adev, res, &mut cur, n);
+            }
+            if same && i == offsets.len() {
+                return Some(o.bo);
+            }
+        }
+    }
+    None
+}
+
 /// `OP_BLOB`, `amdgpu_renderer_get_blob`: the object under `blob_id`
 /// becomes resource `res_id`. The reply names its pages for the kernel:
 /// map info, kind (0: the GTT pages of `tt`, 1: VRAM ranges in BAR0), the

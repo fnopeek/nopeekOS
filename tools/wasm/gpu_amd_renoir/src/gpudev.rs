@@ -127,6 +127,12 @@ fn bind_framebuffer(adev: &amdgpu_device, b: &mut bo) -> bool {
 
 /// Buffer `id`'s pages imported and pinned in GTT.
 fn import(adev: &mut amdgpu_device, id: u32, b: &bo) -> Result<usize, i32> {
+    let pages = bo_page_list(id, b)?;
+    import_pages(adev, pages)
+}
+
+/// The bus address of each page of buffer `id`.
+fn bo_page_list(id: u32, b: &bo) -> Result<Vec<u64>, i32> {
     if b.pages == 0 || b.offset as u64 >= PAGE || b.size + b.offset as u64 > b.pages as u64 * PAGE {
         return Err(-EINVAL);
     }
@@ -140,6 +146,11 @@ fn import(adev: &mut amdgpu_device, id: u32, b: &bo) -> Result<usize, i32> {
         }
         pages.extend_from_slice(&list[..n as usize]);
     }
+    Ok(pages)
+}
+
+/// System pages imported and pinned in GTT.
+fn import_pages(adev: &mut amdgpu_device, pages: Vec<u64>) -> Result<usize, i32> {
     let h = obj::amdgpu_dma_buf_create_obj(adev, pages)?;
     let r = obj::amdgpu_bo_pin(adev, h, AMDGPU_GEM_DOMAIN_GTT);
     if r != 0 {
@@ -401,10 +412,32 @@ fn bo_add(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(), i3
     if svc.dyn_bos.len() == MAX_DYN {
         return Err(-ENOSPC);
     }
-    let c = svc.composer.as_mut().ok_or(-EINVAL)?;
+    if svc.composer.is_none() {
+        return Err(-EINVAL);
+    }
     let mut b = bo_info(id).ok_or(-EINVAL)?;
-    let h = import(adev, id, &b)?;
+    let pages = bo_page_list(id, &b)?;
+    // A guest's VRAM object comes back as itself (`drm_gem_prime_import` of
+    // a dma-buf this device exported): its pages lie in the CPU's window
+    // onto VRAM.
+    let (base, size) = (adev.gmc.aper_base, adev.gmc.aper_size);
+    let offsets: Option<Vec<u64>> =
+        pages.iter().map(|&p| p.checked_sub(base).filter(|&o| o < size)).collect();
+    let own = offsets.and_then(|o| crate::amdgpu_virtio::guest_vram_object(adev, &svc.native, &o));
+    let h = match own {
+        Some(g) => {
+            let h = obj::amdgpu_bo_ref(adev, g);
+            let r = obj::amdgpu_bo_pin(adev, h, AMDGPU_GEM_DOMAIN_VRAM);
+            if r != 0 {
+                obj::amdgpu_bo_unref(adev, h);
+                return Err(r);
+            }
+            h
+        }
+        None => import_pages(adev, pages)?,
+    };
     b.handle = Some(h);
+    let c = svc.composer.as_mut().ok_or(-EINVAL)?;
     if let Err(e) = map_import(adev, c, &mut b) {
         obj::amdgpu_bo_unpin(adev, h);
         obj::amdgpu_bo_unref(adev, h);
