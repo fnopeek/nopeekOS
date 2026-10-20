@@ -8,11 +8,13 @@
 //! The launcher opens a menu above the button: a search field over the app
 //! catalog, the user, power. The window list gives way when the screen runs
 //! out: narrower buttons, then one button per app, then icons, then "+N"
-//! (`plan_tasks`); a group and the "+N" open a list of their windows. While it is open the panel is raised
-//! (`Bottom, Raised`): its window grows upward over the tiles and takes the
-//! keyboard. It lowers again on Esc, on a launch, on a click outside the
-//! menu, and when the compositor moves the focus elsewhere
-//! (`Event::Focus(false)`). See docs/spec/PANEL.md.
+//! (`plan_tasks`); a group and the "+N" open a list of their windows.
+//!
+//! While a menu or a list is open the panel is raised (`Bottom, Raised`):
+//! its window grows upward over the tiles and takes the keyboard. It lowers
+//! again on Esc, on a launch, on a click outside the menu, and when the
+//! compositor moves the focus elsewhere (`Event::Focus(false)`). See
+//! docs/spec/PANEL.md.
 
 #![no_std]
 
