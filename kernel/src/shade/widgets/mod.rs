@@ -2640,7 +2640,10 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
 
     let rect = crate::shade::with_compositor(|c| {
         let win = c.windows.iter().find(|w| w.id.0 == target_id)?;
-        let border = c.border;
+        // The same content rect `build_scene` draws with: a panel has no
+        // border. Laid out any other way, every commit lands at the wrong
+        // size and offset until the next frame lays it out again.
+        let border = if win.is_dock || win.is_bar { 0 } else { c.border };
         Some((
             win.content_x(border) as i32,
             win.content_y(border) as i32,

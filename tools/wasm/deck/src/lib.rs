@@ -494,17 +494,19 @@ impl Deck {
             ],
         };
 
-        if !self.open {
-            return Widget::Stack { children: alloc::vec![bar], modifiers: Vec::new() };
-        }
-        // Raised: the bar sits at the bottom of the taller window, the menu
-        // floats above the launcher button.
+        // The bar sits at the bottom of the window whatever its height: the
+        // compositor lays the last tree out again at the raised size before
+        // the next commit arrives, and the bar must not move meanwhile.
         let column = Widget::Column {
             children: alloc::vec![Widget::Spacer { flex: 1 }, bar],
             spacing: 0,
             align: Align::Stretch,
             modifiers: Vec::new(),
         };
+        if !self.open {
+            return Widget::Stack { children: alloc::vec![column], modifiers: Vec::new() };
+        }
+        // Raised: the menu floats above the launcher button.
         let popover = Widget::Popover {
             anchor: NodeId(NODE_LAUNCHER),
             child: alloc::boxed::Box::new(self.render_menu()),
