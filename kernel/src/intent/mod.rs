@@ -1278,6 +1278,9 @@ fn core0_wait() {
     if crate::xhci::needs_poll() || crate::xhci::take_missed_drain() {
         crate::interrupts::without_interrupts(crate::xhci::poll_events_irq);
     }
+    // A USB device plugged in or out: enumerated or torn down here, outside
+    // the interrupt that noticed it.
+    crate::xhci::hotplug();
     let busy = crate::shade::needs_tick()
         || crate::net::needs_tick()
         || crate::xhci::repeat_active()

@@ -106,7 +106,6 @@ const TRB_TRT_IN:    u32 = 3 << 16; // Transfer Type: IN Data
 // Event TRB types (bits [15:10] of control)
 const EVT_TRANSFER:      u32 = 32 << 10;
 const EVT_CMD_COMPLETE:  u32 = 33 << 10;
-#[allow(dead_code)]
 const EVT_PORT_STATUS:   u32 = 34 << 10;
 
 // Completion codes
@@ -433,6 +432,10 @@ struct XhciState {
     /// USB devices with HID interfaces, and the interfaces.
     hid_devs: Vec<HidUsbDev>,
     hid: Vec<HidIntf>,
+    /// Pages unplugged HID devices gave back, for the next one.
+    free_pages: Vec<DmaRegion>,
+    /// Ports with a Port Status Change Event not yet handled (`hotplug`).
+    port_changes: [u64; 4],
     /// DMA buffers for a network device on this controller.
     nic_device_ctx: DmaRegion,
     nic_ep0_ring: DmaRegion,
@@ -708,7 +711,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         input_ctx, device_ctx,
         ep0_ring, ep0_cycle: 1, ep0_enqueue: 0,
         data_buf, slot_id: 0, port_speed: 0,
-        hid_devs: Vec::new(), hid: Vec::new(),
+        hid_devs: Vec::new(), hid: Vec::new(), free_pages: Vec::new(), port_changes: [0; 4],
         nic_device_ctx, nic_ep0_ring, nic: None,
     };
 
@@ -770,14 +773,27 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         None => return false,
     };
 
-    // A device that turns out not to be HID gives its context and EP0 ring
-    // to the next port; a slot left behind makes a later Address Device on
-    // that port fail.
-    let mut spare: Option<(DmaRegion, DmaRegion)> = None;
+    let mut seen = [0u64; 4];
     for p in 0..state.max_ports {
         if state.oper.r32(portsc_off(p)) & PORTSC_CCS == 0 { continue; }
         crate::kdebug!("[npk] xhci: trying port {}", p + 1);
-        probe_hid_port(&mut state, p, &mut spare);
+        seen[(p / 64) as usize] |= 1 << (p % 64);
+        probe_hid_port(&mut state, p);
+    }
+    // The ports looked at are accounted for: from here a change bit there is
+    // news, and the events our own resets raised are dropped. A device that
+    // arrived during the loop keeps its change bit, and `hotplug` takes it.
+    state.port_changes = [0; 4];
+    for p in 0..state.max_ports {
+        let off = portsc_off(p);
+        let sc = state.oper.r32(off);
+        let looked = seen[(p / 64) as usize] & (1 << (p % 64)) != 0;
+        if !looked && sc & PORTSC_CCS != 0 {
+            state.port_changes[(p / 64) as usize] |= 1 << (p % 64);
+            HOTPLUG.store(true, Ordering::Release);
+            continue;
+        }
+        if sc & PORTSC_CHANGES != 0 { state.oper.w32(off, port_neutral(sc) | (sc & PORTSC_CHANGES)); }
     }
 
     let keyboard = state.hid.iter().any(|h| h.running && h.keyboard);
@@ -810,11 +826,13 @@ pub fn init_mouse() -> bool {
 // usbhid never sends SET_PROTOCOL.
 
 /// A USB device with HID interfaces (Linux `usb_device`). Its device
-/// context and EP0 ring stay allocated and registered for the slot; once
-/// enumerated, nothing here sends it a control transfer.
+/// context and EP0 ring stay registered for the slot until it is unplugged;
+/// once enumerated, nothing here sends it a control transfer.
 struct HidUsbDev {
     slot_id: u8,
     port: u32,
+    device_ctx: DmaRegion,
+    ep0_ring: DmaRegion,
 }
 
 /// An interrupt OUT endpoint, for output reports (LEDs).
@@ -997,64 +1015,116 @@ fn address_device(state: &mut XhciState, port: u32) -> bool {
     true
 }
 
-/// Look for HID interfaces on `port`; set up every one found.
-fn probe_hid_port(state: &mut XhciState, port: u32, spare: &mut Option<(DmaRegion, DmaRegion)>) {
-    let (dctx, ep0) = match spare.take() {
-        Some(s) => s,
-        None => match (alloc_dma(1, "hid dev ctx"), alloc_dma(1, "hid EP0")) {
-            (Some(a), Some(b)) => (a, b),
-            _ => { kprintln!("[npk] xhci: DMA alloc failed"); return; }
-        },
+/// A zeroed DMA page: one given back by an unplugged device, else new.
+fn take_page(state: &mut XhciState, name: &str) -> Option<DmaRegion> {
+    match state.free_pages.pop() {
+        Some(p) => { p.zero(); Some(p) }
+        None => alloc_dma(1, name),
+    }
+}
+
+/// A transfer ring on a fresh page: zeroed, Link TRB at the end.
+fn take_ring(state: &mut XhciState, name: &str) -> Option<DmaRegion> {
+    let r = take_page(state, name)?;
+    write_trb(r, NUM_TR_TRBS - 1, r.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    Some(r)
+}
+
+/// `PORT_INIT_TRIES` (drivers/usb/core/hub.c): a device that fails reset,
+/// addressing or its first descriptors is reset and tried again.
+const PORT_INIT_TRIES: u32 = 4;
+
+/// Reset, address and read the configuration of the device on `port`:
+/// `(slot, device context, EP0 ring, configuration descriptor)`. On failure
+/// the slot is released and the pages go back to the pool.
+fn usb_port_init(state: &mut XhciState, port: u32) -> Option<(u8, DmaRegion, DmaRegion, Vec<u8>)> {
+    let dctx = take_page(state, "hid dev ctx")?;
+    let Some(ep0) = take_ring(state, "hid EP0") else {
+        state.free_pages.push(dctx);
+        return None;
     };
-    dctx.zero();
-    ep0.zero();
-    write_trb(ep0, NUM_TR_TRBS - 1, ep0.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
     state.device_ctx = dctx;
     state.ep0_ring = ep0;
     state.ep0_cycle = 1;
     state.ep0_enqueue = 0;
+    let give_back = |state: &mut XhciState| {
+        state.free_pages.push(dctx);
+        state.free_pages.push(ep0);
+    };
 
     if !reset_port(state, port) {
         kprintln!("[npk] xhci: port {} reset failed", port + 1);
-        *spare = Some((dctx, ep0));
-        return;
+        give_back(state);
+        return None;
     }
     state.port_speed = (state.oper.r32(portsc_off(port)) >> 10) & 0xF;
     let Some(slot) = cmd_enable_slot(state) else {
         kprintln!("[npk] xhci: enable slot failed");
-        *spare = Some((dctx, ep0));
-        return;
+        give_back(state);
+        return None;
     };
     state.slot_id = slot;
     state.dcbaa.w64(slot as usize * 8, dctx.phys());
 
-    let reject = |state: &mut XhciState, spare: &mut Option<(DmaRegion, DmaRegion)>| {
-        cmd_disable_slot(state, slot);
-        *spare = Some((dctx, ep0));
-    };
-    if !address_device(state, port) {
-        kprintln!("[npk] xhci: port {} address device failed", port + 1);
-        return reject(state, spare);
+    let cfg = (|| {
+        if !address_device(state, port) {
+            kprintln!("[npk] xhci: port {} address device failed", port + 1);
+            return None;
+        }
+        // Configuration descriptor: 9 bytes for the total length, then all.
+        if !usb_get_descriptor(state, DESC_CONFIG, 9) { return None; }
+        let total = u16::from_le_bytes([state.data_buf.r8(2u32), state.data_buf.r8(3u32)]) as usize;
+        let fetch = total.min(4096);
+        if !usb_get_descriptor(state, DESC_CONFIG, fetch as u16) { return None; }
+        let mut cfg = alloc::vec![0u8; fetch];
+        state.data_buf.copy_out(0u32, &mut cfg);
+        Some(cfg)
+    })();
+    match cfg {
+        Some(cfg) => Some((slot, dctx, ep0, cfg)),
+        None => {
+            usb_release_slot(state, slot);
+            give_back(state);
+            None
+        }
     }
+}
 
-    // Configuration descriptor: 9 bytes for the total length, then all.
-    if !usb_get_descriptor(state, DESC_CONFIG, 9) { return reject(state, spare); }
-    let total = u16::from_le_bytes([state.data_buf.r8(2u32), state.data_buf.r8(3u32)]) as usize;
-    let fetch = total.min(4096);
-    if !usb_get_descriptor(state, DESC_CONFIG, fetch as u16) { return reject(state, spare); }
-    let mut cfg = alloc::vec![0u8; fetch];
-    state.data_buf.copy_out(0u32, &mut cfg);
+/// Disable Slot, and the slot's DCBAA entry cleared (`xhci_free_virt_device`).
+fn usb_release_slot(state: &mut XhciState, slot: u8) {
+    cmd_disable_slot(state, slot);
+    state.dcbaa.w64(slot as usize * 8, 0);
+}
+
+/// Look for HID interfaces on `port`; set up every one found.
+fn probe_hid_port(state: &mut XhciState, port: u32) {
+    let mut init = None;
+    for attempt in 0..PORT_INIT_TRIES {
+        if attempt > 0 {
+            kprintln!("[npk] xhci: port {} retrying ({}/{})", port + 1, attempt + 1, PORT_INIT_TRIES);
+        }
+        init = usb_port_init(state, port);
+        if init.is_some() { break; }
+        if state.oper.r32(portsc_off(port)) & PORTSC_CCS == 0 { return; }
+    }
+    let Some((slot, dctx, ep0, cfg)) = init else {
+        kprintln!("[npk] xhci: port {} gave up after {} tries", port + 1, PORT_INIT_TRIES);
+        return;
+    };
     let config_val = cfg.get(5).copied().unwrap_or(1);
 
     let descs = parse_hid_interfaces(&cfg);
     if descs.is_empty() {
         crate::kdebug!("[npk] xhci: port {} has no HID interface, releasing slot {}", port + 1, slot);
-        return reject(state, spare);
+        usb_release_slot(state, slot);
+        state.free_pages.push(dctx);
+        state.free_pages.push(ep0);
+        return;
     }
 
     // The device is ours: it keeps this context and EP0 ring.
     let dev_idx = state.hid_devs.len();
-    state.hid_devs.push(HidUsbDev { slot_id: slot, port });
+    state.hid_devs.push(HidUsbDev { slot_id: slot, port, device_ctx: dctx, ep0_ring: ep0 });
 
     // Rings and buffers for every interface, then all endpoints in one
     // Configure Endpoint, then SET_CONFIGURATION — the order of Linux
@@ -1062,20 +1132,20 @@ fn probe_hid_port(state: &mut XhciState, port: u32, spare: &mut Option<(DmaRegio
     let first = state.hid.len();
     let mut eps: Vec<(u8, u64, u32, u16, u8)> = Vec::new();
     for d in &descs {
-        let (Some(in_ring), Some(buf)) = (alloc_dma(1, "hid in"), alloc_dma(1, "hid buf")) else {
+        let (Some(in_ring), Some(buf)) = (take_ring(state, "hid in"), take_page(state, "hid buf")) else {
             kprintln!("[npk] xhci: DMA alloc failed");
             break;
         };
-        write_trb(in_ring, NUM_TR_TRBS - 1, in_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
         let in_dci = (d.ep_in.addr & 0x0F) * 2 + 1;
         eps.push((in_dci, in_ring.phys(), EP_TYPE_INTERRUPT_IN, d.ep_in.max_pkt, d.ep_in.interval));
-        let out = d.ep_out.and_then(|o| {
-            let ring = alloc_dma(1, "hid out")?;
-            write_trb(ring, NUM_TR_TRBS - 1, ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
-            let dci = (o.addr & 0x0F) * 2;
-            eps.push((dci, ring.phys(), EP_TYPE_INTERRUPT_OUT, o.max_pkt, o.interval));
-            Some(OutEp { dci, ring, cycle: 1, enqueue: 0 })
-        });
+        let out = match d.ep_out {
+            Some(o) => take_ring(state, "hid out").map(|ring| {
+                let dci = (o.addr & 0x0F) * 2;
+                eps.push((dci, ring.phys(), EP_TYPE_INTERRUPT_OUT, o.max_pkt, o.interval));
+                OutEp { dci, ring, cycle: 1, enqueue: 0 }
+            }),
+            None => None,
+        };
         state.hid.push(HidIntf {
             dev: dev_idx, ifnum: d.ifnum, keyboard: false, pointer: false,
             in_dci, in_ring, in_cycle: 1, in_enqueue: 0, out, buf,
@@ -1098,6 +1168,131 @@ fn probe_hid_port(state: &mut XhciState, port: u32, spare: &mut Option<(DmaRegio
         if i >= state.hid.len() { break; }
         if !usbhid_parse(state, i, d) { continue; }
         usbhid_start(state, i, d);
+    }
+}
+
+/// The device on `port` is gone (`usb_disconnect`): its interfaces stop,
+/// its slot is released, its pages go back to the pool.
+fn hid_disconnect(state: &mut XhciState, d: usize) {
+    let dev = &state.hid_devs[d];
+    let (slot, port, dctx, ep0) = (dev.slot_id, dev.port, dev.device_ctx, dev.ep0_ring);
+    let mut pages = Vec::new();
+    for h in state.hid.iter_mut().filter(|h| h.dev == d) {
+        hid_stop(h);
+        pages.push(h.in_ring);
+        pages.push(h.buf);
+        if let Some(o) = h.out.as_ref() { pages.push(o.ring); }
+    }
+    state.hid.retain(|h| h.dev != d);
+    for h in state.hid.iter_mut() {
+        if h.dev > d { h.dev -= 1; }
+    }
+    state.hid_devs.remove(d);
+    usb_release_slot(state, slot);
+    state.free_pages.extend(pages);
+    state.free_pages.push(dctx);
+    state.free_pages.push(ep0);
+    kprintln!("[npk] xhci: USB device on port {} gone", port + 1);
+}
+
+// === Hotplug — Linux hub_event / hub_port_connect_change ===
+//
+// The controller reports every connect and disconnect as a Port Status
+// Change Event. The interrupt only notes the port; the shell's idle step
+// (`hotplug`) debounces it and enumerates or tears down, since that waits
+// for the device's answers and must not run in the interrupt.
+
+/// A port changed somewhere; `hotplug` has work.
+static HOTPLUG: AtomicBool = AtomicBool::new(false);
+
+const HUB_DEBOUNCE_TIMEOUT: u64 = 2000;
+const HUB_DEBOUNCE_STEP: u64 = 25;
+const HUB_DEBOUNCE_STABLE: u64 = 100;
+
+/// Note a Port Status Change Event (port ID in bits 31:24).
+fn note_port_change(state: &mut XhciState, e: &Evt) {
+    let port1 = ((e.param as u32) >> 24) as usize;
+    if port1 == 0 || port1 > 256 { return; }
+    let p = port1 - 1;
+    state.port_changes[p / 64] |= 1 << (p % 64);
+    HOTPLUG.store(true, Ordering::Release);
+}
+
+/// The change bits of PORTSC (write 1 to clear).
+const PORTSC_CHANGES: u32 = PORTSC_CSC | PORTSC_PEC | PORTSC_WRC | PORTSC_PRC | PORTSC_PLC;
+
+/// `hub_port_debounce`: the connection status once it held for
+/// `HUB_DEBOUNCE_STABLE` ms, or None if it never settled.
+fn hub_port_debounce(oper: Mmio, port: u32) -> Option<bool> {
+    let off = portsc_off(port);
+    let mut connection: Option<bool> = None;
+    let mut stable = 0u64;
+    let mut total = 0u64;
+    loop {
+        let sc = oper.r32(off);
+        let now = sc & PORTSC_CCS != 0;
+        if sc & PORTSC_CSC == 0 && connection == Some(now) {
+            stable += HUB_DEBOUNCE_STEP;
+            if stable >= HUB_DEBOUNCE_STABLE { return Some(now); }
+        } else {
+            stable = 0;
+            connection = Some(now);
+        }
+        if sc & PORTSC_CSC != 0 {
+            oper.w32(off, port_neutral(sc) | PORTSC_CSC);
+        }
+        if total >= HUB_DEBOUNCE_TIMEOUT { return None; }
+        crate::interrupts::delay_ms(HUB_DEBOUNCE_STEP);
+        total += HUB_DEBOUNCE_STEP;
+    }
+}
+
+/// Handle the ports that changed since the last call: a device that came
+/// is enumerated, one that went is torn down. From the shell's idle step.
+pub fn hotplug() {
+    if !HOTPLUG.swap(false, Ordering::AcqRel) { return; }
+    // Which ports, and whether each saw a connect change. Read and cleared
+    // under the lock; the debounce waits outside it, so the interrupt keeps
+    // draining every other device meanwhile.
+    let mut work: Vec<(pci::PciAddr, Mmio, u32, bool)> = Vec::new();
+    {
+        let mut g = CTRLS.lock();
+        for s in g.iter_mut().flatten() {
+            let nic_port = s.nic.as_ref().map(|n| n.port_num);
+            for w in 0..4 {
+                let mut bits = core::mem::take(&mut s.port_changes[w]);
+                while bits != 0 {
+                    let p = (w * 64) as u32 + bits.trailing_zeros();
+                    bits &= bits - 1;
+                    if p >= s.max_ports || Some(p) == nic_port { continue; }
+                    let off = portsc_off(p);
+                    let sc = s.oper.r32(off);
+                    if sc & PORTSC_CHANGES != 0 {
+                        s.oper.w32(off, port_neutral(sc) | (sc & PORTSC_CHANGES));
+                    }
+                    let gone = sc & PORTSC_CCS == 0 && s.hid_devs.iter().any(|d| d.port == p);
+                    if sc & PORTSC_CSC != 0 || gone {
+                        work.push((s.pci_addr, s.oper, p, sc & PORTSC_CSC != 0));
+                    }
+                }
+            }
+        }
+    }
+    for (addr, oper, port, changed) in work {
+        let connected = if changed {
+            hub_port_debounce(oper, port).unwrap_or(false)
+        } else {
+            false
+        };
+        let mut g = CTRLS.lock();
+        let Some(s) = g.iter_mut().flatten().find(|s| s.pci_addr == addr) else { continue };
+        if let Some(d) = s.hid_devs.iter().position(|d| d.port == port) {
+            hid_disconnect(s, d);
+        }
+        if connected {
+            kprintln!("[npk] xhci: device connected on port {}", port + 1);
+            probe_hid_port(s, port);
+        }
     }
 }
 
@@ -1263,6 +1458,19 @@ fn hid_irq_in(state: &mut XhciState, i: usize, e: &Evt) {
 fn hid_stop(h: &mut HidIntf) {
     if !h.running { return; }
     h.running = false;
+    // Whatever it held is let go: a key would repeat for ever, a button
+    // would keep dragging.
+    if h.kbd.repeat_key != 0 && REPEAT_KEY.load(Ordering::Relaxed) == h.kbd.repeat_key {
+        REPEAT_KEY.store(0, Ordering::Relaxed);
+    }
+    if h.keyboard && h.input.modifiers() != 0 {
+        crate::keyboard::set_super(false);
+        crate::keyboard::set_shift(false);
+        crate::keyboard::set_ctrl(false);
+    }
+    if h.pointer && h.input.buttons != 0 {
+        inject_pointer(MouseEvent { buttons: 0, dx: 0, dy: 0, scroll: 0, hscroll: 0 }, true);
+    }
     if h.keyboard && USB_KEYBOARDS.fetch_sub(1, Ordering::Relaxed) == 1 {
         AVAILABLE.store(false, Ordering::Relaxed);
     }
@@ -1676,6 +1884,8 @@ fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
         }
         if e.trb_type == EVT_TRANSFER {
             dispatch_transfer(state, &e);
+        } else if e.trb_type == EVT_PORT_STATUS {
+            note_port_change(state, &e);
         }
     }
 }
@@ -1808,6 +2018,7 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
             None => { core::hint::spin_loop(); continue; }
         };
         flush_erdp(state);
+        if e.trb_type == EVT_PORT_STATUS { note_port_change(state, &e); }
         if e.trb_type != EVT_TRANSFER { continue; }
         let ok = e.cc == CC_SUCCESS || e.cc == CC_SHORT_PACKET;
         if in_ring(e.param, state.ep0_ring.phys()) {
@@ -2876,6 +3087,8 @@ fn drain(state: &mut XhciState) {
             // control transfer, which is not running here: it is orphaned.
             // Drop it rather than give it to the wrong device.
             dispatch_transfer(state, &e);
+        } else if e.trb_type == EVT_PORT_STATUS {
+            note_port_change(state, &e);
         }
         let _ = e.control;
     }
