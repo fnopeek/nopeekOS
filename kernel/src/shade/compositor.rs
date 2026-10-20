@@ -412,6 +412,13 @@ impl Compositor {
     /// have to repaint over their own former halo) but draw nothing.
     pub fn glow_for(&self, win: &Window) -> Glow {
         if win.is_overlay || win.state != WindowState::Tiled { return Glow::NONE }
+        // The halo tells which tile has the keyboard; alone on the workspace
+        // there is nothing to tell apart, and it only frames the screen.
+        let tiles = self.windows.iter()
+            .filter(|w| w.workspace == self.active_workspace && w.visible
+                && w.state == WindowState::Tiled && !w.is_overlay)
+            .count();
+        if tiles < 2 { return Glow::NONE }
         let band = self.glow_width();
         if band == 0 { return Glow::NONE }
         if !win.focused { return Glow { band, alpha: 0, color: 0 } }
