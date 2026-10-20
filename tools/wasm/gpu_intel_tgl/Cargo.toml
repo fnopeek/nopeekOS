@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 npk_sys = { path = "../sdk/npk_sys" }
+gpu_scene = { path = "../gpu_scene" }
 nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 spin = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex"] }
 

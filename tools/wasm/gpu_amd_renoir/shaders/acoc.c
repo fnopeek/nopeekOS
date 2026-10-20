@@ -198,6 +198,11 @@ main(int argc, char **argv)
    if ((r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, NULL, &pipeline)))
       die("vkCreateComputePipelines", r);
 
+   /* A second pipeline of the same program: what a scene switches to. */
+   VkPipeline pipeline2;
+   if ((r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, NULL, &pipeline2)))
+      die("vkCreateComputePipelines", r);
+
    struct radv_pipeline *pl = radv_pipeline_from_handle(pipeline);
    struct radv_shader *s = pl->shaders[MESA_SHADER_COMPUTE];
    const struct ac_shader_config *c = &s->config;
@@ -272,7 +277,23 @@ main(int argc, char **argv)
    /* RADV emits a barrier's flush with the next dispatch. */
    vkCmdDispatch(cb, GRID_X, GRID_Y, 1);
    uint32_t barriered = cmd->cs->b->cdw;
-   /* And at its end: the CPU and the display read the result. */
+   /* A scene's next dispatch of the same program, with its own push
+    * constants. */
+   vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
+                        NULL, 0, NULL);
+   if (push_bytes)
+      vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes, push);
+   vkCmdDispatch(cb, GRID_X, GRID_Y, 1);
+   uint32_t repushed = cmd->cs->b->cdw;
+   /* And of another program. */
+   vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
+                        NULL, 0, NULL);
+   vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline2);
+   if (push_bytes)
+      vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes, push);
+   vkCmdDispatch(cb, GRID_X, GRID_Y, 1);
+   uint32_t switched = cmd->cs->b->cdw;
+   /* At its end: the CPU and the display read the result. */
    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0,
                         NULL);
@@ -288,7 +309,9 @@ main(int argc, char **argv)
    } parts[] = {
       {"stream_dispatch", begin, dispatched},
       {"stream_barrier_dispatch", dispatched, barriered},
-      {"stream_host_barrier", barriered, ended_barrier},
+      {"stream_barrier_push_dispatch", barriered, repushed},
+      {"stream_barrier_bind_dispatch", repushed, switched},
+      {"stream_host_barrier", switched, ended_barrier},
       {"stream_end", ended_barrier, end},
    };
    for (unsigned p = 0; p < sizeof(parts) / sizeof(parts[0]); p++) {

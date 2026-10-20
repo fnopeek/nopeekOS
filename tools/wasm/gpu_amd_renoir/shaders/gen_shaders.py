@@ -266,6 +266,10 @@ def kernel_rust(name, code, info, members):
     for m, off in members:
         lines.append(f"pub const {up}_PUSH_{m.upper()}: u32 = {off};")
     lines += rust_template(f"{up}_RADV_DISPATCH", info["dispatch_tpl"])
+    lines.append(f"/// After a barrier: the same program again, with new push constants.")
+    lines += rust_template(f"{up}_RADV_REPUSH", info["repush_tpl"])
+    lines.append(f"/// After a barrier: this program after another one.")
+    lines += rust_template(f"{up}_RADV_SWITCH", info["switch_tpl"])
     return lines
 
 
@@ -279,8 +283,8 @@ def main():
     first = kernels[0][2]
     mask = ib_pad_mask()
     preamble, _ = split_pad(pm4, first["preamble"], mask, len(first["preamble"]))
-    cmdbuf = sum(len(first[k]) for k in ("stream_dispatch", "stream_barrier_dispatch", "stream_host_barrier",
-                                          "stream_end"))
+    cmdbuf = sum(len(first[k]) for k in ("stream_dispatch", "stream_barrier_dispatch", "stream_barrier_push_dispatch",
+                                          "stream_barrier_bind_dispatch", "stream_host_barrier", "stream_end"))
     end, _ = split_pad(pm4, first["stream_end"], mask, cmdbuf)
     for name, code, info, members in kernels:
         if info["device"] != first["device"] or info["address32_hi"] != first["address32_hi"]:
@@ -302,6 +306,8 @@ def main():
         if regs["COMPUTE_RESOURCE_LIMITS"] != info["resource_limits"]:
             sys.exit(f"gen_shaders: {name}: resource limits differ between pipeline and stream")
         info["dispatch_tpl"] = template(pm4, info["stream_dispatch"], kernel=True)
+        info["repush_tpl"] = template(pm4, info["stream_barrier_push_dispatch"], kernel=True)
+        info["switch_tpl"] = template(pm4, info["stream_barrier_bind_dispatch"], kernel=True)
 
     lines = [
         "//! The GPU programs of gpu_amd_renoir and the command stream RADV writes",
@@ -361,6 +367,30 @@ def main():
     lines += rust_template("RADV_PREAMBLE", template(pm4, preamble))
     lines += rust_template("RADV_BARRIER_DISPATCH", template(pm4, first["stream_barrier_dispatch"]))
     lines += rust_template("RADV_END", template(pm4, end))
+    lines.append("")
+    # The first kernel's recording as RADV wrote it, padding included, for
+    # the host check to rebuild word for word.
+    rec = kernels[0]
+    cmd = []
+    for k in ("stream_dispatch", "stream_barrier_dispatch", "stream_barrier_push_dispatch",
+              "stream_barrier_bind_dispatch", "stream_host_barrier", "stream_end"):
+        cmd += first[k]
+    lines += [
+        f"/// What acoc recorded for `{rec[0]}.comp`, padding included: its program's",
+        "/// address, the queue preamble IB and the command buffer (dispatch, the",
+        "/// same again after a barrier, again with new push constants, after a",
+        "/// switch of pipeline, end).",
+        f"pub const RADV_RECORDED_KERNEL: &str = \"{rec[0]}\";",
+        f"pub const RADV_RECORDED_SHADER_VA: u64 = {first['shader_va']:#x};",
+        "pub const RADV_RECORDED_PREAMBLE: &[u32] = &[",
+    ]
+    for i in range(0, len(first["preamble"]), 8):
+        lines.append("    " + " ".join(f"{w:#010x}," for w in first["preamble"][i:i + 8]))
+    lines.append("];")
+    lines.append("pub const RADV_RECORDED_CMDBUF: &[u32] = &[")
+    for i in range(0, len(cmd), 8):
+        lines.append("    " + " ".join(f"{w:#010x}," for w in cmd[i:i + 8]))
+    lines.append("];")
     lines.append("")
     for name, code, info, members in kernels:
         lines += kernel_rust(name, code, info, members)

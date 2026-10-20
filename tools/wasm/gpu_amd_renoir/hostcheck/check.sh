@@ -14,7 +14,8 @@ FW=${3:-$(dirname "$(dirname "$(dirname "$MOD")")")/release/modules/gpu_amd_reno
 B=$DEV/hostcheck-build
 "$MOD/oracle/build.sh" "$B"
 rustc --edition 2024 -O --crate-type rlib --crate-name npk_sys "$HERE/npk_sys.rs" -o "$B/libnpk_sys.rlib"
-RF="--edition 2024 -O --cap-lints allow -A dead_code -A non_camel_case_types -A non_snake_case --extern npk_sys=$B/libnpk_sys.rlib"
+rustc --edition 2024 -O --crate-type rlib --crate-name gpu_scene "$MOD/../gpu_scene/src/lib.rs" -o "$B/libgpu_scene.rlib"
+RF="--edition 2024 -O --cap-lints allow -A dead_code -A non_camel_case_types -A non_snake_case --extern npk_sys=$B/libnpk_sys.rlib --extern gpu_scene=$B/libgpu_scene.rlib"
 fail=0
 check() {
     name=$1; oracle=$2; port=$3; input=$4
@@ -153,6 +154,9 @@ for blk in gfx sdma smu soc; do
         fi
     done
 done
+# The scene stream against RADV's recording, word for word.
+rustc $RF "$HERE/stream_check.rs" -o "$B/stream_check"
+"$B/stream_check" || fail=1
 rustc $RF "$HERE/stage1_run.rs" -o "$B/stage1_run"
 "$B/stage1_run" "$DISC" "$BIOS" "$FW" > "$B/run.log"
 # The VRAM requests of the run itself, through Linux's VRAM manager.

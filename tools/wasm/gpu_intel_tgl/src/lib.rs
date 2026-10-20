@@ -28,7 +28,6 @@ mod compose;
 mod drm_edid;
 mod intel_audio;
 mod intel_dp_aux;
-mod plan;
 mod drm_mm;
 mod gpudev;
 mod gen8_engine_cs;

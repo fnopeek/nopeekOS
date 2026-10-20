@@ -1,13 +1,14 @@
-//! How a checked scene becomes dispatches (compose.rs): per damage
+//! How a checked scene becomes dispatches (scene.rs): per damage
 //! rectangle the item list is cut at every panel, since a panel blurs what
 //! lies beneath it (background::blur_region: 4x4 block means, three box
 //! passes per axis). Each segment is composed over the union of what its
 //! items reach, with a bin table: per 64x64 bin of the screen grid the
 //! items that reach the bin, in order, starting at the last one that covers
-//! it opaquely (the background, a window's content, a window's glass). A bin that a later segment covers opaquely is left out of
-//! the earlier ones, unless a panel in between blurs it. No GPU access
-//! here; the caller's `sink` turns each step into commands and memory
-//! writes. Not a Linux file.
+//! it opaquely (the background, a window's content, a window's glass). A
+//! bin that a later segment covers opaquely is left out of the earlier
+//! ones, unless a panel in between blurs it. No GPU access here; the
+//! caller's `sink` turns each step into commands and memory writes. Not a
+//! Linux file.
 
 pub const EINVAL: i32 = 22;
 pub const E2BIG: i32 = 7;

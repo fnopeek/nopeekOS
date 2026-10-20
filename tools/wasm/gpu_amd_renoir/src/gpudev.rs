@@ -1,17 +1,23 @@
 //! The GPU service (docs/plan/GPU_STACK.md §3.3): the kernel's framebuffer
-//! and its two shadow buffers made reachable for the SDMA engine, a copy
-//! self-test, then the compositor's copies on SDMA0 until the module ends.
+//! and its two shadow buffers made reachable for the SDMA engine and for
+//! the compositor's own client, the copy and dispatch self-tests, then the
+//! compositor's copies on SDMA0 and its scenes on the compute ring until
+//! the module ends.
 //!
 //! The framebuffer is the firmware's, in VRAM: its bus address in one of
-//! the windows onto VRAM gives its MC address. The shadows are kernel
-//! pages, imported as a dma-buf would be (`amdgpu_dma_buf_create_obj`),
-//! pinned in GTT and bound into the GART of VMID 0, where the kernel's
-//! copies run in Linux too (`amdgpu_copy_buffer`). A rectangle is copied
-//! row by row with `sdma_v4_0_emit_copy_buffer`, a full-width one in one
-//! span.
+//! the windows onto VRAM gives its MC address, and the reserved buffers
+//! that keep the firmware's framebuffer from TTM (`stolen_vga_memory`,
+//! `stolen_extended_memory`) map it into the compositor's VM. The shadows
+//! and the scene sources are kernel pages, imported as a dma-buf would be
+//! (`amdgpu_dma_buf_create_obj`) and pinned in GTT; the shadows are bound
+//! into the GART of VMID 0 too, where the kernel's copies run in Linux
+//! (`amdgpu_copy_buffer`). A rectangle is copied row by row with
+//! `sdma_v4_0_emit_copy_buffer`, a full-width one in one span.
 
 use crate::amdgpu_device::amdgpu_device;
 use crate::amdgpu_object::{self as obj, amdgpu_kptr};
+use crate::compose::{self, composer};
+use crate::drm_mm::drm_mm_node;
 use crate::linux::Line;
 use crate::regs::*;
 use alloc::vec::Vec;
@@ -20,11 +26,17 @@ const WAIT_IRQ: i32 = 2;
 const WAIT_GPU_CMD: i32 = 64;
 const VERSION: i32 = 2;
 const OP_COPY_RECT: u32 = 1;
+const OP_BO_ADD: u32 = 2;
+const OP_BO_REMOVE: u32 = 3;
+const OP_SCENE: u32 = 4;
 const CAP_COPY: i32 = 1;
+const CAP_SCENE: i32 = 2;
 const JOB_BYTES: usize = 32;
 const BO_INFO_BYTES: usize = 40;
 const NUM_BOS: usize = 3;
+const MAX_DYN: usize = 256;
 const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
 const ETIME: i32 = 62;
 /// The kernel gives a job 100 ms; the module answers before that.
 const JOB_TIMEOUT_US: i64 = 80_000;
@@ -32,11 +44,17 @@ const PAGE: u64 = 4096;
 const TEST_W: u32 = 64;
 const TEST_H: u32 = 64;
 const TEST_PITCH: u32 = TEST_W * 4;
+/// A job left open: the scene completes it when its fence signals.
+const JOB_OPEN: i32 = i32::MIN;
+const SCENES_LOGGED: u32 = 3;
+/// The pieces a framebuffer's mapping may take.
+const FB_PIECES: usize = 4;
 
-/// A buffer of the kernel's as `npk_gpudev_bo_info` describes it, and
-/// where SDMA reaches its first pixel.
+/// A buffer of the kernel's as `npk_gpudev_bo_info` describes it, where
+/// SDMA reaches its first pixel, and where the compositor's VM has it.
 #[derive(Clone, Copy, Default)]
 struct bo {
+    id: u32,
     phys: u64,
     size: u64,
     pitch: u32,
@@ -45,8 +63,16 @@ struct bo {
     offset: u32,
     pages: u32,
     gpu: u64,
-    /// The imported buffer object of a shadow.
+    /// The imported buffer object of a shadow or scene source.
     handle: Option<usize>,
+    /// The framebuffer's VRAM offset, from its page.
+    vram: u64,
+    /// The compositor's view: the address of the first pixel, its VA
+    /// range, and the buffer objects mapped there in order (true when made
+    /// for it), with the bytes of each.
+    va: u64,
+    node: Option<drm_mm_node>,
+    pieces: [Option<(usize, bool, u64)>; FB_PIECES],
 }
 
 /// `npk_gpudev_bo_info`, parsed.
@@ -57,7 +83,7 @@ fn bo_info(id: u32) -> Option<bo> {
     }
     let q = |o: usize| u64::from_le_bytes(out[o..o + 8].try_into().unwrap());
     let d = |o: usize| u32::from_le_bytes(out[o..o + 4].try_into().unwrap());
-    Some(bo { phys: q(0), size: q(8), pitch: d(16), width: d(20), height: d(24), offset: d(32), pages: d(36),
+    Some(bo { id, phys: q(0), size: q(8), pitch: d(16), width: d(20), height: d(24), offset: d(32), pages: d(36),
               ..Default::default() })
 }
 
@@ -74,6 +100,7 @@ fn bind_framebuffer(adev: &amdgpu_device, b: &mut bo) -> bool {
     }) else {
         return false;
     };
+    b.vram = off;
     b.gpu = crate::amdgpu_ttm::amdgpu_ttm_domain_start(adev, TTM_PL_VRAM) + off + b.offset as u64;
     let mut l = Line::new();
     l.s("gpudev: framebuffer at VRAM 0x").hexw((off >> 32) as u32, 8).hexw(off as u32, 8).s(" through ").s(name);
@@ -84,9 +111,8 @@ fn bind_framebuffer(adev: &amdgpu_device, b: &mut bo) -> bool {
     true
 }
 
-/// A shadow buffer: its pages imported, pinned in GTT and bound in the
-/// GART.
-fn bind_shadow(adev: &mut amdgpu_device, id: u32, b: &mut bo) -> Result<(), i32> {
+/// Buffer `id`'s pages imported and pinned in GTT.
+fn import(adev: &mut amdgpu_device, id: u32, b: &bo) -> Result<usize, i32> {
     if b.pages == 0 || b.offset as u64 >= PAGE || b.size + b.offset as u64 > b.pages as u64 * PAGE {
         return Err(-EINVAL);
     }
@@ -106,6 +132,12 @@ fn bind_shadow(adev: &mut amdgpu_device, id: u32, b: &mut bo) -> Result<(), i32>
         obj::amdgpu_bo_unref(adev, h);
         return Err(r);
     }
+    Ok(h)
+}
+
+/// A shadow buffer: imported and bound in the GART.
+fn bind_shadow(adev: &mut amdgpu_device, id: u32, b: &mut bo) -> Result<(), i32> {
+    let h = import(adev, id, b)?;
     let r = crate::amdgpu_ttm::amdgpu_ttm_alloc_gart(adev, h);
     if r != 0 {
         obj::amdgpu_bo_unpin(adev, h);
@@ -114,6 +146,107 @@ fn bind_shadow(adev: &mut amdgpu_device, id: u32, b: &mut bo) -> Result<(), i32>
     }
     b.gpu = obj::amdgpu_bo_gpu_offset(adev, h) + b.offset as u64;
     b.handle = Some(h);
+    Ok(())
+}
+
+/// The compositor's mapping of `b`: one piece per buffer object, at
+/// consecutive addresses of one VA range.
+fn map_vm(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo, pieces: &[(usize, bool, u64, u64)])
+          -> Result<(), i32> {
+    let total: u64 = pieces.iter().map(|p| p.3).sum();
+    let node = c.mm.insert_node_in_range_best(total, PAGE, 0, compose::DYN_START, compose::DYN_END)?;
+    let mut at = node.start;
+    let mut done = 0;
+    let r = (|| {
+        for &(h, _, off, len) in pieces {
+            crate::amdgpu_cs::amdgpu_gem_object_open(adev, &c.fpriv, h);
+            done += 1;
+            crate::amdgpu_cs::amdgpu_gem_va_ioctl(adev, &c.fpriv, h, true, at, off, len,
+                                                   AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE)?;
+            at += len;
+        }
+        Ok(())
+    })();
+    if let Err(e) = r {
+        let mut at = node.start;
+        for &(h, made, _, len) in &pieces[..done] {
+            let _ = crate::amdgpu_cs::amdgpu_gem_va_ioctl(adev, &c.fpriv, h, false, at, 0, len, 0);
+            crate::amdgpu_cs::amdgpu_gem_object_close(adev, &c.fpriv, h);
+            if made {
+                let mut k = Some(h);
+                obj::amdgpu_bo_free_kernel(adev, &mut k);
+            }
+            at += len;
+        }
+        c.mm.remove_node(&node);
+        return Err(e);
+    }
+    b.node = Some(node);
+    for (i, p) in pieces.iter().enumerate() {
+        b.pieces[i] = Some((p.0, p.1, p.3));
+    }
+    Ok(())
+}
+
+/// The compositor's mapping of `b` taken down.
+fn unmap_vm(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo) {
+    let Some(node) = b.node.take() else { return };
+    let mut at = node.start;
+    for p in b.pieces.iter_mut() {
+        let Some((h, made, len)) = p.take() else { continue };
+        let _ = crate::amdgpu_cs::amdgpu_gem_va_ioctl(adev, &c.fpriv, h, false, at, 0, len, 0);
+        crate::amdgpu_cs::amdgpu_gem_object_close(adev, &c.fpriv, h);
+        if made {
+            let mut k = Some(h);
+            obj::amdgpu_bo_free_kernel(adev, &mut k);
+        }
+        at += len;
+    }
+    c.mm.remove_node(&node);
+    b.va = 0;
+}
+
+/// The framebuffer in the compositor's VM: the reserved buffers that hold
+/// the firmware's framebuffer, a kernel buffer at the offset for any part
+/// they leave (`amdgpu_bo_create_kernel_at`).
+fn map_framebuffer(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo) -> Result<(), i32> {
+    let start = b.vram;
+    let end = (b.vram + b.offset as u64 + b.size).next_multiple_of(PAGE);
+    let reserved: Vec<(usize, u64, u64)> = [adev.mman.stolen_vga_memory, adev.mman.stolen_extended_memory]
+        .into_iter()
+        .flatten()
+        .filter_map(|h| {
+            let r = obj::bo(adev, h).tbo.resource.as_ref()?;
+            (r.mem_type == TTM_PL_VRAM).then(|| (h, r.start * PAGE, obj::amdgpu_bo_size(adev, h)))
+        })
+        .collect();
+    let mut pieces: Vec<(usize, bool, u64, u64)> = Vec::new();
+    let mut p = start;
+    while p < end {
+        if pieces.len() == FB_PIECES {
+            return Err(-ENOSPC);
+        }
+        if let Some(&(h, s, len)) = reserved.iter().find(|&&(_, s, len)| p >= s && p < s + len) {
+            let n = (s + len).min(end) - p;
+            pieces.push((h, false, p - s, n));
+            p += n;
+            continue;
+        }
+        let next = reserved.iter().map(|r| r.1).filter(|&s| s > p).min().unwrap_or(end).min(end);
+        let h = obj::amdgpu_bo_create_kernel_at(adev, p, next - p, false)?.ok_or(-EINVAL)?;
+        pieces.push((h, true, 0, next - p));
+        p = next;
+    }
+    map_vm(adev, c, b, &pieces)?;
+    b.va = b.node.unwrap().start + b.offset as u64;
+    Ok(())
+}
+
+/// An imported buffer in the compositor's VM.
+fn map_import(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo) -> Result<(), i32> {
+    let h = b.handle.ok_or(-EINVAL)?;
+    map_vm(adev, c, b, &[(h, false, 0, b.pages as u64 * PAGE)])?;
+    b.va = b.node.unwrap().start + b.offset as u64;
     Ok(())
 }
 
@@ -206,123 +339,246 @@ fn self_test(adev: &mut amdgpu_device) -> bool {
     ok
 }
 
-/// One job from the kernel; its status.
-fn run_job(adev: &mut amdgpu_device, bos: &[bo; NUM_BOS], job: &[u8]) -> i32 {
+/// The service's state.
+struct service {
+    bos: [bo; NUM_BOS],
+    dyn_bos: Vec<bo>,
+    copy_ok: bool,
+    composer: Option<composer>,
+    /// The scene on the compute ring, its job still open: its job's seq and
+    /// target buffer, and when the job began.
+    scene: Option<(u32, u32, u64, compose::scene_inflight)>,
+    scenes: u32,
+}
+
+impl service {
+    /// A buffer the compositor's VM has, by kernel id.
+    fn bo(&self, id: u32) -> Option<&bo> {
+        let b = if (id as usize) < NUM_BOS {
+            Some(&self.bos[id as usize])
+        } else {
+            self.dyn_bos.iter().find(|b| b.id == id)
+        };
+        b.filter(|b| b.node.is_some())
+    }
+
+    /// The buffer objects a scene may touch.
+    fn scene_bos(&self) -> Vec<usize> {
+        self.bos.iter().chain(self.dyn_bos.iter()).flat_map(|b| b.pieces.iter().flatten().map(|p| p.0)).collect()
+    }
+}
+
+impl gpu_scene::scene::buffers for service {
+    fn surface(&self, id: u32) -> Option<gpu_scene::scene::surface> {
+        self.bo(id).map(|b| gpu_scene::scene::surface { va: b.va, pitch: b.pitch, width: b.width, height: b.height,
+                                                        size: b.size })
+    }
+}
+
+/// `OP_BO_ADD`: the buffer imported into the compositor's VM and its
+/// address reported.
+fn bo_add(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(), i32> {
+    if (id as usize) < NUM_BOS || svc.dyn_bos.iter().any(|b| b.id == id) {
+        return Err(-EINVAL);
+    }
+    if svc.dyn_bos.len() == MAX_DYN {
+        return Err(-ENOSPC);
+    }
+    let c = svc.composer.as_mut().ok_or(-EINVAL)?;
+    let mut b = bo_info(id).ok_or(-EINVAL)?;
+    let h = import(adev, id, &b)?;
+    b.handle = Some(h);
+    if let Err(e) = map_import(adev, c, &mut b) {
+        obj::amdgpu_bo_unpin(adev, h);
+        obj::amdgpu_bo_unref(adev, h);
+        return Err(e);
+    }
+    npk_sys::gpudev_bo_bound(id as i32, b.va as i64);
+    svc.dyn_bos.push(b);
+    Ok(())
+}
+
+/// `OP_BO_REMOVE`: unmapped once no scene uses it, and released. A buffer
+/// whose `OP_BO_ADD` failed is not known and needs nothing.
+fn bo_remove(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(), i32> {
+    if (id as usize) < NUM_BOS {
+        return Err(-EINVAL);
+    }
+    let Some(i) = svc.dyn_bos.iter().position(|b| b.id == id) else { return Ok(()) };
+    drain_scene(adev, svc);
+    let mut b = svc.dyn_bos.remove(i);
+    if let Some(c) = svc.composer.as_mut() {
+        unmap_vm(adev, c, &mut b);
+    }
+    if let Some(h) = b.handle.take() {
+        obj::amdgpu_bo_unpin(adev, h);
+        obj::amdgpu_bo_unref(adev, h);
+    }
+    Ok(())
+}
+
+/// One scene job: on the compute ring, its job left open until
+/// `poll_scene` sees it done.
+fn run_scene(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32, bytes: u32) -> i32 {
+    drain_scene(adev, svc);
+    let bos = svc.scene_bos();
+    let Some(mut c) = svc.composer.take() else { return -EINVAL };
+    let t0 = crate::linux::now_us();
+    let r = compose::submit_scene(adev, &mut c, &*svc, &bos, seq, target, bytes);
+    svc.composer = Some(c);
+    match r {
+        Ok(s) => {
+            svc.scene = Some((seq, target, t0, s));
+            JOB_OPEN
+        }
+        Err(e) => {
+            Line::new().s("gpudev: scene into bo ").dec(target as u64).s(" refused (").dec((-e) as u64).s(")").say();
+            e
+        }
+    }
+}
+
+/// Complete the scene's job once its fence signaled. True when it was.
+fn poll_scene(adev: &mut amdgpu_device, svc: &mut service) -> bool {
+    let Some((_, _, _, s)) = svc.scene.as_ref() else { return false };
+    let Some(r) = compose::poll_scene(adev, s) else { return false };
+    let (seq, target, t0, _) = svc.scene.take().unwrap();
+    svc.scenes += 1;
+    match &r {
+        Ok(rep) if svc.scenes <= SCENES_LOGGED => {
+            Line::new().s("gpudev: scene ").dec(svc.scenes as u64).s(", ").dec(rep.items as u64).s(" items, ")
+                .dec(rep.dispatches as u64).s(" dispatches into bo ").dec(target as u64).s(": ")
+                .dec(crate::linux::now_us() - t0).s(" us, of which the GPU ").dec(rep.gpu_us).s(" us").dbg();
+            if crate::linux::debug_enabled() {
+                rep.log.say();
+            }
+        }
+        Err(e) => {
+            Line::new().s("gpudev: scene into bo ").dec(target as u64).s(" failed (").dec((-*e) as u64).s(")").say();
+        }
+        _ => {}
+    }
+    npk_sys::gpudev_complete(seq as i32, match r {
+        Ok(_) => 0,
+        Err(x) => x,
+    });
+    true
+}
+
+/// Wait for the scene on the compute ring: a job that touches the
+/// desktop's buffers runs, and completes, after it.
+fn drain_scene(adev: &mut amdgpu_device, svc: &mut service) {
+    while svc.scene.is_some() && !poll_scene(adev, svc) {
+        crate::amdgpu_irq::amdgpu_irq_wait(adev, 2);
+        crate::workqueue::run_pending(adev);
+    }
+}
+
+/// One job from the kernel; its status, or `JOB_OPEN`.
+fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
     let w = |i: usize| u32::from_le_bytes(job[i * 4..i * 4 + 4].try_into().unwrap());
+    let seq = w(0);
     match w(1) {
         OP_COPY_RECT => {
-            let (src, dst, x, y, cw, ch) = (w(2) as usize, w(3) as usize, w(4), w(5), w(6), w(7));
-            if src >= NUM_BOS || dst >= NUM_BOS || src == dst || !rect_fits(&bos[src], x, y, cw, ch)
-                || !rect_fits(&bos[dst], x, y, cw, ch) {
+            if !svc.copy_ok {
                 return -EINVAL;
             }
-            let (s, d) = (bos[src], bos[dst]);
+            let (src, dst, x, y, cw, ch) = (w(2) as usize, w(3) as usize, w(4), w(5), w(6), w(7));
+            if src >= NUM_BOS || dst >= NUM_BOS || src == dst || !rect_fits(&svc.bos[src], x, y, cw, ch)
+                || !rect_fits(&svc.bos[dst], x, y, cw, ch) {
+                return -EINVAL;
+            }
+            drain_scene(adev, svc);
+            let (s, d) = (svc.bos[src], svc.bos[dst]);
             match copy_rect(adev, s.gpu, s.pitch, d.gpu, d.pitch, x, y, cw, ch) {
                 Ok(()) => 0,
                 Err(e) => e,
             }
         }
+        OP_BO_ADD => match bo_add(adev, svc, w(2)) {
+            Ok(()) => 0,
+            Err(e) => e,
+        },
+        OP_BO_REMOVE => match bo_remove(adev, svc, w(2)) {
+            Ok(()) => 0,
+            Err(e) => e,
+        },
+        OP_SCENE if svc.composer.is_some() => run_scene(adev, svc, seq, w(2), w(3)),
         _ => -EINVAL,
     }
 }
 
-/// The shadows' buffer objects go back.
-fn unbind(adev: &mut amdgpu_device, bos: &mut [bo; NUM_BOS]) {
-    for b in bos.iter_mut() {
+/// Everything the service holds goes back.
+fn unbind(adev: &mut amdgpu_device, svc: &mut service) {
+    drain_scene(adev, svc);
+    if let Some(mut c) = svc.composer.take() {
+        for b in svc.bos.iter_mut().chain(svc.dyn_bos.iter_mut()) {
+            unmap_vm(adev, &mut c, b);
+        }
+        compose::composer_fini(adev, c);
+    }
+    for b in svc.bos.iter_mut().chain(svc.dyn_bos.iter_mut()) {
         if let Some(h) = b.handle.take() {
             obj::amdgpu_bo_unpin(adev, h);
             obj::amdgpu_bo_unref(adev, h);
         }
     }
+    svc.dyn_bos.clear();
     crate::amdgpu_gart::amdgpu_gart_invalidate_tlb(adev);
 }
 
-/// Where the client self-test maps its buffers: the high half, sign
-/// extended as a client's VA manager hands it out.
-const CLIENT_TEST_VA: u64 = 0xffff_8000_0010_0000;
-
-/// The client self-test: a client with its own VM writes a pattern into
-/// one of its buffers through a compute IB in another, both mapped at its
-/// own addresses.
-fn client_self_test(adev: &mut amdgpu_device) -> bool {
-    use crate::amdgpu_cs as cs;
-    let mut fpriv = match cs::amdgpu_driver_open_kms(adev) {
-        Ok(f) => f,
+/// The compositor's client with the fixed buffers in its VM, proven by a
+/// dispatch; None leaves the scenes on the CPU.
+fn scenes_init(adev: &mut amdgpu_device, svc: &mut service) -> bool {
+    let mut c = match compose::composer_init(adev) {
+        Ok(c) => c,
         Err(e) => {
-            Line::new().s("gpudev: client open failed (").dec((-e) as u64).s(")").say();
+            Line::new().s("gpudev: no compositor client (").dec((-e) as u64).s("), scenes stay on the CPU").say();
             return false;
         }
     };
-    let mut bos: Vec<usize> = Vec::new();
-    let ok = (|| -> Result<bool, i32> {
-        let ctx = crate::amdgpu_ctx::amdgpu_ctx_alloc(adev, &mut fpriv.ctx_mgr, fpriv.vm, crate::amdgpu_ctx::PRIORITY_NORMAL)?;
-        for _ in 0..2 {
-            let h = cs::amdgpu_gem_object_create(adev, PAGE, PAGE, AMDGPU_GEM_DOMAIN_GTT, 0)?;
-            bos.push(h);
-            cs::amdgpu_gem_object_open(adev, &fpriv, h);
-        }
-        let rw = AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE;
-        let ib_va = CLIENT_TEST_VA;
-        let dst_va = CLIENT_TEST_VA + PAGE;
-        cs::amdgpu_gem_va_ioctl(adev, &fpriv, bos[0], true, ib_va, 0, PAGE, rw | AMDGPU_VM_PAGE_EXECUTABLE)?;
-        cs::amdgpu_gem_va_ioctl(adev, &fpriv, bos[1], true, dst_va, 0, PAGE, rw)?;
-        let kib = obj::amdgpu_bo_kmap(adev, bos[0])?;
-        let kdst = obj::amdgpu_bo_kmap(adev, bos[1])?;
-        crate::amdgpu_gart::kptr_w32(adev, kdst, 0, 0);
-        let ib = [crate::gfx_v9_0::PACKET3(PACKET3_WRITE_DATA, 3), WRITE_DATA_DST_SEL_5 | WR_CONFIRM, dst_va as u32,
-                  (dst_va >> 32) as u32, 0xC1E7_7E57];
-        for (i, &v) in ib.iter().enumerate() {
-            crate::amdgpu_gart::kptr_w32(adev, kib, i as u64 * 4, v);
-        }
-        let chunk = cs::drm_amdgpu_cs_chunk_ib {
-            flags: 0,
-            va_start: ib_va,
-            ib_bytes: ib.len() as u32 * 4,
-            ip_type: AMDGPU_HW_IP_COMPUTE,
-            ip_instance: 0,
-            ring: 0,
-        };
-        let (_, fence) = cs::amdgpu_cs_ioctl(adev, &mut fpriv, ctx, &[chunk], &bos)?;
-        if crate::dma_fence::dma_fence_wait_timeout(adev, &fence, JOB_TIMEOUT_US) == 0 {
-            return Err(-ETIME);
-        }
-        Ok(crate::amdgpu_gart::kptr_r32(adev, kdst, 0) == 0xC1E7_7E57 && fence.error() == 0)
-    })();
-    for &h in &bos {
-        cs::amdgpu_gem_object_close(adev, &fpriv, h);
-        obj::amdgpu_bo_unref(adev, h);
+    let mut ok = map_framebuffer(adev, &mut c, &mut svc.bos[0]).is_ok();
+    for id in 1..NUM_BOS {
+        let mut b = svc.bos[id];
+        ok = ok && map_import(adev, &mut c, &mut b).is_ok();
+        svc.bos[id] = b;
     }
-    cs::amdgpu_driver_postclose_kms(adev, fpriv);
-    match ok {
-        Ok(v) => v,
-        Err(e) => {
-            Line::new().s("gpudev: client self-test failed (").dec((-e) as u64).s(")").say();
-            false
+    ok = ok && compose::self_test(adev, &mut c);
+    Line::new().s("gpudev: compute dispatch self-test ").s(if ok { "passed" } else { "FAILED" }).say();
+    if !ok {
+        for b in svc.bos.iter_mut() {
+            unmap_vm(adev, &mut c, b);
         }
+        compose::composer_fini(adev, c);
+        return false;
     }
+    svc.composer = Some(c);
+    true
 }
 
-/// Register with the kernel, bind its buffers, prove the copy and serve
-/// until a copy times out.
+/// Register with the kernel, bind its buffers, prove the copy and the
+/// dispatch, and serve until a copy times out.
 pub fn serve(adev: &mut amdgpu_device) {
     let rc = npk_sys::gpudev_register(VERSION);
     if rc != 0 {
         Line::new().s("gpudev: register failed (").dec((-rc) as u64).s(")").say();
         return;
     }
-    let mut bos = [bo::default(); NUM_BOS];
-    for (id, b) in bos.iter_mut().enumerate() {
+    let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: Vec::new(), copy_ok: false, composer: None,
+                            scene: None, scenes: 0 };
+    for id in 0..NUM_BOS {
         let Some(info) = bo_info(id as u32) else {
             Line::new().s("gpudev: no buffer ").dec(id as u64).say();
             npk_sys::gpudev_ready(0);
             return;
         };
-        *b = info;
+        svc.bos[id] = info;
     }
-    Line::new().s("gpudev: ").dec(bos[0].width as u64).s("x").dec(bos[0].height as u64).s(", pitch ")
-        .dec(bos[0].pitch as u64).s(", framebuffer at bus 0x").hexw((bos[0].phys >> 32) as u32, 8)
-        .hexw(bos[0].phys as u32, 8).say();
-    let mut bound = bind_framebuffer(adev, &mut bos[0]);
+    let fb = svc.bos[0];
+    Line::new().s("gpudev: ").dec(fb.width as u64).s("x").dec(fb.height as u64).s(", pitch ")
+        .dec(fb.pitch as u64).s(", framebuffer at bus 0x").hexw((fb.phys >> 32) as u32, 8)
+        .hexw(fb.phys as u32, 8).say();
+    let mut bound = bind_framebuffer(adev, &mut svc.bos[0]);
     if !bound {
         Line::new().s("gpudev: the framebuffer is not in visible VRAM").say();
     }
@@ -330,60 +586,66 @@ pub fn serve(adev: &mut amdgpu_device) {
         if !bound {
             break;
         }
-        if let Err(e) = bind_shadow(adev, id as u32, &mut bos[id]) {
+        let mut b = svc.bos[id];
+        if let Err(e) = bind_shadow(adev, id as u32, &mut b) {
             Line::new().s("gpudev: shadow ").dec(id as u64).s(" could not be bound (").dec((-e) as u64).s(")")
                 .say();
             bound = false;
         }
+        svc.bos[id] = b;
     }
     if !bound {
-        unbind(adev, &mut bos);
+        unbind(adev, &mut svc);
         npk_sys::gpudev_ready(0);
         return;
     }
-    for (id, b) in bos.iter().enumerate() {
+    for (id, b) in svc.bos.iter().enumerate() {
         npk_sys::gpudev_bo_bound(id as i32, b.gpu as i64);
         Line::new().s("gpudev: bo ").dec(id as u64).s(" at 0x").hexw((b.gpu >> 32) as u32, 8).hexw(b.gpu as u32, 8)
             .dbg();
     }
-    let copy_ok = self_test(adev);
-    Line::new().s("gpudev: sdma0 self-test ").s(if copy_ok { "passed" } else { "FAILED" }).say();
-    let client_ok = client_self_test(adev);
-    Line::new().s("gpudev: client self-test ").s(if client_ok { "passed" } else { "FAILED" }).say();
-    npk_sys::gpudev_ready(if copy_ok { CAP_COPY } else { 0 });
-    if !copy_ok {
-        unbind(adev, &mut bos);
+    svc.copy_ok = self_test(adev);
+    Line::new().s("gpudev: sdma0 self-test ").s(if svc.copy_ok { "passed" } else { "FAILED" }).say();
+    let scene_ok = svc.copy_ok && scenes_init(adev, &mut svc);
+    let caps = if svc.copy_ok { CAP_COPY } else { 0 } | if scene_ok { CAP_SCENE } else { 0 };
+    npk_sys::gpudev_ready(caps);
+    if caps == 0 {
+        unbind(adev, &mut svc);
         return;
     }
-    Line::new().s("gpudev: serving copies").say();
+    Line::new().s("gpudev: serving copies").s(if scene_ok { " and scenes" } else { "" }).say();
 
     let mut jobs = [0u8; JOB_BYTES * 8];
     let (mut done, mut failed) = (0u64, 0u64);
     loop {
-        npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, 100);
+        npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, if svc.scene.is_some() { 2 } else { 100 });
         crate::amdgpu_irq::amdgpu_ih_process(adev, false);
         crate::workqueue::run_pending(adev);
+        poll_scene(adev, &mut svc);
         let n = npk_sys::gpudev_poll(&mut jobs);
         // The kernel no longer has this module as its service.
         if n < 0 {
-            Line::new().s("gpudev: no longer the service after ").dec(done).s(" copies (").dec(failed)
-                .s(" refused)").say();
+            Line::new().s("gpudev: no longer the service after ").dec(done).s(" jobs (").dec(failed)
+                .s(" refused, ").dec(svc.scenes as u64).s(" scenes)").say();
             break;
         }
         let mut timed_out = false;
         for j in 0..n.max(0) as usize {
             let job = &jobs[j * JOB_BYTES..(j + 1) * JOB_BYTES];
             let seq = u32::from_le_bytes(job[0..4].try_into().unwrap());
-            let status = run_job(adev, &bos, job);
+            let status = run_job(adev, &mut svc, job);
+            if status == JOB_OPEN {
+                continue;
+            }
             if status == 0 { done += 1 } else { failed += 1 }
             timed_out |= status == -ETIME;
             npk_sys::gpudev_complete(seq as i32, status);
         }
         if timed_out {
-            Line::new().s("gpudev: a copy on sdma0 timed out after ").dec(done).s(" copies (").dec(failed)
+            Line::new().s("gpudev: a copy on sdma0 timed out after ").dec(done).s(" jobs (").dec(failed)
                 .s(" refused), giving the card back").say();
             break;
         }
     }
-    unbind(adev, &mut bos);
+    unbind(adev, &mut svc);
 }

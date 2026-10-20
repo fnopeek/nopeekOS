@@ -60,9 +60,27 @@ und schaltet bei der kleinsten Abweichung auf die CPU zurueck.
    laufen Paket fuer Paket wie Linux sie schreibt.
 6. **Gemeinsame Planung** — `plan.rs` und das Lesen/Pruefen der Szene aus
    `gpu_intel_tgl/src/compose.rs` in eine gemeinsame Crate; beide Module
-   benutzen sie, die Breite ist Parameter.
+   benutzen sie, die Breite ist Parameter. ✅
+   `tools/wasm/gpu_scene`: `plan.rs` (verschoben), `scene.rs` (Pruefen und
+   Umschreiben der Szene aus `submit_scene`, Wort fuer Wort) und die
+   Push-Konstanten samt Raster je Dispatch, abhaengig von der
+   Gruppenbreite. Das Intel-Modul benutzt sie in unveraenderter Wirkung.
 7. **Dienst** — `BO_ADD`/`BO_REMOVE` in den Compositor-VM, `OP_SCENE` mit
-   `JOB_OPEN` und Nachsehen in der Schleife, `CAP_SCENE` nach Selbsttest.
+   `JOB_OPEN` und Nachsehen in der Schleife, `CAP_SCENE` nach Selbsttest. ✅ (Host)
+   Der Compositor ist ein Client (`compose.rs`): Programme und
+   Push-Konstanten im 32-Bit-Fenster, die uebrigen Puffer darunter, eine
+   Szene = Praeambel-IB + Befehls-IB wie bei RADV. Der Framebuffer kommt
+   ueber die reservierten `stolen_*`-BOs in den VM, die Schatten und
+   Szenenquellen importiert und in GTT festgehalten. `CAP_SCENE` erst nach
+   dem Dispatch-Selbsttest (`fill_pattern`, zurueckgelesen).
+   acoc zeichnet jetzt auch auf, was RADV nach einer Barriere schreibt —
+   mit neuen Push-Konstanten (`*_RADV_REPUSH`) und nach einem
+   Pipeline-Wechsel (`*_RADV_SWITCH`, Reihenfolge Pipeline · Push · Flush ·
+   Dispatch · Prefetch) —, dazu die rohe Aufzeichnung samt Polsterung.
+   `hostcheck/stream_check.rs` baut Praeambel-IB (40 Dwords) und
+   Befehlspuffer (144 Dwords) daraus nach: Wort fuer Wort gleich. Die
+   Fake-GPU fuehrt `fill_pattern` aus (am Code ueber die VM erkannt), der
+   Szenen-Job laeuft auf dem Host bis zur Fence durch.
 
 ## Was RADV fuer einen Dispatch schreibt (acoc, Renoir, wave64)
 

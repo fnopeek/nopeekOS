@@ -50,6 +50,48 @@ fn translate(addr: u64) -> Mem {
     Mem::Bus((pte & 0x0000_ffff_ffff_f000) | (addr & 0xfff))
 }
 
+/// PM4 SET_SH_REG and DISPATCH_DIRECT (soc15d.h), and the SH registers a
+/// dispatch reads, from SI_SH_REG_OFFSET in dwords.
+const PKT3_SET_SH_REG: u32 = 0x76;
+const PKT3_DISPATCH_DIRECT: u32 = 0x15;
+const SH_COMPUTE_PGM_LO: u32 = 0x20c;
+const SH_COMPUTE_PGM_HI: u32 = 0x20d;
+const SH_COMPUTE_USER_DATA_0: u32 = 0x240;
+
+thread_local! {
+    /// The compute SH registers the command processor holds.
+    static SH: RefCell<std::collections::HashMap<u32, u32>> = RefCell::new(std::collections::HashMap::new());
+}
+
+/// A dispatch on the compute ring. The fake runs one program, fill_pattern
+/// (recognized by its code through the VM), so the dispatch self-test
+/// proves the program address, push constants and grid end to end; any
+/// other program is logged and does nothing.
+fn run_dispatch(grid: [u32; 3]) {
+    let sh = |r: u32| SH.with(|s| s.borrow().get(&r).copied().unwrap_or(0));
+    let va = ((sh(SH_COMPUTE_PGM_HI) & 0xff) as u64) << 40 | (sh(SH_COMPUTE_PGM_LO) as u64) << 8;
+    let code = &shaders_gen::FILL_PATTERN_CODE;
+    let is_fill = (0..code.len() / 4).all(|i| {
+        gpu_r32(va + i as u64 * 4) == u32::from_le_bytes(code[i * 4..i * 4 + 4].try_into().unwrap())
+    });
+    if !is_fill {
+        log(format!("pm4 DISPATCH_DIRECT {:?} program {:#x}", grid, va));
+        return;
+    }
+    let k = &shaders_gen::FILL_PATTERN;
+    let u = |i: u32| sh(SH_COMPUTE_USER_DATA_0 + k.inline_push_sgpr + i);
+    let push = |off: u32| u(off / 4);
+    let dst = push(shaders_gen::FILL_PATTERN_PUSH_DST) as u64 | (push(shaders_gen::FILL_PATTERN_PUSH_DST + 4) as u64) << 32;
+    let (w, h) = (push(shaders_gen::FILL_PATTERN_PUSH_WIDTH), push(shaders_gen::FILL_PATTERN_PUSH_HEIGHT));
+    let (pitch, seed) = (push(shaders_gen::FILL_PATTERN_PUSH_PITCH_PX), push(shaders_gen::FILL_PATTERN_PUSH_SEED));
+    for y in 0..(grid[1] * k.num_thread[1]).min(h) {
+        for x in 0..(grid[0] * k.num_thread[0]).min(w) {
+            gpu_w32(dst + (y as u64 * pitch as u64 + x as u64) * 4, seed << 24 | y << 12 | x);
+        }
+    }
+    log(format!("pm4 DISPATCH_DIRECT {:?} fill_pattern {}x{} at {:#x}", grid, w, h, dst));
+}
+
 thread_local! {
     /// The VMID of the IB running now; 0 is the kernel's context.
     static VMID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -283,6 +325,12 @@ fn run_pm4(kind: Kind, rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32
                     ih_post(SOC15_IH_CLIENTID_GRBM_CP, GFX_9_0__SRCID__CP_EOP_INTERRUPT, ring_id);
                 }
             }
+            PKT3_SET_SH_REG => {
+                for i in 0..count {
+                    SH.with(|s| s.borrow_mut().insert(d(1) + i, d(2 + i)));
+                }
+            }
+            PKT3_DISPATCH_DIRECT => run_dispatch([d(1), d(2), d(3)]),
             PACKET3_WAIT_REG_MEM => {
                 let mem = (d(1) >> 4) & 1 != 0;
                 if (d(1) >> 6) & 1 != 0 {

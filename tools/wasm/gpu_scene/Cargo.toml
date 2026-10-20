@@ -1,0 +1,9 @@
+[package]
+name = "gpu_scene"
+version = "0.1.0"
+edition = "2024"
+description = "The gpudev scene, checked and planned the same for every GPU module."
+license = "AGPL-3.0-or-later"
+
+[lib]
+crate-type = ["rlib"]

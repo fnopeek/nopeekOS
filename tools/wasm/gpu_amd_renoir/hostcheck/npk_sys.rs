@@ -528,9 +528,12 @@ pub fn fake_psp_log() -> Vec<(Vec<u32>, Vec<u32>)> {
 pub struct FakeGpudev {
     /// Bus address, width, height, pitch.
     pub fb: (u64, u32, u32, u32),
-    pub shadows: [Option<Dma>; 2],
-    pub jobs: std::collections::VecDeque<[u32; 6]>,
+    /// Buffers 1 and 2, the shadows, and 3, a scene source to add.
+    pub shadows: [Option<Dma>; 3],
+    /// Op, arguments and payload of each job.
+    pub jobs: std::collections::VecDeque<(u32, [u32; 6], Vec<u8>)>,
     pub seq: u32,
+    pub payloads: std::collections::HashMap<u32, Vec<u8>>,
 }
 
 thread_local! {
@@ -538,10 +541,11 @@ thread_local! {
 }
 
 /// The service's buffers and jobs, before the run.
-pub fn fake_gpudev(fb: (u64, u32, u32, u32), jobs: Vec<[u32; 6]>) {
+pub fn fake_gpudev(fb: (u64, u32, u32, u32), jobs: Vec<(u32, [u32; 6], Vec<u8>)>) {
     let pages = ((fb.3 * fb.2) as u64).div_ceil(4096) as i32;
-    let shadows = [Dma::alloc(pages), Dma::alloc(pages)];
-    GPUDEV.with(|g| *g.borrow_mut() = Some(FakeGpudev { fb, shadows, jobs: jobs.into(), seq: 0 }));
+    let shadows = [Dma::alloc(pages), Dma::alloc(pages), Dma::alloc(pages)];
+    GPUDEV.with(|g| *g.borrow_mut() = Some(FakeGpudev { fb, shadows, jobs: jobs.into(), seq: 0,
+                                                        payloads: Default::default() }));
 }
 
 /// Shadow `i` (1 or 2), for a check to fill or read.
@@ -564,7 +568,7 @@ pub fn gpudev_bo_info(id: i32, out: &mut [u8; 40]) -> i32 {
         let size = pitch as u64 * h as u64;
         let phys = match id {
             0 => fbp,
-            1 | 2 => match s.shadows[id as usize - 1] {
+            1..=3 => match s.shadows[id as usize - 1] {
                 Some(d) => d.phys,
                 None => return -1,
             },
@@ -584,7 +588,7 @@ pub fn gpudev_bo_pages(id: i32, first: i32, out: &mut [u64]) -> i32 {
     GPUDEV.with(|g| {
         let g = g.borrow();
         let Some(s) = g.as_ref() else { return -1 };
-        if !(1..=2).contains(&id) {
+        if !(1..=3).contains(&id) {
             return -1;
         }
         let Some(d) = s.shadows[id as usize - 1] else { return -1 };
@@ -615,14 +619,30 @@ pub fn gpudev_poll(buf: &mut [u8]) -> i32 {
     GPUDEV.with(|g| {
         let mut g = g.borrow_mut();
         let Some(s) = g.as_mut() else { return -1 };
-        let Some(job) = s.jobs.pop_front() else { return -1 };
+        let Some((op, args, payload)) = s.jobs.pop_front() else { return -1 };
         s.seq += 1;
         buf[0..4].copy_from_slice(&s.seq.to_le_bytes());
-        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-        for (i, v) in job.iter().enumerate() {
+        buf[4..8].copy_from_slice(&op.to_le_bytes());
+        for (i, v) in args.iter().enumerate() {
             buf[8 + i * 4..12 + i * 4].copy_from_slice(&v.to_le_bytes());
         }
+        let seq = s.seq;
+        s.payloads.insert(seq, payload);
         1
+    })
+}
+
+/// `npk_gpudev_job_data`: bytes of a job's payload.
+pub fn gpudev_job_data(seq: i32, off: i32, out: &mut [u8]) -> i32 {
+    GPUDEV.with(|g| {
+        let g = g.borrow();
+        let Some(p) = g.as_ref().and_then(|s| s.payloads.get(&(seq as u32))) else { return -1 };
+        let off = off as usize;
+        if off + out.len() > p.len() {
+            return -1;
+        }
+        out.copy_from_slice(&p[off..off + out.len()]);
+        out.len() as i32
     })
 }
 

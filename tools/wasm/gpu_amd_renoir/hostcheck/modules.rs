@@ -111,5 +111,11 @@ mod amdgpu_res_cursor;
 mod amdgpu_ctx;
 #[path = "../src/amdgpu_cs.rs"]
 mod amdgpu_cs;
+#[path = "../src/shaders_gen.rs"]
+mod shaders_gen;
+#[path = "../src/radv_stream.rs"]
+mod radv_stream;
+#[path = "../src/compose.rs"]
+mod compose;
 #[path = "../src/athub_v1_0.rs"]
 mod athub_v1_0;
