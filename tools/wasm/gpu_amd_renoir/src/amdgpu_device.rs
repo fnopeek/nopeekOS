@@ -461,6 +461,8 @@ pub struct amdgpu_vm_manager {
     /// The `amdgpu_pasid_xa` allocator: PASIDs in use and the next to try.
     pub pasids_used: Vec<u32>,
     pub pasid_xa_next: u32,
+    /// `fault_info`: the last fault of any VM.
+    pub fault_info: crate::amdgpu_vm::amdgpu_vm_fault_info,
 }
 
 /// `struct amdgpu_sdma`.
@@ -745,6 +747,14 @@ pub struct amdgpu_device {
     pub vm_mappings: Vec<Option<crate::amdgpu_vm::amdgpu_bo_va_mapping>>,
     pub gpu_reset_counter: u32,
     pub vram_lost_counter: u32,
+    /// TTM's move statistics (`amdgpu_bo_move`); no buffer moves yet.
+    pub num_bytes_moved: u64,
+    pub num_evictions: u64,
+    pub num_vram_cpu_page_faults: u64,
+    /// What `amdgpu_bo_pin` holds in VRAM, CPU-visible VRAM and GART.
+    pub vram_pin_size: u64,
+    pub visible_pin_size: u64,
+    pub gart_pin_size: u64,
     pub gang_submit: crate::dma_fence::Fence,
     pub isolation: crate::amdgpu_job::amdgpu_isolation,
 }
@@ -873,6 +883,12 @@ impl amdgpu_device {
             vm_mappings: Vec::new(),
             gpu_reset_counter: 0,
             vram_lost_counter: 0,
+            num_bytes_moved: 0,
+            num_evictions: 0,
+            num_vram_cpu_page_faults: 0,
+            vram_pin_size: 0,
+            visible_pin_size: 0,
+            gart_pin_size: 0,
             gang_submit: crate::dma_fence::dma_fence_get_stub(),
             isolation: Default::default(),
         }

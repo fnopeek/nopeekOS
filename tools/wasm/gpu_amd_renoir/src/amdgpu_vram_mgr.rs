@@ -54,6 +54,21 @@ fn amdgpu_vram_mgr_vis_size(visible_vram_size: u64, mm: &gpu_buddy, block: usize
     end.min(visible_vram_size) - start
 }
 
+/// `amdgpu_vram_mgr_bo_visible_size`: the CPU-visible bytes of buffer `h`.
+pub fn amdgpu_vram_mgr_bo_visible_size(adev: &crate::amdgpu_device::amdgpu_device, h: usize) -> u64 {
+    let size = crate::amdgpu_object::amdgpu_bo_size(adev, h);
+    // amdgpu_gmc_vram_full_visible
+    if adev.gmc.real_vram_size == adev.gmc.visible_vram_size {
+        return size;
+    }
+    let Some(res) = crate::amdgpu_object::bo(adev, h).tbo.resource.as_ref() else { return 0 };
+    if res.start >= adev.gmc.visible_vram_size >> PAGE_SHIFT {
+        return 0;
+    }
+    let (Some(mgr), ttm_resource_priv::vram { blocks, .. }) = (adev.mman.vram_mgr.as_ref(), &res.priv_) else { return 0 };
+    blocks.iter().map(|&b| amdgpu_vram_mgr_vis_size(adev.gmc.visible_vram_size, &mgr.mm, b)).sum()
+}
+
 /// `amdgpu_is_vram_mgr_blocks_contiguous`.
 fn amdgpu_is_vram_mgr_blocks_contiguous(mm: &gpu_buddy, blocks: &[usize]) -> bool {
     if blocks.is_empty() {

@@ -292,13 +292,33 @@ pub fn amdgpu_bo_pin(adev: &mut amdgpu_device, h: usize, mut domain: u32) -> i32
         return r;
     }
     bo_mut(adev, h).tbo.pin_count += 1;
+    amdgpu_bo_pin_size(adev, h, true);
     0
 }
 
-/// `amdgpu_bo_unpin`.
+/// The pin sizes `amdgpu_bo_pin` adds and `amdgpu_bo_unpin` takes off.
+fn amdgpu_bo_pin_size(adev: &mut amdgpu_device, h: usize, add: bool) {
+    let size = amdgpu_bo_size(adev, h);
+    let Some(mem_type) = bo(adev, h).tbo.resource.as_ref().map(|r| r.mem_type) else { return };
+    let apply = |v: &mut u64, by: u64| *v = if add { *v + by } else { v.saturating_sub(by) };
+    if mem_type == TTM_PL_VRAM {
+        let visible = crate::amdgpu_vram_mgr::amdgpu_vram_mgr_bo_visible_size(adev, h);
+        apply(&mut adev.vram_pin_size, size);
+        apply(&mut adev.visible_pin_size, visible);
+    } else if mem_type == TTM_PL_TT {
+        apply(&mut adev.gart_pin_size, size);
+    }
+}
+
+/// `amdgpu_bo_unpin`. An imported buffer's pages are the exporter's; there
+/// is no `dma_buf_unpin` to call.
 pub fn amdgpu_bo_unpin(adev: &mut amdgpu_device, h: usize) {
     let b = bo_mut(adev, h);
     b.tbo.pin_count = b.tbo.pin_count.saturating_sub(1);
+    if b.tbo.pin_count != 0 {
+        return;
+    }
+    amdgpu_bo_pin_size(adev, h, false);
 }
 
 /// `amdgpu_gmc_sign_extend` (amdgpu_gmc.h).

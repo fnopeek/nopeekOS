@@ -88,3 +88,7 @@ soc15_ih_clientid_name: str
 @ gmc_v9_0.c
 gfxhub_client_ids: str
 mmhub_client_ids_renoir: str
+@ soc15.c
+rn_video_codecs_decode_array: u32
+vega_video_codecs_encode_array: u32
+soc15_allowed_read_registers: u32

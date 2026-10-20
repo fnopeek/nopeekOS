@@ -635,7 +635,7 @@ pub fn amdgpu_discovery_get_vcn_info(adev: &mut amdgpu_device) -> i32 {
 }
 
 /// `IP_VERSION(mj, mn, rv)`.
-const fn ip_version(mj: u32, mn: u32, rv: u32) -> u32 {
+pub const fn ip_version(mj: u32, mn: u32, rv: u32) -> u32 {
     (mj << 24) | (mn << 16) | (rv << 8)
 }
 

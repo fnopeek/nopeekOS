@@ -93,7 +93,8 @@ pub struct psp_context {
     pub fence_value: u32,
     pub tmr_bo: Option<usize>,
     pub tmr_mc_addr: u64,
-    /// `toc` and `rl`: none in an APU's PSP firmware.
+    /// `sos`, `toc` and `rl`: none in an APU's PSP firmware.
+    pub sos: psp_bin_desc,
     pub toc: psp_bin_desc,
     pub rl: psp_bin_desc,
 }

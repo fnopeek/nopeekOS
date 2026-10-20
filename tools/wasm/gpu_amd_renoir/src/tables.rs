@@ -221,3 +221,12 @@ pub static gfxhub_client_ids: [&[u8]; 13] = [b"CB", b"DB", b"IA", b"WD", b"CPF",
 
 /// `mmhub_client_ids_renoir` in gmc_v9_0.c
 pub static mmhub_client_ids_renoir: [&[u8]; 62] = [b"MP1", b"MP1", b"MP0", b"MP0", b"HDP", b"HDP", b"", b"XDP", b"DCEDMC", b"", b"DCEVGA", b"", b"", b"DBGU0", b"", b"DCEDMC", b"", b"DCEVGA", b"", b"DCEDWB", b"", b"", b"", b"", b"", b"", b"UTCL2", b"", b"", b"", b"", b"", b"", b"", b"", b"", b"", b"", b"TLS", b"", b"", b"", b"", b"", b"", b"", b"", b"", b"", b"", b"", b"", b"OSS", b"OSS", b"SDMA0", b"SDMA0", b"VCN", b"VCN", b"VCNU", b"VCNU", b"JPEG", b"JPEG"];
+
+/// `rn_video_codecs_decode_array` in soc15.c
+pub static rn_video_codecs_decode_array: [u32; 35] = [0, 1920, 1088, 2088960, 3, 1, 1920, 1088, 2088960, 5, 3, 4096, 4096, 16777216, 52, 2, 1920, 1088, 2088960, 4, 4, 8192, 4352, 35651584, 186, 5, 16384, 16384, 268435456, 0, 6, 8192, 4352, 35651584, 0];
+
+/// `vega_video_codecs_encode_array` in soc15.c
+pub static vega_video_codecs_encode_array: [u32; 10] = [3, 4096, 4096, 16777216, 0, 4, 4096, 4096, 16777216, 0];
+
+/// `soc15_allowed_read_registers` in soc15.c
+pub static soc15_allowed_read_registers: [u32; 100] = [1, 0, 0, 4, 0, 1, 0, 0, 2, 0, 1, 0, 0, 5, 0, 1, 0, 0, 6, 0, 1, 0, 0, 14, 0, 1, 0, 0, 15, 0, 3, 0, 0, 37, 0, 4, 0, 0, 37, 0, 1, 0, 0, 416, 0, 1, 0, 0, 413, 0, 1, 0, 0, 414, 0, 1, 0, 0, 412, 0, 1, 0, 0, 136, 0, 1, 0, 0, 137, 0, 1, 0, 0, 135, 0, 1, 0, 0, 133, 0, 1, 0, 0, 134, 0, 1, 0, 0, 132, 0, 1, 0, 0, 1598, 0, 1, 0, 0, 1549, 0];

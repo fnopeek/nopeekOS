@@ -1085,27 +1085,263 @@ fn smu_cmn_get_metrics_table(adev: &mut amdgpu_device, bypass_cache: bool) -> i3
     0
 }
 
-/// `renoir_get_smu_metrics_data` for METRICS_AVERAGE_GFXCLK, in MHz.
-fn renoir_get_smu_metrics_gfxclk(adev: &mut amdgpu_device, value: &mut u32) -> i32 {
+/// `MetricsMember_t`: what `renoir_get_smu_metrics_data` reads.
+#[derive(Clone, Copy)]
+enum metrics_member {
+    AverageGfxclk,
+    AverageSocclk,
+    AverageUclk,
+    AverageGfxActivity,
+    AverageVcnActivity,
+    CurrSocketPower,
+    TemperatureEdge,
+    TemperatureHotspot,
+    ThrottlerStatus,
+    VoltageVddgfx,
+    VoltageVddsoc,
+    SsApuShare,
+    SsDgpuShare,
+}
+
+fn metrics_u16(adev: &amdgpu_device, off: u32) -> u32 {
+    let m = &adev.smu.smu_table.metrics_table;
+    u16::from_le_bytes([m[off as usize], m[off as usize + 1]]) as u32
+}
+
+/// `renoir_get_ss_power_percent`.
+fn renoir_get_ss_power_percent(adev: &amdgpu_device) -> (u32, u32) {
+    let apu_power = metrics_u16(adev, SMU_METRICS_APU_POWER);
+    let apu_limit = metrics_u16(adev, SMU_METRICS_STAPM_ORIGINAL_LIMIT);
+    let mut apu_boost = 0;
+    if apu_power > apu_limit && apu_limit != 0 {
+        apu_boost = ((apu_power - apu_limit) * 100) / apu_limit;
+    }
+    apu_boost = apu_boost.min(100);
+    let dgpu_power = metrics_u16(adev, SMU_METRICS_DGPU_POWER);
+    let current_limit = metrics_u16(adev, SMU_METRICS_STAPM_CURRENT_LIMIT);
+    let mut dgpu_limit = 0;
+    if current_limit > apu_limit {
+        dgpu_limit = current_limit - apu_limit;
+    }
+    let mut dgpu_boost = 0;
+    if dgpu_power > dgpu_limit && dgpu_limit != 0 {
+        dgpu_boost = ((dgpu_power - dgpu_limit) * 100) / dgpu_limit;
+    }
+    dgpu_boost = dgpu_boost.min(100);
+    if dgpu_boost >= apu_boost {
+        apu_boost = 0;
+    } else {
+        dgpu_boost = 0;
+    }
+    (apu_boost, dgpu_boost)
+}
+
+/// `renoir_get_smu_metrics_data`.
+fn renoir_get_smu_metrics_data(adev: &mut amdgpu_device, member: metrics_member, value: &mut u32) -> i32 {
     let r = smu_cmn_get_metrics_table(adev, false);
     if r != 0 {
         return r;
     }
-    let at = (SMU_METRICS_CLOCK_FREQUENCY + CLOCK_GFXCLK * 2) as usize;
-    let m = &adev.smu.smu_table.metrics_table;
-    *value = u16::from_le_bytes([m[at], m[at + 1]]) as u32;
+    let clock = |adev: &amdgpu_device, c: u32| metrics_u16(adev, SMU_METRICS_CLOCK_FREQUENCY + c * 2);
+    *value = match member {
+        metrics_member::AverageGfxclk => clock(adev, CLOCK_GFXCLK),
+        metrics_member::AverageSocclk => clock(adev, CLOCK_SOCCLK),
+        metrics_member::AverageUclk => clock(adev, CLOCK_FCLK),
+        metrics_member::AverageGfxActivity => metrics_u16(adev, SMU_METRICS_AVERAGE_GFX_ACTIVITY) / 100,
+        metrics_member::AverageVcnActivity => metrics_u16(adev, SMU_METRICS_AVERAGE_UVD_ACTIVITY) / 100,
+        metrics_member::CurrSocketPower => {
+            let p = metrics_u16(adev, SMU_METRICS_CURRENT_SOCKET_POWER);
+            let mp1 = adev.ip_version(MP1_HWIP, 0);
+            if (mp1 == crate::amdgpu_discovery::ip_version(12, 0, 1) && adev.pm.fw_version >= 0x40000f)
+                || (mp1 == crate::amdgpu_discovery::ip_version(12, 0, 0) && adev.pm.fw_version >= 0x373200) {
+                p << 8
+            } else {
+                (p << 8) / 1000
+            }
+        }
+        metrics_member::TemperatureEdge =>
+            (metrics_u16(adev, SMU_METRICS_GFX_TEMPERATURE) / 100) * SMU_TEMPERATURE_UNITS_PER_CENTIGRADES,
+        metrics_member::TemperatureHotspot =>
+            (metrics_u16(adev, SMU_METRICS_SOC_TEMPERATURE) / 100) * SMU_TEMPERATURE_UNITS_PER_CENTIGRADES,
+        metrics_member::ThrottlerStatus => metrics_u16(adev, SMU_METRICS_THROTTLER_STATUS),
+        metrics_member::VoltageVddgfx => metrics_u16(adev, SMU_METRICS_VOLTAGE),
+        metrics_member::VoltageVddsoc => metrics_u16(adev, SMU_METRICS_VOLTAGE + 2),
+        metrics_member::SsApuShare => renoir_get_ss_power_percent(adev).0,
+        metrics_member::SsDgpuShare => renoir_get_ss_power_percent(adev).1,
+    };
     0
 }
 
-/// `amdgpu_dpm_read_sensor` → `smu_read_sensor` → `renoir_read_sensor`
-/// for AMDGPU_PP_SENSOR_GFX_SCLK: the average GFX clock in 10 kHz.
-pub fn amdgpu_dpm_read_sensor_gfx_sclk(adev: &mut amdgpu_device, value: &mut u32) -> i32 {
+/// `renoir_read_sensor`: Ok with the value, or the error that makes
+/// `smu_read_sensor` look at the common sensors.
+fn renoir_read_sensor(adev: &mut amdgpu_device, sensor: u32) -> Result<u32, i32> {
+    use metrics_member::*;
+    let (member, scale) = match sensor {
+        AMDGPU_PP_SENSOR_GPU_LOAD => (AverageGfxActivity, 1),
+        AMDGPU_PP_SENSOR_VCN_LOAD => (AverageVcnActivity, 1),
+        AMDGPU_PP_SENSOR_GPU_TEMP => (TemperatureEdge, 1),
+        AMDGPU_PP_SENSOR_HOTSPOT_TEMP => (TemperatureHotspot, 1),
+        AMDGPU_PP_SENSOR_GFX_MCLK => (AverageUclk, 100),
+        AMDGPU_PP_SENSOR_GFX_SCLK => (AverageGfxclk, 100),
+        AMDGPU_PP_SENSOR_VDDGFX => (VoltageVddgfx, 1),
+        AMDGPU_PP_SENSOR_VDDNB => (VoltageVddsoc, 1),
+        AMDGPU_PP_SENSOR_GPU_INPUT_POWER => (CurrSocketPower, 1),
+        AMDGPU_PP_SENSOR_SS_APU_SHARE => (SsApuShare, 1),
+        AMDGPU_PP_SENSOR_SS_DGPU_SHARE => (SsDgpuShare, 1),
+        _ => return Err(-95),
+    };
+    let mut v = 0;
+    let r = renoir_get_smu_metrics_data(adev, member, &mut v);
+    if r != 0 {
+        return Err(r);
+    }
+    Ok(v.wrapping_mul(scale))
+}
+
+/// `amdgpu_dpm_read_sensor` → `smu_read_sensor` for a 32-bit sensor.
+/// renoir has no UMD pstate table, so the stable and peak pstate clocks
+/// are the zeroed `pstate_table`'s.
+pub fn amdgpu_dpm_read_sensor(adev: &mut amdgpu_device, sensor: u32, value: &mut u32) -> i32 {
     if !adev.smu.pm_enabled || !adev.pm.dpm_enabled {
         return -95;
     }
-    let r = renoir_get_smu_metrics_gfxclk(adev, value);
-    *value *= 100;
-    r
+    if let Ok(v) = renoir_read_sensor(adev, sensor) {
+        *value = v;
+        return 0;
+    }
+    *value = match sensor {
+        AMDGPU_PP_SENSOR_STABLE_PSTATE_SCLK | AMDGPU_PP_SENSOR_STABLE_PSTATE_MCLK
+        | AMDGPU_PP_SENSOR_PEAK_PSTATE_SCLK | AMDGPU_PP_SENSOR_PEAK_PSTATE_MCLK => 0,
+        AMDGPU_PP_SENSOR_UVD_POWER => smu_cmn_feature_is_enabled(adev, SMU_FEATURE_DPM_UVD_BIT) as u32,
+        AMDGPU_PP_SENSOR_VCE_POWER => smu_cmn_feature_is_enabled(adev, SMU_FEATURE_DPM_VCE_BIT) as u32,
+        AMDGPU_PP_SENSOR_VCN_POWER_STATE => {
+            (0..adev.vcn.num_vcn_inst as usize).any(|i| !adev.smu.vcn_gated[i]) as u32
+        }
+        AMDGPU_PP_SENSOR_MIN_FAN_RPM => 0,
+        _ => return -95,
+    };
+    0
+}
+
+/// `amdgpu_dpm_read_sensor` for AMDGPU_PP_SENSOR_GFX_SCLK: the average GFX
+/// clock in 10 kHz.
+pub fn amdgpu_dpm_read_sensor_gfx_sclk(adev: &mut amdgpu_device, value: &mut u32) -> i32 {
+    amdgpu_dpm_read_sensor(adev, AMDGPU_PP_SENSOR_GFX_SCLK, value)
+}
+
+/// `smu_cmn_clk_dpm_is_enabled`: every clock's DPM feature, all enabled on
+/// renoir.
+fn smu_cmn_clk_dpm_is_enabled(adev: &amdgpu_device, _clk_type: u32) -> bool {
+    smu_cmn_feature_is_enabled(adev, 0)
+}
+
+/// `renoir_get_dpm_clk_limited`: level `dpm_level` of `clocks_table`.
+fn renoir_get_dpm_clk_limited(adev: &amdgpu_device, clk_type: u32, dpm_level: u32, freq: &mut u32) -> i32 {
+    let t = &adev.smu.smu_table.clocks_table;
+    if t.is_empty() || clk_type >= SMU_CLK_COUNT {
+        return -22;
+    }
+    let (base, levels) = match clk_type {
+        SMU_SOCCLK => (DPM_CLOCKS_SOC_CLOCKS, NUM_SOCCLK_DPM_LEVELS),
+        SMU_UCLK | SMU_MCLK | SMU_FCLK => (DPM_CLOCKS_F_CLOCKS, NUM_FCLK_DPM_LEVELS),
+        SMU_DCEFCLK => (DPM_CLOCKS_DCF_CLOCKS, NUM_DCFCLK_DPM_LEVELS),
+        SMU_VCLK => (DPM_CLOCKS_V_CLOCKS, NUM_VCN_DPM_LEVELS),
+        SMU_DCLK => (DPM_CLOCKS_D_CLOCKS, NUM_VCN_DPM_LEVELS),
+        _ => return -22,
+    };
+    if dpm_level >= levels {
+        return -22;
+    }
+    let at = (base + dpm_level * SIZEOF_DpmClock_t + DPM_CLOCK_FREQ) as usize;
+    *freq = u32::from_le_bytes(t[at..at + 4].try_into().unwrap());
+    0
+}
+
+/// `renoir_get_dpm_ultimate_freq`, in MHz. The peak profile's masks
+/// (`renoir_get_profiling_clk_mask`): memory clock level 0, the last SOC
+/// clock level.
+fn renoir_get_dpm_ultimate_freq(adev: &mut amdgpu_device, clk_type: u32, min: Option<&mut u32>,
+                                max: Option<&mut u32>) -> i32 {
+    if !smu_cmn_clk_dpm_is_enabled(adev, clk_type) {
+        let b = &adev.smu.smu_table.boot_values;
+        let clock_limit = match clk_type {
+            SMU_MCLK | SMU_UCLK => b.uclk,
+            SMU_GFXCLK | SMU_SCLK => b.gfxclk,
+            SMU_SOCCLK => b.socclk,
+            _ => 0,
+        };
+        if let Some(m) = min {
+            *m = clock_limit / 100;
+        }
+        if let Some(m) = max {
+            *m = clock_limit / 100;
+        }
+        return 0;
+    }
+    let (mclk_mask, soc_mask) = (0, NUM_SOCCLK_DPM_LEVELS - 1);
+    if let Some(max) = max {
+        let r = match clk_type {
+            SMU_GFXCLK | SMU_SCLK => {
+                let mut v = 0;
+                let r = smu_cmn_send_smc_msg(adev, SMU_MSG_GetMaxGfxclkFrequency, GetMaxGfxclkFrequency_NAME,
+                                             Some(&mut v));
+                if r != 0 {
+                    Line::new().s("Attempt to get max GX frequency from SMC Failed !").say();
+                }
+                *max = v;
+                r
+            }
+            SMU_UCLK | SMU_FCLK | SMU_MCLK => renoir_get_dpm_clk_limited(adev, clk_type, mclk_mask, max),
+            SMU_SOCCLK => renoir_get_dpm_clk_limited(adev, clk_type, soc_mask, max),
+            _ => -22,
+        };
+        if r != 0 {
+            return r;
+        }
+    }
+    if let Some(min) = min {
+        let r = match clk_type {
+            SMU_GFXCLK | SMU_SCLK => {
+                let mut v = 0;
+                let r = smu_cmn_send_smc_msg(adev, SMU_MSG_GetMinGfxclkFrequency, GetMinGfxclkFrequency_NAME,
+                                             Some(&mut v));
+                if r != 0 {
+                    Line::new().s("Attempt to get min GX frequency from SMC Failed !").say();
+                }
+                *min = v;
+                r
+            }
+            SMU_UCLK | SMU_FCLK | SMU_MCLK => renoir_get_dpm_clk_limited(adev, clk_type, NUM_MEMCLK_DPM_LEVELS - 1, min),
+            SMU_SOCCLK => renoir_get_dpm_clk_limited(adev, clk_type, 0, min),
+            _ => -22,
+        };
+        if r != 0 {
+            return r;
+        }
+    }
+    0
+}
+
+/// `amdgpu_dpm_get_sclk` → `smu_get_sclk`: in 10 kHz, 0 on failure.
+pub fn amdgpu_dpm_get_sclk(adev: &mut amdgpu_device, low: bool) -> u32 {
+    let mut f = 0;
+    let r = if low {
+        renoir_get_dpm_ultimate_freq(adev, SMU_GFXCLK, Some(&mut f), None)
+    } else {
+        renoir_get_dpm_ultimate_freq(adev, SMU_GFXCLK, None, Some(&mut f))
+    };
+    if r != 0 { 0 } else { f * 100 }
+}
+
+/// `amdgpu_dpm_get_mclk` → `smu_get_mclk`: in 10 kHz, 0 on failure.
+pub fn amdgpu_dpm_get_mclk(adev: &mut amdgpu_device, low: bool) -> u32 {
+    let mut f = 0;
+    let r = if low {
+        renoir_get_dpm_ultimate_freq(adev, SMU_UCLK, Some(&mut f), None)
+    } else {
+        renoir_get_dpm_ultimate_freq(adev, SMU_UCLK, None, Some(&mut f))
+    };
+    if r != 0 { 0 } else { f * 100 }
 }
 
 /// `smu_v12_0_get_gfxoff_status`.

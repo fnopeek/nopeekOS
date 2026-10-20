@@ -18,7 +18,7 @@ pub const PRIORITY_NORMAL: i32 = AMDGPU_CTX_PRIORITY_NORMAL as i32;
 const AMDGPU_SCHED_JOBS: usize = 32;
 
 /// `amdgpu_ctx_num_entities`, by `AMDGPU_HW_IP_*`.
-const AMDGPU_CTX_NUM_ENTITIES: [u32; AMDGPU_HW_IP_NUM as usize] = [1, 4, 2, 1, 1, 1, 1, 1, 1, 1];
+pub const AMDGPU_CTX_NUM_ENTITIES: [u32; AMDGPU_HW_IP_NUM as usize] = [1, 4, 2, 1, 1, 1, 1, 1, 1, 1];
 
 /// `struct amdgpu_ctx_entity`.
 pub struct amdgpu_ctx_entity {

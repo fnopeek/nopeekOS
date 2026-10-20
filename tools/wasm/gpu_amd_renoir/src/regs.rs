@@ -6811,3 +6811,147 @@ pub const AMDGPU_INFO_VRAM_LOST_COUNTER: u32 = 0x1f;
 pub const AMDGPU_INFO_VRAM_USAGE: u32 = 0x10;
 /// ?
 pub const AMDGPU_VCE_CLOCK_TABLE_ENTRIES: u32 = 0x6;
+
+// The SMU's metrics and clock tables as the sensors read them (renoir_ppt.c)
+/// The value of `offsetof(SmuMetrics_t, AverageGfxActivity)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_AVERAGE_GFX_ACTIVITY: u32 = 0x2c;
+/// The value of `offsetof(SmuMetrics_t, AverageUvdActivity)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_AVERAGE_UVD_ACTIVITY: u32 = 0x2e;
+/// The value of `offsetof(SmuMetrics_t, Voltage)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_VOLTAGE: u32 = 0x30;
+/// The value of `offsetof(SmuMetrics_t, CurrentSocketPower)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_CURRENT_SOCKET_POWER: u32 = 0x3e;
+/// The value of `offsetof(SmuMetrics_t, GfxTemperature)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_GFX_TEMPERATURE: u32 = 0x78;
+/// The value of `offsetof(SmuMetrics_t, SocTemperature)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_SOC_TEMPERATURE: u32 = 0x7a;
+/// The value of `offsetof(SmuMetrics_t, ThrottlerStatus)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_THROTTLER_STATUS: u32 = 0x7c;
+/// The value of `offsetof(SmuMetrics_t, StapmOriginalLimit)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_STAPM_ORIGINAL_LIMIT: u32 = 0x80;
+/// The value of `offsetof(SmuMetrics_t, StapmCurrentLimit)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_STAPM_CURRENT_LIMIT: u32 = 0x82;
+/// The value of `offsetof(SmuMetrics_t, ApuPower)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_APU_POWER: u32 = 0x84;
+/// The value of `offsetof(SmuMetrics_t, dGpuPower)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_DGPU_POWER: u32 = 0x86;
+/// ?
+pub const CLOCK_SOCCLK: u32 = 0x1;
+/// ?
+pub const CLOCK_FCLK: u32 = 0xf;
+/// ?
+pub const SMU_TEMPERATURE_UNITS_PER_CENTIGRADES: u32 = 0x3e8;
+/// The value of `offsetof(DpmClocks_t, SocClocks)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const DPM_CLOCKS_SOC_CLOCKS: u32 = 0x40;
+/// The value of `offsetof(DpmClocks_t, FClocks)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const DPM_CLOCKS_F_CLOCKS: u32 = 0x80;
+/// The value of `offsetof(DpmClocks_t, DcfClocks)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const DPM_CLOCKS_DCF_CLOCKS: u32 = 0x0;
+/// The value of `offsetof(DpmClocks_t, VClocks)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const DPM_CLOCKS_V_CLOCKS: u32 = 0xc0;
+/// The value of `offsetof(DpmClocks_t, DClocks)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const DPM_CLOCKS_D_CLOCKS: u32 = 0x100;
+/// The value of `sizeof(DpmClock_t)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SIZEOF_DpmClock_t: u32 = 0x8;
+/// The value of `offsetof(DpmClock_t, Freq)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const DPM_CLOCK_FREQ: u32 = 0x0;
+/// ?
+pub const NUM_SOCCLK_DPM_LEVELS: u32 = 0x8;
+/// ?
+pub const NUM_FCLK_DPM_LEVELS: u32 = 0x4;
+/// ?
+pub const NUM_MEMCLK_DPM_LEVELS: u32 = 0x4;
+/// ?
+pub const NUM_DCFCLK_DPM_LEVELS: u32 = 0x8;
+/// ?
+pub const NUM_VCN_DPM_LEVELS: u32 = 0x8;
+/// pm/swsmu/smu12/renoir_ppt.c:695
+pub const SMU_GFXCLK: u32 = 0x0;
+/// ?
+pub const SMU_SCLK: u32 = 0xd;
+/// ?
+pub const SMU_UCLK: u32 = 0x7;
+/// pm/swsmu/smu12/renoir_ppt.c:696
+pub const SMU_MCLK: u32 = 0xe;
+/// ?
+pub const SMU_FCLK: u32 = 0xc;
+/// pm/swsmu/smu12/renoir_ppt.c:697
+pub const SMU_SOCCLK: u32 = 0x6;
+/// ?
+pub const SMU_DCEFCLK: u32 = 0x8;
+/// ?
+pub const SMU_VCLK: u32 = 0x1;
+/// ?
+pub const SMU_DCLK: u32 = 0x2;
+/// ?
+pub const SMU_CLK_COUNT: u32 = 0x20;
+/// include/kgd_pp_interface.h:143
+pub const AMDGPU_PP_SENSOR_GPU_LOAD: u32 = 0x8;
+/// include/kgd_pp_interface.h:164
+pub const AMDGPU_PP_SENSOR_VCN_LOAD: u32 = 0x1c;
+/// include/kgd_pp_interface.h:146
+pub const AMDGPU_PP_SENSOR_GPU_TEMP: u32 = 0xb;
+/// pm/swsmu/amdgpu_smu.c:1273
+pub const AMDGPU_PP_SENSOR_HOTSPOT_TEMP: u32 = 0xc;
+/// include/kgd_pp_interface.h:145
+pub const AMDGPU_PP_SENSOR_GFX_MCLK: u32 = 0xa;
+/// include/kgd_pp_interface.h:138
+pub const AMDGPU_PP_SENSOR_VDDGFX: u32 = 0x3;
+/// include/kgd_pp_interface.h:137
+pub const AMDGPU_PP_SENSOR_VDDNB: u32 = 0x2;
+/// include/kgd_pp_interface.h:153
+pub const AMDGPU_PP_SENSOR_GPU_INPUT_POWER: u32 = 0x11;
+/// include/kgd_pp_interface.h:152
+pub const AMDGPU_PP_SENSOR_GPU_AVG_POWER: u32 = 0x10;
+/// include/kgd_pp_interface.h:154
+pub const AMDGPU_PP_SENSOR_SS_APU_SHARE: u32 = 0x12;
+/// include/kgd_pp_interface.h:155
+pub const AMDGPU_PP_SENSOR_SS_DGPU_SHARE: u32 = 0x13;
+/// include/kgd_pp_interface.h:156
+pub const AMDGPU_PP_SENSOR_STABLE_PSTATE_SCLK: u32 = 0x14;
+/// include/kgd_pp_interface.h:157
+pub const AMDGPU_PP_SENSOR_STABLE_PSTATE_MCLK: u32 = 0x15;
+/// include/kgd_pp_interface.h:162
+pub const AMDGPU_PP_SENSOR_PEAK_PSTATE_SCLK: u32 = 0x1a;
+/// include/kgd_pp_interface.h:163
+pub const AMDGPU_PP_SENSOR_PEAK_PSTATE_MCLK: u32 = 0x1b;
+/// include/kgd_pp_interface.h:151
+pub const AMDGPU_PP_SENSOR_UVD_POWER: u32 = 0xf;
+/// include/kgd_pp_interface.h:150
+pub const AMDGPU_PP_SENSOR_VCE_POWER: u32 = 0xe;
+/// include/kgd_pp_interface.h:161
+pub const AMDGPU_PP_SENSOR_VCN_POWER_STATE: u32 = 0x19;
+/// include/kgd_pp_interface.h:159
+pub const AMDGPU_PP_SENSOR_MIN_FAN_RPM: u32 = 0x17;
+/// ?
+pub const SMU_FEATURE_DPM_UVD_BIT: u32 = 0x4;
+/// ?
+pub const SMU_FEATURE_DPM_VCE_BIT: u32 = 0x5;
+
+// What amdgpu_info_ioctl reads besides the uapi (amdgpu_gfx.h, gfx_v9_0.c)
+/// amdgpu/amdgpu_gfx.h:170
+pub const AMDGPU_GFX_MAX_SE: u32 = 0x4;
+/// amdgpu/amdgpu_gfx.h:171
+pub const AMDGPU_GFX_MAX_SH_PER_SE: u32 = 0x2;
+/// amdgpu/gfx_v9_0.c:148
+pub const mmGOLDEN_TSC_COUNT_UPPER_Renoir: u32 = 0x25;
+/// amdgpu/gfx_v9_0.c:149
+pub const mmGOLDEN_TSC_COUNT_UPPER_Renoir_BASE_IDX: u32 = 0x1;
+/// amdgpu/gfx_v9_0.c:150
+pub const mmGOLDEN_TSC_COUNT_LOWER_Renoir: u32 = 0x26;
+/// amdgpu/gfx_v9_0.c:151
+pub const mmGOLDEN_TSC_COUNT_LOWER_Renoir_BASE_IDX: u32 = 0x1;
+/// ?
+pub const AMDGPU_VMHUB_TYPE_GFX: u32 = 0x0;
+/// ?
+pub const AMDGPU_VMHUB_TYPE_MM0: u32 = 0x1;
+/// ?
+pub const AMDGPU_VMHUB_TYPE_MM1: u32 = 0x2;
+/// ?
+pub const AMDGPU_VMHUB_IDX_SHIFT: u32 = 0x8;
+/// amdgpu/amdgpu_vm.h:156
+pub const AMDGPU_GFXHUB_START: u32 = 0x0;
+/// amdgpu/amdgpu_vm.h:157
+pub const AMDGPU_MMHUB0_START: u32 = 0x8;
+/// amdgpu/amdgpu_vm.h:158
+pub const AMDGPU_MMHUB1_START: u32 = 0xc;

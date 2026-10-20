@@ -742,6 +742,7 @@ pub fn gmc_v9_0_process_interrupt(adev: &mut amdgpu_device, entry: &crate::amdgp
     // WREG32_P(hub->vm_l2_pro_fault_cntl, 1, ~1)
     let c = adev.rreg32(hub.vm_l2_pro_fault_cntl).unwrap_or(0);
     adev.wreg32(hub.vm_l2_pro_fault_cntl, (c & !1) | 1);
+    crate::amdgpu_vm::amdgpu_vm_update_fault_cache(adev, entry.pasid, addr, status, vmhub);
 
     Line::new().s("VM_L2_PROTECTION_FAULT_STATUS:0x").hexw(status, 8).say();
     if entry.vmid_src == AMDGPU_GFXHUB_0 {

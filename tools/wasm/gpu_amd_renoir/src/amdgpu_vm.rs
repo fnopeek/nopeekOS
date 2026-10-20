@@ -123,7 +123,17 @@ pub struct amdgpu_bo_va_mapping {
 }
 
 /// `struct amdgpu_vm`.
+/// `struct amdgpu_vm_fault_info`.
+#[derive(Clone, Copy, Default)]
+pub struct amdgpu_vm_fault_info {
+    pub addr: u64,
+    pub status: u32,
+    pub vmhub: u32,
+}
+
 pub struct amdgpu_vm {
+    /// `fault_info`: the last fault of this VM.
+    pub fault_info: amdgpu_vm_fault_info,
     /// `va`: the mappings by start page.
     pub va: BTreeMap<u64, usize>,
     /// The `vm_status` lists, by `vm_status`, of base keys.
@@ -1012,6 +1022,7 @@ pub fn amdgpu_vm_handle_moved(adev: &mut amdgpu_device, vm: usize) -> i32 {
 pub fn amdgpu_vm_init(adev: &mut amdgpu_device, pasid: u32) -> Result<usize, i32> {
     let stub = dma_fence::dma_fence_get_stub;
     let vm = slot(&mut adev.vms, amdgpu_vm {
+        fault_info: amdgpu_vm_fault_info::default(),
         va: BTreeMap::new(),
         lists: Default::default(),
         freed: Vec::new(),
@@ -1105,6 +1116,25 @@ pub fn amdgpu_vm_fini(adev: &mut amdgpu_device, vm: usize) {
     let rb = adev.vm(vm).root;
     adev.vm_bases[rb] = None;
     adev.vms[vm] = None;
+}
+
+/// `amdgpu_vm_update_fault_cache`. A status of 0, as the later faults of a
+/// burst report, does not replace a useful one.
+pub fn amdgpu_vm_update_fault_cache(adev: &mut amdgpu_device, pasid: u32, addr: u64, status: u32, vmhub: u32) {
+    let vm = adev.vm_manager.pasids.get(&pasid).copied();
+    let Some(vm) = vm.filter(|_| status != 0) else { return };
+    adev.vm_manager.fault_info = amdgpu_vm_fault_info { addr, status, vmhub };
+    let hub = if vmhub >= AMDGPU_MMHUB1_START {
+        AMDGPU_VMHUB_TYPE_MM1 | (vmhub - AMDGPU_MMHUB1_START) << AMDGPU_VMHUB_IDX_SHIFT
+    } else if vmhub >= AMDGPU_MMHUB0_START {
+        AMDGPU_VMHUB_TYPE_MM0 | (vmhub - AMDGPU_MMHUB0_START) << AMDGPU_VMHUB_IDX_SHIFT
+    } else {
+        AMDGPU_VMHUB_TYPE_GFX | (vmhub - AMDGPU_GFXHUB_START) << AMDGPU_VMHUB_IDX_SHIFT
+    };
+    let f = &mut adev.vm_mut(vm).fault_info;
+    f.addr = addr;
+    f.status = status;
+    f.vmhub = hub;
 }
 
 /// `amdgpu_vm_handle_fault`: a retry fault of a graphics VM pointed at the

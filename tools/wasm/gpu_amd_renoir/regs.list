@@ -3404,3 +3404,75 @@ AMDGPU_INFO_VRAM_GTT @ amdgpu_kms.c
 AMDGPU_INFO_VRAM_LOST_COUNTER @ amdgpu_kms.c
 AMDGPU_INFO_VRAM_USAGE @ amdgpu_kms.c
 AMDGPU_VCE_CLOCK_TABLE_ENTRIES @ amdgpu_kms.c
+# The SMU's metrics and clock tables as the sensors read them (renoir_ppt.c)
+SMU_METRICS_AVERAGE_GFX_ACTIVITY = offsetof(SmuMetrics_t, AverageGfxActivity) @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_METRICS_AVERAGE_UVD_ACTIVITY = offsetof(SmuMetrics_t, AverageUvdActivity) @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_METRICS_VOLTAGE = offsetof(SmuMetrics_t, Voltage) @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_METRICS_CURRENT_SOCKET_POWER = offsetof(SmuMetrics_t, CurrentSocketPower) @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_METRICS_GFX_TEMPERATURE = offsetof(SmuMetrics_t, GfxTemperature) @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_METRICS_SOC_TEMPERATURE = offsetof(SmuMetrics_t, SocTemperature) @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_METRICS_THROTTLER_STATUS = offsetof(SmuMetrics_t, ThrottlerStatus) @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_METRICS_STAPM_ORIGINAL_LIMIT = offsetof(SmuMetrics_t, StapmOriginalLimit) @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_METRICS_STAPM_CURRENT_LIMIT = offsetof(SmuMetrics_t, StapmCurrentLimit) @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_METRICS_APU_POWER = offsetof(SmuMetrics_t, ApuPower) @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_METRICS_DGPU_POWER = offsetof(SmuMetrics_t, dGpuPower) @ ../pm/swsmu/smu12/renoir_ppt.c
+CLOCK_SOCCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+CLOCK_FCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_TEMPERATURE_UNITS_PER_CENTIGRADES @ ../pm/swsmu/smu12/renoir_ppt.c
+DPM_CLOCKS_SOC_CLOCKS = offsetof(DpmClocks_t, SocClocks) @ ../pm/swsmu/smu12/renoir_ppt.c
+DPM_CLOCKS_F_CLOCKS = offsetof(DpmClocks_t, FClocks) @ ../pm/swsmu/smu12/renoir_ppt.c
+DPM_CLOCKS_DCF_CLOCKS = offsetof(DpmClocks_t, DcfClocks) @ ../pm/swsmu/smu12/renoir_ppt.c
+DPM_CLOCKS_V_CLOCKS = offsetof(DpmClocks_t, VClocks) @ ../pm/swsmu/smu12/renoir_ppt.c
+DPM_CLOCKS_D_CLOCKS = offsetof(DpmClocks_t, DClocks) @ ../pm/swsmu/smu12/renoir_ppt.c
+SIZEOF_DpmClock_t = sizeof(DpmClock_t) @ ../pm/swsmu/smu12/renoir_ppt.c
+DPM_CLOCK_FREQ = offsetof(DpmClock_t, Freq) @ ../pm/swsmu/smu12/renoir_ppt.c
+NUM_SOCCLK_DPM_LEVELS @ ../pm/swsmu/smu12/renoir_ppt.c
+NUM_FCLK_DPM_LEVELS @ ../pm/swsmu/smu12/renoir_ppt.c
+NUM_MEMCLK_DPM_LEVELS @ ../pm/swsmu/smu12/renoir_ppt.c
+NUM_DCFCLK_DPM_LEVELS @ ../pm/swsmu/smu12/renoir_ppt.c
+NUM_VCN_DPM_LEVELS @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_GFXCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_SCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_UCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_MCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_FCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_SOCCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_DCEFCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_VCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_DCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_CLK_COUNT @ ../pm/swsmu/smu12/renoir_ppt.c
+AMDGPU_PP_SENSOR_GPU_LOAD @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_VCN_LOAD @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_GPU_TEMP @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_HOTSPOT_TEMP @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_GFX_MCLK @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_VDDGFX @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_VDDNB @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_GPU_INPUT_POWER @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_GPU_AVG_POWER @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_SS_APU_SHARE @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_SS_DGPU_SHARE @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_STABLE_PSTATE_SCLK @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_STABLE_PSTATE_MCLK @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_PEAK_PSTATE_SCLK @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_PEAK_PSTATE_MCLK @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_UVD_POWER @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_VCE_POWER @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_VCN_POWER_STATE @ ../pm/swsmu/amdgpu_smu.c
+AMDGPU_PP_SENSOR_MIN_FAN_RPM @ ../pm/swsmu/amdgpu_smu.c
+SMU_FEATURE_DPM_UVD_BIT @ ../pm/swsmu/amdgpu_smu.c
+SMU_FEATURE_DPM_VCE_BIT @ ../pm/swsmu/amdgpu_smu.c
+# What amdgpu_info_ioctl reads besides the uapi (amdgpu_gfx.h, gfx_v9_0.c)
+AMDGPU_GFX_MAX_SE @ amdgpu_kms.c
+AMDGPU_GFX_MAX_SH_PER_SE @ amdgpu_kms.c
+mmGOLDEN_TSC_COUNT_UPPER_Renoir @ gfx_v9_0.c
+mmGOLDEN_TSC_COUNT_UPPER_Renoir_BASE_IDX @ gfx_v9_0.c
+mmGOLDEN_TSC_COUNT_LOWER_Renoir @ gfx_v9_0.c
+mmGOLDEN_TSC_COUNT_LOWER_Renoir_BASE_IDX @ gfx_v9_0.c
+AMDGPU_VMHUB_TYPE_GFX @ amdgpu_vm.c
+AMDGPU_VMHUB_TYPE_MM0 @ amdgpu_vm.c
+AMDGPU_VMHUB_TYPE_MM1 @ amdgpu_vm.c
+AMDGPU_VMHUB_IDX_SHIFT @ amdgpu_vm.c
+AMDGPU_GFXHUB_START @ amdgpu_vm.c
+AMDGPU_MMHUB0_START @ amdgpu_vm.c
+AMDGPU_MMHUB1_START @ amdgpu_vm.c
