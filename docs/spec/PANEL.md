@@ -140,7 +140,16 @@ Kernel side:
 - `npk_window_activate(id)` — switch to the window's workspace and focus
   it (RENDER + SHELL). Panels and overlays are refused.
 
-The menu is a `Popover` anchored at the launcher button, so a click outside
+When the windows outrun the screen the list gives way in a fixed order
+(`plan_tasks`): narrower buttons with clipped captions (down to 100 px);
+then the windows of one app folded into a group button with a count, the
+app with the most windows first; then icons only; then a "+N" button. The
+clock and the readouts never move: the deck computes the list's budget from
+the screen width minus fixed cell widths, since the layout engine does not
+shrink children and the app cannot measure text. The focused window always
+keeps a place. A group and "+N" open a list of their windows in a popover.
+
+The menu is a `Popover` anchored at the bar card, so a click outside
 it dismisses it without app code. Its search field takes the focus through
 `FocusRequest`: the click on the button has just put the focus there, and
 `Autofocus` only fires when nothing holds it.
