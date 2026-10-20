@@ -638,6 +638,26 @@ pub fn release_blob(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, res_id
     0
 }
 
+/// `amdgpu_renderer_attach_resource`: client `id` uses resource
+/// `owner_res` of client `owner` under `res_id`. The dma-buf import of an
+/// object this device exported is that object (`drm_gem_prime_import`),
+/// with a GEM handle of the importer's (`amdgpu_gem_object_open`).
+pub fn attach(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, res_id: u32, owner: u32, owner_res: u32) -> i32 {
+    if vc.clients.get(&id).is_none_or(|c| c.resources.contains_key(&res_id)) {
+        return 0;
+    }
+    let Some(o) = vc.clients.get(&owner).and_then(|c| c.resources.get(&owner_res)) else {
+        Line::new().s("native: could not import res_id ").dec(owner_res as u64).s(" of client ").dec(owner as u64)
+            .say();
+        return EINVAL;
+    };
+    let bo = crate::amdgpu_object::amdgpu_bo_ref(adev, o.bo);
+    let c = vc.clients.get_mut(&id).unwrap();
+    cs::amdgpu_gem_object_open(adev, &c.fpriv, bo);
+    c.resources.insert(res_id, vobject { bo, has_metadata: false, enable_cache_wc: false });
+    0
+}
+
 /// One guest ccmd of client `id` (`drm_context_submit_cmd_dispatch`): the
 /// reply, `REPLY_HEAD` first. Err only for a request too short for its
 /// header.

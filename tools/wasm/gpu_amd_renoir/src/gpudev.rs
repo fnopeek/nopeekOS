@@ -38,6 +38,7 @@ const OP_CCMD: u32 = 7;
 const OP_BLOB: u32 = 8;
 /// `a0` client, `a1` resource id: the guest let go of the resource.
 const OP_BLOB_RELEASE: u32 = 9;
+const OP_ATTACH: u32 = 10;
 /// The largest ccmd a guest sends, and the kernel's largest reply.
 const CCMD_MAX: usize = 256 * 1024;
 const REPLY_MAX: usize = 64 * 1024;
@@ -688,6 +689,9 @@ fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
             Err(e) => e,
         },
         OP_BLOB_RELEASE => crate::amdgpu_virtio::release_blob(adev, &mut svc.native, w(2), w(3)),
+        OP_ATTACH if w(6) != 0 => crate::amdgpu_virtio::attach(adev, &mut svc.native, w(2), w(3), w(4), w(5)),
+        // drm_context_detach_resource
+        OP_ATTACH => crate::amdgpu_virtio::release_blob(adev, &mut svc.native, w(2), w(3)),
         _ => -EINVAL,
     }
 }

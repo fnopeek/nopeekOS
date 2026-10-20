@@ -82,6 +82,8 @@ pub struct AmdgpuBackend {
     /// the client and the resource id (`amdgpu_object.base.res_id`).
     blobs: BTreeMap<u64, (u32, u32)>,
     clients: BTreeMap<u32, Client>,
+    /// Resources of other contexts attached to a context: (client, res_id).
+    imports: alloc::collections::BTreeSet<(u32, u32)>,
     /// Lines `ccmd_failed` has written for this VM.
     failed_lines: u32,
 }
@@ -90,7 +92,9 @@ impl AmdgpuBackend {
     /// For the card at `dev`, with the capset its module reported.
     pub fn new(_dev: PciAddr, capset: Vec<u8>) -> Option<Self> {
         let ctx_type = u32::from_le_bytes(capset.get(16..20)?.try_into().ok()?);
-        (ctx_type == CONTEXT_AMDGPU).then_some(AmdgpuBackend { capset, blobs: BTreeMap::new(), clients: BTreeMap::new(), failed_lines: 0 })
+        (ctx_type == CONTEXT_AMDGPU).then_some(AmdgpuBackend {
+            capset, blobs: BTreeMap::new(), clients: BTreeMap::new(), imports: Default::default(), failed_lines: 0,
+        })
     }
 
     /// `drm_err` of a failed ccmd, with why; a fixed number of lines per VM.
@@ -178,6 +182,7 @@ impl Backend for AmdgpuBackend {
             c.closed = true;
         }
         self.clients.remove(&ctx);
+        self.imports.retain(|&(c, _)| c != ctx);
     }
 
     fn ccmd_alignment(&self) -> u32 {
@@ -243,6 +248,27 @@ impl Backend for AmdgpuBackend {
     fn release_blob(&mut self, _ctx: u32, pages: &Arc<ForeignPixels>) {
         if let Some((ctx, res_id)) = self.blobs.remove(&pages.serial) {
             gpudev::blob_release(ctx, res_id, pages);
+        }
+    }
+
+    /// `amdgpu_renderer_attach_resource`: the owner's object, imported into
+    /// `ctx` under the same resource id.
+    fn attach_resource(&mut self, ctx: u32, res_id: u32, pages: &Arc<ForeignPixels>) {
+        if self.imports.contains(&(ctx, res_id)) || self.clients.get(&ctx).is_none_or(|c| c.closed) {
+            return;
+        }
+        let Some(&(owner, owner_res)) = self.blobs.get(&pages.serial) else { return };
+        if owner == ctx {
+            return;
+        }
+        gpudev::blob_attach(ctx, res_id, owner, owner_res, true);
+        self.imports.insert((ctx, res_id));
+    }
+
+    /// `drm_context_detach_resource` → `amdgpu_renderer_free_object`.
+    fn detach_resource(&mut self, ctx: u32, res_id: u32) {
+        if self.imports.remove(&(ctx, res_id)) {
+            gpudev::blob_attach(ctx, res_id, 0, 0, false);
         }
     }
 

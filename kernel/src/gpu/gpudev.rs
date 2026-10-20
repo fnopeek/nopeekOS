@@ -68,6 +68,10 @@ pub const OP_CCMD: u32 = 7;
 pub const OP_BLOB: u32 = 8;
 /// `a0` client, `a1` resource id: the guest let go of that resource.
 pub const OP_BLOB_RELEASE: u32 = 9;
+/// `a0` client, `a1` resource id, `a2` owner client, `a3` the owner's
+/// resource id, `a4` 1 = attach, 0 = detach: another context's resource
+/// (`amdgpu_renderer_attach_resource`, the same object imported).
+pub const OP_ATTACH: u32 = 10;
 /// What an `OP_BLOB` reply names: pages from `npk_gpudev_tt_alloc`, or
 /// ranges of the card's VRAM aperture (BAR0).
 const BLOB_TT: u32 = 0;
@@ -1802,6 +1806,18 @@ pub fn blob_release(client: u32, res_id: u32, pages: &ForeignPixels) {
         return;
     }
     queue_job(&mut st, OP_BLOB_RELEASE, [client, res_id, 0, 0, 0, 0], None, &[]);
+    drop(st);
+    wake_module();
+}
+
+/// Client `client` uses the resource `owner_res` of client `owner` under
+/// `res_id` (attach), or no longer (detach).
+pub fn blob_attach(client: u32, res_id: u32, owner: u32, owner_res: u32, attach: bool) {
+    let mut st = STATE.lock();
+    if st.owner.is_none() || !st.clients.contains(&client) || (attach && !st.clients.contains(&owner)) {
+        return;
+    }
+    queue_job(&mut st, OP_ATTACH, [client, res_id, owner, owner_res, attach as u32, 0], None, &[]);
     drop(st);
     wake_module();
 }
