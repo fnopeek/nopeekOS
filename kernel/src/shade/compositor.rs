@@ -211,6 +211,37 @@ pub struct TopStrut {
     pub margin: u32,
 }
 
+/// What the bar names a window by: its caption if it set one, else its title.
+fn display_title(w: &Window) -> alloc::string::String {
+    match (w.caption.is_empty(), w.kind) {
+        (true, _) => w.title.clone(),
+        // A guest picks its caption freely: the host's name for the
+        // window goes first, so it cannot pass as a system window.
+        (false, crate::shade::window::WindowKind::Surface) => {
+            alloc::format!("{} · {}", w.title, w.caption)
+        }
+        (false, _) => w.caption.clone(),
+    }
+}
+
+/// Bottom strut panel registered via `npk_window_set_panel(Bottom, Strut)`:
+/// a bar and a dock in one (`deck.wasm`). Reserves a `margin + pill_h` band
+/// at the bottom like `TopStrut` does at the top. `Bottom, Raised` grows the
+/// window upward over the tiles for a menu and gives it the keyboard; the
+/// band stays as it is.
+#[derive(Clone, Copy)]
+pub struct BottomStrut {
+    pub id: WindowId,
+    /// Band height in px (set_panel `h` with behavior Strut).
+    pub pill_h: u32,
+    /// Gap to the screen edge / tiles (px).
+    pub margin: u32,
+    /// Window height while raised; 0 = lowered.
+    pub raised: u32,
+    /// Focus before the raise, given back on lowering.
+    pub prev_focus: Option<WindowId>,
+}
+
 /// Compositor manages all windows, the bar, and rendering state.
 #[allow(dead_code)]
 pub struct Compositor {
@@ -275,6 +306,8 @@ pub struct Compositor {
     /// reserves no top band (tiles use the full height). The app renders
     /// itself — there is no native fallback.
     pub top_strut: Option<TopStrut>,
+    /// Bottom strut panel, if a deck app has registered one.
+    pub bottom_strut: Option<BottomStrut>,
     /// Text layer of each terminal window, by window id.
     pub term_layers: alloc::collections::BTreeMap<u32, PixelBuffer>,
 }
@@ -327,6 +360,7 @@ impl Compositor {
             glow_last_tick: 0,
             dock: None,
             top_strut: None,
+            bottom_strut: None,
             term_layers: alloc::collections::BTreeMap::new(),
         }
     }
@@ -451,6 +485,12 @@ impl Compositor {
         self.top_strut.map(|s| s.margin + s.pill_h).unwrap_or(0)
     }
 
+    /// Height reserved at the bottom for the deck strut (0 if none). The
+    /// raised height is an overlay and reserves nothing.
+    fn bottom_band(&self) -> u32 {
+        self.bottom_strut.map(|s| s.margin + s.pill_h).unwrap_or(0)
+    }
+
     /// Usable workspace area (excluding the top bar band + bottom dock).
     fn workspace_area(&self) -> (u32, u32, u32, u32) {
         let top = self.top_band();
@@ -458,6 +498,7 @@ impl Compositor {
         let y = top + self.gaps;
         let w = self.screen_w.saturating_sub(self.gaps * 2);
         let h = self.screen_h.saturating_sub(top)
+            .saturating_sub(self.bottom_band())
             .saturating_sub(self.gaps * 2)
             .saturating_sub(self.dock_bottom_reserve());
         (x, y, w, h)
@@ -846,14 +887,94 @@ impl Compositor {
 
     /// `npk_window_set_panel` host fn — configure `id` as an edge panel.
     /// `edge`: 0=Bottom, 1=Top. `behavior`: 0=AutoHide overlay (dock),
-    /// 1=Strut (bar). Bottom+AutoHide is the dock (slide + handle);
-    /// Top+Strut is the bar. Returns false for other combinations.
+    /// 1=Strut (bar), 2=Raised (a bottom strut grown upward for a menu).
+    /// Bottom+AutoHide is the dock (slide + handle); Top+Strut is the bar;
+    /// Bottom+Strut is the deck. Returns false for other combinations.
     pub fn set_panel(&mut self, id: WindowId, edge: u8, behavior: u8, w: u32, h: u32) -> bool {
         match (edge, behavior) {
             (0, 0) => self.set_dock_panel(id, w, h),
             (1, 1) => self.set_bar_panel(id, w, h),
+            (0, 1) => self.set_bottom_panel(id, h),
+            (0, 2) => self.raise_bottom_panel(id, h),
             _ => false,
         }
+    }
+
+    /// Bottom strut: full width minus the margin, always visible, global
+    /// across workspaces. A second call on a raised panel lowers it and
+    /// gives the keyboard back to the window that had it.
+    fn set_bottom_panel(&mut self, id: WindowId, h: u32) -> bool {
+        let screen_w = self.screen_w;
+        let screen_h = self.screen_h;
+        let margin = crate::config::get("shade.bar_margin")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(6);
+        let pill_h = h.max(22);
+        let active_ws = self.active_workspace;
+        let prev = self.bottom_strut.filter(|s| s.id == id);
+
+        let found = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            win.state = crate::shade::window::WindowState::Floating;
+            win.is_overlay = true;
+            win.is_bar = true;
+            win.modal = false;
+            win.workspace = active_ws;
+            win.x = margin;
+            win.y = screen_h.saturating_sub(margin + pill_h);
+            win.width = screen_w.saturating_sub(margin * 2).max(120);
+            win.height = pill_h;
+            win.visible = true;
+            win.dirty = true;
+            true
+        } else {
+            false
+        };
+        if !found { return false; }
+
+        self.bottom_strut = Some(BottomStrut { id, pill_h, margin, raised: 0, prev_focus: None });
+        crate::shade::widgets::palette::set_deck_window(Some(id.0));
+        if let Some(p) = prev.filter(|p| p.raised != 0) {
+            let back = p.prev_focus.filter(|f| self.windows.iter()
+                .any(|w| w.id == *f && w.workspace == self.active_workspace && w.visible));
+            match back {
+                Some(f) => self.focus_window(f),
+                None => self.refocus_active_workspace(),
+            }
+        }
+        if self.focused == Some(id) { self.focused = None; }
+        self.retile();
+        self.z_order.retain(|&wid| wid != id);
+        self.z_order.insert(0, id);
+        self.pin_overlays_to_front();
+        self.needs_full_redraw = true;
+        true
+    }
+
+    /// Grow the bottom strut window upward to `h` px over the tiles and
+    /// give it the keyboard (a menu with a search field). The band and the
+    /// tiling stay as they are. Lowered again by `set_bottom_panel`; the app
+    /// learns of a focus moved elsewhere through `Event::Focus(false)`.
+    fn raise_bottom_panel(&mut self, id: WindowId, h: u32) -> bool {
+        let Some(mut s) = self.bottom_strut.filter(|s| s.id == id) else { return false };
+        let raised = h.max(s.pill_h).min(self.screen_h.saturating_sub(2 * s.margin));
+        if s.raised == 0 {
+            s.prev_focus = self.focused.filter(|f| *f != id);
+        }
+        s.raised = raised;
+        self.bottom_strut = Some(s);
+        let screen_h = self.screen_h;
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+            win.y = screen_h.saturating_sub(s.margin + raised);
+            win.height = raised;
+            win.dirty = true;
+        }
+        self.focused = Some(id);
+        self.set_focused_flag(id);
+        self.z_order.retain(|&wid| wid != id);
+        self.z_order.insert(0, id);
+        self.pin_overlays_to_front();
+        self.needs_full_redraw = true;
+        true
     }
 
     /// Top strut bar. The app reports its height via `h`; the compositor
@@ -1009,15 +1130,7 @@ impl Compositor {
                     .filter_map(|wid| self.windows.iter().find(|w| w.id == *wid))
                     .find(|w| is_app(w) && w.workspace == self.active_workspace && w.visible)
             })
-            .map(|w| match (w.caption.is_empty(), w.kind) {
-                (true, _) => w.title.clone(),
-                // A guest picks its caption freely: the host's name for the
-                // window goes first, so it cannot pass as a system window.
-                (false, crate::shade::window::WindowKind::Surface) => {
-                    alloc::format!("{} · {}", w.title, w.caption)
-                }
-                (false, _) => w.caption.clone(),
-            })
+            .map(display_title)
             .unwrap_or_default();
         (self.workspace_count, self.active_workspace, title)
     }
@@ -1049,12 +1162,16 @@ impl Compositor {
         h
     }
 
-    /// One line per real app window: `<flags>\t<workspace>\t<title>`,
-    /// flags being a decimal bitmask (1 = focused, 2 = on the active
-    /// workspace). Panels and transient overlays are excluded. Feeds the
-    /// dock's running/active indicators and the bar's occupied-workspace
-    /// hints; the kernel names no app.
-    pub fn window_lines(&self) -> alloc::string::String {
+    /// One line per real app window:
+    /// `<flags>\t<workspace>\t<title>\t<id>\t<caption>`, flags being a
+    /// decimal bitmask (1 = focused, 2 = on the active workspace), `title`
+    /// the module name and `caption` what the bar shows for it (tabs and
+    /// line breaks blanked). Panels and transient overlays are excluded.
+    /// Feeds the dock's running/active indicators, the bar's
+    /// occupied-workspace hints and the deck's window list; the kernel
+    /// names no app. `id` and `caption` only with `full`: a caption is what
+    /// another app shows (a page title), so only the shell may read it.
+    pub fn window_lines(&self, full: bool) -> alloc::string::String {
         use core::fmt::Write;
         let mut out = alloc::string::String::new();
         for wid in &self.z_order {
@@ -1063,7 +1180,15 @@ impl Compositor {
             let mut flags = 0u8;
             if Some(w.id) == self.focused { flags |= 1; }
             if w.workspace == self.active_workspace { flags |= 2; }
-            let _ = writeln!(out, "{}\t{}\t{}", flags, w.workspace, w.title);
+            if !full {
+                let _ = writeln!(out, "{}\t{}\t{}", flags, w.workspace, w.title);
+                continue;
+            }
+            let caption: alloc::string::String = display_title(w).chars()
+                .map(|c| if c == '\t' || c == '\n' || c == '\r' { ' ' } else { c })
+                .collect();
+            let _ = writeln!(out, "{}\t{}\t{}\t{}\t{}",
+                flags, w.workspace, w.title, w.id.0, caption);
         }
         out
     }
@@ -1240,7 +1365,9 @@ impl Compositor {
     /// Is `id` a panel (dock or bar)? Panels are managed chrome — they
     /// never hold focus and must not be closed by Mod+Q.
     pub fn is_panel(&self, id: WindowId) -> bool {
-        self.dock.map(|d| d.id) == Some(id) || self.top_strut.map(|s| s.id) == Some(id)
+        self.dock.map(|d| d.id) == Some(id)
+            || self.top_strut.map(|s| s.id) == Some(id)
+            || self.bottom_strut.map(|s| s.id) == Some(id)
     }
 
     /// A user gesture asked for `id` to close (Mod+Q, the title-bar X).
@@ -1296,6 +1423,12 @@ impl Compositor {
         if self.top_strut.map(|s| s.id) == Some(id) {
             self.top_strut = None;
             crate::shade::widgets::palette::set_bar_window(None);
+            self.retile();
+            self.needs_full_redraw = true;
+        }
+        if self.bottom_strut.map(|s| s.id) == Some(id) {
+            self.bottom_strut = None;
+            crate::shade::widgets::palette::set_deck_window(None);
             self.retile();
             self.needs_full_redraw = true;
         }
@@ -1408,7 +1541,8 @@ impl Compositor {
         // Panels (dock / bar) are never focusable — focusing them would
         // route keyboard input into a window that ignores it (the shell
         // appears to hang). Refuse, no matter which path asked.
-        if self.windows.iter().any(|w| w.id == id && (w.is_dock || w.is_bar)) {
+        let raised_deck = self.bottom_strut.is_some_and(|s| s.id == id && s.raised != 0);
+        if !raised_deck && self.windows.iter().any(|w| w.id == id && (w.is_dock || w.is_bar)) {
             return;
         }
         self.focused = Some(id);
@@ -1430,6 +1564,19 @@ impl Compositor {
         // behind the just-focused window. Re-pin it to the very top.
         self.pin_overlays_to_front();
         // Don't set needs_full_redraw — render_damaged handles 2 windows only
+    }
+
+    /// Bring an app window to the front from a panel's window list: switch
+    /// to its workspace and focus it. Panels and overlays are refused.
+    pub fn activate_window(&mut self, id: WindowId) -> bool {
+        let Some(ws) = self.windows.iter()
+            .find(|w| w.id == id && !w.is_overlay && !w.is_dock && !w.is_bar)
+            .map(|w| w.workspace)
+        else { return false };
+        self.switch_workspace(ws);
+        self.focus_window(id);
+        self.needs_full_redraw = true;
+        true
     }
 
     /// Keep the dock window at the front of the z-order (topmost). Render
@@ -1475,8 +1622,11 @@ impl Compositor {
             }
         }
 
-        // The bar is global too: follow the active workspace, stay visible.
-        if let Some(bw) = self.top_strut.map(|s| s.id) {
+        // The bar and the deck are global too: follow the active workspace,
+        // stay visible.
+        for bw in [self.top_strut.map(|s| s.id), self.bottom_strut.map(|s| s.id)]
+            .into_iter().flatten()
+        {
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == bw) {
                 win.workspace = ws;
                 win.visible = true;
@@ -1979,6 +2129,14 @@ impl Compositor {
             if win.focused != was {
                 win.dirty = true; // Only re-render windows that changed
                 if win.focused { gained = true; }
+            }
+        }
+        // A raised deck that lost the keyboard closes its menu.
+        if let Some(s) = self.bottom_strut.as_mut() {
+            if s.raised != 0 && s.id != focused_id {
+                s.prev_focus = None;
+                crate::shade::widgets::push_event(
+                    s.id.0, crate::shade::widgets::abi::Event::Focus(false));
             }
         }
         // Flash only on a real change of focus — every path routes through

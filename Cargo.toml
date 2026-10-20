@@ -15,6 +15,7 @@ exclude = [
     "tools/wasm/drun",
     "tools/wasm/dock",
     "tools/wasm/bar",
+    "tools/wasm/deck",
     "tools/wasm/loft",
     "tools/wasm/spell",
     "tools/wasm/pick",

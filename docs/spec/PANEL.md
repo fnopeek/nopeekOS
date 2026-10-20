@@ -115,7 +115,42 @@ Tree: `Row` of the configured segments with flex `Spacer`s distributing
 left/center/right. Bundled into the installer; autostart seed becomes
 `dock bar`.
 
-## 7. Phasing
+## 7. `deck.wasm` — bar and dock in one
+
+`tools/wasm/deck/`: one bottom panel instead of `dock` + `bar`, started in
+their place (`set autostart deck`). Left to right: launcher button,
+workspaces, the windows of the active workspace (icon + caption, the
+focused one underlined), volume, battery, screenshot, clock with date.
+
+Kernel side:
+
+- `set_panel(Bottom, Strut, w, h)` — a strut at the bottom: the compositor
+  reserves `margin + h` there (`BottomStrut`, `bottom_band()`) and lays the
+  tiles above it. Independent of the top strut; both may exist.
+- `set_panel(Bottom, Raised, w, h)` — the launcher menu. The window grows
+  upward to `h` over the tiles, the band and the tiling stay, and the panel
+  takes the keyboard (the one case a panel may hold the focus). Strut again
+  lowers it and hands the focus back to the window that had it. If the focus
+  moves elsewhere meanwhile (a click on a tile, Mod+number), the app gets
+  `Event::Focus(false)` and lowers itself.
+- `npk_window_titles` lines carry two more columns:
+  `<flags>\t<workspace>\t<title>\t<id>\t<caption>` — the window id and
+  what the bar shows for it, for a SHELL caller only (a caption is another
+  app's content, e.g. a page title). The first three are unchanged.
+- `npk_window_activate(id)` — switch to the window's workspace and focus
+  it (RENDER + SHELL). Panels and overlays are refused.
+
+The menu is a `Popover` anchored at the launcher button, so a click outside
+it dismisses it without app code. Its search field takes the focus through
+`FocusRequest`: the click on the button has just put the focus there, and
+`Autofocus` only fires when nothing holds it.
+
+Open: a files section in the menu (needs the extension → app table that
+`loft` keeps, shared through the SDK instead of copied), a settings app for
+the gear, a Wi-Fi readout (no state call yet), a grid icon for the launcher,
+Mod+D opening the deck menu instead of `drun`.
+
+## 8. Phasing
 
 - **P1 (this spec):** unified `set_panel` (dock = wrapper); `is_bar` strut
   window reusing `ShadeBar` geometry + the dock blit; `npk_bar_state` /

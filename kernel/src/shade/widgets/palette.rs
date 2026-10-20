@@ -238,7 +238,8 @@ pub fn for_window(window_id: u32) -> Palette {
 
 pub fn is_panel(window_id: u32) -> bool {
     window_id != 0 && (BAR_WINDOW.load(Ordering::Relaxed) == window_id
-        || DOCK_WINDOW.load(Ordering::Relaxed) == window_id)
+        || DOCK_WINDOW.load(Ordering::Relaxed) == window_id
+        || DECK_WINDOW.load(Ordering::Relaxed) == window_id)
 }
 
 /// Opacity (0..255) of floating chrome — the bar card and the dock tray.
@@ -254,11 +255,12 @@ fn opacity_key(key: &str) -> Option<u32> {
         .map(|v| v.min(255))
 }
 
-// The two panel windows, published by the compositor. The rasterizer runs
+// The panel windows, published by the compositor. The rasterizer runs
 // while the SCENES lock is held and must not reach for the compositor
 // lock, so the ids travel as plain atomics. 0 = no such panel.
 static BAR_WINDOW:  AtomicU32 = AtomicU32::new(0);
 static DOCK_WINDOW: AtomicU32 = AtomicU32::new(0);
+static DECK_WINDOW: AtomicU32 = AtomicU32::new(0);
 
 pub fn set_bar_window(id: Option<u32>) {
     BAR_WINDOW.store(id.unwrap_or(0), Ordering::Relaxed);
@@ -266,6 +268,10 @@ pub fn set_bar_window(id: Option<u32>) {
 
 pub fn set_dock_window(id: Option<u32>) {
     DOCK_WINDOW.store(id.unwrap_or(0), Ordering::Relaxed);
+}
+
+pub fn set_deck_window(id: Option<u32>) {
+    DECK_WINDOW.store(id.unwrap_or(0), Ordering::Relaxed);
 }
 
 /// Drop both per-panel overrides. Called when `shade.chrome_opacity` is
@@ -284,7 +290,9 @@ pub fn clear_panel_opacity_overrides() -> bool {
 /// legible while the dock reads more like glass (or the other way round).
 /// Setting the shared knob clears these — see above.
 pub fn panel_opacity(window_id: u32) -> u32 {
-    let key = if window_id != 0 && BAR_WINDOW.load(Ordering::Relaxed) == window_id {
+    let key = if window_id != 0 && (BAR_WINDOW.load(Ordering::Relaxed) == window_id
+        || DECK_WINDOW.load(Ordering::Relaxed) == window_id)
+    {
         "shade.bar_opacity"
     } else if window_id != 0 && DOCK_WINDOW.load(Ordering::Relaxed) == window_id {
         "shade.dock_opacity"

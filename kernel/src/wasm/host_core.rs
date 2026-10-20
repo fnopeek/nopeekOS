@@ -437,10 +437,12 @@ pub(crate) fn npk_window_set_panel(ctx: &mut HostState, edge: i32, behavior: i32
     }
     if w <= 0 || h <= 0 || edge < 0 || behavior < 0 { return -1; }
     // A panel is a strip along an edge, and its size becomes a pixel buffer
-    // on the next commit: clamp it to a strip of the screen.
+    // on the next commit: clamp it to a strip of the screen. A raised one
+    // holds a menu and may take the height of the screen, like the dock.
     let fb = crate::framebuffer::get_info();
     let w = (w as u32).min(fb.width) as i32;
-    let h = (h as u32).min(fb.height / 4) as i32;
+    let h_max = if behavior == 2 { fb.height } else { fb.height / 4 };
+    let h = (h as u32).min(h_max) as i32;
 
     let mut wid = ctx.widget_window_id;
     if wid == 0 {
@@ -619,6 +621,18 @@ pub(crate) fn npk_workspace_switch(ctx: &mut HostState, n: i32) -> i32 {
     crate::shade::with_compositor(|c| c.switch_workspace(n as u8));
     crate::shade::request_render();
     0
+}
+
+pub(crate) fn npk_window_activate(ctx: &mut HostState, id: i32) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
+        return -1;
+    }
+    if id <= 0 { return -1; }
+    let ok = crate::shade::with_compositor(|c|
+        c.activate_window(crate::shade::WindowId(id as u32))
+    ).unwrap_or(false);
+    if ok { crate::shade::request_render(); 0 } else { -1 }
 }
 
 pub(crate) fn npk_power(ctx: &mut HostState) -> i32 {
@@ -2810,7 +2824,8 @@ pub(crate) fn npk_window_titles(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i3
         return -1;
     }
     if max <= 0 { return -1; }
-    let s = crate::shade::with_compositor(|c| c.window_lines())
+    let full = capability::check_global(&cap_id, capability::Rights::SHELL).is_ok();
+    let s = crate::shade::with_compositor(|c| c.window_lines(full))
         .unwrap_or_default();
     let bytes = s.as_bytes();
     let write_len = bytes.len().min(max as usize);

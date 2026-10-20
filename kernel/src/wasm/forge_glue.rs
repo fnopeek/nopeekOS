@@ -648,7 +648,9 @@ host_imports! {
 
     // npk_window_set_panel(edge, behavior, w, h) -> i32
     // Generalised edge panel (see docs/spec/PANEL.md): edge 0=Bottom 1=Top,
-    // behavior 0=AutoHide overlay (dock) 1=Strut (bar). Creates/promotes
+    // behavior 0=AutoHide overlay (dock) 1=Strut (bar; at the bottom the
+    // deck) 2=Raised (the bottom strut grown to `h` over the tiles, with
+    // the keyboard, for a menu; Strut again lowers it). Creates/promotes
     // the caller's widget window without grabbing focus (like the dock),
     // then hands it to the compositor's panel config. `set_dock` above is
     // the (Bottom, AutoHide) wrapper of this.
@@ -663,12 +665,19 @@ host_imports! {
     mem fn npk_bar_state(buf_ptr: i32, max: i32) -> i32;
 
     // npk_window_titles(buf, max) -> i32
-    // One line per open app window: "<flags>\t<workspace>\t<title>", flags
-    // being a decimal bitmask (1 = focused, 2 = on the active workspace).
-    // Panels and overlays are excluded. The dock derives its running/active
-    // indicators from this, the bar its occupied-workspace hints; the
-    // kernel stays free of app names.
+    // One line per open app window:
+    // "<flags>\t<workspace>\t<title>\t<id>\t<caption>", flags being a
+    // decimal bitmask (1 = focused, 2 = on the active workspace), `title`
+    // the module name, `caption` what the bar shows; `id` and `caption`
+    // only for a SHELL caller. Panels and overlays are excluded. The dock derives its running/active indicators from
+    // this, the bar its occupied-workspace hints, the deck its window
+    // list; the kernel stays free of app names.
     mem fn npk_window_titles(buf_ptr: i32, max: i32) -> i32;
+
+    // npk_window_activate(id) -> i32 — switch to the workspace of window
+    // `id` (from npk_window_titles) and focus it. Panels and overlays are
+    // refused. 0 / -1.
+    ctx fn npk_window_activate(id: i32) -> i32;
 
     // npk_battery() -> i32 — battery state for the bar plugin. Returns -1
     // when no battery is known (desktops/QEMU → segment stays empty), else
