@@ -247,7 +247,7 @@ Plan:
    Objektgroesse pruefen — eine gefaelschte Beschreibung darf nichts ausser dem
    eigenen Objekt im Compositor-Adressraum lesen.
 
-### 5.1 Gebaut (Modul 0.16.1, Geraetetest offen)
+### 5.1 Gebaut (Modul 0.16.2, Geraetetest offen)
 
 Alle drei Punkte, und die Gast-T# wird **nie** benutzt: der Compositor baut
 die T# selbst, wie radeonsi beim Import (`si_texture_from_winsys_buffer`):
@@ -307,5 +307,13 @@ ist EIN zusammenhaengender DMA-Block, und der Kernel gibt davon hoechstens
 1024 Seiten (`MAX_DMA_PAGES_PER_CALL`) — 943x1115 sind schon 1046, 1080p
 waeren 2025. Erster Geraetelauf mit 0.16.0: `bo 57 … not added (12)`.
 
+Das Gastobjekt liegt in der Compositor-VM auf der Ausrichtung seiner
+Oberflaeche (64 KB bei den 64KB-Modi, 0.16.2): die unteren Bits der
+T#-Basis sind das Pipe/Bank-XOR, und die DCC-Adresse wird blockweise
+gerechnet. Mit nur seitenausgerichteter Basis (0.16.1) las die
+Textur-Einheit den DCC-Block HINTER dem Objekt — Lesefehler `TCP` verstreut
+in einem 64-KB-Block, die Szene hing, der Import schrieb nie.
+
 **Offen:** Import nur, wenn sich das Gastbild geaendert hat (heute jede
-Szene).
+Szene). Ein Lesefehler der Compositor-VM meldet sich als „retry page fault"
+und flutet den IH-Ring, obwohl Renoir `noretry` hat — eigener Posten.

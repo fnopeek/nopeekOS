@@ -239,6 +239,14 @@ pub fn check(surf: &radeon_surf, bo_size: u64) -> Result<(), refusal> {
     Ok(())
 }
 
+/// The alignment the address of `surf` must have: its image's and its
+/// DCC's (`alignment_log2`).
+pub fn alignment(surf: &radeon_surf) -> u64 {
+    let log2 = if dcc_enabled(surf) { surf.surf_alignment_log2.max(surf.meta_alignment_log2) }
+               else { surf.surf_alignment_log2 };
+    1u64 << log2
+}
+
 /// `ac_border_color_swizzle` of B8G8R8A8: alpha last, X third.
 const BC_SWIZZLE: u32 = V_008F20_BC_SWIZZLE_ZYXW;
 
@@ -246,6 +254,7 @@ const BC_SWIZZLE: u32 = V_008F20_BC_SWIZZLE_ZYXW;
 /// `si_set_mutable_tex_desc_fields` (ac_set_mutable_tex_desc_fields) of a
 /// 2D B8G8R8A8_UNORM view of the whole surface at `va`.
 pub fn descriptor(surf: &radeon_surf, width: u32, height: u32, va: u64) -> [u32; 8] {
+    debug_assert!(va % alignment(surf) == 0);
     let dcc = dcc_enabled(surf);
     let mut desc = [0u32; 8];
     // ac_build_gfx6_texture_descriptor.

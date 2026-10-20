@@ -181,10 +181,10 @@ fn bind_shadow(adev: &mut amdgpu_device, id: u32, b: &mut bo) -> Result<(), i32>
 
 /// The compositor's mapping of `b`: one piece per buffer object, at
 /// consecutive addresses of one VA range.
-fn map_vm(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo, pieces: &[(usize, bool, u64, u64)])
+fn map_vm(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo, pieces: &[(usize, bool, u64, u64)], align: u64)
           -> Result<(), i32> {
     let total: u64 = pieces.iter().map(|p| p.3).sum();
-    let node = c.mm.insert_node_in_range_best(total, PAGE, 0, compose::DYN_START, compose::DYN_END)?;
+    let node = c.mm.insert_node_in_range_best(total, align, 0, compose::DYN_START, compose::DYN_END)?;
     let mut at = node.start;
     let mut done = 0;
     let r = (|| {
@@ -267,7 +267,7 @@ fn map_framebuffer(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo) -> Re
         pieces.push((h, true, 0, next - p));
         p = next;
     }
-    map_vm(adev, c, b, &pieces)?;
+    map_vm(adev, c, b, &pieces, PAGE)?;
     b.va = b.node.unwrap().start + b.offset as u64;
     Ok(())
 }
@@ -275,7 +275,7 @@ fn map_framebuffer(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo) -> Re
 /// An imported buffer in the compositor's VM.
 fn map_import(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo) -> Result<(), i32> {
     let h = b.handle.ok_or(-EINVAL)?;
-    map_vm(adev, c, b, &[(h, false, 0, b.pages as u64 * PAGE)])?;
+    map_vm(adev, c, b, &[(h, false, 0, b.pages as u64 * PAGE)], PAGE)?;
     b.va = b.node.unwrap().start + b.offset as u64;
     Ok(())
 }
@@ -567,12 +567,16 @@ fn guest_frame(adev: &amdgpu_device, b: &bo, h: usize) -> Option<crate::import::
 }
 
 /// A tiled guest frame in the compositor's VM: its whole object, which the
-/// descriptor reads from its start, and the linear buffer the scenes see.
+/// descriptor reads from its start, at the alignment of its swizzle mode
+/// and its DCC (the low bits of a descriptor's address are the pipe and
+/// bank XOR, radeonsi's VA allocator aligns a BO to its surface), and the
+/// linear buffer the scenes see.
 fn map_tiled(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo, surf: &crate::import::radeon_surf)
              -> Result<(), i32> {
     let h = b.handle.ok_or(-EINVAL)?;
     let size = obj::amdgpu_bo_size(adev, h);
-    if let Err(e) = map_vm(adev, c, b, &[(h, false, 0, size)]) {
+    let align = crate::import::alignment(surf);
+    if let Err(e) = map_vm(adev, c, b, &[(h, false, 0, size)], align) {
         Line::new().s("gpudev: bo ").dec(b.id as u64).s(": its object of ").dec(size).s(" bytes not mapped (")
             .dec((-e) as u64).s(")").say();
         return Err(e);
@@ -588,7 +592,11 @@ fn map_tiled(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo, surf: &crat
             return Err(e);
         }
     };
-    let desc = crate::import::descriptor(surf, b.width, b.height, b.node.unwrap().start);
+    let va = b.node.unwrap().start;
+    let desc = crate::import::descriptor(surf, b.width, b.height, va);
+    Line::new().s("gpudev: bo ").dec(b.id as u64).s(" object at 0x").hexw((va >> 32) as u32, 8).hexw(va as u32, 8)
+        .s("+0x").hexu(size as u32).s(", linear at 0x").hexw((g.va >> 32) as u32, 8).hexw(g.va as u32, 8).s("+0x")
+        .hexu(bytes as u32).say();
     b.import = Some(compose::frame_import { desc, dst: g.va, dst_pitch_px: pitch_px, width: b.width,
                                             height: b.height });
     b.linear = Some(g);
