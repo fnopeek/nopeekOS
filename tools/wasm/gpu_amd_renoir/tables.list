@@ -54,6 +54,8 @@ amdgpu_lockup_timeout: u8
 amdgpu_asic_name: str
 @ ../pm/swsmu/smu12/renoir_ppt.c
 renoir_message_map: i32
+renoir_table_map: i32
+renoir_workload_map: i32
 @ amdgpu_drv.c
 amdgpu_vis_vram_limit: i32
 amdgpu_vram_limit: i32
@@ -66,7 +68,12 @@ amdgpu_vm_update_mode: i32
 amdgpu_vm_fault_stop: i32
 @ amdgpu_drv.c
 amdgpu_msi: i32
+@ amdgpu_drv.c
+amdgpu_sdma_phase_quantum: u32
+@ sdma_v4_0.c
+golden_settings_sdma_4_3: u32
 @ gfx_v9_0.c
+golden_settings_gc_9_1_rn: u32
 gfx9_SECT_CONTEXT_def_1: u32
 gfx9_SECT_CONTEXT_def_2: u32
 gfx9_SECT_CONTEXT_def_3: u32
@@ -75,3 +82,8 @@ gfx9_SECT_CONTEXT_def_5: u32
 gfx9_SECT_CONTEXT_def_6: u32
 gfx9_SECT_CONTEXT_def_7: u32
 gfx9_SECT_CONTEXT_def_8: u32
+@ amdgpu_irq.c
+soc15_ih_clientid_name: str
+@ gmc_v9_0.c
+gfxhub_client_ids: str
+mmhub_client_ids_renoir: str

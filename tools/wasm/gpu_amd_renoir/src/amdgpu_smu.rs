@@ -38,6 +38,23 @@ pub struct smu_context {
     pub dpm_level: u32,
     pub requested_dpm_level: u32,
     pub smu_table: smu_table_context,
+    /// `smu_feature.supported` / `.allowed`: SMU_FEATURE_MAX is 64.
+    pub feature_supported: u64,
+    pub feature_allowed: u64,
+    /// `smu_power.power_gate`.
+    pub vcn_gated: [bool; AMDGPU_MAX_VCN_INSTANCES as usize],
+    pub jpeg_gated: bool,
+    pub vpe_gated: bool,
+    pub isp_gated: bool,
+    pub umsch_mm_gated: bool,
+    pub smc_fw_if_version: u32,
+    pub smc_fw_version: u32,
+    pub wbrf_supported: bool,
+    pub workload_mask: u32,
+    pub gfx_default_hard_min_freq: u32,
+    pub gfx_default_soft_max_freq: u32,
+    pub gfx_actual_hard_min_freq: u32,
+    pub gfx_actual_soft_max_freq: u32,
 }
 
 /// `struct smu_table`.
@@ -232,9 +249,20 @@ fn __smu_cmn_send_msg(adev: &amdgpu_device, msg: u16, param: u32) {
     adev.wreg32(adev.smu.msg_reg, msg as u32);
 }
 
-/// `smu_cmn_send_smc_msg_with_param`, without a read-back argument. No RAS
-/// priority filter (`smc_fw_caps` 0).
+/// `smu_cmn_send_smc_msg_with_param` without a read-back argument.
 pub fn smu_cmn_send_smc_msg_with_param(adev: &mut amdgpu_device, msg: u32, param: u32, name: &[u8]) -> i32 {
+    smu_cmn_send_smc_msg_with_param_read(adev, msg, param, name, None)
+}
+
+/// `smu_cmn_send_smc_msg`.
+fn smu_cmn_send_smc_msg(adev: &mut amdgpu_device, msg: u32, name: &[u8], read_arg: Option<&mut u32>) -> i32 {
+    smu_cmn_send_smc_msg_with_param_read(adev, msg, 0, name, read_arg)
+}
+
+/// `smu_cmn_send_smc_msg_with_param`. No RAS priority filter
+/// (`smc_fw_caps` 0).
+pub fn smu_cmn_send_smc_msg_with_param_read(adev: &mut amdgpu_device, msg: u32, param: u32, name: &[u8],
+                                            read_arg: Option<&mut u32>) -> i32 {
     let index = smu_cmn_to_asic_specific_index(adev, msg);
     if index < 0 {
         return if index == -13 { 0 } else { index };
@@ -265,8 +293,15 @@ pub fn smu_cmn_send_smc_msg_with_param(adev: &mut amdgpu_device, msg: u32, param
         }
         __smu_cmn_reg_print_error(adev, reg, index, param, name);
     }
-    Line::new().s("smu send message: ").bytes(name).s("(").dec(index as u64).s(") param: 0x").hexw(param, 8)
-        .s(", resp: 0x").hexw(reg, 8).dbg();
+    if let Some(arg) = read_arg {
+        // smu_cmn_read_arg
+        *arg = adev.rreg32(adev.smu.param_reg).unwrap_or(0);
+        Line::new().s("smu send message: ").bytes(name).s("(").dec(index as u64).s(") param: 0x").hexw(param, 8)
+            .s(", resp: 0x").hexw(reg, 8).s(", readval: 0x").hexw(*arg, 8).dbg();
+    } else {
+        Line::new().s("smu send message: ").bytes(name).s("(").dec(index as u64).s(") param: 0x").hexw(param, 8)
+            .s(", resp: 0x").hexw(reg, 8).dbg();
+    }
     res
 }
 
@@ -537,7 +572,16 @@ pub fn smu_sw_init(adev: &mut amdgpu_device) -> i32 {
     let smu = &mut adev.smu;
     smu.pool_size = adev.pm.smu_prv_buffer_size as u64;
     smu.feature_num = SMU_FEATURE_MAX;
+    smu.feature_supported = 0;
+    smu.feature_allowed = 0;
     smu.watermarks_bitmap = 0;
+    for i in 0..adev.vcn.num_vcn_inst as usize {
+        smu.vcn_gated[i] = true;
+    }
+    smu.jpeg_gated = true;
+    smu.vpe_gated = true;
+    smu.isp_gated = true;
+    smu.umsch_mm_gated = true;
     // smu_init_power_profile
     if smu.power_profile_mode == PP_SMC_POWER_PROFILE_UNKNOWN as u32 {
         smu.power_profile_mode = PP_SMC_POWER_PROFILE_BOOTUP_DEFAULT;
@@ -558,5 +602,609 @@ pub fn smu_sw_init(adev: &mut amdgpu_device) -> i32 {
         return r;
     }
     adev.pm.no_fan = true;
+    0
+}
+
+/// `smu_cmn_to_asic_specific_index`, CMN2ASIC_MAPPING_TABLE: the ASIC's
+/// table number from `renoir_table_map`.
+fn smu_cmn_to_asic_specific_table(adev: &amdgpu_device, index: u32) -> i32 {
+    if index >= SMU_TABLE_COUNT || adev.smu.table_map.is_none() {
+        return -22;
+    }
+    let m = &crate::tables::renoir_table_map;
+    let at = (index * CMN2ASIC_MAPPING_SIZE / 4) as usize;
+    let field = |off: u32| m.get(at + (off / 4) as usize).copied().unwrap_or(0);
+    if field(CMN2ASIC_MAPPING_valid_mapping) == 0 {
+        return -22;
+    }
+    field(CMN2ASIC_MAPPING_map_to)
+}
+
+/// `renoir_get_enabled_mask`: the PMFW exports no feature mask to an APU,
+/// so every feature counts as enabled.
+fn renoir_get_enabled_mask(feature_mask: &mut u64) -> i32 {
+    *feature_mask = u64::MAX;
+    0
+}
+
+/// `smu_cmn_feature_is_enabled`: renoir has no feature map, and its mask
+/// is all ones.
+fn smu_cmn_feature_is_enabled(_adev: &amdgpu_device, _mask: u32) -> bool {
+    let mut enabled_features = 0;
+    // __smu_get_enabled_features
+    if renoir_get_enabled_mask(&mut enabled_features) != 0 {
+        Line::new().s("Failed to retrieve enabled ppfeatures!").say();
+        return false;
+    }
+    // For Renoir and Cyan Skillfish, they are assumed to have all features
+    // enabled. Also considering they have no feature_map available, the
+    // check here can avoid unwanted feature_map check below.
+    if enabled_features == u64::MAX {
+        return true;
+    }
+    // smu_cmn_to_asic_specific_index(CMN2ASIC_MAPPING_FEATURE): no
+    // feature_map on renoir.
+    false
+}
+
+/// `smu_v12_0_check_fw_status`.
+fn smu_v12_0_check_fw_status(adev: &amdgpu_device) -> i32 {
+    let mp1_fw_flags =
+        crate::amdgpu_device::amdgpu_device_indirect_rreg(adev, MP1_Public | (smnMP1_FIRMWARE_FLAGS & 0xffffffff))
+            .unwrap_or(0);
+    if (mp1_fw_flags & MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK) >> MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED__SHIFT
+        != 0
+    {
+        return 0;
+    }
+    -5
+}
+
+/// `smu_cmn_get_smc_version`.
+fn smu_cmn_get_smc_version(adev: &mut amdgpu_device, if_version: &mut u32, smu_version: &mut u32) -> i32 {
+    if adev.smu.smc_fw_if_version != 0 && adev.smu.smc_fw_version != 0 {
+        *if_version = adev.smu.smc_fw_if_version;
+        *smu_version = adev.smu.smc_fw_version;
+        return 0;
+    }
+    let r = smu_cmn_send_smc_msg(adev, SMU_MSG_GetDriverIfVersion, GetDriverIfVersion_NAME, Some(if_version));
+    if r != 0 {
+        return r;
+    }
+    adev.smu.smc_fw_if_version = *if_version;
+    let r = smu_cmn_send_smc_msg(adev, SMU_MSG_GetSmuVersion, GetSmuVersion_NAME, Some(smu_version));
+    if r != 0 {
+        return r;
+    }
+    adev.smu.smc_fw_version = *smu_version;
+    0
+}
+
+/// `smu_v12_0_check_fw_version`.
+fn smu_v12_0_check_fw_version(adev: &mut amdgpu_device) -> i32 {
+    let mut if_version = 0xff;
+    let mut smu_version = 0xff;
+    let r = smu_cmn_get_smc_version(adev, &mut if_version, &mut smu_version);
+    if r != 0 {
+        return r;
+    }
+    let smu_program = (smu_version >> 24) & 0xff;
+    let smu_major = (smu_version >> 16) & 0xff;
+    let smu_minor = (smu_version >> 8) & 0xff;
+    let smu_debug = smu_version & 0xff;
+    if adev.smu.is_apu {
+        adev.pm.fw_version = smu_version;
+    }
+    // 1. if_version mismatch is not critical as our fw is designed to be
+    // backward compatible.
+    // 2. New fw usually brings some optimizations. But that's visible only
+    // on the paired driver.
+    // Considering above, we just leave user a verbal message instead of
+    // halt driver loading.
+    if if_version != adev.smu.smc_driver_if_version {
+        Line::new().s("smu driver if version = 0x").hexw(adev.smu.smc_driver_if_version, 8)
+            .s(", smu fw if version = 0x").hexw(if_version, 8).s(", smu fw program = ").dec(smu_program as u64)
+            .s(", smu fw version = 0x").hexw(smu_version, 8).s(" (").dec(smu_major as u64).s(".")
+            .dec(smu_minor as u64).s(".").dec(smu_debug as u64).s(")").say();
+    }
+    0
+}
+
+/// `smu_start_smc_engine`: the firmware is loaded by the PSP, and renoir
+/// has `check_fw_status` and `check_fw_version`.
+fn smu_start_smc_engine(adev: &mut amdgpu_device) -> i32 {
+    adev.smu.smc_fw_state = SMU_FW_INIT;
+    if smu_v12_0_check_fw_status(adev) != 0 {
+        Line::new().s("SMC is not ready").say();
+        return -5;
+    }
+    // Send msg GetDriverIfVersion to check if the return value is equal
+    // with DRIVER_IF_VERSION of smc header.
+    smu_v12_0_check_fw_version(adev)
+}
+
+/// `is_vcn_enabled`.
+fn is_vcn_enabled(adev: &amdgpu_device) -> bool {
+    !adev.ip_blocks.iter().any(|b| {
+        (b.version.type_ == AMD_IP_BLOCK_TYPE_VCN || b.version.type_ == AMD_IP_BLOCK_TYPE_JPEG) && !b.status.valid
+    })
+}
+
+/// `renoir_dpm_set_vcn_enable`.
+fn renoir_dpm_set_vcn_enable(adev: &mut amdgpu_device, enable: bool) -> i32 {
+    if enable {
+        // vcn dpm on is a prerequisite for vcn power gate messages
+        if smu_cmn_feature_is_enabled(adev, SMU_FEATURE_VCN_PG_BIT) {
+            return smu_cmn_send_smc_msg_with_param(adev, SMU_MSG_PowerUpVcn, 0, PowerUpVcn_NAME);
+        }
+    } else if smu_cmn_feature_is_enabled(adev, SMU_FEATURE_VCN_PG_BIT) {
+        return smu_cmn_send_smc_msg(adev, SMU_MSG_PowerDownVcn, PowerDownVcn_NAME, None);
+    }
+    0
+}
+
+/// `renoir_dpm_set_jpeg_enable`.
+fn renoir_dpm_set_jpeg_enable(adev: &mut amdgpu_device, enable: bool) -> i32 {
+    if enable {
+        if smu_cmn_feature_is_enabled(adev, SMU_FEATURE_JPEG_PG_BIT) {
+            return smu_cmn_send_smc_msg_with_param(adev, SMU_MSG_PowerUpJpeg, 0, PowerUpJpeg_NAME);
+        }
+    } else if smu_cmn_feature_is_enabled(adev, SMU_FEATURE_JPEG_PG_BIT) {
+        return smu_cmn_send_smc_msg_with_param(adev, SMU_MSG_PowerDownJpeg, 0, PowerDownJpeg_NAME);
+    }
+    0
+}
+
+/// `smu_dpm_set_vcn_enable`.
+fn smu_dpm_set_vcn_enable(adev: &mut amdgpu_device, enable: bool, inst: usize) -> i32 {
+    // don't poweron vcn/jpeg when they are skipped.
+    if !is_vcn_enabled(adev) {
+        return 0;
+    }
+    if adev.smu.vcn_gated[inst] ^ enable {
+        return 0;
+    }
+    let r = renoir_dpm_set_vcn_enable(adev, enable);
+    if r == 0 {
+        adev.smu.vcn_gated[inst] = !enable;
+    }
+    r
+}
+
+/// `smu_dpm_set_jpeg_enable`.
+fn smu_dpm_set_jpeg_enable(adev: &mut amdgpu_device, enable: bool) -> i32 {
+    if !is_vcn_enabled(adev) {
+        return 0;
+    }
+    if adev.smu.jpeg_gated ^ enable {
+        return 0;
+    }
+    let r = renoir_dpm_set_jpeg_enable(adev, enable);
+    if r == 0 {
+        adev.smu.jpeg_gated = !enable;
+    }
+    r
+}
+
+/// `smu_v12_0_set_gfx_cgpg`.
+fn smu_v12_0_set_gfx_cgpg(adev: &mut amdgpu_device, enable: bool) -> i32 {
+    // Until now the SMU12 only implemented for Renoir series so here neen't
+    // do APU check.
+    if adev.pg_flags & AMD_PG_SUPPORT_GFX_PG == 0 || adev.in_s0ix {
+        return 0;
+    }
+    smu_cmn_send_smc_msg_with_param(adev, SMU_MSG_SetGfxCGPG, enable as u32, SetGfxCGPG_NAME)
+}
+
+/// `smu_v12_0_set_driver_table_location`.
+fn smu_v12_0_set_driver_table_location(adev: &mut amdgpu_device) -> i32 {
+    let mc_address = adev.smu.smu_table.driver_table.mc_address;
+    let mut r = 0;
+    if mc_address != 0 {
+        r = smu_cmn_send_smc_msg_with_param(adev, SMU_MSG_SetDriverDramAddrHigh, (mc_address >> 32) as u32,
+                                            SetDriverDramAddrHigh_NAME);
+        if r == 0 {
+            r = smu_cmn_send_smc_msg_with_param(adev, SMU_MSG_SetDriverDramAddrLow, mc_address as u32,
+                                                SetDriverDramAddrLow_NAME);
+        }
+    }
+    r
+}
+
+/// `hdp_v4_0_invalidate_hdp` without a ring.
+pub fn hdp_v4_0_invalidate_hdp(adev: &amdgpu_device) {
+    let v = adev.ip_version(HDP_HWIP, 0);
+    if v == 4 << 24 | 4 << 16 || v == 4 << 24 | 4 << 16 | 2 << 8 || v == 4 << 24 | 4 << 16 | 5 << 8 {
+        return;
+    }
+    crate::nbio_v7_0::wreg32_soc15(adev, HDP_HWIP, 0, HDP_mmHDP_READ_CACHE_INVALIDATE_BASE_IDX,
+                                   HDP_mmHDP_READ_CACHE_INVALIDATE, 1);
+    crate::nbio_v7_0::rreg32_soc15(adev, HDP_HWIP, 0, HDP_mmHDP_READ_CACHE_INVALIDATE_BASE_IDX,
+                                   HDP_mmHDP_READ_CACHE_INVALIDATE);
+}
+
+/// `smu_cmn_update_table` from the SMU to the driver (`drv2smu` false):
+/// soc15_asic_funcs has no `invalidate_hdp`, so it is the HDP block's.
+fn smu_cmn_update_table_smu2drv(adev: &mut amdgpu_device, table_index: u32, argument: u32) -> Result<Vec<u8>, i32> {
+    let table_id = smu_cmn_to_asic_specific_table(adev, table_index);
+    if table_index >= SMU_TABLE_COUNT || table_id < 0 {
+        return Err(-22);
+    }
+    let table_size = adev.smu.smu_table.tables[table_index as usize].size as usize;
+    let r = smu_cmn_send_smc_msg_with_param(adev, SMU_MSG_TransferTableSmu2Dram,
+                                            table_id as u32 | ((argument & 0xFFFF) << 16),
+                                            TransferTableSmu2Dram_NAME);
+    if r != 0 {
+        return Err(r);
+    }
+    hdp_v4_0_invalidate_hdp(adev);
+    let Some(k) = adev.smu.smu_table.driver_table.cpu_addr else { return Err(-22) };
+    let mut data = vec![0u8; table_size];
+    crate::amdgpu_gart::kptr_read(adev, k, 0, &mut data);
+    Ok(data)
+}
+
+/// `smu_v12_0_set_default_dpm_tables`: SMU_TABLE_DPMCLOCKS into
+/// `clocks_table`.
+fn smu_v12_0_set_default_dpm_tables(adev: &mut amdgpu_device) -> i32 {
+    match smu_cmn_update_table_smu2drv(adev, SMU_TABLE_DPMCLOCKS, 0) {
+        Ok(data) => {
+            let n = data.len().min(adev.smu.smu_table.clocks_table.len());
+            adev.smu.smu_table.clocks_table[..n].copy_from_slice(&data[..n]);
+            0
+        }
+        Err(r) => r,
+    }
+}
+
+/// `smu_set_default_dpm_table`.
+fn smu_set_default_dpm_table(adev: &mut amdgpu_device) -> i32 {
+    let n = adev.vcn.num_vcn_inst as usize;
+    let mut vcn_gate = [false; AMDGPU_MAX_VCN_INSTANCES as usize];
+    let mut jpeg_gate = false;
+    if adev.pg_flags & AMD_PG_SUPPORT_VCN != 0 {
+        vcn_gate[..n].copy_from_slice(&adev.smu.vcn_gated[..n]);
+    }
+    if adev.pg_flags & AMD_PG_SUPPORT_JPEG != 0 {
+        jpeg_gate = adev.smu.jpeg_gated;
+    }
+    if adev.pg_flags & AMD_PG_SUPPORT_VCN != 0 {
+        for i in 0..n {
+            let r = smu_dpm_set_vcn_enable(adev, true, i);
+            if r != 0 {
+                return r;
+            }
+        }
+    }
+    let mut r;
+    'err_out: {
+        if adev.pg_flags & AMD_PG_SUPPORT_JPEG != 0 {
+            r = smu_dpm_set_jpeg_enable(adev, true);
+            if r != 0 {
+                break 'err_out;
+            }
+        }
+        r = smu_v12_0_set_default_dpm_tables(adev);
+        if r != 0 {
+            Line::new().s("Failed to setup default dpm clock tables!").say();
+        }
+        if adev.pg_flags & AMD_PG_SUPPORT_JPEG != 0 {
+            smu_dpm_set_jpeg_enable(adev, !jpeg_gate);
+        }
+    }
+    if adev.pg_flags & AMD_PG_SUPPORT_VCN != 0 {
+        for i in 0..n {
+            smu_dpm_set_vcn_enable(adev, !vcn_gate[i], i);
+        }
+    }
+    r
+}
+
+/// `smu_smc_hw_setup` for renoir: of the ppt hooks it calls, renoir has
+/// `set_driver_table_location`, `get_enabled_mask`, `is_dpm_running` and
+/// `set_default_dpm_table`; the others return 0. SCPM is off, there is no
+/// wbrf, and MP1 12.0.0 has no XGMI PLPD policy.
+fn smu_smc_hw_setup(adev: &mut amdgpu_device) -> i32 {
+    let r = smu_v12_0_set_driver_table_location(adev);
+    if r != 0 {
+        Line::new().s("Failed to SetDriverDramAddr!").say();
+        return r;
+    }
+    // smu_update_pcie_parameters: renoir has no update_pcie_parameters, so
+    // the gen and width it would be given are not needed.
+
+    // smu_init_xgmi_plpd_mode: no policies on renoir.
+
+    let mut features_supported = 0;
+    let r = renoir_get_enabled_mask(&mut features_supported);
+    if r != 0 {
+        Line::new().s("Failed to retrieve supported dpm features!").say();
+        return r;
+    }
+    adev.smu.feature_supported = features_supported;
+
+    // renoir_is_dpm_running: true outside suspend.
+    if adev.in_suspend {
+        Line::new().s("dpm has been disabled").say();
+    }
+
+    // Set initialized values (get from vbios) to dpm tables context such as
+    // gfxclk, memclk, dcefclk, and etc. And enable the DPM feature for each
+    // type of clks.
+    let r = smu_set_default_dpm_table(adev);
+    if r != 0 {
+        Line::new().s("Failed to setup default dpm clock tables!").say();
+        return r;
+    }
+    // smu_get_thermal_temperature_range, smu_enable_thermal_alert,
+    // smu_notify_display_change, smu_set_min_dcef_deep_sleep: renoir has
+    // none of them; smu_wbrf_init returns 0 without wbrf.
+    0
+}
+
+/// `smu_hw_init`: bare metal, no SR-IOV.
+pub fn smu_hw_init(adev: &mut amdgpu_device) -> i32 {
+    let r = smu_start_smc_engine(adev);
+    if r != 0 {
+        Line::new().s("SMC engine is not correctly up!").say();
+        return r;
+    }
+    // smu_wbrf_support_check: renoir has no is_asic_wbrf_supported.
+    adev.smu.wbrf_supported = false;
+
+    if adev.smu.is_apu {
+        // smu_set_gfx_imu_enable: renoir has no set_gfx_power_up_by_imu.
+        for i in 0..adev.vcn.num_vcn_inst as usize {
+            smu_dpm_set_vcn_enable(adev, true, i);
+        }
+        smu_dpm_set_jpeg_enable(adev, true);
+        // smu_dpm_set_umsch_mm_enable: enable_umsch_mm is off;
+        // smu_set_mall_enable: renoir has no set_mall_enable.
+        smu_v12_0_set_gfx_cgpg(adev, true);
+    }
+
+    if !adev.smu.pm_enabled {
+        return 0;
+    }
+
+    // smu_get_driver_allowed_feature_mask: SCPM is off, renoir has no
+    // get_allowed_feature_mask.
+    adev.smu.feature_allowed = 0;
+
+    let r = smu_smc_hw_setup(adev);
+    if r != 0 {
+        Line::new().s("Failed to setup smc hw!").say();
+        return r;
+    }
+    // smu_init_max_sustainable_clocks: renoir has none.
+    adev.pm.dpm_enabled = true;
+    Line::new().s("SMU is initialized successfully!").say();
+    0
+}
+
+/// `smu_v12_0_powergate_sdma`.
+fn smu_v12_0_powergate_sdma(adev: &mut amdgpu_device, gate: bool) -> i32 {
+    if !adev.smu.is_apu {
+        return 0;
+    }
+    if gate {
+        smu_cmn_send_smc_msg(adev, SMU_MSG_PowerDownSdma, PowerDownSdma_NAME, None)
+    } else {
+        smu_cmn_send_smc_msg(adev, SMU_MSG_PowerUpSdma, PowerUpSdma_NAME, None)
+    }
+}
+
+/// `smu_dpm_set_power_gate` (swsmu's `set_powergating_by_smu`), for the
+/// blocks Renoir's hw_init gates.
+fn smu_dpm_set_power_gate(adev: &mut amdgpu_device, block_type: u32, gate: bool, inst: usize) -> i32 {
+    if !adev.smu.pm_enabled || !adev.pm.dpm_enabled {
+        Line::new().s("SMU uninitialized but power ").s(if gate { "gate" } else { "ungate" })
+            .s(" requested for ").dec(block_type as u64).s("!").say();
+        return -95;
+    }
+    let what = if gate { "gate" } else { "ungate" };
+    match block_type {
+        // Some legacy code of amdgpu_vcn.c and vcn_v2*.c still uses
+        // AMD_IP_BLOCK_TYPE_UVD for VCN. So, here both of them are kept.
+        AMD_IP_BLOCK_TYPE_UVD | AMD_IP_BLOCK_TYPE_VCN => {
+            let r = smu_dpm_set_vcn_enable(adev, !gate, inst);
+            if r != 0 {
+                Line::new().s("Failed to power ").s(what).s(" VCN instance ").dec(inst as u64).s("!").say();
+            }
+            r
+        }
+        AMD_IP_BLOCK_TYPE_SDMA => {
+            let r = smu_v12_0_powergate_sdma(adev, gate);
+            if r != 0 {
+                Line::new().s("Failed to power ").s(what).s(" SDMA!").say();
+            }
+            r
+        }
+        AMD_IP_BLOCK_TYPE_GFX => {
+            let r = smu_v12_0_gfx_off_control(adev, gate);
+            if r != 0 {
+                Line::new().s("Failed to ").s(if gate { "enable" } else { "disable" }).s(" gfxoff!").say();
+            }
+            r
+        }
+        AMD_IP_BLOCK_TYPE_JPEG => {
+            let r = smu_dpm_set_jpeg_enable(adev, !gate);
+            if r != 0 {
+                Line::new().s("Failed to power ").s(what).s(" JPEG!").say();
+            }
+            r
+        }
+        // smu_dpm_set_vpe_enable, smu_dpm_set_isp_enable: renoir has
+        // neither hook and returns 0.
+        AMD_IP_BLOCK_TYPE_VPE | AMD_IP_BLOCK_TYPE_ISP => 0,
+        _ => {
+            Line::new().s("Unsupported block type!").say();
+            -22
+        }
+    }
+}
+
+/// `amdgpu_dpm_set_powergating_by_smu`.
+pub fn amdgpu_dpm_set_powergating_by_smu(adev: &mut amdgpu_device, block_type: u32, gate: bool, inst: usize) -> i32 {
+    let pwr_state = if gate { POWER_STATE_OFF } else { POWER_STATE_ON };
+    let is_vcn = block_type == AMD_IP_BLOCK_TYPE_VCN;
+    if adev.pm.pwr_state[block_type as usize] == pwr_state && (!is_vcn || adev.vcn.num_vcn_inst == 1) {
+        Line::new().s("IP block").dec(block_type as u64).s(" already in the target ")
+            .s(if gate { "gate" } else { "ungate" }).s(" state!").dbg();
+        return 0;
+    }
+    let r = match block_type {
+        AMD_IP_BLOCK_TYPE_VCN => smu_dpm_set_power_gate(adev, block_type, gate, inst),
+        AMD_IP_BLOCK_TYPE_UVD | AMD_IP_BLOCK_TYPE_VCE | AMD_IP_BLOCK_TYPE_GFX | AMD_IP_BLOCK_TYPE_SDMA
+        | AMD_IP_BLOCK_TYPE_JPEG | AMD_IP_BLOCK_TYPE_GMC | AMD_IP_BLOCK_TYPE_ACP | AMD_IP_BLOCK_TYPE_VPE
+        | AMD_IP_BLOCK_TYPE_ISP => smu_dpm_set_power_gate(adev, block_type, gate, 0),
+        _ => 0,
+    };
+    if r == 0 {
+        adev.pm.pwr_state[block_type as usize] = pwr_state;
+    }
+    r
+}
+
+/// `smu_v12_0_get_gfxoff_status`.
+fn smu_v12_0_get_gfxoff_status(adev: &amdgpu_device) -> u32 {
+    let reg = crate::nbio_v7_0::rreg32_soc15(adev, SMUIO_HWIP, 0, SMUIO_mmSMUIO_GFX_MISC_CNTL_BASE_IDX,
+                                             SMUIO_mmSMUIO_GFX_MISC_CNTL).unwrap_or(0);
+    (reg & SMUIO_SMUIO_GFX_MISC_CNTL__PWR_GFXOFF_STATUS_MASK) >> SMUIO_SMUIO_GFX_MISC_CNTL__PWR_GFXOFF_STATUS__SHIFT
+}
+
+/// `smu_v12_0_gfx_off_control` (`smu_gfx_off_control`).
+fn smu_v12_0_gfx_off_control(adev: &mut amdgpu_device, enable: bool) -> i32 {
+    if enable {
+        return smu_cmn_send_smc_msg(adev, SMU_MSG_AllowGfxOff, AllowGfxOff_NAME, None);
+    }
+    let r = smu_cmn_send_smc_msg(adev, SMU_MSG_DisallowGfxOff, DisallowGfxOff_NAME, None);
+    // confirm gfx is back to "on" state, timeout is 0.5 second
+    let mut timeout = 500;
+    while smu_v12_0_get_gfxoff_status(adev) != 2 {
+        crate::linux::mdelay(1);
+        timeout -= 1;
+        if timeout == 0 {
+            Line::new().s("disable gfxoff timeout and failed!").say();
+            break;
+        }
+    }
+    r
+}
+
+/// `smu_cmn_to_asic_specific_index`, CMN2ASIC_MAPPING_WORKLOAD:
+/// `renoir_workload_map`.
+fn smu_cmn_to_asic_specific_workload(adev: &amdgpu_device, index: u32) -> i32 {
+    if index >= PP_SMC_POWER_PROFILE_COUNT || adev.smu.workload_map.is_none() {
+        return -22;
+    }
+    let m = &crate::tables::renoir_workload_map;
+    let at = (index * CMN2ASIC_MAPPING_SIZE / 4) as usize;
+    let field = |off: u32| m.get(at + (off / 4) as usize).copied().unwrap_or(0);
+    if field(CMN2ASIC_MAPPING_valid_mapping) == 0 {
+        return -524;
+    }
+    field(CMN2ASIC_MAPPING_map_to)
+}
+
+/// `renoir_set_power_profile_mode` with
+/// `smu_cmn_get_backend_workload_mask`.
+fn renoir_set_power_profile_mode(adev: &mut amdgpu_device, workload_mask: u32) -> i32 {
+    let mut backend_workload_mask = 0u32;
+    for profile_mode in 0..PP_SMC_POWER_PROFILE_COUNT {
+        if workload_mask & (1 << profile_mode) == 0 {
+            continue;
+        }
+        // conv PP_SMC_POWER_PROFILE* to WORKLOAD_PPLIB_*_BIT
+        let workload_type = smu_cmn_to_asic_specific_workload(adev, profile_mode);
+        if workload_type < 0 {
+            continue;
+        }
+        backend_workload_mask |= 1 << workload_type;
+    }
+    let r = smu_cmn_send_smc_msg_with_param(adev, SMU_MSG_ActiveProcessNotify, backend_workload_mask,
+                                            ActiveProcessNotify_NAME);
+    if r != 0 {
+        Line::new().s("Failed to set workload mask 0x08").hexu(workload_mask).say();
+    }
+    r
+}
+
+/// `smu_bump_power_profile_mode` without custom parameters.
+fn smu_bump_power_profile_mode(adev: &mut amdgpu_device) -> i32 {
+    let mut workload_mask = 0u32;
+    for i in 0..PP_SMC_POWER_PROFILE_COUNT as usize {
+        if adev.smu.workload_refcount[i] != 0 {
+            workload_mask |= 1 << i;
+        }
+    }
+    if adev.smu.workload_mask == workload_mask {
+        return 0;
+    }
+    let r = renoir_set_power_profile_mode(adev, workload_mask);
+    if r == 0 {
+        adev.smu.workload_mask = workload_mask;
+    }
+    r
+}
+
+/// `renoir_set_fine_grain_gfx_freq_parameters`.
+fn renoir_set_fine_grain_gfx_freq_parameters(adev: &mut amdgpu_device) -> i32 {
+    let (mut min, mut max) = (0, 0);
+    let r = smu_cmn_send_smc_msg_with_param_read(adev, SMU_MSG_GetMinGfxclkFrequency, 0, GetMinGfxclkFrequency_NAME,
+                                                 Some(&mut min));
+    if r != 0 {
+        return r;
+    }
+    let r = smu_cmn_send_smc_msg_with_param_read(adev, SMU_MSG_GetMaxGfxclkFrequency, 0, GetMaxGfxclkFrequency_NAME,
+                                                 Some(&mut max));
+    if r != 0 {
+        return r;
+    }
+    let smu = &mut adev.smu;
+    smu.gfx_default_hard_min_freq = min;
+    smu.gfx_default_soft_max_freq = max;
+    smu.gfx_actual_hard_min_freq = 0;
+    smu.gfx_actual_soft_max_freq = 0;
+    0
+}
+
+/// `smu_late_init` for renoir: of the hooks it calls, renoir has
+/// `set_fine_grain_gfx_freq_parameters` and `set_power_profile_mode`;
+/// `smu_set_ac_dc` finds no `set_power_source`, and the restore of a user
+/// profile is for resume only.
+pub fn smu_late_init(adev: &mut amdgpu_device) -> i32 {
+    renoir_set_fine_grain_gfx_freq_parameters(adev);
+    if !adev.smu.pm_enabled {
+        return 0;
+    }
+    // smu_handle_task(dpm_level, AMD_PP_TASK_COMPLETE_INIT) ->
+    // smu_adjust_power_state_dynamic(dpm_level, skip display settings):
+    // renoir has no apply_clocks_adjust_rules, and the level asked for is
+    // the current one.
+    if !adev.pm.dpm_enabled {
+        return 0;
+    }
+    let level = adev.smu.dpm_level;
+    if level != AMD_DPM_FORCED_LEVEL_MANUAL && level != AMD_DPM_FORCED_LEVEL_PERF_DETERMINISM {
+        smu_bump_power_profile_mode(adev);
+    }
+    0
+}
+
+/// `smu_hw_fini`: no SR-IOV. `smu_smc_hw_cleanup` finds nothing renoir
+/// implements (no thermal alert, no `system_features_control`, no RLC
+/// notify), and `smu_reset_mp1_state` is for MP1 13.0.10.
+pub fn smu_hw_fini(adev: &mut amdgpu_device) -> i32 {
+    for i in 0..adev.vcn.num_vcn_inst as usize {
+        smu_dpm_set_vcn_enable(adev, false, i);
+        adev.vcn.inst[i].cur_state = AMD_PG_STATE_GATE;
+    }
+    smu_dpm_set_jpeg_enable(adev, false);
+    adev.jpeg.cur_state = AMD_PG_STATE_GATE;
+    if !adev.smu.pm_enabled {
+        return 0;
+    }
+    adev.pm.dpm_enabled = false;
     0
 }

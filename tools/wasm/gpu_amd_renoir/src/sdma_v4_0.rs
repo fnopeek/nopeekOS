@@ -213,3 +213,562 @@ pub fn sdma_v4_0_sw_init(adev: &mut amdgpu_device) -> i32 {
     adev.sdma.ip_dump = alloc::vec![0; (n * SDMA_REG_LIST_4_0_COUNT) as usize];
     0
 }
+
+// ---- hw_init (stage 4) ----
+
+/// `sdma_v4_0_get_reg_offset`: Renoir has one instance.
+fn sdma_v4_0_get_reg_offset(adev: &amdgpu_device, instance: u32, offset: u32) -> u32 {
+    match instance {
+        0 => adev.reg_offset[SDMA0_HWIP as usize][0][0] + offset,
+        1 => adev.reg_offset[SDMA1_HWIP as usize][0][0] + offset,
+        _ => 0,
+    }
+}
+
+/// `RREG32_SDMA(i, reg)`.
+fn rd(adev: &amdgpu_device, i: u32, reg: u32) -> u32 {
+    adev.rreg32(sdma_v4_0_get_reg_offset(adev, i, reg)).unwrap_or(0)
+}
+
+/// `WREG32_SDMA(i, reg, v)`.
+fn wr(adev: &amdgpu_device, i: u32, reg: u32, v: u32) {
+    adev.wreg32(sdma_v4_0_get_reg_offset(adev, i, reg), v);
+}
+
+/// `REG_SET_FIELD`.
+fn set_field(v: u32, mask: u32, shift: u32, f: u32) -> u32 {
+    (v & !mask) | (mask & (f << shift))
+}
+
+/// `sdma_v4_0_init_golden_registers`: SDMA 4.1.2, `golden_settings_sdma_4_3`.
+fn sdma_v4_0_init_golden_registers(adev: &amdgpu_device) {
+    if adev.ip_version(SDMA0_HWIP, 0) == 4 << 24 | 1 << 16 | 2 << 8 {
+        crate::gfx_v9_0::soc15_program_register_sequence(adev, &crate::tables::golden_settings_sdma_4_3);
+    }
+}
+
+/// `sdma_v4_0_ctx_switch_enable`. `amdgpu_sdma_phase_quantum` is 32.
+fn sdma_v4_0_ctx_switch_enable(adev: &amdgpu_device, enable: bool) {
+    let mut phase_quantum = 0;
+    let q = crate::tables::amdgpu_sdma_phase_quantum[0];
+    if q != 0 {
+        let mut value = q;
+        let mut unit = 0;
+        let vmax = SDMA0_SDMA0_PHASE0_QUANTUM__VALUE_MASK >> SDMA0_SDMA0_PHASE0_QUANTUM__VALUE__SHIFT;
+        let umax = SDMA0_SDMA0_PHASE0_QUANTUM__UNIT_MASK >> SDMA0_SDMA0_PHASE0_QUANTUM__UNIT__SHIFT;
+        while value > vmax {
+            value = (value + 1) >> 1;
+            unit += 1;
+        }
+        if unit > umax {
+            value = vmax;
+            unit = umax;
+            Line::new().s("clamping sdma_phase_quantum to ").dec((value << unit) as u64).s("K clock cycles").say();
+        }
+        phase_quantum = value << SDMA0_SDMA0_PHASE0_QUANTUM__VALUE__SHIFT | unit << SDMA0_SDMA0_PHASE0_QUANTUM__UNIT__SHIFT;
+    }
+    for i in 0..adev.sdma.num_instances {
+        let mut f32_cntl = rd(adev, i, SDMA0_mmSDMA0_CNTL);
+        f32_cntl = set_field(f32_cntl, SDMA0_SDMA0_CNTL__AUTO_CTXSW_ENABLE_MASK, SDMA0_SDMA0_CNTL__AUTO_CTXSW_ENABLE__SHIFT,
+                             enable as u32);
+        if enable && q != 0 {
+            wr(adev, i, SDMA0_mmSDMA0_PHASE0_QUANTUM, phase_quantum);
+            wr(adev, i, SDMA0_mmSDMA0_PHASE1_QUANTUM, phase_quantum);
+            wr(adev, i, SDMA0_mmSDMA0_PHASE2_QUANTUM, phase_quantum);
+        }
+        wr(adev, i, SDMA0_mmSDMA0_CNTL, f32_cntl);
+        // Enable SDMA utilization. Its only supported on Arcturus for the
+        // moment and firmware version 14 and above.
+        if adev.ip_version(SDMA0_HWIP, 0) == 4 << 24 | 2 << 16 | 2 << 8
+            && adev.sdma.instance[i as usize].fw_version >= 14
+        {
+            wr(adev, i, SDMA0_mmSDMA0_PUB_DUMMY_REG2, enable as u32);
+        }
+        // Extend page fault timeout to avoid interrupt storm
+        wr(adev, i, SDMA0_mmSDMA0_UTCL1_TIMEOUT, 0x00800080);
+    }
+}
+
+/// `sdma_v4_0_enable(adev, true)`: unhalt the MEs.
+fn sdma_v4_0_enable(adev: &amdgpu_device) {
+    for i in 0..adev.sdma.num_instances {
+        let mut f32_cntl = rd(adev, i, SDMA0_mmSDMA0_F32_CNTL);
+        f32_cntl = set_field(f32_cntl, SDMA0_SDMA0_F32_CNTL__HALT_MASK, SDMA0_SDMA0_F32_CNTL__HALT__SHIFT, 0);
+        wr(adev, i, SDMA0_mmSDMA0_F32_CNTL, f32_cntl);
+    }
+}
+
+/// `order_base_2`.
+fn order_base_2(n: u32) -> u32 {
+    if n <= 1 { 0 } else { 32 - (n - 1).leading_zeros() }
+}
+
+/// `sdma_v4_0_gfx_resume`: bare metal, so no F32 wptr polling.
+fn sdma_v4_0_gfx_resume(adev: &mut amdgpu_device, i: u32) {
+    let Some(r) = adev.sdma.instance[i as usize].ring else { return };
+    let mut rb_cntl = rd(adev, i, SDMA0_mmSDMA0_GFX_RB_CNTL);
+    // sdma_v4_0_rb_cntl: set ring buffer size in dwords
+    let rb_bufsz = order_base_2(adev.rings[r].ring_size / 4);
+    rb_cntl = set_field(rb_cntl, SDMA0_SDMA0_GFX_RB_CNTL__RB_SIZE_MASK, SDMA0_SDMA0_GFX_RB_CNTL__RB_SIZE__SHIFT, rb_bufsz);
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_CNTL, rb_cntl);
+
+    // Initialize the ring buffer's read and write pointers
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_RPTR, 0);
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_RPTR_HI, 0);
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_WPTR, 0);
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_WPTR_HI, 0);
+
+    // set the wb address whether it's enabled or not
+    let ring = &adev.rings[r];
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_RPTR_ADDR_HI, (ring.rptr_gpu_addr >> 32) as u32);
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_RPTR_ADDR_LO, ring.rptr_gpu_addr as u32 & 0xFFFFFFFC);
+
+    rb_cntl = set_field(rb_cntl, SDMA0_SDMA0_GFX_RB_CNTL__RPTR_WRITEBACK_ENABLE_MASK,
+                        SDMA0_SDMA0_GFX_RB_CNTL__RPTR_WRITEBACK_ENABLE__SHIFT, 1);
+
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_BASE, (ring.gpu_addr >> 8) as u32);
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_BASE_HI, (ring.gpu_addr >> 40) as u32);
+    let (use_doorbell, doorbell_index, wptr_gpu_addr) = (ring.use_doorbell, ring.doorbell_index, ring.wptr_gpu_addr);
+
+    adev.rings[r].wptr = 0;
+
+    // before programing wptr to a less value, need set minor_ptr_update
+    // first
+    wr(adev, i, SDMA0_mmSDMA0_GFX_MINOR_PTR_UPDATE, 1);
+
+    let mut doorbell = rd(adev, i, SDMA0_mmSDMA0_GFX_DOORBELL);
+    let mut doorbell_offset = rd(adev, i, SDMA0_mmSDMA0_GFX_DOORBELL_OFFSET);
+    doorbell = set_field(doorbell, SDMA0_SDMA0_GFX_DOORBELL__ENABLE_MASK, SDMA0_SDMA0_GFX_DOORBELL__ENABLE__SHIFT,
+                         use_doorbell as u32);
+    doorbell_offset = set_field(doorbell_offset, SDMA0_SDMA0_GFX_DOORBELL_OFFSET__OFFSET_MASK,
+                                SDMA0_SDMA0_GFX_DOORBELL_OFFSET__OFFSET__SHIFT, doorbell_index);
+    wr(adev, i, SDMA0_mmSDMA0_GFX_DOORBELL, doorbell);
+    wr(adev, i, SDMA0_mmSDMA0_GFX_DOORBELL_OFFSET, doorbell_offset);
+
+    sdma_v4_0_ring_set_wptr(adev, r);
+
+    // set minor_ptr_update to 0 after wptr programed
+    wr(adev, i, SDMA0_mmSDMA0_GFX_MINOR_PTR_UPDATE, 0);
+
+    // setup the wptr shadow polling
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_WPTR_POLL_ADDR_LO, wptr_gpu_addr as u32);
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_WPTR_POLL_ADDR_HI, (wptr_gpu_addr >> 32) as u32);
+    let mut wptr_poll_cntl = rd(adev, i, SDMA0_mmSDMA0_GFX_RB_WPTR_POLL_CNTL);
+    wptr_poll_cntl = set_field(wptr_poll_cntl, SDMA0_SDMA0_GFX_RB_WPTR_POLL_CNTL__F32_POLL_ENABLE_MASK,
+                               SDMA0_SDMA0_GFX_RB_WPTR_POLL_CNTL__F32_POLL_ENABLE__SHIFT, 0);
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_WPTR_POLL_CNTL, wptr_poll_cntl);
+
+    // enable DMA RB
+    rb_cntl = set_field(rb_cntl, SDMA0_SDMA0_GFX_RB_CNTL__RB_ENABLE_MASK, SDMA0_SDMA0_GFX_RB_CNTL__RB_ENABLE__SHIFT, 1);
+    wr(adev, i, SDMA0_mmSDMA0_GFX_RB_CNTL, rb_cntl);
+
+    let mut ib_cntl = rd(adev, i, SDMA0_mmSDMA0_GFX_IB_CNTL);
+    ib_cntl = set_field(ib_cntl, SDMA0_SDMA0_GFX_IB_CNTL__IB_ENABLE_MASK, SDMA0_SDMA0_GFX_IB_CNTL__IB_ENABLE__SHIFT, 1);
+    // enable DMA IBs
+    wr(adev, i, SDMA0_mmSDMA0_GFX_IB_CNTL, ib_cntl);
+}
+
+/// `RREG32(SOC15_REG_OFFSET(SDMA0, 0, reg))`.
+fn rd0(adev: &amdgpu_device, idx: u32, reg: u32) -> u32 {
+    crate::nbio_v7_0::rreg32_soc15(adev, SDMA0_HWIP, 0, idx, reg).unwrap_or(0)
+}
+
+/// `WREG32(SOC15_REG_OFFSET(SDMA0, 0, reg), v)`.
+fn wr0(adev: &amdgpu_device, idx: u32, reg: u32, v: u32) {
+    crate::nbio_v7_0::wreg32_soc15(adev, SDMA0_HWIP, 0, idx, reg, v);
+}
+
+/// `sdma_v4_1_init_power_gating`.
+fn sdma_v4_1_init_power_gating(adev: &amdgpu_device) {
+    // Enable HW based PG.
+    let def = rd0(adev, SDMA0_mmSDMA0_POWER_CNTL_BASE_IDX, SDMA0_mmSDMA0_POWER_CNTL);
+    let data = def | SDMA0_SDMA0_POWER_CNTL__PG_CNTL_ENABLE_MASK;
+    if data != def {
+        wr0(adev, SDMA0_mmSDMA0_POWER_CNTL_BASE_IDX, SDMA0_mmSDMA0_POWER_CNTL, data);
+    }
+    // enable interrupt
+    let def = rd0(adev, SDMA0_mmSDMA0_CNTL_BASE_IDX, SDMA0_mmSDMA0_CNTL);
+    let data = def | SDMA0_SDMA0_CNTL__CTXEMPTY_INT_ENABLE_MASK;
+    if data != def {
+        wr0(adev, SDMA0_mmSDMA0_CNTL_BASE_IDX, SDMA0_mmSDMA0_CNTL, data);
+    }
+    // Configure hold time to filter in-valid power on/off request. Use
+    // default right now
+    let def = rd0(adev, SDMA0_mmSDMA0_POWER_CNTL_BASE_IDX, SDMA0_mmSDMA0_POWER_CNTL);
+    let mut data = def & !SDMA0_SDMA0_POWER_CNTL__ON_OFF_CONDITION_HOLD_TIME_MASK;
+    data |= SDMA0_mmSDMA0_POWER_CNTL_DEFAULT & SDMA0_SDMA0_POWER_CNTL__ON_OFF_CONDITION_HOLD_TIME_MASK;
+    // Configure switch time for hysteresis purpose. Use default right now
+    data &= !SDMA0_SDMA0_POWER_CNTL__ON_OFF_STATUS_DURATION_TIME_MASK;
+    data |= SDMA0_mmSDMA0_POWER_CNTL_DEFAULT & SDMA0_SDMA0_POWER_CNTL__ON_OFF_STATUS_DURATION_TIME_MASK;
+    if data != def {
+        wr0(adev, SDMA0_mmSDMA0_POWER_CNTL_BASE_IDX, SDMA0_mmSDMA0_POWER_CNTL, data);
+    }
+}
+
+/// `sdma_v4_1_update_power_gating`.
+fn sdma_v4_1_update_power_gating(adev: &amdgpu_device, enable: bool) {
+    let def = rd0(adev, SDMA0_mmSDMA0_CNTL_BASE_IDX, SDMA0_mmSDMA0_CNTL);
+    let data = if enable && adev.pg_flags & AMD_PG_SUPPORT_SDMA != 0 {
+        // enable idle interrupt
+        def | SDMA0_SDMA0_CNTL__CTXEMPTY_INT_ENABLE_MASK
+    } else {
+        // disable idle interrupt
+        def & !SDMA0_SDMA0_CNTL__CTXEMPTY_INT_ENABLE_MASK
+    };
+    if data != def {
+        wr0(adev, SDMA0_mmSDMA0_CNTL_BASE_IDX, SDMA0_mmSDMA0_CNTL, data);
+    }
+}
+
+/// `sdma_v4_0_rlc_resume`: `sdma_v4_0_init_pg`.
+fn sdma_v4_0_rlc_resume(adev: &amdgpu_device) -> i32 {
+    if adev.pg_flags & AMD_PG_SUPPORT_SDMA == 0 {
+        return 0;
+    }
+    let v = adev.ip_version(SDMA0_HWIP, 0);
+    if v == 4 << 24 | 1 << 16 || v == 4 << 24 | 1 << 16 | 1 << 8 || v == 4 << 24 | 1 << 16 | 2 << 8 {
+        sdma_v4_1_init_power_gating(adev);
+        sdma_v4_1_update_power_gating(adev, true);
+    }
+    0
+}
+
+/// `sdma_v4_0_start`: bare metal, firmware from the PSP, no page queue.
+fn sdma_v4_0_start(adev: &mut amdgpu_device) -> i32 {
+    // unhalt the MEs
+    sdma_v4_0_enable(adev);
+    // enable sdma ring preemption
+    sdma_v4_0_ctx_switch_enable(adev, true);
+
+    // start the gfx rings and rlc compute queues
+    for i in 0..adev.sdma.num_instances {
+        wr(adev, i, SDMA0_mmSDMA0_SEM_WAIT_FAIL_TIMER_CNTL, 0);
+        sdma_v4_0_gfx_resume(adev, i);
+        // set utc l1 enable flag always to 1
+        let mut temp = rd(adev, i, SDMA0_mmSDMA0_CNTL);
+        temp = set_field(temp, SDMA0_SDMA0_CNTL__UTC_L1_ENABLE_MASK, SDMA0_SDMA0_CNTL__UTC_L1_ENABLE__SHIFT, 1);
+        wr(adev, i, SDMA0_mmSDMA0_CNTL, temp);
+        // unhalt engine
+        let mut temp = rd(adev, i, SDMA0_mmSDMA0_F32_CNTL);
+        temp = set_field(temp, SDMA0_SDMA0_F32_CNTL__HALT_MASK, SDMA0_SDMA0_F32_CNTL__HALT__SHIFT, 0);
+        wr(adev, i, SDMA0_mmSDMA0_F32_CNTL, temp);
+    }
+
+    let r = sdma_v4_0_rlc_resume(adev);
+    if r != 0 {
+        return r;
+    }
+
+    for i in 0..adev.sdma.num_instances as usize {
+        let Some(ring) = adev.sdma.instance[i].ring else { continue };
+        let r = crate::amdgpu_ring::amdgpu_ring_test_helper(adev, ring);
+        if r != 0 {
+            return r;
+        }
+    }
+    0
+}
+
+/// `sdma_v4_0_hw_init`: an APU, so the SMU powers SDMA up first.
+pub fn sdma_v4_0_hw_init(adev: &mut amdgpu_device) -> i32 {
+    if adev.flags & AMD_IS_APU != 0 {
+        crate::amdgpu_smu::amdgpu_dpm_set_powergating_by_smu(adev, AMD_IP_BLOCK_TYPE_SDMA, false, 0);
+    }
+    sdma_v4_0_init_golden_registers(adev);
+    sdma_v4_0_start(adev)
+}
+
+/// `amdgpu_sdma_get_instance_from_ring`.
+fn amdgpu_sdma_get_instance_from_ring(adev: &amdgpu_device, r: usize) -> Option<usize> {
+    (0..adev.sdma.num_instances as usize)
+        .find(|&i| adev.sdma.instance[i].ring == Some(r) || adev.sdma.instance[i].page == Some(r))
+}
+
+/// `sdma_v4_0_ring_insert_nop`.
+pub fn sdma_v4_0_ring_insert_nop(adev: &mut amdgpu_device, r: usize, count: u32) {
+    let burst_nop = amdgpu_sdma_get_instance_from_ring(adev, r).is_some_and(|i| adev.sdma.instance[i].burst_nop);
+    let nop = adev.rings[r].funcs.nop;
+    for i in 0..count {
+        if burst_nop && i == 0 {
+            crate::amdgpu_ring::amdgpu_ring_write(adev, r, nop | ((count - 1) & SDMA_PKT_NOP_HEADER_count_mask) << SDMA_PKT_NOP_HEADER_count_shift);
+        } else {
+            crate::amdgpu_ring::amdgpu_ring_write(adev, r, nop);
+        }
+    }
+}
+
+/// `sdma_v4_0_ring_set_wptr`.
+pub fn sdma_v4_0_ring_set_wptr(adev: &mut amdgpu_device, r: usize) {
+    let ring = &adev.rings[r];
+    let (wptr, db, me) = (ring.wptr, ring.doorbell_index, ring.me);
+    if ring.use_doorbell {
+        // XXX check if swapping is necessary on BE
+        crate::amdgpu_ring::ring_wptr_cpu_set(adev, r, wptr << 2);
+        crate::amdgpu_ring::amdgpu_mm_wdoorbell64(adev, db, wptr << 2);
+    } else {
+        wr(adev, me, SDMA0_mmSDMA0_GFX_RB_WPTR, (wptr << 2) as u32);
+        wr(adev, me, SDMA0_mmSDMA0_GFX_RB_WPTR_HI, ((wptr << 2) >> 32) as u32);
+    }
+}
+
+/// `sdma_v4_0_page_ring_set_wptr`: Renoir has no page queue.
+pub fn sdma_v4_0_page_ring_set_wptr(_adev: &mut amdgpu_device, _r: usize) {
+    Line::new().s("sdma_v4_0_page_ring_set_wptr: no page queue on SDMA 4.1.2").say();
+}
+
+/// `sdma_v4_0_ring_test_ring`.
+pub fn sdma_v4_0_ring_test_ring(adev: &mut amdgpu_device, r: usize) -> i32 {
+    let index = match crate::amdgpu_ring::amdgpu_device_wb_get(adev) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let gpu_addr = adev.wb.gpu_addr + index as u64 * 4;
+    let Some(wb) = adev.wb.wb else { return -22 };
+    crate::amdgpu_gart::kptr_w32(adev, wb, index as u64 * 4, 0xCAFEDEAD);
+
+    let mut ret = crate::amdgpu_ring::amdgpu_ring_alloc(adev, r, 5);
+    if ret == 0 {
+        let w = |adev: &mut amdgpu_device, v: u32| crate::amdgpu_ring::amdgpu_ring_write(adev, r, v);
+        w(adev, SDMA_PKT_HEADER_OP_WRITE | SDMA_PKT_HEADER_SUB_OP_WRITE_LINEAR);
+        w(adev, gpu_addr as u32);
+        w(adev, (gpu_addr >> 32) as u32);
+        w(adev, (0 & SDMA_PKT_WRITE_UNTILED_DW_3_count_mask) << SDMA_PKT_WRITE_UNTILED_DW_3_count_shift);
+        w(adev, 0xDEADBEEF);
+        crate::amdgpu_ring::amdgpu_ring_commit(adev, r);
+        let mut i = 0;
+        while i < adev.usec_timeout {
+            if crate::amdgpu_gart::kptr_r32(adev, wb, index as u64 * 4) == 0xDEADBEEF {
+                break;
+            }
+            crate::linux::udelay(1);
+            i += 1;
+        }
+        if i >= adev.usec_timeout {
+            ret = -110;
+        }
+    }
+    crate::amdgpu_ring::amdgpu_device_wb_free(adev, index);
+    ret
+}
+
+// ---- fences, IBs and interrupts (stage 4) ----
+
+use crate::amdgpu_ring::amdgpu_ring_write as rw;
+
+/// `sdma_v4_0_ring_emit_ib` without a job (VMID 0).
+pub fn sdma_v4_0_ring_emit_ib(adev: &mut amdgpu_device, r: usize, ib: &crate::amdgpu_ib::amdgpu_ib, _flags: u32) {
+    let vmid = 0u32;
+    // IB packet must end on a 8 DW boundary
+    let pad = (2u32.wrapping_sub(adev.rings[r].wptr as u32)) & 7;
+    sdma_v4_0_ring_insert_nop(adev, r, pad);
+    rw(adev, r, SDMA_PKT_HEADER_OP_INDIRECT
+        | ((vmid & 0xf) & SDMA_PKT_INDIRECT_HEADER_vmid_mask) << SDMA_PKT_INDIRECT_HEADER_vmid_shift);
+    // base must be 32 byte aligned
+    rw(adev, r, ib.gpu_addr as u32 & 0xffffffe0);
+    rw(adev, r, (ib.gpu_addr >> 32) as u32);
+    rw(adev, r, ib.length_dw);
+    rw(adev, r, 0);
+    rw(adev, r, 0);
+}
+
+/// `sdma_v4_0_ring_emit_fence`.
+pub fn sdma_v4_0_ring_emit_fence(adev: &mut amdgpu_device, r: usize, addr: u64, seq: u64, flags: u32) {
+    let write64bit = flags & AMDGPU_FENCE_FLAG_64BIT != 0;
+    // write the fence
+    rw(adev, r, SDMA_PKT_HEADER_OP_FENCE);
+    // zero in first two bits
+    if addr & 0x3 != 0 {
+        Line::new().s("WARNING: sdma fence address not dword aligned").say();
+    }
+    rw(adev, r, addr as u32);
+    rw(adev, r, (addr >> 32) as u32);
+    rw(adev, r, seq as u32);
+    // optionally write high bits as well
+    if write64bit {
+        let addr = addr + 4;
+        rw(adev, r, SDMA_PKT_HEADER_OP_FENCE);
+        rw(adev, r, addr as u32);
+        rw(adev, r, (addr >> 32) as u32);
+        rw(adev, r, (seq >> 32) as u32);
+    }
+    // generate an interrupt
+    rw(adev, r, SDMA_PKT_HEADER_OP_TRAP);
+    rw(adev, r, (0 & SDMA_PKT_TRAP_INT_CONTEXT_int_context_mask) << SDMA_PKT_TRAP_INT_CONTEXT_int_context_shift);
+}
+
+/// `sdma_v4_0_ring_test_ib`.
+pub fn sdma_v4_0_ring_test_ib(adev: &mut amdgpu_device, r: usize, timeout: i64) -> i32 {
+    use crate::amdgpu_ib::{amdgpu_ib, amdgpu_ib_free, amdgpu_ib_get, amdgpu_ib_schedule};
+    let index = match crate::amdgpu_ring::amdgpu_device_wb_get(adev) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let gpu_addr = adev.wb.gpu_addr + index as u64 * 4;
+    let Some(wb) = adev.wb.wb else { return -22 };
+    crate::amdgpu_gart::kptr_w32(adev, wb, index as u64 * 4, 0xCAFEDEAD);
+    let mut ib = amdgpu_ib::new();
+    let mut ret = amdgpu_ib_get(adev, 256, AMDGPU_IB_POOL_DIRECT, &mut ib);
+    if ret == 0 {
+        ib.set(adev, 0, SDMA_PKT_HEADER_OP_WRITE | SDMA_PKT_HEADER_SUB_OP_WRITE_LINEAR);
+        ib.set(adev, 1, gpu_addr as u32);
+        ib.set(adev, 2, (gpu_addr >> 32) as u32);
+        ib.set(adev, 3, (0 & SDMA_PKT_WRITE_UNTILED_DW_3_count_mask) << SDMA_PKT_WRITE_UNTILED_DW_3_count_shift);
+        ib.set(adev, 4, 0xDEADBEEF);
+        ib.set(adev, 5, SDMA_PKT_NOP_HEADER_OP_NOP);
+        ib.set(adev, 6, SDMA_PKT_NOP_HEADER_OP_NOP);
+        ib.set(adev, 7, SDMA_PKT_NOP_HEADER_OP_NOP);
+        ib.length_dw = 8;
+        ret = match amdgpu_ib_schedule(adev, r, &[&ib]) {
+            Err(e) => e,
+            Ok(f) => {
+                let t = crate::amdgpu_fence::dma_fence_wait_timeout(adev, f, timeout);
+                if t == 0 {
+                    -110
+                } else if crate::amdgpu_gart::kptr_r32(adev, wb, index as u64 * 4) == 0xDEADBEEF {
+                    0
+                } else {
+                    -22
+                }
+            }
+        };
+        amdgpu_ib_free(adev, &mut ib, None);
+    }
+    crate::amdgpu_ring::amdgpu_device_wb_free(adev, index);
+    ret
+}
+
+/// `sdma_v4_0_set_trap_irq_state`.
+pub fn sdma_v4_0_set_trap_irq_state(adev: &mut amdgpu_device, type_: u32, state: u32) -> i32 {
+    let mut sdma_cntl = rd(adev, type_, SDMA0_mmSDMA0_CNTL);
+    sdma_cntl = set_field(sdma_cntl, SDMA0_SDMA0_CNTL__TRAP_ENABLE_MASK, SDMA0_SDMA0_CNTL__TRAP_ENABLE__SHIFT,
+                          (state == AMDGPU_IRQ_STATE_ENABLE) as u32);
+    wr(adev, type_, SDMA0_mmSDMA0_CNTL, sdma_cntl);
+    0
+}
+
+/// `sdma_v4_0_set_ecc_irq_state`.
+pub fn sdma_v4_0_set_ecc_irq_state(adev: &mut amdgpu_device, type_: u32, state: u32) -> i32 {
+    let mut cfg = rd(adev, type_, SDMA0_mmSDMA0_EDC_CONFIG);
+    cfg = set_field(cfg, SDMA0_SDMA0_EDC_CONFIG__ECC_INT_ENABLE_MASK, SDMA0_SDMA0_EDC_CONFIG__ECC_INT_ENABLE__SHIFT,
+                    (state == AMDGPU_IRQ_STATE_ENABLE) as u32);
+    wr(adev, type_, SDMA0_mmSDMA0_EDC_CONFIG, cfg);
+    0
+}
+
+/// `sdma_v4_0_irq_id_to_seq`.
+fn sdma_v4_0_irq_id_to_seq(client_id: u32) -> i32 {
+    match client_id {
+        SOC15_IH_CLIENTID_SDMA0 => 0,
+        SOC15_IH_CLIENTID_SDMA1 => 1,
+        SOC15_IH_CLIENTID_SDMA2 => 2,
+        SOC15_IH_CLIENTID_SDMA3 => 3,
+        SOC15_IH_CLIENTID_SDMA4 => 4,
+        SOC15_IH_CLIENTID_SDMA5 => 5,
+        SOC15_IH_CLIENTID_SDMA6 => 6,
+        SOC15_IH_CLIENTID_SDMA7 => 7,
+        _ => -22,
+    }
+}
+
+/// `sdma_v4_0_process_trap_irq`.
+pub fn sdma_v4_0_process_trap_irq(adev: &mut amdgpu_device, entry: &crate::amdgpu_irq::amdgpu_iv_entry) -> i32 {
+    Line::new().s("IH: SDMA trap").dbg();
+    let instance = sdma_v4_0_irq_id_to_seq(entry.client_id);
+    if instance < 0 {
+        return instance;
+    }
+    let inst = &adev.sdma.instance[instance as usize];
+    let v = adev.ip_version(SDMA0_HWIP, 0);
+    let ring = match entry.ring_id {
+        0 => inst.ring,
+        1 if v == 4 << 24 | 2 << 16 => inst.page,
+        // 2: XXX compute
+        3 if v != 4 << 24 | 2 << 16 => inst.page,
+        _ => None,
+    };
+    if let Some(r) = ring {
+        crate::amdgpu_fence::amdgpu_fence_process(adev, r);
+    }
+    0
+}
+
+/// `sdma_v4_0_update_medium_grain_clock_gating`.
+fn sdma_v4_0_update_medium_grain_clock_gating(adev: &amdgpu_device, enable: bool) {
+    let m = SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE7_MASK | SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE6_MASK
+        | SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE5_MASK | SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE4_MASK
+        | SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE3_MASK | SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE2_MASK
+        | SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE1_MASK | SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE0_MASK;
+    let on = enable && adev.cg_flags & AMD_CG_SUPPORT_SDMA_MGCG as u64 != 0;
+    for i in 0..adev.sdma.num_instances {
+        let def = rd(adev, i, SDMA0_mmSDMA0_CLK_CTRL);
+        let data = if on { def & !m } else { def | m };
+        if def != data {
+            wr(adev, i, SDMA0_mmSDMA0_CLK_CTRL, data);
+        }
+    }
+}
+
+/// `sdma_v4_0_update_medium_grain_light_sleep`: instance 0's register, once
+/// per instance, as Linux has it.
+fn sdma_v4_0_update_medium_grain_light_sleep(adev: &amdgpu_device, enable: bool) {
+    let on = enable && adev.cg_flags & AMD_CG_SUPPORT_SDMA_LS as u64 != 0;
+    for _ in 0..adev.sdma.num_instances {
+        // 1-not override: enable sdma mem light sleep; 0-override: disable
+        let def = rd(adev, 0, SDMA0_mmSDMA0_POWER_CNTL);
+        let data = if on {
+            def | SDMA0_SDMA0_POWER_CNTL__MEM_POWER_OVERRIDE_MASK
+        } else {
+            def & !SDMA0_SDMA0_POWER_CNTL__MEM_POWER_OVERRIDE_MASK
+        };
+        if def != data {
+            wr(adev, 0, SDMA0_mmSDMA0_POWER_CNTL, data);
+        }
+    }
+}
+
+/// `sdma_v4_0_set_clockgating_state`.
+pub fn sdma_v4_0_set_clockgating_state(adev: &amdgpu_device, gate: bool) -> i32 {
+    sdma_v4_0_update_medium_grain_clock_gating(adev, gate);
+    sdma_v4_0_update_medium_grain_light_sleep(adev, gate);
+    0
+}
+
+/// `sdma_v4_0_set_powergating_state`.
+pub fn sdma_v4_0_set_powergating_state(adev: &amdgpu_device, gate: bool) -> i32 {
+    let v = adev.ip_version(SDMA0_HWIP, 0);
+    if v == 4 << 24 | 1 << 16 || v == 4 << 24 | 1 << 16 | 1 << 8 || v == 4 << 24 | 1 << 16 | 2 << 8 {
+        sdma_v4_1_update_power_gating(adev, gate);
+    }
+    0
+}
+
+/// `sdma_v4_0_late_init`: `sdma_v4_0_setup_ulv` is for VG10 and VG20 only,
+/// and there is no RAS block to reset.
+pub fn sdma_v4_0_late_init(_adev: &mut amdgpu_device) -> i32 {
+    0
+}
+
+/// `sdma_v4_0_hw_fini`: bare metal, no RAS.
+pub fn sdma_v4_0_hw_fini(adev: &mut amdgpu_device) -> i32 {
+    sdma_v4_0_ctx_switch_enable(adev, false);
+    // sdma_v4_0_enable(adev, false)
+    for i in 0..adev.sdma.num_instances {
+        // sdma_v4_0_gfx_enable(adev, false)
+        let mut rb_cntl = rd(adev, i, SDMA0_mmSDMA0_GFX_RB_CNTL);
+        rb_cntl = set_field(rb_cntl, SDMA0_SDMA0_GFX_RB_CNTL__RB_ENABLE_MASK, SDMA0_SDMA0_GFX_RB_CNTL__RB_ENABLE__SHIFT, 0);
+        wr(adev, i, SDMA0_mmSDMA0_GFX_RB_CNTL, rb_cntl);
+        let mut ib_cntl = rd(adev, i, SDMA0_mmSDMA0_GFX_IB_CNTL);
+        ib_cntl = set_field(ib_cntl, SDMA0_SDMA0_GFX_IB_CNTL__IB_ENABLE_MASK, SDMA0_SDMA0_GFX_IB_CNTL__IB_ENABLE__SHIFT, 0);
+        wr(adev, i, SDMA0_mmSDMA0_GFX_IB_CNTL, ib_cntl);
+    }
+    // sdma_v4_0_rlc_stop is empty; no page queue to stop.
+    for i in 0..adev.sdma.num_instances {
+        let mut f32_cntl = rd(adev, i, SDMA0_mmSDMA0_F32_CNTL);
+        f32_cntl = set_field(f32_cntl, SDMA0_SDMA0_F32_CNTL__HALT_MASK, SDMA0_SDMA0_F32_CNTL__HALT__SHIFT, 1);
+        wr(adev, i, SDMA0_mmSDMA0_F32_CNTL, f32_cntl);
+    }
+    if adev.flags & AMD_IS_APU != 0 {
+        crate::amdgpu_smu::amdgpu_dpm_set_powergating_by_smu(adev, AMD_IP_BLOCK_TYPE_SDMA, true, 0);
+    }
+    0
+}

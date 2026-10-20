@@ -157,3 +157,29 @@ pub fn amdgpu_gmc_pd_addr(adev: &amdgpu_device, h: usize) -> u64 {
     }
     addr | flags
 }
+
+/// `amdgpu_gmc_allocate_vm_inv_eng`: no MES, no UMSCH, no CPER ring, and
+/// without an SDMA page queue no ring shares an engine.
+pub fn amdgpu_gmc_allocate_vm_inv_eng(adev: &mut amdgpu_device) -> i32 {
+    let mut vm_inv_engs = [0u32; AMDGPU_MAX_VMHUBS as usize];
+    // init the vm inv eng for all vmhubs
+    for i in 0..AMDGPU_MAX_VMHUBS as usize {
+        if adev.vmhubs_mask & (1 << i) != 0 {
+            vm_inv_engs[i] = AMDGPU_VMHUB_INV_ENG_BITMAP;
+        }
+    }
+    for r in 0..adev.rings.len() {
+        let vmhub = adev.rings[r].vm_hub as usize;
+        let inv_eng = vm_inv_engs[vmhub].trailing_zeros();
+        if vm_inv_engs[vmhub] == 0 {
+            Line::new().s("no VM inv eng for ring ").s(&adev.rings[r].name.clone()).say();
+            return -22;
+        }
+        adev.rings[r].vm_inv_eng = inv_eng;
+        vm_inv_engs[vmhub] &= !(1 << inv_eng);
+        let ring = &adev.rings[r];
+        Line::new().s("ring ").s(&ring.name).s(" uses VM inv eng ").dec(ring.vm_inv_eng as u64).s(" on hub ")
+            .dec(ring.vm_hub as u64).say();
+    }
+    0
+}

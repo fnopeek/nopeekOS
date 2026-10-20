@@ -463,6 +463,33 @@ fn acquire_psp_cmd_buf() -> Vec<u8> {
     alloc::vec![0u8; SIZEOF_psp_gfx_cmd_resp as usize]
 }
 
+/// `psp_gfx_cmd_name`.
+fn psp_gfx_cmd_name(cmd_id: u32) -> &'static str {
+    match cmd_id {
+        GFX_CMD_ID_LOAD_TA => "LOAD_TA",
+        GFX_CMD_ID_UNLOAD_TA => "UNLOAD_TA",
+        GFX_CMD_ID_INVOKE_CMD => "INVOKE_CMD",
+        GFX_CMD_ID_LOAD_ASD => "LOAD_ASD",
+        GFX_CMD_ID_SETUP_TMR => "SETUP_TMR",
+        GFX_CMD_ID_LOAD_IP_FW => "LOAD_IP_FW",
+        GFX_CMD_ID_DESTROY_TMR => "DESTROY_TMR",
+        GFX_CMD_ID_SAVE_RESTORE => "SAVE_RESTORE_IP_FW",
+        GFX_CMD_ID_SETUP_VMR => "SETUP_VMR",
+        GFX_CMD_ID_DESTROY_VMR => "DESTROY_VMR",
+        GFX_CMD_ID_PROG_REG => "PROG_REG",
+        GFX_CMD_ID_GET_FW_ATTESTATION => "GET_FW_ATTESTATION",
+        GFX_CMD_ID_LOAD_TOC => "ID_LOAD_TOC",
+        GFX_CMD_ID_AUTOLOAD_RLC => "AUTOLOAD_RLC",
+        GFX_CMD_ID_BOOT_CFG => "BOOT_CFG",
+        GFX_CMD_ID_CONFIG_SQ_PERFMON => "CONFIG_SQ_PERFMON",
+        GFX_CMD_ID_FB_FW_RESERV_ADDR => "FB_FW_RESERV_ADDR",
+        GFX_CMD_ID_FB_FW_RESERV_EXT_ADDR => "FB_FW_RESERV_EXT_ADDR",
+        GFX_CMD_ID_SRIOV_SPATIAL_PART => "SPATIAL_PARTITION",
+        GFX_CMD_ID_FB_NPS_MODE => "NPS_MODE_CHANGE",
+        _ => "UNKNOWN CMD",
+    }
+}
+
 /// `psp_cmd_submit_buf`. `ucode` is the index into `adev.firmware.ucode`
 /// a firmware load reports to. The response is copied back into `cmd`.
 fn psp_cmd_submit_buf(adev: &mut amdgpu_device, ucode: Option<usize>, cmd: &mut [u8], fence_mc_addr: u64) -> i32 {
@@ -508,9 +535,10 @@ fn psp_cmd_submit_buf(adev: &mut amdgpu_device, ucode: Option<usize>, cmd: &mut 
     if status != 0 || timeout == 0 {
         if let Some(u) = ucode {
             let id = adev.firmware.ucode[u].ucode_id;
-            Line::new().s("failed to load ucode id ").dec(id as u64).s(" (0x").hex(id).s(")").say();
+            Line::new().s("failed to load ucode id ").dec(id as u64).s(" (0x").hexu(id).s(")").say();
         }
-        Line::new().s("psp gfx command 0x").hex(cmd_id).s(" failed and response status is (0x").hex(status).s(")").say();
+        Line::new().s("psp gfx command ").s(psp_gfx_cmd_name(cmd_id)).s("(0x").hexu(cmd_id)
+            .s(") failed and response status is (0x").hexu(status).s(")").say();
         // Also return failure in case of timeout
         if timeout == 0 {
             return -22;
@@ -1081,4 +1109,65 @@ pub fn psp_hw_init(adev: &mut amdgpu_device) -> i32 {
     }
     adev.firmware.load_type = AMDGPU_FW_LOAD_DIRECT;
     -22
+}
+
+/// `psp_ta_unload`, with `psp_prep_ta_unload_cmd_buf`.
+fn psp_ta_unload(adev: &mut amdgpu_device, t: ta_id) -> i32 {
+    let mut cmd = acquire_psp_cmd_buf();
+    let session_id = ta(adev, t).session_id;
+    put32(&mut cmd, CMDRESP_CMD_ID, GFX_CMD_ID_UNLOAD_TA);
+    put32(&mut cmd, CMDRESP_CMD + UNLOADTA_SESSION_ID, session_id);
+    let fence = adev.psp.buf.fence_buf_mc_addr;
+    let ret = psp_cmd_submit_buf(adev, None, &mut cmd, fence);
+    ta(adev, t).resp_status = get32(&cmd, CMDRESP_RESP + RESP_STATUS);
+    ret
+}
+
+/// `psp_ras_terminate`, `psp_securedisplay_terminate`,
+/// `psp_rap_terminate`, `psp_dtm_terminate`, `psp_hdcp_terminate`: unload
+/// an initialized TA.
+fn psp_ta_terminate(adev: &mut amdgpu_device, t: ta_id) -> i32 {
+    if !ta(adev, t).initialized {
+        return 0;
+    }
+    let ret = psp_ta_unload(adev, t);
+    ta(adev, t).initialized = false;
+    ret
+}
+
+/// `psp_asd_terminate`.
+fn psp_asd_terminate(adev: &mut amdgpu_device) -> i32 {
+    if !adev.psp.asd_context.initialized {
+        return 0;
+    }
+    let ret = psp_ta_unload(adev, ta_id::asd);
+    if ret == 0 {
+        adev.psp.asd_context.initialized = false;
+    }
+    ret
+}
+
+/// `psp_tmr_terminate` (`psp_tmr_unload`), with
+/// `psp_prep_tmr_unload_cmd_buf` on bare metal.
+fn psp_tmr_terminate(adev: &mut amdgpu_device) -> i32 {
+    let mut cmd = acquire_psp_cmd_buf();
+    put32(&mut cmd, CMDRESP_CMD_ID, GFX_CMD_ID_DESTROY_TMR);
+    Line::new().s("free PSP TMR buffer").dbg();
+    let fence = adev.psp.buf.fence_buf_mc_addr;
+    psp_cmd_submit_buf(adev, None, &mut cmd, fence)
+}
+
+/// `psp_hw_fini`: no XGMI hive.
+pub fn psp_hw_fini(adev: &mut amdgpu_device) -> i32 {
+    if adev.psp.ta_fw.is_some() {
+        psp_ta_terminate(adev, ta_id::ras);
+        psp_ta_terminate(adev, ta_id::securedisplay);
+        psp_ta_terminate(adev, ta_id::rap);
+        psp_ta_terminate(adev, ta_id::dtm);
+        psp_ta_terminate(adev, ta_id::hdcp);
+    }
+    psp_asd_terminate(adev);
+    psp_tmr_terminate(adev);
+    psp_v12_0_ring_destroy(adev);
+    0
 }

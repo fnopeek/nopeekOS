@@ -36,6 +36,8 @@ struct amdgpu_device;
 #define drm_dev_exit(idx) ((void)0)
 #define adev_to_drm(adev) 0
 #define mutex_init(m) ((void)0)
+#define mutex_destroy(m) ((void)0)
+#define dev_dbg(d, ...) ((void)0)
 #define atomic_inc_return(a) (++(a)->counter)
 #define atomic_dec(a) (--(a)->counter)
 #define lower_32_bits(n) ((u32)(n))
@@ -57,7 +59,7 @@ struct psp_funcs {
 	bool (*smu_reload_quirk)(struct psp_context *psp);
 	int (*rlc_autoload_start)(struct psp_context *psp);
 };
-struct psp_ras_context { struct ta_context context; struct amdgpu_ras *ras; };
+struct psp_ras_context { struct ta_context context; struct amdgpu_ras *ras; struct mutex mutex; };
 struct psp_context {
 	struct amdgpu_device *adev;
 	struct psp_ring km_ring;
@@ -79,6 +81,7 @@ struct psp_context {
 	struct psp_ras_context ras_context;
 	struct ta_cp_context hdcp_context, dtm_context, rap_context, securedisplay_context;
 	struct mutex mutex;
+	const struct firmware *ta_fw;
 };
 struct amdgpu_device {
 	enum amd_asic_type asic_type;
@@ -217,5 +220,16 @@ int main(void)
 		psp_securedisplay_initialize(psp);
 	}
 	printf("ret %d\n", r);
+
+	/* psp_hw_fini: the TAs Renoir has, ASD, the TMR. psp_ring_destroy
+	 * writes the ring stop to C2PMSG_64, not a ring command. */
+	psp->ta_fw = (const struct firmware *)&a;
+	psp_ras_terminate(psp);
+	psp_securedisplay_terminate(psp);
+	psp_rap_terminate(psp);
+	psp_dtm_terminate(psp);
+	psp_hdcp_terminate(psp);
+	psp_asd_terminate(psp);
+	psp_tmr_terminate(psp);
 	return 0;
 }

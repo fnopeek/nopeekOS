@@ -301,3 +301,22 @@ pub fn gfxhub_v1_0_set_fault_enable_default(adev: &amdgpu_device, value: bool) {
     }
     wr(adev, GC_mmVM_L2_PROTECTION_FAULT_CNTL_BASE_IDX, GC_mmVM_L2_PROTECTION_FAULT_CNTL, 0, tmp);
 }
+
+/// `gfxhub_v1_0_gart_disable`: bare metal.
+pub fn gfxhub_v1_0_gart_disable(adev: &amdgpu_device) {
+    let hub = adev.vmhub[AMDGPU_GFXHUB_0 as usize];
+    // Disable all tables
+    for i in 0..16 {
+        wr(adev, GC_mmVM_CONTEXT0_CNTL_BASE_IDX, GC_mmVM_CONTEXT0_CNTL, i * hub.ctx_distance, 0);
+    }
+    // Setup TLB control
+    let mut tmp = rd(adev, GC_mmMC_VM_MX_L1_TLB_CNTL_BASE_IDX, GC_mmMC_VM_MX_L1_TLB_CNTL, 0);
+    tmp = set(tmp, GC_MC_VM_MX_L1_TLB_CNTL__ENABLE_L1_TLB_MASK, GC_MC_VM_MX_L1_TLB_CNTL__ENABLE_L1_TLB__SHIFT, 0);
+    tmp = set(tmp, GC_MC_VM_MX_L1_TLB_CNTL__ENABLE_ADVANCED_DRIVER_MODEL_MASK,
+              GC_MC_VM_MX_L1_TLB_CNTL__ENABLE_ADVANCED_DRIVER_MODEL__SHIFT, 0);
+    wr(adev, GC_mmMC_VM_MX_L1_TLB_CNTL_BASE_IDX, GC_mmMC_VM_MX_L1_TLB_CNTL, 0, tmp);
+    // Setup L2 cache: WREG32_FIELD15(GC, 0, VM_L2_CNTL, ENABLE_L2_CACHE, 0)
+    let v = rd(adev, GC_mmVM_L2_CNTL_BASE_IDX, GC_mmVM_L2_CNTL, 0);
+    wr(adev, GC_mmVM_L2_CNTL_BASE_IDX, GC_mmVM_L2_CNTL, 0, v & !GC_VM_L2_CNTL__ENABLE_L2_CACHE_MASK);
+    wr(adev, GC_mmVM_L2_CNTL3_BASE_IDX, GC_mmVM_L2_CNTL3, 0, 0);
+}

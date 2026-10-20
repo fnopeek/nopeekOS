@@ -168,7 +168,8 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
         psp_copy_fw psp_prep_ta_load_cmd_buf psp_ta_load psp_asd_initialize psp_ta_init_shared_buf \
         psp_prep_ta_invoke_cmd_buf psp_ta_invoke psp_prep_ta_unload_cmd_buf psp_ta_unload psp_ta_free_shared_buf \
         psp_hdcp_initialize psp_dtm_initialize psp_securedisplay_invoke psp_securedisplay_terminate \
-        psp_securedisplay_initialize
+        psp_securedisplay_initialize psp_ras_terminate psp_rap_terminate psp_dtm_terminate psp_hdcp_terminate \
+        psp_asd_terminate psp_prep_tmr_unload_cmd_buf psp_tmr_unload psp_tmr_terminate
 } > "$B/psp_funcs.c"
 
 CF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"

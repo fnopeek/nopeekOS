@@ -46,6 +46,7 @@ pub struct amdgpu_ih_ring {
     pub doorbell_index: u32,
     pub ih_regs: amdgpu_ih_regs,
     pub enabled: bool,
+    pub processed_timestamp: u64,
 }
 
 /// `order_base_2`.
@@ -261,6 +262,103 @@ pub fn vega10_ih_hw_init(adev: &mut amdgpu_device) -> i32 {
     vega10_ih_toggle_interrupts(adev, true);
     if adev.irq.ih_soft.ring_size != 0 {
         adev.irq.ih_soft.enabled = true;
+    }
+    0
+}
+
+/// `vega10_ih_get_wptr`: ring 0 and the software ring read the
+/// writeback; only ring 0 has registers to clear an overflow with.
+pub fn vega10_ih_get_wptr(adev: &mut amdgpu_device, soft: bool) -> u32 {
+    let ih = if soft { adev.irq.ih_soft } else { adev.irq.ih };
+    let Some(ring) = ih.ring else { return 0 };
+    // Only ring0 supports writeback. On other rings fall back to
+    // register-based code with overflow checking below. ih_soft ring
+    // doesn't have any backing hardware registers, update wptr and return.
+    let mut wptr = ring.r32(ih.wptr_cpu);
+    if (wptr & OSS_IH_RB_WPTR__RB_OVERFLOW_MASK) >> OSS_IH_RB_WPTR__RB_OVERFLOW__SHIFT == 0 {
+        return wptr & ih.ptr_mask;
+    }
+    let ih_regs = ih.ih_regs;
+    // Double check that the overflow wasn't already cleared.
+    wptr = rreg(adev, ih_regs.ih_rb_wptr);
+    if (wptr & OSS_IH_RB_WPTR__RB_OVERFLOW_MASK) >> OSS_IH_RB_WPTR__RB_OVERFLOW__SHIFT == 0 {
+        return wptr & ih.ptr_mask;
+    }
+    wptr = field(wptr, OSS_IH_RB_WPTR__RB_OVERFLOW_MASK, OSS_IH_RB_WPTR__RB_OVERFLOW__SHIFT, 0);
+    // When a ring buffer overflow happen start parsing interrupt from the
+    // last not overwritten vector (wptr + 32). Hopefully this should allow
+    // us to catchup.
+    let tmp = (wptr + 32) & ih.ptr_mask;
+    crate::linux::Line::new().s(if soft { "ih_soft" } else { "ih" }).s(" ring buffer overflow (0x").hexw(wptr, 8)
+        .s(", 0x").hexw(ih.rptr, 8).s(", 0x").hexw(tmp, 8).s(")").say();
+    if soft {
+        adev.irq.ih_soft.rptr = tmp;
+    } else {
+        adev.irq.ih.rptr = tmp;
+    }
+    let mut tmp = rreg(adev, ih_regs.ih_rb_cntl);
+    tmp = field(tmp, OSS_IH_RB_CNTL__WPTR_OVERFLOW_CLEAR_MASK, OSS_IH_RB_CNTL__WPTR_OVERFLOW_CLEAR__SHIFT, 1);
+    adev.wreg32(ih_regs.ih_rb_cntl, tmp);
+    // Unset the CLEAR_OVERFLOW bit immediately so new overflows can be
+    // detected.
+    tmp = field(tmp, OSS_IH_RB_CNTL__WPTR_OVERFLOW_CLEAR_MASK, OSS_IH_RB_CNTL__WPTR_OVERFLOW_CLEAR__SHIFT, 0);
+    adev.wreg32(ih_regs.ih_rb_cntl, tmp);
+    wptr & ih.ptr_mask
+}
+
+/// `vega10_ih_set_rptr`: bare metal; the software ring has no registers.
+pub fn vega10_ih_set_rptr(adev: &mut amdgpu_device, soft: bool) {
+    if soft {
+        return;
+    }
+    let ih = adev.irq.ih;
+    if ih.use_doorbell {
+        if let Some(ring) = ih.ring {
+            ring.w32(ih.rptr_cpu, ih.rptr);
+        }
+        // WDOORBELL32
+        if ih.doorbell_index < adev.doorbell.num_kernel_doorbells {
+            if let Some(m) = adev.doorbell_mmio {
+                m.w32(ih.doorbell_index * 4, ih.rptr);
+            }
+        }
+    } else {
+        adev.wreg32(ih.ih_regs.ih_rb_rptr, ih.rptr);
+    }
+}
+
+/// `vega10_ih_hw_fini`: `vega10_ih_irq_disable`.
+pub fn vega10_ih_hw_fini(adev: &mut amdgpu_device) -> i32 {
+    vega10_ih_toggle_interrupts(adev, false);
+    // Wait and acknowledge irq
+    crate::linux::mdelay(1);
+    0
+}
+
+/// `vega10_ih_update_clockgating_state` (`vega10_ih_set_clockgating_state`).
+pub fn vega10_ih_set_clockgating_state(adev: &mut amdgpu_device, gate: bool) -> i32 {
+    if adev.cg_flags & AMD_CG_SUPPORT_IH_CG as u64 != 0 {
+        let reg = oss(adev, OSS_mmIH_CLK_CTRL_BASE_IDX, OSS_mmIH_CLK_CTRL);
+        let def = rreg(adev, reg);
+        let v = (!gate) as u32;
+        let mut data = def;
+        // Vega10/12 and RAVEN don't have IH_BUFFER_MEM_CLK_SOFT_OVERRIDE
+        // field.
+        if adev.asic_type == CHIP_RENOIR {
+            data = field(data, OSS_IH_CLK_CTRL__IH_BUFFER_MEM_CLK_SOFT_OVERRIDE_MASK,
+                         OSS_IH_CLK_CTRL__IH_BUFFER_MEM_CLK_SOFT_OVERRIDE__SHIFT, v);
+        }
+        data = field(data, OSS_IH_CLK_CTRL__DBUS_MUX_CLK_SOFT_OVERRIDE_MASK,
+                     OSS_IH_CLK_CTRL__DBUS_MUX_CLK_SOFT_OVERRIDE__SHIFT, v);
+        data = field(data, OSS_IH_CLK_CTRL__OSSSYS_SHARE_CLK_SOFT_OVERRIDE_MASK,
+                     OSS_IH_CLK_CTRL__OSSSYS_SHARE_CLK_SOFT_OVERRIDE__SHIFT, v);
+        data = field(data, OSS_IH_CLK_CTRL__LIMIT_SMN_CLK_SOFT_OVERRIDE_MASK,
+                     OSS_IH_CLK_CTRL__LIMIT_SMN_CLK_SOFT_OVERRIDE__SHIFT, v);
+        data = field(data, OSS_IH_CLK_CTRL__DYN_CLK_SOFT_OVERRIDE_MASK, OSS_IH_CLK_CTRL__DYN_CLK_SOFT_OVERRIDE__SHIFT, v);
+        data = field(data, OSS_IH_CLK_CTRL__REG_CLK_SOFT_OVERRIDE_MASK, OSS_IH_CLK_CTRL__REG_CLK_SOFT_OVERRIDE__SHIFT, v);
+        if def != data {
+            adev.wreg32(reg, data);
+        }
     }
     0
 }

@@ -17,6 +17,11 @@ pub fn udelay(us: u64) {
     while now_us() - t0 < us {}
 }
 
+/// `mdelay`: spins on the clock.
+pub fn mdelay(ms: u64) {
+    udelay(ms * 1000);
+}
+
 /// `wait_for_atomic(COND, ms)` / `_wait_for_atomic(COND, us, 0)`: busy-polls
 /// `cond` until it holds or `timeout_us` passes. `Ok` when it held. The
 /// condition is checked once more after the deadline, as Linux does.
@@ -136,6 +141,12 @@ impl Line {
             b[n - 1 - i] = HEX[((v >> (i * 4)) & 0xf) as usize];
         }
         self.s(core::str::from_utf8(&b[..n]).unwrap_or("?"))
+    }
+
+    /// `%X`.
+    pub fn hexu(&mut self, v: u32) -> &mut Self {
+        let digits = ((32 - v.leading_zeros() + 3) / 4).max(1) as usize;
+        self.hexw(v, digits)
     }
 
     /// `0x%016llX`.

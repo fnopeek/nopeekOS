@@ -1,6 +1,7 @@
 //! amdgpu/gmc_v9_0.c (Linux 6.18.55): the GMC block's early_init.
 
 use crate::amdgpu_device::amdgpu_device;
+use crate::linux::Line;
 use crate::regs::*;
 
 /// `struct amdgpu_irq_src`, as early_init sets it: the type count and
@@ -407,10 +408,7 @@ pub fn gmc_v9_0_hw_init(adev: &mut amdgpu_device) -> i32 {
         dce_field15(adev, DCE_mmVGA_RENDER_CONTROL_BASE_IDX, DCE_mmVGA_RENDER_CONTROL,
                     DCE_VGA_RENDER_CONTROL__VGA_VSTATUS_CNTL_MASK, DCE_VGA_RENDER_CONTROL__VGA_VSTATUS_CNTL__SHIFT, 0);
     }
-    if crate::mmhub_v1_0::mmhub_v1_0_update_power_gating(adev, true) {
-        // amdgpu_dpm_set_powergating_by_smu before the SMU's hw_init.
-        crate::linux::Line::new().s("MMHUB power gating through the SMU: not ported").say();
-    }
+    crate::mmhub_v1_0::mmhub_v1_0_update_power_gating(adev, true);
     crate::hdp_v4_0::hdp_v4_0_init_registers(adev);
     // After HDP is initialized, flush HDP: an APU has none to flush.
     let value = crate::tables::amdgpu_vm_fault_stop[0] != AMDGPU_VM_FAULT_STOP_ALWAYS as i32;
@@ -429,5 +427,259 @@ pub fn gmc_v9_0_hw_init(adev: &mut amdgpu_device) -> i32 {
         crate::linux::Line::new().s("amdgpu_gmc_vram_checking: emulation only, not ported").say();
         return -22;
     }
+    0
+}
+
+// ---- interrupts (stage 4) ----
+
+/// `struct amdgpu_gmc_fault`: `timestamp` and `timestamp_expiry` are 48-bit
+/// fields, `next` is AMDGPU_GMC_FAULT_RING_ORDER bits.
+#[derive(Default, Clone, Copy)]
+pub struct amdgpu_gmc_fault {
+    pub timestamp: u64,
+    pub next: u64,
+    pub key: u64,
+    pub timestamp_expiry: u64,
+}
+
+const TS48: u64 = (1 << 48) - 1;
+const RING_MASK: u64 = (1 << AMDGPU_GMC_FAULT_RING_ORDER) - 1;
+
+/// `amdgpu_ih_ts_after(t1, t2)`.
+fn ts_after(t1: u64, t2: u64) -> bool {
+    ((t2 << 16) as i64).wrapping_sub((t1 << 16) as i64) > 0
+}
+
+/// `amdgpu_gmc_filter_faults`.
+pub fn amdgpu_gmc_filter_faults(adev: &mut amdgpu_device, processed_timestamp: u64, addr: u64, pasid: u16,
+                                timestamp: u64) -> bool {
+    let gmc = &mut adev.gmc;
+    if gmc.fault_ring.is_empty() {
+        gmc.fault_ring = alloc::vec![amdgpu_gmc_fault::default(); AMDGPU_GMC_FAULT_RING_SIZE as usize];
+        gmc.fault_hash = alloc::vec![0; AMDGPU_GMC_FAULT_HASH_SIZE as usize];
+    }
+    // amdgpu_gmc_fault_key
+    let key = addr << 4 | pasid as u64;
+
+    // Stale retry fault if timestamp goes backward
+    if ts_after(timestamp, processed_timestamp) {
+        return true;
+    }
+
+    // If we don't have space left in the ring buffer return immediately
+    let stamp = timestamp.max(AMDGPU_GMC_FAULT_TIMEOUT as u64 + 1) - AMDGPU_GMC_FAULT_TIMEOUT as u64;
+    if gmc.fault_ring[gmc.last_fault as usize].timestamp >= stamp {
+        return true;
+    }
+
+    // Try to find the fault in the hash: hash_64
+    let hash = (key.wrapping_mul(GOLDEN_RATIO_64) >> (64 - AMDGPU_GMC_FAULT_HASH_ORDER)) as usize;
+    let mut fault = gmc.fault_hash[hash] as usize;
+    while gmc.fault_ring[fault].timestamp >= stamp {
+        let f = gmc.fault_ring[fault];
+        if f.key == key {
+            // if we get a fault which is already present in the fault_ring
+            // and the timestamp of the fault is after the expired
+            // timestamp, then this is a new fault that needs to be added
+            // into the fault ring.
+            if f.timestamp_expiry != 0 && ts_after(f.timestamp_expiry, timestamp) {
+                break;
+            } else {
+                return true;
+            }
+        }
+        let tmp = f.timestamp;
+        fault = f.next as usize;
+        // Check if the entry was reused
+        if gmc.fault_ring[fault].timestamp >= tmp {
+            break;
+        }
+    }
+
+    // Add the fault to the ring
+    let last = gmc.last_fault as usize;
+    gmc.fault_ring[last].key = key;
+    gmc.fault_ring[last].timestamp = timestamp & TS48;
+    // And update the hash
+    gmc.fault_ring[last].next = gmc.fault_hash[hash] & RING_MASK;
+    gmc.fault_hash[hash] = gmc.last_fault;
+    gmc.last_fault = (gmc.last_fault + 1) & RING_MASK;
+    false
+}
+
+/// `gmc_v9_0_vm_fault_interrupt_state`.
+pub fn gmc_v9_0_vm_fault_interrupt_state(adev: &mut amdgpu_device, _type: u32, state: u32) -> i32 {
+    let bits = GMC_VM_CONTEXT1_CNTL__RANGE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK
+        | GMC_VM_CONTEXT1_CNTL__DUMMY_PAGE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK
+        | GMC_VM_CONTEXT1_CNTL__PDE0_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK
+        | GMC_VM_CONTEXT1_CNTL__VALID_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK
+        | GMC_VM_CONTEXT1_CNTL__READ_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK
+        | GMC_VM_CONTEXT1_CNTL__WRITE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK
+        | GMC_VM_CONTEXT1_CNTL__EXECUTE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK;
+    if state != AMDGPU_IRQ_STATE_DISABLE && state != AMDGPU_IRQ_STATE_ENABLE {
+        return 0;
+    }
+    for j in 0..AMDGPU_MAX_VMHUBS {
+        if adev.vmhubs_mask & (1 << j) == 0 {
+            continue;
+        }
+        let hub = adev.vmhub[j as usize];
+        for i in 0..16 {
+            let reg = hub.vm_context0_cntl + i;
+            // This works because this interrupt is only enabled at
+            // init/resume and disabled in fini/suspend, so the overall
+            // state doesn't change over the course of suspend/resume.
+            if adev.in_s0ix && j == AMDGPU_GFXHUB_0 {
+                continue;
+            }
+            // RREG32_SOC15_IP(MMHUB, reg) / RREG32_XCC(reg, j): the plain
+            // register on bare metal.
+            let mut tmp = adev.rreg32(reg).unwrap_or(0);
+            if state == AMDGPU_IRQ_STATE_DISABLE {
+                tmp &= !bits;
+            } else {
+                tmp |= bits;
+            }
+            adev.wreg32(reg, tmp);
+        }
+    }
+    0
+}
+
+/// `gmc_v9_0_ecc_interrupt_state`: Renoir is newer than Vega20, the PSP
+/// bootloader programs it.
+pub fn gmc_v9_0_ecc_interrupt_state(adev: &mut amdgpu_device, _type: u32, _state: u32) -> i32 {
+    if adev.asic_type >= CHIP_VEGA20 {
+        return 0;
+    }
+    Line::new().s("gmc_v9_0_ecc_interrupt_state: pre-Vega20 path is not ported").say();
+    0
+}
+
+/// `REG_GET_FIELD`.
+fn get_field(v: u32, mask: u32, shift: u32) -> u32 {
+    (v & mask) >> shift
+}
+
+/// `gmc_v9_0_process_interrupt`: no KFD, no PASID-bound VM, so a retry
+/// fault that `amdgpu_vm_handle_fault` would fill is printed instead, as
+/// Linux does when it finds no VM.
+pub fn gmc_v9_0_process_interrupt(adev: &mut amdgpu_device, entry: &crate::amdgpu_irq::amdgpu_iv_entry,
+                                  ih_soft: bool) -> i32 {
+    let retry_fault = entry.src_data[1] & 0x80 != 0;
+    let node_id = entry.node_id;
+    let mut addr = (entry.src_data[0] as u64) << 12;
+    addr |= ((entry.src_data[1] as u64) & 0xf) << 44;
+
+    let (hub_name, vmhub) = if entry.client_id == SOC15_IH_CLIENTID_VMC {
+        ("mmhub0", AMDGPU_MMHUB0_0_ + node_id / 4)
+    } else if entry.client_id == SOC15_IH_CLIENTID_VMC1 {
+        ("mmhub1", AMDGPU_MMHUB1_0_)
+    } else {
+        // gfx_v9_0 has no ih_node_to_logical_xcc
+        ("gfxhub0", 0)
+    };
+    let hub = adev.vmhub[vmhub as usize];
+
+    if retry_fault {
+        // retry_cam_enabled is off on GC 9.3.0.
+        // Process it onyl if it's the first fault for this address
+        let processed = if ih_soft { adev.irq.ih_soft.processed_timestamp } else { adev.irq.ih.processed_timestamp };
+        if !ih_soft && amdgpu_gmc_filter_faults(adev, processed, addr, entry.pasid as u16, entry.timestamp) {
+            return 1;
+        }
+        // Delegate it to a different ring if the hardware hasn't already
+        // done it.
+        if !ih_soft {
+            crate::amdgpu_irq::amdgpu_irq_delegate(adev, entry, 8);
+            return 1;
+        }
+        // amdgpu_vm_handle_fault: no VM is bound to any PASID here.
+    }
+
+    Line::new().s("[").s(hub_name).s("] ").s(if retry_fault { "retry" } else { "no-retry" })
+        .s(" page fault (src_id:").dec(entry.src_id as u64).s(" ring:").dec(entry.ring_id as u64).s(" vmid:")
+        .dec(entry.vmid as u64).s(" pasid:").dec(entry.pasid as u64).s(")").say();
+    let client = crate::tables::soc15_ih_clientid_name.get(entry.client_id as usize).copied().unwrap_or(b"");
+    Line::new().s("  in page starting at address ").hex64(addr).s(" from IH client 0x").hexu(entry.client_id)
+        .s(" (").bytes(client).s(")").say();
+
+    // Issue a dummy read to wait for the status register to be updated to
+    // avoid reading an incorrect value due to the new fast GRBM interface.
+    if entry.vmid_src == AMDGPU_GFXHUB_0 && adev.ip_version(GC_HWIP, 0) < 9 << 24 | 4 << 16 | 2 << 8 {
+        adev.rreg32(hub.vm_l2_pro_fault_status);
+    }
+    let status = adev.rreg32(hub.vm_l2_pro_fault_status).unwrap_or(0);
+    let cid = get_field(status, GMC_VM_L2_PROTECTION_FAULT_STATUS__CID_MASK, GMC_VM_L2_PROTECTION_FAULT_STATUS__CID__SHIFT);
+    let rw = get_field(status, GMC_VM_L2_PROTECTION_FAULT_STATUS__RW_MASK, GMC_VM_L2_PROTECTION_FAULT_STATUS__RW__SHIFT);
+
+    // Only print L2 fault status if the status register could be read and
+    // contains useful information
+    if status == 0 {
+        return 0;
+    }
+    // WREG32_P(hub->vm_l2_pro_fault_cntl, 1, ~1)
+    let c = adev.rreg32(hub.vm_l2_pro_fault_cntl).unwrap_or(0);
+    adev.wreg32(hub.vm_l2_pro_fault_cntl, (c & !1) | 1);
+
+    Line::new().s("VM_L2_PROTECTION_FAULT_STATUS:0x").hexw(status, 8).say();
+    if entry.vmid_src == AMDGPU_GFXHUB_0 {
+        let name = crate::tables::gfxhub_client_ids.get(cid as usize).copied().unwrap_or(b"unknown");
+        Line::new().s("\t Faulty UTCL2 client ID: ").bytes(name).s(" (0x").hexu(cid).s(")").say();
+    } else {
+        // MMHUB 1.5.0: mmhub_client_ids_renoir, [cid][rw]
+        let v = adev.ip_version(MMHUB_HWIP, 0);
+        let name = if v == 1 << 24 | 5 << 16 || v == 2 << 24 | 4 << 16 {
+            crate::tables::mmhub_client_ids_renoir.get((cid * 2 + rw) as usize).copied().filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        Line::new().s("\t Faulty UTCL2 client ID: ").bytes(name.unwrap_or(b"unknown")).s(" (0x").hexu(cid).s(")").say();
+    }
+    for (what, mask, shift) in [
+        ("\t MORE_FAULTS: 0x", GMC_VM_L2_PROTECTION_FAULT_STATUS__MORE_FAULTS_MASK,
+         GMC_VM_L2_PROTECTION_FAULT_STATUS__MORE_FAULTS__SHIFT),
+        ("\t WALKER_ERROR: 0x", GMC_VM_L2_PROTECTION_FAULT_STATUS__WALKER_ERROR_MASK,
+         GMC_VM_L2_PROTECTION_FAULT_STATUS__WALKER_ERROR__SHIFT),
+        ("\t PERMISSION_FAULTS: 0x", GMC_VM_L2_PROTECTION_FAULT_STATUS__PERMISSION_FAULTS_MASK,
+         GMC_VM_L2_PROTECTION_FAULT_STATUS__PERMISSION_FAULTS__SHIFT),
+        ("\t MAPPING_ERROR: 0x", GMC_VM_L2_PROTECTION_FAULT_STATUS__MAPPING_ERROR_MASK,
+         GMC_VM_L2_PROTECTION_FAULT_STATUS__MAPPING_ERROR__SHIFT),
+    ] {
+        Line::new().s(what).hexu(get_field(status, mask, shift)).say();
+    }
+    Line::new().s("\t RW: 0x").hexu(rw).say();
+    0
+}
+
+/// `gmc_v9_0_set_clockgating_state`.
+pub fn gmc_v9_0_set_clockgating_state(adev: &amdgpu_device, gate: bool) -> i32 {
+    crate::mmhub_v1_0::mmhub_v1_0_set_clockgating(adev, gate);
+    crate::athub_v1_0::athub_v1_0_set_clockgating(adev, gate);
+    0
+}
+
+/// `gmc_v9_0_late_init`: UMC 7.6.0, no RAS.
+pub fn gmc_v9_0_late_init(adev: &mut amdgpu_device) -> i32 {
+    let r = crate::amdgpu_gmc::amdgpu_gmc_allocate_vm_inv_eng(adev);
+    if r != 0 {
+        return r;
+    }
+    // amdgpu_ras_reset_error_count for MMHUB and HDP: no RAS block object,
+    // -EOPNOTSUPP; amdgpu_gmc_ras_late_init returns 0.
+    crate::amdgpu_irq::amdgpu_irq_get(adev, "gmc.vm_fault", 0)
+}
+
+/// `gmc_v9_0_hw_fini`: bare metal, default init level, no UMC RAS.
+pub fn gmc_v9_0_hw_fini(adev: &mut amdgpu_device) -> i32 {
+    // gmc_v9_0_gart_disable
+    if !adev.in_s0ix {
+        crate::gfxhub_v1_0::gfxhub_v1_0_gart_disable(adev);
+    }
+    crate::mmhub_v1_0::mmhub_v1_0_gart_disable(adev);
+    // Pair the operations did in gmc_v9_0_hw_init and thus maintain a
+    // correct cached state for GMC.
+    crate::mmhub_v1_0::mmhub_v1_0_update_power_gating(adev, false);
+    crate::amdgpu_irq::amdgpu_irq_put(adev, "gmc.vm_fault", 0);
     0
 }

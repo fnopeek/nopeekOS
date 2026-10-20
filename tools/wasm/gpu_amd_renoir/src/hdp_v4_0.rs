@@ -28,3 +28,30 @@ pub fn hdp_v4_0_init_registers(adev: &amdgpu_device) {
     wreg32_soc15(adev, HDP_HWIP, 0, HDP_mmHDP_NONSURFACE_BASE_HI_BASE_IDX, HDP_mmHDP_NONSURFACE_BASE_HI,
                  (adev.gmc.vram_start >> 40) as u32);
 }
+
+/// `hdp_v4_0_update_clock_gating`: HDP 4.1.2 takes the MEM_POWER_CTRL
+/// branch.
+pub fn hdp_v4_0_update_clock_gating(adev: &amdgpu_device, enable: bool) {
+    let v = adev.ip_version(HDP_HWIP, 0);
+    let on = enable && adev.cg_flags & AMD_CG_SUPPORT_HDP_LS as u64 != 0;
+    if v == 4 << 24 || v == 4 << 24 | 1 << 8 || v == 4 << 24 | 1 << 16 | 1 << 8 || v == 4 << 24 | 1 << 16 {
+        let def = rreg32_soc15(adev, HDP_HWIP, 0, HDP_mmHDP_MEM_POWER_LS_BASE_IDX, HDP_mmHDP_MEM_POWER_LS).unwrap_or(0);
+        let data = if on {
+            def | HDP_HDP_MEM_POWER_LS__LS_ENABLE_MASK
+        } else {
+            def & !HDP_HDP_MEM_POWER_LS__LS_ENABLE_MASK
+        };
+        if def != data {
+            wreg32_soc15(adev, HDP_HWIP, 0, HDP_mmHDP_MEM_POWER_LS_BASE_IDX, HDP_mmHDP_MEM_POWER_LS, data);
+        }
+    } else {
+        let def =
+            rreg32_soc15(adev, HDP_HWIP, 0, HDP_mmHDP_MEM_POWER_CTRL_BASE_IDX, HDP_mmHDP_MEM_POWER_CTRL).unwrap_or(0);
+        let m = HDP_HDP_MEM_POWER_CTRL__IPH_MEM_POWER_CTRL_EN_MASK | HDP_HDP_MEM_POWER_CTRL__IPH_MEM_POWER_LS_EN_MASK
+            | HDP_HDP_MEM_POWER_CTRL__RC_MEM_POWER_CTRL_EN_MASK | HDP_HDP_MEM_POWER_CTRL__RC_MEM_POWER_LS_EN_MASK;
+        let data = if on { def | m } else { def & !m };
+        if def != data {
+            wreg32_soc15(adev, HDP_HWIP, 0, HDP_mmHDP_MEM_POWER_CTRL_BASE_IDX, HDP_mmHDP_MEM_POWER_CTRL, data);
+        }
+    }
+}

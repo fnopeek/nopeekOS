@@ -16,6 +16,7 @@
 extern crate alloc;
 
 mod amdgpu_atombios;
+mod athub_v1_0;
 mod amdgpu_atomfirmware;
 mod amdgpu_bios;
 mod amdgpu_device;
@@ -36,6 +37,8 @@ mod amdgpu_irq;
 mod amdgpu_gmc;
 mod amdgpu_discovery;
 mod amdgpu_dm;
+mod amdgpu_fence;
+mod amdgpu_ib;
 mod amdgpu_psp;
 mod amdgpu_ras;
 mod amdgpu_smu;
@@ -93,7 +96,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 2: amdgpu_device_ip_init through COMMON").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 4: hw_init of SMU, GFX and SDMA, ring and IB tests").say();
 
     match npk_sys::pci_bind(AMD_VENDOR as i32, LUCIENNE as i32) {
         0 => {}

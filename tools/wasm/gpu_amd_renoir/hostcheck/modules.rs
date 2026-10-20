@@ -81,3 +81,9 @@ mod amdgpu_gart;
 mod hdp_v4_0;
 #[path = "../src/amdgpu_ring.rs"]
 mod amdgpu_ring;
+#[path = "../src/amdgpu_fence.rs"]
+mod amdgpu_fence;
+#[path = "../src/amdgpu_ib.rs"]
+mod amdgpu_ib;
+#[path = "../src/athub_v1_0.rs"]
+mod athub_v1_0;

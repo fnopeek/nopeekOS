@@ -129,14 +129,27 @@ impl Mmio {
         (pages > 0).then(|| Mmio(window(phys, pages as usize * 4096)))
     }
 
-    /// BAR `bar` of the card: a window of zeroes.
-    pub fn map_bar(_bar: i32, pages: i32) -> Option<Mmio> {
-        (pages > 0).then(|| Mmio(window(0, pages as usize * 4096)))
+    /// BAR `bar` of the card: a window of zeroes. BAR2's is the doorbell
+    /// page the fake GPU listens on.
+    pub fn map_bar(bar: i32, pages: i32) -> Option<Mmio> {
+        if pages <= 0 {
+            return None;
+        }
+        let h = window(0, pages as usize * 4096);
+        if bar == 2 {
+            DOORBELL.with(|d| d.set(h));
+        }
+        Some(Mmio(h))
     }
 
     pub fn writeq(self, off: u32, v: u64) {
         self.w32(off, v as u32);
         self.w32(off + 4, (v >> 32) as u32);
+        if self.0 != 0 && DOORBELL.with(|d| d.get()) == self.0 {
+            if let Some(f) = HOOK.with(|h| h.get()) {
+                f(off / 4, v);
+            }
+        }
     }
 
     pub fn r32(self, off: u32) -> u32 {
@@ -161,6 +174,12 @@ impl Mmio {
                 }
                 return c.regs.get(&reg).copied().unwrap_or_else(|| rule(reg));
             }
+            if let Some((index, data)) = PCIE.with(|p| p.get()) {
+                if reg == data {
+                    let a = c.regs.get(&index).copied().unwrap_or(0);
+                    return INDIRECT.with(|i| i.borrow().get(&a).copied().unwrap_or(0));
+                }
+            }
             c.regs.get(&reg).copied().unwrap_or(0)
         })
     }
@@ -179,6 +198,13 @@ impl Mmio {
                 if let Some((rule, (index, data))) = UNSET.with(|u| *u.borrow()) {
                     if reg == data {
                         let a = c.regs.get(&index).copied().unwrap_or_else(|| rule(index));
+                        INDIRECT.with(|i| i.borrow_mut().insert(a, v));
+                        return;
+                    }
+                }
+                if let Some((index, data)) = PCIE.with(|p| p.get()) {
+                    if reg == data {
+                        let a = c.regs.get(&index).copied().unwrap_or(0);
                         INDIRECT.with(|i| i.borrow_mut().insert(a, v));
                         return;
                     }
@@ -349,6 +375,83 @@ pub fn dma_set_mask(bits: i32) -> i32 {
 /// out its first device vector.
 pub fn irq_register(_entry: i32) -> i32 {
     48
+}
+
+/// `npk_irq_arm`: the fired count, which `irq_wait` compares against.
+pub fn irq_arm(_vector: i32) -> i64 {
+    IRQ_FIRED.with(|f| f.get())
+}
+
+/// `npk_irq_wait`: 1 when the fake card raised an interrupt since `since`;
+/// otherwise the wait passes (in an instant: the clock is the host's).
+pub fn irq_wait(_vector: i32, since: i64, _timeout_ms: i32) -> i32 {
+    if IRQ_FIRED.with(|f| f.get()) != since { 1 } else { 0 }
+}
+
+thread_local! {
+    static IRQ_FIRED: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+    static DOORBELL: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static HOOK: std::cell::Cell<Option<fn(u32, u64)>> = const { std::cell::Cell::new(None) };
+    static PCIE: std::cell::Cell<Option<(u32, u32)>> = const { std::cell::Cell::new(None) };
+}
+
+/// The fake GPU: called with the doorbell index and the 64-bit value of
+/// every doorbell write.
+pub fn fake_doorbell_hook(f: fn(u32, u64)) {
+    HOOK.with(|h| h.set(Some(f)));
+}
+
+/// The fake GPU raises its interrupt.
+pub fn fake_irq() {
+    IRQ_FIRED.with(|f| f.set(f.get() + 1));
+}
+
+/// The PCIe index/data pair (dword numbers) reaches a register space of
+/// its own, preset with `presets`; reads of other addresses there are 0.
+pub fn fake_card_pcie(index: u32, data: u32, presets: &[(u32, u32)]) {
+    PCIE.with(|p| p.set(Some((index, data))));
+    INDIRECT.with(|i| i.borrow_mut().extend(presets.iter().copied()));
+}
+
+/// A register as the card holds it, without recording a driver write.
+pub fn fake_reg(reg: u32) -> u32 {
+    CARD.with(|c| c.borrow().as_ref().and_then(|c| c.regs.get(&reg).copied()).unwrap_or(0))
+}
+
+/// The card sets one of its own registers.
+pub fn fake_set_reg(reg: u32, v: u32) {
+    CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.regs.insert(reg, v); });
+}
+
+/// The DMA window holding bus address `bus`, and the offset into it.
+fn bus_window(bus: u64) -> Option<(i32, u32)> {
+    WINDOWS.with(|w| {
+        let w = w.borrow();
+        w.iter().enumerate().find(|(_, (b, v))| *b != 0 && bus >= *b && bus < *b + v.len() as u64)
+            .map(|(i, (b, _))| (i as i32 + 1, (bus - b) as u32))
+    })
+}
+
+/// A dword of system memory, by bus address.
+pub fn bus_r32(bus: u64) -> u32 {
+    bus_window(bus).map_or(0, |(h, o)| win_r32(h, o))
+}
+
+pub fn bus_w32(bus: u64, v: u32) {
+    if let Some((h, o)) = bus_window(bus) {
+        win_w32(h, o, v);
+    }
+}
+
+/// A dword of VRAM, by offset.
+pub fn vram_r32(off: u64) -> u32 {
+    vram_window(off).map_or(0, |h| win_r32(h, off as u32))
+}
+
+pub fn vram_w32(off: u64, v: u32) {
+    if let Some(h) = vram_window(off) {
+        win_w32(h, off as u32, v);
+    }
 }
 
 /// `npk_pci_enable_bus_master`: granted.

@@ -13,10 +13,13 @@ mod stage1;
 use regs::*;
 
 include!("fake_renoir.rs");
+include!("fake_gpu.rs");
 
 fn main() {
     let mut adev = fake_renoir();
+    fake_gpu();
     stage1::run(&mut adev, BDF, (0xfc00_0000, 2 << 20));
+    PACKETS.with(|p| for l in p.borrow().iter() { println!("gpu {}", l); });
     // Every write but the MM_INDEX window VRAM is read through.
     for (reg, v) in npk_sys::fake_card_writes() {
         if reg != mmMM_INDEX && reg != mmMM_INDEX_HI {

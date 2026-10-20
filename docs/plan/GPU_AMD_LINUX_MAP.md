@@ -1,6 +1,6 @@
 # gpu_amd_renoir gegen Linux — die Karte
 
-**Stand:** 2026-10-18 · Modul `gpu_amd_renoir` 0.7.0 (Stufe 3 + 3b gebaut, Geraet offen) · Kernel 0.649.0 · Referenz **Linux 6.18.55**, amdgpu
+**Stand:** 2026-10-20 · Modul `gpu_amd_renoir` 0.8.0 (Stufe 4 gebaut, Host ✅, Geraet offen; Stufe 3/3b ✅ Geraet) · Kernel 0.649.0 · Referenz **Linux 6.18.55**, amdgpu
 **Geraet:** IdeaPad, Ryzen 5 5500U, iGPU `1002:164c` Lucienne = `CHIP_RENOIR | AMD_IS_APU`, `AMD_APU_IS_RENOIR`
 **Papier darueber:** `GPU_STACK.md` §7.2 und §9 (Stufen 8, 9), `GPU_IN_VM.md`
 **Vorlage:** `GPU_INTEL_LINUX_MAP.md` — dieselbe Regel: jede Linux-Funktion auf
@@ -96,9 +96,9 @@ Jede Stufe hat ein Ergebnis am Geraet. Reihenfolge = `amdgpu_device_init`.
 | **1c** ✅ gebaut, Host ✅ | `amdgpu_device_init` bis vor `amdgpu_device_ip_init`: Felder und `check_arguments`, `virt_init` (blankes Metall), `get_pcie_info` (Link-Faehigkeiten von GPU und vorgeschalteter Bridge, `drivers/pci`), Timeouts, `set_mcbp`, `ip_early_init`, TMZ, noretry, Atomics, `amdgpu_doorbell_init` (BAR2, `vega10_doorbell_index_init`), `need_post` (BIOS-Scratch 7), `get_clock_info`. Der **Reset beim Start** (`soc15_need_reset_on_init` ist fuer CHIP_RENOIR immer wahr: MODE2 ueber die SMU) wird entschieden und gemeldet, **nicht ausgefuehrt** | Log: PCIe-Rohwerte und Masken, Doorbells, Reset-Entscheid, Takte |
 | **1d** ✅ gebaut, Host ✅ | Der Reset beim Start: `soc15_asic_reset` → `amdgpu_dpm_mode2_reset` → `smu_mode2_reset` → `smu_v12_0_mode2_reset` → `smu_cmn_send_smc_msg_with_param` (Nachricht 30 aus `renoir_message_map`, Parameter 2; Antwortregister loeschen, Parameter, Nachricht, Antwort abwarten; die erste Nachricht nach dem Start fragt den alten Wert nicht ab). Nur mit `set gpu_amd_renoir.reset_on_init 1` (Kernel 0.646: `npk_config_get`, ein Modul liest nur `<modul>.*`). Auf dem Host mit einer Ersatz-SMU: genau drei Schreibzugriffe, C2PMSG_90=0, C2PMSG_82=2, C2PMSG_66=0x1e | Bild bleibt oder nicht; SMU antwortet OK |
 | **2** ✅ gebaut, Host ✅ | `amdgpu_device_ip_init` bis zum Ende des COMMON-Blocks: `amdgpu_ras_init` (CHIP_RENOIR ist keine RAS-ASIC: `ras_enabled = 0`, Kontext wieder weg), `soc15_common_sw_init` (`df_v1_7_sw_init`), sofort `soc15_common_hw_init` (APU: kein ASPM; `nbio_v7_0_init_registers` loescht Bit 23 von `RCC_DEV0_EPF6_STRAP4` — **ueber das PCIe-Index/Data-Paar**, es liegt jenseits von BAR5, deshalb jetzt `amdgpu_device_indirect_rreg/wreg`; HDP-Remap ins MMIO-Loch, Doorbell-Apertur an, SDMA0-Doorbell-Bereich). Dazu wird der **Reset beim Start Vorgabe** wie in Linux (Schalter entfaellt) | Log: die fuenf NBIO-Register vorher/nachher |
-| **3** ✅ gebaut, Host ✅ | GMC: `gmc_v9_0_sw_init` (VRAM-Info, `amdgpu_bo_init` = TTM, VRAM- und GTT-Manager, GART-Tabelle), dann sofort `amdgpu_device_mem_scratch_init`, `gmc_v9_0_hw_init` (GART an, GFXHUB/MMHUB v1, VMID 0), `amdgpu_device_wb_init`, `amdgpu_seq64_init` | GART-Seite lesbar |
-| **3b** ✅ gebaut, Host ✅ | `sw_init` der uebrigen Bloecke (IH: Ring im Systemspeicher + `amdgpu_irq_init`, PSP, SMU, DM, GFX, SDMA, VCN, JPEG), `amdgpu_ib_pool_init`, `amdgpu_ucode_create_bo`, dann `hw_init_phase1` (COMMON, **IH**: `vega10_ih_irq_init` schaltet hier Bus-Mastering ein → GPU hinter AMD-Vi), `amdgpu_device_fw_loading` (PSP 12: Ring, ASD + TA, Firmware ueber den PSP; SMU 12) | IRQ-Ring laeuft; PSP meldet ASD geladen; SMU antwortet |
-| 4 | GFX 9 (`gfx_v9_0`: RLC, CP pfp/me/ce/mec ueber PSP, KIQ, GFX- und Compute-Ring), SDMA 4 (`sdma_v4_0`) | Ring-Test und IB-Test wie Linux (`amdgpu_ring_test_helper`), SDMA-Selbsttest — **GPU_STACK §9 Stufe 8** |
+| **3** ✅ Geraet 2026-10-20 | GMC: `gmc_v9_0_sw_init` (VRAM-Info, `amdgpu_bo_init` = TTM, VRAM- und GTT-Manager, GART-Tabelle), dann sofort `amdgpu_device_mem_scratch_init`, `gmc_v9_0_hw_init` (GART an, GFXHUB/MMHUB v1, VMID 0), `amdgpu_device_wb_init`, `amdgpu_seq64_init` | GART-Seite lesbar |
+| **3b** ✅ Geraet 2026-10-20 | `sw_init` der uebrigen Bloecke (IH: Ring im Systemspeicher + `amdgpu_irq_init`, PSP, SMU, DM, GFX, SDMA, VCN, JPEG), `amdgpu_ib_pool_init`, `amdgpu_ucode_create_bo`, dann `hw_init_phase1` (COMMON, **IH**: `vega10_ih_irq_init` schaltet hier Bus-Mastering ein → GPU hinter AMD-Vi), `amdgpu_device_fw_loading` (PSP 12: Ring, ASD + TA, Firmware ueber den PSP; SMU 12) | IRQ-Ring laeuft; PSP meldet ASD geladen; SMU antwortet |
+| **4** ✅ gebaut, Host ✅ | `amdgpu_device_ip_hw_init_phase2` in Blockreihenfolge: `smu_hw_init` (fuer Renoir: Firmware-Flag, if/fw-Version, VCN/JPEG an, CGPG, Treibertabelle, DPM-Takttabelle), DM/VCN/JPEG noch ohne hw_init (Stufen 8 und 6, das Log sagt es), `gfx_v9_0_hw_init` (Golden, Konstanten, RB/CU, RLC, CSB, CP-Gfx-Ring mit Clear-State, KIQ-MQD, KCQ-MQDs ueber `SET_RESOURCES`/`MAP_QUEUES`, Ringtests), `sdma_v4_0_hw_init` (SMU macht SDMA an, Golden 4.1.2, Ring, PG, Ringtest). Danach `amdgpu_fence_driver_hw_init`, `amdgpu_device_ip_late_init` (VM-Inv-Engines, Fault-IRQs, Debug-Trap, Workload-Maske, CG und PG samt GFXOFF ueber die SMU, Reset-Magie), die IB-Tests der verzoegerten Init-Arbeit (`drm_suballoc`, `amdgpu_ib_schedule`, Fences ueber den IH-Ring und MSI) und `amdgpu_device_fini_hw` (PG/CG zurueck, alle IRQs aus, KCQs abmelden, KIQ/CP/RLC/SDMA halt, SMU, PSP-TAs und TMR, IH). **Der GMC bleibt dabei an**: die Anzeige gehoert noch der Firmware und liest ueber den MMHUB, Linux erreicht den GMC erst nach dem hw_fini von DM | `ring tests:` / `ib tests:` mit `+` je Ring, `stage 4 done`, 0 IOMMU-Faults, Bild bleibt — **GPU_STACK §9 Stufe 8** |
 | 5 | gpudev-Dienst: Kopie und Szenen wie bei Intel; Fences, GPUVM je Kontext | Desktop-Kopie per SDMA |
 | 6 | VCN 2.2 + JPEG 2.0 | Video-Engine-Ringtest |
 | 7 | native context AMD: Wirtsseite aus virglrenderer `src/drm/amdgpu` (Kontexttyp 2), Gast-Mesa von Alpine (`-Damdgpu-virtio`) | `glxinfo` im Gast nennt radeonsi — **GPU_STACK §9 Stufe 9** |
@@ -183,6 +183,19 @@ Linux' eigenen Code, auf `vbios.bin` und `ip_discovery.bin` vom Geraet
   faellt auf), ein Streuwert —, verglichen wird jeder Schreibzugriff: 3×9
   Zeilen. Eine Mutation „Bit 22 statt 23" sieht nur die Einsen-Regel; mit
   dem Streuwert allein (an beiden Bits 0) fiel sie nicht auf.
+
+- Stufe 4 auf dem Host: `hostcheck/fake_gpu.rs` ist ein Befehlsprozessor
+  hinter den Doorbells. Er liest Ringe ueber die GART-Tabelle, fuehrt die
+  PM4-Pakete der Ring- und IB-Tests aus (`SET_UCONFIG_REG`, `WRITE_DATA`,
+  `RELEASE_MEM`, `INDIRECT_BUFFER`, `MAP_QUEUES`/`UNMAP_QUEUES`), ebenso die
+  SDMA-Pakete (`WRITE_LINEAR`, `INDIRECT`, `FENCE`, `TRAP`), und meldet EOP
+  und Trap als IV im IH-Ring mit Interrupt. Der Lauf geht damit durch alle
+  elf Ringtests, alle neun IB-Tests, die Fences und `fini_hw`.
+  **Das ist eine Gegenprobe der Abläufe, kein Orakel**: die Pakete misst
+  der Ersatz-CP an der eigenen Lesart, nicht an Linux. Das PSP-Orakel deckt
+  `psp_hw_fini` mit ab (23 Befehle). **Noch nicht im Orakel:** die
+  Registerfolgen von `smu_hw_init`, `gfx_v9_0_hw_init`, `sdma_v4_0_hw_init`,
+  CG/PG und der hw_fini-Pfade.
 
 **Grenze:** geprueft ist, was die Daten des Geraets durchlaufen. Die
 GC-Tabelle des Geraets ist v2.0 — eine Mutation im v1-Zweig faellt nicht

@@ -129,3 +129,57 @@ pub fn nbio_v7_0_ih_doorbell_range(adev: &amdgpu_device, use_doorbell: bool, doo
     }
     wreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmBIF_IH_DOORBELL_RANGE_BASE_IDX, NBIO_mmBIF_IH_DOORBELL_RANGE, r);
 }
+
+/// `nbio_7_0_read_syshub_ind_mmr`.
+fn nbio_7_0_read_syshub_ind_mmr(adev: &amdgpu_device, offset: u32) -> u32 {
+    wreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmSYSHUB_INDEX_BASE_IDX, NBIO_mmSYSHUB_INDEX, offset);
+    rreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmSYSHUB_DATA_BASE_IDX, NBIO_mmSYSHUB_DATA).unwrap_or(0)
+}
+
+/// `nbio_7_0_write_syshub_ind_mmr`.
+fn nbio_7_0_write_syshub_ind_mmr(adev: &amdgpu_device, offset: u32, data: u32) {
+    wreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmSYSHUB_INDEX_BASE_IDX, NBIO_mmSYSHUB_INDEX, offset);
+    wreg32_soc15(adev, NBIO_HWIP, 0, NBIO_mmSYSHUB_DATA_BASE_IDX, NBIO_mmSYSHUB_DATA, data);
+}
+
+/// `nbio_v7_0_update_medium_grain_clock_gating`.
+pub fn nbio_v7_0_update_medium_grain_clock_gating(adev: &amdgpu_device, enable: bool) {
+    use crate::amdgpu_device::{amdgpu_device_indirect_rreg, amdgpu_device_indirect_wreg};
+    let on = enable && adev.cg_flags & AMD_CG_SUPPORT_BIF_MGCG as u64 != 0;
+    // NBIF_MGCG_CTRL_LCLK
+    let def = amdgpu_device_indirect_rreg(adev, NBIO_smnNBIF_MGCG_CTRL_LCLK).unwrap_or(0);
+    let data = if on {
+        def | NBIO_NBIF_MGCG_CTRL_LCLK__NBIF_MGCG_EN_LCLK_MASK
+    } else {
+        def & !NBIO_NBIF_MGCG_CTRL_LCLK__NBIF_MGCG_EN_LCLK_MASK
+    };
+    if def != data {
+        amdgpu_device_indirect_wreg(adev, NBIO_smnNBIF_MGCG_CTRL_LCLK, data);
+    }
+    // SYSHUB_MGCG_CTRL_SOCCLK
+    let def = nbio_7_0_read_syshub_ind_mmr(adev, NBIO_ixSYSHUB_MMREG_IND_SYSHUB_MGCG_CTRL_SOCCLK);
+    let m = NBIO_SYSHUB_MMREG_DIRECT_SYSHUB_MGCG_CTRL_SOCCLK__SYSHUB_MGCG_EN_SOCCLK_MASK;
+    let data = if on { def | m } else { def & !m };
+    if def != data {
+        nbio_7_0_write_syshub_ind_mmr(adev, NBIO_ixSYSHUB_MMREG_IND_SYSHUB_MGCG_CTRL_SOCCLK, data);
+    }
+    // SYSHUB_MGCG_CTRL_SHUBCLK
+    let def = nbio_7_0_read_syshub_ind_mmr(adev, NBIO_ixSYSHUB_MMREG_IND_SYSHUB_MGCG_CTRL_SHUBCLK);
+    let m = NBIO_SYSHUB_MMREG_DIRECT_SYSHUB_MGCG_CTRL_SHUBCLK__SYSHUB_MGCG_EN_SHUBCLK_MASK;
+    let data = if on { def | m } else { def & !m };
+    if def != data {
+        nbio_7_0_write_syshub_ind_mmr(adev, NBIO_ixSYSHUB_MMREG_IND_SYSHUB_MGCG_CTRL_SHUBCLK, data);
+    }
+}
+
+/// `nbio_v7_0_update_medium_grain_light_sleep`.
+pub fn nbio_v7_0_update_medium_grain_light_sleep(adev: &amdgpu_device, enable: bool) {
+    use crate::amdgpu_device::{amdgpu_device_indirect_rreg, amdgpu_device_indirect_wreg};
+    let def = amdgpu_device_indirect_rreg(adev, NBIO_smnPCIE_CNTL2).unwrap_or(0);
+    let m = NBIO_PCIE_CNTL2__SLV_MEM_LS_EN_MASK | NBIO_PCIE_CNTL2__MST_MEM_LS_EN_MASK
+        | NBIO_PCIE_CNTL2__REPLAY_MEM_LS_EN_MASK;
+    let data = if enable && adev.cg_flags & AMD_CG_SUPPORT_BIF_LS as u64 != 0 { def | m } else { def & !m };
+    if def != data {
+        amdgpu_device_indirect_wreg(adev, NBIO_smnPCIE_CNTL2, data);
+    }
+}

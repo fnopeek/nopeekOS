@@ -3941,6 +3941,36 @@ pub const GFX_CMD_ID_LOAD_TA: u32 = 0x1;
 pub const GFX_CMD_ID_LOAD_ASD: u32 = 0x4;
 /// amdgpu/psp_gfx_if.h:91
 pub const GFX_CMD_ID_INVOKE_CMD: u32 = 0x3;
+/// amdgpu/psp_gfx_if.h:90
+pub const GFX_CMD_ID_UNLOAD_TA: u32 = 0x2;
+/// amdgpu/psp_gfx_if.h:95
+pub const GFX_CMD_ID_DESTROY_TMR: u32 = 0x7;
+/// amdgpu/psp_gfx_if.h:96
+pub const GFX_CMD_ID_SAVE_RESTORE: u32 = 0x8;
+/// amdgpu/psp_gfx_if.h:97
+pub const GFX_CMD_ID_SETUP_VMR: u32 = 0x9;
+/// amdgpu/psp_gfx_if.h:98
+pub const GFX_CMD_ID_DESTROY_VMR: u32 = 0xa;
+/// amdgpu/psp_gfx_if.h:99
+pub const GFX_CMD_ID_PROG_REG: u32 = 0xb;
+/// amdgpu/psp_gfx_if.h:100
+pub const GFX_CMD_ID_GET_FW_ATTESTATION: u32 = 0xf;
+/// amdgpu/psp_gfx_if.h:102
+pub const GFX_CMD_ID_LOAD_TOC: u32 = 0x20;
+/// amdgpu/psp_gfx_if.h:103
+pub const GFX_CMD_ID_AUTOLOAD_RLC: u32 = 0x21;
+/// amdgpu/psp_gfx_if.h:104
+pub const GFX_CMD_ID_BOOT_CFG: u32 = 0x22;
+/// amdgpu/psp_gfx_if.h:107
+pub const GFX_CMD_ID_CONFIG_SQ_PERFMON: u32 = 0x46;
+/// amdgpu/psp_gfx_if.h:110
+pub const GFX_CMD_ID_FB_FW_RESERV_ADDR: u32 = 0x50;
+/// amdgpu/psp_gfx_if.h:111
+pub const GFX_CMD_ID_FB_FW_RESERV_EXT_ADDR: u32 = 0x51;
+/// amdgpu/psp_gfx_if.h:105
+pub const GFX_CMD_ID_SRIOV_SPATIAL_PART: u32 = 0x27;
+/// amdgpu/psp_gfx_if.h:109
+pub const GFX_CMD_ID_FB_NPS_MODE: u32 = 0x48;
 /// amdgpu/psp_gfx_if.h:44
 pub const GFX_CTRL_CMD_ID_DESTROY_RINGS: u32 = 0x30000;
 /// amdgpu/psp_gfx_if.h:271
@@ -4169,6 +4199,8 @@ pub const LOADTA_CMD_BUF_PHY_ADDR_HI: u32 = 0x10;
 pub const LOADTA_CMD_BUF_LEN: u32 = 0x14;
 /// The value of `offsetof(struct psp_gfx_cmd_invoke_cmd, session_id)` in amdgpu_psp.c
 pub const INVOKE_SESSION_ID: u32 = 0x0;
+/// The value of `offsetof(struct psp_gfx_cmd_unload_ta, session_id)` in amdgpu_psp.c
+pub const UNLOADTA_SESSION_ID: u32 = 0x0;
 /// The value of `offsetof(struct psp_gfx_cmd_invoke_cmd, ta_cmd_id)` in amdgpu_psp.c
 pub const INVOKE_TA_CMD_ID: u32 = 0x4;
 /// The value of `offsetof(struct psp_gfx_rb_frame, cmd_buf_addr_lo)` in amdgpu_psp.c
@@ -4199,3 +4231,1879 @@ pub const RAP_VALIDATION_METHOD_ID: u32 = 0x4;
 pub const RAP_STATUS: u32 = 0xc;
 /// The value of `offsetof(struct sdma_firmware_header_v2_0, ctx_ucode_size_bytes)` in amdgpu_ucode.c
 pub const SDMA_HDR_V2_CTX_UCODE_SIZE: u32 = 0x24;
+
+// smu_hw_init for Renoir (amdgpu_smu.c, smu_cmn.c, smu_v12_0.c, renoir_ppt.c, hdp_v4_0.c)
+/// ?
+pub const SMU_MSG_GetDriverIfVersion: u32 = 0x2;
+/// ?
+pub const SMU_MSG_GetSmuVersion: u32 = 0x1;
+/// ?
+pub const SMU_MSG_PowerUpVcn: u32 = 0x57;
+/// ?
+pub const SMU_MSG_PowerDownVcn: u32 = 0x58;
+/// ?
+pub const SMU_MSG_PowerUpJpeg: u32 = 0x59;
+/// ?
+pub const SMU_MSG_PowerDownJpeg: u32 = 0x5a;
+/// ?
+pub const SMU_MSG_SetGfxCGPG: u32 = 0x8b;
+/// ?
+pub const SMU_MSG_SetDriverDramAddrHigh: u32 = 0x10;
+/// ?
+pub const SMU_MSG_SetDriverDramAddrLow: u32 = 0x11;
+/// pm/swsmu/smu_cmn.c:988
+pub const SMU_MSG_TransferTableSmu2Dram: u32 = 0x14;
+/// The value of `__smu_message_names[SMU_MSG_GetDriverIfVersion]` in ../pm/swsmu/smu_cmn.c
+pub const GetDriverIfVersion_NAME: &[u8] = b"GetDriverIfVersion";
+/// The value of `__smu_message_names[SMU_MSG_GetSmuVersion]` in ../pm/swsmu/smu_cmn.c
+pub const GetSmuVersion_NAME: &[u8] = b"GetSmuVersion";
+/// The value of `__smu_message_names[SMU_MSG_PowerUpVcn]` in ../pm/swsmu/smu_cmn.c
+pub const PowerUpVcn_NAME: &[u8] = b"PowerUpVcn";
+/// The value of `__smu_message_names[SMU_MSG_PowerDownVcn]` in ../pm/swsmu/smu_cmn.c
+pub const PowerDownVcn_NAME: &[u8] = b"PowerDownVcn";
+/// The value of `__smu_message_names[SMU_MSG_PowerUpJpeg]` in ../pm/swsmu/smu_cmn.c
+pub const PowerUpJpeg_NAME: &[u8] = b"PowerUpJpeg";
+/// The value of `__smu_message_names[SMU_MSG_PowerDownJpeg]` in ../pm/swsmu/smu_cmn.c
+pub const PowerDownJpeg_NAME: &[u8] = b"PowerDownJpeg";
+/// The value of `__smu_message_names[SMU_MSG_SetGfxCGPG]` in ../pm/swsmu/smu_cmn.c
+pub const SetGfxCGPG_NAME: &[u8] = b"SetGfxCGPG";
+/// The value of `__smu_message_names[SMU_MSG_SetDriverDramAddrHigh]` in ../pm/swsmu/smu_cmn.c
+pub const SetDriverDramAddrHigh_NAME: &[u8] = b"SetDriverDramAddrHigh";
+/// The value of `__smu_message_names[SMU_MSG_SetDriverDramAddrLow]` in ../pm/swsmu/smu_cmn.c
+pub const SetDriverDramAddrLow_NAME: &[u8] = b"SetDriverDramAddrLow";
+/// The value of `__smu_message_names[SMU_MSG_TransferTableSmu2Dram]` in ../pm/swsmu/smu_cmn.c
+pub const TransferTableSmu2Dram_NAME: &[u8] = b"TransferTableSmu2Dram";
+/// ?
+pub const SMU_FEATURE_VCN_PG_BIT: u32 = 0x2c;
+/// ?
+pub const SMU_FEATURE_JPEG_PG_BIT: u32 = 0x2e;
+/// ?
+pub const MP1_Public: u32 = 0x3b00000;
+/// pm/swsmu/smu12/smu_v12_0.c:56
+pub const smnMP1_FIRMWARE_FLAGS: u32 = 0x3010024;
+/// include/asic_reg/mp/mp_10_0_sh_mask.h:523
+pub const MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK: u32 = 0x1;
+/// include/asic_reg/mp/mp_10_0_sh_mask.h:521
+pub const MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED__SHIFT: u32 = 0x0;
+/// The value of `sizeof(struct cmn2asic_mapping)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const CMN2ASIC_MAPPING_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct cmn2asic_mapping, valid_mapping)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const CMN2ASIC_MAPPING_valid_mapping: u32 = 0x0;
+/// The value of `offsetof(struct cmn2asic_mapping, map_to)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const CMN2ASIC_MAPPING_map_to: u32 = 0x4;
+/// The value of `mmHDP_READ_CACHE_INVALIDATE` in hdp_v4_0.c
+pub const HDP_mmHDP_READ_CACHE_INVALIDATE: u32 = 0xd1;
+/// The value of `mmHDP_READ_CACHE_INVALIDATE_BASE_IDX` in hdp_v4_0.c
+pub const HDP_mmHDP_READ_CACHE_INVALIDATE_BASE_IDX: u32 = 0x0;
+
+// gfx_v9_0_hw_init: registers and fields (generated by reg_names.py)
+/// The value of `mmTCP_ADDR_CONFIG` in gfx_v9_0.c
+pub const GC_mmTCP_ADDR_CONFIG: u32 = 0xb05;
+/// The value of `mmTCP_ADDR_CONFIG_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmTCP_ADDR_CONFIG_BASE_IDX: u32 = 0x0;
+/// The value of `mmGRBM_GFX_INDEX` in gfx_v9_0.c
+pub const GC_mmGRBM_GFX_INDEX: u32 = 0x2200;
+/// The value of `mmGRBM_GFX_INDEX_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmGRBM_GFX_INDEX_BASE_IDX: u32 = 0x1;
+/// The value of `mmCC_RB_BACKEND_DISABLE` in gfx_v9_0.c
+pub const GC_mmCC_RB_BACKEND_DISABLE: u32 = 0x63d;
+/// The value of `mmCC_RB_BACKEND_DISABLE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCC_RB_BACKEND_DISABLE_BASE_IDX: u32 = 0x0;
+/// The value of `mmGC_USER_RB_BACKEND_DISABLE` in gfx_v9_0.c
+pub const GC_mmGC_USER_RB_BACKEND_DISABLE: u32 = 0x6df;
+/// The value of `mmGC_USER_RB_BACKEND_DISABLE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmGC_USER_RB_BACKEND_DISABLE_BASE_IDX: u32 = 0x0;
+/// The value of `mmSH_MEM_CONFIG` in gfx_v9_0.c
+pub const GC_mmSH_MEM_CONFIG: u32 = 0x30d;
+/// The value of `mmSH_MEM_CONFIG_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSH_MEM_CONFIG_BASE_IDX: u32 = 0x0;
+/// The value of `mmSH_MEM_BASES` in gfx_v9_0.c
+pub const GC_mmSH_MEM_BASES: u32 = 0x30a;
+/// The value of `mmSH_MEM_BASES_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSH_MEM_BASES_BASE_IDX: u32 = 0x0;
+/// The value of `mmGDS_VMID0_BASE` in gfx_v9_0.c
+pub const GC_mmGDS_VMID0_BASE: u32 = 0x1300;
+/// The value of `mmGDS_VMID0_BASE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmGDS_VMID0_BASE_BASE_IDX: u32 = 0x0;
+/// The value of `mmGDS_VMID0_SIZE` in gfx_v9_0.c
+pub const GC_mmGDS_VMID0_SIZE: u32 = 0x1301;
+/// The value of `mmGDS_VMID0_SIZE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmGDS_VMID0_SIZE_BASE_IDX: u32 = 0x0;
+/// The value of `mmGDS_GWS_VMID0` in gfx_v9_0.c
+pub const GC_mmGDS_GWS_VMID0: u32 = 0x1320;
+/// The value of `mmGDS_GWS_VMID0_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmGDS_GWS_VMID0_BASE_IDX: u32 = 0x0;
+/// The value of `mmGDS_OA_VMID0` in gfx_v9_0.c
+pub const GC_mmGDS_OA_VMID0: u32 = 0x1330;
+/// The value of `mmGDS_OA_VMID0_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmGDS_OA_VMID0_BASE_IDX: u32 = 0x0;
+/// The value of `mmGC_USER_SHADER_ARRAY_CONFIG` in gfx_v9_0.c
+pub const GC_mmGC_USER_SHADER_ARRAY_CONFIG: u32 = 0x270;
+/// The value of `mmGC_USER_SHADER_ARRAY_CONFIG_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmGC_USER_SHADER_ARRAY_CONFIG_BASE_IDX: u32 = 0x0;
+/// The value of `mmCC_GC_SHADER_ARRAY_CONFIG` in gfx_v9_0.c
+pub const GC_mmCC_GC_SHADER_ARRAY_CONFIG: u32 = 0x26f;
+/// The value of `mmCC_GC_SHADER_ARRAY_CONFIG_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCC_GC_SHADER_ARRAY_CONFIG_BASE_IDX: u32 = 0x0;
+/// The value of `mmDB_DEBUG2` in gfx_v9_0.c
+pub const GC_mmDB_DEBUG2: u32 = 0x60d;
+/// The value of `mmDB_DEBUG2_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmDB_DEBUG2_BASE_IDX: u32 = 0x0;
+/// The value of `mmRLC_GPM_GENERAL_6` in gfx_v9_0.c
+pub const GC_mmRLC_GPM_GENERAL_6: u32 = 0x4c69;
+/// The value of `mmRLC_GPM_GENERAL_6_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_GPM_GENERAL_6_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_GPM_TIMER_INT_3` in gfx_v9_0.c
+pub const GC_mmRLC_GPM_TIMER_INT_3: u32 = 0x4c15;
+/// The value of `mmRLC_GPM_TIMER_INT_3_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_GPM_TIMER_INT_3_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_GPM_GENERAL_12` in gfx_v9_0.c
+pub const GC_mmRLC_GPM_GENERAL_12: u32 = 0x4cb1;
+/// The value of `mmRLC_GPM_GENERAL_12_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_GPM_GENERAL_12_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_JUMP_TABLE_RESTORE` in gfx_v9_0.c
+pub const GC_mmRLC_JUMP_TABLE_RESTORE: u32 = 0x4c1e;
+/// The value of `mmRLC_JUMP_TABLE_RESTORE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_JUMP_TABLE_RESTORE_BASE_IDX: u32 = 0x1;
+/// The value of `mmCP_INT_CNTL_RING0` in gfx_v9_0.c
+pub const GC_mmCP_INT_CNTL_RING0: u32 = 0x106a;
+/// The value of `mmCP_INT_CNTL_RING0_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_INT_CNTL_RING0_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_ME_CNTL` in gfx_v9_0.c
+pub const GC_mmCP_ME_CNTL: u32 = 0x1b6;
+/// The value of `mmCP_ME_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_ME_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_MEC_CNTL` in gfx_v9_0.c
+pub const GC_mmCP_MEC_CNTL: u32 = 0x8d;
+/// The value of `mmCP_MEC_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_MEC_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB_WPTR_DELAY` in gfx_v9_0.c
+pub const GC_mmCP_RB_WPTR_DELAY: u32 = 0x1c1;
+/// The value of `mmCP_RB_WPTR_DELAY_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB_WPTR_DELAY_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB_VMID` in gfx_v9_0.c
+pub const GC_mmCP_RB_VMID: u32 = 0x1051;
+/// The value of `mmCP_RB_VMID_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB_VMID_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB0_CNTL` in gfx_v9_0.c
+pub const GC_mmCP_RB0_CNTL: u32 = 0x1041;
+/// The value of `mmCP_RB0_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB0_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB0_WPTR` in gfx_v9_0.c
+pub const GC_mmCP_RB0_WPTR: u32 = 0x1054;
+/// The value of `mmCP_RB0_WPTR_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB0_WPTR_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB0_WPTR_HI` in gfx_v9_0.c
+pub const GC_mmCP_RB0_WPTR_HI: u32 = 0x1055;
+/// The value of `mmCP_RB0_WPTR_HI_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB0_WPTR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB0_RPTR_ADDR` in gfx_v9_0.c
+pub const GC_mmCP_RB0_RPTR_ADDR: u32 = 0x1043;
+/// The value of `mmCP_RB0_RPTR_ADDR_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB0_RPTR_ADDR_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB0_RPTR_ADDR_HI` in gfx_v9_0.c
+pub const GC_mmCP_RB0_RPTR_ADDR_HI: u32 = 0x1044;
+/// The value of `mmCP_RB0_RPTR_ADDR_HI_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB0_RPTR_ADDR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB_WPTR_POLL_ADDR_LO` in gfx_v9_0.c
+pub const GC_mmCP_RB_WPTR_POLL_ADDR_LO: u32 = 0x1046;
+/// The value of `mmCP_RB_WPTR_POLL_ADDR_LO_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB_WPTR_POLL_ADDR_LO_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB_WPTR_POLL_ADDR_HI` in gfx_v9_0.c
+pub const GC_mmCP_RB_WPTR_POLL_ADDR_HI: u32 = 0x1047;
+/// The value of `mmCP_RB_WPTR_POLL_ADDR_HI_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB_WPTR_POLL_ADDR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB0_BASE` in gfx_v9_0.c
+pub const GC_mmCP_RB0_BASE: u32 = 0x1040;
+/// The value of `mmCP_RB0_BASE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB0_BASE_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB0_BASE_HI` in gfx_v9_0.c
+pub const GC_mmCP_RB0_BASE_HI: u32 = 0x10b1;
+/// The value of `mmCP_RB0_BASE_HI_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB0_BASE_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB_DOORBELL_CONTROL` in gfx_v9_0.c
+pub const GC_mmCP_RB_DOORBELL_CONTROL: u32 = 0x1059;
+/// The value of `mmCP_RB_DOORBELL_CONTROL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB_DOORBELL_CONTROL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB_DOORBELL_RANGE_LOWER` in gfx_v9_0.c
+pub const GC_mmCP_RB_DOORBELL_RANGE_LOWER: u32 = 0x105a;
+/// The value of `mmCP_RB_DOORBELL_RANGE_LOWER_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB_DOORBELL_RANGE_LOWER_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_RB_DOORBELL_RANGE_UPPER` in gfx_v9_0.c
+pub const GC_mmCP_RB_DOORBELL_RANGE_UPPER: u32 = 0x105b;
+/// The value of `mmCP_RB_DOORBELL_RANGE_UPPER_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB_DOORBELL_RANGE_UPPER_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_MAX_CONTEXT` in gfx_v9_0.c
+pub const GC_mmCP_MAX_CONTEXT: u32 = 0x10ae;
+/// The value of `mmCP_MAX_CONTEXT_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_MAX_CONTEXT_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_DEVICE_ID` in gfx_v9_0.c
+pub const GC_mmCP_DEVICE_ID: u32 = 0x104b;
+/// The value of `mmCP_DEVICE_ID_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_DEVICE_ID_BASE_IDX: u32 = 0x0;
+/// The value of `mmVGT_INDEX_TYPE` in gfx_v9_0.c
+pub const GC_mmVGT_INDEX_TYPE: u32 = 0x2243;
+/// The value of `mmVGT_INDEX_TYPE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmVGT_INDEX_TYPE_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_CP_SCHEDULERS` in gfx_v9_0.c
+pub const GC_mmRLC_CP_SCHEDULERS: u32 = 0x4caa;
+/// The value of `mmRLC_CP_SCHEDULERS_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_CP_SCHEDULERS_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_CSIB_ADDR_HI` in gfx_v9_0.c
+pub const GC_mmRLC_CSIB_ADDR_HI: u32 = 0x4ca3;
+/// The value of `mmRLC_CSIB_ADDR_HI_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_CSIB_ADDR_HI_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_CSIB_ADDR_LO` in gfx_v9_0.c
+pub const GC_mmRLC_CSIB_ADDR_LO: u32 = 0x4ca2;
+/// The value of `mmRLC_CSIB_ADDR_LO_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_CSIB_ADDR_LO_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_CSIB_LENGTH` in gfx_v9_0.c
+pub const GC_mmRLC_CSIB_LENGTH: u32 = 0x4ca4;
+/// The value of `mmRLC_CSIB_LENGTH_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_CSIB_LENGTH_BASE_IDX: u32 = 0x1;
+/// The value of `mmCP_RB_WPTR_POLL_CNTL` in gfx_v9_0.c
+pub const GC_mmCP_RB_WPTR_POLL_CNTL: u32 = 0x1c2;
+/// The value of `mmCP_RB_WPTR_POLL_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_RB_WPTR_POLL_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmRLC_PG_DELAY` in gfx_v9_0.c
+pub const GC_mmRLC_PG_DELAY: u32 = 0x4c4d;
+/// The value of `mmRLC_PG_DELAY_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_PG_DELAY_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_PG_DELAY_2` in gfx_v9_0.c
+pub const GC_mmRLC_PG_DELAY_2: u32 = 0x4c1f;
+/// The value of `mmRLC_PG_DELAY_2_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_PG_DELAY_2_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_PG_DELAY_3` in gfx_v9_0.c
+pub const GC_mmRLC_PG_DELAY_3: u32 = 0x4c78;
+/// The value of `mmRLC_PG_DELAY_3_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_PG_DELAY_3_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_AUTO_PG_CTRL` in gfx_v9_0.c
+pub const GC_mmRLC_AUTO_PG_CTRL: u32 = 0x4c55;
+/// The value of `mmRLC_AUTO_PG_CTRL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_AUTO_PG_CTRL_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_SERDES_CU_MASTER_BUSY` in gfx_v9_0.c
+pub const GC_mmRLC_SERDES_CU_MASTER_BUSY: u32 = 0x4c61;
+/// The value of `mmRLC_SERDES_CU_MASTER_BUSY_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_SERDES_CU_MASTER_BUSY_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_SERDES_NONCU_MASTER_BUSY` in gfx_v9_0.c
+pub const GC_mmRLC_SERDES_NONCU_MASTER_BUSY: u32 = 0x4c62;
+/// The value of `mmRLC_SERDES_NONCU_MASTER_BUSY_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_SERDES_NONCU_MASTER_BUSY_BASE_IDX: u32 = 0x1;
+/// The value of `mmCP_HQD_EOP_CONTROL` in gfx_v9_0.c
+pub const GC_mmCP_HQD_EOP_CONTROL: u32 = 0x126c;
+/// The value of `mmCP_HQD_EOP_CONTROL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_EOP_CONTROL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PQ_DOORBELL_CONTROL` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_DOORBELL_CONTROL: u32 = 0x1254;
+/// The value of `mmCP_HQD_PQ_DOORBELL_CONTROL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_DOORBELL_CONTROL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_MQD_CONTROL` in gfx_v9_0.c
+pub const GC_mmCP_MQD_CONTROL: u32 = 0x1267;
+/// The value of `mmCP_MQD_CONTROL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_MQD_CONTROL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PQ_CONTROL` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_CONTROL: u32 = 0x1256;
+/// The value of `mmCP_HQD_PQ_CONTROL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_CONTROL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PQ_RPTR` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_RPTR: u32 = 0x124f;
+/// The value of `mmCP_HQD_PQ_RPTR_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_RPTR_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PERSISTENT_STATE` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PERSISTENT_STATE: u32 = 0x1249;
+/// The value of `mmCP_HQD_PERSISTENT_STATE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PERSISTENT_STATE_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_IB_CONTROL` in gfx_v9_0.c
+pub const GC_mmCP_HQD_IB_CONTROL: u32 = 0x125a;
+/// The value of `mmCP_HQD_IB_CONTROL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_IB_CONTROL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_QUANTUM` in gfx_v9_0.c
+pub const GC_mmCP_HQD_QUANTUM: u32 = 0x124c;
+/// The value of `mmCP_HQD_QUANTUM_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_QUANTUM_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_EOP_BASE_ADDR` in gfx_v9_0.c
+pub const GC_mmCP_HQD_EOP_BASE_ADDR: u32 = 0x126a;
+/// The value of `mmCP_HQD_EOP_BASE_ADDR_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_EOP_BASE_ADDR_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_EOP_BASE_ADDR_HI` in gfx_v9_0.c
+pub const GC_mmCP_HQD_EOP_BASE_ADDR_HI: u32 = 0x126b;
+/// The value of `mmCP_HQD_EOP_BASE_ADDR_HI_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_EOP_BASE_ADDR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_ACTIVE` in gfx_v9_0.c
+pub const GC_mmCP_HQD_ACTIVE: u32 = 0x1247;
+/// The value of `mmCP_HQD_ACTIVE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_ACTIVE_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_DEQUEUE_REQUEST` in gfx_v9_0.c
+pub const GC_mmCP_HQD_DEQUEUE_REQUEST: u32 = 0x125d;
+/// The value of `mmCP_HQD_DEQUEUE_REQUEST_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_DEQUEUE_REQUEST_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PQ_WPTR_LO` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_WPTR_LO: u32 = 0x127b;
+/// The value of `mmCP_HQD_PQ_WPTR_LO_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_WPTR_LO_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PQ_WPTR_HI` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_WPTR_HI: u32 = 0x127c;
+/// The value of `mmCP_HQD_PQ_WPTR_HI_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_WPTR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_MQD_BASE_ADDR` in gfx_v9_0.c
+pub const GC_mmCP_MQD_BASE_ADDR: u32 = 0x1245;
+/// The value of `mmCP_MQD_BASE_ADDR_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_MQD_BASE_ADDR_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_MQD_BASE_ADDR_HI` in gfx_v9_0.c
+pub const GC_mmCP_MQD_BASE_ADDR_HI: u32 = 0x1246;
+/// The value of `mmCP_MQD_BASE_ADDR_HI_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_MQD_BASE_ADDR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PQ_BASE` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_BASE: u32 = 0x124d;
+/// The value of `mmCP_HQD_PQ_BASE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_BASE_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PQ_BASE_HI` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_BASE_HI: u32 = 0x124e;
+/// The value of `mmCP_HQD_PQ_BASE_HI_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_BASE_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PQ_RPTR_REPORT_ADDR` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR: u32 = 0x1250;
+/// The value of `mmCP_HQD_PQ_RPTR_REPORT_ADDR_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PQ_RPTR_REPORT_ADDR_HI` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR_HI: u32 = 0x1251;
+/// The value of `mmCP_HQD_PQ_RPTR_REPORT_ADDR_HI_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PQ_WPTR_POLL_ADDR` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_WPTR_POLL_ADDR: u32 = 0x1252;
+/// The value of `mmCP_HQD_PQ_WPTR_POLL_ADDR_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_WPTR_POLL_ADDR_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_PQ_WPTR_POLL_ADDR_HI` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_WPTR_POLL_ADDR_HI: u32 = 0x1253;
+/// The value of `mmCP_HQD_PQ_WPTR_POLL_ADDR_HI_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_PQ_WPTR_POLL_ADDR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_MEC_DOORBELL_RANGE_LOWER` in gfx_v9_0.c
+pub const GC_mmCP_MEC_DOORBELL_RANGE_LOWER: u32 = 0x105c;
+/// The value of `mmCP_MEC_DOORBELL_RANGE_LOWER_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_MEC_DOORBELL_RANGE_LOWER_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_MEC_DOORBELL_RANGE_UPPER` in gfx_v9_0.c
+pub const GC_mmCP_MEC_DOORBELL_RANGE_UPPER: u32 = 0x105d;
+/// The value of `mmCP_MEC_DOORBELL_RANGE_UPPER_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_MEC_DOORBELL_RANGE_UPPER_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_VMID` in gfx_v9_0.c
+pub const GC_mmCP_HQD_VMID: u32 = 0x1248;
+/// The value of `mmCP_HQD_VMID_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_VMID_BASE_IDX: u32 = 0x0;
+/// The value of `mmSCRATCH_REG0` in gfx_v9_0.c
+pub const GC_mmSCRATCH_REG0: u32 = 0x2040;
+/// The value of `mmSCRATCH_REG0_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSCRATCH_REG0_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_CGCG_CGLS_CTRL` in gfx_v9_0.c
+pub const GC_mmRLC_CGCG_CGLS_CTRL: u32 = 0x4c49;
+/// The value of `mmRLC_CGCG_CGLS_CTRL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_CGCG_CGLS_CTRL_BASE_IDX: u32 = 0x1;
+/// The value of `TCP_ADDR_CONFIG__ENABLE64KHASH_MASK` in gfx_v9_0.c
+pub const GC_TCP_ADDR_CONFIG__ENABLE64KHASH_MASK: u32 = 0x800;
+/// The value of `TCP_ADDR_CONFIG__ENABLE64KHASH__SHIFT` in gfx_v9_0.c
+pub const GC_TCP_ADDR_CONFIG__ENABLE64KHASH__SHIFT: u32 = 0xb;
+/// The value of `TCP_ADDR_CONFIG__ENABLE2MHASH_MASK` in gfx_v9_0.c
+pub const GC_TCP_ADDR_CONFIG__ENABLE2MHASH_MASK: u32 = 0x1000;
+/// The value of `TCP_ADDR_CONFIG__ENABLE2MHASH__SHIFT` in gfx_v9_0.c
+pub const GC_TCP_ADDR_CONFIG__ENABLE2MHASH__SHIFT: u32 = 0xc;
+/// The value of `TCP_ADDR_CONFIG__ENABLE1GHASH_MASK` in gfx_v9_0.c
+pub const GC_TCP_ADDR_CONFIG__ENABLE1GHASH_MASK: u32 = 0x2000;
+/// The value of `TCP_ADDR_CONFIG__ENABLE1GHASH__SHIFT` in gfx_v9_0.c
+pub const GC_TCP_ADDR_CONFIG__ENABLE1GHASH__SHIFT: u32 = 0xd;
+/// The value of `GRBM_GFX_INDEX__INSTANCE_BROADCAST_WRITES_MASK` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__INSTANCE_BROADCAST_WRITES_MASK: u32 = 0x40000000;
+/// The value of `GRBM_GFX_INDEX__INSTANCE_BROADCAST_WRITES__SHIFT` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__INSTANCE_BROADCAST_WRITES__SHIFT: u32 = 0x1e;
+/// The value of `GRBM_GFX_INDEX__INSTANCE_INDEX_MASK` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__INSTANCE_INDEX_MASK: u32 = 0xff;
+/// The value of `GRBM_GFX_INDEX__INSTANCE_INDEX__SHIFT` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__INSTANCE_INDEX__SHIFT: u32 = 0x0;
+/// The value of `GRBM_GFX_INDEX__SE_BROADCAST_WRITES_MASK` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__SE_BROADCAST_WRITES_MASK: u32 = 0x80000000;
+/// The value of `GRBM_GFX_INDEX__SE_BROADCAST_WRITES__SHIFT` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__SE_BROADCAST_WRITES__SHIFT: u32 = 0x1f;
+/// The value of `GRBM_GFX_INDEX__SE_INDEX_MASK` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__SE_INDEX_MASK: u32 = 0xff0000;
+/// The value of `GRBM_GFX_INDEX__SE_INDEX__SHIFT` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__SE_INDEX__SHIFT: u32 = 0x10;
+/// The value of `GRBM_GFX_INDEX__SH_BROADCAST_WRITES_MASK` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__SH_BROADCAST_WRITES_MASK: u32 = 0x20000000;
+/// The value of `GRBM_GFX_INDEX__SH_BROADCAST_WRITES__SHIFT` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__SH_BROADCAST_WRITES__SHIFT: u32 = 0x1d;
+/// The value of `GRBM_GFX_INDEX__SH_INDEX_MASK` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__SH_INDEX_MASK: u32 = 0xff00;
+/// The value of `GRBM_GFX_INDEX__SH_INDEX__SHIFT` in gfx_v9_0.c
+pub const GC_GRBM_GFX_INDEX__SH_INDEX__SHIFT: u32 = 0x8;
+/// The value of `SH_MEM_CONFIG__ALIGNMENT_MODE_MASK` in gfx_v9_0.c
+pub const GC_SH_MEM_CONFIG__ALIGNMENT_MODE_MASK: u32 = 0x18;
+/// The value of `SH_MEM_CONFIG__ALIGNMENT_MODE__SHIFT` in gfx_v9_0.c
+pub const GC_SH_MEM_CONFIG__ALIGNMENT_MODE__SHIFT: u32 = 0x3;
+/// The value of `SH_MEM_CONFIG__RETRY_DISABLE_MASK` in gfx_v9_0.c
+pub const GC_SH_MEM_CONFIG__RETRY_DISABLE_MASK: u32 = 0x1000;
+/// The value of `SH_MEM_CONFIG__RETRY_DISABLE__SHIFT` in gfx_v9_0.c
+pub const GC_SH_MEM_CONFIG__RETRY_DISABLE__SHIFT: u32 = 0xc;
+/// The value of `SH_MEM_BASES__PRIVATE_BASE_MASK` in gfx_v9_0.c
+pub const GC_SH_MEM_BASES__PRIVATE_BASE_MASK: u32 = 0xffff;
+/// The value of `SH_MEM_BASES__PRIVATE_BASE__SHIFT` in gfx_v9_0.c
+pub const GC_SH_MEM_BASES__PRIVATE_BASE__SHIFT: u32 = 0x0;
+/// The value of `SH_MEM_BASES__SHARED_BASE_MASK` in gfx_v9_0.c
+pub const GC_SH_MEM_BASES__SHARED_BASE_MASK: u32 = 0xffff0000;
+/// The value of `SH_MEM_BASES__SHARED_BASE__SHIFT` in gfx_v9_0.c
+pub const GC_SH_MEM_BASES__SHARED_BASE__SHIFT: u32 = 0x10;
+/// The value of `CP_INT_CNTL_RING0__CNTX_BUSY_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__CNTX_BUSY_INT_ENABLE_MASK: u32 = 0x80000;
+/// The value of `CP_INT_CNTL_RING0__CNTX_BUSY_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__CNTX_BUSY_INT_ENABLE__SHIFT: u32 = 0x13;
+/// The value of `CP_INT_CNTL_RING0__CNTX_EMPTY_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__CNTX_EMPTY_INT_ENABLE_MASK: u32 = 0x100000;
+/// The value of `CP_INT_CNTL_RING0__CNTX_EMPTY_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__CNTX_EMPTY_INT_ENABLE__SHIFT: u32 = 0x14;
+/// The value of `CP_INT_CNTL_RING0__CMP_BUSY_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__CMP_BUSY_INT_ENABLE_MASK: u32 = 0x40000;
+/// The value of `CP_INT_CNTL_RING0__CMP_BUSY_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__CMP_BUSY_INT_ENABLE__SHIFT: u32 = 0x12;
+/// The value of `CP_INT_CNTL_RING0__GFX_IDLE_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__GFX_IDLE_INT_ENABLE_MASK: u32 = 0x200000;
+/// The value of `CP_INT_CNTL_RING0__GFX_IDLE_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__GFX_IDLE_INT_ENABLE__SHIFT: u32 = 0x15;
+/// The value of `CP_ME_CNTL__CE_INVALIDATE_ICACHE_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__CE_INVALIDATE_ICACHE_MASK: u32 = 0x10;
+/// The value of `CP_ME_CNTL__CE_INVALIDATE_ICACHE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__CE_INVALIDATE_ICACHE__SHIFT: u32 = 0x4;
+/// The value of `CP_ME_CNTL__PFP_INVALIDATE_ICACHE_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__PFP_INVALIDATE_ICACHE_MASK: u32 = 0x40;
+/// The value of `CP_ME_CNTL__PFP_INVALIDATE_ICACHE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__PFP_INVALIDATE_ICACHE__SHIFT: u32 = 0x6;
+/// The value of `CP_ME_CNTL__ME_INVALIDATE_ICACHE_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__ME_INVALIDATE_ICACHE_MASK: u32 = 0x100;
+/// The value of `CP_ME_CNTL__ME_INVALIDATE_ICACHE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__ME_INVALIDATE_ICACHE__SHIFT: u32 = 0x8;
+/// The value of `CP_ME_CNTL__CE_PIPE0_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__CE_PIPE0_RESET_MASK: u32 = 0x10000;
+/// The value of `CP_ME_CNTL__CE_PIPE0_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__CE_PIPE0_RESET__SHIFT: u32 = 0x10;
+/// The value of `CP_ME_CNTL__CE_PIPE1_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__CE_PIPE1_RESET_MASK: u32 = 0x20000;
+/// The value of `CP_ME_CNTL__CE_PIPE1_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__CE_PIPE1_RESET__SHIFT: u32 = 0x11;
+/// The value of `CP_ME_CNTL__PFP_PIPE0_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__PFP_PIPE0_RESET_MASK: u32 = 0x40000;
+/// The value of `CP_ME_CNTL__PFP_PIPE0_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__PFP_PIPE0_RESET__SHIFT: u32 = 0x12;
+/// The value of `CP_ME_CNTL__PFP_PIPE1_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__PFP_PIPE1_RESET_MASK: u32 = 0x80000;
+/// The value of `CP_ME_CNTL__PFP_PIPE1_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__PFP_PIPE1_RESET__SHIFT: u32 = 0x13;
+/// The value of `CP_ME_CNTL__ME_PIPE0_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__ME_PIPE0_RESET_MASK: u32 = 0x100000;
+/// The value of `CP_ME_CNTL__ME_PIPE0_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__ME_PIPE0_RESET__SHIFT: u32 = 0x14;
+/// The value of `CP_ME_CNTL__ME_PIPE1_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__ME_PIPE1_RESET_MASK: u32 = 0x200000;
+/// The value of `CP_ME_CNTL__ME_PIPE1_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__ME_PIPE1_RESET__SHIFT: u32 = 0x15;
+/// The value of `CP_ME_CNTL__ME_HALT_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__ME_HALT_MASK: u32 = 0x10000000;
+/// The value of `CP_ME_CNTL__ME_HALT__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__ME_HALT__SHIFT: u32 = 0x1c;
+/// The value of `CP_ME_CNTL__PFP_HALT_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__PFP_HALT_MASK: u32 = 0x4000000;
+/// The value of `CP_ME_CNTL__PFP_HALT__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__PFP_HALT__SHIFT: u32 = 0x1a;
+/// The value of `CP_ME_CNTL__CE_HALT_MASK` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__CE_HALT_MASK: u32 = 0x1000000;
+/// The value of `CP_ME_CNTL__CE_HALT__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME_CNTL__CE_HALT__SHIFT: u32 = 0x18;
+/// The value of `CP_RB0_CNTL__RB_BUFSZ_MASK` in gfx_v9_0.c
+pub const GC_CP_RB0_CNTL__RB_BUFSZ_MASK: u32 = 0x3f;
+/// The value of `CP_RB0_CNTL__RB_BUFSZ__SHIFT` in gfx_v9_0.c
+pub const GC_CP_RB0_CNTL__RB_BUFSZ__SHIFT: u32 = 0x0;
+/// The value of `CP_RB0_CNTL__RB_BLKSZ_MASK` in gfx_v9_0.c
+pub const GC_CP_RB0_CNTL__RB_BLKSZ_MASK: u32 = 0x3f00;
+/// The value of `CP_RB0_CNTL__RB_BLKSZ__SHIFT` in gfx_v9_0.c
+pub const GC_CP_RB0_CNTL__RB_BLKSZ__SHIFT: u32 = 0x8;
+/// The value of `CP_RB0_CNTL__BUF_SWAP_MASK` in gfx_v9_0.c
+pub const GC_CP_RB0_CNTL__BUF_SWAP_MASK: u32 = 0x60000;
+/// The value of `CP_RB0_CNTL__BUF_SWAP__SHIFT` in gfx_v9_0.c
+pub const GC_CP_RB0_CNTL__BUF_SWAP__SHIFT: u32 = 0x11;
+/// The value of `CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK` in gfx_v9_0.c
+pub const GC_CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK: u32 = 0xffffffc;
+/// The value of `CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET__SHIFT: u32 = 0x2;
+/// The value of `CP_RB_DOORBELL_CONTROL__DOORBELL_EN_MASK` in gfx_v9_0.c
+pub const GC_CP_RB_DOORBELL_CONTROL__DOORBELL_EN_MASK: u32 = 0x40000000;
+/// The value of `CP_RB_DOORBELL_CONTROL__DOORBELL_EN__SHIFT` in gfx_v9_0.c
+pub const GC_CP_RB_DOORBELL_CONTROL__DOORBELL_EN__SHIFT: u32 = 0x1e;
+/// The value of `CP_RB_DOORBELL_RANGE_LOWER__DOORBELL_RANGE_LOWER_MASK` in gfx_v9_0.c
+pub const GC_CP_RB_DOORBELL_RANGE_LOWER__DOORBELL_RANGE_LOWER_MASK: u32 = 0xffffffc;
+/// The value of `CP_RB_DOORBELL_RANGE_LOWER__DOORBELL_RANGE_LOWER__SHIFT` in gfx_v9_0.c
+pub const GC_CP_RB_DOORBELL_RANGE_LOWER__DOORBELL_RANGE_LOWER__SHIFT: u32 = 0x2;
+/// The value of `CP_HQD_EOP_CONTROL__EOP_SIZE_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_EOP_CONTROL__EOP_SIZE_MASK: u32 = 0x3f;
+/// The value of `CP_HQD_EOP_CONTROL__EOP_SIZE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_EOP_CONTROL__EOP_SIZE__SHIFT: u32 = 0x0;
+/// The value of `CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK: u32 = 0xffffffc;
+/// The value of `CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET__SHIFT: u32 = 0x2;
+/// The value of `CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN_MASK: u32 = 0x40000000;
+/// The value of `CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN__SHIFT: u32 = 0x1e;
+/// The value of `CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_SOURCE_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_SOURCE_MASK: u32 = 0x10000000;
+/// The value of `CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_SOURCE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_SOURCE__SHIFT: u32 = 0x1c;
+/// The value of `CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_HIT_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_HIT_MASK: u32 = 0x80000000;
+/// The value of `CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_HIT__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_HIT__SHIFT: u32 = 0x1f;
+/// The value of `CP_MQD_CONTROL__VMID_MASK` in gfx_v9_0.c
+pub const GC_CP_MQD_CONTROL__VMID_MASK: u32 = 0xf;
+/// The value of `CP_MQD_CONTROL__VMID__SHIFT` in gfx_v9_0.c
+pub const GC_CP_MQD_CONTROL__VMID__SHIFT: u32 = 0x0;
+/// The value of `CP_HQD_PQ_CONTROL__QUEUE_SIZE_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__QUEUE_SIZE_MASK: u32 = 0x3f;
+/// The value of `CP_HQD_PQ_CONTROL__QUEUE_SIZE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__QUEUE_SIZE__SHIFT: u32 = 0x0;
+/// The value of `CP_HQD_PQ_CONTROL__RPTR_BLOCK_SIZE_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__RPTR_BLOCK_SIZE_MASK: u32 = 0x3f00;
+/// The value of `CP_HQD_PQ_CONTROL__RPTR_BLOCK_SIZE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__RPTR_BLOCK_SIZE__SHIFT: u32 = 0x8;
+/// The value of `CP_HQD_PQ_CONTROL__ENDIAN_SWAP_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__ENDIAN_SWAP_MASK: u32 = 0x60000;
+/// The value of `CP_HQD_PQ_CONTROL__ENDIAN_SWAP__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__ENDIAN_SWAP__SHIFT: u32 = 0x11;
+/// The value of `CP_HQD_PQ_CONTROL__UNORD_DISPATCH_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__UNORD_DISPATCH_MASK: u32 = 0x10000000;
+/// The value of `CP_HQD_PQ_CONTROL__UNORD_DISPATCH__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__UNORD_DISPATCH__SHIFT: u32 = 0x1c;
+/// The value of `CP_HQD_PQ_CONTROL__ROQ_PQ_IB_FLIP_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__ROQ_PQ_IB_FLIP_MASK: u32 = 0x20000000;
+/// The value of `CP_HQD_PQ_CONTROL__ROQ_PQ_IB_FLIP__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__ROQ_PQ_IB_FLIP__SHIFT: u32 = 0x1d;
+/// The value of `CP_HQD_PQ_CONTROL__PRIV_STATE_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__PRIV_STATE_MASK: u32 = 0x40000000;
+/// The value of `CP_HQD_PQ_CONTROL__PRIV_STATE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__PRIV_STATE__SHIFT: u32 = 0x1e;
+/// The value of `CP_HQD_PQ_CONTROL__KMD_QUEUE_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__KMD_QUEUE_MASK: u32 = 0x80000000;
+/// The value of `CP_HQD_PQ_CONTROL__KMD_QUEUE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PQ_CONTROL__KMD_QUEUE__SHIFT: u32 = 0x1f;
+/// The value of `CP_HQD_PERSISTENT_STATE__PRELOAD_SIZE_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_PERSISTENT_STATE__PRELOAD_SIZE_MASK: u32 = 0x3ff00;
+/// The value of `CP_HQD_PERSISTENT_STATE__PRELOAD_SIZE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_PERSISTENT_STATE__PRELOAD_SIZE__SHIFT: u32 = 0x8;
+/// The value of `CP_HQD_IB_CONTROL__MIN_IB_AVAIL_SIZE_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_IB_CONTROL__MIN_IB_AVAIL_SIZE_MASK: u32 = 0x300000;
+/// The value of `CP_HQD_IB_CONTROL__MIN_IB_AVAIL_SIZE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_HQD_IB_CONTROL__MIN_IB_AVAIL_SIZE__SHIFT: u32 = 0x14;
+/// The value of `mmRLC_CNTL` in gfx_v9_0.c
+pub const GC_mmRLC_CNTL: u32 = 0x4c00;
+/// The value of `mmRLC_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_CNTL_BASE_IDX: u32 = 0x1;
+/// The value of `RLC_CNTL__RLC_ENABLE_F32_MASK` in gfx_v9_0.c
+pub const GC_RLC_CNTL__RLC_ENABLE_F32_MASK: u32 = 0x1;
+/// The value of `RLC_CNTL__RLC_ENABLE_F32__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CNTL__RLC_ENABLE_F32__SHIFT: u32 = 0x0;
+/// The value of `mmRLC_SRM_CNTL` in gfx_v9_0.c
+pub const GC_mmRLC_SRM_CNTL: u32 = 0x4c80;
+/// The value of `mmRLC_SRM_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_SRM_CNTL_BASE_IDX: u32 = 0x1;
+/// The value of `RLC_SRM_CNTL__SRM_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_RLC_SRM_CNTL__SRM_ENABLE_MASK: u32 = 0x1;
+/// The value of `RLC_SRM_CNTL__SRM_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_SRM_CNTL__SRM_ENABLE__SHIFT: u32 = 0x0;
+/// The value of `mmCP_PQ_WPTR_POLL_CNTL` in gfx_v9_0.c
+pub const GC_mmCP_PQ_WPTR_POLL_CNTL: u32 = 0x1083;
+/// The value of `mmCP_PQ_WPTR_POLL_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_PQ_WPTR_POLL_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `CP_PQ_WPTR_POLL_CNTL__EN_MASK` in gfx_v9_0.c
+pub const GC_CP_PQ_WPTR_POLL_CNTL__EN_MASK: u32 = 0x80000000;
+/// The value of `CP_PQ_WPTR_POLL_CNTL__EN__SHIFT` in gfx_v9_0.c
+pub const GC_CP_PQ_WPTR_POLL_CNTL__EN__SHIFT: u32 = 0x1f;
+/// The value of `mmCP_PQ_STATUS` in gfx_v9_0.c
+pub const GC_mmCP_PQ_STATUS: u32 = 0x10b8;
+/// The value of `mmCP_PQ_STATUS_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_PQ_STATUS_BASE_IDX: u32 = 0x0;
+/// The value of `CP_PQ_STATUS__DOORBELL_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_PQ_STATUS__DOORBELL_ENABLE_MASK: u32 = 0x2;
+/// The value of `CP_PQ_STATUS__DOORBELL_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_PQ_STATUS__DOORBELL_ENABLE__SHIFT: u32 = 0x1;
+/// The value of `CC_RB_BACKEND_DISABLE__BACKEND_DISABLE_MASK` in gfx_v9_0.c
+pub const GC_CC_RB_BACKEND_DISABLE__BACKEND_DISABLE_MASK: u32 = 0xff0000;
+/// The value of `CC_RB_BACKEND_DISABLE__BACKEND_DISABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CC_RB_BACKEND_DISABLE__BACKEND_DISABLE__SHIFT: u32 = 0x10;
+/// The value of `GC_USER_RB_BACKEND_DISABLE__BACKEND_DISABLE_MASK` in gfx_v9_0.c
+pub const GC_GC_USER_RB_BACKEND_DISABLE__BACKEND_DISABLE_MASK: u32 = 0xff0000;
+/// The value of `GC_USER_RB_BACKEND_DISABLE__BACKEND_DISABLE__SHIFT` in gfx_v9_0.c
+pub const GC_GC_USER_RB_BACKEND_DISABLE__BACKEND_DISABLE__SHIFT: u32 = 0x10;
+/// The value of `GC_USER_SHADER_ARRAY_CONFIG__INACTIVE_CUS_MASK` in gfx_v9_0.c
+pub const GC_GC_USER_SHADER_ARRAY_CONFIG__INACTIVE_CUS_MASK: u32 = 0xffff0000;
+/// The value of `GC_USER_SHADER_ARRAY_CONFIG__INACTIVE_CUS__SHIFT` in gfx_v9_0.c
+pub const GC_GC_USER_SHADER_ARRAY_CONFIG__INACTIVE_CUS__SHIFT: u32 = 0x10;
+/// The value of `CC_GC_SHADER_ARRAY_CONFIG__INACTIVE_CUS_MASK` in gfx_v9_0.c
+pub const GC_CC_GC_SHADER_ARRAY_CONFIG__INACTIVE_CUS_MASK: u32 = 0xffff0000;
+/// The value of `CC_GC_SHADER_ARRAY_CONFIG__INACTIVE_CUS__SHIFT` in gfx_v9_0.c
+pub const GC_CC_GC_SHADER_ARRAY_CONFIG__INACTIVE_CUS__SHIFT: u32 = 0x10;
+/// The value of `CP_MEC_CNTL__MEC_INVALIDATE_ICACHE_MASK` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_INVALIDATE_ICACHE_MASK: u32 = 0x10;
+/// The value of `CP_MEC_CNTL__MEC_INVALIDATE_ICACHE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_INVALIDATE_ICACHE__SHIFT: u32 = 0x4;
+/// The value of `CP_MEC_CNTL__MEC_ME1_PIPE0_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME1_PIPE0_RESET_MASK: u32 = 0x10000;
+/// The value of `CP_MEC_CNTL__MEC_ME1_PIPE0_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME1_PIPE0_RESET__SHIFT: u32 = 0x10;
+/// The value of `CP_MEC_CNTL__MEC_ME1_PIPE1_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME1_PIPE1_RESET_MASK: u32 = 0x20000;
+/// The value of `CP_MEC_CNTL__MEC_ME1_PIPE1_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME1_PIPE1_RESET__SHIFT: u32 = 0x11;
+/// The value of `CP_MEC_CNTL__MEC_ME1_PIPE2_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME1_PIPE2_RESET_MASK: u32 = 0x40000;
+/// The value of `CP_MEC_CNTL__MEC_ME1_PIPE2_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME1_PIPE2_RESET__SHIFT: u32 = 0x12;
+/// The value of `CP_MEC_CNTL__MEC_ME1_PIPE3_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME1_PIPE3_RESET_MASK: u32 = 0x80000;
+/// The value of `CP_MEC_CNTL__MEC_ME1_PIPE3_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME1_PIPE3_RESET__SHIFT: u32 = 0x13;
+/// The value of `CP_MEC_CNTL__MEC_ME2_PIPE0_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME2_PIPE0_RESET_MASK: u32 = 0x100000;
+/// The value of `CP_MEC_CNTL__MEC_ME2_PIPE0_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME2_PIPE0_RESET__SHIFT: u32 = 0x14;
+/// The value of `CP_MEC_CNTL__MEC_ME2_PIPE1_RESET_MASK` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME2_PIPE1_RESET_MASK: u32 = 0x200000;
+/// The value of `CP_MEC_CNTL__MEC_ME2_PIPE1_RESET__SHIFT` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME2_PIPE1_RESET__SHIFT: u32 = 0x15;
+/// The value of `CP_MEC_CNTL__MEC_ME1_HALT_MASK` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME1_HALT_MASK: u32 = 0x40000000;
+/// The value of `CP_MEC_CNTL__MEC_ME1_HALT__SHIFT` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME1_HALT__SHIFT: u32 = 0x1e;
+/// The value of `CP_MEC_CNTL__MEC_ME2_HALT_MASK` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME2_HALT_MASK: u32 = 0x10000000;
+/// The value of `CP_MEC_CNTL__MEC_ME2_HALT__SHIFT` in gfx_v9_0.c
+pub const GC_CP_MEC_CNTL__MEC_ME2_HALT__SHIFT: u32 = 0x1c;
+/// The value of `CP_RB_RPTR_ADDR_HI__RB_RPTR_ADDR_HI_MASK` in gfx_v9_0.c
+pub const GC_CP_RB_RPTR_ADDR_HI__RB_RPTR_ADDR_HI_MASK: u32 = 0xffff;
+/// The value of `CP_RB_RPTR_ADDR_HI__RB_RPTR_ADDR_HI__SHIFT` in gfx_v9_0.c
+pub const GC_CP_RB_RPTR_ADDR_HI__RB_RPTR_ADDR_HI__SHIFT: u32 = 0x0;
+/// The value of `CP_RB_DOORBELL_RANGE_UPPER__DOORBELL_RANGE_UPPER_MASK` in gfx_v9_0.c
+pub const GC_CP_RB_DOORBELL_RANGE_UPPER__DOORBELL_RANGE_UPPER_MASK: u32 = 0xffffffc;
+/// The value of `CP_RB_DOORBELL_RANGE_UPPER__DOORBELL_RANGE_UPPER__SHIFT` in gfx_v9_0.c
+pub const GC_CP_RB_DOORBELL_RANGE_UPPER__DOORBELL_RANGE_UPPER__SHIFT: u32 = 0x2;
+/// The value of `CP_RB_WPTR_POLL_CNTL__IDLE_POLL_COUNT_MASK` in gfx_v9_0.c
+pub const GC_CP_RB_WPTR_POLL_CNTL__IDLE_POLL_COUNT_MASK: u32 = 0xffff0000;
+/// The value of `CP_RB_WPTR_POLL_CNTL__IDLE_POLL_COUNT__SHIFT` in gfx_v9_0.c
+pub const GC_CP_RB_WPTR_POLL_CNTL__IDLE_POLL_COUNT__SHIFT: u32 = 0x10;
+/// The value of `RLC_PG_DELAY__POWER_UP_DELAY_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY__POWER_UP_DELAY_MASK: u32 = 0xff;
+/// The value of `RLC_PG_DELAY__POWER_UP_DELAY__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY__POWER_UP_DELAY__SHIFT: u32 = 0x0;
+/// The value of `RLC_PG_DELAY__POWER_DOWN_DELAY_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY__POWER_DOWN_DELAY_MASK: u32 = 0xff00;
+/// The value of `RLC_PG_DELAY__POWER_DOWN_DELAY__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY__POWER_DOWN_DELAY__SHIFT: u32 = 0x8;
+/// The value of `RLC_PG_DELAY__CMD_PROPAGATE_DELAY_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY__CMD_PROPAGATE_DELAY_MASK: u32 = 0xff0000;
+/// The value of `RLC_PG_DELAY__CMD_PROPAGATE_DELAY__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY__CMD_PROPAGATE_DELAY__SHIFT: u32 = 0x10;
+/// The value of `RLC_PG_DELAY__MEM_SLEEP_DELAY_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY__MEM_SLEEP_DELAY_MASK: u32 = 0xff000000;
+/// The value of `RLC_PG_DELAY__MEM_SLEEP_DELAY__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY__MEM_SLEEP_DELAY__SHIFT: u32 = 0x18;
+/// The value of `RLC_PG_DELAY_2__SERDES_CMD_DELAY_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY_2__SERDES_CMD_DELAY_MASK: u32 = 0xff00;
+/// The value of `RLC_PG_DELAY_2__SERDES_CMD_DELAY__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY_2__SERDES_CMD_DELAY__SHIFT: u32 = 0x8;
+/// The value of `RLC_PG_DELAY_3__CGCG_ACTIVE_BEFORE_CGPG_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY_3__CGCG_ACTIVE_BEFORE_CGPG_MASK: u32 = 0xff;
+/// The value of `RLC_PG_DELAY_3__CGCG_ACTIVE_BEFORE_CGPG__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_DELAY_3__CGCG_ACTIVE_BEFORE_CGPG__SHIFT: u32 = 0x0;
+/// The value of `RLC_AUTO_PG_CTRL__GRBM_REG_SAVE_GFX_IDLE_THRESHOLD_MASK` in gfx_v9_0.c
+pub const GC_RLC_AUTO_PG_CTRL__GRBM_REG_SAVE_GFX_IDLE_THRESHOLD_MASK: u32 = 0x7fff8;
+/// The value of `RLC_AUTO_PG_CTRL__GRBM_REG_SAVE_GFX_IDLE_THRESHOLD__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_AUTO_PG_CTRL__GRBM_REG_SAVE_GFX_IDLE_THRESHOLD__SHIFT: u32 = 0x3;
+/// The value of `RLC_SERDES_NONCU_MASTER_BUSY__SE_MASTER_BUSY_MASK` in gfx_v9_0.c
+pub const GC_RLC_SERDES_NONCU_MASTER_BUSY__SE_MASTER_BUSY_MASK: u32 = 0xffff;
+/// The value of `RLC_SERDES_NONCU_MASTER_BUSY__SE_MASTER_BUSY__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_SERDES_NONCU_MASTER_BUSY__SE_MASTER_BUSY__SHIFT: u32 = 0x0;
+/// The value of `RLC_SERDES_NONCU_MASTER_BUSY__GC_MASTER_BUSY_MASK` in gfx_v9_0.c
+pub const GC_RLC_SERDES_NONCU_MASTER_BUSY__GC_MASTER_BUSY_MASK: u32 = 0x10000;
+/// The value of `RLC_SERDES_NONCU_MASTER_BUSY__GC_MASTER_BUSY__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_SERDES_NONCU_MASTER_BUSY__GC_MASTER_BUSY__SHIFT: u32 = 0x10;
+/// The value of `RLC_SERDES_NONCU_MASTER_BUSY__TC0_MASTER_BUSY_MASK` in gfx_v9_0.c
+pub const GC_RLC_SERDES_NONCU_MASTER_BUSY__TC0_MASTER_BUSY_MASK: u32 = 0x40000;
+/// The value of `RLC_SERDES_NONCU_MASTER_BUSY__TC0_MASTER_BUSY__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_SERDES_NONCU_MASTER_BUSY__TC0_MASTER_BUSY__SHIFT: u32 = 0x12;
+/// The value of `RLC_SERDES_NONCU_MASTER_BUSY__TC1_MASTER_BUSY_MASK` in gfx_v9_0.c
+pub const GC_RLC_SERDES_NONCU_MASTER_BUSY__TC1_MASTER_BUSY_MASK: u32 = 0x80000;
+/// The value of `RLC_SERDES_NONCU_MASTER_BUSY__TC1_MASTER_BUSY__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_SERDES_NONCU_MASTER_BUSY__TC1_MASTER_BUSY__SHIFT: u32 = 0x13;
+/// The value of `mmGRBM_GFX_CNTL` in soc15.c
+pub const GC_mmGRBM_GFX_CNTL: u32 = 0x22;
+/// The value of `mmGRBM_GFX_CNTL_BASE_IDX` in soc15.c
+pub const GC_mmGRBM_GFX_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `GRBM_GFX_CNTL__PIPEID_MASK` in soc15.c
+pub const GC_GRBM_GFX_CNTL__PIPEID_MASK: u32 = 0x3;
+/// The value of `GRBM_GFX_CNTL__PIPEID__SHIFT` in soc15.c
+pub const GC_GRBM_GFX_CNTL__PIPEID__SHIFT: u32 = 0x0;
+/// The value of `GRBM_GFX_CNTL__MEID_MASK` in soc15.c
+pub const GC_GRBM_GFX_CNTL__MEID_MASK: u32 = 0xc;
+/// The value of `GRBM_GFX_CNTL__MEID__SHIFT` in soc15.c
+pub const GC_GRBM_GFX_CNTL__MEID__SHIFT: u32 = 0x2;
+/// The value of `GRBM_GFX_CNTL__VMID_MASK` in soc15.c
+pub const GC_GRBM_GFX_CNTL__VMID_MASK: u32 = 0xf0;
+/// The value of `GRBM_GFX_CNTL__VMID__SHIFT` in soc15.c
+pub const GC_GRBM_GFX_CNTL__VMID__SHIFT: u32 = 0x4;
+/// The value of `GRBM_GFX_CNTL__QUEUEID_MASK` in soc15.c
+pub const GC_GRBM_GFX_CNTL__QUEUEID_MASK: u32 = 0x700;
+/// The value of `GRBM_GFX_CNTL__QUEUEID__SHIFT` in soc15.c
+pub const GC_GRBM_GFX_CNTL__QUEUEID__SHIFT: u32 = 0x8;
+
+// gfx_v9_0_hw_init: constants, packets, the MQD (gfx_v9_0.c, soc15d.h, v9_structs.h, amdgpu_gfx.h)
+/// amdgpu/cikd.h:214
+pub const PACKET_TYPE3: u32 = 0x3;
+/// amdgpu/cikd.h:392
+pub const PACKET3_PREAMBLE_CNTL: u32 = 0x4a;
+/// amdgpu/cikd.h:393
+pub const PACKET3_PREAMBLE_BEGIN_CLEAR_STATE: u32 = 0x20000000;
+/// amdgpu/cikd.h:394
+pub const PACKET3_PREAMBLE_END_CLEAR_STATE: u32 = 0x30000000;
+/// amdgpu/cikd.h:255
+pub const PACKET3_CONTEXT_CONTROL: u32 = 0x28;
+/// amdgpu/cikd.h:467
+pub const PACKET3_SET_CONTEXT_REG: u32 = 0x69;
+/// amdgpu/cikd.h:468
+pub const PACKET3_SET_CONTEXT_REG_START: u32 = 0xa000;
+/// amdgpu/cikd.h:240
+pub const PACKET3_CLEAR_STATE: u32 = 0x12;
+/// amdgpu/cikd.h:237
+pub const PACKET3_SET_BASE: u32 = 0x11;
+/// amdgpu/cikd.h:476
+pub const PACKET3_SET_UCONFIG_REG: u32 = 0x79;
+/// amdgpu/soc15d.h:446
+pub const PACKET3_SET_UCONFIG_REG_INDEX_TYPE: u32 = 0x20000000;
+/// amdgpu/cikd.h:477
+pub const PACKET3_SET_UCONFIG_REG_START: u32 = 0xc000;
+/// amdgpu/cikd.h:236
+pub const PACKET3_NOP: u32 = 0x10;
+/// amdgpu/nvd.h:581
+pub const PACKET3_SET_RESOURCES: u32 = 0xa0;
+/// amdgpu/nvd.h:595
+pub const PACKET3_MAP_QUEUES: u32 = 0xa2;
+/// include/navi10_enum.h:433
+pub const NUM_SIMD_PER_CU: u32 = 0x4;
+/// amdgpu/gfx_v9_0.c:2584
+pub const DEFAULT_SH_MEM_BASES: u32 = 0x6000;
+/// include/navi10_enum.h:13679
+pub const SH_MEM_ADDRESS_MODE_64: u32 = 0x0;
+/// include/navi10_enum.h:13701
+pub const SH_MEM_ALIGNMENT_MODE_UNALIGNED: u32 = 0x3;
+/// amdgpu/amdgpu_ids.h:34
+pub const AMDGPU_NUM_VMID: u32 = 0x10;
+/// include/amd_shared.h:164
+pub const AMD_PG_SUPPORT_GFX_SMG: u32 = 0x2;
+/// include/amd_shared.h:165
+pub const AMD_PG_SUPPORT_GFX_DMG: u32 = 0x4;
+/// include/amd_shared.h:169
+pub const AMD_PG_SUPPORT_GDS: u32 = 0x40;
+/// amdgpu/amdgpu_gfx.h:54
+pub const AMDGPU_GFX_PIPE_PRIO_HIGH: u32 = 0x2;
+/// amdgpu/amdgpu_gfx.h:58
+pub const AMDGPU_GFX_QUEUE_PRIORITY_MAXIMUM: u32 = 0xf;
+/// The value of `PACKET3_BASE_INDEX(CE_PARTITION_BASE)` in gfx_v9_0.c
+pub const PACKET3_BASE_INDEX_CE_PARTITION_BASE: u32 = 0x3;
+/// The value of `PACKET3_SET_RESOURCES_VMID_MASK(1)` in gfx_v9_0.c
+pub const PACKET3_SET_RESOURCES_VMID_MASK_1: u32 = 0x1;
+/// The value of `PACKET3_SET_RESOURCES_QUEUE_TYPE(1)` in gfx_v9_0.c
+pub const PACKET3_SET_RESOURCES_QUEUE_TYPE_1: u32 = 0x20000000;
+/// The value of `PACKET3_MAP_QUEUES_QUEUE_SEL(1)` in gfx_v9_0.c
+pub const PACKET3_MAP_QUEUES_QUEUE_SEL_1: u32 = 0x10;
+/// The value of `PACKET3_MAP_QUEUES_VMID(1)` in gfx_v9_0.c
+pub const PACKET3_MAP_QUEUES_VMID_1: u32 = 0x100;
+/// The value of `PACKET3_MAP_QUEUES_QUEUE(1)` in gfx_v9_0.c
+pub const PACKET3_MAP_QUEUES_QUEUE_1: u32 = 0x2000;
+/// The value of `PACKET3_MAP_QUEUES_PIPE(1)` in gfx_v9_0.c
+pub const PACKET3_MAP_QUEUES_PIPE_1: u32 = 0x10000;
+/// The value of `PACKET3_MAP_QUEUES_ME(1)` in gfx_v9_0.c
+pub const PACKET3_MAP_QUEUES_ME_1: u32 = 0x40000;
+/// The value of `PACKET3_MAP_QUEUES_QUEUE_TYPE(1)` in gfx_v9_0.c
+pub const PACKET3_MAP_QUEUES_QUEUE_TYPE_1: u32 = 0x200000;
+/// The value of `PACKET3_MAP_QUEUES_ALLOC_FORMAT(1)` in gfx_v9_0.c
+pub const PACKET3_MAP_QUEUES_ALLOC_FORMAT_1: u32 = 0x1000000;
+/// The value of `PACKET3_MAP_QUEUES_ENGINE_SEL(1)` in gfx_v9_0.c
+pub const PACKET3_MAP_QUEUES_ENGINE_SEL_1: u32 = 0x4000000;
+/// The value of `PACKET3_MAP_QUEUES_NUM_QUEUES(1)` in gfx_v9_0.c
+pub const PACKET3_MAP_QUEUES_NUM_QUEUES_1: u32 = 0x20000000;
+/// The value of `PACKET3_MAP_QUEUES_DOORBELL_OFFSET(1)` in gfx_v9_0.c
+pub const PACKET3_MAP_QUEUES_DOORBELL_OFFSET_1: u32 = 0x4;
+/// The value of `gfx_v9_0_kiq_pm4_funcs.set_resources_size` in gfx_v9_0.c
+pub const GFX_V9_0_KIQ_SET_RESOURCES_SIZE: u32 = 0x8;
+/// The value of `gfx_v9_0_kiq_pm4_funcs.map_queues_size` in gfx_v9_0.c
+pub const GFX_V9_0_KIQ_MAP_QUEUES_SIZE: u32 = 0x7;
+/// The value of `offsetof(struct v9_mqd_allocation, dynamic_cu_mask)` in gfx_v9_0.c
+pub const V9_MQD_ALLOCATION_dynamic_cu_mask: u32 = 0x808;
+/// The value of `offsetof(struct v9_mqd_allocation, dynamic_rb_mask)` in gfx_v9_0.c
+pub const V9_MQD_ALLOCATION_dynamic_rb_mask: u32 = 0x80c;
+/// The value of `offsetof(struct v9_mqd, header)` in gfx_v9_0.c
+pub const V9_MQD_header: u32 = 0x0;
+/// The value of `offsetof(struct v9_mqd, compute_pipelinestat_enable)` in gfx_v9_0.c
+pub const V9_MQD_compute_pipelinestat_enable: u32 = 0x2c;
+/// The value of `offsetof(struct v9_mqd, compute_static_thread_mgmt_se0)` in gfx_v9_0.c
+pub const V9_MQD_compute_static_thread_mgmt_se0: u32 = 0x5c;
+/// The value of `offsetof(struct v9_mqd, compute_static_thread_mgmt_se1)` in gfx_v9_0.c
+pub const V9_MQD_compute_static_thread_mgmt_se1: u32 = 0x60;
+/// The value of `offsetof(struct v9_mqd, compute_static_thread_mgmt_se2)` in gfx_v9_0.c
+pub const V9_MQD_compute_static_thread_mgmt_se2: u32 = 0x68;
+/// The value of `offsetof(struct v9_mqd, compute_static_thread_mgmt_se3)` in gfx_v9_0.c
+pub const V9_MQD_compute_static_thread_mgmt_se3: u32 = 0x6c;
+/// The value of `offsetof(struct v9_mqd, compute_static_thread_mgmt_se4)` in gfx_v9_0.c
+pub const V9_MQD_compute_static_thread_mgmt_se4: u32 = 0x9c;
+/// The value of `offsetof(struct v9_mqd, compute_static_thread_mgmt_se5)` in gfx_v9_0.c
+pub const V9_MQD_compute_static_thread_mgmt_se5: u32 = 0xa0;
+/// The value of `offsetof(struct v9_mqd, compute_static_thread_mgmt_se6)` in gfx_v9_0.c
+pub const V9_MQD_compute_static_thread_mgmt_se6: u32 = 0xa4;
+/// The value of `offsetof(struct v9_mqd, compute_static_thread_mgmt_se7)` in gfx_v9_0.c
+pub const V9_MQD_compute_static_thread_mgmt_se7: u32 = 0xa8;
+/// The value of `offsetof(struct v9_mqd, compute_misc_reserved)` in gfx_v9_0.c
+pub const V9_MQD_compute_misc_reserved: u32 = 0x80;
+/// The value of `offsetof(struct v9_mqd, dynamic_cu_mask_addr_lo)` in gfx_v9_0.c
+pub const V9_MQD_dynamic_cu_mask_addr_lo: u32 = 0x1f8;
+/// The value of `offsetof(struct v9_mqd, dynamic_cu_mask_addr_hi)` in gfx_v9_0.c
+pub const V9_MQD_dynamic_cu_mask_addr_hi: u32 = 0x1fc;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_eop_base_addr_lo)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_eop_base_addr_lo: u32 = 0x294;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_eop_base_addr_hi)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_eop_base_addr_hi: u32 = 0x298;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_eop_control)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_eop_control: u32 = 0x29c;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pq_doorbell_control)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pq_doorbell_control: u32 = 0x23c;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_dequeue_request)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_dequeue_request: u32 = 0x260;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pq_rptr)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pq_rptr: u32 = 0x228;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pq_wptr_lo)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pq_wptr_lo: u32 = 0x2d8;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pq_wptr_hi)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pq_wptr_hi: u32 = 0x2dc;
+/// The value of `offsetof(struct v9_mqd, cp_mqd_base_addr_lo)` in gfx_v9_0.c
+pub const V9_MQD_cp_mqd_base_addr_lo: u32 = 0x200;
+/// The value of `offsetof(struct v9_mqd, cp_mqd_base_addr_hi)` in gfx_v9_0.c
+pub const V9_MQD_cp_mqd_base_addr_hi: u32 = 0x204;
+/// The value of `offsetof(struct v9_mqd, cp_mqd_control)` in gfx_v9_0.c
+pub const V9_MQD_cp_mqd_control: u32 = 0x288;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pq_base_lo)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pq_base_lo: u32 = 0x220;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pq_base_hi)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pq_base_hi: u32 = 0x224;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pq_control)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pq_control: u32 = 0x244;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pq_rptr_report_addr_lo)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pq_rptr_report_addr_lo: u32 = 0x22c;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pq_rptr_report_addr_hi)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pq_rptr_report_addr_hi: u32 = 0x230;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pq_wptr_poll_addr_lo)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pq_wptr_poll_addr_lo: u32 = 0x234;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pq_wptr_poll_addr_hi)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pq_wptr_poll_addr_hi: u32 = 0x238;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_vmid)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_vmid: u32 = 0x20c;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_persistent_state)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_persistent_state: u32 = 0x210;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_ib_control)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_ib_control: u32 = 0x254;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_pipe_priority)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_pipe_priority: u32 = 0x214;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_queue_priority)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_queue_priority: u32 = 0x218;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_quantum)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_quantum: u32 = 0x21c;
+/// The value of `offsetof(struct v9_mqd, cp_hqd_active)` in gfx_v9_0.c
+pub const V9_MQD_cp_hqd_active: u32 = 0x208;
+/// The value of `mmRLC_SPM_MC_CNTL` in gfx_v9_0.c
+pub const GC_mmRLC_SPM_MC_CNTL: u32 = 0x4c71;
+/// The value of `mmRLC_SPM_MC_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_SPM_MC_CNTL_BASE_IDX: u32 = 0x1;
+/// The value of `mmGRBM_CNTL` in gfx_v9_0.c
+pub const GC_mmGRBM_CNTL: u32 = 0x0;
+/// The value of `mmGRBM_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmGRBM_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `GRBM_CNTL__READ_TIMEOUT_MASK` in gfx_v9_0.c
+pub const GC_GRBM_CNTL__READ_TIMEOUT_MASK: u32 = 0xff;
+/// The value of `GRBM_CNTL__READ_TIMEOUT__SHIFT` in gfx_v9_0.c
+pub const GC_GRBM_CNTL__READ_TIMEOUT__SHIFT: u32 = 0x0;
+/// The value of `RLC_SPM_MC_CNTL__RLC_SPM_VMID_MASK` in gfx_v9_0.c
+pub const GC_RLC_SPM_MC_CNTL__RLC_SPM_VMID_MASK: u32 = 0xf;
+/// The value of `RLC_SPM_MC_CNTL__RLC_SPM_VMID__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_SPM_MC_CNTL__RLC_SPM_VMID__SHIFT: u32 = 0x0;
+
+// sdma_v4_0_hw_init: registers and fields (generated by reg_names.py)
+/// The value of `mmSDMA0_SEM_WAIT_FAIL_TIMER_CNTL` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_SEM_WAIT_FAIL_TIMER_CNTL: u32 = 0x21;
+/// The value of `mmSDMA0_SEM_WAIT_FAIL_TIMER_CNTL_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_SEM_WAIT_FAIL_TIMER_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_CNTL` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_CNTL: u32 = 0x1c;
+/// The value of `mmSDMA0_CNTL_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_F32_CNTL` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_F32_CNTL: u32 = 0x2a;
+/// The value of `mmSDMA0_F32_CNTL_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_F32_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_CNTL` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_CNTL: u32 = 0x80;
+/// The value of `mmSDMA0_GFX_RB_CNTL_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_IB_CNTL` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_IB_CNTL: u32 = 0x8a;
+/// The value of `mmSDMA0_GFX_IB_CNTL_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_IB_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_PHASE0_QUANTUM` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_PHASE0_QUANTUM: u32 = 0x2c;
+/// The value of `mmSDMA0_PHASE0_QUANTUM_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_PHASE0_QUANTUM_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_PHASE1_QUANTUM` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_PHASE1_QUANTUM: u32 = 0x2d;
+/// The value of `mmSDMA0_PHASE1_QUANTUM_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_PHASE1_QUANTUM_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_PHASE2_QUANTUM` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_PHASE2_QUANTUM: u32 = 0x4f;
+/// The value of `mmSDMA0_PHASE2_QUANTUM_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_PHASE2_QUANTUM_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_PUB_DUMMY_REG2` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_PUB_DUMMY_REG2: u32 = 0x53;
+/// The value of `mmSDMA0_PUB_DUMMY_REG2_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_PUB_DUMMY_REG2_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_UTCL1_TIMEOUT` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_UTCL1_TIMEOUT: u32 = 0x47;
+/// The value of `mmSDMA0_UTCL1_TIMEOUT_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_UTCL1_TIMEOUT_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_RPTR` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_RPTR: u32 = 0x83;
+/// The value of `mmSDMA0_GFX_RB_RPTR_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_RPTR_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_RPTR_HI` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_RPTR_HI: u32 = 0x84;
+/// The value of `mmSDMA0_GFX_RB_RPTR_HI_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_RPTR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_WPTR` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_WPTR: u32 = 0x85;
+/// The value of `mmSDMA0_GFX_RB_WPTR_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_WPTR_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_WPTR_HI` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_WPTR_HI: u32 = 0x86;
+/// The value of `mmSDMA0_GFX_RB_WPTR_HI_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_WPTR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_RPTR_ADDR_HI` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_RPTR_ADDR_HI: u32 = 0x88;
+/// The value of `mmSDMA0_GFX_RB_RPTR_ADDR_HI_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_RPTR_ADDR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_RPTR_ADDR_LO` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_RPTR_ADDR_LO: u32 = 0x89;
+/// The value of `mmSDMA0_GFX_RB_RPTR_ADDR_LO_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_RPTR_ADDR_LO_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_BASE` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_BASE: u32 = 0x81;
+/// The value of `mmSDMA0_GFX_RB_BASE_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_BASE_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_BASE_HI` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_BASE_HI: u32 = 0x82;
+/// The value of `mmSDMA0_GFX_RB_BASE_HI_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_BASE_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_MINOR_PTR_UPDATE` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_MINOR_PTR_UPDATE: u32 = 0xb5;
+/// The value of `mmSDMA0_GFX_MINOR_PTR_UPDATE_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_MINOR_PTR_UPDATE_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_DOORBELL` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_DOORBELL: u32 = 0x92;
+/// The value of `mmSDMA0_GFX_DOORBELL_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_DOORBELL_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_DOORBELL_OFFSET` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_DOORBELL_OFFSET: u32 = 0xab;
+/// The value of `mmSDMA0_GFX_DOORBELL_OFFSET_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_DOORBELL_OFFSET_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_WPTR_POLL_ADDR_LO` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_WPTR_POLL_ADDR_LO: u32 = 0xb3;
+/// The value of `mmSDMA0_GFX_RB_WPTR_POLL_ADDR_LO_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_WPTR_POLL_ADDR_LO_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_WPTR_POLL_ADDR_HI` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_WPTR_POLL_ADDR_HI: u32 = 0xb2;
+/// The value of `mmSDMA0_GFX_RB_WPTR_POLL_ADDR_HI_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_WPTR_POLL_ADDR_HI_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_GFX_RB_WPTR_POLL_CNTL` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_WPTR_POLL_CNTL: u32 = 0x87;
+/// The value of `mmSDMA0_GFX_RB_WPTR_POLL_CNTL_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_GFX_RB_WPTR_POLL_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_POWER_CNTL` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_POWER_CNTL: u32 = 0x1a;
+/// The value of `mmSDMA0_POWER_CNTL_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_POWER_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_POWER_CNTL_DEFAULT` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_POWER_CNTL_DEFAULT: u32 = 0x4003c050;
+/// The value of `SDMA0_CNTL__UTC_L1_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CNTL__UTC_L1_ENABLE_MASK: u32 = 0x2;
+/// The value of `SDMA0_CNTL__UTC_L1_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CNTL__UTC_L1_ENABLE__SHIFT: u32 = 0x1;
+/// The value of `SDMA0_F32_CNTL__HALT_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_F32_CNTL__HALT_MASK: u32 = 0x1;
+/// The value of `SDMA0_F32_CNTL__HALT__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_F32_CNTL__HALT__SHIFT: u32 = 0x0;
+/// The value of `SDMA0_GFX_RB_CNTL__RB_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_CNTL__RB_ENABLE_MASK: u32 = 0x1;
+/// The value of `SDMA0_GFX_RB_CNTL__RB_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_CNTL__RB_ENABLE__SHIFT: u32 = 0x0;
+/// The value of `SDMA0_GFX_IB_CNTL__IB_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_IB_CNTL__IB_ENABLE_MASK: u32 = 0x1;
+/// The value of `SDMA0_GFX_IB_CNTL__IB_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_IB_CNTL__IB_ENABLE__SHIFT: u32 = 0x0;
+/// The value of `SDMA0_CNTL__AUTO_CTXSW_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CNTL__AUTO_CTXSW_ENABLE_MASK: u32 = 0x40000;
+/// The value of `SDMA0_CNTL__AUTO_CTXSW_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CNTL__AUTO_CTXSW_ENABLE__SHIFT: u32 = 0x12;
+/// The value of `SDMA0_GFX_RB_CNTL__RB_SIZE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_CNTL__RB_SIZE_MASK: u32 = 0x3e;
+/// The value of `SDMA0_GFX_RB_CNTL__RB_SIZE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_CNTL__RB_SIZE__SHIFT: u32 = 0x1;
+/// The value of `SDMA0_GFX_RB_CNTL__RB_SWAP_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_CNTL__RB_SWAP_ENABLE_MASK: u32 = 0x200;
+/// The value of `SDMA0_GFX_RB_CNTL__RB_SWAP_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_CNTL__RB_SWAP_ENABLE__SHIFT: u32 = 0x9;
+/// The value of `SDMA0_GFX_RB_CNTL__RPTR_WRITEBACK_SWAP_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_CNTL__RPTR_WRITEBACK_SWAP_ENABLE_MASK: u32 = 0x2000;
+/// The value of `SDMA0_GFX_RB_CNTL__RPTR_WRITEBACK_SWAP_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_CNTL__RPTR_WRITEBACK_SWAP_ENABLE__SHIFT: u32 = 0xd;
+/// The value of `SDMA0_GFX_RB_CNTL__RPTR_WRITEBACK_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_CNTL__RPTR_WRITEBACK_ENABLE_MASK: u32 = 0x1000;
+/// The value of `SDMA0_GFX_RB_CNTL__RPTR_WRITEBACK_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_CNTL__RPTR_WRITEBACK_ENABLE__SHIFT: u32 = 0xc;
+/// The value of `SDMA0_GFX_DOORBELL__ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_DOORBELL__ENABLE_MASK: u32 = 0x10000000;
+/// The value of `SDMA0_GFX_DOORBELL__ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_DOORBELL__ENABLE__SHIFT: u32 = 0x1c;
+/// The value of `SDMA0_GFX_DOORBELL_OFFSET__OFFSET_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_DOORBELL_OFFSET__OFFSET_MASK: u32 = 0xffffffc;
+/// The value of `SDMA0_GFX_DOORBELL_OFFSET__OFFSET__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_DOORBELL_OFFSET__OFFSET__SHIFT: u32 = 0x2;
+/// The value of `SDMA0_GFX_RB_WPTR_POLL_CNTL__F32_POLL_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_WPTR_POLL_CNTL__F32_POLL_ENABLE_MASK: u32 = 0x4;
+/// The value of `SDMA0_GFX_RB_WPTR_POLL_CNTL__F32_POLL_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_RB_WPTR_POLL_CNTL__F32_POLL_ENABLE__SHIFT: u32 = 0x2;
+/// The value of `SDMA0_GFX_IB_CNTL__IB_SWAP_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_IB_CNTL__IB_SWAP_ENABLE_MASK: u32 = 0x10;
+/// The value of `SDMA0_GFX_IB_CNTL__IB_SWAP_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_GFX_IB_CNTL__IB_SWAP_ENABLE__SHIFT: u32 = 0x4;
+/// The value of `SDMA0_PHASE0_QUANTUM__VALUE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_PHASE0_QUANTUM__VALUE_MASK: u32 = 0xffff00;
+/// The value of `SDMA0_PHASE0_QUANTUM__VALUE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_PHASE0_QUANTUM__VALUE__SHIFT: u32 = 0x8;
+/// The value of `SDMA0_PHASE0_QUANTUM__UNIT_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_PHASE0_QUANTUM__UNIT_MASK: u32 = 0xf;
+/// The value of `SDMA0_PHASE0_QUANTUM__UNIT__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_PHASE0_QUANTUM__UNIT__SHIFT: u32 = 0x0;
+/// The value of `SDMA0_POWER_CNTL__PG_CNTL_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_POWER_CNTL__PG_CNTL_ENABLE_MASK: u32 = 0x1;
+/// The value of `SDMA0_POWER_CNTL__PG_CNTL_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_POWER_CNTL__PG_CNTL_ENABLE__SHIFT: u32 = 0x0;
+/// The value of `SDMA0_CNTL__CTXEMPTY_INT_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CNTL__CTXEMPTY_INT_ENABLE_MASK: u32 = 0x10000000;
+/// The value of `SDMA0_CNTL__CTXEMPTY_INT_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CNTL__CTXEMPTY_INT_ENABLE__SHIFT: u32 = 0x1c;
+/// The value of `SDMA0_POWER_CNTL__ON_OFF_CONDITION_HOLD_TIME_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_POWER_CNTL__ON_OFF_CONDITION_HOLD_TIME_MASK: u32 = 0xf8;
+/// The value of `SDMA0_POWER_CNTL__ON_OFF_CONDITION_HOLD_TIME__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_POWER_CNTL__ON_OFF_CONDITION_HOLD_TIME__SHIFT: u32 = 0x3;
+/// The value of `SDMA0_POWER_CNTL__ON_OFF_STATUS_DURATION_TIME_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_POWER_CNTL__ON_OFF_STATUS_DURATION_TIME_MASK: u32 = 0xfc000000;
+/// The value of `SDMA0_POWER_CNTL__ON_OFF_STATUS_DURATION_TIME__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_POWER_CNTL__ON_OFF_STATUS_DURATION_TIME__SHIFT: u32 = 0x1a;
+
+// sdma_v4_0_hw_init (sdma_v4_0.c, vega10_sdma_pkt_open.h) and the SMU's SDMA power gate
+/// The value of `SDMA_PKT_HEADER_OP(SDMA_OP_WRITE)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_OP_WRITE: u32 = 0x2;
+/// The value of `SDMA_PKT_HEADER_SUB_OP(SDMA_SUBOP_WRITE_LINEAR)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_SUB_OP_WRITE_LINEAR: u32 = 0x0;
+/// amdgpu/iceland_sdma_pkt_open.h:1384
+pub const SDMA_PKT_WRITE_UNTILED_DW_3_count_mask: u32 = 0xfffff;
+/// amdgpu/iceland_sdma_pkt_open.h:1385
+pub const SDMA_PKT_WRITE_UNTILED_DW_3_count_shift: u32 = 0x0;
+/// amdgpu/iceland_sdma_pkt_open.h:2168
+pub const SDMA_PKT_NOP_HEADER_count_mask: u32 = 0x3fff;
+/// amdgpu/iceland_sdma_pkt_open.h:2169
+pub const SDMA_PKT_NOP_HEADER_count_shift: u32 = 0x10;
+/// ?
+pub const POWER_STATE_ON: u32 = 0x1;
+/// ?
+pub const POWER_STATE_OFF: u32 = 0x2;
+/// include/amd_shared.h:112
+pub const AMD_IP_BLOCK_TYPE_NUM: u32 = 0x11;
+/// ?
+pub const SMU_MSG_PowerUpSdma: u32 = 0x70;
+/// ?
+pub const SMU_MSG_PowerDownSdma: u32 = 0x6f;
+/// The value of `__smu_message_names[SMU_MSG_PowerUpSdma]` in ../pm/swsmu/smu_cmn.c
+pub const PowerUpSdma_NAME: &[u8] = b"PowerUpSdma";
+/// The value of `__smu_message_names[SMU_MSG_PowerDownSdma]` in ../pm/swsmu/smu_cmn.c
+pub const PowerDownSdma_NAME: &[u8] = b"PowerDownSdma";
+
+// stage 4: interrupts, fences, IBs, late_init gating, hw_fini (registers by reg_names.py, the rest by hand)
+/// The value of `mmCP_ME1_PIPE0_INT_CNTL` in gfx_v9_0.c
+pub const GC_mmCP_ME1_PIPE0_INT_CNTL: u32 = 0x1085;
+/// The value of `mmCP_ME1_PIPE0_INT_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_ME1_PIPE0_INT_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_ME1_PIPE1_INT_CNTL` in gfx_v9_0.c
+pub const GC_mmCP_ME1_PIPE1_INT_CNTL: u32 = 0x1086;
+/// The value of `mmCP_ME1_PIPE1_INT_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_ME1_PIPE1_INT_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_ME1_PIPE2_INT_CNTL` in gfx_v9_0.c
+pub const GC_mmCP_ME1_PIPE2_INT_CNTL: u32 = 0x1087;
+/// The value of `mmCP_ME1_PIPE2_INT_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_ME1_PIPE2_INT_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_ME1_PIPE3_INT_CNTL` in gfx_v9_0.c
+pub const GC_mmCP_ME1_PIPE3_INT_CNTL: u32 = 0x1088;
+/// The value of `mmCP_ME1_PIPE3_INT_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_ME1_PIPE3_INT_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmCPC_INT_STATUS` in gfx_v9_0.c
+pub const GC_mmCPC_INT_STATUS: u32 = 0x10b5;
+/// The value of `mmCPC_INT_STATUS_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCPC_INT_STATUS_BASE_IDX: u32 = 0x0;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_GFX` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_GFX: u32 = 0x11c7;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_GFX_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_GFX_BASE_IDX: u32 = 0x0;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_GFX_DEFAULT` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_GFX_DEFAULT: u32 = 0x7ffffff;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_CS0` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_CS0: u32 = 0x11c9;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_CS0_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_CS0_BASE_IDX: u32 = 0x0;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_CS0_DEFAULT` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_CS0_DEFAULT: u32 = 0x7f;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_CS1` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_CS1: u32 = 0x11ca;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_CS1_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_CS1_BASE_IDX: u32 = 0x0;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_CS2` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_CS2: u32 = 0x11cb;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_CS2_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_CS2_BASE_IDX: u32 = 0x0;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_CS3` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_CS3: u32 = 0x11cc;
+/// The value of `mmSPI_WCL_PIPE_PERCENT_CS3_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSPI_WCL_PIPE_PERCENT_CS3_BASE_IDX: u32 = 0x0;
+/// The value of `mmGDS_COMPUTE_MAX_WAVE_ID` in gfx_v9_0.c
+pub const GC_mmGDS_COMPUTE_MAX_WAVE_ID: u32 = 0x1348;
+/// The value of `mmGDS_COMPUTE_MAX_WAVE_ID_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmGDS_COMPUTE_MAX_WAVE_ID_BASE_IDX: u32 = 0x0;
+/// The value of `mmRLC_CGTT_MGCG_OVERRIDE` in gfx_v9_0.c
+pub const GC_mmRLC_CGTT_MGCG_OVERRIDE: u32 = 0x4c48;
+/// The value of `mmRLC_CGTT_MGCG_OVERRIDE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_CGTT_MGCG_OVERRIDE_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_MEM_SLP_CNTL` in gfx_v9_0.c
+pub const GC_mmRLC_MEM_SLP_CNTL: u32 = 0x4c06;
+/// The value of `mmRLC_MEM_SLP_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_MEM_SLP_CNTL_BASE_IDX: u32 = 0x1;
+/// The value of `mmCP_MEM_SLP_CNTL` in gfx_v9_0.c
+pub const GC_mmCP_MEM_SLP_CNTL: u32 = 0x1079;
+/// The value of `mmCP_MEM_SLP_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_MEM_SLP_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `mmRLC_CGCG_CGLS_CTRL_3D` in gfx_v9_0.c
+pub const GC_mmRLC_CGCG_CGLS_CTRL_3D: u32 = 0x4cc5;
+/// The value of `mmRLC_CGCG_CGLS_CTRL_3D_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_CGCG_CGLS_CTRL_3D_BASE_IDX: u32 = 0x1;
+/// The value of `mmRLC_SAFE_MODE` in gfx_v9_0.c
+pub const GC_mmRLC_SAFE_MODE: u32 = 0x4c05;
+/// The value of `mmRLC_SAFE_MODE_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_SAFE_MODE_BASE_IDX: u32 = 0x1;
+/// The value of `mmSPI_GDBG_TRAP_CONFIG` in gfx_v9_0.c
+pub const GC_mmSPI_GDBG_TRAP_CONFIG: u32 = 0x11d2;
+/// The value of `mmSPI_GDBG_TRAP_CONFIG_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSPI_GDBG_TRAP_CONFIG_BASE_IDX: u32 = 0x0;
+/// The value of `mmSPI_GDBG_TRAP_MASK` in gfx_v9_0.c
+pub const GC_mmSPI_GDBG_TRAP_MASK: u32 = 0x11d3;
+/// The value of `mmSPI_GDBG_TRAP_MASK_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSPI_GDBG_TRAP_MASK_BASE_IDX: u32 = 0x0;
+/// The value of `mmSPI_GDBG_TRAP_DATA0` in gfx_v9_0.c
+pub const GC_mmSPI_GDBG_TRAP_DATA0: u32 = 0x11d8;
+/// The value of `mmSPI_GDBG_TRAP_DATA0_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSPI_GDBG_TRAP_DATA0_BASE_IDX: u32 = 0x0;
+/// The value of `mmSPI_GDBG_TRAP_DATA1` in gfx_v9_0.c
+pub const GC_mmSPI_GDBG_TRAP_DATA1: u32 = 0x11d9;
+/// The value of `mmSPI_GDBG_TRAP_DATA1_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSPI_GDBG_TRAP_DATA1_BASE_IDX: u32 = 0x0;
+/// The value of `mmCP_HQD_IQ_TIMER` in gfx_v9_0.c
+pub const GC_mmCP_HQD_IQ_TIMER: u32 = 0x125b;
+/// The value of `mmCP_HQD_IQ_TIMER_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmCP_HQD_IQ_TIMER_BASE_IDX: u32 = 0x0;
+/// The value of `mmRLC_PG_CNTL` in gfx_v9_0.c
+pub const GC_mmRLC_PG_CNTL: u32 = 0x4c43;
+/// The value of `mmRLC_PG_CNTL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmRLC_PG_CNTL_BASE_IDX: u32 = 0x1;
+/// The value of `mmDB_RENDER_CONTROL` in gfx_v9_0.c
+pub const GC_mmDB_RENDER_CONTROL: u32 = 0x0;
+/// The value of `mmDB_RENDER_CONTROL_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmDB_RENDER_CONTROL_BASE_IDX: u32 = 0x1;
+/// The value of `CP_ME1_PIPE0_INT_CNTL__TIME_STAMP_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE0_INT_CNTL__TIME_STAMP_INT_ENABLE_MASK: u32 = 0x4000000;
+/// The value of `CP_ME1_PIPE0_INT_CNTL__TIME_STAMP_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE0_INT_CNTL__TIME_STAMP_INT_ENABLE__SHIFT: u32 = 0x1a;
+/// The value of `CP_ME1_PIPE0_INT_CNTL__PRIV_REG_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE0_INT_CNTL__PRIV_REG_INT_ENABLE_MASK: u32 = 0x800000;
+/// The value of `CP_ME1_PIPE0_INT_CNTL__PRIV_REG_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE0_INT_CNTL__PRIV_REG_INT_ENABLE__SHIFT: u32 = 0x17;
+/// The value of `CP_ME1_PIPE0_INT_CNTL__OPCODE_ERROR_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE0_INT_CNTL__OPCODE_ERROR_INT_ENABLE_MASK: u32 = 0x1000000;
+/// The value of `CP_ME1_PIPE0_INT_CNTL__OPCODE_ERROR_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE0_INT_CNTL__OPCODE_ERROR_INT_ENABLE__SHIFT: u32 = 0x18;
+/// The value of `SPI_GDBG_TRAP_CONFIG__VMID_SEL_MASK` in gfx_v9_0.c
+pub const GC_SPI_GDBG_TRAP_CONFIG__VMID_SEL_MASK: u32 = 0xffff0000;
+/// The value of `SPI_GDBG_TRAP_CONFIG__VMID_SEL__SHIFT` in gfx_v9_0.c
+pub const GC_SPI_GDBG_TRAP_CONFIG__VMID_SEL__SHIFT: u32 = 0x10;
+/// The value of `SPI_GDBG_TRAP_CONFIG__TRAP_EN_MASK` in gfx_v9_0.c
+pub const GC_SPI_GDBG_TRAP_CONFIG__TRAP_EN_MASK: u32 = 0x8000;
+/// The value of `SPI_GDBG_TRAP_CONFIG__TRAP_EN__SHIFT` in gfx_v9_0.c
+pub const GC_SPI_GDBG_TRAP_CONFIG__TRAP_EN__SHIFT: u32 = 0xf;
+/// The value of `RLC_PG_CNTL__SMU_CLK_SLOWDOWN_ON_PU_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__SMU_CLK_SLOWDOWN_ON_PU_ENABLE_MASK: u32 = 0x20000;
+/// The value of `RLC_PG_CNTL__SMU_CLK_SLOWDOWN_ON_PU_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__SMU_CLK_SLOWDOWN_ON_PU_ENABLE__SHIFT: u32 = 0x11;
+/// The value of `RLC_PG_CNTL__SMU_CLK_SLOWDOWN_ON_PD_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__SMU_CLK_SLOWDOWN_ON_PD_ENABLE_MASK: u32 = 0x40000;
+/// The value of `RLC_PG_CNTL__SMU_CLK_SLOWDOWN_ON_PD_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__SMU_CLK_SLOWDOWN_ON_PD_ENABLE__SHIFT: u32 = 0x12;
+/// The value of `RLC_PG_CNTL__CP_PG_DISABLE_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__CP_PG_DISABLE_MASK: u32 = 0x8000;
+/// The value of `RLC_PG_CNTL__CP_PG_DISABLE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__CP_PG_DISABLE__SHIFT: u32 = 0xf;
+/// The value of `RLC_PG_CNTL__GFX_POWER_GATING_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__GFX_POWER_GATING_ENABLE_MASK: u32 = 0x1;
+/// The value of `RLC_PG_CNTL__GFX_POWER_GATING_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__GFX_POWER_GATING_ENABLE__SHIFT: u32 = 0x0;
+/// The value of `RLC_PG_CNTL__GFX_PIPELINE_PG_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__GFX_PIPELINE_PG_ENABLE_MASK: u32 = 0x10;
+/// The value of `RLC_PG_CNTL__GFX_PIPELINE_PG_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__GFX_PIPELINE_PG_ENABLE__SHIFT: u32 = 0x4;
+/// The value of `RLC_PG_CNTL__STATIC_PER_CU_PG_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__STATIC_PER_CU_PG_ENABLE_MASK: u32 = 0x8;
+/// The value of `RLC_PG_CNTL__STATIC_PER_CU_PG_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__STATIC_PER_CU_PG_ENABLE__SHIFT: u32 = 0x3;
+/// The value of `RLC_PG_CNTL__DYN_PER_CU_PG_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__DYN_PER_CU_PG_ENABLE_MASK: u32 = 0x4;
+/// The value of `RLC_PG_CNTL__DYN_PER_CU_PG_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_PG_CNTL__DYN_PER_CU_PG_ENABLE__SHIFT: u32 = 0x2;
+/// The value of `CP_INT_CNTL_RING0__TIME_STAMP_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__TIME_STAMP_INT_ENABLE_MASK: u32 = 0x4000000;
+/// The value of `CP_INT_CNTL_RING0__TIME_STAMP_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__TIME_STAMP_INT_ENABLE__SHIFT: u32 = 0x1a;
+/// The value of `CP_INT_CNTL_RING0__PRIV_REG_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__PRIV_REG_INT_ENABLE_MASK: u32 = 0x800000;
+/// The value of `CP_INT_CNTL_RING0__PRIV_REG_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__PRIV_REG_INT_ENABLE__SHIFT: u32 = 0x17;
+/// The value of `CP_INT_CNTL_RING0__OPCODE_ERROR_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__OPCODE_ERROR_INT_ENABLE_MASK: u32 = 0x1000000;
+/// The value of `CP_INT_CNTL_RING0__OPCODE_ERROR_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__OPCODE_ERROR_INT_ENABLE__SHIFT: u32 = 0x18;
+/// The value of `CP_INT_CNTL_RING0__PRIV_INSTR_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__PRIV_INSTR_INT_ENABLE_MASK: u32 = 0x400000;
+/// The value of `CP_INT_CNTL_RING0__PRIV_INSTR_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__PRIV_INSTR_INT_ENABLE__SHIFT: u32 = 0x16;
+/// The value of `CP_INT_CNTL_RING0__CP_ECC_ERROR_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__CP_ECC_ERROR_INT_ENABLE_MASK: u32 = 0x4000;
+/// The value of `CP_INT_CNTL_RING0__CP_ECC_ERROR_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_INT_CNTL_RING0__CP_ECC_ERROR_INT_ENABLE__SHIFT: u32 = 0xe;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__CPF_CGTT_SCLK_OVERRIDE_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__CPF_CGTT_SCLK_OVERRIDE_MASK: u32 = 0x1;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__CPF_CGTT_SCLK_OVERRIDE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__CPF_CGTT_SCLK_OVERRIDE__SHIFT: u32 = 0x0;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GRBM_CGTT_SCLK_OVERRIDE_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GRBM_CGTT_SCLK_OVERRIDE_MASK: u32 = 0x20;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GRBM_CGTT_SCLK_OVERRIDE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GRBM_CGTT_SCLK_OVERRIDE__SHIFT: u32 = 0x5;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GFXIP_MGCG_OVERRIDE_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GFXIP_MGCG_OVERRIDE_MASK: u32 = 0x4;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GFXIP_MGCG_OVERRIDE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GFXIP_MGCG_OVERRIDE__SHIFT: u32 = 0x2;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GFXIP_MGLS_OVERRIDE_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GFXIP_MGLS_OVERRIDE_MASK: u32 = 0x40;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GFXIP_MGLS_OVERRIDE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GFXIP_MGLS_OVERRIDE__SHIFT: u32 = 0x6;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__RLC_CGTT_SCLK_OVERRIDE_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__RLC_CGTT_SCLK_OVERRIDE_MASK: u32 = 0x2;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__RLC_CGTT_SCLK_OVERRIDE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__RLC_CGTT_SCLK_OVERRIDE__SHIFT: u32 = 0x1;
+/// The value of `RLC_MEM_SLP_CNTL__RLC_MEM_LS_EN_MASK` in gfx_v9_0.c
+pub const GC_RLC_MEM_SLP_CNTL__RLC_MEM_LS_EN_MASK: u32 = 0x1;
+/// The value of `RLC_MEM_SLP_CNTL__RLC_MEM_LS_EN__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_MEM_SLP_CNTL__RLC_MEM_LS_EN__SHIFT: u32 = 0x0;
+/// The value of `CP_MEM_SLP_CNTL__CP_MEM_LS_EN_MASK` in gfx_v9_0.c
+pub const GC_CP_MEM_SLP_CNTL__CP_MEM_LS_EN_MASK: u32 = 0x1;
+/// The value of `CP_MEM_SLP_CNTL__CP_MEM_LS_EN__SHIFT` in gfx_v9_0.c
+pub const GC_CP_MEM_SLP_CNTL__CP_MEM_LS_EN__SHIFT: u32 = 0x0;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GFXIP_GFX3D_CG_OVERRIDE_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GFXIP_GFX3D_CG_OVERRIDE_MASK: u32 = 0x80;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GFXIP_GFX3D_CG_OVERRIDE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GFXIP_GFX3D_CG_OVERRIDE__SHIFT: u32 = 0x7;
+/// The value of `RLC_CGCG_CGLS_CTRL_3D__CGCG_GFX_IDLE_THRESHOLD_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL_3D__CGCG_GFX_IDLE_THRESHOLD_MASK: u32 = 0x7ffff00;
+/// The value of `RLC_CGCG_CGLS_CTRL_3D__CGCG_GFX_IDLE_THRESHOLD__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL_3D__CGCG_GFX_IDLE_THRESHOLD__SHIFT: u32 = 0x8;
+/// The value of `RLC_CGCG_CGLS_CTRL_3D__CGCG_EN_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL_3D__CGCG_EN_MASK: u32 = 0x1;
+/// The value of `RLC_CGCG_CGLS_CTRL_3D__CGCG_EN__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL_3D__CGCG_EN__SHIFT: u32 = 0x0;
+/// The value of `RLC_CGCG_CGLS_CTRL_3D__CGLS_REP_COMPANSAT_DELAY_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL_3D__CGLS_REP_COMPANSAT_DELAY_MASK: u32 = 0xfc;
+/// The value of `RLC_CGCG_CGLS_CTRL_3D__CGLS_REP_COMPANSAT_DELAY__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL_3D__CGLS_REP_COMPANSAT_DELAY__SHIFT: u32 = 0x2;
+/// The value of `RLC_CGCG_CGLS_CTRL_3D__CGLS_EN_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL_3D__CGLS_EN_MASK: u32 = 0x2;
+/// The value of `RLC_CGCG_CGLS_CTRL_3D__CGLS_EN__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL_3D__CGLS_EN__SHIFT: u32 = 0x1;
+/// The value of `CP_RB_WPTR_POLL_CNTL__POLL_FREQUENCY_MASK` in gfx_v9_0.c
+pub const GC_CP_RB_WPTR_POLL_CNTL__POLL_FREQUENCY_MASK: u32 = 0xffff;
+/// The value of `CP_RB_WPTR_POLL_CNTL__POLL_FREQUENCY__SHIFT` in gfx_v9_0.c
+pub const GC_CP_RB_WPTR_POLL_CNTL__POLL_FREQUENCY__SHIFT: u32 = 0x0;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGCG_OVERRIDE_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGCG_OVERRIDE_MASK: u32 = 0x8;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGCG_OVERRIDE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGCG_OVERRIDE__SHIFT: u32 = 0x3;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGLS_OVERRIDE_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGLS_OVERRIDE_MASK: u32 = 0x10;
+/// The value of `RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGLS_OVERRIDE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGLS_OVERRIDE__SHIFT: u32 = 0x4;
+/// The value of `RLC_CGCG_CGLS_CTRL__CGCG_GFX_IDLE_THRESHOLD_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL__CGCG_GFX_IDLE_THRESHOLD_MASK: u32 = 0x7ffff00;
+/// The value of `RLC_CGCG_CGLS_CTRL__CGCG_GFX_IDLE_THRESHOLD__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL__CGCG_GFX_IDLE_THRESHOLD__SHIFT: u32 = 0x8;
+/// The value of `RLC_CGCG_CGLS_CTRL__CGCG_EN_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL__CGCG_EN_MASK: u32 = 0x1;
+/// The value of `RLC_CGCG_CGLS_CTRL__CGCG_EN__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL__CGCG_EN__SHIFT: u32 = 0x0;
+/// The value of `RLC_CGCG_CGLS_CTRL__CGLS_REP_COMPANSAT_DELAY_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL__CGLS_REP_COMPANSAT_DELAY_MASK: u32 = 0xfc;
+/// The value of `RLC_CGCG_CGLS_CTRL__CGLS_REP_COMPANSAT_DELAY__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL__CGLS_REP_COMPANSAT_DELAY__SHIFT: u32 = 0x2;
+/// The value of `RLC_CGCG_CGLS_CTRL__CGLS_EN_MASK` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL__CGLS_EN_MASK: u32 = 0x2;
+/// The value of `RLC_CGCG_CGLS_CTRL__CGLS_EN__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_CGCG_CGLS_CTRL__CGLS_EN__SHIFT: u32 = 0x1;
+/// The value of `RLC_SAFE_MODE__CMD_MASK` in gfx_v9_0.c
+pub const GC_RLC_SAFE_MODE__CMD_MASK: u32 = 0x1;
+/// The value of `RLC_SAFE_MODE__CMD__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_SAFE_MODE__CMD__SHIFT: u32 = 0x0;
+/// The value of `RLC_SAFE_MODE__MESSAGE_MASK` in gfx_v9_0.c
+pub const GC_RLC_SAFE_MODE__MESSAGE_MASK: u32 = 0x1e;
+/// The value of `RLC_SAFE_MODE__MESSAGE__SHIFT` in gfx_v9_0.c
+pub const GC_RLC_SAFE_MODE__MESSAGE__SHIFT: u32 = 0x1;
+/// The value of `mmATC_L2_MISC_CG` in mmhub_v1_0.c
+pub const MM_mmATC_L2_MISC_CG: u32 = 0x64a;
+/// The value of `mmATC_L2_MISC_CG_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmATC_L2_MISC_CG_BASE_IDX: u32 = 0x0;
+/// The value of `mmDAGB0_CNTL_MISC2` in mmhub_v1_0.c
+pub const MM_mmDAGB0_CNTL_MISC2: u32 = 0x63;
+/// The value of `mmDAGB0_CNTL_MISC2_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmDAGB0_CNTL_MISC2_BASE_IDX: u32 = 0x0;
+/// The value of `mmDAGB1_CNTL_MISC2` in mmhub_v1_0.c
+pub const MM_mmDAGB1_CNTL_MISC2: u32 = 0xe3;
+/// The value of `mmDAGB1_CNTL_MISC2_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmDAGB1_CNTL_MISC2_BASE_IDX: u32 = 0x0;
+/// The value of `mmDAGB0_CNTL_MISC2_RV` in mmhub_v1_0.c
+pub const MM_mmDAGB0_CNTL_MISC2_RV: u32 = 0x8f;
+/// The value of `mmDAGB0_CNTL_MISC2_RV_BASE_IDX` in mmhub_v1_0.c
+pub const MM_mmDAGB0_CNTL_MISC2_RV_BASE_IDX: u32 = 0x0;
+/// The value of `ATC_L2_MISC_CG__ENABLE_MASK` in mmhub_v1_0.c
+pub const MM_ATC_L2_MISC_CG__ENABLE_MASK: u32 = 0x40000;
+/// The value of `ATC_L2_MISC_CG__ENABLE__SHIFT` in mmhub_v1_0.c
+pub const MM_ATC_L2_MISC_CG__ENABLE__SHIFT: u32 = 0x12;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_WRREQ_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_WRREQ_CG_MASK: u32 = 0x4;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_WRREQ_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_WRREQ_CG__SHIFT: u32 = 0x2;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_WRRET_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_WRRET_CG_MASK: u32 = 0x8;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_WRRET_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_WRRET_CG__SHIFT: u32 = 0x3;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_RDREQ_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_RDREQ_CG_MASK: u32 = 0x10;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_RDREQ_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_RDREQ_CG__SHIFT: u32 = 0x4;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_RDRET_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_RDRET_CG_MASK: u32 = 0x20;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_RDRET_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_RDRET_CG__SHIFT: u32 = 0x5;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_TLBWR_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_TLBWR_CG_MASK: u32 = 0x40;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_TLBWR_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_TLBWR_CG__SHIFT: u32 = 0x6;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_TLBRD_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_TLBRD_CG_MASK: u32 = 0x80;
+/// The value of `DAGB0_CNTL_MISC2__DISABLE_TLBRD_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB0_CNTL_MISC2__DISABLE_TLBRD_CG__SHIFT: u32 = 0x7;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_WRREQ_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_WRREQ_CG_MASK: u32 = 0x4;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_WRREQ_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_WRREQ_CG__SHIFT: u32 = 0x2;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_WRRET_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_WRRET_CG_MASK: u32 = 0x8;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_WRRET_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_WRRET_CG__SHIFT: u32 = 0x3;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_RDREQ_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_RDREQ_CG_MASK: u32 = 0x10;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_RDREQ_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_RDREQ_CG__SHIFT: u32 = 0x4;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_RDRET_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_RDRET_CG_MASK: u32 = 0x20;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_RDRET_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_RDRET_CG__SHIFT: u32 = 0x5;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_TLBWR_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_TLBWR_CG_MASK: u32 = 0x40;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_TLBWR_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_TLBWR_CG__SHIFT: u32 = 0x6;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_TLBRD_CG_MASK` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_TLBRD_CG_MASK: u32 = 0x80;
+/// The value of `DAGB1_CNTL_MISC2__DISABLE_TLBRD_CG__SHIFT` in mmhub_v1_0.c
+pub const MM_DAGB1_CNTL_MISC2__DISABLE_TLBRD_CG__SHIFT: u32 = 0x7;
+/// The value of `ATC_L2_MISC_CG__MEM_LS_ENABLE_MASK` in mmhub_v1_0.c
+pub const MM_ATC_L2_MISC_CG__MEM_LS_ENABLE_MASK: u32 = 0x80000;
+/// The value of `ATC_L2_MISC_CG__MEM_LS_ENABLE__SHIFT` in mmhub_v1_0.c
+pub const MM_ATC_L2_MISC_CG__MEM_LS_ENABLE__SHIFT: u32 = 0x13;
+/// The value of `mmATHUB_MISC_CNTL` in athub_v1_0.c
+pub const ATHUB_mmATHUB_MISC_CNTL: u32 = 0xa;
+/// The value of `mmATHUB_MISC_CNTL_BASE_IDX` in athub_v1_0.c
+pub const ATHUB_mmATHUB_MISC_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `ATHUB_MISC_CNTL__CG_ENABLE_MASK` in athub_v1_0.c
+pub const ATHUB_ATHUB_MISC_CNTL__CG_ENABLE_MASK: u32 = 0x40000;
+/// The value of `ATHUB_MISC_CNTL__CG_ENABLE__SHIFT` in athub_v1_0.c
+pub const ATHUB_ATHUB_MISC_CNTL__CG_ENABLE__SHIFT: u32 = 0x12;
+/// The value of `ATHUB_MISC_CNTL__CG_MEM_LS_ENABLE_MASK` in athub_v1_0.c
+pub const ATHUB_ATHUB_MISC_CNTL__CG_MEM_LS_ENABLE_MASK: u32 = 0x80000;
+/// The value of `ATHUB_MISC_CNTL__CG_MEM_LS_ENABLE__SHIFT` in athub_v1_0.c
+pub const ATHUB_ATHUB_MISC_CNTL__CG_MEM_LS_ENABLE__SHIFT: u32 = 0x13;
+/// The value of `mmSYSHUB_INDEX` in nbio_v7_0.c
+pub const NBIO_mmSYSHUB_INDEX: u32 = 0x8;
+/// The value of `mmSYSHUB_INDEX_BASE_IDX` in nbio_v7_0.c
+pub const NBIO_mmSYSHUB_INDEX_BASE_IDX: u32 = 0x0;
+/// The value of `mmSYSHUB_DATA` in nbio_v7_0.c
+pub const NBIO_mmSYSHUB_DATA: u32 = 0x9;
+/// The value of `mmSYSHUB_DATA_BASE_IDX` in nbio_v7_0.c
+pub const NBIO_mmSYSHUB_DATA_BASE_IDX: u32 = 0x0;
+/// The value of `NBIF_MGCG_CTRL_LCLK__NBIF_MGCG_EN_LCLK_MASK` in nbio_v7_0.c
+pub const NBIO_NBIF_MGCG_CTRL_LCLK__NBIF_MGCG_EN_LCLK_MASK: u32 = 0x1;
+/// The value of `NBIF_MGCG_CTRL_LCLK__NBIF_MGCG_EN_LCLK__SHIFT` in nbio_v7_0.c
+pub const NBIO_NBIF_MGCG_CTRL_LCLK__NBIF_MGCG_EN_LCLK__SHIFT: u32 = 0x0;
+/// The value of `SYSHUB_MMREG_DIRECT_SYSHUB_MGCG_CTRL_SOCCLK__SYSHUB_MGCG_EN_SOCCLK_MASK` in nbio_v7_0.c
+pub const NBIO_SYSHUB_MMREG_DIRECT_SYSHUB_MGCG_CTRL_SOCCLK__SYSHUB_MGCG_EN_SOCCLK_MASK: u32 = 0x1;
+/// The value of `SYSHUB_MMREG_DIRECT_SYSHUB_MGCG_CTRL_SOCCLK__SYSHUB_MGCG_EN_SOCCLK__SHIFT` in nbio_v7_0.c
+pub const NBIO_SYSHUB_MMREG_DIRECT_SYSHUB_MGCG_CTRL_SOCCLK__SYSHUB_MGCG_EN_SOCCLK__SHIFT: u32 = 0x0;
+/// The value of `SYSHUB_MMREG_DIRECT_SYSHUB_MGCG_CTRL_SHUBCLK__SYSHUB_MGCG_EN_SHUBCLK_MASK` in nbio_v7_0.c
+pub const NBIO_SYSHUB_MMREG_DIRECT_SYSHUB_MGCG_CTRL_SHUBCLK__SYSHUB_MGCG_EN_SHUBCLK_MASK: u32 = 0x1;
+/// The value of `SYSHUB_MMREG_DIRECT_SYSHUB_MGCG_CTRL_SHUBCLK__SYSHUB_MGCG_EN_SHUBCLK__SHIFT` in nbio_v7_0.c
+pub const NBIO_SYSHUB_MMREG_DIRECT_SYSHUB_MGCG_CTRL_SHUBCLK__SYSHUB_MGCG_EN_SHUBCLK__SHIFT: u32 = 0x0;
+/// The value of `PCIE_CNTL2__SLV_MEM_LS_EN_MASK` in nbio_v7_0.c
+pub const NBIO_PCIE_CNTL2__SLV_MEM_LS_EN_MASK: u32 = 0x10000;
+/// The value of `PCIE_CNTL2__SLV_MEM_LS_EN__SHIFT` in nbio_v7_0.c
+pub const NBIO_PCIE_CNTL2__SLV_MEM_LS_EN__SHIFT: u32 = 0x10;
+/// The value of `PCIE_CNTL2__MST_MEM_LS_EN_MASK` in nbio_v7_0.c
+pub const NBIO_PCIE_CNTL2__MST_MEM_LS_EN_MASK: u32 = 0x40000;
+/// The value of `PCIE_CNTL2__MST_MEM_LS_EN__SHIFT` in nbio_v7_0.c
+pub const NBIO_PCIE_CNTL2__MST_MEM_LS_EN__SHIFT: u32 = 0x12;
+/// The value of `PCIE_CNTL2__REPLAY_MEM_LS_EN_MASK` in nbio_v7_0.c
+pub const NBIO_PCIE_CNTL2__REPLAY_MEM_LS_EN_MASK: u32 = 0x80000;
+/// The value of `PCIE_CNTL2__REPLAY_MEM_LS_EN__SHIFT` in nbio_v7_0.c
+pub const NBIO_PCIE_CNTL2__REPLAY_MEM_LS_EN__SHIFT: u32 = 0x13;
+/// The value of `mmHDP_MEM_POWER_LS` in hdp_v4_0.c
+pub const HDP_mmHDP_MEM_POWER_LS: u32 = 0xd4;
+/// The value of `mmHDP_MEM_POWER_LS_BASE_IDX` in hdp_v4_0.c
+pub const HDP_mmHDP_MEM_POWER_LS_BASE_IDX: u32 = 0x0;
+/// The value of `mmHDP_MEM_POWER_CTRL` in hdp_v4_0.c
+pub const HDP_mmHDP_MEM_POWER_CTRL: u32 = 0xd4;
+/// The value of `mmHDP_MEM_POWER_CTRL_BASE_IDX` in hdp_v4_0.c
+pub const HDP_mmHDP_MEM_POWER_CTRL_BASE_IDX: u32 = 0x0;
+/// The value of `HDP_MEM_POWER_LS__LS_ENABLE_MASK` in hdp_v4_0.c
+pub const HDP_HDP_MEM_POWER_LS__LS_ENABLE_MASK: u32 = 0x1;
+/// The value of `HDP_MEM_POWER_LS__LS_ENABLE__SHIFT` in hdp_v4_0.c
+pub const HDP_HDP_MEM_POWER_LS__LS_ENABLE__SHIFT: u32 = 0x0;
+/// The value of `HDP_MEM_POWER_CTRL__IPH_MEM_POWER_CTRL_EN_MASK` in hdp_v4_0.c
+pub const HDP_HDP_MEM_POWER_CTRL__IPH_MEM_POWER_CTRL_EN_MASK: u32 = 0x1;
+/// The value of `HDP_MEM_POWER_CTRL__IPH_MEM_POWER_LS_EN_MASK` in hdp_v4_0.c
+pub const HDP_HDP_MEM_POWER_CTRL__IPH_MEM_POWER_LS_EN_MASK: u32 = 0x2;
+/// The value of `HDP_MEM_POWER_CTRL__RC_MEM_POWER_CTRL_EN_MASK` in hdp_v4_0.c
+pub const HDP_HDP_MEM_POWER_CTRL__RC_MEM_POWER_CTRL_EN_MASK: u32 = 0x10000;
+/// The value of `HDP_MEM_POWER_CTRL__RC_MEM_POWER_LS_EN_MASK` in hdp_v4_0.c
+pub const HDP_HDP_MEM_POWER_CTRL__RC_MEM_POWER_LS_EN_MASK: u32 = 0x20000;
+/// The value of `mmMP0_MISC_CGTT_CTRL0` in soc15.c
+pub const MP0_mmMP0_MISC_CGTT_CTRL0: u32 = 0x1b9;
+/// The value of `mmMP0_MISC_CGTT_CTRL0_BASE_IDX` in soc15.c
+pub const MP0_mmMP0_MISC_CGTT_CTRL0_BASE_IDX: u32 = 0x0;
+/// The value of `mmMP0_MISC_LIGHT_SLEEP_CTRL` in soc15.c
+pub const MP0_mmMP0_MISC_LIGHT_SLEEP_CTRL: u32 = 0x1ba;
+/// The value of `mmMP0_MISC_LIGHT_SLEEP_CTRL_BASE_IDX` in soc15.c
+pub const MP0_mmMP0_MISC_LIGHT_SLEEP_CTRL_BASE_IDX: u32 = 0x0;
+/// The value of `mmIH_CLK_CTRL` in vega10_ih.c
+pub const OSS_mmIH_CLK_CTRL: u32 = 0xdb;
+/// The value of `mmIH_CLK_CTRL_BASE_IDX` in vega10_ih.c
+pub const OSS_mmIH_CLK_CTRL_BASE_IDX: u32 = 0x0;
+/// The value of `IH_CLK_CTRL__IH_BUFFER_MEM_CLK_SOFT_OVERRIDE_MASK` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__IH_BUFFER_MEM_CLK_SOFT_OVERRIDE_MASK: u32 = 0x4000000;
+/// The value of `IH_CLK_CTRL__IH_BUFFER_MEM_CLK_SOFT_OVERRIDE__SHIFT` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__IH_BUFFER_MEM_CLK_SOFT_OVERRIDE__SHIFT: u32 = 0x1a;
+/// The value of `IH_CLK_CTRL__DBUS_MUX_CLK_SOFT_OVERRIDE_MASK` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__DBUS_MUX_CLK_SOFT_OVERRIDE_MASK: u32 = 0x8000000;
+/// The value of `IH_CLK_CTRL__DBUS_MUX_CLK_SOFT_OVERRIDE__SHIFT` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__DBUS_MUX_CLK_SOFT_OVERRIDE__SHIFT: u32 = 0x1b;
+/// The value of `IH_CLK_CTRL__OSSSYS_SHARE_CLK_SOFT_OVERRIDE_MASK` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__OSSSYS_SHARE_CLK_SOFT_OVERRIDE_MASK: u32 = 0x10000000;
+/// The value of `IH_CLK_CTRL__OSSSYS_SHARE_CLK_SOFT_OVERRIDE__SHIFT` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__OSSSYS_SHARE_CLK_SOFT_OVERRIDE__SHIFT: u32 = 0x1c;
+/// The value of `IH_CLK_CTRL__LIMIT_SMN_CLK_SOFT_OVERRIDE_MASK` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__LIMIT_SMN_CLK_SOFT_OVERRIDE_MASK: u32 = 0x20000000;
+/// The value of `IH_CLK_CTRL__LIMIT_SMN_CLK_SOFT_OVERRIDE__SHIFT` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__LIMIT_SMN_CLK_SOFT_OVERRIDE__SHIFT: u32 = 0x1d;
+/// The value of `IH_CLK_CTRL__DYN_CLK_SOFT_OVERRIDE_MASK` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__DYN_CLK_SOFT_OVERRIDE_MASK: u32 = 0x40000000;
+/// The value of `IH_CLK_CTRL__DYN_CLK_SOFT_OVERRIDE__SHIFT` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__DYN_CLK_SOFT_OVERRIDE__SHIFT: u32 = 0x1e;
+/// The value of `IH_CLK_CTRL__REG_CLK_SOFT_OVERRIDE_MASK` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__REG_CLK_SOFT_OVERRIDE_MASK: u32 = 0x80000000;
+/// The value of `IH_CLK_CTRL__REG_CLK_SOFT_OVERRIDE__SHIFT` in vega10_ih.c
+pub const OSS_IH_CLK_CTRL__REG_CLK_SOFT_OVERRIDE__SHIFT: u32 = 0x1f;
+/// The value of `IH_RB_WPTR__RB_OVERFLOW_MASK` in vega10_ih.c
+pub const OSS_IH_RB_WPTR__RB_OVERFLOW_MASK: u32 = 0x1;
+/// The value of `IH_RB_WPTR__RB_OVERFLOW__SHIFT` in vega10_ih.c
+pub const OSS_IH_RB_WPTR__RB_OVERFLOW__SHIFT: u32 = 0x0;
+/// The value of `mmSDMA0_CLK_CTRL` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_CLK_CTRL: u32 = 0x1b;
+/// The value of `mmSDMA0_CLK_CTRL_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_CLK_CTRL_BASE_IDX: u32 = 0x0;
+/// The value of `mmSDMA0_EDC_CONFIG` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_EDC_CONFIG: u32 = 0x32;
+/// The value of `mmSDMA0_EDC_CONFIG_BASE_IDX` in sdma_v4_0.c
+pub const SDMA0_mmSDMA0_EDC_CONFIG_BASE_IDX: u32 = 0x0;
+/// The value of `SDMA0_CNTL__TRAP_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CNTL__TRAP_ENABLE_MASK: u32 = 0x1;
+/// The value of `SDMA0_CNTL__TRAP_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CNTL__TRAP_ENABLE__SHIFT: u32 = 0x0;
+/// The value of `SDMA0_EDC_CONFIG__ECC_INT_ENABLE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_EDC_CONFIG__ECC_INT_ENABLE_MASK: u32 = 0x4;
+/// The value of `SDMA0_EDC_CONFIG__ECC_INT_ENABLE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_EDC_CONFIG__ECC_INT_ENABLE__SHIFT: u32 = 0x2;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE7_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE7_MASK: u32 = 0x1000000;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE7__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE7__SHIFT: u32 = 0x18;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE6_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE6_MASK: u32 = 0x2000000;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE6__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE6__SHIFT: u32 = 0x19;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE5_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE5_MASK: u32 = 0x4000000;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE5__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE5__SHIFT: u32 = 0x1a;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE4_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE4_MASK: u32 = 0x8000000;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE4__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE4__SHIFT: u32 = 0x1b;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE3_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE3_MASK: u32 = 0x10000000;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE3__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE3__SHIFT: u32 = 0x1c;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE2_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE2_MASK: u32 = 0x20000000;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE2__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE2__SHIFT: u32 = 0x1d;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE1_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE1_MASK: u32 = 0x40000000;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE1__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE1__SHIFT: u32 = 0x1e;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE0_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE0_MASK: u32 = 0x80000000;
+/// The value of `SDMA0_CLK_CTRL__SOFT_OVERRIDE0__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_CLK_CTRL__SOFT_OVERRIDE0__SHIFT: u32 = 0x1f;
+/// The value of `SDMA0_POWER_CNTL__MEM_POWER_OVERRIDE_MASK` in sdma_v4_0.c
+pub const SDMA0_SDMA0_POWER_CNTL__MEM_POWER_OVERRIDE_MASK: u32 = 0x100;
+/// The value of `SDMA0_POWER_CNTL__MEM_POWER_OVERRIDE__SHIFT` in sdma_v4_0.c
+pub const SDMA0_SDMA0_POWER_CNTL__MEM_POWER_OVERRIDE__SHIFT: u32 = 0x8;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__CID_MASK` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__CID_MASK: u32 = 0x3fe00;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__CID__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__CID__SHIFT: u32 = 0x9;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__RW_MASK` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__RW_MASK: u32 = 0x40000;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__RW__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__RW__SHIFT: u32 = 0x12;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__FED_MASK` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__FED_MASK: u32 = 0x40000000;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__FED__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__FED__SHIFT: u32 = 0x1e;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__MORE_FAULTS_MASK` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__MORE_FAULTS_MASK: u32 = 0x1;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__MORE_FAULTS__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__MORE_FAULTS__SHIFT: u32 = 0x0;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__WALKER_ERROR_MASK` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__WALKER_ERROR_MASK: u32 = 0xe;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__WALKER_ERROR__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__WALKER_ERROR__SHIFT: u32 = 0x1;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__PERMISSION_FAULTS_MASK` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__PERMISSION_FAULTS_MASK: u32 = 0xf0;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__PERMISSION_FAULTS__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__PERMISSION_FAULTS__SHIFT: u32 = 0x4;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__MAPPING_ERROR_MASK` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__MAPPING_ERROR_MASK: u32 = 0x100;
+/// The value of `VM_L2_PROTECTION_FAULT_STATUS__MAPPING_ERROR__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_L2_PROTECTION_FAULT_STATUS__MAPPING_ERROR__SHIFT: u32 = 0x8;
+/// The value of `VM_CONTEXT1_CNTL__RANGE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__RANGE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK: u32 = 0x200;
+/// The value of `VM_CONTEXT1_CNTL__RANGE_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__RANGE_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT: u32 = 0x9;
+/// The value of `VM_CONTEXT1_CNTL__DUMMY_PAGE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__DUMMY_PAGE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK: u32 = 0x800;
+/// The value of `VM_CONTEXT1_CNTL__DUMMY_PAGE_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__DUMMY_PAGE_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT: u32 = 0xb;
+/// The value of `VM_CONTEXT1_CNTL__PDE0_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__PDE0_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK: u32 = 0x2000;
+/// The value of `VM_CONTEXT1_CNTL__PDE0_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__PDE0_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT: u32 = 0xd;
+/// The value of `VM_CONTEXT1_CNTL__VALID_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__VALID_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK: u32 = 0x8000;
+/// The value of `VM_CONTEXT1_CNTL__VALID_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__VALID_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT: u32 = 0xf;
+/// The value of `VM_CONTEXT1_CNTL__READ_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__READ_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK: u32 = 0x20000;
+/// The value of `VM_CONTEXT1_CNTL__READ_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__READ_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT: u32 = 0x11;
+/// The value of `VM_CONTEXT1_CNTL__WRITE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__WRITE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK: u32 = 0x80000;
+/// The value of `VM_CONTEXT1_CNTL__WRITE_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__WRITE_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT: u32 = 0x13;
+/// The value of `VM_CONTEXT1_CNTL__EXECUTE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__EXECUTE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK: u32 = 0x200000;
+/// The value of `VM_CONTEXT1_CNTL__EXECUTE_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT` in gmc_v9_0.c
+pub const GMC_VM_CONTEXT1_CNTL__EXECUTE_PROTECTION_FAULT_ENABLE_INTERRUPT__SHIFT: u32 = 0x15;
+/// The value of `mmSMUIO_GFX_MISC_CNTL` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const SMUIO_mmSMUIO_GFX_MISC_CNTL: u32 = 0xc8;
+/// The value of `mmSMUIO_GFX_MISC_CNTL_BASE_IDX` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const SMUIO_mmSMUIO_GFX_MISC_CNTL_BASE_IDX: u32 = 0x0;
+/// The value of `SMUIO_GFX_MISC_CNTL__PWR_GFXOFF_STATUS_MASK` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const SMUIO_SMUIO_GFX_MISC_CNTL__PWR_GFXOFF_STATUS_MASK: u32 = 0x6;
+/// The value of `SMUIO_GFX_MISC_CNTL__PWR_GFXOFF_STATUS__SHIFT` in ../pm/swsmu/smu12/smu_v12_0.c
+pub const SMUIO_SMUIO_GFX_MISC_CNTL__PWR_GFXOFF_STATUS__SHIFT: u32 = 0x1;
+/// The value of `CP_ME1_PIPE0_INT_CNTL__CP_ECC_ERROR_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE0_INT_CNTL__CP_ECC_ERROR_INT_ENABLE_MASK: u32 = 0x4000;
+/// The value of `CP_ME1_PIPE0_INT_CNTL__CP_ECC_ERROR_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE0_INT_CNTL__CP_ECC_ERROR_INT_ENABLE__SHIFT: u32 = 0xe;
+/// The value of `CP_ME1_PIPE1_INT_CNTL__CP_ECC_ERROR_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE1_INT_CNTL__CP_ECC_ERROR_INT_ENABLE_MASK: u32 = 0x4000;
+/// The value of `CP_ME1_PIPE1_INT_CNTL__CP_ECC_ERROR_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE1_INT_CNTL__CP_ECC_ERROR_INT_ENABLE__SHIFT: u32 = 0xe;
+/// The value of `CP_ME1_PIPE2_INT_CNTL__CP_ECC_ERROR_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE2_INT_CNTL__CP_ECC_ERROR_INT_ENABLE_MASK: u32 = 0x4000;
+/// The value of `CP_ME1_PIPE2_INT_CNTL__CP_ECC_ERROR_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE2_INT_CNTL__CP_ECC_ERROR_INT_ENABLE__SHIFT: u32 = 0xe;
+/// The value of `CP_ME1_PIPE3_INT_CNTL__CP_ECC_ERROR_INT_ENABLE_MASK` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE3_INT_CNTL__CP_ECC_ERROR_INT_ENABLE_MASK: u32 = 0x4000;
+/// The value of `CP_ME1_PIPE3_INT_CNTL__CP_ECC_ERROR_INT_ENABLE__SHIFT` in gfx_v9_0.c
+pub const GC_CP_ME1_PIPE3_INT_CNTL__CP_ECC_ERROR_INT_ENABLE__SHIFT: u32 = 0xe;
+/// The value of `smnNBIF_MGCG_CTRL_LCLK` in nbio_v7_0.c
+pub const NBIO_smnNBIF_MGCG_CTRL_LCLK: u32 = 0x1013a05c;
+/// The value of `smnPCIE_CNTL2` in nbio_v7_0.c
+pub const NBIO_smnPCIE_CNTL2: u32 = 0x11180070;
+/// The value of `ixSYSHUB_MMREG_IND_SYSHUB_MGCG_CTRL_SOCCLK` in nbio_v7_0.c
+pub const NBIO_ixSYSHUB_MMREG_IND_SYSHUB_MGCG_CTRL_SOCCLK: u32 = 0x10310;
+/// The value of `ixSYSHUB_MMREG_IND_SYSHUB_MGCG_CTRL_SHUBCLK` in nbio_v7_0.c
+pub const NBIO_ixSYSHUB_MMREG_IND_SYSHUB_MGCG_CTRL_SHUBCLK: u32 = 0x11040;
+/// amdgpu/cikd.h:391
+pub const PACKET3_RELEASE_MEM: u32 = 0x49;
+/// amdgpu/cikd.h:265
+pub const PACKET3_WRITE_DATA: u32 = 0x37;
+/// amdgpu/cikd.h:458
+pub const PACKET3_ACQUIRE_MEM: u32 = 0x58;
+/// amdgpu/cikd.h:249
+pub const PACKET3_COND_EXEC: u32 = 0x22;
+/// amdgpu/cikd.h:315
+pub const PACKET3_INDIRECT_BUFFER: u32 = 0x3f;
+/// amdgpu/cikd.h:261
+pub const PACKET3_INDIRECT_BUFFER_CONST: u32 = 0x33;
+/// amdgpu/cikd.h:464
+pub const PACKET3_SET_CONFIG_REG: u32 = 0x68;
+/// amdgpu/nvd.h:617
+pub const PACKET3_UNMAP_QUEUES: u32 = 0xa3;
+/// amdgpu/amdgpu_gfx.h:123
+pub const RESET_QUEUES: u32 = 0x1;
+/// amdgpu/soc15d.h:320
+pub const EOP_TC_NC_ACTION_EN: u32 = 0x80000;
+/// amdgpu/cikd.h:365
+pub const EOP_TCL1_ACTION_EN: u32 = 0x10000;
+/// amdgpu/cikd.h:366
+pub const EOP_TC_ACTION_EN: u32 = 0x20000;
+/// amdgpu/soc15d.h:321
+pub const EOP_TC_MD_ACTION_EN: u32 = 0x200000;
+/// amdgpu/cikd.h:364
+pub const EOP_TC_WB_ACTION_EN: u32 = 0x8000;
+/// amdgpu/cikd.h:373
+pub const EOP_EXEC: u32 = 0x10000000;
+/// amdgpu/cikd.h:275
+pub const WR_CONFIRM: u32 = 0x100000;
+/// amdgpu/cikd.h:317
+pub const INDIRECT_BUFFER_VALID: u32 = 0x800000;
+/// amdgpu/amdgpu_ring.h:62
+pub const AMDGPU_FENCE_FLAG_64BIT: u32 = 0x1;
+/// amdgpu/amdgpu_ring.h:63
+pub const AMDGPU_FENCE_FLAG_INT: u32 = 0x2;
+/// amdgpu/amdgpu_ring.h:64
+pub const AMDGPU_FENCE_FLAG_TC_WB_ONLY: u32 = 0x4;
+/// amdgpu/amdgpu_ring.h:65
+pub const AMDGPU_FENCE_FLAG_EXEC: u32 = 0x8;
+/// ?
+pub const AMDGPU_IB_FLAG_CE: u32 = 0x1;
+/// ?
+pub const AMDGPU_IB_FLAG_RESET_GDS_MAX_WAVE_ID: u32 = 0x10;
+/// ?
+pub const AMDGPU_IB_FLAG_EMIT_MEM_SYNC: u32 = 0x40;
+/// ?
+pub const AMDGPU_IB_FLAG_TC_WB_NOT_INVALIDATE: u32 = 0x8;
+/// ?
+pub const AMDGPU_IB_FLAGS_SECURE: u32 = 0x20;
+/// amdgpu/amdgpu_job.h:35
+pub const AMDGPU_HAVE_CTX_SWITCH: u32 = 0x4;
+/// amdgpu/gfx_v9_0.c:4708
+pub const AMDGPU_IB_POOL_DIRECT: u32 = 0x2;
+/// amdgpu/amdgpu.h:341
+pub const AMDGPU_CP_IRQ_COMPUTE_MEC1_PIPE1_EOP: u32 = 0x3;
+/// amdgpu/amdgpu.h:342
+pub const AMDGPU_CP_IRQ_COMPUTE_MEC1_PIPE2_EOP: u32 = 0x4;
+/// amdgpu/amdgpu.h:343
+pub const AMDGPU_CP_IRQ_COMPUTE_MEC1_PIPE3_EOP: u32 = 0x5;
+/// amdgpu/amdgpu.h:344
+pub const AMDGPU_CP_IRQ_COMPUTE_MEC2_PIPE0_EOP: u32 = 0x6;
+/// amdgpu/amdgpu.h:345
+pub const AMDGPU_CP_IRQ_COMPUTE_MEC2_PIPE1_EOP: u32 = 0x7;
+/// amdgpu/amdgpu.h:346
+pub const AMDGPU_CP_IRQ_COMPUTE_MEC2_PIPE2_EOP: u32 = 0x8;
+/// amdgpu/amdgpu.h:347
+pub const AMDGPU_CP_IRQ_COMPUTE_MEC2_PIPE3_EOP: u32 = 0x9;
+/// amdgpu/amdgpu_irq.h:43
+pub const AMDGPU_IRQ_STATE_ENABLE: u32 = 0x1;
+/// amdgpu/amdgpu_irq.h:42
+pub const AMDGPU_IRQ_STATE_DISABLE: u32 = 0x0;
+/// amdgpu/amdgpu_irq.h:37
+pub const AMDGPU_IRQ_SRC_DATA_MAX_SIZE_DW: u32 = 0x4;
+/// amdgpu/amdgpu_ih.h:28
+pub const AMDGPU_IH_MAX_NUM_IVS: u32 = 0x20;
+/// include/soc15_ih_clientid.h:77
+pub const SOC15_IH_CLIENTID_VMC1: u32 = 0x6;
+/// include/soc15_ih_clientid.h:70
+pub const SOC15_IH_CLIENTID_SDMA2: u32 = 0x1;
+/// include/soc15_ih_clientid.h:71
+pub const SOC15_IH_CLIENTID_SDMA3: u32 = 0x4;
+/// include/soc15_ih_clientid.h:73
+pub const SOC15_IH_CLIENTID_SDMA4: u32 = 0x5;
+/// include/soc15_ih_clientid.h:74
+pub const SOC15_IH_CLIENTID_SDMA5: u32 = 0x11;
+/// include/soc15_ih_clientid.h:75
+pub const SOC15_IH_CLIENTID_SDMA6: u32 = 0x13;
+/// include/soc15_ih_clientid.h:76
+pub const SOC15_IH_CLIENTID_SDMA7: u32 = 0x18;
+/// amdgpu/amdgpu_gmc.h:52
+pub const AMDGPU_GMC_FAULT_RING_SIZE: u32 = 0x100;
+/// amdgpu/amdgpu_gmc.h:51
+pub const AMDGPU_GMC_FAULT_RING_ORDER: u32 = 0x8;
+/// amdgpu/amdgpu_gmc.h:58
+pub const AMDGPU_GMC_FAULT_HASH_SIZE: u32 = 0x100;
+/// amdgpu/amdgpu_gmc.h:57
+pub const AMDGPU_GMC_FAULT_HASH_ORDER: u32 = 0x8;
+/// amdgpu/amdgpu_gmc.h:63
+pub const AMDGPU_GMC_FAULT_TIMEOUT: u32 = 0x1388;
+/// amdgpu/amdgpu_gmc.c:592
+pub const AMDGPU_VMHUB_INV_ENG_BITMAP: u32 = 0x1fff3;
+/// amdgpu/amdgpu.h:940
+pub const AMDGPU_RESET_MAGIC_NUM: u32 = 0x40;
+/// include/amd_shared.h:175
+pub const AMD_PG_SUPPORT_GFX_PIPELINE: u32 = 0x1000;
+/// include/amd_shared.h:122
+pub const AMD_PG_STATE_GATE: u32 = 0x0;
+/// include/kgd_pp_interface.h:57
+pub const AMD_DPM_FORCED_LEVEL_MANUAL: u32 = 0x2;
+/// include/kgd_pp_interface.h:65
+pub const AMD_DPM_FORCED_LEVEL_PERF_DETERMINISM: u32 = 0x200;
+/// ?
+pub const GOLDEN_RATIO_64: u64 = 0x61c8864680b583eb;
+/// The value of `AMDGPU_MMHUB1(0)` in gmc_v9_0.c
+pub const AMDGPU_MMHUB1_0_: u32 = 0xc;
+/// ?
+pub const DRM_SUBALLOC_MAX_QUEUES: u32 = 0x20;
+/// include/amd_shared.h:147
+pub const AMD_CG_SUPPORT_BIF_MGCG: u32 = 0x80000;
+/// include/amd_shared.h:150
+pub const AMD_CG_SUPPORT_DRM_MGCG: u32 = 0x400000;
+/// include/amd_shared.h:146
+pub const AMD_CG_SUPPORT_DRM_LS: u32 = 0x40000;
+/// include/amd_shared.h:135
+pub const AMD_CG_SUPPORT_GFX_RLC_LS: u32 = 0x80;
+/// The value of `PACKET3_UNMAP_QUEUES_ACTION(1)` in gfx_v9_0.c
+pub const PACKET3_UNMAP_QUEUES_ACTION_1: u32 = 0x1;
+/// The value of `PACKET3_UNMAP_QUEUES_QUEUE_SEL(1)` in gfx_v9_0.c
+pub const PACKET3_UNMAP_QUEUES_QUEUE_SEL_1: u32 = 0x10;
+/// The value of `PACKET3_UNMAP_QUEUES_ENGINE_SEL(1)` in gfx_v9_0.c
+pub const PACKET3_UNMAP_QUEUES_ENGINE_SEL_1: u32 = 0x4000000;
+/// The value of `PACKET3_UNMAP_QUEUES_NUM_QUEUES(1)` in gfx_v9_0.c
+pub const PACKET3_UNMAP_QUEUES_NUM_QUEUES_1: u32 = 0x20000000;
+/// The value of `PACKET3_UNMAP_QUEUES_DOORBELL_OFFSET0(1)` in gfx_v9_0.c
+pub const PACKET3_UNMAP_QUEUES_DOORBELL_OFFSET0_1: u32 = 0x4;
+/// The value of `gfx_v9_0_kiq_pm4_funcs.unmap_queues_size` in gfx_v9_0.c
+pub const GFX_V9_0_KIQ_UNMAP_QUEUES_SIZE: u32 = 0x6;
+/// The value of `EVENT_TYPE(CACHE_FLUSH_AND_INV_TS_EVENT)` in gfx_v9_0.c
+pub const EVENT_TYPE_CACHE_FLUSH_AND_INV_TS_EVENT: u32 = 0x14;
+/// The value of `EVENT_INDEX(5)` in gfx_v9_0.c
+pub const EVENT_INDEX_5: u32 = 0x500;
+/// The value of `DATA_SEL(1)` in gfx_v9_0.c
+pub const DATA_SEL_1: u32 = 0x20000000;
+/// The value of `DATA_SEL(2)` in gfx_v9_0.c
+pub const DATA_SEL_2: u32 = 0x40000000;
+/// The value of `INT_SEL(0)` in gfx_v9_0.c
+pub const INT_SEL_0: u32 = 0x0;
+/// The value of `INT_SEL(2)` in gfx_v9_0.c
+pub const INT_SEL_2: u32 = 0x2000000;
+/// The value of `WRITE_DATA_ENGINE_SEL(0)` in gfx_v9_0.c
+pub const WRITE_DATA_ENGINE_SEL_0: u32 = 0x0;
+/// The value of `WRITE_DATA_ENGINE_SEL(1)` in gfx_v9_0.c
+pub const WRITE_DATA_ENGINE_SEL_1: u32 = 0x40000000;
+/// The value of `WRITE_DATA_DST_SEL(0)` in gfx_v9_0.c
+pub const WRITE_DATA_DST_SEL_0: u32 = 0x0;
+/// The value of `WRITE_DATA_DST_SEL(5)` in gfx_v9_0.c
+pub const WRITE_DATA_DST_SEL_5: u32 = 0x500;
+/// The value of `PACKET3_ACQUIRE_MEM_CP_COHER_CNTL_SH_ICACHE_ACTION_ENA(1) | PACKET3_ACQUIRE_MEM_CP_COHER_CNTL_SH_KCACHE_ACTION_ENA(1) | PACKET3_ACQUIRE_MEM_CP_COHER_CNTL_TC_ACTION_ENA(1) | PACKET3_ACQUIRE_MEM_CP_COHER_CNTL_TCL1_ACTION_ENA(1) | PACKET3_ACQUIRE_MEM_CP_COHER_CNTL_TC_WB_ACTION_ENA(1)` in gfx_v9_0.c
+pub const GFX_V9_0_MEM_SYNC_CP_COHER_CNTL: u32 = 0x28c40000;
+/// The value of `SDMA_PKT_HEADER_OP(SDMA_OP_INDIRECT)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_OP_INDIRECT: u32 = 0x4;
+/// The value of `SDMA_PKT_HEADER_OP(SDMA_OP_FENCE)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_OP_FENCE: u32 = 0x5;
+/// The value of `SDMA_PKT_HEADER_OP(SDMA_OP_TRAP)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_OP_TRAP: u32 = 0x6;
+/// The value of `SDMA_PKT_NOP_HEADER_OP(SDMA_OP_NOP)` in sdma_v4_0.c
+pub const SDMA_PKT_NOP_HEADER_OP_NOP: u32 = 0x0;
+/// amdgpu/iceland_sdma_pkt_open.h:1649
+pub const SDMA_PKT_INDIRECT_HEADER_vmid_mask: u32 = 0xf;
+/// amdgpu/iceland_sdma_pkt_open.h:1650
+pub const SDMA_PKT_INDIRECT_HEADER_vmid_shift: u32 = 0x10;
+/// amdgpu/iceland_sdma_pkt_open.h:2144
+pub const SDMA_PKT_TRAP_INT_CONTEXT_int_context_mask: u32 = 0xfffffff;
+/// amdgpu/iceland_sdma_pkt_open.h:2145
+pub const SDMA_PKT_TRAP_INT_CONTEXT_int_context_shift: u32 = 0x0;
+/// ?
+pub const SMU_MSG_AllowGfxOff: u32 = 0x4b;
+/// The value of `__smu_message_names[SMU_MSG_AllowGfxOff]` in ../pm/swsmu/smu_cmn.c
+pub const AllowGfxOff_NAME: &[u8] = b"AllowGfxOff";
+/// ?
+pub const SMU_MSG_DisallowGfxOff: u32 = 0x4c;
+/// The value of `__smu_message_names[SMU_MSG_DisallowGfxOff]` in ../pm/swsmu/smu_cmn.c
+pub const DisallowGfxOff_NAME: &[u8] = b"DisallowGfxOff";
+/// ?
+pub const SMU_MSG_ActiveProcessNotify: u32 = 0x77;
+/// The value of `__smu_message_names[SMU_MSG_ActiveProcessNotify]` in ../pm/swsmu/smu_cmn.c
+pub const ActiveProcessNotify_NAME: &[u8] = b"ActiveProcessNotify";
+/// ?
+pub const SMU_MSG_GetMinGfxclkFrequency: u32 = 0x89;
+/// The value of `__smu_message_names[SMU_MSG_GetMinGfxclkFrequency]` in ../pm/swsmu/smu_cmn.c
+pub const GetMinGfxclkFrequency_NAME: &[u8] = b"GetMinGfxclkFrequency";
+/// ?
+pub const SMU_MSG_GetMaxGfxclkFrequency: u32 = 0x8a;
+/// The value of `__smu_message_names[SMU_MSG_GetMaxGfxclkFrequency]` in ../pm/swsmu/smu_cmn.c
+pub const GetMaxGfxclkFrequency_NAME: &[u8] = b"GetMaxGfxclkFrequency";

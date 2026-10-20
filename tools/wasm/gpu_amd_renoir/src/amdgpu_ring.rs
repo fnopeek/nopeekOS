@@ -25,10 +25,25 @@ pub struct amdgpu_ring_funcs {
     pub extra_bytes: u32,
     /// `soft_recovery` is set.
     pub soft_recovery: bool,
+    /// Which table it is, for the function pointers.
+    pub ops: ring_ops,
+}
+
+/// The function pointers of a funcs table, by the table they belong to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ring_ops {
+    gfx_v9_0_gfx,
+    gfx_v9_0_compute,
+    gfx_v9_0_kiq,
+    sdma_v4_0,
+    sdma_v4_0_page,
+    vcn_v2_0_dec,
+    vcn_v2_0_enc,
+    jpeg_v2_0_dec,
 }
 
 macro_rules! ring_funcs {
-    ($id:ident, $name:literal, $t:ident, $a:ident, $n:ident, $s:ident, $f:ident, $i:ident, $e:ident, $r:ident) => {
+    ($id:ident, $name:literal, $ops:ident, $t:ident, $a:ident, $n:ident, $s:ident, $f:ident, $i:ident, $e:ident, $r:ident) => {
         pub static $id: amdgpu_ring_funcs = amdgpu_ring_funcs {
             name: $name,
             type_: $t,
@@ -39,46 +54,47 @@ macro_rules! ring_funcs {
             emit_ib_size: $i,
             extra_bytes: $e,
             soft_recovery: $r != 0,
+            ops: ring_ops::$ops,
         };
     };
 }
 
-ring_funcs!(GFX_V9_0_RING_FUNCS_GFX, "gfx_v9_0_ring_funcs_gfx", RF_gfx_v9_0_ring_funcs_gfx_type,
+ring_funcs!(GFX_V9_0_RING_FUNCS_GFX, "gfx_v9_0_ring_funcs_gfx", gfx_v9_0_gfx, RF_gfx_v9_0_ring_funcs_gfx_type,
     RF_gfx_v9_0_ring_funcs_gfx_align_mask, RF_gfx_v9_0_ring_funcs_gfx_nop,
     RF_gfx_v9_0_ring_funcs_gfx_support_64bit_ptrs, RF_gfx_v9_0_ring_funcs_gfx_emit_frame_size,
     RF_gfx_v9_0_ring_funcs_gfx_emit_ib_size, RF_gfx_v9_0_ring_funcs_gfx_extra_bytes,
     RF_gfx_v9_0_ring_funcs_gfx_soft_recovery);
-ring_funcs!(GFX_V9_0_RING_FUNCS_COMPUTE, "gfx_v9_0_ring_funcs_compute", RF_gfx_v9_0_ring_funcs_compute_type,
+ring_funcs!(GFX_V9_0_RING_FUNCS_COMPUTE, "gfx_v9_0_ring_funcs_compute", gfx_v9_0_compute, RF_gfx_v9_0_ring_funcs_compute_type,
     RF_gfx_v9_0_ring_funcs_compute_align_mask, RF_gfx_v9_0_ring_funcs_compute_nop,
     RF_gfx_v9_0_ring_funcs_compute_support_64bit_ptrs, RF_gfx_v9_0_ring_funcs_compute_emit_frame_size,
     RF_gfx_v9_0_ring_funcs_compute_emit_ib_size, RF_gfx_v9_0_ring_funcs_compute_extra_bytes,
     RF_gfx_v9_0_ring_funcs_compute_soft_recovery);
-ring_funcs!(GFX_V9_0_RING_FUNCS_KIQ, "gfx_v9_0_ring_funcs_kiq", RF_gfx_v9_0_ring_funcs_kiq_type,
+ring_funcs!(GFX_V9_0_RING_FUNCS_KIQ, "gfx_v9_0_ring_funcs_kiq", gfx_v9_0_kiq, RF_gfx_v9_0_ring_funcs_kiq_type,
     RF_gfx_v9_0_ring_funcs_kiq_align_mask, RF_gfx_v9_0_ring_funcs_kiq_nop,
     RF_gfx_v9_0_ring_funcs_kiq_support_64bit_ptrs, RF_gfx_v9_0_ring_funcs_kiq_emit_frame_size,
     RF_gfx_v9_0_ring_funcs_kiq_emit_ib_size, RF_gfx_v9_0_ring_funcs_kiq_extra_bytes,
     RF_gfx_v9_0_ring_funcs_kiq_soft_recovery);
-ring_funcs!(SDMA_V4_0_RING_FUNCS, "sdma_v4_0_ring_funcs", RF_sdma_v4_0_ring_funcs_type,
+ring_funcs!(SDMA_V4_0_RING_FUNCS, "sdma_v4_0_ring_funcs", sdma_v4_0, RF_sdma_v4_0_ring_funcs_type,
     RF_sdma_v4_0_ring_funcs_align_mask, RF_sdma_v4_0_ring_funcs_nop, RF_sdma_v4_0_ring_funcs_support_64bit_ptrs,
     RF_sdma_v4_0_ring_funcs_emit_frame_size, RF_sdma_v4_0_ring_funcs_emit_ib_size,
     RF_sdma_v4_0_ring_funcs_extra_bytes,
     RF_sdma_v4_0_ring_funcs_soft_recovery);
-ring_funcs!(SDMA_V4_0_PAGE_RING_FUNCS, "sdma_v4_0_page_ring_funcs", RF_sdma_v4_0_page_ring_funcs_type,
+ring_funcs!(SDMA_V4_0_PAGE_RING_FUNCS, "sdma_v4_0_page_ring_funcs", sdma_v4_0_page, RF_sdma_v4_0_page_ring_funcs_type,
     RF_sdma_v4_0_page_ring_funcs_align_mask, RF_sdma_v4_0_page_ring_funcs_nop,
     RF_sdma_v4_0_page_ring_funcs_support_64bit_ptrs, RF_sdma_v4_0_page_ring_funcs_emit_frame_size,
     RF_sdma_v4_0_page_ring_funcs_emit_ib_size, RF_sdma_v4_0_page_ring_funcs_extra_bytes,
     RF_sdma_v4_0_page_ring_funcs_soft_recovery);
-ring_funcs!(VCN_V2_0_DEC_RING_VM_FUNCS, "vcn_v2_0_dec_ring_vm_funcs", RF_vcn_v2_0_dec_ring_vm_funcs_type,
+ring_funcs!(VCN_V2_0_DEC_RING_VM_FUNCS, "vcn_v2_0_dec_ring_vm_funcs", vcn_v2_0_dec, RF_vcn_v2_0_dec_ring_vm_funcs_type,
     RF_vcn_v2_0_dec_ring_vm_funcs_align_mask, RF_vcn_v2_0_dec_ring_vm_funcs_nop,
     RF_vcn_v2_0_dec_ring_vm_funcs_support_64bit_ptrs, RF_vcn_v2_0_dec_ring_vm_funcs_emit_frame_size,
     RF_vcn_v2_0_dec_ring_vm_funcs_emit_ib_size, RF_vcn_v2_0_dec_ring_vm_funcs_extra_bytes,
     RF_vcn_v2_0_dec_ring_vm_funcs_soft_recovery);
-ring_funcs!(VCN_V2_0_ENC_RING_VM_FUNCS, "vcn_v2_0_enc_ring_vm_funcs", RF_vcn_v2_0_enc_ring_vm_funcs_type,
+ring_funcs!(VCN_V2_0_ENC_RING_VM_FUNCS, "vcn_v2_0_enc_ring_vm_funcs", vcn_v2_0_enc, RF_vcn_v2_0_enc_ring_vm_funcs_type,
     RF_vcn_v2_0_enc_ring_vm_funcs_align_mask, RF_vcn_v2_0_enc_ring_vm_funcs_nop,
     RF_vcn_v2_0_enc_ring_vm_funcs_support_64bit_ptrs, RF_vcn_v2_0_enc_ring_vm_funcs_emit_frame_size,
     RF_vcn_v2_0_enc_ring_vm_funcs_emit_ib_size, RF_vcn_v2_0_enc_ring_vm_funcs_extra_bytes,
     RF_vcn_v2_0_enc_ring_vm_funcs_soft_recovery);
-ring_funcs!(JPEG_V2_0_DEC_RING_VM_FUNCS, "jpeg_v2_0_dec_ring_vm_funcs", RF_jpeg_v2_0_dec_ring_vm_funcs_type,
+ring_funcs!(JPEG_V2_0_DEC_RING_VM_FUNCS, "jpeg_v2_0_dec_ring_vm_funcs", jpeg_v2_0_dec, RF_jpeg_v2_0_dec_ring_vm_funcs_type,
     RF_jpeg_v2_0_dec_ring_vm_funcs_align_mask, RF_jpeg_v2_0_dec_ring_vm_funcs_nop,
     RF_jpeg_v2_0_dec_ring_vm_funcs_support_64bit_ptrs, RF_jpeg_v2_0_dec_ring_vm_funcs_emit_frame_size,
     RF_jpeg_v2_0_dec_ring_vm_funcs_emit_ib_size, RF_jpeg_v2_0_dec_ring_vm_funcs_extra_bytes,
@@ -125,6 +141,8 @@ pub struct amdgpu_fence_driver {
     /// `fences`: the sequence numbers outstanding, `num_hw_submission * 2`
     /// slots.
     pub fences: Vec<Option<u32>>,
+    /// `fallback_timer`: when it fires, if armed.
+    pub fallback_deadline_us: Option<u64>,
 }
 
 /// `struct amdgpu_ring`.
@@ -169,6 +187,12 @@ pub struct amdgpu_ring {
     pub mqd_size: u32,
     /// `ring_backup`: the ring's contents kept across a queue reset.
     pub ring_backup: Vec<u8>,
+    pub count_dw: i32,
+    pub wptr_old: u64,
+    /// `sched.ready`.
+    pub sched_ready: bool,
+    pub current_ctx: u64,
+    pub vm_inv_eng: u32,
 }
 
 impl amdgpu_ring {
@@ -213,6 +237,11 @@ impl amdgpu_ring {
             mqd_ptr: None,
             mqd_size: 0,
             ring_backup: Vec::new(),
+            count_dw: 0,
+            wptr_old: 0,
+            sched_ready: false,
+            current_ctx: 0,
+            vm_inv_eng: 0,
         }
     }
 }
@@ -228,6 +257,14 @@ pub fn amdgpu_device_wb_get(adev: &mut amdgpu_device) -> Result<u32, i32> {
         }
     }
     Err(-22)
+}
+
+/// `amdgpu_device_wb_free`: `wb` is the dword offset `wb_get` gave.
+pub fn amdgpu_device_wb_free(adev: &mut amdgpu_device, wb: u32) {
+    let wb = (wb >> 3) as usize;
+    if wb < adev.wb.num_wb as usize {
+        adev.wb.used[wb / 64] &= !(1 << (wb % 64));
+    }
 }
 
 /// `amdgpu_ring_max_ibs`.
@@ -419,4 +456,256 @@ pub fn amdgpu_get_soft_full_reset_mask(adev: &amdgpu_device, ring: Option<usize>
         size |= AMDGPU_RESET_TYPE_SOFT_RESET;
     }
     size
+}
+
+/// `amdgpu_ring_alloc`. `begin_use` is the GFX rings'
+/// `amdgpu_gfx_enforce_isolation_ring_begin_use`, which returns at once
+/// without the cleaner shader, and no other ring of Renoir's has one.
+pub fn amdgpu_ring_alloc(adev: &mut amdgpu_device, r: usize, ndw: u32) -> i32 {
+    let ring = &mut adev.rings[r];
+    // Align requested size with padding so unlock_commit can pad safely
+    let ndw = (ndw + ring.funcs.align_mask) & !ring.funcs.align_mask;
+    // Make sure we aren't trying to allocate more space than the maximum
+    // for one submission
+    if ndw > ring.max_dw {
+        Line::new().s("WARNING: amdgpu_ring_alloc ").dec(ndw as u64).s(" > max_dw ").dec(ring.max_dw as u64).say();
+        return -12;
+    }
+    ring.count_dw = ndw as i32;
+    ring.wptr_old = ring.wptr;
+    0
+}
+
+/// `amdgpu_ring_write`.
+pub fn amdgpu_ring_write(adev: &mut amdgpu_device, r: usize, v: u32) {
+    let ring = &mut adev.rings[r];
+    let at = ring.wptr & ring.buf_mask as u64;
+    ring.wptr = (ring.wptr + 1) & ring.ptr_mask;
+    ring.count_dw -= 1;
+    if let Some(k) = ring.ring {
+        crate::amdgpu_gart::kptr_w32(adev, k, at * 4, v);
+    }
+}
+
+/// `amdgpu_ring_insert_nop`.
+pub fn amdgpu_ring_insert_nop(adev: &mut amdgpu_device, r: usize, count: u32) {
+    let ring = &adev.rings[r];
+    let occupied = (ring.wptr & ring.buf_mask as u64) as u32;
+    let chunk1 = (ring.buf_mask + 1 - occupied).min(count);
+    let chunk2 = count - chunk1;
+    let (k, nop) = (ring.ring, ring.funcs.nop);
+    if let Some(k) = k {
+        if chunk1 != 0 {
+            crate::amdgpu_gart::kptr_fill32(adev, k, occupied as u64 * 4, chunk1 as u64 * 4, nop);
+        }
+        if chunk2 != 0 {
+            crate::amdgpu_gart::kptr_fill32(adev, k, 0, chunk2 as u64 * 4, nop);
+        }
+    }
+    let ring = &mut adev.rings[r];
+    ring.wptr = (ring.wptr + count as u64) & ring.ptr_mask;
+    ring.count_dw -= count as i32;
+}
+
+/// `amdgpu_ring_clear_ring`.
+pub fn amdgpu_ring_clear_ring(adev: &mut amdgpu_device, r: usize) {
+    let ring = &adev.rings[r];
+    if let Some(k) = ring.ring {
+        crate::amdgpu_gart::kptr_fill32(adev, k, 0, (ring.buf_mask as u64 + 1) * 4, ring.funcs.nop);
+    }
+}
+
+/// `ring->funcs->insert_nop`.
+fn insert_nop(adev: &mut amdgpu_device, r: usize, count: u32) {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute => crate::gfx_v9_0::gfx_v9_ring_insert_nop(adev, r, count),
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_ring_insert_nop(adev, r, count),
+        _ => amdgpu_ring_insert_nop(adev, r, count),
+    }
+}
+
+/// `amdgpu_ring_set_wptr`.
+pub fn amdgpu_ring_set_wptr(adev: &mut amdgpu_device, r: usize) {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_gfx => crate::gfx_v9_0::gfx_v9_0_ring_set_wptr_gfx(adev, r),
+        ring_ops::gfx_v9_0_compute | ring_ops::gfx_v9_0_kiq => crate::gfx_v9_0::gfx_v9_0_ring_set_wptr_compute(adev, r),
+        ring_ops::sdma_v4_0 => crate::sdma_v4_0::sdma_v4_0_ring_set_wptr(adev, r),
+        ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_page_ring_set_wptr(adev, r),
+        _ => Line::new().s("set_wptr: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
+    }
+}
+
+/// `amdgpu_ring_commit`. `end_use` returns at once, as `begin_use` does.
+pub fn amdgpu_ring_commit(adev: &mut amdgpu_device, r: usize) {
+    let ring = &adev.rings[r];
+    if ring.count_dw < 0 {
+        Line::new().s("amdgpu: writing more dwords to the ring than expected!").say();
+    }
+    // We pad to match fetch size
+    let mut count = ring.funcs.align_mask + 1 - (ring.wptr as u32 & ring.funcs.align_mask);
+    count &= ring.funcs.align_mask;
+    if count != 0 {
+        insert_nop(adev, r, count);
+    }
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    amdgpu_ring_set_wptr(adev, r);
+}
+
+/// `amdgpu_ring_undo`.
+pub fn amdgpu_ring_undo(adev: &mut amdgpu_device, r: usize) {
+    let ring = &mut adev.rings[r];
+    ring.wptr = ring.wptr_old;
+}
+
+/// `amdgpu_ring_test_ring`.
+fn amdgpu_ring_test_ring(adev: &mut amdgpu_device, r: usize) -> i32 {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute | ring_ops::gfx_v9_0_kiq => {
+            crate::gfx_v9_0::gfx_v9_0_ring_test_ring(adev, r)
+        }
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_ring_test_ring(adev, r),
+        _ => {
+            Line::new().s("test_ring: ").s(adev.rings[r].funcs.name).s(" is not ported").say();
+            -22
+        }
+    }
+}
+
+/// `amdgpu_ring_test_helper`.
+pub fn amdgpu_ring_test_helper(adev: &mut amdgpu_device, r: usize) -> i32 {
+    let ret = amdgpu_ring_test_ring(adev, r);
+    if ret != 0 {
+        Line::new().s("ring ").s(&adev.rings[r].name.clone()).s(" test failed (").dec((-ret) as u64).s(")").say();
+    } else {
+        Line::new().s("ring test on ").s(&adev.rings[r].name.clone()).s(" succeeded").dbg();
+    }
+    adev.rings[r].sched_ready = ret == 0;
+    ret
+}
+
+/// `atomic64_set(ring->wptr_cpu_addr, v)`: the ring's writeback wptr slot.
+pub fn ring_wptr_cpu_set(adev: &amdgpu_device, r: usize, v: u64) {
+    let offs = adev.rings[r].wptr_offs;
+    if let Some(k) = adev.wb.wb {
+        crate::amdgpu_gart::kptr_writeq(adev, k, offs as u64 * 4, v);
+    }
+}
+
+/// `*ring->rptr_cpu_addr` / `atomic64_read(ring->wptr_cpu_addr)`.
+pub fn ring_wb_read64(adev: &amdgpu_device, offs: u32) -> u64 {
+    let Some(k) = adev.wb.wb else { return 0 };
+    let lo = crate::amdgpu_gart::kptr_r32(adev, k, offs as u64 * 4) as u64;
+    let hi = crate::amdgpu_gart::kptr_r32(adev, k, offs as u64 * 4 + 4) as u64;
+    lo | hi << 32
+}
+
+/// `amdgpu_mm_wdoorbell64`.
+pub fn amdgpu_mm_wdoorbell64(adev: &amdgpu_device, index: u32, v: u64) {
+    if index < adev.doorbell.num_kernel_doorbells {
+        if let Some(m) = adev.doorbell_mmio {
+            m.writeq(index * 4, v);
+        }
+    } else {
+        Line::new().s("writing beyond doorbell aperture: 0x").hexw(index, 8).say();
+    }
+}
+
+impl amdgpu_ring_funcs {
+    /// `secure_submission_supported`.
+    pub fn secure(&self) -> bool {
+        matches!(self.ops, ring_ops::gfx_v9_0_gfx | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page)
+    }
+}
+
+/// `amdgpu_ring_emit_fence`.
+pub fn amdgpu_ring_emit_fence(adev: &mut amdgpu_device, r: usize, addr: u64, seq: u64, flags: u32) {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute => {
+            crate::gfx_v9_0::gfx_v9_0_ring_emit_fence(adev, r, addr, seq, flags)
+        }
+        ring_ops::gfx_v9_0_kiq => crate::gfx_v9_0::gfx_v9_0_ring_emit_fence_kiq(adev, r, addr, seq, flags),
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => {
+            crate::sdma_v4_0::sdma_v4_0_ring_emit_fence(adev, r, addr, seq, flags)
+        }
+        _ => Line::new().s("emit_fence: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
+    }
+}
+
+/// `ring->funcs->emit_mem_sync`, where the ring has one.
+pub fn amdgpu_ring_emit_mem_sync(adev: &mut amdgpu_device, r: usize) {
+    if matches!(adev.rings[r].funcs.ops, ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute) {
+        crate::gfx_v9_0::gfx_v9_0_emit_mem_sync(adev, r);
+    }
+}
+
+/// `ring->funcs->emit_wave_limit`, where the ring has one.
+pub fn amdgpu_ring_emit_wave_limit(adev: &mut amdgpu_device, r: usize, enable: bool) {
+    if adev.rings[r].funcs.ops == ring_ops::gfx_v9_0_compute {
+        crate::gfx_v9_0::gfx_v9_0_emit_wave_limit(adev, r, enable);
+    }
+}
+
+/// `amdgpu_ring_init_cond_exec` on a ring with `init_cond_exec`; `None`
+/// on the others, where `cond_exec` stays unset and unused.
+pub fn amdgpu_ring_init_cond_exec(adev: &mut amdgpu_device, r: usize) -> Option<u32> {
+    if adev.rings[r].funcs.ops == ring_ops::gfx_v9_0_gfx {
+        let addr = adev.rings[r].cond_exe_gpu_addr;
+        return Some(crate::gfx_v9_0::gfx_v9_0_ring_emit_init_cond_exec(adev, r, addr));
+    }
+    None
+}
+
+/// `amdgpu_ring_patch_cond_exec`.
+pub fn amdgpu_ring_patch_cond_exec(adev: &mut amdgpu_device, r: usize, offset: Option<u32>) {
+    let Some(offset) = offset else { return };
+    let ring = &adev.rings[r];
+    let Some(k) = ring.ring else { return };
+    if offset > ring.buf_mask {
+        Line::new().s("WARNING: amdgpu_ring_patch_cond_exec offset past the ring").say();
+    }
+    if crate::amdgpu_gart::kptr_r32(adev, k, offset as u64 * 4) != 0 {
+        Line::new().s("WARNING: amdgpu_ring_patch_cond_exec on a used dword").say();
+    }
+    // amdgpu_ring_get_dw_distance(ring, offset, ring->wptr - 1)
+    let start = offset & ring.buf_mask;
+    let mut end = (ring.wptr.wrapping_sub(1) as u32) & ring.buf_mask;
+    if end < start {
+        end += ring.ring_size >> 2;
+    }
+    crate::amdgpu_gart::kptr_w32(adev, k, offset as u64 * 4, end - start);
+}
+
+/// `amdgpu_ring_emit_ib`.
+pub fn amdgpu_ring_emit_ib(adev: &mut amdgpu_device, r: usize, ib: &crate::amdgpu_ib::amdgpu_ib, flags: u32) {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_gfx => crate::gfx_v9_0::gfx_v9_0_ring_emit_ib_gfx(adev, r, ib, flags),
+        ring_ops::gfx_v9_0_compute => crate::gfx_v9_0::gfx_v9_0_ring_emit_ib_compute(adev, r, ib, flags),
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_ring_emit_ib(adev, r, ib, flags),
+        _ => Line::new().s("emit_ib: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
+    }
+}
+
+/// `amdgpu_ring_emit_wreg`.
+pub fn amdgpu_ring_emit_wreg(adev: &mut amdgpu_device, r: usize, reg: u32, val: u32) {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute | ring_ops::gfx_v9_0_kiq => {
+            crate::gfx_v9_0::gfx_v9_0_ring_emit_wreg(adev, r, reg, val)
+        }
+        _ => Line::new().s("emit_wreg: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
+    }
+}
+
+/// Whether `ring->funcs->test_ib` is set: compute and SDMA rings (the GFX
+/// ring of GC 9 has none, VCN and JPEG are not running).
+pub fn has_test_ib(adev: &amdgpu_device, r: usize) -> bool {
+    matches!(adev.rings[r].funcs.ops, ring_ops::gfx_v9_0_compute | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page)
+}
+
+/// `amdgpu_ring_test_ib`.
+pub fn amdgpu_ring_test_ib(adev: &mut amdgpu_device, r: usize, timeout: i64) -> i32 {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_compute => crate::gfx_v9_0::gfx_v9_0_ring_test_ib(adev, r, timeout),
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_ring_test_ib(adev, r, timeout),
+        _ => -22,
+    }
 }

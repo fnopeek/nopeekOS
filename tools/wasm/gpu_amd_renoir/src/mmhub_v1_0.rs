@@ -279,10 +279,31 @@ fn mmhub_v1_0_init_saw(adev: &amdgpu_device) {
     wr(adev, MM_mmVM_L2_SAW_CNTL4_BASE_IDX, MM_mmVM_L2_SAW_CNTL4, 0, tmp);
 }
 
-/// `mmhub_v1_0_update_power_gating`: the SMU powers the MMHUB down only
-/// with AMD_PG_SUPPORT_MMHUB.
-pub fn mmhub_v1_0_update_power_gating(adev: &amdgpu_device, _enable: bool) -> bool {
-    adev.pg_flags & AMD_PG_SUPPORT_MMHUB != 0
+/// `mmhub_v1_0_update_power_gating`: bare metal.
+pub fn mmhub_v1_0_update_power_gating(adev: &mut amdgpu_device, enable: bool) {
+    if adev.pg_flags & AMD_PG_SUPPORT_MMHUB != 0 {
+        crate::amdgpu_smu::amdgpu_dpm_set_powergating_by_smu(adev, AMD_IP_BLOCK_TYPE_GMC, enable, 0);
+    }
+}
+
+/// `mmhub_v1_0_gart_disable`: bare metal.
+pub fn mmhub_v1_0_gart_disable(adev: &amdgpu_device) {
+    let hub = adev.vmhub[AMDGPU_MMHUB0_0 as usize];
+    // Disable all tables
+    for i in 0..AMDGPU_NUM_VMID {
+        wr(adev, MM_mmVM_CONTEXT0_CNTL_BASE_IDX, MM_mmVM_CONTEXT0_CNTL, i * hub.ctx_distance, 0);
+    }
+    // Setup TLB control
+    let mut tmp = rd(adev, MM_mmMC_VM_MX_L1_TLB_CNTL_BASE_IDX, MM_mmMC_VM_MX_L1_TLB_CNTL, 0);
+    tmp = set(tmp, MM_MC_VM_MX_L1_TLB_CNTL__ENABLE_L1_TLB_MASK, MM_MC_VM_MX_L1_TLB_CNTL__ENABLE_L1_TLB__SHIFT, 0);
+    tmp = set(tmp, MM_MC_VM_MX_L1_TLB_CNTL__ENABLE_ADVANCED_DRIVER_MODEL_MASK,
+              MM_MC_VM_MX_L1_TLB_CNTL__ENABLE_ADVANCED_DRIVER_MODEL__SHIFT, 0);
+    wr(adev, MM_mmMC_VM_MX_L1_TLB_CNTL_BASE_IDX, MM_mmMC_VM_MX_L1_TLB_CNTL, 0, tmp);
+    // Setup L2 cache
+    let mut tmp = rd(adev, MM_mmVM_L2_CNTL_BASE_IDX, MM_mmVM_L2_CNTL, 0);
+    tmp = set(tmp, MM_VM_L2_CNTL__ENABLE_L2_CACHE_MASK, MM_VM_L2_CNTL__ENABLE_L2_CACHE__SHIFT, 0);
+    wr(adev, MM_mmVM_L2_CNTL_BASE_IDX, MM_mmVM_L2_CNTL, 0, tmp);
+    wr(adev, MM_mmVM_L2_CNTL3_BASE_IDX, MM_mmVM_L2_CNTL3, 0, 0);
 }
 
 /// `mmhub_v1_0_program_invalidation`.
@@ -348,4 +369,53 @@ pub fn mmhub_v1_0_set_fault_enable_default(adev: &amdgpu_device, value: bool) {
                   MM_VM_L2_PROTECTION_FAULT_CNTL__CRASH_ON_RETRY_FAULT__SHIFT, 1);
     }
     wr(adev, MM_mmVM_L2_PROTECTION_FAULT_CNTL_BASE_IDX, MM_mmVM_L2_PROTECTION_FAULT_CNTL, 0, tmp);
+}
+
+/// `mmhub_v1_0_update_medium_grain_clock_gating`: Renoir is not Raven.
+fn mmhub_v1_0_update_medium_grain_clock_gating(adev: &amdgpu_device, enable: bool) {
+    let def = rd(adev, MM_mmATC_L2_MISC_CG_BASE_IDX, MM_mmATC_L2_MISC_CG, 0);
+    let def1 = rd(adev, MM_mmDAGB0_CNTL_MISC2_BASE_IDX, MM_mmDAGB0_CNTL_MISC2, 0);
+    let def2 = rd(adev, MM_mmDAGB1_CNTL_MISC2_BASE_IDX, MM_mmDAGB1_CNTL_MISC2, 0);
+    let m1 = MM_DAGB0_CNTL_MISC2__DISABLE_WRREQ_CG_MASK | MM_DAGB0_CNTL_MISC2__DISABLE_WRRET_CG_MASK
+        | MM_DAGB0_CNTL_MISC2__DISABLE_RDREQ_CG_MASK | MM_DAGB0_CNTL_MISC2__DISABLE_RDRET_CG_MASK
+        | MM_DAGB0_CNTL_MISC2__DISABLE_TLBWR_CG_MASK | MM_DAGB0_CNTL_MISC2__DISABLE_TLBRD_CG_MASK;
+    let m2 = MM_DAGB1_CNTL_MISC2__DISABLE_WRREQ_CG_MASK | MM_DAGB1_CNTL_MISC2__DISABLE_WRRET_CG_MASK
+        | MM_DAGB1_CNTL_MISC2__DISABLE_RDREQ_CG_MASK | MM_DAGB1_CNTL_MISC2__DISABLE_RDRET_CG_MASK
+        | MM_DAGB1_CNTL_MISC2__DISABLE_TLBWR_CG_MASK | MM_DAGB1_CNTL_MISC2__DISABLE_TLBRD_CG_MASK;
+    let (data, data1, data2) = if enable && adev.cg_flags & AMD_CG_SUPPORT_MC_MGCG as u64 != 0 {
+        (def | MM_ATC_L2_MISC_CG__ENABLE_MASK, def1 & !m1, def2 & !m2)
+    } else {
+        (def & !MM_ATC_L2_MISC_CG__ENABLE_MASK, def1 | m1, def2 | m2)
+    };
+    if def != data {
+        wr(adev, MM_mmATC_L2_MISC_CG_BASE_IDX, MM_mmATC_L2_MISC_CG, 0, data);
+    }
+    if def1 != data1 {
+        wr(adev, MM_mmDAGB0_CNTL_MISC2_BASE_IDX, MM_mmDAGB0_CNTL_MISC2, 0, data1);
+    }
+    if def2 != data2 {
+        wr(adev, MM_mmDAGB1_CNTL_MISC2_BASE_IDX, MM_mmDAGB1_CNTL_MISC2, 0, data2);
+    }
+}
+
+/// `mmhub_v1_0_update_medium_grain_light_sleep`.
+fn mmhub_v1_0_update_medium_grain_light_sleep(adev: &amdgpu_device, enable: bool) {
+    let def = rd(adev, MM_mmATC_L2_MISC_CG_BASE_IDX, MM_mmATC_L2_MISC_CG, 0);
+    let data = if enable && adev.cg_flags & AMD_CG_SUPPORT_MC_LS as u64 != 0 {
+        def | MM_ATC_L2_MISC_CG__MEM_LS_ENABLE_MASK
+    } else {
+        def & !MM_ATC_L2_MISC_CG__MEM_LS_ENABLE_MASK
+    };
+    if def != data {
+        wr(adev, MM_mmATC_L2_MISC_CG_BASE_IDX, MM_mmATC_L2_MISC_CG, 0, data);
+    }
+}
+
+/// `mmhub_v1_0_set_clockgating`: CHIP_RENOIR.
+pub fn mmhub_v1_0_set_clockgating(adev: &amdgpu_device, gate: bool) -> i32 {
+    if adev.asic_type == CHIP_RENOIR {
+        mmhub_v1_0_update_medium_grain_clock_gating(adev, gate);
+        mmhub_v1_0_update_medium_grain_light_sleep(adev, gate);
+    }
+    0
 }

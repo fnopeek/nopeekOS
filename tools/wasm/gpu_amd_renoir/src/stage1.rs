@@ -163,11 +163,16 @@ fn ip_init_fw_loading(adev: &mut amdgpu_device) {
     Line::new().s("psp: ring ").hex64(p.km_ring.ring_mem_mc_addr).s(", ").dec(p.fence_value as u64)
         .s(" commands, tmr ").hex64(p.tmr_mc_addr).say();
     let mut l = Line::new();
-    l.s("psp loaded:");
-    for u in adev.firmware.ucode.iter() {
-        if u.fw.is_some() && u.ucode_size != 0 {
-            l.s(" ").dec(u.ucode_id as u64).s("@").hex(u.tmr_mc_addr_lo);
+    let loaded = adev.firmware.ucode.iter().filter(|u| u.fw.is_some() && u.ucode_size != 0);
+    for (n, u) in loaded.enumerate() {
+        if n % 6 == 0 {
+            if n != 0 {
+                l.say();
+            }
+            l = Line::new();
+            l.s("psp loaded:");
         }
+        l.s(" ").dec(u.ucode_id as u64).s("@").hex(u.tmr_mc_addr_lo);
     }
     l.say();
     Line::new().s("ta: asd ").dec(p.asd_context.initialized as u64).s(" hdcp ")
@@ -177,7 +182,70 @@ fn ip_init_fw_loading(adev: &mut amdgpu_device) {
         Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
         return;
     }
-    Line::new().s("stage 4 done: amdgpu_device_fw_loading").say();
+    Line::new().s("fw_loading done").say();
+    ip_init_phase2(adev);
+}
+
+/// The rings' state after a test: `sched.ready` of each, by name.
+fn report_rings(adev: &amdgpu_device, what: &str) {
+    let mut l = Line::new();
+    l.s(what);
+    for r in adev.rings.iter() {
+        if matches!(r.funcs.ops, crate::amdgpu_ring::ring_ops::gfx_v9_0_gfx | crate::amdgpu_ring::ring_ops::gfx_v9_0_compute
+            | crate::amdgpu_ring::ring_ops::gfx_v9_0_kiq | crate::amdgpu_ring::ring_ops::sdma_v4_0)
+        {
+            l.s(" ").s(&r.name).s(if r.sched_ready { "+" } else { "-" });
+        }
+    }
+    l.say();
+}
+
+/// Stage 4: `amdgpu_device_ip_hw_init_phase2` (SMU, GFX with its ring
+/// tests, SDMA with its ring test), the fence interrupts, late_init with
+/// clock and power gating, the IB tests of the delayed init work, and
+/// then `amdgpu_device_fini_hw` before the card goes back. Between phase2
+/// and late_init Linux also sets up RAS recovery (no RAS here), the
+/// schedulers and TTM's buffer functions (no scheduler in the module
+/// yet), KFD and the FRU (an APU has none).
+fn ip_init_phase2(adev: &mut amdgpu_device) {
+    let r = dev::amdgpu_device_ip_hw_init_phase2(adev);
+    let smu = &adev.smu;
+    Line::new().s("smu: if 0x").hexw(smu.smc_fw_if_version, 8).s(" fw 0x").hexw(smu.smc_fw_version, 8)
+        .s(", dpm ").dec(adev.pm.dpm_enabled as u64).s(", features 0x").hexw((smu.feature_supported >> 32) as u32, 8)
+        .hexw(smu.feature_supported as u32, 8).say();
+    let g = &adev.gfx;
+    Line::new().s("gfx: rbs ").dec(g.config.num_rbs as u64).s(" (mask 0x").hexu(g.config.backend_enable_mask)
+        .s("), cu ").dec(g.cu_info.number as u64).s(" (ao 0x").hexu(g.cu_info.ao_cu_mask).s("), db_debug2 0x")
+        .hexw(g.config.db_debug2, 8).say();
+    report_rings(adev, "ring tests:");
+    if r != 0 {
+        Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
+        dev::amdgpu_device_fini_hw(adev);
+        return;
+    }
+    crate::amdgpu_fence::amdgpu_fence_driver_hw_init(adev);
+    let r = dev::amdgpu_device_ip_late_init(adev);
+    if r != 0 {
+        Line::new().s("amdgpu_device_ip_late_init failed").say();
+        dev::amdgpu_device_fini_hw(adev);
+        return;
+    }
+    Line::new().s("late_init: cg 0x").hexw(adev.cg_flags as u32, 8).s(" pg 0x").hexw(adev.pg_flags, 8)
+        .s(", gfxoff ").dec(adev.gfx.gfx_off_state as u64).s(", workload 0x").hexu(adev.smu.workload_mask)
+        .s(", gfxclk ").dec(adev.smu.gfx_default_hard_min_freq as u64).s("-")
+        .dec(adev.smu.gfx_default_soft_max_freq as u64).s(" MHz").say();
+    // amdgpu_device_delayed_init_work_handler
+    let r = crate::amdgpu_ib::amdgpu_ib_ring_tests(adev);
+    if r != 0 {
+        Line::new().s("ib ring test failed (").dec((-r) as u64).s(").").say();
+    }
+    report_rings(adev, "ib tests:");
+    if r == 0 {
+        Line::new().s("stage 4 done: ring and IB tests").say();
+    }
+    dev::amdgpu_device_fini_hw(adev);
+    let faults = crate::amdgpu_irq::amdgpu_irq_counts(adev);
+    Line::new().s("fini: done, ").dec(faults as u64).s(" interrupts processed").say();
 }
 
 /// The PCIe link registers `amdgpu_device_get_pcie_info` read, raw.

@@ -107,6 +107,10 @@ pub struct amdgpu_pm {
     pub pcie_mlw_mask: u32,
     pub smu_prv_buffer_size: u32,
     pub no_fan: bool,
+    pub dpm_enabled: bool,
+    pub fw_version: u32,
+    /// `pwr_state[]`: POWER_STATE_UNKNOWN (0) until a block is gated.
+    pub pwr_state: [u32; AMD_IP_BLOCK_TYPE_NUM as usize],
 }
 
 /// `struct amdgpu_ip_block_status`.
@@ -248,6 +252,9 @@ pub struct amdgpu_gfx_config {
     pub gb_addr_config: u32,
     pub gb_addr_config_fields: amdgpu_gb_addr_config,
     pub max_tile_pipes: u32,
+    pub backend_enable_mask: u32,
+    pub num_rbs: u32,
+    pub db_debug2: u32,
 }
 
 /// `struct gb_addr_config`.
@@ -268,6 +275,11 @@ pub struct amdgpu_cu_info {
     pub max_waves_per_simd: u32,
     pub max_scratch_slots_per_cu: u32,
     pub lds_size: u32,
+    pub number: u32,
+    pub ao_cu_mask: u32,
+    pub simd_per_cu: u32,
+    pub bitmap: [[[u32; 4]; 4]; 1],
+    pub ao_cu_bitmap: [[u32; 4]; 4],
 }
 
 /// `struct amdgpu_gfx`, the part discovery and early_init fill.
@@ -322,6 +334,7 @@ pub struct amdgpu_gfx {
     pub priv_inst_irq: amdgpu_irq_src,
     pub cp_ecc_error_irq: amdgpu_irq_src,
     pub gfx_off_req_count: u32,
+    pub gfx_off_state: bool,
     pub gfx_off_residency: u32,
     pub gfx_off_entrycount: u64,
     pub mec: crate::gfx_v9_0::amdgpu_mec,
@@ -358,6 +371,11 @@ pub struct amdgpu_xgmi {
 /// `struct amdgpu_gmc`.
 #[derive(Default)]
 pub struct amdgpu_gmc {
+    /// `fault_ring`, `fault_hash[].idx` and `last_fault` of
+    /// `amdgpu_gmc_filter_faults`; empty until the first retry fault.
+    pub fault_ring: Vec<crate::gmc_v9_0::amdgpu_gmc_fault>,
+    pub fault_hash: Vec<u64>,
+    pub last_fault: u64,
     pub num_umc: u32,
     pub mall_size: u64,
     pub m_half_use: u32,
@@ -472,6 +490,7 @@ pub struct amdgpu_vcn_inst {
     pub ring_enc_funcs: [Option<&'static str>; AMDGPU_MAX_VCN_ENC_RINGS as usize],
     pub irq: amdgpu_irq_src,
     pub indirect_sram: bool,
+    pub cur_state: u32,
     pub using_unified_queue: bool,
     pub fw_version: u32,
     pub vcpu_bo: Option<usize>,
@@ -542,6 +561,7 @@ pub struct amdgpu_jpeg {
     pub inst0_ring_dec: Option<usize>,
     /// `internal.jpeg_pitch[0]`, `inst[0].external.jpeg_pitch[0]`.
     pub internal_jpeg_pitch0: u32,
+    pub cur_state: u32,
     pub inst0_external_jpeg_pitch0: u32,
     pub ip_dump: Vec<u32>,
     pub reg_count: u32,
@@ -559,6 +579,12 @@ pub struct amdgpu_irq {
     pub ih_soft: crate::vega10_ih::amdgpu_ih_ring,
     pub msi_enabled: bool,
     pub installed: bool,
+    /// `src->enabled_types`, by the source's name.
+    pub enabled_types: alloc::collections::BTreeMap<&'static str, Vec<u32>>,
+    /// A fault was delegated to `ih_soft` and waits for its work.
+    pub ih_soft_pending: bool,
+    /// IVs dispatched, for the log.
+    pub dispatched: u32,
     /// The interrupt vector the kernel gave.
     pub irq: u32,
 }
@@ -618,6 +644,10 @@ pub struct amdgpu_device {
     pub doorbell_mmio: Option<npk_sys::Mmio>,
     pub apu_prefer_gtt: bool,
     pub scpm_enabled: bool,
+    pub in_s0ix: bool,
+    /// `reset_magic`: the first bytes of the GART table after late_init.
+    pub reset_magic: [u8; AMDGPU_RESET_MAGIC_NUM as usize],
+    pub in_suspend: bool,
     pub scpm_status: u32,
     pub wb: amdgpu_wb,
     pub seq64: amdgpu_seq64,
@@ -675,6 +705,8 @@ pub struct amdgpu_device {
     pub dm: crate::amdgpu_dm::amdgpu_display_manager,
     pub ib_pool_ready: bool,
     pub ib_pools: [amdgpu_sa_manager; AMDGPU_IB_POOL_MAX as usize],
+    /// The `drm_suballoc_manager` each IB pool embeds.
+    pub ib_sa: [crate::amdgpu_ib::drm_suballoc_manager; AMDGPU_IB_POOL_MAX as usize],
     pub enable_mes_kiq: bool,
     pub debug_disable_gpu_ring_reset: bool,
     pub debug_disable_soft_recovery: bool,
@@ -734,6 +766,9 @@ impl amdgpu_device {
             doorbell_mmio: None,
             apu_prefer_gtt: false,
             scpm_enabled: false,
+            in_s0ix: false,
+            reset_magic: [0; AMDGPU_RESET_MAGIC_NUM as usize],
+            in_suspend: false,
             scpm_status: 0,
             wb: amdgpu_wb::default(),
             seq64: amdgpu_seq64::default(),
@@ -782,6 +817,7 @@ impl amdgpu_device {
             dm: Default::default(),
             ib_pool_ready: false,
             ib_pools: Default::default(),
+            ib_sa: Default::default(),
             enable_mes_kiq: false,
             debug_disable_gpu_ring_reset: false,
             debug_disable_soft_recovery: false,
@@ -1690,7 +1726,11 @@ pub fn amdgpu_ib_pool_init(adev: &mut amdgpu_device) -> i32 {
     }
     for i in 0..AMDGPU_IB_POOL_MAX as usize {
         match amdgpu_sa_bo_manager_init(adev, AMDGPU_IB_POOL_SIZE, 256, AMDGPU_GEM_DOMAIN_GTT) {
-            Ok(m) => adev.ib_pools[i] = m,
+            Ok(m) => {
+                // drm_suballoc_manager_init
+                adev.ib_sa[i] = crate::amdgpu_ib::drm_suballoc_manager::new(m.size, m.align);
+                adev.ib_pools[i] = m;
+            }
             Err(r) => {
                 for j in (0..i).rev() {
                     // amdgpu_sa_bo_manager_fini
@@ -1769,6 +1809,39 @@ pub fn amdgpu_device_fw_loading(adev: &mut amdgpu_device) -> i32 {
         }
         adev.ip_blocks[i].status.hw = true;
         break;
+    }
+    0
+}
+
+/// `amdgpu_device_ip_hw_init_phase2`: the remaining blocks in their order.
+/// SMU, GFX and SDMA are ported; DM (stage 8), VCN and JPEG (stage 6) are
+/// not yet and stay without hw_init, which the log says.
+pub fn amdgpu_device_ip_hw_init_phase2(adev: &mut amdgpu_device) -> i32 {
+    for i in 0..adev.ip_blocks.len() {
+        let st = adev.ip_blocks[i].status;
+        if !st.sw || st.hw {
+            continue;
+        }
+        let t = adev.ip_blocks[i].version.type_;
+        if !amdgpu_ip_member_of_hwini(adev, t) {
+            continue;
+        }
+        let r = match t {
+            AMD_IP_BLOCK_TYPE_SMC => crate::amdgpu_smu::smu_hw_init(adev),
+            AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_hw_init(adev),
+            AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_init(adev),
+            _ => {
+                Line::new().s("hw_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                    .s(">: not ported yet, skipped").say();
+                continue;
+            }
+        };
+        if r != 0 {
+            Line::new().s("hw_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                .s("> failed ").dec((-r) as u64).say();
+            return r;
+        }
+        adev.ip_blocks[i].status.hw = true;
     }
     0
 }
@@ -1855,4 +1928,185 @@ pub struct amdgpu_seq64 {
     pub num_sem: u32,
     /// The slot bitmap.
     pub used: Vec<u64>,
+}
+
+/// `set_clockgating_state` of a block; `None` where its funcs have none.
+fn set_clockgating_state(adev: &mut amdgpu_device, type_: u32, gate: bool) -> Option<i32> {
+    Some(match type_ {
+        AMD_IP_BLOCK_TYPE_COMMON => crate::soc15::soc15_common_set_clockgating_state(adev, gate),
+        AMD_IP_BLOCK_TYPE_GMC => crate::gmc_v9_0::gmc_v9_0_set_clockgating_state(adev, gate),
+        AMD_IP_BLOCK_TYPE_IH => crate::vega10_ih::vega10_ih_set_clockgating_state(adev, gate),
+        // psp_set_clockgating_state and smu_set_clockgating_state return 0.
+        AMD_IP_BLOCK_TYPE_PSP | AMD_IP_BLOCK_TYPE_SMC => 0,
+        AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_set_clockgating_state(adev, gate),
+        AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_set_clockgating_state(adev, gate),
+        _ => return None,
+    })
+}
+
+/// `set_powergating_state` of a block; `None` where its funcs have none.
+fn set_powergating_state(adev: &mut amdgpu_device, type_: u32, gate: bool) -> Option<i32> {
+    Some(match type_ {
+        // soc15_common, gmc_v9_0, vega10_ih, psp and smu return 0.
+        AMD_IP_BLOCK_TYPE_COMMON | AMD_IP_BLOCK_TYPE_GMC | AMD_IP_BLOCK_TYPE_IH | AMD_IP_BLOCK_TYPE_PSP
+        | AMD_IP_BLOCK_TYPE_SMC => 0,
+        AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_set_powergating_state(adev, gate),
+        AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_set_powergating_state(adev, gate),
+        _ => return None,
+    })
+}
+
+/// The block types the CG and PG walks leave alone.
+fn cg_skipped(type_: u32) -> bool {
+    matches!(type_, AMD_IP_BLOCK_TYPE_UVD | AMD_IP_BLOCK_TYPE_VCE | AMD_IP_BLOCK_TYPE_VCN | AMD_IP_BLOCK_TYPE_JPEG)
+}
+
+/// `amdgpu_device_set_cg_state`.
+pub fn amdgpu_device_set_cg_state(adev: &mut amdgpu_device, gate: bool) -> i32 {
+    if crate::tables::amdgpu_emu_mode[0] == 1 {
+        return 0;
+    }
+    let n = adev.ip_blocks.len();
+    for j in 0..n {
+        let i = if gate { j } else { n - j - 1 };
+        if !adev.ip_blocks[i].status.late_initialized {
+            continue;
+        }
+        let t = adev.ip_blocks[i].version.type_;
+        // skip CG for GFX, SDMA on S0ix
+        if adev.in_s0ix && (t == AMD_IP_BLOCK_TYPE_GFX || t == AMD_IP_BLOCK_TYPE_SDMA) {
+            continue;
+        }
+        // skip CG for VCE/UVD, it's handled specially
+        if cg_skipped(t) {
+            continue;
+        }
+        if let Some(r) = set_clockgating_state(adev, t, gate) {
+            if r != 0 {
+                Line::new().s("set_clockgating_state(gate) of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                    .s("> failed ").dec((-r) as u64).say();
+                return r;
+            }
+        }
+    }
+    0
+}
+
+/// `amdgpu_device_set_pg_state`.
+pub fn amdgpu_device_set_pg_state(adev: &mut amdgpu_device, gate: bool) -> i32 {
+    if crate::tables::amdgpu_emu_mode[0] == 1 {
+        return 0;
+    }
+    let n = adev.ip_blocks.len();
+    for j in 0..n {
+        let i = if gate { j } else { n - j - 1 };
+        if !adev.ip_blocks[i].status.late_initialized {
+            continue;
+        }
+        let t = adev.ip_blocks[i].version.type_;
+        // skip PG for GFX, SDMA on S0ix
+        if adev.in_s0ix && (t == AMD_IP_BLOCK_TYPE_GFX || t == AMD_IP_BLOCK_TYPE_SDMA) {
+            continue;
+        }
+        // skip CG for VCE/UVD, it's handled specially
+        if cg_skipped(t) {
+            continue;
+        }
+        if let Some(r) = set_powergating_state(adev, t, gate) {
+            if r != 0 {
+                Line::new().s("set_powergating_state(gate) of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                    .s("> failed ").dec((-r) as u64).say();
+                return r;
+            }
+        }
+    }
+    0
+}
+
+/// `amdgpu_device_ip_late_init`: no RAS blocks, not in recovery, an APU
+/// on its own (no fan boost, no XGMI hive).
+pub fn amdgpu_device_ip_late_init(adev: &mut amdgpu_device) -> i32 {
+    for i in 0..adev.ip_blocks.len() {
+        if !adev.ip_blocks[i].status.hw {
+            continue;
+        }
+        let r = match adev.ip_blocks[i].version.type_ {
+            // soc15_common_late_init: enable_doorbell_selfring_aperture is
+            // empty on NBIO 7.0. vega10_ih, psp: no late_init.
+            AMD_IP_BLOCK_TYPE_GMC => crate::gmc_v9_0::gmc_v9_0_late_init(adev),
+            AMD_IP_BLOCK_TYPE_SMC => crate::amdgpu_smu::smu_late_init(adev),
+            AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_late_init(adev),
+            AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_late_init(adev),
+            _ => 0,
+        };
+        if r != 0 {
+            Line::new().s("late_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name).s("> failed ")
+                .dec((-r) as u64).say();
+            return r;
+        }
+        adev.ip_blocks[i].status.late_initialized = true;
+    }
+    // amdgpu_ras_late_init: no RAS context, no ACA, empty RAS list.
+    amdgpu_device_set_cg_state(adev, true);
+    amdgpu_device_set_pg_state(adev, true);
+    // amdgpu_device_fill_reset_magic
+    if let Some(k) = adev.gart.ptr {
+        let mut magic = [0u8; AMDGPU_RESET_MAGIC_NUM as usize];
+        crate::amdgpu_gart::kptr_read(adev, k, 0, &mut magic);
+        adev.reset_magic = magic;
+    }
+    0
+}
+
+/// A block's `hw_fini`; the blocks without hw_init here have none to run.
+fn hw_fini(adev: &mut amdgpu_device, type_: u32) -> i32 {
+    match type_ {
+        AMD_IP_BLOCK_TYPE_COMMON => crate::soc15::soc15_common_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_GMC => crate::gmc_v9_0::gmc_v9_0_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_IH => crate::vega10_ih::vega10_ih_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_PSP => crate::amdgpu_psp::psp_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_SMC => crate::amdgpu_smu::smu_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_fini(adev),
+        _ => 0,
+    }
+}
+
+/// `amdgpu_device_fini_hw`, up to `amdgpu_device_ip_fini_early` and
+/// `amdgpu_irq_fini_hw`: bare metal, no display, no RAS, no TTM buffer
+/// functions enabled, no KFD. The DMA buffers go back with the module.
+pub fn amdgpu_device_fini_hw(adev: &mut amdgpu_device) {
+    Line::new().s("amdgpu: finishing device.").say();
+    adev.shutdown = true;
+    amdgpu_device_set_pg_state(adev, false);
+    amdgpu_device_set_cg_state(adev, false);
+    // disable all interrupts
+    crate::amdgpu_irq::amdgpu_irq_disable_all(adev);
+    crate::amdgpu_fence::amdgpu_fence_driver_hw_fini(adev);
+
+    // amdgpu_device_ip_fini_early: no block has early_fini;
+    // amdgpu_device_smu_fini_early is for GC 9.0.0 and older.
+    // DM never came up here, so the scanout the kernel still draws into is
+    // the firmware's, and it reads through the MMHUB: gmc_v9_0_hw_fini
+    // would switch the hub's TLB and L2 off under it. Linux reaches the GMC
+    // only after DM's hw_fini has taken the display down.
+    let display_ours = adev.ip_blocks.iter().any(|b| b.version.type_ == AMD_IP_BLOCK_TYPE_DCE && b.status.hw);
+    for i in (0..adev.ip_blocks.len()).rev() {
+        if !adev.ip_blocks[i].status.hw {
+            continue;
+        }
+        if adev.ip_blocks[i].version.type_ == AMD_IP_BLOCK_TYPE_GMC && !display_ours {
+            Line::new().s("hw_fini of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                .s(">: held back, the display still scans out through the MMHUB").say();
+            continue;
+        }
+        let r = hw_fini(adev, adev.ip_blocks[i].version.type_);
+        if r != 0 {
+            Line::new().s("hw_fini of IP block <").bytes(adev.ip_blocks[i].version.funcs_name).s("> failed ")
+                .dec((-r) as u64).dbg();
+        }
+        adev.ip_blocks[i].status.hw = false;
+    }
+    // amdgpu_irq_fini_hw: free_irq; the rings go with the module.
+    adev.irq.installed = false;
 }

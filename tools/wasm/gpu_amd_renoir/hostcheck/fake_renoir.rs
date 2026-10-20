@@ -26,6 +26,9 @@ fn fake_renoir() -> amdgpu_device::amdgpu_device {
     // BIOS scratch 7 (atomfirmware bios_scratch_reg_startaddr 0x4c + 7) as
     // a posted APU leaves it; the card run reads the real one.
     regs.insert(0x4c + 7, ATOM_S7_ASIC_INIT_COMPLETE_MASK);
+    // SMUIO_GFX_MISC_CNTL with the GFX powered (PWR_GFXOFF_STATUS 2).
+    regs.insert(tables::SMUIO_BASE[SMUIO_mmSMUIO_GFX_MISC_CNTL_BASE_IDX as usize] + SMUIO_mmSMUIO_GFX_MISC_CNTL,
+                2 << SMUIO_SMUIO_GFX_MISC_CNTL__PWR_GFXOFF_STATUS__SHIFT);
     let mut vram = disc;
     vram.resize(DISCOVERY_TMR_SIZE as usize, 0);
     npk_sys::fake_card(npk_sys::FakeCard {
@@ -46,6 +49,12 @@ fn fake_renoir() -> amdgpu_device::amdgpu_device {
         writes: Vec::new(),
         psp_wptr: Some(0x16000 + MP0_mmMP0_SMN_C2PMSG_67),
     });
+
+    // The PCIe index/data pair (NBIO segment 0) and what the SMU's MP1
+    // shows behind it: its firmware up, interrupts enabled.
+    npk_sys::fake_card_pcie(tables::NBIF0_BASE[mmPCIE_INDEX2_BASE_IDX as usize] + mmPCIE_INDEX2,
+                            tables::NBIF0_BASE[mmPCIE_DATA2_BASE_IDX as usize] + mmPCIE_DATA2,
+                            &[(MP1_Public | smnMP1_FIRMWARE_FLAGS, MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK)]);
 
     let mut vfct = vec![0u8; VFCT_SIZE as usize];
     put32(&mut vfct, VFCT_VBIOS_IMAGE_OFFSET, VFCT_SIZE);

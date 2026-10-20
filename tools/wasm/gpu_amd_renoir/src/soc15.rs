@@ -120,3 +120,50 @@ pub fn soc15_common_hw_init(adev: &mut amdgpu_device) -> i32 {
     soc15_sdma_doorbell_range_init(adev);
     0
 }
+
+/// `soc15_update_drm_clock_gating`.
+fn soc15_update_drm_clock_gating(adev: &amdgpu_device, enable: bool) {
+    let def = nbio_v7_0::rreg32_soc15(adev, MP0_HWIP, 0, MP0_mmMP0_MISC_CGTT_CTRL0_BASE_IDX, MP0_mmMP0_MISC_CGTT_CTRL0)
+        .unwrap_or(0);
+    let m = 0x01000000 | 0x02000000 | 0x04000000 | 0x08000000 | 0x10000000 | 0x20000000 | 0x40000000 | 0x80000000;
+    let data = if enable && adev.cg_flags & AMD_CG_SUPPORT_DRM_MGCG as u64 != 0 { def & !m } else { def | m };
+    if def != data {
+        nbio_v7_0::wreg32_soc15(adev, MP0_HWIP, 0, MP0_mmMP0_MISC_CGTT_CTRL0_BASE_IDX, MP0_mmMP0_MISC_CGTT_CTRL0, data);
+    }
+}
+
+/// `soc15_update_drm_light_sleep`.
+fn soc15_update_drm_light_sleep(adev: &amdgpu_device, enable: bool) {
+    let def = nbio_v7_0::rreg32_soc15(adev, MP0_HWIP, 0, MP0_mmMP0_MISC_LIGHT_SLEEP_CTRL_BASE_IDX,
+                                      MP0_mmMP0_MISC_LIGHT_SLEEP_CTRL).unwrap_or(0);
+    let data = if enable && adev.cg_flags & AMD_CG_SUPPORT_DRM_LS as u64 != 0 { def | 1 } else { def & !1 };
+    if def != data {
+        nbio_v7_0::wreg32_soc15(adev, MP0_HWIP, 0, MP0_mmMP0_MISC_LIGHT_SLEEP_CTRL_BASE_IDX,
+                                MP0_mmMP0_MISC_LIGHT_SLEEP_CTRL, data);
+    }
+}
+
+/// `soc15_common_set_clockgating_state`: NBIO 2.5.0.
+pub fn soc15_common_set_clockgating_state(adev: &amdgpu_device, gate: bool) -> i32 {
+    let v = adev.ip_version(NBIO_HWIP, 0);
+    if v == 7 << 24 || v == 7 << 24 | 1 << 8 || v == 2 << 24 | 5 << 16 {
+        nbio_v7_0::nbio_v7_0_update_medium_grain_clock_gating(adev, gate);
+        nbio_v7_0::nbio_v7_0_update_medium_grain_light_sleep(adev, gate);
+        crate::hdp_v4_0::hdp_v4_0_update_clock_gating(adev, gate);
+        soc15_update_drm_clock_gating(adev, gate);
+        soc15_update_drm_light_sleep(adev, gate);
+    } else {
+        crate::linux::Line::new().s("soc15_common_set_clockgating_state: NBIO ").hex(v).s(" is not ported").say();
+    }
+    0
+}
+
+/// `soc15_common_hw_fini`: bare metal, no NBIO RAS.
+/// `nbio_v7_0_enable_doorbell_selfring_aperture` is empty.
+pub fn soc15_common_hw_fini(adev: &mut amdgpu_device) -> i32 {
+    // Disable the doorbell aperture and selfring doorbell aperture
+    // separately in hw_fini because soc15_enable_doorbell_aperture has been
+    // removed and there is no need to delay disabling selfring doorbell.
+    nbio_v7_0::nbio_v7_0_enable_doorbell_aperture(adev, false);
+    0
+}
