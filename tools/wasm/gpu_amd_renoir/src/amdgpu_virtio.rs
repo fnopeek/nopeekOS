@@ -540,9 +540,10 @@ fn ccmd_reserve_vmid(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> R
     Ok(r)
 }
 
-/// The guest object whose VRAM is exactly `offsets` (one per page, from
-/// the start of VRAM): what `drm_gem_prime_import` hands back for a dma-buf
-/// this device exported itself.
+/// The guest object whose VRAM begins with `offsets` (one per page, from
+/// the start of VRAM; a view of its first pages, as a tiled surface is
+/// larger than its rows): what `drm_gem_prime_import` hands back for a
+/// dma-buf this device exported itself.
 pub fn guest_vram_object(adev: &amdgpu_device, vc: &vclients, offsets: &[u64]) -> Option<usize> {
     const PAGE_SIZE: u64 = 4096;
     for c in vc.clients.values() {
@@ -553,15 +554,18 @@ pub fn guest_vram_object(adev: &amdgpu_device, vc: &vclients, offsets: &[u64]) -
                 continue;
             }
             let size = crate::amdgpu_object::amdgpu_bo_size(adev, o.bo);
-            if size != offsets.len() as u64 * PAGE_SIZE {
+            if size < offsets.len() as u64 * PAGE_SIZE {
                 continue;
             }
             let mut i = 0;
             let mut same = true;
             let mut cur = crate::amdgpu_res_cursor::amdgpu_res_first(adev, res, 0, size);
-            while same && cur.remaining != 0 {
+            while same && cur.remaining != 0 && i < offsets.len() {
                 for p in 0..cur.size / PAGE_SIZE {
-                    same &= offsets.get(i) == Some(&(cur.start + p * PAGE_SIZE));
+                    if i == offsets.len() {
+                        break;
+                    }
+                    same &= offsets[i] == cur.start + p * PAGE_SIZE;
                     i += 1;
                 }
                 let n = cur.size;

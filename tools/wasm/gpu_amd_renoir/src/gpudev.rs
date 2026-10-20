@@ -491,8 +491,21 @@ fn log_bo_add(adev: &amdgpu_device, id: u32, b: &bo, pages: &[u64], offsets: Opt
     match (offsets, own) {
         (Some(o), Some(h)) => {
             let ob = obj::bo(adev, h);
-            l.s(": guest VRAM object, tiling 0x").hexw((ob.tiling_flags >> 32) as u32, 8)
-                .hexw(ob.tiling_flags as u32, 8).s(", pixels");
+            let t = ob.tiling_flags;
+            let field = |shift: u32, mask: u32| (t >> shift) & mask as u64;
+            l.s(": guest VRAM object of ").dec(obj::amdgpu_bo_size(adev, h) / PAGE).s(" pages, tiling 0x")
+                .hexw((t >> 32) as u32, 8).hexw(t as u32, 8).s(" (swizzle ")
+                .dec(field(AMDGPU_TILING_SWIZZLE_MODE_SHIFT, AMDGPU_TILING_SWIZZLE_MODE_MASK)).s(", dcc offset ")
+                .dec(field(AMDGPU_TILING_DCC_OFFSET_256B_SHIFT, AMDGPU_TILING_DCC_OFFSET_256B_MASK) * 256)
+                .s(", dcc pitch ").dec(field(AMDGPU_TILING_DCC_PITCH_MAX_SHIFT, AMDGPU_TILING_DCC_PITCH_MAX_MASK))
+                .s(", scanout ").dec(field(AMDGPU_TILING_SCANOUT_SHIFT, 1)).s("), metadata ")
+                .dec(ob.metadata.len() as u64).s(" bytes [");
+            for w in ob.metadata.chunks(4).take(12) {
+                let mut v = [0u8; 4];
+                v[..w.len()].copy_from_slice(w);
+                l.s(" ").hex(u32::from_le_bytes(v));
+            }
+            l.s(" ], pixels");
             pixels(adev, &mut l, b, o);
         }
         (Some(_), None) => {

@@ -3588,3 +3588,11 @@ ATOM_FWI_DEFMCLK_PTR @ atom.c
 AMDGPU_RESET_SRC_JOB @ amdgpu_job.c
 PCI_COMMAND @ amdgpu_device.c
 WATERMARKS_LOADED @ ../pm/swsmu/amdgpu_smu.c
+# Tiling flags of a guest surface (amdgpu_drm.h)
+AMDGPU_TILING_SWIZZLE_MODE_SHIFT @ amdgpu_kms.c
+AMDGPU_TILING_SWIZZLE_MODE_MASK @ amdgpu_kms.c
+AMDGPU_TILING_DCC_OFFSET_256B_SHIFT @ amdgpu_kms.c
+AMDGPU_TILING_DCC_OFFSET_256B_MASK @ amdgpu_kms.c
+AMDGPU_TILING_DCC_PITCH_MAX_SHIFT @ amdgpu_kms.c
+AMDGPU_TILING_DCC_PITCH_MAX_MASK @ amdgpu_kms.c
+AMDGPU_TILING_SCANOUT_SHIFT @ amdgpu_kms.c

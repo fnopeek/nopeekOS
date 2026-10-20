@@ -7179,3 +7179,19 @@ pub const AMDGPU_RESET_SRC_JOB: u32 = 0x1;
 pub const PCI_COMMAND: u32 = 0x4;
 /// ?
 pub const WATERMARKS_LOADED: u32 = 0x2;
+
+// Tiling flags of a guest surface (amdgpu_drm.h)
+/// ?
+pub const AMDGPU_TILING_SWIZZLE_MODE_SHIFT: u32 = 0x0;
+/// ?
+pub const AMDGPU_TILING_SWIZZLE_MODE_MASK: u32 = 0x1f;
+/// ?
+pub const AMDGPU_TILING_DCC_OFFSET_256B_SHIFT: u32 = 0x5;
+/// ?
+pub const AMDGPU_TILING_DCC_OFFSET_256B_MASK: u32 = 0xffffff;
+/// ?
+pub const AMDGPU_TILING_DCC_PITCH_MAX_SHIFT: u32 = 0x1d;
+/// ?
+pub const AMDGPU_TILING_DCC_PITCH_MAX_MASK: u32 = 0x3fff;
+/// ?
+pub const AMDGPU_TILING_SCANOUT_SHIFT: u32 = 0x3f;
