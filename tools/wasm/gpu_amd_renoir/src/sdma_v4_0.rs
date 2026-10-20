@@ -827,6 +827,19 @@ pub const SDMA_V4_0_COPY_MAX_BYTES: u32 = 0x400000;
 /// `sdma_v4_0_buffer_funcs.copy_num_dw`.
 pub const SDMA_V4_0_COPY_NUM_DW: u32 = 7;
 
+/// `sdma_v4_0_buffer_funcs.fill_max_bytes` and `fill_num_dw`.
+pub const SDMA_V4_0_FILL_MAX_BYTES: u32 = 0x400000;
+pub const SDMA_V4_0_FILL_NUM_DW: u32 = 5;
+
+/// `sdma_v4_0_emit_fill_buffer`.
+pub fn sdma_v4_0_emit_fill_buffer(adev: &amdgpu_device, ib: &mut crate::amdgpu_ib::amdgpu_ib, src_data: u32,
+                                  dst_offset: u64, byte_count: u32) {
+    for w in [SDMA_PKT_HEADER_OP_CONST_FILL, dst_offset as u32, (dst_offset >> 32) as u32, src_data, byte_count - 1] {
+        ib.set(adev, ib.length_dw, w);
+        ib.length_dw += 1;
+    }
+}
+
 /// `sdma_v4_0_ring_pad_ib`.
 pub fn sdma_v4_0_ring_pad_ib(adev: &amdgpu_device, r: usize, ib: &mut crate::amdgpu_ib::amdgpu_ib) {
     let burst_nop = amdgpu_sdma_get_instance_from_ring(adev, r).is_some_and(|i| adev.sdma.instance[i].burst_nop);

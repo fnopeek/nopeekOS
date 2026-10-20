@@ -54,6 +54,14 @@ fn amdgpu_vram_mgr_vis_size(visible_vram_size: u64, mm: &gpu_buddy, block: usize
     end.min(visible_vram_size) - start
 }
 
+/// `amdgpu_vram_mgr_set_cleared`: the blocks go back to the buddy
+/// allocator as known zero.
+pub fn amdgpu_vram_mgr_set_cleared(res: &mut ttm_resource) {
+    if let ttm_resource_priv::vram { flags, .. } = &mut res.priv_ {
+        *flags |= crate::gpu_buddy::GPU_BUDDY_CLEARED;
+    }
+}
+
 /// `amdgpu_vram_mgr_bo_visible_size`: the CPU-visible bytes of buffer `h`.
 pub fn amdgpu_vram_mgr_bo_visible_size(adev: &crate::amdgpu_device::amdgpu_device, h: usize) -> u64 {
     let size = crate::amdgpu_object::amdgpu_bo_size(adev, h);

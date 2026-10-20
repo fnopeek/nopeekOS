@@ -794,14 +794,95 @@ pub fn amdgpu_vm_bo_map(adev: &mut amdgpu_device, b: usize, saddr: u64, offset: 
     0
 }
 
+/// `amdgpu_vm_bo_replace_map`: whatever lies in the range is unmapped
+/// first. PRT counting is GMC 8's (`set_prt`), which GMC 9 has not.
+pub fn amdgpu_vm_bo_replace_map(adev: &mut amdgpu_device, b: usize, saddr: u64, offset: u64, size: u64,
+                                flags: u32) -> i32 {
+    let bo = base(adev, b).bo;
+    let vm = base(adev, b).vm;
+    let r = amdgpu_vm_verify_parameters(adev, bo, saddr, offset, size);
+    if r != 0 {
+        return r;
+    }
+    let r = amdgpu_vm_bo_clear_mappings(adev, vm, saddr, size);
+    if r != 0 {
+        return r;
+    }
+    let saddr = saddr / AMDGPU_GPU_PAGE_SIZE as u64;
+    let eaddr = saddr + (size - 1) / AMDGPU_GPU_PAGE_SIZE as u64;
+    let m = slot(&mut adev.vm_mappings, amdgpu_bo_va_mapping { start: saddr, last: eaddr, offset, flags, bo_va: None });
+    amdgpu_vm_bo_insert_map(adev, b, m);
+    0
+}
+
+/// `amdgpu_vm_bo_clear_mappings`: every mapping in the range goes to
+/// `freed`, cut to the range; what reaches past it on either side stays as
+/// a new mapping.
+pub fn amdgpu_vm_bo_clear_mappings(adev: &mut amdgpu_device, vm: usize, saddr: u64, size: u64) -> i32 {
+    let r = amdgpu_vm_verify_parameters(adev, None, saddr, 0, size);
+    if r != 0 {
+        return r;
+    }
+    let saddr = saddr / AMDGPU_GPU_PAGE_SIZE as u64;
+    let eaddr = saddr + (size - 1) / AMDGPU_GPU_PAGE_SIZE as u64;
+    // Now gather all removed mappings
+    let mut removed = Vec::new();
+    let mut before: Option<amdgpu_bo_va_mapping> = None;
+    let mut after: Option<amdgpu_bo_va_mapping> = None;
+    let hit: Vec<usize> = {
+        let va = &adev.vm(vm).va;
+        let mut v: Vec<usize> = va.range(..saddr).next_back().map(|(_, &m)| m)
+            .filter(|&m| mapping(adev, m).last >= saddr).into_iter().collect();
+        v.extend(va.range(saddr..=eaddr).map(|(_, &m)| m));
+        v
+    };
+    for tmp in hit {
+        let t = mapping(adev, tmp);
+        let (start, last, offset, flags, owner) = (t.start, t.last, t.offset, t.flags, t.bo_va);
+        // Remember mapping split at the start
+        if start < saddr {
+            before = Some(amdgpu_bo_va_mapping { start, last: saddr - 1, offset, flags, bo_va: owner });
+        }
+        // Remember mapping split at the end
+        if last > eaddr {
+            let a_start = eaddr + 1;
+            after = Some(amdgpu_bo_va_mapping { start: a_start, last, offset: offset + ((a_start - start) << AMDGPU_GPU_PAGE_SHIFT),
+                                                flags, bo_va: owner });
+        }
+        if let Some(b) = owner {
+            bo_va(adev, b).valids.retain(|&x| x != tmp);
+            bo_va(adev, b).invalids.retain(|&x| x != tmp);
+        }
+        removed.push(tmp);
+    }
+    // And free them up
+    for tmp in removed {
+        let start = mapping(adev, tmp).start;
+        adev.vm_mut(vm).va.remove(&start);
+        let t = mapping_mut(adev, tmp);
+        t.start = t.start.max(saddr);
+        t.last = t.last.min(eaddr);
+        t.bo_va = None;
+        adev.vm_mut(vm).freed.insert(0, tmp);
+    }
+    // Insert partial mappings before and after the range
+    for part in [before, after].into_iter().flatten() {
+        let b = part.bo_va.unwrap();
+        let m = slot(&mut adev.vm_mappings, part);
+        bo_va(adev, b).invalids.insert(0, m);
+        let start = mapping(adev, m).start;
+        adev.vm_mut(vm).va.insert(start, m);
+        let bo = base(adev, b).bo;
+        if amdgpu_vm_is_bo_always_valid(adev, vm, bo) && !base(adev, b).moved {
+            amdgpu_vm_bo_moved(adev, b);
+        }
+    }
+    0
+}
+
 /// The bus address of each page of a TT buffer (`ttm->dma_address`).
 fn tt_dma_addresses(adev: &amdgpu_device, h: usize) -> Vec<u64> {
-    let b = obj::bo(adev, h);
-    let tt = b.tbo.ttm.unwrap();
-    match b.tbo.sg.as_ref() {
-        Some(sg) if tt.page_flags & TTM_TT_FLAG_EXTERNAL != 0 => sg[..tt.num_pages as usize].to_vec(),
-        _ => (0..tt.num_pages).map(|i| tt.dma_address(i)).collect(),
-    }
+    obj::tt_pages(obj::bo(adev, h))
 }
 
 /// `amdgpu_vm_bo_update`: the bo_va's invalid mappings written into the

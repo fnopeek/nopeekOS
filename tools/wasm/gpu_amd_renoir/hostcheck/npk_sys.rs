@@ -585,6 +585,17 @@ pub fn gpudev_bo_info(id: i32, out: &mut [u8; 40]) -> i32 {
 }
 
 pub fn gpudev_bo_pages(id: i32, first: i32, out: &mut [u64]) -> i32 {
+    if id > 1000 {
+        return TTS.with(|t| {
+            let t = t.borrow();
+            let Some(Some((_, d, pages))) = t.get((id - 1001) as usize) else { return -1 };
+            let n = (*pages - first).clamp(0, out.len() as i32);
+            for i in 0..n {
+                out[i as usize] = d.phys + (first + i) as u64 * 4096;
+            }
+            n
+        });
+    }
     GPUDEV.with(|g| {
         let g = g.borrow();
         let Some(s) = g.as_ref() else { return -1 };
@@ -644,6 +655,35 @@ pub fn gpudev_job_data(seq: i32, off: i32, out: &mut [u8]) -> i32 {
         out.copy_from_slice(&p[off..off + out.len()]);
         out.len() as i32
     })
+}
+
+/// `npk_gpudev_tt_alloc`: a guest object's pages, from the fake's DMA.
+pub fn gpudev_tt_alloc(client: i32, pages: i32) -> i32 {
+    let Some(d) = Dma::alloc(pages) else { return -1 };
+    TTS.with(|t| {
+        let mut t = t.borrow_mut();
+        t.push(Some((client, d, pages)));
+        t.len() as i32
+    })
+}
+
+/// `npk_gpudev_tt_buffer`: the fake reads tt pages under the tt's id.
+pub fn gpudev_tt_buffer(tt: i32) -> i32 {
+    TTS.with(|t| if t.borrow().get(tt as usize - 1).is_some_and(|x| x.is_some()) { 1000 + tt } else { -1 })
+}
+
+pub fn gpudev_tt_free(tt: i32) -> i32 {
+    TTS.with(|t| match t.borrow_mut().get_mut(tt as usize - 1).and_then(|x| x.take()) {
+        Some((_, d, _)) => {
+            d.free();
+            0
+        }
+        None => -1,
+    })
+}
+
+thread_local! {
+    static TTS: core::cell::RefCell<Vec<Option<(i32, Dma, i32)>>> = const { core::cell::RefCell::new(Vec::new()) };
 }
 
 /// `npk_gpudev_capset`: the words the guest's Mesa reads.

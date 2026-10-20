@@ -553,19 +553,24 @@ pub fn amdgpu_gem_object_close(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, b
 }
 
 /// `amdgpu_gem_va_update_vm`.
-fn amdgpu_gem_va_update_vm(adev: &mut amdgpu_device, vm: usize, b: usize, map: bool) -> Fence {
+/// `amdgpu_gem_va_update_vm`: the fence of the last update this
+/// operation is about.
+fn amdgpu_gem_va_update_vm(adev: &mut amdgpu_device, vm: usize, b: Option<usize>, operation: u32) -> Fence {
+    // Always start from the VM's existing last update fence.
     let mut fence = Some(adev.vm(vm).last_update.clone());
     if !amdgpu_vm::amdgpu_vm_ready(adev, vm) {
         return fence.unwrap();
     }
+    let map = operation == AMDGPU_VA_OP_MAP || operation == AMDGPU_VA_OP_REPLACE;
     let mut r = amdgpu_vm::amdgpu_vm_clear_freed(adev, vm, Some(&mut fence));
     if r == 0 && map {
-        r = amdgpu_vm::amdgpu_vm_bo_update(adev, b, false);
+        r = amdgpu_vm::amdgpu_vm_bo_update(adev, b.unwrap(), false);
     }
     if r == 0 {
         r = amdgpu_vm::amdgpu_vm_update_pdes(adev, vm, false);
     }
     if r == 0 && map {
+        let b = b.unwrap();
         let bo = amdgpu_vm::base(adev, b).bo;
         fence = Some(if amdgpu_vm::amdgpu_vm_is_bo_always_valid(adev, vm, bo) {
             adev.vm(vm).last_update.clone()
@@ -579,10 +584,16 @@ fn amdgpu_gem_va_update_vm(adev: &mut amdgpu_device, vm: usize, b: usize, map: b
     fence.unwrap()
 }
 
-/// `amdgpu_gem_va_ioctl` with `AMDGPU_VA_OP_MAP` or `AMDGPU_VA_OP_UNMAP`:
-/// the fence of the page table update.
-pub fn amdgpu_gem_va_ioctl(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, bo: usize, map: bool, va_address: u64,
-                           offset: u64, map_size: u64, flags: u32) -> Result<Fence, i32> {
+/// `amdgpu_gem_va_ioctl` without input syncobjs or a VM timeline (no caller
+/// here passes them): `bo` None is a PRT range or a CLEAR. The fence of the
+/// update, None when it was delayed.
+pub fn amdgpu_gem_va_ioctl_op(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, bo: Option<usize>, operation: u32,
+                              va_address: u64, offset: u64, map_size: u64, flags: u32)
+                              -> Result<Option<Fence>, i32> {
+    let valid_flags = AMDGPU_VM_DELAY_UPDATE | AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE
+        | AMDGPU_VM_PAGE_EXECUTABLE | AMDGPU_VM_MTYPE_MASK | AMDGPU_VM_PAGE_NOALLOC;
+    let prt_flags = AMDGPU_VM_DELAY_UPDATE | AMDGPU_VM_PAGE_PRT;
+    // Validate virtual address range against reserved regions.
     if va_address < AMDGPU_VA_RESERVED_BOTTOM as u64 {
         return Err(-22);
     }
@@ -591,17 +602,42 @@ pub fn amdgpu_gem_va_ioctl(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, bo: u
     }
     let va_address = va_address & AMDGPU_GMC_HOLE_MASK;
     let vm_size = adev.vm_manager.max_pfn * AMDGPU_GPU_PAGE_SIZE as u64 - AMDGPU_VA_RESERVED_TOP as u64;
-    if va_address + map_size > vm_size {
+    if va_address.checked_add(map_size).is_none_or(|e| e > vm_size) {
         return Err(-22);
     }
-    let b = amdgpu_vm_bo_find(adev, fpriv.vm, bo).ok_or(-2)?;
-    let r = if map {
-        amdgpu_vm::amdgpu_vm_bo_map(adev, b, va_address, offset, map_size, flags)
-    } else {
-        amdgpu_vm::amdgpu_vm_bo_unmap(adev, b, va_address)
+    if flags & !valid_flags != 0 && flags & !prt_flags != 0 {
+        return Err(-22);
+    }
+    if !matches!(operation, AMDGPU_VA_OP_MAP | AMDGPU_VA_OP_UNMAP | AMDGPU_VA_OP_CLEAR | AMDGPU_VA_OP_REPLACE) {
+        return Err(-22);
+    }
+    let needs_bo = operation != AMDGPU_VA_OP_CLEAR && flags & AMDGPU_VM_PAGE_PRT == 0;
+    let abo = if needs_bo { Some(bo.ok_or(-2)?) } else { None };
+    // Resolve the BO-VA mapping for this VM/BO combination.
+    let b = match abo {
+        Some(h) => Some(amdgpu_vm_bo_find(adev, fpriv.vm, h).ok_or(-2)?),
+        None if operation != AMDGPU_VA_OP_CLEAR => Some(fpriv.prt_va),
+        None => None,
+    };
+    let r = match operation {
+        AMDGPU_VA_OP_MAP => amdgpu_vm::amdgpu_vm_bo_map(adev, b.unwrap(), va_address, offset, map_size, flags),
+        AMDGPU_VA_OP_UNMAP => amdgpu_vm::amdgpu_vm_bo_unmap(adev, b.unwrap(), va_address),
+        AMDGPU_VA_OP_CLEAR => amdgpu_vm::amdgpu_vm_bo_clear_mappings(adev, fpriv.vm, va_address, map_size),
+        _ => amdgpu_vm::amdgpu_vm_bo_replace_map(adev, b.unwrap(), va_address, offset, map_size, flags),
     };
     if r != 0 {
         return Err(r);
     }
-    Ok(amdgpu_gem_va_update_vm(adev, fpriv.vm, b, map))
+    if flags & AMDGPU_VM_DELAY_UPDATE != 0 {
+        return Ok(None);
+    }
+    Ok(Some(amdgpu_gem_va_update_vm(adev, fpriv.vm, b, operation)))
+}
+
+/// `amdgpu_gem_va_ioctl` for one mapping of `bo`, as the compositor uses it.
+pub fn amdgpu_gem_va_ioctl(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, bo: usize, map: bool, va_address: u64,
+                           offset: u64, map_size: u64, flags: u32) -> Result<Fence, i32> {
+    let op = if map { AMDGPU_VA_OP_MAP } else { AMDGPU_VA_OP_UNMAP };
+    let f = amdgpu_gem_va_ioctl_op(adev, fpriv, Some(bo), op, va_address, offset, map_size, flags)?;
+    Ok(f.unwrap_or_else(|| adev.vm(fpriv.vm).last_update.clone()))
 }

@@ -27,6 +27,13 @@ fn block_range(adev: &amdgpu_device, res: &ttm_resource, i: usize) -> (u64, u64)
     }
 }
 
+impl amdgpu_res_cursor {
+    /// The block of the resource the cursor is in.
+    pub fn node(&self) -> Option<usize> {
+        self.node
+    }
+}
+
 /// `amdgpu_res_first`: `size` bytes of `res` from byte `start`.
 pub fn amdgpu_res_first(adev: &amdgpu_device, res: Option<&ttm_resource>, mut start: u64, size: u64)
                         -> amdgpu_res_cursor {

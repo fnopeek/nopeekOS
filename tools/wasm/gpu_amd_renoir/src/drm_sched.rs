@@ -443,6 +443,19 @@ pub fn drm_sched_job_arm(adev: &mut amdgpu_device, j: u64) {
 }
 
 /// `drm_sched_job_add_dependency`: takes the reference it is given.
+/// `drm_sched_job_add_resv_dependencies`: every fence of `resv` up to
+/// `usage`.
+pub fn drm_sched_job_add_resv_dependencies(adev: &mut amdgpu_device, j: u64, resv: &crate::dma_resv::dma_resv,
+                                           usage: crate::dma_resv::dma_resv_usage) -> i32 {
+    for f in crate::dma_resv::dma_resv_get_fences(adev, resv, usage) {
+        let r = drm_sched_job_add_dependency(adev, j, Some(f));
+        if r != 0 {
+            return r;
+        }
+    }
+    0
+}
+
 pub fn drm_sched_job_add_dependency(adev: &mut amdgpu_device, j: u64, fence: Option<Fence>) -> i32 {
     let Some(fence) = fence else { return 0 };
     let deps = &mut job(adev, j).dependencies;

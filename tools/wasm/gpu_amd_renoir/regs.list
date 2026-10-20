@@ -3485,3 +3485,14 @@ KMS_DRIVER_MAJOR @ amdgpu_drv.c
 KMS_DRIVER_MINOR @ amdgpu_drv.c
 KMS_DRIVER_PATCHLEVEL @ amdgpu_drv.c
 AMDGPU_FAMILY_AI @ amdgpu_kms.c
+# A client's GEM objects and mappings (amdgpu_gem.c)
+AMDGPU_VA_OP_MAP @ amdgpu_gem.c
+AMDGPU_VA_OP_UNMAP @ amdgpu_gem.c
+AMDGPU_VA_OP_CLEAR @ amdgpu_gem.c
+AMDGPU_VA_OP_REPLACE @ amdgpu_gem.c
+AMDGPU_VM_DELAY_UPDATE @ amdgpu_gem.c
+AMDGPU_VM_PAGE_NOALLOC @ amdgpu_gem.c
+AMDGPU_GEM_CREATE_SETTABLE_MASK @ amdgpu_gem.c
+AMDGPU_GEM_DOMAIN_MASK @ amdgpu_gem.c
+AMDGPU_FAMILY_CZ @ amdgpu_gem.c
+SDMA_PKT_HEADER_OP_CONST_FILL = SDMA_PKT_HEADER_OP(SDMA_OP_CONST_FILL) @ sdma_v4_0.c

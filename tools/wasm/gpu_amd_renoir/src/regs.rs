@@ -6973,3 +6973,25 @@ pub const KMS_DRIVER_MINOR: u32 = 0x40;
 pub const KMS_DRIVER_PATCHLEVEL: u32 = 0x0;
 /// ?
 pub const AMDGPU_FAMILY_AI: u32 = 0x8d;
+
+// A client's GEM objects and mappings (amdgpu_gem.c)
+/// ?
+pub const AMDGPU_VA_OP_MAP: u32 = 0x1;
+/// ?
+pub const AMDGPU_VA_OP_UNMAP: u32 = 0x2;
+/// ?
+pub const AMDGPU_VA_OP_CLEAR: u32 = 0x3;
+/// ?
+pub const AMDGPU_VA_OP_REPLACE: u32 = 0x4;
+/// ?
+pub const AMDGPU_VM_DELAY_UPDATE: u32 = 0x1;
+/// ?
+pub const AMDGPU_VM_PAGE_NOALLOC: u32 = 0x200;
+/// amdgpu/amdgpu_gem.h:76
+pub const AMDGPU_GEM_CREATE_SETTABLE_MASK: u32 = 0x1f6cf;
+/// ?
+pub const AMDGPU_GEM_DOMAIN_MASK: u32 = 0xff;
+/// ?
+pub const AMDGPU_FAMILY_CZ: u32 = 0x87;
+/// The value of `SDMA_PKT_HEADER_OP(SDMA_OP_CONST_FILL)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_OP_CONST_FILL: u32 = 0xb;

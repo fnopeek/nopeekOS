@@ -278,10 +278,36 @@ fn ttm_tt_create(adev: &mut amdgpu_device, h: usize) -> i32 {
 }
 
 /// `ttm_bo_populate` with `amdgpu_ttm_tt_populate`: the pages from the
-/// kernel, one DMA buffer (`ttm_pool_alloc`).
+/// kernel (`ttm_pool_alloc`), one DMA buffer for this driver's own buffers,
+/// single frames counted to the guest for a guest client's.
 fn ttm_bo_populate(adev: &mut amdgpu_device, h: usize) -> i32 {
     let Some(tt) = bo(adev, h).tbo.ttm else { return 0 };
     if tt.populated || tt.page_flags & TTM_TT_FLAG_EXTERNAL != 0 {
+        return 0;
+    }
+    if let Some(client) = bo(adev, h).client {
+        let id = npk_sys::gpudev_tt_alloc(client as i32, tt.num_pages as i32);
+        if id <= 0 {
+            return -12;
+        }
+        let buf = npk_sys::gpudev_tt_buffer(id);
+        let mut pages = alloc::vec::Vec::new();
+        let mut list = [0u64; 64];
+        while buf > 0 && (pages.len() as u64) < tt.num_pages {
+            let want = ((tt.num_pages - pages.len() as u64) as usize).min(list.len());
+            let n = npk_sys::gpudev_bo_pages(buf, pages.len() as i32, &mut list[..want]);
+            if n <= 0 || n as usize > want {
+                break;
+            }
+            pages.extend_from_slice(&list[..n as usize]);
+        }
+        if pages.len() as u64 != tt.num_pages {
+            npk_sys::gpudev_tt_free(id);
+            return -12;
+        }
+        let b = bo_mut(adev, h);
+        b.pool = Some((id as u32, pages));
+        b.tbo.ttm.as_mut().unwrap().populated = true;
         return 0;
     }
     let Some(d) = npk_sys::Dma::alloc(tt.num_pages as i32) else { return -12 };
@@ -451,10 +477,7 @@ pub fn amdgpu_ttm_tt_pte_flags(adev: &amdgpu_device, tt: Option<&ttm_tt>, mem: O
 /// `drm_prime_sg_to_dma_addr_array`.
 fn amdgpu_ttm_gart_bind(adev: &mut amdgpu_device, h: usize, flags: u64) {
     let tt = tt_of(adev, h);
-    let addrs: alloc::vec::Vec<u64> = match bo(adev, h).tbo.sg.as_ref() {
-        Some(sg) if tt.page_flags & TTM_TT_FLAG_EXTERNAL != 0 => sg[..tt.num_pages as usize].to_vec(),
-        _ => (0..tt.num_pages).map(|i| tt.dma_address(i)).collect(),
-    };
+    let addrs = crate::amdgpu_object::tt_pages(bo(adev, h));
     crate::amdgpu_gart::amdgpu_gart_bind(adev, tt.offset, tt.num_pages, &addrs, flags);
     bo_mut(adev, h).tbo.ttm.as_mut().unwrap().bound = true;
 }
@@ -763,9 +786,10 @@ pub fn amdgpu_ttm_init(adev: &mut amdgpu_device) -> i32 {
     0
 }
 
-/// `amdgpu_ttm_prepare_job` without a reservation object.
-fn amdgpu_ttm_prepare_job(adev: &mut amdgpu_device, direct_submit: bool, num_dw: u32, vm_needs_flush: bool,
-                          delayed: bool) -> Result<u64, i32> {
+/// `amdgpu_ttm_prepare_job`: the job waits for everything in `resv`.
+fn amdgpu_ttm_prepare_job(adev: &mut amdgpu_device, direct_submit: bool, num_dw: u32,
+                          resv: Option<&crate::dma_resv::dma_resv>, vm_needs_flush: bool, delayed: bool)
+                          -> Result<u64, i32> {
     let pool = if direct_submit { AMDGPU_IB_POOL_DIRECT } else { AMDGPU_IB_POOL_DELAYED };
     let entity = if delayed { adev.mman.low_pr } else { adev.mman.high_pr };
     let j = crate::amdgpu_job::amdgpu_job_alloc_with_ib(adev, entity, crate::amdgpu_sync::AMDGPU_FENCE_OWNER_UNDEFINED,
@@ -777,7 +801,111 @@ fn amdgpu_ttm_prepare_job(adev: &mut amdgpu_device, direct_submit: bool, num_dw:
         job.vm_pd_addr = pd;
         job.vm_needs_flush = true;
     }
+    if let Some(resv) = resv {
+        let r = crate::drm_sched::drm_sched_job_add_resv_dependencies(
+            adev, j, resv, crate::dma_resv::dma_resv_usage::DMA_RESV_USAGE_BOOKKEEP);
+        if r != 0 {
+            crate::amdgpu_job::amdgpu_job_free(adev, j);
+            return Err(r);
+        }
+    }
     Ok(j)
+}
+
+/// `amdgpu_ttm_fill_mem`.
+fn amdgpu_ttm_fill_mem(adev: &mut amdgpu_device, r: usize, src_data: u32, mut dst_addr: u64, mut byte_count: u32,
+                       resv: Option<&crate::dma_resv::dma_resv>, vm_needs_flush: bool, delayed: bool)
+                       -> Result<crate::dma_fence::Fence, i32> {
+    use crate::sdma_v4_0::{SDMA_V4_0_FILL_MAX_BYTES, SDMA_V4_0_FILL_NUM_DW};
+    let max_bytes = SDMA_V4_0_FILL_MAX_BYTES;
+    let num_loops = byte_count.div_ceil(max_bytes);
+    let num_dw = crate::linux::align((num_loops * SDMA_V4_0_FILL_NUM_DW) as u64, 8) as u32;
+    let j = amdgpu_ttm_prepare_job(adev, false, num_dw, resv, vm_needs_flush, delayed)?;
+    let mut ib = crate::amdgpu_job::job(adev, j).ibs[0].clone();
+    for _ in 0..num_loops {
+        let cur_size = byte_count.min(max_bytes);
+        crate::sdma_v4_0::sdma_v4_0_emit_fill_buffer(adev, &mut ib, src_data, dst_addr, cur_size);
+        dst_addr += cur_size as u64;
+        byte_count -= cur_size;
+    }
+    crate::sdma_v4_0::sdma_v4_0_ring_pad_ib(adev, r, &mut ib);
+    if ib.length_dw > num_dw {
+        Line::new().s("WARNING: amdgpu_ttm_fill_mem: IB overrun").say();
+    }
+    crate::amdgpu_job::job(adev, j).ibs[0] = ib;
+    Ok(crate::amdgpu_job::amdgpu_job_submit(adev, j))
+}
+
+/// `amdgpu_ttm_map_buffer` for memory the engine reaches directly: VRAM
+/// and a TT with its GART address. A TT without one goes through the
+/// transfer window, which no fill here needs.
+fn amdgpu_ttm_map_buffer(adev: &amdgpu_device, mem: &crate::ttm::ttm_resource,
+                         cur: &crate::amdgpu_res_cursor::amdgpu_res_cursor) -> Result<u64, i32> {
+    if mem.mem_type == AMDGPU_PL_PREEMPT || mem.start == AMDGPU_BO_INVALID_OFFSET {
+        return Err(-22);
+    }
+    Ok(amdgpu_ttm_domain_start(adev, mem.mem_type) + cur.start)
+}
+
+/// `amdgpu_res_cleared`: a VRAM block the buddy allocator knows is zero.
+fn amdgpu_res_cleared(adev: &amdgpu_device, mem: &crate::ttm::ttm_resource,
+                      cur: &crate::amdgpu_res_cursor::amdgpu_res_cursor) -> bool {
+    use crate::ttm::ttm_resource_priv;
+    match (&mem.priv_, cur.node(), adev.mman.vram_mgr.as_ref()) {
+        (ttm_resource_priv::vram { blocks, .. }, Some(i), Some(m)) if mem.mem_type == TTM_PL_VRAM =>
+            blocks.get(i).is_some_and(|&b| m.mm.is_clear(b)),
+        _ => false,
+    }
+}
+
+/// `amdgpu_ttm_clear_buffer`: the blocks not known to be zero, zeroed.
+pub fn amdgpu_ttm_clear_buffer(adev: &mut amdgpu_device, h: usize, resv: &crate::dma_resv::dma_resv)
+                               -> Result<crate::dma_fence::Fence, i32> {
+    if !adev.mman.buffer_funcs_enabled {
+        return Err(-22);
+    }
+    // `mman.buffer_funcs_ring`: SDMA 0, as `amdgpu_ttm_set_buffer_funcs_status` set it.
+    let r = adev.sdma.instance[0].ring.ok_or(-22)?;
+    let mut fence = crate::dma_fence::dma_fence_get_stub();
+    let mem = bo(adev, h).tbo.resource.clone().ok_or(-22)?;
+    let size = crate::amdgpu_object::amdgpu_bo_size(adev, h);
+    let mut cur = crate::amdgpu_res_cursor::amdgpu_res_first(adev, Some(&mem), 0, size);
+    while cur.remaining != 0 {
+        if amdgpu_res_cleared(adev, &mem, &cur) {
+            let n = cur.size;
+            crate::amdgpu_res_cursor::amdgpu_res_next(adev, Some(&mem), &mut cur, n);
+            continue;
+        }
+        // Never clear more than 256MiB at once to avoid timeouts
+        let n = cur.size.min(256 << 20);
+        let addr = amdgpu_ttm_map_buffer(adev, &mem, &cur)?;
+        fence = amdgpu_ttm_fill_mem(adev, r, 0, addr, n as u32, Some(resv), true, true)?;
+        crate::amdgpu_res_cursor::amdgpu_res_next(adev, Some(&mem), &mut cur, n);
+    }
+    Ok(fence)
+}
+
+/// `amdgpu_fill_buffer`.
+pub fn amdgpu_fill_buffer(adev: &mut amdgpu_device, h: usize, src_data: u32, resv: &crate::dma_resv::dma_resv,
+                          delayed: bool) -> Result<crate::dma_fence::Fence, i32> {
+    if !adev.mman.buffer_funcs_enabled {
+        Line::new().s("Trying to clear memory with ring turned off.").say();
+        return Err(-22);
+    }
+    // `mman.buffer_funcs_ring`: SDMA 0, as `amdgpu_ttm_set_buffer_funcs_status` set it.
+    let r = adev.sdma.instance[0].ring.ok_or(-22)?;
+    let mem = bo(adev, h).tbo.resource.clone().ok_or(-22)?;
+    let size = crate::amdgpu_object::amdgpu_bo_size(adev, h);
+    let mut dst = crate::amdgpu_res_cursor::amdgpu_res_first(adev, Some(&mem), 0, size);
+    let mut fence = None;
+    while dst.remaining != 0 {
+        // Never fill more than 256MiB at once to avoid timeouts
+        let n = dst.size.min(256 << 20);
+        let to = amdgpu_ttm_map_buffer(adev, &mem, &dst)?;
+        fence = Some(amdgpu_ttm_fill_mem(adev, r, src_data, to, n as u32, Some(resv), true, delayed)?);
+        crate::amdgpu_res_cursor::amdgpu_res_next(adev, Some(&mem), &mut dst, n);
+    }
+    Ok(fence.unwrap_or_else(crate::dma_fence::dma_fence_get_stub))
 }
 
 /// `amdgpu_copy_buffer` without a reservation object, over spans: one
@@ -793,7 +921,7 @@ pub fn amdgpu_copy_spans(adev: &mut amdgpu_device, r: usize, spans: &[(u64, u64,
     let max_bytes = SDMA_V4_0_COPY_MAX_BYTES;
     let num_loops: u32 = spans.iter().map(|s| s.2.div_ceil(max_bytes)).sum();
     let num_dw = crate::linux::align((num_loops * SDMA_V4_0_COPY_NUM_DW) as u64, 8) as u32;
-    let j = amdgpu_ttm_prepare_job(adev, direct_submit, num_dw, vm_needs_flush, false)?;
+    let j = amdgpu_ttm_prepare_job(adev, direct_submit, num_dw, None, vm_needs_flush, false)?;
     let mut ib = crate::amdgpu_job::job(adev, j).ibs[0].clone();
     for &(mut src_offset, mut dst_offset, mut byte_count) in spans {
         while byte_count != 0 {

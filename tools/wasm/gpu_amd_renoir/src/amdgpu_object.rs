@@ -47,6 +47,33 @@ pub struct amdgpu_bo {
     pub deleted: bool,
     /// `amdgpu_bo_vm.entries`: a page table's entries, by key.
     pub entries: Vec<usize>,
+    /// The guest client a GEM object belongs to: its TT pages come from the
+    /// kernel (`npk_gpudev_tt_alloc`) as the id and bus address of each.
+    pub client: Option<u32>,
+    pub pool: Option<(u32, Vec<u64>)>,
+    /// `amdgpu_bo_user`: tiling flags and the UMD's metadata.
+    pub tiling_flags: u64,
+    pub metadata_flags: u64,
+    pub metadata: Vec<u8>,
+}
+
+/// The bus address of page `i` of a TT buffer: the kernel's pages of a
+/// guest object, an imported buffer's `sg` list, or the DMA buffer.
+pub fn tt_page(b: &amdgpu_bo, i: u64) -> u64 {
+    let Some(tt) = b.tbo.ttm.as_ref() else { return 0 };
+    if let Some((_, p)) = b.pool.as_ref() {
+        return p.get(i as usize).copied().unwrap_or(0);
+    }
+    match b.tbo.sg.as_ref() {
+        Some(sg) if tt.page_flags & TTM_TT_FLAG_EXTERNAL != 0 => sg.get(i as usize).copied().unwrap_or(0),
+        _ => tt.dma_address(i),
+    }
+}
+
+/// `tt_page` of every page.
+pub fn tt_pages(b: &amdgpu_bo) -> Vec<u64> {
+    let n = b.tbo.ttm.as_ref().map_or(0, |t| t.num_pages);
+    (0..n).map(|i| tt_page(b, i)).collect()
 }
 
 /// `struct amdgpu_bo_param`.
@@ -146,8 +173,7 @@ fn amdgpu_bo_support_uswc(_bo_flags: u64) -> bool {
     true
 }
 
-/// `amdgpu_bo_create`: kernel buffers, no VRAM_CLEARED (that needs the
-/// SDMA ring).
+/// `amdgpu_bo_create`.
 pub fn amdgpu_bo_create(adev: &mut amdgpu_device, bp: &amdgpu_bo_param) -> Result<usize, i32> {
     let mut size = bp.size;
     let page_align;
@@ -194,6 +220,11 @@ pub fn amdgpu_bo_create(adev: &mut amdgpu_device, bp: &amdgpu_bo_param) -> Resul
         resv: bp.resv.map(|r| resv_owner(adev, r)),
         deleted: false,
         entries: Vec::new(),
+        client: None,
+        pool: None,
+        tiling_flags: 0,
+        metadata_flags: 0,
+        metadata: Vec::new(),
     };
     let h = match adev.mman.bos.iter().position(|x| x.is_none()) {
         Some(i) => {
@@ -222,6 +253,19 @@ pub fn amdgpu_bo_create(adev: &mut amdgpu_device, bp: &amdgpu_bo_param) -> Resul
     if r != 0 {
         adev.mman.bos[h] = None;
         return Err(r);
+    }
+    if bp.flags & AMDGPU_GEM_CREATE_VRAM_CLEARED as u64 != 0
+        && bo(adev, h).tbo.resource.as_ref().is_some_and(|r| r.mem_type == TTM_PL_VRAM) {
+        let mut resv = amdgpu_bo_resv_take(adev, h);
+        let r = amdgpu_ttm::amdgpu_ttm_clear_buffer(adev, h, &resv);
+        if let Ok(f) = &r {
+            crate::dma_resv::dma_resv_add_fence(adev, &mut resv, f, crate::dma_resv::dma_resv_usage::DMA_RESV_USAGE_KERNEL);
+        }
+        amdgpu_bo_resv_put(adev, h, resv);
+        if let Err(e) = r {
+            amdgpu_bo_unref(adev, h);
+            return Err(e);
+        }
     }
     // Treat CPU_ACCESS_REQUIRED only as a hint if given by UMD
     if bp.type_ == ttm_bo_type_device {
@@ -332,10 +376,11 @@ fn amdgpu_gmc_agp_addr(adev: &amdgpu_device, h: usize) -> u64 {
     if tt.num_pages != 1 || tt.caching == crate::ttm::ttm_caching::ttm_cached {
         return AMDGPU_BO_INVALID_OFFSET;
     }
-    if tt.dma_address(0) + PAGE_SIZE >= adev.gmc.agp_size {
+    let page0 = tt_page(bo(adev, h), 0);
+    if page0 + PAGE_SIZE >= adev.gmc.agp_size {
         return AMDGPU_BO_INVALID_OFFSET;
     }
-    adev.gmc.agp_start + tt.dma_address(0)
+    adev.gmc.agp_start + page0
 }
 
 /// `amdgpu_bo_gpu_offset_no_check`.
@@ -546,12 +591,24 @@ fn amdgpu_bo_release_notify(adev: &mut amdgpu_device, h: usize) {
     if !vram || b.flags & AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE as u64 == 0 || adev.in_suspend {
         return;
     }
-    // amdgpu_fill_buffer of the released VRAM
-    Line::new().s("WARNING: VRAM wipe on release is not ported, the buffer goes back as it is").say();
+    let mut own = core::mem::take(&mut bo_mut(adev, h)._resv);
+    match amdgpu_ttm::amdgpu_fill_buffer(adev, h, 0, &own, true) {
+        Ok(f) => {
+            if let Some(r) = bo_mut(adev, h).tbo.resource.as_mut() {
+                crate::amdgpu_vram_mgr::amdgpu_vram_mgr_set_cleared(r);
+            }
+            crate::dma_resv::dma_resv_add_fence(adev, &mut own, &f, crate::dma_resv::dma_resv_usage::DMA_RESV_USAGE_KERNEL);
+        }
+        Err(e) => Line::new().s("WARNING: wiping released VRAM failed (").dec((-e) as u64).s(")").say(),
+    }
+    bo_mut(adev, h)._resv = own;
 }
 
 /// `ttm_bo_cleanup_memtype_use`: its pages and its place.
 fn ttm_bo_cleanup_memtype_use(adev: &mut amdgpu_device, h: usize) {
+    if let Some((tt, _)) = bo_mut(adev, h).pool.take() {
+        npk_sys::gpudev_tt_free(tt as i32);
+    }
     if let Some(tt) = bo_mut(adev, h).tbo.ttm.take() {
         if let Some((handle, phys)) = tt.dma {
             (npk_sys::Dma { handle, phys }).free();

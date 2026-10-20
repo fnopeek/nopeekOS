@@ -143,7 +143,7 @@ pub fn amdgpu_gmc_get_pde_for_bo(adev: &amdgpu_device, h: usize, level: i32) -> 
     let b = crate::amdgpu_object::bo(adev, h);
     let res = b.tbo.resource.as_ref().unwrap();
     let mut addr = match res.mem_type {
-        t if t == TTM_PL_TT => b.tbo.ttm.map_or(0, |t| t.dma_address(0)),
+        t if t == TTM_PL_TT => crate::amdgpu_object::tt_page(b, 0),
         t if t == TTM_PL_VRAM => crate::amdgpu_object::amdgpu_bo_gpu_offset(adev, h),
         _ => 0,
     };
