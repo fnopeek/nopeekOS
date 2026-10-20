@@ -2170,7 +2170,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "lsusb" | "usb" => {
             if require_cap(vault, &session, Rights::READ, "lsusb") {
-                system::intent_lsusb();
+                system::intent_lsusb(args);
             }
         }
         "mouse" => {

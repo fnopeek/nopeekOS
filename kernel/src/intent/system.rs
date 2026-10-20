@@ -1778,7 +1778,7 @@ pub fn intent_help_topic(topic: &str) {
         "hardware" | "hw" | "disk" | "blk" | "pci" | "usb" => {
             help_head("hardware", "");
             help_row("pci", "PCI devices (also: lspci)");
-            help_row("usb", "USB devices (also: lsusb)");
+            help_row("usb [n]", "USB devices; n: its descriptors (also: lsusb)");
             help_row("xhci", "USB controllers and port link state");
             help_row("disk", "Disk info");
             help_row("disk read <sector>", "Raw sector hex dump");
@@ -2096,13 +2096,18 @@ pub fn intent_mouse(args: &str) {
     }
 }
 
-/// `usb` / `lsusb` — enumerate every device on every xHCI controller and
-/// print VID:PID + class + product. Identifies dongles (NICs etc.) so the
-/// driver catalog can match the right WASM driver.
-pub fn intent_lsusb() {
-    kprintln!();
-    kprintln!("  Enumerating USB (re-plug a USB keyboard/mouse afterwards)...");
-    crate::xhci::list_devices();
+/// `usb` / `lsusb`: the devices the running xHCI driver enumerated, and
+/// with a number, that device's descriptors. Nothing is reset or re-read.
+pub fn intent_lsusb(args: &str) {
+    let a = args.trim();
+    if a.is_empty() {
+        crate::drivers::usb_desc::list();
+        return;
+    }
+    match a.parse::<usize>() {
+        Ok(n) => crate::drivers::usb_desc::describe(n),
+        Err(_) => kprintln!("  usage: usb [n]"),
+    }
 }
 
 fn pci_class_name(cls: u8, sub: u8, prog_if: u8) -> &'static str {

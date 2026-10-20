@@ -1,8 +1,10 @@
 //! xHCI USB Host Controller Driver
 //!
 //! HID devices after Linux usbhid (keyboards, mice, receivers that are
-//! both) and one USB network device. No hubs.
+//! both) and one USB network device. No hubs. Every device enumeration
+//! meets is kept with its descriptors until unplugged (`devices`).
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::{kprintln, pci};
@@ -439,6 +441,11 @@ struct XhciState {
     /// Completion code of the last command or control transfer, for the
     /// log when enumeration fails; 0 = it timed out.
     last_cc: u32,
+    /// The enumeration step that failed last (`port_failed`).
+    last_fail: &'static str,
+    /// Every device enumeration met on a root port, taken by a driver or
+    /// not, until it is unplugged: what `usb` lists.
+    seen: Vec<UsbSeen>,
     /// DMA buffers for a network device on this controller.
     nic_device_ctx: DmaRegion,
     nic_ep0_ring: DmaRegion,
@@ -715,6 +722,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         ep0_ring, ep0_cycle: 1, ep0_enqueue: 0,
         data_buf, slot_id: 0, port_speed: 0,
         hid_devs: Vec::new(), hid: Vec::new(), free_pages: Vec::new(), port_changes: [0; 4], last_cc: 0,
+        last_fail: "", seen: Vec::new(),
         nic_device_ctx, nic_ep0_ring, nic: None,
     };
 
@@ -1037,10 +1045,19 @@ fn take_ring(state: &mut XhciState, name: &str) -> Option<DmaRegion> {
 /// addressing or its first descriptors is reset and tried again.
 const PORT_INIT_TRIES: u32 = 4;
 
-/// Reset, address and read the configuration of the device on `port`:
-/// `(slot, device context, EP0 ring, configuration descriptor)`. On failure
-/// the slot is released and the pages go back to the pool.
-fn usb_port_init(state: &mut XhciState, port: u32) -> Option<(u8, DmaRegion, DmaRegion, Vec<u8>)> {
+/// A device enumerated by `usb_port_init`, its slot still held.
+struct PortInit {
+    slot: u8,
+    dctx: DmaRegion,
+    ep0: DmaRegion,
+    device: Vec<u8>,
+    cfg: Vec<u8>,
+}
+
+/// Reset, address and read the device and configuration descriptors of the
+/// device on `port`. On failure the slot is released and the pages go back
+/// to the pool.
+fn usb_port_init(state: &mut XhciState, port: u32) -> Option<PortInit> {
     let dctx = take_page(state, "hid dev ctx")?;
     let Some(ep0) = take_ring(state, "hid EP0") else {
         state.free_pages.push(dctx);
@@ -1069,11 +1086,17 @@ fn usb_port_init(state: &mut XhciState, port: u32) -> Option<(u8, DmaRegion, Dma
     state.slot_id = slot;
     state.dcbaa.w64(slot as usize * 8, dctx.phys());
 
-    let cfg = (|| {
+    let descs = (|| {
         if !address_device(state, port) {
             port_failed(state, port, "address device");
             return None;
         }
+        if !usb_get_descriptor(state, DESC_DEVICE, 18) {
+            port_failed(state, port, "device descriptor");
+            return None;
+        }
+        let mut device = alloc::vec![0u8; 18];
+        state.data_buf.copy_out(0u32, &mut device);
         // Configuration descriptor: 9 bytes for the total length, then all.
         if !usb_get_descriptor(state, DESC_CONFIG, 9) {
             port_failed(state, port, "configuration descriptor");
@@ -1087,10 +1110,10 @@ fn usb_port_init(state: &mut XhciState, port: u32) -> Option<(u8, DmaRegion, Dma
         }
         let mut cfg = alloc::vec![0u8; fetch];
         state.data_buf.copy_out(0u32, &mut cfg);
-        Some(cfg)
+        Some((device, cfg))
     })();
-    match cfg {
-        Some(cfg) => Some((slot, dctx, ep0, cfg)),
+    match descs {
+        Some((device, cfg)) => Some(PortInit { slot, dctx, ep0, device, cfg }),
         None => {
             usb_release_slot(state, slot);
             give_back(state);
@@ -1100,7 +1123,8 @@ fn usb_port_init(state: &mut XhciState, port: u32) -> Option<(u8, DmaRegion, Dma
 }
 
 /// Which step of enumeration failed, with what the controller said.
-fn port_failed(state: &XhciState, port: u32, step: &str) {
+fn port_failed(state: &mut XhciState, port: u32, step: &'static str) {
+    state.last_fail = step;
     let sc = state.oper.r32(portsc_off(port));
     let speed = match state.port_speed {
         SPEED_LOW => "low", SPEED_FULL => "full", SPEED_HIGH => "high", SPEED_SUPER => "super", _ => "?",
@@ -1146,11 +1170,23 @@ fn probe_hid_port(state: &mut XhciState, port: u32) {
         if init.is_some() { break; }
         if state.oper.r32(portsc_off(port)) & PORTSC_CCS == 0 { return; }
     }
-    let Some((slot, dctx, ep0, cfg)) = init else {
+    let Some(PortInit { slot, dctx, ep0, device, cfg }) = init else {
         kprintln!("[npk] xhci: port {}: unable to enumerate USB device, port disabled", port + 1);
+        state.seen.push(UsbSeen {
+            port, speed: state.port_speed, device: Vec::new(), cfg: Vec::new(),
+            manufacturer: String::new(), product: String::new(),
+            failed: Some((state.last_fail, state.last_cc)),
+        });
         hub_port_disable(state, port);
         return;
     };
+    let lang = if device[14] != 0 || device[15] != 0 { usb_lang(state) } else { 0 };
+    let manufacturer = usb_string(state, lang, device[14]);
+    let product = usb_string(state, lang, device[15]);
+    state.seen.push(UsbSeen {
+        port, speed: state.port_speed, device, cfg: cfg.clone(),
+        manufacturer, product, failed: None,
+    });
     let config_val = cfg.get(5).copied().unwrap_or(1);
 
     let descs = parse_hid_interfaces(&cfg);
@@ -1335,7 +1371,8 @@ fn hotplug_pass() {
                     if sc & PORTSC_CHANGES != 0 {
                         s.oper.w32(off, port_neutral(sc) | (sc & PORTSC_CHANGES));
                     }
-                    let gone = sc & PORTSC_CCS == 0 && s.hid_devs.iter().any(|d| d.port == p);
+                    let gone = sc & PORTSC_CCS == 0
+                        && (s.hid_devs.iter().any(|d| d.port == p) || s.seen.iter().any(|d| d.port == p));
                     if sc & PORTSC_CSC != 0 || gone {
                         work.push((s.pci_addr, s.oper, p, sc & PORTSC_CSC != 0));
                     }
@@ -1354,6 +1391,7 @@ fn hotplug_pass() {
         if let Some(d) = s.hid_devs.iter().position(|d| d.port == port) {
             hid_disconnect(s, d);
         }
+        s.seen.retain(|d| d.port != port);
         if connected {
             kprintln!("[npk] xhci: device connected on port {}", port + 1);
             probe_hid_port(s, port);
@@ -1692,206 +1730,77 @@ fn bios_handoff(mmio: Mmio, mut off: u32) {
     }
 }
 
-#[allow(dead_code)]
-fn find_connected_port(state: &XhciState) -> Option<u32> {
-    for p in 0..state.max_ports {
-        let sc = state.oper.r32(portsc_off(p));
-        if sc & PORTSC_CCS != 0 {
-            return Some(p);
-        }
+/// The first language of the device's strings (string descriptor 0), US
+/// English when it has none (Linux `usb_get_langid`).
+fn usb_lang(state: &mut XhciState) -> u16 {
+    if usb_control_transfer(state, 0x80, USB_GET_DESCRIPTOR, 0x0300, 0, 255, true)
+        && state.data_buf.r8(0u32) >= 4 && state.data_buf.r8(1u32) == 0x03
+    {
+        let lang = u16::from_le_bytes([state.data_buf.r8(2u32), state.data_buf.r8(3u32)]);
+        if lang != 0 { return lang; }
     }
-    None
+    0x0409
 }
 
-/// Read USB string descriptor `idx` into `out` as ASCII (best effort:
-/// UTF-16LE low bytes, printable only). Returns the byte count written.
-fn usb_get_string(state: &mut XhciState, idx: u8, out: &mut [u8]) -> usize {
-    if idx == 0 { return 0; }
-    // wValue = (STRING desc type 0x03 << 8) | index, wIndex = langid 0x0409.
-    if !usb_control_transfer(state, 0x80, USB_GET_DESCRIPTOR,
-        0x0300 | idx as u16, 0x0409, 255, true) {
-        return 0;
+/// String descriptor `idx` in `lang` (Linux `usb_string`), empty when the
+/// device has none or does not answer.
+fn usb_string(state: &mut XhciState, lang: u16, idx: u8) -> String {
+    if idx == 0 { return String::new(); }
+    if !usb_control_transfer(state, 0x80, USB_GET_DESCRIPTOR, 0x0300 | idx as u16, lang, 255, true) {
+        return String::new();
     }
     let blen = state.data_buf.r8(0u32) as usize;
-    if blen < 2 || state.data_buf.r8(1u32) != 0x03 { return 0; }
-    let mut n = 0usize;
-    let mut i = 2usize;
-    while i + 1 < blen && n < out.len() {
-        let lo = state.data_buf.r8(i as u32);
-        let hi = state.data_buf.r8(i as u32 + 1);
-        if hi == 0 && (0x20..0x7F).contains(&lo) { out[n] = lo; n += 1; }
-        i += 2;
-    }
-    n
+    if blen < 2 || state.data_buf.r8(1u32) != 0x03 { return String::new(); }
+    let units = (1..blen / 2).map(|i| {
+        u16::from_le_bytes([state.data_buf.r8((2 * i) as u32), state.data_buf.r8((2 * i + 1) as u32)])
+    });
+    char::decode_utf16(units)
+        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .into()
 }
 
-/// Enumerate every USB device on every xHCI controller and print a table
-/// (controller BDF, port, VID:PID, identifying class, product name). Read-only
-/// probing: each device is slot-enabled, addressed, queried, then released.
-/// Brings each controller up fresh, so a USB keyboard/mouse on a probed
-/// controller may need re-plugging afterwards.
-pub fn list_devices() {
-    let mut total = 0u32;
-    for bus in 0u16..=255 {
-        for dev_num in 0u8..32 {
-            for func in 0u8..8 {
-                let addr = pci::PciAddr { bus: bus as u8, device: dev_num, function: func };
-                let id = pci::read32(addr, 0x00);
-                if id == 0xFFFF_FFFF || id == 0 {
-                    if func == 0 { break; }
-                    continue;
-                }
-                let class_reg = pci::read32(addr, 0x08);
-                let cls = ((class_reg >> 24) & 0xFF) as u8;
-                let sub = ((class_reg >> 16) & 0xFF) as u8;
-                let prog_if = ((class_reg >> 8) & 0xFF) as u8;
-                if cls == 0x0C && sub == 0x03 && prog_if == 0x30 {
-                    let pci_dev = pci::PciDevice {
-                        addr,
-                        vendor_id: (id & 0xFFFF) as u16,
-                        device_id: ((id >> 16) & 0xFFFF) as u16,
-                        bar0: pci::read32(addr, 0x10),
-                        irq_line: pci::read8(addr, 0x3C),
-                    };
-                    total += enumerate_controller(pci_dev);
-                }
-                if func == 0 && pci::read8(addr, 0x0E) & 0x80 == 0 { break; }
-            }
-        }
-    }
-    kprintln!();
-    kprintln!("  {} USB device(s) found", total);
-    kprintln!();
+/// A device as enumeration met it on a root port.
+#[derive(Clone)]
+pub struct UsbSeen {
+    pub port: u32,
+    /// PORTSC speed: 1 full, 2 low, 3 high, 4 super, 5 super+.
+    pub speed: u32,
+    /// The 18-byte device descriptor; empty when enumeration failed.
+    pub device: Vec<u8>,
+    /// The whole configuration descriptor.
+    pub cfg: Vec<u8>,
+    pub manufacturer: String,
+    pub product: String,
+    /// The step that failed and the completion code (0 = timed out).
+    pub failed: Option<(&'static str, u32)>,
 }
 
-/// Bring up one controller, address each connected device, print its identity.
-/// Returns how many devices were reported.
-fn enumerate_controller(dev: pci::PciDevice) -> u32 {
-    let (cbus, cdev, cfunc) = (dev.addr.bus, dev.addr.device, dev.addr.function);
-    let mut state = match bring_up_controller(dev, 16) {
-        Some(s) => s,
-        None => return 0,
-    };
-    let mut found = 0u32;
-
-    for p in 0..state.max_ports {
-        let sc = state.oper.r32(portsc_off(p));
-        if sc & PORTSC_CCS == 0 { continue; }
-        state.port_speed = (sc >> 10) & 0xF;
-
-        // USB3 (SuperSpeed) root ports are link-trained and Enabled (PED) at
-        // connect; a USB2-style Port Reset on an already-enabled port confuses
-        // it and the following Address Device fails. Only PR-reset ports that
-        // aren't enabled yet (USB2 low/full/high speed).
-        if sc & PORTSC_PED == 0 {
-            if !reset_port(&state, p) {
-                kprintln!("  port {} reset failed", p + 1);
-                continue;
-            }
-            state.port_speed = (state.oper.r32(portsc_off(p)) >> 10) & 0xF;
-        }
-
-        let slot_id = match cmd_enable_slot(&mut state) {
-            Some(s) => s,
-            None => { kprintln!("  port {} enable-slot failed", p + 1); continue; }
-        };
-        state.slot_id = slot_id;
-        state.dcbaa.w64(slot_id as usize * 8, state.device_ctx.phys());
-
-        reset_ep0_ring(&mut state);
-        if !address_device(&mut state, p) {
-            kprintln!("  port {} address-device failed (speed {})", p + 1, state.port_speed);
-            cmd_disable_slot(&mut state, slot_id);
-            continue;
-        }
-
-        // Device descriptor (18 bytes): VID/PID, device class, iProduct.
-        if !usb_get_descriptor(&mut state, DESC_DEVICE, 18) {
-            kprintln!("  port {} device-descriptor failed", p + 1);
-            cmd_disable_slot(&mut state, slot_id);
-            continue;
-        }
-        let vid = u16::from_le_bytes([state.data_buf.r8(8u32), state.data_buf.r8(9u32)]);
-        let pid = u16::from_le_bytes([state.data_buf.r8(10u32), state.data_buf.r8(11u32)]);
-        let dclass = state.data_buf.r8(4u32);
-        let dsub = state.data_buf.r8(5u32);
-        let i_product = state.data_buf.r8(15u32);
-
-        // First interface descriptor → its class. Devices whose device-class is
-        // 0 (per-interface) or 0xFF (vendor) defer the real class here — most
-        // USB-NICs do exactly this.
-        let (mut iclass, mut isub, mut iproto) = (0u8, 0u8, 0u8);
-        if usb_get_descriptor(&mut state, DESC_CONFIG, 9) {
-            let total_len = u16::from_le_bytes([state.data_buf.r8(2u32), state.data_buf.r8(3u32)]) as usize;
-            let fetch = total_len.min(256) as u16;
-            if usb_get_descriptor(&mut state, DESC_CONFIG, fetch) {
-                let mut pos = 0usize;
-                while pos + 2 <= fetch as usize {
-                    let blen = state.data_buf.r8(pos as u32) as usize;
-                    if blen == 0 { break; }
-                    if state.data_buf.r8(pos as u32 + 1) == 0x04 {
-                        iclass = state.data_buf.r8(pos as u32 + 5);
-                        isub = state.data_buf.r8(pos as u32 + 6);
-                        iproto = state.data_buf.r8(pos as u32 + 7);
-                        break;
-                    }
-                    pos += blen;
-                }
-            }
-        }
-
-        let mut name = [0u8; 40];
-        let nlen = usb_get_string(&mut state, i_product, &mut name);
-
-        let vendor = dclass == 0x00 || dclass == 0xFF;
-        let eff_class = if vendor { iclass } else { dclass };
-        let eff_sub = if vendor { isub } else { dsub };
-
-        kprintln!("  {:02x}:{:02x}.{} port {}  {:04x}:{:04x}  {}",
-            cbus, cdev, cfunc, p + 1, vid, pid,
-            usb_class_name(eff_class, eff_sub, iproto));
-        let known = usb_vendor_product(vid, pid);
-        if !known.is_empty() {
-            kprintln!("              {}", known);
-        } else if nlen > 0 {
-            kprintln!("              {}", core::str::from_utf8(&name[..nlen]).unwrap_or(""));
-        }
-
-        found += 1;
-        cmd_disable_slot(&mut state, slot_id);
-    }
-    found
+/// One entry of `devices`.
+pub struct UsbListed {
+    pub ctrl: pci::PciAddr,
+    /// What took the device: `hid`, `net`, or empty.
+    pub driver: &'static str,
+    pub dev: UsbSeen,
 }
 
-fn usb_class_name(class: u8, sub: u8, proto: u8) -> &'static str {
-    match (class, sub, proto) {
-        (0x01, _, _) => "Audio",
-        (0x02, _, _) => "Communications (CDC)",
-        (0x03, 0x01, 0x01) => "HID keyboard",
-        (0x03, 0x01, 0x02) => "HID mouse",
-        (0x03, _, _) => "HID",
-        (0x08, _, _) => "Mass storage",
-        (0x09, _, _) => "USB hub",
-        (0x0A, _, _) => "CDC data (Ethernet)",
-        (0x0E, _, _) => "Video",
-        (0xE0, 0x01, 0x03) => "Wireless (RNDIS)",
-        (0xE0, _, _) => "Wireless",
-        (0xFF, _, _) => "Vendor-specific",
-        _ => "Unknown class",
+/// Every device on every controller, copied out of the running state.
+/// Nothing is sent to a device.
+pub fn devices() -> Vec<UsbListed> {
+    let g = CTRLS.lock();
+    let mut out = Vec::new();
+    for s in g.iter().flatten() {
+        let nic_port = s.nic.as_ref().map(|n| n.port_num);
+        for d in &s.seen {
+            let driver = if s.hid_devs.iter().any(|h| h.port == d.port) { "hid" }
+                else if nic_port == Some(d.port) { "net" }
+                else { "" };
+            out.push(UsbListed { ctrl: s.pci_addr, driver, dev: d.clone() });
+        }
     }
-}
-
-/// Known USB chips relevant to the driver catalog (NIC dongles first).
-fn usb_vendor_product(vid: u16, pid: u16) -> &'static str {
-    match (vid, pid) {
-        (0x0bda, 0x8153) => "Realtek RTL8153 USB GbE (r8152)",
-        (0x0bda, 0x8152) => "Realtek RTL8152 USB FE (r8152)",
-        (0x0b95, 0x1790) => "ASIX AX88179 USB GbE",
-        (0x0b95, 0x178a) => "ASIX AX88179A USB GbE",
-        (0x0bda, _) => "Realtek",
-        (0x0b95, _) => "ASIX",
-        _ => "",
-    }
+    out
 }
 
 fn reset_port(state: &XhciState, port: u32) -> bool {
