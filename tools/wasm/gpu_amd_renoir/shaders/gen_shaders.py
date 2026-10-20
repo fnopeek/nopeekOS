@@ -115,6 +115,32 @@ def push_members(spv):
     return out
 
 
+def partial_mask_broadcasts(ir):
+    """The v_readlane in ACO's IR after register allocation whose source was
+    written while EXEC held only some lanes: what such a lane holds is not
+    defined, so the broadcast is not either."""
+    lines = ir.split("\n")
+    start = lines.index("After RA:")
+    full = True
+    made_full = {}
+    bad = []
+    for l in lines[start:]:
+        if l.startswith("disasm") or l.startswith("After"):
+            if l != "After RA:":
+                break
+        if "=" not in l:
+            continue
+        lhs, rhs = l.split("=", 1)
+        if "%0:exec" in lhs:
+            full = "p_parallelcopy -1" in l
+        for t in re.findall(r"%(\d+):v\[", lhs):
+            made_full[t] = full
+        m = re.search(r"v_readlane_b32_e64 %(\d+):v", rhs)
+        if m and not made_full.get(m.group(1), True):
+            bad.append(l.strip())
+    return bad
+
+
 def compile_shader(acoc, tmp, path):
     name = os.path.splitext(os.path.basename(path))[0]
     spv = os.path.join(tmp, name + ".spv")
@@ -124,6 +150,13 @@ def compile_shader(acoc, tmp, path):
                    stdout=subprocess.DEVNULL)
     env = dict(os.environ, LD_PRELOAD=SHIM, AMDGPU_GPU_ID="renoir")
     subprocess.run([acoc, spv, str(WIDTH), str(PUSH_BYTES), binf, meta], check=True, env=env)
+    # A second run for ACO's IR only: RADV_DEBUG moves RADV's uploads.
+    ir = subprocess.run([acoc, spv, str(WIDTH), str(PUSH_BYTES), binf + ".ir", meta + ".ir"], check=True,
+                        env=dict(env, RADV_DEBUG="shaders"), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True).stdout
+    bad = partial_mask_broadcasts(ir)
+    if bad:
+        sys.exit(f"gen_shaders: {name}: {len(bad)} broadcasts read a lane that may have left, first: {bad[0]}")
     info = {"user_sgpr": {}}
     for line in open(meta):
         k, *v = line.split()

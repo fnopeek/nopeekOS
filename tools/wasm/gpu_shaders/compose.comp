@@ -5,7 +5,8 @@
 // register, row by row. A list that starts with an item covering the bin
 // opaquely skips the read of the target. Item and frame words are uniform
 // per workgroup: lane k loads word k % 16 of a 16-word block in one
-// message, the words are then broadcast.
+// message, the words are then broadcast, always while every lane is
+// active: a broadcast from a lane that has left reads nothing defined.
 // A bit-exact port of the kernel's CPU executor (kernel/src/shade/scene.rs
 // `paint` and the helpers it calls in gui/render.rs, gui/background.rs and
 // gui/theme.rs); comments name the function each part mirrors.
@@ -263,13 +264,13 @@ uint glass_backdrop(Blk it, uint x, uint y, uint c) {
 // render::fill_rounded_chrome_aa at one pixel.
 uint chrome(Blk it, uint px, uint py, uint c) {
     uint x = BC(it, 1), y = BC(it, 2), w = BC(it, 3), h = BC(it, 4);
-    if (w < 2u || h < 2u || px < x || py < y || px >= x + w || py >= y + h)
-        return c;
     uint border_a = BC(it, 5), border_b = BC(it, 6), bg = BC(it, 7);
     uint rounding = BC(it, 8), border = BC(it, 9);
     uint bo = min(BC(it, 10), 255u);
     uint go = min(BC(it, 11), 255u);
     bool paint_content = BC(it, 12) != 0u;
+    if (w < 2u || h < 2u || px < x || py < y || px >= x + w || py >= y + h)
+        return c;
     uint r_out = min(rounding, min(w / 2u, h / 2u));
     uint border_px = min(min(border, r_out), min(w / 2u, h / 2u));
     uint inner_x = x + border_px;
@@ -320,11 +321,11 @@ uint chrome(Blk it, uint px, uint py, uint c) {
 // scene::content at one pixel.
 uint content(Blk it, uint x, uint y, uint c) {
     uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
-    if (x < dx || y < dy || x >= dx + dw || y >= dy + dh)
-        return c;
     uint radius = BC(it, 5), fit = BC(it, 6);
     Words src = mkaddr(BC(it, 7), BC(it, 8));
     uint sw = BC(it, 9), sh = BC(it, 10), spitch = BC(it, 11);
+    if (x < dx || y < dy || x >= dx + dw || y >= dy + dh)
+        return c;
     uint r = min(radius, min(dw / 2u, dh / 2u));
     uint cov = rect_coverage(x, y, dx, dy, dw, dh, r);
     if (cov == 0u)
@@ -469,7 +470,10 @@ void main() {
         Blk list = blk_load(p.bins, off);
         Blk it = blk_load(p.frame, ITEMS + SH(list, 0u) * ITEM_WORDS);
         uint kind = BC(it, 0);
-        if (kind == 1u && inside_x) {
+        // Every lane leaves here together.
+        if (kind == 1u) {
+            if (!inside_x)
+                return;
             if ((g_flags & FLAG_WALL) == 0u) {
                 for (uint y = y_lo; y < y_hi; y++)
                     target.v[y * tpitch + x] = 0xFF181820u;
@@ -491,11 +495,13 @@ void main() {
             }
             return;
         }
-        if (kind == 5u && inside_x) {
+        if (kind == 5u) {
             uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
             uint fit = BC(it, 6);
             Words src = mkaddr(BC(it, 7), BC(it, 8));
             uint sw = BC(it, 9), sh = BC(it, 10), spitch = BC(it, 11);
+            if (!inside_x)
+                return;
             bool scale = fit == 0u && (sw != dw || sh != dh);
             uint sx = x - dx;
             if (scale)
