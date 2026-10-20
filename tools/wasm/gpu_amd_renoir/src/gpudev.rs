@@ -377,6 +377,9 @@ struct service {
     /// The guests' contexts, and their fence waits still open.
     native: crate::amdgpu_virtio::vclients,
     waits: Vec<crate::amdgpu_virtio::fence_wait>,
+    /// The scene sources that are guest VRAM objects: id and the VRAM
+    /// offset of each page, for the pixel log.
+    guest_bos: Vec<(u32, Vec<u64>)>,
 }
 
 impl service {
@@ -423,7 +426,9 @@ fn bo_add(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(), i3
     let (base, size) = (adev.gmc.aper_base, adev.gmc.aper_size);
     let offsets: Option<Vec<u64>> =
         pages.iter().map(|&p| p.checked_sub(base).filter(|&o| o < size)).collect();
-    let own = offsets.and_then(|o| crate::amdgpu_virtio::guest_vram_object(adev, &svc.native, &o));
+    let own = offsets.as_ref().and_then(|o| crate::amdgpu_virtio::guest_vram_object(adev, &svc.native, o));
+    log_bo_add(adev, id, &b, &pages, offsets.as_deref(), own);
+    let guest = own.and(offsets);
     let h = match own {
         Some(g) => {
             let h = obj::amdgpu_bo_ref(adev, g);
@@ -444,8 +449,59 @@ fn bo_add(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(), i3
         return Err(e);
     }
     npk_sys::gpudev_bo_bound(id as i32, b.va as i64);
+    if let Some(o) = guest {
+        svc.guest_bos.push((id, o));
+    }
     svc.dyn_bos.push(b);
     Ok(())
+}
+
+/// The pixels at the start and the centre of `b`, whose pages lie at VRAM
+/// offsets `o`.
+fn pixels(adev: &amdgpu_device, l: &mut Line, b: &bo, o: &[u64]) {
+    let at = |byte: u64| -> Option<u32> {
+        let page = (byte / PAGE) as usize;
+        o.get(page).map(|&v| crate::amdgpu_gart::kptr_r32(adev, obj::amdgpu_kptr::vram(v), byte % PAGE))
+    };
+    let base = b.offset as u64;
+    let centre = base + (b.height / 2) as u64 * b.pitch as u64 + (b.width / 2) as u64 * 4;
+    for byte in [base, base + 4, base + 8, centre, centre + 4] {
+        l.s(" ").hex(at(byte).unwrap_or(0));
+    }
+}
+
+/// Every 600 scenes, the pixels of each guest frame being composed.
+fn log_guest_pixels(adev: &amdgpu_device, svc: &service) {
+    for (id, o) in &svc.guest_bos {
+        let Some(b) = svc.dyn_bos.iter().find(|b| b.id == *id) else { continue };
+        let mut l = Line::new();
+        l.s("gpudev: scene ").dec(svc.scenes as u64).s(", guest bo ").dec(*id as u64).s(" pixels");
+        pixels(adev, &mut l, b, o);
+        l.say();
+    }
+}
+
+/// One line per buffer added: how it is reached, the guest object's tiling
+/// and, for VRAM, the pixels at its centre and its first row.
+fn log_bo_add(adev: &amdgpu_device, id: u32, b: &bo, pages: &[u64], offsets: Option<&[u64]>, own: Option<usize>) {
+    let mut l = Line::new();
+    l.s("gpudev: bo ").dec(id as u64).s(" ").dec(b.width as u64).s("x").dec(b.height as u64).s(" pitch ")
+        .dec(b.pitch as u64).s(" offset ").dec(b.offset as u64).s(", ").dec(pages.len() as u64).s(" pages");
+    match (offsets, own) {
+        (Some(o), Some(h)) => {
+            let ob = obj::bo(adev, h);
+            l.s(": guest VRAM object, tiling 0x").hexw((ob.tiling_flags >> 32) as u32, 8)
+                .hexw(ob.tiling_flags as u32, 8).s(", pixels");
+            pixels(adev, &mut l, b, o);
+        }
+        (Some(_), None) => {
+            l.s(": in the VRAM window but no guest object matches, as system pages");
+        }
+        (None, _) => {
+            l.s(": system pages from 0x").hexw((pages[0] >> 32) as u32, 8).hexw(pages[0] as u32, 8);
+        }
+    }
+    l.say();
 }
 
 /// `OP_BO_REMOVE`: unmapped once no scene uses it, and released. A buffer
@@ -454,6 +510,7 @@ fn bo_remove(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(),
     if (id as usize) < NUM_BOS {
         return Err(-EINVAL);
     }
+    svc.guest_bos.retain(|g| g.0 != id);
     let Some(i) = svc.dyn_bos.iter().position(|b| b.id == id) else { return Ok(()) };
     drain_scene(adev, svc);
     let mut b = svc.dyn_bos.remove(i);
@@ -494,6 +551,9 @@ fn poll_scene(adev: &mut amdgpu_device, svc: &mut service) -> bool {
     let Some(r) = compose::poll_scene(adev, s) else { return false };
     let (seq, target, t0, _) = svc.scene.take().unwrap();
     svc.scenes += 1;
+    if svc.scenes % 600 == 0 {
+        log_guest_pixels(adev, svc);
+    }
     match &r {
         Ok(rep) if svc.scenes <= SCENES_LOGGED && crate::linux::debug_enabled() => {
             let us = crate::linux::now_us() - t0;
@@ -603,7 +663,10 @@ fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
         }
         OP_BO_ADD => match bo_add(adev, svc, w(2)) {
             Ok(()) => 0,
-            Err(e) => e,
+            Err(e) => {
+                Line::new().s("gpudev: bo ").dec(w(2) as u64).s(" not added (").dec((-e) as u64).s(")").say();
+                e
+            }
         },
         OP_BO_REMOVE => match bo_remove(adev, svc, w(2)) {
             Ok(()) => 0,
@@ -686,7 +749,8 @@ pub fn serve(adev: &mut amdgpu_device) {
         return;
     }
     let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: Vec::new(), copy_ok: false, composer: None,
-                            scene: None, scenes: 0, native: Default::default(), waits: Vec::new() };
+                            scene: None, scenes: 0, native: Default::default(), waits: Vec::new(),
+                            guest_bos: Vec::new() };
     for id in 0..NUM_BOS {
         let Some(info) = bo_info(id as u32) else {
             Line::new().s("gpudev: no buffer ").dec(id as u64).say();
