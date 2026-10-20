@@ -342,6 +342,14 @@ Offen, in dieser Reihenfolge:
    Szenen je Gastbild die Zahl offener Gast-Fences beim Abschicken loggen.
    DCC-Fast-Clears sind unwahrscheinlich: radeonsi loest DCC vor dem
    Weitergeben selbst auf (`si_flush_resource`, `gfx/si_blit.c`).
+   **Und das alte Kachelmuster beim Mausbewegen** (Florian, 0.16.3): das
+   Gastbild wird dann ROH gelesen. Verdacht: der CPU-Rueckfall des Kernels
+   (`scene on the CPU`, z. B. „the module did not finish in time" im
+   ersten Lauf) komponiert das Gastobjekt linear, er kennt keinen Import.
+   Dann waeren fehlende Glyphen und Muster derselbe Fall: Szene verpasst
+   ihre Frist → CPU-Bild aus Kacheln. Zuerst ein Log genau dieses Moments
+   (`scene on the CPU`, `held job`), dann: Szenendauer mit Import messen,
+   und den Rueckfall fuer gekachelte Gastbilder sperren statt Muster zeigen.
 3. **„Bugwelle" beim Scrollen** (Florian: wie ein vsync-Problem, unter
    Intel nicht). Nicht untersucht. Kandidaten: der Gast zeichnet schon in
    den Puffer, den wir gerade importieren (Puffer-Freigabe an den Gast zu
