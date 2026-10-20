@@ -33,6 +33,11 @@ const OP_SCENE: u32 = 4;
 const OP_CLIENT: u32 = 5;
 /// `a0` client, `a1` length; the payload is the guest's ccmd.
 const OP_CCMD: u32 = 7;
+/// `a0` client, `a1` blob id, `a2` resource id: the object handed to the
+/// kernel (`get_blob`).
+const OP_BLOB: u32 = 8;
+/// `a0` client, `a1` resource id: the guest let go of the resource.
+const OP_BLOB_RELEASE: u32 = 9;
 /// The largest ccmd a guest sends, and the kernel's largest reply.
 const CCMD_MAX: usize = 256 * 1024;
 const REPLY_MAX: usize = 64 * 1024;
@@ -557,6 +562,13 @@ fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
             }
         }
         OP_CCMD => run_ccmd(adev, svc, seq, w(2), w(3)),
+        OP_BLOB => match crate::amdgpu_virtio::get_blob(adev, &mut svc.native, w(2), w(3), w(4)) {
+            Ok(r) => {
+                if npk_sys::gpudev_reply(seq as i32, &r) != 0 { -ENOMEM } else { 0 }
+            }
+            Err(e) => e,
+        },
+        OP_BLOB_RELEASE => crate::amdgpu_virtio::release_blob(adev, &mut svc.native, w(2), w(3)),
         _ => -EINVAL,
     }
 }

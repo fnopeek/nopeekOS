@@ -29,6 +29,13 @@ const REPLY_HANDLER_FAILED: u32 = 1;
 /// list, as none of Renoir's is.
 const DEFAULT_MARKETING_NAME: &[u8] = b"AMD Radeon Graphics";
 
+/// `struct amdgpu_object`: a GEM object of a guest context.
+struct vobject {
+    bo: usize,
+    has_metadata: bool,
+    enable_cache_wc: bool,
+}
+
 /// A guest context.
 pub struct vclient {
     /// The kernel's handle of it.
@@ -36,6 +43,10 @@ pub struct vclient {
     pub fpriv: amdgpu_fpriv,
     /// `amdvgpu_shmem.async_error`.
     async_error: u32,
+    /// `drm_context`'s blob table (objects a GEM_NEW made, until their
+    /// resource exists) and its resource table.
+    blobs: BTreeMap<u32, vobject>,
+    resources: BTreeMap<u32, vobject>,
 }
 
 /// Every guest context of the service.
@@ -51,7 +62,7 @@ pub fn client_open(adev: &mut amdgpu_device, vc: &mut vclients, id: u32) -> i32 
     }
     match cs::amdgpu_driver_open_kms(adev) {
         Ok(fpriv) => {
-            vc.clients.insert(id, vclient { id, fpriv, async_error: 0 });
+            vc.clients.insert(id, vclient { id, fpriv, async_error: 0, blobs: BTreeMap::new(), resources: BTreeMap::new() });
             0
         }
         Err(e) => e,
@@ -60,7 +71,13 @@ pub fn client_open(adev: &mut amdgpu_device, vc: &mut vclients, id: u32) -> i32 
 
 /// `OP_CLIENT` close: `amdgpu_renderer_destroy`, its contexts with it.
 pub fn client_close(adev: &mut amdgpu_device, vc: &mut vclients, id: u32) -> i32 {
-    let Some(c) = vc.clients.remove(&id) else { return EINVAL };
+    let Some(mut c) = vc.clients.remove(&id) else { return EINVAL };
+    // drm_context_deinit: every object, then the device.
+    let objs: Vec<vobject> = core::mem::take(&mut c.blobs).into_values()
+        .chain(core::mem::take(&mut c.resources).into_values()).collect();
+    for o in objs {
+        free_object(adev, &c.fpriv, o);
+    }
     cs::amdgpu_driver_postclose_kms(adev, c.fpriv);
     0
 }
@@ -123,6 +140,183 @@ fn ccmd_create_ctx(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Res
     Ok(r)
 }
 
+/// `amdgpu_renderer_free_object`: `amdgpu_bo_free`, the GEM handle closed.
+fn free_object(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, o: vobject) {
+    cs::amdgpu_gem_object_close(adev, fpriv, o.bo);
+    crate::amdgpu_object::amdgpu_bo_unref(adev, o.bo);
+}
+
+fn q64(b: &[u8], at: u32) -> u64 {
+    d32(b, at) as u64 | (d32(b, at + 4) as u64) << 32
+}
+
+/// `amdgpu_ccmd_gem_new`: libdrm's `amdgpu_bo_alloc`, parked under the
+/// blob id until `get_blob`.
+fn ccmd_gem_new(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Result<Vec<u8>, i32> {
+    let blob_id = q64(req, GN_BLOB_ID);
+    let (size, align, heap, flags) = (q64(req, GN_ALLOC_SIZE), q64(req, GN_PHYS_ALIGNMENT), d32(req, GN_PREFERRED_HEAP),
+                                      q64(req, GN_FLAGS));
+    let fail = |c: &mut vclient, why: &str, e: i32| {
+        Line::new().s("native: gem_new: ").s(why).say();
+        c.async_error = c.async_error.wrapping_add(1);
+        Err(e)
+    };
+    if d32(req, GN_PAD) != 0 {
+        return fail(c, "padding not zero", EINVAL);
+    }
+    // drm_context_blob_id_valid
+    if blob_id == 0 || blob_id >> 32 != 0 || c.blobs.contains_key(&(blob_id as u32)) {
+        return fail(c, "invalid blob id", EINVAL);
+    }
+    let bo = match cs::amdgpu_gem_create_ioctl(adev, &c.fpriv, c.id, size, align, heap as u64, flags) {
+        Ok(h) => h,
+        Err(e) => return fail(c, "amdgpu_bo_alloc failed", e),
+    };
+    // Enable Write-Combine except for GTT buffers with WC disabled.
+    let enable_cache_wc = heap != AMDGPU_GEM_DOMAIN_GTT || flags & AMDGPU_GEM_CREATE_CPU_GTT_USWC as u64 != 0;
+    c.blobs.insert(blob_id as u32, vobject { bo, has_metadata: false, enable_cache_wc });
+    Ok(Vec::new())
+}
+
+/// `amdgpu_ccmd_bo_va_op`: libdrm's `amdgpu_bo_va_op_raw`.
+fn ccmd_bo_va_op(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Result<Vec<u8>, i32> {
+    let mut r = rsp(RSP_SIZE, 0);
+    let flags2 = q64(req, VA_FLAGS2);
+    if flags2 & !(AMDGPU_CCMD_BO_VA_OP_SPARSE_BO as u64) != 0 {
+        Line::new().s("native: bo_va_op: forbidden flags").say();
+        r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&EINVAL.to_le_bytes());
+        return Err(EINVAL);
+    }
+    let bo = if flags2 & AMDGPU_CCMD_BO_VA_OP_SPARSE_BO as u64 != 0 {
+        None
+    } else {
+        // The guest may have closed the GEM already.
+        Some(c.resources.get(&d32(req, VA_RES_ID)).ok_or(EINVAL)?.bo)
+    };
+    let ret = match cs::amdgpu_gem_va_ioctl_op(adev, &c.fpriv, bo, d32(req, VA_OP), q64(req, VA_VA), q64(req, VA_OFFSET),
+                                               q64(req, VA_VM_MAP_SIZE), q64(req, VA_FLAGS) as u32) {
+        Ok(_) => 0,
+        Err(e) => {
+            c.async_error = c.async_error.wrapping_add(1);
+            Line::new().s("native: amdgpu_bo_va_op_raw failed: op ").dec(d32(req, VA_OP) as u64).s(" r=")
+                .dec((-e) as u64).say();
+            e
+        }
+    };
+    r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&ret.to_le_bytes());
+    Ok(r)
+}
+
+/// `amdgpu_ccmd_set_metadata`: libdrm's `amdgpu_bo_set_metadata`.
+fn ccmd_set_metadata(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Result<Vec<u8>, i32> {
+    let mut r = rsp(RSP_SIZE, 0);
+    let len = d32(req, 4);
+    let Some(o) = c.resources.get_mut(&d32(req, SM_RES_ID)) else {
+        r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&EINVAL.to_le_bytes());
+        return Err(EINVAL);
+    };
+    let size = d32(req, SM_SIZE_METADATA);
+    if size > 256 || (size != 0 && SM_UMD_METADATA as u64 + size as u64 > len as u64) {
+        r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&EINVAL.to_le_bytes());
+        return Err(EINVAL);
+    }
+    let data = &req[SM_UMD_METADATA as usize..SM_UMD_METADATA as usize + size as usize];
+    let ret = cs::amdgpu_gem_set_metadata(adev, o.bo, q64(req, SM_TILING_INFO), q64(req, SM_FLAGS), data);
+    r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&ret.to_le_bytes());
+    o.has_metadata = true;
+    Ok(r)
+}
+
+/// `amdgpu_ccmd_bo_query_info`: libdrm's `amdgpu_bo_query_info`, its
+/// GEM_METADATA GET and GEM_OP GET_GEM_CREATE_INFO.
+fn ccmd_bo_query_info(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Result<Vec<u8>, i32> {
+    let mut r = rsp(BQ_RSP_SIZE, 0);
+    if d32(req, BQ_PAD) != 0 {
+        r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&EINVAL.to_le_bytes());
+        return Err(EINVAL);
+    }
+    let Some(o) = c.resources.get(&d32(req, BQ_RES_ID)) else {
+        r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&EINVAL.to_le_bytes());
+        return Ok(r);
+    };
+    let b = crate::amdgpu_object::bo(adev, o.bo);
+    let put32 = |r: &mut [u8], at: u32, v: u32| r[at as usize..at as usize + 4].copy_from_slice(&v.to_le_bytes());
+    let put64 = |r: &mut [u8], at: u32, v: u64| r[at as usize..at as usize + 8].copy_from_slice(&v.to_le_bytes());
+    put64(&mut r, BQ_ALLOC_SIZE, b.tbo.size);
+    put64(&mut r, BQ_PHYS_ALIGNMENT, (b.tbo.page_alignment as u64) << 12);
+    put32(&mut r, BQ_PREFERRED_HEAP, b.preferred_domains);
+    put64(&mut r, BQ_ALLOC_FLAGS, b.flags);
+    put64(&mut r, BQ_MD_FLAGS, b.metadata_flags);
+    put64(&mut r, BQ_MD_TILING_INFO, b.tiling_flags);
+    put32(&mut r, BQ_MD_SIZE_METADATA, b.metadata.len() as u32);
+    let at = BQ_MD_UMD_METADATA as usize;
+    r[at..at + b.metadata.len()].copy_from_slice(&b.metadata);
+    Ok(r)
+}
+
+/// `OP_BLOB`, `amdgpu_renderer_get_blob`: the object under `blob_id`
+/// becomes resource `res_id`. The reply names its pages for the kernel:
+/// map info, kind (0: the GTT pages of `tt`, 1: VRAM ranges in BAR0), the
+/// tt id, the number of ranges, then (offset, length) pairs.
+pub fn get_blob(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, blob_id: u32, res_id: u32) -> Result<Vec<u8>, i32> {
+    let c = vc.clients.get_mut(&id).ok_or(EINVAL)?;
+    // drm_context_res_id_unused
+    if c.resources.contains_key(&res_id) {
+        return Err(EINVAL);
+    }
+    let o = c.blobs.remove(&blob_id).ok_or(-2)?;
+    let b = crate::amdgpu_object::bo(adev, o.bo);
+    let map_info = if o.enable_cache_wc { VIRTIO_GPU_MAP_CACHE_WC } else { VIRTIO_GPU_MAP_CACHE_CACHED };
+    let mut out = Vec::new();
+    let mut put32 = |v: u32| out.extend_from_slice(&v.to_le_bytes());
+    let res = b.tbo.resource.clone();
+    match res.as_ref().map(|r| r.mem_type) {
+        Some(t) if t == TTM_PL_TT => {
+            let Some((tt, _)) = b.pool.as_ref() else {
+                c.blobs.insert(blob_id, o);
+                return Err(EINVAL);
+            };
+            put32(map_info);
+            put32(0);
+            put32(*tt);
+            put32(0);
+        }
+        Some(t) if t == TTM_PL_VRAM => {
+            let size = crate::amdgpu_object::amdgpu_bo_size(adev, o.bo);
+            let mut ranges = Vec::new();
+            let mut cur = crate::amdgpu_res_cursor::amdgpu_res_first(adev, res.as_ref(), 0, size);
+            while cur.remaining != 0 {
+                ranges.push((cur.start, cur.size));
+                let n = cur.size;
+                crate::amdgpu_res_cursor::amdgpu_res_next(adev, res.as_ref(), &mut cur, n);
+            }
+            put32(map_info);
+            put32(1);
+            put32(0);
+            put32(ranges.len() as u32);
+            for (off, len) in ranges {
+                out.extend_from_slice(&off.to_le_bytes());
+                out.extend_from_slice(&len.to_le_bytes());
+            }
+        }
+        _ => {
+            c.blobs.insert(blob_id, o);
+            return Err(EINVAL);
+        }
+    }
+    c.resources.insert(res_id, o);
+    Ok(out)
+}
+
+/// `OP_BLOB_RELEASE`: the guest let go of resource `res_id`
+/// (`drm_context_free_object`).
+pub fn release_blob(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, res_id: u32) -> i32 {
+    let Some(c) = vc.clients.get_mut(&id) else { return EINVAL };
+    let Some(o) = c.resources.remove(&res_id) else { return EINVAL };
+    free_object(adev, &c.fpriv, o);
+    0
+}
+
 /// A ccmd this driver does not run yet: the handler fails, as
 /// virglrenderer's does for a command it cannot serve.
 fn not_ported(cmd: u32) -> Result<Vec<u8>, i32> {
@@ -161,8 +355,11 @@ pub fn ccmd(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, req_in: &[u8])
     let r = match cmd {
         AMDGPU_CCMD_QUERY_INFO => ccmd_query_info(adev, c, &req),
         AMDGPU_CCMD_CREATE_CTX => ccmd_create_ctx(adev, c, &req),
-        AMDGPU_CCMD_GEM_NEW | AMDGPU_CCMD_BO_VA_OP | AMDGPU_CCMD_CS_SUBMIT | AMDGPU_CCMD_SET_METADATA
-        | AMDGPU_CCMD_BO_QUERY_INFO | AMDGPU_CCMD_RESERVE_VMID | AMDGPU_CCMD_SET_PSTATE
+        AMDGPU_CCMD_GEM_NEW => ccmd_gem_new(adev, c, &req),
+        AMDGPU_CCMD_BO_VA_OP => ccmd_bo_va_op(adev, c, &req),
+        AMDGPU_CCMD_SET_METADATA => ccmd_set_metadata(adev, c, &req),
+        AMDGPU_CCMD_BO_QUERY_INFO => ccmd_bo_query_info(adev, c, &req),
+        AMDGPU_CCMD_CS_SUBMIT | AMDGPU_CCMD_RESERVE_VMID | AMDGPU_CCMD_SET_PSTATE
         | AMDGPU_CCMD_CS_QUERY_FENCE_STATUS => not_ported(cmd),
         _ => {
             Line::new().s("native: unknown ccmd ").dec(cmd as u64).say();

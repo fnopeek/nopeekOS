@@ -137,3 +137,6 @@ QF_TIMEOUT_NS = offsetof(struct amdgpu_ccmd_cs_query_fence_status_req, timeout_n
 QF_FLAGS = offsetof(struct amdgpu_ccmd_cs_query_fence_status_req, flags)
 QF_RSP_SIZE = sizeof(struct amdgpu_ccmd_cs_query_fence_status_rsp)
 QF_RSP_EXPIRED = offsetof(struct amdgpu_ccmd_cs_query_fence_status_rsp, expired)
+# The cache type of a blob mapping (linux/virtio_gpu.h)
+VIRTIO_GPU_MAP_CACHE_CACHED
+VIRTIO_GPU_MAP_CACHE_WC

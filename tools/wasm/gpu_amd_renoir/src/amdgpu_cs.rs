@@ -515,8 +515,113 @@ pub fn amdgpu_gem_object_create(adev: &mut amdgpu_device, size: u64, alignment: 
         preferred_domain: initial_domain,
         flags: flags | AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE as u64,
         domain: initial_domain,
+        client: None,
     };
     obj::amdgpu_bo_create(adev, &bp)
+}
+
+/// `amdgpu_gem_are_domains_valid`: the CPU, GTT and VRAM domains in any
+/// combination, or one special domain alone.
+fn amdgpu_gem_are_domains_valid(domains: u32) -> bool {
+    let normal = AMDGPU_GEM_DOMAIN_CPU | AMDGPU_GEM_DOMAIN_GTT | AMDGPU_GEM_DOMAIN_VRAM;
+    let special = AMDGPU_GEM_DOMAIN_MASK & !normal;
+    let (normal_mask, special_mask) = (domains & normal, domains & special);
+    if special_mask == 0 {
+        return true;
+    }
+    if normal_mask != 0 {
+        return false;
+    }
+    special_mask & (special_mask - 1) == 0
+}
+
+/// `amdgpu_gem_create_ioctl` of guest client `client`: the new object,
+/// opened in the client's VM (`drm_gem_handle_create`).
+pub fn amdgpu_gem_create_ioctl(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, client: u32, size: u64,
+                               alignment: u64, domains: u64, domain_flags: u64) -> Result<usize, i32> {
+    let mut flags = domain_flags;
+    // reject invalid gem flags
+    if flags & !(AMDGPU_GEM_CREATE_SETTABLE_MASK as u64) != 0 {
+        return Err(-22);
+    }
+    // reject invalid gem domains
+    if domains & !(AMDGPU_GEM_DOMAIN_MASK as u64) != 0 || !amdgpu_gem_are_domains_valid(domains as u32) {
+        return Err(-22);
+    }
+    if !adev.gmc.tmz_enabled && flags & AMDGPU_GEM_CREATE_ENCRYPTED as u64 != 0 {
+        Line::new().s("Cannot allocate secure buffer since TMZ is disabled").say();
+        return Err(-22);
+    }
+    // always clear VRAM
+    flags |= AMDGPU_GEM_CREATE_VRAM_CLEARED as u64;
+    if domains & AMDGPU_GEM_DOMAIN_MMIO_REMAP as u64 != 0 {
+        return Err(-22);
+    }
+    // create a gem object to contain this object in
+    if domains & (AMDGPU_GEM_DOMAIN_GDS | AMDGPU_GEM_DOMAIN_GWS | AMDGPU_GEM_DOMAIN_OA) as u64 != 0 {
+        if flags & AMDGPU_GEM_CREATE_VM_ALWAYS_VALID as u64 != 0 {
+            // if gds bo is created from user space, it must be passed to bo list
+            Line::new().s("GDS bo cannot be per-vm-bo").say();
+            return Err(-22);
+        }
+        flags |= AMDGPU_GEM_CREATE_NO_CPU_ACCESS as u64;
+    }
+    let root = amdgpu_vm::base(adev, adev.vm(fpriv.vm).root).bo;
+    let resv = if flags & AMDGPU_GEM_CREATE_VM_ALWAYS_VALID as u64 != 0 { root } else { None };
+    let mut initial_domain = domains as u32;
+    let r = loop {
+        let bp = obj::amdgpu_bo_param {
+            size,
+            byte_align: alignment,
+            type_: ttm_bo_type_device,
+            resv,
+            preferred_domain: initial_domain,
+            flags: flags | AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE as u64,
+            domain: initial_domain,
+            client: Some(client),
+        };
+        match obj::amdgpu_bo_create(adev, &bp) {
+            Ok(h) => break Ok(h),
+            Err(e) => {
+                if flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED as u64 != 0 {
+                    flags &= !(AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED as u64);
+                    continue;
+                }
+                if initial_domain == AMDGPU_GEM_DOMAIN_VRAM {
+                    initial_domain |= AMDGPU_GEM_DOMAIN_GTT;
+                    continue;
+                }
+                break Err(e);
+            }
+        }
+    };
+    let h = r?;
+    if resv.is_some() {
+        obj::bo_mut(adev, h).parent = root.map(|r| obj::amdgpu_bo_ref(adev, r));
+    }
+    amdgpu_gem_object_open(adev, fpriv, h);
+    Ok(h)
+}
+
+/// `amdgpu_gem_metadata_ioctl`, SET: tiling flags and the UMD's metadata.
+pub fn amdgpu_gem_set_metadata(adev: &mut amdgpu_device, h: usize, tiling_info: u64, flags: u64, data: &[u8]) -> i32 {
+    if data.len() > 256 {
+        return -22;
+    }
+    // amdgpu_bo_set_tiling_flags: the tile split rule is CZ and older.
+    if adev.family <= AMDGPU_FAMILY_CZ && (tiling_info >> AMDGPU_TILING_TILE_SPLIT_SHIFT) & AMDGPU_TILING_TILE_SPLIT_MASK as u64 > 6 {
+        return -22;
+    }
+    let b = obj::bo_mut(adev, h);
+    b.tiling_flags = tiling_info;
+    // amdgpu_bo_set_metadata
+    if data.is_empty() {
+        b.metadata.clear();
+        return 0;
+    }
+    b.metadata_flags = flags;
+    b.metadata = data.to_vec();
+    0
 }
 
 /// `amdgpu_gem_object_open`: the buffer's bo_va in the client's VM.

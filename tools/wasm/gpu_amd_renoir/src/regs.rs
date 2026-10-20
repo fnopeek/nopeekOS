@@ -6995,3 +6995,11 @@ pub const AMDGPU_GEM_DOMAIN_MASK: u32 = 0xff;
 pub const AMDGPU_FAMILY_CZ: u32 = 0x87;
 /// The value of `SDMA_PKT_HEADER_OP(SDMA_OP_CONST_FILL)` in sdma_v4_0.c
 pub const SDMA_PKT_HEADER_OP_CONST_FILL: u32 = 0xb;
+/// ?
+pub const AMDGPU_TILING_TILE_SPLIT_SHIFT: u32 = 0x9;
+/// ?
+pub const AMDGPU_TILING_TILE_SPLIT_MASK: u32 = 0x7;
+/// ?
+pub const AMDGPU_GEM_METADATA_OP_SET_METADATA: u32 = 0x1;
+/// ?
+pub const AMDGPU_GEM_METADATA_OP_GET_METADATA: u32 = 0x2;

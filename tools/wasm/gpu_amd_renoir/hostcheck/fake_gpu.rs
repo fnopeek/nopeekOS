@@ -442,6 +442,15 @@ fn run_sdma(rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32) {
                 log(format!("sdma SRBM_WRITE {:#x} = {:#x}", d(1), d(2)));
                 3
             }
+            // CONST_FILL: address, data, byte count - 1.
+            (11, _) => {
+                let addr = d(1) as u64 | (d(2) as u64) << 32;
+                for i in 0..(d(4) as u64 + 1) / 4 {
+                    gpu_w32(addr + i * 4, d(3));
+                }
+                log(format!("sdma const_fill {} bytes at {:#x}", d(4) + 1, addr));
+                5
+            }
             (12, _) => {
                 // PTEPDE: count entries (addr + i * incr) | flags
                 let pe = d(1) as u64 | (d(2) as u64) << 32;

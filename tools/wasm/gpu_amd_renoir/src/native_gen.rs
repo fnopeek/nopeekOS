@@ -261,3 +261,6 @@ pub const QF_FLAGS: u32 = 0x30;
 pub const QF_RSP_SIZE: u32 = 0x10;
 /// `offsetof(struct amdgpu_ccmd_cs_query_fence_status_rsp, expired)`
 pub const QF_RSP_EXPIRED: u32 = 0x8;
+// The cache type of a blob mapping (linux/virtio_gpu.h)
+pub const VIRTIO_GPU_MAP_CACHE_CACHED: u32 = 0x1;
+pub const VIRTIO_GPU_MAP_CACHE_WC: u32 = 0x3;

@@ -87,6 +87,8 @@ pub struct amdgpu_bo_param {
     pub type_: u32,
     /// `resv`: share this buffer's reservation object.
     pub resv: Option<usize>,
+    /// The guest client whose GEM object this is (`amdgpu_bo.client`).
+    pub client: Option<u32>,
 }
 
 pub fn bo(adev: &amdgpu_device, h: usize) -> &amdgpu_bo {
@@ -220,7 +222,7 @@ pub fn amdgpu_bo_create(adev: &mut amdgpu_device, bp: &amdgpu_bo_param) -> Resul
         resv: bp.resv.map(|r| resv_owner(adev, r)),
         deleted: false,
         entries: Vec::new(),
-        client: None,
+        client: bp.client,
         pool: None,
         tiling_flags: 0,
         metadata_flags: 0,
@@ -704,6 +706,7 @@ pub fn amdgpu_dma_buf_create_obj(adev: &mut amdgpu_device, pages: Vec<u64>) -> R
         flags: 0,
         type_: ttm_bo_type_sg,
         resv: None,
+        client: None,
     };
     let h = amdgpu_bo_create(adev, &bp)?;
     let b = bo_mut(adev, h);

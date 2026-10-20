@@ -9,7 +9,7 @@ structs) and `src/amd/common/virtio/amdgpu_virtio_proto.h` (the ccmds,
 identical to virglrenderer's copy). Each `NAME = expr` of native.list
 becomes a C function returning its value, compiled to assembly, and the
 number is read off the `mov $N, %eax` GCC emits; a bare `NAME` is a
-constant of those headers.
+constant of those headers, or of the virtio-gpu uapi the map info is in.
 
     python3 gen_native.py            # rewrite ../src/native_gen.rs
     python3 gen_native.py --check    # fail if it is not what it would write
@@ -32,6 +32,7 @@ PRELUDE = """#include <stddef.h>
 #include <stdalign.h>
 #include "drm_hw.h"
 #include "amdgpu_virtio_proto.h"
+#include <linux/virtio_gpu.h>
 """
 FLAGS = ["-O2", "-S", "-DENABLE_DRM_AMDGPU", "-I", LIBDRM,
          "-I", os.path.join(MESA, "src/virtio/virtio-gpu"), "-I", os.path.join(MESA, "src/amd/common/virtio"),
