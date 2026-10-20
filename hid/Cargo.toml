@@ -1,0 +1,10 @@
+[package]
+name = "hid_core"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "HID report descriptors and input reports, after Linux drivers/hid"
+
+# no_std + alloc rlib. Builds for x86_64-nopeek AND for the std harness.
+[lib]
+crate-type = ["rlib"]

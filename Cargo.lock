@@ -420,6 +420,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "hid_core"
+version = "0.1.0"
+
+[[package]]
 name = "hkdf"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -496,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "nopeekos-kernel"
-version = "0.651.1"
+version = "0.652.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -510,6 +514,7 @@ dependencies = [
  "forge_core",
  "ghash",
  "hashbrown",
+ "hid_core",
  "hkdf",
  "hmac",
  "miniz_oxide",

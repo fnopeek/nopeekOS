@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.651.1"
+version = "0.652.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 authors = ["nopeek"]
@@ -21,6 +21,7 @@ spin = "0.12"         # Spinlock (no_std mutex)
 # dependency is the wasmparser wasmi already brings, so it adds a code
 # generator to the tree, not a dependency tree.
 forge_core = { path = "../forge/core" }
+hid_core = { path = "../hid" }
 
 bitflags = "2.13"     # Flag-basierte Enums
 

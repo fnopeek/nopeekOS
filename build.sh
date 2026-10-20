@@ -720,6 +720,14 @@ run_qemu_generic() {
         )
         log "QEMU_USB=split: keyboard on xhci, mouse on a SECOND controller"
     fi
+    # QEMU_USB_HOST=vid:pid passes a real USB device of this machine through
+    # to the first controller (e.g. 03f0:5341, a keyboard+mouse receiver).
+    # QEMU needs write access to its /dev/bus/usb node.
+    if [ -n "${QEMU_USB_HOST:-}" ]; then
+        local hvid="${QEMU_USB_HOST%%:*}" hpid="${QEMU_USB_HOST##*:}"
+        usb_args+=(-device "usb-host,bus=xhci.0,vendorid=0x$hvid,productid=0x$hpid")
+        log "QEMU_USB_HOST=$QEMU_USB_HOST: passed through to xhci"
+    fi
 
     local audiodev="${QEMU_AUDIODEV:-}"
     if [ -z "$audiodev" ]; then

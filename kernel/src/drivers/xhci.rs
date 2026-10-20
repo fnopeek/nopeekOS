@@ -1,7 +1,9 @@
 //! xHCI USB Host Controller Driver
 //!
-//! Minimal implementation for USB HID boot-protocol keyboards.
-//! Polling model, single device, no hubs.
+//! HID devices after Linux usbhid (keyboards, mice, receivers that are
+//! both) and one USB network device. No hubs.
+
+use alloc::vec::Vec;
 
 use crate::{kprintln, pci};
 use crate::hw::{DmaRegion, Mmio};
@@ -87,6 +89,7 @@ const TRB_ENABLE_SLOT:    u32 = 9 << 10;
 const TRB_DISABLE_SLOT:   u32 = 10 << 10;
 const TRB_ADDRESS_DEVICE: u32 = 11 << 10;
 const TRB_CONFIGURE_EP:   u32 = 12 << 10;
+const TRB_EVALUATE_CTX:   u32 = 13 << 10;
 #[allow(dead_code)]
 const TRB_NOOP_CMD:       u32 = 23 << 10;
 
@@ -112,13 +115,12 @@ const CC_SHORT_PACKET:   u32 = 13;
 
 // Endpoint types in endpoint context
 const EP_TYPE_CONTROL:      u32 = 4;
+const EP_TYPE_INTERRUPT_OUT: u32 = 3;
 const EP_TYPE_INTERRUPT_IN:  u32 = 7;
 
 // USB request types
 const USB_GET_DESCRIPTOR: u8 = 6;
 const USB_SET_CONFIG:     u8 = 9;
-const USB_SET_PROTOCOL:   u8 = 0x0B;
-const USB_SET_IDLE:       u8 = 0x0A;
 
 // Descriptor types
 #[allow(dead_code)]
@@ -129,7 +131,7 @@ const NUM_CMD_TRBS: usize = 32;
 const NUM_EVT_TRBS: usize = 256;
 const NUM_TR_TRBS:  usize = 64;
 
-// HID usage code to ASCII table (boot protocol, US layout base)
+// HID usage code to ASCII table (keyboard page, US layout base)
 static HID_TO_ASCII: [u8; 57] = [
     0, 0, 0, 0,                                       // 0x00-0x03
     b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h',  // 0x04-0x0B
@@ -201,7 +203,7 @@ fn push_key(k: u8) {
     }
 }
 
-/// Mouse event from USB HID boot protocol.
+/// A pointer event: from a USB HID device, PS/2 or a driver module.
 #[derive(Clone, Copy)]
 pub struct MouseEvent {
     pub buttons: u8,  // bit 0=left, 1=right, 2=middle
@@ -211,7 +213,7 @@ pub struct MouseEvent {
     /// Horizontal scroll (AC Pan), positive = right.
     ///
     /// A separate axis because a touchpad reports both in the same event.
-    /// The USB boot-protocol mouse has no such axis and leaves it 0.
+    /// A USB mouse fills it from AC Pan; one without leaves it 0.
     pub hscroll: i8,
 }
 
@@ -424,27 +426,13 @@ struct XhciState {
     ep0_ring: DmaRegion,
     ep0_cycle: u32,
     ep0_enqueue: usize,
-    intr_ring: DmaRegion,
-    intr_cycle: u32,
-    intr_enqueue: usize,
     data_buf: DmaRegion, // general-purpose DMA buffer (4KB)
+    /// The device the EP0 set above currently belongs to.
     slot_id: u8,
     port_speed: u32,
-    intr_ep_dci: u8,     // DCI of interrupt IN endpoint
-    prev_keys: [u8; 6],  // previous HID report keys
-    repeat_key: u8,      // key currently held for repeat
-    repeat_shift: bool,  // shift state when repeat started
-    repeat_altgr: bool,  // altgr state when repeat started
-    repeat_start: u64,   // tick when key was first pressed
-    repeat_last: u64,    // tick when last repeat was emitted
-    port_num: u32,       // connected port number
-    error_count: u32,    // consecutive transfer errors
-    // Port probed during keyboard search but wasn't keyboard (reuse for mouse)
-    // Mouse device (second USB device on same controller)
-    /// Whether this controller carries the keyboard. Per controller, since
-    /// the global `AVAILABLE` cannot tell which device an event belongs to.
-    has_keyboard: bool,
-    has_mouse: bool,
+    /// USB devices with HID interfaces, and the interfaces.
+    hid_devs: Vec<HidUsbDev>,
+    hid: Vec<HidIntf>,
     /// DMA buffers for a network device on this controller.
     nic_device_ctx: DmaRegion,
     nic_ep0_ring: DmaRegion,
@@ -452,19 +440,6 @@ struct XhciState {
     /// and its event ring dequeue pointer; a second state on the same ring
     /// would steal events.
     nic: Option<NicRings>,
-    mouse_slot_id: u8,
-    mouse_device_ctx: DmaRegion,
-    mouse_ep0_ring: DmaRegion,
-    mouse_ep0_cycle: u32,
-    mouse_ep0_enqueue: usize,
-    mouse_intr_ring: DmaRegion,
-    mouse_intr_cycle: u32,
-    mouse_intr_enqueue: usize,
-    mouse_intr_ep_dci: u8,
-    mouse_port_num: u32,
-    mouse_port_speed: u32,
-    mouse_prev_buttons: u8,
-    mouse_error_count: u32,
 }
 
 /// Maximum number of xHCI controllers tracked. Laptops commonly have two,
@@ -644,13 +619,12 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         return None;
     }
 
-    // Allocate DMA structures (all page-aligned, zeroed)
-    // A third set (nic_*) for a network device on the same controller, so
-    // it does not share one with the keyboard or mouse.
+    // Allocate DMA structures (all page-aligned, zeroed). The EP0 set
+    // serves enumeration; a HID device gets its own set when accepted, a
+    // network device the nic_* set.
     let (Some(dcbaa), Some(cmd_ring), Some(evt_ring), Some(evt_seg_table),
-         Some(input_ctx), Some(device_ctx), Some(ep0_ring), Some(intr_ring),
-         Some(data_buf), Some(mouse_device_ctx), Some(mouse_ep0_ring),
-         Some(mouse_intr_ring), Some(nic_device_ctx), Some(nic_ep0_ring)) = (
+         Some(input_ctx), Some(device_ctx), Some(ep0_ring),
+         Some(data_buf), Some(nic_device_ctx), Some(nic_ep0_ring)) = (
         alloc_dma(1, "DCBAA"),
         alloc_dma(1, "cmd ring"),
         alloc_dma(1, "evt ring"),
@@ -658,11 +632,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         alloc_dma(1, "input ctx"),
         alloc_dma(1, "device ctx"),
         alloc_dma(1, "EP0 ring"),
-        alloc_dma(1, "intr ring"),
         alloc_dma(1, "data buf"),
-        alloc_dma(1, "mouse dev ctx"),
-        alloc_dma(1, "mouse EP0"),
-        alloc_dma(1, "mouse intr"),
         alloc_dma(1, "nic dev ctx"),
         alloc_dma(1, "nic EP0"),
     ) else {
@@ -673,9 +643,6 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     // Set up Link TRBs at end of rings (wrap back to start)
     write_trb(cmd_ring, NUM_CMD_TRBS - 1, cmd_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1)); // Toggle Cycle
     write_trb(ep0_ring, NUM_TR_TRBS - 1, ep0_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
-    write_trb(intr_ring, NUM_TR_TRBS - 1, intr_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
-    write_trb(mouse_ep0_ring, NUM_TR_TRBS - 1, mouse_ep0_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
-    write_trb(mouse_intr_ring, NUM_TR_TRBS - 1, mouse_intr_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
     write_trb(nic_ep0_ring, NUM_TR_TRBS - 1, nic_ep0_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
 
     // Set up Event Ring Segment Table (1 entry)
@@ -740,18 +707,9 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         evt_ring, evt_cycle: 1, evt_dequeue: 0, evt_seg_table,
         input_ctx, device_ctx,
         ep0_ring, ep0_cycle: 1, ep0_enqueue: 0,
-        intr_ring, intr_cycle: 1, intr_enqueue: 0,
         data_buf, slot_id: 0, port_speed: 0,
-        intr_ep_dci: 0, prev_keys: [0; 6],
-        repeat_key: 0, repeat_shift: false, repeat_altgr: false, repeat_start: 0, repeat_last: 0,
-        port_num: 0, error_count: 0,
-        has_keyboard: false, has_mouse: false, mouse_slot_id: 0,
+        hid_devs: Vec::new(), hid: Vec::new(),
         nic_device_ctx, nic_ep0_ring, nic: None,
-        mouse_device_ctx, mouse_ep0_ring, mouse_ep0_cycle: 1, mouse_ep0_enqueue: 0,
-        mouse_intr_ring, mouse_intr_cycle: 1, mouse_intr_enqueue: 0,
-        mouse_intr_ep_dci: 0, mouse_port_num: 0, mouse_port_speed: 0,
-        mouse_prev_buttons: 0,
-        mouse_error_count: 0,
     };
 
     // Power on all ports
@@ -805,410 +763,588 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     Some(state)
 }
 
-/// Initialize xHCI controller and enumerate a USB keyboard (HID boot protocol).
+/// Initialize one xHCI controller and every HID device on it.
 fn init_controller(dev: pci::PciDevice) -> bool {
-    let mut state = match bring_up_controller(dev, 4) {
+    let mut state = match bring_up_controller(dev, 16) {
         Some(s) => s,
         None => return false,
     };
 
-    // Probe every connected port; a device that is not a keyboard releases
-    // its slot again. One DMA set then serves any number of ports, and a
-    // leftover slot cannot make a later Address Device on that port fail.
+    // A device that turns out not to be HID gives its context and EP0 ring
+    // to the next port; a slot left behind makes a later Address Device on
+    // that port fail.
+    let mut spare: Option<(DmaRegion, DmaRegion)> = None;
     for p in 0..state.max_ports {
         if state.oper.r32(portsc_off(p)) & PORTSC_CCS == 0 { continue; }
         crate::kdebug!("[npk] xhci: trying port {}", p + 1);
-
-        // Start clean: the set may hold leftovers from the previous port.
-        state.ep0_ring.fill(0u32, 0, 4096);
-        state.device_ctx.fill(0u32, 0, 4096);
-        write_trb(state.ep0_ring, NUM_TR_TRBS - 1, state.ep0_ring.phys(), 0,
-            TRB_LINK | TRB_CYCLE | (1 << 1));
-        state.ep0_cycle = 1;
-        state.ep0_enqueue = 0;
-
-        // Reset port
-        crate::kdebug!("[npk] xhci: resetting port {}...", p + 1);
-        if !reset_port(&state, p) {
-            kprintln!("[npk] xhci: port reset failed");
-            continue;   // no slot allocated yet
-        }
-        state.port_speed = (state.oper.r32(portsc_off(p)) >> 10) & 0xF;
-        crate::kdebug!("[npk] xhci: port {} reset ok, speed={}", p + 1, state.port_speed);
-
-        // Enable Slot
-        crate::kdebug!("[npk] xhci: enable slot...");
-        let slot_id = match cmd_enable_slot(&mut state) {
-            Some(s) => s,
-            None => { kprintln!("[npk] xhci: enable slot failed"); continue; }
-        };
-        state.slot_id = slot_id;
-        crate::kdebug!("[npk] xhci: slot {} assigned", slot_id);
-
-        // Set DCBAA entry for this slot
-        state.dcbaa.w64(slot_id as usize * 8, state.device_ctx.phys());
-
-        // Address Device
-        let max_packet = match state.port_speed {
-            SPEED_LOW => 8u16,
-            SPEED_FULL => 8,
-            SPEED_HIGH => 64,
-            SPEED_SUPER => 512,
-            _ => 64,
-        };
-        crate::kdebug!("[npk] xhci: addressing device (maxpkt={})...", max_packet);
-        if !cmd_address_device(&mut state, p, max_packet) {
-            kprintln!("[npk] xhci: address device failed");
-            cmd_disable_slot(&mut state, slot_id);
-            continue;
-        }
-        crate::kdebug!("[npk] xhci: device addressed");
-
-        // Get Configuration Descriptor (9 bytes first to get total length)
-        crate::kdebug!("[npk] xhci: getting config descriptor...");
-        if !usb_get_descriptor(&mut state, DESC_CONFIG, 9) {
-            kprintln!("[npk] xhci: get config desc failed");
-            cmd_disable_slot(&mut state, slot_id);
-            continue;
-        }
-        let total_len = u16::from_le_bytes([
-            state.data_buf.r8(2u32), state.data_buf.r8(3u32)
-        ]) as usize;
-        let config_val = state.data_buf.r8(5u32);
-
-        // Get full Configuration Descriptor
-        let fetch_len = total_len.min(512) as u16;
-        crate::kdebug!("[npk] xhci: getting full config desc ({} bytes)...", fetch_len);
-        if !usb_get_descriptor(&mut state, DESC_CONFIG, fetch_len) {
-            kprintln!("[npk] xhci: get full config desc failed");
-            cmd_disable_slot(&mut state, slot_id);
-            continue;
-        }
-
-        // Check for keyboard interface
-        let (kbd_iface, intr_ep, intr_max_pkt, intr_interval) =
-            match find_keyboard_endpoint(&state, fetch_len as usize) {
-                Some(v) => v,
-                None => {
-                    // Not a keyboard: release the slot. A leftover slot makes
-                    // a later Address Device on the same port fail.
-                    crate::kdebug!("[npk] xhci: port {} not a keyboard, releasing slot {}", p + 1, slot_id);
-                    cmd_disable_slot(&mut state, slot_id);
-                    continue;
-                }
-            };
-        crate::kdebug!("[npk] xhci: keyboard iface={} ep={:#04x} maxpkt={} interval={}",
-            kbd_iface, intr_ep, intr_max_pkt, intr_interval);
-
-        // Keyboard found. It keeps the set it was enumerated with; the
-        // second set stays free for the mouse.
-        state.port_num = p;
-
-        if !usb_set_config(&mut state, config_val) {
-            kprintln!("[npk] xhci: set config failed");
-            return false;
-        }
-
-        // Set Protocol = Boot Protocol (0)
-        if !usb_set_protocol(&mut state, kbd_iface, 0) {
-            // Non-fatal, some keyboards default to boot protocol
-        }
-
-        // Set Idle (rate=0)
-        let _ = usb_set_idle(&mut state, kbd_iface);
-
-        // Configure Endpoint (interrupt IN)
-        let ep_dci = (intr_ep & 0x0F) * 2 + 1;
-        state.intr_ep_dci = ep_dci;
-        if !cmd_configure_endpoint(&mut state, ep_dci, intr_max_pkt, intr_interval) {
-            kprintln!("[npk] xhci: configure endpoint failed");
-            return false;
-        }
-
-        // Schedule first interrupt transfer
-        schedule_interrupt_transfer(&mut state);
-        kprintln!("[npk] xhci: USB keyboard (HID boot protocol)");
-        state.has_keyboard = true;
-        AVAILABLE.store(true, Ordering::Relaxed);
-        store_ctrl(state);
-        return true;
+        probe_hid_port(&mut state, p, &mut spare);
     }
 
-    let connected = (0..state.max_ports)
-        .filter(|&p| state.oper.r32(portsc_off(p)) & PORTSC_CCS != 0)
-        .count();
-    crate::kdebug!("[npk] xhci: no keyboard — {} of {} ports connected", connected, state.max_ports);
-
-    // Keep the running controller even without a keyboard or any device:
-    // `init_mouse` and the NIC scan look for devices on it later (e.g. a USB
-    // mouse with a PS/2 keyboard).
-    let _ = connected;
+    let keyboard = state.hid.iter().any(|h| h.running && h.keyboard);
+    if state.hid.is_empty() {
+        let connected = (0..state.max_ports)
+            .filter(|&p| state.oper.r32(portsc_off(p)) & PORTSC_CCS != 0)
+            .count();
+        crate::kdebug!("[npk] xhci: no HID device — {} of {} ports connected",
+            connected, state.max_ports);
+    }
+    // Kept without a HID device too: the NIC scan looks for devices on it.
     store_ctrl(state);
-    false // No keyboard found on any port
+    keyboard
 }
 
-/// Look for a USB mouse on every controller, not only the keyboard's.
+/// Whether `init` found a USB pointer. Enumeration finds every HID
+/// interface at once, mice included.
 pub fn init_mouse() -> bool {
-    let mut g = CTRLS.lock();
-    for i in 0..MAX_CTRLS {
-        let state = match g[i].as_mut() {
-            Some(s) => s,
-            None => continue,
-        };
-        if state.has_mouse { continue; }
-        if probe_mouse(state) {
-            MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
-            return true;
+    USB_POINTERS.load(Ordering::Relaxed) > 0
+}
+
+// === USB HID — Linux drivers/hid/usbhid/hid-core.c ===
+//
+// One USB device may carry several HID interfaces (a receiver with keyboard
+// on interface 0 and mouse plus media keys on interface 1), and each is a
+// HID device of its own: its report descriptor, its interrupt endpoint, its
+// reports. What a report means comes from the descriptor (`hid_core`), not
+// from the boot protocol, which carries neither the wheel past 8 bits nor
+// the consumer keys. The device stays in the report protocol it starts in;
+// usbhid never sends SET_PROTOCOL.
+
+/// A USB device with HID interfaces (Linux `usb_device`). Its device
+/// context and EP0 ring stay allocated and registered for the slot; once
+/// enumerated, nothing here sends it a control transfer.
+struct HidUsbDev {
+    slot_id: u8,
+    port: u32,
+}
+
+/// An interrupt OUT endpoint, for output reports (LEDs).
+struct OutEp {
+    dci: u8,
+    ring: DmaRegion,
+    cycle: u32,
+    enqueue: usize,
+}
+
+/// The previous key set and key repeat of one keyboard interface.
+struct KbdState {
+    prev_keys: [u8; hid_core::input::KEYS_MAX],
+    prev_len: usize,
+    repeat_key: u8,
+    repeat_shift: bool,
+    repeat_altgr: bool,
+    repeat_start: u64,
+    repeat_last: u64,
+}
+
+impl KbdState {
+    const fn new() -> Self {
+        KbdState {
+            prev_keys: [0; hid_core::input::KEYS_MAX], prev_len: 0,
+            repeat_key: 0, repeat_shift: false, repeat_altgr: false,
+            repeat_start: 0, repeat_last: 0,
         }
     }
-    crate::kdebug!("[npk] xhci: no mouse found on any controller");
-    false
+    fn prev(&self) -> &[u8] { &self.prev_keys[..self.prev_len] }
 }
 
-/// Mouse probe on one controller.
-fn probe_mouse(state: &mut XhciState) -> bool {
-    let kbd_port = state.port_num;
-    let max_ports = state.max_ports;
-
-    // Enumerate each connected port fresh, resetting it and creating slot and
-    // ring together. Reusing a slot from the keyboard probe is unsafe: the
-    // DMA set may since belong to another port.
-    for p in 0..max_ports {
-        // Skip the keyboard's port, but only if this controller has one;
-        // otherwise `port_num` is 0 and would hide port 1.
-        if state.has_keyboard && p == kbd_port { continue; }
-        let portsc = state.oper.r32(portsc_off(p));
-        if portsc & PORTSC_CCS == 0 { continue; }
-
-        crate::kdebug!("[npk] xhci: device on port {} (mouse candidate)", p + 1);
-
-        if try_init_mouse_on_port(state, p) {
-            kprintln!("[npk] xhci: USB mouse (HID boot protocol) on {:02x}:{:02x}.{} port {}",
-                state.pci_addr.bus, state.pci_addr.device, state.pci_addr.function, p + 1);
-            state.has_mouse = true;
-            return true;
-        }
-    }
-    false
+/// One HID interface (Linux `usbhid_device` and its `hid_device`).
+struct HidIntf {
+    /// Index in `XhciState::hid_devs`.
+    dev: usize,
+    ifnum: u8,
+    /// An application collection of this kind; decides what the kernel
+    /// announces (`AVAILABLE`, `USB_POINTERS`).
+    keyboard: bool,
+    pointer: bool,
+    in_dci: u8,
+    in_ring: DmaRegion,
+    in_cycle: u32,
+    in_enqueue: usize,
+    out: Option<OutEp>,
+    /// Input report at 0, output report at `HID_OUT_OFF`.
+    buf: DmaRegion,
+    /// Longest input report with its ID byte (`usbhid_start`'s `insize`).
+    insize: usize,
+    /// The report copied out of `buf`; allocated here, filled in the
+    /// interrupt, which must not allocate.
+    report: Vec<u8>,
+    hid: hid_core::Device,
+    input: hid_core::input::Input,
+    kbd: KbdState,
+    error_count: u32,
+    /// Transfers are queued. Cleared when the device is unplugged.
+    running: bool,
 }
 
-fn try_init_mouse_on_port(state: &mut XhciState, port: u32) -> bool {
-    // Reset port
-    crate::kdebug!("[npk] xhci: mouse: resetting port {}...", port + 1);
-    if !reset_port(state, port) {
-        kprintln!("[npk] xhci: mouse port reset failed");
-        return false;
-    }
-    let port_speed = (state.oper.r32(portsc_off(port)) >> 10) & 0xF;
-    crate::kdebug!("[npk] xhci: mouse: port {} reset ok, speed={}", port + 1, port_speed);
-    state.mouse_port_speed = port_speed;
-    state.mouse_port_num = port;
+/// Where the output report sits in `HidIntf::buf`.
+const HID_OUT_OFF: u64 = 2048;
+/// `HID_MAX_DESCRIPTOR_SIZE`.
+const HID_MAX_DESCRIPTOR_SIZE: usize = 4096;
+const HID_DT_HID: u8 = 0x21;
+const HID_DT_REPORT: u8 = 0x22;
+const HID_REQ_SET_IDLE: u8 = 0x0A;
+const HID_REQ_SET_REPORT: u8 = 0x09;
+const USB_CLASS_HID: u8 = 3;
+const USB_INTERFACE_SUBCLASS_BOOT: u8 = 1;
+const USB_INTERFACE_PROTOCOL_KEYBOARD: u8 = 1;
 
-    // Save keyboard EP0 context (reuse control transfer functions)
-    let saved_slot = state.slot_id;
-    let saved_ep0 = state.ep0_ring;
-    let saved_ep0_cycle = state.ep0_cycle;
-    let saved_ep0_enq = state.ep0_enqueue;
-    let saved_dev_ctx = state.device_ctx;
-    let saved_port_speed = state.port_speed;
+/// USB keyboards and pointers running, over all controllers.
+static USB_KEYBOARDS: AtomicUsize = AtomicUsize::new(0);
+static USB_POINTERS: AtomicUsize = AtomicUsize::new(0);
 
-    // Clear mouse EP0 ring + device context (may have stale data from keyboard probe)
-    state.mouse_ep0_ring.fill(0u32, 0, 4096);
-    state.mouse_device_ctx.fill(0u32, 0, 4096);
-    write_trb(state.mouse_ep0_ring, NUM_TR_TRBS - 1, state.mouse_ep0_ring.phys(), 0,
-        TRB_LINK | TRB_CYCLE | (1 << 1));
-
-    // Switch to mouse EP0 context (fresh state)
-    state.ep0_ring = state.mouse_ep0_ring;
-    state.ep0_cycle = 1;
-    state.ep0_enqueue = 0;
-    state.device_ctx = state.mouse_device_ctx;
-    state.port_speed = port_speed;
-
-    let success = init_mouse_device(state, port);
-
-    // Save mouse EP0 state back
-    state.mouse_ep0_cycle = state.ep0_cycle;
-    state.mouse_ep0_enqueue = state.ep0_enqueue;
-
-    // Restore keyboard EP0 context
-    state.slot_id = saved_slot;
-    state.ep0_ring = saved_ep0;
-    state.ep0_cycle = saved_ep0_cycle;
-    state.ep0_enqueue = saved_ep0_enq;
-    state.device_ctx = saved_dev_ctx;
-    state.port_speed = saved_port_speed;
-
-    success
+/// An endpoint from the configuration descriptor.
+#[derive(Clone, Copy)]
+struct EpDesc {
+    addr: u8,
+    /// wMaxPacketSize as given, with the high-speed transaction bits.
+    max_pkt: u16,
+    interval: u8,
 }
 
-fn init_mouse_device(state: &mut XhciState, port: u32) -> bool {
-    // Enable Slot for mouse
-    crate::kdebug!("[npk] xhci: mouse: enable slot...");
-    let slot_id = match cmd_enable_slot(state) {
-        Some(s) => s,
-        None => { kprintln!("[npk] xhci: mouse enable slot failed"); return false; }
+/// A HID interface as the configuration descriptor describes it.
+struct HidIntfDesc {
+    ifnum: u8,
+    subclass: u8,
+    protocol: u8,
+    /// `wDescriptorLength` of the report descriptor.
+    report_len: usize,
+    ep_in: EpDesc,
+    ep_out: Option<EpDesc>,
+}
+
+/// The HID interfaces of a configuration, alternate setting 0 (the one
+/// SET_CONFIGURATION selects). An interface without a HID descriptor or
+/// without an interrupt IN endpoint is no HID device (`usbhid_parse`,
+/// `usbhid_start`).
+fn parse_hid_interfaces(cfg: &[u8]) -> Vec<HidIntfDesc> {
+    struct Cur { ifnum: u8, alt: u8, class: u8, sub: u8, proto: u8,
+                 report_len: Option<usize>, ep_in: Option<EpDesc>, ep_out: Option<EpDesc> }
+    let mut out = Vec::new();
+    let mut cur: Option<Cur> = None;
+    let finish = |c: Cur, out: &mut Vec<HidIntfDesc>| {
+        if c.alt != 0 || c.class != USB_CLASS_HID { return; }
+        let (Some(report_len), Some(ep_in)) = (c.report_len, c.ep_in) else { return };
+        out.push(HidIntfDesc { ifnum: c.ifnum, subclass: c.sub, protocol: c.proto,
+            report_len, ep_in, ep_out: c.ep_out });
     };
-    state.slot_id = slot_id;
-    state.mouse_slot_id = slot_id;
-    crate::kdebug!("[npk] xhci: mouse: slot {} assigned", slot_id);
+    let mut pos = 0usize;
+    while pos + 2 <= cfg.len() {
+        let len = cfg[pos] as usize;
+        if len < 2 || pos + len > cfg.len() { break; }
+        let d = &cfg[pos..pos + len];
+        match d[1] {
+            4 if len >= 9 => {
+                if let Some(c) = cur.take() { finish(c, &mut out); }
+                cur = Some(Cur { ifnum: d[2], alt: d[3], class: d[5], sub: d[6], proto: d[7],
+                                 report_len: None, ep_in: None, ep_out: None });
+            }
+            HID_DT_HID if len >= 9 => {
+                if let Some(c) = cur.as_mut() {
+                    // `usbhid_parse`: bNumDescriptors may disagree with
+                    // bLength; only the first class descriptor counts.
+                    if d[6] == HID_DT_REPORT && c.report_len.is_none() {
+                        c.report_len = Some(u16::from_le_bytes([d[7], d[8]]) as usize);
+                    }
+                }
+            }
+            5 if len >= 7 => {
+                if let Some(c) = cur.as_mut() {
+                    let ep = EpDesc { addr: d[2], max_pkt: u16::from_le_bytes([d[4], d[5]]),
+                                      interval: d[6] };
+                    // Interrupt endpoints only; the first of each direction.
+                    if d[3] & 0x03 == 3 {
+                        if ep.addr & 0x80 != 0 {
+                            if c.ep_in.is_none() { c.ep_in = Some(ep); }
+                        } else if c.ep_out.is_none() {
+                            c.ep_out = Some(ep);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        pos += len;
+    }
+    if let Some(c) = cur.take() { finish(c, &mut out); }
+    out
+}
 
-    // Set DCBAA entry for mouse slot
-    state.dcbaa.w64(slot_id as usize * 8, state.mouse_device_ctx.phys());
-
-    // Address Device
-    let max_packet = match state.port_speed {
-        SPEED_LOW => 8u16,
-        SPEED_FULL => 8,
-        SPEED_HIGH => 64,
+/// Initial EP0 max packet size by speed — Linux `hub_port_init`. Full speed
+/// starts at 64 and is corrected from the device descriptor; a full-speed
+/// device with 64 driven at 8 sends packets the controller calls babble.
+fn initial_mps0(speed: u32) -> u16 {
+    match speed {
+        SPEED_LOW => 8,
         SPEED_SUPER => 512,
         _ => 64,
-    };
-    crate::kdebug!("[npk] xhci: mouse: addressing device (maxpkt={})...", max_packet);
-    if !cmd_address_device(state, port, max_packet) {
-        kprintln!("[npk] xhci: mouse address device failed");
-        return false;
     }
-    crate::kdebug!("[npk] xhci: mouse: device addressed");
+}
 
-    // Get Configuration Descriptor (9 bytes first)
-    crate::kdebug!("[npk] xhci: mouse: getting config descriptor...");
-    if !usb_get_descriptor(state, DESC_CONFIG, 9) {
-        kprintln!("[npk] xhci: mouse get config desc failed");
-        return false;
+/// Address the device on `port` with the EP0 set in `state`, then read
+/// bMaxPacketSize0 and correct EP0 if it differs (Linux `hub_port_init`
+/// with the new scheme: Address Device, GET_DESCRIPTOR 8 bytes,
+/// `usb_ep0_reinit` → Evaluate Context).
+fn address_device(state: &mut XhciState, port: u32) -> bool {
+    let mps0 = initial_mps0(state.port_speed);
+    if !cmd_address_device(state, port, mps0) { return false; }
+    if !usb_get_descriptor(state, DESC_DEVICE, 8) { return false; }
+    let b = state.data_buf.r8(7u32);
+    let real = if state.port_speed >= SPEED_SUPER { 1u16 << b.min(15) } else { b as u16 };
+    if real != 0 && real != mps0 {
+        crate::kdebug!("[npk] xhci: port {} ep0 max packet {} -> {}", port + 1, mps0, real);
+        return cmd_evaluate_ep0(state, real);
     }
-    let total_len = u16::from_le_bytes([
-        state.data_buf.r8(2u32), state.data_buf.r8(3u32)
-    ]) as usize;
-    let config_val = state.data_buf.r8(5u32);
-
-    // Get full Configuration Descriptor
-    let fetch_len = total_len.min(512) as u16;
-    if !usb_get_descriptor(state, DESC_CONFIG, fetch_len) {
-        kprintln!("[npk] xhci: mouse get full config desc failed");
-        return false;
-    }
-
-    // Parse for HID mouse interface + interrupt IN endpoint
-    let (mouse_iface, intr_ep, intr_max_pkt, intr_interval) =
-        match find_mouse_endpoint(state, fetch_len as usize) {
-            Some(v) => v,
-            None => { kprintln!("[npk] xhci: no mouse interface found"); return false; }
-        };
-    crate::kdebug!("[npk] xhci: mouse iface={} ep={:#04x} maxpkt={} interval={}",
-        mouse_iface, intr_ep, intr_max_pkt, intr_interval);
-
-    // Set Configuration
-    if !usb_set_config(state, config_val) {
-        kprintln!("[npk] xhci: mouse set config failed");
-        return false;
-    }
-
-    // Set Protocol = Boot Protocol (0)
-    if !usb_set_protocol(state, mouse_iface, 0) {
-        // Non-fatal
-    }
-
-    // Set Idle (rate=0)
-    let _ = usb_set_idle(state, mouse_iface);
-
-    // Configure Endpoint (interrupt IN for mouse)
-    let ep_dci = (intr_ep & 0x0F) * 2 + 1;
-    state.mouse_intr_ep_dci = ep_dci;
-
-    // Configure endpoint using mouse's interrupt ring
-    let saved_intr_ring = state.intr_ring;
-    state.intr_ring = state.mouse_intr_ring;
-    let result = cmd_configure_endpoint(state, ep_dci, intr_max_pkt, intr_interval);
-    state.intr_ring = saved_intr_ring;
-
-    if !result {
-        kprintln!("[npk] xhci: mouse configure endpoint failed");
-        return false;
-    }
-
-    // Schedule first interrupt transfer for mouse
-    schedule_mouse_interrupt_transfer(state);
     true
 }
 
-fn find_mouse_endpoint(state: &XhciState, total_len: usize) -> Option<(u8, u8, u16, u8)> {
-    let buf = state.data_buf;
-    let mut pos = 0usize;
-    let mut in_mouse_iface = false;
-    let mut mouse_iface = 0u8;
+/// Look for HID interfaces on `port`; set up every one found.
+fn probe_hid_port(state: &mut XhciState, port: u32, spare: &mut Option<(DmaRegion, DmaRegion)>) {
+    let (dctx, ep0) = match spare.take() {
+        Some(s) => s,
+        None => match (alloc_dma(1, "hid dev ctx"), alloc_dma(1, "hid EP0")) {
+            (Some(a), Some(b)) => (a, b),
+            _ => { kprintln!("[npk] xhci: DMA alloc failed"); return; }
+        },
+    };
+    dctx.zero();
+    ep0.zero();
+    write_trb(ep0, NUM_TR_TRBS - 1, ep0.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    state.device_ctx = dctx;
+    state.ep0_ring = ep0;
+    state.ep0_cycle = 1;
+    state.ep0_enqueue = 0;
 
-    while pos + 1 < total_len {
-        let len = buf.r8(pos as u32) as usize;
-        let dtype = buf.r8((pos + 1) as u32);
-        if len < 2 { break; }
-
-        // Interface descriptor (type 4)
-        if dtype == 4 && len >= 9 {
-            let iface_class = buf.r8((pos + 5) as u32);
-            let iface_subclass = buf.r8((pos + 6) as u32);
-            let iface_protocol = buf.r8((pos + 7) as u32);
-            // HID class=3, boot subclass=1, mouse protocol=2
-            in_mouse_iface = iface_class == 3 && iface_subclass == 1 && iface_protocol == 2;
-            if in_mouse_iface {
-                mouse_iface = buf.r8((pos + 2) as u32);
-            }
-        }
-
-        // Endpoint descriptor (type 5)
-        if dtype == 5 && len >= 7 && in_mouse_iface {
-            let ep_addr = buf.r8((pos + 2) as u32);
-            let ep_attr = buf.r8((pos + 3) as u32);
-            let max_pkt = u16::from_le_bytes([
-                buf.r8((pos + 4) as u32), buf.r8((pos + 5) as u32)
-            ]);
-            let interval = buf.r8((pos + 6) as u32);
-            // Interrupt IN endpoint
-            if (ep_attr & 0x03) == 3 && (ep_addr & 0x80) != 0 {
-                return Some((mouse_iface, ep_addr, max_pkt, interval));
-            }
-        }
-
-        pos += len;
+    if !reset_port(state, port) {
+        kprintln!("[npk] xhci: port {} reset failed", port + 1);
+        *spare = Some((dctx, ep0));
+        return;
     }
-    None
+    state.port_speed = (state.oper.r32(portsc_off(port)) >> 10) & 0xF;
+    let Some(slot) = cmd_enable_slot(state) else {
+        kprintln!("[npk] xhci: enable slot failed");
+        *spare = Some((dctx, ep0));
+        return;
+    };
+    state.slot_id = slot;
+    state.dcbaa.w64(slot as usize * 8, dctx.phys());
+
+    let reject = |state: &mut XhciState, spare: &mut Option<(DmaRegion, DmaRegion)>| {
+        cmd_disable_slot(state, slot);
+        *spare = Some((dctx, ep0));
+    };
+    if !address_device(state, port) {
+        kprintln!("[npk] xhci: port {} address device failed", port + 1);
+        return reject(state, spare);
+    }
+
+    // Configuration descriptor: 9 bytes for the total length, then all.
+    if !usb_get_descriptor(state, DESC_CONFIG, 9) { return reject(state, spare); }
+    let total = u16::from_le_bytes([state.data_buf.r8(2u32), state.data_buf.r8(3u32)]) as usize;
+    let fetch = total.min(4096);
+    if !usb_get_descriptor(state, DESC_CONFIG, fetch as u16) { return reject(state, spare); }
+    let mut cfg = alloc::vec![0u8; fetch];
+    state.data_buf.copy_out(0u32, &mut cfg);
+    let config_val = cfg.get(5).copied().unwrap_or(1);
+
+    let descs = parse_hid_interfaces(&cfg);
+    if descs.is_empty() {
+        crate::kdebug!("[npk] xhci: port {} has no HID interface, releasing slot {}", port + 1, slot);
+        return reject(state, spare);
+    }
+
+    // The device is ours: it keeps this context and EP0 ring.
+    let dev_idx = state.hid_devs.len();
+    state.hid_devs.push(HidUsbDev { slot_id: slot, port });
+
+    // Rings and buffers for every interface, then all endpoints in one
+    // Configure Endpoint, then SET_CONFIGURATION — the order of Linux
+    // `usb_set_configuration` (bandwidth first, request after).
+    let first = state.hid.len();
+    let mut eps: Vec<(u8, u64, u32, u16, u8)> = Vec::new();
+    for d in &descs {
+        let (Some(in_ring), Some(buf)) = (alloc_dma(1, "hid in"), alloc_dma(1, "hid buf")) else {
+            kprintln!("[npk] xhci: DMA alloc failed");
+            break;
+        };
+        write_trb(in_ring, NUM_TR_TRBS - 1, in_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+        let in_dci = (d.ep_in.addr & 0x0F) * 2 + 1;
+        eps.push((in_dci, in_ring.phys(), EP_TYPE_INTERRUPT_IN, d.ep_in.max_pkt, d.ep_in.interval));
+        let out = d.ep_out.and_then(|o| {
+            let ring = alloc_dma(1, "hid out")?;
+            write_trb(ring, NUM_TR_TRBS - 1, ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+            let dci = (o.addr & 0x0F) * 2;
+            eps.push((dci, ring.phys(), EP_TYPE_INTERRUPT_OUT, o.max_pkt, o.interval));
+            Some(OutEp { dci, ring, cycle: 1, enqueue: 0 })
+        });
+        state.hid.push(HidIntf {
+            dev: dev_idx, ifnum: d.ifnum, keyboard: false, pointer: false,
+            in_dci, in_ring, in_cycle: 1, in_enqueue: 0, out, buf,
+            insize: 0, report: Vec::new(), hid: hid_core::Device::default(),
+            input: hid_core::input::Input::default(), kbd: KbdState::new(),
+            error_count: 0, running: false,
+        });
+    }
+    if !cmd_configure_endpoints(state, &eps) {
+        kprintln!("[npk] xhci: port {} configure endpoints failed", port + 1);
+        return;
+    }
+    if !usb_set_config(state, config_val) {
+        kprintln!("[npk] xhci: port {} set configuration failed", port + 1);
+        return;
+    }
+
+    for (n, d) in descs.iter().enumerate() {
+        let i = first + n;
+        if i >= state.hid.len() { break; }
+        if !usbhid_parse(state, i, d) { continue; }
+        usbhid_start(state, i, d);
+    }
 }
 
-fn schedule_mouse_interrupt_transfer(state: &mut XhciState) {
-    let idx = state.mouse_intr_enqueue;
-    let cycle = state.mouse_intr_cycle;
-    // Mouse uses data_buf+3072 (keyboard uses data_buf+2048)
-    let buf = state.data_buf.phys() + MOUSE_REPORT_OFF;
-    write_trb(state.mouse_intr_ring, idx, buf, 8, TRB_NORMAL | TRB_IOC | cycle);
-    state.mouse_intr_enqueue += 1;
-    if state.mouse_intr_enqueue >= NUM_TR_TRBS - 1 {
-        let link = TRB_LINK | cycle | (1 << 1);
-        write_trb(state.mouse_intr_ring, NUM_TR_TRBS - 1, state.mouse_intr_ring.phys(), 0, link);
-        state.mouse_intr_cycle ^= 1;
-        state.mouse_intr_enqueue = 0;
+/// `usbhid_parse`: SET_IDLE, then the report descriptor, parsed.
+fn usbhid_parse(state: &mut XhciState, i: usize, d: &HidIntfDesc) -> bool {
+    let ifnum = d.ifnum as u16;
+    let rsize = d.report_len;
+    if rsize == 0 || rsize > HID_MAX_DESCRIPTOR_SIZE {
+        kprintln!("[npk] xhci: hid interface {}: weird size of report descriptor ({})", ifnum, rsize);
+        return false;
     }
-    ring_doorbell(state, state.mouse_slot_id as u32, state.mouse_intr_ep_dci as u32);
+    let _ = usb_control_transfer(state, 0x21, HID_REQ_SET_IDLE, 0, ifnum, 0, false);
+
+    // `hid_get_class_descriptor`: up to four tries.
+    let mut ok = false;
+    for _ in 0..4 {
+        state.data_buf.fill(0u32, 0, rsize as u64);
+        if usb_control_transfer(state, 0x81, USB_GET_DESCRIPTOR, (HID_DT_REPORT as u16) << 8,
+            ifnum, rsize as u16, true)
+        {
+            ok = true;
+            break;
+        }
+    }
+    if !ok {
+        kprintln!("[npk] xhci: hid interface {}: reading report descriptor failed", ifnum);
+        return false;
+    }
+    let mut rdesc = alloc::vec![0u8; rsize];
+    state.data_buf.copy_out(0u32, &mut rdesc);
+    match hid_core::parse(&rdesc) {
+        Ok(dev) => {
+            let h = &mut state.hid[i];
+            for app in dev.applications() {
+                match app {
+                    hid_core::GD_KEYBOARD => h.keyboard = true,
+                    hid_core::GD_MOUSE | hid_core::GD_POINTER => h.pointer = true,
+                    _ => {}
+                }
+            }
+            h.hid = dev;
+            true
+        }
+        Err(e) => {
+            kprintln!("[npk] xhci: hid interface {}: parsing report descriptor failed: {:?}", ifnum, e);
+            false
+        }
+    }
 }
 
-fn process_mouse_report(state: &mut XhciState) {
-    let buf = state.data_buf.sub(MOUSE_REPORT_OFF, REPORT_LEN);
-    let buttons = buf.r8(0u32);
-    let dx = buf.r8(1u32) as i8;
-    let dy = buf.r8(2u32) as i8;
-    // Byte 3 = scroll wheel (if present, boot protocol may not have it)
-    let scroll = buf.r8(3u32) as i8;
+/// `usbhid_start`, then `hid_start_in`: size the input buffer, clear the
+/// LEDs of a boot keyboard, queue the first IN transfer.
+fn usbhid_start(state: &mut XhciState, i: usize, d: &HidIntfDesc) {
+    let insize = state.hid[i].hid.max_report_bytes(hid_core::ReportType::Input)
+        .min(HID_OUT_OFF as usize);
+    if insize == 0 {
+        crate::kdebug!("[npk] xhci: hid interface {}: no input reports", d.ifnum);
+        return;
+    }
+    state.hid[i].insize = insize;
+    state.hid[i].report = alloc::vec![0u8; insize];
 
-    // Only push event if something changed (movement, button, or scroll)
-    if dx != 0 || dy != 0 || buttons != state.mouse_prev_buttons || scroll != 0 {
-        // Same entry point as PS/2 and driver modules. The cursor is
-        // composited into the shadow buffer (shade::render_frame_*), so the
-        // next blit carries the new position; no MMIO write from the IRQ that
-        // could race a running blit.
-        //
-        // `true` = cheap path, move the cursor only; `handle_mouse` upgrades
-        // to a full frame for drag, click or scroll.
-        inject_pointer(MouseEvent { buttons, dx, dy, scroll, hscroll: 0 }, true);
-        state.mouse_prev_buttons = buttons;
+    // Some keyboards do not work until their LEDs have been set.
+    if d.subclass == USB_INTERFACE_SUBCLASS_BOOT && d.protocol == USB_INTERFACE_PROTOCOL_KEYBOARD {
+        usbhid_set_leds(state, i);
+    }
+
+    let h = &mut state.hid[i];
+    h.running = true;
+    let (kbd, ptr) = (h.keyboard, h.pointer);
+    if kbd {
+        USB_KEYBOARDS.fetch_add(1, Ordering::Relaxed);
+        AVAILABLE.store(true, Ordering::Relaxed);
+    }
+    if ptr {
+        USB_POINTERS.fetch_add(1, Ordering::Relaxed);
+        MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
+    }
+    let dv = &state.hid_devs[state.hid[i].dev];
+    kprintln!("[npk] xhci: USB HID on {:02x}:{:02x}.{} port {} interface {}{}{}",
+        state.pci_addr.bus, state.pci_addr.device, state.pci_addr.function,
+        dv.port + 1, d.ifnum,
+        if kbd { " keyboard" } else { "" }, if ptr { " pointer" } else { "" });
+    schedule_hid_in(state, i);
+}
+
+/// `usbhid_set_leds`: the output report holding NumLock, all zero — over
+/// the interrupt OUT endpoint if there is one, else SET_REPORT.
+fn usbhid_set_leds(state: &mut XhciState, i: usize) {
+    let h = &state.hid[i];
+    let Some(id) = h.hid.find_output_usage(hid_core::UP_LED | 0x01) else { return };
+    let Some(report) = h.hid.output_report_zeroed(id) else { return };
+    let ifnum = h.ifnum as u16;
+    if report.len() > HID_OUT_OFF as usize { return; }
+    if h.out.is_some() {
+        h.buf.copy_in(HID_OUT_OFF, &report);
+        let len = report.len() as u32;
+        let slot = state.hid_devs[h.dev].slot_id as u32;
+        let buf = h.buf.phys() + HID_OUT_OFF;
+        let Some(o) = state.hid[i].out.as_mut() else { return };
+        write_trb(o.ring, o.enqueue, buf, len, TRB_NORMAL | TRB_IOC | o.cycle);
+        o.enqueue += 1;
+        if o.enqueue >= NUM_TR_TRBS - 1 {
+            write_trb(o.ring, NUM_TR_TRBS - 1, o.ring.phys(), 0, TRB_LINK | o.cycle | (1 << 1));
+            o.cycle ^= 1;
+            o.enqueue = 0;
+        }
+        let dci = o.dci as u32;
+        ring_doorbell(state, slot, dci);
+    } else {
+        state.data_buf.copy_in(0u32, &report);
+        let _ = usb_control_transfer(state, 0x21, HID_REQ_SET_REPORT, (2u16 << 8) | id as u16,
+            ifnum, report.len() as u16, false);
+    }
+}
+
+/// Queue the next IN transfer of interface `i` (`hid_start_in`).
+fn schedule_hid_in(state: &mut XhciState, i: usize) {
+    let slot = state.hid_devs[state.hid[i].dev].slot_id as u32;
+    let h = &mut state.hid[i];
+    write_trb(h.in_ring, h.in_enqueue, h.buf.phys(), h.insize as u32,
+        TRB_NORMAL | TRB_IOC | h.in_cycle);
+    h.in_enqueue += 1;
+    if h.in_enqueue >= NUM_TR_TRBS - 1 {
+        write_trb(h.in_ring, NUM_TR_TRBS - 1, h.in_ring.phys(), 0, TRB_LINK | h.in_cycle | (1 << 1));
+        h.in_cycle ^= 1;
+        h.in_enqueue = 0;
+    }
+    let dci = h.in_dci as u32;
+    ring_doorbell(state, slot, dci);
+}
+
+/// `hid_irq_in`: a completed IN transfer of interface `i`.
+fn hid_irq_in(state: &mut XhciState, i: usize, e: &Evt) {
+    let ok = e.cc == CC_SUCCESS || e.cc == CC_SHORT_PACKET;
+    if ok {
+        state.hid[i].error_count = 0;
+        let h = &mut state.hid[i];
+        let len = h.insize.saturating_sub(e.residual as usize);
+        let HidIntf { buf, report, hid, input, .. } = &mut *h;
+        buf.copy_out(0u32, &mut report[..len]);
+        let _ = hid.input_report(&report[..len], &mut |ev| input.event(&ev));
+        let frame = input.sync();
+        hid_deliver(h, &frame);
+    } else if e.cc == 19 {
+        // Missed Service Error: the CPU was busy; nothing is lost but time.
+    } else {
+        state.hid[i].error_count += 1;
+        if state.hid[i].error_count >= 3 {
+            state.hid[i].error_count = 0;
+            let port = state.hid_devs[state.hid[i].dev].port;
+            if state.oper.r32(portsc_off(port)) & PORTSC_CCS == 0 {
+                // Unplugged: do not re-queue.
+                hid_stop(&mut state.hid[i]);
+                return;
+            }
+        }
+    }
+    schedule_hid_in(state, i);
+}
+
+/// The interface is gone: it no longer counts as a keyboard or pointer.
+fn hid_stop(h: &mut HidIntf) {
+    if !h.running { return; }
+    h.running = false;
+    if h.keyboard && USB_KEYBOARDS.fetch_sub(1, Ordering::Relaxed) == 1 {
+        AVAILABLE.store(false, Ordering::Relaxed);
+    }
+    if h.pointer && USB_POINTERS.fetch_sub(1, Ordering::Relaxed) == 1 {
+        MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Forget every HID interface of a controller about to be dropped.
+fn hid_forget(state: &mut XhciState) {
+    for h in state.hid.iter_mut() { hid_stop(h); }
+}
+
+/// Hand what one report changed to the kernel (`input_sync`).
+fn hid_deliver(h: &mut HidIntf, f: &hid_core::input::Frame) {
+    if f.keys_changed {
+        let mut keys = [0u8; hid_core::input::KEYS_MAX];
+        let mut n = 0;
+        for k in h.input.non_modifier_keys() {
+            keys[n] = k;
+            n += 1;
+        }
+        let mods = h.input.modifiers();
+        process_hid_report(mods, &keys[..n], &mut h.kbd);
+        h.kbd.prev_keys[..n].copy_from_slice(&keys[..n]);
+        h.kbd.prev_len = n;
+    }
+
+    if f.buttons_changed || f.dx != 0 || f.dy != 0 || f.wheel != 0 || f.hwheel != 0 {
+        // MouseEvent carries i8 deltas; a 12- or 16-bit report is split.
+        let (mut dx, mut dy, mut wheel, mut hwheel) = (f.dx, f.dy, f.wheel, f.hwheel);
+        loop {
+            let step = |v: i32| v.clamp(-127, 127);
+            let (sx, sy, sw, sh) = (step(dx), step(dy), step(wheel), step(hwheel));
+            inject_pointer(MouseEvent {
+                buttons: h.input.buttons, dx: sx as i8, dy: sy as i8,
+                scroll: sw as i8, hscroll: sh as i8,
+            }, true);
+            dx -= sx; dy -= sy; wheel -= sw; hwheel -= sh;
+            if dx == 0 && dy == 0 && wheel == 0 && hwheel == 0 { break; }
+        }
+    }
+
+    for m in f.media.as_slice() {
+        match m {
+            hid_core::input::Media::Mute => crate::keyboard::toggle_mute(),
+            hid_core::input::Media::VolumeUp => crate::keyboard::step_volume(5),
+            hid_core::input::Media::VolumeDown => crate::keyboard::step_volume(-5),
+        }
+    }
+    for &u in f.unmapped.as_slice() { note_unmapped(u); }
+}
+
+/// Usages pressed that nothing maps, each logged once. Recorded in the
+/// interrupt, printed by `log_unmapped` from the shell's idle step.
+const UNMAPPED_SLOTS: usize = 16;
+static UNMAPPED: [AtomicU64; UNMAPPED_SLOTS] = [const { AtomicU64::new(0) }; UNMAPPED_SLOTS];
+/// Set in a slot once it has been printed.
+const UNMAPPED_LOGGED: u64 = 1 << 32;
+/// Set in a slot that holds a usage (usage 0 is a valid number).
+const UNMAPPED_USED: u64 = 1 << 33;
+
+fn note_unmapped(usage: u32) {
+    for s in UNMAPPED.iter() {
+        let v = s.load(Ordering::Relaxed);
+        if v & UNMAPPED_USED != 0 {
+            if v as u32 == usage { return; }
+            continue;
+        }
+        if s.compare_exchange(0, UNMAPPED_USED | usage as u64, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            return;
+        }
+    }
+}
+
+/// Print usages seen since the last call.
+pub fn log_unmapped() {
+    for s in UNMAPPED.iter() {
+        let v = s.load(Ordering::Relaxed);
+        if v & UNMAPPED_USED == 0 || v & UNMAPPED_LOGGED != 0 { continue; }
+        s.fetch_or(UNMAPPED_LOGGED, Ordering::Relaxed);
+        kprintln!("[npk] usb hid: unmapped usage {:#010x}", v as u32);
     }
 }
 
@@ -1218,11 +1354,6 @@ fn alloc_dma(pages: usize, _name: &str) -> Option<DmaRegion> {
     DmaRegion::alloc_zeroed(pages)
 }
 
-/// Offsets in `data_buf` of the keyboard and mouse interrupt reports; the
-/// control transfer data stage uses the start.
-const KBD_REPORT_OFF: u64 = 2048;
-const MOUSE_REPORT_OFF: u64 = 3072;
-const REPORT_LEN: u64 = 1024;
 
 fn wait_for(base: Mmio, reg: u32, mask: u32, expected: u32) -> bool {
     // Tick-based timeout (500ms) — CPU-speed independent
@@ -1394,14 +1525,8 @@ fn enumerate_controller(dev: pci::PciDevice) -> u32 {
         state.slot_id = slot_id;
         state.dcbaa.w64(slot_id as usize * 8, state.device_ctx.phys());
 
-        let max_packet = match state.port_speed {
-            SPEED_LOW | SPEED_FULL => 8u16,
-            SPEED_HIGH => 64,
-            SPEED_SUPER => 512,
-            _ => 64,
-        };
         reset_ep0_ring(&mut state);
-        if !cmd_address_device(&mut state, p, max_packet) {
+        if !address_device(&mut state, p) {
             kprintln!("  port {} address-device failed (speed {})", p + 1, state.port_speed);
             cmd_disable_slot(&mut state, slot_id);
             continue;
@@ -1706,120 +1831,89 @@ fn usb_set_config(state: &mut XhciState, config_val: u8) -> bool {
     usb_control_transfer(state, 0x00, USB_SET_CONFIG, config_val as u16, 0, 0, false)
 }
 
-fn usb_set_protocol(state: &mut XhciState, iface: u8, protocol: u8) -> bool {
-    usb_control_transfer(state, 0x21, USB_SET_PROTOCOL, protocol as u16, iface as u16, 0, false)
-}
 
-fn usb_set_idle(state: &mut XhciState, iface: u8) -> bool {
-    usb_control_transfer(state, 0x21, USB_SET_IDLE, 0, iface as u16, 0, false)
-}
 
-// === Descriptor parsing ===
+// === Configure Endpoints — Linux xhci_endpoint_init, xhci_check_maxpacket ===
 
-fn find_keyboard_endpoint(state: &XhciState, total_len: usize) -> Option<(u8, u8, u16, u8)> {
-    let buf = state.data_buf;
-    let mut pos = 0usize;
-    let mut in_kbd_iface = false;
-    let mut kbd_iface = 0u8;
-    let mut has_mouse_iface = false;
-    let mut kbd_result: Option<(u8, u8, u16, u8)> = None;
-
-    // Single pass: collect keyboard endpoint AND check for mouse interface.
-    // If both exist, it's a composite mouse device — skip its keyboard interface.
-    while pos + 1 < total_len {
-        let len = buf.r8(pos as u32) as usize;
-        let dtype = buf.r8((pos + 1) as u32);
-        if len < 2 { break; }
-
-        // Interface descriptor (type 4)
-        if dtype == 4 && len >= 9 {
-            let iface_class = buf.r8((pos + 5) as u32);
-            let iface_subclass = buf.r8((pos + 6) as u32);
-            let iface_protocol = buf.r8((pos + 7) as u32);
-            // Track mouse interface (composite device detection)
-            if iface_class == 3 && iface_subclass == 1 && iface_protocol == 2 {
-                has_mouse_iface = true;
-            }
-            // HID class=3, boot subclass=1, keyboard protocol=1
-            in_kbd_iface = iface_class == 3 && iface_subclass == 1 && iface_protocol == 1;
-            if in_kbd_iface {
-                kbd_iface = buf.r8((pos + 2) as u32);
-            }
+/// The xHCI interval of a periodic endpoint (`xhci_get_endpoint_interval`):
+/// at high and super speed bInterval is an exponent, at full and low speed
+/// a number of frames.
+fn xhci_interval(speed: u32, b_interval: u8) -> u32 {
+    match speed {
+        SPEED_HIGH | SPEED_SUPER => (b_interval.clamp(1, 16) - 1) as u32,
+        _ => {
+            // `xhci_parse_frame_interval`: fls(8 * bInterval) - 1, in 3..10.
+            let v = 8 * b_interval as u32;
+            let fls = 32 - v.leading_zeros();
+            fls.saturating_sub(1).clamp(3, 10)
         }
-
-        // Endpoint descriptor (type 5)
-        if dtype == 5 && len >= 7 && in_kbd_iface && kbd_result.is_none() {
-            let ep_addr = buf.r8((pos + 2) as u32);
-            let ep_attr = buf.r8((pos + 3) as u32);
-            let max_pkt = u16::from_le_bytes([
-                buf.r8((pos + 4) as u32), buf.r8((pos + 5) as u32)
-            ]);
-            let interval = buf.r8((pos + 6) as u32);
-            // Interrupt IN endpoint
-            if (ep_attr & 0x03) == 3 && (ep_addr & 0x80) != 0 {
-                kbd_result = Some((kbd_iface, ep_addr, max_pkt, interval));
-            }
-        }
-
-        pos += len;
     }
-
-    // Composite mouse device (has both mouse + keyboard interfaces) — skip.
-    // The keyboard interface is likely media keys, not the real keyboard.
-    if has_mouse_iface {
-        crate::kprintln!("[npk] xhci: composite mouse device — skipping keyboard interface");
-        return None;
-    }
-    kbd_result
 }
 
-// === Configure Interrupt Endpoint ===
-
-fn cmd_configure_endpoint(state: &mut XhciState, ep_dci: u8, max_pkt: u16, interval: u8) -> bool {
+/// Configure interrupt endpoints of the current slot in one command:
+/// `(dci, ring, type, wMaxPacketSize, bInterval)` each.
+fn cmd_configure_endpoints(state: &mut XhciState, eps: &[(u8, u64, u32, u16, u8)]) -> bool {
+    if eps.is_empty() { return true; }
     let ctx = state.ctx_size;
     let input = state.input_ctx;
-
     input.fill(0u32, 0, 4096);
 
-    // Input Control Context: Add Slot (bit 0) + the endpoint (bit ep_dci)
-    input.w32(4u32, 1 | (1u32 << ep_dci));
+    // Input Control Context: Add Slot plus every endpoint.
+    let mut add = 1u32;
+    let mut last = 1u8;
+    for &(dci, ..) in eps {
+        add |= 1 << dci;
+        last = last.max(dci);
+    }
+    input.w32(4u32, add);
 
-    // Slot Context: Context Entries = last valid endpoint index = ep_dci
-    let slot_off = ctx;
-    let slot_dw0 = ((ep_dci as u32) << 27) | ((state.port_speed as u32) << 20);
-    input.w32(slot_off, slot_dw0);
+    // Slot Context: the output one (`xhci_slot_copy`), with Context Entries
+    // raised to the last endpoint.
+    for k in 0..4u32 {
+        input.w32(ctx + (k * 4) as usize, state.device_ctx.r32(k * 4));
+    }
+    let dw0 = (input.r32(ctx) & !(0x1F << 27)) | ((last as u32) << 27);
+    input.w32(ctx, dw0);
 
-    // Endpoint Context (at input + ctx_size * (ep_dci + 1))
-    let ep_off = ctx * (ep_dci as usize + 1);
-
-    // Compute interval for xHCI (different from USB bInterval)
-    let xhci_interval = match state.port_speed {
-        SPEED_HIGH | SPEED_SUPER => {
-            if interval > 0 { interval - 1 } else { 0 }
-        }
-        _ => {
-            // FS/LS: convert ms to 125us frames
-            let mut val = 0u8;
-            let mut ms = interval as u32;
-            while ms > 1 { ms >>= 1; val += 1; }
-            val + 3
-        }
-    };
-
-    // Dword 0: Interval + mult=0 + LSA=0
-    // Dword 1: CErr=3, EP Type=Interrupt IN (7), MaxPacketSize
-    let ring = state.intr_ring.phys();
-    input.w32(ep_off, (xhci_interval as u32) << 16);
-    input.w32(ep_off + 4,
-        (3 << 1) | (EP_TYPE_INTERRUPT_IN << 3) | ((max_pkt as u32) << 16));
-    // TR Dequeue Pointer with DCS=1
-    input.w32(ep_off + 8, (ring as u32) | 1);
-    input.w32(ep_off + 12, (ring >> 32) as u32);
-    // Average TRB Length
-    input.w32(ep_off + 16, 8);
+    for &(dci, ring, ep_type, w_max, b_interval) in eps {
+        let ep_off = ctx * (dci as usize + 1);
+        let maxp = (w_max & 0x7FF) as u32;
+        // High-speed periodic endpoints carry extra transactions in bits
+        // 12..11 (`xhci_get_endpoint_max_burst`).
+        let burst = if state.port_speed == SPEED_HIGH { ((w_max >> 11) & 0x3) as u32 } else { 0 };
+        let esit = maxp * (burst + 1);
+        let interval = xhci_interval(state.port_speed, b_interval);
+        input.w32(ep_off, (interval << 16) | ((esit >> 16) << 24));
+        input.w32(ep_off + 4, (3 << 1) | (ep_type << 3) | (burst << 8) | (maxp << 16));
+        input.w32(ep_off + 8, (ring as u32) | 1);
+        input.w32(ep_off + 12, (ring >> 32) as u32);
+        // Interrupt: average TRB length = max ESIT payload.
+        input.w32(ep_off + 16, ((esit & 0xFFFF) << 16) | (esit & 0xFFFF));
+    }
 
     let slot_field = (state.slot_id as u32) << 24;
     post_command(state, input.phys(), 0, TRB_CONFIGURE_EP | slot_field);
+    match wait_command_completion(state) {
+        Some((cc, _)) => cc == CC_SUCCESS,
+        None => false,
+    }
+}
+
+/// Correct EP0's max packet size of the current slot (Evaluate Context).
+fn cmd_evaluate_ep0(state: &mut XhciState, max_packet: u16) -> bool {
+    let ctx = state.ctx_size;
+    let input = state.input_ctx;
+    input.fill(0u32, 0, 4096);
+    // Add EP0 only; its context is the output one with a new size.
+    input.w32(4u32, 1 << 1);
+    for k in 0..(ctx as u32 / 4) {
+        input.w32(ctx * 2 + (k * 4) as usize, state.device_ctx.r32(ctx as u32 + k * 4));
+    }
+    let dw1 = (input.r32(ctx * 2 + 4) & 0x0000_FFFF) | ((max_packet as u32) << 16);
+    input.w32(ctx * 2 + 4, dw1);
+
+    let slot_field = (state.slot_id as u32) << 24;
+    post_command(state, input.phys(), 0, TRB_EVALUATE_CTX | slot_field);
     match wait_command_completion(state) {
         Some((cc, _)) => cc == CC_SUCCESS,
         None => false,
@@ -1925,8 +2019,8 @@ fn with_nic<R>(f: impl FnOnce(&mut XhciState) -> R) -> Option<R> {
 /// Switch the EP0 set to the network device, run `f`, switch back.
 ///
 /// `usb_control_transfer` works on the set currently in the state, which is
-/// the keyboard's. The NIC needs this at runtime because `rtl8153` reads the
-/// link status through control transfers.
+/// the one enumeration left there. The NIC needs this at runtime because
+/// `rtl8153` reads the link status through control transfers.
 fn with_nic_ep0<R>(state: &mut XhciState, f: impl FnOnce(&mut XhciState) -> R) -> R {
     let saved = (state.slot_id, state.ep0_ring, state.ep0_cycle,
                  state.ep0_enqueue, state.device_ctx, state.port_speed);
@@ -2222,14 +2316,13 @@ fn nic_probe(state: &mut XhciState, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -
     if state.nic.is_some() { return true; }
     dump_nic_ports(state);
 
-    // Save the current EP0 set; the keyboard uses it.
+    // Save the current EP0 set.
     let saved = (state.slot_id, state.ep0_ring, state.ep0_cycle,
                  state.ep0_enqueue, state.device_ctx, state.port_speed);
     let mut found = false;
 
     for p in 0..state.max_ports {
-        if state.has_keyboard && p == state.port_num { continue; }
-        if state.has_mouse && p == state.mouse_port_num { continue; }
+        if state.hid_devs.iter().any(|d| d.port == p) { continue; }
         if state.oper.r32(portsc_off(p)) & PORTSC_CCS == 0 { continue; }
 
         if !reset_port(state, p) { continue; }
@@ -2249,10 +2342,7 @@ fn nic_probe(state: &mut XhciState, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -
         state.slot_id = slot;
         state.dcbaa.w64(slot as usize * 8, state.device_ctx.phys());
 
-        let mp0 = match state.port_speed {
-            SPEED_LOW | SPEED_FULL => 8u16, SPEED_HIGH => 64, SPEED_SUPER => 512, _ => 64,
-        };
-        if !cmd_address_device(state, p, mp0) { cmd_disable_slot(state, slot); continue; }
+        if !address_device(state, p) { cmd_disable_slot(state, slot); continue; }
         if !usb_get_descriptor(state, DESC_DEVICE, 18) { cmd_disable_slot(state, slot); continue; }
         let dvid = u16::from_le_bytes([state.data_buf.r8(8u32), state.data_buf.r8(9u32)]);
         let dpid = u16::from_le_bytes([state.data_buf.r8(10u32), state.data_buf.r8(11u32)]);
@@ -2397,13 +2487,10 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
         {
             let mut g = CTRLS.lock();
             for i in 0..MAX_CTRLS {
-                if g[i].as_ref().map(|s| s.pci_addr) == Some(a) { g[i] = None; }
-            }
-            if !g.iter().flatten().any(|s| s.has_keyboard) {
-                AVAILABLE.store(false, Ordering::Relaxed);
-            }
-            if !g.iter().flatten().any(|s| s.has_mouse) {
-                MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
+                if g[i].as_ref().map(|s| s.pci_addr) == Some(a) {
+                    if let Some(s) = g[i].as_mut() { hid_forget(s); }
+                    g[i] = None;
+                }
             }
         }
         let id = pci::read32(a, 0x00);
@@ -2599,24 +2686,6 @@ fn nic_bulk_in_on(state: &mut XhciState, buf: &mut [u8]) -> usize {
     n_copy
 }
 
-// === Interrupt Transfer (Keyboard Polling) ===
-
-fn schedule_interrupt_transfer(state: &mut XhciState) {
-    let idx = state.intr_enqueue;
-    let cycle = state.intr_cycle;
-    // Normal TRB: 8 bytes from data_buf+2048 (separate from control xfer buf)
-    let buf = state.data_buf.phys() + KBD_REPORT_OFF;
-    write_trb(state.intr_ring, idx, buf, 8, TRB_NORMAL | TRB_IOC | cycle);
-    state.intr_enqueue += 1;
-    if state.intr_enqueue >= NUM_TR_TRBS - 1 {
-        let link = TRB_LINK | cycle | (1 << 1);
-        write_trb(state.intr_ring, NUM_TR_TRBS - 1, state.intr_ring.phys(), 0, link);
-        state.intr_cycle ^= 1;
-        state.intr_enqueue = 0;
-    }
-    ring_doorbell(state, state.slot_id as u32, state.intr_ep_dci as u32);
-}
-
 /// The xHCI MSI-X interrupt: acknowledge like Linux `xhci_irq` (USBSTS.EINT,
 /// then the interrupter's IMAN.IP, both write-1-to-clear) and drain every
 /// controller's event ring. Only EINT is written back, not the whole status
@@ -2728,29 +2797,6 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
     let cc = e.cc;
     let ok = cc == CC_SUCCESS || cc == CC_SHORT_PACKET;
 
-    if state.has_mouse && in_ring(a, state.mouse_intr_ring.phys()) {
-        if ok {
-            process_mouse_report(state);
-            state.mouse_error_count = 0;
-        } else if cc == 19 {
-            // Missed Service Error: harmless, the CPU was busy.
-        } else {
-            state.mouse_error_count += 1;
-            if state.mouse_error_count >= 10 {
-                state.mouse_error_count = 0;
-                let portsc = state.oper.r32(portsc_off(state.mouse_port_num));
-                if portsc & PORTSC_CCS == 0 {
-                    // Device unplugged: do not re-queue.
-                    state.has_mouse = false;
-                    MOUSE_AVAILABLE.store(false, Ordering::Relaxed);
-                    return true;
-                }
-            }
-        }
-        schedule_mouse_interrupt_transfer(state);
-        return true;
-    }
-
     // The network device: largest rings and most events at runtime.
     if let Some((ir, or)) = state.nic.as_ref().map(|n| (n.in_ring.phys(), n.out_ring.phys())) {
         let on_in = ir != 0 && a >= ir && a < ir + ((NIC_RX_BUFS + 1) * 16) as u64;
@@ -2800,33 +2846,16 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
         }
     }
 
-    if state.has_keyboard && in_ring(a, state.intr_ring.phys()) {
-        if ok {
-            state.error_count = 0;
-            let buf = state.data_buf.sub(KBD_REPORT_OFF, REPORT_LEN);
-            let modifiers = buf.r8(0u32);
-            let mut keys = [0u8; 6];
-            for i in 0..6 {
-                keys[i] = buf.r8((2 + i) as u32);
-            }
-            process_hid_report(modifiers, &keys, state);
-            state.prev_keys = keys;
-        } else if cc == 19 {
-            // Missed Service Error: harmless.
-        } else {
-            state.error_count += 1;
-            if state.error_count >= 3 {
-                let portsc = state.oper.r32(portsc_off(state.port_num));
-                if portsc & PORTSC_CCS == 0 {
-                    state.has_keyboard = false;
-                    AVAILABLE.store(false, Ordering::Relaxed);
-                    return true;
-                }
-                state.error_count = 0;
-            }
+    // HID interfaces: an IN completion is a report, an OUT completion the
+    // end of an output report (LEDs).
+    for i in 0..state.hid.len() {
+        if in_ring(a, state.hid[i].in_ring.phys()) {
+            if state.hid[i].running { hid_irq_in(state, i, e); }
+            return true;
         }
-        schedule_interrupt_transfer(state);
-        return true;
+        if state.hid[i].out.as_ref().is_some_and(|o| in_ring(a, o.ring.phys())) {
+            return true;
+        }
     }
 
     false
@@ -2865,7 +2894,7 @@ pub fn poll_events() {
     }
 }
 
-fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
+fn process_hid_report(modifiers: u8, keys: &[u8], state: &mut KbdState) {
     let shift = (modifiers & 0x22) != 0;  // L/R Shift
     let ctrl = (modifiers & 0x11) != 0;   // L/R Ctrl
     let alt_gr = (modifiers & 0x40) != 0; // Right Alt (AltGr)
@@ -2899,7 +2928,7 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
         REPEAT_ALTGR.store(alt_gr, Ordering::Relaxed);
         REPEAT_START.store(now, Ordering::Relaxed);
         REPEAT_LAST.store(now, Ordering::Relaxed);
-    } else if !state.prev_keys.contains(&first_key) {
+    } else if !state.prev().contains(&first_key) {
         // New key pressed — start repeat timer
         state.repeat_key = first_key;
         state.repeat_shift = shift;
@@ -2917,7 +2946,7 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
     for &key in keys.iter() {
         if key == 0 || key == 1 { continue; } // no key / error rollover
         // Only process newly pressed keys
-        if state.prev_keys.contains(&key) { continue; }
+        if state.prev().contains(&key) { continue; }
 
         // Ctrl+Shift+C → copy the selection (terminal drag-selection or
         // focused Input/TextArea). Routed as a ShadeAction so the actual

@@ -125,13 +125,11 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // on notebooks. No-op when absent (desktops/QEMU).
     smbus::init();
 
-    // USB keyboard (xHCI) — before any user input is needed
+    // USB HID (xHCI) — before any user input is needed. One pass finds
+    // keyboards and mice alike; `init_mouse` only reports what it found.
     if xhci::init() {
         vga::show_status(b"USB keyboard online");
     }
-    // Not nested under the keyboard check: the mouse depends on the
-    // controller, not on a USB keyboard (the keyboard may be on the i8042).
-    // `init_mouse` returns false by itself when no controller runs.
     if xhci::init_mouse() {
         vga::show_status(b"USB mouse online");
     }

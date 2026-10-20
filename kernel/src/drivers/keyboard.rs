@@ -632,11 +632,12 @@ static SEEN_UNKNOWN: [core::sync::atomic::AtomicU64; 2] =
 /// Volume before mute; 0xFF = not muted.
 static MUTED_FROM: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0xFF);
 
-fn step_volume(delta: i32) {
+/// Volume up or down by `delta` percent; also used by USB consumer keys.
+pub(crate) fn step_volume(delta: i32) {
     PENDING_VOL.fetch_add(delta, Ordering::Relaxed);
 }
 
-fn toggle_mute() {
+pub(crate) fn toggle_mute() {
     PENDING_MUTE.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -660,6 +661,7 @@ pub fn apply_deferred() {
             kprintln!("[kbd] unmapped key E0 {:02x}", w as u32 * 64 + b);
         }
     }
+    crate::xhci::log_unmapped();
     let mut mutes = PENDING_MUTE.swap(0, Ordering::Relaxed);
     let delta = PENDING_VOL.swap(0, Ordering::Relaxed);
     if delta != 0 {
