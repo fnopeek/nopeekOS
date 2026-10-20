@@ -2,12 +2,13 @@
 //! and its two shadow buffers made reachable for the SDMA engine, a copy
 //! self-test, then the compositor's copies on SDMA0 until the module ends.
 //!
-//! The framebuffer is the firmware's, in VRAM: its bus address in the VRAM
-//! aperture gives its MC address. The shadows are kernel pages, imported
-//! as a dma-buf would be (`amdgpu_dma_buf_create_obj`), pinned in GTT and
-//! bound into the GART of VMID 0, where the kernel's copies run in Linux
-//! too (`amdgpu_copy_buffer`). A rectangle is copied row by row with
-//! `sdma_v4_0_emit_copy_buffer`, a full-width one in one span.
+//! The framebuffer is the firmware's, in VRAM: its bus address in one of
+//! the windows onto VRAM gives its MC address. The shadows are kernel
+//! pages, imported as a dma-buf would be (`amdgpu_dma_buf_create_obj`),
+//! pinned in GTT and bound into the GART of VMID 0, where the kernel's
+//! copies run in Linux too (`amdgpu_copy_buffer`). A rectangle is copied
+//! row by row with `sdma_v4_0_emit_copy_buffer`, a full-width one in one
+//! span.
 
 use crate::amdgpu_device::amdgpu_device;
 use crate::amdgpu_object::{self as obj, amdgpu_kptr};
@@ -60,21 +61,26 @@ fn bo_info(id: u32) -> Option<bo> {
               ..Default::default() })
 }
 
-/// The framebuffer by its bus address in the VRAM aperture: its MC address,
-/// if it lies in visible VRAM.
+/// The framebuffer by its bus address: its MC address, if it lies in
+/// visible VRAM. The firmware's scanout may be named through either window
+/// onto VRAM: the APU's direct one (`gmc.aper_base`, the carve-out, as
+/// `gmc_v9_0_mc_init` sets it) or PCI BAR0, which the GOP uses.
 fn bind_framebuffer(adev: &amdgpu_device, b: &mut bo) -> bool {
     let gmc = &adev.gmc;
-    let Some(off) = b.phys.checked_sub(gmc.aper_base) else { return false };
-    if off + b.offset as u64 + b.size > gmc.visible_vram_size {
+    let windows = [("aperture", gmc.aper_base, gmc.visible_vram_size), ("BAR0", adev.bar0.0, adev.bar0.1)];
+    let Some((name, off)) = windows.iter().find_map(|&(name, base, size)| {
+        let off = b.phys.checked_sub(base)?;
+        (off + b.offset as u64 + b.size <= size.min(gmc.visible_vram_size)).then_some((name, off))
+    }) else {
         return false;
-    }
+    };
     b.gpu = crate::amdgpu_ttm::amdgpu_ttm_domain_start(adev, TTM_PL_VRAM) + off + b.offset as u64;
     let mut l = Line::new();
-    l.s("gpudev: framebuffer at VRAM 0x").hexw((off >> 32) as u32, 8).hexw(off as u32, 8);
+    l.s("gpudev: framebuffer at VRAM 0x").hexw((off >> 32) as u32, 8).hexw(off as u32, 8).s(" through ").s(name);
     if off + b.size > adev.mman.stolen_vga_size + adev.mman.stolen_extended_size {
         l.s(", beyond the reserved firmware range");
     }
-    l.dbg();
+    l.say();
     true
 }
 

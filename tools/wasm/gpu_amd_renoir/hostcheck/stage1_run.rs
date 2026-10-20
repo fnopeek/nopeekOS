@@ -15,9 +15,10 @@ use regs::*;
 include!("fake_renoir.rs");
 include!("fake_gpu.rs");
 
-/// The GPU service's framebuffer on the fake card: at VRAM 0, the bottom
-/// of the aperture, 64x32.
-const FB: (u64, u32, u32, u32) = (0, 64, 32, 256);
+/// The GPU service's framebuffer on the fake card: at VRAM 0, named
+/// through PCI BAR0 as the GOP names it, 64x32.
+const BAR0: (u64, u64) = (0xd000_0000, 256 << 20);
+const FB: (u64, u32, u32, u32) = (BAR0.0, 64, 32, 256);
 
 fn shade(shadow: u32, x: u32, y: u32) -> u32 {
     shadow << 28 | y << 8 | x
@@ -37,6 +38,7 @@ fn main() {
             }
         }
     }
+    adev.bar0 = BAR0;
     stage1::run(&mut adev, BDF, (0xfc00_0000, 2 << 20));
     let mut wrong = 0;
     for y in 0..FB.2 {
@@ -48,7 +50,7 @@ fn main() {
             } else {
                 0
             };
-            if npk_sys::vram_r32(FB.0 + (y * FB.3 + x * 4) as u64) != want {
+            if npk_sys::vram_r32((y * FB.3 + x * 4) as u64) != want {
                 wrong += 1;
             }
         }
