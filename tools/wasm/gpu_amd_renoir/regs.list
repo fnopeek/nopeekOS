@@ -3564,3 +3564,14 @@ SetSoftMaxVcn_NAME$ = __smu_message_names[SMU_MSG_SetSoftMaxVcn] @ ../pm/swsmu/s
 SMU_FEATURE_DPM_GFXCLK_BIT @ ../pm/swsmu/smu12/renoir_ppt.c
 SMU_FEATURE_DPM_UCLK_BIT @ ../pm/swsmu/smu12/renoir_ppt.c
 SMU_FEATURE_DPM_SOCCLK_BIT @ ../pm/swsmu/smu12/renoir_ppt.c
+# Soft recovery (gfx_v9_0_ring_soft_recovery)
+GC_mmSQ_CMD = mmSQ_CMD @ gfx_v9_0.c
+GC_mmSQ_CMD_BASE_IDX = mmSQ_CMD_BASE_IDX @ gfx_v9_0.c
+GC_SQ_CMD__CMD__SHIFT = SQ_CMD__CMD__SHIFT @ gfx_v9_0.c
+GC_SQ_CMD__CMD_MASK = SQ_CMD__CMD_MASK @ gfx_v9_0.c
+GC_SQ_CMD__MODE__SHIFT = SQ_CMD__MODE__SHIFT @ gfx_v9_0.c
+GC_SQ_CMD__MODE_MASK = SQ_CMD__MODE_MASK @ gfx_v9_0.c
+GC_SQ_CMD__CHECK_VMID__SHIFT = SQ_CMD__CHECK_VMID__SHIFT @ gfx_v9_0.c
+GC_SQ_CMD__CHECK_VMID_MASK = SQ_CMD__CHECK_VMID_MASK @ gfx_v9_0.c
+GC_SQ_CMD__VM_ID__SHIFT = SQ_CMD__VM_ID__SHIFT @ gfx_v9_0.c
+GC_SQ_CMD__VM_ID_MASK = SQ_CMD__VM_ID_MASK @ gfx_v9_0.c

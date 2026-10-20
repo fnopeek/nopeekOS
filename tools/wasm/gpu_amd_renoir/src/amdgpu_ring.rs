@@ -450,6 +450,43 @@ pub fn amdgpu_device_should_recover_gpu() -> bool {
     true
 }
 
+/// `amdgpu_ring_is_reset_type_supported`.
+pub fn amdgpu_ring_is_reset_type_supported(adev: &amdgpu_device, r: usize, reset_type: u32) -> bool {
+    let mask = match adev.rings[r].funcs.type_ {
+        AMDGPU_RING_TYPE_GFX => adev.gfx.gfx_supported_reset,
+        AMDGPU_RING_TYPE_COMPUTE => adev.gfx.compute_supported_reset,
+        AMDGPU_RING_TYPE_SDMA => adev.sdma.supported_reset,
+        AMDGPU_RING_TYPE_VCN_DEC | AMDGPU_RING_TYPE_VCN_ENC => adev.vcn.supported_reset,
+        AMDGPU_RING_TYPE_VCN_JPEG => adev.jpeg.supported_reset,
+        _ => 0,
+    };
+    mask & reset_type != 0
+}
+
+/// `amdgpu_ring_soft_recovery`: the ring's `soft_recovery` again and
+/// again for up to 10 ms, until `fence` signals.
+pub fn amdgpu_ring_soft_recovery(adev: &mut amdgpu_device, r: usize, vmid: u32, fence: Option<&crate::dma_fence::Fence>)
+                                 -> bool {
+    let deadline = crate::linux::now_us() + 10_000;
+    let Some(fence) = fence else { return false };
+    if !adev.rings[r].funcs.soft_recovery {
+        return false;
+    }
+    if !crate::dma_fence::dma_fence_is_signaled(adev, fence) {
+        crate::dma_fence::dma_fence_set_error(fence, -61);
+    }
+    while !crate::dma_fence::dma_fence_is_signaled(adev, fence) && crate::linux::now_us() < deadline {
+        // gfx_v9_0_ring_funcs_gfx and _compute: the only ones with one
+        crate::gfx_v9_0::gfx_v9_0_ring_soft_recovery(adev, vmid);
+    }
+    let ret = crate::dma_fence::dma_fence_is_signaled(adev, fence);
+    // increment the counter only if soft reset worked
+    if ret {
+        adev.gpu_reset_counter += 1;
+    }
+    ret
+}
+
 /// `amdgpu_get_soft_full_reset_mask`.
 pub fn amdgpu_get_soft_full_reset_mask(adev: &amdgpu_device, ring: Option<usize>) -> u32 {
     let Some(ring) = ring.and_then(|i| adev.rings.get(i)) else { return 0 };

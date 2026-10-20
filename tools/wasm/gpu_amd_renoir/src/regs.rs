@@ -7131,3 +7131,25 @@ pub const SMU_FEATURE_DPM_GFXCLK_BIT: u32 = 0x1;
 pub const SMU_FEATURE_DPM_UCLK_BIT: u32 = 0x2;
 /// ?
 pub const SMU_FEATURE_DPM_SOCCLK_BIT: u32 = 0x3;
+
+// Soft recovery (gfx_v9_0_ring_soft_recovery)
+/// The value of `mmSQ_CMD` in gfx_v9_0.c
+pub const GC_mmSQ_CMD: u32 = 0x37b;
+/// The value of `mmSQ_CMD_BASE_IDX` in gfx_v9_0.c
+pub const GC_mmSQ_CMD_BASE_IDX: u32 = 0x0;
+/// The value of `SQ_CMD__CMD__SHIFT` in gfx_v9_0.c
+pub const GC_SQ_CMD__CMD__SHIFT: u32 = 0x0;
+/// The value of `SQ_CMD__CMD_MASK` in gfx_v9_0.c
+pub const GC_SQ_CMD__CMD_MASK: u32 = 0x7;
+/// The value of `SQ_CMD__MODE__SHIFT` in gfx_v9_0.c
+pub const GC_SQ_CMD__MODE__SHIFT: u32 = 0x4;
+/// The value of `SQ_CMD__MODE_MASK` in gfx_v9_0.c
+pub const GC_SQ_CMD__MODE_MASK: u32 = 0x70;
+/// The value of `SQ_CMD__CHECK_VMID__SHIFT` in gfx_v9_0.c
+pub const GC_SQ_CMD__CHECK_VMID__SHIFT: u32 = 0x7;
+/// The value of `SQ_CMD__CHECK_VMID_MASK` in gfx_v9_0.c
+pub const GC_SQ_CMD__CHECK_VMID_MASK: u32 = 0x80;
+/// The value of `SQ_CMD__VM_ID__SHIFT` in gfx_v9_0.c
+pub const GC_SQ_CMD__VM_ID__SHIFT: u32 = 0x1c;
+/// The value of `SQ_CMD__VM_ID_MASK` in gfx_v9_0.c
+pub const GC_SQ_CMD__VM_ID_MASK: u32 = 0xf0000000;

@@ -486,6 +486,8 @@ pub struct amdgpu_sdma {
     pub pool_timeout_irq: amdgpu_irq_src,
     pub srbm_write_irq: amdgpu_irq_src,
     pub ip_dump: Vec<u32>,
+    /// sdma_v4_0 leaves it 0.
+    pub supported_reset: u32,
 }
 
 /// `struct amdgpu_umc`.

@@ -2502,6 +2502,18 @@ pub fn gfx_v9_ring_emit_cntxcntl(adev: &mut amdgpu_device, r: usize, flags: u32)
     rw(adev, r, 0);
 }
 
+/// `gfx_v9_0_ring_soft_recovery`: the SQ kills the waves of `vmid`.
+pub fn gfx_v9_0_ring_soft_recovery(adev: &mut amdgpu_device, vmid: u32) {
+    let mut value = 0;
+    value |= (0x03 << GC_SQ_CMD__CMD__SHIFT) & GC_SQ_CMD__CMD_MASK;
+    value |= (0x01 << GC_SQ_CMD__MODE__SHIFT) & GC_SQ_CMD__MODE_MASK;
+    value |= (1 << GC_SQ_CMD__CHECK_VMID__SHIFT) & GC_SQ_CMD__CHECK_VMID_MASK;
+    value |= (vmid << GC_SQ_CMD__VM_ID__SHIFT) & GC_SQ_CMD__VM_ID_MASK;
+    amdgpu_gfx_rlc_enter_safe_mode(adev);
+    gc_wr(adev, GC_mmSQ_CMD_BASE_IDX, GC_mmSQ_CMD, value);
+    amdgpu_gfx_rlc_exit_safe_mode(adev);
+}
+
 /// `gfx_v9_ring_emit_sb`, the GFX ring's `emit_switch_buffer`.
 pub fn gfx_v9_ring_emit_sb(adev: &mut amdgpu_device, r: usize) {
     rw(adev, r, PACKET3(PACKET3_SWITCH_BUFFER, 0));

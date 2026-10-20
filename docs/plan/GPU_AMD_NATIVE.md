@@ -154,6 +154,37 @@ VMID 2), Modul 0.12.0 ausgeliefert — CAP_NATIVE bleibt aus bis E. In D fehlt
 nur SYNCOBJ_IN: virglrenderer nimmt ihn aus dem Eingangszaun des Wirts, und
 den reicht unser virtio-gpu nicht durch (der Gastkern wartet selbst).
 
+### E im Einzelnen (Linux 6.18.55, `amdgpu_job_timedout`)
+
+Linux versucht der Reihe nach: Soft-Recovery, Reset der einen Queue, voller
+Recover. Auf Renoir gilt je Ring:
+
+| Ring | Soft | Queue-Reset | sonst |
+|---|---|---|---|
+| GFX | `gfx_v9_0_ring_soft_recovery` (SQ_CMD: Wellen der VMID beenden) | keiner (gfx9 hat kein kgq-Reset) | voll |
+| Compute | dieselbe | `gfx_v9_0_reset_kcq` (KIQ unmap RESET_QUEUES, HQD aus, MQD aus der Sicherung, map) | voll |
+| SDMA | keine | keiner (`supported_reset` bleibt 0) | voll |
+
+- **E1 Soft-Recovery** — gebaut (`amdgpu_ring_soft_recovery`).
+- **E2 Queue-Reset Compute** — `amdgpu_ring_reset_helper_begin/end`,
+  `amdgpu_ring_backup_unprocessed_commands`, `amdgpu_fence_driver_guilty_force_completion`,
+  `amdgpu_ring_alloc_reemit`, `drm_sched_wqueue_stop/start`, `gfx_v9_0_reset_kcq`,
+  `kcq_init_queue(restore)`.
+- **E3 voller Recover** (`amdgpu_device_gpu_recover`, MODE2 ueber
+  `smu_v12_0_mode2_reset`, kein `reset_cntl` fuer MP1 12): `in_gpu_reset`,
+  `drm_sched_stop/start`, `increase_karma`, `pre_asic_reset` (Zaeune erzwingen,
+  `amdgpu_device_ip_suspend` Phase 1+2), `reinit_after_reset`
+  (`amdgpu_atom_asic_init`, `resume_phase1..3`, `check_vram_lost`,
+  `fw_loading` mit `psp_resume`, `irq_gpu_reset_resume_helper`, IB-Tests,
+  bei Fehler neuer Versuch). Dazu die Suspend/Resume-Wege von COMMON, GMC, IH,
+  PSP (`psp_suspend`, `psp_ring_stop`, `psp_resume`), SMU (`smu_suspend`,
+  `smu_resume`), GFX (`hw_fini` im Reset: `deactivate_kcq_hqd`, kein
+  `kiq_fini_register`; `kiq/kcq_init_queue` aus der MQD-Sicherung), SDMA.
+  **Nur Bloecke, die das Modul hochgebracht hat**: DCN, VCN und JPEG bekommen
+  nur sw_init — Linux wuerde sie mit suspendieren und wieder hochfahren.
+- **E4 Gast sieht es**: `AMDGPU_CTX_OP_QUERY_STATE2` (RESET, VRAMLOST,
+  GUILTY), `async_error`; dann CAP_NATIVE.
+
 **E gehoert in Stufe 7, nicht danach.** Heute steht im Modul „GPU-Recovery
 bei Job-Timeout: benannt, nicht portiert" — fuer den eigenen Compositor
 war das vertretbar, fuer fremden Shadercode aus einer VM nicht: ein

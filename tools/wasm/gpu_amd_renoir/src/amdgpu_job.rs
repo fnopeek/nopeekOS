@@ -85,6 +85,14 @@ pub fn amdgpu_job_get_vmid(adev: &amdgpu_device, j: Option<u64>) -> u32 {
 pub fn amdgpu_job_timedout(adev: &mut amdgpu_device, j: u64) -> drm_gpu_sched_stat {
     let r = job(adev, j).base.sched.unwrap();
     let name = adev.rings[r].sched.name.clone();
+    let (vmid, parent) = (job(adev, j).vmid, job(adev, j).hw_fence.clone());
+    if crate::tables::amdgpu_gpu_recovery[0] != 0
+        && crate::amdgpu_ring::amdgpu_ring_is_reset_type_supported(adev, r, AMDGPU_RESET_TYPE_SOFT_RESET)
+        && crate::amdgpu_ring::amdgpu_ring_soft_recovery(adev, r, vmid, parent.as_ref())
+    {
+        Line::new().s("ring ").s(&name).s(" timeout, but soft recovered").say();
+        return drm_gpu_sched_stat::RESET;
+    }
     let drv = &adev.rings[r].fence_drv;
     Line::new().s("ring ").s(&name).s(" timeout, signaled seq=").dec(drv.last_seq as u64).s(", emitted seq=")
         .dec(drv.sync_seq as u64).say();
