@@ -6,9 +6,8 @@ snap 0.5.0), device test open. `set shade.scale 1.25` applies at once
 panels/dock/overlays are converted, open popups close with `PopupDone`.
 Step 4 built (kernel 0.657.0, gpu_intel_tgl 0.34.0): `loop` draws IBM
 Plex Mono at 14 logical px, one cell source (`terminal::cells`), glyph
-coverage blended by `scene::text` and `compose.comp`. gpu_amd_renoir still
-carries the old compose binary (hard terminal edges) until its shaders are
-generated again. Steps 2, 3, 5 open.
+coverage blended by `scene::text` and `compose.comp` (gpu_intel_tgl 0.34.0,
+gpu_amd_renoir 0.12.0). Steps 2, 3, 5 open.
 
 ## Why
 
