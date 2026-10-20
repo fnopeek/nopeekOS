@@ -571,12 +571,19 @@ fn guest_frame(adev: &amdgpu_device, b: &bo, h: usize) -> Option<crate::import::
 fn map_tiled(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo, surf: &crate::import::radeon_surf)
              -> Result<(), i32> {
     let h = b.handle.ok_or(-EINVAL)?;
-    map_vm(adev, c, b, &[(h, false, 0, obj::amdgpu_bo_size(adev, h))])?;
+    let size = obj::amdgpu_bo_size(adev, h);
+    if let Err(e) = map_vm(adev, c, b, &[(h, false, 0, size)]) {
+        Line::new().s("gpudev: bo ").dec(b.id as u64).s(": its object of ").dec(size).s(" bytes not mapped (")
+            .dec((-e) as u64).s(")").say();
+        return Err(e);
+    }
     let pitch_px = b.width.next_multiple_of(64);
     let bytes = pitch_px as u64 * 4 * b.height as u64;
     let g = match compose::linear_new(adev, c, bytes) {
         Ok(g) => g,
         Err(e) => {
+            Line::new().s("gpudev: bo ").dec(b.id as u64).s(": no linear buffer of ").dec(bytes).s(" bytes (")
+                .dec((-e) as u64).s(")").say();
             unmap_vm(adev, c, b);
             return Err(e);
         }

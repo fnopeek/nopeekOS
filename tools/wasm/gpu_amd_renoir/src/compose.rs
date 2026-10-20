@@ -88,10 +88,11 @@ pub struct composer {
     pre_dw: u32,
 }
 
-/// A GTT buffer of `bytes` mapped into the client at `fixed` or from `mm`.
-fn gem_new(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, mm: &mut drm_mm, fixed: Option<u64>, bytes: u64)
-           -> Result<gem, i32> {
-    let bo = cs::amdgpu_gem_object_create(adev, bytes, PAGE, AMDGPU_GEM_DOMAIN_GTT, 0)?;
+/// A buffer of `bytes` in `domain` mapped into the client at `fixed` or
+/// from `mm`.
+fn gem_new(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, mm: &mut drm_mm, fixed: Option<u64>, bytes: u64,
+           domain: u32) -> Result<gem, i32> {
+    let bo = cs::amdgpu_gem_object_create(adev, bytes, PAGE, domain, 0)?;
     cs::amdgpu_gem_object_open(adev, fpriv, bo);
     let node = match fixed {
         Some(_) => None,
@@ -183,7 +184,7 @@ pub fn composer_init(adev: &mut amdgpu_device) -> Result<composer, i32> {
             (None, PLANE_PAGES),
         ];
         for (fixed, pages) in specs {
-            let g = gem_new(adev, &fpriv, &mut mm, fixed, pages * PAGE)?;
+            let g = gem_new(adev, &fpriv, &mut mm, fixed, pages * PAGE, AMDGPU_GEM_DOMAIN_GTT)?;
             made.push(g);
         }
         Ok([made[0], made[1], made[2], made[3], made[4], made[5], made[6], made[7], made[8]])
@@ -341,7 +342,7 @@ pub fn self_test(adev: &mut amdgpu_device, c: &mut composer) -> bool {
     const H: u32 = 64;
     const SEED: u32 = 0x5a;
     let pitch = W * 4;
-    let Ok(dst) = gem_new(adev, &c.fpriv, &mut c.mm, None, (pitch * H) as u64) else { return false };
+    let Ok(dst) = gem_new(adev, &c.fpriv, &mut c.mm, None, (pitch * H) as u64, AMDGPU_GEM_DOMAIN_GTT) else { return false };
     let ok = (|| -> Result<bool, i32> {
         if !write(adev, &dst, 0, &[0u8; (W * 4 * H) as usize]) {
             return Err(-ENOMEM);
@@ -432,9 +433,10 @@ pub struct frame_import {
     pub height: u32,
 }
 
-/// A linear buffer of the compositor for a guest frame.
+/// A linear buffer of the compositor for a guest frame, in VRAM: only the
+/// GPU writes and reads it, and a frame is larger than one DMA allocation.
 pub fn linear_new(adev: &mut amdgpu_device, c: &mut composer, bytes: u64) -> Result<gem, i32> {
-    gem_new(adev, &c.fpriv, &mut c.mm, None, bytes.next_multiple_of(PAGE))
+    gem_new(adev, &c.fpriv, &mut c.mm, None, bytes.next_multiple_of(PAGE), AMDGPU_GEM_DOMAIN_VRAM)
 }
 
 pub fn linear_free(adev: &mut amdgpu_device, c: &mut composer, g: gem) {

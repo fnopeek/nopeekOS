@@ -247,7 +247,7 @@ Plan:
    Objektgroesse pruefen — eine gefaelschte Beschreibung darf nichts ausser dem
    eigenen Objekt im Compositor-Adressraum lesen.
 
-### 5.1 Gebaut (Modul 0.16.0, Geraetetest offen)
+### 5.1 Gebaut (Modul 0.16.1, Geraetetest offen)
 
 Alle drei Punkte, und die Gast-T# wird **nie** benutzt: der Compositor baut
 die T# selbst, wie radeonsi beim Import (`si_texture_from_winsys_buffer`):
@@ -302,5 +302,10 @@ zuerst alle gekachelten Gastbilder (ein Dispatch je Bild), dann laeuft
 unit into a linear buffer` oder `… read as it lies: <Grund>`; alle 600
 Szenen `guest bo N imported pixels …` — die Pixel NACH dem Import.
 
+Der lineare Puffer liegt in VRAM (0.16.1): ein GTT-Puffer des Compositors
+ist EIN zusammenhaengender DMA-Block, und der Kernel gibt davon hoechstens
+1024 Seiten (`MAX_DMA_PAGES_PER_CALL`) — 943x1115 sind schon 1046, 1080p
+waeren 2025. Erster Geraetelauf mit 0.16.0: `bo 57 … not added (12)`.
+
 **Offen:** Import nur, wenn sich das Gastbild geaendert hat (heute jede
-Szene); der Schattenpuffer liegt in GTT.
+Szene).
