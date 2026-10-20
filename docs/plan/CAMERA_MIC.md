@@ -116,6 +116,21 @@ M0 → M1 → M3 (a mic in calls, small), then C1 → C2 → C3 → C4. Each ste
 is testable alone: M1 with a recording intent, C1 with a byte counter on
 the isoch stream, C3 with the viewer.
 
+## Later, no priority: fingerprint unlock
+
+`27c6:55b4` Goodix: one vendor interface, bulk `0x01` OUT / `0x82` IN
+(512 B), remote wakeup. The descriptor does not tell whether it matches on
+the chip (libfprint `goodixmoc`: enroll/verify, the OS sees only yes/no)
+or sends an encrypted image the host must match (goodixtls, community
+reverse engineering, not upstream). The firmware version, the first
+command of both protocols, decides; it needs only bulk, which xHCI has.
+Build it as a module on C2.
+
+A fingerprint is no secret and yields no key: it can unlock a locked
+session (key already in RAM), not the disk at boot (that stays the
+passphrase, or a key sealed in the TPM). Face login with this camera: no,
+it has no IR part and a photo fools an RGB-only match.
+
 ## Security checkpoint
 
 - New rights `CAMERA` and `MIC`; nothing gets them by default.
