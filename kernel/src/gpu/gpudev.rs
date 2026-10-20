@@ -1365,8 +1365,8 @@ fn vram_aliases_bar(base: u64, size: u64, bar: u64, bar_len: u64) -> bool {
 /// when the firmware declared it as one region that is not RAM and it reads
 /// as BAR0 does; guest blobs above BAR0 are mapped through it.
 pub fn set_vram_window(dev: PciAddr, base: u64, size: u64) -> i32 {
-    let mut st = STATE.lock();
-    if st.owner != Some(dev) || READY.load(Ordering::Acquire) {
+    // Checked without the state lock: the comparison maps pages.
+    if STATE.lock().owner != Some(dev) || READY.load(Ordering::Acquire) {
         return -1;
     }
     if base % PAGE != 0 || size == 0 || size % PAGE != 0 || base.checked_add(size).is_none() {
@@ -1381,8 +1381,13 @@ pub fn set_vram_window(dev: PciAddr, base: u64, size: u64) -> i32 {
         crate::kprintln!("[gpu] VRAM window {:#x}+{:#x} refused: it does not read as BAR0", base, size);
         return -1;
     }
-    crate::kprintln!("[gpu] VRAM window {:#x}+{} MB (BAR0 {} MB)", base, size >> 20, bar.size >> 20);
+    let mut st = STATE.lock();
+    if st.owner != Some(dev) || READY.load(Ordering::Acquire) {
+        return -1;
+    }
     st.vram_window = Some((base, size));
+    drop(st);
+    crate::kprintln!("[gpu] VRAM window {:#x}+{} MB (BAR0 {} MB)", base, size >> 20, bar.size >> 20);
     0
 }
 
