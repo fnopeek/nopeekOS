@@ -436,6 +436,9 @@ struct XhciState {
     free_pages: Vec<DmaRegion>,
     /// Ports with a Port Status Change Event not yet handled (`hotplug`).
     port_changes: [u64; 4],
+    /// Completion code of the last command or control transfer, for the
+    /// log when enumeration fails; 0 = it timed out.
+    last_cc: u32,
     /// DMA buffers for a network device on this controller.
     nic_device_ctx: DmaRegion,
     nic_ep0_ring: DmaRegion,
@@ -711,7 +714,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         input_ctx, device_ctx,
         ep0_ring, ep0_cycle: 1, ep0_enqueue: 0,
         data_buf, slot_id: 0, port_speed: 0,
-        hid_devs: Vec::new(), hid: Vec::new(), free_pages: Vec::new(), port_changes: [0; 4],
+        hid_devs: Vec::new(), hid: Vec::new(), free_pages: Vec::new(), port_changes: [0; 4], last_cc: 0,
         nic_device_ctx, nic_ep0_ring, nic: None,
     };
 
@@ -1068,14 +1071,20 @@ fn usb_port_init(state: &mut XhciState, port: u32) -> Option<(u8, DmaRegion, Dma
 
     let cfg = (|| {
         if !address_device(state, port) {
-            kprintln!("[npk] xhci: port {} address device failed", port + 1);
+            port_failed(state, port, "address device");
             return None;
         }
         // Configuration descriptor: 9 bytes for the total length, then all.
-        if !usb_get_descriptor(state, DESC_CONFIG, 9) { return None; }
+        if !usb_get_descriptor(state, DESC_CONFIG, 9) {
+            port_failed(state, port, "configuration descriptor");
+            return None;
+        }
         let total = u16::from_le_bytes([state.data_buf.r8(2u32), state.data_buf.r8(3u32)]) as usize;
         let fetch = total.min(4096);
-        if !usb_get_descriptor(state, DESC_CONFIG, fetch as u16) { return None; }
+        if !usb_get_descriptor(state, DESC_CONFIG, fetch as u16) {
+            port_failed(state, port, "configuration descriptor");
+            return None;
+        }
         let mut cfg = alloc::vec![0u8; fetch];
         state.data_buf.copy_out(0u32, &mut cfg);
         Some(cfg)
@@ -1087,6 +1096,36 @@ fn usb_port_init(state: &mut XhciState, port: u32) -> Option<(u8, DmaRegion, Dma
             give_back(state);
             None
         }
+    }
+}
+
+/// Which step of enumeration failed, with what the controller said.
+fn port_failed(state: &XhciState, port: u32, step: &str) {
+    let sc = state.oper.r32(portsc_off(port));
+    let speed = match state.port_speed {
+        SPEED_LOW => "low", SPEED_FULL => "full", SPEED_HIGH => "high", SPEED_SUPER => "super", _ => "?",
+    };
+    if state.last_cc == 0 {
+        kprintln!("[npk] xhci: port {} {} timed out (USB{}, {} speed, portsc {:#010x})",
+            port + 1, step, port_usb_version(state.mmio, port), speed, sc);
+    } else {
+        kprintln!("[npk] xhci: port {} {} failed, completion code {} (USB{}, {} speed, portsc {:#010x})",
+            port + 1, step, state.last_cc, port_usb_version(state.mmio, port), speed, sc);
+    }
+}
+
+/// `hub_port_disable` for a root port: a USB 3 port's link goes to U3, a
+/// USB 2 port is disabled (PED, write 1 to clear). A device that would not
+/// enumerate then stays quiet until it is plugged in anew.
+fn hub_port_disable(state: &XhciState, port: u32) {
+    let off = portsc_off(port);
+    let sc = state.oper.r32(off);
+    if port_usb_version(state.mmio, port) >= 3 {
+        const PORT_LINK_STROBE: u32 = 1 << 16;
+        const PLS_U3: u32 = 3 << 5;
+        state.oper.w32(off, (port_neutral(sc) & !(0xF << 5)) | PORT_LINK_STROBE | PLS_U3);
+    } else if sc & PORTSC_PED != 0 {
+        state.oper.w32(off, port_neutral(sc) | PORTSC_PED);
     }
 }
 
@@ -1108,7 +1147,8 @@ fn probe_hid_port(state: &mut XhciState, port: u32) {
         if state.oper.r32(portsc_off(port)) & PORTSC_CCS == 0 { return; }
     }
     let Some((slot, dctx, ep0, cfg)) = init else {
-        kprintln!("[npk] xhci: port {} gave up after {} tries", port + 1, PORT_INIT_TRIES);
+        kprintln!("[npk] xhci: port {}: unable to enumerate USB device, port disabled", port + 1);
+        hub_port_disable(state, port);
         return;
     };
     let config_val = cfg.get(5).copied().unwrap_or(1);
@@ -1247,9 +1287,34 @@ fn hub_port_debounce(oper: Mmio, port: u32) -> Option<bool> {
     }
 }
 
-/// Handle the ports that changed since the last call: a device that came
-/// is enumerated, one that went is torn down. From the shell's idle step.
+/// A hotplug task is queued or running.
+static HOTPLUG_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// From the shell's idle step: hand pending port changes to a worker. The
+/// handling waits on devices for seconds when one misbehaves; the shell's
+/// core must not wait with it. Events of other devices keep flowing: the
+/// waits drain the event ring themselves.
 pub fn hotplug() {
+    if !HOTPLUG.load(Ordering::Acquire) { return; }
+    if HOTPLUG_RUNNING.swap(true, Ordering::AcqRel) { return; }
+    crate::smp::scheduler::spawn("usb hotplug", hotplug_task, 0);
+}
+
+fn hotplug_task(_: u64) {
+    loop {
+        hotplug_pass();
+        HOTPLUG_RUNNING.store(false, Ordering::Release);
+        // A change noted after this pass looked: take it, unless another
+        // task already did.
+        if !HOTPLUG.load(Ordering::Acquire) || HOTPLUG_RUNNING.swap(true, Ordering::AcqRel) {
+            return;
+        }
+    }
+}
+
+/// Handle the ports that changed since the last pass: a device that came
+/// is enumerated, one that went is torn down.
+fn hotplug_pass() {
     if !HOTPLUG.swap(false, Ordering::AcqRel) { return; }
     // Which ports, and whether each saw a connect change. Read and cleared
     // under the lock; the debounce waits outside it, so the interrupt keeps
@@ -1872,6 +1937,7 @@ fn post_command(state: &mut XhciState, param: u64, status: u32, mut control: u32
 /// never re-queued, silencing that device.
 fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
     let deadline = crate::interrupts::ticks() + 100;
+    state.last_cc = 0;
     loop {
         if crate::interrupts::ticks() >= deadline { return None; }
         let e = match next_event(state) {
@@ -1880,6 +1946,7 @@ fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
         };
         flush_erdp(state);
         if e.trb_type == EVT_CMD_COMPLETE {
+            state.last_cc = e.cc;
             return Some((e.cc, (e.control >> 24) & 0xFF));
         }
         if e.trb_type == EVT_TRANSFER {
@@ -2011,6 +2078,7 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
     // Wait for the reply (1 s) and dispatch events of other devices. Our own
     // event is recognised by its TRB address lying in this device's EP0 ring.
     let deadline = crate::interrupts::ticks() + 100;
+    state.last_cc = 0;
     loop {
         if crate::interrupts::ticks() >= deadline { return false; }
         let e = match next_event(state) {
@@ -2022,6 +2090,7 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
         if e.trb_type != EVT_TRANSFER { continue; }
         let ok = e.cc == CC_SUCCESS || e.cc == CC_SHORT_PACKET;
         if in_ring(e.param, state.ep0_ring.phys()) {
+            state.last_cc = e.cc;
             return ok;
         }
         if dispatch_transfer(state, &e) {
