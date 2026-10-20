@@ -646,6 +646,25 @@ pub fn gpudev_job_data(seq: i32, off: i32, out: &mut [u8]) -> i32 {
     })
 }
 
+/// `npk_gpudev_capset`: the words the guest's Mesa reads.
+pub fn gpudev_capset(data: &[u8]) -> i32 {
+    let w = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+    let name: Vec<u8> = data[0x1d0..0x1d0 + 128].iter().copied().take_while(|&b| b != 0).collect();
+    println!("gpudev capset {} bytes: drm {}.{}.{}, context type {}, address32_hi {:#x}, vm_always_valid {}, \
+              alignments {:#x}/{:#x}, asic {:#x} family {} gb_addr_cfg {:#x}, \"{}\"",
+             data.len(), w(4), w(8), w(12), w(16), w(0x18), w(0x1c) & 1, w(0x20), w(0x28), w(0x30), w(0x3c),
+             w(0x30 + 0x60), String::from_utf8_lossy(&name));
+    0
+}
+
+/// `npk_gpudev_reply`: the reply head and the response's ret.
+pub fn gpudev_reply(seq: i32, data: &[u8]) -> i32 {
+    let w = |at: usize| data.get(at..at + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
+    println!("gpudev reply {}: {} bytes, async_error {}, flags {}, rsp len {} ret {} word {:#x}", seq, data.len(), w(0),
+             w(4), w(8), w(12) as i32, w(16));
+    0
+}
+
 pub fn gpudev_complete(seq: i32, status: i32) -> i32 {
     println!("gpudev job {} done: {}", seq, status);
     0

@@ -3476,3 +3476,12 @@ AMDGPU_VMHUB_IDX_SHIFT @ amdgpu_vm.c
 AMDGPU_GFXHUB_START @ amdgpu_vm.c
 AMDGPU_MMHUB0_START @ amdgpu_vm.c
 AMDGPU_MMHUB1_START @ amdgpu_vm.c
+# A client's contexts (amdgpu_ctx.c) and the driver version (amdgpu_drv.c)
+AMDGPU_CTX_PRIORITY_VERY_LOW @ amdgpu_ctx.c
+AMDGPU_CTX_PRIORITY_LOW @ amdgpu_ctx.c
+AMDGPU_CTX_PRIORITY_HIGH @ amdgpu_ctx.c
+AMDGPU_CTX_PRIORITY_VERY_HIGH @ amdgpu_ctx.c
+KMS_DRIVER_MAJOR @ amdgpu_drv.c
+KMS_DRIVER_MINOR @ amdgpu_drv.c
+KMS_DRIVER_PATCHLEVEL @ amdgpu_drv.c
+AMDGPU_FAMILY_AI @ amdgpu_kms.c

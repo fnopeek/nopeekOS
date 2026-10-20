@@ -29,6 +29,13 @@ const OP_COPY_RECT: u32 = 1;
 const OP_BO_ADD: u32 = 2;
 const OP_BO_REMOVE: u32 = 3;
 const OP_SCENE: u32 = 4;
+/// `a0` client, `a1` 1 = open, 0 = close.
+const OP_CLIENT: u32 = 5;
+/// `a0` client, `a1` length; the payload is the guest's ccmd.
+const OP_CCMD: u32 = 7;
+/// The largest ccmd a guest sends, and the kernel's largest reply.
+const CCMD_MAX: usize = 256 * 1024;
+const REPLY_MAX: usize = 64 * 1024;
 const CAP_COPY: i32 = 1;
 const CAP_SCENE: i32 = 2;
 const JOB_BYTES: usize = 32;
@@ -37,6 +44,7 @@ const NUM_BOS: usize = 3;
 const MAX_DYN: usize = 256;
 const EINVAL: i32 = 22;
 const ENOSPC: i32 = 28;
+const ENOMEM: i32 = 12;
 const ETIME: i32 = 62;
 /// The kernel gives a job 100 ms; the module answers before that.
 const JOB_TIMEOUT_US: i64 = 80_000;
@@ -349,6 +357,8 @@ struct service {
     /// target buffer, and when the job began.
     scene: Option<(u32, u32, u64, compose::scene_inflight)>,
     scenes: u32,
+    /// The guests' contexts.
+    native: crate::amdgpu_virtio::vclients,
 }
 
 impl service {
@@ -480,6 +490,35 @@ fn drain_scene(adev: &mut amdgpu_device, svc: &mut service) {
     }
 }
 
+/// `OP_CCMD`: the guest's command from the job's payload, run, its reply
+/// handed to the kernel before the job completes.
+fn run_ccmd(adev: &mut amdgpu_device, svc: &mut service, seq: u32, client: u32, len: u32) -> i32 {
+    let len = len as usize;
+    if len > CCMD_MAX {
+        return -EINVAL;
+    }
+    let mut req = Vec::new();
+    if req.try_reserve_exact(len).is_err() {
+        return -ENOMEM;
+    }
+    req.resize(len, 0);
+    let mut at = 0usize;
+    while at < len {
+        let n = npk_sys::gpudev_job_data(seq as i32, at as i32, &mut req[at..len]);
+        if n <= 0 {
+            return -EINVAL;
+        }
+        at += n as usize;
+    }
+    match crate::amdgpu_virtio::ccmd(adev, &mut svc.native, client, &req) {
+        Ok(r) if r.len() <= REPLY_MAX => {
+            if npk_sys::gpudev_reply(seq as i32, &r) != 0 { -ENOMEM } else { 0 }
+        }
+        Ok(_) => -EINVAL,
+        Err(e) => e,
+    }
+}
+
 /// One job from the kernel; its status, or `JOB_OPEN`.
 fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
     let w = |i: usize| u32::from_le_bytes(job[i * 4..i * 4 + 4].try_into().unwrap());
@@ -510,6 +549,14 @@ fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
             Err(e) => e,
         },
         OP_SCENE if svc.composer.is_some() => run_scene(adev, svc, seq, w(2), w(3)),
+        OP_CLIENT => {
+            if w(3) != 0 {
+                crate::amdgpu_virtio::client_open(adev, &mut svc.native, w(2))
+            } else {
+                crate::amdgpu_virtio::client_close(adev, &mut svc.native, w(2))
+            }
+        }
+        OP_CCMD => run_ccmd(adev, svc, seq, w(2), w(3)),
         _ => -EINVAL,
     }
 }
@@ -571,7 +618,7 @@ pub fn serve(adev: &mut amdgpu_device) {
         return;
     }
     let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: Vec::new(), copy_ok: false, composer: None,
-                            scene: None, scenes: 0 };
+                            scene: None, scenes: 0, native: Default::default() };
     for id in 0..NUM_BOS {
         let Some(info) = bo_info(id as u32) else {
             Line::new().s("gpudev: no buffer ").dec(id as u64).say();
@@ -614,6 +661,13 @@ pub fn serve(adev: &mut amdgpu_device) {
     Line::new().s("gpudev: sdma0 self-test ").s(if svc.copy_ok { "passed" } else { "FAILED" }).say();
     let scene_ok = svc.copy_ok && scenes_init(adev, &mut svc);
     let caps = if svc.copy_ok { CAP_COPY } else { 0 } | if scene_ok { CAP_SCENE } else { 0 };
+    // The capset for the guests' native contexts, before ready.
+    match crate::amdgpu_virtio::capset(adev) {
+        Ok(c) => {
+            npk_sys::gpudev_capset(&c);
+        }
+        Err(e) => Line::new().s("gpudev: no capset for native contexts (").dec((-e) as u64).s(")").say(),
+    }
     npk_sys::gpudev_ready(caps);
     if caps == 0 {
         unbind(adev, &mut svc);

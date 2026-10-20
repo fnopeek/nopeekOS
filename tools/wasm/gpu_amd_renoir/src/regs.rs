@@ -6955,3 +6955,21 @@ pub const AMDGPU_GFXHUB_START: u32 = 0x0;
 pub const AMDGPU_MMHUB0_START: u32 = 0x8;
 /// amdgpu/amdgpu_vm.h:158
 pub const AMDGPU_MMHUB1_START: u32 = 0xc;
+
+// A client's contexts (amdgpu_ctx.c) and the driver version (amdgpu_drv.c)
+/// ?
+pub const AMDGPU_CTX_PRIORITY_VERY_LOW: u64 = 0xfffffffffffffc01;
+/// ?
+pub const AMDGPU_CTX_PRIORITY_LOW: u64 = 0xfffffffffffffe00;
+/// ?
+pub const AMDGPU_CTX_PRIORITY_HIGH: u32 = 0x200;
+/// ?
+pub const AMDGPU_CTX_PRIORITY_VERY_HIGH: u32 = 0x3ff;
+/// amdgpu/amdgpu_drv.c:130
+pub const KMS_DRIVER_MAJOR: u32 = 0x3;
+/// amdgpu/amdgpu_drv.c:131
+pub const KMS_DRIVER_MINOR: u32 = 0x40;
+/// amdgpu/amdgpu_drv.c:132
+pub const KMS_DRIVER_PATCHLEVEL: u32 = 0x0;
+/// ?
+pub const AMDGPU_FAMILY_AI: u32 = 0x8d;

@@ -17,6 +17,7 @@ extern crate alloc;
 
 mod native_gen;
 mod amdgpu_kms;
+mod amdgpu_virtio;
 mod amdgpu_atombios;
 mod athub_v1_0;
 mod amdgpu_atomfirmware;

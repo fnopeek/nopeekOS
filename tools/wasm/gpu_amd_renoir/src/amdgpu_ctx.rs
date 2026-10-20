@@ -117,6 +117,44 @@ fn amdgpu_ctx_init(adev: &mut amdgpu_device, vm: usize, priority: i32) -> amdgpu
     }
 }
 
+/// `amdgpu_ctx_priority_is_valid`.
+pub fn amdgpu_ctx_priority_is_valid(ctx_prio: i32) -> bool {
+    [AMDGPU_CTX_PRIORITY_VERY_LOW as i64 as i32, AMDGPU_CTX_PRIORITY_LOW as i64 as i32, PRIORITY_NORMAL,
+     AMDGPU_CTX_PRIORITY_HIGH as i32, AMDGPU_CTX_PRIORITY_VERY_HIGH as i32].contains(&ctx_prio)
+}
+
+/// `amdgpu_ctx_priority_permit`: above NORMAL needs CAP_SYS_NICE or the DRM
+/// master; `privileged` says whether the client has either.
+fn amdgpu_ctx_priority_permit(privileged: bool, priority: i32) -> i32 {
+    // NORMAL and below are accessible by everyone
+    if priority <= PRIORITY_NORMAL || privileged {
+        return 0;
+    }
+    -13
+}
+
+/// `amdgpu_ctx_alloc` with the permission check of `amdgpu_ctx_init`: the
+/// new context's handle.
+pub fn amdgpu_ctx_alloc_checked(adev: &mut amdgpu_device, mgr: &mut amdgpu_ctx_mgr, vm: usize, priority: i32,
+                                privileged: bool) -> Result<u32, i32> {
+    let r = amdgpu_ctx_priority_permit(privileged, priority);
+    if r != 0 {
+        return Err(r);
+    }
+    amdgpu_ctx_alloc(adev, mgr, vm, priority)
+}
+
+/// `amdgpu_ctx_free` with `amdgpu_ctx_do_release`: the entities go with
+/// the context.
+pub fn amdgpu_ctx_free(adev: &mut amdgpu_device, mgr: &mut amdgpu_ctx_mgr, id: u32) -> i32 {
+    let Some(ctx) = mgr.ctx_handles.remove(&id) else { return -22 };
+    for c in ctx.entities.into_iter().flatten().flatten() {
+        drm_sched::drm_sched_entity_destroy(adev, c.entity);
+        adev.sched_entities[c.entity] = None;
+    }
+    0
+}
+
 /// `amdgpu_ctx_alloc`: the new context's handle.
 pub fn amdgpu_ctx_alloc(adev: &mut amdgpu_device, mgr: &mut amdgpu_ctx_mgr, vm: usize, priority: i32)
                         -> Result<u32, i32> {

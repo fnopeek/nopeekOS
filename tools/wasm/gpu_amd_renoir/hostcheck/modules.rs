@@ -119,3 +119,9 @@ mod radv_stream;
 mod compose;
 #[path = "../src/athub_v1_0.rs"]
 mod athub_v1_0;
+#[path = "../src/native_gen.rs"]
+mod native_gen;
+#[path = "../src/amdgpu_kms.rs"]
+mod amdgpu_kms;
+#[path = "../src/amdgpu_virtio.rs"]
+mod amdgpu_virtio;
