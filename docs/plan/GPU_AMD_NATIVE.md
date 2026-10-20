@@ -97,7 +97,7 @@ alles dorthin und faellt auf GTT zurueck.
   Zaehlung je VM macht der Kernel am GEM_NEW-Kopf (`alloc_size`), bevor er
   weiterreicht.
 
-**Empfehlung (b).** Kosten: eine Kernel-Pruefung „gehoert dem Modul"
+**Entschieden 2026-10-20: (b).** Kosten: eine Kernel-Pruefung „gehoert dem Modul"
 (DMA-Besitz oder BAR des eigenen Geraets), und eine offene Frage fuer
 Schritt C: in Linux darf TTM ein abgebildetes Objekt verschieben, weil die
 CPU-Abbildung ueber `ttm_bo_vm_fault` neu aufgebaut wird. Bei uns liegt die
