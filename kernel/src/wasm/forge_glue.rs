@@ -1111,6 +1111,12 @@ host_imports! {
     ctx fn npk_gpudev_complete(seq: i32, status: i32) -> i32;
     // npk_gpudev_reply(seq, ptr, len) -> 0 / -1; reply of an OP_CCMD job, <= 64 KB
     mem fn npk_gpudev_reply(seq: i32, ptr: i32, len: i32) -> i32;
+    // npk_gpudev_tt_alloc(client, pages) -> GTT pages id / -1
+    ctx fn npk_gpudev_tt_alloc(client: i32, pages: i32) -> i32;
+    // npk_gpudev_tt_buffer(tt) -> buffer id for npk_gpudev_bo_pages / -1
+    ctx fn npk_gpudev_tt_buffer(tt: i32) -> i32;
+    // npk_gpudev_tt_free(tt) -> 0 / -1
+    ctx fn npk_gpudev_tt_free(tt: i32) -> i32;
     // npk_gpudev_capset(ptr, len) -> 0 / -1; the card's DRM capset, <= 1 KB
     mem fn npk_gpudev_capset(ptr: i32, len: i32) -> i32;
     // npk_gpudev_ring(client, ring, submitted, completed) -> 0 / -1

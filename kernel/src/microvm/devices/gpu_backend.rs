@@ -497,6 +497,9 @@ fn worker_entry(_arg: u64) {
         // SUBMIT_3D completions wait for their fences: look again.
         let (fences, held) = {
             let mut g = GPU.lock();
+            if crate::gpu::gpudev::take_vram_lost() {
+                g.lose_device_memory();
+            }
             g.reap_released();
             (g.fences_pending(), g.held_blob().is_some())
         };

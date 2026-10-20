@@ -4372,6 +4372,34 @@ pub(crate) fn npk_gpudev_reply(mem: &mut [u8], ctx: &mut HostState, seq: i32, pt
     crate::gpu::gpudev::reply(dev, seq as u32, data)
 }
 
+/// `npk_gpudev_tt_alloc(client, pages) -> tt | -1`: GTT pages for a guest
+/// client's object.
+pub(crate) fn npk_gpudev_tt_alloc(ctx: &mut HostState, client: i32, pages: i32) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if pages <= 0 {
+        return -1;
+    }
+    crate::gpu::gpudev::tt_alloc(dev, client as u32, pages as u32)
+}
+
+/// `npk_gpudev_tt_buffer(tt) -> id | -1`: the buffer GTT pages `tt` are
+/// read under with `npk_gpudev_bo_pages`.
+pub(crate) fn npk_gpudev_tt_buffer(ctx: &mut HostState, tt: i32) -> i32 {
+    if gpudev_device(ctx).is_none() || tt <= 0 {
+        return -1;
+    }
+    crate::gpu::gpudev::tt_buffer(tt as u32).map_or(-1, |id| id as i32)
+}
+
+/// `npk_gpudev_tt_free(tt) -> 0 | -1`.
+pub(crate) fn npk_gpudev_tt_free(ctx: &mut HostState, tt: i32) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if tt <= 0 {
+        return -1;
+    }
+    crate::gpu::gpudev::tt_free(dev, tt as u32)
+}
+
 /// `npk_gpudev_capset(ptr, len) -> 0 | -1`: the card's DRM capset, for
 /// native contexts, before `npk_gpudev_ready`.
 pub(crate) fn npk_gpudev_capset(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {

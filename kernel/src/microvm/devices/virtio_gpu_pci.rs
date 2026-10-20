@@ -1098,6 +1098,9 @@ impl VirtioGpu {
         }
         let Some(map_info) = self.ctxs.map_info(res_id) else { return Err(VIRTIO_GPU_RESP_ERR_INVALID_RES_ID) };
         let Some(r) = self.ctxs.host3d.get_mut(&res_id) else { return Err(VIRTIO_GPU_RESP_ERR_INVALID_RES_ID) };
+        if r.lost {
+            return Err(VIRTIO_GPU_RESP_ERR_INVALID_PARAM);
+        }
         r.map_info = map_info;
         let pages = r.size.div_ceil(4096) as usize;
         if offset % 4096 != 0
@@ -1113,6 +1116,20 @@ impl VirtioGpu {
         super::hostmem::map(offset, &r.pages.pages[..pages], cache).map_err(|_| VIRTIO_GPU_RESP_ERR_INVALID_PARAM)?;
         r.mapped = Some(offset);
         Ok(r.map_info)
+    }
+
+    /// The GPU module is gone: resources in its card's memory leave the
+    /// guest's window and cannot be mapped again.
+    pub fn lose_device_memory(&mut self) {
+        let lost: Vec<u32> = self.ctxs.host3d.iter()
+            .filter(|(_, r)| !r.lost && super::virtio_gpu_ctx::device_memory(r))
+            .map(|(&id, _)| id).collect();
+        for id in lost {
+            self.unmap_host3d(id);
+            if let Some(r) = self.ctxs.host3d.get_mut(&id) {
+                r.lost = true;
+            }
+        }
     }
 
     /// RESOURCE_UNMAP_BLOB, and before a HOST3D resource goes.

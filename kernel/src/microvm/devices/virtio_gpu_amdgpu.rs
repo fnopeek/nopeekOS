@@ -78,6 +78,9 @@ struct Client {
 
 pub struct AmdgpuBackend {
     capset: Vec<u8>,
+    /// Resources the module handed over, by the serial of their pages:
+    /// the client and the resource id (`amdgpu_object.base.res_id`).
+    blobs: BTreeMap<u64, (u32, u32)>,
     clients: BTreeMap<u32, Client>,
     /// Lines `ccmd_failed` has written for this VM.
     failed_lines: u32,
@@ -87,7 +90,7 @@ impl AmdgpuBackend {
     /// For the card at `dev`, with the capset its module reported.
     pub fn new(_dev: PciAddr, capset: Vec<u8>) -> Option<Self> {
         let ctx_type = u32::from_le_bytes(capset.get(16..20)?.try_into().ok()?);
-        (ctx_type == CONTEXT_AMDGPU).then_some(AmdgpuBackend { capset, clients: BTreeMap::new(), failed_lines: 0 })
+        (ctx_type == CONTEXT_AMDGPU).then_some(AmdgpuBackend { capset, blobs: BTreeMap::new(), clients: BTreeMap::new(), failed_lines: 0 })
     }
 
     /// `drm_err` of a failed ccmd, with why; a fixed number of lines per VM.
@@ -225,11 +228,27 @@ impl Backend for AmdgpuBackend {
         Ok(())
     }
 
-    fn take_blob(&mut self, _ctx: u32, _blob_id: u64, _res_id: u32) -> Option<(Arc<ForeignPixels>, u32)> {
-        None
+    /// `amdgpu_renderer_get_blob`: the module checks the blob id and that
+    /// the object is exported once, and names its pages.
+    fn take_blob(&mut self, ctx: u32, blob_id: u64, res_id: u32) -> Option<(Arc<ForeignPixels>, u32)> {
+        if blob_id >> 32 != 0 || self.clients.get(&ctx).is_none_or(|c| c.closed) {
+            return None;
+        }
+        let (pages, map_info) = gpudev::blob(ctx, blob_id as u32, res_id)?;
+        self.blobs.insert(pages.serial, (ctx, res_id));
+        Some((pages, map_info))
     }
 
-    fn release_blob(&mut self, _ctx: u32, _pages: &Arc<ForeignPixels>) {}
+    /// `drm_context_free_object` → `amdgpu_renderer_free_object`.
+    fn release_blob(&mut self, _ctx: u32, pages: &Arc<ForeignPixels>) {
+        if let Some((ctx, res_id)) = self.blobs.remove(&pages.serial) {
+            gpudev::blob_release(ctx, res_id, pages);
+        }
+    }
+
+    fn device_memory(&self, pages: &ForeignPixels) -> bool {
+        self.blobs.contains_key(&pages.serial) && gpudev::blob_in_vram(pages)
+    }
 
     fn submit_fence(&mut self, ctx: u32, ring: u32) -> u64 {
         gpudev::ring_state(ctx, ring).0

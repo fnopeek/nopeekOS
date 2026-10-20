@@ -62,6 +62,18 @@ pub const OP_OBJECT: u32 = 6;
 pub const DETACH_DEFERRED: i32 = 1;
 /// `a0` client, `a1` length; the payload is the guest's ccmd.
 pub const OP_CCMD: u32 = 7;
+/// `a0` client, `a1` blob id, `a2` resource id: the module hands over the
+/// object a ccmd made under that blob id (`get_blob`); its reply says where
+/// the object lies (`BLOB_*`).
+pub const OP_BLOB: u32 = 8;
+/// `a0` client, `a1` resource id: the guest let go of that resource.
+pub const OP_BLOB_RELEASE: u32 = 9;
+/// What an `OP_BLOB` reply names: pages from `npk_gpudev_tt_alloc`, or
+/// ranges of the card's VRAM aperture (BAR0).
+const BLOB_TT: u32 = 0;
+const BLOB_VRAM: u32 = 1;
+/// Largest guest GTT object in pages (`npk_gpudev_tt_alloc`).
+const MAX_TT_PAGES: u32 = 1 << 20;
 /// Largest capset (`npk_gpudev_capset`), `virtio_gpu_ctx::CAPSET_DRM_SIZE`.
 pub const MAX_CAPSET: usize = 1024;
 /// Largest reply to a ccmd (`npk_gpudev_reply`).
@@ -338,6 +350,16 @@ fn mark_all_done() {
 pub fn register(dev: PciAddr, version: i32) -> i32 {
     if version != VERSION {
         return -2;
+    }
+    // Guest resources in the card's VRAM from a module before leave the
+    // guest first; the worker that does it parks at most 100 ms.
+    let end = crate::interrupts::rdtsc() + 2 * crate::interrupts::tsc_freq();
+    while VRAM_LOST.load(Ordering::Acquire) && crate::interrupts::rdtsc() < end {
+        fiber::spin_or_yield();
+    }
+    if VRAM_LOST.load(Ordering::Acquire) {
+        crate::kprintln!("[npk] gpudev: guest resources in VRAM still mapped, not registering");
+        return -1;
     }
     let Some(fb) = super::framebuffer_info() else { return -1 };
     let Some((pa, pb, pages)) = crate::drivers::framebuffer::shadow_phys_info() else { return -1 };
@@ -630,6 +652,7 @@ pub fn set_waker(dev: PciAddr, w: Waker) {
 /// the CPU, copying into the framebuffer the module last showed. No
 /// register is touched.
 pub fn module_gone(dev: PciAddr) {
+    tts_module_gone();
     let (fb, frees) = {
         let mut st = STATE.lock();
         if st.owner != Some(dev) {
@@ -1477,6 +1500,211 @@ fn free_frames(frames: &ForeignPixels) {
     for &p in &frames.pages {
         crate::memory::deallocate_frame(p);
     }
+}
+
+/// Guest GTT pages (`npk_gpudev_tt_alloc`), kernel frames as `ttm_pool`
+/// takes them from the page allocator. They go back once the module freed
+/// them and no guest resource maps them; they outlive the module.
+struct Tt {
+    client: u32,
+    frames: Arc<ForeignPixels>,
+    /// The buffer id the module reads the pages under, while it holds them.
+    module: Option<u32>,
+    /// Guest resources mapping them.
+    guest: u32,
+}
+
+static TTS: Mutex<BTreeMap<u32, Tt>> = Mutex::new(BTreeMap::new());
+static NEXT_TT: AtomicU32 = AtomicU32::new(1);
+
+/// `npk_gpudev_tt_alloc`: `pages` zeroed frames for a GTT object of guest
+/// client `client`, granted to the card; the buffer id to read them under.
+pub fn tt_alloc(dev: PciAddr, client: u32, pages: u32) -> i32 {
+    if pages == 0 || pages > MAX_TT_PAGES {
+        return -1;
+    }
+    if !STATE.lock().clients.contains(&client) || !owned_by(dev) {
+        return -1;
+    }
+    if crate::microvm::devices::guest_mem::frames_spare() < pages as usize {
+        crate::kprintln!("[gpu] native context: {} KB of GTT refused, host memory down to its reserve", pages * 4);
+        return -1;
+    }
+    let mut list = Vec::new();
+    if list.try_reserve_exact(pages as usize).is_err() {
+        return -1;
+    }
+    for _ in 0..pages {
+        let Some(p) = crate::memory::allocate_frame() else {
+            for &q in &list {
+                crate::memory::deallocate_frame(q);
+            }
+            return -1;
+        };
+        // SAFETY: a frame just allocated, identity-mapped, owned here.
+        unsafe { core::ptr::write_bytes(p as *mut u8, 0, PAGE as usize) };
+        crate::mm::clflush_range(p, PAGE);
+        list.push(p);
+    }
+    let frames = Arc::new(ForeignPixels::new(list));
+    let Some(id) = object_add(&frames, pages as u64 * PAGE) else {
+        free_frames(&frames);
+        return -1;
+    };
+    let tt = NEXT_TT.fetch_add(1, Ordering::Relaxed);
+    TTS.lock().insert(tt, Tt { client, frames, module: Some(id), guest: 0 });
+    tt as i32
+}
+
+/// The buffer id module pages `tt` are read under (`npk_gpudev_bo_pages`).
+pub fn tt_buffer(tt: u32) -> Option<u32> {
+    TTS.lock().get(&tt).and_then(|t| t.module)
+}
+
+/// `npk_gpudev_tt_free`: the module let go of GTT pages `tt`.
+pub fn tt_free(dev: PciAddr, tt: u32) -> i32 {
+    if !owned_by(dev) {
+        return -1;
+    }
+    let mut tts = TTS.lock();
+    let Some(t) = tts.get_mut(&tt) else { return -1 };
+    let Some(id) = t.module.take() else { return -1 };
+    let gone = t.guest == 0;
+    let frames = t.frames.clone();
+    if gone {
+        tts.remove(&tt);
+    }
+    drop(tts);
+    let mut st = STATE.lock();
+    if let Some(g) = grant_of(&st, id) {
+        g.apply(dev, false);
+    }
+    st.bos.remove(&id);
+    st.page_lists.remove(&id);
+    drop(st);
+    if gone {
+        free_frames(&frames);
+    }
+    0
+}
+
+/// The module is gone: GTT pages no guest maps go back now, the others
+/// when their resources go.
+fn tts_module_gone() {
+    let mut tts = TTS.lock();
+    let gone: Vec<u32> = tts.iter_mut().filter_map(|(&k, t)| {
+        t.module = None;
+        (t.guest == 0).then_some(k)
+    }).collect();
+    for k in gone {
+        if let Some(t) = tts.remove(&k) {
+            free_frames(&t.frames);
+        }
+    }
+    if VRAM_BLOBS.load(Ordering::Acquire) != 0 {
+        VRAM_LOST.store(true, Ordering::Release);
+        crate::microvm::devices::gpu_backend::note_gpu_kick(0);
+    }
+}
+
+/// The module went while guest resources lay in the card's VRAM: the
+/// virtio-gpu worker takes them out of the guest (`take_vram_lost`), and no
+/// module registers before.
+static VRAM_LOST: AtomicBool = AtomicBool::new(false);
+
+/// The virtio-gpu side: whether guest resources in VRAM must go now.
+pub fn take_vram_lost() -> bool {
+    VRAM_LOST.swap(false, Ordering::AcqRel)
+}
+
+/// Guest resources in the card's VRAM aperture; they must leave the guest
+/// before the card serves anyone else.
+static VRAM_BLOBS: AtomicU32 = AtomicU32::new(0);
+
+/// Whether pages handed out by `blob` lie in the card's VRAM.
+pub fn blob_in_vram(pages: &ForeignPixels) -> bool {
+    !TTS.lock().values().any(|t| t.frames.serial == pages.serial)
+}
+
+/// `get_blob` of guest client `client`: the object the module made under
+/// `blob_id` becomes resource `res_id`; its pages and cache type.
+pub fn blob(client: u32, blob_id: u32, res_id: u32) -> Option<(Arc<ForeignPixels>, u32)> {
+    let (seq, dev) = {
+        let mut st = STATE.lock();
+        let dev = st.owner?;
+        if !st.clients.contains(&client) {
+            return None;
+        }
+        let seq = queue_job(&mut st, OP_BLOB, [client, blob_id, res_id, 0, 0, 0], None, &[]);
+        st.replies.insert(seq, None);
+        (seq, dev)
+    };
+    wake_module();
+    let status = wait_seq_yield(seq, native_deadline());
+    let r = STATE.lock().replies.remove(&seq).flatten()?;
+    if status != 0 || r.len() < 16 {
+        return None;
+    }
+    let w = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+    let q = |at: usize| u64::from_le_bytes(r[at..at + 8].try_into().unwrap());
+    let (map_info, kind, tt, n) = (w(0), w(4), w(8), w(12) as usize);
+    match kind {
+        BLOB_TT => {
+            let mut tts = TTS.lock();
+            let t = tts.get_mut(&tt).filter(|t| t.client == client && t.module.is_some())?;
+            t.guest += 1;
+            Some((t.frames.clone(), map_info))
+        }
+        BLOB_VRAM => {
+            if n == 0 || r.len() < 16 + n * 16 {
+                return None;
+            }
+            let bar = crate::drivers::pci::bar(dev, 0)?;
+            let (bar0, bar_len) = (bar.base, bar.size);
+            let mut list = Vec::new();
+            for i in 0..n {
+                let (off, len) = (q(16 + i * 16), q(24 + i * 16));
+                if off % PAGE != 0 || len % PAGE != 0 || len == 0 || off.checked_add(len)? > bar_len {
+                    return None;
+                }
+                list.extend((0..len / PAGE).map(|p| bar0 + off + p * PAGE));
+            }
+            VRAM_BLOBS.fetch_add(1, Ordering::AcqRel);
+            Some((Arc::new(ForeignPixels::new(list)), map_info))
+        }
+        _ => None,
+    }
+}
+
+/// The guest let go of resource `res_id` (pages `pages`), which it no
+/// longer maps: the module frees its object (`amdgpu_renderer_free_object`),
+/// and GTT pages the module already freed go back.
+pub fn blob_release(client: u32, res_id: u32, pages: &ForeignPixels) {
+    {
+        let mut tts = TTS.lock();
+        let hit = tts.iter_mut().find(|(_, t)| t.frames.serial == pages.serial).map(|(&k, t)| {
+            t.guest = t.guest.saturating_sub(1);
+            (k, t.guest == 0 && t.module.is_none())
+        });
+        match hit {
+            Some((k, true)) => {
+                if let Some(t) = tts.remove(&k) {
+                    free_frames(&t.frames);
+                }
+            }
+            Some(_) => {}
+            None => {
+                let _ = VRAM_BLOBS.try_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(1));
+            }
+        }
+    }
+    let mut st = STATE.lock();
+    if st.owner.is_none() || !st.clients.contains(&client) {
+        return;
+    }
+    queue_job(&mut st, OP_BLOB_RELEASE, [client, res_id, 0, 0, 0, 0], None, &[]);
+    drop(st);
+    wake_module();
 }
 
 /// The module's answer to a guest ccmd.

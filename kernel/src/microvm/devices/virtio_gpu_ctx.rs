@@ -88,6 +88,11 @@ pub trait Backend: Send {
     }
     /// The guest let go of a resource that was object `blob_id`.
     fn release_blob(&mut self, ctx: u32, pages: &Arc<ForeignPixels>);
+    /// Whether `pages` of a blob are the card's memory (its VRAM aperture),
+    /// which the guest must stop reaching when the GPU module goes.
+    fn device_memory(&self, _pages: &ForeignPixels) -> bool {
+        false
+    }
     /// Context `ctx` uses resource `res_id`, an object of another context
     /// (`i915_renderer_attach_resource`: imported under the same res_id).
     fn attach_resource(&mut self, _ctx: u32, _res_id: u32, _pages: &Arc<ForeignPixels>) {}
@@ -137,6 +142,14 @@ pub struct Host3d {
     owned: bool,
     /// The guest's response buffer of `ctx`.
     shmem: bool,
+    /// Its pages were the card's and went with the GPU module.
+    pub lost: bool,
+}
+
+/// Whether HOST3D resource `r` lies in the card's memory rather than in
+/// frames this side keeps.
+pub fn device_memory(r: &Host3d) -> bool {
+    !r.owned && BACKEND.lock().as_ref().is_some_and(|b| b.device_memory(&r.pages))
 }
 
 struct Ctx {
@@ -227,7 +240,7 @@ impl Contexts {
             let pages = Arc::new(ForeignPixels::new(list));
             shm_apply(&pages, rsp_mem_offset, &b.shmem_update(handle, true));
             self.host3d.insert(res_id, Host3d {
-                ctx: ctx_id, handle, pages, size, map_info: MAP_CACHE_CACHED, mapped: None, owned: true, shmem: true,
+                ctx: ctx_id, handle, pages, size, map_info: MAP_CACHE_CACHED, mapped: None, owned: true, shmem: true, lost: false,
             });
             return Ok(());
         }
@@ -245,7 +258,7 @@ impl Contexts {
             shm_apply(&sh, b.rsp_mem_offset(), &words);
         }
         self.host3d.insert(res_id, Host3d {
-            ctx: ctx_id, handle, pages, size, map_info, mapped: None, owned: false, shmem: false,
+            ctx: ctx_id, handle, pages, size, map_info, mapped: None, owned: false, shmem: false, lost: false,
         });
         Ok(())
     }
