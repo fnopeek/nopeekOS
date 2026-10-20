@@ -247,7 +247,7 @@ Plan:
    Objektgroesse pruefen — eine gefaelschte Beschreibung darf nichts ausser dem
    eigenen Objekt im Compositor-Adressraum lesen.
 
-### 5.1 Gebaut (Modul 0.16.2, Geraetetest offen)
+### 5.1 Gebaut (Modul 0.16.3)
 
 Alle drei Punkte, und die Gast-T# wird **nie** benutzt: der Compositor baut
 die T# selbst, wie radeonsi beim Import (`si_texture_from_winsys_buffer`):
@@ -314,6 +314,44 @@ gerechnet. Mit nur seitenausgerichteter Basis (0.16.1) las die
 Textur-Einheit den DCC-Block HINTER dem Objekt — Lesefehler `TCP` verstreut
 in einem 64-KB-Block, die Szene hing, der Import schrieb nie.
 
-**Offen:** Import nur, wenn sich das Gastbild geaendert hat (heute jede
-Szene). Ein Lesefehler der Compositor-VM meldet sich als „retry page fault"
-und flutet den IH-Ring, obwohl Renoir `noretry` hat — eigener Posten.
+Eine Szene importiert und synchronisiert nur die Puffer, die sie NENNT
+(0.16.3; `buffers::surface` merkt sich jede Abfrage der Szenenpruefung).
+Vorher standen ALLE Gastobjekte in Import und BO-Liste: der Szenen-Job
+wartete per impliziter Sync auf den Puffer, den der Gast gerade zeichnet,
+und haengte selbst einen Fence an jeden Gastpuffer — jede Mausbewegung
+(eine Szene) sperrte das WebGL-Aquarium (30 000 Fische).
+
+### 5.2 Stand am Geraet (IdeaPad, 0.16.2)
+
+Firefox steht im Wirt, WebRender + WebGL auf radeonsi, keine Lesefehler.
+Gemessen:
+- Rahmen: 64KB_S_X mit Scanout ohne DCC (erste npkwm-Bilder, Objekt 1184
+  Seiten) und 64KB_D_X mit DCC (laufende, 1168 Seiten, DCC bei 4718592,
+  65536 Bytes, pipe/rb 1/1). Metadaten-Wort 1 = `0x1002164c`.
+- Alle Objekte 64-KB-ausgerichtet abgebildet, z. B. `0x1043C0000+0x490000`.
+
+Offen, in dieser Reihenfolge:
+1. **0.16.3 am Geraet**: blockiert WebGL beim Bewegen der Maus noch?
+2. **Fehlende Buchstaben/Elemente**, nur manchmal (zweiter Start im
+   Vollbild sauber) — also Timing, nicht Layout. Verdacht: Lesen vor dem
+   Ende der Gastarbeit. Implizite Sync ist im CS-Port Linux-treu
+   (radeonsi setzt nie EXPLICIT_SYNC, geteilte BOs stehen in jeder
+   Gast-BO-Liste) — am Geraet nicht gemessen. Naechster Schritt: alle 600
+   Szenen je Gastbild die Zahl offener Gast-Fences beim Abschicken loggen.
+   DCC-Fast-Clears sind unwahrscheinlich: radeonsi loest DCC vor dem
+   Weitergeben selbst auf (`si_flush_resource`, `gfx/si_blit.c`).
+3. **„Bugwelle" beim Scrollen** (Florian: wie ein vsync-Problem, unter
+   Intel nicht). Nicht untersucht. Kandidaten: der Gast zeichnet schon in
+   den Puffer, den wir gerade importieren (Puffer-Freigabe an den Gast zu
+   frueh?), oder die Szene laeuft laenger und das Bild kommt verspaetet.
+   Erst messen: Szenendauer mit/ohne Import (`gpu_us` im Szenenbericht).
+4. Die 600-Szenen-Pixelzeile liest den linearen VRAM-Puffer ueber
+   `kptr` ab `res.start` — fuer einen NICHT zusammenhaengenden VRAM-Puffer
+   zeigt sie fremden Speicher (`0xffffffff … 0x10101010` in allen alten
+   Puffern). Diagnose korrigieren, bevor man ihr glaubt.
+5. Import nur bei geaendertem Gastbild (heute jede Szene je gezeigtem
+   Bild).
+6. Ein Lesefehler der Compositor-VM meldet sich als „retry page fault" und
+   flutet den IH-Ring, obwohl Renoir `noretry` hat — eigener Posten.
+7. Hardware-Videodekodierung „unsupported" ist erwartet: VA-API auf AMD
+   braucht VCN (Stufe 6).

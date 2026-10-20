@@ -454,15 +454,18 @@ fn import_frame(adev: &mut amdgpu_device, c: &composer, b: &mut batch, f: &frame
              [f.width.div_ceil(sg::WIDTH), f.height, 1])
 }
 
-/// Runs the scene of job `seq` (`bytes` of payload) into `target_id`;
-/// `bos` are the kernel's buffers the scene may name, `imports` the tiled
-/// guest frames among them, imported first.
-pub fn submit_scene(adev: &mut amdgpu_device, c: &mut composer, bufs: &dyn gpu_scene::scene::buffers, bos: &[usize],
-                    imports: &[frame_import], seq: u32, target_id: u32, bytes: u32) -> Result<scene_inflight, i32> {
+/// Runs the scene of job `seq` (`bytes` of payload) into `target_id`.
+/// Once the scene is checked, `used` gives the buffer objects of the
+/// buffers it names and the tiled guest frames among them, imported
+/// first.
+pub fn submit_scene(adev: &mut amdgpu_device, c: &mut composer, bufs: &dyn gpu_scene::scene::buffers,
+                    used: &dyn Fn() -> (Vec<usize>, Vec<frame_import>), seq: u32, target_id: u32, bytes: u32)
+                    -> Result<scene_inflight, i32> {
     let ck = gpu_scene::scene::check_scene(&job_payload(seq), bytes, bufs, &mut scene_mem(adev, c.scene), target_id)?;
+    let (bos, imports) = used();
     let mut log = dispatch_log::default();
     let mut b = batch::new();
-    for f in imports {
+    for f in &imports {
         import_frame(adev, c, &mut b, f)?;
         log.push(rs::K_IMPORT, &rect { x: 0, y: 0, w: f.width, h: f.height }, 0);
     }
@@ -472,7 +475,7 @@ pub fn submit_scene(adev: &mut amdgpu_device, c: &mut composer, bufs: &dyn gpu_s
     plan::plan(&mut s, &lim, &ck.screen, &ck.damage, &ck.shapes, ck.radius)?;
     let b = s.b;
     let t0 = crate::linux::now_us();
-    let f = submit(adev, c, b, bos)?;
+    let f = submit(adev, c, b, &bos)?;
     Ok(scene_inflight { f, log, items: ck.shapes.len() as u32, shapes: ck.shapes, t0 })
 }
 

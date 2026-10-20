@@ -385,6 +385,8 @@ struct service {
     /// The scene sources that are guest VRAM objects: id and the VRAM
     /// offset of each page, for the pixel log.
     guest_bos: Vec<(u32, Vec<u64>)>,
+    /// The buffers the scene being checked names (`buffers::surface`).
+    named: core::cell::RefCell<Vec<u32>>,
 }
 
 impl service {
@@ -398,21 +400,31 @@ impl service {
         b.filter(|b| b.node.is_some())
     }
 
-    /// The buffer objects a scene may touch.
+    /// The buffers the scene just checked names: the kernel's own, and of
+    /// the others only those, so that its job syncs with and fences no
+    /// guest buffer it does not read.
     fn scene_bos(&self) -> Vec<usize> {
-        self.bos.iter().chain(self.dyn_bos.iter())
+        let named = self.named.borrow();
+        self.bos.iter().chain(self.dyn_bos.iter().filter(|b| named.contains(&b.id)))
             .flat_map(|b| b.pieces.iter().flatten().map(|p| p.0).chain(b.linear.map(|g| g.bo)))
             .collect()
     }
 
-    /// The tiled guest frames, imported at the start of every scene.
+    /// The tiled guest frames the scene just checked shows, imported
+    /// before it is composed.
     fn imports(&self) -> Vec<compose::frame_import> {
-        self.dyn_bos.iter().filter_map(|b| b.import).collect()
+        let named = self.named.borrow();
+        self.dyn_bos.iter().filter(|b| named.contains(&b.id)).filter_map(|b| b.import).collect()
     }
 }
 
 impl gpu_scene::scene::buffers for service {
     fn surface(&self, id: u32) -> Option<gpu_scene::scene::surface> {
+        let mut named = self.named.borrow_mut();
+        if !named.contains(&id) {
+            named.push(id);
+        }
+        drop(named);
         self.bo(id).map(|b| gpu_scene::scene::surface { va: b.va, pitch: b.pitch, width: b.width, height: b.height,
                                                         size: b.size })
     }
@@ -683,11 +695,10 @@ fn bo_remove(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(),
 /// `poll_scene` sees it done.
 fn run_scene(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32, bytes: u32) -> i32 {
     drain_scene(adev, svc);
-    let bos = svc.scene_bos();
-    let imports = svc.imports();
+    svc.named.borrow_mut().clear();
     let Some(mut c) = svc.composer.take() else { return -EINVAL };
     let t0 = crate::linux::now_us();
-    let r = compose::submit_scene(adev, &mut c, &*svc, &bos, &imports, seq, target, bytes);
+    let r = compose::submit_scene(adev, &mut c, &*svc, &|| (svc.scene_bos(), svc.imports()), seq, target, bytes);
     svc.composer = Some(c);
     match r {
         Ok(s) => {
@@ -909,7 +920,7 @@ pub fn serve(adev: &mut amdgpu_device) {
     }
     let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: Vec::new(), copy_ok: false, composer: None,
                             scene: None, scenes: 0, native: Default::default(), waits: Vec::new(),
-                            guest_bos: Vec::new() };
+                            guest_bos: Vec::new(), named: core::cell::RefCell::new(Vec::new()) };
     for id in 0..NUM_BOS {
         let Some(info) = bo_info(id as u32) else {
             Line::new().s("gpudev: no buffer ").dec(id as u64).say();
