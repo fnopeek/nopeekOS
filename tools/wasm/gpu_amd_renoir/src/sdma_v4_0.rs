@@ -555,9 +555,9 @@ pub fn sdma_v4_0_ring_test_ring(adev: &mut amdgpu_device, r: usize) -> i32 {
 
 use crate::amdgpu_ring::amdgpu_ring_write as rw;
 
-/// `sdma_v4_0_ring_emit_ib` without a job (VMID 0).
-pub fn sdma_v4_0_ring_emit_ib(adev: &mut amdgpu_device, r: usize, ib: &crate::amdgpu_ib::amdgpu_ib, _flags: u32) {
-    let vmid = 0u32;
+/// `sdma_v4_0_ring_emit_ib`.
+pub fn sdma_v4_0_ring_emit_ib(adev: &mut amdgpu_device, r: usize, vmid: u32, ib: &crate::amdgpu_ib::amdgpu_ib,
+                              _flags: u32) {
     // IB packet must end on a 8 DW boundary
     let pad = (2u32.wrapping_sub(adev.rings[r].wptr as u32)) & 7;
     sdma_v4_0_ring_insert_nop(adev, r, pad);
@@ -596,6 +596,53 @@ pub fn sdma_v4_0_ring_emit_fence(adev: &mut amdgpu_device, r: usize, addr: u64, 
     rw(adev, r, (0 & SDMA_PKT_TRAP_INT_CONTEXT_int_context_mask) << SDMA_PKT_TRAP_INT_CONTEXT_int_context_shift);
 }
 
+/// `sdma_v4_0_wait_reg_mem`: wait until `ref` == `*addr & mask`.
+fn sdma_v4_0_wait_reg_mem(adev: &mut amdgpu_device, r: usize, mem_space: u32, hdp: u32, addr0: u32, addr1: u32,
+                          ref_: u32, mask: u32, inv: u32) {
+    rw(adev, r, SDMA_PKT_HEADER_OP_POLL_REGMEM
+        | (hdp & SDMA_PKT_POLL_REGMEM_HEADER_hdp_flush_mask) << SDMA_PKT_POLL_REGMEM_HEADER_hdp_flush_shift
+        | (mem_space & SDMA_PKT_POLL_REGMEM_HEADER_mem_poll_mask) << SDMA_PKT_POLL_REGMEM_HEADER_mem_poll_shift
+        | SDMA_PKT_POLL_REGMEM_HEADER_FUNC_3); // ==
+    if mem_space != 0 {
+        // memory
+        rw(adev, r, addr0);
+        rw(adev, r, addr1);
+    } else {
+        // registers
+        rw(adev, r, addr0 << 2);
+        rw(adev, r, addr1 << 2);
+    }
+    rw(adev, r, ref_); // reference
+    rw(adev, r, mask); // mask
+    rw(adev, r, SDMA_PKT_POLL_REGMEM_DW5_RETRY_COUNT_FFF
+        | (inv & SDMA_PKT_POLL_REGMEM_DW5_interval_mask) << SDMA_PKT_POLL_REGMEM_DW5_interval_shift); // retry count, poll interval
+}
+
+/// `sdma_v4_0_ring_emit_pipeline_sync`: wait for the ring's last fence.
+pub fn sdma_v4_0_ring_emit_pipeline_sync(adev: &mut amdgpu_device, r: usize) {
+    let seq = adev.rings[r].fence_drv.sync_seq;
+    let addr = adev.rings[r].fence_drv.gpu_addr;
+    // wait for idle
+    sdma_v4_0_wait_reg_mem(adev, r, 1, 0, addr as u32 & 0xfffffffc, (addr >> 32) as u32, seq, 0xffffffff, 4);
+}
+
+/// `sdma_v4_0_ring_emit_vm_flush`.
+pub fn sdma_v4_0_ring_emit_vm_flush(adev: &mut amdgpu_device, r: usize, vmid: u32, pd_addr: u64) {
+    crate::gmc_v9_0::gmc_v9_0_emit_flush_gpu_tlb(adev, r, vmid, pd_addr);
+}
+
+/// `sdma_v4_0_ring_emit_wreg`.
+pub fn sdma_v4_0_ring_emit_wreg(adev: &mut amdgpu_device, r: usize, reg: u32, val: u32) {
+    rw(adev, r, SDMA_PKT_HEADER_OP_SRBM_WRITE | SDMA_PKT_SRBM_WRITE_HEADER_BYTE_EN_F as u32);
+    rw(adev, r, reg);
+    rw(adev, r, val);
+}
+
+/// `sdma_v4_0_ring_emit_reg_wait`.
+pub fn sdma_v4_0_ring_emit_reg_wait(adev: &mut amdgpu_device, r: usize, reg: u32, val: u32, mask: u32) {
+    sdma_v4_0_wait_reg_mem(adev, r, 0, 0, reg, 0, val, mask, 10);
+}
+
 /// `sdma_v4_0_ring_test_ib`.
 pub fn sdma_v4_0_ring_test_ib(adev: &mut amdgpu_device, r: usize, timeout: i64) -> i32 {
     use crate::amdgpu_ib::{amdgpu_ib, amdgpu_ib_free, amdgpu_ib_get, amdgpu_ib_schedule};
@@ -618,10 +665,10 @@ pub fn sdma_v4_0_ring_test_ib(adev: &mut amdgpu_device, r: usize, timeout: i64) 
         ib.set(adev, 6, SDMA_PKT_NOP_HEADER_OP_NOP);
         ib.set(adev, 7, SDMA_PKT_NOP_HEADER_OP_NOP);
         ib.length_dw = 8;
-        ret = match amdgpu_ib_schedule(adev, r, &[&ib]) {
+        ret = match amdgpu_ib_schedule(adev, r, core::slice::from_ref(&ib), None) {
             Err(e) => e,
             Ok(f) => {
-                let t = crate::amdgpu_fence::dma_fence_wait_timeout(adev, f, timeout);
+                let t = crate::dma_fence::dma_fence_wait_timeout(adev, &f, timeout);
                 if t == 0 {
                     -110
                 } else if crate::amdgpu_gart::kptr_r32(adev, wb, index as u64 * 4) == 0xDEADBEEF {

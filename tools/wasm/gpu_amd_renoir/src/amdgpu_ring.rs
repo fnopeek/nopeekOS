@@ -138,9 +138,11 @@ pub struct amdgpu_fence_driver {
     pub irq_src: Option<amdgpu_irq_src_id>,
     pub irq_type: u32,
     pub num_fences_mask: u32,
-    /// `fences`: the sequence numbers outstanding, `num_hw_submission * 2`
-    /// slots.
-    pub fences: Vec<Option<u32>>,
+    /// `fences`: the fences outstanding, `num_hw_submission * 2` slots.
+    pub fences: Vec<Option<crate::dma_fence::Fence>>,
+    /// `signalled_wptr`: the ring's write pointer after the last fence
+    /// signaled.
+    pub signalled_wptr: u64,
     /// `fallback_timer`: when it fires, if armed.
     pub fallback_deadline_us: Option<u64>,
 }
@@ -189,8 +191,9 @@ pub struct amdgpu_ring {
     pub ring_backup: Vec<u8>,
     pub count_dw: i32,
     pub wptr_old: u64,
-    /// `sched.ready`.
-    pub sched_ready: bool,
+    pub sched: crate::drm_sched::drm_gpu_scheduler,
+    pub vmid_wait: crate::dma_fence::Fence,
+    pub has_compute_vm_bug: bool,
     pub current_ctx: u64,
     pub vm_inv_eng: u32,
 }
@@ -239,7 +242,9 @@ impl amdgpu_ring {
             ring_backup: Vec::new(),
             count_dw: 0,
             wptr_old: 0,
-            sched_ready: false,
+            sched: Default::default(),
+            vmid_wait: crate::dma_fence::dma_fence_get_stub(),
+            has_compute_vm_bug: false,
             current_ctx: 0,
             vm_inv_eng: 0,
         }
@@ -580,7 +585,7 @@ pub fn amdgpu_ring_test_helper(adev: &mut amdgpu_device, r: usize) -> i32 {
     } else {
         Line::new().s("ring test on ").s(&adev.rings[r].name.clone()).s(" succeeded").dbg();
     }
-    adev.rings[r].sched_ready = ret == 0;
+    adev.rings[r].sched.ready = ret == 0;
     ret
 }
 
@@ -676,12 +681,15 @@ pub fn amdgpu_ring_patch_cond_exec(adev: &mut amdgpu_device, r: usize, offset: O
     crate::amdgpu_gart::kptr_w32(adev, k, offset as u64 * 4, end - start);
 }
 
-/// `amdgpu_ring_emit_ib`.
-pub fn amdgpu_ring_emit_ib(adev: &mut amdgpu_device, r: usize, ib: &crate::amdgpu_ib::amdgpu_ib, flags: u32) {
+/// `amdgpu_ring_emit_ib`; the GFX ring runs no job here, so its VMID is 0.
+pub fn amdgpu_ring_emit_ib(adev: &mut amdgpu_device, r: usize, vmid: u32, ib: &crate::amdgpu_ib::amdgpu_ib,
+                           flags: u32) {
     match adev.rings[r].funcs.ops {
         ring_ops::gfx_v9_0_gfx => crate::gfx_v9_0::gfx_v9_0_ring_emit_ib_gfx(adev, r, ib, flags),
-        ring_ops::gfx_v9_0_compute => crate::gfx_v9_0::gfx_v9_0_ring_emit_ib_compute(adev, r, ib, flags),
-        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_ring_emit_ib(adev, r, ib, flags),
+        ring_ops::gfx_v9_0_compute => crate::gfx_v9_0::gfx_v9_0_ring_emit_ib_compute(adev, r, vmid, ib, flags),
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => {
+            crate::sdma_v4_0::sdma_v4_0_ring_emit_ib(adev, r, vmid, ib, flags)
+        }
         _ => Line::new().s("emit_ib: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
     }
 }
@@ -692,8 +700,89 @@ pub fn amdgpu_ring_emit_wreg(adev: &mut amdgpu_device, r: usize, reg: u32, val: 
         ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute | ring_ops::gfx_v9_0_kiq => {
             crate::gfx_v9_0::gfx_v9_0_ring_emit_wreg(adev, r, reg, val)
         }
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_ring_emit_wreg(adev, r, reg, val),
         _ => Line::new().s("emit_wreg: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
     }
+}
+
+/// Whether `ring->funcs->emit_wreg` is set.
+pub fn has_emit_wreg(adev: &amdgpu_device, r: usize) -> bool {
+    matches!(adev.rings[r].funcs.ops, ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute | ring_ops::gfx_v9_0_kiq
+        | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page)
+}
+
+/// Whether `emit_pipeline_sync` and `emit_vm_flush` are set.
+pub fn has_emit_vm_flush(adev: &amdgpu_device, r: usize) -> bool {
+    matches!(adev.rings[r].funcs.ops, ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute
+        | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page)
+}
+
+/// Whether `emit_gds_switch` is set.
+pub fn has_emit_gds_switch(adev: &amdgpu_device, r: usize) -> bool {
+    matches!(adev.rings[r].funcs.ops, ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute)
+}
+
+/// `amdgpu_ring_emit_reg_wait`.
+pub fn amdgpu_ring_emit_reg_wait(adev: &mut amdgpu_device, r: usize, reg: u32, val: u32, mask: u32) {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute | ring_ops::gfx_v9_0_kiq => {
+            crate::gfx_v9_0::gfx_v9_0_ring_emit_reg_wait(adev, r, reg, val, mask)
+        }
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => {
+            crate::sdma_v4_0::sdma_v4_0_ring_emit_reg_wait(adev, r, reg, val, mask)
+        }
+        _ => Line::new().s("emit_reg_wait: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
+    }
+}
+
+/// `amdgpu_ring_emit_reg_write_reg_wait_helper`.
+pub fn amdgpu_ring_emit_reg_write_reg_wait_helper(adev: &mut amdgpu_device, r: usize, reg0: u32, reg1: u32, ref_: u32,
+                                                  mask: u32) {
+    amdgpu_ring_emit_wreg(adev, r, reg0, ref_);
+    amdgpu_ring_emit_reg_wait(adev, r, reg1, mask, mask);
+}
+
+/// `amdgpu_ring_emit_reg_write_reg_wait`.
+pub fn amdgpu_ring_emit_reg_write_reg_wait(adev: &mut amdgpu_device, r: usize, reg0: u32, reg1: u32, ref_: u32,
+                                           mask: u32) {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute | ring_ops::gfx_v9_0_kiq => {
+            crate::gfx_v9_0::gfx_v9_0_ring_emit_reg_write_reg_wait(adev, r, reg0, reg1, ref_, mask)
+        }
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => {
+            amdgpu_ring_emit_reg_write_reg_wait_helper(adev, r, reg0, reg1, ref_, mask)
+        }
+        _ => Line::new().s("emit_reg_write_reg_wait: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
+    }
+}
+
+/// `amdgpu_ring_emit_pipeline_sync`.
+pub fn amdgpu_ring_emit_pipeline_sync(adev: &mut amdgpu_device, r: usize) {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute => crate::gfx_v9_0::gfx_v9_0_ring_emit_pipeline_sync(adev, r),
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_ring_emit_pipeline_sync(adev, r),
+        _ => Line::new().s("emit_pipeline_sync: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
+    }
+}
+
+/// `amdgpu_ring_emit_vm_flush`.
+pub fn amdgpu_ring_emit_vm_flush(adev: &mut amdgpu_device, r: usize, vmid: u32, pd_addr: u64) {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute => {
+            crate::gfx_v9_0::gfx_v9_0_ring_emit_vm_flush(adev, r, vmid, pd_addr)
+        }
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => {
+            crate::sdma_v4_0::sdma_v4_0_ring_emit_vm_flush(adev, r, vmid, pd_addr)
+        }
+        _ => Line::new().s("emit_vm_flush: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
+    }
+}
+
+/// `amdgpu_ring_emit_gds_switch`.
+pub fn amdgpu_ring_emit_gds_switch(adev: &mut amdgpu_device, r: usize, vmid: u32, gds_base: u32, gds_size: u32,
+                                   gws_base: u32, gws_size: u32, oa_base: u32, oa_size: u32) {
+    crate::gfx_v9_0::gfx_v9_0_ring_emit_gds_switch(adev, r, vmid, gds_base, gds_size, gws_base, gws_size, oa_base,
+                                                   oa_size);
 }
 
 /// Whether `ring->funcs->test_ib` is set: compute and SDMA rings (the GFX

@@ -114,7 +114,7 @@ fn main() {
     println!("sdma_v4_0_hw_init {}", sdma_v4_0::sdma_v4_0_hw_init(&mut adev));
     for &r in order.iter() {
         let ring = &adev.rings[r];
-        println!("ready {} {} wptr {:#x}", ring.name, ring.sched_ready as u32,
+        println!("ready {} {} wptr {:#x}", ring.name, ring.sched.ready as u32,
                  amdgpu_ring::ring_wb_read64(&adev, ring.wptr_offs));
     }
     let mut l = String::from("wb used");

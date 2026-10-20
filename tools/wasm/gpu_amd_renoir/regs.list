@@ -2988,6 +2988,8 @@ AMDGPU_IB_FLAG_TC_WB_NOT_INVALIDATE @ gfx_v9_0.c
 AMDGPU_IB_FLAGS_SECURE @ gfx_v9_0.c
 AMDGPU_HAVE_CTX_SWITCH @ gfx_v9_0.c
 AMDGPU_IB_POOL_DIRECT @ gfx_v9_0.c
+AMDGPU_IB_POOL_DELAYED @ amdgpu_ttm.c
+AMDGPU_IB_POOL_IMMEDIATE @ amdgpu_vm_sdma.c
 AMDGPU_CP_IRQ_COMPUTE_MEC1_PIPE1_EOP @ gfx_v9_0.c
 AMDGPU_CP_IRQ_COMPUTE_MEC1_PIPE2_EOP @ gfx_v9_0.c
 AMDGPU_CP_IRQ_COMPUTE_MEC1_PIPE3_EOP @ gfx_v9_0.c
@@ -3059,3 +3061,27 @@ SMU_MSG_GetMinGfxclkFrequency @ ../pm/swsmu/smu_cmn.c
 GetMinGfxclkFrequency_NAME$ = __smu_message_names[SMU_MSG_GetMinGfxclkFrequency] @ ../pm/swsmu/smu_cmn.c
 SMU_MSG_GetMaxGfxclkFrequency @ ../pm/swsmu/smu_cmn.c
 GetMaxGfxclkFrequency_NAME$ = __smu_message_names[SMU_MSG_GetMaxGfxclkFrequency] @ ../pm/swsmu/smu_cmn.c
+# The VM flush and pipeline sync of a job (amdgpu_vm_flush)
+PACKET3_WAIT_REG_MEM @ gfx_v9_0.c
+PACKET3_PFP_SYNC_ME @ gfx_v9_0.c
+PACKET3_SWITCH_BUFFER @ gfx_v9_0.c
+WAIT_REG_MEM_FUNCTION_3 = WAIT_REG_MEM_FUNCTION(3) @ gfx_v9_0.c
+WAIT_REG_MEM_MEM_SPACE_1 = WAIT_REG_MEM_MEM_SPACE(1) @ gfx_v9_0.c
+WAIT_REG_MEM_OPERATION_1 = WAIT_REG_MEM_OPERATION(1) @ gfx_v9_0.c
+WAIT_REG_MEM_ENGINE_1 = WAIT_REG_MEM_ENGINE(1) @ gfx_v9_0.c
+GC_GDS_GWS_VMID0__SIZE__SHIFT = GDS_GWS_VMID0__SIZE__SHIFT @ gfx_v9_0.c
+OSS_mmIH_VMID_0_LUT = mmIH_VMID_0_LUT @ gmc_v9_0.c
+OSS_mmIH_VMID_0_LUT_BASE_IDX = mmIH_VMID_0_LUT_BASE_IDX @ gmc_v9_0.c
+OSS_mmIH_VMID_0_LUT_MM = mmIH_VMID_0_LUT_MM @ gmc_v9_0.c
+OSS_mmIH_VMID_0_LUT_MM_BASE_IDX = mmIH_VMID_0_LUT_MM_BASE_IDX @ gmc_v9_0.c
+SDMA_PKT_HEADER_OP_POLL_REGMEM = SDMA_PKT_HEADER_OP(SDMA_OP_POLL_REGMEM) @ sdma_v4_0.c
+SDMA_PKT_HEADER_OP_SRBM_WRITE = SDMA_PKT_HEADER_OP(SDMA_OP_SRBM_WRITE) @ sdma_v4_0.c
+SDMA_PKT_SRBM_WRITE_HEADER_BYTE_EN_F = SDMA_PKT_SRBM_WRITE_HEADER_BYTE_EN(0xf) @ sdma_v4_0.c
+SDMA_PKT_POLL_REGMEM_HEADER_hdp_flush_mask @ sdma_v4_0.c
+SDMA_PKT_POLL_REGMEM_HEADER_hdp_flush_shift @ sdma_v4_0.c
+SDMA_PKT_POLL_REGMEM_HEADER_mem_poll_mask @ sdma_v4_0.c
+SDMA_PKT_POLL_REGMEM_HEADER_mem_poll_shift @ sdma_v4_0.c
+SDMA_PKT_POLL_REGMEM_HEADER_FUNC_3 = SDMA_PKT_POLL_REGMEM_HEADER_FUNC(3) @ sdma_v4_0.c
+SDMA_PKT_POLL_REGMEM_DW5_RETRY_COUNT_FFF = SDMA_PKT_POLL_REGMEM_DW5_RETRY_COUNT(0xfff) @ sdma_v4_0.c
+SDMA_PKT_POLL_REGMEM_DW5_interval_mask @ sdma_v4_0.c
+SDMA_PKT_POLL_REGMEM_DW5_interval_shift @ sdma_v4_0.c

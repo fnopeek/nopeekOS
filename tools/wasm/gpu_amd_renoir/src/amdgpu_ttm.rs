@@ -503,11 +503,40 @@ pub fn amdgpu_gtt_mgr_recover(adev: &mut amdgpu_device) {
     }
 }
 
-/// `amdgpu_ttm_set_buffer_funcs_status(adev, false)` before the rings:
-/// nothing to tear down, only the VRAM size TTM sees.
-fn amdgpu_ttm_set_buffer_funcs_status(adev: &mut amdgpu_device, enable: bool) {
+/// `amdgpu_ttm_set_buffer_funcs_status`: the buffer functions' entities on
+/// their ring's scheduler, and the VRAM size TTM sees.
+pub fn amdgpu_ttm_set_buffer_funcs_status(adev: &mut amdgpu_device, enable: bool) {
     if !adev.mman.initialized || adev.mman.buffer_funcs_enabled == enable || adev.gmc.is_app_apu {
         return;
+    }
+    if enable {
+        let Some(ring) = adev.sdma.instance[0].ring else { return };
+        let sched = [ring];
+        match crate::drm_sched::drm_sched_entity_init(adev, crate::drm_sched::DRM_SCHED_PRIORITY_KERNEL, &sched, None) {
+            Ok(e) => adev.mman.high_pr = Some(e),
+            Err(r) => {
+                Line::new().s("Failed setting up TTM BO move entity (").dec((-r) as u64).s(")").say();
+                return;
+            }
+        }
+        match crate::drm_sched::drm_sched_entity_init(adev, crate::drm_sched::DRM_SCHED_PRIORITY_NORMAL, &sched, None) {
+            Ok(e) => adev.mman.low_pr = Some(e),
+            Err(r) => {
+                Line::new().s("Failed setting up TTM BO move entity (").dec((-r) as u64).s(")").say();
+                if let Some(e) = adev.mman.high_pr.take() {
+                    crate::drm_sched::drm_sched_entity_destroy(adev, e);
+                }
+                return;
+            }
+        }
+    } else {
+        if let Some(e) = adev.mman.high_pr.take() {
+            crate::drm_sched::drm_sched_entity_destroy(adev, e);
+        }
+        if let Some(e) = adev.mman.low_pr.take() {
+            crate::drm_sched::drm_sched_entity_destroy(adev, e);
+        }
+        // dma_fence_put(man->move): no move fence is kept here
     }
     let size = if enable { adev.gmc.real_vram_size } else { adev.gmc.visible_vram_size };
     if let Some(m) = adev.mman.vram_mgr.as_mut() {
@@ -734,22 +763,38 @@ pub fn amdgpu_ttm_init(adev: &mut amdgpu_device) -> i32 {
     0
 }
 
-/// `amdgpu_copy_buffer` with `direct_submit` and without a reservation
-/// object or a VM flush: the copy packets of every span in one IB of
-/// `amdgpu_ttm_prepare_job`'s direct pool, scheduled on `r`. One span is
-/// Linux's call; several are the rows of a rectangle.
-pub fn amdgpu_copy_spans(adev: &mut amdgpu_device, r: usize, spans: &[(u64, u64, u32)], copy_flags: u32)
-                         -> Result<crate::amdgpu_fence::dma_fence, i32> {
-    use crate::amdgpu_ib::{amdgpu_ib, amdgpu_ib_free, amdgpu_ib_get, amdgpu_ib_schedule};
+/// `amdgpu_ttm_prepare_job` without a reservation object.
+fn amdgpu_ttm_prepare_job(adev: &mut amdgpu_device, direct_submit: bool, num_dw: u32, vm_needs_flush: bool,
+                          delayed: bool) -> Result<u64, i32> {
+    let pool = if direct_submit { AMDGPU_IB_POOL_DIRECT } else { AMDGPU_IB_POOL_DELAYED };
+    let entity = if delayed { adev.mman.low_pr } else { adev.mman.high_pr };
+    let j = crate::amdgpu_job::amdgpu_job_alloc_with_ib(adev, entity, crate::amdgpu_sync::AMDGPU_FENCE_OWNER_UNDEFINED,
+                                                        num_dw * 4, pool)?;
+    if vm_needs_flush {
+        // no pdb0_bo without XGMI: the GART table
+        let pd = crate::amdgpu_gmc::amdgpu_gmc_pd_addr(adev, adev.gart.bo.unwrap());
+        let job = crate::amdgpu_job::job(adev, j);
+        job.vm_pd_addr = pd;
+        job.vm_needs_flush = true;
+    }
+    Ok(j)
+}
+
+/// `amdgpu_copy_buffer` without a reservation object, over spans: one
+/// span is Linux's call, several are the rows of a rectangle in one job.
+/// The copy runs on the buffer functions' entity unless `direct_submit`.
+pub fn amdgpu_copy_spans(adev: &mut amdgpu_device, r: usize, spans: &[(u64, u64, u32)], direct_submit: bool,
+                         vm_needs_flush: bool, copy_flags: u32) -> Result<crate::dma_fence::Fence, i32> {
     use crate::sdma_v4_0::{SDMA_V4_0_COPY_MAX_BYTES, SDMA_V4_0_COPY_NUM_DW};
+    if !direct_submit && !adev.rings[r].sched.ready {
+        Line::new().s("Trying to move memory with ring turned off.").say();
+        return Err(-22);
+    }
     let max_bytes = SDMA_V4_0_COPY_MAX_BYTES;
     let num_loops: u32 = spans.iter().map(|s| s.2.div_ceil(max_bytes)).sum();
     let num_dw = crate::linux::align((num_loops * SDMA_V4_0_COPY_NUM_DW) as u64, 8) as u32;
-    let mut ib = amdgpu_ib::new();
-    let r0 = amdgpu_ib_get(adev, num_dw * 4, AMDGPU_IB_POOL_DIRECT, &mut ib);
-    if r0 != 0 {
-        return Err(r0);
-    }
+    let j = amdgpu_ttm_prepare_job(adev, direct_submit, num_dw, vm_needs_flush, false)?;
+    let mut ib = crate::amdgpu_job::job(adev, j).ibs[0].clone();
     for &(mut src_offset, mut dst_offset, mut byte_count) in spans {
         while byte_count != 0 {
             let cur_size_in_bytes = byte_count.min(max_bytes);
@@ -762,18 +807,19 @@ pub fn amdgpu_copy_spans(adev: &mut amdgpu_device, r: usize, spans: &[(u64, u64,
     }
     crate::sdma_v4_0::sdma_v4_0_ring_pad_ib(adev, r, &mut ib);
     if ib.length_dw > num_dw {
-        Line::new().s("amdgpu_copy_buffer: IB overrun").say();
+        Line::new().s("WARNING: amdgpu_copy_buffer: IB overrun").say();
     }
-    // amdgpu_job_submit_direct, then amdgpu_job_free
-    match amdgpu_ib_schedule(adev, r, &[&ib]) {
-        Ok(f) => {
-            amdgpu_ib_free(adev, &mut ib, Some(f));
-            Ok(f)
+    crate::amdgpu_job::job(adev, j).ibs[0] = ib;
+    if direct_submit {
+        match crate::amdgpu_job::amdgpu_job_submit_direct(adev, j, r) {
+            Ok(f) => Ok(f),
+            Err(e) => {
+                crate::amdgpu_job::amdgpu_job_free(adev, j);
+                Line::new().s("Error scheduling IBs (").dec((-e) as u64).s(")").say();
+                Err(e)
+            }
         }
-        Err(e) => {
-            amdgpu_ib_free(adev, &mut ib, None);
-            Line::new().s("Error scheduling IBs (").dec((-e) as u64).s(")").say();
-            Err(e)
-        }
+    } else {
+        Ok(crate::amdgpu_job::amdgpu_job_submit(adev, j))
     }
 }

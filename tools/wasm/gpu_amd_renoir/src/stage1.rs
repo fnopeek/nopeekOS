@@ -200,7 +200,7 @@ fn report_rings(adev: &amdgpu_device, what: &str) {
         if matches!(r.funcs.ops, crate::amdgpu_ring::ring_ops::gfx_v9_0_gfx | crate::amdgpu_ring::ring_ops::gfx_v9_0_compute
             | crate::amdgpu_ring::ring_ops::gfx_v9_0_kiq | crate::amdgpu_ring::ring_ops::sdma_v4_0)
         {
-            l.s(" ").s(&r.name).s(if r.sched_ready { "+" } else { "-" });
+            l.s(" ").s(&r.name).s(if r.sched.ready { "+" } else { "-" });
         }
     }
     l.say();
@@ -212,8 +212,8 @@ fn report_rings(adev: &amdgpu_device, what: &str) {
 /// service while it runs, and then `amdgpu_device_fini_hw` before the card
 /// goes back. Between phase2
 /// and late_init Linux also sets up RAS recovery (no RAS here), the
-/// schedulers and TTM's buffer functions (no scheduler in the module
-/// yet), KFD and the FRU (an APU has none).
+/// schedulers and TTM's buffer functions, KFD and the FRU (an APU has
+/// none).
 fn ip_init_phase2(adev: &mut amdgpu_device) {
     let r = dev::amdgpu_device_ip_hw_init_phase2(adev);
     let smu = &adev.smu;
@@ -229,6 +229,15 @@ fn ip_init_phase2(adev: &mut amdgpu_device) {
         Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
         dev::amdgpu_device_fini_hw(adev);
         return;
+    }
+    let r = dev::amdgpu_device_init_schedulers(adev);
+    if r != 0 {
+        dev::amdgpu_device_fini_hw(adev);
+        return;
+    }
+    let buffer_ring = adev.sdma.instance[0].ring;
+    if buffer_ring.is_some_and(|b| adev.rings[b].sched.ready) {
+        crate::amdgpu_ttm::amdgpu_ttm_set_buffer_funcs_status(adev, true);
     }
     crate::amdgpu_fence::amdgpu_fence_driver_hw_init(adev);
     let r = dev::amdgpu_device_ip_late_init(adev);

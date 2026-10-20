@@ -5,22 +5,21 @@
 //! The suballocator's two lists are kept as vectors: `olist` in offset
 //! order, `hole` as the index of the entry the hole follows (`None` for
 //! the list head), each `flist` as a queue of entries waiting on their
-//! fence. A fence's context is its ring's index: `dma_fence_context_alloc`
-//! hands Linux an arbitrary base, and only `context % MAX_QUEUES` is used.
+//! fence.
 
 use crate::amdgpu_device::amdgpu_device;
-use crate::amdgpu_fence::{dma_fence, dma_fence_is_signaled};
+use crate::dma_fence::{dma_fence_is_signaled, Fence};
 use crate::linux::Line;
 use crate::regs::*;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 /// `struct drm_suballoc`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct drm_suballoc {
     soffset: u32,
     eoffset: u32,
-    fence: Option<dma_fence>,
+    fence: Option<Fence>,
 }
 
 /// `struct drm_suballoc_manager`.
@@ -53,8 +52,8 @@ impl drm_suballoc_manager {
         drm_suballoc_manager { size, align, ..Default::default() }
     }
 
-    fn get(&self, slot: usize) -> drm_suballoc {
-        self.sa[slot].unwrap()
+    fn get(&self, slot: usize) -> &drm_suballoc {
+        self.sa[slot].as_ref().unwrap()
     }
 
     /// The position of the entry after the hole, if any.
@@ -80,12 +79,12 @@ impl drm_suballoc_manager {
     }
 
     /// `drm_suballoc_try_free`.
-    fn try_free(&mut self, adev: &amdgpu_device) {
+    fn try_free(&mut self, adev: &mut amdgpu_device) {
         let Some(pos) = self.hole_next() else { return };
         while pos < self.olist.len() {
             let slot = self.olist[pos];
-            match self.get(slot).fence {
-                Some(f) if dma_fence_is_signaled(adev, f) => self.remove(slot),
+            match self.get(slot).fence.clone() {
+                Some(f) if dma_fence_is_signaled(adev, &f) => self.remove(slot),
                 _ => return,
             }
             // the removal moved the next entry to `pos`
@@ -129,7 +128,7 @@ impl drm_suballoc_manager {
     }
 
     /// `drm_suballoc_next_hole`.
-    fn next_hole(&mut self, adev: &amdgpu_device, fences: &mut [Option<dma_fence>], tries: &mut [u32]) -> bool {
+    fn next_hole(&mut self, adev: &mut amdgpu_device, fences: &mut [Option<Fence>], tries: &mut [u32]) -> bool {
         // if hole points to the end of the buffer
         if self.hole_next().is_none() {
             // try again with its beginning
@@ -145,9 +144,9 @@ impl drm_suballoc_manager {
         for i in 0..DRM_SUBALLOC_MAX_QUEUES as usize {
             fences[i] = None;
             let Some(&slot) = self.flist[i].front() else { continue };
-            let sa = self.get(slot);
+            let sa = self.get(slot).clone();
             let f = sa.fence.unwrap();
-            if !dma_fence_is_signaled(adev, f) {
+            if !dma_fence_is_signaled(adev, &f) {
                 fences[i] = Some(f);
                 continue;
             }
@@ -190,7 +189,7 @@ fn drm_suballoc_new(adev: &mut amdgpu_device, pool: usize, size: u32) -> Result<
     let align = m.align;
     loop {
         let mut tries = [0u32; DRM_SUBALLOC_MAX_QUEUES as usize];
-        let mut fences = [None; DRM_SUBALLOC_MAX_QUEUES as usize];
+        let mut fences: [Option<Fence>; DRM_SUBALLOC_MAX_QUEUES as usize] = Default::default();
         loop {
             let mut m = core::mem::take(&mut adev.ib_sa[pool]);
             m.try_free(adev);
@@ -205,7 +204,7 @@ fn drm_suballoc_new(adev: &mut amdgpu_device, pool: usize, size: u32) -> Result<
                 break;
             }
         }
-        let waiting: Vec<dma_fence> = fences.iter().flatten().copied().collect();
+        let waiting: Vec<Fence> = fences.iter().flatten().cloned().collect();
         if waiting.is_empty() {
             // wait_event for a free by another thread: there is none.
             Line::new().s("drm_suballoc_new: nothing to wait for and no room for ").dec(size as u64).s(" bytes")
@@ -213,22 +212,20 @@ fn drm_suballoc_new(adev: &mut amdgpu_device, pool: usize, size: u32) -> Result<
             return Err(-12);
         }
         // dma_fence_wait_any_timeout, MAX_SCHEDULE_TIMEOUT
-        while !waiting.iter().any(|&f| dma_fence_is_signaled(adev, f)) {
-            crate::amdgpu_fence::dma_fence_wait_timeout(adev, waiting[0], 10_000);
-        }
+        crate::workqueue::wait_until(adev, i64::MAX, |adev| waiting.iter().any(|f| dma_fence_is_signaled(adev, f)));
     }
 }
 
 /// `drm_suballoc_free` (`amdgpu_sa_bo_free`).
-fn drm_suballoc_free(adev: &mut amdgpu_device, bo: sa_bo, fence: Option<dma_fence>) {
-    let signaled = fence.is_none_or(|f| dma_fence_is_signaled(adev, f));
+fn drm_suballoc_free(adev: &mut amdgpu_device, bo: sa_bo, fence: Option<Fence>) {
+    let signaled = fence.as_ref().is_none_or(|f| dma_fence_is_signaled(adev, f));
     let m = &mut adev.ib_sa[bo.pool];
     match fence {
         Some(f) if !signaled => {
+            let idx = (f.context % DRM_SUBALLOC_MAX_QUEUES as u64) as usize;
             if let Some(e) = m.sa[bo.slot].as_mut() {
                 e.fence = Some(f);
             }
-            let idx = f.ring & (DRM_SUBALLOC_MAX_QUEUES as usize - 1);
             m.flist[idx].push_back(bo.slot);
         }
         _ => m.remove(bo.slot),
@@ -236,6 +233,7 @@ fn drm_suballoc_free(adev: &mut amdgpu_device, bo: sa_bo, fence: Option<dma_fenc
 }
 
 /// `struct amdgpu_ib`.
+#[derive(Clone)]
 pub struct amdgpu_ib {
     pub sa_bo: Option<sa_bo>,
     pub length_dw: u32,
@@ -283,27 +281,47 @@ pub fn amdgpu_ib_get(adev: &mut amdgpu_device, size: u32, pool_type: u32, ib: &m
 }
 
 /// `amdgpu_ib_free`.
-pub fn amdgpu_ib_free(adev: &mut amdgpu_device, ib: &mut amdgpu_ib, f: Option<dma_fence>) {
+pub fn amdgpu_ib_free(adev: &mut amdgpu_device, ib: &mut amdgpu_ib, f: Option<Fence>) {
     if let Some(bo) = ib.sa_bo.take() {
         drm_suballoc_free(adev, bo, f);
     }
 }
 
-/// `amdgpu_ib_schedule` without a job: the ring tests. HDP flush and
-/// invalidate do nothing on an APU, and no ring of Renoir's has
-/// `insert_start`, `insert_end` or a software ring.
-pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[&amdgpu_ib]) -> Result<dma_fence, i32> {
+/// `amdgpu_ib_schedule`: the IBs, after the VM flush of `job`, then a
+/// fence. HDP flush and invalidate do nothing on an APU, and no ring of
+/// Renoir's has `insert_start`, `insert_end`, a software ring or GFX
+/// shadowing. The GFX ring takes no job here.
+pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[amdgpu_ib], job: Option<u64>)
+                          -> Result<Fence, i32> {
     use crate::amdgpu_ring as ring;
     if ibs.is_empty() {
         return Err(-22);
     }
-    let ib = ibs[0];
-    if !adev.rings[r].sched_ready {
-        Line::new().s("couldn't schedule ib on ring <").s(&adev.rings[r].name.clone()).s(">").say();
+    let mut ib = &ibs[0];
+    let vmid = crate::amdgpu_job::amdgpu_job_get_vmid(adev, job);
+    let (vm, fence_ctx, af_context) = match job {
+        Some(j) => {
+            let jb = adev.jobs.get(&j).unwrap();
+            let s = jb.base.s_fence.as_ref().map(|f| crate::drm_sched::to_drm_sched_fence(f).unwrap());
+            (jb.vm, s.as_ref().map_or(0, |s| s.scheduled.context), s.as_ref().map_or(0, |s| s.scheduled.context + 1))
+        }
+        None => (None, 0, 0),
+    };
+    let name = adev.rings[r].name.clone();
+    if !adev.rings[r].sched.ready {
+        Line::new().s("couldn't schedule ib on ring <").s(&name).s(">").say();
+        return Err(-22);
+    }
+    if vm.is_some() && vmid == 0 {
+        Line::new().s("VM IB without ID").say();
         return Err(-22);
     }
     if ib.flags & AMDGPU_IB_FLAGS_SECURE != 0 && !adev.rings[r].funcs.secure() {
-        Line::new().s("secure submissions not supported on ring <").s(&adev.rings[r].name.clone()).s(">").say();
+        Line::new().s("secure submissions not supported on ring <").s(&name).s(">").say();
+        return Err(-22);
+    }
+    if job.is_some() && adev.rings[r].funcs.ops == ring::ring_ops::gfx_v9_0_gfx {
+        Line::new().s("a job on the GFX ring is not ported").say();
         return Err(-22);
     }
     let f = adev.rings[r].funcs;
@@ -313,8 +331,23 @@ pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[&amdgpu_ib]
         Line::new().s("scheduling IB failed (").dec((-ret) as u64).s(").").say();
         return Err(ret);
     }
-    let fence_ctx = 0u64;
     let need_ctx_switch = adev.rings[r].current_ctx != fence_ctx;
+    let mut need_pipe_sync = false;
+    if let Some(j) = job {
+        if ring::has_emit_vm_flush(adev, r) {
+            let mut sync = core::mem::take(&mut adev.jobs.get_mut(&j).unwrap().explicit_sync);
+            let tmp = crate::amdgpu_sync::amdgpu_sync_get_fence(adev, &mut sync);
+            adev.jobs.get_mut(&j).unwrap().explicit_sync = sync;
+            if tmp.is_some() || need_ctx_switch || crate::amdgpu_vm::amdgpu_vm_need_pipeline_sync(adev, r, j) {
+                need_pipe_sync = true;
+            }
+        }
+        let ret = crate::amdgpu_vm::amdgpu_vm_flush(adev, r, j, need_pipe_sync);
+        if ret != 0 {
+            ring::amdgpu_ring_undo(adev, r);
+            return Err(ret);
+        }
+    }
 
     if ib.flags & AMDGPU_IB_FLAG_EMIT_MEM_SYNC != 0 {
         ring::amdgpu_ring_emit_mem_sync(adev, r);
@@ -330,21 +363,33 @@ pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[&amdgpu_ib]
     if need_ctx_switch {
         status |= AMDGPU_HAVE_CTX_SWITCH;
     }
-    let mut last = ib;
-    for ib in ibs {
-        last = ib;
-        ring::amdgpu_ring_emit_ib(adev, r, ib, status);
+    for i in ibs {
+        ib = i;
+        ring::amdgpu_ring_emit_ib(adev, r, vmid, ib, status);
         status &= !AMDGPU_HAVE_CTX_SWITCH;
     }
     // amdgpu_device_invalidate_hdp: nothing on an APU.
     let mut fence_flags = 0;
-    if last.flags & AMDGPU_IB_FLAG_TC_WB_NOT_INVALIDATE != 0 {
+    if ib.flags & AMDGPU_IB_FLAG_TC_WB_NOT_INVALIDATE != 0 {
         fence_flags |= AMDGPU_FENCE_FLAG_TC_WB_ONLY;
     }
-    let fence = match crate::amdgpu_fence::amdgpu_fence_emit(adev, r, fence_flags) {
+    if let Some(j) = job {
+        let (uf_addr, uf_sequence) = {
+            let jb = adev.jobs.get(&j).unwrap();
+            (jb.uf_addr, jb.uf_sequence)
+        };
+        if uf_addr != 0 {
+            ring::amdgpu_ring_emit_fence(adev, r, uf_addr, uf_sequence, fence_flags | AMDGPU_FENCE_FLAG_64BIT);
+        }
+    }
+    let fence = match crate::amdgpu_fence::amdgpu_fence_emit(adev, r, job, af_context, fence_flags) {
         Ok(f) => f,
         Err(e) => {
             Line::new().s("failed to emit fence (").dec((-e) as u64).s(")").say();
+            if job.is_some() && vmid != 0 {
+                let hub = adev.rings[r].vm_hub as usize;
+                crate::amdgpu_ids::amdgpu_vmid_reset(adev, hub, vmid as usize);
+            }
             ring::amdgpu_ring_undo(adev, r);
             return Err(e);
         }
@@ -354,6 +399,7 @@ pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[&amdgpu_ib]
     if high {
         ring::amdgpu_ring_emit_wave_limit(adev, r, false);
     }
+    crate::amdgpu_fence::amdgpu_fence_save_wptr(adev, &fence);
     ring::amdgpu_ring_commit(adev, r);
     Ok(fence)
 }
@@ -368,7 +414,7 @@ pub fn amdgpu_ib_ring_tests(adev: &mut amdgpu_device) -> i32 {
     for r in 0..adev.rings.len() {
         // KIQ rings don't have an IB test because we never submit IBs to
         // them and they have no interrupt support.
-        if !adev.rings[r].sched_ready || !crate::amdgpu_ring::has_test_ib(adev, r) {
+        if !adev.rings[r].sched.ready || !crate::amdgpu_ring::has_test_ib(adev, r) {
             continue;
         }
         let res = crate::amdgpu_ring::amdgpu_ring_test_ib(adev, r, tmo);
@@ -377,7 +423,7 @@ pub fn amdgpu_ib_ring_tests(adev: &mut amdgpu_device) -> i32 {
             Line::new().s("ib test on ").s(&name).s(" succeeded").dbg();
             continue;
         }
-        adev.rings[r].sched_ready = false;
+        adev.rings[r].sched.ready = false;
         Line::new().s("IB test failed on ").s(&name).s(" (").dec((-res) as u64).s(").").say();
         if adev.gfx.gfx_ring.first() == Some(&r) {
             // oh, oh, that's really bad

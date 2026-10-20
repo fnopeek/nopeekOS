@@ -1,22 +1,17 @@
 //! amdgpu/amdgpu_fence.c (Linux 6.18.55): the hardware fences a ring
 //! signals through its writeback slot and its interrupt.
 //!
-//! A `dma_fence` here is its ring and sequence number; it is signaled once
-//! `amdgpu_fence_process` has moved the ring's `last_seq` past it. Waiting
-//! runs the interrupt handler (`amdgpu_irq_wait`), and the fallback timer
-//! is a deadline checked by the wait.
+//! A hardware fence is a `dma_fence` (dma_fence.rs) on the ring's context;
+//! the fence driver's slots hold the outstanding ones until
+//! `amdgpu_fence_process` signals them, from the interrupt or the fallback
+//! timer (a deadline `workqueue::run_pending` checks).
 
 use crate::amdgpu_device::amdgpu_device;
 use crate::amdgpu_ring::amdgpu_irq_src_id;
+use crate::dma_fence::{self, dma_fence_ops, Fence};
 use crate::linux::Line;
 use crate::regs::*;
-
-/// A hardware fence: `(ring, seq)`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct dma_fence {
-    pub ring: usize,
-    pub seq: u32,
-}
+use core::cell::Cell;
 
 /// The `adev` field a fence interrupt source is.
 pub fn irq_src_name(src: amdgpu_irq_src_id) -> &'static str {
@@ -73,24 +68,58 @@ fn amdgpu_fence_schedule_fallback(adev: &mut amdgpu_device, r: usize) {
     adev.rings[r].fence_drv.fallback_deadline_us = Some(crate::linux::now_us() + 500_000);
 }
 
-/// `amdgpu_fence_emit` for a fence of its own (no job): the ring's next
-/// sequence number, written by the GPU with an interrupt.
-pub fn amdgpu_fence_emit(adev: &mut amdgpu_device, r: usize, flags: u32) -> Result<dma_fence, i32> {
+/// `amdgpu_fence_enable_signaling` (and `amdgpu_job_fence_enable_signaling`,
+/// the same for a job's fence on its scheduler's ring).
+pub fn amdgpu_fence_enable_signaling(adev: &mut amdgpu_device, r: usize) -> bool {
+    if adev.rings[r].fence_drv.fallback_deadline_us.is_none() {
+        amdgpu_fence_schedule_fallback(adev, r);
+    }
+    true
+}
+
+/// `amdgpu_fence_fallback`.
+pub fn amdgpu_fence_fallback(adev: &mut amdgpu_device, r: usize) {
+    if amdgpu_fence_process(adev, r) {
+        let name = adev.rings[r].name.clone();
+        Line::new().s("Fence fallback timer expired on ring ").s(&name).say();
+    }
+}
+
+/// `amdgpu_fence_emit`: the ring's next sequence number, written by the GPU
+/// with an interrupt, as a fence on the ring's context. With `job` it is
+/// that job's `hw_fence` (`amdgpu_job_fence_ops`), made here as Linux
+/// initializes the one embedded in the job; `af_context` is the
+/// `amdgpu_fence`'s own context field.
+pub fn amdgpu_fence_emit(adev: &mut amdgpu_device, r: usize, job: Option<u64>, af_context: u64, flags: u32)
+                         -> Result<Fence, i32> {
     adev.rings[r].fence_drv.sync_seq = adev.rings[r].fence_drv.sync_seq.wrapping_add(1);
     let seq = adev.rings[r].fence_drv.sync_seq;
+    let context = adev.fence_context + adev.rings[r].idx as u64;
+    let fence = dma_fence::dma_fence_init(
+        dma_fence_ops::amdgpu_fence { ring: r, wptr: Cell::new(0), context: af_context, job: job.is_some() },
+        context, seq as u64);
+    if let Some(j) = job {
+        adev.jobs.get_mut(&j).unwrap().hw_fence = Some(fence.clone());
+    }
     let addr = adev.rings[r].fence_drv.gpu_addr;
     crate::amdgpu_ring::amdgpu_ring_emit_fence(adev, r, addr, seq as u64, flags | AMDGPU_FENCE_FLAG_INT);
-    let drv = &adev.rings[r].fence_drv;
-    let slot = (seq & drv.num_fences_mask) as usize;
-    if let Some(old) = drv.fences[slot] {
-        // the slot still holds a fence: wait for it
-        let r2 = dma_fence_wait(adev, dma_fence { ring: r, seq: old }, i64::MAX);
-        if r2 < 0 {
+    amdgpu_fence_save_wptr(adev, &fence);
+    let slot = (seq & adev.rings[r].fence_drv.num_fences_mask) as usize;
+    if let Some(old) = adev.rings[r].fence_drv.fences[slot].clone() {
+        let r2 = dma_fence::dma_fence_wait(adev, &old);
+        if r2 != 0 {
             return Err(r2 as i32);
         }
     }
-    adev.rings[r].fence_drv.fences[slot] = Some(seq);
-    Ok(dma_fence { ring: r, seq })
+    adev.rings[r].fence_drv.fences[slot] = Some(fence.clone());
+    Ok(fence)
+}
+
+/// `amdgpu_fence_save_wptr`.
+pub fn amdgpu_fence_save_wptr(adev: &amdgpu_device, f: &Fence) {
+    if let dma_fence_ops::amdgpu_fence { ring, wptr, .. } = &f.ops {
+        wptr.set(adev.rings[*ring].wptr);
+    }
 }
 
 /// `amdgpu_fence_emit_polling`.
@@ -119,14 +148,19 @@ pub fn amdgpu_fence_process(adev: &mut amdgpu_device, r: usize) -> bool {
     if seq == last_seq {
         return false;
     }
-    let drv = &mut adev.rings[r].fence_drv;
-    last_seq &= drv.num_fences_mask;
-    seq &= drv.num_fences_mask;
+    let mask = adev.rings[r].fence_drv.num_fences_mask;
+    last_seq &= mask;
+    seq &= mask;
     loop {
-        last_seq = (last_seq + 1) & drv.num_fences_mask;
-        // There is always exactly one thread signaling this fence slot:
-        // taking it out is dma_fence_signal.
-        drv.fences[last_seq as usize] = None;
+        last_seq = (last_seq + 1) & mask;
+        // There is always exactly one thread signaling this fence slot
+        let fence = adev.rings[r].fence_drv.fences[last_seq as usize].take();
+        if let Some(fence) = fence {
+            if let dma_fence_ops::amdgpu_fence { wptr, .. } = &fence.ops {
+                adev.rings[r].fence_drv.signalled_wptr = wptr.get();
+            }
+            dma_fence::dma_fence_signal(adev, &fence);
+        }
         if last_seq == seq {
             break;
         }
@@ -143,49 +177,6 @@ pub fn amdgpu_fence_wait_polling(adev: &amdgpu_device, r: usize, wait_seq: u32, 
     timeout.max(0)
 }
 
-/// `dma_fence_is_signaled`.
-pub fn dma_fence_is_signaled(adev: &amdgpu_device, f: dma_fence) -> bool {
-    (adev.rings[f.ring].fence_drv.last_seq.wrapping_sub(f.seq) as i32) >= 0
-}
-
-/// `dma_fence_wait_timeout` (`timeout` in microseconds, `i64::MAX` for
-/// none): enables signaling, which arms the fallback timer, then lets the
-/// interrupt handler run until the fence is signaled. Returns the time
-/// left, at least 1, or 0 on timeout.
-pub fn dma_fence_wait_timeout(adev: &mut amdgpu_device, f: dma_fence, timeout: i64) -> i64 {
-    if dma_fence_is_signaled(adev, f) {
-        return timeout.max(1);
-    }
-    // amdgpu_fence_enable_signaling
-    if adev.rings[f.ring].fence_drv.fallback_deadline_us.is_none() {
-        amdgpu_fence_schedule_fallback(adev, f.ring);
-    }
-    let t0 = crate::linux::now_us();
-    loop {
-        let elapsed = (crate::linux::now_us() - t0) as i64;
-        if dma_fence_is_signaled(adev, f) {
-            return (timeout - elapsed).max(1);
-        }
-        if elapsed >= timeout {
-            return 0;
-        }
-        let left_ms = ((timeout - elapsed) / 1000).clamp(1, 10) as i32;
-        crate::amdgpu_irq::amdgpu_irq_wait(adev, left_ms);
-        // amdgpu_fence_fallback
-        if adev.rings[f.ring].fence_drv.fallback_deadline_us.is_some_and(|d| crate::linux::now_us() >= d) {
-            adev.rings[f.ring].fence_drv.fallback_deadline_us = None;
-            if amdgpu_fence_process(adev, f.ring) {
-                Line::new().s("Fence fallback timer expired on ring ").s(&adev.rings[f.ring].name.clone()).say();
-            }
-        }
-    }
-}
-
-/// `dma_fence_wait`: uninterruptible, no timeout.
-pub fn dma_fence_wait(adev: &mut amdgpu_device, f: dma_fence, timeout: i64) -> i64 {
-    if dma_fence_wait_timeout(adev, f, timeout) > 0 { 0 } else { -110 }
-}
-
 /// `amdgpu_fence_wait_empty`.
 fn amdgpu_fence_wait_empty(adev: &mut amdgpu_device, r: usize) -> i32 {
     let drv = &adev.rings[r].fence_drv;
@@ -193,13 +184,19 @@ fn amdgpu_fence_wait_empty(adev: &mut amdgpu_device, r: usize) -> i32 {
     if seq == 0 {
         return 0;
     }
-    let Some(s) = drv.fences[(seq & drv.num_fences_mask) as usize] else { return 0 };
-    dma_fence_wait(adev, dma_fence { ring: r, seq: s }, i64::MAX) as i32
+    let Some(fence) = drv.fences[(seq & drv.num_fences_mask) as usize].clone() else { return 0 };
+    dma_fence::dma_fence_wait(adev, &fence) as i32
 }
 
-/// `amdgpu_fence_driver_force_completion`: write the last emitted
-/// sequence and process.
-fn amdgpu_fence_driver_force_completion(adev: &mut amdgpu_device, r: usize) {
+/// `amdgpu_fence_driver_force_completion`.
+pub fn amdgpu_fence_driver_force_completion(adev: &mut amdgpu_device, r: usize, timedout: Option<&Fence>) {
+    for f in adev.rings[r].fence_drv.fences.iter().flatten() {
+        if !f.test_flag(dma_fence::DMA_FENCE_FLAG_SIGNALED_BIT) {
+            let e = if timedout.is_some_and(|t| alloc::rc::Rc::ptr_eq(t, f)) { -62 } else { -125 };
+            dma_fence::dma_fence_set_error(f, e);
+        }
+    }
+    // amdgpu_fence_write
     let drv = &adev.rings[r].fence_drv;
     if let (Some(offs), Some(k)) = (drv.cpu_addr, adev.wb.wb) {
         crate::amdgpu_gart::kptr_w32(adev, k, offs as u64 * 4, drv.sync_seq);
@@ -213,10 +210,11 @@ pub fn amdgpu_fence_driver_hw_fini(adev: &mut amdgpu_device) {
         if !adev.rings[r].fence_drv.initialized {
             continue;
         }
+        // You can't wait for HW to signal if it's gone
         let ret = amdgpu_fence_wait_empty(adev, r);
         // no need to trigger GPU reset as we are unloading
         if ret != 0 {
-            amdgpu_fence_driver_force_completion(adev, r);
+            amdgpu_fence_driver_force_completion(adev, r, None);
         }
         let drv = &adev.rings[r].fence_drv;
         if let Some(src) = drv.irq_src {

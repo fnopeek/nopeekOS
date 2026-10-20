@@ -5979,6 +5979,10 @@ pub const AMDGPU_IB_FLAGS_SECURE: u32 = 0x20;
 pub const AMDGPU_HAVE_CTX_SWITCH: u32 = 0x4;
 /// amdgpu/gfx_v9_0.c:4708
 pub const AMDGPU_IB_POOL_DIRECT: u32 = 0x2;
+/// amdgpu/amdgpu_ttm.c:233
+pub const AMDGPU_IB_POOL_DELAYED: u32 = 0x0;
+/// amdgpu/amdgpu_ring.h:92
+pub const AMDGPU_IB_POOL_IMMEDIATE: u32 = 0x1;
 /// amdgpu/amdgpu.h:341
 pub const AMDGPU_CP_IRQ_COMPUTE_MEC1_PIPE1_EOP: u32 = 0x3;
 /// amdgpu/amdgpu.h:342
@@ -6121,3 +6125,51 @@ pub const GetMinGfxclkFrequency_NAME: &[u8] = b"GetMinGfxclkFrequency";
 pub const SMU_MSG_GetMaxGfxclkFrequency: u32 = 0x8a;
 /// The value of `__smu_message_names[SMU_MSG_GetMaxGfxclkFrequency]` in ../pm/swsmu/smu_cmn.c
 pub const GetMaxGfxclkFrequency_NAME: &[u8] = b"GetMaxGfxclkFrequency";
+
+// The VM flush and pipeline sync of a job (amdgpu_vm_flush)
+/// amdgpu/cikd.h:293
+pub const PACKET3_WAIT_REG_MEM: u32 = 0x3c;
+/// amdgpu/cikd.h:324
+pub const PACKET3_PFP_SYNC_ME: u32 = 0x42;
+/// amdgpu/cikd.h:488
+pub const PACKET3_SWITCH_BUFFER: u32 = 0x8b;
+/// The value of `WAIT_REG_MEM_FUNCTION(3)` in gfx_v9_0.c
+pub const WAIT_REG_MEM_FUNCTION_3: u32 = 0x3;
+/// The value of `WAIT_REG_MEM_MEM_SPACE(1)` in gfx_v9_0.c
+pub const WAIT_REG_MEM_MEM_SPACE_1: u32 = 0x10;
+/// The value of `WAIT_REG_MEM_OPERATION(1)` in gfx_v9_0.c
+pub const WAIT_REG_MEM_OPERATION_1: u32 = 0x40;
+/// The value of `WAIT_REG_MEM_ENGINE(1)` in gfx_v9_0.c
+pub const WAIT_REG_MEM_ENGINE_1: u32 = 0x100;
+/// The value of `GDS_GWS_VMID0__SIZE__SHIFT` in gfx_v9_0.c
+pub const GC_GDS_GWS_VMID0__SIZE__SHIFT: u32 = 0x10;
+/// The value of `mmIH_VMID_0_LUT` in gmc_v9_0.c
+pub const OSS_mmIH_VMID_0_LUT: u32 = 0x0;
+/// The value of `mmIH_VMID_0_LUT_BASE_IDX` in gmc_v9_0.c
+pub const OSS_mmIH_VMID_0_LUT_BASE_IDX: u32 = 0x0;
+/// The value of `mmIH_VMID_0_LUT_MM` in gmc_v9_0.c
+pub const OSS_mmIH_VMID_0_LUT_MM: u32 = 0x10;
+/// The value of `mmIH_VMID_0_LUT_MM_BASE_IDX` in gmc_v9_0.c
+pub const OSS_mmIH_VMID_0_LUT_MM_BASE_IDX: u32 = 0x0;
+/// The value of `SDMA_PKT_HEADER_OP(SDMA_OP_POLL_REGMEM)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_OP_POLL_REGMEM: u32 = 0x8;
+/// The value of `SDMA_PKT_HEADER_OP(SDMA_OP_SRBM_WRITE)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_OP_SRBM_WRITE: u32 = 0xe;
+/// The value of `SDMA_PKT_SRBM_WRITE_HEADER_BYTE_EN(0xf)` in sdma_v4_0.c
+pub const SDMA_PKT_SRBM_WRITE_HEADER_BYTE_EN_F: u64 = 0xfffffffff0000000;
+/// amdgpu/iceland_sdma_pkt_open.h:1970
+pub const SDMA_PKT_POLL_REGMEM_HEADER_hdp_flush_mask: u32 = 0x1;
+/// amdgpu/iceland_sdma_pkt_open.h:1971
+pub const SDMA_PKT_POLL_REGMEM_HEADER_hdp_flush_shift: u32 = 0x1a;
+/// amdgpu/iceland_sdma_pkt_open.h:1982
+pub const SDMA_PKT_POLL_REGMEM_HEADER_mem_poll_mask: u32 = 0x1;
+/// amdgpu/iceland_sdma_pkt_open.h:1983
+pub const SDMA_PKT_POLL_REGMEM_HEADER_mem_poll_shift: u32 = 0x1f;
+/// The value of `SDMA_PKT_POLL_REGMEM_HEADER_FUNC(3)` in sdma_v4_0.c
+pub const SDMA_PKT_POLL_REGMEM_HEADER_FUNC_3: u32 = 0x30000000;
+/// The value of `SDMA_PKT_POLL_REGMEM_DW5_RETRY_COUNT(0xfff)` in sdma_v4_0.c
+pub const SDMA_PKT_POLL_REGMEM_DW5_RETRY_COUNT_FFF: u32 = 0xfff0000;
+/// amdgpu/iceland_sdma_pkt_open.h:2017
+pub const SDMA_PKT_POLL_REGMEM_DW5_interval_mask: u32 = 0xffff;
+/// amdgpu/iceland_sdma_pkt_open.h:2018
+pub const SDMA_PKT_POLL_REGMEM_DW5_interval_shift: u32 = 0x0;

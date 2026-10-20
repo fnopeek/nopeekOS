@@ -28,17 +28,29 @@ und schaltet bei der kleinsten Abweichung auf die CPU zurueck.
    Ende. `shaders/gen_shaders.py` schreibt `src/shaders_gen.rs`; das Modul
    sendet genau diese Paketfolge, der Host-Check haelt sie Wort fuer Wort
    gegen RADVs Aufzeichnung (wie `packcheck.c` bei Intel).
-3. **`amdgpu_vm`** — der Compositor ist ein Client mit eigenem GPU-Adressraum
+3. **`drm_sched`** — Linux reicht Seitentabellen-Updates und Kommandos ueber
+   den DRM-Scheduler ein (Entity, Abhaengigkeiten, `run_job` →
+   `amdgpu_job_run` → `amdgpu_ib_schedule`, `free_job`). Portiert aus
+   `drivers/gpu/drm/scheduler`; das Modul hat keine Threads, also treibt die
+   Dienstschleife, was in Linux der Scheduler-Thread tut. Damit bleibt es
+   asynchron wie in Linux: eine Szene wartet GPU-seitig auf ihr VM-Update. ✅
+   Mit dabei, weil Linux sie schon fuer Kernel-Jobs auf VMID 0 durchlaeuft:
+   `dma_fence` (samt `dma_fence_array`), `dma_resv`, `amdgpu_sync`,
+   `amdgpu_job` (Gang-Wechsel, Isolation), `amdgpu_ids` (VMID-Vergabe) und
+   `amdgpu_vm_flush` mit den Ring-Emits (Pipeline-Sync, TLB-Flush,
+   PASID-Abbildung). Die TTM-Kopien laufen seitdem wie in Linux ueber die
+   Entity `mman.high_pr`; Host-Check: 0/2048 Pixel falsch.
+4. **`amdgpu_vm`** — der Compositor ist ein Client mit eigenem GPU-Adressraum
    wie unter Linux (`amdgpu_vm.c`, `amdgpu_vm_pt.c`, `amdgpu_vm_sdma.c`,
    `amdgpu_ids.c`): Seitentabellen, `amdgpu_vm_bo_map/update`, VMID-Vergabe,
    `amdgpu_vm_flush` beim Einreichen (`gfx_v9_0_ring_emit_vm_flush`). Dasselbe
    Fundament tragen spaeter die nativen Kontexte der Gaeste (Stufe 7).
-4. **Einreichen** — wie `amdgpu_cs` mit dem Client-VM: Job mit IB auf einem
+5. **Einreichen** — wie `amdgpu_cs` mit dem Client-VM: Job mit IB auf einem
    Compute-Ring (RADVs Compute-Queue = MEC-Ring), Fence ueber IH.
-5. **Gemeinsame Planung** — `plan.rs` und das Lesen/Pruefen der Szene aus
+6. **Gemeinsame Planung** — `plan.rs` und das Lesen/Pruefen der Szene aus
    `gpu_intel_tgl/src/compose.rs` in eine gemeinsame Crate; beide Module
    benutzen sie, die Breite ist Parameter.
-6. **Dienst** — `BO_ADD`/`BO_REMOVE` in den Compositor-VM, `OP_SCENE` mit
+7. **Dienst** — `BO_ADD`/`BO_REMOVE` in den Compositor-VM, `OP_SCENE` mit
    `JOB_OPEN` und Nachsehen in der Schleife, `CAP_SCENE` nach Selbsttest.
 
 ## Was RADV fuer einen Dispatch schreibt (acoc, Renoir, wave64)

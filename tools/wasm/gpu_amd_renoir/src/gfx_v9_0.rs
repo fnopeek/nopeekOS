@@ -1392,7 +1392,7 @@ fn gfx_v9_0_constants_init(adev: &mut amdgpu_device) {
     // XXX SH_MEM regs
     // where to put LDS, scratch, GPUVM in FSA64 space
     let noretry = (adev.gmc.noretry != 0) as u32;
-    for i in 0..adev.vm_manager.num_ids[AMDGPU_GFXHUB_0 as usize] {
+    for i in 0..adev.vm_manager.id_mgr[AMDGPU_GFXHUB_0 as usize].num_ids {
         soc15_grbm_select(adev, 0, 0, 0, i);
         // CP and shaders
         let mut tmp = set_field(0, GC_SH_MEM_CONFIG__ALIGNMENT_MODE_MASK, GC_SH_MEM_CONFIG__ALIGNMENT_MODE__SHIFT,
@@ -1647,7 +1647,7 @@ fn gfx_v9_0_cp_compute_enable(adev: &mut amdgpu_device, enable: bool) {
                   | GC_CP_MEC_CNTL__MEC_ME1_HALT_MASK
                   | GC_CP_MEC_CNTL__MEC_ME2_HALT_MASK);
         if let Some(k) = adev.gfx.kiq.ring {
-            adev.rings[k].sched_ready = false;
+            adev.rings[k].sched.ready = false;
         }
     }
     crate::linux::udelay(50);
@@ -2452,10 +2452,9 @@ pub fn gfx_v9_0_ring_emit_ib_gfx(adev: &mut amdgpu_device, r: usize, ib: &crate:
     rw(adev, r, control);
 }
 
-/// `gfx_v9_0_ring_emit_ib_compute` without a job (VMID 0).
-pub fn gfx_v9_0_ring_emit_ib_compute(adev: &mut amdgpu_device, r: usize, ib: &crate::amdgpu_ib::amdgpu_ib,
+/// `gfx_v9_0_ring_emit_ib_compute`.
+pub fn gfx_v9_0_ring_emit_ib_compute(adev: &mut amdgpu_device, r: usize, vmid: u32, ib: &crate::amdgpu_ib::amdgpu_ib,
                                      _flags: u32) {
-    let vmid = 0u32;
     let control = INDIRECT_BUFFER_VALID | ib.length_dw | (vmid << 24);
     // Currently, there is a high possibility to get wave ID mismatch
     // between ME and GDS, leading to a hw deadlock, because ME generates
@@ -2480,6 +2479,86 @@ pub fn gfx_v9_0_ring_emit_ib_compute(adev: &mut amdgpu_device, r: usize, ib: &cr
     rw(adev, r, control);
 }
 
+/// `gfx_v9_0_write_data_to_reg`.
+fn gfx_v9_0_write_data_to_reg(adev: &mut amdgpu_device, r: usize, eng_sel: u32, wc: bool, reg: u32, val: u32) {
+    rw(adev, r, PACKET3(PACKET3_WRITE_DATA, 3));
+    rw(adev, r, eng_sel * WRITE_DATA_ENGINE_SEL_1 | WRITE_DATA_DST_SEL_0 | if wc { WR_CONFIRM } else { 0 });
+    rw(adev, r, reg);
+    rw(adev, r, 0);
+    rw(adev, r, val);
+}
+
+/// `gfx_v9_0_wait_reg_mem`.
+fn gfx_v9_0_wait_reg_mem(adev: &mut amdgpu_device, r: usize, eng_sel: u32, mem_space: u32, opt: u32, addr0: u32,
+                         addr1: u32, ref_: u32, mask: u32, inv: u32) {
+    rw(adev, r, PACKET3(PACKET3_WAIT_REG_MEM, 5));
+    // memory (1) or register (0), write, wait, reg_write_reg_wait, equal
+    rw(adev, r, mem_space * WAIT_REG_MEM_MEM_SPACE_1 | opt * WAIT_REG_MEM_OPERATION_1 | WAIT_REG_MEM_FUNCTION_3
+        | eng_sel * WAIT_REG_MEM_ENGINE_1);
+    if mem_space != 0 && addr0 & 0x3 != 0 {
+        Line::new().s("WARNING: wait_reg_mem address not dword aligned").say();
+    }
+    rw(adev, r, addr0);
+    rw(adev, r, addr1);
+    rw(adev, r, ref_);
+    rw(adev, r, mask);
+    rw(adev, r, inv); // poll interval
+}
+
+/// `gfx_v9_0_ring_emit_pipeline_sync`.
+pub fn gfx_v9_0_ring_emit_pipeline_sync(adev: &mut amdgpu_device, r: usize) {
+    let usepfp = (adev.rings[r].funcs.type_ == AMDGPU_RING_TYPE_GFX) as u32;
+    let seq = adev.rings[r].fence_drv.sync_seq;
+    let addr = adev.rings[r].fence_drv.gpu_addr;
+    gfx_v9_0_wait_reg_mem(adev, r, usepfp, 1, 0, addr as u32, (addr >> 32) as u32, seq, 0xffffffff, 4);
+}
+
+/// `gfx_v9_0_ring_emit_vm_flush`.
+pub fn gfx_v9_0_ring_emit_vm_flush(adev: &mut amdgpu_device, r: usize, vmid: u32, pd_addr: u64) {
+    crate::gmc_v9_0::gmc_v9_0_emit_flush_gpu_tlb(adev, r, vmid, pd_addr);
+    // compute doesn't have PFP
+    if adev.rings[r].funcs.type_ == AMDGPU_RING_TYPE_GFX {
+        // sync PFP to ME, otherwise we might get invalid PFP reads
+        rw(adev, r, PACKET3(PACKET3_PFP_SYNC_ME, 0));
+        rw(adev, r, 0x0);
+    }
+}
+
+/// `gfx_v9_0_ring_emit_reg_wait`.
+pub fn gfx_v9_0_ring_emit_reg_wait(adev: &mut amdgpu_device, r: usize, reg: u32, val: u32, mask: u32) {
+    gfx_v9_0_wait_reg_mem(adev, r, 0, 0, 0, reg, 0, val, mask, 0x20);
+}
+
+/// `gfx_v9_0_ring_emit_reg_write_reg_wait`.
+pub fn gfx_v9_0_ring_emit_reg_write_reg_wait(adev: &mut amdgpu_device, r: usize, reg0: u32, reg1: u32, ref_: u32,
+                                             mask: u32) {
+    let gfx = adev.rings[r].funcs.type_ == AMDGPU_RING_TYPE_GFX;
+    let usepfp = gfx as u32;
+    let fw_version_ok = if gfx { adev.gfx.me_fw_write_wait } else { adev.gfx.mec_fw_write_wait };
+    if fw_version_ok {
+        gfx_v9_0_wait_reg_mem(adev, r, usepfp, 0, 1, reg0, reg1, ref_, mask, 0x20);
+    } else {
+        crate::amdgpu_ring::amdgpu_ring_emit_reg_write_reg_wait_helper(adev, r, reg0, reg1, ref_, mask);
+    }
+}
+
+/// `gfx_v9_0_ring_emit_gds_switch`.
+pub fn gfx_v9_0_ring_emit_gds_switch(adev: &mut amdgpu_device, r: usize, vmid: u32, gds_base: u32, gds_size: u32,
+                                     gws_base: u32, gws_size: u32, oa_base: u32, oa_size: u32) {
+    // GDS Base
+    let reg = gc_reg(adev, GC_mmGDS_VMID0_BASE, GC_mmGDS_VMID0_BASE_BASE_IDX) + 2 * vmid;
+    gfx_v9_0_write_data_to_reg(adev, r, 0, false, reg, gds_base);
+    // GDS Size
+    let reg = gc_reg(adev, GC_mmGDS_VMID0_SIZE, GC_mmGDS_VMID0_SIZE_BASE_IDX) + 2 * vmid;
+    gfx_v9_0_write_data_to_reg(adev, r, 0, false, reg, gds_size);
+    // GWS
+    let reg = gc_reg(adev, GC_mmGDS_GWS_VMID0, GC_mmGDS_GWS_VMID0_BASE_IDX) + vmid;
+    gfx_v9_0_write_data_to_reg(adev, r, 0, false, reg, gws_size << GC_GDS_GWS_VMID0__SIZE__SHIFT | gws_base);
+    // OA
+    let reg = gc_reg(adev, GC_mmGDS_OA_VMID0, GC_mmGDS_OA_VMID0_BASE_IDX) + vmid;
+    gfx_v9_0_write_data_to_reg(adev, r, 0, false, reg, (1u32 << (oa_size + oa_base)).wrapping_sub(1 << oa_base));
+}
+
 /// `gfx_v9_0_ring_test_ib`.
 pub fn gfx_v9_0_ring_test_ib(adev: &mut amdgpu_device, r: usize, timeout: i64) -> i32 {
     use crate::amdgpu_ib::{amdgpu_ib, amdgpu_ib_free, amdgpu_ib_get, amdgpu_ib_schedule};
@@ -2499,10 +2578,10 @@ pub fn gfx_v9_0_ring_test_ib(adev: &mut amdgpu_device, r: usize, timeout: i64) -
         ib.set(adev, 3, (gpu_addr >> 32) as u32);
         ib.set(adev, 4, 0xDEADBEEF);
         ib.length_dw = 5;
-        ret = match amdgpu_ib_schedule(adev, r, &[&ib]) {
+        ret = match amdgpu_ib_schedule(adev, r, core::slice::from_ref(&ib), None) {
             Err(e) => e,
             Ok(f) => {
-                let t = crate::amdgpu_fence::dma_fence_wait_timeout(adev, f, timeout);
+                let t = crate::dma_fence::dma_fence_wait_timeout(adev, &f, timeout);
                 if t == 0 {
                     -110
                 } else if crate::amdgpu_gart::kptr_r32(adev, wb, index as u64 * 4) == 0xDEADBEEF {
@@ -3018,6 +3097,57 @@ pub fn amdgpu_gfx_off_ctrl_immediate(adev: &mut amdgpu_device, enable: bool) {
     }
 }
 
+/// `amdgpu_gfx_off_ctrl`: GFXOFF comes back `GFX_OFF_DELAY_ENABLE`
+/// (100 ms) after the last user is done.
+pub fn amdgpu_gfx_off_ctrl(adev: &mut amdgpu_device, enable: bool) {
+    if adev.pm.pp_feature & PP_GFXOFF_MASK == 0 {
+        return;
+    }
+    let w = crate::workqueue::work::gfx_off_delay;
+    if enable {
+        // If the count is already 0, it means there's an imbalance bug
+        // somewhere.
+        if adev.gfx.gfx_off_req_count == 0 {
+            Line::new().s("WARNING: gfx_off_req_count is already 0").say();
+            return;
+        }
+        adev.gfx.gfx_off_req_count -= 1;
+        if adev.gfx.gfx_off_req_count == 0 && !adev.gfx.gfx_off_state {
+            let delay = if adev.in_s0ix { 0 } else { 100_000 };
+            if !crate::workqueue::delayed_work_pending(adev, w) {
+                crate::workqueue::mod_delayed_work(adev, w, delay);
+            }
+        }
+    } else {
+        if adev.gfx.gfx_off_req_count == 0 {
+            crate::workqueue::cancel_delayed_work(adev, w);
+            if adev.gfx.gfx_off_state
+                && crate::amdgpu_smu::amdgpu_dpm_set_powergating_by_smu(adev, AMD_IP_BLOCK_TYPE_GFX, false, 0) == 0
+            {
+                adev.gfx.gfx_off_state = false;
+            }
+        }
+        adev.gfx.gfx_off_req_count += 1;
+    }
+}
+
+/// `amdgpu_device_delay_enable_gfx_off`.
+pub fn amdgpu_device_delay_enable_gfx_off(adev: &mut amdgpu_device) {
+    if adev.gfx.gfx_off_state || adev.gfx.gfx_off_req_count != 0 {
+        Line::new().s("WARNING: delayed GFXOFF with GFXOFF on or requested off").say();
+    }
+    if crate::amdgpu_smu::amdgpu_dpm_set_powergating_by_smu(adev, AMD_IP_BLOCK_TYPE_GFX, true, 0) == 0 {
+        adev.gfx.gfx_off_state = true;
+    }
+}
+
+/// `gfx_v9_0_update_spm_vmid`.
+pub fn gfx_v9_0_update_spm_vmid(adev: &mut amdgpu_device, vmid: u32) {
+    amdgpu_gfx_off_ctrl(adev, false);
+    gfx_v9_0_update_spm_vmid_internal(adev, vmid);
+    amdgpu_gfx_off_ctrl(adev, true);
+}
+
 /// `gfx_v9_0_set_powergating_state`, GC 9.3.0.
 pub fn gfx_v9_0_set_powergating_state(adev: &mut amdgpu_device, gate: bool) -> i32 {
     if !gate {
@@ -3093,7 +3223,7 @@ fn gfx_v9_0_kiq_unmap_queues(adev: &mut amdgpu_device, kiq_ring: usize, r: usize
 /// `amdgpu_gfx_disable_kcq`: no MES.
 fn amdgpu_gfx_disable_kcq(adev: &mut amdgpu_device) -> i32 {
     let Some(kiq_ring) = adev.gfx.kiq.ring else { return -22 };
-    if !adev.rings[kiq_ring].sched_ready {
+    if !adev.rings[kiq_ring].sched.ready {
         return 0;
     }
     if crate::amdgpu_ring::amdgpu_ring_alloc(adev, kiq_ring,

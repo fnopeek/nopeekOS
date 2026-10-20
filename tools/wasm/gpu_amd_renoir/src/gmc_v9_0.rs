@@ -235,6 +235,51 @@ fn gmc_v9_0_get_invalidate_req(vmid: u32, flush_type: u32) -> u32 {
         VM_INVALIDATE_ENG0_REQ__CLEAR_PROTECTION_FAULT_STATUS_ADDR__SHIFT, 0)
 }
 
+/// `gmc_v9_0_emit_flush_gpu_tlb`: point the VMID at `pd_addr` and
+/// invalidate it, from the ring.
+pub fn gmc_v9_0_emit_flush_gpu_tlb(adev: &mut amdgpu_device, r: usize, vmid: u32, pd_addr: u64) -> u64 {
+    use crate::amdgpu_ring as ring;
+    let vm_hub = adev.rings[r].vm_hub;
+    let use_semaphore = gmc_v9_0_use_invalidate_semaphore(adev, vm_hub);
+    let hub = adev.vmhub[vm_hub as usize];
+    let req = gmc_v9_0_get_invalidate_req(vmid, 0);
+    let eng = adev.rings[r].vm_inv_eng;
+    // It may lose gpuvm invalidate acknowldege state across power-gating
+    // off cycle, add semaphore acquire before invalidation and semaphore
+    // release after invalidation to avoid entering power gated state to
+    // WA the Issue
+    if use_semaphore {
+        // a read return value of 1 means semaphore acuqire
+        ring::amdgpu_ring_emit_reg_wait(adev, r, hub.vm_inv_eng0_sem + hub.eng_distance * eng, 0x1, 0x1);
+    }
+    ring::amdgpu_ring_emit_wreg(adev, r, hub.ctx0_ptb_addr_lo32 + hub.ctx_addr_distance * vmid, pd_addr as u32);
+    ring::amdgpu_ring_emit_wreg(adev, r, hub.ctx0_ptb_addr_hi32 + hub.ctx_addr_distance * vmid, (pd_addr >> 32) as u32);
+    ring::amdgpu_ring_emit_reg_write_reg_wait(adev, r, hub.vm_inv_eng0_req + hub.eng_distance * eng,
+                                              hub.vm_inv_eng0_ack + hub.eng_distance * eng, req, 1 << vmid);
+    // add semaphore release after invalidation, write with 0 means
+    // semaphore release
+    if use_semaphore {
+        ring::amdgpu_ring_emit_wreg(adev, r, hub.vm_inv_eng0_sem + hub.eng_distance * eng, 0);
+    }
+    pd_addr
+}
+
+/// `gmc_v9_0_emit_pasid_mapping`: the IH's VMID-to-PASID table.
+pub fn gmc_v9_0_emit_pasid_mapping(adev: &mut amdgpu_device, r: usize, vmid: u32, pasid: u32) {
+    let vm_hub = adev.rings[r].vm_hub;
+    // MMHUB1 is not in the IH's table
+    if vm_hub == AMDGPU_MMHUB1_0_ {
+        return;
+    }
+    let oss = |idx: u32, reg: u32| adev.reg_offset[OSSSYS_HWIP as usize][0].get(idx as usize).copied().unwrap_or(0) + reg;
+    let reg = if vm_hub == AMDGPU_GFXHUB_0 {
+        oss(OSS_mmIH_VMID_0_LUT_BASE_IDX, OSS_mmIH_VMID_0_LUT) + vmid
+    } else {
+        oss(OSS_mmIH_VMID_0_LUT_MM_BASE_IDX, OSS_mmIH_VMID_0_LUT_MM) + vmid
+    };
+    crate::amdgpu_ring::amdgpu_ring_emit_wreg(adev, r, reg, pasid);
+}
+
 /// `gmc_v9_0_flush_gpu_tlb`, the MMIO path (before KIQ/MES/GFXOFF). The
 /// hub's registers are absolute (`*_IP_NO_KIQ` with one GC instance).
 pub fn gmc_v9_0_flush_gpu_tlb(adev: &mut amdgpu_device, vmid: u32, vmhub: u32, flush_type: u32) {
@@ -312,11 +357,9 @@ fn amdgpu_vm_manager_init(adev: &mut amdgpu_device) {
     // broken on Navi10 and Navi14.
     adev.vm_manager.concurrent_flush =
         !(adev.asic_type < CHIP_VEGA10 || adev.asic_type == CHIP_NAVI10 || adev.asic_type == CHIP_NAVI14);
-    for i in 0..AMDGPU_MAX_VMHUBS as usize {
-        // for GC <10, SDMA uses MMHUB so use first_kfd_vmid for both GC and
-        // MM: manage only VMIDs not used by KFD
-        adev.vm_manager.num_ids[i] = adev.vm_manager.first_kfd_vmid;
-    }
+    crate::amdgpu_ids::amdgpu_vmid_mgr_init(adev);
+    adev.vm_manager.fence_context = crate::dma_fence::dma_fence_context_alloc(AMDGPU_MAX_RINGS);
+    adev.vm_manager.seqno = alloc::vec![0; AMDGPU_MAX_RINGS as usize];
     // CONFIG_X86_64: only in large BAR systems Compute VM tables will be
     // updated by CPU.
     if crate::tables::amdgpu_vm_update_mode[0] == -1 {

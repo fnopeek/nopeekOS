@@ -39,6 +39,9 @@ pub struct amdgpu_mman {
     pub buffer_funcs_ring: Option<&'static str>,
     pub initialized: bool,
     pub buffer_funcs_enabled: bool,
+    /// The buffer functions' scheduler entities, by key.
+    pub high_pr: Option<usize>,
+    pub low_pr: Option<usize>,
     /// The resource managers by placement (`bdev->man_drv`).
     pub vram_mgr: Option<crate::amdgpu_vram_mgr::amdgpu_vram_mgr>,
     pub gtt_mgr: Option<crate::amdgpu_ttm::amdgpu_gtt_mgr>,
@@ -449,8 +452,13 @@ pub struct amdgpu_vm_manager {
     pub first_kfd_vmid: u32,
     pub concurrent_flush: bool,
     pub vm_update_mode: u32,
-    /// `id_mgr[hub].num_ids`.
-    pub num_ids: [u32; AMDGPU_MAX_VMHUBS as usize],
+    pub id_mgr: [crate::amdgpu_ids::amdgpu_vmid_mgr; AMDGPU_MAX_VMHUBS as usize],
+    /// The contexts of the VMID-wait fences, one per ring.
+    pub fence_context: u64,
+    pub seqno: Vec<u32>,
+    /// The `amdgpu_pasid_xa` allocator: PASIDs in use and the next to try.
+    pub pasids_used: Vec<u32>,
+    pub pasid_xa_next: u32,
 }
 
 /// `struct amdgpu_sdma`.
@@ -722,9 +730,31 @@ pub struct amdgpu_device {
     pub bios_scratch_reg_offset: u32,
     pub clock: amdgpu_clock,
     pub pm: amdgpu_pm,
+    /// `adev->fence_context`: the hardware fences' contexts, one per ring.
+    pub fence_context: u64,
+    pub wq: crate::workqueue::workqueue,
+    /// The scheduler entities, by key.
+    pub sched_entities: Vec<Option<crate::drm_sched::drm_sched_entity>>,
+    /// The jobs between allocation and `free_job`, by key.
+    pub jobs: alloc::collections::BTreeMap<u64, crate::amdgpu_job::amdgpu_job>,
+    pub next_job: u64,
+    /// The client VMs, by key.
+    pub vms: Vec<Option<crate::amdgpu_vm::amdgpu_vm>>,
+    pub gpu_reset_counter: u32,
+    pub vram_lost_counter: u32,
+    pub gang_submit: crate::dma_fence::Fence,
+    pub isolation: crate::amdgpu_job::amdgpu_isolation,
 }
 
 impl amdgpu_device {
+    pub fn vm(&self, vm: usize) -> &crate::amdgpu_vm::amdgpu_vm {
+        self.vms[vm].as_ref().unwrap()
+    }
+
+    pub fn vm_mut(&mut self, vm: usize) -> &mut crate::amdgpu_vm::amdgpu_vm {
+        self.vms[vm].as_mut().unwrap()
+    }
+
     pub fn new(device: u16, revision: u8, rmmio: Mmio, rmmio_size: u32) -> Self {
         amdgpu_device {
             device,
@@ -830,6 +860,16 @@ impl amdgpu_device {
             bios_scratch_reg_offset: 0,
             clock: amdgpu_clock::default(),
             pm: amdgpu_pm::default(),
+            fence_context: 0,
+            wq: Default::default(),
+            sched_entities: Vec::new(),
+            jobs: Default::default(),
+            next_job: 0,
+            vms: Vec::new(),
+            gpu_reset_counter: 0,
+            vram_lost_counter: 0,
+            gang_submit: crate::dma_fence::dma_fence_get_stub(),
+            isolation: Default::default(),
         }
     }
 
@@ -1405,6 +1445,7 @@ pub fn amdgpu_device_init(adev: &mut amdgpu_device, flags: u32, bdf: (u8, u8, u8
     adev.vm_manager.vm_pte_num_scheds = 0;
     adev.gmc.gmc_funcs = None;
     adev.harvest_ip_mask = 0;
+    adev.fence_context = crate::dma_fence::dma_fence_context_alloc(AMDGPU_MAX_RINGS);
     // The register access hooks start as amdgpu_invalid_rreg/_wreg; the
     // port calls the access functions directly.
     adev.pdev = crate::linux::pci_dev::new(bdf.0, bdf.1, bdf.2);
@@ -1416,6 +1457,7 @@ pub fn amdgpu_device_init(adev: &mut amdgpu_device, flags: u32, bdf: (u8, u8, u8
 
     // Mutexes, spinlocks, lists, work items and the throttling ratelimit
     // guard and schedule what one thread does here in turn.
+    adev.isolation = crate::amdgpu_job::amdgpu_isolation::default();
 
     amdgpu_device_init_apu_flags(adev);
     let r = amdgpu_device_check_arguments(adev);
@@ -2072,6 +2114,34 @@ fn hw_fini(adev: &mut amdgpu_device, type_: u32) -> i32 {
     }
 }
 
+/// `amdgpu_device_init_schedulers`: no UVD or VCE rings, no partitions.
+pub fn amdgpu_device_init_schedulers(adev: &mut amdgpu_device) -> i32 {
+    for r in 0..adev.rings.len() {
+        // No need to setup the GPU scheduler for rings that don't need it
+        if adev.rings[r].no_scheduler {
+            continue;
+        }
+        let t = adev.rings[r].funcs.type_;
+        let timeout_ms = if t == AMDGPU_RING_TYPE_GFX {
+            adev.gfx_timeout
+        } else if t == AMDGPU_RING_TYPE_COMPUTE {
+            adev.compute_timeout
+        } else if t == AMDGPU_RING_TYPE_SDMA {
+            adev.sdma_timeout
+        } else {
+            adev.video_timeout
+        };
+        let credit_limit = adev.rings[r].num_hw_submission;
+        let name = adev.rings[r].name.clone();
+        let ret = crate::drm_sched::drm_sched_init(adev, r, credit_limit, timeout_ms as i64 * 1000, name.clone());
+        if ret != 0 {
+            Line::new().s("Failed to create scheduler on ring ").s(&name).s(".").say();
+            return ret;
+        }
+    }
+    0
+}
+
 /// `amdgpu_device_fini_hw`, up to `amdgpu_device_ip_fini_early` and
 /// `amdgpu_irq_fini_hw`: bare metal, no display, no RAS, no TTM buffer
 /// functions enabled, no KFD. The DMA buffers go back with the module.
@@ -2083,6 +2153,7 @@ pub fn amdgpu_device_fini_hw(adev: &mut amdgpu_device) {
     // disable all interrupts
     crate::amdgpu_irq::amdgpu_irq_disable_all(adev);
     crate::amdgpu_fence::amdgpu_fence_driver_hw_fini(adev);
+    crate::amdgpu_ttm::amdgpu_ttm_set_buffer_funcs_status(adev, false);
 
     // amdgpu_device_ip_fini_early: no block has early_fini;
     // amdgpu_device_smu_fini_early is for GC 9.0.0 and older.

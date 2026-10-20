@@ -233,6 +233,20 @@ fn run_pm4(kind: Kind, rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32
                     ih_post(SOC15_IH_CLIENTID_GRBM_CP, GFX_9_0__SRCID__CP_EOP_INTERRUPT, ring_id);
                 }
             }
+            PACKET3_WAIT_REG_MEM => {
+                let mem = (d(1) >> 4) & 1 != 0;
+                if (d(1) >> 6) & 1 != 0 {
+                    // write reg0, then wait on reg1
+                    npk_sys::fake_set_reg(d(2), d(4));
+                    let v = npk_sys::fake_reg(d(3));
+                    log(format!("pm4 WAIT_REG_MEM write {:#x} = {:#x}, wait {:#x}{}", d(2), d(4), d(3),
+                                if v & d(5) == d(5) & d(4) { "" } else { " (unmet)" }));
+                } else {
+                    let v = if mem { gpu_r32(d(2) as u64 | (d(3) as u64) << 32) } else { npk_sys::fake_reg(d(2)) };
+                    log(format!("pm4 WAIT_REG_MEM {} {:#x} == {:#x}{}", if mem { "mem" } else { "reg" }, d(2), d(4),
+                                if v & d(5) == d(4) { "" } else { " (unmet)" }));
+                }
+            }
             PACKET3_INDIRECT_BUFFER => {
                 let ib = d(1) as u64 | (d(2) as u64) << 32;
                 let n = d(3) & 0xfffff;
@@ -308,6 +322,21 @@ fn run_sdma(rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32) {
                 gpu_w32(addr, d(3));
                 log(format!("sdma FENCE {:#x} = {}", addr, d(3)));
                 4
+            }
+            (8, _) => {
+                // POLL_REGMEM, function == only
+                let mem = (hdr >> 31) & 1 != 0;
+                let (a0, a1, refv, mask) = (d(1), d(2), d(3), d(4));
+                let v = if mem { gpu_r32(a0 as u64 | (a1 as u64) << 32) } else { npk_sys::fake_reg(a0 >> 2) };
+                log(format!("sdma POLL_REGMEM {} {:#x} == {:#x}{}", if mem { "mem" } else { "reg" },
+                            if mem { a0 as u64 | (a1 as u64) << 32 } else { (a0 >> 2) as u64 }, refv,
+                            if v & mask == refv { "" } else { " (unmet)" }));
+                6
+            }
+            (14, _) => {
+                npk_sys::fake_set_reg(d(1), d(2));
+                log(format!("sdma SRBM_WRITE {:#x} = {:#x}", d(1), d(2)));
+                3
             }
             (6, _) => {
                 log("sdma TRAP".to_string());

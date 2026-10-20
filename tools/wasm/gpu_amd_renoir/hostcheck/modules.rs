@@ -87,5 +87,19 @@ mod amdgpu_ring;
 mod amdgpu_fence;
 #[path = "../src/amdgpu_ib.rs"]
 mod amdgpu_ib;
+#[path = "../src/dma_fence.rs"]
+mod dma_fence;
+#[path = "../src/dma_resv.rs"]
+mod dma_resv;
+#[path = "../src/workqueue.rs"]
+mod workqueue;
+#[path = "../src/drm_sched.rs"]
+mod drm_sched;
+#[path = "../src/amdgpu_sync.rs"]
+mod amdgpu_sync;
+#[path = "../src/amdgpu_job.rs"]
+mod amdgpu_job;
+#[path = "../src/amdgpu_ids.rs"]
+mod amdgpu_ids;
 #[path = "../src/athub_v1_0.rs"]
 mod athub_v1_0;

@@ -139,8 +139,8 @@ fn copy_rect(adev: &mut amdgpu_device, src: u64, src_pitch: u32, dst: u64, dst_p
     } else {
         (0..h as u64).map(|i| (s0 + i * src_pitch as u64, d0 + i * dst_pitch as u64, row)).collect()
     };
-    let f = crate::amdgpu_ttm::amdgpu_copy_spans(adev, r, &spans, 0)?;
-    if crate::amdgpu_fence::dma_fence_wait_timeout(adev, f, JOB_TIMEOUT_US) == 0 {
+    let f = crate::amdgpu_ttm::amdgpu_copy_spans(adev, r, &spans, false, false, 0)?;
+    if crate::dma_fence::dma_fence_wait_timeout(adev, &f, JOB_TIMEOUT_US) == 0 {
         return Err(-ETIME);
     }
     Ok(())
@@ -295,6 +295,7 @@ pub fn serve(adev: &mut amdgpu_device) {
     loop {
         npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, 100);
         crate::amdgpu_irq::amdgpu_ih_process(adev, false);
+        crate::workqueue::run_pending(adev);
         let n = npk_sys::gpudev_poll(&mut jobs);
         // The kernel no longer has this module as its service.
         if n < 0 {

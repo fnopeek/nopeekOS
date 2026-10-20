@@ -90,7 +90,7 @@ fn main() {
     l += &format!(" rlc {} {:#x} {} {:#x} doorbell {} {} {} vm {} {} gmc {} {:#x} {:#x} gds {} {} qmask {:#x} cleaner {} {:#x}",
                   g.rlc.is_rlc_v2_1 as u32, g.rlc.clear_state_gpu_addr, g.rlc.clear_state_size, g.rlc.cp_table_gpu_addr,
                   a.doorbell_index.kiq, a.doorbell_index.userqueue_end, a.doorbell.size, a.vm_manager.first_kfd_vmid,
-                  a.vm_manager.num_ids[AMDGPU_GFXHUB_0 as usize], a.gmc.noretry, a.gmc.private_aperture_start,
+                  a.vm_manager.id_mgr[AMDGPU_GFXHUB_0 as usize].num_ids, a.gmc.noretry, a.gmc.private_aperture_start,
                   a.gmc.shared_aperture_start, a.gds.gds_size, a.gds.gds_compute_max_wave_id, g.mec_queue_bitmap[0],
                   g.enable_cleaner_shader as u32, g.cleaner_shader_gpu_addr);
     println!("{}", l);
@@ -148,7 +148,7 @@ fn main() {
             }
         }
         println!("{}", l);
-        println!("ready {} {}", ring.name, ring.sched_ready as u32);
+        println!("ready {} {}", ring.name, ring.sched.ready as u32);
     }
     println!("--- gfx late_init");
     println!("gfx_v9_0_late_init {}", gfx_v9_0::gfx_v9_0_late_init(&mut adev));
