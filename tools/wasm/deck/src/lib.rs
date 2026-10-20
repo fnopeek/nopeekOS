@@ -231,6 +231,7 @@ const QUERY_CAP: usize = 63;
 // ── ActionIds + NodeIds ──────────────────────────────────────────────
 const WS_BASE: u32 = 1;              // + workspace index
 const ROW_BASE: u32 = 50_000;        // + row index (click)
+const ROW_HOVER: u32 = 60_000;       // + row index (hover)
 const LAUNCHER: u32 = 90_000;
 const POWER: u32 = 90_001;
 const SHOT: u32 = 90_002;
@@ -628,6 +629,14 @@ impl Deck {
             POWER => { power(); false }
             SHOT => { launch("snap", "region"); false }
             VOL_OPEN => { launch("volume", ""); false }
+            _ if (ROW_HOVER..ROW_HOVER + MENU_ROWS as u32).contains(&id) => {
+                let i = self.offset + (id - ROW_HOVER) as usize;
+                if i < self.filtered.len() && i != self.selected {
+                    self.selected = i;
+                    return true;
+                }
+                false
+            }
             _ if (ROW_BASE..ROW_BASE + MENU_ROWS as u32).contains(&id) => {
                 let i = self.offset + (id - ROW_BASE) as usize;
                 if i < self.filtered.len() {
@@ -1151,16 +1160,15 @@ fn menu_row(e: &AppEntry, selected: bool, slot: u32) -> Widget {
             modifiers: Vec::new() },
         Widget::Spacer { flex: 1 },
     ];
-    // The pointer highlights through `Hover`, which the compositor paints
-    // into the existing pixels. An `OnHover` action would make every row
-    // the pointer crosses a new commit, and a commit a new buffer the size
-    // of the raised panel.
+    // The pointer moves the selection itself, as the arrow keys do: one
+    // highlight, never a second one under the pointer beside the keyboard's.
+    // Each row it crosses is a commit, of the popup only, a small buffer.
     let mut mods = alloc::vec![
         Modifier::MinHeight(ROW_H),
         Modifier::PaddingXY { x: Padding::Sm.as_u16(), y: 0 },
         Modifier::Rounded(CELL_RADIUS),
         Modifier::OnClick(ActionId(ROW_BASE + slot)),
-        hover(CELL_RADIUS),
+        Modifier::OnHover(ActionId(ROW_HOVER + slot)),
     ];
     if selected {
         children.push(Widget::Text {
