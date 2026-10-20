@@ -4,7 +4,8 @@ build time by Mesa's own Intel compiler, and what dispatching them needs.
 
 Nothing here encodes hardware knowledge by hand:
 
-  * every `*.comp` in this directory is GLSL compute; glslangValidator turns
+  * every `*.comp` in tools/wasm/gpu_shaders (shared with gpu_amd_renoir)
+    is GLSL compute; glslangValidator turns
     it into SPIR-V and `brwc` (brwc.c, linked against Mesa's compiler
     libraries) compiles it for Tiger Lake GT2 the way anv compiles its
     internal kernels; the result is the program binary plus what dispatch
@@ -42,6 +43,7 @@ import tempfile
 import xml.etree.ElementTree as et
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SHADERS = os.path.join(HERE, "..", "..", "gpu_shaders")
 OUT = os.path.join(HERE, "..", "src", "gpgpu_gen.rs")
 G = os.path.expanduser("~/.cache/nopeekos/gpu-shaders")
 MESA = os.path.join(G, "src", "mesa")
@@ -307,11 +309,11 @@ def verify_packing(tmp, items):
 
 
 def generate():
-    shaders = sorted(f for f in os.listdir(HERE) if f.endswith(".comp"))
+    shaders = sorted(f for f in os.listdir(SHADERS) if f.endswith(".comp"))
     with tempfile.TemporaryDirectory() as tmp:
         brwc = build_brwc(tmp)
         dev = device_info(brwc)
-        kernels = [compile_shader(brwc, tmp, os.path.join(HERE, s)) for s in shaders]
+        kernels = [compile_shader(brwc, tmp, os.path.join(SHADERS, s)) for s in shaders]
         items = load_genxml(os.path.join(MESA, "src/intel/genxml/gen120.xml"))
         verify_packing(tmp, items)
 

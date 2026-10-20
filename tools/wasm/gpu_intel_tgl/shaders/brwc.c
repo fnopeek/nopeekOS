@@ -213,7 +213,12 @@ main(int argc, char **argv)
       .constant_addr_format = nir_address_format_64bit_global,
    };
 
-   nir_shader *nir = spirv_to_nir(spv, spv_size / 4, NULL, MESA_SHADER_COMPUTE,
+   /* Specialization constant 0 is the workgroup width (gpu_shaders): one
+    * SIMD thread. */
+   uint32_t simd = SIMD;
+   struct nir_spirv_specialization_entry width = {.id = 0, .size = 4, .data = (uint8_t *)&simd};
+   struct nir_spirv_specialization spec = {.num_entries = 1, .entries = &width};
+   nir_shader *nir = spirv_to_nir(spv, spv_size / 4, &spec, MESA_SHADER_COMPUTE,
                                   "main", &spirv_options, nir_options);
    if (!nir) {
       fprintf(stderr, "brwc: spirv_to_nir failed\n");

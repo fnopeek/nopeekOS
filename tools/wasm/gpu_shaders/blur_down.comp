@@ -6,7 +6,10 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
+// The workgroup is one subgroup of the card: 16 lanes on Intel (SIMD16),
+// 64 on AMD (wave64); the module sets it at compile time.
+layout(constant_id = 0) const uint WIDTH = 16u;
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
 layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words {
     uint v[];

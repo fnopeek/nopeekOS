@@ -1,11 +1,11 @@
 #version 460
-// One segment of a scene list (compose.rs) over one area: a thread is a
-// column of 16 pixels by ROWS rows inside one 64x64 bin, and runs only the
+// One segment of a scene list (compose.rs) over one area: a workgroup is a
+// row of WIDTH pixels by ROWS rows inside one 64x64 bin, and runs only the
 // items compose.rs listed for that bin, in order, on a colour held in a
 // register, row by row. A list that starts with an item covering the bin
 // opaquely skips the read of the target. Item and frame words are uniform
-// per thread: each lane loads one word of a 16-word block in one message,
-// the words are then broadcast.
+// per workgroup: lane k loads word k % 16 of a 16-word block in one
+// message, the words are then broadcast.
 // A bit-exact port of the kernel's CPU executor (kernel/src/shade/scene.rs
 // `paint` and the helpers it calls in gui/render.rs, gui/background.rs and
 // gui/theme.rs); comments name the function each part mirrors.
@@ -16,7 +16,10 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_shuffle : require
 
-layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
+// The workgroup is one subgroup of the card: 16 lanes on Intel (SIMD16),
+// 64 on AMD (wave64); the module sets it at compile time.
+layout(constant_id = 0) const uint WIDTH = 16u;
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
 layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words {
     uint v[];
@@ -33,7 +36,7 @@ layout(push_constant, std430) uniform Params {
     uint clip_y;
     uint clip_w;
     uint clip_h;
-    // First 16-pixel column of the area, in 16s.
+    // First column of the area, in workgroup widths.
     uint gx0;
     // First run of ROWS rows of the area, in ROWS.
     uint gy0;
@@ -73,11 +76,11 @@ const uint FLAG_GLASS = 4u;
 const uint ROWS = 16u;
 
 // BLOCKS-BEGIN
-// A 16-word block: lane k holds word k. `BC` reads word k (constant), `SH`
-// word n (dynamically uniform).
+// A 16-word block: lane k holds word k % 16. `BC` reads word k (constant),
+// `SH` word n (dynamically uniform).
 #define Blk uint
 Blk blk_load(Words w, uint base) {
-    return w.v[base + gl_SubgroupInvocationID];
+    return w.v[base + (gl_SubgroupInvocationID & 15u)];
 }
 #define BC(b, k) subgroupBroadcast(b, k)
 #define SH(b, n) subgroupShuffle(b, n)
@@ -428,7 +431,7 @@ uint close_glyph(Blk it, uint x, uint y, uint c) {
 }
 
 void main() {
-    uint x0 = (p.gx0 + gl_WorkGroupID.x) * 16u;
+    uint x0 = (p.gx0 + gl_WorkGroupID.x) * WIDTH;
     uint x = x0 + gl_LocalInvocationID.x;
     uint ry0 = (p.gy0 + gl_WorkGroupID.y) * ROWS;
     uint bin = ((ry0 >> 6) - p.bin_y0) * p.nbx + ((x0 >> 6) - p.bin_x0);
