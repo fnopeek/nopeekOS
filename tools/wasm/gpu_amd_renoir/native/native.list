@@ -140,3 +140,8 @@ QF_RSP_EXPIRED = offsetof(struct amdgpu_ccmd_cs_query_fence_status_rsp, expired)
 # The cache type of a blob mapping (linux/virtio_gpu.h)
 VIRTIO_GPU_MAP_CACHE_CACHED
 VIRTIO_GPU_MAP_CACHE_WC
+# libdrm's fence wait (amdgpu.h, amdgpu_internal.h)
+AMDGPU_QUERY_FENCE_TIMEOUT_IS_ABSOLUTE
+AMDGPU_TIMEOUT_INFINITE
+AMDGPU_NULL_SUBMIT_SEQ
+AMDGPU_CS_MAX_RINGS

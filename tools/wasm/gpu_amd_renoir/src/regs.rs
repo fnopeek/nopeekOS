@@ -7039,3 +7039,17 @@ pub const V9_META_DE_PAYLOAD: u32 = 0x100;
 pub const V9_DE_GDS_BACKUP_ADDRLO: u32 = 0x58;
 /// The value of `offsetof(struct v9_de_ib_state, gds_backup_addrhi)` in gfx_v9_0.c
 pub const V9_DE_GDS_BACKUP_ADDRHI: u32 = 0x5c;
+
+// A client's submissions from a guest (amdgpu_cs.c)
+/// ?
+pub const AMDGPU_CHUNK_ID_IB: u32 = 0x1;
+/// ?
+pub const AMDGPU_CHUNK_ID_FENCE: u32 = 0x2;
+/// ?
+pub const AMDGPU_CHUNK_ID_DEPENDENCIES: u32 = 0x3;
+/// ?
+pub const AMDGPU_CHUNK_ID_BO_HANDLES: u32 = 0x6;
+/// ?
+pub const AMDGPU_CHUNK_ID_SCHEDULED_DEPENDENCIES: u32 = 0x7;
+/// The value of `sizeof(struct drm_amdgpu_cs_chunk_dep)` in amdgpu_cs.c
+pub const SIZEOF_drm_amdgpu_cs_chunk_dep: u32 = 0x18;

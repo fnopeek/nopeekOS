@@ -9,7 +9,8 @@ structs) and `src/amd/common/virtio/amdgpu_virtio_proto.h` (the ccmds,
 identical to virglrenderer's copy). Each `NAME = expr` of native.list
 becomes a C function returning its value, compiled to assembly, and the
 number is read off the `mov $N, %eax` GCC emits; a bare `NAME` is a
-constant of those headers, or of the virtio-gpu uapi the map info is in.
+constant of those headers, of the virtio-gpu uapi the map info is in, or
+of libdrm's amdgpu_internal.h (the fence wait the renderer runs).
 
     python3 gen_native.py            # rewrite ../src/native_gen.rs
     python3 gen_native.py --check    # fail if it is not what it would write
@@ -25,6 +26,7 @@ OUT = os.path.join(HERE, "..", "src", "native_gen.rs")
 LIST = os.path.join(HERE, "native.list")
 MESA = os.path.expanduser("~/.cache/nopeekos/gpu-shaders/src/mesa")
 LIBDRM = "/usr/include/libdrm"
+LIBDRM_SRC = os.path.expanduser("~/.cache/nopeekos/libdrm/libdrm-2.4.134")
 
 PRELUDE = """#include <stddef.h>
 #include <stdint.h>
@@ -33,10 +35,12 @@ PRELUDE = """#include <stddef.h>
 #include "drm_hw.h"
 #include "amdgpu_virtio_proto.h"
 #include <linux/virtio_gpu.h>
+#include "amdgpu_internal.h"
 """
-FLAGS = ["-O2", "-S", "-DENABLE_DRM_AMDGPU", "-I", LIBDRM,
+FLAGS = ["-O2", "-S", "-DENABLE_DRM_AMDGPU", "-DHAVE_LIBDRM_ATOMIC_PRIMITIVES=1", "-I", LIBDRM,
          "-I", os.path.join(MESA, "src/virtio/virtio-gpu"), "-I", os.path.join(MESA, "src/amd/common/virtio"),
-         "-I", os.path.join(MESA, "include"), "-Wno-padded"]
+         "-I", os.path.join(MESA, "include"), "-I", os.path.join(LIBDRM_SRC, "amdgpu"), "-I", LIBDRM_SRC,
+         "-Wno-padded"]
 
 
 def values(exprs):

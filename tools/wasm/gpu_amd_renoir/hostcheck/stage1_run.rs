@@ -48,19 +48,32 @@ fn main() {
     let mut adev = fake_renoir();
     fake_gpu();
     // A guest context: open, DEV_INFO and READ_MMR_REG as libdrm asks,
-    // a context made and freed; a GTT and a VRAM object made, handed over,
-    // mapped, given metadata and asked about, then let go; closed.
+    // a context made; a GTT and a VRAM object made, handed over, mapped,
+    // given metadata and asked about; an IB in the GTT object writing the
+    // VRAM one submitted on GFX and its fence waited for; a VMID reserved
+    // and given back; the context freed, the objects let go; closed.
     let dev_info = ccmd(1, 1, &[0, 0, SIZEOF_drm_amdgpu_info_device, AMDGPU_INFO_DEV_INFO, 0, 0, 0, 0]);
     let mmr = ccmd(1, 2, &[0, 0, 4, AMDGPU_INFO_READ_MMR_REG, 0x263e, 1, 0xffff_ffff, 0]);
     let ctx = ccmd(7, 3, &[0, 0]);
-    let free = ccmd(7, 4, &[1, 1]);
     let gem_gtt = ccmd(2, 5, &[1, 0, 8192, 0, 4096, 0, AMDGPU_GEM_DOMAIN_GTT, 0, 0, 0]);
     let gem_vram = ccmd(2, 6, &[2, 0, 4096, 0, 4096, 0, AMDGPU_GEM_DOMAIN_VRAM, 0, 0, 0]);
     let va = ccmd(3, 7, &[0, 1, 8192, 0, AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE, 0, 0, 0, 0, 0, 10,
                           AMDGPU_VA_OP_MAP]);
     let md = ccmd(5, 8, &[0, 0, 0x1234, 0, 11, 4, 0xdead_beef, 0]);
     let query = ccmd(6, 9, &[11, 0]);
-    let submit = ccmd(4, 10, &[1, 0, 0, 1]);
+    let va2 = ccmd(3, 10, &[0x2000, 1, 4096, 0, AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE, 0, 0, 0, 0, 0, 11,
+                            AMDGPU_VA_OP_MAP]);
+    // PACKET3(WRITE_DATA): dst memory, confirmed, at the VRAM object.
+    let ib = [3 << 30 | 3 << 16 | PACKET3_WRITE_DATA << 8, 5 << 8 | 1 << 20, 0x2000, 1, 0xcafe_f00d];
+    let ib_bytes: Vec<u8> = ib.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let submit = ccmd(4, 11, &[1, 2, 0, 1,
+                               AMDGPU_CHUNK_ID_BO_HANDLES | 4 << 16, 0, AMDGPU_CHUNK_ID_IB | 8 << 16, 16,
+                               10, 0, 11, 0,
+                               0, 0, 0, 1, 20, AMDGPU_HW_IP_GFX, 0, 0]);
+    let fence = ccmd(10, 12, &[1, AMDGPU_HW_IP_GFX, 0, 0, 1, 0, 2_000_000_000, 0, 0, 0]);
+    let reserve = ccmd(8, 13, &[0, 0]);
+    let unreserve = ccmd(8, 14, &[1, 0]);
+    let free = ccmd(7, 15, &[1, 1]);
     let len = |v: &Vec<u8>| v.len() as u32;
     // An inner rectangle from shadow 1, then the lower half from shadow 2,
     // which is one span.
@@ -71,7 +84,6 @@ fn main() {
                                   (7, [100, len(&dev_info), 0, 0, 0, 0], dev_info.clone()),
                                   (7, [100, len(&mmr), 0, 0, 0, 0], mmr.clone()),
                                   (7, [100, len(&ctx), 0, 0, 0, 0], ctx.clone()),
-                                  (7, [100, len(&free), 0, 0, 0, 0], free.clone()),
                                   (7, [100, len(&gem_gtt), 0, 0, 0, 0], gem_gtt.clone()),
                                   (7, [100, len(&gem_vram), 0, 0, 0, 0], gem_vram.clone()),
                                   (8, [100, 1, 10, 0, 0, 0], vec![]),
@@ -79,7 +91,13 @@ fn main() {
                                   (7, [100, len(&va), 0, 0, 0, 0], va.clone()),
                                   (7, [100, len(&md), 0, 0, 0, 0], md.clone()),
                                   (7, [100, len(&query), 0, 0, 0, 0], query.clone()),
+                                  (7, [100, len(&va2), 0, 0, 0, 0], va2.clone()),
+                                  (npk_sys::GUEST_STORE, [1, 0, 0, 0, 0, 0], ib_bytes),
                                   (7, [100, len(&submit), 0, 0, 0, 0], submit.clone()),
+                                  (7, [100, len(&fence), 0, 0, 0, 0], fence.clone()),
+                                  (7, [100, len(&reserve), 0, 0, 0, 0], reserve.clone()),
+                                  (7, [100, len(&unreserve), 0, 0, 0, 0], unreserve.clone()),
+                                  (7, [100, len(&free), 0, 0, 0, 0], free.clone()),
                                   (9, [100, 10, 0, 0, 0, 0], vec![]),
                                   (9, [100, 11, 0, 0, 0, 0], vec![]),
                                   (5, [100, 0, 0, 0, 0, 0], vec![])]);

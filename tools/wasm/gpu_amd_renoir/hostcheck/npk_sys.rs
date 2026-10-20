@@ -630,6 +630,18 @@ pub fn gpudev_poll(buf: &mut [u8]) -> i32 {
     GPUDEV.with(|g| {
         let mut g = g.borrow_mut();
         let Some(s) = g.as_mut() else { return -1 };
+        // A guest store through its mapping of tt args[0]: not a job.
+        while s.jobs.front().is_some_and(|j| j.0 == GUEST_STORE) {
+            let (_, args, words) = s.jobs.pop_front().unwrap();
+            TTS.with(|t| {
+                let t = t.borrow();
+                let (_, d, _) = t[args[0] as usize - 1].as_ref().unwrap();
+                for (i, w) in words.chunks(4).enumerate() {
+                    d.w32(args[1] + i as u32 * 4, u32::from_le_bytes(w.try_into().unwrap()));
+                }
+            });
+            println!("guest stores {} bytes at tt {} + {:#x}", words.len(), args[0], args[1]);
+        }
         let Some((op, args, payload)) = s.jobs.pop_front() else { return -1 };
         s.seq += 1;
         buf[0..4].copy_from_slice(&s.seq.to_le_bytes());
@@ -655,6 +667,15 @@ pub fn gpudev_job_data(seq: i32, off: i32, out: &mut [u8]) -> i32 {
         out.copy_from_slice(&p[off..off + out.len()]);
         out.len() as i32
     })
+}
+
+/// The fake's own entry in the job list: the guest writes tt pages.
+pub const GUEST_STORE: u32 = 0xfe;
+
+/// `npk_gpudev_ring`: a timeline's counts.
+pub fn gpudev_ring(client: i32, ring_idx: i32, submitted: i64, completed: i64) -> i32 {
+    println!("gpudev ring: client {} timeline {} submitted {} completed {}", client, ring_idx, submitted, completed);
+    0
 }
 
 /// `npk_gpudev_tt_alloc`: a guest object's pages, from the fake's DMA.

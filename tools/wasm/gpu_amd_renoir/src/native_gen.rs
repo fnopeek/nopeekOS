@@ -264,3 +264,8 @@ pub const QF_RSP_EXPIRED: u32 = 0x8;
 // The cache type of a blob mapping (linux/virtio_gpu.h)
 pub const VIRTIO_GPU_MAP_CACHE_CACHED: u32 = 0x1;
 pub const VIRTIO_GPU_MAP_CACHE_WC: u32 = 0x3;
+// libdrm's fence wait (amdgpu.h, amdgpu_internal.h)
+pub const AMDGPU_QUERY_FENCE_TIMEOUT_IS_ABSOLUTE: u32 = 0x1;
+pub const AMDGPU_TIMEOUT_INFINITE: u64 = 0xffffffffffffffff;
+pub const AMDGPU_NULL_SUBMIT_SEQ: u32 = 0x0;
+pub const AMDGPU_CS_MAX_RINGS: u32 = 0x8;

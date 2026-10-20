@@ -3518,3 +3518,10 @@ V9_META_CE_PAYLOAD = offsetof(struct v9_gfx_meta_data, ce_payload) @ gfx_v9_0.c
 V9_META_DE_PAYLOAD = offsetof(struct v9_gfx_meta_data, de_payload) @ gfx_v9_0.c
 V9_DE_GDS_BACKUP_ADDRLO = offsetof(struct v9_de_ib_state, gds_backup_addrlo) @ gfx_v9_0.c
 V9_DE_GDS_BACKUP_ADDRHI = offsetof(struct v9_de_ib_state, gds_backup_addrhi) @ gfx_v9_0.c
+# A client's submissions from a guest (amdgpu_cs.c)
+AMDGPU_CHUNK_ID_IB @ amdgpu_cs.c
+AMDGPU_CHUNK_ID_FENCE @ amdgpu_cs.c
+AMDGPU_CHUNK_ID_DEPENDENCIES @ amdgpu_cs.c
+AMDGPU_CHUNK_ID_BO_HANDLES @ amdgpu_cs.c
+AMDGPU_CHUNK_ID_SCHEDULED_DEPENDENCIES @ amdgpu_cs.c
+SIZEOF_drm_amdgpu_cs_chunk_dep = sizeof(struct drm_amdgpu_cs_chunk_dep) @ amdgpu_cs.c

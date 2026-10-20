@@ -362,8 +362,9 @@ struct service {
     /// target buffer, and when the job began.
     scene: Option<(u32, u32, u64, compose::scene_inflight)>,
     scenes: u32,
-    /// The guests' contexts.
+    /// The guests' contexts, and their fence waits still open.
     native: crate::amdgpu_virtio::vclients,
+    waits: Vec<crate::amdgpu_virtio::fence_wait>,
 }
 
 impl service {
@@ -516,11 +517,32 @@ fn run_ccmd(adev: &mut amdgpu_device, svc: &mut service, seq: u32, client: u32, 
         at += n as usize;
     }
     match crate::amdgpu_virtio::ccmd(adev, &mut svc.native, client, &req) {
-        Ok(r) if r.len() <= REPLY_MAX => {
+        Ok(crate::amdgpu_virtio::ccmd_result::reply(r)) if r.len() <= REPLY_MAX => {
             if npk_sys::gpudev_reply(seq as i32, &r) != 0 { -ENOMEM } else { 0 }
         }
-        Ok(_) => -EINVAL,
+        Ok(crate::amdgpu_virtio::ccmd_result::reply(_)) => -EINVAL,
+        Ok(crate::amdgpu_virtio::ccmd_result::wait(mut w)) => {
+            w.seq = seq;
+            svc.waits.push(w);
+            JOB_OPEN
+        }
         Err(e) => e,
+    }
+}
+
+/// Fence waits whose fence signaled or whose time is up: replied and
+/// completed.
+fn poll_waits(adev: &mut amdgpu_device, svc: &mut service) {
+    let mut i = 0;
+    while i < svc.waits.len() {
+        match crate::amdgpu_virtio::fence_wait_reply(adev, &svc.native, &svc.waits[i]) {
+            Some(r) => {
+                let w = svc.waits.swap_remove(i);
+                let st = if npk_sys::gpudev_reply(w.seq as i32, &r) != 0 { -ENOMEM } else { 0 };
+                npk_sys::gpudev_complete(w.seq as i32, st);
+            }
+            None => i += 1,
+        }
     }
 }
 
@@ -630,7 +652,7 @@ pub fn serve(adev: &mut amdgpu_device) {
         return;
     }
     let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: Vec::new(), copy_ok: false, composer: None,
-                            scene: None, scenes: 0, native: Default::default() };
+                            scene: None, scenes: 0, native: Default::default(), waits: Vec::new() };
     for id in 0..NUM_BOS {
         let Some(info) = bo_info(id as u32) else {
             Line::new().s("gpudev: no buffer ").dec(id as u64).say();
@@ -690,10 +712,13 @@ pub fn serve(adev: &mut amdgpu_device) {
     let mut jobs = [0u8; JOB_BYTES * 8];
     let (mut done, mut failed) = (0u64, 0u64);
     loop {
-        npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, if svc.scene.is_some() { 2 } else { 100 });
+        let idle_ms = if svc.scene.is_some() { 2 } else { 100 };
+        npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, crate::amdgpu_virtio::fence_wait_ms(&svc.waits).min(idle_ms));
         crate::amdgpu_irq::amdgpu_ih_process(adev, false);
         crate::workqueue::run_pending(adev);
         poll_scene(adev, &mut svc);
+        crate::amdgpu_virtio::poll_rings(adev, &mut svc.native);
+        poll_waits(adev, &mut svc);
         let n = npk_sys::gpudev_poll(&mut jobs);
         // The kernel no longer has this module as its service.
         if n < 0 {
@@ -713,6 +738,8 @@ pub fn serve(adev: &mut amdgpu_device) {
             timed_out |= status == -ETIME;
             npk_sys::gpudev_complete(seq as i32, status);
         }
+        // A fence wait with no time left (a poll) answers now.
+        poll_waits(adev, &mut svc);
         if timed_out {
             Line::new().s("gpudev: a copy on sdma0 timed out after ").dec(done).s(" jobs (").dec(failed)
                 .s(" refused), giving the card back").say();

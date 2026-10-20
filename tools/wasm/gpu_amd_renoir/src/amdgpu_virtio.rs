@@ -47,6 +47,32 @@ pub struct vclient {
     /// resource exists) and its resource table.
     blobs: BTreeMap<u32, vobject>,
     resources: BTreeMap<u32, vobject>,
+    /// The timelines (`drm_timeline`), one per ring the guest may name
+    /// (`ring_idx` - 1): the fences of its submissions not yet done, and
+    /// how many it has had and finished.
+    timelines: Vec<timeline>,
+}
+
+#[derive(Default)]
+struct timeline {
+    pending: alloc::collections::VecDeque<crate::dma_fence::Fence>,
+    submitted: u64,
+    completed: u64,
+}
+
+/// A CS_QUERY_FENCE_STATUS waiting for its fence or its timeout: the job
+/// stays open meanwhile (`amdgpu_cs_wait_ioctl` blocks only its caller).
+pub struct fence_wait {
+    pub seq: u32,
+    client: u32,
+    fence: Option<crate::dma_fence::Fence>,
+    deadline_ns: u64,
+}
+
+/// What a ccmd came to: a reply now, or a wait.
+pub enum ccmd_result {
+    reply(Vec<u8>),
+    wait(fence_wait),
 }
 
 /// Every guest context of the service.
@@ -60,13 +86,27 @@ pub fn client_open(adev: &mut amdgpu_device, vc: &mut vclients, id: u32) -> i32 
     if vc.clients.contains_key(&id) {
         return EINVAL;
     }
-    match cs::amdgpu_driver_open_kms(adev) {
-        Ok(fpriv) => {
-            vc.clients.insert(id, vclient { id, fpriv, async_error: 0, blobs: BTreeMap::new(), resources: BTreeMap::new() });
-            0
+    let fpriv = match cs::amdgpu_driver_open_kms(adev) {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
+    // amdgpu_renderer_create: a timeline per available ring of every IP.
+    let mut count = 0;
+    for ip in 0..AMDGPU_HW_IP_NUM {
+        if let Ok(v) = query(adev, &fpriv, AMDGPU_INFO_HW_IP_INFO, SIZEOF_drm_amdgpu_info_hw_ip,
+                             &[(UAPI_INFO_QUERY_HW_IP_TYPE, ip), (UAPI_INFO_QUERY_HW_IP_INSTANCE, 0)]) {
+            count += d32(&v, UAPI_HWIP_AVAILABLE_RINGS).count_ones();
         }
-        Err(e) => e,
     }
+    if count == 0 {
+        Line::new().s("native: no available rings").say();
+        cs::amdgpu_driver_postclose_kms(adev, fpriv);
+        return EINVAL;
+    }
+    let timelines = (0..count).map(|_| timeline::default()).collect();
+    vc.clients.insert(id, vclient { id, fpriv, async_error: 0, blobs: BTreeMap::new(), resources: BTreeMap::new(),
+                                    timelines });
+    0
 }
 
 /// `OP_CLIENT` close: `amdgpu_renderer_destroy`, its contexts with it.
@@ -254,6 +294,232 @@ fn ccmd_bo_query_info(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> 
     Ok(r)
 }
 
+/// `amdgpu_ccmd_cs_submit`: the chunks checked and translated (resource
+/// ids to buffers) as virglrenderer does, then `amdgpu_cs_submit_raw2`;
+/// the submission's fence goes on the timeline of `ring_idx`.
+fn ccmd_cs_submit(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Result<Vec<u8>, i32> {
+    let mut rsp_ = rsp(RSP_SIZE, 0);
+    let len = (d32(req, 4) as usize).min(req.len());
+    let (ctx_id, num_chunks, ring_idx) = (d32(req, CS_CTX_ID), d32(req, CS_NUM_CHUNKS), d32(req, CS_RING_IDX));
+    let fail = |r: &mut Vec<u8>, e: i32| {
+        r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&e.to_le_bytes());
+        Err(e)
+    };
+    // Do not allocate arbitrarily large buffer.
+    if num_chunks > AMDGPU_CCMD_CS_SUBMIT_MAX_NUM_CHUNKS {
+        return fail(&mut rsp_, EINVAL);
+    }
+    if ring_idx == 0 || ring_idx as usize > c.timelines.len() {
+        Line::new().s("native: invalid ring_idx ").dec(ring_idx as u64).say();
+        return fail(&mut rsp_, EINVAL);
+    }
+    let descriptors_len = CS_PAYLOAD as usize + num_chunks as usize * 8;
+    if descriptors_len > len {
+        return fail(&mut rsp_, EINVAL);
+    }
+    let mut chunks = Vec::new();
+    let mut have_bo_list = false;
+    for i in 0..num_chunks as usize {
+        let at = CS_PAYLOAD as usize + i * 8;
+        let chunk_id = u16::from_le_bytes([req[at], req[at + 1]]) as u32;
+        let length_dw = u16::from_le_bytes([req[at + 2], req[at + 3]]) as usize;
+        // size_add: saturating, so a huge offset fails the bound.
+        let offset = descriptors_len.saturating_add(d32(req, at as u32 + 4) as usize);
+        let clen = length_dw * 4;
+        if offset.saturating_add(clen) > len {
+            return fail(&mut rsp_, EINVAL);
+        }
+        // validate_chunk_inputs: the entries of a BO list and a user fence
+        // are words.
+        if matches!(chunk_id, AMDGPU_CHUNK_ID_BO_HANDLES | AMDGPU_CHUNK_ID_FENCE) && offset % 4 != 0 {
+            return fail(&mut rsp_, EINVAL);
+        }
+        let w = |k: usize| d32(req, (offset + k * 4) as u32);
+        match chunk_id {
+            AMDGPU_CHUNK_ID_BO_HANDLES => {
+                if have_bo_list {
+                    Line::new().s("native: refusing to allocate multiple BO lists").say();
+                    return fail(&mut rsp_, EINVAL);
+                }
+                have_bo_list = true;
+                let mut list = Vec::new();
+                for k in 0..clen / 8 {
+                    let res_id = w(k * 2);
+                    let Some(o) = c.resources.get(&res_id) else {
+                        Line::new().s("native: couldn't retrieve bo with res_id ").dec(res_id as u64).say();
+                        return fail(&mut rsp_, EINVAL);
+                    };
+                    list.push(o.bo);
+                }
+                chunks.push(cs::cs_chunk::bo_handles(list));
+            }
+            AMDGPU_CHUNK_ID_FENCE => {
+                if clen < 8 {
+                    return fail(&mut rsp_, EINVAL);
+                }
+                let (res_id, off) = (w(0), w(1));
+                if off % 8 != 0 {
+                    return fail(&mut rsp_, EINVAL);
+                }
+                let Some(o) = c.resources.get(&res_id) else { return fail(&mut rsp_, EINVAL) };
+                chunks.push(cs::cs_chunk::fence { bo: o.bo, offset: off });
+            }
+            AMDGPU_CHUNK_ID_DEPENDENCIES => {
+                let n = clen / SIZEOF_drm_amdgpu_cs_chunk_dep as usize;
+                let deps = (0..n).map(|k| {
+                    let b = k * 6;
+                    cs::cs_dep { ip_type: w(b), ip_instance: w(b + 1), ring: w(b + 2), ctx_id: w(b + 3),
+                                 handle: w(b + 4) as u64 | (w(b + 5) as u64) << 32 }
+                }).collect();
+                chunks.push(cs::cs_chunk::dependencies { deps, scheduled: false });
+            }
+            AMDGPU_CHUNK_ID_IB => {
+                if length_dw != 8 {
+                    return fail(&mut rsp_, EINVAL);
+                }
+                chunks.push(cs::cs_chunk::ib(cs::drm_amdgpu_cs_chunk_ib {
+                    flags: w(1),
+                    va_start: w(2) as u64 | (w(3) as u64) << 32,
+                    ib_bytes: w(4),
+                    ip_type: w(5),
+                    ip_instance: w(6),
+                    ring: w(7),
+                }));
+            }
+            _ => {
+                Line::new().s("native: unsupported chunk_id ").dec(chunk_id as u64).say();
+                return fail(&mut rsp_, EINVAL);
+            }
+        }
+    }
+    match cs::amdgpu_cs_ioctl_chunks(adev, &mut c.fpriv, ctx_id, &chunks) {
+        Ok((_, fence)) => {
+            let t = &mut c.timelines[ring_idx as usize - 1];
+            t.submitted += 1;
+            t.pending.push_back(fence);
+            npk_sys::gpudev_ring(c.id as i32, ring_idx as i32, t.submitted as i64, t.completed as i64);
+            Ok(rsp_)
+        }
+        Err(e) => {
+            c.async_error = c.async_error.wrapping_add(1);
+            Line::new().s("native: command submission failed (ring ").dec(ring_idx as u64).s(", ").dec((-e) as u64)
+                .s(")").say();
+            fail(&mut rsp_, e)
+        }
+    }
+}
+
+/// The timelines of every client: submissions whose fences signaled are
+/// done (`drm_timeline` retiring in order), and the kernel hears of it.
+pub fn poll_rings(adev: &mut amdgpu_device, vc: &mut vclients) {
+    for c in vc.clients.values_mut() {
+        for (i, t) in c.timelines.iter_mut().enumerate() {
+            let before = t.completed;
+            while t.pending.front().is_some_and(|f| crate::dma_fence::dma_fence_is_signaled(adev, f)) {
+                t.pending.pop_front();
+                t.completed += 1;
+            }
+            if t.completed != before {
+                npk_sys::gpudev_ring(c.id as i32, i as i32 + 1, t.submitted as i64, t.completed as i64);
+            }
+        }
+    }
+}
+
+/// `amdgpu_ccmd_cs_query_fence_status`: libdrm's
+/// `amdgpu_cs_query_fence_status`, `amdgpu_cs_wait_ioctl` in the driver.
+fn ccmd_query_fence_status(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Result<ccmd_result, i32> {
+    let ctx_id = d32(req, QF_CTX_ID);
+    let Some(ctx) = c.fpriv.ctx_mgr.ctx_handles.get_mut(&ctx_id) else {
+        Line::new().s("native: couldn't find amdgpu_context with id ").dec(ctx_id as u64).say();
+        return Err(EINVAL);
+    };
+    let (ip_type, inst, ring) = (d32(req, QF_IP_TYPE), d32(req, QF_IP_INSTANCE), d32(req, QF_RING));
+    let (timeout, flags, seq) = (q64(req, QF_TIMEOUT_NS), q64(req, QF_FLAGS), q64(req, QF_FENCE));
+    let mut early = rsp(QF_RSP_SIZE, 0);
+    if ip_type >= AMDGPU_HW_IP_NUM || ring >= AMDGPU_CS_MAX_RINGS {
+        early[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&EINVAL.to_le_bytes());
+        return Ok(ccmd_result::reply(early));
+    }
+    if seq == AMDGPU_NULL_SUBMIT_SEQ as u64 {
+        early[QF_RSP_EXPIRED as usize..QF_RSP_EXPIRED as usize + 4].copy_from_slice(&1u32.to_le_bytes());
+        return Ok(ccmd_result::reply(early));
+    }
+    // amdgpu_cs_get_fence
+    let fence = crate::amdgpu_ctx::amdgpu_ctx_get_entity(adev, ctx, ip_type, inst, ring)
+        .and_then(|_| crate::amdgpu_ctx::amdgpu_ctx_get_fence(ctx, ip_type, ring, seq));
+    let fence = match fence {
+        Ok(f) => f,
+        Err(e) => {
+            let mut r = rsp(QF_RSP_SIZE, 0);
+            r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&e.to_le_bytes());
+            return Ok(ccmd_result::reply(r));
+        }
+    };
+    // amdgpu_cs_calculate_timeout: a relative timeout from now.
+    let now = crate::linux::now_us().saturating_mul(1000);
+    let deadline_ns = if flags & AMDGPU_QUERY_FENCE_TIMEOUT_IS_ABSOLUTE as u64 != 0 || timeout == AMDGPU_TIMEOUT_INFINITE {
+        timeout
+    } else {
+        now.saturating_add(timeout)
+    };
+    Ok(ccmd_result::wait(fence_wait { seq: 0, client: c.id, fence, deadline_ns }))
+}
+
+/// Milliseconds until the first of `waits` runs out of time (a fence
+/// signaling wakes the module through its interrupt).
+pub fn fence_wait_ms(waits: &[fence_wait]) -> i32 {
+    let Some(first) = waits.iter().map(|w| w.deadline_ns).min() else { return i32::MAX };
+    let now = crate::linux::now_us().saturating_mul(1000);
+    (first.saturating_sub(now).div_ceil(1_000_000)).min(i32::MAX as u64) as i32
+}
+
+/// A fence wait's reply once its fence signaled or its time is up; None
+/// while it still waits.
+pub fn fence_wait_reply(adev: &mut amdgpu_device, vc: &vclients, w: &fence_wait) -> Option<Vec<u8>> {
+    let async_error = vc.clients.get(&w.client).map_or(0, |c| c.async_error);
+    let now = crate::linux::now_us().saturating_mul(1000);
+    // dma_fence_wait_timeout: 1 when signaled, 0 when the time is up.
+    let (r, error) = match &w.fence {
+        None => (1, 0),
+        Some(f) if crate::dma_fence::dma_fence_is_signaled(adev, f) => (1, f.error()),
+        Some(_) if now >= w.deadline_ns => (0, 0),
+        Some(_) => return None,
+    };
+    let mut body = rsp(QF_RSP_SIZE, 0);
+    if r > 0 && error != 0 {
+        body[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&error.to_le_bytes());
+    } else {
+        // out.status = busy; libdrm: expired = !busy
+        let expired = (r != 0) as u32;
+        body[QF_RSP_EXPIRED as usize..QF_RSP_EXPIRED as usize + 4].copy_from_slice(&expired.to_le_bytes());
+    }
+    let mut out = Vec::with_capacity(REPLY_HEAD + body.len());
+    out.extend_from_slice(&async_error.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&body);
+    Some(out)
+}
+
+/// `amdgpu_ccmd_reserve_vmid`: `amdgpu_vm_ioctl`'s (un)reserve, from the GFX hub.
+fn ccmd_reserve_vmid(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Result<Vec<u8>, i32> {
+    let mut r = rsp(RSP_SIZE, 0);
+    let flags = q64(req, RV_FLAGS);
+    if flags & !(AMDGPU_CCMD_RESERVE_VMID_UNRESERVE as u64) != 0 {
+        r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&EINVAL.to_le_bytes());
+        return Err(EINVAL);
+    }
+    let hub = AMDGPU_GFXHUB_0 as usize;
+    let ret = if flags & AMDGPU_CCMD_RESERVE_VMID_UNRESERVE as u64 != 0 {
+        crate::amdgpu_ids::amdgpu_vmid_free_reserved(adev, c.fpriv.vm, hub);
+        0
+    } else {
+        crate::amdgpu_ids::amdgpu_vmid_alloc_reserved(adev, c.fpriv.vm, hub)
+    };
+    r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&ret.to_le_bytes());
+    Ok(r)
+}
+
 /// `OP_BLOB`, `amdgpu_renderer_get_blob`: the object under `blob_id`
 /// becomes resource `res_id`. The reply names its pages for the kernel:
 /// map info, kind (0: the GTT pages of `tt`, 1: VRAM ranges in BAR0), the
@@ -327,7 +593,7 @@ fn not_ported(cmd: u32) -> Result<Vec<u8>, i32> {
 /// One guest ccmd of client `id` (`drm_context_submit_cmd_dispatch`): the
 /// reply, `REPLY_HEAD` first. Err only for a request too short for its
 /// header.
-pub fn ccmd(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, req_in: &[u8]) -> Result<Vec<u8>, i32> {
+pub fn ccmd(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, req_in: &[u8]) -> Result<ccmd_result, i32> {
     if req_in.len() < REQ_HDR_SIZE as usize {
         return Err(EINVAL);
     }
@@ -359,8 +625,14 @@ pub fn ccmd(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, req_in: &[u8])
         AMDGPU_CCMD_BO_VA_OP => ccmd_bo_va_op(adev, c, &req),
         AMDGPU_CCMD_SET_METADATA => ccmd_set_metadata(adev, c, &req),
         AMDGPU_CCMD_BO_QUERY_INFO => ccmd_bo_query_info(adev, c, &req),
-        AMDGPU_CCMD_CS_SUBMIT | AMDGPU_CCMD_RESERVE_VMID | AMDGPU_CCMD_SET_PSTATE
-        | AMDGPU_CCMD_CS_QUERY_FENCE_STATUS => not_ported(cmd),
+        AMDGPU_CCMD_CS_SUBMIT => ccmd_cs_submit(adev, c, &req),
+        AMDGPU_CCMD_RESERVE_VMID => ccmd_reserve_vmid(adev, c, &req),
+        AMDGPU_CCMD_CS_QUERY_FENCE_STATUS => match ccmd_query_fence_status(adev, c, &req) {
+            Ok(ccmd_result::wait(w)) => return Ok(ccmd_result::wait(w)),
+            Ok(ccmd_result::reply(b)) => Ok(b),
+            Err(e) => Err(e),
+        },
+        AMDGPU_CCMD_SET_PSTATE => not_ported(cmd),
         _ => {
             Line::new().s("native: unknown ccmd ").dec(cmd as u64).say();
             Err(EINVAL)
@@ -375,7 +647,7 @@ pub fn ccmd(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, req_in: &[u8])
     out.extend_from_slice(&c.async_error.to_le_bytes());
     out.extend_from_slice(&flags.to_le_bytes());
     out.extend_from_slice(&body);
-    Ok(out)
+    Ok(ccmd_result::reply(out))
 }
 
 /// libdrm `amdgpu_query_info` on client `fpriv`.
