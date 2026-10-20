@@ -105,6 +105,38 @@ Abbildung im EPT/NPT des Gastes; ein abgebildetes Objekt muss seine Seiten
 also behalten, bis `UNMAP_BLOB` kommt, oder der Kernel muss die Abbildung
 beim Verschieben zurueckziehen.
 
+### 3a. Was (b) im Einzelnen heisst (Bestandsaufnahme 2026-10-20)
+
+Gemessen am Kernel: Modul-DMA ist **ein zusammenhaengender Lauf je Aufruf,
+hoechstens 4 MB**, eine GPU-Karte darf insgesamt **128 MB** halten, und
+nichts haelt solche Seiten fest — `npk_dma_free` und `release_hw` geben sie
+sofort an den Rahmenallokator zurueck. Ein Gast-Objekt darin waere also zu
+klein, zu knapp bemessen und beim Modultod ein Use-after-free im Gast.
+
+Darum, Linux naeher: **die Platzierung entscheidet das Modul (TTM wie
+Linux), die Seiten eines GTT-Objekts kommen wie bei `ttm_pool` vom
+Seitenallokator** — hier vom Kernel:
+
+- `npk_gpudev_tt_alloc(client, pages)` → Kernelpuffer-Id: einzelne Rahmen
+  (nicht zusammenhaengend), genullt, der IOMMU der Karte freigegeben, dem
+  Gast-Client zugerechnet (Deckel je VM, Schutz, keine Rechnung). Das Modul
+  liest die Seiten mit `npk_gpudev_bo_pages` und baut daraus die `ttm_tt`
+  des Objekts (wie ein sg-Import). `npk_gpudev_tt_free(id)`.
+- Freigegeben werden die Rahmen erst, wenn **beide** Seiten losgelassen
+  haben: das Modul (`tt_free`) und der Gast (UNMAP_BLOB, Ressource weg) —
+  derselbe `Held`-Mechanismus wie bei Intel.
+- **VRAM** wird ueber BAR0 eingeblendet (WC). Stirbt das Modul, zieht der
+  Kernel jede solche Abbildung aus dem Gast zurueck, bevor die Karte neu
+  vergeben wird.
+- Neuer Auftrag `OP_BLOB` (Client, blob_id, res_id): das Modul antwortet
+  mit der Art (TT-Id oder VRAM-Bereiche im BAR) und der Cache-Art
+  (`enable_cache_wc` wie `amdgpu_renderer_get_blob`). Der Kernel prueft,
+  dass die TT-Id dem Client gehoert bzw. die Bereiche im BAR des Moduls
+  liegen.
+- Dazu im Modul, fuer die Isolation zwischen Clients Pflicht:
+  `VRAM_CLEARED` beim Anlegen und `VRAM_WIPE_ON_RELEASE` beim Freigeben
+  (`amdgpu_fill_buffer` auf SDMA), bisher benannt und nicht portiert.
+
 ## 4. Schritte, jeder mit einem Ergebnis am Geraet
 
 | Schritt | Inhalt | Ergebnis |
