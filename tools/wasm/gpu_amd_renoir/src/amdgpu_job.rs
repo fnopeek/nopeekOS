@@ -80,8 +80,7 @@ pub fn amdgpu_job_get_vmid(adev: &amdgpu_device, j: Option<u64>) -> u32 {
 
 /// `amdgpu_job_timedout`: the device is not unplugged and not a VF, and
 /// no devcoredump takes the core dump. Soft recovery, then a reset of the
-/// ring's queue; the device reset is not ported yet, so past those the
-/// ring's fences are forced complete, as its pre-reset step does.
+/// ring's queue, then the device reset.
 pub fn amdgpu_job_timedout(adev: &mut amdgpu_device, j: u64) -> drm_gpu_sched_stat {
     let r = job(adev, j).base.sched.unwrap();
     let name = adev.rings[r].sched.name.clone();
@@ -115,9 +114,11 @@ pub fn amdgpu_job_timedout(adev: &mut amdgpu_device, j: u64) -> drm_gpu_sched_st
         dma_fence::dma_fence_set_error(&finished, -62);
     }
     if crate::amdgpu_ring::amdgpu_device_should_recover_gpu() {
-        Line::new().s("GPU recovery is not ported: forcing the fences of ").s(&name).s(" complete").say();
-        let hw = job(adev, j).hw_fence.clone();
-        crate::amdgpu_fence::amdgpu_fence_driver_force_completion(adev, r, hw.as_ref());
+        // method NONE, source JOB, no forced full reset, coredump skipped
+        let r = crate::amdgpu_device::amdgpu_device_gpu_recover(adev, Some(j));
+        if r != 0 {
+            Line::new().s("GPU Recovery Failed: ").dec((-r) as u64).say();
+        }
     } else {
         drm_sched::drm_sched_suspend_timeout(adev, r);
     }

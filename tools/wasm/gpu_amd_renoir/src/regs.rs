@@ -7153,3 +7153,29 @@ pub const GC_SQ_CMD__CHECK_VMID_MASK: u32 = 0x80;
 pub const GC_SQ_CMD__VM_ID__SHIFT: u32 = 0x1c;
 /// The value of `SQ_CMD__VM_ID_MASK` in gfx_v9_0.c
 pub const GC_SQ_CMD__VM_ID_MASK: u32 = 0xf0000000;
+
+// GPU recovery (amdgpu_device.c, atom.c)
+/// The value of `CP_HQD_ACTIVE__ACTIVE_MASK` in gfx_v9_0.c
+pub const GC_CP_HQD_ACTIVE__ACTIVE_MASK: u32 = 0x1;
+/// amdgpu/amdgpu_device.c:101
+pub const AMDGPU_MAX_RETRY_LIMIT: u32 = 0x2;
+/// include/kgd_pp_interface.h:235
+pub const PP_MP1_STATE_NONE: u32 = 0x0;
+/// include/kgd_pp_interface.h:236
+pub const PP_MP1_STATE_SHUTDOWN: u32 = 0x1;
+/// include/kgd_pp_interface.h:238
+pub const PP_MP1_STATE_RESET: u32 = 0x3;
+/// amdgpu/atom.h:45
+pub const ATOM_CMD_INIT: u32 = 0x0;
+/// amdgpu/atom.h:51
+pub const ATOM_DATA_FWI_PTR: u32 = 0xc;
+/// amdgpu/atom.h:54
+pub const ATOM_FWI_DEFSCLK_PTR: u32 = 0x8;
+/// amdgpu/atom.h:55
+pub const ATOM_FWI_DEFMCLK_PTR: u32 = 0xc;
+/// amdgpu/amdgpu_reset.h:41
+pub const AMDGPU_RESET_SRC_JOB: u32 = 0x1;
+/// ?
+pub const PCI_COMMAND: u32 = 0x4;
+/// ?
+pub const WATERMARKS_LOADED: u32 = 0x2;

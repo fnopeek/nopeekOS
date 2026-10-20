@@ -48,6 +48,9 @@ fn main() {
     let mut adev = fake_renoir();
     fake_gpu();
     fake_gpu_hqd_banks();
+    // renoir_message_map's number for GfxDeviceDriverReset
+    let at = (SMU_MSG_GfxDeviceDriverReset * CMN2ASIC_MSG_MAPPING_SIZE / 4 + CMN2ASIC_MSG_MAPPING_map_to / 4) as usize;
+    fake_gpu_mode2(tables::renoir_message_map[at] as u32);
     // A guest context: open, DEV_INFO and READ_MMR_REG as libdrm asks,
     // a context made; a GTT and a VRAM object made, handed over, mapped,
     // given metadata and asked about; an IB in the GTT object writing the
@@ -89,6 +92,19 @@ fn main() {
     let ctx2 = ccmd(7, 34, &[0, 0]);
     let after = compute(32, 2, 0x1100, 20);
     let after_wait = ccmd(10, 33, &[2, AMDGPU_HW_IP_COMPUTE, 0, 0, 1, 0, !0, !0, 0, 0]);
+    // The same hang on GFX, which has no queue reset: the device goes
+    // through a MODE2 reset, and a third context's IB runs after it.
+    let gfx = |seqno: u32, ctx: u32, at: u32, bytes: u32| ccmd(4, seqno, &[ctx, 2, 0, 1,
+        AMDGPU_CHUNK_ID_BO_HANDLES | 4 << 16, 0, AMDGPU_CHUNK_ID_IB | 8 << 16, 16,
+        10, 0, 11, 0,
+        0, 0, at, 1, bytes, AMDGPU_HW_IP_GFX, 0, 0]);
+    let ok_ib3 = [3 << 30 | 3 << 16 | PACKET3_WRITE_DATA << 8, 5 << 8 | 1 << 20, 0x2008, 1, 0x900d_f00d];
+    let gfx_hang = gfx(36, 2, 0x1000, 28);
+    let gfx_hang_wait = ccmd(10, 37, &[2, AMDGPU_HW_IP_GFX, 0, 0, 1, 0, !0, !0, 0, 0]);
+    let ctx3 = ccmd(7, 38, &[0, 0]);
+    let gfx_after = gfx(39, 3, 0x1200, 20);
+    let gfx_after_wait = ccmd(10, 40, &[3, AMDGPU_HW_IP_GFX, 0, 0, 1, 0, !0, !0, 0, 0]);
+    let free3 = ccmd(7, 41, &[3, 1]);
     let free2 = ccmd(7, 35, &[2, 1]);
     let reserve = ccmd(8, 13, &[0, 0]);
     let unreserve = ccmd(8, 14, &[1, 0]);
@@ -124,6 +140,14 @@ fn main() {
                                   (7, [100, len(&ctx2), 0, 0, 0, 0], ctx2.clone()),
                                   (7, [100, len(&after), 0, 0, 0, 0], after.clone()),
                                   (7, [100, len(&after_wait), 0, 0, 0, 0], after_wait.clone()),
+                                  (npk_sys::GUEST_STORE, [1, 0x1200, 0, 0, 0, 0], words(&ok_ib3)),
+                                  (7, [100, len(&gfx_hang), 0, 0, 0, 0], gfx_hang.clone()),
+                                  (7, [100, len(&gfx_hang_wait), 0, 0, 0, 0], gfx_hang_wait.clone()),
+                                  (npk_sys::GUEST_IDLE, [15_000, 0, 0, 0, 0, 0], vec![]),
+                                  (7, [100, len(&ctx3), 0, 0, 0, 0], ctx3.clone()),
+                                  (7, [100, len(&gfx_after), 0, 0, 0, 0], gfx_after.clone()),
+                                  (7, [100, len(&gfx_after_wait), 0, 0, 0, 0], gfx_after_wait.clone()),
+                                  (7, [100, len(&free3), 0, 0, 0, 0], free3.clone()),
                                   (7, [100, len(&free2), 0, 0, 0, 0], free2.clone()),
                                   (7, [100, len(&reserve), 0, 0, 0, 0], reserve.clone()),
                                   (7, [100, len(&unreserve), 0, 0, 0, 0], unreserve.clone()),

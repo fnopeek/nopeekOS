@@ -3575,3 +3575,16 @@ GC_SQ_CMD__CHECK_VMID__SHIFT = SQ_CMD__CHECK_VMID__SHIFT @ gfx_v9_0.c
 GC_SQ_CMD__CHECK_VMID_MASK = SQ_CMD__CHECK_VMID_MASK @ gfx_v9_0.c
 GC_SQ_CMD__VM_ID__SHIFT = SQ_CMD__VM_ID__SHIFT @ gfx_v9_0.c
 GC_SQ_CMD__VM_ID_MASK = SQ_CMD__VM_ID_MASK @ gfx_v9_0.c
+# GPU recovery (amdgpu_device.c, atom.c)
+GC_CP_HQD_ACTIVE__ACTIVE_MASK = CP_HQD_ACTIVE__ACTIVE_MASK @ gfx_v9_0.c
+AMDGPU_MAX_RETRY_LIMIT @ amdgpu_device.c
+PP_MP1_STATE_NONE @ amdgpu_device.c
+PP_MP1_STATE_SHUTDOWN @ amdgpu_device.c
+PP_MP1_STATE_RESET @ amdgpu_device.c
+ATOM_CMD_INIT @ atom.c
+ATOM_DATA_FWI_PTR @ atom.c
+ATOM_FWI_DEFSCLK_PTR @ atom.c
+ATOM_FWI_DEFMCLK_PTR @ atom.c
+AMDGPU_RESET_SRC_JOB @ amdgpu_job.c
+PCI_COMMAND @ amdgpu_device.c
+WATERMARKS_LOADED @ ../pm/swsmu/amdgpu_smu.c

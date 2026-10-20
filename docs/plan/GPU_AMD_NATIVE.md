@@ -170,7 +170,7 @@ Recover. Auf Renoir gilt je Ring:
   `amdgpu_ring_backup_unprocessed_commands`, `amdgpu_fence_driver_guilty_force_completion`,
   `amdgpu_ring_alloc_reemit`, `drm_sched_wqueue_stop/start`, `gfx_v9_0_reset_kcq`,
   `kcq_init_queue(restore)`.
-- **E3 voller Recover** (`amdgpu_device_gpu_recover`, MODE2 ueber
+- **E3 voller Recover** — gebaut, host-seitig an einem haengenden GFX-Auftrag geprueft (MODE2, PSP/SMU-Resume, ein neuer Kontext laeuft danach) (`amdgpu_device_gpu_recover`, MODE2 ueber
   `smu_v12_0_mode2_reset`, kein `reset_cntl` fuer MP1 12): `in_gpu_reset`,
   `drm_sched_stop/start`, `increase_karma`, `pre_asic_reset` (Zaeune erzwingen,
   `amdgpu_device_ip_suspend` Phase 1+2), `reinit_after_reset`

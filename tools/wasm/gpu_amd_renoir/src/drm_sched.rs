@@ -99,6 +99,7 @@ pub struct drm_sched_job {
     last_dependency: usize,
     pub submit_ts: u64,
     pub s_priority: u32,
+    pub karma: u32,
     /// The callback that ends the job (`cb`).
     cb: Option<u64>,
 }
@@ -611,6 +612,96 @@ pub fn drm_sched_init(adev: &mut amdgpu_device, r: usize, credit_limit: u32, tim
     s.pause_submit = false;
     s.ready = true;
     0
+}
+
+/// `drm_sched_stop`: the scheduler stopped for a reset; the jobs still on
+/// the hardware lose their parent fence, the finished ones are freed (the
+/// bad one only marked, `free_guilty`).
+pub fn drm_sched_stop(adev: &mut amdgpu_device, r: usize, bad: Option<u64>) {
+    drm_sched_wqueue_stop(adev, r);
+    // Reinsert back the bad job here - now it's safe as
+    // drm_sched_get_finished_job() cannot race against us and release the
+    // bad job at this point.
+    if let Some(b) = bad.filter(|&b| job(adev, b).sched == Some(r)) {
+        adev.rings[r].sched.pending_list.push_front(b);
+    }
+    // Iterate the job list from later to earlier one and either deactive
+    // their HW callbacks or remove them from pending list if they already
+    // signaled.
+    let list: Vec<u64> = adev.rings[r].sched.pending_list.iter().rev().copied().collect();
+    for j in list {
+        let finished = job(adev, j).s_fence.clone().unwrap();
+        let parent = s_fence_of(&finished).parent.borrow().clone();
+        let detached = match (&parent, job(adev, j).cb) {
+            (Some(p), Some(id)) => dma_fence::dma_fence_remove_callback(p, id),
+            _ => false,
+        };
+        if detached {
+            *s_fence_of(&finished).parent.borrow_mut() = None;
+            job(adev, j).cb = None;
+            let credits = job(adev, j).credits;
+            adev.rings[r].sched.credit_count -= credits;
+        } else {
+            // remove job from pending_list.
+            adev.rings[r].sched.pending_list.retain(|&p| p != j);
+            // Wait for job's HW fence callback to finish using s_job
+            // before releasing it.
+            dma_fence::dma_fence_wait(adev, &finished);
+            // We must keep bad job alive for later use during recovery by
+            // some of the drivers but leave a hint that the guilty job
+            // must be released.
+            if bad != Some(j) {
+                crate::amdgpu_job::amdgpu_job_free_cb(adev, j);
+            } else {
+                adev.rings[r].sched.free_guilty = true;
+            }
+        }
+    }
+    // Stop pending timer in flight as we rearm it in drm_sched_start.
+    workqueue::cancel_delayed_work(adev, work::sched_timedout { ring: r });
+}
+
+/// `drm_sched_start`: the jobs that lost their parent fence end with
+/// `errno` (ECANCELED by default), the others wait for theirs again.
+pub fn drm_sched_start(adev: &mut amdgpu_device, r: usize, errno: i32) {
+    let list: Vec<u64> = adev.rings[r].sched.pending_list.iter().copied().collect();
+    for j in list {
+        let finished = job(adev, j).s_fence.clone().unwrap();
+        let parent = s_fence_of(&finished).parent.borrow().clone();
+        let credits = job(adev, j).credits;
+        adev.rings[r].sched.credit_count += credits;
+        let Some(fence) = parent else {
+            drm_sched_job_done(adev, j, if errno != 0 { errno } else { -125 });
+            continue;
+        };
+        match dma_fence::dma_fence_add_callback(adev, &fence, dma_fence_func::sched_job_done { ring: r, job: j }) {
+            Ok(id) => job(adev, j).cb = Some(id),
+            Err(_) => drm_sched_job_done(adev, j, if fence.error() != 0 { fence.error() } else { errno }),
+        }
+    }
+    drm_sched_start_timeout(adev, r);
+    drm_sched_wqueue_start(adev, r);
+}
+
+/// `drm_sched_increase_karma`: the entity of the bad job (not a kernel
+/// one) is marked guilty.
+pub fn drm_sched_increase_karma(adev: &mut amdgpu_device, bad: u64) {
+    if job(adev, bad).s_priority == DRM_SCHED_PRIORITY_KERNEL {
+        return;
+    }
+    job(adev, bad).karma += 1;
+    let Some(r) = job(adev, bad).sched else { return };
+    let finished = job(adev, bad).s_fence.clone().unwrap();
+    let context = s_fence_of(&finished).scheduled.context;
+    for prio in DRM_SCHED_PRIORITY_HIGH..adev.rings[r].sched.num_rqs {
+        let ents = rq(adev, (r, prio)).entities.clone();
+        if let Some(e) = ents.into_iter().find(|&e| entity(adev, e).fence_context == context) {
+            if let Some(g) = entity(adev, e).guilty.clone() {
+                g.set(1);
+            }
+            break;
+        }
+    }
 }
 
 /// `drm_sched_wqueue_stop`: no new jobs pulled, none freed.

@@ -754,6 +754,10 @@ pub struct amdgpu_device {
     pub vm_bases: Vec<Option<crate::amdgpu_vm::amdgpu_vm_bo_base>>,
     pub vm_mappings: Vec<Option<crate::amdgpu_vm::amdgpu_bo_va_mapping>>,
     pub gpu_reset_counter: u32,
+    /// The reset domain is locked (`amdgpu_in_reset`).
+    pub in_gpu_reset: bool,
+    pub asic_reset_res: i32,
+    pub mp1_state: u32,
     /// The serial the next context gets (a context's identity across
     /// clients, where Linux compares pointers).
     pub next_ctx_serial: u64,
@@ -893,6 +897,9 @@ impl amdgpu_device {
             vm_bases: Vec::new(),
             vm_mappings: Vec::new(),
             gpu_reset_counter: 0,
+            in_gpu_reset: false,
+            asic_reset_res: 0,
+            mp1_state: 0,
             next_ctx_serial: 0,
             vram_lost_counter: 0,
             num_bytes_moved: 0,
@@ -1405,7 +1412,7 @@ fn amdgpu_doorbell_init(adev: &mut amdgpu_device, bar2_start: u64, bar2_len: u64
 
 /// `soc15_asic_reset_method` for MP1 12.0.0 with `amdgpu_reset_method`
 /// forced to NONE by the caller: MODE2.
-fn soc15_asic_reset_method(adev: &amdgpu_device) -> u32 {
+pub fn soc15_asic_reset_method(adev: &amdgpu_device) -> u32 {
     if adev.ip_version(MP1_HWIP, 0) == 12 << 24 {
         AMD_RESET_METHOD_MODE2
     } else {
@@ -1438,7 +1445,7 @@ pub struct reset_on_init {
 }
 
 /// `soc15_asic_reset`: not Raven, not resuming from S3, so the reset method.
-fn soc15_asic_reset(adev: &mut amdgpu_device) -> i32 {
+pub fn soc15_asic_reset(adev: &mut amdgpu_device) -> i32 {
     match soc15_asic_reset_method(adev) {
         AMD_RESET_METHOD_MODE2 => {
             Line::new().s("MODE2 reset").say();
@@ -2158,13 +2165,462 @@ pub fn amdgpu_device_ip_late_init(adev: &mut amdgpu_device) -> i32 {
     // amdgpu_ras_late_init: no RAS context, no ACA, empty RAS list.
     amdgpu_device_set_cg_state(adev, true);
     amdgpu_device_set_pg_state(adev, true);
-    // amdgpu_device_fill_reset_magic
+    amdgpu_device_fill_reset_magic(adev);
+    0
+}
+
+/// `amdgpu_device_fill_reset_magic`: the first bytes of the GART table,
+/// which a reset that keeps VRAM leaves alone.
+fn amdgpu_device_fill_reset_magic(adev: &mut amdgpu_device) {
     if let Some(k) = adev.gart.ptr {
         let mut magic = [0u8; AMDGPU_RESET_MAGIC_NUM as usize];
         crate::amdgpu_gart::kptr_read(adev, k, 0, &mut magic);
         adev.reset_magic = magic;
     }
+}
+
+/// `amdgpu_device_check_vram_lost`: MODE2 keeps VRAM unless the magic says
+/// otherwise.
+fn amdgpu_device_check_vram_lost(adev: &mut amdgpu_device) -> bool {
+    if let Some(k) = adev.gart.ptr {
+        let mut now = [0u8; AMDGPU_RESET_MAGIC_NUM as usize];
+        crate::amdgpu_gart::kptr_read(adev, k, 0, &mut now);
+        if now != adev.reset_magic {
+            return true;
+        }
+    }
+    if !amdgpu_in_reset(adev) {
+        return false;
+    }
+    // For all ASICs with baco/mode1 reset, the VRAM is always assumed to
+    // be lost.
+    soc15_asic_reset_method(adev) != AMD_RESET_METHOD_MODE2
+}
+
+/// `amdgpu_in_reset`.
+pub fn amdgpu_in_reset(adev: &amdgpu_device) -> bool {
+    adev.in_gpu_reset
+}
+
+/// A block's `suspend`; `None` for the blocks without hw_init here.
+fn ip_suspend(adev: &mut amdgpu_device, type_: u32) -> Option<i32> {
+    Some(match type_ {
+        AMD_IP_BLOCK_TYPE_COMMON => crate::soc15::soc15_common_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_GMC => crate::gmc_v9_0::gmc_v9_0_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_IH => crate::vega10_ih::vega10_ih_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_PSP => crate::amdgpu_psp::psp_suspend(adev),
+        AMD_IP_BLOCK_TYPE_SMC => crate::amdgpu_smu::smu_suspend(adev),
+        AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_hw_fini(adev),
+        // not in S0ix
+        AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_fini(adev),
+        _ => return None,
+    })
+}
+
+/// A block's `resume`; `None` for the blocks without hw_init here.
+fn ip_resume(adev: &mut amdgpu_device, type_: u32) -> Option<i32> {
+    Some(match type_ {
+        // soc15_need_reset_on_resume: not resuming from S3
+        AMD_IP_BLOCK_TYPE_COMMON => crate::soc15::soc15_common_hw_init(adev),
+        AMD_IP_BLOCK_TYPE_GMC => {
+            // gmc_v9_0_resume: no NPS mode switch
+            let r = crate::gmc_v9_0::gmc_v9_0_hw_init(adev);
+            if r == 0 {
+                crate::amdgpu_ids::amdgpu_vmid_reset_all(adev);
+            }
+            r
+        }
+        AMD_IP_BLOCK_TYPE_IH => crate::vega10_ih::vega10_ih_hw_init(adev),
+        AMD_IP_BLOCK_TYPE_PSP => crate::amdgpu_psp::psp_resume(adev),
+        AMD_IP_BLOCK_TYPE_SMC => crate::amdgpu_smu::smu_resume(adev),
+        AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_hw_init(adev),
+        AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_init(adev),
+        _ => return None,
+    })
+}
+
+/// `amdgpu_ip_block_suspend`.
+fn amdgpu_ip_block_suspend(adev: &mut amdgpu_device, i: usize) -> i32 {
+    let t = adev.ip_blocks[i].version.type_;
+    match ip_suspend(adev, t) {
+        Some(r) if r != 0 => {
+            Line::new().s("suspend of IP block <").bytes(adev.ip_blocks[i].version.funcs_name).s("> failed ")
+                .dec((-r) as u64).say();
+            return r;
+        }
+        Some(_) => {}
+        None => {
+            Line::new().s("suspend of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                .s(">: never brought up here, skipped").dbg();
+        }
+    }
+    adev.ip_blocks[i].status.hw = false;
     0
+}
+
+/// `amdgpu_ip_block_resume`. A block the module never brought up stays
+/// down, as at hw_init.
+fn amdgpu_ip_block_resume(adev: &mut amdgpu_device, i: usize) -> i32 {
+    let t = adev.ip_blocks[i].version.type_;
+    match ip_resume(adev, t) {
+        Some(r) if r != 0 => {
+            Line::new().s("resume of IP block <").bytes(adev.ip_blocks[i].version.funcs_name).s("> failed ")
+                .dec((-r) as u64).say();
+            return r;
+        }
+        Some(_) => adev.ip_blocks[i].status.hw = true,
+        None => {}
+    }
+    0
+}
+
+/// `amdgpu_device_ip_suspend_phase1`: the displays. The module brings up
+/// none, and renoir_ppt has no `set_df_cstate`.
+fn amdgpu_device_ip_suspend_phase1(adev: &mut amdgpu_device) -> i32 {
+    amdgpu_device_set_pg_state(adev, false);
+    amdgpu_device_set_cg_state(adev, false);
+    for i in (0..adev.ip_blocks.len()).rev() {
+        if !adev.ip_blocks[i].status.valid || adev.ip_blocks[i].version.type_ != AMD_IP_BLOCK_TYPE_DCE {
+            continue;
+        }
+        let r = amdgpu_ip_block_suspend(adev, i);
+        if r != 0 {
+            return r;
+        }
+    }
+    0
+}
+
+/// `amdgpu_device_ip_suspend_phase2`: not S0ix, no RAS interrupt, no IMU.
+/// renoir_ppt has no `set_mp1_state`. The GMC stays up while the
+/// firmware's scanout reads through the MMHUB (as `amdgpu_device_fini_hw`
+/// holds it), and its resume runs hw_init over it as the probe did.
+fn amdgpu_device_ip_suspend_phase2(adev: &mut amdgpu_device) -> i32 {
+    let display_ours = adev.ip_blocks.iter().any(|b| b.version.type_ == AMD_IP_BLOCK_TYPE_DCE && b.status.hw);
+    for i in (0..adev.ip_blocks.len()).rev() {
+        let t = adev.ip_blocks[i].version.type_;
+        if !adev.ip_blocks[i].status.valid || t == AMD_IP_BLOCK_TYPE_DCE {
+            continue;
+        }
+        // skip unnecessary suspend if we do not initialize them yet
+        if !amdgpu_ip_member_of_hwini(adev, t) {
+            continue;
+        }
+        if t == AMD_IP_BLOCK_TYPE_GMC && !display_ours {
+            Line::new().s("suspend of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                .s(">: held back, the display still scans out through the MMHUB").dbg();
+            adev.ip_blocks[i].status.hw = false;
+            continue;
+        }
+        amdgpu_ip_block_suspend(adev, i);
+        adev.ip_blocks[i].status.hw = false;
+    }
+    0
+}
+
+/// `amdgpu_device_ip_suspend`: bare metal.
+fn amdgpu_device_ip_suspend(adev: &mut amdgpu_device) -> i32 {
+    crate::amdgpu_ttm::amdgpu_ttm_set_buffer_funcs_status(adev, false);
+    let r = amdgpu_device_ip_suspend_phase1(adev);
+    if r != 0 {
+        return r;
+    }
+    amdgpu_device_ip_suspend_phase2(adev)
+}
+
+/// `amdgpu_device_ip_resume_phase1`: COMMON, GMC, IH.
+fn amdgpu_device_ip_resume_phase1(adev: &mut amdgpu_device) -> i32 {
+    for i in 0..adev.ip_blocks.len() {
+        let st = adev.ip_blocks[i].status;
+        if !st.valid || st.hw {
+            continue;
+        }
+        let t = adev.ip_blocks[i].version.type_;
+        if matches!(t, AMD_IP_BLOCK_TYPE_COMMON | AMD_IP_BLOCK_TYPE_GMC | AMD_IP_BLOCK_TYPE_IH) {
+            let r = amdgpu_ip_block_resume(adev, i);
+            if r != 0 {
+                return r;
+            }
+        }
+    }
+    0
+}
+
+/// `amdgpu_device_ip_resume_phase2`: all but COMMON, GMC, IH, DCE, PSP.
+fn amdgpu_device_ip_resume_phase2(adev: &mut amdgpu_device) -> i32 {
+    for i in 0..adev.ip_blocks.len() {
+        let st = adev.ip_blocks[i].status;
+        if !st.valid || st.hw {
+            continue;
+        }
+        let t = adev.ip_blocks[i].version.type_;
+        if matches!(t, AMD_IP_BLOCK_TYPE_COMMON | AMD_IP_BLOCK_TYPE_GMC | AMD_IP_BLOCK_TYPE_IH
+            | AMD_IP_BLOCK_TYPE_DCE | AMD_IP_BLOCK_TYPE_PSP)
+        {
+            continue;
+        }
+        let r = amdgpu_ip_block_resume(adev, i);
+        if r != 0 {
+            return r;
+        }
+    }
+    0
+}
+
+/// `amdgpu_device_ip_resume_phase3`: the displays.
+fn amdgpu_device_ip_resume_phase3(adev: &mut amdgpu_device) -> i32 {
+    for i in 0..adev.ip_blocks.len() {
+        let st = adev.ip_blocks[i].status;
+        if !st.valid || st.hw || adev.ip_blocks[i].version.type_ != AMD_IP_BLOCK_TYPE_DCE {
+            continue;
+        }
+        let r = amdgpu_ip_block_resume(adev, i);
+        if r != 0 {
+            return r;
+        }
+    }
+    0
+}
+
+/// `amdgpu_atom_asic_init` (atom.c): the vbios ASIC_Init table with the
+/// default engine and memory clocks.
+fn amdgpu_atom_asic_init(adev: &mut amdgpu_device) -> i32 {
+    let Some(ctx) = adev.mode_info.atom_context.as_ref() else { return -22 };
+    let hwi = ctx.cu16(ctx.data_table + ATOM_DATA_FWI_PTR) as u32;
+    let mut ps = [0u32; 16];
+    ps[0] = ctx.cu32(hwi + ATOM_FWI_DEFSCLK_PTR);
+    ps[1] = ctx.cu32(hwi + ATOM_FWI_DEFMCLK_PTR);
+    if ps[0] == 0 || ps[1] == 0 {
+        return 1;
+    }
+    if ctx.cu16(ctx.cmd_table + 4 + 2 * ATOM_CMD_INIT) == 0 {
+        return 1;
+    }
+    crate::amdgpu_smu::amdgpu_atom_execute_table(adev, ATOM_CMD_INIT, &mut ps, 16)
+}
+
+/// `amdgpu_device_asic_init`, GC 9.3.0: `soc15_pre_asic_init`
+/// (`gmc_v9_0_restore_registers`, which is for DCN 1.0 only), vbios flags
+/// 0, so the ATOM ASIC_Init.
+fn amdgpu_device_asic_init(adev: &mut amdgpu_device) -> i32 {
+    amdgpu_atom_asic_init(adev)
+}
+
+/// `amdgpu_device_fw_loading` in a reset: the PSP block's resume.
+fn amdgpu_device_fw_loading_resume(adev: &mut amdgpu_device) -> i32 {
+    for i in 0..adev.ip_blocks.len() {
+        if adev.ip_blocks[i].version.type_ != AMD_IP_BLOCK_TYPE_PSP {
+            continue;
+        }
+        if !amdgpu_ip_member_of_hwini(adev, AMD_IP_BLOCK_TYPE_PSP) {
+            break;
+        }
+        if !adev.ip_blocks[i].status.sw {
+            continue;
+        }
+        // no need to do the fw loading again if already done
+        if adev.ip_blocks[i].status.hw {
+            break;
+        }
+        let r = amdgpu_ip_block_resume(adev, i);
+        if r != 0 {
+            return r;
+        }
+        break;
+    }
+    // amdgpu_pm_load_smu_firmware: nothing for an APU on swSMU.
+    0
+}
+
+/// `amdgpu_device_pre_asic_reset`: no reset handler for MP1 12.0.0, and
+/// `soc15_need_full_reset` is always true, so the blocks are suspended.
+fn amdgpu_device_pre_asic_reset(adev: &mut amdgpu_device, job: Option<u64>) -> i32 {
+    crate::amdgpu_fence::amdgpu_fence_driver_isr_toggle(adev, true);
+    let fence = job.and_then(|j| adev.jobs.get(&j).and_then(|jb| jb.hw_fence.clone()));
+    // block all schedulers and reset given job's ring
+    for r in 0..adev.rings.len() {
+        if !amdgpu_ring_sched_ready(adev, r) {
+            continue;
+        }
+        // Clear job fence from fence drv to avoid force_completion leave
+        // NULL and vm flush fence in fence drv
+        crate::amdgpu_fence::amdgpu_fence_driver_clear_job_fences(adev, r);
+        // after all hw jobs are reset, hw fence is meaningless, so
+        // force_completion
+        crate::amdgpu_fence::amdgpu_fence_driver_force_completion(adev, r, fence.as_ref());
+    }
+    crate::amdgpu_fence::amdgpu_fence_driver_isr_toggle(adev, false);
+    if let Some(j) = job.filter(|j| adev.jobs.get(j).is_some_and(|jb| jb.vm.is_some())) {
+        crate::drm_sched::drm_sched_increase_karma(adev, j);
+    }
+    // amdgpu_reset_prepare_hwcontext: no reset handler (EOPNOTSUPP).
+    // Skipped core dump (AMDGPU_SKIP_COREDUMP).
+    amdgpu_device_ip_suspend(adev)
+}
+
+/// `amdgpu_device_reinit_after_reset`: a full reset at the recovery init
+/// level, which brings up the same blocks as the default one here.
+fn amdgpu_device_reinit_after_reset(adev: &mut amdgpu_device) -> i32 {
+    let mut r = amdgpu_device_asic_init(adev);
+    if r != 0 {
+        Line::new().s("asic atom init failed!").say();
+    } else {
+        Line::new().s("GPU reset succeeded, trying to resume").say();
+        match amdgpu_device_reinit_blocks(adev) {
+            Ok(v) => r = v,
+            // amdgpu_device_fw_loading failed: returned as it is
+            Err(e) => return e,
+        }
+    }
+    if r == 0 {
+        crate::amdgpu_irq::amdgpu_irq_gpu_reset_resume_helper(adev);
+        r = crate::amdgpu_ib::amdgpu_ib_ring_tests(adev);
+        if r != 0 {
+            Line::new().s("ib ring test failed (").dec((-r) as u64).s(").").say();
+            adev.asic_reset_res = -11;
+            return -11;
+        }
+    }
+    if r != 0 {
+        adev.asic_reset_res = r;
+    }
+    r
+}
+
+/// The resume part of `amdgpu_device_reinit_after_reset`: Err when the
+/// firmware loading failed, which returns at once.
+fn amdgpu_device_reinit_blocks(adev: &mut amdgpu_device) -> Result<i32, i32> {
+    let r = amdgpu_device_ip_resume_phase1(adev);
+    if r != 0 {
+        return Ok(r);
+    }
+    let vram_lost = amdgpu_device_check_vram_lost(adev);
+    if vram_lost {
+        Line::new().s("VRAM is lost due to GPU reset!").say();
+        // amdgpu_inc_vram_lost
+        adev.vram_lost_counter += 1;
+    }
+    let r = amdgpu_device_fw_loading_resume(adev);
+    if r != 0 {
+        return Err(r);
+    }
+    let r = amdgpu_device_ip_resume_phase2(adev);
+    if r != 0 {
+        return Ok(r);
+    }
+    if adev.sdma.instance[0].ring.is_some_and(|s| adev.rings[s].sched.ready) {
+        crate::amdgpu_ttm::amdgpu_ttm_set_buffer_funcs_status(adev, true);
+    }
+    let r = amdgpu_device_ip_resume_phase3(adev);
+    if r != 0 {
+        return Ok(r);
+    }
+    if vram_lost {
+        amdgpu_device_fill_reset_magic(adev);
+    }
+    Ok(amdgpu_device_ip_late_init(adev))
+}
+
+/// `amdgpu_do_asic_reset`: no reset handler, no XGMI, no RAS interrupt.
+fn amdgpu_do_asic_reset(adev: &mut amdgpu_device) -> i32 {
+    let r = soc15_asic_reset(adev);
+    if r != 0 {
+        Line::new().s("ASIC reset failed with error, ").dec((-r) as u64).say();
+        return r;
+    }
+    amdgpu_device_reinit_after_reset(adev)
+}
+
+/// `amdgpu_device_asic_reset`: bare metal, again after an EAGAIN.
+fn amdgpu_device_asic_reset(adev: &mut amdgpu_device, job: Option<u64>) -> i32 {
+    loop {
+        let r = amdgpu_device_pre_asic_reset(adev, job);
+        if r != 0 {
+            Line::new().s("GPU pre asic reset failed with err, ").dec((-r) as u64).say();
+            adev.asic_reset_res = r;
+        }
+        let r = amdgpu_do_asic_reset(adev);
+        if r != -11 {
+            // amdgpu_device_stop_pending_resets: no reset work queued
+            return r;
+        }
+    }
+}
+
+/// `amdgpu_ring_sched_ready`.
+fn amdgpu_ring_sched_ready(adev: &amdgpu_device, r: usize) -> bool {
+    !adev.rings[r].no_scheduler && adev.rings[r].sched.ready
+}
+
+/// `amdgpu_device_set_mp1_state`.
+fn amdgpu_device_set_mp1_state(adev: &mut amdgpu_device) {
+    adev.mp1_state = match soc15_asic_reset_method(adev) {
+        AMD_RESET_METHOD_MODE1 => PP_MP1_STATE_SHUTDOWN,
+        AMD_RESET_METHOD_MODE2 => PP_MP1_STATE_RESET,
+        _ => PP_MP1_STATE_NONE,
+    };
+}
+
+/// `amdgpu_device_gpu_recover` for one device on bare metal: no RAS, no
+/// XGMI hive, no KFD, no display of its own (the audio function stays as
+/// it is: `amdgpu_device_suspend_display_audio` refuses MODE2).
+pub fn amdgpu_device_gpu_recover(adev: &mut amdgpu_device, job: Option<u64>) -> i32 {
+    Line::new().s("GPU reset begin!. Source:  ").dec(AMDGPU_RESET_SRC_JOB as u64).say();
+    // amdgpu_device_health_check
+    let status = adev.pdev.read_dword(PCI_COMMAND);
+    if status == u32::MAX {
+        Line::new().s("device lost from bus!").say();
+        Line::new().s("GPU reset end with ret = ").dec(19).say();
+        return -19;
+    }
+    // amdgpu_device_lock_reset_domain
+    adev.in_gpu_reset = true;
+    // amdgpu_device_halt_activities
+    amdgpu_device_set_mp1_state(adev);
+    for r in 0..adev.rings.len() {
+        if !amdgpu_ring_sched_ready(adev, r) {
+            continue;
+        }
+        crate::drm_sched::drm_sched_stop(adev, r, job);
+    }
+    adev.gpu_reset_counter += 1;
+    // Must check guilty signal here since after this point all old HW
+    // fences are force signaled.
+    let hw = job.and_then(|j| adev.jobs.get(&j).and_then(|jb| jb.hw_fence.clone()));
+    let job_signaled = hw.is_some_and(|f| crate::dma_fence::dma_fence_is_signaled(adev, &f));
+    let mut r = 0;
+    if job_signaled {
+        Line::new().s("Guilty job already signaled, skipping HW reset").say();
+    } else {
+        r = amdgpu_device_asic_reset(adev, job);
+    }
+    if r == 0 {
+        // amdgpu_device_sched_resume
+        for ring in 0..adev.rings.len() {
+            if !amdgpu_ring_sched_ready(adev, ring) {
+                continue;
+            }
+            crate::drm_sched::drm_sched_start(adev, ring, 0);
+        }
+        if adev.asic_reset_res != 0 {
+            Line::new().s("GPU reset(").dec(adev.gpu_reset_counter as u64).s(") failed with error ")
+                .dec((-adev.asic_reset_res) as u64).say();
+            r = adev.asic_reset_res;
+            adev.asic_reset_res = 0;
+        } else {
+            Line::new().s("GPU reset(").dec(adev.gpu_reset_counter as u64).s(") succeeded!").say();
+        }
+    }
+    if r == 0 {
+        // amdgpu_device_gpu_resume: amdgpu_device_unset_mp1_state
+        adev.mp1_state = PP_MP1_STATE_NONE;
+    }
+    // amdgpu_device_unlock_reset_domain
+    adev.in_gpu_reset = false;
+    if r != 0 {
+        Line::new().s("GPU reset end with ret = ").dec((-r) as u64).say();
+    }
+    r
 }
 
 /// A block's `hw_fini`; the blocks without hw_init here have none to run.

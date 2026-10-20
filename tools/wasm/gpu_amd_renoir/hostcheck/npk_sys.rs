@@ -212,6 +212,13 @@ impl Mmio {
         if self.0 != 0 {
             return win_w32(self.0, off, v);
         }
+        self.w32_card(off, v);
+        if let Some(f) = WRITE_HOOK.with(|h| h.get()) {
+            f(off / 4, v);
+        }
+    }
+
+    fn w32_card(self, off: u32, v: u32) {
         CARD.with(|c| {
             if let Some(c) = c.borrow_mut().as_mut() {
                 let reg = off / 4;
@@ -290,8 +297,9 @@ pub fn fetch(name: &[u8], buf: &mut [u8]) -> i32 {
 }
 
 /// `npk_pci_read_config_at`: no device answers on the host.
-pub fn pci_read_config_at(_bdf: i32, _offset: i32) -> i32 {
-    -1
+pub fn pci_read_config_at(_bdf: i32, offset: i32) -> i32 {
+    // PCI_COMMAND: memory space and bus master on, status: capabilities
+    if offset == 4 { 0x0010_0006 } else { -1 }
 }
 
 /// `npk_config_get`: the environment variable named like the key with
@@ -430,6 +438,15 @@ thread_local! {
 /// every doorbell write.
 pub fn fake_doorbell_hook(f: fn(u32, u64)) {
     HOOK.with(|h| h.set(Some(f)));
+}
+
+thread_local! {
+    static WRITE_HOOK: std::cell::Cell<Option<fn(u32, u32)>> = const { std::cell::Cell::new(None) };
+}
+
+/// The fake GPU sees every register write the driver makes.
+pub fn fake_write_hook(f: fn(u32, u32)) {
+    WRITE_HOOK.with(|h| h.set(Some(f)));
 }
 
 /// The fake GPU raises its interrupt.

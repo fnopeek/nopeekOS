@@ -1761,6 +1761,42 @@ pub fn smu_late_init(adev: &mut amdgpu_device) -> i32 {
     0
 }
 
+/// `smu_suspend`: `smu_smc_hw_cleanup` finds nothing renoir implements
+/// (see `smu_hw_fini`), and renoir has no `get_gfx_off_entrycount`.
+pub fn smu_suspend(adev: &mut amdgpu_device) -> i32 {
+    if !adev.smu.pm_enabled {
+        return 0;
+    }
+    adev.pm.dpm_enabled = false;
+    adev.smu.watermarks_bitmap &= !WATERMARKS_LOADED;
+    smu_v12_0_set_gfx_cgpg(adev, false);
+    // clear this on suspend so it will get reprogrammed on resume
+    adev.smu.workload_mask = 0;
+    0
+}
+
+/// `smu_resume`: `smu_set_gfx_imu_enable` does nothing in a reset.
+pub fn smu_resume(adev: &mut amdgpu_device) -> i32 {
+    if !adev.smu.pm_enabled {
+        return 0;
+    }
+    Line::new().s("SMU is resuming...").say();
+    let r = smu_start_smc_engine(adev);
+    if r != 0 {
+        Line::new().s("SMC engine is not correctly up!").say();
+        return r;
+    }
+    let r = smu_smc_hw_setup(adev);
+    if r != 0 {
+        Line::new().s("Failed to setup smc hw!").say();
+        return r;
+    }
+    smu_v12_0_set_gfx_cgpg(adev, true);
+    adev.pm.dpm_enabled = true;
+    Line::new().s("SMU is resumed successfully!").say();
+    0
+}
+
 /// `smu_hw_fini`: no SR-IOV. `smu_smc_hw_cleanup` finds nothing renoir
 /// implements (no thermal alert, no `system_features_control`, no RLC
 /// notify), and `smu_reset_mp1_state` is for MP1 13.0.10.

@@ -545,6 +545,29 @@ fn fake_gpu() {
     npk_sys::fake_doorbell_hook(doorbell);
 }
 
+thread_local! {
+    /// The SMU message that is a MODE2 reset (GfxDeviceDriverReset).
+    static MODE2_MSG: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
+}
+
+/// A MODE2 reset through the SMU mailbox drops every queue the CP had.
+fn card_write(reg: u32, v: u32) {
+    if reg == 0x16000 + mmMP1_SMN_C2PMSG_66 && v == MODE2_MSG.with(|m| m.get()) {
+        QUEUES.with(|q| q.borrow_mut().clear());
+        KCQ.with(|k| k.borrow_mut().clear());
+        for bank in npk_sys::fake_banks() {
+            npk_sys::fake_bank_set(bank, gc(GC_mmCP_HQD_ACTIVE_BASE_IDX, GC_mmCP_HQD_ACTIVE), 0);
+        }
+        log("MODE2 reset: the CP forgets its queues".to_string());
+    }
+}
+
+/// Reset behavior: `mode2` is the SMU's index of GfxDeviceDriverReset.
+fn fake_gpu_mode2(mode2: u32) {
+    MODE2_MSG.with(|m| m.set(mode2));
+    npk_sys::fake_write_hook(card_write);
+}
+
 /// The HQD registers once per queue, as GRBM_GFX_CNTL selects them. The
 /// register checks leave them flat: Linux's oracle reads them so.
 fn fake_gpu_hqd_banks() {

@@ -167,6 +167,23 @@ pub fn amdgpu_irq_put(adev: &mut amdgpu_device, name: &'static str, type_: u32) 
     0
 }
 
+/// `amdgpu_irq_gpu_reset_resume_helper`: every source's state written
+/// again after a reset (bare metal, no MSI-X to restore).
+pub fn amdgpu_irq_gpu_reset_resume_helper(adev: &mut amdgpu_device) {
+    for i in 0..adev.irq.client.len() {
+        let Some(sources) = adev.irq.client[i].sources.clone() else { continue };
+        for name in sources.into_iter().flatten() {
+            let Some(src) = irq_src(adev, name) else { continue };
+            if !src.funcs.is_some_and(has_set) {
+                continue;
+            }
+            for k in 0..src.num_types {
+                amdgpu_irq_update(adev, name, k);
+            }
+        }
+    }
+}
+
 /// `amdgpu_irq_disable_all`.
 pub fn amdgpu_irq_disable_all(adev: &mut amdgpu_device) {
     for i in 0..adev.irq.client.len() {

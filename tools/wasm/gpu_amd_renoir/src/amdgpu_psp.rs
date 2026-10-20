@@ -1158,6 +1158,88 @@ fn psp_tmr_terminate(adev: &mut amdgpu_device) -> i32 {
     psp_cmd_submit_buf(adev, None, &mut cmd, fence)
 }
 
+/// `psp_suspend`: no XGMI hive. The TAs, the ASD and the TMR are let go
+/// and the ring stopped; its memory stays for the resume.
+pub fn psp_suspend(adev: &mut amdgpu_device) -> i32 {
+    if adev.psp.ta_fw.is_some() {
+        for (t, what) in [(ta_id::ras, "ras"), (ta_id::hdcp, "hdcp"), (ta_id::dtm, "dtm"), (ta_id::rap, "rap"),
+                          (ta_id::securedisplay, "securedisplay")] {
+            let r = psp_ta_terminate(adev, t);
+            if r != 0 {
+                Line::new().s("Failed to terminate ").s(what).s(" ta").say();
+                return r;
+            }
+        }
+    }
+    let r = psp_asd_terminate(adev);
+    if r != 0 {
+        Line::new().s("Failed to terminate asd").say();
+        return r;
+    }
+    let r = psp_tmr_terminate(adev);
+    if r != 0 {
+        Line::new().s("Failed to terminate tmr").say();
+        return r;
+    }
+    let r = psp_v12_0_ring_stop(adev);
+    if r != 0 {
+        Line::new().s("PSP ring stop failed").say();
+    }
+    r
+}
+
+/// `psp_resume`: no memory training, no XGMI hive. As `psp_load_fw`, on
+/// the ring the suspend kept.
+pub fn psp_resume(adev: &mut amdgpu_device) -> i32 {
+    Line::new().s("PSP is resuming...").say();
+    let failed = |r: i32| {
+        Line::new().s("PSP resume failed").say();
+        r
+    };
+    let r = crate::amdgpu_ucode::amdgpu_ucode_init_bo(adev);
+    if r != 0 {
+        return failed(r);
+    }
+    let r = psp_hw_start(adev);
+    if r != 0 {
+        return failed(r);
+    }
+    let r = psp_load_non_psp_fw(adev);
+    if r != 0 {
+        return failed(r);
+    }
+    let r = psp_asd_initialize(adev);
+    if r != 0 {
+        Line::new().s("PSP load asd failed!").say();
+        return failed(r);
+    }
+    if adev.psp.rl.size_bytes != 0 {
+        Line::new().s("psp_rl_load: an APU's PSP firmware has no RL image").say();
+        Line::new().s("PSP load RL failed!").say();
+        return failed(-22);
+    }
+    if adev.psp.ta_fw.is_some() {
+        if psp_ras_initialize(adev) != 0 {
+            Line::new().s("RAS: Failed to initialize RAS").say();
+        }
+        if psp_display_ta_initialize(adev, ta_id::hdcp, "HDCP: optional hdcp ta ucode is not available",
+            PSP_HDCP_SHARED_MEM_SIZE) != 0 {
+            Line::new().s("HDCP: Failed to initialize HDCP").say();
+        }
+        if psp_display_ta_initialize(adev, ta_id::dtm, "DTM: optional dtm ta ucode is not available",
+            PSP_DTM_SHARED_MEM_SIZE) != 0 {
+            Line::new().s("DTM: Failed to initialize DTM").say();
+        }
+        if psp_rap_initialize(adev) != 0 {
+            Line::new().s("RAP: Failed to initialize RAP").say();
+        }
+        if psp_securedisplay_initialize(adev) != 0 {
+            Line::new().s("SECUREDISPLAY: Failed to initialize SECUREDISPLAY").say();
+        }
+    }
+    0
+}
+
 /// `psp_hw_fini`: no XGMI hive.
 pub fn psp_hw_fini(adev: &mut amdgpu_device) -> i32 {
     if adev.psp.ta_fw.is_some() {

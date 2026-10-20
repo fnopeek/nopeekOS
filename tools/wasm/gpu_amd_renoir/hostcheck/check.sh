@@ -158,7 +158,7 @@ done
 rustc $RF "$HERE/stream_check.rs" -o "$B/stream_check"
 "$B/stream_check" || fail=1
 rustc $RF "$HERE/stage1_run.rs" -o "$B/stage1_run"
-"$B/stage1_run" "$DISC" "$BIOS" "$FW" > "$B/run.log"
+timeout 300 "$B/stage1_run" "$DISC" "$BIOS" "$FW" > "$B/run.log"
 # The VRAM requests of the run itself, through Linux's VRAM manager.
 grep -E '^(vram |  block )' "$B/run.log" > "$B/run_vram.port" || true
 grep -E '^vram ' "$B/run.log" | "$B/oracle_vram" 0x20000000 0x20000000 > "$B/run_vram.linux"

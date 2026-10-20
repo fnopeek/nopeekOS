@@ -201,6 +201,29 @@ pub fn amdgpu_fence_driver_force_completion(adev: &mut amdgpu_device, r: usize, 
     amdgpu_fence_process(adev, r);
 }
 
+/// `amdgpu_fence_driver_isr_toggle`: `disable_irq`/`enable_irq` keep the
+/// fence interrupt from running while the fences are forced. The IH runs
+/// only from the serve loop, never during a reset, so there is nothing to
+/// hold back.
+pub fn amdgpu_fence_driver_isr_toggle(_adev: &mut amdgpu_device, _stop: bool) {}
+
+/// `amdgpu_fence_driver_clear_job_fences`: the slots let go of the job
+/// fences; one without a scheduler job (a failed IB test) signals first.
+pub fn amdgpu_fence_driver_clear_job_fences(adev: &mut amdgpu_device, r: usize) {
+    for i in 0..adev.rings[r].fence_drv.fences.len() {
+        let Some(old) = adev.rings[r].fence_drv.fences[i].clone() else { continue };
+        if !matches!(old.ops, dma_fence_ops::amdgpu_fence { job: true, .. }) {
+            continue;
+        }
+        let scheduled = adev.jobs.values().any(|j| j.hw_fence.as_ref().is_some_and(|h| alloc::rc::Rc::ptr_eq(h, &old))
+            && j.base.s_fence.is_some());
+        if !scheduled && !dma_fence::dma_fence_is_signaled(adev, &old) {
+            dma_fence::dma_fence_signal(adev, &old);
+        }
+        adev.rings[r].fence_drv.fences[i] = None;
+    }
+}
+
 /// `amdgpu_fence_write`.
 fn amdgpu_fence_write(adev: &amdgpu_device, r: usize, seq: u32) {
     let drv = &adev.rings[r].fence_drv;

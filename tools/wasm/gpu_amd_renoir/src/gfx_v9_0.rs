@@ -1774,6 +1774,15 @@ fn gfx_v9_0_kiq_setting(adev: &amdgpu_device, r: usize) {
 /// A `struct v9_mqd` being built: dwords, indexed by `offsetof / 4`.
 struct v9_mqd(Vec<u32>);
 
+/// A `struct v9_mqd` from its bytes (a backup).
+fn mqd_from(b: &[u8]) -> v9_mqd {
+    let mut m = v9_mqd::new();
+    for (i, w) in b.chunks_exact(4).take(m.0.len()).enumerate() {
+        m.0[i] = u32::from_le_bytes(w.try_into().unwrap());
+    }
+    m
+}
+
 impl v9_mqd {
     fn new() -> Self {
         v9_mqd(vec![0; SIZEOF_v9_mqd_allocation as usize / 4])
@@ -2018,9 +2027,31 @@ fn v9_mqd_clean() -> v9_mqd {
     mqd
 }
 
-/// `gfx_v9_0_kiq_init_queue`: not in reset, so a fresh MQD.
+/// `gfx_v9_0_kiq_init_queue`: in a reset, the MQD from its backup and an
+/// empty ring; else a fresh MQD.
 fn gfx_v9_0_kiq_init_queue(adev: &mut amdgpu_device, r: usize) -> i32 {
     gfx_v9_0_kiq_setting(adev, r);
+    // GPU could be in bad state during probe, driver trigger the reset
+    // after load the SMU, in this case , the mqd is not be initialized.
+    // driver need to re-init the mqd.
+    // check mqd->cp_hqd_pq_control since this value should not be 0
+    let backup = mqd_from(&adev.gfx.kiq.mqd_backup);
+    if crate::amdgpu_device::amdgpu_in_reset(adev) && backup.get(V9_MQD_cp_hqd_pq_control) != 0 {
+        // for GPU_RESET case , reset MQD to a clean status
+        let bytes = backup.bytes();
+        if let Some(k) = adev.rings[r].mqd_ptr {
+            crate::amdgpu_gart::kptr_write(adev, k, 0, &bytes);
+        }
+        // reset ring buffer
+        adev.rings[r].wptr = 0;
+        crate::amdgpu_ring::amdgpu_ring_clear_ring(adev, r);
+        let ring = &adev.rings[r];
+        let (me, pipe, queue) = (ring.me, ring.pipe, ring.queue);
+        soc15_grbm_select(adev, me, pipe, queue, 0);
+        gfx_v9_0_kiq_init_register(adev, r, &backup);
+        soc15_grbm_select(adev, 0, 0, 0, 0);
+        return 0;
+    }
     let mut mqd = v9_mqd_clean();
     let ring = &adev.rings[r];
     let (me, pipe, queue) = (ring.me, ring.pipe, ring.queue);
@@ -2039,11 +2070,16 @@ fn gfx_v9_0_kiq_init_queue(adev: &mut amdgpu_device, r: usize) -> i32 {
     0
 }
 
-/// `gfx_v9_0_kcq_init_queue`: a fresh MQD unless `restore` (never in
-/// reset or suspend here), else the backup and an empty ring.
+/// `gfx_v9_0_kcq_init_queue`: a fresh MQD, or with `restore` and in a
+/// reset (when there is a backup) the backup and an empty ring.
 fn gfx_v9_0_kcq_init_queue(adev: &mut amdgpu_device, mqd_idx: usize, restore: bool) -> i32 {
     let r = adev.gfx.compute_ring[mqd_idx];
-    if restore {
+    // Same as above kiq init, driver need to re-init the mqd if
+    // mqd->cp_hqd_pq_control is not be initialized before
+    let backup_pq_control = adev.gfx.mec.mqd_backup.get(mqd_idx).map_or(0, |b| mqd_from(b).get(V9_MQD_cp_hqd_pq_control));
+    let fresh = !restore
+        && (backup_pq_control == 0 || (!crate::amdgpu_device::amdgpu_in_reset(adev) && !adev.in_suspend));
+    if !fresh {
         // restore MQD to a clean status
         if let (Some(k), Some(b)) = (adev.rings[r].mqd_ptr, adev.gfx.mec.mqd_backup.get(mqd_idx)) {
             let b = b.clone();
@@ -2516,6 +2552,39 @@ pub fn gfx_v9_ring_emit_cntxcntl(adev: &mut amdgpu_device, r: usize, flags: u32)
     rw(adev, r, PACKET3(PACKET3_CONTEXT_CONTROL, 1));
     rw(adev, r, dw2);
     rw(adev, r, 0);
+}
+
+/// `gfx_v9_0_deactivate_kcq_hqd`: every compute queue still active is
+/// dequeued, by force if the request times out.
+fn gfx_v9_0_deactivate_kcq_hqd(adev: &mut amdgpu_device) {
+    amdgpu_gfx_rlc_enter_safe_mode(adev);
+    for i in 0..adev.gfx.num_compute_rings as usize {
+        let r = adev.gfx.compute_ring[i];
+        let (me, pipe, queue) = (adev.rings[r].me, adev.rings[r].pipe, adev.rings[r].queue);
+        soc15_grbm_select(adev, me, pipe, queue, 0);
+        let tmp = gc_rd(adev, GC_mmCP_HQD_ACTIVE_BASE_IDX, GC_mmCP_HQD_ACTIVE);
+        // disable the queue if it's active
+        if tmp & GC_CP_HQD_ACTIVE__ACTIVE_MASK != 0 {
+            gc_wr(adev, GC_mmCP_HQD_DEQUEUE_REQUEST_BASE_IDX, GC_mmCP_HQD_DEQUEUE_REQUEST, 1);
+            let mut j = 0;
+            while j < adev.usec_timeout {
+                if gc_rd(adev, GC_mmCP_HQD_ACTIVE_BASE_IDX, GC_mmCP_HQD_ACTIVE) & GC_CP_HQD_ACTIVE__ACTIVE_MASK == 0 {
+                    break;
+                }
+                crate::linux::udelay(1);
+                j += 1;
+            }
+            if j == AMDGPU_MAX_USEC_TIMEOUT {
+                Line::new().s("comp_").dec(me as u64).s("_").dec(pipe as u64).s("_").dec(queue as u64)
+                    .s(" dequeue request failed.").dbg();
+                // Manual disable if dequeue request times out
+                gc_wr(adev, GC_mmCP_HQD_ACTIVE_BASE_IDX, GC_mmCP_HQD_ACTIVE, 0);
+            }
+            gc_wr(adev, GC_mmCP_HQD_DEQUEUE_REQUEST_BASE_IDX, GC_mmCP_HQD_DEQUEUE_REQUEST, 0);
+        }
+        soc15_grbm_select(adev, 0, 0, 0, 0);
+    }
+    amdgpu_gfx_rlc_exit_safe_mode(adev);
 }
 
 /// `gfx_v9_0_reset_kcq`: the compute queue unmapped with RESET_QUEUES
@@ -3439,9 +3508,14 @@ pub fn gfx_v9_0_hw_fini(adev: &mut amdgpu_device) -> i32 {
     // disable KCQ to avoid CPC touch memory not valid anymore
     amdgpu_gfx_disable_kcq(adev);
 
+    let in_reset = crate::amdgpu_device::amdgpu_in_reset(adev);
+    if in_reset && crate::amdgpu_device::soc15_asic_reset_method(adev) == AMD_RESET_METHOD_MODE2 {
+        gfx_v9_0_deactivate_kcq_hqd(adev);
+    }
+
     // Use deinitialize sequence from CAIL when unbinding device from
     // driver, otherwise KIQ is hanging when binding back
-    if let Some(k) = adev.gfx.kiq.ring {
+    if let Some(k) = adev.gfx.kiq.ring.filter(|_| !in_reset && !adev.in_suspend) {
         let (me, pipe, queue) = (adev.rings[k].me, adev.rings[k].pipe, adev.rings[k].queue);
         soc15_grbm_select(adev, me, pipe, queue, 0);
         gfx_v9_0_kiq_fini_register(adev);
