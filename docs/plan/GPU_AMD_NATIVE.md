@@ -216,3 +216,33 @@ begrenzt (`IB` ohne PRIV); Haenger → E. Offen zu pruefen: welche Register
 ein Benutzer-IB per `SET_*_REG`/`WRITE_DATA` erreicht (Linux verlaesst sich
 auf die CP-Firmware), und `READ_MMR_REG` nur mit Linux' Positivliste
 (`soc15_allowed_read_registers`).
+
+## 5. Gast-Bilder im Wirts-Compositor: Kachelung und DCC (Stand 2026-10-20)
+
+Am IdeaPad laeuft Firefox im Gast mit WebRender auf radeonsi (Kernel 0.662.0,
+Modul 0.15.1). Der Wirts-Compositor zeigt die Bilder aber als Kachelmuster,
+weil er sie linear liest. Gemessen (0.15.1, `dmesg gpudev: bo`):
+
+- erstes Scanout-Bild von npkwm: Swizzle 25 = **64KB_S_X**, kein DCC,
+  Objekt 1184 Seiten, Sicht 1115 Seiten (pitch 4096 bei 943 px)
+- laufende Frames: Swizzle 26 = **64KB_D_X mit DCC** (DCC-Offset 4718592,
+  `dcc pitch` 1023, scanout 0), Objekt 1168 Seiten
+- `tiling_flags` z. B. 0x0000087FE009001A; die UMD-Metadaten-Worte wurden im
+  Log abgeschnitten — als Erstes auf eine eigene Zeile legen.
+
+Wie Linux es macht: der Konsument importiert den dmabuf mit implizitem
+Modifier, liest das Layout aus den Objekt-Metadaten (radeonsi legt beim
+Export die Textur-Beschreibung T# in die UMD-Metadaten, `si_set_tex_bo_metadata`;
+Import: `ac_surface_apply_umd_metadata`) und **sampelt ueber die
+Textur-Einheit**, die Kacheln und DCC in Hardware aufloest. SDMA-Entkacheln
+allein reicht nicht (kein DCC).
+
+Plan:
+1. Import-Schritt im Modul-Compositor: ein Shader (RADV/acoc wie die anderen,
+   nichts von Hand) liest das Gast-Bild ueber ein Image und schreibt linear in
+   einen Puffer, den `compose` wie bisher nimmt.
+2. Die T# aus den UMD-Metadaten (Port der radeonsi-Import-Logik), Basis- und
+   DCC-Adresse vom Modul eingesetzt.
+3. **Sicherheit:** Breite, Hoehe, Pitch, Swizzle und DCC-Bereich gegen die
+   Objektgroesse pruefen — eine gefaelschte Beschreibung darf nichts ausser dem
+   eigenen Objekt im Compositor-Adressraum lesen.
