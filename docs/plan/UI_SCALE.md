@@ -7,7 +7,14 @@ panels/dock/overlays are converted, open popups close with `PopupDone`.
 Step 4 built (kernel 0.657.0, gpu_intel_tgl 0.34.0): `loop` draws IBM
 Plex Mono at 14 logical px, one cell source (`terminal::cells`), glyph
 coverage blended by `scene::text` and `compose.comp` (gpu_intel_tgl 0.34.0,
-gpu_amd_renoir 0.12.0). Steps 2, 3, 5 open.
+gpu_amd_renoir 0.12.0). Step 2 built (kernel 0.658.0): `regen-icons`
+writes atlas version 2 with every icon's fill outline (strokes stroked by
+tiny-skia, curves flattened, 1/64 units of the 256 grid); the kernel fills
+it at the exact size asked for (`gui/icon_raster.rs`, nonzero, 16 sample
+rows, exact horizontal coverage) and caches it; the bitmaps stay as the
+fallback. Mean difference to resvg 1.04/255; at 16 px the outline is ~17 %
+darker because tiny-skia draws 1 px strokes as hairlines. The window
+close X follows the factor (part of step 3). Steps 3 (rest) and 5 open.
 
 ## Why
 

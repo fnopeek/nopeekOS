@@ -19,7 +19,15 @@
 //!         IconEntry { icon_id: u16, _pad: u16, offsets: [u32; num_sizes] }
 //! ....  data       : alpha bytes, per-icon per-size, concatenated
 //!                    size S contributes exactly S*S bytes
+//! ....  outlines   : (version 2) b"NPKIPATH", count: u16, _pad: u16, then
+//!                    per icon { icon_id: u16, contours: u16,
+//!                    per contour { points: u16, [x: i16, y: i16; points] } }
 //! ```
+//!
+//! The outlines let the kernel rasterize an icon at any size
+//! (docs/plan/UI_SCALE.md, step 2): every stroke is turned into its fill
+//! outline here, curves are flattened, and a point is in 1/64 units of the
+//! 256 grid, so the kernel only fills closed polygons by the nonzero rule.
 //!
 //! `IconId` values match the frozen numbers in
 //! `kernel/src/shade/widgets/abi.rs` — see the `ICONS` table below.
@@ -103,8 +111,98 @@ const ICONS: &[IconEntry] = &[
 /// Rasterized sizes, in actual pixels (not HiDPI-scaled).
 const SIZES: &[u16] = &[16, 24, 32, 48, 64];
 
-const ATLAS_VERSION: u16 = 1;
+const ATLAS_VERSION: u16 = 2;
 const MAGIC: &[u8; 8] = b"NPKIATLS";
+const PATH_MAGIC: &[u8; 8] = b"NPKIPATH";
+/// Outline coordinate units per pixel of the 256 grid.
+const UNITS: f32 = 64.0;
+/// Longest chord a flattened curve may have, in grid px. At 64 px an icon
+/// is 1/4 of the grid, so a chord's sagitta stays far below a pixel.
+const CHORD: f32 = 1.5;
+
+type Contour = Vec<(f32, f32)>;
+
+/// Fill outlines of `svg_path` in 256-grid px: fills as they are, strokes
+/// as the outline tiny-skia strokes them to, every curve flattened.
+fn outline(svg_path: &Path) -> Vec<Contour> {
+    let svg_data = fs::read(svg_path).expect("read svg");
+    let tree = usvg::Tree::from_data(&svg_data, &usvg::Options::default())
+        .expect("parse svg");
+    let size = tree.size();
+    let fit = 256.0 / size.width().max(size.height());
+    let mut out = Vec::new();
+    walk(tree.root(), fit, &mut out);
+    out
+}
+
+fn walk(group: &usvg::Group, fit: f32, out: &mut Vec<Contour>) {
+    for node in group.children() {
+        match node {
+            usvg::Node::Group(g) => walk(g, fit, out),
+            usvg::Node::Path(p) if p.is_visible() => {
+                let ts = p.abs_transform().post_scale(fit, fit);
+                if p.fill().is_some() {
+                    if let Some(d) = p.data().clone().transform(ts) { flatten(&d, out); }
+                }
+                if let Some(st) = p.stroke() {
+                    // Stroked in the path's own space, fine enough for the
+                    // largest size the grid is drawn at.
+                    let stroked = p.data().stroke(&st.to_tiny_skia(), 4.0);
+                    if let Some(d) = stroked.and_then(|d| d.transform(ts)) { flatten(&d, out); }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn flatten(path: &tiny_skia::Path, out: &mut Vec<Contour>) {
+    use tiny_skia::PathSegment as S;
+    let mut cur: Contour = Vec::new();
+    let mut last = (0.0f32, 0.0f32);
+    let end = |cur: &mut Contour, out: &mut Vec<Contour>| {
+        if cur.len() >= 3 { out.push(core::mem::take(cur)); } else { cur.clear(); }
+    };
+    for seg in path.segments() {
+        match seg {
+            S::MoveTo(p) => { end(&mut cur, out); last = (p.x, p.y); cur.push(last); }
+            S::LineTo(p) => { last = (p.x, p.y); cur.push(last); }
+            S::QuadTo(c, p) => {
+                let (c, p) = ((c.x, c.y), (p.x, p.y));
+                let n = steps(&[last, c, p]);
+                for i in 1..=n {
+                    let t = i as f32 / n as f32;
+                    let u = 1.0 - t;
+                    cur.push((u * u * last.0 + 2.0 * u * t * c.0 + t * t * p.0,
+                              u * u * last.1 + 2.0 * u * t * c.1 + t * t * p.1));
+                }
+                last = p;
+            }
+            S::CubicTo(c1, c2, p) => {
+                let (c1, c2, p) = ((c1.x, c1.y), (c2.x, c2.y), (p.x, p.y));
+                let n = steps(&[last, c1, c2, p]);
+                for i in 1..=n {
+                    let t = i as f32 / n as f32;
+                    let u = 1.0 - t;
+                    let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+                    cur.push((a * last.0 + b * c1.0 + c * c2.0 + d * p.0,
+                              a * last.1 + b * c1.1 + c * c2.1 + d * p.1));
+                }
+                last = p;
+            }
+            S::Close => end(&mut cur, out),
+        }
+    }
+    end(&mut cur, out);
+}
+
+/// Segments for a curve: its control polygon's length in chords.
+fn steps(pts: &[(f32, f32)]) -> usize {
+    let len: f32 = pts.windows(2)
+        .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
+        .sum();
+    ((len / CHORD).ceil() as usize).clamp(1, 256)
+}
 
 fn rasterize(svg_path: &Path, size: u16) -> Vec<u8> {
     let svg_data = fs::read(svg_path).expect("read svg");
@@ -212,6 +310,28 @@ fn main() {
 
     // Append data.
     blob.extend_from_slice(&data_bytes);
+
+    // Outlines (version 2).
+    blob.extend_from_slice(PATH_MAGIC);
+    blob.extend_from_slice(&num_icons.to_le_bytes());
+    blob.extend_from_slice(&0u16.to_le_bytes());
+    let mut points = 0usize;
+    for icon in ICONS {
+        let contours = outline(&svg_dir.join(icon.svg));
+        blob.extend_from_slice(&icon.id.to_le_bytes());
+        blob.extend_from_slice(&(contours.len() as u16).to_le_bytes());
+        for c in &contours {
+            blob.extend_from_slice(&(c.len() as u16).to_le_bytes());
+            for &(x, y) in c {
+                for v in [x, y] {
+                    let q = (v * UNITS).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                    blob.extend_from_slice(&q.to_le_bytes());
+                }
+            }
+            points += c.len();
+        }
+    }
+    println!("regen-icons: outlines, {} points", points);
 
     fs::write(&out_path, &blob).expect("write atlas");
     println!("regen-icons: wrote {} bytes → {}", blob.len(), out_path.display());

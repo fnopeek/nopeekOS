@@ -70,27 +70,16 @@ const CLOSE_BTN_BOX: u32 = 26;
 /// very top edge. Windows without a menu bar (browser, terminal) just
 /// get the X centred in their top ~band; close enough.
 const CLOSE_BTN_BAND: u32 = 36;
-/// Close-X glyph size at 1×. Must be an atlas-native size (16/24/32/…):
-/// `icons::alpha_for` returns the nearest-not-smaller bitmap and the
-/// blit below uses that size verbatim, so any other value would draw a
-/// larger X than intended.
+/// Close-X glyph size at 1×.
 const CLOSE_BTN_GLYPH: u32 = 16;
-
-/// The platform close-X is a fixed pixel size and never tracks the screen
-/// HiDPI scale. Widget apps render their UI at fixed px (the widget
-/// rasterizer runs at `RasterTarget.scale = 1`; apps size via density, not a
-/// HiDPI factor), so a screen-scaled X would balloon against the content on
-/// 4K. Every window kind gets the same small X.
-fn close_btn_scale(_win: &Window, _scale: u32) -> u32 {
-    1
-}
 
 /// Screen rect `(x, y, w, h)` of a window's platform close button, or
 /// `None` for panels (dock/bar are managed chrome — never closable here)
 /// and windows too narrow to host the button. Shared by the renderer and
 /// the click hit-test so the drawn disc and the clickable area always
 /// coincide.
-fn close_button_rect(win: &Window, border: u32, scale: u32)
+/// The X follows the UI scale, like the menu labels it lines up with.
+fn close_button_rect(win: &Window, border: u32)
     -> Option<(u32, u32, u32, u32)>
 {
     // No X on managed chrome (dock/bar), on transient overlays (drun and
@@ -98,13 +87,13 @@ fn close_button_rect(win: &Window, border: u32, scale: u32)
     // windows (the microvm browser owns its own close via its UI).
     if win.is_dock || win.is_bar || win.is_overlay { return None; }
     if win.kind == crate::shade::window::WindowKind::Surface { return None; }
-    let scale = close_btn_scale(win, scale);
-    let box_px = CLOSE_BTN_BOX * scale;
+    use crate::shade::widgets::scale;
+    let box_px = scale::len(CLOSE_BTN_BOX);
     // The box is centred vertically in the app's menu-bar band so the X
     // aligns with `Datei / Bearbeiten / …` rather than the top edge. Reuse
     // that same vertical inset as the right-edge margin → equal gap on the
     // top, bottom and right sides.
-    let band = CLOSE_BTN_BAND * scale;
+    let band = scale::len(CLOSE_BTN_BAND);
     let inset = band.saturating_sub(box_px) / 2;
     if win.width <= border * 2 + inset + box_px { return None; }
     let bx = win.x + win.width - border - inset - box_px;
@@ -2058,7 +2047,6 @@ impl Compositor {
         }
         let border = self.border;
         let rounding = self.rounding;
-        let scale = self.scale;
         let opacity = crate::shade::glass::params().loop_opacity;
         let in_motion = self.geometry_in_motion() || self.animation.is_some();
 
@@ -2081,7 +2069,7 @@ impl Compositor {
                 bg: win.bg_color,
                 content: Rect::new(win.content_x(cb), win.content_y(cb), win.content_w(cb), win.content_h(cb)),
                 text: self.term_text_rect(win),
-                close: close_button_rect(win, border, scale)
+                close: close_button_rect(win, border)
                     .map(|(x, y, w, h)| (Rect::new(x, y, w, h), close_glyph_color(win))),
             });
         }
@@ -2165,7 +2153,7 @@ impl Compositor {
                 }
             }
             if let Some((rect, color)) = p.close {
-                items.push(Item::CloseGlyph { rect, size: CLOSE_BTN_GLYPH, color });
+                items.push(Item::CloseGlyph { rect, size: crate::shade::widgets::scale::len(CLOSE_BTN_GLYPH), color });
             }
         }
         if let Some(h) = self.dock_handle_item() {
@@ -3085,12 +3073,11 @@ impl Compositor {
     /// point isn't over any close button.
     fn close_button_at(&self, x: i32, y: i32) -> Option<WindowId> {
         let border = self.border;
-        let scale = self.scale;
         for &wid in &self.z_order {
             if let Some(win) = self.windows.iter().find(|w| w.id == wid
                 && w.workspace == self.active_workspace && w.visible)
             {
-                if let Some((bx, by, bw, bh)) = close_button_rect(win, border, scale) {
+                if let Some((bx, by, bw, bh)) = close_button_rect(win, border) {
                     if x >= bx as i32 && x < (bx + bw) as i32
                         && y >= by as i32 && y < (by + bh) as i32
                     {
@@ -3125,7 +3112,7 @@ impl Compositor {
             term_idx: win.terminal_idx,
             text_rect,
             char_h: terminal::cells().h,
-            close_rect: close_button_rect(win, border, self.scale),
+            close_rect: close_button_rect(win, border),
         })
     }
 }
