@@ -1859,6 +1859,10 @@ pub fn intent_set(args: &str) {
             kprintln!("[npk] Usage: set <key> <value>");
             return;
         }
+        if key == "shade.scale" && crate::shade::widgets::scale::parse(value).is_none() {
+            kprintln!("[npk] shade.scale takes 1.0 to 3.0, e.g. 1.25");
+            return;
+        }
         // `code.scheme` is a closed set — a typo would otherwise store
         // silently and fall back to auto, which looks like the key did
         // nothing at all.
@@ -1927,6 +1931,7 @@ fn apply_config_change(key: &str) {
     if key.starts_with("shade.") || key.starts_with("code.")
         || key == "theme" || key == "accent" {
         if key == "shade.blur" { crate::gui::background::reblur(); }
+        if key == "shade.scale" { crate::shade::rescale(); }
         crate::shade::widgets::refresh_all_scenes();
         crate::shade::force_redraw();
     }

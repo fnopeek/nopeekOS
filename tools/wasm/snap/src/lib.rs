@@ -33,12 +33,21 @@ static NPK_CAPS: [u8; 1] = [nopeek_widgets::caps::READ | nopeek_widgets::caps::W
 
 use nopeek_widgets::host;
 
-// The two calls only snap makes; the shared ones are in
+// The calls only snap makes; the shared ones are in
 // `nopeek_widgets::host`.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_capture_screen(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_capture_size() -> i32;
     fn npk_screen_flash() -> i32;
+}
+
+/// Physical screen size in px — what `capture_screen` writes. The screen
+/// size apps lay out against is logical and smaller on a scaled screen.
+fn capture_size() -> (usize, usize) {
+    // SAFETY: FFI without pointers.
+    let packed = unsafe { npk_capture_size() } as u32;
+    ((packed >> 16) as usize, (packed & 0xFFFF) as usize)
 }
 
 /// Copy the composited screen as BGRA into `buf`; the byte count or a
@@ -105,9 +114,8 @@ pub extern "C" fn _start() {
     let n = host::launch_arg(&mut argbuf).unwrap_or(0);
     let _mode = if n > 0 { core::str::from_utf8(&argbuf[..n]).unwrap_or("full") } else { "full" };
 
-    let (w, h) = host::screen_size();
-    if (w, h) == (0, 0) { log("[snap] screen_size failed"); return; }
-    let (w, h) = (w as usize, h as usize);
+    let (w, h) = capture_size();
+    if (w, h) == (0, 0) { log("[snap] capture_size failed"); return; }
     if w == 0 || h == 0 { log("[snap] zero screen"); return; }
 
     let t_start = now_ms();

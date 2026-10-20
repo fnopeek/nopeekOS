@@ -818,6 +818,37 @@ impl Compositor {
         changed
     }
 
+    /// The UI scale changed from `old` to `new` (1/120 units): apps sized
+    /// their panels, dock and overlays once, in logical px, so convert the
+    /// physical sizes here. Popups close with `PopupDone`; the app opens
+    /// them again at the new size.
+    pub fn rescale_app_geometry(&mut self, old: u32, new: u32) {
+        if old == 0 || old == new { return; }
+        let f = |v: u32| ((v as u64 * new as u64 + old as u64 / 2) / old as u64) as u32;
+        let popups: alloc::vec::Vec<WindowId> = self.windows.iter()
+            .filter(|w| w.popup_of.is_some()).map(|w| w.id).collect();
+        for id in popups { self.close_popup(id, true); }
+        if let Some(t) = self.top_strut { self.set_bar_panel(t.id, 0, f(t.pill_h)); }
+        if let Some(b) = self.bottom_strut { self.set_bottom_panel(b.id, f(b.pill_h)); }
+        if let Some(d) = self.dock {
+            if let Some((w, h)) = self.windows.iter().find(|w| w.id == d.id).map(|w| (w.width, w.height)) {
+                self.set_dock_panel(d.id, f(w), f(h));
+            }
+        }
+        let (sw, sh) = (self.screen_w, self.screen_h);
+        for win in self.windows.iter_mut()
+            .filter(|w| w.is_overlay && !w.is_bar && !w.is_dock && w.popup_of.is_none())
+        {
+            win.width = f(win.width).clamp(1, sw);
+            win.height = f(win.height).clamp(1, sh);
+            win.x = f(win.x).min(sw - win.width);
+            win.y = f(win.y).min(sh - win.height);
+            win.dirty = true;
+        }
+        self.retile();
+        self.needs_full_redraw = true;
+    }
+
     /// Toggle the `modal` flag on a window.
     pub fn set_modal(&mut self, id: WindowId, modal: bool) -> bool {
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {

@@ -17,8 +17,9 @@
 //!   - Reserved widget slots (Popover/Tooltip/Menu) lay out as a zero-
 //!     sized placeholder — the compositor logs + rejects them.
 //!
-//! All sizes are logical px at 1× HiDPI. The rasterizer multiplies
-//! by the scale factor at raster time (per docs/archive/PHASE10_WIDGETS.md).
+//! Apps write logical px; the tree this produces is in physical px. Every
+//! length read from the widget tree goes through `scale` on the way in
+//! (docs/plan/UI_SCALE.md), so render and hit tests see physical rects.
 //!
 //! Two-pass algorithm — cheap, fits on the stack:
 //!
@@ -40,6 +41,7 @@ use alloc::vec::Vec;
 use super::abi::{
     ActionId, Align, Axis, Modifier, Point, Rect, Size, TextStyle, Widget,
 };
+use super::scale;
 
 /// Geometry result for one widget node. Mirrors the widget tree shape
 /// so callers (debug printer, rasterizer) can walk in lockstep.
@@ -262,7 +264,7 @@ pub(super) fn children_mut(w: &mut Widget) -> &mut [Widget] {
 }
 
 /// Thumb diameter of a `Widget::Slider`, and with it the slider's height.
-pub(super) const SLIDER_THUMB: u32 = 14;
+pub(super) fn slider_thumb() -> u32 { scale::len(14) }
 
 // ── Pass 1: intrinsic measurement ─────────────────────────────────────
 
@@ -290,10 +292,10 @@ fn apply_size_constraints(size: Size, mods: &[Modifier]) -> Size {
     let mut max_h = u32::MAX;
     for m in mods {
         match m {
-            Modifier::MinWidth(v)  => { let v = *v as u32; if v > min_w { min_w = v; } }
-            Modifier::MaxWidth(v)  => { let v = *v as u32; if v < max_w { max_w = v; } }
-            Modifier::MinHeight(v) => { let v = *v as u32; if v > min_h { min_h = v; } }
-            Modifier::MaxHeight(v) => { let v = *v as u32; if v < max_h { max_h = v; } }
+            Modifier::MinWidth(v)  => { let v = scale::len(*v as u32); if v > min_w { min_w = v; } }
+            Modifier::MaxWidth(v)  => { let v = scale::len(*v as u32); if v < max_w { max_w = v; } }
+            Modifier::MinHeight(v) => { let v = scale::len(*v as u32); if v > min_h { min_h = v; } }
+            Modifier::MaxHeight(v) => { let v = scale::len(*v as u32); if v < max_h { max_h = v; } }
             _ => {}
         }
     }
@@ -319,15 +321,20 @@ fn flex_modifier(mods: &[Modifier]) -> Option<u8> {
 
 /// Pixel size a text leaf renders at: `Modifier::FontSize` when present
 /// (clamped — a module must not be able to ask for a 60 000 px glyph),
-/// else whatever the style resolves to. Layout and render must agree on
-/// this, so both go through here.
+/// else whatever the style resolves to, in physical px. Layout, render and
+/// hit tests must agree on this, so all of them go through here.
 pub(super) fn font_size_of<'a>(style: TextStyle, mods: impl IntoIterator<Item = &'a Modifier>) -> u16 {
     for m in mods {
         if let Modifier::FontSize(px) = m {
-            return (*px).clamp(super::abi::FONT_SIZE_MIN, super::abi::FONT_SIZE_MAX);
+            return scale::font((*px).clamp(super::abi::FONT_SIZE_MIN, super::abi::FONT_SIZE_MAX));
         }
     }
-    crate::gui::text::style_desc(style).size_px
+    style_px(style)
+}
+
+/// A style's own size in physical px.
+pub(super) fn style_px(style: TextStyle) -> u16 {
+    scale::font(crate::gui::text::style_desc(style).size_px)
 }
 
 fn mods_of_widget(w: &Widget) -> &[Modifier] {
@@ -365,7 +372,7 @@ fn measure_intrinsic(w: &Widget) -> Size {
                 if cs.w > max_w { max_w = cs.w; }
                 count += 1;
             }
-            let gaps = (count.saturating_sub(1)) * (*spacing as u32);
+            let gaps = (count.saturating_sub(1)) * scale::len(*spacing as u32);
             Size {
                 w: max_w + outer_pad.0 * 2,
                 h: total_h + gaps + outer_pad.1 * 2,
@@ -384,7 +391,7 @@ fn measure_intrinsic(w: &Widget) -> Size {
                 if cs.h > max_h { max_h = cs.h; }
                 count += 1;
             }
-            let gaps = (count.saturating_sub(1)) * (*spacing as u32);
+            let gaps = (count.saturating_sub(1)) * scale::len(*spacing as u32);
             Size {
                 w: total_w + gaps + outer_pad.0 * 2,
                 h: max_h + outer_pad.1 * 2,
@@ -410,11 +417,11 @@ fn measure_intrinsic(w: &Widget) -> Size {
             // Report the child's cross size, but only a small floor on the
             // scroll axis so siblings (e.g. a footer) keep their space.
             let cs = measure(child);
-            const AXIS_FLOOR: u32 = 24;
+            let axis_floor = scale::len(24);
             match axis {
-                Axis::Vertical   => Size { w: cs.w, h: AXIS_FLOOR },
-                Axis::Horizontal => Size { w: AXIS_FLOOR, h: cs.h },
-                Axis::Both       => Size { w: AXIS_FLOOR, h: AXIS_FLOOR },
+                Axis::Vertical   => Size { w: cs.w, h: axis_floor },
+                Axis::Horizontal => Size { w: axis_floor, h: cs.h },
+                Axis::Both       => Size { w: axis_floor, h: axis_floor },
             }
         }
 
@@ -425,7 +432,7 @@ fn measure_intrinsic(w: &Widget) -> Size {
             // Fallbacks for when font isn't loaded — line_height returns
             // size_px * 1.2, measure returns 0 → conservative 6 px/char.
             let w = if w == 0 {
-                content.chars().count() as u32 * 6
+                content.chars().count() as u32 * scale::len(6)
             } else { w };
             // Honour a Padding modifier on the leaf so the outer rect
             // grows to include the padding band — siblings then space
@@ -437,7 +444,7 @@ fn measure_intrinsic(w: &Widget) -> Size {
         }
 
         Widget::Icon { size, modifiers, .. } => {
-            let s = *size as u32;
+            let s = scale::len(*size as u32);
             let pad = padding(modifiers);
             Size { w: s + pad.0 * 2, h: s + pad.1 * 2 }
         }
@@ -447,27 +454,30 @@ fn measure_intrinsic(w: &Widget) -> Size {
             // precedes the label with 4 px gap. Matches typical toolkit
             // button chrome.
             use super::abi::IconId;
+            let px = style_px(TextStyle::Body);
             let label_w = if label.is_empty() {
                 0
             } else {
-                ceil_u32(crate::gui::text::measure(label, TextStyle::Body))
+                ceil_u32(crate::gui::text::measure_px(label, TextStyle::Body, px))
             };
-            let label_h = ceil_u32(crate::gui::text::line_height(TextStyle::Body));
-            let icon_slot = if *icon != IconId::None { 16 + 4 } else { 0 };
+            let label_h = ceil_u32(crate::gui::text::line_height_px(TextStyle::Body, px));
+            let icon_slot = if *icon != IconId::None { scale::len(16 + 4) } else { 0 };
             Size {
-                w: icon_slot + label_w + 16,  // 8 px pad × 2
-                h: label_h.max(16) + 8,       // 4 px vertical pad × 2
+                w: icon_slot + label_w + scale::len(16),  // 8 px pad × 2
+                h: label_h.max(scale::len(16)) + scale::len(8),  // 4 px vertical pad × 2
             }
         }
 
         Widget::Input { value, placeholder, modifiers, .. } => {
             let sample = if value.is_empty() { placeholder } else { value };
-            let w = ceil_u32(crate::gui::text::measure(sample, TextStyle::Body));
-            let h = ceil_u32(crate::gui::text::line_height(TextStyle::Body));
+            let px = style_px(super::render::INPUT_STYLE);
+            let w = ceil_u32(crate::gui::text::measure_px(sample, super::render::INPUT_STYLE, px));
+            let h = ceil_u32(crate::gui::text::line_height_px(super::render::INPUT_STYLE, px));
             // Built-in 4 px chrome + the modifier's own padding. Min-
             // width keeps empty inputs from collapsing in flex rows.
             let pad = padding(modifiers);
-            Size { w: w.max(120) + 8 + pad.0 * 2, h: h + 8 + pad.1 * 2 }
+            let chrome = scale::len(8);
+            Size { w: w.max(scale::len(120)) + chrome + pad.0 * 2, h: h + chrome + pad.1 * 2 }
         }
 
         Widget::TextArea { modifiers, .. } => {
@@ -479,27 +489,28 @@ fn measure_intrinsic(w: &Widget) -> Size {
             let px = font_size_of(TextStyle::Mono, modifiers);
             let line_h = ceil_u32(crate::gui::text::line_height_px(TextStyle::Mono, px));
             let pad = padding(modifiers);
-            Size { w: 280 + 8 + pad.0 * 2, h: line_h * 3 + 8 + pad.1 * 2 }
+            Size { w: scale::len(280 + 8) + pad.0 * 2, h: line_h * 3 + scale::len(8) + pad.1 * 2 }
         }
 
         Widget::Checkbox { modifiers, .. } => {
             let pad = padding(modifiers);
-            Size { w: 16 + pad.0 * 2, h: 16 + pad.1 * 2 }
+            let s = scale::len(16);
+            Size { w: s + pad.0 * 2, h: s + pad.1 * 2 }
         }
 
         // Height = the thumb, so the whole strip around a thin track is
         // grabbable. Width is a floor; sliders are meant to Flex/stretch.
         Widget::Slider { modifiers, .. } => {
             let pad = padding(modifiers);
-            Size { w: 80 + pad.0 * 2, h: SLIDER_THUMB + pad.1 * 2 }
+            Size { w: scale::len(80) + pad.0 * 2, h: slider_thumb() + pad.1 * 2 }
         }
 
         Widget::Spacer { .. } => Size::default(),
 
-        Widget::Divider => Size { w: 0, h: 1 },
+        Widget::Divider => Size { w: 0, h: scale::len(1) },
 
         Widget::Canvas { width, height, .. } => {
-            Size { w: *width as u32, h: *height as u32 }
+            Size { w: scale::len(*width as u32), h: scale::len(*height as u32) }
         }
 
         // Reserved slots — compositor rejects at render time; layout
@@ -565,9 +576,10 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
             }
         }
 
-        Widget::Text { style, .. } => {
+        Widget::Text { style, modifiers, .. } => {
             let measured = measure(w);
-            let baseline = ceil_u32(crate::gui::text::ascent(*style));
+            let px = font_size_of(*style, modifiers);
+            let baseline = ceil_u32(crate::gui::text::ascent_px(*style, px));
             LayoutNode {
                 rect: Rect { x: inner.x, y: inner.y, w: measured.w, h: measured.h },
                 baseline,
@@ -624,7 +636,7 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
         }
 
         Widget::Divider => {
-            LayoutNode::leaf(Rect { x: inner.x, y: inner.y, w: inner.w, h: 1 })
+            LayoutNode::leaf(Rect { x: inner.x, y: inner.y, w: inner.w, h: scale::len(1) })
         }
 
         Widget::Popover { .. } | Widget::Tooltip { .. } | Widget::Menu { .. } => {
@@ -676,7 +688,8 @@ fn place_axis(
         count += 1;
     }
 
-    let gaps = count.saturating_sub(1) * spacing as u32;
+    let spacing = scale::len(spacing as u32);
+    let gaps = count.saturating_sub(1) * spacing;
     let remaining = main_avail.saturating_sub(total_main).saturating_sub(gaps);
 
     // Pass 2: walk children, place them along the main axis. Spacers
@@ -733,7 +746,7 @@ fn place_axis(
         kids.push(place(c, child_rect, ctx));
         cursor = cursor.saturating_add(main_sz);
         if idx + 1 < children.len() {
-            cursor = cursor.saturating_add(spacing as u32);
+            cursor = cursor.saturating_add(spacing);
         }
     }
 
@@ -778,8 +791,8 @@ fn unpack_modifiers_on(mods: &[Modifier], container: Rect) -> (Rect, Rect) {
     (container, inner)
 }
 
-/// Sum of Padding modifiers → (x-pad, y-pad) in logical px.
-fn padding(mods: &[Modifier]) -> (u32, u32) {
+/// Sum of Padding modifiers → (x-pad, y-pad) in physical px.
+pub(super) fn padding<'a>(mods: impl IntoIterator<Item = &'a Modifier>) -> (u32, u32) {
     let (mut px, mut py) = (0u32, 0u32);
     for m in mods {
         match m {
@@ -794,7 +807,7 @@ fn padding(mods: &[Modifier]) -> (u32, u32) {
             _ => {}
         }
     }
-    (px, py)
+    (scale::len(px), scale::len(py))
 }
 
 /// `f32::ceil` isn't in core (no_std). Positive-only ceil-to-u32,

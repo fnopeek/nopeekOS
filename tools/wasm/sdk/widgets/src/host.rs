@@ -79,7 +79,8 @@ pub fn wait(mask: u32, timeout_ms: i32) -> i32 { sys::wait(mask as i32, timeout_
 /// One value of the kernel's system information table.
 pub fn sys_info(key: i32) -> i64 { sys::sys_info(key) }
 
-/// Screen size in pixels, `(0, 0)` without the right to ask.
+/// Screen size in logical px (the unit a widget tree is written in),
+/// `(0, 0)` without the right to ask.
 pub fn screen_size() -> (u32, u32) {
     let v = sys::screen_size() as u32;
     (v >> 16, v & 0xFFFF)

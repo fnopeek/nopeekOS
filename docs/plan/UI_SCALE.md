@@ -1,6 +1,10 @@
 # UI_SCALE.md — one scale factor for the whole UI, fractions included
 
-Status: **plan** (2026-10-20). Nothing built.
+Status: **step 1 built** (2026-10-20, kernel 0.656.0, dock 0.8.3,
+snap 0.5.0), device test open. `set shade.scale 1.25` applies at once
+(step 6, minus a range check per output): every scene is laid out again,
+panels/dock/overlays are converted, open popups close with `PopupDone`.
+Steps 2-5 open.
 
 ## Why
 
@@ -41,6 +45,15 @@ who wants 1.25 or 1.5 rather than 2 has no knob either.
   w) * s)`, `w' = x1 - x0`. Neighbours then meet without a gap or an
   overlap. A 1 px logical border becomes `max(1, round(s))` px, never a
   blurred fraction.
+
+### What crosses the ABI in which unit
+
+- **Logical:** the widget tree, `npk_screen_size`, `npk_window_set_overlay`,
+  `_overlay_at`, `_dock`, `_panel`, the popup `gap`. An app lays itself out
+  against the logical screen.
+- **Physical:** `npk_canvas_rect`, `npk_cursor_pos`, `MouseMove`, `Wheel`
+  (a canvas app maps them onto its own pixels), and `npk_capture_screen`,
+  sized by the new `npk_capture_size`.
 
 ## Steps
 

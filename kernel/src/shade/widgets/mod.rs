@@ -14,6 +14,7 @@ pub mod palette;
 pub mod render;
 pub mod raster;
 pub mod animation;
+pub mod scale;
 
 mod check_abi;
 
@@ -724,7 +725,10 @@ static LAST_HOVER: Mutex<BTreeMap<u32, abi::ActionId>> = Mutex::new(BTreeMap::ne
 
 /// Compositor-side density classifier. Thresholds live here once;
 /// apps reference them only via `Modifier::WhenDensity(Density, …)`.
+/// Decided on the logical width, so drawing a window bigger does not
+/// change its density class.
 fn classify_density(window_w: u32) -> abi::Density {
+    let window_w = scale::logical(window_w);
     if window_w < 600 { abi::Density::Compact }
     else if window_w < 1200 { abi::Density::Regular }
     else { abi::Density::Spacious }
@@ -1691,7 +1695,7 @@ fn cursor_down(s: &str, cursor: usize) -> usize {
 /// Breathing room kept between the caret and the edge of the text column,
 /// so typing at the end of a long line doesn't park the caret exactly on
 /// the boundary where the next glyph would already be clipped.
-const CARET_MARGIN_PX: u32 = 24;
+fn caret_margin_px() -> u32 { scale::len(24) }
 
 /// Nudge a focused TextArea's scroll so the caret stays on screen — down
 /// the lines and sideways along the current one. Called on every caret
@@ -1721,7 +1725,7 @@ fn caret_follow_scroll_in(s: &mut WidgetScene) {
                 .map(|n| render::textarea_text_column(n.rect, mods, total_lines));
             (layout::font_size_of(abi::TextStyle::Mono, mods), column)
         }
-        None => (crate::gui::text::style_desc(abi::TextStyle::Mono).size_px, None),
+        None => (layout::style_px(abi::TextStyle::Mono), None),
     };
     let line_h = (crate::gui::text::line_height_px(abi::TextStyle::Mono, px) as u32).max(1);
 
@@ -1753,12 +1757,12 @@ fn caret_follow_scroll_in(s: &mut WidgetScene) {
     if let Some((_, col_w)) = column {
         // A column narrower than the margin can't hold the caret anywhere —
         // leave the view where it is rather than fight over sub-pixels.
-        if col_w > CARET_MARGIN_PX {
+        if col_w > caret_margin_px() {
             let mut sx = s.scroll_x;
-            if caret_x < sx.saturating_add(CARET_MARGIN_PX) {
-                sx = caret_x.saturating_sub(CARET_MARGIN_PX);
-            } else if caret_x + CARET_MARGIN_PX > sx + col_w {
-                sx = caret_x + CARET_MARGIN_PX - col_w;
+            if caret_x < sx.saturating_add(caret_margin_px()) {
+                sx = caret_x.saturating_sub(caret_margin_px());
+            } else if caret_x + caret_margin_px() > sx + col_w {
+                sx = caret_x + caret_margin_px() - col_w;
             }
             s.scroll_x = sx;
         }
@@ -1874,7 +1878,7 @@ static LAST_CLICK: Mutex<Option<(u64, i32, i32, u32, u8)>> = Mutex::new(None);
 const MULTI_CLICK_TICKS: u64 = 40;
 /// How far the pointer may travel meanwhile. Without this bound two clicks
 /// at different spots would count as a double click and the selection jumps.
-const MULTI_CLICK_SLOP: i32 = 4;
+fn multi_click_slop() -> i32 { scale::len_i(4) }
 
 /// Which click of the current series is this? 1 = single, 2 = double,
 /// 3 = triple (then it starts again at 1).
@@ -1890,8 +1894,8 @@ fn click_run(window_id: u32, x: i32, y: i32) -> u8 {
         Some((t, lx, ly, w, n))
             if w == window_id
                 && now.saturating_sub(t) <= MULTI_CLICK_TICKS
-                && (x - lx).abs() <= MULTI_CLICK_SLOP
-                && (y - ly).abs() <= MULTI_CLICK_SLOP => (n % 3) + 1,
+                && (x - lx).abs() <= multi_click_slop()
+                && (y - ly).abs() <= multi_click_slop() => (n % 3) + 1,
         _ => 1,
     };
     *last = Some((now, x, y, window_id, n));
@@ -1928,15 +1932,7 @@ fn ceil_u32(v: f32) -> u32 { let i = v as u32; if v > i as f32 { i + 1 } else { 
 /// render's `leaf_padding` so the caret hit-test uses the same text origin
 /// the glyphs were drawn at.
 fn padding_sum(mods: &[abi::Modifier]) -> u32 {
-    let mut p = 0u32;
-    for m in mods {
-        match m {
-            abi::Modifier::Padding(n) => p = p.saturating_add(*n as u32),
-            abi::Modifier::PaddingXY { x, .. } => p = p.saturating_add(*x as u32),
-            _ => {}
-        }
-    }
-    p
+    layout::padding(mods).0
 }
 
 fn layout_node_at_path<'a>(root: &'a layout::LayoutNode, path: &[u32])
@@ -1951,7 +1947,7 @@ fn layout_node_at_path<'a>(root: &'a layout::LayoutNode, path: &[u32])
 /// the text origin. Evaluates every char boundary (lines are short, so the
 /// O(n) `measure` calls are cheap) and picks the closest.
 fn byte_at_x(s: &str, style: abi::TextStyle, target_x: u32) -> usize {
-    let px = crate::gui::text::style_desc(style).size_px;
+    let px = layout::style_px(style);
     byte_at_x_px(s, style, px, target_x)
 }
 
@@ -1990,7 +1986,7 @@ fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Optio
     let rect = node.rect;
     if require_inside && !rect_contains(rect, x, y) { return None; }
     let pad = padding_sum(modifiers_of_ref(widget)) as i32;
-    let text_x = rect.x + pad + 4;
+    let text_x = rect.x + pad + render::text_inset();
     let value = edit.value.as_str();
     match widget {
         abi::Widget::Input { .. } => {
@@ -2002,7 +1998,7 @@ fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Optio
             // wrong line the moment the app zooms.
             let px = layout::font_size_of(style, modifiers_of_ref(widget));
             let line_h = ceil_u32(crate::gui::text::line_height_px(style, px)).max(1);
-            let top_y = rect.y + pad + 4;
+            let top_y = rect.y + pad + render::text_inset();
             let visible = (rect.h / line_h).max(1) as usize;
             let total_lines = value.split('\n').count();
             // Same text column the renderer used, shifted by the same
@@ -2152,7 +2148,7 @@ static SLIDE: Mutex<Option<SlideDrag>> = Mutex::new(None);
 pub fn sliding() -> bool { SLIDE.lock().is_some() }
 
 fn slider_value_at(track: abi::Rect, x: i32) -> u16 {
-    let d = layout::SLIDER_THUMB.min(track.h).min(track.w);
+    let d = layout::slider_thumb().min(track.h).min(track.w);
     let travel = track.w.saturating_sub(d);
     if travel == 0 { return 0; }
     let off = (x - track.x - (d / 2) as i32).clamp(0, travel as i32) as u32;
@@ -2469,7 +2465,8 @@ pub fn handle_input_key(
         // One viewport of lines for PageUp/PageDown, derived from the
         // window height at Mono metrics (a close-enough approximation —
         // the TextArea's own rect isn't threaded here).
-        let line_h = (crate::gui::text::line_height(abi::TextStyle::Mono) as u32).max(1);
+        let line_h = (crate::gui::text::line_height_px(
+            abi::TextStyle::Mono, layout::style_px(abi::TextStyle::Mono)) as u32).max(1);
         let page = ((win_h / line_h).saturating_sub(1)).max(1) as usize;
         let mut changed = false;
 

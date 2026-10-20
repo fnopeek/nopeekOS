@@ -470,11 +470,14 @@ host_imports! {
     // size and natively. CANVAS-gated exactly like the BGRA form.
     mem fn npk_canvas_commit_yuv(canvas_id: i32, y_ptr: i32, u_ptr: i32, v_ptr: i32, ys: i32, cs: i32, width: i32, height: i32, flags: i32) -> i32;
 
-    // npk_screen_size() -> (width << 16) | height, or 0 on error.
-    // Allowed for RENDER (overlay sizing) OR CAPTURE (screenshot tool
-    // sizing its capture buffer — it has no RENDER in full-screen mode).
+    // npk_screen_size() -> (width << 16) | height in logical px, or 0 on
+    // error. Allowed for RENDER or CAPTURE.
     // (Screens are well under 65535 px/side.)
     ctx fn npk_screen_size() -> i32;
+
+    // npk_capture_size() -> (width << 16) | height in physical px — the
+    // size `npk_capture_screen` writes. CAPTURE-gated; 0 on error.
+    ctx fn npk_capture_size() -> i32;
 
     // npk_ticks() -> milliseconds since boot (monotonic), or -1.
     //

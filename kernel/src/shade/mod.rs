@@ -56,6 +56,7 @@ pub fn init() {
     }).unwrap_or((1920, 1080));
 
     let scale = font::scale_for(screen_w);
+    widgets::scale::init(screen_w);
     let comp = Compositor::new(screen_w, screen_h, scale);
 
     // Initialize lock-free cursor position (centered, screen bounds for clamping)
@@ -109,11 +110,11 @@ pub fn focus_window(id: WindowId) {
 }
 
 /// Pixels a single mouse-wheel notch scrolls a widget app's
-/// `Widget::Scroll` (≈3 text lines).
-const WIDGET_SCROLL_STEP: i32 = 48;
+/// `Widget::Scroll` (≈3 text lines), physical.
+fn widget_scroll_step() -> i32 { widgets::scale::len_i(48) }
 
-/// Width (px) of the clickable scrollbar strip at a window's right edge.
-const SCROLLBAR_STRIP: i32 = 16;
+/// Width (physical px) of the clickable scrollbar strip at a window's right edge.
+fn scrollbar_strip() -> i32 { widgets::scale::len_i(16) }
 
 /// Active scrollbar drag (set on press over the bar, cleared on release).
 static SCROLL_DRAG: spin::Mutex<Option<ScrollDragState>> = spin::Mutex::new(None);
@@ -133,14 +134,14 @@ struct ScrollDragState {
 
 #[inline]
 fn in_scroll_strip(mx: i32, my: i32, vx: i32, vy: i32, vw: u32, vh: u32) -> bool {
-    mx >= vx + vw as i32 - SCROLLBAR_STRIP && mx < vx + vw as i32
+    mx >= vx + vw as i32 - scrollbar_strip() && mx < vx + vw as i32
         && my >= vy && my < vy + vh as i32
 }
 
 /// Bottom-edge counterpart of `in_scroll_strip`.
 #[inline]
 fn in_hscroll_strip(mx: i32, my: i32, vx: i32, vy: i32, vw: u32, vh: u32) -> bool {
-    my >= vy + vh as i32 - SCROLLBAR_STRIP && my < vy + vh as i32
+    my >= vy + vh as i32 - scrollbar_strip() && my < vy + vh as i32
         && mx >= vx && mx < vx + vw as i32
 }
 
@@ -384,6 +385,17 @@ static FORCE_REDRAW_PENDING: AtomicBool = AtomicBool::new(false);
 /// module) would race Core 0 into the same back buffer, and the
 /// terminal-glass cache could capture a half-mixed frame under the new key.
 /// From any other core this just leaves a note.
+/// Apply `shade.scale` (or, unset, the screen's default) at once: panels
+/// and overlays take their new size here, every scene is laid out again by
+/// the caller's `refresh_all_scenes`.
+pub fn rescale() {
+    let _ = with_compositor(|c| {
+        let old = widgets::scale::get();
+        widgets::scale::init(c.screen_w);
+        c.rescale_app_geometry(old, widgets::scale::get());
+    });
+}
+
 pub fn force_redraw() {
     if crate::smp::per_core::current_core_id() != 0 {
         FORCE_REDRAW_PENDING.store(true, Ordering::Release);
@@ -979,7 +991,7 @@ pub fn handle_action(action: input::ShadeAction) {
             // locks the compositor internally, so resolve the target first
             // and release the lock before calling it — no re-entrancy.)
             if let Some(wid) = focused_widget_id() {
-                widgets::scroll_by(wid, -WIDGET_SCROLL_STEP);
+                widgets::scroll_by(wid, -widget_scroll_step());
                 render_damaged();
             } else {
                 terminal::scroll_up(10);
@@ -993,7 +1005,7 @@ pub fn handle_action(action: input::ShadeAction) {
         }
         ShadeAction::ScrollDown => {
             if let Some(wid) = focused_widget_id() {
-                widgets::scroll_by(wid, WIDGET_SCROLL_STEP);
+                widgets::scroll_by(wid, widget_scroll_step());
                 render_damaged();
             } else {
                 terminal::scroll_down(10);
@@ -1508,7 +1520,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // No branch for the terminal: its scrollback has only one axis.
     if evt.hscroll != 0 {
         if let Some(wid) = focused_widget_id() {
-            let delta = (evt.hscroll as i32) * WIDGET_SCROLL_STEP;
+            let delta = (evt.hscroll as i32) * widget_scroll_step();
             if widgets::scroll_by_x(wid, delta) {
                 request_render();
             } else {
@@ -1536,7 +1548,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
                 request_render();
                 return;
             }
-            let delta = -(evt.scroll as i32) * WIDGET_SCROLL_STEP;
+            let delta = -(evt.scroll as i32) * widget_scroll_step();
             // Shift+wheel scrolls sideways — the editor idiom, and the only
             // way to reach a long line with a mouse that has one wheel.
             if crate::keyboard::is_shift_held() {

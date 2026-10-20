@@ -18,6 +18,7 @@ use super::abi::{
     Axis, Density, Fill, Modifier, Point, RasterTarget, Rasterizer, Rect, Token, Widget,
 };
 use super::layout::LayoutNode;
+use super::scale;
 use super::InputEditState;
 
 /// Render `widget` + `layout` (trees in lockstep) into `target` using
@@ -192,18 +193,19 @@ fn paint_scrollbar(
     let max_off = (content_h - viewport.h) as u64;
     let track_h = viewport.h as u64;
     // Thumb height proportional to the visible fraction, with a floor.
-    let thumb_h = ((track_h * track_h) / content_h as u64).max(24).min(track_h) as u32;
+    let thumb_h = ((track_h * track_h) / content_h as u64)
+        .max(scale::len(24) as u64).min(track_h) as u32;
     let travel = track_h - thumb_h as u64;
     let thumb_y = viewport.y + if max_off == 0 { 0 } else { (off * travel / max_off) as i32 };
 
-    let thumb_w: i32 = 4;
-    let margin: i32 = 2;
+    let thumb_w = scale::len_i(4);
+    let margin = scale::len_i(2);
     let thumb_x = viewport.x + viewport.w as i32 - thumb_w - margin;
     rast.rect_rounded(
         target,
         Rect { x: thumb_x, y: thumb_y, w: thumb_w as u32, h: thumb_h },
         Fill::Solid(Token::OnSurfaceMuted),
-        2,
+        scale::len_u8(2),
     );
 }
 
@@ -235,26 +237,11 @@ fn spans_of<'a>(mods: impl IntoIterator<Item = &'a Modifier>) -> &'a [super::abi
     &[]
 }
 
-/// Sum every `Modifier::Padding` in the effective list. Mirrors
-/// `layout::padding` so leaf glyph placement matches the layout-side
-/// outer-size growth — a single canonical source for "how much
-/// padding does this leaf carry".
+/// Sum every `Modifier::Padding` in the effective list, in physical px —
+/// `layout::padding` itself, so leaf glyph placement matches the
+/// layout-side outer-size growth.
 fn leaf_padding<'a>(mods: impl IntoIterator<Item = &'a Modifier>) -> (u32, u32) {
-    let (mut px, mut py) = (0u32, 0u32);
-    for m in mods {
-        match m {
-            Modifier::Padding(n) => {
-                px = px.saturating_add(*n as u32);
-                py = py.saturating_add(*n as u32);
-            }
-            Modifier::PaddingXY { x, y } => {
-                px = px.saturating_add(*x as u32);
-                py = py.saturating_add(*y as u32);
-            }
-            _ => {}
-        }
-    }
-    (px, py)
+    super::layout::padding(mods)
 }
 
 /// The modifier list that applies to a widget after merging the active
@@ -430,9 +417,13 @@ fn blend_towards(src: u32, dst: u32, weight: u32) -> u32 {
 pub(super) const INPUT_STYLE: super::abi::TextStyle = super::abi::TextStyle::Body;
 
 /// Gap between the widest line number and the gutter's hairline.
-const GUTTER_PAD_R: i32 = 10;
+fn gutter_pad_r() -> i32 { scale::len_i(10) }
 /// Gap between the hairline and the left edge of the number column.
-const GUTTER_PAD_L: i32 = 10;
+fn gutter_pad_l() -> i32 { scale::len_i(10) }
+
+/// Built-in inset between an Input's or TextArea's rect (after padding)
+/// and its text. Shared with the click-to-caret hit test.
+pub(super) fn text_inset() -> i32 { scale::len_i(4) }
 
 /// Width a `TextArea`'s line-number gutter occupies, or 0 when the app
 /// didn't ask for one. Sized to the highest line number the buffer can
@@ -455,13 +446,13 @@ where M: IntoIterator<Item = &'a Modifier> + Copy
     for _ in 0..digits { widest.push('0'); }
     let num_w = ceil_u32_local(
         crate::gui::text::measure_px(&widest, super::abi::TextStyle::Mono, px));
-    num_w + GUTTER_PAD_L as u32 + GUTTER_PAD_R as u32
+    num_w + gutter_pad_l() as u32 + gutter_pad_r() as u32
 }
 
 /// Width the TextArea's overlay scrollbar occupies on the right. Always
 /// reserved, drawn or not, so the text column doesn't change width the
 /// moment a line pushes the document past the viewport.
-const TEXTAREA_BAR_W: i32 = 6;
+fn textarea_bar_w() -> i32 { scale::len_i(6) }
 
 /// A `TextArea`'s text column: left edge and visible width, both in screen
 /// px. Shared by the renderer, the click-to-caret hit test and the
@@ -472,10 +463,10 @@ pub(super) fn textarea_text_column<'a, M>(rect: Rect, mods: M, total_lines: usiz
 where M: IntoIterator<Item = &'a Modifier> + Copy
 {
     let pad = leaf_padding(mods).0 as i32;
-    let x = rect.x + pad + 4 + textarea_gutter_w(mods, total_lines) as i32;
+    let x = rect.x + pad + text_inset() + textarea_gutter_w(mods, total_lines) as i32;
     // The scrollbar overlays the right padding band rather than sitting
     // beside it, so the wider of the two is what the text must keep clear.
-    let right = rect.x + rect.w as i32 - pad.max(TEXTAREA_BAR_W);
+    let right = rect.x + rect.w as i32 - pad.max(textarea_bar_w());
     (x, (right - x).max(0) as u32)
 }
 
@@ -508,9 +499,10 @@ fn paint_modifiers_eff(
     for m in mods {
         match m {
             Modifier::Background(t) => bg = Some(*t),
-            Modifier::Border { token, width, radius } => border = Some((*token, *width, *radius)),
-            Modifier::Rounded(r) => rounded = Some(*r),
-            Modifier::Ring { token, width } => ring = Some((*token, *width)),
+            Modifier::Border { token, width, radius } =>
+                border = Some((*token, scale::len_u8(*width), scale::len_u8(*radius))),
+            Modifier::Rounded(r) => rounded = Some(scale::len_u8(*r)),
+            Modifier::Ring { token, width } => ring = Some((*token, scale::len_u8(*width))),
             _ => {}
         }
     }
@@ -617,8 +609,9 @@ fn paint_node_eff(
                     _ => {}
                 }
             }
-            let scaled = (((*size as u32) * q88) / 256).max(1).min(u16::MAX as u32) as u16;
-            let off_x = (*size as i32 - scaled as i32) / 2;
+            let size = scale::len(*size as u32).min(u16::MAX as u32);
+            let scaled = ((size * q88) / 256).max(1).min(u16::MAX as u32) as u16;
+            let off_x = (size as i32 - scaled as i32) / 2;
             let off_y = off_x;
             rast.icon(target, *id, scaled, color,
                 Point { x: inner_x + off_x, y: inner_y + off_y });
@@ -642,17 +635,18 @@ fn paint_node_eff(
             for m in eff {
                 if let Modifier::Tint(tok) = m { color = *tok; }
             }
-            let pad_x = 8i32;
-            let pad_y = 4i32;
+            let pad_x = scale::len_i(8);
+            let pad_y = scale::len_i(4);
             let mut x = rect.x + pad_x;
             use super::abi::IconId;
             if *icon != IconId::None {
-                rast.icon(target, *icon, 16, color, Point { x, y: rect.y + pad_y });
-                x += 20;
+                rast.icon(target, *icon, scale::len(16) as u16, color, Point { x, y: rect.y + pad_y });
+                x += scale::len_i(20);
             }
             if !label.is_empty() {
-                rast.text(target, label, super::abi::TextStyle::Body, color,
-                          Point { x, y: rect.y + pad_y });
+                let style = super::abi::TextStyle::Body;
+                rast.text_px(target, label, style, super::layout::style_px(style), color,
+                             Point { x, y: rect.y + pad_y });
             }
         }
 
@@ -680,8 +674,9 @@ fn paint_node_eff(
             // welded to the first letter ("|search"). Rest = placeholder,
             // focus = text + caret.
             let focused = edit_state.is_some();
-            let text_x = inner_x + 4;   // built-in chrome + the node's padding
-            let text_y = inner_y + 4;
+            let text_x = inner_x + text_inset();   // built-in chrome + the node's padding
+            let text_y = inner_y + text_inset();
+            let ipx = super::layout::style_px(INPUT_STYLE);
             // The selection goes under the text, before the glyphs. A
             // selection that exists but cannot be seen is worse than none:
             // the user marks, copies and does not know what is on the
@@ -691,12 +686,12 @@ fn paint_node_eff(
                 let (a, b) = (a.min(live_value.len()), b.min(live_value.len()));
                 if b > a {
                     let ax = ceil_u32_local(
-                        crate::gui::text::measure(&live_value[..a], INPUT_STYLE));
+                        crate::gui::text::measure_px(&live_value[..a], INPUT_STYLE, ipx));
                     let w = ceil_u32_local(
-                        crate::gui::text::measure(&live_value[a..b], INPUT_STYLE));
-                    let line_h = ceil_u32_local(crate::gui::text::line_height(INPUT_STYLE));
+                        crate::gui::text::measure_px(&live_value[a..b], INPUT_STYLE, ipx));
+                    let line_h = ceil_u32_local(crate::gui::text::line_height_px(INPUT_STYLE, ipx));
                     rast.rect(target, Rect { x: text_x + ax as i32, y: text_y,
-                                             w: w.max(2), h: line_h },
+                                             w: w.max(scale::len(2)), h: line_h },
                               Fill::Solid(Token::AccentMuted));
                 }
             }
@@ -706,8 +701,8 @@ fn paint_node_eff(
                 // the rest. Without spans it stays one cheap call.
                 let spans = spans_of(eff);
                 if spans.is_empty() {
-                    rast.text(target, live_value, INPUT_STYLE, Token::OnSurface,
-                              Point { x: text_x, y: text_y });
+                    rast.text_px(target, live_value, INPUT_STYLE, ipx, Token::OnSurface,
+                                 Point { x: text_x, y: text_y });
                 } else {
                     // Split into runs of one colour and draw each — the same
                     // computation as in `TextArea`. Measured per run so the
@@ -719,24 +714,24 @@ fn paint_node_eff(
                         let tok = span_token_at(spans, b, Token::OnSurface);
                         if tok != run_tok && b > run_start {
                             let seg = &live_value[run_start..b];
-                            rast.text(target, seg, INPUT_STYLE, run_tok,
-                                      Point { x, y: text_y });
+                            rast.text_px(target, seg, INPUT_STYLE, ipx, run_tok,
+                                         Point { x, y: text_y });
                             x += ceil_u32_local(
-                                crate::gui::text::measure(seg, INPUT_STYLE)) as i32;
+                                crate::gui::text::measure_px(seg, INPUT_STYLE, ipx)) as i32;
                             run_start = b;
                         }
                         run_tok = tok;
                     }
                     let tail = &live_value[run_start..];
                     if !tail.is_empty() {
-                        rast.text(target, tail, INPUT_STYLE, run_tok,
-                                  Point { x, y: text_y });
+                        rast.text_px(target, tail, INPUT_STYLE, ipx, run_tok,
+                                     Point { x, y: text_y });
                     }
                 }
             } else if !focused {
                 // Placeholder is a hint, not content — faint, like the design.
-                rast.text(target, placeholder.as_str(), INPUT_STYLE,
-                          Token::OnSurfaceFaint, Point { x: text_x, y: text_y });
+                rast.text_px(target, placeholder.as_str(), INPUT_STYLE, ipx,
+                             Token::OnSurfaceFaint, Point { x: text_x, y: text_y });
             }
 
             // Paint the caret. Only when an editor exists (focused) —
@@ -749,9 +744,9 @@ fn paint_node_eff(
                     // → drop to end of value.
                     None    => e.value.as_str(),
                 };
-                let advance = ceil_u32_local(crate::gui::text::measure(prefix, style));
-                let line_h  = ceil_u32_local(crate::gui::text::line_height(style));
-                let caret_w = 2u32;
+                let advance = ceil_u32_local(crate::gui::text::measure_px(prefix, style, ipx));
+                let line_h  = ceil_u32_local(crate::gui::text::line_height_px(style, ipx));
+                let caret_w = scale::len(2);
                 let caret_rect = Rect {
                     x: text_x + advance as i32,
                     y: text_y,
@@ -793,7 +788,7 @@ fn paint_node_eff(
             // `text_x`, so the caret and the selection blocks can never
             // drift apart from the glyphs they belong to.
             let text_x = col_x - scroll_x as i32;
-            let top_y  = inner_y + 4;
+            let top_y  = inner_y + text_inset();
             let visible = (rect.h / line_h).max(1) as usize;
 
             // Caret line/column (byte prefix within the caret's line).
@@ -821,9 +816,10 @@ fn paint_node_eff(
             // by the app because only the compositor knows the scroll
             // position of its own viewport.
             if gutter_w > 0 {
-                let rule_x = inner_x + gutter_w - 1;
+                let hair = scale::len(1);
+                let rule_x = inner_x + gutter_w - hair as i32;
                 rast.rect(target,
-                          Rect { x: rule_x, y: rect.y, w: 1, h: rect.h },
+                          Rect { x: rule_x, y: rect.y, w: hair, h: rect.h },
                           Fill::Solid(Token::Border));
                 for row in 0..visible {
                     let li = scroll + row;
@@ -834,7 +830,7 @@ fn paint_node_eff(
                     let w = ceil_u32_local(crate::gui::text::measure_px(&num, style, px)) as i32;
                     let y = top_y + (row as u32 * line_h) as i32;
                     rast.text_px(target, &num, style, px, Token::OnSurfaceFaint,
-                              Point { x: rule_x - GUTTER_PAD_R - w, y });
+                              Point { x: rule_x - gutter_pad_r() - w, y });
                 }
             }
 
@@ -885,8 +881,8 @@ fn paint_node_eff(
                         let b = sel_e.min(line_hi) - line_lo;
                         let ax = ceil_u32_local(crate::gui::text::measure_px(&line[..a], style, px));
                         let mut w = ceil_u32_local(crate::gui::text::measure_px(&line[a..b], style, px));
-                        if sel_e > line_hi { w += 6; } // newline included
-                        if w < 2 { w = 6; }            // empty line / zero-width
+                        if sel_e > line_hi { w += scale::len(6); } // newline included
+                        if w < scale::len(2) { w = scale::len(6); } // empty line / zero-width
                         rast.rect(target, Rect { x: text_x + ax as i32, y, w, h: line_h },
                                   Fill::Solid(Token::AccentMuted));
                     }
@@ -922,7 +918,7 @@ fn paint_node_eff(
                     let caret_rect = Rect {
                         x: text_x + advance as i32,
                         y,
-                        w: 2,
+                        w: scale::len(2),
                         h: line_h,
                     };
                     rast.rect(target, caret_rect, Fill::Solid(Token::OnSurface));
@@ -937,14 +933,15 @@ fn paint_node_eff(
             if total_lines > visible && rect.h > 0 {
                 let content_h = (total_lines as u32) * line_h;
                 let track_h = rect.h as u64;
-                let thumb_h = ((track_h * track_h) / content_h.max(1) as u64).max(24).min(track_h) as u32;
+                let thumb_h = ((track_h * track_h) / content_h.max(1) as u64)
+                    .max(scale::len(24) as u64).min(track_h) as u32;
                 let travel = track_h - thumb_h as u64;
                 let max_off = (total_lines - visible) as u64;
                 let thumb_y = rect.y + if max_off == 0 { 0 } else { (scroll as u64 * travel / max_off) as i32 };
-                let thumb_x = rect.x + rect.w as i32 - 6;
+                let thumb_x = rect.x + rect.w as i32 - textarea_bar_w();
                 rast.rect_rounded(target,
-                    Rect { x: thumb_x, y: thumb_y, w: 4, h: thumb_h },
-                    Fill::Solid(Token::OnSurfaceMuted), 2);
+                    Rect { x: thumb_x, y: thumb_y, w: scale::len(4), h: thumb_h },
+                    Fill::Solid(Token::OnSurfaceMuted), scale::len_u8(2));
             }
 
             // …and its sideways twin, along the bottom of the text column.
@@ -955,7 +952,7 @@ fn paint_node_eff(
             if content_w > col_w && col_w > 0 {
                 let track_w = col_w as u64;
                 let thumb_w = ((track_w * track_w) / content_w.max(1) as u64)
-                    .max(24).min(track_w) as u32;
+                    .max(scale::len(24) as u64).min(track_w) as u32;
                 let travel = track_w - thumb_w as u64;
                 let max_off = (content_w - col_w) as u64;
                 // The caret may sit a margin past the end while the app has
@@ -963,17 +960,17 @@ fn paint_node_eff(
                 // rather than the offset, or the view would fight the caret.
                 let thumb_x = col_x + if max_off == 0 { 0 }
                               else { (scroll_x as u64 * travel / max_off).min(travel) as i32 };
-                let thumb_y = rect.y + rect.h as i32 - 6;
+                let thumb_y = rect.y + rect.h as i32 - textarea_bar_w();
                 rast.rect_rounded(target,
-                    Rect { x: thumb_x, y: thumb_y, w: thumb_w, h: 4 },
-                    Fill::Solid(Token::OnSurfaceMuted), 2);
+                    Rect { x: thumb_x, y: thumb_y, w: thumb_w, h: scale::len(4) },
+                    Fill::Solid(Token::OnSurfaceMuted), scale::len_u8(2));
             }
         }
 
         Widget::Checkbox { value, .. } => {
             // Outer stroke + inner fill if checked.
             rast.rect(target, rect, Fill::Solid(Token::Border));
-            let inset = 2u32;
+            let inset = scale::len(2);
             let inner = Rect {
                 x: rect.x + inset as i32,
                 y: rect.y + inset as i32,
@@ -988,20 +985,20 @@ fn paint_node_eff(
             // A thin track through the middle, filled up to the thumb's
             // centre. The thumb travels inside the rect so it is never
             // clipped at either end.
-            let d = super::layout::SLIDER_THUMB.min(rect.h).min(rect.w);
+            let d = super::layout::slider_thumb().min(rect.h).min(rect.w);
             let travel = rect.w.saturating_sub(d);
             let v = (*value).min(super::abi::SLIDER_MAX) as u32;
             let cx = rect.x + (d / 2) as i32 + (travel * v / super::abi::SLIDER_MAX as u32) as i32;
-            let track_h = 4u32.min(rect.h);
+            let track_h = scale::len(4).min(rect.h);
             let ty = rect.y + ((rect.h - track_h) / 2) as i32;
             rast.rect_rounded(target,
                 Rect { x: rect.x, y: ty, w: rect.w, h: track_h },
-                Fill::Solid(Token::SurfaceMuted), 2);
+                Fill::Solid(Token::SurfaceMuted), scale::len_u8(2));
             let filled = (cx - rect.x).max(0) as u32;
             if filled > 0 {
                 rast.rect_rounded(target,
                     Rect { x: rect.x, y: ty, w: filled, h: track_h },
-                    Fill::Solid(Token::Accent), 2);
+                    Fill::Solid(Token::Accent), scale::len_u8(2));
             }
             rast.rect_rounded(target,
                 Rect { x: cx - (d / 2) as i32, y: rect.y + ((rect.h - d) / 2) as i32, w: d, h: d },

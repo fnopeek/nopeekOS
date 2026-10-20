@@ -45,7 +45,6 @@ use nopeek_widgets::host;
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_window_set_dock(w: i32, h: i32) -> i32;
-    fn npk_get_fb_size() -> i64;
 }
 
 fn window_set_dock(w: i32, h: i32) {
@@ -53,11 +52,9 @@ fn window_set_dock(w: i32, h: i32) {
     unsafe { npk_window_set_dock(w, h) };
 }
 
-/// Framebuffer height in pixels (the low half of `npk_get_fb_size`).
-fn fb_height() -> i32 {
-    // SAFETY: FFI without pointers.
-    let packed = unsafe { npk_get_fb_size() };
-    (packed & 0xFFFF_FFFF) as i32
+/// Screen height in logical px, the unit the dock lays itself out in.
+fn screen_height() -> i32 {
+    host::screen_size().1 as i32
 }
 
 // ── Strings ───────────────────────────────────────────────────────────
@@ -249,7 +246,7 @@ impl Dock {
         Dock {
             entries, catalog,
             open: None, moving: None, suppress_next_press: false,
-            screen_h: fb_height(),
+            screen_h: screen_height(),
             titles: Vec::new(),
         }
     }

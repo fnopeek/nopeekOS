@@ -145,8 +145,23 @@ pub(crate) fn npk_screen_size(ctx: &mut HostState) -> i32 {
         || capability::check_global(&cap_id, capability::Rights::CAPTURE).is_ok();
     if !ok { return 0; }
     let info = crate::framebuffer::get_info();
+    let (w, h) = (logical(info.width), logical(info.height));
+    (((w & 0xFFFF) << 16) | (h & 0xFFFF)) as i32
+}
+
+/// Physical size of what `npk_capture_screen` writes, packed like
+/// `npk_screen_size`. The screen size apps lay out against is logical.
+pub(crate) fn npk_capture_size(ctx: &mut HostState) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::CAPTURE).is_err() {
+        return 0;
+    }
+    let info = crate::framebuffer::get_info();
     (((info.width & 0xFFFF) << 16) | (info.height & 0xFFFF)) as i32
 }
+
+/// Window geometry crosses the ABI in logical px (docs/plan/UI_SCALE.md).
+fn phys(v: i32) -> i32 { crate::shade::widgets::scale::len_i(v) }
+fn logical(v: u32) -> u32 { crate::shade::widgets::scale::logical(v) }
 
 pub(crate) fn npk_ticks(_ctx: &mut HostState) -> i64 {
     (crate::interrupts::ticks() as i64).saturating_mul(10)
@@ -228,6 +243,7 @@ pub(crate) fn npk_window_set_overlay(ctx: &mut HostState, w: i32, h: i32) -> i32
         return -1;
     }
     if w <= 0 || h <= 0 { return -1; }
+    let (w, h) = (phys(w), phys(h));
 
     let mut wid = ctx.widget_window_id;
     if wid == 0 {
@@ -308,6 +324,7 @@ pub(crate) fn npk_window_set_overlay_at(ctx: &mut HostState, x: i32, y: i32, w: 
         return -1;
     }
     if w <= 0 || h <= 0 || x < 0 || y < 0 { return -1; }
+    let (x, y, w, h) = (phys(x), phys(y), phys(w), phys(h));
 
     let mut wid = ctx.widget_window_id;
     if wid == 0 {
@@ -382,6 +399,7 @@ pub(crate) fn npk_window_set_dock(ctx: &mut HostState, w: i32, h: i32) -> i32 {
         return -1;
     }
     if w <= 0 || h <= 0 { return -1; }
+    let (w, h) = (phys(w), phys(h));
 
     let mut wid = ctx.widget_window_id;
     if wid == 0 {
@@ -436,6 +454,7 @@ pub(crate) fn npk_window_set_panel(ctx: &mut HostState, edge: i32, behavior: i32
         return -1;
     }
     if w <= 0 || h <= 0 || edge < 0 || behavior < 0 { return -1; }
+    let (w, h) = (phys(w), phys(h));
     // A panel is a strip along an edge, and its size becomes a pixel buffer
     // on the next commit: clamp it to a strip of the screen.
     let fb = crate::framebuffer::get_info();
@@ -651,7 +670,7 @@ pub(crate) fn npk_popup(mem: &mut [u8], ctx: &mut HostState, popup: i32, anchor:
     let slot = popup as u8;
     let id = crate::shade::with_compositor(|c| {
         let id = c.popup_window(parent_id, slot).or_else(|| c.open_popup(parent_id, slot))?;
-        c.place_popup(id, rect, w, h, gap as u32);
+        c.place_popup(id, rect, w, h, phys(gap) as u32);
         Some(id)
     }).flatten();
     let Some(id) = id else { return -1 };
