@@ -174,8 +174,9 @@ const SEP_H: u16 = 20;
 /// A window button is clipped to this many characters.
 const TASK_CHARS: usize = 26;
 const TASK_MAX_W: u16 = 240;
-/// Menu geometry.
+/// Menu geometry. The gap is left between the menu and the bar card.
 const MENU_W: u16 = 340;
+const MENU_GAP: u16 = 8;
 const MENU_ROWS: usize = 8;
 const ROW_H: u16 = 32;
 const QUERY_CAP: usize = 63;
@@ -189,7 +190,7 @@ const POWER: u32 = 90_001;
 const SHOT: u32 = 90_002;
 const VOL_OPEN: u32 = 90_003;
 const MENU_DISMISS: u32 = 90_004;
-const NODE_LAUNCHER: u32 = 100_000;
+const NODE_BAR: u32 = 100_000;
 /// Last, because a window id has no upper bound of its own.
 const TASK_BASE: u32 = 1_000_000;    // + window id
 
@@ -491,6 +492,7 @@ impl Deck {
                 Modifier::PaddingXY { x: Padding::Xs.as_u16(), y: Padding::Xs.as_u16() },
                 Modifier::MinHeight(PANEL_H as u16),
                 Modifier::MaxHeight(PANEL_H as u16),
+                Modifier::NodeId(NodeId(NODE_BAR)),
             ],
         };
 
@@ -506,10 +508,19 @@ impl Deck {
         if !self.open {
             return Widget::Stack { children: alloc::vec![column], modifiers: Vec::new() };
         }
-        // Raised: the menu floats above the launcher button.
+        // Raised: the menu floats above the bar card, flush with its left
+        // edge. Anchored at the card, not the launcher button: a popover
+        // flips to end at its anchor's top, and the button sits inside the
+        // card's padding, so the menu would cover the card's upper edge.
+        let menu = Widget::Column {
+            children: alloc::vec![self.render_menu(), prefab::mark(1, MENU_GAP, None)],
+            spacing: 0,
+            align: Align::Start,
+            modifiers: Vec::new(),
+        };
         let popover = Widget::Popover {
-            anchor: NodeId(NODE_LAUNCHER),
-            child: alloc::boxed::Box::new(self.render_menu()),
+            anchor: NodeId(NODE_BAR),
+            child: alloc::boxed::Box::new(menu),
             on_dismiss: ActionId(MENU_DISMISS),
             modifiers: Vec::new(),
         };
@@ -608,7 +619,6 @@ fn launcher_button(open: bool) -> Widget {
         Modifier::MinHeight(BTN),
         Modifier::Rounded(CELL_RADIUS),
         Modifier::OnClick(ActionId(LAUNCHER)),
-        Modifier::NodeId(NodeId(NODE_LAUNCHER)),
     ];
     if open {
         mods.push(Modifier::Background(Token::Accent));
