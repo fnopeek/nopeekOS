@@ -1,6 +1,7 @@
 //! Host-function bindings for the nopeekOS WASM Driver ABI.
 //! Subset needed by the HDA driver: serial log, PCI, MMIO, DMA, sleep, fence.
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 pub fn audio_poll_mix(buf: &mut [u8]) -> usize {
@@ -8,11 +9,33 @@ pub fn audio_poll_mix(buf: &mut [u8]) -> usize {
     if n > 0 { n as usize } else { 0 }
 }
 
-/// Diagnostic log line (`dmesg`; on screen only with `bootlog verbose`).
-/// The host adds the newline.
+/// The line `log` is building: callers write a line in pieces, the host
+/// takes whole lines.
+struct LineBuf(UnsafeCell<([u8; 256], usize)>);
+
+// SAFETY: the module runs on one thread.
+unsafe impl Sync for LineBuf {}
+
+static LINE: LineBuf = LineBuf(UnsafeCell::new(([0; 256], 0)));
+
+/// Diagnostic log (`dmesg`; on screen only with `bootlog verbose`): the
+/// pieces up to a `\n` go to the host as one line, which adds the newline.
 pub fn log(s: &str) {
-    let s = s.strip_suffix('\n').unwrap_or(s);
-    npk_sys::log_serial(s.as_bytes());
+    // SAFETY: one thread, and the reference ends with this call.
+    let (buf, n) = unsafe { &mut *LINE.0.get() };
+    for part in s.split_inclusive('\n') {
+        let (text, ends) = match part.strip_suffix('\n') {
+            Some(t) => (t, true),
+            None => (part, false),
+        };
+        let take = text.len().min(buf.len() - *n);
+        buf[*n..*n + take].copy_from_slice(&text.as_bytes()[..take]);
+        *n += take;
+        if ends {
+            npk_sys::log_serial(&buf[..*n]);
+            *n = 0;
+        }
+    }
 }
 
 // ── Diagnostic lines: built in, silent in normal operation ───────────

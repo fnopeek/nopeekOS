@@ -19,7 +19,7 @@ use regs::*;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    log("[audio_hda] panic");
+    log("[audio_hda] panic\n");
     core::arch::wasm32::unreachable()
 }
 
