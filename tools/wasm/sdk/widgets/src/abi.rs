@@ -204,6 +204,8 @@ icon_ids! {
     ArrowCounterClockwise = 50,
     PlayCircle            = 51,
     Fire                  = 52,
+    SquaresFour           = 53,
+    SlidersHorizontal     = 54,
 }
 
 // ── Accessibility roles ───────────────────────────────────────────────

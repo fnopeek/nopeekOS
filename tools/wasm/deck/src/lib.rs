@@ -135,7 +135,6 @@ fn poll_event(buf: &mut [u8]) -> PollResult {
 struct Strings {
     search:     &'static str,
     apps:       &'static str,
-    commands:   &'static str,
     no_matches: &'static str,
     open:       &'static str,
     days:       [&'static str; 7],
@@ -145,7 +144,6 @@ struct Strings {
 const EN: Strings = Strings {
     search:     "Search…",
     apps:       "APPS",
-    commands:   "COMMANDS",
     no_matches: "no matches",
     open:       "open",
     days:       ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
@@ -156,7 +154,6 @@ const EN: Strings = Strings {
 const DE: Strings = Strings {
     search:     "Suchen…",
     apps:       "APPS",
-    commands:   "BEFEHLE",
     no_matches: "keine Treffer",
     open:       "öffnen",
     days:       ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"],
@@ -410,7 +407,10 @@ struct Deck {
 impl Deck {
     fn new() -> Self {
         let (w, _) = host::screen_size();
-        let catalog = app_catalog::load(&["deck", "dock", "bar", "drun", "pick", "volume"]);
+        let mut catalog = app_catalog::load(&["deck", "dock", "bar", "drun", "pick", "volume"]);
+        // One list, as a person reads it: "beak" next to "Firefox", not
+        // after every capital.
+        catalog.sort_by_key(|e| e.display_name.to_ascii_lowercase());
         let filtered = (0..catalog.len()).collect();
         Deck {
             screen_w: if w > 0 { w as i32 } else { 1920 },
@@ -526,17 +526,14 @@ impl Deck {
     fn refilter(&mut self) {
         let q = self.query.to_ascii_lowercase();
         self.filtered.clear();
-        // Apps first, then commands — the order the menu draws them in, so
-        // the arrow keys walk down the screen.
-        for kind in [EntryKind::Module, EntryKind::Intent] {
-            for (i, e) in self.catalog.iter().enumerate() {
-                if e.kind != kind { continue; }
-                if q.is_empty()
-                    || e.display_name.to_ascii_lowercase().contains(&q)
-                    || e.launch_name.to_ascii_lowercase().contains(&q)
-                {
-                    self.filtered.push(i);
-                }
+        // A browser in a microVM is an app to the person picking it, even
+        // though it starts as an intent: one list, no sections.
+        for (i, e) in self.catalog.iter().enumerate() {
+            if q.is_empty()
+                || e.display_name.to_ascii_lowercase().contains(&q)
+                || e.launch_name.to_ascii_lowercase().contains(&q)
+            {
+                self.filtered.push(i);
             }
         }
         self.selected = 0;
@@ -717,15 +714,19 @@ impl Deck {
     /// anchored at the card, flush with its left edge; a window list at its
     /// button, which sits `BTN_INSET` inside the card, so its gap adds that
     /// and neither overlaps the card.
+    /// The tree's root is a `Stack`: only then does the compositor clear the
+    /// popup to transparent, so the card's rounded corners show what is
+    /// behind them.
     fn render_popup(&self) -> Option<(u32, Widget, u16)> {
-        match &self.menu {
-            None => None,
-            Some(Menu::Launcher) => Some((NODE_BAR, self.render_menu(), MENU_GAP)),
+        let (anchor, card, gap) = match &self.menu {
+            None => return None,
+            Some(Menu::Launcher) => (NODE_BAR, self.render_menu(), MENU_GAP),
             Some(Menu::Windows { anchor, ids }) => {
                 let wins = parse_windows(core::str::from_utf8(&self.wins).unwrap_or(""));
-                Some((*anchor, self.render_windows(&wins, ids), MENU_GAP + BTN_INSET))
+                (*anchor, self.render_windows(&wins, ids), MENU_GAP + BTN_INSET)
             }
-        }
+        };
+        Some((anchor, Widget::Stack { children: alloc::vec![card], modifiers: Vec::new() }, gap))
     }
 
     /// One button of the window list.
@@ -813,15 +814,10 @@ impl Deck {
         if self.filtered.is_empty() {
             list.push(prefab::empty_state(s().no_matches));
         }
+        if !self.filtered.is_empty() { list.push(section_label(s().apps)); }
         let end = (self.offset + MENU_ROWS).min(self.filtered.len());
-        let mut last_kind: Option<EntryKind> = None;
         for i in self.offset..end {
             let e = &self.catalog[self.filtered[i]];
-            if last_kind != Some(e.kind) {
-                let label = if e.kind == EntryKind::Module { s().apps } else { s().commands };
-                list.push(section_label(label));
-                last_kind = Some(e.kind);
-            }
             list.push(menu_row(e, i == self.selected, (i - self.offset) as u32));
         }
 
@@ -834,12 +830,12 @@ impl Deck {
                 Widget::Spacer { flex: 1 },
                 // No settings app yet: shown, not wired.
                 prefab::center_box(
-                    Widget::Icon { id: IconId::Gear, size: ICON_PX, modifiers: Vec::new() },
+                    Widget::Icon { id: IconId::SlidersHorizontal, size: ICON_PX, modifiers: Vec::new() },
                     alloc::vec![
                         Modifier::MinWidth(BTN), Modifier::MinHeight(BTN),
-                        Modifier::Tint(Token::OnSurfaceFaint),
+                        Modifier::Tint(Token::OnSurfaceMuted),
                     ]),
-                tray_cell(IconId::Power, POWER, Token::Danger),
+                power_button(),
             ],
             spacing: Spacing::Sm.as_u16(),
             align: Align::Center,
@@ -910,7 +906,7 @@ fn launcher_button(open: bool) -> Widget {
             Modifier::Rounded(CELL_RADIUS),
         ]));
     }
-    prefab::center_box(Widget::Icon { id: IconId::List, size: ICON_PX, modifiers: Vec::new() }, mods)
+    prefab::center_box(Widget::Icon { id: IconId::SquaresFour, size: ICON_PX, modifiers: Vec::new() }, mods)
 }
 
 fn separator() -> Widget {
@@ -1116,6 +1112,25 @@ fn search_field(value: &str, focus_n: u32) -> Widget {
             Modifier::Rounded(Radius::Md.as_u8()),
         ],
     }
+}
+
+/// Power off: grey at rest like its neighbours, red under the pointer —
+/// the warning where it is about to be pressed, not before.
+fn power_button() -> Widget {
+    prefab::center_box(
+        Widget::Icon { id: IconId::Power, size: ICON_PX, modifiers: Vec::new() },
+        alloc::vec![
+            Modifier::MinWidth(BTN),
+            Modifier::MinHeight(BTN),
+            Modifier::Rounded(CELL_RADIUS),
+            Modifier::Tint(Token::OnSurfaceMuted),
+            Modifier::OnClick(ActionId(POWER)),
+            Modifier::Hover(alloc::vec![
+                Modifier::Background(Token::SurfaceHover),
+                Modifier::Rounded(CELL_RADIUS),
+                Modifier::Tint(Token::Danger),
+            ]),
+        ])
 }
 
 fn section_label(label: &str) -> Widget {

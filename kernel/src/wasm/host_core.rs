@@ -2747,6 +2747,11 @@ pub(crate) fn npk_app_meta(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, n
         Err(_) => return -1,
     };
 
+    // A module that asks for the hardware is a driver, not an app: no
+    // launcher lists it, whatever metadata it carries.
+    if capability::widget_rights_from_wasm(&content).contains(capability::Rights::HARDWARE) {
+        return -1;
+    }
     let meta = match extract_wasm_custom_section(&content, ".npk.app_meta") {
         Some(m) => m,
         None => return -1,
