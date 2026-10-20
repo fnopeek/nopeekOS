@@ -1106,3 +1106,40 @@ pub fn amdgpu_vm_fini(adev: &mut amdgpu_device, vm: usize) {
     adev.vm_bases[rb] = None;
     adev.vms[vm] = None;
 }
+
+/// `amdgpu_vm_handle_fault`: a retry fault of a graphics VM pointed at the
+/// dummy page (`amdgpu_vm_fault_stop` is never), so the access completes.
+/// False, as Linux returns it, so the fault is still reported.
+pub fn amdgpu_vm_handle_fault(adev: &mut amdgpu_device, pasid: u32, _vmid: u32, _node_id: u32, addr: u64, _ts: u64,
+                              _write_fault: bool) -> bool {
+    let Some(&vm) = adev.vm_manager.pasids.get(&pasid) else { return false };
+    let Some(root) = base(adev, adev.vm(vm).root).bo else { return false };
+    let root = obj::amdgpu_bo_ref(adev, root);
+    let is_compute_context = adev.vm(vm).is_compute_context;
+    let addr = addr / AMDGPU_GPU_PAGE_SIZE as u64;
+    let mut flags = (AMDGPU_PTE_VALID | AMDGPU_PTE_SNOOPED | AMDGPU_PTE_SYSTEM) as u64;
+    let value;
+    if is_compute_context {
+        // Intentionally setting invalid PTE flag combination to force a
+        // no-retry-fault
+        flags = AMDGPU_VM_NORETRY_FLAGS;
+        value = 0;
+    } else if tables::amdgpu_vm_fault_stop[0] as u32 == AMDGPU_VM_FAULT_STOP_NEVER {
+        // Redirect the access to the dummy page
+        value = adev.dummy_page_addr;
+        flags |= (AMDGPU_PTE_EXECUTABLE | AMDGPU_PTE_READABLE | AMDGPU_PTE_WRITEABLE) as u64;
+    } else {
+        // Let the hw retry silently on the PTE
+        value = 0;
+    }
+    let mut r = amdgpu_vm_update_range(adev, vm, true, false, false, false, None, addr, addr, flags, value, 0, None,
+                                       None, None);
+    if r == 0 {
+        r = amdgpu_vm_update_pdes(adev, vm, true);
+    }
+    if r < 0 {
+        Line::new().s("Can't handle page fault (").dec((-r) as u64).s(")").say();
+    }
+    obj::amdgpu_bo_unref(adev, root);
+    false
+}

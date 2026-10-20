@@ -439,3 +439,31 @@ pub fn roundup_pow_of_two(x: u64) -> u64 {
 pub fn align(x: u64, a: u64) -> u64 {
     (x + a - 1) & !(a - 1)
 }
+
+/// `printk_ratelimit`: the kernel's default ratelimit state, ten messages
+/// in five seconds.
+pub fn printk_ratelimit() -> bool {
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    static BEGIN: AtomicU64 = AtomicU64::new(0);
+    static PRINTED: AtomicU32 = AtomicU32::new(0);
+    static MISSED: AtomicU32 = AtomicU32::new(0);
+    const INTERVAL_US: u64 = 5_000_000;
+    const BURST: u32 = 10;
+    let now = now_us();
+    let begin = BEGIN.load(Ordering::Relaxed);
+    if begin == 0 || now - begin >= INTERVAL_US {
+        let missed = MISSED.swap(0, Ordering::Relaxed);
+        if missed != 0 {
+            Line::new().s("printk: ").dec(missed as u64).s(" callbacks suppressed").say();
+        }
+        BEGIN.store(now, Ordering::Relaxed);
+        PRINTED.store(0, Ordering::Relaxed);
+    }
+    if PRINTED.load(Ordering::Relaxed) < BURST {
+        PRINTED.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        MISSED.fetch_add(1, Ordering::Relaxed);
+        false
+    }
+}

@@ -339,25 +339,24 @@ fn amdgpu_ih_ring_write(adev: &mut amdgpu_device, iv: &[u32]) {
     }
 }
 
-/// `amdgpu_irq_delegate`: the work that processes the software ring runs
-/// in `amdgpu_irq_wait`.
+/// `amdgpu_irq_delegate`: `ih_soft_work` processes the software ring.
 pub fn amdgpu_irq_delegate(adev: &mut amdgpu_device, entry: &amdgpu_iv_entry, num_dw: usize) {
     amdgpu_ih_ring_write(adev, &entry.iv_entry[..num_dw]);
-    adev.irq.ih_soft_pending = true;
+    crate::workqueue::queue_work(adev, crate::workqueue::work::ih_soft);
+}
+
+/// `amdgpu_irq_handle_ih_soft`.
+pub fn amdgpu_irq_handle_ih_soft(adev: &mut amdgpu_device) {
+    amdgpu_ih_process(adev, true);
 }
 
 /// The MSI vector fired, or `timeout_ms` passed: then the IH ring is
-/// processed, and the software ring if a fault was delegated to it. This
-/// is where `amdgpu_irq_handler` and `amdgpu_irq_handle_ih_soft` run; the
-/// module has no interrupt context of its own.
+/// processed. This is where `amdgpu_irq_handler` runs; the module has no
+/// interrupt context of its own.
 pub fn amdgpu_irq_wait(adev: &mut amdgpu_device, timeout_ms: i32) -> bool {
     let vector = adev.irq.irq as i32;
     let since = npk_sys::irq_arm(vector);
     let fired = npk_sys::irq_wait(vector, since, timeout_ms) == 1;
     amdgpu_ih_process(adev, false);
-    if adev.irq.ih_soft_pending {
-        adev.irq.ih_soft_pending = false;
-        amdgpu_ih_process(adev, true);
-    }
     fired
 }

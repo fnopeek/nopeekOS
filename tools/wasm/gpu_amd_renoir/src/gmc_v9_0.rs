@@ -676,9 +676,7 @@ fn get_field(v: u32, mask: u32, shift: u32) -> u32 {
     (v & mask) >> shift
 }
 
-/// `gmc_v9_0_process_interrupt`: no KFD, no PASID-bound VM, so a retry
-/// fault that `amdgpu_vm_handle_fault` would fill is printed instead, as
-/// Linux does when it finds no VM.
+/// `gmc_v9_0_process_interrupt`: no KFD.
 pub fn gmc_v9_0_process_interrupt(adev: &mut amdgpu_device, entry: &crate::amdgpu_irq::amdgpu_iv_entry,
                                   ih_soft: bool) -> i32 {
     let retry_fault = entry.src_data[1] & 0x80 != 0;
@@ -709,7 +707,15 @@ pub fn gmc_v9_0_process_interrupt(adev: &mut amdgpu_device, entry: &crate::amdgp
             crate::amdgpu_irq::amdgpu_irq_delegate(adev, entry, 8);
             return 1;
         }
-        // amdgpu_vm_handle_fault: no VM is bound to any PASID here.
+        // Try to handle the recoverable page faults by filling page tables
+        let write_fault = entry.src_data[1] & 0x20 != 0;
+        if crate::amdgpu_vm::amdgpu_vm_handle_fault(adev, entry.pasid as u32, entry.vmid as u32, node_id, addr,
+                                                    entry.timestamp, write_fault) {
+            return 1;
+        }
+    }
+    if !crate::linux::printk_ratelimit() {
+        return 0;
     }
 
     Line::new().s("[").s(hub_name).s("] ").s(if retry_fault { "retry" } else { "no-retry" })

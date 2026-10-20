@@ -591,8 +591,6 @@ pub struct amdgpu_irq {
     pub installed: bool,
     /// `src->enabled_types`, by the source's name.
     pub enabled_types: alloc::collections::BTreeMap<&'static str, Vec<u32>>,
-    /// A fault was delegated to `ih_soft` and waits for its work.
-    pub ih_soft_pending: bool,
     /// IVs dispatched, for the log.
     pub dispatched: u32,
     /// The interrupt vector the kernel gave.
