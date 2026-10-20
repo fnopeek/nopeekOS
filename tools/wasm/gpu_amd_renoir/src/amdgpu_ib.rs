@@ -290,7 +290,7 @@ pub fn amdgpu_ib_free(adev: &mut amdgpu_device, ib: &mut amdgpu_ib, f: Option<Fe
 /// `amdgpu_ib_schedule`: the IBs, after the VM flush of `job`, then a
 /// fence. HDP flush and invalidate do nothing on an APU, and no ring of
 /// Renoir's has `insert_start`, `insert_end`, a software ring or GFX
-/// shadowing. The GFX ring takes no job here.
+/// shadowing; only the GFX ring has `emit_switch_buffer`.
 pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[amdgpu_ib], job: Option<u64>)
                           -> Result<Fence, i32> {
     use crate::amdgpu_ring as ring;
@@ -420,6 +420,9 @@ pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[amdgpu_ib],
     };
     ring::amdgpu_ring_patch_cond_exec(adev, r, cond_exec);
     adev.rings[r].current_ctx = fence_ctx;
+    if job.is_some() && adev.rings[r].funcs.ops == ring::ring_ops::gfx_v9_0_gfx {
+        crate::gfx_v9_0::gfx_v9_ring_emit_sb(adev, r);
+    }
     if high {
         ring::amdgpu_ring_emit_wave_limit(adev, r, false);
     }

@@ -7053,3 +7053,81 @@ pub const AMDGPU_CHUNK_ID_BO_HANDLES: u32 = 0x6;
 pub const AMDGPU_CHUNK_ID_SCHEDULED_DEPENDENCIES: u32 = 0x7;
 /// The value of `sizeof(struct drm_amdgpu_cs_chunk_dep)` in amdgpu_cs.c
 pub const SIZEOF_drm_amdgpu_cs_chunk_dep: u32 = 0x18;
+
+// Stable pstate of a context (amdgpu_ctx.c, amdgpu_dpm.c, renoir_ppt.c)
+/// ?
+pub const AMDGPU_CTX_OP_GET_STABLE_PSTATE: u32 = 0x5;
+/// ?
+pub const AMDGPU_CTX_OP_SET_STABLE_PSTATE: u32 = 0x6;
+/// ?
+pub const AMDGPU_CTX_STABLE_PSTATE_FLAGS_MASK: u32 = 0xf;
+/// ?
+pub const AMDGPU_CTX_STABLE_PSTATE_NONE: u32 = 0x0;
+/// ?
+pub const AMDGPU_CTX_STABLE_PSTATE_STANDARD: u32 = 0x1;
+/// ?
+pub const AMDGPU_CTX_STABLE_PSTATE_MIN_SCLK: u32 = 0x2;
+/// ?
+pub const AMDGPU_CTX_STABLE_PSTATE_MIN_MCLK: u32 = 0x3;
+/// ?
+pub const AMDGPU_CTX_STABLE_PSTATE_PEAK: u32 = 0x4;
+/// include/kgd_pp_interface.h:59
+pub const AMD_DPM_FORCED_LEVEL_HIGH: u32 = 0x8;
+/// include/kgd_pp_interface.h:58
+pub const AMD_DPM_FORCED_LEVEL_LOW: u32 = 0x4;
+/// include/kgd_pp_interface.h:60
+pub const AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD: u32 = 0x10;
+/// include/kgd_pp_interface.h:61
+pub const AMD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK: u32 = 0x20;
+/// include/kgd_pp_interface.h:62
+pub const AMD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK: u32 = 0x40;
+/// include/kgd_pp_interface.h:63
+pub const AMD_DPM_FORCED_LEVEL_PROFILE_PEAK: u32 = 0x80;
+/// include/kgd_pp_interface.h:64
+pub const AMD_DPM_FORCED_LEVEL_PROFILE_EXIT: u32 = 0x100;
+/// pm/swsmu/smu12/renoir_ppt.c:985
+pub const RENOIR_UMD_PSTATE_GFXCLK: u32 = 0x2bc;
+/// pm/swsmu/smu12/renoir_ppt.c:997
+pub const RENOIR_UMD_PSTATE_SOCCLK: u32 = 0x2a6;
+/// pm/swsmu/smu12/renoir_ppt.c:991
+pub const RENOIR_UMD_PSTATE_FCLK: u32 = 0x320;
+/// pm/swsmu/smu12/renoir_ppt.c:1003
+pub const RENOIR_UMD_PSTATE_VCNCLK: u32 = 0x22d01d8;
+/// ?
+pub const SMU_MSG_SetHardMinGfxClk: u32 = 0x8d;
+/// The value of `__smu_message_names[SMU_MSG_SetHardMinGfxClk]` in ../pm/swsmu/smu_cmn.c
+pub const SetHardMinGfxClk_NAME: &[u8] = b"SetHardMinGfxClk";
+/// ?
+pub const SMU_MSG_SetSoftMaxGfxClk: u32 = 0x8c;
+/// The value of `__smu_message_names[SMU_MSG_SetSoftMaxGfxClk]` in ../pm/swsmu/smu_cmn.c
+pub const SetSoftMaxGfxClk_NAME: &[u8] = b"SetSoftMaxGfxClk";
+/// ?
+pub const SMU_MSG_SetHardMinFclkByFreq: u32 = 0x9b;
+/// The value of `__smu_message_names[SMU_MSG_SetHardMinFclkByFreq]` in ../pm/swsmu/smu_cmn.c
+pub const SetHardMinFclkByFreq_NAME: &[u8] = b"SetHardMinFclkByFreq";
+/// ?
+pub const SMU_MSG_SetSoftMaxFclkByFreq: u32 = 0x8f;
+/// The value of `__smu_message_names[SMU_MSG_SetSoftMaxFclkByFreq]` in ../pm/swsmu/smu_cmn.c
+pub const SetSoftMaxFclkByFreq_NAME: &[u8] = b"SetSoftMaxFclkByFreq";
+/// ?
+pub const SMU_MSG_SetHardMinSocclkByFreq: u32 = 0x7c;
+/// The value of `__smu_message_names[SMU_MSG_SetHardMinSocclkByFreq]` in ../pm/swsmu/smu_cmn.c
+pub const SetHardMinSocclkByFreq_NAME: &[u8] = b"SetHardMinSocclkByFreq";
+/// ?
+pub const SMU_MSG_SetSoftMaxSocclkByFreq: u32 = 0x8e;
+/// The value of `__smu_message_names[SMU_MSG_SetSoftMaxSocclkByFreq]` in ../pm/swsmu/smu_cmn.c
+pub const SetSoftMaxSocclkByFreq_NAME: &[u8] = b"SetSoftMaxSocclkByFreq";
+/// ?
+pub const SMU_MSG_SetHardMinVcn: u32 = 0x72;
+/// The value of `__smu_message_names[SMU_MSG_SetHardMinVcn]` in ../pm/swsmu/smu_cmn.c
+pub const SetHardMinVcn_NAME: &[u8] = b"SetHardMinVcn";
+/// ?
+pub const SMU_MSG_SetSoftMaxVcn: u32 = 0x90;
+/// The value of `__smu_message_names[SMU_MSG_SetSoftMaxVcn]` in ../pm/swsmu/smu_cmn.c
+pub const SetSoftMaxVcn_NAME: &[u8] = b"SetSoftMaxVcn";
+/// ?
+pub const SMU_FEATURE_DPM_GFXCLK_BIT: u32 = 0x1;
+/// ?
+pub const SMU_FEATURE_DPM_UCLK_BIT: u32 = 0x2;
+/// ?
+pub const SMU_FEATURE_DPM_SOCCLK_BIT: u32 = 0x3;

@@ -37,6 +37,10 @@ pub struct smu_context {
     pub workload_refcount: [u32; PP_SMC_POWER_PROFILE_COUNT as usize],
     pub dpm_level: u32,
     pub requested_dpm_level: u32,
+    pub saved_dpm_level: u32,
+    /// `user_dpm_profile.clk_mask`, `.clk_dependency`.
+    pub user_clk_mask: [u32; SMU_CLK_COUNT as usize],
+    pub user_clk_dependency: u32,
     pub smu_table: smu_table_context,
     /// `smu_feature.supported` / `.allowed`: SMU_FEATURE_MAX is 64.
     pub feature_supported: u64,
@@ -1444,6 +1448,293 @@ fn renoir_set_fine_grain_gfx_freq_parameters(adev: &mut amdgpu_device) -> i32 {
     smu.gfx_default_soft_max_freq = max;
     smu.gfx_actual_hard_min_freq = 0;
     smu.gfx_actual_soft_max_freq = 0;
+    0
+}
+
+/// `smu_v12_0_set_soft_freq_limited_range`.
+fn smu_v12_0_set_soft_freq_limited_range(adev: &mut amdgpu_device, clk_type: u32, min: u32, max: u32) -> i32 {
+    if !smu_cmn_clk_dpm_is_enabled(adev, clk_type) {
+        return 0;
+    }
+    let (hard_min, hmin_name, soft_max, smax_name) = match clk_type {
+        SMU_GFXCLK | SMU_SCLK => (SMU_MSG_SetHardMinGfxClk, SetHardMinGfxClk_NAME, SMU_MSG_SetSoftMaxGfxClk,
+                                  SetSoftMaxGfxClk_NAME),
+        SMU_FCLK | SMU_MCLK | SMU_UCLK => (SMU_MSG_SetHardMinFclkByFreq, SetHardMinFclkByFreq_NAME,
+                                           SMU_MSG_SetSoftMaxFclkByFreq, SetSoftMaxFclkByFreq_NAME),
+        SMU_SOCCLK => (SMU_MSG_SetHardMinSocclkByFreq, SetHardMinSocclkByFreq_NAME, SMU_MSG_SetSoftMaxSocclkByFreq,
+                       SetSoftMaxSocclkByFreq_NAME),
+        SMU_VCLK => (SMU_MSG_SetHardMinVcn, SetHardMinVcn_NAME, SMU_MSG_SetSoftMaxVcn, SetSoftMaxVcn_NAME),
+        _ => return -22,
+    };
+    let r = smu_cmn_send_smc_msg_with_param(adev, hard_min, min, hmin_name);
+    if r != 0 {
+        return r;
+    }
+    smu_cmn_send_smc_msg_with_param(adev, soft_max, max, smax_name)
+}
+
+/// `renoir_force_dpm_limit_value`.
+fn renoir_force_dpm_limit_value(adev: &mut amdgpu_device, highest: bool) -> i32 {
+    for clk_type in [SMU_GFXCLK, SMU_MCLK, SMU_SOCCLK] {
+        let (mut min_freq, mut max_freq) = (0, 0);
+        let r = renoir_get_dpm_ultimate_freq(adev, clk_type, Some(&mut min_freq), Some(&mut max_freq));
+        if r != 0 {
+            return r;
+        }
+        let force_freq = if highest { max_freq } else { min_freq };
+        let r = smu_v12_0_set_soft_freq_limited_range(adev, clk_type, force_freq, force_freq);
+        if r != 0 {
+            return r;
+        }
+    }
+    0
+}
+
+/// `renoir_unforce_dpm_levels`: the DPM features of GFXCLK, UCLK and
+/// SOCCLK.
+fn renoir_unforce_dpm_levels(adev: &mut amdgpu_device) -> i32 {
+    for (clk_type, feature) in [(SMU_GFXCLK, SMU_FEATURE_DPM_GFXCLK_BIT), (SMU_MCLK, SMU_FEATURE_DPM_UCLK_BIT),
+                                (SMU_SOCCLK, SMU_FEATURE_DPM_SOCCLK_BIT)] {
+        if !smu_cmn_feature_is_enabled(adev, feature) {
+            continue;
+        }
+        let (mut min_freq, mut max_freq) = (0, 0);
+        let r = renoir_get_dpm_ultimate_freq(adev, clk_type, Some(&mut min_freq), Some(&mut max_freq));
+        if r != 0 {
+            return r;
+        }
+        let r = smu_v12_0_set_soft_freq_limited_range(adev, clk_type, min_freq, max_freq);
+        if r != 0 {
+            return r;
+        }
+    }
+    0
+}
+
+/// `renoir_set_peak_clock_by_device`.
+fn renoir_set_peak_clock_by_device(adev: &mut amdgpu_device) -> i32 {
+    for clk_type in [SMU_SCLK, SMU_UCLK] {
+        let mut freq = 0;
+        let r = renoir_get_dpm_ultimate_freq(adev, clk_type, None, Some(&mut freq));
+        if r != 0 {
+            return r;
+        }
+        let r = smu_v12_0_set_soft_freq_limited_range(adev, clk_type, freq, freq);
+        if r != 0 {
+            return r;
+        }
+    }
+    0
+}
+
+/// `renior_set_dpm_profile_freq`.
+fn renior_set_dpm_profile_freq(adev: &mut amdgpu_device, level: u32, clk_type: u32) -> i32 {
+    let mut ret = 0;
+    let (mut sclk, mut socclk, mut fclk) = (0, 0, 0);
+    match clk_type {
+        SMU_GFXCLK | SMU_SCLK => {
+            sclk = RENOIR_UMD_PSTATE_GFXCLK;
+            if level == AMD_DPM_FORCED_LEVEL_PROFILE_PEAK {
+                renoir_get_dpm_ultimate_freq(adev, SMU_SCLK, None, Some(&mut sclk));
+            } else if level == AMD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK {
+                renoir_get_dpm_ultimate_freq(adev, SMU_SCLK, Some(&mut sclk), None);
+            }
+        }
+        SMU_SOCCLK => {
+            socclk = RENOIR_UMD_PSTATE_SOCCLK;
+            if level == AMD_DPM_FORCED_LEVEL_PROFILE_PEAK {
+                renoir_get_dpm_ultimate_freq(adev, SMU_SOCCLK, None, Some(&mut socclk));
+            }
+        }
+        SMU_FCLK | SMU_MCLK => {
+            fclk = RENOIR_UMD_PSTATE_FCLK;
+            if level == AMD_DPM_FORCED_LEVEL_PROFILE_PEAK {
+                renoir_get_dpm_ultimate_freq(adev, SMU_FCLK, None, Some(&mut fclk));
+            } else if level == AMD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK {
+                renoir_get_dpm_ultimate_freq(adev, SMU_FCLK, Some(&mut fclk), None);
+            }
+        }
+        _ => ret = -22,
+    }
+    if sclk != 0 {
+        ret = smu_v12_0_set_soft_freq_limited_range(adev, SMU_SCLK, sclk, sclk);
+    }
+    if socclk != 0 {
+        ret = smu_v12_0_set_soft_freq_limited_range(adev, SMU_SOCCLK, socclk, socclk);
+    }
+    if fclk != 0 {
+        ret = smu_v12_0_set_soft_freq_limited_range(adev, SMU_FCLK, fclk, fclk);
+    }
+    ret
+}
+
+/// `renoir_set_performance_level`.
+fn renoir_set_performance_level(adev: &mut amdgpu_device, level: u32) -> i32 {
+    let reset_gfx_limits = |adev: &mut amdgpu_device| {
+        adev.smu.gfx_actual_hard_min_freq = adev.smu.gfx_default_hard_min_freq;
+        adev.smu.gfx_actual_soft_max_freq = adev.smu.gfx_default_soft_max_freq;
+    };
+    match level {
+        AMD_DPM_FORCED_LEVEL_HIGH => {
+            reset_gfx_limits(adev);
+            renoir_force_dpm_limit_value(adev, true)
+        }
+        AMD_DPM_FORCED_LEVEL_LOW => {
+            reset_gfx_limits(adev);
+            renoir_force_dpm_limit_value(adev, false)
+        }
+        AMD_DPM_FORCED_LEVEL_AUTO => {
+            reset_gfx_limits(adev);
+            renoir_unforce_dpm_levels(adev)
+        }
+        AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD => {
+            reset_gfx_limits(adev);
+            let msgs: [(u32, u32, &[u8]); 8] = [
+                (SMU_MSG_SetHardMinGfxClk, RENOIR_UMD_PSTATE_GFXCLK, SetHardMinGfxClk_NAME),
+                (SMU_MSG_SetHardMinFclkByFreq, RENOIR_UMD_PSTATE_FCLK, SetHardMinFclkByFreq_NAME),
+                (SMU_MSG_SetHardMinSocclkByFreq, RENOIR_UMD_PSTATE_SOCCLK, SetHardMinSocclkByFreq_NAME),
+                (SMU_MSG_SetHardMinVcn, RENOIR_UMD_PSTATE_VCNCLK, SetHardMinVcn_NAME),
+                (SMU_MSG_SetSoftMaxGfxClk, RENOIR_UMD_PSTATE_GFXCLK, SetSoftMaxGfxClk_NAME),
+                (SMU_MSG_SetSoftMaxFclkByFreq, RENOIR_UMD_PSTATE_FCLK, SetSoftMaxFclkByFreq_NAME),
+                (SMU_MSG_SetSoftMaxSocclkByFreq, RENOIR_UMD_PSTATE_SOCCLK, SetSoftMaxSocclkByFreq_NAME),
+                (SMU_MSG_SetSoftMaxVcn, RENOIR_UMD_PSTATE_VCNCLK, SetSoftMaxVcn_NAME),
+            ];
+            for (msg, param, name) in msgs {
+                let r = smu_cmn_send_smc_msg_with_param(adev, msg, param, name);
+                if r != 0 {
+                    return r;
+                }
+            }
+            0
+        }
+        AMD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK | AMD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK => {
+            reset_gfx_limits(adev);
+            renior_set_dpm_profile_freq(adev, level, SMU_SCLK);
+            renior_set_dpm_profile_freq(adev, level, SMU_MCLK);
+            renior_set_dpm_profile_freq(adev, level, SMU_SOCCLK);
+            0
+        }
+        AMD_DPM_FORCED_LEVEL_PROFILE_PEAK => {
+            reset_gfx_limits(adev);
+            renoir_set_peak_clock_by_device(adev)
+        }
+        // MANUAL, PROFILE_EXIT
+        _ => 0,
+    }
+}
+
+const PROFILE_MODE_MASK: u32 = AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD | AMD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK
+    | AMD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK | AMD_DPM_FORCED_LEVEL_PROFILE_PEAK;
+
+/// `smu_enable_umd_pstate`: renoir has no gpo, gfx ulv or deep sleep
+/// control, and soc15 no `update_umd_stable_pstate`.
+fn smu_enable_umd_pstate(adev: &mut amdgpu_device, level: &mut u32) -> i32 {
+    let smu = &mut adev.smu;
+    if smu.dpm_level & PROFILE_MODE_MASK == 0 {
+        // enter umd pstate, save current level, disable gfx cg
+        if *level & PROFILE_MODE_MASK != 0 {
+            smu.saved_dpm_level = smu.dpm_level;
+        }
+    } else if *level & PROFILE_MODE_MASK == 0 {
+        // exit umd pstate, restore level, enable gfx cg
+        if *level == AMD_DPM_FORCED_LEVEL_PROFILE_EXIT {
+            *level = smu.saved_dpm_level;
+        }
+    }
+    0
+}
+
+/// `smu_adjust_power_state_dynamic` with the display settings skipped:
+/// renoir has no `apply_clocks_adjust_rules`.
+fn smu_adjust_power_state_dynamic(adev: &mut amdgpu_device, level: u32) -> i32 {
+    if adev.smu.dpm_level != level {
+        let r = renoir_set_performance_level(adev, level);
+        if r != 0 {
+            Line::new().s("Failed to set performance level ").dec(level as u64).say();
+            return r;
+        }
+        // update the saved copy
+        adev.smu.dpm_level = level;
+    }
+    let l = adev.smu.dpm_level;
+    if l != AMD_DPM_FORCED_LEVEL_MANUAL && l != AMD_DPM_FORCED_LEVEL_PERF_DETERMINISM {
+        smu_bump_power_profile_mode(adev);
+    }
+    0
+}
+
+/// `smu_get_performance_level`.
+fn smu_get_performance_level(adev: &amdgpu_device) -> u32 {
+    if !adev.smu.pm_enabled || !adev.pm.dpm_enabled {
+        return -95i32 as u32;
+    }
+    adev.smu.dpm_level
+}
+
+/// `smu_force_performance_level` with `smu_handle_task(READJUST_POWER_STATE)`.
+fn smu_force_performance_level(adev: &mut amdgpu_device, mut level: u32) -> i32 {
+    if !adev.smu.pm_enabled || !adev.pm.dpm_enabled {
+        return -95;
+    }
+    let r = smu_enable_umd_pstate(adev, &mut level);
+    if r != 0 {
+        return r;
+    }
+    let r = smu_adjust_power_state_dynamic(adev, level);
+    // reset user dpm clock state
+    if r == 0 && adev.smu.dpm_level != AMD_DPM_FORCED_LEVEL_MANUAL {
+        adev.smu.user_clk_mask = [0; SMU_CLK_COUNT as usize];
+        adev.smu.user_clk_dependency = 0;
+    }
+    r
+}
+
+/// `amdgpu_dpm_get_performance_level`.
+pub fn amdgpu_dpm_get_performance_level(adev: &amdgpu_device) -> u32 {
+    smu_get_performance_level(adev)
+}
+
+/// `amdgpu_dpm_enter_umd_state`.
+fn amdgpu_dpm_enter_umd_state(adev: &mut amdgpu_device) {
+    crate::amdgpu_device::amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_GFX, false);
+    crate::amdgpu_device::amdgpu_device_ip_set_clockgating_state(adev, AMD_IP_BLOCK_TYPE_GFX, false);
+}
+
+/// `amdgpu_dpm_exit_umd_state`.
+fn amdgpu_dpm_exit_umd_state(adev: &mut amdgpu_device) {
+    crate::amdgpu_device::amdgpu_device_ip_set_clockgating_state(adev, AMD_IP_BLOCK_TYPE_GFX, true);
+    crate::amdgpu_device::amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_GFX, true);
+}
+
+/// `amdgpu_dpm_force_performance_level`: not Raven.
+pub fn amdgpu_dpm_force_performance_level(adev: &mut amdgpu_device, level: u32) -> i32 {
+    if adev.pm.dpm_thermal_active {
+        return -22;
+    }
+    let current_level = amdgpu_dpm_get_performance_level(adev);
+    if current_level == level {
+        return 0;
+    }
+    if current_level & PROFILE_MODE_MASK == 0 && level == AMD_DPM_FORCED_LEVEL_PROFILE_EXIT {
+        return -22;
+    }
+    let entering = current_level & PROFILE_MODE_MASK == 0 && level & PROFILE_MODE_MASK != 0;
+    let leaving = current_level & PROFILE_MODE_MASK != 0 && level & PROFILE_MODE_MASK == 0;
+    if entering {
+        amdgpu_dpm_enter_umd_state(adev);
+    } else if leaving {
+        amdgpu_dpm_exit_umd_state(adev);
+    }
+    if smu_force_performance_level(adev, level) != 0 {
+        // If new level failed, retain the umd state as before
+        if entering {
+            amdgpu_dpm_exit_umd_state(adev);
+        } else if leaving {
+            amdgpu_dpm_enter_umd_state(adev);
+        }
+        return -22;
+    }
+    adev.pm.dpm_forced_level = level;
     0
 }
 

@@ -148,6 +148,12 @@ Seitenallokator** — hier vom Kernel:
 | **E** Haenger | `drm_sched`-Zeitueberschreitung → `amdgpu_job_timedout`: Soft-Recovery (`gfx_v9_0_ring_soft_recovery`, Wellen der VMID beenden), sonst `amdgpu_device_gpu_recover` mit MODE2 und Wiederaufbau; Kontext verloren → `async_error`, `AMDGPU_CTX_QUERY2` | ein absichtlich haengender Gast-Shader kostet den Gast den Kontext, nicht den Desktop |
 | **F** Gast | Mesa-Bundle mit radv und `gallium-va` (radeonsi VA-API, fuer Stufe 6), init waehlt VA-API-Treiber nach Hersteller | Firefox: WebRender HW, Video weiter CPU bis Stufe 6 |
 
+Stand 2026-10-20: A–D gebaut, host-seitig geprueft (`hostcheck/stage1_run.rs`
+faehrt einen Gast von DEV_INFO bis SET_PSTATE, eine Gast-IB schreibt auf
+VMID 2), Modul 0.12.0 ausgeliefert — CAP_NATIVE bleibt aus bis E. In D fehlt
+nur SYNCOBJ_IN: virglrenderer nimmt ihn aus dem Eingangszaun des Wirts, und
+den reicht unser virtio-gpu nicht durch (der Gastkern wartet selbst).
+
 **E gehoert in Stufe 7, nicht danach.** Heute steht im Modul „GPU-Recovery
 bei Job-Timeout: benannt, nicht portiert" — fuer den eigenen Compositor
 war das vertretbar, fuer fremden Shadercode aus einer VM nicht: ein

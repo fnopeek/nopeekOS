@@ -3525,3 +3525,42 @@ AMDGPU_CHUNK_ID_DEPENDENCIES @ amdgpu_cs.c
 AMDGPU_CHUNK_ID_BO_HANDLES @ amdgpu_cs.c
 AMDGPU_CHUNK_ID_SCHEDULED_DEPENDENCIES @ amdgpu_cs.c
 SIZEOF_drm_amdgpu_cs_chunk_dep = sizeof(struct drm_amdgpu_cs_chunk_dep) @ amdgpu_cs.c
+# Stable pstate of a context (amdgpu_ctx.c, amdgpu_dpm.c, renoir_ppt.c)
+AMDGPU_CTX_OP_GET_STABLE_PSTATE @ amdgpu_ctx.c
+AMDGPU_CTX_OP_SET_STABLE_PSTATE @ amdgpu_ctx.c
+AMDGPU_CTX_STABLE_PSTATE_FLAGS_MASK @ amdgpu_ctx.c
+AMDGPU_CTX_STABLE_PSTATE_NONE @ amdgpu_ctx.c
+AMDGPU_CTX_STABLE_PSTATE_STANDARD @ amdgpu_ctx.c
+AMDGPU_CTX_STABLE_PSTATE_MIN_SCLK @ amdgpu_ctx.c
+AMDGPU_CTX_STABLE_PSTATE_MIN_MCLK @ amdgpu_ctx.c
+AMDGPU_CTX_STABLE_PSTATE_PEAK @ amdgpu_ctx.c
+AMD_DPM_FORCED_LEVEL_HIGH @ ../pm/amdgpu_dpm.c
+AMD_DPM_FORCED_LEVEL_LOW @ ../pm/amdgpu_dpm.c
+AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD @ ../pm/amdgpu_dpm.c
+AMD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK @ ../pm/amdgpu_dpm.c
+AMD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK @ ../pm/amdgpu_dpm.c
+AMD_DPM_FORCED_LEVEL_PROFILE_PEAK @ ../pm/amdgpu_dpm.c
+AMD_DPM_FORCED_LEVEL_PROFILE_EXIT @ ../pm/amdgpu_dpm.c
+RENOIR_UMD_PSTATE_GFXCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+RENOIR_UMD_PSTATE_SOCCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+RENOIR_UMD_PSTATE_FCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+RENOIR_UMD_PSTATE_VCNCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_MSG_SetHardMinGfxClk @ ../pm/swsmu/smu_cmn.c
+SetHardMinGfxClk_NAME$ = __smu_message_names[SMU_MSG_SetHardMinGfxClk] @ ../pm/swsmu/smu_cmn.c
+SMU_MSG_SetSoftMaxGfxClk @ ../pm/swsmu/smu_cmn.c
+SetSoftMaxGfxClk_NAME$ = __smu_message_names[SMU_MSG_SetSoftMaxGfxClk] @ ../pm/swsmu/smu_cmn.c
+SMU_MSG_SetHardMinFclkByFreq @ ../pm/swsmu/smu_cmn.c
+SetHardMinFclkByFreq_NAME$ = __smu_message_names[SMU_MSG_SetHardMinFclkByFreq] @ ../pm/swsmu/smu_cmn.c
+SMU_MSG_SetSoftMaxFclkByFreq @ ../pm/swsmu/smu_cmn.c
+SetSoftMaxFclkByFreq_NAME$ = __smu_message_names[SMU_MSG_SetSoftMaxFclkByFreq] @ ../pm/swsmu/smu_cmn.c
+SMU_MSG_SetHardMinSocclkByFreq @ ../pm/swsmu/smu_cmn.c
+SetHardMinSocclkByFreq_NAME$ = __smu_message_names[SMU_MSG_SetHardMinSocclkByFreq] @ ../pm/swsmu/smu_cmn.c
+SMU_MSG_SetSoftMaxSocclkByFreq @ ../pm/swsmu/smu_cmn.c
+SetSoftMaxSocclkByFreq_NAME$ = __smu_message_names[SMU_MSG_SetSoftMaxSocclkByFreq] @ ../pm/swsmu/smu_cmn.c
+SMU_MSG_SetHardMinVcn @ ../pm/swsmu/smu_cmn.c
+SetHardMinVcn_NAME$ = __smu_message_names[SMU_MSG_SetHardMinVcn] @ ../pm/swsmu/smu_cmn.c
+SMU_MSG_SetSoftMaxVcn @ ../pm/swsmu/smu_cmn.c
+SetSoftMaxVcn_NAME$ = __smu_message_names[SMU_MSG_SetSoftMaxVcn] @ ../pm/swsmu/smu_cmn.c
+SMU_FEATURE_DPM_GFXCLK_BIT @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_FEATURE_DPM_UCLK_BIT @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_FEATURE_DPM_SOCCLK_BIT @ ../pm/swsmu/smu12/renoir_ppt.c

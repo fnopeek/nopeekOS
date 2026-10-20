@@ -51,7 +51,8 @@ fn main() {
     // a context made; a GTT and a VRAM object made, handed over, mapped,
     // given metadata and asked about; an IB in the GTT object writing the
     // VRAM one submitted on GFX and its fence waited for; a VMID reserved
-    // and given back; the context freed, the objects let go; closed.
+    // and given back; the peak pstate taken and read back; the context freed
+    // (which gives the pstate back), the objects let go; closed.
     let dev_info = ccmd(1, 1, &[0, 0, SIZEOF_drm_amdgpu_info_device, AMDGPU_INFO_DEV_INFO, 0, 0, 0, 0]);
     let mmr = ccmd(1, 2, &[0, 0, 4, AMDGPU_INFO_READ_MMR_REG, 0x263e, 1, 0xffff_ffff, 0]);
     let ctx = ccmd(7, 3, &[0, 0]);
@@ -73,7 +74,9 @@ fn main() {
     let fence = ccmd(10, 12, &[1, AMDGPU_HW_IP_GFX, 0, 0, 1, 0, 2_000_000_000, 0, 0, 0]);
     let reserve = ccmd(8, 13, &[0, 0]);
     let unreserve = ccmd(8, 14, &[1, 0]);
-    let free = ccmd(7, 15, &[1, 1]);
+    let pstate = ccmd(9, 15, &[1, AMDGPU_CTX_OP_SET_STABLE_PSTATE, AMDGPU_CTX_STABLE_PSTATE_PEAK, 0]);
+    let pstate_get = ccmd(9, 16, &[1, AMDGPU_CTX_OP_GET_STABLE_PSTATE, 0, 0]);
+    let free = ccmd(7, 17, &[1, 1]);
     let len = |v: &Vec<u8>| v.len() as u32;
     // An inner rectangle from shadow 1, then the lower half from shadow 2,
     // which is one span.
@@ -97,6 +100,8 @@ fn main() {
                                   (7, [100, len(&fence), 0, 0, 0, 0], fence.clone()),
                                   (7, [100, len(&reserve), 0, 0, 0, 0], reserve.clone()),
                                   (7, [100, len(&unreserve), 0, 0, 0, 0], unreserve.clone()),
+                                  (7, [100, len(&pstate), 0, 0, 0, 0], pstate.clone()),
+                                  (7, [100, len(&pstate_get), 0, 0, 0, 0], pstate_get.clone()),
                                   (7, [100, len(&free), 0, 0, 0, 0], free.clone()),
                                   (9, [100, 10, 0, 0, 0, 0], vec![]),
                                   (9, [100, 11, 0, 0, 0, 0], vec![]),

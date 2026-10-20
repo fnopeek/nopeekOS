@@ -2502,6 +2502,12 @@ pub fn gfx_v9_ring_emit_cntxcntl(adev: &mut amdgpu_device, r: usize, flags: u32)
     rw(adev, r, 0);
 }
 
+/// `gfx_v9_ring_emit_sb`, the GFX ring's `emit_switch_buffer`.
+pub fn gfx_v9_ring_emit_sb(adev: &mut amdgpu_device, r: usize) {
+    rw(adev, r, PACKET3(PACKET3_SWITCH_BUFFER, 0));
+    rw(adev, r, 0);
+}
+
 /// `gfx_v9_0_ring_emit_frame_cntl`.
 pub fn gfx_v9_0_ring_emit_frame_cntl(adev: &mut amdgpu_device, r: usize, start: bool, secure: bool) {
     let v = if secure { FRAME_TMZ } else { 0 };
@@ -3153,38 +3159,10 @@ fn gfx_v9_0_update_gfx_mg_power_gating(adev: &amdgpu_device, enable: bool) {
                 (adev.pg_flags & AMD_PG_SUPPORT_GFX_DMG != 0 && enable) as u32);
 }
 
-/// `amdgpu_gfx_off_ctrl_immediate` (`amdgpu_gfx_do_off_ctrl` without
-/// delay). GC 9.3.0 has no `init_spm_golden`.
-pub fn amdgpu_gfx_off_ctrl_immediate(adev: &mut amdgpu_device, enable: bool) {
-    if adev.pm.pp_feature & PP_GFXOFF_MASK == 0 {
-        return;
-    }
-    if enable {
-        // If the count is already 0, it means there's an imbalance bug
-        // somewhere.
-        if adev.gfx.gfx_off_req_count == 0 {
-            Line::new().s("WARNING: gfx_off_req_count is already 0").say();
-            return;
-        }
-        adev.gfx.gfx_off_req_count -= 1;
-        if adev.gfx.gfx_off_req_count == 0 && !adev.gfx.gfx_off_state
-            && crate::amdgpu_smu::amdgpu_dpm_set_powergating_by_smu(adev, AMD_IP_BLOCK_TYPE_GFX, true, 0) == 0
-        {
-            adev.gfx.gfx_off_state = true;
-        }
-    } else {
-        if adev.gfx.gfx_off_req_count == 0 && adev.gfx.gfx_off_state
-            && crate::amdgpu_smu::amdgpu_dpm_set_powergating_by_smu(adev, AMD_IP_BLOCK_TYPE_GFX, false, 0) == 0
-        {
-            adev.gfx.gfx_off_state = false;
-        }
-        adev.gfx.gfx_off_req_count += 1;
-    }
-}
-
-/// `amdgpu_gfx_off_ctrl`: GFXOFF comes back `GFX_OFF_DELAY_ENABLE`
-/// (100 ms) after the last user is done.
-pub fn amdgpu_gfx_off_ctrl(adev: &mut amdgpu_device, enable: bool) {
+/// `amdgpu_gfx_do_off_ctrl`: GFXOFF comes back `GFX_OFF_DELAY_ENABLE`
+/// (100 ms) after the last user is done, or at once with `no_delay`.
+/// GC 9.3.0 has no `init_spm_golden`.
+fn amdgpu_gfx_do_off_ctrl(adev: &mut amdgpu_device, enable: bool, no_delay: bool) {
     if adev.pm.pp_feature & PP_GFXOFF_MASK == 0 {
         return;
     }
@@ -3198,9 +3176,13 @@ pub fn amdgpu_gfx_off_ctrl(adev: &mut amdgpu_device, enable: bool) {
         }
         adev.gfx.gfx_off_req_count -= 1;
         if adev.gfx.gfx_off_req_count == 0 && !adev.gfx.gfx_off_state {
-            let delay = if adev.in_s0ix { 0 } else { 100_000 };
-            if !crate::workqueue::delayed_work_pending(adev, w) {
-                crate::workqueue::mod_delayed_work(adev, w, delay);
+            if no_delay {
+                if crate::amdgpu_smu::amdgpu_dpm_set_powergating_by_smu(adev, AMD_IP_BLOCK_TYPE_GFX, true, 0) == 0 {
+                    adev.gfx.gfx_off_state = true;
+                }
+            } else if !crate::workqueue::delayed_work_pending(adev, w) {
+                // schedule_delayed_work
+                crate::workqueue::mod_delayed_work(adev, w, 100_000);
             }
         }
     } else {
@@ -3214,6 +3196,17 @@ pub fn amdgpu_gfx_off_ctrl(adev: &mut amdgpu_device, enable: bool) {
         }
         adev.gfx.gfx_off_req_count += 1;
     }
+}
+
+/// `amdgpu_gfx_off_ctrl`: no delay when going to s2idle.
+pub fn amdgpu_gfx_off_ctrl(adev: &mut amdgpu_device, enable: bool) {
+    let no_delay = adev.in_s0ix;
+    amdgpu_gfx_do_off_ctrl(adev, enable, no_delay);
+}
+
+/// `amdgpu_gfx_off_ctrl_immediate`.
+pub fn amdgpu_gfx_off_ctrl_immediate(adev: &mut amdgpu_device, enable: bool) {
+    amdgpu_gfx_do_off_ctrl(adev, enable, true);
 }
 
 /// `amdgpu_device_delay_enable_gfx_off`.

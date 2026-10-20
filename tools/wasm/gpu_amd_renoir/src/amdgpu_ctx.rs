@@ -40,6 +40,10 @@ pub struct amdgpu_ctx {
     pub guilty: Rc<Cell<i32>>,
     pub preamble_presented: bool,
     pub entities: Vec<Vec<Option<amdgpu_ctx_entity>>>,
+    /// The pstate to restore when this context gives the stable pstate up.
+    pub stable_pstate: u32,
+    /// This context among all clients' (`adev.next_ctx_serial`).
+    pub serial: u64,
 }
 
 /// `struct amdgpu_ctx_mgr`: the contexts by handle.
@@ -104,6 +108,8 @@ fn amdgpu_ctx_init_entity(adev: &mut amdgpu_device, ctx: &mut amdgpu_ctx, hw_ip:
 /// `amdgpu_ctx_init`.
 fn amdgpu_ctx_init(adev: &mut amdgpu_device, vm: usize, priority: i32) -> amdgpu_ctx {
     let generation = crate::amdgpu_vm::amdgpu_vm_generation(adev, Some(vm));
+    let serial = adev.next_ctx_serial;
+    adev.next_ctx_serial += 1;
     amdgpu_ctx {
         refcount: 1,
         reset_counter: adev.gpu_reset_counter,
@@ -114,6 +120,90 @@ fn amdgpu_ctx_init(adev: &mut amdgpu_device, vm: usize, priority: i32) -> amdgpu
         guilty: Rc::new(Cell::new(0)),
         preamble_presented: false,
         entities: AMDGPU_CTX_NUM_ENTITIES.iter().map(|&n| (0..n).map(|_| None).collect()).collect(),
+        stable_pstate: AMDGPU_CTX_STABLE_PSTATE_NONE,
+        serial,
+    }
+}
+
+/// `amdgpu_ctx_get_stable_pstate`.
+fn amdgpu_ctx_get_stable_pstate(adev: &amdgpu_device) -> u32 {
+    match crate::amdgpu_smu::amdgpu_dpm_get_performance_level(adev) {
+        AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD => AMDGPU_CTX_STABLE_PSTATE_STANDARD,
+        AMD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK => AMDGPU_CTX_STABLE_PSTATE_MIN_SCLK,
+        AMD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK => AMDGPU_CTX_STABLE_PSTATE_MIN_MCLK,
+        AMD_DPM_FORCED_LEVEL_PROFILE_PEAK => AMDGPU_CTX_STABLE_PSTATE_PEAK,
+        _ => AMDGPU_CTX_STABLE_PSTATE_NONE,
+    }
+}
+
+/// `__amdgpu_ctx_set_stable_pstate`.
+fn __amdgpu_ctx_set_stable_pstate(adev: &mut amdgpu_device, ctx: &mut amdgpu_ctx, stable_pstate: u32) -> i32 {
+    let level = match stable_pstate {
+        AMDGPU_CTX_STABLE_PSTATE_NONE => AMD_DPM_FORCED_LEVEL_AUTO,
+        AMDGPU_CTX_STABLE_PSTATE_STANDARD => AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD,
+        AMDGPU_CTX_STABLE_PSTATE_MIN_SCLK => AMD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK,
+        AMDGPU_CTX_STABLE_PSTATE_MIN_MCLK => AMD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK,
+        AMDGPU_CTX_STABLE_PSTATE_PEAK => AMD_DPM_FORCED_LEVEL_PROFILE_PEAK,
+        _ => return -22,
+    };
+    let current_ctx = adev.pm.stable_pstate_ctx;
+    if current_ctx.is_some_and(|s| s != ctx.serial) {
+        return -16;
+    }
+    let current_stable_pstate = amdgpu_ctx_get_stable_pstate(adev);
+    if current_stable_pstate == stable_pstate {
+        return 0;
+    }
+    let r = crate::amdgpu_smu::amdgpu_dpm_force_performance_level(adev, level);
+    if r != 0 {
+        return r;
+    }
+    if current_ctx.is_none() {
+        adev.pm.stable_pstate_ctx = Some(ctx.serial);
+        ctx.stable_pstate = current_stable_pstate;
+    }
+    0
+}
+
+/// `amdgpu_ctx_fini`'s part for the stable pstate: the context that holds
+/// it puts back what it found.
+fn amdgpu_ctx_fini_stable_pstate(adev: &mut amdgpu_device, ctx: &mut amdgpu_ctx) {
+    if adev.pm.stable_pstate_ctx == Some(ctx.serial) {
+        let p = ctx.stable_pstate;
+        __amdgpu_ctx_set_stable_pstate(adev, ctx, p);
+        adev.pm.stable_pstate_ctx = None;
+    }
+}
+
+/// `amdgpu_ctx_ioctl` for AMDGPU_CTX_OP_GET/SET_STABLE_PSTATE
+/// (`amdgpu_ctx_stable_pstate`): `out.pstate.flags`.
+pub fn amdgpu_ctx_ioctl_stable_pstate(adev: &mut amdgpu_device, mgr: &mut amdgpu_ctx_mgr, id: u32, op: u32, flags: u32)
+                                      -> Result<u32, i32> {
+    let set = match op {
+        AMDGPU_CTX_OP_GET_STABLE_PSTATE => {
+            if flags != 0 {
+                return Err(-22);
+            }
+            false
+        }
+        AMDGPU_CTX_OP_SET_STABLE_PSTATE => {
+            if flags & !AMDGPU_CTX_STABLE_PSTATE_FLAGS_MASK != 0 {
+                return Err(-22);
+            }
+            if flags & AMDGPU_CTX_STABLE_PSTATE_FLAGS_MASK > AMDGPU_CTX_STABLE_PSTATE_PEAK {
+                return Err(-22);
+            }
+            true
+        }
+        _ => return Err(-22),
+    };
+    let Some(ctx) = mgr.ctx_handles.get_mut(&id) else { return Err(-22) };
+    if set {
+        let r = __amdgpu_ctx_set_stable_pstate(adev, ctx, flags & AMDGPU_CTX_STABLE_PSTATE_FLAGS_MASK);
+        // Nothing is written back: the union's out reads as the in's op.
+        if r != 0 { Err(r) } else { Ok(op) }
+    } else {
+        Ok(amdgpu_ctx_get_stable_pstate(adev))
     }
 }
 
@@ -147,7 +237,8 @@ pub fn amdgpu_ctx_alloc_checked(adev: &mut amdgpu_device, mgr: &mut amdgpu_ctx_m
 /// `amdgpu_ctx_free` with `amdgpu_ctx_do_release`: the entities go with
 /// the context.
 pub fn amdgpu_ctx_free(adev: &mut amdgpu_device, mgr: &mut amdgpu_ctx_mgr, id: u32) -> i32 {
-    let Some(ctx) = mgr.ctx_handles.remove(&id) else { return -22 };
+    let Some(mut ctx) = mgr.ctx_handles.remove(&id) else { return -22 };
+    amdgpu_ctx_fini_stable_pstate(adev, &mut ctx);
     for c in ctx.entities.into_iter().flatten().flatten() {
         drm_sched::drm_sched_entity_destroy(adev, c.entity);
         adev.sched_entities[c.entity] = None;
@@ -248,11 +339,12 @@ pub fn amdgpu_ctx_mgr_entity_flush(adev: &mut amdgpu_device, mgr: &mut amdgpu_ct
 
 /// `amdgpu_ctx_mgr_fini` with `amdgpu_ctx_mgr_entity_fini`.
 pub fn amdgpu_ctx_mgr_fini(adev: &mut amdgpu_device, mgr: &mut amdgpu_ctx_mgr) {
-    for (_, ctx) in core::mem::take(&mut mgr.ctx_handles) {
+    for (_, mut ctx) in core::mem::take(&mut mgr.ctx_handles) {
         if ctx.refcount != 1 {
             Line::new().s("ctx is still alive").say();
             continue;
         }
+        amdgpu_ctx_fini_stable_pstate(adev, &mut ctx);
         for c in ctx.entities.into_iter().flatten().flatten() {
             drm_sched::drm_sched_entity_fini(adev, c.entity);
             adev.sched_entities[c.entity] = None;

@@ -453,9 +453,10 @@ pub fn amdgpu_vm_flush(adev: &mut amdgpu_device, r: usize, j: u64, need_pipe_syn
         x.pasid_mapping = fence.clone();
     }
     ring::amdgpu_ring_patch_cond_exec(adev, r, patch);
+    // the double SWITCH_BUFFER here *cannot* be skipped by COND_EXEC
     if adev.rings[r].funcs.ops == ring::ring_ops::gfx_v9_0_gfx {
-        // the GFX ring's emit_switch_buffer; it takes no job here
-        Line::new().s("WARNING: amdgpu_vm_flush on the GFX ring").say();
+        crate::gfx_v9_0::gfx_v9_ring_emit_sb(adev, r);
+        crate::gfx_v9_0::gfx_v9_ring_emit_sb(adev, r);
     }
     0
 }

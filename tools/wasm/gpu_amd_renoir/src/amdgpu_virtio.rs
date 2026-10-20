@@ -501,6 +501,26 @@ pub fn fence_wait_reply(adev: &mut amdgpu_device, vc: &vclients, w: &fence_wait)
     Some(out)
 }
 
+/// `amdgpu_ccmd_set_pstate`: libdrm's `amdgpu_cs_ctx_stable_pstate`.
+fn ccmd_set_pstate(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Result<Vec<u8>, i32> {
+    let mut r = rsp(SP_RSP_SIZE, 0);
+    if d32(req, SP_PAD) != 0 {
+        Line::new().s("native: padding not zeroed").say();
+        return Err(EINVAL);
+    }
+    let ctx_id = d32(req, SP_CTX_ID);
+    if !c.fpriv.ctx_mgr.ctx_handles.contains_key(&ctx_id) {
+        Line::new().s("native: couldn't find amdgpu_context with id ").dec(ctx_id as u64).say();
+        return Err(EINVAL);
+    }
+    match crate::amdgpu_ctx::amdgpu_ctx_ioctl_stable_pstate(adev, &mut c.fpriv.ctx_mgr, ctx_id, d32(req, SP_OP),
+                                                            d32(req, SP_FLAGS)) {
+        Ok(out) => r[SP_RSP_OUT_FLAGS as usize..SP_RSP_OUT_FLAGS as usize + 4].copy_from_slice(&out.to_le_bytes()),
+        Err(e) => r[RSP_RET as usize..RSP_RET as usize + 4].copy_from_slice(&e.to_le_bytes()),
+    }
+    Ok(r)
+}
+
 /// `amdgpu_ccmd_reserve_vmid`: `amdgpu_vm_ioctl`'s (un)reserve, from the GFX hub.
 fn ccmd_reserve_vmid(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Result<Vec<u8>, i32> {
     let mut r = rsp(RSP_SIZE, 0);
@@ -583,13 +603,6 @@ pub fn release_blob(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, res_id
     0
 }
 
-/// A ccmd this driver does not run yet: the handler fails, as
-/// virglrenderer's does for a command it cannot serve.
-fn not_ported(cmd: u32) -> Result<Vec<u8>, i32> {
-    Line::new().s("native: ccmd ").dec(cmd as u64).s(": not ported yet").say();
-    Err(EINVAL)
-}
-
 /// One guest ccmd of client `id` (`drm_context_submit_cmd_dispatch`): the
 /// reply, `REPLY_HEAD` first. Err only for a request too short for its
 /// header.
@@ -632,7 +645,7 @@ pub fn ccmd(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, req_in: &[u8])
             Ok(ccmd_result::reply(b)) => Ok(b),
             Err(e) => Err(e),
         },
-        AMDGPU_CCMD_SET_PSTATE => not_ported(cmd),
+        AMDGPU_CCMD_SET_PSTATE => ccmd_set_pstate(adev, c, &req),
         _ => {
             Line::new().s("native: unknown ccmd ").dec(cmd as u64).say();
             Err(EINVAL)

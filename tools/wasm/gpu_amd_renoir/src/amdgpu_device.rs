@@ -114,6 +114,12 @@ pub struct amdgpu_pm {
     pub fw_version: u32,
     /// `pwr_state[]`: POWER_STATE_UNKNOWN (0) until a block is gated.
     pub pwr_state: [u32; AMD_IP_BLOCK_TYPE_NUM as usize],
+    /// `dpm.forced_level`, `dpm.thermal_active`.
+    pub dpm_forced_level: u32,
+    pub dpm_thermal_active: bool,
+    /// `stable_pstate_ctx`: the serial of the context that holds the
+    /// stable pstate.
+    pub stable_pstate_ctx: Option<u64>,
 }
 
 /// `struct amdgpu_ip_block_status`.
@@ -746,6 +752,9 @@ pub struct amdgpu_device {
     pub vm_bases: Vec<Option<crate::amdgpu_vm::amdgpu_vm_bo_base>>,
     pub vm_mappings: Vec<Option<crate::amdgpu_vm::amdgpu_bo_va_mapping>>,
     pub gpu_reset_counter: u32,
+    /// The serial the next context gets (a context's identity across
+    /// clients, where Linux compares pointers).
+    pub next_ctx_serial: u64,
     pub vram_lost_counter: u32,
     /// TTM's move statistics (`amdgpu_bo_move`); no buffer moves yet.
     pub num_bytes_moved: u64,
@@ -882,6 +891,7 @@ impl amdgpu_device {
             vm_bases: Vec::new(),
             vm_mappings: Vec::new(),
             gpu_reset_counter: 0,
+            next_ctx_serial: 0,
             vram_lost_counter: 0,
             num_bytes_moved: 0,
             num_evictions: 0,
@@ -2017,6 +2027,40 @@ fn set_powergating_state(adev: &mut amdgpu_device, type_: u32, gate: bool) -> Op
         AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_set_powergating_state(adev, gate),
         _ => return None,
     })
+}
+
+/// `amdgpu_device_ip_set_clockgating_state`.
+pub fn amdgpu_device_ip_set_clockgating_state(adev: &mut amdgpu_device, block_type: u32, gate: bool) -> i32 {
+    let mut r = 0;
+    for i in 0..adev.ip_blocks.len() {
+        if !adev.ip_blocks[i].status.valid || adev.ip_blocks[i].version.type_ != block_type {
+            continue;
+        }
+        let Some(v) = set_clockgating_state(adev, block_type, gate) else { continue };
+        r = v;
+        if r != 0 {
+            Line::new().s("set_clockgating_state of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                .s("> failed ").dec((-r) as u64).say();
+        }
+    }
+    r
+}
+
+/// `amdgpu_device_ip_set_powergating_state`.
+pub fn amdgpu_device_ip_set_powergating_state(adev: &mut amdgpu_device, block_type: u32, gate: bool) -> i32 {
+    let mut r = 0;
+    for i in 0..adev.ip_blocks.len() {
+        if !adev.ip_blocks[i].status.valid || adev.ip_blocks[i].version.type_ != block_type {
+            continue;
+        }
+        let Some(v) = set_powergating_state(adev, block_type, gate) else { continue };
+        r = v;
+        if r != 0 {
+            Line::new().s("set_powergating_state of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                .s("> failed ").dec((-r) as u64).say();
+        }
+    }
+    r
 }
 
 /// The block types the CG and PG walks leave alone.
