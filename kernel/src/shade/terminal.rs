@@ -538,6 +538,114 @@ pub fn clear_dirty() {
     DIRTY.store(false, Ordering::Release);
 }
 
+// ── Cells ───────────────────────────────────────────────────────────
+
+/// Terminal text size in logical px (docs/plan/UI_SCALE.md, step 4).
+const TERM_PX: u16 = 14;
+
+#[derive(Clone, Copy)]
+enum Face {
+    /// IBM Plex Mono at `px` physical px; `ascent` from the cell top to
+    /// the baseline.
+    Vector { px: u16, ascent: u32 },
+    /// The bitmap font at an integer scale, while the vector fonts are not
+    /// loaded yet.
+    Bitmap(u32),
+}
+
+/// The terminal's character cell in physical px, and the face that fills
+/// it. Every pixel ↔ cell mapping (render, input line, selection,
+/// scrollbar) goes through here.
+#[derive(Clone, Copy)]
+pub struct Cells {
+    pub w: u32,
+    pub h: u32,
+    face: Face,
+}
+
+pub fn cells() -> Cells {
+    use crate::gui::text;
+    use crate::shade::widgets::abi::TextStyle;
+    use crate::shade::widgets::scale;
+    if text::is_ready() {
+        let px = scale::font(TERM_PX);
+        // Rounded to whole px so every column starts on a pixel and the
+        // grid stays crisp; a monospace advance is the same for every glyph.
+        let w = (text::measure_px("0", TextStyle::Mono, px) + 0.5) as u32;
+        let lh = text::line_height_px(TextStyle::Mono, px);
+        let h = lh as u32 + u32::from((lh as u32 as f32) < lh);
+        let ascent = (text::ascent_px(TextStyle::Mono, px) + 0.5) as u32;
+        if w > 0 && h > 0 {
+            return Cells { w, h, face: Face::Vector { px, ascent } };
+        }
+    }
+    let s = ((scale::get() + scale::UNIT / 2) / scale::UNIT).max(1);
+    let (w, h) = crate::gui::font::char_size(s);
+    Cells { w, h, face: Face::Bitmap(s) }
+}
+
+/// Draw `s` one cell per character from (`x`, `y`), the cell's top-left.
+/// Without `bg` the glyph edges keep their coverage as alpha and the
+/// compositor blends them over the window; with `bg` the cells are filled
+/// and the glyphs mixed into it, opaque.
+fn draw_run(shadow: *mut u8, info: &crate::framebuffer::FbInfo, c: Cells,
+            s: &str, x: u32, y: u32, fg: u32, bg: Option<u32>) {
+    use crate::gui::render;
+    let (px, ascent) = match c.face {
+        Face::Bitmap(scale) => {
+            crate::gui::font::draw_str(shadow, info, s, x, y, fg, bg, scale);
+            return;
+        }
+        Face::Vector { px, ascent } => (px, ascent),
+    };
+    let fg = fg & 0x00FF_FFFF;
+    let mut cx = x;
+    for ch in s.chars() {
+        // Control characters take no cell, as in the bitmap font.
+        if crate::gui::font::glyph_index(ch).is_none() { continue; }
+        if let Some(b) = bg {
+            render::fill_rect(shadow, info, cx, y, c.w, c.h, b | 0xFF00_0000);
+        }
+        if ch != ' ' {
+            crate::gui::text::rasterize_cached_px(ch, crate::shade::widgets::abi::TextStyle::Mono, px, |g| {
+                let gx = cx as i32 + g.xmin as i32;
+                let gy = (y + ascent) as i32 - (g.height as i32 + g.ymin as i32);
+                for row in 0..g.height as i32 {
+                    let py = gy + row;
+                    if py < 0 { continue; }
+                    for col in 0..g.width as i32 {
+                        let a = g.alpha[(row * g.width as i32 + col) as usize] as u32;
+                        let pxx = gx + col;
+                        if a == 0 || pxx < 0 { continue; }
+                        let (pxx, py) = (pxx as u32, py as u32);
+                        let out = match bg {
+                            Some(b) => mix(fg, b, a) | 0xFF00_0000,
+                            None => {
+                                // Neighbouring glyphs may share an edge pixel:
+                                // keep the stronger coverage.
+                                if render::read_pixel(shadow, info, pxx, py) >> 24 >= a { continue; }
+                                (a << 24) | fg
+                            }
+                        };
+                        render::put_pixel(shadow, info, pxx, py, out);
+                    }
+                }
+            });
+        }
+        cx += c.w;
+    }
+}
+
+/// `fg` over `bg` at coverage `a` (0..=255), RGB only.
+fn mix(fg: u32, bg: u32, a: u32) -> u32 {
+    let ch = |sh: u32| {
+        let f = (fg >> sh) & 0xFF;
+        let b = (bg >> sh) & 0xFF;
+        ((f * a + b * (255 - a) + 127) / 255) << sh
+    };
+    ch(16) | ch(8) | ch(0)
+}
+
 /// Terminal foreground (text + cursor) from the active theme's OnSurface
 /// token — so `loop` windows turn dark-on-light in light mode, matching
 /// the widget apps. Masked to opaque RGB (the shadow buffer is opaque).
@@ -614,7 +722,7 @@ fn token_color(tok: &str, base: u32, accent: u32, faint: u32) -> u32 {
 /// caller. Returns false when the row is not a status line and the caller
 /// should draw it plainly.
 fn draw_status_row(shadow: *mut u8, info: &crate::framebuffer::FbInfo,
-                   text: &str, x: u32, py: u32, char_w: u32) -> bool {
+                   text: &str, x: u32, py: u32, c: Cells) -> bool {
     let bytes = text.as_bytes();
     let first = match bytes.iter().position(|c| *c != b' ') { Some(i) => i, None => return false };
     let marker = bytes[first];
@@ -624,8 +732,8 @@ fn draw_status_row(shadow: *mut u8, info: &crate::framebuffer::FbInfo,
     let (marker_color, base) = status_colors(marker);
     let accent = theme_token(crate::shade::widgets::abi::Token::Accent);
     let faint = theme_token(crate::shade::widgets::abi::Token::OnSurfaceFaint);
-    crate::gui::font::draw_str(shadow, info, &text[first..first + 1],
-        x + cols_of(&bytes[..first]) as u32 * char_w, py, marker_color, None, 1);
+    draw_run(shadow, info, c, &text[first..first + 1],
+        x + cols_of(&bytes[..first]) as u32 * c.w, py, marker_color, None);
 
     // Each token is drawn at the column of its first character, so every
     // glyph stays where plain text would have put it.
@@ -639,7 +747,7 @@ fn draw_status_row(shadow: *mut u8, info: &crate::framebuffer::FbInfo,
         } else {
             base
         };
-        crate::gui::font::draw_str(shadow, info, tok, x + cols_of(&bytes[..i]) as u32 * char_w, py, color, None, 1);
+        draw_run(shadow, info, c, tok, x + cols_of(&bytes[..i]) as u32 * c.w, py, color, None);
         i = end;
     }
     true
@@ -671,13 +779,13 @@ fn sel_bounds(s: &Selection) -> ((usize, usize), (usize, usize)) {
 }
 
 /// Map a screen pixel to a terminal cell `(abs_line, col)`, clamped to the
-/// grid. Mirrors the geometry in `render_to_window` exactly (monospace
-/// `char_size(1)`, `visible_lines` snapshot, soft-wrap into `cols`-wide
-/// segments) so the highlight lands on the glyph under the cursor.
+/// grid. Mirrors the geometry in `render_to_window` exactly (`cells()`,
+/// `visible_lines` snapshot, soft-wrap into `cols`-wide segments) so the
+/// highlight lands on the glyph under the cursor.
 pub fn cell_at(idx: usize, rx: i32, ry: i32, rw: u32, rh: u32, mx: i32, my: i32)
     -> Option<(usize, usize)>
 {
-    let (char_w, char_h) = crate::gui::font::char_size(1);
+    let Cells { w: char_w, h: char_h, .. } = cells();
     if char_w == 0 || char_h == 0 { return None; }
     let cols = (rw / char_w) as usize;
     let visible_rows = (rh / char_h) as usize;
@@ -904,10 +1012,10 @@ pub fn render_to_window(
     shadow: *mut u8,
     info: &crate::framebuffer::FbInfo,
     x: u32, y: u32, w: u32, h: u32,
-    _scale: u32,
     terminal_idx: u8,
 ) {
-    let (char_w, char_h) = crate::gui::font::char_size(1);
+    let c = cells();
+    let (char_w, char_h) = (c.w, c.h);
     let cols = w / char_w;
     let rows = h / char_h;
     if cols == 0 || rows == 0 { return; }
@@ -962,27 +1070,27 @@ pub fn render_to_window(
         {
             let text = valid_str(&line_data[s..e]);
             if first && text.starts_with("[npk]") {
-                crate::gui::font::draw_str(shadow, info, "[npk]", x, py, prompt_color, None, 1);
+                draw_run(shadow, info, c, "[npk]", x, py, prompt_color, None);
                 if text.len() > 5 {
                     let rest = &text[5..];
                     let rx = x + 5 * char_w;
-                    if !draw_status_row(shadow, info, rest, rx, py, char_w) {
-                        crate::gui::font::draw_str(shadow, info, rest, rx, py, fg, None, 1);
+                    if !draw_status_row(shadow, info, rest, rx, py, c) {
+                        draw_run(shadow, info, c, rest, rx, py, fg, None);
                     }
                 }
             } else if first {
                 if let Some(pos) = text.find("> ") {
                     let prompt_end = pos + 2; // include "> "
-                    crate::gui::font::draw_str(shadow, info, &text[..prompt_end], x, py, prompt_color, None, 1);
+                    draw_run(shadow, info, c, &text[..prompt_end], x, py, prompt_color, None);
                     if text.len() > prompt_end {
                         let px = x + cols_of(&text.as_bytes()[..prompt_end]) as u32 * char_w;
-                        crate::gui::font::draw_str(shadow, info, &text[prompt_end..], px, py, fg, None, 1);
+                        draw_run(shadow, info, c, &text[prompt_end..], px, py, fg, None);
                     }
                 } else {
-                    crate::gui::font::draw_str(shadow, info, text, x, py, fg, None, 1);
+                    draw_run(shadow, info, c, text, x, py, fg, None);
                 }
             } else {
-                crate::gui::font::draw_str(shadow, info, text, x, py, fg, None, 1);
+                draw_run(shadow, info, c, text, x, py, fg, None);
             }
         }
 
@@ -999,8 +1107,8 @@ pub fn render_to_window(
                 let b = csel1.min(e);
                 if b > a {
                     let seltext = valid_str(&line_data[a..b]);
-                    crate::gui::font::draw_str(shadow, info, seltext,
-                        x + cols_of(&line_data[s..a]) as u32 * char_w, py, fg, Some(sel_color), 1);
+                    draw_run(shadow, info, c, seltext,
+                        x + cols_of(&line_data[s..a]) as u32 * char_w, py, fg, Some(sel_color));
                 }
             }
         }
@@ -1023,7 +1131,8 @@ pub fn render_input_line(
         (term.total, copy, len)
     };
 
-    let (char_w, char_h) = crate::gui::font::char_size(1);
+    let c = cells();
+    let (char_w, char_h) = (c.w, c.h);
     let cols = win_cw / char_w;
     let rows = win_ch / char_h;
     if cols == 0 || rows == 0 { return None; }
@@ -1045,13 +1154,13 @@ pub fn render_input_line(
         let text = valid_str(&line_data[..visible_len]);
         if let Some(pos) = text.find("> ") {
             let prompt_end = pos + 2;
-            crate::gui::font::draw_str(shadow, info, &text[..prompt_end], win_cx, last_line_y, prompt_color, None, 1);
+            draw_run(shadow, info, c, &text[..prompt_end], win_cx, last_line_y, prompt_color, None);
             if text.len() > prompt_end {
                 let px = win_cx + cols_of(&text.as_bytes()[..prompt_end]) as u32 * char_w;
-                crate::gui::font::draw_str(shadow, info, &text[prompt_end..], px, last_line_y, fg, None, 1);
+                draw_run(shadow, info, c, &text[prompt_end..], px, last_line_y, fg, None);
             }
         } else {
-            crate::gui::font::draw_str(shadow, info, text, win_cx, last_line_y, fg, None, 1);
+            draw_run(shadow, info, c, text, win_cx, last_line_y, fg, None);
         }
     }
 
@@ -1059,9 +1168,10 @@ pub fn render_input_line(
     // byte offset into the line.
     let cur = cols_of(&line_data[..cursor_pos().min(len)]);
     let cursor_x = win_cx + cur as u32 * char_w;
-    if cursor_x + 2 <= win_cx + win_cw {
+    let cursor_w = crate::shade::widgets::scale::len(2);
+    if cursor_x + cursor_w <= win_cx + win_cw {
         let cursor_color = theme_fg() | 0xFF00_0000;
-        crate::gui::render::fill_rect(shadow, info, cursor_x, last_line_y, 2, char_h, cursor_color);
+        crate::gui::render::fill_rect(shadow, info, cursor_x, last_line_y, cursor_w, char_h, cursor_color);
     }
 
     Some((win_cx, last_line_y, win_cw, char_h))

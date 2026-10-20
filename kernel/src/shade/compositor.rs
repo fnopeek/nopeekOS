@@ -2014,7 +2014,7 @@ impl Compositor {
 
     /// Text rect of a terminal window: its content rect less the padding.
     fn term_text_rect(&self, win: &Window) -> Rect {
-        let pad = 6 * self.scale;
+        let pad = term_pad();
         Rect::new(win.content_x(self.border) + pad, win.content_y(self.border) + pad,
             win.content_w(self.border).saturating_sub(pad * 2),
             win.content_h(self.border).saturating_sub(pad * 2))
@@ -2031,11 +2031,10 @@ impl Compositor {
         } else if !dirty && !self.needs_full_redraw {
             return;
         }
-        let scale = self.scale;
         let Some(layer) = self.term_layers.get_mut(&id) else { return };
         layer.fill(0);
         let info = layer.info();
-        terminal::render_to_window(layer.ptr(), &info, 0, 0, w, h, scale, terminal_idx);
+        terminal::render_to_window(layer.ptr(), &info, 0, 0, w, h, terminal_idx);
     }
 
     /// The scene of the current frame, back to front. Window buffers that
@@ -2132,7 +2131,7 @@ impl Compositor {
                 WindowKind::Terminal => {
                     self.update_term_layer(p.id.0, p.terminal_idx, p.text.w, p.text.h, p.dirty, in_motion);
                     items.push(Item::Text { src: Source::TermText(p.id.0), dst: p.text });
-                    if let Some(bar) = term_scrollbar(p.terminal_idx, p.text, scale) {
+                    if let Some(bar) = term_scrollbar(p.terminal_idx, p.text) {
                         items.push(bar);
                     }
                 }
@@ -3113,7 +3112,7 @@ impl Compositor {
         let win = self.windows.iter().find(|w| w.id == wid)?;
         if win.is_dock || win.is_bar { return None; }
         let border = self.border;
-        let pad = 6 * self.scale;
+        let pad = term_pad();
         let text_rect = (
             (win.content_x(border) + pad) as i32,
             (win.content_y(border) + pad) as i32,
@@ -3125,7 +3124,7 @@ impl Compositor {
             is_terminal: win.kind == crate::shade::window::WindowKind::Terminal,
             term_idx: win.terminal_idx,
             text_rect,
-            char_h: crate::gui::font::char_size(self.scale).1,
+            char_h: terminal::cells().h,
             close_rect: close_button_rect(win, border, self.scale),
         })
     }
@@ -3139,15 +3138,19 @@ fn parse_hex_color(s: &str) -> Option<u32> {
 }
 
 
+/// Inset of a terminal's text from its content edge, physical px.
+fn term_pad() -> u32 { crate::shade::widgets::scale::len(6) }
+
 /// The overlay scrollbar of a terminal, when its scrollback overflows.
 /// Geometry must match `scroll_hit_at` so the thumb and the drag area agree.
-fn term_scrollbar(terminal_idx: u8, text: Rect, scale: u32) -> Option<Item> {
+fn term_scrollbar(terminal_idx: u8, text: Rect) -> Option<Item> {
+    use crate::shade::widgets::scale;
     let (total, soff) = terminal::scroll_metrics(terminal_idx as usize)?;
-    let (_, char_h) = crate::gui::font::char_size(scale);
+    let char_h = terminal::cells().h;
     let rows = (text.h / char_h.max(1)).max(1) as usize;
     if total <= rows || text.h == 0 { return None; }
     let track_h = text.h as u64;
-    let thumb_h = ((track_h * rows as u64) / total as u64).max(24).min(track_h) as u32;
+    let thumb_h = ((track_h * rows as u64) / total as u64).max(scale::len(24) as u64).min(track_h) as u32;
     let travel = track_h - thumb_h as u64;
     let max_scroll = (total - rows) as u64;
     let soff = (soff as u64).min(max_scroll);
@@ -3156,7 +3159,8 @@ fn term_scrollbar(terminal_idx: u8, text: Rect, scale: u32) -> Option<Item> {
     let color = crate::shade::widgets::palette::resolve_glass(
         crate::shade::widgets::abi::Token::OnSurfaceMuted) & 0x00FF_FFFF;
     // Alpha 200 of 256, as the thumb has always been blended.
-    Some(Item::Fill { rect: Rect::new(text.x + text.w.saturating_sub(6), text.y + from_top as u32, 4, thumb_h),
+    Some(Item::Fill { rect: Rect::new(text.x + text.w.saturating_sub(scale::len(6)), text.y + from_top as u32,
+        scale::len(4), thumb_h),
         color, alpha: 200 * 255 / 256, radius: 0 })
 }
 

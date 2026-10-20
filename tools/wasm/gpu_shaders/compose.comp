@@ -394,7 +394,11 @@ uint text(Blk it, uint x, uint y, uint c) {
     if (x < dx || y < dy || x >= dx + dw || y >= dy + dh || x >= dx + sw || y >= dy + sh)
         return c;
     uint pv = src.v[(y - dy) * spitch + (x - dx)];
-    return (pv >> 24) != 0u ? pv & 0xFFFFFFu : c;
+    // The alpha byte is glyph coverage (0..255), `blend` takes 0..256.
+    uint a = pv >> 24;
+    if (a == 0u)
+        return c;
+    return blend(pv & 0xFFFFFFu, c, a + (a >> 7u));
 }
 
 // Item::Fill at one pixel.

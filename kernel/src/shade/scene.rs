@@ -334,8 +334,11 @@ fn text(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, area
         let row = ((y - dst.y) * sw) as usize;
         for x in area.x..x1 {
             let p = px[row + (x - dst.x) as usize];
-            if p >> 24 != 0 {
-                render::put_pixel(t, info, x, y, p & 0x00FF_FFFF);
+            // The alpha byte is glyph coverage: edges blend, cores cover.
+            match p >> 24 {
+                0 => {}
+                255 => render::put_pixel(t, info, x, y, p & 0x00FF_FFFF),
+                a => render::blend_pixel(t, info, x, y, p & 0x00FF_FFFF, a + (a >> 7)),
             }
         }
     }
