@@ -31,6 +31,8 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
         '#IP_VERSION_MAJ' '#IP_VERSION_MIN' '#IP_VERSION_REV'
     $X "$AMD/amdgpu/amdgpu_vcn.h" '#AMDGPU_MAX_VCN_INSTANCES' '#AMDGPU_VCN_HARVEST_VCN0' '#AMDGPU_VCN_HARVEST_VCN1'
     $X "$AMD/amdgpu/amdgpu_sdma.h" '#AMDGPU_MAX_SDMA_INSTANCES'
+    $X "$AMD/amdgpu/amdgpu_ring.h" '#AMDGPU_MAX_RINGS'
+    $X "$AMD/amdgpu/amdgpu.h" amdgpu_init_lvl_id
     $X "$AMD/amdgpu/amdgpu_vpe.h" '#AMDGPU_MAX_VPE_INSTANCES'
 } > "$B/amdgpu_extracted.h"
 {
@@ -76,6 +78,12 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
         amdgpu_device_indirect_wreg
     $X "$AMD/amdgpu/vega10_reg_init.c" vega10_doorbell_index_init
     $X "$AMD/amdgpu/soc15.c" soc15_program_aspm soc15_sdma_doorbell_range_init soc15_common_hw_init
+    $X "$AMD/amdgpu/nbio_v7_0.c" '#smnNBIF_MGCG_CTRL_LCLK' nbio_7_0_read_syshub_ind_mmr nbio_7_0_write_syshub_ind_mmr \
+        nbio_v7_0_enable_doorbell_selfring_aperture nbio_v7_0_ih_doorbell_range \
+        nbio_v7_0_update_medium_grain_clock_gating nbio_v7_0_update_medium_grain_light_sleep nbio_v7_0_ih_control
+    $X "$AMD/amdgpu/soc15.c" '#mmMP0_MISC_CGTT_CTRL0' '#mmMP0_MISC_CGTT_CTRL0_BASE_IDX' '#mmMP0_MISC_LIGHT_SLEEP_CTRL' \
+        '#mmMP0_MISC_LIGHT_SLEEP_CTRL_BASE_IDX' soc15_update_drm_clock_gating soc15_update_drm_light_sleep \
+        soc15_common_set_clockgating_state soc15_common_hw_fini
 } > "$B/common_extracted.c"
 
 {
@@ -85,27 +93,50 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
     $X "$AMD/amdgpu/amdgpu_gart.h" '#AMDGPU_GPU_PAGE_SHIFT'
     $X "$AMD/amdgpu/amdgpu_gmc.h" '#AMDGPU_GMC_HOLE_START' amdgpu_gart_placement amdgpu_vmhub
     $X "$AMD/amdgpu/amdgpu.h" '#AMDGPU_VBIOS_VGA_ALLOCATION'
+    $X "$AMD/amdgpu/amdgpu_ih.h" amdgpu_ih_regs amdgpu_ih_ring
+    $X "$AMD/amdgpu/amdgpu_psp.h" psp_reg_prog_id
+    $X "$AMD/amdgpu/amdgpu_irq.h" amdgpu_interrupt_state amdgpu_irq_src_funcs
+    $X "$AMD/amdgpu/amdgpu_ras.h" amdgpu_ras_block
 } > "$B/gmc_types.h"
 {
     $X "$AMD/amdgpu/amdgpu.h" amdgpu_ip_version
+    $X "$AMD/amdgpu/amdgpu_ids.h" '#AMDGPU_NUM_VMID'
     $X "$AMD/amdgpu/gfxhub_v1_0.c" gfxhub_v1_0_get_mc_fb_offset gfxhub_v1_0_init gfxhub_v1_0_setup_vm_pt_regs \
         gfxhub_v1_0_init_gart_aperture_regs gfxhub_v1_0_init_system_aperture_regs gfxhub_v1_0_init_tlb_regs \
         gfxhub_v1_0_init_cache_regs gfxhub_v1_0_enable_system_domain gfxhub_v1_0_disable_identity_aperture \
         gfxhub_v1_0_setup_vmid_config gfxhub_v1_0_program_invalidation gfxhub_v1_0_gart_enable \
-        gfxhub_v1_0_set_fault_enable_default
+        gfxhub_v1_0_set_fault_enable_default gfxhub_v1_0_gart_disable
 } > "$B/hub_gc_extracted.c"
 {
     $X "$AMD/amdgpu/amdgpu.h" amdgpu_ip_version
-    $X "$AMD/amdgpu/mmhub_v1_0.c" mmhub_v1_0_get_fb_location mmhub_v1_0_init mmhub_v1_0_setup_vm_pt_regs \
+    $X "$AMD/amdgpu/amdgpu_ids.h" '#AMDGPU_NUM_VMID'
+    $X "$AMD/amdgpu/mmhub_v1_0.c" '#mmDAGB0_CNTL_MISC2_RV' '#mmDAGB0_CNTL_MISC2_RV_BASE_IDX' mmhub_v1_0_get_fb_location mmhub_v1_0_init mmhub_v1_0_setup_vm_pt_regs \
         mmhub_v1_0_init_gart_aperture_regs mmhub_v1_0_init_system_aperture_regs mmhub_v1_0_init_tlb_regs \
         mmhub_v1_0_init_cache_regs mmhub_v1_0_enable_system_domain mmhub_v1_0_disable_identity_aperture \
         mmhub_v1_0_init_saw mmhub_v1_0_setup_vmid_config mmhub_v1_0_program_invalidation \
-        mmhub_v1_0_update_power_gating mmhub_v1_0_gart_enable mmhub_v1_0_set_fault_enable_default
+        mmhub_v1_0_update_power_gating mmhub_v1_0_gart_enable mmhub_v1_0_set_fault_enable_default \
+        mmhub_v1_0_gart_disable mmhub_v1_0_update_medium_grain_clock_gating \
+        mmhub_v1_0_update_medium_grain_light_sleep mmhub_v1_0_set_clockgating
 } > "$B/hub_mm_extracted.c"
 {
     $X "$AMD/amdgpu/amdgpu.h" amdgpu_ip_version
-    $X "$AMD/amdgpu/hdp_v4_0.c" hdp_v4_0_init_registers
+    $X "$AMD/amdgpu/hdp_v4_0.c" '#mmHDP_MEM_POWER_CTRL' '#HDP_MEM_POWER_CTRL__IPH_MEM_POWER_CTRL_EN_MASK' \
+        '#HDP_MEM_POWER_CTRL__IPH_MEM_POWER_LS_EN_MASK' '#HDP_MEM_POWER_CTRL__RC_MEM_POWER_CTRL_EN_MASK' \
+        '#HDP_MEM_POWER_CTRL__RC_MEM_POWER_LS_EN_MASK' '#mmHDP_MEM_POWER_CTRL_BASE_IDX' \
+        hdp_v4_0_init_registers hdp_v4_0_update_clock_gating
 } > "$B/hub_hdp_extracted.c"
+{
+    $X "$AMD/amdgpu/amdgpu.h" amdgpu_ip_version
+    $X "$AMD/amdgpu/vega10_ih.c" vega10_ih_init_register_offset vega10_ih_toggle_ring_interrupts \
+        vega10_ih_toggle_interrupts vega10_ih_rb_cntl vega10_ih_doorbell_rptr vega10_ih_enable_ring \
+        vega10_ih_irq_init vega10_ih_irq_disable vega10_ih_hw_init vega10_ih_hw_fini \
+        vega10_ih_update_clockgating_state vega10_ih_set_clockgating_state
+} > "$B/hub_ih_extracted.c"
+{
+    $X "$AMD/amdgpu/amdgpu.h" amdgpu_ip_version
+    $X "$AMD/amdgpu/athub_v1_0.c" athub_update_medium_grain_clock_gating athub_update_medium_grain_light_sleep \
+        athub_v1_0_set_clockgating
+} > "$B/hub_athub_extracted.c"
 {
     $X "$AMD/amdgpu/amdgpu.h" amdgpu_is_multi_aid '#REG_GET_FIELD'
     $X "$AMD/amdgpu/amdgpu_gmc.h" '#amdgpu_gmc_get_vbios_fb_size'
@@ -128,6 +159,12 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
         gmc_v9_0_get_vbios_fb_size gmc_v9_0_vram_gtt_location gmc_v9_0_mc_init gmc_v9_4_3_init_vram_info \
         gmc_v9_0_sw_init gmc_v9_0_use_invalidate_semaphore gmc_v9_0_get_invalidate_req gmc_v9_0_flush_gpu_tlb \
         gmc_v9_0_gart_enable gmc_v9_0_hw_init
+    $X "$AMD/amdgpu/amdgpu_irq.c" amdgpu_irq_update amdgpu_irq_enabled amdgpu_irq_get amdgpu_irq_put
+    $X "$AMD/amdgpu/amdgpu_sdma.c" amdgpu_sdma_is_shared_inv_eng amdgpu_sdma_get_shared_ring
+    $X "$AMD/amdgpu/amdgpu_gmc.c" '#AMDGPU_VMHUB_INV_ENG_BITMAP' amdgpu_gmc_allocate_vm_inv_eng amdgpu_gmc_ras_late_init
+    $X "$AMD/amdgpu/amdgpu_ras.c" amdgpu_persistent_edc_harvesting_supported
+    $X "$AMD/amdgpu/gmc_v9_0.c" gmc_v9_0_vm_fault_interrupt_state gmc_v9_0_late_init gmc_v9_0_set_clockgating_state \
+        gmc_v9_0_gart_disable gmc_v9_0_hw_fini
 } > "$B/gmc_extracted.c"
 
 # The DMUB region layout: dmub_srv.c's functions with the types they use.
@@ -172,6 +209,108 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
         psp_asd_terminate psp_prep_tmr_unload_cmd_buf psp_tmr_unload psp_tmr_terminate
 } > "$B/psp_funcs.c"
 
+# Stage 4, GFX: gfx_v9_0_hw_init and late_init, the GFX gating, hw_fini,
+# with the ring, KIQ, RLC and IRQ helpers they call.
+{
+    $X "$L/include/uapi/drm/amdgpu_drm.h" '#AMDGPU_HW_IP_GFX' '#AMDGPU_HW_IP_COMPUTE' '#AMDGPU_HW_IP_DMA' '#AMDGPU_HW_IP_UVD' \
+        '#AMDGPU_HW_IP_VCE' '#AMDGPU_HW_IP_UVD_ENC' '#AMDGPU_HW_IP_VCN_DEC' '#AMDGPU_HW_IP_VCN_ENC' '#AMDGPU_HW_IP_VCN_JPEG' \
+        '#AMDGPU_HW_IP_VPE'
+    $X "$AMD/amdgpu/amdgpu.h" amd_hw_ip_block_type '#HWIP_MAX_INSTANCE'
+    $X "$AMD/amdgpu/amdgpu_ring.h" '#AMDGPU_MAX_COMPUTE_RINGS' amdgpu_ring_type amdgpu_ring_priority_level
+    $X "$AMD/amdgpu/amdgpu_gfx.h" '#AMDGPU_MAX_QUEUES' '#AMDGPU_MAX_GFX_QUEUES' '#AMDGPU_MAX_COMPUTE_QUEUES' amdgpu_gfx_pipe_priority \
+        '#AMDGPU_GFX_QUEUE_PRIORITY_MINIMUM' '#AMDGPU_GFX_QUEUE_PRIORITY_MAXIMUM' amdgpu_unmap_queues_action
+    $X "$AMD/amdgpu/amdgpu_irq.h" amdgpu_interrupt_state
+    $X "$AMD/amdgpu/amdgpu.h" amdgpu_cp_irq '#AMDGPU_MAX_USEC_TIMEOUT'
+    $X "$AMD/amdgpu/amdgpu_ids.h" '#AMDGPU_NUM_VMID'
+    $X "$AMD/amdgpu/amdgpu_gart.h" '#AMDGPU_GPU_PAGE_SIZE'
+    $X "$AMD/amdgpu/soc15.h" soc15_reg_golden '#SOC15_REG_ENTRY' '#SOC15_REG_GOLDEN_VALUE'
+    $X "$AMD/amdgpu/gfx_v9_0.c" '#GFX9_NUM_GFX_RINGS' '#GFX9_MEC_HPD_SIZE' '#mmGCEA_PROBE_MAP' '#mmGCEA_PROBE_MAP_BASE_IDX' \
+        '#DEFAULT_SH_MEM_BASES'
+} > "$B/gfx_types.h"
+{
+    $X "$AMD/amdgpu/soc15.c" soc15_grbm_select soc15_program_register_sequence
+    $X "$AMD/amdgpu/amdgpu_ring.c" amdgpu_ring_alloc amdgpu_ring_insert_nop amdgpu_ring_commit amdgpu_ring_undo \
+        amdgpu_ring_test_helper
+    $X "$AMD/amdgpu/amdgpu_ring.h" amdgpu_ring_clear_ring amdgpu_ring_write
+    $X "$AMD/amdgpu/amdgpu_rlc.c" amdgpu_gfx_rlc_enter_safe_mode amdgpu_gfx_rlc_exit_safe_mode
+    $X "$AMD/amdgpu/amdgpu_irq.c" amdgpu_irq_update amdgpu_irq_enabled amdgpu_irq_get amdgpu_irq_put
+    $X "$AMD/amdgpu/amdgpu_gfx.h" amdgpu_gfx_create_bitmask
+    $X "$AMD/amdgpu/amdgpu_gfx.c" amdgpu_queue_mask_bit_to_mec_queue amdgpu_gfx_parse_disable_cu \
+        amdgpu_gfx_is_high_priority_compute_queue amdgpu_queue_mask_bit_to_set_resource_bit amdgpu_gfx_enable_kcq \
+        amdgpu_gfx_disable_kcq amdgpu_gfx_do_off_ctrl amdgpu_gfx_off_ctrl_immediate amdgpu_gfx_cleaner_shader_init \
+        amdgpu_gfx_csb_preamble_start amdgpu_gfx_csb_data_parser amdgpu_gfx_csb_preamble_end
+    $X "$AMD/amdgpu/gfx_v9_0.c" golden_settings_gc_9_1_rn golden_settings_gc_9_x_common \
+        gfx_v9_0_kiq_set_resources gfx_v9_0_kiq_map_queues gfx_v9_0_kiq_unmap_queues \
+        gfx_v9_0_init_golden_registers gfx_v9_0_ring_test_ring check_if_enlarge_doorbell_range \
+        gfx_v9_0_get_csb_size gfx_v9_0_get_csb_buffer gfx_v9_0_tiling_mode_table_init gfx_v9_0_select_se_sh \
+        gfx_v9_0_get_rb_active_bitmap gfx_v9_0_setup_rb gfx_v9_0_debug_trap_config_init gfx_v9_0_init_compute_vmid \
+        gfx_v9_0_init_gds_vmid gfx_v9_0_init_sq_config gfx_v9_0_constants_init gfx_v9_0_wait_for_rlc_serdes \
+        gfx_v9_0_enable_gui_idle_interrupt gfx_v9_0_init_csb gfx_v9_0_enable_save_restore_machine \
+        gfx_v9_0_init_gfx_power_gating gfx_v9_0_enable_sck_slow_down_on_power_up \
+        gfx_v9_0_enable_sck_slow_down_on_power_down gfx_v9_0_enable_cp_power_gating \
+        gfx_v9_0_enable_gfx_cg_power_gating gfx_v9_0_enable_gfx_pipeline_powergating \
+        gfx_v9_0_enable_gfx_static_mg_power_gating gfx_v9_0_enable_gfx_dynamic_mg_power_gating gfx_v9_0_init_pg \
+        gfx_v9_0_rlc_stop gfx_v9_0_rlc_start gfx_v9_0_rlc_resume gfx_v9_0_cp_gfx_enable gfx_v9_0_cp_gfx_start \
+        gfx_v9_0_cp_gfx_resume gfx_v9_0_cp_compute_enable gfx_v9_0_kiq_setting gfx_v9_0_mqd_set_priority \
+        gfx_v9_0_mqd_init gfx_v9_0_kiq_init_register gfx_v9_0_kiq_fini_register gfx_v9_0_kiq_init_queue \
+        gfx_v9_0_kcq_init_queue gfx_v9_0_kiq_resume gfx_v9_0_kcq_resume gfx_v9_0_cp_resume gfx_v9_0_cp_enable \
+        gfx_v9_0_init_tcp_config gfx_v9_0_hw_init gfx_v9_0_hw_fini gfx_v9_0_late_init \
+        gfx_v9_0_is_rlc_enabled gfx_v9_0_set_safe_mode gfx_v9_0_unset_safe_mode gfx_v9_0_update_gfx_cg_power_gating \
+        gfx_v9_0_update_gfx_mg_power_gating gfx_v9_0_update_medium_grain_clock_gating \
+        gfx_v9_0_update_3d_clock_gating gfx_v9_0_update_coarse_grain_clock_gating gfx_v9_0_update_gfx_clock_gating \
+        gfx_v9_0_update_spm_vmid_internal gfx_v9_0_set_powergating_state gfx_v9_0_set_clockgating_state \
+        gfx_v9_0_ring_set_wptr_gfx gfx_v9_0_ring_set_wptr_compute gfx_v9_ring_insert_nop \
+        gfx_v9_0_set_gfx_eop_interrupt_state gfx_v9_0_set_compute_eop_interrupt_state gfx_v9_0_get_cpc_int_cntl \
+        gfx_v9_0_set_priv_reg_fault_state gfx_v9_0_set_bad_op_fault_state gfx_v9_0_set_priv_inst_fault_state \
+        gfx_v9_0_set_eop_interrupt_state gfx_v9_0_set_user_cu_inactive_bitmap gfx_v9_0_get_cu_active_bitmap \
+        gfx_v9_0_get_cu_info
+} > "$B/gfx_extracted.c"
+
+# Stage 4, SDMA: sdma_v4_0_hw_init with its ring test, late_init, gating,
+# hw_fini.
+{
+    $X "$AMD/amdgpu/soc15.c" soc15_program_register_sequence
+    $X "$AMD/amdgpu/amdgpu_ring.c" amdgpu_ring_alloc amdgpu_ring_commit amdgpu_ring_test_helper
+    $X "$AMD/amdgpu/amdgpu_ring.h" amdgpu_ring_write
+    $X "$AMD/amdgpu/amdgpu_sdma.c" amdgpu_sdma_get_instance_from_ring
+    $X "$AMD/amdgpu/amdgpu_device.c" amdgpu_device_wb_get amdgpu_device_wb_free
+    $X "$AMD/amdgpu/sdma_v4_0.c" '#WREG32_SDMA' '#RREG32_SDMA' golden_settings_sdma_4_3 sdma_v4_0_get_reg_offset \
+        sdma_v4_0_init_golden_registers sdma_v4_0_setup_ulv sdma_v4_0_ring_set_wptr sdma_v4_0_ring_insert_nop \
+        sdma_v4_0_gfx_enable sdma_v4_0_rlc_stop sdma_v4_0_page_stop sdma_v4_0_ctx_switch_enable sdma_v4_0_enable \
+        sdma_v4_0_rb_cntl sdma_v4_0_gfx_resume sdma_v4_1_update_power_gating sdma_v4_1_init_power_gating \
+        sdma_v4_0_init_pg sdma_v4_0_rlc_resume sdma_v4_0_start sdma_v4_0_ring_test_ring sdma_v4_0_late_init \
+        sdma_v4_0_hw_init sdma_v4_0_hw_fini sdma_v4_0_update_medium_grain_clock_gating \
+        sdma_v4_0_update_medium_grain_light_sleep sdma_v4_0_set_clockgating_state sdma_v4_0_set_powergating_state
+} > "$B/sdma_extracted.c"
+
+# Stage 4, SMU: smu_cmn.c, smu_v12_0.c and renoir_ppt.c are compiled whole
+# against shim_smu/amdgpu.h; of amdgpu_smu.c the IP block's life is
+# copied, with amdgpu_dpm.c's way into it and the HDP invalidate its table
+# reads use.
+{
+    $X "$AMD/amdgpu/amdgpu.h" amd_hw_ip_block_type '#HWIP_MAX_INSTANCE' amd_reset_method
+    $X "$AMD/pm/inc/amdgpu_dpm.h" ip_power_state amdgpu_dpm_thermal config_table_setting
+} > "$B/smu_oracle_types.h"
+{
+    $X "$AMD/pm/swsmu/amdgpu_smu.c" smu_set_funcs smu_early_init is_vcn_enabled smu_dpm_set_vcn_enable \
+        smu_dpm_set_jpeg_enable smu_dpm_set_vpe_enable smu_dpm_set_isp_enable smu_dpm_set_umsch_mm_enable \
+        smu_set_mall_enable smu_set_gfx_imu_enable smu_set_gfx_power_up_by_imu smu_set_gfx_cgpg \
+        smu_power_profile_mode_get smu_power_profile_mode_put smu_init_power_profile smu_feature_cap_init \
+        smu_set_user_clk_dependencies smu_wbrf_event_handler \
+        smu_init_fb_allocations smu_alloc_memory_pool smu_alloc_dummy_read_table smu_smc_table_sw_init \
+        smu_sw_init smu_start_smc_engine smu_wbrf_support_check smu_wbrf_init smu_wbrf_fini \
+        smu_get_driver_allowed_feature_mask smu_get_thermal_temperature_range smu_init_xgmi_plpd_mode \
+        smu_get_pm_policy smu_update_gpu_addresses smu_set_default_dpm_table smu_smc_hw_setup smu_hw_init \
+        smu_convert_to_smuclk smu_force_smuclk_levels smu_bump_power_profile_mode smu_adjust_power_state_dynamic \
+        smu_handle_task smu_set_ac_dc smu_apply_default_config_table_settings smu_set_power_limit \
+        smu_set_fan_control_mode smu_set_fan_speed_pwm smu_set_fan_speed_rpm smu_od_edit_dpm_table \
+        smu_restore_dpm_user_profile smu_late_init smu_disable_dpms smu_smc_hw_cleanup smu_set_mp1_state \
+        smu_reset_mp1_state smu_hw_fini smu_dpm_set_power_gate
+    $X "$AMD/pm/amdgpu_dpm.c" amdgpu_dpm_set_powergating_by_smu
+    $X "$AMD/amdgpu/hdp_v4_0.c" hdp_v4_0_invalidate_hdp
+} > "$B/smu_extracted.c"
+python3 -I "$HERE/protos.py" "$B/smu_extracted.c" > "$B/smu_protos.h"
+
 CF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
 gcc $CF -c "$B/atom.c" -o "$B/atom.o"
 gcc $CF "$HERE/main.c" "$B/atom.o" -o "$B/oracle_atom"
@@ -184,7 +323,10 @@ gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_common.c" -o "$B/oracle_common"
 gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_gc.c" -o "$B/hub_gc.o"
 gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_mm.c" -o "$B/hub_mm.o"
 gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_hdp.c" -o "$B/hub_hdp.o"
-gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_gmc.c" "$B/hub_gc.o" "$B/hub_mm.o" "$B/hub_hdp.o" -o "$B/oracle_gmc"
+gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_ih.c" -o "$B/hub_ih.o"
+gcc $CF -I "$AMD/include/asic_reg" -c "$HERE/hub_athub.c" -o "$B/hub_athub.o"
+gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_gmc.c" "$B/hub_gc.o" "$B/hub_mm.o" "$B/hub_hdp.o" "$B/hub_ih.o" \
+    "$B/hub_athub.o" -o "$B/oracle_gmc"
 # The VRAM manager: buddy.c and tools/lib/rbtree.c whole, amdgpu_vram_mgr.c's functions.
 mkdir -p "$B/buddy/linux"
 cp "$L/include/linux/gpu_buddy.h" "$B/buddy/linux/"
@@ -204,3 +346,13 @@ $X "$L/include/linux/overflow.h" '#range_overflows' > "$B/buddy/range_overflows.
 gcc -O0 -w -include "$HERE/shim_buddy/buddy_kern.h" -I "$HERE/shim_buddy" -I "$B/buddy" -I "$L/tools/include" \
     -I "$AMD/include" -include "$L/include/uapi/drm/amdgpu_drm.h" -include "$L/include/drm/ttm/ttm_placement.h" \
     "$HERE/main_vram.c" "$L/tools/lib/rbtree.c" -o "$B/oracle_vram"
+gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_gfx.c" -o "$B/oracle_gfx"
+gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_sdma.c" -o "$B/oracle_sdma"
+
+SMUF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -include $HERE/shim/linux/types.h -I $HERE/shim_smu -I $HERE/shim -I $B \
+    -I $AMD/pm/swsmu/inc -I $AMD/pm/swsmu -I $AMD/pm/swsmu/inc/pmfw_if -I $AMD/pm/swsmu/smu12 -I $AMD/include \
+    -I $AMD/include/asic_reg -I $AMD/pm/inc -I $AMD/amdgpu -I $AMD/display/dc"
+gcc $SMUF -c "$AMD/pm/swsmu/smu_cmn.c" -o "$B/smu_cmn.o"
+gcc $SMUF -c "$AMD/pm/swsmu/smu12/smu_v12_0.c" -o "$B/smu_v12_0.o"
+gcc $SMUF -c "$AMD/pm/swsmu/smu12/renoir_ppt.c" -o "$B/renoir_ppt.o"
+gcc $SMUF "$HERE/main_smu.c" "$B/smu_cmn.o" "$B/smu_v12_0.o" "$B/renoir_ppt.o" -o "$B/oracle_smu"

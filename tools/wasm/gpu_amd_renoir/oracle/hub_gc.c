@@ -34,6 +34,7 @@ const struct amdgpu_gfxhub_funcs oracle_gfxhub_v1_0_funcs = {
 	.gart_enable = gfxhub_v1_0_gart_enable,
 	.set_fault_enable_default = gfxhub_v1_0_set_fault_enable_default,
 	.init = gfxhub_v1_0_init,
+	.gart_disable = gfxhub_v1_0_gart_disable,
 };
 
 /* The preset gmc_check.rs sets alike. */

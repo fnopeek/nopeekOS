@@ -12,6 +12,12 @@
 #include "amdgpu_extracted.h"
 typedef u64 resource_size_t;
 typedef struct { int counter; } atomic_t;
+typedef struct { int w; } wait_queue_head_t;
+#define atomic_read(a) ((a)->counter)
+#define atomic_inc_return(a) (++(a)->counter)
+#define atomic_dec_and_test(a) (--(a)->counter == 0)
+struct amdgpu_device;
+struct amdgpu_iv_entry;
 #include "amdgpu_doorbell.h"
 #include "soc15_ih_clientid.h"
 #include "gmc_types.h"
@@ -22,6 +28,7 @@ struct amdgpu_device;
 struct amdgpu_gfxhub_funcs {
 	u64 (*get_mc_fb_offset)(struct amdgpu_device *adev);
 	int (*gart_enable)(struct amdgpu_device *adev);
+	void (*gart_disable)(struct amdgpu_device *adev);
 	void (*set_fault_enable_default)(struct amdgpu_device *adev, bool value);
 	void (*init)(struct amdgpu_device *adev);
 };
@@ -31,12 +38,22 @@ struct amdgpu_mmhub_funcs {
 	int (*gart_enable)(struct amdgpu_device *adev);
 	void (*set_fault_enable_default)(struct amdgpu_device *adev, bool value);
 	void (*update_power_gating)(struct amdgpu_device *adev, bool enable);
+	void (*gart_disable)(struct amdgpu_device *adev);
+	int (*set_clockgating)(struct amdgpu_device *adev, enum amd_clockgating_state state);
 };
 struct amdgpu_gmc_funcs {
 	unsigned int (*get_vbios_fb_size)(struct amdgpu_device *adev);
 };
 struct amdgpu_hdp_funcs {
 	void (*init_registers)(struct amdgpu_device *adev);
+	void (*update_clock_gating)(struct amdgpu_device *adev, bool enable);
+};
+/* What amdgpu_gmc_allocate_vm_inv_eng and the SDMA ring helpers read of a
+ * ring. */
+struct amdgpu_ring {
+	const struct { void *emit_hdp_flush; } *funcs;
+	u32 vm_hub, vm_inv_eng, me;
+	char name[16];
 };
 /* What gmc_v9_0_hw_init reads of a buffer object: the GART table's page
  * directory address and GPU offset, given by the port's run. */
@@ -54,6 +71,11 @@ struct amdgpu_nbio_funcs {
 	u32 (*get_pcie_index_offset)(struct amdgpu_device *adev);
 	u32 (*get_pcie_data_offset)(struct amdgpu_device *adev);
 	u32 (*get_memsize)(struct amdgpu_device *adev);
+	void (*enable_doorbell_selfring_aperture)(struct amdgpu_device *adev, bool enable);
+	void (*ih_doorbell_range)(struct amdgpu_device *adev, bool use_doorbell, int doorbell_index);
+	void (*update_medium_grain_clock_gating)(struct amdgpu_device *adev, bool enable);
+	void (*update_medium_grain_light_sleep)(struct amdgpu_device *adev, bool enable);
+	void (*ih_control)(struct amdgpu_device *adev);
 };
 
 struct amdgpu_vcn_inst { u32 vcn_config, vcn_codec_disable_mask; };
@@ -111,7 +133,20 @@ struct amdgpu_device {
 	unsigned long vmhubs_mask[1];
 	struct { u64 max_pfn; u32 num_level, root_level, block_size, fragment_size; u64 vram_base_offset;
 		 u32 first_kfd_vmid; } vm_manager;
-	struct { struct amdgpu_irq_client client[AMDGPU_IRQ_CLIENTID_MAX]; } irq;
+	struct {
+		struct amdgpu_irq_client client[AMDGPU_IRQ_CLIENTID_MAX];
+		struct amdgpu_ih_ring ih, ih1, ih2, ih_soft;
+		bool installed, msi_enabled;
+	} irq;
+	u64 cg_flags;
+	struct amdgpu_ring *rings[AMDGPU_MAX_RINGS];
+	unsigned num_rings;
+	struct { struct amdgpu_ring ring[2]; } mes;
+	struct { struct amdgpu_ring ring; } umsch_mm;
+	struct { struct amdgpu_ring ring_buf; } cper;
+	bool enable_mes, enable_uni_mes, enable_umsch_mm;
+	struct { int level; } *init_lvl;
+	struct { const struct { void (*update_rom_clock_gating)(struct amdgpu_device *, bool); } *funcs; } smuio;
 	void *bios;
 	struct { struct amdgpu_bo *bo; } gart;
 	struct { u64 gpu_addr; } mem_scratch;
@@ -123,16 +158,25 @@ struct amdgpu_device {
 	struct { void *logical_to_dev_inst, *logical_to_dev_mask; } ip_map;
 	u32 aid_mask;
 	u32 rev_id;
-	struct { const struct { int (*get_hbm_channel_number)(struct amdgpu_device *adev); } *funcs; } df;
+	struct { const struct { int (*get_hbm_channel_number)(struct amdgpu_device *adev);
+				void (*update_medium_grain_clock_gating)(struct amdgpu_device *, bool);
+				void (*enable_ecc_force_par_wr_rmw)(struct amdgpu_device *, bool); } *funcs; } df;
+	u32 ras_enabled;
 	bool need_swiotlb;
-	struct { u32 num_instances, sdma_mask; } sdma;
+	struct { u32 num_instances, sdma_mask; bool has_page_queue;
+		 struct { struct amdgpu_ring ring, page; } instance[AMDGPU_MAX_SDMA_INSTANCES]; } sdma;
 	struct { u32 node_inst_num, active_mask; const struct { void (*init_registers)(struct amdgpu_device *); } *funcs; } umc;
 	struct { u32 num_vcn_inst, inst_mask, harvest_config; struct amdgpu_vcn_inst inst[AMDGPU_MAX_VCN_INSTANCES]; } vcn;
 	struct { u32 inst_mask, harvest_config; } jpeg;
 	struct { u32 num_instances; } vpe;
 	struct { u32 harvest_config; } isp;
 	u32 flags;
-	struct { const struct amdgpu_nbio_funcs *funcs; } nbio;
+	struct {
+		const struct amdgpu_nbio_funcs *funcs;
+		struct { int block; } *ras_if;
+		const struct { void *init_ras_controller_interrupt, *init_ras_err_event_athub_interrupt; } *ras;
+		struct amdgpu_irq_src ras_controller_irq, ras_err_event_athub_irq;
+	} nbio;
 	struct { u32 reg_offset; u64 bus_addr; } rmmio_remap;
 	u64 rmmio_base;
 	void *rmmio;
@@ -140,3 +184,4 @@ struct amdgpu_device {
 	int pcie_idx_lock;
 	struct amdgpu_doorbell_index doorbell_index;
 };
+struct amdgpu_ip_block { struct amdgpu_device *adev; };

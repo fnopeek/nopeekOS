@@ -2210,10 +2210,24 @@ fn gfx_v9_0_cp_resume(adev: &mut amdgpu_device) -> i32 {
     0
 }
 
-/// `gfx_v9_0_hw_init`: bare metal, GC 9.3.0. The cleaner shader is off
-/// (`amdgpu_gfx_cleaner_shader_init` returns), `gfx_v9_0_init_tcp_config`
-/// is for GC 9.4.1/9.4.2 only.
+/// `amdgpu_gfx_cleaner_shader_init`: the shader into its buffer, when
+/// sw_init enabled it.
+fn amdgpu_gfx_cleaner_shader_init(adev: &amdgpu_device, shader: &[u32]) {
+    if !adev.gfx.enable_cleaner_shader {
+        return;
+    }
+    if let Some(k) = adev.gfx.cleaner_shader_cpu_ptr {
+        let bytes: Vec<u8> = shader.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let n = bytes.len().min(adev.gfx.cleaner_shader_size as usize);
+        crate::amdgpu_gart::kptr_write(adev, k, 0, &bytes[..n]);
+    }
+}
+
+/// `gfx_v9_0_hw_init`: bare metal, GC 9.3.0, whose cleaner shader is
+/// `gfx_9_4_2_cleaner_shader_hex`; `gfx_v9_0_init_tcp_config` is for GC
+/// 9.4.1/9.4.2 only.
 pub fn gfx_v9_0_hw_init(adev: &mut amdgpu_device) -> i32 {
+    amdgpu_gfx_cleaner_shader_init(adev, &crate::tables::gfx_9_4_2_cleaner_shader_hex);
     gfx_v9_0_init_golden_registers(adev);
     gfx_v9_0_constants_init(adev);
     let r = gfx_v9_0_rlc_resume(adev);

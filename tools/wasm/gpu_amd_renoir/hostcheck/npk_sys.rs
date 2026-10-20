@@ -43,11 +43,32 @@ pub fn fake_card_unset(rule: fn(u32) -> u32, index_data: (u32, u32)) {
 
 thread_local! {
     static ECHO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ECHO_SKIP: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Registers whose writes the echo leaves out.
+pub fn fake_card_echo_skip(regs: &[u32]) {
+    ECHO_SKIP.with(|e| *e.borrow_mut() = regs.to_vec());
 }
 
 /// From here on every register write is printed as it happens.
 pub fn fake_card_echo(on: bool) {
     ECHO.with(|e| e.set(on));
+}
+
+/// The registers the card holds, (register, value), by register.
+pub fn fake_card_regs() -> Vec<(u32, u32)> {
+    let mut v: Vec<(u32, u32)> =
+        CARD.with(|c| c.borrow().as_ref().map_or(Vec::new(), |c| c.regs.iter().map(|(&r, &v)| (r, v)).collect()));
+    v.sort();
+    v
+}
+
+/// What the card holds behind the PCIe index/data pair, by address.
+pub fn fake_card_indirect() -> Vec<(u32, u32)> {
+    let mut v: Vec<(u32, u32)> = INDIRECT.with(|i| i.borrow().iter().map(|(&a, &v)| (a, v)).collect());
+    v.sort();
+    v
 }
 
 /// Forget the writes seen so far.
@@ -192,7 +213,7 @@ impl Mmio {
             if let Some(c) = c.borrow_mut().as_mut() {
                 let reg = off / 4;
                 c.writes.push((reg, v));
-                if ECHO.with(|e| e.get()) {
+                if ECHO.with(|e| e.get()) && !ECHO_SKIP.with(|e| e.borrow().contains(&reg)) {
                     println!("write reg {:#x} = {:#x}", reg, v);
                 }
                 if let Some((rule, (index, data))) = UNSET.with(|u| *u.borrow()) {

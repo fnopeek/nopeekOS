@@ -35,6 +35,8 @@ const struct amdgpu_mmhub_funcs oracle_mmhub_v1_0_funcs = {
 	.gart_enable = mmhub_v1_0_gart_enable,
 	.set_fault_enable_default = mmhub_v1_0_set_fault_enable_default,
 	.update_power_gating = mmhub_v1_0_update_power_gating,
+	.gart_disable = mmhub_v1_0_gart_disable,
+	.set_clockgating = mmhub_v1_0_set_clockgating,
 };
 
 /* The presets gmc_check.rs sets alike. */

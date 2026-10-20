@@ -967,8 +967,9 @@ pub fn smu_hw_init(adev: &mut amdgpu_device) -> i32 {
         return 0;
     }
 
-    // smu_get_driver_allowed_feature_mask: SCPM is off, renoir has no
-    // get_allowed_feature_mask.
+    // smu_get_driver_allowed_feature_mask: SCPM is off, and renoir has no
+    // get_allowed_feature_mask, so Linux ORs in a stack array nothing wrote.
+    // Nothing on renoir reads the mask; it is kept at zero here.
     adev.smu.feature_allowed = 0;
 
     let r = smu_smc_hw_setup(adev);

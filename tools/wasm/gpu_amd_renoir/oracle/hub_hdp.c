@@ -15,4 +15,7 @@ void oracle_wreg32(struct amdgpu_device *adev, u32 reg, u32 v);
 #define REG_FIELD_MASK(reg, field) reg##__##field##_MASK
 #include "hub_hdp_extracted.c"
 
-const struct amdgpu_hdp_funcs oracle_hdp_v4_0_funcs = { .init_registers = hdp_v4_0_init_registers };
+const struct amdgpu_hdp_funcs oracle_hdp_v4_0_funcs = {
+	.init_registers = hdp_v4_0_init_registers,
+	.update_clock_gating = hdp_v4_0_update_clock_gating,
+};

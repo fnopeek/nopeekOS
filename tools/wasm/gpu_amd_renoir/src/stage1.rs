@@ -14,9 +14,15 @@ use crate::regs;
 /// The stage on a bound card whose BAR5 is mapped; `bdf` is its bus
 /// address, `bar2` the doorbell BAR's bus address and length.
 pub fn run(adev: &mut amdgpu_device, bdf: (u8, u8, u8), bar2: (u64, u64)) {
-    if device_init(adev, bdf, bar2) {
-        ip_init_common(adev);
+    if up_to_fw_loading(adev, bdf, bar2) {
+        ip_init_phase2(adev);
     }
+}
+
+/// Every step through `amdgpu_device_fw_loading`; true when it got there.
+pub fn up_to_fw_loading(adev: &mut amdgpu_device, bdf: (u8, u8, u8), bar2: (u64, u64)) -> bool {
+    device_init(adev, bdf, bar2) && ip_init_common(adev) && ip_init_gmc(adev) && ip_init_sw(adev)
+        && ip_init_fw_loading(adev)
 }
 
 /// `amdgpu_device_init` up to `amdgpu_device_ip_init`, reported; true when
@@ -57,7 +63,7 @@ fn common_regs(adev: &amdgpu_device, l: &mut Line) {
 }
 
 /// Stage 2: `amdgpu_device_ip_init` through the COMMON block.
-pub fn ip_init_common(adev: &mut amdgpu_device) {
+pub fn ip_init_common(adev: &mut amdgpu_device) -> bool {
     let mut l = Line::new();
     l.s("common before: ");
     common_regs(adev, &mut l);
@@ -72,19 +78,19 @@ pub fn ip_init_common(adev: &mut amdgpu_device) {
         .dec(adev.df_hash_status.hash_2m as u64).s("/").dec(adev.df_hash_status.hash_1g as u64).say();
     if r != 0 {
         Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
-        return;
+        return false;
     }
     Line::new().s("stage 2 done: amdgpu_device_ip_init through COMMON (sw ")
         .dec(adev.ip_blocks[0].status.sw as u64).s(", hw ").dec(adev.ip_blocks[0].status.hw as u64).s(")").say();
-    ip_init_gmc(adev);
+    true
 }
 
 /// Stage 3a: the GMC block's sw_init.
-fn ip_init_gmc(adev: &mut amdgpu_device) {
+pub fn ip_init_gmc(adev: &mut amdgpu_device) -> bool {
     let r = dev::amdgpu_device_ip_init_gmc(adev);
     if r != 0 {
         Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
-        return;
+        return false;
     }
     let g = &adev.gmc;
     Line::new().s("gmc: vram ").hex64(g.vram_start).s("-").hex64(g.vram_end).s(" aper ").hex64(g.aper_base)
@@ -102,15 +108,15 @@ fn ip_init_gmc(adev: &mut amdgpu_device) {
     }
     l.s(", ").dec(adev.mman.bos.iter().flatten().count() as u64).s(" kernel buffers").say();
     Line::new().s("stage 3a done: gmc_v9_0_sw_init").say();
-    ip_init_sw(adev);
+    true
 }
 
 /// Stage 3b: the sw_init of the remaining blocks.
-fn ip_init_sw(adev: &mut amdgpu_device) {
+pub fn ip_init_sw(adev: &mut amdgpu_device) -> bool {
     let r = dev::amdgpu_device_ip_init_sw(adev);
     if r != 0 {
         Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
-        return;
+        return false;
     }
     let mut l = Line::new();
     l.s("rings:");
@@ -134,25 +140,25 @@ fn ip_init_sw(adev: &mut amdgpu_device) {
     Line::new().s("fw_size ").dec(adev.firmware.fw_size as u64).s(", ")
         .dec(adev.mman.bos.iter().flatten().count() as u64).s(" kernel buffers").say();
     Line::new().s("stage 3b done: sw_init of every block").say();
-    ip_init_fw_loading(adev);
+    true
 }
 
 /// Stage 4: the IB pools, the firmware buffer, IH up (and with it bus
 /// mastering, so the IOMMU), and the PSP loading every block's firmware.
-fn ip_init_fw_loading(adev: &mut amdgpu_device) {
+fn ip_init_fw_loading(adev: &mut amdgpu_device) -> bool {
     let r = dev::amdgpu_device_ib_pool_init_logged(adev);
     if r != 0 {
-        return;
+        return false;
     }
     let r = crate::amdgpu_ucode::amdgpu_ucode_create_bo(adev);
     if r != 0 {
         Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
-        return;
+        return false;
     }
     let r = dev::amdgpu_device_ip_hw_init_phase1(adev);
     if r != 0 {
         Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
-        return;
+        return false;
     }
     let ih = &adev.irq.ih;
     Line::new().s("ih: ring ").hex64(ih.gpu_addr).s(" size ").dec(ih.ring_size as u64).s(" doorbell ")
@@ -180,10 +186,10 @@ fn ip_init_fw_loading(adev: &mut amdgpu_device) {
         .s(" securedisplay ").dec(p.securedisplay_context.context.initialized as u64).say();
     if r != 0 {
         Line::new().s("amdgpu_device_ip_init failed (").dec((-r) as u64).s(")").say();
-        return;
+        return false;
     }
     Line::new().s("fw_loading done").say();
-    ip_init_phase2(adev);
+    true
 }
 
 /// The rings' state after a test: `sched.ready` of each, by name.

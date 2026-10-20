@@ -129,6 +129,30 @@ if diff -u "$B/psp.linux" "$B/psp.port" | head -30; cmp -s "$B/psp.linux" "$B/ps
 else
     fail=1
 fi
+# Stage 4, block by block: the port runs to the block's start on the fake
+# card and prints the oracle's inputs, then the block's life with every
+# register write and doorbell; Linux runs the same life on the same inputs.
+# soc is GMC's oracle in its late mode: IH hw_init, GMC late_init, the
+# clock gating of COMMON, GMC and IH, their hw_fini.
+for blk in gfx sdma smu soc; do
+    rustc $RF "$HERE/${blk}4_check.rs" -o "$B/${blk}4_check"
+    for seed in ones zeros hash; do
+        "$B/${blk}4_check" "$DISC" "$BIOS" "$FW" $seed > "$B/$blk.$seed.out"
+        sed -n "/^--- $blk /,\$p" "$B/$blk.$seed.out" > "$B/$blk.$seed.port"
+        sed -n "1,/^--- $blk /p" "$B/$blk.$seed.out" | grep -v '^---' > "$B/$blk.$seed.in"
+        if [ $blk = soc ]; then
+            "$B/oracle_gmc" "$DISC" late $seed < "$B/$blk.$seed.in" | sed -n "/^--- $blk /,\$p" |
+                grep -v ' uses VM inv eng ' > "$B/$blk.$seed.linux"
+        else
+            "$B/oracle_$blk" $seed < "$B/$blk.$seed.in" > "$B/$blk.$seed.linux"
+        fi
+        if diff -u "$B/$blk.$seed.linux" "$B/$blk.$seed.port" | head -30; cmp -s "$B/$blk.$seed.linux" "$B/$blk.$seed.port"; then
+            echo "$blk ($seed): port = Linux ($(grep -c '^write' "$B/$blk.$seed.linux") register writes, $(grep -c '^doorbell' "$B/$blk.$seed.linux" || true) doorbells)"
+        else
+            fail=1
+        fi
+    done
+done
 rustc $RF "$HERE/stage1_run.rs" -o "$B/stage1_run"
 "$B/stage1_run" "$DISC" "$BIOS" "$FW" > "$B/run.log"
 # The VRAM requests of the run itself, through Linux's VRAM manager.

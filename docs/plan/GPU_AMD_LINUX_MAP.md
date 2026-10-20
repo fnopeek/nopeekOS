@@ -170,8 +170,8 @@ Linux' eigenen Code, auf `vbios.bin` und `ip_discovery.bin` vom Geraet
   `psp_hw_init` (TMR, jede IP-Firmware, ASD, HDCP, DTM, Secure Display)
   baut aus den Eingaben des Port-Laufs Frame und Befehl; die Ersatzkarte
   hat dafuer einen PSP, der den Ring quittiert und jeden Fence setzt.
-  18 Befehle, Wort fuer Wort gleich. **Nicht im Orakel:** die Register von
-  `vega10_ih_hw_init` (gegen die Quelle gelesen).
+  18 Befehle, Wort fuer Wort gleich. Die Register von `vega10_ih_hw_init`
+  prueft das SOC-Orakel aus Stufe 4 mit.
 
 - Viertes Orakel (`main_common.c`, Stufe 2): `soc15_common_hw_init` mit
   den nbio_v7_0-Funktionen und `amdgpu_device_indirect_rreg/wreg`, auf den
@@ -193,9 +193,39 @@ Linux' eigenen Code, auf `vbios.bin` und `ip_discovery.bin` vom Geraet
   elf Ringtests, alle neun IB-Tests, die Fences und `fini_hw`.
   **Das ist eine Gegenprobe der Abläufe, kein Orakel**: die Pakete misst
   der Ersatz-CP an der eigenen Lesart, nicht an Linux. Das PSP-Orakel deckt
-  `psp_hw_fini` mit ab (23 Befehle). **Noch nicht im Orakel:** die
-  Registerfolgen von `smu_hw_init`, `gfx_v9_0_hw_init`, `sdma_v4_0_hw_init`,
-  CG/PG und der hw_fini-Pfade.
+  `psp_hw_fini` mit ab (23 Befehle).
+
+- Stufe 4, je Block ein Orakel (`hostcheck/<blk>4_check.rs` gegen
+  `oracle/main_<blk>.c`): der Port laeuft auf der Ersatzkarte bis zum Start
+  des Blocks und gibt die Eingaben des Orakels aus (Registerbasen, Ringe,
+  was die Karte schon haelt); danach laeuft auf beiden Seiten dasselbe
+  Leben des Blocks, verglichen wird jeder Registerschreibzugriff und jede
+  Doorbell mit den Ringworten, drei Saatregeln.
+  - **gfx**: `gfx_v9_0_hw_init` (KIQ, KCQ, MQDs, alle Ringtests),
+    `late_init`, CG/PG an und aus, `hw_fini`; hinter den Doorbells laeuft
+    im Orakel genau, was die Ringtests abfragen. 318–325 Schreibzugriffe,
+    14 Doorbells. Gefunden: der Cleaner-Shader wurde nicht in sein BO
+    kopiert (`amdgpu_gfx_cleaner_shader_init`), behoben in 0.8.1.
+  - **sdma**: `sdma_v4_0_hw_init` mit Ringtest (`WRITE_LINEAR` in die
+    Writeback-Slots), `late_init`, CG/PG, `hw_fini`. 48–49, 2 Doorbells.
+  - **smu**: `smu_cmn.c`, `smu_v12_0.c` und `renoir_ppt.c` ganz uebersetzt
+    gegen ein schmales `shim_smu/amdgpu.h`, dazu `smu_early_init` bis
+    `smu_hw_fini` aus `amdgpu_smu.c` — also Linux' echte
+    `renoir_ppt_funcs`-Tabelle, gegen die jedes „renoir hat diesen Hook
+    nicht" des Ports laeuft. hw_init, Powergating von SDMA und GFX
+    (GFXOFF), `late_init`, `hw_fini`: 53 Schreibzugriffe. Nicht verglichen:
+    `smu_feature.allowed` — Renoir hat kein `get_allowed_feature_mask`, und
+    Linux verodert dort ein ungeschriebenes Stack-Array (der Port setzt 0;
+    gelesen wird die Maske auf Renoir nicht).
+  - **soc** (`main_gmc.c late`, mit `hub_ih.c` und `hub_athub.c`):
+    `vega10_ih_hw_init`, `gmc_v9_0_late_init` mit der Vergabe der
+    VM-Invalidierungs-Engines, Clockgating von COMMON (nbio, hdp, drm),
+    GMC (mmhub, athub) und IH an und aus, `hw_fini` von IH, GMC und
+    COMMON. 148–152 Schreibzugriffe.
+
+  **Nicht im Orakel:** `amdgpu_irq_disable_all` und
+  `amdgpu_fence_driver_hw_fini` aus `fini_hw` sowie die Reihenfolge der
+  Bloecke in `set_cg_state`/`set_pg_state` (gegen die Quelle gelesen).
 
 **Grenze:** geprueft ist, was die Daten des Geraets durchlaufen. Die
 GC-Tabelle des Geraets ist v2.0 — eine Mutation im v1-Zweig faellt nicht

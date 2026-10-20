@@ -32,8 +32,8 @@ for name in sys.argv[2:]:
     else:
         n = re.escape(name)
         rx = re.compile(
-            r"^(?:(?:union|struct|enum) %s\s*\{"
-            r"|(?:static )?(?:const )?[\w ]+\*?\s*\b%s\s*\[[^\]]*\]\s*=\s*\{"
+            r"^(?:(?:union|struct|enum) %s\s*(?:\{|$)"
+            r"|(?:static )?(?:const )?[\w ]+\*?\s*\b%s\s*\[[^\]]*\]\s*=\s*(?:\{|$)"
             r"|(?:static )?[\w ]+\*?\b%s\()" % (n, n, n)
         )
         # A prototype ends with `;`, on its own line or a continuation.

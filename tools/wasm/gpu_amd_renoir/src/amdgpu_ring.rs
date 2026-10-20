@@ -459,8 +459,9 @@ pub fn amdgpu_get_soft_full_reset_mask(adev: &amdgpu_device, ring: Option<usize>
 }
 
 /// `amdgpu_ring_alloc`. `begin_use` is the GFX rings'
-/// `amdgpu_gfx_enforce_isolation_ring_begin_use`, which returns at once
-/// without the cleaner shader, and no other ring of Renoir's has one.
+/// `amdgpu_gfx_enforce_isolation_ring_begin_use` (and the compute rings'
+/// wrapper around it): with isolation disabled, as `amdgpu_enforce_isolation`
+/// -1 leaves it, it schedules nothing. No other ring of Renoir's has one.
 pub fn amdgpu_ring_alloc(adev: &mut amdgpu_device, r: usize, ndw: u32) -> i32 {
     let ring = &mut adev.rings[r];
     // Align requested size with padding so unlock_commit can pad safely
@@ -535,7 +536,7 @@ pub fn amdgpu_ring_set_wptr(adev: &mut amdgpu_device, r: usize) {
     }
 }
 
-/// `amdgpu_ring_commit`. `end_use` returns at once, as `begin_use` does.
+/// `amdgpu_ring_commit`. `end_use` does nothing, as `begin_use` does.
 pub fn amdgpu_ring_commit(adev: &mut amdgpu_device, r: usize) {
     let ring = &adev.rings[r];
     if ring.count_dw < 0 {

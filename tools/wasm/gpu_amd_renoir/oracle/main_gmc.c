@@ -3,7 +3,10 @@
  * binary and the register file of main_common.c. A few registers hold
  * values a posted Renoir has (the presets below, set alike by the port's
  * check); the hubs' functions sit in hub_gc.c and hub_mm.c. Prints the
- * address space layout as gmc_check.rs prints it. */
+ * address space layout as gmc_check.rs prints it. With inputs it runs
+ * gmc_v9_0_hw_init, and with `late` the IH, GMC and COMMON blocks' late
+ * life (see late()), whose IH and ATHUB functions sit in hub_ih.c and
+ * hub_athub.c. */
 #include <limits.h>
 #include "vram_types.h"
 #define ORACLE_COMMON_LIBRARY
@@ -79,7 +82,6 @@ static void amdgpu_gmc_sysfs_init(struct amdgpu_device *adev) { abort(); }
 #define DRM_ERROR(...) printf(__VA_ARGS__)
 #define BUG_ON(c) ((void)0)
 #define for_each_set_bit(bit, addr, size) for ((bit) = 0; (bit) < (size); (bit)++) if (((addr)[0] >> (bit)) & 1)
-struct amdgpu_ring { const struct { void *emit_hdp_flush; } *funcs; };
 #define amdgpu_gmc_fw_reg_write_reg_wait(adev, req, ack, inv, mask, inst) abort()
 #define amdgpu_gmc_init_pdb0(adev) abort()
 #define amdgpu_gmc_vram_checking(adev) (abort(), 0)
@@ -89,6 +91,15 @@ struct amdgpu_ring { const struct { void *emit_hdp_flush; } *funcs; };
 #define amdgpu_gtt_mgr_recover(mgr) ((void)0)
 #define amdgpu_bo_gpu_offset(bo) ((bo)->gpu_offset)
 static int amdgpu_vm_fault_stop;
+/* No RAS block objects on Renoir. */
+#define amdgpu_ras_reset_error_count(adev, block) (-EOPNOTSUPP)
+#define amdgpu_ras_is_supported(adev, block) 0
+#define amdgpu_ras_is_rma(adev) 0
+/* amdgpu_device_xcc_rreg/wreg on bare metal with one XCC: RREG32/WREG32. */
+#define RREG32_XCC(reg, inst) RREG32(reg)
+#define WREG32_XCC(reg, v, inst) WREG32(reg, v)
+bool amdgpu_irq_enabled(struct amdgpu_device *adev, struct amdgpu_irq_src *src, unsigned int type);
+int athub_v1_0_set_clockgating(struct amdgpu_device *adev, enum amd_clockgating_state state);
 /* MMHUB 1.5.0 has no golden settings; the tables name MMHUB registers,
  * which cannot meet the GC headers in this unit. */
 static void gmc_v9_0_init_golden_registers(struct amdgpu_device *adev)
@@ -104,6 +115,93 @@ static void gmc_v9_0_init_golden_registers(struct amdgpu_device *adev)
 static const struct amdgpu_irq_src_funcs *const oracle_funcs = (void *)1;
 static struct amdgpu_nbio_funcs nbio_gmc_funcs;
 static const struct amdgpu_gmc_funcs oracle_gmc_funcs = { .get_vbios_fb_size = gmc_v9_0_get_vbios_fb_size };
+
+void oracle_ih_init_register_offset(struct amdgpu_device *adev);
+int oracle_ih_hw_init(struct amdgpu_ip_block *b);
+int oracle_ih_hw_fini(struct amdgpu_ip_block *b);
+int oracle_ih_set_clockgating_state(struct amdgpu_ip_block *b, enum amd_clockgating_state s);
+
+/* The late mode: on the run's state up to the end of sw_init, the IH
+ * block's hw_init, GMC's late_init, the clock gating of COMMON, GMC and IH
+ * on and off, and the hw_fini of IH, GMC and COMMON. The port's register
+ * file and its IH rings and rings come on stdin from soc4_check.rs; a
+ * register never written reads SEED(reg) by the rule `rule` names. */
+static int late(struct amdgpu_device *adev, struct amdgpu_ip_block *gmc_block, const char *rule)
+{
+	static const struct amdgpu_irq_src_funcs vm_fault_funcs = { .set = gmc_v9_0_vm_fault_interrupt_state };
+	static struct amdgpu_nbio_funcs nbio_funcs;
+	static struct { int level; } init_level = { AMDGPU_INIT_LEVEL_DEFAULT };
+	static struct amdgpu_ring rings[AMDGPU_MAX_RINGS];
+	static struct amdgpu_ip_block common, ih;
+	struct amdgpu_ih_ring *ihs[] = { &adev->irq.ih, &adev->irq.ih1, &adev->irq.ih2, &adev->irq.ih_soft };
+	unsigned long long cg, gpu, wptr, dummy;
+	u32 msi, k, p, q, x, y, z;
+	char kw[16], name[16];
+
+	if (scanf(" inputs cg %llx pg %x msi %u dummy %llx", &cg, &adev->pg_flags, &msi, &dummy) != 4)
+		return 2;
+	adev->cg_flags = cg;
+	adev->irq.msi_enabled = msi;
+	adev->dummy_page_addr = dummy;
+	ndirect = nindirect = 0;
+	while (scanf(" %15s", kw) == 1 && strcmp(kw, "end")) {
+		if (!strcmp(kw, "ih") && scanf(" %u %u %llx %llx %u %u %u", &k, &p, &gpu, &wptr, &x, &y, &z) == 7) {
+			ihs[k]->ring_size = p;
+			ihs[k]->gpu_addr = gpu;
+			ihs[k]->wptr_addr = wptr;
+			ihs[k]->use_bus_addr = x;
+			ihs[k]->use_doorbell = y;
+			ihs[k]->doorbell_index = z;
+		} else if (!strcmp(kw, "ring") && scanf(" %15s %u %u", name, &p, &q) == 3) {
+			struct amdgpu_ring *r = &rings[adev->num_rings];
+			strcpy(r->name, name);
+			r->vm_hub = p;
+			r->me = q;
+			adev->rings[adev->num_rings++] = r;
+		} else if (!strcmp(kw, "preset") && scanf(" %x %x", &p, &q) == 2) {
+			file_set(direct, &ndirect, p, q);
+		} else if (!strcmp(kw, "pcie") && scanf(" %x %x", &p, &q) == 2) {
+			file_set(indirect, &nindirect, p, q);
+		} else {
+			return 3;
+		}
+	}
+	seed_rule = rule[0];
+	/* What the blocks' early and sw_init set up for these paths. */
+	nbio_funcs = *adev->nbio.funcs;
+	nbio_funcs.enable_doorbell_selfring_aperture = nbio_v7_0_enable_doorbell_selfring_aperture;
+	nbio_funcs.ih_doorbell_range = nbio_v7_0_ih_doorbell_range;
+	nbio_funcs.update_medium_grain_clock_gating = nbio_v7_0_update_medium_grain_clock_gating;
+	nbio_funcs.update_medium_grain_light_sleep = nbio_v7_0_update_medium_grain_light_sleep;
+	nbio_funcs.ih_control = nbio_v7_0_ih_control;
+	adev->nbio.funcs = &nbio_funcs;
+	adev->hdp.funcs = &oracle_hdp_v4_0_funcs;
+	adev->gmc.vm_fault.funcs = &vm_fault_funcs;
+	adev->init_lvl = (void *)&init_level;
+	adev->irq.installed = true;
+	adev->usec_timeout = 100000;
+	oracle_ih_init_register_offset(adev);
+	common.adev = ih.adev = adev;
+
+	printf("--- soc ih hw_init\n");
+	printf("vega10_ih_hw_init %d\n", oracle_ih_hw_init(&ih));
+	printf("--- soc gmc late_init\n");
+	printf("gmc_v9_0_late_init %d\n", gmc_v9_0_late_init(gmc_block));
+	for (u32 i = 0; i < adev->num_rings; i++)
+		printf("inv %s %u\n", adev->rings[i]->name, adev->rings[i]->vm_inv_eng);
+	printf("--- soc gating\n");
+	soc15_common_set_clockgating_state(&common, AMD_CG_STATE_GATE);
+	gmc_v9_0_set_clockgating_state(gmc_block, AMD_CG_STATE_GATE);
+	oracle_ih_set_clockgating_state(&ih, AMD_CG_STATE_GATE);
+	oracle_ih_set_clockgating_state(&ih, AMD_CG_STATE_UNGATE);
+	gmc_v9_0_set_clockgating_state(gmc_block, AMD_CG_STATE_UNGATE);
+	soc15_common_set_clockgating_state(&common, AMD_CG_STATE_UNGATE);
+	printf("--- soc hw_fini\n");
+	printf("vega10_ih_hw_fini %d\n", oracle_ih_hw_fini(&ih));
+	printf("gmc_v9_0_hw_fini %d\n", gmc_v9_0_hw_fini(gmc_block));
+	printf("soc15_common_hw_fini %d\n", soc15_common_hw_fini(&common));
+	return 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -142,6 +240,8 @@ int main(int argc, char **argv)
 	static struct amdgpu_ip_block gmc_block;
 	gmc_block.adev = adev;
 	int r = gmc_v9_0_sw_init(&gmc_block);
+	if (argc > 3 && !strcmp(argv[2], "late"))
+		return late(adev, &gmc_block, argv[3]);
 	if (argc > 2) {
 		/* hw mode: the inputs as gmc_hw_check.rs printed them. */
 		static struct amdgpu_bo gart_bo;

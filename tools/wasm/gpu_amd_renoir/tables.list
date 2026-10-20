@@ -74,6 +74,7 @@ amdgpu_sdma_phase_quantum: u32
 golden_settings_sdma_4_3: u32
 @ gfx_v9_0.c
 golden_settings_gc_9_1_rn: u32
+gfx_9_4_2_cleaner_shader_hex: u32
 gfx9_SECT_CONTEXT_def_1: u32
 gfx9_SECT_CONTEXT_def_2: u32
 gfx9_SECT_CONTEXT_def_3: u32

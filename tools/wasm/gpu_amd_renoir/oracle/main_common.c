@@ -12,6 +12,7 @@
 #include "soc15_common.h"
 #include "nbio/nbio_7_0_offset.h"
 #include "nbio/nbio_7_0_sh_mask.h"
+#include "nbio/nbio_7_0_smn.h"
 
 static char seed_rule;
 #define SEED(reg) (seed_rule == 'o' ? 0xffffffffu : seed_rule == 'z' ? 0u : \
@@ -90,7 +91,12 @@ void amdgpu_device_indirect_wreg(struct amdgpu_device *adev, u32 reg_addr, u32 r
 #define amdgpu_device_aspm_support_quirk(adev) false
 #define amdgpu_device_get_aspm_pdev(adev) ((struct pci_dev *)0)
 static int amdgpu_aspm = -1;
-struct amdgpu_ip_block { struct amdgpu_device *adev; };
+/* soc15_common_hw_fini and the clock gating: bare metal, no RAS. */
+#define RREG32_PCIE(reg) amdgpu_device_indirect_rreg(adev, reg)
+#define WREG32_PCIE(reg, v) amdgpu_device_indirect_wreg(adev, reg, v)
+#define xgpu_ai_mailbox_put_irq(adev) abort()
+#define amdgpu_ras_is_supported(adev, block) 0
+int amdgpu_irq_put(struct amdgpu_device *adev, struct amdgpu_irq_src *src, unsigned int type);
 
 #include "common_extracted.c"
 
@@ -104,6 +110,8 @@ static const struct amdgpu_nbio_funcs nbio_v7_0_funcs = {
 };
 
 #ifndef ORACLE_COMMON_LIBRARY
+int amdgpu_irq_put(struct amdgpu_device *adev, struct amdgpu_irq_src *src, unsigned int type) { abort(); }
+
 int main(int argc, char **argv)
 {
 	static struct { u16 device; u8 revision; } pdev = { 0x164c, 0xc1 };
