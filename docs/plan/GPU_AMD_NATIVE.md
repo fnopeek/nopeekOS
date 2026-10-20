@@ -182,8 +182,17 @@ Recover. Auf Renoir gilt je Ring:
   `kiq_fini_register`; `kiq/kcq_init_queue` aus der MQD-Sicherung), SDMA.
   **Nur Bloecke, die das Modul hochgebracht hat**: DCN, VCN und JPEG bekommen
   nur sw_init — Linux wuerde sie mit suspendieren und wieder hochfahren.
-- **E4 Gast sieht es**: `AMDGPU_CTX_OP_QUERY_STATE2` (RESET, VRAMLOST,
-  GUILTY), `async_error`; dann CAP_NATIVE.
+- **E4 Gast sieht es** — kein eigener Befehl: Mesa (`amdvgpu_cs_query_reset_state2`)
+  liest nur `async_error`, und den erhoehen GEM_NEW, BO_VA_OP und CS_SUBMIT
+  beim Scheitern wie virglrenderer. Nach einem Reset scheitert die naechste
+  Einreichung des schuldigen Kontexts (`drm_sched_entity_error`, `guilty`).
+- **CAP_NATIVE** — gemeldet ab Modul 0.13.0, wenn die Szenen laufen und das
+  Capset abgegeben ist; der Kernel bietet die Karte nur hinter der IOMMU an.
+
+**F im Gast**: das Mesa im Firefox-Image hat radeonsi mit `-Damdgpu-virtio`
+schon. Offen: radv (`-Dvulkan-drivers=intel,amd`) und die VA-API-Wahl nach
+Hersteller — auf AMD faellt libva mit `LIBVA_DRIVER_NAME=iHD` sauber aus, und
+VA-API auf AMD braucht ohnehin VCN (Stufe 6).
 
 **E gehoert in Stufe 7, nicht danach.** Heute steht im Modul „GPU-Recovery
 bei Job-Timeout: benannt, nicht portiert" — fuer den eigenen Compositor

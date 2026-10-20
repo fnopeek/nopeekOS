@@ -43,6 +43,7 @@ const CCMD_MAX: usize = 256 * 1024;
 const REPLY_MAX: usize = 64 * 1024;
 const CAP_COPY: i32 = 1;
 const CAP_SCENE: i32 = 2;
+const CAP_NATIVE: i32 = 4;
 const JOB_BYTES: usize = 32;
 const BO_INFO_BYTES: usize = 40;
 const NUM_BOS: usize = 3;
@@ -694,20 +695,25 @@ pub fn serve(adev: &mut amdgpu_device) {
     svc.copy_ok = self_test(adev);
     Line::new().s("gpudev: sdma0 self-test ").s(if svc.copy_ok { "passed" } else { "FAILED" }).say();
     let scene_ok = svc.copy_ok && scenes_init(adev, &mut svc);
-    let caps = if svc.copy_ok { CAP_COPY } else { 0 } | if scene_ok { CAP_SCENE } else { 0 };
-    // The capset for the guests' native contexts, before ready.
-    match crate::amdgpu_virtio::capset(adev) {
-        Ok(c) => {
-            npk_sys::gpudev_capset(&c);
+    // The capset for the guests' native contexts, before ready. They need
+    // the compute and SDMA submission the scene self-test has just proven.
+    let capset = match crate::amdgpu_virtio::capset(adev) {
+        Ok(c) => npk_sys::gpudev_capset(&c) == 0,
+        Err(e) => {
+            Line::new().s("gpudev: no capset for native contexts (").dec((-e) as u64).s(")").say();
+            false
         }
-        Err(e) => Line::new().s("gpudev: no capset for native contexts (").dec((-e) as u64).s(")").say(),
-    }
+    };
+    let native_ok = scene_ok && capset;
+    let caps = if svc.copy_ok { CAP_COPY } else { 0 } | if scene_ok { CAP_SCENE } else { 0 }
+        | if native_ok { CAP_NATIVE } else { 0 };
     npk_sys::gpudev_ready(caps);
     if caps == 0 {
         unbind(adev, &mut svc);
         return;
     }
-    Line::new().s("gpudev: serving copies").s(if scene_ok { " and scenes" } else { "" }).say();
+    Line::new().s("gpudev: serving copies").s(if scene_ok { " and scenes" } else { "" })
+        .s(if native_ok { " and native contexts" } else { "" }).say();
 
     let mut jobs = [0u8; JOB_BYTES * 8];
     let (mut done, mut failed) = (0u64, 0u64);
