@@ -3139,3 +3139,268 @@ AMDGPU_VA_RESERVED_CSA_SIZE @ amdgpu_seq64.c
 AMDGPU_VA_RESERVED_TRAP_SIZE @ amdgpu_seq64.c
 AMDGPU_GMC_HOLE_MASK @ amdgpu_seq64.c
 AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE @ amdgpu_gem.c
+# The DRM_AMDGPU_INFO answers (amdgpu_drm.h, amdgpu_kms.c)
+SIZEOF_drm_amdgpu_info_device = sizeof(struct drm_amdgpu_info_device) @ amdgpu_kms.c
+UAPI_DEV_DEVICE_ID = offsetof(struct drm_amdgpu_info_device, device_id) @ amdgpu_kms.c
+UAPI_DEV_CHIP_REV = offsetof(struct drm_amdgpu_info_device, chip_rev) @ amdgpu_kms.c
+UAPI_DEV_EXTERNAL_REV = offsetof(struct drm_amdgpu_info_device, external_rev) @ amdgpu_kms.c
+UAPI_DEV_PCI_REV = offsetof(struct drm_amdgpu_info_device, pci_rev) @ amdgpu_kms.c
+UAPI_DEV_FAMILY = offsetof(struct drm_amdgpu_info_device, family) @ amdgpu_kms.c
+UAPI_DEV_NUM_SHADER_ENGINES = offsetof(struct drm_amdgpu_info_device, num_shader_engines) @ amdgpu_kms.c
+UAPI_DEV_NUM_SHADER_ARRAYS_PER_ENGINE = offsetof(struct drm_amdgpu_info_device, num_shader_arrays_per_engine) @ amdgpu_kms.c
+UAPI_DEV_GPU_COUNTER_FREQ = offsetof(struct drm_amdgpu_info_device, gpu_counter_freq) @ amdgpu_kms.c
+UAPI_DEV_MAX_ENGINE_CLOCK = offsetof(struct drm_amdgpu_info_device, max_engine_clock) @ amdgpu_kms.c
+UAPI_DEV_MAX_MEMORY_CLOCK = offsetof(struct drm_amdgpu_info_device, max_memory_clock) @ amdgpu_kms.c
+UAPI_DEV_CU_ACTIVE_NUMBER = offsetof(struct drm_amdgpu_info_device, cu_active_number) @ amdgpu_kms.c
+UAPI_DEV_CU_AO_MASK = offsetof(struct drm_amdgpu_info_device, cu_ao_mask) @ amdgpu_kms.c
+UAPI_DEV_CU_BITMAP = offsetof(struct drm_amdgpu_info_device, cu_bitmap) @ amdgpu_kms.c
+UAPI_DEV_ENABLED_RB_PIPES_MASK = offsetof(struct drm_amdgpu_info_device, enabled_rb_pipes_mask) @ amdgpu_kms.c
+UAPI_DEV_NUM_RB_PIPES = offsetof(struct drm_amdgpu_info_device, num_rb_pipes) @ amdgpu_kms.c
+UAPI_DEV_NUM_HW_GFX_CONTEXTS = offsetof(struct drm_amdgpu_info_device, num_hw_gfx_contexts) @ amdgpu_kms.c
+UAPI_DEV_PCIE_GEN = offsetof(struct drm_amdgpu_info_device, pcie_gen) @ amdgpu_kms.c
+UAPI_DEV_IDS_FLAGS = offsetof(struct drm_amdgpu_info_device, ids_flags) @ amdgpu_kms.c
+UAPI_DEV_VIRTUAL_ADDRESS_OFFSET = offsetof(struct drm_amdgpu_info_device, virtual_address_offset) @ amdgpu_kms.c
+UAPI_DEV_VIRTUAL_ADDRESS_MAX = offsetof(struct drm_amdgpu_info_device, virtual_address_max) @ amdgpu_kms.c
+UAPI_DEV_VIRTUAL_ADDRESS_ALIGNMENT = offsetof(struct drm_amdgpu_info_device, virtual_address_alignment) @ amdgpu_kms.c
+UAPI_DEV_PTE_FRAGMENT_SIZE = offsetof(struct drm_amdgpu_info_device, pte_fragment_size) @ amdgpu_kms.c
+UAPI_DEV_GART_PAGE_SIZE = offsetof(struct drm_amdgpu_info_device, gart_page_size) @ amdgpu_kms.c
+UAPI_DEV_CE_RAM_SIZE = offsetof(struct drm_amdgpu_info_device, ce_ram_size) @ amdgpu_kms.c
+UAPI_DEV_VRAM_TYPE = offsetof(struct drm_amdgpu_info_device, vram_type) @ amdgpu_kms.c
+UAPI_DEV_VRAM_BIT_WIDTH = offsetof(struct drm_amdgpu_info_device, vram_bit_width) @ amdgpu_kms.c
+UAPI_DEV_VCE_HARVEST_CONFIG = offsetof(struct drm_amdgpu_info_device, vce_harvest_config) @ amdgpu_kms.c
+UAPI_DEV_GC_DOUBLE_OFFCHIP_LDS_BUF = offsetof(struct drm_amdgpu_info_device, gc_double_offchip_lds_buf) @ amdgpu_kms.c
+UAPI_DEV_PRIM_BUF_GPU_ADDR = offsetof(struct drm_amdgpu_info_device, prim_buf_gpu_addr) @ amdgpu_kms.c
+UAPI_DEV_POS_BUF_GPU_ADDR = offsetof(struct drm_amdgpu_info_device, pos_buf_gpu_addr) @ amdgpu_kms.c
+UAPI_DEV_CNTL_SB_BUF_GPU_ADDR = offsetof(struct drm_amdgpu_info_device, cntl_sb_buf_gpu_addr) @ amdgpu_kms.c
+UAPI_DEV_PARAM_BUF_GPU_ADDR = offsetof(struct drm_amdgpu_info_device, param_buf_gpu_addr) @ amdgpu_kms.c
+UAPI_DEV_PRIM_BUF_SIZE = offsetof(struct drm_amdgpu_info_device, prim_buf_size) @ amdgpu_kms.c
+UAPI_DEV_POS_BUF_SIZE = offsetof(struct drm_amdgpu_info_device, pos_buf_size) @ amdgpu_kms.c
+UAPI_DEV_CNTL_SB_BUF_SIZE = offsetof(struct drm_amdgpu_info_device, cntl_sb_buf_size) @ amdgpu_kms.c
+UAPI_DEV_PARAM_BUF_SIZE = offsetof(struct drm_amdgpu_info_device, param_buf_size) @ amdgpu_kms.c
+UAPI_DEV_WAVE_FRONT_SIZE = offsetof(struct drm_amdgpu_info_device, wave_front_size) @ amdgpu_kms.c
+UAPI_DEV_NUM_SHADER_VISIBLE_VGPRS = offsetof(struct drm_amdgpu_info_device, num_shader_visible_vgprs) @ amdgpu_kms.c
+UAPI_DEV_NUM_CU_PER_SH = offsetof(struct drm_amdgpu_info_device, num_cu_per_sh) @ amdgpu_kms.c
+UAPI_DEV_NUM_TCC_BLOCKS = offsetof(struct drm_amdgpu_info_device, num_tcc_blocks) @ amdgpu_kms.c
+UAPI_DEV_GS_VGT_TABLE_DEPTH = offsetof(struct drm_amdgpu_info_device, gs_vgt_table_depth) @ amdgpu_kms.c
+UAPI_DEV_GS_PRIM_BUFFER_DEPTH = offsetof(struct drm_amdgpu_info_device, gs_prim_buffer_depth) @ amdgpu_kms.c
+UAPI_DEV_MAX_GS_WAVES_PER_VGT = offsetof(struct drm_amdgpu_info_device, max_gs_waves_per_vgt) @ amdgpu_kms.c
+UAPI_DEV_PCIE_NUM_LANES = offsetof(struct drm_amdgpu_info_device, pcie_num_lanes) @ amdgpu_kms.c
+UAPI_DEV_CU_AO_BITMAP = offsetof(struct drm_amdgpu_info_device, cu_ao_bitmap) @ amdgpu_kms.c
+UAPI_DEV_HIGH_VA_OFFSET = offsetof(struct drm_amdgpu_info_device, high_va_offset) @ amdgpu_kms.c
+UAPI_DEV_HIGH_VA_MAX = offsetof(struct drm_amdgpu_info_device, high_va_max) @ amdgpu_kms.c
+UAPI_DEV_PA_SC_TILE_STEERING_OVERRIDE = offsetof(struct drm_amdgpu_info_device, pa_sc_tile_steering_override) @ amdgpu_kms.c
+UAPI_DEV_PAD = offsetof(struct drm_amdgpu_info_device, pad) @ amdgpu_kms.c
+UAPI_DEV_TCC_DISABLED_MASK = offsetof(struct drm_amdgpu_info_device, tcc_disabled_mask) @ amdgpu_kms.c
+UAPI_DEV_MIN_ENGINE_CLOCK = offsetof(struct drm_amdgpu_info_device, min_engine_clock) @ amdgpu_kms.c
+UAPI_DEV_MIN_MEMORY_CLOCK = offsetof(struct drm_amdgpu_info_device, min_memory_clock) @ amdgpu_kms.c
+UAPI_DEV_TCP_CACHE_SIZE = offsetof(struct drm_amdgpu_info_device, tcp_cache_size) @ amdgpu_kms.c
+UAPI_DEV_NUM_SQC_PER_WGP = offsetof(struct drm_amdgpu_info_device, num_sqc_per_wgp) @ amdgpu_kms.c
+UAPI_DEV_SQC_DATA_CACHE_SIZE = offsetof(struct drm_amdgpu_info_device, sqc_data_cache_size) @ amdgpu_kms.c
+UAPI_DEV_SQC_INST_CACHE_SIZE = offsetof(struct drm_amdgpu_info_device, sqc_inst_cache_size) @ amdgpu_kms.c
+UAPI_DEV_GL1C_CACHE_SIZE = offsetof(struct drm_amdgpu_info_device, gl1c_cache_size) @ amdgpu_kms.c
+UAPI_DEV_GL2C_CACHE_SIZE = offsetof(struct drm_amdgpu_info_device, gl2c_cache_size) @ amdgpu_kms.c
+UAPI_DEV_MALL_SIZE = offsetof(struct drm_amdgpu_info_device, mall_size) @ amdgpu_kms.c
+UAPI_DEV_ENABLED_RB_PIPES_MASK_HI = offsetof(struct drm_amdgpu_info_device, enabled_rb_pipes_mask_hi) @ amdgpu_kms.c
+UAPI_DEV_SHADOW_SIZE = offsetof(struct drm_amdgpu_info_device, shadow_size) @ amdgpu_kms.c
+UAPI_DEV_SHADOW_ALIGNMENT = offsetof(struct drm_amdgpu_info_device, shadow_alignment) @ amdgpu_kms.c
+UAPI_DEV_CSA_SIZE = offsetof(struct drm_amdgpu_info_device, csa_size) @ amdgpu_kms.c
+UAPI_DEV_CSA_ALIGNMENT = offsetof(struct drm_amdgpu_info_device, csa_alignment) @ amdgpu_kms.c
+UAPI_DEV_USERQ_IP_MASK = offsetof(struct drm_amdgpu_info_device, userq_ip_mask) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_info_hw_ip = sizeof(struct drm_amdgpu_info_hw_ip) @ amdgpu_kms.c
+UAPI_HWIP_HW_IP_VERSION_MAJOR = offsetof(struct drm_amdgpu_info_hw_ip, hw_ip_version_major) @ amdgpu_kms.c
+UAPI_HWIP_HW_IP_VERSION_MINOR = offsetof(struct drm_amdgpu_info_hw_ip, hw_ip_version_minor) @ amdgpu_kms.c
+UAPI_HWIP_CAPABILITIES_FLAGS = offsetof(struct drm_amdgpu_info_hw_ip, capabilities_flags) @ amdgpu_kms.c
+UAPI_HWIP_IB_START_ALIGNMENT = offsetof(struct drm_amdgpu_info_hw_ip, ib_start_alignment) @ amdgpu_kms.c
+UAPI_HWIP_IB_SIZE_ALIGNMENT = offsetof(struct drm_amdgpu_info_hw_ip, ib_size_alignment) @ amdgpu_kms.c
+UAPI_HWIP_AVAILABLE_RINGS = offsetof(struct drm_amdgpu_info_hw_ip, available_rings) @ amdgpu_kms.c
+UAPI_HWIP_IP_DISCOVERY_VERSION = offsetof(struct drm_amdgpu_info_hw_ip, ip_discovery_version) @ amdgpu_kms.c
+UAPI_HWIP_USERQ_NUM_SLOTS = offsetof(struct drm_amdgpu_info_hw_ip, userq_num_slots) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_info_firmware = sizeof(struct drm_amdgpu_info_firmware) @ amdgpu_kms.c
+UAPI_FW_VER = offsetof(struct drm_amdgpu_info_firmware, ver) @ amdgpu_kms.c
+UAPI_FW_FEATURE = offsetof(struct drm_amdgpu_info_firmware, feature) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_info_gds = sizeof(struct drm_amdgpu_info_gds) @ amdgpu_kms.c
+UAPI_GDS_GDS_GFX_PARTITION_SIZE = offsetof(struct drm_amdgpu_info_gds, gds_gfx_partition_size) @ amdgpu_kms.c
+UAPI_GDS_COMPUTE_PARTITION_SIZE = offsetof(struct drm_amdgpu_info_gds, compute_partition_size) @ amdgpu_kms.c
+UAPI_GDS_GDS_TOTAL_SIZE = offsetof(struct drm_amdgpu_info_gds, gds_total_size) @ amdgpu_kms.c
+UAPI_GDS_GWS_PER_GFX_PARTITION = offsetof(struct drm_amdgpu_info_gds, gws_per_gfx_partition) @ amdgpu_kms.c
+UAPI_GDS_GWS_PER_COMPUTE_PARTITION = offsetof(struct drm_amdgpu_info_gds, gws_per_compute_partition) @ amdgpu_kms.c
+UAPI_GDS_OA_PER_GFX_PARTITION = offsetof(struct drm_amdgpu_info_gds, oa_per_gfx_partition) @ amdgpu_kms.c
+UAPI_GDS_OA_PER_COMPUTE_PARTITION = offsetof(struct drm_amdgpu_info_gds, oa_per_compute_partition) @ amdgpu_kms.c
+UAPI_GDS__PAD = offsetof(struct drm_amdgpu_info_gds, _pad) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_heap_info = sizeof(struct drm_amdgpu_heap_info) @ amdgpu_kms.c
+UAPI_HEAP_TOTAL_HEAP_SIZE = offsetof(struct drm_amdgpu_heap_info, total_heap_size) @ amdgpu_kms.c
+UAPI_HEAP_USABLE_HEAP_SIZE = offsetof(struct drm_amdgpu_heap_info, usable_heap_size) @ amdgpu_kms.c
+UAPI_HEAP_HEAP_USAGE = offsetof(struct drm_amdgpu_heap_info, heap_usage) @ amdgpu_kms.c
+UAPI_HEAP_MAX_ALLOCATION = offsetof(struct drm_amdgpu_heap_info, max_allocation) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_memory_info = sizeof(struct drm_amdgpu_memory_info) @ amdgpu_kms.c
+UAPI_MEM_VRAM = offsetof(struct drm_amdgpu_memory_info, vram) @ amdgpu_kms.c
+UAPI_MEM_CPU_ACCESSIBLE_VRAM = offsetof(struct drm_amdgpu_memory_info, cpu_accessible_vram) @ amdgpu_kms.c
+UAPI_MEM_GTT = offsetof(struct drm_amdgpu_memory_info, gtt) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_info_vbios = sizeof(struct drm_amdgpu_info_vbios) @ amdgpu_kms.c
+UAPI_VBIOS_NAME = offsetof(struct drm_amdgpu_info_vbios, name) @ amdgpu_kms.c
+UAPI_VBIOS_VBIOS_PN = offsetof(struct drm_amdgpu_info_vbios, vbios_pn) @ amdgpu_kms.c
+UAPI_VBIOS_VERSION = offsetof(struct drm_amdgpu_info_vbios, version) @ amdgpu_kms.c
+UAPI_VBIOS_PAD = offsetof(struct drm_amdgpu_info_vbios, pad) @ amdgpu_kms.c
+UAPI_VBIOS_VBIOS_VER_STR = offsetof(struct drm_amdgpu_info_vbios, vbios_ver_str) @ amdgpu_kms.c
+UAPI_VBIOS_DATE = offsetof(struct drm_amdgpu_info_vbios, date) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_info_video_codec_info = sizeof(struct drm_amdgpu_info_video_codec_info) @ amdgpu_kms.c
+UAPI_CODEC_VALID = offsetof(struct drm_amdgpu_info_video_codec_info, valid) @ amdgpu_kms.c
+UAPI_CODEC_MAX_WIDTH = offsetof(struct drm_amdgpu_info_video_codec_info, max_width) @ amdgpu_kms.c
+UAPI_CODEC_MAX_HEIGHT = offsetof(struct drm_amdgpu_info_video_codec_info, max_height) @ amdgpu_kms.c
+UAPI_CODEC_MAX_PIXELS_PER_FRAME = offsetof(struct drm_amdgpu_info_video_codec_info, max_pixels_per_frame) @ amdgpu_kms.c
+UAPI_CODEC_MAX_LEVEL = offsetof(struct drm_amdgpu_info_video_codec_info, max_level) @ amdgpu_kms.c
+UAPI_CODEC_PAD = offsetof(struct drm_amdgpu_info_video_codec_info, pad) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_info_video_caps = sizeof(struct drm_amdgpu_info_video_caps) @ amdgpu_kms.c
+UAPI_VCAPS_CODEC_INFO = offsetof(struct drm_amdgpu_info_video_caps, codec_info) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_info_gpuvm_fault = sizeof(struct drm_amdgpu_info_gpuvm_fault) @ amdgpu_kms.c
+UAPI_VMFAULT_ADDR = offsetof(struct drm_amdgpu_info_gpuvm_fault, addr) @ amdgpu_kms.c
+UAPI_VMFAULT_STATUS = offsetof(struct drm_amdgpu_info_gpuvm_fault, status) @ amdgpu_kms.c
+UAPI_VMFAULT_VMHUB = offsetof(struct drm_amdgpu_info_gpuvm_fault, vmhub) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_info_vce_clock_table = sizeof(struct drm_amdgpu_info_vce_clock_table) @ amdgpu_kms.c
+UAPI_VCECLK_ENTRIES = offsetof(struct drm_amdgpu_info_vce_clock_table, entries) @ amdgpu_kms.c
+UAPI_VCECLK_NUM_VALID_ENTRIES = offsetof(struct drm_amdgpu_info_vce_clock_table, num_valid_entries) @ amdgpu_kms.c
+UAPI_VCECLK_PAD = offsetof(struct drm_amdgpu_info_vce_clock_table, pad) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_info_vram_gtt = sizeof(struct drm_amdgpu_info_vram_gtt) @ amdgpu_kms.c
+UAPI_VRAMGTT_VRAM_SIZE = offsetof(struct drm_amdgpu_info_vram_gtt, vram_size) @ amdgpu_kms.c
+UAPI_VRAMGTT_VRAM_CPU_ACCESSIBLE_SIZE = offsetof(struct drm_amdgpu_info_vram_gtt, vram_cpu_accessible_size) @ amdgpu_kms.c
+UAPI_VRAMGTT_GTT_SIZE = offsetof(struct drm_amdgpu_info_vram_gtt, gtt_size) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_info_num_handles = sizeof(struct drm_amdgpu_info_num_handles) @ amdgpu_kms.c
+UAPI_HANDLES_UVD_MAX_HANDLES = offsetof(struct drm_amdgpu_info_num_handles, uvd_max_handles) @ amdgpu_kms.c
+UAPI_HANDLES_UVD_USED_HANDLES = offsetof(struct drm_amdgpu_info_num_handles, uvd_used_handles) @ amdgpu_kms.c
+UAPI_INFO_RETURN_POINTER = offsetof(struct drm_amdgpu_info, return_pointer) @ amdgpu_kms.c
+UAPI_INFO_RETURN_SIZE = offsetof(struct drm_amdgpu_info, return_size) @ amdgpu_kms.c
+UAPI_INFO_QUERY = offsetof(struct drm_amdgpu_info, query) @ amdgpu_kms.c
+UAPI_INFO_MODE_CRTC_ID = offsetof(struct drm_amdgpu_info, mode_crtc.id) @ amdgpu_kms.c
+UAPI_INFO_QUERY_HW_IP_TYPE = offsetof(struct drm_amdgpu_info, query_hw_ip.type) @ amdgpu_kms.c
+UAPI_INFO_QUERY_HW_IP_INSTANCE = offsetof(struct drm_amdgpu_info, query_hw_ip.ip_instance) @ amdgpu_kms.c
+UAPI_INFO_READ_MMR_DWORD_OFFSET = offsetof(struct drm_amdgpu_info, read_mmr_reg.dword_offset) @ amdgpu_kms.c
+UAPI_INFO_READ_MMR_COUNT = offsetof(struct drm_amdgpu_info, read_mmr_reg.count) @ amdgpu_kms.c
+UAPI_INFO_READ_MMR_INSTANCE = offsetof(struct drm_amdgpu_info, read_mmr_reg.instance) @ amdgpu_kms.c
+UAPI_INFO_READ_MMR_FLAGS = offsetof(struct drm_amdgpu_info, read_mmr_reg.flags) @ amdgpu_kms.c
+UAPI_INFO_QUERY_FW = offsetof(struct drm_amdgpu_info, query_fw) @ amdgpu_kms.c
+UAPI_INFO_VBIOS_TYPE = offsetof(struct drm_amdgpu_info, vbios_info.type) @ amdgpu_kms.c
+UAPI_INFO_VBIOS_OFFSET = offsetof(struct drm_amdgpu_info, vbios_info.offset) @ amdgpu_kms.c
+UAPI_INFO_SENSOR_TYPE = offsetof(struct drm_amdgpu_info, sensor_info.type) @ amdgpu_kms.c
+UAPI_INFO_VIDEO_CAP_TYPE = offsetof(struct drm_amdgpu_info, video_cap.type) @ amdgpu_kms.c
+SIZEOF_drm_amdgpu_info = sizeof(struct drm_amdgpu_info) @ amdgpu_kms.c
+UAPI_QUERY_FW_FW_TYPE = offsetof(struct drm_amdgpu_query_fw, fw_type) @ amdgpu_kms.c
+UAPI_QUERY_FW_IP_INSTANCE = offsetof(struct drm_amdgpu_query_fw, ip_instance) @ amdgpu_kms.c
+UAPI_QUERY_FW_INDEX = offsetof(struct drm_amdgpu_query_fw, index) @ amdgpu_kms.c
+AMDGPU_HW_IP_DMA @ amdgpu_kms.c
+AMDGPU_HW_IP_INSTANCE_MAX_COUNT @ amdgpu_kms.c
+AMDGPU_HW_IP_UVD @ amdgpu_kms.c
+AMDGPU_HW_IP_UVD_ENC @ amdgpu_kms.c
+AMDGPU_HW_IP_VCE @ amdgpu_kms.c
+AMDGPU_HW_IP_VCN_DEC @ amdgpu_kms.c
+AMDGPU_HW_IP_VCN_ENC @ amdgpu_kms.c
+AMDGPU_HW_IP_VCN_JPEG @ amdgpu_kms.c
+AMDGPU_HW_IP_VPE @ amdgpu_kms.c
+AMDGPU_IDS_FLAGS_CONFORMANT_TRUNC_COORD @ amdgpu_kms.c
+AMDGPU_IDS_FLAGS_FUSION @ amdgpu_kms.c
+AMDGPU_IDS_FLAGS_GANG_SUBMIT @ amdgpu_kms.c
+AMDGPU_IDS_FLAGS_MODE_MASK @ amdgpu_kms.c
+AMDGPU_IDS_FLAGS_MODE_PF @ amdgpu_kms.c
+AMDGPU_IDS_FLAGS_MODE_PT @ amdgpu_kms.c
+AMDGPU_IDS_FLAGS_MODE_SHIFT @ amdgpu_kms.c
+AMDGPU_IDS_FLAGS_MODE_VF @ amdgpu_kms.c
+AMDGPU_IDS_FLAGS_PREEMPTION @ amdgpu_kms.c
+AMDGPU_IDS_FLAGS_TMZ @ amdgpu_kms.c
+AMDGPU_INFO_ACCEL_WORKING @ amdgpu_kms.c
+AMDGPU_INFO_CRTC_FROM_ID @ amdgpu_kms.c
+AMDGPU_INFO_DEV_INFO @ amdgpu_kms.c
+AMDGPU_INFO_FW_ASD @ amdgpu_kms.c
+AMDGPU_INFO_FW_CAP @ amdgpu_kms.c
+AMDGPU_INFO_FW_DMCU @ amdgpu_kms.c
+AMDGPU_INFO_FW_DMCUB @ amdgpu_kms.c
+AMDGPU_INFO_FW_GFX_CE @ amdgpu_kms.c
+AMDGPU_INFO_FW_GFX_ME @ amdgpu_kms.c
+AMDGPU_INFO_FW_GFX_MEC @ amdgpu_kms.c
+AMDGPU_INFO_FW_GFX_PFP @ amdgpu_kms.c
+AMDGPU_INFO_FW_GFX_RLC @ amdgpu_kms.c
+AMDGPU_INFO_FW_GFX_RLCP @ amdgpu_kms.c
+AMDGPU_INFO_FW_GFX_RLCV @ amdgpu_kms.c
+AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_CNTL @ amdgpu_kms.c
+AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_GPM_MEM @ amdgpu_kms.c
+AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_SRM_MEM @ amdgpu_kms.c
+AMDGPU_INFO_FW_GMC @ amdgpu_kms.c
+AMDGPU_INFO_FW_IMU @ amdgpu_kms.c
+AMDGPU_INFO_FW_MES @ amdgpu_kms.c
+AMDGPU_INFO_FW_MES_KIQ @ amdgpu_kms.c
+AMDGPU_INFO_FW_SDMA @ amdgpu_kms.c
+AMDGPU_INFO_FW_SMC @ amdgpu_kms.c
+AMDGPU_INFO_FW_SOS @ amdgpu_kms.c
+AMDGPU_INFO_FW_TA @ amdgpu_kms.c
+AMDGPU_INFO_FW_TOC @ amdgpu_kms.c
+AMDGPU_INFO_FW_UVD @ amdgpu_kms.c
+AMDGPU_INFO_FW_VCE @ amdgpu_kms.c
+AMDGPU_INFO_FW_VCN @ amdgpu_kms.c
+AMDGPU_INFO_FW_VERSION @ amdgpu_kms.c
+AMDGPU_INFO_FW_VPE @ amdgpu_kms.c
+AMDGPU_INFO_GDS_CONFIG @ amdgpu_kms.c
+AMDGPU_INFO_GPUVM_FAULT @ amdgpu_kms.c
+AMDGPU_INFO_GTT_USAGE @ amdgpu_kms.c
+AMDGPU_INFO_HW_IP_COUNT @ amdgpu_kms.c
+AMDGPU_INFO_HW_IP_INFO @ amdgpu_kms.c
+AMDGPU_INFO_MAX_IBS @ amdgpu_kms.c
+AMDGPU_INFO_MEMORY @ amdgpu_kms.c
+AMDGPU_INFO_MMR_SE_INDEX_MASK @ amdgpu_kms.c
+AMDGPU_INFO_MMR_SE_INDEX_SHIFT @ amdgpu_kms.c
+AMDGPU_INFO_MMR_SH_INDEX_MASK @ amdgpu_kms.c
+AMDGPU_INFO_MMR_SH_INDEX_SHIFT @ amdgpu_kms.c
+AMDGPU_INFO_NUM_BYTES_MOVED @ amdgpu_kms.c
+AMDGPU_INFO_NUM_EVICTIONS @ amdgpu_kms.c
+AMDGPU_INFO_NUM_HANDLES @ amdgpu_kms.c
+AMDGPU_INFO_NUM_VRAM_CPU_PAGE_FAULTS @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_ATHUB @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_DF @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_FEATURES @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_FUSE @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_GFX @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_HDP @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_MMHUB @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_MP0 @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_MP1 @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_PCIE @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_SDMA @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_SEM @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_SMN @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_UMC @ amdgpu_kms.c
+AMDGPU_INFO_RAS_ENABLED_XGMI @ amdgpu_kms.c
+AMDGPU_INFO_READ_MMR_REG @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_GFX_MCLK @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_GFX_SCLK @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_GPU_AVG_POWER @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_GPU_INPUT_POWER @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_GPU_LOAD @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_GPU_TEMP @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_MCLK @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_SCLK @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_STABLE_PSTATE_GFX_MCLK @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_STABLE_PSTATE_GFX_SCLK @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_VDDGFX @ amdgpu_kms.c
+AMDGPU_INFO_SENSOR_VDDNB @ amdgpu_kms.c
+AMDGPU_INFO_TIMESTAMP @ amdgpu_kms.c
+AMDGPU_INFO_UQ_FW_AREAS @ amdgpu_kms.c
+AMDGPU_INFO_VBIOS @ amdgpu_kms.c
+AMDGPU_INFO_VBIOS_IMAGE @ amdgpu_kms.c
+AMDGPU_INFO_VBIOS_INFO @ amdgpu_kms.c
+AMDGPU_INFO_VBIOS_SIZE @ amdgpu_kms.c
+AMDGPU_INFO_VCE_CLOCK_TABLE @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_AV1 @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_COUNT @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_HEVC @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_JPEG @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG2 @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4 @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_VC1 @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_VP9 @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS_DECODE @ amdgpu_kms.c
+AMDGPU_INFO_VIDEO_CAPS_ENCODE @ amdgpu_kms.c
+AMDGPU_INFO_VIS_VRAM_USAGE @ amdgpu_kms.c
+AMDGPU_INFO_VRAM_GTT @ amdgpu_kms.c
+AMDGPU_INFO_VRAM_LOST_COUNTER @ amdgpu_kms.c
+AMDGPU_INFO_VRAM_USAGE @ amdgpu_kms.c
+AMDGPU_VCE_CLOCK_TABLE_ENTRIES @ amdgpu_kms.c

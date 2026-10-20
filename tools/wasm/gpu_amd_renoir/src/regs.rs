@@ -6281,3 +6281,533 @@ pub const AMDGPU_VA_RESERVED_TRAP_SIZE: u32 = 0x10000;
 pub const AMDGPU_GMC_HOLE_MASK: u64 = 0xffffffffffff;
 /// ?
 pub const AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE: u32 = 0x200;
+
+// The DRM_AMDGPU_INFO answers (amdgpu_drm.h, amdgpu_kms.c)
+/// The value of `sizeof(struct drm_amdgpu_info_device)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info_device: u32 = 0x1b8;
+/// The value of `offsetof(struct drm_amdgpu_info_device, device_id)` in amdgpu_kms.c
+pub const UAPI_DEV_DEVICE_ID: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_info_device, chip_rev)` in amdgpu_kms.c
+pub const UAPI_DEV_CHIP_REV: u32 = 0x4;
+/// The value of `offsetof(struct drm_amdgpu_info_device, external_rev)` in amdgpu_kms.c
+pub const UAPI_DEV_EXTERNAL_REV: u32 = 0x8;
+/// The value of `offsetof(struct drm_amdgpu_info_device, pci_rev)` in amdgpu_kms.c
+pub const UAPI_DEV_PCI_REV: u32 = 0xc;
+/// The value of `offsetof(struct drm_amdgpu_info_device, family)` in amdgpu_kms.c
+pub const UAPI_DEV_FAMILY: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_info_device, num_shader_engines)` in amdgpu_kms.c
+pub const UAPI_DEV_NUM_SHADER_ENGINES: u32 = 0x14;
+/// The value of `offsetof(struct drm_amdgpu_info_device, num_shader_arrays_per_engine)` in amdgpu_kms.c
+pub const UAPI_DEV_NUM_SHADER_ARRAYS_PER_ENGINE: u32 = 0x18;
+/// The value of `offsetof(struct drm_amdgpu_info_device, gpu_counter_freq)` in amdgpu_kms.c
+pub const UAPI_DEV_GPU_COUNTER_FREQ: u32 = 0x1c;
+/// The value of `offsetof(struct drm_amdgpu_info_device, max_engine_clock)` in amdgpu_kms.c
+pub const UAPI_DEV_MAX_ENGINE_CLOCK: u32 = 0x20;
+/// The value of `offsetof(struct drm_amdgpu_info_device, max_memory_clock)` in amdgpu_kms.c
+pub const UAPI_DEV_MAX_MEMORY_CLOCK: u32 = 0x28;
+/// The value of `offsetof(struct drm_amdgpu_info_device, cu_active_number)` in amdgpu_kms.c
+pub const UAPI_DEV_CU_ACTIVE_NUMBER: u32 = 0x30;
+/// The value of `offsetof(struct drm_amdgpu_info_device, cu_ao_mask)` in amdgpu_kms.c
+pub const UAPI_DEV_CU_AO_MASK: u32 = 0x34;
+/// The value of `offsetof(struct drm_amdgpu_info_device, cu_bitmap)` in amdgpu_kms.c
+pub const UAPI_DEV_CU_BITMAP: u32 = 0x38;
+/// The value of `offsetof(struct drm_amdgpu_info_device, enabled_rb_pipes_mask)` in amdgpu_kms.c
+pub const UAPI_DEV_ENABLED_RB_PIPES_MASK: u32 = 0x78;
+/// The value of `offsetof(struct drm_amdgpu_info_device, num_rb_pipes)` in amdgpu_kms.c
+pub const UAPI_DEV_NUM_RB_PIPES: u32 = 0x7c;
+/// The value of `offsetof(struct drm_amdgpu_info_device, num_hw_gfx_contexts)` in amdgpu_kms.c
+pub const UAPI_DEV_NUM_HW_GFX_CONTEXTS: u32 = 0x80;
+/// The value of `offsetof(struct drm_amdgpu_info_device, pcie_gen)` in amdgpu_kms.c
+pub const UAPI_DEV_PCIE_GEN: u32 = 0x84;
+/// The value of `offsetof(struct drm_amdgpu_info_device, ids_flags)` in amdgpu_kms.c
+pub const UAPI_DEV_IDS_FLAGS: u32 = 0x88;
+/// The value of `offsetof(struct drm_amdgpu_info_device, virtual_address_offset)` in amdgpu_kms.c
+pub const UAPI_DEV_VIRTUAL_ADDRESS_OFFSET: u32 = 0x90;
+/// The value of `offsetof(struct drm_amdgpu_info_device, virtual_address_max)` in amdgpu_kms.c
+pub const UAPI_DEV_VIRTUAL_ADDRESS_MAX: u32 = 0x98;
+/// The value of `offsetof(struct drm_amdgpu_info_device, virtual_address_alignment)` in amdgpu_kms.c
+pub const UAPI_DEV_VIRTUAL_ADDRESS_ALIGNMENT: u32 = 0xa0;
+/// The value of `offsetof(struct drm_amdgpu_info_device, pte_fragment_size)` in amdgpu_kms.c
+pub const UAPI_DEV_PTE_FRAGMENT_SIZE: u32 = 0xa4;
+/// The value of `offsetof(struct drm_amdgpu_info_device, gart_page_size)` in amdgpu_kms.c
+pub const UAPI_DEV_GART_PAGE_SIZE: u32 = 0xa8;
+/// The value of `offsetof(struct drm_amdgpu_info_device, ce_ram_size)` in amdgpu_kms.c
+pub const UAPI_DEV_CE_RAM_SIZE: u32 = 0xac;
+/// The value of `offsetof(struct drm_amdgpu_info_device, vram_type)` in amdgpu_kms.c
+pub const UAPI_DEV_VRAM_TYPE: u32 = 0xb0;
+/// The value of `offsetof(struct drm_amdgpu_info_device, vram_bit_width)` in amdgpu_kms.c
+pub const UAPI_DEV_VRAM_BIT_WIDTH: u32 = 0xb4;
+/// The value of `offsetof(struct drm_amdgpu_info_device, vce_harvest_config)` in amdgpu_kms.c
+pub const UAPI_DEV_VCE_HARVEST_CONFIG: u32 = 0xb8;
+/// The value of `offsetof(struct drm_amdgpu_info_device, gc_double_offchip_lds_buf)` in amdgpu_kms.c
+pub const UAPI_DEV_GC_DOUBLE_OFFCHIP_LDS_BUF: u32 = 0xbc;
+/// The value of `offsetof(struct drm_amdgpu_info_device, prim_buf_gpu_addr)` in amdgpu_kms.c
+pub const UAPI_DEV_PRIM_BUF_GPU_ADDR: u32 = 0xc0;
+/// The value of `offsetof(struct drm_amdgpu_info_device, pos_buf_gpu_addr)` in amdgpu_kms.c
+pub const UAPI_DEV_POS_BUF_GPU_ADDR: u32 = 0xc8;
+/// The value of `offsetof(struct drm_amdgpu_info_device, cntl_sb_buf_gpu_addr)` in amdgpu_kms.c
+pub const UAPI_DEV_CNTL_SB_BUF_GPU_ADDR: u32 = 0xd0;
+/// The value of `offsetof(struct drm_amdgpu_info_device, param_buf_gpu_addr)` in amdgpu_kms.c
+pub const UAPI_DEV_PARAM_BUF_GPU_ADDR: u32 = 0xd8;
+/// The value of `offsetof(struct drm_amdgpu_info_device, prim_buf_size)` in amdgpu_kms.c
+pub const UAPI_DEV_PRIM_BUF_SIZE: u32 = 0xe0;
+/// The value of `offsetof(struct drm_amdgpu_info_device, pos_buf_size)` in amdgpu_kms.c
+pub const UAPI_DEV_POS_BUF_SIZE: u32 = 0xe4;
+/// The value of `offsetof(struct drm_amdgpu_info_device, cntl_sb_buf_size)` in amdgpu_kms.c
+pub const UAPI_DEV_CNTL_SB_BUF_SIZE: u32 = 0xe8;
+/// The value of `offsetof(struct drm_amdgpu_info_device, param_buf_size)` in amdgpu_kms.c
+pub const UAPI_DEV_PARAM_BUF_SIZE: u32 = 0xec;
+/// The value of `offsetof(struct drm_amdgpu_info_device, wave_front_size)` in amdgpu_kms.c
+pub const UAPI_DEV_WAVE_FRONT_SIZE: u32 = 0xf0;
+/// The value of `offsetof(struct drm_amdgpu_info_device, num_shader_visible_vgprs)` in amdgpu_kms.c
+pub const UAPI_DEV_NUM_SHADER_VISIBLE_VGPRS: u32 = 0xf4;
+/// The value of `offsetof(struct drm_amdgpu_info_device, num_cu_per_sh)` in amdgpu_kms.c
+pub const UAPI_DEV_NUM_CU_PER_SH: u32 = 0xf8;
+/// The value of `offsetof(struct drm_amdgpu_info_device, num_tcc_blocks)` in amdgpu_kms.c
+pub const UAPI_DEV_NUM_TCC_BLOCKS: u32 = 0xfc;
+/// The value of `offsetof(struct drm_amdgpu_info_device, gs_vgt_table_depth)` in amdgpu_kms.c
+pub const UAPI_DEV_GS_VGT_TABLE_DEPTH: u32 = 0x100;
+/// The value of `offsetof(struct drm_amdgpu_info_device, gs_prim_buffer_depth)` in amdgpu_kms.c
+pub const UAPI_DEV_GS_PRIM_BUFFER_DEPTH: u32 = 0x104;
+/// The value of `offsetof(struct drm_amdgpu_info_device, max_gs_waves_per_vgt)` in amdgpu_kms.c
+pub const UAPI_DEV_MAX_GS_WAVES_PER_VGT: u32 = 0x108;
+/// The value of `offsetof(struct drm_amdgpu_info_device, pcie_num_lanes)` in amdgpu_kms.c
+pub const UAPI_DEV_PCIE_NUM_LANES: u32 = 0x10c;
+/// The value of `offsetof(struct drm_amdgpu_info_device, cu_ao_bitmap)` in amdgpu_kms.c
+pub const UAPI_DEV_CU_AO_BITMAP: u32 = 0x110;
+/// The value of `offsetof(struct drm_amdgpu_info_device, high_va_offset)` in amdgpu_kms.c
+pub const UAPI_DEV_HIGH_VA_OFFSET: u32 = 0x150;
+/// The value of `offsetof(struct drm_amdgpu_info_device, high_va_max)` in amdgpu_kms.c
+pub const UAPI_DEV_HIGH_VA_MAX: u32 = 0x158;
+/// The value of `offsetof(struct drm_amdgpu_info_device, pa_sc_tile_steering_override)` in amdgpu_kms.c
+pub const UAPI_DEV_PA_SC_TILE_STEERING_OVERRIDE: u32 = 0x160;
+/// The value of `offsetof(struct drm_amdgpu_info_device, pad)` in amdgpu_kms.c
+pub const UAPI_DEV_PAD: u32 = 0x164;
+/// The value of `offsetof(struct drm_amdgpu_info_device, tcc_disabled_mask)` in amdgpu_kms.c
+pub const UAPI_DEV_TCC_DISABLED_MASK: u32 = 0x168;
+/// The value of `offsetof(struct drm_amdgpu_info_device, min_engine_clock)` in amdgpu_kms.c
+pub const UAPI_DEV_MIN_ENGINE_CLOCK: u32 = 0x170;
+/// The value of `offsetof(struct drm_amdgpu_info_device, min_memory_clock)` in amdgpu_kms.c
+pub const UAPI_DEV_MIN_MEMORY_CLOCK: u32 = 0x178;
+/// The value of `offsetof(struct drm_amdgpu_info_device, tcp_cache_size)` in amdgpu_kms.c
+pub const UAPI_DEV_TCP_CACHE_SIZE: u32 = 0x180;
+/// The value of `offsetof(struct drm_amdgpu_info_device, num_sqc_per_wgp)` in amdgpu_kms.c
+pub const UAPI_DEV_NUM_SQC_PER_WGP: u32 = 0x184;
+/// The value of `offsetof(struct drm_amdgpu_info_device, sqc_data_cache_size)` in amdgpu_kms.c
+pub const UAPI_DEV_SQC_DATA_CACHE_SIZE: u32 = 0x188;
+/// The value of `offsetof(struct drm_amdgpu_info_device, sqc_inst_cache_size)` in amdgpu_kms.c
+pub const UAPI_DEV_SQC_INST_CACHE_SIZE: u32 = 0x18c;
+/// The value of `offsetof(struct drm_amdgpu_info_device, gl1c_cache_size)` in amdgpu_kms.c
+pub const UAPI_DEV_GL1C_CACHE_SIZE: u32 = 0x190;
+/// The value of `offsetof(struct drm_amdgpu_info_device, gl2c_cache_size)` in amdgpu_kms.c
+pub const UAPI_DEV_GL2C_CACHE_SIZE: u32 = 0x194;
+/// The value of `offsetof(struct drm_amdgpu_info_device, mall_size)` in amdgpu_kms.c
+pub const UAPI_DEV_MALL_SIZE: u32 = 0x198;
+/// The value of `offsetof(struct drm_amdgpu_info_device, enabled_rb_pipes_mask_hi)` in amdgpu_kms.c
+pub const UAPI_DEV_ENABLED_RB_PIPES_MASK_HI: u32 = 0x1a0;
+/// The value of `offsetof(struct drm_amdgpu_info_device, shadow_size)` in amdgpu_kms.c
+pub const UAPI_DEV_SHADOW_SIZE: u32 = 0x1a4;
+/// The value of `offsetof(struct drm_amdgpu_info_device, shadow_alignment)` in amdgpu_kms.c
+pub const UAPI_DEV_SHADOW_ALIGNMENT: u32 = 0x1a8;
+/// The value of `offsetof(struct drm_amdgpu_info_device, csa_size)` in amdgpu_kms.c
+pub const UAPI_DEV_CSA_SIZE: u32 = 0x1ac;
+/// The value of `offsetof(struct drm_amdgpu_info_device, csa_alignment)` in amdgpu_kms.c
+pub const UAPI_DEV_CSA_ALIGNMENT: u32 = 0x1b0;
+/// The value of `offsetof(struct drm_amdgpu_info_device, userq_ip_mask)` in amdgpu_kms.c
+pub const UAPI_DEV_USERQ_IP_MASK: u32 = 0x1b4;
+/// The value of `sizeof(struct drm_amdgpu_info_hw_ip)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info_hw_ip: u32 = 0x28;
+/// The value of `offsetof(struct drm_amdgpu_info_hw_ip, hw_ip_version_major)` in amdgpu_kms.c
+pub const UAPI_HWIP_HW_IP_VERSION_MAJOR: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_info_hw_ip, hw_ip_version_minor)` in amdgpu_kms.c
+pub const UAPI_HWIP_HW_IP_VERSION_MINOR: u32 = 0x4;
+/// The value of `offsetof(struct drm_amdgpu_info_hw_ip, capabilities_flags)` in amdgpu_kms.c
+pub const UAPI_HWIP_CAPABILITIES_FLAGS: u32 = 0x8;
+/// The value of `offsetof(struct drm_amdgpu_info_hw_ip, ib_start_alignment)` in amdgpu_kms.c
+pub const UAPI_HWIP_IB_START_ALIGNMENT: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_info_hw_ip, ib_size_alignment)` in amdgpu_kms.c
+pub const UAPI_HWIP_IB_SIZE_ALIGNMENT: u32 = 0x14;
+/// The value of `offsetof(struct drm_amdgpu_info_hw_ip, available_rings)` in amdgpu_kms.c
+pub const UAPI_HWIP_AVAILABLE_RINGS: u32 = 0x18;
+/// The value of `offsetof(struct drm_amdgpu_info_hw_ip, ip_discovery_version)` in amdgpu_kms.c
+pub const UAPI_HWIP_IP_DISCOVERY_VERSION: u32 = 0x1c;
+/// The value of `offsetof(struct drm_amdgpu_info_hw_ip, userq_num_slots)` in amdgpu_kms.c
+pub const UAPI_HWIP_USERQ_NUM_SLOTS: u32 = 0x20;
+/// The value of `sizeof(struct drm_amdgpu_info_firmware)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info_firmware: u32 = 0x8;
+/// The value of `offsetof(struct drm_amdgpu_info_firmware, ver)` in amdgpu_kms.c
+pub const UAPI_FW_VER: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_info_firmware, feature)` in amdgpu_kms.c
+pub const UAPI_FW_FEATURE: u32 = 0x4;
+/// The value of `sizeof(struct drm_amdgpu_info_gds)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info_gds: u32 = 0x20;
+/// The value of `offsetof(struct drm_amdgpu_info_gds, gds_gfx_partition_size)` in amdgpu_kms.c
+pub const UAPI_GDS_GDS_GFX_PARTITION_SIZE: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_info_gds, compute_partition_size)` in amdgpu_kms.c
+pub const UAPI_GDS_COMPUTE_PARTITION_SIZE: u32 = 0x4;
+/// The value of `offsetof(struct drm_amdgpu_info_gds, gds_total_size)` in amdgpu_kms.c
+pub const UAPI_GDS_GDS_TOTAL_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct drm_amdgpu_info_gds, gws_per_gfx_partition)` in amdgpu_kms.c
+pub const UAPI_GDS_GWS_PER_GFX_PARTITION: u32 = 0xc;
+/// The value of `offsetof(struct drm_amdgpu_info_gds, gws_per_compute_partition)` in amdgpu_kms.c
+pub const UAPI_GDS_GWS_PER_COMPUTE_PARTITION: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_info_gds, oa_per_gfx_partition)` in amdgpu_kms.c
+pub const UAPI_GDS_OA_PER_GFX_PARTITION: u32 = 0x14;
+/// The value of `offsetof(struct drm_amdgpu_info_gds, oa_per_compute_partition)` in amdgpu_kms.c
+pub const UAPI_GDS_OA_PER_COMPUTE_PARTITION: u32 = 0x18;
+/// The value of `offsetof(struct drm_amdgpu_info_gds, _pad)` in amdgpu_kms.c
+pub const UAPI_GDS__PAD: u32 = 0x1c;
+/// The value of `sizeof(struct drm_amdgpu_heap_info)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_heap_info: u32 = 0x20;
+/// The value of `offsetof(struct drm_amdgpu_heap_info, total_heap_size)` in amdgpu_kms.c
+pub const UAPI_HEAP_TOTAL_HEAP_SIZE: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_heap_info, usable_heap_size)` in amdgpu_kms.c
+pub const UAPI_HEAP_USABLE_HEAP_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct drm_amdgpu_heap_info, heap_usage)` in amdgpu_kms.c
+pub const UAPI_HEAP_HEAP_USAGE: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_heap_info, max_allocation)` in amdgpu_kms.c
+pub const UAPI_HEAP_MAX_ALLOCATION: u32 = 0x18;
+/// The value of `sizeof(struct drm_amdgpu_memory_info)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_memory_info: u32 = 0x60;
+/// The value of `offsetof(struct drm_amdgpu_memory_info, vram)` in amdgpu_kms.c
+pub const UAPI_MEM_VRAM: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_memory_info, cpu_accessible_vram)` in amdgpu_kms.c
+pub const UAPI_MEM_CPU_ACCESSIBLE_VRAM: u32 = 0x20;
+/// The value of `offsetof(struct drm_amdgpu_memory_info, gtt)` in amdgpu_kms.c
+pub const UAPI_MEM_GTT: u32 = 0x40;
+/// The value of `sizeof(struct drm_amdgpu_info_vbios)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info_vbios: u32 = 0xc8;
+/// The value of `offsetof(struct drm_amdgpu_info_vbios, name)` in amdgpu_kms.c
+pub const UAPI_VBIOS_NAME: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_info_vbios, vbios_pn)` in amdgpu_kms.c
+pub const UAPI_VBIOS_VBIOS_PN: u32 = 0x40;
+/// The value of `offsetof(struct drm_amdgpu_info_vbios, version)` in amdgpu_kms.c
+pub const UAPI_VBIOS_VERSION: u32 = 0x80;
+/// The value of `offsetof(struct drm_amdgpu_info_vbios, pad)` in amdgpu_kms.c
+pub const UAPI_VBIOS_PAD: u32 = 0x84;
+/// The value of `offsetof(struct drm_amdgpu_info_vbios, vbios_ver_str)` in amdgpu_kms.c
+pub const UAPI_VBIOS_VBIOS_VER_STR: u32 = 0x88;
+/// The value of `offsetof(struct drm_amdgpu_info_vbios, date)` in amdgpu_kms.c
+pub const UAPI_VBIOS_DATE: u32 = 0xa8;
+/// The value of `sizeof(struct drm_amdgpu_info_video_codec_info)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info_video_codec_info: u32 = 0x18;
+/// The value of `offsetof(struct drm_amdgpu_info_video_codec_info, valid)` in amdgpu_kms.c
+pub const UAPI_CODEC_VALID: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_info_video_codec_info, max_width)` in amdgpu_kms.c
+pub const UAPI_CODEC_MAX_WIDTH: u32 = 0x4;
+/// The value of `offsetof(struct drm_amdgpu_info_video_codec_info, max_height)` in amdgpu_kms.c
+pub const UAPI_CODEC_MAX_HEIGHT: u32 = 0x8;
+/// The value of `offsetof(struct drm_amdgpu_info_video_codec_info, max_pixels_per_frame)` in amdgpu_kms.c
+pub const UAPI_CODEC_MAX_PIXELS_PER_FRAME: u32 = 0xc;
+/// The value of `offsetof(struct drm_amdgpu_info_video_codec_info, max_level)` in amdgpu_kms.c
+pub const UAPI_CODEC_MAX_LEVEL: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_info_video_codec_info, pad)` in amdgpu_kms.c
+pub const UAPI_CODEC_PAD: u32 = 0x14;
+/// The value of `sizeof(struct drm_amdgpu_info_video_caps)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info_video_caps: u32 = 0xc0;
+/// The value of `offsetof(struct drm_amdgpu_info_video_caps, codec_info)` in amdgpu_kms.c
+pub const UAPI_VCAPS_CODEC_INFO: u32 = 0x0;
+/// The value of `sizeof(struct drm_amdgpu_info_gpuvm_fault)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info_gpuvm_fault: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_info_gpuvm_fault, addr)` in amdgpu_kms.c
+pub const UAPI_VMFAULT_ADDR: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_info_gpuvm_fault, status)` in amdgpu_kms.c
+pub const UAPI_VMFAULT_STATUS: u32 = 0x8;
+/// The value of `offsetof(struct drm_amdgpu_info_gpuvm_fault, vmhub)` in amdgpu_kms.c
+pub const UAPI_VMFAULT_VMHUB: u32 = 0xc;
+/// The value of `sizeof(struct drm_amdgpu_info_vce_clock_table)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info_vce_clock_table: u32 = 0x68;
+/// The value of `offsetof(struct drm_amdgpu_info_vce_clock_table, entries)` in amdgpu_kms.c
+pub const UAPI_VCECLK_ENTRIES: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_info_vce_clock_table, num_valid_entries)` in amdgpu_kms.c
+pub const UAPI_VCECLK_NUM_VALID_ENTRIES: u32 = 0x60;
+/// The value of `offsetof(struct drm_amdgpu_info_vce_clock_table, pad)` in amdgpu_kms.c
+pub const UAPI_VCECLK_PAD: u32 = 0x64;
+/// The value of `sizeof(struct drm_amdgpu_info_vram_gtt)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info_vram_gtt: u32 = 0x18;
+/// The value of `offsetof(struct drm_amdgpu_info_vram_gtt, vram_size)` in amdgpu_kms.c
+pub const UAPI_VRAMGTT_VRAM_SIZE: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_info_vram_gtt, vram_cpu_accessible_size)` in amdgpu_kms.c
+pub const UAPI_VRAMGTT_VRAM_CPU_ACCESSIBLE_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct drm_amdgpu_info_vram_gtt, gtt_size)` in amdgpu_kms.c
+pub const UAPI_VRAMGTT_GTT_SIZE: u32 = 0x10;
+/// The value of `sizeof(struct drm_amdgpu_info_num_handles)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info_num_handles: u32 = 0x8;
+/// The value of `offsetof(struct drm_amdgpu_info_num_handles, uvd_max_handles)` in amdgpu_kms.c
+pub const UAPI_HANDLES_UVD_MAX_HANDLES: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_info_num_handles, uvd_used_handles)` in amdgpu_kms.c
+pub const UAPI_HANDLES_UVD_USED_HANDLES: u32 = 0x4;
+/// The value of `offsetof(struct drm_amdgpu_info, return_pointer)` in amdgpu_kms.c
+pub const UAPI_INFO_RETURN_POINTER: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_info, return_size)` in amdgpu_kms.c
+pub const UAPI_INFO_RETURN_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct drm_amdgpu_info, query)` in amdgpu_kms.c
+pub const UAPI_INFO_QUERY: u32 = 0xc;
+/// The value of `offsetof(struct drm_amdgpu_info, mode_crtc.id)` in amdgpu_kms.c
+pub const UAPI_INFO_MODE_CRTC_ID: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_info, query_hw_ip.type)` in amdgpu_kms.c
+pub const UAPI_INFO_QUERY_HW_IP_TYPE: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_info, query_hw_ip.ip_instance)` in amdgpu_kms.c
+pub const UAPI_INFO_QUERY_HW_IP_INSTANCE: u32 = 0x14;
+/// The value of `offsetof(struct drm_amdgpu_info, read_mmr_reg.dword_offset)` in amdgpu_kms.c
+pub const UAPI_INFO_READ_MMR_DWORD_OFFSET: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_info, read_mmr_reg.count)` in amdgpu_kms.c
+pub const UAPI_INFO_READ_MMR_COUNT: u32 = 0x14;
+/// The value of `offsetof(struct drm_amdgpu_info, read_mmr_reg.instance)` in amdgpu_kms.c
+pub const UAPI_INFO_READ_MMR_INSTANCE: u32 = 0x18;
+/// The value of `offsetof(struct drm_amdgpu_info, read_mmr_reg.flags)` in amdgpu_kms.c
+pub const UAPI_INFO_READ_MMR_FLAGS: u32 = 0x1c;
+/// The value of `offsetof(struct drm_amdgpu_info, query_fw)` in amdgpu_kms.c
+pub const UAPI_INFO_QUERY_FW: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_info, vbios_info.type)` in amdgpu_kms.c
+pub const UAPI_INFO_VBIOS_TYPE: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_info, vbios_info.offset)` in amdgpu_kms.c
+pub const UAPI_INFO_VBIOS_OFFSET: u32 = 0x14;
+/// The value of `offsetof(struct drm_amdgpu_info, sensor_info.type)` in amdgpu_kms.c
+pub const UAPI_INFO_SENSOR_TYPE: u32 = 0x10;
+/// The value of `offsetof(struct drm_amdgpu_info, video_cap.type)` in amdgpu_kms.c
+pub const UAPI_INFO_VIDEO_CAP_TYPE: u32 = 0x10;
+/// The value of `sizeof(struct drm_amdgpu_info)` in amdgpu_kms.c
+pub const SIZEOF_drm_amdgpu_info: u32 = 0x20;
+/// The value of `offsetof(struct drm_amdgpu_query_fw, fw_type)` in amdgpu_kms.c
+pub const UAPI_QUERY_FW_FW_TYPE: u32 = 0x0;
+/// The value of `offsetof(struct drm_amdgpu_query_fw, ip_instance)` in amdgpu_kms.c
+pub const UAPI_QUERY_FW_IP_INSTANCE: u32 = 0x4;
+/// The value of `offsetof(struct drm_amdgpu_query_fw, index)` in amdgpu_kms.c
+pub const UAPI_QUERY_FW_INDEX: u32 = 0x8;
+/// ?
+pub const AMDGPU_HW_IP_DMA: u32 = 0x2;
+/// ?
+pub const AMDGPU_HW_IP_INSTANCE_MAX_COUNT: u32 = 0x1;
+/// ?
+pub const AMDGPU_HW_IP_UVD: u32 = 0x3;
+/// ?
+pub const AMDGPU_HW_IP_UVD_ENC: u32 = 0x5;
+/// ?
+pub const AMDGPU_HW_IP_VCE: u32 = 0x4;
+/// ?
+pub const AMDGPU_HW_IP_VCN_DEC: u32 = 0x6;
+/// ?
+pub const AMDGPU_HW_IP_VCN_ENC: u32 = 0x7;
+/// ?
+pub const AMDGPU_HW_IP_VCN_JPEG: u32 = 0x8;
+/// ?
+pub const AMDGPU_HW_IP_VPE: u32 = 0x9;
+/// ?
+pub const AMDGPU_IDS_FLAGS_CONFORMANT_TRUNC_COORD: u32 = 0x8;
+/// ?
+pub const AMDGPU_IDS_FLAGS_FUSION: u32 = 0x1;
+/// ?
+pub const AMDGPU_IDS_FLAGS_GANG_SUBMIT: u32 = 0x10;
+/// ?
+pub const AMDGPU_IDS_FLAGS_MODE_MASK: u32 = 0x300;
+/// ?
+pub const AMDGPU_IDS_FLAGS_MODE_PF: u32 = 0x0;
+/// ?
+pub const AMDGPU_IDS_FLAGS_MODE_PT: u32 = 0x2;
+/// ?
+pub const AMDGPU_IDS_FLAGS_MODE_SHIFT: u32 = 0x8;
+/// ?
+pub const AMDGPU_IDS_FLAGS_MODE_VF: u32 = 0x1;
+/// ?
+pub const AMDGPU_IDS_FLAGS_PREEMPTION: u32 = 0x2;
+/// ?
+pub const AMDGPU_IDS_FLAGS_TMZ: u32 = 0x4;
+/// ?
+pub const AMDGPU_INFO_ACCEL_WORKING: u32 = 0x0;
+/// ?
+pub const AMDGPU_INFO_CRTC_FROM_ID: u32 = 0x1;
+/// ?
+pub const AMDGPU_INFO_DEV_INFO: u32 = 0x16;
+/// ?
+pub const AMDGPU_INFO_FW_ASD: u32 = 0xd;
+/// ?
+pub const AMDGPU_INFO_FW_CAP: u32 = 0x16;
+/// ?
+pub const AMDGPU_INFO_FW_DMCU: u32 = 0x12;
+/// ?
+pub const AMDGPU_INFO_FW_DMCUB: u32 = 0x14;
+/// ?
+pub const AMDGPU_INFO_FW_GFX_CE: u32 = 0x6;
+/// ?
+pub const AMDGPU_INFO_FW_GFX_ME: u32 = 0x4;
+/// ?
+pub const AMDGPU_INFO_FW_GFX_MEC: u32 = 0x8;
+/// ?
+pub const AMDGPU_INFO_FW_GFX_PFP: u32 = 0x5;
+/// ?
+pub const AMDGPU_INFO_FW_GFX_RLC: u32 = 0x7;
+/// ?
+pub const AMDGPU_INFO_FW_GFX_RLCP: u32 = 0x17;
+/// ?
+pub const AMDGPU_INFO_FW_GFX_RLCV: u32 = 0x18;
+/// ?
+pub const AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_CNTL: u32 = 0xf;
+/// ?
+pub const AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_GPM_MEM: u32 = 0x10;
+/// ?
+pub const AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_SRM_MEM: u32 = 0x11;
+/// ?
+pub const AMDGPU_INFO_FW_GMC: u32 = 0x3;
+/// ?
+pub const AMDGPU_INFO_FW_IMU: u32 = 0x1b;
+/// ?
+pub const AMDGPU_INFO_FW_MES: u32 = 0x1a;
+/// ?
+pub const AMDGPU_INFO_FW_MES_KIQ: u32 = 0x19;
+/// ?
+pub const AMDGPU_INFO_FW_SDMA: u32 = 0xb;
+/// ?
+pub const AMDGPU_INFO_FW_SMC: u32 = 0xa;
+/// ?
+pub const AMDGPU_INFO_FW_SOS: u32 = 0xc;
+/// ?
+pub const AMDGPU_INFO_FW_TA: u32 = 0x13;
+/// ?
+pub const AMDGPU_INFO_FW_TOC: u32 = 0x15;
+/// ?
+pub const AMDGPU_INFO_FW_UVD: u32 = 0x2;
+/// ?
+pub const AMDGPU_INFO_FW_VCE: u32 = 0x1;
+/// ?
+pub const AMDGPU_INFO_FW_VCN: u32 = 0xe;
+/// ?
+pub const AMDGPU_INFO_FW_VERSION: u32 = 0xe;
+/// ?
+pub const AMDGPU_INFO_FW_VPE: u32 = 0x1c;
+/// ?
+pub const AMDGPU_INFO_GDS_CONFIG: u32 = 0x13;
+/// ?
+pub const AMDGPU_INFO_GPUVM_FAULT: u32 = 0x23;
+/// ?
+pub const AMDGPU_INFO_GTT_USAGE: u32 = 0x11;
+/// ?
+pub const AMDGPU_INFO_HW_IP_COUNT: u32 = 0x3;
+/// ?
+pub const AMDGPU_INFO_HW_IP_INFO: u32 = 0x2;
+/// ?
+pub const AMDGPU_INFO_MAX_IBS: u32 = 0x22;
+/// ?
+pub const AMDGPU_INFO_MEMORY: u32 = 0x19;
+/// ?
+pub const AMDGPU_INFO_MMR_SE_INDEX_MASK: u32 = 0xff;
+/// ?
+pub const AMDGPU_INFO_MMR_SE_INDEX_SHIFT: u32 = 0x0;
+/// ?
+pub const AMDGPU_INFO_MMR_SH_INDEX_MASK: u32 = 0xff;
+/// ?
+pub const AMDGPU_INFO_MMR_SH_INDEX_SHIFT: u32 = 0x8;
+/// ?
+pub const AMDGPU_INFO_NUM_BYTES_MOVED: u32 = 0xf;
+/// ?
+pub const AMDGPU_INFO_NUM_EVICTIONS: u32 = 0x18;
+/// ?
+pub const AMDGPU_INFO_NUM_HANDLES: u32 = 0x1c;
+/// ?
+pub const AMDGPU_INFO_NUM_VRAM_CPU_PAGE_FAULTS: u32 = 0x1e;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_ATHUB: u32 = 0x10;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_DF: u32 = 0x100;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_FEATURES: u32 = 0x20;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_FUSE: u32 = 0x2000;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_GFX: u32 = 0x4;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_HDP: u32 = 0x40;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_MMHUB: u32 = 0x8;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_MP0: u32 = 0x800;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_MP1: u32 = 0x1000;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_PCIE: u32 = 0x20;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_SDMA: u32 = 0x2;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_SEM: u32 = 0x400;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_SMN: u32 = 0x200;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_UMC: u32 = 0x1;
+/// ?
+pub const AMDGPU_INFO_RAS_ENABLED_XGMI: u32 = 0x80;
+/// ?
+pub const AMDGPU_INFO_READ_MMR_REG: u32 = 0x15;
+/// ?
+pub const AMDGPU_INFO_SENSOR: u32 = 0x1d;
+/// ?
+pub const AMDGPU_INFO_SENSOR_GFX_MCLK: u32 = 0x2;
+/// ?
+pub const AMDGPU_INFO_SENSOR_GFX_SCLK: u32 = 0x1;
+/// ?
+pub const AMDGPU_INFO_SENSOR_GPU_AVG_POWER: u32 = 0x5;
+/// ?
+pub const AMDGPU_INFO_SENSOR_GPU_INPUT_POWER: u32 = 0xc;
+/// ?
+pub const AMDGPU_INFO_SENSOR_GPU_LOAD: u32 = 0x4;
+/// ?
+pub const AMDGPU_INFO_SENSOR_GPU_TEMP: u32 = 0x3;
+/// ?
+pub const AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_MCLK: u32 = 0xb;
+/// ?
+pub const AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_SCLK: u32 = 0xa;
+/// ?
+pub const AMDGPU_INFO_SENSOR_STABLE_PSTATE_GFX_MCLK: u32 = 0x9;
+/// ?
+pub const AMDGPU_INFO_SENSOR_STABLE_PSTATE_GFX_SCLK: u32 = 0x8;
+/// ?
+pub const AMDGPU_INFO_SENSOR_VDDGFX: u32 = 0x7;
+/// ?
+pub const AMDGPU_INFO_SENSOR_VDDNB: u32 = 0x6;
+/// ?
+pub const AMDGPU_INFO_TIMESTAMP: u32 = 0x5;
+/// ?
+pub const AMDGPU_INFO_UQ_FW_AREAS: u32 = 0x24;
+/// ?
+pub const AMDGPU_INFO_VBIOS: u32 = 0x1b;
+/// ?
+pub const AMDGPU_INFO_VBIOS_IMAGE: u32 = 0x2;
+/// ?
+pub const AMDGPU_INFO_VBIOS_INFO: u32 = 0x3;
+/// ?
+pub const AMDGPU_INFO_VBIOS_SIZE: u32 = 0x1;
+/// ?
+pub const AMDGPU_INFO_VCE_CLOCK_TABLE: u32 = 0x1a;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS: u32 = 0x21;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_AV1: u32 = 0x7;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_COUNT: u32 = 0x8;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_HEVC: u32 = 0x4;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_JPEG: u32 = 0x5;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG2: u32 = 0x0;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4: u32 = 0x1;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC: u32 = 0x3;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_VC1: u32 = 0x2;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_VP9: u32 = 0x6;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS_DECODE: u32 = 0x0;
+/// ?
+pub const AMDGPU_INFO_VIDEO_CAPS_ENCODE: u32 = 0x1;
+/// ?
+pub const AMDGPU_INFO_VIS_VRAM_USAGE: u32 = 0x17;
+/// ?
+pub const AMDGPU_INFO_VRAM_GTT: u32 = 0x14;
+/// ?
+pub const AMDGPU_INFO_VRAM_LOST_COUNTER: u32 = 0x1f;
+/// ?
+pub const AMDGPU_INFO_VRAM_USAGE: u32 = 0x10;
+/// ?
+pub const AMDGPU_VCE_CLOCK_TABLE_ENTRIES: u32 = 0x6;
