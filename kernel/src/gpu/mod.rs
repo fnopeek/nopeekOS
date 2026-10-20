@@ -105,18 +105,19 @@ pub trait GpuHal: Send {
     /// True if hardware blit (BCS) is available.
     fn supports_blit(&self) -> bool { false }
 
-    /// Submit a rectangular blit from src GGTT → dst GGTT.
+    /// Submit a rectangular blit between two buffers named by their GPU
+    /// addresses.
     fn blit_rect_hw(
-        &mut self, src_ggtt: u32, src_pitch: u32,
-        dst_ggtt: u32, dst_pitch: u32,
+        &mut self, src_gpu: u64, src_pitch: u32,
+        dst_gpu: u64, dst_pitch: u32,
         x: u32, y: u32, w: u32, h: u32,
-    ) -> bool { let _ = (src_ggtt, src_pitch, dst_ggtt, dst_pitch, x, y, w, h); false }
+    ) -> bool { let _ = (src_gpu, src_pitch, dst_gpu, dst_pitch, x, y, w, h); false }
 
-    /// Get framebuffer GGTT offset (for BCS destination).
-    fn fb_gpu_addr(&self) -> u32 { 0 }
+    /// The framebuffer's GPU address (the blit destination).
+    fn fb_gpu_addr(&self) -> u64 { 0 }
 
-    /// Get shadow buffer GGTT offsets (A, B). 0 = not mapped.
-    fn shadow_gpu_addr(&self) -> (u32, u32) { (0, 0) }
+    /// The shadow buffers' GPU addresses (A, B). 0 = not mapped.
+    fn shadow_gpu_addr(&self) -> (u64, u64) { (0, 0) }
 }
 
 static GPU: Mutex<Option<Box<dyn GpuHal>>> = Mutex::new(None);
@@ -234,28 +235,29 @@ pub fn supports_blit() -> bool {
     }
 }
 
-/// Submit GPU blit: copy rectangle from src GGTT → dst GGTT.
+/// Submit GPU blit: copy a rectangle between two buffers named by their
+/// GPU addresses.
 pub fn gpu_blit_rect(
-    src_ggtt: u32, src_pitch: u32,
-    dst_ggtt: u32, dst_pitch: u32,
+    src_gpu: u64, src_pitch: u32,
+    dst_gpu: u64, dst_pitch: u32,
     x: u32, y: u32, w: u32, h: u32,
 ) -> bool {
     match GPU.lock().as_mut() {
-        Some(drv) => drv.blit_rect_hw(src_ggtt, src_pitch, dst_ggtt, dst_pitch, x, y, w, h),
+        Some(drv) => drv.blit_rect_hw(src_gpu, src_pitch, dst_gpu, dst_pitch, x, y, w, h),
         None => false,
     }
 }
 
-/// Get framebuffer GGTT offset (for BCS destination).
-pub fn fb_ggtt_offset() -> u32 {
+/// The framebuffer's GPU address (the blit destination).
+pub fn fb_gpu_addr() -> u64 {
     match GPU.lock().as_ref() {
         Some(drv) => drv.fb_gpu_addr(),
         None => 0,
     }
 }
 
-/// Get shadow buffer GGTT offsets (A, B).
-pub fn shadow_ggtt() -> (u32, u32) {
+/// The shadow buffers' GPU addresses (A, B).
+pub fn shadow_gpu_addr() -> (u64, u64) {
     match GPU.lock().as_ref() {
         Some(drv) => drv.shadow_gpu_addr(),
         None => (0, 0),

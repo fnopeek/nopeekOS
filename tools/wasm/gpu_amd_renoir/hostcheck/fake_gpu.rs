@@ -286,6 +286,16 @@ fn run_sdma(rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32) {
                 log(format!("sdma WRITE_LINEAR {:#x} = {:#x}", addr, d(4)));
                 4 + n
             }
+            (1, 0) => {
+                let bytes = d(1) + 1;
+                let src = d(3) as u64 | (d(4) as u64) << 32;
+                let dst = d(5) as u64 | (d(6) as u64) << 32;
+                for i in 0..bytes.div_ceil(4) as u64 {
+                    gpu_w32(dst + i * 4, gpu_r32(src + i * 4));
+                }
+                log(format!("sdma COPY_LINEAR {:#x} -> {:#x} {} bytes", src, dst, bytes));
+                7
+            }
             (4, _) => {
                 let ib = d(1) as u64 | (d(2) as u64) << 32;
                 let n = d(3);

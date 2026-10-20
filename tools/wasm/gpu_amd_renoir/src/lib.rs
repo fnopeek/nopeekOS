@@ -47,6 +47,7 @@ mod atom;
 mod atom_exec;
 mod gfx_v9_0;
 mod gmc_v9_0;
+mod gpudev;
 mod ip_blocks;
 mod jpeg_v2_0;
 mod nbio_v7_0;
@@ -96,7 +97,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    Line::new().s("v").s(DRIVER_VERSION).s(", stage 4: hw_init of SMU, GFX and SDMA, ring and IB tests").say();
+    Line::new().s("v").s(DRIVER_VERSION).s(", stage 5: the GPU service, copies on SDMA").say();
 
     match npk_sys::pci_bind(AMD_VENDOR as i32, LUCIENNE as i32) {
         0 => {}

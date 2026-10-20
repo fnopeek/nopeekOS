@@ -222,13 +222,21 @@ fn amdgpu_mem_type_to_domain(mem_type: u32) -> u32 {
     }
 }
 
-/// `amdgpu_bo_pin`: no imported buffers, no user pages; Carrizo/Stoney's
-/// preferred-domain rule is not Renoir's.
+/// `amdgpu_bo_pin`: no user pages; Carrizo/Stoney's preferred-domain rule
+/// is not Renoir's.
 pub fn amdgpu_bo_pin(adev: &mut amdgpu_device, h: usize, mut domain: u32) -> i32 {
     let preferred = bo(adev, h).preferred_domains;
     // Check domain to be pinned to against preferred domains
     if preferred & domain != 0 {
         domain &= preferred;
+    }
+    // A shared bo cannot be migrated to VRAM
+    if bo(adev, h).tbo.type_ == ttm_bo_type_sg {
+        if domain & AMDGPU_GEM_DOMAIN_GTT != 0 {
+            domain = AMDGPU_GEM_DOMAIN_GTT;
+        } else {
+            return -22;
+        }
     }
     if bo(adev, h).tbo.pin_count != 0 {
         let b = bo(adev, h);
@@ -458,4 +466,24 @@ pub fn amdgpu_bo_init(adev: &mut amdgpu_device) -> i32 {
     let name = crate::tables::amdgpu_vram_names.get(adev.gmc.vram_type as usize).copied().unwrap_or(b"?");
     Line::new().s("RAM width ").dec(adev.gmc.vram_width as u64).s("bits ").bytes(name).say();
     amdgpu_ttm::amdgpu_ttm_init(adev)
+}
+
+/// `amdgpu_dma_buf_create_obj`, with the attachment's pages
+/// (`dma_buf_map_attachment`) given: a buffer of `pages.len()` pages the
+/// kernel owns, in the GTT domain only.
+pub fn amdgpu_dma_buf_create_obj(adev: &mut amdgpu_device, pages: Vec<u64>) -> Result<usize, i32> {
+    let bp = amdgpu_bo_param {
+        size: pages.len() as u64 * PAGE_SIZE,
+        byte_align: PAGE_SIZE,
+        domain: AMDGPU_GEM_DOMAIN_CPU,
+        preferred_domain: 0,
+        flags: 0,
+        type_: ttm_bo_type_sg,
+    };
+    let h = amdgpu_bo_create(adev, &bp)?;
+    let b = bo_mut(adev, h);
+    b.allowed_domains = AMDGPU_GEM_DOMAIN_GTT;
+    b.preferred_domains = AMDGPU_GEM_DOMAIN_GTT;
+    b.tbo.sg = Some(pages);
+    Ok(h)
 }

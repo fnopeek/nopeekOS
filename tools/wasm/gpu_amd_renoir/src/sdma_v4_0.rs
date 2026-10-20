@@ -772,3 +772,46 @@ pub fn sdma_v4_0_hw_fini(adev: &mut amdgpu_device) -> i32 {
     }
     0
 }
+
+// ---- buffer functions (stage 5) ----
+
+/// `sdma_v4_0_buffer_funcs.copy_max_bytes`.
+pub const SDMA_V4_0_COPY_MAX_BYTES: u32 = 0x400000;
+/// `sdma_v4_0_buffer_funcs.copy_num_dw`.
+pub const SDMA_V4_0_COPY_NUM_DW: u32 = 7;
+
+/// `sdma_v4_0_ring_pad_ib`.
+pub fn sdma_v4_0_ring_pad_ib(adev: &amdgpu_device, r: usize, ib: &mut crate::amdgpu_ib::amdgpu_ib) {
+    let burst_nop = amdgpu_sdma_get_instance_from_ring(adev, r).is_some_and(|i| adev.sdma.instance[i].burst_nop);
+    let pad_count = ib.length_dw.wrapping_neg() & 7;
+    for i in 0..pad_count {
+        if burst_nop && i == 0 {
+            ib.set(adev, ib.length_dw, SDMA_PKT_HEADER_OP_NOP
+                | ((pad_count - 1) & SDMA_PKT_NOP_HEADER_count_mask) << SDMA_PKT_NOP_HEADER_count_shift);
+        } else {
+            ib.set(adev, ib.length_dw, SDMA_PKT_HEADER_OP_NOP);
+        }
+        ib.length_dw += 1;
+    }
+}
+
+/// `sdma_v4_0_emit_copy_buffer`: copy GPU buffers using the DMA engine.
+pub fn sdma_v4_0_emit_copy_buffer(adev: &amdgpu_device, ib: &mut crate::amdgpu_ib::amdgpu_ib, src_offset: u64,
+                                  dst_offset: u64, byte_count: u32, copy_flags: u32) {
+    let tmz = (copy_flags & AMDGPU_COPY_FLAGS_TMZ != 0) as u32;
+    let words = [
+        SDMA_PKT_HEADER_OP_COPY | SDMA_PKT_HEADER_SUB_OP_COPY_LINEAR
+            | (tmz & SDMA_PKT_COPY_LINEAR_HEADER_tmz_mask) << SDMA_PKT_COPY_LINEAR_HEADER_tmz_shift,
+        byte_count - 1,
+        // src/dst endian swap
+        0,
+        src_offset as u32,
+        (src_offset >> 32) as u32,
+        dst_offset as u32,
+        (dst_offset >> 32) as u32,
+    ];
+    for w in words {
+        ib.set(adev, ib.length_dw, w);
+        ib.length_dw += 1;
+    }
+}

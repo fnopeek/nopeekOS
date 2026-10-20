@@ -313,7 +313,8 @@ fn tt_of(adev: &amdgpu_device, h: usize) -> ttm_tt {
 }
 
 /// `ttm_bo_handle_move_mem` with `amdgpu_bo_move` for a buffer that has
-/// no resource yet: TT pages created and populated, then `move_null`.
+/// no resource yet, or one in SYSTEM going to TT (an imported buffer being
+/// pinned): TT pages created and populated, then `move_null`.
 fn ttm_bo_handle_move_mem(adev: &mut amdgpu_device, h: usize, mem: ttm_resource) -> Result<(), (i32, ttm_resource)> {
     let new_use_tt = man_used(adev, mem.mem_type).is_some_and(|m| m.use_tt);
     if new_use_tt {
@@ -335,7 +336,9 @@ fn ttm_bo_handle_move_mem(adev: &mut amdgpu_device, h: usize, mem: ttm_resource)
             return Err((r, mem));
         }
     }
-    if bo(adev, h).tbo.resource.is_none() {
+    let old_system = bo(adev, h).tbo.resource.as_ref().map(|r| r.mem_type == TTM_PL_SYSTEM);
+    let new_tt = mem.mem_type == TTM_PL_TT || mem.mem_type == AMDGPU_PL_PREEMPT;
+    if old_system.is_none() || old_system == Some(true) && new_tt {
         // ttm_bo_move_null
         ttm_resource_free(adev, h);
         bo_mut(adev, h).tbo.resource = Some(mem);
@@ -443,10 +446,15 @@ pub fn amdgpu_ttm_tt_pte_flags(adev: &amdgpu_device, tt: Option<&ttm_tt>, mem: O
 }
 
 /// `amdgpu_ttm_gart_bind`: no TMZ buffers and no gfx9 MQD among the
-/// kernel's.
+/// kernel's. An imported buffer's pages are its `sg` list, as
+/// `amdgpu_ttm_backend_bind` copies them with
+/// `drm_prime_sg_to_dma_addr_array`.
 fn amdgpu_ttm_gart_bind(adev: &mut amdgpu_device, h: usize, flags: u64) {
     let tt = tt_of(adev, h);
-    let addrs: alloc::vec::Vec<u64> = (0..tt.num_pages).map(|i| tt.dma_address(i)).collect();
+    let addrs: alloc::vec::Vec<u64> = match bo(adev, h).tbo.sg.as_ref() {
+        Some(sg) if tt.page_flags & TTM_TT_FLAG_EXTERNAL != 0 => sg[..tt.num_pages as usize].to_vec(),
+        _ => (0..tt.num_pages).map(|i| tt.dma_address(i)).collect(),
+    };
     crate::amdgpu_gart::amdgpu_gart_bind(adev, tt.offset, tt.num_pages, &addrs, flags);
     bo_mut(adev, h).tbo.ttm.as_mut().unwrap().bound = true;
 }
@@ -724,4 +732,48 @@ pub fn amdgpu_ttm_init(adev: &mut amdgpu_device) -> i32 {
         Err(_) => Line::new().s("Debug VRAM access will use slowpath MM access").say(),
     }
     0
+}
+
+/// `amdgpu_copy_buffer` with `direct_submit` and without a reservation
+/// object or a VM flush: the copy packets of every span in one IB of
+/// `amdgpu_ttm_prepare_job`'s direct pool, scheduled on `r`. One span is
+/// Linux's call; several are the rows of a rectangle.
+pub fn amdgpu_copy_spans(adev: &mut amdgpu_device, r: usize, spans: &[(u64, u64, u32)], copy_flags: u32)
+                         -> Result<crate::amdgpu_fence::dma_fence, i32> {
+    use crate::amdgpu_ib::{amdgpu_ib, amdgpu_ib_free, amdgpu_ib_get, amdgpu_ib_schedule};
+    use crate::sdma_v4_0::{SDMA_V4_0_COPY_MAX_BYTES, SDMA_V4_0_COPY_NUM_DW};
+    let max_bytes = SDMA_V4_0_COPY_MAX_BYTES;
+    let num_loops: u32 = spans.iter().map(|s| s.2.div_ceil(max_bytes)).sum();
+    let num_dw = crate::linux::align((num_loops * SDMA_V4_0_COPY_NUM_DW) as u64, 8) as u32;
+    let mut ib = amdgpu_ib::new();
+    let r0 = amdgpu_ib_get(adev, num_dw * 4, AMDGPU_IB_POOL_DIRECT, &mut ib);
+    if r0 != 0 {
+        return Err(r0);
+    }
+    for &(mut src_offset, mut dst_offset, mut byte_count) in spans {
+        while byte_count != 0 {
+            let cur_size_in_bytes = byte_count.min(max_bytes);
+            crate::sdma_v4_0::sdma_v4_0_emit_copy_buffer(adev, &mut ib, src_offset, dst_offset, cur_size_in_bytes,
+                                                         copy_flags);
+            src_offset += cur_size_in_bytes as u64;
+            dst_offset += cur_size_in_bytes as u64;
+            byte_count -= cur_size_in_bytes;
+        }
+    }
+    crate::sdma_v4_0::sdma_v4_0_ring_pad_ib(adev, r, &mut ib);
+    if ib.length_dw > num_dw {
+        Line::new().s("amdgpu_copy_buffer: IB overrun").say();
+    }
+    // amdgpu_job_submit_direct, then amdgpu_job_free
+    match amdgpu_ib_schedule(adev, r, &[&ib]) {
+        Ok(f) => {
+            amdgpu_ib_free(adev, &mut ib, Some(f));
+            Ok(f)
+        }
+        Err(e) => {
+            amdgpu_ib_free(adev, &mut ib, None);
+            Line::new().s("Error scheduling IBs (").dec((-e) as u64).s(")").say();
+            Err(e)
+        }
+    }
 }

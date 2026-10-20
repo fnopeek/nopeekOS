@@ -579,8 +579,8 @@ fn render_frame_surface() {
         }
         bbox = bbox.intersect(&crate::shade::scene::Rect::new(0, 0, info.width, info.height));
         let gpu_ok = !bbox.is_empty() && crate::gpu::supports_blit() && {
-            let src = fb.front_ggtt();
-            src != 0 && crate::gpu::gpu_blit_rect(src, info.pitch, crate::gpu::fb_ggtt_offset(), info.pitch,
+            let src = fb.front_gpu();
+            src != 0 && crate::gpu::gpu_blit_rect(src, info.pitch, crate::gpu::fb_gpu_addr(), info.pitch,
                 bbox.x, bbox.y, bbox.w, bbox.h)
         };
         if !gpu_ok {
@@ -694,19 +694,19 @@ fn record_surface_render(t0: u64, t_bg: u64, t_comp: u64, t_cursor: u64) {
 fn try_gpu_blit(fb: &framebuffer::FbConsole, pitch: u32, _w: u32, h: u32) -> bool {
     if !crate::gpu::supports_blit() { return false; }
 
-    let src_ggtt = fb.front_ggtt();
-    let dst_ggtt = crate::gpu::fb_ggtt_offset();
-    // dst_ggtt == 0 is valid: when the firmware scanout sits at GGTT offset 0
+    let src_gpu = fb.front_gpu();
+    let dst_gpu = crate::gpu::fb_gpu_addr();
+    // dst_gpu == 0 is valid: when the firmware scanout sits at GGTT offset 0
     // (Tiger Lake blit-only, fw PLANE_SURF=0), that is the live scanout. Only
     // a missing shadow mapping (src == 0) means "not set up"; treating dst 0
     // as invalid would route every frame to the slow CPU blit.
-    if src_ggtt == 0 { return false; }
+    if src_gpu == 0 { return false; }
 
     // [gpu-blit] instrument: does the real (full 4K) blit succeed, and how
     // long does submit+poll take? A large blit may time out submit_blit's
     // completion poll → false → CPU fallback.
     let t = crate::interrupts::rdtsc();
-    let ok = crate::gpu::gpu_blit_rect(src_ggtt, pitch, dst_ggtt, pitch, 0, 0, pitch / 4, h);
+    let ok = crate::gpu::gpu_blit_rect(src_gpu, pitch, dst_gpu, pitch, 0, 0, pitch / 4, h);
     record_gpu_blit(t, ok);
     ok
 }

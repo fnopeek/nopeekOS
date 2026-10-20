@@ -2663,6 +2663,13 @@ SDMA_PKT_WRITE_UNTILED_DW_3_count_mask @ sdma_v4_0.c
 SDMA_PKT_WRITE_UNTILED_DW_3_count_shift @ sdma_v4_0.c
 SDMA_PKT_NOP_HEADER_count_mask @ sdma_v4_0.c
 SDMA_PKT_NOP_HEADER_count_shift @ sdma_v4_0.c
+# sdma_v4_0_emit_copy_buffer and sdma_v4_0_ring_pad_ib (gpudev's copies)
+SDMA_PKT_HEADER_OP_COPY = SDMA_PKT_HEADER_OP(SDMA_OP_COPY) @ sdma_v4_0.c
+SDMA_PKT_HEADER_SUB_OP_COPY_LINEAR = SDMA_PKT_HEADER_SUB_OP(SDMA_SUBOP_COPY_LINEAR) @ sdma_v4_0.c
+SDMA_PKT_COPY_LINEAR_HEADER_tmz_mask @ sdma_v4_0.c
+SDMA_PKT_COPY_LINEAR_HEADER_tmz_shift @ sdma_v4_0.c
+SDMA_PKT_HEADER_OP_NOP = SDMA_PKT_HEADER_OP(SDMA_OP_NOP) @ sdma_v4_0.c
+AMDGPU_COPY_FLAGS_TMZ @ sdma_v4_0.c
 POWER_STATE_ON @ ../pm/amdgpu_dpm.c
 POWER_STATE_OFF @ ../pm/amdgpu_dpm.c
 AMD_IP_BLOCK_TYPE_NUM @ ../pm/amdgpu_dpm.c

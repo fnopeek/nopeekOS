@@ -95,7 +95,7 @@ enum BoState {
 #[derive(Clone, Copy)]
 pub struct Bo {
     /// Kernel (identity-mapped) address of the first pixel; 0 for buffer 0,
-    /// which the module finds behind its GGTT node. For a buffer in foreign
+    /// whose bus address `bo_info` reports from the framebuffer. For a buffer in foreign
     /// pages (`page_lists`), the first pixel's offset in its page.
     pub addr: u64,
     /// Bytes from the first pixel.
@@ -385,7 +385,8 @@ fn owned_by(dev: PciAddr) -> bool {
 }
 
 /// `npk_gpudev_bo_info`: `{phys, size: u64, pitch, width, height, format,
-/// offset, pages: u32}`.
+/// offset, pages: u32}`. Buffer 0's `phys` is the framebuffer's bus
+/// address; its pages are the module's to find.
 pub fn bo_info(dev: PciAddr, id: i32) -> Option<[u8; BO_INFO_BYTES]> {
     let st = STATE.lock();
     if st.owner != Some(dev) {
@@ -393,6 +394,8 @@ pub fn bo_info(dev: PciAddr, id: i32) -> Option<[u8; BO_INFO_BYTES]> {
     }
     let bo = st.bos.get(&(id as u32))?;
     let (phys, off, pages) = match st.page_lists.get(&(id as u32)) {
+        // Buffer 0: the framebuffer's bus address as the firmware set it up.
+        _ if id == 0 => (st.fb.map_or(0, |fb| fb.addr), 0, bo.pages()),
         Some((list, first)) => {
             let off = (bo.addr & (PAGE - 1)) as u32;
             (list.pages[*first], off, (off as u64 + bo.size).div_ceil(PAGE) as u32)
@@ -412,8 +415,8 @@ pub fn bo_info(dev: PciAddr, id: i32) -> Option<[u8; BO_INFO_BYTES]> {
 }
 
 /// `npk_gpudev_bo_pages`: physical addresses of pages `first..` of buffer
-/// `id` into `out` (8 bytes each). Buffer 0 has none: the module knows the
-/// framebuffer's pages from its GGTT.
+/// `id` into `out` (8 bytes each). Buffer 0 has none: `bo_info` gives its
+/// bus address.
 pub fn bo_pages(dev: PciAddr, id: i32, first: u32, out: &mut [u8]) -> i32 {
     let (bo, list) = {
         let st = STATE.lock();
@@ -456,11 +459,6 @@ pub fn bo_bound(dev: PciAddr, id: i32, gpu_addr: i64) -> i32 {
     if st.owner != Some(dev) || gpu_addr < 0 {
         return -1;
     }
-    let fixed = (id as u32) < FIXED_BOS;
-    // The fixed buffers are named to the GPU HAL by 32-bit addresses.
-    if fixed && gpu_addr > u32::MAX as i64 {
-        return -1;
-    }
     match st.bos.get_mut(&(id as u32)) {
         Some(bo) => {
             bo.gpu_addr = Some(gpu_addr as u64);
@@ -493,10 +491,10 @@ pub fn ready(dev: PciAddr, caps: i32) -> i32 {
             return -1;
         };
         st.caps = caps;
-        (fb, a as u32, b as u32)
+        (fb, a, b)
     };
     // Lock order of the compositor is framebuffer, then GPU; never both here.
-    crate::drivers::framebuffer::set_shadow_ggtt(a, b);
+    crate::drivers::framebuffer::set_shadow_gpu(a, b);
     super::install(Box::new(GpudevDriver { fb }));
     READY.store(true, Ordering::Release);
     SCENES.store(caps & CAP_SCENE != 0, Ordering::Release);
@@ -681,7 +679,7 @@ pub fn module_gone(dev: PciAddr) {
         crate::memory::deallocate_contiguous(phys, pages);
     }
     if super::driver_name() == DRIVER_NAME {
-        crate::drivers::framebuffer::set_shadow_ggtt(0, 0);
+        crate::drivers::framebuffer::set_shadow_gpu(0, 0);
         if let Some(fb) = fb {
             super::install(Box::new(super::gop::GopDriver::from_framebuffer(fb)));
         }
@@ -1139,16 +1137,16 @@ static COPY_DEADLINE: AtomicU64 = AtomicU64::new(0);
 /// either until it is done: `framebuffer::with_fb`, the way into both,
 /// calls `wait_framebuffer` first. False when the job was not taken, so the
 /// caller copies on the CPU now.
-fn submit_copy(src_gpu: u32, src_pitch: u32, dst_gpu: u32, dst_pitch: u32,
+fn submit_copy(src_gpu: u64, src_pitch: u32, dst_gpu: u64, dst_pitch: u32,
                x: u32, y: u32, w: u32, h: u32) -> bool {
     if !READY.load(Ordering::Acquire) || stalled() || !wait_framebuffer() {
         return false;
     }
     let seq = {
         let mut st = STATE.lock();
-        let find = |addr: u32, pitch: u32| {
+        let find = |addr: u64, pitch: u32| {
             (0..FIXED_BOS).find(|i| {
-                st.bos.get(i).is_some_and(|b| b.gpu_addr == Some(addr as u64) && b.pitch == pitch)
+                st.bos.get(i).is_some_and(|b| b.gpu_addr == Some(addr) && b.pitch == pitch)
             })
         };
         let (Some(src), Some(dst)) = (find(src_gpu, src_pitch), find(dst_gpu, dst_pitch)) else {
@@ -1596,18 +1594,18 @@ impl GpuHal for GpudevDriver {
         READY.load(Ordering::Acquire)
     }
 
-    fn blit_rect_hw(&mut self, src_ggtt: u32, src_pitch: u32, dst_ggtt: u32, dst_pitch: u32,
+    fn blit_rect_hw(&mut self, src_gpu: u64, src_pitch: u32, dst_gpu: u64, dst_pitch: u32,
                     x: u32, y: u32, w: u32, h: u32) -> bool {
-        submit_copy(src_ggtt, src_pitch, dst_ggtt, dst_pitch, x, y, w, h)
+        submit_copy(src_gpu, src_pitch, dst_gpu, dst_pitch, x, y, w, h)
     }
 
-    fn fb_gpu_addr(&self) -> u32 {
-        STATE.lock().bos.get(&0).and_then(|b| b.gpu_addr).unwrap_or(0) as u32
+    fn fb_gpu_addr(&self) -> u64 {
+        STATE.lock().bos.get(&0).and_then(|b| b.gpu_addr).unwrap_or(0)
     }
 
-    fn shadow_gpu_addr(&self) -> (u32, u32) {
+    fn shadow_gpu_addr(&self) -> (u64, u64) {
         let st = STATE.lock();
-        let a = |i: u32| st.bos.get(&i).and_then(|b| b.gpu_addr).unwrap_or(0) as u32;
+        let a = |i: u32| st.bos.get(&i).and_then(|b| b.gpu_addr).unwrap_or(0);
         (a(1), a(2))
     }
 }

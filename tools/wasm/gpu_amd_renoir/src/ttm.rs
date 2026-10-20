@@ -112,6 +112,8 @@ pub struct ttm_buffer_object {
     pub pin_count: u32,
     pub resource: Option<ttm_resource>,
     pub ttm: Option<ttm_tt>,
+    /// `sg`: an imported buffer's pages, by bus address.
+    pub sg: Option<Vec<u64>>,
 }
 
 /// `struct ttm_placement`.

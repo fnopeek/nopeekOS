@@ -520,3 +520,118 @@ thread_local! {
 pub fn fake_psp_log() -> Vec<(Vec<u32>, Vec<u32>)> {
     PSP_LOG.with(|l| l.borrow().clone())
 }
+
+/// The kernel's side of the GPU service on the host: a framebuffer at
+/// bus address `fb.0` in the VRAM aperture, two shadows in DMA windows and
+/// the copy jobs a check queues. `poll` gives one job a call and, once
+/// none is left, -1, as the kernel does for a module that no longer serves.
+pub struct FakeGpudev {
+    /// Bus address, width, height, pitch.
+    pub fb: (u64, u32, u32, u32),
+    pub shadows: [Option<Dma>; 2],
+    pub jobs: std::collections::VecDeque<[u32; 6]>,
+    pub seq: u32,
+}
+
+thread_local! {
+    static GPUDEV: RefCell<Option<FakeGpudev>> = const { RefCell::new(None) };
+}
+
+/// The service's buffers and jobs, before the run.
+pub fn fake_gpudev(fb: (u64, u32, u32, u32), jobs: Vec<[u32; 6]>) {
+    let pages = ((fb.3 * fb.2) as u64).div_ceil(4096) as i32;
+    let shadows = [Dma::alloc(pages), Dma::alloc(pages)];
+    GPUDEV.with(|g| *g.borrow_mut() = Some(FakeGpudev { fb, shadows, jobs: jobs.into(), seq: 0 }));
+}
+
+/// Shadow `i` (1 or 2), for a check to fill or read.
+pub fn fake_gpudev_shadow(i: usize) -> Option<Dma> {
+    GPUDEV.with(|g| g.borrow().as_ref().and_then(|s| s.shadows[i - 1]))
+}
+
+pub fn gpudev_register(version: i32) -> i32 {
+    if version != 2 {
+        return -2;
+    }
+    if GPUDEV.with(|g| g.borrow().is_some()) { 0 } else { -1 }
+}
+
+pub fn gpudev_bo_info(id: i32, out: &mut [u8; 40]) -> i32 {
+    GPUDEV.with(|g| {
+        let g = g.borrow();
+        let Some(s) = g.as_ref() else { return -1 };
+        let (fbp, w, h, pitch) = s.fb;
+        let size = pitch as u64 * h as u64;
+        let phys = match id {
+            0 => fbp,
+            1 | 2 => match s.shadows[id as usize - 1] {
+                Some(d) => d.phys,
+                None => return -1,
+            },
+            _ => return -1,
+        };
+        out[0..8].copy_from_slice(&phys.to_le_bytes());
+        out[8..16].copy_from_slice(&size.to_le_bytes());
+        let pages = size.div_ceil(4096) as u32;
+        for (i, v) in [pitch, w, h, 0x3432_5258, 0, pages].iter().enumerate() {
+            out[16 + i * 4..20 + i * 4].copy_from_slice(&v.to_le_bytes());
+        }
+        0
+    })
+}
+
+pub fn gpudev_bo_pages(id: i32, first: i32, out: &mut [u64]) -> i32 {
+    GPUDEV.with(|g| {
+        let g = g.borrow();
+        let Some(s) = g.as_ref() else { return -1 };
+        if !(1..=2).contains(&id) {
+            return -1;
+        }
+        let Some(d) = s.shadows[id as usize - 1] else { return -1 };
+        let pages = ((s.fb.3 * s.fb.2) as u64).div_ceil(4096) as i32;
+        let mut n = 0;
+        for p in first..pages {
+            if n as usize == out.len() {
+                break;
+            }
+            out[n as usize] = d.phys + p as u64 * 4096;
+            n += 1;
+        }
+        n
+    })
+}
+
+pub fn gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32 {
+    println!("gpudev bo {} bound at {:#x}", id, gpu_addr);
+    0
+}
+
+pub fn gpudev_ready(caps: i32) -> i32 {
+    println!("gpudev ready caps {}", caps);
+    0
+}
+
+pub fn gpudev_poll(buf: &mut [u8]) -> i32 {
+    GPUDEV.with(|g| {
+        let mut g = g.borrow_mut();
+        let Some(s) = g.as_mut() else { return -1 };
+        let Some(job) = s.jobs.pop_front() else { return -1 };
+        s.seq += 1;
+        buf[0..4].copy_from_slice(&s.seq.to_le_bytes());
+        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
+        for (i, v) in job.iter().enumerate() {
+            buf[8 + i * 4..12 + i * 4].copy_from_slice(&v.to_le_bytes());
+        }
+        1
+    })
+}
+
+pub fn gpudev_complete(seq: i32, status: i32) -> i32 {
+    println!("gpudev job {} done: {}", seq, status);
+    0
+}
+
+/// `npk_wait`: everything the host run waits for is there already.
+pub fn wait(_mask: i32, _timeout_ms: i32) -> i32 {
+    0
+}

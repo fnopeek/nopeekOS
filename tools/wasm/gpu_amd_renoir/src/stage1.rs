@@ -208,8 +208,9 @@ fn report_rings(adev: &amdgpu_device, what: &str) {
 
 /// Stage 4: `amdgpu_device_ip_hw_init_phase2` (SMU, GFX with its ring
 /// tests, SDMA with its ring test), the fence interrupts, late_init with
-/// clock and power gating, the IB tests of the delayed init work, and
-/// then `amdgpu_device_fini_hw` before the card goes back. Between phase2
+/// clock and power gating, the IB tests of the delayed init work, the GPU
+/// service while it runs, and then `amdgpu_device_fini_hw` before the card
+/// goes back. Between phase2
 /// and late_init Linux also sets up RAS recovery (no RAS here), the
 /// schedulers and TTM's buffer functions (no scheduler in the module
 /// yet), KFD and the FRU (an APU has none).
@@ -248,6 +249,7 @@ fn ip_init_phase2(adev: &mut amdgpu_device) {
     report_rings(adev, "ib tests:");
     if r == 0 {
         Line::new().s("stage 4 done: ring and IB tests").say();
+        crate::gpudev::serve(adev);
     }
     dev::amdgpu_device_fini_hw(adev);
     let faults = crate::amdgpu_irq::amdgpu_irq_counts(adev);

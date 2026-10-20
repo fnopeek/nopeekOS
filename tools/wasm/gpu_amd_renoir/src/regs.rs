@@ -5329,6 +5329,20 @@ pub const SDMA_PKT_WRITE_UNTILED_DW_3_count_shift: u32 = 0x0;
 pub const SDMA_PKT_NOP_HEADER_count_mask: u32 = 0x3fff;
 /// amdgpu/iceland_sdma_pkt_open.h:2169
 pub const SDMA_PKT_NOP_HEADER_count_shift: u32 = 0x10;
+
+// sdma_v4_0_emit_copy_buffer and sdma_v4_0_ring_pad_ib (gpudev's copies)
+/// The value of `SDMA_PKT_HEADER_OP(SDMA_OP_COPY)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_OP_COPY: u32 = 0x1;
+/// The value of `SDMA_PKT_HEADER_SUB_OP(SDMA_SUBOP_COPY_LINEAR)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_SUB_OP_COPY_LINEAR: u32 = 0x0;
+/// amdgpu/navi10_sdma_pkt_open.h:130
+pub const SDMA_PKT_COPY_LINEAR_HEADER_tmz_mask: u32 = 0x1;
+/// amdgpu/navi10_sdma_pkt_open.h:131
+pub const SDMA_PKT_COPY_LINEAR_HEADER_tmz_shift: u32 = 0x12;
+/// The value of `SDMA_PKT_HEADER_OP(SDMA_OP_NOP)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_OP_NOP: u32 = 0x0;
+/// amdgpu/amdgpu_ttm.h:115
+pub const AMDGPU_COPY_FLAGS_TMZ: u32 = 0x1;
 /// ?
 pub const POWER_STATE_ON: u32 = 0x1;
 /// ?
