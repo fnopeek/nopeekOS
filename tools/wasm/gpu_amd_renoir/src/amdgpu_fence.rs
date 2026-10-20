@@ -196,12 +196,98 @@ pub fn amdgpu_fence_driver_force_completion(adev: &mut amdgpu_device, r: usize, 
             dma_fence::dma_fence_set_error(f, e);
         }
     }
-    // amdgpu_fence_write
+    let seq = adev.rings[r].fence_drv.sync_seq;
+    amdgpu_fence_write(adev, r, seq);
+    amdgpu_fence_process(adev, r);
+}
+
+/// `amdgpu_fence_write`.
+fn amdgpu_fence_write(adev: &amdgpu_device, r: usize, seq: u32) {
     let drv = &adev.rings[r].fence_drv;
     if let (Some(offs), Some(k)) = (drv.cpu_addr, adev.wb.wb) {
-        crate::amdgpu_gart::kptr_w32(adev, k, offs as u64 * 4, drv.sync_seq);
+        crate::amdgpu_gart::kptr_w32(adev, k, offs as u64 * 4, seq);
     }
+}
+
+/// The ring, context and write pointer of an `amdgpu_fence`.
+fn amdgpu_fence_of(f: &Fence) -> Option<(usize, u64, u64)> {
+    match &f.ops {
+        dma_fence_ops::amdgpu_fence { ring, wptr, context, .. } => Some((*ring, *context, wptr.get())),
+        _ => None,
+    }
+}
+
+/// `amdgpu_fence_driver_guilty_force_completion`: the guilty fence ends
+/// with ETIME, its context's others with ECANCELED, and everything up to it
+/// signals.
+pub fn amdgpu_fence_driver_guilty_force_completion(adev: &mut amdgpu_device, af: &Fence) {
+    let Some((r, af_context, _)) = amdgpu_fence_of(af) else { return };
+    let mask = adev.rings[r].fence_drv.num_fences_mask;
+    let mut last_seq = amdgpu_fence_read(adev, r) & mask;
+    let seq = adev.rings[r].fence_drv.sync_seq & mask;
+    // mark all fences from the guilty context with an error
+    loop {
+        last_seq = (last_seq + 1) & mask;
+        if let Some(f) = adev.rings[r].fence_drv.fences[last_seq as usize].clone() {
+            if !f.test_flag(dma_fence::DMA_FENCE_FLAG_SIGNALED_BIT) {
+                if alloc::rc::Rc::ptr_eq(&f, af) {
+                    dma_fence::dma_fence_set_error(&f, -62);
+                } else if amdgpu_fence_of(&f).is_some_and(|(_, c, _)| c == af_context) {
+                    dma_fence::dma_fence_set_error(&f, -125);
+                }
+            }
+        }
+        if last_seq == seq {
+            break;
+        }
+    }
+    // signal the guilty fence
+    amdgpu_fence_write(adev, r, af.seqno as u32);
     amdgpu_fence_process(adev, r);
+}
+
+/// `amdgpu_ring_backup_unprocessed_command`.
+fn amdgpu_ring_backup_unprocessed_command(adev: &mut amdgpu_device, r: usize, start_wptr: u64, end_wptr: u64) {
+    let Some(k) = adev.rings[r].ring else { return };
+    let mask = adev.rings[r].buf_mask;
+    let (mut i, last_idx) = (start_wptr as u32 & mask, end_wptr as u32 & mask);
+    // Backup the contents of the ring buffer.
+    while i != last_idx {
+        let v = crate::amdgpu_gart::kptr_r32(adev, k, i as u64 * 4);
+        let ring = &mut adev.rings[r];
+        ring.ring_backup[ring.ring_backup_entries_to_copy as usize] = v;
+        ring.ring_backup_entries_to_copy += 1;
+        i = (i + 1) & mask;
+    }
+}
+
+/// `amdgpu_ring_backup_unprocessed_commands`: what the ring still holds of
+/// fences not signaled; with a guilty fence, only other contexts'.
+pub fn amdgpu_ring_backup_unprocessed_commands(adev: &mut amdgpu_device, r: usize, guilty: Option<&Fence>) {
+    let mask = adev.rings[r].fence_drv.num_fences_mask;
+    let mut last_seq = amdgpu_fence_read(adev, r) & mask;
+    let seq = adev.rings[r].fence_drv.sync_seq & mask;
+    let mut wptr = adev.rings[r].fence_drv.signalled_wptr;
+    adev.rings[r].ring_backup_entries_to_copy = 0;
+    let guilty_context = guilty.and_then(amdgpu_fence_of).map(|(_, c, _)| c);
+    loop {
+        last_seq = (last_seq + 1) & mask;
+        if let Some(f) = adev.rings[r].fence_drv.fences[last_seq as usize].clone() {
+            if !dma_fence::dma_fence_is_signaled(adev, &f) {
+                if let Some((_, context, fence_wptr)) = amdgpu_fence_of(&f) {
+                    // save everything if the ring is not guilty, otherwise
+                    // just save the content from other contexts.
+                    if guilty_context.is_none_or(|g| context != g) {
+                        amdgpu_ring_backup_unprocessed_command(adev, r, wptr, fence_wptr);
+                    }
+                    wptr = fence_wptr;
+                }
+            }
+        }
+        if last_seq == seq {
+            break;
+        }
+    }
 }
 
 /// `amdgpu_fence_driver_hw_fini`.

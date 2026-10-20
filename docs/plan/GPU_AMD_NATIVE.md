@@ -166,7 +166,7 @@ Recover. Auf Renoir gilt je Ring:
 | SDMA | keine | keiner (`supported_reset` bleibt 0) | voll |
 
 - **E1 Soft-Recovery** — gebaut (`amdgpu_ring_soft_recovery`).
-- **E2 Queue-Reset Compute** — `amdgpu_ring_reset_helper_begin/end`,
+- **E2 Queue-Reset Compute** — gebaut, host-seitig an einer haengenden Gast-IB geprueft: `amdgpu_ring_reset_helper_begin/end`,
   `amdgpu_ring_backup_unprocessed_commands`, `amdgpu_fence_driver_guilty_force_completion`,
   `amdgpu_ring_alloc_reemit`, `drm_sched_wqueue_stop/start`, `gfx_v9_0_reset_kcq`,
   `kcq_init_queue(restore)`.

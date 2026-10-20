@@ -186,6 +186,12 @@ fn field(v: u32, mask: u32, shift: u32) -> u32 {
     (v & mask) >> shift
 }
 
+/// The GRBM_GFX_CNTL value that selects a queue's HQD registers.
+fn grbm_bank(me: u32, pipe: u32, queue: u32) -> u32 {
+    pipe << GC_GRBM_GFX_CNTL__PIPEID__SHIFT | me << GC_GRBM_GFX_CNTL__MEID__SHIFT
+        | queue << GC_GRBM_GFX_CNTL__QUEUEID__SHIFT
+}
+
 /// The queue a doorbell index rings, as the registers and MAP_QUEUES left it.
 fn queue_for(index: u32) -> Option<Queue> {
     if let Some(q) = QUEUES.with(|q| q.borrow().iter().find(|e| e.0 == index).map(|e| e.1)) {
@@ -208,23 +214,36 @@ fn queue_for(index: u32) -> Option<Queue> {
                              gc(GC_mmCP_RB0_RPTR_ADDR_HI_BASE_IDX, GC_mmCP_RB0_RPTR_ADDR_HI)),
         });
     }
-    let hqd_db = r(gc(GC_mmCP_HQD_PQ_DOORBELL_CONTROL_BASE_IDX, GC_mmCP_HQD_PQ_DOORBELL_CONTROL));
-    if r(gc(GC_mmCP_HQD_ACTIVE_BASE_IDX, GC_mmCP_HQD_ACTIVE)) & 1 != 0
-        && field(hqd_db, GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK,
-                 GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET__SHIFT) == index
-    {
-        let cntl = r(gc(GC_mmCP_HQD_PQ_CONTROL_BASE_IDX, GC_mmCP_HQD_PQ_CONTROL));
+    // A queue the driver programmed through its HQD registers (the KIQ);
+    // flat, they are the KIQ's.
+    let kiq = grbm_bank(2, 1, 0);
+    let banks = if npk_sys::fake_is_banked() { npk_sys::fake_banks() } else { vec![kiq] };
+    for bank in banks {
+        let br = |idx: u32, reg: u32| {
+            if npk_sys::fake_is_banked() { npk_sys::fake_bank_reg(bank, gc(idx, reg)) } else { r(gc(idx, reg)) }
+        };
+        let hqd_db = br(GC_mmCP_HQD_PQ_DOORBELL_CONTROL_BASE_IDX, GC_mmCP_HQD_PQ_DOORBELL_CONTROL);
+        if br(GC_mmCP_HQD_ACTIVE_BASE_IDX, GC_mmCP_HQD_ACTIVE) & 1 == 0
+            || field(hqd_db, GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK,
+                     GC_CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET__SHIFT) != index
+        {
+            continue;
+        }
+        let cntl = br(GC_mmCP_HQD_PQ_CONTROL_BASE_IDX, GC_mmCP_HQD_PQ_CONTROL);
         let qs = field(cntl, GC_CP_HQD_PQ_CONTROL__QUEUE_SIZE_MASK, GC_CP_HQD_PQ_CONTROL__QUEUE_SIZE__SHIFT);
-        let gfx_cntl = r(gc(GC_mmGRBM_GFX_CNTL_BASE_IDX, GC_mmGRBM_GFX_CNTL));
-        let _ = gfx_cntl;
+        let b64 = |lo: (u32, u32), hi: (u32, u32)| br(lo.0, lo.1) as u64 | (br(hi.0, hi.1) as u64) << 32;
         return Some(Queue {
-            kind: Kind::Compute { me: 2, pipe: 1, queue: 0 },
-            base: r64(gc(GC_mmCP_HQD_PQ_BASE_BASE_IDX, GC_mmCP_HQD_PQ_BASE),
-                      gc(GC_mmCP_HQD_PQ_BASE_HI_BASE_IDX, GC_mmCP_HQD_PQ_BASE_HI)) << 8,
+            kind: Kind::Compute {
+                me: field(bank, GC_GRBM_GFX_CNTL__MEID_MASK, GC_GRBM_GFX_CNTL__MEID__SHIFT),
+                pipe: field(bank, GC_GRBM_GFX_CNTL__PIPEID_MASK, GC_GRBM_GFX_CNTL__PIPEID__SHIFT),
+                queue: field(bank, GC_GRBM_GFX_CNTL__QUEUEID_MASK, GC_GRBM_GFX_CNTL__QUEUEID__SHIFT),
+            },
+            base: b64((GC_mmCP_HQD_PQ_BASE_BASE_IDX, GC_mmCP_HQD_PQ_BASE),
+                      (GC_mmCP_HQD_PQ_BASE_HI_BASE_IDX, GC_mmCP_HQD_PQ_BASE_HI)) << 8,
             size_dw: 2 << qs,
             rptr: 0,
-            rptr_report: r64(gc(GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR_BASE_IDX, GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR),
-                             gc(GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR_HI_BASE_IDX, GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR_HI)),
+            rptr_report: b64((GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR_BASE_IDX, GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR),
+                             (GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR_HI_BASE_IDX, GC_mmCP_HQD_PQ_RPTR_REPORT_ADDR_HI)),
         });
     }
     if let Some(q) = KCQ.with(|k| k.borrow().iter().find(|e| e.0 == index).map(|e| e.1)) {
@@ -274,8 +293,9 @@ fn log(s: String) {
     PACKETS.with(|p| p.borrow_mut().push(s));
 }
 
-/// Runs the PM4 packets in `[at, end)` dwords of a buffer read by `rd`.
-fn run_pm4(kind: Kind, rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32) {
+/// Runs the PM4 packets in `[at, end)` dwords of a buffer read by `rd`;
+/// the dword it stalls at, if a client's wait on memory is never met.
+fn run_pm4(kind: Kind, rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32) -> Option<u32> {
     while at != end {
         let hdr = rd(at % wrap);
         let op = (hdr >> 8) & 0xff;
@@ -341,8 +361,13 @@ fn run_pm4(kind: Kind, rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32
                                 if v & d(5) == d(5) & d(4) { "" } else { " (unmet)" }));
                 } else {
                     let v = if mem { gpu_r32(d(2) as u64 | (d(3) as u64) << 32) } else { npk_sys::fake_reg(d(2)) };
+                    let met = v & d(5) == d(4);
+                    if !met && mem && VMID.with(|v| v.get()) != 0 {
+                        log(format!("pm4 WAIT_REG_MEM mem {:#x} == {:#x}: the queue hangs", d(2), d(4)));
+                        return Some(at);
+                    }
                     log(format!("pm4 WAIT_REG_MEM {} {:#x} == {:#x}{}", if mem { "mem" } else { "reg" }, d(2), d(4),
-                                if v & d(5) == d(4) { "" } else { " (unmet)" }));
+                                if met { "" } else { " (unmet)" }));
                 }
             }
             PACKET3_INDIRECT_BUFFER => {
@@ -351,8 +376,11 @@ fn run_pm4(kind: Kind, rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32
                 let vmid = (d(3) >> 24) & 0xf;
                 log(format!("pm4 INDIRECT_BUFFER {:#x} {} dw vmid {}", ib, n, vmid));
                 let outer = VMID.with(|v| v.replace(vmid));
-                run_pm4(kind, &|i| gpu_r32(ib + i as u64 * 4), 0, n, u32::MAX);
+                let stall = run_pm4(kind, &|i| gpu_r32(ib + i as u64 * 4), 0, n, u32::MAX);
                 VMID.with(|v| v.set(outer));
+                if stall.is_some() {
+                    return Some(at);
+                }
             }
             PACKET3_MAP_QUEUES => {
                 let doorbell = (d(2) >> 2) & 0x3ffffff;
@@ -369,11 +397,18 @@ fn run_pm4(kind: Kind, rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32
                     rptr_report: m(V9_MQD_cp_hqd_pq_rptr_report_addr_lo) as u64
                         | (m(V9_MQD_cp_hqd_pq_rptr_report_addr_hi) as u64) << 32,
                 };
+                if let Kind::Compute { me, pipe, queue } = q.kind {
+                    npk_sys::fake_bank_set(grbm_bank(me, pipe, queue), gc(GC_mmCP_HQD_ACTIVE_BASE_IDX, GC_mmCP_HQD_ACTIVE), 1);
+                }
                 KCQ.with(|k| k.borrow_mut().push((doorbell, q)));
                 log(format!("pm4 MAP_QUEUES doorbell {:#x}", doorbell));
             }
             PACKET3_UNMAP_QUEUES => {
                 let doorbell = (d(2) >> 2) & 0x3ffffff;
+                let gone = KCQ.with(|k| k.borrow().iter().find(|e| e.0 == doorbell).map(|e| e.1.kind));
+                if let Some(Kind::Compute { me, pipe, queue }) = gone {
+                    npk_sys::fake_bank_set(grbm_bank(me, pipe, queue), gc(GC_mmCP_HQD_ACTIVE_BASE_IDX, GC_mmCP_HQD_ACTIVE), 0);
+                }
                 KCQ.with(|k| k.borrow_mut().retain(|e| e.0 != doorbell));
                 QUEUES.with(|q| q.borrow_mut().retain(|e| e.0 != doorbell));
                 log(format!("pm4 UNMAP_QUEUES doorbell {:#x}", doorbell));
@@ -382,6 +417,7 @@ fn run_pm4(kind: Kind, rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32
         }
         at = if wrap == u32::MAX { at + len } else { (at + len) % wrap };
     }
+    None
 }
 
 /// Runs the SDMA packets in `[at, end)` dwords.
@@ -488,12 +524,15 @@ fn doorbell(index: u32, value: u64) {
     let wptr = if q.kind == Kind::Sdma { (value >> 2) as u32 } else { value as u32 } % q.size_dw;
     let base = q.base;
     let rd = move |i: u32| gpu_r32(base + i as u64 * 4);
-    match q.kind {
-        Kind::Sdma => run_sdma(&rd, q.rptr, wptr, q.size_dw),
+    let stall = match q.kind {
+        Kind::Sdma => {
+            run_sdma(&rd, q.rptr, wptr, q.size_dw);
+            None
+        }
         k => run_pm4(k, &rd, q.rptr, wptr, q.size_dw),
-    }
-    q.rptr = wptr;
-    gpu_w32(q.rptr_report, if q.kind == Kind::Sdma { wptr << 2 } else { wptr });
+    };
+    q.rptr = stall.unwrap_or(wptr);
+    gpu_w32(q.rptr_report, if q.kind == Kind::Sdma { q.rptr << 2 } else { q.rptr });
     QUEUES.with(|qs| {
         let mut qs = qs.borrow_mut();
         qs.retain(|e| e.0 != index);
@@ -504,4 +543,12 @@ fn doorbell(index: u32, value: u64) {
 /// The fake GPU listens from here on.
 fn fake_gpu() {
     npk_sys::fake_doorbell_hook(doorbell);
+}
+
+/// The HQD registers once per queue, as GRBM_GFX_CNTL selects them. The
+/// register checks leave them flat: Linux's oracle reads them so.
+fn fake_gpu_hqd_banks() {
+    npk_sys::fake_card_banked(gc(GC_mmGRBM_GFX_CNTL_BASE_IDX, GC_mmGRBM_GFX_CNTL),
+                              gc(GC_mmCP_MQD_BASE_ADDR_BASE_IDX, GC_mmCP_MQD_BASE_ADDR),
+                              gc(GC_mmCP_HQD_PQ_WPTR_HI_BASE_IDX, GC_mmCP_HQD_PQ_WPTR_HI));
 }

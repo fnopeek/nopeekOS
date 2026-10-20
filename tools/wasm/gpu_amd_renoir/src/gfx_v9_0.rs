@@ -2039,10 +2039,26 @@ fn gfx_v9_0_kiq_init_queue(adev: &mut amdgpu_device, r: usize) -> i32 {
     0
 }
 
-/// `gfx_v9_0_kcq_init_queue`, `restore` false and not in reset or
-/// suspend: a fresh MQD.
-fn gfx_v9_0_kcq_init_queue(adev: &mut amdgpu_device, mqd_idx: usize) -> i32 {
+/// `gfx_v9_0_kcq_init_queue`: a fresh MQD unless `restore` (never in
+/// reset or suspend here), else the backup and an empty ring.
+fn gfx_v9_0_kcq_init_queue(adev: &mut amdgpu_device, mqd_idx: usize, restore: bool) -> i32 {
     let r = adev.gfx.compute_ring[mqd_idx];
+    if restore {
+        // restore MQD to a clean status
+        if let (Some(k), Some(b)) = (adev.rings[r].mqd_ptr, adev.gfx.mec.mqd_backup.get(mqd_idx)) {
+            let b = b.clone();
+            crate::amdgpu_gart::kptr_write(adev, k, 0, &b);
+        }
+        // reset ring buffer
+        adev.rings[r].wptr = 0;
+        let offs = adev.rings[r].wptr_offs as u64;
+        if let Some(k) = adev.wb.wb {
+            crate::amdgpu_gart::kptr_w32(adev, k, offs * 4, 0);
+            crate::amdgpu_gart::kptr_w32(adev, k, offs * 4 + 4, 0);
+        }
+        crate::amdgpu_ring::amdgpu_ring_clear_ring(adev, r);
+        return 0;
+    }
     let mut mqd = v9_mqd_clean();
     let ring = &adev.rings[r];
     let (me, pipe, queue) = (ring.me, ring.pipe, ring.queue);
@@ -2162,7 +2178,7 @@ fn amdgpu_gfx_enable_kcq(adev: &mut amdgpu_device) -> i32 {
 fn gfx_v9_0_kcq_resume(adev: &mut amdgpu_device) -> i32 {
     gfx_v9_0_cp_compute_enable(adev, true);
     for i in 0..adev.gfx.num_compute_rings as usize {
-        let r = gfx_v9_0_kcq_init_queue(adev, i);
+        let r = gfx_v9_0_kcq_init_queue(adev, i, false);
         if r != 0 {
             return r;
         }
@@ -2500,6 +2516,57 @@ pub fn gfx_v9_ring_emit_cntxcntl(adev: &mut amdgpu_device, r: usize, flags: u32)
     rw(adev, r, PACKET3(PACKET3_CONTEXT_CONTROL, 1));
     rw(adev, r, dw2);
     rw(adev, r, 0);
+}
+
+/// `gfx_v9_0_reset_kcq`: the compute queue unmapped with RESET_QUEUES
+/// through the KIQ, its HQD drained, the MQD restored and mapped again.
+pub fn gfx_v9_0_reset_kcq(adev: &mut amdgpu_device, r: usize, _vmid: u32, timedout: &crate::dma_fence::Fence) -> i32 {
+    let Some(kiq_ring) = adev.gfx.kiq.ring else { return -22 };
+    crate::amdgpu_ring::amdgpu_ring_reset_helper_begin(adev, r, Some(timedout));
+    if crate::amdgpu_ring::amdgpu_ring_alloc(adev, kiq_ring, GFX_V9_0_KIQ_UNMAP_QUEUES_SIZE) != 0 {
+        return -12;
+    }
+    gfx_v9_0_kiq_unmap_queues(adev, kiq_ring, r);
+    crate::amdgpu_ring::amdgpu_ring_commit(adev, kiq_ring);
+    let ret = crate::amdgpu_ring::amdgpu_ring_test_ring(adev, kiq_ring);
+    if ret != 0 {
+        return ret;
+    }
+    // make sure dequeue is complete
+    amdgpu_gfx_rlc_enter_safe_mode(adev);
+    let (me, pipe, queue) = (adev.rings[r].me, adev.rings[r].pipe, adev.rings[r].queue);
+    soc15_grbm_select(adev, me, pipe, queue, 0);
+    let mut ret = -110;
+    for _ in 0..adev.usec_timeout {
+        if gc_rd(adev, GC_mmCP_HQD_ACTIVE_BASE_IDX, GC_mmCP_HQD_ACTIVE) & 1 == 0 {
+            ret = 0;
+            break;
+        }
+        crate::linux::udelay(1);
+    }
+    soc15_grbm_select(adev, 0, 0, 0, 0);
+    amdgpu_gfx_rlc_exit_safe_mode(adev);
+    if ret != 0 {
+        Line::new().s("fail to wait on hqd deactive").say();
+        return ret;
+    }
+    let Some(mqd_idx) = adev.gfx.compute_ring.iter().position(|&c| c == r) else { return -22 };
+    let ret = gfx_v9_0_kcq_init_queue(adev, mqd_idx, true);
+    if ret != 0 {
+        Line::new().s("fail to init kcq").say();
+        return ret;
+    }
+    if crate::amdgpu_ring::amdgpu_ring_alloc(adev, kiq_ring, GFX_V9_0_KIQ_MAP_QUEUES_SIZE) != 0 {
+        return -12;
+    }
+    gfx_v9_0_kiq_map_queues(adev, kiq_ring, r);
+    crate::amdgpu_ring::amdgpu_ring_commit(adev, kiq_ring);
+    let ret = crate::amdgpu_ring::amdgpu_ring_test_ring(adev, kiq_ring);
+    if ret != 0 {
+        Line::new().s("fail to remap queue").say();
+        return ret;
+    }
+    crate::amdgpu_ring::amdgpu_ring_reset_helper_end(adev, r, Some(timedout))
 }
 
 /// `gfx_v9_0_ring_soft_recovery`: the SQ kills the waves of `vmid`.

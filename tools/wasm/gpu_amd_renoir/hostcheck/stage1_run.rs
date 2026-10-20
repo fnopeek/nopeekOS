@@ -47,6 +47,7 @@ fn ccmd(cmd: u32, seqno: u32, body: &[u32]) -> Vec<u8> {
 fn main() {
     let mut adev = fake_renoir();
     fake_gpu();
+    fake_gpu_hqd_banks();
     // A guest context: open, DEV_INFO and READ_MMR_REG as libdrm asks,
     // a context made; a GTT and a VRAM object made, handed over, mapped,
     // given metadata and asked about; an IB in the GTT object writing the
@@ -72,6 +73,23 @@ fn main() {
                                10, 0, 11, 0,
                                0, 0, 0, 1, 20, AMDGPU_HW_IP_GFX, 0, 0]);
     let fence = ccmd(10, 12, &[1, AMDGPU_HW_IP_GFX, 0, 0, 1, 0, 2_000_000_000, 0, 0, 0]);
+    // A compute IB waiting for a value the VRAM object never holds: the
+    // queue hangs, the job times out, and the queue is reset. The guilty
+    // context's entity keeps the error (drm_sched_entity_error), so a
+    // second context runs the next compute IB on the same queue.
+    let hang_ib = [3 << 30 | 5 << 16 | PACKET3_WAIT_REG_MEM << 8, 3 | 1 << 4, 0x2000, 1, 0x1234_5678, !0u32, 4];
+    let ok_ib = [3 << 30 | 3 << 16 | PACKET3_WRITE_DATA << 8, 5 << 8 | 1 << 20, 0x2004, 1, 0x600d_f00d];
+    let words = |ib: &[u32]| -> Vec<u8> { ib.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let compute = |seqno: u32, ctx: u32, at: u32, bytes: u32| ccmd(4, seqno, &[ctx, 2, 0, 2,
+        AMDGPU_CHUNK_ID_BO_HANDLES | 4 << 16, 0, AMDGPU_CHUNK_ID_IB | 8 << 16, 16,
+        10, 0, 11, 0,
+        0, 0, at, 1, bytes, AMDGPU_HW_IP_COMPUTE, 0, 0]);
+    let hang = compute(30, 1, 0x1000, 28);
+    let hang_wait = ccmd(10, 31, &[1, AMDGPU_HW_IP_COMPUTE, 0, 0, 1, 0, !0, !0, 0, 0]);
+    let ctx2 = ccmd(7, 34, &[0, 0]);
+    let after = compute(32, 2, 0x1100, 20);
+    let after_wait = ccmd(10, 33, &[2, AMDGPU_HW_IP_COMPUTE, 0, 0, 1, 0, !0, !0, 0, 0]);
+    let free2 = ccmd(7, 35, &[2, 1]);
     let reserve = ccmd(8, 13, &[0, 0]);
     let unreserve = ccmd(8, 14, &[1, 0]);
     let pstate = ccmd(9, 15, &[1, AMDGPU_CTX_OP_SET_STABLE_PSTATE, AMDGPU_CTX_STABLE_PSTATE_PEAK, 0]);
@@ -98,6 +116,15 @@ fn main() {
                                   (npk_sys::GUEST_STORE, [1, 0, 0, 0, 0, 0], ib_bytes),
                                   (7, [100, len(&submit), 0, 0, 0, 0], submit.clone()),
                                   (7, [100, len(&fence), 0, 0, 0, 0], fence.clone()),
+                                  (npk_sys::GUEST_STORE, [1, 0x1000, 0, 0, 0, 0], words(&hang_ib)),
+                                  (npk_sys::GUEST_STORE, [1, 0x1100, 0, 0, 0, 0], words(&ok_ib)),
+                                  (7, [100, len(&hang), 0, 0, 0, 0], hang.clone()),
+                                  (7, [100, len(&hang_wait), 0, 0, 0, 0], hang_wait.clone()),
+                                  (npk_sys::GUEST_IDLE, [12_000, 0, 0, 0, 0, 0], vec![]),
+                                  (7, [100, len(&ctx2), 0, 0, 0, 0], ctx2.clone()),
+                                  (7, [100, len(&after), 0, 0, 0, 0], after.clone()),
+                                  (7, [100, len(&after_wait), 0, 0, 0, 0], after_wait.clone()),
+                                  (7, [100, len(&free2), 0, 0, 0, 0], free2.clone()),
                                   (7, [100, len(&reserve), 0, 0, 0, 0], reserve.clone()),
                                   (7, [100, len(&unreserve), 0, 0, 0, 0], unreserve.clone()),
                                   (7, [100, len(&pstate), 0, 0, 0, 0], pstate.clone()),

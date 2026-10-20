@@ -78,10 +78,10 @@ pub fn amdgpu_job_get_vmid(adev: &amdgpu_device, j: Option<u64>) -> u32 {
     j.map_or(0, |j| adev.jobs.get(&j).unwrap().vmid)
 }
 
-/// `amdgpu_job_timedout`: the device is not unplugged and not a VF. A
-/// timed-out job on Renoir has neither soft recovery nor a queue reset in
-/// this port, so the job ends with ETIME and its ring's fences are forced
-/// complete, as the device reset's pre-reset step does for every ring.
+/// `amdgpu_job_timedout`: the device is not unplugged and not a VF, and
+/// no devcoredump takes the core dump. Soft recovery, then a reset of the
+/// ring's queue; the device reset is not ported yet, so past those the
+/// ring's fences are forced complete, as its pre-reset step does.
 pub fn amdgpu_job_timedout(adev: &mut amdgpu_device, j: u64) -> drm_gpu_sched_stat {
     let r = job(adev, j).base.sched.unwrap();
     let name = adev.rings[r].sched.name.clone();
@@ -96,6 +96,20 @@ pub fn amdgpu_job_timedout(adev: &mut amdgpu_device, j: u64) -> drm_gpu_sched_st
     let drv = &adev.rings[r].fence_drv;
     Line::new().s("ring ").s(&name).s(" timeout, signaled seq=").dec(drv.last_seq as u64).s(", emitted seq=")
         .dec(drv.sync_seq as u64).say();
+    // attempt a per ring reset
+    if let Some(hw) = parent.as_ref().filter(|_| {
+        crate::tables::amdgpu_gpu_recovery[0] != 0
+            && crate::amdgpu_ring::amdgpu_ring_is_reset_type_supported(adev, r, AMDGPU_RESET_TYPE_PER_QUEUE)
+            && crate::amdgpu_ring::amdgpu_ring_has_reset(adev, r)
+    }) {
+        Line::new().s("Starting ").s(&name).s(" ring reset").say();
+        if crate::amdgpu_ring::amdgpu_ring_reset(adev, r, vmid, hw) == 0 {
+            adev.gpu_reset_counter += 1;
+            Line::new().s("Ring ").s(&name).s(" reset succeeded").say();
+            return drm_gpu_sched_stat::RESET;
+        }
+        Line::new().s("Ring ").s(&name).s(" reset failed").say();
+    }
     let finished = job(adev, j).base.s_fence.clone().unwrap();
     if dma_fence::dma_fence_get_status(adev, &finished) == 0 {
         dma_fence::dma_fence_set_error(&finished, -62);

@@ -188,7 +188,8 @@ pub struct amdgpu_ring {
     pub mqd_ptr: Option<amdgpu_kptr>,
     pub mqd_size: u32,
     /// `ring_backup`: the ring's contents kept across a queue reset.
-    pub ring_backup: Vec<u8>,
+    pub ring_backup: Vec<u32>,
+    pub ring_backup_entries_to_copy: u32,
     pub count_dw: i32,
     pub wptr_old: u64,
     pub sched: crate::drm_sched::drm_gpu_scheduler,
@@ -240,6 +241,7 @@ impl amdgpu_ring {
             mqd_ptr: None,
             mqd_size: 0,
             ring_backup: Vec::new(),
+            ring_backup_entries_to_copy: 0,
             count_dw: 0,
             wptr_old: 0,
             sched: Default::default(),
@@ -404,7 +406,7 @@ pub fn amdgpu_ring_init(adev: &mut amdgpu_device, mut ring: amdgpu_ring, max_dw:
     ring.cached_rptr = 0;
 
     if ring.ring_backup.is_empty() {
-        ring.ring_backup = vec![0; ring.ring_size as usize];
+        ring.ring_backup = vec![0; ring.ring_size as usize / 4];
     }
 
     // Allocate ring buffer
@@ -448,6 +450,68 @@ pub fn amdgpu_device_should_recover_gpu() -> bool {
         return false;
     }
     true
+}
+
+/// `amdgpu_ring_alloc_reemit`: no `max_dw` check, as several submissions
+/// may come back.
+fn amdgpu_ring_alloc_reemit(adev: &mut amdgpu_device, r: usize, ndw: u32) {
+    let ring = &mut adev.rings[r];
+    // Align requested size with padding so unlock_commit can pad safely
+    let ndw = (ndw + ring.funcs.align_mask) & !ring.funcs.align_mask;
+    ring.count_dw = ndw as i32;
+    ring.wptr_old = ring.wptr;
+}
+
+/// `amdgpu_ring_reset`: `funcs->reset`. Of Renoir's rings with one, only
+/// the compute rings ever run a job here (VCN and JPEG get no hw_init).
+pub fn amdgpu_ring_reset(adev: &mut amdgpu_device, r: usize, vmid: u32, guilty: &crate::dma_fence::Fence) -> i32 {
+    match adev.rings[r].funcs.ops {
+        ring_ops::gfx_v9_0_compute => crate::gfx_v9_0::gfx_v9_0_reset_kcq(adev, r, vmid, guilty),
+        _ => -95,
+    }
+}
+
+/// Whether the ring's funcs have `reset`.
+pub fn amdgpu_ring_has_reset(adev: &amdgpu_device, r: usize) -> bool {
+    matches!(adev.rings[r].funcs.ops, ring_ops::gfx_v9_0_compute | ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc
+        | ring_ops::jpeg_v2_0_dec)
+}
+
+/// `amdgpu_ring_reset_helper_begin`.
+pub fn amdgpu_ring_reset_helper_begin(adev: &mut amdgpu_device, r: usize, guilty: Option<&crate::dma_fence::Fence>) {
+    // Stop the scheduler to prevent anybody else from touching the ring
+    // buffer.
+    crate::drm_sched::drm_sched_wqueue_stop(adev, r);
+    // back up the non-guilty commands
+    crate::amdgpu_fence::amdgpu_ring_backup_unprocessed_commands(adev, r, guilty);
+}
+
+/// `amdgpu_ring_reset_helper_end`.
+pub fn amdgpu_ring_reset_helper_end(adev: &mut amdgpu_device, r: usize, guilty: Option<&crate::dma_fence::Fence>)
+                                    -> i32 {
+    // verify that the ring is functional
+    let ret = amdgpu_ring_test_ring(adev, r);
+    if ret != 0 {
+        return ret;
+    }
+    // signal the guilty fence and set an error on all fences from the
+    // context
+    if let Some(g) = guilty {
+        crate::amdgpu_fence::amdgpu_fence_driver_guilty_force_completion(adev, g);
+    }
+    // Re-emit the non-guilty commands
+    let n = adev.rings[r].ring_backup_entries_to_copy;
+    if n != 0 {
+        amdgpu_ring_alloc_reemit(adev, r, n);
+        for i in 0..n as usize {
+            let v = adev.rings[r].ring_backup[i];
+            amdgpu_ring_write(adev, r, v);
+        }
+        amdgpu_ring_commit(adev, r);
+    }
+    // Start the scheduler again
+    crate::drm_sched::drm_sched_wqueue_start(adev, r);
+    0
 }
 
 /// `amdgpu_ring_is_reset_type_supported`.
@@ -601,7 +665,7 @@ pub fn amdgpu_ring_undo(adev: &mut amdgpu_device, r: usize) {
 }
 
 /// `amdgpu_ring_test_ring`.
-fn amdgpu_ring_test_ring(adev: &mut amdgpu_device, r: usize) -> i32 {
+pub fn amdgpu_ring_test_ring(adev: &mut amdgpu_device, r: usize) -> i32 {
     match adev.rings[r].funcs.ops {
         ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute | ring_ops::gfx_v9_0_kiq => {
             crate::gfx_v9_0::gfx_v9_0_ring_test_ring(adev, r)

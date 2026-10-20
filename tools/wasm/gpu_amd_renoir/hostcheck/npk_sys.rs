@@ -187,6 +187,9 @@ impl Mmio {
                 let pos = (hi << 31 | lo as u64).wrapping_sub(c.vram_base) as usize;
                 return c.vram.get(pos..pos + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
             }
+            if let Some(k) = bank_key(&c.regs, reg) {
+                return BANKS.with(|b| b.borrow().get(&k).copied().unwrap_or(0));
+            }
             let unset = UNSET.with(|u| *u.borrow());
             if let Some((rule, (index, data))) = unset {
                 if reg == data {
@@ -230,7 +233,14 @@ impl Mmio {
                         return;
                     }
                 }
-                c.regs.insert(reg, v);
+                match bank_key(&c.regs, reg) {
+                    Some(k) => {
+                        BANKS.with(|b| b.borrow_mut().insert(k, v));
+                    }
+                    None => {
+                        c.regs.insert(reg, v);
+                    }
+                }
                 let answers: Vec<(u32, u32)> =
                     c.on_write.iter().filter(|w| w.0 == reg).map(|w| (w.1, w.2)).collect();
                 for (r, val) in answers {
@@ -436,12 +446,70 @@ pub fn fake_card_pcie(index: u32, data: u32, presets: &[(u32, u32)]) {
 
 /// A register as the card holds it, without recording a driver write.
 pub fn fake_reg(reg: u32) -> u32 {
-    CARD.with(|c| c.borrow().as_ref().and_then(|c| c.regs.get(&reg).copied()).unwrap_or(0))
+    CARD.with(|c| {
+        let c = c.borrow();
+        let Some(c) = c.as_ref() else { return 0 };
+        match bank_key(&c.regs, reg) {
+            Some(k) => BANKS.with(|b| b.borrow().get(&k).copied().unwrap_or(0)),
+            None => c.regs.get(&reg).copied().unwrap_or(0),
+        }
+    })
 }
 
 /// The card sets one of its own registers.
 pub fn fake_set_reg(reg: u32, v: u32) {
-    CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.regs.insert(reg, v); });
+    CARD.with(|c| {
+        if let Some(c) = c.borrow_mut().as_mut() {
+            match bank_key(&c.regs, reg) {
+                Some(k) => {
+                    BANKS.with(|b| b.borrow_mut().insert(k, v));
+                }
+                None => {
+                    c.regs.insert(reg, v);
+                }
+            }
+        }
+    });
+}
+
+thread_local! {
+    /// Registers `lo..=hi` exist once per value of the select register.
+    static BANKED: core::cell::Cell<Option<(u32, u32, u32)>> = const { core::cell::Cell::new(None) };
+    static BANKS: RefCell<std::collections::HashMap<(u32, u32), u32>> = RefCell::new(Default::default());
+}
+
+/// The bank and register a banked register's access goes to.
+fn bank_key(regs: &std::collections::HashMap<u32, u32>, reg: u32) -> Option<(u32, u32)> {
+    let (sel, lo, hi) = BANKED.with(|b| b.get())?;
+    (lo..=hi).contains(&reg).then(|| (regs.get(&sel).copied().unwrap_or(0), reg))
+}
+
+/// Registers `lo..=hi` are banked by the value of register `sel` (the HQD
+/// registers by GRBM_GFX_CNTL).
+pub fn fake_card_banked(sel: u32, lo: u32, hi: u32) {
+    BANKED.with(|b| b.set(Some((sel, lo, hi))));
+}
+
+pub fn fake_is_banked() -> bool {
+    BANKED.with(|b| b.get().is_some())
+}
+
+/// Register `reg` of bank `bank`.
+pub fn fake_bank_reg(bank: u32, reg: u32) -> u32 {
+    BANKS.with(|b| b.borrow().get(&(bank, reg)).copied().unwrap_or(0))
+}
+
+/// The card sets register `reg` of bank `bank`.
+pub fn fake_bank_set(bank: u32, reg: u32, v: u32) {
+    BANKS.with(|b| b.borrow_mut().insert((bank, reg), v));
+}
+
+/// Every bank written to.
+pub fn fake_banks() -> Vec<u32> {
+    let mut v: Vec<u32> = BANKS.with(|b| b.borrow().keys().map(|k| k.0).collect());
+    v.sort();
+    v.dedup();
+    v
 }
 
 /// The DMA window holding bus address `bus`, and the offset into it.
@@ -642,6 +710,22 @@ pub fn gpudev_poll(buf: &mut [u8]) -> i32 {
             });
             println!("guest stores {} bytes at tt {} + {:#x}", words.len(), args[0], args[1]);
         }
+        // The guest quiet for args[0] ms: no jobs meanwhile.
+        if s.jobs.front().is_some_and(|j| j.0 == GUEST_IDLE) {
+            let now = now_us();
+            let ms = s.jobs.front().unwrap().1[0];
+            let until = IDLE_UNTIL.with(|u| {
+                *u.borrow_mut().get_or_insert_with(|| {
+                    println!("guest idle for {} ms", ms);
+                    now + ms as i64 * 1000
+                })
+            });
+            if now < until {
+                return 0;
+            }
+            IDLE_UNTIL.with(|u| *u.borrow_mut() = None);
+            s.jobs.pop_front();
+        }
         let Some((op, args, payload)) = s.jobs.pop_front() else { return -1 };
         s.seq += 1;
         buf[0..4].copy_from_slice(&s.seq.to_le_bytes());
@@ -669,8 +753,14 @@ pub fn gpudev_job_data(seq: i32, off: i32, out: &mut [u8]) -> i32 {
     })
 }
 
-/// The fake's own entry in the job list: the guest writes tt pages.
+/// The fake's own entries in the job list: the guest writes tt pages, or
+/// sends nothing for a while.
 pub const GUEST_STORE: u32 = 0xfe;
+pub const GUEST_IDLE: u32 = 0xfd;
+
+thread_local! {
+    static IDLE_UNTIL: RefCell<Option<i64>> = const { RefCell::new(None) };
+}
 
 /// `npk_gpudev_ring`: a timeline's counts.
 pub fn gpudev_ring(client: i32, ring_idx: i32, submitted: i64, completed: i64) -> i32 {

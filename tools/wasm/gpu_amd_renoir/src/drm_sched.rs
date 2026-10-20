@@ -613,12 +613,23 @@ pub fn drm_sched_init(adev: &mut amdgpu_device, r: usize, credit_limit: u32, tim
     0
 }
 
-/// `drm_sched_fini`.
-pub fn drm_sched_fini(adev: &mut amdgpu_device, r: usize) {
-    // drm_sched_wqueue_stop
+/// `drm_sched_wqueue_stop`: no new jobs pulled, none freed.
+pub fn drm_sched_wqueue_stop(adev: &mut amdgpu_device, r: usize) {
     adev.rings[r].sched.pause_submit = true;
     workqueue::cancel_work(adev, work::sched_run_job { ring: r });
     workqueue::cancel_work(adev, work::sched_free_job { ring: r });
+}
+
+/// `drm_sched_wqueue_start`.
+pub fn drm_sched_wqueue_start(adev: &mut amdgpu_device, r: usize) {
+    adev.rings[r].sched.pause_submit = false;
+    workqueue::queue_work(adev, work::sched_run_job { ring: r });
+    workqueue::queue_work(adev, work::sched_free_job { ring: r });
+}
+
+/// `drm_sched_fini`.
+pub fn drm_sched_fini(adev: &mut amdgpu_device, r: usize) {
+    drm_sched_wqueue_stop(adev, r);
     for prio in DRM_SCHED_PRIORITY_KERNEL..adev.rings[r].sched.num_rqs {
         let ents = rq(adev, (r, prio)).entities.clone();
         for e in ents {
