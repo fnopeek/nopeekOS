@@ -66,6 +66,7 @@ mod atom_exec;
 mod gfx_v9_0;
 mod gmc_v9_0;
 mod gpudev;
+mod import;
 mod ip_blocks;
 mod jpeg_v2_0;
 mod nbio_v7_0;

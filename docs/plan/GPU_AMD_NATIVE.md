@@ -246,3 +246,61 @@ Plan:
 3. **Sicherheit:** Breite, Hoehe, Pitch, Swizzle und DCC-Bereich gegen die
    Objektgroesse pruefen — eine gefaelschte Beschreibung darf nichts ausser dem
    eigenen Objekt im Compositor-Adressraum lesen.
+
+### 5.1 Gebaut (Modul 0.16.0, Geraetetest offen)
+
+Alle drei Punkte, und die Gast-T# wird **nie** benutzt: der Compositor baut
+die T# selbst, wie radeonsi beim Import (`si_texture_from_winsys_buffer`):
+
+| Schritt (radeonsi)               | Mesa, gemeinsamer Code            | Modul `src/import.rs` |
+|----------------------------------|-----------------------------------|-----------------------|
+| `amdgpu_bo_get_metadata`         | `ac_surface_apply_bo_metadata`    | Swizzle + Scanout aus den Tiling-Flags |
+| `si_init_surface` (IMPORTED)     | `ac_compute_surface`              | Bild- und DCC-Masse |
+| Import                           | `ac_surface_apply_umd_metadata`   | aus den Metadaten NUR DCC an/aus, Offset, pipe/rb-aligned |
+| `si_make_texture_descriptor`     | `ac_build_texture_descriptor`     | T# fuer B8G8R8A8_UNORM, 2D |
+| `si_set_mutable_tex_desc_fields` | `ac_set_mutable_tex_desc_fields`  | Basis, SW_MODE, PITCH, DCC-Adresse |
+
+RADVs Legacy-Import ist das falsche Vorbild: er ignoriert den Swizzle der
+Tiling-Flags und rechnet DCC mit Groesse 0 (eigener Kommentar: „basic
+ability … that don't have DCC").
+
+**Orakel:** `shaders/imgdesc.c` faehrt genau diese Mesa-Schritte (statisch
+gegen `libamd_common.a`/`libaddrlib.a`, Geraet aus RADV hinter dem
+drm-shim). `hostcheck/check.sh` vergleicht 1832 Faelle Feld fuer Feld und
+**1450 T# Wort fuer Wort** (Groessen bis 16384, Modi 21/22/24–27, Scanout,
+DCC an/aus, beide Ausrichtungen, Metadaten, die Mesa ignoriert oder
+ablehnt). Gemessen dabei: Bild = ganze Bloecke (4 KB: 32x32, 64 KB:
+128x128 px); DCC = `align(pitch,512) * align(hoehe,512) / 64` Byte, auf die
+Blockgroesse aufgerundet; mit Scanout laesst addrlib nur 64KB_S_X zu.
+Modi 9/10 (64 KB ohne XOR) rechnen anders und werden nicht angenommen.
+
+**Sicherheit, strenger als Linux:** radeonsi prueft nur
+`total_size <= bo_size`, und `total_size` wird nach dem Einlesen des
+DCC-Offsets aus den Metadaten nicht neu gerechnet — Linux verlaesst sich auf
+die eigene VM des Konsumenten. Die Compositor-VM haelt fremde Puffer, also
+`import::check`: Bild im Objekt, DCC-Offset ausgerichtet, hinter dem Bild,
+`offset + groesse <= Objekt`, keine gemischte pipe/rb-Ausrichtung (macht
+Mesa nie). Acht Grenzfaelle im Hostcheck (`import_check bounds`). Jede
+Abweichung → das Bild wird wie bisher linear gelesen, mit Grund im Log.
+
+**Shader:** `shaders/import.comp` (nur AMD, liegt deshalb nicht in
+`gpu_shaders/`): `texelFetch` auf ein `texture2D` in Set 0, schreibt die
+Bytes unveraendert linear. `acoc` kennt dafuer einen Descriptor-Set
+(`image`-Modus, je Dispatch neu gebunden, damit jede Vorlage den Zeiger
+traegt); der Generator prueft, dass das Set genau die T# der Sicht ist
+und jede Vorlage die Set-Adresse genau einmal traegt. Die vier alten
+Programme sind Wort fuer Wort gleich geblieben (`--check`).
+
+**Im Modul:** ein gekacheltes Gastobjekt wird GANZ in die Compositor-VM
+gelegt (der DCC-Bereich liegt hinter der „Sicht"), dazu ein linearer
+Puffer; die Szene sieht nur den linearen Puffer. Jede Szene importiert
+zuerst alle gekachelten Gastbilder (ein Dispatch je Bild), dann laeuft
+`compose` unveraendert.
+
+**Log am Geraet:** `gpudev: bo N metadata[i] …` (alle Worte, 8 je Zeile),
+`gpudev: bo N tiled, swizzle S, PxH, DCC at O (…): through the texture
+unit into a linear buffer` oder `… read as it lies: <Grund>`; alle 600
+Szenen `guest bo N imported pixels …` — die Pixel NACH dem Import.
+
+**Offen:** Import nur, wenn sich das Gastbild geaendert hat (heute jede
+Szene); der Schattenpuffer liegt in GTT.

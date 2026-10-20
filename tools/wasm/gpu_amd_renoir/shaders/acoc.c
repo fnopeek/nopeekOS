@@ -13,12 +13,14 @@
  * generator can hold the module's dispatch against them.
  *
  * The kernel model the module dispatches:
- *   - push constants only, no descriptor sets;
+ *   - push constants, and with "image" one descriptor set holding one
+ *     sampled image (binding 0), bound anew before every dispatch so that
+ *     each recorded stream carries the set's address;
  *   - memory through 64-bit addresses (GL_EXT_buffer_reference);
  *   - no scratch, no LDS, no grid-size or workgroup-size SGPRs beyond
  *     what the recorded stream shows (refused otherwise).
  *
- * Usage: acoc <in.spv> <workgroup width> <push bytes> <out.bin> <out.meta>
+ * Usage: acoc <in.spv> <workgroup width> <push bytes> <out.bin> <out.meta> [image]
  * out.meta is "key value" lines, read by gen_shaders.py.
  */
 
@@ -27,6 +29,8 @@
 #include <string.h>
 
 #include "radv_cmd_buffer.h"
+#include "radv_descriptor_set.h"
+#include "radv_image_view.h"
 #include "radv_pipeline.h"
 #include "radv_pipeline_compute.h"
 #include "radv_queue.h"
@@ -69,10 +73,11 @@ die(const char *what, VkResult r)
 int
 main(int argc, char **argv)
 {
-   if (argc != 6) {
-      fprintf(stderr, "usage: acoc <in.spv> <workgroup width> <push bytes> <out.bin> <out.meta>\n");
+   if (argc != 6 && !(argc == 7 && !strcmp(argv[6], "image"))) {
+      fprintf(stderr, "usage: acoc <in.spv> <workgroup width> <push bytes> <out.bin> <out.meta> [image]\n");
       return 2;
    }
+   bool image = argc == 7;
    size_t spv_size;
    uint32_t *spv = read_file(argv[1], &spv_size);
    if (!spv) {
@@ -107,6 +112,16 @@ main(int argc, char **argv)
    GET(inst, vkGetDeviceQueue);
    GET(inst, vkQueueSubmit);
    GET(inst, vkQueueWaitIdle);
+   GET(inst, vkCreateDescriptorSetLayout);
+   GET(inst, vkCreateDescriptorPool);
+   GET(inst, vkAllocateDescriptorSets);
+   GET(inst, vkUpdateDescriptorSets);
+   GET(inst, vkCmdBindDescriptorSets);
+   GET(inst, vkCreateImage);
+   GET(inst, vkGetImageMemoryRequirements);
+   GET(inst, vkAllocateMemory);
+   GET(inst, vkBindImageMemory);
+   GET(inst, vkCreateImageView);
 
    uint32_t n = 1;
    VkPhysicalDevice pd;
@@ -171,8 +186,24 @@ main(int argc, char **argv)
       die("vkCreateShaderModule", r);
 
    VkPushConstantRange range = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = push_bytes};
+   VkDescriptorSetLayoutBinding binding = {
+      .binding = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+   };
+   VkDescriptorSetLayoutCreateInfo dslci = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = 1,
+      .pBindings = &binding,
+   };
+   VkDescriptorSetLayout set_layout;
+   if (image && (r = vkCreateDescriptorSetLayout(dev, &dslci, NULL, &set_layout)))
+      die("vkCreateDescriptorSetLayout", r);
    VkPipelineLayoutCreateInfo plci = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = image ? 1 : 0,
+      .pSetLayouts = &set_layout,
       .pushConstantRangeCount = push_bytes ? 1 : 0,
       .pPushConstantRanges = &range,
    };
@@ -235,6 +266,11 @@ main(int argc, char **argv)
       if (u->sgpr_idx >= 0)
          fprintf(m, "user_sgpr %d %d %u\n", i, u->sgpr_idx, u->num_sgprs);
    }
+   for (int i = 0; i < MAX_SETS; i++) {
+      const struct radv_userdata_info *u = &s->info.user_sgprs_locs.descriptor_sets[i];
+      if (u->sgpr_idx >= 0)
+         fprintf(m, "set_sgpr %d %d %u\n", i, u->sgpr_idx, u->num_sgprs);
+   }
    fprintf(m, "push_constant_size %u\n", s->info.push_constant_size);
    fprintf(m, "inline_push %llu\n", (unsigned long long)s->info.inline_push_constant_mask);
 
@@ -251,6 +287,97 @@ main(int argc, char **argv)
    VkCommandBuffer cb;
    if ((r = vkAllocateCommandBuffers(dev, &cbai, &cb)))
       die("vkAllocateCommandBuffers", r);
+   /* Two sets of the same 16x16 image, bound in turn: every dispatch
+    * finds its set changed. */
+   VkDescriptorSet sets[2];
+   if (image) {
+      VkImageCreateInfo ici2 = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+         .imageType = VK_IMAGE_TYPE_2D,
+         .format = VK_FORMAT_B8G8R8A8_UNORM,
+         .extent = {16, 16, 1},
+         .mipLevels = 1,
+         .arrayLayers = 1,
+         .samples = VK_SAMPLE_COUNT_1_BIT,
+         .tiling = VK_IMAGE_TILING_OPTIMAL,
+         .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+      };
+      VkImage img;
+      if ((r = vkCreateImage(dev, &ici2, NULL, &img)))
+         die("vkCreateImage", r);
+      VkMemoryRequirements req;
+      vkGetImageMemoryRequirements(dev, img, &req);
+      VkMemoryAllocateInfo mai = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         .allocationSize = req.size,
+         .memoryTypeIndex = __builtin_ctz(req.memoryTypeBits),
+      };
+      VkDeviceMemory mem;
+      if ((r = vkAllocateMemory(dev, &mai, NULL, &mem)))
+         die("vkAllocateMemory", r);
+      if ((r = vkBindImageMemory(dev, img, mem, 0)))
+         die("vkBindImageMemory", r);
+      VkImageViewCreateInfo vci = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+         .image = img,
+         .viewType = VK_IMAGE_VIEW_TYPE_2D,
+         .format = VK_FORMAT_B8G8R8A8_UNORM,
+         .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+      };
+      VkImageView view;
+      if ((r = vkCreateImageView(dev, &vci, NULL, &view)))
+         die("vkCreateImageView", r);
+      VkDescriptorPoolSize ps = {.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 2};
+      VkDescriptorPoolCreateInfo dpci = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+         .maxSets = 2,
+         .poolSizeCount = 1,
+         .pPoolSizes = &ps,
+      };
+      VkDescriptorPool dpool;
+      if ((r = vkCreateDescriptorPool(dev, &dpci, NULL, &dpool)))
+         die("vkCreateDescriptorPool", r);
+      VkDescriptorSetLayout layouts[2] = {set_layout, set_layout};
+      VkDescriptorSetAllocateInfo dsai = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+         .descriptorPool = dpool,
+         .descriptorSetCount = 2,
+         .pSetLayouts = layouts,
+      };
+      if ((r = vkAllocateDescriptorSets(dev, &dsai, sets)))
+         die("vkAllocateDescriptorSets", r);
+      VkDescriptorImageInfo dii = {.imageView = view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+      for (int i = 0; i < 2; i++) {
+         VkWriteDescriptorSet wds = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = sets[i],
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            .pImageInfo = &dii,
+         };
+         vkUpdateDescriptorSets(dev, 1, &wds, 0, NULL);
+      }
+      struct radv_descriptor_set *set = radv_descriptor_set_from_handle(sets[0]);
+      fprintf(m, "set_size %u\n", set->header.size);
+      fprintf(m, "set_va %llu %llu\n", (unsigned long long)set->header.va,
+              (unsigned long long)radv_descriptor_set_from_handle(sets[1])->header.va);
+      fprintf(m, "set_words");
+      for (uint32_t i = 0; i < set->header.size / 4; i++)
+         fprintf(m, " %u", set->header.mapped_ptr[i]);
+      fprintf(m, "\n");
+      struct radv_image_view *iview = radv_image_view_from_handle(view);
+      fprintf(m, "view_desc");
+      for (int i = 0; i < 8; i++)
+         fprintf(m, " %u", iview->descriptor.plane_descriptors[0][i]);
+      fprintf(m, "\n");
+   }
+   unsigned bound = 0;
+#define BIND_SET()                                                                                                     \
+   do {                                                                                                                \
+      if (image)                                                                                                       \
+         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &sets[bound++ & 1], 0, NULL);       \
+   } while (0)
    VkCommandBufferBeginInfo cbbi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
    vkBeginCommandBuffer(cb, &cbbi);
    struct radv_cmd_buffer *cmd = radv_cmd_buffer_from_handle(cb);
@@ -261,6 +388,7 @@ main(int argc, char **argv)
    uint32_t push[64];
    for (uint32_t i = 0; i < 64; i++)
       push[i] = 0xc0de0000 | i;
+   BIND_SET();
    if (push_bytes)
       vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes, push);
    vkCmdDispatch(cb, GRID_X, GRID_Y, 1);
@@ -275,12 +403,14 @@ main(int argc, char **argv)
    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
                         NULL, 0, NULL);
    /* RADV emits a barrier's flush with the next dispatch. */
+   BIND_SET();
    vkCmdDispatch(cb, GRID_X, GRID_Y, 1);
    uint32_t barriered = cmd->cs->b->cdw;
    /* A scene's next dispatch of the same program, with its own push
     * constants. */
    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
                         NULL, 0, NULL);
+   BIND_SET();
    if (push_bytes)
       vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes, push);
    vkCmdDispatch(cb, GRID_X, GRID_Y, 1);
@@ -289,6 +419,7 @@ main(int argc, char **argv)
    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
                         NULL, 0, NULL);
    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline2);
+   BIND_SET();
    if (push_bytes)
       vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes, push);
    vkCmdDispatch(cb, GRID_X, GRID_Y, 1);

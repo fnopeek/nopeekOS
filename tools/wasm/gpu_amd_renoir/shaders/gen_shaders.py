@@ -5,8 +5,9 @@ to run them.
 
 Nothing here encodes hardware knowledge by hand:
 
-  * every `*.comp` in tools/wasm/gpu_shaders (shared with gpu_intel_tgl) is
-    GLSL compute; glslangValidator turns it into SPIR-V and `acoc` (acoc.c,
+  * every `*.comp` in tools/wasm/gpu_shaders (shared with gpu_intel_tgl),
+    and in this directory those only AMD runs (they read a sampled image
+    through one descriptor set), is GLSL compute; glslangValidator turns it into SPIR-V and `acoc` (acoc.c,
     built against RADV) compiles it through RADV's compute pipeline path
     behind Mesa's amdgpu drm-shim, with the workgroup width 64 (wave64);
   * from that pipeline come the program, its registers and where the push
@@ -33,6 +34,7 @@ built once for RADV and the drm-shim (see docs/plan/GPU_AMD_SCENES.md):
 
     python3 gen_shaders.py            # rewrite ../src/shaders_gen.rs
     python3 gen_shaders.py --check    # fail if it is not what it would write
+    python3 gen_shaders.py --imgdesc <exe>   # build the import oracle
 """
 
 import json
@@ -62,6 +64,16 @@ PUSH_TAG = 0xC0DE0000
 
 
 def build_acoc(tmp):
+    return build_tool(os.path.join(HERE, "acoc.c"), os.path.join(tmp, "acoc"), [])
+
+
+# imgdesc.c runs Mesa's common code itself; RADV is only its device.
+COMMON_LIBS = ["src/amd/common/libamd_common.a", "src/amd/addrlib/libaddrlib.a", "src/util/libmesa_util.a",
+               "src/c11/impl/libmesa_util_c11.a", "src/util/blake3/libblake3.a"]
+
+
+def build_tool(src, exe, libs):
+    """`src` built with RADV's flags and linked against RADV and `libs`."""
     cc = json.load(open(os.path.join(BUILD, "compile_commands.json")))
     cmd = next(c for c in cc if c["file"].endswith("radv_pipeline_compute.c"))
     flags = []
@@ -79,12 +91,25 @@ def build_acoc(tmp):
             flags.append("-I" + (p if os.path.isabs(p) else os.path.join(BUILD, p)))
         elif a.startswith("-D") or a.startswith("-std"):
             flags.append(a)
-    exe = os.path.join(tmp, "acoc")
     obj = exe + ".o"
-    subprocess.run(["cc", "-O1"] + flags + ["-c", os.path.join(HERE, "acoc.c"), "-o", obj], check=True)
-    subprocess.run(["cc", "-o", exe, obj, "-L" + RADV, "-l:libvulkan_radeon.so", "-Wl,-rpath," + RADV],
-                   check=True)
+    subprocess.run(["cc", "-O1"] + flags + ["-c", src, "-o", obj], check=True)
+    extra = [os.path.join(BUILD, l) for l in libs]
+    system = ["-lm", "-lz", "-lexpat", "-lpthread", "-ldrm"] if libs else []
+    subprocess.run(["c++" if libs else "cc", "-o", exe, obj] + extra +
+                   ["-L" + RADV, "-l:libvulkan_radeon.so", "-Wl,-rpath," + RADV] + system, check=True)
     return exe
+
+
+def uses_descriptor_set(spv):
+    """Whether the SPIR-V decorates a variable with a descriptor set."""
+    words = struct.unpack("<%dI" % (len(spv) // 4), spv)
+    i = 5
+    while i < len(words):
+        op, n = words[i] & 0xFFFF, words[i] >> 16
+        if op == 71 and words[i + 2] == 34:  # OpDecorate DescriptorSet
+            return True
+        i += n
+    return False
 
 
 def push_members(spv):
@@ -149,19 +174,24 @@ def compile_shader(acoc, tmp, path):
     subprocess.run(["glslangValidator", "-V", "--target-env", "vulkan1.3", "-o", spv, path], check=True,
                    stdout=subprocess.DEVNULL)
     env = dict(os.environ, LD_PRELOAD=SHIM, AMDGPU_GPU_ID="renoir")
-    subprocess.run([acoc, spv, str(WIDTH), str(PUSH_BYTES), binf, meta], check=True, env=env)
+    image = ["image"] if uses_descriptor_set(open(spv, "rb").read()) else []
+    subprocess.run([acoc, spv, str(WIDTH), str(PUSH_BYTES), binf, meta] + image, check=True, env=env)
     # A second run for ACO's IR only: RADV_DEBUG moves RADV's uploads.
-    ir = subprocess.run([acoc, spv, str(WIDTH), str(PUSH_BYTES), binf + ".ir", meta + ".ir"], check=True,
+    ir = subprocess.run([acoc, spv, str(WIDTH), str(PUSH_BYTES), binf + ".ir", meta + ".ir"] + image, check=True,
                         env=dict(env, RADV_DEBUG="shaders"), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True).stdout
     bad = partial_mask_broadcasts(ir)
     if bad:
         sys.exit(f"gen_shaders: {name}: {len(bad)} broadcasts read a lane that may have left, first: {bad[0]}")
-    info = {"user_sgpr": {}}
+    info = {"user_sgpr": {}, "set_sgpr": {}}
     for line in open(meta):
         k, *v = line.split()
         if k == "user_sgpr":
             info["user_sgpr"][int(v[0])] = (int(v[1]), int(v[2]))
+        elif k == "set_sgpr":
+            info["set_sgpr"][int(v[0])] = (int(v[1]), int(v[2]))
+        elif k in ("set_va", "set_words", "view_desc"):
+            info[k] = [int(x) for x in v]
         elif k.startswith("stream") or k.startswith("preamble"):
             info[k] = [int(x) for x in v]
         elif k == "device":
@@ -291,6 +321,9 @@ def kernel_rust(name, code, info, members):
     lines.append(f"    inline_push_dwords: {inline[1]},")
     lines.append(f"    push_ptr_sgpr: {'None' if ptr_sgpr is None else f'Some({ptr_sgpr})'},")
     lines.append(f"    push_bytes: {info['push_constant_size']},")
+    st = info["set_sgpr"].get(0)
+    lines.append(f"    set_sgpr: {'None' if st is None else f'Some({st[0]})'},")
+    lines.append(f"    set_bytes: {info.get('set_size', 0)},")
     lines.append("};")
     lines.append(f"pub const {up}_CODE: [u8; {len(code)}] = [")
     for i in range(0, len(code), 16):
@@ -307,12 +340,15 @@ def kernel_rust(name, code, info, members):
 
 
 def main():
+    if "--imgdesc" in sys.argv:
+        build_tool(os.path.join(HERE, "imgdesc.c"), sys.argv[sys.argv.index("--imgdesc") + 1], COMMON_LIBS)
+        return
     check = "--check" in sys.argv
     pm4 = Pm4()
     with tempfile.TemporaryDirectory() as tmp:
         acoc = build_acoc(tmp)
-        shaders = sorted(f for f in os.listdir(SHADERS) if f.endswith(".comp"))
-        kernels = [compile_shader(acoc, tmp, os.path.join(SHADERS, s)) for s in shaders]
+        shaders = sorted((f, d) for d in (SHADERS, HERE) for f in os.listdir(d) if f.endswith(".comp"))
+        kernels = [compile_shader(acoc, tmp, os.path.join(d, f)) for f, d in shaders]
     first = kernels[0][2]
     mask = ib_pad_mask()
     preamble, _ = split_pad(pm4, first["preamble"], mask, len(first["preamble"]))
@@ -327,6 +363,14 @@ def main():
         unknown = set(info["user_sgpr"]) - {0, 1, 2}
         if unknown:
             sys.exit(f"gen_shaders: {name}: user SGPRs {sorted(unknown)} are not modelled")
+        if set(info["set_sgpr"]) - {0} or any(n != 1 for _, n in info["set_sgpr"].values()):
+            sys.exit(f"gen_shaders: {name}: descriptor sets {info['set_sgpr']} are not modelled")
+        if info["set_sgpr"]:
+            # The set is the image's descriptor and nothing else (the FMASK
+            # words of a single-sample view are zero).
+            words = info["set_words"]
+            if words[:8] != info["view_desc"] or any(words[8:]):
+                sys.exit(f"gen_shaders: {name}: the descriptor set is not the view's descriptor")
         # The values RADV wrote for the registers it computed.
         regs = {}
         for pname, h, body in pm4.packets(info["stream_dispatch"]):
@@ -341,6 +385,13 @@ def main():
         info["dispatch_tpl"] = template(pm4, info["stream_dispatch"], kernel=True)
         info["repush_tpl"] = template(pm4, info["stream_barrier_push_dispatch"], kernel=True)
         info["switch_tpl"] = template(pm4, info["stream_barrier_bind_dispatch"], kernel=True)
+        if info["set_sgpr"]:
+            hole = f"user_data_{info['set_sgpr'][0][0]}"
+            sets = {v & 0xFFFFFFFF for v in info["set_va"]}
+            for t in ("dispatch_tpl", "repush_tpl", "switch_tpl"):
+                got = [w for w, h in info[t] if h == hole]
+                if len(got) != 1 or got[0] not in sets:
+                    sys.exit(f"gen_shaders: {name}: {t} does not carry the set's address once")
 
     lines = [
         "//! The GPU programs of gpu_amd_renoir and the command stream RADV writes",
@@ -382,6 +433,10 @@ def main():
         "    /// do not all fit inline.",
         "    pub push_ptr_sgpr: Option<u32>,",
         "    pub push_bytes: u32,",
+        "    /// The user SGPR of the 32-bit pointer to descriptor set 0, and the",
+        "    /// set's bytes: the sampled image's descriptor, then zeros.",
+        "    pub set_sgpr: Option<u32>,",
+        "    pub set_bytes: u32,",
         "}",
         "",
         f"/// RADV's device: {first['device']}.",

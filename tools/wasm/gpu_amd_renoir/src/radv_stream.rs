@@ -30,6 +30,9 @@ pub struct dispatch<'a> {
     /// Low half of the address of the uploaded push constants, for a
     /// program that reads them through a pointer.
     pub push_ptr: u32,
+    /// Low half of the address of its descriptor set, for a program that
+    /// reads an image.
+    pub set_ptr: u32,
     pub grid: [u32; 3],
 }
 
@@ -46,6 +49,9 @@ fn fill(d: &dispatch, word: u32, hole: Hole) -> u32 {
     let user_data = |n: u32| -> u32 {
         if k.push_ptr_sgpr == Some(n) {
             return d.push_ptr;
+        }
+        if k.set_sgpr == Some(n) {
+            return d.set_ptr;
         }
         let i = n.wrapping_sub(k.inline_push_sgpr);
         d.push.get(i as usize).copied().unwrap_or(0)
@@ -136,17 +142,19 @@ pub fn template_for(k: usize, prev: Option<usize>) -> &'static [(u32, Hole)] {
 }
 
 /// The programs, in the order the composer uploads them.
-pub const KERNELS: [&Kernel; 4] = [&sg::FILL_PATTERN, &sg::COMPOSE, &sg::BLUR_DOWN, &sg::BLUR_BOX];
+pub const KERNELS: [&Kernel; 5] = [&sg::FILL_PATTERN, &sg::COMPOSE, &sg::BLUR_DOWN, &sg::BLUR_BOX, &sg::IMPORT];
 pub const K_FILL_PATTERN: usize = 0;
 pub const K_COMPOSE: usize = 1;
 pub const K_BLUR_DOWN: usize = 2;
 pub const K_BLUR_BOX: usize = 3;
+pub const K_IMPORT: usize = 4;
 
 /// Per program: first dispatch, same program again, after another one.
 type templates = (&'static [(u32, Hole)], &'static [(u32, Hole)], &'static [(u32, Hole)]);
-const TEMPLATES: [templates; 4] = [
+const TEMPLATES: [templates; 5] = [
     (sg::FILL_PATTERN_RADV_DISPATCH, sg::FILL_PATTERN_RADV_REPUSH, sg::FILL_PATTERN_RADV_SWITCH),
     (sg::COMPOSE_RADV_DISPATCH, sg::COMPOSE_RADV_REPUSH, sg::COMPOSE_RADV_SWITCH),
     (sg::BLUR_DOWN_RADV_DISPATCH, sg::BLUR_DOWN_RADV_REPUSH, sg::BLUR_DOWN_RADV_SWITCH),
     (sg::BLUR_BOX_RADV_DISPATCH, sg::BLUR_BOX_RADV_REPUSH, sg::BLUR_BOX_RADV_SWITCH),
+    (sg::IMPORT_RADV_DISPATCH, sg::IMPORT_RADV_REPUSH, sg::IMPORT_RADV_SWITCH),
 ];

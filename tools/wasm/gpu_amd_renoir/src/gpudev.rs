@@ -88,6 +88,10 @@ struct bo {
     va: u64,
     node: Option<drm_mm_node>,
     pieces: [Option<(usize, bool, u64)>; FB_PIECES],
+    /// A tiled guest frame: the linear buffer the compositor's view is,
+    /// and the import that fills it from the guest's object.
+    linear: Option<compose::gem>,
+    import: Option<compose::frame_import>,
 }
 
 /// `npk_gpudev_bo_info`, parsed.
@@ -396,7 +400,14 @@ impl service {
 
     /// The buffer objects a scene may touch.
     fn scene_bos(&self) -> Vec<usize> {
-        self.bos.iter().chain(self.dyn_bos.iter()).flat_map(|b| b.pieces.iter().flatten().map(|p| p.0)).collect()
+        self.bos.iter().chain(self.dyn_bos.iter())
+            .flat_map(|b| b.pieces.iter().flatten().map(|p| p.0).chain(b.linear.map(|g| g.bo)))
+            .collect()
+    }
+
+    /// The tiled guest frames, imported at the start of every scene.
+    fn imports(&self) -> Vec<compose::frame_import> {
+        self.dyn_bos.iter().filter_map(|b| b.import).collect()
     }
 }
 
@@ -443,8 +454,16 @@ fn bo_add(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(), i3
         None => import_pages(adev, pages)?,
     };
     b.handle = Some(h);
+    let tiled = match own {
+        Some(_) => guest_frame(adev, &b, h),
+        None => None,
+    };
     let c = svc.composer.as_mut().ok_or(-EINVAL)?;
-    if let Err(e) = map_import(adev, c, &mut b) {
+    let mapped = match tiled {
+        Some(surf) => map_tiled(adev, c, &mut b, &surf),
+        None => map_import(adev, c, &mut b),
+    };
+    if let Err(e) = mapped {
         obj::amdgpu_bo_unpin(adev, h);
         obj::amdgpu_bo_unref(adev, h);
         return Err(e);
@@ -471,19 +490,109 @@ fn pixels(adev: &amdgpu_device, l: &mut Line, b: &bo, o: &[u64]) {
     }
 }
 
-/// Every 600 scenes, the pixels of each guest frame being composed.
+/// The pixels at the start and the centre of `b`'s linear buffer `g`, as
+/// the import left them.
+fn linear_pixels(adev: &amdgpu_device, l: &mut Line, b: &bo, g: &compose::gem) {
+    let centre = (b.height / 2) as u64 * b.pitch as u64 + (b.width / 2) as u64 * 4;
+    for byte in [0, 4, 8, centre, centre + 4] {
+        l.s(" ").hex(crate::amdgpu_gart::kptr_r32(adev, g.k, byte));
+    }
+}
+
+/// Every 600 scenes, the pixels of each guest frame being composed: of a
+/// tiled frame those its import wrote.
 fn log_guest_pixels(adev: &amdgpu_device, svc: &service) {
     for (id, o) in &svc.guest_bos {
         let Some(b) = svc.dyn_bos.iter().find(|b| b.id == *id) else { continue };
         let mut l = Line::new();
-        l.s("gpudev: scene ").dec(svc.scenes as u64).s(", guest bo ").dec(*id as u64).s(" pixels");
-        pixels(adev, &mut l, b, o);
+        l.s("gpudev: scene ").dec(svc.scenes as u64).s(", guest bo ").dec(*id as u64);
+        match &b.linear {
+            Some(g) => {
+                l.s(" imported pixels");
+                linear_pixels(adev, &mut l, b, g);
+            }
+            None => {
+                l.s(" pixels");
+                pixels(adev, &mut l, b, o);
+            }
+        }
         l.say();
     }
 }
 
-/// One line per buffer added: how it is reached, the guest object's tiling
-/// and, for VRAM, the pixels at its centre and its first row.
+/// The layout of guest object `h` as radeonsi imports it, when it is tiled
+/// and the texture unit may read it: the frame starts the object, and the
+/// image and its DCC lie inside it. A linear frame, or one refused, is
+/// read as it lies.
+fn guest_frame(adev: &amdgpu_device, b: &bo, h: usize) -> Option<crate::import::radeon_surf> {
+    let ob = obj::bo(adev, h);
+    let (swizzle, _) = crate::import::ac_surface_apply_bo_metadata(ob.tiling_flags);
+    if swizzle == crate::import::ADDR_SW_LINEAR {
+        return None;
+    }
+    let md: Vec<u32> = ob.metadata.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
+    let r = if b.offset != 0 {
+        Err(crate::import::refusal::unmodelled("offset"))
+    } else {
+        crate::import::import(adev.device, b.width, b.height, ob.tiling_flags, &md)
+            .and_then(|s| crate::import::check(&s, obj::amdgpu_bo_size(adev, h)).map(|_| s))
+    };
+    let mut l = Line::new();
+    l.s("gpudev: bo ").dec(b.id as u64);
+    match r {
+        Ok(s) => {
+            l.s(" tiled, swizzle ").dec(s.swizzle_mode as u64).s(", ").dec(s.surf_pitch as u64).s("x")
+                .dec(s.surf_height as u64);
+            if crate::import::dcc_enabled(&s) {
+                l.s(", DCC at ").dec(s.meta_offset).s(" (").dec(s.meta_size as u64).s(" bytes, aligned ")
+                    .dec(s.pipe_aligned as u64).s(")");
+            }
+            l.s(": through the texture unit into a linear buffer").say();
+            Some(s)
+        }
+        Err(e) => {
+            l.s(" tiled, swizzle ").dec(swizzle as u64).s(", read as it lies: ").s(match e {
+                crate::import::refusal::unmodelled(w) => w,
+                crate::import::refusal::surface(_) => "addrlib refuses the layout",
+                crate::import::refusal::metadata => "metadata refused",
+                crate::import::refusal::bounds(w) => w,
+            });
+            if let crate::import::refusal::bounds(_) = e {
+                l.s(" past the object");
+            }
+            l.say();
+            None
+        }
+    }
+}
+
+/// A tiled guest frame in the compositor's VM: its whole object, which the
+/// descriptor reads from its start, and the linear buffer the scenes see.
+fn map_tiled(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo, surf: &crate::import::radeon_surf)
+             -> Result<(), i32> {
+    let h = b.handle.ok_or(-EINVAL)?;
+    map_vm(adev, c, b, &[(h, false, 0, obj::amdgpu_bo_size(adev, h))])?;
+    let pitch_px = b.width.next_multiple_of(64);
+    let bytes = pitch_px as u64 * 4 * b.height as u64;
+    let g = match compose::linear_new(adev, c, bytes) {
+        Ok(g) => g,
+        Err(e) => {
+            unmap_vm(adev, c, b);
+            return Err(e);
+        }
+    };
+    let desc = crate::import::descriptor(surf, b.width, b.height, b.node.unwrap().start);
+    b.import = Some(compose::frame_import { desc, dst: g.va, dst_pitch_px: pitch_px, width: b.width,
+                                            height: b.height });
+    b.linear = Some(g);
+    b.va = g.va;
+    b.pitch = pitch_px * 4;
+    b.size = bytes;
+    Ok(())
+}
+
+/// The lines for a buffer added: how it is reached and, for a guest object,
+/// its tiling, the pixels at its start and centre, and its UMD metadata.
 fn log_bo_add(adev: &amdgpu_device, id: u32, b: &bo, pages: &[u64], offsets: Option<&[u64]>, own: Option<usize>) {
     let mut l = Line::new();
     l.s("gpudev: bo ").dec(id as u64).s(" ").dec(b.width as u64).s("x").dec(b.height as u64).s(" pitch ")
@@ -493,20 +602,20 @@ fn log_bo_add(adev: &amdgpu_device, id: u32, b: &bo, pages: &[u64], offsets: Opt
             let ob = obj::bo(adev, h);
             let t = ob.tiling_flags;
             let field = |shift: u32, mask: u32| (t >> shift) & mask as u64;
-            l.s(": guest VRAM object of ").dec(obj::amdgpu_bo_size(adev, h) / PAGE).s(" pages, tiling 0x")
-                .hexw((t >> 32) as u32, 8).hexw(t as u32, 8).s(" (swizzle ")
+            l.s(": guest VRAM object of ").dec(obj::amdgpu_bo_size(adev, h) / PAGE).s(" pages").say();
+            let mut l = Line::new();
+            l.s("gpudev: bo ").dec(id as u64).s(" tiling 0x").hexw((t >> 32) as u32, 8).hexw(t as u32, 8).s(" (swizzle ")
                 .dec(field(AMDGPU_TILING_SWIZZLE_MODE_SHIFT, AMDGPU_TILING_SWIZZLE_MODE_MASK)).s(", dcc offset ")
                 .dec(field(AMDGPU_TILING_DCC_OFFSET_256B_SHIFT, AMDGPU_TILING_DCC_OFFSET_256B_MASK) * 256)
                 .s(", dcc pitch ").dec(field(AMDGPU_TILING_DCC_PITCH_MAX_SHIFT, AMDGPU_TILING_DCC_PITCH_MAX_MASK))
                 .s(", scanout ").dec(field(AMDGPU_TILING_SCANOUT_SHIFT, 1)).s("), metadata ")
-                .dec(ob.metadata.len() as u64).s(" bytes [");
-            for w in ob.metadata.chunks(4).take(12) {
-                let mut v = [0u8; 4];
-                v[..w.len()].copy_from_slice(w);
-                l.s(" ").hex(u32::from_le_bytes(v));
-            }
-            l.s(" ], pixels");
+                .dec(ob.metadata.len() as u64).s(" bytes").say();
+            let mut l = Line::new();
+            l.s("gpudev: bo ").dec(id as u64).s(" pixels");
             pixels(adev, &mut l, b, o);
+            l.say();
+            log_bo_metadata(id, &ob.metadata);
+            return;
         }
         (Some(_), None) => {
             l.s(": in the VRAM window but no guest object matches, as system pages");
@@ -516,6 +625,20 @@ fn log_bo_add(adev: &amdgpu_device, id: u32, b: &bo, pages: &[u64], offsets: Opt
         }
     }
     l.say();
+}
+
+/// The guest object's UMD metadata, eight words per line from word `i`.
+fn log_bo_metadata(id: u32, md: &[u8]) {
+    for (row, words) in md.chunks(32).enumerate() {
+        let mut l = Line::new();
+        l.s("gpudev: bo ").dec(id as u64).s(" metadata[").dec(row as u64 * 8).s("]");
+        for w in words.chunks(4) {
+            let mut v = [0u8; 4];
+            v[..w.len()].copy_from_slice(w);
+            l.s(" ").hex(u32::from_le_bytes(v));
+        }
+        l.say();
+    }
 }
 
 /// `OP_BO_REMOVE`: unmapped once no scene uses it, and released. A buffer
@@ -530,6 +653,9 @@ fn bo_remove(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(),
     let mut b = svc.dyn_bos.remove(i);
     if let Some(c) = svc.composer.as_mut() {
         unmap_vm(adev, c, &mut b);
+        if let Some(g) = b.linear.take() {
+            compose::linear_free(adev, c, g);
+        }
     }
     if let Some(h) = b.handle.take() {
         obj::amdgpu_bo_unpin(adev, h);
@@ -543,9 +669,10 @@ fn bo_remove(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(),
 fn run_scene(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32, bytes: u32) -> i32 {
     drain_scene(adev, svc);
     let bos = svc.scene_bos();
+    let imports = svc.imports();
     let Some(mut c) = svc.composer.take() else { return -EINVAL };
     let t0 = crate::linux::now_us();
-    let r = compose::submit_scene(adev, &mut c, &*svc, &bos, seq, target, bytes);
+    let r = compose::submit_scene(adev, &mut c, &*svc, &bos, &imports, seq, target, bytes);
     svc.composer = Some(c);
     match r {
         Ok(s) => {

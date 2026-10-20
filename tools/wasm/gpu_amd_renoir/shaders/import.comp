@@ -1,0 +1,37 @@
+#version 460
+// A guest's frame into a linear buffer of the compositor: the frame is
+// read through the texture unit, which resolves its tiling and DCC as
+// radeonsi laid them out, and each pixel is written back as the bytes it
+// had (B8G8R8A8, 8 bits per channel, exact through UNORM). A workgroup is
+// a row of WIDTH pixels. AMD only: the descriptor (import.rs) is Renoir's.
+
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(constant_id = 0) const uint WIDTH = 64u;
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D src;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words {
+    uint v[];
+};
+
+layout(push_constant, std430) uniform Params {
+    Words dst;
+    // Pixels per row of dst.
+    uint dst_pitch;
+    uint width;
+    uint height;
+} p;
+
+void main() {
+    uint x = gl_WorkGroupID.x * WIDTH + gl_LocalInvocationID.x;
+    uint y = gl_WorkGroupID.y;
+    if (x >= p.width || y >= p.height) {
+        return;
+    }
+    uvec4 c = uvec4(round(texelFetch(src, ivec2(x, y), 0) * 255.0));
+    p.dst.v[y * p.dst_pitch + x] = c.b | (c.g << 8) | (c.r << 16) | (c.a << 24);
+}

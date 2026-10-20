@@ -154,6 +154,21 @@ for blk in gfx sdma smu soc; do
         fi
     done
 done
+# A guest frame's import against radeonsi's steps through Mesa's common
+# code, under the drm-shim; then the bounds the module adds on top.
+python3 -I "$MOD/shaders/gen_shaders.py" --imgdesc "$B/imgdesc"
+rustc $RF "$HERE/import_check.rs" -o "$B/import_check"
+SHIM=$HOME/.cache/nopeekos/gpu-shaders/build-amd/src/amd/drm-shim/libamdgpu_noop_drm_shim.so
+word1=$(LD_PRELOAD=$SHIM AMDGPU_GPU_ID=renoir "$B/imgdesc" < /dev/null | sed -n 's/^device word1 \([0-9]*\).*/\1/p')
+python3 -I "$HERE/import_cases.py" $word1 > "$B/import.cases"
+LD_PRELOAD=$SHIM AMDGPU_GPU_ID=renoir "$B/imgdesc" < "$B/import.cases" 2>/dev/null | grep -v '^device' > "$B/import.linux"
+"$B/import_check" $(printf '%x' $((word1 & 0xffff))) < "$B/import.cases" > "$B/import.port"
+if diff -u "$B/import.linux" "$B/import.port" | head -30; cmp -s "$B/import.linux" "$B/import.port"; then
+    echo "import: port = Mesa ($(grep -c '^case desc' "$B/import.linux") descriptors)"
+else
+    fail=1
+fi
+"$B/import_check" $(printf '%x' $((word1 & 0xffff))) bounds || fail=1
 # The scene stream against RADV's recording, word for word.
 rustc $RF "$HERE/stream_check.rs" -o "$B/stream_check"
 "$B/stream_check" || fail=1

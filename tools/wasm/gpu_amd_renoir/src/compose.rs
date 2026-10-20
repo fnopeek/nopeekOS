@@ -5,9 +5,11 @@
 //! (radv_stream.rs). Not a Linux file.
 //!
 //! The compositor is a client like a Vulkan application: its buffers are
-//! GEM objects in its own VM, its programs and push constants live in
-//! RADV's 32-bit window (`ADDRESS32_HI`), and a scene is one submission of
-//! two IBs, the queue preamble and the command buffer.
+//! GEM objects in its own VM, its programs, push constants and descriptor
+//! sets live in RADV's 32-bit window (`ADDRESS32_HI`), and a scene is one
+//! submission of two IBs, the queue preamble and the command buffer. A
+//! scene that shows a tiled guest frame first runs import.comp over it
+//! into a linear buffer, which compose.comp then reads.
 
 use crate::amdgpu_cs::{self as cs, amdgpu_fpriv};
 use crate::amdgpu_device::amdgpu_device;
@@ -31,6 +33,7 @@ const PAGE: u64 = 4096;
 const HIGH32: u64 = (sg::ADDRESS32_HI as u64) << 32;
 const CODE_VA: u64 = HIGH32 + 0x0010_0000;
 const PUSH_VA: u64 = HIGH32 + 0x0020_0000;
+const SET_VA: u64 = HIGH32 + 0x0030_0000;
 const CODE_PAGES: u64 = 8;
 /// The compositor's other buffers and the kernel's, below the window.
 pub const DYN_START: u64 = 1 << 32;
@@ -47,6 +50,9 @@ const PLANE_BLOCKS: u32 = (PLANE_PAGES * PAGE / 4) as u32;
 pub const MAX_DISPATCHES: u32 = 256;
 const PUSH_SLOT: u64 = 128;
 const PUSH_PAGES: u64 = MAX_DISPATCHES as u64 * PUSH_SLOT / PAGE;
+/// Per dispatch one descriptor set, of the program's `set_bytes`.
+const SET_SLOT: u64 = 64;
+const SET_PAGES: u64 = MAX_DISPATCHES as u64 * SET_SLOT / PAGE;
 const IB_PAGES: u64 = 16;
 const PRE_PAGES: u64 = 1;
 
@@ -71,13 +77,14 @@ pub struct composer {
     pub mm: drm_mm,
     code: gem,
     push: gem,
+    sets: gem,
     pre: gem,
     ib: gem,
     scene: gem,
     bins: gem,
     planes: gem,
     tmp: gem,
-    code_off: [u64; 4],
+    code_off: [u64; 5],
     pre_dw: u32,
 }
 
@@ -163,10 +170,11 @@ pub fn composer_init(adev: &mut amdgpu_device) -> Result<composer, i32> {
     };
     let mut mm = drm_mm::init(DYN_START, DYN_END - DYN_START);
     let mut made: Vec<gem> = Vec::new();
-    let r = (|| -> Result<[gem; 8], i32> {
+    let r = (|| -> Result<[gem; 9], i32> {
         let specs = [
             (Some(CODE_VA), CODE_PAGES),
             (Some(PUSH_VA), PUSH_PAGES),
+            (Some(SET_VA), SET_PAGES),
             (None, PRE_PAGES),
             (None, IB_PAGES),
             (None, SCENE_PAGES),
@@ -178,7 +186,7 @@ pub fn composer_init(adev: &mut amdgpu_device) -> Result<composer, i32> {
             let g = gem_new(adev, &fpriv, &mut mm, fixed, pages * PAGE)?;
             made.push(g);
         }
-        Ok([made[0], made[1], made[2], made[3], made[4], made[5], made[6], made[7]])
+        Ok([made[0], made[1], made[2], made[3], made[4], made[5], made[6], made[7], made[8]])
     })();
     let g = match r {
         Ok(g) => g,
@@ -196,13 +204,14 @@ pub fn composer_init(adev: &mut amdgpu_device) -> Result<composer, i32> {
         mm,
         code: g[0],
         push: g[1],
-        pre: g[2],
-        ib: g[3],
-        scene: g[4],
-        bins: g[5],
-        planes: g[6],
-        tmp: g[7],
-        code_off: [0; 4],
+        sets: g[2],
+        pre: g[3],
+        ib: g[4],
+        scene: g[5],
+        bins: g[6],
+        planes: g[7],
+        tmp: g[8],
+        code_off: [0; 5],
         pre_dw: 0,
     };
     // The programs, each where a program address may point (256 bytes).
@@ -227,7 +236,7 @@ pub fn composer_init(adev: &mut amdgpu_device) -> Result<composer, i32> {
 
 /// The client closed, its buffers with it.
 pub fn composer_fini(adev: &mut amdgpu_device, mut c: composer) {
-    for g in [c.code, c.push, c.pre, c.ib, c.scene, c.bins, c.planes, c.tmp] {
+    for g in [c.code, c.push, c.sets, c.pre, c.ib, c.scene, c.bins, c.planes, c.tmp] {
         gem_free(adev, &c.fpriv, &mut c.mm, g);
     }
     cs::amdgpu_driver_postclose_kms(adev, c.fpriv);
@@ -247,12 +256,14 @@ impl batch {
 }
 
 /// One dispatch of program `k` over `grid` workgroups with `push` as its
-/// push constants; it starts after the dispatch before it has written
+/// push constants and, for a program that reads an image, `image` as the
+/// image's descriptor; it starts after the dispatch before it has written
 /// everything (the barrier of its template).
-pub fn dispatch(adev: &mut amdgpu_device, c: &composer, b: &mut batch, k: usize, push: &[u8], grid: [u32; 3])
-                -> Result<(), i32> {
+pub fn dispatch(adev: &mut amdgpu_device, c: &composer, b: &mut batch, k: usize, push: &[u8],
+                image: Option<&[u32; 8]>, grid: [u32; 3]) -> Result<(), i32> {
     let kernel = rs::KERNELS[k];
-    if push.len() as u32 > kernel.push_bytes || kernel.push_bytes as u64 > PUSH_SLOT || push.len() % 4 != 0 {
+    if push.len() as u32 > kernel.push_bytes || kernel.push_bytes as u64 > PUSH_SLOT || push.len() % 4 != 0
+        || kernel.set_bytes as u64 > SET_SLOT || kernel.set_sgpr.is_some() != image.is_some() {
         return Err(-EINVAL);
     }
     if b.dispatches == MAX_DISPATCHES {
@@ -270,11 +281,20 @@ pub fn dispatch(adev: &mut amdgpu_device, c: &composer, b: &mut batch, k: usize,
     if !write_words(adev, &c.push, slot, words) {
         return Err(-ENOMEM);
     }
+    let set = b.dispatches as u64 * SET_SLOT;
+    if let Some(desc) = image {
+        let mut words = [0u32; (SET_SLOT / 4) as usize];
+        words[..8].copy_from_slice(desc);
+        if !write_words(adev, &c.sets, set, &words[..(kernel.set_bytes / 4) as usize]) {
+            return Err(-ENOMEM);
+        }
+    }
     let d = rs::dispatch {
         kernel,
         code_va: CODE_VA + c.code_off[k],
         push: words,
         push_ptr: (PUSH_VA + slot) as u32,
+        set_ptr: (SET_VA + set) as u32,
         grid,
     };
     rs::emit(&mut b.cmd, rs::template_for(k, b.prev), &d);
@@ -302,8 +322,8 @@ pub fn submit(adev: &mut amdgpu_device, c: &mut composer, mut b: batch, bos: &[u
         ring: 0,
     };
     let ibs = [chunk(c.pre.va, c.pre_dw), chunk(c.ib.va, b.cmd.len() as u32)];
-    let mut list: Vec<usize> = [c.code, c.push, c.pre, c.ib, c.scene, c.bins, c.planes, c.tmp].iter().map(|g| g.bo)
-        .collect();
+    let mut list: Vec<usize> =
+        [c.code, c.push, c.sets, c.pre, c.ib, c.scene, c.bins, c.planes, c.tmp].iter().map(|g| g.bo).collect();
     for &h in bos {
         if !list.contains(&h) {
             list.push(h);
@@ -334,7 +354,7 @@ pub fn self_test(adev: &mut amdgpu_device, c: &mut composer) -> bool {
         put(sg::FILL_PATTERN_PUSH_PITCH_PX, &W.to_le_bytes());
         put(sg::FILL_PATTERN_PUSH_SEED, &SEED.to_le_bytes());
         let mut b = batch::new();
-        dispatch(adev, c, &mut b, rs::K_FILL_PATTERN, &push, [W.div_ceil(sg::WIDTH), H, 1])?;
+        dispatch(adev, c, &mut b, rs::K_FILL_PATTERN, &push, None, [W.div_ceil(sg::WIDTH), H, 1])?;
         let t0 = crate::linux::now_us();
         let f = submit(adev, c, b, &[dst.bo])?;
         if dma_fence::dma_fence_wait_timeout(adev, &f, 80_000) == 0 {
@@ -400,13 +420,51 @@ impl gpu_scene::scene::scene_buffer for scene_mem<'_> {
     }
 }
 
+/// A tiled guest frame a scene may show: the descriptor of the frame
+/// (import.rs) and the linear buffer import.comp writes it into, which is
+/// the buffer the scene names.
+#[derive(Clone, Copy)]
+pub struct frame_import {
+    pub desc: [u32; 8],
+    pub dst: u64,
+    pub dst_pitch_px: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A linear buffer of the compositor for a guest frame.
+pub fn linear_new(adev: &mut amdgpu_device, c: &mut composer, bytes: u64) -> Result<gem, i32> {
+    gem_new(adev, &c.fpriv, &mut c.mm, None, bytes.next_multiple_of(PAGE))
+}
+
+pub fn linear_free(adev: &mut amdgpu_device, c: &mut composer, g: gem) {
+    gem_free(adev, &c.fpriv, &mut c.mm, g);
+}
+
+/// The import of `f`: a workgroup per `WIDTH` pixels of a row.
+fn import_frame(adev: &mut amdgpu_device, c: &composer, b: &mut batch, f: &frame_import) -> Result<(), i32> {
+    let mut push = [0u8; 20];
+    put(&mut push, sg::IMPORT_PUSH_DST, &f.dst.to_le_bytes());
+    put(&mut push, sg::IMPORT_PUSH_DST_PITCH, &f.dst_pitch_px.to_le_bytes());
+    put(&mut push, sg::IMPORT_PUSH_WIDTH, &f.width.to_le_bytes());
+    put(&mut push, sg::IMPORT_PUSH_HEIGHT, &f.height.to_le_bytes());
+    dispatch(adev, c, b, rs::K_IMPORT, &push[..sg::IMPORT.push_bytes as usize], Some(&f.desc),
+             [f.width.div_ceil(sg::WIDTH), f.height, 1])
+}
+
 /// Runs the scene of job `seq` (`bytes` of payload) into `target_id`;
-/// `bos` are the kernel's buffers the scene may name.
+/// `bos` are the kernel's buffers the scene may name, `imports` the tiled
+/// guest frames among them, imported first.
 pub fn submit_scene(adev: &mut amdgpu_device, c: &mut composer, bufs: &dyn gpu_scene::scene::buffers, bos: &[usize],
-                    seq: u32, target_id: u32, bytes: u32) -> Result<scene_inflight, i32> {
+                    imports: &[frame_import], seq: u32, target_id: u32, bytes: u32) -> Result<scene_inflight, i32> {
     let ck = gpu_scene::scene::check_scene(&job_payload(seq), bytes, bufs, &mut scene_mem(adev, c.scene), target_id)?;
     let mut log = dispatch_log::default();
-    let mut s = gpu_sink { adev, c, b: batch::new(), target: ck.target, width: ck.width, height: ck.height,
+    let mut b = batch::new();
+    for f in imports {
+        import_frame(adev, c, &mut b, f)?;
+        log.push(rs::K_IMPORT, &rect { x: 0, y: 0, w: f.width, h: f.height }, 0);
+    }
+    let mut s = gpu_sink { adev, c, b, target: ck.target, width: ck.width, height: ck.height,
                            radius: ck.radius, log: &mut log };
     let lim = plan::limits { bins_words: BINS_WORDS, plane_blocks: PLANE_BLOCKS };
     plan::plan(&mut s, &lim, &ck.screen, &ck.damage, &ck.shapes, ck.radius)?;
@@ -486,6 +544,7 @@ impl dispatch_log {
                 rs::K_COMPOSE => "compose",
                 rs::K_BLUR_DOWN => "blur_down",
                 rs::K_BLUR_BOX => "blur_box",
+                rs::K_IMPORT => "import",
                 _ => "?",
             }).s(" ").dec(a.w as u64).s("x").dec(a.h as u64).s("+").dec(a.x as u64).s("+").dec(a.y as u64);
             if self.kernel[i] as usize == rs::K_COMPOSE {
@@ -548,7 +607,7 @@ impl plan::sink for gpu_sink<'_> {
         put(&mut push, sg::COMPOSE_PUSH_BY0, &a.by0.to_le_bytes());
         put(&mut push, sg::COMPOSE_PUSH_BSW, &a.bsw.to_le_bytes());
         put(&mut push, sg::COMPOSE_PUSH_BSH, &a.bsh.to_le_bytes());
-        dispatch(self.adev, self.c, &mut self.b, rs::K_COMPOSE, &push[..sg::COMPOSE.push_bytes as usize], grid)?;
+        dispatch(self.adev, self.c, &mut self.b, rs::K_COMPOSE, &push[..sg::COMPOSE.push_bytes as usize], None, grid)?;
         self.log.push(rs::K_COMPOSE, area, t.listed);
         Ok(())
     }
@@ -566,7 +625,7 @@ impl plan::sink for gpu_sink<'_> {
         put(&mut push, sg::BLUR_DOWN_PUSH_BY0, &a.by0.to_le_bytes());
         put(&mut push, sg::BLUR_DOWN_PUSH_SW, &a.sw.to_le_bytes());
         put(&mut push, sg::BLUR_DOWN_PUSH_SH, &a.sh.to_le_bytes());
-        dispatch(self.adev, self.c, &mut self.b, rs::K_BLUR_DOWN, &push[..sg::BLUR_DOWN.push_bytes as usize], grid)?;
+        dispatch(self.adev, self.c, &mut self.b, rs::K_BLUR_DOWN, &push[..sg::BLUR_DOWN.push_bytes as usize], None, grid)?;
         self.log.push(rs::K_BLUR_DOWN, &rect { x: a.bx0, y: a.by0, w: a.sw, h: a.sh }, 0);
         Ok(())
     }
@@ -583,7 +642,7 @@ impl plan::sink for gpu_sink<'_> {
         put(&mut push, sg::BLUR_BOX_PUSH_STRIDE, &a.stride.to_le_bytes());
         put(&mut push, sg::BLUR_BOX_PUSH_STEP, &a.step.to_le_bytes());
         put(&mut push, sg::BLUR_BOX_PUSH_RADIUS, &a.radius.to_le_bytes());
-        dispatch(self.adev, self.c, &mut self.b, rs::K_BLUR_BOX, &push[..sg::BLUR_BOX.push_bytes as usize], grid)?;
+        dispatch(self.adev, self.c, &mut self.b, rs::K_BLUR_BOX, &push[..sg::BLUR_BOX.push_bytes as usize], None, grid)?;
         self.log.push(rs::K_BLUR_BOX, &rect { x: 0, y: 0, w: len, h: lines }, 0);
         Ok(())
     }

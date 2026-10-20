@@ -41,6 +41,39 @@ fn compare(what: &str, mine: &[u32], radv: &[u32]) -> bool {
     false
 }
 
+/// The program that reads an image: each of its templates filled with
+/// RADV's own values gives back RADV's words, the set's address included.
+fn image_templates() -> bool {
+    let kernel = &sg::IMPORT;
+    let Some(n) = kernel.set_sgpr else { return false };
+    let push: Vec<u32> = (0..kernel.push_bytes / 4).map(|i| sg::PUSH_TAG | i).collect();
+    let mut ok = true;
+    for (what, prev) in [("first", None), ("again", Some(rs::K_IMPORT)), ("after another", Some(usize::MAX))] {
+        let tpl = rs::template_for(rs::K_IMPORT, prev);
+        let hole = match n {
+            2 => sg::Hole::UserData2,
+            3 => sg::Hole::UserData3,
+            _ => panic!("set pointer in user SGPR {n}"),
+        };
+        let set = tpl.iter().find(|e| e.1 == hole).map(|e| e.0).expect("set pointer");
+        let pgm = tpl.iter().find(|e| e.1 == sg::Hole::PgmLo).map_or(0, |e| e.0);
+        let lo = tpl.iter().find(|e| e.1 == sg::Hole::PrefetchLo).map_or(pgm << 8, |e| e.0);
+        let d = rs::dispatch {
+            kernel,
+            code_va: (sg::ADDRESS32_HI as u64) << 32 | lo as u64,
+            push: &push,
+            push_ptr: 0,
+            set_ptr: set,
+            grid: sg::RADV_GRID,
+        };
+        let mut mine = Vec::new();
+        rs::emit(&mut mine, tpl, &d);
+        let radv: Vec<u32> = tpl.iter().map(|e| e.0).collect();
+        ok &= compare(&format!("import, {what}"), &mine, &radv);
+    }
+    ok
+}
+
 fn main() {
     let mut ok = true;
     let mut pre = Vec::new();
@@ -71,6 +104,7 @@ fn main() {
             code_va: sg::RADV_RECORDED_SHADER_VA,
             push: &push,
             push_ptr: recorded_ptr(tpl, kernel),
+            set_ptr: 0,
             grid: sg::RADV_GRID,
         };
         rs::emit(&mut cmd, tpl, &d);
@@ -78,5 +112,6 @@ fn main() {
     }
     rs::end(&mut cmd);
     ok &= compare("command buffer", &cmd, sg::RADV_RECORDED_CMDBUF);
+    ok &= image_templates();
     std::process::exit(if ok { 0 } else { 1 });
 }

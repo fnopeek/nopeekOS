@@ -47,6 +47,8 @@ mod gfx_v9_0;
 mod gmc_v9_0;
 #[path = "../src/gpudev.rs"]
 mod gpudev;
+#[path = "../src/import.rs"]
+mod import;
 #[path = "../src/jpeg_v2_0.rs"]
 mod jpeg_v2_0;
 #[path = "../src/sdma_v4_0.rs"]
