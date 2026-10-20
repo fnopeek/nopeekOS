@@ -30,7 +30,6 @@ use alloc::string::String;
 pub const PERF_LOG: bool = false;
 
 use crate::framebuffer::{self};
-use crate::gui::font;
 
 #[allow(unused_imports)]
 pub use compositor::Compositor;
@@ -55,9 +54,8 @@ pub fn init() {
         (info.width, info.height)
     }).unwrap_or((1920, 1080));
 
-    let scale = font::scale_for(screen_w);
     widgets::scale::init(screen_w);
-    let comp = Compositor::new(screen_w, screen_h, scale);
+    let comp = Compositor::new(screen_w, screen_h);
 
     // Initialize lock-free cursor position (centered, screen bounds for clamping)
     cursor::init_atomic(screen_w, screen_h);

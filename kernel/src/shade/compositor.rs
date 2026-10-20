@@ -231,8 +231,6 @@ pub struct Compositor {
     /// Screen dimensions.
     pub screen_w: u32,
     pub screen_h: u32,
-    /// Pixel scale (1x or 2x for 4K).
-    pub scale: u32,
     /// All managed windows.
     pub windows: Vec<Window>,
     /// Z-order: front-to-back window IDs. First = topmost.
@@ -299,25 +297,16 @@ pub struct Compositor {
 
 #[allow(dead_code)]
 impl Compositor {
-    pub fn new(screen_w: u32, screen_h: u32, scale: u32) -> Self {
-        let gaps = crate::config::get("shade.gaps")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(8) * scale;
-        let border = crate::config::get("shade.border")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(1) * scale;
+    pub fn new(screen_w: u32, screen_h: u32) -> Self {
+        let (gaps, border, rounding) = chrome_lengths();
         let border_active = crate::config::get("shade.border_active")
             .and_then(|s| parse_hex_color(&s));
         let border_inactive = crate::config::get("shade.border_inactive")
             .and_then(|s| parse_hex_color(&s));
-        let rounding = crate::config::get("shade.rounding")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(10) * scale;
 
         Compositor {
             screen_w,
             screen_h,
-            scale,
             windows: Vec::new(),
             z_order: Vec::new(),
             next_id: 1,
@@ -393,8 +382,8 @@ impl Compositor {
     fn glow_width(&self) -> u32 {
         let w = crate::config::get("shade.glow")
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(6) * self.scale;
-        w.min(self.gaps)
+            .unwrap_or(6);
+        crate::shade::widgets::scale::len(w).min(self.gaps)
     }
 
     /// Halo for this window right now. Unfocused tiles keep the `band` (they
@@ -813,6 +802,7 @@ impl Compositor {
     /// them again at the new size.
     pub fn rescale_app_geometry(&mut self, old: u32, new: u32) {
         if old == 0 || old == new { return; }
+        (self.gaps, self.border, self.rounding) = chrome_lengths();
         let f = |v: u32| ((v as u64 * new as u64 + old as u64 / 2) / old as u64) as u32;
         let popups: alloc::vec::Vec<WindowId> = self.windows.iter()
             .filter(|w| w.popup_of.is_some()).map(|w| w.id).collect();
@@ -927,9 +917,7 @@ impl Compositor {
     fn set_bottom_panel(&mut self, id: WindowId, h: u32) -> bool {
         let screen_w = self.screen_w;
         let screen_h = self.screen_h;
-        let margin = crate::config::get("shade.bar_margin")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(6);
+        let margin = bar_margin();
         let pill_h = h.max(22);
         let active_ws = self.active_workspace;
 
@@ -968,9 +956,7 @@ impl Compositor {
     /// never focused, rendered with the panel blit. `w` is advisory.
     fn set_bar_panel(&mut self, id: WindowId, _w: u32, h: u32) -> bool {
         let screen_w = self.screen_w;
-        let margin = crate::config::get("shade.bar_margin")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(6);
+        let margin = bar_margin();
         let pill_h = h.max(22); // floor so a too-small report still fits content
         let active_ws = self.active_workspace;
 
@@ -1053,7 +1039,7 @@ impl Compositor {
         };
 
         if found {
-            let gap = DOCK_BOTTOM_GAP * self.scale.max(1);
+            let gap = crate::shade::widgets::scale::len(DOCK_BOTTOM_GAP);
             let baseline = self.dock_baseline() as i32;
             // On an in-place resize, keep the existing visibility so a
             // popover-open expand doesn't flicker the dock through a hide
@@ -1304,7 +1290,7 @@ impl Compositor {
             (dock.id, dock.offset, slide, dock.offset < slide as u32)
         };
 
-        let hh = DOCK_HANDLE_H * self.scale.max(1);
+        let hh = crate::shade::widgets::scale::len(DOCK_HANDLE_H);
         let base = self.dock_baseline();
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
             // Where it was, and the resting handle, are repainted too.
@@ -2175,7 +2161,7 @@ impl Compositor {
         let dock = self.dock.as_ref()?;
         if dock.offset < dock.thickness + dock.gap { return None; }
         let win = self.windows.iter().find(|w| w.id == dock.id)?;
-        let hh = DOCK_HANDLE_H * self.scale.max(1);
+        let hh = crate::shade::widgets::scale::len(DOCK_HANDLE_H);
         let tray = crate::shade::widgets::palette::resolve_glass(crate::shade::widgets::abi::Token::SurfaceElevated);
         Some(Item::Fill {
             rect: Rect::new(win.x, self.dock_baseline().saturating_sub(hh), win.width, hh),
@@ -3124,6 +3110,25 @@ fn parse_hex_color(s: &str) -> Option<u32> {
     u32::from_str_radix(s, 16).ok()
 }
 
+
+/// Gaps between tiles, window border and corner radius in physical px:
+/// `shade.gaps` / `shade.border` / `shade.rounding` (logical px) times the
+/// UI scale.
+fn chrome_lengths() -> (u32, u32, u32) {
+    let get = |key: &str, default: u32| crate::config::get(key)
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(default);
+    use crate::shade::widgets::scale::len;
+    (len(get("shade.gaps", 8)), len(get("shade.border", 1)), len(get("shade.rounding", 10)))
+}
+
+/// Gap between a strut panel and the screen edge, physical px.
+fn bar_margin() -> u32 {
+    let m = crate::config::get("shade.bar_margin")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(6);
+    crate::shade::widgets::scale::len(m)
+}
 
 /// Inset of a terminal's text from its content edge, physical px.
 fn term_pad() -> u32 { crate::shade::widgets::scale::len(6) }

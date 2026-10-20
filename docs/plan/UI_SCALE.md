@@ -14,7 +14,11 @@ it at the exact size asked for (`gui/icon_raster.rs`, nonzero, 16 sample
 rows, exact horizontal coverage) and caches it; the bitmaps stay as the
 fallback. Mean difference to resvg 1.04/255; at 16 px the outline is ~17 %
 darker because tiny-skia draws 1 px strokes as hairlines. The window
-close X follows the factor (part of step 3). Steps 3 (rest) and 5 open.
+close X follows the factor (part of step 3). Step 3 built (kernel 0.659.0):
+`shade.gaps` / `border` / `rounding` / `glow` / `bar_margin` and the dock
+gap and handle are logical px times the factor, recomputed on
+`set shade.scale`; the integer `Compositor::scale` is gone. Step 5 (beak)
+open.
 
 ## Why
 

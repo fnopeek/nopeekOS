@@ -1412,7 +1412,9 @@ pub fn intent_shade(args: &str) {
             if crate::shade::is_active() {
                 crate::shade::with_compositor(|comp| {
                     kprintln!("  shade: active");
-                    kprintln!("  screen: {}x{} scale:{}x", comp.screen_w, comp.screen_h, comp.scale);
+                    let f = crate::shade::widgets::scale::get();
+                    kprintln!("  screen: {}x{} scale: {}.{:02}", comp.screen_w, comp.screen_h,
+                        f / 120, f % 120 * 100 / 120);
                     kprintln!("  windows: {}", comp.window_count());
                     kprintln!("  workspace: {}/4", comp.active_workspace + 1);
                     kprintln!("  gaps: {}px  border: {}px", comp.gaps, comp.border);
