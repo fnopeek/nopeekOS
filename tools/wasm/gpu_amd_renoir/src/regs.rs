@@ -3239,6 +3239,12 @@ pub const SIZEOF_Watermarks_t: u32 = 0x7c;
 pub const SIZEOF_DpmClocks_t: u32 = 0x148;
 /// The value of `sizeof(SmuMetrics_t)` in ../pm/swsmu/smu12/renoir_ppt.c
 pub const SIZEOF_SmuMetrics_t: u32 = 0x94;
+/// The value of `offsetof(SmuMetrics_t, ClockFrequency)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const SMU_METRICS_CLOCK_FREQUENCY: u32 = 0x0;
+/// ?
+pub const CLOCK_GFXCLK: u32 = 0x11;
+/// include/kgd_pp_interface.h:135
+pub const AMDGPU_PP_SENSOR_GFX_SCLK: u32 = 0x0;
 /// The value of `sizeof(struct gpu_metrics_v2_2)` in ../pm/swsmu/smu12/renoir_ppt.c
 pub const SIZEOF_gpu_metrics_v2_2: u32 = 0x80;
 /// The value of `offsetof(struct atom_master_list_of_data_tables_v2_1, firmwareinfo) / sizeof(uint16_t)` in ../pm/swsmu/smu12/smu_v12_0.c

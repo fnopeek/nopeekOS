@@ -1618,6 +1618,9 @@ AMD_DPM_FORCED_LEVEL_AUTO @ ../pm/swsmu/amdgpu_smu.c
 SIZEOF_Watermarks_t = sizeof(Watermarks_t) @ ../pm/swsmu/smu12/renoir_ppt.c
 SIZEOF_DpmClocks_t = sizeof(DpmClocks_t) @ ../pm/swsmu/smu12/renoir_ppt.c
 SIZEOF_SmuMetrics_t = sizeof(SmuMetrics_t) @ ../pm/swsmu/smu12/renoir_ppt.c
+SMU_METRICS_CLOCK_FREQUENCY = offsetof(SmuMetrics_t, ClockFrequency) @ ../pm/swsmu/smu12/renoir_ppt.c
+CLOCK_GFXCLK @ ../pm/swsmu/smu12/renoir_ppt.c
+AMDGPU_PP_SENSOR_GFX_SCLK @ ../pm/swsmu/amdgpu_smu.c
 SIZEOF_gpu_metrics_v2_2 = sizeof(struct gpu_metrics_v2_2) @ ../pm/swsmu/smu12/renoir_ppt.c
 IDX_firmwareinfo_v2_1 = offsetof(struct atom_master_list_of_data_tables_v2_1, firmwareinfo) / sizeof(uint16_t) @ ../pm/swsmu/smu12/smu_v12_0.c
 ATH_FORMAT_REVISION = offsetof(struct atom_common_table_header, format_revision) @ ../pm/swsmu/smu12/smu_v12_0.c

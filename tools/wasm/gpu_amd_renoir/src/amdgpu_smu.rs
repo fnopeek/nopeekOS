@@ -1067,6 +1067,47 @@ pub fn amdgpu_dpm_set_powergating_by_smu(adev: &mut amdgpu_device, block_type: u
     r
 }
 
+/// `smu_cmn_get_metrics_table` into `metrics_table`, at most once a
+/// millisecond.
+fn smu_cmn_get_metrics_table(adev: &mut amdgpu_device, bypass_cache: bool) -> i32 {
+    let t = &adev.smu.smu_table;
+    let now = crate::linux::now_us();
+    if bypass_cache || t.metrics_time == 0 || now > t.metrics_time + 1000 {
+        match smu_cmn_update_table_smu2drv(adev, SMU_TABLE_SMU_METRICS, 0) {
+            Ok(m) => adev.smu.smu_table.metrics_table = m,
+            Err(r) => {
+                Line::new().s("Failed to export SMU metrics table!").say();
+                return r;
+            }
+        }
+        adev.smu.smu_table.metrics_time = now;
+    }
+    0
+}
+
+/// `renoir_get_smu_metrics_data` for METRICS_AVERAGE_GFXCLK, in MHz.
+fn renoir_get_smu_metrics_gfxclk(adev: &mut amdgpu_device, value: &mut u32) -> i32 {
+    let r = smu_cmn_get_metrics_table(adev, false);
+    if r != 0 {
+        return r;
+    }
+    let at = (SMU_METRICS_CLOCK_FREQUENCY + CLOCK_GFXCLK * 2) as usize;
+    let m = &adev.smu.smu_table.metrics_table;
+    *value = u16::from_le_bytes([m[at], m[at + 1]]) as u32;
+    0
+}
+
+/// `amdgpu_dpm_read_sensor` → `smu_read_sensor` → `renoir_read_sensor`
+/// for AMDGPU_PP_SENSOR_GFX_SCLK: the average GFX clock in 10 kHz.
+pub fn amdgpu_dpm_read_sensor_gfx_sclk(adev: &mut amdgpu_device, value: &mut u32) -> i32 {
+    if !adev.smu.pm_enabled || !adev.pm.dpm_enabled {
+        return -95;
+    }
+    let r = renoir_get_smu_metrics_gfxclk(adev, value);
+    *value *= 100;
+    r
+}
+
 /// `smu_v12_0_get_gfxoff_status`.
 fn smu_v12_0_get_gfxoff_status(adev: &amdgpu_device) -> u32 {
     let reg = crate::nbio_v7_0::rreg32_soc15(adev, SMUIO_HWIP, 0, SMUIO_mmSMUIO_GFX_MISC_CNTL_BASE_IDX,

@@ -445,13 +445,19 @@ fn poll_scene(adev: &mut amdgpu_device, svc: &mut service) -> bool {
     let (seq, target, t0, _) = svc.scene.take().unwrap();
     svc.scenes += 1;
     match &r {
-        Ok(rep) if svc.scenes <= SCENES_LOGGED => {
-            Line::new().s("gpudev: scene ").dec(svc.scenes as u64).s(", ").dec(rep.items as u64).s(" items, ")
-                .dec(rep.dispatches as u64).s(" dispatches into bo ").dec(target as u64).s(": ")
-                .dec(crate::linux::now_us() - t0).s(" us, of which the GPU ").dec(rep.gpu_us).s(" us").dbg();
-            if crate::linux::debug_enabled() {
-                rep.log.say();
+        Ok(rep) if svc.scenes <= SCENES_LOGGED && crate::linux::debug_enabled() => {
+            let us = crate::linux::now_us() - t0;
+            let mut sclk = 0;
+            let clk = crate::amdgpu_smu::amdgpu_dpm_read_sensor_gfx_sclk(adev, &mut sclk);
+            let mut l = Line::new();
+            l.s("gpudev: scene ").dec(svc.scenes as u64).s(", ").dec(rep.items as u64).s(" items, ")
+                .dec(rep.dispatches as u64).s(" dispatches into bo ").dec(target as u64).s(": ").dec(us)
+                .s(" us, of which the GPU ").dec(rep.gpu_us).s(" us");
+            if clk == 0 {
+                l.s(" at ").dec((sclk / 100) as u64).s(" MHz");
             }
+            l.say();
+            rep.log.say();
         }
         Err(e) => {
             Line::new().s("gpudev: scene into bo ").dec(target as u64).s(" failed (").dec((-*e) as u64).s(")").say();
