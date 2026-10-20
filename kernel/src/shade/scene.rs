@@ -145,8 +145,12 @@ pub struct InPlace {
     pub height: u32,
 }
 
-/// Damage that touches a panel covers the panel and a margin around it:
-/// its glass blurs what is beneath, which has to be painted there first.
+/// Damage that touches a panel adds the panel and a margin around it: its
+/// glass blurs what is beneath, which has to be painted there first.
+///
+/// Added as a rectangle of its own, not merged into the damage it touched:
+/// the bounding box of a tile and a panel along the screen edge is nearly
+/// the whole screen.
 pub fn expand_damage(scene: &Scene, damage: &mut Vec<Rect>, screen: Rect) {
     let margin = background::blur_margin();
     loop {
@@ -154,11 +158,12 @@ pub fn expand_damage(scene: &Scene, damage: &mut Vec<Rect>, screen: Rect) {
         for item in &scene.items {
             let Item::Panel { dst, .. } = item else { continue };
             let need = dst.grow(margin).intersect(&screen);
-            for d in damage.iter_mut() {
-                if !d.intersect(dst).is_empty() {
-                    let u = d.union(&need);
-                    if u != *d { *d = u; grew = true; }
-                }
+            if need.is_empty() { continue; }
+            let touched = damage.iter().any(|d| !d.intersect(dst).is_empty());
+            let covered = damage.iter().any(|d| d.union(&need) == *d);
+            if touched && !covered {
+                damage.push(need);
+                grew = true;
             }
         }
         if !grew { break; }
