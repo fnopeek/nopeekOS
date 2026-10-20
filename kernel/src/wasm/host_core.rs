@@ -4522,6 +4522,16 @@ pub(crate) fn npk_gpudev_stats(mem: &mut [u8], ctx: &mut HostState, ptr: i32, le
     crate::gpu::gpudev::stats(dev, words)
 }
 
+/// `npk_gpudev_vram(base, size) -> 0 | -1`: the window through which the
+/// CPU reaches all of the card's VRAM, before `npk_gpudev_ready`.
+pub(crate) fn npk_gpudev_vram(ctx: &mut HostState, base: i64, size: i64) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if base <= 0 || size <= 0 {
+        return -1;
+    }
+    crate::gpu::gpudev::set_vram_window(dev, base as u64, size as u64)
+}
+
 /// `npk_gpudev_ring(client, ring, submitted, completed) -> 0 | -1`.
 pub(crate) fn npk_gpudev_ring(ctx: &mut HostState, client: i32, ring: i32, submitted: i64, completed: i64) -> i32 {
     let Some(dev) = gpudev_device(ctx) else { return -1 };

@@ -111,6 +111,15 @@ fn main() {
     let pstate = ccmd(9, 15, &[1, AMDGPU_CTX_OP_SET_STABLE_PSTATE, AMDGPU_CTX_STABLE_PSTATE_PEAK, 0]);
     let pstate_get = ccmd(9, 16, &[1, AMDGPU_CTX_OP_GET_STABLE_PSTATE, 0, 0]);
     let free = ccmd(7, 17, &[1, 1]);
+    // radeonsi's first objects: 2 MB slabs, local to the VM, in VRAM with
+    // and without CPU access and in write-combined GTT.
+    let local = AMDGPU_GEM_CREATE_VM_ALWAYS_VALID | AMDGPU_GEM_CREATE_EXPLICIT_SYNC;
+    let mesa = [(20, AMDGPU_GEM_DOMAIN_VRAM, local | AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED),
+                (21, AMDGPU_GEM_DOMAIN_VRAM, local | AMDGPU_GEM_CREATE_NO_CPU_ACCESS),
+                (22, AMDGPU_GEM_DOMAIN_GTT, local | AMDGPU_GEM_CREATE_CPU_GTT_USWC),
+                (23, AMDGPU_GEM_DOMAIN_VRAM | AMDGPU_GEM_DOMAIN_GTT, local | AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED)];
+    let mesa_gem: Vec<Vec<u8>> = mesa.iter().map(|&(id, heap, flags)|
+        ccmd(2, 50 + id, &[id, 0, 2 << 20, 0, 4096, 0, heap, 0, flags, 0])).collect();
     let len = |v: &Vec<u8>| v.len() as u32;
     // An inner rectangle from shadow 1, then the lower half from shadow 2,
     // which is one span.
@@ -125,6 +134,14 @@ fn main() {
                                   (7, [100, len(&gem_vram), 0, 0, 0, 0], gem_vram.clone()),
                                   (8, [100, 1, 10, 0, 0, 0], vec![]),
                                   (8, [100, 2, 11, 0, 0, 0], vec![]),
+                                  (7, [100, len(&mesa_gem[0]), 0, 0, 0, 0], mesa_gem[0].clone()),
+                                  (8, [100, 20, 30, 0, 0, 0], vec![]),
+                                  (7, [100, len(&mesa_gem[1]), 0, 0, 0, 0], mesa_gem[1].clone()),
+                                  (8, [100, 21, 31, 0, 0, 0], vec![]),
+                                  (7, [100, len(&mesa_gem[2]), 0, 0, 0, 0], mesa_gem[2].clone()),
+                                  (8, [100, 22, 32, 0, 0, 0], vec![]),
+                                  (7, [100, len(&mesa_gem[3]), 0, 0, 0, 0], mesa_gem[3].clone()),
+                                  (8, [100, 23, 33, 0, 0, 0], vec![]),
                                   (7, [100, len(&va), 0, 0, 0, 0], va.clone()),
                                   (7, [100, len(&md), 0, 0, 0, 0], md.clone()),
                                   (7, [100, len(&query), 0, 0, 0, 0], query.clone()),

@@ -779,6 +779,12 @@ thread_local! {
     static IDLE_UNTIL: RefCell<Option<i64>> = const { RefCell::new(None) };
 }
 
+/// `npk_gpudev_vram`: the window onto all VRAM.
+pub fn gpudev_vram(base: i64, size: i64) -> i32 {
+    println!("gpudev vram window {:#x}+{} MB", base, size >> 20);
+    0
+}
+
 /// `npk_gpudev_ring`: a timeline's counts.
 pub fn gpudev_ring(client: i32, ring_idx: i32, submitted: i64, completed: i64) -> i32 {
     println!("gpudev ring: client {} timeline {} submitted {} completed {}", client, ring_idx, submitted, completed);

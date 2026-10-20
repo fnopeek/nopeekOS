@@ -99,6 +99,7 @@ unsafe extern "C" {
     fn npk_gpudev_tt_buffer(tt: i32) -> i32;
     fn npk_gpudev_tt_free(tt: i32) -> i32;
     fn npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
+    fn npk_gpudev_vram(base: i64, size: i64) -> i32;
     fn npk_gpudev_released(id: i32) -> i32;
     fn npk_gpudev_stats(ptr: i32, len: i32) -> i32;
     fn npk_netdev_submit_rx(buf_ptr: i32, len: i32) -> i32;
@@ -215,6 +216,8 @@ plain! {
     /// Fence counters of `ring` of native-context client `client`.
     fn gpudev_ring = npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
     fn gpudev_released = npk_gpudev_released(id: i32) -> i32;
+    /// The CPU's window onto all of the card's VRAM, before `gpudev_ready`.
+    fn gpudev_vram = npk_gpudev_vram(base: i64, size: i64) -> i32;
     fn gpudev_tt_alloc = npk_gpudev_tt_alloc(client: i32, pages: i32) -> i32;
     fn gpudev_tt_buffer = npk_gpudev_tt_buffer(tt: i32) -> i32;
     fn gpudev_tt_free = npk_gpudev_tt_free(tt: i32) -> i32;

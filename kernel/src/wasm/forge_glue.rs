@@ -1138,6 +1138,8 @@ host_imports! {
     ctx fn npk_gpudev_tt_free(tt: i32) -> i32;
     // npk_gpudev_capset(ptr, len) -> 0 / -1; the card's DRM capset, <= 1 KB
     mem fn npk_gpudev_capset(ptr: i32, len: i32) -> i32;
+    // npk_gpudev_vram(base, size) -> 0 / -1; the CPU's window onto all VRAM
+    ctx fn npk_gpudev_vram(base: i64, size: i64) -> i32;
     // npk_gpudev_ring(client, ring, submitted, completed) -> 0 / -1
     ctx fn npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
     // npk_gpudev_released(id) -> 0 / -1; a GEM object kept past its detach

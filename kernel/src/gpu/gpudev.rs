@@ -216,6 +216,10 @@ struct State {
     /// The capset the module reported (`npk_gpudev_capset`), for a card
     /// whose capset only its driver knows.
     capset: Option<Vec<u8>>,
+    /// Where the CPU reaches all of the card's VRAM (an APU's carve-out,
+    /// `npk_gpudev_vram`), checked against the firmware map and BAR0; else
+    /// only BAR0 reaches it.
+    vram_window: Option<(u64, u64)>,
 }
 
 /// A GEM object on its way out. The module completes a detach at once and
@@ -256,6 +260,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     owner_seq: BTreeMap::new(),
     held: BTreeMap::new(),
     capset: None,
+    vram_window: None,
 });
 
 /// Per client and ring: submissions the module took, and those done.
@@ -403,6 +408,7 @@ pub fn register(dev: PciAddr, version: i32) -> i32 {
     st.clients.clear();
     st.replies.clear();
     st.capset = None;
+    st.vram_window = None;
     mark_all_done();
     crate::kprintln!("[npk] gpudev: {:02x}:{:02x}.{} registered, {}x{} framebuffer, 2 shadow buffers",
         dev.bus, dev.device, dev.function, fb.width, fb.height);
@@ -681,6 +687,7 @@ pub fn module_gone(dev: PciAddr) {
         st.clients.clear();
         st.replies.clear();
         st.capset = None;
+        st.vram_window = None;
         st.detaching.clear();
         st.owner_seq.clear();
         for h in core::mem::take(&mut st.held).into_values() {
@@ -1300,6 +1307,85 @@ pub fn set_capset(dev: PciAddr, data: &[u8]) -> i32 {
     0
 }
 
+/// Pages of VRAM BAR0 and the window are compared at.
+const VRAM_ALIAS_SAMPLES: u64 = 16;
+
+/// Whether `[base, base + size)` holds the same bytes as BAR0 at sample
+/// pages across the BAR, at least one of them not all zero: then it is the
+/// memory behind the BAR, not merely a region of that size. Only read.
+fn vram_aliases_bar(base: u64, size: u64, bar: u64, bar_len: u64) -> bool {
+    let span = size.min(bar_len) / PAGE;
+    if span == 0 {
+        return false;
+    }
+    use crate::paging::PageFlags;
+    // The flags each side already has: the framebuffer driver's
+    // write-combined BAR, the module's uncached window.
+    let (bar_flags, window_flags) =
+        (PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::WRITE_COMBINE, PageFlags::PRESENT | PageFlags::WRITABLE
+            | PageFlags::NO_CACHE);
+    let mut seen_data = false;
+    for i in 0..VRAM_ALIAS_SAMPLES {
+        let off = (span * i / VRAM_ALIAS_SAMPLES) * PAGE;
+        let (Ok(a), Ok(b)) =
+            (crate::paging::ioremap(bar + off, PAGE, bar_flags), crate::paging::ioremap(base + off, PAGE, window_flags))
+        else {
+            return false;
+        };
+        // The desktop may draw between two reads: a page counts as equal
+        // when one of a few reads of both agrees.
+        let mut equal = false;
+        for _ in 0..3 {
+            let mut same = true;
+            let mut data = false;
+            for w in 0..(PAGE / 8) {
+                // SAFETY: both pages were just mapped uncached for reading;
+                // aligned 8-byte reads inside them.
+                let (x, y) = unsafe {
+                    (core::ptr::read_volatile((a + w * 8) as *const u64), core::ptr::read_volatile((b + w * 8) as *const u64))
+                };
+                same &= x == y;
+                data |= x != 0;
+            }
+            if same {
+                equal = true;
+                seen_data |= data;
+                break;
+            }
+        }
+        if !equal {
+            return false;
+        }
+    }
+    seen_data
+}
+
+/// `npk_gpudev_vram`: the window through which the CPU reaches all of the
+/// card's VRAM (an APU's carve-out), before `npk_gpudev_ready`. Taken only
+/// when the firmware declared it as one region that is not RAM and it reads
+/// as BAR0 does; guest blobs above BAR0 are mapped through it.
+pub fn set_vram_window(dev: PciAddr, base: u64, size: u64) -> i32 {
+    let mut st = STATE.lock();
+    if st.owner != Some(dev) || READY.load(Ordering::Acquire) {
+        return -1;
+    }
+    if base % PAGE != 0 || size == 0 || size % PAGE != 0 || base.checked_add(size).is_none() {
+        return -1;
+    }
+    if !crate::memory::is_firmware_device_region(base, size) {
+        crate::kprintln!("[gpu] VRAM window {:#x}+{:#x} refused: not one firmware region", base, size);
+        return -1;
+    }
+    let Some(bar) = crate::drivers::pci::bar(dev, 0) else { return -1 };
+    if !vram_aliases_bar(base, size, bar.base, bar.size) {
+        crate::kprintln!("[gpu] VRAM window {:#x}+{:#x} refused: it does not read as BAR0", base, size);
+        return -1;
+    }
+    crate::kprintln!("[gpu] VRAM window {:#x}+{} MB (BAR0 {} MB)", base, size >> 20, bar.size >> 20);
+    st.vram_window = Some((base, size));
+    0
+}
+
 /// The capset the module of `native_device` reported, if it did.
 pub fn native_capset() -> Option<Vec<u8>> {
     native_device()?;
@@ -1659,12 +1745,20 @@ pub fn blob(client: u32, blob_id: u32, res_id: u32) -> Option<(Arc<ForeignPixels
             if n == 0 || r.len() < 16 + n * 16 {
                 return None;
             }
-            let bar = crate::drivers::pci::bar(dev, 0)?;
-            let (bar0, bar_len) = (bar.base, bar.size);
+            let window = STATE.lock().vram_window;
+            let (bar0, bar_len) = match window {
+                Some(w) => w,
+                None => {
+                    let bar = crate::drivers::pci::bar(dev, 0)?;
+                    (bar.base, bar.size)
+                }
+            };
             let mut list = Vec::new();
             for i in 0..n {
                 let (off, len) = (q(16 + i * 16), q(24 + i * 16));
                 if off % PAGE != 0 || len % PAGE != 0 || len == 0 || off.checked_add(len)? > bar_len {
+                    crate::kprintln!("[gpu] blob {} of client {}: VRAM {:#x}+{:#x} outside the {} MB the CPU reaches",
+                        blob_id, client, off, len, bar_len >> 20);
                     return None;
                 }
                 list.extend((0..len / PAGE).map(|p| bar0 + off + p * PAGE));

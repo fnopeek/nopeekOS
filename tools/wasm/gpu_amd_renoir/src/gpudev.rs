@@ -695,6 +695,11 @@ pub fn serve(adev: &mut amdgpu_device) {
     svc.copy_ok = self_test(adev);
     Line::new().s("gpudev: sdma0 self-test ").s(if svc.copy_ok { "passed" } else { "FAILED" }).say();
     let scene_ok = svc.copy_ok && scenes_init(adev, &mut svc);
+    // An APU's VRAM is the carve-out the CPU reaches whole (`aper_base`,
+    // as gmc_v9_0_mc_init sets it); BAR0 shows only its start.
+    if adev.gmc.aper_base != adev.bar0.0 {
+        npk_sys::gpudev_vram(adev.gmc.aper_base as i64, adev.gmc.aper_size as i64);
+    }
     // The capset for the guests' native contexts, before ready. They need
     // the compute and SDMA submission the scene self-test has just proven.
     let capset = match crate::amdgpu_virtio::capset(adev) {
