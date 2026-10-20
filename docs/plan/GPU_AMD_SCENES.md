@@ -44,9 +44,20 @@ und schaltet bei der kleinsten Abweichung auf die CPU zurueck.
    wie unter Linux (`amdgpu_vm.c`, `amdgpu_vm_pt.c`, `amdgpu_vm_sdma.c`,
    `amdgpu_ids.c`): Seitentabellen, `amdgpu_vm_bo_map/update`, VMID-Vergabe,
    `amdgpu_vm_flush` beim Einreichen (`gfx_v9_0_ring_emit_vm_flush`). Dasselbe
-   Fundament tragen spaeter die nativen Kontexte der Gaeste (Stufe 7).
+   Fundament tragen spaeter die nativen Kontexte der Gaeste (Stufe 7). ✅
+   Mit `amdgpu_vm_pt` (Cursor, Fragmente, Freigabe nach TLB-Flush),
+   `amdgpu_vm_sdma` (PTEPDE/WRITE/COPY), `gmc_v9_0_get_vm_pde/pte`, dem
+   Ressourcen-Cursor und TTMs BO-Lebensdauer (Referenzen, geteilte
+   `dma_resv`, verzoegertes Loeschen bis die Fences signalisieren).
 5. **Einreichen** — wie `amdgpu_cs` mit dem Client-VM: Job mit IB auf einem
-   Compute-Ring (RADVs Compute-Queue = MEC-Ring), Fence ueber IH.
+   Compute-Ring (RADVs Compute-Queue = MEC-Ring), Fence ueber IH. ✅
+   `amdgpu_driver_open_kms` (PASID, `prt_va`, seq64), `amdgpu_ctx`,
+   `amdgpu_gem_va_ioctl` und `amdgpu_cs_ioctl` fuer IB-Chunks. Der
+   Selbsttest ist ein Client wie unter Linux: zwei GTT-Puffer an hohen
+   Adressen, ein IB im einen schreibt ueber den Compute-Ring in den anderen.
+   Host-Check: die Fake-GPU uebersetzt VMID > 0 durch die vierstufige
+   Tabelle, die SDMA gebaut hat — VM-Flush, PASID-Zeile und IB mit VMID 1
+   laufen Paket fuer Paket wie Linux sie schreibt.
 6. **Gemeinsame Planung** — `plan.rs` und das Lesen/Pruefen der Szene aus
    `gpu_intel_tgl/src/compose.rs` in eine gemeinsame Crate; beide Module
    benutzen sie, die Breite ist Parameter.

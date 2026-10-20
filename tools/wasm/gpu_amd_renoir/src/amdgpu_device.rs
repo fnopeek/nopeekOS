@@ -456,6 +456,8 @@ pub struct amdgpu_vm_manager {
     /// The contexts of the VMID-wait fences, one per ring.
     pub fence_context: u64,
     pub seqno: Vec<u32>,
+    /// `pasids`: the VM of each PASID.
+    pub pasids: alloc::collections::BTreeMap<u32, usize>,
     /// The `amdgpu_pasid_xa` allocator: PASIDs in use and the next to try.
     pub pasids_used: Vec<u32>,
     pub pasid_xa_next: u32,
@@ -740,6 +742,9 @@ pub struct amdgpu_device {
     pub next_job: u64,
     /// The client VMs, by key.
     pub vms: Vec<Option<crate::amdgpu_vm::amdgpu_vm>>,
+    /// The VMs' buffer bases and mappings, by key.
+    pub vm_bases: Vec<Option<crate::amdgpu_vm::amdgpu_vm_bo_base>>,
+    pub vm_mappings: Vec<Option<crate::amdgpu_vm::amdgpu_bo_va_mapping>>,
     pub gpu_reset_counter: u32,
     pub vram_lost_counter: u32,
     pub gang_submit: crate::dma_fence::Fence,
@@ -866,6 +871,8 @@ impl amdgpu_device {
             jobs: Default::default(),
             next_job: 0,
             vms: Vec::new(),
+            vm_bases: Vec::new(),
+            vm_mappings: Vec::new(),
             gpu_reset_counter: 0,
             vram_lost_counter: 0,
             gang_submit: crate::dma_fence::dma_fence_get_stub(),
@@ -2147,6 +2154,9 @@ pub fn amdgpu_device_init_schedulers(adev: &mut amdgpu_device) -> i32 {
 /// functions enabled, no KFD. The DMA buffers go back with the module.
 pub fn amdgpu_device_fini_hw(adev: &mut amdgpu_device) {
     Line::new().s("amdgpu: finishing device.").say();
+    if adev.mman.initialized {
+        crate::workqueue::drain_ttm(adev);
+    }
     adev.shutdown = true;
     amdgpu_device_set_pg_state(adev, false);
     amdgpu_device_set_cg_state(adev, false);

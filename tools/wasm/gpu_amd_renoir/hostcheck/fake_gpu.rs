@@ -50,7 +50,49 @@ fn translate(addr: u64) -> Mem {
     Mem::Bus((pte & 0x0000_ffff_ffff_f000) | (addr & 0xfff))
 }
 
+thread_local! {
+    /// The VMID of the IB running now; 0 is the kernel's context.
+    static VMID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A VRAM physical address (`amdgpu_gmc_vram_mc2pa`) to its VRAM offset.
+fn vram_pa_offset(pa: u64) -> u64 {
+    pa - ((r(gc(GC_mmMC_VM_FB_OFFSET_BASE_IDX, GC_mmMC_VM_FB_OFFSET)) as u64) << 24)
+}
+
+/// A client address of VMID `vmid` through its four-level page table
+/// (block size 9), as the GC hub's context registers point to it.
+fn translate_vm(vmid: u32, addr: u64) -> Mem {
+    let lo = gc(GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX, GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32)
+        + GC_CTX_ADDR_DISTANCE * vmid;
+    let hi = gc(GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX, GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32)
+        + GC_CTX_ADDR_DISTANCE * vmid;
+    let mut table = vram_pa_offset(r64(lo, hi) & 0x0000_ffff_ffff_f000);
+    let page = (addr & 0x0000_ffff_ffff_ffff) >> 12;
+    for shift in [27u32, 18, 9, 0] {
+        let at = table + ((page >> shift) & 511) * 8;
+        let e = npk_sys::vram_r32(at) as u64 | (npk_sys::vram_r32(at + 4) as u64) << 32;
+        if e & 1 == 0 {
+            panic!("vmid {vmid} fault at {addr:#x}: entry {e:#x} at level shift {shift}");
+        }
+        let base = e & 0x0000_ffff_ffff_f000;
+        if shift == 0 || e & AMDGPU_PDE_PTE != 0 {
+            let pa = base + ((page & ((1u64 << shift) - 1)) << 12) + (addr & 0xfff);
+            return if e & AMDGPU_PTE_SYSTEM as u64 != 0 { Mem::Bus(pa) } else { Mem::Vram(vram_pa_offset(pa)) };
+        }
+        table = vram_pa_offset(base);
+    }
+    unreachable!()
+}
+
 fn gpu_r32(addr: u64) -> u32 {
+    let vmid = VMID.with(|v| v.get());
+    if vmid != 0 {
+        return match translate_vm(vmid, addr) {
+            Mem::Vram(o) => npk_sys::vram_r32(o),
+            Mem::Bus(b) => npk_sys::bus_r32(b),
+        };
+    }
     match translate(addr) {
         Mem::Vram(o) => npk_sys::vram_r32(o),
         Mem::Bus(b) => npk_sys::bus_r32(b),
@@ -58,6 +100,14 @@ fn gpu_r32(addr: u64) -> u32 {
 }
 
 fn gpu_w32(addr: u64, v: u32) {
+    let vmid = VMID.with(|c| c.get());
+    if vmid != 0 {
+        match translate_vm(vmid, addr) {
+            Mem::Vram(o) => npk_sys::vram_w32(o, v),
+            Mem::Bus(b) => npk_sys::bus_w32(b, v),
+        }
+        return;
+    }
     match translate(addr) {
         Mem::Vram(o) => npk_sys::vram_w32(o, v),
         Mem::Bus(b) => npk_sys::bus_w32(b, v),
@@ -250,8 +300,11 @@ fn run_pm4(kind: Kind, rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32
             PACKET3_INDIRECT_BUFFER => {
                 let ib = d(1) as u64 | (d(2) as u64) << 32;
                 let n = d(3) & 0xfffff;
-                log(format!("pm4 INDIRECT_BUFFER {:#x} {} dw", ib, n));
+                let vmid = (d(3) >> 24) & 0xf;
+                log(format!("pm4 INDIRECT_BUFFER {:#x} {} dw vmid {}", ib, n, vmid));
+                let outer = VMID.with(|v| v.replace(vmid));
                 run_pm4(kind, &|i| gpu_r32(ib + i as u64 * 4), 0, n, u32::MAX);
+                VMID.with(|v| v.set(outer));
             }
             PACKET3_MAP_QUEUES => {
                 let doorbell = (d(2) >> 2) & 0x3ffffff;
@@ -286,6 +339,9 @@ fn run_pm4(kind: Kind, rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32
 /// Runs the SDMA packets in `[at, end)` dwords.
 fn run_sdma(rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32) {
     while at != end {
+        if wrap == u32::MAX && at > end {
+            panic!("sdma IB packets run past the IB's end ({at} > {end})");
+        }
         let hdr = rd(at % wrap);
         let d = |i: u32| rd((at + i) % wrap);
         let (op, sub) = (hdr & 0xff, (hdr >> 8) & 0xff);
@@ -337,6 +393,20 @@ fn run_sdma(rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32) {
                 npk_sys::fake_set_reg(d(1), d(2));
                 log(format!("sdma SRBM_WRITE {:#x} = {:#x}", d(1), d(2)));
                 3
+            }
+            (12, _) => {
+                // PTEPDE: count entries (addr + i * incr) | flags
+                let pe = d(1) as u64 | (d(2) as u64) << 32;
+                let flags = d(3) as u64 | (d(4) as u64) << 32;
+                let addr = d(5) as u64 | (d(6) as u64) << 32;
+                let (incr, count) = (d(7) as u64, d(9) + 1);
+                for i in 0..count as u64 {
+                    let v = (addr + i * incr) | flags;
+                    gpu_w32(pe + i * 8, v as u32);
+                    gpu_w32(pe + i * 8 + 4, (v >> 32) as u32);
+                }
+                log(format!("sdma PTEPDE {:#x} x{} = {:#x} | {:#x} + {:#x}", pe, count, addr, flags, incr));
+                10
             }
             (6, _) => {
                 log("sdma TRAP".to_string());

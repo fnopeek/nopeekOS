@@ -58,6 +58,8 @@ pub enum dma_fence_func {
     sched_entity_kill_jobs { job: u64 },
     /// `dma_fence_array_cb_func`, holding its reference to the array.
     array_cb { array: Fence },
+    /// `amdgpu_vm_tlb_seq_cb` of VM `vm`.
+    vm_tlb_seq { vm: usize },
 }
 
 pub struct dma_fence {
@@ -160,6 +162,7 @@ fn run_callback(adev: &mut amdgpu_device, f: &Fence, func: dma_fence_func) {
         dma_fence_func::sched_entity_wakeup { entity } => crate::drm_sched::drm_sched_entity_wakeup(adev, entity),
         dma_fence_func::sched_entity_kill_jobs { job } => crate::drm_sched::drm_sched_entity_kill_jobs_cb(adev, job),
         dma_fence_func::array_cb { array } => dma_fence_array_cb_func(adev, f, array),
+        dma_fence_func::vm_tlb_seq { vm } => crate::amdgpu_vm::amdgpu_vm_tlb_seq_cb(adev, vm),
     }
 }
 

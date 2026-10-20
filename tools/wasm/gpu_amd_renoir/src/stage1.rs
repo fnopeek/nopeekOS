@@ -240,6 +240,8 @@ fn ip_init_phase2(adev: &mut amdgpu_device) {
         crate::amdgpu_ttm::amdgpu_ttm_set_buffer_funcs_status(adev, true);
     }
     crate::amdgpu_fence::amdgpu_fence_driver_hw_init(adev);
+    adev.accel_working = true;
+    // amdgpu_vm_check_compute_bug: GFX 9 has none, the rings' flags stay
     let r = dev::amdgpu_device_ip_late_init(adev);
     if r != 0 {
         Line::new().s("amdgpu_device_ip_late_init failed").say();

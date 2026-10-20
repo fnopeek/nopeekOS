@@ -1,6 +1,7 @@
-//! amdgpu/amdgpu_object.c (Linux 6.18.55): kernel buffer objects. A
-//! buffer is named by its handle into `adev.mman.bos`; reservation (the
-//! dma_resv lock) is a no-op, one thread drives the device.
+//! amdgpu/amdgpu_object.c (Linux 6.18.55): buffer objects. A buffer is
+//! named by its handle into `adev.mman.bos` and counts its references like
+//! the GEM object's kref; taking the dma_resv lock is a no-op, one thread
+//! drives the device.
 
 use crate::amdgpu_device::amdgpu_device;
 use crate::amdgpu_ttm;
@@ -33,6 +34,19 @@ pub struct amdgpu_bo {
     pub placements: Vec<ttm_place>,
     pub xcp_id: i32,
     pub kptr: Option<amdgpu_kptr>,
+    /// `tbo.kref`.
+    pub ref_count: u32,
+    /// The page directory above a page table, holding a reference.
+    pub parent: Option<usize>,
+    /// The head of the `amdgpu_vm_bo_base` list, by key.
+    pub vm_bo: Option<usize>,
+    /// `tbo.base._resv`, and `tbo.base.resv` when it is another buffer's.
+    pub _resv: crate::dma_resv::dma_resv,
+    pub resv: Option<usize>,
+    /// `tbo.deleted`: waiting for its fences before it goes.
+    pub deleted: bool,
+    /// `amdgpu_bo_vm.entries`: a page table's entries, by key.
+    pub entries: Vec<usize>,
 }
 
 /// `struct amdgpu_bo_param`.
@@ -44,6 +58,8 @@ pub struct amdgpu_bo_param {
     pub preferred_domain: u32,
     pub flags: u64,
     pub type_: u32,
+    /// `resv`: share this buffer's reservation object.
+    pub resv: Option<usize>,
 }
 
 pub fn bo(adev: &amdgpu_device, h: usize) -> &amdgpu_bo {
@@ -171,6 +187,13 @@ pub fn amdgpu_bo_create(adev: &mut amdgpu_device, bp: &amdgpu_bo_param) -> Resul
         // For GPUs without spatial partitioning
         xcp_id: 0,
         kptr: None,
+        ref_count: 1,
+        parent: None,
+        vm_bo: None,
+        _resv: Default::default(),
+        resv: bp.resv.map(|r| resv_owner(adev, r)),
+        deleted: false,
+        entries: Vec::new(),
     };
     let h = match adev.mman.bos.iter().position(|x| x.is_none()) {
         Some(i) => {
@@ -208,7 +231,7 @@ pub fn amdgpu_bo_create(adev: &mut amdgpu_device, bp: &amdgpu_bo_param) -> Resul
 }
 
 /// `amdgpu_mem_type_to_domain`.
-fn amdgpu_mem_type_to_domain(mem_type: u32) -> u32 {
+pub fn amdgpu_mem_type_to_domain(mem_type: u32) -> u32 {
     match mem_type {
         t if t == TTM_PL_VRAM => AMDGPU_GEM_DOMAIN_VRAM,
         t if t == TTM_PL_TT => AMDGPU_GEM_DOMAIN_GTT,
@@ -433,16 +456,140 @@ pub fn amdgpu_bo_create_kernel_at(adev: &mut amdgpu_device, offset: u64, size: u
     Ok(Some(h))
 }
 
-/// `amdgpu_bo_unref` of the last reference: the resource and pages go
-/// back.
+/// The buffer whose `_resv` is `tbo.base.resv` of `h`.
+pub fn resv_owner(adev: &amdgpu_device, h: usize) -> usize {
+    bo(adev, h).resv.unwrap_or(h)
+}
+
+/// `bo->tbo.base.resv`.
+pub fn amdgpu_bo_resv(adev: &amdgpu_device, h: usize) -> &crate::dma_resv::dma_resv {
+    &bo(adev, resv_owner(adev, h))._resv
+}
+
+/// `bo->tbo.base.resv`, taken out to be changed with the device at hand,
+/// and put back with `amdgpu_bo_resv_put`.
+pub fn amdgpu_bo_resv_take(adev: &mut amdgpu_device, h: usize) -> crate::dma_resv::dma_resv {
+    let o = resv_owner(adev, h);
+    core::mem::take(&mut bo_mut(adev, o)._resv)
+}
+
+pub fn amdgpu_bo_resv_put(adev: &mut amdgpu_device, h: usize, resv: crate::dma_resv::dma_resv) {
+    let o = resv_owner(adev, h);
+    bo_mut(adev, o)._resv = resv;
+}
+
+/// `amdgpu_bo_fence`.
+pub fn amdgpu_bo_fence(adev: &mut amdgpu_device, h: usize, fence: &crate::dma_fence::Fence, shared: bool) {
+    use crate::dma_resv::dma_resv_usage::*;
+    let mut resv = amdgpu_bo_resv_take(adev, h);
+    crate::dma_resv::dma_resv_add_fence(adev, &mut resv, fence,
+                                        if shared { DMA_RESV_USAGE_READ } else { DMA_RESV_USAGE_WRITE });
+    amdgpu_bo_resv_put(adev, h, resv);
+}
+
+/// `amdgpu_bo_ref`.
+pub fn amdgpu_bo_ref(adev: &mut amdgpu_device, h: usize) -> usize {
+    bo_mut(adev, h).ref_count += 1;
+    h
+}
+
+/// `amdgpu_bo_unref`: the last reference releases the buffer.
 pub fn amdgpu_bo_unref(adev: &mut amdgpu_device, h: usize) {
-    amdgpu_ttm::ttm_resource_free(adev, h);
-    if let Some(tt) = bo(adev, h).tbo.ttm {
+    let b = bo_mut(adev, h);
+    b.ref_count -= 1;
+    if b.ref_count == 0 {
+        ttm_bo_release(adev, h);
+    }
+}
+
+/// `ttm_bo_individualize_resv`: the fences of a shared reservation object
+/// copied into the buffer's own.
+fn ttm_bo_individualize_resv(adev: &mut amdgpu_device, h: usize) {
+    if bo(adev, h).resv.is_none() {
+        return;
+    }
+    let copy = amdgpu_bo_resv(adev, h).clone();
+    let b = bo_mut(adev, h);
+    b._resv = copy;
+    if b.tbo.type_ != ttm_bo_type_sg {
+        b.resv = None;
+    }
+}
+
+/// `amdgpu_bo_release_notify`: no KFD buffers.
+fn amdgpu_bo_release_notify(adev: &mut amdgpu_device, h: usize) {
+    let b = bo(adev, h);
+    if b.vm_bo.is_some() {
+        Line::new().s("WARNING: buffer released while still in a VM").say();
+    }
+    let vram = b.tbo.resource.as_ref().is_some_and(|r| r.mem_type == TTM_PL_VRAM);
+    if !vram || b.flags & AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE as u64 == 0 || adev.in_suspend {
+        return;
+    }
+    // amdgpu_fill_buffer of the released VRAM
+    Line::new().s("WARNING: VRAM wipe on release is not ported, the buffer goes back as it is").say();
+}
+
+/// `ttm_bo_cleanup_memtype_use`: its pages and its place.
+fn ttm_bo_cleanup_memtype_use(adev: &mut amdgpu_device, h: usize) {
+    if let Some(tt) = bo_mut(adev, h).tbo.ttm.take() {
         if let Some((handle, phys)) = tt.dma {
             (npk_sys::Dma { handle, phys }).free();
         }
     }
+    amdgpu_ttm::ttm_resource_free(adev, h);
+}
+
+/// `ttm_bo_release`: a buffer with fences still pending waits for them in
+/// `ttm_bo_delayed_delete`.
+fn ttm_bo_release(adev: &mut amdgpu_device, h: usize) {
+    use crate::dma_resv::dma_resv_usage::DMA_RESV_USAGE_BOOKKEEP;
+    if bo(adev, h).tbo.pin_count != 0 {
+        Line::new().s("WARNING: pinned buffer released").say();
+    }
+    if !bo(adev, h).deleted {
+        ttm_bo_individualize_resv(adev, h);
+        amdgpu_bo_release_notify(adev, h);
+        let own = bo(adev, h)._resv.clone();
+        let idle = crate::dma_resv::dma_resv_test_signaled(adev, &own, DMA_RESV_USAGE_BOOKKEEP);
+        if !idle || bo(adev, h).tbo.type_ == ttm_bo_type_sg {
+            // ttm_bo_flush_all_fences
+            for f in crate::dma_resv::dma_resv_get_fences(adev, &own, DMA_RESV_USAGE_BOOKKEEP) {
+                crate::dma_fence::dma_fence_enable_sw_signaling(adev, &f);
+            }
+            let b = bo_mut(adev, h);
+            b.deleted = true;
+            b.tbo.pin_count = 0;
+            b.ref_count = 1;
+            crate::workqueue::queue_work(adev, crate::workqueue::work::ttm_delayed_delete { bo: h });
+            return;
+        }
+        ttm_bo_cleanup_memtype_use(adev, h);
+    }
+    amdgpu_bo_destroy(adev, h);
+}
+
+/// `ttm_bo_delayed_delete`.
+pub fn ttm_bo_delayed_delete(adev: &mut amdgpu_device, h: usize) {
+    let own = bo(adev, h)._resv.clone();
+    crate::dma_resv::dma_resv_wait_timeout(adev, &own, crate::dma_resv::dma_resv_usage::DMA_RESV_USAGE_BOOKKEEP,
+                                           crate::drm_sched::MAX_SCHEDULE_TIMEOUT);
+    ttm_bo_cleanup_memtype_use(adev, h);
+    amdgpu_bo_unref(adev, h);
+}
+
+/// `amdgpu_bo_destroy`.
+fn amdgpu_bo_destroy(adev: &mut amdgpu_device, h: usize) {
+    bo_mut(adev, h).kptr = None;
+    // amdgpu_bo_vm: the entries go with the table
+    for e in core::mem::take(&mut bo_mut(adev, h).entries) {
+        adev.vm_bases[e] = None;
+    }
+    let parent = bo_mut(adev, h).parent.take();
     adev.mman.bos[h] = None;
+    if let Some(p) = parent {
+        amdgpu_bo_unref(adev, p);
+    }
 }
 
 /// `amdgpu_bo_free_kernel`.
@@ -479,6 +626,7 @@ pub fn amdgpu_dma_buf_create_obj(adev: &mut amdgpu_device, pages: Vec<u64>) -> R
         preferred_domain: 0,
         flags: 0,
         type_: ttm_bo_type_sg,
+        resv: None,
     };
     let h = amdgpu_bo_create(adev, &bp)?;
     let b = bo_mut(adev, h);

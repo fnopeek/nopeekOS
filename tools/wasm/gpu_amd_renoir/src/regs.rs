@@ -6173,3 +6173,105 @@ pub const SDMA_PKT_POLL_REGMEM_DW5_RETRY_COUNT_FFF: u32 = 0xfff0000;
 pub const SDMA_PKT_POLL_REGMEM_DW5_interval_mask: u32 = 0xffff;
 /// amdgpu/iceland_sdma_pkt_open.h:2018
 pub const SDMA_PKT_POLL_REGMEM_DW5_interval_shift: u32 = 0x0;
+
+// The page tables of a VM (amdgpu_vm.c, amdgpu_vm_pt.c, amdgpu_vm_sdma.c)
+/// amdgpu/amdgpu_vm.h:194
+pub const AMDGPU_VM_PTB: u32 = 0x3;
+/// The value of `AMDGPU_PDE_BFS(0x9)` in gmc_v9_0.c
+pub const AMDGPU_PDE_BFS_9: u64 = 0x4800000000000000;
+/// amdgpu/amdgpu_vm.h:81
+pub const AMDGPU_PTE_TF: u64 = 0x100000000000000;
+/// amdgpu/amdgpu_vm.h:73
+pub const AMDGPU_PTE_PRT: u64 = 0x8000000000000;
+/// The value of `AMDGPU_PTE_FRAG(1)` in amdgpu_vm_pt.c
+pub const AMDGPU_PTE_FRAG_1: u32 = 0x80;
+/// amdgpu/amdgpu_vm.h:98
+pub const AMDGPU_PTE_MTYPE_VG10_MASK: u64 = 0x600000000000000;
+/// The value of `AMDGPU_PTE_MTYPE_VG10(0, MTYPE_NC)` in gmc_v9_0.c
+pub const AMDGPU_PTE_MTYPE_VG10_NC: u32 = 0x0;
+/// The value of `AMDGPU_PTE_MTYPE_VG10(0, MTYPE_WC)` in gmc_v9_0.c
+pub const AMDGPU_PTE_MTYPE_VG10_WC: u64 = 0x200000000000000;
+/// The value of `AMDGPU_PTE_MTYPE_VG10(0, MTYPE_RW)` in gmc_v9_0.c
+pub const AMDGPU_PTE_MTYPE_VG10_RW: u64 = 0x200000000000000;
+/// The value of `AMDGPU_PTE_MTYPE_VG10(0, MTYPE_CC)` in gmc_v9_0.c
+pub const AMDGPU_PTE_MTYPE_VG10_CC: u64 = 0x400000000000000;
+/// The value of `AMDGPU_PTE_MTYPE_VG10(0, MTYPE_UC)` in gmc_v9_0.c
+pub const AMDGPU_PTE_MTYPE_VG10_UC: u64 = 0x600000000000000;
+/// include/navi10_enum.h:285
+pub const MTYPE_NC: u32 = 0x0;
+/// ?
+pub const AMDGPU_VM_PAGE_READABLE: u32 = 0x2;
+/// ?
+pub const AMDGPU_VM_PAGE_WRITEABLE: u32 = 0x4;
+/// ?
+pub const AMDGPU_VM_PAGE_EXECUTABLE: u32 = 0x8;
+/// ?
+pub const AMDGPU_VM_PAGE_PRT: u32 = 0x10;
+/// ?
+pub const AMDGPU_VM_MTYPE_MASK: u32 = 0x1e0;
+/// ?
+pub const AMDGPU_VM_MTYPE_DEFAULT: u32 = 0x0;
+/// ?
+pub const AMDGPU_VM_MTYPE_NC: u32 = 0x20;
+/// ?
+pub const AMDGPU_VM_MTYPE_WC: u32 = 0x40;
+/// ?
+pub const AMDGPU_VM_MTYPE_RW: u32 = 0xa0;
+/// ?
+pub const AMDGPU_VM_MTYPE_CC: u32 = 0x60;
+/// ?
+pub const AMDGPU_VM_MTYPE_UC: u32 = 0x80;
+/// amdgpu/amdgpu_vm.h:184
+pub const AMDGPU_VM_USE_CPU_FOR_GFX: u32 = 0x1;
+/// ?
+pub const AMDGPU_GEM_CREATE_UNCACHED: u32 = 0x4000;
+/// ?
+pub const AMDGPU_GEM_CREATE_COHERENT: u32 = 0x2000;
+/// ?
+pub const AMDGPU_GEM_CREATE_EXT_COHERENT: u32 = 0x8000;
+/// amdgpu/amdgpu_gart.h:36
+pub const AMDGPU_GPU_PAGE_MASK: u32 = 0xfff;
+/// The value of `SDMA_PKT_HEADER_OP(SDMA_OP_PTEPDE)` in sdma_v4_0.c
+pub const SDMA_PKT_HEADER_OP_PTEPDE: u32 = 0xc;
+/// amdgpu/amdgpu_vm_sdma.c:28
+pub const AMDGPU_VM_SDMA_MIN_NUM_DW: u32 = 0x100;
+/// amdgpu/amdgpu_vm_sdma.c:29
+pub const AMDGPU_VM_SDMA_MAX_NUM_DW: u32 = 0x4000;
+/// amdgpu/amdgpu_vm.h:144
+pub const AMDGPU_VM_FAULT_STOP_NEVER: u32 = 0x0;
+/// amdgpu/amdgpu_vm.h:179
+pub const AMDGPU_VA_RESERVED_TOP: u32 = 0x410000;
+/// amdgpu/amdgpu_vm.h:178
+pub const AMDGPU_VA_RESERVED_BOTTOM: u32 = 0x10000;
+/// amdgpu/amdgpu_vm.h:90
+pub const AMDGPU_VM_NORETRY_FLAGS: u64 = 0x140000000000010;
+
+// A client: its context and command submission (amdgpu_ctx.c, amdgpu_cs.c, amdgpu_kms.c)
+/// ?
+pub const AMDGPU_HW_IP_GFX: u32 = 0x0;
+/// ?
+pub const AMDGPU_HW_IP_COMPUTE: u32 = 0x1;
+/// ?
+pub const AMDGPU_CTX_PRIORITY_NORMAL: u32 = 0x0;
+/// ?
+pub const AMDGPU_CTX_PRIORITY_UNSET: u64 = 0xfffffffffffff800;
+/// amdgpu/amdgpu_gfx.h:53
+pub const AMDGPU_GFX_PIPE_PRIO_NORMAL: u32 = 0x1;
+/// amdgpu/amdgpu_job.h:31
+pub const AMDGPU_PREAMBLE_IB_PRESENT: u32 = 0x1;
+/// amdgpu/amdgpu_job.h:33
+pub const AMDGPU_PREAMBLE_IB_PRESENT_FIRST: u32 = 0x2;
+/// ?
+pub const AMDGPU_IB_FLAG_PREAMBLE: u32 = 0x2;
+/// amdgpu/amdgpu_cs.h:33
+pub const AMDGPU_CS_GANG_SIZE: u32 = 0x4;
+/// amdgpu/amdgpu.h:279
+pub const AMDGPU_VM_MAX_NUM_CTX: u32 = 0x1000;
+/// amdgpu/amdgpu_vm.h:168
+pub const AMDGPU_VA_RESERVED_CSA_SIZE: u32 = 0x200000;
+/// amdgpu/amdgpu_vm.h:175
+pub const AMDGPU_VA_RESERVED_TRAP_SIZE: u32 = 0x10000;
+/// amdgpu/amdgpu_gmc.h:46
+pub const AMDGPU_GMC_HOLE_MASK: u64 = 0xffffffffffff;
+/// ?
+pub const AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE: u32 = 0x200;

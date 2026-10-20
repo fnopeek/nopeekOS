@@ -237,6 +237,71 @@ fn unbind(adev: &mut amdgpu_device, bos: &mut [bo; NUM_BOS]) {
     crate::amdgpu_gart::amdgpu_gart_invalidate_tlb(adev);
 }
 
+/// Where the client self-test maps its buffers: the high half, sign
+/// extended as a client's VA manager hands it out.
+const CLIENT_TEST_VA: u64 = 0xffff_8000_0010_0000;
+
+/// The client self-test: a client with its own VM writes a pattern into
+/// one of its buffers through a compute IB in another, both mapped at its
+/// own addresses.
+fn client_self_test(adev: &mut amdgpu_device) -> bool {
+    use crate::amdgpu_cs as cs;
+    let mut fpriv = match cs::amdgpu_driver_open_kms(adev) {
+        Ok(f) => f,
+        Err(e) => {
+            Line::new().s("gpudev: client open failed (").dec((-e) as u64).s(")").say();
+            return false;
+        }
+    };
+    let mut bos: Vec<usize> = Vec::new();
+    let ok = (|| -> Result<bool, i32> {
+        let ctx = crate::amdgpu_ctx::amdgpu_ctx_alloc(adev, &mut fpriv.ctx_mgr, fpriv.vm, crate::amdgpu_ctx::PRIORITY_NORMAL)?;
+        for _ in 0..2 {
+            let h = cs::amdgpu_gem_object_create(adev, PAGE, PAGE, AMDGPU_GEM_DOMAIN_GTT, 0)?;
+            bos.push(h);
+            cs::amdgpu_gem_object_open(adev, &fpriv, h);
+        }
+        let rw = AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE;
+        let ib_va = CLIENT_TEST_VA;
+        let dst_va = CLIENT_TEST_VA + PAGE;
+        cs::amdgpu_gem_va_ioctl(adev, &fpriv, bos[0], true, ib_va, 0, PAGE, rw | AMDGPU_VM_PAGE_EXECUTABLE)?;
+        cs::amdgpu_gem_va_ioctl(adev, &fpriv, bos[1], true, dst_va, 0, PAGE, rw)?;
+        let kib = obj::amdgpu_bo_kmap(adev, bos[0])?;
+        let kdst = obj::amdgpu_bo_kmap(adev, bos[1])?;
+        crate::amdgpu_gart::kptr_w32(adev, kdst, 0, 0);
+        let ib = [crate::gfx_v9_0::PACKET3(PACKET3_WRITE_DATA, 3), WRITE_DATA_DST_SEL_5 | WR_CONFIRM, dst_va as u32,
+                  (dst_va >> 32) as u32, 0xC1E7_7E57];
+        for (i, &v) in ib.iter().enumerate() {
+            crate::amdgpu_gart::kptr_w32(adev, kib, i as u64 * 4, v);
+        }
+        let chunk = cs::drm_amdgpu_cs_chunk_ib {
+            flags: 0,
+            va_start: ib_va,
+            ib_bytes: ib.len() as u32 * 4,
+            ip_type: AMDGPU_HW_IP_COMPUTE,
+            ip_instance: 0,
+            ring: 0,
+        };
+        let (_, fence) = cs::amdgpu_cs_ioctl(adev, &mut fpriv, ctx, &[chunk], &bos)?;
+        if crate::dma_fence::dma_fence_wait_timeout(adev, &fence, JOB_TIMEOUT_US) == 0 {
+            return Err(-ETIME);
+        }
+        Ok(crate::amdgpu_gart::kptr_r32(adev, kdst, 0) == 0xC1E7_7E57 && fence.error() == 0)
+    })();
+    for &h in &bos {
+        cs::amdgpu_gem_object_close(adev, &fpriv, h);
+        obj::amdgpu_bo_unref(adev, h);
+    }
+    cs::amdgpu_driver_postclose_kms(adev, fpriv);
+    match ok {
+        Ok(v) => v,
+        Err(e) => {
+            Line::new().s("gpudev: client self-test failed (").dec((-e) as u64).s(")").say();
+            false
+        }
+    }
+}
+
 /// Register with the kernel, bind its buffers, prove the copy and serve
 /// until a copy times out.
 pub fn serve(adev: &mut amdgpu_device) {
@@ -283,6 +348,8 @@ pub fn serve(adev: &mut amdgpu_device) {
     }
     let copy_ok = self_test(adev);
     Line::new().s("gpudev: sdma0 self-test ").s(if copy_ok { "passed" } else { "FAILED" }).say();
+    let client_ok = client_self_test(adev);
+    Line::new().s("gpudev: client self-test ").s(if client_ok { "passed" } else { "FAILED" }).say();
     npk_sys::gpudev_ready(if copy_ok { CAP_COPY } else { 0 });
     if !copy_ok {
         unbind(adev, &mut bos);

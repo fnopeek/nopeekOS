@@ -45,6 +45,8 @@ pub struct amdgpu_job {
     pub job_run_counter: u32,
     pub enforce_isolation: bool,
     pub run_cleaner_shader: bool,
+    pub num_ibs: u32,
+    /// Room for the IBs; the first `num_ibs` are in use.
     pub ibs: Vec<amdgpu_ib>,
 }
 
@@ -130,7 +132,7 @@ pub fn amdgpu_job_alloc(adev: &mut amdgpu_device, vm: Option<usize>, entity: Opt
 pub fn amdgpu_job_alloc_with_ib(adev: &mut amdgpu_device, entity: Option<usize>, owner: u64, size: u32,
                                 pool_type: u32) -> Result<u64, i32> {
     let j = amdgpu_job_alloc(adev, None, entity, owner, 1)?;
-    job(adev, j).ibs.truncate(1);
+    job(adev, j).num_ibs = 1;
     let mut ib = amdgpu_ib::new();
     let r = crate::amdgpu_ib::amdgpu_ib_get(adev, size, pool_type, &mut ib);
     if r != 0 {
@@ -149,7 +151,8 @@ pub fn amdgpu_job_alloc_with_ib(adev: &mut amdgpu_device, entity: Option<usize>,
 pub fn amdgpu_job_free_resources(adev: &mut amdgpu_device, j: u64) {
     let f = job(adev, j).base.s_fence.clone().or_else(|| job(adev, j).hw_fence.clone());
     let mut ibs = core::mem::take(&mut job(adev, j).ibs);
-    for ib in ibs.iter_mut() {
+    let n = job(adev, j).num_ibs as usize;
+    for ib in ibs[..n].iter_mut() {
         crate::amdgpu_ib::amdgpu_ib_free(adev, ib, f.clone());
     }
     job(adev, j).ibs = ibs;
@@ -194,7 +197,8 @@ pub fn amdgpu_job_submit(adev: &mut amdgpu_device, j: u64) -> Fence {
 /// `amdgpu_job_submit_direct`.
 pub fn amdgpu_job_submit_direct(adev: &mut amdgpu_device, j: u64, r: usize) -> Result<Fence, i32> {
     job(adev, j).base.sched = Some(r);
-    let ibs = job(adev, j).ibs.clone();
+    let n = job(adev, j).num_ibs as usize;
+    let ibs = job(adev, j).ibs[..n].to_vec();
     let fence = crate::amdgpu_ib::amdgpu_ib_schedule(adev, r, &ibs, Some(j))?;
     amdgpu_job_free(adev, j);
     Ok(fence)
@@ -308,7 +312,8 @@ pub fn amdgpu_job_run(adev: &mut amdgpu_device, j: u64) -> Result<Option<Fence>,
     if finished.error() < 0 {
         Line::new().s("Skip scheduling IBs in ring(").s(&adev.rings[r].name.clone()).s(")").dbg();
     } else {
-        let ibs = job(adev, j).ibs.clone();
+        let n = job(adev, j).num_ibs as usize;
+        let ibs = job(adev, j).ibs[..n].to_vec();
         fence = crate::amdgpu_ib::amdgpu_ib_schedule(adev, r, &ibs, Some(j)).map(Some);
         if let Err(e) = fence {
             Line::new().s("Error scheduling IBs (").dec((-e) as u64).s(") in ring(").s(&adev.rings[r].name.clone())

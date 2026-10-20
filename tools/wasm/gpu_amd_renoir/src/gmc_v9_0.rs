@@ -235,6 +235,78 @@ fn gmc_v9_0_get_invalidate_req(vmid: u32, flush_type: u32) -> u32 {
         VM_INVALIDATE_ENG0_REQ__CLEAR_PROTECTION_FAULT_STATUS_ADDR__SHIFT, 0)
 }
 
+/// `gmc_v9_0_get_vm_pde`.
+pub fn gmc_v9_0_get_vm_pde(adev: &amdgpu_device, level: i32, addr: &mut u64, flags: &mut u64) {
+    if *flags & AMDGPU_PDE_PTE == 0 && *flags & AMDGPU_PTE_SYSTEM as u64 == 0 {
+        *addr = crate::amdgpu_gmc::amdgpu_gmc_vram_mc2pa(adev, *addr);
+    }
+    if *addr & 0xFFFF00000000003F != 0 {
+        Line::new().s("BUG: page directory entry address 0x").hexw((*addr >> 32) as u32, 8).hexw(*addr as u32, 8)
+            .say();
+    }
+    if !adev.gmc.translate_further {
+        return;
+    }
+    if level == AMDGPU_VM_PDB1 as i32 {
+        // Set the block fragment size
+        if *flags & AMDGPU_PDE_PTE == 0 {
+            *flags |= AMDGPU_PDE_BFS_9;
+        }
+    } else if level == AMDGPU_VM_PDB0 as i32 {
+        if *flags & AMDGPU_PDE_PTE != 0 {
+            *flags &= !AMDGPU_PDE_PTE;
+            if *flags & AMDGPU_PTE_VALID as u64 == 0 {
+                *addr |= 1 << 12;
+            }
+        } else {
+            *flags |= AMDGPU_PTE_TF;
+        }
+    }
+}
+
+/// `gmc_v9_0_get_coherence_flags`: GC 9.3.0 is the default case.
+fn gmc_v9_0_get_coherence_flags(adev: &amdgpu_device, bo: usize, flags: &mut u64) {
+    let b = crate::amdgpu_object::bo(adev, bo);
+    let is_vram = b.tbo.resource.as_ref().is_some_and(|r| r.mem_type == TTM_PL_VRAM);
+    let coherent = b.flags & (AMDGPU_GEM_CREATE_COHERENT | AMDGPU_GEM_CREATE_EXT_COHERENT) as u64 != 0;
+    let uncached = b.flags & AMDGPU_GEM_CREATE_UNCACHED as u64 != 0;
+    let mtype_uc = uncached || coherent;
+    let snoop = !is_vram;
+    if mtype_uc {
+        *flags = (*flags & !AMDGPU_PTE_MTYPE_VG10_MASK) | AMDGPU_PTE_MTYPE_VG10_UC;
+    }
+    if snoop {
+        *flags |= AMDGPU_PTE_SNOOPED as u64;
+    }
+}
+
+/// `gmc_v9_0_get_vm_pte`.
+pub fn gmc_v9_0_get_vm_pte(adev: &amdgpu_device, bo: Option<usize>, vm_flags: u32, flags: &mut u64) {
+    if vm_flags & AMDGPU_VM_PAGE_EXECUTABLE != 0 {
+        *flags |= AMDGPU_PTE_EXECUTABLE as u64;
+    } else {
+        *flags &= !(AMDGPU_PTE_EXECUTABLE as u64);
+    }
+    let mtype = match vm_flags & AMDGPU_VM_MTYPE_MASK {
+        AMDGPU_VM_MTYPE_WC => AMDGPU_PTE_MTYPE_VG10_WC,
+        AMDGPU_VM_MTYPE_RW => AMDGPU_PTE_MTYPE_VG10_RW,
+        AMDGPU_VM_MTYPE_CC => AMDGPU_PTE_MTYPE_VG10_CC,
+        AMDGPU_VM_MTYPE_UC => AMDGPU_PTE_MTYPE_VG10_UC,
+        // AMDGPU_VM_MTYPE_DEFAULT, AMDGPU_VM_MTYPE_NC
+        _ => AMDGPU_PTE_MTYPE_VG10_NC as u64,
+    };
+    *flags = (*flags & !AMDGPU_PTE_MTYPE_VG10_MASK) | mtype;
+    if vm_flags & AMDGPU_VM_PAGE_PRT != 0 {
+        *flags |= AMDGPU_PTE_PRT;
+        *flags &= !(AMDGPU_PTE_VALID as u64);
+    }
+    if let Some(bo) = bo {
+        if *flags & AMDGPU_PTE_VALID as u64 != 0 {
+            gmc_v9_0_get_coherence_flags(adev, bo, flags);
+        }
+    }
+}
+
 /// `gmc_v9_0_emit_flush_gpu_tlb`: point the VMID at `pd_addr` and
 /// invalidate it, from the ring.
 pub fn gmc_v9_0_emit_flush_gpu_tlb(adev: &mut amdgpu_device, r: usize, vmid: u32, pd_addr: u64) -> u64 {

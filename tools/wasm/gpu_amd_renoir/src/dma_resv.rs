@@ -21,6 +21,12 @@ pub struct dma_resv {
     fences: Vec<(Fence, dma_resv_usage)>,
 }
 
+impl core::fmt::Debug for dma_resv {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(f, "dma_resv({} fences)", self.fences.len())
+    }
+}
+
 /// `dma_resv_usage_rw`: a new write waits for readers, a read for writers.
 pub fn dma_resv_usage_rw(write: bool) -> dma_resv_usage {
     if write { dma_resv_usage::DMA_RESV_USAGE_READ } else { dma_resv_usage::DMA_RESV_USAGE_WRITE }

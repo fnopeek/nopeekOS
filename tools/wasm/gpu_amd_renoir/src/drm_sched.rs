@@ -671,6 +671,11 @@ fn drm_sched_entity_is_idle(adev: &mut amdgpu_device, e: usize) -> bool {
     !ent.in_list || ent.job_queue.is_empty() || ent.stopped
 }
 
+/// `entity->stopped`.
+pub fn drm_sched_entity_stopped(adev: &mut amdgpu_device, e: usize) -> bool {
+    entity(adev, e).stopped
+}
+
 /// `drm_sched_entity_error`.
 pub fn drm_sched_entity_error(adev: &mut amdgpu_device, e: usize) -> i32 {
     entity(adev, e).last_scheduled.as_ref().map_or(0, |f| f.error())

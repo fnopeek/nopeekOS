@@ -19,6 +19,8 @@ pub enum work {
     sched_timedout { ring: usize },
     /// `amdgpu_device_delay_enable_gfx_off` (`gfx.gfx_off_delay_work`).
     gfx_off_delay,
+    /// `ttm_bo_delayed_delete` of a buffer, on `bdev->wq`.
+    ttm_delayed_delete { bo: usize },
 }
 
 /// Queued work and armed timers.
@@ -27,6 +29,24 @@ pub struct workqueue {
     queued: Vec<work>,
     /// Delayed work: when it is due.
     delayed: Vec<(u64, work)>,
+    /// The work running now, outermost first: a waiter inside one runs the
+    /// others, as Linux's other workers would.
+    running: Vec<work>,
+}
+
+/// Whether `w` must wait for running work: a work item never runs twice at
+/// once, a scheduler's submit queue is ordered, and so is the reset
+/// domain's queue all timeouts share.
+fn busy(running: &[work], w: work) -> bool {
+    running.iter().any(|&r| {
+        r == w
+            || match (r, w) {
+                (work::sched_run_job { ring: a } | work::sched_free_job { ring: a },
+                 work::sched_run_job { ring: b } | work::sched_free_job { ring: b }) => a == b,
+                (work::sched_timedout { .. }, work::sched_timedout { .. }) => true,
+                _ => false,
+            }
+    })
 }
 
 /// `queue_work`: false when it was queued already.
@@ -93,14 +113,24 @@ pub fn run_pending(adev: &mut amdgpu_device) {
     for w in due {
         queue_work(adev, w);
     }
-    while !adev.wq.queued.is_empty() {
-        let w = adev.wq.queued.remove(0);
+    while let Some(pos) = adev.wq.queued.iter().position(|&w| !busy(&adev.wq.running, w)) {
+        let w = adev.wq.queued.remove(pos);
+        adev.wq.running.push(w);
         match w {
             work::sched_run_job { ring } => crate::drm_sched::drm_sched_run_job_work(adev, ring),
             work::sched_free_job { ring } => crate::drm_sched::drm_sched_free_job_work(adev, ring),
             work::sched_timedout { ring } => crate::drm_sched::drm_sched_job_timedout(adev, ring),
             work::gfx_off_delay => crate::gfx_v9_0::amdgpu_device_delay_enable_gfx_off(adev),
+            work::ttm_delayed_delete { bo } => crate::amdgpu_object::ttm_bo_delayed_delete(adev, bo),
         }
+        adev.wq.running.pop();
+    }
+}
+
+/// `drain_workqueue` of `bdev->wq`: until no buffer waits to be deleted.
+pub fn drain_ttm(adev: &mut amdgpu_device) {
+    while adev.wq.queued.iter().any(|w| matches!(w, work::ttm_delayed_delete { .. })) {
+        run_pending(adev);
     }
 }
 

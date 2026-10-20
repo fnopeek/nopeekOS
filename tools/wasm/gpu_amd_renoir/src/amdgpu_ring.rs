@@ -273,7 +273,7 @@ pub fn amdgpu_device_wb_free(adev: &mut amdgpu_device, wb: u32) {
 }
 
 /// `amdgpu_ring_max_ibs`.
-fn amdgpu_ring_max_ibs(type_: u32) -> u32 {
+pub fn amdgpu_ring_max_ibs(type_: u32) -> u32 {
     match type_ {
         // Need to keep at least 192 on GFX7+ for old radv.
         t if t == AMDGPU_RING_TYPE_GFX => 192,

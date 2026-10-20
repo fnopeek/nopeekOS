@@ -101,5 +101,15 @@ mod amdgpu_sync;
 mod amdgpu_job;
 #[path = "../src/amdgpu_ids.rs"]
 mod amdgpu_ids;
+#[path = "../src/amdgpu_vm_pt.rs"]
+mod amdgpu_vm_pt;
+#[path = "../src/amdgpu_vm_sdma.rs"]
+mod amdgpu_vm_sdma;
+#[path = "../src/amdgpu_res_cursor.rs"]
+mod amdgpu_res_cursor;
+#[path = "../src/amdgpu_ctx.rs"]
+mod amdgpu_ctx;
+#[path = "../src/amdgpu_cs.rs"]
+mod amdgpu_cs;
 #[path = "../src/athub_v1_0.rs"]
 mod athub_v1_0;
