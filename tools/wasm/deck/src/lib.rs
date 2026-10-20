@@ -51,10 +51,11 @@ unsafe extern "C" {
     fn npk_popup_close(popup: i32) -> i32;
     fn npk_window_activate(id: i32) -> i32;
     fn npk_bar_state(buf_ptr: i32, max: i32) -> i32;
-    fn npk_battery() -> i32;
+    fn npk_status_list(buf_ptr: i32, max: i32) -> i32;
     fn npk_workspace_switch(n: i32) -> i32;
     fn npk_power() -> i32;
     fn npk_launch(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
+    fn npk_launch_at(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32, anchor: i32) -> i32;
 }
 
 fn window_set_panel(w: i32, h: i32) {
@@ -84,10 +85,11 @@ fn bar_state(buf: &mut [u8]) -> i32 {
     unsafe { npk_bar_state(buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
-/// `(status << 8) | percent`, or -1 without a battery.
-fn battery() -> i32 {
-    // SAFETY: FFI without pointers.
-    unsafe { npk_battery() }
+/// The status items into `buf` (docs/plan/STATUS_ITEMS.md); the length,
+/// larger than `buf` when it did not fit, `< 0` when refused.
+fn status_list(buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_status_list(buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
 fn workspace_switch(n: u32) {
@@ -105,6 +107,55 @@ fn launch(app: &str, arg: &str) {
     unsafe {
         npk_launch(app.as_ptr() as i32, app.len() as i32, arg.as_ptr() as i32, arg.len() as i32)
     };
+}
+
+/// Launch `app` placed next to node `anchor` of the panel.
+fn launch_at(app: &str, arg: &str, anchor: u32) {
+    // SAFETY: FFI; the kernel validates both ranges.
+    unsafe {
+        npk_launch_at(app.as_ptr() as i32, app.len() as i32, arg.as_ptr() as i32, arg.len() as i32,
+            anchor as i32)
+    };
+}
+
+/// One status item, borrowed from the raw list.
+struct StatusItem<'a> {
+    owner: &'a str,
+    key:   &'a str,
+    icon:  IconId,
+    state: u8,
+    place: u8,
+    text:  &'a str,
+    opens: &'a str,
+}
+
+const ST_ATTENTION: u8 = 1;
+const ST_OFF: u8 = 2;
+const PLACE_BAR: u8 = 0;
+
+/// Parse the list `npk_status_list` wrote (format in kernel `status.rs`).
+fn parse_status(b: &[u8]) -> Vec<StatusItem<'_>> {
+    let mut v = Vec::new();
+    let Some(count) = b.get(..2).map(|c| u16::from_le_bytes([c[0], c[1]])) else { return v };
+    let mut p = 2usize;
+    let s = |p: &mut usize| -> Option<&str> {
+        let n = *b.get(*p)? as usize;
+        let t = core::str::from_utf8(b.get(*p + 1..*p + 1 + n)?).ok()?;
+        *p += 1 + n;
+        Some(t)
+    };
+    for _ in 0..count {
+        let Some(owner) = s(&mut p) else { break };
+        let Some(key) = s(&mut p) else { break };
+        let Some(f) = b.get(p..p + 8) else { break };
+        let icon = IconId(u16::from_le_bytes([f[0], f[1]]));
+        let (state, place) = (f[6], f[7]);
+        p += 8;
+        let Some(text) = s(&mut p) else { break };
+        let Some(opens) = s(&mut p) else { break };
+        v.push(StatusItem { owner, key, icon, state, place, text, opens });
+    }
+    v
 }
 
 fn log(msg: &str) { host::log_serial(msg); }
@@ -235,12 +286,15 @@ const ROW_HOVER: u32 = 60_000;       // + row index (hover)
 const LAUNCHER: u32 = 90_000;
 const POWER: u32 = 90_001;
 const SHOT: u32 = 90_002;
-const VOL_OPEN: u32 = 90_003;
+/// + index into the status list.
+const STATUS_BASE: u32 = 90_100;
+const STATUS_MAX: u32 = 32;
 const OVERFLOW: u32 = 90_005;
 const GROUP_BASE: u32 = 70_000;      // + slot index
 const NODE_BAR: u32 = 100_000;
 const NODE_OVERFLOW: u32 = 100_001;
 const NODE_SLOT_BASE: u32 = 110_000; // + slot index
+const NODE_STATUS_BASE: u32 = 120_000; // + status index
 /// Last, because a window id has no upper bound of its own.
 const TASK_BASE: u32 = 1_000_000;    // + window id
 
@@ -250,6 +304,7 @@ const WAIT_STATE: u32 = 32;
 
 const STATE_MAX: usize = 256;
 const WINS_CAP: usize = 4096;
+const STATUS_CAP: usize = 4096;
 
 // ── Window list ──────────────────────────────────────────────────────
 
@@ -388,8 +443,8 @@ struct Deck {
     screen_w: i32,
     /// Bar state of the last read: "HH:MM\n<count>\n<active>\n<title>".
     state: Vec<u8>,
-    bat: i32,
-    vol: i32,
+    /// The status list of the last read, raw.
+    status: Vec<u8>,
     pre_mute: u32,
     wins: Vec<u8>,
     catalog: Vec<AppEntry>,
@@ -416,8 +471,7 @@ impl Deck {
         Deck {
             screen_w: if w > 0 { w as i32 } else { 1920 },
             state: Vec::new(),
-            bat: i32::MIN,
-            vol: i32::MIN,
+            status: Vec::new(),
             pre_mute: 50,
             wins: Vec::new(),
             catalog,
@@ -431,6 +485,12 @@ impl Deck {
         }
     }
 
+    /// The status item behind action `id`, if it is one.
+    fn status_item(&self, id: u32) -> Option<StatusItem<'_>> {
+        let i = id.checked_sub(STATUS_BASE).filter(|&i| i < STATUS_MAX)? as usize;
+        parse_status(&self.status).into_iter().nth(i)
+    }
+
     /// Re-read everything the panel shows; true when any of it changed.
     fn refresh(&mut self) -> bool {
         let mut buf = [0u8; STATE_MAX];
@@ -438,19 +498,18 @@ impl Deck {
         let n = if n > 0 { (n as usize).min(STATE_MAX) } else { 0 };
         let mut wins = [0u8; WINS_CAP];
         let wn = host::window_titles(&mut wins).unwrap_or(0).min(WINS_CAP);
-        let bat = battery();
-        let vol = host::audio_volume().map_or(-1, |v| v as i32);
-        if self.state[..] == buf[..n] && self.wins[..] == wins[..wn]
-            && bat == self.bat && vol == self.vol
-        {
+        let mut st = [0u8; STATUS_CAP];
+        let sn = status_list(&mut st);
+        let sn = if sn > 0 && (sn as usize) <= STATUS_CAP { sn as usize } else { 0 };
+        if self.state[..] == buf[..n] && self.wins[..] == wins[..wn] && self.status[..] == st[..sn] {
             return false;
         }
         self.state.clear();
         self.state.extend_from_slice(&buf[..n]);
         self.wins.clear();
         self.wins.extend_from_slice(&wins[..wn]);
-        self.bat = bat;
-        self.vol = vol;
+        self.status.clear();
+        self.status.extend_from_slice(&st[..sn]);
         true
     }
 
@@ -505,8 +564,9 @@ impl Deck {
         let ws = ws_count as u16;
         let left = BTN + SEP_W + ws * WS_W + SEP_W + (3 + ws) * GAP;
         let mut right = BTN + SEP_W + CLOCK_W + 3 * GAP;
-        if self.vol >= 0 { right += READOUT_W + GAP; }
-        if self.bat >= 0 { right += READOUT_W + GAP; }
+        for item in parse_status(&self.status).iter().filter(|i| i.place == PLACE_BAR) {
+            right += if item.text.is_empty() { BTN } else { READOUT_W } + GAP;
+        }
         (self.screen_w.clamp(0, u16::MAX as i32) as u16)
             .saturating_sub(2 * SCREEN_MARGIN + 2 * CARD_PAD + 2 * ROW_GAP)
             .saturating_sub(left + right + SAFETY_W)
@@ -566,7 +626,8 @@ impl Deck {
             Event::ContextAction(ActionId(id)) => {
                 if id == SHOT {
                     launch("snap", "full");
-                } else if id == VOL_OPEN {
+                } else if self.status_item(id).is_some_and(|i| i.owner == "kernel" && i.key == "volume") {
+                    // Mute without opening the slider.
                     let v = host::audio_volume().unwrap_or(0);
                     if v > 0 {
                         self.pre_mute = v;
@@ -628,7 +689,13 @@ impl Deck {
             }
             POWER => { power(); false }
             SHOT => { launch("snap", "region"); false }
-            VOL_OPEN => { launch("volume", ""); false }
+            _ if (STATUS_BASE..STATUS_BASE + STATUS_MAX).contains(&id) => {
+                let i = id - STATUS_BASE;
+                if let Some(item) = self.status_item(id).filter(|i| !i.opens.is_empty()) {
+                    launch_at(item.opens, item.key, NODE_STATUS_BASE + i);
+                }
+                false
+            }
             _ if (ROW_HOVER..ROW_HOVER + MENU_ROWS as u32).contains(&id) => {
                 let i = self.offset + (id - ROW_HOVER) as usize;
                 if i < self.filtered.len() && i != self.selected {
@@ -690,8 +757,9 @@ impl Deck {
         }
 
         let mut right: Vec<Widget> = Vec::new();
-        if self.vol >= 0 { right.push(volume_readout(self.vol as u8)); }
-        if self.bat >= 0 { right.push(battery_readout(self.bat)); }
+        for (i, item) in parse_status(&self.status).iter().enumerate().take(STATUS_MAX as usize) {
+            if item.place == PLACE_BAR { right.push(status_readout(item, i as u32)); }
+        }
         right.push(tray_cell(IconId::Camera, SHOT, Token::OnSurfaceMuted));
         right.push(separator());
         right.push(clock_block(clock));
@@ -1060,30 +1128,22 @@ fn readout(icon: IconId, icon_tint: Token, value: String, click: Option<u32>) ->
     }
 }
 
-fn volume_readout(v: u8) -> Widget {
-    let icon = if v == 0 { IconId::SpeakerX }
-               else if v <= 50 { IconId::SpeakerLow }
-               else { IconId::SpeakerHigh };
-    readout(icon, Token::OnSurfaceMuted, alloc::format!("{}%", v), Some(VOL_OPEN))
-}
-
-fn battery_readout(bat: i32) -> Widget {
-    let percent = (bat & 0xFF) as u8;
-    let status = (bat >> 8) & 0xFF; // 0=discharge 1=charge 2=full 3=plugged-idle
-    let icon = match status {
-        1 => IconId::BatteryCharging,
-        2 => IconId::BatteryFull,
-        3 => IconId::Plug,
-        _ => match percent {
-            0..=10  => IconId::BatteryWarning,
-            11..=30 => IconId::BatteryLow,
-            31..=55 => IconId::BatteryMedium,
-            56..=85 => IconId::BatteryHigh,
-            _       => IconId::BatteryFull,
-        },
+/// A status item on the bar: its icon, coloured by its state, and its
+/// text; clickable when it names a tool.
+fn status_readout(item: &StatusItem, i: u32) -> Widget {
+    let tint = match item.state {
+        ST_ATTENTION => Token::Danger,
+        ST_OFF => Token::OnSurfaceFaint,
+        _ => Token::OnSurfaceMuted,
     };
-    let tint = if status == 0 && percent <= 10 { Token::Danger } else { Token::OnSurfaceMuted };
-    readout(icon, tint, alloc::format!("{}%", percent), None)
+    let click = (!item.opens.is_empty() || item.owner == "kernel" && item.key == "volume")
+        .then_some(STATUS_BASE + i);
+    let mut w = readout(item.icon, tint, item.text.into(), click);
+    if let Widget::Row { modifiers, children, .. } = &mut w {
+        modifiers.push(Modifier::NodeId(NodeId(NODE_STATUS_BASE + i)));
+        if item.text.is_empty() { children.truncate(1); }
+    }
+    w
 }
 
 /// Time over date, right-aligned.

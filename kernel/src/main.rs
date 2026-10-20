@@ -42,6 +42,7 @@ mod interrupts;
 mod irq;
 mod ioapic;
 mod notify;
+mod status;
 mod input;
 mod net;
 mod audio;

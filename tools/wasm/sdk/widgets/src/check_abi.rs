@@ -101,6 +101,14 @@ const _: () = {
     assert!(IconId::ArrowCounterClockwise.0 == 50);
     assert!(IconId::PlayCircle.0        == 51);
     assert!(IconId::Fire.0              == 52);
+    assert!(IconId::SquaresFour.0      == 53);
+    assert!(IconId::SlidersHorizontal.0 == 54);
+    assert!(IconId::WifiHigh.0         == 55);
+    assert!(IconId::WifiMedium.0       == 56);
+    assert!(IconId::WifiLow.0          == 57);
+    assert!(IconId::WifiNone.0         == 58);
+    assert!(IconId::WifiSlash.0        == 59);
+    assert!(IconId::Network.0          == 60);
 
     // Align / Axis
     assert!(Align::Start   as u8 == 0);

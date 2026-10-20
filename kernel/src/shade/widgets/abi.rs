@@ -241,6 +241,12 @@ icon_ids! {
     Fire                  = 52,
     SquaresFour           = 53,
     SlidersHorizontal     = 54,
+    WifiHigh              = 55,
+    WifiMedium            = 56,
+    WifiLow               = 57,
+    WifiNone              = 58,
+    WifiSlash             = 59,
+    Network               = 60,
 }
 
 // ── Accessibility roles ───────────────────────────────────────────────

@@ -701,6 +701,22 @@ host_imports! {
     // standardised SBS-over-SMBus path for SBS laptops.
     ctx fn npk_battery() -> i32;
 
+    // Status items (docs/plan/STATUS_ITEMS.md).
+    // npk_status_set(key, icon, value, flags, text, opens) -> 0 / -1:
+    // create or replace the caller's item `key`; flags = state | place << 8.
+    // No right needed: plain data under the caller's own name, bounded.
+    mem fn npk_status_set(key_ptr: i32, key_len: i32, icon: i32, value: i32, flags: i32,
+        text_ptr: i32, text_len: i32, opens_ptr: i32, opens_len: i32) -> i32;
+    // npk_status_clear(key) -> 0 / -1
+    mem fn npk_status_clear(key_ptr: i32, key_len: i32) -> i32;
+    // npk_status_list(buf, max) -> bytes / -1 (needed size when larger);
+    // RENDER. Format in `status::serialize`.
+    mem fn npk_status_list(buf_ptr: i32, max: i32) -> i32;
+    // npk_launch_at(app, arg, anchor) -> 0 / -1: `npk_launch`, and the
+    // app's first overlay is placed next to node `anchor` of the caller's
+    // window, light-dismissed. EXECUTE.
+    mem fn npk_launch_at(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32, anchor: i32) -> i32;
+
     // ── AML battery driver (aml.wasm) host functions, HARDWARE-gated ─────
     // npk_acpi_dsdt(buf_ptr, buf_max) -> i32: copy the DSDT (firmware AML)
     // into the caller's buffer; returns the DSDT length. If it exceeds

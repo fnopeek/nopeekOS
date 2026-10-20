@@ -1,18 +1,18 @@
-//! volume — a centred overlay volume slider, launched by the bar.
+//! volume — the master volume as a small card next to the panel's
+//! speaker.
 //!
-//! drun-style: declares itself a modal overlay (`npk_window_set_overlay` +
-//! `npk_window_set_modal`), renders a clickable level track, adjusts the
-//! kernel master volume, and closes on Esc / the X / picking nothing. No
-//! kernel support beyond the generic overlay host fns — the bar just
-//! `launch`es this module on a speaker click.
+//! deck opens it with `npk_launch_at`; the kernel places the overlay next
+//! to the item that was clicked and closes it on a click outside
+//! (docs/plan/STATUS_ITEMS.md). The speaker mutes, the slider sets the
+//! level while it is dragged, Esc closes. A level changed elsewhere (keys,
+//! another app) shows here as it happens.
 
 #![no_std]
 
 extern crate alloc;
 
-use alloc::string::ToString;
-use alloc::vec::Vec;
 
+use nopeek_widgets::prefab;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::*;
 
@@ -29,17 +29,17 @@ static NPK_CAPS: [u8; 2] = [caps::READ | caps::EXEC | caps::RENDER, caps::ext::S
 
 use nopeek_widgets::host;
 
-// The two overlay calls only this app makes; the shared ones are in
+// The overlay calls only this app makes; the shared ones are in
 // `nopeek_widgets::host`.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_window_set_overlay_at(x: i32, y: i32, w: i32, h: i32) -> i32;
+    fn npk_window_set_overlay(w: i32, h: i32) -> i32;
     fn npk_window_set_light_dismiss(on: i32) -> i32;
 }
 
-fn set_overlay_at(x: i32, y: i32, w: i32, h: i32) {
+fn set_overlay(w: i32, h: i32) {
     // SAFETY: FFI without pointers.
-    unsafe { npk_window_set_overlay_at(x, y, w, h) };
+    unsafe { npk_window_set_overlay(w, h) };
 }
 
 fn set_light_dismiss(on: bool) {
@@ -73,13 +73,17 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 }
 
 // ── State + actions ──────────────────────────────────────────────────
-const MUTE: u32  = 2;
-const VOL_SET_BASE: u32 = 100;
-const VOL_STEPS: u32 = 20;          // 5 %-steps
 
-// Overlay size (px). Sized to the header + a 20-cell track.
-const W: i32 = 340;
-const H: i32 = 92;
+const MUTE: u32 = 2;
+const LEVEL: u32 = 3;
+
+// Card size (logical px): a 28 px button row and the card's padding.
+const W: i32 = 280;
+const H: i32 = 44;
+
+// Wake masks for `host::wait` (docs/plan/CORES_AND_EVENTS.md).
+const WAIT_INPUT: u32 = 1;
+const WAIT_STATE: u32 = 32;
 
 struct Volume {
     vol: u8,
@@ -90,55 +94,33 @@ struct Volume {
 }
 
 fn render(v: &Volume) -> Widget {
-    let vol = v.vol as u32;
-    let step = 100 / VOL_STEPS;
-
-    // The slider track: VOL_STEPS clickable cells, filled (Accent) up to the
-    // current level, muted past it. No drag (the ABI gives clicks), so the
-    // cells double as the slider's discrete stops.
-    let mut cells: Vec<Widget> = Vec::with_capacity(VOL_STEPS as usize);
-    for i in 0..VOL_STEPS {
-        let level = (i + 1) * step;
-        let tok = if level <= vol { Token::Accent } else { Token::SurfaceMuted };
-        cells.push(Widget::Text {
-            content: " ".to_string(),     // a space gives the cell its height
-            style: TextStyle::Body,
-            modifiers: alloc::vec![
-                Modifier::MinWidth(12),
-                Modifier::Background(tok),
-                Modifier::Rounded(Radius::Sm.as_u8()),
-                Modifier::OnClick(ActionId(VOL_SET_BASE + i)),
-            ],
-        });
-    }
-    let track = Widget::Row {
-        children: cells,
-        spacing: Spacing::Xs.as_u16(),
-        align: Align::Center,
-        modifiers: Vec::new(),
-    };
-
-    let icon = if vol == 0 { IconId::SpeakerX }
-               else if vol <= 50 { IconId::SpeakerLow }
+    let icon = if v.vol == 0 { IconId::SpeakerX }
+               else if v.vol <= 50 { IconId::SpeakerLow }
                else { IconId::SpeakerHigh };
-    // Speaker → toggle mute. Esc / click-outside close (no chrome button).
-    let header = Widget::Row {
+    Widget::Row {
         children: alloc::vec![
-            Widget::Icon { id: icon, size: 20,
-                modifiers: alloc::vec![Modifier::OnClick(ActionId(MUTE))] },
-            Widget::Text { content: alloc::format!("  {}%", vol),
-                style: TextStyle::Body, modifiers: Vec::new() },
+            prefab::icon_button(icon, 16, Some(ActionId(MUTE)), None),
+            Widget::Slider {
+                value: (v.vol as u32 * SLIDER_MAX as u32 / 100) as u16,
+                on_change: ActionId(LEVEL),
+                modifiers: alloc::vec![Modifier::Flex(1)],
+            },
+            Widget::Text {
+                content: alloc::format!("{}%", v.vol),
+                style: TextStyle::Mono,
+                modifiers: alloc::vec![Modifier::MinWidth(36), Modifier::Tint(Token::OnSurfaceMuted)],
+            },
         ],
         spacing: Spacing::Sm.as_u16(),
         align: Align::Center,
-        modifiers: Vec::new(),
-    };
-
-    Widget::Column {
-        children: alloc::vec![header, track],
-        spacing: Spacing::Sm.as_u16(),
-        align: Align::Stretch,
-        modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
+        modifiers: alloc::vec![
+            Modifier::Background(Token::SurfaceElevated),
+            Modifier::Border { token: Token::Border, width: 1, radius: Radius::Lg.as_u8() },
+            Modifier::Rounded(Radius::Lg.as_u8()),
+            Modifier::PaddingXY { x: Padding::Sm.as_u16(), y: Padding::Sm.as_u16() },
+            Modifier::MinWidth(W as u16),
+            Modifier::MinHeight(H as u16),
+        ],
     }
 }
 
@@ -162,23 +144,19 @@ fn set_volume(st: &mut Volume, level: u8) {
 fn handle(st: &mut Volume, ev: Event) -> Outcome {
     match ev {
         Event::Key(KeyCode::Escape) => Outcome::Exit,
-        Event::Action(ActionId(id)) => {
-            if id == MUTE {
-                let v = host::audio_volume().unwrap_or(0);
-                if v > 0 {
-                    st.pre_mute = v as u8;
-                    set_volume(st, 0);
-                } else {
-                    set_volume(st, st.pre_mute.max(10));
-                }
-                Outcome::Rerender
-            } else if id >= VOL_SET_BASE && id < VOL_SET_BASE + VOL_STEPS {
-                let n = id - VOL_SET_BASE;
-                set_volume(st, ((n + 1) * (100 / VOL_STEPS)) as u8);
-                Outcome::Rerender
+        Event::Action(ActionId(MUTE)) => {
+            if st.vol > 0 {
+                st.pre_mute = st.vol;
+                set_volume(st, 0);
             } else {
-                Outcome::Idle
+                set_volume(st, st.pre_mute.max(10));
             }
+            Outcome::Rerender
+        }
+        // The level follows the hand; the ear is the feedback.
+        Event::Slide { action: ActionId(LEVEL), value, .. } => {
+            set_volume(st, (value as u32 * 100 / SLIDER_MAX as u32) as u8);
+            Outcome::Rerender
         }
         _ => Outcome::Idle,
     }
@@ -192,26 +170,30 @@ pub extern "C" fn _start() {
         pre_mute: if vol > 0 { vol } else { 50 },
         heap_base: ALLOCATOR.mark(),
     };
-    // Top-right, just below the bar (≈8 px under the ~40 px strut). The
-    // compositor clamps to the screen. Light-dismiss = close on a click
-    // outside; Esc closes too.
-    let screen_w = (host::screen_size().0 as i32).max(W + 20);
-    let x = screen_w - W - 12;
-    set_overlay_at(x, 48, W, H);
+    // Placed by the kernel next to the item deck was clicked on; started any
+    // other way it is centred. Light-dismiss either way.
+    set_overlay(W, H);
     set_light_dismiss(true);
-
     commit_tree(&st);
 
     let mut event_buf = [0u8; EVENT_BUF_SIZE];
     loop {
-        match poll_event(&mut event_buf) {
-            PollResult::Event(ev) => match handle(&mut st, ev) {
-                Outcome::Idle => {}
-                Outcome::Rerender => commit_tree(&st),
-                Outcome::Exit => { host::close_widget(); return; }
-            },
-            PollResult::Empty => host::sleep_ms(16),
-            PollResult::WindowGone => return,
+        let mut redraw = false;
+        loop {
+            match poll_event(&mut event_buf) {
+                PollResult::Event(ev) => match handle(&mut st, ev) {
+                    Outcome::Idle => {}
+                    Outcome::Rerender => redraw = true,
+                    Outcome::Exit => { host::close_widget(); return; }
+                },
+                PollResult::Empty => break,
+                PollResult::WindowGone => return,
+            }
         }
+        // Changed elsewhere (keys, another app): show it.
+        let now = host::audio_volume().unwrap_or(0).min(100) as u8;
+        if now != st.vol { st.vol = now; redraw = true; }
+        if redraw { commit_tree(&st); }
+        host::wait(WAIT_INPUT | WAIT_STATE, -1);
     }
 }

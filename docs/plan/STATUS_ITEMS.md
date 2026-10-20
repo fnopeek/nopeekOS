@@ -1,6 +1,10 @@
 # STATUS_ITEMS.md — the panel shows, the tools act
 
-Status: **plan** (2026-10-20). Nothing built.
+Status: **steps 1–3 built** (2026-10-20, kernel 0.660.0, deck 0.4.0,
+volume 0.3.0), device test open. The kernel's own items (net, volume,
+battery) are built from the live state when the list is read, not stored.
+Net shows WLAN (`WifiHigh` / `WifiSlash`) or wired (`Network`); signal
+strength comes with wifid. Step 4 (quick settings) and 5 (WLAN tool) open.
 
 ## Why
 

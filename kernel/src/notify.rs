@@ -23,6 +23,9 @@ pub const TOPIC_VOLUME: u32 = 1 << 2;
 /// a module pick up an edited config at once instead of re-reading it on
 /// a timer.
 pub const TOPIC_CONFIG: u32 = 1 << 3;
+/// The status items changed (`status`), or the network link a kernel item
+/// shows.
+pub const TOPIC_STATUS: u32 = 1 << 4;
 
 /// npkFS changed `path`: notify `TOPIC_CONFIG` if it is a config file.
 pub fn path_changed(path: &str) {

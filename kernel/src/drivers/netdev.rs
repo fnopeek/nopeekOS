@@ -151,6 +151,7 @@ pub fn set_wasm_nic_link_state(carrier: bool, dormant: bool) {
     let was_d = WASM_DORMANT.swap(dormant, Ordering::AcqRel);
     WASM_NIC.lock().link_up = carrier && !dormant;
     if was_c != carrier || was_d != dormant {
+        crate::notify::notify(crate::notify::TOPIC_STATUS);
         crate::kprintln!("[npk] wlan: traeger {} -> {}, dormant {} -> {} (takt {}) — sendbar: {}",
             was_c as u8, carrier as u8, was_d as u8, dormant as u8,
             crate::interrupts::ticks(), (carrier && !dormant) as u8);
@@ -201,7 +202,10 @@ static PREFER_WIFI: AtomicBool = AtomicBool::new(false);
 /// deadlocks Core 0. A USB-LAN NIC's cable state is inferred from presence and
 /// the WiFi link instead; see active().
 pub fn refresh_link_state() {
-    INTEL_LINK.store(intel_nic::link_up(), Ordering::Relaxed);
+    let up = intel_nic::link_up();
+    if INTEL_LINK.swap(up, Ordering::Relaxed) != up {
+        crate::notify::notify(crate::notify::TOPIC_STATUS);
+    }
     PREFER_WIFI.store(
         crate::config::get("net_prefer")
             .map(|v| v.trim().eq_ignore_ascii_case("wifi"))

@@ -284,8 +284,16 @@ pub(crate) fn npk_window_set_overlay(ctx: &mut HostState, w: i32, h: i32) -> i32
         wid = new_id;
     }
 
+    let anchor = take_launch_anchor(&ctx.module_name);
     let ok = crate::shade::with_compositor(|comp| {
         let ok = comp.set_overlay(crate::shade::WindowId(wid), w as u32, h as u32);
+        if ok {
+            if let Some(rect) = anchor {
+                let id = crate::shade::WindowId(wid);
+                comp.place_popup(id, rect, w as u32, h as u32, phys(LAUNCH_GAP) as u32);
+                comp.set_light_dismiss(id, true);
+            }
+        }
         // The overlay path always wants this window focused — drun
         // and any other launcher style app drives keyboard from
         // here. The branch above already focuses, but a repeated
@@ -501,14 +509,7 @@ pub(crate) fn npk_battery(ctx: &mut HostState) -> i32 {
     if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
         return -1;
     }
-    let cached = crate::battery::cached();
-    if cached >= 0 {
-        return cached;
-    }
-    match crate::battery::read() {
-        Some(b) => ((b.status as i32) << 8) | b.percent as i32,
-        None => -1,
-    }
+    crate::status::battery_packed().unwrap_or(-1)
 }
 
 /// Reads one byte from an ACPI SystemMemory operation region.
@@ -3960,6 +3961,73 @@ pub(crate) fn npk_open(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_le
     crate::shade::focus_window(win); // bring the editor to the front
     crate::shade::request_render();
     if spawn_on_worker_inner(bytes, module_cap, 255, &app, false, win.0, arg) { 0 } else { -1 }
+}
+
+/// Where a tool started by `npk_launch_at` is to appear: the anchor's
+/// screen rectangle, keyed by module name, taken by the app's first
+/// `npk_window_set_overlay`. An entry older than `ANCHOR_TICKS` is stale.
+static LAUNCH_ANCHORS: spin::Mutex<alloc::vec::Vec<(String, (i32, i32, u32, u32), u64)>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
+const ANCHOR_TICKS: u64 = 500;
+/// Logical px between the anchor and the tool's window.
+const LAUNCH_GAP: i32 = 8;
+
+fn take_launch_anchor(module: &str) -> Option<(i32, i32, u32, u32)> {
+    let now = crate::interrupts::ticks();
+    let mut v = LAUNCH_ANCHORS.lock();
+    v.retain(|e| now.saturating_sub(e.2) <= ANCHOR_TICKS);
+    let i = v.iter().position(|e| e.0 == module)?;
+    Some(v.remove(i).1)
+}
+
+pub(crate) fn npk_launch_at(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_len: i32,
+    arg_ptr: i32, arg_len: i32, anchor: i32) -> i32
+{
+    let Some(app) = read_str(mem, app_ptr, app_len) else { return -1 };
+    // The anchor is a node of the caller's own window, resolved now.
+    let rect = (ctx.widget_window_id != 0).then(||
+        crate::shade::widgets::anchor_rect(ctx.widget_window_id, anchor as u32)).flatten();
+    let r = npk_launch(mem, ctx, app_ptr, app_len, arg_ptr, arg_len);
+    if r == 0 {
+        if let Some(rect) = rect {
+            let mut v = LAUNCH_ANCHORS.lock();
+            v.retain(|e| e.0 != app);
+            v.push((app, rect, crate::interrupts::ticks()));
+        }
+    }
+    r
+}
+
+pub(crate) fn npk_status_set(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32,
+    icon: i32, value: i32, flags: i32, text_ptr: i32, text_len: i32, opens_ptr: i32, opens_len: i32) -> i32
+{
+    let Some(key) = read_str(mem, key_ptr, key_len) else { return -1 };
+    if key.is_empty() || key.len() > crate::status::MAX_KEY { return -1; }
+    let text = if text_len > 0 { read_str(mem, text_ptr, text_len) } else { Some(String::new()) };
+    let Some(text) = text.filter(|t| t.len() <= crate::status::MAX_TEXT) else { return -1 };
+    let opens = if opens_len > 0 { read_str(mem, opens_ptr, opens_len) } else { Some(String::new()) };
+    let Some(opens) = opens.filter(|o| o.len() <= 32 && !o.contains('/')) else { return -1 };
+    let Some(waker) = crate::smp::fiber::current_waker() else { return -1 };
+    if !(0..=u16::MAX as i32).contains(&icon) { return -1; }
+    let ok = crate::status::set(&ctx.module_name, waker, &key, icon as u16, value,
+        (flags & 0xFF) as u8, ((flags >> 8) & 0xFF) as u8, &text, &opens);
+    if ok { 0 } else { -1 }
+}
+
+pub(crate) fn npk_status_clear(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32) -> i32 {
+    let Some(key) = read_str(mem, key_ptr, key_len) else { return -1 };
+    crate::status::clear(&ctx.module_name, &key);
+    0
+}
+
+pub(crate) fn npk_status_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
+        return -1;
+    }
+    let bytes = crate::status::serialize();
+    if glen(max).is_none_or(|m| bytes.len() > m) { return bytes.len() as i32; }
+    if write_bytes(mem, buf_ptr, &bytes) < 0 { return -1; }
+    bytes.len() as i32
 }
 
 pub(crate) fn npk_launch(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32 {

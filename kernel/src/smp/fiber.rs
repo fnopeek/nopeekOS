@@ -237,6 +237,7 @@ fn alloc_waker(cid: usize, movable: bool) -> Waker {
 
 fn free_waker(w: Waker) {
     crate::notify::forget(w);
+    crate::status::forget(w);
     if let Some(slot) = slot(w) {
         slot.signals.store(0, Ordering::Relaxed);
         slot.used.store(false, Ordering::Release);
