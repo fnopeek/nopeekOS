@@ -6,7 +6,9 @@
 //! initializers (unlisted fields stay at their zero default).
 #![allow(dead_code)]
 
-use crate::dml_structs::_vcs_dpi_ip_params_st;
+use crate::dml_structs::{
+    _vcs_dpi_ip_params_st, _vcs_dpi_soc_bounding_box_st, _vcs_dpi_voltage_scaling_st,
+};
 
 /// `struct _vcs_dpi_ip_params_st dcn2_1_ip` (dcn20_fpu.c).
 pub fn dcn2_1_ip() -> _vcs_dpi_ip_params_st {
@@ -79,4 +81,73 @@ pub fn dcn2_1_ip() -> _vcs_dpi_ip_params_st {
     p.ptoi_supported = 0;
     p.number_of_cursors = 1;
     p
+}
+
+/// One clock-limit state of `dcn2_1_soc` (the fields the data sets; the rest
+/// stay zero).
+fn cl(state: i32, dcfclk_mhz: f64, fabricclk_mhz: f64, dispclk_mhz: f64,
+      dppclk_mhz: f64, phyclk_mhz: f64, socclk_mhz: f64, dscclk_mhz: f64,
+      dram_speed_mts: f64) -> _vcs_dpi_voltage_scaling_st {
+    _vcs_dpi_voltage_scaling_st {
+        state, dcfclk_mhz, fabricclk_mhz, dispclk_mhz, dppclk_mhz, phyclk_mhz,
+        socclk_mhz, dscclk_mhz, dram_speed_mts, ..Default::default()
+    }
+}
+
+/// `struct _vcs_dpi_soc_bounding_box_st dcn2_1_soc` (dcn20_fpu.c).
+pub fn dcn2_1_soc() -> _vcs_dpi_soc_bounding_box_st {
+    let mut clock_limits =
+        core::array::from_fn(|_| _vcs_dpi_voltage_scaling_st::default());
+    //        state  dcfclk   fabric   disp     dpp      phy     soc     dsc      dram
+    clock_limits[0] = cl(0, 400.00,  400.0,   600.0,   400.00,  600.0,  278.0, 205.67,  1600.0);
+    clock_limits[1] = cl(1, 464.52,  800.0,   654.55,  626.09,  600.0,  278.0, 205.67,  1600.0);
+    clock_limits[2] = cl(2, 514.29,  933.0,   757.89,  685.71,  600.0,  278.0, 287.67,  1866.0);
+    clock_limits[3] = cl(3, 576.00, 1067.0,   847.06,  757.89,  600.0,  715.0, 318.334, 2134.0);
+    clock_limits[4] = cl(4, 626.09, 1200.0,   900.00,  847.06,  810.0,  953.0, 300.0,   2400.0);
+    clock_limits[5] = cl(5, 685.71, 1333.0,  1028.57,  960.00,  810.0,  278.0, 342.86,  2666.0);
+    clock_limits[6] = cl(6, 757.89, 1467.0,  1107.69, 1028.57,  810.0,  715.0, 369.23,  3200.0);
+    clock_limits[7] = cl(7, 847.06, 1600.0,  1395.0,  1285.00, 1325.0,  953.0, 489.0,   4266.0);
+    // Extra state, no dispclk ramping.
+    clock_limits[8] = cl(8, 847.06, 1600.0,  1395.0,  1285.0,  1325.0,  953.0, 489.0,   4266.0);
+
+    _vcs_dpi_soc_bounding_box_st {
+        clock_limits,
+        sr_exit_time_us: 12.5,
+        sr_enter_plus_exit_time_us: 17.0,
+        urgent_latency_us: 4.0,
+        urgent_latency_pixel_data_only_us: 4.0,
+        urgent_latency_pixel_mixed_with_vm_data_us: 4.0,
+        urgent_latency_vm_data_only_us: 4.0,
+        urgent_out_of_order_return_per_channel_pixel_only_bytes: 4096,
+        urgent_out_of_order_return_per_channel_pixel_and_vm_bytes: 4096,
+        urgent_out_of_order_return_per_channel_vm_only_bytes: 4096,
+        pct_ideal_dram_sdp_bw_after_urgent_pixel_only: 80.0,
+        pct_ideal_dram_sdp_bw_after_urgent_pixel_and_vm: 75.0,
+        pct_ideal_dram_sdp_bw_after_urgent_vm_only: 40.0,
+        max_avg_sdp_bw_use_normal_percent: 60.0,
+        max_avg_dram_bw_use_normal_percent: 100.0,
+        writeback_latency_us: 12.0,
+        max_request_size_bytes: 256,
+        dram_channel_width_bytes: 4.0,
+        fabric_datapath_to_dcn_data_return_bytes: 32.0,
+        dcn_downspread_percent: 0.5,
+        downspread_percent: 0.38,
+        dram_page_open_time_ns: 50.0,
+        dram_rw_turnaround_time_ns: 17.5,
+        dram_return_buffer_per_channel_bytes: 8192.0,
+        round_trip_ping_latency_dcfclk_cycles: 128,
+        urgent_out_of_order_return_per_channel_bytes: 4096,
+        channel_interleave_bytes: 256,
+        num_banks: 8,
+        num_chans: 4,
+        vmm_page_size_bytes: 4096,
+        dram_clock_change_latency_us: 23.84,
+        return_bus_width_bytes: 64,
+        dispclk_dppclk_vco_speed_mhz: 3600.0,
+        xfc_bus_transport_time_us: 4.0,
+        xfc_xbuf_latency_tolerance_us: 4.0,
+        use_urgent_burst_bw: 1,
+        num_states: 8,
+        ..Default::default()
+    }
 }
