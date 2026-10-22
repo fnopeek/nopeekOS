@@ -1121,6 +1121,8 @@ host_imports! {
     mem fn npk_gpudev_job_data(seq: i32, offset: i32, out_ptr: i32, len: i32) -> i32;
     // npk_gpudev_bo_bound(id, gpu_addr) -> 0 / -1
     ctx fn npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
+    // npk_gpudev_bo_gpu_only(id) -> 0 / -1; its pages hold a picture only the card reads
+    ctx fn npk_gpudev_bo_gpu_only(id: i32) -> i32;
     // npk_gpudev_ready(caps) -> 0 / -1; bit 0 copies, bit 1 scenes
     ctx fn npk_gpudev_ready(caps: i32) -> i32;
     // npk_gpudev_poll(buf_ptr, max) -> jobs / -1; 32 bytes each

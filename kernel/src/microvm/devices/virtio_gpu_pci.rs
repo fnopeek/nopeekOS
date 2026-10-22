@@ -221,6 +221,11 @@ const MAX_BLOB_BYTES: u64 = MAX_RESOURCE_DIM as u64 * MAX_RESOURCE_DIM as u64 * 
 pub const HOLD_MAX_MS: u64 = 40;
 /// How long giving a blob's pages back waits for gpudev to unbind them.
 const RELEASE_WAIT_MS: u64 = 200;
+/// Frames of one output waiting for their GPU work (`Latch`); a further
+/// one replaces the newest.
+const LATCHES: usize = 4;
+/// Every how many presented GPU frames the wait for their work is logged.
+const LATCH_LOG_EVERY: u32 = 600;
 
 impl VirtQueue {
     fn desc_gpa(&self)   -> u64 { ((self.desc_hi   as u64) << 32) | self.desc_lo   as u64 }
@@ -306,11 +311,27 @@ struct Held {
     response: Vec<u8>,
     resp_descs: Vec<(u64, u32)>,
     blob: Option<Arc<ForeignPixels>>,
+    /// The frame this FLUSH shows waits for its GPU work (`Latch::id`):
+    /// until it is shown, `blob` is still on screen.
+    latch: Option<u64>,
     deadline: u64,
     /// When it was kept back (TSC).
     since: u64,
     /// The refresh it completes at, at the earliest (TSC).
     not_before: u64,
+}
+
+/// A guest GPU frame flushed while work queued before its FLUSH was not
+/// done. It reaches its window once that work is (`present_latched`);
+/// until then the frame before it stays.
+struct Latch {
+    id: u64,
+    wid: u32,
+    view: ForeignView,
+    dmg: (u32, u32, u32, u32),
+    /// (context, ring, fence) still to be reached.
+    work: Vec<(u32, u32, u64)>,
+    since: u64,
 }
 
 /// A SUBMIT_3D chain taken off the controlq (`take_pending_submit`).
@@ -397,6 +418,16 @@ pub struct VirtioGpu {
     blob_damage: [Vec<(u64, (u32, u32, u32, u32))>; MAX_OUTPUTS],
     /// The blob a FLUSH being served must wait for (`Held`).
     hold_for: Option<Arc<ForeignPixels>>,
+    /// Per output, frames waiting for their GPU work, oldest first.
+    latch: [alloc::collections::VecDeque<Latch>; MAX_OUTPUTS],
+    /// The latch the FLUSH being served queued.
+    flush_latch: Option<u64>,
+    next_latch: u64,
+    /// GPU frames presented, those that waited, and the longest wait (us)
+    /// since the last log line.
+    latch_shown: u32,
+    latch_waited: u32,
+    latch_max_us: u64,
     /// A SUBMIT_3D taken off the controlq whose ccmds run outside the
     /// device lock (`gpu_backend`); serving stops behind it until
     /// `finish_submit`. `submit_running` while its ccmds run.
@@ -455,6 +486,12 @@ impl VirtioGpu {
             last_blob: [const { None }; MAX_OUTPUTS],
             blob_damage: [const { Vec::new() }; MAX_OUTPUTS],
             hold_for: None,
+            latch: [const { alloc::collections::VecDeque::new() }; MAX_OUTPUTS],
+            flush_latch: None,
+            next_latch: 1,
+            latch_shown: 0,
+            latch_waited: 0,
+            latch_max_us: 0,
             pending_submit: None,
             submit_running: false,
             held: None,
@@ -505,6 +542,7 @@ impl VirtioGpu {
     /// command type, and write the response into the driver-writable
     /// descriptor(s).
     fn service_controlq(&mut self, mem: &GuestMem) -> bool {
+        self.present_latched();
         // Nothing behind a SUBMIT_3D whose ccmds have not run yet.
         if self.pending_submit.is_some() || self.submit_running {
             return false;
@@ -514,8 +552,9 @@ impl VirtioGpu {
         let mut completed = self.complete_fences(mem);
         if let Some(h) = &self.held {
             let now = crate::interrupts::rdtsc();
-            let read = !super::gpu_backend::full_active() || h.blob.as_ref().is_none_or(|b| blob_unread(b))
-                || now >= h.deadline;
+            let shown = h.latch.is_none_or(|id| self.latch.iter().flatten().all(|l| l.id > id));
+            let read = !super::gpu_backend::full_active()
+                || (shown && (h.blob.as_ref().is_none_or(|b| blob_unread(b)) || now >= h.deadline));
             if now >= h.not_before && read {
                 let h = self.held.take().unwrap();
                 if h.blob.is_some() {
@@ -573,7 +612,7 @@ impl VirtioGpu {
                 let response = build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, p.flags, p.fence_id);
                 if p.flags & VIRTIO_GPU_FLAG_FENCE != 0 && !self.ctxs.fence_done(p.ctx_id, p.ring, fence) {
                     let held = Held {
-                        head: p.head, response, resp_descs: p.resp_descs, blob: None, deadline: 0,
+                        head: p.head, response, resp_descs: p.resp_descs, blob: None, latch: None, deadline: 0,
                         since: crate::interrupts::rdtsc(), not_before: 0,
                     };
                     self.fenced.push((held, p.ctx_id, p.ring, fence));
@@ -708,7 +747,8 @@ impl VirtioGpu {
                 None
             };
             let blob_frame = shown.is_some();
-            let blob = shown.filter(|b| !blob_unread(b));
+            let latch = if flush { self.flush_latch.take() } else { None };
+            let blob = shown.filter(|b| latch.is_some() || !blob_unread(b));
             if flush && !(blob_frame && blob.is_none()) {
                 let t = crate::interrupts::rdtsc();
                 let not_before = if blob_frame {
@@ -722,7 +762,7 @@ impl VirtioGpu {
                     at
                 };
                 self.held = Some(Held {
-                    head, response, resp_descs, blob,
+                    head, response, resp_descs, blob, latch,
                     deadline: now + crate::interrupts::tsc_freq() / 1000 * HOLD_MAX_MS,
                     since: now, not_before,
                 });
@@ -1316,7 +1356,8 @@ impl VirtioGpu {
         // frame changed: what is dropped is every frame's damage since this
         // blob was last read here. A blob not seen before, and every frame
         // until one is shown (the lit check reads it all), goes whole.
-        if self.ctxs.host3d.contains_key(&self.scanouts[k].resource_id) {
+        let native = self.ctxs.host3d.contains_key(&self.scanouts[k].resource_id);
+        if native {
             let whole = wid == 0 || !crate::shade::surface::has_frame(wid);
             let full = (0, 0, view.width, view.height);
             let own = clamp_rect(rect, view.width, view.height);
@@ -1346,6 +1387,7 @@ impl VirtioGpu {
                 k, wid, view.width, view.height, lit(), gb::presenting());
         }
         if !gb::should_present() {
+            self.latch[k].clear();
             // Not shown: a picture still shown from the blob before must not
             // change under the window once the guest writes that blob.
             if let Some(prev) = self.last_blob[k].take() {
@@ -1379,7 +1421,7 @@ impl VirtioGpu {
         let prev = self.last_blob[k].replace(view.pixels.clone());
         if wid != 0 {
             gb::note(gb::STAT_BLOB, 1);
-            crate::shade::surface::present_blob(wid, view, dmg);
+            self.present_when_done(k, wid, view, dmg, native);
         } else if !crate::microvm::vm_has_window() {
             let mut copy = crate::shade::buffers::PixelBuffer::new(view.width, view.height);
             view.copy_into(&mut copy, (0, 0, view.width, view.height));
@@ -1394,6 +1436,83 @@ impl VirtioGpu {
                 self.hold_for = Some(p);
             }
         }
+    }
+
+    /// Frame `view` of a native context goes to window `wid` once the
+    /// guest's GPU work queued before its FLUSH is done: Mesa names no
+    /// buffer to the guest kernel, so a guest flushes a frame whose drawing
+    /// may still run, and a scene reading it would wait for that drawing in
+    /// the module (implicit sync) past its deadline. A Linux compositor
+    /// latches a client's buffer only once its fences signaled.
+    fn present_when_done(&mut self, k: usize, wid: u32, view: ForeignView, dmg: (u32, u32, u32, u32), native: bool) {
+        let work = if native { self.ctxs.open_work() } else { Vec::new() };
+        if work.is_empty() && self.latch[k].is_empty() {
+            self.latch_shown += 1;
+            crate::shade::surface::present_blob(wid, view, dmg);
+            self.log_latches();
+            return;
+        }
+        let q = &mut self.latch[k];
+        let id = if q.len() == LATCHES {
+            // The newest one is never shown; whoever waits for it waits for
+            // this one, under its id.
+            let last = q.back_mut().unwrap();
+            *last = Latch { id: last.id, wid, view, dmg: union_rect(last.dmg, dmg), work, since: last.since };
+            last.id
+        } else {
+            let id = self.next_latch;
+            self.next_latch += 1;
+            q.push_back(Latch { id, wid, view, dmg, work, since: crate::interrupts::rdtsc() });
+            id
+        };
+        self.present_latched();
+        self.flush_latch = self.latch[k].iter().any(|l| l.id == id).then_some(id);
+    }
+
+    /// The newest frame of each output whose GPU work is done goes to its
+    /// window, with the damage of the frames before it it replaces. A frame
+    /// is done only after the ones before it: its fences are later.
+    fn present_latched(&mut self) {
+        for k in 0..MAX_OUTPUTS {
+            let ctxs = &mut self.ctxs;
+            let q = &mut self.latch[k];
+            let mut ready = None;
+            for l in q.iter_mut() {
+                l.work.retain(|&(c, r, f)| !ctxs.fence_done(c, r, f));
+                if !l.work.is_empty() {
+                    break;
+                }
+                ready = Some(l.id);
+            }
+            let Some(id) = ready else { continue };
+            let mut dmg = (0, 0, 0, 0);
+            let mut oldest = u64::MAX;
+            let mut shown = None;
+            while q.front().is_some_and(|l| l.id <= id) {
+                let l = q.pop_front().unwrap();
+                dmg = union_rect(dmg, l.dmg);
+                oldest = oldest.min(l.since);
+                shown = Some(l);
+            }
+            let l = shown.unwrap();
+            let us = super::gpu_backend::us_since(oldest);
+            self.latch_shown += 1;
+            self.latch_waited += 1;
+            self.latch_max_us = self.latch_max_us.max(us);
+            crate::shade::surface::present_blob(l.wid, l.view, dmg);
+            self.log_latches();
+        }
+    }
+
+    fn log_latches(&mut self) {
+        if self.latch_shown < LATCH_LOG_EVERY {
+            return;
+        }
+        kprintln!("[gpu] {} guest GPU frames shown, {} waited for their drawing, longest {} us",
+            self.latch_shown, self.latch_waited, self.latch_max_us);
+        self.latch_shown = 0;
+        self.latch_waited = 0;
+        self.latch_max_us = 0;
     }
 
     /// The guest gives resource `rid`'s blob pages back (or replaces it):
@@ -1415,6 +1534,9 @@ impl VirtioGpu {
         }
         if self.hold_for.as_ref().is_some_and(|b| b.serial == serial) {
             self.hold_for = None;
+        }
+        for q in self.latch.iter_mut() {
+            q.retain(|l| l.view.pixels.serial != serial);
         }
         if !crate::shade::surface::detach_blob(serial) {
             kprintln!("[gpu] a reader kept a guest frame that is being given back");
@@ -1472,6 +1594,10 @@ impl VirtioGpu {
         }
         self.held = None;
         self.hold_for = None;
+        for q in self.latch.iter_mut() {
+            q.clear();
+        }
+        self.flush_latch = None;
         let done = self.wait_released(RELEASE_WAIT_MS);
         if !done {
             kprintln!("[gpu] {} guest frame(s) still bound on the GPU", self.retired.len());

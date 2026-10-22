@@ -12,7 +12,9 @@
 //! copied at all: the frame stays in guest RAM, the GPU composes from it
 //! there (`front_in_place`), and only a CPU composite copies what it needs.
 //! Before the guest may write or free such a frame again, `detach_blob`
-//! turns every picture still shown from it into a copy.
+//! turns every picture still shown from it into a copy. A frame laid out
+//! for the card (`ForeignPixels::gpu_only`) is never copied: the CPU shows
+//! nothing of it rather than its tiles.
 //!
 //! Concurrency: the producer (virtio-gpu FLUSH on a vCPU core) and the
 //! consumer (Shade render on Core 0) run on different cores. Three
@@ -95,13 +97,22 @@ struct Frame {
 
 /// Keys of guest frames in guest pages (`Sources::with_source_keyed`).
 const KEY_BLOB: u64 = 1 << 63;
+/// The CPU met a frame only the card reads, and said so once.
+static GPU_ONLY_SAID: AtomicBool = AtomicBool::new(false);
 
 impl Frame {
     /// Bring `pixels` up to the blob frame: only what changed since the
     /// frame they hold, if `history` says that. False when there is no
-    /// memory for them; `held` is what all surfaces hold.
+    /// memory for them, or the frame is one only the card reads; `held` is
+    /// what all surfaces hold.
     fn materialize(&mut self, history: &[(u64, u32, u32, (u32, u32, u32, u32)); HISTORY], held: usize) -> bool {
         let Some((view, n)) = self.blob.as_ref() else { return true };
+        if view.pixels.gpu_only() {
+            if !GPU_ONLY_SAID.swap(true, Ordering::Relaxed) {
+                crate::kprintln!("[gpu] a guest frame laid out for the card is not composed on the CPU");
+            }
+            return false;
+        }
         let (w, h) = (view.width, view.height);
         if self.pixels.width() != w || self.pixels.height() != h {
             if !surface_fits(held.saturating_sub(self.pixels.len()), w as usize * h as usize) {
@@ -487,7 +498,8 @@ pub fn detach_blob(serial: u64) -> bool {
                 let ok = !shown || frame.materialize(&history, held);
                 held = (held + frame.pixels.len()).saturating_sub(before);
                 if !ok {
-                    // No memory for the copy: the window shows nothing.
+                    // No copy (no memory, or a frame only the card reads): the
+                    // window shows nothing.
                     frame.seq = 0;
                     frame.width = frame.pixels.width();
                     frame.height = frame.pixels.height();

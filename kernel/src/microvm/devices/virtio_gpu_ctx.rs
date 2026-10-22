@@ -102,6 +102,12 @@ pub trait Backend: Send {
     /// starts one after the ccmds of a SUBMIT_3D.
     fn submit_fence(&mut self, ctx: u32, ring: u32) -> u64;
     fn fence_done(&mut self, ctx: u32, ring: u32, fence: u64) -> bool;
+    /// The rings of `ctx` with work not yet done, and the fence each must
+    /// reach for the work queued now (`present_when_done`). Empty where
+    /// the card syncs a frame's readers with its writers on its own.
+    fn open_work(&mut self, _ctx: u32) -> Vec<(u32, u64)> {
+        Vec::new()
+    }
 }
 
 static BACKEND: Mutex<Option<Box<dyn Backend>>> = Mutex::new(None);
@@ -306,6 +312,21 @@ impl Contexts {
         }
         let shmem = c.shmem.and_then(|id| self.host3d.get(&id)).map(|r| r.pages.clone());
         Some(SubmitJob { handle: c.handle, ring, shmem })
+    }
+
+    /// Every context's work queued so far: (context, ring, fence). A
+    /// guest's GPU frame is complete once all of it is done, since Mesa
+    /// names no buffer to the guest kernel when it submits (no implicit
+    /// fences in the guest) and the guest flushes a frame right after the
+    /// submissions that draw it.
+    pub fn open_work(&mut self) -> Vec<(u32, u32, u64)> {
+        let mut guard = BACKEND.lock();
+        let Some(b) = guard.as_mut() else { return Vec::new() };
+        let mut out = Vec::new();
+        for (&id, c) in &self.ctxs {
+            out.extend(b.open_work(c.handle).into_iter().map(|(ring, fence)| (id, ring, fence)));
+        }
+        out
     }
 
     pub fn fence_done(&mut self, ctx_id: u32, ring: u32, fence: u64) -> bool {

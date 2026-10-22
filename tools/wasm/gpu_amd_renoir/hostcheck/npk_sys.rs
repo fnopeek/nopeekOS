@@ -706,6 +706,11 @@ pub fn gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32 {
     0
 }
 
+pub fn gpudev_bo_gpu_only(id: i32) -> i32 {
+    println!("gpudev bo {} only for the card", id);
+    0
+}
+
 pub fn gpudev_ready(caps: i32) -> i32 {
     println!("gpudev ready caps {}", caps);
     0

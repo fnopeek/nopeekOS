@@ -90,6 +90,7 @@ unsafe extern "C" {
     fn npk_gpudev_bo_pages(id: i32, first: i32, out_ptr: i32, max: i32) -> i32;
     fn npk_gpudev_job_data(seq: i32, offset: i32, out_ptr: i32, len: i32) -> i32;
     fn npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
+    fn npk_gpudev_bo_gpu_only(id: i32) -> i32;
     fn npk_gpudev_ready(ok: i32) -> i32;
     fn npk_gpudev_poll(buf_ptr: i32, max: i32) -> i32;
     fn npk_gpudev_complete(seq: i32, status: i32) -> i32;
@@ -211,6 +212,8 @@ plain! {
     fn irq_wait = npk_irq_wait(vector: i32, since: i64, timeout_ms: i32) -> i32;
     fn gpudev_register = npk_gpudev_register(version: i32) -> i32;
     fn gpudev_bo_bound = npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
+    /// Buffer `id`'s pages hold a picture only the card reads (tiled).
+    fn gpudev_bo_gpu_only = npk_gpudev_bo_gpu_only(id: i32) -> i32;
     fn gpudev_ready = npk_gpudev_ready(ok: i32) -> i32;
     fn gpudev_complete = npk_gpudev_complete(seq: i32, status: i32) -> i32;
     /// Fence counters of `ring` of native-context client `client`.

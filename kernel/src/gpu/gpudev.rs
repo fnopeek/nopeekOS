@@ -508,6 +508,23 @@ pub fn bo_bound(dev: PciAddr, id: i32, gpu_addr: i64) -> i32 {
     }
 }
 
+/// `npk_gpudev_bo_gpu_only`: buffer `id`, in foreign pages, holds a
+/// picture laid out for the card (a tiled guest frame the module imports
+/// through its texture unit); the CPU composes nothing from those pages.
+pub fn bo_gpu_only(dev: PciAddr, id: i32) -> i32 {
+    let st = STATE.lock();
+    if st.owner != Some(dev) {
+        return -1;
+    }
+    match st.page_lists.get(&(id as u32)) {
+        Some((list, _)) => {
+            list.set_gpu_only();
+            0
+        }
+        None => -1,
+    }
+}
+
 /// `npk_gpudev_ready`: with a passed self-test and the fixed buffers bound,
 /// the compositor's copies go to the module from the next frame on, and with
 /// `CAP_SCENE` its scenes may (`shade::gpu_scene` checks them first).
@@ -1441,6 +1458,13 @@ pub fn ring(dev: PciAddr, client: u32, ring: u32, submitted: u64, completed: u64
 /// What the module last reported for `client`'s `ring`.
 pub fn ring_state(client: u32, ring: u32) -> (u64, u64) {
     RINGS.lock().get(&(client, ring)).copied().unwrap_or((0, 0))
+}
+
+/// The rings of `client` with submissions not yet done, and the count
+/// each must reach for the work queued now to be done.
+pub fn open_rings(client: u32) -> Vec<(u32, u64)> {
+    RINGS.lock().range((client, 0)..=(client, u32::MAX)).filter(|&(_, &(s, c))| s > c).map(|(&(_, r), &(s, _))| (r, s))
+        .collect()
 }
 
 /// Native work waits for the module as an ioctl waits for its driver:

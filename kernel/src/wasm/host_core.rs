@@ -4422,6 +4422,14 @@ pub(crate) fn npk_gpudev_bo_bound(ctx: &mut HostState, id: i32, gpu_addr: i64) -
     }
 }
 
+/// `npk_gpudev_bo_gpu_only(id) -> 0 | -1`.
+pub(crate) fn npk_gpudev_bo_gpu_only(ctx: &mut HostState, id: i32) -> i32 {
+    match gpudev_device(ctx) {
+        Some(dev) => crate::gpu::gpudev::bo_gpu_only(dev, id),
+        None => -1,
+    }
+}
+
 /// `npk_gpudev_ready(caps) -> 0 | -1`.
 pub(crate) fn npk_gpudev_ready(ctx: &mut HostState, caps: i32) -> i32 {
     match gpudev_device(ctx) {

@@ -480,6 +480,11 @@ fn bo_add(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(), i3
         obj::amdgpu_bo_unref(adev, h);
         return Err(e);
     }
+    // A frame imported through the texture unit is tiled where it lies:
+    // the kernel must not compose it from its pages on the CPU.
+    if b.import.is_some() {
+        npk_sys::gpudev_bo_gpu_only(id as i32);
+    }
     npk_sys::gpudev_bo_bound(id as i32, b.va as i64);
     if let Some(o) = guest {
         svc.guest_bos.push((id, o));
@@ -503,11 +508,14 @@ fn pixels(adev: &amdgpu_device, l: &mut Line, b: &bo, o: &[u64]) {
 }
 
 /// The pixels at the start and the centre of `b`'s linear buffer `g`, as
-/// the import left them.
+/// the import left them. The buffer's VRAM need not be contiguous, so each
+/// is found through its resource, not from the start of it.
 fn linear_pixels(adev: &amdgpu_device, l: &mut Line, b: &bo, g: &compose::gem) {
+    let res = obj::bo(adev, g.bo).tbo.resource.as_ref();
     let centre = (b.height / 2) as u64 * b.pitch as u64 + (b.width / 2) as u64 * 4;
     for byte in [0, 4, 8, centre, centre + 4] {
-        l.s(" ").hex(crate::amdgpu_gart::kptr_r32(adev, g.k, byte));
+        let cur = crate::amdgpu_res_cursor::amdgpu_res_first(adev, res, byte, 4);
+        l.s(" ").hex(crate::amdgpu_gart::kptr_r32(adev, obj::amdgpu_kptr::vram(cur.start), 0));
     }
 }
 

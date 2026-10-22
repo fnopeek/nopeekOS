@@ -122,6 +122,9 @@ pub struct ForeignPixels {
     /// The pages are guest pages pinned for this object
     /// (`GuestMem::pin_page`); the pins go with it.
     pinned: bool,
+    /// The picture in them is laid out for the card (tiled, compressed):
+    /// only the GPU module reads it, a CPU copy would be scrambled.
+    gpu_only: core::sync::atomic::AtomicBool,
 }
 
 static FOREIGN_SERIAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
@@ -135,6 +138,7 @@ impl ForeignPixels {
             pages,
             readers: core::sync::atomic::AtomicU32::new(0),
             pinned: false,
+            gpu_only: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -162,6 +166,16 @@ impl ForeignPixels {
 
     pub fn unhold(&self) {
         self.readers.fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// The GPU module reads the picture through its layout
+    /// (`npk_gpudev_bo_gpu_only`); the CPU must not copy it.
+    pub fn set_gpu_only(&self) {
+        self.gpu_only.store(true, core::sync::atomic::Ordering::Release);
+    }
+
+    pub fn gpu_only(&self) -> bool {
+        self.gpu_only.load(core::sync::atomic::Ordering::Acquire)
     }
 }
 

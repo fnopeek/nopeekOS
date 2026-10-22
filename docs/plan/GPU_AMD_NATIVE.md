@@ -362,6 +362,73 @@ Offen, in dieser Reihenfolge:
 5. Import nur bei geaendertem Gastbild (heute jede Szene je gezeigtem
    Bild).
 6. Ein Lesefehler der Compositor-VM meldet sich als „retry page fault" und
-   flutet den IH-Ring, obwohl Renoir `noretry` hat — eigener Posten.
+   flutet den IH-Ring. **Korrektur 2026-10-22:** Renoir hat unter Linux
+   KEIN `noretry` — `amdgpu_gmc_noretry_set` fuehrt GC 9.3.0 nicht in der
+   Vorgabeliste, also `noretry = 0` wie im Modul. Retry-Faults sind hier
+   der Linux-Normalfall; offen bleibt nur, ob das Fluten Linux' Filter
+   (`amdgpu_gmc_filter_faults`) braucht.
 7. Hardware-Videodekodierung „unsupported" ist erwartet: VA-API auf AMD
    braucht VCN (Stufe 6).
+
+### 5.3 Wann der Wirt ein Gastbild liest (Kernel 0.664.0, Modul 0.17.0)
+
+Am Code nachgezaehlt statt am Geraet gemessen, und es erklaert das
+Kachelmuster beim Mausbewegen ohne Vermutung:
+
+- **Im Gast gibt es keine implizite Sync.** Mesa reicht bei der Einreichung
+  keine BO-Handles an den Gastkernel (`amdgpu_virtio.c`:
+  `.handles = NULL, .num_handles = 0`), die `dma_resv` eines Gastpuffers
+  bleibt also leer, und der Gastkernel wartet beim Flip eines
+  Nicht-Dumb-Puffers auch nicht auf den Flush-Zaun
+  (`virtio_gpu_plane_prepare_fb`: Zaun nur fuer `dumb` oder importierte).
+  Die einzige Sperre ist die des Wirts: die implizite Sync im Modul. Das
+  ist upstream genauso (virglrenderer + Wirts-amdgpu).
+- **Der Wirt nahm ein geflushtes Bild SOFORT.** Die naechste Szene nannte
+  es, ihr Job wartete im Modul (NE_OWNER, Linux-treu) auf die noch
+  laufende Gastarbeit — bei schwerem WebGL ueber `JOB_TIMEOUT_MS` = 100 ms.
+  Dann `stall`, und der Kernel komponierte auf der CPU.
+- **Der CPU-Weg kopierte das gekachelte Bild roh**
+  (`surface::with_front_keyed` → `Frame::materialize` → `copy_into`): das
+  ist das Kachelmuster. Und der verspaetete GPU-Job schrieb danach trotzdem
+  in den Schattenpuffer.
+
+Linux-Compositoren (Mutter, KWin) uebernehmen einen Clientpuffer erst, wenn
+seine Zaeune signalisiert sind; QEMU haelt die Steuerschlange an, bis die
+Anzeige das Bild verbraucht hat. Gebaut:
+
+1. **Kernel: ein Gastbild wird erst gezeigt, wenn seine Arbeit fertig ist.**
+   `VirtioGpu::present_when_done`: beim FLUSH eines nativen Bildes merkt
+   sich der Kernel je Kontext und Ring den Einreichungsstand
+   (`Contexts::open_work` → `gpudev::open_rings`) und uebergibt das Bild
+   `present_blob` erst, wenn alle Staende erreicht sind
+   (`present_latched`, angestossen von jeder Ringmeldung). Bis dahin bleibt
+   das alte Bild stehen; ein Bild, das inzwischen ersetzt wurde, wird
+   uebersprungen (Schaden vereinigt). Die Ziele stehen beim FLUSH fest,
+   also kann ein Dauerstrom von Flushes ein Bild nicht aushungern
+   (Schlange je Ausgabe, `LATCHES` = 4). **Der FLUSH wird zurueckgehalten,
+   bis SEIN Bild gezeigt ist** (`Held::latch`) — sonst schriebe der Gast in
+   den Puffer, der noch auf dem Schirm steht; die 40-ms-Frist greift erst
+   danach.
+2. **Kernel + Modul: ein gekacheltes Bild liest die CPU nie.**
+   `npk_gpudev_bo_gpu_only(id)` (neu, Modul 0.17.0 ruft es fuer jedes
+   ueber die Textur-Einheit importierte Bild) markiert die Seiten
+   (`ForeignPixels::gpu_only`); `materialize` lehnt die Kopie ab, der
+   CPU-Weg zeigt dann nichts statt der Kacheln, mit einer Zeile im Log.
+3. **Modul: die 600-Szenen-Pixelzeile** liest den linearen VRAM-Puffer
+   jetzt ueber den Ressourcen-Cursor statt ab `res.start` (Posten 4).
+
+**Bewusst grob:** gewartet wird auf ALLE bis zum FLUSH eingereichte Arbeit
+des VM, nicht nur auf die Zaeune genau dieses Puffers. Auf einem GFX-Ring
+laeuft die Arbeit ohnehin in Reihe; der Preis ist hoechstens ein Bild
+Latenz, wenn zwischen dem letzten Zeichnen und dem FLUSH schon das naechste
+WebGL-Bild eingereiht ist. Genau waere: das Modul meldet je exportiertem
+Objekt den letzten schreibenden Zaun.
+
+**Am Geraet zu lesen:** alle 600 gezeigten Bilder
+`[gpu] N guest GPU frames shown, W waited for their drawing, longest U us`.
+`scene on the CPU` und `held job … past its deadline` sollten verschwinden;
+kommen sie trotzdem, steht `a guest frame laid out for the card is not
+composed on the CPU` daneben statt Kacheln. Danach erst die fehlenden
+Glyphen und die Bugwelle neu ansehen — beide koennen derselbe Fall gewesen
+sein (verspaeteter GPU-Job ueberschreibt ein neueres CPU-Bild).
+
