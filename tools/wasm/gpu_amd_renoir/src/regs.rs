@@ -7903,3 +7903,11 @@ pub const mmUVD_LMI_JRBC_RB_MEM_RD_64BIT_BAR_LOW_INTERNAL_OFFSET: u32 = 0x40ec;
 pub const mmUVD_LMI_JRBC_RB_MEM_WR_64BIT_BAR_HIGH_INTERNAL_OFFSET: u32 = 0x40eb;
 /// amdgpu/jpeg_v2_0.h:31
 pub const mmUVD_LMI_JRBC_RB_MEM_WR_64BIT_BAR_LOW_INTERNAL_OFFSET: u32 = 0x40ea;
+
+// KIQ register access (amdgpu.h)
+/// amdgpu/amdgpu.h:363
+pub const MAX_KIQ_REG_WAIT: u32 = 0x1388;
+/// amdgpu/amdgpu.h:364
+pub const MAX_KIQ_REG_BAILOUT_INTERVAL: u32 = 0x5;
+/// amdgpu/amdgpu.h:365
+pub const MAX_KIQ_REG_TRY: u32 = 0x3e8;

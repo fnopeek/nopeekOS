@@ -375,8 +375,11 @@ fn ttm_bo_wait_ctx(adev: &mut amdgpu_device, h: usize, ctx: &ttm_operation_ctx) 
     0
 }
 
-/// `ttm_bo_tt_destroy`: the TT's pages back to the kernel.
+/// `ttm_bo_tt_destroy`: `ttm_tt_unpopulate` (`amdgpu_ttm_tt_unpopulate`
+/// takes the pages out of the GART first), then the TT's pages back to the
+/// kernel.
 pub fn ttm_bo_tt_destroy(adev: &mut amdgpu_device, h: usize) {
+    amdgpu_ttm_backend_unbind(adev, h);
     if let Some((tt, _)) = bo_mut(adev, h).pool.take() {
         npk_sys::gpudev_tt_free(tt as i32);
     }

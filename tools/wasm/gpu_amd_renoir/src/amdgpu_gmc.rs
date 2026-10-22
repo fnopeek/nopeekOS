@@ -192,12 +192,6 @@ pub fn amdgpu_gmc_allocate_vm_inv_eng(adev: &mut amdgpu_device) -> i32 {
     0
 }
 
-/// `MAX_KIQ_REG_WAIT` (amdgpu.h), in usecs.
-const MAX_KIQ_REG_WAIT: i64 = 5000;
-/// `MAX_KIQ_REG_BAILOUT_INTERVAL` (amdgpu.h), in msecs.
-const MAX_KIQ_REG_BAILOUT_INTERVAL: u64 = 5;
-/// `MAX_KIQ_REG_TRY` (amdgpu.h).
-const MAX_KIQ_REG_TRY: i64 = 1000;
 
 /// `amdgpu_gmc_flush_gpu_tlb`. `hub->sdma_invalidation_workaround` is set
 /// only by gfxhub_v2_0 (Navi 1x), so the flush through an SDMA job is
@@ -231,7 +225,7 @@ pub fn amdgpu_gmc_fw_reg_write_reg_wait(adev: &mut amdgpu_device, reg0: u32, reg
     let Some(kiq) = adev.gfx.kiq.ring else { return };
     ring::amdgpu_ring_alloc(adev, kiq, 32);
     ring::amdgpu_ring_emit_reg_write_reg_wait(adev, kiq, reg0, reg1, ref_, mask);
-    let seq = match amdgpu_fence_emit_polling(adev, kiq, MAX_KIQ_REG_WAIT) {
+    let seq = match amdgpu_fence_emit_polling(adev, kiq, MAX_KIQ_REG_WAIT as i64) {
         Ok(seq) => seq,
         Err(_) => {
             // failed_undo
@@ -241,18 +235,18 @@ pub fn amdgpu_gmc_fw_reg_write_reg_wait(adev: &mut amdgpu_device, reg0: u32, reg
         }
     };
     ring::amdgpu_ring_commit(adev, kiq);
-    let mut r = amdgpu_fence_wait_polling(adev, kiq, seq, MAX_KIQ_REG_WAIT);
+    let mut r = amdgpu_fence_wait_polling(adev, kiq, seq, MAX_KIQ_REG_WAIT as i64);
     let mut cnt: i64 = 0;
     while r < 1 {
         let tried = cnt;
         cnt += 1;
-        if tried >= MAX_KIQ_REG_TRY {
+        if tried >= MAX_KIQ_REG_TRY as i64 {
             break;
         }
-        crate::linux::msleep(MAX_KIQ_REG_BAILOUT_INTERVAL);
-        r = amdgpu_fence_wait_polling(adev, kiq, seq, MAX_KIQ_REG_WAIT);
+        crate::linux::msleep(MAX_KIQ_REG_BAILOUT_INTERVAL as u64);
+        r = amdgpu_fence_wait_polling(adev, kiq, seq, MAX_KIQ_REG_WAIT as i64);
     }
-    if cnt > MAX_KIQ_REG_TRY {
+    if cnt > MAX_KIQ_REG_TRY as i64 {
         // failed_kiq
         Line::new().s("failed to write reg ").hex(reg0).s(" wait reg ").hex(reg1).say();
     }
