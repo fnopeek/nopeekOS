@@ -360,3 +360,13 @@ hat, ist die Reihenfolge allein nicht die Erklaerung. **Modul 0.27.0**
 zerlegt den Fall vor `PACKET_START` (nur Schreiben, nur Warten, nur das
 Semaphor, nur die Invalidierung) und wiederholt den Flush nach
 `PACKET_START`, um ein „das zweite Mal haengt es“ auszuschliessen.
+
+**Lauf mit 0.27.0 — gefunden:** schon ein einzelnes Registerschreiben
+vor `PACKET_START` haengt den Dekoder (danach ist der Block auch fuer
+alles andere hin, bis zum naechsten Laden). Linux sieht das gar nicht vor:
+`amdgpu_vm_flush` schickt **vor** dem Flush ein `insert_start` — „There is
+no matching insert_end for this on purpose … you can only have one
+insert_end per submission based on the way VCN FW works“. Diese Zeile
+fehlte im Port. Jeder Gastauftrag auf `vcn_dec` (und `jpeg_dec`) kam damit
+ohne Start beim Firmware an. **Modul 0.28.0** traegt sie nach; die Proben
+aus 0.25–0.27 sind wieder draussen.

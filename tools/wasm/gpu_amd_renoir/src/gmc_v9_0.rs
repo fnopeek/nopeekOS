@@ -207,7 +207,7 @@ pub fn gmc_v9_0_sw_init_layout(adev: &mut amdgpu_device) -> i32 {
 
 /// `gmc_v9_0_use_invalidate_semaphore`: the MMHUB of anything but a
 /// Picasso, on bare metal.
-pub fn gmc_v9_0_use_invalidate_semaphore(adev: &amdgpu_device, vmhub: u32) -> bool {
+fn gmc_v9_0_use_invalidate_semaphore(adev: &amdgpu_device, vmhub: u32) -> bool {
     if adev.ip_version(GC_HWIP, 0) == 9 << 24 | 4 << 16 | 2 << 8 || adev.aid_mask != 0 {
         return false;
     }
@@ -221,7 +221,7 @@ fn set_field(v: u32, mask: u32, shift: u32, f: u32) -> u32 {
 }
 
 /// `gmc_v9_0_get_invalidate_req`.
-pub fn gmc_v9_0_get_invalidate_req(vmid: u32, flush_type: u32) -> u32 {
+fn gmc_v9_0_get_invalidate_req(vmid: u32, flush_type: u32) -> u32 {
     let mut req = 0;
     req = set_field(req, VM_INVALIDATE_ENG0_REQ__PER_VMID_INVALIDATE_REQ_MASK,
         VM_INVALIDATE_ENG0_REQ__PER_VMID_INVALIDATE_REQ__SHIFT, 1 << vmid);

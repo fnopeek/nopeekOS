@@ -415,6 +415,13 @@ pub fn amdgpu_vm_flush(adev: &mut amdgpu_device, r: usize, j: u64, need_pipe_syn
     if !vm_flush_needed && !gds_switch_needed && !need_pipe_sync {
         return 0;
     }
+    // There is no matching insert_end for this on purpose for the vm flush.
+    // The IB portion of the submission has both.  Having multiple
+    // insert_start sequences is ok, but you can only have one insert_end
+    // per submission based on the way VCN FW works.  For JPEG you can as
+    // many insert_start and insert_end sequences as you like as long as the
+    // rest of the packets come between start and end sequences.
+    ring::amdgpu_ring_insert_start(adev, r);
     let patch = ring::amdgpu_ring_init_cond_exec(adev, r);
     if need_pipe_sync {
         ring::amdgpu_ring_emit_pipeline_sync(adev, r);
