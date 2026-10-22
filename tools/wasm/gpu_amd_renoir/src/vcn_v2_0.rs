@@ -1555,6 +1555,13 @@ pub fn amdgpu_vcn_print_ip_state(adev: &amdgpu_device) {
 /// write of the ring test. Whether the scratch arrives says whether the
 /// firmware got past `emit`.
 fn dec_probe(adev: &mut amdgpu_device, r: usize, name: &str, emit: impl FnOnce(&mut amdgpu_device, usize)) -> bool {
+    dec_probe_at(adev, r, name, true, emit)
+}
+
+/// `dec_probe`, with `emit` before PACKET_START when `start_first` is
+/// false — the order `amdgpu_ib_schedule` puts a job's VM flush in.
+fn dec_probe_at(adev: &mut amdgpu_device, r: usize, name: &str, start_first: bool,
+                emit: impl FnOnce(&mut amdgpu_device, usize)) -> bool {
     let me = adev.rings[r].me as usize;
     let (ext, int) = (adev.vcn.inst[me].external.scratch9, &adev.vcn.inst[me].internal);
     let (cmd, scratch9) = (int.cmd, int.scratch9);
@@ -1562,9 +1569,15 @@ fn dec_probe(adev: &mut amdgpu_device, r: usize, name: &str, emit: impl FnOnce(&
     if crate::amdgpu_ring::amdgpu_ring_alloc(adev, r, 64) != 0 {
         return false;
     }
+    let mut emit = Some(emit);
+    if !start_first {
+        (emit.take().unwrap())(adev, r);
+    }
     rw(adev, r, packet0(cmd, 0));
     rw(adev, r, VCN_DEC_KMD_CMD | VCN_DEC_CMD_PACKET_START << 1);
-    emit(adev, r);
+    if let Some(e) = emit {
+        e(adev, r);
+    }
     rw(adev, r, packet0(scratch9, 0));
     rw(adev, r, 0xDEADBEEF);
     crate::amdgpu_ring::amdgpu_ring_commit(adev, r);
@@ -1620,4 +1633,29 @@ pub fn vcn_v2_0_dec_flush_probe(adev: &mut amdgpu_device) {
         crate::gmc_v9_0::gmc_v9_0_emit_flush_gpu_tlb(a, r, 0, (ptb_hi as u64) << 32 | ptb_lo as u64);
     });
     dec_probe(adev, r, "pasid mapping", |a, r| crate::gmc_v9_0::gmc_v9_0_emit_pasid_mapping(a, r, 0, 0));
+    // The same on VMID 1, the one a guest's first job gets, with VMID 0's
+    // table as its base; its own registers are put back afterwards.
+    let (lo1, hi1) = (lo + hub.ctx_addr_distance, hi + hub.ctx_addr_distance);
+    let (old_lo1, old_hi1) = (adev.rreg32(lo1).unwrap_or(0), adev.rreg32(hi1).unwrap_or(0));
+    dec_probe(adev, r, "vmid 1 ptb", |a, r| {
+        crate::amdgpu_ring::amdgpu_ring_emit_wreg(a, r, lo1, ptb_lo);
+        crate::amdgpu_ring::amdgpu_ring_emit_wreg(a, r, hi1, ptb_hi);
+        crate::amdgpu_ring::amdgpu_ring_emit_reg_wait(a, r, lo1, ptb_lo, 0xffffffff);
+    });
+    Line::new().s("vcn_dec probe: vmid 1 ptb now ").hex(adev.rreg32(hi1).unwrap_or(0)).s(":")
+        .hex(adev.rreg32(lo1).unwrap_or(0)).say();
+    let inv1 = crate::gmc_v9_0::gmc_v9_0_get_invalidate_req(1, 0);
+    dec_probe(adev, r, "vmid 1 invalidate", |a, r| {
+        crate::amdgpu_ring::amdgpu_ring_emit_reg_write_reg_wait(a, r, req, ack, inv1, 1 << 1);
+    });
+    dec_probe(adev, r, "vmid 1 flush", |a, r| {
+        crate::amdgpu_ring::amdgpu_ring_emit_vm_flush(a, r, 1, (ptb_hi as u64) << 32 | ptb_lo as u64);
+    });
+    dec_probe(adev, r, "vmid 1 pasid mapping", |a, r| crate::gmc_v9_0::gmc_v9_0_emit_pasid_mapping(a, r, 1, 0));
+    dec_probe_at(adev, r, "vmid 1 flush before start", false, |a, r| {
+        crate::amdgpu_ring::amdgpu_ring_emit_vm_flush(a, r, 1, (ptb_hi as u64) << 32 | ptb_lo as u64);
+        crate::gmc_v9_0::gmc_v9_0_emit_pasid_mapping(a, r, 1, 0);
+    });
+    adev.wreg32(lo1, old_lo1);
+    adev.wreg32(hi1, old_hi1);
 }

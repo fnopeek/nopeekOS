@@ -341,3 +341,13 @@ ist der Ringtest (`PACKET_START` … `SCRATCH9`) mit einem Teil des Flushs
 dazwischen, und `vcn_dec probe <teil>: passed|STUCK` steht im Ladelog.
 Die Probe ist kein Linux und faellt wieder weg, sobald der Teil gefunden
 ist.
+
+**Lauf mit 0.25.0:** alle Proben auf VMID 0 gehen durch (Semaphor,
+Invalidierung mit Ack, Flush, PASID-Tabelle). `RBC_RB_RPTR` blieb dabei
+auf 0x40 stehen, waehrend `SCRATCH9` ankam — das Register sagt im
+DPG-Betrieb also nicht, wie weit die Firmware ist; das `RPTR 0` der Dumps
+beweist nichts. Der Gastauftrag haengt vor seiner ersten Fence, also im
+Flush auf **VMID 1**. **Modul 0.26.0** probt dasselbe auf VMID 1 (PTB
+schreiben und zuruecklesen, Invalidierung mit Ack-Bit 1, der ganze
+`emit_vm_flush` des Rings, PASID-Tabelle) und den Flush in der Reihenfolge
+von `amdgpu_ib_schedule`, also VOR `PACKET_START`.
