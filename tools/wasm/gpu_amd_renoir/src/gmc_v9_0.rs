@@ -352,8 +352,10 @@ pub fn gmc_v9_0_emit_pasid_mapping(adev: &mut amdgpu_device, r: usize, vmid: u32
     crate::amdgpu_ring::amdgpu_ring_emit_wreg(adev, r, reg, pasid);
 }
 
-/// `gmc_v9_0_flush_gpu_tlb`, the MMIO path (before KIQ/MES/GFXOFF). The
-/// hub's registers are absolute (`*_IP_NO_KIQ` with one GC instance).
+/// `gmc_v9_0_flush_gpu_tlb`: through the KIQ once its ring is ready, by
+/// MMIO before. Bare metal with one GC instance: the hub's registers are
+/// absolute (`*_IP_NO_KIQ`, `GET_INST(GC, inst)` is 0), and the index
+/// panics where Linux has `BUG_ON(vmhub >= AMDGPU_MAX_VMHUBS)`.
 pub fn gmc_v9_0_flush_gpu_tlb(adev: &mut amdgpu_device, vmid: u32, vmhub: u32, flush_type: u32) {
     let use_semaphore = gmc_v9_0_use_invalidate_semaphore(adev, vmhub);
     const ENG: u32 = 17;
@@ -362,6 +364,14 @@ pub fn gmc_v9_0_flush_gpu_tlb(adev: &mut amdgpu_device, vmid: u32, vmhub: u32, f
     let sem = hub.vm_inv_eng0_sem + hub.eng_distance * ENG;
     let req = hub.vm_inv_eng0_req + hub.eng_distance * ENG;
     let ack = hub.vm_inv_eng0_ack + hub.eng_distance * ENG;
+    let inst = if vmhub >= AMDGPU_MMHUB0_0 { 0 } else { vmhub };
+    // This is necessary for SRIOV as well as for GFXOFF to function
+    // properly under bare metal
+    if adev.gfx.kiq.ring.is_some_and(|k| adev.rings[k].sched.ready) {
+        crate::amdgpu_gmc::amdgpu_gmc_fw_reg_write_reg_wait(adev, req, ack, inv_req, 1 << vmid, inst);
+        return;
+    }
+    // This path is needed before KIQ/MES/GFXOFF are set up
     // It may lose gpuvm invalidate acknowldege state across power-gating
     // off cycle, add semaphore acquire before invalidation and semaphore
     // release after invalidation to avoid entering power gated state to

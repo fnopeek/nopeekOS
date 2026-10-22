@@ -106,9 +106,7 @@ pub fn amdgpu_gart_invalidate_tlb(adev: &mut amdgpu_device) {
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     for i in 0..AMDGPU_MAX_VMHUBS {
         if adev.vmhubs_mask & (1 << i) != 0 {
-            // amdgpu_gmc_flush_gpu_tlb: no SDMA invalidation workaround on
-            // GC 9.3, no extra flush types.
-            crate::gmc_v9_0::gmc_v9_0_flush_gpu_tlb(adev, 0, i, 0);
+            crate::amdgpu_gmc::amdgpu_gmc_flush_gpu_tlb(adev, 0, i, 0);
         }
     }
 }

@@ -183,3 +183,69 @@ pub fn amdgpu_gmc_allocate_vm_inv_eng(adev: &mut amdgpu_device) -> i32 {
     }
     0
 }
+
+/// `MAX_KIQ_REG_WAIT` (amdgpu.h), in usecs.
+const MAX_KIQ_REG_WAIT: i64 = 5000;
+/// `MAX_KIQ_REG_BAILOUT_INTERVAL` (amdgpu.h), in msecs.
+const MAX_KIQ_REG_BAILOUT_INTERVAL: u64 = 5;
+/// `MAX_KIQ_REG_TRY` (amdgpu.h).
+const MAX_KIQ_REG_TRY: i64 = 1000;
+
+/// `amdgpu_gmc_flush_gpu_tlb`. `hub->sdma_invalidation_workaround` is set
+/// only by gfxhub_v2_0 (Navi 1x), so the flush through an SDMA job is
+/// unreachable on GC 9.3 and every flush takes the `gmc_funcs` path.
+pub fn amdgpu_gmc_flush_gpu_tlb(adev: &mut amdgpu_device, vmid: u32, vmhub: u32, flush_type: u32) {
+    // A GPU reset should flush all TLBs anyway, so no need to do this
+    // while one is ongoing. The reset holds the reset domain's semaphore
+    // exactly while `amdgpu_in_reset`, so that is when the trylock fails.
+    if crate::amdgpu_device::amdgpu_in_reset(adev) {
+        return;
+    }
+    if adev.gmc.flush_tlb_needs_extra_type_2 {
+        crate::gmc_v9_0::gmc_v9_0_flush_gpu_tlb(adev, vmid, vmhub, 2);
+    }
+    if adev.gmc.flush_tlb_needs_extra_type_0 && flush_type == 2 {
+        crate::gmc_v9_0::gmc_v9_0_flush_gpu_tlb(adev, vmid, vmhub, 0);
+    }
+    crate::gmc_v9_0::gmc_v9_0_flush_gpu_tlb(adev, vmid, vmhub, flush_type);
+}
+
+/// `amdgpu_gmc_fw_reg_write_reg_wait`: GC 9 has no MES, so the write and
+/// wait go through the KIQ. One XCC: `xcc_inst` is always 0. The module
+/// is single-threaded and runs no interrupt context, so `kiq->ring_lock`
+/// guards nothing, `in_interrupt()` is false and the reset semaphore is
+/// never contended (`amdgpu_reset_pending`).
+pub fn amdgpu_gmc_fw_reg_write_reg_wait(adev: &mut amdgpu_device, reg0: u32, reg1: u32, ref_: u32, mask: u32,
+                                        xcc_inst: u32) {
+    use crate::amdgpu_fence::{amdgpu_fence_emit_polling, amdgpu_fence_wait_polling};
+    use crate::amdgpu_ring as ring;
+    let _ = xcc_inst;
+    let Some(kiq) = adev.gfx.kiq.ring else { return };
+    ring::amdgpu_ring_alloc(adev, kiq, 32);
+    ring::amdgpu_ring_emit_reg_write_reg_wait(adev, kiq, reg0, reg1, ref_, mask);
+    let seq = match amdgpu_fence_emit_polling(adev, kiq, MAX_KIQ_REG_WAIT) {
+        Ok(seq) => seq,
+        Err(_) => {
+            // failed_undo
+            ring::amdgpu_ring_undo(adev, kiq);
+            Line::new().s("failed to write reg ").hex(reg0).s(" wait reg ").hex(reg1).say();
+            return;
+        }
+    };
+    ring::amdgpu_ring_commit(adev, kiq);
+    let mut r = amdgpu_fence_wait_polling(adev, kiq, seq, MAX_KIQ_REG_WAIT);
+    let mut cnt: i64 = 0;
+    while r < 1 {
+        let tried = cnt;
+        cnt += 1;
+        if tried >= MAX_KIQ_REG_TRY {
+            break;
+        }
+        crate::linux::msleep(MAX_KIQ_REG_BAILOUT_INTERVAL);
+        r = amdgpu_fence_wait_polling(adev, kiq, seq, MAX_KIQ_REG_WAIT);
+    }
+    if cnt > MAX_KIQ_REG_TRY {
+        // failed_kiq
+        Line::new().s("failed to write reg ").hex(reg0).s(" wait reg ").hex(reg1).say();
+    }
+}

@@ -22,6 +22,11 @@ pub fn mdelay(ms: u64) {
     udelay(ms * 1000);
 }
 
+/// `msleep`: gives the CPU away for `ms` milliseconds.
+pub fn msleep(ms: u64) {
+    npk_sys::sleep(ms as i32);
+}
+
 /// `wait_for_atomic(COND, ms)` / `_wait_for_atomic(COND, us, 0)`: busy-polls
 /// `cond` until it holds or `timeout_us` passes. `Ok` when it held. The
 /// condition is checked once more after the deadline, as Linux does.

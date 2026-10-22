@@ -402,6 +402,7 @@ pub struct amdgpu_gmc {
     pub tmz_enabled: bool,
     pub noretry: u32,
     pub flush_pasid_uses_kiq: bool,
+    pub flush_tlb_needs_extra_type_0: bool,
     pub flush_tlb_needs_extra_type_2: bool,
     pub vram_width: u32,
     pub vram_type: u32,
