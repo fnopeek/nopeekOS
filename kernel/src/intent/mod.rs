@@ -2854,12 +2854,12 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
     // vm_poll_slice when the slice that observes the exit completes.
     match crate::microvm::vm_open(&bytes, cmdline, initramfs.as_deref(), inject) {
         Ok(()) => {
-            // Give the guest its own tiled Surface window (tiling
-            // invariant: never fullscreen). virtio-gpu FLUSH renders
-            // into it; shade composites it like any window; the
-            // teardown path closes it on guest exit / window close.
-            // Without a compositor (serial-only boot) we stay unbound
-            // and virtio-gpu falls back to the fullscreen blit.
+            // Give the guest its own Surface window (a tile, or
+            // fullscreen via Mod+F / the guest's own request). virtio-gpu
+            // FLUSH renders into it; shade composites it like any window;
+            // the teardown path closes it on guest exit / window close.
+            // Without a compositor (serial-only boot) we stay unbound and
+            // virtio-gpu falls back to the direct framebuffer blit.
             match crate::shade::create_surface_window(crate::microvm::app::current().name) {
                 Some(wid) => {
                     crate::microvm::vm_bind_window(wid.0);

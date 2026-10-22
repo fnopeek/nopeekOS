@@ -1905,9 +1905,10 @@ impl VirtioGpu {
 
         // Bridge to Shade. If the VM is bound to a Surface window
         // (normal case), the just-flushed frame becomes that window's
-        // tile content — composited with z-order, the tiling
-        // invariant holds (never fullscreen). Fallback to the legacy
-        // fullscreen blit only if unbound (e.g. compositor not up).
+        // tile content — composited with z-order, whether the window is
+        // a tile or fullscreen (then sized to the whole screen). Fallback
+        // to the legacy direct framebuffer blit only if unbound (e.g.
+        // compositor not up).
         // The FLUSH rect (x,y,w,h) is the guest's damage region for this
         // present. Clamp it to the resource and forward it so the host
         // blits only the changed pixels instead of the whole tile.

@@ -538,6 +538,10 @@ static OUTPUTS_CHANGED: AtomicBool = AtomicBool::new(false);
 /// none told yet.
 static FOCUS_SENT: AtomicU32 = AtomicU32::new(NO_FOCUS);
 const NO_FOCUS: u32 = u32::MAX;
+/// Bit k = output k's window was last told (`WIN_STATE`) that it is
+/// fullscreen. The compositor owns the real state; Core 0 mirrors a change
+/// here so the guest's compositor enters/leaves its own fullscreen in step.
+static FS_SENT: AtomicU32 = AtomicU32::new(0);
 
 /// Set when the user closes the VM's window so the next slice tears
 /// the guest down instead of running it headless.
@@ -1188,6 +1192,32 @@ fn sync_vm_windows() {
             FOCUS_SENT.store(k as u32, Ordering::Release);
         }
     }
+
+    // Fullscreen. First carry out the guest's requests (Firefox F11, a video
+    // going fullscreen); the compositor lays the window out over the whole
+    // screen. Then mirror the resulting state back as `WIN_STATE`, so the
+    // guest's compositor enters/leaves its own fullscreen in step. The
+    // compositor is the single source of truth: Mod+F, a focus change and a
+    // workspace switch change it the same way, and all reach the guest here.
+    let fs_reqs = console::take_fullscreen_requests();
+    for (k, req) in fs_reqs.iter().enumerate() {
+        if let Some(on) = *req {
+            let wid = output_window(k);
+            if wid != 0 {
+                crate::shade::set_window_fullscreen(wid, on);
+            }
+        }
+    }
+    let mut sent = FS_SENT.load(Ordering::Acquire);
+    for k in 0..MAX_OUTPUTS {
+        let wid = output_window(k);
+        let now = wid != 0 && crate::shade::is_window_fullscreen(wid);
+        let bit = 1u32 << k;
+        if now != (sent & bit != 0) && console::send_window_state(k, now) {
+            if now { sent |= bit; } else { sent &= !bit; }
+        }
+    }
+    FS_SENT.store(sent, Ordering::Release);
 }
 
 /// Window closed by the user. With the control channel up (the guest's
@@ -1248,6 +1278,7 @@ fn teardown_vm_window() {
     crate::microvm::boottime::report();
     VM_CLOSE_REQUESTED.store(false, Ordering::Release);
     FOCUS_SENT.store(NO_FOCUS, Ordering::Release);
+    FS_SENT.store(0, Ordering::Release);
     OUTPUTS_CHANGED.store(false, Ordering::Release);
     for w in &OUT_WINDOWS {
         let wid = w.swap(0, Ordering::AcqRel);

@@ -87,6 +87,8 @@ fn close_button_rect(win: &Window, border: u32)
     // windows (the microvm browser owns its own close via its UI).
     if win.is_dock || win.is_bar || win.is_overlay { return None; }
     if win.kind == crate::shade::window::WindowKind::Surface { return None; }
+    // A fullscreen window has no chrome; the X would float over its content.
+    if win.state == WindowState::Fullscreen { return None; }
     use crate::shade::widgets::scale;
     let box_px = scale::len(CLOSE_BTN_BOX);
     // The box is centred vertically in the app's menu-bar band so the X
@@ -544,6 +546,42 @@ impl Compositor {
             && w.state == WindowState::Tiled
             && w.visible
             && !w.is_overlay)
+    }
+
+    /// The fullscreen window on the active workspace, if any. A fullscreen
+    /// window covers the whole screen over the bar, the dock and every tile;
+    /// at most one is ever fullscreen at a time (focusing or toggling another
+    /// steals the state). While one is active the bar/dock/chrome are
+    /// suppressed and the hot-edge dock reveal is disarmed.
+    pub fn active_fullscreen(&self) -> Option<WindowId> {
+        self.windows.iter()
+            .find(|w| w.state == WindowState::Fullscreen
+                && w.workspace == self.active_workspace
+                && w.visible)
+            .map(|w| w.id)
+    }
+
+    /// Border actually painted around `win`: none for a fullscreen window (it
+    /// owns the whole screen, no chrome), the configured width otherwise.
+    /// Panels carry their own zero-border rule inside `build_scene`.
+    pub fn effective_border(&self, win: &Window) -> u32 {
+        if win.state == WindowState::Fullscreen { 0 } else { self.border }
+    }
+
+    /// Drop the fullscreen state of every fullscreen window except `keep`,
+    /// back to a normal tile. Returns the windows that changed, so a caller
+    /// can tell their guest the mode ended (WIN_STATE off). Does not retile —
+    /// the caller lays the freed window out again.
+    fn clear_fullscreen_except(&mut self, keep: Option<WindowId>) -> Vec<WindowId> {
+        let mut changed = Vec::new();
+        for w in self.windows.iter_mut() {
+            if w.state == WindowState::Fullscreen && Some(w.id) != keep {
+                w.state = WindowState::Tiled;
+                w.dirty = true;
+                changed.push(w.id);
+            }
+        }
+        changed
     }
 
     /// Which stored delta a resize gesture on `id` moves, for one axis
@@ -1219,6 +1257,15 @@ impl Compositor {
     /// while the cursor is parked. Suppressed during a drag/resize so the
     /// dock never fights a tile being dragged toward the bottom.
     pub fn dock_update_reveal(&mut self, cursor_y: i32) {
+        // A fullscreen window takes the whole screen; the bottom hot-edge
+        // must not peek the dock up over it.
+        if self.active_fullscreen().is_some() {
+            if let Some(dock) = self.dock.as_mut() {
+                dock.target_shown = false;
+                dock.dwell = 0;
+            }
+            return;
+        }
         let dragging = self.drag.is_some();
         let baseline = self.dock_baseline() as i32;
         // "Desktop free" = no real (non-overlay) window on this workspace.
@@ -1537,6 +1584,16 @@ impl Compositor {
                 terminal::restore_cursor();
             }
         }
+        // Focusing a different real window drops any other window's
+        // fullscreen — it no longer owns the screen. Its guest learns the
+        // new (tiled) size through the retile here. Popups and overlays do
+        // not steal fullscreen: they float over it.
+        let real = self.windows.iter()
+            .any(|w| w.id == id && w.popup_of.is_none() && !w.is_overlay);
+        if real && !self.clear_fullscreen_except(Some(id)).is_empty() {
+            self.retile();
+            self.needs_full_redraw = true;
+        }
         // The dock is never focused, so the insert(0) above would bury it
         // behind the just-focused window. Re-pin it to the very top.
         self.pin_overlays_to_front();
@@ -1715,6 +1772,10 @@ impl Compositor {
         // The keys go up to 9; only the workspaces the bar actually shows
         // exist, and switching past them would leave it with nothing to mark.
         if ws >= self.workspace_count { return; }
+        // Leaving a workspace drops any fullscreen on it — a fullscreen
+        // window is a here-and-now mode, not a stored layout. The retile
+        // below sizes the freed window and tells its guest.
+        let _ = self.clear_fullscreen_except(None);
         self.active_workspace = ws;
 
         // The dock is global: follow the active workspace and snap shut so
@@ -1819,6 +1880,24 @@ impl Compositor {
     /// opened (`Window::split_from`), so the tree is stored on the windows
     /// themselves and needs no separate structure.
     pub fn retile(&mut self) {
+        // A fullscreen window covers the whole screen, over the bar, the dock
+        // and every tile. Placed before the dwindle below and before the
+        // empty-workspace early return, so a lone fullscreen window (no tiles
+        // behind it) is still sized and its guest still told the full size.
+        let (sw, sh) = (self.screen_w, self.screen_h);
+        for w in self.windows.iter_mut() {
+            if w.workspace == self.active_workspace
+                && w.state == WindowState::Fullscreen
+                && w.visible
+            {
+                w.x = 0;
+                w.y = 0;
+                w.width = sw;
+                w.height = sh;
+                w.dirty = true;
+            }
+        }
+
         let (area_x, area_y, area_w, area_h) = self.workspace_area();
 
         let tiled: Vec<WindowId> = self.windows.iter()
@@ -1829,25 +1908,26 @@ impl Compositor {
             .map(|w| w.id)
             .collect();
 
-        if tiled.is_empty() { return; }
+        if !tiled.is_empty() {
+            // Roots: a tiled window whose parent is gone or lives on another
+            // workspace. Normally exactly one; a window moved between
+            // workspaces can leave a second, and chaining them keeps the
+            // screen usable instead of dropping tiles off it.
+            let roots: Vec<WindowId> = tiled.iter().copied()
+                .filter(|id| {
+                    let parent = self.windows.iter().find(|w| w.id == *id).and_then(|w| w.split_from);
+                    match parent {
+                        None => true,
+                        Some(p) => !tiled.contains(&p),
+                    }
+                })
+                .collect();
+            let roots = if roots.is_empty() { alloc::vec![tiled[0]] } else { roots };
 
-        // Roots: a tiled window whose parent is gone or lives on another
-        // workspace. Normally exactly one; a window moved between workspaces
-        // can leave a second, and chaining them keeps the screen usable
-        // instead of dropping tiles off it.
-        let roots: Vec<WindowId> = tiled.iter().copied()
-            .filter(|id| {
-                let parent = self.windows.iter().find(|w| w.id == *id).and_then(|w| w.split_from);
-                match parent {
-                    None => true,
-                    Some(p) => !tiled.contains(&p),
-                }
-            })
-            .collect();
-        let roots = if roots.is_empty() { alloc::vec![tiled[0]] } else { roots };
+            let gap = self.gaps;
+            self.dwindle_chain(&roots, &tiled, area_x, area_y, area_w, area_h, gap);
+        }
 
-        let gap = self.gaps;
-        self.dwindle_chain(&roots, &tiled, area_x, area_y, area_w, area_h, gap);
         self.sync_surface_tile_sizes();
     }
 
@@ -1952,9 +2032,9 @@ impl Compositor {
         if self.geometry_in_motion() {
             return;
         }
-        let border = self.border;
         for win in &self.windows {
             if win.kind == crate::shade::window::WindowKind::Surface {
+                let border = self.effective_border(win);
                 crate::shade::surface::set_tile_size(
                     win.id.0,
                     win.content_w(border),
@@ -2030,23 +2110,37 @@ impl Compositor {
             content: Rect,
             text: Rect,
             close: Option<(Rect, u32)>,
+            fullscreen: bool,
         }
         let border = self.border;
         let rounding = self.rounding;
         let opacity = crate::shade::glass::params().loop_opacity;
         let in_motion = self.geometry_in_motion() || self.animation.is_some();
 
+        // While a window is fullscreen the bar, dock and every other tile are
+        // hidden; only the fullscreen window, its popups and any modal draw.
+        let fs = self.active_fullscreen();
+
         let mut plans = Vec::new();
         for &wid in self.z_order.iter().rev() {
             let Some(win) = self.windows.iter().find(|w| w.id == wid) else { continue };
             if win.workspace != self.active_workspace || !win.visible { continue; }
+            if fs.is_some()
+                && Some(win.id) != fs
+                && win.popup_of.is_none()
+                && !win.modal
+            {
+                continue;
+            }
             let panel = win.is_dock || win.is_bar || win.popup_of.is_some();
-            let cb = if panel { 0 } else { border };
+            let fullscreen = win.state == WindowState::Fullscreen;
+            let cb = if panel || fullscreen { 0 } else { border };
             plans.push(Plan {
                 id: win.id,
                 win_rect: Rect::new(win.x, win.y, win.width, win.height),
                 kind: win.kind,
                 panel,
+                fullscreen,
                 focused: win.focused,
                 dirty: win.dirty,
                 terminal_idx: win.terminal_idx,
@@ -2072,8 +2166,11 @@ impl Compositor {
             }
             // Inner shape concentric with the outer at `rounding - border`,
             // so content and the chrome border meet along the same curve.
-            let inner_r = if p.panel { rounding } else { rounding.saturating_sub(border) };
-            if !p.panel {
+            // A fullscreen window owns the whole screen with square corners.
+            let inner_r = if p.fullscreen { 0 }
+                else if p.panel { rounding }
+                else { rounding.saturating_sub(border) };
+            if !p.panel && !p.fullscreen {
                 let (ba, bb, b_op) = if p.focused {
                     if crate::theme::is_active() {
                         let (ga, gb) = crate::theme::border_gradient();
@@ -2142,8 +2239,10 @@ impl Compositor {
                 items.push(Item::CloseGlyph { rect, size: crate::shade::widgets::scale::len(CLOSE_BTN_GLYPH), color });
             }
         }
-        if let Some(h) = self.dock_handle_item() {
-            items.push(h);
+        if fs.is_none() {
+            if let Some(h) = self.dock_handle_item() {
+                items.push(h);
+            }
         }
         // Last of all, over everything: the screenshot flash.
         let flash = self.flash_alpha();

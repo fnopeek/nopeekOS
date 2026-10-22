@@ -3,8 +3,8 @@
 //! A `Surface`-kind window's content is an opaque pixel buffer fed by
 //! an external source — today a microvm's virtio-gpu framebuffer
 //! (`RESOURCE_FLUSH`). Shade
-//! composites it as a tile like any other window (tiling invariant —
-//! never fullscreen).
+//! composites it as a tile like any other window; a fullscreen window is
+//! just a tile sized to the whole screen.
 //!
 //! Keyed by `WindowId`: a VM has one surface per app window.
 //!

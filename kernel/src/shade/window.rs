@@ -37,7 +37,9 @@ pub enum WindowKind {
     /// virtio-gpu framebuffer).
     /// No terminal buffer, no widget tree — its content is a
     /// `GuestSurface` double-buffer keyed by WindowId. Composited as a
-    /// tile like any other window (tiling invariant; never fullscreen).
+    /// tile like any other window, and can go fullscreen (Mod+F, or the
+    /// guest's own request over the window protocol) — it then covers the
+    /// whole screen with no chrome.
     Surface,
 }
 

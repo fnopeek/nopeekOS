@@ -143,6 +143,11 @@ pub const WIN_CLOSE: u8 = 0x01;
 pub const WIN_FOCUS: u8 = 0x02;
 /// Host -> guest: output `u8`'s window is now `u16` x `u16` pixels.
 pub const WIN_RESIZE: u8 = 0x03;
+/// Host -> guest: output `u8`'s window is (not) fullscreen now (`u8` 0/1).
+/// The host owns the fullscreen state; the guest's compositor enters or
+/// leaves its own fullscreen (so a video / F11 follows Mod+F) when it
+/// arrives. An old guest (protocol 3) ignores the unknown type — harmless.
+pub const WIN_STATE: u8 = 0x04;
 /// Guest -> host: the compositor is listening; payload: protocol version.
 const WIN_HELLO: u8 = 0x81;
 /// Guest -> host: title of the topmost window on output `u8`, then UTF-8.
@@ -151,6 +156,10 @@ const WIN_TITLE: u8 = 0x82;
 const WIN_OPEN: u8 = 0x83;
 /// Guest -> host: output `u8` holds no window any more; close its window.
 const WIN_CLOSED: u8 = 0x84;
+/// Guest -> host: the app on output `u8` wants fullscreen on/off (`u8` 0/1).
+/// A request, not a command: the host decides, lays the window out over the
+/// whole screen, and confirms with `WIN_STATE`.
+const WIN_FULLSCREEN: u8 = 0x85;
 /// Bytes of a guest title kept.
 const TITLE_MAX: usize = 200;
 
@@ -172,6 +181,10 @@ static TITLES: Mutex<[Option<String>; MAX_OUTPUTS]> = Mutex::new([const { None }
 /// not yet taken by Core 0 (`take_output_requests`).
 static OPEN_REQ: AtomicU32 = AtomicU32::new(0);
 static CLOSED_REQ: AtomicU32 = AtomicU32::new(0);
+/// Per-output fullscreen requests from the guest (`WIN_FULLSCREEN`), not yet
+/// taken by Core 0. `Some(true)` = wants fullscreen, `Some(false)` = wants
+/// out; the newest request per output wins.
+static FS_REQ: Mutex<[Option<bool>; MAX_OUTPUTS]> = Mutex::new([None; MAX_OUTPUTS]);
 
 /// Whether a guest is listening on the control port.
 pub fn control_ready() -> bool { CONTROL_READY.load(Ordering::Acquire) }
@@ -228,6 +241,16 @@ pub fn take_output_requests() -> (u32, u32) {
     (OPEN_REQ.swap(0, Ordering::AcqRel), CLOSED_REQ.swap(0, Ordering::AcqRel))
 }
 
+/// The guest's fullscreen requests per output since the last call (each once).
+pub fn take_fullscreen_requests() -> [Option<bool>; MAX_OUTPUTS] {
+    core::mem::replace(&mut *FS_REQ.lock(), [None; MAX_OUTPUTS])
+}
+
+/// Tell the guest output `k`'s window is (not) fullscreen now.
+pub fn send_window_state(k: usize, on: bool) -> bool {
+    send_windows(WIN_STATE, &[k as u8, on as u8])
+}
+
 /// Forget the previous launch's channel state.
 pub fn reset() {
     CONTROL_READY.store(false, Ordering::Release);
@@ -241,6 +264,7 @@ pub fn reset() {
     *DISK_REPORT.lock() = None;
     OPEN_REQ.store(0, Ordering::Release);
     CLOSED_REQ.store(0, Ordering::Release);
+    *FS_REQ.lock() = [None; MAX_OUTPUTS];
 }
 
 /// A guest title as the host shows it: invalid UTF-8 replaced, control
@@ -568,6 +592,14 @@ impl VirtioConsole {
                             crate::intent::wake_shell();
                         }
                     }
+                }
+                (PORT_WINDOWS, WIN_FULLSCREEN)
+                    if payload.first().is_some_and(|&k| (k as usize) < MAX_OUTPUTS) =>
+                {
+                    let k = payload[0] as usize;
+                    let on = payload.get(1).copied().unwrap_or(0) != 0;
+                    FS_REQ.lock()[k] = Some(on);
+                    crate::intent::wake_shell();
                 }
                 _ => {}
             }

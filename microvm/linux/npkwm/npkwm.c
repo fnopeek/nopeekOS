@@ -78,13 +78,22 @@
 #define WIN_CLOSE 0x01
 #define WIN_FOCUS 0x02
 #define WIN_RESIZE 0x03
+/* Host -> guest: output k's window is (not) fullscreen now (k, on). The
+ * host owns the state; we enter/leave our own fullscreen when it says so,
+ * so a video / F11 follows the host's Mod+F exit too. */
+#define WIN_STATE 0x04
 /* Guest -> host. */
 #define WIN_HELLO 0x81
 #define WIN_TITLE 0x82
 #define WIN_OPEN 0x83
 #define WIN_CLOSED 0x84
+/* Guest -> host: the app on output k wants fullscreen on/off (k, on). A
+ * request; the host lays the window out over the whole screen and confirms
+ * with WIN_STATE. We do not go fullscreen on our own, or the app would fill
+ * only its tile. */
+#define WIN_FULLSCREEN 0x85
 
-#define WIN_VERSION 3
+#define WIN_VERSION 4
 #define WIN_MAX_FRAME 512
 /* Bytes of title sent; cut on a UTF-8 boundary. */
 #define TITLE_MAX 200
@@ -156,6 +165,10 @@ struct output {
 	/* A size the host asked for and the app has not drawn yet (0 = none);
 	 * the output keeps its mode until then (`resize_output`). */
 	int pend_w, pend_h;
+	/* The host put this output's window into fullscreen (`WIN_STATE`). The
+	 * root toplevel carries the flag, re-asserted on every resize so size
+	 * and fullscreen reach the app in one configure. */
+	bool fullscreen;
 	struct wl_event_source *pend_timer;
 	/* The output's own frame clock (`output_frame`): the next refresh,
 	 * and its timer. */
@@ -225,6 +238,11 @@ static void win_send(struct server *server, uint8_t type, const void *payload, s
 static void win_send_out(struct server *server, uint8_t type, int k) {
 	uint8_t b = (uint8_t)k;
 	win_send(server, type, &b, 1);
+}
+
+static void win_send_out_val(struct server *server, uint8_t type, int k, int v) {
+	uint8_t b[2] = { (uint8_t)k, (uint8_t)v };
+	win_send(server, type, b, 2);
 }
 
 /* ── Toplevels and outputs ───────────────────────────────────────── */
@@ -489,6 +507,22 @@ static int pending_timeout(void *data) {
 	return 0;
 }
 
+/* Apply the host's fullscreen decision to output k's root toplevel(s). The
+ * host owns the state; the matching size arrives as WIN_RESIZE and is
+ * re-asserted there, so size and fullscreen reach the app together. */
+static void set_output_fullscreen(struct server *server, int k, bool on) {
+	struct output *output = server->outputs[k];
+	if (output != NULL) {
+		output->fullscreen = on;
+	}
+	struct toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->out == k && is_root(t) && t->xdg_toplevel->base->initialized) {
+			wlr_xdg_toplevel_set_fullscreen(t->xdg_toplevel, on);
+		}
+	}
+}
+
 /* The host resized output k's window: the app gets the size now, the
  * output when the app has drawn at it. */
 static void resize_output(struct server *server, int k, int w, int h) {
@@ -507,6 +541,10 @@ static void resize_output(struct server *server, int k, int w, int h) {
 	wl_list_for_each(t, &server->toplevels, link) {
 		if (t->out == k && is_root(t) && t->xdg_toplevel->base->initialized) {
 			wlr_xdg_toplevel_set_size(t->xdg_toplevel, w, h);
+			/* Re-assert the host's fullscreen so this resize carries it in
+			 * one configure, whichever of WIN_RESIZE / WIN_STATE arrived
+			 * first. */
+			wlr_xdg_toplevel_set_fullscreen(t->xdg_toplevel, output->fullscreen);
 			waits = true;
 		}
 	}
@@ -530,6 +568,11 @@ static void win_handle_frame(struct server *server, uint8_t type, const uint8_t 
 	case WIN_RESIZE:
 		if (len >= 5) {
 			resize_output(server, k, payload[1] | payload[2] << 8, payload[3] | payload[4] << 8);
+		}
+		break;
+	case WIN_STATE:
+		if (len >= 2) {
+			set_output_fullscreen(server, k, payload[1] != 0);
 		}
 		break;
 	case WIN_FOCUS: {
@@ -1072,8 +1115,14 @@ static void toplevel_request_maximize(struct wl_listener *listener, void *data) 
 
 static void toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
 	struct toplevel *t = wl_container_of(listener, t, request_fullscreen);
-	if (t->xdg_toplevel->base->initialized) {
-		wlr_xdg_toplevel_set_fullscreen(t->xdg_toplevel, t->xdg_toplevel->requested.fullscreen);
+	/* The app (Firefox F11, a video) asks; the host decides. Forward the
+	 * wish and wait — going fullscreen on our own would fill only the tile,
+	 * not the screen. The host lays the window out over the whole screen and
+	 * answers with WIN_STATE, which grants it here (set_output_fullscreen).
+	 * A dialog (non-root) is never fullscreen. */
+	if (t->out >= 0 && is_root(t)) {
+		win_send_out_val(t->server, WIN_FULLSCREEN, t->out,
+			t->xdg_toplevel->requested.fullscreen ? 1 : 0);
 	}
 }
 

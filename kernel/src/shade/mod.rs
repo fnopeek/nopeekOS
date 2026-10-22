@@ -281,6 +281,41 @@ pub fn focused_surface_id() -> Option<u32> {
     }).flatten()
 }
 
+/// Put a Surface window (a microvm output) into / out of fullscreen on the
+/// guest's request (`WIN_FULLSCREEN`). Returns true if the state actually
+/// changed and the frame was redrawn. Core 0 then mirrors the new state back
+/// to the guest with `WIN_STATE` (see `is_window_fullscreen`).
+pub fn set_window_fullscreen(window_id: u32, on: bool) -> bool {
+    let changed = with_compositor(|comp| {
+        let want = if on {
+            window::WindowState::Fullscreen
+        } else {
+            window::WindowState::Tiled
+        };
+        let Some(win) = comp.window_mut(WindowId(window_id)) else { return false };
+        if win.state == want { return false; }
+        win.state = want;
+        win.dirty = true;
+        comp.retile();
+        true
+    }).unwrap_or(false);
+    if changed {
+        render_frame();
+    }
+    changed
+}
+
+/// Is `window_id` fullscreen right now? Core 0 compares this against what it
+/// last told the guest and sends `WIN_STATE` on a change, so the guest's
+/// compositor enters/leaves its own fullscreen in step with Mod+F, a focus
+/// change, a workspace switch or the guest's own request.
+pub fn is_window_fullscreen(window_id: u32) -> bool {
+    with_compositor(|comp| {
+        comp.windows.iter().any(|w| w.id.0 == window_id
+            && w.state == window::WindowState::Fullscreen)
+    }).unwrap_or(false)
+}
+
 /// Forward a host pointer event into the focused Surface window's
 /// guest virtio-input eventq as an absolute pointer (qemu
 /// usb-tablet model): cursor position relative to the tile content
@@ -313,8 +348,9 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
         let fid = comp.focused?;
         let win = comp.windows.iter().find(|w| w.id == fid)?;
         if win.kind != window::WindowKind::Surface { return None; }
-        Some((fid.0, win.content_x(comp.border), win.content_y(comp.border),
-              win.content_w(comp.border), win.content_h(comp.border)))
+        let border = comp.effective_border(win);
+        Some((fid.0, win.content_x(border), win.content_y(border),
+              win.content_w(border), win.content_h(border)))
     }).flatten();
     let (wid, cx, cy, cw, ch) = match rect {
         Some(r) if r.3 > 0 && r.4 > 0 => r,
@@ -544,10 +580,12 @@ fn render_frame_surface() {
         let painted = match guard.as_mut() {
             Some(comp) => {
                 comp.aurora_drawn = true;
-                let border = comp.border;
                 let mut damage = alloc::vec::Vec::new();
                 for win in comp.windows.iter() {
                     if win.kind != crate::shade::window::WindowKind::Surface { continue; }
+                    // A fullscreen Surface has no border; its content is the
+                    // whole window rect.
+                    let border = comp.effective_border(win);
                     let full = crate::shade::scene::Rect::new(win.x, win.y, win.width, win.height);
                     let cx = win.x + border;
                     let cy = win.y + border;
