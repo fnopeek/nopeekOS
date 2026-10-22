@@ -21,6 +21,14 @@ pub fn amdgpu_gmc_is_pdb0_enabled(adev: &amdgpu_device) -> bool {
     adev.gmc.xgmi.connected_to_cpu
 }
 
+/// `amdgpu_gmc_vram_full_visible` (amdgpu_gmc.h).
+pub fn amdgpu_gmc_vram_full_visible(gmc: &crate::amdgpu_device::amdgpu_gmc) -> bool {
+    if gmc.real_vram_size < gmc.visible_vram_size {
+        Line::new().s("WARNING: amdgpu_gmc_vram_full_visible: visible VRAM larger than VRAM").say();
+    }
+    gmc.real_vram_size == gmc.visible_vram_size
+}
+
 /// `amdgpu_gmc_vram_location`.
 pub fn amdgpu_gmc_vram_location(adev: &mut amdgpu_device, base: u64) {
     let vis_limit = (tables::amdgpu_vis_vram_limit[0] as u64) << 20;

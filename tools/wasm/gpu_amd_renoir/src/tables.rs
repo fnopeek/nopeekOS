@@ -177,6 +177,9 @@ pub static amdgpu_vm_fault_stop: [i32; 1] = [0];
 /// `amdgpu_msi` in amdgpu_drv.c
 pub static amdgpu_msi: [i32; 1] = [-1];
 
+/// `amdgpu_moverate` in amdgpu_drv.c
+pub static amdgpu_moverate: [i32; 1] = [-1];
+
 /// `amdgpu_sdma_phase_quantum` in amdgpu_drv.c
 pub static amdgpu_sdma_phase_quantum: [u32; 1] = [32];
 

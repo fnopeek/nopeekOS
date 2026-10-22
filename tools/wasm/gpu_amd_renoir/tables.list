@@ -69,6 +69,8 @@ amdgpu_vm_fault_stop: i32
 @ amdgpu_drv.c
 amdgpu_msi: i32
 @ amdgpu_drv.c
+amdgpu_moverate: i32
+@ amdgpu_drv.c
 amdgpu_sdma_phase_quantum: u32
 @ sdma_v4_0.c
 golden_settings_sdma_4_3: u32

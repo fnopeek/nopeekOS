@@ -377,6 +377,17 @@ pub struct amdgpu_xgmi {
     pub node_segment_size: u64,
 }
 
+/// `adev->mm_stats`; its spinlock guards nothing on one thread.
+#[derive(Default, Clone, Copy)]
+pub struct amdgpu_mm_stats {
+    pub last_update_us: i64,
+    /// accumulated microseconds
+    pub accum_us: i64,
+    /// for visible VRAM
+    pub accum_us_vis: i64,
+    pub log2_max_MBps: u32,
+}
+
 /// `struct amdgpu_gmc`.
 #[derive(Default)]
 pub struct amdgpu_gmc {
@@ -774,7 +785,10 @@ pub struct amdgpu_device {
     /// clients, where Linux compares pointers).
     pub next_ctx_serial: u64,
     pub vram_lost_counter: u32,
-    /// TTM's move statistics (`amdgpu_bo_move`); no buffer moves yet.
+    /// `mm_stats`: data for buffer migration throttling.
+    pub mm_stats: amdgpu_mm_stats,
+    /// TTM's move statistics (`amdgpu_bo_move`): only a copying move
+    /// counts, and there is none.
     pub num_bytes_moved: u64,
     pub num_evictions: u64,
     pub num_vram_cpu_page_faults: u64,
@@ -915,6 +929,7 @@ impl amdgpu_device {
             mp1_state: 0,
             next_ctx_serial: 0,
             vram_lost_counter: 0,
+            mm_stats: amdgpu_mm_stats::default(),
             num_bytes_moved: 0,
             num_evictions: 0,
             num_vram_cpu_page_faults: 0,

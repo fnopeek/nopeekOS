@@ -1,7 +1,7 @@
 //! drivers/gpu/drm/ttm (Linux 6.18.55): the buffer object core as far as
-//! amdgpu's kernel buffers take it. Kernel buffers are created, pinned and
-//! freed; nothing is evicted, swapped or moved between placements once
-//! placed, so the LRU lists and the eviction walk are not here.
+//! amdgpu's buffers take it. A buffer moves only where its pages stay
+//! (system, TT, the on-chip heaps); nothing is evicted or swapped, so the
+//! LRU lists and the eviction walk are not here.
 
 use alloc::vec::Vec;
 
@@ -114,6 +114,16 @@ pub struct ttm_buffer_object {
     pub ttm: Option<ttm_tt>,
     /// `sg`: an imported buffer's pages, by bus address.
     pub sg: Option<Vec<u64>>,
+}
+
+/// `struct ttm_operation_ctx`, the fields this port reads. `interruptible`
+/// and `gfp_retry_mayfail` have nothing to act on here (no signals, the
+/// kernel hands out the pages); `allow_res_evict` and `resv` steer the
+/// eviction walk, which is not here.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct ttm_operation_ctx {
+    pub no_wait_gpu: bool,
+    pub bytes_moved: u64,
 }
 
 /// `struct ttm_placement`.

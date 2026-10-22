@@ -338,44 +338,161 @@ fn tt_of(adev: &amdgpu_device, h: usize) -> ttm_tt {
     bo(adev, h).tbo.ttm.unwrap()
 }
 
-/// `ttm_bo_handle_move_mem` with `amdgpu_bo_move` for a buffer that has
-/// no resource yet, or one in SYSTEM going to TT (an imported buffer being
-/// pinned): TT pages created and populated, then `move_null`.
-fn ttm_bo_handle_move_mem(adev: &mut amdgpu_device, h: usize, mem: ttm_resource) -> Result<(), (i32, ttm_resource)> {
-    let new_use_tt = man_used(adev, mem.mem_type).is_some_and(|m| m.use_tt);
-    if new_use_tt {
-        let r = ttm_tt_create(adev, h);
-        if r != 0 {
-            return Err((r, mem));
+/// `amdgpu_ttm_backend_unbind`: no userptr. An imported buffer keeps its
+/// `sg`: the kernel hands its pages over once (`amdgpu_dma_buf_create_obj`)
+/// and there is no attachment to map again on the next bind.
+fn amdgpu_ttm_backend_unbind(adev: &mut amdgpu_device, h: usize) {
+    let Some(tt) = bo(adev, h).tbo.ttm else { return };
+    if !tt.bound {
+        return;
+    }
+    if tt.offset == AMDGPU_BO_INVALID_OFFSET {
+        return;
+    }
+    // unbind shouldn't be done for GDS/GWS/OA in ttm_bo_clean_mm
+    crate::amdgpu_gart::amdgpu_gart_unbind(adev, tt.offset, tt.num_pages);
+    bo_mut(adev, h).tbo.ttm.as_mut().unwrap().bound = false;
+}
+
+/// `ttm_bo_wait_ctx`.
+fn ttm_bo_wait_ctx(adev: &mut amdgpu_device, h: usize, ctx: &ttm_operation_ctx) -> i32 {
+    use crate::dma_resv::dma_resv_usage::DMA_RESV_USAGE_BOOKKEEP;
+    let resv = crate::amdgpu_object::amdgpu_bo_resv(adev, h).clone();
+    if ctx.no_wait_gpu {
+        if crate::dma_resv::dma_resv_test_signaled(adev, &resv, DMA_RESV_USAGE_BOOKKEEP) {
+            return 0;
         }
-        if mem.mem_type != TTM_PL_SYSTEM {
-            let r = ttm_bo_populate(adev, h);
+        return -16;
+    }
+    // 15 * HZ
+    let ret = crate::dma_resv::dma_resv_wait_timeout(adev, &resv, DMA_RESV_USAGE_BOOKKEEP, 15_000_000);
+    if ret < 0 {
+        return ret as i32;
+    }
+    if ret == 0 {
+        return -16;
+    }
+    0
+}
+
+/// `ttm_bo_tt_destroy`: the TT's pages back to the kernel.
+pub fn ttm_bo_tt_destroy(adev: &mut amdgpu_device, h: usize) {
+    if let Some((tt, _)) = bo_mut(adev, h).pool.take() {
+        npk_sys::gpudev_tt_free(tt as i32);
+    }
+    if let Some(tt) = bo_mut(adev, h).tbo.ttm.take() {
+        if let Some((handle, phys)) = tt.dma {
+            (npk_sys::Dma { handle, phys }).free();
+        }
+    }
+}
+
+/// `ttm_bo_move_null`.
+fn ttm_bo_move_null(adev: &mut amdgpu_device, h: usize, new_mem: ttm_resource) {
+    ttm_resource_free(adev, h);
+    bo_mut(adev, h).tbo.resource = Some(new_mem);
+}
+
+/// `amdgpu_bo_move` for every move that leaves the pages where they are.
+/// A move into or out of VRAM copies (`amdgpu_move_blit`, the bounce
+/// through TT, `ttm_bo_move_memcpy`), which is not here: -EINVAL.
+fn amdgpu_bo_move(adev: &mut amdgpu_device, h: usize, evict: bool, ctx: &ttm_operation_ctx, new_mem: ttm_resource)
+                  -> Result<(), (i32, ttm_resource)> {
+    let is_tt = |t: u32| t == TTM_PL_TT || t == AMDGPU_PL_PREEMPT;
+    let on_chip = |t: u32| {
+        t == AMDGPU_PL_GDS || t == AMDGPU_PL_GWS || t == AMDGPU_PL_OA || t == AMDGPU_PL_DOORBELL
+            || t == AMDGPU_PL_MMIO_REMAP
+    };
+    let old_mem = bo(adev, h).tbo.resource.as_ref().map(|r| r.mem_type);
+    if is_tt(new_mem.mem_type) {
+        if old_mem.is_some_and(is_tt) {
+            let r = ttm_bo_wait_ctx(adev, h, ctx);
+            if r != 0 {
+                return Err((r, new_mem));
+            }
+            amdgpu_ttm_backend_unbind(adev, h);
+        }
+        let r = amdgpu_ttm_backend_bind(adev, h, &new_mem);
+        if r != 0 {
+            return Err((r, new_mem));
+        }
+    }
+    let no_ttm = bo(adev, h).tbo.ttm.is_none();
+    let Some(old) = old_mem.filter(|&t| !(t == TTM_PL_SYSTEM && no_ttm)) else {
+        crate::amdgpu_object::amdgpu_bo_move_notify(adev, h, evict, Some(&new_mem));
+        ttm_bo_move_null(adev, h, new_mem);
+        return Ok(());
+    };
+    if old == TTM_PL_SYSTEM && is_tt(new_mem.mem_type) {
+        crate::amdgpu_object::amdgpu_bo_move_notify(adev, h, evict, Some(&new_mem));
+        ttm_bo_move_null(adev, h, new_mem);
+        return Ok(());
+    }
+    if is_tt(old) && new_mem.mem_type == TTM_PL_SYSTEM {
+        let r = ttm_bo_wait_ctx(adev, h, ctx);
+        if r != 0 {
+            return Err((r, new_mem));
+        }
+        amdgpu_ttm_backend_unbind(adev, h);
+        crate::amdgpu_object::amdgpu_bo_move_notify(adev, h, evict, Some(&new_mem));
+        ttm_resource_free(adev, h);
+        bo_mut(adev, h).tbo.resource = Some(new_mem);
+        return Ok(());
+    }
+    if is_tt(old) && is_tt(new_mem.mem_type) {
+        crate::amdgpu_object::amdgpu_bo_move_notify(adev, h, evict, Some(&new_mem));
+        ttm_resource_free(adev, h);
+        bo_mut(adev, h).tbo.resource = Some(new_mem);
+        return Ok(());
+    }
+    if on_chip(old) || on_chip(new_mem.mem_type) {
+        // Nothing to save here
+        crate::amdgpu_object::amdgpu_bo_move_notify(adev, h, evict, Some(&new_mem));
+        ttm_bo_move_null(adev, h, new_mem);
+        return Ok(());
+    }
+    Err((-22, new_mem))
+}
+
+/// `ttm_bo_handle_move_mem`. `ttm_bo_unmap_virtual` has nothing to take
+/// away: a guest maps a blob's TT pages, which every move here keeps, or
+/// its VRAM, which no move here leaves.
+fn ttm_bo_handle_move_mem(adev: &mut amdgpu_device, h: usize, mem: ttm_resource, evict: bool,
+                          ctx: &mut ttm_operation_ctx) -> Result<(), (i32, ttm_resource)> {
+    let old_use_tt = match bo(adev, h).tbo.resource.as_ref() {
+        None => true,
+        Some(r) => man_used(adev, r.mem_type).is_some_and(|m| m.use_tt),
+    };
+    let new_use_tt = man_used(adev, mem.mem_type).is_some_and(|m| m.use_tt);
+    let r = (|| {
+        // Create and bind a ttm if required.
+        if new_use_tt {
+            let r = ttm_tt_create(adev, h);
             if r != 0 {
                 return Err((r, mem));
             }
+            if mem.mem_type != TTM_PL_SYSTEM {
+                let r = ttm_bo_populate(adev, h);
+                if r != 0 {
+                    return Err((r, mem));
+                }
+            }
         }
-    }
-    // amdgpu_bo_move
-    if mem.mem_type == TTM_PL_TT || mem.mem_type == AMDGPU_PL_PREEMPT {
-        let r = amdgpu_ttm_backend_bind(adev, h, &mem);
-        if r != 0 {
-            return Err((r, mem));
+        amdgpu_bo_move(adev, h, evict, ctx, mem)
+    })();
+    if r.is_err() {
+        if !old_use_tt {
+            ttm_bo_tt_destroy(adev, h);
         }
+        return r;
     }
-    let old_system = bo(adev, h).tbo.resource.as_ref().map(|r| r.mem_type == TTM_PL_SYSTEM);
-    let new_tt = mem.mem_type == TTM_PL_TT || mem.mem_type == AMDGPU_PL_PREEMPT;
-    if old_system.is_none() || old_system == Some(true) && new_tt {
-        // ttm_bo_move_null
-        ttm_resource_free(adev, h);
-        bo_mut(adev, h).tbo.resource = Some(mem);
-        return Ok(());
-    }
-    // A pinned kernel buffer is never moved between placements.
-    Err((-22, mem))
+    ctx.bytes_moved += bo(adev, h).tbo.size;
+    Ok(())
 }
 
 /// `ttm_bo_validate`.
-pub fn ttm_bo_validate(adev: &mut amdgpu_device, h: usize, placement: &ttm_placement) -> i32 {
+pub fn ttm_bo_validate(adev: &mut amdgpu_device, h: usize, placement: &ttm_placement, ctx: &mut ttm_operation_ctx)
+                       -> i32 {
     if placement.is_empty() {
         return -22;
     }
@@ -401,7 +518,7 @@ pub fn ttm_bo_validate(adev: &mut amdgpu_device, h: usize, placement: &ttm_place
             Err(e) => return e,
             Ok(res) => {
                 ret = 0;
-                if let Err((e, res)) = ttm_bo_handle_move_mem(adev, h, res) {
+                if let Err((e, res)) = ttm_bo_handle_move_mem(adev, h, res, false, ctx) {
                     ttm_resource_free_res(adev, res);
                     return e;
                 }
@@ -423,13 +540,35 @@ pub fn ttm_bo_validate(adev: &mut amdgpu_device, h: usize, placement: &ttm_place
 }
 
 /// `ttm_bo_init_reserved`.
-pub fn ttm_bo_init_reserved(adev: &mut amdgpu_device, h: usize, type_: u32, alignment: u32) -> i32 {
+pub fn ttm_bo_init_reserved(adev: &mut amdgpu_device, h: usize, type_: u32, alignment: u32,
+                            ctx: &mut ttm_operation_ctx) -> i32 {
     let b = bo_mut(adev, h);
     b.tbo.type_ = type_;
     b.tbo.page_alignment = alignment;
     b.tbo.pin_count = 0;
     let placement = b.placements.clone();
-    ttm_bo_validate(adev, h, &placement)
+    ttm_bo_validate(adev, h, &placement, ctx)
+}
+
+/// `amdgpu_res_cpu_visible`.
+pub fn amdgpu_res_cpu_visible(adev: &amdgpu_device, res: Option<&ttm_resource>) -> bool {
+    let Some(res) = res else { return false };
+    if res.mem_type == TTM_PL_SYSTEM || res.mem_type == TTM_PL_TT || res.mem_type == AMDGPU_PL_PREEMPT
+        || res.mem_type == AMDGPU_PL_DOORBELL || res.mem_type == AMDGPU_PL_MMIO_REMAP {
+        return true;
+    }
+    if res.mem_type != TTM_PL_VRAM {
+        return false;
+    }
+    let mut cursor = crate::amdgpu_res_cursor::amdgpu_res_first(adev, Some(res), 0, res.size);
+    while cursor.remaining != 0 {
+        if cursor.start + cursor.size > adev.gmc.visible_vram_size {
+            return false;
+        }
+        let n = cursor.size;
+        crate::amdgpu_res_cursor::amdgpu_res_next(adev, Some(res), &mut cursor, n);
+    }
+    true
 }
 
 /// `amdgpu_ttm_domain_start`.

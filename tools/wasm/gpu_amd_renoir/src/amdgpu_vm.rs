@@ -415,6 +415,8 @@ pub fn amdgpu_vm_flush(adev: &mut amdgpu_device, r: usize, j: u64, need_pipe_syn
     if !vm_flush_needed && !gds_switch_needed && !need_pipe_sync {
         return 0;
     }
+    // amdgpu_ring_ib_begin/ib_end act only on a software ring of the MCBP
+    // ring mux, which MCBP off (`amdgpu_mcbp` -1 on bare metal) never makes.
     // There is no matching insert_end for this on purpose for the vm flush.
     // The IB portion of the submission has both.  Having multiple
     // insert_start sequences is ok, but you can only have one insert_end
@@ -502,7 +504,10 @@ impl amdgpu_vm_update_params {
 /// `amdgpu_vm_validate`: the evicted page tables and per-VM buffers
 /// validated with `validate`, and the VM's entities renewed if its
 /// generation moved on.
-pub fn amdgpu_vm_validate(adev: &mut amdgpu_device, vm: usize, validate: fn(&mut amdgpu_device, usize) -> i32) -> i32 {
+/// The loop over `evicted_user` runs only with a ticket, which no caller
+/// here passes.
+pub fn amdgpu_vm_validate(adev: &mut amdgpu_device, vm: usize,
+                          validate: &mut dyn FnMut(&mut amdgpu_device, usize) -> i32) -> i32 {
     let new_vm_generation = amdgpu_vm_generation(adev, Some(vm));
     if adev.vm(vm).generation != new_vm_generation {
         adev.vm_mut(vm).generation = new_vm_generation;
@@ -937,7 +942,11 @@ pub fn amdgpu_vm_bo_update(adev: &mut amdgpu_device, b: usize, clear: bool) -> i
     let (flags, vram_base, uncached) = match bo {
         Some(h) => {
             let x = obj::bo(adev, h);
-            let flags = crate::amdgpu_ttm::amdgpu_ttm_tt_pte_flags(adev, x.tbo.ttm.as_ref(), mem.as_ref());
+            let mut flags = crate::amdgpu_ttm::amdgpu_ttm_tt_pte_flags(adev, x.tbo.ttm.as_ref(), mem.as_ref());
+            // amdgpu_bo_encrypted
+            if x.flags & AMDGPU_GEM_CREATE_ENCRYPTED as u64 != 0 {
+                flags |= AMDGPU_PTE_TMZ as u64;
+            }
             (flags, adev.vm_manager.vram_base_offset, x.flags & AMDGPU_GEM_CREATE_UNCACHED as u64 != 0)
         }
         None => (0, 0, false),
@@ -974,13 +983,15 @@ pub fn amdgpu_vm_bo_update(adev: &mut amdgpu_device, b: usize, clear: bool) -> i
         let r = amdgpu_vm_update_range(adev, vm, false, false, flush_tlb, !uncached, Some(&mut sync), start, last,
                                        update_flags, offset, vram_base, mem.as_ref(), pages_addr.clone(),
                                        Some(&mut last_update));
+        // `last_update` points into the VM or the bo_va: what the mappings
+        // before a failure did stays there.
+        let lu = last_update.clone().unwrap();
+        if to_vm { adev.vm_mut(vm).last_update = lu } else { bo_va(adev, b).last_pt_update = lu }
         if r != 0 {
             crate::amdgpu_sync::amdgpu_sync_free(&mut sync);
             return r;
         }
     }
-    let lu = last_update.unwrap();
-    if to_vm { adev.vm_mut(vm).last_update = lu } else { bo_va(adev, b).last_pt_update = lu }
     // If the BO is not in its preferred location add it back to the
     // evicted list so that it gets validated again on the next command
     // submission.
@@ -1103,13 +1114,47 @@ pub fn amdgpu_vm_handle_moved(adev: &mut amdgpu_device, vm: usize) -> i32 {
         }
     }
     while let Some(&b) = adev.vm(vm).lists[vm_status::invalidated as usize].first() {
-        // the reservation is ours to take: one thread
+        // `clear` stays false: `debug_vm` is off, there is no userptr, and
+        // on one thread the reservation is free or held by this submission.
         let r = amdgpu_vm_bo_update(adev, b, false);
         if r != 0 {
             return r;
         }
+        // Evicted DMABuf imports are remembered only in a compute VM, which
+        // only KFD makes.
     }
     0
+}
+
+/// `amdgpu_vm_bo_invalidate`: mark the bo as invalid.
+pub fn amdgpu_vm_bo_invalidate(adev: &mut amdgpu_device, h: usize, evicted: bool) {
+    let mut bo_base = obj::bo(adev, h).vm_bo;
+    while let Some(b) = bo_base {
+        bo_base = base(adev, b).next;
+        let vm = base(adev, b).vm;
+        if evicted && amdgpu_vm_is_bo_always_valid(adev, vm, Some(h)) {
+            amdgpu_vm_bo_evicted(adev, b);
+            continue;
+        }
+        if base(adev, b).moved {
+            continue;
+        }
+        base_mut(adev, b).moved = true;
+        if obj::bo(adev, h).tbo.type_ == ttm_bo_type_kernel {
+            amdgpu_vm_bo_relocated(adev, b);
+        } else if amdgpu_vm_is_bo_always_valid(adev, vm, Some(h)) {
+            amdgpu_vm_bo_moved(adev, b);
+        } else {
+            amdgpu_vm_bo_invalidated(adev, b);
+        }
+    }
+}
+
+/// `amdgpu_vm_bo_move`: the memory statistics are not kept (see
+/// `amdgpu_vm_bo_base_init`), so what is left is the invalidation.
+pub fn amdgpu_vm_bo_move(adev: &mut amdgpu_device, h: usize, _new_mem: Option<&crate::ttm::ttm_resource>,
+                         evicted: bool) {
+    amdgpu_vm_bo_invalidate(adev, h, evicted);
 }
 
 /// `amdgpu_vm_init`: a VM with its root directory cleared; its key.

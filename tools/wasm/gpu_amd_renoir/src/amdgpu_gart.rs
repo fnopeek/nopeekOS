@@ -78,6 +78,23 @@ fn amdgpu_gmc_set_pte_pde(adev: &amdgpu_device, ptr: amdgpu_kptr, gpu_page_idx: 
     kptr_writeq(adev, ptr, gpu_page_idx * 8, value);
 }
 
+/// `amdgpu_gart_unbind`: the pages pointed at the dummy page, invalid.
+pub fn amdgpu_gart_unbind(adev: &mut amdgpu_device, offset: u64, pages: u64) {
+    // Starting from VEGA10, system bit must be 0 to mean invalid.
+    let flags = 0u64;
+    let Some(ptr) = adev.gart.ptr else { return };
+    let mut t = offset / AMDGPU_GPU_PAGE_SIZE as u64;
+    for _ in 0..pages {
+        let mut page_base = adev.dummy_page_addr;
+        for _ in 0..AMDGPU_GPU_PAGES_IN_CPU_PAGE {
+            amdgpu_gmc_set_pte_pde(adev, ptr, t, page_base, flags);
+            page_base += AMDGPU_GPU_PAGE_SIZE as u64;
+            t += 1;
+        }
+    }
+    amdgpu_gart_invalidate_tlb(adev);
+}
+
 /// `amdgpu_gart_map`.
 pub fn amdgpu_gart_map(adev: &amdgpu_device, offset: u64, pages: u64, dma_addr: &[u64], flags: u64, dst: amdgpu_kptr) {
     let mut t = offset / AMDGPU_GPU_PAGE_SIZE as u64;

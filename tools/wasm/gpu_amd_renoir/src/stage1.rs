@@ -244,6 +244,15 @@ fn ip_init_phase2(adev: &mut amdgpu_device) {
     crate::amdgpu_fence::amdgpu_fence_driver_hw_init(adev);
     adev.accel_working = true;
     // amdgpu_vm_check_compute_bug: GFX 9 has none, the rings' flags stay
+    // Initialize the buffer migration limit.
+    let max_mbps: u32 = if crate::tables::amdgpu_moverate[0] >= 0 {
+        crate::tables::amdgpu_moverate[0] as u32
+    } else {
+        // Allow 8 MB/s.
+        8
+    };
+    // Get a log2 for easy divisions.
+    adev.mm_stats.log2_max_MBps = crate::linux::ilog2(max_mbps.max(1) as u64);
     let r = dev::amdgpu_device_ip_late_init(adev);
     if r != 0 {
         Line::new().s("amdgpu_device_ip_late_init failed").say();

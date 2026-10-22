@@ -92,6 +92,7 @@ pub struct amdgpu_bo_param {
     pub resv: Option<usize>,
     /// The guest client whose GEM object this is (`amdgpu_bo.client`).
     pub client: Option<u32>,
+    pub no_wait_gpu: bool,
 }
 
 pub fn bo(adev: &amdgpu_device, h: usize) -> &amdgpu_bo {
@@ -254,10 +255,17 @@ pub fn amdgpu_bo_create(adev: &mut amdgpu_device, bp: &amdgpu_bo_param) -> Resul
     } else {
         0
     };
-    let r = amdgpu_ttm::ttm_bo_init_reserved(adev, h, bp.type_, page_align as u32);
+    let mut ctx = crate::ttm::ttm_operation_ctx { no_wait_gpu: bp.no_wait_gpu, bytes_moved: 0 };
+    let r = amdgpu_ttm::ttm_bo_init_reserved(adev, h, bp.type_, page_align as u32, &mut ctx);
     if r != 0 {
         adev.mman.bos[h] = None;
         return Err(r);
+    }
+    if !crate::amdgpu_gmc::amdgpu_gmc_vram_full_visible(&adev.gmc)
+        && amdgpu_ttm::amdgpu_res_cpu_visible(adev, bo(adev, h).tbo.resource.as_ref()) {
+        crate::amdgpu_cs::amdgpu_cs_report_moved_bytes(adev, ctx.bytes_moved, ctx.bytes_moved);
+    } else {
+        crate::amdgpu_cs::amdgpu_cs_report_moved_bytes(adev, ctx.bytes_moved, 0);
     }
     if bp.flags & AMDGPU_GEM_CREATE_VRAM_CLEARED as u64 != 0
         && bo(adev, h).tbo.resource.as_ref().is_some_and(|r| r.mem_type == TTM_PL_VRAM) {
@@ -335,7 +343,8 @@ pub fn amdgpu_bo_pin(adev: &mut amdgpu_device, h: usize, mut domain: u32) -> i32
         }
     }
     let placement = bo(adev, h).placements.clone();
-    let r = amdgpu_ttm::ttm_bo_validate(adev, h, &placement);
+    let mut ctx = crate::ttm::ttm_operation_ctx::default();
+    let r = amdgpu_ttm::ttm_bo_validate(adev, h, &placement, &mut ctx);
     if r != 0 {
         Line::new().s("pin failed").say();
         return r;
@@ -610,17 +619,25 @@ fn amdgpu_bo_release_notify(adev: &mut amdgpu_device, h: usize) {
     bo_mut(adev, h)._resv = own;
 }
 
-/// `ttm_bo_cleanup_memtype_use`: its pages and its place.
+/// `ttm_bo_cleanup_memtype_use`, with `amdgpu_bo_delete_mem_notify`.
 fn ttm_bo_cleanup_memtype_use(adev: &mut amdgpu_device, h: usize) {
-    if let Some((tt, _)) = bo_mut(adev, h).pool.take() {
-        npk_sys::gpudev_tt_free(tt as i32);
-    }
-    if let Some(tt) = bo_mut(adev, h).tbo.ttm.take() {
-        if let Some((handle, phys)) = tt.dma {
-            (npk_sys::Dma { handle, phys }).free();
-        }
-    }
+    amdgpu_bo_move_notify(adev, h, false, None);
+    amdgpu_ttm::ttm_bo_tt_destroy(adev, h);
     amdgpu_ttm::ttm_resource_free(adev, h);
+}
+
+/// `amdgpu_bo_kunmap`.
+pub fn amdgpu_bo_kunmap(adev: &mut amdgpu_device, h: usize) {
+    bo_mut(adev, h).kptr = None;
+}
+
+/// `amdgpu_bo_move_notify`: every buffer here is an amdgpu one. No buffer
+/// of this device is exported as a dma-buf with attachments, so there is
+/// no importer to tell (`dma_buf_move_notify`).
+pub fn amdgpu_bo_move_notify(adev: &mut amdgpu_device, h: usize, evict: bool,
+                             new_mem: Option<&crate::ttm::ttm_resource>) {
+    crate::amdgpu_vm::amdgpu_vm_bo_move(adev, h, new_mem, evict);
+    amdgpu_bo_kunmap(adev, h);
 }
 
 /// `ttm_bo_release`: a buffer with fences still pending waits for them in
@@ -711,6 +728,7 @@ pub fn amdgpu_dma_buf_create_obj(adev: &mut amdgpu_device, pages: Vec<u64>) -> R
         type_: ttm_bo_type_sg,
         resv: None,
         client: None,
+        no_wait_gpu: false,
     };
     let h = amdgpu_bo_create(adev, &bp)?;
     let b = bo_mut(adev, h);

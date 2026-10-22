@@ -169,6 +169,11 @@ struct amdgpu_cs_parser {
     bo_list: Vec<(usize, Option<usize>)>,
     /// The objects `exec` locked: the page directory, then the list.
     locked: Vec<usize>,
+    /// buffer moves
+    bytes_moved_threshold: u64,
+    bytes_moved_vis_threshold: u64,
+    bytes_moved: u64,
+    bytes_moved_vis: u64,
 }
 
 /// `amdgpu_cs_job_idx`.
@@ -204,23 +209,128 @@ fn amdgpu_cs_ib_packet_size_max_dw(type_: u32) -> u32 {
     }
 }
 
-/// `amdgpu_cs_bo_validate`: pinned buffers stay, others go to their
-/// preferred domain (no move threshold to keep: VRAM is all visible).
-fn amdgpu_cs_bo_validate(adev: &mut amdgpu_device, bo: usize) -> i32 {
+/// `us_to_bytes`: convert microseconds to bytes.
+fn us_to_bytes(adev: &amdgpu_device, us: i64) -> u64 {
+    if us <= 0 || adev.mm_stats.log2_max_MBps == 0 {
+        return 0;
+    }
+    // Since accum_us is incremented by a million per second, just multiply
+    // it by the number of MB/s to get the number of bytes.
+    (us as u64) << adev.mm_stats.log2_max_MBps
+}
+
+/// `bytes_to_us`.
+fn bytes_to_us(adev: &amdgpu_device, bytes: u64) -> i64 {
+    if adev.mm_stats.log2_max_MBps == 0 {
+        return 0;
+    }
+    (bytes >> adev.mm_stats.log2_max_MBps) as i64
+}
+
+/// `amdgpu_cs_get_threshold_for_moves`: how many bytes TTM can move right
+/// now, and how many of them into CPU-visible VRAM. A non-zero value lets
+/// at least one buffer move, which may go over it once; the debt stops
+/// further moves until the clock has repaid it. The currency is time in
+/// microseconds, converted to bytes.
+fn amdgpu_cs_get_threshold_for_moves(adev: &mut amdgpu_device) -> (u64, u64) {
+    // Allow a maximum of 200 accumulated ms. This is basically per-IB
+    // throttling.
+    let us_upper_bound: i64 = 200000;
+    let vram = adev.mman.vram_mgr.as_ref().map(|m| m.manager).filter(|m| m.use_type);
+    let Some(vram) = vram.filter(|_| adev.mm_stats.log2_max_MBps != 0) else { return (0, 0) };
+    let total_vram = adev.gmc.real_vram_size.wrapping_sub(adev.vram_pin_size);
+    let used_vram = vram.usage;
+    let free_vram = if used_vram >= total_vram { 0 } else { total_vram - used_vram };
+
+    // Increase the amount of accumulated us.
+    let time_us = crate::linux::now_us() as i64;
+    let increment_us = time_us - adev.mm_stats.last_update_us;
+    adev.mm_stats.last_update_us = time_us;
+    adev.mm_stats.accum_us = (adev.mm_stats.accum_us + increment_us).min(us_upper_bound);
+
+    // If 128 MB or 1/8th of VRAM is free, start filling it now by setting
+    // accum_us to a positive number.
+    if free_vram >= 128 * 1024 * 1024 || free_vram >= total_vram / 8 {
+        // Be more aggressive on dGPUs. Try to fill a portion of free VRAM
+        // now.
+        let min_us = if adev.flags & AMD_IS_APU == 0 {
+            bytes_to_us(adev, free_vram / 4)
+        } else {
+            // Reset accum_us on APUs.
+            0
+        };
+        adev.mm_stats.accum_us = min_us.max(adev.mm_stats.accum_us);
+    }
+
+    // This is set to 0 if the driver is in debt to disallow (optional)
+    // buffer moves.
+    let max_bytes = us_to_bytes(adev, adev.mm_stats.accum_us);
+
+    // Do the same for visible VRAM if half of it is free
+    let max_vis_bytes = if !crate::amdgpu_gmc::amdgpu_gmc_vram_full_visible(&adev.gmc) {
+        let total_vis_vram = adev.gmc.visible_vram_size;
+        let used_vis_vram = adev.mman.vram_mgr.as_ref().unwrap().vis_usage;
+        if used_vis_vram < total_vis_vram {
+            let free_vis_vram = total_vis_vram - used_vis_vram;
+            adev.mm_stats.accum_us_vis = (adev.mm_stats.accum_us_vis + increment_us).min(us_upper_bound);
+            if free_vis_vram >= total_vis_vram / 2 {
+                adev.mm_stats.accum_us_vis = bytes_to_us(adev, free_vis_vram / 2).max(adev.mm_stats.accum_us_vis);
+            }
+        }
+        us_to_bytes(adev, adev.mm_stats.accum_us_vis)
+    } else {
+        0
+    };
+    (max_bytes, max_vis_bytes)
+}
+
+/// `amdgpu_cs_report_moved_bytes`: how many bytes the last command
+/// submission really moved. This can leave a debt that stops buffer
+/// migrations for a while.
+pub fn amdgpu_cs_report_moved_bytes(adev: &mut amdgpu_device, num_bytes: u64, num_vis_bytes: u64) {
+    adev.mm_stats.accum_us -= bytes_to_us(adev, num_bytes);
+    adev.mm_stats.accum_us_vis -= bytes_to_us(adev, num_vis_bytes);
+}
+
+/// `amdgpu_cs_bo_validate`. No buffer here carries a dma-buf with
+/// attachments, so only the threshold decides.
+fn amdgpu_cs_bo_validate(adev: &mut amdgpu_device, p: &mut amdgpu_cs_parser, bo: usize) -> i32 {
+    let mut ctx = crate::ttm::ttm_operation_ctx { no_wait_gpu: false, bytes_moved: 0 };
     if obj::bo(adev, bo).tbo.pin_count != 0 {
         return 0;
     }
-    let domain = obj::bo(adev, bo).preferred_domains;
-    obj::amdgpu_bo_placement_from_domain(adev, bo, domain);
-    let placement = obj::bo(adev, bo).placements.clone();
-    let mut r = crate::amdgpu_ttm::ttm_bo_validate(adev, bo, &placement);
-    let allowed = obj::bo(adev, bo).allowed_domains;
-    if r == -12 && domain != allowed {
-        obj::amdgpu_bo_placement_from_domain(adev, bo, allowed);
+    let full_visible = crate::amdgpu_gmc::amdgpu_gmc_vram_full_visible(&adev.gmc);
+    let (preferred, allowed, flags) = {
+        let b = obj::bo(adev, bo);
+        (b.preferred_domains, b.allowed_domains, b.flags)
+    };
+    // Don't move this buffer if we have depleted our allowance to move it.
+    // Don't move anything if the threshold is zero.
+    let mut domain = if p.bytes_moved < p.bytes_moved_threshold {
+        if !full_visible && flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED as u64 != 0 {
+            // And don't move a CPU_ACCESS_REQUIRED BO to limited visible
+            // VRAM if we've depleted our allowance to do that.
+            if p.bytes_moved_vis < p.bytes_moved_vis_threshold { preferred } else { allowed }
+        } else {
+            preferred
+        }
+    } else {
+        allowed
+    };
+    loop {
+        obj::amdgpu_bo_placement_from_domain(adev, bo, domain);
         let placement = obj::bo(adev, bo).placements.clone();
-        r = crate::amdgpu_ttm::ttm_bo_validate(adev, bo, &placement);
+        let r = crate::amdgpu_ttm::ttm_bo_validate(adev, bo, &placement, &mut ctx);
+        p.bytes_moved += ctx.bytes_moved;
+        if !full_visible && crate::amdgpu_ttm::amdgpu_res_cpu_visible(adev, obj::bo(adev, bo).tbo.resource.as_ref()) {
+            p.bytes_moved_vis += ctx.bytes_moved;
+        }
+        if r == -12 && domain != obj::bo(adev, bo).allowed_domains {
+            domain = obj::bo(adev, bo).allowed_domains;
+            continue;
+        }
+        return r;
     }
-    r
 }
 
 /// `amdgpu_cs_ioctl` for `ibs` on context `ctx_id`, with the buffers in
@@ -256,6 +366,10 @@ pub fn amdgpu_cs_ioctl_chunks(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv
         fence: None,
         bo_list: Vec::new(),
         locked: Vec::new(),
+        bytes_moved_threshold: 0,
+        bytes_moved_vis_threshold: 0,
+        bytes_moved: 0,
+        bytes_moved_vis: 0,
     };
     let r = (|| -> Result<u64, i32> {
         amdgpu_cs_pass1(adev, fpriv, &mut p, chunks)?;
@@ -424,18 +538,23 @@ fn amdgpu_cs_parser_bos(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &
         }
         p.bo_list[i].1 = amdgpu_vm_bo_find(adev, vm, bo);
     }
-    let r = amdgpu_vm::amdgpu_vm_validate(adev, vm, amdgpu_cs_bo_validate);
-    if r != 0 {
-        Line::new().s("amdgpu_vm_validate() failed.").say();
-        return Err(r);
-    }
     if let Some(uf) = p.uf_bo {
         if !p.locked.contains(&uf) {
             p.locked.push(uf);
         }
     }
+    let (threshold, vis_threshold) = amdgpu_cs_get_threshold_for_moves(adev);
+    p.bytes_moved_threshold = threshold;
+    p.bytes_moved_vis_threshold = vis_threshold;
+    p.bytes_moved = 0;
+    p.bytes_moved_vis = 0;
+    let r = amdgpu_vm::amdgpu_vm_validate(adev, vm, &mut |adev, bo| amdgpu_cs_bo_validate(adev, p, bo));
+    if r != 0 {
+        Line::new().s("amdgpu_vm_validate() failed.").say();
+        return Err(r);
+    }
     for &bo in &p.locked.clone() {
-        let r = amdgpu_cs_bo_validate(adev, bo);
+        let r = amdgpu_cs_bo_validate(adev, p, bo);
         if r != 0 {
             return Err(r);
         }
@@ -448,6 +567,7 @@ fn amdgpu_cs_parser_bos(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &
         let leader = p.jobs[p.gang_leader_idx].unwrap();
         amdgpu_job::job(adev, leader).uf_addr += obj::amdgpu_bo_gpu_offset(adev, uf);
     }
+    amdgpu_cs_report_moved_bytes(adev, p.bytes_moved, p.bytes_moved_vis);
     Ok(())
 }
 
@@ -473,7 +593,8 @@ fn amdgpu_cs_find_mapping(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, p: &am
             pl.flags |= TTM_PL_FLAG_CONTIGUOUS;
         }
         let placement = obj::bo(adev, bo).placements.clone();
-        let r = crate::amdgpu_ttm::ttm_bo_validate(adev, bo, &placement);
+        let mut ctx = crate::ttm::ttm_operation_ctx::default();
+        let r = crate::amdgpu_ttm::ttm_bo_validate(adev, bo, &placement, &mut ctx);
         if r != 0 {
             return Err(r);
         }
@@ -674,6 +795,8 @@ fn amdgpu_cs_submit(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut 
     }
     let fence = amdgpu_job::job(adev, leader).base.s_fence.clone().unwrap();
     p.fence = Some(fence.clone());
+    // `ttm_bo_move_to_lru_tail_unlocked` here and `amdgpu_vm_move_to_lru_tail`
+    // after the push order the eviction walk, and TTM here evicts nothing.
     for &bo in &p.locked.clone() {
         let mut resv = obj::amdgpu_bo_resv_take(adev, bo);
         for j in p.jobs.clone().into_iter().flatten() {
@@ -726,6 +849,7 @@ pub fn amdgpu_gem_object_create(adev: &mut amdgpu_device, size: u64, alignment: 
         flags: flags | AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE as u64,
         domain: initial_domain,
         client: None,
+        no_wait_gpu: false,
     };
     obj::amdgpu_bo_create(adev, &bp)
 }
@@ -789,6 +913,7 @@ pub fn amdgpu_gem_create_ioctl(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, c
             flags: flags | AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE as u64,
             domain: initial_domain,
             client: Some(client),
+            no_wait_gpu: false,
         };
         match obj::amdgpu_bo_create(adev, &bp) {
             Ok(h) => break Ok(h),

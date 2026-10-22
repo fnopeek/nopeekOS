@@ -191,7 +191,8 @@ pub fn amdgpu_vm_pt_clear(adev: &mut amdgpu_device, vm: usize, vmbo: usize, imme
     let level = pt_level(adev, vmbo);
     let entries = (obj::amdgpu_bo_size(adev, vmbo) / 8) as u32;
     let placement = obj::bo(adev, vmbo).placements.clone();
-    let r = crate::amdgpu_ttm::ttm_bo_validate(adev, vmbo, &placement);
+    let mut ctx = crate::ttm::ttm_operation_ctx::default();
+    let r = crate::amdgpu_ttm::ttm_bo_validate(adev, vmbo, &placement, &mut ctx);
     if r != 0 {
         return r;
     }
@@ -230,7 +231,7 @@ pub fn amdgpu_vm_pt_clear(adev: &mut amdgpu_device, vm: usize, vmbo: usize, imme
 
 /// `amdgpu_vm_pt_create`: a table for `level`, in VRAM, sharing the root's
 /// reservation object, with a base per entry if it is a directory.
-pub fn amdgpu_vm_pt_create(adev: &mut amdgpu_device, vm: usize, level: u32, _immediate: bool) -> Result<usize, i32> {
+pub fn amdgpu_vm_pt_create(adev: &mut amdgpu_device, vm: usize, level: u32, immediate: bool) -> Result<usize, i32> {
     let mut flags = (AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS | AMDGPU_GEM_CREATE_CPU_GTT_USWC) as u64;
     if adev.vm(vm).use_cpu_for_update {
         flags |= AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED as u64;
@@ -244,6 +245,7 @@ pub fn amdgpu_vm_pt_create(adev: &mut amdgpu_device, vm: usize, level: u32, _imm
         flags,
         type_: ttm_bo_type_kernel,
         resv: root,
+        no_wait_gpu: immediate,
         ..Default::default()
     };
     let h = obj::amdgpu_bo_create(adev, &bp)?;
