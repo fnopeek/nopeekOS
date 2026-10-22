@@ -370,3 +370,47 @@ insert_end per submission based on the way VCN FW works“. Diese Zeile
 fehlte im Port. Jeder Gastauftrag auf `vcn_dec` (und `jpeg_dec`) kam damit
 ohne Start beim Firmware an. **Modul 0.28.0** traegt sie nach; die Proben
 aus 0.25–0.27 sind wieder draussen.
+
+## 12. Abgleich des Gastpfads gegen Linux (2026-10-22, sechs Pruefer, nur gelesen)
+
+Anlass: `insert_start` fehlte in einer schon portierten Funktion — das
+findet `linux-coverage.py` nicht. Geprueft wurden Schritt fuer Schritt
+CS/ctx, Scheduler, Job/IB/Ring/Fence/IRQ, VM/VMID/PT/sync, VCN/JPEG/SMU und
+der Fence-Weg Modul↔Kernel↔Gast gegen virglrenderer 1.3.0 und Mesa.
+
+**Behoben in Modul 0.29.0:**
+- Eingereihte Arbeit (`run_job` des Schedulers nach einem CS) lief erst
+  beim naechsten Aufwachen der Schleife — bis 100 ms je Auftrag, ohne
+  Interrupt, weil der Auftrag noch nicht auf dem Ring lag (drei Pruefer
+  unabhaengig). Jetzt laeuft sie vor dem Schlafen; der Schlaf endet am
+  naechsten Timer (Delayed Work, Fence-Fallback).
+- `wait_until` konnte einen Interrupt zwischen Pruefen und Warten
+  verschlafen (bis 10 ms je `dma_fence_wait`).
+- `amdgpu_ring_undo` ohne `end_use`, `amdgpu_ring_alloc_reemit` ohne
+  `begin_use`; Idle-Work der VCN/JPEG mit `mod_` statt `schedule_delayed_work`.
+
+**Offen, Modul:**
+1. `gmc_v9_0_flush_gpu_tlb`: der KIQ-Zweig fehlt (`gmc_v9_0.c:866-875`,
+   „necessary … for GFXOFF to function properly under bare metal"); bei
+   GFXOFF kann die MMIO-Ack-Schleife bis 100 ms laufen.
+2. `amdgpu_bo_move_notify` → `amdgpu_vm_bo_invalidate`/`amdgpu_vm_bo_move`
+   nicht portiert (`amdgpu_vm.c:2280-2337`, `amdgpu_object.c:1270`,
+   `amdgpu_dma_buf.c:504`): ein BO, das nach dem Mappen den Ort wechselt,
+   behaelt ungueltige PTEs. Korrektheit.
+3. `amdgpu_cs_bo_validate`: Verschiebe-Drossel fehlt
+   (`amdgpu_cs_get_threshold_for_moves`, `report_moved_bytes`), dazu
+   `ttm_bo_move_to_lru_tail`/`amdgpu_vm_move_to_lru_tail` in `cs_submit`.
+4. Blockierende Wartestellen im Modul (`drain_scene`, `copy_rect`,
+   `get_blob` → `ttm_bo_vm_fault_idle`) melden derweil keine Gast-Fences.
+5. Klein: TMZ-Flag in `bo_update` und `ib_begin/end` in `vm_flush` ohne
+   Kommentar, `bo_update`-Fehlerpfad, `pt_create` ohne `no_wait_gpu`.
+
+**Offen, Kernel (Fence-Weg zum Gast, gegen virglrenderer):**
+1. `service_controlq` kehrt bei laufendem SUBMIT_3D vor `complete_fences`
+   zurueck (`virtio_gpu_pci.rs:547-552`): Fertigmeldungen stehen, solange
+   ein SUBMIT laeuft; virglrenderer meldet je Zeitlinie aus eigenem Thread.
+2. Der gehaltene FLUSH wartet auf offene Arbeit ALLER Kontexte und Ringe
+   (`present_when_done`, `:1447`) und sperrt die SUBMITs dahinter (`:722`).
+3. controlq mit 16 Deskriptoren (`:183`), QEMU 256.
+4. Eingehende Gast-Fences (SYNCOBJ_IN) — virglrenderer haengt sie an den
+   CS; zu pruefen, ob der Kernel sie traegt.
