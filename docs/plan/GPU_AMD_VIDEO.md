@@ -262,6 +262,21 @@ Liste von `VAProfile…` (H.264, HEVC, VP9, JPEG); `[about]` meldet
 `HARDWARE_VIDEO_DECODING` als verfuegbar. Dann ein Video abspielen; das
 Lastbild zeigt Arbeit auf `vcn_dec` statt CPU-Last.
 
-**Ungeprueft:** ob radeonsis VA-Weg ueber Mesas `amdgpu-virtio` jede
-ccmd-Art bedient, die der Dekoder braucht (Video-Puffer, `CS` auf
-`VCN_DEC`). Das zeigt erst der Geraetelauf.
+**Gegen Mesa 26.2.5 gelesen** (`src/amd/common/virtio`,
+`winsys/amdgpu`, `ac_gpu_info.c`, `frontends/va`):
+
+- Ring-Nummern: Mesa zaehlt `AMD_NUM_IP_TYPES` = 10 IP-Typen der Reihe
+  nach mit ihren `available_rings` ab Ring 1 (`virtio_ring_mapping`),
+  genau wie `client_open` seine Zeitlinien (`AMDGPU_HW_IP_NUM` = 10).
+  Ein VCN-Auftrag landet also auf der Zeitlinie, deren Folgenummer der
+  Gast erwartet.
+- Benutzer-Fence: Mesa haengt `AMDGPU_CHUNK_ID_FENCE` nur an GFX,
+  Compute und SDMA (`amdgpu_cs_has_user_fence`) — die Ablehnung auf den
+  MM-Engines trifft keinen echten Auftrag.
+- Jede `AMDGPU_INFO_*`-Frage, die `ac_gpu_info`, die Winsys und der
+  VA-Frontend stellen (darunter `FW_VCN`, `VIDEO_CAPS`, `HW_IP_INFO` mit
+  `ip_discovery_version` 2.2), beantwortet `amdgpu_kms`.
+
+**Ungeprueft bleibt** der Dekoder selbst: ob die Firmware die Nachrichten
+von radeonsi ueber die VM des Gasts liest und schreibt wie erwartet. Das
+zeigt erst der Geraetelauf.
