@@ -7677,3 +7677,157 @@ pub const FW_SHARED_ENCODE_LOWLATENCY_QUEUE_MODE: u32 = 0x3b;
 pub const AMD_PG_STATE_UNGATE: u32 = 0x1;
 /// include/kgd_pp_interface.h:184
 pub const PP_SMC_POWER_PROFILE_VIDEO: u32 = 0x3;
+
+// JPEG 2.0, its ring and its command parser (jpeg_v2_0.c, jpeg_v2_0.h, amdgpu_jpeg.c, amdgpu_jpeg.h, soc15d.h)
+/// include/asic_reg/uvd/uvd_7_0_offset.h:156
+pub const mmJPEG_CGC_CTRL: u32 = 0x1e1;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:157
+pub const mmJPEG_CGC_CTRL_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:138
+pub const mmJPEG_CGC_GATE: u32 = 0x1e0;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:139
+pub const mmJPEG_CGC_GATE_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:58
+pub const mmJPEG_DEC_GFX10_ADDR_CONFIG: u32 = 0xa6;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:59
+pub const mmJPEG_DEC_GFX10_ADDR_CONFIG_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:332
+pub const mmJPEG_SYS_INT_EN: u32 = 0x1c1;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:333
+pub const mmJPEG_SYS_INT_EN_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:318
+pub const mmUVD_JMI_CNTL: u32 = 0x192;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:319
+pub const mmUVD_JMI_CNTL_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:392
+pub const mmUVD_JPEG_POWER_STATUS: u32 = 0xa;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:393
+pub const mmUVD_JPEG_POWER_STATUS_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:264
+pub const mmUVD_JRBC_RB_CNTL: u32 = 0x101;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:265
+pub const mmUVD_JRBC_RB_CNTL_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:104
+pub const mmUVD_JRBC_RB_RPTR: u32 = 0x10a;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:105
+pub const mmUVD_JRBC_RB_RPTR_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:156
+pub const mmUVD_JRBC_RB_SIZE: u32 = 0x113;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:157
+pub const mmUVD_JRBC_RB_SIZE_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:126
+pub const mmUVD_JRBC_RB_WPTR: u32 = 0x100;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:127
+pub const mmUVD_JRBC_RB_WPTR_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:286
+pub const mmUVD_JRBC_STATUS: u32 = 0x109;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:287
+pub const mmUVD_JRBC_STATUS_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:252
+pub const mmUVD_LMI_JRBC_RB_64BIT_BAR_HIGH: u32 = 0x167;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:253
+pub const mmUVD_LMI_JRBC_RB_64BIT_BAR_HIGH_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:124
+pub const mmUVD_LMI_JRBC_RB_64BIT_BAR_LOW: u32 = 0x166;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:125
+pub const mmUVD_LMI_JRBC_RB_64BIT_BAR_LOW_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:260
+pub const mmUVD_LMI_JRBC_RB_VMID: u32 = 0x150;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:261
+pub const mmUVD_LMI_JRBC_RB_VMID_BASE_IDX: u32 = 0x0;
+/// amdgpu/soc15d.h:79
+pub const CP_PACKETJ_NOP: u32 = 0x60000000;
+/// amdgpu/amdgpu_jpeg.h:37
+pub const JPEG_ATOMIC_RANGE_END: u32 = 0x412a;
+/// amdgpu/amdgpu_jpeg.h:36
+pub const JPEG_ATOMIC_RANGE_START: u32 = 0x4120;
+/// include/asic_reg/uvd/uvd_7_0_sh_mask.h:496
+pub const JPEG_CGC_CTRL__CLK_GATE_DLY_TIMER__SHIFT: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_7_0_sh_mask.h:497
+pub const JPEG_CGC_CTRL__CLK_OFF_DELAY__SHIFT: u32 = 0x5;
+/// include/asic_reg/uvd/uvd_7_0_sh_mask.h:494
+pub const JPEG_CGC_CTRL__DYN_CLOCK_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_sh_mask.h:1349
+pub const JPEG_CGC_GATE__JMCIF_MASK: u32 = 0x8;
+/// include/asic_reg/vcn/vcn_2_0_0_sh_mask.h:1347
+pub const JPEG_CGC_GATE__JPEG2_DEC_MASK: u32 = 0x2;
+/// include/asic_reg/vcn/vcn_2_0_0_sh_mask.h:1346
+pub const JPEG_CGC_GATE__JPEG_DEC_MASK: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_2_0_0_sh_mask.h:1348
+pub const JPEG_CGC_GATE__JPEG_ENC_MASK: u32 = 0x4;
+/// include/asic_reg/vcn/vcn_2_0_0_sh_mask.h:1350
+pub const JPEG_CGC_GATE__JRBBM_MASK: u32 = 0x10;
+/// include/asic_reg/vcn/vcn_2_0_0_sh_mask.h:1321
+pub const JPEG_IH_CTRL__IH_VMID__SHIFT: u32 = 0x3;
+/// amdgpu/amdgpu_jpeg.h:35
+pub const JPEG_REG_RANGE_END: u32 = 0x41c2;
+/// amdgpu/amdgpu_jpeg.h:34
+pub const JPEG_REG_RANGE_START: u32 = 0x4000;
+/// amdgpu/jpeg_v2_0.c:359
+pub const JPEG_SYS_INT_EN__DJRBC_MASK: u32 = 0x2;
+/// amdgpu/jpeg_v2_0.h:46
+pub const JRBC_DEC_EXTERNAL_REG_WRITE_ADDR: u32 = 0x18000;
+/// amdgpu/soc15d.h:56
+pub const PACKETJ_CONDITION_CHECK0: u32 = 0x0;
+/// amdgpu/soc15d.h:59
+pub const PACKETJ_CONDITION_CHECK3: u32 = 0x3;
+/// amdgpu/soc15d.h:65
+pub const PACKETJ_TYPE0: u32 = 0x0;
+/// amdgpu/soc15d.h:67
+pub const PACKETJ_TYPE2: u32 = 0x2;
+/// amdgpu/soc15d.h:68
+pub const PACKETJ_TYPE3: u32 = 0x3;
+/// amdgpu/soc15d.h:69
+pub const PACKETJ_TYPE4: u32 = 0x4;
+/// amdgpu/soc15d.h:71
+pub const PACKETJ_TYPE6: u32 = 0x6;
+/// amdgpu/soc15d.h:72
+pub const PACKETJ_TYPE7: u32 = 0x7;
+/// amdgpu/jpeg_v2_0.c:390
+pub const UVD_JMI_CNTL__SOFT_RESET_MASK: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_2_0_0_sh_mask.h:1541
+pub const UVD_JPEG_POWER_STATUS__JPEG_POWER_STATUS_MASK: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:763
+pub const UVD_JRBC_STATUS__RB_JOB_DONE_MASK: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_2_0_0_sh_mask.h:1471
+pub const UVD_PGFSM_CONFIG__UVDJ_PWR_CONFIG__SHIFT: u32 = 0x16;
+/// amdgpu/amdgpu_vcn.h:266
+pub const UVD_PGFSM_STATUS_UVDJ_PWR_ON: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_sh_mask.h:1508
+pub const UVD_PGFSM_STATUS__UVDJ_PWR_STATUS_MASK: u32 = 0xc00000;
+/// include/asic_reg/vcn/vcn_2_0_0_sh_mask.h:1496
+pub const UVD_PGFSM_STATUS__UVDJ_PWR_STATUS__SHIFT: u32 = 0x16;
+/// amdgpu/jpeg_v2_0.h:28
+pub const mmUVD_JPEG_GPCOM_CMD_INTERNAL_OFFSET: u32 = 0x4029;
+/// amdgpu/jpeg_v2_0.h:29
+pub const mmUVD_JPEG_GPCOM_DATA0_INTERNAL_OFFSET: u32 = 0x402a;
+/// amdgpu/jpeg_v2_0.h:30
+pub const mmUVD_JPEG_GPCOM_DATA1_INTERNAL_OFFSET: u32 = 0x402b;
+/// amdgpu/jpeg_v2_0.h:44
+pub const mmUVD_JPEG_IH_CTRL_INTERNAL_OFFSET: u32 = 0x4149;
+/// amdgpu/jpeg_v2_0.h:27
+pub const mmUVD_JRBC_EXTERNAL_REG_INTERNAL_OFFSET: u32 = 0x1bfff;
+/// amdgpu/jpeg_v2_0.h:37
+pub const mmUVD_JRBC_IB_SIZE_INTERNAL_OFFSET: u32 = 0x4082;
+/// amdgpu/jpeg_v2_0.h:40
+pub const mmUVD_JRBC_RB_COND_RD_TIMER_INTERNAL_OFFSET: u32 = 0x4085;
+/// amdgpu/jpeg_v2_0.h:41
+pub const mmUVD_JRBC_RB_REF_DATA_INTERNAL_OFFSET: u32 = 0x4084;
+/// amdgpu/jpeg_v2_0.h:42
+pub const mmUVD_JRBC_STATUS_INTERNAL_OFFSET: u32 = 0x4089;
+/// amdgpu/jpeg_v2_0.h:34
+pub const mmUVD_LMI_JPEG_VMID_INTERNAL_OFFSET: u32 = 0x40d1;
+/// amdgpu/jpeg_v2_0.h:36
+pub const mmUVD_LMI_JRBC_IB_64BIT_BAR_HIGH_INTERNAL_OFFSET: u32 = 0x40e9;
+/// amdgpu/jpeg_v2_0.h:35
+pub const mmUVD_LMI_JRBC_IB_64BIT_BAR_LOW_INTERNAL_OFFSET: u32 = 0x40e8;
+/// amdgpu/jpeg_v2_0.h:33
+pub const mmUVD_LMI_JRBC_IB_VMID_INTERNAL_OFFSET: u32 = 0x40cf;
+/// amdgpu/jpeg_v2_0.h:39
+pub const mmUVD_LMI_JRBC_RB_MEM_RD_64BIT_BAR_HIGH_INTERNAL_OFFSET: u32 = 0x40ed;
+/// amdgpu/jpeg_v2_0.h:38
+pub const mmUVD_LMI_JRBC_RB_MEM_RD_64BIT_BAR_LOW_INTERNAL_OFFSET: u32 = 0x40ec;
+/// amdgpu/jpeg_v2_0.h:32
+pub const mmUVD_LMI_JRBC_RB_MEM_WR_64BIT_BAR_HIGH_INTERNAL_OFFSET: u32 = 0x40eb;
+/// amdgpu/jpeg_v2_0.h:31
+pub const mmUVD_LMI_JRBC_RB_MEM_WR_64BIT_BAR_LOW_INTERNAL_OFFSET: u32 = 0x40ea;

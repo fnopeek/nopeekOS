@@ -323,6 +323,29 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
 } > "$B/vcn_extracted.c"
 python3 -I "$HERE/protos.py" "$B/vcn_extracted.c" > "$B/vcn_protos.h"
 
+# Stage 6, JPEG: jpeg_v2_0's hw_init with its ring test, the idle work, a
+# use, hw_fini; and amdgpu_jpeg_dec_parse_cs over the cases the check
+# hands it.
+{
+    $X "$AMD/amdgpu/amdgpu_jpeg.h" '#AMDGPU_MAX_JPEG_RINGS' '#JPEG_REG_RANGE_START' '#JPEG_REG_RANGE_END' \
+        '#JPEG_ATOMIC_RANGE_START' '#JPEG_ATOMIC_RANGE_END' amdgpu_jpeg_reg
+    $X "$AMD/amdgpu/amdgpu_vcn.h" engine_status_constants
+} > "$B/jpeg_extracted.h"
+{
+    $X "$AMD/amdgpu/amdgpu_ring.c" amdgpu_ring_alloc amdgpu_ring_commit amdgpu_ring_test_helper
+    $X "$AMD/amdgpu/amdgpu_ring.h" amdgpu_ring_write
+    $X "$AMD/amdgpu/amdgpu_fence.c" amdgpu_fence_count_emitted
+    $X "$AMD/amdgpu/amdgpu_device.c" amdgpu_device_wait_on_rreg
+    $X "$AMD/amdgpu/nbio_v7_0.c" nbio_v7_0_vcn_doorbell_range
+    $X "$AMD/amdgpu/amdgpu_jpeg.c" amdgpu_jpeg_idle_work_handler amdgpu_jpeg_ring_begin_use amdgpu_jpeg_ring_end_use \
+        amdgpu_jpeg_dec_ring_test_ring amdgpu_jpeg_reg_valid amdgpu_jpeg_dec_parse_cs
+    $X "$AMD/amdgpu/jpeg_v2_0.c" jpeg_v2_0_hw_init jpeg_v2_0_hw_fini jpeg_v2_0_disable_power_gating \
+        jpeg_v2_0_enable_power_gating jpeg_v2_0_disable_clock_gating jpeg_v2_0_enable_clock_gating jpeg_v2_0_start \
+        jpeg_v2_0_stop jpeg_v2_0_dec_ring_get_rptr jpeg_v2_0_dec_ring_get_wptr jpeg_v2_0_dec_ring_set_wptr \
+        jpeg_v2_0_dec_ring_nop jpeg_v2_0_set_powergating_state
+} > "$B/jpeg_extracted.c"
+python3 -I "$HERE/protos.py" "$B/jpeg_extracted.c" > "$B/jpeg_protos.h"
+
 # Stage 4, SMU: smu_cmn.c, smu_v12_0.c and renoir_ppt.c are compiled whole
 # against shim_smu/amdgpu.h; of amdgpu_smu.c the IP block's life is
 # copied, with amdgpu_dpm.c's way into it and the HDP invalidate its table
@@ -389,6 +412,7 @@ gcc -O0 -w -include "$HERE/shim_buddy/buddy_kern.h" -I "$HERE/shim_buddy" -I "$B
 gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_gfx.c" -o "$B/oracle_gfx"
 gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_sdma.c" -o "$B/oracle_sdma"
 gcc $CF -I "$AMD/include/asic_reg" -I "$AMD/include/ivsrcid" "$HERE/main_vcn.c" -o "$B/oracle_vcn"
+gcc $CF -I "$AMD/include/asic_reg" -I "$AMD/include/ivsrcid" "$HERE/main_jpeg.c" -o "$B/oracle_jpeg"
 
 SMUF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -include $HERE/shim/linux/types.h -I $HERE/shim_smu -I $HERE/shim -I $B \
     -I $AMD/pm/swsmu/inc -I $AMD/pm/swsmu -I $AMD/pm/swsmu/inc/pmfw_if -I $AMD/pm/swsmu/smu12 -I $AMD/include \

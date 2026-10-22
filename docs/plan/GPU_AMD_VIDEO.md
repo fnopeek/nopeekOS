@@ -1,6 +1,6 @@
 # gpu_amd_renoir Stufe 6 — Video: VCN 2.2 und JPEG 2.0
 
-**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.18.0 (V1 gebaut) · Kernel 0.664.0
+**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.19.0 (V1 ✅ Geraet, V2 gebaut) · Kernel 0.664.0
 **Vorbild:** Linux 6.18.55 `vcn_v2_0.c`, `jpeg_v2_0.c`, `amdgpu_vcn.c`,
 `amdgpu_jpeg.c`; Gast: Mesa 26.2.4 `radeonsi` VA-API (`gallium-va`).
 **Daneben:** `GPU_AMD_NATIVE.md` (der Weg der Gast-ccmds), `GPU_AMD_LINUX_MAP.md`
@@ -105,6 +105,41 @@ Linux die ganze Initialisierung des Moduls (dann `install` der 0.17.1);
 ein gescheiterter IB-Test nimmt nur den Ring aus dem Dienst. Den Gaesten
 meldet `HW_IP_INFO` die VCN-Ringe noch nicht (V3).
 
+**Am Geraet (IdeaPad, 2026-10-22): ✅** `ring tests:` und `ib tests:` beide mit
+`vcn_dec+ vcn_enc0+ vcn_enc1+`; danach Szenen und native Kontexte wie
+vorher.
+
 **Offen in V1:** `amdgpu_vcn_ring_reset` (Queue-Reset bei Haenger) — heute
 faellt ein haengender VCN-Auftrag auf den vollen Recover; gehoert zu V3.
+
+## 6. V2 gebaut (Modul 0.19.0)
+
+`jpeg_v2_0.rs`: `hw_init`/`hw_fini`/`suspend`/`resume`, `start`/`stop`
+(Strom ueber die PGFSM, Takt-Gating, JRBC-Ring), `set_powergating_state`,
+die Ring-Ops (PACKETJ: `insert_start`/`insert_end`, `emit_fence`,
+`emit_ib` mit IB-VMID 0, `emit_reg_wait`, `emit_vm_flush`, `emit_wreg`,
+NOP), `process_interrupt`, Ring- und IB-Test (das Pitch-Register),
+`begin_use`/`end_use`/`idle_work` und **`amdgpu_jpeg_dec_parse_cs`**: nur
+Registerschreiben (TYPE0, Bedingung 0) und -warten (TYPE3, Bedingung 3)
+in `0x4000..=0x41c2` ohne den Atomic-Bereich `0x4120..=0x412a`, dazu der
+eine NOP; alles andere `-EINVAL`.
+
+**Warum die Pruefung Pflicht ist:** mit `parse_cs` gibt `emit_ib` die
+IB-VMID 0 — die Engine liest den IB ueber den Kernel-Adressraum. Linux
+kopiert dafuer in `amdgpu_cs_patch_ibs` den IB des Benutzers in einen
+Kernel-IB und prueft die Kopie. Ohne genau diesen Weg (V3) darf kein
+Gast-IB auf den JPEG-Ring.
+
+**Geprueft:** `oracle/main_jpeg.c` + `hostcheck/jpeg4_check.rs` wie bei VCN
+(`jpeg (ones|zeros|hash): port = Linux`), und beide beurteilen dieselben
+588 Befehlsstroeme — die Grenzen des Bereichs und der Atomic-Luecke, jede
+Paketart mit richtiger und falscher Bedingung, ein gesetztes
+Reserviert-Feld, ungerade Laengen, dazu 400 gezogene: 561 abgewiesen, 27
+angenommen, in allen Saaten gleich. Die Ersatz-GPU hat ein JPEG-Modell;
+und ihr Strom-Modell wurde dabei richtig gestellt (ein Feld auf 1 heisst
+„einschalten“ und liest dann 0).
+
+**Am Geraet zu lesen:** `ring tests:`/`ib tests:` zusaetzlich mit
+`jpeg_dec+`. Auch hier: ein gescheiterter Ringtest beendet wie in Linux
+die Initialisierung (dann `install` 0.18.0).
 

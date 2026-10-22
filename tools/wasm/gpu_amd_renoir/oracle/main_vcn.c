@@ -213,7 +213,13 @@ static u32 uvd(u32 idx, u32 reg) { return uvd_bases[idx] + reg; }
 static void vcn_write(u32 reg, u32 v)
 {
 	if (reg == uvd(mmUVD_PGFSM_CONFIG_BASE_IDX, mmUVD_PGFSM_CONFIG)) {
-		file_set(uvd(mmUVD_PGFSM_STATUS_BASE_IDX, mmUVD_PGFSM_STATUS), v);
+		u32 st = 0;
+
+		/* Per two-bit tile field: power on (1) reads on (0), off (2) off. */
+		for (int f = 0; f < 16; f++)
+			if (((v >> (2 * f)) & 3) == 2)
+				st |= 2u << (2 * f);
+		file_set(uvd(mmUVD_PGFSM_STATUS_BASE_IDX, mmUVD_PGFSM_STATUS), st);
 	} else if (reg == uvd(mmUVD_DPG_PAUSE_BASE_IDX, mmUVD_DPG_PAUSE)) {
 		u32 ps = uvd(mmUVD_POWER_STATUS_BASE_IDX, mmUVD_POWER_STATUS);
 		u32 st = file_get(ps) & ~UVD_POWER_STATUS__UVD_POWER_STATUS_MASK;

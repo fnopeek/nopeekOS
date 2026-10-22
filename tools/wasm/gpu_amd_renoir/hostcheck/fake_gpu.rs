@@ -519,8 +519,8 @@ fn run_sdma(rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32) {
     }
 }
 
-/// VCN's rings by the doorbell range NBIO gives it: the decoder, then the
-/// two encode rings two and three dwords on.
+/// VCN's rings by the doorbell range NBIO gives it: the decoder, JPEG one
+/// dword on, the two encode rings two and three dwords on.
 fn vcn_ring_for(index: u32) -> Option<u32> {
     let range = r(tables::NBIF0_BASE[mmBIF_MMSCH0_DOORBELL_RANGE_BASE_IDX as usize] + mmBIF_MMSCH0_DOORBELL_RANGE);
     if field(range, BIF_MMSCH0_DOORBELL_RANGE__SIZE_MASK, BIF_MMSCH0_DOORBELL_RANGE__SIZE__SHIFT) == 0 {
@@ -529,6 +529,7 @@ fn vcn_ring_for(index: u32) -> Option<u32> {
     let base = field(range, BIF_MMSCH0_DOORBELL_RANGE__OFFSET_MASK, BIF_MMSCH0_DOORBELL_RANGE__OFFSET__SHIFT);
     match index.checked_sub(base)? {
         0 => Some(0),
+        1 => Some(3),
         2 => Some(1),
         3 => Some(2),
         _ => None,
@@ -608,9 +609,55 @@ fn run_vcn_enc(ring: u32, base: u64, size_dw: u32, from: u32, wptr: u32) {
     npk_sys::fake_set_reg(rptr, wptr);
 }
 
+/// JPEG's packets, header and value, from `at` to `end` of a buffer read
+/// by `rd`: register writes to the engine's internal registers (the pitch
+/// shows outside, a GPCOM command 8 writes DATA0 to the MEM_WR address),
+/// TYPE2 runs the IB the IB registers name, TYPE7 traps.
+fn run_jpeg(st: &mut [u32; 6], rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32) {
+    while at != end {
+        let hdr = rd(at % wrap);
+        let v = rd((at + 1) % wrap);
+        let (reg, type_) = (hdr & 0x3FFFF, (hdr >> 28) & 0xF);
+        match type_ {
+            PACKETJ_TYPE0 => match reg {
+                mmUVD_JPEG_PITCH_INTERNAL_OFFSET => npk_sys::fake_set_reg(uvd(mmUVD_JPEG_PITCH_BASE_IDX, mmUVD_JPEG_PITCH), v),
+                mmUVD_JPEG_GPCOM_DATA0_INTERNAL_OFFSET => st[0] = v,
+                mmUVD_LMI_JRBC_RB_MEM_WR_64BIT_BAR_LOW_INTERNAL_OFFSET => st[1] = v,
+                mmUVD_LMI_JRBC_RB_MEM_WR_64BIT_BAR_HIGH_INTERNAL_OFFSET => st[2] = v,
+                mmUVD_LMI_JRBC_IB_64BIT_BAR_LOW_INTERNAL_OFFSET => st[3] = v,
+                mmUVD_LMI_JRBC_IB_64BIT_BAR_HIGH_INTERNAL_OFFSET => st[4] = v,
+                mmUVD_JRBC_IB_SIZE_INTERNAL_OFFSET => st[5] = v,
+                mmUVD_JPEG_GPCOM_CMD_INTERNAL_OFFSET if v == 0x8 => {
+                    let addr = st[1] as u64 | (st[2] as u64) << 32;
+                    gpu_w32(addr, st[0]);
+                    log(format!("jpeg_dec FENCE {:#x} = {}", addr, st[0]));
+                }
+                _ => {}
+            },
+            PACKETJ_TYPE2 => {
+                let ib = st[3] as u64 | (st[4] as u64) << 32;
+                let n = st[5];
+                log(format!("jpeg_dec IB {:#x} {} dw", ib, n));
+                let mut inner = *st;
+                run_jpeg(&mut inner, &|i| gpu_r32(ib + i as u64 * 4), 0, n & !1, u32::MAX);
+                st[0] = inner[0];
+            }
+            PACKETJ_TYPE7 => {
+                log("jpeg_dec TRAP".to_string());
+                ih_post(SOC15_IH_CLIENTID_VCN, VCN_2_0__SRCID__JPEG_DECODE, 0);
+            }
+            _ => {}
+        }
+        at = if wrap == u32::MAX { at + 2 } else { (at + 2) % wrap };
+    }
+}
+
 thread_local! {
-    /// Where each VCN ring was run to.
-    static VCN_RPTR: RefCell<[u32; 3]> = const { RefCell::new([0; 3]) };
+    /// Where each VCN ring was run to: decoder, encoders, JPEG.
+    static VCN_RPTR: RefCell<[u32; 4]> = const { RefCell::new([0; 4]) };
+    /// JPEG's internal registers the ring sets: DATA0, MEM_WR address, IB
+    /// address and size.
+    static JPEG_REGS: RefCell<[u32; 6]> = const { RefCell::new([0; 6]) };
 }
 
 /// A VCN doorbell: the ring runs to the write pointer it hands over.
@@ -620,9 +667,20 @@ fn vcn_doorbell(ring: u32, value: u64) {
     let wreg = match ring {
         0 => uvd(mmUVD_RBC_RB_WPTR_BASE_IDX, mmUVD_RBC_RB_WPTR),
         1 => uvd(mmUVD_RB_WPTR_BASE_IDX, mmUVD_RB_WPTR),
-        _ => uvd(mmUVD_RB_WPTR2_BASE_IDX, mmUVD_RB_WPTR2),
+        2 => uvd(mmUVD_RB_WPTR2_BASE_IDX, mmUVD_RB_WPTR2),
+        _ => uvd(mmUVD_JRBC_RB_WPTR_BASE_IDX, mmUVD_JRBC_RB_WPTR),
     };
     npk_sys::fake_set_reg(wreg, wptr);
+    if ring == 3 {
+        let base = r64(uvd(mmUVD_LMI_JRBC_RB_64BIT_BAR_LOW_BASE_IDX, mmUVD_LMI_JRBC_RB_64BIT_BAR_LOW),
+                       uvd(mmUVD_LMI_JRBC_RB_64BIT_BAR_HIGH_BASE_IDX, mmUVD_LMI_JRBC_RB_64BIT_BAR_HIGH));
+        let size_dw = r(uvd(mmUVD_JRBC_RB_SIZE_BASE_IDX, mmUVD_JRBC_RB_SIZE)).max(2);
+        let from = VCN_RPTR.with(|v| v.borrow()[3]);
+        JPEG_REGS.with(|j| run_jpeg(&mut j.borrow_mut(), &|i| gpu_r32(base + i as u64 * 4), from, wptr % size_dw, size_dw));
+        npk_sys::fake_set_reg(uvd(mmUVD_JRBC_RB_RPTR_BASE_IDX, mmUVD_JRBC_RB_RPTR), wptr);
+        VCN_RPTR.with(|v| v.borrow_mut()[3] = wptr);
+        return;
+    }
     let from = VCN_RPTR.with(|v| v.borrow()[ring as usize]);
     if ring == 0 {
         let base = r64(uvd(mmUVD_LMI_RBC_RB_64BIT_BAR_LOW_BASE_IDX, mmUVD_LMI_RBC_RB_64BIT_BAR_LOW),
@@ -683,13 +741,19 @@ thread_local! {
     static MODE2_MSG: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
 }
 
+/// The power FSM's status for a configuration: per two-bit tile field, a
+/// request to power on (1) reads on (0), one to power off (2) reads off.
+fn pgfsm_status(config: u32) -> u32 {
+    (0..16).map(|f| if (config >> (2 * f)) & 3 == 2 { 2 << (2 * f) } else { 0 }).fold(0, |a, b| a | b)
+}
+
 /// What VCN's own state machines do with a register write: the power
 /// FSM reports the state it was configured to; a DPG pause request is
 /// acknowledged with the tiles on, its release with them off again; a
 /// ring's read pointer reset starts the fake from there.
 fn vcn_write(reg: u32, v: u32) {
     if reg == uvd(mmUVD_PGFSM_CONFIG_BASE_IDX, mmUVD_PGFSM_CONFIG) {
-        npk_sys::fake_set_reg(uvd(mmUVD_PGFSM_STATUS_BASE_IDX, mmUVD_PGFSM_STATUS), v);
+        npk_sys::fake_set_reg(uvd(mmUVD_PGFSM_STATUS_BASE_IDX, mmUVD_PGFSM_STATUS), pgfsm_status(v));
     } else if reg == uvd(mmUVD_DPG_PAUSE_BASE_IDX, mmUVD_DPG_PAUSE) {
         let ps = uvd(mmUVD_POWER_STATUS_BASE_IDX, mmUVD_POWER_STATUS);
         let st = r(ps) & !UVD_POWER_STATUS__UVD_POWER_STATUS_MASK;
@@ -706,6 +770,8 @@ fn vcn_write(reg: u32, v: u32) {
         VCN_RPTR.with(|x| x.borrow_mut()[1] = v);
     } else if reg == uvd(mmUVD_RB_RPTR2_BASE_IDX, mmUVD_RB_RPTR2) {
         VCN_RPTR.with(|x| x.borrow_mut()[2] = v);
+    } else if reg == uvd(mmUVD_JRBC_RB_RPTR_BASE_IDX, mmUVD_JRBC_RB_RPTR) {
+        VCN_RPTR.with(|x| x.borrow_mut()[3] = v);
     }
 }
 

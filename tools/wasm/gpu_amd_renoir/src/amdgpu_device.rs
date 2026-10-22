@@ -593,6 +593,7 @@ pub struct amdgpu_jpeg {
     pub ip_dump: Vec<u32>,
     pub reg_count: u32,
     pub supported_reset: u32,
+    pub total_submission_cnt: u32,
 }
 
 /// `struct amdgpu_irq`, the part early_init and the sw_inits set.
@@ -1903,8 +1904,8 @@ pub fn amdgpu_device_fw_loading(adev: &mut amdgpu_device) -> i32 {
 }
 
 /// `amdgpu_device_ip_hw_init_phase2`: the remaining blocks in their order.
-/// SMU, GFX, SDMA and VCN are ported; DM (stage 8) and JPEG (stage 6) are
-/// not yet and stay without hw_init, which the log says.
+/// SMU, GFX, SDMA, VCN and JPEG are ported; DM (stage 8) is not yet and
+/// stays without hw_init, which the log says.
 pub fn amdgpu_device_ip_hw_init_phase2(adev: &mut amdgpu_device) -> i32 {
     for i in 0..adev.ip_blocks.len() {
         let st = adev.ip_blocks[i].status;
@@ -1920,6 +1921,7 @@ pub fn amdgpu_device_ip_hw_init_phase2(adev: &mut amdgpu_device) -> i32 {
             AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_hw_init(adev),
             AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_init(adev),
             AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::vcn_v2_0_hw_init(adev),
+            AMD_IP_BLOCK_TYPE_JPEG => crate::jpeg_v2_0::jpeg_v2_0_hw_init(adev),
             _ => {
                 Line::new().s("hw_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
                     .s(">: not ported yet, skipped").say();
@@ -2069,6 +2071,12 @@ fn set_powergating_state(adev: &mut amdgpu_device, type_: u32, gate: bool) -> Op
         | AMD_IP_BLOCK_TYPE_SMC => 0,
         AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_set_powergating_state(adev, gate),
         AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_set_powergating_state(adev, gate),
+        AMD_IP_BLOCK_TYPE_VCN => {
+            crate::vcn_v2_0::vcn_set_powergating_state(adev, if gate { AMD_PG_STATE_GATE } else { AMD_PG_STATE_UNGATE })
+        }
+        AMD_IP_BLOCK_TYPE_JPEG => {
+            crate::jpeg_v2_0::jpeg_v2_0_set_powergating_state(adev, if gate { AMD_PG_STATE_GATE } else { AMD_PG_STATE_UNGATE })
+        }
         _ => return None,
     })
 }
@@ -2249,6 +2257,7 @@ fn ip_suspend(adev: &mut amdgpu_device, type_: u32) -> Option<i32> {
         // not in S0ix
         AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_fini(adev),
         AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::vcn_v2_0_suspend(adev),
+        AMD_IP_BLOCK_TYPE_JPEG => crate::jpeg_v2_0::jpeg_v2_0_suspend(adev),
         _ => return None,
     })
 }
@@ -2272,6 +2281,7 @@ fn ip_resume(adev: &mut amdgpu_device, type_: u32) -> Option<i32> {
         AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_hw_init(adev),
         AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_init(adev),
         AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::vcn_v2_0_resume(adev),
+        AMD_IP_BLOCK_TYPE_JPEG => crate::jpeg_v2_0::jpeg_v2_0_resume(adev),
         _ => return None,
     })
 }
@@ -2671,6 +2681,7 @@ fn hw_fini(adev: &mut amdgpu_device, type_: u32) -> i32 {
         AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_hw_fini(adev),
         AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_fini(adev),
         AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::vcn_v2_0_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_JPEG => crate::jpeg_v2_0::jpeg_v2_0_hw_fini(adev),
         _ => 0,
     }
 }

@@ -263,6 +263,7 @@ fn src_process(adev: &mut amdgpu_device, funcs: &str, entry: &amdgpu_iv_entry, s
         "gfx_v9_0_priv_inst_irq_funcs" => crate::gfx_v9_0::gfx_v9_0_priv_inst_irq(adev, entry),
         "sdma_v4_0_trap_irq_funcs" => crate::sdma_v4_0::sdma_v4_0_process_trap_irq(adev, entry),
         "vcn_v2_0_irq_funcs" => crate::vcn_v2_0::vcn_v2_0_process_interrupt(adev, entry),
+        "jpeg_v2_0_irq_funcs" => crate::jpeg_v2_0::jpeg_v2_0_process_interrupt(adev, entry),
         // vega10_ih_self_irq schedules the ih1/ih2 work an APU does not
         // have.
         "vega10_ih_self_irq_funcs" => 0,
