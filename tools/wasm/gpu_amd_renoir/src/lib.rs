@@ -45,6 +45,8 @@ mod dc_types;
 mod dc;
 mod dc_resource;
 mod dcn21_resource;
+mod dml_structs;
+mod dcn20_fpu;
 mod amdgpu_fence;
 mod amdgpu_ib;
 mod dma_fence;
