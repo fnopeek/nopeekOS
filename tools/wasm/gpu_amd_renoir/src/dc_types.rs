@@ -87,6 +87,22 @@ pub struct dc_versions {
     pub dmcu_version: dmcu_version,
 }
 
+/// `struct hw_asic_id` (dc_types.h): what `dc_init_data` / `dc_context` carry
+/// about the chip. `atombios_base_address` is a pointer in Linux; here the
+/// address as u64 (0 = none).
+#[derive(Default, Clone, Copy)]
+pub struct hw_asic_id {
+    pub chip_id: u32,
+    pub chip_family: u32,
+    pub pci_revision_id: u32,
+    pub hw_internal_rev: u32,
+    pub vram_type: u32,
+    pub vram_width: u32,
+    pub feature_flags: u32,
+    pub fake_paths_num: u32,
+    pub atombios_base_address: u64,
+}
+
 /// `#define DC_VER` (dc.h).
 pub const DC_VER: &str = "3.2.351";
 

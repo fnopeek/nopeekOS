@@ -115,7 +115,9 @@ Gemessene Fundstücke für den Weiterbau:
 - **Register:** kommen sauber über `regs.list` → `gen_regs.py` (liest die
   Linux-asic_reg-Header, emittiert `NAME` + `NAME__FIELD__SHIFT/_MASK` — DCE
   ist schon drin). Für die IP-Blöcke `regs.list` um die `dcn_2_1_0`-Register
-  erweitern, dann `dc_helper`-Slices füllen.
+  erweitern, dann `dc_helper`-Slices füllen. **Die Pipeline läuft hier
+  (gcc + Callgraph-Header), aber LANGSAM — ein voller Lauf >3 min; also je
+  Block/Batch einmal im Hintergrund regenerieren, nicht je Register.**
 - **`adev` ersetzt `ctx->driver_context`** (kein Global; das Modul reicht
   `&amdgpu_device` durch).
 - **Abhängigkeitskette von `dc_create`** (gelesen in `core/dc.c`): schon
