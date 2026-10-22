@@ -107,7 +107,9 @@ Gebaut (ruhend, keine Aufrufer, nichts released — host-seitig gebaut):
   1:1 aus `dc_helper.c` + `dm_services.h` + `reg_helper.h`. Die variadischen
   `REG_SET`/`REG_UPDATE`-Makros sind explizite `(shift, mask, value)`-Slices.
 - **`src/dc_types.rs`** — `dce_environment`, `dce_version` (Renoir =
-  `DCN_VERSION_2_1`), `dp_protocol_version`, `dc_versions`, `DC_VER`.
+  `DCN_VERSION_2_1`), `dp_protocol_version`, `dc_versions`, `DC_VER`, **und der
+  ganze `dc_caps`-Baum** (dc_plane_cap/dc_color_caps→dpp/mpc→rom_curve/lut3d,
+  dc_dmub_caps, dc_scl_caps; C-`uns:1` → bool).
 
 Gemessene Fundstücke für den Weiterbau:
 - **Register:** kommen sauber über `regs.list` → `gen_regs.py` (liest die
@@ -122,11 +124,14 @@ Gemessene Fundstücke für den Weiterbau:
   erste host-prüfbare Meilenstein liegt also hinter diesen — der Objektgraph
   muss weitgehend stehen, bevor viel läuft (wie im Prinzip oben benannt).
 
-**Nächste Einheit:** der verschachtelte Typgraph (`dc_caps` →
-`dc_plane_cap`/`dc_color_caps`/`dc_dmub_caps`/`dc_scl_caps`, `dc_context`,
-`struct dc`) + `dc_create`/`dc_construct`, dann `dcn21_resource_construct` mit
-den IP-Block-Konstruktoren (je Block: `regs.list`-Erweiterung + Konstruktor +
-Orakel). Das ist der Hauptteil von Stufe A, mehrere fokussierte Läufe.
+**Nächste Einheit:** `dc_context`, `dc_init_data` und `struct dc` (die
+Spine-Typen) + `dc_create`/`dc_construct` — diese greifen in die Sub-Blöcke
+(`link_create_link_service`, `dc_perf_trace_create`, `dc_bios`, `clk_mgr`,
+`resource_pool`), also entstehen Spine + diese Blöcke verschränkt. Danach
+`dcn21_resource_construct` mit den IP-Block-Konstruktoren (je Block:
+`regs.list`-Erweiterung → `gen_regs.py` + Konstruktor + Orakel). Das ist der
+Hauptteil von Stufe A, mehrere fokussierte Läufe; der erste host-prüfbare
+Meilenstein ist der fertige Objektgraph.
 
 ## Risiken / offen
 
