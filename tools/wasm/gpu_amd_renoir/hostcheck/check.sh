@@ -189,6 +189,15 @@ else
     echo "guest IB on jpeg_dec: NOT refused"
     fail=1
 fi
+# A guest encoder IB that hangs: the VCN engine is reset, and the next
+# guest IB runs on the encoder.
+if grep -q '^Ring vcn_enc0 reset succeeded' "$B/run.log" &&
+   sed -n '/^Ring vcn_enc0 reset succeeded/,$p' "$B/run.log" | grep -q '^gpu vcn_enc0 IB 0x100001400 '; then
+    echo "guest hang on vcn_enc0: ring reset, the next IB runs"
+else
+    echo "guest hang on vcn_enc0: NOT recovered by a ring reset"
+    fail=1
+fi
 echo "--- the run on the host (the log the card run prints; a fake SMU answers OK):"
 grep -vE '^(vram |  block )' "$B/run.log"
 exit $fail

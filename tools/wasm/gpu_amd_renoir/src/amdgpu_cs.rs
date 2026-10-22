@@ -191,8 +191,18 @@ fn amdgpu_cs_job_idx(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut
     Ok(p.entities.len() - 1)
 }
 
-/// `amdgpu_cs_ib_packet_size_max_dw` for the engines with IB packets.
 const AMDGPU_GFX_SDMA_IB_PACKET_SIZE_MAX_DW: u32 = 0x0fffff;
+const AMDGPU_MM_IB_PACKET_SIZE_MAX_DW: u32 = 0x7ffff0;
+
+/// `amdgpu_cs_ib_packet_size_max_dw`.
+fn amdgpu_cs_ib_packet_size_max_dw(type_: u32) -> u32 {
+    match type_ {
+        AMDGPU_RING_TYPE_GFX | AMDGPU_RING_TYPE_COMPUTE | AMDGPU_RING_TYPE_SDMA | AMDGPU_HW_IP_VPE => {
+            AMDGPU_GFX_SDMA_IB_PACKET_SIZE_MAX_DW
+        }
+        _ => AMDGPU_MM_IB_PACKET_SIZE_MAX_DW,
+    }
+}
 
 /// `amdgpu_cs_bo_validate`: pinned buffers stay, others go to their
 /// preferred domain (no move threshold to keep: VRAM is all visible).
@@ -339,11 +349,12 @@ fn amdgpu_cs_pass2(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut a
         let j = p.jobs[r].unwrap();
         let e = p.entities[r];
         let ring = adev.sched_entities[e].as_ref().unwrap().rq.unwrap().0;
-        if chunk_ib.flags & AMDGPU_IB_FLAG_CE != 0 {
-            Line::new().s("CE CS is blocked, use debug=0x400 to override").say();
+        // MM engine doesn't support user fences
+        if p.uf_bo.is_some() && adev.rings[ring].funcs.no_user_fence() {
             return Err(-22);
         }
-        if chunk_ib.ib_bytes / 4 > AMDGPU_GFX_SDMA_IB_PACKET_SIZE_MAX_DW {
+        if chunk_ib.flags & AMDGPU_IB_FLAG_CE != 0 {
+            Line::new().s("CE CS is blocked, use debug=0x400 to override").say();
             return Err(-22);
         }
         if chunk_ib.ip_type == AMDGPU_HW_IP_GFX && chunk_ib.flags & AMDGPU_IB_FLAG_PREEMPT != 0 {
@@ -353,16 +364,15 @@ fn amdgpu_cs_pass2(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut a
                 return Err(-22);
             }
         }
+        if chunk_ib.ib_bytes / 4 > amdgpu_cs_ib_packet_size_max_dw(adev.rings[ring].funcs.type_) {
+            return Err(-22);
+        }
         // A ring with parse_cs runs the IB on VMID 0: amdgpu_cs_patch_ibs
         // copies it into a kernel IB and checks it there. That copy is not
         // built yet, so such a ring takes no IB of a user.
         if adev.rings[ring].funcs.parse_cs() {
             Line::new().s("CS on ").s(&adev.rings[ring].name.clone())
                 .s(": its IBs are checked in a kernel copy, which is not ported").say();
-            return Err(-22);
-        }
-        // MM engine doesn't support user fences
-        if p.uf_bo.is_some() && adev.rings[ring].funcs.no_user_fence() {
             return Err(-22);
         }
         let job = amdgpu_job::job(adev, j);

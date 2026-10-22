@@ -623,3 +623,18 @@ pub fn amdgpu_jpeg_dec_parse_cs(ib: &[u32]) -> i32 {
     }
     0
 }
+
+/// `jpeg_v2_0_ring_reset`.
+pub fn jpeg_v2_0_ring_reset(adev: &mut amdgpu_device, ring: usize, _vmid: u32,
+                            timedout: &crate::dma_fence::Fence) -> i32 {
+    crate::amdgpu_ring::amdgpu_ring_reset_helper_begin(adev, ring, Some(timedout));
+    let r = jpeg_v2_0_stop(adev);
+    if r != 0 {
+        return r;
+    }
+    let r = jpeg_v2_0_start(adev);
+    if r != 0 {
+        return r;
+    }
+    crate::amdgpu_ring::amdgpu_ring_reset_helper_end(adev, ring, Some(timedout))
+}

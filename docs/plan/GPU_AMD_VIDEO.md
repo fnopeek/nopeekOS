@@ -1,6 +1,6 @@
 # gpu_amd_renoir Stufe 6 — Video: VCN 2.2 und JPEG 2.0
 
-**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.19.1 (V1 + V2 ✅ Geraet) · Kernel 0.664.0
+**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.20.0 (V1 + V2 ✅ Geraet, V3 teilweise) · Kernel 0.664.0
 **Vorbild:** Linux 6.18.55 `vcn_v2_0.c`, `jpeg_v2_0.c`, `amdgpu_vcn.c`,
 `amdgpu_jpeg.c`; Gast: Mesa 26.2.4 `radeonsi` VA-API (`gallium-va`).
 **Daneben:** `GPU_AMD_NATIVE.md` (der Weg der Gast-ccmds), `GPU_AMD_LINUX_MAP.md`
@@ -156,3 +156,45 @@ die Regel aus Linux, dass die MM-Engines keinen Benutzer-Fence koennen
 (`no_user_fence` fuer VCN und JPEG). `stage1_run` schickt einen
 Gast-Auftrag auf `jpeg_dec`, und `check.sh` faellt durch, wenn er nicht
 abgewiesen wird (`guest IB on jpeg_dec: refused`).
+
+## 8. V3, erster Teil (Modul 0.20.0)
+
+**Gebaut:**
+
+- `HW_IP_INFO` zaehlt die bereiten Ringe fuer `VCN_DEC`, `VCN_ENC` und
+  `VCN_JPEG` wie Linux (Harvest-Maske, `sched.ready`). Damit meldet der
+  Gast 1 + 2 + 1 Ringe, und `client_open` legt dafuer Zeitlinien an.
+- `amdgpu_ctx_get_hw_prio` gibt `VCN_ENC` (und `VCE`) die Ringprioritaet
+  aus `amdgpu_ctx_sched_prio_to_ring_prio`; `amdgpu_ctx_init_entity`
+  waehlt fuer VCN/UVD mit `drm_sched_pick_best` EINEN Scheduler, weil die
+  Engine Kontext zwischen abhaengigen Auftraegen haelt.
+- CS-Pruefungen in Linux' Reihenfolge, mit der Obergrenze je Ringart
+  (`amdgpu_cs_ib_packet_size_max_dw`: MM-Engines 0x7ffff0 Dwords).
+- Haenger: **die Annahme in §2 war falsch**, VCN 2.0 HAT einen Queue-Reset.
+  `amdgpu_vcn_ring_reset` → `amdgpu_vcn_reset_engine` (alle Ringe der
+  Instanz anhalten, `vcn_v2_0_reset` = stop + start, Ringtests, Fences
+  abschliessen, Scheduler wieder an) und `jpeg_v2_0_ring_reset` (mit dem
+  Reset-Helfer, wie die Compute-Ringe).
+- `VIDEO_CAPS` war schon da.
+
+**Geprueft:** `stage1_run` schickt einen Gast-Auftrag auf `vcn_enc0`, den
+der Encoder der Ersatz-GPU nie abarbeitet. Die Ersatz-GPU laeuft dafuer
+jetzt die Pakete eines Encoder-IBs (jedes beginnt mit seiner Groesse in
+Bytes, wie Linux' eigener IB-Test sie baut) ueber die VM des Auftrags auf
+dem MM-Hub ab; ein Paket der Groesse 0 kommt nie weiter. Der Auftrag
+laeuft in den Timeout, der Ring wird zurueckgesetzt, der schuldige
+Auftrag meldet -62, und der IB eines fuenften Kontexts laeuft danach auf
+dem Encoder. `check.sh` faellt durch, wenn das nicht so kommt (`guest hang
+on vcn_enc0: ring reset, the next IB runs`). Alle 40 Orakelvergleiche
+bleiben gleich mit Linux.
+
+**Offen in V3:** der Kopier- und Pruefweg fuer JPEG (`amdgpu_cs_patch_ibs`:
+Kernel-IB der Groesse `ib_bytes` aus dem verzoegerten Pool,
+`amdgpu_cs_find_mapping`, den Gast-IB kopieren, `parse_cs` auf der Kopie).
+Dafuer muss das Modul Gast-Objekte lesen koennen: im VRAM ueber das
+Aperture-Fenster, Objekte im Systemspeicher brauchen eine Leseschnittstelle
+im Kernel. Bis dahin meldet `HW_IP_INFO` den JPEG-Ring wie Linux, und
+jeder Auftrag darauf wird abgewiesen.
+
+**Am Geraet zu lesen:** unveraendert `ring tests:`/`ib tests:` mit allen
+vier Video-Ringen. Sichtbar wird V3 erst mit V4 (`vainfo` im Gast).

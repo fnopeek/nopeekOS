@@ -536,7 +536,7 @@ fn drm_sched_get_finished_job(adev: &mut amdgpu_device, r: usize) -> Option<(u64
 }
 
 /// `drm_sched_pick_best`: the ready scheduler with the lowest score.
-fn drm_sched_pick_best(adev: &amdgpu_device, list: &[usize]) -> Option<usize> {
+pub fn drm_sched_pick_best(adev: &amdgpu_device, list: &[usize]) -> Option<usize> {
     let mut picked = None;
     let mut min_score = u32::MAX;
     for &r in list {

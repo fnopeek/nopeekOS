@@ -82,13 +82,13 @@ fn amdgpu_device_ip_get_ip_block(adev: &amdgpu_device, type_: u32) -> Option<usi
 }
 
 /// Whether ring `r` takes jobs. `no_user_submission` is never set for a
-/// GFX9 or SDMA 4 ring.
+/// GFX9, SDMA 4, VCN 2 or JPEG 2 ring.
 fn ring_ready(adev: &amdgpu_device, r: usize) -> bool {
     adev.rings.get(r).is_some_and(|r| r.sched.ready)
 }
 
 /// `amdgpu_hw_ip_info`. Renoir has no MES, so there are no user queue
-/// slots, and its VCN and JPEG rings are not brought up.
+/// slots.
 fn amdgpu_hw_ip_info(adev: &amdgpu_device, info: &[u8]) -> Result<answer, i32> {
     let mut out = answer::new(SIZEOF_drm_amdgpu_info_hw_ip);
     let (hw_ip, inst) = (rd32(info, UAPI_INFO_QUERY_HW_IP_TYPE), rd32(info, UAPI_INFO_QUERY_HW_IP_INSTANCE));
@@ -114,9 +114,39 @@ fn amdgpu_hw_ip_info(adev: &amdgpu_device, info: &[u8]) -> Result<answer, i32> {
         AMDGPU_HW_IP_UVD => (AMD_IP_BLOCK_TYPE_UVD, 256, 64),
         AMDGPU_HW_IP_VCE => (AMD_IP_BLOCK_TYPE_VCE, 256, 4),
         AMDGPU_HW_IP_UVD_ENC => (AMD_IP_BLOCK_TYPE_UVD, 256, 4),
-        AMDGPU_HW_IP_VCN_DEC => (AMD_IP_BLOCK_TYPE_VCN, 256, 64),
-        AMDGPU_HW_IP_VCN_ENC => (AMD_IP_BLOCK_TYPE_VCN, 256, 4),
-        AMDGPU_HW_IP_VCN_JPEG => (amdgpu_ip_get_block_type(adev, AMDGPU_HW_IP_VCN_JPEG), 256, 64),
+        AMDGPU_HW_IP_VCN_DEC => {
+            num_rings = (0..adev.vcn.num_vcn_inst as usize)
+                .filter(|&i| adev.vcn.harvest_config & (1 << i) == 0)
+                .filter(|&i| adev.vcn.inst[i].ring_dec.is_some_and(|r| ring_ready(adev, r)))
+                .count() as u32;
+            (AMD_IP_BLOCK_TYPE_VCN, 256, 64)
+        }
+        AMDGPU_HW_IP_VCN_ENC => {
+            num_rings = (0..adev.vcn.num_vcn_inst as usize)
+                .filter(|&i| adev.vcn.harvest_config & (1 << i) == 0)
+                .map(|i| {
+                    let v = &adev.vcn.inst[i];
+                    v.ring_enc[..v.num_enc_rings as usize].iter().filter(|r| r.is_some_and(|r| ring_ready(adev, r)))
+                        .count() as u32
+                })
+                .sum();
+            (AMD_IP_BLOCK_TYPE_VCN, 256, 4)
+        }
+        AMDGPU_HW_IP_VCN_JPEG => {
+            // Only inst[0].ring_dec[0] exists: JPEG 2.0 has one of each.
+            for i in 0..adev.jpeg.num_jpeg_inst {
+                if adev.jpeg.harvest_config & (1 << i) != 0 {
+                    continue;
+                }
+                for j in 0..adev.jpeg.num_jpeg_rings {
+                    let r = if i == 0 && j == 0 { adev.jpeg.inst0_ring_dec } else { None };
+                    if r.is_some_and(|r| ring_ready(adev, r)) {
+                        num_rings += 1;
+                    }
+                }
+            }
+            (amdgpu_ip_get_block_type(adev, AMDGPU_HW_IP_VCN_JPEG), 256, 64)
+        }
         AMDGPU_HW_IP_VPE => (AMD_IP_BLOCK_TYPE_VPE, 256, 4),
         _ => return Err(EINVAL),
     };

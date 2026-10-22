@@ -23,6 +23,10 @@ fn uvd(idx: u32, reg: u32) -> u32 {
     tables::UVD0_BASE[idx as usize] + reg
 }
 
+fn mm(idx: u32, reg: u32) -> u32 {
+    tables::MMHUB_BASE[idx as usize] + reg
+}
+
 fn r(reg: u32) -> u32 {
     npk_sys::fake_reg(reg)
 }
@@ -99,6 +103,8 @@ fn run_dispatch(grid: [u32; 3]) {
 thread_local! {
     /// The VMID of the IB running now; 0 is the kernel's context.
     static VMID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Whether that IB's engine sits on the MM hub rather than the GC hub.
+    static MMHUB: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A VRAM physical address (`amdgpu_gmc_vram_mc2pa`) to its VRAM offset.
@@ -107,12 +113,19 @@ fn vram_pa_offset(pa: u64) -> u64 {
 }
 
 /// A client address of VMID `vmid` through its four-level page table
-/// (block size 9), as the GC hub's context registers point to it.
+/// (block size 9), as the context registers of the IB's hub point to it.
 fn translate_vm(vmid: u32, addr: u64) -> Mem {
-    let lo = gc(GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX, GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32)
-        + GC_CTX_ADDR_DISTANCE * vmid;
-    let hi = gc(GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX, GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32)
-        + GC_CTX_ADDR_DISTANCE * vmid;
+    let (lo, hi) = if MMHUB.with(|h| h.get()) {
+        (mm(MM_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX, MM_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32)
+             + MM_CTX_ADDR_DISTANCE * vmid,
+         mm(MM_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX, MM_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32)
+             + MM_CTX_ADDR_DISTANCE * vmid)
+    } else {
+        (gc(GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX, GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32)
+             + GC_CTX_ADDR_DISTANCE * vmid,
+         gc(GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX, GC_mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32)
+             + GC_CTX_ADDR_DISTANCE * vmid)
+    };
     let mut table = vram_pa_offset(r64(lo, hi) & 0x0000_ffff_ffff_f000);
     let page = (addr & 0x0000_ffff_ffff_ffff) >> 12;
     for shift in [27u32, 18, 9, 0] {
@@ -578,18 +591,20 @@ fn run_vcn_dec(base: u64, size_dw: u32, from: u32, wptr: u32) {
     npk_sys::fake_set_reg(uvd(mmUVD_RBC_RB_RPTR_BASE_IDX, mmUVD_RBC_RB_RPTR), wptr);
 }
 
-/// A VCN encode ring from `from` to `wptr`: END, NO_OP, IB (not run),
-/// register writes and waits; FENCE writes its sequence number, TRAP raises
-/// the ring's interrupt.
-fn run_vcn_enc(ring: u32, base: u64, size_dw: u32, from: u32, wptr: u32) {
-    let d = |i: u32| gpu_r32(base + (i % size_dw) as u64 * 4);
-    let mut at = from;
-    while at != wptr {
-        let len = match d(at) {
+/// VCN encode commands from `at` to `end` of the ring read by `rd`: END,
+/// NO_OP, register writes land and waits pass; FENCE writes its sequence
+/// number, TRAP raises the ring's interrupt. An IB holds encoder packets,
+/// each led by its size in bytes; the fake walks them on the IB's VMID
+/// through the MM hub, and a packet of size 0 never moves on, so the ring
+/// hangs there (the position it stalls at is returned).
+fn run_vcn_enc_cmds(ring: u32, rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32) -> Option<u32> {
+    while at != end {
+        let d = |i: u32| rd((at + i) % wrap);
+        let len = match d(0) {
             VCN_ENC_CMD_FENCE => {
-                let addr = d(at + 1) as u64 | (d(at + 2) as u64) << 32;
-                gpu_w32(addr, d(at + 3));
-                log(format!("vcn_enc{} FENCE {:#x} = {}", ring - 1, addr, d(at + 3)));
+                let addr = d(1) as u64 | (d(2) as u64) << 32;
+                gpu_w32(addr, d(3));
+                log(format!("vcn_enc{} FENCE {:#x} = {}", ring - 1, addr, d(3)));
                 4
             }
             VCN_ENC_CMD_TRAP => {
@@ -598,15 +613,48 @@ fn run_vcn_enc(ring: u32, base: u64, size_dw: u32, from: u32, wptr: u32) {
                 ih_post(SOC15_IH_CLIENTID_VCN, src, 0);
                 1
             }
-            VCN_ENC_CMD_IB => 5,
-            VCN_ENC_CMD_REG_WRITE => 3,
+            VCN_ENC_CMD_IB => {
+                let (vmid, ib, n) = (d(1), d(2) as u64 | (d(3) as u64) << 32, d(4));
+                log(format!("vcn_enc{} IB {:#x} {} dw vmid {}", ring - 1, ib, n, vmid));
+                let (v, h) = (VMID.with(|c| c.replace(vmid)), MMHUB.with(|c| c.replace(true)));
+                let mut i = 0;
+                let mut hung = false;
+                while i < n {
+                    let size = gpu_r32(ib + i as u64 * 4);
+                    if size == 0 {
+                        hung = true;
+                        break;
+                    }
+                    i += size.div_ceil(4);
+                }
+                VMID.with(|c| c.set(v));
+                MMHUB.with(|c| c.set(h));
+                if hung {
+                    log(format!("vcn_enc{} IB packet of size 0 at dword {}: the ring hangs", ring - 1, i));
+                    return Some(at);
+                }
+                5
+            }
+            VCN_ENC_CMD_REG_WRITE => {
+                npk_sys::fake_set_reg(d(1) >> 2, d(2));
+                3
+            }
             VCN_ENC_CMD_REG_WAIT => 4,
             _ => 1,
         };
-        at = (at + len) % size_dw;
+        at = (at + len) % wrap;
     }
+    None
+}
+
+/// A VCN encode ring from `from` to `wptr`; the read pointer stops where
+/// the ring hangs.
+fn run_vcn_enc(ring: u32, base: u64, size_dw: u32, from: u32, wptr: u32) -> u32 {
+    let stall = run_vcn_enc_cmds(ring, &|i| gpu_r32(base + i as u64 * 4), from, wptr, size_dw);
     let rptr = if ring == 1 { uvd(mmUVD_RB_RPTR_BASE_IDX, mmUVD_RB_RPTR) } else { uvd(mmUVD_RB_RPTR2_BASE_IDX, mmUVD_RB_RPTR2) };
-    npk_sys::fake_set_reg(rptr, wptr);
+    let at = stall.unwrap_or(wptr);
+    npk_sys::fake_set_reg(rptr, at);
+    at
 }
 
 /// JPEG's packets, header and value, from `at` to `end` of a buffer read
@@ -697,7 +745,9 @@ fn vcn_doorbell(ring: u32, value: u64) {
              uvd(mmUVD_RB_SIZE2_BASE_IDX, mmUVD_RB_SIZE2))
         };
         let size_dw = r(sz).max(1);
-        run_vcn_enc(ring, r64(lo, hi), size_dw, from, wptr % size_dw);
+        let at = run_vcn_enc(ring, r64(lo, hi), size_dw, from, wptr % size_dw);
+        VCN_RPTR.with(|v| v.borrow_mut()[ring as usize] = at);
+        return;
     }
     VCN_RPTR.with(|v| v.borrow_mut()[ring as usize] = wptr);
 }

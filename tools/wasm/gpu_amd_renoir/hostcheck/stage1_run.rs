@@ -110,6 +110,24 @@ fn main() {
     let ctx3 = ccmd(7, 38, &[0, 0]);
     let gfx_after = gfx(39, 3, 0x1200, 20);
     let gfx_after_wait = ccmd(10, 40, &[3, AMDGPU_HW_IP_GFX, 0, 0, 1, 0, !0, !0, 0, 0]);
+    // An encoder IB the fake's encoder never gets through (a packet of
+    // size 0): the VCN ring hangs and the whole engine is reset
+    // (amdgpu_vcn_ring_reset), then a fifth context's IB, one packet of
+    // eight bytes, runs on the encoder again.
+    let enc_hang_ib = [0u32, 1, 0, 0];
+    let enc_ok_ib = [8u32, 1];
+    let enc = |seqno: u32, ctx: u32, at: u32, bytes: u32| ccmd(4, seqno, &[ctx, 2, 0, 3,
+        AMDGPU_CHUNK_ID_BO_HANDLES | 4 << 16, 0, AMDGPU_CHUNK_ID_IB | 8 << 16, 16,
+        10, 0, 11, 0,
+        0, 0, at, 1, bytes, AMDGPU_HW_IP_VCN_ENC, 0, 0]);
+    let ctx4 = ccmd(7, 42, &[0, 0]);
+    let enc_hang = enc(43, 4, 0x1300, 16);
+    let enc_hang_wait = ccmd(10, 44, &[4, AMDGPU_HW_IP_VCN_ENC, 0, 0, 1, 0, !0, !0, 0, 0]);
+    let ctx5 = ccmd(7, 45, &[0, 0]);
+    let enc_after = enc(46, 5, 0x1400, 8);
+    let enc_after_wait = ccmd(10, 47, &[5, AMDGPU_HW_IP_VCN_ENC, 0, 0, 1, 0, !0, !0, 0, 0]);
+    let free5 = ccmd(7, 48, &[5, 1]);
+    let free4 = ccmd(7, 49, &[4, 1]);
     let free3 = ccmd(7, 41, &[3, 1]);
     let free2 = ccmd(7, 35, &[2, 1]);
     let reserve = ccmd(8, 13, &[0, 0]);
@@ -171,6 +189,17 @@ fn main() {
                                   (7, [100, len(&ctx3), 0, 0, 0, 0], ctx3.clone()),
                                   (7, [100, len(&gfx_after), 0, 0, 0, 0], gfx_after.clone()),
                                   (7, [100, len(&gfx_after_wait), 0, 0, 0, 0], gfx_after_wait.clone()),
+                                  (npk_sys::GUEST_STORE, [1, 0x1300, 0, 0, 0, 0], words(&enc_hang_ib)),
+                                  (npk_sys::GUEST_STORE, [1, 0x1400, 0, 0, 0, 0], words(&enc_ok_ib)),
+                                  (7, [100, len(&ctx4), 0, 0, 0, 0], ctx4.clone()),
+                                  (7, [100, len(&enc_hang), 0, 0, 0, 0], enc_hang.clone()),
+                                  (7, [100, len(&enc_hang_wait), 0, 0, 0, 0], enc_hang_wait.clone()),
+                                  (npk_sys::GUEST_IDLE, [12_000, 0, 0, 0, 0, 0], vec![]),
+                                  (7, [100, len(&ctx5), 0, 0, 0, 0], ctx5.clone()),
+                                  (7, [100, len(&enc_after), 0, 0, 0, 0], enc_after.clone()),
+                                  (7, [100, len(&enc_after_wait), 0, 0, 0, 0], enc_after_wait.clone()),
+                                  (7, [100, len(&free5), 0, 0, 0, 0], free5.clone()),
+                                  (7, [100, len(&free4), 0, 0, 0, 0], free4.clone()),
                                   (7, [100, len(&free3), 0, 0, 0, 0], free3.clone()),
                                   (7, [100, len(&free2), 0, 0, 0, 0], free2.clone()),
                                   (7, [100, len(&reserve), 0, 0, 0, 0], reserve.clone()),

@@ -1402,3 +1402,59 @@ pub fn amdgpu_vcn_enc_ring_test_ib(adev: &mut amdgpu_device, r: usize, timeout: 
     crate::amdgpu_ib::amdgpu_ib_free(adev, &mut ib, fence);
     ret
 }
+
+/// `vcn_v2_0_reset`.
+fn vcn_v2_0_reset(adev: &mut amdgpu_device) -> i32 {
+    let r = vcn_v2_0_stop(adev);
+    if r != 0 {
+        return r;
+    }
+    vcn_v2_0_start(adev)
+}
+
+/// `amdgpu_vcn_reset_engine`.
+fn amdgpu_vcn_reset_engine(adev: &mut amdgpu_device, ring: usize, timedout: &crate::dma_fence::Fence) -> i32 {
+    let vinst = &adev.vcn.inst[adev.rings[ring].me as usize];
+    let dec = vinst.ring_dec.unwrap();
+    let enc: alloc::vec::Vec<usize> = vinst.ring_enc[..vinst.num_enc_rings as usize].iter().map(|r| r.unwrap()).collect();
+    // Stop the scheduler's work queue for the dec and enc rings if they are
+    // running. This ensures that no new tasks are submitted to the queues
+    // while the reset is in progress.
+    crate::drm_sched::drm_sched_wqueue_stop(adev, dec);
+    for &e in &enc {
+        crate::drm_sched::drm_sched_wqueue_stop(adev, e);
+    }
+    // Perform the VCN reset for the specified instance
+    let r = vcn_v2_0_reset(adev);
+    if r != 0 {
+        return r;
+    }
+    let r = crate::amdgpu_ring::amdgpu_ring_test_ring(adev, dec);
+    if r != 0 {
+        return r;
+    }
+    for &e in &enc {
+        let r = crate::amdgpu_ring::amdgpu_ring_test_ring(adev, e);
+        if r != 0 {
+            return r;
+        }
+    }
+    crate::amdgpu_fence::amdgpu_fence_driver_force_completion(adev, dec, (dec == ring).then_some(timedout));
+    for &e in &enc {
+        crate::amdgpu_fence::amdgpu_fence_driver_force_completion(adev, e, (e == ring).then_some(timedout));
+    }
+    // Restart the scheduler's work queue for the dec and enc rings if they
+    // were stopped by this function. This allows new tasks to be submitted
+    // to the queues after the reset is complete.
+    crate::drm_sched::drm_sched_wqueue_start(adev, dec);
+    for &e in &enc {
+        crate::drm_sched::drm_sched_wqueue_start(adev, e);
+    }
+    0
+}
+
+/// `amdgpu_vcn_ring_reset`: VCN 2.0 has no unified queue.
+pub fn amdgpu_vcn_ring_reset(adev: &mut amdgpu_device, ring: usize, _vmid: u32,
+                             timedout: &crate::dma_fence::Fence) -> i32 {
+    amdgpu_vcn_reset_engine(adev, ring, timedout)
+}

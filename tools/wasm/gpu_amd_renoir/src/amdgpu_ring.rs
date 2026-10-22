@@ -462,11 +462,14 @@ fn amdgpu_ring_alloc_reemit(adev: &mut amdgpu_device, r: usize, ndw: u32) {
     ring.wptr_old = ring.wptr;
 }
 
-/// `amdgpu_ring_reset`: `funcs->reset`. Of Renoir's rings with one, only
-/// the compute rings ever run a job here (VCN and JPEG get no hw_init).
+/// `amdgpu_ring_reset`: `funcs->reset`.
 pub fn amdgpu_ring_reset(adev: &mut amdgpu_device, r: usize, vmid: u32, guilty: &crate::dma_fence::Fence) -> i32 {
     match adev.rings[r].funcs.ops {
         ring_ops::gfx_v9_0_compute => crate::gfx_v9_0::gfx_v9_0_reset_kcq(adev, r, vmid, guilty),
+        ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc => {
+            crate::vcn_v2_0::amdgpu_vcn_ring_reset(adev, r, vmid, guilty)
+        }
+        ring_ops::jpeg_v2_0_dec => crate::jpeg_v2_0::jpeg_v2_0_ring_reset(adev, r, vmid, guilty),
         _ => -95,
     }
 }

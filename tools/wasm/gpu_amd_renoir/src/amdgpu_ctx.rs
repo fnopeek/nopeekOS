@@ -72,12 +72,21 @@ fn ctx_prio(ctx: &amdgpu_ctx) -> i32 {
     if ctx.override_priority == PRIORITY_UNSET { ctx.init_priority } else { ctx.override_priority }
 }
 
-/// `amdgpu_ctx_get_hw_prio`: no VCE or VCN encoders run here.
+/// `amdgpu_ctx_sched_prio_to_ring_prio`.
+fn amdgpu_ctx_sched_prio_to_ring_prio(prio: i32) -> u32 {
+    match prio {
+        p if p == AMDGPU_CTX_PRIORITY_HIGH as i32 => AMDGPU_RING_PRIO_1,
+        p if p == AMDGPU_CTX_PRIORITY_VERY_HIGH as i32 => AMDGPU_RING_PRIO_2,
+        _ => AMDGPU_RING_PRIO_0,
+    }
+}
+
+/// `amdgpu_ctx_get_hw_prio`.
 fn amdgpu_ctx_get_hw_prio(adev: &amdgpu_device, ctx: &amdgpu_ctx, hw_ip: u32) -> u32 {
-    let mut hw_prio = if hw_ip == AMDGPU_HW_IP_GFX || hw_ip == AMDGPU_HW_IP_COMPUTE {
-        amdgpu_ctx_prio_to_gfx_pipe_prio(ctx_prio(ctx))
-    } else {
-        AMDGPU_RING_PRIO_DEFAULT
+    let mut hw_prio = match hw_ip {
+        AMDGPU_HW_IP_GFX | AMDGPU_HW_IP_COMPUTE => amdgpu_ctx_prio_to_gfx_pipe_prio(ctx_prio(ctx)),
+        AMDGPU_HW_IP_VCE | AMDGPU_HW_IP_VCN_ENC => amdgpu_ctx_sched_prio_to_ring_prio(ctx_prio(ctx)),
+        _ => AMDGPU_RING_PRIO_DEFAULT,
     };
     if adev.gpu_sched[hw_ip as usize][hw_prio as usize].is_empty() {
         hw_prio = AMDGPU_RING_PRIO_DEFAULT;
@@ -85,12 +94,15 @@ fn amdgpu_ctx_get_hw_prio(adev: &amdgpu_device, ctx: &amdgpu_ctx, hw_ip: u32) ->
     hw_prio
 }
 
-/// `amdgpu_ctx_init_entity`: no partitions, and none of the engines that
-/// pick one scheduler up front.
+/// `amdgpu_ctx_init_entity`: no partitions.
 fn amdgpu_ctx_init_entity(adev: &mut amdgpu_device, ctx: &mut amdgpu_ctx, hw_ip: u32, ring: u32) -> i32 {
     let hw_prio = amdgpu_ctx_get_hw_prio(adev, ctx, hw_ip);
     let drm_prio = amdgpu_ctx_to_drm_sched_prio(ctx_prio(ctx));
-    let scheds = adev.gpu_sched[hw_ip as usize][hw_prio as usize].clone();
+    let mut scheds = adev.gpu_sched[hw_ip as usize][hw_prio as usize].clone();
+    // disable load balance if the hw engine retains context among dependent jobs
+    if matches!(hw_ip, AMDGPU_HW_IP_VCN_ENC | AMDGPU_HW_IP_VCN_DEC | AMDGPU_HW_IP_UVD_ENC | AMDGPU_HW_IP_UVD) {
+        scheds = drm_sched::drm_sched_pick_best(adev, &scheds).into_iter().collect();
+    }
     match drm_sched::drm_sched_entity_init(adev, drm_prio, &scheds, Some(ctx.guilty.clone())) {
         Ok(e) => {
             ctx.entities[hw_ip as usize][ring as usize] = Some(amdgpu_ctx_entity {
