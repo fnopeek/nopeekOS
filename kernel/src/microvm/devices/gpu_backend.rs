@@ -22,6 +22,13 @@ static GPU: Mutex<VirtioGpu> = Mutex::new(VirtioGpu::new());
 /// the worker takes only this — lock order is acyclic.
 pub fn lock() -> MutexGuard<'static, VirtioGpu> { GPU.lock() }
 
+/// The native-context protocol the next VM is offered, if the GPU module
+/// serves native contexts: the card's vendor picks it.
+pub fn native_protocol() -> Option<&'static str> {
+    let dev = crate::gpu::gpudev::native_device()?;
+    Some(if crate::drivers::pci::read16(dev, 0) == 0x1002 { "amdgpu" } else { "i915" })
+}
+
 /// Reset the device on VM teardown/start (alongside `net_backend::reset`).
 pub fn reset() {
     *GPU.lock() = VirtioGpu::new();
@@ -32,10 +39,9 @@ pub fn reset() {
     // probe for `set microvm_gpu test`, else none.
     super::virtio_gpu_ctx::set_backend(None);
     if let Some(dev) = crate::gpu::gpudev::native_device() {
-        // The card's vendor picks the protocol; an AMD card's capset comes
-        // from its module.
+        // An AMD card's capset comes from its module.
         let backend: Option<(alloc::boxed::Box<dyn super::virtio_gpu_ctx::Backend>, &str)> =
-            if crate::drivers::pci::read16(dev, 0) == 0x1002 {
+            if native_protocol() == Some("amdgpu") {
                 crate::gpu::gpudev::native_capset()
                     .and_then(|c| super::virtio_gpu_amdgpu::AmdgpuBackend::new(dev, c))
                     .map(|b| (alloc::boxed::Box::new(b) as _, "amdgpu"))

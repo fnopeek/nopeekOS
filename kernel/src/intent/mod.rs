@@ -2727,14 +2727,10 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
         let _ = write!(s, " nopeektime={}", epoch);
     }
     // The card behind the guest's virtio-gpu, which names no VA-API driver:
-    // the guest's init picks the media driver by it.
-    {
-        use crate::microvm::devices::virtio_gpu_ctx as ctx;
-        match ctx::context_type() {
-            Some(ctx::CONTEXT_AMDGPU) => { let _ = write!(s, " npkgpu=amdgpu"); }
-            Some(ctx::CONTEXT_I915) => { let _ = write!(s, " npkgpu=i915"); }
-            _ => {}
-        }
+    // the guest's init picks the media driver by it. Asked before the VM's
+    // backend exists, the same way `gpu_backend::reset` picks it.
+    if let Some(p) = crate::microvm::devices::gpu_backend::native_protocol() {
+        let _ = write!(s, " npkgpu={}", p);
     }
     // The guest samples the app process too (`[lw-proc]` lines).
     if stats {

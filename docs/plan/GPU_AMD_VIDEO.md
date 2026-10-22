@@ -245,8 +245,10 @@ Gast mit `gallium-va`, `LIBVA_DRIVER_NAME` nach Hersteller.
   (`microvm/linux/mesa/build.sh`). Dabei Mesa 26.2.4 → 26.2.5, weil
   Alpine edge nachgezogen hat (Pruefsumme aus Alpines APKBUILD).
 - **Der Wirt nennt dem Gast die Karte:** `npkgpu=amdgpu` oder
-  `npkgpu=i915` auf der Kommandozeile, aus dem `context_type` des
-  Capsets (`virtio_gpu_ctx::context_type`). Das Render-Device im Gast
+  `npkgpu=i915` auf der Kommandozeile, aus `gpu_backend::native_protocol`
+  — derselben Wahl, mit der `gpu_backend::reset` den Backend anlegt.
+  (0.666.0 las den Capset; der Backend entsteht aber erst NACH der
+  Kommandozeile, und der erste Geraetelauf hatte kein `npkgpu=`. 0.666.1.) Das Render-Device im Gast
   heisst `virtio_gpu` und nennt keinen VA-Treiber.
 - **microvm-init** setzt fuer Firefox `LIBVA_DRIVER_NAME=radeonsi` bei
   `npkgpu=amdgpu`, sonst wie bisher `iHD`. Neu `npkvainfo` auf der
