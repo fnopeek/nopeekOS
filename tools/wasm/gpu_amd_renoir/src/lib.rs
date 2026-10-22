@@ -40,6 +40,7 @@ mod amdgpu_irq;
 mod amdgpu_gmc;
 mod amdgpu_discovery;
 mod amdgpu_dm;
+mod dc_helper;
 mod amdgpu_fence;
 mod amdgpu_ib;
 mod dma_fence;
