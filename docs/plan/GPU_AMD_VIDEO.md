@@ -418,3 +418,19 @@ der Fence-Weg Modul↔Kernel↔Gast gegen virglrenderer 1.3.0 und Mesa.
 3. controlq mit 16 Deskriptoren (`:183`), QEMU 256.
 4. Eingehende Gast-Fences (SYNCOBJ_IN) — virglrenderer haengt sie an den
    CS; zu pruefen, ob der Kernel sie traegt.
+
+**Kernel 0.667.0 + Modul 0.30.0 (2026-10-22):** die Restliste aus §12.
+- Modul: KIQ-Zweig beim TLB-Flush ueber `amdgpu_gmc_flush_gpu_tlb` und
+  `amdgpu_gmc_fw_reg_write_reg_wait`; `amdgpu_bo_move_notify` mit
+  `amdgpu_vm_bo_invalidate`/`amdgpu_vm_bo_move`, `amdgpu_bo_move` als
+  eigene Funktion mit allen nicht kopierenden Zweigen; die Verschiebe-Drossel
+  (`amdgpu_cs_get_threshold_for_moves`, `report_moved_bytes`,
+  `bytes_moved`); TMZ-PTE, `last_update` im Fehlerpfad, `no_wait_gpu` der
+  Seitentabellen; ein freigegebener TT verlaesst die GART.
+- Kernel: Fences werden ohne die Backend-Sperre gelesen und auch waehrend
+  eines laufenden SUBMIT_3D zurueckgemeldet (eigene Faser neben dem
+  GPU-Arbeiter, wie virglrenderers Zeitlinien-Thread); der gehaltene FLUSH
+  wartet nur auf den Kontext seines Bildes, endet nach 40 ms und haelt die
+  SUBMITs dahinter nicht mehr auf.
+- Weiter offen: LRU/Eviction (das TTM des Ports verdraengt nichts),
+  kopierende Moves (`amdgpu_move_blit`), SYNCOBJ_IN, controlq 16.
