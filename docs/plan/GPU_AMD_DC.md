@@ -126,14 +126,21 @@ Gemessene Fundstücke für den Weiterbau:
   erste host-prüfbare Meilenstein liegt also hinter diesen — der Objektgraph
   muss weitgehend stehen, bevor viel läuft (wie im Prinzip oben benannt).
 
-**Nächste Einheit:** `dc_context`, `dc_init_data` und `struct dc` (die
-Spine-Typen) + `dc_create`/`dc_construct` — diese greifen in die Sub-Blöcke
-(`link_create_link_service`, `dc_perf_trace_create`, `dc_bios`, `clk_mgr`,
-`resource_pool`), also entstehen Spine + diese Blöcke verschränkt. Danach
-`dcn21_resource_construct` mit den IP-Block-Konstruktoren (je Block:
-`regs.list`-Erweiterung → `gen_regs.py` + Konstruktor + Orakel). Das ist der
-Hauptteil von Stufe A, mehrere fokussierte Läufe; der erste host-prüfbare
-Meilenstein ist der fertige Objektgraph.
+Weiter gebaut (ruhend):
+- **Spine** `dc.rs` (`dc`, `dc_context`, `dc_init_data`), `dc_resource.rs`
+  (`resource_pool` grow-as-reached, `NO_UNDERLAY_PIPE`), `dcn21_resource.rs`
+  (`RES_CAP_RN`, `dcn21_set_caps`, `dcn21_resource_construct`-Kopf).
+- **DML-Bounding-Box** `dml_structs.rs` (`_vcs_dpi_ip_params_st`,
+  `_vcs_dpi_soc_bounding_box_st` + `_vcs_dpi_voltage_scaling_st` + Enums),
+  `dcn20_fpu.rs` (`dcn2_1_ip()`, `dcn2_1_soc()` — Renoirs Werte 1:1). Das sind
+  die DML-Eingaben; das formale Orakel kommt mit der DML-Verdrahtung.
+
+**Nächste Einheit:** die IP-Block-Konstruktoren der „Create resources"-Sektion
+(clock source, dccg, hubbub, je Pipe hubp/dpp/opp/optc, mpc, stream/link
+encoder) + `clk_mgr` + `dml_init_instance`. Je Block: `regs.list` erweitern →
+`gen_regs.py` (Hintergrund, mehrere Minuten) → Struct + funcs + Konstruktor +
+Orakel (fake_gpu prüft die Registerschreibzugriffe). Das ist der Hauptteil von
+Stufe A; der erste host-prüfbare Meilenstein ist der fertige Objektgraph.
 
 ## Risiken / offen
 
