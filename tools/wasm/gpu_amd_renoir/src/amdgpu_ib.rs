@@ -269,15 +269,20 @@ pub fn amdgpu_ib_get(adev: &mut amdgpu_device, size: u32, pool_type: u32, ib: &m
         };
         let soffset = adev.ib_sa[pool].get(slot).soffset as u64;
         let m = &adev.ib_pools[pool];
-        ib.sa_bo = Some(sa_bo { pool, slot });
+        let sa = sa_bo { pool, slot };
         // amdgpu_sa_bo_cpu_addr
         ib.ptr = m.cpu_ptr.map(|k| (k, soffset));
         // flush the cache before commit the IB
         ib.flags = AMDGPU_IB_FLAG_EMIT_MEM_SYNC;
-        // amdgpu_sa_bo_gpu_addr
-        ib.gpu_addr = m.gpu_addr + soffset;
+        ib.gpu_addr = amdgpu_sa_bo_gpu_addr(adev, &sa);
+        ib.sa_bo = Some(sa);
     }
     0
+}
+
+/// `amdgpu_sa_bo_gpu_addr`.
+pub fn amdgpu_sa_bo_gpu_addr(adev: &amdgpu_device, sa: &sa_bo) -> u64 {
+    adev.ib_pools[sa.pool].gpu_addr + adev.ib_sa[sa.pool].get(sa.slot).soffset as u64
 }
 
 /// `amdgpu_ib_free`.

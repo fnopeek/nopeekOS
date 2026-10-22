@@ -76,12 +76,20 @@ fn main() {
                                10, 0, 11, 0,
                                0, 0, 0, 1, 20, AMDGPU_HW_IP_GFX, 0, 0]);
     let fence = ccmd(10, 12, &[1, AMDGPU_HW_IP_GFX, 0, 0, 1, 0, 2_000_000_000, 0, 0, 0]);
-    // The same IB for JPEG's ring, which reads an IB through VMID 0: it
-    // must be refused, as long as no kernel copy checks it.
+    // JPEG's ring reads an IB through VMID 0, so the IB runs from a kernel
+    // copy that amdgpu_jpeg_dec_parse_cs checked. The same PM4 IB fails
+    // the check; a register write inside JPEG's range and a NOP pass it,
+    // and the copy runs.
     let jpeg = ccmd(4, 18, &[1, 2, 0, 1,
                              AMDGPU_CHUNK_ID_BO_HANDLES | 4 << 16, 0, AMDGPU_CHUNK_ID_IB | 8 << 16, 16,
                              10, 0, 11, 0,
                              0, 0, 0, 1, 20, AMDGPU_HW_IP_VCN_JPEG, 0, 0]);
+    let jpeg_ib = [mmUVD_JPEG_PITCH_INTERNAL_OFFSET, 0x600d_f00d, CP_PACKETJ_NOP, 0];
+    let jpeg_ok = ccmd(4, 24, &[1, 2, 0, 1,
+                                AMDGPU_CHUNK_ID_BO_HANDLES | 4 << 16, 0, AMDGPU_CHUNK_ID_IB | 8 << 16, 16,
+                                10, 0, 11, 0,
+                                0, 0, 0x1500, 1, 16, AMDGPU_HW_IP_VCN_JPEG, 0, 0]);
+    let jpeg_wait = ccmd(10, 25, &[1, AMDGPU_HW_IP_VCN_JPEG, 0, 0, 1, 0, !0, !0, 0, 0]);
     // A compute IB waiting for a value the VRAM object never holds: the
     // queue hangs, the job times out, and the queue is reset. The guilty
     // context's entity keeps the error (drm_sched_entity_error), so a
@@ -174,6 +182,10 @@ fn main() {
                                   (7, [100, len(&submit), 0, 0, 0, 0], submit.clone()),
                                   (7, [100, len(&fence), 0, 0, 0, 0], fence.clone()),
                                   (7, [100, len(&jpeg), 0, 0, 0, 0], jpeg.clone()),
+                                  (npk_sys::GUEST_STORE, [1, 0x1500, 0, 0, 0, 0],
+                                   jpeg_ib.iter().flat_map(|v| v.to_le_bytes()).collect()),
+                                  (7, [100, len(&jpeg_ok), 0, 0, 0, 0], jpeg_ok.clone()),
+                                  (7, [100, len(&jpeg_wait), 0, 0, 0, 0], jpeg_wait.clone()),
                                   (npk_sys::GUEST_STORE, [1, 0x1000, 0, 0, 0, 0], words(&hang_ib)),
                                   (npk_sys::GUEST_STORE, [1, 0x1100, 0, 0, 0, 0], words(&ok_ib)),
                                   (7, [100, len(&hang), 0, 0, 0, 0], hang.clone()),

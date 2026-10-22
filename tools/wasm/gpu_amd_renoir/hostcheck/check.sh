@@ -182,11 +182,14 @@ if diff -u "$B/run_vram.linux" "$B/run_vram.port"; then
 else
     fail=1
 fi
-# A guest IB for JPEG's ring is refused: it would run on VMID 0.
-if grep -q 'CS on jpeg_dec: its IBs are checked in a kernel copy' "$B/run.log"; then
-    echo "guest IB on jpeg_dec: refused"
+# JPEG's ring runs IBs on VMID 0: a guest IB that fails
+# amdgpu_jpeg_dec_parse_cs is refused, one that passes runs from the kernel
+# copy (the 4-dword IB at a kernel address, not at the guest's VA).
+if grep -q '^Unknown packet type 12 !' "$B/run.log" &&
+   grep -E '^gpu jpeg_dec IB 0x[0-9a-f]+ 4 dw' "$B/run.log" | grep -vq '0x100001500 '; then
+    echo "guest IB on jpeg_dec: checked in a kernel copy, refused or run from it"
 else
-    echo "guest IB on jpeg_dec: NOT refused"
+    echo "guest IB on jpeg_dec: NOT checked in a kernel copy"
     fail=1
 fi
 # A guest encoder IB that hangs: the VCN engine is reset, and the next

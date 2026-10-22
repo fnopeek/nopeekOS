@@ -1136,6 +1136,8 @@ host_imports! {
     ctx fn npk_gpudev_tt_alloc(client: i32, pages: i32) -> i32;
     // npk_gpudev_tt_buffer(tt) -> buffer id for npk_gpudev_bo_pages / -1
     ctx fn npk_gpudev_tt_buffer(tt: i32) -> i32;
+    // npk_gpudev_tt_read(tt, offset, out_ptr, len) -> bytes / -1
+    mem fn npk_gpudev_tt_read(tt: i32, offset: i64, out_ptr: i32, len: i32) -> i32;
     // npk_gpudev_tt_free(tt) -> 0 / -1
     ctx fn npk_gpudev_tt_free(tt: i32) -> i32;
     // npk_gpudev_capset(ptr, len) -> 0 / -1; the card's DRM capset, <= 1 KB

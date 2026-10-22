@@ -22,6 +22,9 @@ pub enum amdgpu_kptr {
     gtt(i32),
     /// Into BAR2, at this byte offset.
     doorbell(u64),
+    /// The GTT pages of a client, read through the kernel
+    /// (`npk_gpudev_tt_read`); this driver never writes them.
+    client_tt(u32),
 }
 
 /// `struct amdgpu_bo`.
@@ -400,7 +403,7 @@ pub fn amdgpu_bo_gpu_offset(adev: &amdgpu_device, h: usize) -> u64 {
 
 /// `amdgpu_bo_kmap`: the kernel mapping, made once (`ttm_bo_kmap` on
 /// the resource: VRAM through the mapped stolen memory, a TT through its
-/// DMA buffer, a doorbell through BAR2).
+/// DMA buffer or a client's through the kernel, a doorbell through BAR2).
 pub fn amdgpu_bo_kmap(adev: &mut amdgpu_device, h: usize) -> Result<amdgpu_kptr, i32> {
     if bo(adev, h).flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS as u64 != 0 {
         return Err(-1);
@@ -418,9 +421,10 @@ pub fn amdgpu_bo_kmap(adev: &mut amdgpu_device, h: usize) -> Result<amdgpu_kptr,
             amdgpu_kptr::vram(res.start << PAGE_SHIFT)
         }
         t if t == TTM_PL_TT || t == AMDGPU_PL_PREEMPT || t == TTM_PL_SYSTEM => {
-            match ttm.and_then(|t| t.dma) {
-                Some((handle, _)) => amdgpu_kptr::gtt(handle),
-                None => return Err(-12),
+            match (ttm.and_then(|t| t.dma), &bo(adev, h).pool) {
+                (Some((handle, _)), _) => amdgpu_kptr::gtt(handle),
+                (None, Some((id, _))) => amdgpu_kptr::client_tt(*id),
+                _ => return Err(-12),
             }
         }
         t if t == AMDGPU_PL_DOORBELL => {

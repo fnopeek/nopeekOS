@@ -1680,6 +1680,36 @@ pub fn tt_buffer(tt: u32) -> Option<u32> {
     TTS.lock().get(&tt).and_then(|t| t.module)
 }
 
+/// `npk_gpudev_tt_read`: bytes of GTT pages `tt` the module holds, from
+/// byte `offset` on, as many as `out` takes and the pages hold.
+pub fn tt_read(dev: PciAddr, tt: u32, offset: u64, out: &mut [u8]) -> i32 {
+    if !owned_by(dev) {
+        return -1;
+    }
+    // Under the lock: a guest letting go of the pages frees them only
+    // after taking it.
+    let tts = TTS.lock();
+    let Some(t) = tts.get(&tt).filter(|t| t.module.is_some()) else { return -1 };
+    let total = t.frames.pages.len() as u64 * PAGE;
+    if offset > total {
+        return -1;
+    }
+    let n = (out.len() as u64).min(total - offset) as usize;
+    let mut done = 0;
+    while done < n {
+        let at = offset + done as u64;
+        let in_page = (at % PAGE) as usize;
+        let k = (n - done).min(PAGE as usize - in_page);
+        let src = t.frames.pages[(at / PAGE) as usize] + in_page as u64;
+        // SAFETY: a frame of this TT, identity-mapped and allocated in
+        // `tt_alloc`; the TTS lock keeps it from being freed meanwhile,
+        // and `in_page + k` stays inside the page.
+        unsafe { core::ptr::copy_nonoverlapping(src as *const u8, out[done..].as_mut_ptr(), k) };
+        done += k;
+    }
+    n as i32
+}
+
 /// `npk_gpudev_tt_free`: the module let go of GTT pages `tt`.
 pub fn tt_free(dev: PciAddr, tt: u32) -> i32 {
     if !owned_by(dev) {

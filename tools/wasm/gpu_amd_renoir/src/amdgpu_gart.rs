@@ -123,6 +123,7 @@ pub fn kptr_writeq(adev: &amdgpu_device, k: amdgpu_kptr, off: u64, v: u64) {
             d.w32(off as u32 + 4, (v >> 32) as u32);
         }
         amdgpu_kptr::doorbell(base) => adev.doorbell_mmio.unwrap().writeq((base + off) as u32, v),
+        amdgpu_kptr::client_tt(_) => crate::linux::Line::new().s("kptr: a client's GTT pages are not written here").say(),
     }
 }
 
@@ -132,6 +133,7 @@ pub fn kptr_w32(adev: &amdgpu_device, k: amdgpu_kptr, off: u64, v: u32) {
         amdgpu_kptr::vram(base) => adev.mman.aper_base_kaddr.unwrap().w32((base + off) as u32, v),
         amdgpu_kptr::gtt(h) => npk_sys::Dma { handle: h, phys: 0 }.w32(off as u32, v),
         amdgpu_kptr::doorbell(base) => adev.doorbell_mmio.unwrap().w32((base + off) as u32, v),
+        amdgpu_kptr::client_tt(_) => crate::linux::Line::new().s("kptr: a client's GTT pages are not written here").say(),
     }
 }
 
@@ -141,6 +143,11 @@ pub fn kptr_r32(adev: &amdgpu_device, k: amdgpu_kptr, off: u64) -> u32 {
         amdgpu_kptr::vram(base) => adev.mman.aper_base_kaddr.unwrap().r32((base + off) as u32),
         amdgpu_kptr::gtt(h) => npk_sys::Dma { handle: h, phys: 0 }.r32(off as u32),
         amdgpu_kptr::doorbell(base) => adev.doorbell_mmio.unwrap().r32((base + off) as u32),
+        amdgpu_kptr::client_tt(id) => {
+            let mut w = [0u8; 4];
+            npk_sys::gpudev_tt_read(id as i32, off, &mut w);
+            u32::from_le_bytes(w)
+        }
     }
 }
 
@@ -170,6 +177,11 @@ pub fn kptr_read(adev: &amdgpu_device, k: amdgpu_kptr, off: u64, buf: &mut [u8])
         amdgpu_kptr::gtt(h) => {
             if !(npk_sys::Dma { handle: h, phys: 0 }).read(off as u32, buf) {
                 crate::linux::Line::new().s("kptr_read: DMA read refused").say();
+            }
+        }
+        amdgpu_kptr::client_tt(id) => {
+            if npk_sys::gpudev_tt_read(id as i32, off, buf) != buf.len() as i32 {
+                crate::linux::Line::new().s("kptr_read: the kernel read fewer bytes of a client's GTT pages").say();
             }
         }
         _ => {

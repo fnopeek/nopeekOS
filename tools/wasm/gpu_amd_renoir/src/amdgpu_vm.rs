@@ -737,6 +737,11 @@ fn amdgpu_vm_it_iter_first(adev: &amdgpu_device, vm: usize, start: u64, last: u6
     va.range(start..=last).next().map(|(_, &m)| m)
 }
 
+/// `amdgpu_vm_bo_lookup_mapping`: the mapping of GPU page `addr`.
+pub fn amdgpu_vm_bo_lookup_mapping(adev: &amdgpu_device, vm: usize, addr: u64) -> Option<usize> {
+    amdgpu_vm_it_iter_first(adev, vm, addr, addr)
+}
+
 /// `amdgpu_vm_bo_insert_map`.
 fn amdgpu_vm_bo_insert_map(adev: &mut amdgpu_device, b: usize, m: usize) {
     let vm = base(adev, b).vm;

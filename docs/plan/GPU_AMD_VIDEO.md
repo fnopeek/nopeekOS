@@ -1,6 +1,6 @@
 # gpu_amd_renoir Stufe 6 — Video: VCN 2.2 und JPEG 2.0
 
-**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.20.0 (V1 + V2 ✅ Geraet, V3 teilweise) · Kernel 0.664.0
+**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.21.0 (V1 + V2 ✅ Geraet, V3 gebaut) · Kernel 0.665.0
 **Vorbild:** Linux 6.18.55 `vcn_v2_0.c`, `jpeg_v2_0.c`, `amdgpu_vcn.c`,
 `amdgpu_jpeg.c`; Gast: Mesa 26.2.4 `radeonsi` VA-API (`gallium-va`).
 **Daneben:** `GPU_AMD_NATIVE.md` (der Weg der Gast-ccmds), `GPU_AMD_LINUX_MAP.md`
@@ -198,3 +198,39 @@ jeder Auftrag darauf wird abgewiesen.
 
 **Am Geraet zu lesen:** unveraendert `ring tests:`/`ib tests:` mit allen
 vier Video-Ringen. Sichtbar wird V3 erst mit V4 (`vainfo` im Gast).
+
+## 9. V3, zweiter Teil: JPEG ueber eine Kernel-Kopie (Kernel 0.665.0, Modul 0.21.0)
+
+**Gebaut**, nach `amdgpu_cs.c`: `amdgpu_cs_p1_ib` holt fuer einen Ring
+mit `parse_cs` einen Kernel-IB der Groesse `ib_bytes` aus dem
+verzoegerten Pool; `amdgpu_cs_patch_jobs` → `amdgpu_cs_patch_ibs` sucht
+mit `amdgpu_cs_find_mapping` (`amdgpu_vm_bo_lookup_mapping`, das Objekt
+muss eines dieses CS sein, VRAM wird zusammenhaengend, GART-Adresse)
+die Abbildung, prueft die Laenge gegen ihr Ende, kopiert den Gast-IB in
+den Kernel-IB, laesst `amdgpu_jpeg_dec_parse_cs` die KOPIE pruefen und
+setzt die Adresse des IBs auf die Kopie. Die Engine liest also nie, was
+der Gast danach noch aendern koennte. Die Sperre aus 0.19.1 ist weg.
+
+**Neu im Kernel: `npk_gpudev_tt_read(tt, offset, out, len)`.** Gast-
+Objekte im Systemspeicher hatten im Modul keine Kernel-Abbildung
+(`amdgpu_bo_kmap` gab `-ENOMEM`). Die Funktion liest nur GTT-Seiten, die
+das Modul selbst fuer einen Client angelegt hat (`tt_alloc`) und noch
+haelt, mit Grenzpruefung und unter der TT-Sperre, damit die Seiten
+waehrend des Kopierens nicht frei werden. Im Modul ist das die neue
+Abbildungsart `amdgpu_kptr::client_tt`, nur lesend.
+
+**Wie Linux, auch wo es auffaellt:** der Versatz der Abbildung
+(`m->offset`) geht in Linux nicht in die Leseadresse ein; hier ebenso.
+
+**Geprueft:** `stage1_run` schickt den PM4-IB auf den JPEG-Ring (die
+Pruefung lehnt ihn ab, `Unknown packet type 12`) und einen IB aus einer
+Pitch-Schreibung und einem NOP, der aus der Kopie laeuft (die Ersatz-GPU
+liest ihn an einer Kernel-Adresse, die Fence meldet Erfolg). `check.sh`
+faellt durch, wenn eins davon nicht so kommt. Alle 40 Orakelvergleiche
+gleich.
+
+**Reihenfolge beim Update:** erst `update` (Kernel 0.665.0), dann
+`install gpu_amd_renoir` — Modul 0.21.0 importiert die neue Funktion.
+
+**Damit ist V3 bis auf den Geraetetest gebaut.** Naechst V4: Mesa im
+Gast mit `gallium-va`, `LIBVA_DRIVER_NAME` nach Hersteller.

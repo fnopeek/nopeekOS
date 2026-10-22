@@ -261,7 +261,7 @@ pub fn amdgpu_cs_ioctl_chunks(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv
         amdgpu_cs_pass1(adev, fpriv, &mut p, chunks)?;
         amdgpu_cs_pass2(adev, fpriv, &mut p, chunks)?;
         amdgpu_cs_parser_bos(adev, fpriv, &mut p)?;
-        // amdgpu_cs_patch_jobs: no ring here parses or patches the IBs.
+        amdgpu_cs_patch_jobs(adev, fpriv, &mut p)?;
         amdgpu_cs_vm_handling(adev, fpriv, &mut p)?;
         amdgpu_cs_sync_rings(adev, fpriv, &mut p)?;
         amdgpu_cs_submit(adev, fpriv, &mut p)
@@ -367,21 +367,21 @@ fn amdgpu_cs_pass2(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut a
         if chunk_ib.ib_bytes / 4 > amdgpu_cs_ib_packet_size_max_dw(adev.rings[ring].funcs.type_) {
             return Err(-22);
         }
-        // A ring with parse_cs runs the IB on VMID 0: amdgpu_cs_patch_ibs
-        // copies it into a kernel IB and checks it there. That copy is not
-        // built yet, so such a ring takes no IB of a user.
-        if adev.rings[ring].funcs.parse_cs() {
-            Line::new().s("CS on ").s(&adev.rings[ring].name.clone())
-                .s(": its IBs are checked in a kernel copy, which is not ported").say();
-            return Err(-22);
-        }
         let job = amdgpu_job::job(adev, j);
         let n = job.num_ibs as usize;
         job.num_ibs += 1;
         if chunk_ib.flags & AMDGPU_IB_FLAG_PREAMBLE != 0 {
             job.preamble_status |= AMDGPU_PREAMBLE_IB_PRESENT;
         }
-        // amdgpu_ib_get with size 0: the IB is the client's
+        let mut ib = core::mem::replace(&mut job.ibs[n], crate::amdgpu_ib::amdgpu_ib::new());
+        let size = if adev.rings[ring].funcs.parse_cs() { chunk_ib.ib_bytes } else { 0 };
+        let r = crate::amdgpu_ib::amdgpu_ib_get(adev, size, AMDGPU_IB_POOL_DELAYED, &mut ib);
+        let job = amdgpu_job::job(adev, j);
+        job.ibs[n] = ib;
+        if r != 0 {
+            Line::new().s("Failed to get ib !").say();
+            return Err(r);
+        }
         let ib = &mut job.ibs[n];
         ib.gpu_addr = chunk_ib.va_start;
         ib.length_dw = chunk_ib.ib_bytes / 4;
@@ -447,6 +447,93 @@ fn amdgpu_cs_parser_bos(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &
         }
         let leader = p.jobs[p.gang_leader_idx].unwrap();
         amdgpu_job::job(adev, leader).uf_addr += obj::amdgpu_bo_gpu_offset(adev, uf);
+    }
+    Ok(())
+}
+
+/// `amdgpu_cs_find_mapping`: the buffer and mapping at `addr`, a buffer
+/// this CS reserved, contiguous if in VRAM and bound to the GART.
+fn amdgpu_cs_find_mapping(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, p: &amdgpu_cs_parser, addr: u64)
+                          -> Result<(usize, usize), i32> {
+    let addr = addr / AMDGPU_GPU_PAGE_SIZE as u64;
+    let m = amdgpu_vm::amdgpu_vm_bo_lookup_mapping(adev, fpriv.vm, addr).ok_or(-22)?;
+    let bo_va = amdgpu_vm::mapping(adev, m).bo_va.ok_or(-22)?;
+    let bo = amdgpu_vm::base(adev, bo_va).bo.ok_or(-22)?;
+    // Double check that the BO is reserved by this CS
+    if !p.locked.contains(&bo) {
+        return Err(-22);
+    }
+    // Make sure VRAM is allocated contigiously
+    obj::bo_mut(adev, bo).flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS as u64;
+    let res = obj::bo(adev, bo).tbo.resource.clone().ok_or(-22)?;
+    if res.mem_type == TTM_PL_VRAM && res.placement & TTM_PL_FLAG_CONTIGUOUS == 0 {
+        let allowed = obj::bo(adev, bo).allowed_domains;
+        obj::amdgpu_bo_placement_from_domain(adev, bo, allowed);
+        for pl in obj::bo_mut(adev, bo).placements.iter_mut() {
+            pl.flags |= TTM_PL_FLAG_CONTIGUOUS;
+        }
+        let placement = obj::bo(adev, bo).placements.clone();
+        let r = crate::amdgpu_ttm::ttm_bo_validate(adev, bo, &placement);
+        if r != 0 {
+            return Err(r);
+        }
+    }
+    let r = crate::amdgpu_ttm::amdgpu_ttm_alloc_gart(adev, bo);
+    if r != 0 {
+        return Err(r);
+    }
+    Ok((bo, m))
+}
+
+/// `amdgpu_cs_patch_ibs`: for a ring with `parse_cs`, every IB copied
+/// from the client's buffer into the kernel IB and checked there; the
+/// engine then runs the copy. No ring here has `patch_cs_in_place`.
+fn amdgpu_cs_patch_ibs(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, p: &amdgpu_cs_parser, i: usize)
+                       -> Result<(), i32> {
+    let ring = adev.sched_entities[p.entities[i]].as_ref().unwrap().rq.unwrap().0;
+    if !adev.rings[ring].funcs.parse_cs() {
+        return Ok(());
+    }
+    let j = p.jobs[i].unwrap();
+    for n in 0..amdgpu_job::job(adev, j).num_ibs as usize {
+        let (gpu_addr, length_dw, ptr) = {
+            let ib = &amdgpu_job::job(adev, j).ibs[n];
+            (ib.gpu_addr, ib.length_dw, ib.ptr)
+        };
+        let va_start = gpu_addr & AMDGPU_GMC_HOLE_MASK;
+        let Ok((aobj, m)) = amdgpu_cs_find_mapping(adev, fpriv, p, va_start) else {
+            Line::new().s("IB va_start is invalid").say();
+            return Err(-22);
+        };
+        if va_start + length_dw as u64 * 4 > (amdgpu_vm::mapping(adev, m).last + 1) * AMDGPU_GPU_PAGE_SIZE as u64 {
+            Line::new().s("IB va_start+ib_bytes is invalid").say();
+            return Err(-22);
+        }
+        // the IB should be reserved at this point
+        let kptr = obj::amdgpu_bo_kmap(adev, aobj)?;
+        let at = va_start - amdgpu_vm::mapping(adev, m).start * AMDGPU_GPU_PAGE_SIZE as u64;
+        let (dst, dst_off) = ptr.ok_or(-22)?;
+        let mut copy = alloc::vec![0u8; length_dw as usize * 4];
+        crate::amdgpu_gart::kptr_read(adev, kptr, at, &mut copy);
+        crate::amdgpu_gart::kptr_write(adev, dst, dst_off, &copy);
+        let dws: Vec<u32> = copy.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        let r = crate::jpeg_v2_0::amdgpu_jpeg_dec_parse_cs(&dws);
+        if r != 0 {
+            return Err(r);
+        }
+        if let Some(sa) = amdgpu_job::job(adev, j).ibs[n].sa_bo {
+            let a = crate::amdgpu_ib::amdgpu_sa_bo_gpu_addr(adev, &sa);
+            amdgpu_job::job(adev, j).ibs[n].gpu_addr = a;
+        }
+    }
+    Ok(())
+}
+
+/// `amdgpu_cs_patch_jobs`.
+fn amdgpu_cs_patch_jobs(adev: &mut amdgpu_device, fpriv: &amdgpu_fpriv, p: &mut amdgpu_cs_parser)
+                        -> Result<(), i32> {
+    for i in 0..p.jobs.len() {
+        amdgpu_cs_patch_ibs(adev, fpriv, p, i)?;
     }
     Ok(())
 }

@@ -4486,6 +4486,18 @@ pub(crate) fn npk_gpudev_tt_buffer(ctx: &mut HostState, tt: i32) -> i32 {
     crate::gpu::gpudev::tt_buffer(tt as u32).map_or(-1, |id| id as i32)
 }
 
+/// `npk_gpudev_tt_read(tt, offset, out_ptr, len) -> bytes | -1`: what the
+/// module's GTT pages `tt` hold, for a command stream checked in a copy.
+pub(crate) fn npk_gpudev_tt_read(mem: &mut [u8], ctx: &mut HostState, tt: i32, offset: i64, out_ptr: i32,
+                                 len: i32) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    if tt <= 0 || offset < 0 || len < 0 {
+        return -1;
+    }
+    let Some(out) = guest_mut(mem, out_ptr, len as usize) else { return -1 };
+    crate::gpu::gpudev::tt_read(dev, tt as u32, offset as u64, out)
+}
+
 /// `npk_gpudev_tt_free(tt) -> 0 | -1`.
 pub(crate) fn npk_gpudev_tt_free(ctx: &mut HostState, tt: i32) -> i32 {
     let Some(dev) = gpudev_device(ctx) else { return -1 };

@@ -45,7 +45,7 @@ fn ring_r32(k: amdgpu_object::amdgpu_kptr, i: u64) -> u32 {
     match k {
         amdgpu_object::amdgpu_kptr::gtt(h) => npk_sys::Dma { handle: h, phys: 0 }.r32((i * 4) as u32),
         amdgpu_object::amdgpu_kptr::vram(base) => APER.with(|a| a.get().unwrap().r32((base + i * 4) as u32)),
-        amdgpu_object::amdgpu_kptr::doorbell(_) => 0,
+        amdgpu_object::amdgpu_kptr::doorbell(_) | amdgpu_object::amdgpu_kptr::client_tt(_) => 0,
     }
 }
 

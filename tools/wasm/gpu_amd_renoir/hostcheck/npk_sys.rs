@@ -823,6 +823,24 @@ pub fn gpudev_tt_buffer(tt: i32) -> i32 {
     TTS.with(|t| if t.borrow().get(tt as usize - 1).is_some_and(|x| x.is_some()) { 1000 + tt } else { -1 })
 }
 
+/// `npk_gpudev_tt_read`.
+pub fn gpudev_tt_read(tt: i32, offset: u64, out: &mut [u8]) -> i32 {
+    TTS.with(|t| {
+        let t = t.borrow();
+        let Some(Some((_, d, pages))) = t.get(tt as usize - 1) else { return -1 };
+        let total = *pages as u64 * 4096;
+        if offset > total {
+            return -1;
+        }
+        let n = (out.len() as u64).min(total - offset) as usize;
+        for (i, b) in out[..n].iter_mut().enumerate() {
+            let at = offset + i as u64;
+            *b = (d.r32((at & !3) as u32) >> ((at & 3) * 8)) as u8;
+        }
+        n as i32
+    })
+}
+
 pub fn gpudev_tt_free(tt: i32) -> i32 {
     TTS.with(|t| match t.borrow_mut().get_mut(tt as usize - 1).and_then(|x| x.take()) {
         Some((_, d, _)) => {

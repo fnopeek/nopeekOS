@@ -98,6 +98,7 @@ unsafe extern "C" {
     fn npk_gpudev_capset(ptr: i32, len: i32) -> i32;
     fn npk_gpudev_tt_alloc(client: i32, pages: i32) -> i32;
     fn npk_gpudev_tt_buffer(tt: i32) -> i32;
+    fn npk_gpudev_tt_read(tt: i32, offset: i64, out_ptr: i32, len: i32) -> i32;
     fn npk_gpudev_tt_free(tt: i32) -> i32;
     fn npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
     fn npk_gpudev_vram(base: i64, size: i64) -> i32;
@@ -515,6 +516,14 @@ pub fn gpudev_reply(seq: i32, data: &[u8]) -> i32 {
 pub fn gpudev_capset(data: &[u8]) -> i32 {
     // SAFETY: FFI; `data` is borrowed for the call.
     unsafe { npk_gpudev_capset(data.as_ptr() as i32, data.len() as i32) }
+}
+
+/// Bytes of GTT pages `tt` this module holds, from byte `offset` on
+/// (`npk_gpudev_tt_read`); the number copied, or -1.
+pub fn gpudev_tt_read(tt: i32, offset: u64, out: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the kernel writes at most `out.len()` bytes into `out`,
+    // borrowed for the call.
+    unsafe { npk_gpudev_tt_read(tt, offset as i64, out.as_mut_ptr() as i32, out.len() as i32) }
 }
 
 /// Bytes of job `seq`'s payload from `offset` on (`npk_gpudev_job_data`);
