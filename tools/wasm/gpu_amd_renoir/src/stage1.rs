@@ -198,7 +198,8 @@ fn report_rings(adev: &amdgpu_device, what: &str) {
     l.s(what);
     for r in adev.rings.iter() {
         if matches!(r.funcs.ops, crate::amdgpu_ring::ring_ops::gfx_v9_0_gfx | crate::amdgpu_ring::ring_ops::gfx_v9_0_compute
-            | crate::amdgpu_ring::ring_ops::gfx_v9_0_kiq | crate::amdgpu_ring::ring_ops::sdma_v4_0)
+            | crate::amdgpu_ring::ring_ops::gfx_v9_0_kiq | crate::amdgpu_ring::ring_ops::sdma_v4_0
+            | crate::amdgpu_ring::ring_ops::vcn_v2_0_dec | crate::amdgpu_ring::ring_ops::vcn_v2_0_enc)
         {
             l.s(" ").s(&r.name).s(if r.sched.ready { "+" } else { "-" });
         }

@@ -1,6 +1,6 @@
 # gpu_amd_renoir Stufe 6 — Video: VCN 2.2 und JPEG 2.0
 
-**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.17.1 · Kernel 0.664.0
+**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.18.0 (V1 gebaut) · Kernel 0.664.0
 **Vorbild:** Linux 6.18.55 `vcn_v2_0.c`, `jpeg_v2_0.c`, `amdgpu_vcn.c`,
 `amdgpu_jpeg.c`; Gast: Mesa 26.2.4 `radeonsi` VA-API (`gallium-va`).
 **Daneben:** `GPU_AMD_NATIVE.md` (der Weg der Gast-ccmds), `GPU_AMD_LINUX_MAP.md`
@@ -67,3 +67,44 @@ Hardware hinter dem Ring und der VA-API-Treiber im Gast.
   `psp_get_fw_type` muss `VCN0_RAM` kennen.
 - Die Idle-Arbeit braucht die verzoegerte Arbeit aus `workqueue.rs` mit
   1-s-Frist; der Szenen-/ccmd-Takt des Moduls muss sie ausfuehren.
+
+## 5. V1 gebaut (Modul 0.18.0)
+
+`vcn_v2_0.rs`: `hw_init`/`hw_fini`/`suspend`/`resume`, der DPG-Start mit
+indirektem SRAM (`start_dpg_mode`, `mc_resume_dpg_mode`,
+`clock_gating_dpg_mode`, `enable_static_power_gating`, SRAM ueber
+`amdgpu_vcn_psp_update_sram` → `psp_execute_ip_fw_load`, das dafuer jetzt
+wie Linux eine `amdgpu_firmware_info` nimmt), `stop_dpg_mode`,
+`pause_dpg_mode` (programmiert die Encoder-Ringe), `set_pg_state`, die
+Ring-Ops von Dekoder und Encoder, `process_interrupt`, Ringtests, IB-Tests
+(Dekoder: Create-/Destroy-Nachricht, Encoder: Session auf/zu),
+`begin_use`/`end_use`/`idle_work_handler` mit dem Video-Profil der SMU
+(`amdgpu_dpm_switch_power_profile`). Der Start ohne DPG ist benannt und
+nicht gebaut: Renoirs `pg_flags` tragen `VCN_DPG` fest.
+
+In der Ring-Schicht neu, beides auch Linux-treu fuer die alten Ringe:
+`begin_use` NACH `wptr_old` in `amdgpu_ring_alloc`, `end_use` in
+`amdgpu_ring_commit`, `insert_start`/`insert_end` in `amdgpu_ib_schedule`,
+und `emit_pipeline_sync` getrennt von `emit_vm_flush` (VCN hat nur das
+zweite; `amdgpu_vm_flush` laeuft jetzt fuer jeden Job wie in Linux).
+
+**Geprueft:** `oracle/main_vcn.c` faehrt Linux' eigene Funktionen
+(wortwoertlich extrahiert) durch hw_init, Leerlauf, Benutzung, hw_fini;
+`hostcheck/vcn4_check.rs` den Port. Jede Registerschreibung, jedes Doorbell
+mit seinen Ring-Dwords, Pause-/Stromzustand, die Queue-Modi der Firmware
+und die 264 Byte DPG-SRAM sind in allen drei Saaten gleich
+(`vcn (ones|zeros|hash): port = Linux (46 register writes, 3 doorbells)`).
+Die Ersatz-GPU hat dafuer ein VCN-Modell (Strom-FSM, Pause-ACK, Dekoder-
+und Encoder-Ringe mit Zaun und Trap, 40-Bit-Adressen ueber den Hub) und
+32-Bit-Doorbells; `stage1_run` faehrt die IB-Tests: `vcn_dec+ vcn_enc0+
+vcn_enc1+`.
+
+**Am Geraet zu lesen:** `ring tests:` und `ib tests:` mit `vcn_dec+`,
+`vcn_enc0+`, `vcn_enc1+`. Scheitert ein VCN-**Ringtest**, scheitert wie in
+Linux die ganze Initialisierung des Moduls (dann `install` der 0.17.1);
+ein gescheiterter IB-Test nimmt nur den Ring aus dem Dienst. Den Gaesten
+meldet `HW_IP_INFO` die VCN-Ringe noch nicht (V3).
+
+**Offen in V1:** `amdgpu_vcn_ring_reset` (Queue-Reset bei Haenger) — heute
+faellt ein haengender VCN-Auftrag auf den vollen Recover; gehoert zu V3.
+

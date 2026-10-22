@@ -19,6 +19,10 @@ fn sdma(reg: u32) -> u32 {
     tables::SDMA0_BASE[0] + reg
 }
 
+fn uvd(idx: u32, reg: u32) -> u32 {
+    tables::UVD0_BASE[idx as usize] + reg
+}
+
 fn r(reg: u32) -> u32 {
     npk_sys::fake_reg(reg)
 }
@@ -515,8 +519,136 @@ fn run_sdma(rd: &dyn Fn(u32) -> u32, mut at: u32, end: u32, wrap: u32) {
     }
 }
 
+/// VCN's rings by the doorbell range NBIO gives it: the decoder, then the
+/// two encode rings two and three dwords on.
+fn vcn_ring_for(index: u32) -> Option<u32> {
+    let range = r(tables::NBIF0_BASE[mmBIF_MMSCH0_DOORBELL_RANGE_BASE_IDX as usize] + mmBIF_MMSCH0_DOORBELL_RANGE);
+    if field(range, BIF_MMSCH0_DOORBELL_RANGE__SIZE_MASK, BIF_MMSCH0_DOORBELL_RANGE__SIZE__SHIFT) == 0 {
+        return None;
+    }
+    let base = field(range, BIF_MMSCH0_DOORBELL_RANGE__OFFSET_MASK, BIF_MMSCH0_DOORBELL_RANGE__OFFSET__SHIFT);
+    match index.checked_sub(base)? {
+        0 => Some(0),
+        2 => Some(1),
+        3 => Some(2),
+        _ => None,
+    }
+}
+
+/// A 40-bit address of the VCPU in the 48-bit space of context 0: the hub
+/// supplies the top bits of the GART aperture it lies in.
+fn vcn_addr(a: u64) -> u64 {
+    let start = (r(gc(GC_mmVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32_BASE_IDX, GC_mmVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32))
+        as u64) << 12
+        | (r(gc(GC_mmVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32_BASE_IDX, GC_mmVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32))
+            as u64) << 44;
+    if a >> 32 == (start >> 32) & 0xff { (start & !0xff_ffff_ffff) | a } else { a }
+}
+
+/// The VCN decoder's ring from `from` to `wptr` (dwords): PACKET0 register
+/// writes to the VCPU's internal registers. The scratch one shows outside,
+/// a fence command writes the context id to the address in DATA0/DATA1, a
+/// trap raises the decoder's interrupt.
+fn run_vcn_dec(base: u64, size_dw: u32, from: u32, wptr: u32) {
+    let (mut data0, mut data1, mut ctx) = (0u32, 0u32, 0u32);
+    let mut at = from;
+    while at != wptr {
+        let hdr = gpu_r32(base + at as u64 * 4);
+        let v = gpu_r32(base + ((at + 1) % size_dw) as u64 * 4);
+        let reg = hdr & 0xffff;
+        match reg {
+            mmUVD_SCRATCH9_INTERNAL_OFFSET => npk_sys::fake_set_reg(uvd(mmUVD_SCRATCH9_BASE_IDX, mmUVD_SCRATCH9), v),
+            mmUVD_CONTEXT_ID_INTERNAL_OFFSET => ctx = v,
+            mmUVD_GPCOM_VCPU_DATA0_INTERNAL_OFFSET => data0 = v,
+            mmUVD_GPCOM_VCPU_DATA1_INTERNAL_OFFSET => data1 = v,
+            mmUVD_GPCOM_VCPU_CMD_INTERNAL_OFFSET if v == VCN_DEC_KMD_CMD | VCN_DEC_CMD_FENCE << 1 => {
+                let addr = vcn_addr(data0 as u64 | (data1 as u64) << 32);
+                gpu_w32(addr, ctx);
+                log(format!("vcn_dec FENCE {:#x} = {}", addr, ctx));
+            }
+            mmUVD_GPCOM_VCPU_CMD_INTERNAL_OFFSET if v == VCN_DEC_KMD_CMD | VCN_DEC_CMD_TRAP << 1 => {
+                log("vcn_dec TRAP".to_string());
+                ih_post(SOC15_IH_CLIENTID_VCN, VCN_2_0__SRCID__UVD_SYSTEM_MESSAGE_INTERRUPT, 0);
+            }
+            _ => {}
+        }
+        at = (at + 2) % size_dw;
+    }
+    npk_sys::fake_set_reg(uvd(mmUVD_RBC_RB_RPTR_BASE_IDX, mmUVD_RBC_RB_RPTR), wptr);
+}
+
+/// A VCN encode ring from `from` to `wptr`: END, NO_OP, IB (not run),
+/// register writes and waits; FENCE writes its sequence number, TRAP raises
+/// the ring's interrupt.
+fn run_vcn_enc(ring: u32, base: u64, size_dw: u32, from: u32, wptr: u32) {
+    let d = |i: u32| gpu_r32(base + (i % size_dw) as u64 * 4);
+    let mut at = from;
+    while at != wptr {
+        let len = match d(at) {
+            VCN_ENC_CMD_FENCE => {
+                let addr = d(at + 1) as u64 | (d(at + 2) as u64) << 32;
+                gpu_w32(addr, d(at + 3));
+                log(format!("vcn_enc{} FENCE {:#x} = {}", ring - 1, addr, d(at + 3)));
+                4
+            }
+            VCN_ENC_CMD_TRAP => {
+                let src = if ring == 1 { VCN_2_0__SRCID__UVD_ENC_GENERAL_PURPOSE } else { VCN_2_0__SRCID__UVD_ENC_LOW_LATENCY };
+                log(format!("vcn_enc{} TRAP", ring - 1));
+                ih_post(SOC15_IH_CLIENTID_VCN, src, 0);
+                1
+            }
+            VCN_ENC_CMD_IB => 5,
+            VCN_ENC_CMD_REG_WRITE => 3,
+            VCN_ENC_CMD_REG_WAIT => 4,
+            _ => 1,
+        };
+        at = (at + len) % size_dw;
+    }
+    let rptr = if ring == 1 { uvd(mmUVD_RB_RPTR_BASE_IDX, mmUVD_RB_RPTR) } else { uvd(mmUVD_RB_RPTR2_BASE_IDX, mmUVD_RB_RPTR2) };
+    npk_sys::fake_set_reg(rptr, wptr);
+}
+
+thread_local! {
+    /// Where each VCN ring was run to.
+    static VCN_RPTR: RefCell<[u32; 3]> = const { RefCell::new([0; 3]) };
+}
+
+/// A VCN doorbell: the ring runs to the write pointer it hands over.
+fn vcn_doorbell(ring: u32, value: u64) {
+    let wptr = value as u32;
+    // The doorbell is the ring's write pointer register.
+    let wreg = match ring {
+        0 => uvd(mmUVD_RBC_RB_WPTR_BASE_IDX, mmUVD_RBC_RB_WPTR),
+        1 => uvd(mmUVD_RB_WPTR_BASE_IDX, mmUVD_RB_WPTR),
+        _ => uvd(mmUVD_RB_WPTR2_BASE_IDX, mmUVD_RB_WPTR2),
+    };
+    npk_sys::fake_set_reg(wreg, wptr);
+    let from = VCN_RPTR.with(|v| v.borrow()[ring as usize]);
+    if ring == 0 {
+        let base = r64(uvd(mmUVD_LMI_RBC_RB_64BIT_BAR_LOW_BASE_IDX, mmUVD_LMI_RBC_RB_64BIT_BAR_LOW),
+                       uvd(mmUVD_LMI_RBC_RB_64BIT_BAR_HIGH_BASE_IDX, mmUVD_LMI_RBC_RB_64BIT_BAR_HIGH));
+        let cntl = r(uvd(mmUVD_RBC_RB_CNTL_BASE_IDX, mmUVD_RBC_RB_CNTL));
+        let size_dw = (1 << field(cntl, UVD_RBC_RB_CNTL__RB_BUFSZ_MASK, UVD_RBC_RB_CNTL__RB_BUFSZ__SHIFT)) / 4;
+        run_vcn_dec(base, size_dw.max(1), from, wptr % size_dw.max(1));
+    } else {
+        let (lo, hi, sz) = if ring == 1 {
+            (uvd(mmUVD_RB_BASE_LO_BASE_IDX, mmUVD_RB_BASE_LO), uvd(mmUVD_RB_BASE_HI_BASE_IDX, mmUVD_RB_BASE_HI),
+             uvd(mmUVD_RB_SIZE_BASE_IDX, mmUVD_RB_SIZE))
+        } else {
+            (uvd(mmUVD_RB_BASE_LO2_BASE_IDX, mmUVD_RB_BASE_LO2), uvd(mmUVD_RB_BASE_HI2_BASE_IDX, mmUVD_RB_BASE_HI2),
+             uvd(mmUVD_RB_SIZE2_BASE_IDX, mmUVD_RB_SIZE2))
+        };
+        let size_dw = r(sz).max(1);
+        run_vcn_enc(ring, r64(lo, hi), size_dw, from, wptr % size_dw);
+    }
+    VCN_RPTR.with(|v| v.borrow_mut()[ring as usize] = wptr);
+}
+
 /// A doorbell rang: run the queue up to the new write pointer.
 fn doorbell(index: u32, value: u64) {
+    if let Some(ring) = vcn_ring_for(index) {
+        return vcn_doorbell(ring, value);
+    }
     let Some(mut q) = queue_for(index) else {
         log(format!("doorbell {:#x} = {:#x}: no queue", index, value));
         return;
@@ -543,6 +675,7 @@ fn doorbell(index: u32, value: u64) {
 /// The fake GPU listens from here on.
 fn fake_gpu() {
     npk_sys::fake_doorbell_hook(doorbell);
+    npk_sys::fake_write_hook(card_write);
 }
 
 thread_local! {
@@ -550,8 +683,35 @@ thread_local! {
     static MODE2_MSG: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
 }
 
+/// What VCN's own state machines do with a register write: the power
+/// FSM reports the state it was configured to; a DPG pause request is
+/// acknowledged with the tiles on, its release with them off again; a
+/// ring's read pointer reset starts the fake from there.
+fn vcn_write(reg: u32, v: u32) {
+    if reg == uvd(mmUVD_PGFSM_CONFIG_BASE_IDX, mmUVD_PGFSM_CONFIG) {
+        npk_sys::fake_set_reg(uvd(mmUVD_PGFSM_STATUS_BASE_IDX, mmUVD_PGFSM_STATUS), v);
+    } else if reg == uvd(mmUVD_DPG_PAUSE_BASE_IDX, mmUVD_DPG_PAUSE) {
+        let ps = uvd(mmUVD_POWER_STATUS_BASE_IDX, mmUVD_POWER_STATUS);
+        let st = r(ps) & !UVD_POWER_STATUS__UVD_POWER_STATUS_MASK;
+        if v & UVD_DPG_PAUSE__NJ_PAUSE_DPG_REQ_MASK != 0 {
+            npk_sys::fake_set_reg(reg, v | UVD_DPG_PAUSE__NJ_PAUSE_DPG_ACK_MASK);
+            npk_sys::fake_set_reg(ps, st | UVD_PGFSM_CONFIG__UVDM_UVDU_PWR_ON);
+        } else {
+            npk_sys::fake_set_reg(reg, v & !UVD_DPG_PAUSE__NJ_PAUSE_DPG_ACK_MASK);
+            npk_sys::fake_set_reg(ps, st | UVD_POWER_STATUS__UVD_POWER_STATUS_TILES_OFF);
+        }
+    } else if reg == uvd(mmUVD_RBC_RB_RPTR_BASE_IDX, mmUVD_RBC_RB_RPTR) {
+        VCN_RPTR.with(|x| x.borrow_mut()[0] = v);
+    } else if reg == uvd(mmUVD_RB_RPTR_BASE_IDX, mmUVD_RB_RPTR) {
+        VCN_RPTR.with(|x| x.borrow_mut()[1] = v);
+    } else if reg == uvd(mmUVD_RB_RPTR2_BASE_IDX, mmUVD_RB_RPTR2) {
+        VCN_RPTR.with(|x| x.borrow_mut()[2] = v);
+    }
+}
+
 /// A MODE2 reset through the SMU mailbox drops every queue the CP had.
 fn card_write(reg: u32, v: u32) {
+    vcn_write(reg, v);
     if reg == 0x16000 + mmMP1_SMN_C2PMSG_66 && v == MODE2_MSG.with(|m| m.get()) {
         QUEUES.with(|q| q.borrow_mut().clear());
         KCQ.with(|k| k.borrow_mut().clear());

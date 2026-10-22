@@ -8,7 +8,8 @@
 //! system driver image to load and starts at the command ring.
 
 use crate::amdgpu_device::amdgpu_device;
-use crate::amdgpu_ucode::{amdgpu_is_kicker_fw, amdgpu_ucode_ip_version_decode, amdgpu_ucode_request, le16, le32};
+use crate::amdgpu_ucode::{amdgpu_firmware_info, amdgpu_is_kicker_fw, amdgpu_ucode_ip_version_decode, amdgpu_ucode_request,
+                          le16, le32};
 use crate::linux::{firmware, Line};
 use crate::regs::*;
 use alloc::vec::Vec;
@@ -493,7 +494,8 @@ fn psp_gfx_cmd_name(cmd_id: u32) -> &'static str {
 
 /// `psp_cmd_submit_buf`. `ucode` is the index into `adev.firmware.ucode`
 /// a firmware load reports to. The response is copied back into `cmd`.
-fn psp_cmd_submit_buf(adev: &mut amdgpu_device, ucode: Option<usize>, cmd: &mut [u8], fence_mc_addr: u64) -> i32 {
+fn psp_cmd_submit_buf(adev: &mut amdgpu_device, mut ucode: Option<&mut amdgpu_firmware_info>, cmd: &mut [u8],
+                      fence_mc_addr: u64) -> i32 {
     let mut timeout = adev.psp_timeout;
     let b = adev.psp.buf;
     let (Some(cmd_mem), Some(fence)) = (b.cmd_buf_mem, b.fence_buf) else { return -22 };
@@ -534,8 +536,8 @@ fn psp_cmd_submit_buf(adev: &mut amdgpu_device, ucode: Option<usize>, cmd: &mut 
     // instead of an error during psp initialization to avoid breaking
     // hw_init and it doesn't return -EINVAL.
     if status != 0 || timeout == 0 {
-        if let Some(u) = ucode {
-            let id = adev.firmware.ucode[u].ucode_id;
+        if let Some(u) = ucode.as_ref() {
+            let id = u.ucode_id;
             Line::new().s("failed to load ucode id ").dec(id as u64).s(" (0x").hexu(id).s(")").say();
         }
         Line::new().s("psp gfx command ").s(psp_gfx_cmd_name(cmd_id)).s("(0x").hexu(cmd_id)
@@ -545,9 +547,9 @@ fn psp_cmd_submit_buf(adev: &mut amdgpu_device, ucode: Option<usize>, cmd: &mut 
             return -22;
         }
     }
-    if let Some(u) = ucode {
-        adev.firmware.ucode[u].tmr_mc_addr_lo = get32(&resp, RESP_FW_ADDR_LO);
-        adev.firmware.ucode[u].tmr_mc_addr_hi = get32(&resp, RESP_FW_ADDR_HI);
+    if let Some(u) = ucode.as_mut() {
+        u.tmr_mc_addr_lo = get32(&resp, RESP_FW_ADDR_LO);
+        u.tmr_mc_addr_hi = get32(&resp, RESP_FW_ADDR_HI);
     }
     0
 }
@@ -727,9 +729,8 @@ fn fw_load_skip_check(adev: &amdgpu_device, i: usize) -> bool {
 }
 
 /// `psp_execute_ip_fw_load`, with `psp_prep_load_ip_fw_cmd_buf`.
-fn psp_execute_ip_fw_load(adev: &mut amdgpu_device, i: usize) -> i32 {
+pub fn psp_execute_ip_fw_load(adev: &mut amdgpu_device, u: &mut amdgpu_firmware_info) -> i32 {
     let mut cmd = acquire_psp_cmd_buf();
-    let u = adev.firmware.ucode[i];
     put32(&mut cmd, CMDRESP_CMD_ID, GFX_CMD_ID_LOAD_IP_FW);
     let c = CMDRESP_CMD;
     put32(&mut cmd, c + LOADIPFW_FW_PHY_ADDR_LO, u.mc_addr as u32);
@@ -741,7 +742,7 @@ fn psp_execute_ip_fw_load(adev: &mut amdgpu_device, i: usize) -> i32 {
     };
     put32(&mut cmd, c + LOADIPFW_FW_TYPE, t);
     let fence = adev.psp.buf.fence_buf_mc_addr;
-    psp_cmd_submit_buf(adev, Some(i), &mut cmd, fence)
+    psp_cmd_submit_buf(adev, Some(u), &mut cmd, fence)
 }
 
 /// `psp_load_non_psp_fw`: no autoload, no P2S table, no SMU image.
@@ -757,7 +758,9 @@ fn psp_load_non_psp_fw(adev: &mut amdgpu_device) -> i32 {
         }
         Line::new().s("psp: load ucode id ").dec(id as u64).s(", ").dec(adev.firmware.ucode[i].ucode_size as u64)
             .s(" bytes").dbg();
-        let r = psp_execute_ip_fw_load(adev, i);
+        let mut u = adev.firmware.ucode[i];
+        let r = psp_execute_ip_fw_load(adev, &mut u);
+        adev.firmware.ucode[i] = u;
         if r != 0 {
             return r;
         }

@@ -135,7 +135,7 @@ fi
 # register write and doorbell; Linux runs the same life on the same inputs.
 # soc is GMC's oracle in its late mode: IH hw_init, GMC late_init, the
 # clock gating of COMMON, GMC and IH, their hw_fini.
-for blk in gfx sdma smu soc; do
+for blk in gfx sdma smu soc vcn; do
     rustc $RF "$HERE/${blk}4_check.rs" -o "$B/${blk}4_check"
     for seed in ones zeros hash; do
         "$B/${blk}4_check" "$DISC" "$BIOS" "$FW" $seed > "$B/$blk.$seed.out"

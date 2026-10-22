@@ -1837,6 +1837,18 @@ pub const BIF_SDMA0_DOORBELL_RANGE__OFFSET__SHIFT: u32 = 0x2;
 pub const BIF_SDMA0_DOORBELL_RANGE__SIZE_MASK: u32 = 0x1f0000;
 /// include/asic_reg/nbif/nbif_6_1_sh_mask.h:1284
 pub const BIF_SDMA0_DOORBELL_RANGE__SIZE__SHIFT: u32 = 0x10;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:369
+pub const mmBIF_MMSCH0_DOORBELL_RANGE: u32 = 0x1d3;
+/// include/asic_reg/nbif/nbif_6_1_offset.h:370
+pub const mmBIF_MMSCH0_DOORBELL_RANGE_BASE_IDX: u32 = 0x2;
+/// include/asic_reg/nbio/nbio_2_3_sh_mask.h:2227
+pub const BIF_MMSCH0_DOORBELL_RANGE__OFFSET_MASK: u32 = 0xffc;
+/// include/asic_reg/nbif/nbif_6_1_sh_mask.h:1292
+pub const BIF_MMSCH0_DOORBELL_RANGE__OFFSET__SHIFT: u32 = 0x2;
+/// include/asic_reg/nbio/nbio_2_3_sh_mask.h:2228
+pub const BIF_MMSCH0_DOORBELL_RANGE__SIZE_MASK: u32 = 0x1f0000;
+/// include/asic_reg/nbif/nbif_6_1_sh_mask.h:1293
+pub const BIF_MMSCH0_DOORBELL_RANGE__SIZE__SHIFT: u32 = 0x10;
 
 // amdgpu_device_indirect_rreg/wreg through NBIO (nbio_v7_0.c, nbio_7_0_offset.h)
 /// include/asic_reg/nbif/nbif_6_1_offset.h:681
@@ -3231,6 +3243,8 @@ pub const SMU_MEMORY_POOL_SIZE_ZERO: u32 = 0x0;
 pub const PP_SMC_POWER_PROFILE_BOOTUP_DEFAULT: u32 = 0x0;
 /// include/kgd_pp_interface.h:191
 pub const PP_SMC_POWER_PROFILE_COUNT: u32 = 0xa;
+/// include/kgd_pp_interface.h:187
+pub const PP_SMC_POWER_PROFILE_CUSTOM: u32 = 0x6;
 /// include/kgd_pp_interface.h:56
 pub const AMD_DPM_FORCED_LEVEL_AUTO: u32 = 0x1;
 /// The value of `sizeof(Watermarks_t)` in ../pm/swsmu/smu12/renoir_ppt.c
@@ -7195,3 +7209,471 @@ pub const AMDGPU_TILING_DCC_PITCH_MAX_SHIFT: u32 = 0x1d;
 pub const AMDGPU_TILING_DCC_PITCH_MAX_MASK: u32 = 0x3fff;
 /// ?
 pub const AMDGPU_TILING_SCANOUT_SHIFT: u32 = 0x3f;
+
+// VCN 2.0 start in DPG mode, its rings and their tests (vcn_v2_0.c, amdgpu_vcn.c, amdgpu_vcn.h)
+/// include/asic_reg/uvd/uvd_3_1_d.h:44
+pub const mmUVD_CGC_CTRL: u32 = 0x1ec;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:147
+pub const mmUVD_CGC_CTRL_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:42
+pub const mmUVD_CGC_GATE: u32 = 0x1ea;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:145
+pub const mmUVD_CGC_GATE_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:42
+pub const mmUVD_DPG_PAUSE: u32 = 0x14;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:43
+pub const mmUVD_DPG_PAUSE_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:446
+pub const mmUVD_GFX10_ADDR_CONFIG: u32 = 0x4a;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:447
+pub const mmUVD_GFX10_ADDR_CONFIG_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:51
+pub const mmUVD_LMI_CTRL: u32 = 0x226;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:159
+pub const mmUVD_LMI_CTRL_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:46
+pub const mmUVD_LMI_CTRL2: u32 = 0x1fd;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:151
+pub const mmUVD_LMI_CTRL2_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_5_0_d.h:39
+pub const mmUVD_LMI_RBC_RB_64BIT_BAR_HIGH: u32 = 0x628;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:115
+pub const mmUVD_LMI_RBC_RB_64BIT_BAR_HIGH_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_5_0_d.h:38
+pub const mmUVD_LMI_RBC_RB_64BIT_BAR_LOW: u32 = 0x629;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:117
+pub const mmUVD_LMI_RBC_RB_64BIT_BAR_LOW_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:72
+pub const mmUVD_LMI_VCPU_CACHE1_64BIT_BAR_HIGH: u32 = 0x5ad;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:73
+pub const mmUVD_LMI_VCPU_CACHE1_64BIT_BAR_HIGH_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:70
+pub const mmUVD_LMI_VCPU_CACHE1_64BIT_BAR_LOW: u32 = 0x5ac;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:71
+pub const mmUVD_LMI_VCPU_CACHE1_64BIT_BAR_LOW_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:76
+pub const mmUVD_LMI_VCPU_CACHE2_64BIT_BAR_HIGH: u32 = 0x5b1;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:77
+pub const mmUVD_LMI_VCPU_CACHE2_64BIT_BAR_HIGH_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:74
+pub const mmUVD_LMI_VCPU_CACHE2_64BIT_BAR_LOW: u32 = 0x5b0;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:75
+pub const mmUVD_LMI_VCPU_CACHE2_64BIT_BAR_LOW_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_5_0_d.h:43
+pub const mmUVD_LMI_VCPU_CACHE_64BIT_BAR_HIGH: u32 = 0x61e;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:107
+pub const mmUVD_LMI_VCPU_CACHE_64BIT_BAR_HIGH_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_5_0_d.h:42
+pub const mmUVD_LMI_VCPU_CACHE_64BIT_BAR_LOW: u32 = 0x61f;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:109
+pub const mmUVD_LMI_VCPU_CACHE_64BIT_BAR_LOW_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:950
+pub const mmUVD_LMI_VCPU_NC0_64BIT_BAR_HIGH: u32 = 0x622;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:951
+pub const mmUVD_LMI_VCPU_NC0_64BIT_BAR_HIGH_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:952
+pub const mmUVD_LMI_VCPU_NC0_64BIT_BAR_LOW: u32 = 0x623;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:953
+pub const mmUVD_LMI_VCPU_NC0_64BIT_BAR_LOW_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:47
+pub const mmUVD_MASTINT_EN: u32 = 0x200;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:153
+pub const mmUVD_MASTINT_EN_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:55
+pub const mmUVD_MPC_CNTL: u32 = 0x237;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:345
+pub const mmUVD_MPC_CNTL_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:60
+pub const mmUVD_MPC_SET_MUX: u32 = 0x23d;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:175
+pub const mmUVD_MPC_SET_MUX_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:56
+pub const mmUVD_MPC_SET_MUXA0: u32 = 0x239;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:167
+pub const mmUVD_MPC_SET_MUXA0_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:58
+pub const mmUVD_MPC_SET_MUXB0: u32 = 0x23b;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:171
+pub const mmUVD_MPC_SET_MUXB0_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:90
+pub const mmUVD_PGFSM_CONFIG: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:29
+pub const mmUVD_PGFSM_CONFIG_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:30
+pub const mmUVD_PGFSM_STATUS: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:31
+pub const mmUVD_PGFSM_STATUS_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:93
+pub const mmUVD_POWER_STATUS: u32 = 0x4;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:29
+pub const mmUVD_POWER_STATUS_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:76
+pub const mmUVD_RBC_RB_CNTL: u32 = 0x269;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:205
+pub const mmUVD_RBC_RB_CNTL_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:73
+pub const mmUVD_RBC_RB_RPTR: u32 = 0x264;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:199
+pub const mmUVD_RBC_RB_RPTR_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:77
+pub const mmUVD_RBC_RB_RPTR_ADDR: u32 = 0x26a;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:207
+pub const mmUVD_RBC_RB_RPTR_ADDR_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:74
+pub const mmUVD_RBC_RB_WPTR: u32 = 0x265;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:201
+pub const mmUVD_RBC_RB_WPTR_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:75
+pub const mmUVD_RBC_RB_WPTR_CNTL: u32 = 0x266;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:203
+pub const mmUVD_RBC_RB_WPTR_CNTL_BASE_IDX: u32 = 0x1;
+/// amdgpu/amdgpu_vcn.h:72
+pub const mmUVD_RBC_XX_IB_REG_CHECK: u32 = 0x26b;
+/// amdgpu/amdgpu_vcn.h:73
+pub const mmUVD_RBC_XX_IB_REG_CHECK_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:45
+pub const mmUVD_RB_BASE_HI: u32 = 0x5e7;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:97
+pub const mmUVD_RB_BASE_HI_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:40
+pub const mmUVD_RB_BASE_HI2: u32 = 0x5e2;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:87
+pub const mmUVD_RB_BASE_HI2_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:44
+pub const mmUVD_RB_BASE_LO: u32 = 0x5e6;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:95
+pub const mmUVD_RB_BASE_LO_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:39
+pub const mmUVD_RB_BASE_LO2: u32 = 0x5e1;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:85
+pub const mmUVD_RB_BASE_LO2_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:47
+pub const mmUVD_RB_RPTR: u32 = 0x5e9;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:101
+pub const mmUVD_RB_RPTR_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:42
+pub const mmUVD_RB_RPTR2: u32 = 0x5e4;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:91
+pub const mmUVD_RB_RPTR2_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:46
+pub const mmUVD_RB_SIZE: u32 = 0x5e8;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:99
+pub const mmUVD_RB_SIZE_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:41
+pub const mmUVD_RB_SIZE2: u32 = 0x5e3;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:89
+pub const mmUVD_RB_SIZE2_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:48
+pub const mmUVD_RB_WPTR: u32 = 0x5ea;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:103
+pub const mmUVD_RB_WPTR_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:43
+pub const mmUVD_RB_WPTR2: u32 = 0x5e5;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:93
+pub const mmUVD_RB_WPTR2_BASE_IDX: u32 = 0x1;
+/// amdgpu/amdgpu_vcn.h:74
+pub const mmUVD_REG_XX_MASK: u32 = 0x26c;
+/// amdgpu/amdgpu_vcn.h:75
+pub const mmUVD_REG_XX_MASK_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:46
+pub const mmUVD_SCRATCH2: u32 = 0x16;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:47
+pub const mmUVD_SCRATCH2_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:69
+pub const mmUVD_SOFT_RESET: u32 = 0x260;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:193
+pub const mmUVD_SOFT_RESET_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:78
+pub const mmUVD_STATUS: u32 = 0x26f;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:209
+pub const mmUVD_STATUS_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_5_0_d.h:91
+pub const mmUVD_SUVD_CGC_CTRL: u32 = 0x5a6;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:69
+pub const mmUVD_SUVD_CGC_CTRL_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_5_0_d.h:89
+pub const mmUVD_SUVD_CGC_GATE: u32 = 0x5a4;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:67
+pub const mmUVD_SUVD_CGC_GATE_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:62
+pub const mmUVD_VCPU_CACHE_OFFSET0: u32 = 0x242;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:179
+pub const mmUVD_VCPU_CACHE_OFFSET0_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:64
+pub const mmUVD_VCPU_CACHE_OFFSET1: u32 = 0x244;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:183
+pub const mmUVD_VCPU_CACHE_OFFSET1_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:66
+pub const mmUVD_VCPU_CACHE_OFFSET2: u32 = 0x246;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:187
+pub const mmUVD_VCPU_CACHE_OFFSET2_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:63
+pub const mmUVD_VCPU_CACHE_SIZE0: u32 = 0x243;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:181
+pub const mmUVD_VCPU_CACHE_SIZE0_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:65
+pub const mmUVD_VCPU_CACHE_SIZE1: u32 = 0x245;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:185
+pub const mmUVD_VCPU_CACHE_SIZE1_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:67
+pub const mmUVD_VCPU_CACHE_SIZE2: u32 = 0x247;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:189
+pub const mmUVD_VCPU_CACHE_SIZE2_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:68
+pub const mmUVD_VCPU_CNTL: u32 = 0x258;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:191
+pub const mmUVD_VCPU_CNTL_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:650
+pub const mmUVD_VCPU_NONCACHE_OFFSET0: u32 = 0x254;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:651
+pub const mmUVD_VCPU_NONCACHE_OFFSET0_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:652
+pub const mmUVD_VCPU_NONCACHE_SIZE0: u32 = 0x255;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:653
+pub const mmUVD_VCPU_NONCACHE_SIZE0_BASE_IDX: u32 = 0x1;
+/// amdgpu/amdgpu_jpeg.h:47
+pub const mmUVD_DPG_LMA_DATA: u32 = 0x12;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:39
+pub const mmUVD_DPG_LMA_DATA_BASE_IDX: u32 = 0x1;
+/// amdgpu/amdgpu_jpeg.h:50
+pub const mmUVD_DPG_LMA_CTL: u32 = 0x11;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:37
+pub const mmUVD_DPG_LMA_CTL_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:224
+pub const UVD_CGC_CTRL__CLK_GATE_DLY_TIMER__SHIFT: u32 = 0x2;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:226
+pub const UVD_CGC_CTRL__CLK_OFF_DELAY__SHIFT: u32 = 0x6;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:222
+pub const UVD_CGC_CTRL__DYN_CLOCK_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:251
+pub const UVD_CGC_CTRL__IDCT_MODE_MASK: u32 = 0x800000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:257
+pub const UVD_CGC_CTRL__LBSI_MODE_MASK: u32 = 0x4000000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:247
+pub const UVD_CGC_CTRL__LMI_MC_MODE_MASK: u32 = 0x200000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:249
+pub const UVD_CGC_CTRL__LMI_UMC_MODE_MASK: u32 = 0x400000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:259
+pub const UVD_CGC_CTRL__LRBBM_MODE_MASK: u32 = 0x8000000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:255
+pub const UVD_CGC_CTRL__MPC_MODE_MASK: u32 = 0x2000000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:241
+pub const UVD_CGC_CTRL__MPEG2_MODE_MASK: u32 = 0x40000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:253
+pub const UVD_CGC_CTRL__MPRD_MODE_MASK: u32 = 0x1000000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:245
+pub const UVD_CGC_CTRL__RBC_MODE_MASK: u32 = 0x100000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:243
+pub const UVD_CGC_CTRL__REGS_MODE_MASK: u32 = 0x80000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:265
+pub const UVD_CGC_CTRL__SCPU_MODE_MASK: u32 = 0x40000000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:237
+pub const UVD_CGC_CTRL__SYS_MODE_MASK: u32 = 0x10000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:229
+pub const UVD_CGC_CTRL__UDEC_CM_MODE_MASK: u32 = 0x1000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:233
+pub const UVD_CGC_CTRL__UDEC_DB_MODE_MASK: u32 = 0x4000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:231
+pub const UVD_CGC_CTRL__UDEC_IT_MODE_MASK: u32 = 0x2000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:239
+pub const UVD_CGC_CTRL__UDEC_MODE_MASK: u32 = 0x20000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:235
+pub const UVD_CGC_CTRL__UDEC_MP_MODE_MASK: u32 = 0x8000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:227
+pub const UVD_CGC_CTRL__UDEC_RE_MODE_MASK: u32 = 0x800;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:263
+pub const UVD_CGC_CTRL__VCPU_MODE_MASK: u32 = 0x20000000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:261
+pub const UVD_CGC_CTRL__WCB_MODE_MASK: u32 = 0x10000000;
+/// amdgpu/vcn_v2_0.c:1318
+pub const UVD_DPG_PAUSE__NJ_PAUSE_DPG_ACK_MASK: u32 = 0x8;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:108
+pub const UVD_DPG_PAUSE__NJ_PAUSE_DPG_REQ_MASK: u32 = 0x4;
+/// include/asic_reg/uvd/uvd_4_2_sh_mask.h:324
+pub const UVD_LMI_CTRL2__RE_OFLD_MIF_WR_REQ_NUM__SHIFT: u32 = 0x11;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:357
+pub const UVD_LMI_CTRL__CRC_RESET_MASK: u32 = 0x4000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:355
+pub const UVD_LMI_CTRL__DATA_COHERENCY_EN_MASK: u32 = 0x2000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:353
+pub const UVD_LMI_CTRL__MASK_MC_URGENT_MASK: u32 = 0x1000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:349
+pub const UVD_LMI_CTRL__REQ_MODE_MASK: u32 = 0x200;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:363
+pub const UVD_LMI_CTRL__VCPU_DATA_COHERENCY_EN_MASK: u32 = 0x200000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:347
+pub const UVD_LMI_CTRL__WRITE_CLEAN_TIMER_EN_MASK: u32 = 0x100;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:346
+pub const UVD_LMI_CTRL__WRITE_CLEAN_TIMER__SHIFT: u32 = 0x0;
+/// amdgpu/vcn_v2_0.c:941
+pub const UVD_MASTINT_EN__VCPU_EN_MASK: u32 = 0x2;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:468
+pub const UVD_MPC_CNTL__REPLACEMENT_MODE__SHIFT: u32 = 0x3;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:480
+pub const UVD_MPC_SET_MUXA0__VARA_1__SHIFT: u32 = 0x6;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:482
+pub const UVD_MPC_SET_MUXA0__VARA_2__SHIFT: u32 = 0xc;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:484
+pub const UVD_MPC_SET_MUXA0__VARA_3__SHIFT: u32 = 0x12;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:486
+pub const UVD_MPC_SET_MUXA0__VARA_4__SHIFT: u32 = 0x18;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:496
+pub const UVD_MPC_SET_MUXB0__VARB_1__SHIFT: u32 = 0x6;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:498
+pub const UVD_MPC_SET_MUXB0__VARB_2__SHIFT: u32 = 0xc;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:500
+pub const UVD_MPC_SET_MUXB0__VARB_3__SHIFT: u32 = 0x12;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:502
+pub const UVD_MPC_SET_MUXB0__VARB_4__SHIFT: u32 = 0x18;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:510
+pub const UVD_MPC_SET_MUX__SET_0__SHIFT: u32 = 0x0;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:512
+pub const UVD_MPC_SET_MUX__SET_1__SHIFT: u32 = 0x3;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:514
+pub const UVD_MPC_SET_MUX__SET_2__SHIFT: u32 = 0x6;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:31
+pub const UVD_PGFSM_CONFIG__UVDB_PWR_CONFIG__SHIFT: u32 = 0x8;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:30
+pub const UVD_PGFSM_CONFIG__UVDC_PWR_CONFIG__SHIFT: u32 = 0x6;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:36
+pub const UVD_PGFSM_CONFIG__UVDE_PWR_CONFIG__SHIFT: u32 = 0x12;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:29
+pub const UVD_PGFSM_CONFIG__UVDF_PWR_CONFIG__SHIFT: u32 = 0x4;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:32
+pub const UVD_PGFSM_CONFIG__UVDIL_PWR_CONFIG__SHIFT: u32 = 0xa;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:33
+pub const UVD_PGFSM_CONFIG__UVDIR_PWR_CONFIG__SHIFT: u32 = 0xc;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:27
+pub const UVD_PGFSM_CONFIG__UVDM_PWR_CONFIG__SHIFT: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:34
+pub const UVD_PGFSM_CONFIG__UVDTD_PWR_CONFIG__SHIFT: u32 = 0xe;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:35
+pub const UVD_PGFSM_CONFIG__UVDTE_PWR_CONFIG__SHIFT: u32 = 0x10;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:28
+pub const UVD_PGFSM_CONFIG__UVDU_PWR_CONFIG__SHIFT: u32 = 0x2;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:54
+pub const UVD_PGFSM_STATUS__UVDB_PWR_STATUS__SHIFT: u32 = 0x8;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:53
+pub const UVD_PGFSM_STATUS__UVDC_PWR_STATUS__SHIFT: u32 = 0x6;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:59
+pub const UVD_PGFSM_STATUS__UVDE_PWR_STATUS__SHIFT: u32 = 0x12;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:52
+pub const UVD_PGFSM_STATUS__UVDF_PWR_STATUS__SHIFT: u32 = 0x4;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:55
+pub const UVD_PGFSM_STATUS__UVDIL_PWR_STATUS__SHIFT: u32 = 0xa;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:56
+pub const UVD_PGFSM_STATUS__UVDIR_PWR_STATUS__SHIFT: u32 = 0xc;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:50
+pub const UVD_PGFSM_STATUS__UVDM_PWR_STATUS__SHIFT: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:57
+pub const UVD_PGFSM_STATUS__UVDTD_PWR_STATUS__SHIFT: u32 = 0xe;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:58
+pub const UVD_PGFSM_STATUS__UVDTE_PWR_STATUS__SHIFT: u32 = 0x10;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:51
+pub const UVD_PGFSM_STATUS__UVDU_PWR_STATUS__SHIFT: u32 = 0x2;
+/// amdgpu/vcn_v2_0.c:962
+pub const UVD_POWER_STATUS__STALL_DPG_POWER_UP_MASK: u32 = 0x80000000;
+/// include/asic_reg/uvd/uvd_5_0_sh_mask.h:939
+pub const UVD_POWER_STATUS__UVD_PG_EN_MASK: u32 = 0x100;
+/// include/asic_reg/uvd/uvd_5_0_sh_mask.h:929
+pub const UVD_POWER_STATUS__UVD_PG_MODE_MASK: u32 = 0x4;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:737
+pub const UVD_POWER_STATUS__UVD_POWER_STATUS_MASK: u32 = 0x3;
+/// amdgpu/vcn_v2_0.c:1027
+pub const UVD_VCPU_CNTL__CLK_EN_MASK: u32 = 0x200;
+/// include/asic_reg/uvd/uvd_5_0_sh_mask.h:589
+pub const UVD_VCPU_CNTL__MIF_WR_LOW_THRESHOLD_BP_MASK: u32 = 0x20000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:558
+pub const UVD_VCPU_CNTL__PRB_TIMEOUT_VAL__SHIFT: u32 = 0x14;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:91
+pub const UVD_DPG_LMA_CTL__READ_WRITE__SHIFT: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:92
+pub const UVD_DPG_LMA_CTL__MASK_EN__SHIFT: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_sh_mask.h:95
+pub const UVD_DPG_LMA_CTL__READ_WRITE_ADDR__SHIFT: u32 = 0x10;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:610
+pub const UVD_RBC_RB_CNTL__RB_BUFSZ__SHIFT: u32 = 0x0;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:609
+pub const UVD_RBC_RB_CNTL__RB_BUFSZ_MASK: u32 = 0x1f;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:612
+pub const UVD_RBC_RB_CNTL__RB_BLKSZ__SHIFT: u32 = 0x8;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:611
+pub const UVD_RBC_RB_CNTL__RB_BLKSZ_MASK: u32 = 0x1f00;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:614
+pub const UVD_RBC_RB_CNTL__RB_NO_FETCH__SHIFT: u32 = 0x10;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:613
+pub const UVD_RBC_RB_CNTL__RB_NO_FETCH_MASK: u32 = 0x10000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:618
+pub const UVD_RBC_RB_CNTL__RB_NO_UPDATE__SHIFT: u32 = 0x18;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:617
+pub const UVD_RBC_RB_CNTL__RB_NO_UPDATE_MASK: u32 = 0x1000000;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:620
+pub const UVD_RBC_RB_CNTL__RB_RPTR_WR_EN__SHIFT: u32 = 0x1c;
+/// include/asic_reg/uvd/uvd_3_1_sh_mask.h:619
+pub const UVD_RBC_RB_CNTL__RB_RPTR_WR_EN_MASK: u32 = 0x10000000;
+/// amdgpu/vcn_v2_0.c:1355
+pub const UVD_PGFSM_CONFIG__UVDM_UVDU_PWR_ON: u32 = 0x2;
+/// amdgpu/vcn_v2_0.c:782
+pub const UVD_PGFSM_STATUS__UVDM_UVDU_PWR_ON_2_0: u32 = 0xaaaa0;
+/// amdgpu/amdgpu_vcn.h:264
+pub const UVD_POWER_STATUS__UVD_POWER_STATUS_TILES_OFF: u32 = 0x1;
+/// amdgpu/amdgpu_vcn.h:262
+pub const UVD_STATUS__IDLE: u32 = 0x2;
+/// amdgpu/amdgpu_vcn.h:251
+pub const FW_QUEUE_RING_RESET: u32 = 0x1;
+/// amdgpu/amdgpu_vcn.h:271
+pub const VCN_DPG_STATE__PAUSE: u32 = 0x1;
+/// amdgpu/amdgpu_vcn.h:270
+pub const VCN_DPG_STATE__UNPAUSE: u32 = 0x0;
+/// include/ivsrcid/vcn/irqsrcs_vcn_2_0.h:27
+pub const VCN_2_0__SRCID__UVD_ENC_LOW_LATENCY: u32 = 0x78;
+/// amdgpu/amdgpu_vcn.h:41
+pub const VCN_DEC_KMD_CMD: u32 = 0x80000000;
+/// amdgpu/amdgpu_vcn.h:42
+pub const VCN_DEC_CMD_FENCE: u32 = 0x0;
+/// amdgpu/amdgpu_vcn.h:43
+pub const VCN_DEC_CMD_TRAP: u32 = 0x1;
+/// amdgpu/amdgpu_vcn.h:44
+pub const VCN_DEC_CMD_WRITE_REG: u32 = 0x4;
+/// amdgpu/amdgpu_vcn.h:45
+pub const VCN_DEC_CMD_REG_READ_COND_WAIT: u32 = 0x6;
+/// amdgpu/amdgpu_vcn.h:46
+pub const VCN_DEC_CMD_PACKET_START: u32 = 0xa;
+/// amdgpu/amdgpu_vcn.h:47
+pub const VCN_DEC_CMD_PACKET_END: u32 = 0xb;
+/// amdgpu/amdgpu_vcn.h:60
+pub const VCN_ENC_CMD_NO_OP: u32 = 0x0;
+/// amdgpu/amdgpu_vcn.h:61
+pub const VCN_ENC_CMD_END: u32 = 0x1;
+/// amdgpu/amdgpu_vcn.h:62
+pub const VCN_ENC_CMD_IB: u32 = 0x2;
+/// amdgpu/amdgpu_vcn.h:63
+pub const VCN_ENC_CMD_FENCE: u32 = 0x3;
+/// amdgpu/amdgpu_vcn.h:64
+pub const VCN_ENC_CMD_TRAP: u32 = 0x4;
+/// amdgpu/amdgpu_vcn.h:65
+pub const VCN_ENC_CMD_REG_WRITE: u32 = 0xb;
+/// amdgpu/amdgpu_vcn.h:66
+pub const VCN_ENC_CMD_REG_WAIT: u32 = 0xc;
+/// amdgpu/vcn_v2_0.c:40
+pub const VCN_VID_SOC_ADDRESS_2_0: u32 = 0x1fa00;
+/// amdgpu/vcn_v2_0.c:41
+pub const VCN1_VID_SOC_ADDRESS_3_0: u32 = 0x48200;
+/// amdgpu/vcn_v2_0.c:42
+pub const VCN1_AON_SOC_ADDRESS_3_0: u32 = 0x48000;
+/// amdgpu/amdgpu_vcn.h:68
+pub const VCN_AON_SOC_ADDRESS_2_0: u32 = 0x1f800;
+/// amdgpu/amdgpu_vcn.h:69
+pub const VCN_VID_IP_ADDRESS_2_0: u32 = 0x0;
+/// amdgpu/amdgpu_vcn.h:70
+pub const VCN_AON_IP_ADDRESS_2_0: u32 = 0x30000;
+/// The value of `offsetof(struct amdgpu_fw_shared, multi_queue.decode_queue_mode)` in vcn_v2_0.c
+pub const FW_SHARED_DECODE_QUEUE_MODE: u32 = 0x39;
+/// The value of `offsetof(struct amdgpu_fw_shared, multi_queue.encode_generalpurpose_queue_mode)` in vcn_v2_0.c
+pub const FW_SHARED_ENCODE_GENERALPURPOSE_QUEUE_MODE: u32 = 0x3a;
+/// The value of `offsetof(struct amdgpu_fw_shared, multi_queue.encode_lowlatency_queue_mode)` in vcn_v2_0.c
+pub const FW_SHARED_ENCODE_LOWLATENCY_QUEUE_MODE: u32 = 0x3b;
+/// include/amd_shared.h:123
+pub const AMD_PG_STATE_UNGATE: u32 = 0x1;
+/// include/kgd_pp_interface.h:184
+pub const PP_SMC_POWER_PROFILE_VIDEO: u32 = 0x3;

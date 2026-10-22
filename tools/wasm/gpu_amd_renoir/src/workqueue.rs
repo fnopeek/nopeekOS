@@ -23,6 +23,8 @@ pub enum work {
     ttm_delayed_delete { bo: usize },
     /// `amdgpu_irq_handle_ih_soft` (`irq.ih_soft_work`).
     ih_soft,
+    /// `amdgpu_vcn_idle_work_handler` (`vcn.inst[inst].idle_work`).
+    vcn_idle { inst: usize },
 }
 
 /// Queued work and armed timers.
@@ -125,6 +127,7 @@ pub fn run_pending(adev: &mut amdgpu_device) {
             work::gfx_off_delay => crate::gfx_v9_0::amdgpu_device_delay_enable_gfx_off(adev),
             work::ttm_delayed_delete { bo } => crate::amdgpu_object::ttm_bo_delayed_delete(adev, bo),
             work::ih_soft => crate::amdgpu_irq::amdgpu_irq_handle_ih_soft(adev),
+            work::vcn_idle { inst } => crate::vcn_v2_0::amdgpu_vcn_idle_work_handler(adev, inst),
         }
         adev.wq.running.pop();
     }

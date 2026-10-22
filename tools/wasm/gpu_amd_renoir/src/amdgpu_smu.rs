@@ -1430,6 +1430,42 @@ fn smu_bump_power_profile_mode(adev: &mut amdgpu_device) -> i32 {
     r
 }
 
+/// `smu_switch_power_profile`: no workload pause on Renoir.
+fn smu_switch_power_profile(adev: &mut amdgpu_device, type_: u32, enable: bool) -> i32 {
+    if !adev.smu.pm_enabled || !adev.pm.dpm_enabled {
+        return -95;
+    }
+    if type_ >= PP_SMC_POWER_PROFILE_CUSTOM {
+        return -22;
+    }
+    let l = adev.smu.dpm_level;
+    if l != AMD_DPM_FORCED_LEVEL_MANUAL && l != AMD_DPM_FORCED_LEVEL_PERF_DETERMINISM {
+        let t = type_ as usize;
+        // smu_power_profile_mode_get / _put
+        let get = |adev: &mut amdgpu_device| adev.smu.workload_refcount[t] += 1;
+        let put = |adev: &mut amdgpu_device| {
+            if adev.smu.workload_refcount[t] != 0 {
+                adev.smu.workload_refcount[t] -= 1;
+            }
+        };
+        if enable { get(adev) } else { put(adev) }
+        let r = smu_bump_power_profile_mode(adev);
+        if r != 0 {
+            if enable { put(adev) } else { get(adev) }
+            return r;
+        }
+    }
+    0
+}
+
+/// `amdgpu_dpm_switch_power_profile`: bare metal.
+pub fn amdgpu_dpm_switch_power_profile(adev: &mut amdgpu_device, type_: u32, en: bool) -> i32 {
+    if crate::amdgpu_device::amdgpu_in_reset(adev) {
+        return 0;
+    }
+    smu_switch_power_profile(adev, type_, en)
+}
+
 /// `renoir_set_fine_grain_gfx_freq_parameters`.
 fn renoir_set_fine_grain_gfx_freq_parameters(adev: &mut amdgpu_device) -> i32 {
     let (mut min, mut max) = (0, 0);

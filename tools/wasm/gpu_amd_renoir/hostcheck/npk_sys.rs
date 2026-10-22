@@ -164,8 +164,13 @@ impl Mmio {
     }
 
     pub fn writeq(self, off: u32, v: u64) {
-        self.w32(off, v as u32);
-        self.w32(off + 4, (v >> 32) as u32);
+        if self.0 != 0 {
+            win_w32(self.0, off, v as u32);
+            win_w32(self.0, off + 4, (v >> 32) as u32);
+        } else {
+            self.w32(off, v as u32);
+            self.w32(off + 4, (v >> 32) as u32);
+        }
         if self.0 != 0 && DOORBELL.with(|d| d.get()) == self.0 {
             if let Some(f) = HOOK.with(|h| h.get()) {
                 f(off / 4, v);
@@ -210,7 +215,14 @@ impl Mmio {
 
     pub fn w32(self, off: u32, v: u32) {
         if self.0 != 0 {
-            return win_w32(self.0, off, v);
+            win_w32(self.0, off, v);
+            // A 32-bit doorbell (VCN's): the hook sees the dword.
+            if DOORBELL.with(|d| d.get()) == self.0 {
+                if let Some(f) = HOOK.with(|h| h.get()) {
+                    f(off / 4, v as u64);
+                }
+            }
+            return;
         }
         self.w32_card(off, v);
         if let Some(f) = WRITE_HOOK.with(|h| h.get()) {

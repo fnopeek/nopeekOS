@@ -85,6 +85,22 @@ pub fn nbio_v7_0_sdma_doorbell_range(adev: &amdgpu_device, instance: usize, use_
     wreg32_soc15(adev, NBIO_HWIP, 0, idx, reg, doorbell_range);
 }
 
+/// `nbio_v7_0_vcn_doorbell_range`.
+pub fn nbio_v7_0_vcn_doorbell_range(adev: &amdgpu_device, use_doorbell: bool, doorbell_index: u32, _instance: u32) {
+    let (idx, reg) = (mmBIF_MMSCH0_DOORBELL_RANGE_BASE_IDX, mmBIF_MMSCH0_DOORBELL_RANGE);
+    let Some(mut doorbell_range) = rreg32_soc15(adev, NBIO_HWIP, 0, idx, reg) else { return };
+    if use_doorbell {
+        doorbell_range = reg_set_field(doorbell_range, BIF_MMSCH0_DOORBELL_RANGE__OFFSET_MASK,
+            BIF_MMSCH0_DOORBELL_RANGE__OFFSET__SHIFT, doorbell_index);
+        doorbell_range = reg_set_field(doorbell_range, BIF_MMSCH0_DOORBELL_RANGE__SIZE_MASK,
+            BIF_MMSCH0_DOORBELL_RANGE__SIZE__SHIFT, 8);
+    } else {
+        doorbell_range = reg_set_field(doorbell_range, BIF_MMSCH0_DOORBELL_RANGE__SIZE_MASK,
+            BIF_MMSCH0_DOORBELL_RANGE__SIZE__SHIFT, 0);
+    }
+    wreg32_soc15(adev, NBIO_HWIP, 0, idx, reg, doorbell_range);
+}
+
 /// `nbio_v7_0_get_pcie_index_offset`: `SOC15_REG_OFFSET(NBIO, 0, mmPCIE_INDEX2)`.
 pub fn nbio_v7_0_get_pcie_index_offset(adev: &amdgpu_device) -> Option<u32> {
     Some(*adev.reg_offset[NBIO_HWIP as usize][0].get(mmPCIE_INDEX2_BASE_IDX as usize)? + mmPCIE_INDEX2)

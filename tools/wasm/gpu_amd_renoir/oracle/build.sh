@@ -283,6 +283,46 @@ $X "$AMD/amdgpu/amdgpu_atomfirmware.c" firmware_info amdgpu_atomfirmware_query_f
         sdma_v4_0_update_medium_grain_light_sleep sdma_v4_0_set_clockgating_state sdma_v4_0_set_powergating_state
 } > "$B/sdma_extracted.c"
 
+# Stage 6, VCN: vcn_v2_0's hw_init with its ring tests, the idle work that
+# gates it, a use that starts it again, hw_fini; DPG mode with the SRAM
+# the PSP loads.
+{
+    $X "$AMD/amdgpu/amdgpu_ucode.h" AMDGPU_UCODE_ID
+    $X "$AMD/amdgpu/amdgpu_vcn.h" '#VCN_DEC_KMD_CMD' '#VCN_DEC_CMD_FENCE' '#VCN_DEC_CMD_TRAP' \
+        '#VCN_DEC_CMD_WRITE_REG' '#VCN_DEC_CMD_REG_READ_COND_WAIT' '#VCN_DEC_CMD_PACKET_START' \
+        '#VCN_DEC_CMD_PACKET_END' '#VCN_ENC_CMD_NO_OP' '#VCN_ENC_CMD_END' '#VCN_ENC_CMD_IB' '#VCN_ENC_CMD_FENCE' \
+        '#VCN_ENC_CMD_TRAP' '#VCN_ENC_CMD_REG_WRITE' '#VCN_ENC_CMD_REG_WAIT' '#AMDGPU_VCN_STACK_SIZE' \
+        '#AMDGPU_VCN_CONTEXT_SIZE' '#VCN_AON_SOC_ADDRESS_2_0' '#VCN_VID_IP_ADDRESS_2_0' '#VCN_AON_IP_ADDRESS_2_0' \
+        '#SOC15_DPG_MODE_OFFSET' '#WREG32_SOC15_DPG_MODE' '#mmUVD_RBC_XX_IB_REG_CHECK' \
+        '#mmUVD_RBC_XX_IB_REG_CHECK_BASE_IDX' '#mmUVD_REG_XX_MASK' '#mmUVD_REG_XX_MASK_BASE_IDX' fw_queue_mode engine_status_constants \
+        internal_dpg_state dpg_pause_state amdgpu_vcn_reg amdgpu_fw_shared_rb_ptrs_struct \
+        amdgpu_fw_shared_multi_queue amdgpu_fw_shared_sw_ring amdgpu_fw_shared_fw_logging \
+        amdgpu_fw_shared_smu_interface_info amdgpu_fw_shared
+    $X "$AMD/amdgpu/vcn_v2_0.c" '#VCN_VID_SOC_ADDRESS_2_0' '#VCN1_VID_SOC_ADDRESS_3_0' '#VCN1_AON_SOC_ADDRESS_3_0' \
+        '#mmUVD_CONTEXT_ID_INTERNAL_OFFSET' '#mmUVD_GPCOM_VCPU_CMD_INTERNAL_OFFSET' \
+        '#mmUVD_GPCOM_VCPU_DATA0_INTERNAL_OFFSET' '#mmUVD_GPCOM_VCPU_DATA1_INTERNAL_OFFSET' \
+        '#mmUVD_NO_OP_INTERNAL_OFFSET' '#mmUVD_GP_SCRATCH8_INTERNAL_OFFSET' '#mmUVD_SCRATCH9_INTERNAL_OFFSET' \
+        '#mmUVD_LMI_RBC_IB_VMID_INTERNAL_OFFSET' '#mmUVD_LMI_RBC_IB_64BIT_BAR_HIGH_INTERNAL_OFFSET' \
+        '#mmUVD_LMI_RBC_IB_64BIT_BAR_LOW_INTERNAL_OFFSET' '#mmUVD_RBC_IB_SIZE_INTERNAL_OFFSET'
+} > "$B/vcn_extracted.h"
+{
+    $X "$AMD/amdgpu/amdgpu_ring.c" amdgpu_ring_alloc amdgpu_ring_insert_nop amdgpu_ring_commit amdgpu_ring_test_helper
+    $X "$AMD/amdgpu/amdgpu_ring.h" amdgpu_ring_write
+    $X "$AMD/amdgpu/amdgpu_fence.c" amdgpu_fence_count_emitted
+    $X "$AMD/amdgpu/amdgpu_device.c" amdgpu_device_wait_on_rreg
+    $X "$AMD/amdgpu/nbio_v7_0.c" nbio_v7_0_vcn_doorbell_range
+    $X "$AMD/amdgpu/amdgpu_vcn.c" amdgpu_vcn_get_profile amdgpu_vcn_put_profile amdgpu_vcn_idle_work_handler \
+        amdgpu_vcn_ring_begin_use amdgpu_vcn_ring_end_use amdgpu_vcn_enc_ring_test_ring amdgpu_vcn_psp_update_sram
+    $X "$AMD/amdgpu/vcn_v2_0.c" vcn_v2_0_hw_init vcn_v2_0_hw_fini vcn_v2_0_mc_resume vcn_v2_0_mc_resume_dpg_mode \
+        vcn_v2_0_disable_clock_gating vcn_v2_0_clock_gating_dpg_mode vcn_v2_0_enable_clock_gating \
+        vcn_v2_0_disable_static_power_gating vcn_v2_0_enable_static_power_gating vcn_v2_0_start_dpg_mode \
+        vcn_v2_0_start vcn_v2_0_stop_dpg_mode vcn_v2_0_stop vcn_v2_0_pause_dpg_mode vcn_v2_0_dec_ring_get_rptr \
+        vcn_v2_0_dec_ring_get_wptr vcn_v2_0_dec_ring_set_wptr vcn_v2_0_dec_ring_insert_nop \
+        vcn_v2_0_enc_ring_get_rptr vcn_v2_0_enc_ring_get_wptr vcn_v2_0_enc_ring_set_wptr \
+        vcn_v2_0_dec_ring_test_ring vcn_v2_0_set_pg_state
+} > "$B/vcn_extracted.c"
+python3 -I "$HERE/protos.py" "$B/vcn_extracted.c" > "$B/vcn_protos.h"
+
 # Stage 4, SMU: smu_cmn.c, smu_v12_0.c and renoir_ppt.c are compiled whole
 # against shim_smu/amdgpu.h; of amdgpu_smu.c the IP block's life is
 # copied, with amdgpu_dpm.c's way into it and the HDP invalidate its table
@@ -348,6 +388,7 @@ gcc -O0 -w -include "$HERE/shim_buddy/buddy_kern.h" -I "$HERE/shim_buddy" -I "$B
     "$HERE/main_vram.c" "$L/tools/lib/rbtree.c" -o "$B/oracle_vram"
 gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_gfx.c" -o "$B/oracle_gfx"
 gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_sdma.c" -o "$B/oracle_sdma"
+gcc $CF -I "$AMD/include/asic_reg" -I "$AMD/include/ivsrcid" "$HERE/main_vcn.c" -o "$B/oracle_vcn"
 
 SMUF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -include $HERE/shim/linux/types.h -I $HERE/shim_smu -I $HERE/shim -I $B \
     -I $AMD/pm/swsmu/inc -I $AMD/pm/swsmu -I $AMD/pm/swsmu/inc/pmfw_if -I $AMD/pm/swsmu/smu12 -I $AMD/include \

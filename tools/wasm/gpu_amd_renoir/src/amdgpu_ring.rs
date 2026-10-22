@@ -567,7 +567,8 @@ pub fn amdgpu_get_soft_full_reset_mask(adev: &amdgpu_device, ring: Option<usize>
 /// `amdgpu_ring_alloc`. `begin_use` is the GFX rings'
 /// `amdgpu_gfx_enforce_isolation_ring_begin_use` (and the compute rings'
 /// wrapper around it): with isolation disabled, as `amdgpu_enforce_isolation`
-/// -1 leaves it, it schedules nothing. No other ring of Renoir's has one.
+/// -1 leaves it, it schedules nothing. The VCN rings have
+/// `amdgpu_vcn_ring_begin_use`.
 pub fn amdgpu_ring_alloc(adev: &mut amdgpu_device, r: usize, ndw: u32) -> i32 {
     let ring = &mut adev.rings[r];
     // Align requested size with padding so unlock_commit can pad safely
@@ -580,6 +581,9 @@ pub fn amdgpu_ring_alloc(adev: &mut amdgpu_device, r: usize, ndw: u32) -> i32 {
     }
     ring.count_dw = ndw as i32;
     ring.wptr_old = ring.wptr;
+    if matches!(adev.rings[r].funcs.ops, ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc) {
+        crate::vcn_v2_0::amdgpu_vcn_ring_begin_use(adev, r);
+    }
     0
 }
 
@@ -627,6 +631,7 @@ fn insert_nop(adev: &mut amdgpu_device, r: usize, count: u32) {
     match adev.rings[r].funcs.ops {
         ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute => crate::gfx_v9_0::gfx_v9_ring_insert_nop(adev, r, count),
         ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_ring_insert_nop(adev, r, count),
+        ring_ops::vcn_v2_0_dec => crate::vcn_v2_0::vcn_v2_0_dec_ring_insert_nop(adev, r, count),
         _ => amdgpu_ring_insert_nop(adev, r, count),
     }
 }
@@ -638,11 +643,13 @@ pub fn amdgpu_ring_set_wptr(adev: &mut amdgpu_device, r: usize) {
         ring_ops::gfx_v9_0_compute | ring_ops::gfx_v9_0_kiq => crate::gfx_v9_0::gfx_v9_0_ring_set_wptr_compute(adev, r),
         ring_ops::sdma_v4_0 => crate::sdma_v4_0::sdma_v4_0_ring_set_wptr(adev, r),
         ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_page_ring_set_wptr(adev, r),
+        ring_ops::vcn_v2_0_dec => crate::vcn_v2_0::vcn_v2_0_dec_ring_set_wptr(adev, r),
+        ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::vcn_v2_0_enc_ring_set_wptr(adev, r),
         _ => Line::new().s("set_wptr: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
     }
 }
 
-/// `amdgpu_ring_commit`. `end_use` does nothing, as `begin_use` does.
+/// `amdgpu_ring_commit`. `end_use` is VCN's only (see `amdgpu_ring_alloc`).
 pub fn amdgpu_ring_commit(adev: &mut amdgpu_device, r: usize) {
     let ring = &adev.rings[r];
     if ring.count_dw < 0 {
@@ -656,6 +663,9 @@ pub fn amdgpu_ring_commit(adev: &mut amdgpu_device, r: usize) {
     }
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     amdgpu_ring_set_wptr(adev, r);
+    if matches!(adev.rings[r].funcs.ops, ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc) {
+        crate::vcn_v2_0::amdgpu_vcn_ring_end_use(adev, r);
+    }
 }
 
 /// `amdgpu_ring_undo`.
@@ -671,6 +681,8 @@ pub fn amdgpu_ring_test_ring(adev: &mut amdgpu_device, r: usize) -> i32 {
             crate::gfx_v9_0::gfx_v9_0_ring_test_ring(adev, r)
         }
         ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_ring_test_ring(adev, r),
+        ring_ops::vcn_v2_0_dec => crate::vcn_v2_0::vcn_v2_0_dec_ring_test_ring(adev, r),
+        ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::amdgpu_vcn_enc_ring_test_ring(adev, r),
         _ => {
             Line::new().s("test_ring: ").s(adev.rings[r].funcs.name).s(" is not ported").say();
             -22
@@ -706,6 +718,17 @@ pub fn ring_wb_read64(adev: &amdgpu_device, offs: u32) -> u64 {
     lo | hi << 32
 }
 
+/// `amdgpu_mm_wdoorbell`.
+pub fn amdgpu_mm_wdoorbell(adev: &amdgpu_device, index: u32, v: u32) {
+    if index < adev.doorbell.num_kernel_doorbells {
+        if let Some(m) = adev.doorbell_mmio {
+            m.w32(index * 4, v);
+        }
+    } else {
+        Line::new().s("writing beyond doorbell aperture: 0x").hexw(index, 8).say();
+    }
+}
+
 /// `amdgpu_mm_wdoorbell64`.
 pub fn amdgpu_mm_wdoorbell64(adev: &amdgpu_device, index: u32, v: u64) {
     if index < adev.doorbell.num_kernel_doorbells {
@@ -720,7 +743,13 @@ pub fn amdgpu_mm_wdoorbell64(adev: &amdgpu_device, index: u32, v: u64) {
 impl amdgpu_ring_funcs {
     /// `secure_submission_supported`.
     pub fn secure(&self) -> bool {
-        matches!(self.ops, ring_ops::gfx_v9_0_gfx | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page)
+        matches!(self.ops, ring_ops::gfx_v9_0_gfx | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page
+            | ring_ops::vcn_v2_0_dec)
+    }
+
+    /// `no_user_fence`.
+    pub fn no_user_fence(&self) -> bool {
+        matches!(self.ops, ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc | ring_ops::jpeg_v2_0_dec)
     }
 }
 
@@ -734,6 +763,8 @@ pub fn amdgpu_ring_emit_fence(adev: &mut amdgpu_device, r: usize, addr: u64, seq
         ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => {
             crate::sdma_v4_0::sdma_v4_0_ring_emit_fence(adev, r, addr, seq, flags)
         }
+        ring_ops::vcn_v2_0_dec => crate::vcn_v2_0::vcn_v2_0_dec_ring_emit_fence(adev, r, addr, seq, flags),
+        ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::vcn_v2_0_enc_ring_emit_fence(adev, r, addr, seq, flags),
         _ => Line::new().s("emit_fence: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
     }
 }
@@ -791,6 +822,8 @@ pub fn amdgpu_ring_emit_ib(adev: &mut amdgpu_device, r: usize, vmid: u32, gds: b
         ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => {
             crate::sdma_v4_0::sdma_v4_0_ring_emit_ib(adev, r, vmid, ib, flags)
         }
+        ring_ops::vcn_v2_0_dec => crate::vcn_v2_0::vcn_v2_0_dec_ring_emit_ib(adev, r, vmid, ib, flags),
+        ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::vcn_v2_0_enc_ring_emit_ib(adev, r, vmid, ib, flags),
         _ => Line::new().s("emit_ib: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
     }
 }
@@ -802,6 +835,8 @@ pub fn amdgpu_ring_emit_wreg(adev: &mut amdgpu_device, r: usize, reg: u32, val: 
             crate::gfx_v9_0::gfx_v9_0_ring_emit_wreg(adev, r, reg, val)
         }
         ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_ring_emit_wreg(adev, r, reg, val),
+        ring_ops::vcn_v2_0_dec => crate::vcn_v2_0::vcn_v2_0_dec_ring_emit_wreg(adev, r, reg, val),
+        ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::vcn_v2_0_enc_ring_emit_wreg(adev, r, reg, val),
         _ => Line::new().s("emit_wreg: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
     }
 }
@@ -809,13 +844,35 @@ pub fn amdgpu_ring_emit_wreg(adev: &mut amdgpu_device, r: usize, reg: u32, val: 
 /// Whether `ring->funcs->emit_wreg` is set.
 pub fn has_emit_wreg(adev: &amdgpu_device, r: usize) -> bool {
     matches!(adev.rings[r].funcs.ops, ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute | ring_ops::gfx_v9_0_kiq
+        | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page | ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc)
+}
+
+/// Whether `emit_pipeline_sync` is set: the VCN rings have none.
+pub fn has_emit_pipeline_sync(adev: &amdgpu_device, r: usize) -> bool {
+    matches!(adev.rings[r].funcs.ops, ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute
         | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page)
 }
 
-/// Whether `emit_pipeline_sync` and `emit_vm_flush` are set.
+/// Whether `emit_vm_flush` is set.
 pub fn has_emit_vm_flush(adev: &amdgpu_device, r: usize) -> bool {
     matches!(adev.rings[r].funcs.ops, ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute
-        | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page)
+        | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page | ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc)
+}
+
+/// `ring->funcs->insert_start`, where the ring has one.
+pub fn amdgpu_ring_insert_start(adev: &mut amdgpu_device, r: usize) {
+    if adev.rings[r].funcs.ops == ring_ops::vcn_v2_0_dec {
+        crate::vcn_v2_0::vcn_v2_0_dec_ring_insert_start(adev, r);
+    }
+}
+
+/// `ring->funcs->insert_end`, where the ring has one.
+pub fn amdgpu_ring_insert_end(adev: &mut amdgpu_device, r: usize) {
+    match adev.rings[r].funcs.ops {
+        ring_ops::vcn_v2_0_dec => crate::vcn_v2_0::vcn_v2_0_dec_ring_insert_end(adev, r),
+        ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::vcn_v2_0_enc_ring_insert_end(adev, r),
+        _ => {}
+    }
 }
 
 /// Whether `emit_gds_switch` is set.
@@ -832,6 +889,8 @@ pub fn amdgpu_ring_emit_reg_wait(adev: &mut amdgpu_device, r: usize, reg: u32, v
         ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => {
             crate::sdma_v4_0::sdma_v4_0_ring_emit_reg_wait(adev, r, reg, val, mask)
         }
+        ring_ops::vcn_v2_0_dec => crate::vcn_v2_0::vcn_v2_0_dec_ring_emit_reg_wait(adev, r, reg, val, mask),
+        ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::vcn_v2_0_enc_ring_emit_reg_wait(adev, r, reg, val, mask),
         _ => Line::new().s("emit_reg_wait: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
     }
 }
@@ -850,7 +909,7 @@ pub fn amdgpu_ring_emit_reg_write_reg_wait(adev: &mut amdgpu_device, r: usize, r
         ring_ops::gfx_v9_0_gfx | ring_ops::gfx_v9_0_compute | ring_ops::gfx_v9_0_kiq => {
             crate::gfx_v9_0::gfx_v9_0_ring_emit_reg_write_reg_wait(adev, r, reg0, reg1, ref_, mask)
         }
-        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => {
+        ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page | ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc => {
             amdgpu_ring_emit_reg_write_reg_wait_helper(adev, r, reg0, reg1, ref_, mask)
         }
         _ => Line::new().s("emit_reg_write_reg_wait: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
@@ -875,6 +934,8 @@ pub fn amdgpu_ring_emit_vm_flush(adev: &mut amdgpu_device, r: usize, vmid: u32, 
         ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => {
             crate::sdma_v4_0::sdma_v4_0_ring_emit_vm_flush(adev, r, vmid, pd_addr)
         }
+        ring_ops::vcn_v2_0_dec => crate::vcn_v2_0::vcn_v2_0_dec_ring_emit_vm_flush(adev, r, vmid, pd_addr),
+        ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::vcn_v2_0_enc_ring_emit_vm_flush(adev, r, vmid, pd_addr),
         _ => Line::new().s("emit_vm_flush: ").s(adev.rings[r].funcs.name).s(" is not ported").say(),
     }
 }
@@ -886,10 +947,11 @@ pub fn amdgpu_ring_emit_gds_switch(adev: &mut amdgpu_device, r: usize, vmid: u32
                                                    oa_size);
 }
 
-/// Whether `ring->funcs->test_ib` is set: compute and SDMA rings (the GFX
-/// ring of GC 9 has none, VCN and JPEG are not running).
+/// Whether `ring->funcs->test_ib` is set: compute, SDMA and VCN rings
+/// (the GFX ring of GC 9 has none).
 pub fn has_test_ib(adev: &amdgpu_device, r: usize) -> bool {
-    matches!(adev.rings[r].funcs.ops, ring_ops::gfx_v9_0_compute | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page)
+    matches!(adev.rings[r].funcs.ops, ring_ops::gfx_v9_0_compute | ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page
+        | ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc)
 }
 
 /// `amdgpu_ring_test_ib`.
@@ -897,6 +959,8 @@ pub fn amdgpu_ring_test_ib(adev: &mut amdgpu_device, r: usize, timeout: i64) -> 
     match adev.rings[r].funcs.ops {
         ring_ops::gfx_v9_0_compute => crate::gfx_v9_0::gfx_v9_0_ring_test_ib(adev, r, timeout),
         ring_ops::sdma_v4_0 | ring_ops::sdma_v4_0_page => crate::sdma_v4_0::sdma_v4_0_ring_test_ib(adev, r, timeout),
+        ring_ops::vcn_v2_0_dec => crate::vcn_v2_0::amdgpu_vcn_dec_ring_test_ib(adev, r, timeout),
+        ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::amdgpu_vcn_enc_ring_test_ib(adev, r, timeout),
         _ => -22,
     }
 }

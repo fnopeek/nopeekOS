@@ -525,6 +525,12 @@ pub struct amdgpu_vcn_inst {
     pub ring_enc: [Option<usize>; AMDGPU_MAX_VCN_ENC_RINGS as usize],
     pub internal: amdgpu_vcn_reg,
     pub external: amdgpu_vcn_reg,
+    /// `pause_state.fw_based`.
+    pub pause_state: u32,
+    pub total_submission_cnt: u32,
+    pub dpg_enc_submission_cnt: u32,
+    /// `dpg_sram_curr_addr`: a byte offset into the DPG SRAM's mapping.
+    pub dpg_sram_curr: u64,
 }
 
 /// `struct amdgpu_vcn_fw_shared`: `cpu_addr` is a byte offset into the
@@ -564,6 +570,7 @@ pub struct amdgpu_vcn {
     pub supported_reset: u32,
     pub ip_dump: Vec<u32>,
     pub reg_count: u32,
+    pub workload_profile_active: bool,
 }
 
 /// `struct amdgpu_jpeg`.
@@ -1896,7 +1903,7 @@ pub fn amdgpu_device_fw_loading(adev: &mut amdgpu_device) -> i32 {
 }
 
 /// `amdgpu_device_ip_hw_init_phase2`: the remaining blocks in their order.
-/// SMU, GFX and SDMA are ported; DM (stage 8), VCN and JPEG (stage 6) are
+/// SMU, GFX, SDMA and VCN are ported; DM (stage 8) and JPEG (stage 6) are
 /// not yet and stay without hw_init, which the log says.
 pub fn amdgpu_device_ip_hw_init_phase2(adev: &mut amdgpu_device) -> i32 {
     for i in 0..adev.ip_blocks.len() {
@@ -1912,6 +1919,7 @@ pub fn amdgpu_device_ip_hw_init_phase2(adev: &mut amdgpu_device) -> i32 {
             AMD_IP_BLOCK_TYPE_SMC => crate::amdgpu_smu::smu_hw_init(adev),
             AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_hw_init(adev),
             AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_init(adev),
+            AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::vcn_v2_0_hw_init(adev),
             _ => {
                 Line::new().s("hw_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
                     .s(">: not ported yet, skipped").say();
@@ -1926,6 +1934,33 @@ pub fn amdgpu_device_ip_hw_init_phase2(adev: &mut amdgpu_device) -> i32 {
         adev.ip_blocks[i].status.hw = true;
     }
     0
+}
+
+/// `amdgpu_device_wait_on_rreg` (`SOC15_WAIT_ON_RREG`): 0 once `reg & mask`
+/// reads `expected`, -ETIMEDOUT after `usec_timeout` reads without change.
+pub fn amdgpu_device_wait_on_rreg(adev: &amdgpu_device, inst: u32, reg: u32, name: &str, expected: u32, mask: u32)
+                                  -> i32 {
+    let mut ret = 0;
+    let mut old = 0;
+    let mut tmp = adev.rreg32(reg).unwrap_or(0);
+    let mut loop_ = adev.usec_timeout;
+    while tmp & mask != expected {
+        if old != tmp {
+            loop_ = adev.usec_timeout;
+            old = tmp;
+        } else {
+            crate::linux::udelay(1);
+        }
+        tmp = adev.rreg32(reg).unwrap_or(0);
+        loop_ = loop_.wrapping_sub(1);
+        if loop_ == 0 {
+            Line::new().s("Register(").dec(inst as u64).s(") [").s(name).s("] failed to reach value 0x")
+                .hexw(expected, 8).s(" != 0x").hexw(tmp & mask, 8).say();
+            ret = -110;
+            break;
+        }
+    }
+    ret
 }
 
 /// `amdgpu_device_mem_scratch_init`.
@@ -2213,6 +2248,7 @@ fn ip_suspend(adev: &mut amdgpu_device, type_: u32) -> Option<i32> {
         AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_hw_fini(adev),
         // not in S0ix
         AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::vcn_v2_0_suspend(adev),
         _ => return None,
     })
 }
@@ -2235,6 +2271,7 @@ fn ip_resume(adev: &mut amdgpu_device, type_: u32) -> Option<i32> {
         AMD_IP_BLOCK_TYPE_SMC => crate::amdgpu_smu::smu_resume(adev),
         AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_hw_init(adev),
         AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_init(adev),
+        AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::vcn_v2_0_resume(adev),
         _ => return None,
     })
 }
@@ -2633,6 +2670,7 @@ fn hw_fini(adev: &mut amdgpu_device, type_: u32) -> i32 {
         AMD_IP_BLOCK_TYPE_SMC => crate::amdgpu_smu::smu_hw_fini(adev),
         AMD_IP_BLOCK_TYPE_GFX => crate::gfx_v9_0::gfx_v9_0_hw_fini(adev),
         AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_fini(adev),
+        AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::vcn_v2_0_hw_fini(adev),
         _ => 0,
     }
 }

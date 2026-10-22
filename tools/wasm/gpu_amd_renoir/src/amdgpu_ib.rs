@@ -289,8 +289,8 @@ pub fn amdgpu_ib_free(adev: &mut amdgpu_device, ib: &mut amdgpu_ib, f: Option<Fe
 
 /// `amdgpu_ib_schedule`: the IBs, after the VM flush of `job`, then a
 /// fence. HDP flush and invalidate do nothing on an APU, and no ring of
-/// Renoir's has `insert_start`, `insert_end`, a software ring or GFX
-/// shadowing; only the GFX ring has `emit_switch_buffer`.
+/// Renoir's has a software ring or GFX shadowing; only the GFX ring has
+/// `emit_switch_buffer`, only the VCN rings `insert_start`/`insert_end`.
 pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[amdgpu_ib], job: Option<u64>)
                           -> Result<Fence, i32> {
     use crate::amdgpu_ring as ring;
@@ -330,7 +330,7 @@ pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[amdgpu_ib],
     let need_ctx_switch = adev.rings[r].current_ctx != fence_ctx;
     let mut need_pipe_sync = false;
     if let Some(j) = job {
-        if ring::has_emit_vm_flush(adev, r) {
+        if ring::has_emit_pipeline_sync(adev, r) {
             let mut sync = core::mem::take(&mut adev.jobs.get_mut(&j).unwrap().explicit_sync);
             let tmp = crate::amdgpu_sync::amdgpu_sync_get_fence(adev, &mut sync);
             adev.jobs.get_mut(&j).unwrap().explicit_sync = sync;
@@ -344,6 +344,7 @@ pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[amdgpu_ib],
             return Err(ret);
         }
     }
+    ring::amdgpu_ring_insert_start(adev, r);
 
     if ib.flags & AMDGPU_IB_FLAG_EMIT_MEM_SYNC != 0 {
         ring::amdgpu_ring_emit_mem_sync(adev, r);
@@ -418,6 +419,7 @@ pub fn amdgpu_ib_schedule(adev: &mut amdgpu_device, r: usize, ibs: &[amdgpu_ib],
             return Err(e);
         }
     };
+    ring::amdgpu_ring_insert_end(adev, r);
     ring::amdgpu_ring_patch_cond_exec(adev, r, cond_exec);
     adev.rings[r].current_ctx = fence_ctx;
     if job.is_some() && adev.rings[r].funcs.ops == ring::ring_ops::gfx_v9_0_gfx {
