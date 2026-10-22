@@ -1451,8 +1451,22 @@ pub fn ring(dev: PciAddr, client: u32, ring: u32, submitted: u64, completed: u64
         }
     }
     RINGS.lock().insert((client, ring), (submitted, completed));
-    crate::microvm::devices::gpu_backend::note_gpu_kick(0);
+    crate::microvm::devices::gpu_backend::fences_reported();
     0
+}
+
+/// Whether `fence` on `client`'s `ring` is done; all is once the module
+/// that serves native contexts is gone.
+pub fn fence_done(client: u32, ring: u32, fence: u64) -> bool {
+    native_device().is_none() || ring_state(client, ring).1 >= fence
+}
+
+/// `open_rings` while a module serves native contexts.
+pub fn open_work(client: u32) -> Vec<(u32, u64)> {
+    if native_device().is_none() {
+        return Vec::new();
+    }
+    open_rings(client)
 }
 
 /// What the module last reported for `client`'s `ring`.

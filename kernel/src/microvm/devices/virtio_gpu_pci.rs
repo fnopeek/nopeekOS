@@ -303,9 +303,10 @@ impl Scanout {
 }
 
 /// A FLUSH's completion, kept back until the next refresh and until the
-/// blob shown before it is no longer read. The frame is presented at once
-/// and the commands behind it are served meanwhile; the guest waits for
-/// this completion before its next FLUSH, which paces it to the display.
+/// blob shown before it is no longer read, at most until `deadline`. The
+/// frame is presented at once and the commands behind it are served
+/// meanwhile; the guest waits for this completion before its next FLUSH
+/// on that output, which paces it to the display.
 struct Held {
     head: u16,
     response: Vec<u8>,
@@ -433,7 +434,8 @@ pub struct VirtioGpu {
     /// `finish_submit`. `submit_running` while its ccmds run.
     pending_submit: Option<PendingSubmit>,
     submit_running: bool,
-    held: Option<Held>,
+    /// Held FLUSH completions, in queue order (`retire`).
+    held: alloc::collections::VecDeque<Held>,
     /// Blobs given back by the guest whose pages gpudev may still have bound.
     retired: Vec<Arc<ForeignPixels>>,
     /// HOST3D resources given back whose blob is still in `retired`.
@@ -494,7 +496,7 @@ impl VirtioGpu {
             latch_max_us: 0,
             pending_submit: None,
             submit_running: false,
-            held: None,
+            held: alloc::collections::VecDeque::new(),
             retired: Vec::new(),
             dying: Vec::new(),
             blob_log_count: 0,
@@ -542,29 +544,43 @@ impl VirtioGpu {
     /// command type, and write the response into the driver-writable
     /// descriptor(s).
     fn service_controlq(&mut self, mem: &GuestMem) -> bool {
-        self.present_latched();
-        // Nothing behind a SUBMIT_3D whose ccmds have not run yet.
+        let retired = self.retire(mem);
+        // Nothing behind a SUBMIT_3D whose ccmds have not run yet. Freeing
+        // retired resources takes the backend lock, which those ccmds hold.
         if self.pending_submit.is_some() || self.submit_running {
-            return false;
+            return retired;
         }
         self.reap_released();
+        self.serve_controlq(mem) || retired
+    }
+
+    /// What the GPU finished goes back to the guest: frames whose drawing
+    /// is done reach their windows, SUBMIT_3D chains whose fence is done and
+    /// held FLUSHes whose time came complete. Takes no backend lock, so it
+    /// also runs while a SUBMIT_3D's ccmds do. True when a chain went back.
+    pub fn retire(&mut self, mem: &GuestMem) -> bool {
+        self.present_latched();
         // SUBMIT_3D completions whose fence is done, in queue order per ring.
         let mut completed = self.complete_fences(mem);
-        if let Some(h) = &self.held {
-            let now = crate::interrupts::rdtsc();
+        // In queue order: FLUSH fences share the guest's global timeline,
+        // where a later one completed signals the earlier ones too.
+        let now = crate::interrupts::rdtsc();
+        while let Some(h) = self.held.front() {
             let shown = h.latch.is_none_or(|id| self.latch.iter().flatten().all(|l| l.id > id));
             let read = !super::gpu_backend::full_active()
-                || (shown && (h.blob.as_ref().is_none_or(|b| blob_unread(b)) || now >= h.deadline));
-            if now >= h.not_before && read {
-                let h = self.held.take().unwrap();
-                if h.blob.is_some() {
-                    super::gpu_backend::note(super::gpu_backend::STAT_HOLD_US, super::gpu_backend::us_since(h.since));
-                }
-                self.complete(mem, h.head, &h.response, &h.resp_descs);
-                completed = true;
+                || now >= h.deadline
+                || (shown && h.blob.as_ref().is_none_or(|b| blob_unread(b)));
+            if now < h.not_before || !read {
+                break;
             }
+            let h = self.held.pop_front().unwrap();
+            if h.blob.is_some() {
+                super::gpu_backend::note(super::gpu_backend::STAT_HOLD_US, super::gpu_backend::us_since(h.since));
+            }
+            self.complete(mem, h.head, &h.response, &h.resp_descs);
+            completed = true;
         }
-        self.serve_controlq(mem) || completed
+        completed
     }
 
     /// Complete the SUBMIT_3D chains whose fences are done.
@@ -636,9 +652,15 @@ impl VirtioGpu {
         !self.fenced.is_empty()
     }
 
-    /// The blob that a held FLUSH waits for to be read out, if any.
-    pub fn held_blob(&self) -> Option<Arc<ForeignPixels>> {
-        self.held.as_ref().and_then(|h| h.blob.clone())
+    /// A held FLUSH waits for a blob to be read out or for its frame's
+    /// drawing; either ends by its deadline, which nothing signals.
+    pub fn held_waits(&self) -> bool {
+        self.held.iter().any(|h| h.blob.is_some() || h.latch.is_some())
+    }
+
+    /// Whether `retire` has anything to look at.
+    pub fn retire_waits(&self) -> bool {
+        self.fences_pending() || self.held_waits()
     }
 
     /// Write `response` into the chain's writable descriptors and return the
@@ -716,12 +738,7 @@ impl VirtioGpu {
                 idx = match chain_next(&d, &mut hops, qsize) { Some(n) => n, None => break };
             }
 
-            // One FLUSH completion is kept back at a time; a FLUSH the guest
-            // sends without waiting for the last one waits for it here.
             let flush = le32(&request, 0) == Some(VIRTIO_GPU_CMD_RESOURCE_FLUSH);
-            if flush && self.held.is_some() {
-                break;
-            }
 
             // A SUBMIT_3D of a known context stops serving here: its ccmds
             // run without the device lock, then serving goes on in order.
@@ -761,7 +778,7 @@ impl VirtioGpu {
                         (at - t) * 1_000_000 / crate::interrupts::tsc_freq().max(1));
                     at
                 };
-                self.held = Some(Held {
+                self.held.push_back(Held {
                     head, response, resp_descs, blob, latch,
                     deadline: now + crate::interrupts::tsc_freq() / 1000 * HOLD_MAX_MS,
                     since: now, not_before,
@@ -1438,14 +1455,14 @@ impl VirtioGpu {
         }
     }
 
-    /// Frame `view` of a native context goes to window `wid` once the
-    /// guest's GPU work queued before its FLUSH is done: Mesa names no
-    /// buffer to the guest kernel, so a guest flushes a frame whose drawing
-    /// may still run, and a scene reading it would wait for that drawing in
-    /// the module (implicit sync) past its deadline. A Linux compositor
-    /// latches a client's buffer only once its fences signaled.
+    /// Frame `view` of a native context goes to window `wid` once the GPU
+    /// work its maker queued before its FLUSH is done (`frame_work`): Mesa
+    /// names no buffer to the guest kernel, so a guest flushes a frame whose
+    /// drawing may still run, and a scene reading it would wait for that
+    /// drawing in the module (implicit sync) past its deadline. A Linux
+    /// compositor latches a client's buffer only once its fences signaled.
     fn present_when_done(&mut self, k: usize, wid: u32, view: ForeignView, dmg: (u32, u32, u32, u32), native: bool) {
-        let work = if native { self.ctxs.open_work() } else { Vec::new() };
+        let work = if native { self.ctxs.frame_work(self.scanouts[k].resource_id) } else { Vec::new() };
         if work.is_empty() && self.latch[k].is_empty() {
             self.latch_shown += 1;
             crate::shade::surface::present_blob(wid, view, dmg);
@@ -1474,7 +1491,7 @@ impl VirtioGpu {
     /// is done only after the ones before it: its fences are later.
     fn present_latched(&mut self) {
         for k in 0..MAX_OUTPUTS {
-            let ctxs = &mut self.ctxs;
+            let ctxs = &self.ctxs;
             let q = &mut self.latch[k];
             let mut ready = None;
             for l in q.iter_mut() {
@@ -1592,7 +1609,7 @@ impl VirtioGpu {
         for id in ids {
             self.release_blob(id);
         }
-        self.held = None;
+        self.held.clear();
         self.hold_for = None;
         for q in self.latch.iter_mut() {
             q.clear();

@@ -14,7 +14,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::virtio_gpu_ctx::{Backend, CONTEXT_AMDGPU};
+use super::virtio_gpu_ctx::{Backend, Timelines, CONTEXT_AMDGPU};
 use crate::drivers::pci::PciAddr;
 use crate::gpu::gpudev::{self, Answer};
 use crate::shade::buffers::ForeignPixels;
@@ -280,19 +280,12 @@ impl Backend for AmdgpuBackend {
         gpudev::ring_state(ctx, ring).0
     }
 
-    fn fence_done(&mut self, ctx: u32, ring: u32, fence: u64) -> bool {
-        gpudev::native_device().is_none() || gpudev::ring_state(ctx, ring).1 >= fence
-    }
-
     /// A scene that reads a guest frame waits, by implicit sync in the
     /// module, for every submission on its object; one that waits behind a
     /// long guest frame misses its deadline. A Linux compositor latches a
     /// client's buffer only once its fences signaled.
-    fn open_work(&mut self, ctx: u32) -> Vec<(u32, u64)> {
-        if gpudev::native_device().is_none() {
-            return Vec::new();
-        }
-        gpudev::open_rings(ctx)
+    fn timelines(&self) -> Timelines {
+        Timelines { done: gpudev::fence_done, open: gpudev::open_work }
     }
 }
 

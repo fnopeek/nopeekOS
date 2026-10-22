@@ -98,22 +98,54 @@ pub trait Backend: Send {
     fn attach_resource(&mut self, _ctx: u32, _res_id: u32, _pages: &Arc<ForeignPixels>) {}
     /// Context `ctx` no longer uses that resource.
     fn detach_resource(&mut self, _ctx: u32, _res_id: u32) {}
-    /// Whether `fence` queued on `ring` of `ctx` is done; `submit_fence`
-    /// starts one after the ccmds of a SUBMIT_3D.
+    /// The fence the ccmds of a SUBMIT_3D on `ring` of `ctx` reach once
+    /// done (`Timelines::done`).
     fn submit_fence(&mut self, ctx: u32, ring: u32) -> u64;
-    fn fence_done(&mut self, ctx: u32, ring: u32, fence: u64) -> bool;
-    /// The rings of `ctx` with work not yet done, and the fence each must
-    /// reach for the work queued now (`present_when_done`). Empty where
-    /// the card syncs a frame's readers with its writers on its own.
-    fn open_work(&mut self, _ctx: u32) -> Vec<(u32, u64)> {
-        Vec::new()
+    /// How the fences of this backend's clients are read.
+    fn timelines(&self) -> Timelines {
+        Timelines::NONE
     }
 }
 
+/// The fence timelines of a backend's clients, read without the backend
+/// lock: a SUBMIT_3D's ccmds hold it while they wait for the GPU driver,
+/// and fences retire meanwhile (virglrenderer `drm_fence.c` retires each
+/// timeline on its own thread). Both only read what the driver reported.
+#[derive(Clone, Copy)]
+pub struct Timelines {
+    /// Whether `fence` on `ring` of client `handle` is done.
+    pub done: fn(handle: u32, ring: u32, fence: u64) -> bool,
+    /// The rings of client `handle` with work not yet done, and the fence
+    /// each must reach for the work queued now (`present_when_done`).
+    /// Empty where the card syncs a frame's readers with its writers on
+    /// its own.
+    pub open: fn(handle: u32) -> Vec<(u32, u64)>,
+}
+
+impl Timelines {
+    pub const NONE: Timelines = Timelines { done: all_done, open: no_work };
+}
+
+fn all_done(_handle: u32, _ring: u32, _fence: u64) -> bool {
+    true
+}
+
+pub fn no_work(_handle: u32) -> Vec<(u32, u64)> {
+    Vec::new()
+}
+
 static BACKEND: Mutex<Option<Box<dyn Backend>>> = Mutex::new(None);
+/// The backend's `timelines`. A leaf lock: copied out, never held while
+/// another lock is taken.
+static TIMELINES: Mutex<Timelines> = Mutex::new(Timelines::NONE);
+
+fn timelines() -> Timelines {
+    *TIMELINES.lock()
+}
 
 /// The GPU driver side offers native contexts (stage 7).
 pub fn set_backend(b: Option<Box<dyn Backend>>) {
+    *TIMELINES.lock() = b.as_ref().map_or(Timelines::NONE, |b| b.timelines());
     *BACKEND.lock() = b;
 }
 
@@ -314,24 +346,26 @@ impl Contexts {
         Some(SubmitJob { handle: c.handle, ring, shmem })
     }
 
-    /// Every context's work queued so far: (context, ring, fence). A
-    /// guest's GPU frame is complete once all of it is done, since Mesa
-    /// names no buffer to the guest kernel when it submits (no implicit
-    /// fences in the guest) and the guest flushes a frame right after the
-    /// submissions that draw it.
-    pub fn open_work(&mut self) -> Vec<(u32, u32, u64)> {
-        let mut guard = BACKEND.lock();
-        let Some(b) = guard.as_mut() else { return Vec::new() };
-        let mut out = Vec::new();
-        for (&id, c) in &self.ctxs {
-            out.extend(b.open_work(c.handle).into_iter().map(|(ring, fence)| (id, ring, fence)));
+    /// The work queued so far by the context that made HOST3D resource
+    /// `res_id`: (context, ring, fence). Mesa names no buffer to the guest
+    /// kernel when it submits (no implicit fences in the guest), so a frame
+    /// flushed from the resource is drawn once its maker's work queued
+    /// before the FLUSH is done; what other contexts drew into buffers that
+    /// work read, the card waited for before running it (implicit sync on
+    /// the shared objects). Empty when the maker is gone.
+    pub fn frame_work(&self, res_id: u32) -> Vec<(u32, u32, u64)> {
+        let Some(r) = self.host3d.get(&res_id) else { return Vec::new() };
+        if !self.ctxs.get(&r.ctx).is_some_and(|c| c.handle == r.handle) {
+            return Vec::new();
         }
-        out
+        (timelines().open)(r.handle).into_iter().map(|(ring, fence)| (r.ctx, ring, fence)).collect()
     }
 
-    pub fn fence_done(&mut self, ctx_id: u32, ring: u32, fence: u64) -> bool {
+    /// Whether `fence` on `ring` of context `ctx_id` is done; a context
+    /// that is gone has nothing left to do. Takes no backend lock.
+    pub fn fence_done(&self, ctx_id: u32, ring: u32, fence: u64) -> bool {
         let Some(c) = self.ctxs.get(&ctx_id) else { return true };
-        BACKEND.lock().as_mut().is_none_or(|b| b.fence_done(c.handle, ring, fence))
+        (timelines().done)(c.handle, ring, fence)
     }
 
     /// Every context gone (device reset, VM end); the HOST3D resources,
@@ -548,9 +582,5 @@ impl Backend for ProbeBackend {
 
     fn submit_fence(&mut self, _ctx: u32, _ring: u32) -> u64 {
         0
-    }
-
-    fn fence_done(&mut self, _ctx: u32, _ring: u32, _fence: u64) -> bool {
-        true
     }
 }

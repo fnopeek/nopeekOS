@@ -10,7 +10,10 @@
 //! already `&self`) and writes the compositor surface (global `shade::surface`).
 //! Only the device state needed to move out so the worker can hold it across
 //! cores without waiting for the vCPUs' device lock. Lock order: a vCPU takes
-//! `VmShared::dev` then this lock; the worker takes only this lock — no cycle.
+//! `VmShared::dev` then this lock; the worker and the retirer take only this
+//! lock (the retirer never waits for it); the native-context backend lock is
+//! taken under it or, by a SUBMIT_3D's ccmds, alone — no cycle. Fences are
+//! read without the backend lock (`virtio_gpu_ctx::Timelines`).
 
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
@@ -72,6 +75,7 @@ pub fn reset() {
     // `set microvm_gpu off` does not keep the guest on the CPU.
     GPU.lock().nativectx = super::virtio_gpu_ctx::backend_ready() && mode != Some("off");
     RESUME_TSC.store(0, Ordering::Release);
+    SUBMITTING.store(false, Ordering::Release);
     MSIX.reset(super::msix::wanted());
     reset_vectors();
     ISR.store(0, Ordering::Release);
@@ -156,11 +160,33 @@ pub fn after_inline_service(gpu: &mut super::virtio_gpu_pci::VirtioGpu, gm: &sup
 fn serve_controlq(gm: &super::guest_mem::GuestMem) -> bool {
     let mut advanced = GPU.lock().service_queues(0, gm);
     loop {
-        let Some(p) = GPU.lock().take_pending_submit() else { return advanced };
+        let p = {
+            let mut gpu = GPU.lock();
+            let p = gpu.take_pending_submit();
+            if p.is_some() {
+                SUBMITTING.store(true, Ordering::Release);
+                if gpu.retire_waits() {
+                    RETIRE_BELL.ring();
+                }
+            }
+            p
+        };
+        let Some(p) = p else { return advanced };
         let r = super::virtio_gpu_ctx::run_submit(&p.job, p.stream(), crate::gpu::gpudev::submit_deadline());
         let mut gpu = GPU.lock();
+        SUBMITTING.store(false, Ordering::Release);
         advanced |= gpu.finish_submit(p, r, gm);
         advanced |= gpu.service_queues(0, gm);
+    }
+}
+
+/// The GPU driver reported a ring's progress (`gpudev::ring`): the worker
+/// serves the controlq, or, while it runs a SUBMIT_3D, the retirer
+/// completes what is done.
+pub fn fences_reported() {
+    note_gpu_kick(0);
+    if SUBMITTING.load(Ordering::Acquire) {
+        RETIRE_BELL.ring();
     }
 }
 
@@ -428,6 +454,11 @@ pub fn irq_pending() -> bool { GPU_IRQ_PENDING.load(Ordering::Acquire) }
 // ── The off-vCPU GPU worker fiber ──
 static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
+/// The worker runs a SUBMIT_3D's ccmds, without the device lock.
+static SUBMITTING: AtomicBool = AtomicBool::new(false);
+/// The retirer fiber: rung by ring reports while `SUBMITTING`.
+static RETIRE_BELL: crate::smp::fiber::Doorbell = crate::smp::fiber::Doorbell::new();
+static RETIRER_RUNNING: AtomicBool = AtomicBool::new(false);
 /// service_queues does the framebuffer copy + write_frame; give it a roomy
 /// fiber stack (the default 128 KiB has no guard page).
 const WORKER_STACK_BYTES: usize = 256 * 1024;
@@ -439,6 +470,10 @@ pub fn start_worker(core: usize) {
     STOP.store(false, Ordering::Release);
     set_worker_core(core);
     set_full_active(true);
+    RETIRER_RUNNING.store(true, Ordering::Release);
+    if !crate::smp::fiber::admit_with_stack(core, retire_entry, 0, WORKER_STACK_BYTES) {
+        RETIRER_RUNNING.store(false, Ordering::Release);
+    }
     // Stays where it is put (Core 0): an idle core that took it over would
     // be the net worker's, and a frame copy there holds up the ACKs.
     crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
@@ -451,14 +486,16 @@ pub fn stop_worker() -> bool {
     if !WORKER_RUNNING.load(Ordering::Acquire) { return lock().release_all_blobs(); }
     set_full_active(false);
     STOP.store(true, Ordering::Release);
-    // Out of its park now rather than at the next timeout.
+    // Out of their parks now rather than at the next timeout.
     GPU_BELL.ring();
-    // Yielding, not spinning: the worker may live on the caller's core.
+    RETIRE_BELL.ring();
+    // Yielding, not spinning: the fibers may live on the caller's core.
+    let running = || WORKER_RUNNING.load(Ordering::Acquire) || RETIRER_RUNNING.load(Ordering::Acquire);
     for _ in 0..50_000_000u64 {
-        if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
+        if !running() { break; }
         crate::smp::fiber::spin_or_yield();
     }
-    let stopped = !WORKER_RUNNING.load(Ordering::Acquire);
+    let stopped = !running();
     GPU_KICK.store(0, Ordering::Release);
     GPU_IRQ_PENDING.store(false, Ordering::Release);
     WORKER_CORE.store(usize::MAX, Ordering::Release);
@@ -471,18 +508,56 @@ pub fn stop_worker() -> bool {
 /// for the buffer shown before is completed once nothing reads that buffer
 /// any more, waited for here, outside the device lock.
 fn serve(q: u16, gm: &super::guest_mem::GuestMem) {
-    let signal = |advanced: bool| {
-        if advanced && !notify_queue(q) {
-            // The guest left MSI-X while the kick was in flight.
-            raise_irq();
-            crate::microvm::cpu::kick_bsp_net_irq();
-        }
-    };
     if q != 0 {
-        signal(GPU.lock().service_queues(q, gm));
+        signal_queue(q, GPU.lock().service_queues(q, gm));
         return;
     }
-    signal(serve_controlq(gm));
+    signal_queue(q, serve_controlq(gm));
+}
+
+/// Queue `q` advanced: interrupt the guest.
+fn signal_queue(q: u16, advanced: bool) {
+    if advanced && !notify_queue(q) {
+        // The guest left MSI-X while the kick was in flight.
+        raise_irq();
+        crate::microvm::cpu::kick_bsp_net_irq();
+    }
+}
+
+/// While the worker runs a SUBMIT_3D's ccmds, which wait for the GPU
+/// driver, what else the GPU finished still goes back to the guest:
+/// virglrenderer `drm_fence.c` retires each timeline on its own thread,
+/// apart from the one that runs ccmds.
+fn retire_entry(_arg: u64) {
+    RETIRE_BELL.bind();
+    loop {
+        if STOP.load(Ordering::Acquire) {
+            RETIRE_BELL.unbind();
+            RETIRER_RUNNING.store(false, Ordering::Release);
+            return;
+        }
+        let mut waits = false;
+        if SUBMITTING.load(Ordering::Acquire) {
+            if let Some(gm) = crate::microvm::devices::guest_mem::active() {
+                // Whoever holds the device retires as it serves; looked at
+                // again shortly in case it was the worker taking a submit.
+                match GPU.try_lock() {
+                    Some(mut g) => {
+                        let advanced = g.retire(gm);
+                        waits = g.retire_waits();
+                        drop(g);
+                        signal_queue(0, advanced);
+                    }
+                    None => waits = true,
+                }
+            }
+        }
+        // While a submit runs and a fence or a held FLUSH is open, every
+        // 2 ms (a held FLUSH's deadline is not signaled); otherwise until rung.
+        let hz = if waits { 500 } else { 10 };
+        let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / hz;
+        crate::smp::fiber::park_on_bell(deadline, || STOP.load(Ordering::Acquire));
+    }
 }
 
 fn worker_entry(_arg: u64) {
@@ -507,7 +582,7 @@ fn worker_entry(_arg: u64) {
                 g.lose_device_memory();
             }
             g.reap_released();
-            (g.fences_pending(), g.held_blob().is_some())
+            (g.fences_pending(), g.held_waits())
         };
         if fences || held {
             kicks |= 1;

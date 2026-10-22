@@ -11,7 +11,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::virtio_gpu_ctx::{i915_capset, i915_error_response, Backend, MAP_CACHE_CACHED, MAP_CACHE_UNCACHED, MAP_CACHE_WC};
+use super::virtio_gpu_ctx::{i915_capset, i915_error_response, no_work, Backend, Timelines, MAP_CACHE_CACHED, MAP_CACHE_UNCACHED, MAP_CACHE_WC};
 use crate::drivers::pci::PciAddr;
 use crate::gpu::gpudev::{self, Answer};
 use crate::shade::buffers::ForeignPixels;
@@ -426,8 +426,8 @@ impl Backend for GpudevBackend {
         gpudev::ring_state(ctx, ring).0
     }
 
-    fn fence_done(&mut self, ctx: u32, ring: u32, fence: u64) -> bool {
-        gpudev::native_device().is_none() || gpudev::ring_state(ctx, ring).1 >= fence
+    fn timelines(&self) -> Timelines {
+        Timelines { done: gpudev::fence_done, open: no_work }
     }
 }
 
