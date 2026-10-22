@@ -329,3 +329,15 @@ Ringtest an war. Linux faehrt sie `AMDGPU_RESUME_MS` (2 s) spaeter aus
 gated. **Modul 0.23.0** tut das ebenso: der IB-Test von `vcn_dec` startet
 den Block dann aus dem Ruhezustand, genau wie der erste Auftrag eines
 Gasts. Geht er schief, zeigt das der Bootlog ohne Firefox.
+
+**Lauf mit 0.24.0:** derselbe Haenger, und `signaled seq=2` mit 0.23.0+
+heisst jetzt: die IB-Tests von `vcn_dec` liefen 2 s nach dem Laden, also
+NACH dem Idle-Gate, und gingen durch. Der Start aus dem Ruhezustand ist es
+nicht. Was ein Gastauftrag darueber hinaus verlangt, ist der VM-Flush auf
+dem MMHUB (Semaphor, Invalidierung, PTB schreiben und zuruecklesen, PASID-
+Tabelle des IH) und die VMID des Gasts. **Modul 0.25.0** fragt das Stueck
+fuer Stueck ab, auf VMID 0 mit der Tabelle, die schon da ist: jede Probe
+ist der Ringtest (`PACKET_START` … `SCRATCH9`) mit einem Teil des Flushs
+dazwischen, und `vcn_dec probe <teil>: passed|STUCK` steht im Ladelog.
+Die Probe ist kein Linux und faellt wieder weg, sobald der Teil gefunden
+ist.

@@ -1548,3 +1548,76 @@ pub fn amdgpu_vcn_print_ip_state(adev: &amdgpu_device) {
         }
     }
 }
+
+// ---- the VM flush probe (not Linux) ----
+
+/// One probe on `vcn_dec`: `emit` between PACKET_START and the scratch
+/// write of the ring test. Whether the scratch arrives says whether the
+/// firmware got past `emit`.
+fn dec_probe(adev: &mut amdgpu_device, r: usize, name: &str, emit: impl FnOnce(&mut amdgpu_device, usize)) -> bool {
+    let me = adev.rings[r].me as usize;
+    let (ext, int) = (adev.vcn.inst[me].external.scratch9, &adev.vcn.inst[me].internal);
+    let (cmd, scratch9) = (int.cmd, int.scratch9);
+    adev.wreg32(ext, 0xCAFEDEAD);
+    if crate::amdgpu_ring::amdgpu_ring_alloc(adev, r, 64) != 0 {
+        return false;
+    }
+    rw(adev, r, packet0(cmd, 0));
+    rw(adev, r, VCN_DEC_KMD_CMD | VCN_DEC_CMD_PACKET_START << 1);
+    emit(adev, r);
+    rw(adev, r, packet0(scratch9, 0));
+    rw(adev, r, 0xDEADBEEF);
+    crate::amdgpu_ring::amdgpu_ring_commit(adev, r);
+    let mut ok = false;
+    for _ in 0..adev.usec_timeout {
+        if adev.rreg32(ext).unwrap_or(0) == 0xDEADBEEF {
+            ok = true;
+            break;
+        }
+        crate::linux::udelay(1);
+    }
+    let hub = adev.vmhub[adev.rings[r].vm_hub as usize];
+    let eng = adev.rings[r].vm_inv_eng;
+    let ack = adev.rreg32(hub.vm_inv_eng0_ack + hub.eng_distance * eng).unwrap_or(0);
+    let fault = adev.rreg32(hub.vm_l2_pro_fault_status).unwrap_or(0);
+    Line::new().s("vcn_dec probe ").s(name).s(": ").s(if ok { "passed" } else { "STUCK" }).s(", eng ").dec(eng as u64)
+        .s(" ack ").hex(ack).s(", mmhub fault status ").hex(fault).s(", rptr ")
+        .hex(rreg(adev, mmUVD_RBC_RB_RPTR, mmUVD_RBC_RB_RPTR_BASE_IDX)).s(" wptr ")
+        .hex(rreg(adev, mmUVD_RBC_RB_WPTR, mmUVD_RBC_RB_WPTR_BASE_IDX)).say();
+    if !ok {
+        vcn_v2_0_reset(adev);
+    }
+    ok
+}
+
+/// What a guest job's VM flush asks of `vcn_dec`, piece by piece, on
+/// VMID 0 with the page table base it already has: the semaphore, the
+/// invalidation and its ack, the page table base written and read back.
+pub fn vcn_v2_0_dec_flush_probe(adev: &mut amdgpu_device) {
+    let Some(r) = adev.vcn.inst[0].ring_dec else { return };
+    let hub = adev.vmhub[adev.rings[r].vm_hub as usize];
+    let eng = adev.rings[r].vm_inv_eng;
+    let sem = hub.vm_inv_eng0_sem + hub.eng_distance * eng;
+    let (req, ack) = (hub.vm_inv_eng0_req + hub.eng_distance * eng, hub.vm_inv_eng0_ack + hub.eng_distance * eng);
+    let (lo, hi) = (hub.ctx0_ptb_addr_lo32, hub.ctx0_ptb_addr_hi32);
+    let (ptb_lo, ptb_hi) = (adev.rreg32(lo).unwrap_or(0), adev.rreg32(hi).unwrap_or(0));
+    Line::new().s("vcn_dec probe: hub ").dec(adev.rings[r].vm_hub as u64).s(" sem ").hexu(sem).s(" req ").hexu(req)
+        .s(" ack ").hexu(ack).s(" ptb ").hex(ptb_hi).s(":").hex(ptb_lo).s(", semaphore ")
+        .s(if crate::gmc_v9_0::gmc_v9_0_use_invalidate_semaphore(adev, adev.rings[r].vm_hub) { "used" } else { "not used" })
+        .say();
+    dec_probe(adev, r, "empty", |_, _| {});
+    dec_probe(adev, r, "wreg scratch", |a, r| crate::amdgpu_ring::amdgpu_ring_emit_wreg(a, r, lo, ptb_lo));
+    dec_probe(adev, r, "reg_wait ptb", |a, r| crate::amdgpu_ring::amdgpu_ring_emit_reg_wait(a, r, lo, ptb_lo, 0xffffffff));
+    dec_probe(adev, r, "semaphore", |a, r| {
+        crate::amdgpu_ring::amdgpu_ring_emit_reg_wait(a, r, sem, 1, 1);
+        crate::amdgpu_ring::amdgpu_ring_emit_wreg(a, r, sem, 0);
+    });
+    let inv = crate::gmc_v9_0::gmc_v9_0_get_invalidate_req(0, 0);
+    dec_probe(adev, r, "invalidate", |a, r| {
+        crate::amdgpu_ring::amdgpu_ring_emit_reg_write_reg_wait(a, r, req, ack, inv, 1);
+    });
+    dec_probe(adev, r, "flush", |a, r| {
+        crate::gmc_v9_0::gmc_v9_0_emit_flush_gpu_tlb(a, r, 0, (ptb_hi as u64) << 32 | ptb_lo as u64);
+    });
+    dec_probe(adev, r, "pasid mapping", |a, r| crate::gmc_v9_0::gmc_v9_0_emit_pasid_mapping(a, r, 0, 0));
+}

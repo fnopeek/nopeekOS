@@ -261,6 +261,9 @@ fn ip_init_phase2(adev: &mut amdgpu_device) {
     let r = adev.delayed_init_result.unwrap_or(-22);
     report_rings(adev, "ib tests:");
     if r == 0 {
+        crate::vcn_v2_0::vcn_v2_0_dec_flush_probe(adev);
+    }
+    if r == 0 {
         Line::new().s("stage 4 done: ring and IB tests").say();
         crate::gpudev::serve(adev);
     }
