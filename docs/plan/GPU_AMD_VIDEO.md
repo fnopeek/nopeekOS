@@ -389,6 +389,10 @@ der Fence-Weg Modul↔Kernel↔Gast gegen virglrenderer 1.3.0 und Mesa.
 - `amdgpu_ring_undo` ohne `end_use`, `amdgpu_ring_alloc_reemit` ohne
   `begin_use`; Idle-Work der VCN/JPEG mit `mod_` statt `schedule_delayed_work`.
 
+**Geraet mit 0.29.0:** `[frames]` durchgehend 60/s, im Mittel 0,4 ms, kein
+`SLOW` nach dem Anlauf; `waited for their drawing` laengstens ~10 ms statt
+94–104 ms. Hardware-Video laeuft fluessig.
+
 **Offen, Modul:**
 1. `gmc_v9_0_flush_gpu_tlb`: der KIQ-Zweig fehlt (`gmc_v9_0.c:866-875`,
    „necessary … for GFXOFF to function properly under bare metal"); bei
