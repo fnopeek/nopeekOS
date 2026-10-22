@@ -13,6 +13,9 @@
 # packages with this output, and only if the versions match: libEGL, libgbm
 # and libgallium share an internal ABI and must come from one build.
 #
+# With it radeonsi's VA-API driver (radeonsi_drv_video.so), through which
+# Firefox decodes video on an AMD card over the native context.
+#
 # Also builds npk-gpuprobe (gpuprobe.c) against this Mesa: one log line per
 # session with the driver the guest got; and installs npk-vkprobe
 # (vkprobe.sh), which checks Vulkan Video decoding per codec.
@@ -53,7 +56,7 @@ BUILD_PACKAGES="build-base pkgconf meson bison flex python3 py3-mako py3-packagi
     cmake samurai intel-gmmlib-dev libpciaccess-dev"
 
 # Alpine's options (APKBUILD build()), except: the driver lists, Vulkan only
-# for Intel, no rusticl, no VA-API driver, and the Intel virtio backend.
+# for Intel, no rusticl, and the Intel virtio backend.
 MESON_OPTS="--prefix=/usr --libdir=lib --sysconfdir=/etc --localstatedir=/var
     --buildtype=plain --wrap-mode=nodownload
     -Db_ndebug=true -Db_lto=false
@@ -67,7 +70,7 @@ MESON_OPTS="--prefix=/usr --libdir=lib --sysconfdir=/etc --localstatedir=/var
     -Dplatforms=x11,wayland
     -Dllvm=enabled -Dshared-llvm=enabled
     -Dgbm=enabled -Dglx=dri -Dopengl=true -Dgles1=enabled -Dgles2=enabled -Degl=enabled
-    -Dgallium-extra-hud=true -Dgallium-rusticl=false -Dgallium-va=disabled
+    -Dgallium-extra-hud=true -Dgallium-rusticl=false -Dgallium-va=enabled
     -Dvideo-codecs=all"
 
 fetch() {
@@ -148,15 +151,15 @@ unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c "
 "
 
 # Exactly the runtime files of Alpine's mesa, mesa-egl, mesa-gl, mesa-gles,
-# mesa-gbm and mesa-vulkan-intel, plus the probe; headers, pkg-config files
-# and dev symlinks stay out.
+# mesa-gbm and mesa-vulkan-intel, radeonsi's of mesa-va-gallium, plus the
+# probe; headers, pkg-config files and dev symlinks stay out.
 (
     cd "$STAGE/out"
     find usr/lib/libgallium-*.so usr/lib/gbm/dri_gbm.so usr/share/drirc.d \
          usr/lib/libEGL.so.1* usr/lib/libGL.so.1* usr/lib/libGLESv1_CM.so.1* \
          usr/lib/libGLESv2.so.2* usr/lib/libgbm.so.1* usr/bin/npk-gpuprobe usr/bin/npk-vkprobe \
          usr/lib/libvulkan_intel.so usr/share/vulkan/icd.d/intel_icd.x86_64.json \
-         usr/lib/libnpk_intel_virtio.so.* \
+         usr/lib/libnpk_intel_virtio.so.* usr/lib/dri/radeonsi_drv_video.so \
          \( -type f -o -type l \) -print | LC_ALL=C sort > "$STAGE/files"
     # Unstripped copies stay in the cache, to name the frames of a backtrace
     # (`npkgdb`) from the guest's stripped libraries.

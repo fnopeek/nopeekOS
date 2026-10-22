@@ -1,6 +1,6 @@
 # gpu_amd_renoir Stufe 6 — Video: VCN 2.2 und JPEG 2.0
 
-**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.21.0 (V1 + V2 ✅ Geraet, V3 gebaut) · Kernel 0.665.0
+**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.21.0 (V1–V3 ✅ Geraet soweit ohne Gast messbar, V4 gebaut) · Kernel 0.666.0 · Bundle firefox-0.1.3
 **Vorbild:** Linux 6.18.55 `vcn_v2_0.c`, `jpeg_v2_0.c`, `amdgpu_vcn.c`,
 `amdgpu_jpeg.c`; Gast: Mesa 26.2.4 `radeonsi` VA-API (`gallium-va`).
 **Daneben:** `GPU_AMD_NATIVE.md` (der Weg der Gast-ccmds), `GPU_AMD_LINUX_MAP.md`
@@ -234,3 +234,32 @@ gleich.
 
 **Damit ist V3 bis auf den Geraetetest gebaut.** Naechst V4: Mesa im
 Gast mit `gallium-va`, `LIBVA_DRIVER_NAME` nach Hersteller.
+
+**Am Geraet (IdeaPad, 2026-10-22): ✅** 0.21.0 auf Kernel 0.665.0 laedt
+(der neue Import ist da), Ring- und IB-Tests unveraendert gruen.
+
+## 10. V4: der Gast (Kernel 0.666.0, microvm-init 0.15.0, Bundle firefox-0.1.3)
+
+- **Mesa im Gast mit `-Dgallium-va=enabled`.** `radeonsi_drv_video.so` ist
+  wie bei Alpine ein Link auf `libgallium`, und geht in das Mesa-Paket
+  (`microvm/linux/mesa/build.sh`). Dabei Mesa 26.2.4 → 26.2.5, weil
+  Alpine edge nachgezogen hat (Pruefsumme aus Alpines APKBUILD).
+- **Der Wirt nennt dem Gast die Karte:** `npkgpu=amdgpu` oder
+  `npkgpu=i915` auf der Kommandozeile, aus dem `context_type` des
+  Capsets (`virtio_gpu_ctx::context_type`). Das Render-Device im Gast
+  heisst `virtio_gpu` und nennt keinen VA-Treiber.
+- **microvm-init** setzt fuer Firefox `LIBVA_DRIVER_NAME=radeonsi` bei
+  `npkgpu=amdgpu`, sonst wie bisher `iHD`. Neu `npkvainfo` auf der
+  Kommandozeile: `vainfo` mit diesem Treiber als `[va]`-Zeilen.
+- Das Image nimmt den aktuellen Stand von Alpine edge (Firefox 154.0
+  unveraendert; Mesa, musl, nss u.a. neuer, `packages-firefox.txt`).
+
+**Am Geraet zu lesen** (`set microvm_cmdline npkvainfo npksupport`, dann
+`firefox`): `[va]` nennt `Mesa Gallium driver … for AMD Radeon` und eine
+Liste von `VAProfile…` (H.264, HEVC, VP9, JPEG); `[about]` meldet
+`HARDWARE_VIDEO_DECODING` als verfuegbar. Dann ein Video abspielen; das
+Lastbild zeigt Arbeit auf `vcn_dec` statt CPU-Last.
+
+**Ungeprueft:** ob radeonsis VA-Weg ueber Mesas `amdgpu-virtio` jede
+ccmd-Art bedient, die der Dekoder braucht (Video-Puffer, `CS` auf
+`VCN_DEC`). Das zeigt erst der Geraetelauf.

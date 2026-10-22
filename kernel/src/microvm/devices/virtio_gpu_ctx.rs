@@ -130,6 +130,13 @@ pub fn capset() -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The DRM context type of the capset (`virgl_renderer_capset_drm`'s
+/// `context_type`), if a backend offers one.
+pub fn context_type() -> Option<u32> {
+    let c = capset()?;
+    Some(u32::from_le_bytes(c[16..20].try_into().ok()?))
+}
+
 /// A HOST3D resource: pages the host owns, mapped into the guest's host-
 /// visible window on MAP_BLOB.
 pub struct Host3d {

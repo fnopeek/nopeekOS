@@ -228,9 +228,11 @@ fn launch_wayland(kmsg_fd: i64) {
     // The app is the browser the image carries: Firefox when it has
     // /usr/lib/firefox, else LibreWolf; its directory holds the preloaded
     // libraries, the autoconfig (`<app>.cfg`) and the GPU probes. With a
-    // GPU, Firefox decodes video through VA-API, Intel's media driver over
-    // the native context (`LIBVA_DRIVER_NAME=iHD`: the render node is
-    // virtio_gpu, which names no VA driver); LibreWolf through Vulkan Video.
+    // GPU, Firefox decodes video through VA-API over the native context, with
+    // the media driver of the card the host names (`npkgpu=amdgpu`: Mesa's
+    // radeonsi, else Intel's iHD; the render node is virtio_gpu, which names
+    // no VA driver); LibreWolf through Vulkan Video.
+    // `npkvainfo` writes what vainfo reports for that driver as `[va]` lines.
     // `npklogs` on the command line streams the app's and npkwm's output
     // to the console (`set microvm_cmdline npklogs`); `npklogs=REGEX` only
     // the lines that match it (an awk ERE, no spaces), so a verbose MOZ_LOG
@@ -276,6 +278,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  GPU=0; for d in /sys/bus/virtio/devices/*; do \
                    [ \"$(cat $d/device 2>/dev/null)\" = 0x0010 ] && [ \"$(cut -c5 $d/features 2>/dev/null)\" = 1 ] && GPU=1; \
                  done; \
+                 VA=iHD; grep -qE 'npkgpu=amdgpu( |$)' /proc/cmdline && VA=radeonsi; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
@@ -377,6 +380,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ $GPU = 1 ] || for t in gfxtest glxtest vaapitest; do [ -e $ADIR/$t ] && mount --bind /bin/false $ADIR/$t 2>/dev/null; done; \
                  APPENV=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p' | tr '\\n' ' '); \
                  [ $GPU = 1 ] && [ -x /usr/bin/npk-gpuprobe ] && su -s /bin/sh app -c \"env $APPENV /usr/bin/npk-gpuprobe\" & \
+                 grep -q npkvainfo /proc/cmdline && [ $GPU = 1 ] && [ -x /usr/bin/vainfo ] && \
+                   su -s /bin/sh app -c \"LIBVA_DRIVER_NAME=$VA vainfo 2>&1\" | sed 's/^/<0>[va] /' > /dev/kmsg & \
                  mkdir -p /tmp/moz/chrome; \
                  echo '.titlebar-min, .titlebar-max, .titlebar-maximize, .titlebar-restore { display: none !important; }' > /tmp/moz/chrome/userChrome.css; \
                  ( sleep 15; while true; do sync 2>/dev/null; sleep 3; done ) & \
@@ -409,7 +414,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ -n \"$SCU\" ] || SCU=release_to_os_interval_ms=-1; \
                  [ \"$SCU\" = off ] || { echo \"export SCUDO_OPTIONS=$SCU\" >> /tmp/app.sh; \
                    echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
-                 if [ $APP = firefox ]; then [ $GPU = 1 ] && echo 'export LIBVA_DRIVER_NAME=iHD' >> /tmp/app.sh; \
+                 if [ $APP = firefox ]; then [ $GPU = 1 ] && echo \"export LIBVA_DRIVER_NAME=$VA\" >> /tmp/app.sh; \
                  else [ $GPU = 1 ] && echo 'export ANV_DEBUG=video-decode' >> /tmp/app.sh; fi; \
                  [ $FR = 1 ] && echo 'export MOZ_LOG=FFmpegVideo:4' >> /tmp/app.sh; \
                  for e in $(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p'); do \
