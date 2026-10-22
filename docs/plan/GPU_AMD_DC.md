@@ -1,0 +1,111 @@
+# GPU_AMD_DC — Display Controller (DCN 2.1 / Renoir), 1:1 nach Linux
+
+**Stand:** 2026-10-22 · Kernel 0.669.0 · Modul `gpu_amd_renoir` 0.30.0 ·
+Quelle `~/.cache/nopeekos/amdgpu-callgraph/linux-6.18.55[-renoir]`.
+
+**Prinzip (nicht verhandelbar):** DC wird **ganz** portiert, 1:1 aus Linux'
+eigenem Code, wie der Rest des Moduls (`amdgpu_dm.rs`, `gmc_v9_0.rs`, … mit
+Zeilen-Referenzen im Kopf und Orakel-Gegenprobe). **Kein Flip-only-Abkürzungs-
+pfad**, der DML, Clock-Manager oder die hwss-Sequenzen durch Schätzungen
+ersetzt — genau diese Teile entscheiden, ob ein Bild reißt oder unterläuft.
+Features, die Renoirs eDP-Alltag nicht braucht (DSC, MST, HDCP, PSR/ABM,
+externe Monitore, Audio), sind **spätere Stufen, keine Stubs**: der Kernpfad
+wird vollständig gebaut, die Features kommen als eigene faithful Ports dazu.
+
+## Ist-Stand
+
+Portiert: `amdgpu_dm.rs` (dm_early_init / dm_sw_init / dm_dmub_sw_init) +
+`dmub_srv.rs` (Regionen) — also bis zu den DMUB-Framebuffer-Regionen. **Ab
+`dm_hw_init` / `dc_create` fehlt alles.** `dc_enabled=true` steht, aber es gibt
+keine `dc`-Instanz, keinen Resource-Pool, keine hwss, kein DML, keinen
+Clock-Manager, keinen Commit-Pfad. Heute geht jeder Gast-Frame im Wirt über die
+Textureinheit in einen linearen Puffer (eine GFX-Kopie je Bild); DC ersetzt das
+durch einen Scanout/Flip der Anzeige-Engine.
+
+## Umfang (Renoir-Teilpfad, LOC der Linux-.c)
+
+    core/dc.c 6437 · dc_resource.c 5620 · dc_stream.c 1237 · dc_surface.c 312
+    · dc_state.c 1077
+    resource/ dcn21 1716 + dcn20 2779 + dcn10 1690   (Renoir erbt dcn20/dcn10)
+    hwss/     dcn21  453 + dcn20 3407 + dcn10 4271
+    clk_mgr/dcn21 (rn_clk_mgr + rn_vbios_smu) 1044
+    dml (NUR der dcn21-Teil des 77950-LOC-Baums; dml2 ist dcn32+, NICHT Renoir)
+    link/ (nur der Renoir-eDP/DP-Pfad des 18764-LOC-Baums)
+    bios/ bios_parser2 (Renoir-Teil des 12792-LOC-Baums)
+    IP-Blöcke je dcn10/20/21: hubp · dpp · mpc · opp · optc · dccg · hubbub ·
+      dio (stream_encoder) · link_encoder
+    dc_dmub_srv.c (Mailbox über die vorhandenen dmub_srv-Regionen) · dc irq
+
+Realistisch **~30–40k LOC** — der mit Abstand größte Block des OS. Mehrere
+Sessions. **dml2 und die anderen dcn-Familien sind ausdrücklich draußen.**
+
+## Methode (wie der Rest des Moduls)
+
+Jede Stufe wird host-seitig gegen Linux geprüft, bevor sie aufs Gerät geht
+(`hostcheck/check.sh`, `docs/plan/GPU_AMD_LINUX_MAP.md §2a`):
+
+- **Orakel** `oracle/main_dc.c`: `oracle/extract.py` schneidet die DC-Funktionen
+  der Stufe wörtlich aus der Linux-Quelle (dc core, dcn21/20/10, dml-dcn21,
+  rn_clk_mgr). Verglichen werden **Zeilen / Registerschreibzugriffe / berechnete
+  Werte**, Zahl für Zahl.
+- **`fake_gpu.rs` erweitern:** ein DCN-Anzeigemodell hinter den Registern —
+  Registerräume für hubp/dpp/mpc/optc/opp/dccg/hubbub/dio, das OTG (Vblank/
+  Vupdate als IV im IH-Ring) und die **DMUB-Mailbox** (quittiert Befehle, setzt
+  Fences). Das ist Gegenprobe der Abläufe, kein Orakel.
+- **`<stufe>_check.rs`** fährt den Port auf der Ersatzkarte und vergleicht gegen
+  `main_dc.c`. Die Stufen 1–4 brauchen **kein Gerät** — erst die Commit-/Flip-
+  Stufen haben Geräte-Meilensteine (Florian fährt sie).
+
+## Kernel-Seam
+
+- `GpuHal` braucht Flip/Vblank/Cursor-Ops (heute `supports_flip=false`,
+  GPU_AMD_NATIVE §5.2). Der Wirt-Compositor reicht einen Gast-Scanout-BO an DC
+  statt ihn zu kopieren; DC flippt ihn im Vblank.
+- eDP ist beim Boot schon von der Firmware an (wir erben den Bootmodus-
+  Framebuffer). **Erststufe: den laufenden eDP ÜBERNEHMEN**, nicht neu trainieren
+  — volles Link-Training ist eine spätere Stufe.
+
+## Stufen (nach Abhängigkeit)
+
+- **A — Gerüst + Objektgraph.** `dm_services`/`os_types`-Shim (jede DC-Datei
+  inkludiert ihn; auf `npk_sys`-Registerzugriff abgebildet), `dc_types`/
+  `dc_hw_types`, dann `dc_create` → `dc_construct` → `dcn21_resource_construct`:
+  der volle Objektbaum (Pipes 4, hubp/dpp/opp/optc/mpc/dccg, clk_mgr, dmub,
+  Clock-Tabelle). Kompiliert, baut den Baum, **keine HW-Schreibzugriffe**.
+  Orakel: Konstruktions-Invarianten (Zähler, Clock-Tabelle, caps) gegen
+  `dcn21_resource_construct`.
+- **B — Clock-Manager + DMUB-Mailbox.** `rn_clk_mgr_construct` + `rn_vbios_smu`
+  (Clocks über SMU), `dc_dmub_srv` Befehlsweg auf den vorhandenen Regionen.
+  Orakel: die SMU-Clock-Nachrichten + DMUB-Befehle, Wort für Wort.
+- **C — DML (dcn21).** `display_mode_vba` + rq/dlg/ttu + die dcn21-soc/ip-
+  Parameter. Der große Festkomma-Block. **Hier wohnt „richtig".** Orakel: DML
+  auf einer bekannten Mode (eDP 1920×1080 u.a.) → Watermarks/rq/dlg Zahl für
+  Zahl gegen Linux' DML.
+- **D — hwss init_hw.** `dcn10/20_init_hw` (+dcn21): Power, DCCG/DIO/PHY,
+  hubbub/mpc/opp in bekannten Zustand. Orakel: die Registerschreibfolge von
+  `*_init_hw`, zeilengleich.
+- **E — Commit (statisches Bild).** `dc_validate` + `dc_commit_streams` +
+  `dc_update_planes_and_stream` → `program_front_end` (hubp/dpp/mpc/optc/opp),
+  `bios_parser2` für Timing. **Geräte-Meilenstein:** ein stehender Framebuffer
+  über DC-Scanout statt der Textureinheit-Kopie.
+- **F — Vblank + Page-Flip.** dc irq, OTG Vblank/Vupdate, `dc_flip_surface`;
+  Kernel-`GpuHal` Flip/Vblank. **Geräte-Meilenstein:** Gast-Frame reißfrei im
+  Vblank geflippt, **keine Kopie** — die Scroll-„Bugwelle" (NATIVE §5.2) weg.
+- **G — Hardware-Cursor.** dcn10/20-Cursor auf hubp/dpp; Kernel-Cursor-Op.
+- **H — eDP-Übernahme.** Den firmware-gelichteten eDP sauber übernehmen
+  (Timing/Backlight auslesen, nicht neu trainieren).
+
+**Später, je eigene faithful Stufe (keine Abkürzung):** externe DP/HDMI +
+Hotplug (link-Detection/Training), DP/HDMI-Audio, DSC, MST, PSR/ABM, Backlight/
+ABM-Feinregelung, S0ix.
+
+## Risiken / offen
+
+- **DML-Umfang:** selbst der dcn21-Teil ist groß und reiner Festkomma-Code;
+  eine Mutation fällt nur im Orakel auf. Nicht abkürzen.
+- **bios_parser2 vs. das vorhandene atom/atomfirmware:** DC bringt seinen
+  EIGENEN BIOS-Parser mit; klären, was wiederverwendbar ist.
+- **DMUB-Firmware-Pfad am Gerät** ist bis Stufe B/E ungeprüft (Regionen stehen,
+  die Mailbox nicht).
+- **Koordination:** zweite AMD-GPU-Session (native context) — Kernelstand
+  abgleichen, bevor eine DC-Stufe den Kernel (GpuHal) anfasst.
