@@ -460,6 +460,7 @@ fn amdgpu_ring_alloc_reemit(adev: &mut amdgpu_device, r: usize, ndw: u32) {
     let ndw = (ndw + ring.funcs.align_mask) & !ring.funcs.align_mask;
     ring.count_dw = ndw as i32;
     ring.wptr_old = ring.wptr;
+    begin_use(adev, r);
 }
 
 /// `amdgpu_ring_reset`: `funcs->reset`.
@@ -584,12 +585,26 @@ pub fn amdgpu_ring_alloc(adev: &mut amdgpu_device, r: usize, ndw: u32) -> i32 {
     }
     ring.count_dw = ndw as i32;
     ring.wptr_old = ring.wptr;
+    begin_use(adev, r);
+    0
+}
+
+/// `ring->funcs->begin_use`, where the ring has one.
+fn begin_use(adev: &mut amdgpu_device, r: usize) {
     match adev.rings[r].funcs.ops {
         ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::amdgpu_vcn_ring_begin_use(adev, r),
         ring_ops::jpeg_v2_0_dec => crate::jpeg_v2_0::amdgpu_jpeg_ring_begin_use(adev, r),
         _ => {}
     }
-    0
+}
+
+/// `ring->funcs->end_use`, where the ring has one.
+fn end_use(adev: &mut amdgpu_device, r: usize) {
+    match adev.rings[r].funcs.ops {
+        ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::amdgpu_vcn_ring_end_use(adev, r),
+        ring_ops::jpeg_v2_0_dec => crate::jpeg_v2_0::amdgpu_jpeg_ring_end_use(adev, r),
+        _ => {}
+    }
 }
 
 /// `amdgpu_ring_write`.
@@ -686,17 +701,14 @@ pub fn amdgpu_ring_commit(adev: &mut amdgpu_device, r: usize) {
     }
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     amdgpu_ring_set_wptr(adev, r);
-    match adev.rings[r].funcs.ops {
-        ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc => crate::vcn_v2_0::amdgpu_vcn_ring_end_use(adev, r),
-        ring_ops::jpeg_v2_0_dec => crate::jpeg_v2_0::amdgpu_jpeg_ring_end_use(adev, r),
-        _ => {}
-    }
+    end_use(adev, r);
 }
 
 /// `amdgpu_ring_undo`.
 pub fn amdgpu_ring_undo(adev: &mut amdgpu_device, r: usize) {
     let ring = &mut adev.rings[r];
     ring.wptr = ring.wptr_old;
+    end_use(adev, r);
 }
 
 /// `amdgpu_ring_test_ring`.

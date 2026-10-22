@@ -906,7 +906,7 @@ pub fn amdgpu_vcn_idle_work_handler(adev: &mut amdgpu_device, i: usize) {
         vcn_v2_0_set_pg_state(adev, AMD_PG_STATE_GATE);
         amdgpu_vcn_put_profile(adev);
     } else {
-        crate::workqueue::mod_delayed_work(adev, crate::workqueue::work::vcn_idle { inst: i }, VCN_IDLE_TIMEOUT_US);
+        crate::workqueue::schedule_delayed_work(adev, crate::workqueue::work::vcn_idle { inst: i }, VCN_IDLE_TIMEOUT_US);
     }
 }
 
@@ -956,7 +956,7 @@ pub fn amdgpu_vcn_ring_end_use(adev: &mut amdgpu_device, r: usize) {
         adev.vcn.inst[me].dpg_enc_submission_cnt -= 1;
     }
     adev.vcn.inst[me].total_submission_cnt -= 1;
-    crate::workqueue::mod_delayed_work(adev, crate::workqueue::work::vcn_idle { inst: me }, VCN_IDLE_TIMEOUT_US);
+    crate::workqueue::schedule_delayed_work(adev, crate::workqueue::work::vcn_idle { inst: me }, VCN_IDLE_TIMEOUT_US);
 }
 
 // ---- the rings ----

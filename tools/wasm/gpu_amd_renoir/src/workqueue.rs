@@ -73,6 +73,17 @@ pub fn mod_delayed_work(adev: &mut amdgpu_device, w: work, delay_us: u64) {
     adev.wq.delayed.push((due, w));
 }
 
+/// `schedule_delayed_work`: due `delay_us` from now unless it is pending
+/// already, which keeps its deadline; false then.
+pub fn schedule_delayed_work(adev: &mut amdgpu_device, w: work, delay_us: u64) -> bool {
+    if adev.wq.delayed.iter().any(|e| e.1 == w) || adev.wq.queued.contains(&w) {
+        return false;
+    }
+    let due = crate::linux::now_us().saturating_add(delay_us);
+    adev.wq.delayed.push((due, w));
+    true
+}
+
 /// `cancel_delayed_work`: true when it was pending.
 pub fn cancel_delayed_work(adev: &mut amdgpu_device, w: work) -> bool {
     let n = adev.wq.delayed.len();
@@ -86,6 +97,21 @@ pub fn cancel_work(adev: &mut amdgpu_device, w: work) -> bool {
     let n = adev.wq.queued.len();
     adev.wq.queued.retain(|e| *e != w);
     n != adev.wq.queued.len()
+}
+
+/// Whether work is queued and not blocked by running work: a kworker
+/// would run it now.
+pub fn has_runnable(adev: &amdgpu_device) -> bool {
+    adev.wq.queued.iter().any(|&w| !busy(&adev.wq.running, w))
+}
+
+/// Microseconds until the next timer (delayed work or a fence fallback)
+/// is due, if one is armed.
+pub fn next_timer_us(adev: &amdgpu_device) -> Option<u64> {
+    let now = crate::linux::now_us();
+    let delayed = adev.wq.delayed.iter().map(|e| e.0);
+    let fallback = adev.rings.iter().filter_map(|r| r.fence_drv.fallback_deadline_us);
+    delayed.chain(fallback).min().map(|d| d.saturating_sub(now))
 }
 
 /// `work_tdr.timer.expires`: when the delayed work is due, if armed.
@@ -154,6 +180,10 @@ pub fn wait_until(adev: &mut amdgpu_device, timeout_us: i64, mut cond: impl FnMu
                   -> i64 {
     let t0 = crate::linux::now_us();
     loop {
+        // Armed before the ring is read: an interrupt that comes while
+        // the condition is checked ends the wait below at once.
+        let since = crate::amdgpu_irq::amdgpu_irq_arm(adev);
+        crate::amdgpu_irq::amdgpu_ih_process(adev, false);
         run_pending(adev);
         let elapsed = (crate::linux::now_us() - t0) as i64;
         if cond(adev) {
@@ -163,6 +193,6 @@ pub fn wait_until(adev: &mut amdgpu_device, timeout_us: i64, mut cond: impl FnMu
             return 0;
         }
         let left_ms = ((timeout_us - elapsed) / 1000).clamp(1, 10) as i32;
-        crate::amdgpu_irq::amdgpu_irq_wait(adev, left_ms);
+        crate::amdgpu_irq::amdgpu_irq_wait_armed(adev, since, left_ms);
     }
 }

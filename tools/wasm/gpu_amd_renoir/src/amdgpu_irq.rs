@@ -373,9 +373,19 @@ pub fn amdgpu_irq_handle_ih_soft(adev: &mut amdgpu_device) {
 /// processed. This is where `amdgpu_irq_handler` runs; the module has no
 /// interrupt context of its own.
 pub fn amdgpu_irq_wait(adev: &mut amdgpu_device, timeout_ms: i32) -> bool {
-    let vector = adev.irq.irq as i32;
-    let since = npk_sys::irq_arm(vector);
-    let fired = npk_sys::irq_wait(vector, since, timeout_ms) == 1;
+    let since = amdgpu_irq_arm(adev);
+    amdgpu_irq_wait_armed(adev, since, timeout_ms)
+}
+
+/// The interrupt count a later `amdgpu_irq_wait_armed` waits past: armed
+/// before the ring is looked at, no interrupt in between is lost.
+pub fn amdgpu_irq_arm(adev: &amdgpu_device) -> i64 {
+    npk_sys::irq_arm(adev.irq.irq as i32)
+}
+
+/// `amdgpu_irq_wait` from a count taken with `amdgpu_irq_arm`.
+pub fn amdgpu_irq_wait_armed(adev: &mut amdgpu_device, since: i64, timeout_ms: i32) -> bool {
+    let fired = npk_sys::irq_wait(adev.irq.irq as i32, since, timeout_ms) == 1;
     amdgpu_ih_process(adev, false);
     fired
 }

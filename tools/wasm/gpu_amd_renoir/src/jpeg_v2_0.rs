@@ -316,7 +316,7 @@ pub fn amdgpu_jpeg_idle_work_handler(adev: &mut amdgpu_device) {
     if fences == 0 && adev.jpeg.total_submission_cnt == 0 {
         crate::amdgpu_device::amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_JPEG, true);
     } else {
-        crate::workqueue::mod_delayed_work(adev, crate::workqueue::work::jpeg_idle, JPEG_IDLE_TIMEOUT_US);
+        crate::workqueue::schedule_delayed_work(adev, crate::workqueue::work::jpeg_idle, JPEG_IDLE_TIMEOUT_US);
     }
 }
 
@@ -330,7 +330,7 @@ pub fn amdgpu_jpeg_ring_begin_use(adev: &mut amdgpu_device, _r: usize) {
 /// `amdgpu_jpeg_ring_end_use`.
 pub fn amdgpu_jpeg_ring_end_use(adev: &mut amdgpu_device, _r: usize) {
     adev.jpeg.total_submission_cnt -= 1;
-    crate::workqueue::mod_delayed_work(adev, crate::workqueue::work::jpeg_idle, JPEG_IDLE_TIMEOUT_US);
+    crate::workqueue::schedule_delayed_work(adev, crate::workqueue::work::jpeg_idle, JPEG_IDLE_TIMEOUT_US);
 }
 
 use crate::amdgpu_ring::amdgpu_ring_write as rw;

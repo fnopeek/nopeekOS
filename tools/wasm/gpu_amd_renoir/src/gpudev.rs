@@ -999,7 +999,12 @@ pub fn serve(adev: &mut amdgpu_device) {
     let (mut done, mut failed) = (0u64, 0u64);
     loop {
         let idle_ms = if svc.scene.is_some() { 2 } else { 100 };
-        npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, crate::amdgpu_virtio::fence_wait_ms(&svc.waits).min(idle_ms));
+        // Queued work runs now, as a kworker would; a timer bounds the sleep.
+        let timer_ms = crate::workqueue::next_timer_us(adev).map_or(i32::MAX, |us| us.div_ceil(1000) as i32);
+        let wait_ms = crate::amdgpu_virtio::fence_wait_ms(&svc.waits).min(idle_ms).min(timer_ms);
+        if !crate::workqueue::has_runnable(adev) {
+            npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, wait_ms);
+        }
         crate::amdgpu_irq::amdgpu_ih_process(adev, false);
         crate::workqueue::run_pending(adev);
         poll_scene(adev, &mut svc);
