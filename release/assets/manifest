@@ -1,4 +1,4 @@
-issued=1792687739
+issued=1792689530
 
 [font:ibm-plex-mono]
 size=173052
@@ -31,11 +31,6 @@ sha384=24acb4aff521ef049b54ff1c525b2321b7768b052e766c386cbc2107ef21f88d703711cd4
 [microvm:linux-virt]
 size=9536512
 sha384=66ebc8a6a4a41be21576a2086d28cebb89b04d6e0fe46f2802b29bef922ecdba02a824db5dfd1eb54dcc88241f9a7375
-
-[microvm:userspace-sqfs]
-size=367472640
-sha384=1afb827e01e4a11e87f76f489806f3157d6ee26cf8b4b778b2340a23d55033a05226c6b92bc025ce629452b9f745b078
-url=https://github.com/fnopeek/nopeekOS/releases/download/assets/librewolf-0.9.2/microvm-userspace.sqfs
 
 [microvm:firefox-sqfs]
 size=383483904
