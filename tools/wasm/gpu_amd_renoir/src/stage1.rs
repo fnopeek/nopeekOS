@@ -254,11 +254,11 @@ fn ip_init_phase2(adev: &mut amdgpu_device) {
         .s(", gfxoff ").dec(adev.gfx.gfx_off_state as u64).s(", workload 0x").hexu(adev.smu.workload_mask)
         .s(", gfxclk ").dec(adev.smu.gfx_default_hard_min_freq as u64).s("-")
         .dec(adev.smu.gfx_default_soft_max_freq as u64).s(" MHz").say();
-    // amdgpu_device_delayed_init_work_handler
-    let r = crate::amdgpu_ib::amdgpu_ib_ring_tests(adev);
-    if r != 0 {
-        Line::new().s("ib ring test failed (").dec((-r) as u64).s(").").say();
-    }
+    // The IB tests run AMDGPU_RESUME_MS after init, when the idle work
+    // has gated VCN and JPEG again: their begin_use starts them anew.
+    crate::workqueue::mod_delayed_work(adev, crate::workqueue::work::delayed_init, dev::AMDGPU_RESUME_US);
+    crate::workqueue::wait_until(adev, i64::MAX, |a| a.delayed_init_result.is_some());
+    let r = adev.delayed_init_result.unwrap_or(-22);
     report_rings(adev, "ib tests:");
     if r == 0 {
         Line::new().s("stage 4 done: ring and IB tests").say();

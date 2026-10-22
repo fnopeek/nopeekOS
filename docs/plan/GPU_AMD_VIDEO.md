@@ -312,3 +312,20 @@ der Ring, der letzte VM-Fehler, die IP-Register und der Ringinhalt. Ohne
 devcoredump-Datei geht das ins Log, und vom Ring nur der Teil von 32
 Dwords vor `rptr` bis `wptr` (hoechstens 256). Die Dumps von GFX und SDMA
 sind nicht portiert.
+
+**Der Dump (Modul 0.22.0, 2026-10-22)** sagt, dass die RBC nach dem Start
+**keinen einzigen Befehl** ausgefuehrt hat: `GPCOM_VCPU_DATA0/DATA1/CMD`
+stehen auf 0, obwohl der erste Befehl im Ring sie beschreibt; `RBC_RB_RPTR`
+0, Hardware-`WPTR` 0x60 (die Tuerklingel kam an), `UVD_STATUS` 0x26 ohne
+`RBC_BUSY`. Der Ring ist richtig gebaut (VM-Flush mit Semaphor, Fence 3,
+`PACKET_START`, IB auf VMID 1 an `0xffff8001_00220000`, Fence 4,
+`PACKET_END`) — er wird nur nie gelesen. Damit haengt es nicht am
+VM-Flush, sondern am Start des Blocks.
+
+Der Start nach einem Ruhen ist der Weg, den das Modul bis dahin nie fuhr:
+die IB-Tests liefen gleich nach `late_init`, solange VCN noch vom
+Ringtest an war. Linux faehrt sie `AMDGPU_RESUME_MS` (2 s) spaeter aus
+`delayed_init_work` — nach dem Idle-Work, das VCN und JPEG bei 1 s
+gated. **Modul 0.23.0** tut das ebenso: der IB-Test von `vcn_dec` startet
+den Block dann aus dem Ruhezustand, genau wie der erste Auftrag eines
+Gasts. Geht er schief, zeigt das der Bootlog ohne Firefox.

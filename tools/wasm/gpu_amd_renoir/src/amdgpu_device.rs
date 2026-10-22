@@ -751,6 +751,9 @@ pub struct amdgpu_device {
     /// `adev->fence_context`: the hardware fences' contexts, one per ring.
     pub fence_context: u64,
     pub wq: crate::workqueue::workqueue,
+    /// What `amdgpu_device_delayed_init_work_handler`'s IB tests returned,
+    /// once they ran.
+    pub delayed_init_result: Option<i32>,
     /// The scheduler entities, by key.
     pub sched_entities: Vec<Option<crate::drm_sched::drm_sched_entity>>,
     /// The jobs between allocation and `free_job`, by key.
@@ -898,6 +901,7 @@ impl amdgpu_device {
             pm: amdgpu_pm::default(),
             fence_context: 0,
             wq: Default::default(),
+            delayed_init_result: None,
             sched_entities: Vec::new(),
             jobs: Default::default(),
             next_job: 0,
@@ -2755,4 +2759,17 @@ pub fn amdgpu_device_fini_hw(adev: &mut amdgpu_device) {
     }
     // amdgpu_irq_fini_hw: free_irq; the rings go with the module.
     adev.irq.installed = false;
+}
+
+/// `AMDGPU_RESUME_MS`, in microseconds.
+pub const AMDGPU_RESUME_US: u64 = 2_000_000;
+
+/// `amdgpu_device_delayed_init_work_handler`: the IB tests, queued by
+/// `amdgpu_device_init` after late init.
+pub fn amdgpu_device_delayed_init_work_handler(adev: &mut amdgpu_device) {
+    let r = crate::amdgpu_ib::amdgpu_ib_ring_tests(adev);
+    if r != 0 {
+        Line::new().s("ib ring test failed (").dec((-r) as u64).s(").").say();
+    }
+    adev.delayed_init_result = Some(r);
 }

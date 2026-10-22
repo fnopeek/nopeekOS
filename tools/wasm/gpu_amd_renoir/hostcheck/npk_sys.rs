@@ -435,8 +435,14 @@ pub fn irq_arm(_vector: i32) -> i64 {
 
 /// `npk_irq_wait`: 1 when the fake card raised an interrupt since `since`;
 /// otherwise the wait passes (in an instant: the clock is the host's).
-pub fn irq_wait(_vector: i32, since: i64, _timeout_ms: i32) -> i32 {
-    if IRQ_FIRED.with(|f| f.get()) != since { 1 } else { 0 }
+/// The fake card raises its interrupts synchronously, so one that has not
+/// fired by now does not fire in the wait: it sleeps the timeout out.
+pub fn irq_wait(_vector: i32, since: i64, timeout_ms: i32) -> i32 {
+    if IRQ_FIRED.with(|f| f.get()) != since {
+        return 1;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(timeout_ms.max(0) as u64));
+    0
 }
 
 thread_local! {
@@ -755,6 +761,8 @@ pub fn gpudev_poll(buf: &mut [u8]) -> i32 {
                 })
             });
             if now < until {
+                // An idle guest sends nothing for a while, not for a spin.
+                std::thread::sleep(std::time::Duration::from_millis(1));
                 return 0;
             }
             IDLE_UNTIL.with(|u| *u.borrow_mut() = None);

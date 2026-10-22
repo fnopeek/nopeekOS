@@ -27,6 +27,8 @@ pub enum work {
     vcn_idle { inst: usize },
     /// `amdgpu_jpeg_idle_work_handler` (`jpeg.idle_work`).
     jpeg_idle,
+    /// `amdgpu_device_delayed_init_work_handler` (`delayed_init_work`).
+    delayed_init,
 }
 
 /// Queued work and armed timers.
@@ -131,6 +133,7 @@ pub fn run_pending(adev: &mut amdgpu_device) {
             work::ih_soft => crate::amdgpu_irq::amdgpu_irq_handle_ih_soft(adev),
             work::vcn_idle { inst } => crate::vcn_v2_0::amdgpu_vcn_idle_work_handler(adev, inst),
             work::jpeg_idle => crate::jpeg_v2_0::amdgpu_jpeg_idle_work_handler(adev),
+            work::delayed_init => crate::amdgpu_device::amdgpu_device_delayed_init_work_handler(adev),
         }
         adev.wq.running.pop();
     }
