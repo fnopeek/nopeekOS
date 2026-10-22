@@ -25,3 +25,22 @@ pub struct resource_caps {
     pub num_hpo_dp_link_encoder: i32,
     pub num_mpc_3dlut: i32,
 }
+
+/// `#define NO_UNDERLAY_PIPE` (core_types.h): assigned to the unsigned
+/// `underlay_pipe_index`, so Linux' `-1` reads back as `u32::MAX`.
+pub const NO_UNDERLAY_PIPE: u32 = u32::MAX;
+
+/// `struct resource_pool` (core_types.h): everything a DCN pool owns. Ported
+/// grow-as-reached — only the fields `dcn21_resource_construct` has reached so
+/// far; the block arrays (hubps/dpps/opps/stream_enc/…) join as each IP-block
+/// constructor lands.
+#[derive(Default)]
+pub struct resource_pool {
+    pub pipe_count: u32,
+    pub underlay_pipe_index: u32,
+    pub stream_enc_count: u32,
+    pub audio_count: u32,
+    pub clk_src_count: u32,
+    /// `res_cap`: the per-ASIC count table (Renoir → `RES_CAP_RN`).
+    pub res_cap: Option<&'static resource_caps>,
+}

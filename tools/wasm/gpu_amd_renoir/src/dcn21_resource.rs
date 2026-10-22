@@ -5,7 +5,8 @@
 //! the next unit, each block with its regs.list entries + oracle.
 #![allow(dead_code)]
 
-use crate::dc_resource::resource_caps;
+use crate::dc::dc;
+use crate::dc_resource::{resource_caps, resource_pool, NO_UNDERLAY_PIPE};
 use crate::dc_types::dc_caps;
 
 /// `static const struct resource_caps res_cap_rn` (dcn21_resource.c):
@@ -87,4 +88,20 @@ pub fn dcn21_set_caps(caps: &mut dc_caps) {
     caps.color.mpc.ocsc = true;
 
     caps.dp_hdmi21_pcon_support = true;
+}
+
+/// `dcn21_resource_construct` (dcn21_resource.c), its head: the pool's resource
+/// caps and the `dc->caps` hardcoding. The "Create resources" section (clock
+/// sources + the IP-block constructors, each with its regs.list entries) grows
+/// this as each block lands; `ctx->dc_bios->regs = &bios_regs` waits for
+/// bios_parser, `read_pipe_fuses` for the pipe-fuse read.
+pub fn dcn21_resource_construct(dc: &mut dc, pool: &mut resource_pool) {
+    pool.res_cap = Some(&RES_CAP_RN);
+
+    // Resource + asic cap hardcoding.
+    pool.underlay_pipe_index = NO_UNDERLAY_PIPE;
+    // max pipe num for ASIC before check pipe fuses
+    pool.pipe_count = RES_CAP_RN.num_timing_generator as u32;
+
+    dcn21_set_caps(&mut dc.caps);
 }
