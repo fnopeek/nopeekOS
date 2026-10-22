@@ -638,3 +638,70 @@ pub fn jpeg_v2_0_ring_reset(adev: &mut amdgpu_device, ring: usize, _vmid: u32,
     }
     crate::amdgpu_ring::amdgpu_ring_reset_helper_end(adev, ring, Some(timedout))
 }
+
+// ---- the IP dump of a job timeout ----
+
+/// `jpeg_reg_list_2_0`: name, offset, base index.
+static JPEG_REG_LIST_2_0: [(&str, u32, u32); JPEG_REG_LIST_2_0_COUNT as usize] = [
+    ("mmUVD_JPEG_POWER_STATUS", mmUVD_JPEG_POWER_STATUS, mmUVD_JPEG_POWER_STATUS_BASE_IDX),
+    ("mmUVD_JPEG_INT_STAT", mmUVD_JPEG_INT_STAT, mmUVD_JPEG_INT_STAT_BASE_IDX),
+    ("mmUVD_JRBC_RB_RPTR", mmUVD_JRBC_RB_RPTR, mmUVD_JRBC_RB_RPTR_BASE_IDX),
+    ("mmUVD_JRBC_RB_WPTR", mmUVD_JRBC_RB_WPTR, mmUVD_JRBC_RB_WPTR_BASE_IDX),
+    ("mmUVD_JRBC_RB_CNTL", mmUVD_JRBC_RB_CNTL, mmUVD_JRBC_RB_CNTL_BASE_IDX),
+    ("mmUVD_JRBC_RB_SIZE", mmUVD_JRBC_RB_SIZE, mmUVD_JRBC_RB_SIZE_BASE_IDX),
+    ("mmUVD_JRBC_STATUS", mmUVD_JRBC_STATUS, mmUVD_JRBC_STATUS_BASE_IDX),
+    ("mmJPEG_DEC_ADDR_MODE", mmJPEG_DEC_ADDR_MODE, mmJPEG_DEC_ADDR_MODE_BASE_IDX),
+    ("mmJPEG_DEC_GFX10_ADDR_CONFIG", mmJPEG_DEC_GFX10_ADDR_CONFIG, mmJPEG_DEC_GFX10_ADDR_CONFIG_BASE_IDX),
+    ("mmJPEG_DEC_Y_GFX10_TILING_SURFACE", mmJPEG_DEC_Y_GFX10_TILING_SURFACE, mmJPEG_DEC_Y_GFX10_TILING_SURFACE_BASE_IDX),
+    ("mmJPEG_DEC_UV_GFX10_TILING_SURFACE", mmJPEG_DEC_UV_GFX10_TILING_SURFACE,
+     mmJPEG_DEC_UV_GFX10_TILING_SURFACE_BASE_IDX),
+    ("mmUVD_JPEG_PITCH", mmUVD_JPEG_PITCH, mmUVD_JPEG_PITCH_BASE_IDX),
+    ("mmUVD_JPEG_UV_PITCH", mmUVD_JPEG_UV_PITCH, mmUVD_JPEG_UV_PITCH_BASE_IDX),
+];
+
+/// `amdgpu_jpeg_dump_ip_state`: the power status always, the rest only
+/// while the block is powered.
+pub fn amdgpu_jpeg_dump_ip_state(adev: &mut amdgpu_device) {
+    if adev.jpeg.ip_dump.is_empty() {
+        return;
+    }
+    let count = adev.jpeg.reg_count as usize;
+    for i in 0..adev.jpeg.num_jpeg_inst as usize {
+        if adev.jpeg.harvest_config & (1 << i) != 0 {
+            continue;
+        }
+        let inst_off = i * count;
+        let (_, reg, idx) = JPEG_REG_LIST_2_0[0];
+        adev.jpeg.ip_dump[inst_off] = rreg(adev, reg, idx);
+        if adev.jpeg.ip_dump[inst_off] & 0x1 != 1 {
+            for j in 1..count {
+                let (_, reg, idx) = JPEG_REG_LIST_2_0[j];
+                adev.jpeg.ip_dump[inst_off + j] = rreg(adev, reg, idx);
+            }
+        }
+    }
+}
+
+/// `amdgpu_jpeg_print_ip_state`.
+pub fn amdgpu_jpeg_print_ip_state(adev: &amdgpu_device) {
+    if adev.jpeg.ip_dump.is_empty() {
+        return;
+    }
+    Line::new().s("num_instances:").dec(adev.jpeg.num_jpeg_inst as u64).say();
+    let count = adev.jpeg.reg_count as usize;
+    for i in 0..adev.jpeg.num_jpeg_inst as usize {
+        if adev.jpeg.harvest_config & (1 << i) != 0 {
+            Line::new().s("Harvested Instance:JPEG").dec(i as u64).s(" Skipping dump").say();
+            continue;
+        }
+        let inst_off = i * count;
+        if adev.jpeg.ip_dump[inst_off] & 0x1 != 1 {
+            Line::new().s("Active Instance:JPEG").dec(i as u64).say();
+            for j in 0..count {
+                Line::new().s(JPEG_REG_LIST_2_0[j].0).s(" ").hex(adev.jpeg.ip_dump[inst_off + j]).say();
+            }
+        } else {
+            Line::new().s("Inactive Instance:JPEG").dec(i as u64).say();
+        }
+    }
+}

@@ -655,6 +655,23 @@ pub fn amdgpu_ring_set_wptr(adev: &mut amdgpu_device, r: usize) {
     }
 }
 
+/// `amdgpu_ring_get_rptr` and `amdgpu_ring_get_wptr`, for the rings whose
+/// readers are ported (VCN and JPEG).
+pub fn amdgpu_ring_get_rptr_wptr(adev: &amdgpu_device, r: usize) -> Option<(u64, u64)> {
+    Some(match adev.rings[r].funcs.ops {
+        ring_ops::vcn_v2_0_dec => {
+            (crate::vcn_v2_0::vcn_v2_0_dec_ring_get_rptr(adev, r), crate::vcn_v2_0::vcn_v2_0_dec_ring_get_wptr(adev, r))
+        }
+        ring_ops::vcn_v2_0_enc => {
+            (crate::vcn_v2_0::vcn_v2_0_enc_ring_get_rptr(adev, r), crate::vcn_v2_0::vcn_v2_0_enc_ring_get_wptr(adev, r))
+        }
+        ring_ops::jpeg_v2_0_dec => {
+            (crate::jpeg_v2_0::jpeg_v2_0_dec_ring_get_rptr(adev, r), crate::jpeg_v2_0::jpeg_v2_0_dec_ring_get_wptr(adev, r))
+        }
+        _ => return None,
+    })
+}
+
 /// `amdgpu_ring_commit`. `end_use` is VCN's and JPEG's (see `amdgpu_ring_alloc`).
 pub fn amdgpu_ring_commit(adev: &mut amdgpu_device, r: usize) {
     let ring = &adev.rings[r];

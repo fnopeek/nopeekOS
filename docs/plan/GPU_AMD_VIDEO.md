@@ -280,3 +280,35 @@ Lastbild zeigt Arbeit auf `vcn_dec` statt CPU-Last.
 **Ungeprueft bleibt** der Dekoder selbst: ob die Firmware die Nachrichten
 von radeonsi ueber die VM des Gasts liest und schreibt wie erwartet. Das
 zeigt erst der Geraetelauf.
+
+## 11. Der erste Geraetelauf mit einem Video (Kernel 0.666.1, Modul 0.21.0)
+
+Firefox meldet `H264 HWDEC HWENC`, `VP9 HWDEC`, `HEVC HWDEC HWENC`; VP8 und
+AV1 nur in Software — das ist Renoirs VCN 2.2. Der erste Dekodierauftrag
+eines Gasts aber haengt:
+
+    ring vcn_dec timeout, signaled seq=2, emitted seq=4
+    Starting vcn_dec ring reset
+    Register(0) [mmUVD_POWER_STATUS] failed to reach value 0x00000001 != 0x00000002
+    Register(0) [mmUVD_RBC_RB_RPTR] failed to reach value 0x00000060 != 0x00000000
+    Ring vcn_dec reset succeeded
+
+`seq=2` sind die zwei Fences des IB-Tests beim Laden: **kein Auftrag eines
+Gasts ist auf `vcn_dec` je fertig geworden**, auch nicht im Lauf davor (dort
+spielte das Video in Software). Der Block ist an (`POWER_STATUS` 2 =
+`UVDM_UVDU_PWR_ON`), die RBC hat vom Ring nichts gelesen (`RPTR` 0 bei
+`WPTR` 0x60). Danach lehnt `amdgpu_ctx_get_entity` jeden weiteren Auftrag
+des Kontexts mit ETIME ab (`drm_sched_entity_error`) — wie Linux; Mesas
+Dekoder legt keinen neuen Kontext an, also bleibt das Video stehen.
+
+Neu gegenueber den Ringtests ist an einem Gastauftrag der VM-Flush auf dem
+MMHUB (Semaphor, Invalidierung, `REG_READ_COND_WAIT`) und die VMID des
+Gasts; beides lief auf dem Geraet nie.
+
+**Modul 0.22.0** portiert dafuer den Core-Dump von `amdgpu_job_timedout`
+(`amdgpu_job_do_core_dump`): `dump_ip_state` von VCN und JPEG
+(`vcn_reg_list_2_0`, `jpeg_reg_list_2_0`), dann aus `amdgpu_devcoredump_read`
+der Ring, der letzte VM-Fehler, die IP-Register und der Ringinhalt. Ohne
+devcoredump-Datei geht das ins Log, und vom Ring nur der Teil von 32
+Dwords vor `rptr` bis `wptr` (hoechstens 256). Die Dumps von GFX und SDMA
+sind nicht portiert.

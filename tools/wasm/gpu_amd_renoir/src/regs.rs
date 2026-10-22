@@ -3729,6 +3729,26 @@ pub const mmUVD_JPEG_PITCH_INTERNAL_OFFSET: u32 = 0x401f;
 pub const mmUVD_JPEG_PITCH: u32 = 0x9f;
 /// include/asic_reg/vcn/vcn_1_0_offset.h:113
 pub const mmUVD_JPEG_PITCH_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:42
+pub const mmUVD_JPEG_INT_STAT: u32 = 0x8b;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:43
+pub const mmUVD_JPEG_INT_STAT_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:60
+pub const mmJPEG_DEC_ADDR_MODE: u32 = 0xa7;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:61
+pub const mmJPEG_DEC_ADDR_MODE_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:54
+pub const mmJPEG_DEC_Y_GFX10_TILING_SURFACE: u32 = 0xa4;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:55
+pub const mmJPEG_DEC_Y_GFX10_TILING_SURFACE_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:56
+pub const mmJPEG_DEC_UV_GFX10_TILING_SURFACE: u32 = 0xa5;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:57
+pub const mmJPEG_DEC_UV_GFX10_TILING_SURFACE_BASE_IDX: u32 = 0x0;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:46
+pub const mmUVD_JPEG_UV_PITCH: u32 = 0xa0;
+/// include/asic_reg/vcn/vcn_2_0_0_offset.h:47
+pub const mmUVD_JPEG_UV_PITCH_BASE_IDX: u32 = 0x0;
 /// include/amd_shared.h:182
 pub const AMD_PG_SUPPORT_JPEG_DPG: u32 = 0x80000;
 /// The value of `ARRAY_SIZE(jpeg_reg_list_2_0)` in jpeg_v2_0.c
@@ -7303,6 +7323,58 @@ pub const mmUVD_PGFSM_CONFIG_BASE_IDX: u32 = 0x1;
 pub const mmUVD_PGFSM_STATUS: u32 = 0x1;
 /// include/asic_reg/vcn/vcn_1_0_offset.h:31
 pub const mmUVD_PGFSM_STATUS_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_3_1_d.h:83
+pub const mmUVD_CONTEXT_ID: u32 = 0x27d;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:219
+pub const mmUVD_CONTEXT_ID_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:220
+pub const mmUVD_CONTEXT_ID2: u32 = 0x27f;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:221
+pub const mmUVD_CONTEXT_ID2_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:40
+pub const mmUVD_DPG_LMA_MASK: u32 = 0x13;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:41
+pub const mmUVD_DPG_LMA_MASK_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:59
+pub const mmUVD_RB_BASE_HI3: u32 = 0x1de;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:135
+pub const mmUVD_RB_BASE_HI3_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:58
+pub const mmUVD_RB_BASE_LO3: u32 = 0x1dd;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:133
+pub const mmUVD_RB_BASE_LO3_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:414
+pub const mmUVD_RB_BASE_HI4: u32 = 0x2a0;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:415
+pub const mmUVD_RB_BASE_HI4_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:412
+pub const mmUVD_RB_BASE_LO4: u32 = 0x29f;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:413
+pub const mmUVD_RB_BASE_LO4_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:57
+pub const mmUVD_RB_RPTR3: u32 = 0x1db;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:129
+pub const mmUVD_RB_RPTR3_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:56
+pub const mmUVD_RB_WPTR3: u32 = 0x1dc;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:131
+pub const mmUVD_RB_WPTR3_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:418
+pub const mmUVD_RB_RPTR4: u32 = 0x2a2;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:419
+pub const mmUVD_RB_RPTR4_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:226
+pub const mmUVD_RB_WPTR4: u32 = 0x616;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:227
+pub const mmUVD_RB_WPTR4_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/uvd/uvd_6_0_d.h:60
+pub const mmUVD_RB_SIZE3: u32 = 0x1df;
+/// include/asic_reg/uvd/uvd_7_0_offset.h:137
+pub const mmUVD_RB_SIZE3_BASE_IDX: u32 = 0x1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:416
+pub const mmUVD_RB_SIZE4: u32 = 0x2a1;
+/// include/asic_reg/vcn/vcn_1_0_offset.h:417
+pub const mmUVD_RB_SIZE4_BASE_IDX: u32 = 0x1;
 /// include/asic_reg/uvd/uvd_3_1_d.h:93
 pub const mmUVD_POWER_STATUS: u32 = 0x4;
 /// include/asic_reg/uvd/uvd_7_0_offset.h:29

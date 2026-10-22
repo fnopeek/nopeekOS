@@ -201,6 +201,16 @@ else
     echo "guest hang on vcn_enc0: NOT recovered by a ring reset"
     fail=1
 fi
+# The job timeout dumps the IP state first: the encoder hang shows the
+# powered VCN's registers and the ring between rptr and wptr.
+if sed -n '/^IP Type: 7 Ring Name: vcn_enc0/,/^Ring contents/p' "$B/run.log" |
+   grep -q '^Active Instance:VCN0' &&
+   sed -n '/^IP Type: 7 Ring Name: vcn_enc0/,/^Ring contents/p' "$B/run.log" | grep -q '^Rptr: 0x20 Wptr: 0x40 '; then
+    echo "job timeout on vcn_enc0: IP state and ring dumped"
+else
+    echo "job timeout on vcn_enc0: NO core dump"
+    fail=1
+fi
 echo "--- the run on the host (the log the card run prints; a fake SMU answers OK):"
 grep -vE '^(vram |  block )' "$B/run.log"
 exit $fail

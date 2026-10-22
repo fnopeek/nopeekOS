@@ -1458,3 +1458,93 @@ pub fn amdgpu_vcn_ring_reset(adev: &mut amdgpu_device, ring: usize, _vmid: u32,
                              timedout: &crate::dma_fence::Fence) -> i32 {
     amdgpu_vcn_reset_engine(adev, ring, timedout)
 }
+
+// ---- the IP dump of a job timeout ----
+
+/// `vcn_reg_list_2_0`: name, offset, base index.
+static VCN_REG_LIST_2_0: [(&str, u32, u32); VCN_REG_LIST_2_0_COUNT as usize] = [
+    ("mmUVD_POWER_STATUS", mmUVD_POWER_STATUS, mmUVD_POWER_STATUS_BASE_IDX),
+    ("mmUVD_STATUS", mmUVD_STATUS, mmUVD_STATUS_BASE_IDX),
+    ("mmUVD_CONTEXT_ID", mmUVD_CONTEXT_ID, mmUVD_CONTEXT_ID_BASE_IDX),
+    ("mmUVD_CONTEXT_ID2", mmUVD_CONTEXT_ID2, mmUVD_CONTEXT_ID2_BASE_IDX),
+    ("mmUVD_GPCOM_VCPU_DATA0", mmUVD_GPCOM_VCPU_DATA0, mmUVD_GPCOM_VCPU_DATA0_BASE_IDX),
+    ("mmUVD_GPCOM_VCPU_DATA1", mmUVD_GPCOM_VCPU_DATA1, mmUVD_GPCOM_VCPU_DATA1_BASE_IDX),
+    ("mmUVD_GPCOM_VCPU_CMD", mmUVD_GPCOM_VCPU_CMD, mmUVD_GPCOM_VCPU_CMD_BASE_IDX),
+    ("mmUVD_RB_BASE_HI", mmUVD_RB_BASE_HI, mmUVD_RB_BASE_HI_BASE_IDX),
+    ("mmUVD_RB_BASE_LO", mmUVD_RB_BASE_LO, mmUVD_RB_BASE_LO_BASE_IDX),
+    ("mmUVD_RB_BASE_HI2", mmUVD_RB_BASE_HI2, mmUVD_RB_BASE_HI2_BASE_IDX),
+    ("mmUVD_RB_BASE_LO2", mmUVD_RB_BASE_LO2, mmUVD_RB_BASE_LO2_BASE_IDX),
+    ("mmUVD_RB_BASE_HI3", mmUVD_RB_BASE_HI3, mmUVD_RB_BASE_HI3_BASE_IDX),
+    ("mmUVD_RB_BASE_LO3", mmUVD_RB_BASE_LO3, mmUVD_RB_BASE_LO3_BASE_IDX),
+    ("mmUVD_RB_BASE_HI4", mmUVD_RB_BASE_HI4, mmUVD_RB_BASE_HI4_BASE_IDX),
+    ("mmUVD_RB_BASE_LO4", mmUVD_RB_BASE_LO4, mmUVD_RB_BASE_LO4_BASE_IDX),
+    ("mmUVD_RB_RPTR", mmUVD_RB_RPTR, mmUVD_RB_RPTR_BASE_IDX),
+    ("mmUVD_RB_WPTR", mmUVD_RB_WPTR, mmUVD_RB_WPTR_BASE_IDX),
+    ("mmUVD_RB_RPTR2", mmUVD_RB_RPTR2, mmUVD_RB_RPTR2_BASE_IDX),
+    ("mmUVD_RB_WPTR2", mmUVD_RB_WPTR2, mmUVD_RB_WPTR2_BASE_IDX),
+    ("mmUVD_RB_RPTR3", mmUVD_RB_RPTR3, mmUVD_RB_RPTR3_BASE_IDX),
+    ("mmUVD_RB_WPTR3", mmUVD_RB_WPTR3, mmUVD_RB_WPTR3_BASE_IDX),
+    ("mmUVD_RB_RPTR4", mmUVD_RB_RPTR4, mmUVD_RB_RPTR4_BASE_IDX),
+    ("mmUVD_RB_WPTR4", mmUVD_RB_WPTR4, mmUVD_RB_WPTR4_BASE_IDX),
+    ("mmUVD_RB_SIZE", mmUVD_RB_SIZE, mmUVD_RB_SIZE_BASE_IDX),
+    ("mmUVD_RB_SIZE2", mmUVD_RB_SIZE2, mmUVD_RB_SIZE2_BASE_IDX),
+    ("mmUVD_RB_SIZE3", mmUVD_RB_SIZE3, mmUVD_RB_SIZE3_BASE_IDX),
+    ("mmUVD_RB_SIZE4", mmUVD_RB_SIZE4, mmUVD_RB_SIZE4_BASE_IDX),
+    ("mmUVD_PGFSM_CONFIG", mmUVD_PGFSM_CONFIG, mmUVD_PGFSM_CONFIG_BASE_IDX),
+    ("mmUVD_PGFSM_STATUS", mmUVD_PGFSM_STATUS, mmUVD_PGFSM_STATUS_BASE_IDX),
+    ("mmUVD_DPG_LMA_CTL", mmUVD_DPG_LMA_CTL, mmUVD_DPG_LMA_CTL_BASE_IDX),
+    ("mmUVD_DPG_LMA_DATA", mmUVD_DPG_LMA_DATA, mmUVD_DPG_LMA_DATA_BASE_IDX),
+    ("mmUVD_DPG_LMA_MASK", mmUVD_DPG_LMA_MASK, mmUVD_DPG_LMA_MASK_BASE_IDX),
+    ("mmUVD_DPG_PAUSE", mmUVD_DPG_PAUSE, mmUVD_DPG_PAUSE_BASE_IDX),
+];
+
+/// `amdgpu_vcn_dump_ip_state`: `mmUVD_POWER_STATUS` always, the rest only
+/// while the tiles are powered.
+pub fn amdgpu_vcn_dump_ip_state(adev: &mut amdgpu_device) {
+    if adev.vcn.ip_dump.is_empty() {
+        return;
+    }
+    let count = adev.vcn.reg_count as usize;
+    for i in 0..adev.vcn.num_vcn_inst as usize {
+        if adev.vcn.harvest_config & (1 << i) != 0 {
+            continue;
+        }
+        let inst_off = i * count;
+        let (_, reg, idx) = VCN_REG_LIST_2_0[0];
+        adev.vcn.ip_dump[inst_off] = rreg(adev, reg, idx);
+        let is_powered = adev.vcn.ip_dump[inst_off] & UVD_POWER_STATUS__UVD_POWER_STATUS_TILES_OFF
+            != UVD_POWER_STATUS__UVD_POWER_STATUS_TILES_OFF;
+        if is_powered {
+            for j in 1..count {
+                let (_, reg, idx) = VCN_REG_LIST_2_0[j];
+                adev.vcn.ip_dump[inst_off + j] = rreg(adev, reg, idx);
+            }
+        }
+    }
+}
+
+/// `amdgpu_vcn_print_ip_state`.
+pub fn amdgpu_vcn_print_ip_state(adev: &amdgpu_device) {
+    if adev.vcn.ip_dump.is_empty() {
+        return;
+    }
+    Line::new().s("num_instances:").dec(adev.vcn.num_vcn_inst as u64).say();
+    let count = adev.vcn.reg_count as usize;
+    for i in 0..adev.vcn.num_vcn_inst as usize {
+        if adev.vcn.harvest_config & (1 << i) != 0 {
+            Line::new().s("Harvested Instance:VCN").dec(i as u64).s(" Skipping dump").say();
+            continue;
+        }
+        let inst_off = i * count;
+        let is_powered = adev.vcn.ip_dump[inst_off] & UVD_POWER_STATUS__UVD_POWER_STATUS_TILES_OFF
+            != UVD_POWER_STATUS__UVD_POWER_STATUS_TILES_OFF;
+        if is_powered {
+            Line::new().s("Active Instance:VCN").dec(i as u64).say();
+            for j in 0..count {
+                Line::new().s(VCN_REG_LIST_2_0[j].0).s(" ").hex(adev.vcn.ip_dump[inst_off + j]).say();
+            }
+        } else {
+            Line::new().s("Inactive Instance:VCN").dec(i as u64).say();
+        }
+    }
+}

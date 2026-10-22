@@ -78,12 +78,73 @@ pub fn amdgpu_job_get_vmid(adev: &amdgpu_device, j: Option<u64>) -> u32 {
     j.map_or(0, |j| adev.jobs.get(&j).unwrap().vmid)
 }
 
-/// `amdgpu_job_timedout`: the device is not unplugged and not a VF, and
-/// no devcoredump takes the core dump. Soft recovery, then a reset of the
-/// ring's queue, then the device reset.
+/// `amdgpu_job_do_core_dump`: the IP blocks with a `dump_ip_state` (VCN
+/// and JPEG are ported), then `amdgpu_coredump`.
+fn amdgpu_job_do_core_dump(adev: &mut amdgpu_device, r: usize) {
+    Line::new().s("Dumping IP State").say();
+    for i in 0..adev.ip_blocks.len() {
+        match adev.ip_blocks[i].version.type_ {
+            AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::amdgpu_vcn_dump_ip_state(adev),
+            AMD_IP_BLOCK_TYPE_JPEG => crate::jpeg_v2_0::amdgpu_jpeg_dump_ip_state(adev),
+            _ => {}
+        }
+    }
+    Line::new().s("Dumping IP State Completed").say();
+    amdgpu_coredump(adev, r);
+}
+
+/// The ring contents a dump prints: the dwords before the read pointer and
+/// up to the write pointer.
+const COREDUMP_RING_DWORDS_BEFORE_RPTR: u64 = 32;
+const COREDUMP_RING_DWORDS_MAX: u64 = 256;
+
+/// `amdgpu_coredump` with `amdgpu_devcoredump_read`: no devcoredump file,
+/// so the parts that say where a ring stands go to the log — the timed-out
+/// ring, the last VM fault, the IP dump, and the timed-out ring's buffer.
+fn amdgpu_coredump(adev: &amdgpu_device, r: usize) {
+    let ring = &adev.rings[r];
+    Line::new().s("Ring timed out details").say();
+    Line::new().s("IP Type: ").dec(ring.funcs.type_ as u64).s(" Ring Name: ").s(&ring.name).say();
+    let f = &adev.vm_manager.fault_info;
+    Line::new().s("[").s(if f.vmhub != 0 { "mmhub" } else { "gfxhub" }).s("] Page fault observed").say();
+    Line::new().s("Faulty page starting at address: 0x").hexw((f.addr >> 32) as u32, 8).hexw(f.addr as u32, 8).say();
+    Line::new().s("Protection fault status register: 0x").hexu(f.status).say();
+    Line::new().s("IP Dump").say();
+    for b in adev.ip_blocks.iter() {
+        let print: fn(&amdgpu_device) = match b.version.type_ {
+            AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::amdgpu_vcn_print_ip_state,
+            AMD_IP_BLOCK_TYPE_JPEG => crate::jpeg_v2_0::amdgpu_jpeg_print_ip_state,
+            _ => continue,
+        };
+        Line::new().s("IP: ").bytes(b.version.funcs_name).say();
+        print(adev);
+    }
+    Line::new().s("Ring buffer information").say();
+    Line::new().s("ring name: ").s(&ring.name).say();
+    let Some((rptr, wptr)) = crate::amdgpu_ring::amdgpu_ring_get_rptr_wptr(adev, r) else { return };
+    Line::new().s("Rptr: 0x").hexu(rptr as u32).s(" Wptr: 0x").hexu(wptr as u32).s(" RB mask: ").hexu(ring.buf_mask)
+        .say();
+    Line::new().s("Ring size in dwords: ").dec((ring.ring_size / 4) as u64).say();
+    let Some(k) = ring.ring else { return };
+    let mask = ring.buf_mask as u64;
+    let first = rptr.saturating_sub(COREDUMP_RING_DWORDS_BEFORE_RPTR);
+    let n = wptr.wrapping_sub(first) & mask;
+    Line::new().s("Ring contents").say();
+    for d in 0..n.min(COREDUMP_RING_DWORDS_MAX) {
+        let at = (first + d) & mask;
+        Line::new().s("0x").hexu((at * 4) as u32).s(" 0x").hexu(crate::amdgpu_gart::kptr_r32(adev, k, at * 4)).say();
+    }
+}
+
+/// `amdgpu_job_timedout`: the device is not unplugged and not a VF. The
+/// core dump first, then soft recovery, then a reset of the ring's queue,
+/// then the device reset.
 pub fn amdgpu_job_timedout(adev: &mut amdgpu_device, j: u64) -> drm_gpu_sched_stat {
     let r = job(adev, j).base.sched.unwrap();
     let name = adev.rings[r].sched.name.clone();
+    // Do the coredump immediately after a job timeout to get a very close
+    // dump/snapshot/representation of GPU's current error status
+    amdgpu_job_do_core_dump(adev, r);
     let (vmid, parent) = (job(adev, j).vmid, job(adev, j).hw_fence.clone());
     if crate::tables::amdgpu_gpu_recovery[0] != 0
         && crate::amdgpu_ring::amdgpu_ring_is_reset_type_supported(adev, r, AMDGPU_RESET_TYPE_SOFT_RESET)
