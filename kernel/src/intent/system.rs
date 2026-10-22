@@ -1698,12 +1698,11 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("[npk]");
             help_note("source: raw.githubusercontent.com/fnopeek/nopeekOS");
         }
-        "apps" | "exec" | "wasm" | "run" | "firefox" | "librewolf" => {
+        "apps" | "exec" | "wasm" | "run" | "firefox" => {
             help_head("apps", "");
             help_row("run <module> [args]", "Execute a WASM module");
             help_row("driver <name>", "Load a WASM hardware driver");
             help_row("firefox", "Firefox in a tiled MicroVM (video via VA-API)");
-            help_row("librewolf", "LibreWolf in a tiled MicroVM");
             kprintln!("[npk]");
             help_note("the dock and Mod+D start the same modules; 'modules' lists them");
         }

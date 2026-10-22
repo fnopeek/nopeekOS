@@ -584,7 +584,7 @@ fn is_core0_intent(verb: &str) -> bool {
                    // with error 8 (invalid host-state) because their
                    // TR is null. `browser` is just `microvm linux`
                    // under a user-friendly name, same constraint.
-                   "microvm" | "firefox" | "librewolf")
+                   "microvm" | "firefox")
 }
 
 
@@ -2015,7 +2015,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 }
             } else if sub == "linux" {
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm linux") {
-                    crate::microvm::app::set(&crate::microvm::app::LIBREWOLF);
+                    crate::microvm::app::set(&crate::microvm::app::FIREFOX);
                     microvm_linux(b"", None);
                 }
             } else if let Some(rest) = sub.strip_prefix("benchvm") {
@@ -2025,7 +2025,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 // rate. Isolates the bridge from the browser userspace.
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm benchvm") {
                     let mb: u32 = rest.trim().parse().unwrap_or(1000);
-                    crate::microvm::app::set(&crate::microvm::app::LIBREWOLF);
+                    crate::microvm::app::set(&crate::microvm::app::FIREFOX);
                     microvm_linux(b"", Some(mb));
                 }
             } else if let Some(rest) = sub.strip_prefix("shell") {
@@ -2041,7 +2041,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                     let mut buf = alloc::vec::Vec::with_capacity(line.len() + 1);
                     buf.extend_from_slice(line.as_bytes());
                     buf.push(b'\n');
-                    crate::microvm::app::set(&crate::microvm::app::LIBREWOLF);
+                    crate::microvm::app::set(&crate::microvm::app::FIREFOX);
                     microvm_linux(&buf, None);
                 }
             } else {
@@ -2056,11 +2056,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             // bare-boot diag).
             if require_cap(vault, &session, Rights::EXECUTE, "firefox") {
                 launch_app(&crate::microvm::app::FIREFOX);
-            }
-        }
-        "librewolf" => {
-            if require_cap(vault, &session, Rights::EXECUTE, "librewolf") {
-                launch_app(&crate::microvm::app::LIBREWOLF);
             }
         }
         "caps" | "capabilities" => {
@@ -2603,8 +2598,9 @@ fn microvm_linux_info() {
     }
 }
 
-/// Start `app`'s microvm (`firefox`, `librewolf`). An app whose image is
-/// not installed says so instead of booting into PID-1's fallback.
+/// Start `app`'s microvm (`firefox`, and any future Linux app). An app
+/// whose image is not installed says so instead of booting into PID-1's
+/// fallback.
 ///
 /// Also the entry for the host function `npk_run_intent`, so a launcher
 /// can spawn it without the Core-0 shell prompt. Safe from a worker when
@@ -2614,7 +2610,7 @@ fn microvm_linux_info() {
 /// needs BSP state and fails from a worker; the host function then
 /// returns -1 and the user types the intent at a Core-0 prompt.
 pub fn launch_app(app: &'static crate::microvm::app::App) {
-    if !core::ptr::eq(app, &crate::microvm::app::LIBREWOLF) && !crate::npkfs::exists(app.sqfs) {
+    if !crate::npkfs::exists(app.sqfs) {
         kprintln!("[microvm] {}: no image at {} — `update` fetches it", app.name, app.sqfs);
         return;
     }

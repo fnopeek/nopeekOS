@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "dock"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "nopeek_widgets",
  "postcard",

@@ -13,21 +13,17 @@ pub struct App {
     pub home: &'static str,
 }
 
-/// LibreWolf, frozen; its image is part of every install.
-pub static LIBREWOLF: App = App {
-    name: "librewolf",
-    sqfs: "sys/microvm/userspace.sqfs",
-    home: "sys/microvm/apps/browser/home.img",
-};
-
-/// Firefox, with video through VA-API (Intel's media driver).
+/// Firefox — one Linux app among many. Video decodes on the GPU through
+/// VA-API (Intel's iHD, AMD's radeonsi). Its image arrives over OTA, not
+/// bundled into every install. Further apps (office, ide, …) join the
+/// `APPS` table beside it with their own squashfs + home image.
 pub static FIREFOX: App = App {
     name: "firefox",
     sqfs: "sys/microvm/firefox.sqfs",
     home: "sys/microvm/apps/firefox/home.img",
 };
 
-static APPS: [&App; 2] = [&LIBREWOLF, &FIREFOX];
+static APPS: [&App; 1] = [&FIREFOX];
 
 static CURRENT: AtomicU8 = AtomicU8::new(0);
 

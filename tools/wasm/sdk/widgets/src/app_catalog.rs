@@ -98,13 +98,6 @@ pub fn load(exclude: &[&str]) -> Vec<AppEntry> {
 pub fn builtin_intents() -> Vec<AppEntry> {
     alloc::vec![
         AppEntry {
-            launch_name:  "librewolf".to_string(),
-            display_name: "LibreWolf".to_string(),
-            description:  "LibreWolf in a sandboxed MicroVM".to_string(),
-            icon:         IconId::Globe,
-            kind:         EntryKind::Intent,
-        },
-        AppEntry {
             launch_name:  "firefox".to_string(),
             display_name: "Firefox".to_string(),
             description:  "Firefox in a sandboxed MicroVM, video on the GPU".to_string(),

@@ -60,25 +60,14 @@ const ASSETS: &[AssetSpec] = &[
     AssetSpec { section: "icons:phosphor",      npkfs_path: "sys/icons/phosphor" },
     AssetSpec { section: "microvm:initramfs",   npkfs_path: "sys/microvm/initramfs.cpio.gz" },
     AssetSpec { section: "microvm:linux-virt",  npkfs_path: "sys/microvm/linux-virt.bzImage" },
-    // Optional userspace bundle — Alpine minirootfs + busybox + (future)
-    // Wayland/Mesa/LibreWolf. Built by `microvm-userspace/build.sh`.
-    // Distinct from `microvm:initramfs` (which is just our PID-1, always
-    // present). If a release ships this asset, OTA pulls it; if not, the
-    // entry is absent in the asset manifest and we keep whatever's
-    // already installed (or nothing).
-    //
-    // Small bundles live in `release/assets/` on the `main` branch and
-    // ship via raw.githubusercontent.com. Larger bundles live on GitHub
-    // Releases; the asset
-    // manifest carries a `url=` override per entry and `https_get`
-    // follows the 302 redirect chain to objects.githubusercontent.com.
-    AssetSpec { section: "microvm:userspace",   npkfs_path: "sys/microvm/userspace.cpio.gz" },
-    // Squashfs form of the userspace bundle — read-only, mounted by
-    // PID-1 from /dev/vdb (slot-5 virtio-blk) instead of unpacked into
-    // a tmpfs initramfs. The RAM-efficient path; supersedes the cpio entry
-    // above once it is the only shipped form.
-    AssetSpec { section: "microvm:userspace-sqfs", npkfs_path: "sys/microvm/userspace.sqfs" },
-    // The Firefox image (`firefox`): its own squashfs beside LibreWolf's.
+    // A Linux app's read-only squashfs image, mounted by PID-1 from
+    // /dev/vdb (slot-5 virtio-blk). Fetched over OTA, not bundled into
+    // the installer: firefox today; further apps (office, ide, …) get
+    // their own entry here, each with its own squashfs. Distinct from
+    // `microvm:initramfs` (just our PID-1, always present). Larger than
+    // ~50 MB, so it lives on GitHub Releases; the asset manifest carries
+    // a `url=` override per entry and `https_get` follows the 302
+    // redirect chain to objects.githubusercontent.com.
     AssetSpec { section: "microvm:firefox-sqfs", npkfs_path: "sys/microvm/firefox.sqfs" },
     // CPython's standard library, as one zip. Stored uncompressed on
     // purpose: this interpreter has no zlib, so a deflated zip raises
