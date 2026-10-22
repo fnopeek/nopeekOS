@@ -583,6 +583,19 @@ pub fn guest_vram_object(adev: &amdgpu_device, vc: &vclients, offsets: &[u64]) -
 /// becomes resource `res_id`. The reply names its pages for the kernel:
 /// map info, kind (0: the GTT pages of `tt`, 1: VRAM ranges in BAR0), the
 /// tt id, the number of ranges, then (offset, length) pairs.
+/// `ttm_bo_vm_fault_idle`: the guest's CPU reaches the pages without a
+/// fault the kernel could stall, so the wait Linux does on the first fault
+/// comes before the pages are handed out: the clear of a new VRAM object
+/// (`VRAM_CLEARED`, a KERNEL fence) must not land on what the guest wrote.
+fn ttm_bo_vm_fault_idle(adev: &mut amdgpu_device, h: usize) {
+    use crate::dma_resv::dma_resv_usage::DMA_RESV_USAGE_KERNEL;
+    let resv = crate::amdgpu_object::amdgpu_bo_resv(adev, h).clone();
+    if crate::dma_resv::dma_resv_test_signaled(adev, &resv, DMA_RESV_USAGE_KERNEL) {
+        return;
+    }
+    crate::dma_resv::dma_resv_wait_timeout(adev, &resv, DMA_RESV_USAGE_KERNEL, crate::drm_sched::MAX_SCHEDULE_TIMEOUT);
+}
+
 pub fn get_blob(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, blob_id: u32, res_id: u32) -> Result<Vec<u8>, i32> {
     let c = vc.clients.get_mut(&id).ok_or(EINVAL)?;
     // drm_context_res_id_unused
@@ -590,6 +603,7 @@ pub fn get_blob(adev: &mut amdgpu_device, vc: &mut vclients, id: u32, blob_id: u
         return Err(EINVAL);
     }
     let o = c.blobs.remove(&blob_id).ok_or(-2)?;
+    ttm_bo_vm_fault_idle(adev, o.bo);
     let b = crate::amdgpu_object::bo(adev, o.bo);
     let map_info = if o.enable_cache_wc { VIRTIO_GPU_MAP_CACHE_WC } else { VIRTIO_GPU_MAP_CACHE_CACHED };
     let mut out = Vec::new();

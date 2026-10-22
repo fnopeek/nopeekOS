@@ -432,3 +432,34 @@ composed on the CPU` daneben statt Kacheln. Danach erst die fehlenden
 Glyphen und die Bugwelle neu ansehen — beide koennen derselbe Fall gewesen
 sein (verspaeteter GPU-Job ueberschreibt ein neueres CPU-Bild).
 
+
+### 5.4 Fehlende Buchstaben: die CPU des Gastes wartete nicht (Modul 0.17.1)
+
+Erster Lauf mit 0.17.0 (2026-10-22): das Kachelmuster ist weg, kein
+`scene on the CPU`; je 600 Bilder warteten 74–163 auf ihre Arbeit, laengstens
+~100 ms. Buchstaben und UI-Elemente fehlen weiter, und zwar je START ganz
+oder gar nicht — das spricht gegen Zeitverhalten je Bild und fuer etwas,
+das am Speicher haengt.
+
+Gefunden am Code: ein neues VRAM-Objekt wird geloescht (`VRAM_CLEARED`,
+`amdgpu_ttm_clear_buffer`, KERNEL-Zaun in der `dma_resv`). GPU-Auftraege
+warten darauf, die **CPU des Gastes nicht**. Unter Linux geht der erste
+CPU-Zugriff ueber `ttm_bo_vm_fault` → `ttm_bo_vm_fault_idle`, das auf die
+KERNEL-Zaeune wartet; bei virglrenderer ist das der Seitenfehler im Wirt.
+Bei uns blendet `MAP_BLOB` die Seiten direkt ins NPT ein, es gibt keinen
+Fehler, an dem gewartet wuerde — das SDMA-Loeschen konnte also NACH den
+ersten Schreibzugriffen des Gastes landen und sie nullen. radeonsi legt auf
+einer APU seine Upload-Puffer (Vertex-, Index-, Konstantendaten) frisch im
+VRAM an und beschreibt sie sofort: genau dort stehen Glyphen-Quads und
+UI-Rechtecke.
+
+Gebaut: `get_blob` wartet vor dem Herausgeben der Seiten auf die
+KERNEL-Zaeune (`ttm_bo_vm_fault_idle`). Ein spaeteres Verschieben gibt es
+nicht (das Modul verdraengt nichts, `ttm.rs`), also ist das die einzige
+Stelle.
+
+Nebenbefund aus demselben Log, offen: dasselbe Gastobjekt (gleiche Adresse
+in der Compositor-VM) wird alle paar Sekunden als NEUER Puffer gebunden
+(`bo 137`, `138`, `140`, `144` … alle bei `0x1054A0000`) — jedes Mal Abbilden
+und ein neuer linearer 4-MB-Puffer. Woher die neue Seriennummer kommt
+(neue Ressource je Commit in npkwm?), ist nicht untersucht.
