@@ -1652,7 +1652,24 @@ pub fn vcn_v2_0_dec_flush_probe(adev: &mut amdgpu_device) {
         crate::amdgpu_ring::amdgpu_ring_emit_vm_flush(a, r, 1, (ptb_hi as u64) << 32 | ptb_lo as u64);
     });
     dec_probe(adev, r, "vmid 1 pasid mapping", |a, r| crate::gmc_v9_0::gmc_v9_0_emit_pasid_mapping(a, r, 1, 0));
+    dec_probe_at(adev, r, "wreg before start", false, |a, r| {
+        crate::amdgpu_ring::amdgpu_ring_emit_wreg(a, r, lo1, ptb_lo);
+    });
+    dec_probe_at(adev, r, "reg_wait before start", false, |a, r| {
+        crate::amdgpu_ring::amdgpu_ring_emit_reg_wait(a, r, lo1, ptb_lo, 0xffffffff);
+    });
+    dec_probe_at(adev, r, "semaphore before start", false, |a, r| {
+        crate::amdgpu_ring::amdgpu_ring_emit_reg_wait(a, r, sem, 1, 1);
+        crate::amdgpu_ring::amdgpu_ring_emit_wreg(a, r, sem, 0);
+    });
+    dec_probe_at(adev, r, "vmid 1 invalidate before start", false, |a, r| {
+        crate::amdgpu_ring::amdgpu_ring_emit_reg_write_reg_wait(a, r, req, ack, inv1, 1 << 1);
+    });
     dec_probe_at(adev, r, "vmid 1 flush before start", false, |a, r| {
+        crate::amdgpu_ring::amdgpu_ring_emit_vm_flush(a, r, 1, (ptb_hi as u64) << 32 | ptb_lo as u64);
+        crate::gmc_v9_0::gmc_v9_0_emit_pasid_mapping(a, r, 1, 0);
+    });
+    dec_probe(adev, r, "vmid 1 flush again", |a, r| {
         crate::amdgpu_ring::amdgpu_ring_emit_vm_flush(a, r, 1, (ptb_hi as u64) << 32 | ptb_lo as u64);
         crate::gmc_v9_0::gmc_v9_0_emit_pasid_mapping(a, r, 1, 0);
     });

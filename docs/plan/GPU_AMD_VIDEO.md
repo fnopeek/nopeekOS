@@ -351,3 +351,12 @@ Flush auf **VMID 1**. **Modul 0.26.0** probt dasselbe auf VMID 1 (PTB
 schreiben und zuruecklesen, Invalidierung mit Ack-Bit 1, der ganze
 `emit_vm_flush` des Rings, PASID-Tabelle) und den Flush in der Reihenfolge
 von `amdgpu_ib_schedule`, also VOR `PACKET_START`.
+
+**Lauf mit 0.26.0:** auf VMID 1 geht jedes Stueck durch, und der
+geschriebene PTB steht danach im Register. Nur **der ganze Flush samt
+PASID-Tabelle VOR `PACKET_START`** bleibt haengen — genau die Form eines
+Gastauftrags. Weil `amdgpu_ib_schedule` in Linux dieselbe Reihenfolge
+hat, ist die Reihenfolge allein nicht die Erklaerung. **Modul 0.27.0**
+zerlegt den Fall vor `PACKET_START` (nur Schreiben, nur Warten, nur das
+Semaphor, nur die Invalidierung) und wiederholt den Flush nach
+`PACKET_START`, um ein „das zweite Mal haengt es“ auszuschliessen.
