@@ -182,6 +182,13 @@ if diff -u "$B/run_vram.linux" "$B/run_vram.port"; then
 else
     fail=1
 fi
+# A guest IB for JPEG's ring is refused: it would run on VMID 0.
+if grep -q 'CS on jpeg_dec: its IBs are checked in a kernel copy' "$B/run.log"; then
+    echo "guest IB on jpeg_dec: refused"
+else
+    echo "guest IB on jpeg_dec: NOT refused"
+    fail=1
+fi
 echo "--- the run on the host (the log the card run prints; a fake SMU answers OK):"
 grep -vE '^(vram |  block )' "$B/run.log"
 exit $fail

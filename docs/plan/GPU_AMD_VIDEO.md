@@ -1,6 +1,6 @@
 # gpu_amd_renoir Stufe 6 — Video: VCN 2.2 und JPEG 2.0
 
-**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.19.0 (V1 ✅ Geraet, V2 gebaut) · Kernel 0.664.0
+**Stand:** 2026-10-22 · Modul `gpu_amd_renoir` 0.19.1 (V1 + V2 ✅ Geraet) · Kernel 0.664.0
 **Vorbild:** Linux 6.18.55 `vcn_v2_0.c`, `jpeg_v2_0.c`, `amdgpu_vcn.c`,
 `amdgpu_jpeg.c`; Gast: Mesa 26.2.4 `radeonsi` VA-API (`gallium-va`).
 **Daneben:** `GPU_AMD_NATIVE.md` (der Weg der Gast-ccmds), `GPU_AMD_LINUX_MAP.md`
@@ -139,7 +139,20 @@ angenommen, in allen Saaten gleich. Die Ersatz-GPU hat ein JPEG-Modell;
 und ihr Strom-Modell wurde dabei richtig gestellt (ein Feld auf 1 heisst
 „einschalten“ und liest dann 0).
 
-**Am Geraet zu lesen:** `ring tests:`/`ib tests:` zusaetzlich mit
+**Am Geraet (IdeaPad, 2026-10-22): ✅** `ring tests:`/`ib tests:` beide mit
 `jpeg_dec+`. Auch hier: ein gescheiterter Ringtest beendet wie in Linux
 die Initialisierung (dann `install` 0.18.0).
 
+## 7. 0.19.1: die Luecke in 0.19.0
+
+**0.19.0 liess sie offen.** Der JPEG-Ring war bereit, und der CS-Weg
+nahm einen Gast-Auftrag mit `ip_type` `AMDGPU_HW_IP_VCN_JPEG` an, ohne
+`parse_cs` zu kennen. Der Gast-IB lief dann ungeprueft mit VMID 0, also
+ueber den Kernel-Adressraum der GPU, und konnte jedes Register schreiben.
+
+**Jetzt** (`amdgpu_cs_pass2`): ein Ring mit `parse_cs` weist jeden
+Auftrag mit `-EINVAL` ab, bis der Kopier- und Pruefweg aus V3 steht. Dazu
+die Regel aus Linux, dass die MM-Engines keinen Benutzer-Fence koennen
+(`no_user_fence` fuer VCN und JPEG). `stage1_run` schickt einen
+Gast-Auftrag auf `jpeg_dec`, und `check.sh` faellt durch, wenn er nicht
+abgewiesen wird (`guest IB on jpeg_dec: refused`).

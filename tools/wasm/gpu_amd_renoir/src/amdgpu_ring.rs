@@ -749,6 +749,12 @@ impl amdgpu_ring_funcs {
             | ring_ops::vcn_v2_0_dec)
     }
 
+    /// `parse_cs`: JPEG's ring reads an IB through VMID 0, so the IB a
+    /// user names is copied into a kernel IB and checked first.
+    pub fn parse_cs(&self) -> bool {
+        self.ops == ring_ops::jpeg_v2_0_dec
+    }
+
     /// `no_user_fence`.
     pub fn no_user_fence(&self) -> bool {
         matches!(self.ops, ring_ops::vcn_v2_0_dec | ring_ops::vcn_v2_0_enc | ring_ops::jpeg_v2_0_dec)

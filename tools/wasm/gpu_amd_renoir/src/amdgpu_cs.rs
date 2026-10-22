@@ -346,8 +346,6 @@ fn amdgpu_cs_pass2(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut a
         if chunk_ib.ib_bytes / 4 > AMDGPU_GFX_SDMA_IB_PACKET_SIZE_MAX_DW {
             return Err(-22);
         }
-        // no_user_submission and no_user_fence are set for none of these
-        // rings.
         if chunk_ib.ip_type == AMDGPU_HW_IP_GFX && chunk_ib.flags & AMDGPU_IB_FLAG_PREEMPT != 0 {
             if chunk_ib.flags & AMDGPU_IB_FLAG_CE != 0 { ce_preempt += 1 } else { de_preempt += 1 }
             // Each GFX command submit allows only 1 IB max preemptible for CE & DE
@@ -355,7 +353,18 @@ fn amdgpu_cs_pass2(adev: &mut amdgpu_device, fpriv: &mut amdgpu_fpriv, p: &mut a
                 return Err(-22);
             }
         }
-        let _ = ring;
+        // A ring with parse_cs runs the IB on VMID 0: amdgpu_cs_patch_ibs
+        // copies it into a kernel IB and checks it there. That copy is not
+        // built yet, so such a ring takes no IB of a user.
+        if adev.rings[ring].funcs.parse_cs() {
+            Line::new().s("CS on ").s(&adev.rings[ring].name.clone())
+                .s(": its IBs are checked in a kernel copy, which is not ported").say();
+            return Err(-22);
+        }
+        // MM engine doesn't support user fences
+        if p.uf_bo.is_some() && adev.rings[ring].funcs.no_user_fence() {
+            return Err(-22);
+        }
         let job = amdgpu_job::job(adev, j);
         let n = job.num_ibs as usize;
         job.num_ibs += 1;
