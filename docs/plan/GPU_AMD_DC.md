@@ -99,6 +99,35 @@ Jede Stufe wird host-seitig gegen Linux geprüft, bevor sie aufs Gerät geht
 Hotplug (link-Detection/Training), DP/HDMI-Audio, DSC, MST, PSR/ABM, Backlight/
 ABM-Feinregelung, S0ix.
 
+## Stufe-A-Fortschritt (2026-10-22)
+
+Gebaut (ruhend, keine Aufrufer, nichts released — host-seitig gebaut):
+- **`src/dc_helper.rs`** — die Register-Helfer-Schicht (`dm_read_reg`/
+  `dm_write_reg` → `adev.rreg32`/`wreg32`; `generic_reg_set/update/get/wait`),
+  1:1 aus `dc_helper.c` + `dm_services.h` + `reg_helper.h`. Die variadischen
+  `REG_SET`/`REG_UPDATE`-Makros sind explizite `(shift, mask, value)`-Slices.
+- **`src/dc_types.rs`** — `dce_environment`, `dce_version` (Renoir =
+  `DCN_VERSION_2_1`), `dp_protocol_version`, `dc_versions`, `DC_VER`.
+
+Gemessene Fundstücke für den Weiterbau:
+- **Register:** kommen sauber über `regs.list` → `gen_regs.py` (liest die
+  Linux-asic_reg-Header, emittiert `NAME` + `NAME__FIELD__SHIFT/_MASK` — DCE
+  ist schon drin). Für die IP-Blöcke `regs.list` um die `dcn_2_1_0`-Register
+  erweitern, dann `dc_helper`-Slices füllen.
+- **`adev` ersetzt `ctx->driver_context`** (kein Global; das Modul reicht
+  `&amdgpu_device` durch).
+- **Abhängigkeitskette von `dc_create`** (gelesen in `core/dc.c`): schon
+  `dc_construct_ctx` braucht `link_create_link_service` (link/-Subsystem),
+  `dc_perf_trace_create` und später `dc_bios`/`clk_mgr`/`resource_pool`. Der
+  erste host-prüfbare Meilenstein liegt also hinter diesen — der Objektgraph
+  muss weitgehend stehen, bevor viel läuft (wie im Prinzip oben benannt).
+
+**Nächste Einheit:** der verschachtelte Typgraph (`dc_caps` →
+`dc_plane_cap`/`dc_color_caps`/`dc_dmub_caps`/`dc_scl_caps`, `dc_context`,
+`struct dc`) + `dc_create`/`dc_construct`, dann `dcn21_resource_construct` mit
+den IP-Block-Konstruktoren (je Block: `regs.list`-Erweiterung + Konstruktor +
+Orakel). Das ist der Hauptteil von Stufe A, mehrere fokussierte Läufe.
+
 ## Risiken / offen
 
 - **DML-Umfang:** selbst der dcn21-Teil ist groß und reiner Festkomma-Code;
