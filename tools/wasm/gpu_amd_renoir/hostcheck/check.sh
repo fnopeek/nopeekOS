@@ -211,6 +211,13 @@ else
     echo "job timeout on vcn_enc0: NO core dump"
     fail=1
 fi
+# A guest job finished on a media ring is reported.
+if grep -q '^native: client 100 ring [0-9]* (vcn_enc): 1 jobs done' "$B/run.log"; then
+    echo "guest job on vcn_enc: reported done"
+else
+    echo "guest job on vcn_enc: NOT reported"
+    fail=1
+fi
 echo "--- the run on the host (the log the card run prints; a fake SMU answers OK):"
 grep -vE '^(vram |  block )' "$B/run.log"
 exit $fail

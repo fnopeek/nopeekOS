@@ -55,6 +55,8 @@ pub struct vclient {
 
 #[derive(Default)]
 struct timeline {
+    /// The `AMDGPU_HW_IP_*` of the last submission's IBs.
+    ip: u32,
     pending: alloc::collections::VecDeque<crate::dma_fence::Fence>,
     submitted: u64,
     completed: u64,
@@ -318,6 +320,7 @@ fn ccmd_cs_submit(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Resu
         return fail(&mut rsp_, EINVAL);
     }
     let mut chunks = Vec::new();
+    let mut ip_type = 0;
     let mut have_bo_list = false;
     for i in 0..num_chunks as usize {
         let at = CS_PAYLOAD as usize + i * 8;
@@ -377,6 +380,7 @@ fn ccmd_cs_submit(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Resu
                 if length_dw != 8 {
                     return fail(&mut rsp_, EINVAL);
                 }
+                ip_type = w(5);
                 chunks.push(cs::cs_chunk::ib(cs::drm_amdgpu_cs_chunk_ib {
                     flags: w(1),
                     va_start: w(2) as u64 | (w(3) as u64) << 32,
@@ -395,6 +399,7 @@ fn ccmd_cs_submit(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Resu
     match cs::amdgpu_cs_ioctl_chunks(adev, &mut c.fpriv, ctx_id, &chunks) {
         Ok((_, fence)) => {
             let t = &mut c.timelines[ring_idx as usize - 1];
+            t.ip = ip_type;
             t.submitted += 1;
             t.pending.push_back(fence);
             npk_sys::gpudev_ring(c.id as i32, ring_idx as i32, t.submitted as i64, t.completed as i64);
@@ -409,6 +414,20 @@ fn ccmd_cs_submit(adev: &mut amdgpu_device, c: &mut vclient, req: &[u8]) -> Resu
     }
 }
 
+/// How often a media ring reports its finished jobs.
+const MEDIA_REPORT_EVERY: u64 = 600;
+
+fn media_ip_name(ip: u32) -> &'static str {
+    match ip {
+        AMDGPU_HW_IP_UVD => "uvd",
+        AMDGPU_HW_IP_VCE => "vce",
+        AMDGPU_HW_IP_UVD_ENC => "uvd_enc",
+        AMDGPU_HW_IP_VCN_DEC => "vcn_dec",
+        AMDGPU_HW_IP_VCN_ENC => "vcn_enc",
+        _ => "vcn_jpeg",
+    }
+}
+
 /// The timelines of every client: submissions whose fences signaled are
 /// done (`drm_timeline` retiring in order), and the kernel hears of it.
 pub fn poll_rings(adev: &mut amdgpu_device, vc: &mut vclients) {
@@ -420,6 +439,13 @@ pub fn poll_rings(adev: &mut amdgpu_device, vc: &mut vclients) {
                 t.completed += 1;
             }
             if t.completed != before {
+                // The media engines say when a guest's work finished on
+                // them: the first time, then every 600th.
+                let media = matches!(t.ip, AMDGPU_HW_IP_UVD..=AMDGPU_HW_IP_VCN_JPEG);
+                if media && (before == 0 || t.completed / MEDIA_REPORT_EVERY != before / MEDIA_REPORT_EVERY) {
+                    Line::new().s("native: client ").dec(c.id as u64).s(" ring ").dec(i as u64 + 1).s(" (")
+                        .s(media_ip_name(t.ip)).s("): ").dec(t.completed).s(" jobs done").say();
+                }
                 npk_sys::gpudev_ring(c.id as i32, i as i32 + 1, t.submitted as i64, t.completed as i64);
             }
         }
