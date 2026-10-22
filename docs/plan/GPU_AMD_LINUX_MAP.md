@@ -249,3 +249,52 @@ Modul) nach `sys/firmware/<pfad>` — schreibgeschuetzt fuer Module
   wenn `RCC_CONFIG_MEMSIZE` 0 oder ~0 meldet; das Modul sagt es dann.
 - `amdgpu_device_rreg` jenseits von BAR5 (PCIe-Index/Data ueber NBIO).
 - `harvest_ip`, `get_gfx_info`, `get_vcn_info`: Stufe 1.
+
+## 4 — Was noch fehlt (Stand 2026-10-22, Kernel 0.667.0, Modul 0.30.0)
+
+Bestandsaufnahme gegen Linux 6.18.55, virglrenderer 1.3.0 und Mesa 26.2
+(nur gelesen; „D" = am Geraet bestaetigt, „H" = nur host-seitig geprueft).
+
+**Stand der Bloecke:** common/nbio/hdp/df/discovery/atom D · gmc/GART/GPUVM/ih D
+(KIQ-TLB-Flush und `bo_move_notify` neu in 0.30.0, H) · psp 12 D · smu 12 D
+(ohne Display→SMU-Haelfte aus DCs `rn_clk_mgr`) · gfx 9.3 mit KIQ/KCQ/RLC/GFXOFF D
+· sdma 4.1.2 D · vcn 2.2 Decode D (fluessig ab 0.29.0), Encode nur Ring-/IB-Test
+· jpeg 2.0 Ring/IB-Test/`parse_cs` D, echter Gastlauf offen · **dm/DC: nur
+early_init, sw_init, DMUB-Regionen; hw_init uebersprungen.**
+
+**Gastseite (native context):** alle 10 ccmds von virglrenderers amdgpu-Renderer,
+alle 52 `AMDGPU_INFO`-Faelle (bewusst EINVAL: CRTC_FROM_ID, RAS, UQ_FW_AREAS).
+Luecke: SYNCOBJ_IN.
+
+**Fehlt, nach Wichtigkeit fuer den Alltag:**
+1. **DC (DCN 2.1)** — groesster Block: vom Callgraph aus `dm_hw_init`,
+   `amdgpu_dm_atomic_check/commit_tail`, `dm_suspend/resume` erreichbar 1357
+   Funktionen, davon 92 portiert; die Anzeige allein ~1214 Funktionen, ~43k
+   Zeilen (dc core, link, bios_parser2, dcn20/21 hwss+resource, rn_clk_mgr,
+   DML, dmub_srv, amdgpu_dm). Bringt Flip im Vblank (kein Reissen, keine
+   Vollbildkopie — die Scroll-„Bugwelle" aus GPU_AMD_NATIVE §5.2), Hardware-
+   Cursor, Overlay-Ebenen (Gastbild ohne Kopie), Modesetting/externe
+   Monitore/Hotplug, Backlight/ABM, eDP-PSR, HDMI/DP-Audio, Voraussetzung fuer
+   S0ix. Erster Schnitt: Uebernahme des Bootmodus + Primaerebenen-Flip +
+   Vblank-IRQ + Cursor, ~500–700 Funktionen; Kernel braucht gpudev-Ops fuer
+   Flip/Vblank/Cursor (`GpuHal` hat die Plaetze).
+2. **RADV im Gast-Bundle** — `microvm/linux/mesa/build.sh:68` baut nur
+   `-Dvulkan-drivers=intel`; mit `amd` gehen Vulkan und WebGPU (wgpu). Host
+   braucht keine neuen ccmds; Sparse (PRT) und Mehrfach-Queues liefen nie.
+3. **TTM-Verdraengung** — das TTM des Ports verdraengt nichts
+   (`ttm_bo_alloc_resource` → -ENOSPC), kopierende Moves (`amdgpu_move_blit`,
+   Multihop ueber TT, `ttm_bo_move_memcpy`) fehlen, LRU deshalb ohne Leser.
+   Ein schwerer Gast scheitert bei 512 MB VRAM, wo Linux nach GTT ausweicht.
+4. **Am Geraet nachweisen** — voller MODE2-Recover, KCQ-Reset, VCN-Encode,
+   JPEG im Gast; Core-Dumps fuer GFX und SDMA (`gfx_v9_0_ip_dump`,
+   `sdma_v4_0_dump_ip_state`) fehlen.
+5. **Klein** — SYNCOBJ_IN (Kernel + CS-Chunk), controlq 16 Deskriptoren
+   (QEMU 256; 256 loeste 2026-10-17 auf Intel Hänger aus — erst die Grenzen
+   dahinter klaeren), blockierende Waits im Modul (`drain_scene`, `copy_rect`,
+   `get_blob`) melden derweil keine Gast-Fences.
+6. **Schlaf/S0ix** — `amdgpu_device_suspend/resume` mit `in_s0ix`,
+   `dm_suspend/resume`; blockiert zuerst dadurch, dass nopeekOS selbst kein
+   s2idle hat.
+
+Nicht zutreffend auf Renoir: RAS, Runtime-PM (APU), userptr (Mesas
+virtio-Weg), TMZ (Linux-Vorgabe aus fuer GC 9.3), MES/userq, KFD.
