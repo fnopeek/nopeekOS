@@ -171,7 +171,18 @@ fn decode_login(b: &[u8]) -> (String, String, String, String) {
 fn fetch_login(name: &str) -> (String, String, String, String) {
     let mut buf = [0u8; 2048];
     match host::vault_user_get(name, &mut buf) {
-        Some(n) => decode_login(&buf[..n]),
+        Some(n) => {
+            let (url, user, pass, note) = decode_login(&buf[..n]);
+            // Backward compat: an entry from the old simple UI holds a plain
+            // string, not a record. If nothing decoded but there are bytes,
+            // show them as the password.
+            if n > 0 && url.is_empty() && user.is_empty() && pass.is_empty() && note.is_empty() {
+                let p = core::str::from_utf8(&buf[..n]).unwrap_or("").into();
+                (String::new(), String::new(), p, String::new())
+            } else {
+                (url, user, pass, note)
+            }
+        }
         None => (String::new(), String::new(), String::new(), String::new()),
     }
 }
@@ -626,6 +637,35 @@ fn open_edit(st: &mut St, name: &str) {
     st.goto(View::EditSecret);
 }
 
+fn edit_selected(st: &mut St) {
+    if st.section != 0 {
+        return;
+    }
+    let users = user_names();
+    if st.sel >= 0 && (st.sel as usize) < users.len() {
+        let name = users[st.sel as usize].clone();
+        open_edit(st, &name);
+    }
+}
+
+fn delete_selected(st: &mut St) {
+    if st.section == 0 {
+        let users = user_names();
+        if st.sel >= 0 && (st.sel as usize) < users.len() {
+            host::vault_user_delete(&users[st.sel as usize]);
+        }
+    } else {
+        let wifis = wifi_names();
+        if st.sel >= 0 && (st.sel as usize) < wifis.len() {
+            let mut key = String::from("net:");
+            key.push_str(&wifis[st.sel as usize]);
+            host::vault_system_delete(&key);
+        }
+    }
+    st.sel = -1;
+    st.reveal = false;
+}
+
 fn save_secret(st: &mut St) {
     let name = st.f[0].as_str();
     if name.is_empty() {
@@ -701,7 +741,11 @@ fn on_submit(st: &mut St) -> Outcome {
                 save_wifi(st);
             }
         }
-        View::List => {}
+        View::List => {
+            // Enter on the list reveals the selected password (footer: "Enter show").
+            st.reveal = !st.reveal;
+            st.focus = st.focus.wrapping_add(1);
+        }
     }
     Outcome::Rerender
 }
@@ -750,32 +794,8 @@ fn handle(st: &mut St, ev: Event) -> Outcome {
                     st.sel = -1;
                     st.reveal = false;
                 }
-                A_EDIT => {
-                    if st.section == 0 {
-                        let users = user_names();
-                        if st.sel >= 0 && (st.sel as usize) < users.len() {
-                            let name = users[st.sel as usize].clone();
-                            open_edit(st, &name);
-                        }
-                    }
-                }
-                A_DELETE => {
-                    if st.section == 0 {
-                        let users = user_names();
-                        if st.sel >= 0 && (st.sel as usize) < users.len() {
-                            host::vault_user_delete(&users[st.sel as usize]);
-                        }
-                    } else {
-                        let wifis = wifi_names();
-                        if st.sel >= 0 && (st.sel as usize) < wifis.len() {
-                            let mut key = String::from("net:");
-                            key.push_str(&wifis[st.sel as usize]);
-                            host::vault_system_delete(&key);
-                        }
-                    }
-                    st.sel = -1;
-                    st.reveal = false;
-                }
+                A_EDIT => edit_selected(st),
+                A_DELETE => delete_selected(st),
                 id if id >= A_SEL_BASE => {
                     st.sel = (id - A_SEL_BASE) as i32;
                     st.reveal = false;
@@ -787,6 +807,21 @@ fn handle(st: &mut St, ev: Event) -> Outcome {
             }
             Outcome::Rerender
         }
+        // Ctrl chords (Ctrl is implied) that no focused text widget consumed.
+        Event::Chord { letter, .. } => match letter {
+            b'l' => {
+                host::vault_lock();
+                st.sel = -1;
+                st.goto(View::Unlock);
+                Outcome::Rerender
+            }
+            b'n' if st.view == View::List => {
+                clear_form(st);
+                st.goto(View::EditSecret);
+                Outcome::Rerender
+            }
+            _ => Outcome::Idle,
+        },
         Event::Key(KeyCode::Escape) => match st.view {
             View::List | View::Unlock | View::Setup => Outcome::Exit,
             _ => {
@@ -795,6 +830,28 @@ fn handle(st: &mut St, ev: Event) -> Outcome {
                 Outcome::Rerender
             }
         },
+        // List navigation and actions (when no text field has the keyboard).
+        Event::Key(k) if st.view == View::List => {
+            let n = if st.section == 0 { user_names().len() } else { wifi_names().len() } as i32;
+            match k {
+                KeyCode::Enter => {
+                    st.reveal = !st.reveal;
+                    st.focus = st.focus.wrapping_add(1);
+                }
+                KeyCode::Down if n > 0 => {
+                    st.sel = (st.sel + 1).clamp(0, n - 1);
+                    st.reveal = false;
+                }
+                KeyCode::Up if st.sel > 0 => {
+                    st.sel -= 1;
+                    st.reveal = false;
+                }
+                KeyCode::Delete => delete_selected(st),
+                KeyCode::F(2) => edit_selected(st),
+                _ => return Outcome::Idle,
+            }
+            Outcome::Rerender
+        }
         _ => Outcome::Idle,
     }
 }
