@@ -10,6 +10,8 @@
  * every message. The boot registers are taken from Linux's own register
  * tables of the built DC objects and printed as `preset` lines, which the
  * port reads back.
+ * After it, as amdgpu_dm_init goes on: mmhub_read_system_context on a
+ * Renoir-like GMC layout and dc_setup_system_context.
  * Every register write is printed; the commands DC hands the DMCUB are
  * recorded where it hands them to the DM, then printed with the state
  * init_hw leaves. hostcheck/dchw_check.rs prints the same for the port. */
@@ -21,6 +23,7 @@
 #include "dmub/src/dmub_dcn20.h"
 #include "dm_pp_smu.h"
 #include "clk_mgr.h"
+#include "dchubbub.h"
 #include "atom.h"
 #include "amdgpu.h"
 #include "renoir_ip_offset.h"
@@ -177,6 +180,19 @@ static void amdgpu_dm_fini(struct amdgpu_device *adev) { }
 
 #include "dminit_funcs.c"
 
+/* The GMC layout of the system context: 512 MB of VRAM, the GART table in
+ * its last MB, 1 GB of GART, AGP above the VRAM. */
+#define VRAM_START 0xf400000000ull
+#define VRAM_BASE_OFFSET 0x60000000ull
+#define GART_TABLE_PAGE 0x1ff00ull
+/* amdgpu_gmc_pd_addr for a VRAM BO at GART_TABLE_PAGE: its MC address
+ * turned physical, with AMDGPU_PTE_VALID. */
+static u64 amdgpu_gmc_pd_addr(struct amdgpu_bo *bo)
+{
+	return ((GART_TABLE_PAGE << 12) + VRAM_BASE_OFFSET) | 1;
+}
+#include "dchw_dm_funcs.c"
+
 static void preset(u32 reg, u32 val)
 {
 	printf("preset reg 0x%x = 0x%x\n", reg, val);
@@ -241,6 +257,16 @@ int main(int argc, char **argv)
 	adev.reg_offset[DCE_HWIP][0] = dcn;
 	adev.reg_offset[NBIO_HWIP][0] = nbio;
 	adev.reg_offset[CLK_HWIP][0] = clk;
+	adev.apu_flags = AMD_APU_IS_RENOIR;
+	adev.gmc.fb_start = VRAM_START;
+	adev.gmc.fb_end = VRAM_START + 0x20000000 - 1;
+	adev.gmc.gart_start = 0;
+	adev.gmc.gart_end = 0x40000000 - 1;
+	adev.gmc.agp_start = 0xf800000000ull;
+	adev.gmc.agp_end = 0xffffffffffffull;
+	adev.vm_manager.vram_base_offset = VRAM_BASE_OFFSET;
+	static char gart_bo;
+	adev.gart.bo = (struct amdgpu_bo *)&gart_bo;
 
 	printf("amdgpu_dm_init %d\n", amdgpu_dm_init(&adev));
 	struct dc *dc = adev.dm.dc;
@@ -260,6 +286,24 @@ int main(int argc, char **argv)
 
 	printf("dc_hardware_init\n");
 	dc_hardware_init(dc);
+
+	printf("dc_setup_system_context\n");
+	if ((adev.flags & AMD_IS_APU) && (adev.asic_type >= CHIP_CARRIZO)) {
+		struct dc_phy_addr_space_config pa_config;
+
+		mmhub_read_system_context(&adev, &pa_config);
+		struct dc_phy_addr_space_config *a = &pa_config;
+		printf("pa_config aperture 0x%llx 0x%llx fb 0x%llx 0x%llx 0x%llx agp 0x%llx 0x%llx 0x%llx\n",
+		       a->system_aperture.start_addr, a->system_aperture.end_addr, a->system_aperture.fb_base,
+		       a->system_aperture.fb_top, a->system_aperture.fb_offset, a->system_aperture.agp_base,
+		       a->system_aperture.agp_bot, a->system_aperture.agp_top);
+		printf("pa_config gart 0x%llx 0x%llx 0x%llx hvm %d\n", a->gart_config.page_table_start_addr,
+		       a->gart_config.page_table_end_addr, a->gart_config.page_table_base_addr, a->is_hvm_enabled);
+
+		printf("num_vmids %d\n", dc_setup_system_context(adev.dm.dc, &pa_config));
+		printf("riommu_active %d vm_pa_config valid %d\n", dc->res_pool->hubbub->riommu_active,
+		       dc->vm_pa_config.valid);
+	}
 
 	for (int c = 0; c < n_dmub_cmds; c++) {
 		printf("dmub cmd");

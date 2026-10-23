@@ -28,6 +28,7 @@ pub struct hw_sequencer_funcs {
     pub disable_plane: Option<fn(&amdgpu_device, &mut dc, usize)>,
     pub wait_for_mpcc_disconnect: Option<fn(&amdgpu_device, &mut dc, usize)>,
     pub set_flip_control_gsl: Option<fn(&amdgpu_device, &dc, usize, bool)>,
+    pub init_sys_ctx: Option<fn(&amdgpu_device, &mut dc, &crate::dc::dc_phy_addr_space_config) -> i32>,
     pub edp_power_control: Option<fn(&amdgpu_device, &mut dc, usize, bool)>,
     pub edp_wait_for_hpd_ready: Option<fn(&amdgpu_device, &mut dc, usize, bool)>,
 }
@@ -38,6 +39,7 @@ const DCN21_FUNCS: hw_sequencer_funcs = hw_sequencer_funcs {
     disable_plane: Some(crate::dcn20_hwseq::dcn20_disable_plane),
     wait_for_mpcc_disconnect: Some(crate::dcn10_hwseq::dcn10_wait_for_mpcc_disconnect),
     set_flip_control_gsl: Some(crate::dcn20_hwseq::dcn20_set_flip_control_gsl),
+    init_sys_ctx: Some(crate::dcn21_hwseq::dcn21_init_sys_ctx),
     edp_power_control: Some(dce110_edp_power_control),
     edp_wait_for_hpd_ready: Some(dce110_edp_wait_for_hpd_ready),
 };

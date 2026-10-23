@@ -109,6 +109,7 @@ pub struct dc_config {
     pub allow_lttpr_non_transparent_mode_dp1_4a: bool,
     pub allow_lttpr_non_transparent_mode_dp2_0: bool,
     pub seamless_boot_edp_requested: bool,
+    pub skip_riommu_prefetch_wa: bool,
     pub allow_seamless_boot_optimization: bool,
     pub enable_mipi_converter_optimization: bool,
     /// `enum dmub_ips_disable_type`.
@@ -224,6 +225,57 @@ pub struct dc {
     /// `hwss`: the hw sequencer vtable (`dcn21_hw_sequencer_construct`).
     pub hwss: crate::hw_sequencer::hw_sequencer_funcs,
     pub optimized_required: bool,
+    /// `vm_pa_config`: the system context `dc_setup_system_context` keeps.
+    pub vm_pa_config: dc_phy_addr_space_config,
+}
+
+/// The `system_aperture` of `struct dc_phy_addr_space_config` (dc.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dc_system_aperture {
+    pub start_addr: u64,
+    pub end_addr: u64,
+    pub fb_top: u64,
+    pub fb_offset: u64,
+    pub fb_base: u64,
+    pub agp_top: u64,
+    pub agp_bot: u64,
+    pub agp_base: u64,
+}
+
+/// The `gart_config` of `struct dc_phy_addr_space_config` (dc.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dc_gart_config {
+    pub page_table_start_addr: u64,
+    pub page_table_end_addr: u64,
+    pub page_table_base_addr: u64,
+    pub base_addr_is_mc_addr: bool,
+}
+
+/// `struct dc_phy_addr_space_config` (dc.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dc_phy_addr_space_config {
+    pub system_aperture: dc_system_aperture,
+    pub gart_config: dc_gart_config,
+    pub valid: bool,
+    pub is_hvm_enabled: bool,
+    pub page_table_default_page_addr: u64,
+}
+
+/// `dc_setup_system_context` (dc_vm_helper.c): program the DCHUB address
+/// space and keep it. DML2 (`dml2_options.gpuvm_enable`) is not used on
+/// DCN 2.1 and `hwss.z10_save_init` is not a member of dcn21_funcs.
+pub fn dc_setup_system_context(adev: &amdgpu_device, dc: &mut dc, pa_config: &dc_phy_addr_space_config) -> i32 {
+    let mut num_vmids = 0;
+
+    // Call HWSS to setup HUBBUB for address config
+    if let Some(f) = dc.hwss.init_sys_ctx {
+        num_vmids = f(adev, dc, pa_config);
+
+        dc.vm_pa_config = *pa_config;
+        dc.vm_pa_config.valid = true;
+    }
+
+    num_vmids
 }
 
 /// `dc_get_edp_links` (dc_link_exports.c): the eDP links, connected or not,

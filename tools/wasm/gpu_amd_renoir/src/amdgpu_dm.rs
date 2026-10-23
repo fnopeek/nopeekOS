@@ -643,3 +643,59 @@ pub fn dm_execute_dmub_cmd_list(adev: &amdgpu_device, dc_srv: &mut crate::dc_dmu
                                 debug: &crate::dc::dc_debug_options, cmd: &mut [dmub_rb_cmd], wait_type: u32) -> bool {
     crate::dc_dmub_srv::dc_dmub_srv_cmd_run_list(adev, dc_srv, debug, cmd, wait_type)
 }
+
+/// `mmhub_read_system_context` (amdgpu_dm.c): the address space DC programs
+/// into the DCHUB — the system aperture over the frame buffer (and AGP when
+/// it is on) and the GART as page table. Raven2, Renoir and Green Sardine
+/// cannot use VRAM past MC_VM_SYSTEM_APERTURE_HIGH_ADDR, so the aperture
+/// reaches one unit further (a VM fault and hang otherwise).
+pub fn mmhub_read_system_context(adev: &amdgpu_device) -> crate::dc::dc_phy_addr_space_config {
+    let mut pa_config = crate::dc::dc_phy_addr_space_config::default();
+    let gmc = &adev.gmc;
+    let wa = adev.apu_flags & (AMD_APU_IS_RAVEN2 | AMD_APU_IS_RENOIR | AMD_APU_IS_GREEN_SARDINE) != 0;
+
+    let agp_base: u32 = 0;
+    let agp_bot = (gmc.agp_start >> 24) as u32;
+    let agp_top = (gmc.agp_end >> 24) as u32;
+
+    let (logical_addr_low, logical_addr_high): (u32, u32);
+    // AGP aperture is disabled
+    if agp_bot > agp_top {
+        logical_addr_low = (gmc.fb_start >> 18) as u32;
+        logical_addr_high = if wa { ((gmc.fb_end >> 18) + 0x1) as u32 } else { (gmc.fb_end >> 18) as u32 };
+    } else {
+        logical_addr_low = (gmc.fb_start.min(gmc.agp_start) >> 18) as u32;
+        logical_addr_high = if wa {
+            ((gmc.fb_end >> 18) + 0x1).max(gmc.agp_end >> 18) as u32
+        } else {
+            (gmc.fb_end.max(gmc.agp_end) >> 18) as u32
+        };
+    }
+
+    let pt_base = crate::amdgpu_gmc::amdgpu_gmc_pd_addr(adev, adev.gart.bo.expect("GART table"));
+
+    // PHYSICAL_ADDRESS_LOC: the 32-bit halves put together again.
+    let page_table_start = gmc.gart_start >> AMDGPU_GPU_PAGE_SHIFT;
+    let page_table_end = gmc.gart_end >> AMDGPU_GPU_PAGE_SHIFT;
+    let page_table_base = pt_base;
+
+    let a = &mut pa_config.system_aperture;
+    a.start_addr = (logical_addr_low as u64) << 18;
+    a.end_addr = (logical_addr_high as u64) << 18;
+
+    a.agp_base = (agp_base as u64) << 24;
+    a.agp_bot = (agp_bot as u64) << 24;
+    a.agp_top = (agp_top as u64) << 24;
+
+    a.fb_base = gmc.fb_start;
+    a.fb_offset = adev.vm_manager.vram_base_offset;
+    a.fb_top = gmc.fb_end;
+
+    pa_config.gart_config.page_table_start_addr = page_table_start << 12;
+    pa_config.gart_config.page_table_end_addr = page_table_end << 12;
+    pa_config.gart_config.page_table_base_addr = page_table_base;
+
+    pa_config.is_hvm_enabled = adev.mode_info.gpu_vm_support;
+
+    pa_config
+}

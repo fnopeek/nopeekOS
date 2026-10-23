@@ -668,6 +668,10 @@ find "$DCS" -name '*.o.cmd' | sed 's|/\.\([^/]*\)\.o\.cmd$|/\1.c|' | sort |
 export DCHW_CF DCS B
 xargs -P "$(nproc)" -I{} sh -c 'f={}; gcc $DCHW_CF -c "$f" -o "$B/dchw_obj/$(echo ${f#$DCS/} | tr / _).o"' \
     < "$B/dchw_sources"
+{
+    $X "$AMD/amdgpu/amdgpu_gart.h" '#AMDGPU_GPU_PAGE_SHIFT'
+    $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" mmhub_read_system_context
+} > "$B/dchw_dm_funcs.c"
 gcc $DCHW_CF -c "$HERE/main_dchw.c" -o "$B/main_dchw.o"
 ld -r -o "$B/dchw_all.o" "$B"/dchw_obj/*.o $DMUB_O "$B/atom.o" "$B/main_dchw.o"
 nm -D --defined-only /lib/libc.so.6 | awk '{sub(/@.*/, "", $3); print $3}' | sort -u > "$B/libc_syms"

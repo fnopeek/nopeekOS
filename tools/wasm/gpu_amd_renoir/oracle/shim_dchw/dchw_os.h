@@ -68,3 +68,5 @@ struct drm_dsc_config;
 struct drm_dsc_picture_parameter_set;
 void drm_dsc_pps_payload_pack(struct drm_dsc_picture_parameter_set *pps, const struct drm_dsc_config *cfg);
 int drm_dsc_compute_rc_parameters(struct drm_dsc_config *vdsc_cfg);
+#define upper_32_bits(n) ((u32)(((n) >> 16) >> 16))
+#define lower_32_bits(n) ((u32)((n) & 0xffffffff))

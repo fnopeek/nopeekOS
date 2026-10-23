@@ -333,14 +333,15 @@ def gen_single(block, cfg):
     # (field, idx-or-'', register); idx present => an array field
     entries = re.findall(r"\.(\w+)(?:\[(\d+)\])?\s*=\s*([^,]*?)\+\s*(mm\w+)", txt)
     order, arr, sca = [], {}, {}
-    # A register of the NBIO block (NBIO_SR, NBIF0_BASE__INST0_SEG*) is based
-    # on NBIO_BASE.
-    nbio = set()
+    # The base macro follows the IP segment the list's SR variant names:
+    # NBIO_SR expands to NBIF0_BASE__INST0_SEG*, MMHUB_SR to MMHUB_BASE__*.
+    base_of = {}
     for f, idx, base, reg in entries:
         if f not in order:
             order.append(f)
-        if "NBIF" in base:
-            nbio.add(reg)
+        seg = re.search(r"(\w+?)_BASE__INST0_SEG", base)
+        base_of[reg] = {None: "BASE", "DMU": "BASE", "NBIF0": "NBIO_BASE", "MMHUB": "MMHUB_BASE"}[
+            seg.group(1) if seg else None]
         if idx != "":
             arr.setdefault(f, {})[int(idx)] = reg
         else:
@@ -354,7 +355,7 @@ def gen_single(block, cfg):
 
     def off(name, reg):
         if name not in existing:
-            base = "NBIO_BASE" if reg in nbio else "BASE"
+            base = base_of[reg]
             rl.append(f"{name} = {base}({reg}_BASE_IDX) + {reg} @ {RESOURCE}")
             existing.add(name)
 

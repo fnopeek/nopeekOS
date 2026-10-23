@@ -13,7 +13,7 @@
 #![allow(dead_code)]
 
 use crate::amdgpu_device::amdgpu_device;
-use crate::dc_helper::{reg_get_n, reg_update};
+use crate::dc_helper::{reg_get, reg_get_n, reg_set, reg_update, reg_wait};
 use crate::regs::*;
 use alloc::boxed::Box;
 
@@ -33,6 +33,8 @@ pub struct hubbub_ops {
     pub verify_allow_pstate_change_high: Option<fn(&amdgpu_device, &dcn20_hubbub) -> bool>,
     pub program_det_size: Option<fn(&amdgpu_device, &dcn20_hubbub, u32, u32)>,
     pub program_det_segments: Option<fn(&amdgpu_device, &dcn20_hubbub, u32, u32)>,
+    pub init_dchub_sys_ctx: Option<fn(&amdgpu_device, &crate::dc::dc_config, &mut dcn20_hubbub,
+                                      &dcn_hubbub_phys_addr_config) -> i32>,
 }
 
 /// `hubbub21_funcs` (dcn21_hubbub.c), as far as ported.
@@ -43,6 +45,7 @@ const HUBBUB21_FUNCS: hubbub_ops = hubbub_ops {
     verify_allow_pstate_change_high: None,
     program_det_size: None,
     program_det_segments: None,
+    init_dchub_sys_ctx: Some(hubbub21_init_dchub),
 };
 
 impl hubbub_funcs {
@@ -58,6 +61,7 @@ impl hubbub_funcs {
 #[derive(Default)]
 pub struct hubbub {
     pub funcs: Option<hubbub_funcs>,
+    pub riommu_active: bool,
 }
 
 /// `struct dcn20_vmid` (dcn20/dcn20_vmid.h): one VMID's register bank. `ctx` is
@@ -118,6 +122,165 @@ pub fn hubbub1_allow_self_refresh_control(adev: &amdgpu_device, hubbub1: &dcn20_
     reg_update!(adev, hubbub1.rsm(), DCHUBBUB_ARB_DRAM_STATE_CNTL,
         DCHUBBUB_ARB_ALLOW_SELF_REFRESH_FORCE_VALUE, 0,
         DCHUBBUB_ARB_ALLOW_SELF_REFRESH_FORCE_ENABLE, !allow as u32);
+}
+
+/// `struct dcn_hubbub_phys_addr_config` (dchubbub.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dcn_hubbub_phys_addr_config {
+    pub system_aperture: dcn_hubbub_system_aperture,
+    pub gart_config: dcn_hubbub_gart_config,
+    pub page_table_default_page_addr: u64,
+}
+
+/// The `system_aperture` of `struct dcn_hubbub_phys_addr_config`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dcn_hubbub_system_aperture {
+    pub fb_top: u64,
+    pub fb_offset: u64,
+    pub fb_base: u64,
+    pub agp_top: u64,
+    pub agp_bot: u64,
+    pub agp_base: u64,
+}
+
+/// The `gart_config` of `struct dcn_hubbub_phys_addr_config`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dcn_hubbub_gart_config {
+    pub page_table_start_addr: u64,
+    pub page_table_end_addr: u64,
+    pub page_table_base_addr: u64,
+}
+
+/// `struct dcn_vmid_page_table_config` (vmid.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dcn_vmid_page_table_config {
+    pub page_table_start_addr: u64,
+    pub page_table_end_addr: u64,
+    pub depth: u32,
+    pub block_size: u32,
+    pub page_table_base_addr: u64,
+}
+
+impl dcn20_vmid {
+    fn rsm(&self) -> (&'static dcn_vmid_registers, &'static dcn20_vmid_shift, &'static dcn20_vmid_mask) {
+        (self.regs.unwrap(), self.shifts.unwrap(), self.masks.unwrap())
+    }
+}
+
+/// `dcn20_wait_for_vmid_ready` (dcn20_vmid.c): the hardware sets bit 0 of
+/// PAGE_TABLE_BASE_ADDR_LO32 once a GPUVM context update is taken; there is
+/// no separate field to REG_WAIT on.
+fn dcn20_wait_for_vmid_ready(adev: &amdgpu_device, vmid: &dcn20_vmid) {
+    let max_times = 10000;
+    let delay_us = 5;
+
+    for _ in 0..max_times {
+        let entry_lo32 = reg_get!(adev, vmid.rsm(), PAGE_TABLE_BASE_ADDR_LO32, VM_CONTEXT0_PAGE_DIRECTORY_ENTRY_LO32);
+
+        if entry_lo32 & 0x1 != 0 {
+            return;
+        }
+
+        crate::linux::udelay(delay_us);
+    }
+
+    // VM setup timed out
+    crate::linux::Line::new().s("Timeout while waiting for GPUVM context update").dbg();
+}
+
+/// `dcn20_vmid_setup` (dcn20_vmid.c). PAGE_TABLE_BASE_ADDR_LO32 goes last:
+/// the hardware takes the context on that write.
+pub fn dcn20_vmid_setup(adev: &amdgpu_device, vmid: &dcn20_vmid, config: &dcn_vmid_page_table_config) {
+    let c = vmid.rsm();
+    reg_set!(adev, c, PAGE_TABLE_START_ADDR_HI32, 0, VM_CONTEXT0_START_LOGICAL_PAGE_NUMBER_HI4,
+        (config.page_table_start_addr >> 32) & 0xF);
+    reg_set!(adev, c, PAGE_TABLE_START_ADDR_LO32, 0, VM_CONTEXT0_START_LOGICAL_PAGE_NUMBER_LO32,
+        config.page_table_start_addr & 0xFFFFFFFF);
+
+    reg_set!(adev, c, PAGE_TABLE_END_ADDR_HI32, 0, VM_CONTEXT0_END_LOGICAL_PAGE_NUMBER_HI4,
+        (config.page_table_end_addr >> 32) & 0xF);
+    reg_set!(adev, c, PAGE_TABLE_END_ADDR_LO32, 0, VM_CONTEXT0_END_LOGICAL_PAGE_NUMBER_LO32,
+        config.page_table_end_addr & 0xFFFFFFFF);
+
+    reg_set!(adev, c, CNTL, 0, VM_CONTEXT0_PAGE_TABLE_DEPTH, config.depth, VM_CONTEXT0_PAGE_TABLE_BLOCK_SIZE,
+        config.block_size);
+
+    reg_set!(adev, c, PAGE_TABLE_BASE_ADDR_HI32, 0, VM_CONTEXT0_PAGE_DIRECTORY_ENTRY_HI32,
+        (config.page_table_base_addr >> 32) & 0xFFFFFFFF);
+    reg_set!(adev, c, PAGE_TABLE_BASE_ADDR_LO32, 0, VM_CONTEXT0_PAGE_DIRECTORY_ENTRY_LO32,
+        config.page_table_base_addr & 0xFFFFFFFF);
+
+    dcn20_wait_for_vmid_ready(adev, vmid);
+}
+
+/// `dcn21_dchvm_init` (dcn21_hubbub.c): bring the host VM (rIOMMU) block up,
+/// start its prefetching and let its clocks gate.
+pub fn dcn21_dchvm_init(adev: &amdgpu_device, hubbub1: &mut dcn20_hubbub) {
+    let c = hubbub1.rsm();
+    let mut riommu_active = 0;
+
+    // Init DCHVM block
+    reg_update!(adev, c, DCHVM_CTRL0, HOSTVM_INIT_REQ, 1);
+
+    // Poll until RIOMMU_ACTIVE = 1
+    for _ in 0..100 {
+        riommu_active = reg_get!(adev, c, DCHVM_RIOMMU_STAT0, RIOMMU_ACTIVE);
+
+        if riommu_active != 0 {
+            break;
+        } else {
+            crate::linux::udelay(5);
+        }
+    }
+
+    if riommu_active != 0 {
+        // Reflect the power status of DCHUBBUB
+        reg_update!(adev, c, DCHVM_RIOMMU_CTRL0, HOSTVM_POWERSTATUS, 1);
+
+        // Start rIOMMU prefetching
+        reg_update!(adev, c, DCHVM_RIOMMU_CTRL0, HOSTVM_PREFETCH_REQ, 1);
+
+        // Enable dynamic clock gating
+        reg_update!(adev, c, DCHVM_CLK_CTRL, HVM_DISPCLK_R_GATE_DIS, 0, HVM_DISPCLK_G_GATE_DIS, 0,
+            HVM_DCFCLK_R_GATE_DIS, 0, HVM_DCFCLK_G_GATE_DIS, 0);
+
+        // Poll until HOSTVM_PREFETCH_DONE = 1
+        reg_wait!(adev, c, DCHVM_RIOMMU_STAT0, HOSTVM_PREFETCH_DONE, 1, 5, 100, "dcn21_dchvm_init");
+
+        hubbub1.base.riommu_active = true;
+    }
+}
+
+/// `hubbub21_init_dchub` (dcn21_hubbub.c): the DCHUB system aperture, VMID 0
+/// over the GART (bit 0 of its base is set as Linux does) and the rIOMMU.
+pub fn hubbub21_init_dchub(adev: &amdgpu_device, config: &crate::dc::dc_config, hubbub1: &mut dcn20_hubbub,
+                           pa_config: &dcn_hubbub_phys_addr_config) -> i32 {
+    let c = hubbub1.rsm();
+    let a = &pa_config.system_aperture;
+
+    reg_set!(adev, c, DCN_VM_FB_LOCATION_BASE, 0, FB_BASE, a.fb_base >> 24);
+    reg_set!(adev, c, DCN_VM_FB_LOCATION_TOP, 0, FB_TOP, a.fb_top >> 24);
+    reg_set!(adev, c, DCN_VM_FB_OFFSET, 0, FB_OFFSET, a.fb_offset >> 24);
+    reg_set!(adev, c, DCN_VM_AGP_BOT, 0, AGP_BOT, a.agp_bot >> 24);
+    reg_set!(adev, c, DCN_VM_AGP_TOP, 0, AGP_TOP, a.agp_top >> 24);
+    reg_set!(adev, c, DCN_VM_AGP_BASE, 0, AGP_BASE, a.agp_base >> 24);
+
+    let g = &pa_config.gart_config;
+    if g.page_table_start_addr != g.page_table_end_addr {
+        let phys_config = dcn_vmid_page_table_config {
+            page_table_start_addr: g.page_table_start_addr >> 12,
+            page_table_end_addr: g.page_table_end_addr >> 12,
+            page_table_base_addr: g.page_table_base_addr | 1,
+            depth: 0,
+            block_size: 0,
+        };
+        // Init VMID 0 based on PA config
+        dcn20_vmid_setup(adev, &hubbub1.vmid[0], &phys_config);
+    }
+    if !config.skip_riommu_prefetch_wa {
+        dcn21_dchvm_init(adev, hubbub1);
+    }
+    hubbub1.num_vmid
 }
 
 /// `hubbub21_construct` (dcn21_hubbub.c): store the funcs, registers and the

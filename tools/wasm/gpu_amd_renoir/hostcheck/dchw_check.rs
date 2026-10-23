@@ -3,8 +3,11 @@
 //! attached and dc_hardware_init. Unwritten registers read hash / ones /
 //! zeros / lit / boot; the VBIOS SMC answers every message. For boot the
 //! third argument is the oracle's output, whose `preset` lines are the boot
-//! registers Linux's tables name. Every register write is printed; the DMUB
-//! commands are read back off the inbox ring, then the state init_hw leaves.
+//! registers Linux's tables name. Then, as amdgpu_dm_init goes on,
+//! mmhub_read_system_context and dc_setup_system_context on the oracle's GMC
+//! layout, with the GART table a VRAM buffer. Every register write is
+//! printed; the DMUB commands are read back off the inbox ring, then the
+//! state init_hw leaves.
 
 extern crate alloc;
 
@@ -105,6 +108,41 @@ fn main() {
     adev.bios = bios;
     adev.mode_info.atom_context = atom::amdgpu_atom_parse(adev.bios.clone());
     adev.smu.pm_enabled = true;
+    adev.apu_flags = AMD_APU_IS_RENOIR;
+    adev.gmc.vram_start = 0xf4_0000_0000;
+    adev.gmc.fb_start = 0xf4_0000_0000;
+    adev.gmc.fb_end = 0xf4_0000_0000 + 0x2000_0000 - 1;
+    adev.gmc.gart_start = 0;
+    adev.gmc.gart_end = 0x4000_0000 - 1;
+    adev.gmc.agp_start = 0xf8_0000_0000;
+    adev.gmc.agp_end = 0xffff_ffff_ffff;
+    adev.vm_manager.vram_base_offset = 0x6000_0000;
+    adev.mman.bos.push(Some(amdgpu_object::amdgpu_bo {
+        tbo: ttm::ttm_buffer_object {
+            resource: Some(ttm::ttm_resource { start: 0x1ff00, size: 0x100000, mem_type: TTM_PL_VRAM,
+                ..Default::default() }),
+            ..Default::default()
+        },
+        flags: 0,
+        preferred_domains: 0,
+        allowed_domains: 0,
+        placements: Vec::new(),
+        xcp_id: 0,
+        kptr: None,
+        ref_count: 1,
+        parent: None,
+        vm_bo: None,
+        _resv: Default::default(),
+        resv: None,
+        deleted: false,
+        entries: Vec::new(),
+        client: None,
+        pool: None,
+        tiling_flags: 0,
+        metadata_flags: 0,
+        metadata: Vec::new(),
+    }));
+    adev.gart.bo = Some(adev.mman.bos.len() - 1);
 
     npk_sys::fake_card_echo(true);
     println!("amdgpu_dm_init {}", amdgpu_dm::amdgpu_dm_init(&mut adev));
@@ -125,6 +163,28 @@ fn main() {
 
     println!("dc_hardware_init");
     dc::dc_hardware_init(&adev, &mut dc);
+
+    println!("dc_setup_system_context");
+    if adev.flags & AMD_IS_APU != 0 && adev.asic_type >= CHIP_CARRIZO {
+        let pa_config = amdgpu_dm::mmhub_read_system_context(&adev);
+        let a = &pa_config.system_aperture;
+        println!(
+            "pa_config aperture {:#x} {:#x} fb {:#x} {:#x} {:#x} agp {:#x} {:#x} {:#x}",
+            a.start_addr, a.end_addr, a.fb_base, a.fb_top, a.fb_offset, a.agp_base, a.agp_bot, a.agp_top
+        );
+        let g = &pa_config.gart_config;
+        println!(
+            "pa_config gart {:#x} {:#x} {:#x} hvm {}",
+            g.page_table_start_addr, g.page_table_end_addr, g.page_table_base_addr, pa_config.is_hvm_enabled as u32
+        );
+
+        println!("num_vmids {}", dc::dc_setup_system_context(&adev, &mut dc, &pa_config));
+        println!(
+            "riommu_active {} vm_pa_config valid {}",
+            dc.res_pool.as_deref().unwrap().hubbub.as_deref().unwrap().base.riommu_active as u32,
+            dc.vm_pa_config.valid as u32
+        );
+    }
     npk_sys::fake_card_echo(false);
 
     let wrpt = dc.ctx.dmub_srv.as_deref().unwrap().dmub.as_deref().unwrap().inbox1.rb.wrpt;

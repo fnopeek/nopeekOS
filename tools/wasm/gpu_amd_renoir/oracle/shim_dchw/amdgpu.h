@@ -4,6 +4,7 @@
 #pragma once
 #include "amdgpu_extracted.h"
 struct atom_context;
+struct amdgpu_bo;
 struct pci_dev { u16 vendor, device, subsystem_vendor, subsystem_device; u8 revision; };
 struct amdgpu_display_manager {
 	void *ddev;
@@ -21,7 +22,12 @@ struct amdgpu_device {
 	struct pci_dev *pdev;
 	void *dev;
 	uint32_t family, external_rev_id, asic_type, apu_flags, flags;
-	struct { uint32_t vram_width; } gmc;
+	struct {
+		uint32_t vram_width;
+		u64 fb_start, fb_end, agp_start, agp_end, gart_start, gart_end;
+	} gmc;
+	struct { struct amdgpu_bo *bo; } gart;
+	struct { u64 vram_base_offset; } vm_manager;
 	struct { struct atom_context *atom_context; bool gpu_vm_support; } mode_info;
 	struct { bool keep_stolen_vga_memory; } mman;
 	uint32_t ip_versions[MAX_HWIP][HWIP_MAX_INSTANCE];
