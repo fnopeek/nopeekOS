@@ -148,6 +148,27 @@ pub enum panel_cntl_funcs_id {
     dce_link_panel_cntl_funcs,
 }
 
+/// `struct panel_cntl_funcs` (panel_cntl.h), the members ported.
+#[derive(Default, Clone, Copy)]
+pub struct panel_cntl_ops {
+    pub hw_init: Option<fn(&crate::amdgpu_device::amdgpu_device, &mut dce_panel_cntl) -> u32>,
+    pub is_panel_powered_on: Option<fn(&crate::amdgpu_device::amdgpu_device, &dce_panel_cntl) -> bool>,
+}
+
+/// `dce_link_panel_cntl_funcs` (dce_panel_cntl.c), as far as ported.
+const DCE_LINK_PANEL_CNTL_FUNCS: panel_cntl_ops = panel_cntl_ops {
+    hw_init: Some(dce_panel_cntl_hw_init),
+    is_panel_powered_on: Some(dce_is_panel_powered_on),
+};
+
+impl panel_cntl_funcs_id {
+    pub fn ops(self) -> &'static panel_cntl_ops {
+        match self {
+            panel_cntl_funcs_id::dce_link_panel_cntl_funcs => &DCE_LINK_PANEL_CNTL_FUNCS,
+        }
+    }
+}
+
 /// `struct dce_panel_cntl` with its `struct panel_cntl` base.
 #[derive(Default, Clone, Debug)]
 pub struct dce_panel_cntl {
@@ -170,6 +191,97 @@ pub fn dce_is_panel_powered_on(adev: &crate::amdgpu_device::amdgpu_device, p: &d
         &[(p.shift.LVTMA_DIGON, p.mask.LVTMA_DIGON), (p.shift.LVTMA_DIGON_OVRD, p.mask.LVTMA_DIGON_OVRD)], &mut v);
     let (dig_on, dig_on_ovrd) = (v[0], v[1]);
     pwr_seq_state == 1 || (dig_on == 1 && dig_on_ovrd == 1)
+}
+
+impl dce_panel_cntl {
+    /// `panel_cntl->funcs`.
+    pub fn funcs(&self) -> &'static panel_cntl_ops {
+        self.funcs.expect("panel_cntl funcs").ops()
+    }
+}
+
+/// `dce_get_16_bit_backlight_from_pwm` (dce_panel_cntl.c): the PWM duty
+/// cycle as a 16-bit backlight level.
+fn dce_get_16_bit_backlight_from_pwm(adev: &crate::amdgpu_device::amdgpu_device, p: &dce_panel_cntl) -> u32 {
+    use crate::dc_helper::{reg_get, reg_read};
+    let c = (&p.regs, &p.shift, &p.mask);
+
+    reg_read!(adev, p.regs, BL_PWM_PERIOD_CNTL);
+    let mut bl_period = reg_get!(adev, c, BL_PWM_PERIOD_CNTL, BL_PWM_PERIOD);
+    let mut bl_int_count = reg_get!(adev, c, BL_PWM_PERIOD_CNTL, BL_PWM_PERIOD_BITCNT);
+
+    reg_read!(adev, p.regs, BL_PWM_CNTL);
+    let mut bl_pwm = reg_get!(adev, c, BL_PWM_CNTL, BL_ACTIVE_INT_FRAC_CNT);
+    let fractional_duty_cycle_en = reg_get!(adev, c, BL_PWM_CNTL, BL_PWM_FRACTIONAL_EN);
+
+    if bl_int_count == 0 {
+        bl_int_count = 16;
+    }
+
+    let bl_period_mask = (1u32 << bl_int_count).wrapping_sub(1);
+    bl_period &= bl_period_mask;
+
+    let bl_pwm_mask = bl_period_mask << (16 - bl_int_count);
+
+    if fractional_duty_cycle_en == 0 {
+        bl_pwm &= bl_pwm_mask;
+    } else {
+        bl_pwm &= 0xFFFF;
+    }
+
+    let mut current_backlight = (bl_pwm as u64) << (1 + bl_int_count);
+
+    if bl_period == 0 {
+        bl_period = 0xFFFF;
+    }
+
+    current_backlight /= bl_period as u64;
+    current_backlight = (current_backlight + 1) >> 1;
+
+    current_backlight as u32
+}
+
+/// `dce_panel_cntl_hw_init` (dce_panel_cntl.c): restore or capture the
+/// backlight PWM (a VBIOS resets the period to zero), take backlight control
+/// from the VBIOS and enable the PWM output. Returns the current level.
+pub fn dce_panel_cntl_hw_init(adev: &crate::amdgpu_device::amdgpu_device, p: &mut dce_panel_cntl) -> u32 {
+    use crate::dc_helper::{reg_get, reg_read, reg_update, reg_write};
+    let (regs, shift, mask) = (p.regs, p.shift, p.mask);
+    let c = (&regs, &shift, &mask);
+
+    let value = reg_get!(adev, c, BL_PWM_CNTL, BL_ACTIVE_INT_FRAC_CNT);
+
+    if p.stored_backlight_registers.BL_PWM_CNTL != 0 {
+        reg_write!(adev, regs, BL_PWM_CNTL, p.stored_backlight_registers.BL_PWM_CNTL);
+        reg_write!(adev, regs, BL_PWM_CNTL2, p.stored_backlight_registers.BL_PWM_CNTL2);
+        reg_write!(adev, regs, BL_PWM_PERIOD_CNTL, p.stored_backlight_registers.BL_PWM_PERIOD_CNTL);
+        reg_update!(adev, c, PWRSEQ_REF_DIV, BL_PWM_REF_DIV,
+            p.stored_backlight_registers.LVTMA_PWRSEQ_REF_DIV_BL_PWM_REF_DIV);
+    } else if value != 0 && value != 1 {
+        p.stored_backlight_registers.BL_PWM_CNTL = reg_read!(adev, regs, BL_PWM_CNTL);
+        p.stored_backlight_registers.BL_PWM_CNTL2 = reg_read!(adev, regs, BL_PWM_CNTL2);
+        p.stored_backlight_registers.BL_PWM_PERIOD_CNTL = reg_read!(adev, regs, BL_PWM_PERIOD_CNTL);
+
+        p.stored_backlight_registers.LVTMA_PWRSEQ_REF_DIV_BL_PWM_REF_DIV =
+            reg_get!(adev, c, PWRSEQ_REF_DIV, BL_PWM_REF_DIV);
+    } else {
+        // A VBIOS should have initialised the PWM registers on boot.
+        reg_write!(adev, regs, BL_PWM_CNTL, 0x8000FA00u32);
+        reg_write!(adev, regs, BL_PWM_PERIOD_CNTL, 0x000C0FA0);
+    }
+
+    // Have driver take backlight control: TakeBacklightControl(true)
+    let mut value = reg_read!(adev, regs, BIOS_SCRATCH_2);
+    value |= crate::regs::ATOM_S2_VRI_BRIGHT_ENABLE;
+    reg_write!(adev, regs, BIOS_SCRATCH_2, value);
+
+    // Enable the backlight output
+    reg_update!(adev, c, BL_PWM_CNTL, BL_PWM_EN, 1);
+
+    // Unlock group 2 backlight registers
+    reg_update!(adev, c, BL_PWM_GRP1_REG_LOCK, BL_PWM_GRP1_REG_LOCK, 0);
+
+    dce_get_16_bit_backlight_from_pwm(adev, p)
 }
 
 /// `dce_panel_cntl_construct` (dce_panel_cntl.c).

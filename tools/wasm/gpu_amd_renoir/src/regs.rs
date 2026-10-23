@@ -23515,3 +23515,295 @@ pub const LF_AMD_EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN: u32 = 0x2;
 pub const LF_MAX_LINKS: u32 = 0x10;
 /// The value of `ENUM_ID_COUNT` in ../display/dc/link/link_factory.c
 pub const LF_ENUM_ID_COUNT: u32 = 0x8;
+
+// The OPP display pattern generator (dcn20_opp.c, hw_shared.h, dc_hw_types.h)
+/// ?
+pub const CONTROLLER_DP_TEST_PATTERN_COLORSQUARES: u32 = 0x3;
+/// ?
+pub const CONTROLLER_DP_TEST_PATTERN_COLORSQUARES_CEA: u32 = 0xb;
+/// ?
+pub const CONTROLLER_DP_TEST_PATTERN_VERTICALBARS: u32 = 0x4;
+/// ?
+pub const CONTROLLER_DP_TEST_PATTERN_HORIZONTALBARS: u32 = 0x5;
+/// ?
+pub const CONTROLLER_DP_TEST_PATTERN_COLORRAMP: u32 = 0x6;
+/// ?
+pub const CONTROLLER_DP_TEST_PATTERN_VIDEOMODE: u32 = 0x7;
+/// ?
+pub const CONTROLLER_DP_TEST_PATTERN_SOLID_COLOR: u32 = 0xc;
+/// ?
+pub const CONTROLLER_DP_COLOR_SPACE_RGB: u32 = 0x0;
+/// ?
+pub const CONTROLLER_DP_COLOR_SPACE_YCBCR601: u32 = 0x1;
+/// ?
+pub const CONTROLLER_DP_COLOR_SPACE_YCBCR709: u32 = 0x2;
+/// ?
+pub const CONTROLLER_DP_COLOR_SPACE_UDEFINED: u32 = 0x3;
+/// ?
+pub const COLOR_DEPTH_UNDEFINED: u32 = 0x0;
+/// ?
+pub const COLOR_DEPTH_666: u32 = 0x1;
+/// ?
+pub const COLOR_DEPTH_888: u32 = 0x2;
+/// ?
+pub const COLOR_DEPTH_101010: u32 = 0x3;
+/// ?
+pub const COLOR_DEPTH_121212: u32 = 0x4;
+/// ?
+pub const TEST_PATTERN_COLOR_FORMAT_BPC_6: u32 = 0x0;
+/// ?
+pub const TEST_PATTERN_COLOR_FORMAT_BPC_8: u32 = 0x1;
+/// ?
+pub const TEST_PATTERN_COLOR_FORMAT_BPC_10: u32 = 0x2;
+/// ?
+pub const TEST_PATTERN_COLOR_FORMAT_BPC_12: u32 = 0x3;
+/// ?
+pub const TEST_PATTERN_DYN_RANGE_VESA: u32 = 0x0;
+/// ?
+pub const TEST_PATTERN_DYN_RANGE_CEA: u32 = 0x1;
+/// ?
+pub const TEST_PATTERN_MODE_COLORSQUARES_RGB: u32 = 0x0;
+/// ?
+pub const TEST_PATTERN_MODE_COLORSQUARES_YCBCR601: u32 = 0x1;
+/// ?
+pub const TEST_PATTERN_MODE_COLORSQUARES_YCBCR709: u32 = 0x2;
+/// ?
+pub const TEST_PATTERN_MODE_VERTICALBARS: u32 = 0x3;
+/// ?
+pub const TEST_PATTERN_MODE_HORIZONTALBARS: u32 = 0x4;
+/// ?
+pub const TEST_PATTERN_MODE_SINGLERAMP_RGB: u32 = 0x5;
+/// ?
+pub const TEST_PATTERN_MODE_DUALRAMP_RGB: u32 = 0x6;
+
+// The Azalia codec registers dce_aud_hw_init reaches (dce_audio.c)
+/// include/asic_reg/dce/dce_10_0_d.h:6850
+pub const ixAZALIA_F0_CODEC_PIN_CONTROL_HOT_PLUG_CONTROL: u32 = 0x54;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:13843
+pub const AZALIA_F0_CODEC_PIN_CONTROL_HOT_PLUG_CONTROL__CLOCK_GATING_DISABLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:13842
+pub const AZALIA_F0_CODEC_PIN_CONTROL_HOT_PLUG_CONTROL__CLOCK_GATING_DISABLE_MASK: u32 = 0x1;
+
+// The VBIOS scratch flags DC sets and reads (atombios.h)
+/// include/atombios.h:6830
+pub const ATOM_S2_VRI_BRIGHT_ENABLE: u32 = 0x20000000;
+/// include/atombios.h:6977
+pub const ATOM_S6_ACC_MODE: u32 = 0x10;
+/// include/atombios.h:7049
+pub const ATOM_S6_ACC_MODE_SHIFT: u32 = 0x4;
+
+// DC abm: dce_abm_registers (single struct, array/scalar fields)
+
+// (ABM_DCN20_REG_LIST()) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmMASTER_COMM_CNTL_REG_BASE_IDX) + mmMASTER_COMM_CNTL_REG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_MASTER_COMM_CNTL_REG: u32 = 0x35bd;
+/// The value of `BASE(mmMASTER_COMM_CMD_REG_BASE_IDX) + mmMASTER_COMM_CMD_REG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_MASTER_COMM_CMD_REG: u32 = 0x35bc;
+/// The value of `BASE(mmMASTER_COMM_DATA_REG1_BASE_IDX) + mmMASTER_COMM_DATA_REG1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_MASTER_COMM_DATA_REG1: u32 = 0x35b9;
+/// The value of `BASE(mmDC_ABM1_HG_SAMPLE_RATE_BASE_IDX) + mmDC_ABM1_HG_SAMPLE_RATE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_DC_ABM1_HG_SAMPLE_RATE: u32 = 0x4c8d;
+/// The value of `BASE(mmDC_ABM1_LS_SAMPLE_RATE_BASE_IDX) + mmDC_ABM1_LS_SAMPLE_RATE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_DC_ABM1_LS_SAMPLE_RATE: u32 = 0x4c8e;
+/// The value of `BASE(mmBL1_PWM_BL_UPDATE_SAMPLE_RATE_BASE_IDX) + mmBL1_PWM_BL_UPDATE_SAMPLE_RATE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_BL1_PWM_BL_UPDATE_SAMPLE_RATE: u32 = 0x4c77;
+/// The value of `BASE(mmDC_ABM1_HG_MISC_CTRL_BASE_IDX) + mmDC_ABM1_HG_MISC_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_DC_ABM1_HG_MISC_CTRL: u32 = 0x4c85;
+/// The value of `BASE(mmDC_ABM1_IPCSC_COEFF_SEL_BASE_IDX) + mmDC_ABM1_IPCSC_COEFF_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_DC_ABM1_IPCSC_COEFF_SEL: u32 = 0x4c7a;
+/// The value of `BASE(mmBL1_PWM_CURRENT_ABM_LEVEL_BASE_IDX) + mmBL1_PWM_CURRENT_ABM_LEVEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_BL1_PWM_CURRENT_ABM_LEVEL: u32 = 0x4c73;
+/// The value of `BASE(mmBL1_PWM_TARGET_ABM_LEVEL_BASE_IDX) + mmBL1_PWM_TARGET_ABM_LEVEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_BL1_PWM_TARGET_ABM_LEVEL: u32 = 0x4c72;
+/// The value of `BASE(mmBL1_PWM_USER_LEVEL_BASE_IDX) + mmBL1_PWM_USER_LEVEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_BL1_PWM_USER_LEVEL: u32 = 0x4c71;
+/// The value of `BASE(mmDC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES_BASE_IDX) + mmDC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_DC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES: u32 = 0x4c8a;
+/// The value of `BASE(mmDC_ABM1_HGLS_REG_READ_PROGRESS_BASE_IDX) + mmDC_ABM1_HGLS_REG_READ_PROGRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_DC_ABM1_HGLS_REG_READ_PROGRESS: u32 = 0x4c84;
+/// The value of `BASE(mmDC_ABM1_ACE_OFFSET_SLOPE_0_BASE_IDX) + mmDC_ABM1_ACE_OFFSET_SLOPE_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_DC_ABM1_ACE_OFFSET_SLOPE_0: u32 = 0x4c7b;
+/// The value of `BASE(mmDC_ABM1_ACE_THRES_12_BASE_IDX) + mmDC_ABM1_ACE_THRES_12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_DC_ABM1_ACE_THRES_12: u32 = 0x4c80;
+/// The value of `NBIO_BASE(mmBIOS_SCRATCH_2_BASE_IDX) + mmBIOS_SCRATCH_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const ABM_BIOS_SCRATCH_2: u32 = 0x4e;
+
+// DC abm field shifts/masks (ABM_MASK_SH_LIST_DCN20(__SHIFT))
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:7218
+pub const MASTER_COMM_CNTL_REG__MASTER_COMM_INTERRUPT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:7217
+pub const MASTER_COMM_CNTL_REG__MASTER_COMM_INTERRUPT_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:7210
+pub const MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE0__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:7209
+pub const MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE0_MASK: u32 = 0xff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:7212
+pub const MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE1__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:7211
+pub const MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE1_MASK: u32 = 0xff00;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:7214
+pub const MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE2__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:7213
+pub const MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE2_MASK: u32 = 0xff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:266
+pub const DC_ABM1_HG_MISC_CTRL__ABM1_HG_NUM_OF_BINS_SEL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:265
+pub const DC_ABM1_HG_MISC_CTRL__ABM1_HG_NUM_OF_BINS_SEL_MASK: u32 = 0x3;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:268
+pub const DC_ABM1_HG_MISC_CTRL__ABM1_HG_VMAX_SEL__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:267
+pub const DC_ABM1_HG_MISC_CTRL__ABM1_HG_VMAX_SEL_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:272
+pub const DC_ABM1_HG_MISC_CTRL__ABM1_HG_BIN_BITWIDTH_SIZE_SEL__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:271
+pub const DC_ABM1_HG_MISC_CTRL__ABM1_HG_BIN_BITWIDTH_SIZE_SEL_MASK: u32 = 0x30000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:186
+pub const DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_R__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:185
+pub const DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_R_MASK: u32 = 0xf0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:184
+pub const DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_G__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:183
+pub const DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_G_MASK: u32 = 0xf00;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:182
+pub const DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:181
+pub const DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_B_MASK: u32 = 0xf;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:138
+pub const BL1_PWM_CURRENT_ABM_LEVEL__BL1_PWM_CURRENT_ABM_LEVEL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:137
+pub const BL1_PWM_CURRENT_ABM_LEVEL__BL1_PWM_CURRENT_ABM_LEVEL_MASK: u32 = 0x1ffff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:136
+pub const BL1_PWM_TARGET_ABM_LEVEL__BL1_PWM_TARGET_ABM_LEVEL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:135
+pub const BL1_PWM_TARGET_ABM_LEVEL__BL1_PWM_TARGET_ABM_LEVEL_MASK: u32 = 0x1ffff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:134
+pub const BL1_PWM_USER_LEVEL__BL1_PWM_USER_LEVEL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:133
+pub const BL1_PWM_USER_LEVEL__BL1_PWM_USER_LEVEL_MASK: u32 = 0x1ffff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:302
+pub const DC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES__ABM1_LS_MIN_PIXEL_VALUE_THRES__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:301
+pub const DC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES__ABM1_LS_MIN_PIXEL_VALUE_THRES_MASK: u32 = 0x3ff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:304
+pub const DC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES__ABM1_LS_MAX_PIXEL_VALUE_THRES__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:303
+pub const DC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES__ABM1_LS_MAX_PIXEL_VALUE_THRES_MASK: u32 = 0x3ff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:260
+pub const DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_HG_REG_READ_MISSED_FRAME_CLEAR__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:259
+pub const DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_HG_REG_READ_MISSED_FRAME_CLEAR_MASK: u32 = 0x10000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:262
+pub const DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_LS_REG_READ_MISSED_FRAME_CLEAR__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:261
+pub const DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_LS_REG_READ_MISSED_FRAME_CLEAR_MASK: u32 = 0x1000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:264
+pub const DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_BL_REG_READ_MISSED_FRAME_CLEAR__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:263
+pub const DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_BL_REG_READ_MISSED_FRAME_CLEAR_MASK: u32 = 0x80000000;
+
+// The DMUB ABM commands (dmub_abm_lcd.c, dmub_cmd.h)
+/// ?
+pub const DMUB_CMD__ABM: u32 = 0x42;
+/// ?
+pub const DMUB_CMD__ABM_SET_PWM_FRAC: u32 = 0x5;
+/// ?
+pub const DMUB_CMD_ABM_CONTROL_VERSION_1: u32 = 0x1;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_pwm_frac, abm_set_pwm_frac_data.fractional_pwm)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMFRAC_FRACTIONAL_PWM: u32 = 0x4;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_pwm_frac, abm_set_pwm_frac_data.version)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMFRAC_VERSION: u32 = 0x8;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_pwm_frac, abm_set_pwm_frac_data.panel_mask)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMFRAC_PANEL_MASK: u32 = 0x9;
+/// The value of `sizeof(struct dmub_cmd_abm_set_pwm_frac_data)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const SIZEOF_dmub_cmd_abm_set_pwm_frac_data: u32 = 0x8;
+
+// The BIOS scratch registers DC reads (bios_regs, dcn21_resource.c)
+/// The value of `NBIO_BASE(mmBIOS_SCRATCH_3_BASE_IDX) + mmBIOS_SCRATCH_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const BIOS_REGS_BIOS_SCRATCH_3: u32 = 0x4f;
+/// The value of `NBIO_BASE(mmBIOS_SCRATCH_6_BASE_IDX) + mmBIOS_SCRATCH_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const BIOS_REGS_BIOS_SCRATCH_6: u32 = 0x52;
+
+// Display power gating through the VBIOS (command_table2.c, command_table_helper2.c)
+/// ?
+pub const CONTROLLER_ID_UNDEFINED: u32 = 0x0;
+/// ?
+pub const CONTROLLER_ID_D0: u32 = 0x1;
+/// ?
+pub const CONTROLLER_ID_D1: u32 = 0x2;
+/// ?
+pub const CONTROLLER_ID_D2: u32 = 0x3;
+/// ?
+pub const CONTROLLER_ID_D3: u32 = 0x4;
+/// ?
+pub const CONTROLLER_ID_D4: u32 = 0x5;
+/// ?
+pub const CONTROLLER_ID_D5: u32 = 0x6;
+/// include/atombios.h:61
+pub const ATOM_CRTC1: u32 = 0x0;
+/// include/atombios.h:62
+pub const ATOM_CRTC2: u32 = 0x1;
+/// include/atombios.h:63
+pub const ATOM_CRTC3: u32 = 0x2;
+/// include/atombios.h:64
+pub const ATOM_CRTC4: u32 = 0x3;
+/// include/atombios.h:65
+pub const ATOM_CRTC5: u32 = 0x4;
+/// include/atombios.h:66
+pub const ATOM_CRTC6: u32 = 0x5;
+/// include/atombios.h:71
+pub const ATOM_CRTC_INVALID: u32 = 0xff;
+/// include/atombios.h:112
+pub const ATOM_DISABLE: u32 = 0x0;
+/// include/atombios.h:113
+pub const ATOM_ENABLE: u32 = 0x1;
+/// include/atombios.h:120
+pub const ATOM_INIT: u32 = 0x7;
+/// ?
+pub const ASIC_PIPE_DISABLE: u32 = 0x0;
+/// ?
+pub const ASIC_PIPE_ENABLE: u32 = 0x1;
+/// ?
+pub const ASIC_PIPE_INIT: u32 = 0x2;
+/// ?
+pub const DMUB_CMD__VBIOS_ENABLE_DISP_POWER_GATING: u32 = 0x3;
+/// The value of `offsetof(struct dmub_rb_cmd_enable_disp_power_gating, power_gating.pwr.disp_pipe_id)` in ../display/dc/bios/command_table2.c
+pub const EDPG_DISP_PIPE_ID: u32 = 0x4;
+/// The value of `offsetof(struct dmub_rb_cmd_enable_disp_power_gating, power_gating.pwr.enable)` in ../display/dc/bios/command_table2.c
+pub const EDPG_ENABLE: u32 = 0x5;
+/// The value of `sizeof(struct dmub_rb_cmd_enable_disp_power_gating)` in ../display/dc/bios/command_table2.c
+pub const SIZEOF_dmub_rb_cmd_enable_disp_power_gating: u32 = 0x8;
+
+// dcn10_init_hw (dcn10_hwseq.c)
+/// ?
+pub const MAX_BACKLIGHT_LEVEL: u32 = 0xffff;
+/// ?
+pub const dc_link_fec_enabled: u32 = 0x2;
+/// ?
+pub const SUBVP_NONE: u32 = 0x0;
+/// ?
+pub const SUBVP_PHANTOM: u32 = 0x2;
+/// ?
+pub const COLOR_SPACE_SRGB: u32 = 0x1;
+/// ?
+pub const COLOR_SPACE_SRGB_LIMITED: u32 = 0x3;
+/// ?
+pub const COLOR_SPACE_YCBCR601: u32 = 0x5;
+/// ?
+pub const COLOR_SPACE_YCBCR709: u32 = 0x6;
+/// ?
+pub const COLOR_SPACE_YCBCR709_BLACK: u32 = 0x15;
+/// ?
+pub const COLOR_SPACE_YCBCR601_LIMITED: u32 = 0x9;
+/// ?
+pub const COLOR_SPACE_YCBCR709_LIMITED: u32 = 0xa;
+/// ?
+pub const COLOR_SPACE_2020_YCBCR_LIMITED: u32 = 0xd;
+/// ?
+pub const COLOR_SPACE_2020_YCBCR_FULL: u32 = 0xe;
+/// display/dc/core/dc_hw_sequencer.c:41
+pub const BLACK_COLOR_FORMAT_RGB_FULLRANGE: u32 = 0x0;
+/// display/dc/core/dc_hw_sequencer.c:42
+pub const BLACK_COLOR_FORMAT_RGB_LIMITED: u32 = 0x1;
+/// display/dc/core/dc_hw_sequencer.c:44
+pub const BLACK_COLOR_FORMAT_YUV_CV: u32 = 0x3;

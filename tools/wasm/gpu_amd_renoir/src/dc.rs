@@ -179,6 +179,9 @@ pub struct dc_debug_options {
     /// `dpia_debug.bits.disable_dpia`.
     pub dpia_debug_disable_dpia: bool,
     pub disable_timeout: bool,
+    pub disable_dpp_power_gate: bool,
+    pub disable_hubp_power_gate: bool,
+    pub disable_dsc_power_gate: bool,
 }
 
 /// Which `dc_cap_funcs` entry is bound (dcn21 sets only
@@ -220,6 +223,7 @@ pub struct dc {
     pub current_state: Option<Box<crate::dc_state::dc_state>>,
     /// `hwss`: the hw sequencer vtable (`dcn21_hw_sequencer_construct`).
     pub hwss: crate::hw_sequencer::hw_sequencer_funcs,
+    pub optimized_required: bool,
 }
 
 /// `dc_get_edp_links` (dc_link_exports.c): the eDP links, connected or not,
@@ -246,6 +250,16 @@ pub fn detect_edp_presence(adev: &amdgpu_device, dc: &mut dc) {
         crate::link_detection::link_detect_connection_type(adev, dc, li, &mut r#type);
         dc.links[li].edp_sink_present = r#type != crate::regs::dc_connection_none;
     }
+}
+
+/// `dc_hardware_init` (dc.c): the eDP presence test, the hw sequencer's
+/// init and the D0 notification to the DMCUB.
+pub fn dc_hardware_init(adev: &amdgpu_device, dc: &mut dc) {
+    detect_edp_presence(adev, dc);
+    if dc.ctx.dce_environment != crate::dc_types::dce_environment::DCE_ENV_VIRTUAL_HW {
+        (dc.hwss.init_hw.unwrap())(adev, dc);
+    }
+    crate::dc_dmub_srv::dc_dmub_srv_notify_fw_dc_power_state(adev, dc, crate::regs::DC_ACPI_CM_POWER_STATE_D0);
 }
 
 /// `create_links` (dc.c). The VBIOS reports the number of valid connector

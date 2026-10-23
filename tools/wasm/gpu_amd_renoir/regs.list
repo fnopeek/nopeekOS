@@ -11774,3 +11774,149 @@ LF_AMD_EXT_DISPLAY_PATH_CAPS__EXT_CHIP_MASK = AMD_EXT_DISPLAY_PATH_CAPS__EXT_CHI
 LF_AMD_EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN = AMD_EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN @ ../display/dc/link/link_factory.c
 LF_MAX_LINKS = MAX_LINKS @ ../display/dc/link/link_factory.c
 LF_ENUM_ID_COUNT = ENUM_ID_COUNT @ ../display/dc/link/link_factory.c
+# The OPP display pattern generator (dcn20_opp.c, hw_shared.h, dc_hw_types.h)
+CONTROLLER_DP_TEST_PATTERN_COLORSQUARES @ ../display/dc/opp/dcn20/dcn20_opp.c
+CONTROLLER_DP_TEST_PATTERN_COLORSQUARES_CEA @ ../display/dc/opp/dcn20/dcn20_opp.c
+CONTROLLER_DP_TEST_PATTERN_VERTICALBARS @ ../display/dc/opp/dcn20/dcn20_opp.c
+CONTROLLER_DP_TEST_PATTERN_HORIZONTALBARS @ ../display/dc/opp/dcn20/dcn20_opp.c
+CONTROLLER_DP_TEST_PATTERN_COLORRAMP @ ../display/dc/opp/dcn20/dcn20_opp.c
+CONTROLLER_DP_TEST_PATTERN_VIDEOMODE @ ../display/dc/opp/dcn20/dcn20_opp.c
+CONTROLLER_DP_TEST_PATTERN_SOLID_COLOR @ ../display/dc/opp/dcn20/dcn20_opp.c
+CONTROLLER_DP_COLOR_SPACE_RGB @ ../display/dc/opp/dcn20/dcn20_opp.c
+CONTROLLER_DP_COLOR_SPACE_YCBCR601 @ ../display/dc/opp/dcn20/dcn20_opp.c
+CONTROLLER_DP_COLOR_SPACE_YCBCR709 @ ../display/dc/opp/dcn20/dcn20_opp.c
+CONTROLLER_DP_COLOR_SPACE_UDEFINED @ ../display/dc/opp/dcn20/dcn20_opp.c
+COLOR_DEPTH_UNDEFINED @ ../display/dc/opp/dcn20/dcn20_opp.c
+COLOR_DEPTH_666 @ ../display/dc/opp/dcn20/dcn20_opp.c
+COLOR_DEPTH_888 @ ../display/dc/opp/dcn20/dcn20_opp.c
+COLOR_DEPTH_101010 @ ../display/dc/opp/dcn20/dcn20_opp.c
+COLOR_DEPTH_121212 @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_COLOR_FORMAT_BPC_6 @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_COLOR_FORMAT_BPC_8 @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_COLOR_FORMAT_BPC_10 @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_COLOR_FORMAT_BPC_12 @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_DYN_RANGE_VESA @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_DYN_RANGE_CEA @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_MODE_COLORSQUARES_RGB @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_MODE_COLORSQUARES_YCBCR601 @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_MODE_COLORSQUARES_YCBCR709 @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_MODE_VERTICALBARS @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_MODE_HORIZONTALBARS @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_MODE_SINGLERAMP_RGB @ ../display/dc/opp/dcn20/dcn20_opp.c
+TEST_PATTERN_MODE_DUALRAMP_RGB @ ../display/dc/opp/dcn20/dcn20_opp.c
+# The Azalia codec registers dce_aud_hw_init reaches (dce_audio.c)
+ixAZALIA_F0_CODEC_PIN_CONTROL_HOT_PLUG_CONTROL @ ../display/dc/dce/dce_audio.c
+AZALIA_F0_CODEC_PIN_CONTROL_HOT_PLUG_CONTROL__CLOCK_GATING_DISABLE__SHIFT @ ../display/dc/dce/dce_audio.c
+AZALIA_F0_CODEC_PIN_CONTROL_HOT_PLUG_CONTROL__CLOCK_GATING_DISABLE_MASK @ ../display/dc/dce/dce_audio.c
+# The VBIOS scratch flags DC sets and reads (atombios.h)
+ATOM_S2_VRI_BRIGHT_ENABLE @ ../display/dc/dce/dce_panel_cntl.c
+ATOM_S6_ACC_MODE @ ../display/dc/bios/bios_parser_helper.c
+ATOM_S6_ACC_MODE_SHIFT @ ../display/dc/bios/bios_parser_helper.c
+# DC abm: dce_abm_registers (single struct, array/scalar fields)
+# (ABM_DCN20_REG_LIST()) — field value is BASE(mmX_BASE_IDX)+mmX.
+ABM_MASTER_COMM_CNTL_REG = BASE(mmMASTER_COMM_CNTL_REG_BASE_IDX) + mmMASTER_COMM_CNTL_REG @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_MASTER_COMM_CMD_REG = BASE(mmMASTER_COMM_CMD_REG_BASE_IDX) + mmMASTER_COMM_CMD_REG @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_MASTER_COMM_DATA_REG1 = BASE(mmMASTER_COMM_DATA_REG1_BASE_IDX) + mmMASTER_COMM_DATA_REG1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_DC_ABM1_HG_SAMPLE_RATE = BASE(mmDC_ABM1_HG_SAMPLE_RATE_BASE_IDX) + mmDC_ABM1_HG_SAMPLE_RATE @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_DC_ABM1_LS_SAMPLE_RATE = BASE(mmDC_ABM1_LS_SAMPLE_RATE_BASE_IDX) + mmDC_ABM1_LS_SAMPLE_RATE @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_BL1_PWM_BL_UPDATE_SAMPLE_RATE = BASE(mmBL1_PWM_BL_UPDATE_SAMPLE_RATE_BASE_IDX) + mmBL1_PWM_BL_UPDATE_SAMPLE_RATE @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_DC_ABM1_HG_MISC_CTRL = BASE(mmDC_ABM1_HG_MISC_CTRL_BASE_IDX) + mmDC_ABM1_HG_MISC_CTRL @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_DC_ABM1_IPCSC_COEFF_SEL = BASE(mmDC_ABM1_IPCSC_COEFF_SEL_BASE_IDX) + mmDC_ABM1_IPCSC_COEFF_SEL @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_BL1_PWM_CURRENT_ABM_LEVEL = BASE(mmBL1_PWM_CURRENT_ABM_LEVEL_BASE_IDX) + mmBL1_PWM_CURRENT_ABM_LEVEL @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_BL1_PWM_TARGET_ABM_LEVEL = BASE(mmBL1_PWM_TARGET_ABM_LEVEL_BASE_IDX) + mmBL1_PWM_TARGET_ABM_LEVEL @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_BL1_PWM_USER_LEVEL = BASE(mmBL1_PWM_USER_LEVEL_BASE_IDX) + mmBL1_PWM_USER_LEVEL @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_DC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES = BASE(mmDC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES_BASE_IDX) + mmDC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_DC_ABM1_HGLS_REG_READ_PROGRESS = BASE(mmDC_ABM1_HGLS_REG_READ_PROGRESS_BASE_IDX) + mmDC_ABM1_HGLS_REG_READ_PROGRESS @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_DC_ABM1_ACE_OFFSET_SLOPE_0 = BASE(mmDC_ABM1_ACE_OFFSET_SLOPE_0_BASE_IDX) + mmDC_ABM1_ACE_OFFSET_SLOPE_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_DC_ABM1_ACE_THRES_12 = BASE(mmDC_ABM1_ACE_THRES_12_BASE_IDX) + mmDC_ABM1_ACE_THRES_12 @ ../display/dc/resource/dcn21/dcn21_resource.c
+ABM_BIOS_SCRATCH_2 = NBIO_BASE(mmBIOS_SCRATCH_2_BASE_IDX) + mmBIOS_SCRATCH_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC abm field shifts/masks (ABM_MASK_SH_LIST_DCN20(__SHIFT))
+MASTER_COMM_CNTL_REG__MASTER_COMM_INTERRUPT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MASTER_COMM_CNTL_REG__MASTER_COMM_INTERRUPT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE0__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE0_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE1__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE1_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE2__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MASTER_COMM_CMD_REG__MASTER_COMM_CMD_REG_BYTE2_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HG_MISC_CTRL__ABM1_HG_NUM_OF_BINS_SEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HG_MISC_CTRL__ABM1_HG_NUM_OF_BINS_SEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HG_MISC_CTRL__ABM1_HG_VMAX_SEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HG_MISC_CTRL__ABM1_HG_VMAX_SEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HG_MISC_CTRL__ABM1_HG_BIN_BITWIDTH_SIZE_SEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HG_MISC_CTRL__ABM1_HG_BIN_BITWIDTH_SIZE_SEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_R__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_R_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_G__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_G_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_B__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_IPCSC_COEFF_SEL__ABM1_IPCSC_COEFF_SEL_B_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+BL1_PWM_CURRENT_ABM_LEVEL__BL1_PWM_CURRENT_ABM_LEVEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+BL1_PWM_CURRENT_ABM_LEVEL__BL1_PWM_CURRENT_ABM_LEVEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+BL1_PWM_TARGET_ABM_LEVEL__BL1_PWM_TARGET_ABM_LEVEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+BL1_PWM_TARGET_ABM_LEVEL__BL1_PWM_TARGET_ABM_LEVEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+BL1_PWM_USER_LEVEL__BL1_PWM_USER_LEVEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+BL1_PWM_USER_LEVEL__BL1_PWM_USER_LEVEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES__ABM1_LS_MIN_PIXEL_VALUE_THRES__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES__ABM1_LS_MIN_PIXEL_VALUE_THRES_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES__ABM1_LS_MAX_PIXEL_VALUE_THRES__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_LS_MIN_MAX_PIXEL_VALUE_THRES__ABM1_LS_MAX_PIXEL_VALUE_THRES_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_HG_REG_READ_MISSED_FRAME_CLEAR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_HG_REG_READ_MISSED_FRAME_CLEAR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_LS_REG_READ_MISSED_FRAME_CLEAR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_LS_REG_READ_MISSED_FRAME_CLEAR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_BL_REG_READ_MISSED_FRAME_CLEAR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_ABM1_HGLS_REG_READ_PROGRESS__ABM1_BL_REG_READ_MISSED_FRAME_CLEAR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+# The DMUB ABM commands (dmub_abm_lcd.c, dmub_cmd.h)
+DMUB_CMD__ABM @ ../display/dc/dce/dmub_abm_lcd.c
+DMUB_CMD__ABM_SET_PWM_FRAC @ ../display/dc/dce/dmub_abm_lcd.c
+DMUB_CMD_ABM_CONTROL_VERSION_1 @ ../display/dc/dce/dmub_abm_lcd.c
+ABMFRAC_FRACTIONAL_PWM = offsetof(struct dmub_rb_cmd_abm_set_pwm_frac, abm_set_pwm_frac_data.fractional_pwm) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMFRAC_VERSION = offsetof(struct dmub_rb_cmd_abm_set_pwm_frac, abm_set_pwm_frac_data.version) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMFRAC_PANEL_MASK = offsetof(struct dmub_rb_cmd_abm_set_pwm_frac, abm_set_pwm_frac_data.panel_mask) @ ../display/dc/dce/dmub_abm_lcd.c
+SIZEOF_dmub_cmd_abm_set_pwm_frac_data = sizeof(struct dmub_cmd_abm_set_pwm_frac_data) @ ../display/dc/dce/dmub_abm_lcd.c
+# The BIOS scratch registers DC reads (bios_regs, dcn21_resource.c)
+BIOS_REGS_BIOS_SCRATCH_3 = NBIO_BASE(mmBIOS_SCRATCH_3_BASE_IDX) + mmBIOS_SCRATCH_3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+BIOS_REGS_BIOS_SCRATCH_6 = NBIO_BASE(mmBIOS_SCRATCH_6_BASE_IDX) + mmBIOS_SCRATCH_6 @ ../display/dc/resource/dcn21/dcn21_resource.c
+# Display power gating through the VBIOS (command_table2.c, command_table_helper2.c)
+CONTROLLER_ID_UNDEFINED @ ../display/dc/bios/command_table_helper2.c
+CONTROLLER_ID_D0 @ ../display/dc/bios/command_table_helper2.c
+CONTROLLER_ID_D1 @ ../display/dc/bios/command_table_helper2.c
+CONTROLLER_ID_D2 @ ../display/dc/bios/command_table_helper2.c
+CONTROLLER_ID_D3 @ ../display/dc/bios/command_table_helper2.c
+CONTROLLER_ID_D4 @ ../display/dc/bios/command_table_helper2.c
+CONTROLLER_ID_D5 @ ../display/dc/bios/command_table_helper2.c
+ATOM_CRTC1 @ ../display/dc/bios/command_table_helper2.c
+ATOM_CRTC2 @ ../display/dc/bios/command_table_helper2.c
+ATOM_CRTC3 @ ../display/dc/bios/command_table_helper2.c
+ATOM_CRTC4 @ ../display/dc/bios/command_table_helper2.c
+ATOM_CRTC5 @ ../display/dc/bios/command_table_helper2.c
+ATOM_CRTC6 @ ../display/dc/bios/command_table_helper2.c
+ATOM_CRTC_INVALID @ ../display/dc/bios/command_table_helper2.c
+ATOM_DISABLE @ ../display/dc/bios/dce112/command_table_helper2_dce112.c
+ATOM_ENABLE @ ../display/dc/bios/dce112/command_table_helper2_dce112.c
+ATOM_INIT @ ../display/dc/bios/dce112/command_table_helper2_dce112.c
+ASIC_PIPE_DISABLE @ ../display/dc/bios/command_table2.c
+ASIC_PIPE_ENABLE @ ../display/dc/bios/command_table2.c
+ASIC_PIPE_INIT @ ../display/dc/bios/command_table2.c
+DMUB_CMD__VBIOS_ENABLE_DISP_POWER_GATING @ ../display/dc/bios/command_table2.c
+EDPG_DISP_PIPE_ID = offsetof(struct dmub_rb_cmd_enable_disp_power_gating, power_gating.pwr.disp_pipe_id) @ ../display/dc/bios/command_table2.c
+EDPG_ENABLE = offsetof(struct dmub_rb_cmd_enable_disp_power_gating, power_gating.pwr.enable) @ ../display/dc/bios/command_table2.c
+SIZEOF_dmub_rb_cmd_enable_disp_power_gating = sizeof(struct dmub_rb_cmd_enable_disp_power_gating) @ ../display/dc/bios/command_table2.c
+# dcn10_init_hw (dcn10_hwseq.c)
+MAX_BACKLIGHT_LEVEL @ ../display/dc/hwss/dcn10/dcn10_hwseq.c
+dc_link_fec_enabled @ ../display/dc/hwss/dcn10/dcn10_hwseq.c
+SUBVP_NONE @ ../display/dc/hwss/dcn10/dcn10_hwseq.c
+SUBVP_PHANTOM @ ../display/dc/hwss/dcn10/dcn10_hwseq.c
+COLOR_SPACE_SRGB @ ../display/dc/hwss/dcn20/dcn20_hwseq.c
+COLOR_SPACE_SRGB_LIMITED @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR601 @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR709 @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR709_BLACK @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR601_LIMITED @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR709_LIMITED @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_2020_YCBCR_LIMITED @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_2020_YCBCR_FULL @ ../display/dc/core/dc_hw_sequencer.c
+BLACK_COLOR_FORMAT_RGB_FULLRANGE @ ../display/dc/core/dc_hw_sequencer.c
+BLACK_COLOR_FORMAT_RGB_LIMITED @ ../display/dc/core/dc_hw_sequencer.c
+BLACK_COLOR_FORMAT_YUV_CV @ ../display/dc/core/dc_hw_sequencer.c

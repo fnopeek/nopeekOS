@@ -45,10 +45,56 @@ pub struct link_enc_cfg_context {
     pub transient_assignments: [link_enc_assignment; MAX_PIPES],
 }
 
+/// `struct stream_resource` (core_types.h), the members reached. The
+/// blocks are named by their index in the resource pool's arrays.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct stream_resource {
+    pub opp: Option<usize>,
+    pub tg: Option<usize>,
+    pub gsl_group: i32,
+}
+
+/// `struct plane_resource` (core_types.h), the members reached.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct plane_resource {
+    pub hubp: Option<usize>,
+    pub dpp: Option<usize>,
+    pub mpcc_inst: u8,
+}
+
+/// `struct pipe_ctx` (core_types.h), the members reached. A stream, a plane
+/// state and the neighbouring pipes are indices; none exists before the
+/// first commit.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct pipe_ctx {
+    pub plane_state: Option<usize>,
+    pub stream: Option<usize>,
+    pub plane_res: plane_resource,
+    pub stream_res: stream_resource,
+    pub pipe_idx: u8,
+    pub top_pipe: Option<usize>,
+    pub bottom_pipe: Option<usize>,
+    pub next_odm_pipe: Option<usize>,
+    pub prev_odm_pipe: Option<usize>,
+}
+
 /// `struct resource_context` (core_types.h), the members reached.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct resource_context {
+    pub pipe_ctx: [pipe_ctx; MAX_PIPES],
     pub link_enc_cfg_ctx: link_enc_cfg_context,
+}
+
+/// `struct dcn_bw_output`'s clocks (core_types.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct dcn_bw_output {
+    pub clk: crate::clk_mgr::dc_clocks,
+}
+
+/// `struct bw_context` (core_types.h), its `bw.dcn` view.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct bw_context {
+    pub dcn: dcn_bw_output,
 }
 
 /// `enum dc_power_source_type` (dc_types.h).
@@ -65,7 +111,10 @@ pub enum dc_power_source_type {
 pub struct dc_state {
     pub dml: Option<Box<display_mode_lib>>,
     pub has_clk_mgr: bool,
+    /// `stream_count`: the streams join with the commit path.
+    pub stream_count: u32,
     pub res_ctx: resource_context,
+    pub bw_ctx: bw_context,
     pub power_source: dc_power_source_type,
     pub refcount: u32,
 }
@@ -120,4 +169,17 @@ pub fn dc_state_create(dc: &dc, power_source: Option<dc_power_source_type>) -> B
 
     state.refcount = 1;
     state
+}
+
+/// `dc_state_get_stream_subvp_type` (dc_state.c): the MALL type of `stream`
+/// in `state`, SUBVP_NONE for one the state does not hold. The state holds
+/// no stream yet.
+pub fn dc_state_get_stream_subvp_type(state: &dc_state, stream: Option<usize>) -> u32 {
+    let _ = (state.stream_count, stream);
+    crate::regs::SUBVP_NONE
+}
+
+/// `dc_state_get_pipe_subvp_type` (dc_state.c).
+pub fn dc_state_get_pipe_subvp_type(state: &dc_state, pipe_ctx: &pipe_ctx) -> u32 {
+    dc_state_get_stream_subvp_type(state, pipe_ctx.stream)
 }

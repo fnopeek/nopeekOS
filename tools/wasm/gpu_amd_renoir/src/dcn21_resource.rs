@@ -26,8 +26,8 @@ use crate::dml_structs::{dml_init_instance, dml_project};
 use crate::virtual_stream_encoder::virtual_stream_encoder_create;
 use alloc::boxed::Box;
 use crate::regs::{
-    CC_DC_PIPE_DIS, DC_PINSTRAPS, DC_PINSTRAPS__DC_PINSTRAPS_AUDIO_MASK,
-    DC_PINSTRAPS__DC_PINSTRAPS_AUDIO__SHIFT,
+    BIOS_REGS_BIOS_SCRATCH_3, BIOS_REGS_BIOS_SCRATCH_6, CC_DC_PIPE_DIS, DC_PINSTRAPS,
+    DC_PINSTRAPS__DC_PINSTRAPS_AUDIO_MASK, DC_PINSTRAPS__DC_PINSTRAPS_AUDIO__SHIFT,
 };
 use crate::dccg::{dccg21_create, DCCG_MASK, DCCG_REGS, DCCG_SHIFT};
 use crate::dcn10_ipp::dcn21_ipp_create;
@@ -43,6 +43,7 @@ use crate::dcn21_hubp::dcn21_hubp_create;
 use crate::dce_aux::dcn21_aux_engine_create;
 use crate::dce_clock_source::{clock_source_id, dcn21_clock_source_create, CLK_SRC_REGS};
 use crate::dce_i2c_hw::dcn21_i2c_hw_create;
+use crate::dmub_abm::{dmub_abm_create, dmub_psr_create, ABM_MASK, ABM_REGS, ABM_SHIFT};
 
 /// `enum dcn20_clk_src_array_id` (dcn21_resource.c): the clock-source slots.
 const DCN20_CLK_SRC_PLL0: usize = 0;
@@ -251,6 +252,8 @@ pub fn dcn21_resource_construct(
 ) {
     let pipe_fuses = read_pipe_fuses(adev);
 
+    dc.ctx.dc_bios.base.regs = Some(&BIOS_REGS);
+
     pool.res_cap = Some(&RES_CAP_RN);
 
     // Resource + asic cap hardcoding.
@@ -301,8 +304,21 @@ pub fn dcn21_resource_construct(
     // The DCCG.
     pool.dccg = Some(dccg21_create(&DCCG_REGS, &DCCG_SHIFT, &DCCG_MASK));
 
-    // dmcu (with !config.disable_dmcu; it clears debug.dmub_command_table),
-    // the DMUB psr and the DMUB/DCE abm join with the DMUB command path.
+    if !dc.config.disable_dmcu {
+        // dcn21_dmcu_create is not ported: with a DMCUB firmware the DM sets
+        // disable_dmcu.
+        crate::linux::Line::new().s("dcn21_resource_construct: dmcu not ported").say();
+        dc.debug.dmub_command_table = false;
+    }
+
+    if dc.config.disable_dmcu {
+        pool.psr = Some(dmub_psr_create());
+    }
+
+    // dce_abm_create (no DMCUB) is not ported.
+    if dc.config.disable_dmcu {
+        pool.abm = dmub_abm_create(dc.caps.dmcub_support, &ABM_REGS, &ABM_SHIFT, &ABM_MASK);
+    }
 
     pool.pp_smu = dcn21_pp_smu_create(dc.ctx.dce_version);
 
@@ -365,6 +381,12 @@ pub fn dcn21_resource_construct(
     // (the validate/map vtable — stage E).
 }
 
+/// `bios_regs` (dcn21_resource.c).
+static BIOS_REGS: crate::dc_types::bios_registers = crate::dc_types::bios_registers {
+    BIOS_SCRATCH_3: BIOS_REGS_BIOS_SCRATCH_3,
+    BIOS_SCRATCH_6: BIOS_REGS_BIOS_SCRATCH_6,
+};
+
 /// `debug_defaults_drv` (dcn21_resource.c).
 const DEBUG_DEFAULTS_DRV: dc_debug_options = dc_debug_options {
     disable_dmcu: false,
@@ -403,6 +425,9 @@ const DEBUG_DEFAULTS_DRV: dc_debug_options = dc_debug_options {
     enable_dmub_aux_for_legacy_ddc: false,
     dpia_debug_disable_dpia: false,
     disable_timeout: false,
+    disable_dpp_power_gate: false,
+    disable_hubp_power_gate: false,
+    disable_dsc_power_gate: false,
 };
 
 /// `dcn21_pp_smu_create` (dcn21_resource.c): a table that is not Renoir's is

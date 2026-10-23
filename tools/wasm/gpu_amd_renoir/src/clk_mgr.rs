@@ -126,6 +126,34 @@ pub enum clk_mgr_funcs_id {
     dcn21_funcs,
 }
 
+/// `struct clk_mgr_funcs` (clk_mgr.h), the members ported.
+#[derive(Default, Clone, Copy)]
+pub struct clk_mgr_ops {
+    pub init_clocks: Option<fn(&mut clk_mgr_internal)>,
+    pub notify_wm_ranges: Option<fn(&amdgpu_device, &dc, &mut clk_mgr_internal)>,
+}
+
+impl clk_mgr_funcs_id {
+    pub fn ops(self) -> &'static clk_mgr_ops {
+        match self {
+            clk_mgr_funcs_id::dcn21_funcs => &crate::rn_clk_mgr::DCN21_FUNCS,
+        }
+    }
+}
+
+/// `enum dcn_pwr_state` (dc.h).
+pub const DCN_PWR_STATE_UNKNOWN: i32 = -1;
+
+/// `struct dc_clocks` (dc.h), the members reached.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dc_clocks {
+    pub dispclk_khz: i32,
+    pub dppclk_khz: i32,
+    pub p_state_change_support: bool,
+    pub prev_p_state_change_support: bool,
+    pub pwr_state: i32,
+}
+
 /// `struct clk_mgr`. `bw_params` points at a per-ASIC static in Linux
 /// (`rn_bw_params`), which the construct then edits; the port owns the copy.
 #[derive(Default)]
@@ -137,8 +165,17 @@ pub struct clk_mgr {
     pub dprefclk_khz: i32,
     pub dp_dto_source_clock_in_khz: i32,
     pub dentist_vco_freq_khz: i32,
+    pub clks: dc_clocks,
     pub boot_snapshot: clk_state_registers_and_bypass,
     pub bw_params: Option<Box<clk_bw_params>>,
+    pub ranges: crate::dm_pp_smu::pp_smu_wm_range_sets,
+}
+
+impl clk_mgr_internal {
+    /// `clk_mgr->funcs`.
+    pub fn funcs(&self) -> &'static clk_mgr_ops {
+        self.base.funcs.expect("clk_mgr funcs").ops()
+    }
 }
 
 /// `struct clk_mgr_internal`. `pp_smu` and `dccg` are the pool's; the port

@@ -645,6 +645,42 @@ gcc $CF -I "$AMD/include/asic_reg" "$HERE/main_sdma.c" -o "$B/oracle_sdma"
 gcc $CF -I "$AMD/include/asic_reg" -I "$AMD/include/ivsrcid" "$HERE/main_vcn.c" -o "$B/oracle_vcn"
 gcc $CF -I "$AMD/include/asic_reg" -I "$AMD/include/ivsrcid" "$HERE/main_jpeg.c" -o "$B/oracle_jpeg"
 
+# The DC bring-up: all of display/dc compiled unchanged (shim_dchw stands in
+# for the kernel beyond shim_dmub), with amdgpu_dm_init around dc_create and
+# dc_hardware_init after it. DML2 and the DCN 3.x+ FPU/VBA files are left
+# out; DCN 2.1 never reaches them. What nothing defines is unreachable for
+# DCN 2.1 and links to a stub that says so and aborts.
+S=$B/dchw_shim
+mkdir -p "$S/drm/display" "$S/linux" "$B/dchw_obj"
+cp "$L/include/drm/display/drm_dp.h" "$L/include/drm/display/drm_dsc.h" "$S/drm/display/"
+sed 's|#include <linux/device.h>||' "$L/include/linux/hdmi.h" > "$S/linux/hdmi.h"
+DCHW_CF="-I $HERE/shim_dchw -I $S $CF $DMUB_CF -include $HERE/shim_dchw/dchw_os.h -Wno-incompatible-pointer-types \
+    -DCONFIG_DRM_AMD_DC -DCONFIG_DRM_AMD_DC_FP"
+for d in clk_mgr dccg dio dpp dsc dwb hpo hubbub hubp hwss inc inc/hw mmhubbub mpc opp optc pg resource dml2 \
+    dml2/dml21 dml2/dml21/inc dml2/dml21/src/inc dml2/dml21/src/dml2_core; do
+    DCHW_CF="$DCHW_CF -I $DCS/$d"
+done
+DCHW_CF="$DCHW_CF -I $AMD/display/amdgpu_dm -I $AMD/display/modules/inc -I $AMD/pm/inc"
+find "$DCS" -name '*.o.cmd' | sed 's|/\.\([^/]*\)\.o\.cmd$|/\1.c|' | sort |
+    grep -v '/dml2/\|/soc_and_ip_translator/dcn401/\|/dcn314/\|/dcn35/\|/dcn351/\|/dcn36/\|/dcn40/\|/dcn401/' |
+    grep -v 'display_mode_vba_30\|display_mode_vba_31' |
+    while read f; do [ -f "$f" ] && echo "$f"; done > "$B/dchw_sources"
+export DCHW_CF DCS B
+xargs -P "$(nproc)" -I{} sh -c 'f={}; gcc $DCHW_CF -c "$f" -o "$B/dchw_obj/$(echo ${f#$DCS/} | tr / _).o"' \
+    < "$B/dchw_sources"
+gcc $DCHW_CF -c "$HERE/main_dchw.c" -o "$B/main_dchw.o"
+ld -r -o "$B/dchw_all.o" "$B"/dchw_obj/*.o $DMUB_O "$B/atom.o" "$B/main_dchw.o"
+nm -D --defined-only /lib/libc.so.6 | awk '{sub(/@.*/, "", $3); print $3}' | sort -u > "$B/libc_syms"
+{
+    echo '#include <stdio.h>'
+    echo '#include <stdlib.h>'
+    nm -u "$B/dchw_all.o" | awk '{print $2}' | grep -v '^_GLOBAL_OFFSET_TABLE_$' | sort -u |
+        comm -23 - "$B/libc_syms" |
+        awk '{printf "void %s(void) { fprintf(stderr, \"oracle: unreached %s\\n\"); abort(); }\n", $1, $1}'
+} > "$B/dchw_stubs.c"
+gcc -c -w "$B/dchw_stubs.c" -o "$B/dchw_stubs.o"
+gcc "$B/dchw_all.o" "$B/dchw_stubs.o" -lm -o "$B/oracle_dchw"
+
 SMUF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -include $HERE/shim/linux/types.h -I $HERE/shim_smu -I $HERE/shim -I $B \
     -I $AMD/pm/swsmu/inc -I $AMD/pm/swsmu -I $AMD/pm/swsmu/inc/pmfw_if -I $AMD/pm/swsmu/smu12 -I $AMD/include \
     -I $AMD/include/asic_reg -I $AMD/pm/inc -I $AMD/amdgpu -I $AMD/display/dc"

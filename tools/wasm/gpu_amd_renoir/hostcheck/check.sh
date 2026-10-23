@@ -133,6 +133,22 @@ for a in "24 0x20000 0 0x0101002b 0x02010000 0x164c 0xc1 0x17aa 0x3f1a" \
         fail=1
     fi
 done
+# The DC bring-up: Linux's amdgpu_dm_init (all of display/dc unchanged) and
+# the port's, then dc_hardware_init with a DMUB service attached. Registers
+# never written read all ones, all zeros, the hash, lit (ones with no pipe
+# fused off) or boot (lit as the VBIOS leaves it; the oracle names those
+# registers from Linux's own tables and the port reads them off its output).
+rustc $RF "$HERE/dchw_check.rs" -o "$B/dchw_check"
+for seed in ones zeros hash lit boot; do
+    "$B/oracle_dchw" "$BIOS" $seed | grep -v '^ATOM BIOS:' > "$B/dchw_$seed.linux"
+    "$B/dchw_check" "$BIOS" $seed "$B/dchw_$seed.linux" > "$B/dchw_$seed.port"
+    if diff -u "$B/dchw_$seed.linux" "$B/dchw_$seed.port" | head -30; cmp -s "$B/dchw_$seed.linux" "$B/dchw_$seed.port"; then
+        echo "dc_hardware_init ($seed): port = Linux ($(grep -c '^write' "$B/dchw_$seed.linux") register writes," \
+            "$(grep -c '^dmub cmd' "$B/dchw_$seed.linux") DMUB commands)"
+    else
+        fail=1
+    fi
+done
 # Stage 2: the oracle reads the discovery binary, the port runs the whole
 # amdgpu_device_init on the fake card first.
 # Registers never written read all ones (a bit cleared shows), all zeros

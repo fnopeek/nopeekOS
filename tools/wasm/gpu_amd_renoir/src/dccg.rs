@@ -1,9 +1,8 @@
 //! display/dc/inc/hw/dccg.h + dccg/dcn20/dcn20_dccg.h + dccg/dcn21/dcn21_dccg.c
 //! (Linux 6.18.55): the display clock generator (DCCG) of Renoir's resource
 //! pool. `dccg21_create` is a pointer-only constructor like the clock source —
-//! it stores `dccg_regs`/`dccg_shift`/`dccg_mask` and the funcs table; the
-//! register writes live in the funcs ops (`dccg21_update_dpp_dto`, `dccg2_init`,
-//! …), which are hwss-stage work.
+//! it stores `dccg_regs`/`dccg_shift`/`dccg_mask` and the funcs table. The
+//! ops are ported as the hw sequencer reaches them.
 //!
 //! Renoir takes `DCCG_COMMON_REG_LIST_DCN_BASE` for the registers and
 //! `DCCG_MASK_SH_LIST_DCN2_1` for the fields. The register struct and the
@@ -11,16 +10,61 @@
 //! — HDMI/PHY/DTB/DSC/SYMCLK — stay out until a block reaches them).
 #![allow(dead_code)]
 
+use crate::amdgpu_device::amdgpu_device;
+use crate::dc_helper::reg_get_n;
 use crate::dc_types::MAX_PIPES;
 use crate::regs::*;
 use alloc::boxed::Box;
 
-/// Which `dccg_funcs` vtable `dccg.funcs` points at (dcn21_dccg.c). Only the
-/// identity is carried; the ops are hwss-stage.
+/// Which `dccg_funcs` vtable `dccg.funcs` points at (dcn21_dccg.c).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum dccg_funcs {
     dccg21_funcs,
 }
+
+/// `struct dccg_funcs` (dccg.h), the members ported.
+#[derive(Default, Clone, Copy)]
+pub struct dccg_ops {
+    pub get_dccg_ref_freq: Option<fn(&amdgpu_device, &dcn_dccg, u32, &mut u32)>,
+    pub dccg_init: Option<fn(&dcn_dccg)>,
+}
+
+/// `dccg21_funcs` (dcn21_dccg.c), as far as ported.
+const DCCG21_FUNCS: dccg_ops = dccg_ops {
+    get_dccg_ref_freq: Some(dccg2_get_dccg_ref_freq),
+    dccg_init: Some(dccg2_init),
+};
+
+impl dccg_funcs {
+    pub fn ops(self) -> &'static dccg_ops {
+        match self {
+            dccg_funcs::dccg21_funcs => &DCCG21_FUNCS,
+        }
+    }
+}
+
+impl dcn_dccg {
+    /// `dccg->funcs`.
+    pub fn funcs(&self) -> &'static dccg_ops {
+        self.base.funcs.expect("dccg funcs").ops()
+    }
+
+    fn rsm(&self) -> (&'static dccg_registers, &'static dccg_shift, &'static dccg_mask) {
+        (self.regs.unwrap(), self.dccg_shift.unwrap(), self.dccg_mask.unwrap())
+    }
+}
+
+/// `dccg2_get_dccg_ref_freq` (dcn20_dccg.c): DCN 2.0 was never validated
+/// with a reference other than the crystal (Linux asserts on one), so the
+/// answer is always the crystal.
+pub fn dccg2_get_dccg_ref_freq(adev: &amdgpu_device, dccg_dcn: &dcn_dccg, xtalin_freq_inKhz: u32,
+                               dccg_ref_freq_inKhz: &mut u32) {
+    let [_clk_en, _clk_sel] = reg_get_n!(adev, dccg_dcn.rsm(), REFCLK_CNTL, REFCLK_CLOCK_EN, REFCLK_SRC_SEL);
+    *dccg_ref_freq_inKhz = xtalin_freq_inKhz;
+}
+
+/// `dccg2_init` (dcn20_dccg.c): empty on DCN 2.0/2.1.
+pub fn dccg2_init(_dccg: &dcn_dccg) {}
 
 /// `struct dccg` (inc/hw/dccg.h): the base object. Linux' `ctx` is not stored
 /// (see `clock_source`). The clock-rate state (`ref_dppclk`, …) is 0 at

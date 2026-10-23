@@ -14,7 +14,8 @@ use crate::dc::dc;
 use crate::dc_helper::{dm_read_reg, dm_write_reg, generic_reg_get};
 use crate::dc_types::integrated_info;
 use crate::dm_pp_smu::{
-    dpm_clocks, pp_rn_get_dpm_clock_table, pp_smu_status, PP_SMU_NUM_DCFCLK_DPM_LEVELS, PP_SMU_NUM_FCLK_DPM_LEVELS,
+    dpm_clocks, pp_rn_get_dpm_clock_table, pp_smu_status, pp_smu_wm_range_sets, PP_SMU_NUM_DCFCLK_DPM_LEVELS,
+    PP_SMU_NUM_FCLK_DPM_LEVELS,
     PP_SMU_NUM_SOCCLK_DPM_LEVELS,
 };
 use crate::fixpt31_32::{dc_fixpt_floor, dc_fixpt_from_int, dc_fixpt_mul_int};
@@ -500,5 +501,100 @@ pub fn rn_clk_mgr_construct(adev: &amdgpu_device, dc: &mut dc, clk_mgr: &mut clk
     // enable powerfeatures when displaycount goes to 0
     if clk_mgr.smu_ver >= 0x00371500 {
         rn_vbios_smu_enable_48mhz_tmdp_refclk_pwrdwn(adev, !dc.debug.disable_48mhz_pwrdwn);
+    }
+}
+
+/// `dcn21_funcs` (rn_clk_mgr.c), as far as ported.
+pub const DCN21_FUNCS: crate::clk_mgr::clk_mgr_ops = crate::clk_mgr::clk_mgr_ops {
+    init_clocks: Some(rn_init_clocks),
+    notify_wm_ranges: Some(rn_notify_wm_ranges),
+};
+
+/// `rn_init_clocks` (rn_clk_mgr.c): forget the clocks; the boot state is
+/// assumed to support p-state changes.
+fn rn_init_clocks(clk_mgr: &mut clk_mgr_internal) {
+    clk_mgr.base.clks = crate::clk_mgr::dc_clocks::default();
+    clk_mgr.base.clks.p_state_change_support = true;
+    clk_mgr.base.clks.prev_p_state_change_support = true;
+    clk_mgr.base.clks.pwr_state = crate::clk_mgr::DCN_PWR_STATE_UNKNOWN;
+}
+
+/// `build_watermark_ranges` (rn_clk_mgr.c): one reader range per valid
+/// watermark set, selected by DCFCLK and unconstrained in FCLK; the
+/// writeback range is unconstrained.
+fn build_watermark_ranges(bw_params: &clk_bw_params, ranges: &mut pp_smu_wm_range_sets) {
+    use crate::dm_pp_smu::{PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MAX as UMAX,
+                           PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MIN as UMIN};
+    let mut num_valid_sets = 0usize;
+
+    for i in 0..WM_SET_COUNT {
+        // skip empty entries, the smu array has no holes
+        if !bw_params.wm_table.entries[i].valid {
+            continue;
+        }
+
+        let r = &mut ranges.reader_wm_sets[num_valid_sets];
+        r.wm_inst = bw_params.wm_table.entries[i].wm_inst as u8;
+        r.wm_type = bw_params.wm_table.entries[i].wm_type as u8;
+        // We will not select WM based on fclk, so leave it as unconstrained
+        r.min_fill_clk_mhz = UMIN;
+        r.max_fill_clk_mhz = UMAX;
+        // dcfclk wil be used to select WM
+
+        if r.wm_type as u32 == WM_TYPE_PSTATE_CHG {
+            if i == 0 {
+                r.min_drain_clk_mhz = 0;
+            } else {
+                // add 1 to make it non-overlapping with next lvl
+                r.min_drain_clk_mhz = (bw_params.clk_table.entries[i - 1].dcfclk_mhz + 1) as u16;
+            }
+            r.max_drain_clk_mhz = bw_params.clk_table.entries[i].dcfclk_mhz as u16;
+        } else {
+            // unconstrained for memory retraining
+            r.min_fill_clk_mhz = UMIN;
+            r.max_fill_clk_mhz = UMAX;
+
+            // Modify previous watermark range to cover up to max
+            if num_valid_sets > 0 {
+                ranges.reader_wm_sets[num_valid_sets - 1].max_fill_clk_mhz = UMAX;
+            }
+        }
+        num_valid_sets += 1;
+    }
+
+    // Must have at least one set of valid watermarks
+    ranges.num_reader_wm_sets = num_valid_sets as u32;
+
+    // modify the min and max to make sure we cover the whole range
+    ranges.reader_wm_sets[0].min_drain_clk_mhz = UMIN;
+    ranges.reader_wm_sets[0].min_fill_clk_mhz = UMIN;
+    let last = (ranges.num_reader_wm_sets as usize).wrapping_sub(1);
+    ranges.reader_wm_sets[last].max_drain_clk_mhz = UMAX;
+    ranges.reader_wm_sets[last].max_fill_clk_mhz = UMAX;
+
+    // This is for writeback only, does not matter currently as no writeback support
+    ranges.num_writer_wm_sets = 1;
+    ranges.writer_wm_sets[0].wm_inst = WM_A as u8;
+    ranges.writer_wm_sets[0].min_fill_clk_mhz = UMIN;
+    ranges.writer_wm_sets[0].max_fill_clk_mhz = UMAX;
+    ranges.writer_wm_sets[0].min_drain_clk_mhz = UMIN;
+    ranges.writer_wm_sets[0].max_drain_clk_mhz = UMAX;
+}
+
+/// `rn_notify_wm_ranges` (rn_clk_mgr.c): tell the SMU which watermark set to
+/// use for which clock range.
+fn rn_notify_wm_ranges(adev: &amdgpu_device, dc: &dc, clk_mgr: &mut clk_mgr_internal) {
+    let pp_smu = dc.res_pool.as_deref().and_then(|p| p.pp_smu);
+
+    if !dc.debug.disable_pplib_wm_range {
+        let base = &mut clk_mgr.base;
+        build_watermark_ranges(base.bw_params.as_deref().expect("bw_params"), &mut base.ranges);
+
+        // Notify PP Lib/SMU which Watermarks to use for which clock ranges
+        if let Some(pp) = pp_smu
+            && pp.rn_funcs.set_wm_ranges.is_some()
+        {
+            crate::dm_pp_smu::pp_rn_set_wm_ranges(adev, &base.ranges);
+        }
     }
 }

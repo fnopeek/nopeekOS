@@ -3,9 +3,9 @@
 //! dcn21_resource.c: the display pipe-and-plane processor (DPP) of Renoir's
 //! resource pool. Renoir reuses the dcn20 DPP. One per pipe; the largest block.
 //!
-//! `dcn21_dpp_create` → `dpp2_construct` stores the instance, funcs identity,
-//! caps and the register pointers, plus the line-buffer geometry; it writes no
-//! register (the DPP programming — scaler, gamma, CM — is hwss-stage). The three
+//! `dcn21_dpp_create` → `dpp2_construct` stores the instance, funcs, caps and
+//! the register pointers, plus the line-buffer geometry. The ops of
+//! dcn10/20_dpp.c are ported as the hw sequencer reaches them. The three
 //! register structs and `DPP_REGS`/`DPP_SHIFT`/`DPP_MASK` are machine-generated
 //! by `dcgen.py` from Linux' `TF_REG_LIST_DCN20(+COMMON_APPEND)` and
 //! `TF_REG_LIST_SH_MASK_DCN20` (+ the debug lists), so the 224 registers x 4
@@ -13,6 +13,8 @@
 //! initializer sets twice keep the last macro, as C does.
 #![allow(dead_code)]
 
+use crate::amdgpu_device::amdgpu_device;
+use crate::dc_helper::reg_update;
 use crate::regs::*;
 use alloc::boxed::Box;
 
@@ -43,11 +45,32 @@ pub struct dpp_caps {
     pub max_lb_partitions: u32,
 }
 
-/// Which `dpp_funcs` vtable `dpp.funcs` points at (dcn20_dpp.c). Identity only;
-/// the ops are hwss-stage.
+/// Which `dpp_funcs` vtable `dpp.funcs` points at (dcn20_dpp.c).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum dpp_funcs {
     dcn20_dpp_funcs,
+}
+
+/// `struct dpp_funcs` (dpp.h), the members ported. `None` is a member the
+/// port has not reached.
+#[derive(Default, Clone, Copy)]
+pub struct dpp_ops {
+    pub dpp_reset: Option<fn(&mut dcn20_dpp)>,
+    pub dpp_dppclk_control: Option<fn(&amdgpu_device, &dcn20_dpp, bool, bool)>,
+}
+
+/// `dcn20_dpp_funcs` (dcn20_dpp.c), as far as ported.
+const DCN20_DPP_FUNCS: dpp_ops = dpp_ops {
+    dpp_reset: Some(dpp_reset),
+    dpp_dppclk_control: Some(dpp1_dppclk_control),
+};
+
+impl dpp_funcs {
+    pub fn ops(self) -> &'static dpp_ops {
+        match self {
+            dpp_funcs::dcn20_dpp_funcs => &DCN20_DPP_FUNCS,
+        }
+    }
 }
 
 /// `struct dpp` (inc/hw/dpp.h): the base object. Linux' `ctx` is not stored (see
@@ -78,6 +101,31 @@ pub static DCN20_DPP_CAP: dpp_caps = dpp_caps {
     dscl_data_proc_format: dscl_data_processing_format::DSCL_DATA_PRCESSING_FLOAT_FORMAT,
     max_lb_partitions: 0,
 };
+
+impl dcn20_dpp {
+    /// `dpp->funcs`.
+    pub fn funcs(&self) -> &'static dpp_ops {
+        self.base.funcs.expect("dpp funcs").ops()
+    }
+
+    fn rsm(&self) -> (&'static dcn2_dpp_registers, &'static dcn2_dpp_shift, &'static dcn2_dpp_mask) {
+        (self.tf_regs.unwrap(), self.tf_shift.unwrap(), self.tf_mask.unwrap())
+    }
+}
+
+/// `dpp_reset` (dcn10_dpp.c): drop the scaler filters and clear the cursor,
+/// scaler and PWL state, none of which the port carries yet.
+pub fn dpp_reset(_dpp: &mut dcn20_dpp) {}
+
+/// `dpp1_dppclk_control` (dcn10_dpp.c). The DCN 2.0 mask list has no
+/// DPPCLK_RATE_CONTROL, so its mask is 0 and enabling takes the plain path.
+pub fn dpp1_dppclk_control(adev: &amdgpu_device, dpp: &dcn20_dpp, _dppclk_div: bool, enable: bool) {
+    if enable {
+        reg_update!(adev, dpp.rsm(), DPP_CONTROL, DPP_CLOCK_ENABLE, 1);
+    } else {
+        reg_update!(adev, dpp.rsm(), DPP_CONTROL, DPP_CLOCK_ENABLE, 0);
+    }
+}
 
 /// `dpp2_construct` (dcn20_dpp.c): store the instance, funcs, caps and
 /// registers, and the line-buffer geometry. Always succeeds here.

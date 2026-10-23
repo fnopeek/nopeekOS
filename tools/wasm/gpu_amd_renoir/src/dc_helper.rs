@@ -140,3 +140,68 @@ pub fn generic_reg_wait(adev: &amdgpu_device, addr: u32, shift: u8, mask: u32,
     // BREAK_TO_DEBUGGER(): a timeout is a bug in the sequence, not a retry.
     Line::new().s("REG_WAIT timeout in ").s(func_name).say();
 }
+
+/// `REG_READ` (reg_helper.h) on a block's register table: `reg_read!(adev,
+/// regs, REG)` or `reg_read!(adev, regs, REG[i])`.
+macro_rules! reg_read {
+    ($adev:expr, $r:expr, $reg:ident $([$i:expr])?) => {
+        $crate::dc_helper::dm_read_reg($adev, $r.$reg $([$i])?)
+    };
+}
+
+/// `REG_WRITE` (reg_helper.h).
+macro_rules! reg_write {
+    ($adev:expr, $r:expr, $reg:ident $([$i:expr])?, $v:expr) => {
+        $crate::dc_helper::dm_write_reg($adev, $r.$reg $([$i])?, ($v) as u32)
+    };
+}
+
+/// `REG_GET` (reg_helper.h): one field of a register. `$c` is the block's
+/// `(regs, shift, mask)` triple. Evaluates to the field value.
+macro_rules! reg_get {
+    ($adev:expr, $c:expr, $reg:ident $([$i:expr])?, $f:ident) => {{
+        let (r, s, m) = $c;
+        $crate::dc_helper::generic_reg_get($adev, r.$reg $([$i])?, s.$f, m.$f).1
+    }};
+}
+
+/// `REG_GET_2` … `REG_GET_N` (reg_helper.h): one read, the fields in order.
+/// Evaluates to an array of the field values.
+macro_rules! reg_get_n {
+    ($adev:expr, $c:expr, $reg:ident $([$i:expr])?, $($f:ident),+) => {{
+        let (r, s, m) = $c;
+        let mut out = [0u32; [$(stringify!($f)),+].len()];
+        $crate::dc_helper::generic_reg_get_n($adev, r.$reg $([$i])?, &[$((s.$f, m.$f)),+], &mut out);
+        out
+    }};
+}
+
+/// `REG_SET` / `REG_SET_N` (reg_helper.h): the fields on top of `init`,
+/// written without a read.
+macro_rules! reg_set {
+    ($adev:expr, $c:expr, $reg:ident $([$i:expr])?, $init:expr, $($f:ident, $v:expr),+) => {{
+        let (r, s, m) = $c;
+        $crate::dc_helper::generic_reg_set_ex($adev, r.$reg $([$i])?, ($init) as u32,
+            &[$((s.$f, m.$f, ($v) as u32)),+])
+    }};
+}
+
+/// `REG_UPDATE` / `REG_UPDATE_N` (reg_helper.h): read-modify-write.
+macro_rules! reg_update {
+    ($adev:expr, $c:expr, $reg:ident $([$i:expr])?, $($f:ident, $v:expr),+) => {{
+        let (r, s, m) = $c;
+        $crate::dc_helper::generic_reg_update_ex($adev, r.$reg $([$i])?, &[$((s.$f, m.$f, ($v) as u32)),+])
+    }};
+}
+
+/// `REG_WAIT` (reg_helper.h): poll a field until it reads `cond`.
+macro_rules! reg_wait {
+    ($adev:expr, $c:expr, $reg:ident $([$i:expr])?, $f:ident, $cond:expr, $delay:expr, $tries:expr,
+     $func:expr) => {{
+        let (r, s, m) = $c;
+        $crate::dc_helper::generic_reg_wait($adev, r.$reg $([$i])?, s.$f, m.$f, ($cond) as u32, $delay, $tries,
+            $func)
+    }};
+}
+
+pub(crate) use {reg_get, reg_get_n, reg_read, reg_set, reg_update, reg_wait, reg_write};

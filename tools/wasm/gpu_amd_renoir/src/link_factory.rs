@@ -64,6 +64,11 @@ impl link_enc {
             link_enc::Virtual(e) => e,
         }
     }
+
+    /// `link_enc->funcs`.
+    pub fn funcs(&self) -> &'static crate::dcn21_link_encoder::link_encoder_ops {
+        self.base().funcs.expect("link encoder funcs").ops()
+    }
 }
 
 /// `struct dc_link`'s `bios_forced_drive_settings`.
@@ -78,6 +83,12 @@ pub struct bios_forced_drive_settings {
 pub struct psr_settings {
     pub psr_vtotal_control_support: bool,
     pub psr_version: u32,
+}
+
+/// `struct dc_link_status` (dc.h), the members reached.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dc_link_status {
+    pub link_active: bool,
 }
 
 /// `struct dc_link` (dc.h), the members the construct path reaches.
@@ -110,6 +121,12 @@ pub struct dc_link {
     pub is_hpd_pending: bool,
     /// `local_sink != NULL`: sinks join with link detection.
     pub has_local_sink: bool,
+    /// `priv != NULL`: the DM's connector joins with
+    /// amdgpu_dm_initialize_drm_device.
+    pub has_priv: bool,
+    pub link_status: dc_link_status,
+    /// `enum dc_link_fec_state` (dc_dp_types.h).
+    pub fec_state: u32,
     pub panel_config: panel_config,
     pub dp_trace: dp_trace,
 }

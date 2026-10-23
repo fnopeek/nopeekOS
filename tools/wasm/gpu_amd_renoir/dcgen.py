@@ -197,6 +197,18 @@ BLOCKS = {
         const_prefix="HWSEQ",
         regs_struct="dce_hwseq_registers", shift_struct="dce_hwseq_shift", mask_struct="dce_hwseq_mask",
     ),
+    # The ABM of the DMCUB path (dmub_abm): one bank, all SR plus the NBIO
+    # BIOS_SCRATCH_2 the backlight handover writes — single mode.
+    "abm": dict(
+        single=True,
+        headers=["dce/dce_abm.h"],
+        prefixes=["ABM_", "NBIO_"],
+        reg_calls=["ABM_DCN20_REG_LIST()"],
+        shift_calls=["ABM_MASK_SH_LIST_DCN20(__SHIFT)"],
+        mask_calls=["ABM_MASK_SH_LIST_DCN20(_MASK)"],
+        const_prefix="ABM",
+        regs_struct="dce_abm_registers", shift_struct="dce_abm_shift", mask_struct="dce_abm_mask",
+    ),
     "mpc": dict(
         single=True,
         headers=["mpc/dcn10/dcn10_mpc.h", "mpc/dcn20/dcn20_mpc.h"],
@@ -319,11 +331,16 @@ def gen_single(block, cfg):
     macros_h = build_macros(cfg)
     txt = ",".join(expand(macros_h, c) for c in cfg["reg_calls"])
     # (field, idx-or-'', register); idx present => an array field
-    entries = re.findall(r"\.(\w+)(?:\[(\d+)\])?\s*=\s*[^,]*?\+\s*(mm\w+)", txt)
+    entries = re.findall(r"\.(\w+)(?:\[(\d+)\])?\s*=\s*([^,]*?)\+\s*(mm\w+)", txt)
     order, arr, sca = [], {}, {}
-    for f, idx, reg in entries:
+    # A register of the NBIO block (NBIO_SR, NBIF0_BASE__INST0_SEG*) is based
+    # on NBIO_BASE.
+    nbio = set()
+    for f, idx, base, reg in entries:
         if f not in order:
             order.append(f)
+        if "NBIF" in base:
+            nbio.add(reg)
         if idx != "":
             arr.setdefault(f, {})[int(idx)] = reg
         else:
@@ -337,7 +354,8 @@ def gen_single(block, cfg):
 
     def off(name, reg):
         if name not in existing:
-            rl.append(f"{name} = BASE({reg}_BASE_IDX) + {reg} @ {RESOURCE}")
+            base = "NBIO_BASE" if reg in nbio else "BASE"
+            rl.append(f"{name} = {base}({reg}_BASE_IDX) + {reg} @ {RESOURCE}")
             existing.add(name)
 
     for f in order:

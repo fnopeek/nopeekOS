@@ -302,3 +302,6 @@ pub static amdgpu_sg_display: [i32; 1] = [-1];
 
 /// `amdgpu_seamless` in amdgpu_drv.c
 pub static amdgpu_seamless: [i32; 1] = [-1];
+
+/// `black_color_format` in ../display/dc/core/dc_hw_sequencer.c
+pub static black_color_format: [u16; 18] = [0, 0, 0, 64, 64, 64, 512, 64, 512, 500, 64, 500, 418, 32, 418, 255, 255, 0];

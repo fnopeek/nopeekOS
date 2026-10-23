@@ -41,6 +41,16 @@ mod dc_dmub_srv;
 mod hw_sequencer;
 #[path = "../src/link_detection.rs"]
 mod link_detection;
+#[path = "../src/link_dpms.rs"]
+mod link_dpms;
+#[path = "../src/dcn10_hwseq.rs"]
+mod dcn10_hwseq;
+#[path = "../src/dcn20_hwseq.rs"]
+mod dcn20_hwseq;
+#[path = "../src/dcn21_hwseq.rs"]
+mod dcn21_hwseq;
+#[path = "../src/dmub_abm.rs"]
+mod dmub_abm;
 #[path = "../src/amdgpu_psp.rs"]
 mod amdgpu_psp;
 #[path = "../src/amdgpu_ras.rs"]

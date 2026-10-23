@@ -368,3 +368,80 @@ pub fn bios_parser_enable_lvtma_control(adev: &amdgpu_device, dc: &mut crate::dc
         }
     }
 }
+
+/// `dal_cmd_table_helper_controller_id_to_atom2` (command_table_helper2.c).
+fn controller_id_to_atom(id: u32, atom_id: &mut u8) -> bool {
+    use crate::regs::*;
+    *atom_id = (match id {
+        CONTROLLER_ID_D0 => ATOM_CRTC1,
+        CONTROLLER_ID_D1 => ATOM_CRTC2,
+        CONTROLLER_ID_D2 => ATOM_CRTC3,
+        CONTROLLER_ID_D3 => ATOM_CRTC4,
+        CONTROLLER_ID_D4 => ATOM_CRTC5,
+        CONTROLLER_ID_D5 => ATOM_CRTC6,
+        CONTROLLER_ID_UNDEFINED => ATOM_CRTC_INVALID,
+        // Wrong controller id
+        _ => return false,
+    }) as u8;
+    true
+}
+
+/// `disp_power_gating_action_to_atom` (command_table_helper2_dce112.c).
+fn disp_power_gating_action_to_atom(action: u32) -> u8 {
+    use crate::regs::*;
+    (match action {
+        ASIC_PIPE_DISABLE => ATOM_DISABLE,
+        ASIC_PIPE_ENABLE => ATOM_ENABLE,
+        ASIC_PIPE_INIT => ATOM_INIT,
+        _ => 0,
+    }) as u8
+}
+
+/// `enable_disp_power_gating_dmcub`: the parameters as a DMUB VBIOS command.
+fn enable_disp_power_gating_dmcub(adev: &amdgpu_device, dc: &mut crate::dc::dc, disp_pipe_id: u8, enable: u8) {
+    use crate::regs::*;
+    let mut cmd = crate::dmub_srv::dmub_rb_cmd::default();
+    cmd.set_header(DMUB_CMD__VBIOS, DMUB_CMD__VBIOS_ENABLE_DISP_POWER_GATING,
+        SIZEOF_dmub_rb_cmd_enable_disp_power_gating - SIZEOF_dmub_cmd_header);
+    cmd.0[EDPG_DISP_PIPE_ID as usize] = disp_pipe_id;
+    cmd.0[EDPG_ENABLE as usize] = enable;
+    crate::dc_dmub_srv::dc_wake_and_execute_dmub_cmd(adev, dc, &mut cmd, DM_DMUB_WAIT_TYPE_WAIT);
+}
+
+/// `enable_disp_power_gating_v2_1`. Executing the ATOM table itself
+/// (without `dmub_command_table`) is not ported: DCN 2.1's defaults route it
+/// to the DMCUB.
+fn enable_disp_power_gating_v2_1(adev: &amdgpu_device, dc: &mut crate::dc::dc, crtc_id: u32,
+                                 action: u32) -> crate::bios_parser2::bp_result {
+    let mut atom_crtc_id = 0u8;
+
+    if !controller_id_to_atom(crtc_id, &mut atom_crtc_id) {
+        return crate::bios_parser2::bp_result::BP_RESULT_BADINPUT;
+    }
+    let disp_pipe_id = atom_crtc_id;
+
+    let enable = disp_power_gating_action_to_atom(action);
+
+    if dc.ctx.dmub_srv.is_some() && dc.debug.dmub_command_table {
+        enable_disp_power_gating_dmcub(adev, dc, disp_pipe_id, enable);
+        return crate::bios_parser2::bp_result::BP_RESULT_OK;
+    }
+    crate::linux::Line::new().s("enable_disp_power_gating_v2_1: the ATOM table path is not ported").say();
+    crate::bios_parser2::bp_result::BP_RESULT_FAILURE
+}
+
+/// `bios_parser_enable_disp_power_gating` (bios_parser2.c). The fallback
+/// executor is not ported.
+pub fn bios_parser_enable_disp_power_gating(adev: &amdgpu_device, dc: &mut crate::dc::dc, controller_id: u32,
+                                            action: u32) -> crate::bios_parser2::bp_result {
+    match dc.ctx.dc_bios.cmd_tbl.enable_disp_power_gating {
+        None => crate::bios_parser2::bp_result::BP_RESULT_FAILURE,
+        Some(enable_disp_power_gating_fn::enable_disp_power_gating_v2_1) => {
+            enable_disp_power_gating_v2_1(adev, dc, controller_id, action)
+        }
+        Some(enable_disp_power_gating_fn::enable_disp_power_gating_fallback) => {
+            crate::linux::Line::new().s("bios_parser_enable_disp_power_gating: fallback not ported").say();
+            crate::bios_parser2::bp_result::BP_RESULT_FAILURE
+        }
+    }
+}

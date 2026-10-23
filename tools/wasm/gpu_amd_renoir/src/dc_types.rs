@@ -162,12 +162,20 @@ pub struct dc_vram_info {
     pub dram_channel_width_bytes: u32,
 }
 
+/// `struct bios_registers` (dc_bios_types.h).
+#[derive(Default, Clone, Copy)]
+pub struct bios_registers {
+    pub BIOS_SCRATCH_3: u32,
+    pub BIOS_SCRATCH_6: u32,
+}
+
 /// `struct dc_bios` (dc/dc_bios_types.h): the base of `bios_parser`. The
-/// image pointer is not stored (see bios_parser2.rs); `regs` joins with the
-/// BIOS scratch accessors, `bb_info` with a DCN 3.x VBIOS.
+/// image pointer is not stored (see bios_parser2.rs); `bb_info` joins with a
+/// DCN 3.x VBIOS.
 #[derive(Default)]
 pub struct dc_bios {
     pub bios_size: u32,
+    pub regs: Option<&'static bios_registers>,
     pub integrated_info: Option<alloc::boxed::Box<integrated_info>>,
     pub fw_info: dc_firmware_info,
     pub fw_info_valid: bool,

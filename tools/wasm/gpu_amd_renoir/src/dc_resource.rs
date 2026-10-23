@@ -155,6 +155,10 @@ pub struct resource_pool {
     /// `ref_clocks`: the reference clocks, seeded from the VBIOS crystal by
     /// `dc_create_resource_pool`.
     pub ref_clocks: resource_pool_ref_clocks,
+    /// `abm`: the adaptive backlight (DMUB-run on Renoir with a DMCUB).
+    pub abm: Option<Box<crate::dmub_abm::dce_abm>>,
+    /// `psr`: the DMUB panel self refresh object.
+    pub psr: Option<Box<crate::dmub_abm::dmub_psr>>,
     /// `pp_smu`: the power-play SMU interface (None if the DM offers no
     /// Renoir table — Linux zeroes it then).
     pub pp_smu: Option<crate::dm_pp_smu::pp_smu_funcs>,
