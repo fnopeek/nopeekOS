@@ -57,6 +57,15 @@ BLOCKS = {
         instances=4, const_prefix="DPP",
         regs_struct="dcn2_dpp_registers", shift_struct="dcn2_dpp_shift", mask_struct="dcn2_dpp_mask",
     ),
+    "opp": dict(
+        headers=["opp/dcn10/dcn10_opp.h", "opp/dcn20/dcn20_opp.h"],
+        prefixes=["OPP_"],
+        reg_calls=["OPP_REG_LIST_DCN20({i})"],
+        shift_calls=["OPP_MASK_SH_LIST_DCN20(__SHIFT)"],
+        mask_calls=["OPP_MASK_SH_LIST_DCN20(_MASK)"],
+        instances=6, const_prefix="OPP",
+        regs_struct="dcn20_opp_registers", shift_struct="dcn20_opp_shift", mask_struct="dcn20_opp_mask",
+    ),
 }
 
 

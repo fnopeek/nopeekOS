@@ -6900,3 +6900,242 @@ CNVC_CUR0_CURSOR0_CONTROL__CUR0_ROM_EN__SHIFT @ ../display/dc/resource/dcn21/dcn
 CNVC_CUR0_CURSOR0_CONTROL__CUR0_ROM_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
 DSCL0_OBUF_MEM_PWR_CTRL__OBUF_MEM_PWR_FORCE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
 DSCL0_OBUF_MEM_PWR_CTRL__OBUF_MEM_PWR_FORCE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC opp: dcn20_opp_registers absolute offsets per pipe instance
+# (OPP_REG_LIST_DCN20({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+OPP0_FMT_BIT_DEPTH_CONTROL = BASE(mmFMT0_FMT_BIT_DEPTH_CONTROL_BASE_IDX) + mmFMT0_FMT_BIT_DEPTH_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_FMT_CONTROL = BASE(mmFMT0_FMT_CONTROL_BASE_IDX) + mmFMT0_FMT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_FMT_DITHER_RAND_R_SEED = BASE(mmFMT0_FMT_DITHER_RAND_R_SEED_BASE_IDX) + mmFMT0_FMT_DITHER_RAND_R_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_FMT_DITHER_RAND_G_SEED = BASE(mmFMT0_FMT_DITHER_RAND_G_SEED_BASE_IDX) + mmFMT0_FMT_DITHER_RAND_G_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_FMT_DITHER_RAND_B_SEED = BASE(mmFMT0_FMT_DITHER_RAND_B_SEED_BASE_IDX) + mmFMT0_FMT_DITHER_RAND_B_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_FMT_CLAMP_CNTL = BASE(mmFMT0_FMT_CLAMP_CNTL_BASE_IDX) + mmFMT0_FMT_CLAMP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_FMT_DYNAMIC_EXP_CNTL = BASE(mmFMT0_FMT_DYNAMIC_EXP_CNTL_BASE_IDX) + mmFMT0_FMT_DYNAMIC_EXP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_FMT_MAP420_MEMORY_CONTROL = BASE(mmFMT0_FMT_MAP420_MEMORY_CONTROL_BASE_IDX) + mmFMT0_FMT_MAP420_MEMORY_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_OPPBUF_CONTROL = BASE(mmOPPBUF0_OPPBUF_CONTROL_BASE_IDX) + mmOPPBUF0_OPPBUF_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_OPPBUF_3D_PARAMETERS_0 = BASE(mmOPPBUF0_OPPBUF_3D_PARAMETERS_0_BASE_IDX) + mmOPPBUF0_OPPBUF_3D_PARAMETERS_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_OPPBUF_3D_PARAMETERS_1 = BASE(mmOPPBUF0_OPPBUF_3D_PARAMETERS_1_BASE_IDX) + mmOPPBUF0_OPPBUF_3D_PARAMETERS_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_OPP_PIPE_CONTROL = BASE(mmOPP_PIPE0_OPP_PIPE_CONTROL_BASE_IDX) + mmOPP_PIPE0_OPP_PIPE_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_DPG_CONTROL = BASE(mmDPG0_DPG_CONTROL_BASE_IDX) + mmDPG0_DPG_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_DPG_DIMENSIONS = BASE(mmDPG0_DPG_DIMENSIONS_BASE_IDX) + mmDPG0_DPG_DIMENSIONS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_DPG_OFFSET_SEGMENT = BASE(mmDPG0_DPG_OFFSET_SEGMENT_BASE_IDX) + mmDPG0_DPG_OFFSET_SEGMENT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_DPG_COLOUR_B_CB = BASE(mmDPG0_DPG_COLOUR_B_CB_BASE_IDX) + mmDPG0_DPG_COLOUR_B_CB @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_DPG_COLOUR_G_Y = BASE(mmDPG0_DPG_COLOUR_G_Y_BASE_IDX) + mmDPG0_DPG_COLOUR_G_Y @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_DPG_COLOUR_R_CR = BASE(mmDPG0_DPG_COLOUR_R_CR_BASE_IDX) + mmDPG0_DPG_COLOUR_R_CR @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_DPG_RAMP_CONTROL = BASE(mmDPG0_DPG_RAMP_CONTROL_BASE_IDX) + mmDPG0_DPG_RAMP_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_DPG_STATUS = BASE(mmDPG0_DPG_STATUS_BASE_IDX) + mmDPG0_DPG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_FMT_422_CONTROL = BASE(mmFMT0_FMT_422_CONTROL_BASE_IDX) + mmFMT0_FMT_422_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP0_OPPBUF_CONTROL1 = BASE(mmOPPBUF0_OPPBUF_CONTROL1_BASE_IDX) + mmOPPBUF0_OPPBUF_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_FMT_BIT_DEPTH_CONTROL = BASE(mmFMT1_FMT_BIT_DEPTH_CONTROL_BASE_IDX) + mmFMT1_FMT_BIT_DEPTH_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_FMT_CONTROL = BASE(mmFMT1_FMT_CONTROL_BASE_IDX) + mmFMT1_FMT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_FMT_DITHER_RAND_R_SEED = BASE(mmFMT1_FMT_DITHER_RAND_R_SEED_BASE_IDX) + mmFMT1_FMT_DITHER_RAND_R_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_FMT_DITHER_RAND_G_SEED = BASE(mmFMT1_FMT_DITHER_RAND_G_SEED_BASE_IDX) + mmFMT1_FMT_DITHER_RAND_G_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_FMT_DITHER_RAND_B_SEED = BASE(mmFMT1_FMT_DITHER_RAND_B_SEED_BASE_IDX) + mmFMT1_FMT_DITHER_RAND_B_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_FMT_CLAMP_CNTL = BASE(mmFMT1_FMT_CLAMP_CNTL_BASE_IDX) + mmFMT1_FMT_CLAMP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_FMT_DYNAMIC_EXP_CNTL = BASE(mmFMT1_FMT_DYNAMIC_EXP_CNTL_BASE_IDX) + mmFMT1_FMT_DYNAMIC_EXP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_FMT_MAP420_MEMORY_CONTROL = BASE(mmFMT1_FMT_MAP420_MEMORY_CONTROL_BASE_IDX) + mmFMT1_FMT_MAP420_MEMORY_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_OPPBUF_CONTROL = BASE(mmOPPBUF1_OPPBUF_CONTROL_BASE_IDX) + mmOPPBUF1_OPPBUF_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_OPPBUF_3D_PARAMETERS_0 = BASE(mmOPPBUF1_OPPBUF_3D_PARAMETERS_0_BASE_IDX) + mmOPPBUF1_OPPBUF_3D_PARAMETERS_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_OPPBUF_3D_PARAMETERS_1 = BASE(mmOPPBUF1_OPPBUF_3D_PARAMETERS_1_BASE_IDX) + mmOPPBUF1_OPPBUF_3D_PARAMETERS_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_OPP_PIPE_CONTROL = BASE(mmOPP_PIPE1_OPP_PIPE_CONTROL_BASE_IDX) + mmOPP_PIPE1_OPP_PIPE_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_DPG_CONTROL = BASE(mmDPG1_DPG_CONTROL_BASE_IDX) + mmDPG1_DPG_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_DPG_DIMENSIONS = BASE(mmDPG1_DPG_DIMENSIONS_BASE_IDX) + mmDPG1_DPG_DIMENSIONS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_DPG_OFFSET_SEGMENT = BASE(mmDPG1_DPG_OFFSET_SEGMENT_BASE_IDX) + mmDPG1_DPG_OFFSET_SEGMENT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_DPG_COLOUR_B_CB = BASE(mmDPG1_DPG_COLOUR_B_CB_BASE_IDX) + mmDPG1_DPG_COLOUR_B_CB @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_DPG_COLOUR_G_Y = BASE(mmDPG1_DPG_COLOUR_G_Y_BASE_IDX) + mmDPG1_DPG_COLOUR_G_Y @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_DPG_COLOUR_R_CR = BASE(mmDPG1_DPG_COLOUR_R_CR_BASE_IDX) + mmDPG1_DPG_COLOUR_R_CR @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_DPG_RAMP_CONTROL = BASE(mmDPG1_DPG_RAMP_CONTROL_BASE_IDX) + mmDPG1_DPG_RAMP_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_DPG_STATUS = BASE(mmDPG1_DPG_STATUS_BASE_IDX) + mmDPG1_DPG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_FMT_422_CONTROL = BASE(mmFMT1_FMT_422_CONTROL_BASE_IDX) + mmFMT1_FMT_422_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP1_OPPBUF_CONTROL1 = BASE(mmOPPBUF1_OPPBUF_CONTROL1_BASE_IDX) + mmOPPBUF1_OPPBUF_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_FMT_BIT_DEPTH_CONTROL = BASE(mmFMT2_FMT_BIT_DEPTH_CONTROL_BASE_IDX) + mmFMT2_FMT_BIT_DEPTH_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_FMT_CONTROL = BASE(mmFMT2_FMT_CONTROL_BASE_IDX) + mmFMT2_FMT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_FMT_DITHER_RAND_R_SEED = BASE(mmFMT2_FMT_DITHER_RAND_R_SEED_BASE_IDX) + mmFMT2_FMT_DITHER_RAND_R_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_FMT_DITHER_RAND_G_SEED = BASE(mmFMT2_FMT_DITHER_RAND_G_SEED_BASE_IDX) + mmFMT2_FMT_DITHER_RAND_G_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_FMT_DITHER_RAND_B_SEED = BASE(mmFMT2_FMT_DITHER_RAND_B_SEED_BASE_IDX) + mmFMT2_FMT_DITHER_RAND_B_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_FMT_CLAMP_CNTL = BASE(mmFMT2_FMT_CLAMP_CNTL_BASE_IDX) + mmFMT2_FMT_CLAMP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_FMT_DYNAMIC_EXP_CNTL = BASE(mmFMT2_FMT_DYNAMIC_EXP_CNTL_BASE_IDX) + mmFMT2_FMT_DYNAMIC_EXP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_FMT_MAP420_MEMORY_CONTROL = BASE(mmFMT2_FMT_MAP420_MEMORY_CONTROL_BASE_IDX) + mmFMT2_FMT_MAP420_MEMORY_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_OPPBUF_CONTROL = BASE(mmOPPBUF2_OPPBUF_CONTROL_BASE_IDX) + mmOPPBUF2_OPPBUF_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_OPPBUF_3D_PARAMETERS_0 = BASE(mmOPPBUF2_OPPBUF_3D_PARAMETERS_0_BASE_IDX) + mmOPPBUF2_OPPBUF_3D_PARAMETERS_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_OPPBUF_3D_PARAMETERS_1 = BASE(mmOPPBUF2_OPPBUF_3D_PARAMETERS_1_BASE_IDX) + mmOPPBUF2_OPPBUF_3D_PARAMETERS_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_OPP_PIPE_CONTROL = BASE(mmOPP_PIPE2_OPP_PIPE_CONTROL_BASE_IDX) + mmOPP_PIPE2_OPP_PIPE_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_DPG_CONTROL = BASE(mmDPG2_DPG_CONTROL_BASE_IDX) + mmDPG2_DPG_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_DPG_DIMENSIONS = BASE(mmDPG2_DPG_DIMENSIONS_BASE_IDX) + mmDPG2_DPG_DIMENSIONS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_DPG_OFFSET_SEGMENT = BASE(mmDPG2_DPG_OFFSET_SEGMENT_BASE_IDX) + mmDPG2_DPG_OFFSET_SEGMENT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_DPG_COLOUR_B_CB = BASE(mmDPG2_DPG_COLOUR_B_CB_BASE_IDX) + mmDPG2_DPG_COLOUR_B_CB @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_DPG_COLOUR_G_Y = BASE(mmDPG2_DPG_COLOUR_G_Y_BASE_IDX) + mmDPG2_DPG_COLOUR_G_Y @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_DPG_COLOUR_R_CR = BASE(mmDPG2_DPG_COLOUR_R_CR_BASE_IDX) + mmDPG2_DPG_COLOUR_R_CR @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_DPG_RAMP_CONTROL = BASE(mmDPG2_DPG_RAMP_CONTROL_BASE_IDX) + mmDPG2_DPG_RAMP_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_DPG_STATUS = BASE(mmDPG2_DPG_STATUS_BASE_IDX) + mmDPG2_DPG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_FMT_422_CONTROL = BASE(mmFMT2_FMT_422_CONTROL_BASE_IDX) + mmFMT2_FMT_422_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP2_OPPBUF_CONTROL1 = BASE(mmOPPBUF2_OPPBUF_CONTROL1_BASE_IDX) + mmOPPBUF2_OPPBUF_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_FMT_BIT_DEPTH_CONTROL = BASE(mmFMT3_FMT_BIT_DEPTH_CONTROL_BASE_IDX) + mmFMT3_FMT_BIT_DEPTH_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_FMT_CONTROL = BASE(mmFMT3_FMT_CONTROL_BASE_IDX) + mmFMT3_FMT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_FMT_DITHER_RAND_R_SEED = BASE(mmFMT3_FMT_DITHER_RAND_R_SEED_BASE_IDX) + mmFMT3_FMT_DITHER_RAND_R_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_FMT_DITHER_RAND_G_SEED = BASE(mmFMT3_FMT_DITHER_RAND_G_SEED_BASE_IDX) + mmFMT3_FMT_DITHER_RAND_G_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_FMT_DITHER_RAND_B_SEED = BASE(mmFMT3_FMT_DITHER_RAND_B_SEED_BASE_IDX) + mmFMT3_FMT_DITHER_RAND_B_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_FMT_CLAMP_CNTL = BASE(mmFMT3_FMT_CLAMP_CNTL_BASE_IDX) + mmFMT3_FMT_CLAMP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_FMT_DYNAMIC_EXP_CNTL = BASE(mmFMT3_FMT_DYNAMIC_EXP_CNTL_BASE_IDX) + mmFMT3_FMT_DYNAMIC_EXP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_FMT_MAP420_MEMORY_CONTROL = BASE(mmFMT3_FMT_MAP420_MEMORY_CONTROL_BASE_IDX) + mmFMT3_FMT_MAP420_MEMORY_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_OPPBUF_CONTROL = BASE(mmOPPBUF3_OPPBUF_CONTROL_BASE_IDX) + mmOPPBUF3_OPPBUF_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_OPPBUF_3D_PARAMETERS_0 = BASE(mmOPPBUF3_OPPBUF_3D_PARAMETERS_0_BASE_IDX) + mmOPPBUF3_OPPBUF_3D_PARAMETERS_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_OPPBUF_3D_PARAMETERS_1 = BASE(mmOPPBUF3_OPPBUF_3D_PARAMETERS_1_BASE_IDX) + mmOPPBUF3_OPPBUF_3D_PARAMETERS_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_OPP_PIPE_CONTROL = BASE(mmOPP_PIPE3_OPP_PIPE_CONTROL_BASE_IDX) + mmOPP_PIPE3_OPP_PIPE_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_DPG_CONTROL = BASE(mmDPG3_DPG_CONTROL_BASE_IDX) + mmDPG3_DPG_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_DPG_DIMENSIONS = BASE(mmDPG3_DPG_DIMENSIONS_BASE_IDX) + mmDPG3_DPG_DIMENSIONS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_DPG_OFFSET_SEGMENT = BASE(mmDPG3_DPG_OFFSET_SEGMENT_BASE_IDX) + mmDPG3_DPG_OFFSET_SEGMENT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_DPG_COLOUR_B_CB = BASE(mmDPG3_DPG_COLOUR_B_CB_BASE_IDX) + mmDPG3_DPG_COLOUR_B_CB @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_DPG_COLOUR_G_Y = BASE(mmDPG3_DPG_COLOUR_G_Y_BASE_IDX) + mmDPG3_DPG_COLOUR_G_Y @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_DPG_COLOUR_R_CR = BASE(mmDPG3_DPG_COLOUR_R_CR_BASE_IDX) + mmDPG3_DPG_COLOUR_R_CR @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_DPG_RAMP_CONTROL = BASE(mmDPG3_DPG_RAMP_CONTROL_BASE_IDX) + mmDPG3_DPG_RAMP_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_DPG_STATUS = BASE(mmDPG3_DPG_STATUS_BASE_IDX) + mmDPG3_DPG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_FMT_422_CONTROL = BASE(mmFMT3_FMT_422_CONTROL_BASE_IDX) + mmFMT3_FMT_422_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP3_OPPBUF_CONTROL1 = BASE(mmOPPBUF3_OPPBUF_CONTROL1_BASE_IDX) + mmOPPBUF3_OPPBUF_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_FMT_BIT_DEPTH_CONTROL = BASE(mmFMT4_FMT_BIT_DEPTH_CONTROL_BASE_IDX) + mmFMT4_FMT_BIT_DEPTH_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_FMT_CONTROL = BASE(mmFMT4_FMT_CONTROL_BASE_IDX) + mmFMT4_FMT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_FMT_DITHER_RAND_R_SEED = BASE(mmFMT4_FMT_DITHER_RAND_R_SEED_BASE_IDX) + mmFMT4_FMT_DITHER_RAND_R_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_FMT_DITHER_RAND_G_SEED = BASE(mmFMT4_FMT_DITHER_RAND_G_SEED_BASE_IDX) + mmFMT4_FMT_DITHER_RAND_G_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_FMT_DITHER_RAND_B_SEED = BASE(mmFMT4_FMT_DITHER_RAND_B_SEED_BASE_IDX) + mmFMT4_FMT_DITHER_RAND_B_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_FMT_CLAMP_CNTL = BASE(mmFMT4_FMT_CLAMP_CNTL_BASE_IDX) + mmFMT4_FMT_CLAMP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_FMT_DYNAMIC_EXP_CNTL = BASE(mmFMT4_FMT_DYNAMIC_EXP_CNTL_BASE_IDX) + mmFMT4_FMT_DYNAMIC_EXP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_FMT_MAP420_MEMORY_CONTROL = BASE(mmFMT4_FMT_MAP420_MEMORY_CONTROL_BASE_IDX) + mmFMT4_FMT_MAP420_MEMORY_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_OPPBUF_CONTROL = BASE(mmOPPBUF4_OPPBUF_CONTROL_BASE_IDX) + mmOPPBUF4_OPPBUF_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_OPPBUF_3D_PARAMETERS_0 = BASE(mmOPPBUF4_OPPBUF_3D_PARAMETERS_0_BASE_IDX) + mmOPPBUF4_OPPBUF_3D_PARAMETERS_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_OPPBUF_3D_PARAMETERS_1 = BASE(mmOPPBUF4_OPPBUF_3D_PARAMETERS_1_BASE_IDX) + mmOPPBUF4_OPPBUF_3D_PARAMETERS_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_OPP_PIPE_CONTROL = BASE(mmOPP_PIPE4_OPP_PIPE_CONTROL_BASE_IDX) + mmOPP_PIPE4_OPP_PIPE_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_DPG_CONTROL = BASE(mmDPG4_DPG_CONTROL_BASE_IDX) + mmDPG4_DPG_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_DPG_DIMENSIONS = BASE(mmDPG4_DPG_DIMENSIONS_BASE_IDX) + mmDPG4_DPG_DIMENSIONS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_DPG_OFFSET_SEGMENT = BASE(mmDPG4_DPG_OFFSET_SEGMENT_BASE_IDX) + mmDPG4_DPG_OFFSET_SEGMENT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_DPG_COLOUR_B_CB = BASE(mmDPG4_DPG_COLOUR_B_CB_BASE_IDX) + mmDPG4_DPG_COLOUR_B_CB @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_DPG_COLOUR_G_Y = BASE(mmDPG4_DPG_COLOUR_G_Y_BASE_IDX) + mmDPG4_DPG_COLOUR_G_Y @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_DPG_COLOUR_R_CR = BASE(mmDPG4_DPG_COLOUR_R_CR_BASE_IDX) + mmDPG4_DPG_COLOUR_R_CR @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_DPG_RAMP_CONTROL = BASE(mmDPG4_DPG_RAMP_CONTROL_BASE_IDX) + mmDPG4_DPG_RAMP_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_DPG_STATUS = BASE(mmDPG4_DPG_STATUS_BASE_IDX) + mmDPG4_DPG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_FMT_422_CONTROL = BASE(mmFMT4_FMT_422_CONTROL_BASE_IDX) + mmFMT4_FMT_422_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP4_OPPBUF_CONTROL1 = BASE(mmOPPBUF4_OPPBUF_CONTROL1_BASE_IDX) + mmOPPBUF4_OPPBUF_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_FMT_BIT_DEPTH_CONTROL = BASE(mmFMT5_FMT_BIT_DEPTH_CONTROL_BASE_IDX) + mmFMT5_FMT_BIT_DEPTH_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_FMT_CONTROL = BASE(mmFMT5_FMT_CONTROL_BASE_IDX) + mmFMT5_FMT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_FMT_DITHER_RAND_R_SEED = BASE(mmFMT5_FMT_DITHER_RAND_R_SEED_BASE_IDX) + mmFMT5_FMT_DITHER_RAND_R_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_FMT_DITHER_RAND_G_SEED = BASE(mmFMT5_FMT_DITHER_RAND_G_SEED_BASE_IDX) + mmFMT5_FMT_DITHER_RAND_G_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_FMT_DITHER_RAND_B_SEED = BASE(mmFMT5_FMT_DITHER_RAND_B_SEED_BASE_IDX) + mmFMT5_FMT_DITHER_RAND_B_SEED @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_FMT_CLAMP_CNTL = BASE(mmFMT5_FMT_CLAMP_CNTL_BASE_IDX) + mmFMT5_FMT_CLAMP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_FMT_DYNAMIC_EXP_CNTL = BASE(mmFMT5_FMT_DYNAMIC_EXP_CNTL_BASE_IDX) + mmFMT5_FMT_DYNAMIC_EXP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_FMT_MAP420_MEMORY_CONTROL = BASE(mmFMT5_FMT_MAP420_MEMORY_CONTROL_BASE_IDX) + mmFMT5_FMT_MAP420_MEMORY_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_OPPBUF_CONTROL = BASE(mmOPPBUF5_OPPBUF_CONTROL_BASE_IDX) + mmOPPBUF5_OPPBUF_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_OPPBUF_3D_PARAMETERS_0 = BASE(mmOPPBUF5_OPPBUF_3D_PARAMETERS_0_BASE_IDX) + mmOPPBUF5_OPPBUF_3D_PARAMETERS_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_OPPBUF_3D_PARAMETERS_1 = BASE(mmOPPBUF5_OPPBUF_3D_PARAMETERS_1_BASE_IDX) + mmOPPBUF5_OPPBUF_3D_PARAMETERS_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_OPP_PIPE_CONTROL = BASE(mmOPP_PIPE5_OPP_PIPE_CONTROL_BASE_IDX) + mmOPP_PIPE5_OPP_PIPE_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_DPG_CONTROL = BASE(mmDPG5_DPG_CONTROL_BASE_IDX) + mmDPG5_DPG_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_DPG_DIMENSIONS = BASE(mmDPG5_DPG_DIMENSIONS_BASE_IDX) + mmDPG5_DPG_DIMENSIONS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_DPG_OFFSET_SEGMENT = BASE(mmDPG5_DPG_OFFSET_SEGMENT_BASE_IDX) + mmDPG5_DPG_OFFSET_SEGMENT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_DPG_COLOUR_B_CB = BASE(mmDPG5_DPG_COLOUR_B_CB_BASE_IDX) + mmDPG5_DPG_COLOUR_B_CB @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_DPG_COLOUR_G_Y = BASE(mmDPG5_DPG_COLOUR_G_Y_BASE_IDX) + mmDPG5_DPG_COLOUR_G_Y @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_DPG_COLOUR_R_CR = BASE(mmDPG5_DPG_COLOUR_R_CR_BASE_IDX) + mmDPG5_DPG_COLOUR_R_CR @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_DPG_RAMP_CONTROL = BASE(mmDPG5_DPG_RAMP_CONTROL_BASE_IDX) + mmDPG5_DPG_RAMP_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_DPG_STATUS = BASE(mmDPG5_DPG_STATUS_BASE_IDX) + mmDPG5_DPG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_FMT_422_CONTROL = BASE(mmFMT5_FMT_422_CONTROL_BASE_IDX) + mmFMT5_FMT_422_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP5_OPPBUF_CONTROL1 = BASE(mmOPPBUF5_OPPBUF_CONTROL1_BASE_IDX) + mmOPPBUF5_OPPBUF_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC opp field shifts/masks (OPP_MASK_SH_LIST_DCN20(__SHIFT))
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_TRUNCATE_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_TRUNCATE_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_TRUNCATE_DEPTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_TRUNCATE_DEPTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_TRUNCATE_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_TRUNCATE_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_SPATIAL_DITHER_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_SPATIAL_DITHER_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_SPATIAL_DITHER_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_SPATIAL_DITHER_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_SPATIAL_DITHER_DEPTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_SPATIAL_DITHER_DEPTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_TEMPORAL_DITHER_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_TEMPORAL_DITHER_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_HIGHPASS_RANDOM_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_HIGHPASS_RANDOM_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_FRAME_RANDOM_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_FRAME_RANDOM_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_RGB_RANDOM_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_BIT_DEPTH_CONTROL__FMT_RGB_RANDOM_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_SPATIAL_DITHER_FRAME_COUNTER_MAX__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_SPATIAL_DITHER_FRAME_COUNTER_MAX_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_SPATIAL_DITHER_FRAME_COUNTER_BIT_SWAP__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_SPATIAL_DITHER_FRAME_COUNTER_BIT_SWAP_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_PIXEL_ENCODING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_PIXEL_ENCODING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_SUBSAMPLING_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_SUBSAMPLING_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_CBCR_BIT_REDUCTION_BYPASS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_CBCR_BIT_REDUCTION_BYPASS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_STEREOSYNC_OVERRIDE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CONTROL__FMT_STEREOSYNC_OVERRIDE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_DITHER_RAND_R_SEED__FMT_RAND_R_SEED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_DITHER_RAND_R_SEED__FMT_RAND_R_SEED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_DITHER_RAND_G_SEED__FMT_RAND_G_SEED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_DITHER_RAND_G_SEED__FMT_RAND_G_SEED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_DITHER_RAND_B_SEED__FMT_RAND_B_SEED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_DITHER_RAND_B_SEED__FMT_RAND_B_SEED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CLAMP_CNTL__FMT_CLAMP_DATA_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CLAMP_CNTL__FMT_CLAMP_DATA_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CLAMP_CNTL__FMT_CLAMP_COLOR_FORMAT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_CLAMP_CNTL__FMT_CLAMP_COLOR_FORMAT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_DYNAMIC_EXP_CNTL__FMT_DYNAMIC_EXP_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_DYNAMIC_EXP_CNTL__FMT_DYNAMIC_EXP_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_DYNAMIC_EXP_CNTL__FMT_DYNAMIC_EXP_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_DYNAMIC_EXP_CNTL__FMT_DYNAMIC_EXP_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_MAP420_MEMORY_CONTROL__FMT_MAP420MEM_PWR_FORCE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_MAP420_MEMORY_CONTROL__FMT_MAP420MEM_PWR_FORCE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_CONTROL__OPPBUF_ACTIVE_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_CONTROL__OPPBUF_ACTIVE_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_CONTROL__OPPBUF_PIXEL_REPETITION__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_CONTROL__OPPBUF_PIXEL_REPETITION_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_3D_PARAMETERS_0__OPPBUF_3D_VACT_SPACE1_SIZE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_3D_PARAMETERS_0__OPPBUF_3D_VACT_SPACE1_SIZE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_3D_PARAMETERS_0__OPPBUF_3D_VACT_SPACE2_SIZE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_3D_PARAMETERS_0__OPPBUF_3D_VACT_SPACE2_SIZE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP_PIPE0_OPP_PIPE_CONTROL__OPP_PIPE_CLOCK_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPP_PIPE0_OPP_PIPE_CONTROL__OPP_PIPE_CLOCK_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_DYNAMIC_RANGE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_DYNAMIC_RANGE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_BIT_DEPTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_BIT_DEPTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_VRES__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_VRES_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_HRES__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_CONTROL__DPG_HRES_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_DIMENSIONS__DPG_ACTIVE_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_DIMENSIONS__DPG_ACTIVE_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_DIMENSIONS__DPG_ACTIVE_HEIGHT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_DIMENSIONS__DPG_ACTIVE_HEIGHT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_OFFSET_SEGMENT__DPG_X_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_OFFSET_SEGMENT__DPG_X_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_OFFSET_SEGMENT__DPG_SEGMENT_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_OFFSET_SEGMENT__DPG_SEGMENT_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_R_CR__DPG_COLOUR0_R_CR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_R_CR__DPG_COLOUR0_R_CR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_R_CR__DPG_COLOUR1_R_CR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_R_CR__DPG_COLOUR1_R_CR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_B_CB__DPG_COLOUR0_B_CB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_B_CB__DPG_COLOUR0_B_CB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_B_CB__DPG_COLOUR1_B_CB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_B_CB__DPG_COLOUR1_B_CB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_G_Y__DPG_COLOUR0_G_Y__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_G_Y__DPG_COLOUR0_G_Y_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_G_Y__DPG_COLOUR1_G_Y__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_COLOUR_G_Y__DPG_COLOUR1_G_Y_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_RAMP_CONTROL__DPG_RAMP0_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_RAMP_CONTROL__DPG_RAMP0_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_RAMP_CONTROL__DPG_INC0__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_RAMP_CONTROL__DPG_INC0_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_RAMP_CONTROL__DPG_INC1__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_RAMP_CONTROL__DPG_INC1_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_STATUS__DPG_DOUBLE_BUFFER_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPG0_DPG_STATUS__DPG_DOUBLE_BUFFER_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_CONTROL__OPPBUF_DISPLAY_SEGMENTATION__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_CONTROL__OPPBUF_DISPLAY_SEGMENTATION_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_CONTROL__OPPBUF_OVERLAP_PIXEL_NUM__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OPPBUF0_OPPBUF_CONTROL__OPPBUF_OVERLAP_PIXEL_NUM_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_422_CONTROL__FMT_LEFT_EDGE_EXTRA_PIXEL_COUNT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+FMT0_FMT_422_CONTROL__FMT_LEFT_EDGE_EXTRA_PIXEL_COUNT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c

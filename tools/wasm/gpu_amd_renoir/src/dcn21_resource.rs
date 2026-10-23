@@ -11,6 +11,7 @@ use crate::dc_types::dc_caps;
 use crate::dccg::{dccg21_create, DCCG_MASK, DCCG_REGS, DCCG_SHIFT};
 use crate::dcn10_ipp::dcn21_ipp_create;
 use crate::dcn20_dpp::dcn21_dpp_create;
+use crate::dcn20_opp::dcn21_opp_create;
 use crate::dcn21_hubp::dcn21_hubp_create;
 use crate::dce_clock_source::{clock_source_id, dcn21_clock_source_create, CLK_SRC_REGS};
 
@@ -144,13 +145,14 @@ pub fn dcn21_resource_construct(dc: &mut dc, pool: &mut resource_pool) {
     // The DCCG. (dmcu/psr/abm are gated on dc->config and wait; pp_smu waits.)
     pool.dccg = Some(dccg21_create(&DCCG_REGS, &DCCG_SHIFT, &DCCG_MASK));
 
-    // Per pipe: mem input (hubp) -> ipp -> dpp -> opp -> TG. hubp, ipp and dpp
-    // are ported; opp/timing_generator join this loop as they land, and
-    // read_pipe_fuses (which compacts fused-out pipes) with them — until then
-    // the hw instance is the array index.
+    // Per pipe: mem input (hubp) -> ipp -> dpp -> opp -> TG. hubp, ipp, dpp and
+    // opp are ported; the timing_generator joins this loop as it lands, and
+    // read_pipe_fuses (which compacts fused-out pipes) with it — until then the
+    // hw instance is the array index.
     for i in 0..pool.pipe_count as usize {
         pool.hubps[i] = dcn21_hubp_create(i as u32);
         pool.ipps[i] = Some(dcn21_ipp_create(i as u32));
         pool.dpps[i] = dcn21_dpp_create(i as u32);
+        pool.opps[i] = Some(dcn21_opp_create(i as u32));
     }
 }

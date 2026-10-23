@@ -186,9 +186,11 @@ größte: 224 Register × 4 + 540 Felder, via `dcgen.py` (Reg-Liste =
 nimmt `dcgen.py` jetzt Listen von Makro-Aufrufen). Kopf handgeschrieben (base,
 `dpp_caps`/`DCN20_DPP_CAP`, LB-Geometrie, `dpp2_construct`, `dcn21_dpp_create`).
 
-**Nächste Einheit:** die restlichen Pipe-Blöcke im selben Loop —
-`dcn21_opp_create`, `dcn21_timing_generator_create` (optc) — jeweils mit
-`dcgen.py` (neue `BLOCKS`-Einträge). Dazu `read_pipe_fuses`
+Sechster Block, **OPP** (`src/dcn20_opp.rs`, dcn20-OPP): 22 Register × 6
+Instanzen (`opp_regs[6]`, genutzt 0..3) + 52 Felder, via `dcgen.py`.
+
+**Nächste Einheit:** `dcn21_timing_generator_create` (optc) — der letzte
+Pipe-Block, mit `dcgen.py`. Dazu `read_pipe_fuses`
 (kompaktiert ausgefuste Pipes). Danach aux/i2c je ddc, mpc, hubbub, dsc, dwbc,
 mmhubbub, irq-Service, `resource_construct` + `dcn21_hw_sequencer_construct`,
 `dml_init_instance`. Die Konstruktoren schreiben KEIN Register (Zeiger +
