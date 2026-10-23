@@ -169,6 +169,19 @@ BLOCKS = {
         instances=5, const_prefix="SE",
         regs_struct="dcn10_stream_enc_registers", shift_struct="dcn10_stream_encoder_shift", mask_struct="dcn10_stream_encoder_mask",
     ),
+    # The dce audio endpoints: 6 in the table (audio_regs 0..5), num_audio (4)
+    # used. AUD_COMMON_REG_LIST is SRI/SR; the mask list DCE120_AUD_COMMON_MASK_
+    # SH_LIST lives in the resource file (hence the DCE120_ prefix) and pulls
+    # AUD_COMMON_MASK_SH_LIST_BASE, all via the plain SF macro.
+    "aud": dict(
+        headers=["dce/dce_audio.h"],
+        prefixes=["AUD_", "DCE120_"],
+        reg_calls=["AUD_COMMON_REG_LIST({i})"],
+        shift_calls=["DCE120_AUD_COMMON_MASK_SH_LIST(__SHIFT)"],
+        mask_calls=["DCE120_AUD_COMMON_MASK_SH_LIST(_MASK)"],
+        instances=6, const_prefix="AUD",
+        regs_struct="dce_audio_registers", shift_struct="dce_audio_shift", mask_struct="dce_audio_mask",
+    ),
     "mpc": dict(
         single=True,
         headers=["mpc/dcn10/dcn10_mpc.h", "mpc/dcn20/dcn20_mpc.h"],

@@ -21755,3 +21755,185 @@ pub const DP0_DP_SEC_CNTL5__DP_SEC_GSP5_LINE_NUM_MASK: u32 = 0xffff;
 pub const DP0_DP_SEC_FRAMING4__DP_SST_SDP_SPLITTING__SHIFT: u32 = 0x0;
 /// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40477
 pub const DP0_DP_SEC_FRAMING4__DP_SST_SDP_SPLITTING_MASK: u32 = 0x1;
+
+// DC aud: dce_audio_registers absolute offsets per pipe instance
+
+// (AUD_COMMON_REG_LIST({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmAZF0ENDPOINT0_AZALIA_F0_CODEC_ENDPOINT_INDEX_BASE_IDX) + mmAZF0ENDPOINT0_AZALIA_F0_CODEC_ENDPOINT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD0_AZALIA_F0_CODEC_ENDPOINT_INDEX: u32 = 0x3846;
+/// The value of `BASE(mmAZF0ENDPOINT0_AZALIA_F0_CODEC_ENDPOINT_DATA_BASE_IDX) + mmAZF0ENDPOINT0_AZALIA_F0_CODEC_ENDPOINT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD0_AZALIA_F0_CODEC_ENDPOINT_DATA: u32 = 0x3847;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD0_AZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS: u32 = 0x38cc;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD0_AZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES: u32 = 0x38cb;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD0_AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES: u32 = 0x38cd;
+/// The value of `BASE(mmDCCG_AUDIO_DTO_SOURCE_BASE_IDX) + mmDCCG_AUDIO_DTO_SOURCE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD0_DCCG_AUDIO_DTO_SOURCE: u32 = 0x16b;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO0_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD0_DCCG_AUDIO_DTO0_MODULE: u32 = 0x16d;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO0_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD0_DCCG_AUDIO_DTO0_PHASE: u32 = 0x16c;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO1_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD0_DCCG_AUDIO_DTO1_MODULE: u32 = 0x16f;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO1_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD0_DCCG_AUDIO_DTO1_PHASE: u32 = 0x16e;
+/// The value of `BASE(mmAZF0ENDPOINT1_AZALIA_F0_CODEC_ENDPOINT_INDEX_BASE_IDX) + mmAZF0ENDPOINT1_AZALIA_F0_CODEC_ENDPOINT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD1_AZALIA_F0_CODEC_ENDPOINT_INDEX: u32 = 0x384c;
+/// The value of `BASE(mmAZF0ENDPOINT1_AZALIA_F0_CODEC_ENDPOINT_DATA_BASE_IDX) + mmAZF0ENDPOINT1_AZALIA_F0_CODEC_ENDPOINT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD1_AZALIA_F0_CODEC_ENDPOINT_DATA: u32 = 0x384d;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD1_AZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS: u32 = 0x38cc;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD1_AZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES: u32 = 0x38cb;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD1_AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES: u32 = 0x38cd;
+/// The value of `BASE(mmDCCG_AUDIO_DTO_SOURCE_BASE_IDX) + mmDCCG_AUDIO_DTO_SOURCE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD1_DCCG_AUDIO_DTO_SOURCE: u32 = 0x16b;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO0_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD1_DCCG_AUDIO_DTO0_MODULE: u32 = 0x16d;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO0_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD1_DCCG_AUDIO_DTO0_PHASE: u32 = 0x16c;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO1_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD1_DCCG_AUDIO_DTO1_MODULE: u32 = 0x16f;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO1_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD1_DCCG_AUDIO_DTO1_PHASE: u32 = 0x16e;
+/// The value of `BASE(mmAZF0ENDPOINT2_AZALIA_F0_CODEC_ENDPOINT_INDEX_BASE_IDX) + mmAZF0ENDPOINT2_AZALIA_F0_CODEC_ENDPOINT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD2_AZALIA_F0_CODEC_ENDPOINT_INDEX: u32 = 0x3852;
+/// The value of `BASE(mmAZF0ENDPOINT2_AZALIA_F0_CODEC_ENDPOINT_DATA_BASE_IDX) + mmAZF0ENDPOINT2_AZALIA_F0_CODEC_ENDPOINT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD2_AZALIA_F0_CODEC_ENDPOINT_DATA: u32 = 0x3853;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD2_AZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS: u32 = 0x38cc;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD2_AZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES: u32 = 0x38cb;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD2_AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES: u32 = 0x38cd;
+/// The value of `BASE(mmDCCG_AUDIO_DTO_SOURCE_BASE_IDX) + mmDCCG_AUDIO_DTO_SOURCE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD2_DCCG_AUDIO_DTO_SOURCE: u32 = 0x16b;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO0_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD2_DCCG_AUDIO_DTO0_MODULE: u32 = 0x16d;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO0_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD2_DCCG_AUDIO_DTO0_PHASE: u32 = 0x16c;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO1_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD2_DCCG_AUDIO_DTO1_MODULE: u32 = 0x16f;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO1_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD2_DCCG_AUDIO_DTO1_PHASE: u32 = 0x16e;
+/// The value of `BASE(mmAZF0ENDPOINT3_AZALIA_F0_CODEC_ENDPOINT_INDEX_BASE_IDX) + mmAZF0ENDPOINT3_AZALIA_F0_CODEC_ENDPOINT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD3_AZALIA_F0_CODEC_ENDPOINT_INDEX: u32 = 0x3858;
+/// The value of `BASE(mmAZF0ENDPOINT3_AZALIA_F0_CODEC_ENDPOINT_DATA_BASE_IDX) + mmAZF0ENDPOINT3_AZALIA_F0_CODEC_ENDPOINT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD3_AZALIA_F0_CODEC_ENDPOINT_DATA: u32 = 0x3859;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD3_AZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS: u32 = 0x38cc;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD3_AZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES: u32 = 0x38cb;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD3_AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES: u32 = 0x38cd;
+/// The value of `BASE(mmDCCG_AUDIO_DTO_SOURCE_BASE_IDX) + mmDCCG_AUDIO_DTO_SOURCE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD3_DCCG_AUDIO_DTO_SOURCE: u32 = 0x16b;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO0_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD3_DCCG_AUDIO_DTO0_MODULE: u32 = 0x16d;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO0_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD3_DCCG_AUDIO_DTO0_PHASE: u32 = 0x16c;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO1_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD3_DCCG_AUDIO_DTO1_MODULE: u32 = 0x16f;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO1_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD3_DCCG_AUDIO_DTO1_PHASE: u32 = 0x16e;
+/// The value of `BASE(mmAZF0ENDPOINT4_AZALIA_F0_CODEC_ENDPOINT_INDEX_BASE_IDX) + mmAZF0ENDPOINT4_AZALIA_F0_CODEC_ENDPOINT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD4_AZALIA_F0_CODEC_ENDPOINT_INDEX: u32 = 0x385e;
+/// The value of `BASE(mmAZF0ENDPOINT4_AZALIA_F0_CODEC_ENDPOINT_DATA_BASE_IDX) + mmAZF0ENDPOINT4_AZALIA_F0_CODEC_ENDPOINT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD4_AZALIA_F0_CODEC_ENDPOINT_DATA: u32 = 0x385f;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD4_AZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS: u32 = 0x38cc;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD4_AZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES: u32 = 0x38cb;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD4_AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES: u32 = 0x38cd;
+/// The value of `BASE(mmDCCG_AUDIO_DTO_SOURCE_BASE_IDX) + mmDCCG_AUDIO_DTO_SOURCE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD4_DCCG_AUDIO_DTO_SOURCE: u32 = 0x16b;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO0_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD4_DCCG_AUDIO_DTO0_MODULE: u32 = 0x16d;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO0_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD4_DCCG_AUDIO_DTO0_PHASE: u32 = 0x16c;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO1_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD4_DCCG_AUDIO_DTO1_MODULE: u32 = 0x16f;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO1_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD4_DCCG_AUDIO_DTO1_PHASE: u32 = 0x16e;
+/// The value of `BASE(mmAZF0ENDPOINT5_AZALIA_F0_CODEC_ENDPOINT_INDEX_BASE_IDX) + mmAZF0ENDPOINT5_AZALIA_F0_CODEC_ENDPOINT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD5_AZALIA_F0_CODEC_ENDPOINT_INDEX: u32 = 0x3864;
+/// The value of `BASE(mmAZF0ENDPOINT5_AZALIA_F0_CODEC_ENDPOINT_DATA_BASE_IDX) + mmAZF0ENDPOINT5_AZALIA_F0_CODEC_ENDPOINT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD5_AZALIA_F0_CODEC_ENDPOINT_DATA: u32 = 0x3865;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD5_AZALIA_F0_CODEC_FUNCTION_PARAMETER_STREAM_FORMATS: u32 = 0x38cc;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD5_AZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES: u32 = 0x38cb;
+/// The value of `BASE(mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES_BASE_IDX) + mmAZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD5_AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES: u32 = 0x38cd;
+/// The value of `BASE(mmDCCG_AUDIO_DTO_SOURCE_BASE_IDX) + mmDCCG_AUDIO_DTO_SOURCE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD5_DCCG_AUDIO_DTO_SOURCE: u32 = 0x16b;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO0_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD5_DCCG_AUDIO_DTO0_MODULE: u32 = 0x16d;
+/// The value of `BASE(mmDCCG_AUDIO_DTO0_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO0_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD5_DCCG_AUDIO_DTO0_PHASE: u32 = 0x16c;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_MODULE_BASE_IDX) + mmDCCG_AUDIO_DTO1_MODULE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD5_DCCG_AUDIO_DTO1_MODULE: u32 = 0x16f;
+/// The value of `BASE(mmDCCG_AUDIO_DTO1_PHASE_BASE_IDX) + mmDCCG_AUDIO_DTO1_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUD5_DCCG_AUDIO_DTO1_PHASE: u32 = 0x16e;
+
+// DC aud field shifts/masks (DCE120_AUD_COMMON_MASK_SH_LIST(__SHIFT))
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:13568
+pub const AZF0ENDPOINT0_AZALIA_F0_CODEC_ENDPOINT_INDEX__AZALIA_ENDPOINT_REG_INDEX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:13569
+pub const AZF0ENDPOINT0_AZALIA_F0_CODEC_ENDPOINT_INDEX__AZALIA_ENDPOINT_REG_INDEX_MASK: u32 = 0x3fff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:13571
+pub const AZF0ENDPOINT0_AZALIA_F0_CODEC_ENDPOINT_DATA__AZALIA_ENDPOINT_REG_DATA__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:13572
+pub const AZF0ENDPOINT0_AZALIA_F0_CODEC_ENDPOINT_DATA__AZALIA_ENDPOINT_REG_DATA_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1876
+pub const DCCG_AUDIO_DTO_SOURCE__DCCG_AUDIO_DTO0_SOURCE_SEL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1875
+pub const DCCG_AUDIO_DTO_SOURCE__DCCG_AUDIO_DTO0_SOURCE_SEL_MASK: u32 = 0x7;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1878
+pub const DCCG_AUDIO_DTO_SOURCE__DCCG_AUDIO_DTO_SEL__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1877
+pub const DCCG_AUDIO_DTO_SOURCE__DCCG_AUDIO_DTO_SEL_MASK: u32 = 0x30;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1884
+pub const DCCG_AUDIO_DTO_SOURCE__DCCG_AUDIO_DTO2_USE_512FBR_DTO__SHIFT: u32 = 0x14;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1883
+pub const DCCG_AUDIO_DTO_SOURCE__DCCG_AUDIO_DTO2_USE_512FBR_DTO_MASK: u32 = 0x100000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1886
+pub const DCCG_AUDIO_DTO_SOURCE__DCCG_AUDIO_DTO0_USE_512FBR_DTO__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1885
+pub const DCCG_AUDIO_DTO_SOURCE__DCCG_AUDIO_DTO0_USE_512FBR_DTO_MASK: u32 = 0x1000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1888
+pub const DCCG_AUDIO_DTO_SOURCE__DCCG_AUDIO_DTO1_USE_512FBR_DTO__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1887
+pub const DCCG_AUDIO_DTO_SOURCE__DCCG_AUDIO_DTO1_USE_512FBR_DTO_MASK: u32 = 0x10000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1892
+pub const DCCG_AUDIO_DTO0_MODULE__DCCG_AUDIO_DTO0_MODULE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1891
+pub const DCCG_AUDIO_DTO0_MODULE__DCCG_AUDIO_DTO0_MODULE_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1890
+pub const DCCG_AUDIO_DTO0_PHASE__DCCG_AUDIO_DTO0_PHASE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1889
+pub const DCCG_AUDIO_DTO0_PHASE__DCCG_AUDIO_DTO0_PHASE_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1896
+pub const DCCG_AUDIO_DTO1_MODULE__DCCG_AUDIO_DTO1_MODULE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1895
+pub const DCCG_AUDIO_DTO1_MODULE__DCCG_AUDIO_DTO1_MODULE_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1894
+pub const DCCG_AUDIO_DTO1_PHASE__DCCG_AUDIO_DTO1_PHASE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1893
+pub const DCCG_AUDIO_DTO1_PHASE__DCCG_AUDIO_DTO1_PHASE_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:12382
+pub const AZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES__AUDIO_RATE_CAPABILITIES__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:12381
+pub const AZALIA_F0_CODEC_FUNCTION_PARAMETER_SUPPORTED_SIZE_RATES__AUDIO_RATE_CAPABILITIES_MASK: u32 = 0xfff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:12390
+pub const AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES__CLKSTOP__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:12389
+pub const AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES__CLKSTOP_MASK: u32 = 0x40000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:12392
+pub const AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES__EPSS__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:12391
+pub const AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES__EPSS_MASK: u32 = 0x80000000;
