@@ -478,6 +478,13 @@ pub fn write(s: &str) {
     // land where the user is typing. Falls back to the active terminal if no
     // primary is set (shouldn't happen once a loop exists).
     let primary = PRIMARY_IDX.load(Ordering::Acquire);
+    // Once a loop exists, output nobody asked for (drivers, background
+    // modules, kernel events) stays off the screen: it is in `dmesg` and on
+    // the remote mirror. `bootlog verbose` shows it.
+    if primary != 255 && !crate::drivers::serial::verbose() {
+        stream_push(primary as usize, s);
+        return;
+    }
     let idx = if primary != 255 {
         primary as usize
     } else {

@@ -997,7 +997,11 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             }
             KeyCode::Tab => {
                 if let Ok(input) = core::str::from_utf8(&session.input_buf[..session.pos]) {
-                    if let Some(completion) = tab_complete(input) {
+                    // The candidate list belongs to this loop, like a prompt.
+                    crate::shade::terminal::set_output_redirect(session.terminal_idx);
+                    let completion = tab_complete(input);
+                    crate::shade::terminal::clear_output_redirect();
+                    if let Some(completion) = completion {
                         for cb in completion.as_bytes() {
                             if session.pos < session.input_buf.len() {
                                 session.input_buf[session.pos] = *cb;
