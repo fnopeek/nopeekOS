@@ -14,7 +14,7 @@ pub fn link_blank_all_dp_displays(adev: &amdgpu_device, dc: &mut dc) {
     let _ = adev;
     for i in 0..dc.link_count as usize {
         let link = &dc.links[i];
-        if link.connector_signal != LF_SIGNAL_TYPE_DISPLAY_PORT || !link.has_priv || !link.has_local_sink {
+        if link.connector_signal != LF_SIGNAL_TYPE_DISPLAY_PORT || link.priv_.is_none() || link.local_sink.is_none() {
             continue;
         }
 

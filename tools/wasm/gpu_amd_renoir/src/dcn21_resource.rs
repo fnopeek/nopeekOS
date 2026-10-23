@@ -423,6 +423,8 @@ const DEBUG_DEFAULTS_DRV: dc_debug_options = dc_debug_options {
     visual_confirm: 0,
     ignore_cable_id: false,
     enable_dmub_aux_for_legacy_ddc: false,
+    disable_fixed_vs_aux_timeout_wa: false,
+    disable_uhbr: false,
     dpia_debug_disable_dpia: false,
     disable_timeout: false,
     disable_dpp_power_gate: false,
@@ -454,4 +456,16 @@ pub fn dcn21_create_resource_pool(
     let mut pool = Box::new(resource_pool::default());
     dcn21_resource_construct(adev, init_data.num_virtual_links as u32, dc, &mut pool);
     Some(pool)
+}
+
+/// `panel_config_defaults` + `dcn21_get_panel_config_defaults`
+/// (dcn21_resource.c): PSR allowed, eDP ILR on.
+pub fn dcn21_get_panel_config_defaults(panel_config: &mut crate::link_factory::panel_config) {
+    *panel_config = crate::link_factory::panel_config {
+        psr_disable_psr: false,
+        psr_disallow_psrsu: false,
+        psr_disallow_replay: false,
+        ilr_optimize_edp_link_rate: true,
+        ..Default::default()
+    };
 }

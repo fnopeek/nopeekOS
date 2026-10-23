@@ -182,6 +182,11 @@ impl Mmio {
         if self.0 != 0 {
             return win_r32(self.0, off);
         }
+        if let Some(f) = READ_HOOK.with(|h| h.get()) {
+            if let Some(v) = f(off / 4) {
+                return v;
+            }
+        }
         CARD.with(|c| {
             let c = c.borrow();
             let Some(c) = c.as_ref() else { return 0 };
@@ -465,6 +470,16 @@ thread_local! {
 /// The fake GPU sees every register write the driver makes.
 pub fn fake_write_hook(f: fn(u32, u32)) {
     WRITE_HOOK.with(|h| h.set(Some(f)));
+}
+
+thread_local! {
+    static READ_HOOK: std::cell::Cell<Option<fn(u32) -> Option<u32>>> = const { std::cell::Cell::new(None) };
+}
+
+/// The fake GPU answers a register read itself when the hook returns a
+/// value (a register whose read has a side effect).
+pub fn fake_read_hook(f: fn(u32) -> Option<u32>) {
+    READ_HOOK.with(|h| h.set(Some(f)));
 }
 
 /// The fake GPU raises its interrupt.

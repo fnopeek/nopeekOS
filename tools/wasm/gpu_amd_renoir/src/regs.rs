@@ -23807,3 +23807,445 @@ pub const BLACK_COLOR_FORMAT_RGB_FULLRANGE: u32 = 0x0;
 pub const BLACK_COLOR_FORMAT_RGB_LIMITED: u32 = 0x1;
 /// display/dc/core/dc_hw_sequencer.c:44
 pub const BLACK_COLOR_FORMAT_YUV_CV: u32 = 0x3;
+
+// Link detection: the DP AUX engine (dce_aux.c, dce_11_0_sh_mask.h)
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8907
+pub const AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS_MASK: u32 = 0xc;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8908
+pub const AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8875
+pub const AUX_CONTROL__AUX_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8876
+pub const AUX_CONTROL__AUX_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_11_0_sh_mask.h:8571
+pub const AUX_CONTROL__AUX_RESET_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_11_0_sh_mask.h:8572
+pub const AUX_CONTROL__AUX_RESET__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8949
+pub const AUX_SW_STATUS__AUX_SW_DONE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8959
+pub const AUX_SW_STATUS__AUX_SW_HPD_DISCON_MASK: u32 = 0x200;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8981
+pub const AUX_SW_STATUS__AUX_SW_REPLY_BYTE_COUNT_MASK: u32 = 0x1f000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8982
+pub const AUX_SW_STATUS__AUX_SW_REPLY_BYTE_COUNT__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8967
+pub const AUX_SW_STATUS__AUX_SW_RX_INVALID_STOP_MASK: u32 = 0x4000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8977
+pub const AUX_SW_STATUS__AUX_SW_RX_RECV_INVALID_H_MASK: u32 = 0x400000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8979
+pub const AUX_SW_STATUS__AUX_SW_RX_RECV_INVALID_L_MASK: u32 = 0x800000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8975
+pub const AUX_SW_STATUS__AUX_SW_RX_RECV_NO_DET_MASK: u32 = 0x100000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8955
+pub const AUX_SW_STATUS__AUX_SW_RX_TIMEOUT_MASK: u32 = 0x80;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:8953
+pub const AUX_SW_STATUS__AUX_SW_RX_TIMEOUT_STATE_MASK: u32 = 0x70;
+
+// Link detection: DPCD addresses and fields (drm_dp.h, dpcd_defs.h)
+/// ?
+pub const DP_AUX_I2C_MOT: u32 = 0x4;
+/// ?
+pub const DP_AUX_I2C_READ: u32 = 0x1;
+/// ?
+pub const DP_AUX_I2C_REPLY_MASK: u32 = 0xc;
+/// ?
+pub const DP_AUX_I2C_WRITE: u32 = 0x0;
+/// ?
+pub const DP_AUX_I2C_WRITE_STATUS_UPDATE: u32 = 0x2;
+/// ?
+pub const DP_AUX_MAX_PAYLOAD_BYTES: u32 = 0x10;
+/// ?
+pub const DP_AUX_NATIVE_READ: u32 = 0x9;
+/// ?
+pub const DP_AUX_NATIVE_REPLY_ACK: u32 = 0x0;
+/// ?
+pub const DP_AUX_NATIVE_REPLY_MASK: u32 = 0x3;
+/// ?
+pub const DP_AUX_NATIVE_WRITE: u32 = 0x8;
+/// ?
+pub const DP_BRANCH_DEVICE_ID_001CF8: u32 = 0x1cf8;
+/// display/dc/link/protocols/link_dp_capability.c:1037
+pub const DP_BRANCH_OUI: u32 = 0x500;
+/// display/dc/link/protocols/link_dp_capability.c:1251
+pub const DP_BRANCH_REVISION_START: u32 = 0x509;
+/// display/dc/link/protocols/link_dp_capability.c:1266
+pub const DP_BRANCH_VENDOR_SPECIFIC_START: u32 = 0x50c;
+/// ?
+pub const DP_CABLE_ATTRIBUTES_UPDATED_BY_DPRX: u32 = 0x2217;
+/// ?
+pub const DP_CABLE_ATTRIBUTES_UPDATED_BY_DPTX: u32 = 0x110;
+/// display/dc/link/protocols/link_dp_capability.c:2063
+pub const DPCD_MAX_UNCOMPRESSED_PIXEL_RATE_CAP: u32 = 0x221c;
+/// ?
+pub const DP_DOWNSTREAM_PORT_0: u32 = 0x80;
+/// ?
+pub const DP_DOWN_STREAM_PORT_COUNT: u32 = 0x7;
+/// ?
+pub const DP_DOWNSTREAMPORT_PRESENT: u32 = 0x5;
+/// display/dc/link/protocols/link_dp_capability.c:1779
+pub const DP_DP13_DPCD_REV: u32 = 0x2200;
+/// display/dc/link/protocols/link_dp_capability.c:1336
+pub const DP_DPCD_REV: u32 = 0x0;
+/// display/dc/link/protocols/link_dp_capability.c:1799
+pub const DP_DPRX_FEATURE_ENUMERATION_LIST: u32 = 0x2210;
+/// ?
+pub const DP_DPRX_FEATURE_ENUMERATION_LIST_CONT_1: u32 = 0x2214;
+/// display/dc/link/protocols/link_dp_capability.c:1977
+pub const DP_DSC_BRANCH_OVERALL_THROUGHPUT_0: u32 = 0xa0;
+/// display/dc/link/protocols/link_dp_capability.c:1960
+pub const DP_DSC_SUPPORT: u32 = 0x60;
+/// ?
+pub const DP_EDP_13: u32 = 0x2;
+/// ?
+pub const DP_EDP_14: u32 = 0x3;
+/// ?
+pub const DP_EDP_BACKLIGHT_ADJUSTMENT_CAP: u32 = 0x702;
+/// ?
+pub const DP_EDP_BACKLIGHT_MODE_SET_REGISTER: u32 = 0x721;
+/// ?
+pub const DP_EDP_CONFIGURATION_CAP: u32 = 0xd;
+/// ?
+pub const DP_EDP_DPCD_REV: u32 = 0x700;
+/// ?
+pub const DP_EDP_DYNAMIC_BACKLIGHT_CAP: u32 = 0x40;
+/// ?
+pub const DP_EDP_GENERAL_CAP_1: u32 = 0x701;
+/// ?
+pub const DP_EDP_GENERAL_CAP_2: u32 = 0x703;
+/// display/dc/link/protocols/link_dp_capability.c:2196
+pub const DP_EDP_MSO_LINK_CAPABILITIES: u32 = 0x7a4;
+/// ?
+pub const DP_EDP_PANEL_LUMINANCE_CONTROL_CAPABLE: u32 = 0x10;
+/// ?
+pub const DP_EDP_SET_POWER_CAP: u32 = 0x80;
+/// display/dc/link/protocols/link_dp_capability.c:1952
+pub const DP_FEC_CAPABILITY: u32 = 0x90;
+/// ?
+pub const DP_FORCE_PSRSU_CAPABILITY: u32 = 0x40f;
+/// display/dc/link/protocols/link_dp_dpia.c:45
+pub const DP_IN_ADAPTER_INFO: u32 = 0xe000e;
+/// ?
+pub const DP_IN_ADAPTER_TUNNEL_INFO: u32 = 0xe0021;
+/// ?
+pub const DP_LANE_COUNT_SET: u32 = 0x101;
+/// ?
+pub const DP_LINK_BW_SET: u32 = 0x100;
+/// ?
+pub const DP_LINK_RATE_SET: u32 = 0x115;
+/// ?
+pub const DP_LTTPR_ALPM_CAPABILITIES: u32 = 0xf0009;
+/// display/dc/link/protocols/link_dp_capability.c:1593
+pub const DP_LT_TUNABLE_PHY_REPEATER_FIELD_DATA_STRUCTURE_REV: u32 = 0xf0000;
+/// ?
+pub const DP_MAIN_LINK_CHANNEL_CODING: u32 = 0x6;
+/// ?
+pub const DP_MAIN_LINK_CHANNEL_CODING_PHY_REPEATER: u32 = 0xf0006;
+/// ?
+pub const DP_MAX_DOWNSPREAD: u32 = 0x3;
+/// ?
+pub const DP_MAX_LANE_COUNT: u32 = 0x2;
+/// ?
+pub const DP_MAX_LANE_COUNT_PHY_REPEATER: u32 = 0xf0004;
+/// ?
+pub const DP_MAX_LINK_RATE: u32 = 0x1;
+/// ?
+pub const DP_MAX_LINK_RATE_PHY_REPEATER: u32 = 0xf0001;
+/// ?
+pub const DP_MSTM_CAP: u32 = 0x21;
+/// ?
+pub const DP_PHY_REPEATER_128B132B_RATES: u32 = 0xf0007;
+/// ?
+pub const DP_PHY_REPEATER_CNT: u32 = 0xf0002;
+/// ?
+pub const DP_PHY_REPEATER_EXTENDED_WAIT_TIMEOUT: u32 = 0xf0005;
+/// ?
+pub const DP_PHY_REPEATER_MODE: u32 = 0xf0003;
+/// ?
+pub const DP_PSR2_SU_Y_GRANULARITY: u32 = 0x74;
+/// ?
+pub const DP_PSR_CAPS: u32 = 0x71;
+/// ?
+pub const DP_PSR_SUPPORT: u32 = 0x70;
+/// ?
+pub const DP_RECEIVE_PORT_0_BUFFER_SIZE: u32 = 0x9;
+/// ?
+pub const DP_RECEIVE_PORT_0_CAP_0: u32 = 0x8;
+/// ?
+pub const DP_RECEIVER_ALPM_CAP: u32 = 0x2e;
+/// display/dc/link/protocols/link_dp_capability.c:1077
+pub const DP_SET_POWER: u32 = 0x600;
+/// ?
+pub const DP_SET_POWER_D0: u32 = 0x1;
+/// ?
+pub const DP_SET_POWER_D3: u32 = 0x2;
+/// ?
+pub const DP_SIDEBAND_MSG_DOWN_REQ_BASE: u32 = 0x1000;
+/// display/dc/link/protocols/link_dp_capability.c:1891
+pub const DP_SINK_COUNT: u32 = 0x200;
+/// ?
+pub const DP_SINK_EMISSION_RATE: u32 = 0x37e;
+/// display/dc/link/protocols/link_dp_capability.c:1913
+pub const DP_SINK_HW_REVISION_START: u32 = 0x409;
+/// display/dc/link/protocols/link_dp_capability.c:1897
+pub const DP_SINK_OUI: u32 = 0x400;
+/// ?
+pub const DP_SINK_PR_MAX_NUMBER_OF_DEVIATION_LINE: u32 = 0x37a;
+/// ?
+pub const DP_SINK_PR_PIXEL_DEVIATION_PER_LINE: u32 = 0x379;
+/// display/dc/link/protocols/link_dp_capability.c:1442
+pub const DP_SOURCE_MINIMUM_HBLANK_SUPPORTED: u32 = 0x340;
+/// ?
+pub const DP_SOURCE_OUI: u32 = 0x300;
+/// ?
+pub const DP_SOURCE_SINK_CAP: u32 = 0x317;
+/// ?
+pub const DP_SUPPORTED_LINK_RATES: u32 = 0x10;
+/// ?
+pub const DP_TEST_EDID_CHECKSUM: u32 = 0x261;
+/// ?
+pub const DP_TEST_REQUEST: u32 = 0x218;
+/// ?
+pub const DP_TEST_RESPONSE: u32 = 0x260;
+/// display/dc/link/protocols/link_dp_capability.c:1731
+pub const DP_TOTAL_LTTPR_CNT: u32 = 0xf000a;
+/// ?
+pub const DP_TRAINING_AUX_RD_INTERVAL: u32 = 0xe;
+/// ?
+pub const DP_TRAINING_PATTERN_SET: u32 = 0x102;
+/// display/dc/link/protocols/link_dp_dpia.c:44
+pub const DP_TUNNELING_CAPABILITIES_SUPPORT: u32 = 0xe000d;
+/// ?
+pub const DP_UHBR10: u32 = 0x1;
+/// ?
+pub const DP_UHBR20: u32 = 0x2;
+/// display/dc/link/protocols/link_dp_dpia.c:46
+pub const DP_USB4_DRIVER_ID: u32 = 0xe000f;
+/// display/dc/link/protocols/link_dp_dpia.c:47
+pub const DP_USB4_ROUTER_TOPOLOGY_ID: u32 = 0xe001b;
+/// ?
+pub const USB4_DRIVER_BW_CAPABILITY: u32 = 0xe0020;
+/// ?
+pub const DP_AUX_NATIVE_REPLY_NACK: u32 = 0x1;
+/// ?
+pub const DP_AUX_NATIVE_REPLY_DEFER: u32 = 0x2;
+/// ?
+pub const DP_AUX_I2C_REPLY_ACK: u32 = 0x0;
+/// ?
+pub const DP_AUX_I2C_REPLY_NACK: u32 = 0x4;
+/// ?
+pub const DP_AUX_I2C_REPLY_DEFER: u32 = 0x8;
+/// ?
+pub const DP_BRANCH_DEVICE_ID_0010FA: u32 = 0x10fa;
+/// ?
+pub const DP_BRANCH_DEVICE_ID_0080E1: u32 = 0x80e1;
+/// ?
+pub const DP_BRANCH_DEVICE_ID_00E04C: u32 = 0xe04c;
+
+// Link detection: EDID, CTA, DisplayID, ELD (drm_edid.c, drm_displayid_internal.h, drm_eld.h)
+/// ?
+pub const CEA_EXT: u32 = 0x2;
+/// ../drm_edid.c:4151
+pub const CTA_DB_AUDIO: u32 = 0x1;
+/// ../drm_edid.c:4155
+pub const CTA_DB_EXTENDED_TAG: u32 = 0x7;
+/// ../drm_edid.c:4154
+pub const CTA_DB_SPEAKER: u32 = 0x4;
+/// ../drm_edid.c:4153
+pub const CTA_DB_VENDOR: u32 = 0x3;
+/// ../drm_edid.c:4152
+pub const CTA_DB_VIDEO: u32 = 0x2;
+/// ../drm_edid.c:4162
+pub const CTA_EXT_DB_420_VIDEO_CAP_MAP: u32 = 0xf;
+/// ../drm_edid.c:4161
+pub const CTA_EXT_DB_420_VIDEO_DATA: u32 = 0xe;
+/// ../drm_edid.c:4160
+pub const CTA_EXT_DB_HDR_STATIC_METADATA: u32 = 0x6;
+/// ../drm_edid.c:4163
+pub const CTA_EXT_DB_HF_EEODB: u32 = 0x78;
+/// ../drm_edid.c:4164
+pub const CTA_EXT_DB_HF_SCDB: u32 = 0x79;
+/// ../drm_edid.c:4158
+pub const CTA_EXT_DB_VIDEO_CAP: u32 = 0x0;
+/// ?
+pub const DATA_BLOCK_2_TILED_DISPLAY_TOPOLOGY: u32 = 0x28;
+/// ?
+pub const DATA_BLOCK_2_VENDOR_SPECIFIC: u32 = 0x7e;
+/// ?
+pub const DATA_BLOCK_CTA: u32 = 0x81;
+/// ?
+pub const DATA_BLOCK_TILED_DISPLAY: u32 = 0x12;
+/// ?
+pub const DISPLAYID_EXT: u32 = 0x70;
+/// ?
+pub const DISPLAY_ID_STRUCTURE_VER_20: u32 = 0x20;
+/// ?
+pub const DRM_COLOR_FORMAT_RGB444: u32 = 0x1;
+/// ?
+pub const DRM_COLOR_FORMAT_YCBCR422: u32 = 0x4;
+/// ?
+pub const DRM_COLOR_FORMAT_YCBCR444: u32 = 0x2;
+/// ?
+pub const DRM_EDID_DIGITAL_DEPTH_MASK: u32 = 0x70;
+/// ?
+pub const DRM_EDID_DIGITAL_DFP_1_X: u32 = 0x1;
+/// ?
+pub const DRM_EDID_FEATURE_CONTINUOUS_FREQ: u32 = 0x1;
+/// ?
+pub const DRM_EDID_FEATURE_RGB_YCRCB422: u32 = 0x10;
+/// ?
+pub const DRM_EDID_FEATURE_RGB_YCRCB444: u32 = 0x8;
+/// ?
+pub const DRM_EDID_INPUT_DIGITAL: u32 = 0x80;
+/// ?
+pub const DRM_EDID_RANGE_LIMITS_ONLY_FLAG: u32 = 0x1;
+/// ?
+pub const DRM_EDID_RANGE_OFFSET_MAX_VFREQ: u32 = 0x2;
+/// ?
+pub const DRM_EDID_RANGE_OFFSET_MIN_VFREQ: u32 = 0x1;
+/// ?
+pub const DRM_ELD_BASELINE_ELD_LEN: u32 = 0x2;
+/// ?
+pub const DRM_ELD_CEA_EDID_VER_MNL: u32 = 0x4;
+/// ?
+pub const DRM_ELD_CEA_EDID_VER_SHIFT: u32 = 0x5;
+/// ?
+pub const DRM_ELD_CONN_TYPE_DP: u32 = 0x4;
+/// ?
+pub const DRM_ELD_CONN_TYPE_HDMI: u32 = 0x0;
+/// ?
+pub const DRM_ELD_HEADER_BLOCK_SIZE: u32 = 0x4;
+/// ?
+pub const DRM_ELD_MANUFACTURER_NAME0: u32 = 0x10;
+/// ?
+pub const DRM_ELD_MANUFACTURER_NAME1: u32 = 0x11;
+/// ?
+pub const DRM_ELD_MNL_MASK: u32 = 0x1f;
+/// ?
+pub const DRM_ELD_MNL_SHIFT: u32 = 0x0;
+/// ?
+pub const DRM_ELD_MONITOR_NAME_STRING: u32 = 0x14;
+/// ?
+pub const DRM_ELD_PRODUCT_CODE0: u32 = 0x12;
+/// ?
+pub const DRM_ELD_PRODUCT_CODE1: u32 = 0x13;
+/// ?
+pub const DRM_ELD_SAD_COUNT_CONN_TYPE: u32 = 0x5;
+/// ?
+pub const DRM_ELD_SAD_COUNT_MASK: u32 = 0xf0;
+/// ?
+pub const DRM_ELD_SAD_COUNT_SHIFT: u32 = 0x4;
+/// ?
+pub const DRM_ELD_SPEAKER: u32 = 0x7;
+/// ?
+pub const DRM_ELD_VER: u32 = 0x0;
+/// ?
+pub const DRM_ELD_VER_CEA861D: u32 = 0x10;
+/// ?
+pub const DRM_MODE_CONNECTOR_DisplayPort: u32 = 0xa;
+/// ?
+pub const DRM_MODE_CONNECTOR_DVID: u32 = 0x3;
+/// ?
+pub const DRM_MODE_CONNECTOR_eDP: u32 = 0xe;
+/// ?
+pub const DRM_MODE_CONNECTOR_HDMIA: u32 = 0xb;
+/// ?
+pub const DRM_MODE_CONNECTOR_LVDS: u32 = 0x7;
+/// ?
+pub const DRM_MODE_CONNECTOR_Unknown: u32 = 0x0;
+/// ?
+pub const DRM_MODE_CONNECTOR_VGA: u32 = 0x1;
+/// ?
+pub const DRM_MODE_CONNECTOR_VIRTUAL: u32 = 0xf;
+/// ../drm_edid.c:4166
+pub const EDID_BASIC_AUDIO: u32 = 0x40;
+/// ../drm_edid.c:4168
+pub const EDID_CEA_YCRCB422: u32 = 0x10;
+/// ../drm_edid.c:4167
+pub const EDID_CEA_YCRCB444: u32 = 0x20;
+/// ?
+pub const EDID_DETAIL_MONITOR_NAME: u32 = 0xfc;
+/// ?
+pub const EDID_DETAIL_MONITOR_RANGE: u32 = 0xfd;
+/// ?
+pub const EDID_DETAIL_MONITOR_STRING: u32 = 0xfe;
+/// ?
+pub const HDMI_FORUM_IEEE_OUI: u32 = 0xc45dd8;
+/// ?
+pub const HDMI_IEEE_OUI: u32 = 0xc03;
+/// The value of `CEC_PHYS_ADDR_INVALID` in ../../drm_edid.c
+pub const LD_CEC_PHYS_ADDR_INVALID: u32 = 0xffff;
+/// The value of `DRM_EDID_QUIRK_NUM` in ../../drm_edid.c
+pub const LD_DRM_EDID_QUIRK_NUM: u32 = 0x1;
+/// The value of `MICROSOFT_IEEE_OUI` in ../../drm_edid.c
+pub const LD_MICROSOFT_IEEE_OUI: u32 = 0xca125c;
+/// ?
+pub const PRIMARY_USE_HEAD_MOUNTED_AR: u32 = 0x8;
+/// ?
+pub const PRIMARY_USE_HEAD_MOUNTED_VR: u32 = 0x7;
+/// ?
+pub const VTB_EXT: u32 = 0x10;
+/// ?
+pub const DRM_EDID_DIGITAL_DEPTH_6: u32 = 0x10;
+/// ?
+pub const DRM_EDID_DIGITAL_DEPTH_8: u32 = 0x20;
+/// ?
+pub const DRM_EDID_DIGITAL_DEPTH_10: u32 = 0x30;
+/// ?
+pub const DRM_EDID_DIGITAL_DEPTH_12: u32 = 0x40;
+/// ?
+pub const DRM_EDID_DIGITAL_DEPTH_14: u32 = 0x50;
+/// ?
+pub const DRM_EDID_DIGITAL_DEPTH_16: u32 = 0x60;
+/// ?
+pub const DRM_EDID_DIGITAL_DEPTH_UNDEF: u32 = 0x0;
+
+// Link detection: HDCP messages (hdcp_msg.c, hdcp_msg_types.h)
+/// ?
+pub const HDCP_LINK_PRIMARY: u32 = 0x0;
+/// ?
+pub const HDCP_MESSAGE_ID_HDCP2VERSION: u32 = 0x10;
+/// ?
+pub const HDCP_MESSAGE_ID_INVALID: u64 = 0xffffffffffffffff;
+/// ?
+pub const HDCP_MESSAGE_ID_MAX: u32 = 0x23;
+/// ?
+pub const HDCP_MESSAGE_ID_READ_BCAPS: u32 = 0xc;
+/// ?
+pub const HDCP_MESSAGE_ID_READ_BKSV: u32 = 0x0;
+/// ?
+pub const HDCP_MESSAGE_ID_RX_CAPS: u32 = 0x11;
+/// ?
+pub const HDCP_VERSION_14: u32 = 0x1;
+/// ?
+pub const HDCP_VERSION_22: u32 = 0x2;
+
+// Link detection: connection types (link_detection.c)
+/// ?
+pub const dc_connection_mst_branch: u32 = 0x2;
+/// ?
+pub const dc_connection_sst_branch: u32 = 0x3;
+
+// Link detection: endpoint types (link_factory.c)
+/// The value of `DISPLAY_ENDPOINT_USB4_DPIA` in ../display/dc/link/link_factory.c
+pub const LF_DISPLAY_ENDPOINT_USB4_DPIA: u32 = 0x1;
+
+// Link detection: DC debug mask bits (amdgpu_dm_helpers.c, amd_shared.h)
+/// The value of `DC_DISABLE_ACPI_EDID` in ../display/amdgpu_dm/amdgpu_dm_helpers.c
+pub const LD_DC_DISABLE_ACPI_EDID: u32 = 0x8000;
+/// The value of `DC_DISABLE_DSC` in ../display/amdgpu_dm/amdgpu_dm_helpers.c
+pub const LD_DC_DISABLE_DSC: u32 = 0x4;
+/// The value of `DOWNSTREAM_VGA` in ../display/dc/link/protocols/link_dp_capability.c
+pub const LD_DOWNSTREAM_VGA: u32 = 0x1;
+/// The value of `DOWNSTREAM_DVI_HDMI_DP_PLUS_PLUS` in ../display/dc/link/protocols/link_dp_capability.c
+pub const LD_DOWNSTREAM_DVI_HDMI_DP_PLUS_PLUS: u32 = 0x2;
+/// The value of `DOWN_STREAM_DETAILED_DP` in ../display/dc/link/protocols/link_dp_capability.c
+pub const LD_DOWN_STREAM_DETAILED_DP: u32 = 0x0;
+/// The value of `DOWN_STREAM_DETAILED_VGA` in ../display/dc/link/protocols/link_dp_capability.c
+pub const LD_DOWN_STREAM_DETAILED_VGA: u32 = 0x1;
+/// The value of `DOWN_STREAM_DETAILED_DVI` in ../display/dc/link/protocols/link_dp_capability.c
+pub const LD_DOWN_STREAM_DETAILED_DVI: u32 = 0x2;
+/// The value of `DOWN_STREAM_DETAILED_HDMI` in ../display/dc/link/protocols/link_dp_capability.c
+pub const LD_DOWN_STREAM_DETAILED_HDMI: u32 = 0x3;
+/// The value of `DOWN_STREAM_DETAILED_DP_PLUS_PLUS` in ../display/dc/link/protocols/link_dp_capability.c
+pub const LD_DOWN_STREAM_DETAILED_DP_PLUS_PLUS: u32 = 0x5;

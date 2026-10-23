@@ -616,3 +616,16 @@ pub fn dal_gpio_change_mode(adev: &amdgpu_device, g: &mut gpio, mode: gpio_mode)
         None => gpio_result::GPIO_RESULT_NULL_HANDLE,
     }
 }
+
+/// `dal_gpio_set_config` (gpio_base.c), through the pin's `set_config`. Only a
+/// DDC pin takes a DDC configuration; the HPD pin's (`dal_hw_hpd_set_config`)
+/// is reached through the HPD filter and called there.
+pub fn dal_gpio_set_config(adev: &amdgpu_device, g: &gpio, config: &gpio_ddc_config) -> gpio_result {
+    if !g.pin_open {
+        return gpio_result::GPIO_RESULT_NULL_HANDLE;
+    }
+    match &g.hw_container {
+        hw_container::Ddc(d) => dal_hw_ddc_set_config(adev, d, config),
+        _ => gpio_result::GPIO_RESULT_NON_SPECIFIC_ERROR,
+    }
+}

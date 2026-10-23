@@ -10,6 +10,12 @@
 //! filled into the generated table below.
 #![allow(dead_code)]
 
+use crate::amdgpu_device::amdgpu_device;
+use crate::dc_ddc_types::*;
+use crate::dc_helper::{get_reg_field_value_ex, reg_get, reg_get_n, reg_read, reg_set, reg_update, reg_wait,
+    reg_write, set_reg_field_value_ex};
+use crate::gpio_base::{gpio_ddc_config_type, gpio_mode, gpio_result};
+use crate::gpio_service::{dal_ddc_close, dal_ddc_open, ddc, gpio_service};
 use crate::regs::*;
 use alloc::boxed::Box;
 
@@ -32,11 +38,15 @@ pub enum dce_aux_funcs {
 #[derive(Default)]
 pub struct dce_aux {
     pub inst: u32,
-    // ddc: Option<&ddc> — None until the ddc service lands.
+    /// `ddc != NULL`: the engine holds the pins it was acquired with.
+    pub ddc: bool,
     pub delay: u32,
     pub max_defer_write_retry: u32,
     pub acquire_reset: bool,
     pub funcs: Option<dce_aux_funcs>,
+    /// `funcs->configure_timeout`: Linux sets it on the one shared
+    /// `aux_functions` table when the engine's timeout is configurable.
+    pub configure_timeout: Option<fn(&amdgpu_device, &mut aux_engine_dce110, u32) -> u32>,
 }
 
 /// The `addr` cache of `aux_engine_dce110` (decoded register addresses). The
@@ -85,7 +95,9 @@ pub fn dce110_aux_engine_construct(
     aux_engine110.mask = Some(mask);
     aux_engine110.shift = Some(shift);
     aux_engine110.base.funcs = Some(dce_aux_funcs::aux_functions);
-    let _ = is_ext_aux_timeout_configurable; // vtable configure_timeout: hwss stage
+    if is_ext_aux_timeout_configurable {
+        aux_engine110.base.configure_timeout = Some(dce_aux_configure_timeout);
+    }
 }
 
 /// `dcn21_aux_engine_create` (dcn21_resource.c): allocate and construct the AUX
@@ -103,6 +115,436 @@ pub fn dcn21_aux_engine_create(inst: u32, extended_aux_timeout_support: bool) ->
         extended_aux_timeout_support,
     );
     aux_engine
+}
+
+const TIME_OUT_INCREMENT: u32 = 1016;
+const TIME_OUT_MULTIPLIER_8: u32 = 8;
+const TIME_OUT_MULTIPLIER_16: u32 = 16;
+const TIME_OUT_MULTIPLIER_32: u32 = 32;
+const TIME_OUT_MULTIPLIER_64: u32 = 64;
+const MAX_TIMEOUT_LENGTH: u32 = 127;
+const DEFAULT_AUX_ENGINE_MULT: u32 = 0;
+const DEFAULT_AUX_ENGINE_LENGTH: u32 = 69;
+
+const SW_CAN_ACCESS_AUX: u32 = 1;
+const DMCU_CAN_ACCESS_AUX: u32 = 2;
+
+impl aux_engine_dce110 {
+    /// The `(regs, shift, mask)` triple of the `REG_*` macros.
+    fn c(&self) -> (&'static dce110_aux_registers, &'static dce110_aux_registers_shift,
+                    &'static dce110_aux_registers_mask) {
+        (self.regs.unwrap(), self.shift.unwrap(), self.mask.unwrap())
+    }
+}
+
+/// `release_engine` (dce_aux.c).
+fn release_engine(adev: &amdgpu_device, gs: &mut gpio_service, engine: &mut aux_engine_dce110, ddc: &mut ddc) {
+    dal_ddc_close(adev, gs, ddc);
+
+    engine.base.ddc = false;
+
+    reg_update!(adev, engine.c(), AUX_ARB_CONTROL, AUX_SW_DONE_USING_AUX_REG, 1, AUX_SW_USE_AUX_REG_REQ, 0);
+}
+
+/// `is_engine_available` (dce_aux.c).
+fn is_engine_available(adev: &amdgpu_device, engine: &aux_engine_dce110) -> bool {
+    let value = reg_read!(adev, engine.regs.unwrap(), AUX_ARB_CONTROL);
+    let field = get_reg_field_value_ex(value, AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS_MASK,
+        AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS__SHIFT as u8);
+
+    field != DMCU_CAN_ACCESS_AUX
+}
+
+/// `acquire_engine` (dce_aux.c).
+fn acquire_engine(adev: &amdgpu_device, engine: &aux_engine_dce110) -> bool {
+    let regs = engine.regs.unwrap();
+    let mut value = reg_read!(adev, regs, AUX_ARB_CONTROL);
+    let mut field = get_reg_field_value_ex(value, AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS_MASK,
+        AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS__SHIFT as u8);
+    if field == DMCU_CAN_ACCESS_AUX {
+        return false;
+    }
+    // enable AUX before request SW to access AUX
+    value = reg_read!(adev, regs, AUX_CONTROL);
+    field = get_reg_field_value_ex(value, AUX_CONTROL__AUX_EN_MASK, AUX_CONTROL__AUX_EN__SHIFT as u8);
+
+    if field == 0 {
+        value = set_reg_field_value_ex(value, 1, AUX_CONTROL__AUX_EN_MASK, AUX_CONTROL__AUX_EN__SHIFT as u8);
+
+        if regs.AUX_RESET_MASK != 0 {
+            // DP_AUX block as part of the enable sequence
+            value = set_reg_field_value_ex(value, 1, AUX_CONTROL__AUX_RESET_MASK,
+                AUX_CONTROL__AUX_RESET__SHIFT as u8);
+        }
+
+        reg_write!(adev, regs, AUX_CONTROL, value);
+
+        if regs.AUX_RESET_MASK != 0 {
+            // poll HW to make sure reset it done
+            reg_wait!(adev, engine.c(), AUX_CONTROL, AUX_RESET_DONE, 1, 1, 11, "acquire_engine");
+
+            value = set_reg_field_value_ex(value, 0, AUX_CONTROL__AUX_RESET_MASK,
+                AUX_CONTROL__AUX_RESET__SHIFT as u8);
+
+            reg_write!(adev, regs, AUX_CONTROL, value);
+
+            reg_wait!(adev, engine.c(), AUX_CONTROL, AUX_RESET_DONE, 0, 1, 11, "acquire_engine");
+        }
+    }
+
+    // request SW to access AUX
+    reg_update!(adev, engine.c(), AUX_ARB_CONTROL, AUX_SW_USE_AUX_REG_REQ, 1);
+
+    value = reg_read!(adev, regs, AUX_ARB_CONTROL);
+    field = get_reg_field_value_ex(value, AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS_MASK,
+        AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS__SHIFT as u8);
+
+    field == SW_CAN_ACCESS_AUX
+}
+
+/// `COMPOSE_AUX_SW_DATA_16_20` / `_8_15` / `_0_7` (dce_aux.c).
+fn compose_aux_sw_data_16_20(command: u32, address: u32) -> u32 {
+    command | ((0xF0000 & address) >> 16)
+}
+
+fn compose_aux_sw_data_8_15(address: u32) -> u32 {
+    (0xFF00 & address) >> 8
+}
+
+fn compose_aux_sw_data_0_7(address: u32) -> u32 {
+    0xFF & address
+}
+
+/// `submit_channel_request` (dce_aux.c).
+fn submit_channel_request(adev: &amdgpu_device, engine: &aux_engine_dce110, request: &aux_request_transaction_data) {
+    let c = engine.c();
+    let regs = c.0;
+
+    let is_write = (request.r#type == aux_transaction_type::AUX_TRANSACTION_TYPE_DP
+        && request.action == I2CAUX_TRANSACTION_ACTION_DP_WRITE)
+        || (request.r#type == aux_transaction_type::AUX_TRANSACTION_TYPE_I2C
+            && (request.action == I2CAUX_TRANSACTION_ACTION_I2C_WRITE
+                || request.action == I2CAUX_TRANSACTION_ACTION_I2C_WRITE_MOT));
+    if regs.AUXN_IMPCAL != 0 {
+        // AUXN_IMPCAL is 0 on DCN 2.1: the calibration sequence is never run.
+        crate::linux::Line::new().s("submit_channel_request: AUXN_IMPCAL sequence not ported").say();
+    }
+
+    reg_update!(adev, c, AUX_INTERRUPT_CONTROL, AUX_SW_DONE_ACK, 1);
+
+    reg_wait!(adev, c, AUX_SW_STATUS, AUX_SW_DONE, 0, 10, engine.polling_timeout_period / 10,
+        "submit_channel_request");
+
+    // set the delay and the number of bytes to write
+
+    // The length include
+    // the 4 bit header and the 20 bit address
+    // (that is 3 byte).
+    // If the requested length is non zero this means
+    // an addition byte specifying the length is required.
+
+    let mut length = if request.length != 0 { 4 } else { 3 };
+    if is_write {
+        length += request.length;
+    }
+
+    reg_update!(adev, c, AUX_SW_CONTROL, AUX_SW_START_DELAY, request.delay, AUX_SW_WR_BYTES, length);
+
+    // program action and address and payload data (if 'is_write')
+    let mut value = reg_update!(adev, c, AUX_SW_DATA, AUX_SW_INDEX, 0, AUX_SW_DATA_RW, 0,
+        AUX_SW_AUTOINCREMENT_DISABLE, 1, AUX_SW_DATA, compose_aux_sw_data_16_20(request.action, request.address));
+
+    value = reg_set!(adev, c, AUX_SW_DATA, value, AUX_SW_AUTOINCREMENT_DISABLE, 0,
+        AUX_SW_DATA, compose_aux_sw_data_8_15(request.address));
+
+    value = reg_set!(adev, c, AUX_SW_DATA, value, AUX_SW_DATA, compose_aux_sw_data_0_7(request.address));
+
+    if request.length != 0 {
+        value = reg_set!(adev, c, AUX_SW_DATA, value, AUX_SW_DATA, request.length - 1);
+    }
+
+    if is_write {
+        // Load the HW buffer with the Data to be sent.
+        // This is relevant for write operation.
+        // For read, the data recived data will be
+        // processed in process_channel_reply().
+        let mut i = 0;
+        while i < request.length {
+            value = reg_set!(adev, c, AUX_SW_DATA, value, AUX_SW_DATA, request.data[i as usize]);
+            i += 1;
+        }
+    }
+
+    reg_update!(adev, c, AUX_SW_CONTROL, AUX_SW_GO, 1);
+}
+
+/// `read_channel_reply` (dce_aux.c).
+fn read_channel_reply(adev: &amdgpu_device, engine: &aux_engine_dce110, size: u32, buffer: &mut [u8],
+                      reply_result: Option<&mut u8>, sw_status: &mut u32) -> i32 {
+    let c = engine.c();
+
+    let (status, mut bytes_replied) =
+        crate::dc_helper::generic_reg_get(adev, c.0.AUX_SW_STATUS, c.1.AUX_SW_REPLY_BYTE_COUNT,
+            c.2.AUX_SW_REPLY_BYTE_COUNT);
+    *sw_status = status;
+
+    // In case HPD is LOW, exit AUX transaction
+    if *sw_status & AUX_SW_STATUS__AUX_SW_HPD_DISCON_MASK != 0 {
+        return -1;
+    }
+
+    // Need at least the status byte
+    if bytes_replied == 0 {
+        return -1;
+    }
+
+    let v = reg_update!(adev, c, AUX_SW_DATA, AUX_SW_INDEX, 0);
+    let v = reg_set!(adev, c, AUX_SW_DATA, v, AUX_SW_AUTOINCREMENT_DISABLE, 1);
+    reg_set!(adev, c, AUX_SW_DATA, v, AUX_SW_DATA_RW, 1);
+
+    let mut reply_result_32 = reg_get!(adev, c, AUX_SW_DATA, AUX_SW_DATA);
+    reply_result_32 >>= 4;
+    if let Some(r) = reply_result {
+        *r = reply_result_32 as u8;
+    }
+
+    if reply_result_32 == 0 {
+        // ACK
+        let mut i = 0;
+
+        // First byte was already used to get the command status
+        bytes_replied -= 1;
+
+        // Do not overflow buffer
+        if bytes_replied > size {
+            return -1;
+        }
+
+        while i < bytes_replied {
+            let aux_sw_data_val = reg_get!(adev, c, AUX_SW_DATA, AUX_SW_DATA);
+            buffer[i as usize] = aux_sw_data_val as u8;
+            i += 1;
+        }
+
+        return i as i32;
+    }
+
+    0
+}
+
+/// `get_channel_status` (dce_aux.c).
+fn get_channel_status(adev: &amdgpu_device, engine: &aux_engine_dce110, returned_bytes: &mut u8)
+    -> aux_return_code_type {
+    let c = engine.c();
+    *returned_bytes = 0;
+
+    // poll to make sure that SW_DONE is asserted
+    reg_wait!(adev, c, AUX_SW_STATUS, AUX_SW_DONE, 1, 10, engine.polling_timeout_period / 10,
+        "get_channel_status");
+
+    let value = reg_read!(adev, c.0, AUX_SW_STATUS);
+    // in case HPD is LOW, exit AUX transaction
+    if value & AUX_SW_STATUS__AUX_SW_HPD_DISCON_MASK != 0 {
+        return aux_return_code_type::AUX_RET_ERROR_HPD_DISCON;
+    }
+
+    // Note that the following bits are set in 'status.bits'
+    // during CTS 4.2.1.2 (FW 3.3.1):
+    // AUX_SW_RX_MIN_COUNT_VIOL, AUX_SW_RX_INVALID_STOP,
+    // AUX_SW_RX_RECV_NO_DET, AUX_SW_RX_RECV_INVALID_H.
+    //
+    // AUX_SW_RX_MIN_COUNT_VIOL is an internal,
+    // HW debugging bit and should be ignored.
+    if value & AUX_SW_STATUS__AUX_SW_DONE_MASK != 0 {
+        if value & AUX_SW_STATUS__AUX_SW_RX_TIMEOUT_STATE_MASK != 0
+            || value & AUX_SW_STATUS__AUX_SW_RX_TIMEOUT_MASK != 0
+        {
+            aux_return_code_type::AUX_RET_ERROR_TIMEOUT
+        } else if value & AUX_SW_STATUS__AUX_SW_RX_INVALID_STOP_MASK != 0
+            || value & AUX_SW_STATUS__AUX_SW_RX_RECV_NO_DET_MASK != 0
+            || value & AUX_SW_STATUS__AUX_SW_RX_RECV_INVALID_H_MASK != 0
+            || value & AUX_SW_STATUS__AUX_SW_RX_RECV_INVALID_L_MASK != 0
+        {
+            aux_return_code_type::AUX_RET_ERROR_INVALID_REPLY
+        } else {
+            *returned_bytes = get_reg_field_value_ex(value, AUX_SW_STATUS__AUX_SW_REPLY_BYTE_COUNT_MASK,
+                AUX_SW_STATUS__AUX_SW_REPLY_BYTE_COUNT__SHIFT as u8) as u8;
+
+            if *returned_bytes == 0 {
+                aux_return_code_type::AUX_RET_ERROR_INVALID_REPLY
+            } else {
+                *returned_bytes -= 1;
+                aux_return_code_type::AUX_RET_SUCCESS
+            }
+        }
+    } else {
+        // time_elapsed >= aux_engine->timeout_period
+        //  AUX_SW_STATUS__AUX_SW_HPD_DISCON = at this point
+        aux_return_code_type::AUX_RET_ERROR_TIMEOUT
+    }
+}
+
+/// `acquire` (dce_aux.c).
+fn acquire(adev: &amdgpu_device, gs: &mut gpio_service, engine: &mut aux_engine_dce110, ddc: &mut ddc) -> bool {
+    if !is_engine_available(adev, engine) {
+        return false;
+    }
+
+    let result = dal_ddc_open(adev, gs, ddc, gpio_mode::GPIO_MODE_HARDWARE,
+        gpio_ddc_config_type::GPIO_DDC_CONFIG_TYPE_MODE_AUX);
+
+    if result != gpio_result::GPIO_RESULT_OK {
+        return false;
+    }
+
+    if !acquire_engine(adev, engine) {
+        engine.base.ddc = true;
+        release_engine(adev, gs, engine, ddc);
+        return false;
+    }
+
+    engine.base.ddc = true;
+
+    true
+}
+
+/// `dce_aux_configure_timeout` (dce_aux.c), on the engine the DDC pin's
+/// line selects (the caller's `engines[ddc_pin->pin_data->en]`).
+pub fn dce_aux_configure_timeout(adev: &amdgpu_device, aux110: &mut aux_engine_dce110, timeout_in_us: u32) -> u32 {
+    let mut multiplier = 0;
+    let mut length = 0;
+
+    // 1-Update polling timeout period
+    aux110.polling_timeout_period = timeout_in_us * SW_AUX_TIMEOUT_PERIOD_MULTIPLIER;
+
+    // 2-Update aux timeout period length and multiplier
+    if timeout_in_us == 0 {
+        multiplier = DEFAULT_AUX_ENGINE_MULT;
+        length = DEFAULT_AUX_ENGINE_LENGTH;
+    } else if timeout_in_us <= TIME_OUT_INCREMENT {
+        multiplier = 0;
+        length = timeout_in_us / TIME_OUT_MULTIPLIER_8;
+        if timeout_in_us % TIME_OUT_MULTIPLIER_8 != 0 {
+            length += 1;
+        }
+    } else if timeout_in_us <= 2 * TIME_OUT_INCREMENT {
+        multiplier = 1;
+        length = timeout_in_us / TIME_OUT_MULTIPLIER_16;
+        if timeout_in_us % TIME_OUT_MULTIPLIER_16 != 0 {
+            length += 1;
+        }
+    } else if timeout_in_us <= 4 * TIME_OUT_INCREMENT {
+        multiplier = 2;
+        length = timeout_in_us / TIME_OUT_MULTIPLIER_32;
+        if timeout_in_us % TIME_OUT_MULTIPLIER_32 != 0 {
+            length += 1;
+        }
+    } else if timeout_in_us > 4 * TIME_OUT_INCREMENT {
+        multiplier = 3;
+        length = timeout_in_us / TIME_OUT_MULTIPLIER_64;
+        if timeout_in_us % TIME_OUT_MULTIPLIER_64 != 0 {
+            length += 1;
+        }
+    }
+
+    length = if length < MAX_TIMEOUT_LENGTH { length } else { MAX_TIMEOUT_LENGTH };
+
+    let c = aux110.c();
+    let [prev_length, prev_mult] = reg_get_n!(adev, c, AUX_DPHY_RX_CONTROL1, AUX_RX_TIMEOUT_LEN, AUX_RX_TIMEOUT_LEN_MUL);
+
+    let prev_timeout_val = match prev_mult {
+        0 => prev_length * TIME_OUT_MULTIPLIER_8,
+        1 => prev_length * TIME_OUT_MULTIPLIER_16,
+        2 => prev_length * TIME_OUT_MULTIPLIER_32,
+        3 => prev_length * TIME_OUT_MULTIPLIER_64,
+        _ => DEFAULT_AUX_ENGINE_LENGTH * TIME_OUT_MULTIPLIER_8,
+    };
+
+    let v = reg_update!(adev, c, AUX_DPHY_RX_CONTROL1, AUX_RX_TIMEOUT_LEN, length);
+    reg_set!(adev, c, AUX_DPHY_RX_CONTROL1, v, AUX_RX_TIMEOUT_LEN_MUL, multiplier);
+
+    prev_timeout_val
+}
+
+/// `i2caux_action_from_payload` (dce_aux.c).
+fn i2caux_action_from_payload(payload: &aux_payload) -> u32 {
+    if payload.i2c_over_aux {
+        if payload.write_status_update {
+            if payload.mot {
+                return I2CAUX_TRANSACTION_ACTION_I2C_STATUS_REQUEST_MOT;
+            } else {
+                return I2CAUX_TRANSACTION_ACTION_I2C_STATUS_REQUEST;
+            }
+        }
+        if payload.write {
+            if payload.mot {
+                return I2CAUX_TRANSACTION_ACTION_I2C_WRITE_MOT;
+            } else {
+                return I2CAUX_TRANSACTION_ACTION_I2C_WRITE;
+            }
+        }
+        if payload.mot {
+            return I2CAUX_TRANSACTION_ACTION_I2C_READ_MOT;
+        }
+
+        return I2CAUX_TRANSACTION_ACTION_I2C_READ;
+    }
+    if payload.write {
+        return I2CAUX_TRANSACTION_ACTION_DP_WRITE;
+    }
+
+    I2CAUX_TRANSACTION_ACTION_DP_READ
+}
+
+/// `dce_aux_transfer_raw` (dce_aux.c): the engine is `engines[ddc_pin->
+/// pin_data->en]`; the caller hands it in with the pin and the service.
+pub fn dce_aux_transfer_raw(adev: &amdgpu_device, gs: &mut gpio_service, engines: &mut [Option<Box<aux_engine_dce110>>],
+                            ddc_pin: Option<&mut ddc>, payload: &mut aux_payload,
+                            operation_result: &mut aux_return_code_type) -> i32 {
+    let mut returned_bytes = 0;
+    let res;
+    let mut status = 0;
+
+    let Some(ddc_pin) = ddc_pin else {
+        *operation_result = aux_return_code_type::AUX_RET_ERROR_ENGINE_ACQUIRE;
+        return -1;
+    };
+
+    let Some(aux_engine) = engines.get_mut(ddc_pin.pin_data.en as usize).and_then(|e| e.as_deref_mut()) else {
+        *operation_result = aux_return_code_type::AUX_RET_ERROR_ENGINE_ACQUIRE;
+        return -1;
+    };
+    if !acquire(adev, gs, aux_engine, ddc_pin) {
+        *operation_result = aux_return_code_type::AUX_RET_ERROR_ENGINE_ACQUIRE;
+        return -1;
+    }
+
+    let aux_req = aux_request_transaction_data {
+        r#type: if payload.i2c_over_aux {
+            aux_transaction_type::AUX_TRANSACTION_TYPE_I2C
+        } else {
+            aux_transaction_type::AUX_TRANSACTION_TYPE_DP
+        },
+        action: i2caux_action_from_payload(payload),
+        address: payload.address,
+        delay: 0,
+        length: payload.length,
+        data: &*payload.data,
+    };
+
+    submit_channel_request(adev, aux_engine, &aux_req);
+    *operation_result = get_channel_status(adev, aux_engine, &mut returned_bytes);
+
+    if *operation_result == aux_return_code_type::AUX_RET_SUCCESS {
+        let _bytes_replied = read_channel_reply(adev, aux_engine, payload.length, payload.data,
+            payload.reply.as_deref_mut(), &mut status);
+        res = returned_bytes as i32;
+    } else {
+        res = -1;
+    }
+
+    release_engine(adev, gs, aux_engine, ddc_pin);
+    res
 }
 
 // ── machine-generated by dcgen.py (AUX_COMMON_REG_LIST0 / DCN_AUX_MASK_SH_LIST),

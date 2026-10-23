@@ -472,3 +472,28 @@ pub fn printk_ratelimit() -> bool {
         false
     }
 }
+
+/// `usleep_range`: sleeps at least `min_us`. Below a millisecond the module
+/// has no sleep of that grain and spins.
+pub fn usleep_range(min_us: u64, _max_us: u64) {
+    if min_us >= 1000 {
+        msleep(min_us.div_ceil(1000));
+    } else {
+        udelay(min_us);
+    }
+}
+
+/// The errno values (uapi/asm-generic/errno-base.h, errno.h) the display
+/// paths return, positive as Linux defines them.
+pub const EIO: isize = 5;
+pub const ENXIO: isize = 6;
+pub const E2BIG: isize = 7;
+pub const EAGAIN: isize = 11;
+pub const ENOMEM: isize = 12;
+pub const EBUSY: isize = 16;
+pub const ENODEV: isize = 19;
+pub const EINVAL: isize = 22;
+pub const EPROTO: isize = 71;
+pub const EOPNOTSUPP: isize = 95;
+pub const ETIMEDOUT: isize = 110;
+pub const EREMOTEIO: isize = 121;

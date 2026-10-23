@@ -136,7 +136,7 @@ pub fn dce110_edp_power_control(adev: &amdgpu_device, dc: &mut dc, li: usize, po
         let mut remaining_min_edp_poweroff_time_ms: u64 = 500;
 
         // add time defined by a patch, if any (usually patch extra_t12_ms is 0)
-        if link.has_local_sink {
+        if link.local_sink.is_some() {
             remaining_min_edp_poweroff_time_ms += link.panel_config.pps_extra_t12_ms as u64;
         }
 

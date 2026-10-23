@@ -293,6 +293,12 @@ int main(int argc, char **argv)
 	struct dc *dc = adev.dm.dc;
 	if (boot)
 		boot_preset(dc);
+	bool detect = argc > 3 && !strcmp(argv[3], "detect");
+	/* Every HPD but the panel's low, named from Linux's own pin tables. */
+	if (detect)
+		for (int l = 1; l < dc->link_count; l++)
+			if (dc->links[l]->hpd_gpio && dc->links[l]->hpd_gpio->pin)
+				preset(HW_HPD_FROM_BASE(dc->links[l]->hpd_gpio->pin)->regs->int_status, 0);
 
 	static struct dmub_srv dmub;
 	struct dmub_srv_create_params p = { .funcs = { .reg_read = dmub_reg_read, .reg_write = dmub_reg_write },
@@ -328,16 +334,13 @@ int main(int argc, char **argv)
 
 	/* argv[3] = detect: amdgpu_dm_initialize_drm_device's loop over the
 	 * links, on the eDP panel with every other HPD low. */
-	if (argc > 3 && !strcmp(argv[3], "detect")) {
+	if (detect) {
 		for (int i = 0; i < AUX_ENGINES && dc->res_pool->engines[i]; i++) {
 			aux_engines[i].r = container_of(dc->res_pool->engines[i], struct aux_engine_dce110, base)->regs;
 			n_aux_engines = i + 1;
 		}
 		panel_sink_init();
 		aux_engines[dc->links[0]->ddc_hw_inst].sink = true;
-		for (int l = 1; l < dc->link_count; l++)
-			if (dc->links[l]->hpd_gpio)
-				preset(HW_HPD_FROM_BASE(dc->links[l]->hpd_gpio->pin)->regs->int_status, 0);
 		for (int l = 0; l < dc->link_count; l++) {
 			struct dc_link *link = dc->links[l];
 			enum dc_connection_type new_connection_type = dc_connection_none;

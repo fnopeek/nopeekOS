@@ -149,6 +149,19 @@ for seed in ones zeros hash lit boot; do
         fail=1
     fi
 done
+# Link detection after it (amdgpu_dm_initialize_drm_device's link loop):
+# DP AUX engines with an eDP panel behind the first link, every other HPD
+# low; EDID and DPCD through DRM's and DM's own code in the oracle.
+for seed in ones zeros hash lit boot; do
+    "$B/oracle_dchw" "$BIOS" $seed detect | grep -v '^ATOM BIOS:' > "$B/detect_$seed.linux"
+    "$B/dchw_check" "$BIOS" $seed "$B/detect_$seed.linux" detect > "$B/detect_$seed.port"
+    if diff -u "$B/detect_$seed.linux" "$B/detect_$seed.port" | head -30; cmp -s "$B/detect_$seed.linux" "$B/detect_$seed.port"; then
+        echo "link detection ($seed): port = Linux ($(grep -c '^write' "$B/detect_$seed.linux") register writes," \
+            "$(grep -c '^aux action' "$B/detect_$seed.linux") AUX transactions)"
+    else
+        fail=1
+    fi
+done
 # Stage 2: the oracle reads the discovery binary, the port runs the whole
 # amdgpu_device_init on the fake card first.
 # Registers never written read all ones (a bit cleared shows), all zeros

@@ -223,3 +223,25 @@ mod dcn21_link_encoder;
 mod link_factory;
 #[path = "../src/dc_state.rs"]
 mod dc_state;
+#[path = "../src/dc_ddc_types.rs"]
+mod dc_ddc_types;
+#[path = "../src/link_dpcd.rs"]
+mod link_dpcd;
+#[path = "../src/drm_dp_helper.rs"]
+mod drm_dp_helper;
+#[path = "../src/i2c.rs"]
+mod i2c;
+#[path = "../src/drm_connector.rs"]
+mod drm_connector;
+#[path = "../src/drm_edid.rs"]
+mod drm_edid;
+#[path = "../src/amdgpu_dm_helpers.rs"]
+mod amdgpu_dm_helpers;
+#[path = "../src/dc_sink.rs"]
+mod dc_sink;
+#[path = "../src/dc_dp_types.rs"]
+mod dc_dp_types;
+#[path = "../src/link_dp_capability.rs"]
+mod link_dp_capability;
+#[path = "../src/hdcp_msg.rs"]
+mod hdcp_msg;

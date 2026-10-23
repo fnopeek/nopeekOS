@@ -85,6 +85,32 @@ pub struct psr_settings {
     pub psr_version: u32,
 }
 
+/// `struct link_flags` (dc.h), the link's `wa_flags`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct link_wa_flags {
+    pub dp_keep_receiver_powered: bool,
+    pub dp_skip_DID2: bool,
+    pub dp_skip_reset_segment: bool,
+    pub dp_skip_fs_144hz: bool,
+    pub dp_mot_reset_segment: bool,
+    // Some USB4 docks do not handle turning off MST DSC once it has been enabled.
+    pub dpia_mst_dsc_always_on: bool,
+    // Forced DPIA into TBT3 compatibility mode.
+    pub dpia_forced_tbt3_mode: bool,
+    pub dongle_mode_timing_override: bool,
+    pub blank_stream_on_ocs_change: bool,
+    pub read_dpcd204h_on_irq_hpd: bool,
+    pub force_dp_ffe_preset: bool,
+    pub skip_phy_ssc_reduction: bool,
+}
+
+/// `struct dc_link_training_overrides` (dc_dp_types.h), the member
+/// detection reads.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dc_link_training_overrides {
+    pub mst_enable: Option<bool>,
+}
+
 /// `struct dc_link_status` (dc.h), the members reached.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct dc_link_status {
@@ -119,11 +145,32 @@ pub struct dc_link {
     pub edp_sink_present: bool,
     pub link_powered_externally: bool,
     pub is_hpd_pending: bool,
-    /// `local_sink != NULL`: sinks join with link detection.
-    pub has_local_sink: bool,
-    /// `priv != NULL`: the DM's connector joins with
-    /// amdgpu_dm_initialize_drm_device.
-    pub has_priv: bool,
+    /// `local_sink`: the sink detection found.
+    pub local_sink: Option<Box<crate::dc_sink::dc_sink>>,
+    /// `priv`: the DM's connector (amdgpu_dm_initialize_drm_device).
+    pub priv_: Option<Box<crate::amdgpu_dm_helpers::amdgpu_dm_connector>>,
+    /// `enum dc_connection_type`.
+    pub r#type: u32,
+    pub link_state_valid: bool,
+    pub aux_mode: bool,
+    pub aux_access_disabled: bool,
+    pub is_dig_mapping_flexible: bool,
+    pub is_dds: bool,
+    pub test_pattern_enabled: bool,
+    /// `compliance_test_state.raw`.
+    pub compliance_test_state: u8,
+    pub dpcd_caps: crate::dc_dp_types::dpcd_caps,
+    /// `dpcd_sink_ext_caps.raw`.
+    pub dpcd_sink_ext_caps: u8,
+    pub dpcd_sink_count: u32,
+    pub reported_link_cap: crate::dc_dp_types::dc_link_settings,
+    pub verified_link_cap: crate::dc_dp_types::dc_link_settings,
+    pub cur_link_settings: crate::dc_dp_types::dc_link_settings,
+    pub dongle_max_pix_clk: u32,
+    pub hdcp_caps: crate::dc_dp_types::hdcp_caps,
+    pub dprx_states: crate::dc_dp_types::dprx_states,
+    pub wa_flags: link_wa_flags,
+    pub preferred_training_settings: dc_link_training_overrides,
     pub link_status: dc_link_status,
     /// `enum dc_link_fec_state` (dc_dp_types.h).
     pub fec_state: u32,
@@ -131,8 +178,8 @@ pub struct dc_link {
     pub dp_trace: dp_trace,
 }
 
-/// `struct panel_config`'s `pps` (dc_types.h): the panel-specific extra
-/// power-sequence delays, in ms.
+/// `struct dc_panel_config` (dc_types.h), its sub-structs flattened; the
+/// `pps` delays are in ms.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct panel_config {
     pub pps_extra_t3_ms: u32,
@@ -142,6 +189,30 @@ pub struct panel_config {
     pub pps_extra_pre_t11_ms: u32,
     pub pps_extra_t12_ms: u32,
     pub pps_extra_post_oui_ms: u32,
+    /// `nits_brightness`.
+    pub nits_peak: u32,
+    pub nits_max_avg: u32,
+    pub nits_min: u32,
+    pub nits_max_nonboost_brightness_millinits: u32,
+    pub nits_min_brightness_millinits: u32,
+    /// `psr`.
+    pub psr_disable_psr: bool,
+    pub psr_disallow_psrsu: bool,
+    pub psr_disallow_replay: bool,
+    pub psr_rc_disable: bool,
+    pub psr_rc_allow_static_screen: bool,
+    pub psr_rc_allow_fullscreen_vpb: bool,
+    pub psr_read_psrcap_again: bool,
+    pub psr_replay_enable_option: u32,
+    /// `varib`.
+    pub varib_varibright_feature_enable: u32,
+    pub varib_def_varibright_level: u32,
+    pub varib_abm_config_setting: u32,
+    /// `dsc`.
+    pub dsc_disable_dsc_edp: bool,
+    pub dsc_force_dsc_edp_policy: u32,
+    /// `ilr.optimize_edp_link_rate`.
+    pub ilr_optimize_edp_link_rate: bool,
 }
 
 /// `struct dp_trace`'s eDP power timestamps (link_types.h), in ns.

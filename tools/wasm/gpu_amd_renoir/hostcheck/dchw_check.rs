@@ -1,13 +1,15 @@
 //! The port's DC bring-up, printed as oracle/main_dchw.c prints Linux's:
 //! amdgpu_dm_init up to dc_hardware_init on the VBIOS, then a DMUB service
 //! attached and dc_hardware_init. Unwritten registers read hash / ones /
-//! zeros / lit / boot; the VBIOS SMC answers every message. For boot the
-//! third argument is the oracle's output, whose `preset` lines are the boot
-//! registers Linux's tables name. Then, as amdgpu_dm_init goes on,
+//! zeros / lit / boot; the VBIOS SMC answers every message. The third
+//! argument is the oracle's output, whose `preset` lines are the registers
+//! Linux's tables name (the boot image, the HPD levels of `detect`). Then, as amdgpu_dm_init goes on,
 //! mmhub_read_system_context and dc_setup_system_context on the oracle's GMC
 //! layout, with the GART table a VRAM buffer. Every register write is
 //! printed; the DMUB commands are read back off the inbox ring, then the
-//! state init_hw leaves.
+//! state init_hw leaves. A fourth argument `detect` runs the link loop of
+//! amdgpu_dm_initialize_drm_device against the AUX engines and eDP panel
+//! of oracle/dp_sink.c, modelled here the same way.
 
 extern crate alloc;
 
@@ -33,9 +35,181 @@ fn lit(reg: u32) -> u32 {
     if reg == CC_DC_PIPE_DIS { 0 } else { !0 }
 }
 
+/// The DP AUX engines and the eDP panel behind the first link's (oracle/
+/// dp_sink.c): a request is loaded through AUX_SW_DATA, AUX_SW_GO sends it,
+/// the reply comes back through the same index once AUX_SW_DATA_RW is set.
+#[derive(Default)]
+struct AuxEngine {
+    r: [u32; 6],
+    sink: bool,
+    tx: [u8; 32],
+    rx: [u8; 32],
+    idx: usize,
+    ridx: usize,
+    rx_n: usize,
+    rmode: bool,
+    status: u32,
+    i2c_off: usize,
+}
+
+struct Sink {
+    engines: Vec<AuxEngine>,
+    dpcd: Vec<u8>,
+    edid: [u8; 128],
+}
+
+thread_local! {
+    static SINK: std::cell::RefCell<Option<Sink>> = const { std::cell::RefCell::new(None) };
+}
+
+const SW_DATA: usize = 0;
+const SW_CONTROL: usize = 1;
+const INTERRUPT_CONTROL: usize = 2;
+const SW_STATUS: usize = 3;
+const ARB_CONTROL: usize = 4;
+const CONTROL: usize = 5;
+
+fn aux_engine_of(s: &mut Sink, reg: u32) -> Option<(&mut AuxEngine, usize)> {
+    s.engines.iter_mut().find_map(|e| e.r.iter().position(|&r| r == reg).map(|w| (e, w)))
+}
+
+fn aux_engine_go(m: &mut AuxEngine, dpcd: &mut [u8], edid: &[u8; 128]) {
+    let action = (m.tx[0] & 0xf0) as u32;
+    let addr = ((m.tx[0] & 0xf) as usize) << 16 | (m.tx[1] as usize) << 8 | m.tx[2] as usize;
+    let len = if m.idx > 3 { m.tx[3] as usize + 1 } else { 0 };
+
+    m.rx_n = 1;
+    m.rx[0] = 0;
+    if !m.sink {
+        m.status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK | AUX_SW_STATUS__AUX_SW_RX_TIMEOUT_MASK;
+        println!("aux timeout action {:#x} addr {:#x}", action, addr);
+        return;
+    }
+    if action == dc_ddc_types::I2CAUX_TRANSACTION_ACTION_DP_READ {
+        m.rx[1..1 + len].copy_from_slice(&dpcd[addr..addr + len]);
+        m.rx_n += len;
+    } else if action == dc_ddc_types::I2CAUX_TRANSACTION_ACTION_DP_WRITE {
+        dpcd[addr..addr + len].copy_from_slice(&m.tx[4..4 + len]);
+    } else if addr == 0x50 {
+        if action & dc_ddc_types::I2CAUX_TRANSACTION_ACTION_I2C_READ == 0 {
+            if len != 0 {
+                m.i2c_off = m.tx[4] as usize;
+            }
+        } else {
+            for i in 0..len {
+                m.rx[1 + i] = edid[(m.i2c_off + i) & 0x7f];
+            }
+            m.i2c_off += len;
+            m.rx_n += len;
+        }
+    } else if addr != 0x30 {
+        m.rx[0] = dc_ddc_types::AUX_TRANSACTION_REPLY_I2C_OVER_AUX_NACK << 4;
+    }
+    println!("aux action {:#x} addr {:#x} len {} reply {:#x}", action, addr, len, m.rx[0]);
+    m.status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK | (m.rx_n as u32) << DP_AUX0_AUX_SW_STATUS__AUX_SW_REPLY_BYTE_COUNT__SHIFT;
+}
+
+/// The engine's side of a write the card already stored.
+fn aux_engine_write(reg: u32, val: u32) {
+    SINK.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(s) = s.as_mut() else { return };
+        let Sink { engines, dpcd, edid } = s;
+        let Some((m, w)) = engines.iter_mut().find_map(|e| e.r.iter().position(|&r| r == reg).map(|w| (e, w)))
+        else {
+            return;
+        };
+        match w {
+            SW_DATA => {
+                if val & DP_AUX0_AUX_SW_DATA__AUX_SW_AUTOINCREMENT_DISABLE_MASK != 0 {
+                    m.idx = ((val & DP_AUX0_AUX_SW_DATA__AUX_SW_INDEX_MASK) >> DP_AUX0_AUX_SW_DATA__AUX_SW_INDEX__SHIFT) as usize;
+                }
+                m.rmode = val & DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_RW_MASK != 0;
+                if m.rmode {
+                    m.ridx = m.idx;
+                } else {
+                    m.tx[m.idx & 31] = ((val & DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_MASK) >> DP_AUX0_AUX_SW_DATA__AUX_SW_DATA__SHIFT) as u8;
+                    m.idx += 1;
+                }
+            }
+            SW_CONTROL if val & DP_AUX0_AUX_SW_CONTROL__AUX_SW_GO_MASK != 0 => {
+                npk_sys::fake_set_reg(reg, val & !DP_AUX0_AUX_SW_CONTROL__AUX_SW_GO_MASK);
+                aux_engine_go(m, dpcd, edid);
+            }
+            INTERRUPT_CONTROL if val & DP_AUX0_AUX_INTERRUPT_CONTROL__AUX_SW_DONE_ACK_MASK != 0 => {
+                m.status &= !DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK;
+                npk_sys::fake_set_reg(reg, val & !DP_AUX0_AUX_INTERRUPT_CONTROL__AUX_SW_DONE_ACK_MASK);
+            }
+            _ => {}
+        }
+    });
+}
+
+fn aux_engine_read(reg: u32) -> Option<u32> {
+    SINK.with(|s| {
+        let mut s = s.borrow_mut();
+        let (m, w) = aux_engine_of(s.as_mut()?, reg)?;
+        let v = npk_sys::fake_reg(reg);
+        Some(match w {
+            SW_DATA if m.rmode => {
+                let b = m.rx[m.ridx & 31];
+                m.ridx += 1;
+                (v & !DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_MASK) | (b as u32) << DP_AUX0_AUX_SW_DATA__AUX_SW_DATA__SHIFT
+            }
+            SW_STATUS => m.status,
+            ARB_CONTROL => {
+                (v & !DP_AUX0_AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS_MASK)
+                    | 1 << DP_AUX0_AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS__SHIFT
+            }
+            CONTROL => {
+                (v & !DP_AUX0_AUX_CONTROL__AUX_RESET_DONE_MASK)
+                    | if v & DP_AUX0_AUX_CONTROL__AUX_RESET_MASK != 0 { DP_AUX0_AUX_CONTROL__AUX_RESET_DONE_MASK } else { 0 }
+            }
+            _ => v,
+        })
+    })
+}
+
+/// An eDP 1.4 panel, 1920x1080 over two HBR lanes, backlight on PWM, no PSR
+/// (oracle/dp_sink.c, byte for byte).
+const PANEL_EDID: [u8; 128] = [
+    0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x30, 0xe4, 0x2c, 0x05, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x1d, 0x01, 0x04, 0xa5, 0x22, 0x13, 0x78, 0x02, 0xa0, 0xf5, 0x95, 0x5b, 0x59, 0x93, 0x27,
+    0x1d, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x3c, 0x37, 0x80, 0xde, 0x70, 0x38, 0x14, 0x40, 0x3c, 0x20,
+    0x36, 0x00, 0x58, 0xc2, 0x10, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe, 0x00, 0x4c,
+    0x47, 0x20, 0x44, 0x69, 0x73, 0x70, 0x6c, 0x61, 0x79, 0x0a, 0x20, 0x20, 0x00, 0x00, 0x00, 0xfe,
+    0x00, 0x4c, 0x50, 0x31, 0x35, 0x36, 0x57, 0x46, 0x47, 0x2d, 0x53, 0x50, 0x42, 0x32, 0x00, 0x00,
+];
+
+fn panel_sink(panel_engine: usize) -> Sink {
+    let mut dpcd = vec![0u8; 0x100000];
+    dpcd[DP_DPCD_REV as usize] = 0x14;
+    dpcd[DP_MAX_LINK_RATE as usize] = 0x0a; // DP_LINK_BW_2_7
+    dpcd[DP_MAX_LANE_COUNT as usize] = 2 | 0x80; // DP_ENHANCED_FRAME_CAP
+    dpcd[DP_MAX_DOWNSPREAD as usize] = 0x01; // DP_MAX_DOWNSPREAD_0_5
+    dpcd[DP_EDP_CONFIGURATION_CAP as usize] = 0x01 | 0x02; // alternate scrambler reset, framing change
+    dpcd[DP_EDP_DPCD_REV as usize] = 0x03; // DP_EDP_14
+    dpcd[DP_SET_POWER as usize] = DP_SET_POWER_D0 as u8;
+    let mut edid = PANEL_EDID;
+    let sum = edid[..127].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    edid[127] = sum.wrapping_neg();
+    let engines = dce_aux::AUX_REGS.iter().enumerate()
+        .map(|(i, r)| AuxEngine {
+            r: [r.AUX_SW_DATA, r.AUX_SW_CONTROL, r.AUX_INTERRUPT_CONTROL, r.AUX_SW_STATUS, r.AUX_ARB_CONTROL,
+                r.AUX_CONTROL],
+            sink: i == panel_engine,
+            ..Default::default()
+        })
+        .collect();
+    Sink { engines, dpcd, edid }
+}
+
 /// The VBIOS SMC answers every message OK with the SMU version; the DMCUB
 /// consumes the inbox ring as soon as its write pointer moves.
 fn device(reg: u32, v: u32) {
+    aux_engine_write(reg, v);
     if reg == RN_VBIOS_MP1_SMN_C2PMSG_67 {
         npk_sys::fake_set_reg(RN_VBIOS_MP1_SMN_C2PMSG_83, 0x373700);
         npk_sys::fake_set_reg(RN_VBIOS_MP1_SMN_C2PMSG_91, 1);
@@ -62,8 +236,10 @@ fn main() {
         "lit" | "boot" => lit,
         _ => hash,
     };
-    let presets: Vec<(u32, u32)> = if mode == "boot" {
-        let text = std::fs::read_to_string(args.next().expect("oracle output")).expect("read");
+    let oracle_out = args.next();
+    let detect = args.next().as_deref() == Some("detect");
+    let presets: Vec<(u32, u32)> = if let Some(path) = oracle_out {
+        let text = std::fs::read_to_string(path).expect("read");
         text.lines()
             .filter_map(|l| l.strip_prefix("preset reg 0x"))
             .map(|l| {
@@ -88,6 +264,7 @@ fn main() {
     });
     npk_sys::fake_card_unset(rule, (!0 - 1, !0 - 2));
     npk_sys::fake_write_hook(device);
+    npk_sys::fake_read_hook(aux_engine_read);
     npk_sys::fake_card_echo_skip(&[DMUB_DMCUB_INBOX1_WPTR]);
     npk_sys::quiet(true);
 
@@ -184,6 +361,43 @@ fn main() {
             dc.res_pool.as_deref().unwrap().hubbub.as_deref().unwrap().base.riommu_active as u32,
             dc.vm_pa_config.valid as u32
         );
+    }
+    // amdgpu_dm_initialize_drm_device's loop over the links, on the eDP
+    // panel with every other HPD low (the presets above).
+    if detect {
+        let panel_engine = dc.links[0].ddc_hw_inst as usize;
+        SINK.with(|s| *s.borrow_mut() = Some(panel_sink(panel_engine)));
+        for l in 0..dc.link_count as usize {
+            if dc.links[l].connector_signal == LF_SIGNAL_TYPE_VIRTUAL {
+                continue;
+            }
+            amdgpu_dm_helpers::amdgpu_dm_connector_init(&mut dc, l);
+            println!("detect link {}", l);
+            let mut new_connection_type = dc_connection_none;
+            if !link_detection::dc_link_detect_connection_type(&adev, &mut dc, l, &mut new_connection_type) {
+                println!("KMS: Failed to detect connector");
+            }
+            println!("dc_link_detect {}",
+                link_detection::dc_link_detect(&adev, &mut dc, l, link_detection::dc_detect_reason::DETECT_REASON_BOOT)
+                    as u32);
+        }
+        for (l, link) in dc.links.iter().enumerate() {
+            let sink = link.local_sink.as_deref();
+            print!("link {} type {} signal {}", l, link.r#type, sink.map_or(-1, |s| s.sink_signal as i32));
+            println!(" cap lanes {} rate {} spread {} verified lanes {} rate {}", link.reported_link_cap.lane_count,
+                link.reported_link_cap.link_rate, link.reported_link_cap.link_spread,
+                link.verified_link_cap.lane_count, link.verified_link_cap.link_rate);
+            let Some(sink) = sink else { continue };
+            let c = &sink.edid_caps;
+            let name_len = c.display_name.iter().position(|&b| b == 0).unwrap_or(c.display_name.len());
+            println!("  sink edid {} mfg {:#x} prod {:#x} serial {:#x} week {} year {} name '{}' hdmi {} audio {} speakers {:#x}",
+                sink.dc_edid.length, c.manufacturer_id, c.product_id, c.serial_number, c.manufacture_week,
+                c.manufacture_year, String::from_utf8_lossy(&c.display_name[..name_len]), c.edid_hdmi as u32,
+                c.audio_mode_count, c.speaker_flags);
+            println!("  dpcd rev {:#x} lanes {:#x} spread {:#x} ext_caps {:#x} sink_count {} branch {}",
+                link.dpcd_caps.dpcd_rev, link.dpcd_caps.max_ln_count, link.dpcd_caps.max_down_spread,
+                link.dpcd_sink_ext_caps, link.dpcd_caps.sink_count, link.dpcd_caps.is_branch_dev as u32);
+        }
     }
     npk_sys::fake_card_echo(false);
 

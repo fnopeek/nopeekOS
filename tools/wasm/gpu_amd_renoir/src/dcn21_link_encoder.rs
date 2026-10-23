@@ -1648,3 +1648,24 @@ pub fn virtual_link_encoder_construct(enc: &mut link_encoder, init_data: &encode
 
     true
 }
+
+/// `dcn20_link_encoder_is_in_alt_mode` (dcn20_link_encoder.c): a USB-C
+/// PHY not told to leave DP alt mode is in it.
+pub fn dcn20_link_encoder_is_in_alt_mode(adev: &amdgpu_device, enc: &link_enc) -> bool {
+    let enc10 = to_dcn10_link_enc(enc);
+    let mut is_usb_c_alt_mode = false;
+
+    if enc.base().features.flags & DP_IS_USB_C != 0 {
+        // if value == 1 alt mode is disabled, otherwise it is enabled
+        let dp_alt_mode_disable = reg_get!(adev, enc10.link(), RDPCSTX_PHY_CNTL6, RDPCS_PHY_DPALT_DISABLE);
+        is_usb_c_alt_mode = dp_alt_mode_disable == 0;
+    }
+
+    is_usb_c_alt_mode
+}
+
+/// `REG_GET(RDPCSTX_PHY_CNTL6, RDPCS_PHY_DPALT_DP4, …)` of
+/// `dcn20_link_encoder_get_max_link_cap`.
+pub fn rdpcs_phy_dpalt_dp4(adev: &amdgpu_device, enc: &link_enc) -> u32 {
+    reg_get!(adev, to_dcn10_link_enc(enc).link(), RDPCSTX_PHY_CNTL6, RDPCS_PHY_DPALT_DP4)
+}

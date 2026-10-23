@@ -633,3 +633,23 @@ impl Default for dp_protocol_version {
     // Zero-init matches DP_VERSION_1_4 (= 0), as a kzalloc'd dc_caps starts.
     fn default() -> Self { dp_protocol_version::DP_VERSION_1_4 }
 }
+
+/// `enum dc_status` (core_status.h), the values detection reaches.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum dc_status {
+    DC_OK = 1,
+    DC_NOT_SUPPORTED = 24,
+    DC_ERROR_UNEXPECTED = -1,
+}
+
+/// `enum dc_edid_status` (dc_types.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum dc_edid_status {
+    EDID_OK,
+    EDID_BAD_INPUT,
+    EDID_NO_RESPONSE,
+    EDID_BAD_CHECKSUM,
+    EDID_THE_SAME,
+    EDID_FALL_BACK,
+    EDID_PARTIAL_VALID,
+}

@@ -483,3 +483,43 @@ pub fn dal_gpio_get_generic_pin_info(service: &gpio_service, id: Option<gpio_id>
     }
     pin
 }
+
+/// `dal_ddc_open` (gpio_service.c): both pins in `mode`, the pad through the
+/// data pin. `GPIO_MODE_INPUT` is detect_sink_type's, with the dual-mode
+/// settling delays.
+pub fn dal_ddc_open(adev: &amdgpu_device, service: &mut gpio_service, ddc: &mut ddc, mode: gpio_mode,
+                    config_type: gpio_ddc_config_type) -> gpio_result {
+    let result = dal_gpio_open_ex(adev, service, &mut ddc.pin_data, mode);
+    if result != gpio_result::GPIO_RESULT_OK {
+        return result;
+    }
+
+    let result = dal_gpio_open_ex(adev, service, &mut ddc.pin_clock, mode);
+    if result != gpio_result::GPIO_RESULT_OK {
+        dal_gpio_close(adev, service, &mut ddc.pin_data);
+        return result;
+    }
+
+    let store_en = |g: &mut gpio| g.hw_container.gpio().map_or(0, |p| p.store.en);
+    let config = gpio_ddc_config {
+        r#type: config_type,
+        data_en_bit_present: store_en(&mut ddc.pin_data) != 0,
+        clock_en_bit_present: store_en(&mut ddc.pin_clock) != 0,
+        i2c_aux_dual_mode: mode == gpio_mode::GPIO_MODE_INPUT,
+    };
+
+    let result = dal_gpio_set_config(adev, &ddc.pin_data, &config);
+    if result == gpio_result::GPIO_RESULT_OK {
+        return result;
+    }
+
+    dal_gpio_close(adev, service, &mut ddc.pin_clock);
+    dal_gpio_close(adev, service, &mut ddc.pin_data);
+    result
+}
+
+/// `dal_ddc_close` (gpio_service.c).
+pub fn dal_ddc_close(adev: &amdgpu_device, service: &mut gpio_service, ddc: &mut ddc) {
+    dal_gpio_close(adev, service, &mut ddc.pin_clock);
+    dal_gpio_close(adev, service, &mut ddc.pin_data);
+}

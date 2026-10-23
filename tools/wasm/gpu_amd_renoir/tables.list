@@ -122,3 +122,11 @@ amdgpu_sg_display: i32
 amdgpu_seamless: i32
 @ ../display/dc/core/dc_hw_sequencer.c
 black_color_format: u16
+@ ../display/dc/link/protocols/link_dpcd.c
+mandatory_dpcd_partitions: u32
+mandatory_dpcd_blocks: u32
+@ ../../drm_edid.c
+edid_quirk_list: u32
+@ ../display/dc/hdcp/hdcp_msg.c
+hdcp_dpcd_addrs: u32
+hdcp_cmd_is_read: u8

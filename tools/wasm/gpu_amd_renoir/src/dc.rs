@@ -117,6 +117,8 @@ pub struct dc_config {
     pub disable_ips_in_vpb: u32,
     pub allow_0_dtb_clk: bool,
     pub support_edp0_on_dp1: bool,
+    pub unify_link_enc_assignment: bool,
+    pub enable_dpia_pre_training: bool,
 }
 
 /// `enum pipe_split_policy` (dc.h).
@@ -177,6 +179,8 @@ pub struct dc_debug_options {
     pub visual_confirm: u32,
     pub ignore_cable_id: bool,
     pub enable_dmub_aux_for_legacy_ddc: bool,
+    pub disable_fixed_vs_aux_timeout_wa: bool,
+    pub disable_uhbr: bool,
     /// `dpia_debug.bits.disable_dpia`.
     pub dpia_debug_disable_dpia: bool,
     pub disable_timeout: bool,
@@ -227,6 +231,15 @@ pub struct dc {
     pub optimized_required: bool,
     /// `vm_pa_config`: the system context `dc_setup_system_context` keeps.
     pub vm_pa_config: dc_phy_addr_space_config,
+    pub vendor_signature: dpcd_vendor_signature,
+}
+
+/// `struct dpcd_vendor_signature` (dc_dp_types.h): the source OUI a DM may
+/// set; `data` is its 12 raw bytes.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dpcd_vendor_signature {
+    pub is_valid: bool,
+    pub data: [u8; 12],
 }
 
 /// The `system_aperture` of `struct dc_phy_addr_space_config` (dc.h).
