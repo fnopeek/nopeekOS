@@ -148,7 +148,8 @@ fn wake(slot: &core::sync::atomic::AtomicU32) {
 pub fn set_cmd_waker(w: crate::smp::fiber::Waker) { CMD_WAKER.store(w, Ordering::Release); }
 pub fn set_event_waker(w: crate::smp::fiber::Waker) { EVENT_WAKER.store(w, Ordering::Release); }
 pub fn cmd_pending() -> bool { !DOWNLINK.lock().is_empty() }
-pub fn event_pending() -> bool { !UPLINK.lock().is_empty() }
+/// Something for the manager: a driver event or a user request.
+pub fn event_pending() -> bool { !UPLINK.lock().is_empty() || !REQUESTS.lock().is_empty() }
 /// Dequeue the next command from the manager into `out`; None if empty / too small.
 pub fn poll_cmd(out: &mut [u8]) -> Option<usize> { pop(&DOWNLINK, out) }
 
@@ -158,4 +159,230 @@ pub fn poll_cmd(out: &mut [u8]) -> Option<usize> { pop(&DOWNLINK, out) }
 pub fn reset() {
     DOWNLINK.lock().clear();
     UPLINK.lock().clear();
+}
+
+// ── User requests to the manager (docs/plan/WLAN_MANAGER.md §4) ──
+//
+// The `wlan` intent and the deck ask; `wifid` decides. A password that comes
+// with a request is stored in the vault here and never travels further:
+// `wifid` reads it from the vault like every other known network.
+
+pub const REQ_SCAN: u8 = 0x01;
+pub const REQ_CONNECT: u8 = 0x02;
+pub const REQ_DISCONNECT: u8 = 0x03;
+pub const REQ_FORGET: u8 = 0x04;
+/// The known networks changed (added, auto, priority); re-read them.
+pub const REQ_KNOWN_CHANGED: u8 = 0x05;
+
+static REQUESTS: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
+static REQS_SENT: AtomicU32 = AtomicU32::new(0);
+static REQS_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+/// The manager's own view (state, link, scan list), as it last published it.
+static STATUS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+/// Largest published status.
+pub const STATUS_MAX: usize = 4096;
+
+fn request(msg: &[u8]) -> bool {
+    let ok = push(&REQUESTS, msg, &REQS_SENT, &REQS_DROPPED);
+    if ok { wake(&EVENT_WAKER); }
+    ok
+}
+
+/// Dequeue the next user request into `out`; None if empty / too small.
+pub fn poll_request(out: &mut [u8]) -> Option<usize> { pop(&REQUESTS, out) }
+
+pub fn publish_status(text: &[u8]) {
+    let mut s = STATUS.lock();
+    s.clear();
+    s.extend_from_slice(&text[..text.len().min(STATUS_MAX)]);
+}
+
+pub fn status() -> Vec<u8> { STATUS.lock().clone() }
+
+/// An SSID is 0..=32 arbitrary bytes (802.11 §9.4.2.2).
+pub const SSID_MAX: usize = 32;
+
+fn ssid_msg(op: u8, ssid: &[u8]) -> Option<Vec<u8>> {
+    if ssid.is_empty() || ssid.len() > SSID_MAX { return None; }
+    let mut m = Vec::with_capacity(2 + ssid.len());
+    m.push(op);
+    m.push(ssid.len() as u8);
+    m.extend_from_slice(ssid);
+    Some(m)
+}
+
+pub fn request_scan() -> bool { request(&[REQ_SCAN]) }
+pub fn request_disconnect() -> bool { request(&[REQ_DISCONNECT]) }
+
+fn valid_psk(p: &[u8]) -> bool {
+    (8..=63).contains(&p.len()) && p.iter().all(|&b| (0x20..0x7f).contains(&b))
+}
+
+/// Store a network's password (the vault GUI), keeping its options.
+pub fn save_password(ssid: &[u8], psk: &[u8]) -> Result<(), &'static str> {
+    if ssid.is_empty() || ssid.len() > SSID_MAX { return Err("invalid SSID"); }
+    if !valid_psk(psk) { return Err("a WPA2 password is 8 to 63 printable characters"); }
+    let mut e = known(ssid).unwrap_or_default();
+    e.psk = psk.to_vec();
+    store(ssid, &e)?;
+    known_changed();
+    Ok(())
+}
+
+/// Tell the manager the saved networks changed.
+pub fn known_changed() { request(&[REQ_KNOWN_CHANGED]); }
+
+/// Connect to `ssid`. A password given here is stored first (a new network,
+/// or a changed password); without one the network must already be known.
+pub fn request_connect(ssid: &[u8], psk: Option<&[u8]>) -> Result<(), &'static str> {
+    let msg = ssid_msg(REQ_CONNECT, ssid).ok_or("invalid SSID")?;
+    if let Some(p) = psk {
+        if !valid_psk(p) {
+            return Err("a WPA2 password is 8 to 63 printable characters");
+        }
+        let mut e = known(ssid).unwrap_or_default();
+        e.psk = p.to_vec();
+        store(ssid, &e)?;
+    } else if known(ssid).is_none() {
+        return Err("unknown network: a password is needed");
+    }
+    if request(&msg) { Ok(()) } else { Err("wifid is not taking requests") }
+}
+
+pub fn forget(ssid: &[u8]) -> Result<(), &'static str> {
+    let msg = ssid_msg(REQ_FORGET, ssid).ok_or("invalid SSID")?;
+    if !crate::security::keyvault::system_delete(&entry_name(ssid)) {
+        return Err("not a known network");
+    }
+    request(&msg);
+    Ok(())
+}
+
+pub fn set_auto(ssid: &[u8], on: bool) -> Result<(), &'static str> {
+    let mut e = known(ssid).ok_or("not a known network")?;
+    e.auto = on;
+    store(ssid, &e)?;
+    request(&[REQ_KNOWN_CHANGED]);
+    Ok(())
+}
+
+pub fn set_prio(ssid: &[u8], prio: i8) -> Result<(), &'static str> {
+    let mut e = known(ssid).ok_or("not a known network")?;
+    e.prio = prio;
+    store(ssid, &e)?;
+    request(&[REQ_KNOWN_CHANGED]);
+    Ok(())
+}
+
+// ── Known networks: vault system tier, `net:<SSID>` ──
+
+/// A known network (docs/plan/WLAN_MANAGER.md §1).
+pub struct KnownNet {
+    pub auto: bool,
+    pub prio: i8,
+    /// 0 = the default from sys/config/wifi, 1 = 2.4 GHz only, 2 = 5 GHz only.
+    pub band: u8,
+    pub psk: Vec<u8>,
+}
+
+impl Default for KnownNet {
+    fn default() -> Self { KnownNet { auto: true, prio: 0, band: 0, psk: Vec::new() } }
+}
+
+const NET_V1: u8 = 0x01;
+
+impl KnownNet {
+    /// v1 record, or a bare password (as the vault GUI first wrote them).
+    pub fn decode(b: &[u8]) -> Option<KnownNet> {
+        if b.first() != Some(&NET_V1) {
+            return Some(KnownNet { psk: b.to_vec(), ..KnownNet::default() });
+        }
+        let (&flags, &prio, &band, &len) = (b.get(1)?, b.get(2)?, b.get(3)?, b.get(4)?);
+        let psk = b.get(5..5 + len as usize)?;
+        Some(KnownNet { auto: flags & 1 != 0, prio: prio as i8, band, psk: psk.to_vec() })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(5 + self.psk.len());
+        v.extend_from_slice(&[NET_V1, self.auto as u8, self.prio as u8, self.band, self.psk.len() as u8]);
+        v.extend_from_slice(&self.psk);
+        v
+    }
+}
+
+/// The vault entry name. The SSID is raw bytes; a name is a string, so a
+/// non-UTF-8 SSID is hex-escaped byte by byte.
+pub fn entry_name(ssid: &[u8]) -> alloc::string::String {
+    let mut n = alloc::string::String::from("net:");
+    match core::str::from_utf8(ssid) {
+        Ok(s) if !s.contains('\\') => n.push_str(s),
+        _ => {
+            for &b in ssid {
+                if b.is_ascii_graphic() && b != b'\\' || b == b' ' {
+                    n.push(b as char);
+                } else {
+                    let _ = core::fmt::Write::write_fmt(&mut n, format_args!("\\x{:02x}", b));
+                }
+            }
+        }
+    }
+    n
+}
+
+pub fn known(ssid: &[u8]) -> Option<KnownNet> {
+    crate::security::keyvault::system_get(&entry_name(ssid)).and_then(|v| KnownNet::decode(&v))
+}
+
+fn store(ssid: &[u8], e: &KnownNet) -> Result<(), &'static str> {
+    if crate::security::keyvault::system_set(&entry_name(ssid), &e.encode()) {
+        Ok(())
+    } else {
+        Err("the vault could not store the network")
+    }
+}
+
+/// Inverse of `entry_name` (without the `net:` prefix).
+fn ssid_of(name: &str) -> Vec<u8> {
+    let b = name.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && b.get(i + 1) == Some(&b'x') && i + 3 < b.len() && name.is_char_boundary(i + 4) {
+            if let Ok(v) = u8::from_str_radix(&name[i + 2..i + 4], 16) {
+                out.push(v);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Every known network with its raw SSID.
+pub fn known_all() -> Vec<(Vec<u8>, KnownNet)> {
+    crate::security::keyvault::system_list()
+        .into_iter()
+        .filter_map(|n| {
+            let ssid = ssid_of(n.strip_prefix("net:")?);
+            let e = known(&ssid)?;
+            Some((ssid, e))
+        })
+        .collect()
+}
+
+/// `known_all` for the manager: per network `[ssid_len u8][ssid][rec_len u8][v1 record]`.
+pub fn known_wire() -> Vec<u8> {
+    let mut out = Vec::new();
+    for (ssid, e) in known_all() {
+        if ssid.is_empty() || ssid.len() > SSID_MAX { continue; }
+        let rec = e.encode();
+        out.push(ssid.len() as u8);
+        out.extend_from_slice(&ssid);
+        out.push(rec.len() as u8);
+        out.extend_from_slice(&rec);
+    }
+    out
 }

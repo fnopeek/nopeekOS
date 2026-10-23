@@ -1681,10 +1681,15 @@ pub fn intent_help_topic(topic: &str) {
             help_row("wlan set <key> <val>", "Change one wifi setting (wlan set band 2.4)");
             help_row("wlan unset <key>", "Drop one wifi setting");
             kprintln!("[npk]");
-            help_note("wifi keys: ssid, band (5|2.4|auto), ampdu, ht40, vht, ps, btcoex, settle_ms");
-            help_note("      all in one object, sys/config/wifi - `wlan set` edits it in");
-            help_note("      place, because plain `store` would replace the whole file");
-            help_note("passphrase, kept apart:  store /sys/config/wifi_psk <pass>");
+            help_row("wlan scan", "Look for networks (`wlan` lists them)");
+            help_row("wlan connect <name>", "Join; asks for the password once");
+            help_row("wlan disconnect", "Leave; no auto-reconnect until connect");
+            help_row("wlan known", "Saved networks");
+            help_row("wlan forget <name>", "Delete a saved network");
+            help_row("wlan auto <name> on|off", "Join it automatically");
+            help_row("wlan prio <name> <n>", "Higher joins first");
+            help_note("card keys: band (5|2.4|auto), bw, ampdu, txagg, roam, ps, btcoex, settle_ms");
+            help_note("      in sys/config/wifi - `wlan set` edits it in place");
         }
         "packages" | "install" | "modules" | "update" | "assets" => {
             help_head("packages", "signed (ECDSA P-384) and verified on every path");

@@ -2364,9 +2364,15 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             // `set`/`unset` edit the config object, so they need WRITE — the
             // report itself is a read.
             let a = args.trim();
+            let verb = a.split(' ').next().unwrap_or("");
             if a.starts_with("set") || a.starts_with("unset") {
                 if require_cap(vault, &session, Rights::WRITE, "wlan") {
                     net::intent_wlan_set(a, session);
+                }
+            } else if net::WLAN_VERBS.contains(&verb) {
+                let right = if net::wlan_verb_writes(verb) { Rights::WRITE } else { Rights::READ };
+                if require_cap(vault, &session, right, "wlan") {
+                    net::intent_wlan_manage(a);
                 }
             } else if require_cap(vault, &session, Rights::READ, "wlan") {
                 net::intent_wlan(args);

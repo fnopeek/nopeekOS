@@ -2432,6 +2432,10 @@ pub(crate) fn npk_vault_system_set(
     else {
         return -1;
     };
+    // A network password: the WLAN manager owns the record format.
+    if let Some(ssid) = name.strip_prefix("net:") {
+        return if crate::drivers::wifi::save_password(ssid.as_bytes(), val).is_ok() { 0 } else { -1 };
+    }
     if crate::security::keyvault::system_set(&name, val) { 0 } else { -1 }
 }
 
@@ -2457,7 +2461,13 @@ pub(crate) fn npk_vault_system_delete(mem: &mut [u8], ctx: &mut HostState, name_
         return -1;
     }
     let Some(name) = read_str(mem, name_ptr, name_len) else { return -1 };
-    if crate::security::keyvault::system_delete(&name) { 0 } else { -1 }
+    if !crate::security::keyvault::system_delete(&name) {
+        return -1;
+    }
+    if name.starts_with("net:") {
+        crate::drivers::wifi::known_changed();
+    }
+    0
 }
 
 pub(crate) fn npk_http_response_headers(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -4467,6 +4477,78 @@ pub(crate) fn npk_wifi_send_event(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
         Some(msg) if crate::wifi::send_event(&msg) => 0,
         _ => -1,
     }
+}
+
+// ── WLAN manager (docs/plan/WLAN_MANAGER.md) ──
+//
+// The manager is `wifid` by its kernel-assigned name AND NETCTL: the known
+// networks carry their passwords, and NETCTL alone is a capability a second
+// module could declare. The deck asks and reads state, nothing more.
+
+fn is_wifi_manager(ctx: &HostState) -> bool {
+    ctx.module_name == "wifid"
+        && capability::check_global(&ctx.cap_id, capability::Rights::NETCTL).is_ok()
+}
+
+fn is_wifi_ui(ctx: &HostState) -> bool {
+    ctx.module_name == "deck"
+}
+
+/// npk_wifi_known(buf, max) -> len / -1: every known network with its record.
+pub(crate) fn npk_wifi_known(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
+    if !is_wifi_manager(ctx) { return -1; }
+    let wire = crate::drivers::wifi::known_wire();
+    let Some(max) = glen(max) else { return -1 };
+    // All or nothing: a cut list would drop networks silently.
+    if wire.len() > max { return -2; }
+    write_bytes(mem, buf_ptr, &wire)
+}
+
+pub(crate) fn npk_wifi_poll_request(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
+    if !is_wifi_manager(ctx) { return -1; }
+    wifi_poll_into(mem, buf_ptr, max, crate::drivers::wifi::poll_request)
+}
+
+pub(crate) fn npk_wifi_publish(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
+    if !is_wifi_manager(ctx) { return -1; }
+    if len < 0 || len as usize > crate::drivers::wifi::STATUS_MAX { return -1; }
+    match read_bytes(mem, buf_ptr, len) {
+        Some(b) => { crate::drivers::wifi::publish_status(&b); 0 }
+        None => -1,
+    }
+}
+
+pub(crate) fn npk_wifi_status(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
+    if !is_wifi_ui(ctx) { return -1; }
+    let st = crate::drivers::wifi::status();
+    let Some(max) = glen(max) else { return -1 };
+    if st.len() > max { return -2; }
+    write_bytes(mem, buf_ptr, &st)
+}
+
+/// npk_wifi_request(buf, len) -> 0 / -1. `[op]` or `[op][ssid_len][ssid]`;
+/// CONNECT may append `[psk_len][psk]`, which the kernel stores in the vault.
+pub(crate) fn npk_wifi_request(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
+    use crate::drivers::wifi as w;
+    if !is_wifi_ui(ctx) { return -1; }
+    let Some(m) = read_bytes(mem, buf_ptr, len) else { return -1 };
+    let ssid = || -> Option<&[u8]> {
+        let n = *m.get(1)? as usize;
+        m.get(2..2 + n)
+    };
+    let ok = match m.first().copied() {
+        Some(w::REQ_SCAN) => w::request_scan(),
+        Some(w::REQ_DISCONNECT) => w::request_disconnect(),
+        Some(w::REQ_CONNECT) => {
+            let Some(s) = ssid() else { return -1 };
+            let at = 2 + s.len();
+            let psk = m.get(at).and_then(|&n| m.get(at + 1..at + 1 + n as usize));
+            w::request_connect(s, psk).is_ok()
+        }
+        Some(w::REQ_FORGET) => ssid().is_some_and(|s| w::forget(s).is_ok()),
+        _ => false,
+    };
+    if ok { 0 } else { -1 }
 }
 
 pub(crate) fn npk_driver_report(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {

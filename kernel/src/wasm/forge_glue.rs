@@ -1209,6 +1209,19 @@ host_imports! {
     // npk_wifi_send_event(buf_ptr, len) -> 0 / -1 — driver enqueues an event.
     mem fn npk_wifi_send_event(buf_ptr: i32, len: i32) -> i32;
 
+    // WLAN manager (docs/plan/WLAN_MANAGER.md). Manager side: `wifid` by name
+    // and NETCTL. UI side: `deck` by name.
+    // npk_wifi_known(buf_ptr, max) -> len / -1 / -2 (buffer too small).
+    mem fn npk_wifi_known(buf_ptr: i32, max: i32) -> i32;
+    // npk_wifi_poll_request(buf_ptr, max) -> len / -1 — next user request.
+    mem fn npk_wifi_poll_request(buf_ptr: i32, max: i32) -> i32;
+    // npk_wifi_publish(buf_ptr, len) -> 0 / -1 — the manager's state text.
+    mem fn npk_wifi_publish(buf_ptr: i32, len: i32) -> i32;
+    // npk_wifi_status(buf_ptr, max) -> len / -1 / -2 — read that state (deck).
+    mem fn npk_wifi_status(buf_ptr: i32, max: i32) -> i32;
+    // npk_wifi_request(buf_ptr, len) -> 0 / -1 — scan/connect/disconnect/forget (deck).
+    mem fn npk_wifi_request(buf_ptr: i32, len: i32) -> i32;
+
     // npk_driver_report(buf_ptr, len) -> 0 / -1 — a bound driver publishes a
     // short plain-text status snapshot, read back with the `wlan` intent. The
     // kernel stores the bytes and a timestamp and never parses them: what is

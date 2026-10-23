@@ -269,11 +269,10 @@ const WIFI_CFG: &str = "sys/config/wifi";
 
 /// The keys the wifi stack actually reads; anything else is rejected so a
 /// typo does not write a setting nobody reads.
-const WIFI_KEYS: &[&str] = &["ssid", "band", "bw", "ampdu", "txagg", "roam", "ht40", "vht", "bawin", "ps", "btcoex", "settle_ms"];
+const WIFI_KEYS: &[&str] = &["band", "bw", "ampdu", "txagg", "roam", "ht40", "vht", "bawin", "ps", "btcoex", "settle_ms"];
 
 fn wlan_set_usage() {
     kprintln!("[wlan] Usage: wlan set <key> <value> | wlan unset <key>");
-    kprintln!("[wlan]   ssid: <name>        the network to join (else: loudest)");
     kprintln!("[wlan]   band: 5 | 2.4 | auto");
     kprintln!("[wlan]   ampdu: on | off     RX aggregation (throughput)");
     kprintln!("[wlan]   txagg: on | off     TX aggregation, RTL8822CE (default: on)");
@@ -285,7 +284,108 @@ fn wlan_set_usage() {
     kprintln!("[wlan]   ps: on | off        power save (default off = CAM)");
     kprintln!("[wlan]   btcoex: on | off");
     kprintln!("[wlan]   settle_ms: <n>      pause before the first scan");
-    kprintln!("[wlan] the passphrase is separate: store /sys/config/wifi_psk <pass>");
+    kprintln!("[wlan] networks: wlan connect <name> · wlan known");
+}
+
+// ── Networks: `wlan scan|connect|disconnect|forget|auto|prio|known` ──
+//
+// These ask `wifid`, which decides (docs/plan/WLAN_MANAGER.md). A password is
+// read here, masked, and goes straight into the vault.
+
+/// The verbs handled by `intent_wlan_manage`.
+pub const WLAN_VERBS: &[&str] = &["scan", "connect", "disconnect", "forget", "auto", "prio", "known"];
+
+/// Whether `verb` changes stored networks (needs WRITE).
+pub fn wlan_verb_writes(verb: &str) -> bool {
+    matches!(verb, "connect" | "forget" | "auto" | "prio")
+}
+
+pub fn intent_wlan_manage(args: &str) {
+    use crate::drivers::wifi as w;
+    let a = args.trim();
+    let (verb, rest) = a.split_once(' ').map_or((a, ""), |(v, r)| (v, r.trim()));
+    match verb {
+        "scan" => {
+            if w::request_scan() {
+                kprintln!("[wlan] scanning - `wlan` shows the list");
+            } else {
+                kprintln!("[wlan] wifid is not taking requests");
+            }
+        }
+        "disconnect" => {
+            if w::request_disconnect() {
+                kprintln!("[wlan] disconnecting - no automatic reconnect until `wlan connect`");
+            } else {
+                kprintln!("[wlan] wifid is not taking requests");
+            }
+        }
+        "connect" => {
+            if rest.is_empty() {
+                kprintln!("[wlan] Usage: wlan connect <network name>");
+                return;
+            }
+            let ssid = rest.as_bytes();
+            let mut buf = [0u8; 63];
+            let psk = if w::known(ssid).is_some() {
+                None
+            } else {
+                match super::read_secret("Password: ", &mut buf) {
+                    Some(n) => Some(n),
+                    None => { kprintln!(); return; }
+                }
+            };
+            kprintln!();
+            let r = w::request_connect(ssid, psk.map(|n| &buf[..n]));
+            buf.fill(0);
+            match r {
+                Ok(()) => kprintln!("[wlan] connecting to \"{}\" - `wlan` shows the state", rest),
+                Err(e) => kprintln!("[wlan] {}", e),
+            }
+        }
+        "forget" => match w::forget(rest.as_bytes()) {
+            Ok(()) => kprintln!("[wlan] \"{}\" forgotten", rest),
+            Err(e) => kprintln!("[wlan] {}", e),
+        },
+        "auto" | "prio" => {
+            // The value is the last word; the name before it may hold spaces.
+            let Some((name, val)) = rest.rsplit_once(' ') else {
+                kprintln!("[wlan] Usage: wlan auto <name> on|off · wlan prio <name> <-128..127>");
+                return;
+            };
+            let name = name.trim().as_bytes();
+            let r = if verb == "auto" {
+                match val {
+                    "on" => w::set_auto(name, true),
+                    "off" => w::set_auto(name, false),
+                    _ => Err("auto takes on or off"),
+                }
+            } else {
+                match val.parse::<i8>() {
+                    Ok(p) => w::set_prio(name, p),
+                    Err(_) => Err("priority is a number from -128 to 127"),
+                }
+            };
+            match r {
+                Ok(()) => kprintln!("[wlan] saved"),
+                Err(e) => kprintln!("[wlan] {}", e),
+            }
+        }
+        "known" => {
+            let all = w::known_all();
+            if all.is_empty() {
+                kprintln!("[wlan] no known networks - wlan connect <name>");
+                return;
+            }
+            kprintln!("[wlan] known networks:");
+            for (ssid, e) in all {
+                kprintln!("[wlan]   {:<32} auto {:<3} prio {:>4} band {}",
+                    w::entry_name(&ssid).trim_start_matches("net:"),
+                    if e.auto { "on" } else { "off" }, e.prio,
+                    match e.band { 1 => "2.4", 2 => "5", _ => "default" });
+            }
+        }
+        _ => wlan_set_usage(),
+    }
 }
 
 pub fn intent_wlan_set(args: &str, cap_id: crate::capability::CapId) {
@@ -307,7 +407,8 @@ pub fn intent_wlan_set(args: &str, cap_id: crate::capability::CapId) {
         Some((k, v)) => (k.trim().trim_end_matches(':'), v.trim()),
         None => (rest.trim_end_matches(':'), ""),
     };
-    if !WIFI_KEYS.contains(&key) {
+    // `unset` takes any key, so a setting nobody reads any more can go.
+    if !remove && !WIFI_KEYS.contains(&key) {
         kprintln!("[wlan] unknown key '{}'", key);
         wlan_set_usage();
         return;
@@ -360,6 +461,45 @@ pub fn intent_wlan_set(args: &str, cap_id: crate::capability::CapId) {
     }
 }
 
+/// The manager's state text (docs/plan/WLAN_MANAGER.md), for a person.
+fn print_manager_status(st: &str) {
+    let mut aps = 0;
+    for line in st.lines() {
+        let (k, v) = line.split_once(' ').unwrap_or((line, ""));
+        match k {
+            "state" => kprintln!("  state      {}", v),
+            "ssid" => kprintln!("  network    {}", v),
+            "channel" => kprintln!("  channel    {}", v),
+            "error" => kprintln!("  problem    {}", v),
+            "ap" => {
+                // ap <rssi> <channel> <security> <known> <ssid>
+                let mut f = v.splitn(5, ' ');
+                let (rssi, ch, sec, known, name) =
+                    (f.next().unwrap_or(""), f.next().unwrap_or(""), f.next().unwrap_or(""),
+                     f.next().unwrap_or(""), f.next().unwrap_or(""));
+                if aps == 0 {
+                    kprintln!("  in range   (dBm  channel  security  saved)");
+                }
+                aps += 1;
+                let sec = match sec {
+                    "0" => "open",
+                    "1" => "WEP",
+                    "2" => "WPA2",
+                    "3" => "WPA3",
+                    "4" => "WPA2/3",
+                    _ => "other",
+                };
+                kprintln!("    {:>4}  {:>3}  {:<6}  {}  {}", rssi, ch, sec,
+                    if known == "1" { "*" } else { " " }, name);
+            }
+            _ => {}
+        }
+    }
+    if aps == 0 {
+        kprintln!("  in range   no scan yet - wlan scan");
+    }
+}
+
 /// `wlan` — one screen with everything needed to diagnose the WiFi link.
 ///
 /// Two halves read together: what the kernel sees of the WASM NIC (queues,
@@ -389,6 +529,15 @@ pub fn intent_wlan(args: &str) {
         crate::netdev::Active::None => "none",
     };
 
+    let st = crate::drivers::wifi::status();
+    kprintln!();
+    kprintln!("  Network (wifid)");
+    kprintln!("  ───────────────");
+    if st.is_empty() {
+        kprintln!("  wifid has not reported - not running?");
+    } else {
+        print_manager_status(core::str::from_utf8(&st).unwrap_or(""));
+    }
     kprintln!();
     kprintln!("  Kernel view");
     kprintln!("  ───────────");

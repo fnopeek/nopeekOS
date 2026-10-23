@@ -113,38 +113,20 @@ Rate, Retries, Airtime, A-MPDU-Zustand stehen nirgendwo sonst — ohne sie ist e
 Link, der wegen Legacy-Rate langsam ist, nicht von einem zu unterscheiden, der
 wegen voller Queues langsam ist.
 
-### Verbindungs-Policy (Zwischenstand)
-`CONNECT 0x02` sieht vor, dass **`wifid`** den AP wählt. Solange der Treiber
-noch selbst verbindet, liest er die Policy aus npkFS — dieselbe Stelle, aus der
-`wifid` sein Credential nimmt:
-
-**EINE Datei, `key: value` je Zeile: `sys/config/wifi`.** `wifid` liest
-daraus `ssid:`, die Treiber ebenso — eine zweite Stelle für dasselbe würde
-auseinanderdriften, und dann assoziiert der Treiber zu einem Netz, für das
-`wifid` keinen PSK hat.
+### Verbindungs-Policy
+`wifid` wählt das Netz und schickt `CONNECT` (docs/plan/WLAN_MANAGER.md). Die
+bekannten Netze stehen im Vault (Systembereich, `net:<SSID>`), die
+Kartenparameter in `sys/config/wifi`:
 
 | Schlüssel in `sys/config/wifi` | Wirkung |
 |--------|---------|
-| `ssid:` | nur APs dieses Netzes kommen als Ziel in Frage |
-| `band:` | `auto` (Standard, 5 GHz ab −70 dBm bevorzugt) · `5` · `2.4` |
+| `band:` | `auto` (Standard, 5 GHz ab −70 dBm bevorzugt) · `5` · `2.4` — Vorgabe, ein Netz kann sie überschreiben |
 | `debug:` | `1`/`on` — der Treiber druckt seine Stufen und Tore (RTL8822CE ab 0.24.0). Ohne den Schlüssel ist er still; **gefallene** Tore, Abbrüche und der Zustand der Leitung gehen trotzdem hinaus |
 
-Das Passwort steht getrennt in `sys/config/wifi_psk` (nur `wifid` liest es;
-der Treiber sieht es nie).
+`wlan set <key> <val>` ändert eine Zeile an Ort und Stelle; `store` würde die
+ganze Datei ersetzen. Netze: `wlan connect <name>`, `wlan known`, `wlan forget`.
 
-    store /sys/config/wifi      ssid: MeinNetz
-    store /sys/config/wifi_psk  meinpasswort
-
-**`store` schreibt EINE Zeile und ERSETZT das Objekt** (`intent_store` →
-`npkfs::upsert`, der Text hinter dem Namen kennt keinen Zeilenumbruch).
-Für eine Datei mit mehreren Schlüsseln also den Editor nehmen —
-`spell /sys/config/wifi` —, sonst löscht der zweite `store` den ersten
-Schlüssel, und der Treiber assoziiert plötzlich zum lautesten Nachbarn.
-
-Ohne SSID-Filter nimmt der Treiber den lautesten AP **irgendeines** Netzes —
-inklusive dem des Nachbarn, für den `wifid` keinen PSK hat (stiller
-MIC-Fehlschlag). Ohne Band-Präferenz gewinnt im Mesh immer der nahe
-2,4-GHz-Knoten. Beides verschwindet, sobald `wifid` den `CONNECT` schickt.
+**AX200** (pausiert) wählt noch selbst und liest dafür weiter `ssid:`.
 
 ---
 
@@ -184,6 +166,12 @@ Treiber sieht nie den PSK, nur die fertige PTK/GTK.
 | `0x86` | `LINK_DOWN` | reason u8 (0=requested 1=deauth 2=lost) |
 | `0x87` | `CONNECT_FAILED` | reason u8 (1=no-such-AP 2=assoc-timeout 3=auth-reject) |
 | `0x88` | `RX_MGMT` | frame_len u16, frame[frame_len] — empfangener Mgmt-Frame (Auth-Resp / Assoc-Resp), `wifid` parst AID |
+| `0x89` | `SCAN_RESULT` | count u8, je Zelle bssid[6] rssi i8 channel u8 security u8 ssid_len u8 ssid — EIN Event statt `SCAN_AP` × N (die Mailbox fasst 16) |
+| `0x8a` | `DRIVER_UP` | — der Treiber nimmt Befehle an (nach dem Hochfahren, nach jedem Neustart) |
+
+RTL8822CE: `CONNECT` trägt bssid[6] + channel u8 (kein band — der Kanal sagt
+es), `LINK_UP` zusätzlich channel u8. Die MLME (Auth/Assoc) macht dieser
+Treiber selbst; `TX_MGMT`/`RX_MGMT`/`ASSOCIATED` nutzt er nicht.
 
 `security`-Enum (beacon RSN/WPA-IE-Parse): 0=open 1=WEP 2=WPA2-PSK 3=WPA3-SAE
 4=WPA2/3-mixed. v1 zielt auf **WPA2-PSK (CCMP)**; WPA3-SAE später.
@@ -224,11 +212,11 @@ ASSOCIATED→AUTHORIZED) — das ist der erste testbare Daten-Pfad (Stage 5d).
 ---
 
 ## 6. Credential-Speicher (nur `wifid`)
-Known-nets in npkFS via `npk_store`/`npk_fetch`, z.B. `sys/config/wifi/<ssid>`
-(oder `home/<user>/.wifi`). npkFS verschlüsselt at-rest mit master_key
-([[feedback-encrypt-at-rest-order]]). Gespeichert: SSID + PSK (oder direkt der
-abgeleitete PMK, spart PBKDF2 beim Reconnect). **Der Treiber bekommt davon
-nichts** — Trennung der Geheimnisse.
+Bekannte Netze im Vault, Systembereich, `net:<SSID>` (docs/plan/KEYSTORE.md,
+Format in WLAN_MANAGER.md §1). Lesen darf sie nur `wifid` (Modulname +
+NETCTL, `npk_wifi_known`); geschrieben werden sie vom Kernel (Intent `wlan`,
+Deck-Anfrage) und von der Vault-GUI. **Der Treiber bekommt davon nichts** —
+Trennung der Geheimnisse.
 
 ---
 

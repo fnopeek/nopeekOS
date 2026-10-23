@@ -131,6 +131,11 @@ unsafe extern "C" {
     fn npk_wifi_poll_cmd(buf_ptr: i32, max: i32) -> i32;
     fn npk_wifi_send_event(buf_ptr: i32, len: i32) -> i32;
     fn npk_wifi_poll_event(buf_ptr: i32, max: i32) -> i32;
+    fn npk_wifi_known(buf_ptr: i32, max: i32) -> i32;
+    fn npk_wifi_poll_request(buf_ptr: i32, max: i32) -> i32;
+    fn npk_wifi_publish(buf_ptr: i32, len: i32) -> i32;
+    fn npk_wifi_status(buf_ptr: i32, max: i32) -> i32;
+    fn npk_wifi_request(buf_ptr: i32, len: i32) -> i32;
 
     fn npk_acpi_dsdt(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_acpi_table(sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32;
@@ -305,6 +310,10 @@ reads! {
     fn netdev_rx_deliver = npk_netdev_rx_deliver -> i32;
     fn wifi_send_cmd = npk_wifi_send_cmd -> i32;
     fn wifi_send_event = npk_wifi_send_event -> i32;
+    /// The manager's state text (`wifid` only).
+    fn wifi_publish = npk_wifi_publish -> i32;
+    /// A user request to the manager (`deck` only).
+    fn wifi_request = npk_wifi_request -> i32;
 }
 
 fills! {
@@ -318,6 +327,11 @@ fills! {
     fn gpudev_poll = npk_gpudev_poll -> i32;
     fn wifi_poll_cmd = npk_wifi_poll_cmd -> i32;
     fn wifi_poll_event = npk_wifi_poll_event -> i32;
+    /// Known networks with their records (`wifid` only); -2 = buffer too small.
+    fn wifi_known = npk_wifi_known -> i32;
+    fn wifi_poll_request = npk_wifi_poll_request -> i32;
+    /// The manager's state text (`deck` only); -2 = buffer too small.
+    fn wifi_status = npk_wifi_status -> i32;
     fn acpi_dsdt = npk_acpi_dsdt -> i32;
     fn audio_poll_mix = npk_audio_poll_mix -> i32;
 }

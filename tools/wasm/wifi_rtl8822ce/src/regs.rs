@@ -1225,6 +1225,13 @@ pub const EV_LINK_UP: u8 = 0x85;
 pub const EV_LINK_DOWN: u8 = 0x86;
 pub const EV_CONNECT_FAILED: u8 = 0x87;
 pub const EV_RX_MGMT: u8 = 0x88;
+/// All cells of a scan in one message (docs/plan/WLAN_MANAGER.md §3).
+pub const EV_SCAN_RESULT: u8 = 0x89;
+/// The driver takes commands (after bring-up).
+pub const EV_DRIVER_UP: u8 = 0x8a;
+/// `CONNECT_FAILED` reasons.
+pub const CONNECT_FAILED_NO_AP: u8 = 1;
+pub const CONNECT_FAILED_ASSOC: u8 = 2;
 
 /// 802.2 LLC/SNAP header in front of every 802.11 data frame (RFC 1042).
 pub const LLC_SNAP_HDR: [u8; 6] = [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00];

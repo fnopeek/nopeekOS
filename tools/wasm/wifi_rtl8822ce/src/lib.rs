@@ -754,72 +754,6 @@ fn driver_main(rtwdev: &mut Dev) {
         }
     };
 
-    // ── Stage 5c: scan ───────────────────────────────────────────
-    let mut target: Option<Bss> = None;
-    let stage5c = match (stage5b, efuse.as_ref(), _txpwr.as_ref()) {
-        (true, Some(e), Some(t)) => stage5c_scan(h, &hal, &mut trx, mgmt_buf,
-                                                 &mut h2c, e, t, e.addr,
-                                                 fw_feature, &mut target,
-                                                 rtwdev),
-        _ => {
-            host::say("[rtl8822ce] Stufe 5c: uebersprungen, 5b steht nicht\n");
-            false
-        }
-    };
-
-    // ── Stage 5d: RF calibration ─────────────────────────────────
-    let stage5d = match (stage5c, efuse.as_ref()) {
-        (true, Some(e)) => stage5d_calibration(h, &hal, &mut trx, h2c_buf, &mut h2c, e, rtwdev),
-        _ => {
-            host::say("[rtl8822ce] Stufe 5d: uebersprungen, 5c steht nicht\n");
-            false
-        }
-    };
-
-    // ── Stage 5e: auth and assoc ─────────────────────────────────
-    let mut linked: Option<vif::Vif> = None;
-    let stage5e = match (stage5d, efuse.as_ref(), _txpwr.as_ref(),
-                         target.as_ref()) {
-        (true, Some(e), Some(t), Some(b)) =>
-            stage5e_connect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, t,
-                            e.addr, b, &mut linked, rtwdev),
-        (true, _, _, None) => {
-            host::say("[rtl8822ce] Stufe 5e: uebersprungen, der Suchlauf\n             \x20         hat kein Ziel auf 2,4 GHz gefunden\n");
-            false
-        }
-        _ => {
-            host::say("[rtl8822ce] Stufe 5e: uebersprungen, 5d steht nicht\n");
-            false
-        }
-    };
-
-    // ── Stage 5f: rate adaptation ────────────────────────────────
-    let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
-    let stage5f = match (stage5e, linked.as_ref(), target.as_ref()) {
-        (true, Some(v), Some(b)) =>
-            stage5f_rates(h, &mut trx, &mut h2c, &hal, v, b, &mut rates, rtwdev),
-        _ => {
-            host::say("[rtl8822ce] Stufe 5f: uebersprungen, 5e steht nicht\n");
-            false
-        }
-    };
-
-    // ── Stage 6a: control port, handshake, data path ─────────────
-    let mut link: Option<Link> = None;
-    let mut lstats = LinkStats::default();
-    let stage6a = match (stage5f, linked.as_ref(), target.as_ref(),
-                         rates.as_ref(), efuse.as_ref(), _txpwr.as_ref()) {
-        (true, Some(_v), Some(b), Some((caps, si)), Some(e), Some(tp)) =>
-            stage6a_link(h, &hal, &mut trx, mgmt_buf, b, caps, *si,
-                         e.addr, &mut link, &mut lstats, rtwdev, &mut h2c, e,
-                         tp, fw_feature),
-        _ => {
-            host::say("[rtl8822ce] Stufe 6a: uebersprungen, 5f steht nicht\n");
-            false
-        }
-    };
-
-
     stage_line(stage3a,
         "[rtl8822ce] Stufe 3a: GRUEN\n",
         "[rtl8822ce] Stufe 3a: NEIN — nicht weiterbauen, bevor das steht\n");
@@ -844,103 +778,12 @@ fn driver_main(rtwdev: &mut Dev) {
     stage_line(stage5b,
         "[rtl8822ce] Stufe 5b: GRUEN — WIR SENDEN, UND ES WIRD GEANTWORTET\n",
         "[rtl8822ce] Stufe 5b: NEIN — nicht weiterbauen, bevor das steht\n");
-    stage_line(stage5c,
-        "[rtl8822ce] Stufe 5c: GRUEN — WIR SEHEN DIE UMGEBUNG\n",
-        "[rtl8822ce] Stufe 5c: NEIN — nicht weiterbauen, bevor das steht\n");
-    stage_line(stage5d,
-        "[rtl8822ce] Stufe 5d: GRUEN — DER SENDER IST KALIBRIERT\n",
-        "[rtl8822ce] Stufe 5d: NEIN — nicht weiterbauen, bevor das steht\n");
-    stage_line(stage5e,
-        "[rtl8822ce] Stufe 5e: GRUEN — DER AP HAT UNS ANGENOMMEN\n",
-        "[rtl8822ce] Stufe 5e: NEIN — nicht weiterbauen, bevor das steht\n");
-    stage_line(stage5f,
-        "[rtl8822ce] Stufe 5f: GRUEN — DIE FIRMWARE WAEHLT DIE RATE\n",
-        "[rtl8822ce] Stufe 5f: NEIN — nicht weiterbauen, bevor das steht\n");
-    stage_line(stage6a,
-        "[rtl8822ce] Stufe 6a: GRUEN — DER HANDSCHLAG IST DURCH\n",
-        "[rtl8822ce] Stufe 6a: NEIN — nicht weiterbauen, bevor das steht\n");
 
-    // ── Stage 6b: stay running ───────────────────────────────────
-    //
-    // From here the driver does not return; powering the chip off at the
-    // end would drop the link. The summary is printed before, since nothing
-    // runs after this point.
-    if stage6a {
-        if let (Some(e), Some(l)) = (efuse.as_ref(), link.as_mut()) {
-            host::print("[rtl8822ce] Stufe 6b: der Treiber bleibt stehen —\n             \x20         Bericht je Sekunde, RX-Wachhund, kein\n             \x20         Abschalten mehr\n");
-            // The one line of a silent run. It is placed after the 6a gates
-            // so that it reports a connection, not an intermediate state.
-            report_connected(l, target.as_ref(), linked.as_ref());
-            // Same loop, same link, same counters: 6b continues rather than
-            // restarts. A second `EV_READY` would make `wifid` build a fresh
-            // supplicant waiting for an msg1 the AP never sends again.
-            let caps = rates.as_ref().map(|(c, _)| *c).unwrap_or_default();
-            // From here the link runs and can end. Reconnecting takes the
-            // same path as connecting, stages 5e and 5f, without registering
-            // with the kernel again.
-            let mut fehlschlaege = 0u32;
-            loop {
-                let Some(tp) = _txpwr.as_ref() else { break };
-                let end = link_pump(h, &hal, &mut trx, mgmt_buf, l,
-                                    &mut lstats, e.addr, 0, rtwdev,
-                                    &mut h2c, e, tp, &caps, fw_feature);
-                // A roam takes the same path as a reconnect, stages 5e and
-                // 5f, with a different cell. `reconnect` clears the keys,
-                // updates the `Link` and has `wifid` build a fresh
-                // supplicant.
-                if end == PumpEnd::Roam {
-                    let Some(z) = l.roam.to.take() else { break };
-                    let t0 = host::now_ms();
-                    target = Some(z);
-                    if reconnect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, tp,
-                                 &z, l, &mut lstats, rtwdev, &mut linked) {
-                        host::loud_begin();
-                        host::print("[rtl8822ce] gewechselt — Unterbruch ");
-                        host::print_dec((host::now_ms() - t0) as u32);
-                        host::print(" ms\n");
-                        host::loud_end();
-                        fehlschlaege = 0;
-                    } else {
-                        host::say("[rtl8822ce] der neue AP hat NICHT angenommen\n");
-                        host::sleep_ms(RECONNECT_BACKOFF_MS);
-                    }
-                    continue;
-                }
-                if end != PumpEnd::LinkLost {
-                    break;
-                }
-                let (Some(t), Some(b)) = (_txpwr.as_ref(), target) else {
-                    // If this ever triggers, the driver ends: the caller
-                    // powers off the MAC and the link stays down for good.
-                    // It must not happen silently.
-                    host::say("[rtl8822ce] kein Ziel mehr — der Treiber \
-gibt auf\n");
-                    break;
-                };
-                if reconnect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, t, &b,
-                             l, &mut lstats, rtwdev, &mut linked) {
-                    fehlschlaege = 0;
-                    continue;
-                }
-                fehlschlaege += 1;
-                // After two failures, scan again instead of retrying the
-                // same BSSID and channel: a station that moved out of range
-                // would otherwise retry an AP that is no longer there. A
-                // full scan is fine here because the link is already down;
-                // while the link is up, a directed scan on known channels
-                // is used instead.
-                if fehlschlaege >= RESCAN_AFTER_TRIES {
-                    fehlschlaege = 0;
-                    host::say("[rtl8822ce] zweimal vergeblich — die Umgebung wird neu abgesucht\n");
-                    let _ = stage5c_scan(h, &hal, &mut trx, mgmt_buf,
-                                         &mut h2c, e, t, e.addr, fw_feature,
-                                         &mut target, rtwdev);
-                }
-                // Do not give up, but do not spin either: a restarting AP
-                // needs seconds.
-                host::sleep_ms(RECONNECT_BACKOFF_MS);
-            }
-        }
+    // From here `wifid` decides: scan, which cell, when to leave. The loop
+    // returns only if calibration fails, and with it the chip goes off.
+    if let (true, Some(e), Some(tp)) = (stage5b, efuse.as_ref(), _txpwr.as_ref()) {
+        command_loop(h, &hal, &mut trx, mgmt_buf, h2c_buf, &mut h2c, e, tp,
+                     fw_feature, rtwdev);
     }
 
     // Reached only when a stage failed: the kernel is about to free the DMA
@@ -956,6 +799,232 @@ gibt auf\n");
     // never returns), so this is loud even without `debug: 1`.
     host::say("[rtl8822ce] fertig — Chip ist aus, Geraet freigegeben\n");
 }
+
+/// What a command asks of the driver while no link runs.
+enum Ask {
+    Connect([u8; 6], u8),
+    Leave,
+}
+
+/// The next command while no link runs; a `SCAN` is answered here.
+/// `wait_ms` 0 does not wait.
+#[allow(clippy::too_many_arguments)]
+fn next_ask(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+            h2c: &mut fw::H2cState, e: &efuse::Efuse, tp: &txpower::TxPower,
+            fw_feature: u32, d: &mut Dev, wait_ms: u32) -> Option<Ask> {
+    if let Some((b, ch)) = NEXT_CONNECT.with(|c| c.take()) {
+        return Some(Ask::Connect(b, ch));
+    }
+    let mut cmd = [0u8; 64];
+    let mut n = host::wifi_poll_cmd(&mut cmd);
+    if n <= 0 && wait_ms > 0 {
+        host::wait(host::WAIT_WIFI_CMD, wait_ms);
+        n = host::wifi_poll_cmd(&mut cmd);
+    }
+    if n <= 0 {
+        return None;
+    }
+    let c = &cmd[..n as usize];
+    match c[0] {
+        CMD_SCAN => {
+            let mut none = None;
+            let _ = stage5c_scan(h, hal, trx, mgmt_buf, h2c, e, tp, e.addr,
+                                 fw_feature, &mut none, d, None);
+            None
+        }
+        CMD_CONNECT if c.len() >= 8 => {
+            let mut b = [0u8; 6];
+            b.copy_from_slice(&c[1..7]);
+            Some(Ask::Connect(b, c[7]))
+        }
+        CMD_DISCONNECT => Some(Ask::Leave),
+        _ => None,
+    }
+}
+
+/// After bring-up: the driver does what `wifid` asks
+/// (docs/plan/WLAN_MANAGER.md). Calibration (5d) runs once, before the
+/// first connect; the first connect runs 5e, 5f and 6a, every later one
+/// the reconnect path. A running link is stage 6b: it roams and reconnects
+/// on its own within its network, and leaves when asked.
+#[allow(clippy::too_many_arguments)]
+fn command_loop(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+                h2c_buf: i32, h2c: &mut fw::H2cState, e: &efuse::Efuse,
+                tp: &txpower::TxPower, fw_feature: u32, d: &mut Dev) {
+    let mut calibrated = false;
+    let mut link: Option<Link> = None;
+    let mut lstats = LinkStats::default();
+    let mut linked: Option<vif::Vif> = None;
+    let mut caps = sta::PeerCaps::default();
+
+    send_event_retry(&[EV_DRIVER_UP]);
+    host::print("[rtl8822ce] bereit — wifid waehlt das Netz\n");
+
+    loop {
+        let (bssid, channel) = match next_ask(h, hal, trx, mgmt_buf, h2c, e, tp,
+                                              fw_feature, d, 1000) {
+            Some(Ask::Connect(b, ch)) => (b, ch),
+            Some(Ask::Leave) => {
+                send_event_retry(&[EV_LINK_DOWN, LINK_DOWN_REQUESTED]);
+                continue;
+            }
+            None => continue,
+        };
+        let Some(bss) = find_cell(h, hal, trx, mgmt_buf, e, tp, e.addr, d, bssid, channel) else {
+            host::say("[rtl8822ce] die Zelle antwortet nicht\n");
+            send_event_retry(&[EV_CONNECT_FAILED, CONNECT_FAILED_NO_AP]);
+            continue;
+        };
+        if !calibrated {
+            calibrated = stage5d_calibration(h, hal, trx, h2c_buf, h2c, e, d);
+            stage_line(calibrated,
+                "[rtl8822ce] Stufe 5d: GRUEN — DER SENDER IST KALIBRIERT\n",
+                "[rtl8822ce] Stufe 5d: NEIN — ohne Kalibrierung keine Verbindung\n");
+            if !calibrated {
+                send_event_retry(&[EV_CONNECT_FAILED, CONNECT_FAILED_ASSOC]);
+                return;
+            }
+        }
+        set_roam_channels(&bss);
+        let mut target = bss;
+        // 6a ended without a handshake: the link starts as lost.
+        let mut start_lost = false;
+
+        let joined = match link.as_mut() {
+            Some(l) => reconnect(h, hal, trx, mgmt_buf, h2c, e, tp, &target, l,
+                                 &mut lstats, d, &mut linked, &mut caps),
+            None => {
+                let ok5e = stage5e_connect(h, hal, trx, mgmt_buf, h2c, e, tp,
+                                           e.addr, &target, &mut linked, d);
+                stage_line(ok5e,
+                    "[rtl8822ce] Stufe 5e: GRUEN — DER AP HAT UNS ANGENOMMEN\n",
+                    "[rtl8822ce] Stufe 5e: NEIN — der AP hat uns nicht angenommen\n");
+                let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
+                let ok5f = match (ok5e, linked.as_ref()) {
+                    (true, Some(v)) => stage5f_rates(h, trx, h2c, hal, v, &target, &mut rates, d),
+                    _ => false,
+                };
+                if ok5e {
+                    stage_line(ok5f,
+                        "[rtl8822ce] Stufe 5f: GRUEN — DIE FIRMWARE WAEHLT DIE RATE\n",
+                        "[rtl8822ce] Stufe 5f: NEIN — nicht weiterbauen, bevor das steht\n");
+                }
+                match (ok5f, rates) {
+                    (true, Some((c, si))) => {
+                        caps = c;
+                        // 6a sets up the link and waits for the handshake.
+                        // Its gates are a finding; whether the network is
+                        // kept is `wifid`'s call (a wrong password ends
+                        // here as a refused handshake).
+                        let ok6a = stage6a_link(h, hal, trx, mgmt_buf, &target, &caps, si,
+                                                e.addr, &mut link, &mut lstats, d, h2c, e,
+                                                tp, fw_feature);
+                        stage_line(ok6a,
+                            "[rtl8822ce] Stufe 6a: GRUEN — DER HANDSCHLAG IST DURCH\n",
+                            "[rtl8822ce] Stufe 6a: NEIN — der Handschlag ist nicht durch\n");
+                        start_lost = !ok6a;
+                        link.is_some()
+                    }
+                    _ => false,
+                }
+            }
+        };
+        if !joined {
+            send_event_retry(&[EV_CONNECT_FAILED, CONNECT_FAILED_ASSOC]);
+            continue;
+        }
+        let Some(l) = link.as_mut() else { continue };
+        report_connected(l, Some(&target), linked.as_ref());
+
+        // ── Stage 6b: the link runs until it is asked to leave ──
+        let mut fehlschlaege = 0u32;
+        loop {
+            if LEAVE_ASKED.swap(false, Ordering::Relaxed) {
+                leave(h, trx, mgmt_buf, h2c, l, &mut lstats, e.addr, &mut linked);
+                break;
+            }
+            let end = if core::mem::take(&mut start_lost) {
+                PumpEnd::LinkLost
+            } else {
+                link_pump(h, hal, trx, mgmt_buf, l, &mut lstats, e.addr, 0, d,
+                          h2c, e, tp, &caps, fw_feature)
+            };
+            match end {
+                PumpEnd::Leave => {
+                    LEAVE_ASKED.store(false, Ordering::Relaxed);
+                    leave(h, trx, mgmt_buf, h2c, l, &mut lstats, e.addr, &mut linked);
+                    break;
+                }
+                // A roam takes the same path as a reconnect, stages 5e and
+                // 5f, with a different cell. `reconnect` clears the keys,
+                // updates the `Link` and has `wifid` build a fresh
+                // supplicant.
+                PumpEnd::Roam => {
+                    let Some(z) = l.roam.to.take() else { continue };
+                    let t0 = host::now_ms();
+                    target = z;
+                    if reconnect(h, hal, trx, mgmt_buf, h2c, e, tp, &z, l,
+                                 &mut lstats, d, &mut linked, &mut caps) {
+                        host::loud_begin();
+                        host::print("[rtl8822ce] gewechselt — Unterbruch ");
+                        host::print_dec((host::now_ms() - t0) as u32);
+                        host::print(" ms\n");
+                        host::loud_end();
+                        fehlschlaege = 0;
+                    } else {
+                        host::say("[rtl8822ce] der neue AP hat NICHT angenommen\n");
+                        host::sleep_ms(RECONNECT_BACKOFF_MS);
+                    }
+                }
+                PumpEnd::LinkLost => {
+                    if reconnect(h, hal, trx, mgmt_buf, h2c, e, tp, &target, l,
+                                 &mut lstats, d, &mut linked, &mut caps) {
+                        fehlschlaege = 0;
+                        continue;
+                    }
+                    fehlschlaege += 1;
+                    // After two failures, scan again instead of retrying the
+                    // same BSSID and channel — within the same network: a
+                    // station that moved out of range would otherwise retry
+                    // an AP that is no longer there.
+                    if fehlschlaege >= RESCAN_AFTER_TRIES {
+                        fehlschlaege = 0;
+                        host::say("[rtl8822ce] zweimal vergeblich — die Umgebung wird neu abgesucht\n");
+                        let ssid = target.ssid;
+                        let mut t = Some(target);
+                        let _ = stage5c_scan(h, hal, trx, mgmt_buf, h2c, e, tp, e.addr,
+                                             fw_feature, &mut t, d,
+                                             Some(&ssid[..target.ssid_len as usize]));
+                        if let Some(z) = t {
+                            target = z;
+                        }
+                    }
+                    // Do not give up, but do not spin either: a restarting
+                    // AP needs seconds. Meanwhile `wifid` may ask to leave
+                    // or go elsewhere — it hears the drops and counts them.
+                    match next_ask(h, hal, trx, mgmt_buf, h2c, e, tp, fw_feature, d,
+                                   RECONNECT_BACKOFF_MS) {
+                        Some(Ask::Leave) => {
+                            leave(h, trx, mgmt_buf, h2c, l, &mut lstats, e.addr, &mut linked);
+                            break;
+                        }
+                        Some(Ask::Connect(b, ch)) => {
+                            NEXT_CONNECT.with(|c| *c = Some((b, ch)));
+                            leave(h, trx, mgmt_buf, h2c, l, &mut lstats, e.addr, &mut linked);
+                            break;
+                        }
+                        None => {}
+                    }
+                }
+                PumpEnd::Frist => {}
+            }
+        }
+    }
+}
+
+/// `link_pump` saw `DISCONNECT` or `CONNECT` during stage 6a, whose own
+/// loop does not look at the result.
+static LEAVE_ASKED: AtomicBool = AtomicBool::new(false);
 
 /// main.c:2064-2081 `rtw_chip_board_info_setup`, stage 4b.
 ///
@@ -2045,6 +2114,16 @@ struct CellWidth {
 }
 
 impl Bss {
+    const EMPTY: Bss = Bss {
+        bssid: [0; 6], ssid: [0; 32], ssid_len: 0,
+        channel: 0, best: -128, beacons: 0, resps: 0,
+        capability: 0, rsn: [0; 64], rsn_len: 0, ht_param: 0,
+        ht_op_seen: false, ht_cap: 0,
+        vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
+        ap_vht_cap: 0, ap_vht_cap_seen: false,
+        bss_load: 0, bss_load_seen: false, wmm: false,
+    };
+
     fn width(&self) -> CellWidth {
         CellWidth {
             ht_param: self.ht_param,
@@ -2355,13 +2434,17 @@ fn switch_channel(h: i32, hal: &Hal, e: &efuse::Efuse, t: &txpower::TxPower,
 /// to the upper half (`wifid`/cfg80211), not the driver. Receiving is
 /// allowed everywhere, so the scan listens where it may not ask.
 #[allow(clippy::too_many_arguments)]
+/// `want`: pick a new `target` among the cells of this network (the
+/// reconnect path). `None`: only list what is there (a `SCAN` command);
+/// `wifid` chooses.
 fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 h2c: &mut fw::H2cState,
                 e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
-                fw_feature: u32, target: &mut Option<Bss>, d: &mut Dev) -> bool {
+                fw_feature: u32, target: &mut Option<Bss>, d: &mut Dev,
+                want: Option<&[u8]>) -> bool {
     static RXBUF3: Single<RxBuf> = Single::new([0; RX_BUF_LEN]);
     RXBUF3.with(|buf| stage5c_scan_in(h, hal, trx, mgmt_buf, h2c, e, t, mac,
-                                      fw_feature, target, d, buf))
+                                      fw_feature, target, d, buf, want))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2369,7 +2452,7 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 h2c: &mut fw::H2cState,
                 e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
                 fw_feature: u32, target: &mut Option<Bss>, d: &mut Dev,
-                buf: &mut RxBuf) -> bool {
+                buf: &mut RxBuf, want: Option<&[u8]>) -> bool {
     // 2.4 GHz: the thirteen channels allowed in Europe. Channel 14 is
     // allowed only in Japan and only with DSSS, so it is left out.
     const ACTIVE_2G: [u8; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
@@ -2573,29 +2656,15 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     }
     host::print("\n");
 
-    // The target comes from the SSID filter in `sys/config/wifi`, not from
-    // signal strength. docs/spec/WIFI_CLASS_ABI.md gives the reason: without
-    // it the driver picks the loudest AP of any network, possibly a
-    // neighbor's, for which `wifid` has no PSK; that ends in a silent MIC
-    // failure. One file, `key: value` per line, the same one `wifid` and
-    // `wifi_ax200` read, so the network cannot diverge from the PSK.
-    let mut cfg = [0u8; 512];
-    let cn = host::fetch("sys/config/wifi", &mut cfg);
-    let want = if cn > 0 {
-        cfg_get(&cfg[..cn as usize], b"ssid")
-    } else {
-        None
-    };
-    host::print("  sys/config/wifi ssid: ");
-    match want {
-        Some((a, b)) => {
-            host::print("\"");
-            print_ssid(&cfg[a..b]);
-            host::print("\"");
-        }
-        None => host::print("nicht gesetzt — der lauteste AP wird genommen"),
+    // The list is kept for `CONNECT`, which names a cell by BSSID; a plain
+    // `SCAN` reports it to `wifid` and chooses nothing itself.
+    LAST_SCAN.with(|(l, n)| {
+        l[..n_found].copy_from_slice(&found[..n_found]);
+        *n = n_found;
+    });
+    if want.is_none() {
+        report_scan(&found[..n_found]);
     }
-    host::print("\n");
 
     // 5 GHz cells are selectable. The scan covers them passively (see
     // `PASSIVE_5G`), so no probe request goes out there, which is the care
@@ -2620,9 +2689,8 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             continue;
         }
         let ssid_ok = match want {
-            Some((a, c)) => b.ssid_len as usize == c - a
-                && b.ssid[..c - a] == cfg[a..c],
-            None => true,
+            Some(w) => &b.ssid[..b.ssid_len as usize] == w,
+            None => false,
         };
         if !ssid_ok {
             continue;
@@ -2662,12 +2730,12 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // does not prove the cell is gone.
     match (gewaehlt, *target) {
         (Some(g), _) => *target = Some(g),
-        (None, Some(alt)) => {
+        (None, Some(alt)) if want.is_some() => {
             host::print("  nichts gefunden — das letzte bekannte Ziel bleibt: K");
             host::print_dec(alt.channel as u32);
             host::print("\n");
         }
-        (None, None) => {}
+        (None, _) => {}
     }
     // The candidates, by signal. Selection is by signal strength, which
     // assumes the loudest network is also the fastest; a nearby range extender
@@ -2716,35 +2784,12 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             host::print("\n");
         }
     }
-    // Remember the channels of our SSID as the search space for roaming.
-    // Channels only, not levels: those are stale as soon as someone moves.
-    if let Some(t) = target {
-        let mut n_ch = 0usize;
-        for b in found[..n_found].iter() {
-            if b.ssid_len != t.ssid_len
-                || b.ssid[..b.ssid_len as usize] != t.ssid[..t.ssid_len as usize]
-            {
-                continue;
-            }
-            ROAM_CHANNELS.with(|(chs, _)| {
-                if !chs[..n_ch].contains(&b.channel) && n_ch < chs.len() {
-                    chs[n_ch] = b.channel;
-                    n_ch += 1;
-                }
-            });
+    if want.is_some() {
+        if let Some(t) = target.as_ref() {
+            set_roam_channels(t);
         }
-        let chs = ROAM_CHANNELS.with(|(chs, n)| {
-            *n = n_ch;
-            *chs
-        });
-        host::print("  Roaming-Kanaele:");
-        for i in 0..n_ch {
-            host::print(" K");
-            host::print_dec(chs[i] as u32);
-        }
-        host::print("\n");
     }
-    if let Some(b) = target {
+    if let (Some(b), true) = (target.as_ref(), want.is_some()) {
         host::print("  Ziel fuer Stufe 5e: \"");
         print_ssid(&b.ssid[..b.ssid_len as usize]);
         host::print("\" auf K");
@@ -2781,6 +2826,111 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     ok &= gate("und zwar auf MEHR als dem einen Kanal von vorher",
                mehr_als_einer);
     ok
+}
+
+/// The cells of the last scan, for `CONNECT` (which names a BSSID).
+static LAST_SCAN: Single<([Bss; MAX_BSS], usize)> = Single::new(([Bss::EMPTY; MAX_BSS], 0));
+
+/// The channels of `t`'s network in the last scan: the search space for
+/// roaming. Channels only, not levels: those are stale as soon as someone
+/// moves. Without a scan (a direct `CONNECT`) it is the one channel.
+fn set_roam_channels(t: &Bss) {
+    let mut chs = [0u8; ROAM_CHANNELS_MAX];
+    let mut n_ch = 0usize;
+    LAST_SCAN.with(|(l, n)| {
+        for b in l[..*n].iter() {
+            if b.ssid[..b.ssid_len as usize] != t.ssid[..t.ssid_len as usize] {
+                continue;
+            }
+            if !chs[..n_ch].contains(&b.channel) && n_ch < chs.len() {
+                chs[n_ch] = b.channel;
+                n_ch += 1;
+            }
+        }
+    });
+    if n_ch == 0 {
+        chs[0] = t.channel;
+        n_ch = 1;
+    }
+    ROAM_CHANNELS.with(|(c, n)| {
+        c[..n_ch].copy_from_slice(&chs[..n_ch]);
+        *n = n_ch;
+    });
+    host::print("  Roaming-Kanaele:");
+    for &c in &chs[..n_ch] {
+        host::print(" K");
+        host::print_dec(c as u32);
+    }
+    host::print("\n");
+}
+
+/// What a cell asks for, from its RSN element (802.11 §9.4.2.24) and the
+/// privacy bit: 0 open · 1 WEP · 2 WPA2-PSK · 3 WPA3-SAE · 4 both · 5 other.
+fn security_of(b: &Bss) -> u8 {
+    if b.rsn_len == 0 {
+        return if b.capability & 0x0010 != 0 { 1 } else { 0 };
+    }
+    // version 2 · group suite 4 · pairwise count 2 + 4n · AKM count 2 + 4m
+    let r = &b.rsn[2..b.rsn_len as usize];
+    let Some(pc) = r.get(6..8).map(|x| u16::from_le_bytes([x[0], x[1]]) as usize) else { return 5 };
+    let at = 8 + 4 * pc;
+    let Some(ac) = r.get(at..at + 2).map(|x| u16::from_le_bytes([x[0], x[1]]) as usize) else { return 5 };
+    let (mut psk, mut sae) = (false, false);
+    for i in 0..ac {
+        let Some(sfx) = r.get(at + 2 + 4 * i..at + 6 + 4 * i) else { break };
+        if sfx[..3] != [0x00, 0x0f, 0xac] {
+            continue;
+        }
+        match sfx[3] {
+            2 | 6 => psk = true,
+            8 => sae = true,
+            _ => {}
+        }
+    }
+    match (psk, sae) {
+        (true, true) => 4,
+        (true, false) => 2,
+        (false, true) => 3,
+        _ => 5,
+    }
+}
+
+/// `SCAN_RESULT`: [op][count] then per cell bssid[6] rssi ch security
+/// ssid_len ssid (docs/plan/WLAN_MANAGER.md §3). One message: the channel
+/// holds 16, a scan finds up to 48.
+fn report_scan(found: &[Bss]) {
+    let mut m = [0u8; 2048];
+    let mut n = 2usize;
+    let mut count = 0u8;
+    for b in found {
+        let sl = b.ssid_len as usize;
+        if n + 10 + sl > m.len() {
+            break;
+        }
+        m[n..n + 6].copy_from_slice(&b.bssid);
+        m[n + 6] = b.best as u8;
+        m[n + 7] = b.channel;
+        m[n + 8] = security_of(b);
+        m[n + 9] = sl as u8;
+        m[n + 10..n + 10 + sl].copy_from_slice(&b.ssid[..sl]);
+        n += 10 + sl;
+        count += 1;
+    }
+    m[0] = EV_SCAN_RESULT;
+    m[1] = count;
+    send_event_retry(&m[..n]);
+}
+
+/// The channel holds 16 messages; `wifid` drains it when woken. Retry for a
+/// moment rather than lose a result it is waiting for.
+fn send_event_retry(m: &[u8]) {
+    for _ in 0..200 {
+        if host::wifi_send_event(m) == 0 {
+            return;
+        }
+        host::sleep_ms(1);
+    }
+    host::say("[rtl8822ce] Meldung an wifid nicht zugestellt (Kanal voll)\n");
 }
 
 /// Adds a beacon or probe response to the list. Returns `false` when the
@@ -5059,7 +5209,13 @@ enum PumpEnd {
     /// The cell dropped us (deauth/disassoc) or the firmware declared
     /// itself dead. The caller reconnects.
     LinkLost,
+    /// `wifid` asked to leave: `DISCONNECT`, or `CONNECT` to another cell
+    /// (then in `NEXT_CONNECT`).
+    Leave,
 }
+
+/// A `CONNECT` that arrived while a link ran: `(bssid, channel)`.
+static NEXT_CONNECT: Single<Option<([u8; 6], u8)>> = Single::new(None);
 
 // ── Reorder buffer for received A-MPDUs ──────────────────────────
 //
@@ -6349,12 +6505,30 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 Some(CMD_AUTHORIZED) => {
                     ls.authorized = true;
                     host::netdev_set_link(true);
-                    let mut up = [0u8; 7];
+                    // LINK_UP: [op][bssid 6][channel]
+                    let mut up = [0u8; 8];
                     up[0] = EV_LINK_UP;
                     up[1..7].copy_from_slice(&link.bssid);
+                    up[7] = link.channel;
                     host::wifi_send_event(&up);
                     ls.link_up_sent = true;
                     host::print("  *** AUTHORIZED — Datenweg offen ***\n");
+                }
+                // A full scan would take the link off the air for seconds;
+                // while linked, the last list is the answer.
+                Some(CMD_SCAN) => LAST_SCAN.with(|(l, n)| report_scan(&l[..*n])),
+                Some(CMD_DISCONNECT) => {
+                    NEXT_CONNECT.with(|c| *c = None);
+                    LEAVE_ASKED.store(true, Ordering::Relaxed);
+                    return PumpEnd::Leave;
+                }
+                // CONNECT: [op][bssid 6][channel]
+                Some(CMD_CONNECT) if cmd.len() >= 8 => {
+                    let mut b = [0u8; 6];
+                    b.copy_from_slice(&cmd[1..7]);
+                    NEXT_CONNECT.with(|c| *c = Some((b, cmd[7])));
+                    LEAVE_ASKED.store(true, Ordering::Relaxed);
+                    return PumpEnd::Leave;
                 }
                 _ => {}
             }
@@ -6832,7 +7006,7 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              h2c: &mut fw::H2cState, e: &efuse::Efuse,
              t: &txpower::TxPower, bss: &Bss, link: &mut Link,
              ls: &mut LinkStats, d: &mut Dev,
-             linked: &mut Option<vif::Vif>) -> bool {
+             linked: &mut Option<vif::Vif>, caps: &mut sta::PeerCaps) -> bool {
     ls.reconnects += 1;
     // The cell can be a different one: after two failures the caller scans
     // again, and `bss` may carry another BSSID, channel or name. Without
@@ -6877,8 +7051,50 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::print("\n");
     host::loud_end();
 
+    drop_session(h, link, ls);
+
+    // Stage 5e: auth and assoc, on the same channel.
+    if !stage5e_connect(h, hal, trx, mgmt_buf, h2c, e, t, e.addr, bss,
+                        linked, d) {
+        return false;
+    }
+    let Some(v) = linked.as_ref() else { return false };
+
+    // Stage 5f: the firmware picks the rate again.
+    let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
+    if !stage5f_rates(h, trx, h2c, hal, v, bss, &mut rates, d) {
+        return false;
+    }
+    if let Some((c, si)) = rates {
+        link.si = si;
+        link.highest_rate = highest_tx_rate(&c, hal);
+        // Another cell, possibly another network: its abilities, not the
+        // first one's.
+        *caps = c;
+    }
+
+    // And `wifid` gets a fresh supplicant.
+    let mut ready = [0u8; 13];
+    ready[0] = EV_READY;
+    ready[1..7].copy_from_slice(&link.bssid);
+    ready[7..13].copy_from_slice(&link.mac);
+    host::wifi_send_event(&ready);
+
+    host::loud_begin();
+    host::print("  wieder angemeldet, AID ");
+    host::print_dec(linked.as_ref().map(|v| v.aid).unwrap_or(0));
+    host::print(" — der Handschlag faengt von vorn an
+");
+    host::loud_end();
+    true
+}
+
+/// What belongs to one association goes: the kernel's link, keys, packet
+/// numbers, block-ack sessions in both directions, queued frames.
+fn drop_session(h: i32, link: &mut Link, ls: &mut LinkStats) {
     // The kernel must stop pushing into the dead link.
     host::netdev_set_link(false);
+    ls.authorized = false;
 
     // Old keys out of the CAM. `write_cam` put them in, `clear_cam` takes
     // them out, slot by slot as they were used.
@@ -6910,38 +7126,103 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 ");
         host::loud_end();
     }
+}
 
-    // Stage 5e: auth and assoc, on the same channel.
-    if !stage5e_connect(h, hal, trx, mgmt_buf, h2c, e, t, e.addr, bss,
-                        linked, d) {
-        return false;
+/// Leave the cell on `wifid`'s request: deauthenticate (reason 3, "station
+/// is leaving"), drop the session, and set the port back to no link —
+/// `ieee80211_set_disassoc` and, in rtw88, `rtw_vif_assoc_changed` with
+/// `NO_LINK` plus `rtw_fw_media_status_report(false)` from `rtw_sta_remove`.
+#[allow(clippy::too_many_arguments)]
+fn leave(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, h2c: &mut fw::H2cState,
+         link: &mut Link, ls: &mut LinkStats, mac: [u8; 6],
+         linked: &mut Option<vif::Vif>) {
+    let mut f = [0u8; 256];
+    mgmt_header(&mut f, DOT11_FC_DEAUTH, &mac, &link.bssid);
+    f[24..26].copy_from_slice(&3u16.to_le_bytes());
+    let mut info = tx::pkt_info_update(&f[..26], 0, tx::band_of(link.channel));
+    let q = tx::RTW_TX_QUEUE_MGMT;
+    if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &f[..26]) {
+        pci::tx_kick_off_queue(h, trx, q);
     }
-    let Some(v) = linked.as_ref() else { return false };
-
-    // Stage 5f: the firmware picks the rate again.
-    let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
-    if !stage5f_rates(h, trx, h2c, hal, v, bss, &mut rates, d) {
-        return false;
+    // The deauth leaves before the keys and the port go.
+    host::sleep_ms(20);
+    drop_session(h, link, ls);
+    if let Some(v) = linked.as_mut() {
+        v.aid = 0;
+        v.net_type = RTW_NET_NO_LINK;
+        vif::port_config(h, v, PORT_SET_NET_TYPE | PORT_SET_AID);
+        fw::media_status_report(h, h2c, v.mac_id, false);
     }
-    if let Some((caps, si)) = rates {
-        link.si = si;
-        link.highest_rate = highest_tx_rate(&caps, hal);
+    send_event_retry(&[EV_LINK_DOWN, LINK_DOWN_REQUESTED]);
+    host::say("[rtl8822ce] abgemeldet\n");
+}
+
+/// The cell `bssid` on `channel`: from the last scan, else listened for
+/// there (a beacon, and on 2.4 GHz a probe response). The fast way back to
+/// a known network without a full scan.
+#[allow(clippy::too_many_arguments)]
+fn find_cell(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+             e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
+             d: &mut Dev, bssid: [u8; 6], channel: u8) -> Option<Bss> {
+    let known = LAST_SCAN.with(|(l, n)| l[..*n].iter().find(|b| b.bssid == bssid).copied());
+    if known.is_some() {
+        return known;
     }
-
-    // And `wifid` gets a fresh supplicant.
-    let mut ready = [0u8; 13];
-    ready[0] = EV_READY;
-    ready[1..7].copy_from_slice(&link.bssid);
-    ready[7..13].copy_from_slice(&link.mac);
-    host::wifi_send_event(&ready);
-
-    host::loud_begin();
-    host::print("  wieder angemeldet, AID ");
-    host::print_dec(linked.as_ref().map(|v| v.aid).unwrap_or(0));
-    host::print(" — der Handschlag faengt von vorn an
-");
-    host::loud_end();
-    true
+    static RXBUF_P: Single<RxBuf> = Single::new([0; RX_BUF_LEN]);
+    // Three beacon intervals: one is missed by clock alone now and then.
+    const LISTEN_MS: u64 = 320;
+    RXBUF_P.with(|buf| {
+        if !switch_channel(h, hal, e, t, channel, CellWidth::default(), 0) {
+            return None;
+        }
+        // 5 GHz is listened to only, as in the scan: a DFS channel must be
+        // heard before we transmit on it.
+        if channel <= 14 {
+            let mut frame = [0u8; 128];
+            let n = build_probe_req_to(&mut frame, &mac, channel, Some(&bssid), &[]);
+            let mut info = tx::pkt_info_update(&frame[..n], 0, tx::band_of(channel));
+            let q = tx::RTW_TX_QUEUE_MGMT;
+            if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &frame[..n]) {
+                pci::tx_kick_off_queue(h, trx, q);
+            }
+        }
+        let mut found = [Bss::EMPTY; 4];
+        let mut n_found = 0usize;
+        let dm = &mut d.dm;
+        let path_div = &mut d.path_div;
+        let t0 = host::now_ms();
+        while host::now_ms() - t0 < LISTEN_MS
+            && !found[..n_found].iter().any(|b| b.bssid == bssid)
+        {
+            let got = pci::rx_poll(h, trx, 64, buf, dm, path_div, hal.rf_path_num, 0, channel, |st, pkt| {
+                if st.crc_err || st.is_c2h {
+                    return;
+                }
+                let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize + st.shift as usize;
+                if off + 36 > pkt.len() {
+                    return;
+                }
+                let fc = u16::from_le_bytes([pkt[off], pkt[off + 1]]);
+                let is_beacon = fc & 0xfc == 0x80;
+                if (is_beacon || fc & 0xfc == 0x50) && pkt[off + 16..off + 22] == bssid {
+                    record_bss(&mut found, &mut n_found, &pkt[off..], channel, st.signal_power, is_beacon);
+                }
+            });
+            if got == 0 {
+                host::sleep_ms(1);
+            }
+        }
+        // Back to the channel the bring-up measured on, as after a scan.
+        let _ = switch_channel(h, hal, e, t, 1, CellWidth::default(), 0);
+        let cell = found[..n_found].iter().find(|b| b.bssid == bssid).copied();
+        if let Some(c) = cell {
+            LAST_SCAN.with(|(l, n)| {
+                l[0] = c;
+                *n = 1;
+            });
+        }
+        cell
+    })
 }
 
 /// Scans without losing the link.

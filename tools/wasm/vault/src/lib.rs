@@ -793,7 +793,7 @@ fn detail_pane(st: &St, names: &[String], shown: &[usize]) -> Widget {
                 align: Align::Center,
                 modifiers: vec![],
             },
-            prefab::muted("Password stored. Showing it comes with the Wi-Fi integration."),
+            prefab::muted("Password stored. The system joins this network when it is in range (`wlan known`)."),
             button_row(vec![delete_button(st)]),
         ]
     };
@@ -1128,9 +1128,15 @@ fn save_wifi(st: &mut St) {
         st.focus_on(0);
         return;
     }
+    let pass = st.f[1].as_str();
+    if !(8..=63).contains(&pass.len()) || !pass.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        st.error("A Wi-Fi password is 8 to 63 characters (letters, digits, symbols).");
+        st.focus_on(1);
+        return;
+    }
     let mut key = String::from("net:");
     key.push_str(ssid);
-    if !host::vault_system_set(&key, st.f[1].as_str().as_bytes()) {
+    if !host::vault_system_set(&key, pass.as_bytes()) {
         st.error("Could not save the network.");
         return;
     }
