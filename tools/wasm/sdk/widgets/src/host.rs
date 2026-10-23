@@ -61,6 +61,11 @@ pub fn vault_system_list(buf: &mut [u8]) -> Option<usize> { len(sys::vault_syste
 pub fn vault_user_delete(name: &str) -> bool { sys::vault_user_delete(name.as_bytes()) == 0 }
 pub fn vault_system_delete(name: &str) -> bool { sys::vault_system_delete(name.as_bytes()) == 0 }
 
+// ── Clipboard — focus-gated: works only while this app has focus ──────
+pub fn clipboard_set(text: &str) -> bool { sys::clipboard_set(text.as_bytes()) >= 0 }
+/// The clipboard text's full length (may exceed `buf`), or None if denied.
+pub fn clipboard_get(buf: &mut [u8]) -> Option<usize> { len(sys::clipboard_get(buf)) }
+
 /// List `prefix` into `out` (the kernel's entry encoding); `Some(n)` bytes.
 pub fn fs_list(prefix: &str, out: &mut [u8], recursive: bool) -> Option<usize> {
     len(sys::fs_list(prefix.as_bytes(), out, recursive))

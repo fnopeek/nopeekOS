@@ -728,6 +728,10 @@ pub enum Event {
     /// The compositor closed popup `popup` (`npk_popup`): a press outside
     /// it, or the keyboard went elsewhere. Wayland's `xdg_popup.popup_done`.
     PopupDone { popup: u32 },
+    /// The focused `Widget::Input` / `TextArea` carrying `Modifier::NodeId`
+    /// was mutated. Sent in addition to `InputChange`, so a form with
+    /// several fields knows which one changed: `node` is that NodeId.
+    InputChangeAt { node: u32, value: String },
     // Appended only.
 }
 

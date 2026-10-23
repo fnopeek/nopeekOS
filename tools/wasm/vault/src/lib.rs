@@ -2,16 +2,24 @@
 //! (docs/plan/KEYSTORE.md). UI after the agreed mockup: setup / unlock, a
 //! sidebar + list + detail, and the add/edit forms.
 //!
-//! Layout rules learned from `loft`: the root Column has no fixed size (the
-//! window sizes it) and uses Flex to fill; a `Scroll` needs `Modifier::Flex(1)`
-//! or it collapses. Lists use `prefab::list_row`, the sidebar
-//! `prefab::sidebar_section` / `nav_row`.
+//! Layout follows `loft`: the root Column has no fixed size (the window
+//! sizes it) and fills with Flex; a `Scroll` needs `Modifier::Flex(1)` or it
+//! collapses.
+//!
+//! Input model (see the compositor in kernel/src/shade/widgets/mod.rs):
+//! - Every form field is a real `Widget::Input` tagged with its own NodeId,
+//!   so `Event::InputChangeAt { node, value }` says which field changed.
+//! - Form fields are not re-committed per keystroke: the compositor keeps
+//!   the buffer and writes it back into its tree when focus leaves a field.
+//!   Echoing every key would race fast typing (a stale echo resets the
+//!   buffer). Only the search box re-commits per key, because the list
+//!   must filter as you type.
+//! - `Modifier::FocusRequest` focuses a field with its whole text selected,
+//!   so it is raised only when a screen opens or a field must be fixed,
+//!   never on show/hide.
 //!
 //! No heap state (the bump allocator resets each frame): fields sit in fixed
-//! buffers, entries are fetched from the kernel each frame. The compositor
-//! reports only the focused input's value, not which field, so forms edit ONE
-//! field at a time — the active field is a live input, the others are value
-//! boxes that activate on click; Enter advances, the last field saves.
+//! buffers, entries are fetched from the kernel each frame.
 
 #![no_std]
 
@@ -22,7 +30,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use nopeek_widgets::host;
-use nopeek_widgets::prefab::{self, ButtonStyle, InputKind};
+use nopeek_widgets::prefab::{self, ButtonStyle};
 use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::*;
 
@@ -44,12 +52,16 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
 }
 
-const EVENT_BUF_SIZE: usize = 1024;
+const EVENT_BUF_SIZE: usize = 2048;
 const WAIT_INPUT: u32 = 1;
 const SIDEBAR_W: u16 = 190;
+/// How long a copied password stays on the clipboard.
+const CLIP_CLEAR_MS: u64 = 30_000;
+/// Shortest master passphrase accepted at setup.
+const MIN_PASSPHRASE: usize = 8;
 
 // Actions.
-const A_SUBMIT: u32 = 1;
+const A_SAVE: u32 = 1;
 const A_ADD: u32 = 2;
 const A_ADD_WIFI: u32 = 3;
 const A_LOCK: u32 = 4;
@@ -59,8 +71,16 @@ const A_EDIT: u32 = 7;
 const A_DELETE: u32 = 8;
 const A_SEC_USER: u32 = 10;
 const A_SEC_WIFI: u32 = 11;
-const A_FIELD_BASE: u32 = 100; // + field index: make that field active
+const A_SEARCH_ENTER: u32 = 20;
+const A_COPY_PASS: u32 = 21;
+const A_COPY_USER: u32 = 22;
+const A_ENTER_BASE: u32 = 300; // + field index: Enter pressed in that field
 const A_SEL_BASE: u32 = 1000; // + row index: select that entry
+
+/// NodeId of form field `i` is `NODE_FIELD + i`.
+const NODE_FIELD: u32 = 100;
+/// `focus_field` value that requests focus for the search box.
+const FOCUS_SEARCH: usize = usize::MAX;
 
 #[derive(PartialEq, Clone, Copy)]
 enum View {
@@ -73,23 +93,29 @@ enum View {
 
 /// A fixed-size text field — survives the per-frame allocator reset.
 struct Field {
-    b: [u8; 256],
+    b: [u8; 1024],
     n: usize,
 }
 
 impl Field {
     const fn new() -> Self {
-        Field { b: [0u8; 256], n: 0 }
+        Field { b: [0u8; 1024], n: 0 }
     }
     fn as_str(&self) -> &str {
         core::str::from_utf8(&self.b[..self.n]).unwrap_or("")
     }
+    /// Store `s`, cut at a char boundary if it does not fit (a cut through a
+    /// UTF-8 sequence would make the whole field read as empty).
     fn set(&mut self, s: &str) {
-        let k = s.len().min(self.b.len());
+        let mut k = s.len().min(self.b.len());
+        while k > 0 && !s.is_char_boundary(k) {
+            k -= 1;
+        }
         self.b[..k].copy_from_slice(&s.as_bytes()[..k]);
         self.n = k;
     }
     fn clear(&mut self) {
+        self.b.fill(0);
         self.n = 0;
     }
     fn is_empty(&self) -> bool {
@@ -101,48 +127,73 @@ const NFIELDS: usize = 5;
 
 struct St {
     view: View,
+    /// Form fields, by screen: setup 0 passphrase / 1 confirm; unlock 0;
+    /// secret 0 name / 1 url / 2 username / 3 password / 4 note;
+    /// Wi-Fi 0 SSID / 1 password.
     f: [Field; NFIELDS],
     search: Field,
     /// 0 = secrets (user tier), 1 = Wi-Fi (system tier).
     section: u8,
-    /// Which field in the current form is the editable input.
-    active: usize,
-    /// FocusRequest counter — bumps so the active input takes the keyboard.
+    /// FocusRequest number; bumped to move the keyboard to `focus_field`.
     focus: u32,
+    focus_field: usize,
     reveal: bool,
-    /// Selected entry index in the current section's list, or -1.
+    /// Selected index into the current section's full name list, or -1.
     sel: i32,
+    /// Name of the entry being edited; empty for a new one.
     edit_orig: Field,
+    /// Delete was pressed once; the next Delete removes the entry.
+    confirm_del: bool,
     msg: &'static str,
+    msg_err: bool,
+    /// FNV hash of a password we put on the clipboard (0 = none), and when
+    /// to clear it again.
+    clip_hash: u64,
+    clip_deadline: u64,
     heap_base: usize,
 }
 
 impl St {
-    fn active_field(&mut self) -> &mut Field {
-        &mut self.f[self.active.min(NFIELDS - 1)]
-    }
     fn goto(&mut self, v: View) {
         self.view = v;
-        self.active = 0;
-        self.focus = self.focus.wrapping_add(1);
         self.reveal = false;
-        self.msg = "";
+        self.confirm_del = false;
+        self.focus_on(0);
     }
-    fn set_active(&mut self, i: usize) {
-        self.active = i.min(NFIELDS - 1);
-        self.focus = self.focus.wrapping_add(1);
+    /// Move the keyboard to `field` (whole text selected).
+    fn focus_on(&mut self, field: usize) {
+        self.focus_field = field;
+        self.focus = self.focus.wrapping_add(1).max(1);
+    }
+    fn info(&mut self, m: &'static str) {
+        self.msg = m;
+        self.msg_err = false;
+    }
+    fn error(&mut self, m: &'static str) {
+        self.msg = m;
+        self.msg_err = true;
     }
 }
 
-// ── Entry record (user "Login" entry): url, username, password, note ───────
+// ── Entry record (user "Login" entry) ──────────────────────────────────────
+//
+// v1: tag 0x01, then url, username, password, note — each u16 length +
+// UTF-8. Two older shapes may still be on disk and are read, never written:
+// the same fields without the tag (UI 0.2–0.4), and a bare password string
+// (the first simple UI). A typed password never starts with 0x01: the
+// compositor does not insert control bytes.
+
+const RECORD_V1: u8 = 0x01;
 
 fn put_str(out: &mut Vec<u8>, s: &str) {
-    out.extend_from_slice(&(s.len() as u16).to_le_bytes());
-    out.extend_from_slice(s.as_bytes());
+    let b = &s.as_bytes()[..s.len().min(u16::MAX as usize)];
+    out.extend_from_slice(&(b.len() as u16).to_le_bytes());
+    out.extend_from_slice(b);
 }
 
 fn encode_login(url: &str, user: &str, pass: &str, note: &str) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(9 + url.len() + user.len() + pass.len() + note.len());
+    out.push(RECORD_V1);
     put_str(&mut out, url);
     put_str(&mut out, user);
     put_str(&mut out, pass);
@@ -150,45 +201,59 @@ fn encode_login(url: &str, user: &str, pass: &str, note: &str) -> Vec<u8> {
     out
 }
 
-fn decode_login(b: &[u8]) -> (String, String, String, String) {
+/// Exactly four length-prefixed fields filling `b`, or None.
+fn decode_fields(b: &[u8]) -> Option<[String; 4]> {
     let mut off = 0usize;
-    let mut take = || -> String {
+    let mut out: [String; 4] = [String::new(), String::new(), String::new(), String::new()];
+    for slot in out.iter_mut() {
         if off + 2 > b.len() {
-            return String::new();
+            return None;
         }
         let len = u16::from_le_bytes([b[off], b[off + 1]]) as usize;
         off += 2;
         if off + len > b.len() {
-            return String::new();
+            return None;
         }
-        let s = core::str::from_utf8(&b[off..off + len]).unwrap_or("").into();
+        *slot = core::str::from_utf8(&b[off..off + len]).ok()?.into();
         off += len;
-        s
-    };
-    (take(), take(), take(), take())
+    }
+    (off == b.len()).then_some(out)
 }
 
-fn fetch_login(name: &str) -> (String, String, String, String) {
-    let mut buf = [0u8; 2048];
+struct Login {
+    url: String,
+    user: String,
+    pass: String,
+    note: String,
+}
+
+fn decode_login(b: &[u8]) -> Login {
+    let fields = if b.first() == Some(&RECORD_V1) {
+        decode_fields(&b[1..])
+    } else {
+        decode_fields(b)
+    };
+    match fields {
+        Some([url, user, pass, note]) => Login { url, user, pass, note },
+        None => Login {
+            url: String::new(),
+            user: String::new(),
+            pass: core::str::from_utf8(b).unwrap_or("").into(),
+            note: String::new(),
+        },
+    }
+}
+
+fn fetch_login(name: &str) -> Login {
+    let mut buf = [0u8; 8192];
     match host::vault_user_get(name, &mut buf) {
-        Some(n) => {
-            let (url, user, pass, note) = decode_login(&buf[..n]);
-            // Backward compat: an entry from the old simple UI holds a plain
-            // string, not a record. If nothing decoded but there are bytes,
-            // show them as the password.
-            if n > 0 && url.is_empty() && user.is_empty() && pass.is_empty() && note.is_empty() {
-                let p = core::str::from_utf8(&buf[..n]).unwrap_or("").into();
-                (String::new(), String::new(), p, String::new())
-            } else {
-                (url, user, pass, note)
-            }
-        }
-        None => (String::new(), String::new(), String::new(), String::new()),
+        Some(n) if n <= buf.len() => decode_login(&buf[..n]),
+        _ => Login { url: String::new(), user: String::new(), pass: String::new(), note: String::new() },
     }
 }
 
 fn split_names(buf: &[u8], n: usize) -> Vec<String> {
-    core::str::from_utf8(&buf[..n])
+    core::str::from_utf8(&buf[..n.min(buf.len())])
         .unwrap_or("")
         .split('\n')
         .filter(|s| !s.is_empty())
@@ -197,7 +262,7 @@ fn split_names(buf: &[u8], n: usize) -> Vec<String> {
 }
 
 fn user_names() -> Vec<String> {
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; 8192];
     match host::vault_user_list(&mut buf) {
         Some(n) => split_names(&buf, n),
         None => Vec::new(),
@@ -205,12 +270,36 @@ fn user_names() -> Vec<String> {
 }
 
 fn wifi_names() -> Vec<String> {
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; 8192];
     let raw = match host::vault_system_list(&mut buf) {
         Some(n) => split_names(&buf, n),
         None => Vec::new(),
     };
-    raw.iter().map(|s| s.strip_prefix("net:").unwrap_or(s).into()).collect()
+    raw.iter().filter_map(|s| s.strip_prefix("net:")).map(|s| s.into()).collect()
+}
+
+fn section_names(st: &St) -> Vec<String> {
+    if st.section == 0 { user_names() } else { wifi_names() }
+}
+
+/// Indices into `names` that match the search box.
+fn visible(st: &St, names: &[String]) -> Vec<usize> {
+    let filter = st.search.as_str().to_lowercase();
+    names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| filter.is_empty() || n.to_lowercase().contains(&filter))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn fnv(b: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &x in b {
+        h ^= x as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h | 1
 }
 
 // ── Rendering helpers ──────────────────────────────────────────────────────
@@ -227,61 +316,41 @@ fn btn(lbl: &str, style: ButtonStyle, action: u32) -> Widget {
     prefab::button(lbl, style, ActionId(action))
 }
 
-fn box_mods() -> Vec<Modifier> {
+fn field_chrome() -> Vec<Modifier> {
     vec![
-        Modifier::Background(Token::SurfaceElevated),
+        Modifier::Background(Token::Surface),
         Modifier::Rounded(Radius::Md.as_u8()),
+        Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
         Modifier::PaddingXY { x: Padding::Md.as_u16(), y: Padding::Sm.as_u16() },
+        Modifier::Focus(vec![Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() }]),
     ]
 }
 
-/// A form field: the active one is a live input, the others value boxes that
-/// activate on click. `secret` masks the value unless revealed.
-fn field(st: &St, idx: usize, placeholder: &str, secret: bool) -> Widget {
-    let val = st.f[idx].as_str();
-    if idx == st.active {
-        let kind = if secret && !st.reveal { InputKind::Password } else { InputKind::Text };
-        let mut mods = vec![Modifier::FocusRequest(st.focus), Modifier::Flex(1)];
-        if matches!(kind, InputKind::Password) {
-            mods.push(Modifier::Mask);
-        }
-        let input = Widget::Input {
-            value: val.into(),
-            placeholder: placeholder.into(),
-            on_submit: ActionId(A_SUBMIT),
-            modifiers: mods,
-        };
-        let mut m = box_mods();
-        m.push(Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() });
-        Widget::Row { children: vec![input], spacing: 0, align: Align::Center, modifiers: m }
-    } else {
-        let shown: String = if val.is_empty() {
-            placeholder.into()
-        } else if secret && !st.reveal {
-            "•".repeat(val.chars().count().min(24))
-        } else {
-            val.into()
-        };
-        let tint = if val.is_empty() { Token::OnSurfaceFaint } else { Token::OnSurface };
-        let mut m = box_mods();
-        m.push(Modifier::OnClick(ActionId(A_FIELD_BASE + idx as u32)));
-        Widget::Row {
-            children: vec![Widget::Text {
-                content: shown,
-                style: TextStyle::Body,
-                modifiers: vec![Modifier::Tint(tint), Modifier::Flex(1)],
-            }],
-            spacing: 0,
-            align: Align::Center,
-            modifiers: m,
-        }
+/// A real form input, tagged with its NodeId so `InputChangeAt` names it.
+fn input_field(st: &St, idx: usize, placeholder: &str, secret: bool) -> Widget {
+    let mut mods = vec![Modifier::NodeId(NodeId(NODE_FIELD + idx as u32)), Modifier::Flex(1)];
+    if st.focus_field == idx {
+        mods.push(Modifier::FocusRequest(st.focus));
     }
+    if secret && !st.reveal {
+        mods.push(Modifier::Mask);
+    }
+    let mut children = vec![Widget::Input {
+        value: st.f[idx].as_str().into(),
+        placeholder: placeholder.into(),
+        on_submit: ActionId(A_ENTER_BASE + idx as u32),
+        modifiers: mods,
+    }];
+    if secret {
+        children.push(btn(if st.reveal { "Hide" } else { "Show" }, ButtonStyle::Ghost, A_REVEAL));
+    }
+    Widget::Row { children, spacing: Spacing::Sm.as_u16(), align: Align::Center, modifiers: field_chrome() }
 }
 
 fn labelled(st: &St, idx: usize, lab: &str, placeholder: &str, secret: bool) -> Widget {
     Widget::Column {
-        children: vec![label(lab), field(st, idx, placeholder, secret)],
-        spacing: 2,
+        children: vec![label(lab), input_field(st, idx, placeholder, secret)],
+        spacing: 4,
         align: Align::Stretch,
         modifiers: vec![],
     }
@@ -291,149 +360,245 @@ fn button_row(buttons: Vec<Widget>) -> Widget {
     Widget::Row { children: buttons, spacing: Spacing::Sm.as_u16(), align: Align::Center, modifiers: vec![] }
 }
 
+fn heading(text: &str) -> Widget {
+    Widget::Text { content: text.into(), style: TextStyle::Heading, modifiers: vec![] }
+}
+
+fn message(st: &St) -> Option<Widget> {
+    if st.msg.is_empty() {
+        return None;
+    }
+    Some(Widget::Text {
+        content: st.msg.into(),
+        style: TextStyle::Caption,
+        modifiers: vec![Modifier::Tint(if st.msg_err { Token::Danger } else { Token::OnSurfaceMuted })],
+    })
+}
+
 /// A centered card screen (setup / unlock / forms) on a full-window surface.
-fn screen_card(children: Vec<Widget>) -> Widget {
+fn screen_card(st: &St, mut children: Vec<Widget>, hints: &str) -> Widget {
+    if let Some(m) = message(st) {
+        children.push(m);
+    }
     let card = Widget::Column {
         children,
-        spacing: Spacing::Md.as_u16(),
+        spacing: Spacing::Lg.as_u16(),
         align: Align::Stretch,
         modifiers: vec![
             Modifier::Background(Token::SurfaceElevated),
             Modifier::Rounded(Radius::Lg.as_u8()),
             Modifier::Padding(Padding::Lg.as_u16()),
-            Modifier::MinWidth(380),
-            Modifier::MaxWidth(440),
+            Modifier::MinWidth(400),
+            Modifier::MaxWidth(460),
         ],
     };
-    Widget::Column {
+    let page = Widget::Column {
         children: vec![Widget::Spacer { flex: 1 }, card, Widget::Spacer { flex: 1 }],
         spacing: 0,
         align: Align::Center,
-        modifiers: vec![Modifier::Background(Token::Surface), Modifier::Padding(Padding::Lg.as_u16())],
+        modifiers: vec![Modifier::Flex(1), Modifier::Padding(Padding::Lg.as_u16())],
+    };
+    Widget::Column {
+        children: vec![page, Widget::Divider, prefab::footer("", hints)],
+        spacing: Spacing::None.as_u16(),
+        align: Align::Stretch,
+        modifiers: vec![Modifier::Background(Token::Surface)],
     }
 }
 
 // ── Screens ────────────────────────────────────────────────────────────────
 
 fn setup_screen(st: &St) -> Widget {
-    screen_card(vec![
-        Widget::Text { content: "Create your vault".into(), style: TextStyle::Heading, modifiers: vec![] },
-        prefab::muted("One passphrase unlocks everything in here. There is no reset and no recovery."),
-        labelled(st, 0, "MASTER PASSPHRASE", "", true),
-        labelled(st, 1, "CONFIRM", "", true),
-        button_row(vec![btn("Create vault", ButtonStyle::Primary, A_SUBMIT)]),
-    ])
+    screen_card(
+        st,
+        vec![
+            heading("Create your vault"),
+            prefab::muted("One passphrase unlocks everything in here. There is no reset and no recovery."),
+            labelled(st, 0, "MASTER PASSPHRASE", "at least 8 characters", true),
+            labelled(st, 1, "CONFIRM", "", true),
+            button_row(vec![btn("Create vault", ButtonStyle::Primary, A_SAVE)]),
+        ],
+        "Enter next · Esc close",
+    )
 }
 
 fn unlock_screen(st: &St) -> Widget {
-    let users = user_names().len();
     let wifis = wifi_names().len();
-    screen_card(vec![
-        Widget::Row {
-            children: vec![
-                Widget::Icon { id: IconId::Lock, size: 24, modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)] },
-                Widget::Text { content: "Vault is locked".into(), style: TextStyle::Heading, modifiers: vec![] },
-            ],
-            spacing: Spacing::Sm.as_u16(),
-            align: Align::Center,
-            modifiers: vec![],
-        },
-        prefab::muted(&alloc::format!("{} secrets · {} Wi-Fi", users, wifis)),
-        labelled(st, 0, "MASTER PASSPHRASE", "", true),
-        button_row(vec![
-            btn(if st.reveal { "Hide" } else { "Show" }, ButtonStyle::Ghost, A_REVEAL),
-            btn("Unlock", ButtonStyle::Primary, A_SUBMIT),
-        ]),
-    ])
+    let sub = if wifis > 0 {
+        alloc::format!("Enter your master passphrase · {} Wi-Fi network(s) stored", wifis)
+    } else {
+        "Enter your master passphrase.".into()
+    };
+    screen_card(
+        st,
+        vec![
+            Widget::Row {
+                children: vec![
+                    Widget::Icon { id: IconId::Lock, size: 24, modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)] },
+                    heading("Vault is locked"),
+                ],
+                spacing: Spacing::Sm.as_u16(),
+                align: Align::Center,
+                modifiers: vec![],
+            },
+            prefab::muted(&sub),
+            labelled(st, 0, "MASTER PASSPHRASE", "", true),
+            button_row(vec![btn("Unlock", ButtonStyle::Primary, A_SAVE)]),
+        ],
+        "Enter unlock · Esc close",
+    )
 }
 
-fn detail_field(lab: &str, value: &str) -> Widget {
-    Widget::Column {
-        children: vec![
-            label(lab),
-            Widget::Row {
-                children: vec![Widget::Text {
-                    content: if value.is_empty() { "—".into() } else { value.into() },
-                    style: TextStyle::Body,
-                    modifiers: vec![Modifier::Tint(Token::OnSurface), Modifier::Flex(1)],
-                }],
-                spacing: 0,
-                align: Align::Center,
-                modifiers: box_mods(),
-            },
+fn edit_screen(st: &St) -> Widget {
+    let title = if st.edit_orig.is_empty() { "New secret" } else { "Edit secret" };
+    screen_card(
+        st,
+        vec![
+            heading(title),
+            labelled(st, 0, "NAME", "e.g. github.com", false),
+            labelled(st, 1, "URL", "https://…", false),
+            labelled(st, 2, "USERNAME", "", false),
+            labelled(st, 3, "PASSWORD", "", true),
+            labelled(st, 4, "NOTE", "", false),
+            button_row(vec![
+                btn("Cancel", ButtonStyle::Ghost, A_CANCEL),
+                btn("Save", ButtonStyle::Primary, A_SAVE),
+            ]),
         ],
-        spacing: 2,
+        "Tab next · Ctrl S save · Esc cancel",
+    )
+}
+
+fn wifi_screen(st: &St) -> Widget {
+    screen_card(
+        st,
+        vec![
+            heading("New Wi-Fi network"),
+            labelled(st, 0, "SSID", "network name", false),
+            labelled(st, 1, "PASSWORD", "", true),
+            button_row(vec![
+                btn("Cancel", ButtonStyle::Ghost, A_CANCEL),
+                btn("Save", ButtonStyle::Primary, A_SAVE),
+            ]),
+        ],
+        "Tab next · Ctrl S save · Esc cancel",
+    )
+}
+
+fn value_box(content: String, mono: bool, trailing: Vec<Widget>) -> Widget {
+    let mut children = vec![Widget::Text {
+        content,
+        style: if mono { TextStyle::Mono } else { TextStyle::Body },
+        modifiers: vec![Modifier::Tint(Token::OnSurface), Modifier::Flex(1)],
+    }];
+    children.extend(trailing);
+    Widget::Row {
+        children,
+        spacing: Spacing::Sm.as_u16(),
+        align: Align::Center,
+        modifiers: vec![
+            Modifier::Background(Token::SurfaceElevated),
+            Modifier::Rounded(Radius::Md.as_u8()),
+            Modifier::PaddingXY { x: Padding::Md.as_u16(), y: Padding::Sm.as_u16() },
+        ],
+    }
+}
+
+fn detail_row(lab: &str, value: &str, trailing: Vec<Widget>) -> Widget {
+    let shown = if value.is_empty() { "—".into() } else { value.into() };
+    Widget::Column {
+        children: vec![label(lab), value_box(shown, false, trailing)],
+        spacing: 4,
         align: Align::Stretch,
         modifiers: vec![],
     }
 }
 
-fn detail_pane(st: &St, users: &[String], wifis: &[String]) -> Widget {
-    let on_user = st.section == 0;
-    let names = if on_user { users } else { wifis };
-    if st.sel < 0 || st.sel as usize >= names.len() {
+fn delete_button(st: &St) -> Widget {
+    btn(if st.confirm_del { "Confirm delete" } else { "Delete" }, ButtonStyle::Destructive, A_DELETE)
+}
+
+fn detail_pane(st: &St, names: &[String], shown: &[usize]) -> Widget {
+    let pane_mods = vec![Modifier::Flex(1), Modifier::MinWidth(280), Modifier::Padding(Padding::Md.as_u16())];
+    let sel = st.sel;
+    if sel < 0 || !shown.contains(&(sel as usize)) {
         return Widget::Column {
             children: vec![prefab::muted("Select an entry")],
             spacing: 0,
             align: Align::Start,
-            modifiers: vec![Modifier::Flex(1), Modifier::MinWidth(260), Modifier::Padding(Padding::Md.as_u16())],
+            modifiers: pane_mods,
         };
     }
-    let name = &names[st.sel as usize];
-    let children: Vec<Widget> = if on_user {
-        let (url, user, pass, note) = fetch_login(name);
-        let pass_shown = if st.reveal { pass.clone() } else { "•".repeat(pass.chars().count().min(24)) };
+    let name = &names[sel as usize];
+    let children: Vec<Widget> = if st.section == 0 {
+        let l = fetch_login(name);
+        let pass_shown = if l.pass.is_empty() {
+            "—".into()
+        } else if st.reveal {
+            l.pass.clone()
+        } else {
+            "•".repeat(l.pass.chars().count().min(24))
+        };
+        let mut user_trail = Vec::new();
+        if !l.user.is_empty() {
+            user_trail.push(btn("Copy", ButtonStyle::Ghost, A_COPY_USER));
+        }
+        let mut pass_trail = Vec::new();
+        if !l.pass.is_empty() {
+            pass_trail.push(btn(if st.reveal { "Hide" } else { "Show" }, ButtonStyle::Ghost, A_REVEAL));
+            pass_trail.push(btn("Copy", ButtonStyle::Ghost, A_COPY_PASS));
+        }
         vec![
-            Widget::Text { content: name.clone(), style: TextStyle::Heading, modifiers: vec![] },
-            detail_field("URL", &url),
-            detail_field("USERNAME", &user),
+            heading(name),
+            detail_row("URL", &l.url, vec![]),
+            detail_row("USERNAME", &l.user, user_trail),
             Widget::Column {
-                children: vec![
-                    label("PASSWORD"),
-                    Widget::Row {
-                        children: vec![
-                            Widget::Text {
-                                content: if pass.is_empty() { "—".into() } else { pass_shown },
-                                style: TextStyle::Mono,
-                                modifiers: vec![Modifier::Tint(Token::OnSurface), Modifier::Flex(1)],
-                            },
-                            btn(if st.reveal { "Hide" } else { "Show" }, ButtonStyle::Ghost, A_REVEAL),
-                        ],
-                        spacing: Spacing::Sm.as_u16(),
-                        align: Align::Center,
-                        modifiers: box_mods(),
-                    },
-                ],
-                spacing: 2,
+                children: vec![label("PASSWORD"), value_box(pass_shown, true, pass_trail)],
+                spacing: 4,
                 align: Align::Stretch,
                 modifiers: vec![],
             },
-            detail_field("NOTE", &note),
-            button_row(vec![
-                btn("Edit", ButtonStyle::Secondary, A_EDIT),
-                btn("Delete", ButtonStyle::Destructive, A_DELETE),
-            ]),
+            detail_row("NOTE", &l.note, vec![]),
+            button_row(vec![btn("Edit", ButtonStyle::Secondary, A_EDIT), delete_button(st)]),
         ]
     } else {
         vec![
             Widget::Row {
                 children: vec![
                     Widget::Icon { id: IconId::WifiHigh, size: 20, modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)] },
-                    Widget::Text { content: name.clone(), style: TextStyle::Heading, modifiers: vec![] },
+                    heading(name),
                 ],
                 spacing: Spacing::Sm.as_u16(),
                 align: Align::Center,
                 modifiers: vec![],
             },
-            prefab::muted("Wi-Fi password stored. Reveal comes with the WLAN integration."),
-            button_row(vec![btn("Delete", ButtonStyle::Destructive, A_DELETE)]),
+            prefab::muted("Password stored. Showing it comes with the Wi-Fi integration."),
+            button_row(vec![delete_button(st)]),
         ]
     };
-    Widget::Column {
-        children,
-        spacing: Spacing::Md.as_u16(),
-        align: Align::Stretch,
-        modifiers: vec![Modifier::Flex(1), Modifier::MinWidth(260), Modifier::Padding(Padding::Md.as_u16())],
+    Widget::Column { children, spacing: Spacing::Md.as_u16(), align: Align::Stretch, modifiers: pane_mods }
+}
+
+fn search_field(st: &St) -> Widget {
+    let mut mods = vec![Modifier::Flex(1)];
+    if st.focus_field == FOCUS_SEARCH {
+        mods.push(Modifier::FocusRequest(st.focus));
+    }
+    let mut chrome = field_chrome();
+    chrome.push(Modifier::Flex(1));
+    Widget::Row {
+        children: vec![
+            Widget::Icon { id: IconId::MagnifyingGlass, size: 16, modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)] },
+            Widget::Input {
+                value: st.search.as_str().into(),
+                placeholder: "search".into(),
+                on_submit: ActionId(A_SEARCH_ENTER),
+                modifiers: mods,
+            },
+        ],
+        spacing: Spacing::Sm.as_u16(),
+        align: Align::Center,
+        modifiers: chrome,
     }
 }
 
@@ -441,17 +606,16 @@ fn list_screen(st: &St) -> Widget {
     let users = user_names();
     let wifis = wifi_names();
     let on_user = st.section == 0;
+    let names: &[String] = if on_user { &users } else { &wifis };
+    let shown = visible(st, names);
 
-    // Toolbar: search + actions.
-    let search = prefab::input(st.search.as_str(), "search", InputKind::Search, ActionId(A_SUBMIT), None);
     let toolbar = prefab::toolbar(vec![
-        Widget::Row { children: vec![search], spacing: 0, align: Align::Center, modifiers: vec![Modifier::Flex(1)] },
+        search_field(st),
         btn("+ Add", ButtonStyle::Primary, A_ADD),
         btn("+ Wi-Fi", ButtonStyle::Secondary, A_ADD_WIFI),
         btn("Lock", ButtonStyle::Ghost, A_LOCK),
     ]);
 
-    // Sidebar.
     let sidebar = Widget::Column {
         children: vec![
             prefab::sidebar_section(
@@ -485,27 +649,21 @@ fn list_screen(st: &St) -> Widget {
         ],
     };
 
-    // Middle: the entry list.
-    let filter = st.search.as_str().to_lowercase();
-    let names: &[String] = if on_user { &users } else { &wifis };
     let mut rows: Vec<Widget> = Vec::new();
-    for (i, name) in names.iter().enumerate() {
-        if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
-            continue;
-        }
-        let selected = st.sel == i as i32;
-        let subtitle = if on_user { fetch_login(name).1 } else { String::new() };
+    for &i in &shown {
+        let name = &names[i];
+        let subtitle = if on_user { fetch_login(name).user } else { String::new() };
         rows.push(prefab::list_row(
             if on_user { IconId::Lock } else { IconId::WifiHigh },
             name,
             &subtitle,
-            selected,
+            st.sel == i as i32,
             Some(ActionId(A_SEL_BASE + i as u32)),
             None,
         ));
     }
     if rows.is_empty() {
-        rows.push(prefab::empty_state("No entries yet"));
+        rows.push(prefab::empty_state(if names.is_empty() { "No entries yet" } else { "No match" }));
     }
     let list = Widget::Column {
         children: vec![Widget::Scroll {
@@ -524,20 +682,24 @@ fn list_screen(st: &St) -> Widget {
     };
 
     let body = Widget::Row {
-        children: vec![sidebar, list, Widget::Divider, detail_pane(st, &users, &wifis)],
+        children: vec![sidebar, list, Widget::Divider, detail_pane(st, names, &shown)],
         spacing: 0,
         align: Align::Stretch,
         modifiers: vec![Modifier::Flex(1)],
     };
 
-    let count = if on_user { users.len() } else { wifis.len() };
+    let status = if st.msg.is_empty() {
+        alloc::format!("{} items · unlocked", names.len())
+    } else {
+        st.msg.into()
+    };
     Widget::Column {
         children: vec![
             toolbar,
             Widget::Divider,
             body,
             Widget::Divider,
-            prefab::footer(&alloc::format!("{} items · unlocked", count), "Enter show · Ctrl L lock"),
+            prefab::footer(&status, "↑↓ select · Enter show · Ctrl C copy · Ctrl L lock"),
         ],
         spacing: Spacing::None.as_u16(),
         align: Align::Stretch,
@@ -545,53 +707,13 @@ fn list_screen(st: &St) -> Widget {
     }
 }
 
-fn edit_screen(st: &St) -> Widget {
-    let title = if st.edit_orig.is_empty() { "New secret" } else { "Edit secret" };
-    screen_card(vec![
-        Widget::Text { content: title.into(), style: TextStyle::Heading, modifiers: vec![] },
-        labelled(st, 0, "NAME", "github.com", false),
-        labelled(st, 1, "URL", "https://…", false),
-        labelled(st, 2, "USERNAME", "", false),
-        labelled(st, 3, "PASSWORD", "", true),
-        labelled(st, 4, "NOTE", "", false),
-        button_row(vec![
-            btn(if st.reveal { "Hide pw" } else { "Show pw" }, ButtonStyle::Ghost, A_REVEAL),
-            btn("Cancel", ButtonStyle::Ghost, A_CANCEL),
-            btn("Save", ButtonStyle::Primary, A_SUBMIT),
-        ]),
-    ])
-}
-
-fn wifi_screen(st: &St) -> Widget {
-    screen_card(vec![
-        Widget::Text { content: "New Wi-Fi network".into(), style: TextStyle::Heading, modifiers: vec![] },
-        labelled(st, 0, "SSID", "", false),
-        labelled(st, 1, "PASSWORD", "", true),
-        button_row(vec![
-            btn(if st.reveal { "Hide" } else { "Show" }, ButtonStyle::Ghost, A_REVEAL),
-            btn("Cancel", ButtonStyle::Ghost, A_CANCEL),
-            btn("Save", ButtonStyle::Primary, A_SUBMIT),
-        ]),
-    ])
-}
-
 fn render(st: &St) -> Widget {
-    let body = match st.view {
+    match st.view {
         View::Setup => setup_screen(st),
         View::Unlock => unlock_screen(st),
         View::List => list_screen(st),
         View::EditSecret => edit_screen(st),
         View::AddWifi => wifi_screen(st),
-    };
-    if st.msg.is_empty() {
-        body
-    } else {
-        Widget::Column {
-            children: vec![body, prefab::muted(st.msg)],
-            spacing: Spacing::Sm.as_u16(),
-            align: Align::Stretch,
-            modifiers: vec![Modifier::Background(Token::Surface)],
-        }
     }
 }
 
@@ -608,13 +730,15 @@ fn commit_tree(st: &St) {
     }
 }
 
-// ── Events ───────────────────────────────────────────────────────────────
+// ── Actions ────────────────────────────────────────────────────────────────
 
 fn start_view() -> View {
-    if host::vault_user_present() {
-        View::Unlock
-    } else {
+    if !host::vault_user_present() {
         View::Setup
+    } else if host::vault_unlocked() {
+        View::List
+    } else {
+        View::Unlock
     }
 }
 
@@ -625,16 +749,149 @@ fn clear_form(st: &mut St) {
     st.edit_orig.clear();
 }
 
+/// Views that need the user tier open. If something else locked the vault
+/// (the shell, another instance), fall back to the unlock screen.
+fn ensure_unlocked(st: &mut St) -> bool {
+    if matches!(st.view, View::List | View::EditSecret | View::AddWifi) && !host::vault_unlocked() {
+        clear_form(st);
+        st.sel = -1;
+        st.goto(View::Unlock);
+        st.error("The vault was locked.");
+        return false;
+    }
+    true
+}
+
+fn create_vault(st: &mut St) {
+    let pass = st.f[0].as_str();
+    if pass.chars().count() < MIN_PASSPHRASE {
+        st.error("Use at least 8 characters.");
+        st.focus_on(0);
+    } else if pass != st.f[1].as_str() {
+        st.f[1].clear();
+        st.error("Passphrases do not match.");
+        st.focus_on(1);
+    } else if host::vault_set_passphrase("", pass) {
+        clear_form(st);
+        st.sel = -1;
+        st.goto(View::List);
+        st.info("Vault created.");
+    } else {
+        st.error("Could not create the vault.");
+    }
+}
+
+fn unlock(st: &mut St) {
+    if st.f[0].is_empty() {
+        st.error("Enter your passphrase.");
+        st.focus_on(0);
+    } else if host::vault_unlock(st.f[0].as_str()) {
+        clear_form(st);
+        st.sel = -1;
+        st.goto(View::List);
+    } else {
+        st.f[0].clear();
+        st.error("Wrong passphrase.");
+        st.focus_on(0);
+    }
+}
+
 fn open_edit(st: &mut St, name: &str) {
     clear_form(st);
-    let (url, user, pass, note) = fetch_login(name);
+    let l = fetch_login(name);
     st.f[0].set(name);
-    st.f[1].set(&url);
-    st.f[2].set(&user);
-    st.f[3].set(&pass);
-    st.f[4].set(&note);
+    st.f[1].set(&l.url);
+    st.f[2].set(&l.user);
+    st.f[3].set(&l.pass);
+    st.f[4].set(&l.note);
     st.edit_orig.set(name);
     st.goto(View::EditSecret);
+}
+
+fn select_name(st: &mut St, name: &str) {
+    st.sel = section_names(st).iter().position(|n| n == name).map_or(-1, |i| i as i32);
+}
+
+fn save_secret(st: &mut St) {
+    let name = st.f[0].as_str().trim();
+    if name.is_empty() {
+        st.error("Name is required.");
+        st.focus_on(0);
+        return;
+    }
+    let orig = st.edit_orig.as_str();
+    if name != orig && user_names().iter().any(|n| n == name) {
+        st.error("An entry with this name already exists.");
+        st.focus_on(0);
+        return;
+    }
+    let rec = encode_login(st.f[1].as_str(), st.f[2].as_str(), st.f[3].as_str(), st.f[4].as_str());
+    // Write the new entry first; only then drop the old name of a rename,
+    // so a failed write never loses the entry.
+    if !host::vault_user_set(name, &rec) {
+        st.error("Could not save — is the vault still unlocked?");
+        return;
+    }
+    if !orig.is_empty() && orig != name {
+        host::vault_user_delete(orig);
+    }
+    let saved = String::from(name);
+    clear_form(st);
+    st.section = 0;
+    st.goto(View::List);
+    select_name(st, &saved);
+    st.info("Saved.");
+}
+
+fn save_wifi(st: &mut St) {
+    let ssid = st.f[0].as_str().trim();
+    if ssid.is_empty() {
+        st.error("SSID is required.");
+        st.focus_on(0);
+        return;
+    }
+    let mut key = String::from("net:");
+    key.push_str(ssid);
+    if !host::vault_system_set(&key, st.f[1].as_str().as_bytes()) {
+        st.error("Could not save the network.");
+        return;
+    }
+    let saved = String::from(ssid);
+    clear_form(st);
+    st.section = 1;
+    st.goto(View::List);
+    select_name(st, &saved);
+    st.info("Saved.");
+}
+
+fn save_form(st: &mut St) {
+    match st.view {
+        View::Setup => create_vault(st),
+        View::Unlock => unlock(st),
+        View::EditSecret => save_secret(st),
+        View::AddWifi => save_wifi(st),
+        View::List => {}
+    }
+}
+
+/// Number of fields on the current form screen.
+fn form_fields(view: View) -> usize {
+    match view {
+        View::Setup => 2,
+        View::Unlock => 1,
+        View::EditSecret => 5,
+        View::AddWifi => 2,
+        View::List => 0,
+    }
+}
+
+/// Enter in field `i`: the next field, or submit on the last one.
+fn on_enter(st: &mut St, i: usize) {
+    if i + 1 < form_fields(st.view) {
+        st.focus_on(i + 1);
+    } else {
+        save_form(st);
+    }
 }
 
 fn edit_selected(st: &mut St) {
@@ -648,206 +905,230 @@ fn edit_selected(st: &mut St) {
     }
 }
 
+/// First press arms, second press deletes.
 fn delete_selected(st: &mut St) {
-    if st.section == 0 {
-        let users = user_names();
-        if st.sel >= 0 && (st.sel as usize) < users.len() {
-            host::vault_user_delete(&users[st.sel as usize]);
-        }
-    } else {
-        let wifis = wifi_names();
-        if st.sel >= 0 && (st.sel as usize) < wifis.len() {
-            let mut key = String::from("net:");
-            key.push_str(&wifis[st.sel as usize]);
-            host::vault_system_delete(&key);
-        }
+    let names = section_names(st);
+    if st.sel < 0 || st.sel as usize >= names.len() {
+        return;
     }
+    if !st.confirm_del {
+        st.confirm_del = true;
+        st.info("Press Delete again to remove this entry.");
+        return;
+    }
+    let name = &names[st.sel as usize];
+    let ok = if st.section == 0 {
+        host::vault_user_delete(name)
+    } else {
+        let mut key = String::from("net:");
+        key.push_str(name);
+        host::vault_system_delete(&key)
+    };
+    st.confirm_del = false;
     st.sel = -1;
+    st.reveal = false;
+    if ok {
+        st.info("Deleted.");
+    } else {
+        st.error("Could not delete.");
+    }
+}
+
+fn move_selection(st: &mut St, down: bool) {
+    let names = section_names(st);
+    let shown = visible(st, &names);
+    if shown.is_empty() {
+        return;
+    }
+    let pos = shown.iter().position(|&i| i as i32 == st.sel);
+    let next = match (pos, down) {
+        (None, _) => 0,
+        (Some(p), true) => (p + 1).min(shown.len() - 1),
+        (Some(p), false) => p.saturating_sub(1),
+    };
+    st.sel = shown[next] as i32;
     st.reveal = false;
 }
 
-fn save_secret(st: &mut St) {
-    let name = st.f[0].as_str();
-    if name.is_empty() {
-        st.msg = "Name is required.";
+fn copy_selected(st: &mut St, password: bool) {
+    if st.section != 0 {
         return;
     }
-    let rec = encode_login(st.f[1].as_str(), st.f[2].as_str(), st.f[3].as_str(), st.f[4].as_str());
-    let orig = st.edit_orig.as_str();
-    if !orig.is_empty() && orig != name {
-        host::vault_user_delete(orig);
-    }
-    host::vault_user_set(name, &rec);
-    clear_form(st);
-    st.sel = -1;
-    st.section = 0;
-    st.goto(View::List);
-}
-
-fn save_wifi(st: &mut St) {
-    let ssid = st.f[0].as_str();
-    if ssid.is_empty() {
-        st.msg = "SSID is required.";
+    let users = user_names();
+    if st.sel < 0 || st.sel as usize >= users.len() {
         return;
     }
-    let mut key = String::from("net:");
-    key.push_str(ssid);
-    host::vault_system_set(&key, st.f[1].as_str().as_bytes());
-    clear_form(st);
-    st.sel = -1;
-    st.section = 1;
-    st.goto(View::List);
+    let l = fetch_login(&users[st.sel as usize]);
+    let text = if password { &l.pass } else { &l.user };
+    if text.is_empty() {
+        st.info("Nothing to copy.");
+    } else if host::clipboard_set(text) {
+        if password {
+            st.clip_hash = fnv(text.as_bytes());
+            st.clip_deadline = host::ticks_ms() + CLIP_CLEAR_MS;
+            st.info("Password copied — the clipboard clears in 30 s.");
+        } else {
+            st.info("Username copied.");
+        }
+    } else {
+        st.error("Could not copy.");
+    }
 }
 
-fn on_submit(st: &mut St) -> Outcome {
-    match st.view {
-        View::Setup => {
-            if st.f[0].as_str().is_empty() {
-                st.msg = "Choose a passphrase.";
-            } else if st.f[0].as_str() != st.f[1].as_str() {
-                st.msg = "Passphrases do not match.";
-                st.f[1].clear();
-                st.set_active(1);
-            } else if host::vault_set_passphrase("", st.f[0].as_str()) {
-                clear_form(st);
-                st.sel = -1;
-                st.goto(View::List);
-            } else {
-                st.msg = "Could not create the vault.";
-            }
-        }
-        View::Unlock => {
-            if host::vault_unlock(st.f[0].as_str()) {
-                clear_form(st);
-                st.sel = -1;
-                st.goto(View::List);
-            } else {
-                st.f[0].clear();
-                st.msg = "Wrong passphrase.";
-                st.set_active(0);
-            }
-        }
-        View::EditSecret => {
-            if st.active < 4 {
-                st.set_active(st.active + 1);
-            } else {
-                save_secret(st);
-            }
-        }
-        View::AddWifi => {
-            if st.active < 1 {
-                st.set_active(st.active + 1);
-            } else {
-                save_wifi(st);
-            }
-        }
-        View::List => {
-            // Enter on the list reveals the selected password (footer: "Enter show").
-            st.reveal = !st.reveal;
-            st.focus = st.focus.wrapping_add(1);
-        }
+/// Clear the clipboard if it still holds the password we put there. False
+/// while it cannot be checked (the clipboard is focus-gated).
+fn clear_clipboard(st: &mut St) -> bool {
+    if st.clip_hash == 0 {
+        return true;
     }
-    Outcome::Rerender
+    let mut buf = [0u8; 2048];
+    match host::clipboard_get(&mut buf) {
+        Some(n) => {
+            if n <= buf.len() && fnv(&buf[..n]) == st.clip_hash {
+                host::clipboard_set("");
+            }
+            st.clip_hash = 0;
+            st.clip_deadline = 0;
+            true
+        }
+        None => false,
+    }
+}
+
+fn lock(st: &mut St) {
+    clear_clipboard(st);
+    host::vault_lock();
+    clear_form(st);
+    st.search.clear();
+    st.sel = -1;
+    st.goto(View::Unlock);
+}
+
+fn on_action(st: &mut St, id: u32) {
+    if id != A_DELETE {
+        st.confirm_del = false;
+    }
+    match id {
+        A_SAVE => save_form(st),
+        A_REVEAL => st.reveal = !st.reveal,
+        A_ADD => {
+            clear_form(st);
+            st.goto(View::EditSecret);
+        }
+        A_ADD_WIFI => {
+            clear_form(st);
+            st.goto(View::AddWifi);
+        }
+        A_LOCK => lock(st),
+        A_CANCEL => {
+            clear_form(st);
+            st.goto(View::List);
+        }
+        A_SEC_USER | A_SEC_WIFI => {
+            st.section = if id == A_SEC_USER { 0 } else { 1 };
+            st.sel = -1;
+            st.reveal = false;
+            st.info("");
+        }
+        A_EDIT => edit_selected(st),
+        A_DELETE => delete_selected(st),
+        A_COPY_PASS => copy_selected(st, true),
+        A_COPY_USER => copy_selected(st, false),
+        A_SEARCH_ENTER => {
+            let names = section_names(st);
+            if let Some(&first) = visible(st, &names).first() {
+                st.sel = first as i32;
+                st.reveal = false;
+            }
+        }
+        id if id >= A_SEL_BASE => {
+            st.sel = (id - A_SEL_BASE) as i32;
+            st.reveal = false;
+            st.info("");
+        }
+        id if id >= A_ENTER_BASE => on_enter(st, (id - A_ENTER_BASE) as usize),
+        _ => {}
+    }
 }
 
 fn handle(st: &mut St, ev: Event) -> Outcome {
     match ev {
-        Event::InputChange { value } => {
-            if st.view == View::List {
-                st.search.set(&value);
-            } else {
-                st.active_field().set(&value);
+        // A form field changed: store it, no re-commit (see the module doc).
+        Event::InputChangeAt { node, value } => {
+            if let Some(i) = node.checked_sub(NODE_FIELD).map(|i| i as usize).filter(|&i| i < NFIELDS) {
+                st.f[i].set(&value);
             }
             Outcome::Idle
         }
+        // Untagged change: only the search box sends these. It re-commits so
+        // the list filters as you type.
+        Event::InputChange { value } => {
+            if st.view == View::List {
+                st.search.set(&value);
+                st.info("");
+                Outcome::Rerender
+            } else {
+                Outcome::Idle
+            }
+        }
+        Event::Focus(true) => {
+            ensure_unlocked(st);
+            Outcome::Rerender
+        }
         Event::Action(ActionId(id)) => {
-            match id {
-                A_SUBMIT => return on_submit(st),
-                A_REVEAL => {
-                    st.reveal = !st.reveal;
-                    st.focus = st.focus.wrapping_add(1);
-                }
-                A_ADD => {
-                    clear_form(st);
-                    st.goto(View::EditSecret);
-                }
-                A_ADD_WIFI => {
-                    clear_form(st);
-                    st.goto(View::AddWifi);
-                }
-                A_LOCK => {
-                    host::vault_lock();
-                    st.sel = -1;
-                    st.goto(View::Unlock);
-                }
-                A_CANCEL => {
-                    clear_form(st);
-                    st.goto(View::List);
-                }
-                A_SEC_USER => {
-                    st.section = 0;
-                    st.sel = -1;
-                    st.reveal = false;
-                }
-                A_SEC_WIFI => {
-                    st.section = 1;
-                    st.sel = -1;
-                    st.reveal = false;
-                }
-                A_EDIT => edit_selected(st),
-                A_DELETE => delete_selected(st),
-                id if id >= A_SEL_BASE => {
-                    st.sel = (id - A_SEL_BASE) as i32;
-                    st.reveal = false;
-                }
-                id if id >= A_FIELD_BASE => {
-                    st.set_active((id - A_FIELD_BASE) as usize);
-                }
-                _ => {}
+            if ensure_unlocked(st) {
+                on_action(st, id);
             }
             Outcome::Rerender
         }
-        // Ctrl chords (Ctrl is implied) that no focused text widget consumed.
-        Event::Chord { letter, .. } => match letter {
-            b'l' => {
-                host::vault_lock();
-                st.sel = -1;
-                st.goto(View::Unlock);
-                Outcome::Rerender
+        // Ctrl chords (Ctrl implied). They reach the app even while a field
+        // has the keyboard, except A/C/X/V, which stay with the editor.
+        Event::Chord { letter, .. } => {
+            if !ensure_unlocked(st) {
+                return Outcome::Rerender;
             }
-            b'n' if st.view == View::List => {
-                clear_form(st);
-                st.goto(View::EditSecret);
-                Outcome::Rerender
+            match (letter, st.view) {
+                (b'l', View::List | View::EditSecret | View::AddWifi) => lock(st),
+                (b's', View::EditSecret | View::AddWifi | View::Setup) => save_form(st),
+                (b'n', View::List) => {
+                    clear_form(st);
+                    st.goto(View::EditSecret);
+                }
+                (b'b', View::List) => copy_selected(st, false),
+                (b'f', View::List) => st.focus_on(FOCUS_SEARCH),
+                _ => return Outcome::Idle,
             }
-            _ => Outcome::Idle,
-        },
+            Outcome::Rerender
+        }
         Event::Key(KeyCode::Escape) => match st.view {
+            View::List if !st.search.is_empty() => {
+                st.search.clear();
+                Outcome::Rerender
+            }
             View::List | View::Unlock | View::Setup => Outcome::Exit,
-            _ => {
+            View::EditSecret | View::AddWifi => {
                 clear_form(st);
                 st.goto(View::List);
                 Outcome::Rerender
             }
         },
-        // List navigation and actions (when no text field has the keyboard).
+        // List keys arrive only while no text field has the keyboard
+        // (Up/Down also pass through a focused search box).
         Event::Key(k) if st.view == View::List => {
-            let n = if st.section == 0 { user_names().len() } else { wifi_names().len() } as i32;
+            if !ensure_unlocked(st) {
+                return Outcome::Rerender;
+            }
+            if k != KeyCode::Delete {
+                st.confirm_del = false;
+            }
             match k {
-                KeyCode::Enter => {
-                    st.reveal = !st.reveal;
-                    st.focus = st.focus.wrapping_add(1);
-                }
-                KeyCode::Down if n > 0 => {
-                    st.sel = (st.sel + 1).clamp(0, n - 1);
-                    st.reveal = false;
-                }
-                KeyCode::Up if st.sel > 0 => {
-                    st.sel -= 1;
-                    st.reveal = false;
-                }
+                KeyCode::Enter if st.sel >= 0 => st.reveal = !st.reveal,
+                KeyCode::Down => move_selection(st, true),
+                KeyCode::Up => move_selection(st, false),
                 KeyCode::Delete => delete_selected(st),
                 KeyCode::F(2) => edit_selected(st),
+                // Ctrl+C without a focused text field arrives as the ETX byte.
+                KeyCode::Char(0x03) => copy_selected(st, true),
                 _ => return Outcome::Idle,
             }
             Outcome::Rerender
@@ -862,6 +1143,13 @@ enum Outcome {
     Exit,
 }
 
+fn shutdown(st: &mut St) {
+    clear_clipboard(st);
+    // Closing the window locks the user tier: no idle lock exists yet, and
+    // an unlocked vault should not outlive the window that opened it.
+    host::vault_lock();
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let mut st = St {
@@ -869,12 +1157,16 @@ pub extern "C" fn _start() {
         f: [Field::new(), Field::new(), Field::new(), Field::new(), Field::new()],
         search: Field::new(),
         section: 0,
-        active: 0,
         focus: 1,
+        focus_field: 0,
         reveal: false,
         sel: -1,
         edit_orig: Field::new(),
+        confirm_del: false,
         msg: "",
+        msg_err: false,
+        clip_hash: 0,
+        clip_deadline: 0,
         heap_base: ALLOCATOR.mark(),
     };
     commit_tree(&st);
@@ -888,17 +1180,33 @@ pub extern "C" fn _start() {
                     Outcome::Idle => {}
                     Outcome::Rerender => redraw = true,
                     Outcome::Exit => {
+                        shutdown(&mut st);
                         host::close_widget();
                         return;
                     }
                 },
                 nopeek_widgets::events::Poll::Empty => break,
-                nopeek_widgets::events::Poll::Gone => return,
+                nopeek_widgets::events::Poll::Gone => {
+                    shutdown(&mut st);
+                    return;
+                }
             }
+        }
+        // A copied password is cleared once its time is up. The clipboard is
+        // focus-gated: if we are not focused, retry on the next event.
+        let now = host::ticks_ms();
+        if st.clip_hash != 0 && now >= st.clip_deadline && clear_clipboard(&mut st) {
+            st.info("Clipboard cleared.");
+            redraw = true;
         }
         if redraw {
             commit_tree(&st);
         }
-        host::wait(WAIT_INPUT, -1);
+        let timeout = if st.clip_hash != 0 && now < st.clip_deadline {
+            (st.clip_deadline - now).min(i32::MAX as u64) as i32
+        } else {
+            -1
+        };
+        host::wait(WAIT_INPUT, timeout);
     }
 }

@@ -229,6 +229,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::WheelX { .. }    => 14,
         Event::Slide { .. }      => 15,
         Event::PopupDone { .. }  => 16,
+        Event::InputChangeAt { .. } => 17,
     }
 }
 

@@ -1309,11 +1309,27 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
                 s.parked_edit = Some((leaving, edit));
             }
         } else {
-            let resume = match &s.parked_edit {
-                Some((path, edit)) if *path == s.focus_path => Some(edit.clone()),
-                _ => None,
-            };
-            s.input_edit = compute_input_edit(&s.tree, &s.focus_path, resume.as_ref());
+            let same_field = s.focus_path == leaving;
+            // Moving to another field: the one being left keeps what was
+            // typed, on screen and parked, exactly as when focus goes to
+            // nothing above. Without this a field left by click shows the
+            // app's older tree value until the app commits again.
+            if !same_field {
+                if let Some(edit) = s.input_edit.take() {
+                    tree_updated = set_scene_input_value(s, &leaving, &edit.value);
+                    s.parked_edit = Some((leaving, edit));
+                }
+            }
+            // A click inside the field being edited keeps its live buffer:
+            // it leads the tree, so rebuilding from the tree would drop what
+            // was typed since the app last committed.
+            if !(same_field && s.input_edit.is_some()) {
+                let resume = match &s.parked_edit {
+                    Some((path, edit)) if *path == s.focus_path => Some(edit.clone()),
+                    _ => None,
+                };
+                s.input_edit = compute_input_edit(&s.tree, &s.focus_path, resume.as_ref());
+            }
             // Click on the text positions the caret exactly there
             // (`text_select_begin`, which needs the press inside the
             // Input's own rect). A click on the field's chrome has no
@@ -1353,6 +1369,15 @@ fn set_scene_input_value(s: &mut WidgetScene, path: &[u32], value: &str) -> bool
     let changed = set_input_value_at(Arc::make_mut(&mut s.tree), path, value);
     if changed { s.layout_stale = true; }
     changed
+}
+
+/// The `Modifier::NodeId` of the widget at `path`, if it carries one.
+fn node_id_at(tree: &abi::Widget, path: &[u32]) -> Option<u32> {
+    let w = widget_at_path(tree, path)?;
+    modifiers_of_ref(w).iter().find_map(|m| match m {
+        abi::Modifier::NodeId(n) => Some(n.0),
+        _ => None,
+    })
 }
 
 /// Move focus to the next focusable widget in document order
@@ -1395,12 +1420,24 @@ fn advance_focus(window_id: u32, delta: isize) -> bool {
         let new_path = paths.swap_remove(next_idx);
         if new_path == s.focus_path { return false; }
 
-        s.focus_path = new_path;
-        // Tab onto an Input → init the editor; Tab off Input → drop it.
-        s.input_edit = compute_input_edit(&s.tree, &s.focus_path, None);
+        // Tab off an Input: keep what was typed on screen and parked (same
+        // as a click away), so the field does not fall back to the app's
+        // older tree value. Tab onto an Input → init the editor, resuming a
+        // parked one for that field.
+        let leaving = core::mem::replace(&mut s.focus_path, new_path);
+        let mut tree_updated = false;
+        if let Some(edit) = s.input_edit.take() {
+            tree_updated = set_scene_input_value(s, &leaving, &edit.value);
+            s.parked_edit = Some((leaving, edit));
+        }
+        let resume = match &s.parked_edit {
+            Some((path, edit)) if *path == s.focus_path => Some(edit.clone()),
+            _ => None,
+        };
+        s.input_edit = compute_input_edit(&s.tree, &s.focus_path, resume.as_ref());
         // Without pseudo-state mods a newly focused Input still needs its
         // caret painted.
-        if !(s.has_pseudo || s.input_edit.is_some()) { return false; }
+        if !(s.has_pseudo || s.input_edit.is_some() || tree_updated) { return false; }
         RenderJob::take(s, LayoutMode::Reuse)
     };
     finish_job(window_id, job, LayoutMode::Reuse);
@@ -1776,19 +1813,20 @@ fn caret_follow_scroll_in(s: &mut WidgetScene) {
 /// actually changes (cut/paste), and always re-renders so a new selection
 /// shows immediately.
 fn handle_clipboard_key(window_id: u32, letter: u8, is_textarea: bool) -> bool {
-    let changed_value: Option<String> = {
+    let (changed_value, node): (Option<String>, Option<u32>) = {
         let mut scenes = SCENES.lock();
         let scene = match scenes.get_mut(&window_id) {
             Some(s) => s,
             None    => return false,
         };
+        let node = node_id_at(&scene.tree, &scene.focus_path);
         let edit = match scene.input_edit.as_mut() {
             Some(e) => e,
             None    => return false,
         };
         edit.cursor = clamp_boundary(&edit.value, edit.cursor);
         let sel = edit.selection();
-        match letter {
+        let v = match letter {
             b'a' => {
                 // Select all (anchor at start, caret at end).
                 if !edit.value.is_empty() {
@@ -1839,14 +1877,18 @@ fn handle_clipboard_key(window_id: u32, letter: u8, is_textarea: bool) -> bool {
                 }
             }
             _ => None,
-        }
+        };
+        (v, node)
     };
 
     if is_textarea {
         caret_follow_scroll(window_id);
     }
     if let Some(v) = changed_value {
-        push_event(window_id, abi::Event::InputChange { value: v });
+        push_event(window_id, abi::Event::InputChange { value: v.clone() });
+        if let Some(node) = node {
+            push_event(window_id, abi::Event::InputChangeAt { node, value: v });
+        }
     }
     rerender_state_only(window_id);
     mark_dirty(window_id);
@@ -2331,7 +2373,7 @@ pub fn handle_input_key(
     // Phase 1: confirm a focused text widget exists; capture its kind
     // (Input on_submit, or TextArea) + the window height for paging.
     // Drop the read lock before mutating.
-    let (is_textarea, on_submit, win_h, has_sel, value_empty) = {
+    let (is_textarea, on_submit, win_h, has_sel, value_empty, node) = {
         let scenes = SCENES.lock();
         let scene = match scenes.get(&window_id) {
             Some(s) => s,
@@ -2346,9 +2388,10 @@ pub fn handle_input_key(
             Some(e) => (e.selection().is_some(), e.value.is_empty()),
             None    => (false, true),
         };
+        let node = node_id_at(&scene.tree, &scene.focus_path);
         match widget_at_path(&scene.tree, &scene.focus_path) {
-            Some(abi::Widget::Input { on_submit, .. }) => (false, *on_submit, scene.height, has_sel, value_empty),
-            Some(abi::Widget::TextArea { .. })         => (true, abi::ActionId(u32::MAX), scene.height, has_sel, value_empty),
+            Some(abi::Widget::Input { on_submit, .. }) => (false, *on_submit, scene.height, has_sel, value_empty, node),
+            Some(abi::Widget::TextArea { .. })         => (true, abi::ActionId(u32::MAX), scene.height, has_sel, value_empty, node),
             _ => return false,
         }
     };
@@ -2587,7 +2630,10 @@ pub fn handle_input_key(
         }
         _ => {
             if let Some(value) = new_value {
-                push_event(window_id, abi::Event::InputChange { value });
+                push_event(window_id, abi::Event::InputChange { value: value.clone() });
+                if let Some(node) = node {
+                    push_event(window_id, abi::Event::InputChangeAt { node, value });
+                }
             }
         }
     }

@@ -34,6 +34,10 @@ unsafe extern "C" {
     fn npk_vault_system_list(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_vault_user_delete(name_ptr: i32, name_len: i32) -> i32;
     fn npk_vault_system_delete(name_ptr: i32, name_len: i32) -> i32;
+
+    // Clipboard — focus-gated (only the focused widget app).
+    fn npk_clipboard_set(ptr: i32, len: i32) -> i32;
+    fn npk_clipboard_get(ptr: i32, max: i32) -> i32;
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
     fn npk_config_get(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
@@ -393,6 +397,18 @@ pub fn vault_user_delete(name: &[u8]) -> i32 {
 pub fn vault_system_delete(name: &[u8]) -> i32 {
     // SAFETY: FFI; the range is borrowed for the call.
     unsafe { npk_vault_system_delete(name.as_ptr() as i32, name.len() as i32) }
+}
+
+/// Put `text` on the clipboard. Bytes stored, or -1 (not focused / denied).
+pub fn clipboard_set(text: &[u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_clipboard_set(text.as_ptr() as i32, text.len() as i32) }
+}
+/// Copy the clipboard text into `buf`. The full text length (may exceed
+/// `buf`), 0 if empty, or -1 (not focused / denied).
+pub fn clipboard_get(buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_clipboard_get(buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
 pub fn fs_list(prefix: &[u8], out: &mut [u8], recursive: bool) -> i32 {
