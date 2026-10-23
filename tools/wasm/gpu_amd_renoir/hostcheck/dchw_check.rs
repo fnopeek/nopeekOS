@@ -170,8 +170,8 @@ fn aux_engine_read(reg: u32) -> Option<u32> {
     })
 }
 
-/// An eDP 1.4 panel, 1920x1080 over two HBR lanes, backlight on PWM, no PSR
-/// (oracle/dp_sink.c, byte for byte).
+/// An eDP 1.4 panel, 1920x1080 over two HBR lanes, backlight on PWM, no PSR,
+/// that trains at the first try (oracle/dp_sink.c, byte for byte).
 const PANEL_EDID: [u8; 128] = [
     0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x30, 0xe4, 0x2c, 0x05, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x1d, 0x01, 0x04, 0xa5, 0x22, 0x13, 0x78, 0x02, 0xa0, 0xf5, 0x95, 0x5b, 0x59, 0x93, 0x27,
@@ -192,6 +192,9 @@ fn panel_sink(panel_engine: usize) -> Sink {
     dpcd[DP_EDP_CONFIGURATION_CAP as usize] = 0x01 | 0x02; // alternate scrambler reset, framing change
     dpcd[DP_EDP_DPCD_REV as usize] = 0x03; // DP_EDP_14
     dpcd[DP_SET_POWER as usize] = DP_SET_POWER_D0 as u8;
+    // Link training: both lanes CR/EQ/symbol lock, interlane alignment done.
+    dpcd[0x202] = 0x77; // DP_LANE0_1_STATUS
+    dpcd[0x204] = 0x01; // DP_LANE_ALIGN_STATUS_UPDATED: DP_INTERLANE_ALIGN_DONE
     let mut edid = PANEL_EDID;
     let sum = edid[..127].iter().fold(0u8, |a, &b| a.wrapping_add(b));
     edid[127] = sum.wrapping_neg();

@@ -695,7 +695,8 @@ done
 {
     $X "$AMD/display/amdgpu_dm/amdgpu_dm_helpers.c" edid_extract_panel_id apply_edid_quirks dm_helpers_parse_edid_caps \
         dm_helpers_dp_read_dpcd dm_helpers_dp_write_dpcd dm_helpers_probe_acpi_edid dm_helpers_read_acpi_edid \
-        dm_helpers_read_local_edid dm_helpers_init_panel_settings dm_helpers_override_panel_settings
+        dm_helpers_read_local_edid dm_helpers_init_panel_settings dm_helpers_override_panel_settings \
+        dm_helpers_dp_write_hblank_reduction
     $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" to_drm_connector_type amdgpu_dm_i2c_xfer amdgpu_dm_i2c_func \
         amdgpu_dm_i2c_algo
     $X "$AMD/display/amdgpu_dm/amdgpu_dm_mst_types.c" dm_dp_aux_transfer |
@@ -710,7 +711,8 @@ done
 ld -r -o "$K/kworld_all.o" "$K/kdrm_bridge.o" "$K/kshim.o" "$K/drm_edid.o" "$K/drm_dp_helper.o" \
     "$K/drm_displayid.o" "$K/drm_modes.o" "$K/ctype.o"
 printf '%s\n' kdrm_connector_create dm_helpers_read_local_edid dm_helpers_parse_edid_caps dm_helpers_dp_read_dpcd \
-    dm_helpers_dp_write_dpcd dm_helpers_init_panel_settings dm_helpers_override_panel_settings > "$K/keep"
+    dm_helpers_dp_write_dpcd dm_helpers_init_panel_settings dm_helpers_override_panel_settings \
+    dm_helpers_dp_write_hblank_reduction > "$K/keep"
 objcopy --keep-global-symbols="$K/keep" "$K/kworld_all.o" "$K/kworld.o"
 $KCC $KAMD -c "$HERE/kdrm/layout.c" -o "$K/layout_kernel.o"
 gcc $DCHW_CF -c "$HERE/kdrm/layout.c" -o "$K/layout_shim.o"

@@ -24,6 +24,8 @@
 #include "dc.h"
 #include "core_types.h"
 #include "dc_dmub_srv.h"
+#include "dc_state.h"
+#include "dc_stream.h"
 #include "dmub/dmub_srv.h"
 #include "dmub/src/dmub_dcn20.h"
 #include "dm_pp_smu.h"
@@ -213,6 +215,20 @@ static u64 amdgpu_gmc_pd_addr(struct amdgpu_bo *bo)
 
 void kdrm_connector_create(struct dc_link *link);
 
+/* udelay for the DMUB service's polls (dmub_srv.c): time does not pass
+ * in the register file. */
+void (udelay)(unsigned long usecs)
+{
+}
+
+/* dml2_destroy (dml2_wrapper.c), which dc_state_release calls with the
+ * state's DML2 context; DCN 2.1 has none (dml2 is not built). */
+void dml2_destroy(struct dml2_context *dml2)
+{
+	if (dml2)
+		abort();
+}
+
 static void preset(u32 reg, u32 val)
 {
 	printf("preset reg 0x%x = 0x%x\n", reg, val);
@@ -293,7 +309,8 @@ int main(int argc, char **argv)
 	struct dc *dc = adev.dm.dc;
 	if (boot)
 		boot_preset(dc);
-	bool detect = argc > 3 && !strcmp(argv[3], "detect");
+	bool commit = argc > 3 && !strcmp(argv[3], "commit");
+	bool detect = commit || (argc > 3 && !strcmp(argv[3], "detect"));
 	/* Every HPD but the panel's low, named from Linux's own pin tables. */
 	if (detect)
 		for (int l = 1; l < dc->link_count; l++)
@@ -373,6 +390,62 @@ int main(int argc, char **argv)
 			       link->dpcd_caps.max_down_spread.raw, link->dpcd_sink_ext_caps.raw,
 			       link->dpcd_caps.sink_count.raw, link->dpcd_caps.is_branch_dev);
 		}
+	}
+
+	/* argv[3] = commit: after detection, a 1920x1080 stream for the panel
+	 * from its EDID's first detailed timing, one ARGB8888 plane, then
+	 * dc_validate_global_state, dc_commit_streams and
+	 * dc_update_planes_and_stream as amdgpu_dm_atomic_commit_tail calls
+	 * them. */
+	if (commit && dc->links[0]->local_sink) {
+		struct dc_stream_state *stream = dc_create_stream_for_sink(dc->links[0]->local_sink);
+		struct dc_crtc_timing *t = &stream->timing;
+
+		t->h_addressable = 1920;
+		t->h_total = 1920 + 222;
+		t->h_front_porch = 60;
+		t->h_sync_width = 32;
+		t->v_addressable = 1080;
+		t->v_total = 1080 + 20;
+		t->v_front_porch = 3;
+		t->v_sync_width = 6;
+		t->pix_clk_100hz = 1414000;
+		t->display_color_depth = COLOR_DEPTH_888;
+		t->pixel_encoding = PIXEL_ENCODING_RGB;
+		t->scan_type = SCANNING_TYPE_NODATA;
+		t->flags.HSYNC_POSITIVE_POLARITY = 1;
+		t->flags.VSYNC_POSITIVE_POLARITY = 1;
+		stream->src.width = stream->dst.width = 1920;
+		stream->src.height = stream->dst.height = 1080;
+		stream->output_color_space = COLOR_SPACE_SRGB;
+		stream->out_transfer_func.type = TF_TYPE_PREDEFINED;
+		stream->out_transfer_func.tf = TRANSFER_FUNCTION_SRGB;
+
+		struct dc_plane_state *plane = dc_create_plane_state(dc);
+		plane->format = SURFACE_PIXEL_FORMAT_GRPH_ARGB8888;
+		plane->plane_size.surface_size.width = 1920;
+		plane->plane_size.surface_size.height = 1080;
+		plane->plane_size.surface_pitch = 1920;
+		plane->src_rect = plane->dst_rect = plane->clip_rect = (struct rect){ 0, 0, 1920, 1080 };
+		plane->tiling_info.gfx9.swizzle = DC_SW_LINEAR;
+		plane->rotation = ROTATION_ANGLE_0;
+		plane->visible = true;
+		plane->color_space = COLOR_SPACE_SRGB;
+		plane->address.type = PLN_ADDR_TYPE_GRAPHICS;
+		plane->address.grph.addr.quad_part = VRAM_START + 0x1000000;
+		plane->global_alpha_value = 0xff;
+		plane->in_transfer_func.type = TF_TYPE_PREDEFINED;
+		plane->in_transfer_func.tf = TRANSFER_FUNCTION_SRGB;
+
+		struct dc_state *context = dc_state_create_current_copy(dc);
+		printf("dc_state_add_stream %d\n", dc_state_add_stream(dc, context, stream));
+		printf("dc_state_add_plane %d\n", dc_state_add_plane(dc, stream, plane, context));
+		printf("dc_validate_global_state %d\n",
+		       dc_validate_global_state(dc, context, DC_VALIDATE_MODE_AND_PROGRAMMING));
+		struct dc_commit_streams_params params = { .streams = &stream, .stream_count = 1 };
+		printf("dc_commit_streams %d\n", dc_commit_streams(dc, &params));
+		struct dc_surface_update srf = { .surface = plane };
+		printf("dc_update_planes_and_stream %d\n", dc_update_planes_and_stream(dc, &srf, 1, stream, NULL));
 	}
 
 	for (int c = 0; c < n_dmub_cmds; c++) {

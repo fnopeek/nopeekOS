@@ -127,7 +127,8 @@ static bool aux_engine_read(u32 reg, u32 *val)
 }
 
 /* An eDP 1.4 panel, 1920x1080 over two HBR lanes, backlight on PWM, no PSR,
- * and its EDID (base block only, checksum filled in). */
+ * that trains at the first try, and its EDID (base block only, checksum
+ * filled in). */
 static const u8 panel_edid[128] = {
 	0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x30, 0xe4, 0x2c, 0x05, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x1d, 0x01, 0x04, 0xa5, 0x22, 0x13, 0x78, 0x02, 0xa0, 0xf5, 0x95, 0x5b, 0x59, 0x93, 0x27,
@@ -150,6 +151,10 @@ static void panel_sink_init(void)
 	sink_dpcd[DP_EDP_CONFIGURATION_CAP] = DP_ALTERNATE_SCRAMBLER_RESET_CAP | DP_FRAMING_CHANGE_CAP;
 	sink_dpcd[DP_EDP_DPCD_REV] = DP_EDP_14;
 	sink_dpcd[DP_SET_POWER] = DP_SET_POWER_D0;
+	/* Link training: both lanes report clock recovery, channel EQ and
+	 * symbol lock, interlane alignment done, no adjustment requested. */
+	sink_dpcd[DP_LANE0_1_STATUS] = 0x77;
+	sink_dpcd[DP_LANE_ALIGN_STATUS_UPDATED] = DP_INTERLANE_ALIGN_DONE;
 	memcpy(sink_edid, panel_edid, 128);
 	for (int i = 0; i < 127; i++)
 		sum += sink_edid[i];
