@@ -23,6 +23,16 @@ pub fn dm_write_reg(adev: &amdgpu_device, addr: u32, value: u32) {
     adev.wreg32(addr, value);
 }
 
+/// `dm_get_timestamp` (amdgpu_dm_services.c): ktime in ns.
+pub fn dm_get_timestamp() -> u64 {
+    (npk_sys::now_us() as u64).wrapping_mul(1000)
+}
+
+/// `dm_get_elapse_time_in_ns` (amdgpu_dm_services.c).
+pub fn dm_get_elapse_time_in_ns(current_time_stamp: u64, last_time_stamp: u64) -> u64 {
+    current_time_stamp.wrapping_sub(last_time_stamp)
+}
+
 /// `set_reg_field_value_ex` (dm_services.h).
 #[inline]
 pub fn set_reg_field_value_ex(reg_value: u32, value: u32, mask: u32, shift: u8) -> u32 {

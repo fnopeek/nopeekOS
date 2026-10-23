@@ -34,6 +34,18 @@ check ucode oracle_ucode ucode_check "$FW"
 check bios oracle_bios bios_check "$BIOS"
 check gpio oracle_gpio gpio_check "$BIOS"
 check link oracle_link link_check "$BIOS"
+# detect_edp_presence after create_links, with the registers never written
+# reading all ones (panel on, HPD high), all zeros (panel off, HPD low:
+# power-on through the DMCUB) or the hash.
+for seed in ones zeros hash; do
+    "$B/oracle_link" "$BIOS" edp $seed > "$B/edp_$seed.linux"
+    "$B/link_check" "$BIOS" edp $seed > "$B/edp_$seed.port"
+    if diff -u "$B/edp_$seed.linux" "$B/edp_$seed.port" | head -30; cmp -s "$B/edp_$seed.linux" "$B/edp_$seed.port"; then
+        echo "edp presence ($seed): port = Linux ($(grep -c '^dmub cmd' "$B/edp_$seed.linux") DMUB commands)"
+    else
+        fail=1
+    fi
+done
 # DC's clock manager on the VBIOS, with the VBIOS SMC answering two SMU
 # versions (either side of 55.51.0 and 0x371500), retraining on/off, and
 # the SMU's clock table handed out or not.

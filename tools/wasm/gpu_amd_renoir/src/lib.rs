@@ -33,6 +33,8 @@ mod drm_mm;
 mod dmub_srv;
 mod dmub_dcn20;
 mod dc_dmub_srv;
+mod hw_sequencer;
+mod link_detection;
 mod ttm;
 mod gpu_buddy;
 mod mmhub_v1_0;

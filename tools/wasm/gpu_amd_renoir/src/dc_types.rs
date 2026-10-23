@@ -214,6 +214,12 @@ pub struct graphics_object_id {
 }
 
 impl graphics_object_id {
+    /// `dal_graphics_object_id_get_connector_id`: the id of a connector
+    /// object, CONNECTOR_ID_UNKNOWN (0) for any other object.
+    pub fn get_connector_id(&self) -> u32 {
+        if self.r#type == object_type::OBJECT_TYPE_CONNECTOR { self.id } else { 0 }
+    }
+
     /// `dal_graphics_object_id_init`.
     pub fn init(id: u32, enum_id: object_enum_id, r#type: object_type) -> Self {
         graphics_object_id { id: id & 0xff, enum_id, r#type }

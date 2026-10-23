@@ -105,6 +105,53 @@ pub struct dc_link {
     pub bios_forced_drive_settings: bios_forced_drive_settings,
     pub psr_settings: psr_settings,
     pub is_hpd_filter_disabled: bool,
+    pub edp_sink_present: bool,
+    pub link_powered_externally: bool,
+    pub is_hpd_pending: bool,
+    /// `local_sink != NULL`: sinks join with link detection.
+    pub has_local_sink: bool,
+    pub panel_config: panel_config,
+    pub dp_trace: dp_trace,
+}
+
+/// `struct panel_config`'s `pps` (dc_types.h): the panel-specific extra
+/// power-sequence delays, in ms.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct panel_config {
+    pub pps_extra_t3_ms: u32,
+    pub pps_extra_t7_ms: u32,
+    pub pps_extra_delay_backlight_off: u32,
+    pub pps_extra_post_t7_ms: u32,
+    pub pps_extra_pre_t11_ms: u32,
+    pub pps_extra_t12_ms: u32,
+    pub pps_extra_post_oui_ms: u32,
+}
+
+/// `struct dp_trace`'s eDP power timestamps (link_types.h), in ns.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dp_trace {
+    pub edp_poweroff: u64,
+    pub edp_poweron: u64,
+}
+
+/// `dp_trace_set_edp_power_timestamp` (link_dp_trace.c).
+pub fn dp_trace_set_edp_power_timestamp(link: &mut dc_link, power_up: bool) {
+    if !power_up {
+        // save driver power off time stamp
+        link.dp_trace.edp_poweroff = crate::dc_helper::dm_get_timestamp();
+    } else {
+        link.dp_trace.edp_poweron = crate::dc_helper::dm_get_timestamp();
+    }
+}
+
+/// `dp_trace_get_edp_poweron_timestamp` (link_dp_trace.c).
+pub fn dp_trace_get_edp_poweron_timestamp(link: &dc_link) -> u64 {
+    link.dp_trace.edp_poweron
+}
+
+/// `dp_trace_get_edp_poweroff_timestamp` (link_dp_trace.c).
+pub fn dp_trace_get_edp_poweroff_timestamp(link: &dc_link) -> u64 {
+    link.dp_trace.edp_poweroff
 }
 
 /// `struct link_init_data` (link.h... link_service.h).

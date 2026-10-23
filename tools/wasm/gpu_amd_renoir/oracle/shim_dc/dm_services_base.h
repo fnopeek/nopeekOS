@@ -26,8 +26,10 @@
 struct dc_reg_helper_state {
 	bool gather_in_progress;
 };
+struct dc_context;
 struct dc_dmub_srv {
 	struct dc_reg_helper_state reg_helper_offload;
+	struct dc_context *ctx;
 };
 struct gpio_service;
 struct dc_bios;

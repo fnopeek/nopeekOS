@@ -1709,6 +1709,60 @@ DMUB_GPINT__STOP_FW_RESPONSE @ ../display/dmub/src/dmub_srv.c
 DMUB_STATUS_TIMEOUT @ ../display/dmub/src/dmub_srv.c
 DMUB_POWER_STATE_D0 @ ../display/dmub/src/dmub_srv.c
 DMUB_MEMORY_ACCESS_CPU @ ../display/dmub/src/dmub_srv.c
+# eDP power and HPD: dce110_edp_power_control / wait_for_hpd_ready, the
+# transmitter and LVTMA commands of command_table2.c, link_detect_connection_type
+BP_RESULT_OK @ ../display/dc/bios/command_table2.c
+BP_RESULT_FAILURE @ ../display/dc/bios/command_table2.c
+ATOM_PHY_ID_UNIPHYA @ ../display/dc/bios/command_table2.c
+ATOM_PHY_ID_UNIPHYB @ ../display/dc/bios/command_table2.c
+ATOM_PHY_ID_UNIPHYC @ ../display/dc/bios/command_table2.c
+ATOM_PHY_ID_UNIPHYD @ ../display/dc/bios/command_table2.c
+ATOM_PHY_ID_UNIPHYE @ ../display/dc/bios/command_table2.c
+ATOM_PHY_ID_UNIPHYF @ ../display/dc/bios/command_table2.c
+ATOM_PHY_ID_UNIPHYG @ ../display/dc/bios/command_table2.c
+ATOM_TRANSMITTER_DIGMODE_V6_DP @ ../display/dc/bios/command_table2.c
+ATOM_TRANSMITTER_DIGMODE_V6_DVI @ ../display/dc/bios/command_table2.c
+ATOM_TRANSMITTER_DIGMODE_V6_HDMI @ ../display/dc/bios/command_table2.c
+ATOM_TRANSMITTER_DIGMODE_V6_DP_MST @ ../display/dc/bios/command_table2.c
+ATOM_TRANSMITTER_V6_HPD1_SEL @ ../display/dc/bios/command_table2.c
+ATOM_TRANSMITTER_V6_HPD2_SEL @ ../display/dc/bios/command_table2.c
+ATOM_TRANSMITTER_V6_HPD3_SEL @ ../display/dc/bios/command_table2.c
+ATOM_TRANSMITTER_V6_HPD4_SEL @ ../display/dc/bios/command_table2.c
+ATOM_TRANSMITTER_V6_HPD5_SEL @ ../display/dc/bios/command_table2.c
+ATOM_TRANSMITTER_V6_HPD6_SEL @ ../display/dc/bios/command_table2.c
+DMUB_CMD__VBIOS @ ../display/dc/bios/command_table2.c
+DMUB_CMD__VBIOS_DIG1_TRANSMITTER_CONTROL @ ../display/dc/bios/command_table2.c
+DMUB_CMD__VBIOS_LVTMA_CONTROL @ ../display/dc/bios/command_table2.c
+TRANSMITTER_CONTROL_POWER_ON @ ../display/dc/bios/command_table2.c
+TRANSMITTER_CONTROL_POWER_OFF @ ../display/dc/bios/command_table2.c
+TRANSMITTER_CONTROL_SET_VOLTAGE_AND_PREEMPASIS @ ../display/dc/bios/command_table2.c
+TRANSMITTER_CONTROL_ENABLE @ ../display/dc/bios/command_table2.c
+TRANSMITTER_CONTROL_ACTIAVATE @ ../display/dc/bios/command_table2.c
+TRANSMITTER_CONTROL_DEACTIVATE @ ../display/dc/bios/command_table2.c
+SIZEOF_dmub_rb_cmd_dig1_transmitter_control = sizeof(struct dmub_rb_cmd_dig1_transmitter_control) @ ../display/dc/bios/command_table2.c
+DIG1TC_DATA = offsetof(struct dmub_rb_cmd_dig1_transmitter_control, transmitter_control) @ ../display/dc/bios/command_table2.c
+SIZEOF_dig_transmitter_control_parameters_v1_6 = sizeof(struct dig_transmitter_control_parameters_v1_6) @ ../display/dc/bios/command_table2.c
+DIG16_PHYID = offsetof(struct dig_transmitter_control_parameters_v1_6, phyid) @ ../display/dc/bios/command_table2.c
+DIG16_ACTION = offsetof(struct dig_transmitter_control_parameters_v1_6, action) @ ../display/dc/bios/command_table2.c
+DIG16_MODE_LANESET = offsetof(struct dig_transmitter_control_parameters_v1_6, mode_laneset) @ ../display/dc/bios/command_table2.c
+DIG16_LANENUM = offsetof(struct dig_transmitter_control_parameters_v1_6, lanenum) @ ../display/dc/bios/command_table2.c
+DIG16_SYMCLK_10KHZ = offsetof(struct dig_transmitter_control_parameters_v1_6, symclk_10khz) @ ../display/dc/bios/command_table2.c
+DIG16_HPDSEL = offsetof(struct dig_transmitter_control_parameters_v1_6, hpdsel) @ ../display/dc/bios/command_table2.c
+DIG16_DIGFE_SEL = offsetof(struct dig_transmitter_control_parameters_v1_6, digfe_sel) @ ../display/dc/bios/command_table2.c
+DIG16_CONNOBJ_ID = offsetof(struct dig_transmitter_control_parameters_v1_6, connobj_id) @ ../display/dc/bios/command_table2.c
+LVTMA_UC_PWR_ACTION = offsetof(struct dmub_rb_cmd_lvtma_control, data.uc_pwr_action) @ ../display/dc/bios/command_table2.c
+LVTMA_BYPASS_PANEL_CONTROL_WAIT = offsetof(struct dmub_rb_cmd_lvtma_control, data.bypass_panel_control_wait) @ ../display/dc/bios/command_table2.c
+LVTMA_PWRSEQ_INST = offsetof(struct dmub_rb_cmd_lvtma_control, data.pwrseq_inst) @ ../display/dc/bios/command_table2.c
+PANEL_POWER_UP_TIMEOUT @ ../display/dc/hwss/dce110/dce110_hwseq.c
+PANEL_POWER_DOWN_TIMEOUT @ ../display/dc/hwss/dce110/dce110_hwseq.c
+HPD_CHECK_INTERVAL @ ../display/dc/hwss/dce110/dce110_hwseq.c
+LVTMA_CONTROL_POWER_ON @ ../display/dc/hwss/dce110/dce110_hwseq.c
+LVTMA_CONTROL_POWER_OFF @ ../display/dc/hwss/dce110/dce110_hwseq.c
+LANE_COUNT_FOUR @ ../display/dc/hwss/dce110/dce110_hwseq.c
+CONNECTOR_ID_EDP @ ../display/dc/hwss/dce110/dce110_hwseq.c
+MAX_NUM_EDP @ ../display/dc/hwss/dce110/dce110_hwseq.c
+dc_connection_none @ ../display/dc/link/link_detection.c
+dc_connection_single @ ../display/dc/link/link_detection.c
 # The DMUB command path (dmub_srv.c, dmub_cmd.h, dc_dmub_srv.c)
 DMUB_RB_CMD_SIZE @ ../display/dmub/src/dmub_srv.c
 DMUB_STATUS_QUEUE_FULL @ ../display/dmub/src/dmub_srv.c

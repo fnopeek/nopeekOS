@@ -218,6 +218,34 @@ pub struct dc {
     pub links: Vec<Box<dc_link>>,
     pub lowest_dpia_link_index: u32,
     pub current_state: Option<Box<crate::dc_state::dc_state>>,
+    /// `hwss`: the hw sequencer vtable (`dcn21_hw_sequencer_construct`).
+    pub hwss: crate::hw_sequencer::hw_sequencer_funcs,
+}
+
+/// `dc_get_edp_links` (dc_link_exports.c): the eDP links, connected or not,
+/// as indices into `dc.links`.
+pub fn dc_get_edp_links(dc: &dc) -> Vec<usize> {
+    let mut edp_links = Vec::new();
+    for (i, link) in dc.links.iter().enumerate() {
+        if link.connector_signal == crate::regs::LF_SIGNAL_TYPE_EDP {
+            edp_links.push(i);
+            if edp_links.len() == crate::regs::MAX_NUM_EDP as usize {
+                break;
+            }
+        }
+    }
+    edp_links
+}
+
+/// `detect_edp_presence` (dc.c).
+pub fn detect_edp_presence(adev: &amdgpu_device, dc: &mut dc) {
+    let edp_links = dc_get_edp_links(dc);
+    for li in edp_links {
+        // dc.config.edp_not_connected is never set on this path.
+        let mut r#type = crate::regs::dc_connection_none;
+        crate::link_detection::link_detect_connection_type(adev, dc, li, &mut r#type);
+        dc.links[li].edp_sink_present = r#type != crate::regs::dc_connection_none;
+    }
 }
 
 /// `create_links` (dc.c). The VBIOS reports the number of valid connector

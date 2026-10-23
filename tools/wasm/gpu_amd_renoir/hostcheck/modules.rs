@@ -37,6 +37,10 @@ mod dmub_srv;
 mod dmub_dcn20;
 #[path = "../src/dc_dmub_srv.rs"]
 mod dc_dmub_srv;
+#[path = "../src/hw_sequencer.rs"]
+mod hw_sequencer;
+#[path = "../src/link_detection.rs"]
+mod link_detection;
 #[path = "../src/amdgpu_psp.rs"]
 mod amdgpu_psp;
 #[path = "../src/amdgpu_ras.rs"]

@@ -1,7 +1,9 @@
 //! The port's links, printed as oracle/main_link.c prints Linux's:
 //! create_links with one virtual link on the VBIOS, every register write,
 //! the pool's encoder slots, then every link and its encoder. Unwritten
-//! registers read hash(reg).
+//! registers read hash(reg). With "edp ones|zeros|hash" they then read all
+//! ones, all zeros or the hash, and detect_edp_presence runs; the DMUB
+//! commands it sends are read back off the inbox ring.
 
 extern crate alloc;
 
@@ -13,6 +15,21 @@ use dc_types::{dce_environment, dce_version, graphics_object_id};
 
 fn hash(reg: u32) -> u32 {
     reg.wrapping_mul(0x9e37_79b1) ^ 0xa5a5_a5a5
+}
+
+fn ones(_reg: u32) -> u32 {
+    !0
+}
+
+fn zeros(_reg: u32) -> u32 {
+    0
+}
+
+/// The DMCUB consumes the inbox ring as soon as its write pointer moves.
+fn dmcub(reg: u32, v: u32) {
+    if reg == regs::DMUB_DMCUB_INBOX1_WPTR {
+        npk_sys::fake_set_reg(regs::DMUB_DMCUB_INBOX1_RPTR, v);
+    }
 }
 
 fn gid(n: &str, g: graphics_object_id) {
@@ -95,6 +112,49 @@ fn main() {
             );
             gid(" id", e.id);
             gid("  connector", e.connector);
+        }
+    }
+
+    let mut args = std::env::args().skip(2);
+    if args.next().as_deref() == Some("edp") {
+        let rule: fn(u32) -> u32 = match args.next().as_deref() {
+            Some("ones") => ones,
+            Some("zeros") => zeros,
+            _ => hash,
+        };
+        npk_sys::fake_card_unset(rule, (!0 - 1, !0 - 2));
+        npk_sys::fake_card_echo_skip(&[regs::DMUB_DMCUB_INBOX1_WPTR]);
+        npk_sys::fake_write_hook(dmcub);
+
+        let ring = npk_sys::Dma::alloc((regs::DMUB_RB_SIZE / 4096) as i32).expect("dma");
+        let mut dmub = Box::new(dmub_srv::dmub_srv::default());
+        dmub_srv::dmub_srv_create(&mut dmub, regs::DMUB_ASIC_DCN21, 0);
+        dmub.hw_init = true;
+        dmub.power_state = regs::DMUB_POWER_STATE_D0;
+        dmub.cpu = Some(amdgpu_object::amdgpu_kptr::gtt(ring.handle));
+        dmub.inbox1.rb.capacity = regs::DMUB_RB_SIZE;
+        dc.ctx.dmub_srv = dc_dmub_srv::dc_dmub_srv_create(dmub);
+        dc.debug.dmub_command_table = true;
+        hw_sequencer::dcn21_hw_sequencer_construct(&mut dc);
+
+        dc::detect_edp_presence(&adev, &mut dc);
+        npk_sys::fake_card_echo(false);
+
+        for (l, k) in dc.links.iter().enumerate() {
+            println!(
+                "edp link {} sink_present {} poweron {} poweroff {}",
+                l, k.edp_sink_present as u32, (k.dp_trace.edp_poweron != 0) as u32,
+                (k.dp_trace.edp_poweroff != 0) as u32
+            );
+        }
+        let wrpt = dc.ctx.dmub_srv.as_deref().unwrap().dmub.as_deref().unwrap().inbox1.rb.wrpt;
+        let mem = npk_sys::window_bytes(ring.handle);
+        for slot in mem[..wrpt as usize].chunks(regs::DMUB_RB_CMD_SIZE as usize) {
+            print!("dmub cmd");
+            for b in slot {
+                print!(" {:02x}", b);
+            }
+            println!();
         }
     }
 }

@@ -334,12 +334,14 @@ fn dal_hw_gpio_construct(pin: &mut hw_gpio, id: gpio_id, en: u32) {
     pin.mux_supported = false;
 }
 
-/// `dal_hw_hpd_get_value` (hw_hpd.c): in interrupt mode the DELAYED sense
-/// bit is read and dropped — Linux returns OK without storing it.
+/// `dal_hw_hpd_get_value` (hw_hpd.c): in interrupt mode the value is the
+/// DELAYED sense bit.
 pub fn dal_hw_hpd_get_value(adev: &amdgpu_device, hpd: &hw_hpd, value: &mut u32) -> gpio_result {
     if hpd.base.mode == gpio_mode::GPIO_MODE_INTERRUPT {
         let r = hpd.regs.unwrap_or_default();
-        generic_reg_get(adev, r.int_status, hpd.shifts.DC_HPD_SENSE_DELAYED as u8, hpd.masks.DC_HPD_SENSE_DELAYED);
+        let (_, hpd_delayed) =
+            generic_reg_get(adev, r.int_status, hpd.shifts.DC_HPD_SENSE_DELAYED as u8, hpd.masks.DC_HPD_SENSE_DELAYED);
+        *value = hpd_delayed;
         return gpio_result::GPIO_RESULT_OK;
     }
     dal_hw_gpio_get_value(adev, &hpd.base, value)

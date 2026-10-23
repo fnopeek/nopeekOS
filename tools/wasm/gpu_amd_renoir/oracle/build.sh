@@ -512,6 +512,40 @@ GPIO_CF="-I $HERE/shim_dc -I $B/dc_shim -I $AMD/display -I $DCS -I $DCS/inc -I $
     $X "$DCS/core/dc.c" get_num_of_internal_disp create_links
 } > "$B/link_funcs.c"
 python3 -I "$HERE/protos.py" "$B/link_funcs.c" > "$B/link_protos.h"
+# eDP presence: detect_edp_presence with the eDP power and HPD waits it
+# runs; the VBIOS transmitter and LVTMA commands go out as DMUB commands.
+{
+    $X "$DCS/dce/dce_panel_cntl.h" '#DCN_PANEL_CNTL_SR' '#DCN_PANEL_CNTL_REG_LIST' '#DCE_PANEL_CNTL_SF' \
+        '#DCE_PANEL_CNTL_MASK_SH_LIST' '#DCE_PANEL_CNTL_REG_FIELD_LIST' dce_panel_cntl_shift dce_panel_cntl_mask \
+        dce_panel_cntl_registers
+    $X "$DCS/bios/command_table_helper_struct.h" command_table_helper
+    $X "$DCS/dm_services_types.h" dm_dmub_wait_type
+    $X "$DCS/dc_dp_types.h" dc_lane_count
+    $X "$AMD/display/include/bios_parser_types.h" bp_transmitter_control_action bp_lvtma_control_action \
+        bp_transmitter_control
+    $X "$DCS/dc_types.h" dc_connection_type
+    $X "$DCS/dc.h" '#MAX_NUM_EDP'
+} > "$B/edp_types.h"
+$X "$DCS/resource/dcn21/dcn21_resource.c" '#BASE_INNER' '#BASE' '#SR' '#NBIO_BASE_INNER' '#NBIO_BASE' '#NBIO_SR' \
+    panel_cntl_regs panel_cntl_shift panel_cntl_mask > "$B/edp_tables.c"
+{
+    $X "$DCS/dce/dce_panel_cntl.c" '#TO_DCE_PANEL_CNTL' '#CTX' '#REG' '#FN' dce_is_panel_powered_on
+    $X "$DCS/bios/command_table_helper.c" phy_id_to_atom
+    $X "$DCS/bios/dce112/command_table_helper2_dce112.c" signal_type_to_atom_dig_mode hpd_sel_to_atom \
+        dig_encoder_sel_to_atom
+    $X "$DCS/bios/command_table2.c" transmitter_control_dmcub transmitter_control_v1_6 enable_lvtma_control_dmcub \
+        enable_lvtma_control
+    $X "$DCS/bios/bios_parser2.c" bios_parser_transmitter_control bios_parser_enable_lvtma_control
+    $X "$DCS/link/accessories/link_dp_trace.c" dp_trace_set_edp_power_timestamp dp_trace_get_edp_poweron_timestamp \
+        dp_trace_get_edp_poweroff_timestamp
+    $X "$DCS/hwss/dce110/dce110_hwseq.c" '#PANEL_POWER_UP_TIMEOUT' '#PANEL_POWER_DOWN_TIMEOUT' '#HPD_CHECK_INTERVAL' \
+        link_transmitter_control dce110_edp_power_control dce110_edp_wait_for_hpd_ready
+    $X "$DCS/link/protocols/link_hpd.c" query_hpd_status
+    $X "$DCS/link/link_detection.c" link_detect_connection_type
+    $X "$DCS/core/dc_link_exports.c" dc_get_edp_links dc_link_detect_connection_type
+    $X "$DCS/core/dc.c" detect_edp_presence
+} > "$B/edp_funcs.c"
+python3 -I "$HERE/protos.py" "$B/edp_funcs.c" > "$B/edp_protos.h"
 
 # The DMCUB bring-up: Linux's dmub/src compiled unchanged (shim_dmub stands
 # in for os_types.h), with dm_dmub_sw_init / dm_dmub_hw_init and the DC DMUB
@@ -574,7 +608,7 @@ for f in gpio_base gpio_service hw_gpio hw_hpd hw_ddc hw_generic dcn21/hw_factor
 done
 gcc $CF $GPIO_CF -c "$B/dc_helper_extracted.c" -o "$B/dc_helper_extracted.o"
 gcc $CF $GPIO_CF "$HERE/main_gpio.c" $GPIO_O "$B/dc_helper_extracted.o" "$B/atom.o" -o "$B/oracle_gpio"
-gcc $CF $GPIO_CF "$HERE/main_link.c" $GPIO_O "$B/dc_helper_extracted.o" "$B/atom.o" -o "$B/oracle_link"
+gcc $CF $GPIO_CF -D_OS_TYPES_H_ -I "$HERE/shim_dmub" -I "$AMD/display/dmub/inc" "$HERE/main_link.c" $GPIO_O "$B/dc_helper_extracted.o" "$B/atom.o" -o "$B/oracle_link"
 gcc $CF -I "$AMD/include/asic_reg" -I "$AMD/display/dc" -I "$AMD/display/include" "$HERE/main_clk.c" "$B/atom.o" -o "$B/oracle_clk"
 gcc $CF "$HERE/main_psp.c" -o "$B/oracle_psp"
 gcc $CF "$HERE/main_discovery.c" -o "$B/oracle_discovery"

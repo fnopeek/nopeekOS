@@ -350,7 +350,7 @@ pub fn dcn21_resource_construct(
     // these through res_create_funcs; the dcn21 binding is inlined.)
     resource_construct(adev, num_virtual_links, dc, pool);
 
-    // dcn21_hw_sequencer_construct(dc): the hwss vtable — stage D (init_hw).
+    crate::hw_sequencer::dcn21_hw_sequencer_construct(dc);
 
     // The plane/ODM caps, now that the live pipe count is known.
     dc.caps.max_planes = pool.pipe_count;

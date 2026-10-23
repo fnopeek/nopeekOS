@@ -3422,6 +3422,114 @@ pub const DMUB_POWER_STATE_D0: u32 = 0x1;
 /// ?
 pub const DMUB_MEMORY_ACCESS_CPU: u32 = 0x0;
 
+// eDP power and HPD: dce110_edp_power_control / wait_for_hpd_ready, the
+
+// transmitter and LVTMA commands of command_table2.c, link_detect_connection_type
+/// ?
+pub const BP_RESULT_OK: u32 = 0x0;
+/// ?
+pub const BP_RESULT_FAILURE: u32 = 0x5;
+/// include/atombios.h:1496
+pub const ATOM_PHY_ID_UNIPHYA: u32 = 0x0;
+/// include/atombios.h:1497
+pub const ATOM_PHY_ID_UNIPHYB: u32 = 0x1;
+/// include/atombios.h:1498
+pub const ATOM_PHY_ID_UNIPHYC: u32 = 0x2;
+/// include/atombios.h:1499
+pub const ATOM_PHY_ID_UNIPHYD: u32 = 0x3;
+/// include/atombios.h:1500
+pub const ATOM_PHY_ID_UNIPHYE: u32 = 0x4;
+/// include/atombios.h:1501
+pub const ATOM_PHY_ID_UNIPHYF: u32 = 0x5;
+/// include/atombios.h:1502
+pub const ATOM_PHY_ID_UNIPHYG: u32 = 0x6;
+/// include/atombios.h:1588
+pub const ATOM_TRANSMITTER_DIGMODE_V6_DP: u32 = 0x0;
+/// include/atombios.h:1589
+pub const ATOM_TRANSMITTER_DIGMODE_V6_DVI: u32 = 0x2;
+/// include/atombios.h:1590
+pub const ATOM_TRANSMITTER_DIGMODE_V6_HDMI: u32 = 0x3;
+/// include/atombios.h:1591
+pub const ATOM_TRANSMITTER_DIGMODE_V6_DP_MST: u32 = 0x5;
+/// include/atombios.h:1595
+pub const ATOM_TRANSMITTER_V6_HPD1_SEL: u32 = 0x1;
+/// include/atombios.h:1596
+pub const ATOM_TRANSMITTER_V6_HPD2_SEL: u32 = 0x2;
+/// include/atombios.h:1597
+pub const ATOM_TRANSMITTER_V6_HPD3_SEL: u32 = 0x3;
+/// include/atombios.h:1598
+pub const ATOM_TRANSMITTER_V6_HPD4_SEL: u32 = 0x4;
+/// include/atombios.h:1599
+pub const ATOM_TRANSMITTER_V6_HPD5_SEL: u32 = 0x5;
+/// include/atombios.h:1600
+pub const ATOM_TRANSMITTER_V6_HPD6_SEL: u32 = 0x6;
+/// ?
+pub const DMUB_CMD__VBIOS: u32 = 0x80;
+/// ?
+pub const DMUB_CMD__VBIOS_DIG1_TRANSMITTER_CONTROL: u32 = 0x1;
+/// ?
+pub const DMUB_CMD__VBIOS_LVTMA_CONTROL: u32 = 0xf;
+/// ?
+pub const TRANSMITTER_CONTROL_POWER_ON: u32 = 0xc;
+/// ?
+pub const TRANSMITTER_CONTROL_POWER_OFF: u32 = 0xd;
+/// ?
+pub const TRANSMITTER_CONTROL_SET_VOLTAGE_AND_PREEMPASIS: u32 = 0xb;
+/// ?
+pub const TRANSMITTER_CONTROL_ENABLE: u32 = 0x1;
+/// ?
+pub const TRANSMITTER_CONTROL_ACTIAVATE: u32 = 0x9;
+/// ?
+pub const TRANSMITTER_CONTROL_DEACTIVATE: u32 = 0x8;
+/// The value of `sizeof(struct dmub_rb_cmd_dig1_transmitter_control)` in ../display/dc/bios/command_table2.c
+pub const SIZEOF_dmub_rb_cmd_dig1_transmitter_control: u32 = 0x40;
+/// The value of `offsetof(struct dmub_rb_cmd_dig1_transmitter_control, transmitter_control)` in ../display/dc/bios/command_table2.c
+pub const DIG1TC_DATA: u32 = 0x4;
+/// The value of `sizeof(struct dig_transmitter_control_parameters_v1_6)` in ../display/dc/bios/command_table2.c
+pub const SIZEOF_dig_transmitter_control_parameters_v1_6: u32 = 0x10;
+/// The value of `offsetof(struct dig_transmitter_control_parameters_v1_6, phyid)` in ../display/dc/bios/command_table2.c
+pub const DIG16_PHYID: u32 = 0x0;
+/// The value of `offsetof(struct dig_transmitter_control_parameters_v1_6, action)` in ../display/dc/bios/command_table2.c
+pub const DIG16_ACTION: u32 = 0x1;
+/// The value of `offsetof(struct dig_transmitter_control_parameters_v1_6, mode_laneset)` in ../display/dc/bios/command_table2.c
+pub const DIG16_MODE_LANESET: u32 = 0x2;
+/// The value of `offsetof(struct dig_transmitter_control_parameters_v1_6, lanenum)` in ../display/dc/bios/command_table2.c
+pub const DIG16_LANENUM: u32 = 0x3;
+/// The value of `offsetof(struct dig_transmitter_control_parameters_v1_6, symclk_10khz)` in ../display/dc/bios/command_table2.c
+pub const DIG16_SYMCLK_10KHZ: u32 = 0x4;
+/// The value of `offsetof(struct dig_transmitter_control_parameters_v1_6, hpdsel)` in ../display/dc/bios/command_table2.c
+pub const DIG16_HPDSEL: u32 = 0x8;
+/// The value of `offsetof(struct dig_transmitter_control_parameters_v1_6, digfe_sel)` in ../display/dc/bios/command_table2.c
+pub const DIG16_DIGFE_SEL: u32 = 0x9;
+/// The value of `offsetof(struct dig_transmitter_control_parameters_v1_6, connobj_id)` in ../display/dc/bios/command_table2.c
+pub const DIG16_CONNOBJ_ID: u32 = 0xa;
+/// The value of `offsetof(struct dmub_rb_cmd_lvtma_control, data.uc_pwr_action)` in ../display/dc/bios/command_table2.c
+pub const LVTMA_UC_PWR_ACTION: u32 = 0x4;
+/// The value of `offsetof(struct dmub_rb_cmd_lvtma_control, data.bypass_panel_control_wait)` in ../display/dc/bios/command_table2.c
+pub const LVTMA_BYPASS_PANEL_CONTROL_WAIT: u32 = 0x5;
+/// The value of `offsetof(struct dmub_rb_cmd_lvtma_control, data.pwrseq_inst)` in ../display/dc/bios/command_table2.c
+pub const LVTMA_PWRSEQ_INST: u32 = 0x8;
+/// display/dc/hwss/dce110/dce110_hwseq.c:79
+pub const PANEL_POWER_UP_TIMEOUT: u32 = 0x12c;
+/// display/dc/hwss/dce110/dce110_hwseq.c:80
+pub const PANEL_POWER_DOWN_TIMEOUT: u32 = 0x1f4;
+/// display/dc/hwss/dce110/dce110_hwseq.c:81
+pub const HPD_CHECK_INTERVAL: u32 = 0xa;
+/// display/dc/hwss/dce110/dce110_hwseq.c:879
+pub const LVTMA_CONTROL_POWER_ON: u32 = 0xc;
+/// display/dc/hwss/dce110/dce110_hwseq.c:883
+pub const LVTMA_CONTROL_POWER_OFF: u32 = 0xd;
+/// ?
+pub const LANE_COUNT_FOUR: u32 = 0x4;
+/// ?
+pub const CONNECTOR_ID_EDP: u32 = 0x14;
+/// ?
+pub const MAX_NUM_EDP: u32 = 0x2;
+/// ?
+pub const dc_connection_none: u32 = 0x0;
+/// ?
+pub const dc_connection_single: u32 = 0x1;
+
 // The DMUB command path (dmub_srv.c, dmub_cmd.h, dc_dmub_srv.c)
 /// ?
 pub const DMUB_RB_CMD_SIZE: u32 = 0x40;

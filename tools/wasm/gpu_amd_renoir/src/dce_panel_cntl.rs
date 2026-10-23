@@ -160,6 +160,18 @@ pub struct dce_panel_cntl {
     pub mask: dce_panel_cntl_mask,
 }
 
+/// `dce_is_panel_powered_on` (dce_panel_cntl.c): the power sequencer's
+/// target state, or DIGON forced on.
+pub fn dce_is_panel_powered_on(adev: &crate::amdgpu_device::amdgpu_device, p: &dce_panel_cntl) -> bool {
+    let (_, pwr_seq_state) = crate::dc_helper::generic_reg_get(adev, p.regs.PWRSEQ_STATE,
+        p.shift.LVTMA_PWRSEQ_TARGET_STATE_R, p.mask.LVTMA_PWRSEQ_TARGET_STATE_R);
+    let mut v = [0u32; 2];
+    crate::dc_helper::generic_reg_get_n(adev, p.regs.PWRSEQ_CNTL,
+        &[(p.shift.LVTMA_DIGON, p.mask.LVTMA_DIGON), (p.shift.LVTMA_DIGON_OVRD, p.mask.LVTMA_DIGON_OVRD)], &mut v);
+    let (dig_on, dig_on_ovrd) = (v[0], v[1]);
+    pwr_seq_state == 1 || (dig_on == 1 && dig_on_ovrd == 1)
+}
+
 /// `dce_panel_cntl_construct` (dce_panel_cntl.c).
 pub fn dce_panel_cntl_construct(p: &mut dce_panel_cntl, init_data: &panel_cntl_init_data,
                                 regs: dce_panel_cntl_registers, shift: dce_panel_cntl_shift,

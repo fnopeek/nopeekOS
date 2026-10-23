@@ -4,9 +4,17 @@
  * virtual link. `struct dc_link`, `struct dc` and `struct resource_pool`
  * carry the members this path touches. Unwritten registers read hash(reg);
  * every register write is printed, then every link.
+ * With argv[2] "edp" and argv[3] ones / zeros / hash, unwritten registers
+ * then read all ones (panel on, HPD high), all zeros (panel off, HPD low)
+ * or the hash, and detect_edp_presence runs: the eDP panel power and HPD
+ * waits, with the VBIOS transmitter and LVTMA commands handed to the DMCUB
+ * (dc_wake_and_execute_dmub_cmd records them).
  * hostcheck/link_check.rs prints the same for the port. */
 #include <linux/sched.h>
+#define READ_ONCE(x) (x)
+#include "dmub_cmd.h"
 #include "dm_services.h"
+struct bp_transmitter_control;
 #include "atomfirmware.h"
 #include "atom.h"
 #include "ObjectID.h"
@@ -41,10 +49,15 @@ static int find(u32 reg)
 	return -1;
 }
 
+static u32 hash_rule(u32 reg) { return (reg * 0x9e3779b1u) ^ 0xa5a5a5a5u; }
+static u32 ones_rule(u32 reg) { return 0xffffffffu; }
+static u32 zeros_rule(u32 reg) { return 0; }
+static u32 (*unset_rule)(u32) = hash_rule;
+
 uint32_t dc_mmio_read(uint32_t reg)
 {
 	int i = find(reg);
-	return i < 0 ? (reg * 0x9e3779b1u) ^ 0xa5a5a5a5u : reg_val[i];
+	return i < 0 ? unset_rule(reg) : reg_val[i];
 }
 
 void dc_mmio_write(uint32_t reg, uint32_t val)
@@ -83,6 +96,9 @@ struct dc_vbios_funcs {
 	enum bp_result (*get_disp_connector_caps_info)(struct dc_bios *bios, struct graphics_object_id object_id,
 						       struct bp_disp_connector_caps_info *info);
 	enum bp_result (*get_atom_dc_golden_table)(struct dc_bios *dcb);
+	enum bp_result (*transmitter_control)(struct dc_bios *bios, struct bp_transmitter_control *cntl);
+	enum bp_result (*enable_lvtma_control)(struct dc_bios *bios, uint8_t uc_pwr_on, uint8_t pwrseq_instance,
+					       uint8_t bypass_panel_control_wait);
 };
 struct dc_bios {
 	const struct dc_vbios_funcs *funcs;
@@ -98,13 +114,17 @@ struct dc_bios {
 	struct dc_golden_table golden_table;
 };
 struct bios_parser;
+struct bp_transmitter_control;
 struct cmd_tbl {
-	void *dig_encoder_control, *transmitter_control, *set_pixel_clock, *set_crtc_timing,
-	     *enable_crtc, *external_encoder_control, *enable_disp_power_gating, *set_dce_clock,
-	     *enable_lvtma_control;
+	void *dig_encoder_control;
+	enum bp_result (*transmitter_control)(struct bios_parser *bp, struct bp_transmitter_control *cntl);
+	void *set_pixel_clock, *set_crtc_timing, *enable_crtc, *external_encoder_control, *enable_disp_power_gating,
+	     *set_dce_clock;
+	enum bp_result (*enable_lvtma_control)(struct bios_parser *bp, uint8_t uc_pwr_on, uint8_t pwrseq_instance,
+					       uint8_t bypass_panel_control_wait);
 	unsigned int (*get_smu_clock_info)(struct bios_parser *bp, uint8_t id);
 };
-struct command_table_helper { int unused; };
+#include "edp_types.h"
 struct bios_parser {
 	struct dc_bios base;
 	struct object_info_table object_info_tbl;
@@ -117,13 +137,31 @@ struct bios_parser {
 static const struct dc_vbios_funcs vbios_funcs;
 
 #define EXEC(n) static char n[1];
-EXEC(encoder_control_digx_v1_5) EXEC(encoder_control_fallback) EXEC(transmitter_control_v1_6)
-EXEC(transmitter_control_v1_7) EXEC(transmitter_control_fallback) EXEC(set_pixel_clock_v7)
+EXEC(encoder_control_digx_v1_5) EXEC(encoder_control_fallback) EXEC(set_pixel_clock_v7)
 EXEC(set_pixel_clock_fallback) EXEC(set_crtc_using_dtd_timing_v3) EXEC(enable_crtc_v1)
 EXEC(external_encoder_control_v3) EXEC(enable_disp_power_gating_v2_1)
-EXEC(enable_disp_power_gating_fallback) EXEC(set_dce_clock_v2_1) EXEC(enable_lvtma_control)
+EXEC(enable_disp_power_gating_fallback) EXEC(set_dce_clock_v2_1)
 static unsigned int get_smu_clock_info_v3_1(struct bios_parser *bp, uint8_t id) { return 0; }
-static const struct command_table_helper helper_dce60, helper_dce80, helper_dce110, helper_dce112_2;
+static enum bp_result transmitter_control_v1_6(struct bios_parser *bp, struct bp_transmitter_control *cntl);
+/* Not this VBIOS's executors. */
+static enum bp_result transmitter_control_v1_7(struct bios_parser *bp, struct bp_transmitter_control *cntl) { abort(); }
+static enum bp_result transmitter_control_fallback(struct bios_parser *bp, struct bp_transmitter_control *cntl)
+{
+	abort();
+}
+static enum bp_result enable_lvtma_control(struct bios_parser *bp, uint8_t uc_pwr_on, uint8_t pwrseq_instance,
+					   uint8_t bypass_panel_control_wait);
+static uint8_t phy_id_to_atom(enum transmitter t);
+static uint8_t signal_type_to_atom_dig_mode(enum signal_type s);
+static uint8_t hpd_sel_to_atom(enum hpd_source_id id);
+static uint8_t dig_encoder_sel_to_atom(enum engine_id id);
+static const struct command_table_helper helper_dce60, helper_dce80, helper_dce110;
+static const struct command_table_helper helper_dce112_2 = {
+	.signal_type_to_atom_dig_mode = signal_type_to_atom_dig_mode,
+	.hpd_sel_to_atom = hpd_sel_to_atom,
+	.dig_encoder_sel_to_atom = dig_encoder_sel_to_atom,
+	.phy_id_to_atom = phy_id_to_atom,
+};
 static const struct command_table_helper *dal_cmd_tbl_helper_dce60_get_table(void) { return &helper_dce60; }
 static const struct command_table_helper *dal_cmd_tbl_helper_dce80_get_table(void) { return &helper_dce80; }
 static const struct command_table_helper *dal_cmd_tbl_helper_dce110_get_table(void) { return &helper_dce110; }
@@ -160,6 +198,12 @@ struct dc_link {
 	struct { uint8_t VOLTAGE_SWING, PRE_EMPHASIS; } bios_forced_drive_settings;
 	struct { bool psr_vtotal_control_support; enum dc_psr_version psr_version; } psr_settings;
 	bool is_hpd_filter_disabled;
+	bool edp_sink_present;
+	bool link_powered_externally;
+	bool is_hpd_pending;
+	void *local_sink;
+	struct { struct { unsigned int extra_t3_ms, extra_t12_ms; } pps; } panel_config;
+	struct { struct { uint64_t poweroff, poweron; } edp_trace_power_timestamps; } dp_trace;
 };
 struct resource_funcs {
 	void (*link_init)(struct dc_link *link);
@@ -176,6 +220,16 @@ struct resource_pool {
 };
 struct link_service {
 	struct dc_link *(*create_link)(const struct link_init_data *init_params);
+	struct gpio *(*get_hpd_gpio)(struct dc_bios *dcb, struct graphics_object_id link_id,
+				     struct gpio_service *gpio_service);
+	void (*dp_trace_set_edp_power_timestamp)(struct dc_link *link, bool power_up);
+	uint64_t (*dp_trace_get_edp_poweron_timestamp)(struct dc_link *link);
+	uint64_t (*dp_trace_get_edp_poweroff_timestamp)(struct dc_link *link);
+	bool (*detect_connection_type)(struct dc_link *link, enum dc_connection_type *type);
+};
+struct hw_sequencer_funcs {
+	void (*edp_power_control)(struct dc_link *link, bool enable);
+	void (*edp_wait_for_hpd_ready)(struct dc_link *link, bool power_up);
 };
 struct dc {
 	struct dc_context *ctx;
@@ -185,14 +239,20 @@ struct dc {
 		unsigned int force_bios_fixed_vs;
 		int smart_mux_version;
 		uint32_t allow_edp_hotplug_detection;
+		bool edp_no_power_sequencing;
+		bool edp_not_connected;
 	} config;
 	struct { bool is_apu; uint32_t num_of_internal_disp; } caps;
-	struct { bool hdmi20_disable; } debug;
+	struct { bool hdmi20_disable; bool dmub_command_table; } debug;
+	struct hw_sequencer_funcs hwss;
 	struct dc_link *links[MAX_LINKS];
 	uint8_t link_count;
 	uint8_t lowest_dpia_link_index;
 };
 #include "bios_protos.h"
+static enum bp_result bios_parser_transmitter_control(struct dc_bios *dcb, struct bp_transmitter_control *cntl);
+static enum bp_result bios_parser_enable_lvtma_control(struct dc_bios *dcb, uint8_t uc_pwr_on, uint8_t pwrseq_instance,
+						       uint8_t bypass_panel_control_wait);
 #include "bios_funcs.c"
 static const struct dc_vbios_funcs vbios_funcs = {
 	.get_hpd_info = bios_parser_get_hpd_info,
@@ -206,30 +266,40 @@ static const struct dc_vbios_funcs vbios_funcs = {
 	.get_encoder_cap_info = bios_parser_get_encoder_cap_info,
 	.get_disp_connector_caps_info = bios_parser_get_disp_connector_caps_info,
 	.get_atom_dc_golden_table = bios_get_atom_dc_golden_table,
+	.transmitter_control = bios_parser_transmitter_control,
+	.enable_lvtma_control = bios_parser_enable_lvtma_control,
 };
 #include "gpio_link.c"
 
 struct link_encoder_funcs { void (*destroy)(struct link_encoder **enc); };
-struct panel_cntl_funcs { void (*destroy)(struct panel_cntl **panel_cntl); };
+struct panel_cntl_funcs {
+	void (*destroy)(struct panel_cntl **panel_cntl);
+	bool (*is_panel_powered_on)(struct panel_cntl *panel_cntl);
+};
 static const struct link_encoder_funcs dcn21_link_enc_funcs, virtual_lnk_enc_funcs;
-static const struct panel_cntl_funcs dce_link_panel_cntl_funcs;
+static bool dce_is_panel_powered_on(struct panel_cntl *panel_cntl);
+static const struct panel_cntl_funcs dce_link_panel_cntl_funcs = {
+	.is_panel_powered_on = dce_is_panel_powered_on,
+};
 /* The register tables are pointed at, not read, on this path. */
 struct dcn10_link_enc_registers { int unused; };
 struct dcn10_link_enc_aux_registers { int unused; };
 struct dcn10_link_enc_hpd_registers { int unused; };
 struct dcn10_link_enc_shift { int unused; };
 struct dcn10_link_enc_mask { int unused; };
-struct dce_panel_cntl_registers { int unused; };
-struct dce_panel_cntl_shift { int unused; };
-struct dce_panel_cntl_mask { int unused; };
 static const struct dcn10_link_enc_registers link_enc_regs[5];
 static const struct dcn10_link_enc_aux_registers link_enc_aux_regs[5];
 static const struct dcn10_link_enc_hpd_registers link_enc_hpd_regs[5];
 static const struct dcn10_link_enc_shift le_shift;
 static const struct dcn10_link_enc_mask le_mask;
-static const struct dce_panel_cntl_registers panel_cntl_regs[1];
-static const struct dce_panel_cntl_shift panel_cntl_shift;
-static const struct dce_panel_cntl_mask panel_cntl_mask;
+#include "renoir_ip_offset.h"
+#include "dcn/dcn_2_1_0_offset.h"
+#include "dcn/dcn_2_1_0_sh_mask.h"
+#include "nbio/nbio_7_0_offset.h"
+#include "edp_tables.c"
+#undef SR
+#undef BASE
+#undef BASE_INNER
 struct dcn21_link_encoder {
 	struct dcn10_link_encoder enc10;
 	char phy_seq_cfg[256];
@@ -269,6 +339,37 @@ static void gid(const char *n, struct graphics_object_id g)
 {
 	printf("%s id %u enum %u type %u\n", n, g.id, g.enum_id, g.type);
 }
+
+/* The eDP presence step. */
+#define DC_LOG_HW_RESUME_S3(...) do { } while (0)
+#define DC_LOG_DC(...) do { } while (0)
+#define DC_LOG_ERROR(...) do { } while (0)
+#define DC_LOG_BIOS(...) do { } while (0)
+#define EXEC_BIOS_CMD_TABLE(command, params) (abort(), 0)
+static unsigned long long dm_get_timestamp(struct dc_context *ctx) { return 1000000000ull; }
+static unsigned long long dm_get_elapse_time_in_ns(struct dc_context *ctx, unsigned long long current_time_stamp,
+						     unsigned long long last_time_stamp)
+{
+	return current_time_stamp - last_time_stamp;
+}
+static uint8_t dmub_cmds[64][DMUB_RB_CMD_SIZE];
+static int n_dmub_cmds;
+/* Where DC hands a command to the DMCUB: the oracle records it. */
+static bool dc_wake_and_execute_dmub_cmd(const struct dc_context *ctx, union dmub_rb_cmd *cmd,
+					 enum dm_dmub_wait_type wait_type)
+{
+	memcpy(dmub_cmds[n_dmub_cmds++], cmd, DMUB_RB_CMD_SIZE);
+	return true;
+}
+#undef REG
+#undef FN
+#undef CTX
+#include "reg_helper.h"
+#define div64_u64(a, b) ((a) / (b))
+/* USB4 DPIA links do not exist on DCN 2.1. */
+static bool dpia_query_hpd_status(struct dc_link *link) { abort(); }
+#include "edp_protos.h"
+#include "edp_funcs.c"
 
 int main(int argc, char **argv)
 {
@@ -338,6 +439,36 @@ int main(int argc, char **argv)
 			       e->features.fec_supported);
 			gid(" id", e->id);
 			gid("  connector", e->connector);
+		}
+	}
+	if (argc > 3 && !strcmp(argv[2], "edp")) {
+		static struct dc_dmub_srv dmub = { .ctx = &ctx };
+		static const struct link_service edp_srv = {
+			.create_link = link_create,
+			.get_hpd_gpio = link_get_hpd_gpio,
+			.dp_trace_set_edp_power_timestamp = dp_trace_set_edp_power_timestamp,
+			.dp_trace_get_edp_poweron_timestamp = dp_trace_get_edp_poweron_timestamp,
+			.dp_trace_get_edp_poweroff_timestamp = dp_trace_get_edp_poweroff_timestamp,
+			.detect_connection_type = link_detect_connection_type,
+		};
+		unset_rule = !strcmp(argv[3], "ones") ? ones_rule : !strcmp(argv[3], "zeros") ? zeros_rule : hash_rule;
+		ctx.dmub_srv = &dmub;
+		dc.link_srv = &edp_srv;
+		dc.debug.dmub_command_table = true;
+		dc.hwss.edp_power_control = dce110_edp_power_control;
+		dc.hwss.edp_wait_for_hpd_ready = dce110_edp_wait_for_hpd_ready;
+		for (int l = 0; l < dc.link_count; l++)
+			dc.links[l]->dc = &dc;
+		detect_edp_presence(&dc);
+		for (int l = 0; l < dc.link_count; l++)
+			printf("edp link %d sink_present %d poweron %d poweroff %d\n", l, dc.links[l]->edp_sink_present,
+			       dc.links[l]->dp_trace.edp_trace_power_timestamps.poweron != 0,
+			       dc.links[l]->dp_trace.edp_trace_power_timestamps.poweroff != 0);
+		for (int c = 0; c < n_dmub_cmds; c++) {
+			printf("dmub cmd");
+			for (int i = 0; i < DMUB_RB_CMD_SIZE; i++)
+				printf(" %02x", dmub_cmds[c][i]);
+			printf("\n");
 		}
 	}
 	return 0;
