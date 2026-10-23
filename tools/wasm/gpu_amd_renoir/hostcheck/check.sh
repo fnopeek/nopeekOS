@@ -99,6 +99,25 @@ for a in "off psp" "cold direct" "running psp"; do
         fail=1
     fi
 done
+# amdgpu_dm_init up to dc_hardware_init: what reaches dc_create and the debug
+# overrides, on Renoir and Raven, APU or not, DMCUB versions either side of
+# the disable_dmcu list, the stutter-quirk device, and DCE 2.0.3 / 3.0 / 3.5.
+rustc $RF "$HERE/dminit_check.rs" -o "$B/dminit_check"
+for a in "24 0x20000 0 0x0101002b 0x02010000 0x164c 0xc1 0x17aa 0x3f1a" \
+         "24 0x20000 0 0 0x02010000 0x1636 0xd1 0x1043 0x16c2" \
+         "22 0x20000 1 0x01000000 0x01000000 0x15dd 0xc8 0x1002 0x15dd" \
+         "22 0x20000 0 0x1 0x01000000 0x15dd 0xc1 0x1002 0x15dd" \
+         "24 0x0 0 0x0101002b 0x02000300 0x164c 0xc1 0x17aa 0x3f1a" \
+         "24 0x20000 0 0x0101002b 0x03050000 0x164c 0xc1 0x17aa 0x3f1a" \
+         "24 0x20000 0 0x0101002b 0x03000000 0x164c 0xc1 0x17aa 0x3f1a"; do
+    "$B/oracle_dminit" $a > "$B/dminit.linux"
+    "$B/dminit_check" "$BIOS" $a > "$B/dminit.port"
+    if diff -u "$B/dminit.linux" "$B/dminit.port" | head -30; cmp -s "$B/dminit.linux" "$B/dminit.port"; then
+        echo "amdgpu_dm_init ($a): port = Linux ($(wc -l < "$B/dminit.linux") lines)"
+    else
+        fail=1
+    fi
+done
 # Stage 2: the oracle reads the discovery binary, the port runs the whole
 # amdgpu_device_init on the fake card first.
 # Registers never written read all ones (a bit cleared shows), all zeros

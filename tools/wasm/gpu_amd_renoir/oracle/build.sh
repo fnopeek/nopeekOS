@@ -527,6 +527,23 @@ python3 -I "$HERE/protos.py" "$B/link_funcs.c" > "$B/link_protos.h"
     $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" '#PSP_HEADER_BYTES' '#PSP_FOOTER_BYTES' amdgpu_dm_dmub_reg_read \
         amdgpu_dm_dmub_reg_write dm_dmub_sw_init dm_dmub_hw_init
 } > "$B/dmubhw_funcs.c"
+# amdgpu_dm_init up to dc_hardware_init (stage D cuts it there), with its
+# quirk tables and the module parameters it reads.
+{
+    $X "$AMD/amdgpu/amdgpu_drv.c" amdgpu_pp_feature_mask amdgpu_dc_feature_mask
+    grep -h '^int amdgpu_sg_display = \|^int amdgpu_seamless = ' "$AMD/amdgpu/amdgpu_drv.c"
+    $X "$AMD/display/amdgpu_dm/amdgpu_dm_quirks.c" amdgpu_dm_quirks quirk_entries edp0_on_dp1_callback \
+        aux_hpd_discon_callback dmi_quirk_table retrieve_dmi_info
+    $X "$AMD/amdgpu/amdgpu_device.c" amdgpu_device_seamless_boot_supported
+    $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" amdgpu_stutter_quirk amdgpu_stutter_quirk_list dm_should_disable_stutter \
+        dm_get_default_ips_mode
+    $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" amdgpu_dm_init | python3 -I -c '
+import sys
+t = sys.stdin.read()
+cut = "\tdc_hardware_init(adev->dm.dc);\n"
+assert t.count(cut) == 1
+print(t[:t.index(cut)] + "\treturn 0;\nerror:\n\tamdgpu_dm_fini(adev);\n\n\treturn -EINVAL;\n}")'
+} > "$B/dminit_funcs.c"
 DMUB_CF="-I $HERE/shim_dmub -D_OS_TYPES_H_ -include $HERE/shim_dmub/dmub_os.h -I $AMD/display -I $AMD/display/dc \
     -I $AMD/display/include -I $AMD/include/asic_reg -I $AMD/display/dmub/inc -I $AMD/display/dmub"
 
@@ -542,6 +559,7 @@ for f in "$AMD"/display/dmub/src/*.c; do
     DMUB_O="$DMUB_O $B/dmub_$n.o"
 done
 gcc $CF $DMUB_CF "$HERE/main_dmubhw.c" $DMUB_O -o "$B/oracle_dmubhw"
+gcc $CF $DMUB_CF "$HERE/main_dminit.c" -o "$B/oracle_dminit"
 gcc $CF "$HERE/main_bios.c" "$B/atom.o" -o "$B/oracle_bios"
 GPIO_O=""
 for f in gpio_base gpio_service hw_gpio hw_hpd hw_ddc hw_generic dcn21/hw_factory_dcn21 dcn21/hw_translate_dcn21; do

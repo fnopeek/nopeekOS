@@ -1925,8 +1925,9 @@ pub fn amdgpu_device_fw_loading(adev: &mut amdgpu_device) -> i32 {
 }
 
 /// `amdgpu_device_ip_hw_init_phase2`: the remaining blocks in their order.
-/// SMU, GFX, SDMA, VCN and JPEG are ported; DM (stage 8) is not yet and
-/// stays without hw_init, which the log says.
+/// SMU, GFX, SDMA, VCN and JPEG are ported; DM runs only when
+/// `gpu_amd_renoir.dc` is set and otherwise stays without hw_init, which the
+/// log says.
 pub fn amdgpu_device_ip_hw_init_phase2(adev: &mut amdgpu_device) -> i32 {
     for i in 0..adev.ip_blocks.len() {
         let st = adev.ip_blocks[i].status;
@@ -1943,6 +1944,18 @@ pub fn amdgpu_device_ip_hw_init_phase2(adev: &mut amdgpu_device) -> i32 {
             AMD_IP_BLOCK_TYPE_SDMA => crate::sdma_v4_0::sdma_v4_0_hw_init(adev),
             AMD_IP_BLOCK_TYPE_VCN => crate::vcn_v2_0::vcn_v2_0_hw_init(adev),
             AMD_IP_BLOCK_TYPE_JPEG => crate::jpeg_v2_0::jpeg_v2_0_hw_init(adev),
+            // Display Core runs only on request and for diagnosis: it builds
+            // DC and brings up the DMCUB but does not drive the display yet,
+            // so the block stays without hw and a failure does not stop the
+            // device.
+            AMD_IP_BLOCK_TYPE_DCE if crate::amdgpu_dm::dc_requested() => {
+                let r = crate::amdgpu_dm::dm_hw_init(adev);
+                Line::new().s("hw_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
+                    .s(">: Display Core bring-up ").s(if r == 0 { "done" } else { "failed" }).s(", status ")
+                    .dec((-r) as u64).say();
+                crate::amdgpu_dm::dm_report(adev);
+                continue;
+            }
             _ => {
                 Line::new().s("hw_init of IP block <").bytes(adev.ip_blocks[i].version.funcs_name)
                     .s(">: not ported yet, skipped").say();

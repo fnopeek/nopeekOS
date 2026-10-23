@@ -12,6 +12,7 @@ use crate::regs::*;
 use crate::dmub_srv::*;
 use crate::dc::{dc, dc_create, dc_init_data};
 use crate::dc_types::dce_environment;
+use crate::amdgpu_discovery::ip_version;
 use alloc::boxed::Box;
 
 /// `struct amdgpu_display_manager`, the part sw_init fills.
@@ -230,10 +231,6 @@ fn dm_get_default_ips_mode(adev: &amdgpu_device) -> u32 {
     ret
 }
 
-/// `IP_VERSION` (amdgpu.h).
-const fn ip_version(maj: u32, min: u32, rev: u32) -> u32 {
-    maj << 16 | min << 8 | rev
-}
 
 /// `amdgpu_device_seamless_boot_supported` (amdgpu_device.c).
 fn amdgpu_device_seamless_boot_supported(adev: &amdgpu_device) -> bool {
@@ -570,4 +567,47 @@ pub fn amdgpu_dm_init(adev: &mut amdgpu_device) -> i32 {
 /// i2c bus follow `amdgpu_dm_init`'s later stages.
 pub fn dm_hw_init(adev: &mut amdgpu_device) -> i32 {
     amdgpu_dm_init(adev)
+}
+
+/// Whether `set gpu_amd_renoir.dc on` asks for Display Core on this boot.
+pub fn dc_requested() -> bool {
+    let mut buf = [0u8; 8];
+    let n = npk_sys::config_get(b"gpu_amd_renoir.dc", &mut buf);
+    n > 0 && matches!(&buf[..n as usize], b"on" | b"1")
+}
+
+/// What `dm_hw_init` built and found, one line per object, for reading
+/// the bring-up off a device's log.
+pub fn dm_report(adev: &amdgpu_device) {
+    let Some(dc) = adev.dm.dc.as_deref() else {
+        Line::new().s("dc: no Display Core").say();
+        return;
+    };
+    let pool = dc.res_pool.as_deref();
+    Line::new().s("dc: links ").dec(dc.link_count as u64).s(", streams ").dec(dc.caps.max_streams as u64)
+        .s(", audios ").dec(dc.caps.max_audios as u64).s(", pipes ").dec(pool.map_or(0, |p| p.pipe_count) as u64)
+        .s(", internal displays ").dec(dc.caps.num_of_internal_disp as u64).say();
+    for l in &dc.links {
+        Line::new().s("dc: link ").dec(l.link_index as u64).s(" connector ").dec(l.link_id.id as u64)
+            .s(" signal 0x").hex(l.connector_signal).s(" internal ").dec(l.is_internal_display as u64)
+            .s(" eng ").dec(l.eng_id as u64).s(" hpd ").dec(l.hpd_src as u64).s(" ddc ").dec(l.ddc_hw_inst as u64)
+            .s(" panel_cntl ").dec(l.panel_cntl.is_some() as u64).say();
+    }
+    if let Some(c) = dc.clk_mgr.as_deref() {
+        let b = &c.base.boot_snapshot;
+        Line::new().s("dc: clk smu_ver 0x").hex(c.smu_ver as u32).s(" vco ").dec(c.base.dentist_vco_freq_khz as u64)
+            .s(" kHz dprefclk ").dec(c.base.dprefclk_khz as u64).s(" kHz smu ").dec(c.smu_present as u64)
+            .s(" dpm ").dec(c.dpm_present as u64).s(" retraining_off ").dec(c.periodic_retraining_disabled as u64)
+            .say();
+        Line::new().s("dc: boot clocks dispclk ").dec(b.dispclk as u64).s(" dppclk ").dec(b.dppclk as u64)
+            .s(" dcfclk ").dec(b.dcfclk as u64).s(" dprefclk ").dec(b.dprefclk as u64).s(" fclk ").dec(b.fclk as u64)
+            .say();
+    }
+    if let Some(d) = adev.dm.dmub_srv.as_ref() {
+        let r = &crate::dmub_dcn20::dmub_srv_dcn21_regs.offset;
+        Line::new().s("dmub: hw_init ").dec(d.hw_init as u64).s(" fw_version 0x").hexw(d.fw_version, 8)
+            .s(" DMCUB_CNTL 0x").hexw(crate::dc_helper::dm_read_reg(adev, r.DMCUB_CNTL), 8)
+            .s(" boot status 0x").hexw(crate::dc_helper::dm_read_reg(adev, r.DMCUB_SCRATCH0), 8)
+            .s(" dc handle ").dec(dc.ctx.dmub_srv.is_some() as u64).say();
+    }
 }
