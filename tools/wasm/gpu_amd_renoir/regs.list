@@ -9922,3 +9922,6 @@ WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_DIS__SHIFT @ ../display/dc/resourc
 WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_DIS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
 WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
 WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+
+# DC dcn21_resource read_pipe_fuses: the pipe-disable fuse register.
+CC_DC_PIPE_DIS = BASE(mmCC_DC_PIPE_DIS_BASE_IDX) + mmCC_DC_PIPE_DIS @ ../display/dc/resource/dcn21/dcn21_resource.c

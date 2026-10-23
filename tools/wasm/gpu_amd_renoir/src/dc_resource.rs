@@ -55,6 +55,8 @@ pub const NO_UNDERLAY_PIPE: u32 = u32::MAX;
 #[derive(Default)]
 pub struct resource_pool {
     pub pipe_count: u32,
+    pub mpcc_count: u32,
+    pub timing_generator_count: u32,
     pub underlay_pipe_index: u32,
     pub stream_enc_count: u32,
     pub audio_count: u32,

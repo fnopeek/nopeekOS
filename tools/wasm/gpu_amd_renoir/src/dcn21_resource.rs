@@ -5,9 +5,12 @@
 //! the next unit, each block with its regs.list entries + oracle.
 #![allow(dead_code)]
 
+use crate::amdgpu_device::amdgpu_device;
 use crate::dc::dc;
+use crate::dc_helper::dm_read_reg;
 use crate::dc_resource::{resource_caps, resource_pool, NO_UNDERLAY_PIPE};
 use crate::dc_types::dc_caps;
+use crate::regs::CC_DC_PIPE_DIS;
 use crate::dccg::{dccg21_create, DCCG_MASK, DCCG_REGS, DCCG_SHIFT};
 use crate::dcn10_ipp::dcn21_ipp_create;
 use crate::dcn20_dpp::dcn21_dpp_create;
@@ -110,15 +113,26 @@ pub fn dcn21_set_caps(caps: &mut dc_caps) {
     caps.dp_hdmi21_pcon_support = true;
 }
 
+/// `read_pipe_fuses` (dcn21_resource.c): the pipe-disable fuse bitmap. Bit `i`
+/// set means hw pipe `i` is fused off. RV1/Renoir has at most 4 pipes, so the
+/// value is masked to its low 4 bits. This is the first hardware register read
+/// of the DC port — every other constructor only stores pointers.
+fn read_pipe_fuses(adev: &amdgpu_device) -> u32 {
+    // REG(CC_DC_PIPE_DIS) is DCN_BASE seg2 + mmCC_DC_PIPE_DIS, resolved in regs.rs.
+    dm_read_reg(adev, CC_DC_PIPE_DIS) & 0xf
+}
+
 /// `dcn21_resource_construct` (dcn21_resource.c), as far as it is ported: the
 /// pool's resource caps, the `dc->caps` hardcoding, and the first "Create
 /// resources" block — the five combo-PHY clock sources plus the DP-DTO clock
 /// source. The remaining constructors (dccg, hubbub, per-pipe hubp/dpp/opp/optc,
-/// mpc, encoders, `dml_init_instance`) grow this as each block lands;
-/// `ctx->dc_bios->regs = &bios_regs` waits for bios_parser, `read_pipe_fuses`
-/// for the pipe-fuse read, and the NULL-checks / `goto create_fail` return with
-/// the full construct.
-pub fn dcn21_resource_construct(dc: &mut dc, pool: &mut resource_pool) {
+/// mpc, encoders, `dml_init_instance`) grow this as each block lands. The pipe
+/// loop honours `read_pipe_fuses`; `ctx->dc_bios->regs = &bios_regs` waits for
+/// bios_parser, and the NULL-checks / `goto create_fail` return come with the
+/// full construct.
+pub fn dcn21_resource_construct(adev: &amdgpu_device, dc: &mut dc, pool: &mut resource_pool) {
+    let pipe_fuses = read_pipe_fuses(adev);
+
     pool.res_cap = Some(&RES_CAP_RN);
 
     // Resource + asic cap hardcoding.
@@ -151,19 +165,29 @@ pub fn dcn21_resource_construct(dc: &mut dc, pool: &mut resource_pool) {
     // The DCCG. (dmcu/psr/abm are gated on dc->config and wait; pp_smu waits.)
     pool.dccg = Some(dccg21_create(&DCCG_REGS, &DCCG_SHIFT, &DCCG_MASK));
 
-    // Per pipe: mem input (hubp) -> ipp -> dpp -> opp -> TG. The full pipe chain
-    // is ported. read_pipe_fuses (which compacts fused-out pipes) joins later —
-    // until then the hw instance is the array index.
+    // Per pipe: mem input (hubp) -> ipp -> dpp -> opp -> TG. A pipe fused off
+    // (its bit set in pipe_fuses) is skipped: the hw instance stays `i`, but the
+    // live blocks compact into slot `j`, so the pool has no gaps. On Renoir with
+    // no pipes fused, j == pipe_count.
+    let mut j = 0usize;
     for i in 0..pool.pipe_count as usize {
-        pool.hubps[i] = dcn21_hubp_create(i as u32);
-        pool.ipps[i] = Some(dcn21_ipp_create(i as u32));
-        pool.dpps[i] = dcn21_dpp_create(i as u32);
-        pool.opps[i] = Some(dcn21_opp_create(i as u32));
-        pool.timing_generators[i] = Some(dcn21_timing_generator_create(i as u32));
+        if pipe_fuses & (1 << i) != 0 {
+            continue;
+        }
+        pool.hubps[j] = dcn21_hubp_create(i as u32);
+        pool.ipps[j] = Some(dcn21_ipp_create(i as u32));
+        pool.dpps[j] = dcn21_dpp_create(i as u32);
+        pool.opps[j] = Some(dcn21_opp_create(i as u32));
+        pool.timing_generators[j] = Some(dcn21_timing_generator_create(i as u32));
+        j += 1;
     }
 
-    // After the ddc loop (aux/i2c, not yet ported) Linux sets
-    // timing_generator_count/pipe_count/mpcc_count = j; then mpc and hubbub.
+    // (The aux-engine / i2c loop over num_ddc is a later block.) Linux then sets
+    // the live-pipe counts to j, before mpc and hubbub.
+    pool.timing_generator_count = j as u32;
+    pool.pipe_count = j as u32;
+    pool.mpcc_count = j as u32;
+
     pool.mpc = Some(dcn21_mpc_create());
     pool.hubbub = Some(dcn21_hubbub_create());
 

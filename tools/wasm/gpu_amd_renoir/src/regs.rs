@@ -19837,3 +19837,7 @@ pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_DIS_MASK: u32 = 0x100000
 pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_STATUS__SHIFT: u32 = 0x19;
 /// include/asic_reg/dcn/dcn_1_0_sh_mask.h:7411
 pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_STATUS_MASK: u32 = 0x2000000;
+
+// DC dcn21_resource read_pipe_fuses: the pipe-disable fuse register.
+/// The value of `BASE(mmCC_DC_PIPE_DIS_BASE_IDX) + mmCC_DC_PIPE_DIS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CC_DC_PIPE_DIS: u32 = 0x358a;
