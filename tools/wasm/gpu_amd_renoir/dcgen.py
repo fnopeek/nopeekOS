@@ -78,6 +78,25 @@ BLOCKS = {
     # Single struct with array fields: the reg list uses SRII to fill `.F[inst]`
     # within one struct (not an array of structs). mpcc fields span 0..5, the
     # OUT_MUX fields 0..3.
+    "hubbub": dict(
+        single=True,
+        headers=["hubbub/dcn10/dcn10_hubbub.h", "hubbub/dcn20/dcn20_hubbub.h", "hubbub/dcn21/dcn21_hubbub.h"],
+        prefixes=["HUBBUB_", "DCN_HUBBUB"],
+        reg_calls=["HUBBUB_REG_LIST_DCN21()"],
+        shift_calls=["HUBBUB_MASK_SH_LIST_DCN21(__SHIFT)"],
+        mask_calls=["HUBBUB_MASK_SH_LIST_DCN21(_MASK)"],
+        const_prefix="HUBBUB",
+        regs_struct="dcn_hubbub_registers", shift_struct="dcn_hubbub_shift", mask_struct="dcn_hubbub_mask",
+    ),
+    "vmid": dict(
+        headers=["inc/hw/vmid.h", "dcn20/dcn20_vmid.h"],
+        prefixes=["DCN20_VMID", "VMID_"],
+        reg_calls=["DCN20_VMID_REG_LIST({i})"],
+        shift_calls=["DCN20_VMID_MASK_SH_LIST(__SHIFT)"],
+        mask_calls=["DCN20_VMID_MASK_SH_LIST(_MASK)"],
+        instances=16, const_prefix="VMID",
+        regs_struct="dcn_vmid_registers", shift_struct="dcn20_vmid_shift", mask_struct="dcn20_vmid_mask",
+    ),
     "mpc": dict(
         single=True,
         headers=["mpc/dcn10/dcn10_mpc.h", "mpc/dcn20/dcn20_mpc.h"],

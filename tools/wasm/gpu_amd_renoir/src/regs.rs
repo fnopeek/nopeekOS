@@ -16493,3 +16493,733 @@ pub const MPC_OUT0_DENORM_CLAMP_B_CB__MPC_OUT_DENORM_CLAMP_MIN_B_CB_MASK: u32 = 
 pub const CUR_VUPDATE_LOCK_SET0__CUR_VUPDATE_LOCK_SET__SHIFT: u32 = 0x0;
 /// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24308
 pub const CUR_VUPDATE_LOCK_SET0__CUR_VUPDATE_LOCK_SET_MASK: u32 = 0x1;
+
+// DC hubbub: dcn_hubbub_registers (single struct, array/scalar fields)
+
+// (HUBBUB_REG_LIST_DCN21()) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmDCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A_BASE_IDX) + mmDCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A: u32 = 0x39c9;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A: u32 = 0x39cd;
+/// The value of `BASE(mmDCHUBBUB_ARB_DATA_URGENCY_WATERMARK_B_BASE_IDX) + mmDCHUBBUB_ARB_DATA_URGENCY_WATERMARK_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_B: u32 = 0x39ce;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B: u32 = 0x39d2;
+/// The value of `BASE(mmDCHUBBUB_ARB_DATA_URGENCY_WATERMARK_C_BASE_IDX) + mmDCHUBBUB_ARB_DATA_URGENCY_WATERMARK_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_C: u32 = 0x39d3;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C: u32 = 0x39d7;
+/// The value of `BASE(mmDCHUBBUB_ARB_DATA_URGENCY_WATERMARK_D_BASE_IDX) + mmDCHUBBUB_ARB_DATA_URGENCY_WATERMARK_D` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_D: u32 = 0x39d8;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D: u32 = 0x39dc;
+/// The value of `BASE(mmDCHUBBUB_ARB_WATERMARK_CHANGE_CNTL_BASE_IDX) + mmDCHUBBUB_ARB_WATERMARK_CHANGE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_WATERMARK_CHANGE_CNTL: u32 = 0x39dd;
+/// The value of `BASE(mmDCHUBBUB_ARB_DRAM_STATE_CNTL_BASE_IDX) + mmDCHUBBUB_ARB_DRAM_STATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_DRAM_STATE_CNTL: u32 = 0x39c8;
+/// The value of `BASE(mmDCHUBBUB_ARB_SAT_LEVEL_BASE_IDX) + mmDCHUBBUB_ARB_SAT_LEVEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_SAT_LEVEL: u32 = 0x39c6;
+/// The value of `BASE(mmDCHUBBUB_ARB_DF_REQ_OUTSTAND_BASE_IDX) + mmDCHUBBUB_ARB_DF_REQ_OUTSTAND` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_DF_REQ_OUTSTAND: u32 = 0x39c5;
+/// The value of `BASE(mmDCHUBBUB_GLOBAL_TIMER_CNTL_BASE_IDX) + mmDCHUBBUB_GLOBAL_TIMER_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_GLOBAL_TIMER_CNTL: u32 = 0x39df;
+/// The value of `BASE(mmDCHUBBUB_TEST_DEBUG_INDEX_BASE_IDX) + mmDCHUBBUB_TEST_DEBUG_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_TEST_DEBUG_INDEX: u32 = 0x39fd;
+/// The value of `BASE(mmDCHUBBUB_TEST_DEBUG_DATA_BASE_IDX) + mmDCHUBBUB_TEST_DEBUG_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_TEST_DEBUG_DATA: u32 = 0x39fe;
+/// The value of `BASE(mmDCHUBBUB_SOFT_RESET_BASE_IDX) + mmDCHUBBUB_SOFT_RESET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_SOFT_RESET: u32 = 0x39ee;
+/// The value of `BASE(mmDCHUBBUB_CRC_CTRL_BASE_IDX) + mmDCHUBBUB_CRC_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_CRC_CTRL: u32 = 0x39b1;
+/// The value of `BASE(mmDCN_VM_FB_LOCATION_BASE_BASE_IDX) + mmDCN_VM_FB_LOCATION_BASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCN_VM_FB_LOCATION_BASE: u32 = 0x3953;
+/// The value of `BASE(mmDCN_VM_FB_LOCATION_TOP_BASE_IDX) + mmDCN_VM_FB_LOCATION_TOP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCN_VM_FB_LOCATION_TOP: u32 = 0x3954;
+/// The value of `BASE(mmDCN_VM_FB_OFFSET_BASE_IDX) + mmDCN_VM_FB_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCN_VM_FB_OFFSET: u32 = 0x3955;
+/// The value of `BASE(mmDCN_VM_AGP_BOT_BASE_IDX) + mmDCN_VM_AGP_BOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCN_VM_AGP_BOT: u32 = 0x3956;
+/// The value of `BASE(mmDCN_VM_AGP_TOP_BASE_IDX) + mmDCN_VM_AGP_TOP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCN_VM_AGP_TOP: u32 = 0x3957;
+/// The value of `BASE(mmDCN_VM_AGP_BASE_BASE_IDX) + mmDCN_VM_AGP_BASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCN_VM_AGP_BASE: u32 = 0x3958;
+/// The value of `BASE(mmDCN_VM_FAULT_ADDR_MSB_BASE_IDX) + mmDCN_VM_FAULT_ADDR_MSB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCN_VM_FAULT_ADDR_MSB: u32 = 0x3a8d;
+/// The value of `BASE(mmDCN_VM_FAULT_ADDR_LSB_BASE_IDX) + mmDCN_VM_FAULT_ADDR_LSB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCN_VM_FAULT_ADDR_LSB: u32 = 0x3a8e;
+/// The value of `BASE(mmDCN_VM_FAULT_CNTL_BASE_IDX) + mmDCN_VM_FAULT_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCN_VM_FAULT_CNTL: u32 = 0x3a8b;
+/// The value of `BASE(mmDCN_VM_FAULT_STATUS_BASE_IDX) + mmDCN_VM_FAULT_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCN_VM_FAULT_STATUS: u32 = 0x3a8c;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_A_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_A: u32 = 0x39cb;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_A_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_A: u32 = 0x39cc;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_B_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_B: u32 = 0x39d0;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_B_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_B: u32 = 0x39d1;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_C_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_C: u32 = 0x39d5;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_C_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_C: u32 = 0x39d6;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_D_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_D` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_D: u32 = 0x39da;
+/// The value of `BASE(mmDCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_D_BASE_IDX) + mmDCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_D` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_D: u32 = 0x39db;
+/// The value of `BASE(mmDCHUBBUB_ARB_FRAC_URG_BW_NOM_A_BASE_IDX) + mmDCHUBBUB_ARB_FRAC_URG_BW_NOM_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_FRAC_URG_BW_NOM_A: u32 = 0x39ff;
+/// The value of `BASE(mmDCHUBBUB_ARB_FRAC_URG_BW_NOM_B_BASE_IDX) + mmDCHUBBUB_ARB_FRAC_URG_BW_NOM_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_FRAC_URG_BW_NOM_B: u32 = 0x3a01;
+/// The value of `BASE(mmDCHUBBUB_ARB_FRAC_URG_BW_NOM_C_BASE_IDX) + mmDCHUBBUB_ARB_FRAC_URG_BW_NOM_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_FRAC_URG_BW_NOM_C: u32 = 0x3a03;
+/// The value of `BASE(mmDCHUBBUB_ARB_FRAC_URG_BW_NOM_D_BASE_IDX) + mmDCHUBBUB_ARB_FRAC_URG_BW_NOM_D` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_FRAC_URG_BW_NOM_D: u32 = 0x3a05;
+/// The value of `BASE(mmDCHUBBUB_ARB_FRAC_URG_BW_FLIP_A_BASE_IDX) + mmDCHUBBUB_ARB_FRAC_URG_BW_FLIP_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_FRAC_URG_BW_FLIP_A: u32 = 0x3a00;
+/// The value of `BASE(mmDCHUBBUB_ARB_FRAC_URG_BW_FLIP_B_BASE_IDX) + mmDCHUBBUB_ARB_FRAC_URG_BW_FLIP_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_FRAC_URG_BW_FLIP_B: u32 = 0x3a02;
+/// The value of `BASE(mmDCHUBBUB_ARB_FRAC_URG_BW_FLIP_C_BASE_IDX) + mmDCHUBBUB_ARB_FRAC_URG_BW_FLIP_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_FRAC_URG_BW_FLIP_C: u32 = 0x3a04;
+/// The value of `BASE(mmDCHUBBUB_ARB_FRAC_URG_BW_FLIP_D_BASE_IDX) + mmDCHUBBUB_ARB_FRAC_URG_BW_FLIP_D` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_FRAC_URG_BW_FLIP_D: u32 = 0x3a06;
+/// The value of `BASE(mmDCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_A_BASE_IDX) + mmDCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_A: u32 = 0x39ca;
+/// The value of `BASE(mmDCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_B_BASE_IDX) + mmDCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_B: u32 = 0x39cf;
+/// The value of `BASE(mmDCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_C_BASE_IDX) + mmDCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_C: u32 = 0x39d4;
+/// The value of `BASE(mmDCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_D_BASE_IDX) + mmDCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_D` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_D: u32 = 0x39d9;
+/// The value of `BASE(mmDCHUBBUB_ARB_HOSTVM_CNTL_BASE_IDX) + mmDCHUBBUB_ARB_HOSTVM_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHUBBUB_ARB_HOSTVM_CNTL: u32 = 0x3a07;
+/// The value of `BASE(mmDCHVM_CTRL0_BASE_IDX) + mmDCHVM_CTRL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHVM_CTRL0: u32 = 0x916b;
+/// The value of `BASE(mmDCHVM_MEM_CTRL_BASE_IDX) + mmDCHVM_MEM_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHVM_MEM_CTRL: u32 = 0x916e;
+/// The value of `BASE(mmDCHVM_CLK_CTRL_BASE_IDX) + mmDCHVM_CLK_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHVM_CLK_CTRL: u32 = 0x916d;
+/// The value of `BASE(mmDCHVM_RIOMMU_CTRL0_BASE_IDX) + mmDCHVM_RIOMMU_CTRL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHVM_RIOMMU_CTRL0: u32 = 0x916f;
+/// The value of `BASE(mmDCHVM_RIOMMU_STAT0_BASE_IDX) + mmDCHVM_RIOMMU_STAT0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBBUB_DCHVM_RIOMMU_STAT0: u32 = 0x9170;
+
+// DC hubbub field shifts/masks (HUBBUB_MASK_SH_LIST_DCN21(__SHIFT))
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8095
+pub const DCHUBBUB_ARB_DF_REQ_OUTSTAND__DCHUBBUB_ARB_MIN_REQ_OUTSTAND_COMMIT_THRESHOLD__SHIFT: u32 = 0x17;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8098
+pub const DCHUBBUB_ARB_DF_REQ_OUTSTAND__DCHUBBUB_ARB_MIN_REQ_OUTSTAND_COMMIT_THRESHOLD_MASK: u32 = 0xff800000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8373
+pub const DCHUBBUB_ARB_FRAC_URG_BW_FLIP_A__DCHUBBUB_ARB_FRAC_URG_BW_FLIP_A__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8374
+pub const DCHUBBUB_ARB_FRAC_URG_BW_FLIP_A__DCHUBBUB_ARB_FRAC_URG_BW_FLIP_A_MASK: u32 = 0x3ff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8379
+pub const DCHUBBUB_ARB_FRAC_URG_BW_FLIP_B__DCHUBBUB_ARB_FRAC_URG_BW_FLIP_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8380
+pub const DCHUBBUB_ARB_FRAC_URG_BW_FLIP_B__DCHUBBUB_ARB_FRAC_URG_BW_FLIP_B_MASK: u32 = 0x3ff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8385
+pub const DCHUBBUB_ARB_FRAC_URG_BW_FLIP_C__DCHUBBUB_ARB_FRAC_URG_BW_FLIP_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8386
+pub const DCHUBBUB_ARB_FRAC_URG_BW_FLIP_C__DCHUBBUB_ARB_FRAC_URG_BW_FLIP_C_MASK: u32 = 0x3ff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8391
+pub const DCHUBBUB_ARB_FRAC_URG_BW_FLIP_D__DCHUBBUB_ARB_FRAC_URG_BW_FLIP_D__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8392
+pub const DCHUBBUB_ARB_FRAC_URG_BW_FLIP_D__DCHUBBUB_ARB_FRAC_URG_BW_FLIP_D_MASK: u32 = 0x3ff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8370
+pub const DCHUBBUB_ARB_FRAC_URG_BW_NOM_A__DCHUBBUB_ARB_FRAC_URG_BW_NOM_A__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8371
+pub const DCHUBBUB_ARB_FRAC_URG_BW_NOM_A__DCHUBBUB_ARB_FRAC_URG_BW_NOM_A_MASK: u32 = 0x3ff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8376
+pub const DCHUBBUB_ARB_FRAC_URG_BW_NOM_B__DCHUBBUB_ARB_FRAC_URG_BW_NOM_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8377
+pub const DCHUBBUB_ARB_FRAC_URG_BW_NOM_B__DCHUBBUB_ARB_FRAC_URG_BW_NOM_B_MASK: u32 = 0x3ff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8382
+pub const DCHUBBUB_ARB_FRAC_URG_BW_NOM_C__DCHUBBUB_ARB_FRAC_URG_BW_NOM_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8383
+pub const DCHUBBUB_ARB_FRAC_URG_BW_NOM_C__DCHUBBUB_ARB_FRAC_URG_BW_NOM_C_MASK: u32 = 0x3ff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8388
+pub const DCHUBBUB_ARB_FRAC_URG_BW_NOM_D__DCHUBBUB_ARB_FRAC_URG_BW_NOM_D__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8389
+pub const DCHUBBUB_ARB_FRAC_URG_BW_NOM_D__DCHUBBUB_ARB_FRAC_URG_BW_NOM_D_MASK: u32 = 0x3ff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8122
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A__DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_A__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8124
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A__DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_A_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8145
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_B__DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_B__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8147
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_B__DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_B_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8168
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_C__DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8170
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_C__DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_C_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8191
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_D__DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_D__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8193
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_D__DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_D_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8130
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_A__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_A__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8132
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_A__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_A_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8153
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_B__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_B__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8155
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_B__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_B_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8176
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_C__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8178
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_C__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_C_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8199
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_D__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_D__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8201
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_D__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_D_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8135
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_A__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_A__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8137
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_A__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_A_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8158
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_B__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_B__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8160
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_B__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_B_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8181
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_C__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8183
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_C__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_C_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8204
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_D__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_D__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8206
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_D__DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_D_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8140
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A__DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8142
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A__DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8163
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B__DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8165
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B__DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8186
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C__DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8188
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C__DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8209
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D__DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8211
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D__DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8404
+pub const DCHUBBUB_ARB_HOSTVM_CNTL__DCHUBBUB_ARB_MAX_QOS_COMMIT_THRESHOLD__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8415
+pub const DCHUBBUB_ARB_HOSTVM_CNTL__DCHUBBUB_ARB_MAX_QOS_COMMIT_THRESHOLD_MASK: u32 = 0xf0000000;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48449
+pub const DCHVM_CTRL0__HOSTVM_INIT_REQ__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48450
+pub const DCHVM_CTRL0__HOSTVM_INIT_REQ_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48468
+pub const DCHVM_MEM_CTRL__HVM_GPUVMRET_PWR_REQ_DIS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48471
+pub const DCHVM_MEM_CTRL__HVM_GPUVMRET_PWR_REQ_DIS_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48469
+pub const DCHVM_MEM_CTRL__HVM_GPUVMRET_FORCE_REQ__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48472
+pub const DCHVM_MEM_CTRL__HVM_GPUVMRET_FORCE_REQ_MASK: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48470
+pub const DCHVM_MEM_CTRL__HVM_GPUVMRET_POWER_STATUS__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48473
+pub const DCHVM_MEM_CTRL__HVM_GPUVMRET_POWER_STATUS_MASK: u32 = 0x30;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48455
+pub const DCHVM_CLK_CTRL__HVM_DISPCLK_R_GATE_DIS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48461
+pub const DCHVM_CLK_CTRL__HVM_DISPCLK_R_GATE_DIS_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48456
+pub const DCHVM_CLK_CTRL__HVM_DISPCLK_G_GATE_DIS__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48462
+pub const DCHVM_CLK_CTRL__HVM_DISPCLK_G_GATE_DIS_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48457
+pub const DCHVM_CLK_CTRL__HVM_DCFCLK_R_GATE_DIS__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48463
+pub const DCHVM_CLK_CTRL__HVM_DCFCLK_R_GATE_DIS_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48458
+pub const DCHVM_CLK_CTRL__HVM_DCFCLK_G_GATE_DIS__SHIFT: u32 = 0x5;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48464
+pub const DCHVM_CLK_CTRL__HVM_DCFCLK_G_GATE_DIS_MASK: u32 = 0x20;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48459
+pub const DCHVM_CLK_CTRL__TR_REQ_REQCLKREQ_MODE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48465
+pub const DCHVM_CLK_CTRL__TR_REQ_REQCLKREQ_MODE_MASK: u32 = 0x300;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48460
+pub const DCHVM_CLK_CTRL__TW_RSP_COMPCLKREQ_MODE__SHIFT: u32 = 0xa;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48466
+pub const DCHVM_CLK_CTRL__TW_RSP_COMPCLKREQ_MODE_MASK: u32 = 0xc00;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48475
+pub const DCHVM_RIOMMU_CTRL0__HOSTVM_PREFETCH_REQ__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48477
+pub const DCHVM_RIOMMU_CTRL0__HOSTVM_PREFETCH_REQ_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48476
+pub const DCHVM_RIOMMU_CTRL0__HOSTVM_POWERSTATUS__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48478
+pub const DCHVM_RIOMMU_CTRL0__HOSTVM_POWERSTATUS_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48480
+pub const DCHVM_RIOMMU_STAT0__RIOMMU_ACTIVE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48482
+pub const DCHVM_RIOMMU_STAT0__RIOMMU_ACTIVE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48481
+pub const DCHVM_RIOMMU_STAT0__HOSTVM_PREFETCH_DONE__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:48483
+pub const DCHVM_RIOMMU_STAT0__HOSTVM_PREFETCH_DONE_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8126
+pub const DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_A__DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_A__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8127
+pub const DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_A__DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_A_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8149
+pub const DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_B__DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8150
+pub const DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_B__DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_B_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8172
+pub const DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_C__DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8173
+pub const DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_C__DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_C_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8195
+pub const DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_D__DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_D__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:8196
+pub const DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_D__DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_D_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8858
+pub const DCHUBBUB_GLOBAL_TIMER_CNTL__DCHUBBUB_GLOBAL_TIMER_ENABLE__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8861
+pub const DCHUBBUB_GLOBAL_TIMER_CNTL__DCHUBBUB_GLOBAL_TIMER_ENABLE_MASK: u32 = 0x1000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8938
+pub const DCHUBBUB_SOFT_RESET__DCHUBBUB_GLOBAL_SOFT_RESET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8941
+pub const DCHUBBUB_SOFT_RESET__DCHUBBUB_GLOBAL_SOFT_RESET_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8847
+pub const DCHUBBUB_ARB_WATERMARK_CHANGE_CNTL__DCHUBBUB_ARB_WATERMARK_CHANGE_REQUEST__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8852
+pub const DCHUBBUB_ARB_WATERMARK_CHANGE_CNTL__DCHUBBUB_ARB_WATERMARK_CHANGE_REQUEST_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8844
+pub const DCHUBBUB_ARB_WATERMARK_CHANGE_CNTL__DCHUBBUB_ARB_WATERMARK_CHANGE_DONE_INTERRUPT_DISABLE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8849
+pub const DCHUBBUB_ARB_WATERMARK_CHANGE_CNTL__DCHUBBUB_ARB_WATERMARK_CHANGE_DONE_INTERRUPT_DISABLE_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8772
+pub const DCHUBBUB_ARB_DRAM_STATE_CNTL__DCHUBBUB_ARB_ALLOW_SELF_REFRESH_FORCE_VALUE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8777
+pub const DCHUBBUB_ARB_DRAM_STATE_CNTL__DCHUBBUB_ARB_ALLOW_SELF_REFRESH_FORCE_VALUE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8773
+pub const DCHUBBUB_ARB_DRAM_STATE_CNTL__DCHUBBUB_ARB_ALLOW_SELF_REFRESH_FORCE_ENABLE__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8778
+pub const DCHUBBUB_ARB_DRAM_STATE_CNTL__DCHUBBUB_ARB_ALLOW_SELF_REFRESH_FORCE_ENABLE_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8775
+pub const DCHUBBUB_ARB_DRAM_STATE_CNTL__DCHUBBUB_ARB_ALLOW_PSTATE_CHANGE_FORCE_VALUE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8780
+pub const DCHUBBUB_ARB_DRAM_STATE_CNTL__DCHUBBUB_ARB_ALLOW_PSTATE_CHANGE_FORCE_VALUE_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8776
+pub const DCHUBBUB_ARB_DRAM_STATE_CNTL__DCHUBBUB_ARB_ALLOW_PSTATE_CHANGE_FORCE_ENABLE__SHIFT: u32 = 0x5;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8781
+pub const DCHUBBUB_ARB_DRAM_STATE_CNTL__DCHUBBUB_ARB_ALLOW_PSTATE_CHANGE_FORCE_ENABLE_MASK: u32 = 0x20;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8764
+pub const DCHUBBUB_ARB_SAT_LEVEL__DCHUBBUB_ARB_SAT_LEVEL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8765
+pub const DCHUBBUB_ARB_SAT_LEVEL__DCHUBBUB_ARB_SAT_LEVEL_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8760
+pub const DCHUBBUB_ARB_DF_REQ_OUTSTAND__DCHUBBUB_ARB_MIN_REQ_OUTSTAND__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8762
+pub const DCHUBBUB_ARB_DF_REQ_OUTSTAND__DCHUBBUB_ARB_MIN_REQ_OUTSTAND_MASK: u32 = 0x1ff000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8783
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A__DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8784
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A__DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8798
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_B__DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8799
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_B__DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_B_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8813
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_C__DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8814
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_C__DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_C_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8828
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_D__DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_D__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8829
+pub const DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_D__DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_D_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8795
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A__DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8796
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A__DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8810
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B__DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8811
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B__DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8825
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C__DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8826
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C__DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8840
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D__DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8841
+pub const DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D__DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8789
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_A__DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_A__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8790
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_A__DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_A_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8804
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_B__DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8805
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_B__DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8819
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_C__DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8820
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_C__DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_C_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8834
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_D__DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_D__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8835
+pub const DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_D__DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_D_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8792
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_A__DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_A__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8793
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_A__DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_A_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8807
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_B__DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8808
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_B__DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8822
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_C__DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8823
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_C__DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_C_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8837
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_D__DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_D__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8838
+pub const DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_D__DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_D_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8857
+pub const DCHUBBUB_GLOBAL_TIMER_CNTL__DCHUBBUB_GLOBAL_TIMER_REFDIV__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8860
+pub const DCHUBBUB_GLOBAL_TIMER_CNTL__DCHUBBUB_GLOBAL_TIMER_REFDIV_MASK: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8188
+pub const DCN_VM_FB_LOCATION_BASE__FB_BASE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8189
+pub const DCN_VM_FB_LOCATION_BASE__FB_BASE_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8191
+pub const DCN_VM_FB_LOCATION_TOP__FB_TOP__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8192
+pub const DCN_VM_FB_LOCATION_TOP__FB_TOP_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8194
+pub const DCN_VM_FB_OFFSET__FB_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8195
+pub const DCN_VM_FB_OFFSET__FB_OFFSET_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8197
+pub const DCN_VM_AGP_BOT__AGP_BOT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8198
+pub const DCN_VM_AGP_BOT__AGP_BOT_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8200
+pub const DCN_VM_AGP_TOP__AGP_TOP__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8201
+pub const DCN_VM_AGP_TOP__AGP_TOP_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8203
+pub const DCN_VM_AGP_BASE__AGP_BASE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8204
+pub const DCN_VM_AGP_BASE__AGP_BASE_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9225
+pub const DCN_VM_FAULT_ADDR_MSB__DCN_VM_FAULT_ADDR_MSB__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9226
+pub const DCN_VM_FAULT_ADDR_MSB__DCN_VM_FAULT_ADDR_MSB_MASK: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9228
+pub const DCN_VM_FAULT_ADDR_LSB__DCN_VM_FAULT_ADDR_LSB__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9229
+pub const DCN_VM_FAULT_ADDR_LSB__DCN_VM_FAULT_ADDR_LSB_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9203
+pub const DCN_VM_FAULT_CNTL__DCN_VM_ERROR_STATUS_CLEAR__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9208
+pub const DCN_VM_FAULT_CNTL__DCN_VM_ERROR_STATUS_CLEAR_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9204
+pub const DCN_VM_FAULT_CNTL__DCN_VM_ERROR_STATUS_MODE__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9209
+pub const DCN_VM_FAULT_CNTL__DCN_VM_ERROR_STATUS_MODE_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9205
+pub const DCN_VM_FAULT_CNTL__DCN_VM_ERROR_INTERRUPT_ENABLE__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9210
+pub const DCN_VM_FAULT_CNTL__DCN_VM_ERROR_INTERRUPT_ENABLE_MASK: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9206
+pub const DCN_VM_FAULT_CNTL__DCN_VM_RANGE_FAULT_DISABLE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9211
+pub const DCN_VM_FAULT_CNTL__DCN_VM_RANGE_FAULT_DISABLE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9207
+pub const DCN_VM_FAULT_CNTL__DCN_VM_PRQ_FAULT_DISABLE__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9212
+pub const DCN_VM_FAULT_CNTL__DCN_VM_PRQ_FAULT_DISABLE_MASK: u32 = 0x200;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9214
+pub const DCN_VM_FAULT_STATUS__DCN_VM_ERROR_STATUS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9219
+pub const DCN_VM_FAULT_STATUS__DCN_VM_ERROR_STATUS_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9215
+pub const DCN_VM_FAULT_STATUS__DCN_VM_ERROR_VMID__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9220
+pub const DCN_VM_FAULT_STATUS__DCN_VM_ERROR_VMID_MASK: u32 = 0xf0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9216
+pub const DCN_VM_FAULT_STATUS__DCN_VM_ERROR_TABLE_LEVEL__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9221
+pub const DCN_VM_FAULT_STATUS__DCN_VM_ERROR_TABLE_LEVEL_MASK: u32 = 0x300000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9217
+pub const DCN_VM_FAULT_STATUS__DCN_VM_ERROR_PIPE__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9222
+pub const DCN_VM_FAULT_STATUS__DCN_VM_ERROR_PIPE_MASK: u32 = 0xf000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9218
+pub const DCN_VM_FAULT_STATUS__DCN_VM_ERROR_INTERRUPT_STATUS__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9223
+pub const DCN_VM_FAULT_STATUS__DCN_VM_ERROR_INTERRUPT_STATUS_MASK: u32 = 0x80000000;
+
+// DC vmid: dcn_vmid_registers absolute offsets per pipe instance
+
+// (DCN20_VMID_REG_LIST({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmDCN_VM_CONTEXT0_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT0_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID0_CNTL: u32 = 0x3a19;
+/// The value of `BASE(mmDCN_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID0_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a1a;
+/// The value of `BASE(mmDCN_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID0_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a1b;
+/// The value of `BASE(mmDCN_VM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID0_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a1c;
+/// The value of `BASE(mmDCN_VM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID0_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a1d;
+/// The value of `BASE(mmDCN_VM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID0_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a1e;
+/// The value of `BASE(mmDCN_VM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID0_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a1f;
+/// The value of `BASE(mmDCN_VM_CONTEXT1_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT1_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID1_CNTL: u32 = 0x3a20;
+/// The value of `BASE(mmDCN_VM_CONTEXT1_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT1_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID1_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a21;
+/// The value of `BASE(mmDCN_VM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID1_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a22;
+/// The value of `BASE(mmDCN_VM_CONTEXT1_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT1_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID1_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a23;
+/// The value of `BASE(mmDCN_VM_CONTEXT1_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT1_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID1_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a24;
+/// The value of `BASE(mmDCN_VM_CONTEXT1_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT1_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID1_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a25;
+/// The value of `BASE(mmDCN_VM_CONTEXT1_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT1_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID1_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a26;
+/// The value of `BASE(mmDCN_VM_CONTEXT2_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT2_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID2_CNTL: u32 = 0x3a27;
+/// The value of `BASE(mmDCN_VM_CONTEXT2_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT2_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID2_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a28;
+/// The value of `BASE(mmDCN_VM_CONTEXT2_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT2_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID2_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a29;
+/// The value of `BASE(mmDCN_VM_CONTEXT2_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT2_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID2_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a2a;
+/// The value of `BASE(mmDCN_VM_CONTEXT2_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT2_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID2_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a2b;
+/// The value of `BASE(mmDCN_VM_CONTEXT2_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT2_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID2_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a2c;
+/// The value of `BASE(mmDCN_VM_CONTEXT2_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT2_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID2_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a2d;
+/// The value of `BASE(mmDCN_VM_CONTEXT3_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT3_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID3_CNTL: u32 = 0x3a2e;
+/// The value of `BASE(mmDCN_VM_CONTEXT3_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT3_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID3_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a2f;
+/// The value of `BASE(mmDCN_VM_CONTEXT3_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT3_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID3_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a30;
+/// The value of `BASE(mmDCN_VM_CONTEXT3_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT3_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID3_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a31;
+/// The value of `BASE(mmDCN_VM_CONTEXT3_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT3_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID3_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a32;
+/// The value of `BASE(mmDCN_VM_CONTEXT3_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT3_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID3_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a33;
+/// The value of `BASE(mmDCN_VM_CONTEXT3_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT3_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID3_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a34;
+/// The value of `BASE(mmDCN_VM_CONTEXT4_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT4_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID4_CNTL: u32 = 0x3a35;
+/// The value of `BASE(mmDCN_VM_CONTEXT4_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT4_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID4_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a36;
+/// The value of `BASE(mmDCN_VM_CONTEXT4_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT4_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID4_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a37;
+/// The value of `BASE(mmDCN_VM_CONTEXT4_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT4_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID4_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a38;
+/// The value of `BASE(mmDCN_VM_CONTEXT4_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT4_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID4_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a39;
+/// The value of `BASE(mmDCN_VM_CONTEXT4_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT4_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID4_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a3a;
+/// The value of `BASE(mmDCN_VM_CONTEXT4_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT4_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID4_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a3b;
+/// The value of `BASE(mmDCN_VM_CONTEXT5_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT5_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID5_CNTL: u32 = 0x3a3c;
+/// The value of `BASE(mmDCN_VM_CONTEXT5_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT5_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID5_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a3d;
+/// The value of `BASE(mmDCN_VM_CONTEXT5_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT5_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID5_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a3e;
+/// The value of `BASE(mmDCN_VM_CONTEXT5_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT5_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID5_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a3f;
+/// The value of `BASE(mmDCN_VM_CONTEXT5_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT5_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID5_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a40;
+/// The value of `BASE(mmDCN_VM_CONTEXT5_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT5_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID5_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a41;
+/// The value of `BASE(mmDCN_VM_CONTEXT5_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT5_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID5_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a42;
+/// The value of `BASE(mmDCN_VM_CONTEXT6_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT6_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID6_CNTL: u32 = 0x3a43;
+/// The value of `BASE(mmDCN_VM_CONTEXT6_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT6_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID6_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a44;
+/// The value of `BASE(mmDCN_VM_CONTEXT6_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT6_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID6_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a45;
+/// The value of `BASE(mmDCN_VM_CONTEXT6_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT6_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID6_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a46;
+/// The value of `BASE(mmDCN_VM_CONTEXT6_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT6_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID6_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a47;
+/// The value of `BASE(mmDCN_VM_CONTEXT6_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT6_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID6_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a48;
+/// The value of `BASE(mmDCN_VM_CONTEXT6_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT6_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID6_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a49;
+/// The value of `BASE(mmDCN_VM_CONTEXT7_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT7_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID7_CNTL: u32 = 0x3a4a;
+/// The value of `BASE(mmDCN_VM_CONTEXT7_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT7_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID7_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a4b;
+/// The value of `BASE(mmDCN_VM_CONTEXT7_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT7_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID7_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a4c;
+/// The value of `BASE(mmDCN_VM_CONTEXT7_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT7_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID7_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a4d;
+/// The value of `BASE(mmDCN_VM_CONTEXT7_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT7_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID7_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a4e;
+/// The value of `BASE(mmDCN_VM_CONTEXT7_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT7_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID7_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a4f;
+/// The value of `BASE(mmDCN_VM_CONTEXT7_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT7_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID7_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a50;
+/// The value of `BASE(mmDCN_VM_CONTEXT8_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT8_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID8_CNTL: u32 = 0x3a51;
+/// The value of `BASE(mmDCN_VM_CONTEXT8_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT8_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID8_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a52;
+/// The value of `BASE(mmDCN_VM_CONTEXT8_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT8_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID8_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a53;
+/// The value of `BASE(mmDCN_VM_CONTEXT8_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT8_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID8_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a54;
+/// The value of `BASE(mmDCN_VM_CONTEXT8_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT8_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID8_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a55;
+/// The value of `BASE(mmDCN_VM_CONTEXT8_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT8_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID8_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a56;
+/// The value of `BASE(mmDCN_VM_CONTEXT8_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT8_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID8_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a57;
+/// The value of `BASE(mmDCN_VM_CONTEXT9_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT9_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID9_CNTL: u32 = 0x3a58;
+/// The value of `BASE(mmDCN_VM_CONTEXT9_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT9_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID9_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a59;
+/// The value of `BASE(mmDCN_VM_CONTEXT9_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT9_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID9_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a5a;
+/// The value of `BASE(mmDCN_VM_CONTEXT9_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT9_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID9_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a5b;
+/// The value of `BASE(mmDCN_VM_CONTEXT9_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT9_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID9_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a5c;
+/// The value of `BASE(mmDCN_VM_CONTEXT9_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT9_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID9_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a5d;
+/// The value of `BASE(mmDCN_VM_CONTEXT9_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT9_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID9_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a5e;
+/// The value of `BASE(mmDCN_VM_CONTEXT10_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT10_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID10_CNTL: u32 = 0x3a5f;
+/// The value of `BASE(mmDCN_VM_CONTEXT10_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT10_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID10_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a60;
+/// The value of `BASE(mmDCN_VM_CONTEXT10_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT10_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID10_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a61;
+/// The value of `BASE(mmDCN_VM_CONTEXT10_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT10_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID10_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a62;
+/// The value of `BASE(mmDCN_VM_CONTEXT10_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT10_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID10_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a63;
+/// The value of `BASE(mmDCN_VM_CONTEXT10_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT10_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID10_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a64;
+/// The value of `BASE(mmDCN_VM_CONTEXT10_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT10_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID10_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a65;
+/// The value of `BASE(mmDCN_VM_CONTEXT11_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT11_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID11_CNTL: u32 = 0x3a66;
+/// The value of `BASE(mmDCN_VM_CONTEXT11_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT11_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID11_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a67;
+/// The value of `BASE(mmDCN_VM_CONTEXT11_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT11_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID11_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a68;
+/// The value of `BASE(mmDCN_VM_CONTEXT11_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT11_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID11_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a69;
+/// The value of `BASE(mmDCN_VM_CONTEXT11_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT11_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID11_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a6a;
+/// The value of `BASE(mmDCN_VM_CONTEXT11_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT11_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID11_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a6b;
+/// The value of `BASE(mmDCN_VM_CONTEXT11_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT11_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID11_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a6c;
+/// The value of `BASE(mmDCN_VM_CONTEXT12_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT12_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID12_CNTL: u32 = 0x3a6d;
+/// The value of `BASE(mmDCN_VM_CONTEXT12_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT12_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID12_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a6e;
+/// The value of `BASE(mmDCN_VM_CONTEXT12_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT12_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID12_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a6f;
+/// The value of `BASE(mmDCN_VM_CONTEXT12_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT12_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID12_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a70;
+/// The value of `BASE(mmDCN_VM_CONTEXT12_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT12_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID12_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a71;
+/// The value of `BASE(mmDCN_VM_CONTEXT12_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT12_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID12_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a72;
+/// The value of `BASE(mmDCN_VM_CONTEXT12_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT12_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID12_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a73;
+/// The value of `BASE(mmDCN_VM_CONTEXT13_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT13_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID13_CNTL: u32 = 0x3a74;
+/// The value of `BASE(mmDCN_VM_CONTEXT13_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT13_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID13_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a75;
+/// The value of `BASE(mmDCN_VM_CONTEXT13_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT13_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID13_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a76;
+/// The value of `BASE(mmDCN_VM_CONTEXT13_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT13_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID13_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a77;
+/// The value of `BASE(mmDCN_VM_CONTEXT13_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT13_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID13_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a78;
+/// The value of `BASE(mmDCN_VM_CONTEXT13_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT13_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID13_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a79;
+/// The value of `BASE(mmDCN_VM_CONTEXT13_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT13_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID13_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a7a;
+/// The value of `BASE(mmDCN_VM_CONTEXT14_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT14_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID14_CNTL: u32 = 0x3a7b;
+/// The value of `BASE(mmDCN_VM_CONTEXT14_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT14_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID14_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a7c;
+/// The value of `BASE(mmDCN_VM_CONTEXT14_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT14_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID14_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a7d;
+/// The value of `BASE(mmDCN_VM_CONTEXT14_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT14_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID14_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a7e;
+/// The value of `BASE(mmDCN_VM_CONTEXT14_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT14_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID14_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a7f;
+/// The value of `BASE(mmDCN_VM_CONTEXT14_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT14_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID14_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a80;
+/// The value of `BASE(mmDCN_VM_CONTEXT14_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT14_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID14_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a81;
+/// The value of `BASE(mmDCN_VM_CONTEXT15_CNTL_BASE_IDX) + mmDCN_VM_CONTEXT15_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID15_CNTL: u32 = 0x3a82;
+/// The value of `BASE(mmDCN_VM_CONTEXT15_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT15_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID15_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x3a83;
+/// The value of `BASE(mmDCN_VM_CONTEXT15_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT15_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID15_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x3a84;
+/// The value of `BASE(mmDCN_VM_CONTEXT15_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT15_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID15_PAGE_TABLE_START_ADDR_HI32: u32 = 0x3a85;
+/// The value of `BASE(mmDCN_VM_CONTEXT15_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT15_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID15_PAGE_TABLE_START_ADDR_LO32: u32 = 0x3a86;
+/// The value of `BASE(mmDCN_VM_CONTEXT15_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmDCN_VM_CONTEXT15_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID15_PAGE_TABLE_END_ADDR_HI32: u32 = 0x3a87;
+/// The value of `BASE(mmDCN_VM_CONTEXT15_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmDCN_VM_CONTEXT15_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const VMID15_PAGE_TABLE_END_ADDR_LO32: u32 = 0x3a88;
+
+// DC vmid field shifts/masks (DCN20_VMID_MASK_SH_LIST(__SHIFT))
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8813
+pub const DCN_VM_CONTEXT0_CNTL__VM_CONTEXT0_PAGE_TABLE_DEPTH__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8815
+pub const DCN_VM_CONTEXT0_CNTL__VM_CONTEXT0_PAGE_TABLE_DEPTH_MASK: u32 = 0x6;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8814
+pub const DCN_VM_CONTEXT0_CNTL__VM_CONTEXT0_PAGE_TABLE_BLOCK_SIZE__SHIFT: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8816
+pub const DCN_VM_CONTEXT0_CNTL__VM_CONTEXT0_PAGE_TABLE_BLOCK_SIZE_MASK: u32 = 0x78;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8818
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32__VM_CONTEXT0_PAGE_DIRECTORY_ENTRY_HI32__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8819
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32__VM_CONTEXT0_PAGE_DIRECTORY_ENTRY_HI32_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8821
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32__VM_CONTEXT0_PAGE_DIRECTORY_ENTRY_LO32__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8822
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32__VM_CONTEXT0_PAGE_DIRECTORY_ENTRY_LO32_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8824
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32__VM_CONTEXT0_START_LOGICAL_PAGE_NUMBER_HI4__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8825
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32__VM_CONTEXT0_START_LOGICAL_PAGE_NUMBER_HI4_MASK: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8827
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32__VM_CONTEXT0_START_LOGICAL_PAGE_NUMBER_LO32__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8828
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32__VM_CONTEXT0_START_LOGICAL_PAGE_NUMBER_LO32_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8830
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32__VM_CONTEXT0_END_LOGICAL_PAGE_NUMBER_HI4__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8831
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32__VM_CONTEXT0_END_LOGICAL_PAGE_NUMBER_HI4_MASK: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8833
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32__VM_CONTEXT0_END_LOGICAL_PAGE_NUMBER_LO32__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:8834
+pub const DCN_VM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32__VM_CONTEXT0_END_LOGICAL_PAGE_NUMBER_LO32_MASK: u32 = 0xffffffff;
