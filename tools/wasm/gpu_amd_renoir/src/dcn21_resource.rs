@@ -6,13 +6,16 @@
 #![allow(dead_code)]
 
 use crate::amdgpu_device::amdgpu_device;
-use crate::dc::dc;
+use crate::dc::{cap_func_id, dc};
 use crate::dc_helper::{dm_read_reg, generic_reg_get};
 use crate::dc_resource::{
     resource_caps, resource_pool, resource_straps, stream_enc_slot, update_num_audio,
     NO_UNDERLAY_PIPE,
 };
-use crate::dc_types::{dc_caps, engine_id};
+use crate::dc_types::{
+    dc_caps, dc_plane_cap, dc_plane_pixel_format_support, dc_plane_scale_factor, dc_plane_type,
+    engine_id,
+};
 use crate::dce_audio::{dce_aud_endpoint_valid, dcn21_create_audio};
 use crate::dce_hwseq::dcn21_hwseq_create;
 use crate::dcn20_fpu::{dcn2_1_ip, dcn2_1_soc};
@@ -68,6 +71,25 @@ pub static RES_CAP_RN: resource_caps = resource_caps {
     num_hpo_dp_stream_encoder: 0,
     num_hpo_dp_link_encoder: 0,
     num_mpc_3dlut: 0,
+};
+
+/// `static const struct dc_plane_cap plane_cap` (dcn21_resource.c): every plane
+/// of Renoir is a universal DCN plane. Written into `dc.caps.planes[]` once the
+/// live pipe count is known.
+pub static PLANE_CAP: dc_plane_cap = dc_plane_cap {
+    r#type: dc_plane_type::DC_PLANE_TYPE_DCN_UNIVERSAL,
+    per_pixel_alpha: true,
+    pixel_format_support: dc_plane_pixel_format_support {
+        argb8888: true,
+        nv12: true,
+        fp16: true,
+        p010: true,
+        ayuv: false,
+    },
+    max_upscale_factor: dc_plane_scale_factor { argb8888: 16000, nv12: 16000, fp16: 16000 },
+    max_downscale_factor: dc_plane_scale_factor { argb8888: 250, nv12: 250, fp16: 250 },
+    min_width: 64,
+    min_height: 64,
 };
 
 /// The `dc->caps.*` hardcoding of `dcn21_resource_construct` ("Resource + asic
@@ -317,5 +339,17 @@ pub fn dcn21_resource_construct(
     // these through res_create_funcs; the dcn21 binding is inlined.)
     resource_construct(adev, num_virtual_links, dc, pool);
 
-    // Still ahead: dml_init_instance + dc->caps.max_planes/planes[]/cap_funcs.
+    // dcn21_hw_sequencer_construct(dc): the hwss vtable — stage D (init_hw).
+
+    // The plane/ODM caps, now that the live pipe count is known.
+    dc.caps.max_planes = pool.pipe_count;
+    for i in 0..dc.caps.max_planes as usize {
+        dc.caps.planes[i] = PLANE_CAP;
+    }
+    dc.caps.max_odm_combine_factor = 2;
+    dc.cap_funcs.get_dcc_compression_cap = Some(cap_func_id::dcn20_get_dcc_compression_cap);
+
+    // With this dcn21_resource_construct is complete bar the irq service
+    // (dal_irq_service_dcn21_create) and `pool.funcs = &dcn21_res_pool_funcs`
+    // (the validate/map vtable — stage E).
 }

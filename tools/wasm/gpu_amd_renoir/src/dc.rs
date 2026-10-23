@@ -46,6 +46,19 @@ pub struct dc_init_data {
     pub force_smu_not_present: bool,
 }
 
+/// Which `dc_cap_funcs` entry is bound (dcn21 sets only
+/// `get_dcc_compression_cap`; its body and `get_subvp_en` are later stages).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum cap_func_id {
+    dcn20_get_dcc_compression_cap,
+}
+
+/// `struct dc_cap_funcs` (dc.h): the capability-query vtable.
+#[derive(Default)]
+pub struct dc_cap_funcs {
+    pub get_dcc_compression_cap: Option<cap_func_id>,
+}
+
 /// `struct dc` (dc.h): the Display Core instance.
 #[derive(Default)]
 pub struct dc {
@@ -59,4 +72,6 @@ pub struct dc {
     /// `dml`: the DML instance (`dml_init_instance`). Boxed because the SoC
     /// bounding box is not Default (its `clock_limits` array is > 32 entries).
     pub dml: Option<Box<crate::dml_structs::display_mode_lib>>,
+    /// `cap_funcs`: the capability-query vtable (set at the end of the construct).
+    pub cap_funcs: dc_cap_funcs,
 }
