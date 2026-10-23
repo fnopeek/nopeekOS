@@ -2442,6 +2442,16 @@ fn switch_channel(h: i32, hal: &Hal, e: &efuse::Efuse, t: &txpower::TxPower,
 /// to the upper half (`wifid`/cfg80211), not the driver. Receiving is
 /// allowed everywhere, so the scan listens where it may not ask.
 #[allow(clippy::too_many_arguments)]
+/// 2.4 GHz: the thirteen channels allowed in Europe. Channel 14 is allowed
+/// only in Japan and only with DSSS, so it is left out.
+const ACTIVE_2G: [u8; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+/// 5 GHz: UNII-1 to UNII-3 as cfg80211 lists them. Listen only.
+const PASSIVE_5G: [u8; 25] = [
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165,
+];
+
 /// `want`: pick a new `target` among the cells of this network (the
 /// reconnect path). `None`: only list what is there (a `SCAN` command);
 /// `wifid` chooses.
@@ -2461,15 +2471,6 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
                 fw_feature: u32, target: &mut Option<Bss>, d: &mut Dev,
                 buf: &mut RxBuf, want: Option<&[u8]>) -> bool {
-    // 2.4 GHz: the thirteen channels allowed in Europe. Channel 14 is
-    // allowed only in Japan and only with DSSS, so it is left out.
-    const ACTIVE_2G: [u8; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-    // 5 GHz: UNII-1 to UNII-3 as cfg80211 lists them. Listen only.
-    const PASSIVE_5G: [u8; 25] = [
-        36, 40, 44, 48, 52, 56, 60, 64,
-        100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
-        149, 153, 157, 161, 165,
-    ];
     // A beacon interval is 102.4 ms. Listening shorter misses a network
     // because of the clock, not a weak signal.
     const DWELL_MS: u32 = 130;
@@ -6516,9 +6517,8 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     ls.link_up_sent = true;
                     host::print("  *** AUTHORIZED — Datenweg offen ***\n");
                 }
-                // A full scan would take the link off the air for seconds;
-                // while linked, the last list is the answer.
-                Some(CMD_SCAN) => LAST_SCAN.with(|(l, n)| report_scan(&l[..*n])),
+                // While linked the scan runs in slices beside the link.
+                Some(CMD_SCAN) => bg_scan_start(now),
                 Some(CMD_DISCONNECT) => {
                     NEXT_CONNECT.with(|c| *c = None);
                     LEAVE_ASKED.store(true, Ordering::Relaxed);
@@ -6854,6 +6854,8 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             publish_report(link, ls, d, e, caps);
             report_signal(link);
         }
+        bg_scan_step(h, hal, trx, mgmt_buf, e, t_pwr, link, rxbuf, &mut d.dm,
+                     &mut d.path_div, now);
 
         // ── RX silence as a watchdog ─────────────────────────────
         // A live cell always sends something, beacons alone are ten per
@@ -7250,17 +7252,26 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              rxbuf: &mut [u8], dm: &mut dm::DmInfo,
              path_div: &mut dm::PathDiv,
              found: &mut [Bss; ROAM_BSS_MAX], n_found: &mut usize) -> u32 {
-    let mac = link.mac;
-    let leer = Bss {
-        bssid: [0; 6], ssid: [0; 32], ssid_len: 0, channel: 0, best: -128,
-        beacons: 0, resps: 0, capability: 0, rsn: [0; 64], rsn_len: 0,
-        ht_param: 0, ht_op_seen: false, ht_cap: 0, vht_chanwidth: 0,
-        vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
-        ap_vht_cap: 0, ap_vht_cap_seen: false,
-        bss_load: 0, bss_load_seen: false, wmm: false,
-    };
-    *found = [leer; ROAM_BSS_MAX];
+    *found = [Bss::EMPTY; ROAM_BSS_MAX];
     *n_found = 0;
+    let (chs, n_ch) = ROAM_CHANNELS.get();
+    offchannel(h, hal, trx, mgmt_buf, e, t_pwr, link, rxbuf, dm, path_div,
+               &chs[..n_ch], &link.ssid[..link.ssid_len as usize], false,
+               ROAM_DWELL_MS, found, n_found)
+}
+
+/// Listen on `chans` and come back, the link kept (steps 1-4 above).
+/// `ssid` goes into the probe requests; `passive_5g` sends none on 5 GHz,
+/// where a DFS channel must be heard before we transmit. Returns the time
+/// away in ms.
+#[allow(clippy::too_many_arguments)]
+fn offchannel(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+              e: &efuse::Efuse, t_pwr: &txpower::TxPower, link: &Link,
+              rxbuf: &mut [u8], dm: &mut dm::DmInfo,
+              path_div: &mut dm::PathDiv, chans: &[u8], ssid: &[u8],
+              passive_5g: bool, dwell_ms: u32,
+              found: &mut [Bss], n_found: &mut usize) -> u32 {
+    let mac = link.mac;
 
     // (1) doze
     let mut nf = [0u8; 32];
@@ -7275,19 +7286,19 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::sleep_ms(2);
 
     let t0 = host::now_us();
-    let (chs, n_ch) = ROAM_CHANNELS.get();
-    for &ch in chs[..n_ch].iter() {
+    for &ch in chans {
         // (2) switch, probe, listen
         let _ = switch_channel(h, hal, e, t_pwr, ch, CellWidth::default(), 0);
-        let mut pr = [0u8; 128];
-        let n = build_probe_req_to(&mut pr, &mac, ch, None,
-                                   &link.ssid[..link.ssid_len as usize]);
-        let mut info = tx::pkt_info_update(&pr[..n], 0, tx::band_of(ch));
-        if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &pr[..n]) {
-            pci::tx_kick_off_queue(h, trx, q);
+        if !(passive_5g && ch > 14) {
+            let mut pr = [0u8; 128];
+            let n = build_probe_req_to(&mut pr, &mac, ch, None, ssid);
+            let mut info = tx::pkt_info_update(&pr[..n], 0, tx::band_of(ch));
+            if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &pr[..n]) {
+                pci::tx_kick_off_queue(h, trx, q);
+            }
         }
         let t_ch = host::now_us();
-        while host::now_us() - t_ch < ROAM_DWELL_MS as u64 * 1000 {
+        while host::now_us() - t_ch < dwell_ms as u64 * 1000 {
             let got = pci::rx_poll(h, trx, 64, rxbuf, dm, path_div,
                                    hal.rf_path_num, 0, ch, |st, pkt| {
                 if st.crc_err || st.is_c2h {
@@ -7328,6 +7339,76 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         pci::tx_kick_off_queue(h, trx, q);
     }
     ((host::now_us() - t0) / 1000) as u32
+}
+
+/// A full scan while linked, as mac80211 does it associated: a few
+/// channels at a time, back on our own channel in between so the link
+/// keeps flowing (`ieee80211_scan_state_decision`). `wifid` asked with
+/// `SCAN`; the result goes out when the last slice is done.
+struct BgScan {
+    active: bool,
+    /// Index into the 2.4 + 5 GHz list of the next channel.
+    next: usize,
+    due_ms: u64,
+    found: [Bss; MAX_BSS],
+    n: usize,
+}
+
+static BG_SCAN: Single<BgScan> = Single::new(BgScan {
+    active: false, next: 0, due_ms: 0, found: [Bss::EMPTY; MAX_BSS], n: 0,
+});
+
+/// Channels per slice and the time at home between slices: three channels
+/// are ~400 ms away, which the AP buffers and TCP does not notice.
+const BG_SLICE: usize = 3;
+const BG_HOME_MS: u64 = 300;
+const BG_DWELL_MS: u32 = 130;
+
+fn bg_scan_start(now: u64) {
+    BG_SCAN.with(|b| {
+        b.active = true;
+        b.next = 0;
+        b.due_ms = now;
+        b.n = 0;
+    });
+}
+
+/// Run the next slice when it is due; at the end report the list.
+#[allow(clippy::too_many_arguments)]
+fn bg_scan_step(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+                e: &efuse::Efuse, t_pwr: &txpower::TxPower, link: &Link,
+                rxbuf: &mut [u8], dm: &mut dm::DmInfo,
+                path_div: &mut dm::PathDiv, now: u64) {
+    BG_SCAN.with(|b| {
+        if !b.active || now < b.due_ms {
+            return;
+        }
+        let all = ACTIVE_2G.len() + PASSIVE_5G.len();
+        let mut chans = [0u8; BG_SLICE];
+        let mut k = 0;
+        while k < BG_SLICE && b.next < all {
+            chans[k] = if b.next < ACTIVE_2G.len() {
+                ACTIVE_2G[b.next]
+            } else {
+                PASSIVE_5G[b.next - ACTIVE_2G.len()]
+            };
+            b.next += 1;
+            k += 1;
+        }
+        let (found, n) = (&mut b.found, &mut b.n);
+        let _ = offchannel(h, hal, trx, mgmt_buf, e, t_pwr, link, rxbuf, dm,
+                           path_div, &chans[..k], &[], true, BG_DWELL_MS,
+                           found, n);
+        b.due_ms = host::now_ms() + BG_HOME_MS;
+        if b.next >= all {
+            b.active = false;
+            LAST_SCAN.with(|(l, ln)| {
+                l[..b.n].copy_from_slice(&b.found[..b.n]);
+                *ln = b.n;
+            });
+            report_scan(&b.found[..b.n]);
+        }
+    });
 }
 
 /// Whether the candidate is better than the current cell.

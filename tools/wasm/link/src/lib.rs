@@ -699,8 +699,11 @@ pub extern "C" fn _start() {
         heap_base: ALLOCATOR.mark(),
     };
     st.refresh();
-    // A fresh list; while linked the manager answers from its last one.
-    host::wifi_request(&[REQ_SCAN]);
+    // A list to show. While linked a scan runs in slices beside the link
+    // (~10 s), so only when there is next to nothing; the button forces one.
+    if parse_wifi(&st.wifi[..st.wifi_n]).aps.len() <= 1 {
+        host::wifi_request(&[REQ_SCAN]);
+    }
     // Placed by the kernel next to the icon deck was clicked on.
     set_overlay(W, H);
     set_light_dismiss(true);
