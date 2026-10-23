@@ -56,4 +56,7 @@ pub struct dc {
     pub versions: dc_versions,
     /// `hwseq`: the hw-sequencer register bank (`resource_construct` creates it).
     pub hwseq: Option<Box<crate::dce_hwseq::dce_hwseq>>,
+    /// `dml`: the DML instance (`dml_init_instance`). Boxed because the SoC
+    /// bounding box is not Default (its `clock_limits` array is > 32 entries).
+    pub dml: Option<Box<crate::dml_structs::display_mode_lib>>,
 }

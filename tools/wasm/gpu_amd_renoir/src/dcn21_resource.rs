@@ -15,8 +15,11 @@ use crate::dc_resource::{
 use crate::dc_types::{dc_caps, engine_id};
 use crate::dce_audio::{dce_aud_endpoint_valid, dcn21_create_audio};
 use crate::dce_hwseq::dcn21_hwseq_create;
+use crate::dcn20_fpu::{dcn2_1_ip, dcn2_1_soc};
 use crate::dcn20_stream_encoder::dcn21_stream_encoder_create;
+use crate::dml_structs::{dml_init_instance, dml_project};
 use crate::virtual_stream_encoder::virtual_stream_encoder_create;
+use alloc::boxed::Box;
 use crate::regs::{
     CC_DC_PIPE_DIS, DC_PINSTRAPS, DC_PINSTRAPS__DC_PINSTRAPS_AUDIO_MASK,
     DC_PINSTRAPS__DC_PINSTRAPS_AUDIO__SHIFT,
@@ -232,6 +235,20 @@ pub fn dcn21_resource_construct(
     pool.pipe_count = RES_CAP_RN.num_timing_generator as u32;
 
     dcn21_set_caps(&mut dc.caps);
+
+    // The DML instance. `num_pipes` is the live DPP count (the IP max minus the
+    // fused-off pipes); it caps the IP's max_num_dpp/otg before dml_init copies
+    // the SoC/IP inputs into dc.dml. (Linux does this just before the pipe loop.)
+    let mut ip = dcn2_1_ip();
+    let mut num_pipes = ip.max_num_dpp;
+    for i in 0..ip.max_num_dpp {
+        if pipe_fuses & (1 << i) != 0 {
+            num_pipes -= 1;
+        }
+    }
+    ip.max_num_dpp = num_pipes;
+    ip.max_num_otg = num_pipes;
+    dc.dml = Some(Box::new(dml_init_instance(&dcn2_1_soc(), &ip, dml_project::DML_PROJECT_DCN21)));
 
     // Create resources: the clock sources. CLOCK_SOURCE_COMBO_PHY_PLL0..4 use
     // clk_src_regs[0..4]; the DP-DTO source reuses clk_src_regs[0] (Linux'

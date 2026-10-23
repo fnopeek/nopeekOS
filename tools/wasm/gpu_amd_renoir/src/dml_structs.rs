@@ -299,3 +299,55 @@ impl Default for _vcs_dpi_soc_bounding_box_st {
         }
     }
 }
+
+// ── the DML instance (display_mode_lib.{h,c}) ──────────────────────────────
+
+/// `enum dml_project` (display_mode_lib.h): which ASIC's DML the instance runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum dml_project {
+    #[default]
+    DML_PROJECT_UNDEFINED,
+    DML_PROJECT_RAVEN1,
+    DML_PROJECT_NAVI10,
+    DML_PROJECT_NAVI10v2,
+    DML_PROJECT_DCN201,
+    DML_PROJECT_DCN21,
+    DML_PROJECT_DCN30,
+    DML_PROJECT_DCN31,
+    DML_PROJECT_DCN315,
+    DML_PROJECT_DCN314,
+    DML_PROJECT_DCN32,
+}
+
+/// Which `dml_funcs` vtable the instance points at. Renoir uses `dml21_funcs`;
+/// the vtable bodies (the rq/dlg/ttu + mode-support math) are stage C.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum dml_funcs {
+    dml21_funcs,
+}
+
+/// `struct display_mode_lib` (display_mode_lib.h): the DML instance. Ported
+/// grow-as-reached — the inputs (`ip`/`soc`), the project and the funcs
+/// identity; the `vba` working state and `dml_pipe_state` are the stage-C math.
+#[derive(Clone, Copy)]
+pub struct display_mode_lib {
+    pub ip: _vcs_dpi_ip_params_st,
+    pub soc: _vcs_dpi_soc_bounding_box_st,
+    pub project: dml_project,
+    pub funcs: Option<dml_funcs>,
+}
+
+/// `dml_init_instance` (display_mode_lib.c): copy the SoC/IP inputs into the
+/// instance and bind the per-project DML vtable. Renoir → `dml21_funcs`.
+pub fn dml_init_instance(
+    soc_bb: &_vcs_dpi_soc_bounding_box_st,
+    ip_params: &_vcs_dpi_ip_params_st,
+    project: dml_project,
+) -> display_mode_lib {
+    let funcs = match project {
+        dml_project::DML_PROJECT_DCN21 => Some(dml_funcs::dml21_funcs),
+        // Other projects bind their own dmlNN_funcs; not built (Renoir = DCN21).
+        _ => None,
+    };
+    display_mode_lib { ip: *ip_params, soc: *soc_bb, project, funcs }
+}
