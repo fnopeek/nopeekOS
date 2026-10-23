@@ -4062,3 +4062,109 @@ OTG2_PIXEL_RATE_CNTL__OTG2_DROP_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_
 OTG3_PIXEL_RATE_CNTL__OTG3_DROP_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
 OTG3_PIXEL_RATE_CNTL__OTG3_DROP_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
 
+# DC ipp (input pixel processor): dcn10_ipp_registers absolute
+# offsets per pipe instance 0..3 (IPP_REG_LIST_DCN20, dcn10/dcn10_ipp.h).
+IPP0_FORMAT_CONTROL = BASE(mmCNVC_CFG0_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG0_FORMAT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CNVC_SURFACE_PIXEL_FORMAT = BASE(mmCNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CURSOR0_CONTROL = BASE(mmCNVC_CUR0_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR0_CURSOR0_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CURSOR0_COLOR0 = BASE(mmCNVC_CUR0_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR0_CURSOR0_COLOR0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CURSOR0_COLOR1 = BASE(mmCNVC_CUR0_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR0_CURSOR0_COLOR1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CURSOR_SETTINGS = BASE(mmHUBPREQ0_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ0_CURSOR_SETTINGS @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CURSOR_SURFACE_ADDRESS_HIGH = BASE(mmCURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CURSOR_SURFACE_ADDRESS = BASE(mmCURSOR0_0_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_0_CURSOR_SURFACE_ADDRESS @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CURSOR_SIZE = BASE(mmCURSOR0_0_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_0_CURSOR_SIZE @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CURSOR_CONTROL = BASE(mmCURSOR0_0_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_0_CURSOR_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CURSOR_POSITION = BASE(mmCURSOR0_0_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_0_CURSOR_POSITION @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CURSOR_HOT_SPOT = BASE(mmCURSOR0_0_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_0_CURSOR_HOT_SPOT @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP0_CURSOR_DST_OFFSET = BASE(mmCURSOR0_0_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_0_CURSOR_DST_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_FORMAT_CONTROL = BASE(mmCNVC_CFG1_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG1_FORMAT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CNVC_SURFACE_PIXEL_FORMAT = BASE(mmCNVC_CFG1_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG1_CNVC_SURFACE_PIXEL_FORMAT @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CURSOR0_CONTROL = BASE(mmCNVC_CUR1_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR1_CURSOR0_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CURSOR0_COLOR0 = BASE(mmCNVC_CUR1_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR1_CURSOR0_COLOR0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CURSOR0_COLOR1 = BASE(mmCNVC_CUR1_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR1_CURSOR0_COLOR1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CURSOR_SETTINGS = BASE(mmHUBPREQ1_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ1_CURSOR_SETTINGS @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CURSOR_SURFACE_ADDRESS_HIGH = BASE(mmCURSOR0_1_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_1_CURSOR_SURFACE_ADDRESS_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CURSOR_SURFACE_ADDRESS = BASE(mmCURSOR0_1_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_1_CURSOR_SURFACE_ADDRESS @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CURSOR_SIZE = BASE(mmCURSOR0_1_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_1_CURSOR_SIZE @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CURSOR_CONTROL = BASE(mmCURSOR0_1_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_1_CURSOR_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CURSOR_POSITION = BASE(mmCURSOR0_1_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_1_CURSOR_POSITION @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CURSOR_HOT_SPOT = BASE(mmCURSOR0_1_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_1_CURSOR_HOT_SPOT @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP1_CURSOR_DST_OFFSET = BASE(mmCURSOR0_1_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_1_CURSOR_DST_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_FORMAT_CONTROL = BASE(mmCNVC_CFG2_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG2_FORMAT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CNVC_SURFACE_PIXEL_FORMAT = BASE(mmCNVC_CFG2_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG2_CNVC_SURFACE_PIXEL_FORMAT @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CURSOR0_CONTROL = BASE(mmCNVC_CUR2_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR2_CURSOR0_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CURSOR0_COLOR0 = BASE(mmCNVC_CUR2_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR2_CURSOR0_COLOR0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CURSOR0_COLOR1 = BASE(mmCNVC_CUR2_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR2_CURSOR0_COLOR1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CURSOR_SETTINGS = BASE(mmHUBPREQ2_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ2_CURSOR_SETTINGS @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CURSOR_SURFACE_ADDRESS_HIGH = BASE(mmCURSOR0_2_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_2_CURSOR_SURFACE_ADDRESS_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CURSOR_SURFACE_ADDRESS = BASE(mmCURSOR0_2_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_2_CURSOR_SURFACE_ADDRESS @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CURSOR_SIZE = BASE(mmCURSOR0_2_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_2_CURSOR_SIZE @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CURSOR_CONTROL = BASE(mmCURSOR0_2_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_2_CURSOR_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CURSOR_POSITION = BASE(mmCURSOR0_2_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_2_CURSOR_POSITION @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CURSOR_HOT_SPOT = BASE(mmCURSOR0_2_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_2_CURSOR_HOT_SPOT @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP2_CURSOR_DST_OFFSET = BASE(mmCURSOR0_2_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_2_CURSOR_DST_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_FORMAT_CONTROL = BASE(mmCNVC_CFG3_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG3_FORMAT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CNVC_SURFACE_PIXEL_FORMAT = BASE(mmCNVC_CFG3_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG3_CNVC_SURFACE_PIXEL_FORMAT @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CURSOR0_CONTROL = BASE(mmCNVC_CUR3_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR3_CURSOR0_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CURSOR0_COLOR0 = BASE(mmCNVC_CUR3_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR3_CURSOR0_COLOR0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CURSOR0_COLOR1 = BASE(mmCNVC_CUR3_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR3_CURSOR0_COLOR1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CURSOR_SETTINGS = BASE(mmHUBPREQ3_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ3_CURSOR_SETTINGS @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CURSOR_SURFACE_ADDRESS_HIGH = BASE(mmCURSOR0_3_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_3_CURSOR_SURFACE_ADDRESS_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CURSOR_SURFACE_ADDRESS = BASE(mmCURSOR0_3_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_3_CURSOR_SURFACE_ADDRESS @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CURSOR_SIZE = BASE(mmCURSOR0_3_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_3_CURSOR_SIZE @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CURSOR_CONTROL = BASE(mmCURSOR0_3_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_3_CURSOR_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CURSOR_POSITION = BASE(mmCURSOR0_3_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_3_CURSOR_POSITION @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CURSOR_HOT_SPOT = BASE(mmCURSOR0_3_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_3_CURSOR_HOT_SPOT @ ../display/dc/resource/dcn21/dcn21_resource.c
+IPP3_CURSOR_DST_OFFSET = BASE(mmCURSOR0_3_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_3_CURSOR_DST_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC ipp field shifts/masks (IPP_MASK_SH_LIST_DCN20, instance-0 defs)
+CNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT__CNVC_SURFACE_PIXEL_FORMAT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT__CNVC_SURFACE_PIXEL_FORMAT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CFG0_FORMAT_CONTROL__CNVC_BYPASS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CFG0_FORMAT_CONTROL__CNVC_BYPASS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CFG0_FORMAT_CONTROL__ALPHA_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CFG0_FORMAT_CONTROL__ALPHA_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CFG0_FORMAT_CONTROL__FORMAT_EXPANSION_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CFG0_FORMAT_CONTROL__FORMAT_EXPANSION_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CUR0_CURSOR0_CONTROL__CUR0_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CUR0_CURSOR0_CONTROL__CUR0_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CUR0_CURSOR0_COLOR0__CUR0_COLOR0__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CUR0_CURSOR0_COLOR0__CUR0_COLOR0_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CUR0_CURSOR0_COLOR1__CUR0_COLOR1__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CUR0_CURSOR0_COLOR1__CUR0_COLOR1_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CUR0_CURSOR0_CONTROL__CUR0_EXPANSION_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CUR0_CURSOR0_CONTROL__CUR0_EXPANSION_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CUR0_CURSOR0_CONTROL__CUR0_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNVC_CUR0_CURSOR0_CONTROL__CUR0_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+HUBPREQ0_CURSOR_SETTINGS__CURSOR0_DST_Y_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+HUBPREQ0_CURSOR_SETTINGS__CURSOR0_DST_Y_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+HUBPREQ0_CURSOR_SETTINGS__CURSOR0_CHUNK_HDL_ADJUST__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+HUBPREQ0_CURSOR_SETTINGS__CURSOR0_CHUNK_HDL_ADJUST_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH__CURSOR_SURFACE_ADDRESS_HIGH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH__CURSOR_SURFACE_ADDRESS_HIGH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_SURFACE_ADDRESS__CURSOR_SURFACE_ADDRESS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_SURFACE_ADDRESS__CURSOR_SURFACE_ADDRESS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_SIZE__CURSOR_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_SIZE__CURSOR_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_SIZE__CURSOR_HEIGHT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_SIZE__CURSOR_HEIGHT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_CONTROL__CURSOR_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_CONTROL__CURSOR_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_CONTROL__CURSOR_2X_MAGNIFY__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_CONTROL__CURSOR_2X_MAGNIFY_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_CONTROL__CURSOR_PITCH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_CONTROL__CURSOR_PITCH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_CONTROL__CURSOR_LINES_PER_CHUNK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_CONTROL__CURSOR_LINES_PER_CHUNK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_CONTROL__CURSOR_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_CONTROL__CURSOR_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_POSITION__CURSOR_X_POSITION__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_POSITION__CURSOR_X_POSITION_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_POSITION__CURSOR_Y_POSITION__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_POSITION__CURSOR_Y_POSITION_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_HOT_SPOT__CURSOR_HOT_SPOT_X__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_HOT_SPOT__CURSOR_HOT_SPOT_X_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_HOT_SPOT__CURSOR_HOT_SPOT_Y__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_HOT_SPOT__CURSOR_HOT_SPOT_Y_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_DST_OFFSET__CURSOR_DST_X_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CURSOR0_0_CURSOR_DST_OFFSET__CURSOR_DST_X_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+

@@ -4,7 +4,9 @@
 #![allow(dead_code)]
 
 use crate::dccg::dcn_dccg;
+use crate::dcn10_ipp::dcn10_ipp;
 use crate::dce_clock_source::dce110_clk_src;
+use crate::dc_types::MAX_PIPES;
 use alloc::boxed::Box;
 
 /// `#define MAX_CLOCK_SOURCES` (core_types.h).
@@ -55,6 +57,8 @@ pub struct resource_pool {
     pub dp_clock_source: Option<Box<dce110_clk_src>>,
     /// `dccg`: the display clock generator (Renoir → `dcn_dccg`).
     pub dccg: Option<Box<dcn_dccg>>,
+    /// `ipps[MAX_PIPES]`: the input pixel processors, one per active pipe.
+    pub ipps: [Option<Box<dcn10_ipp>>; MAX_PIPES],
     /// `res_cap`: the per-ASIC count table (Renoir → `RES_CAP_RN`).
     pub res_cap: Option<&'static resource_caps>,
 }

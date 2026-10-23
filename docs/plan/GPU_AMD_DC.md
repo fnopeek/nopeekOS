@@ -161,18 +161,26 @@ Registerschreib). 8 Offsets + 64 Shift/Mask in `regs.list`; `resource_pool.dccg`
 + der Aufruf im Construct. DCN3+-Taktbäume (HDMI/PHY/DTB/DSC/SYMCLK) bewusst
 draußen (grow-as-reached).
 
-**Nächste Einheit:** die **Pipe-Blöcke** — je Pipe `dcn21_hubp_create`,
-`dcn21_ipp_create`, `dcn21_dpp_create`, `dcn21_opp_create`,
-`dcn21_timing_generator_create` (optc). Jeder hat einen Instanz-Reg-Satz
-(`SRI`/`SRII` mit der Instanz 0..3) — die Register-Batches über alle vier
-Instanzen bündeln und einmal regenerieren. Danach aux/i2c je ddc, mpc, hubbub,
-dsc, dwbc, mmhubbub, irq-Service, `resource_construct` +
-`dcn21_hw_sequencer_construct`, `dml_init_instance`. Die meisten Konstruktoren
-schreiben KEIN Register (Zeiger + funcs); die Schreibzugriffe kommen in hwss
-(Stufe D/E). **Das formale `main_dc.c`-Orakel (extract.py-Weg + os_types-Shim)
-wird EINMAL am fertigen Objektgraph gebaut und prüft dann den ganzen
-Construct** — der erste host-prüfbare Meilenstein ist der Graph, nicht der
-Einzelblock.
+Dritter Block, **IPP** (`src/dcn10_ipp.rs`): `input_pixel_processor`/`dcn10_ipp`,
+`dcn10_ipp_registers` (14) + `dcn10_ipp_shift`/`_mask` (26, `IPP_DCN10_REG_FIELD_
+LIST`), Statics `IPP_REGS[4]`/`IPP_SHIFT`/`IPP_MASK` (`IPP_REG_LIST_DCN20` +
+`IPP_MASK_SH_LIST_DCN20`; `OUTPUT_FP` DCN10-only → 0), `dcn20_ipp_construct` +
+`dcn21_ipp_create`. `resource_pool.ipps[MAX_PIPES]` + der Pipe-Loop im Construct
+(nur ipps; `read_pipe_fuses` fehlt → hw-Instanz = Index). regs.list +52 Offsets
+(13×4) +50 Shift/Mask. Schreibt kein Register.
+
+**Nächste Einheit:** die restlichen **Pipe-Blöcke** im selben Loop —
+`dcn21_hubp_create`, `dcn21_dpp_create`, `dcn21_opp_create`,
+`dcn21_timing_generator_create` (optc). HUBP/DPP/OPTC sind groß (viele Register
+je Instanz); Register-Batch je Block über alle 4 Instanzen bündeln, einmal
+regenerieren. Dazu `read_pipe_fuses` (kompaktiert ausgefuste Pipes). Danach
+aux/i2c je ddc, mpc, hubbub, dsc, dwbc, mmhubbub, irq-Service,
+`resource_construct` + `dcn21_hw_sequencer_construct`, `dml_init_instance`. Die
+Konstruktoren schreiben KEIN Register (Zeiger + funcs); die Schreibzugriffe
+kommen in hwss (Stufe D/E). **Das formale `main_dc.c`-Orakel (extract.py-Weg +
+os_types-Shim) wird EINMAL am fertigen Objektgraph gebaut und prüft dann den
+ganzen Construct** — der erste host-prüfbare Meilenstein ist der Graph, nicht
+der Einzelblock.
 
 ## Risiken / offen
 

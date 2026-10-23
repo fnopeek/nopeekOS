@@ -8125,3 +8125,213 @@ pub const OTG2_PIXEL_RATE_CNTL__OTG2_DROP_PIXEL_MASK: u32 = 0x200;
 pub const OTG3_PIXEL_RATE_CNTL__OTG3_DROP_PIXEL__SHIFT: u32 = 0x9;
 /// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2235
 pub const OTG3_PIXEL_RATE_CNTL__OTG3_DROP_PIXEL_MASK: u32 = 0x200;
+
+// DC ipp (input pixel processor): dcn10_ipp_registers absolute
+
+// offsets per pipe instance 0..3 (IPP_REG_LIST_DCN20, dcn10/dcn10_ipp.h).
+/// The value of `BASE(mmCNVC_CFG0_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG0_FORMAT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_FORMAT_CONTROL: u32 = 0x4190;
+/// The value of `BASE(mmCNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CNVC_SURFACE_PIXEL_FORMAT: u32 = 0x418f;
+/// The value of `BASE(mmCNVC_CUR0_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR0_CURSOR0_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CURSOR0_CONTROL: u32 = 0x41a0;
+/// The value of `BASE(mmCNVC_CUR0_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR0_CURSOR0_COLOR0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CURSOR0_COLOR0: u32 = 0x41a1;
+/// The value of `BASE(mmCNVC_CUR0_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR0_CURSOR0_COLOR1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CURSOR0_COLOR1: u32 = 0x41a2;
+/// The value of `BASE(mmHUBPREQ0_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ0_CURSOR_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CURSOR_SETTINGS: u32 = 0x3b1e;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CURSOR_SURFACE_ADDRESS_HIGH: u32 = 0x3b3a;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_0_CURSOR_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CURSOR_SURFACE_ADDRESS: u32 = 0x3b39;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_0_CURSOR_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CURSOR_SIZE: u32 = 0x3b3b;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_0_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CURSOR_CONTROL: u32 = 0x3b38;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_0_CURSOR_POSITION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CURSOR_POSITION: u32 = 0x3b3c;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_0_CURSOR_HOT_SPOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CURSOR_HOT_SPOT: u32 = 0x3b3d;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_0_CURSOR_DST_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP0_CURSOR_DST_OFFSET: u32 = 0x3b3f;
+/// The value of `BASE(mmCNVC_CFG1_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG1_FORMAT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_FORMAT_CONTROL: u32 = 0x42fb;
+/// The value of `BASE(mmCNVC_CFG1_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG1_CNVC_SURFACE_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CNVC_SURFACE_PIXEL_FORMAT: u32 = 0x42fa;
+/// The value of `BASE(mmCNVC_CUR1_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR1_CURSOR0_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CURSOR0_CONTROL: u32 = 0x430b;
+/// The value of `BASE(mmCNVC_CUR1_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR1_CURSOR0_COLOR0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CURSOR0_COLOR0: u32 = 0x430c;
+/// The value of `BASE(mmCNVC_CUR1_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR1_CURSOR0_COLOR1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CURSOR0_COLOR1: u32 = 0x430d;
+/// The value of `BASE(mmHUBPREQ1_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ1_CURSOR_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CURSOR_SETTINGS: u32 = 0x3bfa;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_1_CURSOR_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CURSOR_SURFACE_ADDRESS_HIGH: u32 = 0x3c16;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_1_CURSOR_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CURSOR_SURFACE_ADDRESS: u32 = 0x3c15;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_1_CURSOR_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CURSOR_SIZE: u32 = 0x3c17;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_1_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CURSOR_CONTROL: u32 = 0x3c14;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_1_CURSOR_POSITION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CURSOR_POSITION: u32 = 0x3c18;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_1_CURSOR_HOT_SPOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CURSOR_HOT_SPOT: u32 = 0x3c19;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_1_CURSOR_DST_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP1_CURSOR_DST_OFFSET: u32 = 0x3c1b;
+/// The value of `BASE(mmCNVC_CFG2_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG2_FORMAT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_FORMAT_CONTROL: u32 = 0x4466;
+/// The value of `BASE(mmCNVC_CFG2_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG2_CNVC_SURFACE_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CNVC_SURFACE_PIXEL_FORMAT: u32 = 0x4465;
+/// The value of `BASE(mmCNVC_CUR2_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR2_CURSOR0_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CURSOR0_CONTROL: u32 = 0x4476;
+/// The value of `BASE(mmCNVC_CUR2_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR2_CURSOR0_COLOR0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CURSOR0_COLOR0: u32 = 0x4477;
+/// The value of `BASE(mmCNVC_CUR2_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR2_CURSOR0_COLOR1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CURSOR0_COLOR1: u32 = 0x4478;
+/// The value of `BASE(mmHUBPREQ2_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ2_CURSOR_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CURSOR_SETTINGS: u32 = 0x3cd6;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_2_CURSOR_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CURSOR_SURFACE_ADDRESS_HIGH: u32 = 0x3cf2;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_2_CURSOR_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CURSOR_SURFACE_ADDRESS: u32 = 0x3cf1;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_2_CURSOR_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CURSOR_SIZE: u32 = 0x3cf3;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_2_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CURSOR_CONTROL: u32 = 0x3cf0;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_2_CURSOR_POSITION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CURSOR_POSITION: u32 = 0x3cf4;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_2_CURSOR_HOT_SPOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CURSOR_HOT_SPOT: u32 = 0x3cf5;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_2_CURSOR_DST_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP2_CURSOR_DST_OFFSET: u32 = 0x3cf7;
+/// The value of `BASE(mmCNVC_CFG3_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG3_FORMAT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_FORMAT_CONTROL: u32 = 0x45d1;
+/// The value of `BASE(mmCNVC_CFG3_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG3_CNVC_SURFACE_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CNVC_SURFACE_PIXEL_FORMAT: u32 = 0x45d0;
+/// The value of `BASE(mmCNVC_CUR3_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR3_CURSOR0_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CURSOR0_CONTROL: u32 = 0x45e1;
+/// The value of `BASE(mmCNVC_CUR3_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR3_CURSOR0_COLOR0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CURSOR0_COLOR0: u32 = 0x45e2;
+/// The value of `BASE(mmCNVC_CUR3_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR3_CURSOR0_COLOR1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CURSOR0_COLOR1: u32 = 0x45e3;
+/// The value of `BASE(mmHUBPREQ3_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ3_CURSOR_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CURSOR_SETTINGS: u32 = 0x3db2;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_3_CURSOR_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CURSOR_SURFACE_ADDRESS_HIGH: u32 = 0x3dce;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_3_CURSOR_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CURSOR_SURFACE_ADDRESS: u32 = 0x3dcd;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_3_CURSOR_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CURSOR_SIZE: u32 = 0x3dcf;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_3_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CURSOR_CONTROL: u32 = 0x3dcc;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_3_CURSOR_POSITION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CURSOR_POSITION: u32 = 0x3dd0;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_3_CURSOR_HOT_SPOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CURSOR_HOT_SPOT: u32 = 0x3dd1;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_3_CURSOR_DST_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const IPP3_CURSOR_DST_OFFSET: u32 = 0x3dd3;
+
+// DC ipp field shifts/masks (IPP_MASK_SH_LIST_DCN20, instance-0 defs)
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12729
+pub const CNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT__CNVC_SURFACE_PIXEL_FORMAT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12730
+pub const CNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT__CNVC_SURFACE_PIXEL_FORMAT_MASK: u32 = 0x7f;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12735
+pub const CNVC_CFG0_FORMAT_CONTROL__CNVC_BYPASS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12741
+pub const CNVC_CFG0_FORMAT_CONTROL__CNVC_BYPASS_MASK: u32 = 0x1000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12734
+pub const CNVC_CFG0_FORMAT_CONTROL__ALPHA_EN__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12740
+pub const CNVC_CFG0_FORMAT_CONTROL__ALPHA_EN_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12732
+pub const CNVC_CFG0_FORMAT_CONTROL__FORMAT_EXPANSION_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12738
+pub const CNVC_CFG0_FORMAT_CONTROL__FORMAT_EXPANSION_MODE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12790
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_MODE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12797
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_MODE_MASK: u32 = 0x70;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12802
+pub const CNVC_CUR0_CURSOR0_COLOR0__CUR0_COLOR0__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12803
+pub const CNVC_CUR0_CURSOR0_COLOR0__CUR0_COLOR0_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12805
+pub const CNVC_CUR0_CURSOR0_COLOR1__CUR0_COLOR1__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12806
+pub const CNVC_CUR0_CURSOR0_COLOR1__CUR0_COLOR1_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12788
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_EXPANSION_MODE__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12795
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_EXPANSION_MODE_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12787
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_ENABLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12794
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_ENABLE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9838
+pub const HUBPREQ0_CURSOR_SETTINGS__CURSOR0_DST_Y_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9842
+pub const HUBPREQ0_CURSOR_SETTINGS__CURSOR0_DST_Y_OFFSET_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9839
+pub const HUBPREQ0_CURSOR_SETTINGS__CURSOR0_CHUNK_HDL_ADJUST__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9843
+pub const HUBPREQ0_CURSOR_SETTINGS__CURSOR0_CHUNK_HDL_ADJUST_MASK: u32 = 0x300;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10017
+pub const CURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH__CURSOR_SURFACE_ADDRESS_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10018
+pub const CURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH__CURSOR_SURFACE_ADDRESS_HIGH_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10014
+pub const CURSOR0_0_CURSOR_SURFACE_ADDRESS__CURSOR_SURFACE_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10015
+pub const CURSOR0_0_CURSOR_SURFACE_ADDRESS__CURSOR_SURFACE_ADDRESS_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10021
+pub const CURSOR0_0_CURSOR_SIZE__CURSOR_WIDTH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10023
+pub const CURSOR0_0_CURSOR_SIZE__CURSOR_WIDTH_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10020
+pub const CURSOR0_0_CURSOR_SIZE__CURSOR_HEIGHT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10022
+pub const CURSOR0_0_CURSOR_SIZE__CURSOR_HEIGHT_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9993
+pub const CURSOR0_0_CURSOR_CONTROL__CURSOR_MODE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10004
+pub const CURSOR0_0_CURSOR_CONTROL__CURSOR_MODE_MASK: u32 = 0x700;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9992
+pub const CURSOR0_0_CURSOR_CONTROL__CURSOR_2X_MAGNIFY__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10003
+pub const CURSOR0_0_CURSOR_CONTROL__CURSOR_2X_MAGNIFY_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9997
+pub const CURSOR0_0_CURSOR_CONTROL__CURSOR_PITCH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10008
+pub const CURSOR0_0_CURSOR_CONTROL__CURSOR_PITCH_MASK: u32 = 0x30000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9999
+pub const CURSOR0_0_CURSOR_CONTROL__CURSOR_LINES_PER_CHUNK__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10010
+pub const CURSOR0_0_CURSOR_CONTROL__CURSOR_LINES_PER_CHUNK_MASK: u32 = 0x1f000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9991
+pub const CURSOR0_0_CURSOR_CONTROL__CURSOR_ENABLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10002
+pub const CURSOR0_0_CURSOR_CONTROL__CURSOR_ENABLE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10026
+pub const CURSOR0_0_CURSOR_POSITION__CURSOR_X_POSITION__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10028
+pub const CURSOR0_0_CURSOR_POSITION__CURSOR_X_POSITION_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10025
+pub const CURSOR0_0_CURSOR_POSITION__CURSOR_Y_POSITION__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10027
+pub const CURSOR0_0_CURSOR_POSITION__CURSOR_Y_POSITION_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10031
+pub const CURSOR0_0_CURSOR_HOT_SPOT__CURSOR_HOT_SPOT_X__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10033
+pub const CURSOR0_0_CURSOR_HOT_SPOT__CURSOR_HOT_SPOT_X_MASK: u32 = 0xff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10030
+pub const CURSOR0_0_CURSOR_HOT_SPOT__CURSOR_HOT_SPOT_Y__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10032
+pub const CURSOR0_0_CURSOR_HOT_SPOT__CURSOR_HOT_SPOT_Y_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10042
+pub const CURSOR0_0_CURSOR_DST_OFFSET__CURSOR_DST_X_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10043
+pub const CURSOR0_0_CURSOR_DST_OFFSET__CURSOR_DST_X_OFFSET_MASK: u32 = 0x1fff;

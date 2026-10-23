@@ -46,6 +46,7 @@ mod dc;
 mod dc_resource;
 mod dccg;
 mod dce_clock_source;
+mod dcn10_ipp;
 mod dcn21_resource;
 mod dml_structs;
 mod dcn20_fpu;
