@@ -203,3 +203,5 @@ mod dce_panel_cntl;
 mod dcn21_link_encoder;
 #[path = "../src/link_factory.rs"]
 mod link_factory;
+#[path = "../src/dc_state.rs"]
+mod dc_state;

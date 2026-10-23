@@ -117,6 +117,19 @@ struct dc_debug_options {
 	int min_disp_clk_khz;
 	bool disable_48mhz_pwrdwn;
 };
+#include "dml/display_mode_structs.h"
+struct resource_caps { int num_timing_generator; };
+struct resource_pool { unsigned int pipe_count; const struct resource_caps *res_cap; };
+struct dcn21_resource_pool { struct resource_pool base; };
+#define TO_DCN21_RES_POOL(pool) container_of(pool, struct dcn21_resource_pool, base)
+struct display_mode_lib { int unused; };
+enum dml_project { DML_PROJECT_DCN21 = 9 };
+static int dml_inits;
+static void dml_init_instance(struct display_mode_lib *lib, const struct _vcs_dpi_soc_bounding_box_st *soc,
+			      const struct _vcs_dpi_ip_params_st *ip, enum dml_project project)
+{
+	dml_inits++;
+}
 struct dc {
 	struct dc_context *ctx;
 	struct {
@@ -126,6 +139,9 @@ struct dc {
 		bool ignore_dpref_ss;
 	} config;
 	struct dc_debug_options debug;
+	struct resource_pool *res_pool;
+	struct display_mode_lib dml;
+	struct { struct { struct _vcs_dpi_voltage_scaling_st clock_limits[DC__VOLTAGE_STATES]; } update_bw_bounding_box; } scratch;
 };
 struct bios_parser;
 struct dc_bios;
@@ -301,6 +317,32 @@ int main(int argc, char **argv)
 		struct wm_range_table_entry *w = &b->wm_table.entries[i];
 		printf("wm %d inst %u type %u pstate %.6f sr_exit %.6f sr_enter_exit %.6f valid %d\n", i, w->wm_inst,
 		       w->wm_type, w->pstate_latency_us, w->sr_exit_time_us, w->sr_enter_plus_exit_time_us, w->valid);
+	}
+
+	/* dc_construct then runs update_bw_bounding_box on this table; the
+	 * resource construct capped dcn2_1_ip at the live pipe count. */
+	static struct dcn21_resource_pool bb_pool;
+	static const struct resource_caps bb_cap = { .num_timing_generator = 4 };
+	bb_pool.base.pipe_count = 4;
+	bb_pool.base.res_cap = &bb_cap;
+	dc.res_pool = &bb_pool.base;
+	dcn2_1_ip.max_num_dpp = 4;
+	dcn2_1_ip.max_num_otg = 4;
+	dcn21_update_bw_bounding_box(&dc, b);
+	printf("bb dml_inits %d max_num_otg %u max_num_dpp %u num_chans %u num_states %u clk_entries %u\n", dml_inits,
+	       dcn2_1_ip.max_num_otg, dcn2_1_ip.max_num_dpp, dcn2_1_soc.num_chans, dcn2_1_soc.num_states,
+	       b->clk_table.num_entries);
+	for (int i = 0; i < MAX_NUM_DPM_LVL; i++) {
+		struct clk_limit_table_entry *e = &b->clk_table.entries[i];
+		printf("bb clk %d voltage %u dcfclk %u fclk %u memclk %u socclk %u\n", i, e->voltage, e->dcfclk_mhz,
+		       e->fclk_mhz, e->memclk_mhz, e->socclk_mhz);
+	}
+	for (int i = 0; i <= (int)dcn2_1_soc.num_states && i < DC__VOLTAGE_STATES; i++) {
+		struct _vcs_dpi_voltage_scaling_st *l = &dcn2_1_soc.clock_limits[i];
+		printf("bb state %d: %d dcf %.3f fab %.3f soc %.3f dram %.3f disp %.3f dpp %.3f bw %.3f dsc %.3f dtb %.3f "
+		       "phy18 %.3f phy %.3f\n", i, l->state, l->dcfclk_mhz, l->fabricclk_mhz, l->socclk_mhz,
+		       l->dram_speed_mts, l->dispclk_mhz, l->dppclk_mhz, l->dram_bw_per_chan_gbps, l->dscclk_mhz,
+		       l->dtbclk_mhz, l->phyclk_d18_mhz, l->phyclk_mhz);
 	}
 	return 0;
 }

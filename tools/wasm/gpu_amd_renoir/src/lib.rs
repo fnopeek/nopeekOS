@@ -44,6 +44,7 @@ mod bios_parser2;
 mod command_table2;
 mod clk_mgr;
 mod dc_helper;
+mod dc_state;
 mod dm_pp_smu;
 mod fixpt31_32;
 mod rn_clk_mgr;

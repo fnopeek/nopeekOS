@@ -439,7 +439,8 @@ DCLK=$AMD/display/dc/clk_mgr
     $X "$DCLK/dce100/dce_clk_mgr.c" dce_clock_read_ss_info
     $X "$AMD/display/dc/dml/dcn20/dcn20_fpu.c" '#LPDDR_MEM_RETRAIN_LATENCY' ddr4_wm_table_gs lpddr4_wm_table_gs \
         lpddr4_wm_table_with_disabled_ppt ddr4_wm_table_rn ddr4_1R_wm_table_rn lpddr4_wm_table_rn \
-        dcn21_clk_mgr_set_bw_params_wm_table
+        dcn21_clk_mgr_set_bw_params_wm_table dcn2_1_ip dcn2_1_soc construct_low_pstate_lvl \
+        dcn21_update_bw_bounding_box
     $X "$DCLK/dcn21/rn_clk_mgr_vbios_smu.c" '#REG' '#FN' '#VBIOSSMC_MSG_GetSmuVersion' \
         '#VBIOSSMC_MSG_EnableTmdp48MHzRefclkPwrDown' '#VBIOSSMC_MSG_IsPeriodicRetrainingDisabled' \
         '#VBIOSSMC_Status_BUSY' '#VBIOSSMC_Result_OK' rn_smu_wait_for_response rn_vbios_smu_send_msg_with_param \

@@ -108,6 +108,7 @@ fn main() {
 
     let mut clk_mgr = Box::new(clk_mgr::clk_mgr_internal::default());
     rn_clk_mgr::rn_clk_mgr_construct(&adev, &mut dc, &mut clk_mgr);
+    let clk_mgr = &*dc.clk_mgr.insert(clk_mgr);
 
     for (reg, v) in npk_sys::fake_card_writes() {
         println!("write reg {:#x} = {:#x}", reg, v);
@@ -144,6 +145,41 @@ fn main() {
             "wm {} inst {} type {} pstate {:.6} sr_exit {:.6} sr_enter_exit {:.6} valid {}",
             i, w.wm_inst, w.wm_type, w.pstate_latency_us, w.sr_exit_time_us, w.sr_enter_plus_exit_time_us,
             w.valid as u32
+        );
+    }
+
+    // dc_construct then runs update_bw_bounding_box on this table; the
+    // resource construct capped the IP at the live pipe count.
+    {
+        let pool = dc.res_pool.as_deref_mut().unwrap();
+        pool.pipe_count = 4;
+        pool.res_cap = Some(&dcn21_resource::RES_CAP_RN);
+    }
+    let mut ip = dcn20_fpu::dcn2_1_ip();
+    ip.max_num_dpp = 4;
+    ip.max_num_otg = 4;
+    dc.dml = Some(Box::new(dml_structs::dml_init_instance(&dcn20_fpu::dcn2_1_soc(), &ip,
+        dml_structs::dml_project::DML_PROJECT_DCN21)));
+    dcn20_fpu::dcn21_update_bw_bounding_box(&mut dc);
+    let dml = dc.dml.as_deref().unwrap();
+    let b = dc.clk_mgr.as_deref().unwrap().base.bw_params.as_deref().unwrap();
+    println!(
+        "bb dml_inits 1 max_num_otg {} max_num_dpp {} num_chans {} num_states {} clk_entries {}",
+        dml.ip.max_num_otg, dml.ip.max_num_dpp, dml.soc.num_chans, dml.soc.num_states, b.clk_table.num_entries
+    );
+    for (i, e) in b.clk_table.entries.iter().enumerate() {
+        println!(
+            "bb clk {} voltage {} dcfclk {} fclk {} memclk {} socclk {}",
+            i, e.voltage, e.dcfclk_mhz, e.fclk_mhz, e.memclk_mhz, e.socclk_mhz
+        );
+    }
+    for i in 0..=dml.soc.num_states as usize {
+        let l = &dml.soc.clock_limits[i];
+        println!(
+            "bb state {}: {} dcf {:.3} fab {:.3} soc {:.3} dram {:.3} disp {:.3} dpp {:.3} bw {:.3} dsc {:.3} dtb {:.3} \
+             phy18 {:.3} phy {:.3}",
+            i, l.state, l.dcfclk_mhz, l.fabricclk_mhz, l.socclk_mhz, l.dram_speed_mts, l.dispclk_mhz, l.dppclk_mhz,
+            l.dram_bw_per_chan_gbps, l.dscclk_mhz, l.dtbclk_mhz, l.phyclk_d18_mhz, l.phyclk_mhz
         );
     }
 }

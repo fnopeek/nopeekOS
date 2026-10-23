@@ -10,6 +10,8 @@
 
 use crate::amdgpu_device::amdgpu_device;
 use crate::clk_mgr::dc_clk_mgr_create;
+use crate::dc_state::dc_state_create;
+use crate::dcn20_fpu::dcn21_update_bw_bounding_box;
 use crate::bios_parser2::{bios_parser_get_connector_id, bios_parser_get_connectors_number};
 use crate::link_factory::{create_virtual_link, dc_link, get_num_of_internal_disp, link_create, link_ctx, link_init_data};
 use crate::regs::{LF_ENUM_ID_COUNT, LF_MAX_LINKS};
@@ -166,6 +168,7 @@ pub struct dc {
     /// `links[MAX_LINKS]`, `link_count` of them.
     pub links: Vec<Box<dc_link>>,
     pub lowest_dpia_link_index: u32,
+    pub current_state: Option<Box<crate::dc_state::dc_state>>,
 }
 
 /// `create_links` (dc.c). The VBIOS reports the number of valid connector
@@ -287,16 +290,18 @@ fn dc_construct(adev: &amdgpu_device, dc: &mut dc, init_params: &dc_init_data) -
     if let Some(clk_mgr) = dc.clk_mgr.as_deref_mut() {
         clk_mgr.base.force_smu_not_present = init_params.force_smu_not_present;
     }
-    // res_pool->funcs->update_bw_bounding_box (dcn21_update_bw_bounding_box,
-    // DML — stage C). dc_create_soc_and_ip_translator binds a translator for
-    // DCN 4.01 only; on 2.1 it is an empty allocation.
+    // res_pool->funcs->update_bw_bounding_box
+    dcn21_update_bw_bounding_box(dc);
+    // dc_create_soc_and_ip_translator binds a translator for DCN 4.01 only; on
+    // 2.1 it is an empty allocation.
     if !create_links(adev, dc, init_params.num_virtual_links as u32) {
         return false;
     }
 
     // create_link_encoders: a platform without USB4 DPIA endpoints (Renoir:
     // num_usb4_dpia 0) maps DIG encoders to endpoints fixed; nothing to add.
-    // dc->current_state = dc_state_create(dc, NULL).
+    // current_state is created after dc->dml, which it copies.
+    dc.current_state = Some(dc_state_create(dc, None));
     true
 }
 

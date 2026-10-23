@@ -151,3 +151,117 @@ pub fn dcn2_1_soc() -> _vcs_dpi_soc_bounding_box_st {
         ..Default::default()
     }
 }
+
+/// `construct_low_pstate_lvl` (dcn20_fpu.c): the min-DF-pstate level, from
+/// the lowest clock table entry and `soc.clock_limits[high_voltage_lvl]`.
+/// It also inserts a copy of entry 0 at entry 1 of the clock table.
+fn construct_low_pstate_lvl(soc: &_vcs_dpi_soc_bounding_box_st, clk_table: &mut crate::clk_mgr::clk_limit_table,
+                            high_voltage_lvl: usize) -> _vcs_dpi_voltage_scaling_st {
+    let mut low = _vcs_dpi_voltage_scaling_st::default();
+    let e0 = clk_table.entries[0];
+    let hv = &soc.clock_limits[high_voltage_lvl];
+
+    low.state = 1;
+    low.dcfclk_mhz = e0.dcfclk_mhz as f64;
+    low.fabricclk_mhz = e0.fclk_mhz as f64;
+    low.socclk_mhz = e0.socclk_mhz as f64;
+    low.dram_speed_mts = (e0.memclk_mhz * 2) as f64;
+
+    low.dispclk_mhz = hv.dispclk_mhz;
+    low.dppclk_mhz = hv.dppclk_mhz;
+    low.dram_bw_per_chan_gbps = hv.dram_bw_per_chan_gbps;
+    low.dscclk_mhz = hv.dscclk_mhz;
+    low.dtbclk_mhz = hv.dtbclk_mhz;
+    low.phyclk_d18_mhz = hv.phyclk_d18_mhz;
+    low.phyclk_mhz = hv.phyclk_mhz;
+
+    let mut i = clk_table.num_entries as usize;
+    while i > 1 {
+        clk_table.entries[i] = clk_table.entries[i - 1];
+        i -= 1;
+    }
+    clk_table.entries[1] = clk_table.entries[0];
+    clk_table.num_entries += 1;
+
+    low
+}
+
+/// `dcn21_update_bw_bounding_box` (dcn20_fpu.c): the SoC clock levels from
+/// the clock manager's table, then the DML instance again. Linux edits the
+/// `dcn2_1_ip`/`dcn2_1_soc` globals in place; the port carries them in
+/// `dc.dml`, which holds exactly those inputs since `dml_init_instance`.
+/// The `closest_clk_lvl` of the last entry is the one the low-pstate level
+/// reads, out of the clock limits already rewritten — as in Linux.
+pub fn dcn21_update_bw_bounding_box(dc: &mut crate::dc::dc) {
+    let (Some(pool), Some(dml), Some(clk_mgr)) = (dc.res_pool.as_deref(), dc.dml.as_deref(), dc.clk_mgr.as_deref_mut())
+    else {
+        return;
+    };
+    let Some(bw_params) = clk_mgr.base.bw_params.as_deref_mut() else { return };
+    let mut ip = dml.ip;
+    let mut soc = dml.soc;
+    let clk_table = &mut bw_params.clk_table;
+
+    ip.max_num_otg = pool.res_cap.map_or(0, |c| c.num_timing_generator as u32);
+    ip.max_num_dpp = pool.pipe_count;
+    soc.num_chans = bw_params.num_channels;
+
+    // a copy of the clock limits, so null states are not copied over later
+    let mut s = soc.clock_limits;
+    let mut closest_clk_lvl = 0usize;
+    let mut k = 0usize;
+
+    for i in 0..clk_table.num_entries as usize {
+        // loop backwards
+        closest_clk_lvl = 0;
+        let mut j = soc.num_states as i32 - 1;
+        while j >= 0 {
+            if soc.clock_limits[j as usize].dcfclk_mhz as u32 <= clk_table.entries[i].dcfclk_mhz {
+                closest_clk_lvl = j as usize;
+                break;
+            }
+            j -= 1;
+        }
+
+        // clk_table[1] is reserved for min DF PState, filled in below
+        if i == 1 {
+            k += 1;
+        }
+
+        let e = clk_table.entries[i];
+        let c = soc.clock_limits[closest_clk_lvl];
+        s[k].state = k as i32;
+        s[k].dcfclk_mhz = e.dcfclk_mhz as f64;
+        s[k].fabricclk_mhz = e.fclk_mhz as f64;
+        s[k].socclk_mhz = e.socclk_mhz as f64;
+        s[k].dram_speed_mts = (e.memclk_mhz * 2) as f64;
+
+        s[k].dispclk_mhz = c.dispclk_mhz;
+        s[k].dppclk_mhz = c.dppclk_mhz;
+        s[k].dram_bw_per_chan_gbps = c.dram_bw_per_chan_gbps;
+        s[k].dscclk_mhz = c.dscclk_mhz;
+        s[k].dtbclk_mhz = c.dtbclk_mhz;
+        s[k].phyclk_d18_mhz = c.phyclk_d18_mhz;
+        s[k].phyclk_mhz = c.phyclk_mhz;
+
+        k += 1;
+    }
+
+    soc.clock_limits = s;
+
+    if clk_table.num_entries != 0 {
+        soc.num_states = clk_table.num_entries + 1;
+        // fill in min DF PState
+        soc.clock_limits[1] = construct_low_pstate_lvl(&soc, clk_table, closest_clk_lvl);
+        // duplicate last level
+        let n = soc.num_states as usize;
+        soc.clock_limits[n] = soc.clock_limits[n - 1];
+        soc.clock_limits[n].state = n as i32;
+    }
+
+    dc.dml = Some(alloc::boxed::Box::new(crate::dml_structs::dml_init_instance(
+        &soc,
+        &ip,
+        crate::dml_structs::dml_project::DML_PROJECT_DCN21,
+    )));
+}
