@@ -280,7 +280,16 @@ pub fn set_passphrase(old: Option<&[u8]>, new: &[u8]) -> bool {
     if !v.set_passphrase(&subkey, old, new, params()) {
         return false;
     }
-    save(&v)
+    if !save(&v) {
+        return false;
+    }
+    // Leave the user tier open: the caller just proved the passphrase, so a
+    // fresh setup lands in an unlocked vault (otherwise the first write after
+    // setup fails with no session, and nothing is stored).
+    if let Some(dek) = v.unlock_user(new) {
+        *USER_SESSION.lock() = Some(dek);
+    }
+    true
 }
 
 /// Open the user tier for this session.
