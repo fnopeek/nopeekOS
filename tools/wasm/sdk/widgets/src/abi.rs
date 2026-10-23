@@ -457,6 +457,10 @@ pub enum Modifier {
     /// changes nothing, so the request survives the app re-rendering on
     /// every event without stealing focus back each time. 0 never requests.
     FocusRequest(u32),
+    /// Render a `Widget::Input` masked — each character drawn as a bullet
+    /// (password entry). The compositor still edits the real buffer and
+    /// reports it via `Event::InputChange`; only the glyphs are hidden.
+    Mask,
     // Appended only.
 }
 

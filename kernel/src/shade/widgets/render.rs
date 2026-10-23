@@ -237,6 +237,18 @@ fn spans_of<'a>(mods: impl IntoIterator<Item = &'a Modifier>) -> &'a [super::abi
     &[]
 }
 
+/// Whether a `Widget::Input` carries `Modifier::Mask` (password entry).
+fn mask_of<'a>(mods: impl IntoIterator<Item = &'a Modifier>) -> bool {
+    mods.into_iter().any(|m| matches!(m, super::abi::Modifier::Mask))
+}
+
+/// A run of `n` bullets — what a masked Input draws in place of its text.
+/// Positions (selection, caret) are measured over the same run, so they stay
+/// aligned with the glyphs on screen.
+fn mask_str(n: usize) -> alloc::string::String {
+    core::iter::repeat('•').take(n).collect()
+}
+
 /// Sum every `Modifier::Padding` in the effective list, in physical px —
 /// `layout::padding` itself, so leaf glyph placement matches the
 /// layout-side outer-size growth.
@@ -681,14 +693,20 @@ fn paint_node_eff(
             // selection that exists but cannot be seen is worse than none:
             // the user marks, copies and does not know what is on the
             // clipboard. Same computation and token as `TextArea` below.
+            let masked = mask_of(eff);
             let sel = edit_state.and_then(|e| e.selection());
             if let (Some((a, b)), false) = (sel, live_value.is_empty()) {
                 let (a, b) = (a.min(live_value.len()), b.min(live_value.len()));
                 if b > a {
-                    let ax = ceil_u32_local(
-                        crate::gui::text::measure_px(&live_value[..a], INPUT_STYLE, ipx));
-                    let w = ceil_u32_local(
-                        crate::gui::text::measure_px(&live_value[a..b], INPUT_STYLE, ipx));
+                    let (ax, w) = if masked {
+                        let ca = live_value[..a].chars().count();
+                        let cb = live_value[..b].chars().count();
+                        (ceil_u32_local(crate::gui::text::measure_px(&mask_str(ca), INPUT_STYLE, ipx)),
+                         ceil_u32_local(crate::gui::text::measure_px(&mask_str(cb - ca), INPUT_STYLE, ipx)))
+                    } else {
+                        (ceil_u32_local(crate::gui::text::measure_px(&live_value[..a], INPUT_STYLE, ipx)),
+                         ceil_u32_local(crate::gui::text::measure_px(&live_value[a..b], INPUT_STYLE, ipx)))
+                    };
                     let line_h = ceil_u32_local(crate::gui::text::line_height_px(INPUT_STYLE, ipx));
                     rast.rect(target, Rect { x: text_x + ax as i32, y: text_y,
                                              w: w.max(scale::len(2)), h: line_h },
@@ -699,6 +717,13 @@ fn paint_node_eff(
                 // `Modifier::Spans` colours runs of the text; the address
                 // bar uses it to highlight the registrable domain and dim
                 // the rest. Without spans it stays one cheap call.
+                if masked {
+                    // Password entry: one bullet per character, same metrics
+                    // as the caret/selection above. Spans never apply here.
+                    let display = mask_str(live_value.chars().count());
+                    rast.text_px(target, &display, INPUT_STYLE, ipx, Token::OnSurface,
+                                 Point { x: text_x, y: text_y });
+                } else {
                 let spans = spans_of(eff);
                 if spans.is_empty() {
                     rast.text_px(target, live_value, INPUT_STYLE, ipx, Token::OnSurface,
@@ -728,6 +753,7 @@ fn paint_node_eff(
                                      Point { x, y: text_y });
                     }
                 }
+                }
             } else if !focused {
                 // Placeholder is a hint, not content — faint, like the design.
                 rast.text_px(target, placeholder.as_str(), INPUT_STYLE, ipx,
@@ -744,7 +770,11 @@ fn paint_node_eff(
                     // → drop to end of value.
                     None    => e.value.as_str(),
                 };
-                let advance = ceil_u32_local(crate::gui::text::measure_px(prefix, style, ipx));
+                let advance = if masked {
+                    ceil_u32_local(crate::gui::text::measure_px(&mask_str(prefix.chars().count()), style, ipx))
+                } else {
+                    ceil_u32_local(crate::gui::text::measure_px(prefix, style, ipx))
+                };
                 let line_h  = ceil_u32_local(crate::gui::text::line_height_px(style, ipx));
                 let caret_w = scale::len(2);
                 let caret_rect = Rect {

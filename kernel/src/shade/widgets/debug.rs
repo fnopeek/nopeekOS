@@ -224,6 +224,7 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::OnMotion(a)   => { let _ = write!(s, "OnMotion({})", a.0); }
             Modifier::CanvasNative  => { s.push_str("CanvasNative"); }
             Modifier::FocusRequest(n) => { let _ = write!(s, "FocusRequest({})", n); }
+            Modifier::Mask => { let _ = write!(s, "Mask"); }
         }
     }
     s.push(']');
