@@ -11,6 +11,7 @@ use crate::dc_types::dc_caps;
 use crate::dccg::{dccg21_create, DCCG_MASK, DCCG_REGS, DCCG_SHIFT};
 use crate::dcn10_ipp::dcn21_ipp_create;
 use crate::dcn20_dpp::dcn21_dpp_create;
+use crate::dcn20_dsc::dcn21_dsc_create;
 use crate::dcn20_hubbub::dcn21_hubbub_create;
 use crate::dcn20_mpc::dcn21_mpc_create;
 use crate::dcn20_opp::dcn21_opp_create;
@@ -163,4 +164,8 @@ pub fn dcn21_resource_construct(dc: &mut dc, pool: &mut resource_pool) {
     // timing_generator_count/pipe_count/mpcc_count = j; then mpc and hubbub.
     pool.mpc = Some(dcn21_mpc_create());
     pool.hubbub = Some(dcn21_hubbub_create());
+
+    for i in 0..RES_CAP_RN.num_dsc as usize {
+        pool.dscs[i] = Some(dcn21_dsc_create(i as u32));
+    }
 }

@@ -88,6 +88,15 @@ BLOCKS = {
         const_prefix="HUBBUB",
         regs_struct="dcn_hubbub_registers", shift_struct="dcn_hubbub_shift", mask_struct="dcn_hubbub_mask",
     ),
+    "dsc": dict(
+        headers=["dsc/dcn20/dcn20_dsc.h"],
+        prefixes=["DSC_"],
+        reg_calls=["DSC_REG_LIST_DCN20({i})"],
+        shift_calls=["DSC_REG_LIST_SH_MASK_DCN20(__SHIFT)"],
+        mask_calls=["DSC_REG_LIST_SH_MASK_DCN20(_MASK)"],
+        instances=6, const_prefix="DSC",
+        regs_struct="dcn20_dsc_registers", shift_struct="dcn20_dsc_shift", mask_struct="dcn20_dsc_mask",
+    ),
     "vmid": dict(
         headers=["inc/hw/vmid.h", "dcn20/dcn20_vmid.h"],
         prefixes=["DCN20_VMID", "VMID_"],

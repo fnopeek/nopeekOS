@@ -6,6 +6,7 @@
 use crate::dccg::dcn_dccg;
 use crate::dcn10_ipp::dcn10_ipp;
 use crate::dcn20_dpp::dcn20_dpp;
+use crate::dcn20_dsc::dcn20_dsc;
 use crate::dcn20_hubbub::dcn20_hubbub;
 use crate::dcn20_mpc::dcn20_mpc;
 use crate::dcn20_opp::dcn20_opp;
@@ -77,6 +78,8 @@ pub struct resource_pool {
     pub mpc: Option<Box<dcn20_mpc>>,
     /// `hubbub`: the hub bottleneck arbiter (one per device).
     pub hubbub: Option<Box<dcn20_hubbub>>,
+    /// `dscs[MAX_PIPES]`: the display stream compressors (`num_dsc` used).
+    pub dscs: [Option<Box<dcn20_dsc>>; MAX_PIPES],
     /// `res_cap`: the per-ASIC count table (Renoir → `RES_CAP_RN`).
     pub res_cap: Option<&'static resource_caps>,
 }
