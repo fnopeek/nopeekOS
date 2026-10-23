@@ -1,13 +1,18 @@
 //! display/amdgpu_dm/amdgpu_dm.c (Linux 6.18.55): the DM block's
-//! early_init, which sizes the display for DCN 2.1 and requests DMCUB, and
-//! its sw_init, which lays out the DMUB regions in one buffer.
+//! early_init, which sizes the display for DCN 2.1 and requests DMCUB, its
+//! sw_init, which lays out the DMUB regions in one buffer, and the start of
+//! its hw_init: `amdgpu_dm_init` creates Display Core and brings up the
+//! DMCUB. Nothing dispatches `dm_hw_init` yet.
 
 use crate::amdgpu_device::amdgpu_device;
 use crate::amdgpu_ucode::amdgpu_ucode_request;
 use crate::atom::amdgpu_atom_parse_data_header;
-use crate::linux::{drm_info, Line};
+use crate::linux::{drm_err, drm_info, Line};
 use crate::regs::*;
 use crate::dmub_srv::*;
+use crate::dc::{dc, dc_create, dc_init_data};
+use crate::dc_types::dce_environment;
+use alloc::boxed::Box;
 
 /// `struct amdgpu_display_manager`, the part sw_init fills.
 #[derive(Default)]
@@ -21,6 +26,12 @@ pub struct amdgpu_display_manager {
     pub dmub_bo_gpu_addr: u64,
     pub dmub_bo_cpu_addr: Option<crate::amdgpu_object::amdgpu_kptr>,
     pub dmub_fb_info: Option<dmub_srv_fb_info>,
+    /// `dc`: the Display Core instance `amdgpu_dm_init` creates.
+    pub dc: Option<Box<dc>>,
+    pub aux_hpd_discon_quirk: bool,
+    pub edp0_on_dp1_quirk: bool,
+    /// `bb_from_dmub`: the DMUB bounding box, DCN 4.0.1 only.
+    pub bb_from_dmub: bool,
 }
 
 /// `dm_init_microcode`: DCN 2.1.0, Renoir's DMCUB unless the revision is
@@ -175,4 +186,388 @@ fn dm_dmub_sw_init(adev: &mut amdgpu_device) -> i32 {
 pub fn dm_sw_init(adev: &mut amdgpu_device) -> i32 {
     adev.dm.cgs_device = true;
     dm_dmub_sw_init(adev)
+}
+
+/// `amdgpu_dm_irq_init` (amdgpu_dm_irq.c): it initializes an empty handler
+/// list per DAL irq source; the lists exist once handlers can be registered.
+fn amdgpu_dm_irq_init(_adev: &mut amdgpu_device) -> i32 {
+    0
+}
+
+/// `retrieve_dmi_info` (amdgpu_dm_quirks.c): the quirks match DMI system
+/// vendor and product names of Dell and HP machines. Not implemented: the
+/// kernel hands modules no DMI strings, so no entry matches.
+fn retrieve_dmi_info(dm: &mut amdgpu_display_manager) {
+    dm.aux_hpd_discon_quirk = false;
+    dm.edp0_on_dp1_quirk = false;
+}
+
+/// `amdgpu_stutter_quirk_list` (amdgpu_dm.c): vendor, device, subsystem
+/// vendor, subsystem device, revision.
+const AMDGPU_STUTTER_QUIRK_LIST: [(u16, u16, u16, u16, u8); 1] = [(0x1002, 0x15dd, 0x1002, 0x15dd, 0xc8)];
+
+/// `dm_should_disable_stutter`.
+fn dm_should_disable_stutter(adev: &amdgpu_device) -> bool {
+    AMDGPU_STUTTER_QUIRK_LIST.iter().any(|&(vendor, device, sub_vendor, sub_device, revision)| {
+        PCI_VENDOR_ID_ATI as u16 == vendor && adev.device == device && adev.subsystem_vendor == sub_vendor
+            && adev.subsystem_device == sub_device && adev.revision == revision
+    })
+}
+
+/// `dm_get_default_ips_mode`: ASICs older than DCN 3.5 have no IPS.
+fn dm_get_default_ips_mode(adev: &amdgpu_device) -> u32 {
+    let mut ret = DMUB_IPS_ENABLE;
+    match adev.ip_version(DCE_HWIP, 0) {
+        v if v == ip_version(3, 5, 0) || v == ip_version(3, 6, 0) || v == ip_version(3, 5, 1) => {
+            ret = DMUB_IPS_RCG_IN_ACTIVE_IPS2_IN_OFF;
+        }
+        v => {
+            if v < ip_version(3, 5, 0) {
+                ret = DMUB_IPS_DISABLE_ALL;
+            }
+        }
+    }
+    ret
+}
+
+/// `IP_VERSION` (amdgpu.h).
+const fn ip_version(maj: u32, min: u32, rev: u32) -> u32 {
+    maj << 16 | min << 8 | rev
+}
+
+/// `amdgpu_device_seamless_boot_supported` (amdgpu_device.c).
+fn amdgpu_device_seamless_boot_supported(adev: &amdgpu_device) -> bool {
+    match crate::tables::amdgpu_seamless[0] {
+        -1 => {}
+        1 => return true,
+        0 => return false,
+        _ => {
+            drm_err("Invalid value for amdgpu.seamless");
+            return false;
+        }
+    }
+    if adev.flags & AMD_IS_APU == 0 {
+        return false;
+    }
+    if adev.mman.keep_stolen_vga_memory {
+        return false;
+    }
+    adev.ip_version(DCE_HWIP, 0) >= ip_version(3, 0, 0)
+}
+
+/// `dm_dmub_hw_init`. The DMCUB on DCN 2.1 has no runtime register
+/// offsets, no DPIA and no IPS, and DC has no DMCU or ABM.
+pub fn dm_dmub_hw_init(adev: &mut amdgpu_device) -> i32 {
+    let Some(mut dmub_srv) = adev.dm.dmub_srv.take() else {
+        // DMUB isn't supported on the ASIC.
+        return 0;
+    };
+    let r = dm_dmub_hw_init_srv(adev, &mut dmub_srv);
+    adev.dm.dmub_srv = Some(dmub_srv);
+    r
+}
+
+fn dm_dmub_hw_init_srv(adev: &mut amdgpu_device, dmub_srv: &mut dmub_srv) -> i32 {
+    let Some(fb_info) = adev.dm.dmub_fb_info.as_ref() else {
+        drm_err("No framebuffer info for DMUB service.");
+        return -22;
+    };
+    let Some(dmub_fw) = adev.dm_dmub_fw.as_ref() else {
+        // Firmware required for DMUB support.
+        drm_err("No firmware provided for DMUB.");
+        return -22;
+    };
+    let adev_r: &amdgpu_device = adev;
+
+    let mut has_hw_support = false;
+    let status = dmub_srv_has_hw_support(adev_r, dmub_srv, &mut has_hw_support);
+    if status != DMUB_STATUS_OK {
+        Line::new().s("Error checking HW support for DMUB: ").dec(status as u64).say();
+        return -22;
+    }
+
+    if !has_hw_support {
+        drm_info("DMUB unsupported on ASIC");
+        return 0;
+    }
+
+    // Reset DMCUB if it was previously running - before we overwrite its memory.
+    let status = dmub_srv_hw_reset(adev_r, dmub_srv);
+    if status != DMUB_STATUS_OK {
+        Line::new().s("Error resetting DMUB HW: ").dec(status as u64).say();
+    }
+
+    let data = &dmub_fw.data;
+    let ucode_array_offset = le32(data, UCODE_HDR_UCODE_ARRAY_OFFSET_BYTES);
+    let inst_const_bytes = le32(data, DMCUB_HDR_INST_CONST_BYTES);
+    let fw_inst_const = ucode_array_offset.wrapping_add(PSP_HEADER_BYTES);
+    let fw_bss_data = ucode_array_offset.wrapping_add(inst_const_bytes);
+
+    // Copy firmware and bios info into FB memory.
+    let fw_inst_const_size = inst_const_bytes.wrapping_sub(PSP_HEADER_BYTES).wrapping_sub(PSP_FOOTER_BYTES);
+    let fw_bss_data_size = le32(data, DMCUB_HDR_BSS_DATA_BYTES);
+
+    let Some(cpu) = adev_r.dm.dmub_bo_cpu_addr else { return -22 };
+    let blob = |off: u32, len: u32| data.get(off as usize..(off as usize).saturating_add(len as usize));
+    let fb = |id: u32| fb_info.fb[id as usize];
+
+    // With PSP loading, amdgpu_ucode_init_single_fw puts fw_inst_const in
+    // cw0; otherwise this is the backdoor load.
+    if adev_r.firmware.load_type != AMDGPU_FW_LOAD_PSP {
+        let Some(src) = blob(fw_inst_const, fw_inst_const_size) else { return -22 };
+        crate::amdgpu_gart::kptr_write(adev_r, cpu, fb(DMUB_WINDOW_0_INST_CONST).cpu_off, src);
+    }
+
+    if fw_bss_data_size != 0 {
+        let Some(src) = blob(fw_bss_data, fw_bss_data_size) else { return -22 };
+        crate::amdgpu_gart::kptr_write(adev_r, cpu, fb(DMUB_WINDOW_2_BSS_DATA).cpu_off, src);
+    }
+
+    // Copy firmware bios info into FB memory.
+    crate::amdgpu_gart::kptr_write(adev_r, cpu, fb(DMUB_WINDOW_3_VBIOS).cpu_off, &adev_r.bios);
+
+    // Reset regions that need to be reset.
+    for id in [DMUB_WINDOW_4_MAILBOX, DMUB_WINDOW_5_TRACEBUFF, DMUB_WINDOW_6_FW_STATE, DMUB_WINDOW_SHARED_STATE] {
+        let w = fb(id);
+        crate::amdgpu_gart::kptr_fill32(adev_r, cpu, w.cpu_off, w.size as u64, 0);
+    }
+
+    // Initialize hardware.
+    let mut hw_params = dmub_srv_hw_params {
+        cpu: Some(cpu),
+        fb_base: adev_r.gmc.fb_start,
+        fb_offset: adev_r.vm_manager.vram_base_offset,
+        ..dmub_srv_hw_params::default()
+    };
+
+    // backdoor load firmware and trigger dmub running
+    if adev_r.firmware.load_type != AMDGPU_FW_LOAD_PSP {
+        hw_params.load_inst_const = true;
+    }
+
+    // dmcu is NULL on DCN 2.1: psp_version stays 0.
+    for i in 0..fb_info.num_fb as usize {
+        hw_params.fb[i] = Some(fb_info.fb[i]);
+    }
+    // DPIA (DCN 3.1.3+) and the IPS/PHY options (DCN 3.5+) do not apply.
+
+    let status = dmub_srv_hw_init(adev_r, dmub_srv, &hw_params);
+    if status != DMUB_STATUS_OK {
+        Line::new().s("Error initializing DMUB HW: ").dec(status as u64).say();
+        return -22;
+    }
+
+    // Wait for firmware load to finish.
+    let status = dmub_srv_wait_for_auto_load(adev_r, dmub_srv, 100000);
+    if status != DMUB_STATUS_OK {
+        Line::new().s("Wait for DMUB auto-load failed: ").dec(status as u64).say();
+    }
+
+    // Init DMCU and ABM if available: DCN 2.1 has neither.
+
+    let dc = adev.dm.dc.as_deref_mut().expect("dm_dmub_hw_init runs after dc_create");
+    if dc.ctx.dmub_srv.is_none() {
+        dc.ctx.dmub_srv = crate::dc_dmub_srv::dc_dmub_srv_create();
+    }
+    if dc.ctx.dmub_srv.is_none() {
+        drm_err("Couldn't allocate DC DMUB server!");
+        return -12;
+    }
+
+    Line::new().s("DMUB hardware initialized: version=0x").hexw(adev.dm.dmcub_fw_version, 8).say();
+
+    // The sanity-check overrides are DCN 3.1.x only.
+    0
+}
+
+/// `amdgpu_dm_init`, up to the DMCUB. `dc_hardware_init` (detect_edp_presence,
+/// `hwss.init_hw`, the D0 power-state command) and everything after it —
+/// the system context, freesync, the work queues, outbox, the DRM device —
+/// are the next stages; until then this returns after `dm_dmub_hw_init`.
+pub fn amdgpu_dm_init(adev: &mut amdgpu_device) -> i32 {
+    if amdgpu_dm_irq_init(adev) != 0 {
+        drm_err("failed to initialize DM IRQ support.");
+        return -22;
+    }
+
+    let mut init_data = dc_init_data::default();
+    init_data.asic_id.chip_family = adev.family;
+
+    init_data.asic_id.pci_revision_id = adev.revision as u32;
+    init_data.asic_id.hw_internal_rev = adev.external_rev_id;
+    init_data.asic_id.chip_id = adev.device as u32;
+
+    init_data.asic_id.vram_width = adev.gmc.vram_width;
+    // vram_type is left unset, as Linux leaves it; atombios_base_address
+    // is the VBIOS image, which the port reads through adev.bios.
+
+    // cgs_device was created in dm_sw_init()
+    init_data.cgs_device = adev.dm.cgs_device;
+
+    init_data.dce_environment = dce_environment::DCE_ENV_PRODUCTION_DRV;
+
+    match adev.ip_version(DCE_HWIP, 0) {
+        v if v == ip_version(2, 1, 0) => {
+            init_data.flags.disable_dmcu = !matches!(adev.dm.dmcub_fw_version,
+                // development, linux-firmware.git hash 6d9f399, hash 9a0b0f4
+                0 | 0x1 | 0x0100_0000);
+        }
+        v if v == ip_version(2, 0, 3) => init_data.flags.disable_dmcu = true,
+        _ => {}
+    }
+
+    // APU support S/G display by default except ASICs before Carrizo and
+    // RAVEN1 (users reported stability issues).
+    let sg_display = crate::tables::amdgpu_sg_display[0];
+    if adev.asic_type < CHIP_CARRIZO {
+        init_data.flags.gpu_vm_support = false;
+    } else if adev.asic_type == CHIP_RAVEN {
+        init_data.flags.gpu_vm_support = if adev.apu_flags & AMD_APU_IS_RAVEN != 0 { false } else { sg_display != 0 };
+    } else if adev.ip_version(DCE_HWIP, 0) == ip_version(2, 0, 3) {
+        init_data.flags.gpu_vm_support = sg_display == 1;
+    } else {
+        init_data.flags.gpu_vm_support = sg_display != 0 && adev.flags & AMD_IS_APU != 0;
+    }
+
+    adev.mode_info.gpu_vm_support = init_data.flags.gpu_vm_support;
+
+    let feature_mask = crate::tables::amdgpu_dc_feature_mask[0];
+    if feature_mask & DC_FBC_MASK != 0 {
+        init_data.flags.fbc_support = true;
+    }
+    if feature_mask & DC_MULTI_MON_PP_MCLK_SWITCH_MASK != 0 {
+        init_data.flags.multi_mon_pp_mclk_switch = true;
+    }
+    if feature_mask & DC_DISABLE_FRACTIONAL_PWM_MASK != 0 {
+        init_data.flags.disable_fractional_pwm = true;
+    }
+    if feature_mask & DC_EDP_NO_POWER_SEQUENCING != 0 {
+        init_data.flags.edp_no_power_sequencing = true;
+    }
+    if feature_mask & DC_DISABLE_LTTPR_DP1_4A != 0 {
+        init_data.flags.allow_lttpr_non_transparent_mode_dp1_4a = true;
+    }
+    if feature_mask & DC_DISABLE_LTTPR_DP2_0 != 0 {
+        init_data.flags.allow_lttpr_non_transparent_mode_dp2_0 = true;
+    }
+
+    init_data.flags.seamless_boot_edp_requested = false;
+
+    if amdgpu_device_seamless_boot_supported(adev) {
+        init_data.flags.seamless_boot_edp_requested = true;
+        init_data.flags.allow_seamless_boot_optimization = true;
+    }
+
+    init_data.flags.enable_mipi_converter_optimization = true;
+
+    init_data.dcn_reg_offsets = adev.reg_offset[DCE_HWIP as usize][0].clone();
+    init_data.nbio_reg_offsets = adev.reg_offset[NBIO_HWIP as usize][0].clone();
+    init_data.clk_reg_offsets = adev.reg_offset[CLK_HWIP as usize][0].clone();
+
+    let debug_mask = crate::tables::amdgpu_dc_debug_mask[0];
+    init_data.flags.disable_ips = if debug_mask & DC_DISABLE_IPS != 0 {
+        DMUB_IPS_DISABLE_ALL
+    } else if debug_mask & DC_DISABLE_IPS_DYNAMIC != 0 {
+        DMUB_IPS_DISABLE_DYNAMIC
+    } else if debug_mask & DC_DISABLE_IPS2_DYNAMIC != 0 {
+        DMUB_IPS_RCG_IN_ACTIVE_IPS2_IN_OFF
+    } else if debug_mask & DC_FORCE_IPS_ENABLE != 0 {
+        DMUB_IPS_ENABLE
+    } else {
+        dm_get_default_ips_mode(adev)
+    };
+
+    init_data.flags.disable_ips_in_vpb = 0;
+
+    // DCN35 and above supports dynamic DTBCLK switch
+    if adev.ip_version(DCE_HWIP, 0) >= ip_version(3, 5, 0) {
+        init_data.flags.allow_0_dtb_clk = true;
+    }
+
+    // Enable DWB for tested platforms only
+    if adev.ip_version(DCE_HWIP, 0) >= ip_version(3, 0, 0) {
+        init_data.num_virtual_links = 1;
+    }
+
+    retrieve_dmi_info(&mut adev.dm);
+    if adev.dm.edp0_on_dp1_quirk {
+        init_data.flags.support_edp0_on_dp1 = true;
+    }
+
+    init_data.bb_from_dmub = adev.dm.bb_from_dmub;
+
+    // Display Core create.
+    adev.dm.dc = dc_create(adev, &init_data);
+
+    let Some(dc) = adev.dm.dc.as_deref_mut() else {
+        Line::new().s("Display Core failed to initialize with v").s(crate::dc_types::DC_VER).say();
+        return -22;
+    };
+    Line::new().s("Display Core v").s(crate::dc_types::DC_VER).s(" initialized on DCN 2.1").say();
+
+    if debug_mask & DC_DISABLE_PIPE_SPLIT != 0 {
+        dc.debug.force_single_disp_pipe_split = false;
+        dc.debug.pipe_split_policy = crate::dc::pipe_split_policy::MPC_SPLIT_AVOID;
+    }
+
+    if adev.asic_type != CHIP_CARRIZO && adev.asic_type != CHIP_STONEY {
+        dc.debug.disable_stutter = crate::tables::amdgpu_pp_feature_mask[0] & PP_STUTTER_MODE == 0;
+    }
+    if dm_should_disable_stutter(adev) {
+        adev.dm.dc.as_deref_mut().unwrap().debug.disable_stutter = true;
+    }
+    let dc = adev.dm.dc.as_deref_mut().unwrap();
+
+    if debug_mask & DC_DISABLE_STUTTER != 0 {
+        dc.debug.disable_stutter = true;
+    }
+    if debug_mask & DC_DISABLE_DSC != 0 {
+        dc.debug.disable_dsc = true;
+    }
+    if debug_mask & DC_DISABLE_CLOCK_GATING != 0 {
+        dc.debug.disable_clock_gate = true;
+    }
+    if debug_mask & DC_FORCE_SUBVP_MCLK_SWITCH != 0 {
+        dc.debug.force_subvp_mclk_switch = true;
+    }
+    if debug_mask & DC_DISABLE_SUBVP_FAMS != 0 {
+        dc.debug.force_disable_subvp = true;
+        dc.debug.fams2_config_enable = false;
+    }
+    if debug_mask & DC_ENABLE_DML2 != 0 {
+        dc.debug.using_dml2 = true;
+        dc.debug.using_dml21 = true;
+    }
+    if debug_mask & DC_HDCP_LC_FORCE_FW_ENABLE != 0 {
+        dc.debug.hdcp_lc_force_fw_enable = true;
+    }
+    if debug_mask & DC_HDCP_LC_ENABLE_SW_FALLBACK != 0 {
+        dc.debug.hdcp_lc_enable_sw_fallback = true;
+    }
+    if debug_mask & DC_SKIP_DETECTION_LT != 0 {
+        dc.debug.skip_detection_link_training = true;
+    }
+
+    dc.debug.visual_confirm = crate::tables::amdgpu_dc_visual_confirm[0];
+
+    // TODO: Remove after DP2 receiver gets proper support of Cable ID feature
+    dc.debug.ignore_cable_id = true;
+
+    if dc.caps.dp_hdmi21_pcon_support {
+        drm_info("DP-HDMI FRL PCON supported");
+    }
+
+    let r = dm_dmub_hw_init(adev);
+    if r != 0 {
+        Line::new().s("DMUB interface failed to initialize: status=").dec(r as i64 as u64).say();
+        return -22;
+    }
+
+    0
+}
+
+/// `dm_hw_init`: the DAL display manager. `amdgpu_dm_hpd_init` and the OEM
+/// i2c bus follow `amdgpu_dm_init`'s later stages.
+pub fn dm_hw_init(adev: &mut amdgpu_device) -> i32 {
+    amdgpu_dm_init(adev)
 }

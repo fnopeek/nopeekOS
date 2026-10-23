@@ -114,3 +114,9 @@ le_mask: u32
 panel_cntl_regs: u32
 panel_cntl_shift: u8
 panel_cntl_mask: u32
+@ amdgpu_drv.c
+amdgpu_dc_feature_mask: u32
+amdgpu_dc_debug_mask: u32
+amdgpu_dc_visual_confirm: u32
+amdgpu_sg_display: i32
+amdgpu_seamless: i32

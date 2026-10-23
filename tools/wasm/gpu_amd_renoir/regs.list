@@ -1693,6 +1693,199 @@ FWMETA_FW_REGION_SIZE = offsetof(struct dmub_fw_meta_info, fw_region_size) @ ../
 FWMETA_TRACE_BUFFER_SIZE = offsetof(struct dmub_fw_meta_info, trace_buffer_size) @ ../display/dmub/src/dmub_srv.c
 FWMETA_FW_VERSION = offsetof(struct dmub_fw_meta_info, fw_version) @ ../display/dmub/src/dmub_srv.c
 FWMETA_SHARED_STATE_SIZE = offsetof(struct dmub_fw_meta_info, shared_state_size) @ ../display/dmub/src/dmub_srv.c
+# dm_dmub_hw_init / dmub_srv_hw_init (amdgpu_dm.c, dmub_srv.c, dmub_cmd.h)
+DMUB_CW0_BASE @ ../display/dmub/src/dmub_srv.c
+DMUB_CW1_BASE @ ../display/dmub/src/dmub_srv.c
+DMUB_CW3_BASE @ ../display/dmub/src/dmub_srv.c
+DMUB_CW4_BASE @ ../display/dmub/src/dmub_srv.c
+DMUB_CW5_BASE @ ../display/dmub/src/dmub_srv.c
+DMUB_CW6_BASE @ ../display/dmub/src/dmub_srv.c
+DMUB_REGION5_BASE @ ../display/dmub/src/dmub_srv.c
+TRACE_BUFFER_ENTRY_OFFSET @ ../display/dmub/src/dmub_srv.c
+DMUB_RB_SIZE @ ../display/dmub/src/dmub_srv.c
+DMUB_DEBUG_FW_STATE_OFFSET @ ../display/dmub/src/dmub_srv.c
+DMUB_GPINT__STOP_FW @ ../display/dmub/src/dmub_srv.c
+DMUB_GPINT__STOP_FW_RESPONSE @ ../display/dmub/src/dmub_srv.c
+DMUB_STATUS_TIMEOUT @ ../display/dmub/src/dmub_srv.c
+DMUB_POWER_STATE_D0 @ ../display/dmub/src/dmub_srv.c
+DMUB_MEMORY_ACCESS_CPU @ ../display/dmub/src/dmub_srv.c
+# amdgpu_dm_init (amdgpu_dm.c, amd_shared.h, dmub_cmd.h)
+DAL_IRQ_SOURCES_NUMBER @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_IPS_ENABLE @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_IPS_DISABLE_ALL @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_IPS_DISABLE_DYNAMIC @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_IPS_RCG_IN_ACTIVE_IPS2_IN_OFF @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_FBC_MASK @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_MULTI_MON_PP_MCLK_SWITCH_MASK @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_DISABLE_FRACTIONAL_PWM_MASK @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_EDP_NO_POWER_SEQUENCING @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_DISABLE_LTTPR_DP1_4A @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_DISABLE_LTTPR_DP2_0 @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_DISABLE_PIPE_SPLIT @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_DISABLE_STUTTER @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_DISABLE_DSC @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_DISABLE_CLOCK_GATING @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_FORCE_SUBVP_MCLK_SWITCH @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_DISABLE_SUBVP_FAMS @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_ENABLE_DML2 @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_HDCP_LC_FORCE_FW_ENABLE @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_HDCP_LC_ENABLE_SW_FALLBACK @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_SKIP_DETECTION_LT @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_DISABLE_IPS @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_DISABLE_IPS_DYNAMIC @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_DISABLE_IPS2_DYNAMIC @ ../display/amdgpu_dm/amdgpu_dm.c
+DC_FORCE_IPS_ENABLE @ ../display/amdgpu_dm/amdgpu_dm.c
+PP_STUTTER_MODE @ ../display/amdgpu_dm/amdgpu_dm.c
+CHIP_CARRIZO @ ../display/amdgpu_dm/amdgpu_dm.c
+CHIP_STONEY @ ../display/amdgpu_dm/amdgpu_dm.c
+CHIP_RAVEN @ ../display/amdgpu_dm/amdgpu_dm.c
+AMD_APU_IS_RAVEN @ ../display/amdgpu_dm/amdgpu_dm.c
+# DMUB on DCN 2.1: dmub_srv_dcn21_regs, the DMUB_COMMON_REGS / DMUB_COMMON_FIELDS
+# lists of dmub_dcn20.h as dmub_dcn21.c expands them (BASE = DMU_BASE__INST0_SEGx).
+DMUB_DMCUB_CNTL = REG_OFFSET(DMCUB_CNTL) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_MEM_CNTL = REG_OFFSET(DMCUB_MEM_CNTL) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SEC_CNTL = REG_OFFSET(DMCUB_SEC_CNTL) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_INBOX0_SIZE = REG_OFFSET(DMCUB_INBOX0_SIZE) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_INBOX0_RPTR = REG_OFFSET(DMCUB_INBOX0_RPTR) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_INBOX0_WPTR = REG_OFFSET(DMCUB_INBOX0_WPTR) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_INBOX1_BASE_ADDRESS = REG_OFFSET(DMCUB_INBOX1_BASE_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_INBOX1_SIZE = REG_OFFSET(DMCUB_INBOX1_SIZE) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_INBOX1_RPTR = REG_OFFSET(DMCUB_INBOX1_RPTR) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_INBOX1_WPTR = REG_OFFSET(DMCUB_INBOX1_WPTR) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_OUTBOX0_BASE_ADDRESS = REG_OFFSET(DMCUB_OUTBOX0_BASE_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_OUTBOX0_SIZE = REG_OFFSET(DMCUB_OUTBOX0_SIZE) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_OUTBOX0_RPTR = REG_OFFSET(DMCUB_OUTBOX0_RPTR) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_OUTBOX0_WPTR = REG_OFFSET(DMCUB_OUTBOX0_WPTR) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_OUTBOX1_BASE_ADDRESS = REG_OFFSET(DMCUB_OUTBOX1_BASE_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_OUTBOX1_SIZE = REG_OFFSET(DMCUB_OUTBOX1_SIZE) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_OUTBOX1_RPTR = REG_OFFSET(DMCUB_OUTBOX1_RPTR) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_OUTBOX1_WPTR = REG_OFFSET(DMCUB_OUTBOX1_WPTR) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW0_OFFSET = REG_OFFSET(DMCUB_REGION3_CW0_OFFSET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW1_OFFSET = REG_OFFSET(DMCUB_REGION3_CW1_OFFSET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW2_OFFSET = REG_OFFSET(DMCUB_REGION3_CW2_OFFSET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW3_OFFSET = REG_OFFSET(DMCUB_REGION3_CW3_OFFSET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW4_OFFSET = REG_OFFSET(DMCUB_REGION3_CW4_OFFSET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW5_OFFSET = REG_OFFSET(DMCUB_REGION3_CW5_OFFSET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW6_OFFSET = REG_OFFSET(DMCUB_REGION3_CW6_OFFSET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW7_OFFSET = REG_OFFSET(DMCUB_REGION3_CW7_OFFSET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW0_OFFSET_HIGH = REG_OFFSET(DMCUB_REGION3_CW0_OFFSET_HIGH) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW1_OFFSET_HIGH = REG_OFFSET(DMCUB_REGION3_CW1_OFFSET_HIGH) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW2_OFFSET_HIGH = REG_OFFSET(DMCUB_REGION3_CW2_OFFSET_HIGH) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW3_OFFSET_HIGH = REG_OFFSET(DMCUB_REGION3_CW3_OFFSET_HIGH) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW4_OFFSET_HIGH = REG_OFFSET(DMCUB_REGION3_CW4_OFFSET_HIGH) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW5_OFFSET_HIGH = REG_OFFSET(DMCUB_REGION3_CW5_OFFSET_HIGH) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW6_OFFSET_HIGH = REG_OFFSET(DMCUB_REGION3_CW6_OFFSET_HIGH) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW7_OFFSET_HIGH = REG_OFFSET(DMCUB_REGION3_CW7_OFFSET_HIGH) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW0_BASE_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW0_BASE_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW1_BASE_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW1_BASE_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW2_BASE_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW2_BASE_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW3_BASE_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW3_BASE_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW4_BASE_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW4_BASE_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW5_BASE_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW5_BASE_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW6_BASE_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW6_BASE_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW7_BASE_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW7_BASE_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW0_TOP_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW0_TOP_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW1_TOP_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW1_TOP_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW2_TOP_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW2_TOP_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW3_TOP_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW3_TOP_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW4_TOP_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW4_TOP_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW5_TOP_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW5_TOP_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW6_TOP_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW6_TOP_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION3_CW7_TOP_ADDRESS = REG_OFFSET(DMCUB_REGION3_CW7_TOP_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION4_OFFSET = REG_OFFSET(DMCUB_REGION4_OFFSET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION4_OFFSET_HIGH = REG_OFFSET(DMCUB_REGION4_OFFSET_HIGH) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION4_TOP_ADDRESS = REG_OFFSET(DMCUB_REGION4_TOP_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION5_OFFSET = REG_OFFSET(DMCUB_REGION5_OFFSET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION5_OFFSET_HIGH = REG_OFFSET(DMCUB_REGION5_OFFSET_HIGH) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_REGION5_TOP_ADDRESS = REG_OFFSET(DMCUB_REGION5_TOP_ADDRESS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH0 = REG_OFFSET(DMCUB_SCRATCH0) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH1 = REG_OFFSET(DMCUB_SCRATCH1) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH2 = REG_OFFSET(DMCUB_SCRATCH2) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH3 = REG_OFFSET(DMCUB_SCRATCH3) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH4 = REG_OFFSET(DMCUB_SCRATCH4) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH5 = REG_OFFSET(DMCUB_SCRATCH5) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH6 = REG_OFFSET(DMCUB_SCRATCH6) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH7 = REG_OFFSET(DMCUB_SCRATCH7) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH8 = REG_OFFSET(DMCUB_SCRATCH8) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH9 = REG_OFFSET(DMCUB_SCRATCH9) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH10 = REG_OFFSET(DMCUB_SCRATCH10) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH11 = REG_OFFSET(DMCUB_SCRATCH11) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH12 = REG_OFFSET(DMCUB_SCRATCH12) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH13 = REG_OFFSET(DMCUB_SCRATCH13) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH14 = REG_OFFSET(DMCUB_SCRATCH14) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_SCRATCH15 = REG_OFFSET(DMCUB_SCRATCH15) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_GPINT_DATAIN1 = REG_OFFSET(DMCUB_GPINT_DATAIN1) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_CC_DC_PIPE_DIS = REG_OFFSET(CC_DC_PIPE_DIS) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_MMHUBBUB_SOFT_RESET = REG_OFFSET(MMHUBBUB_SOFT_RESET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DCN_VM_FB_LOCATION_BASE = REG_OFFSET(DCN_VM_FB_LOCATION_BASE) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DCN_VM_FB_OFFSET = REG_OFFSET(DCN_VM_FB_OFFSET) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_INTERRUPT_ACK = REG_OFFSET(DMCUB_INTERRUPT_ACK) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_TIMER_CURRENT = REG_OFFSET(DMCUB_TIMER_CURRENT) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_INST_FETCH_FAULT_ADDR = REG_OFFSET(DMCUB_INST_FETCH_FAULT_ADDR) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_UNDEFINED_ADDRESS_FAULT_ADDR = REG_OFFSET(DMCUB_UNDEFINED_ADDRESS_FAULT_ADDR) @ ../display/dmub/src/dmub_dcn21.c
+DMUB_DMCUB_DATA_WRITE_FAULT_ADDR = REG_OFFSET(DMCUB_DATA_WRITE_FAULT_ADDR) @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_CNTL__DMCUB_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_CNTL__DMCUB_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_CNTL__DMCUB_SOFT_RESET__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_CNTL__DMCUB_SOFT_RESET_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_CNTL__DMCUB_TRACEPORT_EN__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_CNTL__DMCUB_TRACEPORT_EN_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_MEM_CNTL__DMCUB_MEM_READ_SPACE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_MEM_CNTL__DMCUB_MEM_READ_SPACE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_MEM_CNTL__DMCUB_MEM_WRITE_SPACE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_MEM_CNTL__DMCUB_MEM_WRITE_SPACE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_SEC_CNTL__DMCUB_SEC_RESET__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_SEC_CNTL__DMCUB_SEC_RESET_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_SEC_CNTL__DMCUB_MEM_UNIT_ID__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_SEC_CNTL__DMCUB_MEM_UNIT_ID_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_SEC_CNTL__DMCUB_SEC_RESET_STATUS__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_SEC_CNTL__DMCUB_SEC_RESET_STATUS_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_TOP_ADDRESS__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_TOP_ADDRESS_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW1_TOP_ADDRESS__DMCUB_REGION3_CW1_TOP_ADDRESS__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW1_TOP_ADDRESS__DMCUB_REGION3_CW1_TOP_ADDRESS_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW1_TOP_ADDRESS__DMCUB_REGION3_CW1_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW1_TOP_ADDRESS__DMCUB_REGION3_CW1_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW2_TOP_ADDRESS__DMCUB_REGION3_CW2_TOP_ADDRESS__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW2_TOP_ADDRESS__DMCUB_REGION3_CW2_TOP_ADDRESS_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW2_TOP_ADDRESS__DMCUB_REGION3_CW2_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW2_TOP_ADDRESS__DMCUB_REGION3_CW2_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW3_TOP_ADDRESS__DMCUB_REGION3_CW3_TOP_ADDRESS__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW3_TOP_ADDRESS__DMCUB_REGION3_CW3_TOP_ADDRESS_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW3_TOP_ADDRESS__DMCUB_REGION3_CW3_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW3_TOP_ADDRESS__DMCUB_REGION3_CW3_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW4_TOP_ADDRESS__DMCUB_REGION3_CW4_TOP_ADDRESS__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW4_TOP_ADDRESS__DMCUB_REGION3_CW4_TOP_ADDRESS_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW4_TOP_ADDRESS__DMCUB_REGION3_CW4_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW4_TOP_ADDRESS__DMCUB_REGION3_CW4_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW5_TOP_ADDRESS__DMCUB_REGION3_CW5_TOP_ADDRESS__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW5_TOP_ADDRESS__DMCUB_REGION3_CW5_TOP_ADDRESS_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW5_TOP_ADDRESS__DMCUB_REGION3_CW5_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW5_TOP_ADDRESS__DMCUB_REGION3_CW5_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW6_TOP_ADDRESS__DMCUB_REGION3_CW6_TOP_ADDRESS__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW6_TOP_ADDRESS__DMCUB_REGION3_CW6_TOP_ADDRESS_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW6_TOP_ADDRESS__DMCUB_REGION3_CW6_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW6_TOP_ADDRESS__DMCUB_REGION3_CW6_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW7_TOP_ADDRESS__DMCUB_REGION3_CW7_TOP_ADDRESS__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW7_TOP_ADDRESS__DMCUB_REGION3_CW7_TOP_ADDRESS_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW7_TOP_ADDRESS__DMCUB_REGION3_CW7_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION3_CW7_TOP_ADDRESS__DMCUB_REGION3_CW7_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION4_TOP_ADDRESS__DMCUB_REGION4_TOP_ADDRESS__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION4_TOP_ADDRESS__DMCUB_REGION4_TOP_ADDRESS_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION4_TOP_ADDRESS__DMCUB_REGION4_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION4_TOP_ADDRESS__DMCUB_REGION4_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION5_TOP_ADDRESS__DMCUB_REGION5_TOP_ADDRESS__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION5_TOP_ADDRESS__DMCUB_REGION5_TOP_ADDRESS_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION5_TOP_ADDRESS__DMCUB_REGION5_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_REGION5_TOP_ADDRESS__DMCUB_REGION5_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+CC_DC_PIPE_DIS__DC_DMCUB_ENABLE__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+CC_DC_PIPE_DIS__DC_DMCUB_ENABLE_MASK @ ../display/dmub/src/dmub_dcn21.c
+MMHUBBUB_SOFT_RESET__DMUIF_SOFT_RESET__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+MMHUBBUB_SOFT_RESET__DMUIF_SOFT_RESET_MASK @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_INTERRUPT_ACK__DMCUB_OUTBOX0_READY_INT_ACK__SHIFT @ ../display/dmub/src/dmub_dcn21.c
+DMCUB_INTERRUPT_ACK__DMCUB_OUTBOX0_READY_INT_ACK_MASK @ ../display/dmub/src/dmub_dcn21.c
 # The rings: amdgpu_ring.c and the ring funcs tables they read
 AMDGPU_MAX_RINGS @ amdgpu_ring.c
 AMDGPU_HW_IP_NUM @ amdgpu_ring.c

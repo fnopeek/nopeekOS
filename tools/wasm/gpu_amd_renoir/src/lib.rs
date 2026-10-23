@@ -31,6 +31,8 @@ mod amdgpu_ring;
 mod amdgpu_vram_mgr;
 mod drm_mm;
 mod dmub_srv;
+mod dmub_dcn20;
+mod dc_dmub_srv;
 mod ttm;
 mod gpu_buddy;
 mod mmhub_v1_0;

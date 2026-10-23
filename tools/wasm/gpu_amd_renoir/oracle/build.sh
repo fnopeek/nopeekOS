@@ -513,11 +513,35 @@ GPIO_CF="-I $HERE/shim_dc -I $B/dc_shim -I $AMD/display -I $DCS -I $DCS/inc -I $
 } > "$B/link_funcs.c"
 python3 -I "$HERE/protos.py" "$B/link_funcs.c" > "$B/link_protos.h"
 
+# The DMCUB bring-up: Linux's dmub/src compiled unchanged (shim_dmub stands
+# in for os_types.h), with dm_dmub_sw_init / dm_dmub_hw_init and the DC DMUB
+# handle around them.
+{
+    $X "$L/include/uapi/drm/amdgpu_drm.h" '#AMDGPU_GEM_DOMAIN_GTT' '#AMDGPU_GEM_DOMAIN_VRAM'
+    $X "$AMD/amdgpu/amdgpu_ucode.h" common_firmware_header dmcub_firmware_header_v1_0 amdgpu_firmware_load_type \
+        AMDGPU_UCODE_ID
+    $X "$AMD/display/dc/dc_dmub_srv.h" dc_reg_helper_state dc_dmub_srv
+} > "$B/dmubhw_types.h"
+{
+    $X "$AMD/display/dc/dc_dmub_srv.c" dc_dmub_srv_construct dc_dmub_srv_create
+    $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" '#PSP_HEADER_BYTES' '#PSP_FOOTER_BYTES' amdgpu_dm_dmub_reg_read \
+        amdgpu_dm_dmub_reg_write dm_dmub_sw_init dm_dmub_hw_init
+} > "$B/dmubhw_funcs.c"
+DMUB_CF="-I $HERE/shim_dmub -D_OS_TYPES_H_ -include $HERE/shim_dmub/dmub_os.h -I $AMD/display -I $AMD/display/dc \
+    -I $AMD/display/include -I $AMD/include/asic_reg -I $AMD/display/dmub/inc -I $AMD/display/dmub"
+
 CF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
 gcc $CF -c "$B/atom.c" -o "$B/atom.o"
 gcc $CF "$HERE/main.c" "$B/atom.o" -o "$B/oracle_atom"
 gcc $CF "$HERE/main_atomexec.c" "$B/atom.o" -o "$B/oracle_atomexec"
 gcc $CF "$HERE/main_dmub.c" -o "$B/oracle_dmub"
+DMUB_O=""
+for f in "$AMD"/display/dmub/src/*.c; do
+    n=$(basename "$f" .c)
+    gcc $CF $DMUB_CF -c "$f" -o "$B/dmub_$n.o"
+    DMUB_O="$DMUB_O $B/dmub_$n.o"
+done
+gcc $CF $DMUB_CF "$HERE/main_dmubhw.c" $DMUB_O -o "$B/oracle_dmubhw"
 gcc $CF "$HERE/main_bios.c" "$B/atom.o" -o "$B/oracle_bios"
 GPIO_O=""
 for f in gpio_base gpio_service hw_gpio hw_hpd hw_ddc hw_generic dcn21/hw_factory_dcn21 dcn21/hw_translate_dcn21; do

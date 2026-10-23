@@ -33,6 +33,10 @@ mod tables;
 mod amdgpu_dm;
 #[path = "../src/dmub_srv.rs"]
 mod dmub_srv;
+#[path = "../src/dmub_dcn20.rs"]
+mod dmub_dcn20;
+#[path = "../src/dc_dmub_srv.rs"]
+mod dc_dmub_srv;
 #[path = "../src/amdgpu_psp.rs"]
 mod amdgpu_psp;
 #[path = "../src/amdgpu_ras.rs"]

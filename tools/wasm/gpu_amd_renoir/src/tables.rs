@@ -287,3 +287,18 @@ pub static panel_cntl_shift: [u8; 15] = [24, 25, 16, 17, 4, 0, 16, 31, 0, 30, 0,
 
 /// `panel_cntl_mask` in ../display/dc/resource/dcn21/dcn21_resource.c
 pub static panel_cntl_mask: [u32; 15] = [16777216, 33554432, 65536, 131072, 16, 1, 4294901760, 2147483648, 65535, 1073741824, 65535, 983040, 2147483648, 1, 256];
+
+/// `amdgpu_dc_feature_mask` in amdgpu_drv.c
+pub static amdgpu_dc_feature_mask: [u32; 1] = [2];
+
+/// `amdgpu_dc_debug_mask` in amdgpu_drv.c
+pub static amdgpu_dc_debug_mask: [u32; 1] = [0];
+
+/// `amdgpu_dc_visual_confirm` in amdgpu_drv.c
+pub static amdgpu_dc_visual_confirm: [u32; 1] = [0];
+
+/// `amdgpu_sg_display` in amdgpu_drv.c
+pub static amdgpu_sg_display: [i32; 1] = [-1];
+
+/// `amdgpu_seamless` in amdgpu_drv.c
+pub static amdgpu_seamless: [i32; 1] = [-1];

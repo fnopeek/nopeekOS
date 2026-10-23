@@ -72,6 +72,7 @@ pub struct amdgpu_mode_info {
     pub num_hpd: u32,
     pub num_dig: u32,
     pub funcs: Option<&'static str>,
+    pub gpu_vm_support: bool,
 }
 
 /// `struct amdgpu_pll`, the fields `amdgpu_atomfirmware_get_clock_info` sets.

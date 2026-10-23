@@ -1,7 +1,12 @@
-//! display/dmub/src/dmub_srv.c (Linux 6.18.55): the DMUB service, the part
-//! dm_dmub_sw_init runs: create, the region layout and its rebase onto the
-//! framebuffer.
+//! display/dmub/src/dmub_srv.c + dmub_srv.h (Linux 6.18.55): the DMUB
+//! service — create, the region layout and its rebase onto the framebuffer
+//! (dm_dmub_sw_init), and the hardware bring-up of the DMCUB
+//! (dm_dmub_hw_init): reset, windows, mailboxes, release, auto-load wait.
+//! The hardware functions are those of `dmub_dcn20.rs`.
 
+use crate::amdgpu_device::amdgpu_device;
+use crate::amdgpu_object::amdgpu_kptr;
+use crate::dmub_dcn20::*;
 use crate::regs::*;
 
 const NUM_WINDOWS: usize = DMUB_NUM_WINDOWS as usize;
@@ -16,13 +21,101 @@ pub struct dmub_fw_meta_info {
     pub shared_state_size: u32,
 }
 
-/// `struct dmub_srv`, the part sw_init fills.
+/// `struct dmub_rb` (dmub_cmd.h). `base_address` is a CPU offset into the
+/// buffer the windows were rebased on.
+#[derive(Default, Clone, Copy)]
+pub struct dmub_rb {
+    pub base_address: u64,
+    pub rptr: u32,
+    pub wrpt: u32,
+    pub capacity: u32,
+}
+
+/// `struct dmub_rb_init_params` (dmub_cmd.h).
+#[derive(Default, Clone, Copy)]
+pub struct dmub_rb_init_params {
+    pub base_address: u64,
+    pub capacity: u32,
+    pub read_ptr: u32,
+    pub write_ptr: u32,
+}
+
+/// `dmub_rb_init` (dmub_cmd.h).
+pub fn dmub_rb_init(rb: &mut dmub_rb, init_params: &dmub_rb_init_params) {
+    rb.base_address = init_params.base_address;
+    rb.capacity = init_params.capacity;
+    rb.rptr = init_params.read_ptr;
+    rb.wrpt = init_params.write_ptr;
+}
+
+/// `struct dmub_srv_inbox` (dmub_srv.h): the frame-buffer mailbox ring and
+/// the register mailbox's pending flag of its union.
+#[derive(Default, Clone, Copy)]
+pub struct dmub_srv_inbox {
+    pub num_submitted: u64,
+    pub num_reported: u64,
+    pub rb: dmub_rb,
+    pub is_pending: bool,
+}
+
+/// `struct dmub_srv_hw_funcs` (dmub_srv.h), the members `dmub_srv_hw_setup`
+/// binds for the DCN 2.0 family. A `None` is a function the family does
+/// not have.
+#[derive(Default, Clone, Copy)]
+pub struct dmub_srv_hw_funcs {
+    pub reset: Option<fn(&amdgpu_device, &mut dmub_srv)>,
+    pub reset_release: Option<fn(&amdgpu_device, &mut dmub_srv)>,
+    pub backdoor_load: Option<fn(&amdgpu_device, &mut dmub_srv, &dmub_window, &dmub_window)>,
+    pub setup_windows: Option<fn(&amdgpu_device, &mut dmub_srv, &dmub_window, &dmub_window, &dmub_window,
+                                 &dmub_window, &dmub_window, &dmub_window)>,
+    pub setup_mailbox: Option<fn(&amdgpu_device, &mut dmub_srv, &dmub_region)>,
+    pub get_inbox1_wptr: Option<fn(&amdgpu_device, &dmub_srv) -> u32>,
+    pub get_inbox1_rptr: Option<fn(&amdgpu_device, &dmub_srv) -> u32>,
+    pub set_inbox1_wptr: Option<fn(&amdgpu_device, &dmub_srv, u32)>,
+    pub is_supported: Option<fn(&amdgpu_device, &dmub_srv) -> bool>,
+    pub is_hw_init: Option<fn(&amdgpu_device, &dmub_srv) -> bool>,
+    pub set_gpint: Option<fn(&amdgpu_device, &dmub_srv, dmub_gpint_data_register)>,
+    pub is_gpint_acked: Option<fn(&amdgpu_device, &dmub_srv, dmub_gpint_data_register) -> bool>,
+    pub get_gpint_response: Option<fn(&amdgpu_device, &dmub_srv) -> u32>,
+    pub get_fw_status: Option<fn(&amdgpu_device, &dmub_srv) -> dmub_fw_boot_status>,
+    pub enable_dmub_boot_options: Option<fn(&amdgpu_device, &dmub_srv, &dmub_srv_hw_params)>,
+    pub skip_dmub_panel_power_sequence: Option<fn(&amdgpu_device, &dmub_srv, bool)>,
+    pub get_current_time: Option<fn(&amdgpu_device, &dmub_srv) -> u32>,
+    pub setup_out_mailbox: Option<fn(&amdgpu_device, &mut dmub_srv, &dmub_region)>,
+    pub get_outbox1_wptr: Option<fn(&amdgpu_device, &dmub_srv) -> u32>,
+    pub set_outbox1_rptr: Option<fn(&amdgpu_device, &dmub_srv, u32)>,
+    pub setup_outbox0: Option<fn(&amdgpu_device, &mut dmub_srv, &dmub_region)>,
+    pub get_outbox0_wptr: Option<fn(&amdgpu_device, &dmub_srv) -> u32>,
+    pub set_outbox0_rptr: Option<fn(&amdgpu_device, &dmub_srv, u32)>,
+}
+
+/// `struct dmub_srv` (dmub_srv.h). `fw_state` and `shared_state` are CPU
+/// offsets into the buffer the windows were rebased on.
 #[derive(Default)]
 pub struct dmub_srv {
     pub asic: u32,
     pub fw_version: u32,
+    pub is_virtual: bool,
+    pub scratch_mem_fb: dmub_fb,
+    pub ib_mem_gart: dmub_fb,
+    pub shared_state: Option<u64>,
+    pub fw_state: Option<u64>,
+    pub regs: Option<&'static dmub_srv_common_regs>,
+    pub hw_funcs: dmub_srv_hw_funcs,
+    pub inbox1: dmub_srv_inbox,
+    pub inbox1_last_wptr: u32,
+    pub reg_inbox0: dmub_srv_inbox,
+    pub outbox1_rb: dmub_rb,
+    pub outbox0_rb: dmub_rb,
     pub sw_init: bool,
+    pub hw_init: bool,
+    pub dpia_supported: bool,
+    pub fb_base: u64,
+    pub fb_offset: u64,
+    pub psp_version: u32,
     pub meta_info: dmub_fw_meta_info,
+    pub inbox_type: u32,
+    pub power_state: u32,
 }
 
 /// `struct dmub_srv_region_params`; the blobs are slices of the firmware
@@ -41,6 +134,13 @@ pub struct dmub_srv_region_params<'a> {
 pub struct dmub_region {
     pub base: u32,
     pub top: u32,
+}
+
+/// `struct dmub_window`: `offset` is the `union dmub_addr` quad part.
+#[derive(Default, Clone, Copy)]
+pub struct dmub_window {
+    pub offset: u64,
+    pub region: dmub_region,
 }
 
 /// `struct dmub_srv_region_info`.
@@ -68,21 +168,108 @@ pub struct dmub_srv_fb_info {
     pub fb: [dmub_fb; NUM_WINDOWS],
 }
 
+/// `struct dmub_srv_hw_params` (dmub_srv.h). `fb` holds copies of the
+/// `fb_info` entries Linux points at; `cpu` is the buffer their CPU
+/// offsets index.
+#[derive(Default)]
+pub struct dmub_srv_hw_params {
+    pub fb: [Option<dmub_fb>; NUM_WINDOWS],
+    pub cpu: Option<amdgpu_kptr>,
+    pub fb_base: u64,
+    pub fb_offset: u64,
+    pub psp_version: u32,
+    pub load_inst_const: bool,
+    pub skip_panel_power_sequence: bool,
+    pub disable_z10: bool,
+    pub power_optimization: bool,
+    pub dpia_supported: bool,
+    pub disable_dpia: bool,
+    pub usb4_cm_version: bool,
+    pub fw_in_system_memory: bool,
+    pub dpia_hpd_int_enable_supported: bool,
+    pub disable_clock_gate: bool,
+    pub disallow_dispclk_dppclk_ds: bool,
+    pub ips_sequential_ono: bool,
+    pub mem_access_type: u32,
+    pub disable_ips: u32,
+    pub disallow_phy_access: bool,
+    pub disable_sldo_opt: bool,
+    pub enable_non_transparent_setconfig: bool,
+    pub lower_hbr3_phy_ssc: bool,
+    pub override_hbr3_pll_vco: bool,
+}
+
 fn dmub_align(val: u32, factor: u32) -> u32 {
     (val + factor - 1) / factor * factor
 }
 
-/// `dmub_srv_hw_setup`: DCN 2.1 has inbox1 read and write pointers, so the
-/// sanity check of `dmub_srv_create` passes.
-fn dmub_srv_hw_setup(asic: u32) -> bool {
-    asic == DMUB_ASIC_DCN21
+/// `dmub_flush_buffer_mem`: read the window back in 64-byte chunks so CPU
+/// writes reach memory before the DMCUB fetches it.
+fn dmub_flush_buffer_mem(adev: &amdgpu_device, cpu: Option<amdgpu_kptr>, fb: &dmub_fb) {
+    let Some(base) = cpu else { return };
+    let mut buf = [0u8; 64];
+    let end = fb.size / 64 * 64;
+    let mut pos = 0;
+    while pos < end {
+        crate::amdgpu_gart::kptr_read(adev, base, fb.cpu_off + pos as u64, &mut buf);
+        pos += 64;
+    }
+    // Read anything leftover into the buffer.
+    if end < fb.size {
+        crate::amdgpu_gart::kptr_read(adev, base, fb.cpu_off + pos as u64, &mut buf[..(fb.size - end) as usize]);
+    }
+}
+
+/// `dmub_srv_hw_setup`: the DCN 2.0 family's functions on DCN 2.1's
+/// registers. `get_diagnostic_data` is not bound: nothing on the port's
+/// path reads the diagnostic block yet.
+fn dmub_srv_hw_setup(dmub: &mut dmub_srv, asic: u32) -> bool {
+    if asic != DMUB_ASIC_DCN21 {
+        return false;
+    }
+    let funcs = &mut dmub.hw_funcs;
+    funcs.reset = Some(dmub_dcn20_reset);
+    funcs.reset_release = Some(dmub_dcn20_reset_release);
+    funcs.backdoor_load = Some(dmub_dcn20_backdoor_load);
+    funcs.setup_windows = Some(dmub_dcn20_setup_windows);
+    funcs.setup_mailbox = Some(dmub_dcn20_setup_mailbox);
+    funcs.get_inbox1_wptr = Some(dmub_dcn20_get_inbox1_wptr);
+    funcs.get_inbox1_rptr = Some(dmub_dcn20_get_inbox1_rptr);
+    funcs.set_inbox1_wptr = Some(dmub_dcn20_set_inbox1_wptr);
+    funcs.is_supported = Some(dmub_dcn20_is_supported);
+    funcs.is_hw_init = Some(dmub_dcn20_is_hw_init);
+    funcs.set_gpint = Some(dmub_dcn20_set_gpint);
+    funcs.is_gpint_acked = Some(dmub_dcn20_is_gpint_acked);
+    funcs.get_gpint_response = Some(dmub_dcn20_get_gpint_response);
+    funcs.get_fw_status = Some(dmub_dcn20_get_fw_boot_status);
+    funcs.enable_dmub_boot_options = Some(dmub_dcn20_enable_dmub_boot_options);
+    funcs.skip_dmub_panel_power_sequence = Some(dmub_dcn20_skip_dmub_panel_power_sequence);
+    funcs.get_current_time = Some(dmub_dcn20_get_current_time);
+
+    // Out mailbox register access functions for RN and above
+    funcs.setup_out_mailbox = Some(dmub_dcn20_setup_out_mailbox);
+    funcs.get_outbox1_wptr = Some(dmub_dcn20_get_outbox1_wptr);
+    funcs.set_outbox1_rptr = Some(dmub_dcn20_set_outbox1_rptr);
+
+    // outbox0 call stacks
+    funcs.setup_outbox0 = Some(dmub_dcn20_setup_outbox0);
+    funcs.get_outbox0_wptr = Some(dmub_dcn20_get_outbox0_wptr);
+    funcs.set_outbox0_rptr = Some(dmub_dcn20_set_outbox0_rptr);
+
+    dmub.regs = Some(&dmub_srv_dcn21_regs);
+    true
 }
 
 /// `dmub_srv_create`.
 pub fn dmub_srv_create(dmub: &mut dmub_srv, asic: u32, fw_version: u32) -> u32 {
     *dmub = dmub_srv { asic, fw_version, ..dmub_srv::default() };
     // Setup asic dependent hardware funcs.
-    if !dmub_srv_hw_setup(asic) {
+    if !dmub_srv_hw_setup(dmub, asic) {
+        *dmub = dmub_srv::default();
+        return DMUB_STATUS_INVALID;
+    }
+    // Sanity checks for required hw func pointers.
+    if dmub.hw_funcs.get_inbox1_rptr.is_none() || dmub.hw_funcs.set_inbox1_wptr.is_none() {
         *dmub = dmub_srv::default();
         return DMUB_STATUS_INVALID;
     }
@@ -219,4 +406,235 @@ pub fn dmub_srv_calc_mem_info(
     }
     out.num_fb = DMUB_NUM_WINDOWS;
     DMUB_STATUS_OK
+}
+
+/// `dmub_srv_has_hw_support`.
+pub fn dmub_srv_has_hw_support(adev: &amdgpu_device, dmub: &dmub_srv, is_supported: &mut bool) -> u32 {
+    *is_supported = false;
+    if !dmub.sw_init {
+        return DMUB_STATUS_INVALID;
+    }
+    if let Some(f) = dmub.hw_funcs.is_supported {
+        *is_supported = f(adev, dmub);
+    }
+    DMUB_STATUS_OK
+}
+
+/// `dmub_srv_is_hw_init`.
+pub fn dmub_srv_is_hw_init(adev: &amdgpu_device, dmub: &dmub_srv, is_hw_init: &mut bool) -> u32 {
+    *is_hw_init = false;
+    if !dmub.sw_init {
+        return DMUB_STATUS_INVALID;
+    }
+    if !dmub.hw_init {
+        return DMUB_STATUS_OK;
+    }
+    if let Some(f) = dmub.hw_funcs.is_hw_init {
+        *is_hw_init = f(adev, dmub);
+    }
+    DMUB_STATUS_OK
+}
+
+/// `dmub_srv_hw_init`. The DCN 2.0 family has no system-memory firmware
+/// mode and no inbox0/outbox0 interrupt enables.
+pub fn dmub_srv_hw_init(adev: &amdgpu_device, dmub: &mut dmub_srv, params: &dmub_srv_hw_params) -> u32 {
+    if !dmub.sw_init {
+        return DMUB_STATUS_INVALID;
+    }
+
+    let w = |id: u32| params.fb[id as usize];
+    let (Some(inst_fb), Some(stack_fb), Some(data_fb), Some(bios_fb), Some(mail_fb), Some(tracebuff_fb),
+         Some(fw_state_fb), Some(scratch_mem_fb), Some(ib_mem_gart)) =
+        (w(DMUB_WINDOW_0_INST_CONST), w(DMUB_WINDOW_1_STACK), w(DMUB_WINDOW_2_BSS_DATA), w(DMUB_WINDOW_3_VBIOS),
+         w(DMUB_WINDOW_4_MAILBOX), w(DMUB_WINDOW_5_TRACEBUFF), w(DMUB_WINDOW_6_FW_STATE),
+         w(DMUB_WINDOW_7_SCRATCH_MEM), w(DMUB_WINDOW_IB_MEM))
+    else {
+        return DMUB_STATUS_INVALID;
+    };
+    // Linux reads the shared-state window's address unchecked.
+    let shared_state_fb = w(DMUB_WINDOW_SHARED_STATE).unwrap_or_default();
+
+    dmub.fb_base = params.fb_base;
+    dmub.fb_offset = params.fb_offset;
+    dmub.psp_version = params.psp_version;
+
+    if let Some(f) = dmub.hw_funcs.reset {
+        f(adev, dmub);
+    }
+
+    // reset the cache of the last wptr as well now that hw is reset
+    dmub.inbox1_last_wptr = 0;
+
+    let cw0 = dmub_window {
+        offset: inst_fb.gpu_addr,
+        region: dmub_region { base: DMUB_CW0_BASE, top: DMUB_CW0_BASE + inst_fb.size - 1 },
+    };
+    let cw1 = dmub_window {
+        offset: stack_fb.gpu_addr,
+        region: dmub_region { base: DMUB_CW1_BASE, top: DMUB_CW1_BASE + stack_fb.size - 1 },
+    };
+
+    if params.load_inst_const {
+        if let Some(f) = dmub.hw_funcs.backdoor_load {
+            // Read back all the instruction memory so we don't hang the
+            // DMCUB when backdoor loading if the write from x86 hasn't been
+            // flushed yet.
+            if params.mem_access_type == DMUB_MEMORY_ACCESS_CPU {
+                dmub_flush_buffer_mem(adev, params.cpu, &inst_fb);
+            }
+            f(adev, dmub, &cw0, &cw1);
+        }
+    }
+
+    let cw2 = dmub_window {
+        offset: data_fb.gpu_addr,
+        region: dmub_region { base: DMUB_CW0_BASE + inst_fb.size, top: DMUB_CW0_BASE + inst_fb.size + data_fb.size },
+    };
+    let cw3 = dmub_window {
+        offset: bios_fb.gpu_addr,
+        region: dmub_region { base: DMUB_CW3_BASE, top: DMUB_CW3_BASE + bios_fb.size },
+    };
+    let cw4 = dmub_window {
+        offset: mail_fb.gpu_addr,
+        region: dmub_region { base: DMUB_CW4_BASE, top: DMUB_CW4_BASE + mail_fb.size },
+    };
+
+    // The mailbox window holds the inbox and then the outbox, DMUB_RB_SIZE
+    // each; setup_out_mailbox's uncached outbox address assumes this split.
+    let inbox1 = dmub_region { base: cw4.region.base, top: cw4.region.base + DMUB_RB_SIZE };
+    let outbox1 = dmub_region { base: inbox1.top, top: inbox1.top + DMUB_RB_SIZE };
+
+    let cw5 = dmub_window {
+        offset: tracebuff_fb.gpu_addr,
+        region: dmub_region { base: DMUB_CW5_BASE, top: DMUB_CW5_BASE + tracebuff_fb.size },
+    };
+
+    let outbox0_base = DMUB_REGION5_BASE + TRACE_BUFFER_ENTRY_OFFSET;
+    let outbox0 = dmub_region {
+        base: outbox0_base,
+        top: outbox0_base.wrapping_add(tracebuff_fb.size).wrapping_sub(TRACE_BUFFER_ENTRY_OFFSET),
+    };
+
+    let cw6 = dmub_window {
+        offset: fw_state_fb.gpu_addr,
+        region: dmub_region { base: DMUB_CW6_BASE, top: DMUB_CW6_BASE + fw_state_fb.size },
+    };
+
+    dmub.fw_state = Some(fw_state_fb.cpu_off + DMUB_DEBUG_FW_STATE_OFFSET as u64);
+
+    let region6 = dmub_window {
+        offset: shared_state_fb.gpu_addr,
+        region: dmub_region { base: DMUB_CW6_BASE, top: DMUB_CW6_BASE + shared_state_fb.size },
+    };
+
+    dmub.shared_state = Some(shared_state_fb.cpu_off);
+
+    dmub.scratch_mem_fb = scratch_mem_fb;
+
+    dmub.ib_mem_gart = ib_mem_gart;
+
+    let hw = dmub.hw_funcs;
+    if let Some(f) = hw.setup_windows {
+        f(adev, dmub, &cw2, &cw3, &cw4, &cw5, &cw6, &region6);
+    }
+    if let Some(f) = hw.setup_outbox0 {
+        f(adev, dmub, &outbox0);
+    }
+    if let Some(f) = hw.setup_mailbox {
+        f(adev, dmub, &inbox1);
+    }
+    if let Some(f) = hw.setup_out_mailbox {
+        f(adev, dmub, &outbox1);
+    }
+
+    let mut rb_params = dmub_rb_init_params { base_address: mail_fb.cpu_off, capacity: DMUB_RB_SIZE,
+        ..dmub_rb_init_params::default() };
+    dmub_rb_init(&mut dmub.inbox1.rb, &rb_params);
+
+    // Initialize outbox1 ring buffer
+    rb_params.base_address = mail_fb.cpu_off + DMUB_RB_SIZE as u64;
+    rb_params.capacity = DMUB_RB_SIZE;
+    dmub_rb_init(&mut dmub.outbox1_rb, &rb_params);
+
+    let outbox0_rb_params = dmub_rb_init_params {
+        base_address: tracebuff_fb.cpu_off + TRACE_BUFFER_ENTRY_OFFSET as u64,
+        capacity: tracebuff_fb.size.wrapping_sub(dmub_align(TRACE_BUFFER_ENTRY_OFFSET, 64)),
+        ..dmub_rb_init_params::default()
+    };
+    dmub_rb_init(&mut dmub.outbox0_rb, &outbox0_rb_params);
+
+    // Report to DMUB what features are supported by current driver
+    if let Some(f) = hw.enable_dmub_boot_options {
+        f(adev, dmub, params);
+    }
+
+    if !dmub.is_virtual {
+        if let Some(f) = hw.skip_dmub_panel_power_sequence {
+            f(adev, dmub, params.skip_panel_power_sequence);
+        }
+    }
+
+    if !dmub.is_virtual {
+        if let Some(f) = hw.reset_release {
+            f(adev, dmub);
+        }
+    }
+
+    dmub.hw_init = true;
+    dmub.power_state = DMUB_POWER_STATE_D0;
+
+    DMUB_STATUS_OK
+}
+
+/// `dmub_srv_hw_reset`.
+pub fn dmub_srv_hw_reset(adev: &amdgpu_device, dmub: &mut dmub_srv) -> u32 {
+    if !dmub.sw_init {
+        return DMUB_STATUS_INVALID;
+    }
+
+    if let Some(f) = dmub.hw_funcs.reset {
+        f(adev, dmub);
+    }
+
+    // mailboxes have been reset in hw, so reset the sw state as well
+    dmub.inbox1_last_wptr = 0;
+    dmub.inbox1.rb.wrpt = 0;
+    dmub.inbox1.rb.rptr = 0;
+    dmub.inbox1.num_reported = 0;
+    dmub.inbox1.num_submitted = 0;
+    dmub.reg_inbox0.num_reported = 0;
+    dmub.reg_inbox0.num_submitted = 0;
+    dmub.reg_inbox0.is_pending = false;
+    dmub.outbox0_rb.wrpt = 0;
+    dmub.outbox0_rb.rptr = 0;
+    dmub.outbox1_rb.wrpt = 0;
+    dmub.outbox1_rb.rptr = 0;
+
+    dmub.hw_init = false;
+
+    DMUB_STATUS_OK
+}
+
+/// `dmub_srv_wait_for_auto_load`. The DCN 2.0 family has no
+/// `is_hw_powered_up`, so the hardware counts as on.
+pub fn dmub_srv_wait_for_auto_load(adev: &amdgpu_device, dmub: &dmub_srv, timeout_us: u32) -> u32 {
+    let hw_on = true;
+
+    if !dmub.hw_init {
+        return DMUB_STATUS_INVALID;
+    }
+
+    let mut i = 0;
+    while i <= timeout_us {
+        let status = dmub.hw_funcs.get_fw_status.map_or(dmub_fw_boot_status::default(), |f| f(adev, dmub));
+
+        if status.dal_fw() && status.mailbox_rdy() && hw_on {
+            return DMUB_STATUS_OK;
+        }
+
+        crate::linux::udelay(100);
+        i += 100;
+    }
+
+    DMUB_STATUS_TIMEOUT
 }

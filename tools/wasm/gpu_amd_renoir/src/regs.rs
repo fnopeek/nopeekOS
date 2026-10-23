@@ -3390,6 +3390,392 @@ pub const FWMETA_FW_VERSION: u32 = 0xc;
 /// The value of `offsetof(struct dmub_fw_meta_info, shared_state_size)` in ../display/dmub/src/dmub_srv.c
 pub const FWMETA_SHARED_STATE_SIZE: u32 = 0x14;
 
+// dm_dmub_hw_init / dmub_srv_hw_init (amdgpu_dm.c, dmub_srv.c, dmub_cmd.h)
+/// display/dmub/src/dmub_srv.c:78
+pub const DMUB_CW0_BASE: u32 = 0x60000000;
+/// display/dmub/src/dmub_srv.c:79
+pub const DMUB_CW1_BASE: u32 = 0x61000000;
+/// display/dmub/src/dmub_srv.c:80
+pub const DMUB_CW3_BASE: u32 = 0x63000000;
+/// display/dmub/src/dmub_srv.c:81
+pub const DMUB_CW4_BASE: u32 = 0x64000000;
+/// display/dmub/src/dmub_srv.c:82
+pub const DMUB_CW5_BASE: u32 = 0x65000000;
+/// display/dmub/src/dmub_srv.c:83
+pub const DMUB_CW6_BASE: u32 = 0x66000000;
+/// display/dmub/src/dmub_srv.c:85
+pub const DMUB_REGION5_BASE: u32 = 0xa0000000;
+/// ?
+pub const TRACE_BUFFER_ENTRY_OFFSET: u32 = 0x10;
+/// ?
+pub const DMUB_RB_SIZE: u32 = 0x2000;
+/// ?
+pub const DMUB_DEBUG_FW_STATE_OFFSET: u32 = 0x300;
+/// ?
+pub const DMUB_GPINT__STOP_FW: u32 = 0x2;
+/// ?
+pub const DMUB_GPINT__STOP_FW_RESPONSE: u32 = 0xdeaddead;
+/// ?
+pub const DMUB_STATUS_TIMEOUT: u32 = 0x3;
+/// ?
+pub const DMUB_POWER_STATE_D0: u32 = 0x1;
+/// ?
+pub const DMUB_MEMORY_ACCESS_CPU: u32 = 0x0;
+
+// amdgpu_dm_init (amdgpu_dm.c, amd_shared.h, dmub_cmd.h)
+/// ?
+pub const DAL_IRQ_SOURCES_NUMBER: u32 = 0x75;
+/// ?
+pub const DMUB_IPS_ENABLE: u32 = 0x0;
+/// ?
+pub const DMUB_IPS_DISABLE_ALL: u32 = 0x1;
+/// ?
+pub const DMUB_IPS_DISABLE_DYNAMIC: u32 = 0x5;
+/// ?
+pub const DMUB_IPS_RCG_IN_ACTIVE_IPS2_IN_OFF: u32 = 0x6;
+/// include/amd_shared.h:250
+pub const DC_FBC_MASK: u32 = 0x1;
+/// include/amd_shared.h:254
+pub const DC_MULTI_MON_PP_MCLK_SWITCH_MASK: u32 = 0x2;
+/// include/amd_shared.h:258
+pub const DC_DISABLE_FRACTIONAL_PWM_MASK: u32 = 0x4;
+/// include/amd_shared.h:266
+pub const DC_EDP_NO_POWER_SEQUENCING: u32 = 0x10;
+/// include/amd_shared.h:270
+pub const DC_DISABLE_LTTPR_DP1_4A: u32 = 0x20;
+/// include/amd_shared.h:274
+pub const DC_DISABLE_LTTPR_DP2_0: u32 = 0x40;
+/// include/amd_shared.h:296
+pub const DC_DISABLE_PIPE_SPLIT: u32 = 0x1;
+/// include/amd_shared.h:301
+pub const DC_DISABLE_STUTTER: u32 = 0x2;
+/// include/amd_shared.h:306
+pub const DC_DISABLE_DSC: u32 = 0x4;
+/// include/amd_shared.h:311
+pub const DC_DISABLE_CLOCK_GATING: u32 = 0x8;
+/// include/amd_shared.h:322
+pub const DC_FORCE_SUBVP_MCLK_SWITCH: u32 = 0x20;
+/// include/amd_shared.h:390
+pub const DC_DISABLE_SUBVP_FAMS: u32 = 0x20000;
+/// include/amd_shared.h:338
+pub const DC_ENABLE_DML2: u32 = 0x100;
+/// include/amd_shared.h:401
+pub const DC_HDCP_LC_FORCE_FW_ENABLE: u32 = 0x80000;
+/// include/amd_shared.h:407
+pub const DC_HDCP_LC_ENABLE_SW_FALLBACK: u32 = 0x100000;
+/// include/amd_shared.h:412
+pub const DC_SKIP_DETECTION_LT: u32 = 0x200000;
+/// include/amd_shared.h:357
+pub const DC_DISABLE_IPS: u32 = 0x800;
+/// include/amd_shared.h:363
+pub const DC_DISABLE_IPS_DYNAMIC: u32 = 0x1000;
+/// include/amd_shared.h:369
+pub const DC_DISABLE_IPS2_DYNAMIC: u32 = 0x2000;
+/// include/amd_shared.h:374
+pub const DC_FORCE_IPS_ENABLE: u32 = 0x4000;
+/// include/amd_shared.h:231
+pub const PP_STUTTER_MODE: u32 = 0x20000;
+/// ?
+pub const CHIP_CARRIZO: u32 = 0xd;
+/// ?
+pub const CHIP_STONEY: u32 = 0xe;
+/// ?
+pub const CHIP_RAVEN: u32 = 0x16;
+/// include/amd_shared.h:47
+pub const AMD_APU_IS_RAVEN: u32 = 0x1;
+
+// DMUB on DCN 2.1: dmub_srv_dcn21_regs, the DMUB_COMMON_REGS / DMUB_COMMON_FIELDS
+
+// lists of dmub_dcn20.h as dmub_dcn21.c expands them (BASE = DMU_BASE__INST0_SEGx).
+/// The value of `REG_OFFSET(DMCUB_CNTL)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_CNTL: u32 = 0x6760;
+/// The value of `REG_OFFSET(DMCUB_MEM_CNTL)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_MEM_CNTL: u32 = 0x6739;
+/// The value of `REG_OFFSET(DMCUB_SEC_CNTL)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SEC_CNTL: u32 = 0x6738;
+/// The value of `REG_OFFSET(DMCUB_INBOX0_SIZE)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_INBOX0_SIZE: u32 = 0x673b;
+/// The value of `REG_OFFSET(DMCUB_INBOX0_RPTR)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_INBOX0_RPTR: u32 = 0x673d;
+/// The value of `REG_OFFSET(DMCUB_INBOX0_WPTR)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_INBOX0_WPTR: u32 = 0x673c;
+/// The value of `REG_OFFSET(DMCUB_INBOX1_BASE_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_INBOX1_BASE_ADDRESS: u32 = 0x673e;
+/// The value of `REG_OFFSET(DMCUB_INBOX1_SIZE)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_INBOX1_SIZE: u32 = 0x673f;
+/// The value of `REG_OFFSET(DMCUB_INBOX1_RPTR)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_INBOX1_RPTR: u32 = 0x6741;
+/// The value of `REG_OFFSET(DMCUB_INBOX1_WPTR)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_INBOX1_WPTR: u32 = 0x6740;
+/// The value of `REG_OFFSET(DMCUB_OUTBOX0_BASE_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_OUTBOX0_BASE_ADDRESS: u32 = 0x6742;
+/// The value of `REG_OFFSET(DMCUB_OUTBOX0_SIZE)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_OUTBOX0_SIZE: u32 = 0x6743;
+/// The value of `REG_OFFSET(DMCUB_OUTBOX0_RPTR)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_OUTBOX0_RPTR: u32 = 0x6745;
+/// The value of `REG_OFFSET(DMCUB_OUTBOX0_WPTR)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_OUTBOX0_WPTR: u32 = 0x6744;
+/// The value of `REG_OFFSET(DMCUB_OUTBOX1_BASE_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_OUTBOX1_BASE_ADDRESS: u32 = 0x6746;
+/// The value of `REG_OFFSET(DMCUB_OUTBOX1_SIZE)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_OUTBOX1_SIZE: u32 = 0x6747;
+/// The value of `REG_OFFSET(DMCUB_OUTBOX1_RPTR)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_OUTBOX1_RPTR: u32 = 0x6749;
+/// The value of `REG_OFFSET(DMCUB_OUTBOX1_WPTR)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_OUTBOX1_WPTR: u32 = 0x6748;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW0_OFFSET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW0_OFFSET: u32 = 0x671f;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW1_OFFSET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW1_OFFSET: u32 = 0x6721;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW2_OFFSET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW2_OFFSET: u32 = 0x6723;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW3_OFFSET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW3_OFFSET: u32 = 0x6725;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW4_OFFSET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW4_OFFSET: u32 = 0x6727;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW5_OFFSET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW5_OFFSET: u32 = 0x6729;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW6_OFFSET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW6_OFFSET: u32 = 0x672b;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW7_OFFSET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW7_OFFSET: u32 = 0x672d;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW0_OFFSET_HIGH)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW0_OFFSET_HIGH: u32 = 0x6720;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW1_OFFSET_HIGH)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW1_OFFSET_HIGH: u32 = 0x6722;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW2_OFFSET_HIGH)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW2_OFFSET_HIGH: u32 = 0x6724;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW3_OFFSET_HIGH)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW3_OFFSET_HIGH: u32 = 0x6726;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW4_OFFSET_HIGH)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW4_OFFSET_HIGH: u32 = 0x6728;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW5_OFFSET_HIGH)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW5_OFFSET_HIGH: u32 = 0x672a;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW6_OFFSET_HIGH)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW6_OFFSET_HIGH: u32 = 0x672c;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW7_OFFSET_HIGH)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW7_OFFSET_HIGH: u32 = 0x672e;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW0_BASE_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW0_BASE_ADDRESS: u32 = 0x670f;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW1_BASE_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW1_BASE_ADDRESS: u32 = 0x6710;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW2_BASE_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW2_BASE_ADDRESS: u32 = 0x6711;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW3_BASE_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW3_BASE_ADDRESS: u32 = 0x6712;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW4_BASE_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW4_BASE_ADDRESS: u32 = 0x6713;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW5_BASE_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW5_BASE_ADDRESS: u32 = 0x6714;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW6_BASE_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW6_BASE_ADDRESS: u32 = 0x6715;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW7_BASE_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW7_BASE_ADDRESS: u32 = 0x6716;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW0_TOP_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW0_TOP_ADDRESS: u32 = 0x6717;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW1_TOP_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW1_TOP_ADDRESS: u32 = 0x6718;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW2_TOP_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW2_TOP_ADDRESS: u32 = 0x6719;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW3_TOP_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW3_TOP_ADDRESS: u32 = 0x671a;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW4_TOP_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW4_TOP_ADDRESS: u32 = 0x671b;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW5_TOP_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW5_TOP_ADDRESS: u32 = 0x671c;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW6_TOP_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW6_TOP_ADDRESS: u32 = 0x671d;
+/// The value of `REG_OFFSET(DMCUB_REGION3_CW7_TOP_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION3_CW7_TOP_ADDRESS: u32 = 0x671e;
+/// The value of `REG_OFFSET(DMCUB_REGION4_OFFSET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION4_OFFSET: u32 = 0x6700;
+/// The value of `REG_OFFSET(DMCUB_REGION4_OFFSET_HIGH)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION4_OFFSET_HIGH: u32 = 0x6701;
+/// The value of `REG_OFFSET(DMCUB_REGION4_TOP_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION4_TOP_ADDRESS: u32 = 0x670b;
+/// The value of `REG_OFFSET(DMCUB_REGION5_OFFSET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION5_OFFSET: u32 = 0x6702;
+/// The value of `REG_OFFSET(DMCUB_REGION5_OFFSET_HIGH)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION5_OFFSET_HIGH: u32 = 0x6703;
+/// The value of `REG_OFFSET(DMCUB_REGION5_TOP_ADDRESS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_REGION5_TOP_ADDRESS: u32 = 0x670c;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH0)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH0: u32 = 0x674d;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH1)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH1: u32 = 0x674e;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH2)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH2: u32 = 0x674f;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH3)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH3: u32 = 0x6750;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH4)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH4: u32 = 0x6751;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH5)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH5: u32 = 0x6752;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH6)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH6: u32 = 0x6753;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH7)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH7: u32 = 0x6754;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH8)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH8: u32 = 0x6755;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH9)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH9: u32 = 0x6756;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH10)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH10: u32 = 0x6757;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH11)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH11: u32 = 0x6758;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH12)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH12: u32 = 0x6759;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH13)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH13: u32 = 0x675a;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH14)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH14: u32 = 0x675b;
+/// The value of `REG_OFFSET(DMCUB_SCRATCH15)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_SCRATCH15: u32 = 0x675c;
+/// The value of `REG_OFFSET(DMCUB_GPINT_DATAIN1)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_GPINT_DATAIN1: u32 = 0x6762;
+/// The value of `REG_OFFSET(CC_DC_PIPE_DIS)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_CC_DC_PIPE_DIS: u32 = 0x358a;
+/// The value of `REG_OFFSET(MMHUBBUB_SOFT_RESET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_MMHUBBUB_SOFT_RESET: u32 = 0x3803;
+/// The value of `REG_OFFSET(DCN_VM_FB_LOCATION_BASE)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DCN_VM_FB_LOCATION_BASE: u32 = 0x3953;
+/// The value of `REG_OFFSET(DCN_VM_FB_OFFSET)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DCN_VM_FB_OFFSET: u32 = 0x3955;
+/// The value of `REG_OFFSET(DMCUB_INTERRUPT_ACK)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_INTERRUPT_ACK: u32 = 0x6730;
+/// The value of `REG_OFFSET(DMCUB_TIMER_CURRENT)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_TIMER_CURRENT: u32 = 0x6767;
+/// The value of `REG_OFFSET(DMCUB_INST_FETCH_FAULT_ADDR)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_INST_FETCH_FAULT_ADDR: u32 = 0x6736;
+/// The value of `REG_OFFSET(DMCUB_UNDEFINED_ADDRESS_FAULT_ADDR)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_UNDEFINED_ADDRESS_FAULT_ADDR: u32 = 0x6764;
+/// The value of `REG_OFFSET(DMCUB_DATA_WRITE_FAULT_ADDR)` in ../display/dmub/src/dmub_dcn21.c
+pub const DMUB_DMCUB_DATA_WRITE_FAULT_ADDR: u32 = 0x6737;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54591
+pub const DMCUB_CNTL__DMCUB_ENABLE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54598
+pub const DMCUB_CNTL__DMCUB_ENABLE_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54592
+pub const DMCUB_CNTL__DMCUB_SOFT_RESET__SHIFT: u32 = 0x11;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54599
+pub const DMCUB_CNTL__DMCUB_SOFT_RESET_MASK: u32 = 0x20000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54594
+pub const DMCUB_CNTL__DMCUB_TRACEPORT_EN__SHIFT: u32 = 0x13;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54601
+pub const DMCUB_CNTL__DMCUB_TRACEPORT_EN_MASK: u32 = 0x80000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54478
+pub const DMCUB_MEM_CNTL__DMCUB_MEM_READ_SPACE__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54482
+pub const DMCUB_MEM_CNTL__DMCUB_MEM_READ_SPACE_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54477
+pub const DMCUB_MEM_CNTL__DMCUB_MEM_WRITE_SPACE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54481
+pub const DMCUB_MEM_CNTL__DMCUB_MEM_WRITE_SPACE_MASK: u32 = 0x700;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54460
+pub const DMCUB_SEC_CNTL__DMCUB_SEC_RESET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54468
+pub const DMCUB_SEC_CNTL__DMCUB_SEC_RESET_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54459
+pub const DMCUB_SEC_CNTL__DMCUB_MEM_UNIT_ID__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54467
+pub const DMCUB_SEC_CNTL__DMCUB_MEM_UNIT_ID_MASK: u32 = 0x3f00;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54463
+pub const DMCUB_SEC_CNTL__DMCUB_SEC_RESET_STATUS__SHIFT: u32 = 0x15;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54471
+pub const DMCUB_SEC_CNTL__DMCUB_SEC_RESET_STATUS_MASK: u32 = 0x200000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54233
+pub const DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_TOP_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54235
+pub const DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_TOP_ADDRESS_MASK: u32 = 0x1fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54234
+pub const DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_ENABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54236
+pub const DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_ENABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54238
+pub const DMCUB_REGION3_CW1_TOP_ADDRESS__DMCUB_REGION3_CW1_TOP_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54240
+pub const DMCUB_REGION3_CW1_TOP_ADDRESS__DMCUB_REGION3_CW1_TOP_ADDRESS_MASK: u32 = 0x1fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54239
+pub const DMCUB_REGION3_CW1_TOP_ADDRESS__DMCUB_REGION3_CW1_ENABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54241
+pub const DMCUB_REGION3_CW1_TOP_ADDRESS__DMCUB_REGION3_CW1_ENABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54243
+pub const DMCUB_REGION3_CW2_TOP_ADDRESS__DMCUB_REGION3_CW2_TOP_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54245
+pub const DMCUB_REGION3_CW2_TOP_ADDRESS__DMCUB_REGION3_CW2_TOP_ADDRESS_MASK: u32 = 0x1fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54244
+pub const DMCUB_REGION3_CW2_TOP_ADDRESS__DMCUB_REGION3_CW2_ENABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54246
+pub const DMCUB_REGION3_CW2_TOP_ADDRESS__DMCUB_REGION3_CW2_ENABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54248
+pub const DMCUB_REGION3_CW3_TOP_ADDRESS__DMCUB_REGION3_CW3_TOP_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54250
+pub const DMCUB_REGION3_CW3_TOP_ADDRESS__DMCUB_REGION3_CW3_TOP_ADDRESS_MASK: u32 = 0x1fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54249
+pub const DMCUB_REGION3_CW3_TOP_ADDRESS__DMCUB_REGION3_CW3_ENABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54251
+pub const DMCUB_REGION3_CW3_TOP_ADDRESS__DMCUB_REGION3_CW3_ENABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54253
+pub const DMCUB_REGION3_CW4_TOP_ADDRESS__DMCUB_REGION3_CW4_TOP_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54255
+pub const DMCUB_REGION3_CW4_TOP_ADDRESS__DMCUB_REGION3_CW4_TOP_ADDRESS_MASK: u32 = 0x1fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54254
+pub const DMCUB_REGION3_CW4_TOP_ADDRESS__DMCUB_REGION3_CW4_ENABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54256
+pub const DMCUB_REGION3_CW4_TOP_ADDRESS__DMCUB_REGION3_CW4_ENABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54258
+pub const DMCUB_REGION3_CW5_TOP_ADDRESS__DMCUB_REGION3_CW5_TOP_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54260
+pub const DMCUB_REGION3_CW5_TOP_ADDRESS__DMCUB_REGION3_CW5_TOP_ADDRESS_MASK: u32 = 0x1fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54259
+pub const DMCUB_REGION3_CW5_TOP_ADDRESS__DMCUB_REGION3_CW5_ENABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54261
+pub const DMCUB_REGION3_CW5_TOP_ADDRESS__DMCUB_REGION3_CW5_ENABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54263
+pub const DMCUB_REGION3_CW6_TOP_ADDRESS__DMCUB_REGION3_CW6_TOP_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54265
+pub const DMCUB_REGION3_CW6_TOP_ADDRESS__DMCUB_REGION3_CW6_TOP_ADDRESS_MASK: u32 = 0x1fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54264
+pub const DMCUB_REGION3_CW6_TOP_ADDRESS__DMCUB_REGION3_CW6_ENABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54266
+pub const DMCUB_REGION3_CW6_TOP_ADDRESS__DMCUB_REGION3_CW6_ENABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54268
+pub const DMCUB_REGION3_CW7_TOP_ADDRESS__DMCUB_REGION3_CW7_TOP_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54270
+pub const DMCUB_REGION3_CW7_TOP_ADDRESS__DMCUB_REGION3_CW7_TOP_ADDRESS_MASK: u32 = 0x1fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54269
+pub const DMCUB_REGION3_CW7_TOP_ADDRESS__DMCUB_REGION3_CW7_ENABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54271
+pub const DMCUB_REGION3_CW7_TOP_ADDRESS__DMCUB_REGION3_CW7_ENABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54189
+pub const DMCUB_REGION4_TOP_ADDRESS__DMCUB_REGION4_TOP_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54191
+pub const DMCUB_REGION4_TOP_ADDRESS__DMCUB_REGION4_TOP_ADDRESS_MASK: u32 = 0x1fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54190
+pub const DMCUB_REGION4_TOP_ADDRESS__DMCUB_REGION4_ENABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54192
+pub const DMCUB_REGION4_TOP_ADDRESS__DMCUB_REGION4_ENABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54194
+pub const DMCUB_REGION5_TOP_ADDRESS__DMCUB_REGION5_TOP_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54196
+pub const DMCUB_REGION5_TOP_ADDRESS__DMCUB_REGION5_TOP_ADDRESS_MASK: u32 = 0x1fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54195
+pub const DMCUB_REGION5_TOP_ADDRESS__DMCUB_REGION5_ENABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54197
+pub const DMCUB_REGION5_TOP_ADDRESS__DMCUB_REGION5_ENABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:2333
+pub const CC_DC_PIPE_DIS__DC_DMCUB_ENABLE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:2335
+pub const CC_DC_PIPE_DIS__DC_DMCUB_ENABLE_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:7171
+pub const MMHUBBUB_SOFT_RESET__DMUIF_SOFT_RESET__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:7175
+pub const MMHUBBUB_SOFT_RESET__DMUIF_SOFT_RESET_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54356
+pub const DMCUB_INTERRUPT_ACK__DMCUB_OUTBOX0_READY_INT_ACK__SHIFT: u32 = 0x6;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:54370
+pub const DMCUB_INTERRUPT_ACK__DMCUB_OUTBOX0_READY_INT_ACK_MASK: u32 = 0x40;
+
 // The rings: amdgpu_ring.c and the ring funcs tables they read
 /// amdgpu/amdgpu_ring.h:40
 pub const AMDGPU_MAX_RINGS: u32 = 0x95;

@@ -40,6 +40,15 @@ pub struct dc_context {
     pub dc_edp_id_count: u32,
     pub fbc_gpu_addr: u64,
     pub perf_trace: Option<Box<dc_perf_trace>>,
+    /// `cgs_device`: created by dm_sw_init; nothing in the port reads through it.
+    pub cgs_device: bool,
+    /// The DCE / NBIO / CLK IP base offsets of the discovery table. DCN 2.1
+    /// addresses its registers through compile-time bases and reads none.
+    pub dcn_reg_offsets: Vec<u32>,
+    pub nbio_reg_offsets: Vec<u32>,
+    pub clk_reg_offsets: Vec<u32>,
+    /// `dmub_srv`: DC's handle on the DM's DMUB service (dm_dmub_hw_init).
+    pub dmub_srv: Option<Box<crate::dc_dmub_srv::dc_dmub_srv>>,
 }
 
 /// `struct dc_perf_trace` (dc_types.h): the register-access counters.
@@ -73,6 +82,12 @@ pub struct dc_init_data {
     pub log_mask: u64,
     pub flags: dc_config,
     pub force_smu_not_present: bool,
+    pub cgs_device: bool,
+    pub dcn_reg_offsets: Vec<u32>,
+    pub nbio_reg_offsets: Vec<u32>,
+    pub clk_reg_offsets: Vec<u32>,
+    /// `bb_from_dmub`: the DMUB bounding box, DCN 4.0.1 only.
+    pub bb_from_dmub: bool,
 }
 
 /// `struct dc_config` (dc.h): the members a reached path reads.
@@ -85,6 +100,22 @@ pub struct dc_config {
     pub ignore_dpref_ss: bool,
     pub allow_edp_hotplug_detection: u32,
     pub smart_mux_version: i32,
+    pub gpu_vm_support: bool,
+    pub fbc_support: bool,
+    pub multi_mon_pp_mclk_switch: bool,
+    pub disable_fractional_pwm: bool,
+    pub edp_no_power_sequencing: bool,
+    /// `allow_lttpr_non_transparent_mode.bits.DP1_4A` / `.DP2_0`.
+    pub allow_lttpr_non_transparent_mode_dp1_4a: bool,
+    pub allow_lttpr_non_transparent_mode_dp2_0: bool,
+    pub seamless_boot_edp_requested: bool,
+    pub allow_seamless_boot_optimization: bool,
+    pub enable_mipi_converter_optimization: bool,
+    /// `enum dmub_ips_disable_type`.
+    pub disable_ips: u32,
+    pub disable_ips_in_vpb: u32,
+    pub allow_0_dtb_clk: bool,
+    pub support_edp0_on_dp1: bool,
 }
 
 /// `enum pipe_split_policy` (dc.h).
@@ -130,6 +161,23 @@ pub struct dc_debug_options {
     pub enable_legacy_fast_update: bool,
     pub using_dml2: bool,
     pub hdmi20_disable: bool,
+    pub disable_stutter: bool,
+    pub disable_dsc: bool,
+    pub disable_clock_gate: bool,
+    pub force_subvp_mclk_switch: bool,
+    pub force_disable_subvp: bool,
+    /// `fams2_config.bits.enable`.
+    pub fams2_config_enable: bool,
+    pub using_dml21: bool,
+    pub hdcp_lc_force_fw_enable: bool,
+    pub hdcp_lc_enable_sw_fallback: bool,
+    pub skip_detection_link_training: bool,
+    /// `enum visual_confirm`.
+    pub visual_confirm: u32,
+    pub ignore_cable_id: bool,
+    pub enable_dmub_aux_for_legacy_ddc: bool,
+    /// `dpia_debug.bits.disable_dpia`.
+    pub dpia_debug_disable_dpia: bool,
 }
 
 /// Which `dc_cap_funcs` entry is bound (dcn21 sets only
@@ -233,10 +281,14 @@ const DC_BUILD_ID: &str = "production-build";
 /// module's own.
 fn dc_construct_ctx(dc: &mut dc, init_params: &dc_init_data) -> bool {
     let dc_ctx = &mut dc.ctx;
+    dc_ctx.cgs_device = init_params.cgs_device;
     dc_ctx.asic_id = init_params.asic_id;
     dc_ctx.dc_sink_id_count = 0;
     dc_ctx.dc_stream_id_count = 0;
     dc_ctx.dce_environment = init_params.dce_environment;
+    dc_ctx.dcn_reg_offsets = init_params.dcn_reg_offsets.clone();
+    dc_ctx.nbio_reg_offsets = init_params.nbio_reg_offsets.clone();
+    dc_ctx.clk_reg_offsets = init_params.clk_reg_offsets.clone();
 
     dc_ctx.dce_version = resource_parse_asic_id(&init_params.asic_id);
 

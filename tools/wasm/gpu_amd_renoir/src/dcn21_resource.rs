@@ -388,6 +388,20 @@ const DEBUG_DEFAULTS_DRV: dc_debug_options = dc_debug_options {
     enable_legacy_fast_update: true,
     using_dml2: false,
     hdmi20_disable: false,
+    disable_stutter: false,
+    disable_dsc: false,
+    disable_clock_gate: false,
+    force_subvp_mclk_switch: false,
+    force_disable_subvp: false,
+    fams2_config_enable: false,
+    using_dml21: false,
+    hdcp_lc_force_fw_enable: false,
+    hdcp_lc_enable_sw_fallback: false,
+    skip_detection_link_training: false,
+    visual_confirm: 0,
+    ignore_cable_id: false,
+    enable_dmub_aux_for_legacy_ddc: false,
+    dpia_debug_disable_dpia: false,
 };
 
 /// `dcn21_pp_smu_create` (dcn21_resource.c): a table that is not Renoir's is
