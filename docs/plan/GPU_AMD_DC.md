@@ -195,10 +195,16 @@ makro und dedupt `macros_h` nach Namen). `dcn20_timing_generator_init` liest die
 Maske (`max_h_total = tg_mask.OTG_H_TOTAL + 1`). **Damit ist die volle Pipe-Kette
 hubp→ipp→dpp→opp→optc portiert.**
 
-**Nächste Einheit:** die Nicht-Pipe-Blöcke des Construct — `read_pipe_fuses`,
-aux/i2c je ddc, `dcn21_mpc_create`, `dcn21_hubbub_create`, `dcn21_dsc_create`,
-dwbc/mmhubbub, `resource_construct` (stream/link-enc/audio) +
-`dcn21_hw_sequencer_construct`, `dml_init_instance`. Dazu `read_pipe_fuses`
+Achter Block, **MPC** (`src/dcn20_mpc.rs`, dcn20-MPC): ein Struct mit Array-
+Feldern (55 Felder + 2 skalar) + 69 Felder, via `dcgen.py` **single-Modus** (neu:
+`gen_single` für Register-Structs, die `SRII` in `.F[inst]` EINES Structs
+füllen). Kopf portiert `mpcc`/`mpc2_init_mpcc` (Mischknoten-Reset).
+
+**Nächste Einheit:** `dcn21_hubbub_create` (wie MPC single-Struct),
+`dcn21_dsc_create` (array-of-structs je num_dsc=3), dann die Nicht-Tabellen-
+Blöcke `resource_construct` (stream/link-enc/audio) +
+`dcn21_hw_sequencer_construct` + `dml_init_instance` (Hand-Port). Dazu
+`read_pipe_fuses`
 (kompaktiert ausgefuste Pipes). Danach aux/i2c je ddc, mpc, hubbub, dsc, dwbc,
 mmhubbub, irq-Service, `resource_construct` + `dcn21_hw_sequencer_construct`,
 `dml_init_instance`. Die Konstruktoren schreiben KEIN Register (Zeiger +

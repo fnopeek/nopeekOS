@@ -15579,3 +15579,917 @@ pub const OTG0_OTG_MANUAL_FLOW_CONTROL__MANUAL_FLOW_CONTROL_MASK: u32 = 0x1;
 pub const OTG0_OTG_DRR_CONTROL__OTG_V_TOTAL_LAST_USED_BY_DRR__SHIFT: u32 = 0x10;
 /// include/asic_reg/dcn/dcn_1_0_sh_mask.h:22337
 pub const OTG0_OTG_DRR_CONTROL__OTG_V_TOTAL_LAST_USED_BY_DRR_MASK: u32 = 0x7fff0000;
+
+// DC mpc: dcn20_mpc_registers (single struct, array/scalar fields)
+
+// (MPC_REG_LIST_DCN2_0(0) + MPC_REG_LIST_DCN2_0(1) + MPC_REG_LIST_DCN2_0(2) + MPC_REG_LIST_DCN2_0(3) + MPC_REG_LIST_DCN2_0(4) + MPC_REG_LIST_DCN2_0(5) + MPC_OUT_MUX_REG_LIST_DCN2_0(0) + MPC_OUT_MUX_REG_LIST_DCN2_0(1) + MPC_OUT_MUX_REG_LIST_DCN2_0(2) + MPC_OUT_MUX_REG_LIST_DCN2_0(3) + MPC_DBG_REG_LIST_DCN2_0()) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmMPCC0_MPCC_TOP_SEL_BASE_IDX) + mmMPCC0_MPCC_TOP_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_SEL_0: u32 = 0x4731;
+/// The value of `BASE(mmMPCC1_MPCC_TOP_SEL_BASE_IDX) + mmMPCC1_MPCC_TOP_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_SEL_1: u32 = 0x474c;
+/// The value of `BASE(mmMPCC2_MPCC_TOP_SEL_BASE_IDX) + mmMPCC2_MPCC_TOP_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_SEL_2: u32 = 0x4767;
+/// The value of `BASE(mmMPCC3_MPCC_TOP_SEL_BASE_IDX) + mmMPCC3_MPCC_TOP_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_SEL_3: u32 = 0x4782;
+/// The value of `BASE(mmMPCC4_MPCC_TOP_SEL_BASE_IDX) + mmMPCC4_MPCC_TOP_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_SEL_4: u32 = 0x479d;
+/// The value of `BASE(mmMPCC5_MPCC_TOP_SEL_BASE_IDX) + mmMPCC5_MPCC_TOP_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_SEL_5: u32 = 0x47b8;
+/// The value of `BASE(mmMPCC0_MPCC_BOT_SEL_BASE_IDX) + mmMPCC0_MPCC_BOT_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_SEL_0: u32 = 0x4732;
+/// The value of `BASE(mmMPCC1_MPCC_BOT_SEL_BASE_IDX) + mmMPCC1_MPCC_BOT_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_SEL_1: u32 = 0x474d;
+/// The value of `BASE(mmMPCC2_MPCC_BOT_SEL_BASE_IDX) + mmMPCC2_MPCC_BOT_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_SEL_2: u32 = 0x4768;
+/// The value of `BASE(mmMPCC3_MPCC_BOT_SEL_BASE_IDX) + mmMPCC3_MPCC_BOT_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_SEL_3: u32 = 0x4783;
+/// The value of `BASE(mmMPCC4_MPCC_BOT_SEL_BASE_IDX) + mmMPCC4_MPCC_BOT_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_SEL_4: u32 = 0x479e;
+/// The value of `BASE(mmMPCC5_MPCC_BOT_SEL_BASE_IDX) + mmMPCC5_MPCC_BOT_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_SEL_5: u32 = 0x47b9;
+/// The value of `BASE(mmMPCC0_MPCC_CONTROL_BASE_IDX) + mmMPCC0_MPCC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_CONTROL_0: u32 = 0x4734;
+/// The value of `BASE(mmMPCC1_MPCC_CONTROL_BASE_IDX) + mmMPCC1_MPCC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_CONTROL_1: u32 = 0x474f;
+/// The value of `BASE(mmMPCC2_MPCC_CONTROL_BASE_IDX) + mmMPCC2_MPCC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_CONTROL_2: u32 = 0x476a;
+/// The value of `BASE(mmMPCC3_MPCC_CONTROL_BASE_IDX) + mmMPCC3_MPCC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_CONTROL_3: u32 = 0x4785;
+/// The value of `BASE(mmMPCC4_MPCC_CONTROL_BASE_IDX) + mmMPCC4_MPCC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_CONTROL_4: u32 = 0x47a0;
+/// The value of `BASE(mmMPCC5_MPCC_CONTROL_BASE_IDX) + mmMPCC5_MPCC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_CONTROL_5: u32 = 0x47bb;
+/// The value of `BASE(mmMPCC0_MPCC_STATUS_BASE_IDX) + mmMPCC0_MPCC_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_STATUS_0: u32 = 0x473f;
+/// The value of `BASE(mmMPCC1_MPCC_STATUS_BASE_IDX) + mmMPCC1_MPCC_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_STATUS_1: u32 = 0x475a;
+/// The value of `BASE(mmMPCC2_MPCC_STATUS_BASE_IDX) + mmMPCC2_MPCC_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_STATUS_2: u32 = 0x4775;
+/// The value of `BASE(mmMPCC3_MPCC_STATUS_BASE_IDX) + mmMPCC3_MPCC_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_STATUS_3: u32 = 0x4790;
+/// The value of `BASE(mmMPCC4_MPCC_STATUS_BASE_IDX) + mmMPCC4_MPCC_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_STATUS_4: u32 = 0x47ab;
+/// The value of `BASE(mmMPCC5_MPCC_STATUS_BASE_IDX) + mmMPCC5_MPCC_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_STATUS_5: u32 = 0x47c6;
+/// The value of `BASE(mmMPCC0_MPCC_OPP_ID_BASE_IDX) + mmMPCC0_MPCC_OPP_ID` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OPP_ID_0: u32 = 0x4733;
+/// The value of `BASE(mmMPCC1_MPCC_OPP_ID_BASE_IDX) + mmMPCC1_MPCC_OPP_ID` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OPP_ID_1: u32 = 0x474e;
+/// The value of `BASE(mmMPCC2_MPCC_OPP_ID_BASE_IDX) + mmMPCC2_MPCC_OPP_ID` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OPP_ID_2: u32 = 0x4769;
+/// The value of `BASE(mmMPCC3_MPCC_OPP_ID_BASE_IDX) + mmMPCC3_MPCC_OPP_ID` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OPP_ID_3: u32 = 0x4784;
+/// The value of `BASE(mmMPCC4_MPCC_OPP_ID_BASE_IDX) + mmMPCC4_MPCC_OPP_ID` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OPP_ID_4: u32 = 0x479f;
+/// The value of `BASE(mmMPCC5_MPCC_OPP_ID_BASE_IDX) + mmMPCC5_MPCC_OPP_ID` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OPP_ID_5: u32 = 0x47ba;
+/// The value of `BASE(mmMPCC0_MPCC_BG_G_Y_BASE_IDX) + mmMPCC0_MPCC_BG_G_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_G_Y_0: u32 = 0x473b;
+/// The value of `BASE(mmMPCC1_MPCC_BG_G_Y_BASE_IDX) + mmMPCC1_MPCC_BG_G_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_G_Y_1: u32 = 0x4756;
+/// The value of `BASE(mmMPCC2_MPCC_BG_G_Y_BASE_IDX) + mmMPCC2_MPCC_BG_G_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_G_Y_2: u32 = 0x4771;
+/// The value of `BASE(mmMPCC3_MPCC_BG_G_Y_BASE_IDX) + mmMPCC3_MPCC_BG_G_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_G_Y_3: u32 = 0x478c;
+/// The value of `BASE(mmMPCC4_MPCC_BG_G_Y_BASE_IDX) + mmMPCC4_MPCC_BG_G_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_G_Y_4: u32 = 0x47a7;
+/// The value of `BASE(mmMPCC5_MPCC_BG_G_Y_BASE_IDX) + mmMPCC5_MPCC_BG_G_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_G_Y_5: u32 = 0x47c2;
+/// The value of `BASE(mmMPCC0_MPCC_BG_R_CR_BASE_IDX) + mmMPCC0_MPCC_BG_R_CR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_R_CR_0: u32 = 0x473a;
+/// The value of `BASE(mmMPCC1_MPCC_BG_R_CR_BASE_IDX) + mmMPCC1_MPCC_BG_R_CR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_R_CR_1: u32 = 0x4755;
+/// The value of `BASE(mmMPCC2_MPCC_BG_R_CR_BASE_IDX) + mmMPCC2_MPCC_BG_R_CR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_R_CR_2: u32 = 0x4770;
+/// The value of `BASE(mmMPCC3_MPCC_BG_R_CR_BASE_IDX) + mmMPCC3_MPCC_BG_R_CR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_R_CR_3: u32 = 0x478b;
+/// The value of `BASE(mmMPCC4_MPCC_BG_R_CR_BASE_IDX) + mmMPCC4_MPCC_BG_R_CR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_R_CR_4: u32 = 0x47a6;
+/// The value of `BASE(mmMPCC5_MPCC_BG_R_CR_BASE_IDX) + mmMPCC5_MPCC_BG_R_CR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_R_CR_5: u32 = 0x47c1;
+/// The value of `BASE(mmMPCC0_MPCC_BG_B_CB_BASE_IDX) + mmMPCC0_MPCC_BG_B_CB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_B_CB_0: u32 = 0x473c;
+/// The value of `BASE(mmMPCC1_MPCC_BG_B_CB_BASE_IDX) + mmMPCC1_MPCC_BG_B_CB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_B_CB_1: u32 = 0x4757;
+/// The value of `BASE(mmMPCC2_MPCC_BG_B_CB_BASE_IDX) + mmMPCC2_MPCC_BG_B_CB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_B_CB_2: u32 = 0x4772;
+/// The value of `BASE(mmMPCC3_MPCC_BG_B_CB_BASE_IDX) + mmMPCC3_MPCC_BG_B_CB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_B_CB_3: u32 = 0x478d;
+/// The value of `BASE(mmMPCC4_MPCC_BG_B_CB_BASE_IDX) + mmMPCC4_MPCC_BG_B_CB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_B_CB_4: u32 = 0x47a8;
+/// The value of `BASE(mmMPCC5_MPCC_BG_B_CB_BASE_IDX) + mmMPCC5_MPCC_BG_B_CB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BG_B_CB_5: u32 = 0x47c3;
+/// The value of `BASE(mmMPCC0_MPCC_SM_CONTROL_BASE_IDX) + mmMPCC0_MPCC_SM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_SM_CONTROL_0: u32 = 0x4735;
+/// The value of `BASE(mmMPCC1_MPCC_SM_CONTROL_BASE_IDX) + mmMPCC1_MPCC_SM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_SM_CONTROL_1: u32 = 0x4750;
+/// The value of `BASE(mmMPCC2_MPCC_SM_CONTROL_BASE_IDX) + mmMPCC2_MPCC_SM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_SM_CONTROL_2: u32 = 0x476b;
+/// The value of `BASE(mmMPCC3_MPCC_SM_CONTROL_BASE_IDX) + mmMPCC3_MPCC_SM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_SM_CONTROL_3: u32 = 0x4786;
+/// The value of `BASE(mmMPCC4_MPCC_SM_CONTROL_BASE_IDX) + mmMPCC4_MPCC_SM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_SM_CONTROL_4: u32 = 0x47a1;
+/// The value of `BASE(mmMPCC5_MPCC_SM_CONTROL_BASE_IDX) + mmMPCC5_MPCC_SM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_SM_CONTROL_5: u32 = 0x47bc;
+/// The value of `BASE(mmMPCC0_MPCC_UPDATE_LOCK_SEL_BASE_IDX) + mmMPCC0_MPCC_UPDATE_LOCK_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_UPDATE_LOCK_SEL_0: u32 = 0x4736;
+/// The value of `BASE(mmMPCC1_MPCC_UPDATE_LOCK_SEL_BASE_IDX) + mmMPCC1_MPCC_UPDATE_LOCK_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_UPDATE_LOCK_SEL_1: u32 = 0x4751;
+/// The value of `BASE(mmMPCC2_MPCC_UPDATE_LOCK_SEL_BASE_IDX) + mmMPCC2_MPCC_UPDATE_LOCK_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_UPDATE_LOCK_SEL_2: u32 = 0x476c;
+/// The value of `BASE(mmMPCC3_MPCC_UPDATE_LOCK_SEL_BASE_IDX) + mmMPCC3_MPCC_UPDATE_LOCK_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_UPDATE_LOCK_SEL_3: u32 = 0x4787;
+/// The value of `BASE(mmMPCC4_MPCC_UPDATE_LOCK_SEL_BASE_IDX) + mmMPCC4_MPCC_UPDATE_LOCK_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_UPDATE_LOCK_SEL_4: u32 = 0x47a2;
+/// The value of `BASE(mmMPCC5_MPCC_UPDATE_LOCK_SEL_BASE_IDX) + mmMPCC5_MPCC_UPDATE_LOCK_SEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_UPDATE_LOCK_SEL_5: u32 = 0x47bd;
+/// The value of `BASE(mmMPCC0_MPCC_TOP_GAIN_BASE_IDX) + mmMPCC0_MPCC_TOP_GAIN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_GAIN_0: u32 = 0x4737;
+/// The value of `BASE(mmMPCC1_MPCC_TOP_GAIN_BASE_IDX) + mmMPCC1_MPCC_TOP_GAIN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_GAIN_1: u32 = 0x4752;
+/// The value of `BASE(mmMPCC2_MPCC_TOP_GAIN_BASE_IDX) + mmMPCC2_MPCC_TOP_GAIN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_GAIN_2: u32 = 0x476d;
+/// The value of `BASE(mmMPCC3_MPCC_TOP_GAIN_BASE_IDX) + mmMPCC3_MPCC_TOP_GAIN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_GAIN_3: u32 = 0x4788;
+/// The value of `BASE(mmMPCC4_MPCC_TOP_GAIN_BASE_IDX) + mmMPCC4_MPCC_TOP_GAIN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_GAIN_4: u32 = 0x47a3;
+/// The value of `BASE(mmMPCC5_MPCC_TOP_GAIN_BASE_IDX) + mmMPCC5_MPCC_TOP_GAIN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_TOP_GAIN_5: u32 = 0x47be;
+/// The value of `BASE(mmMPCC0_MPCC_BOT_GAIN_INSIDE_BASE_IDX) + mmMPCC0_MPCC_BOT_GAIN_INSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_INSIDE_0: u32 = 0x4738;
+/// The value of `BASE(mmMPCC1_MPCC_BOT_GAIN_INSIDE_BASE_IDX) + mmMPCC1_MPCC_BOT_GAIN_INSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_INSIDE_1: u32 = 0x4753;
+/// The value of `BASE(mmMPCC2_MPCC_BOT_GAIN_INSIDE_BASE_IDX) + mmMPCC2_MPCC_BOT_GAIN_INSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_INSIDE_2: u32 = 0x476e;
+/// The value of `BASE(mmMPCC3_MPCC_BOT_GAIN_INSIDE_BASE_IDX) + mmMPCC3_MPCC_BOT_GAIN_INSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_INSIDE_3: u32 = 0x4789;
+/// The value of `BASE(mmMPCC4_MPCC_BOT_GAIN_INSIDE_BASE_IDX) + mmMPCC4_MPCC_BOT_GAIN_INSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_INSIDE_4: u32 = 0x47a4;
+/// The value of `BASE(mmMPCC5_MPCC_BOT_GAIN_INSIDE_BASE_IDX) + mmMPCC5_MPCC_BOT_GAIN_INSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_INSIDE_5: u32 = 0x47bf;
+/// The value of `BASE(mmMPCC0_MPCC_BOT_GAIN_OUTSIDE_BASE_IDX) + mmMPCC0_MPCC_BOT_GAIN_OUTSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_OUTSIDE_0: u32 = 0x4739;
+/// The value of `BASE(mmMPCC1_MPCC_BOT_GAIN_OUTSIDE_BASE_IDX) + mmMPCC1_MPCC_BOT_GAIN_OUTSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_OUTSIDE_1: u32 = 0x4754;
+/// The value of `BASE(mmMPCC2_MPCC_BOT_GAIN_OUTSIDE_BASE_IDX) + mmMPCC2_MPCC_BOT_GAIN_OUTSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_OUTSIDE_2: u32 = 0x476f;
+/// The value of `BASE(mmMPCC3_MPCC_BOT_GAIN_OUTSIDE_BASE_IDX) + mmMPCC3_MPCC_BOT_GAIN_OUTSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_OUTSIDE_3: u32 = 0x478a;
+/// The value of `BASE(mmMPCC4_MPCC_BOT_GAIN_OUTSIDE_BASE_IDX) + mmMPCC4_MPCC_BOT_GAIN_OUTSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_OUTSIDE_4: u32 = 0x47a5;
+/// The value of `BASE(mmMPCC5_MPCC_BOT_GAIN_OUTSIDE_BASE_IDX) + mmMPCC5_MPCC_BOT_GAIN_OUTSIDE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_BOT_GAIN_OUTSIDE_5: u32 = 0x47c0;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_B_0: u32 = 0x4872;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_B_1: u32 = 0x48b3;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_B_2: u32 = 0x48f4;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_B_3: u32 = 0x4935;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_B_4: u32 = 0x4976;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_B_5: u32 = 0x49b7;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_G_0: u32 = 0x4873;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_G_1: u32 = 0x48b4;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_G_2: u32 = 0x48f5;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_G_3: u32 = 0x4936;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_G_4: u32 = 0x4977;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_G_5: u32 = 0x49b8;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_R_0: u32 = 0x4874;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_R_1: u32 = 0x48b5;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_R_2: u32 = 0x48f6;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_R_3: u32 = 0x4937;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_R_4: u32 = 0x4978;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_START_CNTL_R_5: u32 = 0x49b9;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_B_0: u32 = 0x4875;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_B_1: u32 = 0x48b6;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_B_2: u32 = 0x48f7;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_B_3: u32 = 0x4938;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_B_4: u32 = 0x4979;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_B_5: u32 = 0x49ba;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_G_0: u32 = 0x4876;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_G_1: u32 = 0x48b7;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_G_2: u32 = 0x48f8;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_G_3: u32 = 0x4939;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_G_4: u32 = 0x497a;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_G_5: u32 = 0x49bb;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_R_0: u32 = 0x4877;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_R_1: u32 = 0x48b8;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_R_2: u32 = 0x48f9;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_R_3: u32 = 0x493a;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_R_4: u32 = 0x497b;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_SLOPE_CNTL_R_5: u32 = 0x49bc;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_B_0: u32 = 0x4878;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_B_1: u32 = 0x48b9;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_B_2: u32 = 0x48fa;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_B_3: u32 = 0x493b;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_B_4: u32 = 0x497c;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_B_5: u32 = 0x49bd;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_B_0: u32 = 0x4879;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_B_1: u32 = 0x48ba;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_B_2: u32 = 0x48fb;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_B_3: u32 = 0x493c;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_B_4: u32 = 0x497d;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_B_5: u32 = 0x49be;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_G_0: u32 = 0x487a;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_G_1: u32 = 0x48bb;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_G_2: u32 = 0x48fc;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_G_3: u32 = 0x493d;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_G_4: u32 = 0x497e;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_G_5: u32 = 0x49bf;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_G_0: u32 = 0x487b;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_G_1: u32 = 0x48bc;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_G_2: u32 = 0x48fd;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_G_3: u32 = 0x493e;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_G_4: u32 = 0x497f;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_G_5: u32 = 0x49c0;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_R_0: u32 = 0x487c;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_R_1: u32 = 0x48bd;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_R_2: u32 = 0x48fe;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_R_3: u32 = 0x493f;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_R_4: u32 = 0x4980;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL1_R_5: u32 = 0x49c1;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_R_0: u32 = 0x487d;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_R_1: u32 = 0x48be;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_R_2: u32 = 0x48ff;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_R_3: u32 = 0x4940;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_R_4: u32 = 0x4981;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_END_CNTL2_R_5: u32 = 0x49c2;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_0_1_0: u32 = 0x487e;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_REGION_0_1_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_0_1_1: u32 = 0x48bf;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_REGION_0_1_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_0_1_2: u32 = 0x4900;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_REGION_0_1_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_0_1_3: u32 = 0x4941;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_REGION_0_1_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_0_1_4: u32 = 0x4982;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_REGION_0_1_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_0_1_5: u32 = 0x49c3;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMA_REGION_32_33_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_32_33_0: u32 = 0x488e;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMA_REGION_32_33_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_32_33_1: u32 = 0x48cf;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMA_REGION_32_33_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_32_33_2: u32 = 0x4910;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMA_REGION_32_33_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_32_33_3: u32 = 0x4951;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMA_REGION_32_33_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_32_33_4: u32 = 0x4992;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMA_REGION_32_33_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMA_REGION_32_33_5: u32 = 0x49d3;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_B_0: u32 = 0x488f;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_B_1: u32 = 0x48d0;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_B_2: u32 = 0x4911;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_B_3: u32 = 0x4952;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_B_4: u32 = 0x4993;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_START_CNTL_B_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_B_5: u32 = 0x49d4;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_G_0: u32 = 0x4890;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_G_1: u32 = 0x48d1;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_G_2: u32 = 0x4912;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_G_3: u32 = 0x4953;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_G_4: u32 = 0x4994;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_START_CNTL_G_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_G_5: u32 = 0x49d5;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_R_0: u32 = 0x4891;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_R_1: u32 = 0x48d2;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_R_2: u32 = 0x4913;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_R_3: u32 = 0x4954;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_R_4: u32 = 0x4995;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_START_CNTL_R_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_START_CNTL_R_5: u32 = 0x49d6;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_B_0: u32 = 0x4892;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_B_1: u32 = 0x48d3;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_B_2: u32 = 0x4914;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_B_3: u32 = 0x4955;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_B_4: u32 = 0x4996;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_B_5: u32 = 0x49d7;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_G_0: u32 = 0x4893;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_G_1: u32 = 0x48d4;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_G_2: u32 = 0x4915;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_G_3: u32 = 0x4956;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_G_4: u32 = 0x4997;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_G_5: u32 = 0x49d8;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_R_0: u32 = 0x4894;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_R_1: u32 = 0x48d5;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_R_2: u32 = 0x4916;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_R_3: u32 = 0x4957;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_R_4: u32 = 0x4998;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_SLOPE_CNTL_R_5: u32 = 0x49d9;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_B_0: u32 = 0x4895;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_B_1: u32 = 0x48d6;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_B_2: u32 = 0x4917;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_B_3: u32 = 0x4958;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_B_4: u32 = 0x4999;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_B_5: u32 = 0x49da;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_B_0: u32 = 0x4896;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_B_1: u32 = 0x48d7;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_B_2: u32 = 0x4918;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_B_3: u32 = 0x4959;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_B_4: u32 = 0x499a;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_B_5: u32 = 0x49db;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_G_0: u32 = 0x4897;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_G_1: u32 = 0x48d8;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_G_2: u32 = 0x4919;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_G_3: u32 = 0x495a;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_G_4: u32 = 0x499b;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_G_5: u32 = 0x49dc;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_G_0: u32 = 0x4898;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_G_1: u32 = 0x48d9;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_G_2: u32 = 0x491a;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_G_3: u32 = 0x495b;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_G_4: u32 = 0x499c;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_G_5: u32 = 0x49dd;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_R_0: u32 = 0x4899;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_R_1: u32 = 0x48da;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_R_2: u32 = 0x491b;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_R_3: u32 = 0x495c;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_R_4: u32 = 0x499d;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL1_R_5: u32 = 0x49de;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_R_0: u32 = 0x489a;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_R_1: u32 = 0x48db;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_R_2: u32 = 0x491c;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_R_3: u32 = 0x495d;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_R_4: u32 = 0x499e;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_END_CNTL2_R_5: u32 = 0x49df;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_REGION_0_1_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_0_1_0: u32 = 0x489b;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_REGION_0_1_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_0_1_1: u32 = 0x48dc;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_REGION_0_1_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_0_1_2: u32 = 0x491d;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_REGION_0_1_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_0_1_3: u32 = 0x495e;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_REGION_0_1_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_0_1_4: u32 = 0x499f;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_REGION_0_1_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_0_1_5: u32 = 0x49e0;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_RAMB_REGION_32_33_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_32_33_0: u32 = 0x48ab;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_RAMB_REGION_32_33_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_32_33_1: u32 = 0x48ec;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_RAMB_REGION_32_33_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_32_33_2: u32 = 0x492d;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_RAMB_REGION_32_33_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_32_33_3: u32 = 0x496e;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_RAMB_REGION_32_33_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_32_33_4: u32 = 0x49af;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_RAMB_REGION_32_33_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_RAMB_REGION_32_33_5: u32 = 0x49f0;
+/// The value of `BASE(mmMPCC0_MPCC_MEM_PWR_CTRL_BASE_IDX) + mmMPCC0_MPCC_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_MEM_PWR_CTRL_0: u32 = 0x473d;
+/// The value of `BASE(mmMPCC1_MPCC_MEM_PWR_CTRL_BASE_IDX) + mmMPCC1_MPCC_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_MEM_PWR_CTRL_1: u32 = 0x4758;
+/// The value of `BASE(mmMPCC2_MPCC_MEM_PWR_CTRL_BASE_IDX) + mmMPCC2_MPCC_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_MEM_PWR_CTRL_2: u32 = 0x4773;
+/// The value of `BASE(mmMPCC3_MPCC_MEM_PWR_CTRL_BASE_IDX) + mmMPCC3_MPCC_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_MEM_PWR_CTRL_3: u32 = 0x478e;
+/// The value of `BASE(mmMPCC4_MPCC_MEM_PWR_CTRL_BASE_IDX) + mmMPCC4_MPCC_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_MEM_PWR_CTRL_4: u32 = 0x47a9;
+/// The value of `BASE(mmMPCC5_MPCC_MEM_PWR_CTRL_BASE_IDX) + mmMPCC5_MPCC_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_MEM_PWR_CTRL_5: u32 = 0x47c4;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_LUT_INDEX_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_INDEX_0: u32 = 0x486f;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_LUT_INDEX_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_INDEX_1: u32 = 0x48b0;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_LUT_INDEX_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_INDEX_2: u32 = 0x48f1;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_LUT_INDEX_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_INDEX_3: u32 = 0x4932;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_LUT_INDEX_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_INDEX_4: u32 = 0x4973;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_LUT_INDEX_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_INDEX_5: u32 = 0x49b4;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_LUT_RAM_CONTROL_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_LUT_RAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_RAM_CONTROL_0: u32 = 0x4871;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_LUT_RAM_CONTROL_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_LUT_RAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_RAM_CONTROL_1: u32 = 0x48b2;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_LUT_RAM_CONTROL_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_LUT_RAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_RAM_CONTROL_2: u32 = 0x48f3;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_LUT_RAM_CONTROL_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_LUT_RAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_RAM_CONTROL_3: u32 = 0x4934;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_LUT_RAM_CONTROL_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_LUT_RAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_RAM_CONTROL_4: u32 = 0x4975;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_LUT_RAM_CONTROL_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_LUT_RAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_RAM_CONTROL_5: u32 = 0x49b6;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_LUT_DATA_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_DATA_0: u32 = 0x4870;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_LUT_DATA_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_DATA_1: u32 = 0x48b1;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_LUT_DATA_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_DATA_2: u32 = 0x48f2;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_LUT_DATA_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_DATA_3: u32 = 0x4933;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_LUT_DATA_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_DATA_4: u32 = 0x4974;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_LUT_DATA_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_LUT_DATA_5: u32 = 0x49b5;
+/// The value of `BASE(mmMPCC_OGAM0_MPCC_OGAM_MODE_BASE_IDX) + mmMPCC_OGAM0_MPCC_OGAM_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_MODE_0: u32 = 0x486e;
+/// The value of `BASE(mmMPCC_OGAM1_MPCC_OGAM_MODE_BASE_IDX) + mmMPCC_OGAM1_MPCC_OGAM_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_MODE_1: u32 = 0x48af;
+/// The value of `BASE(mmMPCC_OGAM2_MPCC_OGAM_MODE_BASE_IDX) + mmMPCC_OGAM2_MPCC_OGAM_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_MODE_2: u32 = 0x48f0;
+/// The value of `BASE(mmMPCC_OGAM3_MPCC_OGAM_MODE_BASE_IDX) + mmMPCC_OGAM3_MPCC_OGAM_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_MODE_3: u32 = 0x4931;
+/// The value of `BASE(mmMPCC_OGAM4_MPCC_OGAM_MODE_BASE_IDX) + mmMPCC_OGAM4_MPCC_OGAM_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_MODE_4: u32 = 0x4972;
+/// The value of `BASE(mmMPCC_OGAM5_MPCC_OGAM_MODE_BASE_IDX) + mmMPCC_OGAM5_MPCC_OGAM_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPCC_OGAM_MODE_5: u32 = 0x49b3;
+/// The value of `BASE(mmMPC_OUT0_MUX_BASE_IDX) + mmMPC_OUT0_MUX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MUX_0: u32 = 0x4845;
+/// The value of `BASE(mmMPC_OUT1_MUX_BASE_IDX) + mmMPC_OUT1_MUX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MUX_1: u32 = 0x4849;
+/// The value of `BASE(mmMPC_OUT2_MUX_BASE_IDX) + mmMPC_OUT2_MUX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MUX_2: u32 = 0x484d;
+/// The value of `BASE(mmMPC_OUT3_MUX_BASE_IDX) + mmMPC_OUT3_MUX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MUX_3: u32 = 0x4851;
+/// The value of `BASE(mmCUR_VUPDATE_LOCK_SET0_BASE_IDX) + mmCUR_VUPDATE_LOCK_SET0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CUR_0: u32 = 0x4821;
+/// The value of `BASE(mmCUR_VUPDATE_LOCK_SET1_BASE_IDX) + mmCUR_VUPDATE_LOCK_SET1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CUR_1: u32 = 0x4826;
+/// The value of `BASE(mmCUR_VUPDATE_LOCK_SET2_BASE_IDX) + mmCUR_VUPDATE_LOCK_SET2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CUR_2: u32 = 0x482b;
+/// The value of `BASE(mmCUR_VUPDATE_LOCK_SET3_BASE_IDX) + mmCUR_VUPDATE_LOCK_SET3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CUR_3: u32 = 0x4830;
+/// The value of `BASE(mmMPC_OUT0_CSC_MODE_BASE_IDX) + mmMPC_OUT0_CSC_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_MODE_0: u32 = 0x4a77;
+/// The value of `BASE(mmMPC_OUT1_CSC_MODE_BASE_IDX) + mmMPC_OUT1_CSC_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_MODE_1: u32 = 0x4a84;
+/// The value of `BASE(mmMPC_OUT2_CSC_MODE_BASE_IDX) + mmMPC_OUT2_CSC_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_MODE_2: u32 = 0x4a91;
+/// The value of `BASE(mmMPC_OUT3_CSC_MODE_BASE_IDX) + mmMPC_OUT3_CSC_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_MODE_3: u32 = 0x4a9e;
+/// The value of `BASE(mmMPC_OUT0_CSC_C11_C12_A_BASE_IDX) + mmMPC_OUT0_CSC_C11_C12_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C11_C12_A_0: u32 = 0x4a78;
+/// The value of `BASE(mmMPC_OUT1_CSC_C11_C12_A_BASE_IDX) + mmMPC_OUT1_CSC_C11_C12_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C11_C12_A_1: u32 = 0x4a85;
+/// The value of `BASE(mmMPC_OUT2_CSC_C11_C12_A_BASE_IDX) + mmMPC_OUT2_CSC_C11_C12_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C11_C12_A_2: u32 = 0x4a92;
+/// The value of `BASE(mmMPC_OUT3_CSC_C11_C12_A_BASE_IDX) + mmMPC_OUT3_CSC_C11_C12_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C11_C12_A_3: u32 = 0x4a9f;
+/// The value of `BASE(mmMPC_OUT0_CSC_C33_C34_A_BASE_IDX) + mmMPC_OUT0_CSC_C33_C34_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C33_C34_A_0: u32 = 0x4a7d;
+/// The value of `BASE(mmMPC_OUT1_CSC_C33_C34_A_BASE_IDX) + mmMPC_OUT1_CSC_C33_C34_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C33_C34_A_1: u32 = 0x4a8a;
+/// The value of `BASE(mmMPC_OUT2_CSC_C33_C34_A_BASE_IDX) + mmMPC_OUT2_CSC_C33_C34_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C33_C34_A_2: u32 = 0x4a97;
+/// The value of `BASE(mmMPC_OUT3_CSC_C33_C34_A_BASE_IDX) + mmMPC_OUT3_CSC_C33_C34_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C33_C34_A_3: u32 = 0x4aa4;
+/// The value of `BASE(mmMPC_OUT0_CSC_C11_C12_B_BASE_IDX) + mmMPC_OUT0_CSC_C11_C12_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C11_C12_B_0: u32 = 0x4a7e;
+/// The value of `BASE(mmMPC_OUT1_CSC_C11_C12_B_BASE_IDX) + mmMPC_OUT1_CSC_C11_C12_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C11_C12_B_1: u32 = 0x4a8b;
+/// The value of `BASE(mmMPC_OUT2_CSC_C11_C12_B_BASE_IDX) + mmMPC_OUT2_CSC_C11_C12_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C11_C12_B_2: u32 = 0x4a98;
+/// The value of `BASE(mmMPC_OUT3_CSC_C11_C12_B_BASE_IDX) + mmMPC_OUT3_CSC_C11_C12_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C11_C12_B_3: u32 = 0x4aa5;
+/// The value of `BASE(mmMPC_OUT0_CSC_C33_C34_B_BASE_IDX) + mmMPC_OUT0_CSC_C33_C34_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C33_C34_B_0: u32 = 0x4a83;
+/// The value of `BASE(mmMPC_OUT1_CSC_C33_C34_B_BASE_IDX) + mmMPC_OUT1_CSC_C33_C34_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C33_C34_B_1: u32 = 0x4a90;
+/// The value of `BASE(mmMPC_OUT2_CSC_C33_C34_B_BASE_IDX) + mmMPC_OUT2_CSC_C33_C34_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C33_C34_B_2: u32 = 0x4a9d;
+/// The value of `BASE(mmMPC_OUT3_CSC_C33_C34_B_BASE_IDX) + mmMPC_OUT3_CSC_C33_C34_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_CSC_C33_C34_B_3: u32 = 0x4aaa;
+/// The value of `BASE(mmMPC_OUT0_DENORM_CONTROL_BASE_IDX) + mmMPC_OUT0_DENORM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CONTROL_0: u32 = 0x4846;
+/// The value of `BASE(mmMPC_OUT1_DENORM_CONTROL_BASE_IDX) + mmMPC_OUT1_DENORM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CONTROL_1: u32 = 0x484a;
+/// The value of `BASE(mmMPC_OUT2_DENORM_CONTROL_BASE_IDX) + mmMPC_OUT2_DENORM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CONTROL_2: u32 = 0x484e;
+/// The value of `BASE(mmMPC_OUT3_DENORM_CONTROL_BASE_IDX) + mmMPC_OUT3_DENORM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CONTROL_3: u32 = 0x4852;
+/// The value of `BASE(mmMPC_OUT0_DENORM_CLAMP_G_Y_BASE_IDX) + mmMPC_OUT0_DENORM_CLAMP_G_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CLAMP_G_Y_0: u32 = 0x4847;
+/// The value of `BASE(mmMPC_OUT1_DENORM_CLAMP_G_Y_BASE_IDX) + mmMPC_OUT1_DENORM_CLAMP_G_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CLAMP_G_Y_1: u32 = 0x484b;
+/// The value of `BASE(mmMPC_OUT2_DENORM_CLAMP_G_Y_BASE_IDX) + mmMPC_OUT2_DENORM_CLAMP_G_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CLAMP_G_Y_2: u32 = 0x484f;
+/// The value of `BASE(mmMPC_OUT3_DENORM_CLAMP_G_Y_BASE_IDX) + mmMPC_OUT3_DENORM_CLAMP_G_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CLAMP_G_Y_3: u32 = 0x4853;
+/// The value of `BASE(mmMPC_OUT0_DENORM_CLAMP_B_CB_BASE_IDX) + mmMPC_OUT0_DENORM_CLAMP_B_CB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CLAMP_B_CB_0: u32 = 0x4848;
+/// The value of `BASE(mmMPC_OUT1_DENORM_CLAMP_B_CB_BASE_IDX) + mmMPC_OUT1_DENORM_CLAMP_B_CB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CLAMP_B_CB_1: u32 = 0x484c;
+/// The value of `BASE(mmMPC_OUT2_DENORM_CLAMP_B_CB_BASE_IDX) + mmMPC_OUT2_DENORM_CLAMP_B_CB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CLAMP_B_CB_2: u32 = 0x4850;
+/// The value of `BASE(mmMPC_OUT3_DENORM_CLAMP_B_CB_BASE_IDX) + mmMPC_OUT3_DENORM_CLAMP_B_CB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_DENORM_CLAMP_B_CB_3: u32 = 0x4854;
+/// The value of `BASE(mmMPC_OCSC_TEST_DEBUG_DATA_BASE_IDX) + mmMPC_OCSC_TEST_DEBUG_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPC_OCSC_TEST_DEBUG_DATA: u32 = 0x4afc;
+/// The value of `BASE(mmMPC_OCSC_TEST_DEBUG_INDEX_BASE_IDX) + mmMPC_OCSC_TEST_DEBUG_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MPC_MPC_OCSC_TEST_DEBUG_INDEX: u32 = 0x4afb;
+
+// DC mpc field shifts/masks (MPC_COMMON_MASK_SH_LIST_DCN2_0(__SHIFT) + MPC_DEBUG_REG_LIST_SH_DCN20)
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18798
+pub const MPCC0_MPCC_TOP_SEL__MPCC_TOP_SEL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18799
+pub const MPCC0_MPCC_TOP_SEL__MPCC_TOP_SEL_MASK: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18801
+pub const MPCC0_MPCC_BOT_SEL__MPCC_BOT_SEL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18802
+pub const MPCC0_MPCC_BOT_SEL__MPCC_BOT_SEL_MASK: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18807
+pub const MPCC0_MPCC_CONTROL__MPCC_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18813
+pub const MPCC0_MPCC_CONTROL__MPCC_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18808
+pub const MPCC0_MPCC_CONTROL__MPCC_ALPHA_BLND_MODE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18814
+pub const MPCC0_MPCC_CONTROL__MPCC_ALPHA_BLND_MODE_MASK: u32 = 0x30;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18809
+pub const MPCC0_MPCC_CONTROL__MPCC_ALPHA_MULTIPLIED_MODE__SHIFT: u32 = 0x6;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18815
+pub const MPCC0_MPCC_CONTROL__MPCC_ALPHA_MULTIPLIED_MODE_MASK: u32 = 0x40;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18810
+pub const MPCC0_MPCC_CONTROL__MPCC_BLND_ACTIVE_OVERLAP_ONLY__SHIFT: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18816
+pub const MPCC0_MPCC_CONTROL__MPCC_BLND_ACTIVE_OVERLAP_ONLY_MASK: u32 = 0x80;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18811
+pub const MPCC0_MPCC_CONTROL__MPCC_GLOBAL_ALPHA__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18817
+pub const MPCC0_MPCC_CONTROL__MPCC_GLOBAL_ALPHA_MASK: u32 = 0xff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18812
+pub const MPCC0_MPCC_CONTROL__MPCC_GLOBAL_GAIN__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18818
+pub const MPCC0_MPCC_CONTROL__MPCC_GLOBAL_GAIN_MASK: u32 = 0xff000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18873
+pub const MPCC0_MPCC_STATUS__MPCC_IDLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18885
+pub const MPCC0_MPCC_STATUS__MPCC_IDLE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18874
+pub const MPCC0_MPCC_STATUS__MPCC_BUSY__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18886
+pub const MPCC0_MPCC_STATUS__MPCC_BUSY_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18804
+pub const MPCC0_MPCC_OPP_ID__MPCC_OPP_ID__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18805
+pub const MPCC0_MPCC_OPP_ID__MPCC_OPP_ID_MASK: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18858
+pub const MPCC0_MPCC_BG_G_Y__MPCC_BG_G_Y__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18859
+pub const MPCC0_MPCC_BG_G_Y__MPCC_BG_G_Y_MASK: u32 = 0xfff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18855
+pub const MPCC0_MPCC_BG_R_CR__MPCC_BG_R_CR__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18856
+pub const MPCC0_MPCC_BG_R_CR__MPCC_BG_R_CR_MASK: u32 = 0xfff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18861
+pub const MPCC0_MPCC_BG_B_CB__MPCC_BG_B_CB__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18862
+pub const MPCC0_MPCC_BG_B_CB__MPCC_BG_B_CB_MASK: u32 = 0xfff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18820
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18827
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18821
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_MODE__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18828
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_MODE_MASK: u32 = 0xe;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18822
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_FRAME_ALT__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18829
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_FRAME_ALT_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18823
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_FIELD_ALT__SHIFT: u32 = 0x5;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18830
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_FIELD_ALT_MASK: u32 = 0x20;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18824
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_FORCE_NEXT_FRAME_POL__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18831
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_FORCE_NEXT_FRAME_POL_MASK: u32 = 0x300;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18825
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_FORCE_NEXT_TOP_POL__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18832
+pub const MPCC0_MPCC_SM_CONTROL__MPCC_SM_FORCE_NEXT_TOP_POL_MASK: u32 = 0x30000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:19292
+pub const MPC_OUT0_MUX__MPC_OUT_MUX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:19293
+pub const MPC_OUT0_MUX__MPC_OUT_MUX_MASK: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18835
+pub const MPCC0_MPCC_UPDATE_LOCK_SEL__MPCC_UPDATE_LOCK_SEL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:18837
+pub const MPCC0_MPCC_UPDATE_LOCK_SEL__MPCC_UPDATE_LOCK_SEL_MASK: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23253
+pub const MPCC0_MPCC_CONTROL__MPCC_BG_BPC__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23261
+pub const MPCC0_MPCC_CONTROL__MPCC_BG_BPC_MASK: u32 = 0x700;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23254
+pub const MPCC0_MPCC_CONTROL__MPCC_BOT_GAIN_MODE__SHIFT: u32 = 0xb;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23262
+pub const MPCC0_MPCC_CONTROL__MPCC_BOT_GAIN_MODE_MASK: u32 = 0x800;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23286
+pub const MPCC0_MPCC_TOP_GAIN__MPCC_TOP_GAIN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23287
+pub const MPCC0_MPCC_TOP_GAIN__MPCC_TOP_GAIN_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23289
+pub const MPCC0_MPCC_BOT_GAIN_INSIDE__MPCC_BOT_GAIN_INSIDE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23290
+pub const MPCC0_MPCC_BOT_GAIN_INSIDE__MPCC_BOT_GAIN_INSIDE_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23292
+pub const MPCC0_MPCC_BOT_GAIN_OUTSIDE__MPCC_BOT_GAIN_OUTSIDE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23293
+pub const MPCC0_MPCC_BOT_GAIN_OUTSIDE__MPCC_BOT_GAIN_OUTSIDE_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:28267
+pub const MPC_OCSC_TEST_DEBUG_INDEX__MPC_OCSC_TEST_DEBUG_INDEX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:28269
+pub const MPC_OCSC_TEST_DEBUG_INDEX__MPC_OCSC_TEST_DEBUG_INDEX_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:27889
+pub const MPC_OUT0_CSC_MODE__MPC_OCSC_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:27890
+pub const MPC_OUT0_CSC_MODE__MPC_OCSC_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:27892
+pub const MPC_OUT0_CSC_C11_C12_A__MPC_OCSC_C11_A__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:27894
+pub const MPC_OUT0_CSC_C11_C12_A__MPC_OCSC_C11_A_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:27893
+pub const MPC_OUT0_CSC_C11_C12_A__MPC_OCSC_C12_A__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:27895
+pub const MPC_OUT0_CSC_C11_C12_A__MPC_OCSC_C12_A_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23322
+pub const MPCC0_MPCC_STATUS__MPCC_DISABLED__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23328
+pub const MPCC0_MPCC_STATUS__MPCC_DISABLED_MASK: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24572
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1__MPCC_OGAM_RAMA_EXP_REGION0_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24576
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1__MPCC_OGAM_RAMA_EXP_REGION0_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24573
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1__MPCC_OGAM_RAMA_EXP_REGION0_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24577
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1__MPCC_OGAM_RAMA_EXP_REGION0_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24574
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1__MPCC_OGAM_RAMA_EXP_REGION1_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24578
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1__MPCC_OGAM_RAMA_EXP_REGION1_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24575
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1__MPCC_OGAM_RAMA_EXP_REGION1_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24579
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1__MPCC_OGAM_RAMA_EXP_REGION1_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24548
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL1_B__MPCC_OGAM_RAMA_EXP_REGION_END_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24549
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL1_B__MPCC_OGAM_RAMA_EXP_REGION_END_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24551
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL2_B__MPCC_OGAM_RAMA_EXP_REGION_END_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24553
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL2_B__MPCC_OGAM_RAMA_EXP_REGION_END_SLOPE_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24552
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL2_B__MPCC_OGAM_RAMA_EXP_REGION_END_BASE_B__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24554
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL2_B__MPCC_OGAM_RAMA_EXP_REGION_END_BASE_B_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24539
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_SLOPE_CNTL_B__MPCC_OGAM_RAMA_EXP_REGION_LINEAR_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24540
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_SLOPE_CNTL_B__MPCC_OGAM_RAMA_EXP_REGION_LINEAR_SLOPE_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24524
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_B__MPCC_OGAM_RAMA_EXP_REGION_START_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24526
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_B__MPCC_OGAM_RAMA_EXP_REGION_START_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24525
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_B__MPCC_OGAM_RAMA_EXP_REGION_START_SEGMENT_B__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24527
+pub const MPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_B__MPCC_OGAM_RAMA_EXP_REGION_START_SEGMENT_B_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24773
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_REGION_0_1__MPCC_OGAM_RAMB_EXP_REGION0_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24777
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_REGION_0_1__MPCC_OGAM_RAMB_EXP_REGION0_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24774
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_REGION_0_1__MPCC_OGAM_RAMB_EXP_REGION0_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24778
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_REGION_0_1__MPCC_OGAM_RAMB_EXP_REGION0_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24775
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_REGION_0_1__MPCC_OGAM_RAMB_EXP_REGION1_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24779
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_REGION_0_1__MPCC_OGAM_RAMB_EXP_REGION1_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24776
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_REGION_0_1__MPCC_OGAM_RAMB_EXP_REGION1_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24780
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_REGION_0_1__MPCC_OGAM_RAMB_EXP_REGION1_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24749
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL1_B__MPCC_OGAM_RAMB_EXP_REGION_END_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24750
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL1_B__MPCC_OGAM_RAMB_EXP_REGION_END_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24752
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL2_B__MPCC_OGAM_RAMB_EXP_REGION_END_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24754
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL2_B__MPCC_OGAM_RAMB_EXP_REGION_END_SLOPE_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24753
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL2_B__MPCC_OGAM_RAMB_EXP_REGION_END_BASE_B__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24755
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_END_CNTL2_B__MPCC_OGAM_RAMB_EXP_REGION_END_BASE_B_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24740
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_SLOPE_CNTL_B__MPCC_OGAM_RAMB_EXP_REGION_LINEAR_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24741
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_SLOPE_CNTL_B__MPCC_OGAM_RAMB_EXP_REGION_LINEAR_SLOPE_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24725
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_B__MPCC_OGAM_RAMB_EXP_REGION_START_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24727
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_B__MPCC_OGAM_RAMB_EXP_REGION_START_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24726
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_B__MPCC_OGAM_RAMB_EXP_REGION_START_SEGMENT_B__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24728
+pub const MPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_B__MPCC_OGAM_RAMB_EXP_REGION_START_SEGMENT_B_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23304
+pub const MPCC0_MPCC_MEM_PWR_CTRL__MPCC_OGAM_MEM_PWR_FORCE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23307
+pub const MPCC0_MPCC_MEM_PWR_CTRL__MPCC_OGAM_MEM_PWR_FORCE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23305
+pub const MPCC0_MPCC_MEM_PWR_CTRL__MPCC_OGAM_MEM_PWR_DIS__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:23308
+pub const MPCC0_MPCC_MEM_PWR_CTRL__MPCC_OGAM_MEM_PWR_DIS_MASK: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24511
+pub const MPCC_OGAM0_MPCC_OGAM_LUT_INDEX__MPCC_OGAM_LUT_INDEX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24512
+pub const MPCC_OGAM0_MPCC_OGAM_LUT_INDEX__MPCC_OGAM_LUT_INDEX_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24517
+pub const MPCC_OGAM0_MPCC_OGAM_LUT_RAM_CONTROL__MPCC_OGAM_LUT_WRITE_EN_MASK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24520
+pub const MPCC_OGAM0_MPCC_OGAM_LUT_RAM_CONTROL__MPCC_OGAM_LUT_WRITE_EN_MASK_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24518
+pub const MPCC_OGAM0_MPCC_OGAM_LUT_RAM_CONTROL__MPCC_OGAM_LUT_RAM_SEL__SHIFT: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24521
+pub const MPCC_OGAM0_MPCC_OGAM_LUT_RAM_CONTROL__MPCC_OGAM_LUT_RAM_SEL_MASK: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24519
+pub const MPCC_OGAM0_MPCC_OGAM_LUT_RAM_CONTROL__MPCC_OGAM_CONFIG_STATUS__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24522
+pub const MPCC_OGAM0_MPCC_OGAM_LUT_RAM_CONTROL__MPCC_OGAM_CONFIG_STATUS_MASK: u32 = 0x30;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24514
+pub const MPCC_OGAM0_MPCC_OGAM_LUT_DATA__MPCC_OGAM_LUT_DATA__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24515
+pub const MPCC_OGAM0_MPCC_OGAM_LUT_DATA__MPCC_OGAM_LUT_DATA_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24508
+pub const MPCC_OGAM0_MPCC_OGAM_MODE__MPCC_OGAM_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24509
+pub const MPCC_OGAM0_MPCC_OGAM_MODE__MPCC_OGAM_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24390
+pub const MPC_OUT0_DENORM_CONTROL__MPC_OUT_DENORM_MODE__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24393
+pub const MPC_OUT0_DENORM_CONTROL__MPC_OUT_DENORM_MODE_MASK: u32 = 0x7000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24389
+pub const MPC_OUT0_DENORM_CONTROL__MPC_OUT_DENORM_CLAMP_MAX_R_CR__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24392
+pub const MPC_OUT0_DENORM_CONTROL__MPC_OUT_DENORM_CLAMP_MAX_R_CR_MASK: u32 = 0xfff000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24388
+pub const MPC_OUT0_DENORM_CONTROL__MPC_OUT_DENORM_CLAMP_MIN_R_CR__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24391
+pub const MPC_OUT0_DENORM_CONTROL__MPC_OUT_DENORM_CLAMP_MIN_R_CR_MASK: u32 = 0xfff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24396
+pub const MPC_OUT0_DENORM_CLAMP_G_Y__MPC_OUT_DENORM_CLAMP_MAX_G_Y__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24398
+pub const MPC_OUT0_DENORM_CLAMP_G_Y__MPC_OUT_DENORM_CLAMP_MAX_G_Y_MASK: u32 = 0xfff000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24395
+pub const MPC_OUT0_DENORM_CLAMP_G_Y__MPC_OUT_DENORM_CLAMP_MIN_G_Y__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24397
+pub const MPC_OUT0_DENORM_CLAMP_G_Y__MPC_OUT_DENORM_CLAMP_MIN_G_Y_MASK: u32 = 0xfff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24401
+pub const MPC_OUT0_DENORM_CLAMP_B_CB__MPC_OUT_DENORM_CLAMP_MAX_B_CB__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24403
+pub const MPC_OUT0_DENORM_CLAMP_B_CB__MPC_OUT_DENORM_CLAMP_MAX_B_CB_MASK: u32 = 0xfff000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24400
+pub const MPC_OUT0_DENORM_CLAMP_B_CB__MPC_OUT_DENORM_CLAMP_MIN_B_CB__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24402
+pub const MPC_OUT0_DENORM_CLAMP_B_CB__MPC_OUT_DENORM_CLAMP_MIN_B_CB_MASK: u32 = 0xfff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24307
+pub const CUR_VUPDATE_LOCK_SET0__CUR_VUPDATE_LOCK_SET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:24308
+pub const CUR_VUPDATE_LOCK_SET0__CUR_VUPDATE_LOCK_SET_MASK: u32 = 0x1;

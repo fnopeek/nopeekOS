@@ -75,6 +75,21 @@ BLOCKS = {
         instances=4, const_prefix="OPTC",
         regs_struct="dcn_optc_registers", shift_struct="dcn_optc_shift", mask_struct="dcn_optc_mask",
     ),
+    # Single struct with array fields: the reg list uses SRII to fill `.F[inst]`
+    # within one struct (not an array of structs). mpcc fields span 0..5, the
+    # OUT_MUX fields 0..3.
+    "mpc": dict(
+        single=True,
+        headers=["mpc/dcn10/dcn10_mpc.h", "mpc/dcn20/dcn20_mpc.h"],
+        prefixes=["MPC_"],
+        reg_calls=[f"MPC_REG_LIST_DCN2_0({i})" for i in range(6)]
+                  + [f"MPC_OUT_MUX_REG_LIST_DCN2_0({i})" for i in range(4)]
+                  + ["MPC_DBG_REG_LIST_DCN2_0()"],
+        shift_calls=["MPC_COMMON_MASK_SH_LIST_DCN2_0(__SHIFT)", "MPC_DEBUG_REG_LIST_SH_DCN20"],
+        mask_calls=["MPC_COMMON_MASK_SH_LIST_DCN2_0(_MASK)", "MPC_DEBUG_REG_LIST_MASK_DCN20"],
+        const_prefix="MPC",
+        regs_struct="dcn20_mpc_registers", shift_struct="dcn20_mpc_shift", mask_struct="dcn20_mpc_mask",
+    ),
 }
 
 
@@ -110,28 +125,134 @@ def expand(macros_h, call):
         return re.search(r"START(.*)END", r.stdout, re.S).group(1)
 
 
-def gen(block):
-    cfg = BLOCKS[block]
-    # Extract from the resource file (its SR/SRI/BASE family), the block headers
-    # (the REG_LIST/MASK_SH/<BLK>_SF macros) and reg_helper.h (the bare SF). Dedup
-    # by macro name, first wins, so the resource file's SR/SRI/BASE are the ones
-    # used and reg_helper's identical copies don't redefine them.
-    srcs = [RESOURCE.replace("../display/dc/", "")] + cfg["headers"]
-    # `SF` is the universal field macro (`.field = reg__field<post>`), defined
-    # identically in dozens of DC headers but in none of the block headers; inject
-    # the canonical form so a mask list that uses bare SF (e.g. optc's
-    # TG_COMMON_MASK_SH_LIST) expands. Same shape as the SRI/SRII family above.
+def build_macros(cfg):
+    """The isolated macro set for a block: the resource file's SR/SRI/BASE family
+    and the block headers' REG_LIST/MASK_SH/<BLK>_SF macros, deduped by name
+    (first wins, so the resource file's SR/SRI/BASE are used), plus the injected
+    universal bare `SF` field macro (used by e.g. optc's/mpc's mask lists)."""
     seen, blocks = {"SF"}, [
         "#define SF(reg_name, field_name, post_fix)"
         " .field_name = reg_name ## __ ## field_name ## post_fix"
     ]
-    for h in srcs:
+    for h in [RESOURCE.replace("../display/dc/", "")] + cfg["headers"]:
         for b in defines_from(DC + "/" + h, cfg["prefixes"]):
             name = re.match(r"\s*#\s*define\s+(\w+)", b).group(1)
             if name not in seen:
                 seen.add(name)
                 blocks.append(b)
-    macros_h = "\n".join(blocks) + "\n"
+    return "\n".join(blocks) + "\n"
+
+
+def existing_names():
+    out = set()
+    for raw in open(os.path.join(HERE, "regs.list")):
+        s = raw.strip()
+        if s and not s.startswith("#"):
+            out.add(re.match(r"^(\w+)", s).group(1))
+    return out
+
+
+def shift_mask_fields(cfg, macros_h):
+    """field -> shift macro, field -> mask macro (last wins), in order."""
+    sh, mk = {}, {}
+    for f, mac in re.findall(r"\.(\w+)\s*=\s*(\w+)",
+                             ",".join(expand(macros_h, c) for c in cfg["shift_calls"])):
+        sh[f] = mac
+    for f, mac in re.findall(r"\.(\w+)\s*=\s*(\w+)",
+                             ",".join(expand(macros_h, c) for c in cfg["mask_calls"])):
+        mk[f] = mac
+    return sh, mk, list(sh.keys())
+
+
+def emit_shift_mask(block, cfg, sh, mk, fld_order, existing, rl):
+    """Append the shift/mask regs.list lines (skipping literal values and names
+    already present) and return the three Rust struct defs + the two statics."""
+    rl.append(f"# DC {block} field shifts/masks ({' + '.join(cfg['shift_calls'])})")
+    for f in fld_order:
+        for mac in (sh[f], mk[f]):
+            if re.fullmatch(r"0x[0-9a-fA-F]+|\d+", mac):
+                continue
+            if mac not in existing:
+                rl.append(f"{mac} @ {RESOURCE}")
+                existing.add(mac)
+    out = [_struct(cfg["shift_struct"], fld_order, "u8"), "",
+           _struct(cfg["mask_struct"], fld_order, "u32"), "",
+           f"pub static {cfg['const_prefix']}_SHIFT: {cfg['shift_struct']} = {cfg['shift_struct']} {{"]
+    out += [f"    {f}: {sh[f]} as u8," for f in fld_order]
+    out += ["};", "",
+            f"pub static {cfg['const_prefix']}_MASK: {cfg['mask_struct']} = {cfg['mask_struct']} {{"]
+    out += [f"    {f}: {mk[f]}," for f in fld_order]
+    out += ["};"]
+    return out
+
+
+def _struct(name, fields, ty):
+    s = ["#[derive(Default, Clone, Copy)]", f"pub struct {name} {{"]
+    s += [f"    pub {f}: {ty}," for f in fields]
+    s += ["}"]
+    return "\n".join(s)
+
+
+def gen_single(block, cfg):
+    """A block whose register table is a single struct with array/scalar fields
+    (the reg list uses SRII with an instance index into `.FIELD[inst]`), e.g. mpc
+    and hubbub — as opposed to the per-pipe array of structs `gen` handles."""
+    macros_h = build_macros(cfg)
+    txt = ",".join(expand(macros_h, c) for c in cfg["reg_calls"])
+    # (field, idx-or-'', register); idx present => an array field
+    entries = re.findall(r"\.(\w+)(?:\[(\d+)\])?\s*=\s*[^,]*?\+\s*(mm\w+)", txt)
+    order, arr, sca = [], {}, {}
+    for f, idx, reg in entries:
+        if f not in order:
+            order.append(f)
+        if idx != "":
+            arr.setdefault(f, {})[int(idx)] = reg
+        else:
+            sca[f] = reg
+    sizes = {f: max(d) + 1 for f, d in arr.items()}
+    sh, mk, fld_order = shift_mask_fields(cfg, macros_h)
+    existing = existing_names()
+
+    rl = [f"# DC {block}: {cfg['regs_struct']} (single struct, array/scalar fields)",
+          f"# ({' + '.join(cfg['reg_calls'])}) — field value is BASE(mmX_BASE_IDX)+mmX."]
+
+    def off(name, reg):
+        if name not in existing:
+            rl.append(f"{name} = BASE({reg}_BASE_IDX) + {reg} @ {RESOURCE}")
+            existing.add(name)
+
+    for f in order:
+        if f in arr:
+            for i in range(sizes[f]):
+                off(f"{cfg['const_prefix']}_{f}_{i}", arr[f][i])
+        else:
+            off(f"{cfg['const_prefix']}_{f}", sca[f])
+
+    ru = []
+    s = ["#[derive(Default, Clone, Copy)]", f"pub struct {cfg['regs_struct']} {{"]
+    for f in order:
+        s.append(f"    pub {f}: [u32; {sizes[f]}]," if f in arr else f"    pub {f}: u32,")
+    s.append("}")
+    ru.append("\n".join(s))
+    ru.append("")
+    ru.append(f"pub static {cfg['const_prefix']}_REGS: {cfg['regs_struct']} = {cfg['regs_struct']} {{")
+    for f in order:
+        if f in arr:
+            vals = ", ".join(f"{cfg['const_prefix']}_{f}_{i}" for i in range(sizes[f]))
+            ru.append(f"    {f}: [{vals}],")
+        else:
+            ru.append(f"    {f}: {cfg['const_prefix']}_{f},")
+    ru.append("};")
+    ru.append("")
+    ru += emit_shift_mask(block, cfg, sh, mk, fld_order, existing, rl)
+    return "\n".join(rl) + "\n", "\n".join(ru) + "\n", (len(order), len(fld_order))
+
+
+def gen(block):
+    cfg = BLOCKS[block]
+    if cfg.get("single"):
+        return gen_single(block, cfg)
+    macros_h = build_macros(cfg)
     # field -> register, per instance (reg_calls concatenated)
     per_inst = []
     reg_fields = None
@@ -220,5 +341,6 @@ if __name__ == "__main__":
     rl, ru, (nr, nf) = gen(block)
     open(os.path.join(HERE, f".dcgen_{block}.regs"), "w").write(rl)
     open(os.path.join(HERE, f".dcgen_{block}.rs"), "w").write(ru)
-    print(f"{block}: {nr} reg fields x {BLOCKS[block]['instances']} inst, {nf} shift/mask fields")
+    inst = BLOCKS[block].get("instances", "single")
+    print(f"{block}: {nr} reg fields x {inst} inst, {nf} shift/mask fields")
     print(f"wrote .dcgen_{block}.regs ({rl.count(chr(10))} lines) and .dcgen_{block}.rs")

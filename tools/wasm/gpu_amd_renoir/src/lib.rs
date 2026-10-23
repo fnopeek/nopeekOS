@@ -48,6 +48,7 @@ mod dccg;
 mod dce_clock_source;
 mod dcn10_ipp;
 mod dcn20_dpp;
+mod dcn20_mpc;
 mod dcn20_opp;
 mod dcn20_optc;
 mod dcn21_hubp;

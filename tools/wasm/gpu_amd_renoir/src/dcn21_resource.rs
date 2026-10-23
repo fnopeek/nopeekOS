@@ -11,6 +11,7 @@ use crate::dc_types::dc_caps;
 use crate::dccg::{dccg21_create, DCCG_MASK, DCCG_REGS, DCCG_SHIFT};
 use crate::dcn10_ipp::dcn21_ipp_create;
 use crate::dcn20_dpp::dcn21_dpp_create;
+use crate::dcn20_mpc::dcn21_mpc_create;
 use crate::dcn20_opp::dcn21_opp_create;
 use crate::dcn20_optc::dcn21_timing_generator_create;
 use crate::dcn21_hubp::dcn21_hubp_create;
@@ -156,4 +157,8 @@ pub fn dcn21_resource_construct(dc: &mut dc, pool: &mut resource_pool) {
         pool.opps[i] = Some(dcn21_opp_create(i as u32));
         pool.timing_generators[i] = Some(dcn21_timing_generator_create(i as u32));
     }
+
+    // After the ddc loop (aux/i2c, not yet ported) Linux sets
+    // timing_generator_count/pipe_count/mpcc_count = j; then the MPC.
+    pool.mpc = Some(dcn21_mpc_create());
 }

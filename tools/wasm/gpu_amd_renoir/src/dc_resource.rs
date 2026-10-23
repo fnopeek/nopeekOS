@@ -6,6 +6,7 @@
 use crate::dccg::dcn_dccg;
 use crate::dcn10_ipp::dcn10_ipp;
 use crate::dcn20_dpp::dcn20_dpp;
+use crate::dcn20_mpc::dcn20_mpc;
 use crate::dcn20_opp::dcn20_opp;
 use crate::dcn20_optc::optc;
 use crate::dcn21_hubp::dcn21_hubp;
@@ -71,6 +72,8 @@ pub struct resource_pool {
     pub opps: [Option<Box<dcn20_opp>>; MAX_PIPES],
     /// `timing_generators[MAX_PIPES]`: the OTGs, one per pipe.
     pub timing_generators: [Option<Box<optc>>; MAX_PIPES],
+    /// `mpc`: the multiple pipe/plane combiner (one per device).
+    pub mpc: Option<Box<dcn20_mpc>>,
     /// `res_cap`: the per-ASIC count table (Renoir → `RES_CAP_RN`).
     pub res_cap: Option<&'static resource_caps>,
 }
