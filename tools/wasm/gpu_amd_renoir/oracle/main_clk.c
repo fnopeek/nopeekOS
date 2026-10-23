@@ -145,6 +145,7 @@ struct dc_bios {
 	bool fw_info_valid;
 	struct dc_vram_info vram_info;
 	struct bp_soc_bb_info bb_info;
+	struct dc_golden_table golden_table;
 };
 struct cmd_tbl {
 	void *dig_encoder_control, *transmitter_control, *set_pixel_clock, *set_crtc_timing,

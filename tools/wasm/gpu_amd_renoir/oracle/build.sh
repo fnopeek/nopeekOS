@@ -390,10 +390,12 @@ DB=$AMD/display/dc/bios
         graphics_object_hpd_info connector_device_tag_info
 } > "$B/bios_types_grph.h"
 {
-    $X "$AMD/display/include/bios_parser_types.h" bp_result bp_soc_bb_info as_signal_type bp_disp_connector_caps_info
+    $X "$AMD/display/include/bios_parser_types.h" bp_result bp_soc_bb_info as_signal_type bp_disp_connector_caps_info \
+        bp_encoder_cap_info
     $X "$AMD/display/include/bios_parser_interface.h" bp_init_data
     $X "$DB/bios_parser_types_internal2.h" atom_data_revision object_info_table '#BP_FROM_DCB'
     $X "$DB/bios_parser_helper.h" '#GET_IMAGE' '#BIOS_MAX_NUM_RECORD'
+    $X "$AMD/display/dc/dc_types.h" dc_golden_table
 } > "$B/bios_types.h"
 {
     $X "$DB/bios_parser_helper.c" bios_get_image
@@ -412,7 +414,8 @@ DB=$AMD/display/dc/bios
         get_bios_object_from_path_v3 bios_parser_get_i2c_info get_gpio_i2c_info get_hpd_record_for_path_v3 \
         bios_parser_get_hpd_info get_hpd_record bios_parser_get_gpio_pin_info device_type_from_device_id \
         bios_parser_get_device_tag get_support_mask_for_device_id bios_parser_is_device_id_supported \
-        get_disp_connector_caps_record get_connector_caps_record bios_parser_get_disp_connector_caps_info
+        get_disp_connector_caps_record get_connector_caps_record bios_parser_get_disp_connector_caps_info \
+        get_encoder_cap_record bios_parser_get_encoder_cap_info bios_get_golden_table bios_get_atom_dc_golden_table
     $X "$DB/command_table2.c" '#GET_INDEX_INTO_MASTER_TABLE' '#BIOS_CMD_TABLE_REVISION' \
         '#BIOS_CMD_TABLE_PARA_REVISION' bios_cmd_table_para_revision init_dig_encoder_control \
         init_transmitter_control init_set_pixel_clock init_set_crtc_timing init_enable_crtc \
@@ -483,6 +486,32 @@ mkdir -p "$B/dc_shim"
 } > "$B/gpio_link.c"
 GPIO_CF="-I $HERE/shim_dc -I $B/dc_shim -I $AMD/display -I $DCS -I $DCS/inc -I $DCS/gpio -I $AMD/display/include -I $AMD/include/asic_reg"
 
+# The links: construct_phy / link_create / create_links with the link
+# encoder and panel control constructors, on top of the GPIO pins above.
+{
+    $X "$DCS/inc/hw/hw_shared.h" '#MAX_DPIA' '#MAX_CONNECTOR' '#MAX_VIRTUAL_LINKS' '#MAX_LINKS' '#MAX_DIG_LINK_ENCODERS'
+    $X "$DCS/dc_hw_types.h" dc_color_depth
+    $X "$DCS/dc_types.h" dc_psr_version display_endpoint_type dc_hpd_enable_select
+    $X "$DCS/inc/hw/link_encoder.h" encoder_init_data encoder_feature_support link_encoder
+    $X "$DCS/dio/dcn10/dcn10_link_encoder.h" dcn10_link_encoder
+    $X "$DCS/inc/hw/panel_cntl.h" panel_cntl_backlight_registers panel_cntl_init_data panel_cntl
+    $X "$DCS/dce/dce_panel_cntl.h" dce_panel_cntl
+    $X "$DCS/inc/link_service.h" link_init_data
+} > "$B/link_types.h"
+{
+    $X "$DCS/dce/dce_panel_cntl.c" dce_panel_cntl_construct
+    $X "$DCS/dcn21/dcn21_link_encoder.c" dcn21_link_encoder_construct
+    $X "$DCS/virtual/virtual_link_encoder.c" virtual_link_encoder_construct
+    $X "$DCS/resource/dcn21/dcn21_resource.c" link_enc_feature map_transmitter_id_to_phy_instance \
+        dcn21_link_encoder_create dcn21_panel_cntl_create
+    $X "$DCS/link/protocols/link_ddc.c" ddc_service_destruct link_destroy_ddc_service get_ddc_pin
+    $X "$DCS/link/protocols/link_hpd.c" get_hpd_line program_hpd_filter
+    $X "$DCS/link/protocols/link_edp_panel_control.c" is_smartmux_suported
+    $X "$DCS/link/link_factory.c" translate_encoder_to_transmitter get_ddc_line construct_phy link_create
+    $X "$DCS/core/dc.c" get_num_of_internal_disp create_links
+} > "$B/link_funcs.c"
+python3 -I "$HERE/protos.py" "$B/link_funcs.c" > "$B/link_protos.h"
+
 CF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
 gcc $CF -c "$B/atom.c" -o "$B/atom.o"
 gcc $CF "$HERE/main.c" "$B/atom.o" -o "$B/oracle_atom"
@@ -496,6 +525,7 @@ for f in gpio_base gpio_service hw_gpio hw_hpd hw_ddc hw_generic dcn21/hw_factor
 done
 gcc $CF $GPIO_CF -c "$B/dc_helper_extracted.c" -o "$B/dc_helper_extracted.o"
 gcc $CF $GPIO_CF "$HERE/main_gpio.c" $GPIO_O "$B/dc_helper_extracted.o" "$B/atom.o" -o "$B/oracle_gpio"
+gcc $CF $GPIO_CF "$HERE/main_link.c" $GPIO_O "$B/dc_helper_extracted.o" "$B/atom.o" -o "$B/oracle_link"
 gcc $CF -I "$AMD/include/asic_reg" -I "$AMD/display/dc" -I "$AMD/display/include" "$HERE/main_clk.c" "$B/atom.o" -o "$B/oracle_clk"
 gcc $CF "$HERE/main_psp.c" -o "$B/oracle_psp"
 gcc $CF "$HERE/main_discovery.c" -o "$B/oracle_discovery"

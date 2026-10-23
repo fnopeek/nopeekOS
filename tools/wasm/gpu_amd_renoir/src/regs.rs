@@ -22851,3 +22851,133 @@ pub const DC_IRQ_SOURCE_HPD1RX: u32 = 0x7;
 pub const DC_IRQ_SOURCE_DCI2C_RR_DDC1: u32 = 0x6f;
 /// ?
 pub const DC_IRQ_SOURCE_GPIOPAD0: u32 = 0x21;
+
+// construct_phy (link/link_factory.c): encoder caps record, signals, transmitters, channels, HPD sources
+/// The value of `sizeof(struct atom_encoder_caps_record)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ENCCAPREC_SIZE: u32 = 0x6;
+/// The value of `offsetof(struct atom_encoder_caps_record, encodercaps)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ENCCAPREC_ENCODERCAPS: u32 = 0x2;
+/// The value of `ATOM_ENCODER_CAP_RECORD_TYPE` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_ENCODER_CAP_RECORD_TYPE: u32 = 0x14;
+/// The value of `ATOM_ENCODER_CAP_RECORD_HBR2` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_ENCODER_CAP_RECORD_HBR2: u32 = 0x1;
+/// The value of `ATOM_ENCODER_CAP_RECORD_HBR2_EN` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_ENCODER_CAP_RECORD_HBR2_EN: u32 = 0x2;
+/// The value of `ATOM_ENCODER_CAP_RECORD_HBR3_EN` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_ENCODER_CAP_RECORD_HBR3_EN: u32 = 0x8;
+/// The value of `ATOM_ENCODER_CAP_RECORD_HDMI6Gbps_EN` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_ENCODER_CAP_RECORD_HDMI6Gbps_EN: u32 = 0x4;
+/// The value of `ATOM_ENCODER_CAP_RECORD_DP2` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_ENCODER_CAP_RECORD_DP2: u32 = 0x10;
+/// The value of `ATOM_ENCODER_CAP_RECORD_UHBR10_EN` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_ENCODER_CAP_RECORD_UHBR10_EN: u32 = 0x20;
+/// The value of `ATOM_ENCODER_CAP_RECORD_UHBR13_5_EN` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_ENCODER_CAP_RECORD_UHBR13_5_EN: u32 = 0x40;
+/// The value of `ATOM_ENCODER_CAP_RECORD_UHBR20_EN` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_ENCODER_CAP_RECORD_UHBR20_EN: u32 = 0x80;
+/// The value of `ATOM_ENCODER_CAP_RECORD_USB_C_TYPE` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_ENCODER_CAP_RECORD_USB_C_TYPE: u32 = 0x100;
+/// The value of `SIGNAL_TYPE_NONE` in ../display/dc/link/link_factory.c
+pub const LF_SIGNAL_TYPE_NONE: u32 = 0x0;
+/// The value of `SIGNAL_TYPE_DVI_SINGLE_LINK` in ../display/dc/link/link_factory.c
+pub const LF_SIGNAL_TYPE_DVI_SINGLE_LINK: u32 = 0x1;
+/// The value of `SIGNAL_TYPE_DVI_DUAL_LINK` in ../display/dc/link/link_factory.c
+pub const LF_SIGNAL_TYPE_DVI_DUAL_LINK: u32 = 0x2;
+/// The value of `SIGNAL_TYPE_HDMI_TYPE_A` in ../display/dc/link/link_factory.c
+pub const LF_SIGNAL_TYPE_HDMI_TYPE_A: u32 = 0x4;
+/// The value of `SIGNAL_TYPE_LVDS` in ../display/dc/link/link_factory.c
+pub const LF_SIGNAL_TYPE_LVDS: u32 = 0x8;
+/// The value of `SIGNAL_TYPE_RGB` in ../display/dc/link/link_factory.c
+pub const LF_SIGNAL_TYPE_RGB: u32 = 0x10;
+/// The value of `SIGNAL_TYPE_DISPLAY_PORT` in ../display/dc/link/link_factory.c
+pub const LF_SIGNAL_TYPE_DISPLAY_PORT: u32 = 0x20;
+/// The value of `SIGNAL_TYPE_DISPLAY_PORT_MST` in ../display/dc/link/link_factory.c
+pub const LF_SIGNAL_TYPE_DISPLAY_PORT_MST: u32 = 0x40;
+/// The value of `SIGNAL_TYPE_EDP` in ../display/dc/link/link_factory.c
+pub const LF_SIGNAL_TYPE_EDP: u32 = 0x80;
+/// The value of `SIGNAL_TYPE_VIRTUAL` in ../display/dc/link/link_factory.c
+pub const LF_SIGNAL_TYPE_VIRTUAL: u32 = 0x200;
+/// The value of `TRANSMITTER_UNKNOWN` in ../display/dc/link/link_factory.c
+pub const LF_TRANSMITTER_UNKNOWN: u64 = 0xffffffffffffffff;
+/// The value of `TRANSMITTER_UNIPHY_A` in ../display/dc/link/link_factory.c
+pub const LF_TRANSMITTER_UNIPHY_A: u32 = 0x0;
+/// The value of `TRANSMITTER_UNIPHY_B` in ../display/dc/link/link_factory.c
+pub const LF_TRANSMITTER_UNIPHY_B: u32 = 0x1;
+/// The value of `TRANSMITTER_UNIPHY_C` in ../display/dc/link/link_factory.c
+pub const LF_TRANSMITTER_UNIPHY_C: u32 = 0x2;
+/// The value of `TRANSMITTER_UNIPHY_D` in ../display/dc/link/link_factory.c
+pub const LF_TRANSMITTER_UNIPHY_D: u32 = 0x3;
+/// The value of `TRANSMITTER_UNIPHY_E` in ../display/dc/link/link_factory.c
+pub const LF_TRANSMITTER_UNIPHY_E: u32 = 0x4;
+/// The value of `TRANSMITTER_UNIPHY_F` in ../display/dc/link/link_factory.c
+pub const LF_TRANSMITTER_UNIPHY_F: u32 = 0x5;
+/// The value of `TRANSMITTER_UNIPHY_G` in ../display/dc/link/link_factory.c
+pub const LF_TRANSMITTER_UNIPHY_G: u32 = 0x9;
+/// The value of `TRANSMITTER_NUTMEG_CRT` in ../display/dc/link/link_factory.c
+pub const LF_TRANSMITTER_NUTMEG_CRT: u32 = 0x6;
+/// The value of `TRANSMITTER_TRAVIS_CRT` in ../display/dc/link/link_factory.c
+pub const LF_TRANSMITTER_TRAVIS_CRT: u32 = 0x7;
+/// The value of `TRANSMITTER_TRAVIS_LCD` in ../display/dc/link/link_factory.c
+pub const LF_TRANSMITTER_TRAVIS_LCD: u32 = 0x8;
+/// The value of `CHANNEL_ID_UNKNOWN` in ../display/dc/link/link_factory.c
+pub const LF_CHANNEL_ID_UNKNOWN: u32 = 0x0;
+/// The value of `CHANNEL_ID_DDC1` in ../display/dc/link/link_factory.c
+pub const LF_CHANNEL_ID_DDC1: u32 = 0x1;
+/// The value of `CHANNEL_ID_DDC2` in ../display/dc/link/link_factory.c
+pub const LF_CHANNEL_ID_DDC2: u32 = 0x2;
+/// The value of `CHANNEL_ID_DDC3` in ../display/dc/link/link_factory.c
+pub const LF_CHANNEL_ID_DDC3: u32 = 0x3;
+/// The value of `CHANNEL_ID_DDC4` in ../display/dc/link/link_factory.c
+pub const LF_CHANNEL_ID_DDC4: u32 = 0x4;
+/// The value of `CHANNEL_ID_DDC5` in ../display/dc/link/link_factory.c
+pub const LF_CHANNEL_ID_DDC5: u32 = 0x5;
+/// The value of `CHANNEL_ID_DDC6` in ../display/dc/link/link_factory.c
+pub const LF_CHANNEL_ID_DDC6: u32 = 0x6;
+/// The value of `CHANNEL_ID_DDC_VGA` in ../display/dc/link/link_factory.c
+pub const LF_CHANNEL_ID_DDC_VGA: u32 = 0x7;
+/// The value of `CHANNEL_ID_I2C_PAD` in ../display/dc/link/link_factory.c
+pub const LF_CHANNEL_ID_I2C_PAD: u32 = 0x8;
+/// The value of `HPD_SOURCEID_UNKNOWN` in ../display/dc/link/link_factory.c
+pub const LF_HPD_SOURCEID_UNKNOWN: u32 = 0x7;
+/// The value of `HPD_SOURCEID1` in ../display/dc/link/link_factory.c
+pub const LF_HPD_SOURCEID1: u32 = 0x0;
+/// The value of `HPD_SOURCEID2` in ../display/dc/link/link_factory.c
+pub const LF_HPD_SOURCEID2: u32 = 0x1;
+/// The value of `HPD_SOURCEID3` in ../display/dc/link/link_factory.c
+pub const LF_HPD_SOURCEID3: u32 = 0x2;
+/// The value of `HPD_SOURCEID4` in ../display/dc/link/link_factory.c
+pub const LF_HPD_SOURCEID4: u32 = 0x3;
+/// The value of `HPD_SOURCEID5` in ../display/dc/link/link_factory.c
+pub const LF_HPD_SOURCEID5: u32 = 0x4;
+/// The value of `HPD_SOURCEID6` in ../display/dc/link/link_factory.c
+pub const LF_HPD_SOURCEID6: u32 = 0x5;
+/// The value of `DC_IRQ_SOURCE_HPD2` in ../display/dc/link/link_factory.c
+pub const LF_DC_IRQ_SOURCE_HPD2: u32 = 0x2;
+/// The value of `DC_IRQ_SOURCE_HPD3` in ../display/dc/link/link_factory.c
+pub const LF_DC_IRQ_SOURCE_HPD3: u32 = 0x3;
+/// The value of `DC_IRQ_SOURCE_HPD4` in ../display/dc/link/link_factory.c
+pub const LF_DC_IRQ_SOURCE_HPD4: u32 = 0x4;
+/// The value of `DC_IRQ_SOURCE_HPD5` in ../display/dc/link/link_factory.c
+pub const LF_DC_IRQ_SOURCE_HPD5: u32 = 0x5;
+/// The value of `DC_IRQ_SOURCE_HPD6` in ../display/dc/link/link_factory.c
+pub const LF_DC_IRQ_SOURCE_HPD6: u32 = 0x6;
+/// The value of `COLOR_DEPTH_121212` in ../display/dc/link/link_factory.c
+pub const LF_COLOR_DEPTH_121212: u32 = 0x4;
+/// The value of `ENGINE_ID_UNKNOWN` in ../display/dc/link/link_factory.c
+pub const LF_ENGINE_ID_UNKNOWN: u64 = 0xffffffffffffffff;
+/// The value of `DISPLAY_ENDPOINT_PHY` in ../display/dc/link/link_factory.c
+pub const LF_DISPLAY_ENDPOINT_PHY: u32 = 0x0;
+/// The value of `DC_PSR_VERSION_UNSUPPORTED` in ../display/dc/link/link_factory.c
+pub const LF_DC_PSR_VERSION_UNSUPPORTED: u32 = 0xffffffff;
+/// The value of `DEVICE_TYPE_CRT` in ../display/dc/link/link_factory.c
+pub const LF_DEVICE_TYPE_CRT: u32 = 0x2;
+/// The value of `DEVICE_TYPE_LCD` in ../display/dc/link/link_factory.c
+pub const LF_DEVICE_TYPE_LCD: u32 = 0x1;
+/// The value of `AMD_EXT_DISPLAY_PATH_CAPS__EXT_CHIP_MASK` in ../display/dc/link/link_factory.c
+pub const LF_AMD_EXT_DISPLAY_PATH_CAPS__EXT_CHIP_MASK: u32 = 0x7e;
+/// The value of `AMD_EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN` in ../display/dc/link/link_factory.c
+pub const LF_AMD_EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN: u32 = 0x2;
+/// The value of `MAX_LINKS` in ../display/dc/link/link_factory.c
+pub const LF_MAX_LINKS: u32 = 0x10;
+/// The value of `ENUM_ID_COUNT` in ../display/dc/link/link_factory.c
+pub const LF_ENUM_ID_COUNT: u32 = 0x8;

@@ -158,7 +158,15 @@ pub struct resource_pool {
     /// `pp_smu`: the power-play SMU interface (None if the DM offers no
     /// Renoir table — Linux zeroes it then).
     pub pp_smu: Option<crate::dm_pp_smu::pp_smu_funcs>,
+    /// `link_encoders[MAX_DIG_LINK_ENCODERS]`: per DIG, the index of the link
+    /// whose encoder it is (Linux stores the encoder pointer the link owns).
+    pub link_encoders: [Option<u32>; MAX_DIG_LINK_ENCODERS],
+    pub dig_link_enc_count: u32,
+    pub usb4_dpia_count: u32,
 }
+
+/// `MAX_DIG_LINK_ENCODERS` (hw_shared.h).
+pub const MAX_DIG_LINK_ENCODERS: usize = 7;
 
 /// The anonymous `ref_clocks` member of `struct resource_pool` (core_types.h).
 #[derive(Default, Clone, Copy)]

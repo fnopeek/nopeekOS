@@ -14,6 +14,7 @@
 #define ASSERT_CRITICAL(x) do { } while (0)
 #define BREAK_TO_DEBUGGER() do { } while (0)
 #define DC_ERR(...) do { } while (0)
+#define DC_ERROR(...) do { } while (0)
 #define dm_error(...) do { } while (0)
 #define dm_output_to_console(...) do { } while (0)
 #define msleep(ms) do { } while (0)
@@ -38,6 +39,9 @@ struct dc_context {
 	struct dc_dmub_srv *dmub_srv;
 	struct gpio_service *gpio_service;
 	struct dc_bios *dc_bios;
+	uint32_t dc_sink_id_count;
+	uint32_t dc_stream_id_count;
+	uint32_t dc_edp_id_count;
 	void *logger;
 };
 

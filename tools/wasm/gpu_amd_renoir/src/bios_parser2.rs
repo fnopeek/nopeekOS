@@ -1306,3 +1306,61 @@ pub fn bios_parser_get_disp_connector_caps_info(bp: &bios_parser, bios: &[u8], o
     info.INTERNAL_DISPLAY_BL = caps & BP2_ATOM_CONNECTOR_CAP_INTERNAL_DISPLAY_BL != 0;
     bp_result::BP_RESULT_OK
 }
+
+/// `struct bp_encoder_cap_info` (bios_parser_types.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct bp_encoder_cap_info {
+    pub DP_HBR2_CAP: bool,
+    pub DP_HBR2_EN: bool,
+    pub DP_HBR3_EN: bool,
+    pub HDMI_6GB_EN: bool,
+    pub IS_DP2_CAPABLE: bool,
+    pub DP_UHBR10_EN: bool,
+    pub DP_UHBR13_5_EN: bool,
+    pub DP_UHBR20_EN: bool,
+    pub DP_IS_USB_C: bool,
+}
+
+/// `bios_parser_get_encoder_cap_info` (bios_parser2.c), through
+/// `get_encoder_cap_record`. A v1.5 object table has no encoder cap record.
+pub fn bios_parser_get_encoder_cap_info(bp: &bios_parser, bios: &[u8], object_id: graphics_object_id,
+                                        info: &mut bp_encoder_cap_info) -> bp_result {
+    if bp.object_info_tbl.revision.minor == 5 {
+        return bp_result::BP_RESULT_NORECORD;
+    }
+
+    let Some(object) = get_bios_object(bp, bios, object_id) else { return bp_result::BP_RESULT_BADINPUT };
+
+    let mut offset = u16_at(bios, object + BP2_PATHV2_ENCODER_RECORDOFFSET) as u32 + bp.object_info_tbl_offset;
+    let mut record = None;
+    for _ in 0..BP2_BIOS_MAX_NUM_RECORD {
+        let Some(header) = bp.get_image(bios, offset, BP2_RECHDR_SIZE) else { break };
+        let record_type = u8_at(bios, header + BP2_RECHDR_RECORD_TYPE) as u32;
+        let record_size = u8_at(bios, header + BP2_RECHDR_RECORD_SIZE) as u32;
+        offset += record_size;
+        if record_type == BP2_LAST_RECORD_TYPE || record_size == 0 {
+            break;
+        }
+        if record_type != BP2_ATOM_ENCODER_CAP_RECORD_TYPE {
+            continue;
+        }
+        if BP2_ENCCAPREC_SIZE <= record_size {
+            record = Some(header);
+            break;
+        }
+    }
+    let Some(r) = record else { return bp_result::BP_RESULT_NORECORD };
+
+    let caps = u32_at(bios, r + BP2_ENCCAPREC_ENCODERCAPS);
+    info.DP_HBR2_CAP = caps & BP2_ATOM_ENCODER_CAP_RECORD_HBR2 != 0;
+    info.DP_HBR2_EN = caps & BP2_ATOM_ENCODER_CAP_RECORD_HBR2_EN != 0;
+    info.DP_HBR3_EN = caps & BP2_ATOM_ENCODER_CAP_RECORD_HBR3_EN != 0;
+    info.HDMI_6GB_EN = caps & BP2_ATOM_ENCODER_CAP_RECORD_HDMI6Gbps_EN != 0;
+    info.IS_DP2_CAPABLE = caps & BP2_ATOM_ENCODER_CAP_RECORD_DP2 != 0;
+    info.DP_UHBR10_EN = caps & BP2_ATOM_ENCODER_CAP_RECORD_UHBR10_EN != 0;
+    info.DP_UHBR13_5_EN = caps & BP2_ATOM_ENCODER_CAP_RECORD_UHBR13_5_EN != 0;
+    info.DP_UHBR20_EN = caps & BP2_ATOM_ENCODER_CAP_RECORD_UHBR20_EN != 0;
+    info.DP_IS_USB_C = caps & BP2_ATOM_ENCODER_CAP_RECORD_USB_C_TYPE != 0;
+
+    bp_result::BP_RESULT_OK
+}

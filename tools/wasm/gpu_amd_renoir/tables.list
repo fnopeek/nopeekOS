@@ -105,3 +105,12 @@ ddc_mask: u32
 generic_regs: u32
 generic_shift: u32
 generic_mask: u32
+@ ../display/dc/resource/dcn21/dcn21_resource.c
+link_enc_regs: u32
+link_enc_aux_regs: u32
+link_enc_hpd_regs: u32
+le_shift: u8
+le_mask: u32
+panel_cntl_regs: u32
+panel_cntl_shift: u8
+panel_cntl_mask: u32

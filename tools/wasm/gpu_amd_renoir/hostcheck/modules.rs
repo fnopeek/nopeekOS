@@ -197,3 +197,9 @@ mod gpio_base;
 mod link_ddc;
 #[path = "../src/link_hpd.rs"]
 mod link_hpd;
+#[path = "../src/dce_panel_cntl.rs"]
+mod dce_panel_cntl;
+#[path = "../src/dcn21_link_encoder.rs"]
+mod dcn21_link_encoder;
+#[path = "../src/link_factory.rs"]
+mod link_factory;

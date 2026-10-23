@@ -10,6 +10,10 @@
 
 use crate::amdgpu_device::amdgpu_device;
 use crate::clk_mgr::dc_clk_mgr_create;
+use crate::bios_parser2::{bios_parser_get_connector_id, bios_parser_get_connectors_number};
+use crate::link_factory::{create_virtual_link, dc_link, get_num_of_internal_disp, link_create, link_ctx, link_init_data};
+use crate::regs::{LF_ENUM_ID_COUNT, LF_MAX_LINKS};
+use alloc::vec::Vec;
 use crate::dc_resource::{dc_create_resource_pool, resource_parse_asic_id, resource_pool, NO_UNDERLAY_PIPE};
 use crate::gpio_service::{dal_gpio_service_create, gpio_service};
 use crate::bios_parser2::{bios_parser, bp_init_data, dal_bios_parser_create};
@@ -77,6 +81,8 @@ pub struct dc_config {
     pub is_asymmetric_memory: bool,
     pub force_bios_fixed_vs: u32,
     pub ignore_dpref_ss: bool,
+    pub allow_edp_hotplug_detection: u32,
+    pub smart_mux_version: i32,
 }
 
 /// `enum pipe_split_policy` (dc.h).
@@ -121,6 +127,7 @@ pub struct dc_debug_options {
     pub use_max_lb: bool,
     pub enable_legacy_fast_update: bool,
     pub using_dml2: bool,
+    pub hdmi20_disable: bool,
 }
 
 /// Which `dc_cap_funcs` entry is bound (dcn21 sets only
@@ -156,6 +163,62 @@ pub struct dc {
     pub debug: dc_debug_options,
     /// `clk_mgr`: Renoir's is the `clk_mgr_internal` of rn_clk_mgr.
     pub clk_mgr: Option<Box<crate::clk_mgr::clk_mgr_internal>>,
+    /// `links[MAX_LINKS]`, `link_count` of them.
+    pub links: Vec<Box<dc_link>>,
+    pub lowest_dpia_link_index: u32,
+}
+
+/// `create_links` (dc.c). The VBIOS reports the number of valid connector
+/// indices, not which ones carry a connector, so an index without one is
+/// skipped. USB4 DPIA links: `usb4_dpia_count` is 0 on Renoir.
+pub fn create_links(adev: &amdgpu_device, dc: &mut dc, num_virtual_links: u32) -> bool {
+    let bios = &adev.bios[..];
+    dc.link_count = 0;
+
+    let connectors_num = bios_parser_get_connectors_number(&dc.ctx.dc_bios, bios) as u32;
+    if connectors_num > LF_ENUM_ID_COUNT {
+        return false;
+    }
+
+    let (Some(gs), Some(pool)) = (dc.ctx.gpio_service.as_deref_mut(), dc.res_pool.as_deref_mut()) else {
+        return false;
+    };
+    let mut cx = link_ctx {
+        adev,
+        bp: &dc.ctx.dc_bios,
+        gpio_service: gs,
+        dc_edp_id_count: &mut dc.ctx.dc_edp_id_count,
+        link_encoders: &mut pool.link_encoders,
+        dig_link_enc_count: &mut pool.dig_link_enc_count,
+        is_apu: dc.caps.is_apu,
+        smart_mux_version: dc.config.smart_mux_version,
+        allow_edp_hotplug_detection: dc.config.allow_edp_hotplug_detection,
+        hdmi20_disable: dc.debug.hdmi20_disable,
+    };
+
+    let mut i = 0;
+    while dc.link_count < connectors_num && i < LF_MAX_LINKS {
+        let connector_id = bios_parser_get_connector_id(cx.bp, bios, i as u8);
+        if connector_id.id != 0 {
+            let link_init_params = link_init_data { connector_index: i, link_index: dc.link_count, is_dpia_link: false };
+            if let Some(link) = link_create(&mut cx, &link_init_params) {
+                dc.links.push(link);
+                dc.link_count += 1;
+            }
+        }
+        i += 1;
+    }
+
+    dc.lowest_dpia_link_index = LF_MAX_LINKS;
+
+    for _ in 0..num_virtual_links {
+        dc.links.push(create_virtual_link(dc.link_count));
+        dc.link_count += 1;
+    }
+
+    dc.caps.num_of_internal_disp = get_num_of_internal_disp(&dc.links);
+
+    true
 }
 
 /// `DC_BUILD_ID` (dc.c).
@@ -227,7 +290,12 @@ fn dc_construct(adev: &amdgpu_device, dc: &mut dc, init_params: &dc_init_data) -
     // res_pool->funcs->update_bw_bounding_box (dcn21_update_bw_bounding_box,
     // DML — stage C). dc_create_soc_and_ip_translator binds a translator for
     // DCN 4.01 only; on 2.1 it is an empty allocation.
-    // create_links(), create_link_encoders(): the link/ subsystem.
+    if !create_links(adev, dc, init_params.num_virtual_links as u32) {
+        return false;
+    }
+
+    // create_link_encoders: a platform without USB4 DPIA endpoints (Renoir:
+    // num_usb4_dpia 0) maps DIG encoders to endpoints fixed; nothing to add.
     // dc->current_state = dc_state_create(dc, NULL).
     true
 }

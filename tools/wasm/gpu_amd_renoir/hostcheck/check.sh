@@ -33,6 +33,7 @@ check discovery oracle_discovery discovery_check "$DISC"
 check ucode oracle_ucode ucode_check "$FW"
 check bios oracle_bios bios_check "$BIOS"
 check gpio oracle_gpio gpio_check "$BIOS"
+check link oracle_link link_check "$BIOS"
 # DC's clock manager on the VBIOS, with the VBIOS SMC answering two SMU
 # versions (either side of 55.51.0 and 0x371500), retraining on/off, and
 # the SMU's clock table handed out or not.

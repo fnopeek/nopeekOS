@@ -387,6 +387,7 @@ const DEBUG_DEFAULTS_DRV: dc_debug_options = dc_debug_options {
     use_max_lb: true,
     enable_legacy_fast_update: true,
     using_dml2: false,
+    hdmi20_disable: false,
 };
 
 /// `dcn21_pp_smu_create` (dcn21_resource.c): a table that is not Renoir's is
