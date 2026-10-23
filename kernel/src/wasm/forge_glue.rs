@@ -337,6 +337,9 @@ host_imports! {
     mem fn npk_vault_system_set(name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32) -> i32;
     // npk_vault_system_list(buf_ptr, buf_max) -> len or -1. Names only, never values.
     mem fn npk_vault_system_list(buf_ptr: i32, buf_max: i32) -> i32;
+    // npk_vault_user_delete / system_delete(name_ptr, name_len) -> 0 or -1.
+    mem fn npk_vault_user_delete(name_ptr: i32, name_len: i32) -> i32;
+    mem fn npk_vault_system_delete(name_ptr: i32, name_len: i32) -> i32;
 
     // npk_home_dir(buf_ptr, buf_max) -> i32
     // Write the current user's home directory ("home/<name>", or "home"

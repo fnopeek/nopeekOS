@@ -47,17 +47,19 @@ pub fn vault_set_passphrase(old: &str, new: &str) -> bool {
 }
 pub fn vault_unlock(pass: &str) -> bool { sys::vault_unlock(pass.as_bytes()) == 0 }
 pub fn vault_lock() { sys::vault_lock(); }
-pub fn vault_user_set(name: &str, val: &str) -> bool {
-    sys::vault_user_set(name.as_bytes(), val.as_bytes()) == 0
+pub fn vault_user_set(name: &str, val: &[u8]) -> bool {
+    sys::vault_user_set(name.as_bytes(), val) == 0
 }
 pub fn vault_user_get(name: &str, buf: &mut [u8]) -> Option<usize> {
     len(sys::vault_user_get(name.as_bytes(), buf))
 }
 pub fn vault_user_list(buf: &mut [u8]) -> Option<usize> { len(sys::vault_user_list(buf)) }
-pub fn vault_system_set(name: &str, val: &str) -> bool {
-    sys::vault_system_set(name.as_bytes(), val.as_bytes()) == 0
+pub fn vault_system_set(name: &str, val: &[u8]) -> bool {
+    sys::vault_system_set(name.as_bytes(), val) == 0
 }
 pub fn vault_system_list(buf: &mut [u8]) -> Option<usize> { len(sys::vault_system_list(buf)) }
+pub fn vault_user_delete(name: &str) -> bool { sys::vault_user_delete(name.as_bytes()) == 0 }
+pub fn vault_system_delete(name: &str) -> bool { sys::vault_system_delete(name.as_bytes()) == 0 }
 
 /// List `prefix` into `out` (the kernel's entry encoding); `Some(n)` bytes.
 pub fn fs_list(prefix: &str, out: &mut [u8], recursive: bool) -> Option<usize> {

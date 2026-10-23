@@ -139,6 +139,11 @@ impl VaultFile {
         true
     }
 
+    /// Remove an entry from `tier`, if present.
+    pub fn delete(&mut self, tier: u8, name: &str) {
+        self.entries.retain(|e| !(e.tier == tier && e.name == name));
+    }
+
     /// The plaintext of an entry, decrypted with `dek`. None if absent or the
     /// DEK is wrong (the GCM tag fails) — so a system DEK cannot read a user
     /// entry, and vice versa.
@@ -340,6 +345,16 @@ pub fn user_list() -> Vec<String> {
     }
 }
 
+/// Remove a user secret. Requires the user tier unlocked this session.
+pub fn user_delete(name: &str) -> bool {
+    if USER_SESSION.lock().is_none() {
+        return false;
+    }
+    let Some(mut v) = load() else { return false };
+    v.delete(TIER_USER, name);
+    save(&v)
+}
+
 /// Read a system credential. The device subkey opens the system tier; the
 /// CALLER must have checked the capability for this credential class. None
 /// while the disk is locked or the entry is absent.
@@ -366,6 +381,13 @@ pub fn system_list() -> Vec<String> {
         Some(v) => v.names(TIER_SYSTEM).iter().map(|s| s.to_string()).collect(),
         None => Vec::new(),
     }
+}
+
+/// Remove a system credential.
+pub fn system_delete(name: &str) -> bool {
+    let Some(mut v) = load() else { return false };
+    v.delete(TIER_SYSTEM, name);
+    save(&v)
 }
 
 // ── Self-test ──────────────────────────────────────────────────────────────

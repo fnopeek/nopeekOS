@@ -2444,6 +2444,22 @@ pub(crate) fn npk_vault_system_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr
     write_bytes(mem, buf_ptr, &joined.as_bytes()[..joined.len().min(max)])
 }
 
+pub(crate) fn npk_vault_user_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    let Some(name) = read_str(mem, name_ptr, name_len) else { return -1 };
+    if crate::security::keyvault::user_delete(&name) { 0 } else { -1 }
+}
+
+pub(crate) fn npk_vault_system_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    let Some(name) = read_str(mem, name_ptr, name_len) else { return -1 };
+    if crate::security::keyvault::system_delete(&name) { 0 } else { -1 }
+}
+
 pub(crate) fn npk_http_response_headers(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::NET).is_err() {

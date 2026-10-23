@@ -32,6 +32,8 @@ unsafe extern "C" {
     fn npk_vault_user_list(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_vault_system_set(name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32) -> i32;
     fn npk_vault_system_list(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_vault_user_delete(name_ptr: i32, name_len: i32) -> i32;
+    fn npk_vault_system_delete(name_ptr: i32, name_len: i32) -> i32;
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
     fn npk_config_get(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
@@ -383,6 +385,14 @@ pub fn vault_system_set(name: &[u8], val: &[u8]) -> i32 {
 pub fn vault_system_list(buf: &mut [u8]) -> i32 {
     // SAFETY: FFI; the range is borrowed for the call.
     unsafe { npk_vault_system_list(buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+pub fn vault_user_delete(name: &[u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_vault_user_delete(name.as_ptr() as i32, name.len() as i32) }
+}
+pub fn vault_system_delete(name: &[u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_vault_system_delete(name.as_ptr() as i32, name.len() as i32) }
 }
 
 pub fn fs_list(prefix: &[u8], out: &mut [u8], recursive: bool) -> i32 {
