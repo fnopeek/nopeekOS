@@ -32,6 +32,19 @@ check atom oracle_atom atom_check "$BIOS"
 check discovery oracle_discovery discovery_check "$DISC"
 check ucode oracle_ucode ucode_check "$FW"
 check bios oracle_bios bios_check "$BIOS"
+# DC's clock manager on the VBIOS, with the VBIOS SMC answering two SMU
+# versions (either side of 55.51.0 and 0x371500), retraining on/off, and
+# the SMU's clock table handed out or not.
+rustc $RF "$HERE/clk_check.rs" -o "$B/clk_check"
+for a in "0x373700 0 dpm" "0x370000 1 nodpm" "0x371600 0 nodpm" "0x373300 1 dpm"; do
+    "$B/oracle_clk" "$BIOS" $a > "$B/clk.linux"
+    "$B/clk_check" "$BIOS" $a > "$B/clk.port"
+    if diff -u "$B/clk.linux" "$B/clk.port" | head -30; cmp -s "$B/clk.linux" "$B/clk.port"; then
+        echo "clk_mgr ($a): port = Linux ($(grep -c '^write' "$B/clk.linux") register writes)"
+    else
+        fail=1
+    fi
+done
 # The ATOM interpreter: the clock tables smu_v12_0 runs, every register
 # access compared. Linux prefixes DRM_ERROR, the port's log does not.
 rustc $RF "$HERE/atomexec_check.rs" -o "$B/atomexec_check"

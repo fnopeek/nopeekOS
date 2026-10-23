@@ -6,7 +6,9 @@
 #![allow(dead_code)]
 
 use crate::amdgpu_device::amdgpu_device;
-use crate::dc::{cap_func_id, dc, dc_init_data};
+use crate::dc::{cap_func_id, dc, dc_debug_options, dc_init_data, dcc_option, pipe_split_policy};
+use crate::dc_types::dce_environment;
+use crate::dm_pp_smu::{dm_pp_get_funcs, pp_smu_funcs, pp_smu_ver};
 use crate::dc_helper::{dm_read_reg, generic_reg_get};
 use crate::dc_resource::{
     resource_caps, resource_pool, resource_straps, stream_enc_slot, update_num_audio,
@@ -258,6 +260,10 @@ pub fn dcn21_resource_construct(
 
     dcn21_set_caps(&mut dc.caps);
 
+    if dc.ctx.dce_environment == dce_environment::DCE_ENV_PRODUCTION_DRV {
+        dc.debug = DEBUG_DEFAULTS_DRV;
+    }
+
     // The DML instance. `num_pipes` is the live DPP count (the IP max minus the
     // fused-off pipes); it caps the IP's max_num_dpp/otg before dml_init copies
     // the SoC/IP inputs into dc.dml. (Linux does this just before the pipe loop.)
@@ -292,8 +298,13 @@ pub fn dcn21_resource_construct(
     pool.dp_clock_source = dcn21_clock_source_create(
         bios, clock_source_id::CLOCK_SOURCE_ID_DP_DTO, &CLK_SRC_REGS[0], true);
 
-    // The DCCG. (dmcu/psr/abm are gated on dc->config and wait; pp_smu waits.)
+    // The DCCG.
     pool.dccg = Some(dccg21_create(&DCCG_REGS, &DCCG_SHIFT, &DCCG_MASK));
+
+    // dmcu (with !config.disable_dmcu; it clears debug.dmub_command_table),
+    // the DMUB psr and the DMUB/DCE abm join with the DMUB command path.
+
+    pool.pp_smu = dcn21_pp_smu_create(dc.ctx.dce_version);
 
     // Per pipe: mem input (hubp) -> ipp -> dpp -> opp -> TG. A pipe fused off
     // (its bit set in pipe_fuses) is skipped: the hw instance stays `i`, but the
@@ -352,6 +363,44 @@ pub fn dcn21_resource_construct(
     // With this dcn21_resource_construct is complete bar the irq service
     // (dal_irq_service_dcn21_create) and `pool.funcs = &dcn21_res_pool_funcs`
     // (the validate/map vtable — stage E).
+}
+
+/// `debug_defaults_drv` (dcn21_resource.c).
+const DEBUG_DEFAULTS_DRV: dc_debug_options = dc_debug_options {
+    disable_dmcu: false,
+    force_abm_enable: false,
+    clock_trace: true,
+    disable_pplib_clock_request: true,
+    min_disp_clk_khz: 100000,
+    pipe_split_policy: pipe_split_policy::MPC_SPLIT_DYNAMIC,
+    force_single_disp_pipe_split: false,
+    disable_dcc: dcc_option::DCC_ENABLE,
+    vsr_support: true,
+    performance_trace: false,
+    max_downscale_src_width: 4096,
+    disable_pplib_wm_range: false,
+    scl_reset_length10: true,
+    sanity_checks: true,
+    disable_48mhz_pwrdwn: false,
+    usbc_combo_phy_reset_wa: true,
+    dmub_command_table: true,
+    use_max_lb: true,
+    enable_legacy_fast_update: true,
+    using_dml2: false,
+};
+
+/// `dcn21_pp_smu_create` (dcn21_resource.c): a table that is not Renoir's is
+/// zeroed, which the port says with None.
+fn dcn21_pp_smu_create(dce_version: crate::dc_types::dce_version) -> Option<pp_smu_funcs> {
+    let mut pp_smu = pp_smu_funcs::default();
+
+    dm_pp_get_funcs(dce_version, &mut pp_smu);
+
+    if pp_smu.ver != pp_smu_ver::PP_SMU_VER_RN {
+        return None;
+    }
+
+    Some(pp_smu)
 }
 
 /// `dcn21_create_resource_pool` (dcn21_resource.c). The port's pool is the

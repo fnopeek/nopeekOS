@@ -486,6 +486,194 @@ fn bios_parser_get_soc_bb_info(bp: &bios_parser, bios: &[u8]) -> bp_result {
     bp_result::BP_RESULT_UNSUPPORTED
 }
 
+/// `enum as_signal_type` (bios_parser_types.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum as_signal_type {
+    AS_SIGNAL_TYPE_NONE = 0,
+    AS_SIGNAL_TYPE_DVI,
+    AS_SIGNAL_TYPE_HDMI,
+    AS_SIGNAL_TYPE_LVDS,
+    AS_SIGNAL_TYPE_DISPLAY_PORT,
+    AS_SIGNAL_TYPE_GPU_PLL,
+    AS_SIGNAL_TYPE_XGMI,
+    AS_SIGNAL_TYPE_UNKNOWN,
+}
+
+/// `struct spread_spectrum_type` (grph_object_ctrl_defs.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct spread_spectrum_type {
+    pub CENTER_MODE: bool,
+    pub EXTERNAL: bool,
+    pub STEP_AND_DELAY_INFO: bool,
+}
+
+/// `struct spread_spectrum_info` (grph_object_ctrl_defs.h). The union of
+/// `step_and_delay_info` and `target_clock_range` is held as
+/// `target_clock_range`; the atomfirmware readers only write that view.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct spread_spectrum_info {
+    pub r#type: spread_spectrum_type,
+    pub spread_spectrum_percentage: u32,
+    pub spread_percentage_divider: u32,
+    pub spread_spectrum_range: u32,
+    pub target_clock_range: u32,
+}
+
+/// One DVI/HDMI/DP entry of a dce_info table: (percentage, rate_10hz, mode).
+fn ss_entry(bios: &[u8], tbl: u32, pct: u32, rate: u32, mode: u32, ss_info: &mut spread_spectrum_info) {
+    ss_info.spread_spectrum_percentage = u16_at(bios, tbl + pct) as u32;
+    ss_info.spread_spectrum_range = u16_at(bios, tbl + rate) as u32 * 10;
+    if u8_at(bios, tbl + mode) as u32 & BP2_ATOM_SS_CENTRE_SPREAD_MODE != 0 {
+        ss_info.r#type.CENTER_MODE = true;
+    }
+}
+
+/// `get_ss_info_v4_1` (bios_parser2.c).
+fn get_ss_info_v4_1(bp: &bios_parser, bios: &[u8], id: as_signal_type, ss_info: &mut spread_spectrum_info) -> bp_result {
+    let mut result = bp_result::BP_RESULT_OK;
+
+    if bp.data_tables(bios, BP2_DT_dce_info) == 0 {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    }
+    let Some(t) = bp.get_image(bios, bp.data_tables(bios, BP2_DT_dce_info), BP2_DCEI41_SIZE) else {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    };
+
+    ss_info.r#type.STEP_AND_DELAY_INFO = false;
+    ss_info.spread_percentage_divider = 1000;
+    // BIOS no longer uses target clock.  Always enable for now
+    ss_info.target_clock_range = 0xffffffff;
+
+    match id {
+        as_signal_type::AS_SIGNAL_TYPE_DVI => ss_entry(bios, t, BP2_DCEI41_DVI_SS_PERCENTAGE,
+            BP2_DCEI41_DVI_SS_RATE_10HZ, BP2_DCEI41_DVI_SS_MODE, ss_info),
+        as_signal_type::AS_SIGNAL_TYPE_HDMI => ss_entry(bios, t, BP2_DCEI41_HDMI_SS_PERCENTAGE,
+            BP2_DCEI41_HDMI_SS_RATE_10HZ, BP2_DCEI41_HDMI_SS_MODE, ss_info),
+        as_signal_type::AS_SIGNAL_TYPE_DISPLAY_PORT => ss_entry(bios, t, BP2_DCEI41_DP_SS_PERCENTAGE,
+            BP2_DCEI41_DP_SS_RATE_10HZ, BP2_DCEI41_DP_SS_MODE, ss_info),
+        as_signal_type::AS_SIGNAL_TYPE_XGMI => {
+            let Some(smu_info) = bp.get_image(bios, bp.data_tables(bios, BP2_DT_smu_info), BP2_SMUI33_SIZE) else {
+                return bp_result::BP_RESULT_BADBIOSTABLE;
+            };
+            ss_info.spread_spectrum_percentage = u16_at(bios, smu_info + BP2_SMUI33_WAFLCLK_SS_PERCENTAGE) as u32;
+            ss_info.spread_spectrum_range = u16_at(bios, smu_info + BP2_SMUI33_GPUCLK_SS_RATE_10HZ) as u32 * 10;
+            if u8_at(bios, smu_info + BP2_SMUI33_WAFLCLK_SS_MODE) as u32 & BP2_ATOM_SS_CENTRE_SPREAD_MODE != 0 {
+                ss_info.r#type.CENTER_MODE = true;
+            }
+        }
+        // atom_firmware: DAL only get data from dce_info table (GPU_PLL too).
+        _ => result = bp_result::BP_RESULT_UNSUPPORTED,
+    }
+
+    result
+}
+
+/// `get_ss_info_v4_2` (bios_parser2.c): Renoir's dce_info is v4.3, read
+/// through this layout.
+fn get_ss_info_v4_2(bp: &bios_parser, bios: &[u8], id: as_signal_type, ss_info: &mut spread_spectrum_info) -> bp_result {
+    let mut result = bp_result::BP_RESULT_OK;
+
+    if bp.data_tables(bios, BP2_DT_dce_info) == 0 {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    }
+    if bp.data_tables(bios, BP2_DT_smu_info) == 0 {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    }
+    let Some(t) = bp.get_image(bios, bp.data_tables(bios, BP2_DT_dce_info), BP2_DCEI42_SIZE) else {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    };
+    let Some(smu_info) = bp.get_image(bios, bp.data_tables(bios, BP2_DT_smu_info), BP2_SMUI31_SIZE) else {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    };
+
+    ss_info.r#type.STEP_AND_DELAY_INFO = false;
+    ss_info.spread_percentage_divider = 1000;
+    // BIOS no longer uses target clock.  Always enable for now
+    ss_info.target_clock_range = 0xffffffff;
+
+    match id {
+        as_signal_type::AS_SIGNAL_TYPE_DVI => ss_entry(bios, t, BP2_DCEI42_DVI_SS_PERCENTAGE,
+            BP2_DCEI42_DVI_SS_RATE_10HZ, BP2_DCEI42_DVI_SS_MODE, ss_info),
+        as_signal_type::AS_SIGNAL_TYPE_HDMI => ss_entry(bios, t, BP2_DCEI42_HDMI_SS_PERCENTAGE,
+            BP2_DCEI42_HDMI_SS_RATE_10HZ, BP2_DCEI42_HDMI_SS_MODE, ss_info),
+        as_signal_type::AS_SIGNAL_TYPE_DISPLAY_PORT => ss_entry(bios, smu_info, BP2_SMUI31_GPUCLK_SS_PERCENTAGE,
+            BP2_SMUI31_GPUCLK_SS_RATE_10HZ, BP2_SMUI31_GPUCLK_SS_MODE, ss_info),
+        _ => result = bp_result::BP_RESULT_UNSUPPORTED,
+    }
+
+    result
+}
+
+/// `get_ss_info_v4_5` (bios_parser2.c).
+fn get_ss_info_v4_5(bp: &bios_parser, bios: &[u8], id: as_signal_type, ss_info: &mut spread_spectrum_info) -> bp_result {
+    let mut result = bp_result::BP_RESULT_OK;
+
+    if bp.data_tables(bios, BP2_DT_dce_info) == 0 {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    }
+    let Some(t) = bp.get_image(bios, bp.data_tables(bios, BP2_DT_dce_info), BP2_DCEI45_SIZE) else {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    };
+
+    ss_info.r#type.STEP_AND_DELAY_INFO = false;
+    ss_info.spread_percentage_divider = 1000;
+    // BIOS no longer uses target clock.  Always enable for now
+    ss_info.target_clock_range = 0xffffffff;
+
+    match id {
+        as_signal_type::AS_SIGNAL_TYPE_DVI => ss_entry(bios, t, BP2_DCEI45_DVI_SS_PERCENTAGE,
+            BP2_DCEI45_DVI_SS_RATE_10HZ, BP2_DCEI45_DVI_SS_MODE, ss_info),
+        as_signal_type::AS_SIGNAL_TYPE_HDMI => ss_entry(bios, t, BP2_DCEI45_HDMI_SS_PERCENTAGE,
+            BP2_DCEI45_HDMI_SS_RATE_10HZ, BP2_DCEI45_HDMI_SS_MODE, ss_info),
+        as_signal_type::AS_SIGNAL_TYPE_DISPLAY_PORT => {
+            if let Some(ii) = bp.base.integrated_info.as_deref() {
+                ss_info.spread_spectrum_percentage = ii.gpuclk_ss_percentage;
+                ss_info.r#type.CENTER_MODE = ii.gpuclk_ss_type != 0;
+            } else {
+                ss_entry(bios, t, BP2_DCEI45_DP_SS_PERCENTAGE, BP2_DCEI45_DP_SS_RATE_10HZ, BP2_DCEI45_DP_SS_MODE,
+                    ss_info);
+            }
+        }
+        _ => result = bp_result::BP_RESULT_UNSUPPORTED,
+    }
+
+    result
+}
+
+/// `bios_parser_get_spread_spectrum_info` (bios_parser2.c). `index` is
+/// unused by every atomfirmware reader.
+pub fn bios_parser_get_spread_spectrum_info(
+    bp: &bios_parser,
+    bios: &[u8],
+    signal: as_signal_type,
+    _index: u32,
+    ss_info: &mut spread_spectrum_info,
+) -> bp_result {
+    if bp.data_tables(bios, BP2_DT_dce_info) == 0 {
+        return bp_result::BP_RESULT_UNSUPPORTED;
+    }
+
+    let header = bp.get_image(bios, bp.data_tables(bios, BP2_DT_dce_info), BP2_COMMON_HDR_SIZE);
+    let tbl_revision = get_atom_data_table_revision(bios, header);
+
+    if tbl_revision.major == 4 {
+        match tbl_revision.minor {
+            1 => return get_ss_info_v4_1(bp, bios, signal, ss_info),
+            2 | 3 | 4 => return get_ss_info_v4_2(bp, bios, signal, ss_info),
+            5 => return get_ss_info_v4_5(bp, bios, signal, ss_info),
+            _ => {}
+        }
+    }
+    // there can not be more then one entry for SS Info table
+    bp_result::BP_RESULT_UNSUPPORTED
+}
+
+/// `bios_parser_get_ss_entry_number` (bios_parser2.c): always one on the
+/// atomfirmware path.
+pub fn bios_parser_get_ss_entry_number(_bp: &bios_parser, _signal: as_signal_type) -> u32 {
+    1
+}
+
 /// `bios_parser2_construct` (bios_parser2.c).
 fn bios_parser2_construct(
     adev: &amdgpu_device,
@@ -574,4 +762,547 @@ fn firmware_parser_create(adev: &amdgpu_device, init: &bp_init_data, dce_version
 /// pre-atomfirmware `bios_parser_create` is for ASICs before Vega.
 pub fn dal_bios_parser_create(adev: &amdgpu_device, init: &bp_init_data, dce_version: dce_version) -> Option<Box<bios_parser>> {
     firmware_parser_create(adev, init, dce_version)
+}
+
+/// `enum dal_device_type` (grph_object_ctrl_defs.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum dal_device_type {
+    #[default]
+    DEVICE_TYPE_UNKNOWN = 0,
+    DEVICE_TYPE_LCD,
+    DEVICE_TYPE_CRT,
+    DEVICE_TYPE_DFP,
+    DEVICE_TYPE_CV,
+    DEVICE_TYPE_TV,
+    DEVICE_TYPE_CF,
+    DEVICE_TYPE_WIRELESS,
+}
+
+/// `struct device_id` (grph_object_ctrl_defs.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct device_id {
+    pub device_type: dal_device_type,
+    pub enum_id: u32,
+    pub raw_device_tag: u16,
+}
+
+/// `struct connector_device_tag_info`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct connector_device_tag_info {
+    pub acpi_device: u32,
+    pub dev_id: device_id,
+}
+
+/// `struct gpio_info` (in `graphics_object_i2c_info`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct gpio_info {
+    pub clk_mask_register_index: u32,
+    pub clk_en_register_index: u32,
+    pub clk_y_register_index: u32,
+    pub clk_a_register_index: u32,
+    pub data_mask_register_index: u32,
+    pub data_en_register_index: u32,
+    pub data_y_register_index: u32,
+    pub data_a_register_index: u32,
+    pub clk_mask_shift: u32,
+    pub clk_en_shift: u32,
+    pub clk_y_shift: u32,
+    pub clk_a_shift: u32,
+    pub data_mask_shift: u32,
+    pub data_en_shift: u32,
+    pub data_y_shift: u32,
+    pub data_a_shift: u32,
+}
+
+/// `struct graphics_object_i2c_info`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct graphics_object_i2c_info {
+    pub gpio_info: gpio_info,
+    pub i2c_hw_assist: bool,
+    pub i2c_line: u32,
+    pub i2c_engine_id: u32,
+    pub i2c_slave_address: u32,
+}
+
+/// `struct graphics_object_hpd_info`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct graphics_object_hpd_info {
+    pub hpd_int_gpio_uid: u8,
+    pub hpd_active: u8,
+}
+
+/// `struct gpio_pin_info` (gpio_types.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct gpio_pin_info {
+    pub offset: u32,
+    pub offset_y: u32,
+    pub offset_en: u32,
+    pub offset_mask: u32,
+    pub mask: u32,
+    pub mask_y: u32,
+    pub mask_en: u32,
+    pub mask_mask: u32,
+}
+
+/// `struct bp_disp_connector_caps_info` (bios_parser_types.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct bp_disp_connector_caps_info {
+    pub INTERNAL_DISPLAY: bool,
+    pub INTERNAL_DISPLAY_BL: bool,
+}
+
+/// `le16_to_cpu` on a wider field keeps the low 16 bits.
+fn le16(v: u32) -> u32 {
+    v & 0xffff
+}
+
+/// The table offset of `display_path[i]` of the object info table, per its
+/// minor revision (4: `atom_display_object_path_v2`, 5: `_v3`).
+fn path_at(bp: &bios_parser, i: u32) -> u32 {
+    let t = bp.object_info_tbl.tbl.unwrap_or(0);
+    match bp.object_info_tbl.revision.minor {
+        5 => t + BP2_OBJINFO15_DISPLAY_PATH + i * BP2_PATHV3_SIZE,
+        _ => t + BP2_OBJINFO14_DISPLAY_PATH + i * BP2_PATHV2_SIZE,
+    }
+}
+
+fn number_of_path(bp: &bios_parser, bios: &[u8]) -> u32 {
+    let t = bp.object_info_tbl.tbl.unwrap_or(0);
+    match bp.object_info_tbl.revision.minor {
+        5 => u8_at(bios, t + BP2_OBJINFO15_NUMBER_OF_PATH) as u32,
+        _ => u8_at(bios, t + BP2_OBJINFO14_NUMBER_OF_PATH) as u32,
+    }
+}
+
+/// `display_objid`/`encoderobjid`/`disp_recordoffset`/`device_tag` of a
+/// path; v2 and v3 share those offsets' meaning, not necessarily the offsets.
+fn path_display_objid(bp: &bios_parser, bios: &[u8], p: u32) -> u32 {
+    let o = if bp.object_info_tbl.revision.minor == 5 { BP2_PATHV3_DISPLAY_OBJID } else { BP2_PATHV2_DISPLAY_OBJID };
+    u16_at(bios, p + o) as u32
+}
+
+fn path_encoderobjid(bp: &bios_parser, bios: &[u8], p: u32) -> u32 {
+    let o = if bp.object_info_tbl.revision.minor == 5 { BP2_PATHV3_ENCODEROBJID } else { BP2_PATHV2_ENCODEROBJID };
+    u16_at(bios, p + o) as u32
+}
+
+/// `bios_parser_get_connectors_number` (bios_parser2.c): the paths with an
+/// encoder (an extra path not for a connector has encoderobjid 0).
+pub fn bios_parser_get_connectors_number(bp: &bios_parser, bios: &[u8]) -> u8 {
+    let mut count = 0u32;
+    for i in 0..number_of_path(bp, bios) {
+        if path_encoderobjid(bp, bios, path_at(bp, i)) != 0 {
+            count += 1;
+        }
+    }
+    count as u8
+}
+
+/// `bios_parser_get_connector_id` (bios_parser2.c).
+pub fn bios_parser_get_connector_id(bp: &bios_parser, bios: &[u8], i: u8) -> graphics_object_id {
+    let mut object_id = graphics_object_id::init(0, object_enum_id::ENUM_ID_UNKNOWN, object_type::OBJECT_TYPE_UNKNOWN);
+
+    if number_of_path(bp, bios) > i as u32 {
+        let p = path_at(bp, i as u32);
+        // If display_objid is generic object id, the encoderObj /extencoderobjId
+        // should be 0
+        if path_encoderobjid(bp, bios, p) != 0 && path_display_objid(bp, bios, p) != 0 {
+            object_id = object_id_from_bios_object_id(path_display_objid(bp, bios, p));
+        }
+    }
+    object_id
+}
+
+fn same_object(a: graphics_object_id, b: graphics_object_id) -> bool {
+    a.r#type == b.r#type && a.id == b.id && a.enum_id == b.enum_id
+}
+
+/// `bios_parser_get_src_obj` (bios_parser2.c). In Linux the v1.5 connector
+/// branch sits on the OUTER switch as `case 5`, i.e. on `object_id.type ==
+/// OBJECT_TYPE_GENERIC`; the port keeps that.
+pub fn bios_parser_get_src_obj(
+    bp: &bios_parser,
+    bios: &[u8],
+    object_id: graphics_object_id,
+    _index: u32,
+    src_object_id: &mut graphics_object_id,
+) -> bp_result {
+    let n = number_of_path(bp, bios);
+    match object_id.r#type {
+        // Encoder's Source is GPU. BIOS does not provide GPU, since all
+        // displaypaths point to same GPU (0x1100).
+        object_type::OBJECT_TYPE_ENCODER => {
+            for i in 0..n {
+                let obj_id = object_id_from_bios_object_id(path_encoderobjid(bp, bios, path_at(bp, i)));
+                if same_object(object_id, obj_id) {
+                    *src_object_id = object_id_from_bios_object_id(0x1100);
+                }
+            }
+            bp_result::BP_RESULT_OK
+        }
+        object_type::OBJECT_TYPE_CONNECTOR => {
+            if bp.object_info_tbl.revision.minor != 5 {
+                for i in 0..n {
+                    let p = path_at(bp, i);
+                    let obj_id = object_id_from_bios_object_id(path_display_objid(bp, bios, p));
+                    if same_object(object_id, obj_id) {
+                        *src_object_id = object_id_from_bios_object_id(path_encoderobjid(bp, bios, p));
+                    }
+                }
+            }
+            bp_result::BP_RESULT_OK
+        }
+        object_type::OBJECT_TYPE_GENERIC => {
+            // Read through the v1.5 layout whatever the table's revision.
+            let t = bp.object_info_tbl.tbl.unwrap_or(0);
+            for i in 0..u8_at(bios, t + BP2_OBJINFO15_NUMBER_OF_PATH) as u32 {
+                let p = t + BP2_OBJINFO15_DISPLAY_PATH + i * BP2_PATHV3_SIZE;
+                let obj_id = object_id_from_bios_object_id(u16_at(bios, p + BP2_PATHV3_DISPLAY_OBJID) as u32);
+                if same_object(object_id, obj_id) {
+                    *src_object_id =
+                        object_id_from_bios_object_id(u16_at(bios, p + BP2_PATHV3_ENCODEROBJID) as u32);
+                }
+            }
+            bp_result::BP_RESULT_OK
+        }
+        _ => bp_result::BP_RESULT_OK,
+    }
+}
+
+/// `get_bios_object` (bios_parser2.c): the v1.4 path holding `id`, as its
+/// offset. An encoder not found falls through to the connector search.
+fn get_bios_object(bp: &bios_parser, bios: &[u8], id: graphics_object_id) -> Option<u32> {
+    let t = bp.object_info_tbl.tbl.unwrap_or(0);
+    let n = u8_at(bios, t + BP2_OBJINFO14_NUMBER_OF_PATH) as u32;
+    let at = |i: u32| t + BP2_OBJINFO14_DISPLAY_PATH + i * BP2_PATHV2_SIZE;
+    match id.r#type {
+        object_type::OBJECT_TYPE_ENCODER | object_type::OBJECT_TYPE_CONNECTOR | object_type::OBJECT_TYPE_GENERIC => {
+            if id.r#type == object_type::OBJECT_TYPE_ENCODER {
+                for i in 0..n {
+                    let obj_id = object_id_from_bios_object_id(u16_at(bios, at(i) + BP2_PATHV2_ENCODEROBJID) as u32);
+                    if same_object(id, obj_id) {
+                        return Some(at(i));
+                    }
+                }
+            }
+            // Both Generic and Connector Object ID will be stored on display_objid
+            for i in 0..n {
+                let obj_id = object_id_from_bios_object_id(u16_at(bios, at(i) + BP2_PATHV2_DISPLAY_OBJID) as u32);
+                if same_object(id, obj_id) {
+                    return Some(at(i));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// `get_bios_object_from_path_v3` (bios_parser2.c).
+fn get_bios_object_from_path_v3(bp: &bios_parser, bios: &[u8], id: graphics_object_id) -> Option<u32> {
+    let t = bp.object_info_tbl.tbl.unwrap_or(0);
+    let n = u8_at(bios, t + BP2_OBJINFO15_NUMBER_OF_PATH) as u32;
+    let at = |i: u32| t + BP2_OBJINFO15_DISPLAY_PATH + i * BP2_PATHV3_SIZE;
+    let field = match id.r#type {
+        object_type::OBJECT_TYPE_ENCODER => BP2_PATHV3_ENCODEROBJID,
+        object_type::OBJECT_TYPE_CONNECTOR | object_type::OBJECT_TYPE_GENERIC => BP2_PATHV3_DISPLAY_OBJID,
+        _ => return None,
+    };
+    (0..n).map(at).find(|&p| same_object(id, object_id_from_bios_object_id(u16_at(bios, p + field) as u32)))
+}
+
+/// Walks the records from `offset` as Linux's record loops do: at most
+/// `BIOS_MAX_NUM_RECORD`, stopping at `end_type` or a zero size. `visit`
+/// sees (offset, type, size) and returns Some to finish with that value.
+/// `Err` where a header's GET_IMAGE fails.
+fn walk_records<T>(bp: &bios_parser, bios: &[u8], mut offset: u32, end_type: u32,
+                   mut visit: impl FnMut(u32, u32, u32) -> Option<T>) -> Result<Option<T>, ()> {
+    for _ in 0..BP2_BIOS_MAX_NUM_RECORD {
+        let header = bp.get_image(bios, offset, BP2_RECHDR_SIZE).ok_or(())?;
+        let record_type = u8_at(bios, header + BP2_RECHDR_RECORD_TYPE) as u32;
+        let record_size = u8_at(bios, header + BP2_RECHDR_RECORD_SIZE) as u32;
+        if record_type == end_type || record_size == 0 {
+            break;
+        }
+        if let Some(v) = visit(header, record_type, record_size) {
+            return Ok(Some(v));
+        }
+        offset += record_size;
+    }
+    Ok(None)
+}
+
+/// The offset of a path's display records (`disp_recordoffset` +
+/// `object_info_tbl_offset`), v2 or v3 layout.
+fn disp_records(bp: &bios_parser, bios: &[u8], p: u32, v3: bool) -> u32 {
+    let o = if v3 { BP2_PATHV3_DISP_RECORDOFFSET } else { BP2_PATHV2_DISP_RECORDOFFSET };
+    u16_at(bios, p + o) as u32 + bp.object_info_tbl_offset
+}
+
+/// `get_gpio_i2c_info` (bios_parser2.c): the GPIO pin LUT entry of an I2C
+/// id. `i2c_id`/`i2c_slave_addr` are the record's bytes.
+fn get_gpio_i2c_info(bp: &bios_parser, bios: &[u8], i2c_id: u8, i2c_slave_addr: u8,
+                     info: &mut graphics_object_i2c_info) -> bp_result {
+    let lut = bp.data_tables(bios, BP2_DT_gpio_pin_lut);
+    if lut == 0 {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    }
+    let Some(header) = bp.get_image(bios, lut, BP2_PINLUT_SIZE) else {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    };
+    let structuresize = u16_at(bios, header + BP2_HDR_STRUCTURESIZE) as u32;
+    if BP2_COMMON_HDR_SIZE + BP2_PIN_SIZE > structuresize {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    }
+    if u8_at(bios, header + BP2_HDR_CONTENT_REVISION) != 1 {
+        return bp_result::BP_RESULT_UNSUPPORTED;
+    }
+    let count = (structuresize - BP2_COMMON_HDR_SIZE) / BP2_PIN_SIZE;
+    if bios_get_image(&bp.base, bios, lut, structuresize).is_none() {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    }
+
+    let id = i2c_id as u32;
+    let mut found = None;
+    for table_index in 0..count {
+        let pin = header + BP2_PINLUT_GPIO_PIN + table_index * BP2_PIN_SIZE;
+        let gpio_id = u8_at(bios, pin + BP2_PIN_GPIO_ID) as u32;
+        if (id & BP2_I2C_HW_CAP) == (gpio_id & BP2_I2C_HW_CAP)
+            && (id & BP2_I2C_HW_ENGINE_ID_MASK) == (gpio_id & BP2_I2C_HW_ENGINE_ID_MASK)
+            && (id & BP2_I2C_HW_LANE_MUX) == (gpio_id & BP2_I2C_HW_LANE_MUX)
+        {
+            found = Some(pin);
+            break;
+        }
+    }
+    let Some(pin) = found else { return bp_result::BP_RESULT_BADBIOSTABLE };
+
+    info.i2c_hw_assist = id & BP2_I2C_HW_CAP != 0;
+    info.i2c_line = id & BP2_I2C_HW_LANE_MUX;
+    info.i2c_engine_id = (id & BP2_I2C_HW_ENGINE_ID_MASK) >> 4;
+    info.i2c_slave_address = i2c_slave_addr as u32;
+
+    info.gpio_info.clk_a_register_index = le16(u32_at(bios, pin + BP2_PIN_DATA_A_REG_INDEX));
+    info.gpio_info.clk_a_shift = u8_at(bios, pin + BP2_PIN_GPIO_BITSHIFT) as u32;
+
+    bp_result::BP_RESULT_OK
+}
+
+/// `bios_parser_get_i2c_info` (bios_parser2.c).
+pub fn bios_parser_get_i2c_info(bp: &bios_parser, bios: &[u8], id: graphics_object_id,
+                                info: &mut graphics_object_i2c_info) -> bp_result {
+    if id.r#type == object_type::OBJECT_TYPE_GENERIC {
+        return match get_gpio_i2c_info(bp, bios, id.id as u8, 0, info) {
+            bp_result::BP_RESULT_OK => bp_result::BP_RESULT_OK,
+            _ => bp_result::BP_RESULT_NORECORD,
+        };
+    }
+
+    let offset = if bp.object_info_tbl.revision.minor == 5 {
+        let Some(p) = get_bios_object_from_path_v3(bp, bios, id) else { return bp_result::BP_RESULT_BADINPUT };
+        disp_records(bp, bios, p, true)
+    } else {
+        let Some(p) = get_bios_object(bp, bios, id) else { return bp_result::BP_RESULT_BADINPUT };
+        disp_records(bp, bios, p, false)
+    };
+
+    let found = walk_records(bp, bios, offset, BP2_LAST_RECORD_TYPE, |r, record_type, record_size| {
+        if record_type == BP2_ATOM_I2C_RECORD_TYPE && BP2_I2CREC_SIZE <= record_size {
+            let i2c_id = u8_at(bios, r + BP2_I2CREC_I2C_ID);
+            let slave = u8_at(bios, r + BP2_I2CREC_I2C_SLAVE_ADDR);
+            if get_gpio_i2c_info(bp, bios, i2c_id, slave, info) == bp_result::BP_RESULT_OK {
+                return Some(());
+            }
+        }
+        None
+    });
+    match found {
+        Err(()) => bp_result::BP_RESULT_BADBIOSTABLE,
+        Ok(Some(())) => bp_result::BP_RESULT_OK,
+        Ok(None) => bp_result::BP_RESULT_NORECORD,
+    }
+}
+
+/// `get_hpd_record` / `get_hpd_record_for_path_v3` (bios_parser2.c): the
+/// first HPD record of a path, as its offset.
+fn get_hpd_record(bp: &bios_parser, bios: &[u8], p: u32, v3: bool) -> Option<u32> {
+    let end = if v3 { BP2_ATOM_RECORD_END_TYPE } else { BP2_LAST_RECORD_TYPE };
+    walk_records(bp, bios, disp_records(bp, bios, p, v3), end, |r, t, s| {
+        (t == BP2_ATOM_HPD_INT_RECORD_TYPE && BP2_HPDREC_SIZE <= s).then_some(r)
+    })
+    .ok()
+    .flatten()
+}
+
+/// `bios_parser_get_hpd_info` (bios_parser2.c).
+pub fn bios_parser_get_hpd_info(bp: &bios_parser, bios: &[u8], id: graphics_object_id,
+                                info: &mut graphics_object_hpd_info) -> bp_result {
+    let record = if bp.object_info_tbl.revision.minor == 5 {
+        let Some(p) = get_bios_object_from_path_v3(bp, bios, id) else { return bp_result::BP_RESULT_BADINPUT };
+        get_hpd_record(bp, bios, p, true)
+    } else {
+        let Some(p) = get_bios_object(bp, bios, id) else { return bp_result::BP_RESULT_BADINPUT };
+        get_hpd_record(bp, bios, p, false)
+    };
+
+    if let Some(r) = record {
+        info.hpd_int_gpio_uid = u8_at(bios, r + BP2_HPDREC_PIN_ID);
+        info.hpd_active = u8_at(bios, r + BP2_HPDREC_PLUGIN_PIN_STATE);
+        return bp_result::BP_RESULT_OK;
+    }
+
+    bp_result::BP_RESULT_NORECORD
+}
+
+/// `bios_parser_get_gpio_pin_info` (bios_parser2.c): the register A
+/// offset/mask of `gpio_id` from the GPIO pin LUT.
+pub fn bios_parser_get_gpio_pin_info(bp: &bios_parser, bios: &[u8], gpio_id: u32, info: &mut gpio_pin_info) -> bp_result {
+    let lut = bp.data_tables(bios, BP2_DT_gpio_pin_lut);
+    if lut == 0 {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    }
+    let Some(header) = bp.get_image(bios, lut, BP2_PINLUT_SIZE) else {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    };
+    let structuresize = u16_at(bios, header + BP2_HDR_STRUCTURESIZE) as u32;
+    if BP2_COMMON_HDR_SIZE + BP2_PIN_SIZE > structuresize {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    }
+    if u8_at(bios, header + BP2_HDR_CONTENT_REVISION) != 1 {
+        return bp_result::BP_RESULT_UNSUPPORTED;
+    }
+    let count = (structuresize - BP2_COMMON_HDR_SIZE) / BP2_PIN_SIZE;
+    if bios_get_image(&bp.base, bios, lut, structuresize).is_none() {
+        return bp_result::BP_RESULT_BADBIOSTABLE;
+    }
+
+    for i in 0..count {
+        let pin = header + BP2_PINLUT_GPIO_PIN + i * BP2_PIN_SIZE;
+        if u8_at(bios, pin + BP2_PIN_GPIO_ID) as u32 != gpio_id {
+            continue;
+        }
+
+        info.offset = le16(u32_at(bios, pin + BP2_PIN_DATA_A_REG_INDEX));
+        info.offset_y = info.offset.wrapping_add(2);
+        info.offset_en = info.offset.wrapping_add(1);
+        info.offset_mask = info.offset.wrapping_sub(1);
+
+        let bitshift = u8_at(bios, pin + BP2_PIN_GPIO_BITSHIFT) as u32;
+        if bitshift >= 32 {
+            return bp_result::BP_RESULT_BADBIOSTABLE;
+        }
+
+        info.mask = 1u32 << bitshift;
+        info.mask_y = info.mask.wrapping_add(2);
+        info.mask_en = info.mask.wrapping_add(1);
+        info.mask_mask = info.mask.wrapping_sub(1);
+
+        return bp_result::BP_RESULT_OK;
+    }
+
+    bp_result::BP_RESULT_NORECORD
+}
+
+/// `device_type_from_device_id` (bios_parser2.c).
+fn device_type_from_device_id(device_id: u16) -> device_id {
+    let (device_type, enum_id) = match device_id as u32 {
+        BP2_ATOM_DISPLAY_LCD1_SUPPORT => (dal_device_type::DEVICE_TYPE_LCD, 1),
+        BP2_ATOM_DISPLAY_LCD2_SUPPORT => (dal_device_type::DEVICE_TYPE_LCD, 2),
+        BP2_ATOM_DISPLAY_DFP1_SUPPORT => (dal_device_type::DEVICE_TYPE_DFP, 1),
+        BP2_ATOM_DISPLAY_DFP2_SUPPORT => (dal_device_type::DEVICE_TYPE_DFP, 2),
+        BP2_ATOM_DISPLAY_DFP3_SUPPORT => (dal_device_type::DEVICE_TYPE_DFP, 3),
+        BP2_ATOM_DISPLAY_DFP4_SUPPORT => (dal_device_type::DEVICE_TYPE_DFP, 4),
+        BP2_ATOM_DISPLAY_DFP5_SUPPORT => (dal_device_type::DEVICE_TYPE_DFP, 5),
+        BP2_ATOM_DISPLAY_DFP6_SUPPORT => (dal_device_type::DEVICE_TYPE_DFP, 6),
+        _ => (dal_device_type::DEVICE_TYPE_UNKNOWN, 0),
+    };
+    device_id { device_type, enum_id, raw_device_tag: device_id }
+}
+
+/// `bios_parser_get_device_tag` (bios_parser2.c). The index is not used:
+/// a path carries one device tag.
+pub fn bios_parser_get_device_tag(bp: &bios_parser, bios: &[u8], connector_object_id: graphics_object_id,
+                                  _device_tag_index: u32, info: &mut connector_device_tag_info) -> bp_result {
+    let tag = if bp.object_info_tbl.revision.minor == 5 {
+        let Some(p) = get_bios_object_from_path_v3(bp, bios, connector_object_id) else {
+            return bp_result::BP_RESULT_BADINPUT;
+        };
+        u16_at(bios, p + BP2_PATHV3_DEVICE_TAG)
+    } else {
+        // getBiosObject will return MXM object
+        let Some(p) = get_bios_object(bp, bios, connector_object_id) else {
+            return bp_result::BP_RESULT_BADINPUT;
+        };
+        u16_at(bios, p + BP2_PATHV2_DEVICE_TAG)
+    };
+    info.acpi_device = 0; // BIOS no longer provides this
+    info.dev_id = device_type_from_device_id(tag);
+    bp_result::BP_RESULT_OK
+}
+
+/// `get_support_mask_for_device_id` (bios_parser2.c).
+fn get_support_mask_for_device_id(device_id: device_id) -> u32 {
+    match (device_id.device_type, device_id.enum_id) {
+        (dal_device_type::DEVICE_TYPE_LCD, 1) => BP2_ATOM_DISPLAY_LCD1_SUPPORT,
+        (dal_device_type::DEVICE_TYPE_DFP, 1) => BP2_ATOM_DISPLAY_DFP1_SUPPORT,
+        (dal_device_type::DEVICE_TYPE_DFP, 2) => BP2_ATOM_DISPLAY_DFP2_SUPPORT,
+        (dal_device_type::DEVICE_TYPE_DFP, 3) => BP2_ATOM_DISPLAY_DFP3_SUPPORT,
+        (dal_device_type::DEVICE_TYPE_DFP, 4) => BP2_ATOM_DISPLAY_DFP4_SUPPORT,
+        (dal_device_type::DEVICE_TYPE_DFP, 5) => BP2_ATOM_DISPLAY_DFP5_SUPPORT,
+        (dal_device_type::DEVICE_TYPE_DFP, 6) => BP2_ATOM_DISPLAY_DFP6_SUPPORT,
+        // Unidentified device ID, return empty support mask.
+        _ => 0,
+    }
+}
+
+/// `bios_parser_is_device_id_supported` (bios_parser2.c).
+pub fn bios_parser_is_device_id_supported(bp: &bios_parser, bios: &[u8], id: device_id) -> bool {
+    let mask = get_support_mask_for_device_id(id);
+    let t = bp.object_info_tbl.tbl.unwrap_or(0);
+    let supported = match bp.object_info_tbl.revision.minor {
+        5 => u16_at(bios, t + BP2_OBJINFO15_SUPPORTEDDEVICES),
+        _ => u16_at(bios, t + BP2_OBJINFO14_SUPPORTEDDEVICES),
+    } as u32;
+    supported & mask != 0
+}
+
+/// `bios_parser_get_disp_connector_caps_info` (bios_parser2.c), through
+/// `get_disp_connector_caps_record` (v1.4) / `get_connector_caps_record`
+/// (v1.5). Both stop at a zero size or the end type, having stepped past
+/// the record first.
+pub fn bios_parser_get_disp_connector_caps_info(bp: &bios_parser, bios: &[u8], object_id: graphics_object_id,
+                                                info: &mut bp_disp_connector_caps_info) -> bp_result {
+    let v3 = bp.object_info_tbl.revision.minor == 5;
+    let p = if v3 { get_bios_object_from_path_v3(bp, bios, object_id) } else { get_bios_object(bp, bios, object_id) };
+    let Some(p) = p else { return bp_result::BP_RESULT_BADINPUT };
+
+    let (end, want, size) = if v3 {
+        (BP2_ATOM_RECORD_END_TYPE, BP2_ATOM_CONNECTOR_CAP_RECORD_TYPE, BP2_CCAPREC_SIZE)
+    } else {
+        (BP2_LAST_RECORD_TYPE, BP2_ATOM_DISP_CONNECTOR_CAPS_RECORD_TYPE, BP2_DCCAPREC_SIZE)
+    };
+    let mut offset = disp_records(bp, bios, p, v3);
+    let mut record = None;
+    for _ in 0..BP2_BIOS_MAX_NUM_RECORD {
+        let Some(header) = bp.get_image(bios, offset, BP2_RECHDR_SIZE) else { break };
+        let record_type = u8_at(bios, header + BP2_RECHDR_RECORD_TYPE) as u32;
+        let record_size = u8_at(bios, header + BP2_RECHDR_RECORD_SIZE) as u32;
+        offset += record_size;
+        if record_type == end || record_size == 0 {
+            break;
+        }
+        if record_type != want {
+            continue;
+        }
+        if size <= record_size {
+            record = Some(header);
+            break;
+        }
+    }
+    let Some(r) = record else { return bp_result::BP_RESULT_NORECORD };
+
+    let caps = if v3 { u16_at(bios, r + BP2_CCAPREC_CONNECTOR_CAPS) as u32 } else { u32_at(bios, r + BP2_DCCAPREC_CONNECTCAPS) };
+    info.INTERNAL_DISPLAY = caps & BP2_ATOM_CONNECTOR_CAP_INTERNAL_DISPLAY != 0;
+    info.INTERNAL_DISPLAY_BL = caps & BP2_ATOM_CONNECTOR_CAP_INTERNAL_DISPLAY_BL != 0;
+    bp_result::BP_RESULT_OK
 }

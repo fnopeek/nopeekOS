@@ -133,3 +133,61 @@ mod bios_parser2;
 mod command_table2;
 #[path = "../src/dc_types.rs"]
 mod dc_types;
+#[path = "../src/clk_mgr.rs"]
+mod clk_mgr;
+#[path = "../src/dc_helper.rs"]
+mod dc_helper;
+#[path = "../src/dm_pp_smu.rs"]
+mod dm_pp_smu;
+#[path = "../src/fixpt31_32.rs"]
+mod fixpt31_32;
+#[path = "../src/rn_clk_mgr.rs"]
+mod rn_clk_mgr;
+#[path = "../src/gpio_service.rs"]
+mod gpio_service;
+#[path = "../src/dc.rs"]
+mod dc;
+#[path = "../src/dc_resource.rs"]
+mod dc_resource;
+#[path = "../src/dccg.rs"]
+mod dccg;
+#[path = "../src/dce_audio.rs"]
+mod dce_audio;
+#[path = "../src/dce_aux.rs"]
+mod dce_aux;
+#[path = "../src/dce_hwseq.rs"]
+mod dce_hwseq;
+#[path = "../src/dce_clock_source.rs"]
+mod dce_clock_source;
+#[path = "../src/dce_i2c_hw.rs"]
+mod dce_i2c_hw;
+#[path = "../src/dcn10_ipp.rs"]
+mod dcn10_ipp;
+#[path = "../src/dcn20_dpp.rs"]
+mod dcn20_dpp;
+#[path = "../src/dcn20_dsc.rs"]
+mod dcn20_dsc;
+#[path = "../src/dcn20_dwb.rs"]
+mod dcn20_dwb;
+#[path = "../src/dcn20_hubbub.rs"]
+mod dcn20_hubbub;
+#[path = "../src/dcn20_mmhubbub.rs"]
+mod dcn20_mmhubbub;
+#[path = "../src/dcn20_mpc.rs"]
+mod dcn20_mpc;
+#[path = "../src/dcn20_opp.rs"]
+mod dcn20_opp;
+#[path = "../src/dcn20_optc.rs"]
+mod dcn20_optc;
+#[path = "../src/dcn20_stream_encoder.rs"]
+mod dcn20_stream_encoder;
+#[path = "../src/dcn21_hubp.rs"]
+mod dcn21_hubp;
+#[path = "../src/dcn21_resource.rs"]
+mod dcn21_resource;
+#[path = "../src/virtual_stream_encoder.rs"]
+mod virtual_stream_encoder;
+#[path = "../src/dml_structs.rs"]
+mod dml_structs;
+#[path = "../src/dcn20_fpu.rs"]
+mod dcn20_fpu;

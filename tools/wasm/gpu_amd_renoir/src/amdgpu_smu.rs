@@ -1239,6 +1239,48 @@ fn smu_cmn_clk_dpm_is_enabled(adev: &amdgpu_device, _clk_type: u32) -> bool {
     smu_cmn_feature_is_enabled(adev, 0)
 }
 
+/// `renoir_get_dpm_clock_table`: `clocks_table` into DC's `dpm_clocks`.
+fn renoir_get_dpm_clock_table(adev: &amdgpu_device, clock_table: &mut crate::dm_pp_smu::dpm_clocks) -> i32 {
+    let t = &adev.smu.smu_table.clocks_table;
+    if t.is_empty() {
+        return -22;
+    }
+    let level = |base: u32, i: u32| {
+        let at = (base + i * SIZEOF_DpmClock_t) as usize;
+        let rd = |o: u32| u32::from_le_bytes(t[at + o as usize..at + o as usize + 4].try_into().unwrap());
+        crate::dm_pp_smu::dpm_clock { Freq: rd(DPM_CLOCK_FREQ), Vol: rd(DPM_CLOCK_VOL) }
+    };
+
+    for i in 0..NUM_DCFCLK_DPM_LEVELS {
+        clock_table.DcfClocks[i as usize] = level(DPM_CLOCKS_DCF_CLOCKS, i);
+    }
+    for i in 0..NUM_SOCCLK_DPM_LEVELS {
+        clock_table.SocClocks[i as usize] = level(DPM_CLOCKS_SOC_CLOCKS, i);
+    }
+    for i in 0..NUM_FCLK_DPM_LEVELS {
+        clock_table.FClocks[i as usize] = level(DPM_CLOCKS_F_CLOCKS, i);
+    }
+    for i in 0..NUM_MEMCLK_DPM_LEVELS {
+        clock_table.MemClocks[i as usize] = level(DPM_CLOCKS_MEM_CLOCKS, i);
+    }
+    for i in 0..NUM_VCN_DPM_LEVELS {
+        clock_table.VClocks[i as usize] = level(DPM_CLOCKS_V_CLOCKS, i);
+    }
+    for i in 0..NUM_VCN_DPM_LEVELS {
+        clock_table.DClocks[i as usize] = level(DPM_CLOCKS_D_CLOCKS, i);
+    }
+
+    0
+}
+
+/// `amdgpu_dpm_get_dpm_clock_table` → `smu_get_dpm_clock_table`.
+pub fn amdgpu_dpm_get_dpm_clock_table(adev: &amdgpu_device, clock_table: &mut crate::dm_pp_smu::dpm_clocks) -> i32 {
+    if !adev.smu.pm_enabled || !adev.pm.dpm_enabled {
+        return -95;
+    }
+    renoir_get_dpm_clock_table(adev, clock_table)
+}
+
 /// `renoir_get_dpm_clk_limited`: level `dpm_level` of `clocks_table`.
 fn renoir_get_dpm_clk_limited(adev: &amdgpu_device, clk_type: u32, dpm_level: u32, freq: &mut u32) -> i32 {
     let t = &adev.smu.smu_table.clocks_table;

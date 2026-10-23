@@ -6,7 +6,7 @@ extern crate alloc;
 include!("modules.rs");
 
 use amdgpu_device::amdgpu_device as Adev;
-use bios_parser2::{bp_init_data, dal_bios_parser_create};
+use bios_parser2::*;
 use dc_types::{dce_version, graphics_object_id, i2c_reg_info};
 
 fn gid(n: &str, g: graphics_object_id) {
@@ -143,4 +143,57 @@ fn main() {
         e.edp_pwr_on_vary_bl_to_blon, e.edp_pwr_down_bloff_to_vary_bloff, e.edp_panel_bpc, e.edp_bootup_bl_level
     );
     println!("gpuclk_ss {} {}", ii.gpuclk_ss_percentage, ii.gpuclk_ss_type);
+
+    // The object table, as create_links and construct_phy ask it.
+    let b = &adev.bios[..];
+    println!("connectors {}", bios_parser_get_connectors_number(&bp, b));
+    for i in 0..8u8 {
+        let c = bios_parser_get_connector_id(&bp, b, i);
+        print!("connector {}", i);
+        gid("", c);
+        let mut src = graphics_object_id::default();
+        let r = bios_parser_get_src_obj(&bp, b, c, 0, &mut src);
+        print!("  src {}", r as u32);
+        gid("", src);
+        let mut gsrc = graphics_object_id::default();
+        let r = bios_parser_get_src_obj(&bp, b, src, 0, &mut gsrc);
+        print!("  encoder src {}", r as u32);
+        gid("", gsrc);
+        let mut i2c = graphics_object_i2c_info::default();
+        let r = bios_parser_get_i2c_info(&bp, b, c, &mut i2c);
+        println!(
+            "  i2c {} hw_assist {} line {} engine {} slave {} clk_a {} shift {}",
+            r as u32, i2c.i2c_hw_assist as u32, i2c.i2c_line, i2c.i2c_engine_id, i2c.i2c_slave_address,
+            i2c.gpio_info.clk_a_register_index, i2c.gpio_info.clk_a_shift
+        );
+        let mut hpd = graphics_object_hpd_info::default();
+        let r = bios_parser_get_hpd_info(&bp, b, c, &mut hpd);
+        println!("  hpd {} uid {} active {}", r as u32, hpd.hpd_int_gpio_uid, hpd.hpd_active);
+        let mut pin = gpio_pin_info::default();
+        let r = bios_parser_get_gpio_pin_info(&bp, b, hpd.hpd_int_gpio_uid as u32, &mut pin);
+        println!(
+            "  pin {} {} {} {} {} {} {} {} {}",
+            r as u32, pin.offset, pin.offset_y, pin.offset_en, pin.offset_mask, pin.mask, pin.mask_y, pin.mask_en,
+            pin.mask_mask
+        );
+        let mut tag = connector_device_tag_info::default();
+        let r = bios_parser_get_device_tag(&bp, b, c, 0, &mut tag);
+        println!(
+            "  tag {} acpi {} type {} enum {} raw {} supported {}",
+            r as u32, tag.acpi_device, tag.dev_id.device_type as u32, tag.dev_id.enum_id, tag.dev_id.raw_device_tag,
+            bios_parser_is_device_id_supported(&bp, b, tag.dev_id) as u32
+        );
+        let mut caps = bp_disp_connector_caps_info::default();
+        let r = bios_parser_get_disp_connector_caps_info(&bp, b, c, &mut caps);
+        println!(
+            "  caps {} internal {} bl {}",
+            r as u32, caps.INTERNAL_DISPLAY as u32, caps.INTERNAL_DISPLAY_BL as u32
+        );
+    }
+    for g in (0..256u32).step_by(17) {
+        let gobj = graphics_object_id::init(g & 0xff, dc_types::object_enum_id::ENUM_ID_1, dc_types::object_type::OBJECT_TYPE_GENERIC);
+        let mut i2c = graphics_object_i2c_info::default();
+        let r = bios_parser_get_i2c_info(&bp, b, gobj, &mut i2c);
+        println!("generic i2c {}: {} line {} engine {}", g, r as u32, i2c.i2c_line, i2c.i2c_engine_id);
+    }
 }

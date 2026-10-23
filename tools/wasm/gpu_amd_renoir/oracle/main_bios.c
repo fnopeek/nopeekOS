@@ -14,6 +14,7 @@
 
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #define DC_LOG_BIOS(...) do { } while (0)
+#define fallthrough __attribute__((fallthrough))
 #define ASSERT(x) do { } while (0)
 #define ASSERT_CRITICAL(x) do { } while (0)
 #define BREAK_TO_DEBUGGER() do { } while (0)
@@ -204,5 +205,49 @@ int main(int argc, char **argv)
 	       ii->edp1_info.edp_ss_rate_10hz, ii->edp1_info.edp_pwr_on_off_delay, ii->edp1_info.edp_pwr_on_vary_bl_to_blon,
 	       ii->edp1_info.edp_pwr_down_bloff_to_vary_bloff, ii->edp1_info.edp_panel_bpc, ii->edp1_info.edp_bootup_bl_level);
 	printf("gpuclk_ss %u %u\n", ii->gpuclk_ss_percentage, ii->gpuclk_ss_type);
+
+	/* The object table, as create_links and construct_phy ask it. */
+	struct dc_bios *dcb = &bp->base;
+	uint8_t n = bios_parser_get_connectors_number(dcb);
+	printf("connectors %u\n", n);
+	for (int i = 0; i < 8; i++) {
+		struct graphics_object_id c = bios_parser_get_connector_id(dcb, i);
+		printf("connector %d", i);
+		gid("", c);
+		struct graphics_object_id src = { 0 };
+		enum bp_result r = bios_parser_get_src_obj(dcb, c, 0, &src);
+		printf("  src %d", r);
+		gid("", src);
+		struct graphics_object_id gsrc = { 0 };
+		r = bios_parser_get_src_obj(dcb, src, 0, &gsrc);
+		printf("  encoder src %d", r);
+		gid("", gsrc);
+		struct graphics_object_i2c_info i2c = { 0 };
+		r = bios_parser_get_i2c_info(dcb, c, &i2c);
+		printf("  i2c %d hw_assist %d line %u engine %u slave %u clk_a %u shift %u\n", r, i2c.i2c_hw_assist,
+		       i2c.i2c_line, i2c.i2c_engine_id, i2c.i2c_slave_address, i2c.gpio_info.clk_a_register_index,
+		       i2c.gpio_info.clk_a_shift);
+		struct graphics_object_hpd_info hpd = { 0 };
+		r = bios_parser_get_hpd_info(dcb, c, &hpd);
+		printf("  hpd %d uid %u active %u\n", r, hpd.hpd_int_gpio_uid, hpd.hpd_active);
+		struct gpio_pin_info pin = { 0 };
+		r = bios_parser_get_gpio_pin_info(dcb, hpd.hpd_int_gpio_uid, &pin);
+		printf("  pin %d %u %u %u %u %u %u %u %u\n", r, pin.offset, pin.offset_y, pin.offset_en, pin.offset_mask,
+		       pin.mask, pin.mask_y, pin.mask_en, pin.mask_mask);
+		struct connector_device_tag_info tag = { 0 };
+		r = bios_parser_get_device_tag(dcb, c, 0, &tag);
+		printf("  tag %d acpi %u type %u enum %u raw %u supported %d\n", r, tag.acpi_device,
+		       tag.dev_id.device_type, tag.dev_id.enum_id, tag.dev_id.raw_device_tag,
+		       bios_parser_is_device_id_supported(dcb, tag.dev_id));
+		struct bp_disp_connector_caps_info caps = { 0 };
+		r = bios_parser_get_disp_connector_caps_info(dcb, c, &caps);
+		printf("  caps %d internal %u bl %u\n", r, caps.INTERNAL_DISPLAY, caps.INTERNAL_DISPLAY_BL);
+	}
+	for (int g = 0; g < 256; g += 17) {
+		struct graphics_object_id gen = dal_graphics_object_id_init(g & 0xff, ENUM_ID_1, OBJECT_TYPE_GENERIC);
+		struct graphics_object_i2c_info i2c = { 0 };
+		enum bp_result r = bios_parser_get_i2c_info(dcb, gen, &i2c);
+		printf("generic i2c %d: %d line %u engine %u\n", g, r, i2c.i2c_line, i2c.i2c_engine_id);
+	}
 	return 0;
 }

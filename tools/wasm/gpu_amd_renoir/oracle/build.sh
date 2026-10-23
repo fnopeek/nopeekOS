@@ -386,7 +386,12 @@ DB=$AMD/display/dc/bios
     $X "$AMD/display/include/bios_parser_types.h" bp_result bp_soc_bb_info
     $X "$AMD/display/include/bios_parser_interface.h" bp_init_data
     $X "$DB/bios_parser_types_internal2.h" atom_data_revision object_info_table
-    $X "$DB/bios_parser_helper.h" '#GET_IMAGE'
+    $X "$AMD/display/include/bios_parser_types.h" as_signal_type
+    $X "$AMD/display/include/grph_object_ctrl_defs.h" step_and_delay_info spread_spectrum_info dal_device_type \
+        device_id graphics_object_i2c_info graphics_object_hpd_info connector_device_tag_info
+    $X "$AMD/display/include/bios_parser_types.h" bp_disp_connector_caps_info
+    $X "$AMD/display/include/gpio_types.h" gpio_pin_info
+    $X "$DB/bios_parser_helper.h" '#GET_IMAGE' '#BIOS_MAX_NUM_RECORD'
     $X "$DB/bios_parser_types_internal2.h" '#BP_FROM_DCB'
 } > "$B/bios_types.h"
 {
@@ -394,13 +399,19 @@ DB=$AMD/display/dc/bios
     $X "$DB/bios_parser_common.c" object_type_from_bios_object_id enum_id_from_bios_object_id \
         gpu_id_from_bios_object_id encoder_id_from_bios_object_id connector_id_from_bios_object_id \
         generic_id_from_bios_object_id id_from_bios_object_id object_id_from_bios_object_id
-    $X "$DB/bios_parser2.c" '#SMU9_SYSPLL0_ID' '#BIOS_IMAGE_SIZE_OFFSET' '#BIOS_IMAGE_SIZE_UNIT' '#DATA_TABLES' \
+    $X "$DB/bios_parser2.c" '#LAST_RECORD_TYPE' '#SMU9_SYSPLL0_ID' '#BIOS_IMAGE_SIZE_OFFSET' '#BIOS_IMAGE_SIZE_UNIT' '#DATA_TABLES' \
         get_atom_data_table_revision bios_parser_get_firmware_info get_firmware_info_v3_1 \
         get_firmware_info_v3_2 get_firmware_info_v3_4 get_firmware_info_v3_5 get_integrated_info_v11 \
         get_integrated_info_v2_1 get_integrated_info_v2_2 construct_integrated_info get_vram_info_v23 \
         get_vram_info_v24 get_vram_info_v25 get_vram_info_v30 get_vram_info_from_umc_info_v40 \
         bios_parser_get_vram_info get_soc_bb_info_v4_4 get_soc_bb_info_v4_5 bios_parser_get_soc_bb_info \
-        bios_parser_create_integrated_info bios_parser2_construct
+        bios_parser_create_integrated_info bios_parser2_construct get_ss_info_v4_1 get_ss_info_v4_2 \
+        get_ss_info_v4_5 bios_parser_get_spread_spectrum_info bios_parser_get_ss_entry_number \
+        bios_parser_get_connectors_number bios_parser_get_connector_id bios_parser_get_src_obj get_bios_object \
+        get_bios_object_from_path_v3 bios_parser_get_i2c_info get_gpio_i2c_info get_hpd_record_for_path_v3 \
+        bios_parser_get_hpd_info get_hpd_record bios_parser_get_gpio_pin_info device_type_from_device_id \
+        bios_parser_get_device_tag get_support_mask_for_device_id bios_parser_is_device_id_supported \
+        get_disp_connector_caps_record get_connector_caps_record bios_parser_get_disp_connector_caps_info
     $X "$DB/command_table2.c" '#GET_INDEX_INTO_MASTER_TABLE' '#BIOS_CMD_TABLE_REVISION' \
         '#BIOS_CMD_TABLE_PARA_REVISION' bios_cmd_table_para_revision init_dig_encoder_control \
         init_transmitter_control init_set_pixel_clock init_set_crtc_timing init_enable_crtc \
@@ -410,12 +421,41 @@ DB=$AMD/display/dc/bios
 } > "$B/bios_funcs.c"
 python3 -I "$HERE/protos.py" "$B/bios_funcs.c" > "$B/bios_protos.h"
 
+# DC's clock manager: rn_clk_mgr_construct and what it calls, on top of the
+# VBIOS parser above.
+DCLK=$AMD/display/dc/clk_mgr
+{
+    $X "$AMD/display/dc/inc/hw/clk_mgr.h" '#MAX_NUM_DPM_LVL' clk_limit_table_entry clk_limit_num_entries \
+        clk_limit_table wm_range_table_entry nv_wm_range_entry wm_table dummy_pstate_entry clk_bw_params \
+        clk_state_registers_and_bypass clk_log_info rn_clk_internal
+} > "$B/clk_types.h"
+{
+    $X "$AMD/display/dc/basics/fixpt31_32.c" '#FRACTIONAL_PART_MASK' '#GET_INTEGER_PART' '#GET_FRACTIONAL_PART' \
+        dc_fixpt_mul
+    $X "$DCLK/dce100/dce_clk_mgr.c" dce_clock_read_ss_info
+    $X "$AMD/display/dc/dml/dcn20/dcn20_fpu.c" '#LPDDR_MEM_RETRAIN_LATENCY' ddr4_wm_table_gs lpddr4_wm_table_gs \
+        lpddr4_wm_table_with_disabled_ppt ddr4_wm_table_rn ddr4_1R_wm_table_rn lpddr4_wm_table_rn \
+        dcn21_clk_mgr_set_bw_params_wm_table
+    $X "$DCLK/dcn21/rn_clk_mgr_vbios_smu.c" '#REG' '#FN' '#VBIOSSMC_MSG_GetSmuVersion' \
+        '#VBIOSSMC_MSG_EnableTmdp48MHzRefclkPwrDown' '#VBIOSSMC_MSG_IsPeriodicRetrainingDisabled' \
+        '#VBIOSSMC_Status_BUSY' '#VBIOSSMC_Result_OK' rn_smu_wait_for_response rn_vbios_smu_send_msg_with_param \
+        rn_vbios_smu_get_smu_version rn_vbios_smu_enable_48mhz_tmdp_refclk_pwrdwn \
+        rn_vbios_smu_is_periodic_retraining_disabled
+    echo '#undef REG'
+    echo '#undef FN'
+    $X "$DCLK/dcn21/rn_clk_mgr.c" '#SMU_VER_55_51_0' '#REG' get_vco_frequency_from_reg \
+        rn_dump_clk_registers_internal rn_dump_clk_registers rn_bw_params find_socclk_for_voltage \
+        find_dcfclk_for_voltage rn_clk_mgr_helper_populate_bw_params rn_clk_mgr_construct
+} > "$B/clk_funcs.c"
+python3 -I "$HERE/protos.py" "$B/clk_funcs.c" > "$B/clk_protos.h"
+
 CF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
 gcc $CF -c "$B/atom.c" -o "$B/atom.o"
 gcc $CF "$HERE/main.c" "$B/atom.o" -o "$B/oracle_atom"
 gcc $CF "$HERE/main_atomexec.c" "$B/atom.o" -o "$B/oracle_atomexec"
 gcc $CF "$HERE/main_dmub.c" -o "$B/oracle_dmub"
 gcc $CF "$HERE/main_bios.c" "$B/atom.o" -o "$B/oracle_bios"
+gcc $CF -I "$AMD/include/asic_reg" -I "$AMD/display/dc" -I "$AMD/display/include" "$HERE/main_clk.c" "$B/atom.o" -o "$B/oracle_clk"
 gcc $CF "$HERE/main_psp.c" -o "$B/oracle_psp"
 gcc $CF "$HERE/main_discovery.c" -o "$B/oracle_discovery"
 gcc $CF -I "$AMD/display/include" "$HERE/main_ucode.c" -o "$B/oracle_ucode"

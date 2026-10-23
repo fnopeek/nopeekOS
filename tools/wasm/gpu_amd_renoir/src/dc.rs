@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use crate::amdgpu_device::amdgpu_device;
+use crate::clk_mgr::dc_clk_mgr_create;
 use crate::dc_resource::{dc_create_resource_pool, resource_parse_asic_id, resource_pool, NO_UNDERLAY_PIPE};
 use crate::gpio_service::{dal_gpio_service_create, gpio_service};
 use crate::bios_parser2::{bios_parser, bp_init_data, dal_bios_parser_create};
@@ -64,7 +65,62 @@ pub struct dc_init_data {
     pub num_virtual_links: i32,
     pub dce_environment: dce_environment,
     pub log_mask: u64,
+    pub flags: dc_config,
     pub force_smu_not_present: bool,
+}
+
+/// `struct dc_config` (dc.h): the members a reached path reads.
+#[derive(Default, Clone, Copy)]
+pub struct dc_config {
+    pub disable_dmcu: bool,
+    pub is_single_rank_dimm: bool,
+    pub is_asymmetric_memory: bool,
+    pub force_bios_fixed_vs: u32,
+    pub ignore_dpref_ss: bool,
+}
+
+/// `enum pipe_split_policy` (dc.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum pipe_split_policy {
+    #[default]
+    MPC_SPLIT_DYNAMIC = 0,
+    MPC_SPLIT_AVOID = 1,
+    MPC_SPLIT_AVOID_MULT_DISP = 2,
+}
+
+/// `enum dcc_option` (dc.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum dcc_option {
+    #[default]
+    DCC_ENABLE = 0,
+    DCC_DISABLE = 1,
+    DCC_HALF_REQ_DISALBE = 2,
+}
+
+/// `struct dc_debug_options` (dc.h): the members DCN 2.1's
+/// `debug_defaults_drv` sets.
+#[derive(Default, Clone, Copy)]
+pub struct dc_debug_options {
+    pub disable_dmcu: bool,
+    pub force_abm_enable: bool,
+    pub clock_trace: bool,
+    pub disable_pplib_clock_request: bool,
+    pub min_disp_clk_khz: i32,
+    pub pipe_split_policy: pipe_split_policy,
+    pub force_single_disp_pipe_split: bool,
+    pub disable_dcc: dcc_option,
+    pub vsr_support: bool,
+    pub performance_trace: bool,
+    pub max_downscale_src_width: i32,
+    pub disable_pplib_wm_range: bool,
+    pub scl_reset_length10: bool,
+    pub sanity_checks: bool,
+    pub disable_48mhz_pwrdwn: bool,
+    pub usbc_combo_phy_reset_wa: bool,
+    pub dmub_command_table: bool,
+    pub use_max_lb: bool,
+    pub enable_legacy_fast_update: bool,
+    pub using_dml2: bool,
 }
 
 /// Which `dc_cap_funcs` entry is bound (dcn21 sets only
@@ -96,6 +152,10 @@ pub struct dc {
     /// `cap_funcs`: the capability-query vtable (set at the end of the construct).
     pub cap_funcs: dc_cap_funcs,
     pub build_id: &'static str,
+    pub config: dc_config,
+    pub debug: dc_debug_options,
+    /// `clk_mgr`: Renoir's is the `clk_mgr_internal` of rn_clk_mgr.
+    pub clk_mgr: Option<Box<crate::clk_mgr::clk_mgr_internal>>,
 }
 
 /// `DC_BUILD_ID` (dc.c).
@@ -122,8 +182,10 @@ fn dc_construct_ctx(dc: &mut dc, init_params: &dc_init_data) -> bool {
 
 /// `dc_construct` (dc.c).
 fn dc_construct(adev: &amdgpu_device, dc: &mut dc, init_params: &dc_init_data) -> bool {
-    // dc->config, vm_helper, bb_overrides and the DCN 1.0 bw_dceip/bw_vbios/
-    // dcn_soc/dcn_ip blocks join with their first reader.
+    dc.config = init_params.flags;
+
+    // vm_helper, bb_overrides and the DCN 1.0 bw_dceip/bw_vbios/dcn_soc/dcn_ip
+    // blocks join with their first reader.
     if !dc_construct_ctx(dc, init_params) {
         return false;
     }
@@ -155,8 +217,16 @@ fn dc_construct(adev: &amdgpu_device, dc: &mut dc, init_params: &dc_init_data) -
         dc.caps.max_optimizable_video_width = 5120;
     }
 
-    // dc->clk_mgr = dc_clk_mgr_create(): rn_clk_mgr (stage B), then
-    // update_bw_bounding_box and the soc/ip translator.
+    dc.clk_mgr = dc_clk_mgr_create(adev, dc);
+    if dc.clk_mgr.is_none() {
+        return false;
+    }
+    if let Some(clk_mgr) = dc.clk_mgr.as_deref_mut() {
+        clk_mgr.base.force_smu_not_present = init_params.force_smu_not_present;
+    }
+    // res_pool->funcs->update_bw_bounding_box (dcn21_update_bw_bounding_box,
+    // DML — stage C). dc_create_soc_and_ip_translator binds a translator for
+    // DCN 4.01 only; on 2.1 it is an empty allocation.
     // create_links(), create_link_encoders(): the link/ subsystem.
     // dc->current_state = dc_state_create(dc, NULL).
     true

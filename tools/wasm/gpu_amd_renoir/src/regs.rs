@@ -22529,3 +22529,257 @@ pub const BP2_GENERIC_OBJECT_ID_MXM_OPM: u32 = 0x3;
 pub const BP2_GENERIC_OBJECT_ID_GLSYNC: u32 = 0x1;
 /// The value of `GENERIC_OBJECT_ID_STEREO_PIN` in ../display/dc/bios/bios_parser_common.c
 pub const BP2_GENERIC_OBJECT_ID_STEREO_PIN: u32 = 0x4;
+
+// rn_clk_mgr (dc/clk_mgr/dcn21): the CLK1 registers at the static CLK_BASE
+/// The value of `CLK_BASE.instance[0].segment[mmCLK1_CLK_PLL_REQ_BASE_IDX] + mmCLK1_CLK_PLL_REQ` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK_PLL_REQ: u32 = 0x16e0f;
+/// The value of `CLK_BASE.instance[0].segment[mmCLK1_CLK0_CURRENT_CNT_BASE_IDX] + mmCLK1_CLK0_CURRENT_CNT` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK0_CURRENT_CNT: u32 = 0x16e8a;
+/// The value of `CLK_BASE.instance[0].segment[mmCLK1_CLK1_CURRENT_CNT_BASE_IDX] + mmCLK1_CLK1_CURRENT_CNT` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK1_CURRENT_CNT: u32 = 0x16e8b;
+/// The value of `CLK_BASE.instance[0].segment[mmCLK1_CLK2_CURRENT_CNT_BASE_IDX] + mmCLK1_CLK2_CURRENT_CNT` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK2_CURRENT_CNT: u32 = 0x16e8c;
+/// The value of `CLK_BASE.instance[0].segment[mmCLK1_CLK3_CURRENT_CNT_BASE_IDX] + mmCLK1_CLK3_CURRENT_CNT` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK3_CURRENT_CNT: u32 = 0x16e8d;
+/// The value of `CLK_BASE.instance[0].segment[mmCLK1_CLK3_DS_CNTL_BASE_IDX] + mmCLK1_CLK3_DS_CNTL` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK3_DS_CNTL: u32 = 0x16e60;
+/// The value of `CLK_BASE.instance[0].segment[mmCLK1_CLK3_ALLOW_DS_BASE_IDX] + mmCLK1_CLK3_ALLOW_DS` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK3_ALLOW_DS: u32 = 0x16e61;
+/// The value of `CLK_BASE.instance[0].segment[mmCLK1_CLK0_BYPASS_CNTL_BASE_IDX] + mmCLK1_CLK0_BYPASS_CNTL` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK0_BYPASS_CNTL: u32 = 0x16e49;
+/// The value of `CLK_BASE.instance[0].segment[mmCLK1_CLK1_BYPASS_CNTL_BASE_IDX] + mmCLK1_CLK1_BYPASS_CNTL` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK1_BYPASS_CNTL: u32 = 0x16e53;
+/// The value of `CLK_BASE.instance[0].segment[mmCLK1_CLK2_BYPASS_CNTL_BASE_IDX] + mmCLK1_CLK2_BYPASS_CNTL` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK2_BYPASS_CNTL: u32 = 0x16e5d;
+/// The value of `CLK_BASE.instance[0].segment[mmCLK1_CLK3_BYPASS_CNTL_BASE_IDX] + mmCLK1_CLK3_BYPASS_CNTL` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK3_BYPASS_CNTL: u32 = 0x16e67;
+/// The value of `CLK1_CLK_PLL_REQ__FbMult_int__SHIFT` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK_PLL_REQ__FbMult_int__SHIFT: u32 = 0x0;
+/// The value of `CLK1_CLK_PLL_REQ__FbMult_int_MASK` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK_PLL_REQ__FbMult_int_MASK: u32 = 0x1ff;
+/// The value of `CLK1_CLK_PLL_REQ__FbMult_frac__SHIFT` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK_PLL_REQ__FbMult_frac__SHIFT: u32 = 0x10;
+/// The value of `CLK1_CLK_PLL_REQ__FbMult_frac_MASK` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_CLK1_CLK_PLL_REQ__FbMult_frac_MASK: u32 = 0xffff0000;
+/// The value of `SMU_VER_55_51_0` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr.c
+pub const RN_SMU_VER_55_51_0: u32 = 0x373300;
+
+// rn_clk_mgr_vbios_smu: the VBIOS SMC mailbox at the static MP0_BASE
+/// The value of `MP0_BASE.instance[0].segment[mmMP1_SMN_C2PMSG_67_BASE_IDX] + mmMP1_SMN_C2PMSG_67` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOS_MP1_SMN_C2PMSG_67: u32 = 0x16283;
+/// The value of `MP0_BASE.instance[0].segment[mmMP1_SMN_C2PMSG_83_BASE_IDX] + mmMP1_SMN_C2PMSG_83` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOS_MP1_SMN_C2PMSG_83: u32 = 0x16293;
+/// The value of `MP0_BASE.instance[0].segment[mmMP1_SMN_C2PMSG_91_BASE_IDX] + mmMP1_SMN_C2PMSG_91` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOS_MP1_SMN_C2PMSG_91: u32 = 0x1629b;
+/// The value of `VBIOSSMC_MSG_GetSmuVersion` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOSSMC_MSG_GetSmuVersion: u32 = 0x2;
+/// The value of `VBIOSSMC_MSG_EnableTmdp48MHzRefclkPwrDown` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOSSMC_MSG_EnableTmdp48MHzRefclkPwrDown: u32 = 0xd;
+/// The value of `VBIOSSMC_MSG_IsPeriodicRetrainingDisabled` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOSSMC_MSG_IsPeriodicRetrainingDisabled: u32 = 0xf;
+/// The value of `VBIOSSMC_Status_BUSY` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOSSMC_Status_BUSY: u32 = 0x0;
+/// The value of `VBIOSSMC_Result_OK` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOSSMC_Result_OK: u32 = 0x1;
+
+// bios_parser2 spread spectrum (get_ss_info_v4_1/v4_2/v4_5)
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, dvi_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_DVI_SS_PERCENTAGE: u32 = 0x10;
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, dvi_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_DVI_SS_RATE_10HZ: u32 = 0x12;
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, dvi_ss_mode)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_DVI_SS_MODE: u32 = 0x1c;
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, hdmi_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_HDMI_SS_PERCENTAGE: u32 = 0x14;
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, hdmi_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_HDMI_SS_RATE_10HZ: u32 = 0x16;
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, hdmi_ss_mode)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_HDMI_SS_MODE: u32 = 0x1d;
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, dp_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_DP_SS_PERCENTAGE: u32 = 0x18;
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, dp_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_DP_SS_RATE_10HZ: u32 = 0x1a;
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, dp_ss_mode)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_DP_SS_MODE: u32 = 0x1e;
+/// The value of `sizeof(struct atom_display_controller_info_v4_2)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI42_SIZE: u32 = 0x38;
+/// The value of `offsetof(struct atom_display_controller_info_v4_2, dvi_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI42_DVI_SS_PERCENTAGE: u32 = 0x10;
+/// The value of `offsetof(struct atom_display_controller_info_v4_2, dvi_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI42_DVI_SS_RATE_10HZ: u32 = 0x12;
+/// The value of `offsetof(struct atom_display_controller_info_v4_2, dvi_ss_mode)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI42_DVI_SS_MODE: u32 = 0x1c;
+/// The value of `offsetof(struct atom_display_controller_info_v4_2, hdmi_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI42_HDMI_SS_PERCENTAGE: u32 = 0x14;
+/// The value of `offsetof(struct atom_display_controller_info_v4_2, hdmi_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI42_HDMI_SS_RATE_10HZ: u32 = 0x16;
+/// The value of `offsetof(struct atom_display_controller_info_v4_2, hdmi_ss_mode)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI42_HDMI_SS_MODE: u32 = 0x1d;
+/// The value of `sizeof(struct atom_display_controller_info_v4_5)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI45_SIZE: u32 = 0xd4;
+/// The value of `offsetof(struct atom_display_controller_info_v4_5, dvi_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI45_DVI_SS_PERCENTAGE: u32 = 0x10;
+/// The value of `offsetof(struct atom_display_controller_info_v4_5, dvi_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI45_DVI_SS_RATE_10HZ: u32 = 0x12;
+/// The value of `offsetof(struct atom_display_controller_info_v4_5, dvi_ss_mode)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI45_DVI_SS_MODE: u32 = 0x1c;
+/// The value of `offsetof(struct atom_display_controller_info_v4_5, hdmi_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI45_HDMI_SS_PERCENTAGE: u32 = 0x14;
+/// The value of `offsetof(struct atom_display_controller_info_v4_5, hdmi_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI45_HDMI_SS_RATE_10HZ: u32 = 0x16;
+/// The value of `offsetof(struct atom_display_controller_info_v4_5, hdmi_ss_mode)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI45_HDMI_SS_MODE: u32 = 0x1d;
+/// The value of `offsetof(struct atom_display_controller_info_v4_5, dp_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI45_DP_SS_PERCENTAGE: u32 = 0x18;
+/// The value of `offsetof(struct atom_display_controller_info_v4_5, dp_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI45_DP_SS_RATE_10HZ: u32 = 0x1a;
+/// The value of `offsetof(struct atom_display_controller_info_v4_5, dp_ss_mode)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI45_DP_SS_MODE: u32 = 0x1e;
+/// The value of `sizeof(struct atom_smu_info_v3_1)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI31_SIZE: u32 = 0x1c;
+/// The value of `offsetof(struct atom_smu_info_v3_1, gpuclk_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI31_GPUCLK_SS_PERCENTAGE: u32 = 0xc;
+/// The value of `offsetof(struct atom_smu_info_v3_1, gpuclk_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI31_GPUCLK_SS_RATE_10HZ: u32 = 0xe;
+/// The value of `offsetof(struct atom_smu_info_v3_1, gpuclk_ss_mode)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI31_GPUCLK_SS_MODE: u32 = 0x7;
+/// The value of `offsetof(struct atom_smu_info_v3_3, gpuclk_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI33_GPUCLK_SS_PERCENTAGE: u32 = 0xc;
+/// The value of `offsetof(struct atom_smu_info_v3_3, gpuclk_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI33_GPUCLK_SS_RATE_10HZ: u32 = 0xe;
+/// The value of `offsetof(struct atom_smu_info_v3_3, waflclk_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI33_WAFLCLK_SS_PERCENTAGE: u32 = 0x54;
+/// The value of `offsetof(struct atom_smu_info_v3_3, waflclk_ss_mode)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI33_WAFLCLK_SS_MODE: u32 = 0x6;
+/// The value of `ATOM_SS_CENTRE_SPREAD_MODE` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_SS_CENTRE_SPREAD_MODE: u32 = 0x1;
+/// The value of `offsetof(DpmClock_t, Vol)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const DPM_CLOCK_VOL: u32 = 0x4;
+/// The value of `offsetof(DpmClocks_t, MemClocks)` in ../pm/swsmu/smu12/renoir_ppt.c
+pub const DPM_CLOCKS_MEM_CLOCKS: u32 = 0xa0;
+
+// bios_parser2 object table queries (create_links / construct_phy)
+/// The value of `sizeof(struct display_object_info_table_v1_4)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OBJINFO14_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct display_object_info_table_v1_4, supporteddevices)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OBJINFO14_SUPPORTEDDEVICES: u32 = 0x4;
+/// The value of `offsetof(struct display_object_info_table_v1_4, number_of_path)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OBJINFO14_NUMBER_OF_PATH: u32 = 0x6;
+/// The value of `offsetof(struct display_object_info_table_v1_4, display_path)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OBJINFO14_DISPLAY_PATH: u32 = 0x8;
+/// The value of `sizeof(struct display_object_info_table_v1_5)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OBJINFO15_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct display_object_info_table_v1_5, supporteddevices)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OBJINFO15_SUPPORTEDDEVICES: u32 = 0x4;
+/// The value of `offsetof(struct display_object_info_table_v1_5, number_of_path)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OBJINFO15_NUMBER_OF_PATH: u32 = 0x6;
+/// The value of `offsetof(struct display_object_info_table_v1_5, display_path)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OBJINFO15_DISPLAY_PATH: u32 = 0x8;
+/// The value of `sizeof(struct atom_display_object_path_v2)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV2_SIZE: u32 = 0x10;
+/// The value of `offsetof(struct atom_display_object_path_v2, display_objid)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV2_DISPLAY_OBJID: u32 = 0x0;
+/// The value of `offsetof(struct atom_display_object_path_v2, disp_recordoffset)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV2_DISP_RECORDOFFSET: u32 = 0x2;
+/// The value of `offsetof(struct atom_display_object_path_v2, encoderobjid)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV2_ENCODEROBJID: u32 = 0x4;
+/// The value of `offsetof(struct atom_display_object_path_v2, extencoderobjid)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV2_EXTENCODEROBJID: u32 = 0x6;
+/// The value of `offsetof(struct atom_display_object_path_v2, encoder_recordoffset)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV2_ENCODER_RECORDOFFSET: u32 = 0x8;
+/// The value of `offsetof(struct atom_display_object_path_v2, device_tag)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV2_DEVICE_TAG: u32 = 0xc;
+/// The value of `sizeof(struct atom_display_object_path_v3)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV3_SIZE: u32 = 0x10;
+/// The value of `offsetof(struct atom_display_object_path_v3, display_objid)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV3_DISPLAY_OBJID: u32 = 0x0;
+/// The value of `offsetof(struct atom_display_object_path_v3, disp_recordoffset)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV3_DISP_RECORDOFFSET: u32 = 0x2;
+/// The value of `offsetof(struct atom_display_object_path_v3, encoderobjid)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV3_ENCODEROBJID: u32 = 0x4;
+/// The value of `offsetof(struct atom_display_object_path_v3, device_tag)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PATHV3_DEVICE_TAG: u32 = 0xc;
+/// The value of `sizeof(struct atom_common_record_header)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_RECHDR_SIZE: u32 = 0x2;
+/// The value of `offsetof(struct atom_common_record_header, record_type)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_RECHDR_RECORD_TYPE: u32 = 0x0;
+/// The value of `offsetof(struct atom_common_record_header, record_size)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_RECHDR_RECORD_SIZE: u32 = 0x1;
+/// The value of `sizeof(struct atom_i2c_record)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_I2CREC_SIZE: u32 = 0x4;
+/// The value of `offsetof(struct atom_i2c_record, i2c_id)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_I2CREC_I2C_ID: u32 = 0x2;
+/// The value of `offsetof(struct atom_i2c_record, i2c_slave_addr)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_I2CREC_I2C_SLAVE_ADDR: u32 = 0x3;
+/// The value of `sizeof(struct atom_hpd_int_record)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_HPDREC_SIZE: u32 = 0x4;
+/// The value of `offsetof(struct atom_hpd_int_record, pin_id)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_HPDREC_PIN_ID: u32 = 0x2;
+/// The value of `offsetof(struct atom_hpd_int_record, plugin_pin_state)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_HPDREC_PLUGIN_PIN_STATE: u32 = 0x3;
+/// The value of `sizeof(struct atom_gpio_pin_lut_v2_1)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PINLUT_SIZE: u32 = 0x4;
+/// The value of `offsetof(struct atom_gpio_pin_lut_v2_1, gpio_pin)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PINLUT_GPIO_PIN: u32 = 0x4;
+/// The value of `sizeof(struct atom_gpio_pin_assignment)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PIN_SIZE: u32 = 0x8;
+/// The value of `offsetof(struct atom_gpio_pin_assignment, data_a_reg_index)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PIN_DATA_A_REG_INDEX: u32 = 0x0;
+/// The value of `offsetof(struct atom_gpio_pin_assignment, gpio_bitshift)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PIN_GPIO_BITSHIFT: u32 = 0x4;
+/// The value of `offsetof(struct atom_gpio_pin_assignment, gpio_mask_bitshift)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PIN_GPIO_MASK_BITSHIFT: u32 = 0x5;
+/// The value of `offsetof(struct atom_gpio_pin_assignment, gpio_id)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_PIN_GPIO_ID: u32 = 0x6;
+/// The value of `sizeof(struct atom_disp_connector_caps_record)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCCAPREC_SIZE: u32 = 0x6;
+/// The value of `offsetof(struct atom_disp_connector_caps_record, connectcaps)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCCAPREC_CONNECTCAPS: u32 = 0x2;
+/// The value of `sizeof(struct atom_connector_caps_record)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_CCAPREC_SIZE: u32 = 0x4;
+/// The value of `offsetof(struct atom_connector_caps_record, connector_caps)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_CCAPREC_CONNECTOR_CAPS: u32 = 0x2;
+/// The value of `offsetof(struct atom_common_table_header, structuresize)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_HDR_STRUCTURESIZE: u32 = 0x0;
+/// The value of `offsetof(struct atom_master_data_table_v2_1, listOfdatatables.gpio_pin_lut)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DT_gpio_pin_lut: u32 = 0x1c;
+/// The value of `LAST_RECORD_TYPE` in ../display/dc/bios/bios_parser2.c
+pub const BP2_LAST_RECORD_TYPE: u32 = 0xff;
+/// The value of `ATOM_RECORD_END_TYPE` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_RECORD_END_TYPE: u32 = 0xff;
+/// The value of `ATOM_I2C_RECORD_TYPE` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_I2C_RECORD_TYPE: u32 = 0x1;
+/// The value of `ATOM_HPD_INT_RECORD_TYPE` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_HPD_INT_RECORD_TYPE: u32 = 0x2;
+/// The value of `BIOS_MAX_NUM_RECORD` in ../display/dc/bios/bios_parser2.c
+pub const BP2_BIOS_MAX_NUM_RECORD: u32 = 0x100;
+/// The value of `I2C_HW_CAP` in ../display/dc/bios/bios_parser2.c
+pub const BP2_I2C_HW_CAP: u32 = 0x80;
+/// The value of `I2C_HW_ENGINE_ID_MASK` in ../display/dc/bios/bios_parser2.c
+pub const BP2_I2C_HW_ENGINE_ID_MASK: u32 = 0x70;
+/// The value of `I2C_HW_LANE_MUX` in ../display/dc/bios/bios_parser2.c
+pub const BP2_I2C_HW_LANE_MUX: u32 = 0xf;
+/// The value of `ATOM_DISP_CONNECTOR_CAPS_RECORD_TYPE` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_DISP_CONNECTOR_CAPS_RECORD_TYPE: u32 = 0x17;
+/// The value of `ATOM_CONNECTOR_CAP_RECORD_TYPE` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_CONNECTOR_CAP_RECORD_TYPE: u32 = 0x3;
+/// The value of `ATOM_CONNECTOR_CAP_INTERNAL_DISPLAY` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_CONNECTOR_CAP_INTERNAL_DISPLAY: u32 = 0x1;
+/// The value of `ATOM_CONNECTOR_CAP_INTERNAL_DISPLAY_BL` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_CONNECTOR_CAP_INTERNAL_DISPLAY_BL: u32 = 0x2;
+/// The value of `ATOM_DISPLAY_LCD1_SUPPORT` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_DISPLAY_LCD1_SUPPORT: u32 = 0x2;
+/// The value of `ATOM_DISPLAY_LCD2_SUPPORT` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_DISPLAY_LCD2_SUPPORT: u32 = 0x20;
+/// The value of `ATOM_DISPLAY_DFP1_SUPPORT` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_DISPLAY_DFP1_SUPPORT: u32 = 0x8;
+/// The value of `ATOM_DISPLAY_DFP2_SUPPORT` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_DISPLAY_DFP2_SUPPORT: u32 = 0x80;
+/// The value of `ATOM_DISPLAY_DFP3_SUPPORT` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_DISPLAY_DFP3_SUPPORT: u32 = 0x200;
+/// The value of `ATOM_DISPLAY_DFP4_SUPPORT` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_DISPLAY_DFP4_SUPPORT: u32 = 0x400;
+/// The value of `ATOM_DISPLAY_DFP5_SUPPORT` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_DISPLAY_DFP5_SUPPORT: u32 = 0x800;
+/// The value of `ATOM_DISPLAY_DFP6_SUPPORT` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ATOM_DISPLAY_DFP6_SUPPORT: u32 = 0x40;

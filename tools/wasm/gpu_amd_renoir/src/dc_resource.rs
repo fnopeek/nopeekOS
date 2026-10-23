@@ -155,6 +155,9 @@ pub struct resource_pool {
     /// `ref_clocks`: the reference clocks, seeded from the VBIOS crystal by
     /// `dc_create_resource_pool`.
     pub ref_clocks: resource_pool_ref_clocks,
+    /// `pp_smu`: the power-play SMU interface (None if the DM offers no
+    /// Renoir table — Linux zeroes it then).
+    pub pp_smu: Option<crate::dm_pp_smu::pp_smu_funcs>,
 }
 
 /// The anonymous `ref_clocks` member of `struct resource_pool` (core_types.h).

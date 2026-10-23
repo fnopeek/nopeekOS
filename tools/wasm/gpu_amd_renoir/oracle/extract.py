@@ -3,7 +3,8 @@
     extract.py file name... > out.c
 
 A name is a function (its return type on the same line or the one
-before), a `union`/`struct`/`enum` definition, a static table or a
+before), a `union`/`struct`/`enum` definition, a static table, a struct
+object with an initializer or a
 one-line scalar constant: its text
 runs from its first line to the first `}` / `};` at column 0. `#NAME` is a `#define NAME`, with its continuation lines. Every piece is
 headed by its file:line range.
@@ -34,7 +35,8 @@ for name in sys.argv[2:]:
         rx = re.compile(
             r"^(?:(?:union|struct|enum) %s\s*(?:\{|$)"
             r"|(?:static )?(?:const )?[\w ]+\*?\s*\b%s\s*\[[^\]]*\]\s*=\s*(?:\{|$)"
-            r"|(?:static )?[\w ]+\*?\b%s\()" % (n, n, n)
+            r"|(?:static )?(?:const )?struct \w+ %s\s*=\s*(?:\{|$)"
+            r"|(?:static )?[\w ]+\*?\b%s\()" % (n, n, n, n)
         )
         # A prototype ends with `;`, on its own line or a continuation.
         starts = [i for i, l in enumerate(src) if rx.match(l)
