@@ -384,34 +384,37 @@ impl Mgr {
         };
     }
 
-    /// The cell of `ssid` to join, by band preference.
+    /// The cell of `ssid` to join. A network's own band (`band` 1 or 2) is
+    /// a filter; the default from sys/config/wifi only a preference — a
+    /// network on the other band alone is still joined (a phone hotspot on
+    /// 2.4 GHz with `band: 5`).
     fn pick_cell(&self, ssid: &Ssid, band: u8) -> Option<Ap> {
-        let pref = match band {
-            1 => BandPref::Only24,
-            2 => BandPref::Only5,
-            _ => self.default_band,
+        let (pref, strict) = match band {
+            1 => (BandPref::Only24, true),
+            2 => (BandPref::Only5, true),
+            _ => (self.default_band, false),
         };
         let mut best_all: Option<Ap> = None;
         let mut best_5g: Option<Ap> = None;
+        let mut best_24: Option<Ap> = None;
         for a in self.aps[..self.n_aps].iter().filter(|a| a.ssid == *ssid) {
-            let ok = match pref {
-                BandPref::Only24 => a.channel <= 14,
-                BandPref::Only5 => a.channel > 14,
-                BandPref::Auto => true,
-            };
-            if !ok {
-                continue;
-            }
             if best_all.is_none_or(|b| a.rssi > b.rssi) {
                 best_all = Some(*a);
             }
-            if a.channel > 14 && best_5g.is_none_or(|b| a.rssi > b.rssi) {
-                best_5g = Some(*a);
+            let slot = if a.channel > 14 { &mut best_5g } else { &mut best_24 };
+            if slot.is_none_or(|b| a.rssi > b.rssi) {
+                *slot = Some(*a);
             }
         }
-        match (pref, best_5g) {
-            (BandPref::Auto, Some(f)) if f.rssi >= PREFER_5G_DBM => Some(f),
-            _ => best_all,
+        match pref {
+            BandPref::Only5 if strict => best_5g,
+            BandPref::Only24 if strict => best_24,
+            BandPref::Only5 => best_5g.or(best_all),
+            BandPref::Only24 => best_24.or(best_all),
+            BandPref::Auto => match best_5g {
+                Some(f) if f.rssi >= PREFER_5G_DBM => Some(f),
+                _ => best_all,
+            },
         }
     }
 
@@ -469,6 +472,8 @@ impl Mgr {
     }
 
     fn connect_ssid(&mut self, ssid: Ssid) {
+        // `wlan set band` takes effect at the next choice, not the next boot.
+        self.read_default_band();
         let band = self.known(&ssid).map_or(0, |k| k.band);
         match self.pick_cell(&ssid, band) {
             Some(c) if matches!(c.security, SEC_WPA2_PSK | SEC_WPA2_WPA3) => {
@@ -478,6 +483,10 @@ impl Mgr {
             }
             Some(_) => {
                 self.error = "this network's security is not supported (WPA2-PSK only)";
+                self.idle();
+            }
+            None if self.aps[..self.n_aps].iter().any(|a| a.ssid == ssid) => {
+                self.error = "this network is not on the band set for it";
                 self.idle();
             }
             None => {
@@ -498,6 +507,7 @@ impl Mgr {
         if !matches!(self.state, State::Idle | State::Scanning) {
             return;
         }
+        self.read_default_band();
         match self.pick_auto() {
             Some(s) => self.connect_ssid(s),
             None => self.idle(),
