@@ -136,6 +136,10 @@ unsafe extern "C" {
     fn npk_wifi_publish(buf_ptr: i32, len: i32) -> i32;
     fn npk_wifi_status(buf_ptr: i32, max: i32) -> i32;
     fn npk_wifi_request(buf_ptr: i32, len: i32) -> i32;
+    fn npk_net_info(buf_ptr: i32, max: i32) -> i32;
+    fn npk_status_set(key_ptr: i32, key_len: i32, icon: i32, value: i32, flags: i32,
+        text_ptr: i32, text_len: i32, opens_ptr: i32, opens_len: i32) -> i32;
+    fn npk_status_clear(key_ptr: i32, key_len: i32) -> i32;
 
     fn npk_acpi_dsdt(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_acpi_table(sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32;
@@ -312,7 +316,7 @@ reads! {
     fn wifi_send_event = npk_wifi_send_event -> i32;
     /// The manager's state text (`wifid` only).
     fn wifi_publish = npk_wifi_publish -> i32;
-    /// A user request to the manager (`deck` only).
+    /// A user request to the manager (`link` only).
     fn wifi_request = npk_wifi_request -> i32;
 }
 
@@ -330,8 +334,10 @@ fills! {
     /// Known networks with their records (`wifid` only); -2 = buffer too small.
     fn wifi_known = npk_wifi_known -> i32;
     fn wifi_poll_request = npk_wifi_poll_request -> i32;
-    /// The manager's state text (`deck` only); -2 = buffer too small.
+    /// The manager's state text (`link` only); -2 = buffer too small.
     fn wifi_status = npk_wifi_status -> i32;
+    /// Interfaces + IPv4 as `key value` lines (RENDER); -2 = buffer too small.
+    fn net_info = npk_net_info -> i32;
     fn acpi_dsdt = npk_acpi_dsdt -> i32;
     fn audio_poll_mix = npk_audio_poll_mix -> i32;
 }
@@ -371,6 +377,19 @@ pub fn vault_status() -> i32 {
 pub fn vault_init() -> i32 {
     // SAFETY: FFI without pointers.
     unsafe { npk_vault_init() }
+}
+/// Publish status item `key` (docs/plan/STATUS_ITEMS.md): `flags` = state
+/// | place << 8; a click on it opens module `opens`.
+pub fn status_set(key: &[u8], icon: i32, value: i32, flags: i32, text: &[u8], opens: &[u8]) -> i32 {
+    // SAFETY: FFI; the three ranges are borrowed for the call.
+    unsafe {
+        npk_status_set(key.as_ptr() as i32, key.len() as i32, icon, value, flags,
+            text.as_ptr() as i32, text.len() as i32, opens.as_ptr() as i32, opens.len() as i32)
+    }
+}
+pub fn status_clear(key: &[u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_status_clear(key.as_ptr() as i32, key.len() as i32) }
 }
 pub fn vault_set_passphrase(old: &[u8], new: &[u8]) -> i32 {
     // SAFETY: FFI; both ranges are borrowed for the call.

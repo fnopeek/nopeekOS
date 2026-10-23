@@ -91,11 +91,21 @@ pub fn forget(w: Waker) {
 /// value: i32, state: u8, place: u8, text, opens: u8-length strings`.
 pub fn serialize() -> Vec<u8> {
     let mut out = Vec::new();
-    let own = kernel_items();
     let items = ITEMS.lock();
-    let count = own.len() + items.len();
-    out.extend_from_slice(&(count as u16).to_le_bytes());
-    for i in own.iter().chain(items.iter()) {
+    // One network icon, for the link the traffic takes: a linked wired
+    // primary wins, else the WLAN manager's item (signal, network name),
+    // else the kernel's own view of the WLAN.
+    let wired_up = crate::netdev::list().iter().any(|i| i.name != "wlan" && i.primary && i.link_up);
+    let wlan_item = items.iter().find(|i| is_wlan_item(i)).filter(|_| !wired_up);
+    let own = kernel_items(wlan_item.is_some());
+    let (net, rest_own) = own.split_at(own.iter().take_while(|i| i.key == "net").count());
+    let ordered: Vec<&Item> = net.iter()
+        .chain(wlan_item)
+        .chain(rest_own.iter())
+        .chain(items.iter().filter(|i| !is_wlan_item(i)))
+        .collect();
+    out.extend_from_slice(&(ordered.len() as u16).to_le_bytes());
+    for i in ordered {
         put_str(&mut out, &i.owner);
         put_str(&mut out, &i.key);
         out.extend_from_slice(&i.icon.to_le_bytes());
@@ -121,10 +131,15 @@ fn kernel_item(key: &str, icon: IconId, value: i32, state: u8, text: String, ope
     }
 }
 
+/// The WLAN manager's item; it stands for the WLAN in place of the kernel's.
+fn is_wlan_item(i: &Item) -> bool {
+    i.owner == "wifid" && i.key == "wlan"
+}
+
 /// Network, volume, battery — left to right before the clock.
-fn kernel_items() -> Vec<Item> {
+fn kernel_items(wlan_shown: bool) -> Vec<Item> {
     let mut v = Vec::new();
-    if let Some(net) = net_item() { v.push(net); }
+    if let Some(net) = net_item(wlan_shown) { v.push(net); }
 
     let vol = crate::audio::get_volume();
     let icon = if vol == 0 { IconId::SpeakerX } else if vol <= 50 { IconId::SpeakerLow } else { IconId::SpeakerHigh };
@@ -158,17 +173,20 @@ pub fn battery_packed() -> Option<i32> {
     crate::battery::read().map(|b| ((b.status as i32) << 8) | b.percent as i32)
 }
 
-/// The interface the stack uses: WLAN or wired, linked or not. Nothing
-/// without any network interface.
-fn net_item() -> Option<Item> {
+/// The interface the traffic takes, unless the WLAN manager's item stands
+/// for it (`wlan_shown`). Nothing without an interface. A click opens `link`.
+fn net_item(wlan_shown: bool) -> Option<Item> {
+    if wlan_shown {
+        return None;
+    }
     let ifaces = crate::netdev::list();
-    let primary = ifaces.iter().find(|i| i.primary).or(ifaces.first())?;
-    let wlan = primary.name == "wlan";
-    let (icon, state) = match (wlan, primary.link_up) {
+    let shown = ifaces.iter().find(|i| i.primary).or(ifaces.first())?;
+    let wlan = shown.name == "wlan";
+    let (icon, state) = match (wlan, shown.link_up) {
         (true, true) => (IconId::WifiHigh, STATE_NORMAL),
         (true, false) => (IconId::WifiSlash, STATE_OFF),
         (false, true) => (IconId::Network, STATE_NORMAL),
         (false, false) => (IconId::Network, STATE_OFF),
     };
-    Some(kernel_item("net", icon, -1, state, String::new(), ""))
+    Some(kernel_item("net", icon, -1, state, String::new(), "link"))
 }

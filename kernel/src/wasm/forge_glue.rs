@@ -1210,17 +1210,19 @@ host_imports! {
     mem fn npk_wifi_send_event(buf_ptr: i32, len: i32) -> i32;
 
     // WLAN manager (docs/plan/WLAN_MANAGER.md). Manager side: `wifid` by name
-    // and NETCTL. UI side: `deck` by name.
+    // and NETCTL. UI side: the `link` tool by name.
     // npk_wifi_known(buf_ptr, max) -> len / -1 / -2 (buffer too small).
     mem fn npk_wifi_known(buf_ptr: i32, max: i32) -> i32;
     // npk_wifi_poll_request(buf_ptr, max) -> len / -1 — next user request.
     mem fn npk_wifi_poll_request(buf_ptr: i32, max: i32) -> i32;
     // npk_wifi_publish(buf_ptr, len) -> 0 / -1 — the manager's state text.
     mem fn npk_wifi_publish(buf_ptr: i32, len: i32) -> i32;
-    // npk_wifi_status(buf_ptr, max) -> len / -1 / -2 — read that state (deck).
+    // npk_wifi_status(buf_ptr, max) -> len / -1 / -2 — read that state (`link`).
     mem fn npk_wifi_status(buf_ptr: i32, max: i32) -> i32;
-    // npk_wifi_request(buf_ptr, len) -> 0 / -1 — scan/connect/disconnect/forget (deck).
+    // npk_wifi_request(buf_ptr, len) -> 0 / -1 — scan/connect/disconnect/forget (`link`).
     mem fn npk_wifi_request(buf_ptr: i32, len: i32) -> i32;
+    // npk_net_info(buf_ptr, max) -> len / -1 / -2 — interfaces + IPv4 (RENDER).
+    mem fn npk_net_info(buf_ptr: i32, max: i32) -> i32;
 
     // npk_driver_report(buf_ptr, len) -> 0 / -1 — a bound driver publishes a
     // short plain-text status snapshot, read back with the `wlan` intent. The

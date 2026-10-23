@@ -100,6 +100,18 @@ const EV_CONNECT_FAILED: u8 = 0x87;
 const EV_SCAN_RESULT: u8 = 0x89;
 /// The driver takes commands now (sent again after a driver restart).
 const EV_DRIVER_UP: u8 = 0x8a;
+/// The smoothed level of our cell: [op][dBm i8].
+const EV_SIGNAL: u8 = 0x8b;
+
+// The panel's item (docs/plan/STATUS_ITEMS.md): icons by `IconId`, the
+// `link` tool opens on a click.
+const ICON_WIFI_HIGH: i32 = 55;
+const ICON_WIFI_MEDIUM: i32 = 56;
+const ICON_WIFI_LOW: i32 = 57;
+const ICON_WIFI_NONE: i32 = 58;
+const ICON_WIFI_SLASH: i32 = 59;
+const ITEM_NORMAL: i32 = 0;
+const ITEM_OFF: i32 = 2;
 // user requests (kernel → manager), WLAN_MANAGER §4
 const REQ_SCAN: u8 = 0x01;
 const REQ_CONNECT: u8 = 0x02;
@@ -229,6 +241,9 @@ struct Mgr {
     target: Ssid,
     bssid: [u8; 6],
     channel: u8,
+    /// The level of the joined cell in dBm (scan, then the driver's
+    /// `SIGNAL`); 0 = unknown.
+    rssi: i8,
     pmk: Option<[u8; 32]>,
     sup: Option<Supplicant>,
     /// The connect came from `sys/config/wifid` without a scan; a failure
@@ -243,6 +258,8 @@ struct Mgr {
     error: &'static str,
     /// The driver said it takes commands.
     driver_up: bool,
+    /// The panel item last published: (icon, flags, bars).
+    item: core::cell::Cell<(i32, i32, i32)>,
     default_band: BandPref,
     out: [u8; 256],
 }
@@ -292,6 +309,7 @@ impl Mgr {
             target: Ssid::EMPTY,
             bssid: [0; 6],
             channel: 0,
+            rssi: 0,
             pmk: None,
             sup: None,
             fast: false,
@@ -301,6 +319,7 @@ impl Mgr {
             auth_failures: 0,
             error: "",
             driver_up: false,
+            item: core::cell::Cell::new((0, 0, i32::MIN)),
             default_band: BandPref::Auto,
             out: [0; 256],
         }
@@ -434,6 +453,7 @@ impl Mgr {
         self.target = ssid;
         self.bssid = bssid;
         self.channel = channel;
+        self.rssi = 0;
         self.fast = fast;
         self.sup = None;
         self.error = "";
@@ -454,6 +474,7 @@ impl Mgr {
             Some(c) if matches!(c.security, SEC_WPA2_PSK | SEC_WPA2_WPA3) => {
                 self.auth_failures = 0;
                 self.connect(ssid, c.bssid, c.channel, false);
+                self.rssi = c.rssi;
             }
             Some(_) => {
                 self.error = "this network's security is not supported (WPA2-PSK only)";
@@ -542,6 +563,11 @@ impl Mgr {
                 }
             }
             Some(EV_SCAN_RESULT) => self.on_scan(ev),
+            Some(EV_SIGNAL) => {
+                if let Some(&d) = ev.get(1) {
+                    self.rssi = d as i8;
+                }
+            }
             // READY: [op][ap_mac 6][our_mac 6] → a supplicant for this BSS.
             Some(EV_READY) if ev.len() >= 13 => {
                 let Some(pmk) = self.pmk else {
@@ -828,6 +854,17 @@ impl Mgr {
             let mut d = [0u8; 3];
             w.s(dec_u8(self.channel, &mut d));
             w.s(b"\n");
+            if self.rssi != 0 {
+                w.s(b"signal ");
+                w.i8(self.rssi);
+                w.s(b"\n");
+            }
+            let sec = self.aps[..self.n_aps].iter().find(|a| a.ssid == self.target).map(|a| a.security);
+            if let Some(sec) = sec {
+                w.s(b"security ");
+                w.s(dec_u8(sec, &mut d));
+                w.s(b"\n");
+            }
         }
         if !self.error.is_empty() {
             w.s(b"error ");
@@ -874,6 +911,33 @@ impl Mgr {
         }
         let n = w.n;
         npk_sys::wifi_publish(&buf[..n]);
+        self.publish_item();
+    }
+
+    /// The panel's WLAN icon: bars by signal while connected, dimmed while
+    /// on the way, struck through without a network. Published only on a
+    /// change, so the panel is not woken for nothing.
+    fn publish_item(&self) {
+        let (icon, flags, bars) = match self.state {
+            State::Connected => {
+                let (icon, bars) = match self.rssi {
+                    0 => (ICON_WIFI_HIGH, -1),
+                    r if r >= -60 => (ICON_WIFI_HIGH, 3),
+                    r if r >= -70 => (ICON_WIFI_MEDIUM, 2),
+                    r if r >= -80 => (ICON_WIFI_LOW, 1),
+                    _ => (ICON_WIFI_NONE, 0),
+                };
+                (icon, ITEM_NORMAL, bars)
+            }
+            State::Connecting | State::Reconnecting => (ICON_WIFI_NONE, ITEM_OFF, -1),
+            _ => (ICON_WIFI_SLASH, ITEM_OFF, -1),
+        };
+        if self.item.get() == (icon, flags, bars) {
+            return;
+        }
+        self.item.set((icon, flags, bars));
+        // Icon only, as panels do: the network's name is in the `link` card.
+        npk_sys::status_set(b"wlan", icon, bars, flags, b"", b"link");
     }
 }
 

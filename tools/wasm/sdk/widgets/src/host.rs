@@ -66,6 +66,14 @@ pub fn vault_system_list(buf: &mut [u8]) -> Option<usize> { len(sys::vault_syste
 pub fn vault_user_delete(name: &str) -> bool { sys::vault_user_delete(name.as_bytes()) == 0 }
 pub fn vault_system_delete(name: &str) -> bool { sys::vault_system_delete(name.as_bytes()) == 0 }
 
+// ── Network (docs/plan/WLAN_MANAGER.md) — the `link` tool ─────────────
+/// The WLAN manager's state text; None if denied or too large for `buf`.
+pub fn wifi_status(buf: &mut [u8]) -> Option<usize> { len(sys::wifi_status(buf)) }
+/// Ask the WLAN manager: scan, connect, disconnect, forget, auto.
+pub fn wifi_request(msg: &[u8]) -> bool { sys::wifi_request(msg) == 0 }
+/// Interfaces and IPv4 as `key value` lines.
+pub fn net_info(buf: &mut [u8]) -> Option<usize> { len(sys::net_info(buf)) }
+
 // ── Clipboard — focus-gated: works only while this app has focus ──────
 pub fn clipboard_set(text: &str) -> bool { sys::clipboard_set(text.as_bytes()) >= 0 }
 /// The clipboard text's full length (may exceed `buf`), or None if denied.

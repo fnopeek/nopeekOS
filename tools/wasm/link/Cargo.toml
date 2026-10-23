@@ -1,0 +1,25 @@
+[package]
+name = "link"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "Network — the connection, its addresses, and the Wi-Fi networks in range."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
+
+[dependencies.postcard]
+version = "1.0"
+default-features = false
+features = ["alloc"]
+
+[build-dependencies]
+nopeek_widgets = { path = "../sdk/widgets" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

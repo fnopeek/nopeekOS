@@ -4490,8 +4490,39 @@ fn is_wifi_manager(ctx: &HostState) -> bool {
         && capability::check_global(&ctx.cap_id, capability::Rights::NETCTL).is_ok()
 }
 
+/// The network tool the panel opens (`STATUS_ITEMS.md`): it may read the
+/// manager's state and ask it to scan, connect or forget.
 fn is_wifi_ui(ctx: &HostState) -> bool {
-    ctx.module_name == "deck"
+    ctx.module_name == "link"
+}
+
+/// npk_net_info(buf, max) -> len / -1 / -2: the interfaces and the IPv4
+/// configuration as `key value` lines (RENDER, like the status list):
+/// `iface <name> <driver> <mac> <up 0|1> <primary 0|1>`, `ipv4 a.b.c.d/p`,
+/// `gateway a.b.c.d`, `dns a.b.c.d`.
+pub(crate) fn npk_net_info(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
+    use core::fmt::Write;
+    if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
+        return -1;
+    }
+    let mut t = String::new();
+    for i in crate::netdev::list() {
+        let m = i.mac;
+        let _ = writeln!(t, "iface {} {} {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} {} {}",
+            i.name, i.driver.replace(' ', "_"), m[0], m[1], m[2], m[3], m[4], m[5],
+            i.link_up as u8, i.primary as u8);
+    }
+    let ip = crate::net::arp::our_ip();
+    if ip != [0, 0, 0, 0] {
+        let gw = crate::net::ipv4::gateway();
+        let dns = crate::net::dns::server();
+        let _ = writeln!(t, "ipv4 {}.{}.{}.{}/{}", ip[0], ip[1], ip[2], ip[3], crate::net::ipv4::prefix_len());
+        let _ = writeln!(t, "gateway {}.{}.{}.{}", gw[0], gw[1], gw[2], gw[3]);
+        let _ = writeln!(t, "dns {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
+    }
+    let Some(max) = glen(max) else { return -1 };
+    if t.len() > max { return -2; }
+    write_bytes(mem, buf_ptr, t.as_bytes())
 }
 
 /// npk_wifi_known(buf, max) -> len / -1: every known network with its record.
@@ -4527,7 +4558,8 @@ pub(crate) fn npk_wifi_status(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32,
 }
 
 /// npk_wifi_request(buf, len) -> 0 / -1. `[op]` or `[op][ssid_len][ssid]`;
-/// CONNECT may append `[psk_len][psk]`, which the kernel stores in the vault.
+/// CONNECT may append `[psk_len][psk]`, which the kernel stores in the vault;
+/// SET_AUTO appends `[on]`.
 pub(crate) fn npk_wifi_request(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
     use crate::drivers::wifi as w;
     if !is_wifi_ui(ctx) { return -1; }
@@ -4546,6 +4578,10 @@ pub(crate) fn npk_wifi_request(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32
             w::request_connect(s, psk).is_ok()
         }
         Some(w::REQ_FORGET) => ssid().is_some_and(|s| w::forget(s).is_ok()),
+        Some(w::REQ_SET_AUTO) => match ssid() {
+            Some(s) => w::set_auto(s, m.get(2 + s.len()).is_some_and(|&b| b != 0)).is_ok(),
+            None => false,
+        },
         _ => false,
     };
     if ok { 0 } else { -1 }

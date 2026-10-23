@@ -1,6 +1,6 @@
 # WLAN-Manager — Netze scannen, wählen, merken
 
-**Stand:** 2026-10-23 · Stufen 1–4 gebaut (Kernel 0.677.0, wifid 0.15.0, RTL8822CE 0.72.0, vault 0.9.0), Gerätetest offen · Stufe 5 offen · Ziel-Hardware zuerst
+**Stand:** 2026-10-23 · Stufen 1–4 auf dem Notebook ✅ (Kernel 0.677.0, wifid 0.15.0, RTL8822CE 0.72.1, vault 0.9.0) · Stufe 5 gebaut (Kernel 0.678.0, wifid 0.16.0, RTL8822CE 0.73.0, `link` 0.1.0), Gerätetest offen · Ziel-Hardware zuerst
 nur RTL8822CE (Notebook). AX200 ist pausiert und liest weiter `ssid:`.
 
 **Was sich ändert:** Heute wählt der Treiber beim Start selbst — einmal voller
@@ -69,6 +69,7 @@ Suchlauf neben der Verbindung (wie `roam_scan`) ist der nächste Schritt.
 | `0x02` | `CONNECT` | bssid[6], channel u8 |
 | `0x85` | `LINK_UP` | bssid[6], channel u8 |
 | `0x8a` | `DRIVER_UP` | — (der Treiber nimmt Befehle an; `wifid` legt erst dann los) |
+| `0x8b` | `SIGNAL` | dBm i8 — geglätteter Beacon-Pegel, bei ±3 dB Änderung |
 | `0x03` | `DISCONNECT` | — |
 | `0x89` | `SCAN_RESULT` | count u8, je AP: bssid[6], rssi i8, channel u8, security u8, ssid_len u8, ssid |
 | `0x86` | `LINK_DOWN` | reason u8 (0 = verlangt, 1 = Deauth, 2 = verloren) |
@@ -96,7 +97,7 @@ nur aus dem Vault.
     wlan auto <SSID> on|off  automatisch verbinden
     wlan prio <SSID> <n>     Priorität (−128..127)
 
-Zugriff: Anfragen und Zustand nur für Kernel-Intents und das Modul `deck`;
+Zugriff: Anfragen und Zustand nur für Kernel-Intents und das Werkzeug `link`;
 der Vault-Systembereich `net:*` lesend nur für `wifid` (NETCTL + Name).
 
 ## 5. Stufen
@@ -109,7 +110,12 @@ der Vault-Systembereich `net:*` lesend nur für `wifid` (NETCTL + Name).
    `CONNECT` (gezielte Probe, wenn nicht in der letzten Liste);
    `DISCONNECT` im Verbindungsbetrieb.
 4. **Vault:** Wi-Fi-Einträge im v1-Format, Auto/Priorität bearbeitbar.
-5. **Deck-Popup:** Liste, Verbinden/Trennen/Vergessen, Passwortfeld.
+5. **Panel:** `wifid` veröffentlicht den Statuseintrag `wlan` (Balken nach
+   dem `SIGNAL` des Treibers, ohne Text — der Name steht in der Karte), der
+   Kernel zeigt EIN Netzwerk-Symbol (das der Verbindung, über die der
+   Verkehr läuft). Ein Klick öffnet das Werkzeug `link` (STATUS_ITEMS.md §5):
+   Verbindung mit IP/Gateway/DNS/MAC, Netze in Reichweite, Verbinden mit
+   Passwortfeld, Trennen, Vergessen, Auto-Join.
 
 Stufen 1–4 gehen zusammen hinaus (vorher verbindet nichts mehr automatisch);
 Stufe 5 danach.

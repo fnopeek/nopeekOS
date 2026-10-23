@@ -6852,6 +6852,7 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         if now.wrapping_sub(report_ms) >= 1000 {
             report_ms = now;
             publish_report(link, ls, d, e, caps);
+            report_signal(link);
         }
 
         // ── RX silence as a watchdog ─────────────────────────────
@@ -7096,6 +7097,8 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 fn drop_session(h: i32, link: &mut Link, ls: &mut LinkStats) {
     // The kernel must stop pushing into the dead link.
     host::netdev_set_link(false);
+    // The next cell's level is news, whatever it is.
+    SIGNAL_SENT.store(i32::MIN, Ordering::Relaxed);
     ls.authorized = false;
 
     // Old keys out of the CAM. `write_cam` put them in, `clear_cam` takes
@@ -7714,6 +7717,26 @@ const REPORT_CAP: usize = 3584;
 ///
 /// A plain text block the `wlan` intent prints beside the kernel view. The
 /// kernel parses nothing; what is worth reporting is device knowledge.
+/// The level `wifid` last heard, in dBm; `i32::MIN` = never sent.
+static SIGNAL_SENT: AtomicI32 = AtomicI32::new(i32::MIN);
+
+/// `SIGNAL` to `wifid` (the panel's bars) when the smoothed beacon level
+/// moved by 3 dB or more: often enough for four bars, rarely enough not to
+/// wake anyone once a second. Only after four beacons, as roaming waits.
+fn report_signal(link: &Link) {
+    if link.roam.count < SIGNAL_AVE_MIN_COUNT {
+        return;
+    }
+    let dbm = link.roam.dbm() as i32;
+    let last = SIGNAL_SENT.load(Ordering::Relaxed);
+    if last != i32::MIN && (dbm - last).abs() < 3 {
+        return;
+    }
+    if host::wifi_send_event(&[EV_SIGNAL, dbm as i8 as u8]) == 0 {
+        SIGNAL_SENT.store(dbm, Ordering::Relaxed);
+    }
+}
+
 fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
                   e: &efuse::Efuse, caps: &sta::PeerCaps) {
     // `put` truncates silently (`s.len().min(b.len() - *n)`); if the buffer

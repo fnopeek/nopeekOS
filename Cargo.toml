@@ -23,6 +23,7 @@ exclude = [
     "tools/wasm/tune",
     "tools/wasm/snap",
     "tools/wasm/volume",
+    "tools/wasm/link",
     "tools/wasm/beak",
     "tools/wasm/beak-engine",
     "tools/wasm/testdisk",

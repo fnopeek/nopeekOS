@@ -163,7 +163,7 @@ pub fn reset() {
 
 // ── User requests to the manager (docs/plan/WLAN_MANAGER.md §4) ──
 //
-// The `wlan` intent and the deck ask; `wifid` decides. A password that comes
+// The `wlan` intent and the `link` tool ask; `wifid` decides. A password that comes
 // with a request is stored in the vault here and never travels further:
 // `wifid` reads it from the vault like every other known network.
 
@@ -173,6 +173,8 @@ pub const REQ_DISCONNECT: u8 = 0x03;
 pub const REQ_FORGET: u8 = 0x04;
 /// The known networks changed (added, auto, priority); re-read them.
 pub const REQ_KNOWN_CHANGED: u8 = 0x05;
+/// From the UI only, never queued: `[op][ssid_len][ssid][on u8]`.
+pub const REQ_SET_AUTO: u8 = 0x06;
 
 static REQUESTS: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
 static REQS_SENT: AtomicU32 = AtomicU32::new(0);
@@ -193,9 +195,16 @@ fn request(msg: &[u8]) -> bool {
 pub fn poll_request(out: &mut [u8]) -> Option<usize> { pop(&REQUESTS, out) }
 
 pub fn publish_status(text: &[u8]) {
-    let mut s = STATUS.lock();
-    s.clear();
-    s.extend_from_slice(&text[..text.len().min(STATUS_MAX)]);
+    {
+        let mut s = STATUS.lock();
+        if s.as_slice() == &text[..text.len().min(STATUS_MAX)] {
+            return;
+        }
+        s.clear();
+        s.extend_from_slice(&text[..text.len().min(STATUS_MAX)]);
+    }
+    // The `link` tool shows it; it waits on the status topic.
+    crate::notify::notify(crate::notify::TOPIC_STATUS);
 }
 
 pub fn status() -> Vec<u8> { STATUS.lock().clone() }

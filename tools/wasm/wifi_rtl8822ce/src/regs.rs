@@ -1229,6 +1229,8 @@ pub const EV_RX_MGMT: u8 = 0x88;
 pub const EV_SCAN_RESULT: u8 = 0x89;
 /// The driver takes commands (after bring-up).
 pub const EV_DRIVER_UP: u8 = 0x8a;
+/// The smoothed level of our cell: [op][dBm i8].
+pub const EV_SIGNAL: u8 = 0x8b;
 /// `CONNECT_FAILED` reasons.
 pub const CONNECT_FAILED_NO_AP: u8 = 1;
 pub const CONNECT_FAILED_ASSOC: u8 = 2;
