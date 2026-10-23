@@ -113,10 +113,10 @@ fn store_tree(entries: Vec<TreeEntry>) -> Result<([u8; 32], u64), PathError> {
         .fold(0u64, |acc, e| acc.saturating_add(e.size));
     let obj = Object::tree_sorted(entries).map_err(|_| PathError::Corrupt)?;
     let (bytes, hash) = obj.encode_and_hash().map_err(|_| PathError::Corrupt)?;
-    // Trees stay plaintext: boot-time `fs::exists` has to walk them
-    // before the user has logged in, so AEAD on Trees would brick the
-    // first-vs-subsequent-boot decision. File contents (Blobs) are
-    // encrypted separately in `paths::store` below.
+    // Every object is AEAD-wrapped, Trees included: storage::put encrypts
+    // unconditionally and get() refuses an unencrypted object. The boot-time
+    // `fs::exists` walk still works because the volume is unlocked with the
+    // device key at mount, before login.
     storage::put(&hash, &bytes)?;
     Ok((hash, recursive_size))
 }
@@ -347,7 +347,7 @@ pub fn mkdir(root: &[u8; 32], path: &str) -> Result<[u8; 32], PathError> {
 
     let empty = Object::Tree(Vec::new());
     let (bytes, hash) = empty.encode_and_hash().map_err(|_| PathError::Corrupt)?;
-    // Tree → unencrypted (same reasoning as `store_tree`).
+    // AEAD-wrapped like every object (see store_tree).
     storage::put(&hash, &bytes)?;
 
     let entry = TreeEntry {

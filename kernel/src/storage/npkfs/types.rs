@@ -89,7 +89,7 @@ impl core::fmt::Display for FsError {
             FsError::Corrupt => write!(f, "filesystem corrupt"),
             FsError::ObjectNotFound => write!(f, "object not found"),
             FsError::ObjectExists => write!(f, "object already exists"),
-            FsError::NameTooLong => write!(f, "name too long (max 63)"),
+            FsError::NameTooLong => write!(f, "name too long (max 255)"),
             FsError::InvalidName => write!(f, "invalid name"),
             FsError::ReservedName => write!(f, "reserved name"),
             FsError::DiskFull => write!(f, "disk full"),

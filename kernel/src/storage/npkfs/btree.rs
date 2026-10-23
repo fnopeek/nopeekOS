@@ -41,11 +41,26 @@ fn verify_node_checksum(buf: &[u8; BLOCK_SIZE]) -> bool {
 // ── Header helpers ────────────────────────────────────────────────────
 
 fn read_header(buf: &[u8; BLOCK_SIZE]) -> BTreeNodeHeader {
+    let node_type = buf[4];
+    // Clamp the on-disk count to the node's capacity before anyone uses it
+    // as a loop bound. num_entries drives every entry-indexing loop
+    // (lookup/insert/delete/find_child), and leaf_entry/internal_key slice
+    // the 4 KiB buffer at idx*entry_size; a count past capacity indexes off
+    // the end and panics = kernel halt. Node metadata carries only an
+    // unkeyed checksum, so a disk-level attacker forges a valid one for
+    // free — the clamp is the bound, not the checksum. A no-op on valid
+    // nodes, which never exceed capacity.
+    let cap = match node_type {
+        BTREE_LEAF => MAX_LEAF_ENTRIES,
+        BTREE_INTERNAL => MAX_INTERNAL_KEYS,
+        _ => 0,
+    };
+    let num_entries = (u16::from_le_bytes(buf[6..8].try_into().unwrap()) as usize).min(cap) as u16;
     BTreeNodeHeader {
         magic:       u32::from_le_bytes(buf[0..4].try_into().unwrap()),
-        node_type:   buf[4],
+        node_type,
         _pad:        buf[5],
-        num_entries: u16::from_le_bytes(buf[6..8].try_into().unwrap()),
+        num_entries,
         right_child: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
     }
 }

@@ -174,6 +174,19 @@ pub fn mount() -> Result<(), FsError> {
         },
     };
 
+    // The superblock's checksum is unkeyed, so sb.total_blocks is an
+    // attacker-controlled count on a crafted disk. load_args sizes the
+    // in-memory bitmap from it (total_blocks/8 bytes); an oversized value
+    // would drive a huge allocation (→ OOM → kernel halt). Reject anything
+    // past the real device before any sizing happens.
+    let disk_blocks = blkdev::block_count()
+        .ok_or(FsError::Disk(crate::virtio_blk::BlkError::NotInitialized))?;
+    if sb.total_blocks > disk_blocks {
+        kprintln!("[npk] npkfs: superblock claims {} blocks, device has {} — refusing mount",
+            sb.total_blocks, disk_blocks);
+        return Err(FsError::Corrupt);
+    }
+
     let frees = Journal::replay(&mut cache, sb.journal_head, sb.journal_seq)?;
     let mut bmap = Bitmap::load_args(
         &mut cache, sb.total_blocks, sb.bitmap_start, sb.bitmap_count, sb.data_start,
@@ -384,9 +397,15 @@ pub fn self_check() -> Result<FsckReport, FsError> {
     // Mark every object's data extents + indirect-chain blocks. The chain
     // walk already yields `indirect_block` as its first element, so we never
     // mark it separately (that would be a false self-overlap).
+    let (data_start, total_blocks) = (fs.sb.data_start, fs.sb.total_blocks);
     for e in &entries {
         let direct = (e.extent_count as usize).min(DIRECT_EXTENTS);
         for ext in &e.extents[..direct] {
+            // block_count is a u64 straight from disk (unkeyed checksum). An
+            // unchecked `0..block_count` would spin ~2^64 times and overflow
+            // `start_block + b`. Validate the extent like checked_extent_blocks
+            // does before iterating; fsck is best-effort, so skip a bad one.
+            if !extent_in_data_area(ext, data_start, total_blocks) { continue; }
             for b in 0..ext.block_count {
                 fsck_mark(&mut seen, &mut dup, &mut rep, ext.start_block + b);
             }
@@ -397,6 +416,7 @@ pub fn self_check() -> Result<FsckReport, FsError> {
                     fsck_mark(&mut seen, &mut dup, &mut rep, cb);
                 }
                 for ext in &exts {
+                    if !extent_in_data_area(ext, data_start, total_blocks) { continue; }
                     for b in 0..ext.block_count {
                         fsck_mark(&mut seen, &mut dup, &mut rep, ext.start_block + b);
                     }
@@ -757,6 +777,16 @@ fn checked_extent_blocks(extents: &[(u64, u64)], data_start: u64, disk_blocks: u
         sum = sum.checked_add(count)?;
     }
     (sum <= disk_blocks).then_some(sum)
+}
+
+/// A single extent lies wholly in the data area without overflow — the
+/// per-extent half of `checked_extent_blocks`, for callers that walk extents
+/// one at a time (fsck) rather than as a set.
+fn extent_in_data_area(ext: &Extent, data_start: u64, disk_blocks: u64) -> bool {
+    match ext.start_block.checked_add(ext.block_count) {
+        Some(end) => ext.block_count != 0 && ext.start_block >= data_start && end <= disk_blocks,
+        None => false,
+    }
 }
 
 pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {

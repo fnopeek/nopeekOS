@@ -777,7 +777,21 @@ pub fn open_streaming_write(path: &str) -> StreamingWriter {
     // Mark a stream in flight so GC backs off until `finish`/drop. Done
     // here (at construction) so both the public wrapper and the direct
     // 9p caller are covered. Balanced by `Drop`.
-    stream_begin();
+    //
+    // Taken under ROOT_MUTEX so a stream can't begin mid-sweep. gc() holds
+    // ROOT_MUTEX for its whole run and checks stream_active() just before
+    // sweeping; without this lock a 9p stream could begin during the sweep
+    // (p9 calls here directly, no ROOT_MUTEX), dedup via has() against an
+    // orphan gc is deleting, skip the put, and publish a manifest referencing
+    // a chunk gc then removes → Corrupt. Under the lock, either gc hasn't
+    // started (its pre-sweep stream_active() sees this one) or it's running
+    // (this blocks until it's done). Neither caller holds ROOT_MUTEX here, so
+    // the non-reentrant spin lock is safe. Released at once; the writer itself
+    // does not hold it.
+    {
+        let _g = ROOT_MUTEX.lock();
+        stream_begin();
+    }
     StreamingWriter {
         path: alloc::string::String::from(path),
         chunk_size: STREAMING_CHUNK_SIZE,

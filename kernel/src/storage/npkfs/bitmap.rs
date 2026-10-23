@@ -43,7 +43,13 @@ impl Bitmap {
         {
             return Err(FsError::Corrupt);
         }
-        let mut data = alloc::vec![0u8; byte_count];
+        // Fallible: byte_count derives from the (unkeyed) superblock count.
+        // mount() already rejects total_blocks past the device, but size the
+        // bitmap without an infallible vec! so a large-but-valid device can
+        // still fail gracefully instead of aborting the kernel.
+        let mut data: Vec<u8> = Vec::new();
+        data.try_reserve_exact(byte_count).map_err(|_| FsError::Corrupt)?;
+        data.resize(byte_count, 0);
 
         for i in 0..bitmap_count {
             let mut buf = [0u8; BLOCK_SIZE];

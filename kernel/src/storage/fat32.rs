@@ -453,6 +453,10 @@ impl Fat32Reader {
         -> Result<(u32, u32, u32, usize), &'static str>
     {
         let mut cluster = dir_cluster;
+        // Cap the directory-chain walk: a crafted/corrupt FAT can form a
+        // cluster cycle, and without a terminating 0x00 entry the loop would
+        // spin forever (DoS on the OTA path). Same bound as chain_len.
+        let mut steps = 0u32;
         loop {
             let sector = self.cluster_to_sector(cluster);
             for s in 0..self.spc {
@@ -477,6 +481,8 @@ impl Fat32Reader {
                 Some(next) => cluster = next,
                 None => return Err("entry not found"),
             }
+            steps += 1;
+            if steps > 100_000 { return Err("FAT dir chain too long"); }
         }
     }
 

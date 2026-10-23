@@ -1240,6 +1240,28 @@ fn is_trust_critical_path(name: &str) -> bool {
     if c == "sys/wasm" || c.starts_with("sys/wasm/") {
         return true;
     }
+    // The `.system/` namespace is kernel-only: `.system/config` holds autostart,
+    // the user name (and thus the home/9p root), static_dns and the plain-HTTP
+    // toggle; `.system/history` the command history. config::save and the
+    // intents write these through the kernel npkFS path, never through these
+    // host functions, so closing them here blocks an app without touching any
+    // legitimate writer. An app overwriting `.system/config` buys boot
+    // persistence, a system-wide DNS redirect or an HTTPS downgrade; deleting it
+    // is a config-wipe DoS (NPKFS_SECURITY_REVIEW F-H3).
+    if c == ".system" || c.starts_with(".system/") {
+        return true;
+    }
+    // The picker/launcher trust anchors: who serves the trusted file dialog and
+    // the entry point. NOT the whole `sys/config/` prefix — an app persists its
+    // own settings under `sys/config/<module>` via the own_config exception,
+    // which must keep working. This is checked before own_config in npk_store,
+    // so a module named `picker`/`launcher` cannot write its anchor either
+    // (NPKFS_SECURITY_REVIEW Fund 2 / F-M4). The network-credential keys
+    // (sys/config/wifi, wifi_psk) are deliberately left to the keystore track
+    // (docs/plan/KEYSTORE.md), not blanket-blocked here, so wifid keeps working.
+    if c == "sys/config/picker" || c == "sys/config/launcher" {
+        return true;
+    }
     // Prefix match on a path segment — a plain `starts_with` would also
     // catch a sibling like `sys/certsomething`, and missing the trailing
     // separator is how this class of guard usually leaks.
