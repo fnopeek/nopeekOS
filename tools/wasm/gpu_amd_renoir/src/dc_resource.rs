@@ -19,7 +19,10 @@ use crate::dce_audio::dce_audio;
 use crate::dce_aux::aux_engine_dce110;
 use crate::dce_clock_source::dce110_clk_src;
 use crate::dce_i2c_hw::dce_i2c_hw;
-use crate::dc_types::MAX_PIPES;
+use crate::amdgpu_device::amdgpu_device;
+use crate::dc::{dc, dc_init_data};
+use crate::dc_types::{dce_version, hw_asic_id, MAX_PIPES};
+use crate::dcn21_resource::dcn21_create_resource_pool;
 use alloc::boxed::Box;
 
 /// A `stream_encoder *` slot of the pool: a real DIG encoder (dcn10) or a
@@ -149,4 +152,41 @@ pub struct resource_pool {
     pub audio_support: audio_support,
     /// `res_cap`: the per-ASIC count table (Renoir → `RES_CAP_RN`).
     pub res_cap: Option<&'static resource_caps>,
+    /// `ref_clocks`: the reference clocks, seeded from the VBIOS crystal by
+    /// `dc_create_resource_pool`.
+    pub ref_clocks: resource_pool_ref_clocks,
+}
+
+/// The anonymous `ref_clocks` member of `struct resource_pool` (core_types.h).
+#[derive(Default, Clone, Copy)]
+pub struct resource_pool_ref_clocks {
+    pub xtalin_clock_inKhz: u32,
+    pub dccg_ref_clock_inKhz: u32,
+    pub dchub_ref_clock_inKhz: u32,
+}
+
+/// `resource_parse_asic_id` (dc_resource.c): FAMILY_RV with a Renoir
+/// revision is DCN 2.1.
+pub fn resource_parse_asic_id(_asic_id: &hw_asic_id) -> dce_version {
+    dce_version::DCN_VERSION_2_1
+}
+
+/// `dc_create_resource_pool` (dc_resource.c): the DCN 2.1 pool, then the
+/// reference clocks from the VBIOS firmware info.
+pub fn dc_create_resource_pool(
+    adev: &amdgpu_device,
+    dc: &mut dc,
+    init_data: &dc_init_data,
+) -> Option<Box<resource_pool>> {
+    let mut res_pool = dcn21_create_resource_pool(adev, init_data, dc);
+
+    if let Some(pool) = res_pool.as_deref_mut() {
+        if dc.ctx.dc_bios.fw_info_valid {
+            pool.ref_clocks.xtalin_clock_inKhz = dc.ctx.dc_bios.fw_info.pll_info.crystal_frequency;
+            pool.ref_clocks.dccg_ref_clock_inKhz = pool.ref_clocks.xtalin_clock_inKhz;
+            pool.ref_clocks.dchub_ref_clock_inKhz = pool.ref_clocks.xtalin_clock_inKhz;
+        }
+    }
+
+    res_pool
 }

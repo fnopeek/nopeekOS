@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 use crate::amdgpu_device::amdgpu_device;
-use crate::dc::{cap_func_id, dc};
+use crate::dc::{cap_func_id, dc, dc_init_data};
 use crate::dc_helper::{dm_read_reg, generic_reg_get};
 use crate::dc_resource::{
     resource_caps, resource_pool, resource_straps, stream_enc_slot, update_num_audio,
@@ -352,4 +352,16 @@ pub fn dcn21_resource_construct(
     // With this dcn21_resource_construct is complete bar the irq service
     // (dal_irq_service_dcn21_create) and `pool.funcs = &dcn21_res_pool_funcs`
     // (the validate/map vtable — stage E).
+}
+
+/// `dcn21_create_resource_pool` (dcn21_resource.c). The port's pool is the
+/// `resource_pool` itself (Linux wraps it as `dcn21_resource_pool.base`).
+pub fn dcn21_create_resource_pool(
+    adev: &amdgpu_device,
+    init_data: &dc_init_data,
+    dc: &mut dc,
+) -> Option<Box<resource_pool>> {
+    let mut pool = Box::new(resource_pool::default());
+    dcn21_resource_construct(adev, init_data.num_virtual_links as u32, dc, &mut pool);
+    Some(pool)
 }
