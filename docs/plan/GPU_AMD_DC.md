@@ -153,17 +153,26 @@ Registertabelle. `regs.list` +25 (17 absolute Offsets `BASE(mmX_BASE_IDX)+mmX`
 (resource_pool). Verifikation: Werte maschinell aus den Linux-Headern +
 Makro-Struktur geprüft; das formale Orakel kommt mit dem Objektgraph.
 
-**Nächste Einheit:** die restlichen „Create resources"-Konstruktoren, der Reihe
-nach — **`dccg21_create` zuerst** (erster Block mit echtem `dccg_regs`-Satz),
-dann je Pipe hubp/ipp/dpp/opp/optc, aux/i2c, mpc, hubbub, dsc, dwbc, mmhubbub,
-der irq-Service, `resource_construct` + `dcn21_hw_sequencer_construct`, und
-`dml_init_instance`. Je Block: `regs.list` erweitern → `gen_regs.py`
-(Hintergrund, mehrere Minuten) → Struct + funcs + Konstruktor. Die meisten
-Konstruktoren schreiben KEIN Register (Zeiger + funcs-Tabelle); die
-Schreibzugriffe kommen in hwss (Stufe D/E). **Das formale `main_dc.c`-Orakel
-(extract.py-Weg + os_types-Shim) wird EINMAL am fertigen Objektgraph gebaut und
-prüft dann den ganzen Construct** — der erste host-prüfbare Meilenstein ist der
-Graph, nicht der Einzelblock.
+Zweiter Block, **dccg** (`src/dccg.rs`): `dccg`/`dcn_dccg`,
+`dccg_registers`/`dccg_shift`/`dccg_mask` als erreichter Teil
+(`DCCG_COMMON_REG_LIST_DCN_BASE` + `DCCG_MASK_SH_LIST_DCN2_1`), die Statics
+`DCCG_REGS`/`DCCG_SHIFT`/`DCCG_MASK`, `dccg21_create` (Zeiger + funcs, kein
+Registerschreib). 8 Offsets + 64 Shift/Mask in `regs.list`; `resource_pool.dccg`
++ der Aufruf im Construct. DCN3+-Taktbäume (HDMI/PHY/DTB/DSC/SYMCLK) bewusst
+draußen (grow-as-reached).
+
+**Nächste Einheit:** die **Pipe-Blöcke** — je Pipe `dcn21_hubp_create`,
+`dcn21_ipp_create`, `dcn21_dpp_create`, `dcn21_opp_create`,
+`dcn21_timing_generator_create` (optc). Jeder hat einen Instanz-Reg-Satz
+(`SRI`/`SRII` mit der Instanz 0..3) — die Register-Batches über alle vier
+Instanzen bündeln und einmal regenerieren. Danach aux/i2c je ddc, mpc, hubbub,
+dsc, dwbc, mmhubbub, irq-Service, `resource_construct` +
+`dcn21_hw_sequencer_construct`, `dml_init_instance`. Die meisten Konstruktoren
+schreiben KEIN Register (Zeiger + funcs); die Schreibzugriffe kommen in hwss
+(Stufe D/E). **Das formale `main_dc.c`-Orakel (extract.py-Weg + os_types-Shim)
+wird EINMAL am fertigen Objektgraph gebaut und prüft dann den ganzen
+Construct** — der erste host-prüfbare Meilenstein ist der Graph, nicht der
+Einzelblock.
 
 ## Risiken / offen
 

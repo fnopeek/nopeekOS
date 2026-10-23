@@ -3985,3 +3985,80 @@ PHYPLLA_PIXCLK_RESYNC_CNTL__PHYPLLA_DCCG_DEEP_COLOR_CNTL__SHIFT @ ../display/dc/
 PHYPLLA_PIXCLK_RESYNC_CNTL__PHYPLLA_DCCG_DEEP_COLOR_CNTL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
 OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
 OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC dccg (display clock generator): dccg_regs absolute offsets for
+# Renoir (DCCG_COMMON_REG_LIST_DCN_BASE, dccg/dcn20/dcn20_dccg.h).
+DCCG_DPPCLK_DTO_CTRL = BASE(mmDPPCLK_DTO_CTRL_BASE_IDX) + mmDPPCLK_DTO_CTRL @ ../display/dc/resource/dcn21/dcn21_resource.c
+DCCG_DPPCLK0_DTO_PARAM = BASE(mmDPPCLK0_DTO_PARAM_BASE_IDX) + mmDPPCLK0_DTO_PARAM @ ../display/dc/resource/dcn21/dcn21_resource.c
+DCCG_DPPCLK1_DTO_PARAM = BASE(mmDPPCLK1_DTO_PARAM_BASE_IDX) + mmDPPCLK1_DTO_PARAM @ ../display/dc/resource/dcn21/dcn21_resource.c
+DCCG_DPPCLK2_DTO_PARAM = BASE(mmDPPCLK2_DTO_PARAM_BASE_IDX) + mmDPPCLK2_DTO_PARAM @ ../display/dc/resource/dcn21/dcn21_resource.c
+DCCG_DPPCLK3_DTO_PARAM = BASE(mmDPPCLK3_DTO_PARAM_BASE_IDX) + mmDPPCLK3_DTO_PARAM @ ../display/dc/resource/dcn21/dcn21_resource.c
+DCCG_REFCLK_CNTL = BASE(mmREFCLK_CNTL_BASE_IDX) + mmREFCLK_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+DCCG_OTG0_PIXEL_RATE_CNTL = BASE(mmOTG0_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG0_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+DCCG_OTG1_PIXEL_RATE_CNTL = BASE(mmOTG1_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG1_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+DCCG_DISPCLK_FREQ_CHANGE_CNTL = BASE(mmDISPCLK_FREQ_CHANGE_CNTL_BASE_IDX) + mmDISPCLK_FREQ_CHANGE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC dccg field shifts/masks (DCCG_MASK_SH_LIST_DCN2_1)
+DPPCLK_DTO_CTRL__DPPCLK0_DTO_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK0_DTO_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK0_DTO_DB_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK0_DTO_DB_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK1_DTO_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK1_DTO_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK1_DTO_DB_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK1_DTO_DB_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK2_DTO_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK2_DTO_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK2_DTO_DB_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK2_DTO_DB_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK3_DTO_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK3_DTO_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK3_DTO_DB_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK3_DTO_DB_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK4_DTO_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK4_DTO_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK4_DTO_DB_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK4_DTO_DB_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK5_DTO_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK5_DTO_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK5_DTO_DB_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK_DTO_CTRL__DPPCLK5_DTO_DB_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK0_DTO_PARAM__DPPCLK0_DTO_PHASE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK0_DTO_PARAM__DPPCLK0_DTO_PHASE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK0_DTO_PARAM__DPPCLK0_DTO_MODULO__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DPPCLK0_DTO_PARAM__DPPCLK0_DTO_MODULO_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+REFCLK_CNTL__REFCLK_CLOCK_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+REFCLK_CNTL__REFCLK_CLOCK_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+REFCLK_CNTL__REFCLK_SRC_SEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+REFCLK_CNTL__REFCLK_SRC_SEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_STEP_DELAY__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_STEP_DELAY_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_STEP_SIZE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_STEP_SIZE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_FREQ_RAMP_DONE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_FREQ_RAMP_DONE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_MAX_ERRDET_CYCLES__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_MAX_ERRDET_CYCLES_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_RESET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_RESET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_STATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_STATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_OVR_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_OVR_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_CHG_FWD_CORR_DISABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_CHG_FWD_CORR_DISABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG0_PIXEL_RATE_CNTL__OTG0_ADD_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG0_PIXEL_RATE_CNTL__OTG0_ADD_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG1_PIXEL_RATE_CNTL__OTG1_ADD_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG1_PIXEL_RATE_CNTL__OTG1_ADD_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG2_PIXEL_RATE_CNTL__OTG2_ADD_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG2_PIXEL_RATE_CNTL__OTG2_ADD_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG3_PIXEL_RATE_CNTL__OTG3_ADD_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG3_PIXEL_RATE_CNTL__OTG3_ADD_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG0_PIXEL_RATE_CNTL__OTG0_DROP_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG0_PIXEL_RATE_CNTL__OTG0_DROP_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG1_PIXEL_RATE_CNTL__OTG1_DROP_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG1_PIXEL_RATE_CNTL__OTG1_DROP_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG2_PIXEL_RATE_CNTL__OTG2_DROP_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG2_PIXEL_RATE_CNTL__OTG2_DROP_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG3_PIXEL_RATE_CNTL__OTG3_DROP_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG3_PIXEL_RATE_CNTL__OTG3_DROP_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+

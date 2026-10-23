@@ -3,6 +3,7 @@
 //! table a pool points `res_pool->res_cap` at (e.g. `res_cap_rn` for Renoir).
 #![allow(dead_code)]
 
+use crate::dccg::dcn_dccg;
 use crate::dce_clock_source::dce110_clk_src;
 use alloc::boxed::Box;
 
@@ -52,6 +53,8 @@ pub struct resource_pool {
     /// `clock_source` base pointer).
     pub clock_sources: [Option<Box<dce110_clk_src>>; MAX_CLOCK_SOURCES],
     pub dp_clock_source: Option<Box<dce110_clk_src>>,
+    /// `dccg`: the display clock generator (Renoir → `dcn_dccg`).
+    pub dccg: Option<Box<dcn_dccg>>,
     /// `res_cap`: the per-ASIC count table (Renoir → `RES_CAP_RN`).
     pub res_cap: Option<&'static resource_caps>,
 }

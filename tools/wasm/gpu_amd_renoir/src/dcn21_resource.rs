@@ -8,6 +8,7 @@
 use crate::dc::dc;
 use crate::dc_resource::{resource_caps, resource_pool, NO_UNDERLAY_PIPE};
 use crate::dc_types::dc_caps;
+use crate::dccg::{dccg21_create, DCCG_MASK, DCCG_REGS, DCCG_SHIFT};
 use crate::dce_clock_source::{clock_source_id, dcn21_clock_source_create, CLK_SRC_REGS};
 
 /// `enum dcn20_clk_src_array_id` (dcn21_resource.c): the clock-source slots.
@@ -136,4 +137,7 @@ pub fn dcn21_resource_construct(dc: &mut dc, pool: &mut resource_pool) {
 
     pool.dp_clock_source = dcn21_clock_source_create(
         bios, clock_source_id::CLOCK_SOURCE_ID_DP_DTO, &CLK_SRC_REGS[0], true);
+
+    // The DCCG. (dmcu/psr/abm are gated on dc->config and wait; pp_smu waits.)
+    pool.dccg = Some(dccg21_create(&DCCG_REGS, &DCCG_SHIFT, &DCCG_MASK));
 }

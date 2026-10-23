@@ -7973,3 +7973,155 @@ pub const PHYPLLA_PIXCLK_RESYNC_CNTL__PHYPLLA_DCCG_DEEP_COLOR_CNTL_MASK: u32 = 0
 pub const OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE__SHIFT: u32 = 0x4;
 /// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2154
 pub const OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE_MASK: u32 = 0x10;
+
+// DC dccg (display clock generator): dccg_regs absolute offsets for
+
+// Renoir (DCCG_COMMON_REG_LIST_DCN_BASE, dccg/dcn20/dcn20_dccg.h).
+/// The value of `BASE(mmDPPCLK_DTO_CTRL_BASE_IDX) + mmDPPCLK_DTO_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DCCG_DPPCLK_DTO_CTRL: u32 = 0x176;
+/// The value of `BASE(mmDPPCLK0_DTO_PARAM_BASE_IDX) + mmDPPCLK0_DTO_PARAM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DCCG_DPPCLK0_DTO_PARAM: u32 = 0x159;
+/// The value of `BASE(mmDPPCLK1_DTO_PARAM_BASE_IDX) + mmDPPCLK1_DTO_PARAM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DCCG_DPPCLK1_DTO_PARAM: u32 = 0x15a;
+/// The value of `BASE(mmDPPCLK2_DTO_PARAM_BASE_IDX) + mmDPPCLK2_DTO_PARAM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DCCG_DPPCLK2_DTO_PARAM: u32 = 0x15b;
+/// The value of `BASE(mmDPPCLK3_DTO_PARAM_BASE_IDX) + mmDPPCLK3_DTO_PARAM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DCCG_DPPCLK3_DTO_PARAM: u32 = 0x15c;
+/// The value of `BASE(mmREFCLK_CNTL_BASE_IDX) + mmREFCLK_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DCCG_REFCLK_CNTL: u32 = 0x109;
+/// The value of `BASE(mmOTG0_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG0_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DCCG_OTG0_PIXEL_RATE_CNTL: u32 = 0x140;
+/// The value of `BASE(mmOTG1_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG1_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DCCG_OTG1_PIXEL_RATE_CNTL: u32 = 0x144;
+/// The value of `BASE(mmDISPCLK_FREQ_CHANGE_CNTL_BASE_IDX) + mmDISPCLK_FREQ_CHANGE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DCCG_DISPCLK_FREQ_CHANGE_CNTL: u32 = 0x131;
+
+// DC dccg field shifts/masks (DCCG_MASK_SH_LIST_DCN2_1)
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1066
+pub const DPPCLK_DTO_CTRL__DPPCLK0_DTO_ENABLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1078
+pub const DPPCLK_DTO_CTRL__DPPCLK0_DTO_ENABLE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1067
+pub const DPPCLK_DTO_CTRL__DPPCLK0_DTO_DB_EN__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1079
+pub const DPPCLK_DTO_CTRL__DPPCLK0_DTO_DB_EN_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1068
+pub const DPPCLK_DTO_CTRL__DPPCLK1_DTO_ENABLE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1080
+pub const DPPCLK_DTO_CTRL__DPPCLK1_DTO_ENABLE_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1069
+pub const DPPCLK_DTO_CTRL__DPPCLK1_DTO_DB_EN__SHIFT: u32 = 0x5;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1081
+pub const DPPCLK_DTO_CTRL__DPPCLK1_DTO_DB_EN_MASK: u32 = 0x20;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1070
+pub const DPPCLK_DTO_CTRL__DPPCLK2_DTO_ENABLE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1082
+pub const DPPCLK_DTO_CTRL__DPPCLK2_DTO_ENABLE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1071
+pub const DPPCLK_DTO_CTRL__DPPCLK2_DTO_DB_EN__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1083
+pub const DPPCLK_DTO_CTRL__DPPCLK2_DTO_DB_EN_MASK: u32 = 0x200;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1072
+pub const DPPCLK_DTO_CTRL__DPPCLK3_DTO_ENABLE__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1084
+pub const DPPCLK_DTO_CTRL__DPPCLK3_DTO_ENABLE_MASK: u32 = 0x1000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1073
+pub const DPPCLK_DTO_CTRL__DPPCLK3_DTO_DB_EN__SHIFT: u32 = 0xd;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1085
+pub const DPPCLK_DTO_CTRL__DPPCLK3_DTO_DB_EN_MASK: u32 = 0x2000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1074
+pub const DPPCLK_DTO_CTRL__DPPCLK4_DTO_ENABLE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1086
+pub const DPPCLK_DTO_CTRL__DPPCLK4_DTO_ENABLE_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1075
+pub const DPPCLK_DTO_CTRL__DPPCLK4_DTO_DB_EN__SHIFT: u32 = 0x11;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1087
+pub const DPPCLK_DTO_CTRL__DPPCLK4_DTO_DB_EN_MASK: u32 = 0x20000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1076
+pub const DPPCLK_DTO_CTRL__DPPCLK5_DTO_ENABLE__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1088
+pub const DPPCLK_DTO_CTRL__DPPCLK5_DTO_ENABLE_MASK: u32 = 0x100000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1077
+pub const DPPCLK_DTO_CTRL__DPPCLK5_DTO_DB_EN__SHIFT: u32 = 0x15;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1089
+pub const DPPCLK_DTO_CTRL__DPPCLK5_DTO_DB_EN_MASK: u32 = 0x200000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:884
+pub const DPPCLK0_DTO_PARAM__DPPCLK0_DTO_PHASE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:886
+pub const DPPCLK0_DTO_PARAM__DPPCLK0_DTO_PHASE_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:885
+pub const DPPCLK0_DTO_PARAM__DPPCLK0_DTO_MODULO__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:887
+pub const DPPCLK0_DTO_PARAM__DPPCLK0_DTO_MODULO_MASK: u32 = 0xff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1436
+pub const REFCLK_CNTL__REFCLK_CLOCK_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1435
+pub const REFCLK_CNTL__REFCLK_CLOCK_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1438
+pub const REFCLK_CNTL__REFCLK_SRC_SEL__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1437
+pub const REFCLK_CNTL__REFCLK_SRC_SEL_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1618
+pub const DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_STEP_DELAY__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1617
+pub const DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_STEP_DELAY_MASK: u32 = 0x3fff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1620
+pub const DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_STEP_SIZE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1619
+pub const DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_STEP_SIZE_MASK: u32 = 0xf0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1622
+pub const DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_FREQ_RAMP_DONE__SHIFT: u32 = 0x14;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1621
+pub const DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_FREQ_RAMP_DONE_MASK: u32 = 0x100000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1624
+pub const DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_MAX_ERRDET_CYCLES__SHIFT: u32 = 0x19;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1623
+pub const DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_MAX_ERRDET_CYCLES_MASK: u32 = 0xe000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1626
+pub const DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_RESET__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1625
+pub const DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_RESET_MASK: u32 = 0x10000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1628
+pub const DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_STATE__SHIFT: u32 = 0x1d;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1627
+pub const DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_STATE_MASK: u32 = 0x20000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1630
+pub const DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_OVR_EN__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1629
+pub const DISPCLK_FREQ_CHANGE_CNTL__DCCG_FIFO_ERRDET_OVR_EN_MASK: u32 = 0x40000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1632
+pub const DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_CHG_FWD_CORR_DISABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1631
+pub const DISPCLK_FREQ_CHANGE_CNTL__DISPCLK_CHG_FWD_CORR_DISABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2149
+pub const OTG0_PIXEL_RATE_CNTL__OTG0_ADD_PIXEL__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2156
+pub const OTG0_PIXEL_RATE_CNTL__OTG0_ADD_PIXEL_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2175
+pub const OTG1_PIXEL_RATE_CNTL__OTG1_ADD_PIXEL__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2182
+pub const OTG1_PIXEL_RATE_CNTL__OTG1_ADD_PIXEL_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2201
+pub const OTG2_PIXEL_RATE_CNTL__OTG2_ADD_PIXEL__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2208
+pub const OTG2_PIXEL_RATE_CNTL__OTG2_ADD_PIXEL_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2227
+pub const OTG3_PIXEL_RATE_CNTL__OTG3_ADD_PIXEL__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2234
+pub const OTG3_PIXEL_RATE_CNTL__OTG3_ADD_PIXEL_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2150
+pub const OTG0_PIXEL_RATE_CNTL__OTG0_DROP_PIXEL__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2157
+pub const OTG0_PIXEL_RATE_CNTL__OTG0_DROP_PIXEL_MASK: u32 = 0x200;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2176
+pub const OTG1_PIXEL_RATE_CNTL__OTG1_DROP_PIXEL__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2183
+pub const OTG1_PIXEL_RATE_CNTL__OTG1_DROP_PIXEL_MASK: u32 = 0x200;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2202
+pub const OTG2_PIXEL_RATE_CNTL__OTG2_DROP_PIXEL__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2209
+pub const OTG2_PIXEL_RATE_CNTL__OTG2_DROP_PIXEL_MASK: u32 = 0x200;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2228
+pub const OTG3_PIXEL_RATE_CNTL__OTG3_DROP_PIXEL__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2235
+pub const OTG3_PIXEL_RATE_CNTL__OTG3_DROP_PIXEL_MASK: u32 = 0x200;
