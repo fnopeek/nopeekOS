@@ -182,6 +182,21 @@ BLOCKS = {
         instances=6, const_prefix="AUD",
         regs_struct="dce_audio_registers", shift_struct="dce_audio_shift", mask_struct="dce_audio_mask",
     ),
+    # The hw-sequencer register bank (dce_hwseq): one struct with scalar fields
+    # (SR/SRI) plus the per-OTG PIXEL_RATE arrays (SRII, 0..3) — single mode.
+    # HWSEQ_DCN21_REG_LIST pulls HWSEQ_DCN_REG_LIST / MMHUB_DCN_REG_LIST /
+    # HSWEQ_DCN_PIXEL_RATE_REG_LIST (note Linux' HSWEQ typo); the mask list uses
+    # the HWS_SF field macro (blk ## reg ## __ ## field ## post).
+    "hwseq": dict(
+        single=True,
+        headers=["hwss/dce/dce_hwseq.h"],
+        prefixes=["HWSEQ_", "HSWEQ_", "MMHUB_", "HWS_"],
+        reg_calls=["HWSEQ_DCN21_REG_LIST()"],
+        shift_calls=["HWSEQ_DCN21_MASK_SH_LIST(__SHIFT)"],
+        mask_calls=["HWSEQ_DCN21_MASK_SH_LIST(_MASK)"],
+        const_prefix="HWSEQ",
+        regs_struct="dce_hwseq_registers", shift_struct="dce_hwseq_shift", mask_struct="dce_hwseq_mask",
+    ),
     "mpc": dict(
         single=True,
         headers=["mpc/dcn10/dcn10_mpc.h", "mpc/dcn20/dcn20_mpc.h"],

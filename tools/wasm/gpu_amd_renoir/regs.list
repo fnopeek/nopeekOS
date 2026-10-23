@@ -10977,3 +10977,156 @@ AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES__CLKSTOP__SHIFT @ ../display/dc/
 AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES__CLKSTOP_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
 AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES__EPSS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
 AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES__EPSS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+
+# DC hwseq: dce_hwseq_registers (single struct, array/scalar fields)
+# (HWSEQ_DCN21_REG_LIST()) — field value is BASE(mmX_BASE_IDX)+mmX.
+HWSEQ_REFCLK_CNTL = BASE(mmREFCLK_CNTL_BASE_IDX) + mmREFCLK_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DCHUBBUB_GLOBAL_TIMER_CNTL = BASE(mmDCHUBBUB_GLOBAL_TIMER_CNTL_BASE_IDX) + mmDCHUBBUB_GLOBAL_TIMER_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DIO_MEM_PWR_CTRL = BASE(mmDIO_MEM_PWR_CTRL_BASE_IDX) + mmDIO_MEM_PWR_CTRL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DCCG_GATE_DISABLE_CNTL = BASE(mmDCCG_GATE_DISABLE_CNTL_BASE_IDX) + mmDCCG_GATE_DISABLE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DCCG_GATE_DISABLE_CNTL2 = BASE(mmDCCG_GATE_DISABLE_CNTL2_BASE_IDX) + mmDCCG_GATE_DISABLE_CNTL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DCFCLK_CNTL = BASE(mmDCFCLK_CNTL_BASE_IDX) + mmDCFCLK_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DC_MEM_GLOBAL_PWR_REQ_CNTL = BASE(mmDC_MEM_GLOBAL_PWR_REQ_CNTL_BASE_IDX) + mmDC_MEM_GLOBAL_PWR_REQ_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_PIXEL_RATE_CNTL_0 = BASE(mmOTG0_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG0_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_PIXEL_RATE_CNTL_1 = BASE(mmOTG1_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG1_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_PIXEL_RATE_CNTL_2 = BASE(mmOTG2_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG2_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_PIXEL_RATE_CNTL_3 = BASE(mmOTG3_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG3_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_PHYPLL_PIXEL_RATE_CNTL_0 = BASE(mmOTG0_PHYPLL_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG0_PHYPLL_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_PHYPLL_PIXEL_RATE_CNTL_1 = BASE(mmOTG1_PHYPLL_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG1_PHYPLL_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_PHYPLL_PIXEL_RATE_CNTL_2 = BASE(mmOTG2_PHYPLL_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG2_PHYPLL_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_PHYPLL_PIXEL_RATE_CNTL_3 = BASE(mmOTG3_PHYPLL_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG3_PHYPLL_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32 = BASE(mmMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32 @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 = BASE(mmMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_VM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32 = BASE(mmMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32 @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_VM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32 = BASE(mmMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32 @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_VM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32 = BASE(mmMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32 @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_VM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32 = BASE(mmMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32 @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_VM_L2_PROTECTION_FAULT_DEFAULT_ADDR_HI32 = BASE(mmMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_HI32_BASE_IDX) + mmMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_HI32 @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_VM_L2_PROTECTION_FAULT_DEFAULT_ADDR_LO32 = BASE(mmMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_LO32_BASE_IDX) + mmMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_LO32 @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_MC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_MSB = BASE(mmMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_MSB_BASE_IDX) + mmMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_MSB @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_MC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_LSB = BASE(mmMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_LSB_BASE_IDX) + mmMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_LSB @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_MC_VM_SYSTEM_APERTURE_LOW_ADDR = BASE(mmMMMC_VM_SYSTEM_APERTURE_LOW_ADDR_BASE_IDX) + mmMMMC_VM_SYSTEM_APERTURE_LOW_ADDR @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_MC_VM_SYSTEM_APERTURE_HIGH_ADDR = BASE(mmMMMC_VM_SYSTEM_APERTURE_HIGH_ADDR_BASE_IDX) + mmMMMC_VM_SYSTEM_APERTURE_HIGH_ADDR @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_MICROSECOND_TIME_BASE_DIV = BASE(mmMICROSECOND_TIME_BASE_DIV_BASE_IDX) + mmMICROSECOND_TIME_BASE_DIV @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_MILLISECOND_TIME_BASE_DIV = BASE(mmMILLISECOND_TIME_BASE_DIV_BASE_IDX) + mmMILLISECOND_TIME_BASE_DIV @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DISPCLK_FREQ_CHANGE_CNTL = BASE(mmDISPCLK_FREQ_CHANGE_CNTL_BASE_IDX) + mmDISPCLK_FREQ_CHANGE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_RBBMIF_TIMEOUT_DIS = BASE(mmRBBMIF_TIMEOUT_DIS_BASE_IDX) + mmRBBMIF_TIMEOUT_DIS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_RBBMIF_TIMEOUT_DIS_2 = BASE(mmRBBMIF_TIMEOUT_DIS_2_BASE_IDX) + mmRBBMIF_TIMEOUT_DIS_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DCHUBBUB_CRC_CTRL = BASE(mmDCHUBBUB_CRC_CTRL_BASE_IDX) + mmDCHUBBUB_CRC_CTRL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DPP_TOP0_DPP_CRC_CTRL = BASE(mmDPP_TOP0_DPP_CRC_CTRL_BASE_IDX) + mmDPP_TOP0_DPP_CRC_CTRL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DPP_TOP0_DPP_CRC_VAL_B_A = BASE(mmDPP_TOP0_DPP_CRC_VAL_B_A_BASE_IDX) + mmDPP_TOP0_DPP_CRC_VAL_B_A @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DPP_TOP0_DPP_CRC_VAL_R_G = BASE(mmDPP_TOP0_DPP_CRC_VAL_R_G_BASE_IDX) + mmDPP_TOP0_DPP_CRC_VAL_R_G @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_MPC_CRC_CTRL = BASE(mmMPC_CRC_CTRL_BASE_IDX) + mmMPC_CRC_CTRL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_MPC_CRC_RESULT_GB = BASE(mmMPC_CRC_RESULT_GB_BASE_IDX) + mmMPC_CRC_RESULT_GB @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_MPC_CRC_RESULT_C = BASE(mmMPC_CRC_RESULT_C_BASE_IDX) + mmMPC_CRC_RESULT_C @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_MPC_CRC_RESULT_AR = BASE(mmMPC_CRC_RESULT_AR_BASE_IDX) + mmMPC_CRC_RESULT_AR @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN0_PG_CONFIG = BASE(mmDOMAIN0_PG_CONFIG_BASE_IDX) + mmDOMAIN0_PG_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN1_PG_CONFIG = BASE(mmDOMAIN1_PG_CONFIG_BASE_IDX) + mmDOMAIN1_PG_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN2_PG_CONFIG = BASE(mmDOMAIN2_PG_CONFIG_BASE_IDX) + mmDOMAIN2_PG_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN3_PG_CONFIG = BASE(mmDOMAIN3_PG_CONFIG_BASE_IDX) + mmDOMAIN3_PG_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN4_PG_CONFIG = BASE(mmDOMAIN4_PG_CONFIG_BASE_IDX) + mmDOMAIN4_PG_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN5_PG_CONFIG = BASE(mmDOMAIN5_PG_CONFIG_BASE_IDX) + mmDOMAIN5_PG_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN6_PG_CONFIG = BASE(mmDOMAIN6_PG_CONFIG_BASE_IDX) + mmDOMAIN6_PG_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN7_PG_CONFIG = BASE(mmDOMAIN7_PG_CONFIG_BASE_IDX) + mmDOMAIN7_PG_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN16_PG_CONFIG = BASE(mmDOMAIN16_PG_CONFIG_BASE_IDX) + mmDOMAIN16_PG_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN17_PG_CONFIG = BASE(mmDOMAIN17_PG_CONFIG_BASE_IDX) + mmDOMAIN17_PG_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN18_PG_CONFIG = BASE(mmDOMAIN18_PG_CONFIG_BASE_IDX) + mmDOMAIN18_PG_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN0_PG_STATUS = BASE(mmDOMAIN0_PG_STATUS_BASE_IDX) + mmDOMAIN0_PG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN1_PG_STATUS = BASE(mmDOMAIN1_PG_STATUS_BASE_IDX) + mmDOMAIN1_PG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN2_PG_STATUS = BASE(mmDOMAIN2_PG_STATUS_BASE_IDX) + mmDOMAIN2_PG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN3_PG_STATUS = BASE(mmDOMAIN3_PG_STATUS_BASE_IDX) + mmDOMAIN3_PG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN4_PG_STATUS = BASE(mmDOMAIN4_PG_STATUS_BASE_IDX) + mmDOMAIN4_PG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN5_PG_STATUS = BASE(mmDOMAIN5_PG_STATUS_BASE_IDX) + mmDOMAIN5_PG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN6_PG_STATUS = BASE(mmDOMAIN6_PG_STATUS_BASE_IDX) + mmDOMAIN6_PG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN7_PG_STATUS = BASE(mmDOMAIN7_PG_STATUS_BASE_IDX) + mmDOMAIN7_PG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN16_PG_STATUS = BASE(mmDOMAIN16_PG_STATUS_BASE_IDX) + mmDOMAIN16_PG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN17_PG_STATUS = BASE(mmDOMAIN17_PG_STATUS_BASE_IDX) + mmDOMAIN17_PG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DOMAIN18_PG_STATUS = BASE(mmDOMAIN18_PG_STATUS_BASE_IDX) + mmDOMAIN18_PG_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_D1VGA_CONTROL = BASE(mmD1VGA_CONTROL_BASE_IDX) + mmD1VGA_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_D2VGA_CONTROL = BASE(mmD2VGA_CONTROL_BASE_IDX) + mmD2VGA_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_D3VGA_CONTROL = BASE(mmD3VGA_CONTROL_BASE_IDX) + mmD3VGA_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_D4VGA_CONTROL = BASE(mmD4VGA_CONTROL_BASE_IDX) + mmD4VGA_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_D5VGA_CONTROL = BASE(mmD5VGA_CONTROL_BASE_IDX) + mmD5VGA_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_D6VGA_CONTROL = BASE(mmD6VGA_CONTROL_BASE_IDX) + mmD6VGA_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+HWSEQ_DC_IP_REQUEST_CNTL = BASE(mmDC_IP_REQUEST_CNTL_BASE_IDX) + mmDC_IP_REQUEST_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC hwseq field shifts/masks (HWSEQ_DCN21_MASK_SH_LIST(__SHIFT))
+OTG0_PIXEL_RATE_CNTL__OTG0_PIXEL_RATE_SOURCE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG0_PIXEL_RATE_CNTL__OTG0_PIXEL_RATE_SOURCE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG0_PHYPLL_PIXEL_RATE_CNTL__OTG0_PHYPLL_PIXEL_RATE_SOURCE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG0_PHYPLL_PIXEL_RATE_CNTL__OTG0_PHYPLL_PIXEL_RATE_SOURCE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DCFCLK_CNTL__DCFCLK_GATE_DIS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DCFCLK_CNTL__DCFCLK_GATE_DIS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_MEM_GLOBAL_PWR_REQ_CNTL__DC_MEM_GLOBAL_PWR_REQ_DIS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_MEM_GLOBAL_PWR_REQ_CNTL__DC_MEM_GLOBAL_PWR_REQ_DIS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32__PAGE_DIRECTORY_ENTRY_HI32__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32__PAGE_DIRECTORY_ENTRY_HI32_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32__PAGE_DIRECTORY_ENTRY_LO32__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32__PAGE_DIRECTORY_ENTRY_LO32_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN0_PG_CONFIG__DOMAIN0_POWER_FORCEON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN0_PG_CONFIG__DOMAIN0_POWER_FORCEON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN0_PG_CONFIG__DOMAIN0_POWER_GATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN0_PG_CONFIG__DOMAIN0_POWER_GATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN1_PG_CONFIG__DOMAIN1_POWER_FORCEON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN1_PG_CONFIG__DOMAIN1_POWER_FORCEON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN1_PG_CONFIG__DOMAIN1_POWER_GATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN1_PG_CONFIG__DOMAIN1_POWER_GATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN2_PG_CONFIG__DOMAIN2_POWER_FORCEON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN2_PG_CONFIG__DOMAIN2_POWER_FORCEON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN2_PG_CONFIG__DOMAIN2_POWER_GATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN2_PG_CONFIG__DOMAIN2_POWER_GATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN3_PG_CONFIG__DOMAIN3_POWER_FORCEON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN3_PG_CONFIG__DOMAIN3_POWER_FORCEON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN3_PG_CONFIG__DOMAIN3_POWER_GATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN3_PG_CONFIG__DOMAIN3_POWER_GATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN4_PG_CONFIG__DOMAIN4_POWER_FORCEON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN4_PG_CONFIG__DOMAIN4_POWER_FORCEON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN4_PG_CONFIG__DOMAIN4_POWER_GATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN4_PG_CONFIG__DOMAIN4_POWER_GATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN5_PG_CONFIG__DOMAIN5_POWER_FORCEON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN5_PG_CONFIG__DOMAIN5_POWER_FORCEON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN5_PG_CONFIG__DOMAIN5_POWER_GATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN5_PG_CONFIG__DOMAIN5_POWER_GATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN6_PG_CONFIG__DOMAIN6_POWER_FORCEON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN6_PG_CONFIG__DOMAIN6_POWER_FORCEON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN6_PG_CONFIG__DOMAIN6_POWER_GATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN6_PG_CONFIG__DOMAIN6_POWER_GATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN7_PG_CONFIG__DOMAIN7_POWER_FORCEON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN7_PG_CONFIG__DOMAIN7_POWER_FORCEON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN7_PG_CONFIG__DOMAIN7_POWER_GATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN7_PG_CONFIG__DOMAIN7_POWER_GATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN16_PG_CONFIG__DOMAIN16_POWER_FORCEON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN16_PG_CONFIG__DOMAIN16_POWER_FORCEON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN16_PG_CONFIG__DOMAIN16_POWER_GATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN16_PG_CONFIG__DOMAIN16_POWER_GATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN17_PG_CONFIG__DOMAIN17_POWER_FORCEON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN17_PG_CONFIG__DOMAIN17_POWER_FORCEON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN17_PG_CONFIG__DOMAIN17_POWER_GATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN17_PG_CONFIG__DOMAIN17_POWER_GATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN18_PG_CONFIG__DOMAIN18_POWER_FORCEON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN18_PG_CONFIG__DOMAIN18_POWER_FORCEON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN18_PG_CONFIG__DOMAIN18_POWER_GATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN18_PG_CONFIG__DOMAIN18_POWER_GATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN0_PG_STATUS__DOMAIN0_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN0_PG_STATUS__DOMAIN0_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN1_PG_STATUS__DOMAIN1_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN1_PG_STATUS__DOMAIN1_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN2_PG_STATUS__DOMAIN2_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN2_PG_STATUS__DOMAIN2_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN3_PG_STATUS__DOMAIN3_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN3_PG_STATUS__DOMAIN3_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN4_PG_STATUS__DOMAIN4_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN4_PG_STATUS__DOMAIN4_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN5_PG_STATUS__DOMAIN5_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN5_PG_STATUS__DOMAIN5_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN6_PG_STATUS__DOMAIN6_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN6_PG_STATUS__DOMAIN6_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN7_PG_STATUS__DOMAIN7_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN7_PG_STATUS__DOMAIN7_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN16_PG_STATUS__DOMAIN16_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN16_PG_STATUS__DOMAIN16_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN17_PG_STATUS__DOMAIN17_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN17_PG_STATUS__DOMAIN17_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN18_PG_STATUS__DOMAIN18_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DOMAIN18_PG_STATUS__DOMAIN18_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_IP_REQUEST_CNTL__IP_REQUEST_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_IP_REQUEST_CNTL__IP_REQUEST_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c

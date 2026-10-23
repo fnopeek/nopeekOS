@@ -21937,3 +21937,307 @@ pub const AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES__CLKSTOP_MASK: u32 = 0
 pub const AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES__EPSS__SHIFT: u32 = 0x1f;
 /// include/asic_reg/dce/dce_10_0_sh_mask.h:12391
 pub const AZALIA_F0_CODEC_FUNCTION_PARAMETER_POWER_STATES__EPSS_MASK: u32 = 0x80000000;
+
+// DC hwseq: dce_hwseq_registers (single struct, array/scalar fields)
+
+// (HWSEQ_DCN21_REG_LIST()) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmREFCLK_CNTL_BASE_IDX) + mmREFCLK_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_REFCLK_CNTL: u32 = 0x109;
+/// The value of `BASE(mmDCHUBBUB_GLOBAL_TIMER_CNTL_BASE_IDX) + mmDCHUBBUB_GLOBAL_TIMER_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DCHUBBUB_GLOBAL_TIMER_CNTL: u32 = 0x39df;
+/// The value of `BASE(mmDIO_MEM_PWR_CTRL_BASE_IDX) + mmDIO_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DIO_MEM_PWR_CTRL: u32 = 0x539e;
+/// The value of `BASE(mmDCCG_GATE_DISABLE_CNTL_BASE_IDX) + mmDCCG_GATE_DISABLE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DCCG_GATE_DISABLE_CNTL: u32 = 0x134;
+/// The value of `BASE(mmDCCG_GATE_DISABLE_CNTL2_BASE_IDX) + mmDCCG_GATE_DISABLE_CNTL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DCCG_GATE_DISABLE_CNTL2: u32 = 0x13c;
+/// The value of `BASE(mmDCFCLK_CNTL_BASE_IDX) + mmDCFCLK_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DCFCLK_CNTL: u32 = 0x39f0;
+/// The value of `BASE(mmDC_MEM_GLOBAL_PWR_REQ_CNTL_BASE_IDX) + mmDC_MEM_GLOBAL_PWR_REQ_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DC_MEM_GLOBAL_PWR_REQ_CNTL: u32 = 0x132;
+/// The value of `BASE(mmOTG0_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG0_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_PIXEL_RATE_CNTL_0: u32 = 0x140;
+/// The value of `BASE(mmOTG1_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG1_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_PIXEL_RATE_CNTL_1: u32 = 0x144;
+/// The value of `BASE(mmOTG2_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG2_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_PIXEL_RATE_CNTL_2: u32 = 0x148;
+/// The value of `BASE(mmOTG3_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG3_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_PIXEL_RATE_CNTL_3: u32 = 0x14c;
+/// The value of `BASE(mmOTG0_PHYPLL_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG0_PHYPLL_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_PHYPLL_PIXEL_RATE_CNTL_0: u32 = 0x143;
+/// The value of `BASE(mmOTG1_PHYPLL_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG1_PHYPLL_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_PHYPLL_PIXEL_RATE_CNTL_1: u32 = 0x147;
+/// The value of `BASE(mmOTG2_PHYPLL_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG2_PHYPLL_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_PHYPLL_PIXEL_RATE_CNTL_2: u32 = 0x14b;
+/// The value of `BASE(mmOTG3_PHYPLL_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG3_PHYPLL_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_PHYPLL_PIXEL_RATE_CNTL_3: u32 = 0x14f;
+/// The value of `BASE(mmMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32: u32 = 0x73e;
+/// The value of `BASE(mmMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32: u32 = 0x73d;
+/// The value of `BASE(mmMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_VM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32: u32 = 0x75e;
+/// The value of `BASE(mmMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_VM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32: u32 = 0x75d;
+/// The value of `BASE(mmMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_VM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32: u32 = 0x77e;
+/// The value of `BASE(mmMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32_BASE_IDX) + mmMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_VM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32: u32 = 0x77d;
+/// The value of `BASE(mmMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_HI32_BASE_IDX) + mmMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_HI32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_VM_L2_PROTECTION_FAULT_DEFAULT_ADDR_HI32: u32 = 0x6a2;
+/// The value of `BASE(mmMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_LO32_BASE_IDX) + mmMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_LO32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_VM_L2_PROTECTION_FAULT_DEFAULT_ADDR_LO32: u32 = 0x6a1;
+/// The value of `BASE(mmMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_MSB_BASE_IDX) + mmMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_MSB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_MC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_MSB: u32 = 0x86b;
+/// The value of `BASE(mmMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_LSB_BASE_IDX) + mmMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_LSB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_MC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_LSB: u32 = 0x86a;
+/// The value of `BASE(mmMMMC_VM_SYSTEM_APERTURE_LOW_ADDR_BASE_IDX) + mmMMMC_VM_SYSTEM_APERTURE_LOW_ADDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_MC_VM_SYSTEM_APERTURE_LOW_ADDR: u32 = 0x883;
+/// The value of `BASE(mmMMMC_VM_SYSTEM_APERTURE_HIGH_ADDR_BASE_IDX) + mmMMMC_VM_SYSTEM_APERTURE_HIGH_ADDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_MC_VM_SYSTEM_APERTURE_HIGH_ADDR: u32 = 0x884;
+/// The value of `BASE(mmMICROSECOND_TIME_BASE_DIV_BASE_IDX) + mmMICROSECOND_TIME_BASE_DIV` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_MICROSECOND_TIME_BASE_DIV: u32 = 0x13b;
+/// The value of `BASE(mmMILLISECOND_TIME_BASE_DIV_BASE_IDX) + mmMILLISECOND_TIME_BASE_DIV` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_MILLISECOND_TIME_BASE_DIV: u32 = 0x130;
+/// The value of `BASE(mmDISPCLK_FREQ_CHANGE_CNTL_BASE_IDX) + mmDISPCLK_FREQ_CHANGE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DISPCLK_FREQ_CHANGE_CNTL: u32 = 0x131;
+/// The value of `BASE(mmRBBMIF_TIMEOUT_DIS_BASE_IDX) + mmRBBMIF_TIMEOUT_DIS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_RBBMIF_TIMEOUT_DIS: u32 = 0x351f;
+/// The value of `BASE(mmRBBMIF_TIMEOUT_DIS_2_BASE_IDX) + mmRBBMIF_TIMEOUT_DIS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_RBBMIF_TIMEOUT_DIS_2: u32 = 0x3520;
+/// The value of `BASE(mmDCHUBBUB_CRC_CTRL_BASE_IDX) + mmDCHUBBUB_CRC_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DCHUBBUB_CRC_CTRL: u32 = 0x39b1;
+/// The value of `BASE(mmDPP_TOP0_DPP_CRC_CTRL_BASE_IDX) + mmDPP_TOP0_DPP_CRC_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DPP_TOP0_DPP_CRC_CTRL: u32 = 0x4189;
+/// The value of `BASE(mmDPP_TOP0_DPP_CRC_VAL_B_A_BASE_IDX) + mmDPP_TOP0_DPP_CRC_VAL_B_A` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DPP_TOP0_DPP_CRC_VAL_B_A: u32 = 0x4188;
+/// The value of `BASE(mmDPP_TOP0_DPP_CRC_VAL_R_G_BASE_IDX) + mmDPP_TOP0_DPP_CRC_VAL_R_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DPP_TOP0_DPP_CRC_VAL_R_G: u32 = 0x4187;
+/// The value of `BASE(mmMPC_CRC_CTRL_BASE_IDX) + mmMPC_CRC_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_MPC_CRC_CTRL: u32 = 0x480b;
+/// The value of `BASE(mmMPC_CRC_RESULT_GB_BASE_IDX) + mmMPC_CRC_RESULT_GB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_MPC_CRC_RESULT_GB: u32 = 0x480e;
+/// The value of `BASE(mmMPC_CRC_RESULT_C_BASE_IDX) + mmMPC_CRC_RESULT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_MPC_CRC_RESULT_C: u32 = 0x480f;
+/// The value of `BASE(mmMPC_CRC_RESULT_AR_BASE_IDX) + mmMPC_CRC_RESULT_AR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_MPC_CRC_RESULT_AR: u32 = 0x480d;
+/// The value of `BASE(mmDOMAIN0_PG_CONFIG_BASE_IDX) + mmDOMAIN0_PG_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN0_PG_CONFIG: u32 = 0x3540;
+/// The value of `BASE(mmDOMAIN1_PG_CONFIG_BASE_IDX) + mmDOMAIN1_PG_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN1_PG_CONFIG: u32 = 0x3542;
+/// The value of `BASE(mmDOMAIN2_PG_CONFIG_BASE_IDX) + mmDOMAIN2_PG_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN2_PG_CONFIG: u32 = 0x3544;
+/// The value of `BASE(mmDOMAIN3_PG_CONFIG_BASE_IDX) + mmDOMAIN3_PG_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN3_PG_CONFIG: u32 = 0x3546;
+/// The value of `BASE(mmDOMAIN4_PG_CONFIG_BASE_IDX) + mmDOMAIN4_PG_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN4_PG_CONFIG: u32 = 0x3548;
+/// The value of `BASE(mmDOMAIN5_PG_CONFIG_BASE_IDX) + mmDOMAIN5_PG_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN5_PG_CONFIG: u32 = 0x354a;
+/// The value of `BASE(mmDOMAIN6_PG_CONFIG_BASE_IDX) + mmDOMAIN6_PG_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN6_PG_CONFIG: u32 = 0x354c;
+/// The value of `BASE(mmDOMAIN7_PG_CONFIG_BASE_IDX) + mmDOMAIN7_PG_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN7_PG_CONFIG: u32 = 0x354e;
+/// The value of `BASE(mmDOMAIN16_PG_CONFIG_BASE_IDX) + mmDOMAIN16_PG_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN16_PG_CONFIG: u32 = 0x3561;
+/// The value of `BASE(mmDOMAIN17_PG_CONFIG_BASE_IDX) + mmDOMAIN17_PG_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN17_PG_CONFIG: u32 = 0x3563;
+/// The value of `BASE(mmDOMAIN18_PG_CONFIG_BASE_IDX) + mmDOMAIN18_PG_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN18_PG_CONFIG: u32 = 0x3565;
+/// The value of `BASE(mmDOMAIN0_PG_STATUS_BASE_IDX) + mmDOMAIN0_PG_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN0_PG_STATUS: u32 = 0x3541;
+/// The value of `BASE(mmDOMAIN1_PG_STATUS_BASE_IDX) + mmDOMAIN1_PG_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN1_PG_STATUS: u32 = 0x3543;
+/// The value of `BASE(mmDOMAIN2_PG_STATUS_BASE_IDX) + mmDOMAIN2_PG_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN2_PG_STATUS: u32 = 0x3545;
+/// The value of `BASE(mmDOMAIN3_PG_STATUS_BASE_IDX) + mmDOMAIN3_PG_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN3_PG_STATUS: u32 = 0x3547;
+/// The value of `BASE(mmDOMAIN4_PG_STATUS_BASE_IDX) + mmDOMAIN4_PG_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN4_PG_STATUS: u32 = 0x3549;
+/// The value of `BASE(mmDOMAIN5_PG_STATUS_BASE_IDX) + mmDOMAIN5_PG_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN5_PG_STATUS: u32 = 0x354b;
+/// The value of `BASE(mmDOMAIN6_PG_STATUS_BASE_IDX) + mmDOMAIN6_PG_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN6_PG_STATUS: u32 = 0x354d;
+/// The value of `BASE(mmDOMAIN7_PG_STATUS_BASE_IDX) + mmDOMAIN7_PG_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN7_PG_STATUS: u32 = 0x354f;
+/// The value of `BASE(mmDOMAIN16_PG_STATUS_BASE_IDX) + mmDOMAIN16_PG_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN16_PG_STATUS: u32 = 0x3562;
+/// The value of `BASE(mmDOMAIN17_PG_STATUS_BASE_IDX) + mmDOMAIN17_PG_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN17_PG_STATUS: u32 = 0x3564;
+/// The value of `BASE(mmDOMAIN18_PG_STATUS_BASE_IDX) + mmDOMAIN18_PG_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DOMAIN18_PG_STATUS: u32 = 0x3566;
+/// The value of `BASE(mmD1VGA_CONTROL_BASE_IDX) + mmD1VGA_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_D1VGA_CONTROL: u32 = 0xcc;
+/// The value of `BASE(mmD2VGA_CONTROL_BASE_IDX) + mmD2VGA_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_D2VGA_CONTROL: u32 = 0xce;
+/// The value of `BASE(mmD3VGA_CONTROL_BASE_IDX) + mmD3VGA_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_D3VGA_CONTROL: u32 = 0xf8;
+/// The value of `BASE(mmD4VGA_CONTROL_BASE_IDX) + mmD4VGA_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_D4VGA_CONTROL: u32 = 0xf9;
+/// The value of `BASE(mmD5VGA_CONTROL_BASE_IDX) + mmD5VGA_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_D5VGA_CONTROL: u32 = 0xfa;
+/// The value of `BASE(mmD6VGA_CONTROL_BASE_IDX) + mmD6VGA_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_D6VGA_CONTROL: u32 = 0xfb;
+/// The value of `BASE(mmDC_IP_REQUEST_CNTL_BASE_IDX) + mmDC_IP_REQUEST_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HWSEQ_DC_IP_REQUEST_CNTL: u32 = 0x3572;
+
+// DC hwseq field shifts/masks (HWSEQ_DCN21_MASK_SH_LIST(__SHIFT))
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2146
+pub const OTG0_PIXEL_RATE_CNTL__OTG0_PIXEL_RATE_SOURCE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2153
+pub const OTG0_PIXEL_RATE_CNTL__OTG0_PIXEL_RATE_SOURCE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2167
+pub const OTG0_PHYPLL_PIXEL_RATE_CNTL__OTG0_PHYPLL_PIXEL_RATE_SOURCE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2169
+pub const OTG0_PHYPLL_PIXEL_RATE_CNTL__OTG0_PHYPLL_PIXEL_RATE_SOURCE_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8954
+pub const DCFCLK_CNTL__DCFCLK_GATE_DIS__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:8957
+pub const DCFCLK_CNTL__DCFCLK_GATE_DIS_MASK: u32 = 0x80000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1634
+pub const DC_MEM_GLOBAL_PWR_REQ_CNTL__DC_MEM_GLOBAL_PWR_REQ_DIS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1633
+pub const DC_MEM_GLOBAL_PWR_REQ_CNTL__DC_MEM_GLOBAL_PWR_REQ_DIS_MASK: u32 = 0x1;
+/// include/asic_reg/mmhub/mmhub_2_0_0_sh_mask.h:6631
+pub const MMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32__PAGE_DIRECTORY_ENTRY_HI32__SHIFT: u32 = 0x0;
+/// include/asic_reg/mmhub/mmhub_2_0_0_sh_mask.h:6632
+pub const MMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32__PAGE_DIRECTORY_ENTRY_HI32_MASK: u32 = 0xffffffff;
+/// include/asic_reg/mmhub/mmhub_2_0_0_sh_mask.h:6628
+pub const MMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32__PAGE_DIRECTORY_ENTRY_LO32__SHIFT: u32 = 0x0;
+/// include/asic_reg/mmhub/mmhub_2_0_0_sh_mask.h:6629
+pub const MMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32__PAGE_DIRECTORY_ENTRY_LO32_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3073
+pub const DOMAIN0_PG_CONFIG__DOMAIN0_POWER_FORCEON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3075
+pub const DOMAIN0_PG_CONFIG__DOMAIN0_POWER_FORCEON_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3074
+pub const DOMAIN0_PG_CONFIG__DOMAIN0_POWER_GATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3076
+pub const DOMAIN0_PG_CONFIG__DOMAIN0_POWER_GATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3083
+pub const DOMAIN1_PG_CONFIG__DOMAIN1_POWER_FORCEON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3085
+pub const DOMAIN1_PG_CONFIG__DOMAIN1_POWER_FORCEON_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3084
+pub const DOMAIN1_PG_CONFIG__DOMAIN1_POWER_GATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3086
+pub const DOMAIN1_PG_CONFIG__DOMAIN1_POWER_GATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3093
+pub const DOMAIN2_PG_CONFIG__DOMAIN2_POWER_FORCEON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3095
+pub const DOMAIN2_PG_CONFIG__DOMAIN2_POWER_FORCEON_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3094
+pub const DOMAIN2_PG_CONFIG__DOMAIN2_POWER_GATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3096
+pub const DOMAIN2_PG_CONFIG__DOMAIN2_POWER_GATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3103
+pub const DOMAIN3_PG_CONFIG__DOMAIN3_POWER_FORCEON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3105
+pub const DOMAIN3_PG_CONFIG__DOMAIN3_POWER_FORCEON_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3104
+pub const DOMAIN3_PG_CONFIG__DOMAIN3_POWER_GATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3106
+pub const DOMAIN3_PG_CONFIG__DOMAIN3_POWER_GATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3113
+pub const DOMAIN4_PG_CONFIG__DOMAIN4_POWER_FORCEON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3115
+pub const DOMAIN4_PG_CONFIG__DOMAIN4_POWER_FORCEON_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3114
+pub const DOMAIN4_PG_CONFIG__DOMAIN4_POWER_GATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3116
+pub const DOMAIN4_PG_CONFIG__DOMAIN4_POWER_GATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3123
+pub const DOMAIN5_PG_CONFIG__DOMAIN5_POWER_FORCEON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3125
+pub const DOMAIN5_PG_CONFIG__DOMAIN5_POWER_FORCEON_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3124
+pub const DOMAIN5_PG_CONFIG__DOMAIN5_POWER_GATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3126
+pub const DOMAIN5_PG_CONFIG__DOMAIN5_POWER_GATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3133
+pub const DOMAIN6_PG_CONFIG__DOMAIN6_POWER_FORCEON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3135
+pub const DOMAIN6_PG_CONFIG__DOMAIN6_POWER_FORCEON_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3134
+pub const DOMAIN6_PG_CONFIG__DOMAIN6_POWER_GATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3136
+pub const DOMAIN6_PG_CONFIG__DOMAIN6_POWER_GATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3143
+pub const DOMAIN7_PG_CONFIG__DOMAIN7_POWER_FORCEON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3145
+pub const DOMAIN7_PG_CONFIG__DOMAIN7_POWER_FORCEON_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3144
+pub const DOMAIN7_PG_CONFIG__DOMAIN7_POWER_GATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3146
+pub const DOMAIN7_PG_CONFIG__DOMAIN7_POWER_GATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1859
+pub const DOMAIN16_PG_CONFIG__DOMAIN16_POWER_FORCEON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1861
+pub const DOMAIN16_PG_CONFIG__DOMAIN16_POWER_FORCEON_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1860
+pub const DOMAIN16_PG_CONFIG__DOMAIN16_POWER_GATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1862
+pub const DOMAIN16_PG_CONFIG__DOMAIN16_POWER_GATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1869
+pub const DOMAIN17_PG_CONFIG__DOMAIN17_POWER_FORCEON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1871
+pub const DOMAIN17_PG_CONFIG__DOMAIN17_POWER_FORCEON_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1870
+pub const DOMAIN17_PG_CONFIG__DOMAIN17_POWER_GATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1872
+pub const DOMAIN17_PG_CONFIG__DOMAIN17_POWER_GATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1879
+pub const DOMAIN18_PG_CONFIG__DOMAIN18_POWER_FORCEON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1881
+pub const DOMAIN18_PG_CONFIG__DOMAIN18_POWER_FORCEON_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1880
+pub const DOMAIN18_PG_CONFIG__DOMAIN18_POWER_GATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1882
+pub const DOMAIN18_PG_CONFIG__DOMAIN18_POWER_GATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3079
+pub const DOMAIN0_PG_STATUS__DOMAIN0_PGFSM_PWR_STATUS__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3081
+pub const DOMAIN0_PG_STATUS__DOMAIN0_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3089
+pub const DOMAIN1_PG_STATUS__DOMAIN1_PGFSM_PWR_STATUS__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3091
+pub const DOMAIN1_PG_STATUS__DOMAIN1_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3099
+pub const DOMAIN2_PG_STATUS__DOMAIN2_PGFSM_PWR_STATUS__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3101
+pub const DOMAIN2_PG_STATUS__DOMAIN2_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3109
+pub const DOMAIN3_PG_STATUS__DOMAIN3_PGFSM_PWR_STATUS__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3111
+pub const DOMAIN3_PG_STATUS__DOMAIN3_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3119
+pub const DOMAIN4_PG_STATUS__DOMAIN4_PGFSM_PWR_STATUS__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3121
+pub const DOMAIN4_PG_STATUS__DOMAIN4_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3129
+pub const DOMAIN5_PG_STATUS__DOMAIN5_PGFSM_PWR_STATUS__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3131
+pub const DOMAIN5_PG_STATUS__DOMAIN5_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3139
+pub const DOMAIN6_PG_STATUS__DOMAIN6_PGFSM_PWR_STATUS__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3141
+pub const DOMAIN6_PG_STATUS__DOMAIN6_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3149
+pub const DOMAIN7_PG_STATUS__DOMAIN7_PGFSM_PWR_STATUS__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:3151
+pub const DOMAIN7_PG_STATUS__DOMAIN7_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1865
+pub const DOMAIN16_PG_STATUS__DOMAIN16_PGFSM_PWR_STATUS__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1867
+pub const DOMAIN16_PG_STATUS__DOMAIN16_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1875
+pub const DOMAIN17_PG_STATUS__DOMAIN17_PGFSM_PWR_STATUS__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1877
+pub const DOMAIN17_PG_STATUS__DOMAIN17_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1885
+pub const DOMAIN18_PG_STATUS__DOMAIN18_PGFSM_PWR_STATUS__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:1887
+pub const DOMAIN18_PG_STATUS__DOMAIN18_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:112
+pub const DC_IP_REQUEST_CNTL__IP_REQUEST_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:111
+pub const DC_IP_REQUEST_CNTL__IP_REQUEST_EN_MASK: u32 = 0x1;
