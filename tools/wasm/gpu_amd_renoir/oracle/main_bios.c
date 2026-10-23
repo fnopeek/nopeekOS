@@ -10,6 +10,8 @@
 #include "atomfirmware.h"
 #include "atom.h"
 #include "ObjectID.h"
+#include "bios_types_std.h"
+#include "bios_types_grph.h"
 #include "bios_types.h"
 
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))

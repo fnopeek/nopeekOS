@@ -45,6 +45,8 @@
 #include "mp/mp_12_0_0_sh_mask.h"
 #include "fixed31_32.h"
 #include "dm_pp_smu.h"
+#include "bios_types_std.h"
+#include "bios_types_grph.h"
 #include "bios_types.h"
 #include "clk_types.h"
 

@@ -191,3 +191,9 @@ mod virtual_stream_encoder;
 mod dml_structs;
 #[path = "../src/dcn20_fpu.rs"]
 mod dcn20_fpu;
+#[path = "../src/gpio_base.rs"]
+mod gpio_base;
+#[path = "../src/link_ddc.rs"]
+mod link_ddc;
+#[path = "../src/link_hpd.rs"]
+mod link_hpd;

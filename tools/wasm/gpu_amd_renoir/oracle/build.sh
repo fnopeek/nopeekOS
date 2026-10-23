@@ -378,21 +378,22 @@ python3 -I "$HERE/protos.py" "$B/smu_extracted.c" > "$B/smu_protos.h"
 DB=$AMD/display/dc/bios
 {
     $X "$AMD/display/include/dal_types.h" dce_version
+    $X "$AMD/display/include/gpio_types.h" gpio_pin_info
+} > "$B/bios_types_std.h"
+{
     $X "$AMD/display/include/grph_object_id.h" object_type object_enum_id generic_id encoder_id connector_id \
-        graphics_object_id dal_graphics_object_id_init
+        graphics_object_id dal_graphics_object_id_init dal_graphics_object_id_get_connector_id
     $X "$AMD/display/include/grph_object_ctrl_defs.h" ddi_channel_mapping '#NUMBER_OF_UCHAR_FOR_GUID' \
         '#MAX_NUMBER_OF_EXT_DISPLAY_PATH' '#NUMBER_OF_CSR_M3_ARB' '#NUMBER_OF_DISP_CLK_VOLTAGE' \
-        '#NUMBER_OF_AVAILABLE_SCLK' i2c_reg_info edp_info integrated_info dc_firmware_info dc_vram_info
-    $X "$AMD/display/include/bios_parser_types.h" bp_result bp_soc_bb_info
+        '#NUMBER_OF_AVAILABLE_SCLK' i2c_reg_info edp_info integrated_info dc_firmware_info dc_vram_info \
+        step_and_delay_info spread_spectrum_info dal_device_type device_id graphics_object_i2c_info \
+        graphics_object_hpd_info connector_device_tag_info
+} > "$B/bios_types_grph.h"
+{
+    $X "$AMD/display/include/bios_parser_types.h" bp_result bp_soc_bb_info as_signal_type bp_disp_connector_caps_info
     $X "$AMD/display/include/bios_parser_interface.h" bp_init_data
-    $X "$DB/bios_parser_types_internal2.h" atom_data_revision object_info_table
-    $X "$AMD/display/include/bios_parser_types.h" as_signal_type
-    $X "$AMD/display/include/grph_object_ctrl_defs.h" step_and_delay_info spread_spectrum_info dal_device_type \
-        device_id graphics_object_i2c_info graphics_object_hpd_info connector_device_tag_info
-    $X "$AMD/display/include/bios_parser_types.h" bp_disp_connector_caps_info
-    $X "$AMD/display/include/gpio_types.h" gpio_pin_info
+    $X "$DB/bios_parser_types_internal2.h" atom_data_revision object_info_table '#BP_FROM_DCB'
     $X "$DB/bios_parser_helper.h" '#GET_IMAGE' '#BIOS_MAX_NUM_RECORD'
-    $X "$DB/bios_parser_types_internal2.h" '#BP_FROM_DCB'
 } > "$B/bios_types.h"
 {
     $X "$DB/bios_parser_helper.c" bios_get_image
@@ -449,12 +450,52 @@ DCLK=$AMD/display/dc/clk_mgr
 } > "$B/clk_funcs.c"
 python3 -I "$HERE/protos.py" "$B/clk_funcs.c" > "$B/clk_protos.h"
 
+# DC sources compiled unchanged: a dm_services.h of the oracle's own
+# (shim_dc/dm_services_base.h + the field helpers of Linux's dm_services.h)
+# and dc_helper.c's register helpers.
+DCS=$AMD/display/dc
+mkdir -p "$B/dc_shim"
+{
+    echo '#pragma once'
+    echo '#include "dm_services_base.h"'
+    $X "$DCS/dm_services.h" get_reg_field_value_ex set_reg_field_value_ex
+    $X "$DCS/dc_types.h" dce_environment
+    $X "$DCS/irq_types.h" dc_irq_source
+    $X "$DCS/dc_ddc_types.h" gpio_ddc_hw_info ddc
+} > "$B/dc_shim/dm_services.h"
+{
+    echo '#include "dm_services.h"'
+    echo 'static uint32_t dmub_reg_value_pack(const struct dc_context *c, uint32_t a, void *m) { abort(); }'
+    echo 'static bool dmub_reg_value_burst_set_pack(const struct dc_context *c, uint32_t a, uint32_t v) { abort(); }'
+    sed '/note:  va version of this/,$d' "$DCS/dc_helper.c" > "$B/dc_helper_head.c"
+    $X "$B/dc_helper_head.c" dc_reg_value_masks set_reg_field_value_masks set_reg_field_values generic_reg_update_ex \
+        generic_reg_set_ex generic_reg_get generic_reg_get2 generic_reg_get3 generic_reg_get4 generic_reg_get5 \
+        generic_reg_get6 generic_reg_get7 generic_reg_get8
+} > "$B/dc_helper_extracted.c"
+
+# The GPIO pins of a link: Linux's gpio/ sources unchanged, with
+# link_get_hpd_gpio and the DDC service around them.
+{
+    $X "$DCS/dc_ddc_types.h" ddc_flags ddc_transaction_type display_dongle_type ddc_wa '#DC_MAX_EDID_BUFFER_SIZE' ddc_service
+    $X "$DCS/inc/link_service.h" ddc_service_init_data
+    $X "$DCS/link/protocols/link_hpd.c" link_get_hpd_gpio
+    $X "$DCS/link/protocols/link_ddc.c" ddc_service_construct link_create_ddc_service
+} > "$B/gpio_link.c"
+GPIO_CF="-I $HERE/shim_dc -I $B/dc_shim -I $AMD/display -I $DCS -I $DCS/inc -I $DCS/gpio -I $AMD/display/include -I $AMD/include/asic_reg"
+
 CF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
 gcc $CF -c "$B/atom.c" -o "$B/atom.o"
 gcc $CF "$HERE/main.c" "$B/atom.o" -o "$B/oracle_atom"
 gcc $CF "$HERE/main_atomexec.c" "$B/atom.o" -o "$B/oracle_atomexec"
 gcc $CF "$HERE/main_dmub.c" -o "$B/oracle_dmub"
 gcc $CF "$HERE/main_bios.c" "$B/atom.o" -o "$B/oracle_bios"
+GPIO_O=""
+for f in gpio_base gpio_service hw_gpio hw_hpd hw_ddc hw_generic dcn21/hw_factory_dcn21 dcn21/hw_translate_dcn21; do
+    gcc $CF $GPIO_CF -c "$DCS/gpio/$f.c" -o "$B/gpio_${f##*/}.o"
+    GPIO_O="$GPIO_O $B/gpio_${f##*/}.o"
+done
+gcc $CF $GPIO_CF -c "$B/dc_helper_extracted.c" -o "$B/dc_helper_extracted.o"
+gcc $CF $GPIO_CF "$HERE/main_gpio.c" $GPIO_O "$B/dc_helper_extracted.o" "$B/atom.o" -o "$B/oracle_gpio"
 gcc $CF -I "$AMD/include/asic_reg" -I "$AMD/display/dc" -I "$AMD/display/include" "$HERE/main_clk.c" "$B/atom.o" -o "$B/oracle_clk"
 gcc $CF "$HERE/main_psp.c" -o "$B/oracle_psp"
 gcc $CF "$HERE/main_discovery.c" -o "$B/oracle_discovery"

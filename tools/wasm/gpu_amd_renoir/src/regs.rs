@@ -22783,3 +22783,71 @@ pub const BP2_ATOM_DISPLAY_DFP4_SUPPORT: u32 = 0x400;
 pub const BP2_ATOM_DISPLAY_DFP5_SUPPORT: u32 = 0x800;
 /// The value of `ATOM_DISPLAY_DFP6_SUPPORT` in ../display/dc/bios/bios_parser2.c
 pub const BP2_ATOM_DISPLAY_DFP6_SUPPORT: u32 = 0x40;
+
+// The DCN 2.1 GPIO translate (gpio/dcn21/hw_translate_dcn21.c) and gpio_service
+/// The value of `REG(DC_GPIO_GENERIC_A)` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENERIC_A: u32 = 0x5d89;
+/// The value of `REG(DC_GPIO_HPD_A)` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_HPD_A: u32 = 0x5db5;
+/// The value of `REG(DC_GPIO_GENLK_A)` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENLK_A: u32 = 0x5db1;
+/// The value of `REG(DC_GPIO_DDC1_A)` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_DDC1_A: u32 = 0x5d91;
+/// The value of `REG(DC_GPIO_DDC2_A)` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_DDC2_A: u32 = 0x5d95;
+/// The value of `REG(DC_GPIO_DDC3_A)` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_DDC3_A: u32 = 0x5d99;
+/// The value of `REG(DC_GPIO_DDC4_A)` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_DDC4_A: u32 = 0x5d9d;
+/// The value of `REG(DC_GPIO_DDC5_A)` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_DDC5_A: u32 = 0x5da1;
+/// The value of `REG(DC_GPIO_DDCVGA_A)` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_DDCVGA_A: u32 = 0x5da9;
+/// The value of `DC_GPIO_GENERIC_A__DC_GPIO_GENERICA_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENERIC_A__DC_GPIO_GENERICA_A_MASK: u32 = 0x1;
+/// The value of `DC_GPIO_GENERIC_A__DC_GPIO_GENERICB_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENERIC_A__DC_GPIO_GENERICB_A_MASK: u32 = 0x100;
+/// The value of `DC_GPIO_GENERIC_A__DC_GPIO_GENERICC_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENERIC_A__DC_GPIO_GENERICC_A_MASK: u32 = 0x10000;
+/// The value of `DC_GPIO_GENERIC_A__DC_GPIO_GENERICD_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENERIC_A__DC_GPIO_GENERICD_A_MASK: u32 = 0x100000;
+/// The value of `DC_GPIO_GENERIC_A__DC_GPIO_GENERICE_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENERIC_A__DC_GPIO_GENERICE_A_MASK: u32 = 0x200000;
+/// The value of `DC_GPIO_GENERIC_A__DC_GPIO_GENERICF_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENERIC_A__DC_GPIO_GENERICF_A_MASK: u32 = 0x400000;
+/// The value of `DC_GPIO_GENERIC_A__DC_GPIO_GENERICG_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENERIC_A__DC_GPIO_GENERICG_A_MASK: u32 = 0x800000;
+/// The value of `DC_GPIO_HPD_A__DC_GPIO_HPD1_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_HPD_A__DC_GPIO_HPD1_A_MASK: u32 = 0x1;
+/// The value of `DC_GPIO_HPD_A__DC_GPIO_HPD2_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_HPD_A__DC_GPIO_HPD2_A_MASK: u32 = 0x100;
+/// The value of `DC_GPIO_HPD_A__DC_GPIO_HPD3_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_HPD_A__DC_GPIO_HPD3_A_MASK: u32 = 0x10000;
+/// The value of `DC_GPIO_HPD_A__DC_GPIO_HPD4_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_HPD_A__DC_GPIO_HPD4_A_MASK: u32 = 0x1000000;
+/// The value of `DC_GPIO_HPD_A__DC_GPIO_HPD5_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_HPD_A__DC_GPIO_HPD5_A_MASK: u32 = 0x4000000;
+/// The value of `DC_GPIO_HPD_A__DC_GPIO_HPD6_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_HPD_A__DC_GPIO_HPD6_A_MASK: u32 = 0x10000000;
+/// The value of `DC_GPIO_GENLK_A__DC_GPIO_GENLK_CLK_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENLK_A__DC_GPIO_GENLK_CLK_A_MASK: u32 = 0x1;
+/// The value of `DC_GPIO_GENLK_A__DC_GPIO_GENLK_VSYNC_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENLK_A__DC_GPIO_GENLK_VSYNC_A_MASK: u32 = 0x100;
+/// The value of `DC_GPIO_GENLK_A__DC_GPIO_SWAPLOCK_A_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENLK_A__DC_GPIO_SWAPLOCK_A_A_MASK: u32 = 0x10000;
+/// The value of `DC_GPIO_GENLK_A__DC_GPIO_SWAPLOCK_B_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_GENLK_A__DC_GPIO_SWAPLOCK_B_A_MASK: u32 = 0x1000000;
+/// The value of `DC_GPIO_DDC5_A__DC_GPIO_DDC5DATA_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_DDC5_A__DC_GPIO_DDC5DATA_A_MASK: u32 = 0x100;
+/// The value of `DC_GPIO_DDC5_A__DC_GPIO_DDC5CLK_A_MASK` in ../display/dc/gpio/dcn21/hw_translate_dcn21.c
+pub const GPIOT_DC_GPIO_DDC5_A__DC_GPIO_DDC5CLK_A_MASK: u32 = 0x1;
+/// ?
+pub const DC_IRQ_SOURCE_INVALID: u32 = 0x0;
+/// ?
+pub const DC_IRQ_SOURCE_HPD1: u32 = 0x1;
+/// ?
+pub const DC_IRQ_SOURCE_HPD1RX: u32 = 0x7;
+/// ?
+pub const DC_IRQ_SOURCE_DCI2C_RR_DDC1: u32 = 0x6f;
+/// ?
+pub const DC_IRQ_SOURCE_GPIOPAD0: u32 = 0x21;

@@ -94,3 +94,14 @@ mmhub_client_ids_renoir: str
 rn_video_codecs_decode_array: u32
 vega_video_codecs_encode_array: u32
 soc15_allowed_read_registers: u32
+@ ../display/dc/gpio/dcn21/hw_factory_dcn21.c
+hpd_regs: u32
+hpd_shift: u32
+hpd_mask: u32
+ddc_data_regs_dcn: u32
+ddc_clk_regs_dcn: u32
+ddc_shift: u32
+ddc_mask: u32
+generic_regs: u32
+generic_shift: u32
+generic_mask: u32
