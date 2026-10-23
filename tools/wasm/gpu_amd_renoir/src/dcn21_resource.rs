@@ -7,10 +7,13 @@
 
 use crate::amdgpu_device::amdgpu_device;
 use crate::dc::dc;
-use crate::dc_helper::dm_read_reg;
-use crate::dc_resource::{resource_caps, resource_pool, NO_UNDERLAY_PIPE};
+use crate::dc_helper::{dm_read_reg, generic_reg_get};
+use crate::dc_resource::{resource_caps, resource_pool, resource_straps, NO_UNDERLAY_PIPE};
 use crate::dc_types::dc_caps;
-use crate::regs::CC_DC_PIPE_DIS;
+use crate::regs::{
+    CC_DC_PIPE_DIS, DC_PINSTRAPS, DC_PINSTRAPS__DC_PINSTRAPS_AUDIO_MASK,
+    DC_PINSTRAPS__DC_PINSTRAPS_AUDIO__SHIFT,
+};
 use crate::dccg::{dccg21_create, DCCG_MASK, DCCG_REGS, DCCG_SHIFT};
 use crate::dcn10_ipp::dcn21_ipp_create;
 use crate::dcn20_dpp::dcn21_dpp_create;
@@ -122,6 +125,18 @@ pub fn dcn21_set_caps(caps: &mut dc_caps) {
 fn read_pipe_fuses(adev: &amdgpu_device) -> u32 {
     // REG(CC_DC_PIPE_DIS) is DCN_BASE seg2 + mmCC_DC_PIPE_DIS, resolved in regs.rs.
     dm_read_reg(adev, CC_DC_PIPE_DIS) & 0xf
+}
+
+/// `read_dce_straps` (dcn21_resource.c): read the board straps. dcn21 reads
+/// only the audio pin-straps field of `DC_PINSTRAPS`; the other straps stay 0.
+pub fn read_dce_straps(adev: &amdgpu_device, straps: &mut resource_straps) {
+    let (_, audio) = generic_reg_get(
+        adev,
+        DC_PINSTRAPS,
+        DC_PINSTRAPS__DC_PINSTRAPS_AUDIO__SHIFT as u8,
+        DC_PINSTRAPS__DC_PINSTRAPS_AUDIO_MASK,
+    );
+    straps.dc_pinstraps_audio = audio;
 }
 
 /// `dcn21_resource_construct` (dcn21_resource.c), as far as it is ported: the

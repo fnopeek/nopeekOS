@@ -50,6 +50,43 @@ pub struct resource_caps {
 /// `underlay_pipe_index`, so Linux' `-1` reads back as `u32::MAX`.
 pub const NO_UNDERLAY_PIPE: u32 = u32::MAX;
 
+/// `struct resource_straps` (resource.h): the board straps read from HW.
+/// `read_dce_straps` fills only `dc_pinstraps_audio` on dcn21; the rest are 0.
+#[derive(Default, Clone, Copy)]
+pub struct resource_straps {
+    pub hdmi_disable: u32,
+    pub dc_pinstraps_audio: u32,
+    pub audio_stream_number: u32,
+}
+
+/// `struct audio_support` (core_types.h): which audio outputs the board offers.
+#[derive(Default, Clone, Copy)]
+pub struct audio_support {
+    pub dp_audio: bool,
+    pub hdmi_audio_on_dongle: bool,
+    pub hdmi_audio_native: bool,
+}
+
+/// `update_num_audio` (core/dc_resource.c): derive the audio-output support and
+/// the usable stream count from the straps. `audio_stream_number == 0` means
+/// multi-stream, so `num_audio` is left at the cap.
+pub fn update_num_audio(straps: &resource_straps, num_audio: &mut u32, aud_support: &mut audio_support) {
+    aud_support.dp_audio = true;
+    aud_support.hdmi_audio_native = false;
+    aud_support.hdmi_audio_on_dongle = false;
+
+    if straps.hdmi_disable == 0 && straps.dc_pinstraps_audio & 0x2 != 0 {
+        aud_support.hdmi_audio_on_dongle = true;
+        aud_support.hdmi_audio_native = true;
+    }
+
+    match straps.audio_stream_number {
+        0 => {}          // multi streams supported
+        1 => *num_audio = 1, // multi streams not supported
+        _ => {}          // Linux logs "unexpected audio fuse"
+    }
+}
+
 /// `struct resource_pool` (core_types.h): everything a DCN pool owns. Ported
 /// grow-as-reached — only the fields `dcn21_resource_construct` has reached so
 /// far; the block arrays (hubps/dpps/opps/stream_enc/…) join as each IP-block

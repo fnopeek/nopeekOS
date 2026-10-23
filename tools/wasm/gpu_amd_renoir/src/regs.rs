@@ -22241,3 +22241,11 @@ pub const DOMAIN18_PG_STATUS__DOMAIN18_PGFSM_PWR_STATUS_MASK: u32 = 0xc0000000;
 pub const DC_IP_REQUEST_CNTL__IP_REQUEST_EN__SHIFT: u32 = 0x0;
 /// include/asic_reg/dce/dce_10_0_sh_mask.h:111
 pub const DC_IP_REQUEST_CNTL__IP_REQUEST_EN_MASK: u32 = 0x1;
+
+// DC resource_construct: read_dce_straps reads DC_PINSTRAPS (audio straps).
+/// The value of `BASE(mmDC_PINSTRAPS_BASE_IDX) + mmDC_PINSTRAPS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DC_PINSTRAPS: u32 = 0x5d40;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:3088
+pub const DC_PINSTRAPS__DC_PINSTRAPS_AUDIO__SHIFT: u32 = 0xe;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:3087
+pub const DC_PINSTRAPS__DC_PINSTRAPS_AUDIO_MASK: u32 = 0xc000;

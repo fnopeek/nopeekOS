@@ -11130,3 +11130,8 @@ DOMAIN18_PG_STATUS__DOMAIN18_PGFSM_PWR_STATUS__SHIFT @ ../display/dc/resource/dc
 DOMAIN18_PG_STATUS__DOMAIN18_PGFSM_PWR_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
 DC_IP_REQUEST_CNTL__IP_REQUEST_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
 DC_IP_REQUEST_CNTL__IP_REQUEST_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+
+# DC resource_construct: read_dce_straps reads DC_PINSTRAPS (audio straps).
+DC_PINSTRAPS = BASE(mmDC_PINSTRAPS_BASE_IDX) + mmDC_PINSTRAPS @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_PINSTRAPS__DC_PINSTRAPS_AUDIO__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DC_PINSTRAPS__DC_PINSTRAPS_AUDIO_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
