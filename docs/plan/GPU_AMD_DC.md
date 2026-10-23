@@ -169,18 +169,27 @@ LIST`), Statics `IPP_REGS[4]`/`IPP_SHIFT`/`IPP_MASK` (`IPP_REG_LIST_DCN20` +
 (nur ipps; `read_pipe_fuses` fehlt → hw-Instanz = Index). regs.list +52 Offsets
 (13×4) +50 Shift/Mask. Schreibt kein Register.
 
-**Nächste Einheit:** die restlichen **Pipe-Blöcke** im selben Loop —
-`dcn21_hubp_create`, `dcn21_dpp_create`, `dcn21_opp_create`,
-`dcn21_timing_generator_create` (optc). HUBP/DPP/OPTC sind groß (viele Register
-je Instanz); Register-Batch je Block über alle 4 Instanzen bündeln, einmal
-regenerieren. Dazu `read_pipe_fuses` (kompaktiert ausgefuste Pipes). Danach
-aux/i2c je ddc, mpc, hubbub, dsc, dwbc, mmhubbub, irq-Service,
-`resource_construct` + `dcn21_hw_sequencer_construct`, `dml_init_instance`. Die
-Konstruktoren schreiben KEIN Register (Zeiger + funcs); die Schreibzugriffe
-kommen in hwss (Stufe D/E). **Das formale `main_dc.c`-Orakel (extract.py-Weg +
-os_types-Shim) wird EINMAL am fertigen Objektgraph gebaut und prüft dann den
-ganzen Construct** — der erste host-prüfbare Meilenstein ist der Graph, nicht
-der Einzelblock.
+Vierter Block, **HUBP** (`src/dcn21_hubp.rs`), der größte: 111 Register × 4
+Pipes + 191 Shift/Mask-Felder. Wegen der Größe NICHT von Hand — das neue
+Werkzeug **`dcgen.py`** expandiert Linux' `HUBP_REG_LIST_DCN21` /
+`HUBP_MASK_SH_LIST_DCN21` mit dem C-Präprozessor und emittiert die `regs.list`-
+Zeilen (dedupt gegen vorhandene Namen) und die Rust-Structs + Statics
+(`dcn_hubp2_registers`/`_shift`/`_mask`, `HUBP_REGS[4]`/`HUBP_SHIFT`/`HUBP_MASK`).
+Der Kopf (base-struct, funcs-Identität, `hubp21_construct` [Zeiger + inst +
+opp/mpcc=0xf], `dcn21_hubp_create`) ist handgeschrieben. `resource_pool.hubps`
++ im Pipe-Loop. Schreibt kein Register. Dazu wurde `gen_regs.py` mehrkernig
+(~5× schneller, byte-identisch).
+
+**Nächste Einheit:** die restlichen Pipe-Blöcke im selben Loop —
+`dcn21_dpp_create`, `dcn21_opp_create`, `dcn21_timing_generator_create` (optc)
+— jeweils mit `dcgen.py` (neue `BLOCKS`-Einträge). Dazu `read_pipe_fuses`
+(kompaktiert ausgefuste Pipes). Danach aux/i2c je ddc, mpc, hubbub, dsc, dwbc,
+mmhubbub, irq-Service, `resource_construct` + `dcn21_hw_sequencer_construct`,
+`dml_init_instance`. Die Konstruktoren schreiben KEIN Register (Zeiger +
+funcs); die Schreibzugriffe kommen in hwss (Stufe D/E). **Das formale
+`main_dc.c`-Orakel (extract.py-Weg + os_types-Shim) wird EINMAL am fertigen
+Objektgraph gebaut und prüft dann den ganzen Construct** — der erste
+host-prüfbare Meilenstein ist der Graph, nicht der Einzelblock.
 
 ## Risiken / offen
 

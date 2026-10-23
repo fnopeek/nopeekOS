@@ -8335,3 +8335,1589 @@ pub const CURSOR0_0_CURSOR_HOT_SPOT__CURSOR_HOT_SPOT_Y_MASK: u32 = 0xff;
 pub const CURSOR0_0_CURSOR_DST_OFFSET__CURSOR_DST_X_OFFSET__SHIFT: u32 = 0x0;
 /// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10043
 pub const CURSOR0_0_CURSOR_DST_OFFSET__CURSOR_DST_X_OFFSET_MASK: u32 = 0x1fff;
+
+// DC hubp: dcn_hubp2_registers absolute offsets per pipe instance
+
+// (HUBP_REG_LIST_DCN21) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmHUBP0_DCHUBP_CNTL_BASE_IDX) + mmHUBP0_DCHUBP_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCHUBP_CNTL: u32 = 0x3ab3;
+/// The value of `BASE(mmHUBP0_HUBPREQ_DEBUG_DB_BASE_IDX) + mmHUBP0_HUBPREQ_DEBUG_DB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_HUBPREQ_DEBUG_DB: u32 = 0x3ab6;
+/// The value of `BASE(mmHUBP0_HUBPREQ_DEBUG_BASE_IDX) + mmHUBP0_HUBPREQ_DEBUG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_HUBPREQ_DEBUG: u32 = 0x3ab7;
+/// The value of `BASE(mmHUBP0_DCSURF_ADDR_CONFIG_BASE_IDX) + mmHUBP0_DCSURF_ADDR_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_ADDR_CONFIG: u32 = 0x3aa6;
+/// The value of `BASE(mmHUBP0_DCSURF_TILING_CONFIG_BASE_IDX) + mmHUBP0_DCSURF_TILING_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_TILING_CONFIG: u32 = 0x3aa7;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_PITCH_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_PITCH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_PITCH: u32 = 0x3ac7;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_PITCH_C_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_PITCH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_PITCH_C: u32 = 0x3ac8;
+/// The value of `BASE(mmHUBP0_DCSURF_SURFACE_CONFIG_BASE_IDX) + mmHUBP0_DCSURF_SURFACE_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_CONFIG: u32 = 0x3aa5;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_FLIP_CONTROL_BASE_IDX) + mmHUBPREQ0_DCSURF_FLIP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_FLIP_CONTROL: u32 = 0x3adb;
+/// The value of `BASE(mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_BASE_IDX) + mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION: u32 = 0x3aaa;
+/// The value of `BASE(mmHUBP0_DCSURF_PRI_VIEWPORT_START_BASE_IDX) + mmHUBP0_DCSURF_PRI_VIEWPORT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRI_VIEWPORT_START: u32 = 0x3aa9;
+/// The value of `BASE(mmHUBP0_DCSURF_SEC_VIEWPORT_DIMENSION_BASE_IDX) + mmHUBP0_DCSURF_SEC_VIEWPORT_DIMENSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SEC_VIEWPORT_DIMENSION: u32 = 0x3aae;
+/// The value of `BASE(mmHUBP0_DCSURF_SEC_VIEWPORT_START_BASE_IDX) + mmHUBP0_DCSURF_SEC_VIEWPORT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SEC_VIEWPORT_START: u32 = 0x3aad;
+/// The value of `BASE(mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_C_BASE_IDX) + mmHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_C: u32 = 0x3aac;
+/// The value of `BASE(mmHUBP0_DCSURF_PRI_VIEWPORT_START_C_BASE_IDX) + mmHUBP0_DCSURF_PRI_VIEWPORT_START_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRI_VIEWPORT_START_C: u32 = 0x3aab;
+/// The value of `BASE(mmHUBP0_DCSURF_SEC_VIEWPORT_DIMENSION_C_BASE_IDX) + mmHUBP0_DCSURF_SEC_VIEWPORT_DIMENSION_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SEC_VIEWPORT_DIMENSION_C: u32 = 0x3ab0;
+/// The value of `BASE(mmHUBP0_DCSURF_SEC_VIEWPORT_START_C_BASE_IDX) + mmHUBP0_DCSURF_SEC_VIEWPORT_START_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SEC_VIEWPORT_START_C: u32 = 0x3aaf;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH: u32 = 0x3acb;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRIMARY_SURFACE_ADDRESS: u32 = 0x3aca;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH: u32 = 0x3acf;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SECONDARY_SURFACE_ADDRESS: u32 = 0x3ace;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH: u32 = 0x3ad3;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRIMARY_META_SURFACE_ADDRESS: u32 = 0x3ad2;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH: u32 = 0x3ad7;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SECONDARY_META_SURFACE_ADDRESS: u32 = 0x3ad6;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C: u32 = 0x3acd;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRIMARY_SURFACE_ADDRESS_C: u32 = 0x3acc;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C: u32 = 0x3ad1;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SECONDARY_SURFACE_ADDRESS_C: u32 = 0x3ad0;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C: u32 = 0x3ad5;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C: u32 = 0x3ad4;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C: u32 = 0x3ad9;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C: u32 = 0x3ad8;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_INUSE_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_INUSE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_INUSE: u32 = 0x3ae1;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_INUSE_HIGH_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_INUSE_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_INUSE_HIGH: u32 = 0x3ae2;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_INUSE_C_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_INUSE_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_INUSE_C: u32 = 0x3ae3;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_INUSE_HIGH_C_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_INUSE_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_INUSE_HIGH_C: u32 = 0x3ae4;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_EARLIEST_INUSE: u32 = 0x3ae5;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH: u32 = 0x3ae6;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_C_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_EARLIEST_INUSE_C: u32 = 0x3ae7;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C: u32 = 0x3ae8;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_CONTROL_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_CONTROL: u32 = 0x3ada;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_SURFACE_FLIP_INTERRUPT_BASE_IDX) + mmHUBPREQ0_DCSURF_SURFACE_FLIP_INTERRUPT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_SURFACE_FLIP_INTERRUPT: u32 = 0x3ae0;
+/// The value of `BASE(mmHUBPRET0_HUBPRET_CONTROL_BASE_IDX) + mmHUBPRET0_HUBPRET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_HUBPRET_CONTROL: u32 = 0x3b2c;
+/// The value of `BASE(mmHUBPRET0_HUBPRET_READ_LINE_STATUS_BASE_IDX) + mmHUBPRET0_HUBPRET_READ_LINE_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_HUBPRET_READ_LINE_STATUS: u32 = 0x3b35;
+/// The value of `BASE(mmHUBPREQ0_DCN_EXPANSION_MODE_BASE_IDX) + mmHUBPREQ0_DCN_EXPANSION_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_EXPANSION_MODE: u32 = 0x3aec;
+/// The value of `BASE(mmHUBP0_DCHUBP_REQ_SIZE_CONFIG_BASE_IDX) + mmHUBP0_DCHUBP_REQ_SIZE_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG: u32 = 0x3ab1;
+/// The value of `BASE(mmHUBP0_DCHUBP_REQ_SIZE_CONFIG_C_BASE_IDX) + mmHUBP0_DCHUBP_REQ_SIZE_CONFIG_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C: u32 = 0x3ab2;
+/// The value of `BASE(mmHUBPREQ0_BLANK_OFFSET_0_BASE_IDX) + mmHUBPREQ0_BLANK_OFFSET_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_BLANK_OFFSET_0: u32 = 0x3b06;
+/// The value of `BASE(mmHUBPREQ0_BLANK_OFFSET_1_BASE_IDX) + mmHUBPREQ0_BLANK_OFFSET_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_BLANK_OFFSET_1: u32 = 0x3b07;
+/// The value of `BASE(mmHUBPREQ0_DST_DIMENSIONS_BASE_IDX) + mmHUBPREQ0_DST_DIMENSIONS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DST_DIMENSIONS: u32 = 0x3b08;
+/// The value of `BASE(mmHUBPREQ0_DST_AFTER_SCALER_BASE_IDX) + mmHUBPREQ0_DST_AFTER_SCALER` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DST_AFTER_SCALER: u32 = 0x3b09;
+/// The value of `BASE(mmHUBPREQ0_VBLANK_PARAMETERS_0_BASE_IDX) + mmHUBPREQ0_VBLANK_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_VBLANK_PARAMETERS_0: u32 = 0x3b0c;
+/// The value of `BASE(mmHUBPREQ0_REF_FREQ_TO_PIX_FREQ_BASE_IDX) + mmHUBPREQ0_REF_FREQ_TO_PIX_FREQ` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_REF_FREQ_TO_PIX_FREQ: u32 = 0x3b1f;
+/// The value of `BASE(mmHUBPREQ0_VBLANK_PARAMETERS_1_BASE_IDX) + mmHUBPREQ0_VBLANK_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_VBLANK_PARAMETERS_1: u32 = 0x3b0d;
+/// The value of `BASE(mmHUBPREQ0_VBLANK_PARAMETERS_3_BASE_IDX) + mmHUBPREQ0_VBLANK_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_VBLANK_PARAMETERS_3: u32 = 0x3b0f;
+/// The value of `BASE(mmHUBPREQ0_NOM_PARAMETERS_4_BASE_IDX) + mmHUBPREQ0_NOM_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_NOM_PARAMETERS_4: u32 = 0x3b18;
+/// The value of `BASE(mmHUBPREQ0_NOM_PARAMETERS_5_BASE_IDX) + mmHUBPREQ0_NOM_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_NOM_PARAMETERS_5: u32 = 0x3b19;
+/// The value of `BASE(mmHUBPREQ0_PER_LINE_DELIVERY_PRE_BASE_IDX) + mmHUBPREQ0_PER_LINE_DELIVERY_PRE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_PER_LINE_DELIVERY_PRE: u32 = 0x3b1c;
+/// The value of `BASE(mmHUBPREQ0_PER_LINE_DELIVERY_BASE_IDX) + mmHUBPREQ0_PER_LINE_DELIVERY` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_PER_LINE_DELIVERY: u32 = 0x3b1d;
+/// The value of `BASE(mmHUBPREQ0_VBLANK_PARAMETERS_2_BASE_IDX) + mmHUBPREQ0_VBLANK_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_VBLANK_PARAMETERS_2: u32 = 0x3b0e;
+/// The value of `BASE(mmHUBPREQ0_VBLANK_PARAMETERS_4_BASE_IDX) + mmHUBPREQ0_VBLANK_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_VBLANK_PARAMETERS_4: u32 = 0x3b10;
+/// The value of `BASE(mmHUBPREQ0_NOM_PARAMETERS_6_BASE_IDX) + mmHUBPREQ0_NOM_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_NOM_PARAMETERS_6: u32 = 0x3b1a;
+/// The value of `BASE(mmHUBPREQ0_NOM_PARAMETERS_7_BASE_IDX) + mmHUBPREQ0_NOM_PARAMETERS_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_NOM_PARAMETERS_7: u32 = 0x3b1b;
+/// The value of `BASE(mmHUBPREQ0_DCN_TTU_QOS_WM_BASE_IDX) + mmHUBPREQ0_DCN_TTU_QOS_WM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_TTU_QOS_WM: u32 = 0x3aed;
+/// The value of `BASE(mmHUBPREQ0_DCN_GLOBAL_TTU_CNTL_BASE_IDX) + mmHUBPREQ0_DCN_GLOBAL_TTU_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_GLOBAL_TTU_CNTL: u32 = 0x3aee;
+/// The value of `BASE(mmHUBPREQ0_DCN_SURF0_TTU_CNTL0_BASE_IDX) + mmHUBPREQ0_DCN_SURF0_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_SURF0_TTU_CNTL0: u32 = 0x3aef;
+/// The value of `BASE(mmHUBPREQ0_DCN_SURF0_TTU_CNTL1_BASE_IDX) + mmHUBPREQ0_DCN_SURF0_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_SURF0_TTU_CNTL1: u32 = 0x3af0;
+/// The value of `BASE(mmHUBPREQ0_DCN_SURF1_TTU_CNTL0_BASE_IDX) + mmHUBPREQ0_DCN_SURF1_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_SURF1_TTU_CNTL0: u32 = 0x3af1;
+/// The value of `BASE(mmHUBPREQ0_DCN_SURF1_TTU_CNTL1_BASE_IDX) + mmHUBPREQ0_DCN_SURF1_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_SURF1_TTU_CNTL1: u32 = 0x3af2;
+/// The value of `BASE(mmHUBPREQ0_DCN_CUR0_TTU_CNTL0_BASE_IDX) + mmHUBPREQ0_DCN_CUR0_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_CUR0_TTU_CNTL0: u32 = 0x3af3;
+/// The value of `BASE(mmHUBPREQ0_DCN_CUR0_TTU_CNTL1_BASE_IDX) + mmHUBPREQ0_DCN_CUR0_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_CUR0_TTU_CNTL1: u32 = 0x3af4;
+/// The value of `BASE(mmHUBP0_HUBP_CLK_CNTL_BASE_IDX) + mmHUBP0_HUBP_CLK_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_HUBP_CLK_CNTL: u32 = 0x3ab4;
+/// The value of `BASE(mmHUBPRET0_HUBPRET_READ_LINE_VALUE_BASE_IDX) + mmHUBPRET0_HUBPRET_READ_LINE_VALUE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_HUBPRET_READ_LINE_VALUE: u32 = 0x3b34;
+/// The value of `BASE(mmHUBPREQ0_NOM_PARAMETERS_0_BASE_IDX) + mmHUBPREQ0_NOM_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_NOM_PARAMETERS_0: u32 = 0x3b14;
+/// The value of `BASE(mmHUBPREQ0_NOM_PARAMETERS_1_BASE_IDX) + mmHUBPREQ0_NOM_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_NOM_PARAMETERS_1: u32 = 0x3b15;
+/// The value of `BASE(mmHUBPREQ0_NOM_PARAMETERS_2_BASE_IDX) + mmHUBPREQ0_NOM_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_NOM_PARAMETERS_2: u32 = 0x3b16;
+/// The value of `BASE(mmHUBPREQ0_NOM_PARAMETERS_3_BASE_IDX) + mmHUBPREQ0_NOM_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_NOM_PARAMETERS_3: u32 = 0x3b17;
+/// The value of `BASE(mmHUBPREQ0_DCN_VM_MX_L1_TLB_CNTL_BASE_IDX) + mmHUBPREQ0_DCN_VM_MX_L1_TLB_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_VM_MX_L1_TLB_CNTL: u32 = 0x3b05;
+/// The value of `BASE(mmHUBPREQ0_PREFETCH_SETTINGS_BASE_IDX) + mmHUBPREQ0_PREFETCH_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_PREFETCH_SETTINGS: u32 = 0x3b0a;
+/// The value of `BASE(mmHUBPREQ0_PREFETCH_SETTINGS_C_BASE_IDX) + mmHUBPREQ0_PREFETCH_SETTINGS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_PREFETCH_SETTINGS_C: u32 = 0x3b0b;
+/// The value of `BASE(mmHUBPREQ0_DCN_VM_SYSTEM_APERTURE_LOW_ADDR_BASE_IDX) + mmHUBPREQ0_DCN_VM_SYSTEM_APERTURE_LOW_ADDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_VM_SYSTEM_APERTURE_LOW_ADDR: u32 = 0x3af7;
+/// The value of `BASE(mmHUBPREQ0_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR_BASE_IDX) + mmHUBPREQ0_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR: u32 = 0x3af8;
+/// The value of `BASE(mmHUBPREQ0_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ0_CURSOR_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_CURSOR_SETTINGS: u32 = 0x3b1e;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_CURSOR_SURFACE_ADDRESS_HIGH: u32 = 0x3b3a;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_0_CURSOR_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_CURSOR_SURFACE_ADDRESS: u32 = 0x3b39;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_0_CURSOR_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_CURSOR_SIZE: u32 = 0x3b3b;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_0_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_CURSOR_CONTROL: u32 = 0x3b38;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_0_CURSOR_POSITION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_CURSOR_POSITION: u32 = 0x3b3c;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_0_CURSOR_HOT_SPOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_CURSOR_HOT_SPOT: u32 = 0x3b3d;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_0_CURSOR_DST_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_CURSOR_DST_OFFSET: u32 = 0x3b3f;
+/// The value of `BASE(mmCURSOR0_0_DMDATA_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_0_DMDATA_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DMDATA_ADDRESS_HIGH: u32 = 0x3b42;
+/// The value of `BASE(mmCURSOR0_0_DMDATA_ADDRESS_LOW_BASE_IDX) + mmCURSOR0_0_DMDATA_ADDRESS_LOW` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DMDATA_ADDRESS_LOW: u32 = 0x3b43;
+/// The value of `BASE(mmCURSOR0_0_DMDATA_CNTL_BASE_IDX) + mmCURSOR0_0_DMDATA_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DMDATA_CNTL: u32 = 0x3b44;
+/// The value of `BASE(mmCURSOR0_0_DMDATA_SW_CNTL_BASE_IDX) + mmCURSOR0_0_DMDATA_SW_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DMDATA_SW_CNTL: u32 = 0x3b47;
+/// The value of `BASE(mmCURSOR0_0_DMDATA_QOS_CNTL_BASE_IDX) + mmCURSOR0_0_DMDATA_QOS_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DMDATA_QOS_CNTL: u32 = 0x3b45;
+/// The value of `BASE(mmCURSOR0_0_DMDATA_SW_DATA_BASE_IDX) + mmCURSOR0_0_DMDATA_SW_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DMDATA_SW_DATA: u32 = 0x3b48;
+/// The value of `BASE(mmCURSOR0_0_DMDATA_STATUS_BASE_IDX) + mmCURSOR0_0_DMDATA_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DMDATA_STATUS: u32 = 0x3b46;
+/// The value of `BASE(mmHUBPREQ0_FLIP_PARAMETERS_0_BASE_IDX) + mmHUBPREQ0_FLIP_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_FLIP_PARAMETERS_0: u32 = 0x3b11;
+/// The value of `BASE(mmHUBPREQ0_FLIP_PARAMETERS_1_BASE_IDX) + mmHUBPREQ0_FLIP_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_FLIP_PARAMETERS_1: u32 = 0x3b12;
+/// The value of `BASE(mmHUBPREQ0_FLIP_PARAMETERS_2_BASE_IDX) + mmHUBPREQ0_FLIP_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_FLIP_PARAMETERS_2: u32 = 0x3b13;
+/// The value of `BASE(mmHUBPREQ0_DCN_CUR1_TTU_CNTL0_BASE_IDX) + mmHUBPREQ0_DCN_CUR1_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_CUR1_TTU_CNTL0: u32 = 0x3af5;
+/// The value of `BASE(mmHUBPREQ0_DCN_CUR1_TTU_CNTL1_BASE_IDX) + mmHUBPREQ0_DCN_CUR1_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCN_CUR1_TTU_CNTL1: u32 = 0x3af6;
+/// The value of `BASE(mmHUBPREQ0_DCSURF_FLIP_CONTROL2_BASE_IDX) + mmHUBPREQ0_DCSURF_FLIP_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_DCSURF_FLIP_CONTROL2: u32 = 0x3adc;
+/// The value of `BASE(mmHUBPREQ0_VMID_SETTINGS_0_BASE_IDX) + mmHUBPREQ0_VMID_SETTINGS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_VMID_SETTINGS_0: u32 = 0x3ac9;
+/// The value of `BASE(mmHUBPREQ0_FLIP_PARAMETERS_3_BASE_IDX) + mmHUBPREQ0_FLIP_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_FLIP_PARAMETERS_3: u32 = 0x3b27;
+/// The value of `BASE(mmHUBPREQ0_FLIP_PARAMETERS_4_BASE_IDX) + mmHUBPREQ0_FLIP_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_FLIP_PARAMETERS_4: u32 = 0x3b28;
+/// The value of `BASE(mmHUBPREQ0_FLIP_PARAMETERS_5_BASE_IDX) + mmHUBPREQ0_FLIP_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_FLIP_PARAMETERS_5: u32 = 0x3b29;
+/// The value of `BASE(mmHUBPREQ0_FLIP_PARAMETERS_6_BASE_IDX) + mmHUBPREQ0_FLIP_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_FLIP_PARAMETERS_6: u32 = 0x3b2a;
+/// The value of `BASE(mmHUBPREQ0_VBLANK_PARAMETERS_5_BASE_IDX) + mmHUBPREQ0_VBLANK_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_VBLANK_PARAMETERS_5: u32 = 0x3b25;
+/// The value of `BASE(mmHUBPREQ0_VBLANK_PARAMETERS_6_BASE_IDX) + mmHUBPREQ0_VBLANK_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP0_VBLANK_PARAMETERS_6: u32 = 0x3b26;
+/// The value of `BASE(mmHUBP1_DCHUBP_CNTL_BASE_IDX) + mmHUBP1_DCHUBP_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCHUBP_CNTL: u32 = 0x3b8f;
+/// The value of `BASE(mmHUBP1_HUBPREQ_DEBUG_DB_BASE_IDX) + mmHUBP1_HUBPREQ_DEBUG_DB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_HUBPREQ_DEBUG_DB: u32 = 0x3b92;
+/// The value of `BASE(mmHUBP1_HUBPREQ_DEBUG_BASE_IDX) + mmHUBP1_HUBPREQ_DEBUG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_HUBPREQ_DEBUG: u32 = 0x3b93;
+/// The value of `BASE(mmHUBP1_DCSURF_ADDR_CONFIG_BASE_IDX) + mmHUBP1_DCSURF_ADDR_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_ADDR_CONFIG: u32 = 0x3b82;
+/// The value of `BASE(mmHUBP1_DCSURF_TILING_CONFIG_BASE_IDX) + mmHUBP1_DCSURF_TILING_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_TILING_CONFIG: u32 = 0x3b83;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_PITCH_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_PITCH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_PITCH: u32 = 0x3ba3;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_PITCH_C_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_PITCH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_PITCH_C: u32 = 0x3ba4;
+/// The value of `BASE(mmHUBP1_DCSURF_SURFACE_CONFIG_BASE_IDX) + mmHUBP1_DCSURF_SURFACE_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_CONFIG: u32 = 0x3b81;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_FLIP_CONTROL_BASE_IDX) + mmHUBPREQ1_DCSURF_FLIP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_FLIP_CONTROL: u32 = 0x3bb7;
+/// The value of `BASE(mmHUBP1_DCSURF_PRI_VIEWPORT_DIMENSION_BASE_IDX) + mmHUBP1_DCSURF_PRI_VIEWPORT_DIMENSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRI_VIEWPORT_DIMENSION: u32 = 0x3b86;
+/// The value of `BASE(mmHUBP1_DCSURF_PRI_VIEWPORT_START_BASE_IDX) + mmHUBP1_DCSURF_PRI_VIEWPORT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRI_VIEWPORT_START: u32 = 0x3b85;
+/// The value of `BASE(mmHUBP1_DCSURF_SEC_VIEWPORT_DIMENSION_BASE_IDX) + mmHUBP1_DCSURF_SEC_VIEWPORT_DIMENSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SEC_VIEWPORT_DIMENSION: u32 = 0x3b8a;
+/// The value of `BASE(mmHUBP1_DCSURF_SEC_VIEWPORT_START_BASE_IDX) + mmHUBP1_DCSURF_SEC_VIEWPORT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SEC_VIEWPORT_START: u32 = 0x3b89;
+/// The value of `BASE(mmHUBP1_DCSURF_PRI_VIEWPORT_DIMENSION_C_BASE_IDX) + mmHUBP1_DCSURF_PRI_VIEWPORT_DIMENSION_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRI_VIEWPORT_DIMENSION_C: u32 = 0x3b88;
+/// The value of `BASE(mmHUBP1_DCSURF_PRI_VIEWPORT_START_C_BASE_IDX) + mmHUBP1_DCSURF_PRI_VIEWPORT_START_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRI_VIEWPORT_START_C: u32 = 0x3b87;
+/// The value of `BASE(mmHUBP1_DCSURF_SEC_VIEWPORT_DIMENSION_C_BASE_IDX) + mmHUBP1_DCSURF_SEC_VIEWPORT_DIMENSION_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SEC_VIEWPORT_DIMENSION_C: u32 = 0x3b8c;
+/// The value of `BASE(mmHUBP1_DCSURF_SEC_VIEWPORT_START_C_BASE_IDX) + mmHUBP1_DCSURF_SEC_VIEWPORT_START_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SEC_VIEWPORT_START_C: u32 = 0x3b8b;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ1_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH: u32 = 0x3ba7;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_PRIMARY_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ1_DCSURF_PRIMARY_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRIMARY_SURFACE_ADDRESS: u32 = 0x3ba6;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ1_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH: u32 = 0x3bab;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SECONDARY_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ1_DCSURF_SECONDARY_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SECONDARY_SURFACE_ADDRESS: u32 = 0x3baa;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ1_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH: u32 = 0x3baf;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_PRIMARY_META_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ1_DCSURF_PRIMARY_META_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRIMARY_META_SURFACE_ADDRESS: u32 = 0x3bae;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ1_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH: u32 = 0x3bb3;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SECONDARY_META_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ1_DCSURF_SECONDARY_META_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SECONDARY_META_SURFACE_ADDRESS: u32 = 0x3bb2;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ1_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C: u32 = 0x3ba9;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_PRIMARY_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ1_DCSURF_PRIMARY_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRIMARY_SURFACE_ADDRESS_C: u32 = 0x3ba8;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ1_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C: u32 = 0x3bad;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SECONDARY_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ1_DCSURF_SECONDARY_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SECONDARY_SURFACE_ADDRESS_C: u32 = 0x3bac;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ1_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C: u32 = 0x3bb1;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ1_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C: u32 = 0x3bb0;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ1_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C: u32 = 0x3bb5;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ1_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C: u32 = 0x3bb4;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_INUSE_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_INUSE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_INUSE: u32 = 0x3bbd;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_INUSE_HIGH_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_INUSE_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_INUSE_HIGH: u32 = 0x3bbe;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_INUSE_C_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_INUSE_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_INUSE_C: u32 = 0x3bbf;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_INUSE_HIGH_C_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_INUSE_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_INUSE_HIGH_C: u32 = 0x3bc0;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_EARLIEST_INUSE_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_EARLIEST_INUSE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_EARLIEST_INUSE: u32 = 0x3bc1;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_EARLIEST_INUSE_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_EARLIEST_INUSE_HIGH: u32 = 0x3bc2;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_EARLIEST_INUSE_C_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_EARLIEST_INUSE_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_EARLIEST_INUSE_C: u32 = 0x3bc3;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C: u32 = 0x3bc4;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_CONTROL_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_CONTROL: u32 = 0x3bb6;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_SURFACE_FLIP_INTERRUPT_BASE_IDX) + mmHUBPREQ1_DCSURF_SURFACE_FLIP_INTERRUPT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_SURFACE_FLIP_INTERRUPT: u32 = 0x3bbc;
+/// The value of `BASE(mmHUBPRET1_HUBPRET_CONTROL_BASE_IDX) + mmHUBPRET1_HUBPRET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_HUBPRET_CONTROL: u32 = 0x3c08;
+/// The value of `BASE(mmHUBPRET1_HUBPRET_READ_LINE_STATUS_BASE_IDX) + mmHUBPRET1_HUBPRET_READ_LINE_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_HUBPRET_READ_LINE_STATUS: u32 = 0x3c11;
+/// The value of `BASE(mmHUBPREQ1_DCN_EXPANSION_MODE_BASE_IDX) + mmHUBPREQ1_DCN_EXPANSION_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_EXPANSION_MODE: u32 = 0x3bc8;
+/// The value of `BASE(mmHUBP1_DCHUBP_REQ_SIZE_CONFIG_BASE_IDX) + mmHUBP1_DCHUBP_REQ_SIZE_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCHUBP_REQ_SIZE_CONFIG: u32 = 0x3b8d;
+/// The value of `BASE(mmHUBP1_DCHUBP_REQ_SIZE_CONFIG_C_BASE_IDX) + mmHUBP1_DCHUBP_REQ_SIZE_CONFIG_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCHUBP_REQ_SIZE_CONFIG_C: u32 = 0x3b8e;
+/// The value of `BASE(mmHUBPREQ1_BLANK_OFFSET_0_BASE_IDX) + mmHUBPREQ1_BLANK_OFFSET_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_BLANK_OFFSET_0: u32 = 0x3be2;
+/// The value of `BASE(mmHUBPREQ1_BLANK_OFFSET_1_BASE_IDX) + mmHUBPREQ1_BLANK_OFFSET_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_BLANK_OFFSET_1: u32 = 0x3be3;
+/// The value of `BASE(mmHUBPREQ1_DST_DIMENSIONS_BASE_IDX) + mmHUBPREQ1_DST_DIMENSIONS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DST_DIMENSIONS: u32 = 0x3be4;
+/// The value of `BASE(mmHUBPREQ1_DST_AFTER_SCALER_BASE_IDX) + mmHUBPREQ1_DST_AFTER_SCALER` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DST_AFTER_SCALER: u32 = 0x3be5;
+/// The value of `BASE(mmHUBPREQ1_VBLANK_PARAMETERS_0_BASE_IDX) + mmHUBPREQ1_VBLANK_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_VBLANK_PARAMETERS_0: u32 = 0x3be8;
+/// The value of `BASE(mmHUBPREQ1_REF_FREQ_TO_PIX_FREQ_BASE_IDX) + mmHUBPREQ1_REF_FREQ_TO_PIX_FREQ` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_REF_FREQ_TO_PIX_FREQ: u32 = 0x3bfb;
+/// The value of `BASE(mmHUBPREQ1_VBLANK_PARAMETERS_1_BASE_IDX) + mmHUBPREQ1_VBLANK_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_VBLANK_PARAMETERS_1: u32 = 0x3be9;
+/// The value of `BASE(mmHUBPREQ1_VBLANK_PARAMETERS_3_BASE_IDX) + mmHUBPREQ1_VBLANK_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_VBLANK_PARAMETERS_3: u32 = 0x3beb;
+/// The value of `BASE(mmHUBPREQ1_NOM_PARAMETERS_4_BASE_IDX) + mmHUBPREQ1_NOM_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_NOM_PARAMETERS_4: u32 = 0x3bf4;
+/// The value of `BASE(mmHUBPREQ1_NOM_PARAMETERS_5_BASE_IDX) + mmHUBPREQ1_NOM_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_NOM_PARAMETERS_5: u32 = 0x3bf5;
+/// The value of `BASE(mmHUBPREQ1_PER_LINE_DELIVERY_PRE_BASE_IDX) + mmHUBPREQ1_PER_LINE_DELIVERY_PRE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_PER_LINE_DELIVERY_PRE: u32 = 0x3bf8;
+/// The value of `BASE(mmHUBPREQ1_PER_LINE_DELIVERY_BASE_IDX) + mmHUBPREQ1_PER_LINE_DELIVERY` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_PER_LINE_DELIVERY: u32 = 0x3bf9;
+/// The value of `BASE(mmHUBPREQ1_VBLANK_PARAMETERS_2_BASE_IDX) + mmHUBPREQ1_VBLANK_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_VBLANK_PARAMETERS_2: u32 = 0x3bea;
+/// The value of `BASE(mmHUBPREQ1_VBLANK_PARAMETERS_4_BASE_IDX) + mmHUBPREQ1_VBLANK_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_VBLANK_PARAMETERS_4: u32 = 0x3bec;
+/// The value of `BASE(mmHUBPREQ1_NOM_PARAMETERS_6_BASE_IDX) + mmHUBPREQ1_NOM_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_NOM_PARAMETERS_6: u32 = 0x3bf6;
+/// The value of `BASE(mmHUBPREQ1_NOM_PARAMETERS_7_BASE_IDX) + mmHUBPREQ1_NOM_PARAMETERS_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_NOM_PARAMETERS_7: u32 = 0x3bf7;
+/// The value of `BASE(mmHUBPREQ1_DCN_TTU_QOS_WM_BASE_IDX) + mmHUBPREQ1_DCN_TTU_QOS_WM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_TTU_QOS_WM: u32 = 0x3bc9;
+/// The value of `BASE(mmHUBPREQ1_DCN_GLOBAL_TTU_CNTL_BASE_IDX) + mmHUBPREQ1_DCN_GLOBAL_TTU_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_GLOBAL_TTU_CNTL: u32 = 0x3bca;
+/// The value of `BASE(mmHUBPREQ1_DCN_SURF0_TTU_CNTL0_BASE_IDX) + mmHUBPREQ1_DCN_SURF0_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_SURF0_TTU_CNTL0: u32 = 0x3bcb;
+/// The value of `BASE(mmHUBPREQ1_DCN_SURF0_TTU_CNTL1_BASE_IDX) + mmHUBPREQ1_DCN_SURF0_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_SURF0_TTU_CNTL1: u32 = 0x3bcc;
+/// The value of `BASE(mmHUBPREQ1_DCN_SURF1_TTU_CNTL0_BASE_IDX) + mmHUBPREQ1_DCN_SURF1_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_SURF1_TTU_CNTL0: u32 = 0x3bcd;
+/// The value of `BASE(mmHUBPREQ1_DCN_SURF1_TTU_CNTL1_BASE_IDX) + mmHUBPREQ1_DCN_SURF1_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_SURF1_TTU_CNTL1: u32 = 0x3bce;
+/// The value of `BASE(mmHUBPREQ1_DCN_CUR0_TTU_CNTL0_BASE_IDX) + mmHUBPREQ1_DCN_CUR0_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_CUR0_TTU_CNTL0: u32 = 0x3bcf;
+/// The value of `BASE(mmHUBPREQ1_DCN_CUR0_TTU_CNTL1_BASE_IDX) + mmHUBPREQ1_DCN_CUR0_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_CUR0_TTU_CNTL1: u32 = 0x3bd0;
+/// The value of `BASE(mmHUBP1_HUBP_CLK_CNTL_BASE_IDX) + mmHUBP1_HUBP_CLK_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_HUBP_CLK_CNTL: u32 = 0x3b90;
+/// The value of `BASE(mmHUBPRET1_HUBPRET_READ_LINE_VALUE_BASE_IDX) + mmHUBPRET1_HUBPRET_READ_LINE_VALUE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_HUBPRET_READ_LINE_VALUE: u32 = 0x3c10;
+/// The value of `BASE(mmHUBPREQ1_NOM_PARAMETERS_0_BASE_IDX) + mmHUBPREQ1_NOM_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_NOM_PARAMETERS_0: u32 = 0x3bf0;
+/// The value of `BASE(mmHUBPREQ1_NOM_PARAMETERS_1_BASE_IDX) + mmHUBPREQ1_NOM_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_NOM_PARAMETERS_1: u32 = 0x3bf1;
+/// The value of `BASE(mmHUBPREQ1_NOM_PARAMETERS_2_BASE_IDX) + mmHUBPREQ1_NOM_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_NOM_PARAMETERS_2: u32 = 0x3bf2;
+/// The value of `BASE(mmHUBPREQ1_NOM_PARAMETERS_3_BASE_IDX) + mmHUBPREQ1_NOM_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_NOM_PARAMETERS_3: u32 = 0x3bf3;
+/// The value of `BASE(mmHUBPREQ1_DCN_VM_MX_L1_TLB_CNTL_BASE_IDX) + mmHUBPREQ1_DCN_VM_MX_L1_TLB_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_VM_MX_L1_TLB_CNTL: u32 = 0x3be1;
+/// The value of `BASE(mmHUBPREQ1_PREFETCH_SETTINGS_BASE_IDX) + mmHUBPREQ1_PREFETCH_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_PREFETCH_SETTINGS: u32 = 0x3be6;
+/// The value of `BASE(mmHUBPREQ1_PREFETCH_SETTINGS_C_BASE_IDX) + mmHUBPREQ1_PREFETCH_SETTINGS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_PREFETCH_SETTINGS_C: u32 = 0x3be7;
+/// The value of `BASE(mmHUBPREQ1_DCN_VM_SYSTEM_APERTURE_LOW_ADDR_BASE_IDX) + mmHUBPREQ1_DCN_VM_SYSTEM_APERTURE_LOW_ADDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_VM_SYSTEM_APERTURE_LOW_ADDR: u32 = 0x3bd3;
+/// The value of `BASE(mmHUBPREQ1_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR_BASE_IDX) + mmHUBPREQ1_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR: u32 = 0x3bd4;
+/// The value of `BASE(mmHUBPREQ1_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ1_CURSOR_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_CURSOR_SETTINGS: u32 = 0x3bfa;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_1_CURSOR_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_CURSOR_SURFACE_ADDRESS_HIGH: u32 = 0x3c16;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_1_CURSOR_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_CURSOR_SURFACE_ADDRESS: u32 = 0x3c15;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_1_CURSOR_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_CURSOR_SIZE: u32 = 0x3c17;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_1_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_CURSOR_CONTROL: u32 = 0x3c14;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_1_CURSOR_POSITION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_CURSOR_POSITION: u32 = 0x3c18;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_1_CURSOR_HOT_SPOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_CURSOR_HOT_SPOT: u32 = 0x3c19;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_1_CURSOR_DST_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_CURSOR_DST_OFFSET: u32 = 0x3c1b;
+/// The value of `BASE(mmCURSOR0_1_DMDATA_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_1_DMDATA_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DMDATA_ADDRESS_HIGH: u32 = 0x3c1e;
+/// The value of `BASE(mmCURSOR0_1_DMDATA_ADDRESS_LOW_BASE_IDX) + mmCURSOR0_1_DMDATA_ADDRESS_LOW` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DMDATA_ADDRESS_LOW: u32 = 0x3c1f;
+/// The value of `BASE(mmCURSOR0_1_DMDATA_CNTL_BASE_IDX) + mmCURSOR0_1_DMDATA_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DMDATA_CNTL: u32 = 0x3c20;
+/// The value of `BASE(mmCURSOR0_1_DMDATA_SW_CNTL_BASE_IDX) + mmCURSOR0_1_DMDATA_SW_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DMDATA_SW_CNTL: u32 = 0x3c23;
+/// The value of `BASE(mmCURSOR0_1_DMDATA_QOS_CNTL_BASE_IDX) + mmCURSOR0_1_DMDATA_QOS_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DMDATA_QOS_CNTL: u32 = 0x3c21;
+/// The value of `BASE(mmCURSOR0_1_DMDATA_SW_DATA_BASE_IDX) + mmCURSOR0_1_DMDATA_SW_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DMDATA_SW_DATA: u32 = 0x3c24;
+/// The value of `BASE(mmCURSOR0_1_DMDATA_STATUS_BASE_IDX) + mmCURSOR0_1_DMDATA_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DMDATA_STATUS: u32 = 0x3c22;
+/// The value of `BASE(mmHUBPREQ1_FLIP_PARAMETERS_0_BASE_IDX) + mmHUBPREQ1_FLIP_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_FLIP_PARAMETERS_0: u32 = 0x3bed;
+/// The value of `BASE(mmHUBPREQ1_FLIP_PARAMETERS_1_BASE_IDX) + mmHUBPREQ1_FLIP_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_FLIP_PARAMETERS_1: u32 = 0x3bee;
+/// The value of `BASE(mmHUBPREQ1_FLIP_PARAMETERS_2_BASE_IDX) + mmHUBPREQ1_FLIP_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_FLIP_PARAMETERS_2: u32 = 0x3bef;
+/// The value of `BASE(mmHUBPREQ1_DCN_CUR1_TTU_CNTL0_BASE_IDX) + mmHUBPREQ1_DCN_CUR1_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_CUR1_TTU_CNTL0: u32 = 0x3bd1;
+/// The value of `BASE(mmHUBPREQ1_DCN_CUR1_TTU_CNTL1_BASE_IDX) + mmHUBPREQ1_DCN_CUR1_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCN_CUR1_TTU_CNTL1: u32 = 0x3bd2;
+/// The value of `BASE(mmHUBPREQ1_DCSURF_FLIP_CONTROL2_BASE_IDX) + mmHUBPREQ1_DCSURF_FLIP_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_DCSURF_FLIP_CONTROL2: u32 = 0x3bb8;
+/// The value of `BASE(mmHUBPREQ1_VMID_SETTINGS_0_BASE_IDX) + mmHUBPREQ1_VMID_SETTINGS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_VMID_SETTINGS_0: u32 = 0x3ba5;
+/// The value of `BASE(mmHUBPREQ1_FLIP_PARAMETERS_3_BASE_IDX) + mmHUBPREQ1_FLIP_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_FLIP_PARAMETERS_3: u32 = 0x3c03;
+/// The value of `BASE(mmHUBPREQ1_FLIP_PARAMETERS_4_BASE_IDX) + mmHUBPREQ1_FLIP_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_FLIP_PARAMETERS_4: u32 = 0x3c04;
+/// The value of `BASE(mmHUBPREQ1_FLIP_PARAMETERS_5_BASE_IDX) + mmHUBPREQ1_FLIP_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_FLIP_PARAMETERS_5: u32 = 0x3c05;
+/// The value of `BASE(mmHUBPREQ1_FLIP_PARAMETERS_6_BASE_IDX) + mmHUBPREQ1_FLIP_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_FLIP_PARAMETERS_6: u32 = 0x3c06;
+/// The value of `BASE(mmHUBPREQ1_VBLANK_PARAMETERS_5_BASE_IDX) + mmHUBPREQ1_VBLANK_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_VBLANK_PARAMETERS_5: u32 = 0x3c01;
+/// The value of `BASE(mmHUBPREQ1_VBLANK_PARAMETERS_6_BASE_IDX) + mmHUBPREQ1_VBLANK_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP1_VBLANK_PARAMETERS_6: u32 = 0x3c02;
+/// The value of `BASE(mmHUBP2_DCHUBP_CNTL_BASE_IDX) + mmHUBP2_DCHUBP_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCHUBP_CNTL: u32 = 0x3c6b;
+/// The value of `BASE(mmHUBP2_HUBPREQ_DEBUG_DB_BASE_IDX) + mmHUBP2_HUBPREQ_DEBUG_DB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_HUBPREQ_DEBUG_DB: u32 = 0x3c6e;
+/// The value of `BASE(mmHUBP2_HUBPREQ_DEBUG_BASE_IDX) + mmHUBP2_HUBPREQ_DEBUG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_HUBPREQ_DEBUG: u32 = 0x3c6f;
+/// The value of `BASE(mmHUBP2_DCSURF_ADDR_CONFIG_BASE_IDX) + mmHUBP2_DCSURF_ADDR_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_ADDR_CONFIG: u32 = 0x3c5e;
+/// The value of `BASE(mmHUBP2_DCSURF_TILING_CONFIG_BASE_IDX) + mmHUBP2_DCSURF_TILING_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_TILING_CONFIG: u32 = 0x3c5f;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_PITCH_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_PITCH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_PITCH: u32 = 0x3c7f;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_PITCH_C_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_PITCH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_PITCH_C: u32 = 0x3c80;
+/// The value of `BASE(mmHUBP2_DCSURF_SURFACE_CONFIG_BASE_IDX) + mmHUBP2_DCSURF_SURFACE_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_CONFIG: u32 = 0x3c5d;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_FLIP_CONTROL_BASE_IDX) + mmHUBPREQ2_DCSURF_FLIP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_FLIP_CONTROL: u32 = 0x3c93;
+/// The value of `BASE(mmHUBP2_DCSURF_PRI_VIEWPORT_DIMENSION_BASE_IDX) + mmHUBP2_DCSURF_PRI_VIEWPORT_DIMENSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRI_VIEWPORT_DIMENSION: u32 = 0x3c62;
+/// The value of `BASE(mmHUBP2_DCSURF_PRI_VIEWPORT_START_BASE_IDX) + mmHUBP2_DCSURF_PRI_VIEWPORT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRI_VIEWPORT_START: u32 = 0x3c61;
+/// The value of `BASE(mmHUBP2_DCSURF_SEC_VIEWPORT_DIMENSION_BASE_IDX) + mmHUBP2_DCSURF_SEC_VIEWPORT_DIMENSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SEC_VIEWPORT_DIMENSION: u32 = 0x3c66;
+/// The value of `BASE(mmHUBP2_DCSURF_SEC_VIEWPORT_START_BASE_IDX) + mmHUBP2_DCSURF_SEC_VIEWPORT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SEC_VIEWPORT_START: u32 = 0x3c65;
+/// The value of `BASE(mmHUBP2_DCSURF_PRI_VIEWPORT_DIMENSION_C_BASE_IDX) + mmHUBP2_DCSURF_PRI_VIEWPORT_DIMENSION_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRI_VIEWPORT_DIMENSION_C: u32 = 0x3c64;
+/// The value of `BASE(mmHUBP2_DCSURF_PRI_VIEWPORT_START_C_BASE_IDX) + mmHUBP2_DCSURF_PRI_VIEWPORT_START_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRI_VIEWPORT_START_C: u32 = 0x3c63;
+/// The value of `BASE(mmHUBP2_DCSURF_SEC_VIEWPORT_DIMENSION_C_BASE_IDX) + mmHUBP2_DCSURF_SEC_VIEWPORT_DIMENSION_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SEC_VIEWPORT_DIMENSION_C: u32 = 0x3c68;
+/// The value of `BASE(mmHUBP2_DCSURF_SEC_VIEWPORT_START_C_BASE_IDX) + mmHUBP2_DCSURF_SEC_VIEWPORT_START_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SEC_VIEWPORT_START_C: u32 = 0x3c67;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ2_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH: u32 = 0x3c83;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_PRIMARY_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ2_DCSURF_PRIMARY_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRIMARY_SURFACE_ADDRESS: u32 = 0x3c82;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ2_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH: u32 = 0x3c87;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SECONDARY_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ2_DCSURF_SECONDARY_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SECONDARY_SURFACE_ADDRESS: u32 = 0x3c86;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ2_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH: u32 = 0x3c8b;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_PRIMARY_META_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ2_DCSURF_PRIMARY_META_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRIMARY_META_SURFACE_ADDRESS: u32 = 0x3c8a;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ2_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH: u32 = 0x3c8f;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SECONDARY_META_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ2_DCSURF_SECONDARY_META_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SECONDARY_META_SURFACE_ADDRESS: u32 = 0x3c8e;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ2_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C: u32 = 0x3c85;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_PRIMARY_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ2_DCSURF_PRIMARY_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRIMARY_SURFACE_ADDRESS_C: u32 = 0x3c84;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ2_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C: u32 = 0x3c89;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SECONDARY_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ2_DCSURF_SECONDARY_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SECONDARY_SURFACE_ADDRESS_C: u32 = 0x3c88;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ2_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C: u32 = 0x3c8d;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ2_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C: u32 = 0x3c8c;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ2_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C: u32 = 0x3c91;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ2_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C: u32 = 0x3c90;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_INUSE_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_INUSE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_INUSE: u32 = 0x3c99;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_INUSE_HIGH_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_INUSE_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_INUSE_HIGH: u32 = 0x3c9a;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_INUSE_C_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_INUSE_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_INUSE_C: u32 = 0x3c9b;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_INUSE_HIGH_C_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_INUSE_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_INUSE_HIGH_C: u32 = 0x3c9c;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_EARLIEST_INUSE_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_EARLIEST_INUSE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_EARLIEST_INUSE: u32 = 0x3c9d;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_EARLIEST_INUSE_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_EARLIEST_INUSE_HIGH: u32 = 0x3c9e;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_EARLIEST_INUSE_C_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_EARLIEST_INUSE_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_EARLIEST_INUSE_C: u32 = 0x3c9f;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C: u32 = 0x3ca0;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_CONTROL_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_CONTROL: u32 = 0x3c92;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_SURFACE_FLIP_INTERRUPT_BASE_IDX) + mmHUBPREQ2_DCSURF_SURFACE_FLIP_INTERRUPT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_SURFACE_FLIP_INTERRUPT: u32 = 0x3c98;
+/// The value of `BASE(mmHUBPRET2_HUBPRET_CONTROL_BASE_IDX) + mmHUBPRET2_HUBPRET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_HUBPRET_CONTROL: u32 = 0x3ce4;
+/// The value of `BASE(mmHUBPRET2_HUBPRET_READ_LINE_STATUS_BASE_IDX) + mmHUBPRET2_HUBPRET_READ_LINE_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_HUBPRET_READ_LINE_STATUS: u32 = 0x3ced;
+/// The value of `BASE(mmHUBPREQ2_DCN_EXPANSION_MODE_BASE_IDX) + mmHUBPREQ2_DCN_EXPANSION_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_EXPANSION_MODE: u32 = 0x3ca4;
+/// The value of `BASE(mmHUBP2_DCHUBP_REQ_SIZE_CONFIG_BASE_IDX) + mmHUBP2_DCHUBP_REQ_SIZE_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCHUBP_REQ_SIZE_CONFIG: u32 = 0x3c69;
+/// The value of `BASE(mmHUBP2_DCHUBP_REQ_SIZE_CONFIG_C_BASE_IDX) + mmHUBP2_DCHUBP_REQ_SIZE_CONFIG_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCHUBP_REQ_SIZE_CONFIG_C: u32 = 0x3c6a;
+/// The value of `BASE(mmHUBPREQ2_BLANK_OFFSET_0_BASE_IDX) + mmHUBPREQ2_BLANK_OFFSET_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_BLANK_OFFSET_0: u32 = 0x3cbe;
+/// The value of `BASE(mmHUBPREQ2_BLANK_OFFSET_1_BASE_IDX) + mmHUBPREQ2_BLANK_OFFSET_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_BLANK_OFFSET_1: u32 = 0x3cbf;
+/// The value of `BASE(mmHUBPREQ2_DST_DIMENSIONS_BASE_IDX) + mmHUBPREQ2_DST_DIMENSIONS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DST_DIMENSIONS: u32 = 0x3cc0;
+/// The value of `BASE(mmHUBPREQ2_DST_AFTER_SCALER_BASE_IDX) + mmHUBPREQ2_DST_AFTER_SCALER` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DST_AFTER_SCALER: u32 = 0x3cc1;
+/// The value of `BASE(mmHUBPREQ2_VBLANK_PARAMETERS_0_BASE_IDX) + mmHUBPREQ2_VBLANK_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_VBLANK_PARAMETERS_0: u32 = 0x3cc4;
+/// The value of `BASE(mmHUBPREQ2_REF_FREQ_TO_PIX_FREQ_BASE_IDX) + mmHUBPREQ2_REF_FREQ_TO_PIX_FREQ` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_REF_FREQ_TO_PIX_FREQ: u32 = 0x3cd7;
+/// The value of `BASE(mmHUBPREQ2_VBLANK_PARAMETERS_1_BASE_IDX) + mmHUBPREQ2_VBLANK_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_VBLANK_PARAMETERS_1: u32 = 0x3cc5;
+/// The value of `BASE(mmHUBPREQ2_VBLANK_PARAMETERS_3_BASE_IDX) + mmHUBPREQ2_VBLANK_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_VBLANK_PARAMETERS_3: u32 = 0x3cc7;
+/// The value of `BASE(mmHUBPREQ2_NOM_PARAMETERS_4_BASE_IDX) + mmHUBPREQ2_NOM_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_NOM_PARAMETERS_4: u32 = 0x3cd0;
+/// The value of `BASE(mmHUBPREQ2_NOM_PARAMETERS_5_BASE_IDX) + mmHUBPREQ2_NOM_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_NOM_PARAMETERS_5: u32 = 0x3cd1;
+/// The value of `BASE(mmHUBPREQ2_PER_LINE_DELIVERY_PRE_BASE_IDX) + mmHUBPREQ2_PER_LINE_DELIVERY_PRE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_PER_LINE_DELIVERY_PRE: u32 = 0x3cd4;
+/// The value of `BASE(mmHUBPREQ2_PER_LINE_DELIVERY_BASE_IDX) + mmHUBPREQ2_PER_LINE_DELIVERY` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_PER_LINE_DELIVERY: u32 = 0x3cd5;
+/// The value of `BASE(mmHUBPREQ2_VBLANK_PARAMETERS_2_BASE_IDX) + mmHUBPREQ2_VBLANK_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_VBLANK_PARAMETERS_2: u32 = 0x3cc6;
+/// The value of `BASE(mmHUBPREQ2_VBLANK_PARAMETERS_4_BASE_IDX) + mmHUBPREQ2_VBLANK_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_VBLANK_PARAMETERS_4: u32 = 0x3cc8;
+/// The value of `BASE(mmHUBPREQ2_NOM_PARAMETERS_6_BASE_IDX) + mmHUBPREQ2_NOM_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_NOM_PARAMETERS_6: u32 = 0x3cd2;
+/// The value of `BASE(mmHUBPREQ2_NOM_PARAMETERS_7_BASE_IDX) + mmHUBPREQ2_NOM_PARAMETERS_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_NOM_PARAMETERS_7: u32 = 0x3cd3;
+/// The value of `BASE(mmHUBPREQ2_DCN_TTU_QOS_WM_BASE_IDX) + mmHUBPREQ2_DCN_TTU_QOS_WM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_TTU_QOS_WM: u32 = 0x3ca5;
+/// The value of `BASE(mmHUBPREQ2_DCN_GLOBAL_TTU_CNTL_BASE_IDX) + mmHUBPREQ2_DCN_GLOBAL_TTU_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_GLOBAL_TTU_CNTL: u32 = 0x3ca6;
+/// The value of `BASE(mmHUBPREQ2_DCN_SURF0_TTU_CNTL0_BASE_IDX) + mmHUBPREQ2_DCN_SURF0_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_SURF0_TTU_CNTL0: u32 = 0x3ca7;
+/// The value of `BASE(mmHUBPREQ2_DCN_SURF0_TTU_CNTL1_BASE_IDX) + mmHUBPREQ2_DCN_SURF0_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_SURF0_TTU_CNTL1: u32 = 0x3ca8;
+/// The value of `BASE(mmHUBPREQ2_DCN_SURF1_TTU_CNTL0_BASE_IDX) + mmHUBPREQ2_DCN_SURF1_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_SURF1_TTU_CNTL0: u32 = 0x3ca9;
+/// The value of `BASE(mmHUBPREQ2_DCN_SURF1_TTU_CNTL1_BASE_IDX) + mmHUBPREQ2_DCN_SURF1_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_SURF1_TTU_CNTL1: u32 = 0x3caa;
+/// The value of `BASE(mmHUBPREQ2_DCN_CUR0_TTU_CNTL0_BASE_IDX) + mmHUBPREQ2_DCN_CUR0_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_CUR0_TTU_CNTL0: u32 = 0x3cab;
+/// The value of `BASE(mmHUBPREQ2_DCN_CUR0_TTU_CNTL1_BASE_IDX) + mmHUBPREQ2_DCN_CUR0_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_CUR0_TTU_CNTL1: u32 = 0x3cac;
+/// The value of `BASE(mmHUBP2_HUBP_CLK_CNTL_BASE_IDX) + mmHUBP2_HUBP_CLK_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_HUBP_CLK_CNTL: u32 = 0x3c6c;
+/// The value of `BASE(mmHUBPRET2_HUBPRET_READ_LINE_VALUE_BASE_IDX) + mmHUBPRET2_HUBPRET_READ_LINE_VALUE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_HUBPRET_READ_LINE_VALUE: u32 = 0x3cec;
+/// The value of `BASE(mmHUBPREQ2_NOM_PARAMETERS_0_BASE_IDX) + mmHUBPREQ2_NOM_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_NOM_PARAMETERS_0: u32 = 0x3ccc;
+/// The value of `BASE(mmHUBPREQ2_NOM_PARAMETERS_1_BASE_IDX) + mmHUBPREQ2_NOM_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_NOM_PARAMETERS_1: u32 = 0x3ccd;
+/// The value of `BASE(mmHUBPREQ2_NOM_PARAMETERS_2_BASE_IDX) + mmHUBPREQ2_NOM_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_NOM_PARAMETERS_2: u32 = 0x3cce;
+/// The value of `BASE(mmHUBPREQ2_NOM_PARAMETERS_3_BASE_IDX) + mmHUBPREQ2_NOM_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_NOM_PARAMETERS_3: u32 = 0x3ccf;
+/// The value of `BASE(mmHUBPREQ2_DCN_VM_MX_L1_TLB_CNTL_BASE_IDX) + mmHUBPREQ2_DCN_VM_MX_L1_TLB_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_VM_MX_L1_TLB_CNTL: u32 = 0x3cbd;
+/// The value of `BASE(mmHUBPREQ2_PREFETCH_SETTINGS_BASE_IDX) + mmHUBPREQ2_PREFETCH_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_PREFETCH_SETTINGS: u32 = 0x3cc2;
+/// The value of `BASE(mmHUBPREQ2_PREFETCH_SETTINGS_C_BASE_IDX) + mmHUBPREQ2_PREFETCH_SETTINGS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_PREFETCH_SETTINGS_C: u32 = 0x3cc3;
+/// The value of `BASE(mmHUBPREQ2_DCN_VM_SYSTEM_APERTURE_LOW_ADDR_BASE_IDX) + mmHUBPREQ2_DCN_VM_SYSTEM_APERTURE_LOW_ADDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_VM_SYSTEM_APERTURE_LOW_ADDR: u32 = 0x3caf;
+/// The value of `BASE(mmHUBPREQ2_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR_BASE_IDX) + mmHUBPREQ2_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR: u32 = 0x3cb0;
+/// The value of `BASE(mmHUBPREQ2_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ2_CURSOR_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_CURSOR_SETTINGS: u32 = 0x3cd6;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_2_CURSOR_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_CURSOR_SURFACE_ADDRESS_HIGH: u32 = 0x3cf2;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_2_CURSOR_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_CURSOR_SURFACE_ADDRESS: u32 = 0x3cf1;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_2_CURSOR_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_CURSOR_SIZE: u32 = 0x3cf3;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_2_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_CURSOR_CONTROL: u32 = 0x3cf0;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_2_CURSOR_POSITION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_CURSOR_POSITION: u32 = 0x3cf4;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_2_CURSOR_HOT_SPOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_CURSOR_HOT_SPOT: u32 = 0x3cf5;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_2_CURSOR_DST_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_CURSOR_DST_OFFSET: u32 = 0x3cf7;
+/// The value of `BASE(mmCURSOR0_2_DMDATA_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_2_DMDATA_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DMDATA_ADDRESS_HIGH: u32 = 0x3cfa;
+/// The value of `BASE(mmCURSOR0_2_DMDATA_ADDRESS_LOW_BASE_IDX) + mmCURSOR0_2_DMDATA_ADDRESS_LOW` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DMDATA_ADDRESS_LOW: u32 = 0x3cfb;
+/// The value of `BASE(mmCURSOR0_2_DMDATA_CNTL_BASE_IDX) + mmCURSOR0_2_DMDATA_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DMDATA_CNTL: u32 = 0x3cfc;
+/// The value of `BASE(mmCURSOR0_2_DMDATA_SW_CNTL_BASE_IDX) + mmCURSOR0_2_DMDATA_SW_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DMDATA_SW_CNTL: u32 = 0x3cff;
+/// The value of `BASE(mmCURSOR0_2_DMDATA_QOS_CNTL_BASE_IDX) + mmCURSOR0_2_DMDATA_QOS_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DMDATA_QOS_CNTL: u32 = 0x3cfd;
+/// The value of `BASE(mmCURSOR0_2_DMDATA_SW_DATA_BASE_IDX) + mmCURSOR0_2_DMDATA_SW_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DMDATA_SW_DATA: u32 = 0x3d00;
+/// The value of `BASE(mmCURSOR0_2_DMDATA_STATUS_BASE_IDX) + mmCURSOR0_2_DMDATA_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DMDATA_STATUS: u32 = 0x3cfe;
+/// The value of `BASE(mmHUBPREQ2_FLIP_PARAMETERS_0_BASE_IDX) + mmHUBPREQ2_FLIP_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_FLIP_PARAMETERS_0: u32 = 0x3cc9;
+/// The value of `BASE(mmHUBPREQ2_FLIP_PARAMETERS_1_BASE_IDX) + mmHUBPREQ2_FLIP_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_FLIP_PARAMETERS_1: u32 = 0x3cca;
+/// The value of `BASE(mmHUBPREQ2_FLIP_PARAMETERS_2_BASE_IDX) + mmHUBPREQ2_FLIP_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_FLIP_PARAMETERS_2: u32 = 0x3ccb;
+/// The value of `BASE(mmHUBPREQ2_DCN_CUR1_TTU_CNTL0_BASE_IDX) + mmHUBPREQ2_DCN_CUR1_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_CUR1_TTU_CNTL0: u32 = 0x3cad;
+/// The value of `BASE(mmHUBPREQ2_DCN_CUR1_TTU_CNTL1_BASE_IDX) + mmHUBPREQ2_DCN_CUR1_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCN_CUR1_TTU_CNTL1: u32 = 0x3cae;
+/// The value of `BASE(mmHUBPREQ2_DCSURF_FLIP_CONTROL2_BASE_IDX) + mmHUBPREQ2_DCSURF_FLIP_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_DCSURF_FLIP_CONTROL2: u32 = 0x3c94;
+/// The value of `BASE(mmHUBPREQ2_VMID_SETTINGS_0_BASE_IDX) + mmHUBPREQ2_VMID_SETTINGS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_VMID_SETTINGS_0: u32 = 0x3c81;
+/// The value of `BASE(mmHUBPREQ2_FLIP_PARAMETERS_3_BASE_IDX) + mmHUBPREQ2_FLIP_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_FLIP_PARAMETERS_3: u32 = 0x3cdf;
+/// The value of `BASE(mmHUBPREQ2_FLIP_PARAMETERS_4_BASE_IDX) + mmHUBPREQ2_FLIP_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_FLIP_PARAMETERS_4: u32 = 0x3ce0;
+/// The value of `BASE(mmHUBPREQ2_FLIP_PARAMETERS_5_BASE_IDX) + mmHUBPREQ2_FLIP_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_FLIP_PARAMETERS_5: u32 = 0x3ce1;
+/// The value of `BASE(mmHUBPREQ2_FLIP_PARAMETERS_6_BASE_IDX) + mmHUBPREQ2_FLIP_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_FLIP_PARAMETERS_6: u32 = 0x3ce2;
+/// The value of `BASE(mmHUBPREQ2_VBLANK_PARAMETERS_5_BASE_IDX) + mmHUBPREQ2_VBLANK_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_VBLANK_PARAMETERS_5: u32 = 0x3cdd;
+/// The value of `BASE(mmHUBPREQ2_VBLANK_PARAMETERS_6_BASE_IDX) + mmHUBPREQ2_VBLANK_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP2_VBLANK_PARAMETERS_6: u32 = 0x3cde;
+/// The value of `BASE(mmHUBP3_DCHUBP_CNTL_BASE_IDX) + mmHUBP3_DCHUBP_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCHUBP_CNTL: u32 = 0x3d47;
+/// The value of `BASE(mmHUBP3_HUBPREQ_DEBUG_DB_BASE_IDX) + mmHUBP3_HUBPREQ_DEBUG_DB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_HUBPREQ_DEBUG_DB: u32 = 0x3d4a;
+/// The value of `BASE(mmHUBP3_HUBPREQ_DEBUG_BASE_IDX) + mmHUBP3_HUBPREQ_DEBUG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_HUBPREQ_DEBUG: u32 = 0x3d4b;
+/// The value of `BASE(mmHUBP3_DCSURF_ADDR_CONFIG_BASE_IDX) + mmHUBP3_DCSURF_ADDR_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_ADDR_CONFIG: u32 = 0x3d3a;
+/// The value of `BASE(mmHUBP3_DCSURF_TILING_CONFIG_BASE_IDX) + mmHUBP3_DCSURF_TILING_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_TILING_CONFIG: u32 = 0x3d3b;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_PITCH_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_PITCH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_PITCH: u32 = 0x3d5b;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_PITCH_C_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_PITCH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_PITCH_C: u32 = 0x3d5c;
+/// The value of `BASE(mmHUBP3_DCSURF_SURFACE_CONFIG_BASE_IDX) + mmHUBP3_DCSURF_SURFACE_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_CONFIG: u32 = 0x3d39;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_FLIP_CONTROL_BASE_IDX) + mmHUBPREQ3_DCSURF_FLIP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_FLIP_CONTROL: u32 = 0x3d6f;
+/// The value of `BASE(mmHUBP3_DCSURF_PRI_VIEWPORT_DIMENSION_BASE_IDX) + mmHUBP3_DCSURF_PRI_VIEWPORT_DIMENSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRI_VIEWPORT_DIMENSION: u32 = 0x3d3e;
+/// The value of `BASE(mmHUBP3_DCSURF_PRI_VIEWPORT_START_BASE_IDX) + mmHUBP3_DCSURF_PRI_VIEWPORT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRI_VIEWPORT_START: u32 = 0x3d3d;
+/// The value of `BASE(mmHUBP3_DCSURF_SEC_VIEWPORT_DIMENSION_BASE_IDX) + mmHUBP3_DCSURF_SEC_VIEWPORT_DIMENSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SEC_VIEWPORT_DIMENSION: u32 = 0x3d42;
+/// The value of `BASE(mmHUBP3_DCSURF_SEC_VIEWPORT_START_BASE_IDX) + mmHUBP3_DCSURF_SEC_VIEWPORT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SEC_VIEWPORT_START: u32 = 0x3d41;
+/// The value of `BASE(mmHUBP3_DCSURF_PRI_VIEWPORT_DIMENSION_C_BASE_IDX) + mmHUBP3_DCSURF_PRI_VIEWPORT_DIMENSION_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRI_VIEWPORT_DIMENSION_C: u32 = 0x3d40;
+/// The value of `BASE(mmHUBP3_DCSURF_PRI_VIEWPORT_START_C_BASE_IDX) + mmHUBP3_DCSURF_PRI_VIEWPORT_START_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRI_VIEWPORT_START_C: u32 = 0x3d3f;
+/// The value of `BASE(mmHUBP3_DCSURF_SEC_VIEWPORT_DIMENSION_C_BASE_IDX) + mmHUBP3_DCSURF_SEC_VIEWPORT_DIMENSION_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SEC_VIEWPORT_DIMENSION_C: u32 = 0x3d44;
+/// The value of `BASE(mmHUBP3_DCSURF_SEC_VIEWPORT_START_C_BASE_IDX) + mmHUBP3_DCSURF_SEC_VIEWPORT_START_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SEC_VIEWPORT_START_C: u32 = 0x3d43;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ3_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH: u32 = 0x3d5f;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_PRIMARY_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ3_DCSURF_PRIMARY_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRIMARY_SURFACE_ADDRESS: u32 = 0x3d5e;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ3_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH: u32 = 0x3d63;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SECONDARY_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ3_DCSURF_SECONDARY_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SECONDARY_SURFACE_ADDRESS: u32 = 0x3d62;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ3_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH: u32 = 0x3d67;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_PRIMARY_META_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ3_DCSURF_PRIMARY_META_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRIMARY_META_SURFACE_ADDRESS: u32 = 0x3d66;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmHUBPREQ3_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH: u32 = 0x3d6b;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SECONDARY_META_SURFACE_ADDRESS_BASE_IDX) + mmHUBPREQ3_DCSURF_SECONDARY_META_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SECONDARY_META_SURFACE_ADDRESS: u32 = 0x3d6a;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ3_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C: u32 = 0x3d61;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_PRIMARY_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ3_DCSURF_PRIMARY_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRIMARY_SURFACE_ADDRESS_C: u32 = 0x3d60;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ3_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C: u32 = 0x3d65;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SECONDARY_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ3_DCSURF_SECONDARY_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SECONDARY_SURFACE_ADDRESS_C: u32 = 0x3d64;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ3_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C: u32 = 0x3d69;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ3_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C: u32 = 0x3d68;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C_BASE_IDX) + mmHUBPREQ3_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C: u32 = 0x3d6d;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C_BASE_IDX) + mmHUBPREQ3_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C: u32 = 0x3d6c;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_INUSE_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_INUSE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_INUSE: u32 = 0x3d75;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_INUSE_HIGH_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_INUSE_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_INUSE_HIGH: u32 = 0x3d76;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_INUSE_C_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_INUSE_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_INUSE_C: u32 = 0x3d77;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_INUSE_HIGH_C_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_INUSE_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_INUSE_HIGH_C: u32 = 0x3d78;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_EARLIEST_INUSE_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_EARLIEST_INUSE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_EARLIEST_INUSE: u32 = 0x3d79;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_EARLIEST_INUSE_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_EARLIEST_INUSE_HIGH: u32 = 0x3d7a;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_EARLIEST_INUSE_C_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_EARLIEST_INUSE_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_EARLIEST_INUSE_C: u32 = 0x3d7b;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C: u32 = 0x3d7c;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_CONTROL_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_CONTROL: u32 = 0x3d6e;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_SURFACE_FLIP_INTERRUPT_BASE_IDX) + mmHUBPREQ3_DCSURF_SURFACE_FLIP_INTERRUPT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_SURFACE_FLIP_INTERRUPT: u32 = 0x3d74;
+/// The value of `BASE(mmHUBPRET3_HUBPRET_CONTROL_BASE_IDX) + mmHUBPRET3_HUBPRET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_HUBPRET_CONTROL: u32 = 0x3dc0;
+/// The value of `BASE(mmHUBPRET3_HUBPRET_READ_LINE_STATUS_BASE_IDX) + mmHUBPRET3_HUBPRET_READ_LINE_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_HUBPRET_READ_LINE_STATUS: u32 = 0x3dc9;
+/// The value of `BASE(mmHUBPREQ3_DCN_EXPANSION_MODE_BASE_IDX) + mmHUBPREQ3_DCN_EXPANSION_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_EXPANSION_MODE: u32 = 0x3d80;
+/// The value of `BASE(mmHUBP3_DCHUBP_REQ_SIZE_CONFIG_BASE_IDX) + mmHUBP3_DCHUBP_REQ_SIZE_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCHUBP_REQ_SIZE_CONFIG: u32 = 0x3d45;
+/// The value of `BASE(mmHUBP3_DCHUBP_REQ_SIZE_CONFIG_C_BASE_IDX) + mmHUBP3_DCHUBP_REQ_SIZE_CONFIG_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCHUBP_REQ_SIZE_CONFIG_C: u32 = 0x3d46;
+/// The value of `BASE(mmHUBPREQ3_BLANK_OFFSET_0_BASE_IDX) + mmHUBPREQ3_BLANK_OFFSET_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_BLANK_OFFSET_0: u32 = 0x3d9a;
+/// The value of `BASE(mmHUBPREQ3_BLANK_OFFSET_1_BASE_IDX) + mmHUBPREQ3_BLANK_OFFSET_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_BLANK_OFFSET_1: u32 = 0x3d9b;
+/// The value of `BASE(mmHUBPREQ3_DST_DIMENSIONS_BASE_IDX) + mmHUBPREQ3_DST_DIMENSIONS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DST_DIMENSIONS: u32 = 0x3d9c;
+/// The value of `BASE(mmHUBPREQ3_DST_AFTER_SCALER_BASE_IDX) + mmHUBPREQ3_DST_AFTER_SCALER` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DST_AFTER_SCALER: u32 = 0x3d9d;
+/// The value of `BASE(mmHUBPREQ3_VBLANK_PARAMETERS_0_BASE_IDX) + mmHUBPREQ3_VBLANK_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_VBLANK_PARAMETERS_0: u32 = 0x3da0;
+/// The value of `BASE(mmHUBPREQ3_REF_FREQ_TO_PIX_FREQ_BASE_IDX) + mmHUBPREQ3_REF_FREQ_TO_PIX_FREQ` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_REF_FREQ_TO_PIX_FREQ: u32 = 0x3db3;
+/// The value of `BASE(mmHUBPREQ3_VBLANK_PARAMETERS_1_BASE_IDX) + mmHUBPREQ3_VBLANK_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_VBLANK_PARAMETERS_1: u32 = 0x3da1;
+/// The value of `BASE(mmHUBPREQ3_VBLANK_PARAMETERS_3_BASE_IDX) + mmHUBPREQ3_VBLANK_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_VBLANK_PARAMETERS_3: u32 = 0x3da3;
+/// The value of `BASE(mmHUBPREQ3_NOM_PARAMETERS_4_BASE_IDX) + mmHUBPREQ3_NOM_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_NOM_PARAMETERS_4: u32 = 0x3dac;
+/// The value of `BASE(mmHUBPREQ3_NOM_PARAMETERS_5_BASE_IDX) + mmHUBPREQ3_NOM_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_NOM_PARAMETERS_5: u32 = 0x3dad;
+/// The value of `BASE(mmHUBPREQ3_PER_LINE_DELIVERY_PRE_BASE_IDX) + mmHUBPREQ3_PER_LINE_DELIVERY_PRE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_PER_LINE_DELIVERY_PRE: u32 = 0x3db0;
+/// The value of `BASE(mmHUBPREQ3_PER_LINE_DELIVERY_BASE_IDX) + mmHUBPREQ3_PER_LINE_DELIVERY` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_PER_LINE_DELIVERY: u32 = 0x3db1;
+/// The value of `BASE(mmHUBPREQ3_VBLANK_PARAMETERS_2_BASE_IDX) + mmHUBPREQ3_VBLANK_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_VBLANK_PARAMETERS_2: u32 = 0x3da2;
+/// The value of `BASE(mmHUBPREQ3_VBLANK_PARAMETERS_4_BASE_IDX) + mmHUBPREQ3_VBLANK_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_VBLANK_PARAMETERS_4: u32 = 0x3da4;
+/// The value of `BASE(mmHUBPREQ3_NOM_PARAMETERS_6_BASE_IDX) + mmHUBPREQ3_NOM_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_NOM_PARAMETERS_6: u32 = 0x3dae;
+/// The value of `BASE(mmHUBPREQ3_NOM_PARAMETERS_7_BASE_IDX) + mmHUBPREQ3_NOM_PARAMETERS_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_NOM_PARAMETERS_7: u32 = 0x3daf;
+/// The value of `BASE(mmHUBPREQ3_DCN_TTU_QOS_WM_BASE_IDX) + mmHUBPREQ3_DCN_TTU_QOS_WM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_TTU_QOS_WM: u32 = 0x3d81;
+/// The value of `BASE(mmHUBPREQ3_DCN_GLOBAL_TTU_CNTL_BASE_IDX) + mmHUBPREQ3_DCN_GLOBAL_TTU_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_GLOBAL_TTU_CNTL: u32 = 0x3d82;
+/// The value of `BASE(mmHUBPREQ3_DCN_SURF0_TTU_CNTL0_BASE_IDX) + mmHUBPREQ3_DCN_SURF0_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_SURF0_TTU_CNTL0: u32 = 0x3d83;
+/// The value of `BASE(mmHUBPREQ3_DCN_SURF0_TTU_CNTL1_BASE_IDX) + mmHUBPREQ3_DCN_SURF0_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_SURF0_TTU_CNTL1: u32 = 0x3d84;
+/// The value of `BASE(mmHUBPREQ3_DCN_SURF1_TTU_CNTL0_BASE_IDX) + mmHUBPREQ3_DCN_SURF1_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_SURF1_TTU_CNTL0: u32 = 0x3d85;
+/// The value of `BASE(mmHUBPREQ3_DCN_SURF1_TTU_CNTL1_BASE_IDX) + mmHUBPREQ3_DCN_SURF1_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_SURF1_TTU_CNTL1: u32 = 0x3d86;
+/// The value of `BASE(mmHUBPREQ3_DCN_CUR0_TTU_CNTL0_BASE_IDX) + mmHUBPREQ3_DCN_CUR0_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_CUR0_TTU_CNTL0: u32 = 0x3d87;
+/// The value of `BASE(mmHUBPREQ3_DCN_CUR0_TTU_CNTL1_BASE_IDX) + mmHUBPREQ3_DCN_CUR0_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_CUR0_TTU_CNTL1: u32 = 0x3d88;
+/// The value of `BASE(mmHUBP3_HUBP_CLK_CNTL_BASE_IDX) + mmHUBP3_HUBP_CLK_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_HUBP_CLK_CNTL: u32 = 0x3d48;
+/// The value of `BASE(mmHUBPRET3_HUBPRET_READ_LINE_VALUE_BASE_IDX) + mmHUBPRET3_HUBPRET_READ_LINE_VALUE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_HUBPRET_READ_LINE_VALUE: u32 = 0x3dc8;
+/// The value of `BASE(mmHUBPREQ3_NOM_PARAMETERS_0_BASE_IDX) + mmHUBPREQ3_NOM_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_NOM_PARAMETERS_0: u32 = 0x3da8;
+/// The value of `BASE(mmHUBPREQ3_NOM_PARAMETERS_1_BASE_IDX) + mmHUBPREQ3_NOM_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_NOM_PARAMETERS_1: u32 = 0x3da9;
+/// The value of `BASE(mmHUBPREQ3_NOM_PARAMETERS_2_BASE_IDX) + mmHUBPREQ3_NOM_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_NOM_PARAMETERS_2: u32 = 0x3daa;
+/// The value of `BASE(mmHUBPREQ3_NOM_PARAMETERS_3_BASE_IDX) + mmHUBPREQ3_NOM_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_NOM_PARAMETERS_3: u32 = 0x3dab;
+/// The value of `BASE(mmHUBPREQ3_DCN_VM_MX_L1_TLB_CNTL_BASE_IDX) + mmHUBPREQ3_DCN_VM_MX_L1_TLB_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_VM_MX_L1_TLB_CNTL: u32 = 0x3d99;
+/// The value of `BASE(mmHUBPREQ3_PREFETCH_SETTINGS_BASE_IDX) + mmHUBPREQ3_PREFETCH_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_PREFETCH_SETTINGS: u32 = 0x3d9e;
+/// The value of `BASE(mmHUBPREQ3_PREFETCH_SETTINGS_C_BASE_IDX) + mmHUBPREQ3_PREFETCH_SETTINGS_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_PREFETCH_SETTINGS_C: u32 = 0x3d9f;
+/// The value of `BASE(mmHUBPREQ3_DCN_VM_SYSTEM_APERTURE_LOW_ADDR_BASE_IDX) + mmHUBPREQ3_DCN_VM_SYSTEM_APERTURE_LOW_ADDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_VM_SYSTEM_APERTURE_LOW_ADDR: u32 = 0x3d8b;
+/// The value of `BASE(mmHUBPREQ3_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR_BASE_IDX) + mmHUBPREQ3_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR: u32 = 0x3d8c;
+/// The value of `BASE(mmHUBPREQ3_CURSOR_SETTINGS_BASE_IDX) + mmHUBPREQ3_CURSOR_SETTINGS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_CURSOR_SETTINGS: u32 = 0x3db2;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_SURFACE_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_3_CURSOR_SURFACE_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_CURSOR_SURFACE_ADDRESS_HIGH: u32 = 0x3dce;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_SURFACE_ADDRESS_BASE_IDX) + mmCURSOR0_3_CURSOR_SURFACE_ADDRESS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_CURSOR_SURFACE_ADDRESS: u32 = 0x3dcd;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_SIZE_BASE_IDX) + mmCURSOR0_3_CURSOR_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_CURSOR_SIZE: u32 = 0x3dcf;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_3_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_CURSOR_CONTROL: u32 = 0x3dcc;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_POSITION_BASE_IDX) + mmCURSOR0_3_CURSOR_POSITION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_CURSOR_POSITION: u32 = 0x3dd0;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_HOT_SPOT_BASE_IDX) + mmCURSOR0_3_CURSOR_HOT_SPOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_CURSOR_HOT_SPOT: u32 = 0x3dd1;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_DST_OFFSET_BASE_IDX) + mmCURSOR0_3_CURSOR_DST_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_CURSOR_DST_OFFSET: u32 = 0x3dd3;
+/// The value of `BASE(mmCURSOR0_3_DMDATA_ADDRESS_HIGH_BASE_IDX) + mmCURSOR0_3_DMDATA_ADDRESS_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DMDATA_ADDRESS_HIGH: u32 = 0x3dd6;
+/// The value of `BASE(mmCURSOR0_3_DMDATA_ADDRESS_LOW_BASE_IDX) + mmCURSOR0_3_DMDATA_ADDRESS_LOW` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DMDATA_ADDRESS_LOW: u32 = 0x3dd7;
+/// The value of `BASE(mmCURSOR0_3_DMDATA_CNTL_BASE_IDX) + mmCURSOR0_3_DMDATA_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DMDATA_CNTL: u32 = 0x3dd8;
+/// The value of `BASE(mmCURSOR0_3_DMDATA_SW_CNTL_BASE_IDX) + mmCURSOR0_3_DMDATA_SW_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DMDATA_SW_CNTL: u32 = 0x3ddb;
+/// The value of `BASE(mmCURSOR0_3_DMDATA_QOS_CNTL_BASE_IDX) + mmCURSOR0_3_DMDATA_QOS_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DMDATA_QOS_CNTL: u32 = 0x3dd9;
+/// The value of `BASE(mmCURSOR0_3_DMDATA_SW_DATA_BASE_IDX) + mmCURSOR0_3_DMDATA_SW_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DMDATA_SW_DATA: u32 = 0x3ddc;
+/// The value of `BASE(mmCURSOR0_3_DMDATA_STATUS_BASE_IDX) + mmCURSOR0_3_DMDATA_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DMDATA_STATUS: u32 = 0x3dda;
+/// The value of `BASE(mmHUBPREQ3_FLIP_PARAMETERS_0_BASE_IDX) + mmHUBPREQ3_FLIP_PARAMETERS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_FLIP_PARAMETERS_0: u32 = 0x3da5;
+/// The value of `BASE(mmHUBPREQ3_FLIP_PARAMETERS_1_BASE_IDX) + mmHUBPREQ3_FLIP_PARAMETERS_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_FLIP_PARAMETERS_1: u32 = 0x3da6;
+/// The value of `BASE(mmHUBPREQ3_FLIP_PARAMETERS_2_BASE_IDX) + mmHUBPREQ3_FLIP_PARAMETERS_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_FLIP_PARAMETERS_2: u32 = 0x3da7;
+/// The value of `BASE(mmHUBPREQ3_DCN_CUR1_TTU_CNTL0_BASE_IDX) + mmHUBPREQ3_DCN_CUR1_TTU_CNTL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_CUR1_TTU_CNTL0: u32 = 0x3d89;
+/// The value of `BASE(mmHUBPREQ3_DCN_CUR1_TTU_CNTL1_BASE_IDX) + mmHUBPREQ3_DCN_CUR1_TTU_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCN_CUR1_TTU_CNTL1: u32 = 0x3d8a;
+/// The value of `BASE(mmHUBPREQ3_DCSURF_FLIP_CONTROL2_BASE_IDX) + mmHUBPREQ3_DCSURF_FLIP_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_DCSURF_FLIP_CONTROL2: u32 = 0x3d70;
+/// The value of `BASE(mmHUBPREQ3_VMID_SETTINGS_0_BASE_IDX) + mmHUBPREQ3_VMID_SETTINGS_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_VMID_SETTINGS_0: u32 = 0x3d5d;
+/// The value of `BASE(mmHUBPREQ3_FLIP_PARAMETERS_3_BASE_IDX) + mmHUBPREQ3_FLIP_PARAMETERS_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_FLIP_PARAMETERS_3: u32 = 0x3dbb;
+/// The value of `BASE(mmHUBPREQ3_FLIP_PARAMETERS_4_BASE_IDX) + mmHUBPREQ3_FLIP_PARAMETERS_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_FLIP_PARAMETERS_4: u32 = 0x3dbc;
+/// The value of `BASE(mmHUBPREQ3_FLIP_PARAMETERS_5_BASE_IDX) + mmHUBPREQ3_FLIP_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_FLIP_PARAMETERS_5: u32 = 0x3dbd;
+/// The value of `BASE(mmHUBPREQ3_FLIP_PARAMETERS_6_BASE_IDX) + mmHUBPREQ3_FLIP_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_FLIP_PARAMETERS_6: u32 = 0x3dbe;
+/// The value of `BASE(mmHUBPREQ3_VBLANK_PARAMETERS_5_BASE_IDX) + mmHUBPREQ3_VBLANK_PARAMETERS_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_VBLANK_PARAMETERS_5: u32 = 0x3db9;
+/// The value of `BASE(mmHUBPREQ3_VBLANK_PARAMETERS_6_BASE_IDX) + mmHUBPREQ3_VBLANK_PARAMETERS_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const HUBP3_VBLANK_PARAMETERS_6: u32 = 0x3dba;
+
+// DC hubp field shifts/masks (HUBP_MASK_SH_LIST_DCN21)
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9235
+pub const HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9244
+pub const HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9240
+pub const HUBP0_DCHUBP_CNTL__HUBP_TTU_DISABLE__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9249
+pub const HUBP0_DCHUBP_CNTL__HUBP_TTU_DISABLE_MASK: u32 = 0x1000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9242
+pub const HUBP0_DCHUBP_CNTL__HUBP_UNDERFLOW_STATUS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9251
+pub const HUBP0_DCHUBP_CNTL__HUBP_UNDERFLOW_STATUS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9243
+pub const HUBP0_DCHUBP_CNTL__HUBP_UNDERFLOW_CLEAR__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9252
+pub const HUBP0_DCHUBP_CNTL__HUBP_UNDERFLOW_CLEAR_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9236
+pub const HUBP0_DCHUBP_CNTL__HUBP_NO_OUTSTANDING_REQ__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9245
+pub const HUBP0_DCHUBP_CNTL__HUBP_NO_OUTSTANDING_REQ_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9239
+pub const HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9248
+pub const HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL_MASK: u32 = 0xf0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9237
+pub const HUBP0_DCHUBP_CNTL__HUBP_DISABLE__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9246
+pub const HUBP0_DCHUBP_CNTL__HUBP_DISABLE_MASK: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9238
+pub const HUBP0_DCHUBP_CNTL__HUBP_IN_BLANK__SHIFT: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9247
+pub const HUBP0_DCHUBP_CNTL__HUBP_IN_BLANK_MASK: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9137
+pub const HUBP0_DCSURF_ADDR_CONFIG__NUM_PIPES__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9143
+pub const HUBP0_DCSURF_ADDR_CONFIG__NUM_PIPES_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9138
+pub const HUBP0_DCSURF_ADDR_CONFIG__NUM_BANKS__SHIFT: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9144
+pub const HUBP0_DCSURF_ADDR_CONFIG__NUM_BANKS_MASK: u32 = 0x38;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9139
+pub const HUBP0_DCSURF_ADDR_CONFIG__PIPE_INTERLEAVE__SHIFT: u32 = 0x6;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9145
+pub const HUBP0_DCSURF_ADDR_CONFIG__PIPE_INTERLEAVE_MASK: u32 = 0xc0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9140
+pub const HUBP0_DCSURF_ADDR_CONFIG__NUM_SE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9146
+pub const HUBP0_DCSURF_ADDR_CONFIG__NUM_SE_MASK: u32 = 0x300;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9141
+pub const HUBP0_DCSURF_ADDR_CONFIG__NUM_RB_PER_SE__SHIFT: u32 = 0xa;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9147
+pub const HUBP0_DCSURF_ADDR_CONFIG__NUM_RB_PER_SE_MASK: u32 = 0xc00;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9142
+pub const HUBP0_DCSURF_ADDR_CONFIG__MAX_COMPRESSED_FRAGS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9148
+pub const HUBP0_DCSURF_ADDR_CONFIG__MAX_COMPRESSED_FRAGS_MASK: u32 = 0x3000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9150
+pub const HUBP0_DCSURF_TILING_CONFIG__SW_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9155
+pub const HUBP0_DCSURF_TILING_CONFIG__SW_MODE_MASK: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9152
+pub const HUBP0_DCSURF_TILING_CONFIG__META_LINEAR__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9157
+pub const HUBP0_DCSURF_TILING_CONFIG__META_LINEAR_MASK: u32 = 0x200;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9154
+pub const HUBP0_DCSURF_TILING_CONFIG__PIPE_ALIGNED__SHIFT: u32 = 0xb;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9159
+pub const HUBP0_DCSURF_TILING_CONFIG__PIPE_ALIGNED_MASK: u32 = 0x800;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9306
+pub const HUBPREQ0_DCSURF_SURFACE_PITCH__PITCH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9308
+pub const HUBPREQ0_DCSURF_SURFACE_PITCH__PITCH_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9307
+pub const HUBPREQ0_DCSURF_SURFACE_PITCH__META_PITCH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9309
+pub const HUBPREQ0_DCSURF_SURFACE_PITCH__META_PITCH_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9311
+pub const HUBPREQ0_DCSURF_SURFACE_PITCH_C__PITCH_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9313
+pub const HUBPREQ0_DCSURF_SURFACE_PITCH_C__PITCH_C_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9312
+pub const HUBPREQ0_DCSURF_SURFACE_PITCH_C__META_PITCH_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9314
+pub const HUBPREQ0_DCSURF_SURFACE_PITCH_C__META_PITCH_C_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9130
+pub const HUBP0_DCSURF_SURFACE_CONFIG__SURFACE_PIXEL_FORMAT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9133
+pub const HUBP0_DCSURF_SURFACE_CONFIG__SURFACE_PIXEL_FORMAT_MASK: u32 = 0x7f;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9394
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_TYPE__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9404
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_TYPE_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9396
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_MODE_FOR_STEREOSYNC__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9406
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_MODE_FOR_STEREOSYNC_MASK: u32 = 0x3000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9397
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_IN_STEREOSYNC__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9407
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_IN_STEREOSYNC_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9402
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_PENDING__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9412
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_PENDING_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9393
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_UPDATE_LOCK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9403
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_UPDATE_LOCK_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9161
+pub const HUBP0_DCSURF_PRI_VIEWPORT_START__PRI_VIEWPORT_X_START__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9163
+pub const HUBP0_DCSURF_PRI_VIEWPORT_START__PRI_VIEWPORT_X_START_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9162
+pub const HUBP0_DCSURF_PRI_VIEWPORT_START__PRI_VIEWPORT_Y_START__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9164
+pub const HUBP0_DCSURF_PRI_VIEWPORT_START__PRI_VIEWPORT_Y_START_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9186
+pub const HUBP0_DCSURF_SEC_VIEWPORT_DIMENSION__SEC_VIEWPORT_WIDTH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9188
+pub const HUBP0_DCSURF_SEC_VIEWPORT_DIMENSION__SEC_VIEWPORT_WIDTH_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9187
+pub const HUBP0_DCSURF_SEC_VIEWPORT_DIMENSION__SEC_VIEWPORT_HEIGHT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9189
+pub const HUBP0_DCSURF_SEC_VIEWPORT_DIMENSION__SEC_VIEWPORT_HEIGHT_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9181
+pub const HUBP0_DCSURF_SEC_VIEWPORT_START__SEC_VIEWPORT_X_START__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9183
+pub const HUBP0_DCSURF_SEC_VIEWPORT_START__SEC_VIEWPORT_X_START_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9182
+pub const HUBP0_DCSURF_SEC_VIEWPORT_START__SEC_VIEWPORT_Y_START__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9184
+pub const HUBP0_DCSURF_SEC_VIEWPORT_START__SEC_VIEWPORT_Y_START_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9176
+pub const HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_C__PRI_VIEWPORT_WIDTH_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9178
+pub const HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_C__PRI_VIEWPORT_WIDTH_C_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9177
+pub const HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_C__PRI_VIEWPORT_HEIGHT_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9179
+pub const HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_C__PRI_VIEWPORT_HEIGHT_C_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9171
+pub const HUBP0_DCSURF_PRI_VIEWPORT_START_C__PRI_VIEWPORT_X_START_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9173
+pub const HUBP0_DCSURF_PRI_VIEWPORT_START_C__PRI_VIEWPORT_X_START_C_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9172
+pub const HUBP0_DCSURF_PRI_VIEWPORT_START_C__PRI_VIEWPORT_Y_START_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9174
+pub const HUBP0_DCSURF_PRI_VIEWPORT_START_C__PRI_VIEWPORT_Y_START_C_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9196
+pub const HUBP0_DCSURF_SEC_VIEWPORT_DIMENSION_C__SEC_VIEWPORT_WIDTH_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9198
+pub const HUBP0_DCSURF_SEC_VIEWPORT_DIMENSION_C__SEC_VIEWPORT_WIDTH_C_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9197
+pub const HUBP0_DCSURF_SEC_VIEWPORT_DIMENSION_C__SEC_VIEWPORT_HEIGHT_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9199
+pub const HUBP0_DCSURF_SEC_VIEWPORT_DIMENSION_C__SEC_VIEWPORT_HEIGHT_C_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9191
+pub const HUBP0_DCSURF_SEC_VIEWPORT_START_C__SEC_VIEWPORT_X_START_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9193
+pub const HUBP0_DCSURF_SEC_VIEWPORT_START_C__SEC_VIEWPORT_X_START_C_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9192
+pub const HUBP0_DCSURF_SEC_VIEWPORT_START_C__SEC_VIEWPORT_Y_START_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9194
+pub const HUBP0_DCSURF_SEC_VIEWPORT_START_C__SEC_VIEWPORT_Y_START_C_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9319
+pub const HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH__PRIMARY_SURFACE_ADDRESS_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9320
+pub const HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH__PRIMARY_SURFACE_ADDRESS_HIGH_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9316
+pub const HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS__PRIMARY_SURFACE_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9317
+pub const HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS__PRIMARY_SURFACE_ADDRESS_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9331
+pub const HUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH__SECONDARY_SURFACE_ADDRESS_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9332
+pub const HUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH__SECONDARY_SURFACE_ADDRESS_HIGH_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9328
+pub const HUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS__SECONDARY_SURFACE_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9329
+pub const HUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS__SECONDARY_SURFACE_ADDRESS_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9343
+pub const HUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH__PRIMARY_META_SURFACE_ADDRESS_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9344
+pub const HUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH__PRIMARY_META_SURFACE_ADDRESS_HIGH_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9340
+pub const HUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS__PRIMARY_META_SURFACE_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9341
+pub const HUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS__PRIMARY_META_SURFACE_ADDRESS_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9355
+pub const HUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH__SECONDARY_META_SURFACE_ADDRESS_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9356
+pub const HUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH__SECONDARY_META_SURFACE_ADDRESS_HIGH_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9352
+pub const HUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS__SECONDARY_META_SURFACE_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9353
+pub const HUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS__SECONDARY_META_SURFACE_ADDRESS_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9325
+pub const HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C__PRIMARY_SURFACE_ADDRESS_HIGH_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9326
+pub const HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C__PRIMARY_SURFACE_ADDRESS_HIGH_C_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9322
+pub const HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_C__PRIMARY_SURFACE_ADDRESS_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9323
+pub const HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_C__PRIMARY_SURFACE_ADDRESS_C_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9337
+pub const HUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C__SECONDARY_SURFACE_ADDRESS_HIGH_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9338
+pub const HUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH_C__SECONDARY_SURFACE_ADDRESS_HIGH_C_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9334
+pub const HUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_C__SECONDARY_SURFACE_ADDRESS_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9335
+pub const HUBPREQ0_DCSURF_SECONDARY_SURFACE_ADDRESS_C__SECONDARY_SURFACE_ADDRESS_C_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9349
+pub const HUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C__PRIMARY_META_SURFACE_ADDRESS_HIGH_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9350
+pub const HUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C__PRIMARY_META_SURFACE_ADDRESS_HIGH_C_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9346
+pub const HUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C__PRIMARY_META_SURFACE_ADDRESS_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9347
+pub const HUBPREQ0_DCSURF_PRIMARY_META_SURFACE_ADDRESS_C__PRIMARY_META_SURFACE_ADDRESS_C_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9361
+pub const HUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C__SECONDARY_META_SURFACE_ADDRESS_HIGH_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9362
+pub const HUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH_C__SECONDARY_META_SURFACE_ADDRESS_HIGH_C_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9358
+pub const HUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C__SECONDARY_META_SURFACE_ADDRESS_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9359
+pub const HUBPREQ0_DCSURF_SECONDARY_META_SURFACE_ADDRESS_C__SECONDARY_META_SURFACE_ADDRESS_C_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9454
+pub const HUBPREQ0_DCSURF_SURFACE_INUSE__SURFACE_INUSE_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9455
+pub const HUBPREQ0_DCSURF_SURFACE_INUSE__SURFACE_INUSE_ADDRESS_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9457
+pub const HUBPREQ0_DCSURF_SURFACE_INUSE_HIGH__SURFACE_INUSE_ADDRESS_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9458
+pub const HUBPREQ0_DCSURF_SURFACE_INUSE_HIGH__SURFACE_INUSE_ADDRESS_HIGH_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9460
+pub const HUBPREQ0_DCSURF_SURFACE_INUSE_C__SURFACE_INUSE_ADDRESS_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9461
+pub const HUBPREQ0_DCSURF_SURFACE_INUSE_C__SURFACE_INUSE_ADDRESS_C_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9463
+pub const HUBPREQ0_DCSURF_SURFACE_INUSE_HIGH_C__SURFACE_INUSE_ADDRESS_HIGH_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9464
+pub const HUBPREQ0_DCSURF_SURFACE_INUSE_HIGH_C__SURFACE_INUSE_ADDRESS_HIGH_C_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9466
+pub const HUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE__SURFACE_EARLIEST_INUSE_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9467
+pub const HUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE__SURFACE_EARLIEST_INUSE_ADDRESS_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9469
+pub const HUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH__SURFACE_EARLIEST_INUSE_ADDRESS_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9470
+pub const HUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH__SURFACE_EARLIEST_INUSE_ADDRESS_HIGH_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9472
+pub const HUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_C__SURFACE_EARLIEST_INUSE_ADDRESS_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9473
+pub const HUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_C__SURFACE_EARLIEST_INUSE_ADDRESS_C_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9475
+pub const HUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C__SURFACE_EARLIEST_INUSE_ADDRESS_HIGH_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9476
+pub const HUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH_C__SURFACE_EARLIEST_INUSE_ADDRESS_HIGH_C_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9364
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_SURFACE_TMZ__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9378
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_SURFACE_TMZ_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9367
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_SURFACE_TMZ_C__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9381
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_SURFACE_TMZ_C_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9374
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_META_SURFACE_TMZ__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9388
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_META_SURFACE_TMZ_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9375
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_META_SURFACE_TMZ_C__SHIFT: u32 = 0x11;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9389
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_META_SURFACE_TMZ_C_MASK: u32 = 0x20000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9365
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_SURFACE_DCC_EN__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9379
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_SURFACE_DCC_EN_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9366
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_SURFACE_DCC_IND_64B_BLK__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9380
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__PRIMARY_SURFACE_DCC_IND_64B_BLK_MASK: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9369
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_SURFACE_TMZ__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9383
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_SURFACE_TMZ_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9372
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_SURFACE_TMZ_C__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9386
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_SURFACE_TMZ_C_MASK: u32 = 0x1000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9376
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_META_SURFACE_TMZ__SHIFT: u32 = 0x12;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9390
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_META_SURFACE_TMZ_MASK: u32 = 0x40000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9377
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_META_SURFACE_TMZ_C__SHIFT: u32 = 0x13;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9391
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_META_SURFACE_TMZ_C_MASK: u32 = 0x80000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9370
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_SURFACE_DCC_EN__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9384
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_SURFACE_DCC_EN_MASK: u32 = 0x200;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9371
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_SURFACE_DCC_IND_64B_BLK__SHIFT: u32 = 0xa;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9385
+pub const HUBPREQ0_DCSURF_SURFACE_CONTROL__SECONDARY_SURFACE_DCC_IND_64B_BLK_MASK: u32 = 0x400;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9433
+pub const HUBPREQ0_DCSURF_SURFACE_FLIP_INTERRUPT__SURFACE_FLIP_INT_MASK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9443
+pub const HUBPREQ0_DCSURF_SURFACE_FLIP_INTERRUPT__SURFACE_FLIP_INT_MASK_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9727
+pub const HUBPRET0_HUBPRET_CONTROL__DET_BUF_PLANE1_BASE_ADDRESS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9734
+pub const HUBPRET0_HUBPRET_CONTROL__DET_BUF_PLANE1_BASE_ADDRESS_MASK: u32 = 0xfff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9731
+pub const HUBPRET0_HUBPRET_CONTROL__CROSSBAR_SRC_CB_B__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9738
+pub const HUBPRET0_HUBPRET_CONTROL__CROSSBAR_SRC_CB_B_MASK: u32 = 0x300000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9732
+pub const HUBPRET0_HUBPRET_CONTROL__CROSSBAR_SRC_CR_R__SHIFT: u32 = 0x16;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9739
+pub const HUBPRET0_HUBPRET_CONTROL__CROSSBAR_SRC_CR_R_MASK: u32 = 0xc00000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9810
+pub const HUBPRET0_HUBPRET_READ_LINE_STATUS__PIPE_READ_VBLANK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9815
+pub const HUBPRET0_HUBPRET_READ_LINE_STATUS__PIPE_READ_VBLANK_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9478
+pub const HUBPREQ0_DCN_EXPANSION_MODE__DRQ_EXPANSION_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9482
+pub const HUBPREQ0_DCN_EXPANSION_MODE__DRQ_EXPANSION_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9481
+pub const HUBPREQ0_DCN_EXPANSION_MODE__PRQ_EXPANSION_MODE__SHIFT: u32 = 0x6;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9485
+pub const HUBPREQ0_DCN_EXPANSION_MODE__PRQ_EXPANSION_MODE_MASK: u32 = 0xc0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9480
+pub const HUBPREQ0_DCN_EXPANSION_MODE__MRQ_EXPANSION_MODE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9484
+pub const HUBPREQ0_DCN_EXPANSION_MODE__MRQ_EXPANSION_MODE_MASK: u32 = 0x30;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9479
+pub const HUBPREQ0_DCN_EXPANSION_MODE__CRQ_EXPANSION_MODE__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9483
+pub const HUBPREQ0_DCN_EXPANSION_MODE__CRQ_EXPANSION_MODE_MASK: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9203
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__CHUNK_SIZE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9211
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__CHUNK_SIZE_MASK: u32 = 0x700;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9204
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__MIN_CHUNK_SIZE__SHIFT: u32 = 0xb;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9212
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__MIN_CHUNK_SIZE_MASK: u32 = 0x1800;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9205
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__META_CHUNK_SIZE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9213
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__META_CHUNK_SIZE_MASK: u32 = 0x30000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9206
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__MIN_META_CHUNK_SIZE__SHIFT: u32 = 0x12;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9214
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__MIN_META_CHUNK_SIZE_MASK: u32 = 0xc0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9207
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__DPTE_GROUP_SIZE__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9215
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__DPTE_GROUP_SIZE_MASK: u32 = 0x700000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9201
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__SWATH_HEIGHT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9209
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__SWATH_HEIGHT_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9202
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__PTE_ROW_HEIGHT_LINEAR__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9210
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__PTE_ROW_HEIGHT_LINEAR_MASK: u32 = 0x70;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9220
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__CHUNK_SIZE_C__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9228
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__CHUNK_SIZE_C_MASK: u32 = 0x700;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9221
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__MIN_CHUNK_SIZE_C__SHIFT: u32 = 0xb;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9229
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__MIN_CHUNK_SIZE_C_MASK: u32 = 0x1800;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9222
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__META_CHUNK_SIZE_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9230
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__META_CHUNK_SIZE_C_MASK: u32 = 0x30000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9223
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__MIN_META_CHUNK_SIZE_C__SHIFT: u32 = 0x12;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9231
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__MIN_META_CHUNK_SIZE_C_MASK: u32 = 0xc0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9224
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__DPTE_GROUP_SIZE_C__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9232
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__DPTE_GROUP_SIZE_C_MASK: u32 = 0x700000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9218
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__SWATH_HEIGHT_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9226
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__SWATH_HEIGHT_C_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9219
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__PTE_ROW_HEIGHT_LINEAR_C__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9227
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG_C__PTE_ROW_HEIGHT_LINEAR_C_MASK: u32 = 0x70;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9611
+pub const HUBPREQ0_BLANK_OFFSET_0__REFCYC_H_BLANK_END__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9613
+pub const HUBPREQ0_BLANK_OFFSET_0__REFCYC_H_BLANK_END_MASK: u32 = 0x1fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9612
+pub const HUBPREQ0_BLANK_OFFSET_0__DLG_V_BLANK_END__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9614
+pub const HUBPREQ0_BLANK_OFFSET_0__DLG_V_BLANK_END_MASK: u32 = 0x7fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9616
+pub const HUBPREQ0_BLANK_OFFSET_1__MIN_DST_Y_NEXT_START__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9617
+pub const HUBPREQ0_BLANK_OFFSET_1__MIN_DST_Y_NEXT_START_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9619
+pub const HUBPREQ0_DST_DIMENSIONS__REFCYC_PER_HTOTAL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9620
+pub const HUBPREQ0_DST_DIMENSIONS__REFCYC_PER_HTOTAL_MASK: u32 = 0x1fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9622
+pub const HUBPREQ0_DST_AFTER_SCALER__REFCYC_X_AFTER_SCALER__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9624
+pub const HUBPREQ0_DST_AFTER_SCALER__REFCYC_X_AFTER_SCALER_MASK: u32 = 0x1fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9623
+pub const HUBPREQ0_DST_AFTER_SCALER__DST_Y_AFTER_SCALER__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9625
+pub const HUBPREQ0_DST_AFTER_SCALER__DST_Y_AFTER_SCALER_MASK: u32 = 0x70000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9635
+pub const HUBPREQ0_VBLANK_PARAMETERS_0__DST_Y_PER_VM_VBLANK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9637
+pub const HUBPREQ0_VBLANK_PARAMETERS_0__DST_Y_PER_VM_VBLANK_MASK: u32 = 0x7f;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9636
+pub const HUBPREQ0_VBLANK_PARAMETERS_0__DST_Y_PER_ROW_VBLANK__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9638
+pub const HUBPREQ0_VBLANK_PARAMETERS_0__DST_Y_PER_ROW_VBLANK_MASK: u32 = 0x3f00;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9691
+pub const HUBPREQ0_REF_FREQ_TO_PIX_FREQ__REF_FREQ_TO_PIX_FREQ__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9692
+pub const HUBPREQ0_REF_FREQ_TO_PIX_FREQ__REF_FREQ_TO_PIX_FREQ_MASK: u32 = 0x1fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9640
+pub const HUBPREQ0_VBLANK_PARAMETERS_1__REFCYC_PER_PTE_GROUP_VBLANK_L__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9641
+pub const HUBPREQ0_VBLANK_PARAMETERS_1__REFCYC_PER_PTE_GROUP_VBLANK_L_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9646
+pub const HUBPREQ0_VBLANK_PARAMETERS_3__REFCYC_PER_META_CHUNK_VBLANK_L__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9647
+pub const HUBPREQ0_VBLANK_PARAMETERS_3__REFCYC_PER_META_CHUNK_VBLANK_L_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9664
+pub const HUBPREQ0_NOM_PARAMETERS_4__DST_Y_PER_META_ROW_NOM_L__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9665
+pub const HUBPREQ0_NOM_PARAMETERS_4__DST_Y_PER_META_ROW_NOM_L_MASK: u32 = 0x1ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9667
+pub const HUBPREQ0_NOM_PARAMETERS_5__REFCYC_PER_META_CHUNK_NOM_L__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9668
+pub const HUBPREQ0_NOM_PARAMETERS_5__REFCYC_PER_META_CHUNK_NOM_L_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9676
+pub const HUBPREQ0_PER_LINE_DELIVERY_PRE__REFCYC_PER_LINE_DELIVERY_PRE_L__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9678
+pub const HUBPREQ0_PER_LINE_DELIVERY_PRE__REFCYC_PER_LINE_DELIVERY_PRE_L_MASK: u32 = 0x1fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9677
+pub const HUBPREQ0_PER_LINE_DELIVERY_PRE__REFCYC_PER_LINE_DELIVERY_PRE_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9679
+pub const HUBPREQ0_PER_LINE_DELIVERY_PRE__REFCYC_PER_LINE_DELIVERY_PRE_C_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9681
+pub const HUBPREQ0_PER_LINE_DELIVERY__REFCYC_PER_LINE_DELIVERY_L__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9683
+pub const HUBPREQ0_PER_LINE_DELIVERY__REFCYC_PER_LINE_DELIVERY_L_MASK: u32 = 0x1fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9682
+pub const HUBPREQ0_PER_LINE_DELIVERY__REFCYC_PER_LINE_DELIVERY_C__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9684
+pub const HUBPREQ0_PER_LINE_DELIVERY__REFCYC_PER_LINE_DELIVERY_C_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9643
+pub const HUBPREQ0_VBLANK_PARAMETERS_2__REFCYC_PER_PTE_GROUP_VBLANK_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9644
+pub const HUBPREQ0_VBLANK_PARAMETERS_2__REFCYC_PER_PTE_GROUP_VBLANK_C_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9649
+pub const HUBPREQ0_VBLANK_PARAMETERS_4__REFCYC_PER_META_CHUNK_VBLANK_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9650
+pub const HUBPREQ0_VBLANK_PARAMETERS_4__REFCYC_PER_META_CHUNK_VBLANK_C_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9670
+pub const HUBPREQ0_NOM_PARAMETERS_6__DST_Y_PER_META_ROW_NOM_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9671
+pub const HUBPREQ0_NOM_PARAMETERS_6__DST_Y_PER_META_ROW_NOM_C_MASK: u32 = 0x1ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9673
+pub const HUBPREQ0_NOM_PARAMETERS_7__REFCYC_PER_META_CHUNK_NOM_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9674
+pub const HUBPREQ0_NOM_PARAMETERS_7__REFCYC_PER_META_CHUNK_NOM_C_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9487
+pub const HUBPREQ0_DCN_TTU_QOS_WM__QoS_LEVEL_LOW_WM__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9489
+pub const HUBPREQ0_DCN_TTU_QOS_WM__QoS_LEVEL_LOW_WM_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9488
+pub const HUBPREQ0_DCN_TTU_QOS_WM__QoS_LEVEL_HIGH_WM__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9490
+pub const HUBPREQ0_DCN_TTU_QOS_WM__QoS_LEVEL_HIGH_WM_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9492
+pub const HUBPREQ0_DCN_GLOBAL_TTU_CNTL__MIN_TTU_VBLANK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9494
+pub const HUBPREQ0_DCN_GLOBAL_TTU_CNTL__MIN_TTU_VBLANK_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9493
+pub const HUBPREQ0_DCN_GLOBAL_TTU_CNTL__QoS_LEVEL_FLIP__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9495
+pub const HUBPREQ0_DCN_GLOBAL_TTU_CNTL__QoS_LEVEL_FLIP_MASK: u32 = 0xf0000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9517
+pub const HUBPREQ0_DCN_CUR0_TTU_CNTL0__REFCYC_PER_REQ_DELIVERY__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9520
+pub const HUBPREQ0_DCN_CUR0_TTU_CNTL0__REFCYC_PER_REQ_DELIVERY_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9518
+pub const HUBPREQ0_DCN_CUR0_TTU_CNTL0__QoS_LEVEL_FIXED__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9521
+pub const HUBPREQ0_DCN_CUR0_TTU_CNTL0__QoS_LEVEL_FIXED_MASK: u32 = 0xf000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9519
+pub const HUBPREQ0_DCN_CUR0_TTU_CNTL0__QoS_RAMP_DISABLE__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9522
+pub const HUBPREQ0_DCN_CUR0_TTU_CNTL0__QoS_RAMP_DISABLE_MASK: u32 = 0x10000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9524
+pub const HUBPREQ0_DCN_CUR0_TTU_CNTL1__REFCYC_PER_REQ_DELIVERY_PRE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9525
+pub const HUBPREQ0_DCN_CUR0_TTU_CNTL1__REFCYC_PER_REQ_DELIVERY_PRE_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9254
+pub const HUBP0_HUBP_CLK_CNTL__HUBP_CLOCK_ENABLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9264
+pub const HUBP0_HUBP_CLK_CNTL__HUBP_CLOCK_ENABLE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9652
+pub const HUBPREQ0_NOM_PARAMETERS_0__DST_Y_PER_PTE_ROW_NOM_L__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9653
+pub const HUBPREQ0_NOM_PARAMETERS_0__DST_Y_PER_PTE_ROW_NOM_L_MASK: u32 = 0x1ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9655
+pub const HUBPREQ0_NOM_PARAMETERS_1__REFCYC_PER_PTE_GROUP_NOM_L__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9656
+pub const HUBPREQ0_NOM_PARAMETERS_1__REFCYC_PER_PTE_GROUP_NOM_L_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9658
+pub const HUBPREQ0_NOM_PARAMETERS_2__DST_Y_PER_PTE_ROW_NOM_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9659
+pub const HUBPREQ0_NOM_PARAMETERS_2__DST_Y_PER_PTE_ROW_NOM_C_MASK: u32 = 0x1ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9661
+pub const HUBPREQ0_NOM_PARAMETERS_3__REFCYC_PER_PTE_GROUP_NOM_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9662
+pub const HUBPREQ0_NOM_PARAMETERS_3__REFCYC_PER_PTE_GROUP_NOM_C_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9606
+pub const HUBPREQ0_DCN_VM_MX_L1_TLB_CNTL__ENABLE_L1_TLB__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9608
+pub const HUBPREQ0_DCN_VM_MX_L1_TLB_CNTL__ENABLE_L1_TLB_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9607
+pub const HUBPREQ0_DCN_VM_MX_L1_TLB_CNTL__SYSTEM_ACCESS_MODE__SHIFT: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9609
+pub const HUBPREQ0_DCN_VM_MX_L1_TLB_CNTL__SYSTEM_ACCESS_MODE_MASK: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9131
+pub const HUBP0_DCSURF_SURFACE_CONFIG__ROTATION_ANGLE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9134
+pub const HUBP0_DCSURF_SURFACE_CONFIG__ROTATION_ANGLE_MASK: u32 = 0x300;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9132
+pub const HUBP0_DCSURF_SURFACE_CONFIG__H_MIRROR_EN__SHIFT: u32 = 0xa;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9135
+pub const HUBP0_DCSURF_SURFACE_CONFIG__H_MIRROR_EN_MASK: u32 = 0x400;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9769
+pub const HUBPREQ0_PREFETCH_SETTINGS__DST_Y_PREFETCH__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9771
+pub const HUBPREQ0_PREFETCH_SETTINGS__DST_Y_PREFETCH_MASK: u32 = 0xff000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9768
+pub const HUBPREQ0_PREFETCH_SETTINGS__VRATIO_PREFETCH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9770
+pub const HUBPREQ0_PREFETCH_SETTINGS__VRATIO_PREFETCH_MASK: u32 = 0x3fffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9773
+pub const HUBPREQ0_PREFETCH_SETTINGS_C__VRATIO_PREFETCH_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9774
+pub const HUBPREQ0_PREFETCH_SETTINGS_C__VRATIO_PREFETCH_C_MASK: u32 = 0x3fffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9675
+pub const HUBPREQ0_DCN_VM_SYSTEM_APERTURE_LOW_ADDR__MC_VM_SYSTEM_APERTURE_LOW_ADDR__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9676
+pub const HUBPREQ0_DCN_VM_SYSTEM_APERTURE_LOW_ADDR__MC_VM_SYSTEM_APERTURE_LOW_ADDR_MASK: u32 = 0x3fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9678
+pub const HUBPREQ0_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR__MC_VM_SYSTEM_APERTURE_HIGH_ADDR__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9679
+pub const HUBPREQ0_DCN_VM_SYSTEM_APERTURE_HIGH_ADDR__MC_VM_SYSTEM_APERTURE_HIGH_ADDR_MASK: u32 = 0x3fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10055
+pub const CURSOR0_0_DMDATA_ADDRESS_HIGH__DMDATA_ADDRESS_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10059
+pub const CURSOR0_0_DMDATA_ADDRESS_HIGH__DMDATA_ADDRESS_HIGH_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10069
+pub const CURSOR0_0_DMDATA_CNTL__DMDATA_MODE__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10073
+pub const CURSOR0_0_DMDATA_CNTL__DMDATA_MODE_MASK: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10067
+pub const CURSOR0_0_DMDATA_CNTL__DMDATA_UPDATED__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10071
+pub const CURSOR0_0_DMDATA_CNTL__DMDATA_UPDATED_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10068
+pub const CURSOR0_0_DMDATA_CNTL__DMDATA_REPEAT__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10072
+pub const CURSOR0_0_DMDATA_CNTL__DMDATA_REPEAT_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10070
+pub const CURSOR0_0_DMDATA_CNTL__DMDATA_SIZE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10074
+pub const CURSOR0_0_DMDATA_CNTL__DMDATA_SIZE_MASK: u32 = 0xfff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10090
+pub const CURSOR0_0_DMDATA_SW_CNTL__DMDATA_SW_UPDATED__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10093
+pub const CURSOR0_0_DMDATA_SW_CNTL__DMDATA_SW_UPDATED_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10091
+pub const CURSOR0_0_DMDATA_SW_CNTL__DMDATA_SW_REPEAT__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10094
+pub const CURSOR0_0_DMDATA_SW_CNTL__DMDATA_SW_REPEAT_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10092
+pub const CURSOR0_0_DMDATA_SW_CNTL__DMDATA_SW_SIZE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10095
+pub const CURSOR0_0_DMDATA_SW_CNTL__DMDATA_SW_SIZE_MASK: u32 = 0xfff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10076
+pub const CURSOR0_0_DMDATA_QOS_CNTL__DMDATA_QOS_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10079
+pub const CURSOR0_0_DMDATA_QOS_CNTL__DMDATA_QOS_MODE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10077
+pub const CURSOR0_0_DMDATA_QOS_CNTL__DMDATA_QOS_LEVEL__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10080
+pub const CURSOR0_0_DMDATA_QOS_CNTL__DMDATA_QOS_LEVEL_MASK: u32 = 0xf0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10078
+pub const CURSOR0_0_DMDATA_QOS_CNTL__DMDATA_DL_DELTA__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10081
+pub const CURSOR0_0_DMDATA_QOS_CNTL__DMDATA_DL_DELTA_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10083
+pub const CURSOR0_0_DMDATA_STATUS__DMDATA_DONE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:10086
+pub const CURSOR0_0_DMDATA_STATUS__DMDATA_DONE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9793
+pub const HUBPREQ0_FLIP_PARAMETERS_0__DST_Y_PER_VM_FLIP__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9795
+pub const HUBPREQ0_FLIP_PARAMETERS_0__DST_Y_PER_VM_FLIP_MASK: u32 = 0x7f;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9794
+pub const HUBPREQ0_FLIP_PARAMETERS_0__DST_Y_PER_ROW_FLIP__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9796
+pub const HUBPREQ0_FLIP_PARAMETERS_0__DST_Y_PER_ROW_FLIP_MASK: u32 = 0x3f00;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9798
+pub const HUBPREQ0_FLIP_PARAMETERS_1__REFCYC_PER_PTE_GROUP_FLIP_L__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9799
+pub const HUBPREQ0_FLIP_PARAMETERS_1__REFCYC_PER_PTE_GROUP_FLIP_L_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9801
+pub const HUBPREQ0_FLIP_PARAMETERS_2__REFCYC_PER_META_CHUNK_FLIP_L__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9802
+pub const HUBPREQ0_FLIP_PARAMETERS_2__REFCYC_PER_META_CHUNK_FLIP_L_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9344
+pub const HUBP0_DCHUBP_CNTL__HUBP_VREADY_AT_OR_AFTER_VSYNC__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9360
+pub const HUBP0_DCHUBP_CNTL__HUBP_VREADY_AT_OR_AFTER_VSYNC_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9345
+pub const HUBP0_DCHUBP_CNTL__HUBP_DISABLE_STOP_DATA_DURING_VM__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9361
+pub const HUBP0_DCHUBP_CNTL__HUBP_DISABLE_STOP_DATA_DURING_VM_MASK: u32 = 0x200;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9518
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__HUBPREQ_MASTER_UPDATE_LOCK_STATUS__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9528
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL__HUBPREQ_MASTER_UPDATE_LOCK_STATUS_MASK: u32 = 0x200;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9536
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL2__SURFACE_GSL_ENABLE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9541
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL2__SURFACE_GSL_ENABLE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9538
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL2__SURFACE_TRIPLE_BUFFER_ENABLE__SHIFT: u32 = 0xa;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9543
+pub const HUBPREQ0_DCSURF_FLIP_CONTROL2__SURFACE_TRIPLE_BUFFER_ENABLE_MASK: u32 = 0x400;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9434
+pub const HUBPREQ0_VMID_SETTINGS_0__VMID__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:9435
+pub const HUBPREQ0_VMID_SETTINGS_0__VMID_MASK: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9554
+pub const HUBPREQ0_FLIP_PARAMETERS_3__REFCYC_PER_VM_GROUP_FLIP__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9555
+pub const HUBPREQ0_FLIP_PARAMETERS_3__REFCYC_PER_VM_GROUP_FLIP_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9557
+pub const HUBPREQ0_FLIP_PARAMETERS_4__REFCYC_PER_VM_REQ_FLIP__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9558
+pub const HUBPREQ0_FLIP_PARAMETERS_4__REFCYC_PER_VM_REQ_FLIP_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9560
+pub const HUBPREQ0_FLIP_PARAMETERS_5__REFCYC_PER_PTE_GROUP_FLIP_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9561
+pub const HUBPREQ0_FLIP_PARAMETERS_5__REFCYC_PER_PTE_GROUP_FLIP_C_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9563
+pub const HUBPREQ0_FLIP_PARAMETERS_6__REFCYC_PER_META_CHUNK_FLIP_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9564
+pub const HUBPREQ0_FLIP_PARAMETERS_6__REFCYC_PER_META_CHUNK_FLIP_C_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9548
+pub const HUBPREQ0_VBLANK_PARAMETERS_5__REFCYC_PER_VM_GROUP_VBLANK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9549
+pub const HUBPREQ0_VBLANK_PARAMETERS_5__REFCYC_PER_VM_GROUP_VBLANK_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9551
+pub const HUBPREQ0_VBLANK_PARAMETERS_6__REFCYC_PER_VM_REQ_VBLANK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9552
+pub const HUBPREQ0_VBLANK_PARAMETERS_6__REFCYC_PER_VM_REQ_VBLANK_MASK: u32 = 0x7fffff;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9070
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__VM_GROUP_SIZE__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_2_1_0_sh_mask.h:9078
+pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__VM_GROUP_SIZE_MASK: u32 = 0x7000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9153
+pub const HUBP0_DCSURF_TILING_CONFIG__RB_ALIGNED__SHIFT: u32 = 0xa;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9158
+pub const HUBP0_DCSURF_TILING_CONFIG__RB_ALIGNED_MASK: u32 = 0x400;
