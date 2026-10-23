@@ -660,3 +660,16 @@ pub static OPP_MASK: dcn20_opp_mask = dcn20_opp_mask {
     OPPBUF_OVERLAP_PIXEL_NUM: OPPBUF0_OPPBUF_CONTROL__OPPBUF_OVERLAP_PIXEL_NUM_MASK,
     FMT_LEFT_EDGE_EXTRA_PIXEL_COUNT: FMT0_FMT_422_CONTROL__FMT_LEFT_EDGE_EXTRA_PIXEL_COUNT_MASK,
 };
+
+/// `opp2_get_left_edge_extra_pixel_count`.
+pub fn opp2_get_left_edge_extra_pixel_count(dc_debug: &crate::dc::dc_debug_options, pixel_encoding: u32,
+                                            is_primary: bool) -> u32 {
+    if (pixel_encoding == PIXEL_ENCODING_YCBCR422 || pixel_encoding == PIXEL_ENCODING_YCBCR420)
+        && !dc_debug.force_chroma_subsampling_1tap
+        && !is_primary
+    {
+        1
+    } else {
+        0
+    }
+}

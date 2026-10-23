@@ -24249,3 +24249,183 @@ pub const LD_DOWN_STREAM_DETAILED_DVI: u32 = 0x2;
 pub const LD_DOWN_STREAM_DETAILED_HDMI: u32 = 0x3;
 /// The value of `DOWN_STREAM_DETAILED_DP_PLUS_PLUS` in ../display/dc/link/protocols/link_dp_capability.c
 pub const LD_DOWN_STREAM_DETAILED_DP_PLUS_PLUS: u32 = 0x5;
+
+// Commit: streams, planes, resource mapping and scaling (dc_resource.c, dc_hw_types.h, dc.h, link_service_types.h)
+/// ?
+pub const COLOR_DEPTH_141414: u32 = 0x5;
+/// ?
+pub const COLOR_DEPTH_161616: u32 = 0x6;
+/// ?
+pub const PIXEL_ENCODING_UNDEFINED: u32 = 0x0;
+/// ?
+pub const PIXEL_ENCODING_RGB: u32 = 0x1;
+/// ?
+pub const PIXEL_ENCODING_YCBCR422: u32 = 0x2;
+/// ?
+pub const PIXEL_ENCODING_YCBCR444: u32 = 0x3;
+/// ?
+pub const PIXEL_ENCODING_YCBCR420: u32 = 0x4;
+/// ?
+pub const DITHER_OPTION_DEFAULT: u32 = 0x0;
+/// ?
+pub const DITHER_OPTION_DISABLE: u32 = 0x1;
+/// ?
+pub const DITHER_OPTION_FM6: u32 = 0x2;
+/// ?
+pub const DITHER_OPTION_FM8: u32 = 0x3;
+/// ?
+pub const DITHER_OPTION_FM10: u32 = 0x4;
+/// ?
+pub const DITHER_OPTION_SPATIAL6_FRAME_RANDOM: u32 = 0x5;
+/// ?
+pub const DITHER_OPTION_SPATIAL8_FRAME_RANDOM: u32 = 0x6;
+/// ?
+pub const DITHER_OPTION_SPATIAL10_FRAME_RANDOM: u32 = 0x7;
+/// ?
+pub const DITHER_OPTION_SPATIAL6: u32 = 0x8;
+/// ?
+pub const DITHER_OPTION_SPATIAL8: u32 = 0x9;
+/// ?
+pub const DITHER_OPTION_SPATIAL10: u32 = 0xa;
+/// ?
+pub const DITHER_OPTION_TRUN6: u32 = 0xb;
+/// ?
+pub const DITHER_OPTION_TRUN8: u32 = 0xc;
+/// ?
+pub const DITHER_OPTION_TRUN10: u32 = 0xd;
+/// ?
+pub const DITHER_OPTION_TRUN10_SPATIAL8: u32 = 0xe;
+/// ?
+pub const DITHER_OPTION_TRUN10_SPATIAL6: u32 = 0xf;
+/// ?
+pub const DITHER_OPTION_TRUN10_FM8: u32 = 0x10;
+/// ?
+pub const DITHER_OPTION_TRUN10_FM6: u32 = 0x11;
+/// ?
+pub const DITHER_OPTION_TRUN10_SPATIAL8_FM6: u32 = 0x12;
+/// ?
+pub const DITHER_OPTION_SPATIAL10_FM8: u32 = 0x13;
+/// ?
+pub const DITHER_OPTION_SPATIAL10_FM6: u32 = 0x14;
+/// ?
+pub const DITHER_OPTION_TRUN8_SPATIAL6: u32 = 0x15;
+/// ?
+pub const DITHER_OPTION_TRUN8_FM6: u32 = 0x16;
+/// ?
+pub const DITHER_OPTION_SPATIAL8_FM6: u32 = 0x17;
+/// ?
+pub const PIXEL_FORMAT_UNKNOWN: u32 = 0x9;
+/// ?
+pub const PIXEL_FORMAT_INDEX8: u32 = 0x1;
+/// ?
+pub const PIXEL_FORMAT_RGB565: u32 = 0x2;
+/// ?
+pub const PIXEL_FORMAT_ARGB8888: u32 = 0x3;
+/// ?
+pub const PIXEL_FORMAT_ARGB2101010: u32 = 0x4;
+/// ?
+pub const PIXEL_FORMAT_ARGB2101010_XRBIAS: u32 = 0x5;
+/// ?
+pub const PIXEL_FORMAT_FP16: u32 = 0x6;
+/// ?
+pub const PIXEL_FORMAT_420BPP8: u32 = 0x7;
+/// ?
+pub const PIXEL_FORMAT_420BPP10: u32 = 0x8;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_PALETA_256_COLORS: u32 = 0x0;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_ARGB1555: u32 = 0x1;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_RGB565: u32 = 0x2;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_ARGB8888: u32 = 0x3;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_ABGR8888: u32 = 0x4;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_ARGB2101010: u32 = 0x5;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_ABGR2101010: u32 = 0x6;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_ABGR2101010_XR_BIAS: u32 = 0x7;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_ARGB16161616: u32 = 0x8;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616: u32 = 0x9;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_ARGB16161616F: u32 = 0xa;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616F: u32 = 0xb;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_VIDEO_420_YCbCr: u32 = 0x12;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_VIDEO_420_YCrCb: u32 = 0x13;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_VIDEO_420_10bpc_YCbCr: u32 = 0x14;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_VIDEO_420_10bpc_YCrCb: u32 = 0x15;
+/// ?
+pub const ROTATION_ANGLE_0: u32 = 0x0;
+/// ?
+pub const ROTATION_ANGLE_90: u32 = 0x1;
+/// ?
+pub const ROTATION_ANGLE_180: u32 = 0x2;
+/// ?
+pub const ROTATION_ANGLE_270: u32 = 0x3;
+/// ?
+pub const VIEW_3D_FORMAT_NONE: u32 = 0x0;
+/// ?
+pub const VIEW_3D_FORMAT_SIDE_BY_SIDE: u32 = 0x2;
+/// ?
+pub const VIEW_3D_FORMAT_TOP_AND_BOTTOM: u32 = 0x3;
+/// ?
+pub const TIMING_3D_FORMAT_HW_FRAME_PACKING: u32 = 0x5;
+/// ?
+pub const CLAMPING_FULL_RANGE: u32 = 0x0;
+/// ?
+pub const TF_TYPE_PREDEFINED: u32 = 0x0;
+/// ?
+pub const TF_TYPE_BYPASS: u32 = 0x2;
+/// ?
+pub const TRANSFER_FUNCTION_SRGB: u32 = 0x0;
+/// ?
+pub const TMDS_MAX_PIXEL_CLOCK: u32 = 0x28488;
+/// ?
+pub const VISUAL_CONFIRM_DISABLE: u32 = 0x0;
+/// display/dc/core/dc_resource.c:85
+pub const VISUAL_CONFIRM_BASE_DEFAULT: u32 = 0x3;
+/// display/dc/core/dc_resource.c:86
+pub const VISUAL_CONFIRM_BASE_MIN: u32 = 0x1;
+/// display/dc/core/dc_resource.c:87
+pub const VISUAL_CONFIRM_BASE_MAX: u32 = 0xa;
+/// display/dc/core/dc_resource.c:93
+pub const VISUAL_CONFIRM_DPP_OFFSET_DENO: u32 = 0xf0;
+/// ?
+pub const MIN_VIEWPORT_SIZE: u32 = 0xc;
+/// ?
+pub const FREE_PIPE_INDEX_NOT_FOUND: u64 = 0xffffffffffffffff;
+/// ?
+pub const LINK_RATE_REF_FREQ_IN_KHZ: u32 = 0x6978;
+/// ?
+pub const BITS_PER_DP_BYTE: u32 = 0xa;
+/// ?
+pub const DATA_EFFICIENCY_8b_10b_x10000: u32 = 0x1f40;
+/// ?
+pub const DATA_EFFICIENCY_8b_10b_FEC_EFFICIENCY_x100: u32 = 0x61;
+/// ?
+pub const DATA_EFFICIENCY_128b_132b_x10000: u32 = 0x25a9;
+/// ?
+pub const DC_LINK_ENCODING_UNSPECIFIED: u32 = 0x0;
+/// ?
+pub const DC_LINK_ENCODING_DP_8b_10b: u32 = 0x1;
+/// ?
+pub const DC_LINK_ENCODING_DP_128b_132b: u32 = 0x2;
+/// ?
+pub const DC_LINK_ENCODING_HDMI_TMDS: u32 = 0x3;
+/// ?
+pub const DC_LINK_ENCODING_HDMI_FRL: u32 = 0x4;
+/// ?
+pub const DC_SW_LINEAR: u32 = 0x0;
+/// ?
+pub const PLN_ADDR_TYPE_GRAPHICS: u32 = 0x0;
+/// ?
+pub const SCANNING_TYPE_NODATA: u32 = 0x0;

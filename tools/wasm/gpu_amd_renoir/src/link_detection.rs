@@ -107,6 +107,10 @@ pub fn dc_is_virtual_signal(signal: u32) -> bool {
     signal == LF_SIGNAL_TYPE_VIRTUAL
 }
 
+pub fn dc_is_audio_capable_signal(signal: u32) -> bool {
+    signal == LF_SIGNAL_TYPE_DISPLAY_PORT || signal == LF_SIGNAL_TYPE_DISPLAY_PORT_MST || dc_is_hdmi_signal(signal)
+}
+
 /// `link_disconnect_sink`.
 fn link_disconnect_sink(link: &mut crate::link_factory::dc_link) {
     // dc_sink_release

@@ -240,3 +240,108 @@ pub fn dcn21_clock_source_create(
         None
     }
 }
+
+/// `struct pixel_clk_flags` (inc/clock_source.h).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct pixel_clk_flags {
+    pub ENABLE_SS: bool,
+    pub DISPLAY_BLANKED: bool,
+    pub PROGRAM_PIXEL_CLOCK: bool,
+    pub PROGRAM_ID_CLOCK: bool,
+    pub SUPPORT_YCBCR420: bool,
+}
+
+impl pixel_clk_flags {
+    /// The bitfield word, in declaration order.
+    pub fn raw(&self) -> u32 {
+        self.ENABLE_SS as u32
+            | (self.DISPLAY_BLANKED as u32) << 1
+            | (self.PROGRAM_PIXEL_CLOCK as u32) << 2
+            | (self.PROGRAM_ID_CLOCK as u32) << 3
+            | (self.SUPPORT_YCBCR420 as u32) << 4
+    }
+}
+
+/// `struct pixel_clk_params` (inc/clock_source.h), without the de-spread
+/// parameters of an on-the-fly retune.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct pixel_clk_params {
+    pub requested_pix_clk_100hz: u32,
+    pub requested_sym_clk: u32,
+    pub dp_ref_clk: u32,
+    pub encoder_object_id: crate::dc_types::graphics_object_id,
+    /// `enum signal_type`.
+    pub signal_type: u32,
+    /// `enum controller_id`.
+    pub controller_id: u32,
+    /// `enum dc_color_depth`.
+    pub color_depth: u32,
+    /// `enum dc_pixel_encoding`.
+    pub pixel_encoding: u32,
+    pub flags: pixel_clk_flags,
+    pub dio_se_pix_per_cycle: u32,
+}
+
+/// `struct pll_settings` (inc/clock_source.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct pll_settings {
+    pub actual_pix_clk_100hz: u32,
+    pub adjusted_pix_clk_100hz: u32,
+    pub calculated_pix_clk_100hz: u32,
+    pub vco_freq: u32,
+    pub reference_freq: u32,
+    pub reference_divider: u32,
+    pub feedback_divider: u32,
+    pub fract_feedback_divider: u32,
+    pub pix_clk_post_divider: u32,
+    pub ss_percentage: u32,
+    pub use_external_clk: bool,
+}
+
+/// `dce112_get_pix_clk_dividers_helper`.
+fn dce112_get_pix_clk_dividers_helper(pll_settings: &mut pll_settings, pix_clk_params: &pixel_clk_params) {
+    let mut actual_pixel_clock_100hz = pix_clk_params.requested_pix_clk_100hz;
+    // Calculate Dividers
+    if pix_clk_params.signal_type == LF_SIGNAL_TYPE_HDMI_TYPE_A {
+        match pix_clk_params.color_depth {
+            COLOR_DEPTH_101010 => {
+                actual_pixel_clock_100hz = (actual_pixel_clock_100hz * 5) >> 2;
+                actual_pixel_clock_100hz -= actual_pixel_clock_100hz % 10;
+            }
+            COLOR_DEPTH_121212 => {
+                actual_pixel_clock_100hz = (actual_pixel_clock_100hz * 6) >> 2;
+                actual_pixel_clock_100hz -= actual_pixel_clock_100hz % 10;
+            }
+            COLOR_DEPTH_161616 => {
+                actual_pixel_clock_100hz *= 2;
+            }
+            _ => {}
+        }
+    }
+    pll_settings.actual_pix_clk_100hz = actual_pixel_clock_100hz;
+    pll_settings.adjusted_pix_clk_100hz = actual_pixel_clock_100hz;
+    pll_settings.calculated_pix_clk_100hz = pix_clk_params.requested_pix_clk_100hz;
+}
+
+/// `dce112_get_pix_clk_dividers`, the `get_pix_clk_dividers` of both
+/// `dce112_clk_src_funcs` and `dcn20_clk_src_funcs`.
+pub fn dce112_get_pix_clk_dividers(cs: &dce110_clk_src, pix_clk_params: &pixel_clk_params,
+                                   pll_settings: &mut pll_settings) -> u32 {
+    if pix_clk_params.requested_pix_clk_100hz == 0 {
+        crate::linux::Line::new().s("dce112_get_pix_clk_dividers: Invalid parameters!!").say();
+        return u32::MAX;
+    }
+
+    *pll_settings = Default::default();
+
+    if cs.base.id == clock_source_id::CLOCK_SOURCE_ID_DP_DTO || cs.base.id == clock_source_id::CLOCK_SOURCE_ID_EXTERNAL {
+        pll_settings.adjusted_pix_clk_100hz = cs.ext_clk_khz * 10;
+        pll_settings.calculated_pix_clk_100hz = cs.ext_clk_khz * 10;
+        pll_settings.actual_pix_clk_100hz = pix_clk_params.requested_pix_clk_100hz;
+        return u32::MAX;
+    }
+
+    dce112_get_pix_clk_dividers_helper(pll_settings, pix_clk_params);
+
+    0
+}

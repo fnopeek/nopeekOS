@@ -1038,3 +1038,411 @@ pub fn get_max_edp_link_rate(adev: &amdgpu_device, dc: &dc, li: usize) -> u32 {
 
     if max_ilr_rate > max_non_ilr_rate { max_ilr_rate } else { max_non_ilr_rate }
 }
+
+/// `dp_is_fec_supported`.
+pub fn dp_is_fec_supported(dc: &dc, li: usize) -> bool {
+    // TODO - use asic cap instead of link_enc->features
+    // we no longer know which link enc to use for this link before commit
+    let mut link_enc = get_temp_dio_link_enc(dc, li);
+
+    let link = &dc.links[li];
+    if !dc.config.unify_link_enc_assignment {
+        // link_enc_cfg_get_link_enc: a fixed DIG mapping is the link's own
+        link_enc = if link.is_dig_mapping_flexible {
+            crate::linux::Line::new().s("link_enc_cfg_get_link_enc: dynamic assignment not ported").say();
+            None
+        } else {
+            link.link_enc.as_ref().map(|_| li as u32)
+        };
+    }
+
+    crate::link_detection::dc_is_dp_signal(link.connector_signal)
+        && link_enc.is_some_and(|l| dc.links[l as usize].link_enc.as_ref().unwrap().base().features.fec_supported)
+        && fec_cap_FEC_CAPABLE(link.dpcd_caps.fec_cap) != 0
+}
+
+/// `dp_should_enable_fec`.
+pub fn dp_should_enable_fec(dc: &dc, li: usize) -> bool {
+    let link = &dc.links[li];
+    let force_disable = if link.fec_state == dc_link_fec_enabled {
+        false
+    } else if link.connector_signal != LF_SIGNAL_TYPE_DISPLAY_PORT_MST
+        && link.local_sink.as_deref().is_some_and(|s| s.edid_caps.panel_patch.disable_fec != 0)
+    {
+        true
+    } else {
+        link.connector_signal == LF_SIGNAL_TYPE_EDP
+            && (dsc_support_DSC_SUPPORT(link.dpcd_caps.dsc_caps.dsc_basic_caps[0]) == 0
+                || link.panel_config.dsc_disable_dsc_edp
+                || !dc.caps.edp_dsc_support)
+    };
+
+    !force_disable && dp_is_fec_supported(dc, li)
+}
+
+/// `dp_link_bandwidth_kbps` (link_validation.c).
+pub fn dp_link_bandwidth_kbps(dc: &dc, li: usize, link_settings: &dc_link_settings) -> u32 {
+    let mut total_data_bw_efficiency_x10000 = 0;
+    let mut link_rate_per_lane_kbps = 0;
+
+    match link_dp_get_encoding_format(link_settings) {
+        dp_link_encoding::DP_8b_10b_ENCODING => {
+            // For 8b/10b encoding:
+            // link rate is defined in the unit of LINK_RATE_REF_FREQ_IN_KHZ per DP byte per lane.
+            // data bandwidth efficiency is 80% with additional 3% overhead if FEC is supported.
+            link_rate_per_lane_kbps = link_settings.link_rate * LINK_RATE_REF_FREQ_IN_KHZ * BITS_PER_DP_BYTE;
+            total_data_bw_efficiency_x10000 = DATA_EFFICIENCY_8b_10b_x10000;
+            if dp_should_enable_fec(dc, li) {
+                total_data_bw_efficiency_x10000 /= 100;
+                total_data_bw_efficiency_x10000 *= DATA_EFFICIENCY_8b_10b_FEC_EFFICIENCY_x100;
+            }
+        }
+        dp_link_encoding::DP_128b_132b_ENCODING => {
+            // For 128b/132b encoding:
+            // link rate is defined in the unit of 10mbps per lane.
+            // total data bandwidth efficiency is always 96.71%.
+            link_rate_per_lane_kbps = link_settings.link_rate * 10000;
+            total_data_bw_efficiency_x10000 = DATA_EFFICIENCY_128b_132b_x10000;
+        }
+        _ => {}
+    }
+
+    // overall effective link bandwidth = link rate per lane * lane count * total data bandwidth efficiency
+    link_rate_per_lane_kbps * link_settings.lane_count / 10000 * total_data_bw_efficiency_x10000
+}
+
+/// `dc_link_get_highest_encoding_format` (dc_link_exports.c).
+pub fn dc_link_get_highest_encoding_format(dc: &dc, li: usize) -> u32 {
+    let link = &dc.links[li];
+    if crate::link_detection::dc_is_dp_signal(link.connector_signal) {
+        if link.dpcd_caps.dongle_type >= DISPLAY_DONGLE_DP_DVI_DONGLE
+            && link.dpcd_caps.dongle_type <= DISPLAY_DONGLE_DP_HDMI_MISMATCHED_DONGLE
+        {
+            return DC_LINK_ENCODING_HDMI_TMDS;
+        } else if link_dp_get_encoding_format(&link.verified_link_cap) == dp_link_encoding::DP_8b_10b_ENCODING {
+            return DC_LINK_ENCODING_DP_8b_10b;
+        } else if link_dp_get_encoding_format(&link.verified_link_cap) == dp_link_encoding::DP_128b_132b_ENCODING {
+            return DC_LINK_ENCODING_DP_128b_132b;
+        }
+    }
+
+    DC_LINK_ENCODING_UNSPECIFIED
+}
+
+/// `increase_lane_count`.
+fn increase_lane_count(lane_count: u32) -> u32 {
+    match lane_count {
+        LANE_COUNT_ONE => LANE_COUNT_TWO,
+        LANE_COUNT_TWO => crate::dc_dp_types::LANE_COUNT_FOUR,
+        _ => LANE_COUNT_UNKNOWN,
+    }
+}
+
+/// `increase_link_rate`.
+fn increase_link_rate(dc: &dc, li: usize, link_rate: u32) -> u32 {
+    match link_rate {
+        LINK_RATE_LOW => LINK_RATE_HIGH,
+        LINK_RATE_HIGH => LINK_RATE_HIGH2,
+        LINK_RATE_HIGH2 => LINK_RATE_HIGH3,
+        LINK_RATE_HIGH3 => LINK_RATE_UHBR10,
+        // upto DP2.x specs UHBR13.5 is the only link rate that could be
+        // not supported by DPRX when higher link rate is supported.
+        // so we treat it as a special case for code simplicity. When we
+        // have new specs with more link rates like this, we should
+        // consider a more generic solution to handle discrete link
+        // rate capabilities.
+        LINK_RATE_UHBR10 => {
+            if rates_128b_132b_UHBR13_5(dc.links[li].dpcd_caps.dp_128b_132b_supported_link_rates) != 0 {
+                LINK_RATE_UHBR13_5
+            } else {
+                LINK_RATE_UHBR20
+            }
+        }
+        LINK_RATE_UHBR13_5 => LINK_RATE_UHBR20,
+        _ => LINK_RATE_UNKNOWN,
+    }
+}
+
+/// `increase_edp_link_rate`.
+fn increase_edp_link_rate(dc: &dc, li: usize, current_link_setting: &mut dc_link_settings) {
+    let caps = &dc.links[li].dpcd_caps;
+    if current_link_setting.use_link_rate_set {
+        if current_link_setting.link_rate_set < caps.edp_supported_link_rates_count {
+            current_link_setting.link_rate_set += 1;
+            current_link_setting.link_rate = caps.edp_supported_link_rates[current_link_setting.link_rate_set as usize];
+        } else {
+            current_link_setting.use_link_rate_set = false;
+            current_link_setting.link_rate = LINK_RATE_UHBR10;
+        }
+    } else {
+        current_link_setting.link_rate = increase_link_rate(dc, li, current_link_setting.link_rate);
+    }
+}
+
+/// `edp_is_ilr_optimization_enabled` (link_edp_panel_control.c).
+pub fn edp_is_ilr_optimization_enabled(dc: &dc, li: usize) -> bool {
+    let link = &dc.links[li];
+    !(link.dpcd_caps.edp_supported_link_rates_count == 0 || !link.panel_config.ilr_optimize_edp_link_rate)
+}
+
+/// `decide_dp_link_settings`.
+fn decide_dp_link_settings(dc: &dc, li: usize, link_setting: &mut dc_link_settings, req_bw: u32) -> bool {
+    let link = &dc.links[li];
+    let initial_link_setting = dc_link_settings {
+        lane_count: LANE_COUNT_ONE,
+        link_rate: LINK_RATE_LOW,
+        link_spread: LINK_SPREAD_DISABLED,
+        use_link_rate_set: false,
+        link_rate_set: 0,
+    };
+    let mut current_link_setting = initial_link_setting;
+
+    if req_bw > dp_link_bandwidth_kbps(dc, li, &link.verified_link_cap) {
+        return false;
+    }
+
+    // search for the minimum link setting that:
+    // 1. is supported according to the link training result
+    // 2. could support the b/w requested by the timing
+    while current_link_setting.link_rate <= link.verified_link_cap.link_rate {
+        let link_bw = dp_link_bandwidth_kbps(dc, li, &current_link_setting);
+        if req_bw <= link_bw {
+            *link_setting = current_link_setting;
+            return true;
+        }
+
+        if current_link_setting.lane_count < link.verified_link_cap.lane_count {
+            current_link_setting.lane_count = increase_lane_count(current_link_setting.lane_count);
+        } else {
+            current_link_setting.link_rate = increase_link_rate(dc, li, current_link_setting.link_rate);
+            current_link_setting.lane_count = initial_link_setting.lane_count;
+        }
+    }
+
+    false
+}
+
+/// `edp_decide_link_settings`.
+pub fn edp_decide_link_settings(dc: &dc, li: usize, link_setting: &mut dc_link_settings, req_bw: u32) -> bool {
+    let link = &dc.links[li];
+
+    // edp_supported_link_rates_count is only valid for eDP v1.4 or higher.
+    // Per VESA eDP spec, "The DPCD revision for eDP v1.4 is 13h"
+    if !edp_is_ilr_optimization_enabled(dc, li) {
+        *link_setting = link.verified_link_cap;
+        return true;
+    }
+
+    let initial_link_setting = dc_link_settings {
+        lane_count: LANE_COUNT_ONE,
+        link_rate: link.dpcd_caps.edp_supported_link_rates[0],
+        link_spread: LINK_SPREAD_DISABLED,
+        use_link_rate_set: true,
+        link_rate_set: 0,
+    };
+    let mut current_link_setting = initial_link_setting;
+
+    // search for the minimum link setting that:
+    // 1. is supported according to the link training result
+    // 2. could support the b/w requested by the timing
+    while current_link_setting.link_rate <= link.verified_link_cap.link_rate {
+        let link_bw = dp_link_bandwidth_kbps(dc, li, &current_link_setting);
+        if req_bw <= link_bw {
+            *link_setting = current_link_setting;
+            return true;
+        }
+
+        if current_link_setting.lane_count < link.verified_link_cap.lane_count {
+            current_link_setting.lane_count = increase_lane_count(current_link_setting.lane_count);
+        } else {
+            increase_edp_link_rate(dc, li, &mut current_link_setting);
+        }
+    }
+    false
+}
+
+/// `decide_edp_link_settings_with_dsc`.
+pub fn decide_edp_link_settings_with_dsc(dc: &dc, li: usize, link_setting: &mut dc_link_settings, req_bw: u32,
+                                         mut max_link_rate: u32) -> bool {
+    let link = &dc.links[li];
+    let policy = link.panel_config.dsc_force_dsc_edp_policy;
+    if max_link_rate == LINK_RATE_UNKNOWN {
+        max_link_rate = link.verified_link_cap.link_rate;
+    }
+    // edp_supported_link_rates_count is only valid for eDP v1.4 or higher.
+    // Per VESA eDP spec, "The DPCD revision for eDP v1.4 is 13h"
+    if !edp_is_ilr_optimization_enabled(dc, li) {
+        // for DSC enabled case, we search for minimum lane count
+        let initial_link_setting = dc_link_settings {
+            lane_count: LANE_COUNT_ONE,
+            link_rate: LINK_RATE_LOW,
+            link_spread: LINK_SPREAD_DISABLED,
+            use_link_rate_set: false,
+            link_rate_set: 0,
+        };
+        let mut current_link_setting = initial_link_setting;
+        if req_bw > dp_link_bandwidth_kbps(dc, li, &link.verified_link_cap) {
+            return false;
+        }
+
+        // search for the minimum link setting that:
+        // 1. is supported according to the link training result
+        // 2. could support the b/w requested by the timing
+        while current_link_setting.link_rate <= max_link_rate {
+            let link_bw = dp_link_bandwidth_kbps(dc, li, &current_link_setting);
+            if req_bw <= link_bw {
+                *link_setting = current_link_setting;
+                return true;
+            }
+            if policy != 0 {
+                // minimize lane
+                if current_link_setting.link_rate < max_link_rate {
+                    increase_edp_link_rate(dc, li, &mut current_link_setting);
+                } else if current_link_setting.lane_count < link.verified_link_cap.lane_count {
+                    current_link_setting.lane_count = increase_lane_count(current_link_setting.lane_count);
+                    current_link_setting.link_rate = initial_link_setting.link_rate;
+                } else {
+                    break;
+                }
+            } else {
+                // minimize link rate
+                if current_link_setting.lane_count < link.verified_link_cap.lane_count {
+                    current_link_setting.lane_count = increase_lane_count(current_link_setting.lane_count);
+                } else {
+                    increase_edp_link_rate(dc, li, &mut current_link_setting);
+                    current_link_setting.lane_count = initial_link_setting.lane_count;
+                }
+            }
+        }
+        return false;
+    }
+
+    // if optimize edp link is supported
+    let initial_link_setting = dc_link_settings {
+        lane_count: LANE_COUNT_ONE,
+        link_rate: link.dpcd_caps.edp_supported_link_rates[0],
+        link_spread: LINK_SPREAD_DISABLED,
+        use_link_rate_set: true,
+        link_rate_set: 0,
+    };
+    let mut current_link_setting = initial_link_setting;
+
+    // search for the minimum link setting that:
+    // 1. is supported according to the link training result
+    // 2. could support the b/w requested by the timing
+    while current_link_setting.link_rate <= max_link_rate {
+        let link_bw = dp_link_bandwidth_kbps(dc, li, &current_link_setting);
+        if req_bw <= link_bw {
+            *link_setting = current_link_setting;
+            return true;
+        }
+        if policy != 0 {
+            // minimize lane
+            if current_link_setting.link_rate < max_link_rate {
+                increase_edp_link_rate(dc, li, &mut current_link_setting);
+            } else if current_link_setting.lane_count < link.verified_link_cap.lane_count {
+                current_link_setting.lane_count = increase_lane_count(current_link_setting.lane_count);
+                current_link_setting.link_rate_set = initial_link_setting.link_rate_set;
+                current_link_setting.use_link_rate_set = initial_link_setting.use_link_rate_set;
+                current_link_setting.link_rate =
+                    link.dpcd_caps.edp_supported_link_rates[current_link_setting.link_rate_set as usize];
+            } else {
+                break;
+            }
+        } else {
+            // minimize link rate
+            if current_link_setting.lane_count < link.verified_link_cap.lane_count {
+                current_link_setting.lane_count = increase_lane_count(current_link_setting.lane_count);
+            } else {
+                increase_edp_link_rate(dc, li, &mut current_link_setting);
+                if current_link_setting.link_rate == LINK_RATE_UNKNOWN {
+                    break;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// `decide_mst_link_settings`.
+fn decide_mst_link_settings(dc: &dc, li: usize, link_setting: &mut dc_link_settings) -> bool {
+    *link_setting = dc.links[li].verified_link_cap;
+    true
+}
+
+/// `link_decide_link_settings`, the link service's
+/// `dp_decide_link_settings`.
+pub fn link_decide_link_settings(dc: &dc, stream: &crate::dc_stream::dc_stream_state,
+                                 link_setting: &mut dc_link_settings) -> bool {
+    let li = stream.link;
+    let link = &dc.links[li];
+    let req_bw = crate::dc_dsc::dc_bandwidth_in_kbps_from_timing(&stream.timing,
+        dc_link_get_highest_encoding_format(dc, li));
+
+    *link_setting = dc_link_settings::default();
+
+    if crate::link_detection::dc_is_dp_signal(stream.signal)
+        && link.preferred_link_setting.lane_count != LANE_COUNT_UNKNOWN
+        && link.preferred_link_setting.link_rate != LINK_RATE_UNKNOWN
+    {
+        // if preferred is specified through AMDDP, use it, if it's enough
+        // to drive the mode
+        *link_setting = link.preferred_link_setting;
+    } else if stream.signal == LF_SIGNAL_TYPE_DISPLAY_PORT_MST {
+        // MST doesn't perform link training for now
+        // TODO: add MST specific link training routine
+        decide_mst_link_settings(dc, li, link_setting);
+    } else if stream.signal == LF_SIGNAL_TYPE_VIRTUAL {
+        link_setting.lane_count = crate::dc_dp_types::LANE_COUNT_FOUR;
+        link_setting.link_rate = LINK_RATE_HIGH3;
+    } else if link.connector_signal == LF_SIGNAL_TYPE_EDP {
+        // enable edp link optimization for DSC eDP case
+        if stream.timing.flags.DSC {
+            let mut max_link_rate = LINK_RATE_UNKNOWN;
+
+            if link.panel_config.dsc_force_dsc_edp_policy != 0 {
+                // calculate link max link rate cap
+                let mut tmp_link_setting = dc_link_settings { link_rate: LINK_RATE_UNKNOWN, ..Default::default() };
+                let mut tmp_timing = stream.timing;
+
+                tmp_timing.flags.DSC = false;
+                let orig_req_bw = crate::dc_dsc::dc_bandwidth_in_kbps_from_timing(&tmp_timing,
+                    dc_link_get_highest_encoding_format(dc, li));
+                edp_decide_link_settings(dc, li, &mut tmp_link_setting, orig_req_bw);
+                max_link_rate = tmp_link_setting.link_rate;
+            }
+            decide_edp_link_settings_with_dsc(dc, li, link_setting, req_bw, max_link_rate);
+        } else {
+            edp_decide_link_settings(dc, li, link_setting, req_bw);
+        }
+    } else {
+        decide_dp_link_settings(dc, li, link_setting, req_bw);
+    }
+
+    link_setting.lane_count != LANE_COUNT_UNKNOWN && link_setting.link_rate != LINK_RATE_UNKNOWN
+}
+
+/// `link_decide_dp_tunnel_settings` (link_dp_dpia.c).
+pub fn link_decide_dp_tunnel_settings(dc: &dc, stream: &crate::dc_stream::dc_stream_state,
+                                      dp_tunnel_setting: &mut crate::dc_state::dc_tunnel_settings) {
+    let link = &dc.links[stream.link];
+
+    *dp_tunnel_setting = Default::default();
+
+    if stream.signal == LF_SIGNAL_TYPE_DISPLAY_PORT || stream.signal == LF_SIGNAL_TYPE_DISPLAY_PORT_MST {
+        let tun = &link.dpcd_caps.usb4_dp_tun_info;
+        dp_tunnel_setting.should_enable_dp_tunneling = dp_tun_cap_dp_tunneling(tun.dp_tun_cap) != 0;
+
+        if dp_tun_cap_dpia_bw_alloc(tun.dp_tun_cap) != 0
+            && usb4_driver_bw_cap_driver_bw_alloc_support(tun.driver_bw_cap) != 0
+        {
+            dp_tunnel_setting.should_use_dp_bw_allocation = true;
+            dp_tunnel_setting.cm_id = tun.usb4_driver_id & 0x0F;
+            // dpia_tunnel_info.bits.group_id
+            dp_tunnel_setting.group_id = tun.dpia_tunnel_info & 0x7;
+            dp_tunnel_setting.estimated_bw = link.dpia_bw_alloc_config.estimated_bw;
+            dp_tunnel_setting.allocated_bw = link.dpia_bw_alloc_config.allocated_bw;
+            dp_tunnel_setting.bw_granularity = link.dpia_bw_alloc_config.bw_granularity;
+        }
+    }
+}

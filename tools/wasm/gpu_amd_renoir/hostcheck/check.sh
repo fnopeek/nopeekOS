@@ -162,6 +162,27 @@ for seed in ones zeros hash lit boot; do
         fail=1
     fi
 done
+# The commit after detection, as far as the port goes: a stream and a
+# plane added to a copy of the current state (dc_state_add_stream,
+# dc_state_add_plane), identity and scaled; compared up to the line where
+# the port stops, the oracle's dc_validate_global_state.
+for seed in ones zeros hash lit boot; do
+    for plane in full scaled; do
+        "$B/oracle_dchw" "$BIOS" $seed commit $plane | grep -v '^ATOM BIOS:' > "$B/commit_$seed$plane.linux"
+        "$B/dchw_check" "$BIOS" $seed "$B/commit_$seed$plane.linux" commit $plane > "$B/commit_$seed$plane.port"
+        n=$(grep -n '^dc_validate_global_state' "$B/commit_$seed$plane.linux" | cut -d: -f1)
+        n=$(( ${n:-$(($(wc -l < "$B/commit_$seed$plane.linux") + 1))} - 1 ))
+        head -n $n "$B/commit_$seed$plane.linux" > "$B/commit_$seed$plane.linux.head"
+        head -n $n "$B/commit_$seed$plane.port" > "$B/commit_$seed$plane.port.head"
+        if diff -u "$B/commit_$seed$plane.linux.head" "$B/commit_$seed$plane.port.head" | head -30;
+           cmp -s "$B/commit_$seed$plane.linux.head" "$B/commit_$seed$plane.port.head"; then
+            echo "commit ($seed, $plane plane): port = Linux to dc_state_add_plane" \
+                "($(sed -n '/^context added/,$p' "$B/commit_$seed$plane.linux.head" | wc -l) context lines)"
+        else
+            fail=1
+        fi
+    done
+done
 # Stage 2: the oracle reads the discovery binary, the port runs the whole
 # amdgpu_device_init on the fake card first.
 # Registers never written read all ones (a bit cleared shows), all zeros

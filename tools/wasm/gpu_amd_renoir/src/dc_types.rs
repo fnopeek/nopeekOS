@@ -634,11 +634,37 @@ impl Default for dp_protocol_version {
     fn default() -> Self { dp_protocol_version::DP_VERSION_1_4 }
 }
 
-/// `enum dc_status` (core_status.h), the values detection reaches.
+/// `enum dc_status` (core_status.h).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum dc_status {
     DC_OK = 1,
+    DC_NO_CONTROLLER_RESOURCE = 2,
+    DC_NO_STREAM_ENC_RESOURCE = 3,
+    DC_NO_CLOCK_SOURCE_RESOURCE = 4,
+    DC_FAIL_CONTROLLER_VALIDATE = 5,
+    DC_FAIL_ENC_VALIDATE = 6,
+    DC_FAIL_ATTACH_SURFACES = 7,
+    DC_FAIL_DETACH_SURFACES = 8,
+    DC_FAIL_SURFACE_VALIDATE = 9,
+    DC_NO_DP_LINK_BANDWIDTH = 10,
+    DC_EXCEED_DONGLE_CAP = 11,
+    DC_SURFACE_PIXEL_FORMAT_UNSUPPORTED = 12,
+    DC_FAIL_BANDWIDTH_VALIDATE = 13,
+    DC_FAIL_SCALING = 14,
+    DC_FAIL_DP_LINK_TRAINING = 15,
+    DC_FAIL_DSC_VALIDATE = 16,
+    DC_NO_DSC_RESOURCE = 17,
+    DC_FAIL_UNSUPPORTED_1 = 18,
+    DC_FAIL_CLK_EXCEED_MAX = 21,
+    DC_FAIL_CLK_BELOW_MIN = 22,
+    DC_FAIL_CLK_BELOW_CFG_REQUIRED = 23,
     DC_NOT_SUPPORTED = 24,
+    DC_UNSUPPORTED_VALUE = 25,
+    DC_NO_LINK_ENC_RESOURCE = 26,
+    DC_FAIL_DP_PAYLOAD_ALLOCATION = 27,
+    DC_FAIL_DP_LINK_BANDWIDTH = 28,
+    DC_FAIL_HW_CURSOR_SUPPORT = 29,
+    DC_FAIL_DP_TUNNEL_BW_VALIDATE = 30,
     DC_ERROR_UNEXPECTED = -1,
 }
 

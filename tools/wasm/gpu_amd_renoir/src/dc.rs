@@ -187,6 +187,9 @@ pub struct dc_debug_options {
     pub disable_dpp_power_gate: bool,
     pub disable_hubp_power_gate: bool,
     pub disable_dsc_power_gate: bool,
+    pub always_scale: bool,
+    pub force_chroma_subsampling_1tap: bool,
+    pub visual_confirm_rect_height: u32,
 }
 
 /// Which `dc_cap_funcs` entry is bound (dcn21 sets only
@@ -232,6 +235,11 @@ pub struct dc {
     /// `vm_pa_config`: the system context `dc_setup_system_context` keeps.
     pub vm_pa_config: dc_phy_addr_space_config,
     pub vendor_signature: dpcd_vendor_signature,
+    /// The streams the DM created (`dc_create_stream_for_sink`); a context
+    /// names one by its index here. `None` once released.
+    pub streams: Vec<Option<Box<crate::dc_stream::dc_stream_state>>>,
+    /// The plane states the DM created (`dc_create_plane_state`).
+    pub planes: Vec<Option<Box<crate::dc_stream::dc_plane_state>>>,
 }
 
 /// `struct dpcd_vendor_signature` (dc_dp_types.h): the source OUI a DM may

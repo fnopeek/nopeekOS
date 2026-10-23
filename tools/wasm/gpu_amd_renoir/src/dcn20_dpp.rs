@@ -3462,3 +3462,77 @@ pub static DPP_MASK: dcn2_dpp_mask = dcn2_dpp_mask {
     CM_TEST_DEBUG_DATA_ICSC_MODE: 0x18,
     CM_TEST_DEBUG_DATA_GAMUT_REMAP_MODE: 0x600,
 };
+
+/// `IDENTITY_RATIO` (dcn10_dpp.c).
+fn IDENTITY_RATIO(ratio: crate::fixpt31_32::fixed31_32) -> bool {
+    crate::fixpt31_32::dc_fixpt_u2d19(ratio) == (1 << 19)
+}
+
+/// `dpp1_get_optimal_number_of_taps` (dcn10_dpp.c), DCN 2.0's
+/// `dpp_get_optimal_number_of_taps`.
+pub fn dpp1_get_optimal_number_of_taps(dpp: &dcn20_dpp, dc_debug: &crate::dc::dc_debug_options,
+                                       scl_data: &mut crate::dc_hw_types::scaler_data,
+                                       in_taps: &crate::dc_hw_types::scaling_taps) -> bool {
+    use crate::fixpt31_32::dc_fixpt_one;
+    // Some ASICs does not support  FP16 scaling, so we reject modes require this
+    if scl_data.format == PIXEL_FORMAT_FP16
+        && dpp.base.caps.unwrap().dscl_data_proc_format == dscl_data_processing_format::DSCL_DATA_PRCESSING_FIXED_FORMAT
+        && scl_data.ratios.horz.value != dc_fixpt_one.value
+        && scl_data.ratios.vert.value != dc_fixpt_one.value
+    {
+        return false;
+    }
+
+    if scl_data.viewport.width > scl_data.h_active
+        && dc_debug.max_downscale_src_width != 0
+        && scl_data.viewport.width > dc_debug.max_downscale_src_width
+    {
+        return false;
+    }
+
+    // TODO: add lb check
+
+    // No support for programming ratio of 4, drop to 3.99999..
+    if scl_data.ratios.horz.value == (4i64 << 32) {
+        scl_data.ratios.horz.value -= 1;
+    }
+    if scl_data.ratios.vert.value == (4i64 << 32) {
+        scl_data.ratios.vert.value -= 1;
+    }
+    if scl_data.ratios.horz_c.value == (4i64 << 32) {
+        scl_data.ratios.horz_c.value -= 1;
+    }
+    if scl_data.ratios.vert_c.value == (4i64 << 32) {
+        scl_data.ratios.vert_c.value -= 1;
+    }
+
+    // Set default taps if none are provided
+    scl_data.taps.h_taps = if in_taps.h_taps == 0 { 4 } else { in_taps.h_taps };
+    scl_data.taps.v_taps = if in_taps.v_taps == 0 { 4 } else { in_taps.v_taps };
+    scl_data.taps.v_taps_c = if in_taps.v_taps_c == 0 { 2 } else { in_taps.v_taps_c };
+    scl_data.taps.h_taps_c = if in_taps.h_taps_c == 0 {
+        2
+    } else if in_taps.h_taps_c % 2 != 0 && in_taps.h_taps_c != 1 {
+        // Only 1 and even h_taps_c are supported by hw
+        in_taps.h_taps_c - 1
+    } else {
+        in_taps.h_taps_c
+    };
+
+    if !dc_debug.always_scale {
+        if IDENTITY_RATIO(scl_data.ratios.horz) {
+            scl_data.taps.h_taps = 1;
+        }
+        if IDENTITY_RATIO(scl_data.ratios.vert) {
+            scl_data.taps.v_taps = 1;
+        }
+        if IDENTITY_RATIO(scl_data.ratios.horz_c) {
+            scl_data.taps.h_taps_c = 1;
+        }
+        if IDENTITY_RATIO(scl_data.ratios.vert_c) {
+            scl_data.taps.v_taps_c = 1;
+        }
+    }
+
+    true
+}

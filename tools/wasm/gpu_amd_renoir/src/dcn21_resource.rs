@@ -430,6 +430,9 @@ const DEBUG_DEFAULTS_DRV: dc_debug_options = dc_debug_options {
     disable_dpp_power_gate: false,
     disable_hubp_power_gate: false,
     disable_dsc_power_gate: false,
+    always_scale: false,
+    force_chroma_subsampling_1tap: false,
+    visual_confirm_rect_height: 0,
 };
 
 /// `dcn21_pp_smu_create` (dcn21_resource.c): a table that is not Renoir's is

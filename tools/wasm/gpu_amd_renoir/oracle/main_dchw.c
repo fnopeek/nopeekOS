@@ -215,6 +215,53 @@ static u64 amdgpu_gmc_pd_addr(struct amdgpu_bo *bo)
 
 void kdrm_connector_create(struct dc_link *link);
 
+
+/* The context as the commit path builds it: the stream, and per pipe the
+ * blocks it holds (pool instances), its scaler data and pixel clock. */
+static void dump_context(const char *tag, struct dc_state *ctx)
+{
+	printf("context %s streams %d\n", tag, ctx->stream_count);
+	for (int s = 0; s < ctx->stream_count; s++) {
+		struct dc_stream_state *st = ctx->streams[s];
+		struct dc_stream_status *ss = &ctx->stream_status[s];
+
+		printf("  stream %d id %u signal %d phy_pix_clk %d link %d planes %d otg %d\n", s, st->stream_id,
+		       st->signal, st->phy_pix_clk, st->link->link_index, ss->plane_count, ss->primary_otg_inst);
+	}
+	for (int i = 0; i < MAX_PIPES; i++) {
+		struct pipe_ctx *p = &ctx->res_ctx.pipe_ctx[i];
+		struct scaler_data *d = &p->plane_res.scl_data;
+		struct pixel_clk_params *c = &p->stream_res.pix_clk_params;
+
+		if (!p->stream)
+			continue;
+		printf("  pipe %d idx %d plane %d tg %d opp %d hubp %d dpp %d mpcc %d senc %d clk %d top %d bottom %d"
+		       " odm %d %d\n", i, p->pipe_idx, p->plane_state != NULL,
+		       p->stream_res.tg ? p->stream_res.tg->inst : -1, p->stream_res.opp ? p->stream_res.opp->inst : -1,
+		       p->plane_res.hubp ? p->plane_res.hubp->inst : -1, p->plane_res.dpp ? p->plane_res.dpp->inst : -1,
+		       p->plane_res.mpcc_inst, p->stream_res.stream_enc ? (int)p->stream_res.stream_enc->id : -1,
+		       p->clock_source ? (int)p->clock_source->id : -1, p->top_pipe ? p->top_pipe->pipe_idx : -1,
+		       p->bottom_pipe ? p->bottom_pipe->pipe_idx : -1, p->prev_odm_pipe ? p->prev_odm_pipe->pipe_idx : -1,
+		       p->next_odm_pipe ? p->next_odm_pipe->pipe_idx : -1);
+		printf("    link lanes %d rate %d spread %d\n", p->link_config.dp_link_settings.lane_count,
+		       p->link_config.dp_link_settings.link_rate, p->link_config.dp_link_settings.link_spread);
+		printf("    pixclk req %u sym %u ref %u signal %d ctrl %d depth %d enc %d flags 0x%x pll actual %u ref %u"
+		       " fb %u.%u post %u\n", c->requested_pix_clk_100hz, c->requested_sym_clk, c->dp_ref_clk,
+		       c->signal_type, c->controller_id, c->color_depth, c->pixel_encoding, *(uint32_t *)&c->flags,
+		       p->pll_settings.actual_pix_clk_100hz, p->pll_settings.reference_divider,
+		       p->pll_settings.feedback_divider, p->pll_settings.fract_feedback_divider,
+		       p->pll_settings.pix_clk_post_divider);
+		printf("    scl active %d %d vp %d %d %d %d vpc %d %d %d %d recout %d %d %d %d\n", d->h_active, d->v_active,
+		       d->viewport.x, d->viewport.y, d->viewport.width, d->viewport.height, d->viewport_c.x,
+		       d->viewport_c.y, d->viewport_c.width, d->viewport_c.height, d->recout.x, d->recout.y,
+		       d->recout.width, d->recout.height);
+		printf("    scl ratios %lld %lld %lld %lld inits %lld %lld %lld %lld taps %d %d %d %d format %d lb %d\n",
+		       d->ratios.horz.value, d->ratios.vert.value, d->ratios.horz_c.value, d->ratios.vert_c.value,
+		       d->inits.h.value, d->inits.h_c.value, d->inits.v.value, d->inits.v_c.value, d->taps.h_taps,
+		       d->taps.v_taps, d->taps.h_taps_c, d->taps.v_taps_c, d->format, d->lb_params.depth);
+	}
+}
+
 /* udelay for the DMUB service's polls (dmub_srv.c): time does not pass
  * in the register file. */
 void (udelay)(unsigned long usecs)
@@ -427,6 +474,16 @@ int main(int argc, char **argv)
 		plane->plane_size.surface_size.height = 1080;
 		plane->plane_size.surface_pitch = 1920;
 		plane->src_rect = plane->dst_rect = plane->clip_rect = (struct rect){ 0, 0, 1920, 1080 };
+		/* argv[4] = scaled: a 1280x720 surface shown at 1600x900, offset,
+		 * so the scaler's ratios, taps, inits and viewport are not the
+		 * identity. */
+		if (argc > 4 && !strcmp(argv[4], "scaled")) {
+			plane->plane_size.surface_size.width = 1280;
+			plane->plane_size.surface_size.height = 720;
+			plane->plane_size.surface_pitch = 1280;
+			plane->src_rect = (struct rect){ 0, 0, 1280, 720 };
+			plane->dst_rect = plane->clip_rect = (struct rect){ 100, 50, 1600, 900 };
+		}
 		plane->tiling_info.gfx9.swizzle = DC_SW_LINEAR;
 		plane->rotation = ROTATION_ANGLE_0;
 		plane->visible = true;
@@ -440,8 +497,10 @@ int main(int argc, char **argv)
 		struct dc_state *context = dc_state_create_current_copy(dc);
 		printf("dc_state_add_stream %d\n", dc_state_add_stream(dc, context, stream));
 		printf("dc_state_add_plane %d\n", dc_state_add_plane(dc, stream, plane, context));
+		dump_context("added", context);
 		printf("dc_validate_global_state %d\n",
 		       dc_validate_global_state(dc, context, DC_VALIDATE_MODE_AND_PROGRAMMING));
+		dump_context("validated", context);
 		struct dc_commit_streams_params params = { .streams = &stream, .stream_count = 1 };
 		printf("dc_commit_streams %d\n", dc_commit_streams(dc, &params));
 		struct dc_surface_update srf = { .surface = plane };

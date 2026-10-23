@@ -1,12 +1,16 @@
 //! display/dc/core/dc_state.c + core/dc_link_enc_cfg.c (link_enc_cfg_init)
 //! (Linux 6.18.55): the DC state `dc_construct` ends with. Grown as reached:
-//! the DML copy, the clock manager it refers to and the DIG link encoder
-//! assignment context; streams, planes and pipes join with the commit path.
+//! the DML copy, the clock manager it refers to, the DIG link encoder
+//! assignment context, and the streams, planes and pipes of a commit.
 #![allow(dead_code)]
 
 use crate::dc::dc;
 use crate::dc_resource::MAX_DIG_LINK_ENCODERS;
-use crate::dc_types::{graphics_object_id, MAX_PIPES};
+use crate::dc_dp_types::dc_link_settings;
+use crate::dc_hw_types::scaler_data;
+use crate::dc_resource::MAX_CLOCK_SOURCES;
+use crate::dc_types::{graphics_object_id, MAX_PIPES, MAX_SURFACES};
+use crate::dce_clock_source::{pixel_clk_params, pll_settings};
 use crate::dcn21_link_encoder::ENGINE_ID_UNKNOWN;
 use crate::dml_structs::display_mode_lib;
 use alloc::boxed::Box;
@@ -46,43 +50,107 @@ pub struct link_enc_cfg_context {
 }
 
 /// `struct stream_resource` (core_types.h), the members reached. The
-/// blocks are named by their index in the resource pool's arrays.
+/// blocks are named by their index in the resource pool's arrays; `abm`
+/// says whether it holds the pool's one.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct stream_resource {
     pub opp: Option<usize>,
     pub tg: Option<usize>,
+    pub stream_enc: Option<usize>,
+    pub audio: Option<usize>,
+    pub pix_clk_params: pixel_clk_params,
+    pub abm: bool,
     pub gsl_group: i32,
 }
 
-/// `struct plane_resource` (core_types.h), the members reached.
+/// `struct plane_resource` (core_types.h), the members reached. DCN has no
+/// `mi` or `xfm`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct plane_resource {
+    pub scl_data: scaler_data,
     pub hubp: Option<usize>,
+    pub ipp: Option<usize>,
     pub dpp: Option<usize>,
     pub mpcc_inst: u8,
 }
 
-/// `struct pipe_ctx` (core_types.h), the members reached. A stream, a plane
-/// state and the neighbouring pipes are indices; none exists before the
-/// first commit.
+/// `struct link_resource` (core_types.h): `dio_link_enc` is the index of
+/// the link owning the encoder.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct link_resource {
+    pub dio_link_enc: Option<u32>,
+}
+
+/// `struct dc_tunnel_settings` (dc_dp_types.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct dc_tunnel_settings {
+    pub should_enable_dp_tunneling: bool,
+    pub should_use_dp_bw_allocation: bool,
+    pub cm_id: u8,
+    pub group_id: u8,
+    pub bw_granularity: u32,
+    pub estimated_bw: u32,
+    pub allocated_bw: u32,
+}
+
+/// `struct link_config` (core_types.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct link_config {
+    pub dp_link_settings: dc_link_settings,
+    pub dp_tunnel_settings: dc_tunnel_settings,
+}
+
+/// A `struct clock_source *` of a pipe: one of the pool's PLLs, or its DP
+/// DTO source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum clock_source_ref {
+    Pll(usize),
+    Dp,
+}
+
+/// `struct pipe_ctx` (core_types.h), the members reached. A stream and a
+/// plane state are indices into dc's arenas, the neighbouring pipes indices
+/// into the same context's `pipe_ctx`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct pipe_ctx {
     pub plane_state: Option<usize>,
     pub stream: Option<usize>,
     pub plane_res: plane_resource,
     pub stream_res: stream_resource,
+    pub link_res: link_resource,
+    pub clock_source: Option<clock_source_ref>,
+    pub pll_settings: pll_settings,
+    pub link_config: link_config,
     pub pipe_idx: u8,
     pub top_pipe: Option<usize>,
     pub bottom_pipe: Option<usize>,
     pub next_odm_pipe: Option<usize>,
     pub prev_odm_pipe: Option<usize>,
+    /// `dsc_padding_params.dsc_hactive_padding`.
+    pub dsc_hactive_padding: u8,
 }
 
 /// `struct resource_context` (core_types.h), the members reached.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct resource_context {
     pub pipe_ctx: [pipe_ctx; MAX_PIPES],
+    pub is_stream_enc_acquired: [bool; MAX_PIPES * 2],
+    pub is_audio_acquired: [bool; MAX_PIPES],
+    pub clock_source_ref_count: [u8; MAX_CLOCK_SOURCES],
+    pub dp_clock_source_ref_count: u8,
     pub link_enc_cfg_ctx: link_enc_cfg_context,
+}
+
+/// `struct dc_stream_status` (dc_stream.h), the members reached; the plane
+/// states are indices into dc's arena.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct dc_stream_status {
+    pub primary_otg_inst: i32,
+    pub stream_enc_inst: i32,
+    pub plane_count: i32,
+    pub audio_inst: i32,
+    pub plane_states: [Option<usize>; MAX_SURFACES],
+    pub is_abm_supported: bool,
 }
 
 /// `struct dcn_bw_output`'s clocks (core_types.h).
@@ -111,7 +179,8 @@ pub enum dc_power_source_type {
 pub struct dc_state {
     pub dml: Option<Box<display_mode_lib>>,
     pub has_clk_mgr: bool,
-    /// `stream_count`: the streams join with the commit path.
+    pub streams: [Option<usize>; MAX_PIPES],
+    pub stream_status: [dc_stream_status; MAX_PIPES],
     pub stream_count: u32,
     pub res_ctx: resource_context,
     pub bw_ctx: bw_context,
@@ -182,4 +251,149 @@ pub fn dc_state_get_stream_subvp_type(state: &dc_state, stream: Option<usize>) -
 /// `dc_state_get_pipe_subvp_type` (dc_state.c).
 pub fn dc_state_get_pipe_subvp_type(state: &dc_state, pipe_ctx: &pipe_ctx) -> u32 {
     dc_state_get_stream_subvp_type(state, pipe_ctx.stream)
+}
+
+/// `dc_state_copy_internal` (dc_state.c): the neighbouring pipes are
+/// indices, so the copy needs no relinking; the streams and planes it
+/// holds gain a reference.
+fn dc_state_copy_internal(dc: &mut dc, src_state: &dc_state) -> dc_state {
+    let dst_state = src_state.clone();
+
+    // retain streams and planes
+    for i in 0..dst_state.stream_count as usize {
+        crate::dc_stream::dc_stream_retain(dc, dst_state.streams[i].unwrap());
+        for j in 0..dst_state.stream_status[i].plane_count as usize {
+            crate::dc_stream::dc_plane_state_retain(dc, dst_state.stream_status[i].plane_states[j].unwrap());
+        }
+    }
+
+    dst_state
+}
+
+/// `dc_state_create_copy` (dc_state.c). DCN 2.1 has no dml2 context.
+pub fn dc_state_create_copy(dc: &mut dc, src_state: &dc_state) -> Box<dc_state> {
+    let mut new_state = Box::new(dc_state_copy_internal(dc, src_state));
+
+    new_state.refcount = 1;
+
+    new_state
+}
+
+/// `dc_state_create_current_copy` (dc_state.c).
+pub fn dc_state_create_current_copy(dc: &mut dc) -> Box<dc_state> {
+    let current = dc.current_state.take().unwrap();
+    let copy = dc_state_create_copy(dc, &current);
+    dc.current_state = Some(current);
+    copy
+}
+
+/// `dc_state_get_stream_status` (dc_state.c): the slot of `stream`.
+pub fn dc_state_get_stream_status(state: &dc_state, stream: usize) -> Option<usize> {
+    (0..state.stream_count as usize).find(|&i| state.streams[i] == Some(stream))
+}
+
+/// `dc_state_add_stream` (dc_state.c).
+pub fn dc_state_add_stream(dc: &mut dc, state: &mut dc_state, stream: usize) -> crate::dc_types::dc_status {
+    use crate::dc_types::dc_status;
+
+    if state.stream_count >= dc.res_pool.as_deref().unwrap().timing_generator_count {
+        crate::linux::Line::new().s("Max streams reached, can't add stream!").say();
+        return dc_status::DC_ERROR_UNEXPECTED;
+    }
+
+    state.streams[state.stream_count as usize] = Some(stream);
+    crate::dc_stream::dc_stream_retain(dc, stream);
+    state.stream_count += 1;
+
+    let res = crate::dc_resource::resource_add_otg_master_for_stream_output(dc, state, stream);
+    if res != dc_status::DC_OK {
+        crate::linux::Line::new().s("Adding stream to context failed with err ").hex(res as i32 as u32).say();
+    }
+
+    res
+}
+
+/// `add_plane_to_opp_head_pipes` (dc_resource.c).
+fn add_plane_to_opp_head_pipes(otg_master_pipe: usize, plane_state: usize, context: &mut dc_state) -> bool {
+    let mut opp_head_pipe = Some(otg_master_pipe);
+
+    while let Some(p) = opp_head_pipe {
+        let pipe = &mut context.res_ctx.pipe_ctx[p];
+        if pipe.plane_state.is_some() {
+            return false;
+        }
+        pipe.plane_state = Some(plane_state);
+        opp_head_pipe = pipe.next_odm_pipe;
+    }
+
+    true
+}
+
+/// `update_pipe_params_after_mpc_slice_count_change` (dc_resource.c).
+fn update_pipe_params_after_mpc_slice_count_change(dc: &mut dc, plane: usize, context: &mut dc_state) -> bool {
+    let pipe_count = dc.res_pool.as_deref().unwrap().pipe_count as usize;
+    let mut result = true;
+
+    let mut i = 0;
+    while i < pipe_count && result {
+        if context.res_ctx.pipe_ctx[i].plane_state == Some(plane) {
+            result = crate::dc_resource::resource_build_scaling_params(dc, &mut context.res_ctx, i);
+        }
+        i += 1;
+    }
+    result
+}
+
+/// `resource_append_dpp_pipes_for_plane_composition` (dc_resource.c).
+/// Adding a second plane to a stream (MPO) acquires secondary DPP pipes;
+/// that half is named, not ported.
+pub fn resource_append_dpp_pipes_for_plane_composition(dc: &mut dc, new_ctx: &mut dc_state, otg_master_pipe: usize,
+                                                       plane_state: usize) -> bool {
+    let mut success = if new_ctx.res_ctx.pipe_ctx[otg_master_pipe].plane_state.is_none() {
+        add_plane_to_opp_head_pipes(otg_master_pipe, plane_state, new_ctx)
+    } else {
+        crate::linux::Line::new().s("acquire_secondary_dpp_pipes_and_add_plane not ported").say();
+        false
+    };
+    if success {
+        // when appending a plane mpc slice count changes from 0 to 1
+        success = update_pipe_params_after_mpc_slice_count_change(dc, plane_state, new_ctx);
+        if !success {
+            crate::linux::Line::new().s("resource_remove_dpp_pipes_for_plane_composition not ported").say();
+        }
+    }
+
+    success
+}
+
+/// `dc_state_add_plane` (dc_state.c). Freeing pipes by undoing MPC combine
+/// or ODM slices to fit a further plane is named, not ported.
+pub fn dc_state_add_plane(dc: &mut dc, stream: usize, plane_state: usize, state: &mut dc_state) -> bool {
+    let stream_status = dc_state_get_stream_status(state, stream);
+    let otg_master_pipe = crate::dc_resource::resource_get_otg_master_for_stream(&state.res_ctx, stream);
+    let Some(ss) = stream_status else {
+        crate::linux::Line::new().s("Existing stream not found; failed to attach surface!").say();
+        return false;
+    };
+    if state.stream_status[ss].plane_count as usize == MAX_SURFACES {
+        crate::linux::Line::new().s("Surface: can not attach plane_state! Maximum is: ").dec(MAX_SURFACES as u64).say();
+        return false;
+    }
+    let Some(otg_master_pipe) = otg_master_pipe else { return false };
+
+    let mut added = resource_append_dpp_pipes_for_plane_composition(dc, state, otg_master_pipe, plane_state);
+
+    if !added {
+        crate::linux::Line::new().s("remove_mpc_combine_for_stream, resource_update_pipes_for_stream_with_slice_count not ported").say();
+        added = false;
+    }
+
+    if added {
+        let st = &mut state.stream_status[ss];
+        st.plane_states[st.plane_count as usize] = Some(plane_state);
+        st.plane_count += 1;
+        crate::dc_stream::dc_plane_state_retain(dc, plane_state);
+    }
+
+    added
 }

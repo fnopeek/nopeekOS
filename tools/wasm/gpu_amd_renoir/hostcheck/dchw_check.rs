@@ -229,6 +229,51 @@ fn print_range(n: &str, i: u32, r: &dm_pp_smu::pp_smu_wm_set_range) {
     );
 }
 
+/// The context as the commit path builds it (the oracle's `dump_context`).
+fn dump_context(dc: &dc::dc, tag: &str, ctx: &dc_state::dc_state) {
+    let pool = dc.res_pool.as_deref().unwrap();
+    println!("context {} streams {}", tag, ctx.stream_count);
+    for s in 0..ctx.stream_count as usize {
+        let st = dc.streams[ctx.streams[s].unwrap()].as_deref().unwrap();
+        let ss = &ctx.stream_status[s];
+        println!("  stream {} id {} signal {} phy_pix_clk {} link {} planes {} otg {}", s, st.stream_id, st.signal,
+            st.phy_pix_clk, dc.links[st.link].link_index, ss.plane_count, ss.primary_otg_inst);
+    }
+    for i in 0..dc_types::MAX_PIPES {
+        let p = &ctx.res_ctx.pipe_ctx[i];
+        if p.stream.is_none() {
+            continue;
+        }
+        let d = &p.plane_res.scl_data;
+        let c = &p.stream_res.pix_clk_params;
+        let idx = |o: Option<usize>| o.map_or(-1, |j| ctx.res_ctx.pipe_ctx[j].pipe_idx as i32);
+        println!("  pipe {} idx {} plane {} tg {} opp {} hubp {} dpp {} mpcc {} senc {} clk {} top {} bottom {} odm {} {}",
+            i, p.pipe_idx, p.plane_state.is_some() as u32,
+            p.stream_res.tg.map_or(-1, |t| pool.timing_generators[t].as_deref().unwrap().base.inst as i32),
+            p.stream_res.opp.map_or(-1, |t| pool.opps[t].as_deref().unwrap().base.inst as i32),
+            p.plane_res.hubp.map_or(-1, |t| pool.hubps[t].as_deref().unwrap().base.inst as i32),
+            p.plane_res.dpp.map_or(-1, |t| pool.dpps[t].as_deref().unwrap().base.inst as i32),
+            p.plane_res.mpcc_inst,
+            p.stream_res.stream_enc.map_or(-1, |t| pool.stream_enc[t].as_ref().unwrap().base().id as i32),
+            p.clock_source.map_or(-1, |cs| dc_resource::clock_source_of(pool, cs).base.id as i32),
+            idx(p.top_pipe), idx(p.bottom_pipe), idx(p.prev_odm_pipe), idx(p.next_odm_pipe));
+        let l = &p.link_config.dp_link_settings;
+        println!("    link lanes {} rate {} spread {}", l.lane_count, l.link_rate, l.link_spread);
+        let ps = &p.pll_settings;
+        println!("    pixclk req {} sym {} ref {} signal {} ctrl {} depth {} enc {} flags {:#x} pll actual {} ref {} fb {}.{} post {}",
+            c.requested_pix_clk_100hz, c.requested_sym_clk, c.dp_ref_clk, c.signal_type, c.controller_id,
+            c.color_depth, c.pixel_encoding, c.flags.raw(), ps.actual_pix_clk_100hz, ps.reference_divider,
+            ps.feedback_divider, ps.fract_feedback_divider, ps.pix_clk_post_divider);
+        println!("    scl active {} {} vp {} {} {} {} vpc {} {} {} {} recout {} {} {} {}", d.h_active, d.v_active,
+            d.viewport.x, d.viewport.y, d.viewport.width, d.viewport.height, d.viewport_c.x, d.viewport_c.y,
+            d.viewport_c.width, d.viewport_c.height, d.recout.x, d.recout.y, d.recout.width, d.recout.height);
+        println!("    scl ratios {} {} {} {} inits {} {} {} {} taps {} {} {} {} format {} lb {}",
+            d.ratios.horz.value, d.ratios.vert.value, d.ratios.horz_c.value, d.ratios.vert_c.value,
+            d.inits.h.value, d.inits.h_c.value, d.inits.v.value, d.inits.v_c.value, d.taps.h_taps, d.taps.v_taps,
+            d.taps.h_taps_c, d.taps.v_taps_c, d.format, d.lb_params.depth);
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let bios = std::fs::read(args.next().expect("vbios.bin")).expect("read");
@@ -240,7 +285,10 @@ fn main() {
         _ => hash,
     };
     let oracle_out = args.next();
-    let detect = args.next().as_deref() == Some("detect");
+    let mode3 = args.next();
+    let commit = mode3.as_deref() == Some("commit");
+    let detect = commit || mode3.as_deref() == Some("detect");
+    let scaled = args.next().as_deref() == Some("scaled");
     let presets: Vec<(u32, u32)> = if let Some(path) = oracle_out {
         let text = std::fs::read_to_string(path).expect("read");
         text.lines()
@@ -401,6 +449,72 @@ fn main() {
                 link.dpcd_caps.dpcd_rev, link.dpcd_caps.max_ln_count, link.dpcd_caps.max_down_spread,
                 link.dpcd_sink_ext_caps, link.dpcd_caps.sink_count, link.dpcd_caps.is_branch_dev as u32);
         }
+    }
+    // After detection, a 1920x1080 stream for the panel from its EDID's
+    // first detailed timing, one ARGB8888 plane, then the commit chain as
+    // amdgpu_dm_atomic_commit_tail calls it (the oracle's `commit`).
+    if commit && dc.links[0].local_sink.is_some() {
+        let stream = dc_stream::dc_create_stream_for_sink(&mut dc, 0).unwrap();
+        {
+            let st = dc.streams[stream].as_deref_mut().unwrap();
+            let t = &mut st.timing;
+            t.h_addressable = 1920;
+            t.h_total = 1920 + 222;
+            t.h_front_porch = 60;
+            t.h_sync_width = 32;
+            t.v_addressable = 1080;
+            t.v_total = 1080 + 20;
+            t.v_front_porch = 3;
+            t.v_sync_width = 6;
+            t.pix_clk_100hz = 1414000;
+            t.display_color_depth = COLOR_DEPTH_888;
+            t.pixel_encoding = PIXEL_ENCODING_RGB;
+            t.scan_type = SCANNING_TYPE_NODATA;
+            t.flags.HSYNC_POSITIVE_POLARITY = true;
+            t.flags.VSYNC_POSITIVE_POLARITY = true;
+            st.src.width = 1920;
+            st.dst.width = 1920;
+            st.src.height = 1080;
+            st.dst.height = 1080;
+            st.output_color_space = COLOR_SPACE_SRGB;
+            st.out_transfer_func.r#type = TF_TYPE_PREDEFINED;
+            st.out_transfer_func.tf = TRANSFER_FUNCTION_SRGB;
+        }
+
+        let plane = dc_stream::dc_create_plane_state(&mut dc);
+        {
+            let pl = dc.planes[plane].as_deref_mut().unwrap();
+            pl.format = SURFACE_PIXEL_FORMAT_GRPH_ARGB8888;
+            pl.plane_size.surface_size.width = 1920;
+            pl.plane_size.surface_size.height = 1080;
+            pl.plane_size.surface_pitch = 1920;
+            let r = dc_hw_types::rect { x: 0, y: 0, width: 1920, height: 1080 };
+            pl.src_rect = r;
+            pl.dst_rect = r;
+            pl.clip_rect = r;
+            if scaled {
+                pl.plane_size.surface_size.width = 1280;
+                pl.plane_size.surface_size.height = 720;
+                pl.plane_size.surface_pitch = 1280;
+                pl.src_rect = dc_hw_types::rect { x: 0, y: 0, width: 1280, height: 720 };
+                pl.dst_rect = dc_hw_types::rect { x: 100, y: 50, width: 1600, height: 900 };
+                pl.clip_rect = pl.dst_rect;
+            }
+            pl.tiling_info.swizzle = DC_SW_LINEAR;
+            pl.rotation = ROTATION_ANGLE_0;
+            pl.visible = true;
+            pl.color_space = COLOR_SPACE_SRGB;
+            pl.address.r#type = PLN_ADDR_TYPE_GRAPHICS;
+            pl.address.grph_addr = 0xf4_0000_0000 + 0x100_0000;
+            pl.global_alpha_value = 0xff;
+            pl.in_transfer_func.r#type = TF_TYPE_PREDEFINED;
+            pl.in_transfer_func.tf = TRANSFER_FUNCTION_SRGB;
+        }
+
+        let mut context = dc_state::dc_state_create_current_copy(&mut dc);
+        println!("dc_state_add_stream {}", dc_state::dc_state_add_stream(&mut dc, &mut context, stream) as i32);
+        println!("dc_state_add_plane {}", dc_state::dc_state_add_plane(&mut dc, stream, plane, &mut context) as u32);
+        dump_context(&dc, "added", &context);
     }
     npk_sys::fake_card_echo(false);
 

@@ -165,6 +165,7 @@ pub struct dc_link {
     pub dpcd_sink_count: u32,
     pub reported_link_cap: crate::dc_dp_types::dc_link_settings,
     pub verified_link_cap: crate::dc_dp_types::dc_link_settings,
+    pub preferred_link_setting: crate::dc_dp_types::dc_link_settings,
     pub cur_link_settings: crate::dc_dp_types::dc_link_settings,
     pub dongle_max_pix_clk: u32,
     pub hdcp_caps: crate::dc_dp_types::hdcp_caps,
@@ -175,7 +176,18 @@ pub struct dc_link {
     /// `enum dc_link_fec_state` (dc_dp_types.h).
     pub fec_state: u32,
     pub panel_config: panel_config,
+    pub dpia_preferred_eng_id: u32,
+    pub dpia_bw_alloc_config: dc_dpia_bw_alloc,
     pub dp_trace: dp_trace,
+}
+
+/// `struct dc_dpia_bw_alloc` (dc.h), the members a stream's tunnel
+/// settings copy.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct dc_dpia_bw_alloc {
+    pub estimated_bw: u32,
+    pub allocated_bw: u32,
+    pub bw_granularity: u32,
 }
 
 /// `struct dc_panel_config` (dc_types.h), its sub-structs flattened; the

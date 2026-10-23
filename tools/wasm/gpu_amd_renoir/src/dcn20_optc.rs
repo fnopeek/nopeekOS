@@ -1300,3 +1300,13 @@ pub static OPTC_MASK: dcn_optc_mask = dcn_optc_mask {
     MANUAL_FLOW_CONTROL: OTG0_OTG_MANUAL_FLOW_CONTROL__MANUAL_FLOW_CONTROL_MASK,
     OTG_V_TOTAL_LAST_USED_BY_DRR: OTG0_OTG_DRR_CONTROL__OTG_V_TOTAL_LAST_USED_BY_DRR_MASK,
 };
+
+/// `optc1_is_two_pixels_per_container` (dcn10_optc.c), DCN 2.0's
+/// `is_two_pixels_per_container`.
+pub fn optc1_is_two_pixels_per_container(timing: &crate::dc_hw_types::dc_crtc_timing) -> bool {
+    let mut two_pix = timing.pixel_encoding == PIXEL_ENCODING_YCBCR420;
+
+    two_pix = two_pix
+        || (timing.flags.DSC && timing.pixel_encoding == PIXEL_ENCODING_YCBCR422 && !timing.dsc_cfg.ycbcr422_simple);
+    two_pix
+}

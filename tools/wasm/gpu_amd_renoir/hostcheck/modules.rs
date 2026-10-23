@@ -223,6 +223,14 @@ mod dcn21_link_encoder;
 mod link_factory;
 #[path = "../src/dc_state.rs"]
 mod dc_state;
+#[path = "../src/dc_hw_types.rs"]
+mod dc_hw_types;
+#[path = "../src/dc_stream.rs"]
+mod dc_stream;
+#[path = "../src/dc_dsc.rs"]
+mod dc_dsc;
+#[path = "../src/dcn20_resource.rs"]
+mod dcn20_resource;
 #[path = "../src/dc_ddc_types.rs"]
 mod dc_ddc_types;
 #[path = "../src/link_dpcd.rs"]
