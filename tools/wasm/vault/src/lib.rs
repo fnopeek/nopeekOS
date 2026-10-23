@@ -74,13 +74,27 @@ const A_SEC_WIFI: u32 = 11;
 const A_SEARCH_ENTER: u32 = 20;
 const A_COPY_PASS: u32 = 21;
 const A_COPY_USER: u32 = 22;
+const A_MENU_VAULT: u32 = 30;
+const A_MENU_EDIT: u32 = 31;
+const A_MENU_DISMISS: u32 = 32;
+const A_CLOSE: u32 = 33;
+const A_FIND: u32 = 34;
 const A_ENTER_BASE: u32 = 300; // + field index: Enter pressed in that field
 const A_SEL_BASE: u32 = 1000; // + row index: select that entry
 
 /// NodeId of form field `i` is `NODE_FIELD + i`.
 const NODE_FIELD: u32 = 100;
+/// Menu-bar labels, the anchors of their dropdowns.
+const NODE_MENU_VAULT: u32 = 200;
+const NODE_MENU_EDIT: u32 = 201;
 /// `focus_field` value that requests focus for the search box.
 const FOCUS_SEARCH: usize = usize::MAX;
+
+#[derive(PartialEq, Clone, Copy)]
+enum Menu {
+    Vault,
+    Edit,
+}
 
 #[derive(PartialEq, Clone, Copy)]
 enum View {
@@ -146,6 +160,8 @@ struct St {
     confirm_del: bool,
     msg: &'static str,
     msg_err: bool,
+    /// The open menu-bar dropdown.
+    menu: Option<Menu>,
     /// FNV hash of a password we put on the clipboard (0 = none), and when
     /// to clear it again.
     clip_hash: u64,
@@ -375,8 +391,8 @@ fn message(st: &St) -> Option<Widget> {
     })
 }
 
-/// A centered card screen (setup / unlock / forms) on a full-window surface.
-fn screen_card(st: &St, mut children: Vec<Widget>, hints: &str) -> Widget {
+/// A centered card screen (setup / unlock / forms).
+fn screen_card(st: &St, mut children: Vec<Widget>) -> Widget {
     if let Some(m) = message(st) {
         children.push(m);
     }
@@ -392,17 +408,11 @@ fn screen_card(st: &St, mut children: Vec<Widget>, hints: &str) -> Widget {
             Modifier::MaxWidth(460),
         ],
     };
-    let page = Widget::Column {
+    Widget::Column {
         children: vec![Widget::Spacer { flex: 1 }, card, Widget::Spacer { flex: 1 }],
         spacing: 0,
         align: Align::Center,
         modifiers: vec![Modifier::Flex(1), Modifier::Padding(Padding::Lg.as_u16())],
-    };
-    Widget::Column {
-        children: vec![page, Widget::Divider, prefab::footer("", hints)],
-        spacing: Spacing::None.as_u16(),
-        align: Align::Stretch,
-        modifiers: vec![Modifier::Background(Token::Surface)],
     }
 }
 
@@ -418,7 +428,6 @@ fn setup_screen(st: &St) -> Widget {
             labelled(st, 1, "CONFIRM", "", true),
             button_row(vec![btn("Create vault", ButtonStyle::Primary, A_SAVE)]),
         ],
-        "Enter next · Esc close",
     )
 }
 
@@ -445,7 +454,6 @@ fn unlock_screen(st: &St) -> Widget {
             labelled(st, 0, "MASTER PASSPHRASE", "", true),
             button_row(vec![btn("Unlock", ButtonStyle::Primary, A_SAVE)]),
         ],
-        "Enter unlock · Esc close",
     )
 }
 
@@ -465,7 +473,6 @@ fn edit_screen(st: &St) -> Widget {
                 btn("Save", ButtonStyle::Primary, A_SAVE),
             ]),
         ],
-        "Tab next · Ctrl S save · Esc cancel",
     )
 }
 
@@ -481,7 +488,6 @@ fn wifi_screen(st: &St) -> Widget {
                 btn("Save", ButtonStyle::Primary, A_SAVE),
             ]),
         ],
-        "Tab next · Ctrl S save · Esc cancel",
     )
 }
 
@@ -522,15 +528,17 @@ fn detail_pane(st: &St, names: &[String], shown: &[usize]) -> Widget {
     let pane_mods = vec![Modifier::Flex(1), Modifier::MinWidth(280), Modifier::Padding(Padding::Md.as_u16())];
     let sel = st.sel;
     if sel < 0 || !shown.contains(&(sel as usize)) {
+        let mut children = vec![prefab::muted("Select an entry")];
+        children.extend(message(st));
         return Widget::Column {
-            children: vec![prefab::muted("Select an entry")],
+            children,
             spacing: 0,
             align: Align::Start,
             modifiers: pane_mods,
         };
     }
     let name = &names[sel as usize];
-    let children: Vec<Widget> = if st.section == 0 {
+    let mut children: Vec<Widget> = if st.section == 0 {
         let l = fetch_login(name);
         let pass_shown = if l.pass.is_empty() {
             "—".into()
@@ -576,6 +584,7 @@ fn detail_pane(st: &St, names: &[String], shown: &[usize]) -> Widget {
             button_row(vec![delete_button(st)]),
         ]
     };
+    children.extend(message(st));
     Widget::Column { children, spacing: Spacing::Md.as_u16(), align: Align::Stretch, modifiers: pane_mods }
 }
 
@@ -688,32 +697,84 @@ fn list_screen(st: &St) -> Widget {
         modifiers: vec![Modifier::Flex(1)],
     };
 
-    let status = if st.msg.is_empty() {
-        alloc::format!("{} items · unlocked", names.len())
-    } else {
-        st.msg.into()
-    };
     Widget::Column {
-        children: vec![
-            toolbar,
-            Widget::Divider,
-            body,
-            Widget::Divider,
-            prefab::footer(&status, "↑↓ select · Enter show · Ctrl C copy · Ctrl L lock"),
-        ],
+        children: vec![toolbar, Widget::Divider, body],
         spacing: Spacing::None.as_u16(),
         align: Align::Stretch,
+        modifiers: vec![Modifier::Flex(1)],
+    }
+}
+
+fn menu_items(items: &[(&str, u32, &str)]) -> Widget {
+    let entries: Vec<(String, ActionId)> = items.iter().map(|(l, a, _)| ((*l).into(), ActionId(*a))).collect();
+    let hints: Vec<&str> = items.iter().map(|(_, _, h)| *h).collect();
+    prefab::popover_menu_shortcuts(&entries, &hints, None)
+}
+
+/// The open dropdown. What it offers depends on the screen: locked, only
+/// Close; in a form, Lock and Close; on the list, everything.
+fn dropdown(st: &St, menu: Menu) -> Widget {
+    let on_list = st.view == View::List;
+    let unlocked = matches!(st.view, View::List | View::EditSecret | View::AddWifi);
+    let (anchor, content) = match menu {
+        Menu::Vault => {
+            let mut items: Vec<(&str, u32, &str)> = Vec::new();
+            if on_list {
+                items.push(("New secret", A_ADD, "Ctrl+N"));
+                items.push(("New Wi-Fi network", A_ADD_WIFI, ""));
+            }
+            if unlocked {
+                items.push(("Lock", A_LOCK, "Ctrl+L"));
+            }
+            items.push(("Close", A_CLOSE, "Esc"));
+            (NODE_MENU_VAULT, menu_items(&items))
+        }
+        Menu::Edit => {
+            let user = st.section == 0;
+            let mut items: Vec<(&str, u32, &str)> = vec![("Find", A_FIND, "Ctrl+F")];
+            if st.sel >= 0 {
+                if user {
+                    items.push(("Edit", A_EDIT, "F2"));
+                    items.push(("Copy username", A_COPY_USER, "Ctrl+B"));
+                    items.push(("Copy password", A_COPY_PASS, "Ctrl+C"));
+                }
+                items.push((if st.reveal { "Hide password" } else { "Show password" }, A_REVEAL, "Enter"));
+                items.push(("Delete", A_DELETE, "Del"));
+            }
+            (NODE_MENU_EDIT, menu_items(&items))
+        }
+    };
+    Widget::Popover {
+        anchor: NodeId(anchor),
+        child: alloc::boxed::Box::new(content),
+        on_dismiss: ActionId(A_MENU_DISMISS),
         modifiers: vec![],
     }
 }
 
 fn render(st: &St) -> Widget {
-    match st.view {
+    let mut labels: Vec<(String, ActionId)> = vec![("Vault".into(), ActionId(A_MENU_VAULT))];
+    let mut anchors = vec![NodeId(NODE_MENU_VAULT)];
+    if st.view == View::List {
+        labels.push(("Edit".into(), ActionId(A_MENU_EDIT)));
+        anchors.push(NodeId(NODE_MENU_EDIT));
+    }
+    let content = match st.view {
         View::Setup => setup_screen(st),
         View::Unlock => unlock_screen(st),
         View::List => list_screen(st),
         View::EditSecret => edit_screen(st),
         View::AddWifi => wifi_screen(st),
+    };
+    let mut children = vec![prefab::menu_bar_with_icon(IconId::Lock, &labels, &anchors), Widget::Divider, content];
+    if let Some(m) = st.menu {
+        children.push(dropdown(st, m));
+    }
+    Widget::Column {
+        children,
+        spacing: Spacing::None.as_u16(),
+        align: Align::Stretch,
+        modifiers: vec![Modifier::Background(Token::Surface)],
     }
 }
 
@@ -1008,7 +1069,14 @@ fn on_action(st: &mut St, id: u32) {
     if id != A_DELETE {
         st.confirm_del = false;
     }
+    // A menu label toggles its own dropdown; anything else closes it.
+    let open = st.menu;
+    st.menu = None;
     match id {
+        A_MENU_VAULT => st.menu = if open == Some(Menu::Vault) { None } else { Some(Menu::Vault) },
+        A_MENU_EDIT => st.menu = if open == Some(Menu::Edit) { None } else { Some(Menu::Edit) },
+        A_MENU_DISMISS => {}
+        A_FIND => st.focus_on(FOCUS_SEARCH),
         A_SAVE => save_form(st),
         A_REVEAL => st.reveal = !st.reveal,
         A_ADD => {
@@ -1075,6 +1143,7 @@ fn handle(st: &mut St, ev: Event) -> Outcome {
             ensure_unlocked(st);
             Outcome::Rerender
         }
+        Event::Action(ActionId(A_CLOSE)) => Outcome::Exit,
         Event::Action(ActionId(id)) => {
             if ensure_unlocked(st) {
                 on_action(st, id);
@@ -1098,6 +1167,10 @@ fn handle(st: &mut St, ev: Event) -> Outcome {
                 (b'f', View::List) => st.focus_on(FOCUS_SEARCH),
                 _ => return Outcome::Idle,
             }
+            Outcome::Rerender
+        }
+        Event::Key(KeyCode::Escape) if st.menu.is_some() => {
+            st.menu = None;
             Outcome::Rerender
         }
         Event::Key(KeyCode::Escape) => match st.view {
@@ -1165,6 +1238,7 @@ pub extern "C" fn _start() {
         confirm_del: false,
         msg: "",
         msg_err: false,
+        menu: None,
         clip_hash: 0,
         clip_deadline: 0,
         heap_base: ALLOCATOR.mark(),
