@@ -9,16 +9,19 @@
 #![allow(dead_code)]
 
 use crate::dc_resource::resource_pool;
-use crate::dc_types::{dc_caps, dce_environment, dce_version, dc_versions, hw_asic_id};
+use crate::dc_types::{dc_bios, dc_caps, dce_environment, dce_version, dc_versions, hw_asic_id};
 use alloc::boxed::Box;
 
 /// `struct dc_context` (dc_types.h): the per-device DC context. Sub-block
-/// handles (dc_bios, dmub_srv, perf_trace, …) join as their stages land.
+/// handles (dmub_srv, perf_trace, …) join as their stages land. Linux' `dc_bios`
+/// is a pointer; the port holds it by value until bios_parser2 lands (see
+/// `dc_bios`).
 #[derive(Default)]
 pub struct dc_context {
     pub dce_environment: dce_environment,
     pub asic_id: hw_asic_id,
     pub dce_version: dce_version,
+    pub dc_bios: dc_bios,
     pub dc_sink_id_count: u32,
     pub dc_stream_id_count: u32,
     pub dc_edp_id_count: u32,

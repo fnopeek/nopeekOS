@@ -3954,3 +3954,34 @@ mmUVD_LMI_JRBC_RB_MEM_WR_64BIT_BAR_LOW_INTERNAL_OFFSET @ jpeg_v2_0.c
 MAX_KIQ_REG_WAIT
 MAX_KIQ_REG_BAILOUT_INTERVAL
 MAX_KIQ_REG_TRY
+# DC clock source: the absolute register offsets of dce110_clk_src_regs, as
+# CS_COMMON_REG_LIST_DCN2_1 expands them for Renoir (dce/dce_clock_source.h).
+# The value is BASE(mmX_BASE_IDX) + mmX, with BASE = DMU_BASE__INST0_SEGx, the
+# same arithmetic dcn21_resource.c's SRI/SRII macros do; computed through that
+# file so its BASE macro and the dcn_2_1 headers are in scope.
+CS_PHYPLLA_PIXCLK_RESYNC_CNTL = BASE(mmPHYPLLA_PIXCLK_RESYNC_CNTL_BASE_IDX) + mmPHYPLLA_PIXCLK_RESYNC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_PHYPLLB_PIXCLK_RESYNC_CNTL = BASE(mmPHYPLLB_PIXCLK_RESYNC_CNTL_BASE_IDX) + mmPHYPLLB_PIXCLK_RESYNC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_PHYPLLC_PIXCLK_RESYNC_CNTL = BASE(mmPHYPLLC_PIXCLK_RESYNC_CNTL_BASE_IDX) + mmPHYPLLC_PIXCLK_RESYNC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_PHYPLLD_PIXCLK_RESYNC_CNTL = BASE(mmPHYPLLD_PIXCLK_RESYNC_CNTL_BASE_IDX) + mmPHYPLLD_PIXCLK_RESYNC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_PHYPLLE_PIXCLK_RESYNC_CNTL = BASE(mmPHYPLLE_PIXCLK_RESYNC_CNTL_BASE_IDX) + mmPHYPLLE_PIXCLK_RESYNC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_DP_DTO0_PHASE = BASE(mmDP_DTO0_PHASE_BASE_IDX) + mmDP_DTO0_PHASE @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_DP_DTO1_PHASE = BASE(mmDP_DTO1_PHASE_BASE_IDX) + mmDP_DTO1_PHASE @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_DP_DTO2_PHASE = BASE(mmDP_DTO2_PHASE_BASE_IDX) + mmDP_DTO2_PHASE @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_DP_DTO3_PHASE = BASE(mmDP_DTO3_PHASE_BASE_IDX) + mmDP_DTO3_PHASE @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_DP_DTO0_MODULO = BASE(mmDP_DTO0_MODULO_BASE_IDX) + mmDP_DTO0_MODULO @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_DP_DTO1_MODULO = BASE(mmDP_DTO1_MODULO_BASE_IDX) + mmDP_DTO1_MODULO @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_DP_DTO2_MODULO = BASE(mmDP_DTO2_MODULO_BASE_IDX) + mmDP_DTO2_MODULO @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_DP_DTO3_MODULO = BASE(mmDP_DTO3_MODULO_BASE_IDX) + mmDP_DTO3_MODULO @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_OTG0_PIXEL_RATE_CNTL = BASE(mmOTG0_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG0_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_OTG1_PIXEL_RATE_CNTL = BASE(mmOTG1_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG1_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_OTG2_PIXEL_RATE_CNTL = BASE(mmOTG2_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG2_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+CS_OTG3_PIXEL_RATE_CNTL = BASE(mmOTG3_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG3_PIXEL_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC clock source field shifts/masks (CS_COMMON_MASK_SH_LIST_DCN2_0)
+DP_DTO0_PHASE__DP_DTO0_PHASE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_DTO0_PHASE__DP_DTO0_PHASE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_DTO0_MODULO__DP_DTO0_MODULO__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_DTO0_MODULO__DP_DTO0_MODULO_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+PHYPLLA_PIXCLK_RESYNC_CNTL__PHYPLLA_DCCG_DEEP_COLOR_CNTL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+PHYPLLA_PIXCLK_RESYNC_CNTL__PHYPLLA_DCCG_DEEP_COLOR_CNTL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c

@@ -135,12 +135,35 @@ Weiter gebaut (ruhend):
   `dcn20_fpu.rs` (`dcn2_1_ip()`, `dcn2_1_soc()` — Renoirs Werte 1:1). Das sind
   die DML-Eingaben; das formale Orakel kommt mit der DML-Verdrahtung.
 
-**Nächste Einheit:** die IP-Block-Konstruktoren der „Create resources"-Sektion
-(clock source, dccg, hubbub, je Pipe hubp/dpp/opp/optc, mpc, stream/link
-encoder) + `clk_mgr` + `dml_init_instance`. Je Block: `regs.list` erweitern →
-`gen_regs.py` (Hintergrund, mehrere Minuten) → Struct + funcs + Konstruktor +
-Orakel (fake_gpu prüft die Registerschreibzugriffe). Das ist der Hauptteil von
-Stufe A; der erste host-prüfbare Meilenstein ist der fertige Objektgraph.
+### Stufe-A-Fortschritt (2026-10-23): Clock Sources
+
+Erster „Create resources"-Block portiert (ruhend, baut, nichts released):
+`src/dce_clock_source.rs` — `clock_source_id`/`clock_source`, `dce110_clk_src`
++ `_regs`/`_shift`/`_mask`, die Statics `CLK_SRC_REGS[5]`/`CS_SHIFT`/`CS_MASK`
+(1:1 aus `CS_COMMON_REG_LIST_DCN2_1` + `CS_COMMON_MASK_SH_LIST_DCN2_0`) und
+`dce112_clk_src_construct`→`dcn20_clk_src_construct`→`dcn21_clock_source_create`.
+**Renoir nimmt den kurzen `dce112`-Pfad**: der Konstruktor legt nur Zeiger +
+funcs-Tabelle + `ext_clk_khz` an und **schreibt kein Register** (kein calc_pll /
+Spread-Spectrum — das wäre `dce110_clk_src_construct`). Substanz ist also die
+Registertabelle. `regs.list` +25 (17 absolute Offsets `BASE(mmX_BASE_IDX)+mmX`
+über `dcn21_resource.c`, 4 Shift + 4 Mask), `regs.rs` neu generiert.
+`dcn21_resource_construct` legt jetzt die 5 PLLs + DP-DTO an und setzt
+`clk_src_count`. Mitgewachsen: `dc_bios`/`dc_firmware_info`/`MAX_PIPES`
+(dc_types), `ctx.dc_bios` (dc.rs), `clock_sources[7]`/`dp_clock_source`
+(resource_pool). Verifikation: Werte maschinell aus den Linux-Headern +
+Makro-Struktur geprüft; das formale Orakel kommt mit dem Objektgraph.
+
+**Nächste Einheit:** die restlichen „Create resources"-Konstruktoren, der Reihe
+nach — **`dccg21_create` zuerst** (erster Block mit echtem `dccg_regs`-Satz),
+dann je Pipe hubp/ipp/dpp/opp/optc, aux/i2c, mpc, hubbub, dsc, dwbc, mmhubbub,
+der irq-Service, `resource_construct` + `dcn21_hw_sequencer_construct`, und
+`dml_init_instance`. Je Block: `regs.list` erweitern → `gen_regs.py`
+(Hintergrund, mehrere Minuten) → Struct + funcs + Konstruktor. Die meisten
+Konstruktoren schreiben KEIN Register (Zeiger + funcs-Tabelle); die
+Schreibzugriffe kommen in hwss (Stufe D/E). **Das formale `main_dc.c`-Orakel
+(extract.py-Weg + os_types-Shim) wird EINMAL am fertigen Objektgraph gebaut und
+prüft dann den ganzen Construct** — der erste host-prüfbare Meilenstein ist der
+Graph, nicht der Einzelblock.
 
 ## Risiken / offen
 

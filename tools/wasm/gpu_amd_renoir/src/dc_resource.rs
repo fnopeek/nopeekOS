@@ -3,6 +3,12 @@
 //! table a pool points `res_pool->res_cap` at (e.g. `res_cap_rn` for Renoir).
 #![allow(dead_code)]
 
+use crate::dce_clock_source::dce110_clk_src;
+use alloc::boxed::Box;
+
+/// `#define MAX_CLOCK_SOURCES` (core_types.h).
+pub const MAX_CLOCK_SOURCES: usize = 7;
+
 /// `struct resource_caps` (resource.h): how many of each block the ASIC has.
 #[derive(Default, Clone, Copy)]
 pub struct resource_caps {
@@ -41,6 +47,11 @@ pub struct resource_pool {
     pub stream_enc_count: u32,
     pub audio_count: u32,
     pub clk_src_count: u32,
+    /// `clock_sources[MAX_CLOCK_SOURCES]`: every Renoir clock source is a
+    /// `dce110_clk_src`, so the pool holds the concrete type (Linux stores the
+    /// `clock_source` base pointer).
+    pub clock_sources: [Option<Box<dce110_clk_src>>; MAX_CLOCK_SOURCES],
+    pub dp_clock_source: Option<Box<dce110_clk_src>>,
     /// `res_cap`: the per-ASIC count table (Renoir → `RES_CAP_RN`).
     pub res_cap: Option<&'static resource_caps>,
 }

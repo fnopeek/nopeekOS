@@ -8,6 +8,15 @@
 use crate::dc::dc;
 use crate::dc_resource::{resource_caps, resource_pool, NO_UNDERLAY_PIPE};
 use crate::dc_types::dc_caps;
+use crate::dce_clock_source::{clock_source_id, dcn21_clock_source_create, CLK_SRC_REGS};
+
+/// `enum dcn20_clk_src_array_id` (dcn21_resource.c): the clock-source slots.
+const DCN20_CLK_SRC_PLL0: usize = 0;
+const DCN20_CLK_SRC_PLL1: usize = 1;
+const DCN20_CLK_SRC_PLL2: usize = 2;
+const DCN20_CLK_SRC_PLL3: usize = 3;
+const DCN20_CLK_SRC_PLL4: usize = 4;
+const DCN20_CLK_SRC_TOTAL_DCN21: u32 = 5;
 
 /// `static const struct resource_caps res_cap_rn` (dcn21_resource.c):
 /// Renoir has 4 timing generators / OPPs / video planes / audio, 5 stream
@@ -90,11 +99,14 @@ pub fn dcn21_set_caps(caps: &mut dc_caps) {
     caps.dp_hdmi21_pcon_support = true;
 }
 
-/// `dcn21_resource_construct` (dcn21_resource.c), its head: the pool's resource
-/// caps and the `dc->caps` hardcoding. The "Create resources" section (clock
-/// sources + the IP-block constructors, each with its regs.list entries) grows
-/// this as each block lands; `ctx->dc_bios->regs = &bios_regs` waits for
-/// bios_parser, `read_pipe_fuses` for the pipe-fuse read.
+/// `dcn21_resource_construct` (dcn21_resource.c), as far as it is ported: the
+/// pool's resource caps, the `dc->caps` hardcoding, and the first "Create
+/// resources" block — the five combo-PHY clock sources plus the DP-DTO clock
+/// source. The remaining constructors (dccg, hubbub, per-pipe hubp/dpp/opp/optc,
+/// mpc, encoders, `dml_init_instance`) grow this as each block lands;
+/// `ctx->dc_bios->regs = &bios_regs` waits for bios_parser, `read_pipe_fuses`
+/// for the pipe-fuse read, and the NULL-checks / `goto create_fail` return with
+/// the full construct.
 pub fn dcn21_resource_construct(dc: &mut dc, pool: &mut resource_pool) {
     pool.res_cap = Some(&RES_CAP_RN);
 
@@ -104,4 +116,24 @@ pub fn dcn21_resource_construct(dc: &mut dc, pool: &mut resource_pool) {
     pool.pipe_count = RES_CAP_RN.num_timing_generator as u32;
 
     dcn21_set_caps(&mut dc.caps);
+
+    // Create resources: the clock sources. CLOCK_SOURCE_COMBO_PHY_PLL0..4 use
+    // clk_src_regs[0..4]; the DP-DTO source reuses clk_src_regs[0] (Linux'
+    // "todo: not reuse phy_pll registers").
+    let bios = &dc.ctx.dc_bios;
+    pool.clock_sources[DCN20_CLK_SRC_PLL0] = dcn21_clock_source_create(
+        bios, clock_source_id::CLOCK_SOURCE_COMBO_PHY_PLL0, &CLK_SRC_REGS[0], false);
+    pool.clock_sources[DCN20_CLK_SRC_PLL1] = dcn21_clock_source_create(
+        bios, clock_source_id::CLOCK_SOURCE_COMBO_PHY_PLL1, &CLK_SRC_REGS[1], false);
+    pool.clock_sources[DCN20_CLK_SRC_PLL2] = dcn21_clock_source_create(
+        bios, clock_source_id::CLOCK_SOURCE_COMBO_PHY_PLL2, &CLK_SRC_REGS[2], false);
+    pool.clock_sources[DCN20_CLK_SRC_PLL3] = dcn21_clock_source_create(
+        bios, clock_source_id::CLOCK_SOURCE_COMBO_PHY_PLL3, &CLK_SRC_REGS[3], false);
+    pool.clock_sources[DCN20_CLK_SRC_PLL4] = dcn21_clock_source_create(
+        bios, clock_source_id::CLOCK_SOURCE_COMBO_PHY_PLL4, &CLK_SRC_REGS[4], false);
+
+    pool.clk_src_count = DCN20_CLK_SRC_TOTAL_DCN21;
+
+    pool.dp_clock_source = dcn21_clock_source_create(
+        bios, clock_source_id::CLOCK_SOURCE_ID_DP_DTO, &CLK_SRC_REGS[0], true);
 }

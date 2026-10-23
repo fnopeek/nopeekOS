@@ -7911,3 +7911,65 @@ pub const MAX_KIQ_REG_WAIT: u32 = 0x1388;
 pub const MAX_KIQ_REG_BAILOUT_INTERVAL: u32 = 0x5;
 /// amdgpu/amdgpu.h:365
 pub const MAX_KIQ_REG_TRY: u32 = 0x3e8;
+
+// DC clock source: the absolute register offsets of dce110_clk_src_regs, as
+
+// CS_COMMON_REG_LIST_DCN2_1 expands them for Renoir (dce/dce_clock_source.h).
+
+// The value is BASE(mmX_BASE_IDX) + mmX, with BASE = DMU_BASE__INST0_SEGx, the
+
+// same arithmetic dcn21_resource.c's SRI/SRII macros do; computed through that
+
+// file so its BASE macro and the dcn_2_1 headers are in scope.
+/// The value of `BASE(mmPHYPLLA_PIXCLK_RESYNC_CNTL_BASE_IDX) + mmPHYPLLA_PIXCLK_RESYNC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_PHYPLLA_PIXCLK_RESYNC_CNTL: u32 = 0x100;
+/// The value of `BASE(mmPHYPLLB_PIXCLK_RESYNC_CNTL_BASE_IDX) + mmPHYPLLB_PIXCLK_RESYNC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_PHYPLLB_PIXCLK_RESYNC_CNTL: u32 = 0x101;
+/// The value of `BASE(mmPHYPLLC_PIXCLK_RESYNC_CNTL_BASE_IDX) + mmPHYPLLC_PIXCLK_RESYNC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_PHYPLLC_PIXCLK_RESYNC_CNTL: u32 = 0x102;
+/// The value of `BASE(mmPHYPLLD_PIXCLK_RESYNC_CNTL_BASE_IDX) + mmPHYPLLD_PIXCLK_RESYNC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_PHYPLLD_PIXCLK_RESYNC_CNTL: u32 = 0x103;
+/// The value of `BASE(mmPHYPLLE_PIXCLK_RESYNC_CNTL_BASE_IDX) + mmPHYPLLE_PIXCLK_RESYNC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_PHYPLLE_PIXCLK_RESYNC_CNTL: u32 = 0x10c;
+/// The value of `BASE(mmDP_DTO0_PHASE_BASE_IDX) + mmDP_DTO0_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_DP_DTO0_PHASE: u32 = 0x141;
+/// The value of `BASE(mmDP_DTO1_PHASE_BASE_IDX) + mmDP_DTO1_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_DP_DTO1_PHASE: u32 = 0x145;
+/// The value of `BASE(mmDP_DTO2_PHASE_BASE_IDX) + mmDP_DTO2_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_DP_DTO2_PHASE: u32 = 0x149;
+/// The value of `BASE(mmDP_DTO3_PHASE_BASE_IDX) + mmDP_DTO3_PHASE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_DP_DTO3_PHASE: u32 = 0x14d;
+/// The value of `BASE(mmDP_DTO0_MODULO_BASE_IDX) + mmDP_DTO0_MODULO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_DP_DTO0_MODULO: u32 = 0x142;
+/// The value of `BASE(mmDP_DTO1_MODULO_BASE_IDX) + mmDP_DTO1_MODULO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_DP_DTO1_MODULO: u32 = 0x146;
+/// The value of `BASE(mmDP_DTO2_MODULO_BASE_IDX) + mmDP_DTO2_MODULO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_DP_DTO2_MODULO: u32 = 0x14a;
+/// The value of `BASE(mmDP_DTO3_MODULO_BASE_IDX) + mmDP_DTO3_MODULO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_DP_DTO3_MODULO: u32 = 0x14e;
+/// The value of `BASE(mmOTG0_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG0_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_OTG0_PIXEL_RATE_CNTL: u32 = 0x140;
+/// The value of `BASE(mmOTG1_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG1_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_OTG1_PIXEL_RATE_CNTL: u32 = 0x144;
+/// The value of `BASE(mmOTG2_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG2_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_OTG2_PIXEL_RATE_CNTL: u32 = 0x148;
+/// The value of `BASE(mmOTG3_PIXEL_RATE_CNTL_BASE_IDX) + mmOTG3_PIXEL_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const CS_OTG3_PIXEL_RATE_CNTL: u32 = 0x14c;
+
+// DC clock source field shifts/masks (CS_COMMON_MASK_SH_LIST_DCN2_0)
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1674
+pub const DP_DTO0_PHASE__DP_DTO0_PHASE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1673
+pub const DP_DTO0_PHASE__DP_DTO0_PHASE_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1676
+pub const DP_DTO0_MODULO__DP_DTO0_MODULO__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1675
+pub const DP_DTO0_MODULO__DP_DTO0_MODULO_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:1666
+pub const PHYPLLA_PIXCLK_RESYNC_CNTL__PHYPLLA_DCCG_DEEP_COLOR_CNTL__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:1665
+pub const PHYPLLA_PIXCLK_RESYNC_CNTL__PHYPLLA_DCCG_DEEP_COLOR_CNTL_MASK: u32 = 0x30;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2147
+pub const OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:2154
+pub const OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE_MASK: u32 = 0x10;

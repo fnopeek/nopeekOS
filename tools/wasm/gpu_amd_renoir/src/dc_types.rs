@@ -110,6 +110,28 @@ pub const DC_VER: &str = "3.2.351";
 pub const MAX_PLANES: usize = 6;
 pub const MAX_SURFACES: usize = 4;
 
+/// `#define MAX_PIPES` (inc/hw/hw_shared.h): the DCN pipe arrays' bound.
+pub const MAX_PIPES: usize = 6;
+
+/// `struct dc_firmware_info` (include/grph_object_ctrl_defs.h): ported
+/// grow-as-reached — the clock-source construct reads only
+/// `external_clock_source_frequency_for_dp`, so only that field is here.
+#[derive(Default, Clone, Copy)]
+pub struct dc_firmware_info {
+    /// In KHz.
+    pub external_clock_source_frequency_for_dp: u32,
+}
+
+/// `struct dc_bios` (dc/dc_bios_types.h): the VBIOS interface a `dc_context`
+/// points at. Linux holds it by pointer (owned by the BIOS parser); until
+/// bios_parser2 lands the port carries the reached fields by value — the
+/// clock-source path reads `fw_info` and `fw_info_valid`.
+#[derive(Default)]
+pub struct dc_bios {
+    pub fw_info: dc_firmware_info,
+    pub fw_info_valid: bool,
+}
+
 // ── dc_caps and its tree (dc.h) ───────────────────────────────────────────
 // Software capability structs the resource pool fills; the C uns:1 bitfields
 // become bool here (these are not MMIO layouts — only the values matter).
