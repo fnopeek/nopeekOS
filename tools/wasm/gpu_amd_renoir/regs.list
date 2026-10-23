@@ -9248,3 +9248,677 @@ DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_FORWARD_EN__SHIFT @ ../display/dc/res
 DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_FORWARD_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
 DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_OPP_PIPE_SOURCE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
 DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_OPP_PIPE_SOURCE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+
+# DC dwbc: dcn20_dwbc_registers absolute offsets per pipe instance
+# (DWBC_COMMON_REG_LIST_DCN2_0({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+DWBC0_WB_ENABLE = BASE(mmWB_ENABLE_BASE_IDX) + mmWB_ENABLE @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WB_EC_CONFIG = BASE(mmWB_EC_CONFIG_BASE_IDX) + mmWB_EC_CONFIG @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_CNV_MODE = BASE(mmCNV_MODE_BASE_IDX) + mmCNV_MODE @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_CNV_WINDOW_START = BASE(mmCNV_WINDOW_START_BASE_IDX) + mmCNV_WINDOW_START @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_CNV_WINDOW_SIZE = BASE(mmCNV_WINDOW_SIZE_BASE_IDX) + mmCNV_WINDOW_SIZE @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_CNV_UPDATE = BASE(mmCNV_UPDATE_BASE_IDX) + mmCNV_UPDATE @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_CNV_SOURCE_SIZE = BASE(mmCNV_SOURCE_SIZE_BASE_IDX) + mmCNV_SOURCE_SIZE @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_CNV_TEST_CNTL = BASE(mmCNV_TEST_CNTL_BASE_IDX) + mmCNV_TEST_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_CNV_TEST_CRC_RED = BASE(mmCNV_TEST_CRC_RED_BASE_IDX) + mmCNV_TEST_CRC_RED @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_CNV_TEST_CRC_GREEN = BASE(mmCNV_TEST_CRC_GREEN_BASE_IDX) + mmCNV_TEST_CRC_GREEN @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_CNV_TEST_CRC_BLUE = BASE(mmCNV_TEST_CRC_BLUE_BASE_IDX) + mmCNV_TEST_CRC_BLUE @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_COEF_RAM_SELECT = BASE(mmWBSCL_COEF_RAM_SELECT_BASE_IDX) + mmWBSCL_COEF_RAM_SELECT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_COEF_RAM_TAP_DATA = BASE(mmWBSCL_COEF_RAM_TAP_DATA_BASE_IDX) + mmWBSCL_COEF_RAM_TAP_DATA @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_MODE = BASE(mmWBSCL_MODE_BASE_IDX) + mmWBSCL_MODE @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_TAP_CONTROL = BASE(mmWBSCL_TAP_CONTROL_BASE_IDX) + mmWBSCL_TAP_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_DEST_SIZE = BASE(mmWBSCL_DEST_SIZE_BASE_IDX) + mmWBSCL_DEST_SIZE @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_HORZ_FILTER_SCALE_RATIO = BASE(mmWBSCL_HORZ_FILTER_SCALE_RATIO_BASE_IDX) + mmWBSCL_HORZ_FILTER_SCALE_RATIO @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_HORZ_FILTER_INIT_Y_RGB = BASE(mmWBSCL_HORZ_FILTER_INIT_Y_RGB_BASE_IDX) + mmWBSCL_HORZ_FILTER_INIT_Y_RGB @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_HORZ_FILTER_INIT_CBCR = BASE(mmWBSCL_HORZ_FILTER_INIT_CBCR_BASE_IDX) + mmWBSCL_HORZ_FILTER_INIT_CBCR @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_VERT_FILTER_SCALE_RATIO = BASE(mmWBSCL_VERT_FILTER_SCALE_RATIO_BASE_IDX) + mmWBSCL_VERT_FILTER_SCALE_RATIO @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_VERT_FILTER_INIT_Y_RGB = BASE(mmWBSCL_VERT_FILTER_INIT_Y_RGB_BASE_IDX) + mmWBSCL_VERT_FILTER_INIT_Y_RGB @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_VERT_FILTER_INIT_CBCR = BASE(mmWBSCL_VERT_FILTER_INIT_CBCR_BASE_IDX) + mmWBSCL_VERT_FILTER_INIT_CBCR @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_ROUND_OFFSET = BASE(mmWBSCL_ROUND_OFFSET_BASE_IDX) + mmWBSCL_ROUND_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_OVERFLOW_STATUS = BASE(mmWBSCL_OVERFLOW_STATUS_BASE_IDX) + mmWBSCL_OVERFLOW_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_COEF_RAM_CONFLICT_STATUS = BASE(mmWBSCL_COEF_RAM_CONFLICT_STATUS_BASE_IDX) + mmWBSCL_COEF_RAM_CONFLICT_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_TEST_CNTL = BASE(mmWBSCL_TEST_CNTL_BASE_IDX) + mmWBSCL_TEST_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_TEST_CRC_RED = BASE(mmWBSCL_TEST_CRC_RED_BASE_IDX) + mmWBSCL_TEST_CRC_RED @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_TEST_CRC_GREEN = BASE(mmWBSCL_TEST_CRC_GREEN_BASE_IDX) + mmWBSCL_TEST_CRC_GREEN @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_TEST_CRC_BLUE = BASE(mmWBSCL_TEST_CRC_BLUE_BASE_IDX) + mmWBSCL_TEST_CRC_BLUE @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_BACKPRESSURE_CNT_EN = BASE(mmWBSCL_BACKPRESSURE_CNT_EN_BASE_IDX) + mmWBSCL_BACKPRESSURE_CNT_EN @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WB_MCIF_BACKPRESSURE_CNT = BASE(mmWB_MCIF_BACKPRESSURE_CNT_BASE_IDX) + mmWB_MCIF_BACKPRESSURE_CNT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_CLAMP_Y_RGB = BASE(mmWBSCL_CLAMP_Y_RGB_BASE_IDX) + mmWBSCL_CLAMP_Y_RGB @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_CLAMP_CBCR = BASE(mmWBSCL_CLAMP_CBCR_BASE_IDX) + mmWBSCL_CLAMP_CBCR @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_OUTSIDE_PIX_STRATEGY = BASE(mmWBSCL_OUTSIDE_PIX_STRATEGY_BASE_IDX) + mmWBSCL_OUTSIDE_PIX_STRATEGY @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_OUTSIDE_PIX_STRATEGY_CBCR = BASE(mmWBSCL_OUTSIDE_PIX_STRATEGY_CBCR_BASE_IDX) + mmWBSCL_OUTSIDE_PIX_STRATEGY_CBCR @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_DEBUG = BASE(mmWBSCL_DEBUG_BASE_IDX) + mmWBSCL_DEBUG @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_TEST_DEBUG_INDEX = BASE(mmWBSCL_TEST_DEBUG_INDEX_BASE_IDX) + mmWBSCL_TEST_DEBUG_INDEX @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WBSCL_TEST_DEBUG_DATA = BASE(mmWBSCL_TEST_DEBUG_DATA_BASE_IDX) + mmWBSCL_TEST_DEBUG_DATA @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WB_DEBUG_CTRL = BASE(mmWB_DEBUG_CTRL_BASE_IDX) + mmWB_DEBUG_CTRL @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WB_DBG_MODE = BASE(mmWB_DBG_MODE_BASE_IDX) + mmWB_DBG_MODE @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WB_HW_DEBUG = BASE(mmWB_HW_DEBUG_BASE_IDX) + mmWB_HW_DEBUG @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_CNV_TEST_DEBUG_INDEX = BASE(mmCNV_TEST_DEBUG_INDEX_BASE_IDX) + mmCNV_TEST_DEBUG_INDEX @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_CNV_TEST_DEBUG_DATA = BASE(mmCNV_TEST_DEBUG_DATA_BASE_IDX) + mmCNV_TEST_DEBUG_DATA @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WB_SOFT_RESET = BASE(mmWB_SOFT_RESET_BASE_IDX) + mmWB_SOFT_RESET @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WB_WARM_UP_MODE_CTL1 = BASE(mmWB_WARM_UP_MODE_CTL1_BASE_IDX) + mmWB_WARM_UP_MODE_CTL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+DWBC0_WB_WARM_UP_MODE_CTL2 = BASE(mmWB_WARM_UP_MODE_CTL2_BASE_IDX) + mmWB_WARM_UP_MODE_CTL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC dwbc field shifts/masks (DWBC_COMMON_MASK_SH_LIST_DCN2_0(__SHIFT))
+WB_ENABLE__WB_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_ENABLE__WB_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__DISPCLK_R_WB_GATE_DIS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__DISPCLK_R_WB_GATE_DIS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__DISPCLK_G_WB_GATE_DIS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__DISPCLK_G_WB_GATE_DIS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__DISPCLK_G_WBSCL_GATE_DIS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__DISPCLK_G_WBSCL_GATE_DIS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WB_TEST_CLK_SEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WB_TEST_CLK_SEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WB_LB_LS_DIS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WB_LB_LS_DIS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WB_LB_SD_DIS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WB_LB_SD_DIS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WB_LUT_LS_DIS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WB_LUT_LS_DIS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WBSCL_LB_MEM_PWR_MODE_SEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WBSCL_LB_MEM_PWR_MODE_SEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WBSCL_LB_MEM_PWR_DIS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WBSCL_LB_MEM_PWR_DIS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WBSCL_LB_MEM_PWR_FORCE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WBSCL_LB_MEM_PWR_FORCE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WBSCL_LB_MEM_PWR_STATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WBSCL_LB_MEM_PWR_STATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WB_RAM_PW_SAVE_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WB_RAM_PW_SAVE_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WBSCL_LUT_MEM_PWR_STATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_EC_CONFIG__WBSCL_LUT_MEM_PWR_STATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_OUT_BPC__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_OUT_BPC_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_FRAME_CAPTURE_RATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_FRAME_CAPTURE_RATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_WINDOW_CROP_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_WINDOW_CROP_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_STEREO_TYPE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_STEREO_TYPE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_INTERLACED_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_INTERLACED_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_EYE_SELECTION__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_EYE_SELECTION_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_STEREO_POLARITY__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_STEREO_POLARITY_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_INTERLACED_FIELD_ORDER__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_INTERLACED_FIELD_ORDER_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_STEREO_SPLIT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_STEREO_SPLIT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_NEW_CONTENT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_NEW_CONTENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_FRAME_CAPTURE_EN_CURRENT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_FRAME_CAPTURE_EN_CURRENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_FRAME_CAPTURE_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_MODE__CNV_FRAME_CAPTURE_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_WINDOW_START__CNV_WINDOW_START_X__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_WINDOW_START__CNV_WINDOW_START_X_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_WINDOW_START__CNV_WINDOW_START_Y__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_WINDOW_START__CNV_WINDOW_START_Y_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_WINDOW_SIZE__CNV_WINDOW_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_WINDOW_SIZE__CNV_WINDOW_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_WINDOW_SIZE__CNV_WINDOW_HEIGHT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_WINDOW_SIZE__CNV_WINDOW_HEIGHT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_UPDATE__CNV_UPDATE_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_UPDATE__CNV_UPDATE_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_UPDATE__CNV_UPDATE_TAKEN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_UPDATE__CNV_UPDATE_TAKEN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_UPDATE__CNV_UPDATE_LOCK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_UPDATE__CNV_UPDATE_LOCK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_SOURCE_SIZE__CNV_SOURCE_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_SOURCE_SIZE__CNV_SOURCE_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_SOURCE_SIZE__CNV_SOURCE_HEIGHT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_SOURCE_SIZE__CNV_SOURCE_HEIGHT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CNTL__CNV_TEST_CRC_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CNTL__CNV_TEST_CRC_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CNTL__CNV_TEST_CRC_CONT_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CNTL__CNV_TEST_CRC_CONT_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_RED__CNV_TEST_CRC_RED_MASK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_RED__CNV_TEST_CRC_RED_MASK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_RED__CNV_TEST_CRC_SIG_RED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_RED__CNV_TEST_CRC_SIG_RED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_GREEN__CNV_TEST_CRC_GREEN_MASK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_GREEN__CNV_TEST_CRC_GREEN_MASK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_GREEN__CNV_TEST_CRC_SIG_GREEN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_GREEN__CNV_TEST_CRC_SIG_GREEN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_BLUE__CNV_TEST_CRC_BLUE_MASK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_BLUE__CNV_TEST_CRC_BLUE_MASK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_BLUE__CNV_TEST_CRC_SIG_BLUE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_CRC_BLUE__CNV_TEST_CRC_SIG_BLUE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DEBUG_CTRL__WB_DEBUG_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DEBUG_CTRL__WB_DEBUG_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DEBUG_CTRL__WB_DEBUG_SEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DEBUG_CTRL__WB_DEBUG_SEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_MODE_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_MODE_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_DIN_FMT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_DIN_FMT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_36MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_36MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_CMAP__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_CMAP_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_PXLRATE_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_PXLRATE_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_SOURCE_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_DBG_MODE__WB_DBG_SOURCE_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_HW_DEBUG__WB_HW_DEBUG__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_HW_DEBUG__WB_HW_DEBUG_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_SOFT_RESET__WB_SOFT_RESET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_SOFT_RESET__WB_SOFT_RESET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_DEBUG_INDEX__CNV_TEST_DEBUG_INDEX__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_DEBUG_INDEX__CNV_TEST_DEBUG_INDEX_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_DEBUG_INDEX__CNV_TEST_DEBUG_WRITE_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_DEBUG_INDEX__CNV_TEST_DEBUG_WRITE_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_DEBUG_DATA__CNV_TEST_DEBUG_DATA__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+CNV_TEST_DEBUG_DATA__CNV_TEST_DEBUG_DATA_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_TAP_PAIR_IDX__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_TAP_PAIR_IDX_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_PHASE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_PHASE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_FILTER_TYPE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_FILTER_TYPE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_EVEN_TAP_COEF__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_EVEN_TAP_COEF_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_EVEN_TAP_COEF_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_EVEN_TAP_COEF_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_ODD_TAP_COEF__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_ODD_TAP_COEF_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_ODD_TAP_COEF_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_ODD_TAP_COEF_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_MODE__WBSCL_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_MODE__WBSCL_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_MODE__WBSCL_OUT_BIT_DEPTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_MODE__WBSCL_OUT_BIT_DEPTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TAP_CONTROL__WBSCL_V_NUM_OF_TAPS_Y_RGB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TAP_CONTROL__WBSCL_V_NUM_OF_TAPS_Y_RGB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TAP_CONTROL__WBSCL_V_NUM_OF_TAPS_CBCR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TAP_CONTROL__WBSCL_V_NUM_OF_TAPS_CBCR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TAP_CONTROL__WBSCL_H_NUM_OF_TAPS_Y_RGB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TAP_CONTROL__WBSCL_H_NUM_OF_TAPS_Y_RGB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TAP_CONTROL__WBSCL_H_NUM_OF_TAPS_CBCR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TAP_CONTROL__WBSCL_H_NUM_OF_TAPS_CBCR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_DEST_SIZE__WBSCL_DEST_HEIGHT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_DEST_SIZE__WBSCL_DEST_HEIGHT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_DEST_SIZE__WBSCL_DEST_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_DEST_SIZE__WBSCL_DEST_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_HORZ_FILTER_SCALE_RATIO__WBSCL_H_SCALE_RATIO__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_HORZ_FILTER_SCALE_RATIO__WBSCL_H_SCALE_RATIO_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_HORZ_FILTER_INIT_Y_RGB__WBSCL_H_INIT_FRAC_Y_RGB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_HORZ_FILTER_INIT_Y_RGB__WBSCL_H_INIT_FRAC_Y_RGB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_HORZ_FILTER_INIT_Y_RGB__WBSCL_H_INIT_INT_Y_RGB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_HORZ_FILTER_INIT_Y_RGB__WBSCL_H_INIT_INT_Y_RGB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_HORZ_FILTER_INIT_CBCR__WBSCL_H_INIT_FRAC_CBCR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_HORZ_FILTER_INIT_CBCR__WBSCL_H_INIT_FRAC_CBCR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_HORZ_FILTER_INIT_CBCR__WBSCL_H_INIT_INT_CBCR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_HORZ_FILTER_INIT_CBCR__WBSCL_H_INIT_INT_CBCR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_VERT_FILTER_SCALE_RATIO__WBSCL_V_SCALE_RATIO__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_VERT_FILTER_SCALE_RATIO__WBSCL_V_SCALE_RATIO_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_VERT_FILTER_INIT_Y_RGB__WBSCL_V_INIT_FRAC_Y_RGB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_VERT_FILTER_INIT_Y_RGB__WBSCL_V_INIT_FRAC_Y_RGB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_VERT_FILTER_INIT_Y_RGB__WBSCL_V_INIT_INT_Y_RGB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_VERT_FILTER_INIT_Y_RGB__WBSCL_V_INIT_INT_Y_RGB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_VERT_FILTER_INIT_CBCR__WBSCL_V_INIT_FRAC_CBCR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_VERT_FILTER_INIT_CBCR__WBSCL_V_INIT_FRAC_CBCR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_VERT_FILTER_INIT_CBCR__WBSCL_V_INIT_INT_CBCR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_VERT_FILTER_INIT_CBCR__WBSCL_V_INIT_INT_CBCR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_ROUND_OFFSET__WBSCL_ROUND_OFFSET_Y_RGB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_ROUND_OFFSET__WBSCL_ROUND_OFFSET_Y_RGB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_ROUND_OFFSET__WBSCL_ROUND_OFFSET_CBCR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_ROUND_OFFSET__WBSCL_ROUND_OFFSET_CBCR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_FLAG__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_FLAG_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_ACK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_ACK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_MASK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_MASK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_INT_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_INT_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_INT_TYPE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_INT_TYPE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_FLAG__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_FLAG_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_ACK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_ACK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_MASK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_MASK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_INT_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_INT_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_INT_TYPE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_INT_TYPE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CNTL__WBSCL_TEST_CRC_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CNTL__WBSCL_TEST_CRC_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CNTL__WBSCL_TEST_CRC_CONT_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CNTL__WBSCL_TEST_CRC_CONT_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_RED__WBSCL_TEST_CRC_RED_MASK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_RED__WBSCL_TEST_CRC_RED_MASK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_RED__WBSCL_TEST_CRC_SIG_RED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_RED__WBSCL_TEST_CRC_SIG_RED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_GREEN__WBSCL_TEST_CRC_GREEN_MASK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_GREEN__WBSCL_TEST_CRC_GREEN_MASK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_GREEN__WBSCL_TEST_CRC_SIG_GREEN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_GREEN__WBSCL_TEST_CRC_SIG_GREEN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_BLUE__WBSCL_TEST_CRC_BLUE_MASK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_BLUE__WBSCL_TEST_CRC_BLUE_MASK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_BLUE__WBSCL_TEST_CRC_SIG_BLUE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_CRC_BLUE__WBSCL_TEST_CRC_SIG_BLUE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_BACKPRESSURE_CNT_EN__WBSCL_BACKPRESSURE_CNT_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_BACKPRESSURE_CNT_EN__WBSCL_BACKPRESSURE_CNT_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_MCIF_BACKPRESSURE_CNT__WB_MCIF_Y_MAX_BACKPRESSURE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_MCIF_BACKPRESSURE_CNT__WB_MCIF_Y_MAX_BACKPRESSURE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_MCIF_BACKPRESSURE_CNT__WB_MCIF_C_MAX_BACKPRESSURE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_MCIF_BACKPRESSURE_CNT__WB_MCIF_C_MAX_BACKPRESSURE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_CLAMP_Y_RGB__WBSCL_CLAMP_UPPER_Y_RGB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_CLAMP_Y_RGB__WBSCL_CLAMP_UPPER_Y_RGB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_CLAMP_Y_RGB__WBSCL_CLAMP_LOWER_Y_RGB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_CLAMP_Y_RGB__WBSCL_CLAMP_LOWER_Y_RGB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_CLAMP_CBCR__WBSCL_CLAMP_UPPER_CBCR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_CLAMP_CBCR__WBSCL_CLAMP_UPPER_CBCR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_CLAMP_CBCR__WBSCL_CLAMP_LOWER_CBCR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_CLAMP_CBCR__WBSCL_CLAMP_LOWER_CBCR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OUTSIDE_PIX_STRATEGY__WBSCL_OUTSIDE_PIX_STRATEGY__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OUTSIDE_PIX_STRATEGY__WBSCL_OUTSIDE_PIX_STRATEGY_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OUTSIDE_PIX_STRATEGY__WBSCL_BLACK_COLOR_G_Y__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OUTSIDE_PIX_STRATEGY__WBSCL_BLACK_COLOR_G_Y_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OUTSIDE_PIX_STRATEGY_CBCR__WBSCL_BLACK_COLOR_B_CB__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OUTSIDE_PIX_STRATEGY_CBCR__WBSCL_BLACK_COLOR_B_CB_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OUTSIDE_PIX_STRATEGY_CBCR__WBSCL_BLACK_COLOR_R_CR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_OUTSIDE_PIX_STRATEGY_CBCR__WBSCL_BLACK_COLOR_R_CR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_DEBUG__WBSCL_DEBUG__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_DEBUG__WBSCL_DEBUG_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_DEBUG_INDEX__WBSCL_TEST_DEBUG_INDEX__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_DEBUG_INDEX__WBSCL_TEST_DEBUG_INDEX_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_DEBUG_INDEX__WBSCL_TEST_DEBUG_WRITE_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_DEBUG_INDEX__WBSCL_TEST_DEBUG_WRITE_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_DEBUG_DATA__WBSCL_TEST_DEBUG_DATA__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBSCL_TEST_DEBUG_DATA__WBSCL_TEST_DEBUG_DATA_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL1__WIDTH_WARMUP__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL1__WIDTH_WARMUP_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL1__HEIGHT_WARMUP__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL1__HEIGHT_WARMUP_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL1__GMC_WARM_UP_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL1__GMC_WARM_UP_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL2__DATA_VALUE_WARMUP__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL2__DATA_VALUE_WARMUP_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL2__MODE_WARMUP__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL2__MODE_WARMUP_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL2__DATA_DEPTH_WARMUP__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WB_WARM_UP_MODE_CTL2__DATA_DEPTH_WARMUP_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+
+# DC mcif: dcn20_mmhubbub_registers absolute offsets per pipe instance
+# (MCIF_WB_COMMON_REG_LIST_DCN2_0({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+MCIF0_MCIF_WB_BUFMGR_SW_CONTROL = BASE(mmMCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUFMGR_CUR_LINE_R = BASE(mmMCIF_WB0_MCIF_WB_BUFMGR_CUR_LINE_R_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUFMGR_CUR_LINE_R @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUFMGR_STATUS = BASE(mmMCIF_WB0_MCIF_WB_BUFMGR_STATUS_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUFMGR_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_PITCH = BASE(mmMCIF_WB0_MCIF_WB_BUF_PITCH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_PITCH @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_1_STATUS = BASE(mmMCIF_WB0_MCIF_WB_BUF_1_STATUS_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_1_STATUS2 = BASE(mmMCIF_WB0_MCIF_WB_BUF_1_STATUS2_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_STATUS2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_2_STATUS = BASE(mmMCIF_WB0_MCIF_WB_BUF_2_STATUS_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_2_STATUS2 = BASE(mmMCIF_WB0_MCIF_WB_BUF_2_STATUS2_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_STATUS2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_3_STATUS = BASE(mmMCIF_WB0_MCIF_WB_BUF_3_STATUS_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_3_STATUS2 = BASE(mmMCIF_WB0_MCIF_WB_BUF_3_STATUS2_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_STATUS2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_4_STATUS = BASE(mmMCIF_WB0_MCIF_WB_BUF_4_STATUS_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_4_STATUS2 = BASE(mmMCIF_WB0_MCIF_WB_BUF_4_STATUS2_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_STATUS2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_ARBITRATION_CONTROL = BASE(mmMCIF_WB0_MCIF_WB_ARBITRATION_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_ARBITRATION_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_SCLK_CHANGE = BASE(mmMCIF_WB0_MCIF_WB_SCLK_CHANGE_BASE_IDX) + mmMCIF_WB0_MCIF_WB_SCLK_CHANGE @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_TEST_DEBUG_INDEX = BASE(mmMCIF_WB0_MCIF_WB_TEST_DEBUG_INDEX_BASE_IDX) + mmMCIF_WB0_MCIF_WB_TEST_DEBUG_INDEX @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_TEST_DEBUG_DATA = BASE(mmMCIF_WB0_MCIF_WB_TEST_DEBUG_DATA_BASE_IDX) + mmMCIF_WB0_MCIF_WB_TEST_DEBUG_DATA @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_1_ADDR_Y = BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_1_ADDR_Y_OFFSET = BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_1_ADDR_C = BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_1_ADDR_C_OFFSET = BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_2_ADDR_Y = BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_2_ADDR_Y_OFFSET = BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_2_ADDR_C = BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_2_ADDR_C_OFFSET = BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_3_ADDR_Y = BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_3_ADDR_Y_OFFSET = BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_3_ADDR_C = BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_3_ADDR_C_OFFSET = BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_4_ADDR_Y = BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_4_ADDR_Y_OFFSET = BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_4_ADDR_C = BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_4_ADDR_C_OFFSET = BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C_OFFSET @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUFMGR_VCE_CONTROL = BASE(mmMCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_NB_PSTATE_LATENCY_WATERMARK = BASE(mmMCIF_WB0_MCIF_WB_NB_PSTATE_LATENCY_WATERMARK_BASE_IDX) + mmMCIF_WB0_MCIF_WB_NB_PSTATE_LATENCY_WATERMARK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_NB_PSTATE_CONTROL = BASE(mmMCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_WATERMARK = BASE(mmMCIF_WB0_MCIF_WB_WATERMARK_BASE_IDX) + mmMCIF_WB0_MCIF_WB_WATERMARK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_CLOCK_GATER_CONTROL = BASE(mmMCIF_WB0_MCIF_WB_CLOCK_GATER_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_CLOCK_GATER_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_WARM_UP_CNTL = BASE(mmMCIF_WB0_MCIF_WB_WARM_UP_CNTL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_WARM_UP_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_SELF_REFRESH_CONTROL = BASE(mmMCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MULTI_LEVEL_QOS_CTRL = BASE(mmMCIF_WB0_MULTI_LEVEL_QOS_CTRL_BASE_IDX) + mmMCIF_WB0_MULTI_LEVEL_QOS_CTRL @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_SECURITY_LEVEL = BASE(mmMCIF_WB0_MCIF_WB_SECURITY_LEVEL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_SECURITY_LEVEL @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_LUMA_SIZE = BASE(mmMCIF_WB0_MCIF_WB_BUF_LUMA_SIZE_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_LUMA_SIZE @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_CHROMA_SIZE = BASE(mmMCIF_WB0_MCIF_WB_BUF_CHROMA_SIZE_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_CHROMA_SIZE @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_1_ADDR_Y_HIGH = BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_1_ADDR_C_HIGH = BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_2_ADDR_Y_HIGH = BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_2_ADDR_C_HIGH = BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_3_ADDR_Y_HIGH = BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_3_ADDR_C_HIGH = BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_4_ADDR_Y_HIGH = BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_4_ADDR_C_HIGH = BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C_HIGH @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_1_RESOLUTION = BASE(mmMCIF_WB0_MCIF_WB_BUF_1_RESOLUTION_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_RESOLUTION @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_2_RESOLUTION = BASE(mmMCIF_WB0_MCIF_WB_BUF_2_RESOLUTION_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_RESOLUTION @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_3_RESOLUTION = BASE(mmMCIF_WB0_MCIF_WB_BUF_3_RESOLUTION_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_RESOLUTION @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_MCIF_WB_BUF_4_RESOLUTION = BASE(mmMCIF_WB0_MCIF_WB_BUF_4_RESOLUTION_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_RESOLUTION @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF0_SMU_WM_CONTROL = BASE(mmWBIF0_SMU_WM_CONTROL_BASE_IDX) + mmWBIF0_SMU_WM_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC mcif field shifts/masks (MCIF_WB_COMMON_MASK_SH_LIST_DCN2_0(__SHIFT))
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_INT_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_INT_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_INT_ACK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_INT_ACK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_SLICE_INT_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_SLICE_INT_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_OVERRUN_INT_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_OVERRUN_INT_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_LOCK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_LOCK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_P_VMID__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_P_VMID_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUF_ADDR_FENCE_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUF_ADDR_FENCE_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_CUR_LINE_R__MCIF_WB_BUFMGR_CUR_LINE_R__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_CUR_LINE_R__MCIF_WB_BUFMGR_CUR_LINE_R_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_VCE_INT_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_VCE_INT_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_SW_INT_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_SW_INT_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_SW_OVERRUN_INT_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_SW_OVERRUN_INT_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_CUR_BUF__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_CUR_BUF_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_BUFTAG__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_BUFTAG_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_CUR_LINE_L__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_CUR_LINE_L_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_NEXT_BUF__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_NEXT_BUF_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_PITCH__MCIF_WB_BUF_LUMA_PITCH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_PITCH__MCIF_WB_BUF_LUMA_PITCH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_PITCH__MCIF_WB_BUF_CHROMA_PITCH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_PITCH__MCIF_WB_BUF_CHROMA_PITCH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_ACTIVE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_ACTIVE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_SW_LOCKED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_SW_LOCKED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_VCE_LOCKED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_VCE_LOCKED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_OVERFLOW__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_OVERFLOW_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_DISABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_DISABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_BUFTAG__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_BUFTAG_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_NXT_BUF__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_NXT_BUF_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_FIELD__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_FIELD_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_CUR_LINE_L__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_CUR_LINE_L_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_LONG_LINE_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_LONG_LINE_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_SHORT_LINE_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_SHORT_LINE_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_FRAME_LENGTH_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_FRAME_LENGTH_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_CUR_LINE_R__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_CUR_LINE_R_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_NEW_CONTENT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_NEW_CONTENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_COLOR_DEPTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_COLOR_DEPTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_TMZ_BLACK_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_TMZ_BLACK_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_TMZ__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_TMZ_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_Y_OVERRUN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_Y_OVERRUN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_C_OVERRUN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_C_OVERRUN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_ACTIVE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_ACTIVE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_SW_LOCKED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_SW_LOCKED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_VCE_LOCKED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_VCE_LOCKED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_OVERFLOW__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_OVERFLOW_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_DISABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_DISABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_BUFTAG__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_BUFTAG_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_NXT_BUF__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_NXT_BUF_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_FIELD__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_FIELD_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_CUR_LINE_L__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_CUR_LINE_L_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_LONG_LINE_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_LONG_LINE_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_SHORT_LINE_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_SHORT_LINE_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_FRAME_LENGTH_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_FRAME_LENGTH_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_CUR_LINE_R__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_CUR_LINE_R_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_NEW_CONTENT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_NEW_CONTENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_COLOR_DEPTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_COLOR_DEPTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_TMZ_BLACK_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_TMZ_BLACK_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_TMZ__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_TMZ_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_Y_OVERRUN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_Y_OVERRUN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_C_OVERRUN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_C_OVERRUN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_ACTIVE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_ACTIVE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_SW_LOCKED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_SW_LOCKED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_VCE_LOCKED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_VCE_LOCKED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_OVERFLOW__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_OVERFLOW_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_DISABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_DISABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_BUFTAG__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_BUFTAG_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_NXT_BUF__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_NXT_BUF_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_FIELD__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_FIELD_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_CUR_LINE_L__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_CUR_LINE_L_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_LONG_LINE_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_LONG_LINE_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_SHORT_LINE_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_SHORT_LINE_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_FRAME_LENGTH_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_FRAME_LENGTH_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_CUR_LINE_R__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_CUR_LINE_R_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_NEW_CONTENT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_NEW_CONTENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_COLOR_DEPTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_COLOR_DEPTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_TMZ_BLACK_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_TMZ_BLACK_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_TMZ__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_TMZ_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_Y_OVERRUN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_Y_OVERRUN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_C_OVERRUN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_C_OVERRUN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_ACTIVE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_ACTIVE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_SW_LOCKED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_SW_LOCKED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_VCE_LOCKED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_VCE_LOCKED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_OVERFLOW__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_OVERFLOW_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_DISABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_DISABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_BUFTAG__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_BUFTAG_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_NXT_BUF__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_NXT_BUF_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_FIELD__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_FIELD_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_CUR_LINE_L__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_CUR_LINE_L_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_LONG_LINE_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_LONG_LINE_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_SHORT_LINE_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_SHORT_LINE_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_FRAME_LENGTH_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_FRAME_LENGTH_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_CUR_LINE_R__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_CUR_LINE_R_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_NEW_CONTENT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_NEW_CONTENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_COLOR_DEPTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_COLOR_DEPTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_TMZ_BLACK_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_TMZ_BLACK_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_TMZ__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_TMZ_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_Y_OVERRUN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_Y_OVERRUN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_C_OVERRUN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_C_OVERRUN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_ARBITRATION_CONTROL__MCIF_WB_CLIENT_ARBITRATION_SLICE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_ARBITRATION_CONTROL__MCIF_WB_CLIENT_ARBITRATION_SLICE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_ARBITRATION_CONTROL__MCIF_WB_TIME_PER_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_ARBITRATION_CONTROL__MCIF_WB_TIME_PER_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_SCLK_CHANGE__WM_CHANGE_ACK_FORCE_ON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_SCLK_CHANGE__WM_CHANGE_ACK_FORCE_ON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_SCLK_CHANGE__MCIF_WB_CLI_WATERMARK_MASK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_SCLK_CHANGE__MCIF_WB_CLI_WATERMARK_MASK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_TEST_DEBUG_INDEX__MCIF_WB_TEST_DEBUG_INDEX__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_TEST_DEBUG_INDEX__MCIF_WB_TEST_DEBUG_INDEX_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_TEST_DEBUG_DATA__MCIF_WB_TEST_DEBUG_DATA__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_TEST_DEBUG_DATA__MCIF_WB_TEST_DEBUG_DATA_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y__MCIF_WB_BUF_1_ADDR_Y__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y__MCIF_WB_BUF_1_ADDR_Y_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_OFFSET__MCIF_WB_BUF_1_ADDR_Y_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_OFFSET__MCIF_WB_BUF_1_ADDR_Y_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_C__MCIF_WB_BUF_1_ADDR_C__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_C__MCIF_WB_BUF_1_ADDR_C_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_C_OFFSET__MCIF_WB_BUF_1_ADDR_C_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_C_OFFSET__MCIF_WB_BUF_1_ADDR_C_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y__MCIF_WB_BUF_2_ADDR_Y__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y__MCIF_WB_BUF_2_ADDR_Y_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_OFFSET__MCIF_WB_BUF_2_ADDR_Y_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_OFFSET__MCIF_WB_BUF_2_ADDR_Y_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_C__MCIF_WB_BUF_2_ADDR_C__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_C__MCIF_WB_BUF_2_ADDR_C_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_C_OFFSET__MCIF_WB_BUF_2_ADDR_C_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_C_OFFSET__MCIF_WB_BUF_2_ADDR_C_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y__MCIF_WB_BUF_3_ADDR_Y__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y__MCIF_WB_BUF_3_ADDR_Y_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_OFFSET__MCIF_WB_BUF_3_ADDR_Y_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_OFFSET__MCIF_WB_BUF_3_ADDR_Y_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_C__MCIF_WB_BUF_3_ADDR_C__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_C__MCIF_WB_BUF_3_ADDR_C_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_C_OFFSET__MCIF_WB_BUF_3_ADDR_C_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_C_OFFSET__MCIF_WB_BUF_3_ADDR_C_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y__MCIF_WB_BUF_4_ADDR_Y__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y__MCIF_WB_BUF_4_ADDR_Y_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_OFFSET__MCIF_WB_BUF_4_ADDR_Y_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_OFFSET__MCIF_WB_BUF_4_ADDR_Y_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_C__MCIF_WB_BUF_4_ADDR_C__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_C__MCIF_WB_BUF_4_ADDR_C_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_C_OFFSET__MCIF_WB_BUF_4_ADDR_C_OFFSET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_C_OFFSET__MCIF_WB_BUF_4_ADDR_C_OFFSET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_LOCK_IGNORE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_LOCK_IGNORE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_INT_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_INT_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_INT_ACK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_INT_ACK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_SLICE_INT_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_SLICE_INT_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_LOCK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_LOCK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_SLICE_SIZE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_SLICE_SIZE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_NB_PSTATE_LATENCY_WATERMARK__NB_PSTATE_CHANGE_REFRESH_WATERMARK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_NB_PSTATE_LATENCY_WATERMARK__NB_PSTATE_CHANGE_REFRESH_WATERMARK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_URGENT_DURING_REQUEST__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_URGENT_DURING_REQUEST_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_FORCE_ON__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_FORCE_ON_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_ALLOW_FOR_URGENT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_ALLOW_FOR_URGENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_WATERMARK_MASK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_WATERMARK_MASK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_WATERMARK__MCIF_WB_CLI_WATERMARK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_WATERMARK__MCIF_WB_CLI_WATERMARK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_CLOCK_GATER_CONTROL__MCIF_WB_CLI_CLOCK_GATER_OVERRIDE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_CLOCK_GATER_CONTROL__MCIF_WB_CLI_CLOCK_GATER_OVERRIDE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_WARM_UP_CNTL__MCIF_WB_PITCH_SIZE_WARMUP__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_WARM_UP_CNTL__MCIF_WB_PITCH_SIZE_WARMUP_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL__DIS_REFRESH_UNDER_NBPREQ__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL__DIS_REFRESH_UNDER_NBPREQ_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL__PERFRAME_SELF_REFRESH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL__PERFRAME_SELF_REFRESH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MULTI_LEVEL_QOS_CTRL__MAX_SCALED_TIME_TO_URGENT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MULTI_LEVEL_QOS_CTRL__MAX_SCALED_TIME_TO_URGENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_SECURITY_LEVEL__MCIF_WB_SECURITY_LEVEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_SECURITY_LEVEL__MCIF_WB_SECURITY_LEVEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_LUMA_SIZE__MCIF_WB_BUF_LUMA_SIZE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_LUMA_SIZE__MCIF_WB_BUF_LUMA_SIZE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_CHROMA_SIZE__MCIF_WB_BUF_CHROMA_SIZE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_CHROMA_SIZE__MCIF_WB_BUF_CHROMA_SIZE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_HIGH__MCIF_WB_BUF_1_ADDR_Y_HIGH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_HIGH__MCIF_WB_BUF_1_ADDR_Y_HIGH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_C_HIGH__MCIF_WB_BUF_1_ADDR_C_HIGH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_ADDR_C_HIGH__MCIF_WB_BUF_1_ADDR_C_HIGH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_HIGH__MCIF_WB_BUF_2_ADDR_Y_HIGH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_HIGH__MCIF_WB_BUF_2_ADDR_Y_HIGH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_C_HIGH__MCIF_WB_BUF_2_ADDR_C_HIGH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_ADDR_C_HIGH__MCIF_WB_BUF_2_ADDR_C_HIGH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_HIGH__MCIF_WB_BUF_3_ADDR_Y_HIGH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_HIGH__MCIF_WB_BUF_3_ADDR_Y_HIGH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_C_HIGH__MCIF_WB_BUF_3_ADDR_C_HIGH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_ADDR_C_HIGH__MCIF_WB_BUF_3_ADDR_C_HIGH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_HIGH__MCIF_WB_BUF_4_ADDR_Y_HIGH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_HIGH__MCIF_WB_BUF_4_ADDR_Y_HIGH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_C_HIGH__MCIF_WB_BUF_4_ADDR_C_HIGH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_ADDR_C_HIGH__MCIF_WB_BUF_4_ADDR_C_HIGH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_RESOLUTION__MCIF_WB_BUF_1_RESOLUTION_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_RESOLUTION__MCIF_WB_BUF_1_RESOLUTION_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_RESOLUTION__MCIF_WB_BUF_1_RESOLUTION_HEIGHT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_1_RESOLUTION__MCIF_WB_BUF_1_RESOLUTION_HEIGHT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_RESOLUTION__MCIF_WB_BUF_2_RESOLUTION_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_RESOLUTION__MCIF_WB_BUF_2_RESOLUTION_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_RESOLUTION__MCIF_WB_BUF_2_RESOLUTION_HEIGHT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_2_RESOLUTION__MCIF_WB_BUF_2_RESOLUTION_HEIGHT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_RESOLUTION__MCIF_WB_BUF_3_RESOLUTION_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_RESOLUTION__MCIF_WB_BUF_3_RESOLUTION_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_RESOLUTION__MCIF_WB_BUF_3_RESOLUTION_HEIGHT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_3_RESOLUTION__MCIF_WB_BUF_3_RESOLUTION_HEIGHT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_RESOLUTION__MCIF_WB_BUF_4_RESOLUTION_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_RESOLUTION__MCIF_WB_BUF_4_RESOLUTION_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_RESOLUTION__MCIF_WB_BUF_4_RESOLUTION_HEIGHT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+MCIF_WB0_MCIF_WB_BUF_4_RESOLUTION__MCIF_WB_BUF_4_RESOLUTION_HEIGHT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_SEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_SEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_REQ__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_REQ_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_DIS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_DIS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c

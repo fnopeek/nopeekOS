@@ -106,6 +106,28 @@ BLOCKS = {
         instances=16, const_prefix="VMID",
         regs_struct="dcn_vmid_registers", shift_struct="dcn20_vmid_shift", mask_struct="dcn20_vmid_mask",
     ),
+    # The writeback blocks: num_dwb = 1, so one instance each. dwbc's reg list
+    # uses SRI2_DWB (register name independent of block/id, defined in
+    # dcn20_resource.c) and its mask list SF_DWB (identical body to SF); mcif_wb
+    # uses the plain SRI / SF. Both lists are fully self-contained.
+    "dwbc": dict(
+        headers=["resource/dcn20/dcn20_resource.c", "dcn10/dcn10_dwb.h", "dcn20/dcn20_dwb.h"],
+        prefixes=["DWBC_"],
+        reg_calls=["DWBC_COMMON_REG_LIST_DCN2_0({i})"],
+        shift_calls=["DWBC_COMMON_MASK_SH_LIST_DCN2_0(__SHIFT)"],
+        mask_calls=["DWBC_COMMON_MASK_SH_LIST_DCN2_0(_MASK)"],
+        instances=1, const_prefix="DWBC",
+        regs_struct="dcn20_dwbc_registers", shift_struct="dcn20_dwbc_shift", mask_struct="dcn20_dwbc_mask",
+    ),
+    "mcif": dict(
+        headers=["mmhubbub/dcn20/dcn20_mmhubbub.h"],
+        prefixes=["MCIF_WB_"],
+        reg_calls=["MCIF_WB_COMMON_REG_LIST_DCN2_0({i})"],
+        shift_calls=["MCIF_WB_COMMON_MASK_SH_LIST_DCN2_0(__SHIFT)"],
+        mask_calls=["MCIF_WB_COMMON_MASK_SH_LIST_DCN2_0(_MASK)"],
+        instances=1, const_prefix="MCIF",
+        regs_struct="dcn20_mmhubbub_registers", shift_struct="dcn20_mmhubbub_shift", mask_struct="dcn20_mmhubbub_mask",
+    ),
     "mpc": dict(
         single=True,
         headers=["mpc/dcn10/dcn10_mpc.h", "mpc/dcn20/dcn20_mpc.h"],
@@ -130,7 +152,7 @@ def defines_from(path, want):
         m = re.match(r"\s*#\s*define\s+(\w+)", lines[i])
         if m and (any(m.group(1).startswith(p) for p in want)
                   or m.group(1) in ("SR", "SRI", "SRII", "SRIR", "SRI2", "BASE", "BASE_INNER",
-                                     "VUPDATE_SRII", "SF", "SFRB")):
+                                     "VUPDATE_SRII", "SF", "SFRB", "SRI2_DWB", "SF_DWB")):
             block = [lines[i]]
             while block[-1].rstrip().endswith("\\"):
                 i += 1

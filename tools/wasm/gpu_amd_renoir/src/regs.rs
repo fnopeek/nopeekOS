@@ -18493,3 +18493,1347 @@ pub const DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_FORWARD_EN_MASK: u32 = 0x1;
 pub const DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_OPP_PIPE_SOURCE__SHIFT: u32 = 0x4;
 /// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:30215
 pub const DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_OPP_PIPE_SOURCE_MASK: u32 = 0x70;
+
+// DC dwbc: dcn20_dwbc_registers absolute offsets per pipe instance
+
+// (DWBC_COMMON_REG_LIST_DCN2_0({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmWB_ENABLE_BASE_IDX) + mmWB_ENABLE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WB_ENABLE: u32 = 0x369a;
+/// The value of `BASE(mmWB_EC_CONFIG_BASE_IDX) + mmWB_EC_CONFIG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WB_EC_CONFIG: u32 = 0x369b;
+/// The value of `BASE(mmCNV_MODE_BASE_IDX) + mmCNV_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_CNV_MODE: u32 = 0x369c;
+/// The value of `BASE(mmCNV_WINDOW_START_BASE_IDX) + mmCNV_WINDOW_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_CNV_WINDOW_START: u32 = 0x369d;
+/// The value of `BASE(mmCNV_WINDOW_SIZE_BASE_IDX) + mmCNV_WINDOW_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_CNV_WINDOW_SIZE: u32 = 0x369e;
+/// The value of `BASE(mmCNV_UPDATE_BASE_IDX) + mmCNV_UPDATE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_CNV_UPDATE: u32 = 0x369f;
+/// The value of `BASE(mmCNV_SOURCE_SIZE_BASE_IDX) + mmCNV_SOURCE_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_CNV_SOURCE_SIZE: u32 = 0x36a0;
+/// The value of `BASE(mmCNV_TEST_CNTL_BASE_IDX) + mmCNV_TEST_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_CNV_TEST_CNTL: u32 = 0x36ae;
+/// The value of `BASE(mmCNV_TEST_CRC_RED_BASE_IDX) + mmCNV_TEST_CRC_RED` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_CNV_TEST_CRC_RED: u32 = 0x36af;
+/// The value of `BASE(mmCNV_TEST_CRC_GREEN_BASE_IDX) + mmCNV_TEST_CRC_GREEN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_CNV_TEST_CRC_GREEN: u32 = 0x36b0;
+/// The value of `BASE(mmCNV_TEST_CRC_BLUE_BASE_IDX) + mmCNV_TEST_CRC_BLUE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_CNV_TEST_CRC_BLUE: u32 = 0x36b1;
+/// The value of `BASE(mmWBSCL_COEF_RAM_SELECT_BASE_IDX) + mmWBSCL_COEF_RAM_SELECT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_COEF_RAM_SELECT: u32 = 0x36ca;
+/// The value of `BASE(mmWBSCL_COEF_RAM_TAP_DATA_BASE_IDX) + mmWBSCL_COEF_RAM_TAP_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_COEF_RAM_TAP_DATA: u32 = 0x36cb;
+/// The value of `BASE(mmWBSCL_MODE_BASE_IDX) + mmWBSCL_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_MODE: u32 = 0x36cc;
+/// The value of `BASE(mmWBSCL_TAP_CONTROL_BASE_IDX) + mmWBSCL_TAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_TAP_CONTROL: u32 = 0x36cd;
+/// The value of `BASE(mmWBSCL_DEST_SIZE_BASE_IDX) + mmWBSCL_DEST_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_DEST_SIZE: u32 = 0x36ce;
+/// The value of `BASE(mmWBSCL_HORZ_FILTER_SCALE_RATIO_BASE_IDX) + mmWBSCL_HORZ_FILTER_SCALE_RATIO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_HORZ_FILTER_SCALE_RATIO: u32 = 0x36cf;
+/// The value of `BASE(mmWBSCL_HORZ_FILTER_INIT_Y_RGB_BASE_IDX) + mmWBSCL_HORZ_FILTER_INIT_Y_RGB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_HORZ_FILTER_INIT_Y_RGB: u32 = 0x36d0;
+/// The value of `BASE(mmWBSCL_HORZ_FILTER_INIT_CBCR_BASE_IDX) + mmWBSCL_HORZ_FILTER_INIT_CBCR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_HORZ_FILTER_INIT_CBCR: u32 = 0x36d1;
+/// The value of `BASE(mmWBSCL_VERT_FILTER_SCALE_RATIO_BASE_IDX) + mmWBSCL_VERT_FILTER_SCALE_RATIO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_VERT_FILTER_SCALE_RATIO: u32 = 0x36d2;
+/// The value of `BASE(mmWBSCL_VERT_FILTER_INIT_Y_RGB_BASE_IDX) + mmWBSCL_VERT_FILTER_INIT_Y_RGB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_VERT_FILTER_INIT_Y_RGB: u32 = 0x36d3;
+/// The value of `BASE(mmWBSCL_VERT_FILTER_INIT_CBCR_BASE_IDX) + mmWBSCL_VERT_FILTER_INIT_CBCR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_VERT_FILTER_INIT_CBCR: u32 = 0x36d4;
+/// The value of `BASE(mmWBSCL_ROUND_OFFSET_BASE_IDX) + mmWBSCL_ROUND_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_ROUND_OFFSET: u32 = 0x36d5;
+/// The value of `BASE(mmWBSCL_OVERFLOW_STATUS_BASE_IDX) + mmWBSCL_OVERFLOW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_OVERFLOW_STATUS: u32 = 0x36d6;
+/// The value of `BASE(mmWBSCL_COEF_RAM_CONFLICT_STATUS_BASE_IDX) + mmWBSCL_COEF_RAM_CONFLICT_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_COEF_RAM_CONFLICT_STATUS: u32 = 0x36d7;
+/// The value of `BASE(mmWBSCL_TEST_CNTL_BASE_IDX) + mmWBSCL_TEST_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_TEST_CNTL: u32 = 0x36d8;
+/// The value of `BASE(mmWBSCL_TEST_CRC_RED_BASE_IDX) + mmWBSCL_TEST_CRC_RED` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_TEST_CRC_RED: u32 = 0x36d9;
+/// The value of `BASE(mmWBSCL_TEST_CRC_GREEN_BASE_IDX) + mmWBSCL_TEST_CRC_GREEN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_TEST_CRC_GREEN: u32 = 0x36da;
+/// The value of `BASE(mmWBSCL_TEST_CRC_BLUE_BASE_IDX) + mmWBSCL_TEST_CRC_BLUE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_TEST_CRC_BLUE: u32 = 0x36db;
+/// The value of `BASE(mmWBSCL_BACKPRESSURE_CNT_EN_BASE_IDX) + mmWBSCL_BACKPRESSURE_CNT_EN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_BACKPRESSURE_CNT_EN: u32 = 0x36dc;
+/// The value of `BASE(mmWB_MCIF_BACKPRESSURE_CNT_BASE_IDX) + mmWB_MCIF_BACKPRESSURE_CNT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WB_MCIF_BACKPRESSURE_CNT: u32 = 0x36dd;
+/// The value of `BASE(mmWBSCL_CLAMP_Y_RGB_BASE_IDX) + mmWBSCL_CLAMP_Y_RGB` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_CLAMP_Y_RGB: u32 = 0x36de;
+/// The value of `BASE(mmWBSCL_CLAMP_CBCR_BASE_IDX) + mmWBSCL_CLAMP_CBCR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_CLAMP_CBCR: u32 = 0x36df;
+/// The value of `BASE(mmWBSCL_OUTSIDE_PIX_STRATEGY_BASE_IDX) + mmWBSCL_OUTSIDE_PIX_STRATEGY` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_OUTSIDE_PIX_STRATEGY: u32 = 0x36e0;
+/// The value of `BASE(mmWBSCL_OUTSIDE_PIX_STRATEGY_CBCR_BASE_IDX) + mmWBSCL_OUTSIDE_PIX_STRATEGY_CBCR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_OUTSIDE_PIX_STRATEGY_CBCR: u32 = 0x36e1;
+/// The value of `BASE(mmWBSCL_DEBUG_BASE_IDX) + mmWBSCL_DEBUG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_DEBUG: u32 = 0x36e2;
+/// The value of `BASE(mmWBSCL_TEST_DEBUG_INDEX_BASE_IDX) + mmWBSCL_TEST_DEBUG_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_TEST_DEBUG_INDEX: u32 = 0x36e3;
+/// The value of `BASE(mmWBSCL_TEST_DEBUG_DATA_BASE_IDX) + mmWBSCL_TEST_DEBUG_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WBSCL_TEST_DEBUG_DATA: u32 = 0x36e4;
+/// The value of `BASE(mmWB_DEBUG_CTRL_BASE_IDX) + mmWB_DEBUG_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WB_DEBUG_CTRL: u32 = 0x36b2;
+/// The value of `BASE(mmWB_DBG_MODE_BASE_IDX) + mmWB_DBG_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WB_DBG_MODE: u32 = 0x36b3;
+/// The value of `BASE(mmWB_HW_DEBUG_BASE_IDX) + mmWB_HW_DEBUG` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WB_HW_DEBUG: u32 = 0x36b4;
+/// The value of `BASE(mmCNV_TEST_DEBUG_INDEX_BASE_IDX) + mmCNV_TEST_DEBUG_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_CNV_TEST_DEBUG_INDEX: u32 = 0x36b8;
+/// The value of `BASE(mmCNV_TEST_DEBUG_DATA_BASE_IDX) + mmCNV_TEST_DEBUG_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_CNV_TEST_DEBUG_DATA: u32 = 0x36b9;
+/// The value of `BASE(mmWB_SOFT_RESET_BASE_IDX) + mmWB_SOFT_RESET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WB_SOFT_RESET: u32 = 0x36b5;
+/// The value of `BASE(mmWB_WARM_UP_MODE_CTL1_BASE_IDX) + mmWB_WARM_UP_MODE_CTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WB_WARM_UP_MODE_CTL1: u32 = 0x36b6;
+/// The value of `BASE(mmWB_WARM_UP_MODE_CTL2_BASE_IDX) + mmWB_WARM_UP_MODE_CTL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DWBC0_WB_WARM_UP_MODE_CTL2: u32 = 0x36b7;
+
+// DC dwbc field shifts/masks (DWBC_COMMON_MASK_SH_LIST_DCN2_0(__SHIFT))
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14543
+pub const WB_ENABLE__WB_ENABLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14542
+pub const WB_ENABLE__WB_ENABLE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14545
+pub const WB_EC_CONFIG__DISPCLK_R_WB_GATE_DIS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14544
+pub const WB_EC_CONFIG__DISPCLK_R_WB_GATE_DIS_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14547
+pub const WB_EC_CONFIG__DISPCLK_G_WB_GATE_DIS__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14546
+pub const WB_EC_CONFIG__DISPCLK_G_WB_GATE_DIS_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14549
+pub const WB_EC_CONFIG__DISPCLK_G_WBSCL_GATE_DIS__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14548
+pub const WB_EC_CONFIG__DISPCLK_G_WBSCL_GATE_DIS_MASK: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14565
+pub const WB_EC_CONFIG__WB_TEST_CLK_SEL__SHIFT: u32 = 0x3;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14564
+pub const WB_EC_CONFIG__WB_TEST_CLK_SEL_MASK: u32 = 0x78;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14557
+pub const WB_EC_CONFIG__WB_LB_LS_DIS__SHIFT: u32 = 0x7;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14556
+pub const WB_EC_CONFIG__WB_LB_LS_DIS_MASK: u32 = 0x80;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14559
+pub const WB_EC_CONFIG__WB_LB_SD_DIS__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14558
+pub const WB_EC_CONFIG__WB_LB_SD_DIS_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14561
+pub const WB_EC_CONFIG__WB_LUT_LS_DIS__SHIFT: u32 = 0x9;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14560
+pub const WB_EC_CONFIG__WB_LUT_LS_DIS_MASK: u32 = 0x200;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14563
+pub const WB_EC_CONFIG__WBSCL_LB_MEM_PWR_MODE_SEL__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14562
+pub const WB_EC_CONFIG__WBSCL_LB_MEM_PWR_MODE_SEL_MASK: u32 = 0x3000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14567
+pub const WB_EC_CONFIG__WBSCL_LB_MEM_PWR_DIS__SHIFT: u32 = 0xe;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14566
+pub const WB_EC_CONFIG__WBSCL_LB_MEM_PWR_DIS_MASK: u32 = 0x4000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14569
+pub const WB_EC_CONFIG__WBSCL_LB_MEM_PWR_FORCE__SHIFT: u32 = 0xf;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14568
+pub const WB_EC_CONFIG__WBSCL_LB_MEM_PWR_FORCE_MASK: u32 = 0x18000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14571
+pub const WB_EC_CONFIG__WBSCL_LB_MEM_PWR_STATE__SHIFT: u32 = 0x15;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14570
+pub const WB_EC_CONFIG__WBSCL_LB_MEM_PWR_STATE_MASK: u32 = 0x600000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14573
+pub const WB_EC_CONFIG__WB_RAM_PW_SAVE_MODE__SHIFT: u32 = 0x17;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14572
+pub const WB_EC_CONFIG__WB_RAM_PW_SAVE_MODE_MASK: u32 = 0x800000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:5916
+pub const WB_EC_CONFIG__WBSCL_LUT_MEM_PWR_STATE__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:5929
+pub const WB_EC_CONFIG__WBSCL_LUT_MEM_PWR_STATE_MASK: u32 = 0x3000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:5931
+pub const CNV_MODE__CNV_OUT_BPC__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:5943
+pub const CNV_MODE__CNV_OUT_BPC_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14579
+pub const CNV_MODE__CNV_FRAME_CAPTURE_RATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14578
+pub const CNV_MODE__CNV_FRAME_CAPTURE_RATE_MASK: u32 = 0x300;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14581
+pub const CNV_MODE__CNV_WINDOW_CROP_EN__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14580
+pub const CNV_MODE__CNV_WINDOW_CROP_EN_MASK: u32 = 0x1000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14583
+pub const CNV_MODE__CNV_STEREO_TYPE__SHIFT: u32 = 0xd;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14582
+pub const CNV_MODE__CNV_STEREO_TYPE_MASK: u32 = 0x6000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14585
+pub const CNV_MODE__CNV_INTERLACED_MODE__SHIFT: u32 = 0xf;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14584
+pub const CNV_MODE__CNV_INTERLACED_MODE_MASK: u32 = 0x8000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14587
+pub const CNV_MODE__CNV_EYE_SELECTION__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14586
+pub const CNV_MODE__CNV_EYE_SELECTION_MASK: u32 = 0x30000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14589
+pub const CNV_MODE__CNV_STEREO_POLARITY__SHIFT: u32 = 0x12;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14588
+pub const CNV_MODE__CNV_STEREO_POLARITY_MASK: u32 = 0x40000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14591
+pub const CNV_MODE__CNV_INTERLACED_FIELD_ORDER__SHIFT: u32 = 0x13;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14590
+pub const CNV_MODE__CNV_INTERLACED_FIELD_ORDER_MASK: u32 = 0x80000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14593
+pub const CNV_MODE__CNV_STEREO_SPLIT__SHIFT: u32 = 0x14;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14592
+pub const CNV_MODE__CNV_STEREO_SPLIT_MASK: u32 = 0x100000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14595
+pub const CNV_MODE__CNV_NEW_CONTENT__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14594
+pub const CNV_MODE__CNV_NEW_CONTENT_MASK: u32 = 0x1000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:5941
+pub const CNV_MODE__CNV_FRAME_CAPTURE_EN_CURRENT__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:5953
+pub const CNV_MODE__CNV_FRAME_CAPTURE_EN_CURRENT_MASK: u32 = 0x40000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14597
+pub const CNV_MODE__CNV_FRAME_CAPTURE_EN__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14596
+pub const CNV_MODE__CNV_FRAME_CAPTURE_EN_MASK: u32 = 0x80000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14599
+pub const CNV_WINDOW_START__CNV_WINDOW_START_X__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14598
+pub const CNV_WINDOW_START__CNV_WINDOW_START_X_MASK: u32 = 0xfff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14601
+pub const CNV_WINDOW_START__CNV_WINDOW_START_Y__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14600
+pub const CNV_WINDOW_START__CNV_WINDOW_START_Y_MASK: u32 = 0xfff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14603
+pub const CNV_WINDOW_SIZE__CNV_WINDOW_WIDTH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14602
+pub const CNV_WINDOW_SIZE__CNV_WINDOW_WIDTH_MASK: u32 = 0xfff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14605
+pub const CNV_WINDOW_SIZE__CNV_WINDOW_HEIGHT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14604
+pub const CNV_WINDOW_SIZE__CNV_WINDOW_HEIGHT_MASK: u32 = 0xfff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14607
+pub const CNV_UPDATE__CNV_UPDATE_PENDING__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14606
+pub const CNV_UPDATE__CNV_UPDATE_PENDING_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14609
+pub const CNV_UPDATE__CNV_UPDATE_TAKEN__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14608
+pub const CNV_UPDATE__CNV_UPDATE_TAKEN_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14611
+pub const CNV_UPDATE__CNV_UPDATE_LOCK__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14610
+pub const CNV_UPDATE__CNV_UPDATE_LOCK_MASK: u32 = 0x10000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14613
+pub const CNV_SOURCE_SIZE__CNV_SOURCE_WIDTH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14612
+pub const CNV_SOURCE_SIZE__CNV_SOURCE_WIDTH_MASK: u32 = 0x7fff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14615
+pub const CNV_SOURCE_SIZE__CNV_SOURCE_HEIGHT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14614
+pub const CNV_SOURCE_SIZE__CNV_SOURCE_HEIGHT_MASK: u32 = 0x7fff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14661
+pub const CNV_TEST_CNTL__CNV_TEST_CRC_EN__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14660
+pub const CNV_TEST_CNTL__CNV_TEST_CRC_EN_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14663
+pub const CNV_TEST_CNTL__CNV_TEST_CRC_CONT_EN__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14662
+pub const CNV_TEST_CNTL__CNV_TEST_CRC_CONT_EN_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14667
+pub const CNV_TEST_CRC_RED__CNV_TEST_CRC_RED_MASK__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14666
+pub const CNV_TEST_CRC_RED__CNV_TEST_CRC_RED_MASK_MASK: u32 = 0xfff0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14669
+pub const CNV_TEST_CRC_RED__CNV_TEST_CRC_SIG_RED__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14668
+pub const CNV_TEST_CRC_RED__CNV_TEST_CRC_SIG_RED_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14671
+pub const CNV_TEST_CRC_GREEN__CNV_TEST_CRC_GREEN_MASK__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14670
+pub const CNV_TEST_CRC_GREEN__CNV_TEST_CRC_GREEN_MASK_MASK: u32 = 0xfff0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14673
+pub const CNV_TEST_CRC_GREEN__CNV_TEST_CRC_SIG_GREEN__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14672
+pub const CNV_TEST_CRC_GREEN__CNV_TEST_CRC_SIG_GREEN_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14675
+pub const CNV_TEST_CRC_BLUE__CNV_TEST_CRC_BLUE_MASK__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14674
+pub const CNV_TEST_CRC_BLUE__CNV_TEST_CRC_BLUE_MASK_MASK: u32 = 0xfff0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14677
+pub const CNV_TEST_CRC_BLUE__CNV_TEST_CRC_SIG_BLUE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14676
+pub const CNV_TEST_CRC_BLUE__CNV_TEST_CRC_SIG_BLUE_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14679
+pub const WB_DEBUG_CTRL__WB_DEBUG_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14678
+pub const WB_DEBUG_CTRL__WB_DEBUG_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14681
+pub const WB_DEBUG_CTRL__WB_DEBUG_SEL__SHIFT: u32 = 0x6;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14680
+pub const WB_DEBUG_CTRL__WB_DEBUG_SEL_MASK: u32 = 0xc0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14683
+pub const WB_DBG_MODE__WB_DBG_MODE_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14682
+pub const WB_DBG_MODE__WB_DBG_MODE_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14685
+pub const WB_DBG_MODE__WB_DBG_DIN_FMT__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14684
+pub const WB_DBG_MODE__WB_DBG_DIN_FMT_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14687
+pub const WB_DBG_MODE__WB_DBG_36MODE__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14686
+pub const WB_DBG_MODE__WB_DBG_36MODE_MASK: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14689
+pub const WB_DBG_MODE__WB_DBG_CMAP__SHIFT: u32 = 0x3;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14688
+pub const WB_DBG_MODE__WB_DBG_CMAP_MASK: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14691
+pub const WB_DBG_MODE__WB_DBG_PXLRATE_ERROR__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14690
+pub const WB_DBG_MODE__WB_DBG_PXLRATE_ERROR_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14693
+pub const WB_DBG_MODE__WB_DBG_SOURCE_WIDTH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14692
+pub const WB_DBG_MODE__WB_DBG_SOURCE_WIDTH_MASK: u32 = 0x7fff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14695
+pub const WB_HW_DEBUG__WB_HW_DEBUG__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14694
+pub const WB_HW_DEBUG__WB_HW_DEBUG_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14701
+pub const WB_SOFT_RESET__WB_SOFT_RESET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14700
+pub const WB_SOFT_RESET__WB_SOFT_RESET_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14703
+pub const CNV_TEST_DEBUG_INDEX__CNV_TEST_DEBUG_INDEX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14702
+pub const CNV_TEST_DEBUG_INDEX__CNV_TEST_DEBUG_INDEX_MASK: u32 = 0xff;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14705
+pub const CNV_TEST_DEBUG_INDEX__CNV_TEST_DEBUG_WRITE_EN__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14704
+pub const CNV_TEST_DEBUG_INDEX__CNV_TEST_DEBUG_WRITE_EN_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14707
+pub const CNV_TEST_DEBUG_DATA__CNV_TEST_DEBUG_DATA__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:14706
+pub const CNV_TEST_DEBUG_DATA__CNV_TEST_DEBUG_DATA_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4506
+pub const WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_TAP_PAIR_IDX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4509
+pub const WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_TAP_PAIR_IDX_MASK: u32 = 0x7;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4507
+pub const WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_PHASE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4510
+pub const WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_PHASE_MASK: u32 = 0xf00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4508
+pub const WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_FILTER_TYPE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4511
+pub const WBSCL_COEF_RAM_SELECT__WBSCL_COEF_RAM_FILTER_TYPE_MASK: u32 = 0x30000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4513
+pub const WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_EVEN_TAP_COEF__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4517
+pub const WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_EVEN_TAP_COEF_MASK: u32 = 0x3fff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4514
+pub const WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_EVEN_TAP_COEF_EN__SHIFT: u32 = 0xf;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4518
+pub const WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_EVEN_TAP_COEF_EN_MASK: u32 = 0x8000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4515
+pub const WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_ODD_TAP_COEF__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4519
+pub const WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_ODD_TAP_COEF_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4516
+pub const WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_ODD_TAP_COEF_EN__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4520
+pub const WBSCL_COEF_RAM_TAP_DATA__WBSCL_COEF_RAM_ODD_TAP_COEF_EN_MASK: u32 = 0x80000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4522
+pub const WBSCL_MODE__WBSCL_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4523
+pub const WBSCL_MODE__WBSCL_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6064
+pub const WBSCL_MODE__WBSCL_OUT_BIT_DEPTH__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6066
+pub const WBSCL_MODE__WBSCL_OUT_BIT_DEPTH_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4525
+pub const WBSCL_TAP_CONTROL__WBSCL_V_NUM_OF_TAPS_Y_RGB__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4529
+pub const WBSCL_TAP_CONTROL__WBSCL_V_NUM_OF_TAPS_Y_RGB_MASK: u32 = 0xf;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4526
+pub const WBSCL_TAP_CONTROL__WBSCL_V_NUM_OF_TAPS_CBCR__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4530
+pub const WBSCL_TAP_CONTROL__WBSCL_V_NUM_OF_TAPS_CBCR_MASK: u32 = 0xf0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4527
+pub const WBSCL_TAP_CONTROL__WBSCL_H_NUM_OF_TAPS_Y_RGB__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4531
+pub const WBSCL_TAP_CONTROL__WBSCL_H_NUM_OF_TAPS_Y_RGB_MASK: u32 = 0xf00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4528
+pub const WBSCL_TAP_CONTROL__WBSCL_H_NUM_OF_TAPS_CBCR__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4532
+pub const WBSCL_TAP_CONTROL__WBSCL_H_NUM_OF_TAPS_CBCR_MASK: u32 = 0xf000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4534
+pub const WBSCL_DEST_SIZE__WBSCL_DEST_HEIGHT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4536
+pub const WBSCL_DEST_SIZE__WBSCL_DEST_HEIGHT_MASK: u32 = 0x7fff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4535
+pub const WBSCL_DEST_SIZE__WBSCL_DEST_WIDTH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4537
+pub const WBSCL_DEST_SIZE__WBSCL_DEST_WIDTH_MASK: u32 = 0x7fff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4539
+pub const WBSCL_HORZ_FILTER_SCALE_RATIO__WBSCL_H_SCALE_RATIO__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4540
+pub const WBSCL_HORZ_FILTER_SCALE_RATIO__WBSCL_H_SCALE_RATIO_MASK: u32 = 0x7ffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4542
+pub const WBSCL_HORZ_FILTER_INIT_Y_RGB__WBSCL_H_INIT_FRAC_Y_RGB__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4544
+pub const WBSCL_HORZ_FILTER_INIT_Y_RGB__WBSCL_H_INIT_FRAC_Y_RGB_MASK: u32 = 0xffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4543
+pub const WBSCL_HORZ_FILTER_INIT_Y_RGB__WBSCL_H_INIT_INT_Y_RGB__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4545
+pub const WBSCL_HORZ_FILTER_INIT_Y_RGB__WBSCL_H_INIT_INT_Y_RGB_MASK: u32 = 0x1f000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4547
+pub const WBSCL_HORZ_FILTER_INIT_CBCR__WBSCL_H_INIT_FRAC_CBCR__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4549
+pub const WBSCL_HORZ_FILTER_INIT_CBCR__WBSCL_H_INIT_FRAC_CBCR_MASK: u32 = 0xffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4548
+pub const WBSCL_HORZ_FILTER_INIT_CBCR__WBSCL_H_INIT_INT_CBCR__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4550
+pub const WBSCL_HORZ_FILTER_INIT_CBCR__WBSCL_H_INIT_INT_CBCR_MASK: u32 = 0x1f000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4552
+pub const WBSCL_VERT_FILTER_SCALE_RATIO__WBSCL_V_SCALE_RATIO__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4553
+pub const WBSCL_VERT_FILTER_SCALE_RATIO__WBSCL_V_SCALE_RATIO_MASK: u32 = 0x7ffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4555
+pub const WBSCL_VERT_FILTER_INIT_Y_RGB__WBSCL_V_INIT_FRAC_Y_RGB__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4557
+pub const WBSCL_VERT_FILTER_INIT_Y_RGB__WBSCL_V_INIT_FRAC_Y_RGB_MASK: u32 = 0xffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4556
+pub const WBSCL_VERT_FILTER_INIT_Y_RGB__WBSCL_V_INIT_INT_Y_RGB__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4558
+pub const WBSCL_VERT_FILTER_INIT_Y_RGB__WBSCL_V_INIT_INT_Y_RGB_MASK: u32 = 0x1f000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4560
+pub const WBSCL_VERT_FILTER_INIT_CBCR__WBSCL_V_INIT_FRAC_CBCR__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4562
+pub const WBSCL_VERT_FILTER_INIT_CBCR__WBSCL_V_INIT_FRAC_CBCR_MASK: u32 = 0xffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4561
+pub const WBSCL_VERT_FILTER_INIT_CBCR__WBSCL_V_INIT_INT_CBCR__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4563
+pub const WBSCL_VERT_FILTER_INIT_CBCR__WBSCL_V_INIT_INT_CBCR_MASK: u32 = 0x1f000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4565
+pub const WBSCL_ROUND_OFFSET__WBSCL_ROUND_OFFSET_Y_RGB__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4567
+pub const WBSCL_ROUND_OFFSET__WBSCL_ROUND_OFFSET_Y_RGB_MASK: u32 = 0x3ff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4566
+pub const WBSCL_ROUND_OFFSET__WBSCL_ROUND_OFFSET_CBCR__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4568
+pub const WBSCL_ROUND_OFFSET__WBSCL_ROUND_OFFSET_CBCR_MASK: u32 = 0x3ff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4579
+pub const WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_FLAG__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4584
+pub const WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_FLAG_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4580
+pub const WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_ACK__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4585
+pub const WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_ACK_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4581
+pub const WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_MASK__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4586
+pub const WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_MASK_MASK: u32 = 0x1000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4582
+pub const WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_INT_STATUS__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4587
+pub const WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_INT_STATUS_MASK: u32 = 0x10000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4583
+pub const WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_INT_TYPE__SHIFT: u32 = 0x14;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4588
+pub const WBSCL_OVERFLOW_STATUS__WBSCL_DATA_OVERFLOW_INT_TYPE_MASK: u32 = 0x100000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4590
+pub const WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_FLAG__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4595
+pub const WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_FLAG_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4591
+pub const WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_ACK__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4596
+pub const WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_ACK_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4592
+pub const WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_MASK__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4597
+pub const WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_MASK_MASK: u32 = 0x1000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4593
+pub const WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_INT_STATUS__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4598
+pub const WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_INT_STATUS_MASK: u32 = 0x10000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4594
+pub const WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_INT_TYPE__SHIFT: u32 = 0x14;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4599
+pub const WBSCL_COEF_RAM_CONFLICT_STATUS__WBSCL_HOST_CONFLICT_INT_TYPE_MASK: u32 = 0x100000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4610
+pub const WBSCL_TEST_CNTL__WBSCL_TEST_CRC_EN__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4613
+pub const WBSCL_TEST_CNTL__WBSCL_TEST_CRC_EN_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4611
+pub const WBSCL_TEST_CNTL__WBSCL_TEST_CRC_CONT_EN__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4614
+pub const WBSCL_TEST_CNTL__WBSCL_TEST_CRC_CONT_EN_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4617
+pub const WBSCL_TEST_CRC_RED__WBSCL_TEST_CRC_RED_MASK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4619
+pub const WBSCL_TEST_CRC_RED__WBSCL_TEST_CRC_RED_MASK_MASK: u32 = 0x3ff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4618
+pub const WBSCL_TEST_CRC_RED__WBSCL_TEST_CRC_SIG_RED__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4620
+pub const WBSCL_TEST_CRC_RED__WBSCL_TEST_CRC_SIG_RED_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4622
+pub const WBSCL_TEST_CRC_GREEN__WBSCL_TEST_CRC_GREEN_MASK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4624
+pub const WBSCL_TEST_CRC_GREEN__WBSCL_TEST_CRC_GREEN_MASK_MASK: u32 = 0xffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4623
+pub const WBSCL_TEST_CRC_GREEN__WBSCL_TEST_CRC_SIG_GREEN__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4625
+pub const WBSCL_TEST_CRC_GREEN__WBSCL_TEST_CRC_SIG_GREEN_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4627
+pub const WBSCL_TEST_CRC_BLUE__WBSCL_TEST_CRC_BLUE_MASK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4629
+pub const WBSCL_TEST_CRC_BLUE__WBSCL_TEST_CRC_BLUE_MASK_MASK: u32 = 0x3ff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4628
+pub const WBSCL_TEST_CRC_BLUE__WBSCL_TEST_CRC_SIG_BLUE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4630
+pub const WBSCL_TEST_CRC_BLUE__WBSCL_TEST_CRC_SIG_BLUE_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4632
+pub const WBSCL_BACKPRESSURE_CNT_EN__WBSCL_BACKPRESSURE_CNT_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4633
+pub const WBSCL_BACKPRESSURE_CNT_EN__WBSCL_BACKPRESSURE_CNT_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4635
+pub const WB_MCIF_BACKPRESSURE_CNT__WB_MCIF_Y_MAX_BACKPRESSURE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4637
+pub const WB_MCIF_BACKPRESSURE_CNT__WB_MCIF_Y_MAX_BACKPRESSURE_MASK: u32 = 0xffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4636
+pub const WB_MCIF_BACKPRESSURE_CNT__WB_MCIF_C_MAX_BACKPRESSURE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4638
+pub const WB_MCIF_BACKPRESSURE_CNT__WB_MCIF_C_MAX_BACKPRESSURE_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6163
+pub const WBSCL_CLAMP_Y_RGB__WBSCL_CLAMP_UPPER_Y_RGB__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6165
+pub const WBSCL_CLAMP_Y_RGB__WBSCL_CLAMP_UPPER_Y_RGB_MASK: u32 = 0x3ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6164
+pub const WBSCL_CLAMP_Y_RGB__WBSCL_CLAMP_LOWER_Y_RGB__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6166
+pub const WBSCL_CLAMP_Y_RGB__WBSCL_CLAMP_LOWER_Y_RGB_MASK: u32 = 0x3ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6168
+pub const WBSCL_CLAMP_CBCR__WBSCL_CLAMP_UPPER_CBCR__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6170
+pub const WBSCL_CLAMP_CBCR__WBSCL_CLAMP_UPPER_CBCR_MASK: u32 = 0x3ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6169
+pub const WBSCL_CLAMP_CBCR__WBSCL_CLAMP_LOWER_CBCR__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6171
+pub const WBSCL_CLAMP_CBCR__WBSCL_CLAMP_LOWER_CBCR_MASK: u32 = 0x3ff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4601
+pub const WBSCL_OUTSIDE_PIX_STRATEGY__WBSCL_OUTSIDE_PIX_STRATEGY__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4605
+pub const WBSCL_OUTSIDE_PIX_STRATEGY__WBSCL_OUTSIDE_PIX_STRATEGY_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4603
+pub const WBSCL_OUTSIDE_PIX_STRATEGY__WBSCL_BLACK_COLOR_G_Y__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:4607
+pub const WBSCL_OUTSIDE_PIX_STRATEGY__WBSCL_BLACK_COLOR_G_Y_MASK: u32 = 0x3ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6178
+pub const WBSCL_OUTSIDE_PIX_STRATEGY_CBCR__WBSCL_BLACK_COLOR_B_CB__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6180
+pub const WBSCL_OUTSIDE_PIX_STRATEGY_CBCR__WBSCL_BLACK_COLOR_B_CB_MASK: u32 = 0x3ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6179
+pub const WBSCL_OUTSIDE_PIX_STRATEGY_CBCR__WBSCL_BLACK_COLOR_R_CR__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6181
+pub const WBSCL_OUTSIDE_PIX_STRATEGY_CBCR__WBSCL_BLACK_COLOR_R_CR_MASK: u32 = 0x3ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6183
+pub const WBSCL_DEBUG__WBSCL_DEBUG__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6184
+pub const WBSCL_DEBUG__WBSCL_DEBUG_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6186
+pub const WBSCL_TEST_DEBUG_INDEX__WBSCL_TEST_DEBUG_INDEX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6188
+pub const WBSCL_TEST_DEBUG_INDEX__WBSCL_TEST_DEBUG_INDEX_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6187
+pub const WBSCL_TEST_DEBUG_INDEX__WBSCL_TEST_DEBUG_WRITE_EN__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6189
+pub const WBSCL_TEST_DEBUG_INDEX__WBSCL_TEST_DEBUG_WRITE_EN_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6191
+pub const WBSCL_TEST_DEBUG_DATA__WBSCL_TEST_DEBUG_DATA__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6192
+pub const WBSCL_TEST_DEBUG_DATA__WBSCL_TEST_DEBUG_DATA_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:15323
+pub const WB_WARM_UP_MODE_CTL1__WIDTH_WARMUP__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:15322
+pub const WB_WARM_UP_MODE_CTL1__WIDTH_WARMUP_MASK: u32 = 0x7fff;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:15325
+pub const WB_WARM_UP_MODE_CTL1__HEIGHT_WARMUP__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:15324
+pub const WB_WARM_UP_MODE_CTL1__HEIGHT_WARMUP_MASK: u32 = 0x7fff0000;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:15327
+pub const WB_WARM_UP_MODE_CTL1__GMC_WARM_UP_ENABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:15326
+pub const WB_WARM_UP_MODE_CTL1__GMC_WARM_UP_ENABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:15329
+pub const WB_WARM_UP_MODE_CTL2__DATA_VALUE_WARMUP__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:15328
+pub const WB_WARM_UP_MODE_CTL2__DATA_VALUE_WARMUP_MASK: u32 = 0x3ff;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:15331
+pub const WB_WARM_UP_MODE_CTL2__MODE_WARMUP__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_11_2_sh_mask.h:15330
+pub const WB_WARM_UP_MODE_CTL2__MODE_WARMUP_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6031
+pub const WB_WARM_UP_MODE_CTL2__DATA_DEPTH_WARMUP__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6034
+pub const WB_WARM_UP_MODE_CTL2__DATA_DEPTH_WARMUP_MASK: u32 = 0x100000;
+
+// DC mcif: dcn20_mmhubbub_registers absolute offsets per pipe instance
+
+// (MCIF_WB_COMMON_REG_LIST_DCN2_0({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUFMGR_SW_CONTROL: u32 = 0x3772;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUFMGR_CUR_LINE_R_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUFMGR_CUR_LINE_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUFMGR_CUR_LINE_R: u32 = 0x3773;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUFMGR_STATUS_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUFMGR_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUFMGR_STATUS: u32 = 0x3774;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_PITCH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_PITCH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_PITCH: u32 = 0x3775;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_1_STATUS_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_1_STATUS: u32 = 0x3776;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_1_STATUS2_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_STATUS2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_1_STATUS2: u32 = 0x3777;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_2_STATUS_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_2_STATUS: u32 = 0x3778;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_2_STATUS2_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_STATUS2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_2_STATUS2: u32 = 0x3779;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_3_STATUS_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_3_STATUS: u32 = 0x377a;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_3_STATUS2_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_STATUS2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_3_STATUS2: u32 = 0x377b;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_4_STATUS_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_4_STATUS: u32 = 0x377c;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_4_STATUS2_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_STATUS2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_4_STATUS2: u32 = 0x377d;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_ARBITRATION_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_ARBITRATION_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_ARBITRATION_CONTROL: u32 = 0x377e;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_SCLK_CHANGE_BASE_IDX) + mmMCIF_WB0_MCIF_WB_SCLK_CHANGE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_SCLK_CHANGE: u32 = 0x377f;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_TEST_DEBUG_INDEX_BASE_IDX) + mmMCIF_WB0_MCIF_WB_TEST_DEBUG_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_TEST_DEBUG_INDEX: u32 = 0x3780;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_TEST_DEBUG_DATA_BASE_IDX) + mmMCIF_WB0_MCIF_WB_TEST_DEBUG_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_TEST_DEBUG_DATA: u32 = 0x3781;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_1_ADDR_Y: u32 = 0x3782;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_1_ADDR_Y_OFFSET: u32 = 0x3783;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_1_ADDR_C: u32 = 0x3784;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_1_ADDR_C_OFFSET: u32 = 0x3785;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_2_ADDR_Y: u32 = 0x3786;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_2_ADDR_Y_OFFSET: u32 = 0x3787;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_2_ADDR_C: u32 = 0x3788;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_2_ADDR_C_OFFSET: u32 = 0x3789;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_3_ADDR_Y: u32 = 0x378a;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_3_ADDR_Y_OFFSET: u32 = 0x378b;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_3_ADDR_C: u32 = 0x378c;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_3_ADDR_C_OFFSET: u32 = 0x378d;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_4_ADDR_Y: u32 = 0x378e;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_4_ADDR_Y_OFFSET: u32 = 0x378f;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_4_ADDR_C: u32 = 0x3790;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C_OFFSET_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_4_ADDR_C_OFFSET: u32 = 0x3791;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUFMGR_VCE_CONTROL: u32 = 0x3792;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_NB_PSTATE_LATENCY_WATERMARK_BASE_IDX) + mmMCIF_WB0_MCIF_WB_NB_PSTATE_LATENCY_WATERMARK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_NB_PSTATE_LATENCY_WATERMARK: u32 = 0x3793;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_NB_PSTATE_CONTROL: u32 = 0x3794;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_WATERMARK_BASE_IDX) + mmMCIF_WB0_MCIF_WB_WATERMARK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_WATERMARK: u32 = 0x3795;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_CLOCK_GATER_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_CLOCK_GATER_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_CLOCK_GATER_CONTROL: u32 = 0x3796;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_WARM_UP_CNTL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_WARM_UP_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_WARM_UP_CNTL: u32 = 0x3797;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_SELF_REFRESH_CONTROL: u32 = 0x3798;
+/// The value of `BASE(mmMCIF_WB0_MULTI_LEVEL_QOS_CTRL_BASE_IDX) + mmMCIF_WB0_MULTI_LEVEL_QOS_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MULTI_LEVEL_QOS_CTRL: u32 = 0x3799;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_SECURITY_LEVEL_BASE_IDX) + mmMCIF_WB0_MCIF_WB_SECURITY_LEVEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_SECURITY_LEVEL: u32 = 0x379a;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_LUMA_SIZE_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_LUMA_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_LUMA_SIZE: u32 = 0x379b;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_CHROMA_SIZE_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_CHROMA_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_CHROMA_SIZE: u32 = 0x379c;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_1_ADDR_Y_HIGH: u32 = 0x379d;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_ADDR_C_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_1_ADDR_C_HIGH: u32 = 0x379e;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_2_ADDR_Y_HIGH: u32 = 0x379f;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_ADDR_C_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_2_ADDR_C_HIGH: u32 = 0x37a0;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_3_ADDR_Y_HIGH: u32 = 0x37a1;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_ADDR_C_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_3_ADDR_C_HIGH: u32 = 0x37a2;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_4_ADDR_Y_HIGH: u32 = 0x37a3;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C_HIGH_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_ADDR_C_HIGH` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_4_ADDR_C_HIGH: u32 = 0x37a4;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_1_RESOLUTION_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_1_RESOLUTION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_1_RESOLUTION: u32 = 0x37a5;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_2_RESOLUTION_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_2_RESOLUTION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_2_RESOLUTION: u32 = 0x37a6;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_3_RESOLUTION_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_3_RESOLUTION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_3_RESOLUTION: u32 = 0x37a7;
+/// The value of `BASE(mmMCIF_WB0_MCIF_WB_BUF_4_RESOLUTION_BASE_IDX) + mmMCIF_WB0_MCIF_WB_BUF_4_RESOLUTION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_MCIF_WB_BUF_4_RESOLUTION: u32 = 0x37a8;
+/// The value of `BASE(mmWBIF0_SMU_WM_CONTROL_BASE_IDX) + mmWBIF0_SMU_WM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const MCIF0_SMU_WM_CONTROL: u32 = 0x37f4;
+
+// DC mcif field shifts/masks (MCIF_WB_COMMON_MASK_SH_LIST_DCN2_0(__SHIFT))
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:816
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_ENABLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:825
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_ENABLE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:818
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_INT_EN__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:827
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_INT_EN_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:819
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_INT_ACK__SHIFT: u32 = 0x5;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:828
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_INT_ACK_MASK: u32 = 0x20;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:820
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_SLICE_INT_EN__SHIFT: u32 = 0x6;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:829
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_SLICE_INT_EN_MASK: u32 = 0x40;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:821
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_OVERRUN_INT_EN__SHIFT: u32 = 0x7;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:830
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_OVERRUN_INT_EN_MASK: u32 = 0x80;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:822
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_LOCK__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:831
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUFMGR_SW_LOCK_MASK: u32 = 0xf00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:823
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_P_VMID__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:832
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_P_VMID_MASK: u32 = 0xf0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:824
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUF_ADDR_FENCE_EN__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:833
+pub const MCIF_WB0_MCIF_WB_BUFMGR_SW_CONTROL__MCIF_WB_BUF_ADDR_FENCE_EN_MASK: u32 = 0x1000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:835
+pub const MCIF_WB0_MCIF_WB_BUFMGR_CUR_LINE_R__MCIF_WB_BUFMGR_CUR_LINE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:836
+pub const MCIF_WB0_MCIF_WB_BUFMGR_CUR_LINE_R__MCIF_WB_BUFMGR_CUR_LINE_R_MASK: u32 = 0x1fff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:838
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_VCE_INT_STATUS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:846
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_VCE_INT_STATUS_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:839
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_SW_INT_STATUS__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:847
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_SW_INT_STATUS_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:840
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_SW_OVERRUN_INT_STATUS__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:848
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_SW_OVERRUN_INT_STATUS_MASK: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:841
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_CUR_BUF__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:849
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_CUR_BUF_MASK: u32 = 0x70;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:843
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_BUFTAG__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:851
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_BUFTAG_MASK: u32 = 0xf00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:844
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_CUR_LINE_L__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:852
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_CUR_LINE_L_MASK: u32 = 0x1fff000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:845
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_NEXT_BUF__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:853
+pub const MCIF_WB0_MCIF_WB_BUFMGR_STATUS__MCIF_WB_BUFMGR_NEXT_BUF_MASK: u32 = 0x70000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:855
+pub const MCIF_WB0_MCIF_WB_BUF_PITCH__MCIF_WB_BUF_LUMA_PITCH__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:857
+pub const MCIF_WB0_MCIF_WB_BUF_PITCH__MCIF_WB_BUF_LUMA_PITCH_MASK: u32 = 0xff00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:856
+pub const MCIF_WB0_MCIF_WB_BUF_PITCH__MCIF_WB_BUF_CHROMA_PITCH__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:858
+pub const MCIF_WB0_MCIF_WB_BUF_PITCH__MCIF_WB_BUF_CHROMA_PITCH_MASK: u32 = 0xff000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:860
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_ACTIVE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:873
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_ACTIVE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:861
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_SW_LOCKED__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:874
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_SW_LOCKED_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:862
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_VCE_LOCKED__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:875
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_VCE_LOCKED_MASK: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:863
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_OVERFLOW__SHIFT: u32 = 0x3;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:876
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_OVERFLOW_MASK: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:864
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_DISABLE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:877
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_DISABLE_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:865
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_MODE__SHIFT: u32 = 0x5;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:878
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_MODE_MASK: u32 = 0xe0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:866
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_BUFTAG__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:879
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_BUFTAG_MASK: u32 = 0xf00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:867
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_NXT_BUF__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:880
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_NXT_BUF_MASK: u32 = 0x7000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:868
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_FIELD__SHIFT: u32 = 0xf;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:881
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_FIELD_MASK: u32 = 0x8000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:869
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_CUR_LINE_L__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:882
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_CUR_LINE_L_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:870
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_LONG_LINE_ERROR__SHIFT: u32 = 0x1d;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:883
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_LONG_LINE_ERROR_MASK: u32 = 0x20000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:871
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_SHORT_LINE_ERROR__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:884
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_SHORT_LINE_ERROR_MASK: u32 = 0x40000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:872
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_FRAME_LENGTH_ERROR__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:885
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS__MCIF_WB_BUF_1_FRAME_LENGTH_ERROR_MASK: u32 = 0x80000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:887
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_CUR_LINE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:892
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_CUR_LINE_R_MASK: u32 = 0x1fff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:888
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_NEW_CONTENT__SHIFT: u32 = 0xd;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:893
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_NEW_CONTENT_MASK: u32 = 0x2000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:889
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_COLOR_DEPTH__SHIFT: u32 = 0xe;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:894
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_COLOR_DEPTH_MASK: u32 = 0x4000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6409
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_TMZ_BLACK_PIXEL__SHIFT: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6417
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_TMZ_BLACK_PIXEL_MASK: u32 = 0x8000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6410
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_TMZ__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6418
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_TMZ_MASK: u32 = 0x10000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:890
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_Y_OVERRUN__SHIFT: u32 = 0x11;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:895
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_Y_OVERRUN_MASK: u32 = 0x20000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:891
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_C_OVERRUN__SHIFT: u32 = 0x12;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:896
+pub const MCIF_WB0_MCIF_WB_BUF_1_STATUS2__MCIF_WB_BUF_1_C_OVERRUN_MASK: u32 = 0x40000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:898
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_ACTIVE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:911
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_ACTIVE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:899
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_SW_LOCKED__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:912
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_SW_LOCKED_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:900
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_VCE_LOCKED__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:913
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_VCE_LOCKED_MASK: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:901
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_OVERFLOW__SHIFT: u32 = 0x3;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:914
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_OVERFLOW_MASK: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:902
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_DISABLE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:915
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_DISABLE_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:903
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_MODE__SHIFT: u32 = 0x5;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:916
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_MODE_MASK: u32 = 0xe0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:904
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_BUFTAG__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:917
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_BUFTAG_MASK: u32 = 0xf00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:905
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_NXT_BUF__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:918
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_NXT_BUF_MASK: u32 = 0x7000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:906
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_FIELD__SHIFT: u32 = 0xf;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:919
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_FIELD_MASK: u32 = 0x8000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:907
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_CUR_LINE_L__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:920
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_CUR_LINE_L_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:908
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_LONG_LINE_ERROR__SHIFT: u32 = 0x1d;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:921
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_LONG_LINE_ERROR_MASK: u32 = 0x20000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:909
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_SHORT_LINE_ERROR__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:922
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_SHORT_LINE_ERROR_MASK: u32 = 0x40000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:910
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_FRAME_LENGTH_ERROR__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:923
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS__MCIF_WB_BUF_2_FRAME_LENGTH_ERROR_MASK: u32 = 0x80000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:925
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_CUR_LINE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:930
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_CUR_LINE_R_MASK: u32 = 0x1fff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:926
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_NEW_CONTENT__SHIFT: u32 = 0xd;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:931
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_NEW_CONTENT_MASK: u32 = 0x2000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:927
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_COLOR_DEPTH__SHIFT: u32 = 0xe;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:932
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_COLOR_DEPTH_MASK: u32 = 0x4000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6453
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_TMZ_BLACK_PIXEL__SHIFT: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6461
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_TMZ_BLACK_PIXEL_MASK: u32 = 0x8000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6454
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_TMZ__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6462
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_TMZ_MASK: u32 = 0x10000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:928
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_Y_OVERRUN__SHIFT: u32 = 0x11;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:933
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_Y_OVERRUN_MASK: u32 = 0x20000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:929
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_C_OVERRUN__SHIFT: u32 = 0x12;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:934
+pub const MCIF_WB0_MCIF_WB_BUF_2_STATUS2__MCIF_WB_BUF_2_C_OVERRUN_MASK: u32 = 0x40000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:936
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_ACTIVE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:949
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_ACTIVE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:937
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_SW_LOCKED__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:950
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_SW_LOCKED_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:938
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_VCE_LOCKED__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:951
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_VCE_LOCKED_MASK: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:939
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_OVERFLOW__SHIFT: u32 = 0x3;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:952
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_OVERFLOW_MASK: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:940
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_DISABLE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:953
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_DISABLE_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:941
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_MODE__SHIFT: u32 = 0x5;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:954
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_MODE_MASK: u32 = 0xe0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:942
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_BUFTAG__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:955
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_BUFTAG_MASK: u32 = 0xf00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:943
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_NXT_BUF__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:956
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_NXT_BUF_MASK: u32 = 0x7000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:944
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_FIELD__SHIFT: u32 = 0xf;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:957
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_FIELD_MASK: u32 = 0x8000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:945
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_CUR_LINE_L__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:958
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_CUR_LINE_L_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:946
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_LONG_LINE_ERROR__SHIFT: u32 = 0x1d;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:959
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_LONG_LINE_ERROR_MASK: u32 = 0x20000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:947
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_SHORT_LINE_ERROR__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:960
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_SHORT_LINE_ERROR_MASK: u32 = 0x40000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:948
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_FRAME_LENGTH_ERROR__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:961
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS__MCIF_WB_BUF_3_FRAME_LENGTH_ERROR_MASK: u32 = 0x80000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:963
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_CUR_LINE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:968
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_CUR_LINE_R_MASK: u32 = 0x1fff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:964
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_NEW_CONTENT__SHIFT: u32 = 0xd;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:969
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_NEW_CONTENT_MASK: u32 = 0x2000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:965
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_COLOR_DEPTH__SHIFT: u32 = 0xe;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:970
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_COLOR_DEPTH_MASK: u32 = 0x4000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6497
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_TMZ_BLACK_PIXEL__SHIFT: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6505
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_TMZ_BLACK_PIXEL_MASK: u32 = 0x8000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6498
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_TMZ__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6506
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_TMZ_MASK: u32 = 0x10000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:966
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_Y_OVERRUN__SHIFT: u32 = 0x11;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:971
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_Y_OVERRUN_MASK: u32 = 0x20000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:967
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_C_OVERRUN__SHIFT: u32 = 0x12;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:972
+pub const MCIF_WB0_MCIF_WB_BUF_3_STATUS2__MCIF_WB_BUF_3_C_OVERRUN_MASK: u32 = 0x40000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:974
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_ACTIVE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:987
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_ACTIVE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:975
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_SW_LOCKED__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:988
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_SW_LOCKED_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:976
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_VCE_LOCKED__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:989
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_VCE_LOCKED_MASK: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:977
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_OVERFLOW__SHIFT: u32 = 0x3;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:990
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_OVERFLOW_MASK: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:978
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_DISABLE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:991
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_DISABLE_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:979
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_MODE__SHIFT: u32 = 0x5;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:992
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_MODE_MASK: u32 = 0xe0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:980
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_BUFTAG__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:993
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_BUFTAG_MASK: u32 = 0xf00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:981
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_NXT_BUF__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:994
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_NXT_BUF_MASK: u32 = 0x7000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:982
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_FIELD__SHIFT: u32 = 0xf;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:995
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_FIELD_MASK: u32 = 0x8000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:983
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_CUR_LINE_L__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:996
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_CUR_LINE_L_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:984
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_LONG_LINE_ERROR__SHIFT: u32 = 0x1d;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:997
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_LONG_LINE_ERROR_MASK: u32 = 0x20000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:985
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_SHORT_LINE_ERROR__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:998
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_SHORT_LINE_ERROR_MASK: u32 = 0x40000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:986
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_FRAME_LENGTH_ERROR__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:999
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS__MCIF_WB_BUF_4_FRAME_LENGTH_ERROR_MASK: u32 = 0x80000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1001
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_CUR_LINE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1006
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_CUR_LINE_R_MASK: u32 = 0x1fff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1002
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_NEW_CONTENT__SHIFT: u32 = 0xd;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1007
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_NEW_CONTENT_MASK: u32 = 0x2000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1003
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_COLOR_DEPTH__SHIFT: u32 = 0xe;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1008
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_COLOR_DEPTH_MASK: u32 = 0x4000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6541
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_TMZ_BLACK_PIXEL__SHIFT: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6549
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_TMZ_BLACK_PIXEL_MASK: u32 = 0x8000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6542
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_TMZ__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6550
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_TMZ_MASK: u32 = 0x10000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1004
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_Y_OVERRUN__SHIFT: u32 = 0x11;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1009
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_Y_OVERRUN_MASK: u32 = 0x20000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1005
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_C_OVERRUN__SHIFT: u32 = 0x12;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1010
+pub const MCIF_WB0_MCIF_WB_BUF_4_STATUS2__MCIF_WB_BUF_4_C_OVERRUN_MASK: u32 = 0x40000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1012
+pub const MCIF_WB0_MCIF_WB_ARBITRATION_CONTROL__MCIF_WB_CLIENT_ARBITRATION_SLICE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1014
+pub const MCIF_WB0_MCIF_WB_ARBITRATION_CONTROL__MCIF_WB_CLIENT_ARBITRATION_SLICE_MASK: u32 = 0x3;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1013
+pub const MCIF_WB0_MCIF_WB_ARBITRATION_CONTROL__MCIF_WB_TIME_PER_PIXEL__SHIFT: u32 = 0x16;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1015
+pub const MCIF_WB0_MCIF_WB_ARBITRATION_CONTROL__MCIF_WB_TIME_PER_PIXEL_MASK: u32 = 0xffc00000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1017
+pub const MCIF_WB0_MCIF_WB_SCLK_CHANGE__WM_CHANGE_ACK_FORCE_ON__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1019
+pub const MCIF_WB0_MCIF_WB_SCLK_CHANGE__WM_CHANGE_ACK_FORCE_ON_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1018
+pub const MCIF_WB0_MCIF_WB_SCLK_CHANGE__MCIF_WB_CLI_WATERMARK_MASK__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1020
+pub const MCIF_WB0_MCIF_WB_SCLK_CHANGE__MCIF_WB_CLI_WATERMARK_MASK_MASK: u32 = 0xe;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6565
+pub const MCIF_WB0_MCIF_WB_TEST_DEBUG_INDEX__MCIF_WB_TEST_DEBUG_INDEX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6567
+pub const MCIF_WB0_MCIF_WB_TEST_DEBUG_INDEX__MCIF_WB_TEST_DEBUG_INDEX_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6570
+pub const MCIF_WB0_MCIF_WB_TEST_DEBUG_DATA__MCIF_WB_TEST_DEBUG_DATA__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6571
+pub const MCIF_WB0_MCIF_WB_TEST_DEBUG_DATA__MCIF_WB_TEST_DEBUG_DATA_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1022
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y__MCIF_WB_BUF_1_ADDR_Y__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1023
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y__MCIF_WB_BUF_1_ADDR_Y_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1025
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_OFFSET__MCIF_WB_BUF_1_ADDR_Y_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1026
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_OFFSET__MCIF_WB_BUF_1_ADDR_Y_OFFSET_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1028
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_C__MCIF_WB_BUF_1_ADDR_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1029
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_C__MCIF_WB_BUF_1_ADDR_C_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1031
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_C_OFFSET__MCIF_WB_BUF_1_ADDR_C_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1032
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_C_OFFSET__MCIF_WB_BUF_1_ADDR_C_OFFSET_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1034
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y__MCIF_WB_BUF_2_ADDR_Y__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1035
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y__MCIF_WB_BUF_2_ADDR_Y_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1037
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_OFFSET__MCIF_WB_BUF_2_ADDR_Y_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1038
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_OFFSET__MCIF_WB_BUF_2_ADDR_Y_OFFSET_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1040
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_C__MCIF_WB_BUF_2_ADDR_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1041
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_C__MCIF_WB_BUF_2_ADDR_C_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1043
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_C_OFFSET__MCIF_WB_BUF_2_ADDR_C_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1044
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_C_OFFSET__MCIF_WB_BUF_2_ADDR_C_OFFSET_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1046
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y__MCIF_WB_BUF_3_ADDR_Y__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1047
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y__MCIF_WB_BUF_3_ADDR_Y_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1049
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_OFFSET__MCIF_WB_BUF_3_ADDR_Y_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1050
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_OFFSET__MCIF_WB_BUF_3_ADDR_Y_OFFSET_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1052
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_C__MCIF_WB_BUF_3_ADDR_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1053
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_C__MCIF_WB_BUF_3_ADDR_C_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1055
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_C_OFFSET__MCIF_WB_BUF_3_ADDR_C_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1056
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_C_OFFSET__MCIF_WB_BUF_3_ADDR_C_OFFSET_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1058
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y__MCIF_WB_BUF_4_ADDR_Y__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1059
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y__MCIF_WB_BUF_4_ADDR_Y_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1061
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_OFFSET__MCIF_WB_BUF_4_ADDR_Y_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1062
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_OFFSET__MCIF_WB_BUF_4_ADDR_Y_OFFSET_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1064
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_C__MCIF_WB_BUF_4_ADDR_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1065
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_C__MCIF_WB_BUF_4_ADDR_C_MASK: u32 = 0xffffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1067
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_C_OFFSET__MCIF_WB_BUF_4_ADDR_C_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1068
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_C_OFFSET__MCIF_WB_BUF_4_ADDR_C_OFFSET_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1070
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_LOCK_IGNORE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1076
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_LOCK_IGNORE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1071
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_INT_EN__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1077
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_INT_EN_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1072
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_INT_ACK__SHIFT: u32 = 0x5;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1078
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_INT_ACK_MASK: u32 = 0x20;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1073
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_SLICE_INT_EN__SHIFT: u32 = 0x6;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1079
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_SLICE_INT_EN_MASK: u32 = 0x40;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1074
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_LOCK__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1080
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_VCE_LOCK_MASK: u32 = 0xf00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1075
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_SLICE_SIZE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1081
+pub const MCIF_WB0_MCIF_WB_BUFMGR_VCE_CONTROL__MCIF_WB_BUFMGR_SLICE_SIZE_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1083
+pub const MCIF_WB0_MCIF_WB_NB_PSTATE_LATENCY_WATERMARK__NB_PSTATE_CHANGE_REFRESH_WATERMARK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1084
+pub const MCIF_WB0_MCIF_WB_NB_PSTATE_LATENCY_WATERMARK__NB_PSTATE_CHANGE_REFRESH_WATERMARK_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1086
+pub const MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_URGENT_DURING_REQUEST__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1090
+pub const MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_URGENT_DURING_REQUEST_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1087
+pub const MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_FORCE_ON__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1091
+pub const MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_FORCE_ON_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1088
+pub const MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_ALLOW_FOR_URGENT__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1092
+pub const MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_ALLOW_FOR_URGENT_MASK: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1089
+pub const MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_WATERMARK_MASK__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1093
+pub const MCIF_WB0_MCIF_WB_NB_PSTATE_CONTROL__NB_PSTATE_CHANGE_WATERMARK_MASK_MASK: u32 = 0x70;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1095
+pub const MCIF_WB0_MCIF_WB_WATERMARK__MCIF_WB_CLI_WATERMARK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1096
+pub const MCIF_WB0_MCIF_WB_WATERMARK__MCIF_WB_CLI_WATERMARK_MASK: u32 = 0xffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1098
+pub const MCIF_WB0_MCIF_WB_CLOCK_GATER_CONTROL__MCIF_WB_CLI_CLOCK_GATER_OVERRIDE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1099
+pub const MCIF_WB0_MCIF_WB_CLOCK_GATER_CONTROL__MCIF_WB_CLI_CLOCK_GATER_OVERRIDE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1101
+pub const MCIF_WB0_MCIF_WB_WARM_UP_CNTL__MCIF_WB_PITCH_SIZE_WARMUP__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1102
+pub const MCIF_WB0_MCIF_WB_WARM_UP_CNTL__MCIF_WB_PITCH_SIZE_WARMUP_MASK: u32 = 0xff00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1104
+pub const MCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL__DIS_REFRESH_UNDER_NBPREQ__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1106
+pub const MCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL__DIS_REFRESH_UNDER_NBPREQ_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1105
+pub const MCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL__PERFRAME_SELF_REFRESH__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1107
+pub const MCIF_WB0_MCIF_WB_SELF_REFRESH_CONTROL__PERFRAME_SELF_REFRESH_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1109
+pub const MCIF_WB0_MULTI_LEVEL_QOS_CTRL__MAX_SCALED_TIME_TO_URGENT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1110
+pub const MCIF_WB0_MULTI_LEVEL_QOS_CTRL__MAX_SCALED_TIME_TO_URGENT_MASK: u32 = 0x3fffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6663
+pub const MCIF_WB0_MCIF_WB_SECURITY_LEVEL__MCIF_WB_SECURITY_LEVEL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6664
+pub const MCIF_WB0_MCIF_WB_SECURITY_LEVEL__MCIF_WB_SECURITY_LEVEL_MASK: u32 = 0x7;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1112
+pub const MCIF_WB0_MCIF_WB_BUF_LUMA_SIZE__MCIF_WB_BUF_LUMA_SIZE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1113
+pub const MCIF_WB0_MCIF_WB_BUF_LUMA_SIZE__MCIF_WB_BUF_LUMA_SIZE_MASK: u32 = 0xfffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1115
+pub const MCIF_WB0_MCIF_WB_BUF_CHROMA_SIZE__MCIF_WB_BUF_CHROMA_SIZE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:1116
+pub const MCIF_WB0_MCIF_WB_BUF_CHROMA_SIZE__MCIF_WB_BUF_CHROMA_SIZE_MASK: u32 = 0xfffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6672
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_HIGH__MCIF_WB_BUF_1_ADDR_Y_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6673
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_Y_HIGH__MCIF_WB_BUF_1_ADDR_Y_HIGH_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6675
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_C_HIGH__MCIF_WB_BUF_1_ADDR_C_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6676
+pub const MCIF_WB0_MCIF_WB_BUF_1_ADDR_C_HIGH__MCIF_WB_BUF_1_ADDR_C_HIGH_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6678
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_HIGH__MCIF_WB_BUF_2_ADDR_Y_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6679
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_Y_HIGH__MCIF_WB_BUF_2_ADDR_Y_HIGH_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6681
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_C_HIGH__MCIF_WB_BUF_2_ADDR_C_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6682
+pub const MCIF_WB0_MCIF_WB_BUF_2_ADDR_C_HIGH__MCIF_WB_BUF_2_ADDR_C_HIGH_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6684
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_HIGH__MCIF_WB_BUF_3_ADDR_Y_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6685
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_Y_HIGH__MCIF_WB_BUF_3_ADDR_Y_HIGH_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6687
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_C_HIGH__MCIF_WB_BUF_3_ADDR_C_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6688
+pub const MCIF_WB0_MCIF_WB_BUF_3_ADDR_C_HIGH__MCIF_WB_BUF_3_ADDR_C_HIGH_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6690
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_HIGH__MCIF_WB_BUF_4_ADDR_Y_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6691
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_Y_HIGH__MCIF_WB_BUF_4_ADDR_Y_HIGH_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6693
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_C_HIGH__MCIF_WB_BUF_4_ADDR_C_HIGH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6694
+pub const MCIF_WB0_MCIF_WB_BUF_4_ADDR_C_HIGH__MCIF_WB_BUF_4_ADDR_C_HIGH_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6696
+pub const MCIF_WB0_MCIF_WB_BUF_1_RESOLUTION__MCIF_WB_BUF_1_RESOLUTION_WIDTH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6698
+pub const MCIF_WB0_MCIF_WB_BUF_1_RESOLUTION__MCIF_WB_BUF_1_RESOLUTION_WIDTH_MASK: u32 = 0x1fff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6697
+pub const MCIF_WB0_MCIF_WB_BUF_1_RESOLUTION__MCIF_WB_BUF_1_RESOLUTION_HEIGHT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6699
+pub const MCIF_WB0_MCIF_WB_BUF_1_RESOLUTION__MCIF_WB_BUF_1_RESOLUTION_HEIGHT_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6701
+pub const MCIF_WB0_MCIF_WB_BUF_2_RESOLUTION__MCIF_WB_BUF_2_RESOLUTION_WIDTH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6703
+pub const MCIF_WB0_MCIF_WB_BUF_2_RESOLUTION__MCIF_WB_BUF_2_RESOLUTION_WIDTH_MASK: u32 = 0x1fff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6702
+pub const MCIF_WB0_MCIF_WB_BUF_2_RESOLUTION__MCIF_WB_BUF_2_RESOLUTION_HEIGHT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6704
+pub const MCIF_WB0_MCIF_WB_BUF_2_RESOLUTION__MCIF_WB_BUF_2_RESOLUTION_HEIGHT_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6706
+pub const MCIF_WB0_MCIF_WB_BUF_3_RESOLUTION__MCIF_WB_BUF_3_RESOLUTION_WIDTH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6708
+pub const MCIF_WB0_MCIF_WB_BUF_3_RESOLUTION__MCIF_WB_BUF_3_RESOLUTION_WIDTH_MASK: u32 = 0x1fff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6707
+pub const MCIF_WB0_MCIF_WB_BUF_3_RESOLUTION__MCIF_WB_BUF_3_RESOLUTION_HEIGHT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6709
+pub const MCIF_WB0_MCIF_WB_BUF_3_RESOLUTION__MCIF_WB_BUF_3_RESOLUTION_HEIGHT_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6711
+pub const MCIF_WB0_MCIF_WB_BUF_4_RESOLUTION__MCIF_WB_BUF_4_RESOLUTION_WIDTH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6713
+pub const MCIF_WB0_MCIF_WB_BUF_4_RESOLUTION__MCIF_WB_BUF_4_RESOLUTION_WIDTH_MASK: u32 = 0x1fff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6712
+pub const MCIF_WB0_MCIF_WB_BUF_4_RESOLUTION__MCIF_WB_BUF_4_RESOLUTION_HEIGHT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:6714
+pub const MCIF_WB0_MCIF_WB_BUF_4_RESOLUTION__MCIF_WB_BUF_4_RESOLUTION_HEIGHT_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:7404
+pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_SEL__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:7408
+pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_SEL_MASK: u32 = 0x300000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:7405
+pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_REQ__SHIFT: u32 = 0x16;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:7409
+pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_REQ_MASK: u32 = 0x400000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:7406
+pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_DIS__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:7410
+pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_DIS_MASK: u32 = 0x1000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:7407
+pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_STATUS__SHIFT: u32 = 0x19;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:7411
+pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_STATUS_MASK: u32 = 0x2000000;
