@@ -24,6 +24,11 @@ pub fn scene_commit(bytes: &[u8]) -> bool { sys::scene_commit(bytes) >= 0 }
 /// Yield the core for `ms` milliseconds.
 pub fn sleep_ms(ms: u32) { sys::sleep(ms.min(i32::MAX as u32) as i32); }
 
+/// Fill `buf` from the kernel CSPRNG. False if no real entropy source.
+pub fn random_bytes(buf: &mut [u8]) -> bool {
+    usize::try_from(sys::random_bytes(buf)).is_ok_and(|n| n == buf.len())
+}
+
 /// Milliseconds since boot.
 pub fn ticks_ms() -> u64 { sys::ticks().max(0) as u64 }
 

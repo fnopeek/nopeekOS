@@ -60,6 +60,18 @@ const CLIP_CLEAR_MS: u64 = 30_000;
 /// Shortest master passphrase accepted at setup.
 const MIN_PASSPHRASE: usize = 8;
 
+// Password generator: length range and the character classes. Quotes,
+// backslash and space are left out of the symbols, they break too many
+// login forms and config files.
+const GEN_MIN: u32 = 8;
+const GEN_MAX: u32 = 64;
+const GEN_CLASSES: [(&str, &[u8]); 4] = [
+    ("A-Z", b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+    ("a-z", b"abcdefghijklmnopqrstuvwxyz"),
+    ("0-9", b"0123456789"),
+    ("!#$", b"!#$%&()*+,-./:;<=>?@[]^_{|}~"),
+];
+
 // Actions.
 const A_SAVE: u32 = 1;
 const A_ADD: u32 = 2;
@@ -79,6 +91,9 @@ const A_MENU_EDIT: u32 = 31;
 const A_MENU_DISMISS: u32 = 32;
 const A_CLOSE: u32 = 33;
 const A_FIND: u32 = 34;
+const A_GEN: u32 = 40;
+const A_GEN_LEN: u32 = 41;
+const A_GEN_CLASS_BASE: u32 = 50; // + class index: toggle that class
 const A_ENTER_BASE: u32 = 300; // + field index: Enter pressed in that field
 const A_SEL_BASE: u32 = 1000; // + row index: select that entry
 
@@ -162,6 +177,11 @@ struct St {
     msg_err: bool,
     /// The open menu-bar dropdown.
     menu: Option<Menu>,
+    /// Generator options; the panel shows once Generate was pressed.
+    gen_open: bool,
+    gen_len: u32,
+    /// Bit i set = class `GEN_CLASSES[i]` is used.
+    gen_classes: u8,
     /// FNV hash of a password we put on the clipboard (0 = none), and when
     /// to clear it again.
     clip_hash: u64,
@@ -174,6 +194,7 @@ impl St {
         self.view = v;
         self.reveal = false;
         self.confirm_del = false;
+        self.gen_open = false;
         self.focus_on(0);
     }
     /// Move the keyboard to `field` (whole text selected).
@@ -318,6 +339,99 @@ fn fnv(b: &[u8]) -> u64 {
     h | 1
 }
 
+// ── Password generator ─────────────────────────────────────────────────────
+
+/// A uniform index below `n` from the CSPRNG (rejection sampling, so no
+/// character is more likely than another).
+fn random_below(n: usize, pool: &mut [u8; 64], at: &mut usize) -> Option<usize> {
+    let limit = 256 - 256 % n;
+    loop {
+        if *at == pool.len() {
+            if !host::random_bytes(pool) {
+                return None;
+            }
+            *at = 0;
+        }
+        let b = pool[*at] as usize;
+        *at += 1;
+        if b < limit {
+            return Some(b % n);
+        }
+    }
+}
+
+/// A password of `len` characters from the selected classes, containing
+/// at least one of each. None without a real entropy source.
+fn generate(len: u32, classes: u8) -> Option<String> {
+    let mut set: Vec<u8> = Vec::new();
+    for (i, (_, chars)) in GEN_CLASSES.iter().enumerate() {
+        if classes & (1 << i) != 0 {
+            set.extend_from_slice(chars);
+        }
+    }
+    if set.is_empty() {
+        return None;
+    }
+    let mut pool = [0u8; 64];
+    let mut at = pool.len();
+    // Redraw until every class is present; at 8+ characters a redraw is
+    // rare, and redrawing keeps the result uniform over the valid ones.
+    loop {
+        let mut out = String::with_capacity(len as usize);
+        for _ in 0..len {
+            out.push(set[random_below(set.len(), &mut pool, &mut at)?] as char);
+        }
+        let complete = GEN_CLASSES
+            .iter()
+            .enumerate()
+            .all(|(i, (_, chars))| classes & (1 << i) == 0 || out.bytes().any(|b| chars.contains(&b)));
+        if complete {
+            return Some(out);
+        }
+    }
+}
+
+/// log2(n) in 1/256 bits.
+fn log2_q8(n: u32) -> u32 {
+    if n < 2 {
+        return 0;
+    }
+    let int = 31 - n.leading_zeros();
+    // Mantissa in [1, 2) as Q16; each squaring yields one fraction bit.
+    let mut x: u64 = ((n as u64) << 16) >> int;
+    let mut frac = 0u32;
+    for bit in (0..8).rev() {
+        x = (x * x) >> 16;
+        if x >= 2 << 16 {
+            x >>= 1;
+            frac |= 1 << bit;
+        }
+    }
+    (int << 8) | frac
+}
+
+fn gen_bits(st: &St) -> u32 {
+    let n: usize = GEN_CLASSES
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| st.gen_classes & (1 << i) != 0)
+        .map(|(_, (_, c))| c.len())
+        .sum();
+    st.gen_len * log2_q8(n as u32) / 256
+}
+
+fn fill_generated(st: &mut St) {
+    match generate(st.gen_len, st.gen_classes) {
+        Some(p) => {
+            st.f[3].set(&p);
+            st.reveal = true;
+            st.info("");
+        }
+        None if st.gen_classes == 0 => st.error("Pick at least one character class."),
+        None => st.error("No random source available."),
+    }
+}
+
 // ── Rendering helpers ──────────────────────────────────────────────────────
 
 fn label(text: &str) -> Widget {
@@ -343,7 +457,7 @@ fn field_chrome() -> Vec<Modifier> {
 }
 
 /// A real form input, tagged with its NodeId so `InputChangeAt` names it.
-fn input_field(st: &St, idx: usize, placeholder: &str, secret: bool) -> Widget {
+fn input_field(st: &St, idx: usize, placeholder: &str, secret: bool, extra: Vec<Widget>) -> Widget {
     let mut mods = vec![Modifier::NodeId(NodeId(NODE_FIELD + idx as u32)), Modifier::Flex(1)];
     if st.focus_field == idx {
         mods.push(Modifier::FocusRequest(st.focus));
@@ -360,15 +474,72 @@ fn input_field(st: &St, idx: usize, placeholder: &str, secret: bool) -> Widget {
     if secret {
         children.push(btn(if st.reveal { "Hide" } else { "Show" }, ButtonStyle::Ghost, A_REVEAL));
     }
+    children.extend(extra);
     Widget::Row { children, spacing: Spacing::Sm.as_u16(), align: Align::Center, modifiers: field_chrome() }
 }
 
 fn labelled(st: &St, idx: usize, lab: &str, placeholder: &str, secret: bool) -> Widget {
     Widget::Column {
-        children: vec![label(lab), input_field(st, idx, placeholder, secret)],
+        children: vec![label(lab), input_field(st, idx, placeholder, secret, vec![])],
         spacing: 4,
         align: Align::Stretch,
         modifiers: vec![],
+    }
+}
+
+/// An on/off chip: accent-tinted when on.
+fn chip(text: &str, on: bool, action: u32) -> Widget {
+    Widget::Text {
+        content: text.into(),
+        style: TextStyle::Mono,
+        modifiers: vec![
+            Modifier::PaddingXY { x: Padding::Md.as_u16(), y: Padding::Xs.as_u16() },
+            Modifier::Rounded(Radius::Md.as_u8()),
+            Modifier::Background(if on { Token::AccentMuted } else { Token::SurfaceMuted }),
+            Modifier::Tint(if on { Token::OnSurface } else { Token::OnSurfaceFaint }),
+            Modifier::OnClick(ActionId(action)),
+            Modifier::Hover(vec![Modifier::Background(Token::SurfaceHover)]),
+        ],
+    }
+}
+
+fn generator_panel(st: &St) -> Widget {
+    let slider = Widget::Slider {
+        value: ((st.gen_len - GEN_MIN) * SLIDER_MAX as u32 / (GEN_MAX - GEN_MIN)) as u16,
+        on_change: ActionId(A_GEN_LEN),
+        modifiers: vec![Modifier::Flex(1)],
+    };
+    let mut chips: Vec<Widget> = GEN_CLASSES
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| chip(name, st.gen_classes & (1 << i) != 0, A_GEN_CLASS_BASE + i as u32))
+        .collect();
+    chips.push(Widget::Spacer { flex: 1 });
+    chips.push(label(&alloc::format!("≈ {} bits", gen_bits(st))));
+    Widget::Column {
+        children: vec![
+            Widget::Row {
+                children: vec![
+                    Widget::Text {
+                        content: alloc::format!("Length {}", st.gen_len),
+                        style: TextStyle::Caption,
+                        modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted), Modifier::MinWidth(72)],
+                    },
+                    slider,
+                ],
+                spacing: Spacing::Sm.as_u16(),
+                align: Align::Center,
+                modifiers: vec![],
+            },
+            Widget::Row { children: chips, spacing: Spacing::Xs.as_u16(), align: Align::Center, modifiers: vec![] },
+        ],
+        spacing: Spacing::Sm.as_u16(),
+        align: Align::Stretch,
+        modifiers: vec![
+            Modifier::Background(Token::Surface),
+            Modifier::Rounded(Radius::Md.as_u8()),
+            Modifier::Padding(Padding::Sm.as_u16()),
+        ],
     }
 }
 
@@ -466,7 +637,7 @@ fn edit_screen(st: &St) -> Widget {
             labelled(st, 0, "NAME", "e.g. github.com", false),
             labelled(st, 1, "URL", "https://…", false),
             labelled(st, 2, "USERNAME", "", false),
-            labelled(st, 3, "PASSWORD", "", true),
+            password_with_generator(st),
             labelled(st, 4, "NOTE", "", false),
             button_row(vec![
                 btn("Cancel", ButtonStyle::Ghost, A_CANCEL),
@@ -474,6 +645,15 @@ fn edit_screen(st: &St) -> Widget {
             ]),
         ],
     )
+}
+
+fn password_with_generator(st: &St) -> Widget {
+    let generate = btn(if st.gen_open { "New" } else { "Generate" }, ButtonStyle::Ghost, A_GEN);
+    let mut children = vec![label("PASSWORD"), input_field(st, 3, "", true, vec![generate])];
+    if st.gen_open {
+        children.push(generator_panel(st));
+    }
+    Widget::Column { children, spacing: 4, align: Align::Stretch, modifiers: vec![] }
 }
 
 fn wifi_screen(st: &St) -> Widget {
@@ -722,6 +902,10 @@ fn dropdown(st: &St, menu: Menu) -> Widget {
             if on_list {
                 items.push(("New secret", A_ADD, "Ctrl+N"));
                 items.push(("New Wi-Fi network", A_ADD_WIFI, ""));
+            }
+            if st.view == View::EditSecret {
+                items.push(("Generate password", A_GEN, "Ctrl+G"));
+                items.push(("Save", A_SAVE, "Ctrl+S"));
             }
             if unlocked {
                 items.push(("Lock", A_LOCK, "Ctrl+L"));
@@ -1077,6 +1261,14 @@ fn on_action(st: &mut St, id: u32) {
         A_MENU_EDIT => st.menu = if open == Some(Menu::Edit) { None } else { Some(Menu::Edit) },
         A_MENU_DISMISS => {}
         A_FIND => st.focus_on(FOCUS_SEARCH),
+        A_GEN if st.view == View::EditSecret => {
+            st.gen_open = true;
+            fill_generated(st);
+        }
+        id if (A_GEN_CLASS_BASE..A_GEN_CLASS_BASE + GEN_CLASSES.len() as u32).contains(&id) => {
+            st.gen_classes ^= 1 << (id - A_GEN_CLASS_BASE);
+            fill_generated(st);
+        }
         A_SAVE => save_form(st),
         A_REVEAL => st.reveal = !st.reveal,
         A_ADD => {
@@ -1144,6 +1336,16 @@ fn handle(st: &mut St, ev: Event) -> Outcome {
             Outcome::Rerender
         }
         Event::Action(ActionId(A_CLOSE)) => Outcome::Exit,
+        // The length slider regenerates as it moves.
+        Event::Slide { action: ActionId(A_GEN_LEN), value, .. } if st.view == View::EditSecret => {
+            let len = GEN_MIN + (value.min(SLIDER_MAX) as u32 * (GEN_MAX - GEN_MIN) + SLIDER_MAX as u32 / 2) / SLIDER_MAX as u32;
+            if len == st.gen_len {
+                return Outcome::Idle;
+            }
+            st.gen_len = len;
+            fill_generated(st);
+            Outcome::Rerender
+        }
         Event::Action(ActionId(id)) => {
             if ensure_unlocked(st) {
                 on_action(st, id);
@@ -1159,6 +1361,10 @@ fn handle(st: &mut St, ev: Event) -> Outcome {
             match (letter, st.view) {
                 (b'l', View::List | View::EditSecret | View::AddWifi) => lock(st),
                 (b's', View::EditSecret | View::AddWifi | View::Setup) => save_form(st),
+                (b'g', View::EditSecret) => {
+                    st.gen_open = true;
+                    fill_generated(st);
+                }
                 (b'n', View::List) => {
                     clear_form(st);
                     st.goto(View::EditSecret);
@@ -1239,6 +1445,9 @@ pub extern "C" fn _start() {
         msg: "",
         msg_err: false,
         menu: None,
+        gen_open: false,
+        gen_len: 20,
+        gen_classes: 0b1111,
         clip_hash: 0,
         clip_deadline: 0,
         heap_base: ALLOCATOR.mark(),
