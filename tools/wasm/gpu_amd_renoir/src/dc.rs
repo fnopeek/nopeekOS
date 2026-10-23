@@ -178,6 +178,7 @@ pub struct dc_debug_options {
     pub enable_dmub_aux_for_legacy_ddc: bool,
     /// `dpia_debug.bits.disable_dpia`.
     pub dpia_debug_disable_dpia: bool,
+    pub disable_timeout: bool,
 }
 
 /// Which `dc_cap_funcs` entry is bound (dcn21 sets only

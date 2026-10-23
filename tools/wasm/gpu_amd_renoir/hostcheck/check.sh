@@ -88,11 +88,14 @@ else
 fi
 # dm_dmub_hw_init on the DMCUB image and the VBIOS: a DMCUB fused off, one
 # in reset that never answers (backdoor load), and a running one that
-# answers STOP_FW and reports its boot status (PSP load).
+# answers STOP_FW and reports its boot status (PSP load). With "cmd" DC
+# then sends the D0 power state: the running DMCUB consumes the ring, the
+# cold one times out into the diagnostic dump.
 rustc $RF "$HERE/dmubhw_check.rs" -o "$B/dmubhw_check"
-for a in "off psp" "cold direct" "running psp"; do
-    "$B/oracle_dmubhw" "$FW/amdgpu/renoir_dmcub.bin" "$BIOS" $a 0xf400000000 0x80000000 0xf400100000 > "$B/dmubhw.linux"
-    "$B/dmubhw_check" "$FW/amdgpu/renoir_dmcub.bin" "$BIOS" $a 0xf400000000 0x80000000 0xf400100000 > "$B/dmubhw.port"
+for a in "off psp -" "cold direct cmd" "running psp cmd"; do
+    set -- $a
+    "$B/oracle_dmubhw" "$FW/amdgpu/renoir_dmcub.bin" "$BIOS" $1 $2 0xf400000000 0x80000000 0xf400100000 $3 > "$B/dmubhw.linux"
+    "$B/dmubhw_check" "$FW/amdgpu/renoir_dmcub.bin" "$BIOS" $1 $2 0xf400000000 0x80000000 0xf400100000 $3 > "$B/dmubhw.port"
     if diff -u "$B/dmubhw.linux" "$B/dmubhw.port" | head -30; cmp -s "$B/dmubhw.linux" "$B/dmubhw.port"; then
         echo "dmub hw_init ($a): port = Linux ($(grep -c '^write' "$B/dmubhw.linux") register writes)"
     else

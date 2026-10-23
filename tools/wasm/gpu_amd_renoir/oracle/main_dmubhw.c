@@ -5,8 +5,12 @@
  * "running" (running; acknowledges GPINT STOP_FW and reports dal_fw and
  * mailbox_rdy once released). argv[4] is "psp" or "direct" for the load
  * type; argv[5..7] are fb_start, vram_base_offset and the GPU address of
- * the DMUB buffer. Unwritten registers read hash(reg). Every register
- * write is printed, then the DMUB state and a checksum of each window.
+ * the DMUB buffer. With argv[8] "cmd", DC then sends the DMCUB the D0
+ * power state over the inbox ring (dc_dmub_srv_notify_fw_dc_power_state);
+ * a running DMCUB consumes the ring, a cold one never does, and the wait
+ * times out into the diagnostic dump. Unwritten registers read hash(reg).
+ * Every register write is printed, then the DMUB state and a checksum of
+ * each window.
  * hostcheck/dmubhw_check.rs prints the same for the port. */
 #include <errno.h>
 #include "dmub_srv.h"
@@ -72,6 +76,8 @@ static void wr(u32 reg, u32 val)
 		if (((val >> 16) & 0xfff) == DMUB_GPINT__STOP_FW)
 			set(R->offset.DMCUB_SCRATCH7, DMUB_GPINT__STOP_FW_RESPONSE);
 	}
+	if (reg == R->offset.DMCUB_INBOX1_WPTR)
+		set(R->offset.DMCUB_INBOX1_RPTR, val);
 	if (reg == R->offset.DMCUB_CNTL && (val & R->mask.DMCUB_CNTL__DMCUB_ENABLE) &&
 	    !(val & R->mask.DMCUB_CNTL__DMCUB_SOFT_RESET))
 		set(R->offset.DMCUB_SCRATCH0, 3);
@@ -94,8 +100,16 @@ struct dc {
 	struct {
 		bool sanity_checks;
 		union { struct { uint32_t disable_dpia : 1; } bits; uint32_t raw; } dpia_debug;
+		bool disable_timeout;
+		bool disable_dmub_reallow_idle;
 	} debug;
 };
+#define DC_ERROR(...) do { } while (0)
+#define DC_LOG_ERROR(...) do { } while (0)
+#define DC_LOG_DEBUG(...) do { } while (0)
+static unsigned long long dm_get_timestamp(const struct dc_context *ctx) { return 0; }
+/* Idle is allowed only through the IPS sequence of DCN 3.5+. */
+static void dc_dmub_srv_apply_idle_power_optimizations(const struct dc *dc, bool allow_idle) { abort(); }
 struct amdgpu_bo;
 struct amdgpu_firmware_info { enum AMDGPU_UCODE_ID ucode_id; const struct firmware *fw; };
 struct amdgpu_device {
@@ -134,6 +148,7 @@ static int amdgpu_bo_create_kernel(struct amdgpu_device *adev, unsigned long siz
 	return 0;
 }
 
+#include "dmubhw_protos.h"
 #include "dmubhw_funcs.c"
 
 static uint8_t *load(const char *path, long *size)
@@ -217,6 +232,31 @@ int main(int argc, char **argv)
 	       (unsigned long long)d->scratch_mem_fb.gpu_addr, d->scratch_mem_fb.size,
 	       (unsigned long long)d->ib_mem_gart.gpu_addr, d->ib_mem_gart.size);
 	struct dmub_srv_fb_info *fb = adev.dm.dmub_fb_info;
+	if (argc > 8 && !strcmp(argv[8], "cmd")) {
+		ctx.dc = &dc;
+		dc_dmub_srv_notify_fw_dc_power_state(ctx.dmub_srv, DC_ACPI_CM_POWER_STATE_D0);
+		printf("optimized_init_done %d\n", dc_dmub_srv_optimized_init_done(ctx.dmub_srv));
+		printf("inbox1 rptr %u wrpt %u last_wptr %u submitted %llu reported %llu\n", d->inbox1.rb.rptr,
+		       d->inbox1.rb.wrpt, d->inbox1_last_wptr, (unsigned long long)d->inbox1.num_submitted,
+		       (unsigned long long)d->inbox1.num_reported);
+		const uint8_t *slot = d->inbox1.rb.base_address;
+		printf("slot0");
+		for (int i = 0; i < DMUB_RB_CMD_SIZE; i++)
+			printf(" %02x", slot[i]);
+		printf("\n");
+		struct dmub_diagnostic_data *g = &d->debug;
+		printf("timeout %d cmd %02x %02x version 0x%08x\n", g->timeout_info.timeout_occured,
+		       ((uint8_t *)&g->timeout_info.timeout_cmd)[0], ((uint8_t *)&g->timeout_info.timeout_cmd)[1],
+		       g->dmcub_version);
+		printf("scratch");
+		for (int i = 0; i < 16; i++)
+			printf(" %08x", g->scratch[i]);
+		printf("\nfaults %08x %08x %08x inbox1 %08x %08x %08x inbox0 %08x %08x %08x\n",
+		       g->undefined_address_fault_addr, g->inst_fetch_fault_addr, g->data_write_fault_addr,
+		       g->inbox1_rptr, g->inbox1_wptr, g->inbox1_size, g->inbox0_rptr, g->inbox0_wptr, g->inbox0_size);
+		printf("flags %d %d %d %d %d %d\n", g->is_dmcub_enabled, g->is_dmcub_soft_reset,
+		       g->is_dmcub_secure_reset, g->is_traceport_en, g->is_cw0_enabled, g->is_cw6_enabled);
+	}
 	for (int i = 0; i < DMUB_WINDOW_TOTAL; i++)
 		printf("window %d gpu 0x%llx size 0x%x sum 0x%08x\n", i, (unsigned long long)fb->fb[i].gpu_addr,
 		       fb->fb[i].size, fnv(fb->fb[i].cpu_addr, fb->fb[i].size));

@@ -22,7 +22,9 @@ pub struct amdgpu_display_manager {
     /// this port reads through it.
     pub cgs_device: bool,
     pub dmcub_fw_version: u32,
-    pub dmub_srv: Option<dmub_srv>,
+    /// `dmub_srv`: the DMUB service until `dc_dmub_srv_create` moves it
+    /// into DC; `dm_dmub_srv` finds it in either place.
+    pub dmub_srv: Option<Box<dmub_srv>>,
     pub dmub_bo: Option<usize>,
     pub dmub_bo_gpu_addr: u64,
     pub dmub_bo_cpu_addr: Option<crate::amdgpu_object::amdgpu_kptr>,
@@ -157,7 +159,7 @@ fn dm_dmub_sw_init(adev: &mut amdgpu_device) -> i32 {
     if dm_dmub_regions(data, adev.bios.len() as u32, dmub_asic, &mut dmub_srv, &mut region_info) != 0 {
         return -22;
     }
-    adev.dm.dmub_srv = Some(dmub_srv);
+    adev.dm.dmub_srv = Some(Box::new(dmub_srv));
 
     // Allocate a framebuffer based on the total size of all the regions.
     let h = match crate::amdgpu_object::amdgpu_bo_create_kernel(adev, region_info.fb_size as u64,
@@ -255,24 +257,55 @@ fn amdgpu_device_seamless_boot_supported(adev: &amdgpu_device) -> bool {
 /// `dm_dmub_hw_init`. The DMCUB on DCN 2.1 has no runtime register
 /// offsets, no DPIA and no IPS, and DC has no DMCU or ABM.
 pub fn dm_dmub_hw_init(adev: &mut amdgpu_device) -> i32 {
-    let Some(mut dmub_srv) = adev.dm.dmub_srv.take() else {
+    let in_dc = adev.dm.dc.as_deref_mut().and_then(|d| d.ctx.dmub_srv.as_deref_mut()).and_then(|s| s.dmub.take());
+    let Some(mut dmub_srv) = in_dc.or_else(|| adev.dm.dmub_srv.take()) else {
         // DMUB isn't supported on the ASIC.
         return 0;
     };
     let r = dm_dmub_hw_init_srv(adev, &mut dmub_srv);
-    adev.dm.dmub_srv = Some(dmub_srv);
-    r
+
+    let dc = adev.dm.dc.as_deref_mut().expect("dm_dmub_hw_init runs after dc_create");
+    if let Some(dc_srv) = dc.ctx.dmub_srv.as_deref_mut() {
+        dc_srv.dmub = Some(dmub_srv);
+    } else if r == Ok(true) {
+        dc.ctx.dmub_srv = crate::dc_dmub_srv::dc_dmub_srv_create(dmub_srv);
+    } else {
+        adev.dm.dmub_srv = Some(dmub_srv);
+    }
+    match r {
+        Ok(false) => 0,
+        Err(e) => e,
+        Ok(true) => {
+            if adev.dm.dc.as_deref().is_none_or(|d| d.ctx.dmub_srv.is_none()) {
+                drm_err("Couldn't allocate DC DMUB server!");
+                return -12;
+            }
+            Line::new().s("DMUB hardware initialized: version=0x").hexw(adev.dm.dmcub_fw_version, 8).say();
+            // The sanity-check overrides are DCN 3.1.x only.
+            0
+        }
+    }
 }
 
-fn dm_dmub_hw_init_srv(adev: &mut amdgpu_device, dmub_srv: &mut dmub_srv) -> i32 {
+/// The DMUB service wherever it lives: in DC once `dc_dmub_srv_create` ran,
+/// in the DM before.
+pub fn dm_dmub_srv(adev: &amdgpu_device) -> Option<&dmub_srv> {
+    adev.dm.dc.as_deref().and_then(|d| d.ctx.dmub_srv.as_deref()).and_then(|s| s.dmub.as_deref())
+        .or(adev.dm.dmub_srv.as_deref())
+}
+
+/// The body of `dm_dmub_hw_init` up to `dc_dmub_srv_create`: Ok(true) when
+/// the DMCUB came up and DC's handle is due, Ok(false) when the ASIC has no
+/// DMCUB to bring up.
+fn dm_dmub_hw_init_srv(adev: &mut amdgpu_device, dmub_srv: &mut dmub_srv) -> Result<bool, i32> {
     let Some(fb_info) = adev.dm.dmub_fb_info.as_ref() else {
         drm_err("No framebuffer info for DMUB service.");
-        return -22;
+        return Err(-22);
     };
     let Some(dmub_fw) = adev.dm_dmub_fw.as_ref() else {
         // Firmware required for DMUB support.
         drm_err("No firmware provided for DMUB.");
-        return -22;
+        return Err(-22);
     };
     let adev_r: &amdgpu_device = adev;
 
@@ -280,12 +313,12 @@ fn dm_dmub_hw_init_srv(adev: &mut amdgpu_device, dmub_srv: &mut dmub_srv) -> i32
     let status = dmub_srv_has_hw_support(adev_r, dmub_srv, &mut has_hw_support);
     if status != DMUB_STATUS_OK {
         Line::new().s("Error checking HW support for DMUB: ").dec(status as u64).say();
-        return -22;
+        return Err(-22);
     }
 
     if !has_hw_support {
         drm_info("DMUB unsupported on ASIC");
-        return 0;
+        return Ok(false);
     }
 
     // Reset DMCUB if it was previously running - before we overwrite its memory.
@@ -304,19 +337,19 @@ fn dm_dmub_hw_init_srv(adev: &mut amdgpu_device, dmub_srv: &mut dmub_srv) -> i32
     let fw_inst_const_size = inst_const_bytes.wrapping_sub(PSP_HEADER_BYTES).wrapping_sub(PSP_FOOTER_BYTES);
     let fw_bss_data_size = le32(data, DMCUB_HDR_BSS_DATA_BYTES);
 
-    let Some(cpu) = adev_r.dm.dmub_bo_cpu_addr else { return -22 };
+    let Some(cpu) = adev_r.dm.dmub_bo_cpu_addr else { return Err(-22) };
     let blob = |off: u32, len: u32| data.get(off as usize..(off as usize).saturating_add(len as usize));
     let fb = |id: u32| fb_info.fb[id as usize];
 
     // With PSP loading, amdgpu_ucode_init_single_fw puts fw_inst_const in
     // cw0; otherwise this is the backdoor load.
     if adev_r.firmware.load_type != AMDGPU_FW_LOAD_PSP {
-        let Some(src) = blob(fw_inst_const, fw_inst_const_size) else { return -22 };
+        let Some(src) = blob(fw_inst_const, fw_inst_const_size) else { return Err(-22) };
         crate::amdgpu_gart::kptr_write(adev_r, cpu, fb(DMUB_WINDOW_0_INST_CONST).cpu_off, src);
     }
 
     if fw_bss_data_size != 0 {
-        let Some(src) = blob(fw_bss_data, fw_bss_data_size) else { return -22 };
+        let Some(src) = blob(fw_bss_data, fw_bss_data_size) else { return Err(-22) };
         crate::amdgpu_gart::kptr_write(adev_r, cpu, fb(DMUB_WINDOW_2_BSS_DATA).cpu_off, src);
     }
 
@@ -351,7 +384,7 @@ fn dm_dmub_hw_init_srv(adev: &mut amdgpu_device, dmub_srv: &mut dmub_srv) -> i32
     let status = dmub_srv_hw_init(adev_r, dmub_srv, &hw_params);
     if status != DMUB_STATUS_OK {
         Line::new().s("Error initializing DMUB HW: ").dec(status as u64).say();
-        return -22;
+        return Err(-22);
     }
 
     // Wait for firmware load to finish.
@@ -361,20 +394,7 @@ fn dm_dmub_hw_init_srv(adev: &mut amdgpu_device, dmub_srv: &mut dmub_srv) -> i32
     }
 
     // Init DMCU and ABM if available: DCN 2.1 has neither.
-
-    let dc = adev.dm.dc.as_deref_mut().expect("dm_dmub_hw_init runs after dc_create");
-    if dc.ctx.dmub_srv.is_none() {
-        dc.ctx.dmub_srv = crate::dc_dmub_srv::dc_dmub_srv_create();
-    }
-    if dc.ctx.dmub_srv.is_none() {
-        drm_err("Couldn't allocate DC DMUB server!");
-        return -12;
-    }
-
-    Line::new().s("DMUB hardware initialized: version=0x").hexw(adev.dm.dmcub_fw_version, 8).say();
-
-    // The sanity-check overrides are DCN 3.1.x only.
-    0
+    Ok(true)
 }
 
 /// `amdgpu_dm_init`, up to the DMCUB. `dc_hardware_init` (detect_edp_presence,
@@ -603,11 +623,23 @@ pub fn dm_report(adev: &amdgpu_device) {
             .s(" dcfclk ").dec(b.dcfclk as u64).s(" dprefclk ").dec(b.dprefclk as u64).s(" fclk ").dec(b.fclk as u64)
             .say();
     }
-    if let Some(d) = adev.dm.dmub_srv.as_ref() {
+    if let Some(d) = dm_dmub_srv(adev) {
         let r = &crate::dmub_dcn20::dmub_srv_dcn21_regs.offset;
         Line::new().s("dmub: hw_init ").dec(d.hw_init as u64).s(" fw_version 0x").hexw(d.fw_version, 8)
             .s(" DMCUB_CNTL 0x").hexw(crate::dc_helper::dm_read_reg(adev, r.DMCUB_CNTL), 8)
             .s(" boot status 0x").hexw(crate::dc_helper::dm_read_reg(adev, r.DMCUB_SCRATCH0), 8)
             .s(" dc handle ").dec(dc.ctx.dmub_srv.is_some() as u64).say();
     }
+}
+
+/// `dm_execute_dmub_cmd` (amdgpu_dm.c).
+pub fn dm_execute_dmub_cmd(adev: &amdgpu_device, dc_srv: &mut crate::dc_dmub_srv::dc_dmub_srv,
+                           debug: &crate::dc::dc_debug_options, cmd: &mut dmub_rb_cmd, wait_type: u32) -> bool {
+    crate::dc_dmub_srv::dc_dmub_srv_cmd_run(adev, dc_srv, debug, cmd, wait_type)
+}
+
+/// `dm_execute_dmub_cmd_list` (amdgpu_dm.c).
+pub fn dm_execute_dmub_cmd_list(adev: &amdgpu_device, dc_srv: &mut crate::dc_dmub_srv::dc_dmub_srv,
+                                debug: &crate::dc::dc_debug_options, cmd: &mut [dmub_rb_cmd], wait_type: u32) -> bool {
+    crate::dc_dmub_srv::dc_dmub_srv_cmd_run_list(adev, dc_srv, debug, cmd, wait_type)
 }

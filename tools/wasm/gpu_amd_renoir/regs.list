@@ -1709,6 +1709,26 @@ DMUB_GPINT__STOP_FW_RESPONSE @ ../display/dmub/src/dmub_srv.c
 DMUB_STATUS_TIMEOUT @ ../display/dmub/src/dmub_srv.c
 DMUB_POWER_STATE_D0 @ ../display/dmub/src/dmub_srv.c
 DMUB_MEMORY_ACCESS_CPU @ ../display/dmub/src/dmub_srv.c
+# The DMUB command path (dmub_srv.c, dmub_cmd.h, dc_dmub_srv.c)
+DMUB_RB_CMD_SIZE @ ../display/dmub/src/dmub_srv.c
+DMUB_STATUS_QUEUE_FULL @ ../display/dmub/src/dmub_srv.c
+DMUB_STATUS_HW_FAILURE @ ../display/dmub/src/dmub_srv.c
+DMUB_STATUS_POWER_STATE_D3 @ ../display/dmub/src/dmub_srv.c
+DMUB_CMD_INTERFACE_REG @ ../display/dmub/src/dmub_srv.c
+DMUB_PC_SNAPSHOT_COUNT @ ../display/dmub/src/dmub_srv.c
+DMUB_CMD__IDLE_OPT @ ../display/dmub/src/dmub_srv.c
+DMUB_CMD__IDLE_OPT_SET_DC_POWER_STATE @ ../display/dmub/src/dmub_srv.c
+DMUB_IDLE_OPT_DC_POWER_STATE_UNKNOWN @ ../display/dmub/src/dmub_srv.c
+DMUB_IDLE_OPT_DC_POWER_STATE_D0 @ ../display/dmub/src/dmub_srv.c
+DMUB_IDLE_OPT_DC_POWER_STATE_D3 @ ../display/dmub/src/dmub_srv.c
+SIZEOF_dmub_cmd_header = sizeof(struct dmub_cmd_header) @ ../display/dmub/src/dmub_srv.c
+SIZEOF_dmub_rb_cmd_idle_opt_set_dc_power_state = sizeof(struct dmub_rb_cmd_idle_opt_set_dc_power_state) @ ../display/dmub/src/dmub_srv.c
+IDLE_OPT_DC_POWER_STATE_DATA = offsetof(struct dmub_rb_cmd_idle_opt_set_dc_power_state, data.power_state) @ ../display/dmub/src/dmub_srv.c
+DM_DMUB_WAIT_TYPE_NO_WAIT @ ../display/dc/dc_dmub_srv.c
+DM_DMUB_WAIT_TYPE_WAIT @ ../display/dc/dc_dmub_srv.c
+DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY @ ../display/dc/dc_dmub_srv.c
+DC_ACPI_CM_POWER_STATE_D0 @ ../display/dc/dc_dmub_srv.c
+DC_ACPI_CM_POWER_STATE_D3 @ ../display/dc/dc_dmub_srv.c
 # amdgpu_dm_init (amdgpu_dm.c, amd_shared.h, dmub_cmd.h)
 DAL_IRQ_SOURCES_NUMBER @ ../display/amdgpu_dm/amdgpu_dm.c
 DMUB_IPS_ENABLE @ ../display/amdgpu_dm/amdgpu_dm.c

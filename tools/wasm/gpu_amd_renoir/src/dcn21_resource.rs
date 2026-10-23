@@ -402,6 +402,7 @@ const DEBUG_DEFAULTS_DRV: dc_debug_options = dc_debug_options {
     ignore_cable_id: false,
     enable_dmub_aux_for_legacy_ddc: false,
     dpia_debug_disable_dpia: false,
+    disable_timeout: false,
 };
 
 /// `dcn21_pp_smu_create` (dcn21_resource.c): a table that is not Renoir's is

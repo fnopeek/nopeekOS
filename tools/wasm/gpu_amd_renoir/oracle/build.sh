@@ -521,12 +521,18 @@ python3 -I "$HERE/protos.py" "$B/link_funcs.c" > "$B/link_protos.h"
     $X "$AMD/amdgpu/amdgpu_ucode.h" common_firmware_header dmcub_firmware_header_v1_0 amdgpu_firmware_load_type \
         AMDGPU_UCODE_ID
     $X "$AMD/display/dc/dc_dmub_srv.h" dc_reg_helper_state dc_dmub_srv
+    $X "$AMD/display/dc/dm_services_types.h" dm_dmub_wait_type
 } > "$B/dmubhw_types.h"
 {
-    $X "$AMD/display/dc/dc_dmub_srv.c" dc_dmub_srv_construct dc_dmub_srv_create
+    $X "$AMD/display/dc/dc_dmub_srv.c" dc_dmub_srv_construct dc_dmub_srv_create \
+        dc_dmub_srv_reg_cmd_list_queue_execute dc_dmub_srv_fb_cmd_list_queue_execute \
+        dc_dmub_srv_cmd_list_queue_execute dc_dmub_srv_wait_for_idle dc_dmub_srv_cmd_run dc_dmub_srv_cmd_run_list \
+        dc_dmub_srv_optimized_init_done dc_dmub_srv_get_diagnostic_data dc_dmub_srv_log_diagnostic_data \
+        dc_wake_and_execute_dmub_cmd dc_wake_and_execute_dmub_cmd_list dc_dmub_srv_notify_fw_dc_power_state
     $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" '#PSP_HEADER_BYTES' '#PSP_FOOTER_BYTES' amdgpu_dm_dmub_reg_read \
-        amdgpu_dm_dmub_reg_write dm_dmub_sw_init dm_dmub_hw_init
+        amdgpu_dm_dmub_reg_write dm_dmub_sw_init dm_dmub_hw_init dm_execute_dmub_cmd dm_execute_dmub_cmd_list
 } > "$B/dmubhw_funcs.c"
+python3 -I "$HERE/protos.py" "$B/dmubhw_funcs.c" > "$B/dmubhw_protos.h"
 # amdgpu_dm_init up to dc_hardware_init (stage D cuts it there), with its
 # quirk tables and the module parameters it reads.
 {

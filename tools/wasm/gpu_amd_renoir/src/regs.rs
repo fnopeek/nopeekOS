@@ -3422,6 +3422,46 @@ pub const DMUB_POWER_STATE_D0: u32 = 0x1;
 /// ?
 pub const DMUB_MEMORY_ACCESS_CPU: u32 = 0x0;
 
+// The DMUB command path (dmub_srv.c, dmub_cmd.h, dc_dmub_srv.c)
+/// ?
+pub const DMUB_RB_CMD_SIZE: u32 = 0x40;
+/// ?
+pub const DMUB_STATUS_QUEUE_FULL: u32 = 0x2;
+/// ?
+pub const DMUB_STATUS_HW_FAILURE: u32 = 0x5;
+/// ?
+pub const DMUB_STATUS_POWER_STATE_D3: u32 = 0x6;
+/// ?
+pub const DMUB_CMD_INTERFACE_REG: u32 = 0x2;
+/// ?
+pub const DMUB_PC_SNAPSHOT_COUNT: u32 = 0xa;
+/// ?
+pub const DMUB_CMD__IDLE_OPT: u32 = 0x48;
+/// ?
+pub const DMUB_CMD__IDLE_OPT_SET_DC_POWER_STATE: u32 = 0x3;
+/// ?
+pub const DMUB_IDLE_OPT_DC_POWER_STATE_UNKNOWN: u32 = 0x0;
+/// ?
+pub const DMUB_IDLE_OPT_DC_POWER_STATE_D0: u32 = 0x1;
+/// ?
+pub const DMUB_IDLE_OPT_DC_POWER_STATE_D3: u32 = 0x8;
+/// The value of `sizeof(struct dmub_cmd_header)` in ../display/dmub/src/dmub_srv.c
+pub const SIZEOF_dmub_cmd_header: u32 = 0x4;
+/// The value of `sizeof(struct dmub_rb_cmd_idle_opt_set_dc_power_state)` in ../display/dmub/src/dmub_srv.c
+pub const SIZEOF_dmub_rb_cmd_idle_opt_set_dc_power_state: u32 = 0x8;
+/// The value of `offsetof(struct dmub_rb_cmd_idle_opt_set_dc_power_state, data.power_state)` in ../display/dmub/src/dmub_srv.c
+pub const IDLE_OPT_DC_POWER_STATE_DATA: u32 = 0x4;
+/// ?
+pub const DM_DMUB_WAIT_TYPE_NO_WAIT: u32 = 0x0;
+/// ?
+pub const DM_DMUB_WAIT_TYPE_WAIT: u32 = 0x1;
+/// ?
+pub const DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY: u32 = 0x2;
+/// ?
+pub const DC_ACPI_CM_POWER_STATE_D0: u32 = 0x1;
+/// ?
+pub const DC_ACPI_CM_POWER_STATE_D3: u32 = 0x8;
+
 // amdgpu_dm_init (amdgpu_dm.c, amd_shared.h, dmub_cmd.h)
 /// ?
 pub const DAL_IRQ_SOURCES_NUMBER: u32 = 0x75;

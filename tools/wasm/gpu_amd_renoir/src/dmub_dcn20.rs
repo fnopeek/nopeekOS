@@ -429,6 +429,9 @@ impl dmub_fw_boot_status {
     pub fn mailbox_rdy(self) -> bool {
         self.all & 2 != 0
     }
+    pub fn optimized_init_done(self) -> bool {
+        self.all & 4 != 0
+    }
 }
 
 /// `skip_phy_init_panel_sequence`, bit 5 of `union dmub_fw_boot_options`.
@@ -774,4 +777,51 @@ pub fn dmub_dcn20_skip_dmub_panel_power_sequence(adev: &amdgpu_device, dmub: &dm
 /// `dmub_dcn20_get_current_time`.
 pub fn dmub_dcn20_get_current_time(adev: &amdgpu_device, dmub: &dmub_srv) -> u32 {
     dm_read_reg(adev, regs(dmub).offset.DMCUB_TIMER_CURRENT)
+}
+
+/// `dmub_dcn20_get_diagnostic_data`: the timeout info is filled by the
+/// caller and survives the refresh.
+pub fn dmub_dcn20_get_diagnostic_data(adev: &amdgpu_device, dmub: &mut dmub_srv) {
+    let r = regs(dmub);
+    let (o, s, m) = (&r.offset, &r.shift, &r.mask);
+    let rd = |reg: u32| dm_read_reg(adev, reg);
+
+    // timeout data filled externally, cache before resetting memory
+    let timeout = dmub.debug.timeout_info;
+    dmub.debug = Default::default();
+    dmub.debug.timeout_info = timeout;
+
+    let d = &mut dmub.debug;
+    d.dmcub_version = dmub.fw_version;
+    let scratch = [
+        o.DMCUB_SCRATCH0, o.DMCUB_SCRATCH1, o.DMCUB_SCRATCH2, o.DMCUB_SCRATCH3, o.DMCUB_SCRATCH4, o.DMCUB_SCRATCH5,
+        o.DMCUB_SCRATCH6, o.DMCUB_SCRATCH7, o.DMCUB_SCRATCH8, o.DMCUB_SCRATCH9, o.DMCUB_SCRATCH10,
+        o.DMCUB_SCRATCH11, o.DMCUB_SCRATCH12, o.DMCUB_SCRATCH13, o.DMCUB_SCRATCH14, o.DMCUB_SCRATCH15,
+    ];
+    for (i, &reg) in scratch.iter().enumerate() {
+        d.scratch[i] = rd(reg);
+    }
+
+    d.undefined_address_fault_addr = rd(o.DMCUB_UNDEFINED_ADDRESS_FAULT_ADDR);
+    d.inst_fetch_fault_addr = rd(o.DMCUB_INST_FETCH_FAULT_ADDR);
+    d.data_write_fault_addr = rd(o.DMCUB_DATA_WRITE_FAULT_ADDR);
+
+    d.inbox1_rptr = rd(o.DMCUB_INBOX1_RPTR);
+    d.inbox1_wptr = rd(o.DMCUB_INBOX1_WPTR);
+    d.inbox1_size = rd(o.DMCUB_INBOX1_SIZE);
+
+    d.inbox0_rptr = rd(o.DMCUB_INBOX0_RPTR);
+    d.inbox0_wptr = rd(o.DMCUB_INBOX0_WPTR);
+    d.inbox0_size = rd(o.DMCUB_INBOX0_SIZE);
+
+    let get = |reg: u32, shift: u8, mask: u32| dmub_reg_get(adev, reg, shift, mask) != 0;
+    d.is_dmcub_enabled = get(o.DMCUB_CNTL, s.DMCUB_CNTL__DMCUB_ENABLE, m.DMCUB_CNTL__DMCUB_ENABLE);
+    d.is_dmcub_soft_reset = get(o.DMCUB_CNTL, s.DMCUB_CNTL__DMCUB_SOFT_RESET, m.DMCUB_CNTL__DMCUB_SOFT_RESET);
+    d.is_dmcub_secure_reset =
+        get(o.DMCUB_SEC_CNTL, s.DMCUB_SEC_CNTL__DMCUB_SEC_RESET_STATUS, m.DMCUB_SEC_CNTL__DMCUB_SEC_RESET_STATUS);
+    d.is_traceport_en = get(o.DMCUB_CNTL, s.DMCUB_CNTL__DMCUB_TRACEPORT_EN, m.DMCUB_CNTL__DMCUB_TRACEPORT_EN);
+    d.is_cw0_enabled = get(o.DMCUB_REGION3_CW0_TOP_ADDRESS,
+        s.DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_ENABLE, m.DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_ENABLE);
+    d.is_cw6_enabled = get(o.DMCUB_REGION3_CW6_TOP_ADDRESS,
+        s.DMCUB_REGION3_CW6_TOP_ADDRESS__DMCUB_REGION3_CW6_ENABLE, m.DMCUB_REGION3_CW6_TOP_ADDRESS__DMCUB_REGION3_CW6_ENABLE);
 }

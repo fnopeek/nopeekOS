@@ -56,6 +56,70 @@ pub struct dmub_srv_inbox {
     pub num_reported: u64,
     pub rb: dmub_rb,
     pub is_pending: bool,
+    pub is_multi_pending: bool,
+}
+
+/// `union dmub_rb_cmd` (dmub_cmd.h): one 64-byte ring entry. The header
+/// (`struct dmub_cmd_header`) is its first word: type 7:0, sub_type 15:8,
+/// ret_status 16, multi_cmd_pending 17, is_reg_based 18, payload_bytes 29:24.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct dmub_rb_cmd(pub [u8; DMUB_RB_CMD_SIZE as usize]);
+
+impl Default for dmub_rb_cmd {
+    fn default() -> Self {
+        dmub_rb_cmd([0; DMUB_RB_CMD_SIZE as usize])
+    }
+}
+
+impl dmub_rb_cmd {
+    fn header(&self) -> u32 {
+        u32::from_le_bytes([self.0[0], self.0[1], self.0[2], self.0[3]])
+    }
+    /// Sets the header's type, sub_type and payload_bytes.
+    pub fn set_header(&mut self, type_: u32, sub_type: u32, payload_bytes: u32) {
+        let h = (self.header() & !0x3f00_ffff) | (type_ & 0xff) | (sub_type & 0xff) << 8 | (payload_bytes & 0x3f) << 24;
+        self.0[..4].copy_from_slice(&h.to_le_bytes());
+    }
+    pub fn multi_cmd_pending(&self) -> bool {
+        self.header() & 1 << 17 != 0
+    }
+}
+
+/// `struct dmub_timeout_info` (dmub_srv.h).
+#[derive(Default, Clone, Copy)]
+pub struct dmub_timeout_info {
+    pub timeout_occured: bool,
+    pub timeout_cmd: dmub_rb_cmd,
+    pub timestamp: u64,
+}
+
+/// `struct dmub_diagnostic_data` (dmub_srv.h).
+#[derive(Default, Clone, Copy)]
+pub struct dmub_diagnostic_data {
+    pub dmcub_version: u32,
+    pub scratch: [u32; 17],
+    pub pc: [u32; DMUB_PC_SNAPSHOT_COUNT as usize],
+    pub undefined_address_fault_addr: u32,
+    pub inst_fetch_fault_addr: u32,
+    pub data_write_fault_addr: u32,
+    pub inbox1_rptr: u32,
+    pub inbox1_wptr: u32,
+    pub inbox1_size: u32,
+    pub inbox0_rptr: u32,
+    pub inbox0_wptr: u32,
+    pub inbox0_size: u32,
+    pub outbox1_rptr: u32,
+    pub outbox1_wptr: u32,
+    pub outbox1_size: u32,
+    pub gpint_datain0: u32,
+    pub timeout_info: dmub_timeout_info,
+    pub is_dmcub_enabled: bool,
+    pub is_dmcub_soft_reset: bool,
+    pub is_dmcub_secure_reset: bool,
+    pub is_traceport_en: bool,
+    pub is_cw0_enabled: bool,
+    pub is_cw6_enabled: bool,
+    pub is_pwait: bool,
 }
 
 /// `struct dmub_srv_hw_funcs` (dmub_srv.h), the members `dmub_srv_hw_setup`
@@ -87,12 +151,15 @@ pub struct dmub_srv_hw_funcs {
     pub setup_outbox0: Option<fn(&amdgpu_device, &mut dmub_srv, &dmub_region)>,
     pub get_outbox0_wptr: Option<fn(&amdgpu_device, &dmub_srv) -> u32>,
     pub set_outbox0_rptr: Option<fn(&amdgpu_device, &dmub_srv, u32)>,
+    pub get_diagnostic_data: Option<fn(&amdgpu_device, &mut dmub_srv)>,
 }
 
-/// `struct dmub_srv` (dmub_srv.h). `fw_state` and `shared_state` are CPU
-/// offsets into the buffer the windows were rebased on.
+/// `struct dmub_srv` (dmub_srv.h). `fw_state`, `shared_state` and the
+/// rings' `base_address` are CPU offsets into `cpu`, the buffer the windows
+/// were rebased on (Linux holds pointers).
 #[derive(Default)]
 pub struct dmub_srv {
+    pub cpu: Option<amdgpu_kptr>,
     pub asic: u32,
     pub fw_version: u32,
     pub is_virtual: bool,
@@ -116,6 +183,7 @@ pub struct dmub_srv {
     pub meta_info: dmub_fw_meta_info,
     pub inbox_type: u32,
     pub power_state: u32,
+    pub debug: dmub_diagnostic_data,
 }
 
 /// `struct dmub_srv_region_params`; the blobs are slices of the firmware
@@ -221,8 +289,7 @@ fn dmub_flush_buffer_mem(adev: &amdgpu_device, cpu: Option<amdgpu_kptr>, fb: &dm
 }
 
 /// `dmub_srv_hw_setup`: the DCN 2.0 family's functions on DCN 2.1's
-/// registers. `get_diagnostic_data` is not bound: nothing on the port's
-/// path reads the diagnostic block yet.
+/// registers.
 fn dmub_srv_hw_setup(dmub: &mut dmub_srv, asic: u32) -> bool {
     if asic != DMUB_ASIC_DCN21 {
         return false;
@@ -255,6 +322,8 @@ fn dmub_srv_hw_setup(dmub: &mut dmub_srv, asic: u32) -> bool {
     funcs.setup_outbox0 = Some(dmub_dcn20_setup_outbox0);
     funcs.get_outbox0_wptr = Some(dmub_dcn20_get_outbox0_wptr);
     funcs.set_outbox0_rptr = Some(dmub_dcn20_set_outbox0_rptr);
+
+    funcs.get_diagnostic_data = Some(dmub_dcn20_get_diagnostic_data);
 
     dmub.regs = Some(&dmub_srv_dcn21_regs);
     true
@@ -454,6 +523,7 @@ pub fn dmub_srv_hw_init(adev: &amdgpu_device, dmub: &mut dmub_srv, params: &dmub
     // Linux reads the shared-state window's address unchecked.
     let shared_state_fb = w(DMUB_WINDOW_SHARED_STATE).unwrap_or_default();
 
+    dmub.cpu = params.cpu;
     dmub.fb_base = params.fb_base;
     dmub.fb_offset = params.fb_offset;
     dmub.psp_version = params.psp_version;
@@ -637,4 +707,247 @@ pub fn dmub_srv_wait_for_auto_load(adev: &amdgpu_device, dmub: &dmub_srv, timeou
     }
 
     DMUB_STATUS_TIMEOUT
+}
+
+/// `dmub_rb_empty` (dmub_cmd.h).
+pub fn dmub_rb_empty(rb: &dmub_rb) -> bool {
+    rb.wrpt == rb.rptr
+}
+
+/// The bytes between read and write pointer.
+fn dmub_rb_data_count(rb: &dmub_rb) -> u32 {
+    if rb.wrpt >= rb.rptr { rb.wrpt - rb.rptr } else { rb.capacity - (rb.rptr - rb.wrpt) }
+}
+
+/// `dmub_rb_num_outstanding` (dmub_cmd.h).
+pub fn dmub_rb_num_outstanding(rb: &dmub_rb) -> u32 {
+    dmub_rb_data_count(rb) / DMUB_RB_CMD_SIZE
+}
+
+/// `dmub_rb_num_free` (dmub_cmd.h): one entry is always unusable.
+pub fn dmub_rb_num_free(rb: &dmub_rb) -> u32 {
+    let data_count = dmub_rb_data_count(rb) + DMUB_RB_CMD_SIZE;
+    rb.capacity.wrapping_sub(data_count) / DMUB_RB_CMD_SIZE
+}
+
+/// `dmub_rb_full` (dmub_cmd.h): one entry is always unusable.
+pub fn dmub_rb_full(rb: &dmub_rb) -> bool {
+    dmub_rb_data_count(rb) == rb.capacity.wrapping_sub(DMUB_RB_CMD_SIZE)
+}
+
+/// `dmub_rb_push_front` (dmub_cmd.h).
+pub fn dmub_rb_push_front(adev: &amdgpu_device, cpu: Option<amdgpu_kptr>, rb: &mut dmub_rb, cmd: &dmub_rb_cmd) -> bool {
+    if rb.capacity == 0 {
+        return false;
+    }
+    if dmub_rb_full(rb) {
+        return false;
+    }
+    let Some(base) = cpu else { return false };
+    crate::amdgpu_gart::kptr_write(adev, base, rb.base_address + rb.wrpt as u64, &cmd.0);
+    rb.wrpt += DMUB_RB_CMD_SIZE;
+    if rb.wrpt >= rb.capacity {
+        rb.wrpt %= rb.capacity;
+    }
+    true
+}
+
+/// `dmub_rb_flush_pending` (dmub_cmd.h): read the pending entries back so
+/// the CPU's writes have reached memory before the DMCUB reads them.
+pub fn dmub_rb_flush_pending(adev: &amdgpu_device, cpu: Option<amdgpu_kptr>, rb: &dmub_rb) {
+    let mut rptr = rb.rptr;
+    let wptr = rb.wrpt;
+    if rb.capacity == 0 {
+        return;
+    }
+    let Some(base) = cpu else { return };
+    let mut entry = [0u8; DMUB_RB_CMD_SIZE as usize];
+    while rptr != wptr {
+        crate::amdgpu_gart::kptr_read(adev, base, rb.base_address + rptr as u64, &mut entry);
+        rptr += DMUB_RB_CMD_SIZE;
+        if rptr >= rb.capacity {
+            rptr %= rb.capacity;
+        }
+    }
+}
+
+/// `dmub_rb_get_return_data` (dmub_cmd.h): the entry before the read
+/// pointer, which the DMCUB has answered in place.
+pub fn dmub_rb_get_return_data(adev: &amdgpu_device, cpu: Option<amdgpu_kptr>, rb: &dmub_rb, cmd: &mut dmub_rb_cmd) {
+    let Some(base) = cpu else { return };
+    let rd = if rb.rptr == 0 { rb.capacity - DMUB_RB_CMD_SIZE } else { rb.rptr - DMUB_RB_CMD_SIZE };
+    crate::amdgpu_gart::kptr_read(adev, base, rb.base_address + rd as u64, &mut cmd.0);
+}
+
+/// `dmub_srv_fb_cmd_queue`.
+pub fn dmub_srv_fb_cmd_queue(adev: &amdgpu_device, dmub: &mut dmub_srv, cmd: &dmub_rb_cmd) -> u32 {
+    if !dmub.hw_init {
+        return DMUB_STATUS_INVALID;
+    }
+    if dmub.power_state != DMUB_POWER_STATE_D0 {
+        return DMUB_STATUS_POWER_STATE_D3;
+    }
+    if dmub.inbox1.rb.rptr > dmub.inbox1.rb.capacity || dmub.inbox1.rb.wrpt > dmub.inbox1.rb.capacity {
+        return DMUB_STATUS_HW_FAILURE;
+    }
+    if dmub_rb_push_front(adev, dmub.cpu, &mut dmub.inbox1.rb, cmd) {
+        dmub.inbox1.num_submitted += 1;
+        return DMUB_STATUS_OK;
+    }
+    DMUB_STATUS_QUEUE_FULL
+}
+
+/// `dmub_srv_fb_cmd_execute`.
+pub fn dmub_srv_fb_cmd_execute(adev: &amdgpu_device, dmub: &mut dmub_srv) -> u32 {
+    if !dmub.hw_init {
+        return DMUB_STATUS_INVALID;
+    }
+    if dmub.power_state != DMUB_POWER_STATE_D0 {
+        return DMUB_STATUS_POWER_STATE_D3;
+    }
+    // Read back all the queued commands so the DMCUB reads neither stale
+    // nor partial entries.
+    let mut flush_rb = dmub.inbox1.rb;
+    flush_rb.rptr = dmub.inbox1_last_wptr;
+    dmub_rb_flush_pending(adev, dmub.cpu, &flush_rb);
+
+    if let Some(f) = dmub.hw_funcs.set_inbox1_wptr {
+        f(adev, dmub, dmub.inbox1.rb.wrpt);
+    }
+    dmub.inbox1_last_wptr = dmub.inbox1.rb.wrpt;
+    DMUB_STATUS_OK
+}
+
+/// `dmub_srv_get_fw_boot_status`.
+pub fn dmub_srv_get_fw_boot_status(adev: &amdgpu_device, dmub: &dmub_srv, status: &mut dmub_fw_boot_status) -> u32 {
+    status.all = 0;
+    if !dmub.sw_init {
+        return DMUB_STATUS_INVALID;
+    }
+    if let Some(f) = dmub.hw_funcs.get_fw_status {
+        *status = f(adev, dmub);
+    }
+    DMUB_STATUS_OK
+}
+
+/// `dmub_srv_update_reg_inbox0_status`: the DCN 2.0 family has no register
+/// inbox0 response interrupt, so a pending command clears at once.
+fn dmub_srv_update_reg_inbox0_status(dmub: &mut dmub_srv) {
+    if dmub.reg_inbox0.is_pending {
+        dmub.reg_inbox0.is_pending = false;
+        // only update the reported count if commands aren't being batched
+        if !dmub.reg_inbox0.is_multi_pending {
+            dmub.reg_inbox0.num_reported = dmub.reg_inbox0.num_submitted;
+        }
+    }
+}
+
+/// `dmub_srv_update_inbox_status`.
+pub fn dmub_srv_update_inbox_status(adev: &amdgpu_device, dmub: &mut dmub_srv) -> u32 {
+    if !dmub.hw_init {
+        return DMUB_STATUS_INVALID;
+    }
+    if dmub.power_state != DMUB_POWER_STATE_D0 {
+        return DMUB_STATUS_POWER_STATE_D3;
+    }
+    // update inbox1 state
+    let rptr = dmub.hw_funcs.get_inbox1_rptr.map_or(0, |f| f(adev, dmub));
+    if rptr > dmub.inbox1.rb.capacity {
+        return DMUB_STATUS_HW_FAILURE;
+    }
+    let rb = &mut dmub.inbox1.rb;
+    let advanced = if rb.rptr > rptr { rptr + rb.capacity - rb.rptr } else { rptr - rb.rptr };
+    dmub.inbox1.num_reported += (advanced / DMUB_RB_CMD_SIZE) as u64;
+    dmub.inbox1.rb.rptr = rptr;
+
+    // update reg_inbox0
+    dmub_srv_update_reg_inbox0_status(dmub);
+    DMUB_STATUS_OK
+}
+
+/// `dmub_srv_wait_for_idle`.
+pub fn dmub_srv_wait_for_idle(adev: &amdgpu_device, dmub: &mut dmub_srv, timeout_us: u32) -> u32 {
+    if !dmub.hw_init {
+        return DMUB_STATUS_INVALID;
+    }
+    let mut i = 0;
+    while i < timeout_us {
+        let status = dmub_srv_update_inbox_status(adev, dmub);
+        if status != DMUB_STATUS_OK {
+            return status;
+        }
+        // check for idle
+        if dmub_rb_empty(&dmub.inbox1.rb) && !dmub.reg_inbox0.is_pending {
+            return DMUB_STATUS_OK;
+        }
+        crate::linux::udelay(1);
+        i += 1;
+    }
+    DMUB_STATUS_TIMEOUT
+}
+
+/// `dmub_srv_wait_for_inbox_free`.
+pub fn dmub_srv_wait_for_inbox_free(adev: &amdgpu_device, dmub: &mut dmub_srv, timeout_us: u32,
+                                    num_free_required: u32) -> u32 {
+    if !dmub.hw_init {
+        return DMUB_STATUS_INVALID;
+    }
+    let mut i = 0;
+    while i < timeout_us {
+        let status = dmub_srv_update_inbox_status(adev, dmub);
+        if status != DMUB_STATUS_OK {
+            return status;
+        }
+        // check for space in inbox1
+        if dmub_rb_num_free(&dmub.inbox1.rb) >= num_free_required {
+            return DMUB_STATUS_OK;
+        }
+        crate::linux::udelay(1);
+        i += 1;
+    }
+    DMUB_STATUS_TIMEOUT
+}
+
+/// `dmub_srv_wait_for_pending`: the DCN 2.0 family has no register inbox0
+/// response interrupt, so a pending register command counts as done.
+pub fn dmub_srv_wait_for_pending(adev: &amdgpu_device, dmub: &dmub_srv, timeout_us: u32) -> u32 {
+    let mut scratch_reg_inbox0 = dmub.reg_inbox0;
+    let mut scratch_inbox1 = dmub.inbox1;
+    let (Some(get_wptr), Some(get_rptr)) = (dmub.hw_funcs.get_inbox1_wptr, dmub.hw_funcs.get_inbox1_rptr) else {
+        return DMUB_STATUS_INVALID;
+    };
+    if !dmub.hw_init {
+        return DMUB_STATUS_INVALID;
+    }
+    let mut i = 0;
+    while i <= timeout_us {
+        scratch_inbox1.rb.wrpt = get_wptr(adev, dmub);
+        scratch_inbox1.rb.rptr = get_rptr(adev, dmub);
+        scratch_reg_inbox0.is_pending = false;
+        if scratch_inbox1.rb.rptr > dmub.inbox1.rb.capacity {
+            return DMUB_STATUS_HW_FAILURE;
+        }
+        // check current HW state first, but use command submission vs reported as a fallback
+        if (dmub_rb_empty(&scratch_inbox1.rb) || dmub.inbox1.num_reported >= scratch_inbox1.num_submitted)
+            && (!scratch_reg_inbox0.is_pending || dmub.reg_inbox0.num_reported >= scratch_reg_inbox0.num_submitted)
+        {
+            return DMUB_STATUS_OK;
+        }
+        crate::linux::udelay(1);
+        i += 1;
+    }
+    DMUB_STATUS_TIMEOUT
+}
+
+/// `dmub_srv_cmd_get_response`: DCN 2.0 has no register inbox0, so the
+/// answer is the ring entry the DMCUB wrote back.
+pub fn dmub_srv_cmd_get_response(adev: &amdgpu_device, dmub: &dmub_srv, cmd_rsp: &mut dmub_rb_cmd) {
+    dmub_rb_get_return_data(adev, dmub.cpu, &dmub.inbox1.rb, cmd_rsp);
+}
+
+/// `dmub_srv_get_diagnostic_data`.
+pub fn dmub_srv_get_diagnostic_data(adev: &amdgpu_device, dmub: &mut dmub_srv) -> bool {
+    let Some(f) = dmub.hw_funcs.get_diagnostic_data else { return false };
+    f(adev, dmub);
+    true
 }

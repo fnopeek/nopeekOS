@@ -2,7 +2,8 @@
 //! Linux's: the DMUB regions of dm_dmub_sw_init, then dm_dmub_hw_init on a
 //! card whose DMCUB is "off", "cold" or "running" (main_dmubhw.c says what
 //! each answers), every register write, the DMUB state and a checksum of
-//! each window. Unwritten registers read hash(reg).
+//! each window; with "cmd" DC then sends the D0 power state over the
+//! inbox ring. Unwritten registers read hash(reg).
 
 extern crate alloc;
 
@@ -17,8 +18,12 @@ fn hash(reg: u32) -> u32 {
 }
 
 /// A running DMCUB: it clears the status of a GPINT and answers STOP_FW,
-/// and reports dal_fw and mailbox_rdy once enabled out of reset.
+/// reports dal_fw and mailbox_rdy once enabled out of reset, and consumes
+/// the inbox ring as soon as its write pointer moves.
 fn dmcub(reg: u32, v: u32) {
+    if reg == R.offset.DMCUB_INBOX1_WPTR {
+        npk_sys::fake_set_reg(R.offset.DMCUB_INBOX1_RPTR, v);
+    }
     if reg == R.offset.DMCUB_GPINT_DATAIN1 && v >> 28 != 0 {
         npk_sys::fake_set_reg(reg, v & 0x0fff_ffff);
         if (v >> 16) & 0xfff == DMUB_GPINT__STOP_FW {
@@ -56,6 +61,7 @@ fn main() {
     let fb_start = parse(&args.next().expect("fb_start"));
     let vram_base_offset = parse(&args.next().expect("vram_base_offset"));
     let gpu = parse(&args.next().expect("buffer gpu address"));
+    let cmd = args.next().as_deref() == Some("cmd");
 
     npk_sys::fake_card(npk_sys::FakeCard {
         regs: Default::default(),
@@ -100,7 +106,7 @@ fn main() {
     let pages = region_info.fb_size.div_ceil(4096) as i32;
     let buf = npk_sys::Dma::alloc(pages).expect("dma");
     adev.dm.dmub_bo_cpu_addr = Some(amdgpu_object::amdgpu_kptr::gtt(buf.handle));
-    adev.dm.dmub_srv = Some(dmub);
+    adev.dm.dmub_srv = Some(Box::new(dmub));
     adev.dm.dmub_fb_info = Some(fb_info);
     adev.dm_dmub_fw = Some(linux::firmware { data: fw.clone() });
 
@@ -109,7 +115,7 @@ fn main() {
     let r = amdgpu_dm::dm_dmub_hw_init(&mut adev);
     npk_sys::fake_card_echo(false);
 
-    let d = adev.dm.dmub_srv.as_ref().unwrap();
+    let d = amdgpu_dm::dm_dmub_srv(&adev).unwrap();
     println!(
         "hw_init {} hw_init {} dc_dmub_srv {}",
         r, d.hw_init as u32, adev.dm.dc.as_ref().unwrap().ctx.dmub_srv.is_some() as u32
@@ -126,6 +132,46 @@ fn main() {
         "scratch_mem gpu {:#x} size {:#x} ib_mem gpu {:#x} size {:#x}",
         d.scratch_mem_fb.gpu_addr, d.scratch_mem_fb.size, d.ib_mem_gart.gpu_addr, d.ib_mem_gart.size
     );
+    if cmd {
+        let mut dc = adev.dm.dc.take().unwrap();
+        npk_sys::fake_card_echo(true);
+        dc_dmub_srv::dc_dmub_srv_notify_fw_dc_power_state(&adev, &mut dc, DC_ACPI_CM_POWER_STATE_D0);
+        npk_sys::fake_card_echo(false);
+        let dc_srv = dc.ctx.dmub_srv.as_deref().unwrap();
+        println!("optimized_init_done {}", dc_dmub_srv::dc_dmub_srv_optimized_init_done(&adev, Some(dc_srv)) as u32);
+        let d = dc_srv.dmub.as_deref().unwrap();
+        println!(
+            "inbox1 rptr {} wrpt {} last_wptr {} submitted {} reported {}",
+            d.inbox1.rb.rptr, d.inbox1.rb.wrpt, d.inbox1_last_wptr, d.inbox1.num_submitted, d.inbox1.num_reported
+        );
+        let mem = npk_sys::window_bytes(buf.handle);
+        print!("slot0");
+        for b in &mem[d.inbox1.rb.base_address as usize..][..DMUB_RB_CMD_SIZE as usize] {
+            print!(" {:02x}", b);
+        }
+        println!();
+        let g = &d.debug;
+        println!(
+            "timeout {} cmd {:02x} {:02x} version 0x{:08x}",
+            g.timeout_info.timeout_occured as u32, g.timeout_info.timeout_cmd.0[0], g.timeout_info.timeout_cmd.0[1],
+            g.dmcub_version
+        );
+        print!("scratch");
+        for s in &g.scratch[..16] {
+            print!(" {:08x}", s);
+        }
+        println!(
+            "\nfaults {:08x} {:08x} {:08x} inbox1 {:08x} {:08x} {:08x} inbox0 {:08x} {:08x} {:08x}",
+            g.undefined_address_fault_addr, g.inst_fetch_fault_addr, g.data_write_fault_addr, g.inbox1_rptr,
+            g.inbox1_wptr, g.inbox1_size, g.inbox0_rptr, g.inbox0_wptr, g.inbox0_size
+        );
+        println!(
+            "flags {} {} {} {} {} {}",
+            g.is_dmcub_enabled as u32, g.is_dmcub_soft_reset as u32, g.is_dmcub_secure_reset as u32,
+            g.is_traceport_en as u32, g.is_cw0_enabled as u32, g.is_cw6_enabled as u32
+        );
+        adev.dm.dc = Some(dc);
+    }
     let mem = npk_sys::window_bytes(buf.handle);
     let fb = adev.dm.dmub_fb_info.as_ref().unwrap();
     for (i, f) in fb.fb.iter().enumerate() {
