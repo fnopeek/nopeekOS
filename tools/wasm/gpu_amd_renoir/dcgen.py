@@ -156,6 +156,19 @@ BLOCKS = {
         instances=5, const_prefix="AUX",
         regs_struct="dce110_aux_registers", shift_struct="dce110_aux_registers_shift", mask_struct="dce110_aux_registers_mask",
     ),
+    # The dcn20 stream encoder (dio): 5 engines, DIGA..DIGE (engine_id 0..4).
+    # SE_DCN2_REG_LIST pulls SE_COMMON_DCN_REG_LIST; the mask list pulls
+    # SE_COMMON_MASK_SH_LIST_SOC. Both use SRI/SR and the SE_SF field macro
+    # (body identical to SF). Large: ~87 registers per engine.
+    "se": dict(
+        headers=["dio/dcn10/dcn10_stream_encoder.h", "dio/dcn20/dcn20_stream_encoder.h"],
+        prefixes=["SE_"],
+        reg_calls=["SE_DCN2_REG_LIST({i})"],
+        shift_calls=["SE_COMMON_MASK_SH_LIST_DCN20(__SHIFT)"],
+        mask_calls=["SE_COMMON_MASK_SH_LIST_DCN20(_MASK)"],
+        instances=5, const_prefix="SE",
+        regs_struct="dcn10_stream_enc_registers", shift_struct="dcn10_stream_encoder_shift", mask_struct="dcn10_stream_encoder_mask",
+    ),
     "mpc": dict(
         single=True,
         headers=["mpc/dcn10/dcn10_mpc.h", "mpc/dcn20/dcn20_mpc.h"],

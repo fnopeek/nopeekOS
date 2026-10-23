@@ -20271,3 +20271,1487 @@ pub const DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MASK: u32 = 0x7f00;
 pub const DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL__SHIFT: u32 = 0xf;
 /// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:37484
 pub const DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL_MASK: u32 = 0x18000;
+
+// DC se: dcn10_stream_enc_registers absolute offsets per pipe instance
+
+// (SE_DCN2_REG_LIST({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmDIG0_AFMT_CNTL_BASE_IDX) + mmDIG0_AFMT_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_CNTL: u32 = 0x55a6;
+/// The value of `BASE(mmDIG0_AFMT_GENERIC_0_BASE_IDX) + mmDIG0_AFMT_GENERIC_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_GENERIC_0: u32 = 0x554d;
+/// The value of `BASE(mmDIG0_AFMT_GENERIC_1_BASE_IDX) + mmDIG0_AFMT_GENERIC_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_GENERIC_1: u32 = 0x554e;
+/// The value of `BASE(mmDIG0_AFMT_GENERIC_2_BASE_IDX) + mmDIG0_AFMT_GENERIC_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_GENERIC_2: u32 = 0x554f;
+/// The value of `BASE(mmDIG0_AFMT_GENERIC_3_BASE_IDX) + mmDIG0_AFMT_GENERIC_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_GENERIC_3: u32 = 0x5550;
+/// The value of `BASE(mmDIG0_AFMT_GENERIC_4_BASE_IDX) + mmDIG0_AFMT_GENERIC_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_GENERIC_4: u32 = 0x5551;
+/// The value of `BASE(mmDIG0_AFMT_GENERIC_5_BASE_IDX) + mmDIG0_AFMT_GENERIC_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_GENERIC_5: u32 = 0x5552;
+/// The value of `BASE(mmDIG0_AFMT_GENERIC_6_BASE_IDX) + mmDIG0_AFMT_GENERIC_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_GENERIC_6: u32 = 0x5553;
+/// The value of `BASE(mmDIG0_AFMT_GENERIC_7_BASE_IDX) + mmDIG0_AFMT_GENERIC_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_GENERIC_7: u32 = 0x5554;
+/// The value of `BASE(mmDIG0_AFMT_GENERIC_HDR_BASE_IDX) + mmDIG0_AFMT_GENERIC_HDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_GENERIC_HDR: u32 = 0x554c;
+/// The value of `BASE(mmDIG0_AFMT_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG0_AFMT_INFOFRAME_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_INFOFRAME_CONTROL0: u32 = 0x556c;
+/// The value of `BASE(mmDIG0_AFMT_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG0_AFMT_VBI_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_VBI_PACKET_CONTROL: u32 = 0x556b;
+/// The value of `BASE(mmDIG0_AFMT_VBI_PACKET_CONTROL1_BASE_IDX) + mmDIG0_AFMT_VBI_PACKET_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_VBI_PACKET_CONTROL1: u32 = 0x55a7;
+/// The value of `BASE(mmDIG0_AFMT_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG0_AFMT_AUDIO_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_AUDIO_PACKET_CONTROL: u32 = 0x556a;
+/// The value of `BASE(mmDIG0_AFMT_AUDIO_PACKET_CONTROL2_BASE_IDX) + mmDIG0_AFMT_AUDIO_PACKET_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_AUDIO_PACKET_CONTROL2: u32 = 0x553c;
+/// The value of `BASE(mmDIG0_AFMT_AUDIO_SRC_CONTROL_BASE_IDX) + mmDIG0_AFMT_AUDIO_SRC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_AUDIO_SRC_CONTROL: u32 = 0x556d;
+/// The value of `BASE(mmDIG0_AFMT_60958_0_BASE_IDX) + mmDIG0_AFMT_60958_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_60958_0: u32 = 0x5560;
+/// The value of `BASE(mmDIG0_AFMT_60958_1_BASE_IDX) + mmDIG0_AFMT_60958_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_60958_1: u32 = 0x5561;
+/// The value of `BASE(mmDIG0_AFMT_60958_2_BASE_IDX) + mmDIG0_AFMT_60958_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_AFMT_60958_2: u32 = 0x5567;
+/// The value of `BASE(mmDIG0_DIG_FE_CNTL_BASE_IDX) + mmDIG0_DIG_FE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DIG_FE_CNTL: u32 = 0x5528;
+/// The value of `BASE(mmDIG0_DIG_FIFO_STATUS_BASE_IDX) + mmDIG0_DIG_FIFO_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DIG_FIFO_STATUS: u32 = 0x552e;
+/// The value of `BASE(mmDIG0_HDMI_CONTROL_BASE_IDX) + mmDIG0_HDMI_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_CONTROL: u32 = 0x5531;
+/// The value of `BASE(mmDIG0_HDMI_DB_CONTROL_BASE_IDX) + mmDIG0_HDMI_DB_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_DB_CONTROL: u32 = 0x5548;
+/// The value of `BASE(mmDIG0_HDMI_GC_BASE_IDX) + mmDIG0_HDMI_GC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_GC: u32 = 0x553b;
+/// The value of `BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL0_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_GENERIC_PACKET_CONTROL0: u32 = 0x5538;
+/// The value of `BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL1_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_GENERIC_PACKET_CONTROL1: u32 = 0x5555;
+/// The value of `BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL2_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_GENERIC_PACKET_CONTROL2: u32 = 0x5546;
+/// The value of `BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL3_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_GENERIC_PACKET_CONTROL3: u32 = 0x5547;
+/// The value of `BASE(mmDIG0_HDMI_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG0_HDMI_INFOFRAME_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_INFOFRAME_CONTROL0: u32 = 0x5536;
+/// The value of `BASE(mmDIG0_HDMI_INFOFRAME_CONTROL1_BASE_IDX) + mmDIG0_HDMI_INFOFRAME_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_INFOFRAME_CONTROL1: u32 = 0x5537;
+/// The value of `BASE(mmDIG0_HDMI_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG0_HDMI_VBI_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_VBI_PACKET_CONTROL: u32 = 0x5535;
+/// The value of `BASE(mmDIG0_HDMI_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG0_HDMI_AUDIO_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_AUDIO_PACKET_CONTROL: u32 = 0x5533;
+/// The value of `BASE(mmDIG0_HDMI_ACR_PACKET_CONTROL_BASE_IDX) + mmDIG0_HDMI_ACR_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_ACR_PACKET_CONTROL: u32 = 0x5534;
+/// The value of `BASE(mmDIG0_HDMI_ACR_32_0_BASE_IDX) + mmDIG0_HDMI_ACR_32_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_ACR_32_0: u32 = 0x5556;
+/// The value of `BASE(mmDIG0_HDMI_ACR_32_1_BASE_IDX) + mmDIG0_HDMI_ACR_32_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_ACR_32_1: u32 = 0x5557;
+/// The value of `BASE(mmDIG0_HDMI_ACR_44_0_BASE_IDX) + mmDIG0_HDMI_ACR_44_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_ACR_44_0: u32 = 0x5558;
+/// The value of `BASE(mmDIG0_HDMI_ACR_44_1_BASE_IDX) + mmDIG0_HDMI_ACR_44_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_ACR_44_1: u32 = 0x5559;
+/// The value of `BASE(mmDIG0_HDMI_ACR_48_0_BASE_IDX) + mmDIG0_HDMI_ACR_48_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_ACR_48_0: u32 = 0x555a;
+/// The value of `BASE(mmDIG0_HDMI_ACR_48_1_BASE_IDX) + mmDIG0_HDMI_ACR_48_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_ACR_48_1: u32 = 0x555b;
+/// The value of `BASE(mmDP0_DP_DB_CNTL_BASE_IDX) + mmDP0_DP_DB_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_DB_CNTL: u32 = 0x5619;
+/// The value of `BASE(mmDP0_DP_MSA_MISC_BASE_IDX) + mmDP0_DP_MSA_MISC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_MSA_MISC: u32 = 0x55ce;
+/// The value of `BASE(mmDP0_DP_MSA_VBID_MISC_BASE_IDX) + mmDP0_DP_MSA_VBID_MISC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_MSA_VBID_MISC: u32 = 0x561a;
+/// The value of `BASE(mmDP0_DP_MSA_COLORIMETRY_BASE_IDX) + mmDP0_DP_MSA_COLORIMETRY` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_MSA_COLORIMETRY: u32 = 0x55ca;
+/// The value of `BASE(mmDP0_DP_MSA_TIMING_PARAM1_BASE_IDX) + mmDP0_DP_MSA_TIMING_PARAM1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_MSA_TIMING_PARAM1: u32 = 0x560c;
+/// The value of `BASE(mmDP0_DP_MSA_TIMING_PARAM2_BASE_IDX) + mmDP0_DP_MSA_TIMING_PARAM2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_MSA_TIMING_PARAM2: u32 = 0x560d;
+/// The value of `BASE(mmDP0_DP_MSA_TIMING_PARAM3_BASE_IDX) + mmDP0_DP_MSA_TIMING_PARAM3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_MSA_TIMING_PARAM3: u32 = 0x560e;
+/// The value of `BASE(mmDP0_DP_MSA_TIMING_PARAM4_BASE_IDX) + mmDP0_DP_MSA_TIMING_PARAM4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_MSA_TIMING_PARAM4: u32 = 0x560f;
+/// The value of `BASE(mmDP0_DP_MSE_RATE_CNTL_BASE_IDX) + mmDP0_DP_MSE_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_MSE_RATE_CNTL: u32 = 0x55f7;
+/// The value of `BASE(mmDP0_DP_MSE_RATE_UPDATE_BASE_IDX) + mmDP0_DP_MSE_RATE_UPDATE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_MSE_RATE_UPDATE: u32 = 0x55f9;
+/// The value of `BASE(mmDP0_DP_PIXEL_FORMAT_BASE_IDX) + mmDP0_DP_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_PIXEL_FORMAT: u32 = 0x55c9;
+/// The value of `BASE(mmDP0_DP_SEC_CNTL_BASE_IDX) + mmDP0_DP_SEC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_SEC_CNTL: u32 = 0x55eb;
+/// The value of `BASE(mmDP0_DP_SEC_CNTL1_BASE_IDX) + mmDP0_DP_SEC_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_SEC_CNTL1: u32 = 0x55ec;
+/// The value of `BASE(mmDP0_DP_SEC_CNTL2_BASE_IDX) + mmDP0_DP_SEC_CNTL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_SEC_CNTL2: u32 = 0x5613;
+/// The value of `BASE(mmDP0_DP_SEC_CNTL5_BASE_IDX) + mmDP0_DP_SEC_CNTL5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_SEC_CNTL5: u32 = 0x5616;
+/// The value of `BASE(mmDP0_DP_SEC_CNTL6_BASE_IDX) + mmDP0_DP_SEC_CNTL6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_SEC_CNTL6: u32 = 0x5617;
+/// The value of `BASE(mmDP0_DP_STEER_FIFO_BASE_IDX) + mmDP0_DP_STEER_FIFO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_STEER_FIFO: u32 = 0x55cd;
+/// The value of `BASE(mmDP0_DP_VID_M_BASE_IDX) + mmDP0_DP_VID_M` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_VID_M: u32 = 0x55d2;
+/// The value of `BASE(mmDP0_DP_VID_N_BASE_IDX) + mmDP0_DP_VID_N` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_VID_N: u32 = 0x55d1;
+/// The value of `BASE(mmDP0_DP_VID_STREAM_CNTL_BASE_IDX) + mmDP0_DP_VID_STREAM_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_VID_STREAM_CNTL: u32 = 0x55cc;
+/// The value of `BASE(mmDP0_DP_VID_TIMING_BASE_IDX) + mmDP0_DP_VID_TIMING` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_VID_TIMING: u32 = 0x55d0;
+/// The value of `BASE(mmDP0_DP_SEC_AUD_N_BASE_IDX) + mmDP0_DP_SEC_AUD_N` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_SEC_AUD_N: u32 = 0x55f1;
+/// The value of `BASE(mmDP0_DP_SEC_AUD_N_READBACK_BASE_IDX) + mmDP0_DP_SEC_AUD_N_READBACK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_SEC_AUD_N_READBACK: u32 = 0x55f2;
+/// The value of `BASE(mmDP0_DP_SEC_AUD_M_READBACK_BASE_IDX) + mmDP0_DP_SEC_AUD_M_READBACK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_SEC_AUD_M_READBACK: u32 = 0x55f4;
+/// The value of `BASE(mmDP0_DP_SEC_TIMESTAMP_BASE_IDX) + mmDP0_DP_SEC_TIMESTAMP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_SEC_TIMESTAMP: u32 = 0x55f5;
+/// The value of `BASE(mmDIG0_DIG_CLOCK_PATTERN_BASE_IDX) + mmDIG0_DIG_CLOCK_PATTERN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DIG_CLOCK_PATTERN: u32 = 0x552b;
+/// The value of `BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL4_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_GENERIC_PACKET_CONTROL4: u32 = 0x5530;
+/// The value of `BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL5_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_GENERIC_PACKET_CONTROL5: u32 = 0x55b6;
+/// The value of `BASE(mmDP0_DP_DSC_CNTL_BASE_IDX) + mmDP0_DP_DSC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_DSC_CNTL: u32 = 0x5612;
+/// The value of `BASE(mmDP0_DP_DSC_BYTES_PER_PIXEL_BASE_IDX) + mmDP0_DP_DSC_BYTES_PER_PIXEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_DSC_BYTES_PER_PIXEL: u32 = 0x561c;
+/// The value of `BASE(mmDIG0_DME_CONTROL_BASE_IDX) + mmDIG0_DME_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DME_CONTROL: u32 = 0x5549;
+/// The value of `BASE(mmDP0_DP_SEC_METADATA_TRANSMISSION_BASE_IDX) + mmDP0_DP_SEC_METADATA_TRANSMISSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_SEC_METADATA_TRANSMISSION: u32 = 0x561b;
+/// The value of `BASE(mmDIG0_HDMI_METADATA_PACKET_CONTROL_BASE_IDX) + mmDIG0_HDMI_METADATA_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_HDMI_METADATA_PACKET_CONTROL: u32 = 0x552f;
+/// The value of `BASE(mmDP0_DP_SEC_FRAMING4_BASE_IDX) + mmDP0_DP_SEC_FRAMING4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE0_DP_SEC_FRAMING4: u32 = 0x55f0;
+/// The value of `BASE(mmDIG1_AFMT_CNTL_BASE_IDX) + mmDIG1_AFMT_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_CNTL: u32 = 0x56a6;
+/// The value of `BASE(mmDIG1_AFMT_GENERIC_0_BASE_IDX) + mmDIG1_AFMT_GENERIC_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_GENERIC_0: u32 = 0x564d;
+/// The value of `BASE(mmDIG1_AFMT_GENERIC_1_BASE_IDX) + mmDIG1_AFMT_GENERIC_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_GENERIC_1: u32 = 0x564e;
+/// The value of `BASE(mmDIG1_AFMT_GENERIC_2_BASE_IDX) + mmDIG1_AFMT_GENERIC_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_GENERIC_2: u32 = 0x564f;
+/// The value of `BASE(mmDIG1_AFMT_GENERIC_3_BASE_IDX) + mmDIG1_AFMT_GENERIC_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_GENERIC_3: u32 = 0x5650;
+/// The value of `BASE(mmDIG1_AFMT_GENERIC_4_BASE_IDX) + mmDIG1_AFMT_GENERIC_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_GENERIC_4: u32 = 0x5651;
+/// The value of `BASE(mmDIG1_AFMT_GENERIC_5_BASE_IDX) + mmDIG1_AFMT_GENERIC_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_GENERIC_5: u32 = 0x5652;
+/// The value of `BASE(mmDIG1_AFMT_GENERIC_6_BASE_IDX) + mmDIG1_AFMT_GENERIC_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_GENERIC_6: u32 = 0x5653;
+/// The value of `BASE(mmDIG1_AFMT_GENERIC_7_BASE_IDX) + mmDIG1_AFMT_GENERIC_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_GENERIC_7: u32 = 0x5654;
+/// The value of `BASE(mmDIG1_AFMT_GENERIC_HDR_BASE_IDX) + mmDIG1_AFMT_GENERIC_HDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_GENERIC_HDR: u32 = 0x564c;
+/// The value of `BASE(mmDIG1_AFMT_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG1_AFMT_INFOFRAME_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_INFOFRAME_CONTROL0: u32 = 0x566c;
+/// The value of `BASE(mmDIG1_AFMT_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG1_AFMT_VBI_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_VBI_PACKET_CONTROL: u32 = 0x566b;
+/// The value of `BASE(mmDIG1_AFMT_VBI_PACKET_CONTROL1_BASE_IDX) + mmDIG1_AFMT_VBI_PACKET_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_VBI_PACKET_CONTROL1: u32 = 0x56a7;
+/// The value of `BASE(mmDIG1_AFMT_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG1_AFMT_AUDIO_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_AUDIO_PACKET_CONTROL: u32 = 0x566a;
+/// The value of `BASE(mmDIG1_AFMT_AUDIO_PACKET_CONTROL2_BASE_IDX) + mmDIG1_AFMT_AUDIO_PACKET_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_AUDIO_PACKET_CONTROL2: u32 = 0x563c;
+/// The value of `BASE(mmDIG1_AFMT_AUDIO_SRC_CONTROL_BASE_IDX) + mmDIG1_AFMT_AUDIO_SRC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_AUDIO_SRC_CONTROL: u32 = 0x566d;
+/// The value of `BASE(mmDIG1_AFMT_60958_0_BASE_IDX) + mmDIG1_AFMT_60958_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_60958_0: u32 = 0x5660;
+/// The value of `BASE(mmDIG1_AFMT_60958_1_BASE_IDX) + mmDIG1_AFMT_60958_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_60958_1: u32 = 0x5661;
+/// The value of `BASE(mmDIG1_AFMT_60958_2_BASE_IDX) + mmDIG1_AFMT_60958_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_AFMT_60958_2: u32 = 0x5667;
+/// The value of `BASE(mmDIG1_DIG_FE_CNTL_BASE_IDX) + mmDIG1_DIG_FE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DIG_FE_CNTL: u32 = 0x5628;
+/// The value of `BASE(mmDIG1_DIG_FIFO_STATUS_BASE_IDX) + mmDIG1_DIG_FIFO_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DIG_FIFO_STATUS: u32 = 0x562e;
+/// The value of `BASE(mmDIG1_HDMI_CONTROL_BASE_IDX) + mmDIG1_HDMI_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_CONTROL: u32 = 0x5631;
+/// The value of `BASE(mmDIG1_HDMI_DB_CONTROL_BASE_IDX) + mmDIG1_HDMI_DB_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_DB_CONTROL: u32 = 0x5648;
+/// The value of `BASE(mmDIG1_HDMI_GC_BASE_IDX) + mmDIG1_HDMI_GC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_GC: u32 = 0x563b;
+/// The value of `BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL0_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_GENERIC_PACKET_CONTROL0: u32 = 0x5638;
+/// The value of `BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL1_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_GENERIC_PACKET_CONTROL1: u32 = 0x5655;
+/// The value of `BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL2_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_GENERIC_PACKET_CONTROL2: u32 = 0x5646;
+/// The value of `BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL3_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_GENERIC_PACKET_CONTROL3: u32 = 0x5647;
+/// The value of `BASE(mmDIG1_HDMI_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG1_HDMI_INFOFRAME_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_INFOFRAME_CONTROL0: u32 = 0x5636;
+/// The value of `BASE(mmDIG1_HDMI_INFOFRAME_CONTROL1_BASE_IDX) + mmDIG1_HDMI_INFOFRAME_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_INFOFRAME_CONTROL1: u32 = 0x5637;
+/// The value of `BASE(mmDIG1_HDMI_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG1_HDMI_VBI_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_VBI_PACKET_CONTROL: u32 = 0x5635;
+/// The value of `BASE(mmDIG1_HDMI_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG1_HDMI_AUDIO_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_AUDIO_PACKET_CONTROL: u32 = 0x5633;
+/// The value of `BASE(mmDIG1_HDMI_ACR_PACKET_CONTROL_BASE_IDX) + mmDIG1_HDMI_ACR_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_ACR_PACKET_CONTROL: u32 = 0x5634;
+/// The value of `BASE(mmDIG1_HDMI_ACR_32_0_BASE_IDX) + mmDIG1_HDMI_ACR_32_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_ACR_32_0: u32 = 0x5656;
+/// The value of `BASE(mmDIG1_HDMI_ACR_32_1_BASE_IDX) + mmDIG1_HDMI_ACR_32_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_ACR_32_1: u32 = 0x5657;
+/// The value of `BASE(mmDIG1_HDMI_ACR_44_0_BASE_IDX) + mmDIG1_HDMI_ACR_44_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_ACR_44_0: u32 = 0x5658;
+/// The value of `BASE(mmDIG1_HDMI_ACR_44_1_BASE_IDX) + mmDIG1_HDMI_ACR_44_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_ACR_44_1: u32 = 0x5659;
+/// The value of `BASE(mmDIG1_HDMI_ACR_48_0_BASE_IDX) + mmDIG1_HDMI_ACR_48_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_ACR_48_0: u32 = 0x565a;
+/// The value of `BASE(mmDIG1_HDMI_ACR_48_1_BASE_IDX) + mmDIG1_HDMI_ACR_48_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_ACR_48_1: u32 = 0x565b;
+/// The value of `BASE(mmDP1_DP_DB_CNTL_BASE_IDX) + mmDP1_DP_DB_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_DB_CNTL: u32 = 0x5719;
+/// The value of `BASE(mmDP1_DP_MSA_MISC_BASE_IDX) + mmDP1_DP_MSA_MISC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_MSA_MISC: u32 = 0x56ce;
+/// The value of `BASE(mmDP1_DP_MSA_VBID_MISC_BASE_IDX) + mmDP1_DP_MSA_VBID_MISC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_MSA_VBID_MISC: u32 = 0x571a;
+/// The value of `BASE(mmDP1_DP_MSA_COLORIMETRY_BASE_IDX) + mmDP1_DP_MSA_COLORIMETRY` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_MSA_COLORIMETRY: u32 = 0x56ca;
+/// The value of `BASE(mmDP1_DP_MSA_TIMING_PARAM1_BASE_IDX) + mmDP1_DP_MSA_TIMING_PARAM1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_MSA_TIMING_PARAM1: u32 = 0x570c;
+/// The value of `BASE(mmDP1_DP_MSA_TIMING_PARAM2_BASE_IDX) + mmDP1_DP_MSA_TIMING_PARAM2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_MSA_TIMING_PARAM2: u32 = 0x570d;
+/// The value of `BASE(mmDP1_DP_MSA_TIMING_PARAM3_BASE_IDX) + mmDP1_DP_MSA_TIMING_PARAM3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_MSA_TIMING_PARAM3: u32 = 0x570e;
+/// The value of `BASE(mmDP1_DP_MSA_TIMING_PARAM4_BASE_IDX) + mmDP1_DP_MSA_TIMING_PARAM4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_MSA_TIMING_PARAM4: u32 = 0x570f;
+/// The value of `BASE(mmDP1_DP_MSE_RATE_CNTL_BASE_IDX) + mmDP1_DP_MSE_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_MSE_RATE_CNTL: u32 = 0x56f7;
+/// The value of `BASE(mmDP1_DP_MSE_RATE_UPDATE_BASE_IDX) + mmDP1_DP_MSE_RATE_UPDATE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_MSE_RATE_UPDATE: u32 = 0x56f9;
+/// The value of `BASE(mmDP1_DP_PIXEL_FORMAT_BASE_IDX) + mmDP1_DP_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_PIXEL_FORMAT: u32 = 0x56c9;
+/// The value of `BASE(mmDP1_DP_SEC_CNTL_BASE_IDX) + mmDP1_DP_SEC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_SEC_CNTL: u32 = 0x56eb;
+/// The value of `BASE(mmDP1_DP_SEC_CNTL1_BASE_IDX) + mmDP1_DP_SEC_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_SEC_CNTL1: u32 = 0x56ec;
+/// The value of `BASE(mmDP1_DP_SEC_CNTL2_BASE_IDX) + mmDP1_DP_SEC_CNTL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_SEC_CNTL2: u32 = 0x5713;
+/// The value of `BASE(mmDP1_DP_SEC_CNTL5_BASE_IDX) + mmDP1_DP_SEC_CNTL5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_SEC_CNTL5: u32 = 0x5716;
+/// The value of `BASE(mmDP1_DP_SEC_CNTL6_BASE_IDX) + mmDP1_DP_SEC_CNTL6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_SEC_CNTL6: u32 = 0x5717;
+/// The value of `BASE(mmDP1_DP_STEER_FIFO_BASE_IDX) + mmDP1_DP_STEER_FIFO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_STEER_FIFO: u32 = 0x56cd;
+/// The value of `BASE(mmDP1_DP_VID_M_BASE_IDX) + mmDP1_DP_VID_M` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_VID_M: u32 = 0x56d2;
+/// The value of `BASE(mmDP1_DP_VID_N_BASE_IDX) + mmDP1_DP_VID_N` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_VID_N: u32 = 0x56d1;
+/// The value of `BASE(mmDP1_DP_VID_STREAM_CNTL_BASE_IDX) + mmDP1_DP_VID_STREAM_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_VID_STREAM_CNTL: u32 = 0x56cc;
+/// The value of `BASE(mmDP1_DP_VID_TIMING_BASE_IDX) + mmDP1_DP_VID_TIMING` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_VID_TIMING: u32 = 0x56d0;
+/// The value of `BASE(mmDP1_DP_SEC_AUD_N_BASE_IDX) + mmDP1_DP_SEC_AUD_N` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_SEC_AUD_N: u32 = 0x56f1;
+/// The value of `BASE(mmDP1_DP_SEC_AUD_N_READBACK_BASE_IDX) + mmDP1_DP_SEC_AUD_N_READBACK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_SEC_AUD_N_READBACK: u32 = 0x56f2;
+/// The value of `BASE(mmDP1_DP_SEC_AUD_M_READBACK_BASE_IDX) + mmDP1_DP_SEC_AUD_M_READBACK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_SEC_AUD_M_READBACK: u32 = 0x56f4;
+/// The value of `BASE(mmDP1_DP_SEC_TIMESTAMP_BASE_IDX) + mmDP1_DP_SEC_TIMESTAMP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_SEC_TIMESTAMP: u32 = 0x56f5;
+/// The value of `BASE(mmDIG1_DIG_CLOCK_PATTERN_BASE_IDX) + mmDIG1_DIG_CLOCK_PATTERN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DIG_CLOCK_PATTERN: u32 = 0x562b;
+/// The value of `BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL4_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_GENERIC_PACKET_CONTROL4: u32 = 0x5630;
+/// The value of `BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL5_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_GENERIC_PACKET_CONTROL5: u32 = 0x56b6;
+/// The value of `BASE(mmDP1_DP_DSC_CNTL_BASE_IDX) + mmDP1_DP_DSC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_DSC_CNTL: u32 = 0x5712;
+/// The value of `BASE(mmDP1_DP_DSC_BYTES_PER_PIXEL_BASE_IDX) + mmDP1_DP_DSC_BYTES_PER_PIXEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_DSC_BYTES_PER_PIXEL: u32 = 0x571c;
+/// The value of `BASE(mmDIG1_DME_CONTROL_BASE_IDX) + mmDIG1_DME_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DME_CONTROL: u32 = 0x5649;
+/// The value of `BASE(mmDP1_DP_SEC_METADATA_TRANSMISSION_BASE_IDX) + mmDP1_DP_SEC_METADATA_TRANSMISSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_SEC_METADATA_TRANSMISSION: u32 = 0x571b;
+/// The value of `BASE(mmDIG1_HDMI_METADATA_PACKET_CONTROL_BASE_IDX) + mmDIG1_HDMI_METADATA_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_HDMI_METADATA_PACKET_CONTROL: u32 = 0x562f;
+/// The value of `BASE(mmDP1_DP_SEC_FRAMING4_BASE_IDX) + mmDP1_DP_SEC_FRAMING4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE1_DP_SEC_FRAMING4: u32 = 0x56f0;
+/// The value of `BASE(mmDIG2_AFMT_CNTL_BASE_IDX) + mmDIG2_AFMT_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_CNTL: u32 = 0x57a6;
+/// The value of `BASE(mmDIG2_AFMT_GENERIC_0_BASE_IDX) + mmDIG2_AFMT_GENERIC_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_GENERIC_0: u32 = 0x574d;
+/// The value of `BASE(mmDIG2_AFMT_GENERIC_1_BASE_IDX) + mmDIG2_AFMT_GENERIC_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_GENERIC_1: u32 = 0x574e;
+/// The value of `BASE(mmDIG2_AFMT_GENERIC_2_BASE_IDX) + mmDIG2_AFMT_GENERIC_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_GENERIC_2: u32 = 0x574f;
+/// The value of `BASE(mmDIG2_AFMT_GENERIC_3_BASE_IDX) + mmDIG2_AFMT_GENERIC_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_GENERIC_3: u32 = 0x5750;
+/// The value of `BASE(mmDIG2_AFMT_GENERIC_4_BASE_IDX) + mmDIG2_AFMT_GENERIC_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_GENERIC_4: u32 = 0x5751;
+/// The value of `BASE(mmDIG2_AFMT_GENERIC_5_BASE_IDX) + mmDIG2_AFMT_GENERIC_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_GENERIC_5: u32 = 0x5752;
+/// The value of `BASE(mmDIG2_AFMT_GENERIC_6_BASE_IDX) + mmDIG2_AFMT_GENERIC_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_GENERIC_6: u32 = 0x5753;
+/// The value of `BASE(mmDIG2_AFMT_GENERIC_7_BASE_IDX) + mmDIG2_AFMT_GENERIC_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_GENERIC_7: u32 = 0x5754;
+/// The value of `BASE(mmDIG2_AFMT_GENERIC_HDR_BASE_IDX) + mmDIG2_AFMT_GENERIC_HDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_GENERIC_HDR: u32 = 0x574c;
+/// The value of `BASE(mmDIG2_AFMT_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG2_AFMT_INFOFRAME_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_INFOFRAME_CONTROL0: u32 = 0x576c;
+/// The value of `BASE(mmDIG2_AFMT_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG2_AFMT_VBI_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_VBI_PACKET_CONTROL: u32 = 0x576b;
+/// The value of `BASE(mmDIG2_AFMT_VBI_PACKET_CONTROL1_BASE_IDX) + mmDIG2_AFMT_VBI_PACKET_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_VBI_PACKET_CONTROL1: u32 = 0x57a7;
+/// The value of `BASE(mmDIG2_AFMT_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG2_AFMT_AUDIO_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_AUDIO_PACKET_CONTROL: u32 = 0x576a;
+/// The value of `BASE(mmDIG2_AFMT_AUDIO_PACKET_CONTROL2_BASE_IDX) + mmDIG2_AFMT_AUDIO_PACKET_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_AUDIO_PACKET_CONTROL2: u32 = 0x573c;
+/// The value of `BASE(mmDIG2_AFMT_AUDIO_SRC_CONTROL_BASE_IDX) + mmDIG2_AFMT_AUDIO_SRC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_AUDIO_SRC_CONTROL: u32 = 0x576d;
+/// The value of `BASE(mmDIG2_AFMT_60958_0_BASE_IDX) + mmDIG2_AFMT_60958_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_60958_0: u32 = 0x5760;
+/// The value of `BASE(mmDIG2_AFMT_60958_1_BASE_IDX) + mmDIG2_AFMT_60958_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_60958_1: u32 = 0x5761;
+/// The value of `BASE(mmDIG2_AFMT_60958_2_BASE_IDX) + mmDIG2_AFMT_60958_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_AFMT_60958_2: u32 = 0x5767;
+/// The value of `BASE(mmDIG2_DIG_FE_CNTL_BASE_IDX) + mmDIG2_DIG_FE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DIG_FE_CNTL: u32 = 0x5728;
+/// The value of `BASE(mmDIG2_DIG_FIFO_STATUS_BASE_IDX) + mmDIG2_DIG_FIFO_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DIG_FIFO_STATUS: u32 = 0x572e;
+/// The value of `BASE(mmDIG2_HDMI_CONTROL_BASE_IDX) + mmDIG2_HDMI_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_CONTROL: u32 = 0x5731;
+/// The value of `BASE(mmDIG2_HDMI_DB_CONTROL_BASE_IDX) + mmDIG2_HDMI_DB_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_DB_CONTROL: u32 = 0x5748;
+/// The value of `BASE(mmDIG2_HDMI_GC_BASE_IDX) + mmDIG2_HDMI_GC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_GC: u32 = 0x573b;
+/// The value of `BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL0_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_GENERIC_PACKET_CONTROL0: u32 = 0x5738;
+/// The value of `BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL1_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_GENERIC_PACKET_CONTROL1: u32 = 0x5755;
+/// The value of `BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL2_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_GENERIC_PACKET_CONTROL2: u32 = 0x5746;
+/// The value of `BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL3_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_GENERIC_PACKET_CONTROL3: u32 = 0x5747;
+/// The value of `BASE(mmDIG2_HDMI_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG2_HDMI_INFOFRAME_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_INFOFRAME_CONTROL0: u32 = 0x5736;
+/// The value of `BASE(mmDIG2_HDMI_INFOFRAME_CONTROL1_BASE_IDX) + mmDIG2_HDMI_INFOFRAME_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_INFOFRAME_CONTROL1: u32 = 0x5737;
+/// The value of `BASE(mmDIG2_HDMI_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG2_HDMI_VBI_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_VBI_PACKET_CONTROL: u32 = 0x5735;
+/// The value of `BASE(mmDIG2_HDMI_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG2_HDMI_AUDIO_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_AUDIO_PACKET_CONTROL: u32 = 0x5733;
+/// The value of `BASE(mmDIG2_HDMI_ACR_PACKET_CONTROL_BASE_IDX) + mmDIG2_HDMI_ACR_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_ACR_PACKET_CONTROL: u32 = 0x5734;
+/// The value of `BASE(mmDIG2_HDMI_ACR_32_0_BASE_IDX) + mmDIG2_HDMI_ACR_32_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_ACR_32_0: u32 = 0x5756;
+/// The value of `BASE(mmDIG2_HDMI_ACR_32_1_BASE_IDX) + mmDIG2_HDMI_ACR_32_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_ACR_32_1: u32 = 0x5757;
+/// The value of `BASE(mmDIG2_HDMI_ACR_44_0_BASE_IDX) + mmDIG2_HDMI_ACR_44_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_ACR_44_0: u32 = 0x5758;
+/// The value of `BASE(mmDIG2_HDMI_ACR_44_1_BASE_IDX) + mmDIG2_HDMI_ACR_44_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_ACR_44_1: u32 = 0x5759;
+/// The value of `BASE(mmDIG2_HDMI_ACR_48_0_BASE_IDX) + mmDIG2_HDMI_ACR_48_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_ACR_48_0: u32 = 0x575a;
+/// The value of `BASE(mmDIG2_HDMI_ACR_48_1_BASE_IDX) + mmDIG2_HDMI_ACR_48_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_ACR_48_1: u32 = 0x575b;
+/// The value of `BASE(mmDP2_DP_DB_CNTL_BASE_IDX) + mmDP2_DP_DB_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_DB_CNTL: u32 = 0x5819;
+/// The value of `BASE(mmDP2_DP_MSA_MISC_BASE_IDX) + mmDP2_DP_MSA_MISC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_MSA_MISC: u32 = 0x57ce;
+/// The value of `BASE(mmDP2_DP_MSA_VBID_MISC_BASE_IDX) + mmDP2_DP_MSA_VBID_MISC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_MSA_VBID_MISC: u32 = 0x581a;
+/// The value of `BASE(mmDP2_DP_MSA_COLORIMETRY_BASE_IDX) + mmDP2_DP_MSA_COLORIMETRY` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_MSA_COLORIMETRY: u32 = 0x57ca;
+/// The value of `BASE(mmDP2_DP_MSA_TIMING_PARAM1_BASE_IDX) + mmDP2_DP_MSA_TIMING_PARAM1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_MSA_TIMING_PARAM1: u32 = 0x580c;
+/// The value of `BASE(mmDP2_DP_MSA_TIMING_PARAM2_BASE_IDX) + mmDP2_DP_MSA_TIMING_PARAM2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_MSA_TIMING_PARAM2: u32 = 0x580d;
+/// The value of `BASE(mmDP2_DP_MSA_TIMING_PARAM3_BASE_IDX) + mmDP2_DP_MSA_TIMING_PARAM3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_MSA_TIMING_PARAM3: u32 = 0x580e;
+/// The value of `BASE(mmDP2_DP_MSA_TIMING_PARAM4_BASE_IDX) + mmDP2_DP_MSA_TIMING_PARAM4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_MSA_TIMING_PARAM4: u32 = 0x580f;
+/// The value of `BASE(mmDP2_DP_MSE_RATE_CNTL_BASE_IDX) + mmDP2_DP_MSE_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_MSE_RATE_CNTL: u32 = 0x57f7;
+/// The value of `BASE(mmDP2_DP_MSE_RATE_UPDATE_BASE_IDX) + mmDP2_DP_MSE_RATE_UPDATE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_MSE_RATE_UPDATE: u32 = 0x57f9;
+/// The value of `BASE(mmDP2_DP_PIXEL_FORMAT_BASE_IDX) + mmDP2_DP_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_PIXEL_FORMAT: u32 = 0x57c9;
+/// The value of `BASE(mmDP2_DP_SEC_CNTL_BASE_IDX) + mmDP2_DP_SEC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_SEC_CNTL: u32 = 0x57eb;
+/// The value of `BASE(mmDP2_DP_SEC_CNTL1_BASE_IDX) + mmDP2_DP_SEC_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_SEC_CNTL1: u32 = 0x57ec;
+/// The value of `BASE(mmDP2_DP_SEC_CNTL2_BASE_IDX) + mmDP2_DP_SEC_CNTL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_SEC_CNTL2: u32 = 0x5813;
+/// The value of `BASE(mmDP2_DP_SEC_CNTL5_BASE_IDX) + mmDP2_DP_SEC_CNTL5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_SEC_CNTL5: u32 = 0x5816;
+/// The value of `BASE(mmDP2_DP_SEC_CNTL6_BASE_IDX) + mmDP2_DP_SEC_CNTL6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_SEC_CNTL6: u32 = 0x5817;
+/// The value of `BASE(mmDP2_DP_STEER_FIFO_BASE_IDX) + mmDP2_DP_STEER_FIFO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_STEER_FIFO: u32 = 0x57cd;
+/// The value of `BASE(mmDP2_DP_VID_M_BASE_IDX) + mmDP2_DP_VID_M` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_VID_M: u32 = 0x57d2;
+/// The value of `BASE(mmDP2_DP_VID_N_BASE_IDX) + mmDP2_DP_VID_N` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_VID_N: u32 = 0x57d1;
+/// The value of `BASE(mmDP2_DP_VID_STREAM_CNTL_BASE_IDX) + mmDP2_DP_VID_STREAM_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_VID_STREAM_CNTL: u32 = 0x57cc;
+/// The value of `BASE(mmDP2_DP_VID_TIMING_BASE_IDX) + mmDP2_DP_VID_TIMING` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_VID_TIMING: u32 = 0x57d0;
+/// The value of `BASE(mmDP2_DP_SEC_AUD_N_BASE_IDX) + mmDP2_DP_SEC_AUD_N` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_SEC_AUD_N: u32 = 0x57f1;
+/// The value of `BASE(mmDP2_DP_SEC_AUD_N_READBACK_BASE_IDX) + mmDP2_DP_SEC_AUD_N_READBACK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_SEC_AUD_N_READBACK: u32 = 0x57f2;
+/// The value of `BASE(mmDP2_DP_SEC_AUD_M_READBACK_BASE_IDX) + mmDP2_DP_SEC_AUD_M_READBACK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_SEC_AUD_M_READBACK: u32 = 0x57f4;
+/// The value of `BASE(mmDP2_DP_SEC_TIMESTAMP_BASE_IDX) + mmDP2_DP_SEC_TIMESTAMP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_SEC_TIMESTAMP: u32 = 0x57f5;
+/// The value of `BASE(mmDIG2_DIG_CLOCK_PATTERN_BASE_IDX) + mmDIG2_DIG_CLOCK_PATTERN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DIG_CLOCK_PATTERN: u32 = 0x572b;
+/// The value of `BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL4_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_GENERIC_PACKET_CONTROL4: u32 = 0x5730;
+/// The value of `BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL5_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_GENERIC_PACKET_CONTROL5: u32 = 0x57b6;
+/// The value of `BASE(mmDP2_DP_DSC_CNTL_BASE_IDX) + mmDP2_DP_DSC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_DSC_CNTL: u32 = 0x5812;
+/// The value of `BASE(mmDP2_DP_DSC_BYTES_PER_PIXEL_BASE_IDX) + mmDP2_DP_DSC_BYTES_PER_PIXEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_DSC_BYTES_PER_PIXEL: u32 = 0x581c;
+/// The value of `BASE(mmDIG2_DME_CONTROL_BASE_IDX) + mmDIG2_DME_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DME_CONTROL: u32 = 0x5749;
+/// The value of `BASE(mmDP2_DP_SEC_METADATA_TRANSMISSION_BASE_IDX) + mmDP2_DP_SEC_METADATA_TRANSMISSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_SEC_METADATA_TRANSMISSION: u32 = 0x581b;
+/// The value of `BASE(mmDIG2_HDMI_METADATA_PACKET_CONTROL_BASE_IDX) + mmDIG2_HDMI_METADATA_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_HDMI_METADATA_PACKET_CONTROL: u32 = 0x572f;
+/// The value of `BASE(mmDP2_DP_SEC_FRAMING4_BASE_IDX) + mmDP2_DP_SEC_FRAMING4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE2_DP_SEC_FRAMING4: u32 = 0x57f0;
+/// The value of `BASE(mmDIG3_AFMT_CNTL_BASE_IDX) + mmDIG3_AFMT_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_CNTL: u32 = 0x58a6;
+/// The value of `BASE(mmDIG3_AFMT_GENERIC_0_BASE_IDX) + mmDIG3_AFMT_GENERIC_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_GENERIC_0: u32 = 0x584d;
+/// The value of `BASE(mmDIG3_AFMT_GENERIC_1_BASE_IDX) + mmDIG3_AFMT_GENERIC_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_GENERIC_1: u32 = 0x584e;
+/// The value of `BASE(mmDIG3_AFMT_GENERIC_2_BASE_IDX) + mmDIG3_AFMT_GENERIC_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_GENERIC_2: u32 = 0x584f;
+/// The value of `BASE(mmDIG3_AFMT_GENERIC_3_BASE_IDX) + mmDIG3_AFMT_GENERIC_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_GENERIC_3: u32 = 0x5850;
+/// The value of `BASE(mmDIG3_AFMT_GENERIC_4_BASE_IDX) + mmDIG3_AFMT_GENERIC_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_GENERIC_4: u32 = 0x5851;
+/// The value of `BASE(mmDIG3_AFMT_GENERIC_5_BASE_IDX) + mmDIG3_AFMT_GENERIC_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_GENERIC_5: u32 = 0x5852;
+/// The value of `BASE(mmDIG3_AFMT_GENERIC_6_BASE_IDX) + mmDIG3_AFMT_GENERIC_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_GENERIC_6: u32 = 0x5853;
+/// The value of `BASE(mmDIG3_AFMT_GENERIC_7_BASE_IDX) + mmDIG3_AFMT_GENERIC_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_GENERIC_7: u32 = 0x5854;
+/// The value of `BASE(mmDIG3_AFMT_GENERIC_HDR_BASE_IDX) + mmDIG3_AFMT_GENERIC_HDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_GENERIC_HDR: u32 = 0x584c;
+/// The value of `BASE(mmDIG3_AFMT_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG3_AFMT_INFOFRAME_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_INFOFRAME_CONTROL0: u32 = 0x586c;
+/// The value of `BASE(mmDIG3_AFMT_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG3_AFMT_VBI_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_VBI_PACKET_CONTROL: u32 = 0x586b;
+/// The value of `BASE(mmDIG3_AFMT_VBI_PACKET_CONTROL1_BASE_IDX) + mmDIG3_AFMT_VBI_PACKET_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_VBI_PACKET_CONTROL1: u32 = 0x58a7;
+/// The value of `BASE(mmDIG3_AFMT_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG3_AFMT_AUDIO_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_AUDIO_PACKET_CONTROL: u32 = 0x586a;
+/// The value of `BASE(mmDIG3_AFMT_AUDIO_PACKET_CONTROL2_BASE_IDX) + mmDIG3_AFMT_AUDIO_PACKET_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_AUDIO_PACKET_CONTROL2: u32 = 0x583c;
+/// The value of `BASE(mmDIG3_AFMT_AUDIO_SRC_CONTROL_BASE_IDX) + mmDIG3_AFMT_AUDIO_SRC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_AUDIO_SRC_CONTROL: u32 = 0x586d;
+/// The value of `BASE(mmDIG3_AFMT_60958_0_BASE_IDX) + mmDIG3_AFMT_60958_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_60958_0: u32 = 0x5860;
+/// The value of `BASE(mmDIG3_AFMT_60958_1_BASE_IDX) + mmDIG3_AFMT_60958_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_60958_1: u32 = 0x5861;
+/// The value of `BASE(mmDIG3_AFMT_60958_2_BASE_IDX) + mmDIG3_AFMT_60958_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_AFMT_60958_2: u32 = 0x5867;
+/// The value of `BASE(mmDIG3_DIG_FE_CNTL_BASE_IDX) + mmDIG3_DIG_FE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DIG_FE_CNTL: u32 = 0x5828;
+/// The value of `BASE(mmDIG3_DIG_FIFO_STATUS_BASE_IDX) + mmDIG3_DIG_FIFO_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DIG_FIFO_STATUS: u32 = 0x582e;
+/// The value of `BASE(mmDIG3_HDMI_CONTROL_BASE_IDX) + mmDIG3_HDMI_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_CONTROL: u32 = 0x5831;
+/// The value of `BASE(mmDIG3_HDMI_DB_CONTROL_BASE_IDX) + mmDIG3_HDMI_DB_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_DB_CONTROL: u32 = 0x5848;
+/// The value of `BASE(mmDIG3_HDMI_GC_BASE_IDX) + mmDIG3_HDMI_GC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_GC: u32 = 0x583b;
+/// The value of `BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL0_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_GENERIC_PACKET_CONTROL0: u32 = 0x5838;
+/// The value of `BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL1_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_GENERIC_PACKET_CONTROL1: u32 = 0x5855;
+/// The value of `BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL2_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_GENERIC_PACKET_CONTROL2: u32 = 0x5846;
+/// The value of `BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL3_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_GENERIC_PACKET_CONTROL3: u32 = 0x5847;
+/// The value of `BASE(mmDIG3_HDMI_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG3_HDMI_INFOFRAME_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_INFOFRAME_CONTROL0: u32 = 0x5836;
+/// The value of `BASE(mmDIG3_HDMI_INFOFRAME_CONTROL1_BASE_IDX) + mmDIG3_HDMI_INFOFRAME_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_INFOFRAME_CONTROL1: u32 = 0x5837;
+/// The value of `BASE(mmDIG3_HDMI_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG3_HDMI_VBI_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_VBI_PACKET_CONTROL: u32 = 0x5835;
+/// The value of `BASE(mmDIG3_HDMI_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG3_HDMI_AUDIO_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_AUDIO_PACKET_CONTROL: u32 = 0x5833;
+/// The value of `BASE(mmDIG3_HDMI_ACR_PACKET_CONTROL_BASE_IDX) + mmDIG3_HDMI_ACR_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_ACR_PACKET_CONTROL: u32 = 0x5834;
+/// The value of `BASE(mmDIG3_HDMI_ACR_32_0_BASE_IDX) + mmDIG3_HDMI_ACR_32_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_ACR_32_0: u32 = 0x5856;
+/// The value of `BASE(mmDIG3_HDMI_ACR_32_1_BASE_IDX) + mmDIG3_HDMI_ACR_32_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_ACR_32_1: u32 = 0x5857;
+/// The value of `BASE(mmDIG3_HDMI_ACR_44_0_BASE_IDX) + mmDIG3_HDMI_ACR_44_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_ACR_44_0: u32 = 0x5858;
+/// The value of `BASE(mmDIG3_HDMI_ACR_44_1_BASE_IDX) + mmDIG3_HDMI_ACR_44_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_ACR_44_1: u32 = 0x5859;
+/// The value of `BASE(mmDIG3_HDMI_ACR_48_0_BASE_IDX) + mmDIG3_HDMI_ACR_48_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_ACR_48_0: u32 = 0x585a;
+/// The value of `BASE(mmDIG3_HDMI_ACR_48_1_BASE_IDX) + mmDIG3_HDMI_ACR_48_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_ACR_48_1: u32 = 0x585b;
+/// The value of `BASE(mmDP3_DP_DB_CNTL_BASE_IDX) + mmDP3_DP_DB_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_DB_CNTL: u32 = 0x5919;
+/// The value of `BASE(mmDP3_DP_MSA_MISC_BASE_IDX) + mmDP3_DP_MSA_MISC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_MSA_MISC: u32 = 0x58ce;
+/// The value of `BASE(mmDP3_DP_MSA_VBID_MISC_BASE_IDX) + mmDP3_DP_MSA_VBID_MISC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_MSA_VBID_MISC: u32 = 0x591a;
+/// The value of `BASE(mmDP3_DP_MSA_COLORIMETRY_BASE_IDX) + mmDP3_DP_MSA_COLORIMETRY` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_MSA_COLORIMETRY: u32 = 0x58ca;
+/// The value of `BASE(mmDP3_DP_MSA_TIMING_PARAM1_BASE_IDX) + mmDP3_DP_MSA_TIMING_PARAM1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_MSA_TIMING_PARAM1: u32 = 0x590c;
+/// The value of `BASE(mmDP3_DP_MSA_TIMING_PARAM2_BASE_IDX) + mmDP3_DP_MSA_TIMING_PARAM2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_MSA_TIMING_PARAM2: u32 = 0x590d;
+/// The value of `BASE(mmDP3_DP_MSA_TIMING_PARAM3_BASE_IDX) + mmDP3_DP_MSA_TIMING_PARAM3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_MSA_TIMING_PARAM3: u32 = 0x590e;
+/// The value of `BASE(mmDP3_DP_MSA_TIMING_PARAM4_BASE_IDX) + mmDP3_DP_MSA_TIMING_PARAM4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_MSA_TIMING_PARAM4: u32 = 0x590f;
+/// The value of `BASE(mmDP3_DP_MSE_RATE_CNTL_BASE_IDX) + mmDP3_DP_MSE_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_MSE_RATE_CNTL: u32 = 0x58f7;
+/// The value of `BASE(mmDP3_DP_MSE_RATE_UPDATE_BASE_IDX) + mmDP3_DP_MSE_RATE_UPDATE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_MSE_RATE_UPDATE: u32 = 0x58f9;
+/// The value of `BASE(mmDP3_DP_PIXEL_FORMAT_BASE_IDX) + mmDP3_DP_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_PIXEL_FORMAT: u32 = 0x58c9;
+/// The value of `BASE(mmDP3_DP_SEC_CNTL_BASE_IDX) + mmDP3_DP_SEC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_SEC_CNTL: u32 = 0x58eb;
+/// The value of `BASE(mmDP3_DP_SEC_CNTL1_BASE_IDX) + mmDP3_DP_SEC_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_SEC_CNTL1: u32 = 0x58ec;
+/// The value of `BASE(mmDP3_DP_SEC_CNTL2_BASE_IDX) + mmDP3_DP_SEC_CNTL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_SEC_CNTL2: u32 = 0x5913;
+/// The value of `BASE(mmDP3_DP_SEC_CNTL5_BASE_IDX) + mmDP3_DP_SEC_CNTL5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_SEC_CNTL5: u32 = 0x5916;
+/// The value of `BASE(mmDP3_DP_SEC_CNTL6_BASE_IDX) + mmDP3_DP_SEC_CNTL6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_SEC_CNTL6: u32 = 0x5917;
+/// The value of `BASE(mmDP3_DP_STEER_FIFO_BASE_IDX) + mmDP3_DP_STEER_FIFO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_STEER_FIFO: u32 = 0x58cd;
+/// The value of `BASE(mmDP3_DP_VID_M_BASE_IDX) + mmDP3_DP_VID_M` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_VID_M: u32 = 0x58d2;
+/// The value of `BASE(mmDP3_DP_VID_N_BASE_IDX) + mmDP3_DP_VID_N` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_VID_N: u32 = 0x58d1;
+/// The value of `BASE(mmDP3_DP_VID_STREAM_CNTL_BASE_IDX) + mmDP3_DP_VID_STREAM_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_VID_STREAM_CNTL: u32 = 0x58cc;
+/// The value of `BASE(mmDP3_DP_VID_TIMING_BASE_IDX) + mmDP3_DP_VID_TIMING` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_VID_TIMING: u32 = 0x58d0;
+/// The value of `BASE(mmDP3_DP_SEC_AUD_N_BASE_IDX) + mmDP3_DP_SEC_AUD_N` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_SEC_AUD_N: u32 = 0x58f1;
+/// The value of `BASE(mmDP3_DP_SEC_AUD_N_READBACK_BASE_IDX) + mmDP3_DP_SEC_AUD_N_READBACK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_SEC_AUD_N_READBACK: u32 = 0x58f2;
+/// The value of `BASE(mmDP3_DP_SEC_AUD_M_READBACK_BASE_IDX) + mmDP3_DP_SEC_AUD_M_READBACK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_SEC_AUD_M_READBACK: u32 = 0x58f4;
+/// The value of `BASE(mmDP3_DP_SEC_TIMESTAMP_BASE_IDX) + mmDP3_DP_SEC_TIMESTAMP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_SEC_TIMESTAMP: u32 = 0x58f5;
+/// The value of `BASE(mmDIG3_DIG_CLOCK_PATTERN_BASE_IDX) + mmDIG3_DIG_CLOCK_PATTERN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DIG_CLOCK_PATTERN: u32 = 0x582b;
+/// The value of `BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL4_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_GENERIC_PACKET_CONTROL4: u32 = 0x5830;
+/// The value of `BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL5_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_GENERIC_PACKET_CONTROL5: u32 = 0x58b6;
+/// The value of `BASE(mmDP3_DP_DSC_CNTL_BASE_IDX) + mmDP3_DP_DSC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_DSC_CNTL: u32 = 0x5912;
+/// The value of `BASE(mmDP3_DP_DSC_BYTES_PER_PIXEL_BASE_IDX) + mmDP3_DP_DSC_BYTES_PER_PIXEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_DSC_BYTES_PER_PIXEL: u32 = 0x591c;
+/// The value of `BASE(mmDIG3_DME_CONTROL_BASE_IDX) + mmDIG3_DME_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DME_CONTROL: u32 = 0x5849;
+/// The value of `BASE(mmDP3_DP_SEC_METADATA_TRANSMISSION_BASE_IDX) + mmDP3_DP_SEC_METADATA_TRANSMISSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_SEC_METADATA_TRANSMISSION: u32 = 0x591b;
+/// The value of `BASE(mmDIG3_HDMI_METADATA_PACKET_CONTROL_BASE_IDX) + mmDIG3_HDMI_METADATA_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_HDMI_METADATA_PACKET_CONTROL: u32 = 0x582f;
+/// The value of `BASE(mmDP3_DP_SEC_FRAMING4_BASE_IDX) + mmDP3_DP_SEC_FRAMING4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE3_DP_SEC_FRAMING4: u32 = 0x58f0;
+/// The value of `BASE(mmDIG4_AFMT_CNTL_BASE_IDX) + mmDIG4_AFMT_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_CNTL: u32 = 0x59a6;
+/// The value of `BASE(mmDIG4_AFMT_GENERIC_0_BASE_IDX) + mmDIG4_AFMT_GENERIC_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_GENERIC_0: u32 = 0x594d;
+/// The value of `BASE(mmDIG4_AFMT_GENERIC_1_BASE_IDX) + mmDIG4_AFMT_GENERIC_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_GENERIC_1: u32 = 0x594e;
+/// The value of `BASE(mmDIG4_AFMT_GENERIC_2_BASE_IDX) + mmDIG4_AFMT_GENERIC_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_GENERIC_2: u32 = 0x594f;
+/// The value of `BASE(mmDIG4_AFMT_GENERIC_3_BASE_IDX) + mmDIG4_AFMT_GENERIC_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_GENERIC_3: u32 = 0x5950;
+/// The value of `BASE(mmDIG4_AFMT_GENERIC_4_BASE_IDX) + mmDIG4_AFMT_GENERIC_4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_GENERIC_4: u32 = 0x5951;
+/// The value of `BASE(mmDIG4_AFMT_GENERIC_5_BASE_IDX) + mmDIG4_AFMT_GENERIC_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_GENERIC_5: u32 = 0x5952;
+/// The value of `BASE(mmDIG4_AFMT_GENERIC_6_BASE_IDX) + mmDIG4_AFMT_GENERIC_6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_GENERIC_6: u32 = 0x5953;
+/// The value of `BASE(mmDIG4_AFMT_GENERIC_7_BASE_IDX) + mmDIG4_AFMT_GENERIC_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_GENERIC_7: u32 = 0x5954;
+/// The value of `BASE(mmDIG4_AFMT_GENERIC_HDR_BASE_IDX) + mmDIG4_AFMT_GENERIC_HDR` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_GENERIC_HDR: u32 = 0x594c;
+/// The value of `BASE(mmDIG4_AFMT_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG4_AFMT_INFOFRAME_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_INFOFRAME_CONTROL0: u32 = 0x596c;
+/// The value of `BASE(mmDIG4_AFMT_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG4_AFMT_VBI_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_VBI_PACKET_CONTROL: u32 = 0x596b;
+/// The value of `BASE(mmDIG4_AFMT_VBI_PACKET_CONTROL1_BASE_IDX) + mmDIG4_AFMT_VBI_PACKET_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_VBI_PACKET_CONTROL1: u32 = 0x59a7;
+/// The value of `BASE(mmDIG4_AFMT_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG4_AFMT_AUDIO_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_AUDIO_PACKET_CONTROL: u32 = 0x596a;
+/// The value of `BASE(mmDIG4_AFMT_AUDIO_PACKET_CONTROL2_BASE_IDX) + mmDIG4_AFMT_AUDIO_PACKET_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_AUDIO_PACKET_CONTROL2: u32 = 0x593c;
+/// The value of `BASE(mmDIG4_AFMT_AUDIO_SRC_CONTROL_BASE_IDX) + mmDIG4_AFMT_AUDIO_SRC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_AUDIO_SRC_CONTROL: u32 = 0x596d;
+/// The value of `BASE(mmDIG4_AFMT_60958_0_BASE_IDX) + mmDIG4_AFMT_60958_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_60958_0: u32 = 0x5960;
+/// The value of `BASE(mmDIG4_AFMT_60958_1_BASE_IDX) + mmDIG4_AFMT_60958_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_60958_1: u32 = 0x5961;
+/// The value of `BASE(mmDIG4_AFMT_60958_2_BASE_IDX) + mmDIG4_AFMT_60958_2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_AFMT_60958_2: u32 = 0x5967;
+/// The value of `BASE(mmDIG4_DIG_FE_CNTL_BASE_IDX) + mmDIG4_DIG_FE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DIG_FE_CNTL: u32 = 0x5928;
+/// The value of `BASE(mmDIG4_DIG_FIFO_STATUS_BASE_IDX) + mmDIG4_DIG_FIFO_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DIG_FIFO_STATUS: u32 = 0x592e;
+/// The value of `BASE(mmDIG4_HDMI_CONTROL_BASE_IDX) + mmDIG4_HDMI_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_CONTROL: u32 = 0x5931;
+/// The value of `BASE(mmDIG4_HDMI_DB_CONTROL_BASE_IDX) + mmDIG4_HDMI_DB_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_DB_CONTROL: u32 = 0x5948;
+/// The value of `BASE(mmDIG4_HDMI_GC_BASE_IDX) + mmDIG4_HDMI_GC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_GC: u32 = 0x593b;
+/// The value of `BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL0_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_GENERIC_PACKET_CONTROL0: u32 = 0x5938;
+/// The value of `BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL1_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_GENERIC_PACKET_CONTROL1: u32 = 0x5955;
+/// The value of `BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL2_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_GENERIC_PACKET_CONTROL2: u32 = 0x5946;
+/// The value of `BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL3_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_GENERIC_PACKET_CONTROL3: u32 = 0x5947;
+/// The value of `BASE(mmDIG4_HDMI_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG4_HDMI_INFOFRAME_CONTROL0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_INFOFRAME_CONTROL0: u32 = 0x5936;
+/// The value of `BASE(mmDIG4_HDMI_INFOFRAME_CONTROL1_BASE_IDX) + mmDIG4_HDMI_INFOFRAME_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_INFOFRAME_CONTROL1: u32 = 0x5937;
+/// The value of `BASE(mmDIG4_HDMI_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG4_HDMI_VBI_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_VBI_PACKET_CONTROL: u32 = 0x5935;
+/// The value of `BASE(mmDIG4_HDMI_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG4_HDMI_AUDIO_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_AUDIO_PACKET_CONTROL: u32 = 0x5933;
+/// The value of `BASE(mmDIG4_HDMI_ACR_PACKET_CONTROL_BASE_IDX) + mmDIG4_HDMI_ACR_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_ACR_PACKET_CONTROL: u32 = 0x5934;
+/// The value of `BASE(mmDIG4_HDMI_ACR_32_0_BASE_IDX) + mmDIG4_HDMI_ACR_32_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_ACR_32_0: u32 = 0x5956;
+/// The value of `BASE(mmDIG4_HDMI_ACR_32_1_BASE_IDX) + mmDIG4_HDMI_ACR_32_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_ACR_32_1: u32 = 0x5957;
+/// The value of `BASE(mmDIG4_HDMI_ACR_44_0_BASE_IDX) + mmDIG4_HDMI_ACR_44_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_ACR_44_0: u32 = 0x5958;
+/// The value of `BASE(mmDIG4_HDMI_ACR_44_1_BASE_IDX) + mmDIG4_HDMI_ACR_44_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_ACR_44_1: u32 = 0x5959;
+/// The value of `BASE(mmDIG4_HDMI_ACR_48_0_BASE_IDX) + mmDIG4_HDMI_ACR_48_0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_ACR_48_0: u32 = 0x595a;
+/// The value of `BASE(mmDIG4_HDMI_ACR_48_1_BASE_IDX) + mmDIG4_HDMI_ACR_48_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_ACR_48_1: u32 = 0x595b;
+/// The value of `BASE(mmDP4_DP_DB_CNTL_BASE_IDX) + mmDP4_DP_DB_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_DB_CNTL: u32 = 0x5a19;
+/// The value of `BASE(mmDP4_DP_MSA_MISC_BASE_IDX) + mmDP4_DP_MSA_MISC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_MSA_MISC: u32 = 0x59ce;
+/// The value of `BASE(mmDP4_DP_MSA_VBID_MISC_BASE_IDX) + mmDP4_DP_MSA_VBID_MISC` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_MSA_VBID_MISC: u32 = 0x5a1a;
+/// The value of `BASE(mmDP4_DP_MSA_COLORIMETRY_BASE_IDX) + mmDP4_DP_MSA_COLORIMETRY` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_MSA_COLORIMETRY: u32 = 0x59ca;
+/// The value of `BASE(mmDP4_DP_MSA_TIMING_PARAM1_BASE_IDX) + mmDP4_DP_MSA_TIMING_PARAM1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_MSA_TIMING_PARAM1: u32 = 0x5a0c;
+/// The value of `BASE(mmDP4_DP_MSA_TIMING_PARAM2_BASE_IDX) + mmDP4_DP_MSA_TIMING_PARAM2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_MSA_TIMING_PARAM2: u32 = 0x5a0d;
+/// The value of `BASE(mmDP4_DP_MSA_TIMING_PARAM3_BASE_IDX) + mmDP4_DP_MSA_TIMING_PARAM3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_MSA_TIMING_PARAM3: u32 = 0x5a0e;
+/// The value of `BASE(mmDP4_DP_MSA_TIMING_PARAM4_BASE_IDX) + mmDP4_DP_MSA_TIMING_PARAM4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_MSA_TIMING_PARAM4: u32 = 0x5a0f;
+/// The value of `BASE(mmDP4_DP_MSE_RATE_CNTL_BASE_IDX) + mmDP4_DP_MSE_RATE_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_MSE_RATE_CNTL: u32 = 0x59f7;
+/// The value of `BASE(mmDP4_DP_MSE_RATE_UPDATE_BASE_IDX) + mmDP4_DP_MSE_RATE_UPDATE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_MSE_RATE_UPDATE: u32 = 0x59f9;
+/// The value of `BASE(mmDP4_DP_PIXEL_FORMAT_BASE_IDX) + mmDP4_DP_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_PIXEL_FORMAT: u32 = 0x59c9;
+/// The value of `BASE(mmDP4_DP_SEC_CNTL_BASE_IDX) + mmDP4_DP_SEC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_SEC_CNTL: u32 = 0x59eb;
+/// The value of `BASE(mmDP4_DP_SEC_CNTL1_BASE_IDX) + mmDP4_DP_SEC_CNTL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_SEC_CNTL1: u32 = 0x59ec;
+/// The value of `BASE(mmDP4_DP_SEC_CNTL2_BASE_IDX) + mmDP4_DP_SEC_CNTL2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_SEC_CNTL2: u32 = 0x5a13;
+/// The value of `BASE(mmDP4_DP_SEC_CNTL5_BASE_IDX) + mmDP4_DP_SEC_CNTL5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_SEC_CNTL5: u32 = 0x5a16;
+/// The value of `BASE(mmDP4_DP_SEC_CNTL6_BASE_IDX) + mmDP4_DP_SEC_CNTL6` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_SEC_CNTL6: u32 = 0x5a17;
+/// The value of `BASE(mmDP4_DP_STEER_FIFO_BASE_IDX) + mmDP4_DP_STEER_FIFO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_STEER_FIFO: u32 = 0x59cd;
+/// The value of `BASE(mmDP4_DP_VID_M_BASE_IDX) + mmDP4_DP_VID_M` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_VID_M: u32 = 0x59d2;
+/// The value of `BASE(mmDP4_DP_VID_N_BASE_IDX) + mmDP4_DP_VID_N` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_VID_N: u32 = 0x59d1;
+/// The value of `BASE(mmDP4_DP_VID_STREAM_CNTL_BASE_IDX) + mmDP4_DP_VID_STREAM_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_VID_STREAM_CNTL: u32 = 0x59cc;
+/// The value of `BASE(mmDP4_DP_VID_TIMING_BASE_IDX) + mmDP4_DP_VID_TIMING` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_VID_TIMING: u32 = 0x59d0;
+/// The value of `BASE(mmDP4_DP_SEC_AUD_N_BASE_IDX) + mmDP4_DP_SEC_AUD_N` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_SEC_AUD_N: u32 = 0x59f1;
+/// The value of `BASE(mmDP4_DP_SEC_AUD_N_READBACK_BASE_IDX) + mmDP4_DP_SEC_AUD_N_READBACK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_SEC_AUD_N_READBACK: u32 = 0x59f2;
+/// The value of `BASE(mmDP4_DP_SEC_AUD_M_READBACK_BASE_IDX) + mmDP4_DP_SEC_AUD_M_READBACK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_SEC_AUD_M_READBACK: u32 = 0x59f4;
+/// The value of `BASE(mmDP4_DP_SEC_TIMESTAMP_BASE_IDX) + mmDP4_DP_SEC_TIMESTAMP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_SEC_TIMESTAMP: u32 = 0x59f5;
+/// The value of `BASE(mmDIG4_DIG_CLOCK_PATTERN_BASE_IDX) + mmDIG4_DIG_CLOCK_PATTERN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DIG_CLOCK_PATTERN: u32 = 0x592b;
+/// The value of `BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL4_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_GENERIC_PACKET_CONTROL4: u32 = 0x5930;
+/// The value of `BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL5_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_GENERIC_PACKET_CONTROL5: u32 = 0x59b6;
+/// The value of `BASE(mmDP4_DP_DSC_CNTL_BASE_IDX) + mmDP4_DP_DSC_CNTL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_DSC_CNTL: u32 = 0x5a12;
+/// The value of `BASE(mmDP4_DP_DSC_BYTES_PER_PIXEL_BASE_IDX) + mmDP4_DP_DSC_BYTES_PER_PIXEL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_DSC_BYTES_PER_PIXEL: u32 = 0x5a1c;
+/// The value of `BASE(mmDIG4_DME_CONTROL_BASE_IDX) + mmDIG4_DME_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DME_CONTROL: u32 = 0x5949;
+/// The value of `BASE(mmDP4_DP_SEC_METADATA_TRANSMISSION_BASE_IDX) + mmDP4_DP_SEC_METADATA_TRANSMISSION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_SEC_METADATA_TRANSMISSION: u32 = 0x5a1b;
+/// The value of `BASE(mmDIG4_HDMI_METADATA_PACKET_CONTROL_BASE_IDX) + mmDIG4_HDMI_METADATA_PACKET_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_HDMI_METADATA_PACKET_CONTROL: u32 = 0x592f;
+/// The value of `BASE(mmDP4_DP_SEC_FRAMING4_BASE_IDX) + mmDP4_DP_SEC_FRAMING4` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const SE4_DP_SEC_FRAMING4: u32 = 0x59f0;
+
+// DC se field shifts/masks (SE_COMMON_MASK_SH_LIST_DCN20(__SHIFT))
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37740
+pub const DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_INDEX__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37743
+pub const DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_INDEX_MASK: u32 = 0xf0000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37497
+pub const DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB0__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37501
+pub const DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB0_MASK: u32 = 0xff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37498
+pub const DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB1__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37502
+pub const DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB1_MASK: u32 = 0xff00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37499
+pub const DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB2__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37503
+pub const DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB2_MASK: u32 = 0xff0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37500
+pub const DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB3__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37504
+pub const DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB3_MASK: u32 = 0xff000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37908
+pub const DP0_DP_PIXEL_FORMAT__DP_PIXEL_ENCODING__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37912
+pub const DP0_DP_PIXEL_FORMAT__DP_PIXEL_ENCODING_MASK: u32 = 0x7;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37911
+pub const DP0_DP_PIXEL_FORMAT__DP_COMPONENT_DEPTH__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37915
+pub const DP0_DP_PIXEL_FORMAT__DP_COMPONENT_DEPTH_MASK: u32 = 0x7000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37239
+pub const DIG0_HDMI_CONTROL__HDMI_PACKET_GEN_VERSION__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37248
+pub const DIG0_HDMI_CONTROL__HDMI_PACKET_GEN_VERSION_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37235
+pub const DIG0_HDMI_CONTROL__HDMI_KEEPOUT_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37244
+pub const DIG0_HDMI_CONTROL__HDMI_KEEPOUT_MODE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37242
+pub const DIG0_HDMI_CONTROL__HDMI_DEEP_COLOR_ENABLE__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37251
+pub const DIG0_HDMI_CONTROL__HDMI_DEEP_COLOR_ENABLE_MASK: u32 = 0x1000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37243
+pub const DIG0_HDMI_CONTROL__HDMI_DEEP_COLOR_DEPTH__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37252
+pub const DIG0_HDMI_CONTROL__HDMI_DEEP_COLOR_DEPTH_MASK: u32 = 0x30000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37236
+pub const DIG0_HDMI_CONTROL__HDMI_DATA_SCRAMBLE_EN__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37245
+pub const DIG0_HDMI_CONTROL__HDMI_DATA_SCRAMBLE_EN_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37238
+pub const DIG0_HDMI_CONTROL__HDMI_NO_EXTRA_NULL_PACKET_FILLED__SHIFT: u32 = 0x3;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37247
+pub const DIG0_HDMI_CONTROL__HDMI_NO_EXTRA_NULL_PACKET_FILLED_MASK: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37285
+pub const DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_CONT__SHIFT: u32 = 0x5;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37292
+pub const DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_CONT_MASK: u32 = 0x20;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37284
+pub const DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_SEND__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37291
+pub const DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_SEND_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37283
+pub const DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_NULL_SEND__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37290
+pub const DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_NULL_SEND_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37288
+pub const DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_ACP_SEND__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37295
+pub const DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_ACP_SEND_MASK: u32 = 0x1000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37300
+pub const DIG0_HDMI_INFOFRAME_CONTROL0__HDMI_AUDIO_INFO_SEND__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37306
+pub const DIG0_HDMI_INFOFRAME_CONTROL0__HDMI_AUDIO_INFO_SEND_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37746
+pub const DIG0_AFMT_INFOFRAME_CONTROL0__AFMT_AUDIO_INFO_UPDATE__SHIFT: u32 = 0x7;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37749
+pub const DIG0_AFMT_INFOFRAME_CONTROL0__AFMT_AUDIO_INFO_UPDATE_MASK: u32 = 0x80;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37312
+pub const DIG0_HDMI_INFOFRAME_CONTROL1__HDMI_AUDIO_INFO_LINE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37315
+pub const DIG0_HDMI_INFOFRAME_CONTROL1__HDMI_AUDIO_INFO_LINE_MASK: u32 = 0x3f00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37332
+pub const DIG0_HDMI_GC__HDMI_GC_AVMUTE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37337
+pub const DIG0_HDMI_GC__HDMI_GC_AVMUTE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38211
+pub const DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X__SHIFT: u32 = 0x1a;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38213
+pub const DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X_MASK: u32 = 0xfc000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38210
+pub const DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_Y__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38212
+pub const DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_Y_MASK: u32 = 0x3ffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38215
+pub const DP0_DP_MSE_RATE_UPDATE__DP_MSE_RATE_UPDATE_PENDING__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38216
+pub const DP0_DP_MSE_RATE_UPDATE__DP_MSE_RATE_UPDATE_PENDING_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38131
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP0_ENABLE__SHIFT: u32 = 0x14;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38142
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP0_ENABLE_MASK: u32 = 0x100000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38126
+pub const DP0_DP_SEC_CNTL__DP_SEC_STREAM_ENABLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38137
+pub const DP0_DP_SEC_CNTL__DP_SEC_STREAM_ENABLE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38132
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP1_ENABLE__SHIFT: u32 = 0x15;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38143
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP1_ENABLE_MASK: u32 = 0x200000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38133
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP2_ENABLE__SHIFT: u32 = 0x16;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38144
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP2_ENABLE_MASK: u32 = 0x400000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38134
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP3_ENABLE__SHIFT: u32 = 0x17;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38145
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP3_ENABLE_MASK: u32 = 0x800000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38136
+pub const DP0_DP_SEC_CNTL__DP_SEC_MPG_ENABLE__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38147
+pub const DP0_DP_SEC_CNTL__DP_SEC_MPG_ENABLE_MASK: u32 = 0x10000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31484
+pub const DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31513
+pub const DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND_MASK: u32 = 0x1000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31485
+pub const DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND_PENDING__SHIFT: u32 = 0xd;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31514
+pub const DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND_PENDING_MASK: u32 = 0x2000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31537
+pub const DP0_DP_SEC_CNTL4__DP_SEC_GSP4_LINE_NUM__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31539
+pub const DP0_DP_SEC_CNTL4__DP_SEC_GSP4_LINE_NUM_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31487
+pub const DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND_ANY_LINE__SHIFT: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31516
+pub const DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND_ANY_LINE_MASK: u32 = 0x8000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37930
+pub const DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_DIS_DEFER__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37934
+pub const DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_DIS_DEFER_MASK: u32 = 0x300;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37929
+pub const DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_ENABLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37933
+pub const DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_ENABLE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37931
+pub const DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_STATUS__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37935
+pub const DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_STATUS_MASK: u32 = 0x10000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37938
+pub const DP0_DP_STEER_FIFO__DP_STEER_FIFO_RESET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37945
+pub const DP0_DP_STEER_FIFO__DP_STEER_FIFO_RESET_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37964
+pub const DP0_DP_VID_TIMING__DP_VID_M_N_GEN_EN__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37969
+pub const DP0_DP_VID_TIMING__DP_VID_M_N_GEN_EN_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37973
+pub const DP0_DP_VID_N__DP_VID_N__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37974
+pub const DP0_DP_VID_N__DP_VID_N_MASK: u32 = 0xffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37976
+pub const DP0_DP_VID_M__DP_VID_M__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37977
+pub const DP0_DP_VID_M__DP_VID_M_MASK: u32 = 0xffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37169
+pub const DIG0_DIG_FE_CNTL__DIG_START__SHIFT: u32 = 0xa;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37176
+pub const DIG0_DIG_FE_CNTL__DIG_START_MASK: u32 = 0x400;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37752
+pub const DIG0_AFMT_AUDIO_SRC_CONTROL__AFMT_AUDIO_SRC_SELECT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37753
+pub const DIG0_AFMT_AUDIO_SRC_CONTROL__AFMT_AUDIO_SRC_SELECT_MASK: u32 = 0x7;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37345
+pub const DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_AUDIO_CHANNEL_ENABLE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37351
+pub const DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_AUDIO_CHANNEL_ENABLE_MASK: u32 = 0xff00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37264
+pub const DIG0_HDMI_AUDIO_PACKET_CONTROL__HDMI_AUDIO_PACKETS_PER_LINE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37266
+pub const DIG0_HDMI_AUDIO_PACKET_CONTROL__HDMI_AUDIO_PACKETS_PER_LINE_MASK: u32 = 0x1f0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37263
+pub const DIG0_HDMI_AUDIO_PACKET_CONTROL__HDMI_AUDIO_DELAY_EN__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37265
+pub const DIG0_HDMI_AUDIO_PACKET_CONTROL__HDMI_AUDIO_DELAY_EN_MASK: u32 = 0x30;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37727
+pub const DIG0_AFMT_AUDIO_PACKET_CONTROL__AFMT_60958_CS_UPDATE__SHIFT: u32 = 0x1a;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37735
+pub const DIG0_AFMT_AUDIO_PACKET_CONTROL__AFMT_60958_CS_UPDATE_MASK: u32 = 0x4000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37343
+pub const DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_AUDIO_LAYOUT_OVRD__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37349
+pub const DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_AUDIO_LAYOUT_OVRD_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37348
+pub const DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_60958_OSF_OVRD__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37354
+pub const DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_60958_OSF_OVRD_MASK: u32 = 0x10000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37272
+pub const DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_AUTO_SEND__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37279
+pub const DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_AUTO_SEND_MASK: u32 = 0x1000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37271
+pub const DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_SOURCE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37278
+pub const DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_SOURCE_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37274
+pub const DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_AUDIO_PRIORITY__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37281
+pub const DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_AUDIO_PRIORITY_MASK: u32 = 0x80000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37591
+pub const DIG0_HDMI_ACR_32_0__HDMI_ACR_CTS_32__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37592
+pub const DIG0_HDMI_ACR_32_0__HDMI_ACR_CTS_32_MASK: u32 = 0xfffff000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37594
+pub const DIG0_HDMI_ACR_32_1__HDMI_ACR_N_32__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37595
+pub const DIG0_HDMI_ACR_32_1__HDMI_ACR_N_32_MASK: u32 = 0xfffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37597
+pub const DIG0_HDMI_ACR_44_0__HDMI_ACR_CTS_44__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37598
+pub const DIG0_HDMI_ACR_44_0__HDMI_ACR_CTS_44_MASK: u32 = 0xfffff000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37600
+pub const DIG0_HDMI_ACR_44_1__HDMI_ACR_N_44__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37601
+pub const DIG0_HDMI_ACR_44_1__HDMI_ACR_N_44_MASK: u32 = 0xfffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37603
+pub const DIG0_HDMI_ACR_48_0__HDMI_ACR_CTS_48__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37604
+pub const DIG0_HDMI_ACR_48_0__HDMI_ACR_CTS_48_MASK: u32 = 0xfffff000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37606
+pub const DIG0_HDMI_ACR_48_1__HDMI_ACR_N_48__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37607
+pub const DIG0_HDMI_ACR_48_1__HDMI_ACR_N_48_MASK: u32 = 0xfffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37642
+pub const DIG0_AFMT_60958_0__AFMT_60958_CS_CHANNEL_NUMBER_L__SHIFT: u32 = 0x14;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37652
+pub const DIG0_AFMT_60958_0__AFMT_60958_CS_CHANNEL_NUMBER_L_MASK: u32 = 0xf00000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37644
+pub const DIG0_AFMT_60958_0__AFMT_60958_CS_CLOCK_ACCURACY__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37654
+pub const DIG0_AFMT_60958_0__AFMT_60958_CS_CLOCK_ACCURACY_MASK: u32 = 0x30000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37660
+pub const DIG0_AFMT_60958_1__AFMT_60958_CS_CHANNEL_NUMBER_R__SHIFT: u32 = 0x14;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37665
+pub const DIG0_AFMT_60958_1__AFMT_60958_CS_CHANNEL_NUMBER_R_MASK: u32 = 0xf00000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37694
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_2__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37700
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_2_MASK: u32 = 0xf;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37695
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_3__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37701
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_3_MASK: u32 = 0xf0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37696
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_4__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37702
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_4_MASK: u32 = 0xf00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37697
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_5__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37703
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_5_MASK: u32 = 0xf000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37698
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_6__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37704
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_6_MASK: u32 = 0xf0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37699
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_7__SHIFT: u32 = 0x14;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37705
+pub const DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_7_MASK: u32 = 0xf00000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38186
+pub const DP0_DP_SEC_AUD_N__DP_SEC_AUD_N__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38187
+pub const DP0_DP_SEC_AUD_N__DP_SEC_AUD_N_MASK: u32 = 0xffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38189
+pub const DP0_DP_SEC_AUD_N_READBACK__DP_SEC_AUD_N_READBACK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38190
+pub const DP0_DP_SEC_AUD_N_READBACK__DP_SEC_AUD_N_READBACK_MASK: u32 = 0xffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38195
+pub const DP0_DP_SEC_AUD_M_READBACK__DP_SEC_AUD_M_READBACK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38196
+pub const DP0_DP_SEC_AUD_M_READBACK__DP_SEC_AUD_M_READBACK_MASK: u32 = 0xffffff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38198
+pub const DP0_DP_SEC_TIMESTAMP__DP_SEC_TIMESTAMP_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38199
+pub const DP0_DP_SEC_TIMESTAMP__DP_SEC_TIMESTAMP_MODE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38127
+pub const DP0_DP_SEC_CNTL__DP_SEC_ASP_ENABLE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38138
+pub const DP0_DP_SEC_CNTL__DP_SEC_ASP_ENABLE_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38128
+pub const DP0_DP_SEC_CNTL__DP_SEC_ATP_ENABLE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38139
+pub const DP0_DP_SEC_CNTL__DP_SEC_ATP_ENABLE_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38129
+pub const DP0_DP_SEC_CNTL__DP_SEC_AIP_ENABLE__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38140
+pub const DP0_DP_SEC_CNTL__DP_SEC_AIP_ENABLE_MASK: u32 = 0x1000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38130
+pub const DP0_DP_SEC_CNTL__DP_SEC_ACM_ENABLE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:38141
+pub const DP0_DP_SEC_CNTL__DP_SEC_ACM_ENABLE_MASK: u32 = 0x10000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37721
+pub const DIG0_AFMT_AUDIO_PACKET_CONTROL__AFMT_AUDIO_SAMPLE_SEND__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37729
+pub const DIG0_AFMT_AUDIO_PACKET_CONTROL__AFMT_AUDIO_SAMPLE_SEND_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37893
+pub const DIG0_AFMT_CNTL__AFMT_AUDIO_CLOCK_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37895
+pub const DIG0_AFMT_CNTL__AFMT_AUDIO_CLOCK_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37237
+pub const DIG0_HDMI_CONTROL__HDMI_CLOCK_CHANNEL_RATE__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37246
+pub const DIG0_HDMI_CONTROL__HDMI_CLOCK_CHANNEL_RATE_MASK: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37171
+pub const DIG0_DIG_FE_CNTL__TMDS_PIXEL_ENCODING__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37178
+pub const DIG0_DIG_FE_CNTL__TMDS_PIXEL_ENCODING_MASK: u32 = 0x10000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37172
+pub const DIG0_DIG_FE_CNTL__TMDS_COLOR_FORMAT__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37179
+pub const DIG0_DIG_FE_CNTL__TMDS_COLOR_FORMAT_MASK: u32 = 0xc0000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37167
+pub const DIG0_DIG_FE_CNTL__DIG_STEREOSYNC_SELECT__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37174
+pub const DIG0_DIG_FE_CNTL__DIG_STEREOSYNC_SELECT_MASK: u32 = 0x70;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37168
+pub const DIG0_DIG_FE_CNTL__DIG_STEREOSYNC_GATE_EN__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37175
+pub const DIG0_DIG_FE_CNTL__DIG_STEREOSYNC_GATE_EN_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37212
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_LEVEL_ERROR__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37223
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_LEVEL_ERROR_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37213
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_USE_OVERWRITE_LEVEL__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37224
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_USE_OVERWRITE_LEVEL_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37214
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_OVERWRITE_LEVEL__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37225
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_OVERWRITE_LEVEL_MASK: u32 = 0xfc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37215
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_ERROR_ACK__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37226
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_ERROR_ACK_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37216
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_CAL_AVERAGE_LEVEL__SHIFT: u32 = 0xa;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37227
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_CAL_AVERAGE_LEVEL_MASK: u32 = 0xfc00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37217
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_MAXIMUM_LEVEL__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37228
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_MAXIMUM_LEVEL_MASK: u32 = 0x1f0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37218
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_MINIMUM_LEVEL__SHIFT: u32 = 0x16;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37229
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_MINIMUM_LEVEL_MASK: u32 = 0x3c00000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37219
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_READ_CLOCK_SRC__SHIFT: u32 = 0x1a;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37230
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_READ_CLOCK_SRC_MASK: u32 = 0x4000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37220
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_CALIBRATED__SHIFT: u32 = 0x1d;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37231
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_CALIBRATED_MASK: u32 = 0x20000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37221
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_FORCE_RECAL_AVERAGE__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37232
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_FORCE_RECAL_AVERAGE_MASK: u32 = 0x40000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37222
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_FORCE_RECOMP_MINMAX__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37233
+pub const DIG0_DIG_FIFO_STATUS__DIG_FIFO_FORCE_RECOMP_MINMAX_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30795
+pub const DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_LOCK_STATUS__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30799
+pub const DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_LOCK_STATUS_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30796
+pub const DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_CONFLICT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30800
+pub const DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_CONFLICT_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30797
+pub const DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_CONFLICT_CLR__SHIFT: u32 = 0x11;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30801
+pub const DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_CONFLICT_CLR_MASK: u32 = 0x20000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30958
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_FRAME_UPDATE_PENDING__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30990
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_FRAME_UPDATE_PENDING_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30962
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_FRAME_UPDATE_PENDING__SHIFT: u32 = 0x5;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30994
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_FRAME_UPDATE_PENDING_MASK: u32 = 0x20;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30966
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_FRAME_UPDATE_PENDING__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30998
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_FRAME_UPDATE_PENDING_MASK: u32 = 0x200;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30970
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_FRAME_UPDATE_PENDING__SHIFT: u32 = 0xd;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31002
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_FRAME_UPDATE_PENDING_MASK: u32 = 0x2000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30974
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_FRAME_UPDATE_PENDING__SHIFT: u32 = 0x11;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31006
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_FRAME_UPDATE_PENDING_MASK: u32 = 0x20000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30976
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_IMMEDIATE_UPDATE_PENDING__SHIFT: u32 = 0x13;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31008
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_IMMEDIATE_UPDATE_PENDING_MASK: u32 = 0x80000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30978
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_FRAME_UPDATE_PENDING__SHIFT: u32 = 0x15;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31010
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_FRAME_UPDATE_PENDING_MASK: u32 = 0x200000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30982
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_FRAME_UPDATE_PENDING__SHIFT: u32 = 0x19;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31014
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_FRAME_UPDATE_PENDING_MASK: u32 = 0x2000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30986
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_FRAME_UPDATE_PENDING__SHIFT: u32 = 0x1d;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31018
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_FRAME_UPDATE_PENDING_MASK: u32 = 0x20000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30957
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_FRAME_UPDATE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30989
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_FRAME_UPDATE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30961
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_FRAME_UPDATE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30993
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_FRAME_UPDATE_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30965
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_FRAME_UPDATE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30997
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_FRAME_UPDATE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30969
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_FRAME_UPDATE__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31001
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_FRAME_UPDATE_MASK: u32 = 0x1000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30973
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_FRAME_UPDATE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31005
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_FRAME_UPDATE_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30959
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_IMMEDIATE_UPDATE__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30991
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_IMMEDIATE_UPDATE_MASK: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30963
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_IMMEDIATE_UPDATE__SHIFT: u32 = 0x6;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30995
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_IMMEDIATE_UPDATE_MASK: u32 = 0x40;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30967
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_IMMEDIATE_UPDATE__SHIFT: u32 = 0xa;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30999
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_IMMEDIATE_UPDATE_MASK: u32 = 0x400;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30971
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_IMMEDIATE_UPDATE__SHIFT: u32 = 0xe;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31003
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_IMMEDIATE_UPDATE_MASK: u32 = 0x4000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30975
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_IMMEDIATE_UPDATE__SHIFT: u32 = 0x12;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31007
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_IMMEDIATE_UPDATE_MASK: u32 = 0x40000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30979
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_IMMEDIATE_UPDATE__SHIFT: u32 = 0x16;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31011
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_IMMEDIATE_UPDATE_MASK: u32 = 0x400000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30983
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_IMMEDIATE_UPDATE__SHIFT: u32 = 0x1a;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31015
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_IMMEDIATE_UPDATE_MASK: u32 = 0x4000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30987
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_IMMEDIATE_UPDATE__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31019
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_IMMEDIATE_UPDATE_MASK: u32 = 0x40000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30977
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_FRAME_UPDATE__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31009
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_FRAME_UPDATE_MASK: u32 = 0x100000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30981
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_FRAME_UPDATE__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31013
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_FRAME_UPDATE_MASK: u32 = 0x1000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30985
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_FRAME_UPDATE__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31017
+pub const DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_FRAME_UPDATE_MASK: u32 = 0x10000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31239
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP4_ENABLE__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31253
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP4_ENABLE_MASK: u32 = 0x1000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31240
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP5_ENABLE__SHIFT: u32 = 0x19;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31254
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP5_ENABLE_MASK: u32 = 0x2000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31241
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP6_ENABLE__SHIFT: u32 = 0x1a;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31255
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP6_ENABLE_MASK: u32 = 0x4000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31242
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP7_ENABLE__SHIFT: u32 = 0x1b;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31256
+pub const DP0_DP_SEC_CNTL__DP_SEC_GSP7_ENABLE_MASK: u32 = 0x8000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31500
+pub const DP0_DP_SEC_CNTL2__DP_SEC_GSP7_PPS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31529
+pub const DP0_DP_SEC_CNTL2__DP_SEC_GSP7_PPS_MASK: u32 = 0x10000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31496
+pub const DP0_DP_SEC_CNTL2__DP_SEC_GSP7_SEND__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31525
+pub const DP0_DP_SEC_CNTL2__DP_SEC_GSP7_SEND_MASK: u32 = 0x1000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31546
+pub const DP0_DP_SEC_CNTL6__DP_SEC_GSP7_LINE_NUM__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31547
+pub const DP0_DP_SEC_CNTL6__DP_SEC_GSP7_LINE_NUM_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31570
+pub const DP0_DP_DB_CNTL__DP_DB_DISABLE__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31575
+pub const DP0_DP_DB_CNTL__DP_DB_DISABLE_MASK: u32 = 0x1000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31039
+pub const DP0_DP_MSA_COLORIMETRY__DP_MSA_MISC0__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31040
+pub const DP0_DP_MSA_COLORIMETRY__DP_MSA_MISC0_MASK: u32 = 0xff000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31412
+pub const DP0_DP_MSA_TIMING_PARAM1__DP_MSA_HTOTAL__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31414
+pub const DP0_DP_MSA_TIMING_PARAM1__DP_MSA_HTOTAL_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31411
+pub const DP0_DP_MSA_TIMING_PARAM1__DP_MSA_VTOTAL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31413
+pub const DP0_DP_MSA_TIMING_PARAM1__DP_MSA_VTOTAL_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31417
+pub const DP0_DP_MSA_TIMING_PARAM2__DP_MSA_HSTART__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31419
+pub const DP0_DP_MSA_TIMING_PARAM2__DP_MSA_HSTART_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31416
+pub const DP0_DP_MSA_TIMING_PARAM2__DP_MSA_VSTART__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31418
+pub const DP0_DP_MSA_TIMING_PARAM2__DP_MSA_VSTART_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31423
+pub const DP0_DP_MSA_TIMING_PARAM3__DP_MSA_HSYNCWIDTH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31427
+pub const DP0_DP_MSA_TIMING_PARAM3__DP_MSA_HSYNCWIDTH_MASK: u32 = 0x7fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31424
+pub const DP0_DP_MSA_TIMING_PARAM3__DP_MSA_HSYNCPOLARITY__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31428
+pub const DP0_DP_MSA_TIMING_PARAM3__DP_MSA_HSYNCPOLARITY_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31421
+pub const DP0_DP_MSA_TIMING_PARAM3__DP_MSA_VSYNCWIDTH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31425
+pub const DP0_DP_MSA_TIMING_PARAM3__DP_MSA_VSYNCWIDTH_MASK: u32 = 0x7fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31422
+pub const DP0_DP_MSA_TIMING_PARAM3__DP_MSA_VSYNCPOLARITY__SHIFT: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31426
+pub const DP0_DP_MSA_TIMING_PARAM3__DP_MSA_VSYNCPOLARITY_MASK: u32 = 0x8000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31431
+pub const DP0_DP_MSA_TIMING_PARAM4__DP_MSA_HWIDTH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31433
+pub const DP0_DP_MSA_TIMING_PARAM4__DP_MSA_HWIDTH_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31430
+pub const DP0_DP_MSA_TIMING_PARAM4__DP_MSA_VHEIGHT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31432
+pub const DP0_DP_MSA_TIMING_PARAM4__DP_MSA_VHEIGHT_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30531
+pub const DIG0_HDMI_DB_CONTROL__HDMI_DB_DISABLE__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:30536
+pub const DIG0_HDMI_DB_CONTROL__HDMI_DB_DISABLE_MASK: u32 = 0x1000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31080
+pub const DP0_DP_VID_TIMING__DP_VID_N_MUL__SHIFT: u32 = 0xa;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31085
+pub const DP0_DP_VID_TIMING__DP_VID_N_MUL_MASK: u32 = 0xc00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37166
+pub const DIG0_DIG_FE_CNTL__DIG_SOURCE_SELECT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37173
+pub const DIG0_DIG_FE_CNTL__DIG_SOURCE_SELECT_MASK: u32 = 0x7;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37191
+pub const DIG0_DIG_CLOCK_PATTERN__DIG_CLOCK_PATTERN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37192
+pub const DIG0_DIG_CLOCK_PATTERN__DIG_CLOCK_PATTERN_MASK: u32 = 0x3ff;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37319
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC0_CONT__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37325
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC0_CONT_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37318
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC0_SEND__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37324
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC0_SEND_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37321
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC1_CONT__SHIFT: u32 = 0x5;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37327
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC1_CONT_MASK: u32 = 0x20;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37320
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC1_SEND__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:37326
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC1_SEND_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39473
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC2_CONT__SHIFT: u32 = 0x9;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39497
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC2_CONT_MASK: u32 = 0x200;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39472
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC2_SEND__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39496
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC2_SEND_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39476
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC3_CONT__SHIFT: u32 = 0xd;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39500
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC3_CONT_MASK: u32 = 0x2000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39475
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC3_SEND__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39499
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC3_SEND_MASK: u32 = 0x1000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39479
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC4_CONT__SHIFT: u32 = 0x11;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39503
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC4_CONT_MASK: u32 = 0x20000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39478
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC4_SEND__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39502
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC4_SEND_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39482
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC5_CONT__SHIFT: u32 = 0x15;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39506
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC5_CONT_MASK: u32 = 0x200000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39481
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC5_SEND__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39505
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC5_SEND_MASK: u32 = 0x100000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39485
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC6_CONT__SHIFT: u32 = 0x19;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39509
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC6_CONT_MASK: u32 = 0x2000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39484
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC6_SEND__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39508
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC6_SEND_MASK: u32 = 0x1000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39488
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC7_CONT__SHIFT: u32 = 0x1d;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39512
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC7_CONT_MASK: u32 = 0x20000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39487
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC7_SEND__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39511
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC7_SEND_MASK: u32 = 0x10000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39757
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL1__HDMI_GENERIC0_LINE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39759
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL1__HDMI_GENERIC0_LINE_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39758
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL1__HDMI_GENERIC1_LINE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39760
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL1__HDMI_GENERIC1_LINE_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39618
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL2__HDMI_GENERIC2_LINE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39620
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL2__HDMI_GENERIC2_LINE_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39619
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL2__HDMI_GENERIC3_LINE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39621
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL2__HDMI_GENERIC3_LINE_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39623
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL3__HDMI_GENERIC4_LINE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39625
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL3__HDMI_GENERIC4_LINE_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39624
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL3__HDMI_GENERIC5_LINE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39626
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL3__HDMI_GENERIC5_LINE_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39382
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL4__HDMI_GENERIC6_LINE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39384
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL4__HDMI_GENERIC6_LINE_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39383
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL4__HDMI_GENERIC7_LINE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39385
+pub const DIG0_HDMI_GENERIC_PACKET_CONTROL4__HDMI_GENERIC7_LINE_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40654
+pub const DP0_DP_DSC_CNTL__DP_DSC_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40656
+pub const DP0_DP_DSC_CNTL__DP_DSC_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40655
+pub const DP0_DP_DSC_CNTL__DP_DSC_SLICE_WIDTH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40657
+pub const DP0_DP_DSC_CNTL__DP_DSC_SLICE_WIDTH_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40812
+pub const DP0_DP_DSC_BYTES_PER_PIXEL__DP_DSC_BYTES_PER_PIXEL__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40813
+pub const DP0_DP_DSC_BYTES_PER_PIXEL__DP_DSC_BYTES_PER_PIXEL_MASK: u32 = 0x7fffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40792
+pub const DP0_DP_MSA_VBID_MISC__DP_VBID6_LINE_REFERENCE__SHIFT: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40800
+pub const DP0_DP_MSA_VBID_MISC__DP_VBID6_LINE_REFERENCE_MASK: u32 = 0x8000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40793
+pub const DP0_DP_MSA_VBID_MISC__DP_VBID6_LINE_NUM__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40801
+pub const DP0_DP_MSA_VBID_MISC__DP_VBID6_LINE_NUM_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39646
+pub const DIG0_DME_CONTROL__METADATA_ENGINE_EN__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39653
+pub const DIG0_DME_CONTROL__METADATA_ENGINE_EN_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39645
+pub const DIG0_DME_CONTROL__METADATA_HUBP_REQUESTOR_ID__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39652
+pub const DIG0_DME_CONTROL__METADATA_HUBP_REQUESTOR_ID_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39647
+pub const DIG0_DME_CONTROL__METADATA_STREAM_TYPE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39654
+pub const DIG0_DME_CONTROL__METADATA_STREAM_TYPE_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40803
+pub const DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_ENABLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40807
+pub const DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_ENABLE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40804
+pub const DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_LINE_REFERENCE__SHIFT: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40808
+pub const DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_LINE_REFERENCE_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40806
+pub const DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_LINE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40810
+pub const DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_LINE_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39373
+pub const DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_ENABLE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39377
+pub const DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_ENABLE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39374
+pub const DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_LINE_REFERENCE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39378
+pub const DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_LINE_REFERENCE_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39376
+pub const DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_LINE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39380
+pub const DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_LINE_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39302
+pub const DIG0_DIG_FE_CNTL__DOLBY_VISION_EN__SHIFT: u32 = 0x12;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:39313
+pub const DIG0_DIG_FE_CNTL__DOLBY_VISION_EN_MASK: u32 = 0x40000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31034
+pub const DP0_DP_PIXEL_FORMAT__DP_PIXEL_COMBINE__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31037
+pub const DP0_DP_PIXEL_FORMAT__DP_PIXEL_COMBINE_MASK: u32 = 0x30000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40437
+pub const DP0_DP_SEC_CNTL1__DP_SEC_GSP5_LINE_REFERENCE__SHIFT: u32 = 0xd;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40452
+pub const DP0_DP_SEC_CNTL1__DP_SEC_GSP5_LINE_REFERENCE_MASK: u32 = 0x2000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31541
+pub const DP0_DP_SEC_CNTL5__DP_SEC_GSP5_LINE_NUM__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:31543
+pub const DP0_DP_SEC_CNTL5__DP_SEC_GSP5_LINE_NUM_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40472
+pub const DP0_DP_SEC_FRAMING4__DP_SST_SDP_SPLITTING__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:40477
+pub const DP0_DP_SEC_FRAMING4__DP_SST_SDP_SPLITTING_MASK: u32 = 0x1;

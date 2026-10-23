@@ -10142,3 +10142,746 @@ DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN__SHIFT @ ../display/dc/resource
 DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
 DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
 DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+
+# DC se: dcn10_stream_enc_registers absolute offsets per pipe instance
+# (SE_DCN2_REG_LIST({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+SE0_AFMT_CNTL = BASE(mmDIG0_AFMT_CNTL_BASE_IDX) + mmDIG0_AFMT_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_GENERIC_0 = BASE(mmDIG0_AFMT_GENERIC_0_BASE_IDX) + mmDIG0_AFMT_GENERIC_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_GENERIC_1 = BASE(mmDIG0_AFMT_GENERIC_1_BASE_IDX) + mmDIG0_AFMT_GENERIC_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_GENERIC_2 = BASE(mmDIG0_AFMT_GENERIC_2_BASE_IDX) + mmDIG0_AFMT_GENERIC_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_GENERIC_3 = BASE(mmDIG0_AFMT_GENERIC_3_BASE_IDX) + mmDIG0_AFMT_GENERIC_3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_GENERIC_4 = BASE(mmDIG0_AFMT_GENERIC_4_BASE_IDX) + mmDIG0_AFMT_GENERIC_4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_GENERIC_5 = BASE(mmDIG0_AFMT_GENERIC_5_BASE_IDX) + mmDIG0_AFMT_GENERIC_5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_GENERIC_6 = BASE(mmDIG0_AFMT_GENERIC_6_BASE_IDX) + mmDIG0_AFMT_GENERIC_6 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_GENERIC_7 = BASE(mmDIG0_AFMT_GENERIC_7_BASE_IDX) + mmDIG0_AFMT_GENERIC_7 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_GENERIC_HDR = BASE(mmDIG0_AFMT_GENERIC_HDR_BASE_IDX) + mmDIG0_AFMT_GENERIC_HDR @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_INFOFRAME_CONTROL0 = BASE(mmDIG0_AFMT_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG0_AFMT_INFOFRAME_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_VBI_PACKET_CONTROL = BASE(mmDIG0_AFMT_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG0_AFMT_VBI_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_VBI_PACKET_CONTROL1 = BASE(mmDIG0_AFMT_VBI_PACKET_CONTROL1_BASE_IDX) + mmDIG0_AFMT_VBI_PACKET_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_AUDIO_PACKET_CONTROL = BASE(mmDIG0_AFMT_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG0_AFMT_AUDIO_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_AUDIO_PACKET_CONTROL2 = BASE(mmDIG0_AFMT_AUDIO_PACKET_CONTROL2_BASE_IDX) + mmDIG0_AFMT_AUDIO_PACKET_CONTROL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_AUDIO_SRC_CONTROL = BASE(mmDIG0_AFMT_AUDIO_SRC_CONTROL_BASE_IDX) + mmDIG0_AFMT_AUDIO_SRC_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_60958_0 = BASE(mmDIG0_AFMT_60958_0_BASE_IDX) + mmDIG0_AFMT_60958_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_60958_1 = BASE(mmDIG0_AFMT_60958_1_BASE_IDX) + mmDIG0_AFMT_60958_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_AFMT_60958_2 = BASE(mmDIG0_AFMT_60958_2_BASE_IDX) + mmDIG0_AFMT_60958_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DIG_FE_CNTL = BASE(mmDIG0_DIG_FE_CNTL_BASE_IDX) + mmDIG0_DIG_FE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DIG_FIFO_STATUS = BASE(mmDIG0_DIG_FIFO_STATUS_BASE_IDX) + mmDIG0_DIG_FIFO_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_CONTROL = BASE(mmDIG0_HDMI_CONTROL_BASE_IDX) + mmDIG0_HDMI_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_DB_CONTROL = BASE(mmDIG0_HDMI_DB_CONTROL_BASE_IDX) + mmDIG0_HDMI_DB_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_GC = BASE(mmDIG0_HDMI_GC_BASE_IDX) + mmDIG0_HDMI_GC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_GENERIC_PACKET_CONTROL0 = BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL0_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_GENERIC_PACKET_CONTROL1 = BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL1_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_GENERIC_PACKET_CONTROL2 = BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL2_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_GENERIC_PACKET_CONTROL3 = BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL3_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_INFOFRAME_CONTROL0 = BASE(mmDIG0_HDMI_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG0_HDMI_INFOFRAME_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_INFOFRAME_CONTROL1 = BASE(mmDIG0_HDMI_INFOFRAME_CONTROL1_BASE_IDX) + mmDIG0_HDMI_INFOFRAME_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_VBI_PACKET_CONTROL = BASE(mmDIG0_HDMI_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG0_HDMI_VBI_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_AUDIO_PACKET_CONTROL = BASE(mmDIG0_HDMI_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG0_HDMI_AUDIO_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_ACR_PACKET_CONTROL = BASE(mmDIG0_HDMI_ACR_PACKET_CONTROL_BASE_IDX) + mmDIG0_HDMI_ACR_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_ACR_32_0 = BASE(mmDIG0_HDMI_ACR_32_0_BASE_IDX) + mmDIG0_HDMI_ACR_32_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_ACR_32_1 = BASE(mmDIG0_HDMI_ACR_32_1_BASE_IDX) + mmDIG0_HDMI_ACR_32_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_ACR_44_0 = BASE(mmDIG0_HDMI_ACR_44_0_BASE_IDX) + mmDIG0_HDMI_ACR_44_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_ACR_44_1 = BASE(mmDIG0_HDMI_ACR_44_1_BASE_IDX) + mmDIG0_HDMI_ACR_44_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_ACR_48_0 = BASE(mmDIG0_HDMI_ACR_48_0_BASE_IDX) + mmDIG0_HDMI_ACR_48_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_ACR_48_1 = BASE(mmDIG0_HDMI_ACR_48_1_BASE_IDX) + mmDIG0_HDMI_ACR_48_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_DB_CNTL = BASE(mmDP0_DP_DB_CNTL_BASE_IDX) + mmDP0_DP_DB_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_MSA_MISC = BASE(mmDP0_DP_MSA_MISC_BASE_IDX) + mmDP0_DP_MSA_MISC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_MSA_VBID_MISC = BASE(mmDP0_DP_MSA_VBID_MISC_BASE_IDX) + mmDP0_DP_MSA_VBID_MISC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_MSA_COLORIMETRY = BASE(mmDP0_DP_MSA_COLORIMETRY_BASE_IDX) + mmDP0_DP_MSA_COLORIMETRY @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_MSA_TIMING_PARAM1 = BASE(mmDP0_DP_MSA_TIMING_PARAM1_BASE_IDX) + mmDP0_DP_MSA_TIMING_PARAM1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_MSA_TIMING_PARAM2 = BASE(mmDP0_DP_MSA_TIMING_PARAM2_BASE_IDX) + mmDP0_DP_MSA_TIMING_PARAM2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_MSA_TIMING_PARAM3 = BASE(mmDP0_DP_MSA_TIMING_PARAM3_BASE_IDX) + mmDP0_DP_MSA_TIMING_PARAM3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_MSA_TIMING_PARAM4 = BASE(mmDP0_DP_MSA_TIMING_PARAM4_BASE_IDX) + mmDP0_DP_MSA_TIMING_PARAM4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_MSE_RATE_CNTL = BASE(mmDP0_DP_MSE_RATE_CNTL_BASE_IDX) + mmDP0_DP_MSE_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_MSE_RATE_UPDATE = BASE(mmDP0_DP_MSE_RATE_UPDATE_BASE_IDX) + mmDP0_DP_MSE_RATE_UPDATE @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_PIXEL_FORMAT = BASE(mmDP0_DP_PIXEL_FORMAT_BASE_IDX) + mmDP0_DP_PIXEL_FORMAT @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_SEC_CNTL = BASE(mmDP0_DP_SEC_CNTL_BASE_IDX) + mmDP0_DP_SEC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_SEC_CNTL1 = BASE(mmDP0_DP_SEC_CNTL1_BASE_IDX) + mmDP0_DP_SEC_CNTL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_SEC_CNTL2 = BASE(mmDP0_DP_SEC_CNTL2_BASE_IDX) + mmDP0_DP_SEC_CNTL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_SEC_CNTL5 = BASE(mmDP0_DP_SEC_CNTL5_BASE_IDX) + mmDP0_DP_SEC_CNTL5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_SEC_CNTL6 = BASE(mmDP0_DP_SEC_CNTL6_BASE_IDX) + mmDP0_DP_SEC_CNTL6 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_STEER_FIFO = BASE(mmDP0_DP_STEER_FIFO_BASE_IDX) + mmDP0_DP_STEER_FIFO @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_VID_M = BASE(mmDP0_DP_VID_M_BASE_IDX) + mmDP0_DP_VID_M @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_VID_N = BASE(mmDP0_DP_VID_N_BASE_IDX) + mmDP0_DP_VID_N @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_VID_STREAM_CNTL = BASE(mmDP0_DP_VID_STREAM_CNTL_BASE_IDX) + mmDP0_DP_VID_STREAM_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_VID_TIMING = BASE(mmDP0_DP_VID_TIMING_BASE_IDX) + mmDP0_DP_VID_TIMING @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_SEC_AUD_N = BASE(mmDP0_DP_SEC_AUD_N_BASE_IDX) + mmDP0_DP_SEC_AUD_N @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_SEC_AUD_N_READBACK = BASE(mmDP0_DP_SEC_AUD_N_READBACK_BASE_IDX) + mmDP0_DP_SEC_AUD_N_READBACK @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_SEC_AUD_M_READBACK = BASE(mmDP0_DP_SEC_AUD_M_READBACK_BASE_IDX) + mmDP0_DP_SEC_AUD_M_READBACK @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_SEC_TIMESTAMP = BASE(mmDP0_DP_SEC_TIMESTAMP_BASE_IDX) + mmDP0_DP_SEC_TIMESTAMP @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DIG_CLOCK_PATTERN = BASE(mmDIG0_DIG_CLOCK_PATTERN_BASE_IDX) + mmDIG0_DIG_CLOCK_PATTERN @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_GENERIC_PACKET_CONTROL4 = BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL4_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_GENERIC_PACKET_CONTROL5 = BASE(mmDIG0_HDMI_GENERIC_PACKET_CONTROL5_BASE_IDX) + mmDIG0_HDMI_GENERIC_PACKET_CONTROL5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_DSC_CNTL = BASE(mmDP0_DP_DSC_CNTL_BASE_IDX) + mmDP0_DP_DSC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_DSC_BYTES_PER_PIXEL = BASE(mmDP0_DP_DSC_BYTES_PER_PIXEL_BASE_IDX) + mmDP0_DP_DSC_BYTES_PER_PIXEL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DME_CONTROL = BASE(mmDIG0_DME_CONTROL_BASE_IDX) + mmDIG0_DME_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_SEC_METADATA_TRANSMISSION = BASE(mmDP0_DP_SEC_METADATA_TRANSMISSION_BASE_IDX) + mmDP0_DP_SEC_METADATA_TRANSMISSION @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_HDMI_METADATA_PACKET_CONTROL = BASE(mmDIG0_HDMI_METADATA_PACKET_CONTROL_BASE_IDX) + mmDIG0_HDMI_METADATA_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE0_DP_SEC_FRAMING4 = BASE(mmDP0_DP_SEC_FRAMING4_BASE_IDX) + mmDP0_DP_SEC_FRAMING4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_CNTL = BASE(mmDIG1_AFMT_CNTL_BASE_IDX) + mmDIG1_AFMT_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_GENERIC_0 = BASE(mmDIG1_AFMT_GENERIC_0_BASE_IDX) + mmDIG1_AFMT_GENERIC_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_GENERIC_1 = BASE(mmDIG1_AFMT_GENERIC_1_BASE_IDX) + mmDIG1_AFMT_GENERIC_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_GENERIC_2 = BASE(mmDIG1_AFMT_GENERIC_2_BASE_IDX) + mmDIG1_AFMT_GENERIC_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_GENERIC_3 = BASE(mmDIG1_AFMT_GENERIC_3_BASE_IDX) + mmDIG1_AFMT_GENERIC_3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_GENERIC_4 = BASE(mmDIG1_AFMT_GENERIC_4_BASE_IDX) + mmDIG1_AFMT_GENERIC_4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_GENERIC_5 = BASE(mmDIG1_AFMT_GENERIC_5_BASE_IDX) + mmDIG1_AFMT_GENERIC_5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_GENERIC_6 = BASE(mmDIG1_AFMT_GENERIC_6_BASE_IDX) + mmDIG1_AFMT_GENERIC_6 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_GENERIC_7 = BASE(mmDIG1_AFMT_GENERIC_7_BASE_IDX) + mmDIG1_AFMT_GENERIC_7 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_GENERIC_HDR = BASE(mmDIG1_AFMT_GENERIC_HDR_BASE_IDX) + mmDIG1_AFMT_GENERIC_HDR @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_INFOFRAME_CONTROL0 = BASE(mmDIG1_AFMT_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG1_AFMT_INFOFRAME_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_VBI_PACKET_CONTROL = BASE(mmDIG1_AFMT_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG1_AFMT_VBI_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_VBI_PACKET_CONTROL1 = BASE(mmDIG1_AFMT_VBI_PACKET_CONTROL1_BASE_IDX) + mmDIG1_AFMT_VBI_PACKET_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_AUDIO_PACKET_CONTROL = BASE(mmDIG1_AFMT_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG1_AFMT_AUDIO_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_AUDIO_PACKET_CONTROL2 = BASE(mmDIG1_AFMT_AUDIO_PACKET_CONTROL2_BASE_IDX) + mmDIG1_AFMT_AUDIO_PACKET_CONTROL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_AUDIO_SRC_CONTROL = BASE(mmDIG1_AFMT_AUDIO_SRC_CONTROL_BASE_IDX) + mmDIG1_AFMT_AUDIO_SRC_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_60958_0 = BASE(mmDIG1_AFMT_60958_0_BASE_IDX) + mmDIG1_AFMT_60958_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_60958_1 = BASE(mmDIG1_AFMT_60958_1_BASE_IDX) + mmDIG1_AFMT_60958_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_AFMT_60958_2 = BASE(mmDIG1_AFMT_60958_2_BASE_IDX) + mmDIG1_AFMT_60958_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DIG_FE_CNTL = BASE(mmDIG1_DIG_FE_CNTL_BASE_IDX) + mmDIG1_DIG_FE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DIG_FIFO_STATUS = BASE(mmDIG1_DIG_FIFO_STATUS_BASE_IDX) + mmDIG1_DIG_FIFO_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_CONTROL = BASE(mmDIG1_HDMI_CONTROL_BASE_IDX) + mmDIG1_HDMI_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_DB_CONTROL = BASE(mmDIG1_HDMI_DB_CONTROL_BASE_IDX) + mmDIG1_HDMI_DB_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_GC = BASE(mmDIG1_HDMI_GC_BASE_IDX) + mmDIG1_HDMI_GC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_GENERIC_PACKET_CONTROL0 = BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL0_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_GENERIC_PACKET_CONTROL1 = BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL1_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_GENERIC_PACKET_CONTROL2 = BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL2_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_GENERIC_PACKET_CONTROL3 = BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL3_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_INFOFRAME_CONTROL0 = BASE(mmDIG1_HDMI_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG1_HDMI_INFOFRAME_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_INFOFRAME_CONTROL1 = BASE(mmDIG1_HDMI_INFOFRAME_CONTROL1_BASE_IDX) + mmDIG1_HDMI_INFOFRAME_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_VBI_PACKET_CONTROL = BASE(mmDIG1_HDMI_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG1_HDMI_VBI_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_AUDIO_PACKET_CONTROL = BASE(mmDIG1_HDMI_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG1_HDMI_AUDIO_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_ACR_PACKET_CONTROL = BASE(mmDIG1_HDMI_ACR_PACKET_CONTROL_BASE_IDX) + mmDIG1_HDMI_ACR_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_ACR_32_0 = BASE(mmDIG1_HDMI_ACR_32_0_BASE_IDX) + mmDIG1_HDMI_ACR_32_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_ACR_32_1 = BASE(mmDIG1_HDMI_ACR_32_1_BASE_IDX) + mmDIG1_HDMI_ACR_32_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_ACR_44_0 = BASE(mmDIG1_HDMI_ACR_44_0_BASE_IDX) + mmDIG1_HDMI_ACR_44_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_ACR_44_1 = BASE(mmDIG1_HDMI_ACR_44_1_BASE_IDX) + mmDIG1_HDMI_ACR_44_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_ACR_48_0 = BASE(mmDIG1_HDMI_ACR_48_0_BASE_IDX) + mmDIG1_HDMI_ACR_48_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_ACR_48_1 = BASE(mmDIG1_HDMI_ACR_48_1_BASE_IDX) + mmDIG1_HDMI_ACR_48_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_DB_CNTL = BASE(mmDP1_DP_DB_CNTL_BASE_IDX) + mmDP1_DP_DB_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_MSA_MISC = BASE(mmDP1_DP_MSA_MISC_BASE_IDX) + mmDP1_DP_MSA_MISC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_MSA_VBID_MISC = BASE(mmDP1_DP_MSA_VBID_MISC_BASE_IDX) + mmDP1_DP_MSA_VBID_MISC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_MSA_COLORIMETRY = BASE(mmDP1_DP_MSA_COLORIMETRY_BASE_IDX) + mmDP1_DP_MSA_COLORIMETRY @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_MSA_TIMING_PARAM1 = BASE(mmDP1_DP_MSA_TIMING_PARAM1_BASE_IDX) + mmDP1_DP_MSA_TIMING_PARAM1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_MSA_TIMING_PARAM2 = BASE(mmDP1_DP_MSA_TIMING_PARAM2_BASE_IDX) + mmDP1_DP_MSA_TIMING_PARAM2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_MSA_TIMING_PARAM3 = BASE(mmDP1_DP_MSA_TIMING_PARAM3_BASE_IDX) + mmDP1_DP_MSA_TIMING_PARAM3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_MSA_TIMING_PARAM4 = BASE(mmDP1_DP_MSA_TIMING_PARAM4_BASE_IDX) + mmDP1_DP_MSA_TIMING_PARAM4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_MSE_RATE_CNTL = BASE(mmDP1_DP_MSE_RATE_CNTL_BASE_IDX) + mmDP1_DP_MSE_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_MSE_RATE_UPDATE = BASE(mmDP1_DP_MSE_RATE_UPDATE_BASE_IDX) + mmDP1_DP_MSE_RATE_UPDATE @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_PIXEL_FORMAT = BASE(mmDP1_DP_PIXEL_FORMAT_BASE_IDX) + mmDP1_DP_PIXEL_FORMAT @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_SEC_CNTL = BASE(mmDP1_DP_SEC_CNTL_BASE_IDX) + mmDP1_DP_SEC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_SEC_CNTL1 = BASE(mmDP1_DP_SEC_CNTL1_BASE_IDX) + mmDP1_DP_SEC_CNTL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_SEC_CNTL2 = BASE(mmDP1_DP_SEC_CNTL2_BASE_IDX) + mmDP1_DP_SEC_CNTL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_SEC_CNTL5 = BASE(mmDP1_DP_SEC_CNTL5_BASE_IDX) + mmDP1_DP_SEC_CNTL5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_SEC_CNTL6 = BASE(mmDP1_DP_SEC_CNTL6_BASE_IDX) + mmDP1_DP_SEC_CNTL6 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_STEER_FIFO = BASE(mmDP1_DP_STEER_FIFO_BASE_IDX) + mmDP1_DP_STEER_FIFO @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_VID_M = BASE(mmDP1_DP_VID_M_BASE_IDX) + mmDP1_DP_VID_M @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_VID_N = BASE(mmDP1_DP_VID_N_BASE_IDX) + mmDP1_DP_VID_N @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_VID_STREAM_CNTL = BASE(mmDP1_DP_VID_STREAM_CNTL_BASE_IDX) + mmDP1_DP_VID_STREAM_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_VID_TIMING = BASE(mmDP1_DP_VID_TIMING_BASE_IDX) + mmDP1_DP_VID_TIMING @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_SEC_AUD_N = BASE(mmDP1_DP_SEC_AUD_N_BASE_IDX) + mmDP1_DP_SEC_AUD_N @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_SEC_AUD_N_READBACK = BASE(mmDP1_DP_SEC_AUD_N_READBACK_BASE_IDX) + mmDP1_DP_SEC_AUD_N_READBACK @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_SEC_AUD_M_READBACK = BASE(mmDP1_DP_SEC_AUD_M_READBACK_BASE_IDX) + mmDP1_DP_SEC_AUD_M_READBACK @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_SEC_TIMESTAMP = BASE(mmDP1_DP_SEC_TIMESTAMP_BASE_IDX) + mmDP1_DP_SEC_TIMESTAMP @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DIG_CLOCK_PATTERN = BASE(mmDIG1_DIG_CLOCK_PATTERN_BASE_IDX) + mmDIG1_DIG_CLOCK_PATTERN @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_GENERIC_PACKET_CONTROL4 = BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL4_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_GENERIC_PACKET_CONTROL5 = BASE(mmDIG1_HDMI_GENERIC_PACKET_CONTROL5_BASE_IDX) + mmDIG1_HDMI_GENERIC_PACKET_CONTROL5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_DSC_CNTL = BASE(mmDP1_DP_DSC_CNTL_BASE_IDX) + mmDP1_DP_DSC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_DSC_BYTES_PER_PIXEL = BASE(mmDP1_DP_DSC_BYTES_PER_PIXEL_BASE_IDX) + mmDP1_DP_DSC_BYTES_PER_PIXEL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DME_CONTROL = BASE(mmDIG1_DME_CONTROL_BASE_IDX) + mmDIG1_DME_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_SEC_METADATA_TRANSMISSION = BASE(mmDP1_DP_SEC_METADATA_TRANSMISSION_BASE_IDX) + mmDP1_DP_SEC_METADATA_TRANSMISSION @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_HDMI_METADATA_PACKET_CONTROL = BASE(mmDIG1_HDMI_METADATA_PACKET_CONTROL_BASE_IDX) + mmDIG1_HDMI_METADATA_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE1_DP_SEC_FRAMING4 = BASE(mmDP1_DP_SEC_FRAMING4_BASE_IDX) + mmDP1_DP_SEC_FRAMING4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_CNTL = BASE(mmDIG2_AFMT_CNTL_BASE_IDX) + mmDIG2_AFMT_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_GENERIC_0 = BASE(mmDIG2_AFMT_GENERIC_0_BASE_IDX) + mmDIG2_AFMT_GENERIC_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_GENERIC_1 = BASE(mmDIG2_AFMT_GENERIC_1_BASE_IDX) + mmDIG2_AFMT_GENERIC_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_GENERIC_2 = BASE(mmDIG2_AFMT_GENERIC_2_BASE_IDX) + mmDIG2_AFMT_GENERIC_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_GENERIC_3 = BASE(mmDIG2_AFMT_GENERIC_3_BASE_IDX) + mmDIG2_AFMT_GENERIC_3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_GENERIC_4 = BASE(mmDIG2_AFMT_GENERIC_4_BASE_IDX) + mmDIG2_AFMT_GENERIC_4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_GENERIC_5 = BASE(mmDIG2_AFMT_GENERIC_5_BASE_IDX) + mmDIG2_AFMT_GENERIC_5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_GENERIC_6 = BASE(mmDIG2_AFMT_GENERIC_6_BASE_IDX) + mmDIG2_AFMT_GENERIC_6 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_GENERIC_7 = BASE(mmDIG2_AFMT_GENERIC_7_BASE_IDX) + mmDIG2_AFMT_GENERIC_7 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_GENERIC_HDR = BASE(mmDIG2_AFMT_GENERIC_HDR_BASE_IDX) + mmDIG2_AFMT_GENERIC_HDR @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_INFOFRAME_CONTROL0 = BASE(mmDIG2_AFMT_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG2_AFMT_INFOFRAME_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_VBI_PACKET_CONTROL = BASE(mmDIG2_AFMT_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG2_AFMT_VBI_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_VBI_PACKET_CONTROL1 = BASE(mmDIG2_AFMT_VBI_PACKET_CONTROL1_BASE_IDX) + mmDIG2_AFMT_VBI_PACKET_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_AUDIO_PACKET_CONTROL = BASE(mmDIG2_AFMT_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG2_AFMT_AUDIO_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_AUDIO_PACKET_CONTROL2 = BASE(mmDIG2_AFMT_AUDIO_PACKET_CONTROL2_BASE_IDX) + mmDIG2_AFMT_AUDIO_PACKET_CONTROL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_AUDIO_SRC_CONTROL = BASE(mmDIG2_AFMT_AUDIO_SRC_CONTROL_BASE_IDX) + mmDIG2_AFMT_AUDIO_SRC_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_60958_0 = BASE(mmDIG2_AFMT_60958_0_BASE_IDX) + mmDIG2_AFMT_60958_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_60958_1 = BASE(mmDIG2_AFMT_60958_1_BASE_IDX) + mmDIG2_AFMT_60958_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_AFMT_60958_2 = BASE(mmDIG2_AFMT_60958_2_BASE_IDX) + mmDIG2_AFMT_60958_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DIG_FE_CNTL = BASE(mmDIG2_DIG_FE_CNTL_BASE_IDX) + mmDIG2_DIG_FE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DIG_FIFO_STATUS = BASE(mmDIG2_DIG_FIFO_STATUS_BASE_IDX) + mmDIG2_DIG_FIFO_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_CONTROL = BASE(mmDIG2_HDMI_CONTROL_BASE_IDX) + mmDIG2_HDMI_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_DB_CONTROL = BASE(mmDIG2_HDMI_DB_CONTROL_BASE_IDX) + mmDIG2_HDMI_DB_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_GC = BASE(mmDIG2_HDMI_GC_BASE_IDX) + mmDIG2_HDMI_GC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_GENERIC_PACKET_CONTROL0 = BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL0_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_GENERIC_PACKET_CONTROL1 = BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL1_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_GENERIC_PACKET_CONTROL2 = BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL2_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_GENERIC_PACKET_CONTROL3 = BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL3_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_INFOFRAME_CONTROL0 = BASE(mmDIG2_HDMI_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG2_HDMI_INFOFRAME_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_INFOFRAME_CONTROL1 = BASE(mmDIG2_HDMI_INFOFRAME_CONTROL1_BASE_IDX) + mmDIG2_HDMI_INFOFRAME_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_VBI_PACKET_CONTROL = BASE(mmDIG2_HDMI_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG2_HDMI_VBI_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_AUDIO_PACKET_CONTROL = BASE(mmDIG2_HDMI_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG2_HDMI_AUDIO_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_ACR_PACKET_CONTROL = BASE(mmDIG2_HDMI_ACR_PACKET_CONTROL_BASE_IDX) + mmDIG2_HDMI_ACR_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_ACR_32_0 = BASE(mmDIG2_HDMI_ACR_32_0_BASE_IDX) + mmDIG2_HDMI_ACR_32_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_ACR_32_1 = BASE(mmDIG2_HDMI_ACR_32_1_BASE_IDX) + mmDIG2_HDMI_ACR_32_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_ACR_44_0 = BASE(mmDIG2_HDMI_ACR_44_0_BASE_IDX) + mmDIG2_HDMI_ACR_44_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_ACR_44_1 = BASE(mmDIG2_HDMI_ACR_44_1_BASE_IDX) + mmDIG2_HDMI_ACR_44_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_ACR_48_0 = BASE(mmDIG2_HDMI_ACR_48_0_BASE_IDX) + mmDIG2_HDMI_ACR_48_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_ACR_48_1 = BASE(mmDIG2_HDMI_ACR_48_1_BASE_IDX) + mmDIG2_HDMI_ACR_48_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_DB_CNTL = BASE(mmDP2_DP_DB_CNTL_BASE_IDX) + mmDP2_DP_DB_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_MSA_MISC = BASE(mmDP2_DP_MSA_MISC_BASE_IDX) + mmDP2_DP_MSA_MISC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_MSA_VBID_MISC = BASE(mmDP2_DP_MSA_VBID_MISC_BASE_IDX) + mmDP2_DP_MSA_VBID_MISC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_MSA_COLORIMETRY = BASE(mmDP2_DP_MSA_COLORIMETRY_BASE_IDX) + mmDP2_DP_MSA_COLORIMETRY @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_MSA_TIMING_PARAM1 = BASE(mmDP2_DP_MSA_TIMING_PARAM1_BASE_IDX) + mmDP2_DP_MSA_TIMING_PARAM1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_MSA_TIMING_PARAM2 = BASE(mmDP2_DP_MSA_TIMING_PARAM2_BASE_IDX) + mmDP2_DP_MSA_TIMING_PARAM2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_MSA_TIMING_PARAM3 = BASE(mmDP2_DP_MSA_TIMING_PARAM3_BASE_IDX) + mmDP2_DP_MSA_TIMING_PARAM3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_MSA_TIMING_PARAM4 = BASE(mmDP2_DP_MSA_TIMING_PARAM4_BASE_IDX) + mmDP2_DP_MSA_TIMING_PARAM4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_MSE_RATE_CNTL = BASE(mmDP2_DP_MSE_RATE_CNTL_BASE_IDX) + mmDP2_DP_MSE_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_MSE_RATE_UPDATE = BASE(mmDP2_DP_MSE_RATE_UPDATE_BASE_IDX) + mmDP2_DP_MSE_RATE_UPDATE @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_PIXEL_FORMAT = BASE(mmDP2_DP_PIXEL_FORMAT_BASE_IDX) + mmDP2_DP_PIXEL_FORMAT @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_SEC_CNTL = BASE(mmDP2_DP_SEC_CNTL_BASE_IDX) + mmDP2_DP_SEC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_SEC_CNTL1 = BASE(mmDP2_DP_SEC_CNTL1_BASE_IDX) + mmDP2_DP_SEC_CNTL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_SEC_CNTL2 = BASE(mmDP2_DP_SEC_CNTL2_BASE_IDX) + mmDP2_DP_SEC_CNTL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_SEC_CNTL5 = BASE(mmDP2_DP_SEC_CNTL5_BASE_IDX) + mmDP2_DP_SEC_CNTL5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_SEC_CNTL6 = BASE(mmDP2_DP_SEC_CNTL6_BASE_IDX) + mmDP2_DP_SEC_CNTL6 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_STEER_FIFO = BASE(mmDP2_DP_STEER_FIFO_BASE_IDX) + mmDP2_DP_STEER_FIFO @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_VID_M = BASE(mmDP2_DP_VID_M_BASE_IDX) + mmDP2_DP_VID_M @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_VID_N = BASE(mmDP2_DP_VID_N_BASE_IDX) + mmDP2_DP_VID_N @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_VID_STREAM_CNTL = BASE(mmDP2_DP_VID_STREAM_CNTL_BASE_IDX) + mmDP2_DP_VID_STREAM_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_VID_TIMING = BASE(mmDP2_DP_VID_TIMING_BASE_IDX) + mmDP2_DP_VID_TIMING @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_SEC_AUD_N = BASE(mmDP2_DP_SEC_AUD_N_BASE_IDX) + mmDP2_DP_SEC_AUD_N @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_SEC_AUD_N_READBACK = BASE(mmDP2_DP_SEC_AUD_N_READBACK_BASE_IDX) + mmDP2_DP_SEC_AUD_N_READBACK @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_SEC_AUD_M_READBACK = BASE(mmDP2_DP_SEC_AUD_M_READBACK_BASE_IDX) + mmDP2_DP_SEC_AUD_M_READBACK @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_SEC_TIMESTAMP = BASE(mmDP2_DP_SEC_TIMESTAMP_BASE_IDX) + mmDP2_DP_SEC_TIMESTAMP @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DIG_CLOCK_PATTERN = BASE(mmDIG2_DIG_CLOCK_PATTERN_BASE_IDX) + mmDIG2_DIG_CLOCK_PATTERN @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_GENERIC_PACKET_CONTROL4 = BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL4_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_GENERIC_PACKET_CONTROL5 = BASE(mmDIG2_HDMI_GENERIC_PACKET_CONTROL5_BASE_IDX) + mmDIG2_HDMI_GENERIC_PACKET_CONTROL5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_DSC_CNTL = BASE(mmDP2_DP_DSC_CNTL_BASE_IDX) + mmDP2_DP_DSC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_DSC_BYTES_PER_PIXEL = BASE(mmDP2_DP_DSC_BYTES_PER_PIXEL_BASE_IDX) + mmDP2_DP_DSC_BYTES_PER_PIXEL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DME_CONTROL = BASE(mmDIG2_DME_CONTROL_BASE_IDX) + mmDIG2_DME_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_SEC_METADATA_TRANSMISSION = BASE(mmDP2_DP_SEC_METADATA_TRANSMISSION_BASE_IDX) + mmDP2_DP_SEC_METADATA_TRANSMISSION @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_HDMI_METADATA_PACKET_CONTROL = BASE(mmDIG2_HDMI_METADATA_PACKET_CONTROL_BASE_IDX) + mmDIG2_HDMI_METADATA_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE2_DP_SEC_FRAMING4 = BASE(mmDP2_DP_SEC_FRAMING4_BASE_IDX) + mmDP2_DP_SEC_FRAMING4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_CNTL = BASE(mmDIG3_AFMT_CNTL_BASE_IDX) + mmDIG3_AFMT_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_GENERIC_0 = BASE(mmDIG3_AFMT_GENERIC_0_BASE_IDX) + mmDIG3_AFMT_GENERIC_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_GENERIC_1 = BASE(mmDIG3_AFMT_GENERIC_1_BASE_IDX) + mmDIG3_AFMT_GENERIC_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_GENERIC_2 = BASE(mmDIG3_AFMT_GENERIC_2_BASE_IDX) + mmDIG3_AFMT_GENERIC_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_GENERIC_3 = BASE(mmDIG3_AFMT_GENERIC_3_BASE_IDX) + mmDIG3_AFMT_GENERIC_3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_GENERIC_4 = BASE(mmDIG3_AFMT_GENERIC_4_BASE_IDX) + mmDIG3_AFMT_GENERIC_4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_GENERIC_5 = BASE(mmDIG3_AFMT_GENERIC_5_BASE_IDX) + mmDIG3_AFMT_GENERIC_5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_GENERIC_6 = BASE(mmDIG3_AFMT_GENERIC_6_BASE_IDX) + mmDIG3_AFMT_GENERIC_6 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_GENERIC_7 = BASE(mmDIG3_AFMT_GENERIC_7_BASE_IDX) + mmDIG3_AFMT_GENERIC_7 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_GENERIC_HDR = BASE(mmDIG3_AFMT_GENERIC_HDR_BASE_IDX) + mmDIG3_AFMT_GENERIC_HDR @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_INFOFRAME_CONTROL0 = BASE(mmDIG3_AFMT_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG3_AFMT_INFOFRAME_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_VBI_PACKET_CONTROL = BASE(mmDIG3_AFMT_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG3_AFMT_VBI_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_VBI_PACKET_CONTROL1 = BASE(mmDIG3_AFMT_VBI_PACKET_CONTROL1_BASE_IDX) + mmDIG3_AFMT_VBI_PACKET_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_AUDIO_PACKET_CONTROL = BASE(mmDIG3_AFMT_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG3_AFMT_AUDIO_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_AUDIO_PACKET_CONTROL2 = BASE(mmDIG3_AFMT_AUDIO_PACKET_CONTROL2_BASE_IDX) + mmDIG3_AFMT_AUDIO_PACKET_CONTROL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_AUDIO_SRC_CONTROL = BASE(mmDIG3_AFMT_AUDIO_SRC_CONTROL_BASE_IDX) + mmDIG3_AFMT_AUDIO_SRC_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_60958_0 = BASE(mmDIG3_AFMT_60958_0_BASE_IDX) + mmDIG3_AFMT_60958_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_60958_1 = BASE(mmDIG3_AFMT_60958_1_BASE_IDX) + mmDIG3_AFMT_60958_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_AFMT_60958_2 = BASE(mmDIG3_AFMT_60958_2_BASE_IDX) + mmDIG3_AFMT_60958_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DIG_FE_CNTL = BASE(mmDIG3_DIG_FE_CNTL_BASE_IDX) + mmDIG3_DIG_FE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DIG_FIFO_STATUS = BASE(mmDIG3_DIG_FIFO_STATUS_BASE_IDX) + mmDIG3_DIG_FIFO_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_CONTROL = BASE(mmDIG3_HDMI_CONTROL_BASE_IDX) + mmDIG3_HDMI_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_DB_CONTROL = BASE(mmDIG3_HDMI_DB_CONTROL_BASE_IDX) + mmDIG3_HDMI_DB_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_GC = BASE(mmDIG3_HDMI_GC_BASE_IDX) + mmDIG3_HDMI_GC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_GENERIC_PACKET_CONTROL0 = BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL0_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_GENERIC_PACKET_CONTROL1 = BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL1_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_GENERIC_PACKET_CONTROL2 = BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL2_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_GENERIC_PACKET_CONTROL3 = BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL3_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_INFOFRAME_CONTROL0 = BASE(mmDIG3_HDMI_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG3_HDMI_INFOFRAME_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_INFOFRAME_CONTROL1 = BASE(mmDIG3_HDMI_INFOFRAME_CONTROL1_BASE_IDX) + mmDIG3_HDMI_INFOFRAME_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_VBI_PACKET_CONTROL = BASE(mmDIG3_HDMI_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG3_HDMI_VBI_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_AUDIO_PACKET_CONTROL = BASE(mmDIG3_HDMI_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG3_HDMI_AUDIO_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_ACR_PACKET_CONTROL = BASE(mmDIG3_HDMI_ACR_PACKET_CONTROL_BASE_IDX) + mmDIG3_HDMI_ACR_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_ACR_32_0 = BASE(mmDIG3_HDMI_ACR_32_0_BASE_IDX) + mmDIG3_HDMI_ACR_32_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_ACR_32_1 = BASE(mmDIG3_HDMI_ACR_32_1_BASE_IDX) + mmDIG3_HDMI_ACR_32_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_ACR_44_0 = BASE(mmDIG3_HDMI_ACR_44_0_BASE_IDX) + mmDIG3_HDMI_ACR_44_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_ACR_44_1 = BASE(mmDIG3_HDMI_ACR_44_1_BASE_IDX) + mmDIG3_HDMI_ACR_44_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_ACR_48_0 = BASE(mmDIG3_HDMI_ACR_48_0_BASE_IDX) + mmDIG3_HDMI_ACR_48_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_ACR_48_1 = BASE(mmDIG3_HDMI_ACR_48_1_BASE_IDX) + mmDIG3_HDMI_ACR_48_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_DB_CNTL = BASE(mmDP3_DP_DB_CNTL_BASE_IDX) + mmDP3_DP_DB_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_MSA_MISC = BASE(mmDP3_DP_MSA_MISC_BASE_IDX) + mmDP3_DP_MSA_MISC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_MSA_VBID_MISC = BASE(mmDP3_DP_MSA_VBID_MISC_BASE_IDX) + mmDP3_DP_MSA_VBID_MISC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_MSA_COLORIMETRY = BASE(mmDP3_DP_MSA_COLORIMETRY_BASE_IDX) + mmDP3_DP_MSA_COLORIMETRY @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_MSA_TIMING_PARAM1 = BASE(mmDP3_DP_MSA_TIMING_PARAM1_BASE_IDX) + mmDP3_DP_MSA_TIMING_PARAM1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_MSA_TIMING_PARAM2 = BASE(mmDP3_DP_MSA_TIMING_PARAM2_BASE_IDX) + mmDP3_DP_MSA_TIMING_PARAM2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_MSA_TIMING_PARAM3 = BASE(mmDP3_DP_MSA_TIMING_PARAM3_BASE_IDX) + mmDP3_DP_MSA_TIMING_PARAM3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_MSA_TIMING_PARAM4 = BASE(mmDP3_DP_MSA_TIMING_PARAM4_BASE_IDX) + mmDP3_DP_MSA_TIMING_PARAM4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_MSE_RATE_CNTL = BASE(mmDP3_DP_MSE_RATE_CNTL_BASE_IDX) + mmDP3_DP_MSE_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_MSE_RATE_UPDATE = BASE(mmDP3_DP_MSE_RATE_UPDATE_BASE_IDX) + mmDP3_DP_MSE_RATE_UPDATE @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_PIXEL_FORMAT = BASE(mmDP3_DP_PIXEL_FORMAT_BASE_IDX) + mmDP3_DP_PIXEL_FORMAT @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_SEC_CNTL = BASE(mmDP3_DP_SEC_CNTL_BASE_IDX) + mmDP3_DP_SEC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_SEC_CNTL1 = BASE(mmDP3_DP_SEC_CNTL1_BASE_IDX) + mmDP3_DP_SEC_CNTL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_SEC_CNTL2 = BASE(mmDP3_DP_SEC_CNTL2_BASE_IDX) + mmDP3_DP_SEC_CNTL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_SEC_CNTL5 = BASE(mmDP3_DP_SEC_CNTL5_BASE_IDX) + mmDP3_DP_SEC_CNTL5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_SEC_CNTL6 = BASE(mmDP3_DP_SEC_CNTL6_BASE_IDX) + mmDP3_DP_SEC_CNTL6 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_STEER_FIFO = BASE(mmDP3_DP_STEER_FIFO_BASE_IDX) + mmDP3_DP_STEER_FIFO @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_VID_M = BASE(mmDP3_DP_VID_M_BASE_IDX) + mmDP3_DP_VID_M @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_VID_N = BASE(mmDP3_DP_VID_N_BASE_IDX) + mmDP3_DP_VID_N @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_VID_STREAM_CNTL = BASE(mmDP3_DP_VID_STREAM_CNTL_BASE_IDX) + mmDP3_DP_VID_STREAM_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_VID_TIMING = BASE(mmDP3_DP_VID_TIMING_BASE_IDX) + mmDP3_DP_VID_TIMING @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_SEC_AUD_N = BASE(mmDP3_DP_SEC_AUD_N_BASE_IDX) + mmDP3_DP_SEC_AUD_N @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_SEC_AUD_N_READBACK = BASE(mmDP3_DP_SEC_AUD_N_READBACK_BASE_IDX) + mmDP3_DP_SEC_AUD_N_READBACK @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_SEC_AUD_M_READBACK = BASE(mmDP3_DP_SEC_AUD_M_READBACK_BASE_IDX) + mmDP3_DP_SEC_AUD_M_READBACK @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_SEC_TIMESTAMP = BASE(mmDP3_DP_SEC_TIMESTAMP_BASE_IDX) + mmDP3_DP_SEC_TIMESTAMP @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DIG_CLOCK_PATTERN = BASE(mmDIG3_DIG_CLOCK_PATTERN_BASE_IDX) + mmDIG3_DIG_CLOCK_PATTERN @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_GENERIC_PACKET_CONTROL4 = BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL4_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_GENERIC_PACKET_CONTROL5 = BASE(mmDIG3_HDMI_GENERIC_PACKET_CONTROL5_BASE_IDX) + mmDIG3_HDMI_GENERIC_PACKET_CONTROL5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_DSC_CNTL = BASE(mmDP3_DP_DSC_CNTL_BASE_IDX) + mmDP3_DP_DSC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_DSC_BYTES_PER_PIXEL = BASE(mmDP3_DP_DSC_BYTES_PER_PIXEL_BASE_IDX) + mmDP3_DP_DSC_BYTES_PER_PIXEL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DME_CONTROL = BASE(mmDIG3_DME_CONTROL_BASE_IDX) + mmDIG3_DME_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_SEC_METADATA_TRANSMISSION = BASE(mmDP3_DP_SEC_METADATA_TRANSMISSION_BASE_IDX) + mmDP3_DP_SEC_METADATA_TRANSMISSION @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_HDMI_METADATA_PACKET_CONTROL = BASE(mmDIG3_HDMI_METADATA_PACKET_CONTROL_BASE_IDX) + mmDIG3_HDMI_METADATA_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE3_DP_SEC_FRAMING4 = BASE(mmDP3_DP_SEC_FRAMING4_BASE_IDX) + mmDP3_DP_SEC_FRAMING4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_CNTL = BASE(mmDIG4_AFMT_CNTL_BASE_IDX) + mmDIG4_AFMT_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_GENERIC_0 = BASE(mmDIG4_AFMT_GENERIC_0_BASE_IDX) + mmDIG4_AFMT_GENERIC_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_GENERIC_1 = BASE(mmDIG4_AFMT_GENERIC_1_BASE_IDX) + mmDIG4_AFMT_GENERIC_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_GENERIC_2 = BASE(mmDIG4_AFMT_GENERIC_2_BASE_IDX) + mmDIG4_AFMT_GENERIC_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_GENERIC_3 = BASE(mmDIG4_AFMT_GENERIC_3_BASE_IDX) + mmDIG4_AFMT_GENERIC_3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_GENERIC_4 = BASE(mmDIG4_AFMT_GENERIC_4_BASE_IDX) + mmDIG4_AFMT_GENERIC_4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_GENERIC_5 = BASE(mmDIG4_AFMT_GENERIC_5_BASE_IDX) + mmDIG4_AFMT_GENERIC_5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_GENERIC_6 = BASE(mmDIG4_AFMT_GENERIC_6_BASE_IDX) + mmDIG4_AFMT_GENERIC_6 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_GENERIC_7 = BASE(mmDIG4_AFMT_GENERIC_7_BASE_IDX) + mmDIG4_AFMT_GENERIC_7 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_GENERIC_HDR = BASE(mmDIG4_AFMT_GENERIC_HDR_BASE_IDX) + mmDIG4_AFMT_GENERIC_HDR @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_INFOFRAME_CONTROL0 = BASE(mmDIG4_AFMT_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG4_AFMT_INFOFRAME_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_VBI_PACKET_CONTROL = BASE(mmDIG4_AFMT_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG4_AFMT_VBI_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_VBI_PACKET_CONTROL1 = BASE(mmDIG4_AFMT_VBI_PACKET_CONTROL1_BASE_IDX) + mmDIG4_AFMT_VBI_PACKET_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_AUDIO_PACKET_CONTROL = BASE(mmDIG4_AFMT_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG4_AFMT_AUDIO_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_AUDIO_PACKET_CONTROL2 = BASE(mmDIG4_AFMT_AUDIO_PACKET_CONTROL2_BASE_IDX) + mmDIG4_AFMT_AUDIO_PACKET_CONTROL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_AUDIO_SRC_CONTROL = BASE(mmDIG4_AFMT_AUDIO_SRC_CONTROL_BASE_IDX) + mmDIG4_AFMT_AUDIO_SRC_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_60958_0 = BASE(mmDIG4_AFMT_60958_0_BASE_IDX) + mmDIG4_AFMT_60958_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_60958_1 = BASE(mmDIG4_AFMT_60958_1_BASE_IDX) + mmDIG4_AFMT_60958_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_AFMT_60958_2 = BASE(mmDIG4_AFMT_60958_2_BASE_IDX) + mmDIG4_AFMT_60958_2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DIG_FE_CNTL = BASE(mmDIG4_DIG_FE_CNTL_BASE_IDX) + mmDIG4_DIG_FE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DIG_FIFO_STATUS = BASE(mmDIG4_DIG_FIFO_STATUS_BASE_IDX) + mmDIG4_DIG_FIFO_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_CONTROL = BASE(mmDIG4_HDMI_CONTROL_BASE_IDX) + mmDIG4_HDMI_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_DB_CONTROL = BASE(mmDIG4_HDMI_DB_CONTROL_BASE_IDX) + mmDIG4_HDMI_DB_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_GC = BASE(mmDIG4_HDMI_GC_BASE_IDX) + mmDIG4_HDMI_GC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_GENERIC_PACKET_CONTROL0 = BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL0_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_GENERIC_PACKET_CONTROL1 = BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL1_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_GENERIC_PACKET_CONTROL2 = BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL2_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_GENERIC_PACKET_CONTROL3 = BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL3_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_INFOFRAME_CONTROL0 = BASE(mmDIG4_HDMI_INFOFRAME_CONTROL0_BASE_IDX) + mmDIG4_HDMI_INFOFRAME_CONTROL0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_INFOFRAME_CONTROL1 = BASE(mmDIG4_HDMI_INFOFRAME_CONTROL1_BASE_IDX) + mmDIG4_HDMI_INFOFRAME_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_VBI_PACKET_CONTROL = BASE(mmDIG4_HDMI_VBI_PACKET_CONTROL_BASE_IDX) + mmDIG4_HDMI_VBI_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_AUDIO_PACKET_CONTROL = BASE(mmDIG4_HDMI_AUDIO_PACKET_CONTROL_BASE_IDX) + mmDIG4_HDMI_AUDIO_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_ACR_PACKET_CONTROL = BASE(mmDIG4_HDMI_ACR_PACKET_CONTROL_BASE_IDX) + mmDIG4_HDMI_ACR_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_ACR_32_0 = BASE(mmDIG4_HDMI_ACR_32_0_BASE_IDX) + mmDIG4_HDMI_ACR_32_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_ACR_32_1 = BASE(mmDIG4_HDMI_ACR_32_1_BASE_IDX) + mmDIG4_HDMI_ACR_32_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_ACR_44_0 = BASE(mmDIG4_HDMI_ACR_44_0_BASE_IDX) + mmDIG4_HDMI_ACR_44_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_ACR_44_1 = BASE(mmDIG4_HDMI_ACR_44_1_BASE_IDX) + mmDIG4_HDMI_ACR_44_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_ACR_48_0 = BASE(mmDIG4_HDMI_ACR_48_0_BASE_IDX) + mmDIG4_HDMI_ACR_48_0 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_ACR_48_1 = BASE(mmDIG4_HDMI_ACR_48_1_BASE_IDX) + mmDIG4_HDMI_ACR_48_1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_DB_CNTL = BASE(mmDP4_DP_DB_CNTL_BASE_IDX) + mmDP4_DP_DB_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_MSA_MISC = BASE(mmDP4_DP_MSA_MISC_BASE_IDX) + mmDP4_DP_MSA_MISC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_MSA_VBID_MISC = BASE(mmDP4_DP_MSA_VBID_MISC_BASE_IDX) + mmDP4_DP_MSA_VBID_MISC @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_MSA_COLORIMETRY = BASE(mmDP4_DP_MSA_COLORIMETRY_BASE_IDX) + mmDP4_DP_MSA_COLORIMETRY @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_MSA_TIMING_PARAM1 = BASE(mmDP4_DP_MSA_TIMING_PARAM1_BASE_IDX) + mmDP4_DP_MSA_TIMING_PARAM1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_MSA_TIMING_PARAM2 = BASE(mmDP4_DP_MSA_TIMING_PARAM2_BASE_IDX) + mmDP4_DP_MSA_TIMING_PARAM2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_MSA_TIMING_PARAM3 = BASE(mmDP4_DP_MSA_TIMING_PARAM3_BASE_IDX) + mmDP4_DP_MSA_TIMING_PARAM3 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_MSA_TIMING_PARAM4 = BASE(mmDP4_DP_MSA_TIMING_PARAM4_BASE_IDX) + mmDP4_DP_MSA_TIMING_PARAM4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_MSE_RATE_CNTL = BASE(mmDP4_DP_MSE_RATE_CNTL_BASE_IDX) + mmDP4_DP_MSE_RATE_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_MSE_RATE_UPDATE = BASE(mmDP4_DP_MSE_RATE_UPDATE_BASE_IDX) + mmDP4_DP_MSE_RATE_UPDATE @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_PIXEL_FORMAT = BASE(mmDP4_DP_PIXEL_FORMAT_BASE_IDX) + mmDP4_DP_PIXEL_FORMAT @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_SEC_CNTL = BASE(mmDP4_DP_SEC_CNTL_BASE_IDX) + mmDP4_DP_SEC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_SEC_CNTL1 = BASE(mmDP4_DP_SEC_CNTL1_BASE_IDX) + mmDP4_DP_SEC_CNTL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_SEC_CNTL2 = BASE(mmDP4_DP_SEC_CNTL2_BASE_IDX) + mmDP4_DP_SEC_CNTL2 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_SEC_CNTL5 = BASE(mmDP4_DP_SEC_CNTL5_BASE_IDX) + mmDP4_DP_SEC_CNTL5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_SEC_CNTL6 = BASE(mmDP4_DP_SEC_CNTL6_BASE_IDX) + mmDP4_DP_SEC_CNTL6 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_STEER_FIFO = BASE(mmDP4_DP_STEER_FIFO_BASE_IDX) + mmDP4_DP_STEER_FIFO @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_VID_M = BASE(mmDP4_DP_VID_M_BASE_IDX) + mmDP4_DP_VID_M @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_VID_N = BASE(mmDP4_DP_VID_N_BASE_IDX) + mmDP4_DP_VID_N @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_VID_STREAM_CNTL = BASE(mmDP4_DP_VID_STREAM_CNTL_BASE_IDX) + mmDP4_DP_VID_STREAM_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_VID_TIMING = BASE(mmDP4_DP_VID_TIMING_BASE_IDX) + mmDP4_DP_VID_TIMING @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_SEC_AUD_N = BASE(mmDP4_DP_SEC_AUD_N_BASE_IDX) + mmDP4_DP_SEC_AUD_N @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_SEC_AUD_N_READBACK = BASE(mmDP4_DP_SEC_AUD_N_READBACK_BASE_IDX) + mmDP4_DP_SEC_AUD_N_READBACK @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_SEC_AUD_M_READBACK = BASE(mmDP4_DP_SEC_AUD_M_READBACK_BASE_IDX) + mmDP4_DP_SEC_AUD_M_READBACK @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_SEC_TIMESTAMP = BASE(mmDP4_DP_SEC_TIMESTAMP_BASE_IDX) + mmDP4_DP_SEC_TIMESTAMP @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DIG_CLOCK_PATTERN = BASE(mmDIG4_DIG_CLOCK_PATTERN_BASE_IDX) + mmDIG4_DIG_CLOCK_PATTERN @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_GENERIC_PACKET_CONTROL4 = BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL4_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_GENERIC_PACKET_CONTROL5 = BASE(mmDIG4_HDMI_GENERIC_PACKET_CONTROL5_BASE_IDX) + mmDIG4_HDMI_GENERIC_PACKET_CONTROL5 @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_DSC_CNTL = BASE(mmDP4_DP_DSC_CNTL_BASE_IDX) + mmDP4_DP_DSC_CNTL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_DSC_BYTES_PER_PIXEL = BASE(mmDP4_DP_DSC_BYTES_PER_PIXEL_BASE_IDX) + mmDP4_DP_DSC_BYTES_PER_PIXEL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DME_CONTROL = BASE(mmDIG4_DME_CONTROL_BASE_IDX) + mmDIG4_DME_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_SEC_METADATA_TRANSMISSION = BASE(mmDP4_DP_SEC_METADATA_TRANSMISSION_BASE_IDX) + mmDP4_DP_SEC_METADATA_TRANSMISSION @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_HDMI_METADATA_PACKET_CONTROL = BASE(mmDIG4_HDMI_METADATA_PACKET_CONTROL_BASE_IDX) + mmDIG4_HDMI_METADATA_PACKET_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+SE4_DP_SEC_FRAMING4 = BASE(mmDP4_DP_SEC_FRAMING4_BASE_IDX) + mmDP4_DP_SEC_FRAMING4 @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC se field shifts/masks (SE_COMMON_MASK_SH_LIST_DCN20(__SHIFT))
+DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_INDEX__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_INDEX_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB0__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB0_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB1__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB1_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB2__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB2_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB3__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_GENERIC_HDR__AFMT_GENERIC_HB3_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_PIXEL_FORMAT__DP_PIXEL_ENCODING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_PIXEL_FORMAT__DP_PIXEL_ENCODING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_PIXEL_FORMAT__DP_COMPONENT_DEPTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_PIXEL_FORMAT__DP_COMPONENT_DEPTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_PACKET_GEN_VERSION__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_PACKET_GEN_VERSION_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_KEEPOUT_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_KEEPOUT_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_DEEP_COLOR_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_DEEP_COLOR_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_DEEP_COLOR_DEPTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_DEEP_COLOR_DEPTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_DATA_SCRAMBLE_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_DATA_SCRAMBLE_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_NO_EXTRA_NULL_PACKET_FILLED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_NO_EXTRA_NULL_PACKET_FILLED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_CONT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_CONT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_NULL_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_NULL_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_ACP_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_ACP_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_INFOFRAME_CONTROL0__HDMI_AUDIO_INFO_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_INFOFRAME_CONTROL0__HDMI_AUDIO_INFO_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_INFOFRAME_CONTROL0__AFMT_AUDIO_INFO_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_INFOFRAME_CONTROL0__AFMT_AUDIO_INFO_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_INFOFRAME_CONTROL1__HDMI_AUDIO_INFO_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_INFOFRAME_CONTROL1__HDMI_AUDIO_INFO_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GC__HDMI_GC_AVMUTE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GC__HDMI_GC_AVMUTE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_Y__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_Y_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSE_RATE_UPDATE__DP_MSE_RATE_UPDATE_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSE_RATE_UPDATE__DP_MSE_RATE_UPDATE_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP0_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP0_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_STREAM_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_STREAM_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP1_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP1_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP2_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP2_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP3_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP3_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_MPG_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_MPG_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL4__DP_SEC_GSP4_LINE_NUM__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL4__DP_SEC_GSP4_LINE_NUM_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND_ANY_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL2__DP_SEC_GSP4_SEND_ANY_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_DIS_DEFER__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_DIS_DEFER_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_STEER_FIFO__DP_STEER_FIFO_RESET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_STEER_FIFO__DP_STEER_FIFO_RESET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_TIMING__DP_VID_M_N_GEN_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_TIMING__DP_VID_M_N_GEN_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_N__DP_VID_N__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_N__DP_VID_N_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_M__DP_VID_M__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_M__DP_VID_M_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__DIG_START__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__DIG_START_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_SRC_CONTROL__AFMT_AUDIO_SRC_SELECT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_SRC_CONTROL__AFMT_AUDIO_SRC_SELECT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_AUDIO_CHANNEL_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_AUDIO_CHANNEL_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_AUDIO_PACKET_CONTROL__HDMI_AUDIO_PACKETS_PER_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_AUDIO_PACKET_CONTROL__HDMI_AUDIO_PACKETS_PER_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_AUDIO_PACKET_CONTROL__HDMI_AUDIO_DELAY_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_AUDIO_PACKET_CONTROL__HDMI_AUDIO_DELAY_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_PACKET_CONTROL__AFMT_60958_CS_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_PACKET_CONTROL__AFMT_60958_CS_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_AUDIO_LAYOUT_OVRD__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_AUDIO_LAYOUT_OVRD_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_60958_OSF_OVRD__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_PACKET_CONTROL2__AFMT_60958_OSF_OVRD_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_AUTO_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_AUTO_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_SOURCE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_SOURCE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_AUDIO_PRIORITY__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_PACKET_CONTROL__HDMI_ACR_AUDIO_PRIORITY_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_32_0__HDMI_ACR_CTS_32__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_32_0__HDMI_ACR_CTS_32_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_32_1__HDMI_ACR_N_32__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_32_1__HDMI_ACR_N_32_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_44_0__HDMI_ACR_CTS_44__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_44_0__HDMI_ACR_CTS_44_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_44_1__HDMI_ACR_N_44__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_44_1__HDMI_ACR_N_44_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_48_0__HDMI_ACR_CTS_48__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_48_0__HDMI_ACR_CTS_48_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_48_1__HDMI_ACR_N_48__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_ACR_48_1__HDMI_ACR_N_48_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_0__AFMT_60958_CS_CHANNEL_NUMBER_L__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_0__AFMT_60958_CS_CHANNEL_NUMBER_L_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_0__AFMT_60958_CS_CLOCK_ACCURACY__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_0__AFMT_60958_CS_CLOCK_ACCURACY_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_1__AFMT_60958_CS_CHANNEL_NUMBER_R__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_1__AFMT_60958_CS_CHANNEL_NUMBER_R_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_2__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_2_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_3__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_3_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_4__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_4_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_5__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_5_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_6__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_6_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_7__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_60958_2__AFMT_60958_CS_CHANNEL_NUMBER_7_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_AUD_N__DP_SEC_AUD_N__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_AUD_N__DP_SEC_AUD_N_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_AUD_N_READBACK__DP_SEC_AUD_N_READBACK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_AUD_N_READBACK__DP_SEC_AUD_N_READBACK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_AUD_M_READBACK__DP_SEC_AUD_M_READBACK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_AUD_M_READBACK__DP_SEC_AUD_M_READBACK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_TIMESTAMP__DP_SEC_TIMESTAMP_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_TIMESTAMP__DP_SEC_TIMESTAMP_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_ASP_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_ASP_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_ATP_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_ATP_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_AIP_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_AIP_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_ACM_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_ACM_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_PACKET_CONTROL__AFMT_AUDIO_SAMPLE_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_AUDIO_PACKET_CONTROL__AFMT_AUDIO_SAMPLE_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_CNTL__AFMT_AUDIO_CLOCK_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_CNTL__AFMT_AUDIO_CLOCK_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_CLOCK_CHANNEL_RATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_CONTROL__HDMI_CLOCK_CHANNEL_RATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__TMDS_PIXEL_ENCODING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__TMDS_PIXEL_ENCODING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__TMDS_COLOR_FORMAT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__TMDS_COLOR_FORMAT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__DIG_STEREOSYNC_SELECT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__DIG_STEREOSYNC_SELECT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__DIG_STEREOSYNC_GATE_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__DIG_STEREOSYNC_GATE_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_LEVEL_ERROR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_LEVEL_ERROR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_USE_OVERWRITE_LEVEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_USE_OVERWRITE_LEVEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_OVERWRITE_LEVEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_OVERWRITE_LEVEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_ERROR_ACK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_ERROR_ACK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_CAL_AVERAGE_LEVEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_CAL_AVERAGE_LEVEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_MAXIMUM_LEVEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_MAXIMUM_LEVEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_MINIMUM_LEVEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_MINIMUM_LEVEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_READ_CLOCK_SRC__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_READ_CLOCK_SRC_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_CALIBRATED__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_CALIBRATED_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_FORCE_RECAL_AVERAGE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_FORCE_RECAL_AVERAGE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_FORCE_RECOMP_MINMAX__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FIFO_STATUS__DIG_FIFO_FORCE_RECOMP_MINMAX_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_LOCK_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_LOCK_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_CONFLICT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_CONFLICT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_CONFLICT_CLR__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL__AFMT_GENERIC_CONFLICT_CLR_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_FRAME_UPDATE_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_FRAME_UPDATE_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_FRAME_UPDATE_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_FRAME_UPDATE_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_FRAME_UPDATE_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_FRAME_UPDATE_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_FRAME_UPDATE_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_FRAME_UPDATE_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_FRAME_UPDATE_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_FRAME_UPDATE_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_IMMEDIATE_UPDATE_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_IMMEDIATE_UPDATE_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_FRAME_UPDATE_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_FRAME_UPDATE_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_FRAME_UPDATE_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_FRAME_UPDATE_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_FRAME_UPDATE_PENDING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_FRAME_UPDATE_PENDING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_FRAME_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_FRAME_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_FRAME_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_FRAME_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_FRAME_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_FRAME_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_FRAME_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_FRAME_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_FRAME_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_FRAME_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_IMMEDIATE_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC0_IMMEDIATE_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_IMMEDIATE_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC1_IMMEDIATE_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_IMMEDIATE_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC2_IMMEDIATE_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_IMMEDIATE_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC3_IMMEDIATE_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_IMMEDIATE_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC4_IMMEDIATE_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_IMMEDIATE_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_IMMEDIATE_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_IMMEDIATE_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_IMMEDIATE_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_IMMEDIATE_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_IMMEDIATE_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_FRAME_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC5_FRAME_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_FRAME_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC6_FRAME_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_FRAME_UPDATE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_AFMT_VBI_PACKET_CONTROL1__AFMT_GENERIC7_FRAME_UPDATE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP4_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP4_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP5_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP5_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP6_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP6_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP7_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL__DP_SEC_GSP7_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL2__DP_SEC_GSP7_PPS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL2__DP_SEC_GSP7_PPS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL2__DP_SEC_GSP7_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL2__DP_SEC_GSP7_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL6__DP_SEC_GSP7_LINE_NUM__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL6__DP_SEC_GSP7_LINE_NUM_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_DB_CNTL__DP_DB_DISABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_DB_CNTL__DP_DB_DISABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_COLORIMETRY__DP_MSA_MISC0__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_COLORIMETRY__DP_MSA_MISC0_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM1__DP_MSA_HTOTAL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM1__DP_MSA_HTOTAL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM1__DP_MSA_VTOTAL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM1__DP_MSA_VTOTAL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM2__DP_MSA_HSTART__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM2__DP_MSA_HSTART_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM2__DP_MSA_VSTART__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM2__DP_MSA_VSTART_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM3__DP_MSA_HSYNCWIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM3__DP_MSA_HSYNCWIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM3__DP_MSA_HSYNCPOLARITY__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM3__DP_MSA_HSYNCPOLARITY_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM3__DP_MSA_VSYNCWIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM3__DP_MSA_VSYNCWIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM3__DP_MSA_VSYNCPOLARITY__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM3__DP_MSA_VSYNCPOLARITY_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM4__DP_MSA_HWIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM4__DP_MSA_HWIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM4__DP_MSA_VHEIGHT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_TIMING_PARAM4__DP_MSA_VHEIGHT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_DB_CONTROL__HDMI_DB_DISABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_DB_CONTROL__HDMI_DB_DISABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_TIMING__DP_VID_N_MUL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_VID_TIMING__DP_VID_N_MUL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__DIG_SOURCE_SELECT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__DIG_SOURCE_SELECT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_CLOCK_PATTERN__DIG_CLOCK_PATTERN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_CLOCK_PATTERN__DIG_CLOCK_PATTERN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC0_CONT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC0_CONT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC0_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC0_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC1_CONT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC1_CONT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC1_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC1_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC2_CONT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC2_CONT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC2_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC2_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC3_CONT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC3_CONT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC3_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC3_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC4_CONT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC4_CONT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC4_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC4_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC5_CONT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC5_CONT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC5_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC5_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC6_CONT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC6_CONT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC6_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC6_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC7_CONT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC7_CONT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC7_SEND__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC7_SEND_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL1__HDMI_GENERIC0_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL1__HDMI_GENERIC0_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL1__HDMI_GENERIC1_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL1__HDMI_GENERIC1_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL2__HDMI_GENERIC2_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL2__HDMI_GENERIC2_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL2__HDMI_GENERIC3_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL2__HDMI_GENERIC3_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL3__HDMI_GENERIC4_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL3__HDMI_GENERIC4_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL3__HDMI_GENERIC5_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL3__HDMI_GENERIC5_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL4__HDMI_GENERIC6_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL4__HDMI_GENERIC6_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL4__HDMI_GENERIC7_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_GENERIC_PACKET_CONTROL4__HDMI_GENERIC7_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_DSC_CNTL__DP_DSC_MODE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_DSC_CNTL__DP_DSC_MODE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_DSC_CNTL__DP_DSC_SLICE_WIDTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_DSC_CNTL__DP_DSC_SLICE_WIDTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_DSC_BYTES_PER_PIXEL__DP_DSC_BYTES_PER_PIXEL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_DSC_BYTES_PER_PIXEL__DP_DSC_BYTES_PER_PIXEL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_VBID_MISC__DP_VBID6_LINE_REFERENCE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_VBID_MISC__DP_VBID6_LINE_REFERENCE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_VBID_MISC__DP_VBID6_LINE_NUM__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_MSA_VBID_MISC__DP_VBID6_LINE_NUM_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DME_CONTROL__METADATA_ENGINE_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DME_CONTROL__METADATA_ENGINE_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DME_CONTROL__METADATA_HUBP_REQUESTOR_ID__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DME_CONTROL__METADATA_HUBP_REQUESTOR_ID_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DME_CONTROL__METADATA_STREAM_TYPE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DME_CONTROL__METADATA_STREAM_TYPE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_LINE_REFERENCE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_LINE_REFERENCE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_METADATA_TRANSMISSION__DP_SEC_METADATA_PACKET_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_ENABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_ENABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_LINE_REFERENCE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_LINE_REFERENCE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_LINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_HDMI_METADATA_PACKET_CONTROL__HDMI_METADATA_PACKET_LINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__DOLBY_VISION_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DIG0_DIG_FE_CNTL__DOLBY_VISION_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_PIXEL_FORMAT__DP_PIXEL_COMBINE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_PIXEL_FORMAT__DP_PIXEL_COMBINE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL1__DP_SEC_GSP5_LINE_REFERENCE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL1__DP_SEC_GSP5_LINE_REFERENCE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL5__DP_SEC_GSP5_LINE_NUM__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_CNTL5__DP_SEC_GSP5_LINE_NUM_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_FRAMING4__DP_SST_SDP_SPLITTING__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP0_DP_SEC_FRAMING4__DP_SST_SDP_SPLITTING_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c

@@ -143,6 +143,34 @@ pub struct dc_bios {
     pub fw_info_valid: bool,
 }
 
+/// `enum engine_id` (include/grph_object_id.h): the DIG/DAC/HPO encoder
+/// engines. DIGA is 0, so a stream encoder's `stream_enc_inst` is
+/// `eng_id - ENGINE_ID_DIGA`. ENGINE_ID_UNKNOWN (= -1) is omitted
+/// (grow-as-reached — None stands in where it is needed).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(i32)]
+pub enum engine_id {
+    #[default]
+    ENGINE_ID_DIGA = 0,
+    ENGINE_ID_DIGB,
+    ENGINE_ID_DIGC,
+    ENGINE_ID_DIGD,
+    ENGINE_ID_DIGE,
+    ENGINE_ID_DIGF,
+    ENGINE_ID_DIGG,
+    ENGINE_ID_DACA,
+    ENGINE_ID_DACB,
+    ENGINE_ID_VCE,
+    ENGINE_ID_HPO_0,
+    ENGINE_ID_HPO_1,
+    ENGINE_ID_HPO_DP_0,
+    ENGINE_ID_HPO_DP_1,
+    ENGINE_ID_HPO_DP_2,
+    ENGINE_ID_HPO_DP_3,
+    ENGINE_ID_VIRTUAL,
+    ENGINE_ID_COUNT,
+}
+
 // ── dc_caps and its tree (dc.h) ───────────────────────────────────────────
 // Software capability structs the resource pool fills; the C uns:1 bitfields
 // become bool here (these are not MMIO layouts — only the values matter).

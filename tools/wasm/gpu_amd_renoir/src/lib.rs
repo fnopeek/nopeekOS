@@ -57,6 +57,7 @@ mod dcn20_mmhubbub;
 mod dcn20_mpc;
 mod dcn20_opp;
 mod dcn20_optc;
+mod dcn20_stream_encoder;
 mod dcn21_hubp;
 mod dcn21_resource;
 mod dml_structs;
