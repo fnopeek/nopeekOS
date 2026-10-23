@@ -1,180 +1,197 @@
-# Keystore / Vault — Plan-Paper
+# Keyvault — Design-Paper
 
-**Stand:** 2026-10-23 · Entwurf, noch nicht entschieden · keine Zeile Code
-geschrieben
+**Stand:** 2026-10-23 · **Architektur beschlossen** (Diskussion mit Florian) ·
+noch keine Zeile Code
 
-**Herkunft:** Florian-Wunsch 2026-06-07 (beim wifid-Bringup: „kein Fan davon,
-den WLAN-Key im Klartext zu speichern — wir brauchen wohl sowas wie ein
-keystore"), neu aufgegriffen 2026-10-23: „zukünftig werden wir Kennwörter etc.
-sowas wie ein Vault bauen, und nicht im Filesystem als File ablegen". Löst den
-Audit-Fund **F-M3** aus `NPKFS_SECURITY_REVIEW.md` (WLAN-PSK welt-lesbar) und
-ersetzt die heute nur *behauptete* Zusage in `docs/spec/WIFI_CLASS_ABI.md` §6
-(„nur `wifid` liest den PSK") durch einen echten Mechanismus.
+**Was es ist:** ein kleiner Passwort-Manager mit GUI und zwei Berechtigungs-
+Tiers. Löst Audit-Fund **F-M3** aus `NPKFS_SECURITY_REVIEW.md` (WLAN-PSK als
+welt-lesbare Datei) und macht die bislang nur *behauptete* Zusage in
+`docs/spec/WIFI_CLASS_ABI.md` §6 („nur `wifid` liest den PSK") zu einem echten
+Mechanismus. Ersetzt `sys/config/wifi_psk`.
 
-**Leitsatz:** Ein Geheimnis ist keine Datei. Es darf nicht über den generischen
-FS-Pfad erreichbar sein, sondern nur über eine Zugriffskontrolle, die an eine
-Capability (und optional an den Login) gebunden ist.
+**Leitsatz:** Ein Geheimnis ist keine Datei. Es ist nie über den generischen
+FS-Pfad erreichbar, sondern nur über den Vault, der es nach Policy herausgibt.
 
 ---
 
-## 0. Stand heute — was ist, was fehlt
+## 1. Zwei Tiers, zwei Autorisierungen
 
-- **At-rest IST verschlüsselt.** npkFS AEAD-wrappt jedes Objekt (AES-256-GCM,
-  Key aus dem Content-Hash) — auf der SSD liegt `sys/config/wifi_psk` nicht im
-  Klartext. Das ist NICHT die Lücke.
-- **Die Lücke ist die Zugriffskontrolle am Host-Rand.** Jedes WASM-Modul mit dem
-  Default-Cap `READ` ruft `npk_fetch("sys/config/wifi_psk")` und bekommt den
-  entschlüsselten Klartext. `npk_fs_list` versteckt `sys/`/`.system/` nicht (F-M3).
-  Ein Browser-Bug o. Ä. liest damit WLAN-Passwörter. Es gibt KEIN per-Geheimnis-
-  Gating.
-- **`NETCTL` existiert, schützt aber das Falsche.** Der Cap-Bit `NETCTL`
-  (`capability.rs:47`, geprüft in `host_core.rs:4286/4297` u. a.) gated die
-  WiFi-*Steuerung* (scan, connect, EAPOL-Pfad) — NICHT die PSK-*Lesung*. Die
-  PSK-Lesung ist ein gewöhnliches `npk_fetch` und kennt `NETCTL` nicht.
-- **Zusätzliche Schreib-Lücke (F-M4 / Fund-2-Klasse):** die `own_config`-Ausnahme
-  (`host_core.rs:2403`) lässt ein Modul namens `wifi`/`wifi_psk`
-  `sys/config/wifi_psk` OHNE WRITE-Cap schreiben.
-- **Dokumentierte Absicht ≠ Mechanismus.** `WIFI_CLASS_ABI.md` §6 sagt „nur
-  `wifid` liest es" und §1-Tabelle führt den Klartext-PSK als etwas, das der
-  *Treiber nie sieht*. Beim Treiber stimmt das (er bekommt nur fertige PTK/GTK
-  via SET_KEY); beim *generischen FS-Zugriff* stimmt es nicht. Der Keystore macht
-  die Absicht wahr.
+| Tier | Inhalt | Entsperrt durch | Zugriff beim Benutzen |
+|---|---|---|---|
+| **System** | WLAN-PSK, später VPN/Enterprise-Certs | **Geräteschlüssel** (automatisch nach Disk-Unlock) | **Capability** (z.B. `NETCTL`) |
+| **User** | Website-Passwörter, Notizen | **separates Vault-Passwort** (nicht das Login) | Vault-Session (Passwort eingegeben) |
 
-**Fazit:** Es ist ein reines Zugriffskontroll-Problem am Host-ABI, kein
-Krypto-at-rest-Problem. Die Bausteine sind da (AES-256-GCM, Capability-System);
-es fehlt der *gated Pfad* dorthin.
+Die zwei Tiers sind **kein Timing-Thema, sondern reine Autorisierung.** Der
+System-Tier hängt am Geräteschlüssel, damit autostart-Tools wie `wifid` das WLAN
+nutzen können, **ohne dass der Nutzer je ein Vault-Passwort tippt**. Der
+User-Tier verlangt explizites Entsperren (Password-Manager-Semantik).
 
 ---
 
-## 1. Anforderungen
+## 2. Ein File, zwei kryptografische Kammern
 
-1. **Ein Geheimnis ist über den generischen FS-Pfad NICHT erreichbar.** Kein
-   `npk_fetch`/`npk_fs_list`/`npk_fs_read` sieht je ein Secret — auch nicht mit
-   globalem READ. Das ist die harte Grenze.
-2. **Zugriff ist Capability-gegated**, pro Geheimnis-Klasse. Nur der berechtigte
-   Manager liest (WLAN-Secrets: nur `wifid` via `NETCTL`/eine neue
-   `KEYSTORE`-Right).
-3. **Schreiben ist ebenso gegated** — die `own_config`-Namensfalle (F-M4) darf
-   nicht auf Secrets greifen.
-4. **Enumeration verrät nichts.** Ein Modul darf nicht einmal *sehen*, welche
-   Secrets existieren, wenn es sie nicht lesen darf (Listung blendet den
-   Keystore vollständig aus — nicht nur die Werte).
-5. **Einziger Nutzer, kein Migrationscode** (Projekt-Policy): die bestehende
-   `sys/config/wifi_psk` wird einmal per `wlan`-Intent neu provisioniert, nicht
-   migriert. **Kein Reformat** (siehe §5).
-6. **Boot-Tauglichkeit bedenken:** WLAN muss ggf. VOR dem Login verbinden (OTA,
-   Zeit). Ein login-gebundener Vault darf den Netz-Bringup nicht verklemmen
-   (§4, Spannungsfeld).
+Der Vault ist **EIN** npkFS-Objekt an einem trust-critical Pfad (`sys/vault`,
+geschützt wie `sys/wasm` — nur das Vault-Modul darf ihn roh lesen). Das Keyslot-
+Muster ist dasselbe, das npkFS für die Platte schon nutzt (`crypto/keyslot.rs`,
+`security/disk_key.rs`):
 
----
+```
+sys/vault  (ein npkFS-Objekt)
+├─ Header
+│   ├─ Keyslots für System-DEK:  [Geräteschlüssel]  [Vault-Passwort]   ← zwei Wege rein
+│   └─ Keyslots für User-DEK:    [Vault-Passwort]                      ← ein Weg rein
+├─ System-Einträge  → AEAD(System-DEK)   nutzen = Cap, anzeigen = Passwort
+└─ User-Einträge    → AEAD(User-DEK)     alles = Vault-Passwort (+ opt. Cap)
+```
 
-## 2. Designoptionen (noch nicht entschieden)
+**Die tragende Eigenschaft:** der Geräteschlüssel entsperrt **nur** die
+System-DEK, **nie** die User-DEK. Das Gerät kann also das WLAN-Passwort nutzen,
+ohne je die User-Secrets lesen zu können. „Ein File" heißt deshalb **nicht** „ein
+Schlüssel öffnet alles" — das File hat innere Schotten. Zwei DEKs (nicht eine),
+weil eine gemeinsame DEK die Tier-Trennung aufhöbe.
 
-### Option A — gegateter Pfad-Präfix `sys/keystore/*`
-Ein reservierter Präfix, den `npk_fetch`/`npk_fs_list`/`npk_store`/`delete` nur
-mit einer `KEYSTORE`-Right (oder klassenspezifisch, z. B. `NETCTL` für
-`sys/keystore/net/*`) freigeben — analog wie `sys/wasm/` heute
-schreibgeschützt ist (`is_trust_critical_path`).
-- **+** Minimaler Eingriff, nutzt den vorhandenen Gating-Mechanismus.
-- **+** Ein Ort, eine Regel.
-- **−** Der generische FS-Pfad kennt das Geheimnis weiterhin *als Pfad* — die
-  Grenze ist eine `if`-Prüfung, kein struktureller Riegel. Ein vergessener
-  Zugangsweg (neue Host-Fn) leakt wieder. (Genau diese Klasse Fehler ist F-M3.)
-
-### Option B — dedizierte Host-Fns `npk_secret_get/put(class, name)` (empfohlene Richtung)
-Secrets liegen in einem Namensraum, den der generische FS-Layer GAR NICHT
-auflöst; der einzige Zugang sind cap-gegatete Host-Fns.
-- `npk_secret_put(class, name, bytes)` — braucht die Schreib-Right der Klasse.
-- `npk_secret_get(class, name) -> bytes` — braucht die Lese-Right der Klasse.
-- `class` bindet an eine Capability-Right: `net` → `NETCTL`, später `app` →
-  eine per-App-Right, etc.
-- **+** Struktureller Riegel: kein FS-Pfad führt je zum Geheimnis, also kann
-  keine künftige FS-Host-Fn es versehentlich freilegen. Das ist die robuste
-  Antwort auf F-M3 (dort war die Lücke genau ein generischer Pfad).
-- **+** Enumeration ist von Natur aus dicht (kein Pfad zum Listen).
-- **−** Neue ABI-Fläche (zwei Host-Fns + Rights-Mapping), mehr als ein `if`.
-
-> **Empfehlung:** B als Ziel, intern auf einem reservierten npkFS-Präfix
-> gespeichert (z. B. `sys/keystore/<class>/<name>`), der über den generischen
-> Pfad NIE aufgelöst wird (A als Speicher-Detail, B als einziges Tor). So ist das
-> Geheimnis strukturell unerreichbar und die Speicherung bleibt simpel.
-
-### Option C — login-gebundener Wrap (zusätzlich, nicht alternativ)
-Secrets zusätzlich unter einem Schlüssel verpackt, der erst aus der
-User-Authentifizierung ableitbar ist — vor dem Login nicht entschlüsselbar.
-- **+** Stärkste Stufe: ein Kompromittieren vor dem Login (oder Offline-Zugriff,
-  vgl. Rollback-Fund §3 im Security-Review) liest die Secrets nicht.
-- **−** Spannung mit §1.6: WLAN-Verbindung vor dem Login (OTA) braucht den PSK,
-  bevor ein User authentifiziert ist. Auflösung denkbar: Netz-Secrets in einer
-  Klasse, die an einen *Geräte*-Schlüssel gebunden ist (verfügbar beim Boot),
-  App-/Nutzer-Secrets an den *Login*-Schlüssel. Zwei Vertrauensstufen.
-- Entscheidung später; C baut auf B auf.
+**Migration (der Grund für ein File):**
+- **User-Tier:** File kopieren, Vault-Passwort eingeben — der Passwort-Keyslot ist
+  maschinenunabhängig. Fertig.
+- **System-Tier:** der Geräteschlüssel-Slot ist auf der neuen Maschine tot. Aber
+  die System-DEK hat einen **zweiten Slot aufs Vault-Passwort**: beim ersten
+  Entsperren auf der neuen Maschine wird die System-DEK übers Passwort
+  entschlüsselt und **unter den neuen Geräteschlüssel neu gewickelt**. Einmal
+  Passwort auf der neuen Kiste → WLAN wieder boot-fähig.
 
 ---
 
-## 3. Betroffene Stellen (wenn gebaut)
+## 3. Timing (korrigiert)
 
-- **Die EINE Lesestelle heute:** `wifid` holt den PSK über `npk_fetch` aus
-  `sys/config/wifi_psk`. Das ist der einzige Punkt, der auf
-  `npk_secret_get("net", ssid)` umgestellt wird (`WIFI_CLASS_ABI.md` §6 markiert
-  ihn bereits als die Stelle).
-- **Die Schreibstelle:** der `store /sys/config/wifi_psk <pass>`-Intent
-  (`intent/net.rs:288`, `intent/system.rs:1687`, Hilfetext) → neuer
-  `wlan`-Intent-Unterbefehl, der `npk_secret_put("net", …)` ruft.
-- **`intent/history.rs:21`** führt `sys/config/wifi_psk` schon als „zu heiß für
-  die Platte" (aus dem Verlauf gefiltert) — der Filter bleibt, der Pfad ändert
-  sich.
-- **Host-ABI:** neue Fns in `host_core.rs` + beide ABI-Wege; `KEYSTORE`-Right
-  (oder Wiederverwendung `NETCTL` für die net-Klasse) in `capability.rs`.
-- **`is_trust_critical_path`** (`wasm.rs:1238`): der Keystore-Präfix wird dort
-  (oder im FS-Resolver) als „nicht über den generischen Pfad auflösbar"
-  verankert — zusammen mit dem F-H3-Fix (`.system`/`sys/config`), der ohnehin
-  ansteht.
+Nichts Netzfähiges läuft vor dem Disk-Unlock — das ist Absicht. Ablauf:
+**Platte entsperren → Login → autostart lädt `wifid` → Verbindung.** Es gibt
+**kein Pre-Login-Netz.**
+
+Der **Geräteschlüssel** ist ein **domänen-getrennter Subkey aus dem
+npkFS-Disk-Masterkey** (HKDF/BLAKE3-Ableitung mit Label „vault-system"). Er ist
+nach dem Disk-Unlock verfügbar. Wichtig: das Vault-Modul bekommt **nie den rohen
+Disk-Masterkey**, nur diesen Subkey über einen schmalen, ihm vorbehaltenen
+Kernel-Aufruf — kompromittiertes Modul leakt dann nur den Vault-System-Subkey.
 
 ---
 
-## 4. Spannungsfeld Boot vs. Login
+## 4. Besitzverhältnis (Option A — beschlossen)
 
-WLAN verbindet heute teils vor dem Login (OTA, NTP). Ein rein login-gebundener
-Vault (Option C) würde das verklemmen. Richtung: **zwei Secret-Klassen mit zwei
-Wrap-Keys** — `net`/Geräte-Secrets an einen beim Boot verfügbaren
-Geräteschlüssel (heute: der npkFS-`master_key`), `app`/Nutzer-Secrets an den
-Login. So bleibt der Netz-Bringup möglich, während App-Passwörter erst nach Auth
-lesbar sind. Nicht entschieden; hier nur benannt, damit C nicht naiv gebaut wird.
+Hält den Kernel schlank, das Tool pflegt sich separat.
 
----
+- **Kernel = File-Wächter + Cap-Broker + Subkey-Geber, sonst nichts.**
+  - schützt `sys/vault` in `is_trust_critical_path` (nur der Vault liest ihn roh);
+  - prüft die Capability, wenn eine App ein System-Credential anfragt;
+  - gibt dem Vault den domänen-getrennten Geräte-Subkey.
+- **Vault-Modul = Krypto + Policy + GUI.** Hält die DEKs nur solange entsperrt,
+  setzt die Policy (§5) durch, rendert das GUI (§6).
 
-## 5. On-Disk-Impact — kein Reformat
+**Start: bei Bedarf, nicht im autostart einsortiert.** Der Vault ist kein
+autostart-Eintrag (Reihenfolge-Abhängigkeiten sind fragil), sondern ein Dienst,
+den der **Kernel beim ersten Secret-Zugriff hochzieht** — exakt wie der Picker
+heute demand-gespawnt wird (`host_core.rs` spawnt `sys/wasm/<picker>` beim
+`npk_pick`). Ablauf:
 
-Der Keystore ist **Code-only** (neue Host-Fns + gegateter Präfix + Right). Das
-npkFS-Format ändert sich nicht — ein Secret ist weiterhin ein AEAD-Objekt, nur
-an einem Pfad, den der generische Layer nicht auflöst. Bestehende Installation
-läuft weiter (normaler Kernel-`update`). Die eine bestehende
-`sys/config/wifi_psk` wird **nicht migriert**, sondern einmal per `wlan`-Intent
-neu gesetzt (Projekt-Policy: ein Nutzer, kein Migrationscode) und die alte Datei
-gelöscht. Das deckt sich mit `NPKFS_SECURITY_REVIEW.md` §8 (F-M3-Zeile:
-„berührt nur die PSK-Datei, kein Reformat").
+1. `wifid` (autostart, `NETCTL`) → `request("net", ssid)` an den Kernel-Broker.
+2. Kernel prüft `NETCTL`, zieht den Vault-Dienst hoch, falls nicht da, leitet weiter.
+3. Vault holt den Geräte-Subkey, entsperrt die System-DEK, leitet die PMK ab,
+   gibt sie an `wifid`.
 
-Login-Wrap (Option C) bleibt ebenfalls Code-only, solange keine neuen
-persistenten Header-Felder nötig werden.
-
----
-
-## 6. Offene Entscheidungen
-
-1. Option A vs. B (Empfehlung: B mit A als Speicherdetail).
-2. Eigene `KEYSTORE`-Right oder Wiederverwendung `NETCTL` für die net-Klasse?
-3. Option C jetzt mitdenken (zwei Wrap-Keys) oder später?
-4. Namensraum: `sys/keystore/<class>/<name>` oder flach pro Klasse?
-5. Reicht WLAN v1 (eine net-Klasse), oder von Anfang an app-Secrets mitdenken
-   (Browser-Passwörter, vgl. `beak`-Cookies)?
+Order-unabhängig: die Anfrage **zieht den Vault hoch**. Danach bleibt er resident.
+Der System-Tier braucht dafür **keine** User-Interaktion. **Notnagel** (nur falls
+der Demand-Launch beim ersten WLAN je zu träge wäre): Kernel bedient den
+System-Tier direkt, Modul nur fürs GUI — zieht Krypto in den Kernel, daher nicht
+die erste Wahl.
 
 ---
 
-## 7. Querverweise
+## 5. Access-Policy: nutzen ≠ anzeigen ≠ verwalten
 
-- `NPKFS_SECURITY_REVIEW.md` §5 F-M3 (PSK welt-lesbar), F-M4 (Picker-Grant),
-  Fund 2 (`own_config`-Ausnahme) — die Lücken, die der Keystore schließt.
-- `docs/spec/WIFI_CLASS_ABI.md` §1 (Rollentabelle), §6 (Credential-Speicher) —
-  die Zusage, die der Keystore erzwingbar macht.
-- Memory `project_keystore.md` — die ursprüngliche Skizze (2026-06-07).
+| Operation | Was nötig ist |
+|---|---|
+| **Verbinden** (wifid nutzt das Netz-Credential) | Capability `NETCTL`. Der Vault gibt **nicht den PSK, sondern die abgeleitete PMK** (PBKDF2 über SSID+PSK, `WIFI_CLASS_ABI` §5). Kompromittiertes `wifid` leakt dann nur einen netzspezifischen Schlüssel, nicht das wiederverwendbare Passwort. |
+| **Anzeigen** (Klartext im GUI zeigen) | **Vault-Passwort** (User-Session entsperrt) — **auch** für System-Credentials. Benutzen ≠ Enthüllen: ein Hintergrund-Tool mit `NETCTL` darf das WLAN-Passwort nutzen, aber nicht auf Schirm/Log ausleiten. |
+| **Erfassen / Ändern** | System-Tier: Capability (z.B. `NETCTL`) **oder** Vault-Passwort im GUI. User-Tier: Vault-Passwort. |
+
+---
+
+## 6. GUI (im v1-Umfang)
+
+Ein WASM-App über den Compositor (wie loft/bar). Modi:
+- **Entsperren:** Vault-Passwort eingeben → User-Tier offen für die Session,
+  **auto-lock** nach Inaktivität / bei Logout.
+- **User-Secrets:** Liste, Hinzufügen/Editieren/Löschen, Enthüllen/Kopieren.
+- **System-Credentials:** Abschnitt für WLAN & Co. — anzeigen (Passwort nötig),
+  erfassen/ändern (schreibt in den System-Tier), ein WLAN-Passwort hier setzen
+  ersetzt den alten `store /sys/config/wifi_psk`-Weg.
+- **Verwaltung:** Vault-Passwort setzen/ändern, Keyslots verwalten (später: MFA-
+  Faktoren, §7).
+
+**Offene Implementierungsfrage:** ein Modul (Dienst-first, GUI als Modus) oder
+zwei (headless Dienst + dünnes GUI-Frontend, das am Dienst andockt)? Lean: **ein
+Modul**, das demand-gespawnt headless startet und beim Launch aus dem Launcher
+zusätzlich ein Fenster zeigt — die Session lebt im Dienst, das GUI ist die Sicht.
+Beim Bauen entscheiden.
+
+---
+
+## 7. MFA — vorgemerkt, Architektur bleibt MFA-ready (nicht v1)
+
+Zwei Sorten, beide vom Modell getragen:
+- **Kryptografische Faktoren** (FIDO2 hmac-secret, Smartcard, Recovery-Key) →
+  zusätzlicher **Keyslot-Input** für die User-DEK. Echter zweiter Faktor.
+- **Verifikationsfaktoren** (TOTP) → das Modul prüft vor dem Entsperren (ein
+  TOTP-Code taugt nicht als stabiler Schlüssel-Input, aber als Gate).
+
+**Synergie (später):** der Vault könnte die Login-MFA-Secrets halten; Geräte-
+Login-MFA wäre dann nur ein weiterer Vault-Nutzer mit Cap. Beim v1-Bau **nicht
+verbauen** (Keyslot-Header erweiterbar lassen, Policy-Enforcement im Modul).
+
+---
+
+## 8. Kernel-ABI (minimal halten)
+
+- `is_trust_critical_path`: `sys/vault` aufnehmen (nur Vault liest roh).
+- **Cap-Broker + Demand-Launch** für Secret-Anfragen (ein schmaler Weg, am
+  Picker-Spawn modelliert).
+- **Geräte-Subkey-Aufruf**, nur dem Vault-Modul erlaubt, liefert den
+  domänen-getrennten „vault-system"-Subkey (nie den rohen Disk-Masterkey).
+
+Mehr nicht im Kernel. Liste/Add/Edit/Anzeige = alles im Modul.
+
+---
+
+## 9. v1-Umfang + Baureihenfolge
+
+**Umfang:** Unterbau + WLAN-Migration + GUI (GUI direkt mit, spart späteren Umbau).
+
+1. **Unterbau:** File-Format + Header mit Keyslots, zwei DEKs, AEAD-Einträge
+   (nutzt das bestehende Keyslot-/AES-256-GCM-Material). `sys/vault` als
+   trust-critical; Geräte-Subkey-Ableitung.
+2. **Kernel-Broker + Demand-Launch + Subkey-Aufruf** (am Picker-Spawn modelliert).
+3. **WLAN-Migration:** `wifid` fragt den Vault statt `npk_fetch("sys/config/
+   wifi_psk")`; Vault liefert PMK. Alt-Datei entfällt (einmal `wlan`-Intent neu;
+   kein Migrationscode — ein Nutzer). Schließt F-M3.
+4. **GUI:** User-Secrets + System-Credential-Verwaltung + Entsperren/auto-lock.
+
+Kein Reformat, alles Kernel-`update` + neues Modul.
+
+---
+
+## 10. Offen / bewusst später
+
+- **Offline-Rollback** (erbt Fund 3 aus `NPKFS_SECURITY_REVIEW.md`): ein
+  Angreifer mit der Platte kann einen alten Vault-Stand zurückspielen. Gehört zu
+  „Metadaten echt authentifizieren", nicht v1.
+- **MFA** (§7) und **Login-Integration** — Architektur bereit, Bau später.
+- **Ein vs. zwei Module** fürs GUI (§6) — beim Bau entscheiden.
+
+---
+
+## 11. Querverweise
+
+- `NPKFS_SECURITY_REVIEW.md` §5 F-M3 (der auslösende Fund), Fund 3 (Rollback).
+- `docs/spec/WIFI_CLASS_ABI.md` §1/§5/§6 (Rollen, PMK-Ableitung, „Treiber sieht
+  nie PSK" — jetzt erzwingbar).
+- `crypto/keyslot.rs`, `security/disk_key.rs` (das wiederverwendete Keyslot-Muster).
+- Memory `project_keystore.md` (ursprüngliche Skizze, jetzt von diesem Paper abgelöst).
