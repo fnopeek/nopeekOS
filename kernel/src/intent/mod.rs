@@ -1894,10 +1894,62 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "cores" | "cpu" => {
             system::intent_cores();
         }
-        "keyvault" => {
-            match args.trim() {
-                "selftest" | "test" => crate::security::keyvault::selftest(),
-                _ => kprintln!("  keyvault selftest"),
+        "keyvault" | "vault" => {
+            use crate::security::keyvault as kv;
+            let mut it = args.trim().splitn(2, ' ');
+            let sub = it.next().unwrap_or("");
+            let rest = it.next().unwrap_or("").trim();
+            match sub {
+                "selftest" | "test" => kv::selftest(),
+                "status" | "" => {
+                    kprintln!("  vault: exists={} user-unlocked={}", kv::exists(), kv::user_unlocked());
+                    let sys = kv::system_list();
+                    if sys.is_empty() { kprintln!("  system entries: (none)"); }
+                    else { for n in &sys { kprintln!("    system: {}", n); } }
+                    if kv::user_unlocked() {
+                        let u = kv::user_list();
+                        if u.is_empty() { kprintln!("  user entries: (none)"); }
+                        else { for n in &u { kprintln!("    user: {}", n); } }
+                    }
+                }
+                "init" => kprintln!("  vault init: {}", if kv::init() { "ok" } else { "FAILED" }),
+                "passphrase" | "setpass" => {
+                    let mut p = rest.splitn(2, ' ');
+                    let a = p.next().unwrap_or("");
+                    let ok = match p.next() {
+                        Some(newp) if !newp.is_empty() => kv::set_passphrase(Some(a.as_bytes()), newp.as_bytes()),
+                        _ => kv::set_passphrase(None, a.as_bytes()),
+                    };
+                    kprintln!("  vault passphrase: {}", if ok { "set" } else { "FAILED" });
+                }
+                "unlock" => kprintln!("  vault unlock: {}", if kv::unlock_user(rest.as_bytes()) { "open" } else { "FAILED" }),
+                "lock" => { kv::lock_user(); kprintln!("  vault locked"); }
+                "set-user" | "setu" => {
+                    let mut p = rest.splitn(2, ' ');
+                    let name = p.next().unwrap_or("");
+                    let val = p.next().unwrap_or("");
+                    kprintln!("  set-user {}: {}", name, if kv::user_set(name, val.as_bytes()) { "ok" } else { "FAILED (locked?)" });
+                }
+                "get-user" | "getu" => match kv::user_get(rest) {
+                    Some(v) => kprintln!("  {} = {}", rest, core::str::from_utf8(&v).unwrap_or("<binary>")),
+                    None => kprintln!("  {}: not found (or locked)", rest),
+                },
+                "set-net" => {
+                    let mut p = rest.splitn(2, ' ');
+                    let ssid = p.next().unwrap_or("");
+                    let psk = p.next().unwrap_or("");
+                    let mut key = alloc::string::String::from("net:");
+                    key.push_str(ssid);
+                    kprintln!("  set-net {}: {}", ssid, if kv::system_set(&key, psk.as_bytes()) { "ok" } else { "FAILED" });
+                }
+                "check-net" | "test-net" => {
+                    // The wifid read path: present and decrypts via the device
+                    // subkey. Prints presence only, never the secret.
+                    let mut key = alloc::string::String::from("net:");
+                    key.push_str(rest);
+                    kprintln!("  net:{}: {}", rest, if kv::system_get(&key).is_some() { "present (decrypts)" } else { "absent" });
+                }
+                _ => kprintln!("  keyvault status|init|passphrase <pw>|unlock <pw>|lock|set-user <n> <v>|get-user <n>|set-net <ssid> <psk>|check-net <ssid>|selftest"),
             }
         }
         "akku" | "battery" | "bat" => {

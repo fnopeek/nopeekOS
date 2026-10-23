@@ -21,7 +21,7 @@ const MAX_BYTES: usize = 16 * 1024;
 /// Markers that make a line too hot for disk — `store /sys/config/wifi_psk
 /// <pass>` is the live example. Such lines stay in the session's ring (Up
 /// still finds them) but never reach the store.
-const SECRET_MARKERS: &[&str] = &["psk", "passwd", "password", "passphrase", "secret"];
+const SECRET_MARKERS: &[&str] = &["psk", "passwd", "password", "passphrase", "secret", "keyvault"];
 
 struct Store {
     /// Oldest first.

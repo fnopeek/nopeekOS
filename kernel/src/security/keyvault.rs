@@ -1,22 +1,27 @@
 //! Keyvault — secrets kept apart from files (docs/plan/KEYSTORE.md).
 //!
-//! One object, two tiers, each with its own DEK:
+//! One object (`sys/vault`), two tiers, each with its own DEK:
 //!   - system tier: DEK wrapped under the device subkey (`crypto::vault_subkey`)
-//!     and, for migration, under the vault passphrase; used after disk unlock,
-//!     gated at use by capability;
-//!   - user tier:   DEK wrapped under the vault passphrase only.
+//!     and, once a passphrase is set, also under it (migration); used after disk
+//!     unlock, gated at use by capability;
+//!   - user tier:   DEK wrapped under the vault passphrase only — exists only
+//!     after the user sets a passphrase.
 //! The device subkey opens only the system DEK; the user DEK needs the
 //! passphrase. Entries are AES-256-GCM under their tier's DEK with the name as
 //! associated data, so an entry cannot be relabeled or read with the wrong DEK.
 //!
-//! This step holds the file format, the crypto engine and a self-test. The
-//! host ABI (sys/vault, cap broker, demand-launch) and the GUI follow.
+//! The kernel is the authority: it holds this engine, reads/writes the object
+//! through npkFS, and holds the unlocked user DEK in a session. Modules and
+//! wifid reach secrets only through this layer (the host ABI follows). The
+//! GUI is a separate step.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::crypto::{self, keyslot};
-use crate::crypto::keyslot::{Slot, SLOT_BYTES};
+use spin::Mutex;
+
+use crate::crypto::keyslot::{self, Slot, SLOT_BYTES};
+use crate::crypto::{self};
 use crate::kprintln;
 
 pub const TIER_SYSTEM: u8 = 0;
@@ -27,6 +32,13 @@ const VERSION: u16 = 1;
 /// magic + version + reserved + three keyslots + entry count.
 const HEADER_LEN: usize = 8 + 2 + 2 + SLOT_BYTES * 3 + 4;
 
+/// The vault object's path. Trust-critical (`wasm::is_trust_critical_path`), so
+/// no app can touch the raw store through the generic FS path.
+const VAULT_OBJECT: &str = "sys/vault";
+
+/// The unlocked user DEK while the user tier is open. None when locked.
+static USER_SESSION: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
 struct Entry {
     tier: u8,
     name: String,
@@ -35,42 +47,70 @@ struct Entry {
 }
 
 /// A parsed, in-memory vault. The DEKs are never stored here — only the
-/// keyslots that wrap them and the per-entry ciphertext.
+/// keyslots that wrap them and the per-entry ciphertext. `sys_pass`/`usr_pass`
+/// are empty (`keyslot::is_empty`) until a passphrase is set.
 pub struct VaultFile {
-    sys_device: Slot, // system DEK under the device subkey
-    sys_pass: Slot,   // system DEK under the vault passphrase (migration/recovery)
-    usr_pass: Slot,   // user DEK under the vault passphrase
+    sys_device: Slot,
+    sys_pass: Slot,
+    usr_pass: Slot,
     entries: Vec<Entry>,
 }
 
 impl VaultFile {
-    /// A fresh, empty vault: two random DEKs, each wrapped in its slots. The
-    /// vault passphrase wraps both DEKs; the device subkey wraps only the
-    /// system DEK.
-    pub fn create(
-        vault_pass: &[u8],
-        device_subkey: &[u8; 32],
-        params: keyslot::Params,
-    ) -> Option<Self> {
+    /// A fresh vault with only the system tier, wrapped under the device
+    /// subkey — no passphrase yet, so WLAN and other system credentials work
+    /// right after disk unlock. The user tier is added by `set_passphrase`.
+    pub fn create(device_subkey: &[u8; 32]) -> Option<Self> {
         let sys_dek = crate::csprng::random_256();
-        let usr_dek = crate::csprng::random_256();
         Some(VaultFile {
             sys_device: keyslot::create_device(device_subkey, &sys_dek)?,
-            sys_pass: keyslot::create(vault_pass, &sys_dek, params)?,
-            usr_pass: keyslot::create(vault_pass, &usr_dek, params)?,
+            sys_pass: [0u8; SLOT_BYTES],
+            usr_pass: [0u8; SLOT_BYTES],
             entries: Vec::new(),
         })
     }
 
-    /// System DEK via the device subkey (the automatic, no-passphrase path).
+    pub fn has_user_tier(&self) -> bool {
+        !keyslot::is_empty(&self.usr_pass)
+    }
+
+    /// Set up the user tier (first passphrase), or change the passphrase. On
+    /// first setup `old` is ignored and a new user DEK is drawn; on a change
+    /// `old` must open the user tier, and both DEKs are re-wrapped under `new`.
+    pub fn set_passphrase(
+        &mut self,
+        device_subkey: &[u8; 32],
+        old: Option<&[u8]>,
+        new: &[u8],
+        params: keyslot::Params,
+    ) -> bool {
+        let Some(sys_dek) = self.unlock_system_device(device_subkey) else {
+            return false;
+        };
+        let user_dek = if self.has_user_tier() {
+            let Some(old) = old else { return false };
+            let Some(d) = self.unlock_user(old) else { return false };
+            d
+        } else {
+            crate::csprng::random_256()
+        };
+        let (Some(sp), Some(up)) = (
+            keyslot::create(new, &sys_dek, params),
+            keyslot::create(new, &user_dek, params),
+        ) else {
+            return false;
+        };
+        self.sys_pass = sp;
+        self.usr_pass = up;
+        true
+    }
+
     pub fn unlock_system_device(&self, device_subkey: &[u8; 32]) -> Option<[u8; 32]> {
         keyslot::unlock_device(&self.sys_device, device_subkey)
     }
-    /// System DEK via the vault passphrase (migration onto a new device).
     pub fn unlock_system_pass(&self, pass: &[u8]) -> Option<[u8; 32]> {
         keyslot::unlock(&self.sys_pass, pass)
     }
-    /// User DEK via the vault passphrase.
     pub fn unlock_user(&self, pass: &[u8]) -> Option<[u8; 32]> {
         keyslot::unlock(&self.usr_pass, pass)
     }
@@ -91,7 +131,7 @@ impl VaultFile {
         if ct.is_empty() {
             return false;
         }
-        let entry = Entry { tier, name: String::from(name), nonce, ct };
+        let entry = Entry { tier, name: name.to_string(), nonce, ct };
         match self.entries.iter_mut().find(|x| x.tier == tier && x.name == name) {
             Some(slot) => *slot = entry,
             None => self.entries.push(entry),
@@ -107,7 +147,6 @@ impl VaultFile {
         crypto::aead_decrypt_aad(dek, &e.nonce, &Self::aad(tier, name), &e.ct)
     }
 
-    /// Entry names in a tier (no decryption needed).
     pub fn names(&self, tier: u8) -> Vec<&str> {
         self.entries
             .iter()
@@ -190,15 +229,140 @@ impl VaultFile {
     }
 }
 
+// ── Persistence + session (the kernel-side keyvault authority) ─────────────
+
+fn load() -> Option<VaultFile> {
+    match crate::npkfs::fetch(VAULT_OBJECT) {
+        Ok((bytes, _)) => VaultFile::parse(&bytes),
+        Err(_) => None,
+    }
+}
+
+fn save(v: &VaultFile) -> bool {
+    crate::npkfs::upsert(VAULT_OBJECT, &v.serialize(), crate::security::capability::CAP_NULL).is_ok()
+}
+
+/// Load the vault, creating a device-only one if it does not exist yet. None
+/// only while the disk is locked (no device subkey).
+fn ensure() -> Option<VaultFile> {
+    if let Some(v) = load() {
+        return Some(v);
+    }
+    let subkey = crate::crypto::vault_subkey()?;
+    let v = VaultFile::create(&subkey)?;
+    save(&v).then_some(v)
+}
+
+/// Argon2 cost for the vault passphrase — the same calibration the disk uses.
+fn params() -> keyslot::Params {
+    keyslot::calibrate()
+}
+
+pub fn exists() -> bool {
+    crate::npkfs::exists(VAULT_OBJECT)
+}
+
+/// Create the vault (device-only system tier) if it does not exist.
+pub fn init() -> bool {
+    ensure().is_some()
+}
+
+/// Set or change the vault passphrase (adds/updates the user tier and the
+/// system migration slot).
+pub fn set_passphrase(old: Option<&[u8]>, new: &[u8]) -> bool {
+    let Some(subkey) = crate::crypto::vault_subkey() else { return false };
+    let Some(mut v) = ensure() else { return false };
+    if !v.set_passphrase(&subkey, old, new, params()) {
+        return false;
+    }
+    save(&v)
+}
+
+/// Open the user tier for this session.
+pub fn unlock_user(pass: &[u8]) -> bool {
+    let Some(v) = load() else { return false };
+    match v.unlock_user(pass) {
+        Some(dek) => {
+            *USER_SESSION.lock() = Some(dek);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Close the user tier: the DEK leaves memory.
+pub fn lock_user() {
+    let mut s = USER_SESSION.lock();
+    if let Some(dek) = s.as_mut() {
+        dek.fill(0);
+    }
+    *s = None;
+}
+
+pub fn user_unlocked() -> bool {
+    USER_SESSION.lock().is_some()
+}
+
+/// Read a user secret. Requires the user tier to be unlocked this session.
+pub fn user_get(name: &str) -> Option<Vec<u8>> {
+    let dek = (*USER_SESSION.lock())?;
+    load()?.get(&dek, TIER_USER, name)
+}
+
+/// Write a user secret. Requires the user tier to be unlocked this session.
+pub fn user_set(name: &str, value: &[u8]) -> bool {
+    let Some(dek) = *USER_SESSION.lock() else { return false };
+    let Some(mut v) = load() else { return false };
+    if !v.set(&dek, TIER_USER, name, value) {
+        return false;
+    }
+    save(&v)
+}
+
+pub fn user_list() -> Vec<String> {
+    match (*USER_SESSION.lock(), load()) {
+        (Some(_), Some(v)) => v.names(TIER_USER).iter().map(|s| s.to_string()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Read a system credential. The device subkey opens the system tier; the
+/// CALLER must have checked the capability for this credential class. None
+/// while the disk is locked or the entry is absent.
+pub fn system_get(name: &str) -> Option<Vec<u8>> {
+    let subkey = crate::crypto::vault_subkey()?;
+    let v = load()?;
+    let dek = v.unlock_system_device(&subkey)?;
+    v.get(&dek, TIER_SYSTEM, name)
+}
+
+/// Write a system credential (creates the vault device-only if needed).
+pub fn system_set(name: &str, value: &[u8]) -> bool {
+    let Some(subkey) = crate::crypto::vault_subkey() else { return false };
+    let Some(mut v) = ensure() else { return false };
+    let Some(dek) = v.unlock_system_device(&subkey) else { return false };
+    if !v.set(&dek, TIER_SYSTEM, name, value) {
+        return false;
+    }
+    save(&v)
+}
+
+pub fn system_list() -> Vec<String> {
+    match load() {
+        Some(v) => v.names(TIER_SYSTEM).iter().map(|s| s.to_string()).collect(),
+        None => Vec::new(),
+    }
+}
+
+// ── Self-test ──────────────────────────────────────────────────────────────
+
 /// Exercise the keyslot layer and the vault file format with test vectors —
 /// no disk object, no stored secret. `keyvault selftest` runs it. A
-/// contiguous-memory shortfall for the Argon2 pass shows as `skip`, not a
-/// failure.
+/// contiguous-memory shortfall for the Argon2 pass shows as `skip`.
 pub fn selftest() {
     let subkey = [0x11u8; 32];
     let dek = [0x22u8; 32];
 
-    // Device-key slot: pure AES-GCM, no allocation.
     let device = match keyslot::create_device(&subkey, &dek) {
         Some(slot) => {
             keyslot::unlock_device(&slot, &subkey) == Some(dek)
@@ -207,40 +371,39 @@ pub fn selftest() {
         None => false,
     };
 
-    // Passphrase slot: small Argon2 params so a diagnostic stays quick.
-    let params = keyslot::Params { m_kib: 1024, t: 1, p: 4 };
-    let passphrase = keyslot::create(b"correct horse battery", &dek, params).map(|slot| {
+    let p = keyslot::Params { m_kib: 1024, t: 1, p: 4 };
+    let passphrase = keyslot::create(b"correct horse battery", &dek, p).map(|slot| {
         keyslot::unlock(&slot, b"correct horse battery") == Some(dek)
             && keyslot::unlock(&slot, b"wrong").is_none()
     });
 
-    // Full vault file: create, add one entry per tier, serialize, re-parse,
-    // unlock each tier, read back. Also check the two invariants that matter:
-    // the system DEK cannot read a user entry, and the vault passphrase also
-    // recovers the system DEK (the migration path). Uses the real device
-    // subkey when the disk is unlocked.
+    // Full vault file: create device-only, add a system entry (no passphrase
+    // needed), set a passphrase, add a user entry, serialize, re-parse, unlock
+    // each tier, read back. Invariants: the system DEK cannot read a user
+    // entry, and the passphrase recovers the system DEK (the migration path).
+    // Uses the real device subkey when the disk is unlocked.
     let device_subkey = crate::crypto::vault_subkey().unwrap_or(subkey);
-    let file = VaultFile::create(b"vault pass", &device_subkey, params).map(|mut v| {
-        let (Some(sys_dek), Some(usr_dek)) =
-            (v.unlock_system_device(&device_subkey), v.unlock_user(b"vault pass"))
-        else {
-            return false;
-        };
+    let file = VaultFile::create(&device_subkey).map(|mut v| {
+        let Some(sys_dek) = v.unlock_system_device(&device_subkey) else { return false };
         v.set(&sys_dek, TIER_SYSTEM, "net:TestNet", b"pmk-material");
+        if !v.set_passphrase(&device_subkey, None, b"vault pass", p) {
+            return false;
+        }
+        let Some(usr_dek) = v.unlock_user(b"vault pass") else { return false };
         v.set(&usr_dek, TIER_USER, "site:example", b"hunter2");
-        let bytes = v.serialize();
-        let Some(p) = VaultFile::parse(&bytes) else { return false };
+
+        let Some(q) = VaultFile::parse(&v.serialize()) else { return false };
         let (Some(sys2), Some(usr2)) =
-            (p.unlock_system_device(&device_subkey), p.unlock_user(b"vault pass"))
+            (q.unlock_system_device(&device_subkey), q.unlock_user(b"vault pass"))
         else {
             return false;
         };
-        p.get(&sys2, TIER_SYSTEM, "net:TestNet").as_deref() == Some(b"pmk-material".as_slice())
-            && p.get(&usr2, TIER_USER, "site:example").as_deref() == Some(b"hunter2".as_slice())
-            && p.get(&sys2, TIER_USER, "site:example").is_none()      // system DEK can't read a user entry
-            && p.unlock_system_pass(b"vault pass") == Some(sys2)      // migration path recovers the system DEK
-            && p.names(TIER_SYSTEM).contains(&"net:TestNet")
-            && p.names(TIER_USER).contains(&"site:example")
+        q.get(&sys2, TIER_SYSTEM, "net:TestNet").as_deref() == Some(b"pmk-material".as_slice())
+            && q.get(&usr2, TIER_USER, "site:example").as_deref() == Some(b"hunter2".as_slice())
+            && q.get(&sys2, TIER_USER, "site:example").is_none()
+            && q.unlock_system_pass(b"vault pass") == Some(sys2)
+            && q.names(TIER_SYSTEM).contains(&"net:TestNet")
+            && q.names(TIER_USER).contains(&"site:example")
     });
 
     let fmt = |o: Option<bool>| match o {

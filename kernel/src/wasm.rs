@@ -1262,6 +1262,12 @@ fn is_trust_critical_path(name: &str) -> bool {
     if c == "sys/config/picker" || c == "sys/config/launcher" {
         return true;
     }
+    // The keyvault object: only the kernel's keyvault layer reads and writes
+    // it. An app must never touch the raw secret store through the generic FS
+    // path — secrets are reached only via the keyvault API, gated per tier.
+    if c == "sys/vault" {
+        return true;
+    }
     // Prefix match on a path segment — a plain `starts_with` would also
     // catch a sibling like `sys/certsomething`, and missing the trailing
     // separator is how this class of guard usually leaks.
