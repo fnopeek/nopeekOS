@@ -101,6 +101,13 @@ pub fn is_running() -> bool {
     EXCHANGE.lock().is_some()
 }
 
+/// The link now goes to another network: the lease, its address and its
+/// gateway belong to the old one. Any exchange in flight is dropped too.
+pub fn forget() {
+    *EXCHANGE.lock() = None;
+    no_lease();
+}
+
 /// Begin a lease. Returns at once.
 pub fn start() -> Start {
     if is_running() {

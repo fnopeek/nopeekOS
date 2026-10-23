@@ -132,6 +132,7 @@ unsafe extern "C" {
     fn npk_wifi_send_event(buf_ptr: i32, len: i32) -> i32;
     fn npk_wifi_poll_event(buf_ptr: i32, max: i32) -> i32;
     fn npk_wifi_known(buf_ptr: i32, max: i32) -> i32;
+    fn npk_wifi_new_network() -> i32;
     fn npk_wifi_poll_request(buf_ptr: i32, max: i32) -> i32;
     fn npk_wifi_publish(buf_ptr: i32, len: i32) -> i32;
     fn npk_wifi_status(buf_ptr: i32, max: i32) -> i32;
@@ -254,6 +255,8 @@ plain! {
     fn gpudev_tt_free = npk_gpudev_tt_free(tt: i32) -> i32;
 
     fn netdev_set_link = npk_netdev_set_link(up: i32) -> i32;
+    /// The WLAN joined another network: a new DHCP lease (`wifid` only).
+    fn wifi_new_network = npk_wifi_new_network() -> i32;
     fn netdev_set_link_state = npk_netdev_set_link_state(carrier: i32, dormant: i32) -> i32;
 
     fn acpi_mem_read = npk_acpi_mem_read(hi: i32, lo: i32) -> i32;

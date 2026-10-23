@@ -355,6 +355,20 @@ pub fn tick_link_and_reconfigure() {
     }
 }
 
+/// The link joined another network on the same interface (the WLAN manager
+/// says so; only it knows). A quick down/up keeps the lease, as roaming
+/// within one network should — a new network needs a new one.
+pub fn network_changed() {
+    // The address belongs to the interface the traffic takes; a WLAN
+    // switch beside a working cable leaves it alone.
+    if netdev::active() != netdev::Active::Wasm {
+        return;
+    }
+    dhcp::forget();
+    DHCP_RETRY_S.store(DHCP_RETRY_MIN_S, Ordering::Relaxed);
+    reconfigure();
+}
+
 /// Seconds until the next unsolicited DHCP attempt, doubled per failure.
 static DHCP_RETRY_S: AtomicU64 = AtomicU64::new(DHCP_RETRY_MIN_S);
 const DHCP_RETRY_MIN_S: u64 = 10;

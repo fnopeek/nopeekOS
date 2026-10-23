@@ -239,6 +239,9 @@ struct Mgr {
     state: State,
     /// The network being joined or joined.
     target: Ssid,
+    /// The network the link last came up on; its DHCP lease is the
+    /// kernel's current one.
+    linked: Ssid,
     bssid: [u8; 6],
     channel: u8,
     /// The level of the joined cell in dBm (scan, then the driver's
@@ -307,6 +310,7 @@ impl Mgr {
             have_scan: false,
             state: State::Idle,
             target: Ssid::EMPTY,
+            linked: Ssid::EMPTY,
             bssid: [0; 6],
             channel: 0,
             rssi: 0,
@@ -617,6 +621,13 @@ impl Mgr {
                 self.auth_failures = 0;
                 self.fast = false;
                 self.error = "";
+                // Another network than the lease came from: the kernel saw
+                // only a short down/up and would keep the old address.
+                if self.linked.n > 0 && self.linked != self.target {
+                    log("[wifid] another network — asking for a new address\n");
+                    npk_sys::wifi_new_network();
+                }
+                self.linked = self.target;
                 self.remember_last();
                 log("[wifid] link up — connected\n");
             }

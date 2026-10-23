@@ -1213,6 +1213,9 @@ host_imports! {
     // and NETCTL. UI side: the `link` tool by name.
     // npk_wifi_known(buf_ptr, max) -> len / -1 / -2 (buffer too small).
     mem fn npk_wifi_known(buf_ptr: i32, max: i32) -> i32;
+    // npk_wifi_new_network() -> 0 / -1 — the link is on another network now:
+    // a new DHCP lease.
+    ctx fn npk_wifi_new_network() -> i32;
     // npk_wifi_poll_request(buf_ptr, max) -> len / -1 — next user request.
     mem fn npk_wifi_poll_request(buf_ptr: i32, max: i32) -> i32;
     // npk_wifi_publish(buf_ptr, len) -> 0 / -1 — the manager's state text.

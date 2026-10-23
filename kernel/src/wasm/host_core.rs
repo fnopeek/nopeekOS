@@ -4535,6 +4535,14 @@ pub(crate) fn npk_wifi_known(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, 
     write_bytes(mem, buf_ptr, &wire)
 }
 
+/// npk_wifi_new_network() -> 0 / -1: the link just came up on a different
+/// network than before; drop the lease and ask for a new one.
+pub(crate) fn npk_wifi_new_network(ctx: &mut HostState) -> i32 {
+    if !is_wifi_manager(ctx) { return -1; }
+    crate::net::network_changed();
+    0
+}
+
 pub(crate) fn npk_wifi_poll_request(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     if !is_wifi_manager(ctx) { return -1; }
     wifi_poll_into(mem, buf_ptr, max, crate::drivers::wifi::poll_request)
