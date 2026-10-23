@@ -54,4 +54,6 @@ pub struct dc {
     pub res_pool: Option<Box<resource_pool>>,
     pub link_count: u32,
     pub versions: dc_versions,
+    /// `hwseq`: the hw-sequencer register bank (`resource_construct` creates it).
+    pub hwseq: Option<Box<crate::dce_hwseq::dce_hwseq>>,
 }

@@ -62,6 +62,7 @@ mod dcn20_optc;
 mod dcn20_stream_encoder;
 mod dcn21_hubp;
 mod dcn21_resource;
+mod virtual_stream_encoder;
 mod dml_structs;
 mod dcn20_fpu;
 mod amdgpu_fence;

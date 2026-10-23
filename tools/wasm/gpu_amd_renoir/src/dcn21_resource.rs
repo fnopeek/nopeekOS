@@ -8,8 +8,15 @@
 use crate::amdgpu_device::amdgpu_device;
 use crate::dc::dc;
 use crate::dc_helper::{dm_read_reg, generic_reg_get};
-use crate::dc_resource::{resource_caps, resource_pool, resource_straps, NO_UNDERLAY_PIPE};
-use crate::dc_types::dc_caps;
+use crate::dc_resource::{
+    resource_caps, resource_pool, resource_straps, stream_enc_slot, update_num_audio,
+    NO_UNDERLAY_PIPE,
+};
+use crate::dc_types::{dc_caps, engine_id};
+use crate::dce_audio::{dce_aud_endpoint_valid, dcn21_create_audio};
+use crate::dce_hwseq::dcn21_hwseq_create;
+use crate::dcn20_stream_encoder::dcn21_stream_encoder_create;
+use crate::virtual_stream_encoder::virtual_stream_encoder_create;
 use crate::regs::{
     CC_DC_PIPE_DIS, DC_PINSTRAPS, DC_PINSTRAPS__DC_PINSTRAPS_AUDIO_MASK,
     DC_PINSTRAPS__DC_PINSTRAPS_AUDIO__SHIFT,
@@ -139,6 +146,68 @@ pub fn read_dce_straps(adev: &amdgpu_device, straps: &mut resource_straps) {
     straps.dc_pinstraps_audio = audio;
 }
 
+/// The DIG engine ids the stream-encoder loop walks (Linux passes the loop
+/// index `i` where an `engine_id` is expected; DIGA is 0).
+const DIG_ENGINE_IDS: [engine_id; 5] = [
+    engine_id::ENGINE_ID_DIGA,
+    engine_id::ENGINE_ID_DIGB,
+    engine_id::ENGINE_ID_DIGC,
+    engine_id::ENGINE_ID_DIGD,
+    engine_id::ENGINE_ID_DIGE,
+];
+
+/// `resource_construct` (core/dc_resource.c), specialised to dcn21's
+/// `res_create_funcs` (read_dce_straps / dcn21_create_audio /
+/// dcn21_stream_encoder_create / dcn21_hwseq_create): create the audio
+/// endpoints, the DIG + virtual stream encoders and the hw sequencer. The
+/// funcs-vtable dispatch (endpoint_valid, the create_* table) is modelled by
+/// calling the concrete dcn21 functions directly.
+pub fn resource_construct(
+    adev: &amdgpu_device,
+    num_virtual_links: u32,
+    dc: &mut dc,
+    pool: &mut resource_pool,
+) -> bool {
+    let caps = pool.res_cap.unwrap();
+    let mut num_audio = caps.num_audio as u32;
+    let mut straps = resource_straps::default();
+
+    read_dce_straps(adev, &mut straps);
+
+    pool.audio_count = 0;
+    update_num_audio(&straps, &mut num_audio, &mut pool.audio_support);
+    let _ = num_audio; // Linux derives it here; this ASIC's loop uses the cap.
+    for i in 0..caps.num_audio as usize {
+        let aud = dcn21_create_audio(i as u32);
+        // aud->funcs->endpoint_valid(aud): stop at the first endpoint with no port.
+        if !dce_aud_endpoint_valid(&aud, adev) {
+            break;
+        }
+        pool.audios[i] = Some(aud);
+        pool.audio_count += 1;
+    }
+
+    pool.stream_enc_count = 0;
+    for i in 0..caps.num_stream_encoder as usize {
+        pool.stream_enc[i] =
+            Some(stream_enc_slot::Dcn10(dcn21_stream_encoder_create(DIG_ENGINE_IDS[i])));
+        pool.stream_enc_count += 1;
+    }
+
+    // hpo_dp_stream_enc / hpo_dp_link_enc / mpc_3dlut are 0 on Renoir.
+
+    dc.caps.dynamic_audio = pool.audio_count < pool.stream_enc_count;
+
+    for _ in 0..num_virtual_links {
+        let idx = pool.stream_enc_count as usize;
+        pool.stream_enc[idx] = Some(stream_enc_slot::Virtual(virtual_stream_encoder_create()));
+        pool.stream_enc_count += 1;
+    }
+
+    dc.hwseq = Some(dcn21_hwseq_create());
+    true
+}
+
 /// `dcn21_resource_construct` (dcn21_resource.c), as far as it is ported: the
 /// pool's resource caps, the `dc->caps` hardcoding, and the first "Create
 /// resources" block — the five combo-PHY clock sources plus the DP-DTO clock
@@ -147,7 +216,12 @@ pub fn read_dce_straps(adev: &amdgpu_device, straps: &mut resource_straps) {
 /// loop honours `read_pipe_fuses`; `ctx->dc_bios->regs = &bios_regs` waits for
 /// bios_parser, and the NULL-checks / `goto create_fail` return come with the
 /// full construct.
-pub fn dcn21_resource_construct(adev: &amdgpu_device, dc: &mut dc, pool: &mut resource_pool) {
+pub fn dcn21_resource_construct(
+    adev: &amdgpu_device,
+    num_virtual_links: u32,
+    dc: &mut dc,
+    pool: &mut resource_pool,
+) {
     let pipe_fuses = read_pipe_fuses(adev);
 
     pool.res_cap = Some(&RES_CAP_RN);
@@ -221,4 +295,10 @@ pub fn dcn21_resource_construct(adev: &amdgpu_device, dc: &mut dc, pool: &mut re
     // The writeback path: one DWBC + one MCIF-WB per `num_dwb`.
     dcn20_dwbc_create(pool);
     dcn20_mmhubbub_create(pool);
+
+    // Audio + stream encoders (DIG + virtual) + the hw sequencer. (Linux routes
+    // these through res_create_funcs; the dcn21 binding is inlined.)
+    resource_construct(adev, num_virtual_links, dc, pool);
+
+    // Still ahead: dml_init_instance + dc->caps.max_planes/planes[]/cap_funcs.
 }

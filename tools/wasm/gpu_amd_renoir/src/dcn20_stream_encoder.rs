@@ -17,10 +17,12 @@ use crate::dc_types::engine_id;
 use crate::regs::*;
 use alloc::boxed::Box;
 
-/// Which `stream_encoder_funcs` vtable the base points at (dcn20_stream_encoder.c).
+/// Which `stream_encoder_funcs` vtable the base points at: the dcn20 encoder
+/// (dcn20_stream_encoder.c) or the virtual encoder (virtual_stream_encoder.c).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum stream_encoder_funcs {
     dcn20_str_enc_funcs,
+    virtual_str_enc_funcs,
 }
 
 /// `struct stream_encoder` (inc/hw/stream_encoder.h): the encoder base. Ported

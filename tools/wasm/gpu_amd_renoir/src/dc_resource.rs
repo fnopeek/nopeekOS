@@ -13,12 +13,22 @@ use crate::dcn20_mmhubbub::dcn20_mmhubbub;
 use crate::dcn20_mpc::dcn20_mpc;
 use crate::dcn20_opp::dcn20_opp;
 use crate::dcn20_optc::optc;
+use crate::dcn20_stream_encoder::{dcn10_stream_encoder, stream_encoder};
 use crate::dcn21_hubp::dcn21_hubp;
+use crate::dce_audio::dce_audio;
 use crate::dce_aux::aux_engine_dce110;
 use crate::dce_clock_source::dce110_clk_src;
 use crate::dce_i2c_hw::dce_i2c_hw;
 use crate::dc_types::MAX_PIPES;
 use alloc::boxed::Box;
+
+/// A `stream_encoder *` slot of the pool: a real DIG encoder (dcn10) or a
+/// virtual one (a bare `stream_encoder`). Linux stores the shared base pointer;
+/// the port keeps the concrete object and tags it.
+pub enum stream_enc_slot {
+    Dcn10(Box<dcn10_stream_encoder>),
+    Virtual(Box<stream_encoder>),
+}
 
 /// `#define MAX_CLOCK_SOURCES` (core_types.h).
 pub const MAX_CLOCK_SOURCES: usize = 7;
@@ -131,6 +141,12 @@ pub struct resource_pool {
     pub engines: [Option<Box<aux_engine_dce110>>; MAX_PIPES],
     /// `hw_i2cs[MAX_PIPES]`: the hardware I2C engines (`num_ddc` used).
     pub hw_i2cs: [Option<Box<dce_i2c_hw>>; MAX_PIPES],
+    /// `stream_enc[MAX_PIPES]`: the stream encoders (DIG + virtual).
+    pub stream_enc: [Option<stream_enc_slot>; MAX_PIPES],
+    /// `audios[MAX_PIPES]`: the audio endpoints (`audio_count` valid).
+    pub audios: [Option<Box<dce_audio>>; MAX_PIPES],
+    /// `audio_support`: which audio outputs the board offers (from the straps).
+    pub audio_support: audio_support,
     /// `res_cap`: the per-ASIC count table (Renoir → `RES_CAP_RN`).
     pub res_cap: Option<&'static resource_caps>,
 }
