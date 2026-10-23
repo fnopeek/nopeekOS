@@ -417,7 +417,7 @@ build_installer() {
     # (produced by a prior release build). The .version file lets
     # `intent::install` and `intent::update::update_all_modules` tell
     # that a bundled module is up to date; without it they redownload.
-    for mod in top debug wallpaper drun dock bar loft spell pick iris snap beak volume tune testdisk aml wifid wifi_ax200 audio_hda; do
+    for mod in top debug wallpaper drun dock bar loft spell pick iris snap beak vault volume tune testdisk aml wifid wifi_ax200 audio_hda; do
         WASM_SRC="$PROJECT_DIR/release/modules/${mod}.wasm"
         VER_SRC="$PROJECT_DIR/release/modules/${mod}.version"
 

@@ -541,6 +541,7 @@ fn is_bundled_module(name: &str) -> bool {
         "pick",
         "iris",
         "snap",
+        "vault",
     ];
     BUNDLED_NAMES.iter().any(|n| *n == name)
 }

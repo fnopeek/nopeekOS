@@ -20,6 +20,18 @@ unsafe extern "C" {
 
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
+
+    // Keyvault — usable only by the signed `vault` GUI module.
+    fn npk_vault_status() -> i32;
+    fn npk_vault_init() -> i32;
+    fn npk_vault_set_passphrase(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
+    fn npk_vault_unlock(pass_ptr: i32, pass_len: i32) -> i32;
+    fn npk_vault_lock() -> i32;
+    fn npk_vault_user_set(name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32) -> i32;
+    fn npk_vault_user_get(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_vault_user_list(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_vault_system_set(name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32) -> i32;
+    fn npk_vault_system_list(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
     fn npk_config_get(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
@@ -327,6 +339,50 @@ pub fn fetch(name: &[u8], buf: &mut [u8]) -> i32 {
 pub fn store(name: &[u8], data: &[u8]) -> i32 {
     // SAFETY: FFI; both ranges are borrowed for the call.
     unsafe { npk_store(name.as_ptr() as i32, name.len() as i32, data.as_ptr() as i32, data.len() as i32) }
+}
+
+// ── Keyvault (docs/plan/KEYSTORE.md) — only the `vault` module may call ──
+
+/// Bits: 1 exists, 2 user tier present, 4 user tier unlocked; -1 if denied.
+pub fn vault_status() -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_vault_status() }
+}
+pub fn vault_init() -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_vault_init() }
+}
+pub fn vault_set_passphrase(old: &[u8], new: &[u8]) -> i32 {
+    // SAFETY: FFI; both ranges are borrowed for the call.
+    unsafe { npk_vault_set_passphrase(old.as_ptr() as i32, old.len() as i32, new.as_ptr() as i32, new.len() as i32) }
+}
+pub fn vault_unlock(pass: &[u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_vault_unlock(pass.as_ptr() as i32, pass.len() as i32) }
+}
+pub fn vault_lock() -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_vault_lock() }
+}
+pub fn vault_user_set(name: &[u8], val: &[u8]) -> i32 {
+    // SAFETY: FFI; both ranges are borrowed for the call.
+    unsafe { npk_vault_user_set(name.as_ptr() as i32, name.len() as i32, val.as_ptr() as i32, val.len() as i32) }
+}
+pub fn vault_user_get(name: &[u8], buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; both ranges are borrowed for the call.
+    unsafe { npk_vault_user_get(name.as_ptr() as i32, name.len() as i32, buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+pub fn vault_user_list(buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_vault_user_list(buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+pub fn vault_system_set(name: &[u8], val: &[u8]) -> i32 {
+    // SAFETY: FFI; both ranges are borrowed for the call.
+    unsafe { npk_vault_system_set(name.as_ptr() as i32, name.len() as i32, val.as_ptr() as i32, val.len() as i32) }
+}
+pub fn vault_system_list(buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_vault_system_list(buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
 pub fn fs_list(prefix: &[u8], out: &mut [u8], recursive: bool) -> i32 {

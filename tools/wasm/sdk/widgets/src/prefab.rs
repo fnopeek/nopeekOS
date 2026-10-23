@@ -619,8 +619,7 @@ pub fn button(label: &str, style: ButtonStyle, on_click: ActionId) -> Widget {
 }
 
 /// Semantic kind for `input`. Search adds a leading magnifier icon;
-/// Password is a placeholder for masked rendering once the rasterizer
-/// supports it (today renders as plain text).
+/// Password renders masked (`Modifier::Mask`) — one bullet per character.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputKind {
     Text,
@@ -668,11 +667,14 @@ fn input_maybe_focused(
     trailing: Option<Widget>,
     autofocus: bool,
 ) -> Widget {
+    let mut in_mods: Vec<Modifier> = Vec::new();
+    if autofocus { in_mods.push(Modifier::Autofocus); }
+    if matches!(kind, InputKind::Password) { in_mods.push(Modifier::Mask); }
     let raw = Widget::Input {
         value:       value.to_string(),
         placeholder: placeholder.to_string(),
         on_submit,
-        modifiers:   if autofocus { vec![Modifier::Autofocus] } else { vec![] },
+        modifiers:   in_mods,
     };
     // No background — the input blends with the dialog so the search bar
     // reads as part of the panel rather than as a stacked card on top.

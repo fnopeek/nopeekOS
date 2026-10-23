@@ -37,6 +37,28 @@ pub fn fetch(name: &str, buf: &mut [u8]) -> Option<usize> { len(sys::fetch(name.
 /// Write `data` as file `name`. False if refused.
 pub fn store(name: &str, data: &[u8]) -> bool { sys::store(name.as_bytes(), data) == 0 }
 
+// ── Keyvault (docs/plan/KEYSTORE.md) — only the `vault` module may call ──
+pub fn vault_exists() -> bool { let s = sys::vault_status(); s >= 0 && s & 1 != 0 }
+pub fn vault_user_present() -> bool { let s = sys::vault_status(); s >= 0 && s & 2 != 0 }
+pub fn vault_unlocked() -> bool { let s = sys::vault_status(); s >= 0 && s & 4 != 0 }
+pub fn vault_init() -> bool { sys::vault_init() == 0 }
+pub fn vault_set_passphrase(old: &str, new: &str) -> bool {
+    sys::vault_set_passphrase(old.as_bytes(), new.as_bytes()) == 0
+}
+pub fn vault_unlock(pass: &str) -> bool { sys::vault_unlock(pass.as_bytes()) == 0 }
+pub fn vault_lock() { sys::vault_lock(); }
+pub fn vault_user_set(name: &str, val: &str) -> bool {
+    sys::vault_user_set(name.as_bytes(), val.as_bytes()) == 0
+}
+pub fn vault_user_get(name: &str, buf: &mut [u8]) -> Option<usize> {
+    len(sys::vault_user_get(name.as_bytes(), buf))
+}
+pub fn vault_user_list(buf: &mut [u8]) -> Option<usize> { len(sys::vault_user_list(buf)) }
+pub fn vault_system_set(name: &str, val: &str) -> bool {
+    sys::vault_system_set(name.as_bytes(), val.as_bytes()) == 0
+}
+pub fn vault_system_list(buf: &mut [u8]) -> Option<usize> { len(sys::vault_system_list(buf)) }
+
 /// List `prefix` into `out` (the kernel's entry encoding); `Some(n)` bytes.
 pub fn fs_list(prefix: &str, out: &mut [u8], recursive: bool) -> Option<usize> {
     len(sys::fs_list(prefix.as_bytes(), out, recursive))

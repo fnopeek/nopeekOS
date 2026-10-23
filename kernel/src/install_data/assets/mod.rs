@@ -182,6 +182,11 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         bytes:   include_bytes!("beak.wasm"),
         version: Some(include_str!("beak.version")),
     },
+    BundledAsset {
+        fs_path: "sys/wasm/vault",
+        bytes:   include_bytes!("vault.wasm"),
+        version: Some(include_str!("vault.version")),
+    },
 
     // MicroVM Linux-app images (firefox, …) are not bundled into the
     // installer: they arrive via OTA from GitHub Releases on the first
