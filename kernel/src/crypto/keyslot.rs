@@ -31,6 +31,7 @@ pub const SLOT_BYTES: usize = 128;
 pub type Slot = [u8; SLOT_BYTES];
 
 const KIND_PASSPHRASE: u8 = 1;
+const KIND_DEVICE: u8 = 2;
 const AAD_END: usize = 32;
 const WRAPPED: core::ops::Range<usize> = 44..92;
 
@@ -135,6 +136,39 @@ pub fn unlock(slot: &Slot, pass: &[u8]) -> Option<[u8; 32]> {
     let salt: [u8; 16] = slot[16..32].try_into().ok()?;
     let kek = argon2id(pass, &salt, params)?;
     let cipher = Aes256Gcm::new_from_slice(&kek).ok()?;
+    let nonce = Nonce::from(<[u8; 12]>::try_from(&slot[32..44]).ok()?);
+    let pt = cipher.decrypt(&nonce, Payload { msg: &slot[WRAPPED], aad: &slot[..AAD_END] }).ok()?;
+    <[u8; 32]>::try_from(pt.as_slice()).ok()
+}
+
+/// A device-key slot for `dek`: the key-encryption key is `kek` directly (a
+/// high-entropy subkey, e.g. `crypto::vault_subkey`), so there is no Argon2
+/// pass — nothing here needs stretching. Same 128-byte layout; the Argon2
+/// parameter and salt fields stay zero and ride along in the GCM associated
+/// data (bytes 0..32), so the kind cannot be flipped without the unwrap
+/// failing. Used by the keyvault's system tier.
+pub fn create_device(kek: &[u8; 32], dek: &[u8; 32]) -> Option<Slot> {
+    let mut slot = [0u8; SLOT_BYTES];
+    slot[0] = KIND_DEVICE;
+    let rnd = crate::csprng::random_256();
+    slot[32..44].copy_from_slice(&rnd[..12]);
+    let cipher = Aes256Gcm::new_from_slice(kek).ok()?;
+    let nonce = Nonce::from(<[u8; 12]>::try_from(&slot[32..44]).ok()?);
+    let ct = cipher.encrypt(&nonce, Payload { msg: dek, aad: &slot[..AAD_END] }).ok()?;
+    if ct.len() != WRAPPED.len() {
+        return None;
+    }
+    slot[WRAPPED].copy_from_slice(&ct);
+    Some(slot)
+}
+
+/// The DEK, if `kek` opens this device-key slot. None for any other kind, so a
+/// device key can never unwrap a passphrase slot (and vice versa).
+pub fn unlock_device(slot: &Slot, kek: &[u8; 32]) -> Option<[u8; 32]> {
+    if slot[0] != KIND_DEVICE {
+        return None;
+    }
+    let cipher = Aes256Gcm::new_from_slice(kek).ok()?;
     let nonce = Nonce::from(<[u8; 12]>::try_from(&slot[32..44]).ok()?);
     let pt = cipher.decrypt(&nonce, Payload { msg: &slot[WRAPPED], aad: &slot[..AAD_END] }).ok()?;
     <[u8; 32]>::try_from(pt.as_slice()).ok()

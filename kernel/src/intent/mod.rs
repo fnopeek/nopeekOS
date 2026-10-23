@@ -1894,6 +1894,12 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "cores" | "cpu" => {
             system::intent_cores();
         }
+        "keyvault" => {
+            match args.trim() {
+                "selftest" | "test" => crate::security::keyvault::selftest(),
+                _ => kprintln!("  keyvault selftest"),
+            }
+        }
         "akku" | "battery" | "bat" => {
             system::intent_battery();
         }

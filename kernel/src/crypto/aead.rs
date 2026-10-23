@@ -28,13 +28,13 @@ use spin::Mutex;
 struct DiskKeys {
     data: [u8; 32],
     address: [u8; 32],
+    vault: [u8; 32],
 }
 
 static DISK_KEYS: Mutex<Option<DiskKeys>> = Mutex::new(None);
 
 const CTX_DATA: &str = "nopeekOS npkfs data key v1";
 const CTX_ADDRESS: &str = "nopeekOS npkfs address key v1";
-#[allow(dead_code)]
 const CTX_VAULT: &str = "nopeekOS vault key v1";
 
 /// Unlock: derive the working keys from the DEK.
@@ -42,6 +42,7 @@ pub fn set_disk_key(dek: &[u8; 32]) {
     *DISK_KEYS.lock() = Some(DiskKeys {
         data: blake3::derive_key(CTX_DATA, dek),
         address: blake3::derive_key(CTX_ADDRESS, dek),
+        vault: blake3::derive_key(CTX_VAULT, dek),
     });
 }
 
@@ -52,6 +53,15 @@ pub fn clear_disk_key() {
 
 pub fn disk_unlocked() -> bool {
     DISK_KEYS.lock().is_some()
+}
+
+/// The keyvault's device subkey: a domain-separated key derived from the disk
+/// DEK (CTX_VAULT), available while the disk is unlocked. The raw DEK never
+/// leaves this module. The keyvault's system tier wraps its DEK under this, so
+/// a capability holder can use system credentials after disk unlock without a
+/// vault passphrase. None while locked.
+pub fn vault_subkey() -> Option<[u8; 32]> {
+    DISK_KEYS.lock().as_ref().map(|k| k.vault)
 }
 
 /// A hasher that yields content addresses, or None while locked.

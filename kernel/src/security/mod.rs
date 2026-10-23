@@ -6,3 +6,4 @@ pub mod capability;
 pub mod audit;
 pub mod csprng;
 pub mod disk_key;
+pub mod keyvault;
