@@ -857,6 +857,14 @@ fn command_loop(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut linked: Option<vif::Vif> = None;
     let mut caps = sta::PeerCaps::default();
 
+    // Registered before the first connect, as `ieee80211_register_hw` does
+    // at probe: the kernel opens the control channel to `wifid` only to a
+    // registered NIC, and without it `DRIVER_UP` would be refused. The link
+    // stays down until `AUTHORIZED`.
+    if host::netdev_register(&e.addr) < 0 {
+        host::say("[rtl8822ce] netdev_register FEHLGESCHLAGEN — kein Kanal zu wifid\n");
+        return;
+    }
     send_event_retry(&[EV_DRIVER_UP]);
     host::print("[rtl8822ce] bereit — wifid waehlt das Netz\n");
 
@@ -5038,12 +5046,6 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         csa_zurueck: None,
         csa_frist_ms: 0,
     };
-
-    // Without registration the IP stack does not see the data channel.
-    let reg = host::netdev_register(&mac);
-    host::print("  netdev_register ");
-    host::print(if reg >= 0 { "ok" } else { "FEHLGESCHLAGEN" });
-    host::print("\n");
 
     // `EV_READY` = [0x83][ap_mac 6][our_mac 6]: `wifid` builds its
     // supplicant for exactly this cell.

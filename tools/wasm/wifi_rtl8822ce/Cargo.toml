@@ -1,6 +1,6 @@
 [package]
 name = "wifi_rtl8822ce"
-version = "0.72.0"
+version = "0.72.1"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 
