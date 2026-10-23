@@ -262,6 +262,11 @@ pub fn exists() -> bool {
     crate::npkfs::exists(VAULT_OBJECT)
 }
 
+/// Whether a user tier (a passphrase) has been set up.
+pub fn user_tier_present() -> bool {
+    load().map(|v| v.has_user_tier()).unwrap_or(false)
+}
+
 /// Create the vault (device-only system tier) if it does not exist.
 pub fn init() -> bool {
     ensure().is_some()

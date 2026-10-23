@@ -2307,6 +2307,143 @@ pub(crate) fn npk_fetch(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
     write_bytes(mem, buf_ptr, &content[..content.len().min(max)])
 }
 
+// ── Keyvault (docs/plan/KEYSTORE.md) ────────────────────────────────────
+//
+// The kernel is the vault authority (crate::security::keyvault). These are
+// usable only by the signed `vault` GUI module, checked by its kernel-assigned
+// name (not spoofable), so an unlocked user tier is NOT ambient: no other app
+// can read user secrets while the GUI holds it open.
+
+fn is_vault_module(ctx: &HostState) -> bool {
+    ctx.module_name == "vault"
+}
+
+/// Raw guest bytes `[ptr, ptr+len)`, bounds-checked. None on overflow or OOB.
+fn read_mem(mem: &[u8], ptr: i32, len: i32) -> Option<&[u8]> {
+    let len = glen(len)?;
+    let start = usize::try_from(ptr).ok()?;
+    let end = start.checked_add(len)?;
+    if end > mem.len() {
+        return None;
+    }
+    Some(&mem[start..end])
+}
+
+pub(crate) fn npk_vault_status(ctx: &mut HostState) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    use crate::security::keyvault as kv;
+    let mut s = 0;
+    if kv::exists() { s |= 1; }
+    if kv::user_tier_present() { s |= 2; }
+    if kv::user_unlocked() { s |= 4; }
+    s
+}
+
+pub(crate) fn npk_vault_init(ctx: &mut HostState) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    if crate::security::keyvault::init() { 0 } else { -1 }
+}
+
+pub(crate) fn npk_vault_set_passphrase(
+    mem: &mut [u8], ctx: &mut HostState,
+    old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32,
+) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    let Some(new) = read_mem(mem, new_ptr, new_len) else { return -1 };
+    let old = if old_len > 0 {
+        match read_mem(mem, old_ptr, old_len) {
+            Some(o) => Some(o),
+            None => return -1,
+        }
+    } else {
+        None
+    };
+    if crate::security::keyvault::set_passphrase(old, new) { 0 } else { -1 }
+}
+
+pub(crate) fn npk_vault_unlock(mem: &mut [u8], ctx: &mut HostState, pass_ptr: i32, pass_len: i32) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    let Some(pass) = read_mem(mem, pass_ptr, pass_len) else { return -1 };
+    if crate::security::keyvault::unlock_user(pass) { 0 } else { -1 }
+}
+
+pub(crate) fn npk_vault_lock(ctx: &mut HostState) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    crate::security::keyvault::lock_user();
+    0
+}
+
+pub(crate) fn npk_vault_user_set(
+    mem: &mut [u8], ctx: &mut HostState,
+    name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32,
+) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    let (Some(name), Some(val)) =
+        (read_str(mem, name_ptr, name_len), read_mem(mem, val_ptr, val_len))
+    else {
+        return -1;
+    };
+    if crate::security::keyvault::user_set(&name, val) { 0 } else { -1 }
+}
+
+pub(crate) fn npk_vault_user_get(
+    mem: &mut [u8], ctx: &mut HostState,
+    name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32,
+) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    let Some(name) = read_str(mem, name_ptr, name_len) else { return -1 };
+    let Some(val) = crate::security::keyvault::user_get(&name) else { return -1 };
+    let Some(max) = glen(buf_max) else { return -1 };
+    write_bytes(mem, buf_ptr, &val[..val.len().min(max)])
+}
+
+pub(crate) fn npk_vault_user_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    let joined = crate::security::keyvault::user_list().join("\n");
+    let Some(max) = glen(buf_max) else { return -1 };
+    write_bytes(mem, buf_ptr, &joined.as_bytes()[..joined.len().min(max)])
+}
+
+pub(crate) fn npk_vault_system_set(
+    mem: &mut [u8], ctx: &mut HostState,
+    name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32,
+) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    let (Some(name), Some(val)) =
+        (read_str(mem, name_ptr, name_len), read_mem(mem, val_ptr, val_len))
+    else {
+        return -1;
+    };
+    if crate::security::keyvault::system_set(&name, val) { 0 } else { -1 }
+}
+
+pub(crate) fn npk_vault_system_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
+    if !is_vault_module(ctx) {
+        return -1;
+    }
+    let joined = crate::security::keyvault::system_list().join("\n");
+    let Some(max) = glen(buf_max) else { return -1 };
+    write_bytes(mem, buf_ptr, &joined.as_bytes()[..joined.len().min(max)])
+}
+
 pub(crate) fn npk_http_response_headers(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::NET).is_err() {

@@ -306,6 +306,38 @@ host_imports! {
     // npk_store(name_ptr, name_len, data_ptr, data_len) -> 0 or -1
     mem fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
 
+    // ── Keyvault (docs/plan/KEYSTORE.md) ───────────────────────────────
+    //
+    // The kernel is the vault authority (crate::security::keyvault). These
+    // are usable only by the signed `vault` GUI module (checked by the
+    // kernel-assigned module name, not spoofable), so the unlocked user tier
+    // is NOT ambient — no other app can read user secrets while the GUI holds
+    // it open. System credentials for drivers go through their capability
+    // (NETCTL), added with the wifid migration, not here.
+
+    // npk_vault_status() -> bits: 1 exists, 2 user tier present, 4 unlocked; -1 denied
+    ctx fn npk_vault_status() -> i32;
+    // npk_vault_init() -> 0 or -1. Create a device-only vault if none exists.
+    ctx fn npk_vault_init() -> i32;
+    // npk_vault_set_passphrase(old_ptr, old_len, new_ptr, new_len) -> 0 or -1.
+    // old_len 0 = first setup; otherwise a change.
+    mem fn npk_vault_set_passphrase(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
+    // npk_vault_unlock(pass_ptr, pass_len) -> 0 or -1. Opens the user tier.
+    mem fn npk_vault_unlock(pass_ptr: i32, pass_len: i32) -> i32;
+    // npk_vault_lock() -> 0. The user DEK leaves memory.
+    ctx fn npk_vault_lock() -> i32;
+    // npk_vault_user_set(name_ptr, name_len, val_ptr, val_len) -> 0 or -1.
+    mem fn npk_vault_user_set(name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32) -> i32;
+    // npk_vault_user_get(name_ptr, name_len, buf_ptr, buf_max) -> bytes or -1.
+    mem fn npk_vault_user_get(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    // npk_vault_user_list(buf_ptr, buf_max) -> len or -1. Newline-separated names.
+    mem fn npk_vault_user_list(buf_ptr: i32, buf_max: i32) -> i32;
+    // npk_vault_system_set(name_ptr, name_len, val_ptr, val_len) -> 0 or -1.
+    // Write a system credential (e.g. "net:<ssid>") from the GUI.
+    mem fn npk_vault_system_set(name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32) -> i32;
+    // npk_vault_system_list(buf_ptr, buf_max) -> len or -1. Names only, never values.
+    mem fn npk_vault_system_list(buf_ptr: i32, buf_max: i32) -> i32;
+
     // npk_home_dir(buf_ptr, buf_max) -> i32
     // Write the current user's home directory ("home/<name>", or "home"
     // if unset) into the caller's buffer; returns bytes written or -1.
