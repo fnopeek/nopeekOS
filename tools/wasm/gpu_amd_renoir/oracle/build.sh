@@ -672,18 +672,62 @@ xargs -P "$(nproc)" -I{} sh -c 'f={}; gcc $DCHW_CF -c "$f" -o "$B/dchw_obj/$(ech
     $X "$AMD/amdgpu/amdgpu_gart.h" '#AMDGPU_GPU_PAGE_SHIFT'
     $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" mmhub_read_system_context
 } > "$B/dchw_dm_funcs.c"
+# The kernel half for link detection (oracle/kdrm): DRM's EDID and DP-AUX
+# helpers and the DM functions between them and DC, compiled unchanged
+# against the kernel's own headers with userspace code generation. Of it
+# only the DM helpers DC calls and the connector set-up stay global; the DC
+# types that cross are measured on both sides first.
+K=$B/kdrm
+mkdir -p "$K"
+KCC="gcc -nostdinc -I $L/arch/x86/include -I $L/arch/x86/include/generated -I $L/include -I $L/arch/x86/include/uapi \
+    -I $L/arch/x86/include/generated/uapi -I $L/include/uapi -I $L/include/generated/uapi \
+    -include $L/include/linux/compiler-version.h -include $L/include/linux/kconfig.h \
+    -include $L/include/linux/compiler_types.h -D__KERNEL__ -std=gnu11 -fshort-wchar -funsigned-char -fno-common \
+    -fno-strict-aliasing -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -m64 -mno-80387 -mno-fp-ret-in-387 \
+    -mno-red-zone -fno-PIE -O1 -fno-stack-protector -fno-delete-null-pointer-checks -fno-strict-overflow -w"
+KMOD="-DKBUILD_MODFILE=\"drm\" -DKBUILD_BASENAME=\"kdrm\" -DKBUILD_MODNAME=\"drm\" -D__KBUILD_MODNAME=kmod_drm"
+KAMD=""
+for d in amdgpu display display/amdgpu_dm display/dc display/dc/inc display/dc/inc/hw display/dmub/inc display/include \
+    display/modules/inc display/modules/freesync display/modules/color display/modules/info_packet display/modules/power \
+    display/modules/hdcp include include/asic_reg pm/inc pm/swsmu/inc pm/swsmu/inc/pmfw_if acp/include amdkfd; do
+    KAMD="$KAMD -I $AMD/$d"
+done
+{
+    $X "$AMD/display/amdgpu_dm/amdgpu_dm_helpers.c" edid_extract_panel_id apply_edid_quirks dm_helpers_parse_edid_caps \
+        dm_helpers_dp_read_dpcd dm_helpers_dp_write_dpcd dm_helpers_probe_acpi_edid dm_helpers_read_acpi_edid \
+        dm_helpers_read_local_edid dm_helpers_init_panel_settings dm_helpers_override_panel_settings
+    $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" to_drm_connector_type amdgpu_dm_i2c_xfer amdgpu_dm_i2c_func \
+        amdgpu_dm_i2c_algo
+    $X "$AMD/display/amdgpu_dm/amdgpu_dm_mst_types.c" dm_dp_aux_transfer |
+        sed 's/adev = ddc->ctx->driver_context;/adev = kdrm_adev;/'
+} > "$K/kdrm_extracted.c"
+$KCC $KMOD $KAMD -I "$K" -c "$HERE/kdrm/kdrm_bridge.c" -o "$K/kdrm_bridge.o"
+$KCC $KMOD -c "$HERE/kdrm/kshim.c" -o "$K/kshim.o"
+for f in drivers/gpu/drm/drm_edid drivers/gpu/drm/display/drm_dp_helper drivers/gpu/drm/drm_displayid \
+    drivers/gpu/drm/drm_modes lib/ctype; do
+    $KCC $KMOD -c "$L/$f.c" -o "$K/${f##*/}.o"
+done
+ld -r -o "$K/kworld_all.o" "$K/kdrm_bridge.o" "$K/kshim.o" "$K/drm_edid.o" "$K/drm_dp_helper.o" \
+    "$K/drm_displayid.o" "$K/drm_modes.o" "$K/ctype.o"
+printf '%s\n' kdrm_connector_create dm_helpers_read_local_edid dm_helpers_parse_edid_caps dm_helpers_dp_read_dpcd \
+    dm_helpers_dp_write_dpcd dm_helpers_init_panel_settings dm_helpers_override_panel_settings > "$K/keep"
+objcopy --keep-global-symbols="$K/keep" "$K/kworld_all.o" "$K/kworld.o"
+$KCC $KAMD -c "$HERE/kdrm/layout.c" -o "$K/layout_kernel.o"
+gcc $DCHW_CF -c "$HERE/kdrm/layout.c" -o "$K/layout_shim.o"
+gcc -DLAYOUT_MAIN "$HERE/kdrm/layout.c" "$K/layout_kernel.o" "$K/layout_shim.o" -no-pie -o "$K/layout"
+"$K/layout"
 gcc $DCHW_CF -c "$HERE/main_dchw.c" -o "$B/main_dchw.o"
-ld -r -o "$B/dchw_all.o" "$B"/dchw_obj/*.o $DMUB_O "$B/atom.o" "$B/main_dchw.o"
+ld -r -o "$B/dchw_all.o" "$B"/dchw_obj/*.o $DMUB_O "$B/atom.o" "$B/main_dchw.o" "$K/kworld.o"
 nm -D --defined-only /lib/libc.so.6 | awk '{sub(/@.*/, "", $3); print $3}' | sort -u > "$B/libc_syms"
 {
     echo '#include <stdio.h>'
     echo '#include <stdlib.h>'
-    nm -u "$B/dchw_all.o" | awk '{print $2}' | grep -v '^_GLOBAL_OFFSET_TABLE_$' | sort -u |
+    nm -u "$B/dchw_all.o" | awk '{print $2}' | grep -v '^_GLOBAL_OFFSET_TABLE_$\|^__popcount' | sort -u |
         comm -23 - "$B/libc_syms" |
         awk '{printf "void %s(void) { fprintf(stderr, \"oracle: unreached %s\\n\"); abort(); }\n", $1, $1}'
 } > "$B/dchw_stubs.c"
 gcc -c -w "$B/dchw_stubs.c" -o "$B/dchw_stubs.o"
-gcc "$B/dchw_all.o" "$B/dchw_stubs.o" -lm -o "$B/oracle_dchw"
+gcc -no-pie "$B/dchw_all.o" "$B/dchw_stubs.o" -lm -o "$B/oracle_dchw"
 
 SMUF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -include $HERE/shim/linux/types.h -I $HERE/shim_smu -I $HERE/shim -I $B \
     -I $AMD/pm/swsmu/inc -I $AMD/pm/swsmu -I $AMD/pm/swsmu/inc/pmfw_if -I $AMD/pm/swsmu/smu12 -I $AMD/include \

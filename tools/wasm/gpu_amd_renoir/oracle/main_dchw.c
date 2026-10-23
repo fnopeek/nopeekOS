@@ -12,6 +12,11 @@
  * port reads back.
  * After it, as amdgpu_dm_init goes on: mmhub_read_system_context on a
  * Renoir-like GMC layout and dc_setup_system_context.
+ * argv[3] = detect then runs amdgpu_dm_initialize_drm_device's link loop
+ * (dc_link_detect_connection_type, dc_link_detect at boot) against the AUX
+ * engines of dp_sink.c, an eDP panel on the first link, every other HPD
+ * low; EDID and DPCD go through the kernel half (kdrm/), DRM's and DM's own
+ * code, back into DC.
  * Every register write is printed; the commands DC hands the DMCUB are
  * recorded where it hands them to the DM, then printed with the state
  * init_hw leaves. hostcheck/dchw_check.rs prints the same for the port. */
@@ -29,10 +34,15 @@
 #include "renoir_ip_offset.h"
 #include "mp/mp_12_0_0_offset.h"
 #include "dcn/dcn_2_1_0_offset.h"
+#include "dcn/dcn_2_1_0_sh_mask.h"
 #include "dcn10/dcn10_optc.h"
 #include "dcn20/dcn20_opp.h"
 #include "hw_sequencer_private.h"
 #include "hwss/dce/dce_hwseq.h"
+#include "dce/dce_aux.h"
+#include "gpio/hw_gpio.h"
+#include "gpio/hw_hpd.h"
+#include <drm/display/drm_dp.h>
 
 #define mutex_init(m) ((void)(m))
 #define drm_dbg_driver(d, ...) do { } while (0)
@@ -85,8 +95,14 @@ static void set(u32 reg, u32 val)
 	reg_val[i] = val;
 }
 
+#include "dp_sink.c"
+
 static u32 rd(u32 reg)
 {
+	u32 v;
+
+	if (aux_engine_read(reg, &v))
+		return v;
 	int i = find(reg);
 	return i < 0 ? unset_rule(reg) : reg_val[i];
 }
@@ -98,6 +114,8 @@ static u32 rd(u32 reg)
 static void wr(u32 reg, u32 val)
 {
 	printf("write reg 0x%x = 0x%x\n", reg, val);
+	if (aux_engine_write(reg, val))
+		return;
 	set(reg, val);
 	if (reg == MP1_REG(MP1_SMN_C2PMSG_67)) {
 		set(MP1_REG(MP1_SMN_C2PMSG_83), 0x373700);
@@ -193,6 +211,8 @@ static u64 amdgpu_gmc_pd_addr(struct amdgpu_bo *bo)
 }
 #include "dchw_dm_funcs.c"
 
+void kdrm_connector_create(struct dc_link *link);
+
 static void preset(u32 reg, u32 val)
 {
 	printf("preset reg 0x%x = 0x%x\n", reg, val);
@@ -228,6 +248,7 @@ static void no_write(struct card_info *info, u32 reg, u32 val) {}
 
 int main(int argc, char **argv)
 {
+	setvbuf(stdout, NULL, _IOLBF, 0);
 	FILE *f = fopen(argv[1], "rb");
 	static unsigned char bios[1 << 20];
 	fread(bios, 1, sizeof(bios), f);
@@ -303,6 +324,52 @@ int main(int argc, char **argv)
 		printf("num_vmids %d\n", dc_setup_system_context(adev.dm.dc, &pa_config));
 		printf("riommu_active %d vm_pa_config valid %d\n", dc->res_pool->hubbub->riommu_active,
 		       dc->vm_pa_config.valid);
+	}
+
+	/* argv[3] = detect: amdgpu_dm_initialize_drm_device's loop over the
+	 * links, on the eDP panel with every other HPD low. */
+	if (argc > 3 && !strcmp(argv[3], "detect")) {
+		for (int i = 0; i < AUX_ENGINES && dc->res_pool->engines[i]; i++) {
+			aux_engines[i].r = container_of(dc->res_pool->engines[i], struct aux_engine_dce110, base)->regs;
+			n_aux_engines = i + 1;
+		}
+		panel_sink_init();
+		aux_engines[dc->links[0]->ddc_hw_inst].sink = true;
+		for (int l = 1; l < dc->link_count; l++)
+			if (dc->links[l]->hpd_gpio)
+				preset(HW_HPD_FROM_BASE(dc->links[l]->hpd_gpio->pin)->regs->int_status, 0);
+		for (int l = 0; l < dc->link_count; l++) {
+			struct dc_link *link = dc->links[l];
+			enum dc_connection_type new_connection_type = dc_connection_none;
+
+			if (link->connector_signal == SIGNAL_TYPE_VIRTUAL)
+				continue;
+			kdrm_connector_create(link);
+			printf("detect link %d\n", l);
+			if (!dc_link_detect_connection_type(link, &new_connection_type))
+				printf("KMS: Failed to detect connector\n");
+			printf("dc_link_detect %d\n", dc_link_detect(link, DETECT_REASON_BOOT));
+		}
+		for (int l = 0; l < dc->link_count; l++) {
+			struct dc_link *link = dc->links[l];
+			struct dc_sink *sink = link->local_sink;
+
+			printf("link %d type %d signal %d", l, link->type, sink ? sink->sink_signal : -1);
+			printf(" cap lanes %d rate %d spread %d verified lanes %d rate %d\n", link->reported_link_cap.lane_count,
+			       link->reported_link_cap.link_rate, link->reported_link_cap.link_spread,
+			       link->verified_link_cap.lane_count, link->verified_link_cap.link_rate);
+			if (!sink)
+				continue;
+			struct dc_edid_caps *c = &sink->edid_caps;
+			printf("  sink edid %u mfg 0x%x prod 0x%x serial 0x%x week %d year %d name '%s' hdmi %d audio %d"
+			       " speakers 0x%x\n", sink->dc_edid.length, c->manufacturer_id, c->product_id,
+			       c->serial_number, c->manufacture_week, c->manufacture_year, c->display_name, c->edid_hdmi,
+			       c->audio_mode_count, c->speaker_flags);
+			printf("  dpcd rev 0x%x lanes 0x%x spread 0x%x ext_caps 0x%x sink_count %d branch %d\n",
+			       link->dpcd_caps.dpcd_rev.raw, link->dpcd_caps.max_ln_count.raw,
+			       link->dpcd_caps.max_down_spread.raw, link->dpcd_sink_ext_caps.raw,
+			       link->dpcd_caps.sink_count.raw, link->dpcd_caps.is_branch_dev);
+		}
 	}
 
 	for (int c = 0; c < n_dmub_cmds; c++) {
