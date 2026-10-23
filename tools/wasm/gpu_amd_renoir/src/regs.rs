@@ -22249,3 +22249,13 @@ pub const DC_PINSTRAPS: u32 = 0x5d40;
 pub const DC_PINSTRAPS__DC_PINSTRAPS_AUDIO__SHIFT: u32 = 0xe;
 /// include/asic_reg/dce/dce_10_0_sh_mask.h:3087
 pub const DC_PINSTRAPS__DC_PINSTRAPS_AUDIO_MASK: u32 = 0xc000;
+
+// DC audio endpoint_valid: the indexed AZALIA codec pin-control register
+
+// (HD-audio codec register indices; generation-independent, from the dce headers).
+/// include/asic_reg/dce/dce_10_0_d.h:6852
+pub const ixAZALIA_F0_CODEC_PIN_CONTROL_RESPONSE_CONFIGURATION_DEFAULT: u32 = 0x56;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:13867
+pub const AZALIA_F0_CODEC_PIN_CONTROL_RESPONSE_CONFIGURATION_DEFAULT__PORT_CONNECTIVITY__SHIFT: u32 = 0x1e;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:13866
+pub const AZALIA_F0_CODEC_PIN_CONTROL_RESPONSE_CONFIGURATION_DEFAULT__PORT_CONNECTIVITY_MASK: u32 = 0xc0000000;

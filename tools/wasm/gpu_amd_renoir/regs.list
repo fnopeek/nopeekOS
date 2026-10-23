@@ -11135,3 +11135,9 @@ DC_IP_REQUEST_CNTL__IP_REQUEST_EN_MASK @ ../display/dc/resource/dcn21/dcn21_reso
 DC_PINSTRAPS = BASE(mmDC_PINSTRAPS_BASE_IDX) + mmDC_PINSTRAPS @ ../display/dc/resource/dcn21/dcn21_resource.c
 DC_PINSTRAPS__DC_PINSTRAPS_AUDIO__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
 DC_PINSTRAPS__DC_PINSTRAPS_AUDIO_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+
+# DC audio endpoint_valid: the indexed AZALIA codec pin-control register
+# (HD-audio codec register indices; generation-independent, from the dce headers).
+ixAZALIA_F0_CODEC_PIN_CONTROL_RESPONSE_CONFIGURATION_DEFAULT @ ../display/dc/dce/dce_audio.c
+AZALIA_F0_CODEC_PIN_CONTROL_RESPONSE_CONFIGURATION_DEFAULT__PORT_CONNECTIVITY__SHIFT @ ../display/dc/dce/dce_audio.c
+AZALIA_F0_CODEC_PIN_CONTROL_RESPONSE_CONFIGURATION_DEFAULT__PORT_CONNECTIVITY_MASK @ ../display/dc/dce/dce_audio.c
