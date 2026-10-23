@@ -22,6 +22,7 @@ use crate::dcn20_mpc::dcn21_mpc_create;
 use crate::dcn20_opp::dcn21_opp_create;
 use crate::dcn20_optc::dcn21_timing_generator_create;
 use crate::dcn21_hubp::dcn21_hubp_create;
+use crate::dce_aux::dcn21_aux_engine_create;
 use crate::dce_clock_source::{clock_source_id, dcn21_clock_source_create, CLK_SRC_REGS};
 use crate::dce_i2c_hw::dcn21_i2c_hw_create;
 
@@ -183,9 +184,10 @@ pub fn dcn21_resource_construct(adev: &amdgpu_device, dc: &mut dc, pool: &mut re
         j += 1;
     }
 
-    // Per ddc: aux engine (engines[i], a later block) + hw i2c (hw_i2cs[i]);
-    // sw_i2cs stays None.
+    // Per ddc: aux engine (engines[i]) + hw i2c (hw_i2cs[i]); sw_i2cs stays None.
+    let ext_aux = dc.caps.extended_aux_timeout_support;
     for i in 0..RES_CAP_RN.num_ddc as usize {
+        pool.engines[i] = Some(dcn21_aux_engine_create(i as u32, ext_aux));
         pool.hw_i2cs[i] = Some(dcn21_i2c_hw_create(&dc.ctx.dc_bios, i as u32));
     }
 

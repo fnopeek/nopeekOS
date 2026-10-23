@@ -14,6 +14,7 @@ use crate::dcn20_mpc::dcn20_mpc;
 use crate::dcn20_opp::dcn20_opp;
 use crate::dcn20_optc::optc;
 use crate::dcn21_hubp::dcn21_hubp;
+use crate::dce_aux::aux_engine_dce110;
 use crate::dce_clock_source::dce110_clk_src;
 use crate::dce_i2c_hw::dce_i2c_hw;
 use crate::dc_types::MAX_PIPES;
@@ -89,6 +90,8 @@ pub struct resource_pool {
     pub dwbc: [Option<Box<dcn20_dwbc>>; MAX_DWB_PIPES],
     /// `mcif_wb[MAX_DWB_PIPES]`: the writeback hubs, one per DWBC.
     pub mcif_wb: [Option<Box<dcn20_mmhubbub>>; MAX_DWB_PIPES],
+    /// `engines[MAX_PIPES]`: the DP AUX engines (`num_ddc` used).
+    pub engines: [Option<Box<aux_engine_dce110>>; MAX_PIPES],
     /// `hw_i2cs[MAX_PIPES]`: the hardware I2C engines (`num_ddc` used).
     pub hw_i2cs: [Option<Box<dce_i2c_hw>>; MAX_PIPES],
     /// `res_cap`: the per-ASIC count table (Renoir → `RES_CAP_RN`).

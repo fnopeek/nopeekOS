@@ -142,6 +142,20 @@ BLOCKS = {
         inst_ids=[1, 2, 3, 4, 5], const_prefix="I2C",
         regs_struct="dce_i2c_registers", shift_struct="dce_i2c_shift", mask_struct="dce_i2c_mask",
     ),
+    # The aux engines of the ddc loop (5, DP_AUX0..4). AUX_COMMON_REG_LIST0 is 7
+    # SRI registers; the resource file's wrapper adds three non-SRI fields
+    # (AUXN_IMPCAL/AUXP_IMPCAL = 0, AUX_RESET_MASK = a mask constant) that this
+    # generator does not emit — they are hand-added in dce_aux.rs. The mask list
+    # uses AUX_SF (body identical to SF).
+    "aux": dict(
+        headers=["dce/dce_aux.h"],
+        prefixes=["AUX_", "DCN_AUX"],
+        reg_calls=["AUX_COMMON_REG_LIST0({i})"],
+        shift_calls=["DCN_AUX_MASK_SH_LIST(__SHIFT)"],
+        mask_calls=["DCN_AUX_MASK_SH_LIST(_MASK)"],
+        instances=5, const_prefix="AUX",
+        regs_struct="dce110_aux_registers", shift_struct="dce110_aux_registers_shift", mask_struct="dce110_aux_registers_mask",
+    ),
     "mpc": dict(
         single=True,
         headers=["mpc/dcn10/dcn10_mpc.h", "mpc/dcn20/dcn20_mpc.h"],

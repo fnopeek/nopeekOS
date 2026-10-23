@@ -20123,3 +20123,151 @@ pub const DC_I2C_DDC1_SPEED__DC_I2C_DDC1_START_STOP_TIMING_CNTL_MASK: u32 = 0x30
 pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_SEND_RESET_LENGTH__SHIFT: u32 = 0x2;
 /// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:36218
 pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_SEND_RESET_LENGTH_MASK: u32 = 0x4;
+
+// DC aux: dce110_aux_registers absolute offsets per pipe instance
+
+// (AUX_COMMON_REG_LIST0({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmDP_AUX0_AUX_CONTROL_BASE_IDX) + mmDP_AUX0_AUX_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX0_AUX_CONTROL: u32 = 0x5410;
+/// The value of `BASE(mmDP_AUX0_AUX_ARB_CONTROL_BASE_IDX) + mmDP_AUX0_AUX_ARB_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX0_AUX_ARB_CONTROL: u32 = 0x5412;
+/// The value of `BASE(mmDP_AUX0_AUX_SW_DATA_BASE_IDX) + mmDP_AUX0_AUX_SW_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX0_AUX_SW_DATA: u32 = 0x5416;
+/// The value of `BASE(mmDP_AUX0_AUX_SW_CONTROL_BASE_IDX) + mmDP_AUX0_AUX_SW_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX0_AUX_SW_CONTROL: u32 = 0x5411;
+/// The value of `BASE(mmDP_AUX0_AUX_INTERRUPT_CONTROL_BASE_IDX) + mmDP_AUX0_AUX_INTERRUPT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX0_AUX_INTERRUPT_CONTROL: u32 = 0x5413;
+/// The value of `BASE(mmDP_AUX0_AUX_DPHY_RX_CONTROL1_BASE_IDX) + mmDP_AUX0_AUX_DPHY_RX_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX0_AUX_DPHY_RX_CONTROL1: u32 = 0x541b;
+/// The value of `BASE(mmDP_AUX0_AUX_SW_STATUS_BASE_IDX) + mmDP_AUX0_AUX_SW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX0_AUX_SW_STATUS: u32 = 0x5414;
+/// The value of `BASE(mmDP_AUX1_AUX_CONTROL_BASE_IDX) + mmDP_AUX1_AUX_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX1_AUX_CONTROL: u32 = 0x542c;
+/// The value of `BASE(mmDP_AUX1_AUX_ARB_CONTROL_BASE_IDX) + mmDP_AUX1_AUX_ARB_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX1_AUX_ARB_CONTROL: u32 = 0x542e;
+/// The value of `BASE(mmDP_AUX1_AUX_SW_DATA_BASE_IDX) + mmDP_AUX1_AUX_SW_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX1_AUX_SW_DATA: u32 = 0x5432;
+/// The value of `BASE(mmDP_AUX1_AUX_SW_CONTROL_BASE_IDX) + mmDP_AUX1_AUX_SW_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX1_AUX_SW_CONTROL: u32 = 0x542d;
+/// The value of `BASE(mmDP_AUX1_AUX_INTERRUPT_CONTROL_BASE_IDX) + mmDP_AUX1_AUX_INTERRUPT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX1_AUX_INTERRUPT_CONTROL: u32 = 0x542f;
+/// The value of `BASE(mmDP_AUX1_AUX_DPHY_RX_CONTROL1_BASE_IDX) + mmDP_AUX1_AUX_DPHY_RX_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX1_AUX_DPHY_RX_CONTROL1: u32 = 0x5437;
+/// The value of `BASE(mmDP_AUX1_AUX_SW_STATUS_BASE_IDX) + mmDP_AUX1_AUX_SW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX1_AUX_SW_STATUS: u32 = 0x5430;
+/// The value of `BASE(mmDP_AUX2_AUX_CONTROL_BASE_IDX) + mmDP_AUX2_AUX_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX2_AUX_CONTROL: u32 = 0x5448;
+/// The value of `BASE(mmDP_AUX2_AUX_ARB_CONTROL_BASE_IDX) + mmDP_AUX2_AUX_ARB_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX2_AUX_ARB_CONTROL: u32 = 0x544a;
+/// The value of `BASE(mmDP_AUX2_AUX_SW_DATA_BASE_IDX) + mmDP_AUX2_AUX_SW_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX2_AUX_SW_DATA: u32 = 0x544e;
+/// The value of `BASE(mmDP_AUX2_AUX_SW_CONTROL_BASE_IDX) + mmDP_AUX2_AUX_SW_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX2_AUX_SW_CONTROL: u32 = 0x5449;
+/// The value of `BASE(mmDP_AUX2_AUX_INTERRUPT_CONTROL_BASE_IDX) + mmDP_AUX2_AUX_INTERRUPT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX2_AUX_INTERRUPT_CONTROL: u32 = 0x544b;
+/// The value of `BASE(mmDP_AUX2_AUX_DPHY_RX_CONTROL1_BASE_IDX) + mmDP_AUX2_AUX_DPHY_RX_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX2_AUX_DPHY_RX_CONTROL1: u32 = 0x5453;
+/// The value of `BASE(mmDP_AUX2_AUX_SW_STATUS_BASE_IDX) + mmDP_AUX2_AUX_SW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX2_AUX_SW_STATUS: u32 = 0x544c;
+/// The value of `BASE(mmDP_AUX3_AUX_CONTROL_BASE_IDX) + mmDP_AUX3_AUX_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX3_AUX_CONTROL: u32 = 0x5464;
+/// The value of `BASE(mmDP_AUX3_AUX_ARB_CONTROL_BASE_IDX) + mmDP_AUX3_AUX_ARB_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX3_AUX_ARB_CONTROL: u32 = 0x5466;
+/// The value of `BASE(mmDP_AUX3_AUX_SW_DATA_BASE_IDX) + mmDP_AUX3_AUX_SW_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX3_AUX_SW_DATA: u32 = 0x546a;
+/// The value of `BASE(mmDP_AUX3_AUX_SW_CONTROL_BASE_IDX) + mmDP_AUX3_AUX_SW_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX3_AUX_SW_CONTROL: u32 = 0x5465;
+/// The value of `BASE(mmDP_AUX3_AUX_INTERRUPT_CONTROL_BASE_IDX) + mmDP_AUX3_AUX_INTERRUPT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX3_AUX_INTERRUPT_CONTROL: u32 = 0x5467;
+/// The value of `BASE(mmDP_AUX3_AUX_DPHY_RX_CONTROL1_BASE_IDX) + mmDP_AUX3_AUX_DPHY_RX_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX3_AUX_DPHY_RX_CONTROL1: u32 = 0x546f;
+/// The value of `BASE(mmDP_AUX3_AUX_SW_STATUS_BASE_IDX) + mmDP_AUX3_AUX_SW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX3_AUX_SW_STATUS: u32 = 0x5468;
+/// The value of `BASE(mmDP_AUX4_AUX_CONTROL_BASE_IDX) + mmDP_AUX4_AUX_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX4_AUX_CONTROL: u32 = 0x5480;
+/// The value of `BASE(mmDP_AUX4_AUX_ARB_CONTROL_BASE_IDX) + mmDP_AUX4_AUX_ARB_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX4_AUX_ARB_CONTROL: u32 = 0x5482;
+/// The value of `BASE(mmDP_AUX4_AUX_SW_DATA_BASE_IDX) + mmDP_AUX4_AUX_SW_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX4_AUX_SW_DATA: u32 = 0x5486;
+/// The value of `BASE(mmDP_AUX4_AUX_SW_CONTROL_BASE_IDX) + mmDP_AUX4_AUX_SW_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX4_AUX_SW_CONTROL: u32 = 0x5481;
+/// The value of `BASE(mmDP_AUX4_AUX_INTERRUPT_CONTROL_BASE_IDX) + mmDP_AUX4_AUX_INTERRUPT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX4_AUX_INTERRUPT_CONTROL: u32 = 0x5483;
+/// The value of `BASE(mmDP_AUX4_AUX_DPHY_RX_CONTROL1_BASE_IDX) + mmDP_AUX4_AUX_DPHY_RX_CONTROL1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX4_AUX_DPHY_RX_CONTROL1: u32 = 0x548b;
+/// The value of `BASE(mmDP_AUX4_AUX_SW_STATUS_BASE_IDX) + mmDP_AUX4_AUX_SW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const AUX4_AUX_SW_STATUS: u32 = 0x5484;
+
+// DC aux field shifts/masks (DCN_AUX_MASK_SH_LIST(__SHIFT))
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35342
+pub const DP_AUX0_AUX_CONTROL__AUX_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35355
+pub const DP_AUX0_AUX_CONTROL__AUX_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35343
+pub const DP_AUX0_AUX_CONTROL__AUX_RESET__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35356
+pub const DP_AUX0_AUX_CONTROL__AUX_RESET_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35344
+pub const DP_AUX0_AUX_CONTROL__AUX_RESET_DONE__SHIFT: u32 = 0x5;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35357
+pub const DP_AUX0_AUX_CONTROL__AUX_RESET_DONE_MASK: u32 = 0x20;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35379
+pub const DP_AUX0_AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35389
+pub const DP_AUX0_AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS_MASK: u32 = 0xc;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35382
+pub const DP_AUX0_AUX_ARB_CONTROL__AUX_SW_USE_AUX_REG_REQ__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35392
+pub const DP_AUX0_AUX_ARB_CONTROL__AUX_SW_USE_AUX_REG_REQ_MASK: u32 = 0x10000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35384
+pub const DP_AUX0_AUX_ARB_CONTROL__AUX_SW_DONE_USING_AUX_REG__SHIFT: u32 = 0x11;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35394
+pub const DP_AUX0_AUX_ARB_CONTROL__AUX_SW_DONE_USING_AUX_REG_MASK: u32 = 0x20000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35371
+pub const DP_AUX0_AUX_SW_CONTROL__AUX_SW_START_DELAY__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35375
+pub const DP_AUX0_AUX_SW_CONTROL__AUX_SW_START_DELAY_MASK: u32 = 0xf0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35372
+pub const DP_AUX0_AUX_SW_CONTROL__AUX_SW_WR_BYTES__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35376
+pub const DP_AUX0_AUX_SW_CONTROL__AUX_SW_WR_BYTES_MASK: u32 = 0x1f0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35369
+pub const DP_AUX0_AUX_SW_CONTROL__AUX_SW_GO__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35373
+pub const DP_AUX0_AUX_SW_CONTROL__AUX_SW_GO_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35505
+pub const DP_AUX0_AUX_SW_DATA__AUX_SW_AUTOINCREMENT_DISABLE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35509
+pub const DP_AUX0_AUX_SW_DATA__AUX_SW_AUTOINCREMENT_DISABLE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35502
+pub const DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_RW__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35506
+pub const DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_RW_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35504
+pub const DP_AUX0_AUX_SW_DATA__AUX_SW_INDEX__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35508
+pub const DP_AUX0_AUX_SW_DATA__AUX_SW_INDEX_MASK: u32 = 0x1f0000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35503
+pub const DP_AUX0_AUX_SW_DATA__AUX_SW_DATA__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35507
+pub const DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_MASK: u32 = 0xff00;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35440
+pub const DP_AUX0_AUX_SW_STATUS__AUX_SW_REPLY_BYTE_COUNT__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35458
+pub const DP_AUX0_AUX_SW_STATUS__AUX_SW_REPLY_BYTE_COUNT_MASK: u32 = 0x1f000000;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35424
+pub const DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35442
+pub const DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35400
+pub const DP_AUX0_AUX_INTERRUPT_CONTROL__AUX_SW_DONE_ACK__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_12_0_sh_mask.h:35412
+pub const DP_AUX0_AUX_INTERRUPT_CONTROL__AUX_SW_DONE_ACK_MASK: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:37480
+pub const DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:37483
+pub const DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MASK: u32 = 0x7f00;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:37481
+pub const DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL__SHIFT: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:37484
+pub const DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL_MASK: u32 = 0x18000;

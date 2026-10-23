@@ -10067,3 +10067,78 @@ DC_I2C_DDC1_SPEED__DC_I2C_DDC1_START_STOP_TIMING_CNTL__SHIFT @ ../display/dc/res
 DC_I2C_DDC1_SPEED__DC_I2C_DDC1_START_STOP_TIMING_CNTL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
 DC_I2C_DDC1_SETUP__DC_I2C_DDC1_SEND_RESET_LENGTH__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
 DC_I2C_DDC1_SETUP__DC_I2C_DDC1_SEND_RESET_LENGTH_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+
+# DC aux: dce110_aux_registers absolute offsets per pipe instance
+# (AUX_COMMON_REG_LIST0({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+AUX0_AUX_CONTROL = BASE(mmDP_AUX0_AUX_CONTROL_BASE_IDX) + mmDP_AUX0_AUX_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX0_AUX_ARB_CONTROL = BASE(mmDP_AUX0_AUX_ARB_CONTROL_BASE_IDX) + mmDP_AUX0_AUX_ARB_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX0_AUX_SW_DATA = BASE(mmDP_AUX0_AUX_SW_DATA_BASE_IDX) + mmDP_AUX0_AUX_SW_DATA @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX0_AUX_SW_CONTROL = BASE(mmDP_AUX0_AUX_SW_CONTROL_BASE_IDX) + mmDP_AUX0_AUX_SW_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX0_AUX_INTERRUPT_CONTROL = BASE(mmDP_AUX0_AUX_INTERRUPT_CONTROL_BASE_IDX) + mmDP_AUX0_AUX_INTERRUPT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX0_AUX_DPHY_RX_CONTROL1 = BASE(mmDP_AUX0_AUX_DPHY_RX_CONTROL1_BASE_IDX) + mmDP_AUX0_AUX_DPHY_RX_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX0_AUX_SW_STATUS = BASE(mmDP_AUX0_AUX_SW_STATUS_BASE_IDX) + mmDP_AUX0_AUX_SW_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX1_AUX_CONTROL = BASE(mmDP_AUX1_AUX_CONTROL_BASE_IDX) + mmDP_AUX1_AUX_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX1_AUX_ARB_CONTROL = BASE(mmDP_AUX1_AUX_ARB_CONTROL_BASE_IDX) + mmDP_AUX1_AUX_ARB_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX1_AUX_SW_DATA = BASE(mmDP_AUX1_AUX_SW_DATA_BASE_IDX) + mmDP_AUX1_AUX_SW_DATA @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX1_AUX_SW_CONTROL = BASE(mmDP_AUX1_AUX_SW_CONTROL_BASE_IDX) + mmDP_AUX1_AUX_SW_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX1_AUX_INTERRUPT_CONTROL = BASE(mmDP_AUX1_AUX_INTERRUPT_CONTROL_BASE_IDX) + mmDP_AUX1_AUX_INTERRUPT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX1_AUX_DPHY_RX_CONTROL1 = BASE(mmDP_AUX1_AUX_DPHY_RX_CONTROL1_BASE_IDX) + mmDP_AUX1_AUX_DPHY_RX_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX1_AUX_SW_STATUS = BASE(mmDP_AUX1_AUX_SW_STATUS_BASE_IDX) + mmDP_AUX1_AUX_SW_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX2_AUX_CONTROL = BASE(mmDP_AUX2_AUX_CONTROL_BASE_IDX) + mmDP_AUX2_AUX_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX2_AUX_ARB_CONTROL = BASE(mmDP_AUX2_AUX_ARB_CONTROL_BASE_IDX) + mmDP_AUX2_AUX_ARB_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX2_AUX_SW_DATA = BASE(mmDP_AUX2_AUX_SW_DATA_BASE_IDX) + mmDP_AUX2_AUX_SW_DATA @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX2_AUX_SW_CONTROL = BASE(mmDP_AUX2_AUX_SW_CONTROL_BASE_IDX) + mmDP_AUX2_AUX_SW_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX2_AUX_INTERRUPT_CONTROL = BASE(mmDP_AUX2_AUX_INTERRUPT_CONTROL_BASE_IDX) + mmDP_AUX2_AUX_INTERRUPT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX2_AUX_DPHY_RX_CONTROL1 = BASE(mmDP_AUX2_AUX_DPHY_RX_CONTROL1_BASE_IDX) + mmDP_AUX2_AUX_DPHY_RX_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX2_AUX_SW_STATUS = BASE(mmDP_AUX2_AUX_SW_STATUS_BASE_IDX) + mmDP_AUX2_AUX_SW_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX3_AUX_CONTROL = BASE(mmDP_AUX3_AUX_CONTROL_BASE_IDX) + mmDP_AUX3_AUX_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX3_AUX_ARB_CONTROL = BASE(mmDP_AUX3_AUX_ARB_CONTROL_BASE_IDX) + mmDP_AUX3_AUX_ARB_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX3_AUX_SW_DATA = BASE(mmDP_AUX3_AUX_SW_DATA_BASE_IDX) + mmDP_AUX3_AUX_SW_DATA @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX3_AUX_SW_CONTROL = BASE(mmDP_AUX3_AUX_SW_CONTROL_BASE_IDX) + mmDP_AUX3_AUX_SW_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX3_AUX_INTERRUPT_CONTROL = BASE(mmDP_AUX3_AUX_INTERRUPT_CONTROL_BASE_IDX) + mmDP_AUX3_AUX_INTERRUPT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX3_AUX_DPHY_RX_CONTROL1 = BASE(mmDP_AUX3_AUX_DPHY_RX_CONTROL1_BASE_IDX) + mmDP_AUX3_AUX_DPHY_RX_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX3_AUX_SW_STATUS = BASE(mmDP_AUX3_AUX_SW_STATUS_BASE_IDX) + mmDP_AUX3_AUX_SW_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX4_AUX_CONTROL = BASE(mmDP_AUX4_AUX_CONTROL_BASE_IDX) + mmDP_AUX4_AUX_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX4_AUX_ARB_CONTROL = BASE(mmDP_AUX4_AUX_ARB_CONTROL_BASE_IDX) + mmDP_AUX4_AUX_ARB_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX4_AUX_SW_DATA = BASE(mmDP_AUX4_AUX_SW_DATA_BASE_IDX) + mmDP_AUX4_AUX_SW_DATA @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX4_AUX_SW_CONTROL = BASE(mmDP_AUX4_AUX_SW_CONTROL_BASE_IDX) + mmDP_AUX4_AUX_SW_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX4_AUX_INTERRUPT_CONTROL = BASE(mmDP_AUX4_AUX_INTERRUPT_CONTROL_BASE_IDX) + mmDP_AUX4_AUX_INTERRUPT_CONTROL @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX4_AUX_DPHY_RX_CONTROL1 = BASE(mmDP_AUX4_AUX_DPHY_RX_CONTROL1_BASE_IDX) + mmDP_AUX4_AUX_DPHY_RX_CONTROL1 @ ../display/dc/resource/dcn21/dcn21_resource.c
+AUX4_AUX_SW_STATUS = BASE(mmDP_AUX4_AUX_SW_STATUS_BASE_IDX) + mmDP_AUX4_AUX_SW_STATUS @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC aux field shifts/masks (DCN_AUX_MASK_SH_LIST(__SHIFT))
+DP_AUX0_AUX_CONTROL__AUX_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_CONTROL__AUX_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_CONTROL__AUX_RESET__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_CONTROL__AUX_RESET_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_CONTROL__AUX_RESET_DONE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_CONTROL__AUX_RESET_DONE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_ARB_CONTROL__AUX_SW_USE_AUX_REG_REQ__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_ARB_CONTROL__AUX_SW_USE_AUX_REG_REQ_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_ARB_CONTROL__AUX_SW_DONE_USING_AUX_REG__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_ARB_CONTROL__AUX_SW_DONE_USING_AUX_REG_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_CONTROL__AUX_SW_START_DELAY__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_CONTROL__AUX_SW_START_DELAY_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_CONTROL__AUX_SW_WR_BYTES__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_CONTROL__AUX_SW_WR_BYTES_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_CONTROL__AUX_SW_GO__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_CONTROL__AUX_SW_GO_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_DATA__AUX_SW_AUTOINCREMENT_DISABLE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_DATA__AUX_SW_AUTOINCREMENT_DISABLE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_RW__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_RW_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_DATA__AUX_SW_INDEX__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_DATA__AUX_SW_INDEX_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_DATA__AUX_SW_DATA__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_STATUS__AUX_SW_REPLY_BYTE_COUNT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_STATUS__AUX_SW_REPLY_BYTE_COUNT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_INTERRUPT_CONTROL__AUX_SW_DONE_ACK__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_INTERRUPT_CONTROL__AUX_SW_DONE_ACK_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
