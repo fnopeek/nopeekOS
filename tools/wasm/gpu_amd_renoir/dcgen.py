@@ -128,6 +128,20 @@ BLOCKS = {
         instances=1, const_prefix="MCIF",
         regs_struct="dcn20_mmhubbub_registers", shift_struct="dcn20_mmhubbub_shift", mask_struct="dcn20_mmhubbub_mask",
     ),
+    # The hw-i2c engines of the ddc loop: Renoir uses DDC1..DDC5, so inst_ids is
+    # 1..5 (the pool array is 0-based in that order). The reg list mixes SRI (the
+    # per-DDC SETUP/SPEED/HW_STATUS) with SR (the shared DC_I2C_* block, same
+    # offset for every engine); the mask list pulls I2C_COMMON_MASK_SH_LIST_DCE110
+    # + the dcn2 reset-length field via the I2C_SF macro (body identical to SF).
+    "i2c": dict(
+        headers=["dce/dce_i2c_hw.h"],
+        prefixes=["I2C_"],
+        reg_calls=["I2C_HW_ENGINE_COMMON_REG_LIST({i})"],
+        shift_calls=["I2C_COMMON_MASK_SH_LIST_DCN2(__SHIFT)"],
+        mask_calls=["I2C_COMMON_MASK_SH_LIST_DCN2(_MASK)"],
+        inst_ids=[1, 2, 3, 4, 5], const_prefix="I2C",
+        regs_struct="dce_i2c_registers", shift_struct="dce_i2c_shift", mask_struct="dce_i2c_mask",
+    ),
     "mpc": dict(
         single=True,
         headers=["mpc/dcn10/dcn10_mpc.h", "mpc/dcn20/dcn20_mpc.h"],
@@ -303,10 +317,14 @@ def gen(block):
     if cfg.get("single"):
         return gen_single(block, cfg)
     macros_h = build_macros(cfg)
+    # The hw instance ids. Usually 0..instances-1, but a block whose register
+    # macro is called with a non-zero-based id list (e.g. i2c uses DDC1..DDC5)
+    # sets `inst_ids` explicitly; the pool array stays 0-based in that order.
+    inst_ids = cfg.get("inst_ids") or list(range(cfg["instances"]))
     # field -> register, per instance (reg_calls concatenated)
     per_inst = []
     reg_fields = None
-    for i in range(cfg["instances"]):
+    for i in inst_ids:
         txt = ",".join(expand(macros_h, c.format(i=i)) for c in cfg["reg_calls"])
         pairs = re.findall(r"\.(\w+)\s*=\s*[^,]*?\+\s*(mm\w+)", txt)
         per_inst.append(dict(pairs))  # a field set twice keeps the last (C last-wins)
@@ -333,9 +351,9 @@ def gen(block):
     # regs.list chunk
     rl = [f"# DC {block}: {cfg['regs_struct']} absolute offsets per pipe instance",
           f"# ({' + '.join(cfg['reg_calls'])}) — field value is BASE(mmX_BASE_IDX)+mmX."]
-    for i in range(cfg["instances"]):
+    for pos, i in enumerate(inst_ids):
         for f in reg_fields:
-            reg = per_inst[i][f]
+            reg = per_inst[pos][f]
             name = f"{cfg['const_prefix']}{i}_{f}"
             if name not in existing:
                 rl.append(f"{name} = BASE({reg}_BASE_IDX) + {reg} @ {RESOURCE}")
@@ -365,9 +383,9 @@ def gen(block):
     ru.append("")
     ru.append(struct(cfg["mask_struct"], fld_order, "u32"))
     ru.append("")
-    # REGS[instances]
-    ru.append(f"pub static {cfg['const_prefix']}_REGS: [{cfg['regs_struct']}; {cfg['instances']}] = [")
-    for i in range(cfg["instances"]):
+    # REGS[instances] (0-based, in inst_ids order)
+    ru.append(f"pub static {cfg['const_prefix']}_REGS: [{cfg['regs_struct']}; {len(inst_ids)}] = [")
+    for i in inst_ids:
         ru.append(f"    {cfg['regs_struct']} {{")
         for f in reg_fields:
             ru.append(f"        {f}: {cfg['const_prefix']}{i}_{f},")

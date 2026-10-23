@@ -19841,3 +19841,285 @@ pub const WBIF0_SMU_WM_CONTROL__MCIF_WB0_WM_CHG_ACK_INT_STATUS_MASK: u32 = 0x200
 // DC dcn21_resource read_pipe_fuses: the pipe-disable fuse register.
 /// The value of `BASE(mmCC_DC_PIPE_DIS_BASE_IDX) + mmCC_DC_PIPE_DIS` in ../display/dc/resource/dcn21/dcn21_resource.c
 pub const CC_DC_PIPE_DIS: u32 = 0x358a;
+
+// DC i2c: dce_i2c_registers absolute offsets per pipe instance
+
+// (I2C_HW_ENGINE_COMMON_REG_LIST({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmDC_I2C_DDC1_SETUP_BASE_IDX) + mmDC_I2C_DDC1_SETUP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_SETUP: u32 = 0x5363;
+/// The value of `BASE(mmDC_I2C_DDC1_SPEED_BASE_IDX) + mmDC_I2C_DDC1_SPEED` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_SPEED: u32 = 0x5362;
+/// The value of `BASE(mmDC_I2C_DDC1_HW_STATUS_BASE_IDX) + mmDC_I2C_DDC1_HW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_HW_STATUS: u32 = 0x535c;
+/// The value of `BASE(mmDC_I2C_ARBITRATION_BASE_IDX) + mmDC_I2C_ARBITRATION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_DC_I2C_ARBITRATION: u32 = 0x5359;
+/// The value of `BASE(mmDC_I2C_CONTROL_BASE_IDX) + mmDC_I2C_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_DC_I2C_CONTROL: u32 = 0x5358;
+/// The value of `BASE(mmDC_I2C_SW_STATUS_BASE_IDX) + mmDC_I2C_SW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_DC_I2C_SW_STATUS: u32 = 0x535b;
+/// The value of `BASE(mmDC_I2C_TRANSACTION0_BASE_IDX) + mmDC_I2C_TRANSACTION0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_DC_I2C_TRANSACTION0: u32 = 0x536e;
+/// The value of `BASE(mmDC_I2C_TRANSACTION1_BASE_IDX) + mmDC_I2C_TRANSACTION1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_DC_I2C_TRANSACTION1: u32 = 0x536f;
+/// The value of `BASE(mmDC_I2C_TRANSACTION2_BASE_IDX) + mmDC_I2C_TRANSACTION2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_DC_I2C_TRANSACTION2: u32 = 0x5370;
+/// The value of `BASE(mmDC_I2C_TRANSACTION3_BASE_IDX) + mmDC_I2C_TRANSACTION3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_DC_I2C_TRANSACTION3: u32 = 0x5371;
+/// The value of `BASE(mmDC_I2C_DATA_BASE_IDX) + mmDC_I2C_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_DC_I2C_DATA: u32 = 0x5372;
+/// The value of `BASE(mmMICROSECOND_TIME_BASE_DIV_BASE_IDX) + mmMICROSECOND_TIME_BASE_DIV` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C1_MICROSECOND_TIME_BASE_DIV: u32 = 0x13b;
+/// The value of `BASE(mmDC_I2C_DDC2_SETUP_BASE_IDX) + mmDC_I2C_DDC2_SETUP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_SETUP: u32 = 0x5365;
+/// The value of `BASE(mmDC_I2C_DDC2_SPEED_BASE_IDX) + mmDC_I2C_DDC2_SPEED` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_SPEED: u32 = 0x5364;
+/// The value of `BASE(mmDC_I2C_DDC2_HW_STATUS_BASE_IDX) + mmDC_I2C_DDC2_HW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_HW_STATUS: u32 = 0x535d;
+/// The value of `BASE(mmDC_I2C_ARBITRATION_BASE_IDX) + mmDC_I2C_ARBITRATION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_DC_I2C_ARBITRATION: u32 = 0x5359;
+/// The value of `BASE(mmDC_I2C_CONTROL_BASE_IDX) + mmDC_I2C_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_DC_I2C_CONTROL: u32 = 0x5358;
+/// The value of `BASE(mmDC_I2C_SW_STATUS_BASE_IDX) + mmDC_I2C_SW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_DC_I2C_SW_STATUS: u32 = 0x535b;
+/// The value of `BASE(mmDC_I2C_TRANSACTION0_BASE_IDX) + mmDC_I2C_TRANSACTION0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_DC_I2C_TRANSACTION0: u32 = 0x536e;
+/// The value of `BASE(mmDC_I2C_TRANSACTION1_BASE_IDX) + mmDC_I2C_TRANSACTION1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_DC_I2C_TRANSACTION1: u32 = 0x536f;
+/// The value of `BASE(mmDC_I2C_TRANSACTION2_BASE_IDX) + mmDC_I2C_TRANSACTION2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_DC_I2C_TRANSACTION2: u32 = 0x5370;
+/// The value of `BASE(mmDC_I2C_TRANSACTION3_BASE_IDX) + mmDC_I2C_TRANSACTION3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_DC_I2C_TRANSACTION3: u32 = 0x5371;
+/// The value of `BASE(mmDC_I2C_DATA_BASE_IDX) + mmDC_I2C_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_DC_I2C_DATA: u32 = 0x5372;
+/// The value of `BASE(mmMICROSECOND_TIME_BASE_DIV_BASE_IDX) + mmMICROSECOND_TIME_BASE_DIV` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C2_MICROSECOND_TIME_BASE_DIV: u32 = 0x13b;
+/// The value of `BASE(mmDC_I2C_DDC3_SETUP_BASE_IDX) + mmDC_I2C_DDC3_SETUP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_SETUP: u32 = 0x5367;
+/// The value of `BASE(mmDC_I2C_DDC3_SPEED_BASE_IDX) + mmDC_I2C_DDC3_SPEED` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_SPEED: u32 = 0x5366;
+/// The value of `BASE(mmDC_I2C_DDC3_HW_STATUS_BASE_IDX) + mmDC_I2C_DDC3_HW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_HW_STATUS: u32 = 0x535e;
+/// The value of `BASE(mmDC_I2C_ARBITRATION_BASE_IDX) + mmDC_I2C_ARBITRATION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_DC_I2C_ARBITRATION: u32 = 0x5359;
+/// The value of `BASE(mmDC_I2C_CONTROL_BASE_IDX) + mmDC_I2C_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_DC_I2C_CONTROL: u32 = 0x5358;
+/// The value of `BASE(mmDC_I2C_SW_STATUS_BASE_IDX) + mmDC_I2C_SW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_DC_I2C_SW_STATUS: u32 = 0x535b;
+/// The value of `BASE(mmDC_I2C_TRANSACTION0_BASE_IDX) + mmDC_I2C_TRANSACTION0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_DC_I2C_TRANSACTION0: u32 = 0x536e;
+/// The value of `BASE(mmDC_I2C_TRANSACTION1_BASE_IDX) + mmDC_I2C_TRANSACTION1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_DC_I2C_TRANSACTION1: u32 = 0x536f;
+/// The value of `BASE(mmDC_I2C_TRANSACTION2_BASE_IDX) + mmDC_I2C_TRANSACTION2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_DC_I2C_TRANSACTION2: u32 = 0x5370;
+/// The value of `BASE(mmDC_I2C_TRANSACTION3_BASE_IDX) + mmDC_I2C_TRANSACTION3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_DC_I2C_TRANSACTION3: u32 = 0x5371;
+/// The value of `BASE(mmDC_I2C_DATA_BASE_IDX) + mmDC_I2C_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_DC_I2C_DATA: u32 = 0x5372;
+/// The value of `BASE(mmMICROSECOND_TIME_BASE_DIV_BASE_IDX) + mmMICROSECOND_TIME_BASE_DIV` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C3_MICROSECOND_TIME_BASE_DIV: u32 = 0x13b;
+/// The value of `BASE(mmDC_I2C_DDC4_SETUP_BASE_IDX) + mmDC_I2C_DDC4_SETUP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_SETUP: u32 = 0x5369;
+/// The value of `BASE(mmDC_I2C_DDC4_SPEED_BASE_IDX) + mmDC_I2C_DDC4_SPEED` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_SPEED: u32 = 0x5368;
+/// The value of `BASE(mmDC_I2C_DDC4_HW_STATUS_BASE_IDX) + mmDC_I2C_DDC4_HW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_HW_STATUS: u32 = 0x535f;
+/// The value of `BASE(mmDC_I2C_ARBITRATION_BASE_IDX) + mmDC_I2C_ARBITRATION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_DC_I2C_ARBITRATION: u32 = 0x5359;
+/// The value of `BASE(mmDC_I2C_CONTROL_BASE_IDX) + mmDC_I2C_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_DC_I2C_CONTROL: u32 = 0x5358;
+/// The value of `BASE(mmDC_I2C_SW_STATUS_BASE_IDX) + mmDC_I2C_SW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_DC_I2C_SW_STATUS: u32 = 0x535b;
+/// The value of `BASE(mmDC_I2C_TRANSACTION0_BASE_IDX) + mmDC_I2C_TRANSACTION0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_DC_I2C_TRANSACTION0: u32 = 0x536e;
+/// The value of `BASE(mmDC_I2C_TRANSACTION1_BASE_IDX) + mmDC_I2C_TRANSACTION1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_DC_I2C_TRANSACTION1: u32 = 0x536f;
+/// The value of `BASE(mmDC_I2C_TRANSACTION2_BASE_IDX) + mmDC_I2C_TRANSACTION2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_DC_I2C_TRANSACTION2: u32 = 0x5370;
+/// The value of `BASE(mmDC_I2C_TRANSACTION3_BASE_IDX) + mmDC_I2C_TRANSACTION3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_DC_I2C_TRANSACTION3: u32 = 0x5371;
+/// The value of `BASE(mmDC_I2C_DATA_BASE_IDX) + mmDC_I2C_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_DC_I2C_DATA: u32 = 0x5372;
+/// The value of `BASE(mmMICROSECOND_TIME_BASE_DIV_BASE_IDX) + mmMICROSECOND_TIME_BASE_DIV` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C4_MICROSECOND_TIME_BASE_DIV: u32 = 0x13b;
+/// The value of `BASE(mmDC_I2C_DDC5_SETUP_BASE_IDX) + mmDC_I2C_DDC5_SETUP` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_SETUP: u32 = 0x536b;
+/// The value of `BASE(mmDC_I2C_DDC5_SPEED_BASE_IDX) + mmDC_I2C_DDC5_SPEED` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_SPEED: u32 = 0x536a;
+/// The value of `BASE(mmDC_I2C_DDC5_HW_STATUS_BASE_IDX) + mmDC_I2C_DDC5_HW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_HW_STATUS: u32 = 0x5360;
+/// The value of `BASE(mmDC_I2C_ARBITRATION_BASE_IDX) + mmDC_I2C_ARBITRATION` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_DC_I2C_ARBITRATION: u32 = 0x5359;
+/// The value of `BASE(mmDC_I2C_CONTROL_BASE_IDX) + mmDC_I2C_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_DC_I2C_CONTROL: u32 = 0x5358;
+/// The value of `BASE(mmDC_I2C_SW_STATUS_BASE_IDX) + mmDC_I2C_SW_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_DC_I2C_SW_STATUS: u32 = 0x535b;
+/// The value of `BASE(mmDC_I2C_TRANSACTION0_BASE_IDX) + mmDC_I2C_TRANSACTION0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_DC_I2C_TRANSACTION0: u32 = 0x536e;
+/// The value of `BASE(mmDC_I2C_TRANSACTION1_BASE_IDX) + mmDC_I2C_TRANSACTION1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_DC_I2C_TRANSACTION1: u32 = 0x536f;
+/// The value of `BASE(mmDC_I2C_TRANSACTION2_BASE_IDX) + mmDC_I2C_TRANSACTION2` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_DC_I2C_TRANSACTION2: u32 = 0x5370;
+/// The value of `BASE(mmDC_I2C_TRANSACTION3_BASE_IDX) + mmDC_I2C_TRANSACTION3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_DC_I2C_TRANSACTION3: u32 = 0x5371;
+/// The value of `BASE(mmDC_I2C_DATA_BASE_IDX) + mmDC_I2C_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_DC_I2C_DATA: u32 = 0x5372;
+/// The value of `BASE(mmMICROSECOND_TIME_BASE_DIV_BASE_IDX) + mmMICROSECOND_TIME_BASE_DIV` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const I2C5_MICROSECOND_TIME_BASE_DIV: u32 = 0x13b;
+
+// DC i2c field shifts/masks (I2C_COMMON_MASK_SH_LIST_DCN2(__SHIFT))
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15903
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_ENABLE__SHIFT: u32 = 0x6;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15902
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_ENABLE_MASK: u32 = 0x40;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15911
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_TIME_LIMIT__SHIFT: u32 = 0x18;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15910
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_TIME_LIMIT_MASK: u32 = 0xff000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15895
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_DATA_DRIVE_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15894
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_DATA_DRIVE_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15905
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_CLK_DRIVE_EN__SHIFT: u32 = 0x7;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15904
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_CLK_DRIVE_EN_MASK: u32 = 0x80;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15897
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_DATA_DRIVE_SEL__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15896
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_DATA_DRIVE_SEL_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15909
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_INTRA_TRANSACTION_DELAY__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15908
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_INTRA_TRANSACTION_DELAY_MASK: u32 = 0xff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15907
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_INTRA_BYTE_DELAY__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15906
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_INTRA_BYTE_DELAY_MASK: u32 = 0xff00;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15803
+pub const DC_I2C_DDC1_HW_STATUS__DC_I2C_DDC1_HW_STATUS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15802
+pub const DC_I2C_DDC1_HW_STATUS__DC_I2C_DDC1_HW_STATUS_MASK: u32 = 0x3;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15723
+pub const DC_I2C_ARBITRATION__DC_I2C_SW_USE_I2C_REG_REQ__SHIFT: u32 = 0x14;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15722
+pub const DC_I2C_ARBITRATION__DC_I2C_SW_USE_I2C_REG_REQ_MASK: u32 = 0x100000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15725
+pub const DC_I2C_ARBITRATION__DC_I2C_SW_DONE_USING_I2C_REG__SHIFT: u32 = 0x15;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15724
+pub const DC_I2C_ARBITRATION__DC_I2C_SW_DONE_USING_I2C_REG_MASK: u32 = 0x200000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15717
+pub const DC_I2C_ARBITRATION__DC_I2C_NO_QUEUED_SW_GO__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15716
+pub const DC_I2C_ARBITRATION__DC_I2C_NO_QUEUED_SW_GO_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15713
+pub const DC_I2C_ARBITRATION__DC_I2C_SW_PRIORITY__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15712
+pub const DC_I2C_ARBITRATION__DC_I2C_SW_PRIORITY_MASK: u32 = 0x3;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15701
+pub const DC_I2C_CONTROL__DC_I2C_SOFT_RESET__SHIFT: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15700
+pub const DC_I2C_CONTROL__DC_I2C_SOFT_RESET_MASK: u32 = 0x2;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15705
+pub const DC_I2C_CONTROL__DC_I2C_SW_STATUS_RESET__SHIFT: u32 = 0x3;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15704
+pub const DC_I2C_CONTROL__DC_I2C_SW_STATUS_RESET_MASK: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15699
+pub const DC_I2C_CONTROL__DC_I2C_GO__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15698
+pub const DC_I2C_CONTROL__DC_I2C_GO_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15703
+pub const DC_I2C_CONTROL__DC_I2C_SEND_RESET__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15702
+pub const DC_I2C_CONTROL__DC_I2C_SEND_RESET_MASK: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15709
+pub const DC_I2C_CONTROL__DC_I2C_TRANSACTION_COUNT__SHIFT: u32 = 0x14;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15708
+pub const DC_I2C_CONTROL__DC_I2C_TRANSACTION_COUNT_MASK: u32 = 0x300000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15707
+pub const DC_I2C_CONTROL__DC_I2C_DDC_SELECT__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15706
+pub const DC_I2C_CONTROL__DC_I2C_DDC_SELECT_MASK: u32 = 0x700;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15893
+pub const DC_I2C_DDC1_SPEED__DC_I2C_DDC1_PRESCALE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15892
+pub const DC_I2C_DDC1_SPEED__DC_I2C_DDC1_PRESCALE_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15887
+pub const DC_I2C_DDC1_SPEED__DC_I2C_DDC1_THRESHOLD__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15886
+pub const DC_I2C_DDC1_SPEED__DC_I2C_DDC1_THRESHOLD_MASK: u32 = 0x3;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15791
+pub const DC_I2C_SW_STATUS__DC_I2C_SW_STOPPED_ON_NACK__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15790
+pub const DC_I2C_SW_STATUS__DC_I2C_SW_STOPPED_ON_NACK_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15785
+pub const DC_I2C_SW_STATUS__DC_I2C_SW_TIMEOUT__SHIFT: u32 = 0x5;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15784
+pub const DC_I2C_SW_STATUS__DC_I2C_SW_TIMEOUT_MASK: u32 = 0x20;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15783
+pub const DC_I2C_SW_STATUS__DC_I2C_SW_ABORTED__SHIFT: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15782
+pub const DC_I2C_SW_STATUS__DC_I2C_SW_ABORTED_MASK: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15781
+pub const DC_I2C_SW_STATUS__DC_I2C_SW_DONE__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15780
+pub const DC_I2C_SW_STATUS__DC_I2C_SW_DONE_MASK: u32 = 0x4;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15779
+pub const DC_I2C_SW_STATUS__DC_I2C_SW_STATUS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15778
+pub const DC_I2C_SW_STATUS__DC_I2C_SW_STATUS_MASK: u32 = 0x3;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16045
+pub const DC_I2C_TRANSACTION0__DC_I2C_STOP_ON_NACK0__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16044
+pub const DC_I2C_TRANSACTION0__DC_I2C_STOP_ON_NACK0_MASK: u32 = 0x100;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16047
+pub const DC_I2C_TRANSACTION0__DC_I2C_START0__SHIFT: u32 = 0xc;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16046
+pub const DC_I2C_TRANSACTION0__DC_I2C_START0_MASK: u32 = 0x1000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16043
+pub const DC_I2C_TRANSACTION0__DC_I2C_RW0__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16042
+pub const DC_I2C_TRANSACTION0__DC_I2C_RW0_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16049
+pub const DC_I2C_TRANSACTION0__DC_I2C_STOP0__SHIFT: u32 = 0xd;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16048
+pub const DC_I2C_TRANSACTION0__DC_I2C_STOP0_MASK: u32 = 0x2000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16051
+pub const DC_I2C_TRANSACTION0__DC_I2C_COUNT0__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16050
+pub const DC_I2C_TRANSACTION0__DC_I2C_COUNT0_MASK: u32 = 0x3ff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16083
+pub const DC_I2C_DATA__DC_I2C_DATA_RW__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16082
+pub const DC_I2C_DATA__DC_I2C_DATA_RW_MASK: u32 = 0x1;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16085
+pub const DC_I2C_DATA__DC_I2C_DATA__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16084
+pub const DC_I2C_DATA__DC_I2C_DATA_MASK: u32 = 0xff00;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16087
+pub const DC_I2C_DATA__DC_I2C_INDEX__SHIFT: u32 = 0x10;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16086
+pub const DC_I2C_DATA__DC_I2C_INDEX_MASK: u32 = 0x3ff0000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16089
+pub const DC_I2C_DATA__DC_I2C_INDEX_WRITE__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:16088
+pub const DC_I2C_DATA__DC_I2C_INDEX_WRITE_MASK: u32 = 0x80000000;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1604
+pub const MICROSECOND_TIME_BASE_DIV__XTAL_REF_DIV__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1603
+pub const MICROSECOND_TIME_BASE_DIV__XTAL_REF_DIV_MASK: u32 = 0x7f00;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1602
+pub const MICROSECOND_TIME_BASE_DIV__MICROSECOND_TIME_BASE_DIV__SHIFT: u32 = 0x0;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:1601
+pub const MICROSECOND_TIME_BASE_DIV__MICROSECOND_TIME_BASE_DIV_MASK: u32 = 0x7f;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15715
+pub const DC_I2C_ARBITRATION__DC_I2C_REG_RW_CNTL_STATUS__SHIFT: u32 = 0x2;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15714
+pub const DC_I2C_ARBITRATION__DC_I2C_REG_RW_CNTL_STATUS_MASK: u32 = 0xc;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15891
+pub const DC_I2C_DDC1_SPEED__DC_I2C_DDC1_START_STOP_TIMING_CNTL__SHIFT: u32 = 0x8;
+/// include/asic_reg/dce/dce_10_0_sh_mask.h:15890
+pub const DC_I2C_DDC1_SPEED__DC_I2C_DDC1_START_STOP_TIMING_CNTL_MASK: u32 = 0x300;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:36208
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_SEND_RESET_LENGTH__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:36218
+pub const DC_I2C_DDC1_SETUP__DC_I2C_DDC1_SEND_RESET_LENGTH_MASK: u32 = 0x4;

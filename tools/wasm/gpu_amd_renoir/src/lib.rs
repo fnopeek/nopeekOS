@@ -46,6 +46,7 @@ mod dc;
 mod dc_resource;
 mod dccg;
 mod dce_clock_source;
+mod dce_i2c_hw;
 mod dcn10_ipp;
 mod dcn20_dpp;
 mod dcn20_dsc;

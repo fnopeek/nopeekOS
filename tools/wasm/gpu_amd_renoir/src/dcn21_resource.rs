@@ -23,6 +23,7 @@ use crate::dcn20_opp::dcn21_opp_create;
 use crate::dcn20_optc::dcn21_timing_generator_create;
 use crate::dcn21_hubp::dcn21_hubp_create;
 use crate::dce_clock_source::{clock_source_id, dcn21_clock_source_create, CLK_SRC_REGS};
+use crate::dce_i2c_hw::dcn21_i2c_hw_create;
 
 /// `enum dcn20_clk_src_array_id` (dcn21_resource.c): the clock-source slots.
 const DCN20_CLK_SRC_PLL0: usize = 0;
@@ -182,8 +183,13 @@ pub fn dcn21_resource_construct(adev: &amdgpu_device, dc: &mut dc, pool: &mut re
         j += 1;
     }
 
-    // (The aux-engine / i2c loop over num_ddc is a later block.) Linux then sets
-    // the live-pipe counts to j, before mpc and hubbub.
+    // Per ddc: aux engine (engines[i], a later block) + hw i2c (hw_i2cs[i]);
+    // sw_i2cs stays None.
+    for i in 0..RES_CAP_RN.num_ddc as usize {
+        pool.hw_i2cs[i] = Some(dcn21_i2c_hw_create(&dc.ctx.dc_bios, i as u32));
+    }
+
+    // Linux then sets the live-pipe counts to j, before mpc and hubbub.
     pool.timing_generator_count = j as u32;
     pool.pipe_count = j as u32;
     pool.mpcc_count = j as u32;

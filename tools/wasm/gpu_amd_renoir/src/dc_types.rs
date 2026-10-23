@@ -118,8 +118,19 @@ pub const MAX_PIPES: usize = 6;
 /// `external_clock_source_frequency_for_dp`, so only that field is here.
 #[derive(Default, Clone, Copy)]
 pub struct dc_firmware_info {
+    /// `struct pll_info pll_info` — the hw-i2c construct reads
+    /// `pll_info.crystal_frequency`.
+    pub pll_info: pll_info,
     /// In KHz.
     pub external_clock_source_frequency_for_dp: u32,
+}
+
+/// `struct pll_info` (the inline member of `dc_firmware_info`): only
+/// `crystal_frequency` is reached so far (hw-i2c `reference_frequency`).
+#[derive(Default, Clone, Copy)]
+pub struct pll_info {
+    /// In KHz.
+    pub crystal_frequency: u32,
 }
 
 /// `struct dc_bios` (dc/dc_bios_types.h): the VBIOS interface a `dc_context`
