@@ -189,8 +189,16 @@ nimmt `dcgen.py` jetzt Listen von Makro-Aufrufen). Kopf handgeschrieben (base,
 Sechster Block, **OPP** (`src/dcn20_opp.rs`, dcn20-OPP): 22 Register × 6
 Instanzen (`opp_regs[6]`, genutzt 0..3) + 52 Felder, via `dcgen.py`.
 
-**Nächste Einheit:** `dcn21_timing_generator_create` (optc) — der letzte
-Pipe-Block, mit `dcgen.py`. Dazu `read_pipe_fuses`
+Siebter Block, **OPTC/OTG** (`src/dcn20_optc.rs`, dcn20-OTG): 77 Register × 4 +
+170 Felder, via `dcgen.py` (dafür injiziert `dcgen.py` jetzt das bare `SF`-Feld-
+makro und dedupt `macros_h` nach Namen). `dcn20_timing_generator_init` liest die
+Maske (`max_h_total = tg_mask.OTG_H_TOTAL + 1`). **Damit ist die volle Pipe-Kette
+hubp→ipp→dpp→opp→optc portiert.**
+
+**Nächste Einheit:** die Nicht-Pipe-Blöcke des Construct — `read_pipe_fuses`,
+aux/i2c je ddc, `dcn21_mpc_create`, `dcn21_hubbub_create`, `dcn21_dsc_create`,
+dwbc/mmhubbub, `resource_construct` (stream/link-enc/audio) +
+`dcn21_hw_sequencer_construct`, `dml_init_instance`. Dazu `read_pipe_fuses`
 (kompaktiert ausgefuste Pipes). Danach aux/i2c je ddc, mpc, hubbub, dsc, dwbc,
 mmhubbub, irq-Service, `resource_construct` + `dcn21_hw_sequencer_construct`,
 `dml_init_instance`. Die Konstruktoren schreiben KEIN Register (Zeiger +

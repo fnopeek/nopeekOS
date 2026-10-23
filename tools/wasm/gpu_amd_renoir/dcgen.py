@@ -66,6 +66,15 @@ BLOCKS = {
         instances=6, const_prefix="OPP",
         regs_struct="dcn20_opp_registers", shift_struct="dcn20_opp_shift", mask_struct="dcn20_opp_mask",
     ),
+    "optc": dict(
+        headers=["optc/dcn10/dcn10_optc.h", "optc/dcn20/dcn20_optc.h"],
+        prefixes=["TG_", "OPTC_"],
+        reg_calls=["TG_COMMON_REG_LIST_DCN2_0({i})"],
+        shift_calls=["TG_COMMON_MASK_SH_LIST_DCN2_0(__SHIFT)"],
+        mask_calls=["TG_COMMON_MASK_SH_LIST_DCN2_0(_MASK)"],
+        instances=4, const_prefix="OPTC",
+        regs_struct="dcn_optc_registers", shift_struct="dcn_optc_shift", mask_struct="dcn_optc_mask",
+    ),
 }
 
 
@@ -77,7 +86,8 @@ def defines_from(path, want):
     while i < len(lines):
         m = re.match(r"\s*#\s*define\s+(\w+)", lines[i])
         if m and (any(m.group(1).startswith(p) for p in want)
-                  or m.group(1) in ("SR", "SRI", "SRII", "SRIR", "SRI2", "BASE", "BASE_INNER", "VUPDATE_SRII")):
+                  or m.group(1) in ("SR", "SRI", "SRII", "SRIR", "SRI2", "BASE", "BASE_INNER",
+                                     "VUPDATE_SRII", "SF", "SFRB")):
             block = [lines[i]]
             while block[-1].rstrip().endswith("\\"):
                 i += 1
@@ -102,10 +112,26 @@ def expand(macros_h, call):
 
 def gen(block):
     cfg = BLOCKS[block]
-    macros_h = "\n".join(
-        b for h in [RESOURCE.replace("../display/dc/", "")] + cfg["headers"]
-        for b in defines_from(DC + "/" + h, cfg["prefixes"])
-    ) + "\n"
+    # Extract from the resource file (its SR/SRI/BASE family), the block headers
+    # (the REG_LIST/MASK_SH/<BLK>_SF macros) and reg_helper.h (the bare SF). Dedup
+    # by macro name, first wins, so the resource file's SR/SRI/BASE are the ones
+    # used and reg_helper's identical copies don't redefine them.
+    srcs = [RESOURCE.replace("../display/dc/", "")] + cfg["headers"]
+    # `SF` is the universal field macro (`.field = reg__field<post>`), defined
+    # identically in dozens of DC headers but in none of the block headers; inject
+    # the canonical form so a mask list that uses bare SF (e.g. optc's
+    # TG_COMMON_MASK_SH_LIST) expands. Same shape as the SRI/SRII family above.
+    seen, blocks = {"SF"}, [
+        "#define SF(reg_name, field_name, post_fix)"
+        " .field_name = reg_name ## __ ## field_name ## post_fix"
+    ]
+    for h in srcs:
+        for b in defines_from(DC + "/" + h, cfg["prefixes"]):
+            name = re.match(r"\s*#\s*define\s+(\w+)", b).group(1)
+            if name not in seen:
+                seen.add(name)
+                blocks.append(b)
+    macros_h = "\n".join(blocks) + "\n"
     # field -> register, per instance (reg_calls concatenated)
     per_inst = []
     reg_fields = None
