@@ -58,12 +58,12 @@ const SIDEBAR_W: u16 = 190;
 /// How long a copied password stays on the clipboard.
 const CLIP_CLEAR_MS: u64 = 30_000;
 /// Shortest master passphrase accepted at setup.
-const MIN_PASSPHRASE: usize = 8;
+const MIN_PASSPHRASE: usize = 12;
 
 // Password generator: length range and the character classes. Quotes,
 // backslash and space are left out of the symbols, they break too many
 // login forms and config files.
-const GEN_MIN: u32 = 8;
+const GEN_MIN: u32 = 12;
 const GEN_MAX: u32 = 64;
 const GEN_CLASSES: [(&str, &[u8]); 4] = [
     ("A-Z", b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
@@ -595,7 +595,7 @@ fn setup_screen(st: &St) -> Widget {
         vec![
             heading("Create your vault"),
             prefab::muted("One passphrase unlocks everything in here. There is no reset and no recovery."),
-            labelled(st, 0, "MASTER PASSPHRASE", "at least 8 characters", true),
+            labelled(st, 0, "MASTER PASSPHRASE", "at least 12 characters", true),
             labelled(st, 1, "CONFIRM", "", true),
             button_row(vec![btn("Create vault", ButtonStyle::Primary, A_SAVE)]),
         ],
@@ -690,6 +690,39 @@ fn value_box(content: String, mono: bool, trailing: Vec<Widget>) -> Widget {
     }
 }
 
+/// Characters per line of a shown password: long ones wrap in mono
+/// columns instead of being cut, so every character stays readable.
+const PASS_LINE: usize = 24;
+
+fn password_box(shown: &str, trailing: Vec<Widget>) -> Widget {
+    let chars: Vec<char> = shown.chars().collect();
+    let lines: Vec<Widget> = chars
+        .chunks(PASS_LINE)
+        .map(|c| Widget::Text {
+            content: c.iter().collect(),
+            style: TextStyle::Mono,
+            modifiers: vec![Modifier::Tint(Token::OnSurface)],
+        })
+        .collect();
+    let mut children = vec![Widget::Column {
+        children: lines,
+        spacing: 2,
+        align: Align::Start,
+        modifiers: vec![Modifier::Flex(1)],
+    }];
+    children.extend(trailing);
+    Widget::Row {
+        children,
+        spacing: Spacing::Sm.as_u16(),
+        align: Align::Center,
+        modifiers: vec![
+            Modifier::Background(Token::SurfaceElevated),
+            Modifier::Rounded(Radius::Md.as_u8()),
+            Modifier::PaddingXY { x: Padding::Md.as_u16(), y: Padding::Sm.as_u16() },
+        ],
+    }
+}
+
 fn detail_row(lab: &str, value: &str, trailing: Vec<Widget>) -> Widget {
     let shown = if value.is_empty() { "—".into() } else { value.into() };
     Widget::Column {
@@ -741,7 +774,7 @@ fn detail_pane(st: &St, names: &[String], shown: &[usize]) -> Widget {
             detail_row("URL", &l.url, vec![]),
             detail_row("USERNAME", &l.user, user_trail),
             Widget::Column {
-                children: vec![label("PASSWORD"), value_box(pass_shown, true, pass_trail)],
+                children: vec![label("PASSWORD"), password_box(&pass_shown, pass_trail)],
                 spacing: 4,
                 align: Align::Stretch,
                 modifiers: vec![],
@@ -1010,7 +1043,7 @@ fn ensure_unlocked(st: &mut St) -> bool {
 fn create_vault(st: &mut St) {
     let pass = st.f[0].as_str();
     if pass.chars().count() < MIN_PASSPHRASE {
-        st.error("Use at least 8 characters.");
+        st.error("Use at least 12 characters.");
         st.focus_on(0);
     } else if pass != st.f[1].as_str() {
         st.f[1].clear();

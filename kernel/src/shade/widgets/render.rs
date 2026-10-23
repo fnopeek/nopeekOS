@@ -249,6 +249,41 @@ fn mask_str(n: usize) -> alloc::string::String {
     core::iter::repeat('•').take(n).collect()
 }
 
+/// How far a single-line Input's text is shifted left so the caret stays
+/// inside the field. `field_w` is the field minus its padding; an
+/// unfocused field (`cursor` None) shows its start. Shared with the click
+/// mapping in mod.rs, which must undo the same shift.
+pub(super) fn input_scroll_x(value: &str, cursor: Option<usize>, masked: bool, field_w: u32) -> i32 {
+    let Some(c) = cursor else { return 0 };
+    let prefix = value.get(..c).unwrap_or(value);
+    let px = super::layout::style_px(INPUT_STYLE);
+    let adv = if masked {
+        ceil_u32_local(crate::gui::text::measure_px(&mask_str(prefix.chars().count()), INPUT_STYLE, px))
+    } else {
+        ceil_u32_local(crate::gui::text::measure_px(prefix, INPUT_STYLE, px))
+    };
+    let avail = field_w.saturating_sub(2 * text_inset() as u32);
+    let need = adv + scale::len(2);
+    need.saturating_sub(avail) as i32
+}
+
+/// The longest prefix of `s` that fits `max_w` px with a trailing "…".
+fn ellipsize(s: &str, style: super::abi::TextStyle, px: u16, max_w: u32) -> alloc::string::String {
+    let fits = |n: usize| {
+        let mut t: alloc::string::String = s.chars().take(n).collect();
+        t.push('…');
+        ceil_u32_local(crate::gui::text::measure_px(&t, style, px)) <= max_w
+    };
+    let (mut lo, mut hi) = (0usize, s.chars().count());
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        if fits(mid) { lo = mid } else { hi = mid - 1 }
+    }
+    let mut t: alloc::string::String = s.chars().take(lo).collect();
+    t.push('…');
+    t
+}
+
 /// Sum every `Modifier::Padding` in the effective list, in physical px —
 /// `layout::padding` itself, so leaf glyph placement matches the
 /// layout-side outer-size growth.
@@ -603,7 +638,13 @@ fn paint_node_eff(
             // Same resolver the layout pass used — otherwise the glyphs
             // would outgrow the box that was measured for them.
             let px = super::layout::font_size_of(*style, eff);
-            rast.text_px(target, content, *style, px, color, Point { x: inner_x, y: inner_y });
+            let avail = rect.w.saturating_sub(2 * leaf_pad.0);
+            if ceil_u32_local(crate::gui::text::measure_px(content, *style, px)) > avail {
+                let cut = ellipsize(content, *style, px, avail);
+                rast.text_px(target, &cut, *style, px, color, Point { x: inner_x, y: inner_y });
+            } else {
+                rast.text_px(target, content, *style, px, color, Point { x: inner_x, y: inner_y });
+            }
         }
 
         Widget::Icon { id, size, .. } => {
@@ -686,14 +727,28 @@ fn paint_node_eff(
             // welded to the first letter ("|search"). Rest = placeholder,
             // focus = text + caret.
             let focused = edit_state.is_some();
-            let text_x = inner_x + text_inset();   // built-in chrome + the node's padding
+            let masked = mask_of(eff);
+            // Longer text than the field scrolls left to keep the caret in
+            // view, and nothing paints past the field's edge.
+            let field_w = rect.w.saturating_sub(2 * leaf_pad.0);
+            let shift = input_scroll_x(live_value, edit_state.map(|e| e.cursor), masked, field_w);
+            let saved_clip = target.clip;
+            {
+                let lx0 = inner_x - target.origin.x;
+                let ly0 = rect.y - target.origin.y;
+                let (nx1, ny1) = (lx0 + field_w as i32, ly0 + rect.h as i32);
+                target.clip = Some(match saved_clip {
+                    Some((a, b, c, d)) => (a.max(lx0), b.max(ly0), c.min(nx1), d.min(ny1)),
+                    None => (lx0, ly0, nx1, ny1),
+                });
+            }
+            let text_x = inner_x + text_inset() - shift;   // built-in chrome + the node's padding
             let text_y = inner_y + text_inset();
             let ipx = super::layout::style_px(INPUT_STYLE);
             // The selection goes under the text, before the glyphs. A
             // selection that exists but cannot be seen is worse than none:
             // the user marks, copies and does not know what is on the
             // clipboard. Same computation and token as `TextArea` below.
-            let masked = mask_of(eff);
             let sel = edit_state.and_then(|e| e.selection());
             if let (Some((a, b)), false) = (sel, live_value.is_empty()) {
                 let (a, b) = (a.min(live_value.len()), b.min(live_value.len()));
@@ -785,6 +840,7 @@ fn paint_node_eff(
                 };
                 rast.rect(target, caret_rect, Fill::Solid(Token::OnSurface));
             }
+            target.clip = saved_clip;
         }
 
         Widget::TextArea { value, placeholder, spans, .. } => {

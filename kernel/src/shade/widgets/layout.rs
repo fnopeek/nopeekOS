@@ -468,10 +468,11 @@ fn measure_intrinsic(w: &Widget) -> Size {
             }
         }
 
-        Widget::Input { value, placeholder, modifiers, .. } => {
-            let sample = if value.is_empty() { placeholder } else { value };
+        // Sized by its placeholder, never by its value: a field must not
+        // grow with what is typed into it. A longer value scrolls inside.
+        Widget::Input { placeholder, modifiers, .. } => {
             let px = style_px(super::render::INPUT_STYLE);
-            let w = ceil_u32(crate::gui::text::measure_px(sample, super::render::INPUT_STYLE, px));
+            let w = ceil_u32(crate::gui::text::measure_px(placeholder, super::render::INPUT_STYLE, px));
             let h = ceil_u32(crate::gui::text::line_height_px(super::render::INPUT_STYLE, px));
             // Built-in 4 px chrome + the modifier's own padding. Min-
             // width keeps empty inputs from collapsing in flex rows.
@@ -580,8 +581,9 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
             let measured = measure(w);
             let px = font_size_of(*style, modifiers);
             let baseline = ceil_u32(crate::gui::text::ascent_px(*style, px));
+            // Never wider than allotted; the renderer ends a cut line in "…".
             LayoutNode {
-                rect: Rect { x: inner.x, y: inner.y, w: measured.w, h: measured.h },
+                rect: Rect { x: inner.x, y: inner.y, w: measured.w.min(inner.w), h: measured.h },
                 baseline,
                 children: Vec::new(),
             }
@@ -622,9 +624,15 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
             LayoutNode::leaf(inner)
         }
 
+        // An Input takes the width it is given (Flex, Stretch), so its
+        // text can be clipped to the field and scrolled within it.
+        Widget::Input { .. } => {
+            let m = measure(w);
+            LayoutNode::leaf(Rect { x: inner.x, y: inner.y, w: inner.w, h: m.h })
+        }
+
         Widget::Icon { .. }
         | Widget::Button { .. }
-        | Widget::Input { .. }
         | Widget::Checkbox { .. } => {
             let m = measure(w);
             LayoutNode::leaf(Rect { x: inner.x, y: inner.y, w: m.w, h: m.h })
@@ -692,6 +700,18 @@ fn place_axis(
     let gaps = count.saturating_sub(1) * spacing;
     let remaining = main_avail.saturating_sub(total_main).saturating_sub(gaps);
 
+    // Overflow: Flex children give back space in proportion to weight ×
+    // basis, down to zero (css-flexbox-1 §9.7 flex-shrink). Everyone else
+    // keeps its intrinsic size.
+    let overflow = total_main.saturating_add(gaps).saturating_sub(main_avail);
+    let shrink_basis = |c: &Widget, m: &Size| -> u64 {
+        match (c, flex_modifier(mods_of_widget(c))) {
+            (Widget::Spacer { .. }, _) | (_, None) => 0,
+            (_, Some(weight)) => weight as u64 * if vertical { m.h } else { m.w } as u64,
+        }
+    };
+    let shrink_total: u64 = children.iter().zip(measured.iter()).map(|(c, m)| shrink_basis(c, m)).sum();
+
     // Pass 2: walk children, place them along the main axis. Spacers
     // and Modifier::Flex children absorb `remaining` proportionally
     // to their flex weight; everyone else sticks to intrinsic.
@@ -708,6 +728,10 @@ fn place_axis(
                 if flex_sum == 0 { 0 } else {
                     (remaining * (*flex).max(1) as u32) / flex_sum
                 }
+            }
+            _ if overflow > 0 && shrink_total > 0 => {
+                let give = (overflow as u64 * shrink_basis(c, m) / shrink_total) as u32;
+                intrinsic_main.saturating_sub(give)
             }
             _ => match flex_modifier(mods_of_widget(c)) {
                 Some(weight) if flex_sum > 0 => {

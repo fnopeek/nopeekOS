@@ -2032,7 +2032,19 @@ fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Optio
     let value = edit.value.as_str();
     match widget {
         abi::Widget::Input { .. } => {
-            Some(byte_at_x(value, render::INPUT_STYLE, (x - text_x).max(0) as u32))
+            let mods = modifiers_of_ref(widget);
+            let masked = mods.iter().any(|m| matches!(m, abi::Modifier::Mask));
+            let field_w = rect.w.saturating_sub(2 * pad as u32);
+            let shift = render::input_scroll_x(value, Some(edit.cursor), masked, field_w);
+            let at = (x - text_x + shift).max(0) as u32;
+            if masked {
+                // Bullets are what is on screen; map back to a char boundary.
+                let bullets: alloc::string::String = core::iter::repeat('•').take(value.chars().count()).collect();
+                let n = bullets[..byte_at_x(&bullets, render::INPUT_STYLE, at)].chars().count();
+                Some(value.char_indices().nth(n).map_or(value.len(), |(b, _)| b))
+            } else {
+                Some(byte_at_x(value, render::INPUT_STYLE, at))
+            }
         }
         abi::Widget::TextArea { .. } => {
             let style = abi::TextStyle::Mono;
