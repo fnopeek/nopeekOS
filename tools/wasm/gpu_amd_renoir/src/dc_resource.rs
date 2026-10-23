@@ -5,6 +5,7 @@
 
 use crate::dccg::dcn_dccg;
 use crate::dcn10_ipp::dcn10_ipp;
+use crate::dcn20_dpp::dcn20_dpp;
 use crate::dcn21_hubp::dcn21_hubp;
 use crate::dce_clock_source::dce110_clk_src;
 use crate::dc_types::MAX_PIPES;
@@ -62,6 +63,8 @@ pub struct resource_pool {
     pub hubps: [Option<Box<dcn21_hubp>>; MAX_PIPES],
     /// `ipps[MAX_PIPES]`: the input pixel processors, one per active pipe.
     pub ipps: [Option<Box<dcn10_ipp>>; MAX_PIPES],
+    /// `dpps[MAX_PIPES]`: the display pipe-and-plane processors, one per pipe.
+    pub dpps: [Option<Box<dcn20_dpp>>; MAX_PIPES],
     /// `res_cap`: the per-ASIC count table (Renoir → `RES_CAP_RN`).
     pub res_cap: Option<&'static resource_caps>,
 }

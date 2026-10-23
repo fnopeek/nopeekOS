@@ -9921,3 +9921,3881 @@ pub const HUBP0_DCHUBP_REQ_SIZE_CONFIG__VM_GROUP_SIZE_MASK: u32 = 0x7000000;
 pub const HUBP0_DCSURF_TILING_CONFIG__RB_ALIGNED__SHIFT: u32 = 0xa;
 /// include/asic_reg/dcn/dcn_1_0_sh_mask.h:9158
 pub const HUBP0_DCSURF_TILING_CONFIG__RB_ALIGNED_MASK: u32 = 0x400;
+
+// DC dpp: dcn2_dpp_registers absolute offsets per pipe instance
+
+// (TF_REG_LIST_DCN20({i}) + TF_REG_LIST_DCN20_COMMON_APPEND({i})) — field value is BASE(mmX_BASE_IDX)+mmX.
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_CONTROL_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_CONTROL: u32 = 0x41e8;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_C11_C12_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_C11_C12: u32 = 0x41e9;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_C13_C14_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_C13_C14` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_C13_C14: u32 = 0x41ea;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_C21_C22_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_C21_C22` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_C21_C22: u32 = 0x41eb;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_C23_C24_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_C23_C24` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_C23_C24: u32 = 0x41ec;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_C31_C32_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_C31_C32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_C31_C32: u32 = 0x41ed;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_C33_C34_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_C33_C34: u32 = 0x41ee;
+/// The value of `BASE(mmDSCL0_DSCL_EXT_OVERSCAN_LEFT_RIGHT_BASE_IDX) + mmDSCL0_DSCL_EXT_OVERSCAN_LEFT_RIGHT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_DSCL_EXT_OVERSCAN_LEFT_RIGHT: u32 = 0x41be;
+/// The value of `BASE(mmDSCL0_DSCL_EXT_OVERSCAN_TOP_BOTTOM_BASE_IDX) + mmDSCL0_DSCL_EXT_OVERSCAN_TOP_BOTTOM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_DSCL_EXT_OVERSCAN_TOP_BOTTOM: u32 = 0x41bf;
+/// The value of `BASE(mmDSCL0_DSCL_MEM_PWR_STATUS_BASE_IDX) + mmDSCL0_DSCL_MEM_PWR_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_DSCL_MEM_PWR_STATUS: u32 = 0x41c9;
+/// The value of `BASE(mmDSCL0_DSCL_MEM_PWR_CTRL_BASE_IDX) + mmDSCL0_DSCL_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_DSCL_MEM_PWR_CTRL: u32 = 0x41c8;
+/// The value of `BASE(mmDSCL0_OTG_H_BLANK_BASE_IDX) + mmDSCL0_OTG_H_BLANK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_OTG_H_BLANK: u32 = 0x41c0;
+/// The value of `BASE(mmDSCL0_OTG_V_BLANK_BASE_IDX) + mmDSCL0_OTG_V_BLANK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_OTG_V_BLANK: u32 = 0x41c1;
+/// The value of `BASE(mmDSCL0_SCL_MODE_BASE_IDX) + mmDSCL0_SCL_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_MODE: u32 = 0x41ac;
+/// The value of `BASE(mmDSCL0_LB_DATA_FORMAT_BASE_IDX) + mmDSCL0_LB_DATA_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_LB_DATA_FORMAT: u32 = 0x41c5;
+/// The value of `BASE(mmDSCL0_LB_MEMORY_CTRL_BASE_IDX) + mmDSCL0_LB_MEMORY_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_LB_MEMORY_CTRL: u32 = 0x41c6;
+/// The value of `BASE(mmDSCL0_DSCL_AUTOCAL_BASE_IDX) + mmDSCL0_DSCL_AUTOCAL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_DSCL_AUTOCAL: u32 = 0x41bd;
+/// The value of `BASE(mmDSCL0_DSCL_CONTROL_BASE_IDX) + mmDSCL0_DSCL_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_DSCL_CONTROL: u32 = 0x41ae;
+/// The value of `BASE(mmDSCL0_SCL_BLACK_OFFSET_BASE_IDX) + mmDSCL0_SCL_BLACK_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_BLACK_OFFSET: u32 = 0x41bb;
+/// The value of `BASE(mmDSCL0_SCL_TAP_CONTROL_BASE_IDX) + mmDSCL0_SCL_TAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_TAP_CONTROL: u32 = 0x41ad;
+/// The value of `BASE(mmDSCL0_SCL_COEF_RAM_TAP_SELECT_BASE_IDX) + mmDSCL0_SCL_COEF_RAM_TAP_SELECT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_COEF_RAM_TAP_SELECT: u32 = 0x41aa;
+/// The value of `BASE(mmDSCL0_SCL_COEF_RAM_TAP_DATA_BASE_IDX) + mmDSCL0_SCL_COEF_RAM_TAP_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_COEF_RAM_TAP_DATA: u32 = 0x41ab;
+/// The value of `BASE(mmDSCL0_DSCL_2TAP_CONTROL_BASE_IDX) + mmDSCL0_DSCL_2TAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_DSCL_2TAP_CONTROL: u32 = 0x41af;
+/// The value of `BASE(mmDSCL0_MPC_SIZE_BASE_IDX) + mmDSCL0_MPC_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_MPC_SIZE: u32 = 0x41c4;
+/// The value of `BASE(mmDSCL0_SCL_HORZ_FILTER_SCALE_RATIO_BASE_IDX) + mmDSCL0_SCL_HORZ_FILTER_SCALE_RATIO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_HORZ_FILTER_SCALE_RATIO: u32 = 0x41b1;
+/// The value of `BASE(mmDSCL0_SCL_VERT_FILTER_SCALE_RATIO_BASE_IDX) + mmDSCL0_SCL_VERT_FILTER_SCALE_RATIO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_VERT_FILTER_SCALE_RATIO: u32 = 0x41b5;
+/// The value of `BASE(mmDSCL0_SCL_HORZ_FILTER_SCALE_RATIO_C_BASE_IDX) + mmDSCL0_SCL_HORZ_FILTER_SCALE_RATIO_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_HORZ_FILTER_SCALE_RATIO_C: u32 = 0x41b3;
+/// The value of `BASE(mmDSCL0_SCL_VERT_FILTER_SCALE_RATIO_C_BASE_IDX) + mmDSCL0_SCL_VERT_FILTER_SCALE_RATIO_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_VERT_FILTER_SCALE_RATIO_C: u32 = 0x41b8;
+/// The value of `BASE(mmDSCL0_SCL_HORZ_FILTER_INIT_BASE_IDX) + mmDSCL0_SCL_HORZ_FILTER_INIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_HORZ_FILTER_INIT: u32 = 0x41b2;
+/// The value of `BASE(mmDSCL0_SCL_HORZ_FILTER_INIT_C_BASE_IDX) + mmDSCL0_SCL_HORZ_FILTER_INIT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_HORZ_FILTER_INIT_C: u32 = 0x41b4;
+/// The value of `BASE(mmDSCL0_SCL_VERT_FILTER_INIT_BASE_IDX) + mmDSCL0_SCL_VERT_FILTER_INIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_VERT_FILTER_INIT: u32 = 0x41b6;
+/// The value of `BASE(mmDSCL0_SCL_VERT_FILTER_INIT_BOT_BASE_IDX) + mmDSCL0_SCL_VERT_FILTER_INIT_BOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_VERT_FILTER_INIT_BOT: u32 = 0x41b7;
+/// The value of `BASE(mmDSCL0_SCL_VERT_FILTER_INIT_C_BASE_IDX) + mmDSCL0_SCL_VERT_FILTER_INIT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_VERT_FILTER_INIT_C: u32 = 0x41b9;
+/// The value of `BASE(mmDSCL0_SCL_VERT_FILTER_INIT_BOT_C_BASE_IDX) + mmDSCL0_SCL_VERT_FILTER_INIT_BOT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_SCL_VERT_FILTER_INIT_BOT_C: u32 = 0x41ba;
+/// The value of `BASE(mmDSCL0_RECOUT_START_BASE_IDX) + mmDSCL0_RECOUT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_RECOUT_START: u32 = 0x41c2;
+/// The value of `BASE(mmDSCL0_RECOUT_SIZE_BASE_IDX) + mmDSCL0_RECOUT_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_RECOUT_SIZE: u32 = 0x41c3;
+/// The value of `BASE(mmCM0_CM_ICSC_CONTROL_BASE_IDX) + mmCM0_CM_ICSC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_ICSC_CONTROL: u32 = 0x41db;
+/// The value of `BASE(mmCM0_CM_ICSC_C11_C12_BASE_IDX) + mmCM0_CM_ICSC_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_ICSC_C11_C12: u32 = 0x41dc;
+/// The value of `BASE(mmCM0_CM_ICSC_C33_C34_BASE_IDX) + mmCM0_CM_ICSC_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_ICSC_C33_C34: u32 = 0x41e1;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_START_CNTL_B_BASE_IDX) + mmCM0_CM_DGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_START_CNTL_B: u32 = 0x420f;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_START_CNTL_G_BASE_IDX) + mmCM0_CM_DGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_START_CNTL_G: u32 = 0x4210;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_START_CNTL_R_BASE_IDX) + mmCM0_CM_DGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_START_CNTL_R: u32 = 0x4211;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmCM0_CM_DGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_SLOPE_CNTL_B: u32 = 0x4212;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmCM0_CM_DGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_SLOPE_CNTL_G: u32 = 0x4213;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmCM0_CM_DGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_SLOPE_CNTL_R: u32 = 0x4214;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmCM0_CM_DGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_END_CNTL1_B: u32 = 0x4215;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmCM0_CM_DGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_END_CNTL2_B: u32 = 0x4216;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmCM0_CM_DGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_END_CNTL1_G: u32 = 0x4217;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmCM0_CM_DGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_END_CNTL2_G: u32 = 0x4218;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmCM0_CM_DGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_END_CNTL1_R: u32 = 0x4219;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmCM0_CM_DGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_END_CNTL2_R: u32 = 0x421a;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_REGION_0_1_BASE_IDX) + mmCM0_CM_DGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_REGION_0_1: u32 = 0x421b;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMB_REGION_14_15_BASE_IDX) + mmCM0_CM_DGAM_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMB_REGION_14_15: u32 = 0x4222;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_START_CNTL_B_BASE_IDX) + mmCM0_CM_DGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_START_CNTL_B: u32 = 0x41fb;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_START_CNTL_G_BASE_IDX) + mmCM0_CM_DGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_START_CNTL_G: u32 = 0x41fc;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_START_CNTL_R_BASE_IDX) + mmCM0_CM_DGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_START_CNTL_R: u32 = 0x41fd;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmCM0_CM_DGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_SLOPE_CNTL_B: u32 = 0x41fe;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmCM0_CM_DGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_SLOPE_CNTL_G: u32 = 0x41ff;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmCM0_CM_DGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_SLOPE_CNTL_R: u32 = 0x4200;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmCM0_CM_DGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_END_CNTL1_B: u32 = 0x4201;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmCM0_CM_DGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_END_CNTL2_B: u32 = 0x4202;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmCM0_CM_DGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_END_CNTL1_G: u32 = 0x4203;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmCM0_CM_DGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_END_CNTL2_G: u32 = 0x4204;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmCM0_CM_DGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_END_CNTL1_R: u32 = 0x4205;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmCM0_CM_DGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_END_CNTL2_R: u32 = 0x4206;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_REGION_0_1_BASE_IDX) + mmCM0_CM_DGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_REGION_0_1: u32 = 0x4207;
+/// The value of `BASE(mmCM0_CM_DGAM_RAMA_REGION_14_15_BASE_IDX) + mmCM0_CM_DGAM_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_RAMA_REGION_14_15: u32 = 0x420e;
+/// The value of `BASE(mmCM0_CM_MEM_PWR_CTRL_BASE_IDX) + mmCM0_CM_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_MEM_PWR_CTRL: u32 = 0x4262;
+/// The value of `BASE(mmCM0_CM_DGAM_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM0_CM_DGAM_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_LUT_WRITE_EN_MASK: u32 = 0x41fa;
+/// The value of `BASE(mmCM0_CM_DGAM_LUT_INDEX_BASE_IDX) + mmCM0_CM_DGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_LUT_INDEX: u32 = 0x41f8;
+/// The value of `BASE(mmCM0_CM_DGAM_LUT_DATA_BASE_IDX) + mmCM0_CM_DGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_LUT_DATA: u32 = 0x41f9;
+/// The value of `BASE(mmCM0_CM_CONTROL_BASE_IDX) + mmCM0_CM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_CONTROL: u32 = 0x41da;
+/// The value of `BASE(mmCM0_CM_DGAM_CONTROL_BASE_IDX) + mmCM0_CM_DGAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_DGAM_CONTROL: u32 = 0x41f7;
+/// The value of `BASE(mmCM0_CM_TEST_DEBUG_INDEX_BASE_IDX) + mmCM0_CM_TEST_DEBUG_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_TEST_DEBUG_INDEX: u32 = 0x42a9;
+/// The value of `BASE(mmCM0_CM_TEST_DEBUG_DATA_BASE_IDX) + mmCM0_CM_TEST_DEBUG_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_TEST_DEBUG_DATA: u32 = 0x42aa;
+/// The value of `BASE(mmCNVC_CFG0_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG0_FORMAT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_FORMAT_CONTROL: u32 = 0x4190;
+/// The value of `BASE(mmCNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CNVC_SURFACE_PIXEL_FORMAT: u32 = 0x418f;
+/// The value of `BASE(mmCNVC_CUR0_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR0_CURSOR0_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CURSOR0_CONTROL: u32 = 0x41a0;
+/// The value of `BASE(mmCNVC_CUR0_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR0_CURSOR0_COLOR0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CURSOR0_COLOR0: u32 = 0x41a1;
+/// The value of `BASE(mmCNVC_CUR0_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR0_CURSOR0_COLOR1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CURSOR0_COLOR1: u32 = 0x41a2;
+/// The value of `BASE(mmCNVC_CUR0_CURSOR0_FP_SCALE_BIAS_BASE_IDX) + mmCNVC_CUR0_CURSOR0_FP_SCALE_BIAS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CURSOR0_FP_SCALE_BIAS: u32 = 0x41a3;
+/// The value of `BASE(mmDPP_TOP0_DPP_CONTROL_BASE_IDX) + mmDPP_TOP0_DPP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_DPP_CONTROL: u32 = 0x4185;
+/// The value of `BASE(mmCM0_CM_HDR_MULT_COEF_BASE_IDX) + mmCM0_CM_HDR_MULT_COEF` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_HDR_MULT_COEF: u32 = 0x4261;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_CONTROL_BASE_IDX) + mmCM0_CM_BLNDGAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_CONTROL: u32 = 0x4223;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_START_CNTL_B_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_START_CNTL_B: u32 = 0x4244;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_START_CNTL_G_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_START_CNTL_G: u32 = 0x4245;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_START_CNTL_R_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_START_CNTL_R: u32 = 0x4246;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_END_CNTL1_B: u32 = 0x424a;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_END_CNTL2_B: u32 = 0x424b;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_END_CNTL1_G: u32 = 0x424c;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_END_CNTL2_G: u32 = 0x424d;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_END_CNTL1_R: u32 = 0x424e;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_END_CNTL2_R: u32 = 0x424f;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_0_1_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_0_1: u32 = 0x4250;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_2_3_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_2_3: u32 = 0x4251;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_4_5_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_4_5: u32 = 0x4252;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_6_7_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_6_7: u32 = 0x4253;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_8_9_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_8_9: u32 = 0x4254;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_10_11_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_10_11: u32 = 0x4255;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_12_13_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_12_13: u32 = 0x4256;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_14_15_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_14_15: u32 = 0x4257;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_16_17_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_16_17: u32 = 0x4258;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_18_19_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_18_19: u32 = 0x4259;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_20_21_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_20_21: u32 = 0x425a;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_22_23_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_22_23: u32 = 0x425b;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_24_25_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_24_25: u32 = 0x425c;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_26_27_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_26_27: u32 = 0x425d;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_28_29_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_28_29: u32 = 0x425e;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_30_31_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_30_31: u32 = 0x425f;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_REGION_32_33_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_REGION_32_33: u32 = 0x4260;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_START_CNTL_B_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_START_CNTL_B: u32 = 0x4227;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_START_CNTL_G_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_START_CNTL_G: u32 = 0x4228;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_START_CNTL_R_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_START_CNTL_R: u32 = 0x4229;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_END_CNTL1_B: u32 = 0x422d;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_END_CNTL2_B: u32 = 0x422e;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_END_CNTL1_G: u32 = 0x422f;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_END_CNTL2_G: u32 = 0x4230;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_END_CNTL1_R: u32 = 0x4231;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_END_CNTL2_R: u32 = 0x4232;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_0_1_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_0_1: u32 = 0x4233;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_2_3_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_2_3: u32 = 0x4234;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_4_5_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_4_5: u32 = 0x4235;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_6_7_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_6_7: u32 = 0x4236;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_8_9_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_8_9: u32 = 0x4237;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_10_11_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_10_11: u32 = 0x4238;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_12_13_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_12_13: u32 = 0x4239;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_14_15_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_14_15: u32 = 0x423a;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_16_17_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_16_17: u32 = 0x423b;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_18_19_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_18_19: u32 = 0x423c;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_20_21_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_20_21: u32 = 0x423d;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_22_23_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_22_23: u32 = 0x423e;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_24_25_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_24_25: u32 = 0x423f;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_26_27_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_26_27: u32 = 0x4240;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_28_29_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_28_29: u32 = 0x4241;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_30_31_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_30_31: u32 = 0x4242;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_REGION_32_33_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_REGION_32_33: u32 = 0x4243;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_LUT_INDEX_BASE_IDX) + mmCM0_CM_BLNDGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_LUT_INDEX: u32 = 0x4224;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_LUT_DATA_BASE_IDX) + mmCM0_CM_BLNDGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_LUT_DATA: u32 = 0x4225;
+/// The value of `BASE(mmCM0_CM_3DLUT_MODE_BASE_IDX) + mmCM0_CM_3DLUT_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_3DLUT_MODE: u32 = 0x42a0;
+/// The value of `BASE(mmCM0_CM_3DLUT_INDEX_BASE_IDX) + mmCM0_CM_3DLUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_3DLUT_INDEX: u32 = 0x42a1;
+/// The value of `BASE(mmCM0_CM_3DLUT_DATA_BASE_IDX) + mmCM0_CM_3DLUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_3DLUT_DATA: u32 = 0x42a2;
+/// The value of `BASE(mmCM0_CM_3DLUT_DATA_30BIT_BASE_IDX) + mmCM0_CM_3DLUT_DATA_30BIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_3DLUT_DATA_30BIT: u32 = 0x42a3;
+/// The value of `BASE(mmCM0_CM_3DLUT_READ_WRITE_CONTROL_BASE_IDX) + mmCM0_CM_3DLUT_READ_WRITE_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_3DLUT_READ_WRITE_CONTROL: u32 = 0x42a4;
+/// The value of `BASE(mmCM0_CM_SHAPER_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM0_CM_SHAPER_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_LUT_WRITE_EN_MASK: u32 = 0x426f;
+/// The value of `BASE(mmCM0_CM_SHAPER_CONTROL_BASE_IDX) + mmCM0_CM_SHAPER_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_CONTROL: u32 = 0x4267;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_START_CNTL_B_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_START_CNTL_B: u32 = 0x4287;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_START_CNTL_G_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_START_CNTL_G: u32 = 0x4288;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_START_CNTL_R_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_START_CNTL_R: u32 = 0x4289;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_END_CNTL_B_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_END_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_END_CNTL_B: u32 = 0x428a;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_END_CNTL_G_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_END_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_END_CNTL_G: u32 = 0x428b;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_END_CNTL_R_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_END_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_END_CNTL_R: u32 = 0x428c;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_0_1_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_0_1: u32 = 0x428d;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_2_3_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_2_3: u32 = 0x428e;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_4_5_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_4_5: u32 = 0x428f;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_6_7_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_6_7: u32 = 0x4290;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_8_9_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_8_9: u32 = 0x4291;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_10_11_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_10_11: u32 = 0x4292;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_12_13_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_12_13: u32 = 0x4293;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_14_15_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_14_15: u32 = 0x4294;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_16_17_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_16_17: u32 = 0x4295;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_18_19_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_18_19: u32 = 0x4296;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_20_21_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_20_21: u32 = 0x4297;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_22_23_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_22_23: u32 = 0x4298;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_24_25_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_24_25: u32 = 0x4299;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_26_27_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_26_27: u32 = 0x429a;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_28_29_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_28_29: u32 = 0x429b;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_30_31_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_30_31: u32 = 0x429c;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMB_REGION_32_33_BASE_IDX) + mmCM0_CM_SHAPER_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMB_REGION_32_33: u32 = 0x429d;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_START_CNTL_B_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_START_CNTL_B: u32 = 0x4270;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_START_CNTL_G_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_START_CNTL_G: u32 = 0x4271;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_START_CNTL_R_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_START_CNTL_R: u32 = 0x4272;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_END_CNTL_B_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_END_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_END_CNTL_B: u32 = 0x4273;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_END_CNTL_G_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_END_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_END_CNTL_G: u32 = 0x4274;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_END_CNTL_R_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_END_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_END_CNTL_R: u32 = 0x4275;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_0_1_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_0_1: u32 = 0x4276;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_2_3_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_2_3: u32 = 0x4277;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_4_5_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_4_5: u32 = 0x4278;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_6_7_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_6_7: u32 = 0x4279;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_8_9_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_8_9: u32 = 0x427a;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_10_11_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_10_11: u32 = 0x427b;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_12_13_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_12_13: u32 = 0x427c;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_14_15_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_14_15: u32 = 0x427d;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_16_17_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_16_17: u32 = 0x427e;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_18_19_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_18_19: u32 = 0x427f;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_20_21_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_20_21: u32 = 0x4280;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_22_23_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_22_23: u32 = 0x4281;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_24_25_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_24_25: u32 = 0x4282;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_26_27_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_26_27: u32 = 0x4283;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_28_29_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_28_29: u32 = 0x4284;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_30_31_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_30_31: u32 = 0x4285;
+/// The value of `BASE(mmCM0_CM_SHAPER_RAMA_REGION_32_33_BASE_IDX) + mmCM0_CM_SHAPER_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_RAMA_REGION_32_33: u32 = 0x4286;
+/// The value of `BASE(mmCM0_CM_SHAPER_LUT_INDEX_BASE_IDX) + mmCM0_CM_SHAPER_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_LUT_INDEX: u32 = 0x426d;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM0_CM_BLNDGAM_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_LUT_WRITE_EN_MASK: u32 = 0x4226;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_SLOPE_CNTL_B: u32 = 0x4247;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_SLOPE_CNTL_G: u32 = 0x4248;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMB_SLOPE_CNTL_R: u32 = 0x4249;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_SLOPE_CNTL_B: u32 = 0x422a;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_SLOPE_CNTL_G: u32 = 0x422b;
+/// The value of `BASE(mmCM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmCM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_BLNDGAM_RAMA_SLOPE_CNTL_R: u32 = 0x422c;
+/// The value of `BASE(mmCURSOR0_0_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_0_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CURSOR_CONTROL: u32 = 0x3b38;
+/// The value of `BASE(mmCNVC_CFG0_ALPHA_2BIT_LUT_BASE_IDX) + mmCNVC_CFG0_ALPHA_2BIT_LUT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_ALPHA_2BIT_LUT: u32 = 0x419d;
+/// The value of `BASE(mmCNVC_CFG0_FCNV_FP_BIAS_R_BASE_IDX) + mmCNVC_CFG0_FCNV_FP_BIAS_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_FCNV_FP_BIAS_R: u32 = 0x4191;
+/// The value of `BASE(mmCNVC_CFG0_FCNV_FP_BIAS_G_BASE_IDX) + mmCNVC_CFG0_FCNV_FP_BIAS_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_FCNV_FP_BIAS_G: u32 = 0x4192;
+/// The value of `BASE(mmCNVC_CFG0_FCNV_FP_BIAS_B_BASE_IDX) + mmCNVC_CFG0_FCNV_FP_BIAS_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_FCNV_FP_BIAS_B: u32 = 0x4193;
+/// The value of `BASE(mmCNVC_CFG0_FCNV_FP_SCALE_R_BASE_IDX) + mmCNVC_CFG0_FCNV_FP_SCALE_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_FCNV_FP_SCALE_R: u32 = 0x4194;
+/// The value of `BASE(mmCNVC_CFG0_FCNV_FP_SCALE_G_BASE_IDX) + mmCNVC_CFG0_FCNV_FP_SCALE_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_FCNV_FP_SCALE_G: u32 = 0x4195;
+/// The value of `BASE(mmCNVC_CFG0_FCNV_FP_SCALE_B_BASE_IDX) + mmCNVC_CFG0_FCNV_FP_SCALE_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_FCNV_FP_SCALE_B: u32 = 0x4196;
+/// The value of `BASE(mmCNVC_CFG0_COLOR_KEYER_CONTROL_BASE_IDX) + mmCNVC_CFG0_COLOR_KEYER_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_COLOR_KEYER_CONTROL: u32 = 0x4197;
+/// The value of `BASE(mmCNVC_CFG0_COLOR_KEYER_ALPHA_BASE_IDX) + mmCNVC_CFG0_COLOR_KEYER_ALPHA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_COLOR_KEYER_ALPHA: u32 = 0x4198;
+/// The value of `BASE(mmCNVC_CFG0_COLOR_KEYER_RED_BASE_IDX) + mmCNVC_CFG0_COLOR_KEYER_RED` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_COLOR_KEYER_RED: u32 = 0x4199;
+/// The value of `BASE(mmCNVC_CFG0_COLOR_KEYER_GREEN_BASE_IDX) + mmCNVC_CFG0_COLOR_KEYER_GREEN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_COLOR_KEYER_GREEN: u32 = 0x419a;
+/// The value of `BASE(mmCNVC_CFG0_COLOR_KEYER_BLUE_BASE_IDX) + mmCNVC_CFG0_COLOR_KEYER_BLUE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_COLOR_KEYER_BLUE: u32 = 0x419b;
+/// The value of `BASE(mmCM0_CM_SHAPER_LUT_DATA_BASE_IDX) + mmCM0_CM_SHAPER_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_SHAPER_LUT_DATA: u32 = 0x426e;
+/// The value of `BASE(mmDSCL0_OBUF_MEM_PWR_CTRL_BASE_IDX) + mmDSCL0_OBUF_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_OBUF_MEM_PWR_CTRL: u32 = 0x41cb;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_B_C11_C12_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_B_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_B_C11_C12: u32 = 0x41ef;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_B_C13_C14_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_B_C13_C14` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_B_C13_C14: u32 = 0x41f0;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_B_C21_C22_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_B_C21_C22` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_B_C21_C22: u32 = 0x41f1;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_B_C23_C24_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_B_C23_C24` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_B_C23_C24: u32 = 0x41f2;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_B_C31_C32_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_B_C31_C32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_B_C31_C32: u32 = 0x41f3;
+/// The value of `BASE(mmCM0_CM_GAMUT_REMAP_B_C33_C34_BASE_IDX) + mmCM0_CM_GAMUT_REMAP_B_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_GAMUT_REMAP_B_C33_C34: u32 = 0x41f4;
+/// The value of `BASE(mmCM0_CM_ICSC_B_C11_C12_BASE_IDX) + mmCM0_CM_ICSC_B_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_ICSC_B_C11_C12: u32 = 0x41e2;
+/// The value of `BASE(mmCM0_CM_ICSC_B_C33_C34_BASE_IDX) + mmCM0_CM_ICSC_B_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP0_CM_ICSC_B_C33_C34: u32 = 0x41e7;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_CONTROL_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_CONTROL: u32 = 0x4353;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_C11_C12_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_C11_C12: u32 = 0x4354;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_C13_C14_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_C13_C14` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_C13_C14: u32 = 0x4355;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_C21_C22_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_C21_C22` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_C21_C22: u32 = 0x4356;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_C23_C24_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_C23_C24` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_C23_C24: u32 = 0x4357;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_C31_C32_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_C31_C32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_C31_C32: u32 = 0x4358;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_C33_C34_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_C33_C34: u32 = 0x4359;
+/// The value of `BASE(mmDSCL1_DSCL_EXT_OVERSCAN_LEFT_RIGHT_BASE_IDX) + mmDSCL1_DSCL_EXT_OVERSCAN_LEFT_RIGHT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_DSCL_EXT_OVERSCAN_LEFT_RIGHT: u32 = 0x4329;
+/// The value of `BASE(mmDSCL1_DSCL_EXT_OVERSCAN_TOP_BOTTOM_BASE_IDX) + mmDSCL1_DSCL_EXT_OVERSCAN_TOP_BOTTOM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_DSCL_EXT_OVERSCAN_TOP_BOTTOM: u32 = 0x432a;
+/// The value of `BASE(mmDSCL1_DSCL_MEM_PWR_STATUS_BASE_IDX) + mmDSCL1_DSCL_MEM_PWR_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_DSCL_MEM_PWR_STATUS: u32 = 0x4334;
+/// The value of `BASE(mmDSCL1_DSCL_MEM_PWR_CTRL_BASE_IDX) + mmDSCL1_DSCL_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_DSCL_MEM_PWR_CTRL: u32 = 0x4333;
+/// The value of `BASE(mmDSCL1_OTG_H_BLANK_BASE_IDX) + mmDSCL1_OTG_H_BLANK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_OTG_H_BLANK: u32 = 0x432b;
+/// The value of `BASE(mmDSCL1_OTG_V_BLANK_BASE_IDX) + mmDSCL1_OTG_V_BLANK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_OTG_V_BLANK: u32 = 0x432c;
+/// The value of `BASE(mmDSCL1_SCL_MODE_BASE_IDX) + mmDSCL1_SCL_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_MODE: u32 = 0x4317;
+/// The value of `BASE(mmDSCL1_LB_DATA_FORMAT_BASE_IDX) + mmDSCL1_LB_DATA_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_LB_DATA_FORMAT: u32 = 0x4330;
+/// The value of `BASE(mmDSCL1_LB_MEMORY_CTRL_BASE_IDX) + mmDSCL1_LB_MEMORY_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_LB_MEMORY_CTRL: u32 = 0x4331;
+/// The value of `BASE(mmDSCL1_DSCL_AUTOCAL_BASE_IDX) + mmDSCL1_DSCL_AUTOCAL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_DSCL_AUTOCAL: u32 = 0x4328;
+/// The value of `BASE(mmDSCL1_DSCL_CONTROL_BASE_IDX) + mmDSCL1_DSCL_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_DSCL_CONTROL: u32 = 0x4319;
+/// The value of `BASE(mmDSCL1_SCL_BLACK_OFFSET_BASE_IDX) + mmDSCL1_SCL_BLACK_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_BLACK_OFFSET: u32 = 0x4326;
+/// The value of `BASE(mmDSCL1_SCL_TAP_CONTROL_BASE_IDX) + mmDSCL1_SCL_TAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_TAP_CONTROL: u32 = 0x4318;
+/// The value of `BASE(mmDSCL1_SCL_COEF_RAM_TAP_SELECT_BASE_IDX) + mmDSCL1_SCL_COEF_RAM_TAP_SELECT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_COEF_RAM_TAP_SELECT: u32 = 0x4315;
+/// The value of `BASE(mmDSCL1_SCL_COEF_RAM_TAP_DATA_BASE_IDX) + mmDSCL1_SCL_COEF_RAM_TAP_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_COEF_RAM_TAP_DATA: u32 = 0x4316;
+/// The value of `BASE(mmDSCL1_DSCL_2TAP_CONTROL_BASE_IDX) + mmDSCL1_DSCL_2TAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_DSCL_2TAP_CONTROL: u32 = 0x431a;
+/// The value of `BASE(mmDSCL1_MPC_SIZE_BASE_IDX) + mmDSCL1_MPC_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_MPC_SIZE: u32 = 0x432f;
+/// The value of `BASE(mmDSCL1_SCL_HORZ_FILTER_SCALE_RATIO_BASE_IDX) + mmDSCL1_SCL_HORZ_FILTER_SCALE_RATIO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_HORZ_FILTER_SCALE_RATIO: u32 = 0x431c;
+/// The value of `BASE(mmDSCL1_SCL_VERT_FILTER_SCALE_RATIO_BASE_IDX) + mmDSCL1_SCL_VERT_FILTER_SCALE_RATIO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_VERT_FILTER_SCALE_RATIO: u32 = 0x4320;
+/// The value of `BASE(mmDSCL1_SCL_HORZ_FILTER_SCALE_RATIO_C_BASE_IDX) + mmDSCL1_SCL_HORZ_FILTER_SCALE_RATIO_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_HORZ_FILTER_SCALE_RATIO_C: u32 = 0x431e;
+/// The value of `BASE(mmDSCL1_SCL_VERT_FILTER_SCALE_RATIO_C_BASE_IDX) + mmDSCL1_SCL_VERT_FILTER_SCALE_RATIO_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_VERT_FILTER_SCALE_RATIO_C: u32 = 0x4323;
+/// The value of `BASE(mmDSCL1_SCL_HORZ_FILTER_INIT_BASE_IDX) + mmDSCL1_SCL_HORZ_FILTER_INIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_HORZ_FILTER_INIT: u32 = 0x431d;
+/// The value of `BASE(mmDSCL1_SCL_HORZ_FILTER_INIT_C_BASE_IDX) + mmDSCL1_SCL_HORZ_FILTER_INIT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_HORZ_FILTER_INIT_C: u32 = 0x431f;
+/// The value of `BASE(mmDSCL1_SCL_VERT_FILTER_INIT_BASE_IDX) + mmDSCL1_SCL_VERT_FILTER_INIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_VERT_FILTER_INIT: u32 = 0x4321;
+/// The value of `BASE(mmDSCL1_SCL_VERT_FILTER_INIT_BOT_BASE_IDX) + mmDSCL1_SCL_VERT_FILTER_INIT_BOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_VERT_FILTER_INIT_BOT: u32 = 0x4322;
+/// The value of `BASE(mmDSCL1_SCL_VERT_FILTER_INIT_C_BASE_IDX) + mmDSCL1_SCL_VERT_FILTER_INIT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_VERT_FILTER_INIT_C: u32 = 0x4324;
+/// The value of `BASE(mmDSCL1_SCL_VERT_FILTER_INIT_BOT_C_BASE_IDX) + mmDSCL1_SCL_VERT_FILTER_INIT_BOT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_SCL_VERT_FILTER_INIT_BOT_C: u32 = 0x4325;
+/// The value of `BASE(mmDSCL1_RECOUT_START_BASE_IDX) + mmDSCL1_RECOUT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_RECOUT_START: u32 = 0x432d;
+/// The value of `BASE(mmDSCL1_RECOUT_SIZE_BASE_IDX) + mmDSCL1_RECOUT_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_RECOUT_SIZE: u32 = 0x432e;
+/// The value of `BASE(mmCM1_CM_ICSC_CONTROL_BASE_IDX) + mmCM1_CM_ICSC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_ICSC_CONTROL: u32 = 0x4346;
+/// The value of `BASE(mmCM1_CM_ICSC_C11_C12_BASE_IDX) + mmCM1_CM_ICSC_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_ICSC_C11_C12: u32 = 0x4347;
+/// The value of `BASE(mmCM1_CM_ICSC_C33_C34_BASE_IDX) + mmCM1_CM_ICSC_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_ICSC_C33_C34: u32 = 0x434c;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_START_CNTL_B_BASE_IDX) + mmCM1_CM_DGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_START_CNTL_B: u32 = 0x437a;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_START_CNTL_G_BASE_IDX) + mmCM1_CM_DGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_START_CNTL_G: u32 = 0x437b;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_START_CNTL_R_BASE_IDX) + mmCM1_CM_DGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_START_CNTL_R: u32 = 0x437c;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmCM1_CM_DGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_SLOPE_CNTL_B: u32 = 0x437d;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmCM1_CM_DGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_SLOPE_CNTL_G: u32 = 0x437e;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmCM1_CM_DGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_SLOPE_CNTL_R: u32 = 0x437f;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmCM1_CM_DGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_END_CNTL1_B: u32 = 0x4380;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmCM1_CM_DGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_END_CNTL2_B: u32 = 0x4381;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmCM1_CM_DGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_END_CNTL1_G: u32 = 0x4382;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmCM1_CM_DGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_END_CNTL2_G: u32 = 0x4383;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmCM1_CM_DGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_END_CNTL1_R: u32 = 0x4384;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmCM1_CM_DGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_END_CNTL2_R: u32 = 0x4385;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_REGION_0_1_BASE_IDX) + mmCM1_CM_DGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_REGION_0_1: u32 = 0x4386;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMB_REGION_14_15_BASE_IDX) + mmCM1_CM_DGAM_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMB_REGION_14_15: u32 = 0x438d;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_START_CNTL_B_BASE_IDX) + mmCM1_CM_DGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_START_CNTL_B: u32 = 0x4366;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_START_CNTL_G_BASE_IDX) + mmCM1_CM_DGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_START_CNTL_G: u32 = 0x4367;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_START_CNTL_R_BASE_IDX) + mmCM1_CM_DGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_START_CNTL_R: u32 = 0x4368;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmCM1_CM_DGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_SLOPE_CNTL_B: u32 = 0x4369;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmCM1_CM_DGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_SLOPE_CNTL_G: u32 = 0x436a;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmCM1_CM_DGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_SLOPE_CNTL_R: u32 = 0x436b;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmCM1_CM_DGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_END_CNTL1_B: u32 = 0x436c;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmCM1_CM_DGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_END_CNTL2_B: u32 = 0x436d;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmCM1_CM_DGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_END_CNTL1_G: u32 = 0x436e;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmCM1_CM_DGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_END_CNTL2_G: u32 = 0x436f;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmCM1_CM_DGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_END_CNTL1_R: u32 = 0x4370;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmCM1_CM_DGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_END_CNTL2_R: u32 = 0x4371;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_REGION_0_1_BASE_IDX) + mmCM1_CM_DGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_REGION_0_1: u32 = 0x4372;
+/// The value of `BASE(mmCM1_CM_DGAM_RAMA_REGION_14_15_BASE_IDX) + mmCM1_CM_DGAM_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_RAMA_REGION_14_15: u32 = 0x4379;
+/// The value of `BASE(mmCM1_CM_MEM_PWR_CTRL_BASE_IDX) + mmCM1_CM_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_MEM_PWR_CTRL: u32 = 0x43cd;
+/// The value of `BASE(mmCM1_CM_DGAM_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM1_CM_DGAM_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_LUT_WRITE_EN_MASK: u32 = 0x4365;
+/// The value of `BASE(mmCM1_CM_DGAM_LUT_INDEX_BASE_IDX) + mmCM1_CM_DGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_LUT_INDEX: u32 = 0x4363;
+/// The value of `BASE(mmCM1_CM_DGAM_LUT_DATA_BASE_IDX) + mmCM1_CM_DGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_LUT_DATA: u32 = 0x4364;
+/// The value of `BASE(mmCM1_CM_CONTROL_BASE_IDX) + mmCM1_CM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_CONTROL: u32 = 0x4345;
+/// The value of `BASE(mmCM1_CM_DGAM_CONTROL_BASE_IDX) + mmCM1_CM_DGAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_DGAM_CONTROL: u32 = 0x4362;
+/// The value of `BASE(mmCM1_CM_TEST_DEBUG_INDEX_BASE_IDX) + mmCM1_CM_TEST_DEBUG_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_TEST_DEBUG_INDEX: u32 = 0x4414;
+/// The value of `BASE(mmCM1_CM_TEST_DEBUG_DATA_BASE_IDX) + mmCM1_CM_TEST_DEBUG_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_TEST_DEBUG_DATA: u32 = 0x4415;
+/// The value of `BASE(mmCNVC_CFG1_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG1_FORMAT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_FORMAT_CONTROL: u32 = 0x42fb;
+/// The value of `BASE(mmCNVC_CFG1_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG1_CNVC_SURFACE_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CNVC_SURFACE_PIXEL_FORMAT: u32 = 0x42fa;
+/// The value of `BASE(mmCNVC_CUR1_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR1_CURSOR0_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CURSOR0_CONTROL: u32 = 0x430b;
+/// The value of `BASE(mmCNVC_CUR1_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR1_CURSOR0_COLOR0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CURSOR0_COLOR0: u32 = 0x430c;
+/// The value of `BASE(mmCNVC_CUR1_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR1_CURSOR0_COLOR1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CURSOR0_COLOR1: u32 = 0x430d;
+/// The value of `BASE(mmCNVC_CUR1_CURSOR0_FP_SCALE_BIAS_BASE_IDX) + mmCNVC_CUR1_CURSOR0_FP_SCALE_BIAS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CURSOR0_FP_SCALE_BIAS: u32 = 0x430e;
+/// The value of `BASE(mmDPP_TOP1_DPP_CONTROL_BASE_IDX) + mmDPP_TOP1_DPP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_DPP_CONTROL: u32 = 0x42f0;
+/// The value of `BASE(mmCM1_CM_HDR_MULT_COEF_BASE_IDX) + mmCM1_CM_HDR_MULT_COEF` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_HDR_MULT_COEF: u32 = 0x43cc;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_CONTROL_BASE_IDX) + mmCM1_CM_BLNDGAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_CONTROL: u32 = 0x438e;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_START_CNTL_B_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_START_CNTL_B: u32 = 0x43af;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_START_CNTL_G_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_START_CNTL_G: u32 = 0x43b0;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_START_CNTL_R_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_START_CNTL_R: u32 = 0x43b1;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_END_CNTL1_B: u32 = 0x43b5;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_END_CNTL2_B: u32 = 0x43b6;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_END_CNTL1_G: u32 = 0x43b7;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_END_CNTL2_G: u32 = 0x43b8;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_END_CNTL1_R: u32 = 0x43b9;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_END_CNTL2_R: u32 = 0x43ba;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_0_1_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_0_1: u32 = 0x43bb;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_2_3_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_2_3: u32 = 0x43bc;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_4_5_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_4_5: u32 = 0x43bd;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_6_7_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_6_7: u32 = 0x43be;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_8_9_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_8_9: u32 = 0x43bf;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_10_11_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_10_11: u32 = 0x43c0;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_12_13_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_12_13: u32 = 0x43c1;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_14_15_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_14_15: u32 = 0x43c2;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_16_17_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_16_17: u32 = 0x43c3;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_18_19_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_18_19: u32 = 0x43c4;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_20_21_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_20_21: u32 = 0x43c5;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_22_23_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_22_23: u32 = 0x43c6;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_24_25_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_24_25: u32 = 0x43c7;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_26_27_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_26_27: u32 = 0x43c8;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_28_29_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_28_29: u32 = 0x43c9;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_30_31_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_30_31: u32 = 0x43ca;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_REGION_32_33_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_REGION_32_33: u32 = 0x43cb;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_START_CNTL_B_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_START_CNTL_B: u32 = 0x4392;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_START_CNTL_G_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_START_CNTL_G: u32 = 0x4393;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_START_CNTL_R_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_START_CNTL_R: u32 = 0x4394;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_END_CNTL1_B: u32 = 0x4398;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_END_CNTL2_B: u32 = 0x4399;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_END_CNTL1_G: u32 = 0x439a;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_END_CNTL2_G: u32 = 0x439b;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_END_CNTL1_R: u32 = 0x439c;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_END_CNTL2_R: u32 = 0x439d;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_0_1_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_0_1: u32 = 0x439e;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_2_3_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_2_3: u32 = 0x439f;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_4_5_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_4_5: u32 = 0x43a0;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_6_7_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_6_7: u32 = 0x43a1;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_8_9_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_8_9: u32 = 0x43a2;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_10_11_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_10_11: u32 = 0x43a3;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_12_13_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_12_13: u32 = 0x43a4;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_14_15_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_14_15: u32 = 0x43a5;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_16_17_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_16_17: u32 = 0x43a6;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_18_19_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_18_19: u32 = 0x43a7;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_20_21_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_20_21: u32 = 0x43a8;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_22_23_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_22_23: u32 = 0x43a9;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_24_25_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_24_25: u32 = 0x43aa;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_26_27_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_26_27: u32 = 0x43ab;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_28_29_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_28_29: u32 = 0x43ac;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_30_31_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_30_31: u32 = 0x43ad;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_REGION_32_33_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_REGION_32_33: u32 = 0x43ae;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_LUT_INDEX_BASE_IDX) + mmCM1_CM_BLNDGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_LUT_INDEX: u32 = 0x438f;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_LUT_DATA_BASE_IDX) + mmCM1_CM_BLNDGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_LUT_DATA: u32 = 0x4390;
+/// The value of `BASE(mmCM1_CM_3DLUT_MODE_BASE_IDX) + mmCM1_CM_3DLUT_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_3DLUT_MODE: u32 = 0x440b;
+/// The value of `BASE(mmCM1_CM_3DLUT_INDEX_BASE_IDX) + mmCM1_CM_3DLUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_3DLUT_INDEX: u32 = 0x440c;
+/// The value of `BASE(mmCM1_CM_3DLUT_DATA_BASE_IDX) + mmCM1_CM_3DLUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_3DLUT_DATA: u32 = 0x440d;
+/// The value of `BASE(mmCM1_CM_3DLUT_DATA_30BIT_BASE_IDX) + mmCM1_CM_3DLUT_DATA_30BIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_3DLUT_DATA_30BIT: u32 = 0x440e;
+/// The value of `BASE(mmCM1_CM_3DLUT_READ_WRITE_CONTROL_BASE_IDX) + mmCM1_CM_3DLUT_READ_WRITE_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_3DLUT_READ_WRITE_CONTROL: u32 = 0x440f;
+/// The value of `BASE(mmCM1_CM_SHAPER_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM1_CM_SHAPER_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_LUT_WRITE_EN_MASK: u32 = 0x43da;
+/// The value of `BASE(mmCM1_CM_SHAPER_CONTROL_BASE_IDX) + mmCM1_CM_SHAPER_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_CONTROL: u32 = 0x43d2;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_START_CNTL_B_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_START_CNTL_B: u32 = 0x43f2;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_START_CNTL_G_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_START_CNTL_G: u32 = 0x43f3;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_START_CNTL_R_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_START_CNTL_R: u32 = 0x43f4;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_END_CNTL_B_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_END_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_END_CNTL_B: u32 = 0x43f5;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_END_CNTL_G_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_END_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_END_CNTL_G: u32 = 0x43f6;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_END_CNTL_R_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_END_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_END_CNTL_R: u32 = 0x43f7;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_0_1_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_0_1: u32 = 0x43f8;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_2_3_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_2_3: u32 = 0x43f9;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_4_5_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_4_5: u32 = 0x43fa;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_6_7_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_6_7: u32 = 0x43fb;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_8_9_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_8_9: u32 = 0x43fc;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_10_11_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_10_11: u32 = 0x43fd;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_12_13_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_12_13: u32 = 0x43fe;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_14_15_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_14_15: u32 = 0x43ff;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_16_17_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_16_17: u32 = 0x4400;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_18_19_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_18_19: u32 = 0x4401;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_20_21_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_20_21: u32 = 0x4402;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_22_23_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_22_23: u32 = 0x4403;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_24_25_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_24_25: u32 = 0x4404;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_26_27_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_26_27: u32 = 0x4405;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_28_29_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_28_29: u32 = 0x4406;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_30_31_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_30_31: u32 = 0x4407;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMB_REGION_32_33_BASE_IDX) + mmCM1_CM_SHAPER_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMB_REGION_32_33: u32 = 0x4408;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_START_CNTL_B_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_START_CNTL_B: u32 = 0x43db;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_START_CNTL_G_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_START_CNTL_G: u32 = 0x43dc;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_START_CNTL_R_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_START_CNTL_R: u32 = 0x43dd;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_END_CNTL_B_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_END_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_END_CNTL_B: u32 = 0x43de;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_END_CNTL_G_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_END_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_END_CNTL_G: u32 = 0x43df;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_END_CNTL_R_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_END_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_END_CNTL_R: u32 = 0x43e0;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_0_1_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_0_1: u32 = 0x43e1;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_2_3_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_2_3: u32 = 0x43e2;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_4_5_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_4_5: u32 = 0x43e3;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_6_7_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_6_7: u32 = 0x43e4;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_8_9_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_8_9: u32 = 0x43e5;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_10_11_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_10_11: u32 = 0x43e6;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_12_13_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_12_13: u32 = 0x43e7;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_14_15_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_14_15: u32 = 0x43e8;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_16_17_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_16_17: u32 = 0x43e9;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_18_19_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_18_19: u32 = 0x43ea;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_20_21_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_20_21: u32 = 0x43eb;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_22_23_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_22_23: u32 = 0x43ec;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_24_25_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_24_25: u32 = 0x43ed;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_26_27_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_26_27: u32 = 0x43ee;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_28_29_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_28_29: u32 = 0x43ef;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_30_31_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_30_31: u32 = 0x43f0;
+/// The value of `BASE(mmCM1_CM_SHAPER_RAMA_REGION_32_33_BASE_IDX) + mmCM1_CM_SHAPER_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_RAMA_REGION_32_33: u32 = 0x43f1;
+/// The value of `BASE(mmCM1_CM_SHAPER_LUT_INDEX_BASE_IDX) + mmCM1_CM_SHAPER_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_LUT_INDEX: u32 = 0x43d8;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM1_CM_BLNDGAM_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_LUT_WRITE_EN_MASK: u32 = 0x4391;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_SLOPE_CNTL_B: u32 = 0x43b2;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_SLOPE_CNTL_G: u32 = 0x43b3;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMB_SLOPE_CNTL_R: u32 = 0x43b4;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_SLOPE_CNTL_B: u32 = 0x4395;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_SLOPE_CNTL_G: u32 = 0x4396;
+/// The value of `BASE(mmCM1_CM_BLNDGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmCM1_CM_BLNDGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_BLNDGAM_RAMA_SLOPE_CNTL_R: u32 = 0x4397;
+/// The value of `BASE(mmCURSOR0_1_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_1_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CURSOR_CONTROL: u32 = 0x3c14;
+/// The value of `BASE(mmCNVC_CFG1_ALPHA_2BIT_LUT_BASE_IDX) + mmCNVC_CFG1_ALPHA_2BIT_LUT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_ALPHA_2BIT_LUT: u32 = 0x4308;
+/// The value of `BASE(mmCNVC_CFG1_FCNV_FP_BIAS_R_BASE_IDX) + mmCNVC_CFG1_FCNV_FP_BIAS_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_FCNV_FP_BIAS_R: u32 = 0x42fc;
+/// The value of `BASE(mmCNVC_CFG1_FCNV_FP_BIAS_G_BASE_IDX) + mmCNVC_CFG1_FCNV_FP_BIAS_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_FCNV_FP_BIAS_G: u32 = 0x42fd;
+/// The value of `BASE(mmCNVC_CFG1_FCNV_FP_BIAS_B_BASE_IDX) + mmCNVC_CFG1_FCNV_FP_BIAS_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_FCNV_FP_BIAS_B: u32 = 0x42fe;
+/// The value of `BASE(mmCNVC_CFG1_FCNV_FP_SCALE_R_BASE_IDX) + mmCNVC_CFG1_FCNV_FP_SCALE_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_FCNV_FP_SCALE_R: u32 = 0x42ff;
+/// The value of `BASE(mmCNVC_CFG1_FCNV_FP_SCALE_G_BASE_IDX) + mmCNVC_CFG1_FCNV_FP_SCALE_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_FCNV_FP_SCALE_G: u32 = 0x4300;
+/// The value of `BASE(mmCNVC_CFG1_FCNV_FP_SCALE_B_BASE_IDX) + mmCNVC_CFG1_FCNV_FP_SCALE_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_FCNV_FP_SCALE_B: u32 = 0x4301;
+/// The value of `BASE(mmCNVC_CFG1_COLOR_KEYER_CONTROL_BASE_IDX) + mmCNVC_CFG1_COLOR_KEYER_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_COLOR_KEYER_CONTROL: u32 = 0x4302;
+/// The value of `BASE(mmCNVC_CFG1_COLOR_KEYER_ALPHA_BASE_IDX) + mmCNVC_CFG1_COLOR_KEYER_ALPHA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_COLOR_KEYER_ALPHA: u32 = 0x4303;
+/// The value of `BASE(mmCNVC_CFG1_COLOR_KEYER_RED_BASE_IDX) + mmCNVC_CFG1_COLOR_KEYER_RED` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_COLOR_KEYER_RED: u32 = 0x4304;
+/// The value of `BASE(mmCNVC_CFG1_COLOR_KEYER_GREEN_BASE_IDX) + mmCNVC_CFG1_COLOR_KEYER_GREEN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_COLOR_KEYER_GREEN: u32 = 0x4305;
+/// The value of `BASE(mmCNVC_CFG1_COLOR_KEYER_BLUE_BASE_IDX) + mmCNVC_CFG1_COLOR_KEYER_BLUE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_COLOR_KEYER_BLUE: u32 = 0x4306;
+/// The value of `BASE(mmCM1_CM_SHAPER_LUT_DATA_BASE_IDX) + mmCM1_CM_SHAPER_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_SHAPER_LUT_DATA: u32 = 0x43d9;
+/// The value of `BASE(mmDSCL1_OBUF_MEM_PWR_CTRL_BASE_IDX) + mmDSCL1_OBUF_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_OBUF_MEM_PWR_CTRL: u32 = 0x4336;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_B_C11_C12_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_B_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_B_C11_C12: u32 = 0x435a;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_B_C13_C14_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_B_C13_C14` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_B_C13_C14: u32 = 0x435b;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_B_C21_C22_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_B_C21_C22` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_B_C21_C22: u32 = 0x435c;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_B_C23_C24_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_B_C23_C24` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_B_C23_C24: u32 = 0x435d;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_B_C31_C32_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_B_C31_C32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_B_C31_C32: u32 = 0x435e;
+/// The value of `BASE(mmCM1_CM_GAMUT_REMAP_B_C33_C34_BASE_IDX) + mmCM1_CM_GAMUT_REMAP_B_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_GAMUT_REMAP_B_C33_C34: u32 = 0x435f;
+/// The value of `BASE(mmCM1_CM_ICSC_B_C11_C12_BASE_IDX) + mmCM1_CM_ICSC_B_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_ICSC_B_C11_C12: u32 = 0x434d;
+/// The value of `BASE(mmCM1_CM_ICSC_B_C33_C34_BASE_IDX) + mmCM1_CM_ICSC_B_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP1_CM_ICSC_B_C33_C34: u32 = 0x4352;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_CONTROL_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_CONTROL: u32 = 0x44be;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_C11_C12_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_C11_C12: u32 = 0x44bf;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_C13_C14_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_C13_C14` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_C13_C14: u32 = 0x44c0;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_C21_C22_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_C21_C22` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_C21_C22: u32 = 0x44c1;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_C23_C24_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_C23_C24` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_C23_C24: u32 = 0x44c2;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_C31_C32_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_C31_C32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_C31_C32: u32 = 0x44c3;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_C33_C34_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_C33_C34: u32 = 0x44c4;
+/// The value of `BASE(mmDSCL2_DSCL_EXT_OVERSCAN_LEFT_RIGHT_BASE_IDX) + mmDSCL2_DSCL_EXT_OVERSCAN_LEFT_RIGHT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_DSCL_EXT_OVERSCAN_LEFT_RIGHT: u32 = 0x4494;
+/// The value of `BASE(mmDSCL2_DSCL_EXT_OVERSCAN_TOP_BOTTOM_BASE_IDX) + mmDSCL2_DSCL_EXT_OVERSCAN_TOP_BOTTOM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_DSCL_EXT_OVERSCAN_TOP_BOTTOM: u32 = 0x4495;
+/// The value of `BASE(mmDSCL2_DSCL_MEM_PWR_STATUS_BASE_IDX) + mmDSCL2_DSCL_MEM_PWR_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_DSCL_MEM_PWR_STATUS: u32 = 0x449f;
+/// The value of `BASE(mmDSCL2_DSCL_MEM_PWR_CTRL_BASE_IDX) + mmDSCL2_DSCL_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_DSCL_MEM_PWR_CTRL: u32 = 0x449e;
+/// The value of `BASE(mmDSCL2_OTG_H_BLANK_BASE_IDX) + mmDSCL2_OTG_H_BLANK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_OTG_H_BLANK: u32 = 0x4496;
+/// The value of `BASE(mmDSCL2_OTG_V_BLANK_BASE_IDX) + mmDSCL2_OTG_V_BLANK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_OTG_V_BLANK: u32 = 0x4497;
+/// The value of `BASE(mmDSCL2_SCL_MODE_BASE_IDX) + mmDSCL2_SCL_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_MODE: u32 = 0x4482;
+/// The value of `BASE(mmDSCL2_LB_DATA_FORMAT_BASE_IDX) + mmDSCL2_LB_DATA_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_LB_DATA_FORMAT: u32 = 0x449b;
+/// The value of `BASE(mmDSCL2_LB_MEMORY_CTRL_BASE_IDX) + mmDSCL2_LB_MEMORY_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_LB_MEMORY_CTRL: u32 = 0x449c;
+/// The value of `BASE(mmDSCL2_DSCL_AUTOCAL_BASE_IDX) + mmDSCL2_DSCL_AUTOCAL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_DSCL_AUTOCAL: u32 = 0x4493;
+/// The value of `BASE(mmDSCL2_DSCL_CONTROL_BASE_IDX) + mmDSCL2_DSCL_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_DSCL_CONTROL: u32 = 0x4484;
+/// The value of `BASE(mmDSCL2_SCL_BLACK_OFFSET_BASE_IDX) + mmDSCL2_SCL_BLACK_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_BLACK_OFFSET: u32 = 0x4491;
+/// The value of `BASE(mmDSCL2_SCL_TAP_CONTROL_BASE_IDX) + mmDSCL2_SCL_TAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_TAP_CONTROL: u32 = 0x4483;
+/// The value of `BASE(mmDSCL2_SCL_COEF_RAM_TAP_SELECT_BASE_IDX) + mmDSCL2_SCL_COEF_RAM_TAP_SELECT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_COEF_RAM_TAP_SELECT: u32 = 0x4480;
+/// The value of `BASE(mmDSCL2_SCL_COEF_RAM_TAP_DATA_BASE_IDX) + mmDSCL2_SCL_COEF_RAM_TAP_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_COEF_RAM_TAP_DATA: u32 = 0x4481;
+/// The value of `BASE(mmDSCL2_DSCL_2TAP_CONTROL_BASE_IDX) + mmDSCL2_DSCL_2TAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_DSCL_2TAP_CONTROL: u32 = 0x4485;
+/// The value of `BASE(mmDSCL2_MPC_SIZE_BASE_IDX) + mmDSCL2_MPC_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_MPC_SIZE: u32 = 0x449a;
+/// The value of `BASE(mmDSCL2_SCL_HORZ_FILTER_SCALE_RATIO_BASE_IDX) + mmDSCL2_SCL_HORZ_FILTER_SCALE_RATIO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_HORZ_FILTER_SCALE_RATIO: u32 = 0x4487;
+/// The value of `BASE(mmDSCL2_SCL_VERT_FILTER_SCALE_RATIO_BASE_IDX) + mmDSCL2_SCL_VERT_FILTER_SCALE_RATIO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_VERT_FILTER_SCALE_RATIO: u32 = 0x448b;
+/// The value of `BASE(mmDSCL2_SCL_HORZ_FILTER_SCALE_RATIO_C_BASE_IDX) + mmDSCL2_SCL_HORZ_FILTER_SCALE_RATIO_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_HORZ_FILTER_SCALE_RATIO_C: u32 = 0x4489;
+/// The value of `BASE(mmDSCL2_SCL_VERT_FILTER_SCALE_RATIO_C_BASE_IDX) + mmDSCL2_SCL_VERT_FILTER_SCALE_RATIO_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_VERT_FILTER_SCALE_RATIO_C: u32 = 0x448e;
+/// The value of `BASE(mmDSCL2_SCL_HORZ_FILTER_INIT_BASE_IDX) + mmDSCL2_SCL_HORZ_FILTER_INIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_HORZ_FILTER_INIT: u32 = 0x4488;
+/// The value of `BASE(mmDSCL2_SCL_HORZ_FILTER_INIT_C_BASE_IDX) + mmDSCL2_SCL_HORZ_FILTER_INIT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_HORZ_FILTER_INIT_C: u32 = 0x448a;
+/// The value of `BASE(mmDSCL2_SCL_VERT_FILTER_INIT_BASE_IDX) + mmDSCL2_SCL_VERT_FILTER_INIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_VERT_FILTER_INIT: u32 = 0x448c;
+/// The value of `BASE(mmDSCL2_SCL_VERT_FILTER_INIT_BOT_BASE_IDX) + mmDSCL2_SCL_VERT_FILTER_INIT_BOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_VERT_FILTER_INIT_BOT: u32 = 0x448d;
+/// The value of `BASE(mmDSCL2_SCL_VERT_FILTER_INIT_C_BASE_IDX) + mmDSCL2_SCL_VERT_FILTER_INIT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_VERT_FILTER_INIT_C: u32 = 0x448f;
+/// The value of `BASE(mmDSCL2_SCL_VERT_FILTER_INIT_BOT_C_BASE_IDX) + mmDSCL2_SCL_VERT_FILTER_INIT_BOT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_SCL_VERT_FILTER_INIT_BOT_C: u32 = 0x4490;
+/// The value of `BASE(mmDSCL2_RECOUT_START_BASE_IDX) + mmDSCL2_RECOUT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_RECOUT_START: u32 = 0x4498;
+/// The value of `BASE(mmDSCL2_RECOUT_SIZE_BASE_IDX) + mmDSCL2_RECOUT_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_RECOUT_SIZE: u32 = 0x4499;
+/// The value of `BASE(mmCM2_CM_ICSC_CONTROL_BASE_IDX) + mmCM2_CM_ICSC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_ICSC_CONTROL: u32 = 0x44b1;
+/// The value of `BASE(mmCM2_CM_ICSC_C11_C12_BASE_IDX) + mmCM2_CM_ICSC_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_ICSC_C11_C12: u32 = 0x44b2;
+/// The value of `BASE(mmCM2_CM_ICSC_C33_C34_BASE_IDX) + mmCM2_CM_ICSC_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_ICSC_C33_C34: u32 = 0x44b7;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_START_CNTL_B_BASE_IDX) + mmCM2_CM_DGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_START_CNTL_B: u32 = 0x44e5;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_START_CNTL_G_BASE_IDX) + mmCM2_CM_DGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_START_CNTL_G: u32 = 0x44e6;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_START_CNTL_R_BASE_IDX) + mmCM2_CM_DGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_START_CNTL_R: u32 = 0x44e7;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmCM2_CM_DGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_SLOPE_CNTL_B: u32 = 0x44e8;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmCM2_CM_DGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_SLOPE_CNTL_G: u32 = 0x44e9;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmCM2_CM_DGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_SLOPE_CNTL_R: u32 = 0x44ea;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmCM2_CM_DGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_END_CNTL1_B: u32 = 0x44eb;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmCM2_CM_DGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_END_CNTL2_B: u32 = 0x44ec;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmCM2_CM_DGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_END_CNTL1_G: u32 = 0x44ed;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmCM2_CM_DGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_END_CNTL2_G: u32 = 0x44ee;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmCM2_CM_DGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_END_CNTL1_R: u32 = 0x44ef;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmCM2_CM_DGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_END_CNTL2_R: u32 = 0x44f0;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_REGION_0_1_BASE_IDX) + mmCM2_CM_DGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_REGION_0_1: u32 = 0x44f1;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMB_REGION_14_15_BASE_IDX) + mmCM2_CM_DGAM_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMB_REGION_14_15: u32 = 0x44f8;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_START_CNTL_B_BASE_IDX) + mmCM2_CM_DGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_START_CNTL_B: u32 = 0x44d1;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_START_CNTL_G_BASE_IDX) + mmCM2_CM_DGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_START_CNTL_G: u32 = 0x44d2;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_START_CNTL_R_BASE_IDX) + mmCM2_CM_DGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_START_CNTL_R: u32 = 0x44d3;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmCM2_CM_DGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_SLOPE_CNTL_B: u32 = 0x44d4;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmCM2_CM_DGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_SLOPE_CNTL_G: u32 = 0x44d5;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmCM2_CM_DGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_SLOPE_CNTL_R: u32 = 0x44d6;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmCM2_CM_DGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_END_CNTL1_B: u32 = 0x44d7;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmCM2_CM_DGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_END_CNTL2_B: u32 = 0x44d8;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmCM2_CM_DGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_END_CNTL1_G: u32 = 0x44d9;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmCM2_CM_DGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_END_CNTL2_G: u32 = 0x44da;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmCM2_CM_DGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_END_CNTL1_R: u32 = 0x44db;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmCM2_CM_DGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_END_CNTL2_R: u32 = 0x44dc;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_REGION_0_1_BASE_IDX) + mmCM2_CM_DGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_REGION_0_1: u32 = 0x44dd;
+/// The value of `BASE(mmCM2_CM_DGAM_RAMA_REGION_14_15_BASE_IDX) + mmCM2_CM_DGAM_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_RAMA_REGION_14_15: u32 = 0x44e4;
+/// The value of `BASE(mmCM2_CM_MEM_PWR_CTRL_BASE_IDX) + mmCM2_CM_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_MEM_PWR_CTRL: u32 = 0x4538;
+/// The value of `BASE(mmCM2_CM_DGAM_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM2_CM_DGAM_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_LUT_WRITE_EN_MASK: u32 = 0x44d0;
+/// The value of `BASE(mmCM2_CM_DGAM_LUT_INDEX_BASE_IDX) + mmCM2_CM_DGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_LUT_INDEX: u32 = 0x44ce;
+/// The value of `BASE(mmCM2_CM_DGAM_LUT_DATA_BASE_IDX) + mmCM2_CM_DGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_LUT_DATA: u32 = 0x44cf;
+/// The value of `BASE(mmCM2_CM_CONTROL_BASE_IDX) + mmCM2_CM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_CONTROL: u32 = 0x44b0;
+/// The value of `BASE(mmCM2_CM_DGAM_CONTROL_BASE_IDX) + mmCM2_CM_DGAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_DGAM_CONTROL: u32 = 0x44cd;
+/// The value of `BASE(mmCM2_CM_TEST_DEBUG_INDEX_BASE_IDX) + mmCM2_CM_TEST_DEBUG_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_TEST_DEBUG_INDEX: u32 = 0x457f;
+/// The value of `BASE(mmCM2_CM_TEST_DEBUG_DATA_BASE_IDX) + mmCM2_CM_TEST_DEBUG_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_TEST_DEBUG_DATA: u32 = 0x4580;
+/// The value of `BASE(mmCNVC_CFG2_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG2_FORMAT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_FORMAT_CONTROL: u32 = 0x4466;
+/// The value of `BASE(mmCNVC_CFG2_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG2_CNVC_SURFACE_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CNVC_SURFACE_PIXEL_FORMAT: u32 = 0x4465;
+/// The value of `BASE(mmCNVC_CUR2_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR2_CURSOR0_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CURSOR0_CONTROL: u32 = 0x4476;
+/// The value of `BASE(mmCNVC_CUR2_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR2_CURSOR0_COLOR0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CURSOR0_COLOR0: u32 = 0x4477;
+/// The value of `BASE(mmCNVC_CUR2_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR2_CURSOR0_COLOR1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CURSOR0_COLOR1: u32 = 0x4478;
+/// The value of `BASE(mmCNVC_CUR2_CURSOR0_FP_SCALE_BIAS_BASE_IDX) + mmCNVC_CUR2_CURSOR0_FP_SCALE_BIAS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CURSOR0_FP_SCALE_BIAS: u32 = 0x4479;
+/// The value of `BASE(mmDPP_TOP2_DPP_CONTROL_BASE_IDX) + mmDPP_TOP2_DPP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_DPP_CONTROL: u32 = 0x445b;
+/// The value of `BASE(mmCM2_CM_HDR_MULT_COEF_BASE_IDX) + mmCM2_CM_HDR_MULT_COEF` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_HDR_MULT_COEF: u32 = 0x4537;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_CONTROL_BASE_IDX) + mmCM2_CM_BLNDGAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_CONTROL: u32 = 0x44f9;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_START_CNTL_B_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_START_CNTL_B: u32 = 0x451a;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_START_CNTL_G_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_START_CNTL_G: u32 = 0x451b;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_START_CNTL_R_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_START_CNTL_R: u32 = 0x451c;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_END_CNTL1_B: u32 = 0x4520;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_END_CNTL2_B: u32 = 0x4521;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_END_CNTL1_G: u32 = 0x4522;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_END_CNTL2_G: u32 = 0x4523;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_END_CNTL1_R: u32 = 0x4524;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_END_CNTL2_R: u32 = 0x4525;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_0_1_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_0_1: u32 = 0x4526;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_2_3_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_2_3: u32 = 0x4527;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_4_5_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_4_5: u32 = 0x4528;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_6_7_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_6_7: u32 = 0x4529;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_8_9_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_8_9: u32 = 0x452a;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_10_11_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_10_11: u32 = 0x452b;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_12_13_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_12_13: u32 = 0x452c;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_14_15_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_14_15: u32 = 0x452d;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_16_17_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_16_17: u32 = 0x452e;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_18_19_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_18_19: u32 = 0x452f;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_20_21_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_20_21: u32 = 0x4530;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_22_23_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_22_23: u32 = 0x4531;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_24_25_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_24_25: u32 = 0x4532;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_26_27_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_26_27: u32 = 0x4533;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_28_29_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_28_29: u32 = 0x4534;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_30_31_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_30_31: u32 = 0x4535;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_REGION_32_33_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_REGION_32_33: u32 = 0x4536;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_START_CNTL_B_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_START_CNTL_B: u32 = 0x44fd;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_START_CNTL_G_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_START_CNTL_G: u32 = 0x44fe;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_START_CNTL_R_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_START_CNTL_R: u32 = 0x44ff;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_END_CNTL1_B: u32 = 0x4503;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_END_CNTL2_B: u32 = 0x4504;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_END_CNTL1_G: u32 = 0x4505;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_END_CNTL2_G: u32 = 0x4506;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_END_CNTL1_R: u32 = 0x4507;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_END_CNTL2_R: u32 = 0x4508;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_0_1_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_0_1: u32 = 0x4509;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_2_3_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_2_3: u32 = 0x450a;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_4_5_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_4_5: u32 = 0x450b;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_6_7_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_6_7: u32 = 0x450c;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_8_9_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_8_9: u32 = 0x450d;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_10_11_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_10_11: u32 = 0x450e;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_12_13_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_12_13: u32 = 0x450f;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_14_15_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_14_15: u32 = 0x4510;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_16_17_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_16_17: u32 = 0x4511;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_18_19_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_18_19: u32 = 0x4512;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_20_21_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_20_21: u32 = 0x4513;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_22_23_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_22_23: u32 = 0x4514;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_24_25_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_24_25: u32 = 0x4515;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_26_27_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_26_27: u32 = 0x4516;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_28_29_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_28_29: u32 = 0x4517;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_30_31_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_30_31: u32 = 0x4518;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_REGION_32_33_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_REGION_32_33: u32 = 0x4519;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_LUT_INDEX_BASE_IDX) + mmCM2_CM_BLNDGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_LUT_INDEX: u32 = 0x44fa;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_LUT_DATA_BASE_IDX) + mmCM2_CM_BLNDGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_LUT_DATA: u32 = 0x44fb;
+/// The value of `BASE(mmCM2_CM_3DLUT_MODE_BASE_IDX) + mmCM2_CM_3DLUT_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_3DLUT_MODE: u32 = 0x4576;
+/// The value of `BASE(mmCM2_CM_3DLUT_INDEX_BASE_IDX) + mmCM2_CM_3DLUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_3DLUT_INDEX: u32 = 0x4577;
+/// The value of `BASE(mmCM2_CM_3DLUT_DATA_BASE_IDX) + mmCM2_CM_3DLUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_3DLUT_DATA: u32 = 0x4578;
+/// The value of `BASE(mmCM2_CM_3DLUT_DATA_30BIT_BASE_IDX) + mmCM2_CM_3DLUT_DATA_30BIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_3DLUT_DATA_30BIT: u32 = 0x4579;
+/// The value of `BASE(mmCM2_CM_3DLUT_READ_WRITE_CONTROL_BASE_IDX) + mmCM2_CM_3DLUT_READ_WRITE_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_3DLUT_READ_WRITE_CONTROL: u32 = 0x457a;
+/// The value of `BASE(mmCM2_CM_SHAPER_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM2_CM_SHAPER_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_LUT_WRITE_EN_MASK: u32 = 0x4545;
+/// The value of `BASE(mmCM2_CM_SHAPER_CONTROL_BASE_IDX) + mmCM2_CM_SHAPER_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_CONTROL: u32 = 0x453d;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_START_CNTL_B_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_START_CNTL_B: u32 = 0x455d;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_START_CNTL_G_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_START_CNTL_G: u32 = 0x455e;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_START_CNTL_R_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_START_CNTL_R: u32 = 0x455f;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_END_CNTL_B_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_END_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_END_CNTL_B: u32 = 0x4560;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_END_CNTL_G_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_END_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_END_CNTL_G: u32 = 0x4561;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_END_CNTL_R_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_END_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_END_CNTL_R: u32 = 0x4562;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_0_1_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_0_1: u32 = 0x4563;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_2_3_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_2_3: u32 = 0x4564;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_4_5_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_4_5: u32 = 0x4565;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_6_7_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_6_7: u32 = 0x4566;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_8_9_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_8_9: u32 = 0x4567;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_10_11_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_10_11: u32 = 0x4568;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_12_13_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_12_13: u32 = 0x4569;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_14_15_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_14_15: u32 = 0x456a;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_16_17_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_16_17: u32 = 0x456b;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_18_19_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_18_19: u32 = 0x456c;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_20_21_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_20_21: u32 = 0x456d;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_22_23_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_22_23: u32 = 0x456e;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_24_25_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_24_25: u32 = 0x456f;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_26_27_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_26_27: u32 = 0x4570;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_28_29_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_28_29: u32 = 0x4571;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_30_31_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_30_31: u32 = 0x4572;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMB_REGION_32_33_BASE_IDX) + mmCM2_CM_SHAPER_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMB_REGION_32_33: u32 = 0x4573;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_START_CNTL_B_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_START_CNTL_B: u32 = 0x4546;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_START_CNTL_G_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_START_CNTL_G: u32 = 0x4547;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_START_CNTL_R_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_START_CNTL_R: u32 = 0x4548;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_END_CNTL_B_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_END_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_END_CNTL_B: u32 = 0x4549;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_END_CNTL_G_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_END_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_END_CNTL_G: u32 = 0x454a;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_END_CNTL_R_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_END_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_END_CNTL_R: u32 = 0x454b;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_0_1_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_0_1: u32 = 0x454c;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_2_3_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_2_3: u32 = 0x454d;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_4_5_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_4_5: u32 = 0x454e;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_6_7_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_6_7: u32 = 0x454f;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_8_9_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_8_9: u32 = 0x4550;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_10_11_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_10_11: u32 = 0x4551;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_12_13_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_12_13: u32 = 0x4552;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_14_15_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_14_15: u32 = 0x4553;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_16_17_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_16_17: u32 = 0x4554;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_18_19_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_18_19: u32 = 0x4555;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_20_21_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_20_21: u32 = 0x4556;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_22_23_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_22_23: u32 = 0x4557;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_24_25_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_24_25: u32 = 0x4558;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_26_27_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_26_27: u32 = 0x4559;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_28_29_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_28_29: u32 = 0x455a;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_30_31_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_30_31: u32 = 0x455b;
+/// The value of `BASE(mmCM2_CM_SHAPER_RAMA_REGION_32_33_BASE_IDX) + mmCM2_CM_SHAPER_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_RAMA_REGION_32_33: u32 = 0x455c;
+/// The value of `BASE(mmCM2_CM_SHAPER_LUT_INDEX_BASE_IDX) + mmCM2_CM_SHAPER_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_LUT_INDEX: u32 = 0x4543;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM2_CM_BLNDGAM_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_LUT_WRITE_EN_MASK: u32 = 0x44fc;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_SLOPE_CNTL_B: u32 = 0x451d;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_SLOPE_CNTL_G: u32 = 0x451e;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMB_SLOPE_CNTL_R: u32 = 0x451f;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_SLOPE_CNTL_B: u32 = 0x4500;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_SLOPE_CNTL_G: u32 = 0x4501;
+/// The value of `BASE(mmCM2_CM_BLNDGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmCM2_CM_BLNDGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_BLNDGAM_RAMA_SLOPE_CNTL_R: u32 = 0x4502;
+/// The value of `BASE(mmCURSOR0_2_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_2_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CURSOR_CONTROL: u32 = 0x3cf0;
+/// The value of `BASE(mmCNVC_CFG2_ALPHA_2BIT_LUT_BASE_IDX) + mmCNVC_CFG2_ALPHA_2BIT_LUT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_ALPHA_2BIT_LUT: u32 = 0x4473;
+/// The value of `BASE(mmCNVC_CFG2_FCNV_FP_BIAS_R_BASE_IDX) + mmCNVC_CFG2_FCNV_FP_BIAS_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_FCNV_FP_BIAS_R: u32 = 0x4467;
+/// The value of `BASE(mmCNVC_CFG2_FCNV_FP_BIAS_G_BASE_IDX) + mmCNVC_CFG2_FCNV_FP_BIAS_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_FCNV_FP_BIAS_G: u32 = 0x4468;
+/// The value of `BASE(mmCNVC_CFG2_FCNV_FP_BIAS_B_BASE_IDX) + mmCNVC_CFG2_FCNV_FP_BIAS_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_FCNV_FP_BIAS_B: u32 = 0x4469;
+/// The value of `BASE(mmCNVC_CFG2_FCNV_FP_SCALE_R_BASE_IDX) + mmCNVC_CFG2_FCNV_FP_SCALE_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_FCNV_FP_SCALE_R: u32 = 0x446a;
+/// The value of `BASE(mmCNVC_CFG2_FCNV_FP_SCALE_G_BASE_IDX) + mmCNVC_CFG2_FCNV_FP_SCALE_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_FCNV_FP_SCALE_G: u32 = 0x446b;
+/// The value of `BASE(mmCNVC_CFG2_FCNV_FP_SCALE_B_BASE_IDX) + mmCNVC_CFG2_FCNV_FP_SCALE_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_FCNV_FP_SCALE_B: u32 = 0x446c;
+/// The value of `BASE(mmCNVC_CFG2_COLOR_KEYER_CONTROL_BASE_IDX) + mmCNVC_CFG2_COLOR_KEYER_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_COLOR_KEYER_CONTROL: u32 = 0x446d;
+/// The value of `BASE(mmCNVC_CFG2_COLOR_KEYER_ALPHA_BASE_IDX) + mmCNVC_CFG2_COLOR_KEYER_ALPHA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_COLOR_KEYER_ALPHA: u32 = 0x446e;
+/// The value of `BASE(mmCNVC_CFG2_COLOR_KEYER_RED_BASE_IDX) + mmCNVC_CFG2_COLOR_KEYER_RED` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_COLOR_KEYER_RED: u32 = 0x446f;
+/// The value of `BASE(mmCNVC_CFG2_COLOR_KEYER_GREEN_BASE_IDX) + mmCNVC_CFG2_COLOR_KEYER_GREEN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_COLOR_KEYER_GREEN: u32 = 0x4470;
+/// The value of `BASE(mmCNVC_CFG2_COLOR_KEYER_BLUE_BASE_IDX) + mmCNVC_CFG2_COLOR_KEYER_BLUE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_COLOR_KEYER_BLUE: u32 = 0x4471;
+/// The value of `BASE(mmCM2_CM_SHAPER_LUT_DATA_BASE_IDX) + mmCM2_CM_SHAPER_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_SHAPER_LUT_DATA: u32 = 0x4544;
+/// The value of `BASE(mmDSCL2_OBUF_MEM_PWR_CTRL_BASE_IDX) + mmDSCL2_OBUF_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_OBUF_MEM_PWR_CTRL: u32 = 0x44a1;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_B_C11_C12_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_B_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_B_C11_C12: u32 = 0x44c5;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_B_C13_C14_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_B_C13_C14` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_B_C13_C14: u32 = 0x44c6;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_B_C21_C22_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_B_C21_C22` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_B_C21_C22: u32 = 0x44c7;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_B_C23_C24_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_B_C23_C24` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_B_C23_C24: u32 = 0x44c8;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_B_C31_C32_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_B_C31_C32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_B_C31_C32: u32 = 0x44c9;
+/// The value of `BASE(mmCM2_CM_GAMUT_REMAP_B_C33_C34_BASE_IDX) + mmCM2_CM_GAMUT_REMAP_B_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_GAMUT_REMAP_B_C33_C34: u32 = 0x44ca;
+/// The value of `BASE(mmCM2_CM_ICSC_B_C11_C12_BASE_IDX) + mmCM2_CM_ICSC_B_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_ICSC_B_C11_C12: u32 = 0x44b8;
+/// The value of `BASE(mmCM2_CM_ICSC_B_C33_C34_BASE_IDX) + mmCM2_CM_ICSC_B_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP2_CM_ICSC_B_C33_C34: u32 = 0x44bd;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_CONTROL_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_CONTROL: u32 = 0x4629;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_C11_C12_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_C11_C12: u32 = 0x462a;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_C13_C14_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_C13_C14` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_C13_C14: u32 = 0x462b;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_C21_C22_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_C21_C22` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_C21_C22: u32 = 0x462c;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_C23_C24_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_C23_C24` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_C23_C24: u32 = 0x462d;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_C31_C32_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_C31_C32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_C31_C32: u32 = 0x462e;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_C33_C34_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_C33_C34: u32 = 0x462f;
+/// The value of `BASE(mmDSCL3_DSCL_EXT_OVERSCAN_LEFT_RIGHT_BASE_IDX) + mmDSCL3_DSCL_EXT_OVERSCAN_LEFT_RIGHT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_DSCL_EXT_OVERSCAN_LEFT_RIGHT: u32 = 0x45ff;
+/// The value of `BASE(mmDSCL3_DSCL_EXT_OVERSCAN_TOP_BOTTOM_BASE_IDX) + mmDSCL3_DSCL_EXT_OVERSCAN_TOP_BOTTOM` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_DSCL_EXT_OVERSCAN_TOP_BOTTOM: u32 = 0x4600;
+/// The value of `BASE(mmDSCL3_DSCL_MEM_PWR_STATUS_BASE_IDX) + mmDSCL3_DSCL_MEM_PWR_STATUS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_DSCL_MEM_PWR_STATUS: u32 = 0x460a;
+/// The value of `BASE(mmDSCL3_DSCL_MEM_PWR_CTRL_BASE_IDX) + mmDSCL3_DSCL_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_DSCL_MEM_PWR_CTRL: u32 = 0x4609;
+/// The value of `BASE(mmDSCL3_OTG_H_BLANK_BASE_IDX) + mmDSCL3_OTG_H_BLANK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_OTG_H_BLANK: u32 = 0x4601;
+/// The value of `BASE(mmDSCL3_OTG_V_BLANK_BASE_IDX) + mmDSCL3_OTG_V_BLANK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_OTG_V_BLANK: u32 = 0x4602;
+/// The value of `BASE(mmDSCL3_SCL_MODE_BASE_IDX) + mmDSCL3_SCL_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_MODE: u32 = 0x45ed;
+/// The value of `BASE(mmDSCL3_LB_DATA_FORMAT_BASE_IDX) + mmDSCL3_LB_DATA_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_LB_DATA_FORMAT: u32 = 0x4606;
+/// The value of `BASE(mmDSCL3_LB_MEMORY_CTRL_BASE_IDX) + mmDSCL3_LB_MEMORY_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_LB_MEMORY_CTRL: u32 = 0x4607;
+/// The value of `BASE(mmDSCL3_DSCL_AUTOCAL_BASE_IDX) + mmDSCL3_DSCL_AUTOCAL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_DSCL_AUTOCAL: u32 = 0x45fe;
+/// The value of `BASE(mmDSCL3_DSCL_CONTROL_BASE_IDX) + mmDSCL3_DSCL_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_DSCL_CONTROL: u32 = 0x45ef;
+/// The value of `BASE(mmDSCL3_SCL_BLACK_OFFSET_BASE_IDX) + mmDSCL3_SCL_BLACK_OFFSET` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_BLACK_OFFSET: u32 = 0x45fc;
+/// The value of `BASE(mmDSCL3_SCL_TAP_CONTROL_BASE_IDX) + mmDSCL3_SCL_TAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_TAP_CONTROL: u32 = 0x45ee;
+/// The value of `BASE(mmDSCL3_SCL_COEF_RAM_TAP_SELECT_BASE_IDX) + mmDSCL3_SCL_COEF_RAM_TAP_SELECT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_COEF_RAM_TAP_SELECT: u32 = 0x45eb;
+/// The value of `BASE(mmDSCL3_SCL_COEF_RAM_TAP_DATA_BASE_IDX) + mmDSCL3_SCL_COEF_RAM_TAP_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_COEF_RAM_TAP_DATA: u32 = 0x45ec;
+/// The value of `BASE(mmDSCL3_DSCL_2TAP_CONTROL_BASE_IDX) + mmDSCL3_DSCL_2TAP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_DSCL_2TAP_CONTROL: u32 = 0x45f0;
+/// The value of `BASE(mmDSCL3_MPC_SIZE_BASE_IDX) + mmDSCL3_MPC_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_MPC_SIZE: u32 = 0x4605;
+/// The value of `BASE(mmDSCL3_SCL_HORZ_FILTER_SCALE_RATIO_BASE_IDX) + mmDSCL3_SCL_HORZ_FILTER_SCALE_RATIO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_HORZ_FILTER_SCALE_RATIO: u32 = 0x45f2;
+/// The value of `BASE(mmDSCL3_SCL_VERT_FILTER_SCALE_RATIO_BASE_IDX) + mmDSCL3_SCL_VERT_FILTER_SCALE_RATIO` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_VERT_FILTER_SCALE_RATIO: u32 = 0x45f6;
+/// The value of `BASE(mmDSCL3_SCL_HORZ_FILTER_SCALE_RATIO_C_BASE_IDX) + mmDSCL3_SCL_HORZ_FILTER_SCALE_RATIO_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_HORZ_FILTER_SCALE_RATIO_C: u32 = 0x45f4;
+/// The value of `BASE(mmDSCL3_SCL_VERT_FILTER_SCALE_RATIO_C_BASE_IDX) + mmDSCL3_SCL_VERT_FILTER_SCALE_RATIO_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_VERT_FILTER_SCALE_RATIO_C: u32 = 0x45f9;
+/// The value of `BASE(mmDSCL3_SCL_HORZ_FILTER_INIT_BASE_IDX) + mmDSCL3_SCL_HORZ_FILTER_INIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_HORZ_FILTER_INIT: u32 = 0x45f3;
+/// The value of `BASE(mmDSCL3_SCL_HORZ_FILTER_INIT_C_BASE_IDX) + mmDSCL3_SCL_HORZ_FILTER_INIT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_HORZ_FILTER_INIT_C: u32 = 0x45f5;
+/// The value of `BASE(mmDSCL3_SCL_VERT_FILTER_INIT_BASE_IDX) + mmDSCL3_SCL_VERT_FILTER_INIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_VERT_FILTER_INIT: u32 = 0x45f7;
+/// The value of `BASE(mmDSCL3_SCL_VERT_FILTER_INIT_BOT_BASE_IDX) + mmDSCL3_SCL_VERT_FILTER_INIT_BOT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_VERT_FILTER_INIT_BOT: u32 = 0x45f8;
+/// The value of `BASE(mmDSCL3_SCL_VERT_FILTER_INIT_C_BASE_IDX) + mmDSCL3_SCL_VERT_FILTER_INIT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_VERT_FILTER_INIT_C: u32 = 0x45fa;
+/// The value of `BASE(mmDSCL3_SCL_VERT_FILTER_INIT_BOT_C_BASE_IDX) + mmDSCL3_SCL_VERT_FILTER_INIT_BOT_C` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_SCL_VERT_FILTER_INIT_BOT_C: u32 = 0x45fb;
+/// The value of `BASE(mmDSCL3_RECOUT_START_BASE_IDX) + mmDSCL3_RECOUT_START` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_RECOUT_START: u32 = 0x4603;
+/// The value of `BASE(mmDSCL3_RECOUT_SIZE_BASE_IDX) + mmDSCL3_RECOUT_SIZE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_RECOUT_SIZE: u32 = 0x4604;
+/// The value of `BASE(mmCM3_CM_ICSC_CONTROL_BASE_IDX) + mmCM3_CM_ICSC_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_ICSC_CONTROL: u32 = 0x461c;
+/// The value of `BASE(mmCM3_CM_ICSC_C11_C12_BASE_IDX) + mmCM3_CM_ICSC_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_ICSC_C11_C12: u32 = 0x461d;
+/// The value of `BASE(mmCM3_CM_ICSC_C33_C34_BASE_IDX) + mmCM3_CM_ICSC_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_ICSC_C33_C34: u32 = 0x4622;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_START_CNTL_B_BASE_IDX) + mmCM3_CM_DGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_START_CNTL_B: u32 = 0x4650;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_START_CNTL_G_BASE_IDX) + mmCM3_CM_DGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_START_CNTL_G: u32 = 0x4651;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_START_CNTL_R_BASE_IDX) + mmCM3_CM_DGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_START_CNTL_R: u32 = 0x4652;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmCM3_CM_DGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_SLOPE_CNTL_B: u32 = 0x4653;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmCM3_CM_DGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_SLOPE_CNTL_G: u32 = 0x4654;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmCM3_CM_DGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_SLOPE_CNTL_R: u32 = 0x4655;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmCM3_CM_DGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_END_CNTL1_B: u32 = 0x4656;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmCM3_CM_DGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_END_CNTL2_B: u32 = 0x4657;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmCM3_CM_DGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_END_CNTL1_G: u32 = 0x4658;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmCM3_CM_DGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_END_CNTL2_G: u32 = 0x4659;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmCM3_CM_DGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_END_CNTL1_R: u32 = 0x465a;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmCM3_CM_DGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_END_CNTL2_R: u32 = 0x465b;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_REGION_0_1_BASE_IDX) + mmCM3_CM_DGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_REGION_0_1: u32 = 0x465c;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMB_REGION_14_15_BASE_IDX) + mmCM3_CM_DGAM_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMB_REGION_14_15: u32 = 0x4663;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_START_CNTL_B_BASE_IDX) + mmCM3_CM_DGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_START_CNTL_B: u32 = 0x463c;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_START_CNTL_G_BASE_IDX) + mmCM3_CM_DGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_START_CNTL_G: u32 = 0x463d;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_START_CNTL_R_BASE_IDX) + mmCM3_CM_DGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_START_CNTL_R: u32 = 0x463e;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmCM3_CM_DGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_SLOPE_CNTL_B: u32 = 0x463f;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmCM3_CM_DGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_SLOPE_CNTL_G: u32 = 0x4640;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmCM3_CM_DGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_SLOPE_CNTL_R: u32 = 0x4641;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmCM3_CM_DGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_END_CNTL1_B: u32 = 0x4642;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmCM3_CM_DGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_END_CNTL2_B: u32 = 0x4643;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmCM3_CM_DGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_END_CNTL1_G: u32 = 0x4644;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmCM3_CM_DGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_END_CNTL2_G: u32 = 0x4645;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmCM3_CM_DGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_END_CNTL1_R: u32 = 0x4646;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmCM3_CM_DGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_END_CNTL2_R: u32 = 0x4647;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_REGION_0_1_BASE_IDX) + mmCM3_CM_DGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_REGION_0_1: u32 = 0x4648;
+/// The value of `BASE(mmCM3_CM_DGAM_RAMA_REGION_14_15_BASE_IDX) + mmCM3_CM_DGAM_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_RAMA_REGION_14_15: u32 = 0x464f;
+/// The value of `BASE(mmCM3_CM_MEM_PWR_CTRL_BASE_IDX) + mmCM3_CM_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_MEM_PWR_CTRL: u32 = 0x46a3;
+/// The value of `BASE(mmCM3_CM_DGAM_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM3_CM_DGAM_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_LUT_WRITE_EN_MASK: u32 = 0x463b;
+/// The value of `BASE(mmCM3_CM_DGAM_LUT_INDEX_BASE_IDX) + mmCM3_CM_DGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_LUT_INDEX: u32 = 0x4639;
+/// The value of `BASE(mmCM3_CM_DGAM_LUT_DATA_BASE_IDX) + mmCM3_CM_DGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_LUT_DATA: u32 = 0x463a;
+/// The value of `BASE(mmCM3_CM_CONTROL_BASE_IDX) + mmCM3_CM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_CONTROL: u32 = 0x461b;
+/// The value of `BASE(mmCM3_CM_DGAM_CONTROL_BASE_IDX) + mmCM3_CM_DGAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_DGAM_CONTROL: u32 = 0x4638;
+/// The value of `BASE(mmCM3_CM_TEST_DEBUG_INDEX_BASE_IDX) + mmCM3_CM_TEST_DEBUG_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_TEST_DEBUG_INDEX: u32 = 0x46ea;
+/// The value of `BASE(mmCM3_CM_TEST_DEBUG_DATA_BASE_IDX) + mmCM3_CM_TEST_DEBUG_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_TEST_DEBUG_DATA: u32 = 0x46eb;
+/// The value of `BASE(mmCNVC_CFG3_FORMAT_CONTROL_BASE_IDX) + mmCNVC_CFG3_FORMAT_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_FORMAT_CONTROL: u32 = 0x45d1;
+/// The value of `BASE(mmCNVC_CFG3_CNVC_SURFACE_PIXEL_FORMAT_BASE_IDX) + mmCNVC_CFG3_CNVC_SURFACE_PIXEL_FORMAT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CNVC_SURFACE_PIXEL_FORMAT: u32 = 0x45d0;
+/// The value of `BASE(mmCNVC_CUR3_CURSOR0_CONTROL_BASE_IDX) + mmCNVC_CUR3_CURSOR0_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CURSOR0_CONTROL: u32 = 0x45e1;
+/// The value of `BASE(mmCNVC_CUR3_CURSOR0_COLOR0_BASE_IDX) + mmCNVC_CUR3_CURSOR0_COLOR0` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CURSOR0_COLOR0: u32 = 0x45e2;
+/// The value of `BASE(mmCNVC_CUR3_CURSOR0_COLOR1_BASE_IDX) + mmCNVC_CUR3_CURSOR0_COLOR1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CURSOR0_COLOR1: u32 = 0x45e3;
+/// The value of `BASE(mmCNVC_CUR3_CURSOR0_FP_SCALE_BIAS_BASE_IDX) + mmCNVC_CUR3_CURSOR0_FP_SCALE_BIAS` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CURSOR0_FP_SCALE_BIAS: u32 = 0x45e4;
+/// The value of `BASE(mmDPP_TOP3_DPP_CONTROL_BASE_IDX) + mmDPP_TOP3_DPP_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_DPP_CONTROL: u32 = 0x45c6;
+/// The value of `BASE(mmCM3_CM_HDR_MULT_COEF_BASE_IDX) + mmCM3_CM_HDR_MULT_COEF` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_HDR_MULT_COEF: u32 = 0x46a2;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_CONTROL_BASE_IDX) + mmCM3_CM_BLNDGAM_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_CONTROL: u32 = 0x4664;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_START_CNTL_B_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_START_CNTL_B: u32 = 0x4685;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_START_CNTL_G_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_START_CNTL_G: u32 = 0x4686;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_START_CNTL_R_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_START_CNTL_R: u32 = 0x4687;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_END_CNTL1_B_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_END_CNTL1_B: u32 = 0x468b;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_END_CNTL2_B_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_END_CNTL2_B: u32 = 0x468c;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_END_CNTL1_G_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_END_CNTL1_G: u32 = 0x468d;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_END_CNTL2_G_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_END_CNTL2_G: u32 = 0x468e;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_END_CNTL1_R_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_END_CNTL1_R: u32 = 0x468f;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_END_CNTL2_R_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_END_CNTL2_R: u32 = 0x4690;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_0_1_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_0_1: u32 = 0x4691;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_2_3_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_2_3: u32 = 0x4692;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_4_5_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_4_5: u32 = 0x4693;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_6_7_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_6_7: u32 = 0x4694;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_8_9_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_8_9: u32 = 0x4695;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_10_11_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_10_11: u32 = 0x4696;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_12_13_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_12_13: u32 = 0x4697;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_14_15_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_14_15: u32 = 0x4698;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_16_17_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_16_17: u32 = 0x4699;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_18_19_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_18_19: u32 = 0x469a;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_20_21_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_20_21: u32 = 0x469b;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_22_23_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_22_23: u32 = 0x469c;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_24_25_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_24_25: u32 = 0x469d;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_26_27_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_26_27: u32 = 0x469e;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_28_29_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_28_29: u32 = 0x469f;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_30_31_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_30_31: u32 = 0x46a0;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_REGION_32_33_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_REGION_32_33: u32 = 0x46a1;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_START_CNTL_B_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_START_CNTL_B: u32 = 0x4668;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_START_CNTL_G_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_START_CNTL_G: u32 = 0x4669;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_START_CNTL_R_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_START_CNTL_R: u32 = 0x466a;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_END_CNTL1_B_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_END_CNTL1_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_END_CNTL1_B: u32 = 0x466e;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_END_CNTL2_B_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_END_CNTL2_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_END_CNTL2_B: u32 = 0x466f;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_END_CNTL1_G_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_END_CNTL1_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_END_CNTL1_G: u32 = 0x4670;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_END_CNTL2_G_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_END_CNTL2_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_END_CNTL2_G: u32 = 0x4671;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_END_CNTL1_R_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_END_CNTL1_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_END_CNTL1_R: u32 = 0x4672;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_END_CNTL2_R_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_END_CNTL2_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_END_CNTL2_R: u32 = 0x4673;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_0_1_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_0_1: u32 = 0x4674;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_2_3_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_2_3: u32 = 0x4675;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_4_5_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_4_5: u32 = 0x4676;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_6_7_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_6_7: u32 = 0x4677;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_8_9_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_8_9: u32 = 0x4678;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_10_11_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_10_11: u32 = 0x4679;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_12_13_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_12_13: u32 = 0x467a;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_14_15_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_14_15: u32 = 0x467b;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_16_17_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_16_17: u32 = 0x467c;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_18_19_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_18_19: u32 = 0x467d;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_20_21_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_20_21: u32 = 0x467e;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_22_23_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_22_23: u32 = 0x467f;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_24_25_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_24_25: u32 = 0x4680;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_26_27_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_26_27: u32 = 0x4681;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_28_29_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_28_29: u32 = 0x4682;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_30_31_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_30_31: u32 = 0x4683;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_REGION_32_33_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_REGION_32_33: u32 = 0x4684;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_LUT_INDEX_BASE_IDX) + mmCM3_CM_BLNDGAM_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_LUT_INDEX: u32 = 0x4665;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_LUT_DATA_BASE_IDX) + mmCM3_CM_BLNDGAM_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_LUT_DATA: u32 = 0x4666;
+/// The value of `BASE(mmCM3_CM_3DLUT_MODE_BASE_IDX) + mmCM3_CM_3DLUT_MODE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_3DLUT_MODE: u32 = 0x46e1;
+/// The value of `BASE(mmCM3_CM_3DLUT_INDEX_BASE_IDX) + mmCM3_CM_3DLUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_3DLUT_INDEX: u32 = 0x46e2;
+/// The value of `BASE(mmCM3_CM_3DLUT_DATA_BASE_IDX) + mmCM3_CM_3DLUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_3DLUT_DATA: u32 = 0x46e3;
+/// The value of `BASE(mmCM3_CM_3DLUT_DATA_30BIT_BASE_IDX) + mmCM3_CM_3DLUT_DATA_30BIT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_3DLUT_DATA_30BIT: u32 = 0x46e4;
+/// The value of `BASE(mmCM3_CM_3DLUT_READ_WRITE_CONTROL_BASE_IDX) + mmCM3_CM_3DLUT_READ_WRITE_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_3DLUT_READ_WRITE_CONTROL: u32 = 0x46e5;
+/// The value of `BASE(mmCM3_CM_SHAPER_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM3_CM_SHAPER_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_LUT_WRITE_EN_MASK: u32 = 0x46b0;
+/// The value of `BASE(mmCM3_CM_SHAPER_CONTROL_BASE_IDX) + mmCM3_CM_SHAPER_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_CONTROL: u32 = 0x46a8;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_START_CNTL_B_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_START_CNTL_B: u32 = 0x46c8;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_START_CNTL_G_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_START_CNTL_G: u32 = 0x46c9;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_START_CNTL_R_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_START_CNTL_R: u32 = 0x46ca;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_END_CNTL_B_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_END_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_END_CNTL_B: u32 = 0x46cb;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_END_CNTL_G_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_END_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_END_CNTL_G: u32 = 0x46cc;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_END_CNTL_R_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_END_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_END_CNTL_R: u32 = 0x46cd;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_0_1_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_0_1: u32 = 0x46ce;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_2_3_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_2_3: u32 = 0x46cf;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_4_5_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_4_5: u32 = 0x46d0;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_6_7_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_6_7: u32 = 0x46d1;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_8_9_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_8_9: u32 = 0x46d2;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_10_11_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_10_11: u32 = 0x46d3;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_12_13_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_12_13: u32 = 0x46d4;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_14_15_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_14_15: u32 = 0x46d5;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_16_17_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_16_17: u32 = 0x46d6;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_18_19_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_18_19: u32 = 0x46d7;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_20_21_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_20_21: u32 = 0x46d8;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_22_23_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_22_23: u32 = 0x46d9;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_24_25_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_24_25: u32 = 0x46da;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_26_27_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_26_27: u32 = 0x46db;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_28_29_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_28_29: u32 = 0x46dc;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_30_31_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_30_31: u32 = 0x46dd;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMB_REGION_32_33_BASE_IDX) + mmCM3_CM_SHAPER_RAMB_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMB_REGION_32_33: u32 = 0x46de;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_START_CNTL_B_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_START_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_START_CNTL_B: u32 = 0x46b1;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_START_CNTL_G_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_START_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_START_CNTL_G: u32 = 0x46b2;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_START_CNTL_R_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_START_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_START_CNTL_R: u32 = 0x46b3;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_END_CNTL_B_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_END_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_END_CNTL_B: u32 = 0x46b4;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_END_CNTL_G_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_END_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_END_CNTL_G: u32 = 0x46b5;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_END_CNTL_R_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_END_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_END_CNTL_R: u32 = 0x46b6;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_0_1_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_0_1` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_0_1: u32 = 0x46b7;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_2_3_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_2_3` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_2_3: u32 = 0x46b8;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_4_5_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_4_5` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_4_5: u32 = 0x46b9;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_6_7_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_6_7` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_6_7: u32 = 0x46ba;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_8_9_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_8_9` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_8_9: u32 = 0x46bb;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_10_11_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_10_11` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_10_11: u32 = 0x46bc;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_12_13_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_12_13` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_12_13: u32 = 0x46bd;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_14_15_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_14_15` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_14_15: u32 = 0x46be;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_16_17_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_16_17` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_16_17: u32 = 0x46bf;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_18_19_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_18_19` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_18_19: u32 = 0x46c0;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_20_21_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_20_21` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_20_21: u32 = 0x46c1;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_22_23_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_22_23` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_22_23: u32 = 0x46c2;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_24_25_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_24_25` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_24_25: u32 = 0x46c3;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_26_27_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_26_27` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_26_27: u32 = 0x46c4;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_28_29_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_28_29` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_28_29: u32 = 0x46c5;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_30_31_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_30_31` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_30_31: u32 = 0x46c6;
+/// The value of `BASE(mmCM3_CM_SHAPER_RAMA_REGION_32_33_BASE_IDX) + mmCM3_CM_SHAPER_RAMA_REGION_32_33` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_RAMA_REGION_32_33: u32 = 0x46c7;
+/// The value of `BASE(mmCM3_CM_SHAPER_LUT_INDEX_BASE_IDX) + mmCM3_CM_SHAPER_LUT_INDEX` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_LUT_INDEX: u32 = 0x46ae;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_LUT_WRITE_EN_MASK_BASE_IDX) + mmCM3_CM_BLNDGAM_LUT_WRITE_EN_MASK` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_LUT_WRITE_EN_MASK: u32 = 0x4667;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_SLOPE_CNTL_B_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_SLOPE_CNTL_B: u32 = 0x4688;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_SLOPE_CNTL_G_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_SLOPE_CNTL_G: u32 = 0x4689;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMB_SLOPE_CNTL_R_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMB_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMB_SLOPE_CNTL_R: u32 = 0x468a;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_SLOPE_CNTL_B_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_SLOPE_CNTL_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_SLOPE_CNTL_B: u32 = 0x466b;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_SLOPE_CNTL_G_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_SLOPE_CNTL_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_SLOPE_CNTL_G: u32 = 0x466c;
+/// The value of `BASE(mmCM3_CM_BLNDGAM_RAMA_SLOPE_CNTL_R_BASE_IDX) + mmCM3_CM_BLNDGAM_RAMA_SLOPE_CNTL_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_BLNDGAM_RAMA_SLOPE_CNTL_R: u32 = 0x466d;
+/// The value of `BASE(mmCURSOR0_3_CURSOR_CONTROL_BASE_IDX) + mmCURSOR0_3_CURSOR_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CURSOR_CONTROL: u32 = 0x3dcc;
+/// The value of `BASE(mmCNVC_CFG3_ALPHA_2BIT_LUT_BASE_IDX) + mmCNVC_CFG3_ALPHA_2BIT_LUT` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_ALPHA_2BIT_LUT: u32 = 0x45de;
+/// The value of `BASE(mmCNVC_CFG3_FCNV_FP_BIAS_R_BASE_IDX) + mmCNVC_CFG3_FCNV_FP_BIAS_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_FCNV_FP_BIAS_R: u32 = 0x45d2;
+/// The value of `BASE(mmCNVC_CFG3_FCNV_FP_BIAS_G_BASE_IDX) + mmCNVC_CFG3_FCNV_FP_BIAS_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_FCNV_FP_BIAS_G: u32 = 0x45d3;
+/// The value of `BASE(mmCNVC_CFG3_FCNV_FP_BIAS_B_BASE_IDX) + mmCNVC_CFG3_FCNV_FP_BIAS_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_FCNV_FP_BIAS_B: u32 = 0x45d4;
+/// The value of `BASE(mmCNVC_CFG3_FCNV_FP_SCALE_R_BASE_IDX) + mmCNVC_CFG3_FCNV_FP_SCALE_R` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_FCNV_FP_SCALE_R: u32 = 0x45d5;
+/// The value of `BASE(mmCNVC_CFG3_FCNV_FP_SCALE_G_BASE_IDX) + mmCNVC_CFG3_FCNV_FP_SCALE_G` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_FCNV_FP_SCALE_G: u32 = 0x45d6;
+/// The value of `BASE(mmCNVC_CFG3_FCNV_FP_SCALE_B_BASE_IDX) + mmCNVC_CFG3_FCNV_FP_SCALE_B` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_FCNV_FP_SCALE_B: u32 = 0x45d7;
+/// The value of `BASE(mmCNVC_CFG3_COLOR_KEYER_CONTROL_BASE_IDX) + mmCNVC_CFG3_COLOR_KEYER_CONTROL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_COLOR_KEYER_CONTROL: u32 = 0x45d8;
+/// The value of `BASE(mmCNVC_CFG3_COLOR_KEYER_ALPHA_BASE_IDX) + mmCNVC_CFG3_COLOR_KEYER_ALPHA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_COLOR_KEYER_ALPHA: u32 = 0x45d9;
+/// The value of `BASE(mmCNVC_CFG3_COLOR_KEYER_RED_BASE_IDX) + mmCNVC_CFG3_COLOR_KEYER_RED` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_COLOR_KEYER_RED: u32 = 0x45da;
+/// The value of `BASE(mmCNVC_CFG3_COLOR_KEYER_GREEN_BASE_IDX) + mmCNVC_CFG3_COLOR_KEYER_GREEN` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_COLOR_KEYER_GREEN: u32 = 0x45db;
+/// The value of `BASE(mmCNVC_CFG3_COLOR_KEYER_BLUE_BASE_IDX) + mmCNVC_CFG3_COLOR_KEYER_BLUE` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_COLOR_KEYER_BLUE: u32 = 0x45dc;
+/// The value of `BASE(mmCM3_CM_SHAPER_LUT_DATA_BASE_IDX) + mmCM3_CM_SHAPER_LUT_DATA` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_SHAPER_LUT_DATA: u32 = 0x46af;
+/// The value of `BASE(mmDSCL3_OBUF_MEM_PWR_CTRL_BASE_IDX) + mmDSCL3_OBUF_MEM_PWR_CTRL` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_OBUF_MEM_PWR_CTRL: u32 = 0x460c;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_B_C11_C12_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_B_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_B_C11_C12: u32 = 0x4630;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_B_C13_C14_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_B_C13_C14` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_B_C13_C14: u32 = 0x4631;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_B_C21_C22_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_B_C21_C22` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_B_C21_C22: u32 = 0x4632;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_B_C23_C24_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_B_C23_C24` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_B_C23_C24: u32 = 0x4633;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_B_C31_C32_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_B_C31_C32` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_B_C31_C32: u32 = 0x4634;
+/// The value of `BASE(mmCM3_CM_GAMUT_REMAP_B_C33_C34_BASE_IDX) + mmCM3_CM_GAMUT_REMAP_B_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_GAMUT_REMAP_B_C33_C34: u32 = 0x4635;
+/// The value of `BASE(mmCM3_CM_ICSC_B_C11_C12_BASE_IDX) + mmCM3_CM_ICSC_B_C11_C12` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_ICSC_B_C11_C12: u32 = 0x4623;
+/// The value of `BASE(mmCM3_CM_ICSC_B_C33_C34_BASE_IDX) + mmCM3_CM_ICSC_B_C33_C34` in ../display/dc/resource/dcn21/dcn21_resource.c
+pub const DPP3_CM_ICSC_B_C33_C34: u32 = 0x4628;
+
+// DC dpp field shifts/masks (TF_REG_LIST_SH_MASK_DCN20(__SHIFT) + TF_DEBUG_REG_LIST_SH_DCN20)
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13241
+pub const CM0_CM_GAMUT_REMAP_CONTROL__CM_GAMUT_REMAP_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13242
+pub const CM0_CM_GAMUT_REMAP_CONTROL__CM_GAMUT_REMAP_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13244
+pub const CM0_CM_GAMUT_REMAP_C11_C12__CM_GAMUT_REMAP_C11__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13246
+pub const CM0_CM_GAMUT_REMAP_C11_C12__CM_GAMUT_REMAP_C11_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13245
+pub const CM0_CM_GAMUT_REMAP_C11_C12__CM_GAMUT_REMAP_C12__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13247
+pub const CM0_CM_GAMUT_REMAP_C11_C12__CM_GAMUT_REMAP_C12_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13249
+pub const CM0_CM_GAMUT_REMAP_C13_C14__CM_GAMUT_REMAP_C13__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13251
+pub const CM0_CM_GAMUT_REMAP_C13_C14__CM_GAMUT_REMAP_C13_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13250
+pub const CM0_CM_GAMUT_REMAP_C13_C14__CM_GAMUT_REMAP_C14__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13252
+pub const CM0_CM_GAMUT_REMAP_C13_C14__CM_GAMUT_REMAP_C14_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13254
+pub const CM0_CM_GAMUT_REMAP_C21_C22__CM_GAMUT_REMAP_C21__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13256
+pub const CM0_CM_GAMUT_REMAP_C21_C22__CM_GAMUT_REMAP_C21_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13255
+pub const CM0_CM_GAMUT_REMAP_C21_C22__CM_GAMUT_REMAP_C22__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13257
+pub const CM0_CM_GAMUT_REMAP_C21_C22__CM_GAMUT_REMAP_C22_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13259
+pub const CM0_CM_GAMUT_REMAP_C23_C24__CM_GAMUT_REMAP_C23__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13261
+pub const CM0_CM_GAMUT_REMAP_C23_C24__CM_GAMUT_REMAP_C23_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13260
+pub const CM0_CM_GAMUT_REMAP_C23_C24__CM_GAMUT_REMAP_C24__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13262
+pub const CM0_CM_GAMUT_REMAP_C23_C24__CM_GAMUT_REMAP_C24_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13264
+pub const CM0_CM_GAMUT_REMAP_C31_C32__CM_GAMUT_REMAP_C31__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13266
+pub const CM0_CM_GAMUT_REMAP_C31_C32__CM_GAMUT_REMAP_C31_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13265
+pub const CM0_CM_GAMUT_REMAP_C31_C32__CM_GAMUT_REMAP_C32__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13267
+pub const CM0_CM_GAMUT_REMAP_C31_C32__CM_GAMUT_REMAP_C32_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13269
+pub const CM0_CM_GAMUT_REMAP_C33_C34__CM_GAMUT_REMAP_C33__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13271
+pub const CM0_CM_GAMUT_REMAP_C33_C34__CM_GAMUT_REMAP_C33_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13270
+pub const CM0_CM_GAMUT_REMAP_C33_C34__CM_GAMUT_REMAP_C34__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13272
+pub const CM0_CM_GAMUT_REMAP_C33_C34__CM_GAMUT_REMAP_C34_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12933
+pub const DSCL0_DSCL_EXT_OVERSCAN_LEFT_RIGHT__EXT_OVERSCAN_LEFT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12935
+pub const DSCL0_DSCL_EXT_OVERSCAN_LEFT_RIGHT__EXT_OVERSCAN_LEFT_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12932
+pub const DSCL0_DSCL_EXT_OVERSCAN_LEFT_RIGHT__EXT_OVERSCAN_RIGHT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12934
+pub const DSCL0_DSCL_EXT_OVERSCAN_LEFT_RIGHT__EXT_OVERSCAN_RIGHT_MASK: u32 = 0x1fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12937
+pub const DSCL0_DSCL_EXT_OVERSCAN_TOP_BOTTOM__EXT_OVERSCAN_BOTTOM__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12939
+pub const DSCL0_DSCL_EXT_OVERSCAN_TOP_BOTTOM__EXT_OVERSCAN_BOTTOM_MASK: u32 = 0x1fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12938
+pub const DSCL0_DSCL_EXT_OVERSCAN_TOP_BOTTOM__EXT_OVERSCAN_TOP__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12940
+pub const DSCL0_DSCL_EXT_OVERSCAN_TOP_BOTTOM__EXT_OVERSCAN_TOP_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12942
+pub const DSCL0_OTG_H_BLANK__OTG_H_BLANK_START__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12944
+pub const DSCL0_OTG_H_BLANK__OTG_H_BLANK_START_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12943
+pub const DSCL0_OTG_H_BLANK__OTG_H_BLANK_END__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12945
+pub const DSCL0_OTG_H_BLANK__OTG_H_BLANK_END_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12947
+pub const DSCL0_OTG_V_BLANK__OTG_V_BLANK_START__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12949
+pub const DSCL0_OTG_V_BLANK__OTG_V_BLANK_START_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12948
+pub const DSCL0_OTG_V_BLANK__OTG_V_BLANK_END__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12950
+pub const DSCL0_OTG_V_BLANK__OTG_V_BLANK_END_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12972
+pub const DSCL0_LB_DATA_FORMAT__INTERLEAVE_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12979
+pub const DSCL0_LB_DATA_FORMAT__INTERLEAVE_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12982
+pub const DSCL0_LB_MEMORY_CTRL__MEMORY_CONFIG__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12986
+pub const DSCL0_LB_MEMORY_CTRL__MEMORY_CONFIG_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12983
+pub const DSCL0_LB_MEMORY_CTRL__LB_MAX_PARTITIONS__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12987
+pub const DSCL0_LB_MEMORY_CTRL__LB_MAX_PARTITIONS_MASK: u32 = 0x3f00;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12925
+pub const DSCL0_DSCL_AUTOCAL__AUTOCAL_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12928
+pub const DSCL0_DSCL_AUTOCAL__AUTOCAL_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12926
+pub const DSCL0_DSCL_AUTOCAL__AUTOCAL_NUM_PIPE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12929
+pub const DSCL0_DSCL_AUTOCAL__AUTOCAL_NUM_PIPE_MASK: u32 = 0x300;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12927
+pub const DSCL0_DSCL_AUTOCAL__AUTOCAL_PIPE_ID__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12930
+pub const DSCL0_DSCL_AUTOCAL__AUTOCAL_PIPE_ID_MASK: u32 = 0x3000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12854
+pub const DSCL0_DSCL_CONTROL__SCL_BOUNDARY_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12855
+pub const DSCL0_DSCL_CONTROL__SCL_BOUNDARY_MODE_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12917
+pub const DSCL0_SCL_BLACK_OFFSET__SCL_BLACK_OFFSET_RGB_Y__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12919
+pub const DSCL0_SCL_BLACK_OFFSET__SCL_BLACK_OFFSET_RGB_Y_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12918
+pub const DSCL0_SCL_BLACK_OFFSET__SCL_BLACK_OFFSET_CBCR__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12920
+pub const DSCL0_SCL_BLACK_OFFSET__SCL_BLACK_OFFSET_CBCR_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12845
+pub const DSCL0_SCL_TAP_CONTROL__SCL_V_NUM_TAPS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12849
+pub const DSCL0_SCL_TAP_CONTROL__SCL_V_NUM_TAPS_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12846
+pub const DSCL0_SCL_TAP_CONTROL__SCL_H_NUM_TAPS__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12850
+pub const DSCL0_SCL_TAP_CONTROL__SCL_H_NUM_TAPS_MASK: u32 = 0x70;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12847
+pub const DSCL0_SCL_TAP_CONTROL__SCL_V_NUM_TAPS_C__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12851
+pub const DSCL0_SCL_TAP_CONTROL__SCL_V_NUM_TAPS_C_MASK: u32 = 0x700;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12848
+pub const DSCL0_SCL_TAP_CONTROL__SCL_H_NUM_TAPS_C__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12852
+pub const DSCL0_SCL_TAP_CONTROL__SCL_H_NUM_TAPS_C_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12816
+pub const DSCL0_SCL_COEF_RAM_TAP_SELECT__SCL_COEF_RAM_TAP_PAIR_IDX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12819
+pub const DSCL0_SCL_COEF_RAM_TAP_SELECT__SCL_COEF_RAM_TAP_PAIR_IDX_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12817
+pub const DSCL0_SCL_COEF_RAM_TAP_SELECT__SCL_COEF_RAM_PHASE__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12820
+pub const DSCL0_SCL_COEF_RAM_TAP_SELECT__SCL_COEF_RAM_PHASE_MASK: u32 = 0x3f00;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12818
+pub const DSCL0_SCL_COEF_RAM_TAP_SELECT__SCL_COEF_RAM_FILTER_TYPE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12821
+pub const DSCL0_SCL_COEF_RAM_TAP_SELECT__SCL_COEF_RAM_FILTER_TYPE_MASK: u32 = 0x70000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12823
+pub const DSCL0_SCL_COEF_RAM_TAP_DATA__SCL_COEF_RAM_EVEN_TAP_COEF__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12827
+pub const DSCL0_SCL_COEF_RAM_TAP_DATA__SCL_COEF_RAM_EVEN_TAP_COEF_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12824
+pub const DSCL0_SCL_COEF_RAM_TAP_DATA__SCL_COEF_RAM_EVEN_TAP_COEF_EN__SHIFT: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12828
+pub const DSCL0_SCL_COEF_RAM_TAP_DATA__SCL_COEF_RAM_EVEN_TAP_COEF_EN_MASK: u32 = 0x8000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12825
+pub const DSCL0_SCL_COEF_RAM_TAP_DATA__SCL_COEF_RAM_ODD_TAP_COEF__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12829
+pub const DSCL0_SCL_COEF_RAM_TAP_DATA__SCL_COEF_RAM_ODD_TAP_COEF_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12826
+pub const DSCL0_SCL_COEF_RAM_TAP_DATA__SCL_COEF_RAM_ODD_TAP_COEF_EN__SHIFT: u32 = 0x1f;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12830
+pub const DSCL0_SCL_COEF_RAM_TAP_DATA__SCL_COEF_RAM_ODD_TAP_COEF_EN_MASK: u32 = 0x80000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12857
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_H_2TAP_HARDCODE_COEF_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12863
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_H_2TAP_HARDCODE_COEF_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12858
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_H_2TAP_SHARP_EN__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12864
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_H_2TAP_SHARP_EN_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12859
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_H_2TAP_SHARP_FACTOR__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12865
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_H_2TAP_SHARP_FACTOR_MASK: u32 = 0x700;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12860
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_V_2TAP_HARDCODE_COEF_EN__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12866
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_V_2TAP_HARDCODE_COEF_EN_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12861
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_V_2TAP_SHARP_EN__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12867
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_V_2TAP_SHARP_EN_MASK: u32 = 0x100000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12862
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_V_2TAP_SHARP_FACTOR__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12868
+pub const DSCL0_DSCL_2TAP_CONTROL__SCL_V_2TAP_SHARP_FACTOR_MASK: u32 = 0x7000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12833
+pub const DSCL0_SCL_MODE__SCL_COEF_RAM_SELECT__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12839
+pub const DSCL0_SCL_MODE__SCL_COEF_RAM_SELECT_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12832
+pub const DSCL0_SCL_MODE__DSCL_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12838
+pub const DSCL0_SCL_MODE__DSCL_MODE_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12952
+pub const DSCL0_RECOUT_START__RECOUT_START_X__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12954
+pub const DSCL0_RECOUT_START__RECOUT_START_X_MASK: u32 = 0x1fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12953
+pub const DSCL0_RECOUT_START__RECOUT_START_Y__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12955
+pub const DSCL0_RECOUT_START__RECOUT_START_Y_MASK: u32 = 0x1fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12957
+pub const DSCL0_RECOUT_SIZE__RECOUT_WIDTH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12959
+pub const DSCL0_RECOUT_SIZE__RECOUT_WIDTH_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12958
+pub const DSCL0_RECOUT_SIZE__RECOUT_HEIGHT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12960
+pub const DSCL0_RECOUT_SIZE__RECOUT_HEIGHT_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12962
+pub const DSCL0_MPC_SIZE__MPC_WIDTH__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12964
+pub const DSCL0_MPC_SIZE__MPC_WIDTH_MASK: u32 = 0x3fff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12963
+pub const DSCL0_MPC_SIZE__MPC_HEIGHT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12965
+pub const DSCL0_MPC_SIZE__MPC_HEIGHT_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12875
+pub const DSCL0_SCL_HORZ_FILTER_SCALE_RATIO__SCL_H_SCALE_RATIO__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12876
+pub const DSCL0_SCL_HORZ_FILTER_SCALE_RATIO__SCL_H_SCALE_RATIO_MASK: u32 = 0x3ffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12891
+pub const DSCL0_SCL_VERT_FILTER_SCALE_RATIO__SCL_V_SCALE_RATIO__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12892
+pub const DSCL0_SCL_VERT_FILTER_SCALE_RATIO__SCL_V_SCALE_RATIO_MASK: u32 = 0x3ffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12883
+pub const DSCL0_SCL_HORZ_FILTER_SCALE_RATIO_C__SCL_H_SCALE_RATIO_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12884
+pub const DSCL0_SCL_HORZ_FILTER_SCALE_RATIO_C__SCL_H_SCALE_RATIO_C_MASK: u32 = 0x3ffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12904
+pub const DSCL0_SCL_VERT_FILTER_SCALE_RATIO_C__SCL_V_SCALE_RATIO_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12905
+pub const DSCL0_SCL_VERT_FILTER_SCALE_RATIO_C__SCL_V_SCALE_RATIO_C_MASK: u32 = 0x3ffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12878
+pub const DSCL0_SCL_HORZ_FILTER_INIT__SCL_H_INIT_FRAC__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12880
+pub const DSCL0_SCL_HORZ_FILTER_INIT__SCL_H_INIT_FRAC_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12879
+pub const DSCL0_SCL_HORZ_FILTER_INIT__SCL_H_INIT_INT__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12881
+pub const DSCL0_SCL_HORZ_FILTER_INIT__SCL_H_INIT_INT_MASK: u32 = 0xf000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12886
+pub const DSCL0_SCL_HORZ_FILTER_INIT_C__SCL_H_INIT_FRAC_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12888
+pub const DSCL0_SCL_HORZ_FILTER_INIT_C__SCL_H_INIT_FRAC_C_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12887
+pub const DSCL0_SCL_HORZ_FILTER_INIT_C__SCL_H_INIT_INT_C__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12889
+pub const DSCL0_SCL_HORZ_FILTER_INIT_C__SCL_H_INIT_INT_C_MASK: u32 = 0xf000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12894
+pub const DSCL0_SCL_VERT_FILTER_INIT__SCL_V_INIT_FRAC__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12896
+pub const DSCL0_SCL_VERT_FILTER_INIT__SCL_V_INIT_FRAC_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12895
+pub const DSCL0_SCL_VERT_FILTER_INIT__SCL_V_INIT_INT__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12897
+pub const DSCL0_SCL_VERT_FILTER_INIT__SCL_V_INIT_INT_MASK: u32 = 0xf000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12899
+pub const DSCL0_SCL_VERT_FILTER_INIT_BOT__SCL_V_INIT_FRAC_BOT__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12901
+pub const DSCL0_SCL_VERT_FILTER_INIT_BOT__SCL_V_INIT_FRAC_BOT_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12900
+pub const DSCL0_SCL_VERT_FILTER_INIT_BOT__SCL_V_INIT_INT_BOT__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12902
+pub const DSCL0_SCL_VERT_FILTER_INIT_BOT__SCL_V_INIT_INT_BOT_MASK: u32 = 0xf000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12907
+pub const DSCL0_SCL_VERT_FILTER_INIT_C__SCL_V_INIT_FRAC_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12909
+pub const DSCL0_SCL_VERT_FILTER_INIT_C__SCL_V_INIT_FRAC_C_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12908
+pub const DSCL0_SCL_VERT_FILTER_INIT_C__SCL_V_INIT_INT_C__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12910
+pub const DSCL0_SCL_VERT_FILTER_INIT_C__SCL_V_INIT_INT_C_MASK: u32 = 0xf000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12912
+pub const DSCL0_SCL_VERT_FILTER_INIT_BOT_C__SCL_V_INIT_FRAC_BOT_C__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12914
+pub const DSCL0_SCL_VERT_FILTER_INIT_BOT_C__SCL_V_INIT_FRAC_BOT_C_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12913
+pub const DSCL0_SCL_VERT_FILTER_INIT_BOT_C__SCL_V_INIT_INT_BOT_C__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12915
+pub const DSCL0_SCL_VERT_FILTER_INIT_BOT_C__SCL_V_INIT_INT_BOT_C_MASK: u32 = 0xf000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12835
+pub const DSCL0_SCL_MODE__SCL_CHROMA_COEF_MODE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12841
+pub const DSCL0_SCL_MODE__SCL_CHROMA_COEF_MODE_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12834
+pub const DSCL0_SCL_MODE__SCL_COEF_RAM_SELECT_CURRENT__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12840
+pub const DSCL0_SCL_MODE__SCL_COEF_RAM_SELECT_CURRENT_MASK: u32 = 0x1000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12996
+pub const DSCL0_DSCL_MEM_PWR_CTRL__LUT_MEM_PWR_FORCE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13010
+pub const DSCL0_DSCL_MEM_PWR_CTRL__LUT_MEM_PWR_FORCE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13025
+pub const DSCL0_DSCL_MEM_PWR_STATUS__LUT_MEM_PWR_STATE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13032
+pub const DSCL0_DSCL_MEM_PWR_STATUS__LUT_MEM_PWR_STATE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13208
+pub const CM0_CM_ICSC_CONTROL__CM_ICSC_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13209
+pub const CM0_CM_ICSC_CONTROL__CM_ICSC_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13211
+pub const CM0_CM_ICSC_C11_C12__CM_ICSC_C11__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13213
+pub const CM0_CM_ICSC_C11_C12__CM_ICSC_C11_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13212
+pub const CM0_CM_ICSC_C11_C12__CM_ICSC_C12__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13214
+pub const CM0_CM_ICSC_C11_C12__CM_ICSC_C12_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13236
+pub const CM0_CM_ICSC_C33_C34__CM_ICSC_C33__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13238
+pub const CM0_CM_ICSC_C33_C34__CM_ICSC_C33_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13237
+pub const CM0_CM_ICSC_C33_C34__CM_ICSC_C34__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13239
+pub const CM0_CM_ICSC_C33_C34__CM_ICSC_C34_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13456
+pub const CM0_CM_DGAM_RAMB_START_CNTL_B__CM_DGAM_RAMB_EXP_REGION_START_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13458
+pub const CM0_CM_DGAM_RAMB_START_CNTL_B__CM_DGAM_RAMB_EXP_REGION_START_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13457
+pub const CM0_CM_DGAM_RAMB_START_CNTL_B__CM_DGAM_RAMB_EXP_REGION_START_SEGMENT_B__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13459
+pub const CM0_CM_DGAM_RAMB_START_CNTL_B__CM_DGAM_RAMB_EXP_REGION_START_SEGMENT_B_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13461
+pub const CM0_CM_DGAM_RAMB_START_CNTL_G__CM_DGAM_RAMB_EXP_REGION_START_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13463
+pub const CM0_CM_DGAM_RAMB_START_CNTL_G__CM_DGAM_RAMB_EXP_REGION_START_G_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13462
+pub const CM0_CM_DGAM_RAMB_START_CNTL_G__CM_DGAM_RAMB_EXP_REGION_START_SEGMENT_G__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13464
+pub const CM0_CM_DGAM_RAMB_START_CNTL_G__CM_DGAM_RAMB_EXP_REGION_START_SEGMENT_G_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13466
+pub const CM0_CM_DGAM_RAMB_START_CNTL_R__CM_DGAM_RAMB_EXP_REGION_START_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13468
+pub const CM0_CM_DGAM_RAMB_START_CNTL_R__CM_DGAM_RAMB_EXP_REGION_START_R_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13467
+pub const CM0_CM_DGAM_RAMB_START_CNTL_R__CM_DGAM_RAMB_EXP_REGION_START_SEGMENT_R__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13469
+pub const CM0_CM_DGAM_RAMB_START_CNTL_R__CM_DGAM_RAMB_EXP_REGION_START_SEGMENT_R_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13471
+pub const CM0_CM_DGAM_RAMB_SLOPE_CNTL_B__CM_DGAM_RAMB_EXP_REGION_LINEAR_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13472
+pub const CM0_CM_DGAM_RAMB_SLOPE_CNTL_B__CM_DGAM_RAMB_EXP_REGION_LINEAR_SLOPE_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13474
+pub const CM0_CM_DGAM_RAMB_SLOPE_CNTL_G__CM_DGAM_RAMB_EXP_REGION_LINEAR_SLOPE_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13475
+pub const CM0_CM_DGAM_RAMB_SLOPE_CNTL_G__CM_DGAM_RAMB_EXP_REGION_LINEAR_SLOPE_G_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13477
+pub const CM0_CM_DGAM_RAMB_SLOPE_CNTL_R__CM_DGAM_RAMB_EXP_REGION_LINEAR_SLOPE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13478
+pub const CM0_CM_DGAM_RAMB_SLOPE_CNTL_R__CM_DGAM_RAMB_EXP_REGION_LINEAR_SLOPE_R_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13480
+pub const CM0_CM_DGAM_RAMB_END_CNTL1_B__CM_DGAM_RAMB_EXP_REGION_END_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13481
+pub const CM0_CM_DGAM_RAMB_END_CNTL1_B__CM_DGAM_RAMB_EXP_REGION_END_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13483
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_B__CM_DGAM_RAMB_EXP_REGION_END_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13485
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_B__CM_DGAM_RAMB_EXP_REGION_END_SLOPE_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13484
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_B__CM_DGAM_RAMB_EXP_REGION_END_BASE_B__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13486
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_B__CM_DGAM_RAMB_EXP_REGION_END_BASE_B_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13488
+pub const CM0_CM_DGAM_RAMB_END_CNTL1_G__CM_DGAM_RAMB_EXP_REGION_END_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13489
+pub const CM0_CM_DGAM_RAMB_END_CNTL1_G__CM_DGAM_RAMB_EXP_REGION_END_G_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13491
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_G__CM_DGAM_RAMB_EXP_REGION_END_SLOPE_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13493
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_G__CM_DGAM_RAMB_EXP_REGION_END_SLOPE_G_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13492
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_G__CM_DGAM_RAMB_EXP_REGION_END_BASE_G__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13494
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_G__CM_DGAM_RAMB_EXP_REGION_END_BASE_G_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13496
+pub const CM0_CM_DGAM_RAMB_END_CNTL1_R__CM_DGAM_RAMB_EXP_REGION_END_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13497
+pub const CM0_CM_DGAM_RAMB_END_CNTL1_R__CM_DGAM_RAMB_EXP_REGION_END_R_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13499
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_R__CM_DGAM_RAMB_EXP_REGION_END_SLOPE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13501
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_R__CM_DGAM_RAMB_EXP_REGION_END_SLOPE_R_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13500
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_R__CM_DGAM_RAMB_EXP_REGION_END_BASE_R__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13502
+pub const CM0_CM_DGAM_RAMB_END_CNTL2_R__CM_DGAM_RAMB_EXP_REGION_END_BASE_R_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13504
+pub const CM0_CM_DGAM_RAMB_REGION_0_1__CM_DGAM_RAMB_EXP_REGION0_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13508
+pub const CM0_CM_DGAM_RAMB_REGION_0_1__CM_DGAM_RAMB_EXP_REGION0_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13505
+pub const CM0_CM_DGAM_RAMB_REGION_0_1__CM_DGAM_RAMB_EXP_REGION0_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13509
+pub const CM0_CM_DGAM_RAMB_REGION_0_1__CM_DGAM_RAMB_EXP_REGION0_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13506
+pub const CM0_CM_DGAM_RAMB_REGION_0_1__CM_DGAM_RAMB_EXP_REGION1_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13510
+pub const CM0_CM_DGAM_RAMB_REGION_0_1__CM_DGAM_RAMB_EXP_REGION1_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13507
+pub const CM0_CM_DGAM_RAMB_REGION_0_1__CM_DGAM_RAMB_EXP_REGION1_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13511
+pub const CM0_CM_DGAM_RAMB_REGION_0_1__CM_DGAM_RAMB_EXP_REGION1_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13567
+pub const CM0_CM_DGAM_RAMB_REGION_14_15__CM_DGAM_RAMB_EXP_REGION14_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13571
+pub const CM0_CM_DGAM_RAMB_REGION_14_15__CM_DGAM_RAMB_EXP_REGION14_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13568
+pub const CM0_CM_DGAM_RAMB_REGION_14_15__CM_DGAM_RAMB_EXP_REGION14_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13572
+pub const CM0_CM_DGAM_RAMB_REGION_14_15__CM_DGAM_RAMB_EXP_REGION14_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13569
+pub const CM0_CM_DGAM_RAMB_REGION_14_15__CM_DGAM_RAMB_EXP_REGION15_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13573
+pub const CM0_CM_DGAM_RAMB_REGION_14_15__CM_DGAM_RAMB_EXP_REGION15_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13570
+pub const CM0_CM_DGAM_RAMB_REGION_14_15__CM_DGAM_RAMB_EXP_REGION15_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13574
+pub const CM0_CM_DGAM_RAMB_REGION_14_15__CM_DGAM_RAMB_EXP_REGION15_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13336
+pub const CM0_CM_DGAM_RAMA_START_CNTL_B__CM_DGAM_RAMA_EXP_REGION_START_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13338
+pub const CM0_CM_DGAM_RAMA_START_CNTL_B__CM_DGAM_RAMA_EXP_REGION_START_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13337
+pub const CM0_CM_DGAM_RAMA_START_CNTL_B__CM_DGAM_RAMA_EXP_REGION_START_SEGMENT_B__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13339
+pub const CM0_CM_DGAM_RAMA_START_CNTL_B__CM_DGAM_RAMA_EXP_REGION_START_SEGMENT_B_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13341
+pub const CM0_CM_DGAM_RAMA_START_CNTL_G__CM_DGAM_RAMA_EXP_REGION_START_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13343
+pub const CM0_CM_DGAM_RAMA_START_CNTL_G__CM_DGAM_RAMA_EXP_REGION_START_G_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13342
+pub const CM0_CM_DGAM_RAMA_START_CNTL_G__CM_DGAM_RAMA_EXP_REGION_START_SEGMENT_G__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13344
+pub const CM0_CM_DGAM_RAMA_START_CNTL_G__CM_DGAM_RAMA_EXP_REGION_START_SEGMENT_G_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13346
+pub const CM0_CM_DGAM_RAMA_START_CNTL_R__CM_DGAM_RAMA_EXP_REGION_START_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13348
+pub const CM0_CM_DGAM_RAMA_START_CNTL_R__CM_DGAM_RAMA_EXP_REGION_START_R_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13347
+pub const CM0_CM_DGAM_RAMA_START_CNTL_R__CM_DGAM_RAMA_EXP_REGION_START_SEGMENT_R__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13349
+pub const CM0_CM_DGAM_RAMA_START_CNTL_R__CM_DGAM_RAMA_EXP_REGION_START_SEGMENT_R_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13351
+pub const CM0_CM_DGAM_RAMA_SLOPE_CNTL_B__CM_DGAM_RAMA_EXP_REGION_LINEAR_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13352
+pub const CM0_CM_DGAM_RAMA_SLOPE_CNTL_B__CM_DGAM_RAMA_EXP_REGION_LINEAR_SLOPE_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13354
+pub const CM0_CM_DGAM_RAMA_SLOPE_CNTL_G__CM_DGAM_RAMA_EXP_REGION_LINEAR_SLOPE_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13355
+pub const CM0_CM_DGAM_RAMA_SLOPE_CNTL_G__CM_DGAM_RAMA_EXP_REGION_LINEAR_SLOPE_G_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13357
+pub const CM0_CM_DGAM_RAMA_SLOPE_CNTL_R__CM_DGAM_RAMA_EXP_REGION_LINEAR_SLOPE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13358
+pub const CM0_CM_DGAM_RAMA_SLOPE_CNTL_R__CM_DGAM_RAMA_EXP_REGION_LINEAR_SLOPE_R_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13360
+pub const CM0_CM_DGAM_RAMA_END_CNTL1_B__CM_DGAM_RAMA_EXP_REGION_END_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13361
+pub const CM0_CM_DGAM_RAMA_END_CNTL1_B__CM_DGAM_RAMA_EXP_REGION_END_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13363
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_B__CM_DGAM_RAMA_EXP_REGION_END_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13365
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_B__CM_DGAM_RAMA_EXP_REGION_END_SLOPE_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13364
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_B__CM_DGAM_RAMA_EXP_REGION_END_BASE_B__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13366
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_B__CM_DGAM_RAMA_EXP_REGION_END_BASE_B_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13368
+pub const CM0_CM_DGAM_RAMA_END_CNTL1_G__CM_DGAM_RAMA_EXP_REGION_END_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13369
+pub const CM0_CM_DGAM_RAMA_END_CNTL1_G__CM_DGAM_RAMA_EXP_REGION_END_G_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13371
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_G__CM_DGAM_RAMA_EXP_REGION_END_SLOPE_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13373
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_G__CM_DGAM_RAMA_EXP_REGION_END_SLOPE_G_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13372
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_G__CM_DGAM_RAMA_EXP_REGION_END_BASE_G__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13374
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_G__CM_DGAM_RAMA_EXP_REGION_END_BASE_G_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13376
+pub const CM0_CM_DGAM_RAMA_END_CNTL1_R__CM_DGAM_RAMA_EXP_REGION_END_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13377
+pub const CM0_CM_DGAM_RAMA_END_CNTL1_R__CM_DGAM_RAMA_EXP_REGION_END_R_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13379
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_R__CM_DGAM_RAMA_EXP_REGION_END_SLOPE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13381
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_R__CM_DGAM_RAMA_EXP_REGION_END_SLOPE_R_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13380
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_R__CM_DGAM_RAMA_EXP_REGION_END_BASE_R__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13382
+pub const CM0_CM_DGAM_RAMA_END_CNTL2_R__CM_DGAM_RAMA_EXP_REGION_END_BASE_R_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13384
+pub const CM0_CM_DGAM_RAMA_REGION_0_1__CM_DGAM_RAMA_EXP_REGION0_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13388
+pub const CM0_CM_DGAM_RAMA_REGION_0_1__CM_DGAM_RAMA_EXP_REGION0_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13385
+pub const CM0_CM_DGAM_RAMA_REGION_0_1__CM_DGAM_RAMA_EXP_REGION0_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13389
+pub const CM0_CM_DGAM_RAMA_REGION_0_1__CM_DGAM_RAMA_EXP_REGION0_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13386
+pub const CM0_CM_DGAM_RAMA_REGION_0_1__CM_DGAM_RAMA_EXP_REGION1_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13390
+pub const CM0_CM_DGAM_RAMA_REGION_0_1__CM_DGAM_RAMA_EXP_REGION1_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13387
+pub const CM0_CM_DGAM_RAMA_REGION_0_1__CM_DGAM_RAMA_EXP_REGION1_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13391
+pub const CM0_CM_DGAM_RAMA_REGION_0_1__CM_DGAM_RAMA_EXP_REGION1_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13447
+pub const CM0_CM_DGAM_RAMA_REGION_14_15__CM_DGAM_RAMA_EXP_REGION14_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13451
+pub const CM0_CM_DGAM_RAMA_REGION_14_15__CM_DGAM_RAMA_EXP_REGION14_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13448
+pub const CM0_CM_DGAM_RAMA_REGION_14_15__CM_DGAM_RAMA_EXP_REGION14_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13452
+pub const CM0_CM_DGAM_RAMA_REGION_14_15__CM_DGAM_RAMA_EXP_REGION14_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13449
+pub const CM0_CM_DGAM_RAMA_REGION_14_15__CM_DGAM_RAMA_EXP_REGION15_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13453
+pub const CM0_CM_DGAM_RAMA_REGION_14_15__CM_DGAM_RAMA_EXP_REGION15_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13450
+pub const CM0_CM_DGAM_RAMA_REGION_14_15__CM_DGAM_RAMA_EXP_REGION15_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13454
+pub const CM0_CM_DGAM_RAMA_REGION_14_15__CM_DGAM_RAMA_EXP_REGION15_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:14040
+pub const CM0_CM_MEM_PWR_CTRL__SHARED_MEM_PWR_DIS__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:14044
+pub const CM0_CM_MEM_PWR_CTRL__SHARED_MEM_PWR_DIS_MASK: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13331
+pub const CM0_CM_DGAM_LUT_WRITE_EN_MASK__CM_DGAM_LUT_WRITE_EN_MASK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13333
+pub const CM0_CM_DGAM_LUT_WRITE_EN_MASK__CM_DGAM_LUT_WRITE_EN_MASK_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13332
+pub const CM0_CM_DGAM_LUT_WRITE_EN_MASK__CM_DGAM_LUT_WRITE_SEL__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13334
+pub const CM0_CM_DGAM_LUT_WRITE_EN_MASK__CM_DGAM_LUT_WRITE_SEL_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13325
+pub const CM0_CM_DGAM_LUT_INDEX__CM_DGAM_LUT_INDEX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13326
+pub const CM0_CM_DGAM_LUT_INDEX__CM_DGAM_LUT_INDEX_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13328
+pub const CM0_CM_DGAM_LUT_DATA__CM_DGAM_LUT_DATA__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13329
+pub const CM0_CM_DGAM_LUT_DATA__CM_DGAM_LUT_DATA_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13322
+pub const CM0_CM_DGAM_CONTROL__CM_DGAM_LUT_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13323
+pub const CM0_CM_DGAM_CONTROL__CM_DGAM_LUT_MODE_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:14053
+pub const CM0_CM_TEST_DEBUG_INDEX__CM_TEST_DEBUG_INDEX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:14055
+pub const CM0_CM_TEST_DEBUG_INDEX__CM_TEST_DEBUG_INDEX_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12809
+pub const CNVC_CUR0_CURSOR0_FP_SCALE_BIAS__CUR0_FP_BIAS__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12811
+pub const CNVC_CUR0_CURSOR0_FP_SCALE_BIAS__CUR0_FP_BIAS_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12808
+pub const CNVC_CUR0_CURSOR0_FP_SCALE_BIAS__CUR0_FP_SCALE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12810
+pub const CNVC_CUR0_CURSOR0_FP_SCALE_BIAS__CUR0_FP_SCALE_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12662
+pub const DPP_TOP0_DPP_CONTROL__DPP_CLOCK_ENABLE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12671
+pub const DPP_TOP0_DPP_CONTROL__DPP_CLOCK_ENABLE_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13994
+pub const CM0_CM_HDR_MULT_COEF__CM_HDR_MULT_COEF__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13995
+pub const CM0_CM_HDR_MULT_COEF__CM_HDR_MULT_COEF_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17469
+pub const CM0_CM_3DLUT_MODE__CM_3DLUT_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17471
+pub const CM0_CM_3DLUT_MODE__CM_3DLUT_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16828
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_B__CM_BLNDGAM_RAMB_EXP_REGION_START_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16830
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_B__CM_BLNDGAM_RAMB_EXP_REGION_START_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16829
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_B__CM_BLNDGAM_RAMB_EXP_REGION_START_SEGMENT_B__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16831
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_B__CM_BLNDGAM_RAMB_EXP_REGION_START_SEGMENT_B_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16833
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_G__CM_BLNDGAM_RAMB_EXP_REGION_START_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16835
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_G__CM_BLNDGAM_RAMB_EXP_REGION_START_G_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16834
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_G__CM_BLNDGAM_RAMB_EXP_REGION_START_SEGMENT_G__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16836
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_G__CM_BLNDGAM_RAMB_EXP_REGION_START_SEGMENT_G_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16838
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_R__CM_BLNDGAM_RAMB_EXP_REGION_START_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16840
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_R__CM_BLNDGAM_RAMB_EXP_REGION_START_R_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16839
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_R__CM_BLNDGAM_RAMB_EXP_REGION_START_SEGMENT_R__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16841
+pub const CM0_CM_BLNDGAM_RAMB_START_CNTL_R__CM_BLNDGAM_RAMB_EXP_REGION_START_SEGMENT_R_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16855
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL2_B__CM_BLNDGAM_RAMB_EXP_REGION_END_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16857
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL2_B__CM_BLNDGAM_RAMB_EXP_REGION_END_SLOPE_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16863
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL2_G__CM_BLNDGAM_RAMB_EXP_REGION_END_SLOPE_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16865
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL2_G__CM_BLNDGAM_RAMB_EXP_REGION_END_SLOPE_G_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16871
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL2_R__CM_BLNDGAM_RAMB_EXP_REGION_END_SLOPE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16873
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL2_R__CM_BLNDGAM_RAMB_EXP_REGION_END_SLOPE_R_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16876
+pub const CM0_CM_BLNDGAM_RAMB_REGION_0_1__CM_BLNDGAM_RAMB_EXP_REGION0_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16880
+pub const CM0_CM_BLNDGAM_RAMB_REGION_0_1__CM_BLNDGAM_RAMB_EXP_REGION0_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16877
+pub const CM0_CM_BLNDGAM_RAMB_REGION_0_1__CM_BLNDGAM_RAMB_EXP_REGION0_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16881
+pub const CM0_CM_BLNDGAM_RAMB_REGION_0_1__CM_BLNDGAM_RAMB_EXP_REGION0_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16878
+pub const CM0_CM_BLNDGAM_RAMB_REGION_0_1__CM_BLNDGAM_RAMB_EXP_REGION1_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16882
+pub const CM0_CM_BLNDGAM_RAMB_REGION_0_1__CM_BLNDGAM_RAMB_EXP_REGION1_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16879
+pub const CM0_CM_BLNDGAM_RAMB_REGION_0_1__CM_BLNDGAM_RAMB_EXP_REGION1_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16883
+pub const CM0_CM_BLNDGAM_RAMB_REGION_0_1__CM_BLNDGAM_RAMB_EXP_REGION1_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16885
+pub const CM0_CM_BLNDGAM_RAMB_REGION_2_3__CM_BLNDGAM_RAMB_EXP_REGION2_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16889
+pub const CM0_CM_BLNDGAM_RAMB_REGION_2_3__CM_BLNDGAM_RAMB_EXP_REGION2_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16886
+pub const CM0_CM_BLNDGAM_RAMB_REGION_2_3__CM_BLNDGAM_RAMB_EXP_REGION2_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16890
+pub const CM0_CM_BLNDGAM_RAMB_REGION_2_3__CM_BLNDGAM_RAMB_EXP_REGION2_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16887
+pub const CM0_CM_BLNDGAM_RAMB_REGION_2_3__CM_BLNDGAM_RAMB_EXP_REGION3_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16891
+pub const CM0_CM_BLNDGAM_RAMB_REGION_2_3__CM_BLNDGAM_RAMB_EXP_REGION3_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16888
+pub const CM0_CM_BLNDGAM_RAMB_REGION_2_3__CM_BLNDGAM_RAMB_EXP_REGION3_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16892
+pub const CM0_CM_BLNDGAM_RAMB_REGION_2_3__CM_BLNDGAM_RAMB_EXP_REGION3_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16894
+pub const CM0_CM_BLNDGAM_RAMB_REGION_4_5__CM_BLNDGAM_RAMB_EXP_REGION4_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16898
+pub const CM0_CM_BLNDGAM_RAMB_REGION_4_5__CM_BLNDGAM_RAMB_EXP_REGION4_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16895
+pub const CM0_CM_BLNDGAM_RAMB_REGION_4_5__CM_BLNDGAM_RAMB_EXP_REGION4_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16899
+pub const CM0_CM_BLNDGAM_RAMB_REGION_4_5__CM_BLNDGAM_RAMB_EXP_REGION4_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16896
+pub const CM0_CM_BLNDGAM_RAMB_REGION_4_5__CM_BLNDGAM_RAMB_EXP_REGION5_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16900
+pub const CM0_CM_BLNDGAM_RAMB_REGION_4_5__CM_BLNDGAM_RAMB_EXP_REGION5_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16897
+pub const CM0_CM_BLNDGAM_RAMB_REGION_4_5__CM_BLNDGAM_RAMB_EXP_REGION5_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16901
+pub const CM0_CM_BLNDGAM_RAMB_REGION_4_5__CM_BLNDGAM_RAMB_EXP_REGION5_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16903
+pub const CM0_CM_BLNDGAM_RAMB_REGION_6_7__CM_BLNDGAM_RAMB_EXP_REGION6_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16907
+pub const CM0_CM_BLNDGAM_RAMB_REGION_6_7__CM_BLNDGAM_RAMB_EXP_REGION6_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16904
+pub const CM0_CM_BLNDGAM_RAMB_REGION_6_7__CM_BLNDGAM_RAMB_EXP_REGION6_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16908
+pub const CM0_CM_BLNDGAM_RAMB_REGION_6_7__CM_BLNDGAM_RAMB_EXP_REGION6_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16905
+pub const CM0_CM_BLNDGAM_RAMB_REGION_6_7__CM_BLNDGAM_RAMB_EXP_REGION7_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16909
+pub const CM0_CM_BLNDGAM_RAMB_REGION_6_7__CM_BLNDGAM_RAMB_EXP_REGION7_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16906
+pub const CM0_CM_BLNDGAM_RAMB_REGION_6_7__CM_BLNDGAM_RAMB_EXP_REGION7_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16910
+pub const CM0_CM_BLNDGAM_RAMB_REGION_6_7__CM_BLNDGAM_RAMB_EXP_REGION7_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16912
+pub const CM0_CM_BLNDGAM_RAMB_REGION_8_9__CM_BLNDGAM_RAMB_EXP_REGION8_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16916
+pub const CM0_CM_BLNDGAM_RAMB_REGION_8_9__CM_BLNDGAM_RAMB_EXP_REGION8_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16913
+pub const CM0_CM_BLNDGAM_RAMB_REGION_8_9__CM_BLNDGAM_RAMB_EXP_REGION8_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16917
+pub const CM0_CM_BLNDGAM_RAMB_REGION_8_9__CM_BLNDGAM_RAMB_EXP_REGION8_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16914
+pub const CM0_CM_BLNDGAM_RAMB_REGION_8_9__CM_BLNDGAM_RAMB_EXP_REGION9_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16918
+pub const CM0_CM_BLNDGAM_RAMB_REGION_8_9__CM_BLNDGAM_RAMB_EXP_REGION9_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16915
+pub const CM0_CM_BLNDGAM_RAMB_REGION_8_9__CM_BLNDGAM_RAMB_EXP_REGION9_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16919
+pub const CM0_CM_BLNDGAM_RAMB_REGION_8_9__CM_BLNDGAM_RAMB_EXP_REGION9_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16921
+pub const CM0_CM_BLNDGAM_RAMB_REGION_10_11__CM_BLNDGAM_RAMB_EXP_REGION10_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16925
+pub const CM0_CM_BLNDGAM_RAMB_REGION_10_11__CM_BLNDGAM_RAMB_EXP_REGION10_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16922
+pub const CM0_CM_BLNDGAM_RAMB_REGION_10_11__CM_BLNDGAM_RAMB_EXP_REGION10_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16926
+pub const CM0_CM_BLNDGAM_RAMB_REGION_10_11__CM_BLNDGAM_RAMB_EXP_REGION10_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16923
+pub const CM0_CM_BLNDGAM_RAMB_REGION_10_11__CM_BLNDGAM_RAMB_EXP_REGION11_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16927
+pub const CM0_CM_BLNDGAM_RAMB_REGION_10_11__CM_BLNDGAM_RAMB_EXP_REGION11_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16924
+pub const CM0_CM_BLNDGAM_RAMB_REGION_10_11__CM_BLNDGAM_RAMB_EXP_REGION11_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16928
+pub const CM0_CM_BLNDGAM_RAMB_REGION_10_11__CM_BLNDGAM_RAMB_EXP_REGION11_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16930
+pub const CM0_CM_BLNDGAM_RAMB_REGION_12_13__CM_BLNDGAM_RAMB_EXP_REGION12_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16934
+pub const CM0_CM_BLNDGAM_RAMB_REGION_12_13__CM_BLNDGAM_RAMB_EXP_REGION12_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16931
+pub const CM0_CM_BLNDGAM_RAMB_REGION_12_13__CM_BLNDGAM_RAMB_EXP_REGION12_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16935
+pub const CM0_CM_BLNDGAM_RAMB_REGION_12_13__CM_BLNDGAM_RAMB_EXP_REGION12_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16932
+pub const CM0_CM_BLNDGAM_RAMB_REGION_12_13__CM_BLNDGAM_RAMB_EXP_REGION13_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16936
+pub const CM0_CM_BLNDGAM_RAMB_REGION_12_13__CM_BLNDGAM_RAMB_EXP_REGION13_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16933
+pub const CM0_CM_BLNDGAM_RAMB_REGION_12_13__CM_BLNDGAM_RAMB_EXP_REGION13_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16937
+pub const CM0_CM_BLNDGAM_RAMB_REGION_12_13__CM_BLNDGAM_RAMB_EXP_REGION13_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16939
+pub const CM0_CM_BLNDGAM_RAMB_REGION_14_15__CM_BLNDGAM_RAMB_EXP_REGION14_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16943
+pub const CM0_CM_BLNDGAM_RAMB_REGION_14_15__CM_BLNDGAM_RAMB_EXP_REGION14_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16940
+pub const CM0_CM_BLNDGAM_RAMB_REGION_14_15__CM_BLNDGAM_RAMB_EXP_REGION14_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16944
+pub const CM0_CM_BLNDGAM_RAMB_REGION_14_15__CM_BLNDGAM_RAMB_EXP_REGION14_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16941
+pub const CM0_CM_BLNDGAM_RAMB_REGION_14_15__CM_BLNDGAM_RAMB_EXP_REGION15_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16945
+pub const CM0_CM_BLNDGAM_RAMB_REGION_14_15__CM_BLNDGAM_RAMB_EXP_REGION15_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16942
+pub const CM0_CM_BLNDGAM_RAMB_REGION_14_15__CM_BLNDGAM_RAMB_EXP_REGION15_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16946
+pub const CM0_CM_BLNDGAM_RAMB_REGION_14_15__CM_BLNDGAM_RAMB_EXP_REGION15_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16948
+pub const CM0_CM_BLNDGAM_RAMB_REGION_16_17__CM_BLNDGAM_RAMB_EXP_REGION16_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16952
+pub const CM0_CM_BLNDGAM_RAMB_REGION_16_17__CM_BLNDGAM_RAMB_EXP_REGION16_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16949
+pub const CM0_CM_BLNDGAM_RAMB_REGION_16_17__CM_BLNDGAM_RAMB_EXP_REGION16_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16953
+pub const CM0_CM_BLNDGAM_RAMB_REGION_16_17__CM_BLNDGAM_RAMB_EXP_REGION16_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16950
+pub const CM0_CM_BLNDGAM_RAMB_REGION_16_17__CM_BLNDGAM_RAMB_EXP_REGION17_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16954
+pub const CM0_CM_BLNDGAM_RAMB_REGION_16_17__CM_BLNDGAM_RAMB_EXP_REGION17_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16951
+pub const CM0_CM_BLNDGAM_RAMB_REGION_16_17__CM_BLNDGAM_RAMB_EXP_REGION17_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16955
+pub const CM0_CM_BLNDGAM_RAMB_REGION_16_17__CM_BLNDGAM_RAMB_EXP_REGION17_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16957
+pub const CM0_CM_BLNDGAM_RAMB_REGION_18_19__CM_BLNDGAM_RAMB_EXP_REGION18_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16961
+pub const CM0_CM_BLNDGAM_RAMB_REGION_18_19__CM_BLNDGAM_RAMB_EXP_REGION18_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16958
+pub const CM0_CM_BLNDGAM_RAMB_REGION_18_19__CM_BLNDGAM_RAMB_EXP_REGION18_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16962
+pub const CM0_CM_BLNDGAM_RAMB_REGION_18_19__CM_BLNDGAM_RAMB_EXP_REGION18_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16959
+pub const CM0_CM_BLNDGAM_RAMB_REGION_18_19__CM_BLNDGAM_RAMB_EXP_REGION19_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16963
+pub const CM0_CM_BLNDGAM_RAMB_REGION_18_19__CM_BLNDGAM_RAMB_EXP_REGION19_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16960
+pub const CM0_CM_BLNDGAM_RAMB_REGION_18_19__CM_BLNDGAM_RAMB_EXP_REGION19_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16964
+pub const CM0_CM_BLNDGAM_RAMB_REGION_18_19__CM_BLNDGAM_RAMB_EXP_REGION19_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16966
+pub const CM0_CM_BLNDGAM_RAMB_REGION_20_21__CM_BLNDGAM_RAMB_EXP_REGION20_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16970
+pub const CM0_CM_BLNDGAM_RAMB_REGION_20_21__CM_BLNDGAM_RAMB_EXP_REGION20_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16967
+pub const CM0_CM_BLNDGAM_RAMB_REGION_20_21__CM_BLNDGAM_RAMB_EXP_REGION20_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16971
+pub const CM0_CM_BLNDGAM_RAMB_REGION_20_21__CM_BLNDGAM_RAMB_EXP_REGION20_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16968
+pub const CM0_CM_BLNDGAM_RAMB_REGION_20_21__CM_BLNDGAM_RAMB_EXP_REGION21_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16972
+pub const CM0_CM_BLNDGAM_RAMB_REGION_20_21__CM_BLNDGAM_RAMB_EXP_REGION21_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16969
+pub const CM0_CM_BLNDGAM_RAMB_REGION_20_21__CM_BLNDGAM_RAMB_EXP_REGION21_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16973
+pub const CM0_CM_BLNDGAM_RAMB_REGION_20_21__CM_BLNDGAM_RAMB_EXP_REGION21_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16975
+pub const CM0_CM_BLNDGAM_RAMB_REGION_22_23__CM_BLNDGAM_RAMB_EXP_REGION22_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16979
+pub const CM0_CM_BLNDGAM_RAMB_REGION_22_23__CM_BLNDGAM_RAMB_EXP_REGION22_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16976
+pub const CM0_CM_BLNDGAM_RAMB_REGION_22_23__CM_BLNDGAM_RAMB_EXP_REGION22_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16980
+pub const CM0_CM_BLNDGAM_RAMB_REGION_22_23__CM_BLNDGAM_RAMB_EXP_REGION22_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16977
+pub const CM0_CM_BLNDGAM_RAMB_REGION_22_23__CM_BLNDGAM_RAMB_EXP_REGION23_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16981
+pub const CM0_CM_BLNDGAM_RAMB_REGION_22_23__CM_BLNDGAM_RAMB_EXP_REGION23_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16978
+pub const CM0_CM_BLNDGAM_RAMB_REGION_22_23__CM_BLNDGAM_RAMB_EXP_REGION23_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16982
+pub const CM0_CM_BLNDGAM_RAMB_REGION_22_23__CM_BLNDGAM_RAMB_EXP_REGION23_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16984
+pub const CM0_CM_BLNDGAM_RAMB_REGION_24_25__CM_BLNDGAM_RAMB_EXP_REGION24_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16988
+pub const CM0_CM_BLNDGAM_RAMB_REGION_24_25__CM_BLNDGAM_RAMB_EXP_REGION24_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16985
+pub const CM0_CM_BLNDGAM_RAMB_REGION_24_25__CM_BLNDGAM_RAMB_EXP_REGION24_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16989
+pub const CM0_CM_BLNDGAM_RAMB_REGION_24_25__CM_BLNDGAM_RAMB_EXP_REGION24_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16986
+pub const CM0_CM_BLNDGAM_RAMB_REGION_24_25__CM_BLNDGAM_RAMB_EXP_REGION25_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16990
+pub const CM0_CM_BLNDGAM_RAMB_REGION_24_25__CM_BLNDGAM_RAMB_EXP_REGION25_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16987
+pub const CM0_CM_BLNDGAM_RAMB_REGION_24_25__CM_BLNDGAM_RAMB_EXP_REGION25_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16991
+pub const CM0_CM_BLNDGAM_RAMB_REGION_24_25__CM_BLNDGAM_RAMB_EXP_REGION25_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16993
+pub const CM0_CM_BLNDGAM_RAMB_REGION_26_27__CM_BLNDGAM_RAMB_EXP_REGION26_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16997
+pub const CM0_CM_BLNDGAM_RAMB_REGION_26_27__CM_BLNDGAM_RAMB_EXP_REGION26_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16994
+pub const CM0_CM_BLNDGAM_RAMB_REGION_26_27__CM_BLNDGAM_RAMB_EXP_REGION26_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16998
+pub const CM0_CM_BLNDGAM_RAMB_REGION_26_27__CM_BLNDGAM_RAMB_EXP_REGION26_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16995
+pub const CM0_CM_BLNDGAM_RAMB_REGION_26_27__CM_BLNDGAM_RAMB_EXP_REGION27_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16999
+pub const CM0_CM_BLNDGAM_RAMB_REGION_26_27__CM_BLNDGAM_RAMB_EXP_REGION27_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16996
+pub const CM0_CM_BLNDGAM_RAMB_REGION_26_27__CM_BLNDGAM_RAMB_EXP_REGION27_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17000
+pub const CM0_CM_BLNDGAM_RAMB_REGION_26_27__CM_BLNDGAM_RAMB_EXP_REGION27_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17002
+pub const CM0_CM_BLNDGAM_RAMB_REGION_28_29__CM_BLNDGAM_RAMB_EXP_REGION28_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17006
+pub const CM0_CM_BLNDGAM_RAMB_REGION_28_29__CM_BLNDGAM_RAMB_EXP_REGION28_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17003
+pub const CM0_CM_BLNDGAM_RAMB_REGION_28_29__CM_BLNDGAM_RAMB_EXP_REGION28_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17007
+pub const CM0_CM_BLNDGAM_RAMB_REGION_28_29__CM_BLNDGAM_RAMB_EXP_REGION28_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17004
+pub const CM0_CM_BLNDGAM_RAMB_REGION_28_29__CM_BLNDGAM_RAMB_EXP_REGION29_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17008
+pub const CM0_CM_BLNDGAM_RAMB_REGION_28_29__CM_BLNDGAM_RAMB_EXP_REGION29_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17005
+pub const CM0_CM_BLNDGAM_RAMB_REGION_28_29__CM_BLNDGAM_RAMB_EXP_REGION29_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17009
+pub const CM0_CM_BLNDGAM_RAMB_REGION_28_29__CM_BLNDGAM_RAMB_EXP_REGION29_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17011
+pub const CM0_CM_BLNDGAM_RAMB_REGION_30_31__CM_BLNDGAM_RAMB_EXP_REGION30_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17015
+pub const CM0_CM_BLNDGAM_RAMB_REGION_30_31__CM_BLNDGAM_RAMB_EXP_REGION30_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17012
+pub const CM0_CM_BLNDGAM_RAMB_REGION_30_31__CM_BLNDGAM_RAMB_EXP_REGION30_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17016
+pub const CM0_CM_BLNDGAM_RAMB_REGION_30_31__CM_BLNDGAM_RAMB_EXP_REGION30_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17013
+pub const CM0_CM_BLNDGAM_RAMB_REGION_30_31__CM_BLNDGAM_RAMB_EXP_REGION31_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17017
+pub const CM0_CM_BLNDGAM_RAMB_REGION_30_31__CM_BLNDGAM_RAMB_EXP_REGION31_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17014
+pub const CM0_CM_BLNDGAM_RAMB_REGION_30_31__CM_BLNDGAM_RAMB_EXP_REGION31_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17018
+pub const CM0_CM_BLNDGAM_RAMB_REGION_30_31__CM_BLNDGAM_RAMB_EXP_REGION31_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17020
+pub const CM0_CM_BLNDGAM_RAMB_REGION_32_33__CM_BLNDGAM_RAMB_EXP_REGION32_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17024
+pub const CM0_CM_BLNDGAM_RAMB_REGION_32_33__CM_BLNDGAM_RAMB_EXP_REGION32_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17021
+pub const CM0_CM_BLNDGAM_RAMB_REGION_32_33__CM_BLNDGAM_RAMB_EXP_REGION32_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17025
+pub const CM0_CM_BLNDGAM_RAMB_REGION_32_33__CM_BLNDGAM_RAMB_EXP_REGION32_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17022
+pub const CM0_CM_BLNDGAM_RAMB_REGION_32_33__CM_BLNDGAM_RAMB_EXP_REGION33_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17026
+pub const CM0_CM_BLNDGAM_RAMB_REGION_32_33__CM_BLNDGAM_RAMB_EXP_REGION33_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17023
+pub const CM0_CM_BLNDGAM_RAMB_REGION_32_33__CM_BLNDGAM_RAMB_EXP_REGION33_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17027
+pub const CM0_CM_BLNDGAM_RAMB_REGION_32_33__CM_BLNDGAM_RAMB_EXP_REGION33_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16627
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_B__CM_BLNDGAM_RAMA_EXP_REGION_START_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16629
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_B__CM_BLNDGAM_RAMA_EXP_REGION_START_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16628
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_B__CM_BLNDGAM_RAMA_EXP_REGION_START_SEGMENT_B__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16630
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_B__CM_BLNDGAM_RAMA_EXP_REGION_START_SEGMENT_B_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16632
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_G__CM_BLNDGAM_RAMA_EXP_REGION_START_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16634
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_G__CM_BLNDGAM_RAMA_EXP_REGION_START_G_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16633
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_G__CM_BLNDGAM_RAMA_EXP_REGION_START_SEGMENT_G__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16635
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_G__CM_BLNDGAM_RAMA_EXP_REGION_START_SEGMENT_G_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16637
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_R__CM_BLNDGAM_RAMA_EXP_REGION_START_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16639
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_R__CM_BLNDGAM_RAMA_EXP_REGION_START_R_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16638
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_R__CM_BLNDGAM_RAMA_EXP_REGION_START_SEGMENT_R__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16640
+pub const CM0_CM_BLNDGAM_RAMA_START_CNTL_R__CM_BLNDGAM_RAMA_EXP_REGION_START_SEGMENT_R_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16654
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_B__CM_BLNDGAM_RAMA_EXP_REGION_END_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16656
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_B__CM_BLNDGAM_RAMA_EXP_REGION_END_SLOPE_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16662
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_G__CM_BLNDGAM_RAMA_EXP_REGION_END_SLOPE_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16664
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_G__CM_BLNDGAM_RAMA_EXP_REGION_END_SLOPE_G_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16670
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_R__CM_BLNDGAM_RAMA_EXP_REGION_END_SLOPE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16672
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_R__CM_BLNDGAM_RAMA_EXP_REGION_END_SLOPE_R_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16675
+pub const CM0_CM_BLNDGAM_RAMA_REGION_0_1__CM_BLNDGAM_RAMA_EXP_REGION0_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16679
+pub const CM0_CM_BLNDGAM_RAMA_REGION_0_1__CM_BLNDGAM_RAMA_EXP_REGION0_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16676
+pub const CM0_CM_BLNDGAM_RAMA_REGION_0_1__CM_BLNDGAM_RAMA_EXP_REGION0_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16680
+pub const CM0_CM_BLNDGAM_RAMA_REGION_0_1__CM_BLNDGAM_RAMA_EXP_REGION0_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16677
+pub const CM0_CM_BLNDGAM_RAMA_REGION_0_1__CM_BLNDGAM_RAMA_EXP_REGION1_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16681
+pub const CM0_CM_BLNDGAM_RAMA_REGION_0_1__CM_BLNDGAM_RAMA_EXP_REGION1_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16678
+pub const CM0_CM_BLNDGAM_RAMA_REGION_0_1__CM_BLNDGAM_RAMA_EXP_REGION1_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16682
+pub const CM0_CM_BLNDGAM_RAMA_REGION_0_1__CM_BLNDGAM_RAMA_EXP_REGION1_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16684
+pub const CM0_CM_BLNDGAM_RAMA_REGION_2_3__CM_BLNDGAM_RAMA_EXP_REGION2_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16688
+pub const CM0_CM_BLNDGAM_RAMA_REGION_2_3__CM_BLNDGAM_RAMA_EXP_REGION2_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16685
+pub const CM0_CM_BLNDGAM_RAMA_REGION_2_3__CM_BLNDGAM_RAMA_EXP_REGION2_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16689
+pub const CM0_CM_BLNDGAM_RAMA_REGION_2_3__CM_BLNDGAM_RAMA_EXP_REGION2_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16686
+pub const CM0_CM_BLNDGAM_RAMA_REGION_2_3__CM_BLNDGAM_RAMA_EXP_REGION3_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16690
+pub const CM0_CM_BLNDGAM_RAMA_REGION_2_3__CM_BLNDGAM_RAMA_EXP_REGION3_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16687
+pub const CM0_CM_BLNDGAM_RAMA_REGION_2_3__CM_BLNDGAM_RAMA_EXP_REGION3_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16691
+pub const CM0_CM_BLNDGAM_RAMA_REGION_2_3__CM_BLNDGAM_RAMA_EXP_REGION3_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16693
+pub const CM0_CM_BLNDGAM_RAMA_REGION_4_5__CM_BLNDGAM_RAMA_EXP_REGION4_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16697
+pub const CM0_CM_BLNDGAM_RAMA_REGION_4_5__CM_BLNDGAM_RAMA_EXP_REGION4_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16694
+pub const CM0_CM_BLNDGAM_RAMA_REGION_4_5__CM_BLNDGAM_RAMA_EXP_REGION4_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16698
+pub const CM0_CM_BLNDGAM_RAMA_REGION_4_5__CM_BLNDGAM_RAMA_EXP_REGION4_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16695
+pub const CM0_CM_BLNDGAM_RAMA_REGION_4_5__CM_BLNDGAM_RAMA_EXP_REGION5_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16699
+pub const CM0_CM_BLNDGAM_RAMA_REGION_4_5__CM_BLNDGAM_RAMA_EXP_REGION5_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16696
+pub const CM0_CM_BLNDGAM_RAMA_REGION_4_5__CM_BLNDGAM_RAMA_EXP_REGION5_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16700
+pub const CM0_CM_BLNDGAM_RAMA_REGION_4_5__CM_BLNDGAM_RAMA_EXP_REGION5_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16702
+pub const CM0_CM_BLNDGAM_RAMA_REGION_6_7__CM_BLNDGAM_RAMA_EXP_REGION6_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16706
+pub const CM0_CM_BLNDGAM_RAMA_REGION_6_7__CM_BLNDGAM_RAMA_EXP_REGION6_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16703
+pub const CM0_CM_BLNDGAM_RAMA_REGION_6_7__CM_BLNDGAM_RAMA_EXP_REGION6_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16707
+pub const CM0_CM_BLNDGAM_RAMA_REGION_6_7__CM_BLNDGAM_RAMA_EXP_REGION6_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16704
+pub const CM0_CM_BLNDGAM_RAMA_REGION_6_7__CM_BLNDGAM_RAMA_EXP_REGION7_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16708
+pub const CM0_CM_BLNDGAM_RAMA_REGION_6_7__CM_BLNDGAM_RAMA_EXP_REGION7_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16705
+pub const CM0_CM_BLNDGAM_RAMA_REGION_6_7__CM_BLNDGAM_RAMA_EXP_REGION7_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16709
+pub const CM0_CM_BLNDGAM_RAMA_REGION_6_7__CM_BLNDGAM_RAMA_EXP_REGION7_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16711
+pub const CM0_CM_BLNDGAM_RAMA_REGION_8_9__CM_BLNDGAM_RAMA_EXP_REGION8_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16715
+pub const CM0_CM_BLNDGAM_RAMA_REGION_8_9__CM_BLNDGAM_RAMA_EXP_REGION8_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16712
+pub const CM0_CM_BLNDGAM_RAMA_REGION_8_9__CM_BLNDGAM_RAMA_EXP_REGION8_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16716
+pub const CM0_CM_BLNDGAM_RAMA_REGION_8_9__CM_BLNDGAM_RAMA_EXP_REGION8_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16713
+pub const CM0_CM_BLNDGAM_RAMA_REGION_8_9__CM_BLNDGAM_RAMA_EXP_REGION9_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16717
+pub const CM0_CM_BLNDGAM_RAMA_REGION_8_9__CM_BLNDGAM_RAMA_EXP_REGION9_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16714
+pub const CM0_CM_BLNDGAM_RAMA_REGION_8_9__CM_BLNDGAM_RAMA_EXP_REGION9_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16718
+pub const CM0_CM_BLNDGAM_RAMA_REGION_8_9__CM_BLNDGAM_RAMA_EXP_REGION9_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16720
+pub const CM0_CM_BLNDGAM_RAMA_REGION_10_11__CM_BLNDGAM_RAMA_EXP_REGION10_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16724
+pub const CM0_CM_BLNDGAM_RAMA_REGION_10_11__CM_BLNDGAM_RAMA_EXP_REGION10_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16721
+pub const CM0_CM_BLNDGAM_RAMA_REGION_10_11__CM_BLNDGAM_RAMA_EXP_REGION10_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16725
+pub const CM0_CM_BLNDGAM_RAMA_REGION_10_11__CM_BLNDGAM_RAMA_EXP_REGION10_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16722
+pub const CM0_CM_BLNDGAM_RAMA_REGION_10_11__CM_BLNDGAM_RAMA_EXP_REGION11_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16726
+pub const CM0_CM_BLNDGAM_RAMA_REGION_10_11__CM_BLNDGAM_RAMA_EXP_REGION11_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16723
+pub const CM0_CM_BLNDGAM_RAMA_REGION_10_11__CM_BLNDGAM_RAMA_EXP_REGION11_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16727
+pub const CM0_CM_BLNDGAM_RAMA_REGION_10_11__CM_BLNDGAM_RAMA_EXP_REGION11_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16729
+pub const CM0_CM_BLNDGAM_RAMA_REGION_12_13__CM_BLNDGAM_RAMA_EXP_REGION12_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16733
+pub const CM0_CM_BLNDGAM_RAMA_REGION_12_13__CM_BLNDGAM_RAMA_EXP_REGION12_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16730
+pub const CM0_CM_BLNDGAM_RAMA_REGION_12_13__CM_BLNDGAM_RAMA_EXP_REGION12_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16734
+pub const CM0_CM_BLNDGAM_RAMA_REGION_12_13__CM_BLNDGAM_RAMA_EXP_REGION12_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16731
+pub const CM0_CM_BLNDGAM_RAMA_REGION_12_13__CM_BLNDGAM_RAMA_EXP_REGION13_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16735
+pub const CM0_CM_BLNDGAM_RAMA_REGION_12_13__CM_BLNDGAM_RAMA_EXP_REGION13_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16732
+pub const CM0_CM_BLNDGAM_RAMA_REGION_12_13__CM_BLNDGAM_RAMA_EXP_REGION13_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16736
+pub const CM0_CM_BLNDGAM_RAMA_REGION_12_13__CM_BLNDGAM_RAMA_EXP_REGION13_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16738
+pub const CM0_CM_BLNDGAM_RAMA_REGION_14_15__CM_BLNDGAM_RAMA_EXP_REGION14_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16742
+pub const CM0_CM_BLNDGAM_RAMA_REGION_14_15__CM_BLNDGAM_RAMA_EXP_REGION14_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16739
+pub const CM0_CM_BLNDGAM_RAMA_REGION_14_15__CM_BLNDGAM_RAMA_EXP_REGION14_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16743
+pub const CM0_CM_BLNDGAM_RAMA_REGION_14_15__CM_BLNDGAM_RAMA_EXP_REGION14_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16740
+pub const CM0_CM_BLNDGAM_RAMA_REGION_14_15__CM_BLNDGAM_RAMA_EXP_REGION15_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16744
+pub const CM0_CM_BLNDGAM_RAMA_REGION_14_15__CM_BLNDGAM_RAMA_EXP_REGION15_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16741
+pub const CM0_CM_BLNDGAM_RAMA_REGION_14_15__CM_BLNDGAM_RAMA_EXP_REGION15_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16745
+pub const CM0_CM_BLNDGAM_RAMA_REGION_14_15__CM_BLNDGAM_RAMA_EXP_REGION15_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16747
+pub const CM0_CM_BLNDGAM_RAMA_REGION_16_17__CM_BLNDGAM_RAMA_EXP_REGION16_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16751
+pub const CM0_CM_BLNDGAM_RAMA_REGION_16_17__CM_BLNDGAM_RAMA_EXP_REGION16_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16748
+pub const CM0_CM_BLNDGAM_RAMA_REGION_16_17__CM_BLNDGAM_RAMA_EXP_REGION16_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16752
+pub const CM0_CM_BLNDGAM_RAMA_REGION_16_17__CM_BLNDGAM_RAMA_EXP_REGION16_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16749
+pub const CM0_CM_BLNDGAM_RAMA_REGION_16_17__CM_BLNDGAM_RAMA_EXP_REGION17_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16753
+pub const CM0_CM_BLNDGAM_RAMA_REGION_16_17__CM_BLNDGAM_RAMA_EXP_REGION17_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16750
+pub const CM0_CM_BLNDGAM_RAMA_REGION_16_17__CM_BLNDGAM_RAMA_EXP_REGION17_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16754
+pub const CM0_CM_BLNDGAM_RAMA_REGION_16_17__CM_BLNDGAM_RAMA_EXP_REGION17_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16756
+pub const CM0_CM_BLNDGAM_RAMA_REGION_18_19__CM_BLNDGAM_RAMA_EXP_REGION18_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16760
+pub const CM0_CM_BLNDGAM_RAMA_REGION_18_19__CM_BLNDGAM_RAMA_EXP_REGION18_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16757
+pub const CM0_CM_BLNDGAM_RAMA_REGION_18_19__CM_BLNDGAM_RAMA_EXP_REGION18_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16761
+pub const CM0_CM_BLNDGAM_RAMA_REGION_18_19__CM_BLNDGAM_RAMA_EXP_REGION18_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16758
+pub const CM0_CM_BLNDGAM_RAMA_REGION_18_19__CM_BLNDGAM_RAMA_EXP_REGION19_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16762
+pub const CM0_CM_BLNDGAM_RAMA_REGION_18_19__CM_BLNDGAM_RAMA_EXP_REGION19_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16759
+pub const CM0_CM_BLNDGAM_RAMA_REGION_18_19__CM_BLNDGAM_RAMA_EXP_REGION19_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16763
+pub const CM0_CM_BLNDGAM_RAMA_REGION_18_19__CM_BLNDGAM_RAMA_EXP_REGION19_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16765
+pub const CM0_CM_BLNDGAM_RAMA_REGION_20_21__CM_BLNDGAM_RAMA_EXP_REGION20_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16769
+pub const CM0_CM_BLNDGAM_RAMA_REGION_20_21__CM_BLNDGAM_RAMA_EXP_REGION20_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16766
+pub const CM0_CM_BLNDGAM_RAMA_REGION_20_21__CM_BLNDGAM_RAMA_EXP_REGION20_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16770
+pub const CM0_CM_BLNDGAM_RAMA_REGION_20_21__CM_BLNDGAM_RAMA_EXP_REGION20_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16767
+pub const CM0_CM_BLNDGAM_RAMA_REGION_20_21__CM_BLNDGAM_RAMA_EXP_REGION21_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16771
+pub const CM0_CM_BLNDGAM_RAMA_REGION_20_21__CM_BLNDGAM_RAMA_EXP_REGION21_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16768
+pub const CM0_CM_BLNDGAM_RAMA_REGION_20_21__CM_BLNDGAM_RAMA_EXP_REGION21_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16772
+pub const CM0_CM_BLNDGAM_RAMA_REGION_20_21__CM_BLNDGAM_RAMA_EXP_REGION21_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16774
+pub const CM0_CM_BLNDGAM_RAMA_REGION_22_23__CM_BLNDGAM_RAMA_EXP_REGION22_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16778
+pub const CM0_CM_BLNDGAM_RAMA_REGION_22_23__CM_BLNDGAM_RAMA_EXP_REGION22_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16775
+pub const CM0_CM_BLNDGAM_RAMA_REGION_22_23__CM_BLNDGAM_RAMA_EXP_REGION22_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16779
+pub const CM0_CM_BLNDGAM_RAMA_REGION_22_23__CM_BLNDGAM_RAMA_EXP_REGION22_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16776
+pub const CM0_CM_BLNDGAM_RAMA_REGION_22_23__CM_BLNDGAM_RAMA_EXP_REGION23_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16780
+pub const CM0_CM_BLNDGAM_RAMA_REGION_22_23__CM_BLNDGAM_RAMA_EXP_REGION23_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16777
+pub const CM0_CM_BLNDGAM_RAMA_REGION_22_23__CM_BLNDGAM_RAMA_EXP_REGION23_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16781
+pub const CM0_CM_BLNDGAM_RAMA_REGION_22_23__CM_BLNDGAM_RAMA_EXP_REGION23_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16783
+pub const CM0_CM_BLNDGAM_RAMA_REGION_24_25__CM_BLNDGAM_RAMA_EXP_REGION24_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16787
+pub const CM0_CM_BLNDGAM_RAMA_REGION_24_25__CM_BLNDGAM_RAMA_EXP_REGION24_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16784
+pub const CM0_CM_BLNDGAM_RAMA_REGION_24_25__CM_BLNDGAM_RAMA_EXP_REGION24_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16788
+pub const CM0_CM_BLNDGAM_RAMA_REGION_24_25__CM_BLNDGAM_RAMA_EXP_REGION24_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16785
+pub const CM0_CM_BLNDGAM_RAMA_REGION_24_25__CM_BLNDGAM_RAMA_EXP_REGION25_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16789
+pub const CM0_CM_BLNDGAM_RAMA_REGION_24_25__CM_BLNDGAM_RAMA_EXP_REGION25_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16786
+pub const CM0_CM_BLNDGAM_RAMA_REGION_24_25__CM_BLNDGAM_RAMA_EXP_REGION25_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16790
+pub const CM0_CM_BLNDGAM_RAMA_REGION_24_25__CM_BLNDGAM_RAMA_EXP_REGION25_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16792
+pub const CM0_CM_BLNDGAM_RAMA_REGION_26_27__CM_BLNDGAM_RAMA_EXP_REGION26_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16796
+pub const CM0_CM_BLNDGAM_RAMA_REGION_26_27__CM_BLNDGAM_RAMA_EXP_REGION26_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16793
+pub const CM0_CM_BLNDGAM_RAMA_REGION_26_27__CM_BLNDGAM_RAMA_EXP_REGION26_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16797
+pub const CM0_CM_BLNDGAM_RAMA_REGION_26_27__CM_BLNDGAM_RAMA_EXP_REGION26_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16794
+pub const CM0_CM_BLNDGAM_RAMA_REGION_26_27__CM_BLNDGAM_RAMA_EXP_REGION27_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16798
+pub const CM0_CM_BLNDGAM_RAMA_REGION_26_27__CM_BLNDGAM_RAMA_EXP_REGION27_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16795
+pub const CM0_CM_BLNDGAM_RAMA_REGION_26_27__CM_BLNDGAM_RAMA_EXP_REGION27_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16799
+pub const CM0_CM_BLNDGAM_RAMA_REGION_26_27__CM_BLNDGAM_RAMA_EXP_REGION27_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16801
+pub const CM0_CM_BLNDGAM_RAMA_REGION_28_29__CM_BLNDGAM_RAMA_EXP_REGION28_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16805
+pub const CM0_CM_BLNDGAM_RAMA_REGION_28_29__CM_BLNDGAM_RAMA_EXP_REGION28_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16802
+pub const CM0_CM_BLNDGAM_RAMA_REGION_28_29__CM_BLNDGAM_RAMA_EXP_REGION28_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16806
+pub const CM0_CM_BLNDGAM_RAMA_REGION_28_29__CM_BLNDGAM_RAMA_EXP_REGION28_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16803
+pub const CM0_CM_BLNDGAM_RAMA_REGION_28_29__CM_BLNDGAM_RAMA_EXP_REGION29_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16807
+pub const CM0_CM_BLNDGAM_RAMA_REGION_28_29__CM_BLNDGAM_RAMA_EXP_REGION29_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16804
+pub const CM0_CM_BLNDGAM_RAMA_REGION_28_29__CM_BLNDGAM_RAMA_EXP_REGION29_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16808
+pub const CM0_CM_BLNDGAM_RAMA_REGION_28_29__CM_BLNDGAM_RAMA_EXP_REGION29_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16810
+pub const CM0_CM_BLNDGAM_RAMA_REGION_30_31__CM_BLNDGAM_RAMA_EXP_REGION30_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16814
+pub const CM0_CM_BLNDGAM_RAMA_REGION_30_31__CM_BLNDGAM_RAMA_EXP_REGION30_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16811
+pub const CM0_CM_BLNDGAM_RAMA_REGION_30_31__CM_BLNDGAM_RAMA_EXP_REGION30_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16815
+pub const CM0_CM_BLNDGAM_RAMA_REGION_30_31__CM_BLNDGAM_RAMA_EXP_REGION30_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16812
+pub const CM0_CM_BLNDGAM_RAMA_REGION_30_31__CM_BLNDGAM_RAMA_EXP_REGION31_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16816
+pub const CM0_CM_BLNDGAM_RAMA_REGION_30_31__CM_BLNDGAM_RAMA_EXP_REGION31_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16813
+pub const CM0_CM_BLNDGAM_RAMA_REGION_30_31__CM_BLNDGAM_RAMA_EXP_REGION31_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16817
+pub const CM0_CM_BLNDGAM_RAMA_REGION_30_31__CM_BLNDGAM_RAMA_EXP_REGION31_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16819
+pub const CM0_CM_BLNDGAM_RAMA_REGION_32_33__CM_BLNDGAM_RAMA_EXP_REGION32_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16823
+pub const CM0_CM_BLNDGAM_RAMA_REGION_32_33__CM_BLNDGAM_RAMA_EXP_REGION32_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16820
+pub const CM0_CM_BLNDGAM_RAMA_REGION_32_33__CM_BLNDGAM_RAMA_EXP_REGION32_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16824
+pub const CM0_CM_BLNDGAM_RAMA_REGION_32_33__CM_BLNDGAM_RAMA_EXP_REGION32_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16821
+pub const CM0_CM_BLNDGAM_RAMA_REGION_32_33__CM_BLNDGAM_RAMA_EXP_REGION33_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16825
+pub const CM0_CM_BLNDGAM_RAMA_REGION_32_33__CM_BLNDGAM_RAMA_EXP_REGION33_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16822
+pub const CM0_CM_BLNDGAM_RAMA_REGION_32_33__CM_BLNDGAM_RAMA_EXP_REGION33_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16826
+pub const CM0_CM_BLNDGAM_RAMA_REGION_32_33__CM_BLNDGAM_RAMA_EXP_REGION33_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16614
+pub const CM0_CM_BLNDGAM_LUT_INDEX__CM_BLNDGAM_LUT_INDEX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16615
+pub const CM0_CM_BLNDGAM_LUT_INDEX__CM_BLNDGAM_LUT_INDEX_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16617
+pub const CM0_CM_BLNDGAM_LUT_DATA__CM_BLNDGAM_LUT_DATA__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16618
+pub const CM0_CM_BLNDGAM_LUT_DATA__CM_BLNDGAM_LUT_DATA_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17034
+pub const CM0_CM_MEM_PWR_CTRL__BLNDGAM_MEM_PWR_FORCE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17038
+pub const CM0_CM_MEM_PWR_CTRL__BLNDGAM_MEM_PWR_FORCE_MASK: u32 = 0x30;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17470
+pub const CM0_CM_3DLUT_MODE__CM_3DLUT_SIZE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17472
+pub const CM0_CM_3DLUT_MODE__CM_3DLUT_SIZE_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17474
+pub const CM0_CM_3DLUT_INDEX__CM_3DLUT_INDEX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17475
+pub const CM0_CM_3DLUT_INDEX__CM_3DLUT_INDEX_MASK: u32 = 0x7ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17477
+pub const CM0_CM_3DLUT_DATA__CM_3DLUT_DATA0__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17479
+pub const CM0_CM_3DLUT_DATA__CM_3DLUT_DATA0_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17478
+pub const CM0_CM_3DLUT_DATA__CM_3DLUT_DATA1__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17480
+pub const CM0_CM_3DLUT_DATA__CM_3DLUT_DATA1_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17482
+pub const CM0_CM_3DLUT_DATA_30BIT__CM_3DLUT_DATA_30BIT__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17483
+pub const CM0_CM_3DLUT_DATA_30BIT__CM_3DLUT_DATA_30BIT_MASK: u32 = 0xfffffffc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17485
+pub const CM0_CM_3DLUT_READ_WRITE_CONTROL__CM_3DLUT_WRITE_EN_MASK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17490
+pub const CM0_CM_3DLUT_READ_WRITE_CONTROL__CM_3DLUT_WRITE_EN_MASK_MASK: u32 = 0xf;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17486
+pub const CM0_CM_3DLUT_READ_WRITE_CONTROL__CM_3DLUT_RAM_SEL__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17491
+pub const CM0_CM_3DLUT_READ_WRITE_CONTROL__CM_3DLUT_RAM_SEL_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17487
+pub const CM0_CM_3DLUT_READ_WRITE_CONTROL__CM_3DLUT_30BIT_EN__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17492
+pub const CM0_CM_3DLUT_READ_WRITE_CONTROL__CM_3DLUT_30BIT_EN_MASK: u32 = 0x100;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17489
+pub const CM0_CM_3DLUT_READ_WRITE_CONTROL__CM_3DLUT_READ_SEL__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17494
+pub const CM0_CM_3DLUT_READ_WRITE_CONTROL__CM_3DLUT_READ_SEL_MASK: u32 = 0x30000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17056
+pub const CM0_CM_SHAPER_CONTROL__CM_SHAPER_LUT_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17057
+pub const CM0_CM_SHAPER_CONTROL__CM_SHAPER_LUT_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17272
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_B__CM_SHAPER_RAMB_EXP_REGION_START_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17274
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_B__CM_SHAPER_RAMB_EXP_REGION_START_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17273
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_B__CM_SHAPER_RAMB_EXP_REGION_START_SEGMENT_B__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17275
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_B__CM_SHAPER_RAMB_EXP_REGION_START_SEGMENT_B_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17277
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_G__CM_SHAPER_RAMB_EXP_REGION_START_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17279
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_G__CM_SHAPER_RAMB_EXP_REGION_START_G_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17278
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_G__CM_SHAPER_RAMB_EXP_REGION_START_SEGMENT_G__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17280
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_G__CM_SHAPER_RAMB_EXP_REGION_START_SEGMENT_G_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17282
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_R__CM_SHAPER_RAMB_EXP_REGION_START_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17284
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_R__CM_SHAPER_RAMB_EXP_REGION_START_R_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17283
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_R__CM_SHAPER_RAMB_EXP_REGION_START_SEGMENT_R__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17285
+pub const CM0_CM_SHAPER_RAMB_START_CNTL_R__CM_SHAPER_RAMB_EXP_REGION_START_SEGMENT_R_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17287
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_B__CM_SHAPER_RAMB_EXP_REGION_END_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17289
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_B__CM_SHAPER_RAMB_EXP_REGION_END_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17288
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_B__CM_SHAPER_RAMB_EXP_REGION_END_BASE_B__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17290
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_B__CM_SHAPER_RAMB_EXP_REGION_END_BASE_B_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17292
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_G__CM_SHAPER_RAMB_EXP_REGION_END_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17294
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_G__CM_SHAPER_RAMB_EXP_REGION_END_G_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17293
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_G__CM_SHAPER_RAMB_EXP_REGION_END_BASE_G__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17295
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_G__CM_SHAPER_RAMB_EXP_REGION_END_BASE_G_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17297
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_R__CM_SHAPER_RAMB_EXP_REGION_END_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17299
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_R__CM_SHAPER_RAMB_EXP_REGION_END_R_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17298
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_R__CM_SHAPER_RAMB_EXP_REGION_END_BASE_R__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17300
+pub const CM0_CM_SHAPER_RAMB_END_CNTL_R__CM_SHAPER_RAMB_EXP_REGION_END_BASE_R_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17302
+pub const CM0_CM_SHAPER_RAMB_REGION_0_1__CM_SHAPER_RAMB_EXP_REGION0_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17306
+pub const CM0_CM_SHAPER_RAMB_REGION_0_1__CM_SHAPER_RAMB_EXP_REGION0_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17303
+pub const CM0_CM_SHAPER_RAMB_REGION_0_1__CM_SHAPER_RAMB_EXP_REGION0_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17307
+pub const CM0_CM_SHAPER_RAMB_REGION_0_1__CM_SHAPER_RAMB_EXP_REGION0_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17304
+pub const CM0_CM_SHAPER_RAMB_REGION_0_1__CM_SHAPER_RAMB_EXP_REGION1_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17308
+pub const CM0_CM_SHAPER_RAMB_REGION_0_1__CM_SHAPER_RAMB_EXP_REGION1_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17305
+pub const CM0_CM_SHAPER_RAMB_REGION_0_1__CM_SHAPER_RAMB_EXP_REGION1_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17309
+pub const CM0_CM_SHAPER_RAMB_REGION_0_1__CM_SHAPER_RAMB_EXP_REGION1_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17311
+pub const CM0_CM_SHAPER_RAMB_REGION_2_3__CM_SHAPER_RAMB_EXP_REGION2_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17315
+pub const CM0_CM_SHAPER_RAMB_REGION_2_3__CM_SHAPER_RAMB_EXP_REGION2_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17312
+pub const CM0_CM_SHAPER_RAMB_REGION_2_3__CM_SHAPER_RAMB_EXP_REGION2_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17316
+pub const CM0_CM_SHAPER_RAMB_REGION_2_3__CM_SHAPER_RAMB_EXP_REGION2_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17313
+pub const CM0_CM_SHAPER_RAMB_REGION_2_3__CM_SHAPER_RAMB_EXP_REGION3_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17317
+pub const CM0_CM_SHAPER_RAMB_REGION_2_3__CM_SHAPER_RAMB_EXP_REGION3_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17314
+pub const CM0_CM_SHAPER_RAMB_REGION_2_3__CM_SHAPER_RAMB_EXP_REGION3_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17318
+pub const CM0_CM_SHAPER_RAMB_REGION_2_3__CM_SHAPER_RAMB_EXP_REGION3_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17320
+pub const CM0_CM_SHAPER_RAMB_REGION_4_5__CM_SHAPER_RAMB_EXP_REGION4_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17324
+pub const CM0_CM_SHAPER_RAMB_REGION_4_5__CM_SHAPER_RAMB_EXP_REGION4_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17321
+pub const CM0_CM_SHAPER_RAMB_REGION_4_5__CM_SHAPER_RAMB_EXP_REGION4_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17325
+pub const CM0_CM_SHAPER_RAMB_REGION_4_5__CM_SHAPER_RAMB_EXP_REGION4_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17322
+pub const CM0_CM_SHAPER_RAMB_REGION_4_5__CM_SHAPER_RAMB_EXP_REGION5_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17326
+pub const CM0_CM_SHAPER_RAMB_REGION_4_5__CM_SHAPER_RAMB_EXP_REGION5_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17323
+pub const CM0_CM_SHAPER_RAMB_REGION_4_5__CM_SHAPER_RAMB_EXP_REGION5_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17327
+pub const CM0_CM_SHAPER_RAMB_REGION_4_5__CM_SHAPER_RAMB_EXP_REGION5_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17329
+pub const CM0_CM_SHAPER_RAMB_REGION_6_7__CM_SHAPER_RAMB_EXP_REGION6_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17333
+pub const CM0_CM_SHAPER_RAMB_REGION_6_7__CM_SHAPER_RAMB_EXP_REGION6_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17330
+pub const CM0_CM_SHAPER_RAMB_REGION_6_7__CM_SHAPER_RAMB_EXP_REGION6_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17334
+pub const CM0_CM_SHAPER_RAMB_REGION_6_7__CM_SHAPER_RAMB_EXP_REGION6_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17331
+pub const CM0_CM_SHAPER_RAMB_REGION_6_7__CM_SHAPER_RAMB_EXP_REGION7_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17335
+pub const CM0_CM_SHAPER_RAMB_REGION_6_7__CM_SHAPER_RAMB_EXP_REGION7_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17332
+pub const CM0_CM_SHAPER_RAMB_REGION_6_7__CM_SHAPER_RAMB_EXP_REGION7_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17336
+pub const CM0_CM_SHAPER_RAMB_REGION_6_7__CM_SHAPER_RAMB_EXP_REGION7_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17338
+pub const CM0_CM_SHAPER_RAMB_REGION_8_9__CM_SHAPER_RAMB_EXP_REGION8_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17342
+pub const CM0_CM_SHAPER_RAMB_REGION_8_9__CM_SHAPER_RAMB_EXP_REGION8_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17339
+pub const CM0_CM_SHAPER_RAMB_REGION_8_9__CM_SHAPER_RAMB_EXP_REGION8_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17343
+pub const CM0_CM_SHAPER_RAMB_REGION_8_9__CM_SHAPER_RAMB_EXP_REGION8_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17340
+pub const CM0_CM_SHAPER_RAMB_REGION_8_9__CM_SHAPER_RAMB_EXP_REGION9_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17344
+pub const CM0_CM_SHAPER_RAMB_REGION_8_9__CM_SHAPER_RAMB_EXP_REGION9_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17341
+pub const CM0_CM_SHAPER_RAMB_REGION_8_9__CM_SHAPER_RAMB_EXP_REGION9_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17345
+pub const CM0_CM_SHAPER_RAMB_REGION_8_9__CM_SHAPER_RAMB_EXP_REGION9_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17347
+pub const CM0_CM_SHAPER_RAMB_REGION_10_11__CM_SHAPER_RAMB_EXP_REGION10_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17351
+pub const CM0_CM_SHAPER_RAMB_REGION_10_11__CM_SHAPER_RAMB_EXP_REGION10_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17348
+pub const CM0_CM_SHAPER_RAMB_REGION_10_11__CM_SHAPER_RAMB_EXP_REGION10_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17352
+pub const CM0_CM_SHAPER_RAMB_REGION_10_11__CM_SHAPER_RAMB_EXP_REGION10_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17349
+pub const CM0_CM_SHAPER_RAMB_REGION_10_11__CM_SHAPER_RAMB_EXP_REGION11_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17353
+pub const CM0_CM_SHAPER_RAMB_REGION_10_11__CM_SHAPER_RAMB_EXP_REGION11_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17350
+pub const CM0_CM_SHAPER_RAMB_REGION_10_11__CM_SHAPER_RAMB_EXP_REGION11_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17354
+pub const CM0_CM_SHAPER_RAMB_REGION_10_11__CM_SHAPER_RAMB_EXP_REGION11_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17356
+pub const CM0_CM_SHAPER_RAMB_REGION_12_13__CM_SHAPER_RAMB_EXP_REGION12_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17360
+pub const CM0_CM_SHAPER_RAMB_REGION_12_13__CM_SHAPER_RAMB_EXP_REGION12_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17357
+pub const CM0_CM_SHAPER_RAMB_REGION_12_13__CM_SHAPER_RAMB_EXP_REGION12_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17361
+pub const CM0_CM_SHAPER_RAMB_REGION_12_13__CM_SHAPER_RAMB_EXP_REGION12_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17358
+pub const CM0_CM_SHAPER_RAMB_REGION_12_13__CM_SHAPER_RAMB_EXP_REGION13_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17362
+pub const CM0_CM_SHAPER_RAMB_REGION_12_13__CM_SHAPER_RAMB_EXP_REGION13_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17359
+pub const CM0_CM_SHAPER_RAMB_REGION_12_13__CM_SHAPER_RAMB_EXP_REGION13_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17363
+pub const CM0_CM_SHAPER_RAMB_REGION_12_13__CM_SHAPER_RAMB_EXP_REGION13_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17365
+pub const CM0_CM_SHAPER_RAMB_REGION_14_15__CM_SHAPER_RAMB_EXP_REGION14_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17369
+pub const CM0_CM_SHAPER_RAMB_REGION_14_15__CM_SHAPER_RAMB_EXP_REGION14_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17366
+pub const CM0_CM_SHAPER_RAMB_REGION_14_15__CM_SHAPER_RAMB_EXP_REGION14_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17370
+pub const CM0_CM_SHAPER_RAMB_REGION_14_15__CM_SHAPER_RAMB_EXP_REGION14_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17367
+pub const CM0_CM_SHAPER_RAMB_REGION_14_15__CM_SHAPER_RAMB_EXP_REGION15_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17371
+pub const CM0_CM_SHAPER_RAMB_REGION_14_15__CM_SHAPER_RAMB_EXP_REGION15_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17368
+pub const CM0_CM_SHAPER_RAMB_REGION_14_15__CM_SHAPER_RAMB_EXP_REGION15_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17372
+pub const CM0_CM_SHAPER_RAMB_REGION_14_15__CM_SHAPER_RAMB_EXP_REGION15_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17374
+pub const CM0_CM_SHAPER_RAMB_REGION_16_17__CM_SHAPER_RAMB_EXP_REGION16_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17378
+pub const CM0_CM_SHAPER_RAMB_REGION_16_17__CM_SHAPER_RAMB_EXP_REGION16_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17375
+pub const CM0_CM_SHAPER_RAMB_REGION_16_17__CM_SHAPER_RAMB_EXP_REGION16_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17379
+pub const CM0_CM_SHAPER_RAMB_REGION_16_17__CM_SHAPER_RAMB_EXP_REGION16_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17376
+pub const CM0_CM_SHAPER_RAMB_REGION_16_17__CM_SHAPER_RAMB_EXP_REGION17_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17380
+pub const CM0_CM_SHAPER_RAMB_REGION_16_17__CM_SHAPER_RAMB_EXP_REGION17_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17377
+pub const CM0_CM_SHAPER_RAMB_REGION_16_17__CM_SHAPER_RAMB_EXP_REGION17_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17381
+pub const CM0_CM_SHAPER_RAMB_REGION_16_17__CM_SHAPER_RAMB_EXP_REGION17_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17383
+pub const CM0_CM_SHAPER_RAMB_REGION_18_19__CM_SHAPER_RAMB_EXP_REGION18_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17387
+pub const CM0_CM_SHAPER_RAMB_REGION_18_19__CM_SHAPER_RAMB_EXP_REGION18_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17384
+pub const CM0_CM_SHAPER_RAMB_REGION_18_19__CM_SHAPER_RAMB_EXP_REGION18_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17388
+pub const CM0_CM_SHAPER_RAMB_REGION_18_19__CM_SHAPER_RAMB_EXP_REGION18_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17385
+pub const CM0_CM_SHAPER_RAMB_REGION_18_19__CM_SHAPER_RAMB_EXP_REGION19_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17389
+pub const CM0_CM_SHAPER_RAMB_REGION_18_19__CM_SHAPER_RAMB_EXP_REGION19_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17386
+pub const CM0_CM_SHAPER_RAMB_REGION_18_19__CM_SHAPER_RAMB_EXP_REGION19_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17390
+pub const CM0_CM_SHAPER_RAMB_REGION_18_19__CM_SHAPER_RAMB_EXP_REGION19_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17392
+pub const CM0_CM_SHAPER_RAMB_REGION_20_21__CM_SHAPER_RAMB_EXP_REGION20_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17396
+pub const CM0_CM_SHAPER_RAMB_REGION_20_21__CM_SHAPER_RAMB_EXP_REGION20_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17393
+pub const CM0_CM_SHAPER_RAMB_REGION_20_21__CM_SHAPER_RAMB_EXP_REGION20_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17397
+pub const CM0_CM_SHAPER_RAMB_REGION_20_21__CM_SHAPER_RAMB_EXP_REGION20_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17394
+pub const CM0_CM_SHAPER_RAMB_REGION_20_21__CM_SHAPER_RAMB_EXP_REGION21_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17398
+pub const CM0_CM_SHAPER_RAMB_REGION_20_21__CM_SHAPER_RAMB_EXP_REGION21_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17395
+pub const CM0_CM_SHAPER_RAMB_REGION_20_21__CM_SHAPER_RAMB_EXP_REGION21_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17399
+pub const CM0_CM_SHAPER_RAMB_REGION_20_21__CM_SHAPER_RAMB_EXP_REGION21_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17401
+pub const CM0_CM_SHAPER_RAMB_REGION_22_23__CM_SHAPER_RAMB_EXP_REGION22_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17405
+pub const CM0_CM_SHAPER_RAMB_REGION_22_23__CM_SHAPER_RAMB_EXP_REGION22_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17402
+pub const CM0_CM_SHAPER_RAMB_REGION_22_23__CM_SHAPER_RAMB_EXP_REGION22_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17406
+pub const CM0_CM_SHAPER_RAMB_REGION_22_23__CM_SHAPER_RAMB_EXP_REGION22_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17403
+pub const CM0_CM_SHAPER_RAMB_REGION_22_23__CM_SHAPER_RAMB_EXP_REGION23_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17407
+pub const CM0_CM_SHAPER_RAMB_REGION_22_23__CM_SHAPER_RAMB_EXP_REGION23_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17404
+pub const CM0_CM_SHAPER_RAMB_REGION_22_23__CM_SHAPER_RAMB_EXP_REGION23_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17408
+pub const CM0_CM_SHAPER_RAMB_REGION_22_23__CM_SHAPER_RAMB_EXP_REGION23_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17410
+pub const CM0_CM_SHAPER_RAMB_REGION_24_25__CM_SHAPER_RAMB_EXP_REGION24_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17414
+pub const CM0_CM_SHAPER_RAMB_REGION_24_25__CM_SHAPER_RAMB_EXP_REGION24_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17411
+pub const CM0_CM_SHAPER_RAMB_REGION_24_25__CM_SHAPER_RAMB_EXP_REGION24_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17415
+pub const CM0_CM_SHAPER_RAMB_REGION_24_25__CM_SHAPER_RAMB_EXP_REGION24_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17412
+pub const CM0_CM_SHAPER_RAMB_REGION_24_25__CM_SHAPER_RAMB_EXP_REGION25_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17416
+pub const CM0_CM_SHAPER_RAMB_REGION_24_25__CM_SHAPER_RAMB_EXP_REGION25_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17413
+pub const CM0_CM_SHAPER_RAMB_REGION_24_25__CM_SHAPER_RAMB_EXP_REGION25_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17417
+pub const CM0_CM_SHAPER_RAMB_REGION_24_25__CM_SHAPER_RAMB_EXP_REGION25_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17419
+pub const CM0_CM_SHAPER_RAMB_REGION_26_27__CM_SHAPER_RAMB_EXP_REGION26_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17423
+pub const CM0_CM_SHAPER_RAMB_REGION_26_27__CM_SHAPER_RAMB_EXP_REGION26_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17420
+pub const CM0_CM_SHAPER_RAMB_REGION_26_27__CM_SHAPER_RAMB_EXP_REGION26_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17424
+pub const CM0_CM_SHAPER_RAMB_REGION_26_27__CM_SHAPER_RAMB_EXP_REGION26_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17421
+pub const CM0_CM_SHAPER_RAMB_REGION_26_27__CM_SHAPER_RAMB_EXP_REGION27_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17425
+pub const CM0_CM_SHAPER_RAMB_REGION_26_27__CM_SHAPER_RAMB_EXP_REGION27_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17422
+pub const CM0_CM_SHAPER_RAMB_REGION_26_27__CM_SHAPER_RAMB_EXP_REGION27_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17426
+pub const CM0_CM_SHAPER_RAMB_REGION_26_27__CM_SHAPER_RAMB_EXP_REGION27_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17428
+pub const CM0_CM_SHAPER_RAMB_REGION_28_29__CM_SHAPER_RAMB_EXP_REGION28_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17432
+pub const CM0_CM_SHAPER_RAMB_REGION_28_29__CM_SHAPER_RAMB_EXP_REGION28_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17429
+pub const CM0_CM_SHAPER_RAMB_REGION_28_29__CM_SHAPER_RAMB_EXP_REGION28_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17433
+pub const CM0_CM_SHAPER_RAMB_REGION_28_29__CM_SHAPER_RAMB_EXP_REGION28_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17430
+pub const CM0_CM_SHAPER_RAMB_REGION_28_29__CM_SHAPER_RAMB_EXP_REGION29_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17434
+pub const CM0_CM_SHAPER_RAMB_REGION_28_29__CM_SHAPER_RAMB_EXP_REGION29_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17431
+pub const CM0_CM_SHAPER_RAMB_REGION_28_29__CM_SHAPER_RAMB_EXP_REGION29_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17435
+pub const CM0_CM_SHAPER_RAMB_REGION_28_29__CM_SHAPER_RAMB_EXP_REGION29_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17437
+pub const CM0_CM_SHAPER_RAMB_REGION_30_31__CM_SHAPER_RAMB_EXP_REGION30_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17441
+pub const CM0_CM_SHAPER_RAMB_REGION_30_31__CM_SHAPER_RAMB_EXP_REGION30_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17438
+pub const CM0_CM_SHAPER_RAMB_REGION_30_31__CM_SHAPER_RAMB_EXP_REGION30_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17442
+pub const CM0_CM_SHAPER_RAMB_REGION_30_31__CM_SHAPER_RAMB_EXP_REGION30_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17439
+pub const CM0_CM_SHAPER_RAMB_REGION_30_31__CM_SHAPER_RAMB_EXP_REGION31_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17443
+pub const CM0_CM_SHAPER_RAMB_REGION_30_31__CM_SHAPER_RAMB_EXP_REGION31_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17440
+pub const CM0_CM_SHAPER_RAMB_REGION_30_31__CM_SHAPER_RAMB_EXP_REGION31_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17444
+pub const CM0_CM_SHAPER_RAMB_REGION_30_31__CM_SHAPER_RAMB_EXP_REGION31_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17446
+pub const CM0_CM_SHAPER_RAMB_REGION_32_33__CM_SHAPER_RAMB_EXP_REGION32_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17450
+pub const CM0_CM_SHAPER_RAMB_REGION_32_33__CM_SHAPER_RAMB_EXP_REGION32_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17447
+pub const CM0_CM_SHAPER_RAMB_REGION_32_33__CM_SHAPER_RAMB_EXP_REGION32_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17451
+pub const CM0_CM_SHAPER_RAMB_REGION_32_33__CM_SHAPER_RAMB_EXP_REGION32_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17448
+pub const CM0_CM_SHAPER_RAMB_REGION_32_33__CM_SHAPER_RAMB_EXP_REGION33_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17452
+pub const CM0_CM_SHAPER_RAMB_REGION_32_33__CM_SHAPER_RAMB_EXP_REGION33_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17449
+pub const CM0_CM_SHAPER_RAMB_REGION_32_33__CM_SHAPER_RAMB_EXP_REGION33_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17453
+pub const CM0_CM_SHAPER_RAMB_REGION_32_33__CM_SHAPER_RAMB_EXP_REGION33_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17089
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_B__CM_SHAPER_RAMA_EXP_REGION_START_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17091
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_B__CM_SHAPER_RAMA_EXP_REGION_START_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17090
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_B__CM_SHAPER_RAMA_EXP_REGION_START_SEGMENT_B__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17092
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_B__CM_SHAPER_RAMA_EXP_REGION_START_SEGMENT_B_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17094
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_G__CM_SHAPER_RAMA_EXP_REGION_START_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17096
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_G__CM_SHAPER_RAMA_EXP_REGION_START_G_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17095
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_G__CM_SHAPER_RAMA_EXP_REGION_START_SEGMENT_G__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17097
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_G__CM_SHAPER_RAMA_EXP_REGION_START_SEGMENT_G_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17099
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_R__CM_SHAPER_RAMA_EXP_REGION_START_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17101
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_R__CM_SHAPER_RAMA_EXP_REGION_START_R_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17100
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_R__CM_SHAPER_RAMA_EXP_REGION_START_SEGMENT_R__SHIFT: u32 = 0x14;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17102
+pub const CM0_CM_SHAPER_RAMA_START_CNTL_R__CM_SHAPER_RAMA_EXP_REGION_START_SEGMENT_R_MASK: u32 = 0x7f00000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17104
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_B__CM_SHAPER_RAMA_EXP_REGION_END_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17106
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_B__CM_SHAPER_RAMA_EXP_REGION_END_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17105
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_B__CM_SHAPER_RAMA_EXP_REGION_END_BASE_B__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17107
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_B__CM_SHAPER_RAMA_EXP_REGION_END_BASE_B_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17109
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_G__CM_SHAPER_RAMA_EXP_REGION_END_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17111
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_G__CM_SHAPER_RAMA_EXP_REGION_END_G_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17110
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_G__CM_SHAPER_RAMA_EXP_REGION_END_BASE_G__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17112
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_G__CM_SHAPER_RAMA_EXP_REGION_END_BASE_G_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17114
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_R__CM_SHAPER_RAMA_EXP_REGION_END_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17116
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_R__CM_SHAPER_RAMA_EXP_REGION_END_R_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17115
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_R__CM_SHAPER_RAMA_EXP_REGION_END_BASE_R__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17117
+pub const CM0_CM_SHAPER_RAMA_END_CNTL_R__CM_SHAPER_RAMA_EXP_REGION_END_BASE_R_MASK: u32 = 0x3fff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17119
+pub const CM0_CM_SHAPER_RAMA_REGION_0_1__CM_SHAPER_RAMA_EXP_REGION0_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17123
+pub const CM0_CM_SHAPER_RAMA_REGION_0_1__CM_SHAPER_RAMA_EXP_REGION0_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17120
+pub const CM0_CM_SHAPER_RAMA_REGION_0_1__CM_SHAPER_RAMA_EXP_REGION0_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17124
+pub const CM0_CM_SHAPER_RAMA_REGION_0_1__CM_SHAPER_RAMA_EXP_REGION0_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17121
+pub const CM0_CM_SHAPER_RAMA_REGION_0_1__CM_SHAPER_RAMA_EXP_REGION1_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17125
+pub const CM0_CM_SHAPER_RAMA_REGION_0_1__CM_SHAPER_RAMA_EXP_REGION1_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17122
+pub const CM0_CM_SHAPER_RAMA_REGION_0_1__CM_SHAPER_RAMA_EXP_REGION1_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17126
+pub const CM0_CM_SHAPER_RAMA_REGION_0_1__CM_SHAPER_RAMA_EXP_REGION1_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17128
+pub const CM0_CM_SHAPER_RAMA_REGION_2_3__CM_SHAPER_RAMA_EXP_REGION2_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17132
+pub const CM0_CM_SHAPER_RAMA_REGION_2_3__CM_SHAPER_RAMA_EXP_REGION2_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17129
+pub const CM0_CM_SHAPER_RAMA_REGION_2_3__CM_SHAPER_RAMA_EXP_REGION2_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17133
+pub const CM0_CM_SHAPER_RAMA_REGION_2_3__CM_SHAPER_RAMA_EXP_REGION2_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17130
+pub const CM0_CM_SHAPER_RAMA_REGION_2_3__CM_SHAPER_RAMA_EXP_REGION3_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17134
+pub const CM0_CM_SHAPER_RAMA_REGION_2_3__CM_SHAPER_RAMA_EXP_REGION3_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17131
+pub const CM0_CM_SHAPER_RAMA_REGION_2_3__CM_SHAPER_RAMA_EXP_REGION3_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17135
+pub const CM0_CM_SHAPER_RAMA_REGION_2_3__CM_SHAPER_RAMA_EXP_REGION3_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17137
+pub const CM0_CM_SHAPER_RAMA_REGION_4_5__CM_SHAPER_RAMA_EXP_REGION4_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17141
+pub const CM0_CM_SHAPER_RAMA_REGION_4_5__CM_SHAPER_RAMA_EXP_REGION4_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17138
+pub const CM0_CM_SHAPER_RAMA_REGION_4_5__CM_SHAPER_RAMA_EXP_REGION4_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17142
+pub const CM0_CM_SHAPER_RAMA_REGION_4_5__CM_SHAPER_RAMA_EXP_REGION4_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17139
+pub const CM0_CM_SHAPER_RAMA_REGION_4_5__CM_SHAPER_RAMA_EXP_REGION5_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17143
+pub const CM0_CM_SHAPER_RAMA_REGION_4_5__CM_SHAPER_RAMA_EXP_REGION5_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17140
+pub const CM0_CM_SHAPER_RAMA_REGION_4_5__CM_SHAPER_RAMA_EXP_REGION5_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17144
+pub const CM0_CM_SHAPER_RAMA_REGION_4_5__CM_SHAPER_RAMA_EXP_REGION5_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17146
+pub const CM0_CM_SHAPER_RAMA_REGION_6_7__CM_SHAPER_RAMA_EXP_REGION6_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17150
+pub const CM0_CM_SHAPER_RAMA_REGION_6_7__CM_SHAPER_RAMA_EXP_REGION6_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17147
+pub const CM0_CM_SHAPER_RAMA_REGION_6_7__CM_SHAPER_RAMA_EXP_REGION6_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17151
+pub const CM0_CM_SHAPER_RAMA_REGION_6_7__CM_SHAPER_RAMA_EXP_REGION6_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17148
+pub const CM0_CM_SHAPER_RAMA_REGION_6_7__CM_SHAPER_RAMA_EXP_REGION7_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17152
+pub const CM0_CM_SHAPER_RAMA_REGION_6_7__CM_SHAPER_RAMA_EXP_REGION7_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17149
+pub const CM0_CM_SHAPER_RAMA_REGION_6_7__CM_SHAPER_RAMA_EXP_REGION7_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17153
+pub const CM0_CM_SHAPER_RAMA_REGION_6_7__CM_SHAPER_RAMA_EXP_REGION7_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17155
+pub const CM0_CM_SHAPER_RAMA_REGION_8_9__CM_SHAPER_RAMA_EXP_REGION8_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17159
+pub const CM0_CM_SHAPER_RAMA_REGION_8_9__CM_SHAPER_RAMA_EXP_REGION8_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17156
+pub const CM0_CM_SHAPER_RAMA_REGION_8_9__CM_SHAPER_RAMA_EXP_REGION8_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17160
+pub const CM0_CM_SHAPER_RAMA_REGION_8_9__CM_SHAPER_RAMA_EXP_REGION8_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17157
+pub const CM0_CM_SHAPER_RAMA_REGION_8_9__CM_SHAPER_RAMA_EXP_REGION9_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17161
+pub const CM0_CM_SHAPER_RAMA_REGION_8_9__CM_SHAPER_RAMA_EXP_REGION9_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17158
+pub const CM0_CM_SHAPER_RAMA_REGION_8_9__CM_SHAPER_RAMA_EXP_REGION9_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17162
+pub const CM0_CM_SHAPER_RAMA_REGION_8_9__CM_SHAPER_RAMA_EXP_REGION9_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17164
+pub const CM0_CM_SHAPER_RAMA_REGION_10_11__CM_SHAPER_RAMA_EXP_REGION10_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17168
+pub const CM0_CM_SHAPER_RAMA_REGION_10_11__CM_SHAPER_RAMA_EXP_REGION10_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17165
+pub const CM0_CM_SHAPER_RAMA_REGION_10_11__CM_SHAPER_RAMA_EXP_REGION10_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17169
+pub const CM0_CM_SHAPER_RAMA_REGION_10_11__CM_SHAPER_RAMA_EXP_REGION10_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17166
+pub const CM0_CM_SHAPER_RAMA_REGION_10_11__CM_SHAPER_RAMA_EXP_REGION11_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17170
+pub const CM0_CM_SHAPER_RAMA_REGION_10_11__CM_SHAPER_RAMA_EXP_REGION11_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17167
+pub const CM0_CM_SHAPER_RAMA_REGION_10_11__CM_SHAPER_RAMA_EXP_REGION11_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17171
+pub const CM0_CM_SHAPER_RAMA_REGION_10_11__CM_SHAPER_RAMA_EXP_REGION11_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17173
+pub const CM0_CM_SHAPER_RAMA_REGION_12_13__CM_SHAPER_RAMA_EXP_REGION12_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17177
+pub const CM0_CM_SHAPER_RAMA_REGION_12_13__CM_SHAPER_RAMA_EXP_REGION12_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17174
+pub const CM0_CM_SHAPER_RAMA_REGION_12_13__CM_SHAPER_RAMA_EXP_REGION12_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17178
+pub const CM0_CM_SHAPER_RAMA_REGION_12_13__CM_SHAPER_RAMA_EXP_REGION12_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17175
+pub const CM0_CM_SHAPER_RAMA_REGION_12_13__CM_SHAPER_RAMA_EXP_REGION13_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17179
+pub const CM0_CM_SHAPER_RAMA_REGION_12_13__CM_SHAPER_RAMA_EXP_REGION13_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17176
+pub const CM0_CM_SHAPER_RAMA_REGION_12_13__CM_SHAPER_RAMA_EXP_REGION13_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17180
+pub const CM0_CM_SHAPER_RAMA_REGION_12_13__CM_SHAPER_RAMA_EXP_REGION13_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17182
+pub const CM0_CM_SHAPER_RAMA_REGION_14_15__CM_SHAPER_RAMA_EXP_REGION14_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17186
+pub const CM0_CM_SHAPER_RAMA_REGION_14_15__CM_SHAPER_RAMA_EXP_REGION14_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17183
+pub const CM0_CM_SHAPER_RAMA_REGION_14_15__CM_SHAPER_RAMA_EXP_REGION14_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17187
+pub const CM0_CM_SHAPER_RAMA_REGION_14_15__CM_SHAPER_RAMA_EXP_REGION14_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17184
+pub const CM0_CM_SHAPER_RAMA_REGION_14_15__CM_SHAPER_RAMA_EXP_REGION15_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17188
+pub const CM0_CM_SHAPER_RAMA_REGION_14_15__CM_SHAPER_RAMA_EXP_REGION15_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17185
+pub const CM0_CM_SHAPER_RAMA_REGION_14_15__CM_SHAPER_RAMA_EXP_REGION15_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17189
+pub const CM0_CM_SHAPER_RAMA_REGION_14_15__CM_SHAPER_RAMA_EXP_REGION15_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17191
+pub const CM0_CM_SHAPER_RAMA_REGION_16_17__CM_SHAPER_RAMA_EXP_REGION16_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17195
+pub const CM0_CM_SHAPER_RAMA_REGION_16_17__CM_SHAPER_RAMA_EXP_REGION16_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17192
+pub const CM0_CM_SHAPER_RAMA_REGION_16_17__CM_SHAPER_RAMA_EXP_REGION16_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17196
+pub const CM0_CM_SHAPER_RAMA_REGION_16_17__CM_SHAPER_RAMA_EXP_REGION16_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17193
+pub const CM0_CM_SHAPER_RAMA_REGION_16_17__CM_SHAPER_RAMA_EXP_REGION17_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17197
+pub const CM0_CM_SHAPER_RAMA_REGION_16_17__CM_SHAPER_RAMA_EXP_REGION17_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17194
+pub const CM0_CM_SHAPER_RAMA_REGION_16_17__CM_SHAPER_RAMA_EXP_REGION17_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17198
+pub const CM0_CM_SHAPER_RAMA_REGION_16_17__CM_SHAPER_RAMA_EXP_REGION17_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17200
+pub const CM0_CM_SHAPER_RAMA_REGION_18_19__CM_SHAPER_RAMA_EXP_REGION18_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17204
+pub const CM0_CM_SHAPER_RAMA_REGION_18_19__CM_SHAPER_RAMA_EXP_REGION18_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17201
+pub const CM0_CM_SHAPER_RAMA_REGION_18_19__CM_SHAPER_RAMA_EXP_REGION18_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17205
+pub const CM0_CM_SHAPER_RAMA_REGION_18_19__CM_SHAPER_RAMA_EXP_REGION18_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17202
+pub const CM0_CM_SHAPER_RAMA_REGION_18_19__CM_SHAPER_RAMA_EXP_REGION19_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17206
+pub const CM0_CM_SHAPER_RAMA_REGION_18_19__CM_SHAPER_RAMA_EXP_REGION19_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17203
+pub const CM0_CM_SHAPER_RAMA_REGION_18_19__CM_SHAPER_RAMA_EXP_REGION19_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17207
+pub const CM0_CM_SHAPER_RAMA_REGION_18_19__CM_SHAPER_RAMA_EXP_REGION19_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17209
+pub const CM0_CM_SHAPER_RAMA_REGION_20_21__CM_SHAPER_RAMA_EXP_REGION20_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17213
+pub const CM0_CM_SHAPER_RAMA_REGION_20_21__CM_SHAPER_RAMA_EXP_REGION20_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17210
+pub const CM0_CM_SHAPER_RAMA_REGION_20_21__CM_SHAPER_RAMA_EXP_REGION20_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17214
+pub const CM0_CM_SHAPER_RAMA_REGION_20_21__CM_SHAPER_RAMA_EXP_REGION20_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17211
+pub const CM0_CM_SHAPER_RAMA_REGION_20_21__CM_SHAPER_RAMA_EXP_REGION21_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17215
+pub const CM0_CM_SHAPER_RAMA_REGION_20_21__CM_SHAPER_RAMA_EXP_REGION21_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17212
+pub const CM0_CM_SHAPER_RAMA_REGION_20_21__CM_SHAPER_RAMA_EXP_REGION21_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17216
+pub const CM0_CM_SHAPER_RAMA_REGION_20_21__CM_SHAPER_RAMA_EXP_REGION21_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17218
+pub const CM0_CM_SHAPER_RAMA_REGION_22_23__CM_SHAPER_RAMA_EXP_REGION22_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17222
+pub const CM0_CM_SHAPER_RAMA_REGION_22_23__CM_SHAPER_RAMA_EXP_REGION22_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17219
+pub const CM0_CM_SHAPER_RAMA_REGION_22_23__CM_SHAPER_RAMA_EXP_REGION22_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17223
+pub const CM0_CM_SHAPER_RAMA_REGION_22_23__CM_SHAPER_RAMA_EXP_REGION22_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17220
+pub const CM0_CM_SHAPER_RAMA_REGION_22_23__CM_SHAPER_RAMA_EXP_REGION23_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17224
+pub const CM0_CM_SHAPER_RAMA_REGION_22_23__CM_SHAPER_RAMA_EXP_REGION23_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17221
+pub const CM0_CM_SHAPER_RAMA_REGION_22_23__CM_SHAPER_RAMA_EXP_REGION23_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17225
+pub const CM0_CM_SHAPER_RAMA_REGION_22_23__CM_SHAPER_RAMA_EXP_REGION23_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17227
+pub const CM0_CM_SHAPER_RAMA_REGION_24_25__CM_SHAPER_RAMA_EXP_REGION24_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17231
+pub const CM0_CM_SHAPER_RAMA_REGION_24_25__CM_SHAPER_RAMA_EXP_REGION24_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17228
+pub const CM0_CM_SHAPER_RAMA_REGION_24_25__CM_SHAPER_RAMA_EXP_REGION24_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17232
+pub const CM0_CM_SHAPER_RAMA_REGION_24_25__CM_SHAPER_RAMA_EXP_REGION24_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17229
+pub const CM0_CM_SHAPER_RAMA_REGION_24_25__CM_SHAPER_RAMA_EXP_REGION25_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17233
+pub const CM0_CM_SHAPER_RAMA_REGION_24_25__CM_SHAPER_RAMA_EXP_REGION25_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17230
+pub const CM0_CM_SHAPER_RAMA_REGION_24_25__CM_SHAPER_RAMA_EXP_REGION25_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17234
+pub const CM0_CM_SHAPER_RAMA_REGION_24_25__CM_SHAPER_RAMA_EXP_REGION25_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17236
+pub const CM0_CM_SHAPER_RAMA_REGION_26_27__CM_SHAPER_RAMA_EXP_REGION26_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17240
+pub const CM0_CM_SHAPER_RAMA_REGION_26_27__CM_SHAPER_RAMA_EXP_REGION26_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17237
+pub const CM0_CM_SHAPER_RAMA_REGION_26_27__CM_SHAPER_RAMA_EXP_REGION26_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17241
+pub const CM0_CM_SHAPER_RAMA_REGION_26_27__CM_SHAPER_RAMA_EXP_REGION26_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17238
+pub const CM0_CM_SHAPER_RAMA_REGION_26_27__CM_SHAPER_RAMA_EXP_REGION27_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17242
+pub const CM0_CM_SHAPER_RAMA_REGION_26_27__CM_SHAPER_RAMA_EXP_REGION27_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17239
+pub const CM0_CM_SHAPER_RAMA_REGION_26_27__CM_SHAPER_RAMA_EXP_REGION27_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17243
+pub const CM0_CM_SHAPER_RAMA_REGION_26_27__CM_SHAPER_RAMA_EXP_REGION27_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17245
+pub const CM0_CM_SHAPER_RAMA_REGION_28_29__CM_SHAPER_RAMA_EXP_REGION28_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17249
+pub const CM0_CM_SHAPER_RAMA_REGION_28_29__CM_SHAPER_RAMA_EXP_REGION28_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17246
+pub const CM0_CM_SHAPER_RAMA_REGION_28_29__CM_SHAPER_RAMA_EXP_REGION28_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17250
+pub const CM0_CM_SHAPER_RAMA_REGION_28_29__CM_SHAPER_RAMA_EXP_REGION28_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17247
+pub const CM0_CM_SHAPER_RAMA_REGION_28_29__CM_SHAPER_RAMA_EXP_REGION29_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17251
+pub const CM0_CM_SHAPER_RAMA_REGION_28_29__CM_SHAPER_RAMA_EXP_REGION29_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17248
+pub const CM0_CM_SHAPER_RAMA_REGION_28_29__CM_SHAPER_RAMA_EXP_REGION29_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17252
+pub const CM0_CM_SHAPER_RAMA_REGION_28_29__CM_SHAPER_RAMA_EXP_REGION29_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17254
+pub const CM0_CM_SHAPER_RAMA_REGION_30_31__CM_SHAPER_RAMA_EXP_REGION30_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17258
+pub const CM0_CM_SHAPER_RAMA_REGION_30_31__CM_SHAPER_RAMA_EXP_REGION30_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17255
+pub const CM0_CM_SHAPER_RAMA_REGION_30_31__CM_SHAPER_RAMA_EXP_REGION30_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17259
+pub const CM0_CM_SHAPER_RAMA_REGION_30_31__CM_SHAPER_RAMA_EXP_REGION30_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17256
+pub const CM0_CM_SHAPER_RAMA_REGION_30_31__CM_SHAPER_RAMA_EXP_REGION31_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17260
+pub const CM0_CM_SHAPER_RAMA_REGION_30_31__CM_SHAPER_RAMA_EXP_REGION31_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17257
+pub const CM0_CM_SHAPER_RAMA_REGION_30_31__CM_SHAPER_RAMA_EXP_REGION31_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17261
+pub const CM0_CM_SHAPER_RAMA_REGION_30_31__CM_SHAPER_RAMA_EXP_REGION31_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17263
+pub const CM0_CM_SHAPER_RAMA_REGION_32_33__CM_SHAPER_RAMA_EXP_REGION32_LUT_OFFSET__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17267
+pub const CM0_CM_SHAPER_RAMA_REGION_32_33__CM_SHAPER_RAMA_EXP_REGION32_LUT_OFFSET_MASK: u32 = 0x1ff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17264
+pub const CM0_CM_SHAPER_RAMA_REGION_32_33__CM_SHAPER_RAMA_EXP_REGION32_NUM_SEGMENTS__SHIFT: u32 = 0xc;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17268
+pub const CM0_CM_SHAPER_RAMA_REGION_32_33__CM_SHAPER_RAMA_EXP_REGION32_NUM_SEGMENTS_MASK: u32 = 0x7000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17265
+pub const CM0_CM_SHAPER_RAMA_REGION_32_33__CM_SHAPER_RAMA_EXP_REGION33_LUT_OFFSET__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17269
+pub const CM0_CM_SHAPER_RAMA_REGION_32_33__CM_SHAPER_RAMA_EXP_REGION33_LUT_OFFSET_MASK: u32 = 0x1ff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17266
+pub const CM0_CM_SHAPER_RAMA_REGION_32_33__CM_SHAPER_RAMA_EXP_REGION33_NUM_SEGMENTS__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17270
+pub const CM0_CM_SHAPER_RAMA_REGION_32_33__CM_SHAPER_RAMA_EXP_REGION33_NUM_SEGMENTS_MASK: u32 = 0x70000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17082
+pub const CM0_CM_SHAPER_LUT_WRITE_EN_MASK__CM_SHAPER_LUT_WRITE_EN_MASK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17085
+pub const CM0_CM_SHAPER_LUT_WRITE_EN_MASK__CM_SHAPER_LUT_WRITE_EN_MASK_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17083
+pub const CM0_CM_SHAPER_LUT_WRITE_EN_MASK__CM_SHAPER_LUT_WRITE_SEL__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17086
+pub const CM0_CM_SHAPER_LUT_WRITE_EN_MASK__CM_SHAPER_LUT_WRITE_SEL_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17076
+pub const CM0_CM_SHAPER_LUT_INDEX__CM_SHAPER_LUT_INDEX__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17077
+pub const CM0_CM_SHAPER_LUT_INDEX__CM_SHAPER_LUT_INDEX_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17079
+pub const CM0_CM_SHAPER_LUT_DATA__CM_SHAPER_LUT_DATA__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:17080
+pub const CM0_CM_SHAPER_LUT_DATA__CM_SHAPER_LUT_DATA_MASK: u32 = 0xffffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16843
+pub const CM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_B__CM_BLNDGAM_RAMB_EXP_REGION_LINEAR_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16844
+pub const CM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_B__CM_BLNDGAM_RAMB_EXP_REGION_LINEAR_SLOPE_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16846
+pub const CM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_G__CM_BLNDGAM_RAMB_EXP_REGION_LINEAR_SLOPE_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16847
+pub const CM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_G__CM_BLNDGAM_RAMB_EXP_REGION_LINEAR_SLOPE_G_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16849
+pub const CM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_R__CM_BLNDGAM_RAMB_EXP_REGION_LINEAR_SLOPE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16850
+pub const CM0_CM_BLNDGAM_RAMB_SLOPE_CNTL_R__CM_BLNDGAM_RAMB_EXP_REGION_LINEAR_SLOPE_R_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16852
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL1_B__CM_BLNDGAM_RAMB_EXP_REGION_END_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16853
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL1_B__CM_BLNDGAM_RAMB_EXP_REGION_END_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16860
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL1_G__CM_BLNDGAM_RAMB_EXP_REGION_END_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16861
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL1_G__CM_BLNDGAM_RAMB_EXP_REGION_END_G_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16868
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL1_R__CM_BLNDGAM_RAMB_EXP_REGION_END_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16869
+pub const CM0_CM_BLNDGAM_RAMB_END_CNTL1_R__CM_BLNDGAM_RAMB_EXP_REGION_END_R_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16642
+pub const CM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_B__CM_BLNDGAM_RAMA_EXP_REGION_LINEAR_SLOPE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16643
+pub const CM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_B__CM_BLNDGAM_RAMA_EXP_REGION_LINEAR_SLOPE_B_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16645
+pub const CM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_G__CM_BLNDGAM_RAMA_EXP_REGION_LINEAR_SLOPE_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16646
+pub const CM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_G__CM_BLNDGAM_RAMA_EXP_REGION_LINEAR_SLOPE_G_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16648
+pub const CM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_R__CM_BLNDGAM_RAMA_EXP_REGION_LINEAR_SLOPE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16649
+pub const CM0_CM_BLNDGAM_RAMA_SLOPE_CNTL_R__CM_BLNDGAM_RAMA_EXP_REGION_LINEAR_SLOPE_R_MASK: u32 = 0x3ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16651
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL1_B__CM_BLNDGAM_RAMA_EXP_REGION_END_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16652
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL1_B__CM_BLNDGAM_RAMA_EXP_REGION_END_B_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16659
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL1_G__CM_BLNDGAM_RAMA_EXP_REGION_END_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16660
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL1_G__CM_BLNDGAM_RAMA_EXP_REGION_END_G_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16667
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL1_R__CM_BLNDGAM_RAMA_EXP_REGION_END_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16668
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL1_R__CM_BLNDGAM_RAMA_EXP_REGION_END_R_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16655
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_B__CM_BLNDGAM_RAMA_EXP_REGION_END_BASE_B__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16657
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_B__CM_BLNDGAM_RAMA_EXP_REGION_END_BASE_B_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16663
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_G__CM_BLNDGAM_RAMA_EXP_REGION_END_BASE_G__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16665
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_G__CM_BLNDGAM_RAMA_EXP_REGION_END_BASE_G_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16671
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_R__CM_BLNDGAM_RAMA_EXP_REGION_END_BASE_R__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16673
+pub const CM0_CM_BLNDGAM_RAMA_END_CNTL2_R__CM_BLNDGAM_RAMA_EXP_REGION_END_BASE_R_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16611
+pub const CM0_CM_BLNDGAM_CONTROL__CM_BLNDGAM_LUT_MODE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16612
+pub const CM0_CM_BLNDGAM_CONTROL__CM_BLNDGAM_LUT_MODE_MASK: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16620
+pub const CM0_CM_BLNDGAM_LUT_WRITE_EN_MASK__CM_BLNDGAM_LUT_WRITE_EN_MASK__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16623
+pub const CM0_CM_BLNDGAM_LUT_WRITE_EN_MASK__CM_BLNDGAM_LUT_WRITE_EN_MASK_MASK: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16621
+pub const CM0_CM_BLNDGAM_LUT_WRITE_EN_MASK__CM_BLNDGAM_LUT_WRITE_SEL__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16624
+pub const CM0_CM_BLNDGAM_LUT_WRITE_EN_MASK__CM_BLNDGAM_LUT_WRITE_SEL_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16622
+pub const CM0_CM_BLNDGAM_LUT_WRITE_EN_MASK__CM_BLNDGAM_CONFIG_STATUS__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16625
+pub const CM0_CM_BLNDGAM_LUT_WRITE_EN_MASK__CM_BLNDGAM_CONFIG_STATUS_MASK: u32 = 0x300;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16364
+pub const CM0_CM_DGAM_LUT_WRITE_EN_MASK__CM_DGAM_CONFIG_STATUS__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16368
+pub const CM0_CM_DGAM_LUT_WRITE_EN_MASK__CM_DGAM_CONFIG_STATUS_MASK: u32 = 0x700;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16214
+pub const CM0_CM_CONTROL__CM_BYPASS__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:16216
+pub const CM0_CM_CONTROL__CM_BYPASS_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12733
+pub const CNVC_CFG0_FORMAT_CONTROL__FORMAT_CNV16__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12739
+pub const CNVC_CFG0_FORMAT_CONTROL__FORMAT_CNV16_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15880
+pub const CNVC_CFG0_FORMAT_CONTROL__CNVC_BYPASS_MSB_ALIGN__SHIFT: u32 = 0xd;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15888
+pub const CNVC_CFG0_FORMAT_CONTROL__CNVC_BYPASS_MSB_ALIGN_MASK: u32 = 0x2000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15881
+pub const CNVC_CFG0_FORMAT_CONTROL__CLAMP_POSITIVE__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15889
+pub const CNVC_CFG0_FORMAT_CONTROL__CLAMP_POSITIVE_MASK: u32 = 0x10000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15882
+pub const CNVC_CFG0_FORMAT_CONTROL__CLAMP_POSITIVE_C__SHIFT: u32 = 0x11;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15890
+pub const CNVC_CFG0_FORMAT_CONTROL__CLAMP_POSITIVE_C_MASK: u32 = 0x20000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15936
+pub const CNVC_CFG0_ALPHA_2BIT_LUT__ALPHA_2BIT_LUT0__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15940
+pub const CNVC_CFG0_ALPHA_2BIT_LUT__ALPHA_2BIT_LUT0_MASK: u32 = 0xff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15937
+pub const CNVC_CFG0_ALPHA_2BIT_LUT__ALPHA_2BIT_LUT1__SHIFT: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15941
+pub const CNVC_CFG0_ALPHA_2BIT_LUT__ALPHA_2BIT_LUT1_MASK: u32 = 0xff00;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15938
+pub const CNVC_CFG0_ALPHA_2BIT_LUT__ALPHA_2BIT_LUT2__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15942
+pub const CNVC_CFG0_ALPHA_2BIT_LUT__ALPHA_2BIT_LUT2_MASK: u32 = 0xff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15939
+pub const CNVC_CFG0_ALPHA_2BIT_LUT__ALPHA_2BIT_LUT3__SHIFT: u32 = 0x18;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15943
+pub const CNVC_CFG0_ALPHA_2BIT_LUT__ALPHA_2BIT_LUT3_MASK: u32 = 0xff000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15893
+pub const CNVC_CFG0_FCNV_FP_BIAS_R__FCNV_FP_BIAS_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15894
+pub const CNVC_CFG0_FCNV_FP_BIAS_R__FCNV_FP_BIAS_R_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15896
+pub const CNVC_CFG0_FCNV_FP_BIAS_G__FCNV_FP_BIAS_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15897
+pub const CNVC_CFG0_FCNV_FP_BIAS_G__FCNV_FP_BIAS_G_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15899
+pub const CNVC_CFG0_FCNV_FP_BIAS_B__FCNV_FP_BIAS_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15900
+pub const CNVC_CFG0_FCNV_FP_BIAS_B__FCNV_FP_BIAS_B_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15902
+pub const CNVC_CFG0_FCNV_FP_SCALE_R__FCNV_FP_SCALE_R__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15903
+pub const CNVC_CFG0_FCNV_FP_SCALE_R__FCNV_FP_SCALE_R_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15905
+pub const CNVC_CFG0_FCNV_FP_SCALE_G__FCNV_FP_SCALE_G__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15906
+pub const CNVC_CFG0_FCNV_FP_SCALE_G__FCNV_FP_SCALE_G_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15908
+pub const CNVC_CFG0_FCNV_FP_SCALE_B__FCNV_FP_SCALE_B__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15909
+pub const CNVC_CFG0_FCNV_FP_SCALE_B__FCNV_FP_SCALE_B_MASK: u32 = 0x7ffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12759
+pub const CNVC_CFG0_COLOR_KEYER_CONTROL__COLOR_KEYER_EN__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12761
+pub const CNVC_CFG0_COLOR_KEYER_CONTROL__COLOR_KEYER_EN_MASK: u32 = 0x1;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12760
+pub const CNVC_CFG0_COLOR_KEYER_CONTROL__COLOR_KEYER_MODE__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12762
+pub const CNVC_CFG0_COLOR_KEYER_CONTROL__COLOR_KEYER_MODE_MASK: u32 = 0x30;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12764
+pub const CNVC_CFG0_COLOR_KEYER_ALPHA__COLOR_KEYER_ALPHA_LOW__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12766
+pub const CNVC_CFG0_COLOR_KEYER_ALPHA__COLOR_KEYER_ALPHA_LOW_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12765
+pub const CNVC_CFG0_COLOR_KEYER_ALPHA__COLOR_KEYER_ALPHA_HIGH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12767
+pub const CNVC_CFG0_COLOR_KEYER_ALPHA__COLOR_KEYER_ALPHA_HIGH_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12769
+pub const CNVC_CFG0_COLOR_KEYER_RED__COLOR_KEYER_RED_LOW__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12771
+pub const CNVC_CFG0_COLOR_KEYER_RED__COLOR_KEYER_RED_LOW_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12770
+pub const CNVC_CFG0_COLOR_KEYER_RED__COLOR_KEYER_RED_HIGH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12772
+pub const CNVC_CFG0_COLOR_KEYER_RED__COLOR_KEYER_RED_HIGH_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12774
+pub const CNVC_CFG0_COLOR_KEYER_GREEN__COLOR_KEYER_GREEN_LOW__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12776
+pub const CNVC_CFG0_COLOR_KEYER_GREEN__COLOR_KEYER_GREEN_LOW_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12775
+pub const CNVC_CFG0_COLOR_KEYER_GREEN__COLOR_KEYER_GREEN_HIGH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12777
+pub const CNVC_CFG0_COLOR_KEYER_GREEN__COLOR_KEYER_GREEN_HIGH_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12779
+pub const CNVC_CFG0_COLOR_KEYER_BLUE__COLOR_KEYER_BLUE_LOW__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12781
+pub const CNVC_CFG0_COLOR_KEYER_BLUE__COLOR_KEYER_BLUE_LOW_MASK: u32 = 0xffff;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12780
+pub const CNVC_CFG0_COLOR_KEYER_BLUE__COLOR_KEYER_BLUE_HIGH__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12782
+pub const CNVC_CFG0_COLOR_KEYER_BLUE__COLOR_KEYER_BLUE_HIGH_MASK: u32 = 0xffff0000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15950
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_PIX_INV_MODE__SHIFT: u32 = 0x2;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15957
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_PIX_INV_MODE_MASK: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15953
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_PIXEL_ALPHA_MOD_EN__SHIFT: u32 = 0x7;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15960
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_PIXEL_ALPHA_MOD_EN_MASK: u32 = 0x80;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15951
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_ROM_EN__SHIFT: u32 = 0x3;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:15958
+pub const CNVC_CUR0_CURSOR0_CONTROL__CUR0_ROM_EN_MASK: u32 = 0x8;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13055
+pub const DSCL0_OBUF_MEM_PWR_CTRL__OBUF_MEM_PWR_FORCE__SHIFT: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:13058
+pub const DSCL0_OBUF_MEM_PWR_CTRL__OBUF_MEM_PWR_FORCE_MASK: u32 = 0x3;

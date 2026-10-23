@@ -180,9 +180,15 @@ opp/mpcc=0xf], `dcn21_hubp_create`) ist handgeschrieben. `resource_pool.hubps`
 + im Pipe-Loop. Schreibt kein Register. Dazu wurde `gen_regs.py` mehrkernig
 (~5× schneller, byte-identisch).
 
+Fünfter Block, **DPP** (`src/dcn20_dpp.rs`, Renoir nutzt den dcn20-DPP), der
+größte: 224 Register × 4 + 540 Felder, via `dcgen.py` (Reg-Liste =
+`TF_REG_LIST_DCN20`+`_COMMON_APPEND`, Shift/Mask = Haupt- + Debug-Liste — dafür
+nimmt `dcgen.py` jetzt Listen von Makro-Aufrufen). Kopf handgeschrieben (base,
+`dpp_caps`/`DCN20_DPP_CAP`, LB-Geometrie, `dpp2_construct`, `dcn21_dpp_create`).
+
 **Nächste Einheit:** die restlichen Pipe-Blöcke im selben Loop —
-`dcn21_dpp_create`, `dcn21_opp_create`, `dcn21_timing_generator_create` (optc)
-— jeweils mit `dcgen.py` (neue `BLOCKS`-Einträge). Dazu `read_pipe_fuses`
+`dcn21_opp_create`, `dcn21_timing_generator_create` (optc) — jeweils mit
+`dcgen.py` (neue `BLOCKS`-Einträge). Dazu `read_pipe_fuses`
 (kompaktiert ausgefuste Pipes). Danach aux/i2c je ddc, mpc, hubbub, dsc, dwbc,
 mmhubbub, irq-Service, `resource_construct` + `dcn21_hw_sequencer_construct`,
 `dml_init_instance`. Die Konstruktoren schreiben KEIN Register (Zeiger +

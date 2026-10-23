@@ -33,16 +33,29 @@ L = os.path.expanduser("~/.cache/nopeekos/amdgpu-callgraph/linux-6.18.55-renoir"
 DC = L + "/drivers/gpu/drm/amd/display/dc"
 RESOURCE = "../display/dc/resource/dcn21/dcn21_resource.c"
 
-# Per block: the headers whose #define macros to extract, the reg-list and
-# mask-sh-list macro names, the pipe-instance count, and the regs.list const
-# prefix for the per-instance offsets.
+# Per block: the headers whose #define macros to extract, the #define-name
+# prefixes to take, the reg-list macro calls (templates with {i} for the pipe
+# instance, concatenated), the shift/mask macro calls (literal — the __SHIFT and
+# _MASK variants, each list concatenated), the pipe-instance count, the regs.list
+# const prefix for the per-instance offsets, and the three Rust struct names.
 BLOCKS = {
     "hubp": dict(
         headers=["hubp/dcn10/dcn10_hubp.h", "hubp/dcn20/dcn20_hubp.h", "hubp/dcn21/dcn21_hubp.h"],
         prefixes=["HUBP_", "DCN_HUBP"],
-        reg_list="HUBP_REG_LIST_DCN21", mask_list="HUBP_MASK_SH_LIST_DCN21",
+        reg_calls=["HUBP_REG_LIST_DCN21({i})"],
+        shift_calls=["HUBP_MASK_SH_LIST_DCN21(__SHIFT)"],
+        mask_calls=["HUBP_MASK_SH_LIST_DCN21(_MASK)"],
         instances=4, const_prefix="HUBP",
         regs_struct="dcn_hubp2_registers", shift_struct="dcn_hubp2_shift", mask_struct="dcn_hubp2_mask",
+    ),
+    "dpp": dict(
+        headers=["dpp/dcn10/dcn10_dpp.h", "dpp/dcn20/dcn20_dpp.h"],
+        prefixes=["TF_", "DPP_", "CM_"],
+        reg_calls=["TF_REG_LIST_DCN20({i})", "TF_REG_LIST_DCN20_COMMON_APPEND({i})"],
+        shift_calls=["TF_REG_LIST_SH_MASK_DCN20(__SHIFT)", "TF_DEBUG_REG_LIST_SH_DCN20"],
+        mask_calls=["TF_REG_LIST_SH_MASK_DCN20(_MASK)", "TF_DEBUG_REG_LIST_MASK_DCN20"],
+        instances=4, const_prefix="DPP",
+        regs_struct="dcn2_dpp_registers", shift_struct="dcn2_dpp_shift", mask_struct="dcn2_dpp_mask",
     ),
 }
 
@@ -84,20 +97,24 @@ def gen(block):
         b for h in [RESOURCE.replace("../display/dc/", "")] + cfg["headers"]
         for b in defines_from(DC + "/" + h, cfg["prefixes"])
     ) + "\n"
-    # field -> register, per instance
+    # field -> register, per instance (reg_calls concatenated)
     per_inst = []
     reg_fields = None
     for i in range(cfg["instances"]):
-        txt = expand(macros_h, f"{cfg['reg_list']}({i})")
+        txt = ",".join(expand(macros_h, c.format(i=i)) for c in cfg["reg_calls"])
         pairs = re.findall(r"\.(\w+)\s*=\s*[^,]*?\+\s*(mm\w+)", txt)
-        per_inst.append(dict(pairs))
+        per_inst.append(dict(pairs))  # a field set twice keeps the last (C last-wins)
         if reg_fields is None:
-            reg_fields = [f for f, _ in pairs]
-    # field -> shift/mask macro (last wins)
+            # unique field names, order-preserving; the value per field comes
+            # from the last-wins dict above, so a doubly-set field is correct.
+            reg_fields = list(dict.fromkeys(f for f, _ in pairs))
+    # field -> shift/mask macro (last wins; shift_calls/mask_calls concatenated)
     sh, mk = {}, {}
-    for f, mac in re.findall(r"\.(\w+)\s*=\s*(\w+)", expand(macros_h, f"{cfg['mask_list']}(__SHIFT)")):
+    for f, mac in re.findall(r"\.(\w+)\s*=\s*(\w+)",
+                             ",".join(expand(macros_h, c) for c in cfg["shift_calls"])):
         sh[f] = mac
-    for f, mac in re.findall(r"\.(\w+)\s*=\s*(\w+)", expand(macros_h, f"{cfg['mask_list']}(_MASK)")):
+    for f, mac in re.findall(r"\.(\w+)\s*=\s*(\w+)",
+                             ",".join(expand(macros_h, c) for c in cfg["mask_calls"])):
         mk[f] = mac
     fld_order = list(sh.keys())
 
@@ -109,7 +126,7 @@ def gen(block):
 
     # regs.list chunk
     rl = [f"# DC {block}: {cfg['regs_struct']} absolute offsets per pipe instance",
-          f"# ({cfg['reg_list']}) — field value is BASE(mmX_BASE_IDX)+mmX."]
+          f"# ({' + '.join(cfg['reg_calls'])}) — field value is BASE(mmX_BASE_IDX)+mmX."]
     for i in range(cfg["instances"]):
         for f in reg_fields:
             reg = per_inst[i][f]
@@ -117,9 +134,14 @@ def gen(block):
             if name not in existing:
                 rl.append(f"{name} = BASE({reg}_BASE_IDX) + {reg} @ {RESOURCE}")
                 existing.add(name)
-    rl.append(f"# DC {block} field shifts/masks ({cfg['mask_list']})")
+    rl.append(f"# DC {block} field shifts/masks ({' + '.join(cfg['shift_calls'])})")
     for f in fld_order:
         for mac in (sh[f], mk[f]):
+            # Some debug fields set a literal shift/mask (e.g. `.FIELD = 0x18`)
+            # rather than a REG__FIELD macro; a literal is inlined in the Rust
+            # static, not a named constant, so it never goes to regs.list.
+            if re.fullmatch(r"0x[0-9a-fA-F]+|\d+", mac):
+                continue
             if mac not in existing:
                 rl.append(f"{mac} @ {RESOURCE}")
                 existing.add(mac)
