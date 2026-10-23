@@ -127,3 +127,9 @@ mod native_gen;
 mod amdgpu_kms;
 #[path = "../src/amdgpu_virtio.rs"]
 mod amdgpu_virtio;
+#[path = "../src/bios_parser2.rs"]
+mod bios_parser2;
+#[path = "../src/command_table2.rs"]
+mod command_table2;
+#[path = "../src/dc_types.rs"]
+mod dc_types;

@@ -181,8 +181,8 @@ pub fn dc_create_resource_pool(
     let mut res_pool = dcn21_create_resource_pool(adev, init_data, dc);
 
     if let Some(pool) = res_pool.as_deref_mut() {
-        if dc.ctx.dc_bios.fw_info_valid {
-            pool.ref_clocks.xtalin_clock_inKhz = dc.ctx.dc_bios.fw_info.pll_info.crystal_frequency;
+        if dc.ctx.dc_bios.base.fw_info_valid {
+            pool.ref_clocks.xtalin_clock_inKhz = dc.ctx.dc_bios.base.fw_info.pll_info.crystal_frequency;
             pool.ref_clocks.dccg_ref_clock_inKhz = pool.ref_clocks.xtalin_clock_inKhz;
             pool.ref_clocks.dchub_ref_clock_inKhz = pool.ref_clocks.xtalin_clock_inKhz;
         }

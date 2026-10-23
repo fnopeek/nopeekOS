@@ -31,6 +31,7 @@ check() {
 check atom oracle_atom atom_check "$BIOS"
 check discovery oracle_discovery discovery_check "$DISC"
 check ucode oracle_ucode ucode_check "$FW"
+check bios oracle_bios bios_check "$BIOS"
 # The ATOM interpreter: the clock tables smu_v12_0 runs, every register
 # access compared. Linux prefixes DRM_ERROR, the port's log does not.
 rustc $RF "$HERE/atomexec_check.rs" -o "$B/atomexec_check"

@@ -374,11 +374,48 @@ python3 -I "$HERE/protos.py" "$B/jpeg_extracted.c" > "$B/jpeg_protos.h"
 } > "$B/smu_extracted.c"
 python3 -I "$HERE/protos.py" "$B/smu_extracted.c" > "$B/smu_protos.h"
 
+# The DC VBIOS parser: bios_parser2.c's construct path with the types it uses.
+DB=$AMD/display/dc/bios
+{
+    $X "$AMD/display/include/dal_types.h" dce_version
+    $X "$AMD/display/include/grph_object_id.h" object_type object_enum_id generic_id encoder_id connector_id \
+        graphics_object_id dal_graphics_object_id_init
+    $X "$AMD/display/include/grph_object_ctrl_defs.h" ddi_channel_mapping '#NUMBER_OF_UCHAR_FOR_GUID' \
+        '#MAX_NUMBER_OF_EXT_DISPLAY_PATH' '#NUMBER_OF_CSR_M3_ARB' '#NUMBER_OF_DISP_CLK_VOLTAGE' \
+        '#NUMBER_OF_AVAILABLE_SCLK' i2c_reg_info edp_info integrated_info dc_firmware_info dc_vram_info
+    $X "$AMD/display/include/bios_parser_types.h" bp_result bp_soc_bb_info
+    $X "$AMD/display/include/bios_parser_interface.h" bp_init_data
+    $X "$DB/bios_parser_types_internal2.h" atom_data_revision object_info_table
+    $X "$DB/bios_parser_helper.h" '#GET_IMAGE'
+    $X "$DB/bios_parser_types_internal2.h" '#BP_FROM_DCB'
+} > "$B/bios_types.h"
+{
+    $X "$DB/bios_parser_helper.c" bios_get_image
+    $X "$DB/bios_parser_common.c" object_type_from_bios_object_id enum_id_from_bios_object_id \
+        gpu_id_from_bios_object_id encoder_id_from_bios_object_id connector_id_from_bios_object_id \
+        generic_id_from_bios_object_id id_from_bios_object_id object_id_from_bios_object_id
+    $X "$DB/bios_parser2.c" '#SMU9_SYSPLL0_ID' '#BIOS_IMAGE_SIZE_OFFSET' '#BIOS_IMAGE_SIZE_UNIT' '#DATA_TABLES' \
+        get_atom_data_table_revision bios_parser_get_firmware_info get_firmware_info_v3_1 \
+        get_firmware_info_v3_2 get_firmware_info_v3_4 get_firmware_info_v3_5 get_integrated_info_v11 \
+        get_integrated_info_v2_1 get_integrated_info_v2_2 construct_integrated_info get_vram_info_v23 \
+        get_vram_info_v24 get_vram_info_v25 get_vram_info_v30 get_vram_info_from_umc_info_v40 \
+        bios_parser_get_vram_info get_soc_bb_info_v4_4 get_soc_bb_info_v4_5 bios_parser_get_soc_bb_info \
+        bios_parser_create_integrated_info bios_parser2_construct
+    $X "$DB/command_table2.c" '#GET_INDEX_INTO_MASTER_TABLE' '#BIOS_CMD_TABLE_REVISION' \
+        '#BIOS_CMD_TABLE_PARA_REVISION' bios_cmd_table_para_revision init_dig_encoder_control \
+        init_transmitter_control init_set_pixel_clock init_set_crtc_timing init_enable_crtc \
+        init_external_encoder_control init_enable_disp_power_gating init_set_dce_clock \
+        init_get_smu_clock_info init_enable_lvtma_control dal_firmware_parser_init_cmd_tbl
+    $X "$DB/command_table_helper2.c" dal_bios_parser_init_cmd_tbl_helper2
+} > "$B/bios_funcs.c"
+python3 -I "$HERE/protos.py" "$B/bios_funcs.c" > "$B/bios_protos.h"
+
 CF="-O0 -w -DCONFIG_X86 -DCONFIG_X86_64 -DLITTLEENDIAN_CPU -include linux/types.h -I $HERE/shim -I $B -I $AMD/include -I $AMD/amdgpu"
 gcc $CF -c "$B/atom.c" -o "$B/atom.o"
 gcc $CF "$HERE/main.c" "$B/atom.o" -o "$B/oracle_atom"
 gcc $CF "$HERE/main_atomexec.c" "$B/atom.o" -o "$B/oracle_atomexec"
 gcc $CF "$HERE/main_dmub.c" -o "$B/oracle_dmub"
+gcc $CF "$HERE/main_bios.c" "$B/atom.o" -o "$B/oracle_bios"
 gcc $CF "$HERE/main_psp.c" -o "$B/oracle_psp"
 gcc $CF "$HERE/main_discovery.c" -o "$B/oracle_discovery"
 gcc $CF -I "$AMD/display/include" "$HERE/main_ucode.c" -o "$B/oracle_ucode"

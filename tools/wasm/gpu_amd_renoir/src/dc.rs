@@ -10,21 +10,24 @@
 
 use crate::amdgpu_device::amdgpu_device;
 use crate::dc_resource::{dc_create_resource_pool, resource_parse_asic_id, resource_pool, NO_UNDERLAY_PIPE};
+use crate::gpio_service::{dal_gpio_service_create, gpio_service};
+use crate::bios_parser2::{bios_parser, bp_init_data, dal_bios_parser_create};
 use crate::dc_types::{
-    dc_bios, dc_caps, dce_environment, dce_version, dc_versions, dp_protocol_version, hw_asic_id, DC_VER,
+    dc_caps, dce_environment, dce_version, dc_versions, dp_protocol_version, hw_asic_id, DC_VER,
 };
 use alloc::boxed::Box;
 
 /// `struct dc_context` (dc_types.h): the per-device DC context. Sub-block
-/// handles (dmub_srv, perf_trace, …) join as their stages land. Linux' `dc_bios`
-/// is a pointer; the port holds it by value until bios_parser2 lands (see
-/// `dc_bios`).
+/// handles (dmub_srv, gpio_service, …) join as their stages land. `dc_bios`
+/// owns the parser (Linux points at `bios_parser.base`).
 #[derive(Default)]
 pub struct dc_context {
     pub dce_environment: dce_environment,
     pub asic_id: hw_asic_id,
     pub dce_version: dce_version,
-    pub dc_bios: dc_bios,
+    pub dc_bios: Box<bios_parser>,
+    pub created_bios: bool,
+    pub gpio_service: Option<Box<gpio_service>>,
     pub dc_sink_id_count: u32,
     pub dc_stream_id_count: u32,
     pub dc_edp_id_count: u32,
@@ -125,8 +128,19 @@ fn dc_construct(adev: &amdgpu_device, dc: &mut dc, init_params: &dc_init_data) -
         return false;
     }
 
-    // dc_ctx->dc_bios = dal_bios_parser_create(): bios_parser2.
-    // dc_ctx->gpio_service = dal_gpio_service_create(DCN_VERSION_2_1, ...).
+    // Create BIOS parser (no vbios_override on this path).
+    let bp_init_data = bp_init_data { bios: &adev.bios };
+    match dal_bios_parser_create(adev, &bp_init_data, dce_version::DCN_VERSION_2_1) {
+        Some(bp) => dc.ctx.dc_bios = bp,
+        None => return false,
+    }
+    dc.ctx.created_bios = true;
+
+    // Create GPIO service
+    dc.ctx.gpio_service = dal_gpio_service_create(dce_version::DCN_VERSION_2_1, dc.ctx.dce_environment);
+    if dc.ctx.gpio_service.is_none() {
+        return false;
+    }
 
     dc.res_pool = dc_create_resource_pool(adev, dc, init_params);
     if dc.res_pool.is_none() {

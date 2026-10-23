@@ -113,34 +113,260 @@ pub const MAX_SURFACES: usize = 4;
 /// `#define MAX_PIPES` (inc/hw/hw_shared.h): the DCN pipe arrays' bound.
 pub const MAX_PIPES: usize = 6;
 
-/// `struct dc_firmware_info` (include/grph_object_ctrl_defs.h): ported
-/// grow-as-reached — the clock-source construct reads only
-/// `external_clock_source_frequency_for_dp`, so only that field is here.
-#[derive(Default, Clone, Copy)]
+/// `struct dc_firmware_info` (include/grph_object_ctrl_defs.h).
+#[derive(Default, Clone, Copy, Debug)]
 pub struct dc_firmware_info {
-    /// `struct pll_info pll_info` — the hw-i2c construct reads
-    /// `pll_info.crystal_frequency`.
     pub pll_info: pll_info,
+    pub feature: firmware_feature,
+    /// In KHz.
+    pub default_display_engine_pll_frequency: u32,
     /// In KHz.
     pub external_clock_source_frequency_for_dp: u32,
-}
-
-/// `struct pll_info` (the inline member of `dc_firmware_info`): only
-/// `crystal_frequency` is reached so far (hw-i2c `reference_frequency`).
-#[derive(Default, Clone, Copy)]
-pub struct pll_info {
     /// In KHz.
-    pub crystal_frequency: u32,
+    pub smu_gpu_pll_output_freq: u32,
+    pub min_allowed_bl_level: u8,
+    pub remote_display_config: u8,
+    /// In KHz.
+    pub default_memory_clk: u32,
+    /// In KHz.
+    pub default_engine_clk: u32,
+    /// In KHz - DCE12 only.
+    pub dp_phy_ref_clk: u32,
+    /// In KHz - DCE12 only.
+    pub i2c_engine_ref_clk: u32,
+    pub oem_i2c_present: bool,
+    pub oem_i2c_obj_id: u8,
 }
 
-/// `struct dc_bios` (dc/dc_bios_types.h): the VBIOS interface a `dc_context`
-/// points at. Linux holds it by pointer (owned by the BIOS parser); until
-/// bios_parser2 lands the port carries the reached fields by value — the
-/// clock-source path reads `fw_info` and `fw_info_valid`.
+/// `struct pll_info` (the inline member of `dc_firmware_info`), in KHz.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct pll_info {
+    pub crystal_frequency: u32,
+    pub min_input_pxl_clk_pll_frequency: u32,
+    pub max_input_pxl_clk_pll_frequency: u32,
+    pub min_output_pxl_clk_pll_frequency: u32,
+    pub max_output_pxl_clk_pll_frequency: u32,
+}
+
+/// `struct firmware_feature` (the inline member of `dc_firmware_info`).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct firmware_feature {
+    pub memory_clk_ss_percentage: u32,
+    pub engine_clk_ss_percentage: u32,
+}
+
+/// `struct dc_vram_info` (include/grph_object_ctrl_defs.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dc_vram_info {
+    pub num_chans: u32,
+    pub dram_channel_width_bytes: u32,
+}
+
+/// `struct dc_bios` (dc/dc_bios_types.h): the base of `bios_parser`. The
+/// image pointer is not stored (see bios_parser2.rs); `regs` joins with the
+/// BIOS scratch accessors, `bb_info` with a DCN 3.x VBIOS.
 #[derive(Default)]
 pub struct dc_bios {
+    pub bios_size: u32,
+    pub integrated_info: Option<alloc::boxed::Box<integrated_info>>,
     pub fw_info: dc_firmware_info,
     pub fw_info_valid: bool,
+    pub vram_info: dc_vram_info,
+}
+
+/// `enum object_type` (include/grph_object_id.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum object_type {
+    #[default]
+    OBJECT_TYPE_UNKNOWN = 0,
+    OBJECT_TYPE_GPU,
+    OBJECT_TYPE_ENCODER,
+    OBJECT_TYPE_CONNECTOR,
+    OBJECT_TYPE_ROUTER,
+    OBJECT_TYPE_GENERIC,
+    OBJECT_TYPE_AUDIO,
+    OBJECT_TYPE_CONTROLLER,
+    OBJECT_TYPE_CLOCK_SOURCE,
+    OBJECT_TYPE_ENGINE,
+}
+
+/// `enum object_enum_id` (include/grph_object_id.h).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum object_enum_id {
+    #[default]
+    ENUM_ID_UNKNOWN = 0,
+    ENUM_ID_1,
+    ENUM_ID_2,
+    ENUM_ID_3,
+    ENUM_ID_4,
+    ENUM_ID_5,
+    ENUM_ID_6,
+    ENUM_ID_7,
+}
+
+/// `struct graphics_object_id` (include/grph_object_id.h). Linux packs it
+/// into a u32 bitfield (`id:8`, `enum_id:4`, `type:4`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct graphics_object_id {
+    pub id: u32,
+    pub enum_id: object_enum_id,
+    pub r#type: object_type,
+}
+
+impl graphics_object_id {
+    /// `dal_graphics_object_id_init`.
+    pub fn init(id: u32, enum_id: object_enum_id, r#type: object_type) -> Self {
+        graphics_object_id { id: id & 0xff, enum_id, r#type }
+    }
+}
+
+/// Sizes of `integrated_info` (include/grph_object_ctrl_defs.h).
+pub const NUMBER_OF_UCHAR_FOR_GUID: usize = 16;
+pub const MAX_NUMBER_OF_EXT_DISPLAY_PATH: usize = 7;
+pub const NUMBER_OF_CSR_M3_ARB: usize = 10;
+pub const NUMBER_OF_DISP_CLK_VOLTAGE: usize = 4;
+pub const NUMBER_OF_AVAILABLE_SCLK: usize = 5;
+
+/// `struct i2c_reg_info`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct i2c_reg_info {
+    pub i2c_reg_index: u8,
+    pub i2c_reg_val: u8,
+}
+
+/// `struct edp_info`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct edp_info {
+    pub edp_backlight_pwm_hz: u16,
+    pub edp_ss_percentage: u16,
+    pub edp_ss_rate_10hz: u16,
+    pub edp_pwr_on_off_delay: u8,
+    pub edp_pwr_on_vary_bl_to_blon: u8,
+    pub edp_pwr_down_bloff_to_vary_bloff: u8,
+    pub edp_panel_bpc: u8,
+    pub edp_bootup_bl_level: u8,
+}
+
+/// `struct clock_voltage_caps` (in `integrated_info`).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct clock_voltage_caps {
+    pub voltage_index: u32,
+    /// In KHz.
+    pub max_supported_clk: u32,
+}
+
+/// `struct external_display_path` (in `integrated_info`). `channel_mapping`
+/// is `union ddi_channel_mapping` as its raw byte.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct external_display_path {
+    pub device_tag: u32,
+    pub device_acpi_enum: u32,
+    pub device_connector_id: graphics_object_id,
+    pub ext_aux_ddc_lut_index: u8,
+    pub ext_hpd_pin_lut_index: u8,
+    pub ext_encoder_obj_id: graphics_object_id,
+    pub channel_mapping: u8,
+    pub caps: u16,
+}
+
+/// `struct display_connection_info` (in `integrated_info`).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct display_connection_info {
+    pub path: [external_display_path; MAX_NUMBER_OF_EXT_DISPLAY_PATH],
+    pub gu_id: [u8; NUMBER_OF_UCHAR_FOR_GUID],
+    pub checksum: u8,
+    pub fixdpvoltageswing: u8,
+}
+
+/// `struct available_s_clk_list` (in `integrated_info`).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct available_s_clk_list {
+    /// In KHz.
+    pub supported_s_clk: u32,
+    pub voltage_index: u32,
+    pub voltage_id: u32,
+}
+
+/// `struct integrated_info` (include/grph_object_ctrl_defs.h).
+#[derive(Default, Clone, Debug)]
+pub struct integrated_info {
+    pub disp_clk_voltage: [clock_voltage_caps; NUMBER_OF_DISP_CLK_VOLTAGE],
+    pub ext_disp_conn_info: display_connection_info,
+    pub avail_s_clk: [available_s_clk_list; NUMBER_OF_AVAILABLE_SCLK],
+    pub memory_type: u8,
+    pub ma_channel_number: u8,
+    pub boot_up_engine_clock: u32,
+    pub dentist_vco_freq: u32,
+    pub boot_up_uma_clock: u32,
+    pub boot_up_req_display_vector: u32,
+    pub other_display_misc: u32,
+    pub gpu_cap_info: u32,
+    pub sb_mmio_base_addr: u32,
+    pub system_config: u32,
+    pub cpu_cap_info: u32,
+    pub max_nb_voltage: u32,
+    pub min_nb_voltage: u32,
+    pub boot_up_nb_voltage: u32,
+    pub ext_disp_conn_info_offset: u32,
+    pub csr_m3_arb_cntl_default: [u32; NUMBER_OF_CSR_M3_ARB],
+    pub csr_m3_arb_cntl_uvd: [u32; NUMBER_OF_CSR_M3_ARB],
+    pub csr_m3_arb_cntl_fs3d: [u32; NUMBER_OF_CSR_M3_ARB],
+    pub gmc_restore_reset_time: u32,
+    pub minimum_n_clk: u32,
+    pub idle_n_clk: u32,
+    pub ddr_dll_power_up_time: u32,
+    pub ddr_pll_power_up_time: u32,
+    pub pcie_clk_ss_type: u32,
+    pub lvds_ss_percentage: u32,
+    pub lvds_sspread_rate_in_10hz: u32,
+    pub hdmi_ss_percentage: u32,
+    pub hdmi_sspread_rate_in_10hz: u32,
+    pub dvi_ss_percentage: u32,
+    pub dvi_sspread_rate_in_10_hz: u32,
+    pub sclk_dpm_boost_margin: u32,
+    pub sclk_dpm_throttle_margin: u32,
+    pub sclk_dpm_tdp_limit_pg: u32,
+    pub sclk_dpm_tdp_limit_boost: u32,
+    pub boost_engine_clock: u32,
+    pub boost_vid_2bit: u32,
+    pub enable_boost: u32,
+    pub gnb_tdp_limit: u32,
+    pub max_lvds_pclk_freq_in_single_link: u32,
+    pub lvds_misc: u32,
+    pub lvds_pwr_on_seq_dig_on_to_de_in_4ms: u32,
+    pub lvds_pwr_on_seq_de_to_vary_bl_in_4ms: u32,
+    pub lvds_pwr_off_seq_vary_bl_to_de_in4ms: u32,
+    pub lvds_pwr_off_seq_de_to_dig_on_in4ms: u32,
+    pub lvds_off_to_on_delay_in_4ms: u32,
+    pub lvds_pwr_on_seq_vary_bl_to_blon_in_4ms: u32,
+    pub lvds_pwr_off_seq_blon_to_vary_bl_in_4ms: u32,
+    pub lvds_reserved1: u32,
+    pub lvds_bit_depth_control_val: u32,
+    pub dp0_ext_hdmi_slv_addr: u8,
+    pub dp0_ext_hdmi_reg_num: u8,
+    pub dp0_ext_hdmi_reg_settings: [i2c_reg_info; 9],
+    pub dp0_ext_hdmi_6g_reg_num: u8,
+    pub dp0_ext_hdmi_6g_reg_settings: [i2c_reg_info; 3],
+    pub dp1_ext_hdmi_slv_addr: u8,
+    pub dp1_ext_hdmi_reg_num: u8,
+    pub dp1_ext_hdmi_reg_settings: [i2c_reg_info; 9],
+    pub dp1_ext_hdmi_6g_reg_num: u8,
+    pub dp1_ext_hdmi_6g_reg_settings: [i2c_reg_info; 3],
+    pub dp2_ext_hdmi_slv_addr: u8,
+    pub dp2_ext_hdmi_reg_num: u8,
+    pub dp2_ext_hdmi_reg_settings: [i2c_reg_info; 9],
+    pub dp2_ext_hdmi_6g_reg_num: u8,
+    pub dp2_ext_hdmi_6g_reg_settings: [i2c_reg_info; 3],
+    pub dp3_ext_hdmi_slv_addr: u8,
+    pub dp3_ext_hdmi_reg_num: u8,
+    pub dp3_ext_hdmi_reg_settings: [i2c_reg_info; 9],
+    pub dp3_ext_hdmi_6g_reg_num: u8,
+    pub dp3_ext_hdmi_6g_reg_settings: [i2c_reg_info; 3],
+    pub dp_ss_control: u32,
+    pub edp1_info: edp_info,
+    pub edp2_info: edp_info,
+    pub gpuclk_ss_percentage: u32,
+    pub gpuclk_ss_type: u32,
 }
 
 /// `enum engine_id` (include/grph_object_id.h): the DIG/DAC/HPO encoder

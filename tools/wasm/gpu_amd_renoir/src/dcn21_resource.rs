@@ -275,7 +275,7 @@ pub fn dcn21_resource_construct(
     // Create resources: the clock sources. CLOCK_SOURCE_COMBO_PHY_PLL0..4 use
     // clk_src_regs[0..4]; the DP-DTO source reuses clk_src_regs[0] (Linux'
     // "todo: not reuse phy_pll registers").
-    let bios = &dc.ctx.dc_bios;
+    let bios = &dc.ctx.dc_bios.base;
     pool.clock_sources[DCN20_CLK_SRC_PLL0] = dcn21_clock_source_create(
         bios, clock_source_id::CLOCK_SOURCE_COMBO_PHY_PLL0, &CLK_SRC_REGS[0], false);
     pool.clock_sources[DCN20_CLK_SRC_PLL1] = dcn21_clock_source_create(
@@ -316,7 +316,7 @@ pub fn dcn21_resource_construct(
     let ext_aux = dc.caps.extended_aux_timeout_support;
     for i in 0..RES_CAP_RN.num_ddc as usize {
         pool.engines[i] = Some(dcn21_aux_engine_create(i as u32, ext_aux));
-        pool.hw_i2cs[i] = Some(dcn21_i2c_hw_create(&dc.ctx.dc_bios, i as u32));
+        pool.hw_i2cs[i] = Some(dcn21_i2c_hw_create(&dc.ctx.dc_bios.base, i as u32));
     }
 
     // Linux then sets the live-pipe counts to j, before mpc and hubbub.

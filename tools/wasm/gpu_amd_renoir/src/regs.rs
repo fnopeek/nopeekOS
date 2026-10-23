@@ -22259,3 +22259,273 @@ pub const ixAZALIA_F0_CODEC_PIN_CONTROL_RESPONSE_CONFIGURATION_DEFAULT: u32 = 0x
 pub const AZALIA_F0_CODEC_PIN_CONTROL_RESPONSE_CONFIGURATION_DEFAULT__PORT_CONNECTIVITY__SHIFT: u32 = 0x1e;
 /// include/asic_reg/dce/dce_10_0_sh_mask.h:13866
 pub const AZALIA_F0_CODEC_PIN_CONTROL_RESPONSE_CONFIGURATION_DEFAULT__PORT_CONNECTIVITY_MASK: u32 = 0xc0000000;
+
+// bios_parser2 (dc/bios/bios_parser2.c, atomfirmware.h): the construct path
+/// The value of `OFFSET_TO_ATOM_ROM_HEADER_POINTER` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OFFSET_TO_ATOM_ROM_HEADER_POINTER: u32 = 0x48;
+/// The value of `OFFSET_TO_ATOM_ROM_IMAGE_SIZE` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OFFSET_TO_ATOM_ROM_IMAGE_SIZE: u32 = 0x2;
+/// The value of `BIOS_IMAGE_SIZE_UNIT` in ../display/dc/bios/bios_parser2.c
+pub const BP2_BIOS_IMAGE_SIZE_UNIT: u32 = 0x200;
+/// The value of `sizeof(struct atom_rom_header_v2_2)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ROM_HEADER_SIZE: u32 = 0x28;
+/// The value of `offsetof(struct atom_rom_header_v2_2, masterdatatable_offset)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_ROM_HEADER_MASTERDATATABLE: u32 = 0x20;
+/// The value of `sizeof(struct atom_master_data_table_v2_1)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_MASTER_DATA_TABLE_SIZE: u32 = 0x4a;
+/// The value of `offsetof(struct atom_master_data_table_v2_1, listOfdatatables.firmwareinfo)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DT_firmwareinfo: u32 = 0xc;
+/// The value of `offsetof(struct atom_master_data_table_v2_1, listOfdatatables.smu_info)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DT_smu_info: u32 = 0x14;
+/// The value of `offsetof(struct atom_master_data_table_v2_1, listOfdatatables.displayobjectinfo)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DT_displayobjectinfo: u32 = 0x30;
+/// The value of `offsetof(struct atom_master_data_table_v2_1, listOfdatatables.umc_info)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DT_umc_info: u32 = 0x34;
+/// The value of `offsetof(struct atom_master_data_table_v2_1, listOfdatatables.dce_info)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DT_dce_info: u32 = 0x3a;
+/// The value of `offsetof(struct atom_master_data_table_v2_1, listOfdatatables.vram_info)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DT_vram_info: u32 = 0x3c;
+/// The value of `offsetof(struct atom_master_data_table_v2_1, listOfdatatables.integratedsysteminfo)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DT_integratedsysteminfo: u32 = 0x40;
+/// The value of `sizeof(struct atom_common_table_header)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_COMMON_HDR_SIZE: u32 = 0x4;
+/// The value of `offsetof(struct atom_common_table_header, format_revision)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_HDR_FORMAT_REVISION: u32 = 0x2;
+/// The value of `offsetof(struct atom_common_table_header, content_revision)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_HDR_CONTENT_REVISION: u32 = 0x3;
+/// The value of `sizeof(struct display_object_info_table_v1_4)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OBJINFO_V1_4_SIZE: u32 = 0x8;
+/// The value of `sizeof(struct display_object_info_table_v1_5)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_OBJINFO_V1_5_SIZE: u32 = 0x8;
+/// The value of `sizeof(struct atom_firmware_info_v3_1)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_FWI31_SIZE: u32 = 0x48;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, bootup_sclk_in10khz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_FWI31_BOOTUP_SCLK_IN10KHZ: u32 = 0x8;
+/// The value of `offsetof(struct atom_firmware_info_v3_1, bootup_mclk_in10khz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_FWI31_BOOTUP_MCLK_IN10KHZ: u32 = 0xc;
+/// The value of `sizeof(struct atom_firmware_info_v3_2)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_FWI32_SIZE: u32 = 0x48;
+/// The value of `offsetof(struct atom_firmware_info_v3_2, bootup_mclk_in10khz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_FWI32_BOOTUP_MCLK_IN10KHZ: u32 = 0xc;
+/// The value of `offsetof(struct atom_firmware_info_v3_2, board_i2c_feature_id)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_FWI32_BOARD_I2C_FEATURE_ID: u32 = 0x30;
+/// The value of `offsetof(struct atom_firmware_info_v3_2, board_i2c_feature_gpio_id)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_FWI32_BOARD_I2C_FEATURE_GPIO_ID: u32 = 0x31;
+/// The value of `sizeof(struct atom_display_controller_info_v4_1)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_SIZE: u32 = 0x38;
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, dce_refclk_10khz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_DCE_REFCLK_10KHZ: u32 = 0xc;
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, i2c_engine_refclk_10khz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_I2C_ENGINE_REFCLK_10KHZ: u32 = 0xe;
+/// The value of `offsetof(struct atom_display_controller_info_v4_1, dpphy_refclk_10khz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_DCEI41_DPPHY_REFCLK_10KHZ: u32 = 0x24;
+/// The value of `sizeof(struct atom_smu_info_v3_2)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI32_SIZE: u32 = 0x54;
+/// The value of `offsetof(struct atom_smu_info_v3_2, bootup_dcefclk_10khz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI32_BOOTUP_DCEFCLK_10KHZ: u32 = 0x38;
+/// The value of `sizeof(struct atom_smu_info_v3_3)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI33_SIZE: u32 = 0x5c;
+/// The value of `offsetof(struct atom_smu_info_v3_3, bootup_dcefclk_10khz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_SMUI33_BOOTUP_DCEFCLK_10KHZ: u32 = 0x38;
+/// The value of `sizeof(struct atom_integrated_system_info_v1_11)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_SIZE: u32 = 0x400;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, gpucapinfo)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_GPUCAPINFO: u32 = 0x8;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, system_config)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_SYSTEM_CONFIG: u32 = 0xc;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, cpucapinfo)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_CPUCAPINFO: u32 = 0x10;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, memorytype)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_MEMORYTYPE: u32 = 0x2a;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, umachannelnumber)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_UMACHANNELNUMBER: u32 = 0x2b;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, lvds_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_LVDS_SS_PERCENTAGE: u32 = 0x18;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, reserved1)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_RESERVED1: u32 = 0x36;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, lvds_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_LVDS_SS_RATE_10HZ: u32 = 0x1a;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, hdmi_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_HDMI_SS_PERCENTAGE: u32 = 0x1c;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, hdmi_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_HDMI_SS_RATE_10HZ: u32 = 0x1e;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, dvi_ss_percentage)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_DVI_SS_PERCENTAGE: u32 = 0x20;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, dvi_ss_rate_10hz)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_DVI_SS_RATE_10HZ: u32 = 0x22;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, lvds_misc)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_LVDS_MISC: u32 = 0x26;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, extdispconninfo.guid)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_EXTDISPCONNINFO_GUID: u32 = 0x3c;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, extdispconninfo.path)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_EXTDISPCONNINFO_PATH: u32 = 0x4c;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, extdispconninfo.checksum)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_EXTDISPCONNINFO_CHECKSUM: u32 = 0xbc;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, dp0_retimer_set)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_DP0_RETIMER_SET: u32 = 0x1e4;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, dp1_retimer_set)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_DP1_RETIMER_SET: u32 = 0x1ff;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, dp2_retimer_set)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_DP2_RETIMER_SET: u32 = 0x21a;
+/// The value of `offsetof(struct atom_integrated_system_info_v1_11, dp3_retimer_set)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_IGP11_DP3_RETIMER_SET: u32 = 0x235;
+/// The value of `sizeof(struct atom_ext_display_path)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_EXTPATH_SIZE: u32 = 0x10;
+/// The value of `offsetof(struct atom_ext_display_path, device_tag)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_EXTPATH_DEVICE_TAG: u32 = 0x0;
+/// The value of `offsetof(struct atom_ext_display_path, device_acpi_enum)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_EXTPATH_DEVICE_ACPI_ENUM: u32 = 0x2;
+/// The value of `offsetof(struct atom_ext_display_path, connectorobjid)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_EXTPATH_CONNECTOROBJID: u32 = 0x4;
+/// The value of `offsetof(struct atom_ext_display_path, auxddclut_index)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_EXTPATH_AUXDDCLUT_INDEX: u32 = 0x6;
+/// The value of `offsetof(struct atom_ext_display_path, hpdlut_index)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_EXTPATH_HPDLUT_INDEX: u32 = 0x7;
+/// The value of `offsetof(struct atom_ext_display_path, ext_encoder_objid)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_EXTPATH_EXT_ENCODER_OBJID: u32 = 0x8;
+/// The value of `offsetof(struct atom_ext_display_path, channelmapping)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_EXTPATH_CHANNELMAPPING: u32 = 0xa;
+/// The value of `offsetof(struct atom_ext_display_path, caps)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_EXTPATH_CAPS: u32 = 0xc;
+/// The value of `offsetof(struct atom_hdmi_retimer_redriver_set, HdmiSlvAddr)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_RETIMER_HDMISLVADDR: u32 = 0x0;
+/// The value of `offsetof(struct atom_hdmi_retimer_redriver_set, HdmiRegNum)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_RETIMER_HDMIREGNUM: u32 = 0x1;
+/// The value of `offsetof(struct atom_hdmi_retimer_redriver_set, Hdmi6GRegNum)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_RETIMER_HDMI6GREGNUM: u32 = 0x2;
+/// The value of `offsetof(struct atom_hdmi_retimer_redriver_set, HdmiRegSetting)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_RETIMER_HDMIREGSETTING: u32 = 0x3;
+/// The value of `offsetof(struct atom_hdmi_retimer_redriver_set, Hdmi6GhzRegSetting)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_RETIMER_HDMI6GHZREGSETTING: u32 = 0x15;
+/// The value of `sizeof(struct atom_i2c_reg_info)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_I2CREG_SIZE: u32 = 0x2;
+/// The value of `offsetof(struct atom_i2c_reg_info, ucI2cRegIndex)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_I2CREG_UCI2CREGINDEX: u32 = 0x0;
+/// The value of `offsetof(struct atom_i2c_reg_info, ucI2cRegVal)` in ../display/dc/bios/bios_parser2.c
+pub const BP2_I2CREG_UCI2CREGVAL: u32 = 0x1;
+
+// The command tables dal_firmware_parser_init_cmd_tbl versions (command_table2.c)
+/// The value of `offsetof(struct atom_master_list_of_command_functions_v2_1, digxencodercontrol) / sizeof(uint16_t)` in ../display/dc/bios/command_table2.c
+pub const BP2_CMD_DIGXENCODERCONTROL: u32 = 0x4;
+/// The value of `offsetof(struct atom_master_list_of_command_functions_v2_1, dig1transmittercontrol) / sizeof(uint16_t)` in ../display/dc/bios/command_table2.c
+pub const BP2_CMD_DIG1TRANSMITTERCONTROL: u32 = 0x4c;
+/// The value of `offsetof(struct atom_master_list_of_command_functions_v2_1, setpixelclock) / sizeof(uint16_t)` in ../display/dc/bios/command_table2.c
+pub const BP2_CMD_SETPIXELCLOCK: u32 = 0xc;
+/// The value of `offsetof(struct atom_master_list_of_command_functions_v2_1, setcrtc_usingdtdtiming) / sizeof(uint16_t)` in ../display/dc/bios/command_table2.c
+pub const BP2_CMD_SETCRTC_USINGDTDTIMING: u32 = 0x31;
+/// The value of `offsetof(struct atom_master_list_of_command_functions_v2_1, enablecrtc) / sizeof(uint16_t)` in ../display/dc/bios/command_table2.c
+pub const BP2_CMD_ENABLECRTC: u32 = 0x23;
+/// The value of `offsetof(struct atom_master_list_of_command_functions_v2_1, externalencodercontrol) / sizeof(uint16_t)` in ../display/dc/bios/command_table2.c
+pub const BP2_CMD_EXTERNALENCODERCONTROL: u32 = 0x32;
+/// The value of `offsetof(struct atom_master_list_of_command_functions_v2_1, enabledisppowergating) / sizeof(uint16_t)` in ../display/dc/bios/command_table2.c
+pub const BP2_CMD_ENABLEDISPPOWERGATING: u32 = 0xd;
+/// The value of `offsetof(struct atom_master_list_of_command_functions_v2_1, setdceclock) / sizeof(uint16_t)` in ../display/dc/bios/command_table2.c
+pub const BP2_CMD_SETDCECLOCK: u32 = 0x2e;
+
+// Object IDs (ObjectID.h) — object_id_from_bios_object_id (bios_parser_common.c)
+/// The value of `OBJECT_TYPE_MASK` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_OBJECT_TYPE_MASK: u32 = 0x7000;
+/// The value of `OBJECT_TYPE_SHIFT` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_OBJECT_TYPE_SHIFT: u32 = 0xc;
+/// The value of `ENUM_ID_MASK` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENUM_ID_MASK: u32 = 0x700;
+/// The value of `ENUM_ID_SHIFT` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENUM_ID_SHIFT: u32 = 0x8;
+/// The value of `OBJECT_ID_MASK` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_OBJECT_ID_MASK: u32 = 0xff;
+/// The value of `OBJECT_ID_SHIFT` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_OBJECT_ID_SHIFT: u32 = 0x0;
+/// The value of `GRAPH_OBJECT_TYPE_GPU` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_TYPE_GPU: u32 = 0x1;
+/// The value of `GRAPH_OBJECT_TYPE_ENCODER` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_TYPE_ENCODER: u32 = 0x2;
+/// The value of `GRAPH_OBJECT_TYPE_CONNECTOR` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_TYPE_CONNECTOR: u32 = 0x3;
+/// The value of `GRAPH_OBJECT_TYPE_ROUTER` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_TYPE_ROUTER: u32 = 0x4;
+/// The value of `GRAPH_OBJECT_TYPE_GENERIC` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_TYPE_GENERIC: u32 = 0x7;
+/// The value of `GRAPH_OBJECT_ENUM_ID1` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_ENUM_ID1: u32 = 0x1;
+/// The value of `GRAPH_OBJECT_ENUM_ID2` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_ENUM_ID2: u32 = 0x2;
+/// The value of `GRAPH_OBJECT_ENUM_ID3` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_ENUM_ID3: u32 = 0x3;
+/// The value of `GRAPH_OBJECT_ENUM_ID4` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_ENUM_ID4: u32 = 0x4;
+/// The value of `GRAPH_OBJECT_ENUM_ID5` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_ENUM_ID5: u32 = 0x5;
+/// The value of `GRAPH_OBJECT_ENUM_ID6` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_ENUM_ID6: u32 = 0x6;
+/// The value of `GRAPH_OBJECT_ENUM_ID7` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GRAPH_OBJECT_ENUM_ID7: u32 = 0x7;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_LVDS` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_LVDS: u32 = 0x1;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_TMDS1` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_TMDS1: u32 = 0x2;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_TMDS2` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_TMDS2: u32 = 0x3;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_DAC1` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_DAC1: u32 = 0x4;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_DAC2` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_DAC2: u32 = 0x5;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_LVTM1` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_LVTM1: u32 = 0xf;
+/// The value of `ENCODER_OBJECT_ID_HDMI_INTERNAL` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_HDMI_INTERNAL: u32 = 0x12;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_KLDSCP_TMDS1` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_KLDSCP_TMDS1: u32 = 0x13;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_KLDSCP_DAC1` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_KLDSCP_DAC1: u32 = 0x15;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_KLDSCP_DAC2` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_KLDSCP_DAC2: u32 = 0x16;
+/// The value of `ENCODER_OBJECT_ID_MVPU_FPGA` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_MVPU_FPGA: u32 = 0x18;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_DDI` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_DDI: u32 = 0x19;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_UNIPHY` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_UNIPHY: u32 = 0x1e;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_KLDSCP_LVTMA` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_KLDSCP_LVTMA: u32 = 0x1f;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_UNIPHY1` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_UNIPHY1: u32 = 0x20;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_UNIPHY2` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_UNIPHY2: u32 = 0x21;
+/// The value of `ENCODER_OBJECT_ID_ALMOND` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_ALMOND: u32 = 0x22;
+/// The value of `ENCODER_OBJECT_ID_TRAVIS` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_TRAVIS: u32 = 0x23;
+/// The value of `ENCODER_OBJECT_ID_INTERNAL_UNIPHY3` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_ENCODER_OBJECT_ID_INTERNAL_UNIPHY3: u32 = 0x25;
+/// The value of `CONNECTOR_OBJECT_ID_SINGLE_LINK_DVI_I` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_SINGLE_LINK_DVI_I: u32 = 0x1;
+/// The value of `CONNECTOR_OBJECT_ID_DUAL_LINK_DVI_I` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_DUAL_LINK_DVI_I: u32 = 0x2;
+/// The value of `CONNECTOR_OBJECT_ID_SINGLE_LINK_DVI_D` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_SINGLE_LINK_DVI_D: u32 = 0x3;
+/// The value of `CONNECTOR_OBJECT_ID_DUAL_LINK_DVI_D` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_DUAL_LINK_DVI_D: u32 = 0x4;
+/// The value of `CONNECTOR_OBJECT_ID_VGA` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_VGA: u32 = 0x5;
+/// The value of `CONNECTOR_OBJECT_ID_HDMI_TYPE_A` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_HDMI_TYPE_A: u32 = 0xc;
+/// The value of `CONNECTOR_OBJECT_ID_LVDS` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_LVDS: u32 = 0xe;
+/// The value of `CONNECTOR_OBJECT_ID_PCIE_CONNECTOR` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_PCIE_CONNECTOR: u32 = 0x10;
+/// The value of `CONNECTOR_OBJECT_ID_HARDCODE_DVI` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_HARDCODE_DVI: u32 = 0x12;
+/// The value of `CONNECTOR_OBJECT_ID_DISPLAYPORT` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_DISPLAYPORT: u32 = 0x13;
+/// The value of `CONNECTOR_OBJECT_ID_eDP` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_eDP: u32 = 0x14;
+/// The value of `CONNECTOR_OBJECT_ID_MXM` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_MXM: u32 = 0x15;
+/// The value of `CONNECTOR_OBJECT_ID_USBC` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_CONNECTOR_OBJECT_ID_USBC: u32 = 0x17;
+/// The value of `GENERIC_OBJECT_ID_MXM_OPM` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GENERIC_OBJECT_ID_MXM_OPM: u32 = 0x3;
+/// The value of `GENERIC_OBJECT_ID_GLSYNC` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GENERIC_OBJECT_ID_GLSYNC: u32 = 0x1;
+/// The value of `GENERIC_OBJECT_ID_STEREO_PIN` in ../display/dc/bios/bios_parser_common.c
+pub const BP2_GENERIC_OBJECT_ID_STEREO_PIN: u32 = 0x4;
