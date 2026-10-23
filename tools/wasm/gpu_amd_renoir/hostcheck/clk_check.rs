@@ -158,8 +158,8 @@ fn main() {
     let mut ip = dcn20_fpu::dcn2_1_ip();
     ip.max_num_dpp = 4;
     ip.max_num_otg = 4;
-    dc.dml = Some(Box::new(dml_structs::dml_init_instance(&dcn20_fpu::dcn2_1_soc(), &ip,
-        dml_structs::dml_project::DML_PROJECT_DCN21)));
+    let dml = dc.dml.get_or_insert_with(dml_structs::DmlBox::zero);
+    dml_structs::dml_init_instance(dml, &dcn20_fpu::dcn2_1_soc(), &ip, dml_structs::DML_PROJECT_DCN21);
     dcn20_fpu::dcn21_update_bw_bounding_box(&mut dc);
     let dml = dc.dml.as_deref().unwrap();
     let b = dc.clk_mgr.as_deref().unwrap().base.bw_params.as_deref().unwrap();

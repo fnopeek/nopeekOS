@@ -144,14 +144,42 @@ impl clk_mgr_funcs_id {
 /// `enum dcn_pwr_state` (dc.h).
 pub const DCN_PWR_STATE_UNKNOWN: i32 = -1;
 
-/// `struct dc_clocks` (dc.h), the members reached.
+/// `struct dc_clocks` (dc.h). `zstate_support` is `enum
+/// dcn_zstate_support_state`, `dtm_level` `enum dtm_pstate`.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct dc_clocks {
     pub dispclk_khz: i32,
+    pub actual_dispclk_khz: i32,
     pub dppclk_khz: i32,
+    pub actual_dppclk_khz: i32,
+    pub disp_dpp_voltage_level_khz: i32,
+    pub dcfclk_khz: i32,
+    pub socclk_khz: i32,
+    pub dcfclk_deep_sleep_khz: i32,
+    pub fclk_khz: i32,
+    pub phyclk_khz: i32,
+    pub dramclk_khz: i32,
     pub p_state_change_support: bool,
-    pub prev_p_state_change_support: bool,
+    pub zstate_support: u32,
+    pub dtbclk_en: bool,
+    pub ref_dtbclk_khz: i32,
+    pub fclk_p_state_change_support: bool,
     pub pwr_state: i32,
+    pub prev_p_state_change_support: bool,
+    pub fclk_prev_p_state_change_support: bool,
+    pub num_ways: i32,
+    pub fw_based_mclk_switching: bool,
+    pub fw_based_mclk_switching_shut_down: bool,
+    pub prev_num_ways: i32,
+    pub dtm_level: u32,
+    pub max_supported_dppclk_khz: i32,
+    pub max_supported_dispclk_khz: i32,
+    pub bw_dppclk_khz: i32,
+    pub bw_dispclk_khz: i32,
+    pub idle_dramclk_khz: i32,
+    pub idle_fclk_khz: i32,
+    pub subvp_prefetch_dramclk_khz: i32,
+    pub subvp_prefetch_fclk_khz: i32,
 }
 
 /// `struct clk_mgr`. `bw_params` points at a per-ASIC static in Linux

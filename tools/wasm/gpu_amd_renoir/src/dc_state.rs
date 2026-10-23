@@ -12,7 +12,6 @@ use crate::dc_resource::MAX_CLOCK_SOURCES;
 use crate::dc_types::{graphics_object_id, MAX_PIPES, MAX_SURFACES};
 use crate::dce_clock_source::{pixel_clk_params, pll_settings};
 use crate::dcn21_link_encoder::ENGINE_ID_UNKNOWN;
-use crate::dml_structs::display_mode_lib;
 use alloc::boxed::Box;
 
 /// `enum link_enc_cfg_mode` (link_encoder.h).
@@ -68,6 +67,8 @@ pub struct stream_resource {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct plane_resource {
     pub scl_data: scaler_data,
+    /// `bw.dppclk_khz` (struct dcn_fe_bandwidth).
+    pub bw_dppclk_khz: i32,
     pub hubp: Option<usize>,
     pub ipp: Option<usize>,
     pub dpp: Option<usize>,
@@ -128,6 +129,12 @@ pub struct pipe_ctx {
     pub prev_odm_pipe: Option<usize>,
     /// `dsc_padding_params.dsc_hactive_padding`.
     pub dsc_hactive_padding: u8,
+    pub dlg_regs: crate::display_mode_structs::_vcs_dpi_display_dlg_regs_st,
+    pub ttu_regs: crate::display_mode_structs::_vcs_dpi_display_ttu_regs_st,
+    pub rq_regs: crate::display_mode_structs::_vcs_dpi_display_rq_regs_st,
+    pub pipe_dlg_param: crate::display_mode_structs::_vcs_dpi_display_pipe_dest_params_st,
+    pub det_buffer_size_kb: i32,
+    pub unbounded_req: bool,
 }
 
 /// `struct resource_context` (core_types.h), the members reached.
@@ -153,10 +160,45 @@ pub struct dc_stream_status {
     pub is_abm_supported: bool,
 }
 
-/// `struct dcn_bw_output`'s clocks (core_types.h).
+/// `struct cstate_pstate_watermarks_st` (inc/hw/mem_input.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct cstate_pstate_watermarks_st {
+    pub cstate_exit_ns: u32,
+    pub cstate_exit_z8_ns: u32,
+    pub cstate_enter_plus_exit_z8_ns: u32,
+    pub cstate_enter_plus_exit_ns: u32,
+    pub pstate_change_ns: u32,
+    pub fclk_pstate_change_ns: u32,
+}
+
+/// `struct dcn_watermarks` (inc/hw/mem_input.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct dcn_watermarks {
+    pub pte_meta_urgent_ns: u32,
+    pub urgent_ns: u32,
+    pub frac_urg_bw_nom: u32,
+    pub frac_urg_bw_flip: u32,
+    pub urgent_latency_ns: u32,
+    pub cstate_pstate: cstate_pstate_watermarks_st,
+    pub usr_retraining_ns: u32,
+}
+
+/// `union dcn_watermark_set`, its legacy view (DCN 2.x).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct dcn_watermark_set {
+    pub a: dcn_watermarks,
+    pub b: dcn_watermarks,
+    pub c: dcn_watermarks,
+    pub d: dcn_watermarks,
+}
+
+/// `struct dcn_bw_output` (core_types.h), the DCN 2.x members; writeback
+/// arbitration joins with writeback.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct dcn_bw_output {
     pub clk: crate::clk_mgr::dc_clocks,
+    pub watermarks: dcn_watermark_set,
+    pub compbuf_size_kb: i32,
 }
 
 /// `struct bw_context` (core_types.h), its `bw.dcn` view.
@@ -177,7 +219,7 @@ pub enum dc_power_source_type {
 /// of the DML instance; `clk_mgr` says whether it refers to dc's.
 #[derive(Clone, Default)]
 pub struct dc_state {
-    pub dml: Option<Box<display_mode_lib>>,
+    pub dml: Option<crate::dml_structs::DmlBox>,
     pub has_clk_mgr: bool,
     pub streams: [Option<usize>; MAX_PIPES],
     pub stream_status: [dc_stream_status; MAX_PIPES],

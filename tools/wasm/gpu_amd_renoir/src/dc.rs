@@ -119,6 +119,7 @@ pub struct dc_config {
     pub support_edp0_on_dp1: bool,
     pub unify_link_enc_assignment: bool,
     pub enable_dpia_pre_training: bool,
+    pub enable_4to1MPC: bool,
 }
 
 /// `enum pipe_split_policy` (dc.h).
@@ -188,6 +189,11 @@ pub struct dc_debug_options {
     pub disable_hubp_power_gate: bool,
     pub disable_dsc_power_gate: bool,
     pub always_scale: bool,
+    pub disable_timing_sync: bool,
+    pub min_dram_clk_khz: i32,
+    pub force_odm_combine: u32,
+    pub force_odm_combine_4to1: u32,
+    pub minimum_z8_residency_time: u32,
     pub force_chroma_subsampling_1tap: bool,
     pub visual_confirm_rect_height: u32,
 }
@@ -217,7 +223,7 @@ pub struct dc {
     pub hwseq: Option<Box<crate::dce_hwseq::dce_hwseq>>,
     /// `dml`: the DML instance (`dml_init_instance`). Boxed because the SoC
     /// bounding box is not Default (its `clock_limits` array is > 32 entries).
-    pub dml: Option<Box<crate::dml_structs::display_mode_lib>>,
+    pub dml: Option<crate::dml_structs::DmlBox>,
     /// `cap_funcs`: the capability-query vtable (set at the end of the construct).
     pub cap_funcs: dc_cap_funcs,
     pub build_id: &'static str,
@@ -235,11 +241,28 @@ pub struct dc {
     /// `vm_pa_config`: the system context `dc_setup_system_context` keeps.
     pub vm_pa_config: dc_phy_addr_space_config,
     pub vendor_signature: dpcd_vendor_signature,
+    pub bb_overrides: dc_bounding_box_overrides,
     /// The streams the DM created (`dc_create_stream_for_sink`); a context
     /// names one by its index here. `None` once released.
     pub streams: Vec<Option<Box<crate::dc_stream::dc_stream_state>>>,
     /// The plane states the DM created (`dc_create_plane_state`).
     pub planes: Vec<Option<Box<crate::dc_stream::dc_plane_state>>>,
+}
+
+/// `struct dc_bounding_box_overrides` (dc.h): bounding-box values the DM
+/// may impose; zero means none.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dc_bounding_box_overrides {
+    pub sr_exit_time_ns: i32,
+    pub sr_enter_plus_exit_time_ns: i32,
+    pub sr_exit_z8_time_ns: i32,
+    pub sr_enter_plus_exit_z8_time_ns: i32,
+    pub urgent_latency_ns: i32,
+    pub percent_of_ideal_drambw: i32,
+    pub dram_clock_change_latency_ns: i32,
+    pub dummy_clock_change_latency_ns: i32,
+    pub fclk_clock_change_latency_ns: i32,
+    pub min_dcfclk_mhz: i32,
 }
 
 /// `struct dpcd_vendor_signature` (dc_dp_types.h): the source OUI a DM may

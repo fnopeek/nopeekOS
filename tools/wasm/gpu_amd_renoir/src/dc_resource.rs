@@ -1454,3 +1454,183 @@ pub fn resource_build_scaling_params(dc: &mut dc, res_ctx: &mut resource_context
 pub fn resource_add_otg_master_for_stream_output(dc: &mut dc, new_ctx: &mut dc_state, stream: usize) -> dc_status {
     crate::dcn20_resource::dcn20_add_stream_to_ctx(dc, new_ctx, stream)
 }
+
+/// `struct audio_check` (dc_types.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct audio_check {
+    pub audio_packet_type: u32,
+    pub max_audiosample_rate: u32,
+    pub acat: u32,
+}
+
+/// `get_max_audio_sample_rate`: `sample_rates` is the union's byte, RATE_32
+/// in bit 0 up to RATE_192 in bit 6.
+fn get_max_audio_sample_rate(modes: &crate::dc_stream::audio_mode) -> u32 {
+    let r = modes.sample_rates;
+    if r & (1 << 6) != 0 {
+        return 192000;
+    }
+    if r & (1 << 5) != 0 {
+        return 176400;
+    }
+    if r & (1 << 4) != 0 {
+        return 96000;
+    }
+    if r & (1 << 3) != 0 {
+        return 88200;
+    }
+    if r & (1 << 2) != 0 {
+        return 48000;
+    }
+    if r & (1 << 1) != 0 {
+        return 44100;
+    }
+    if r & 1 != 0 {
+        return 32000;
+    }
+    // original logic when no audio info
+    441000
+}
+
+/// `get_audio_check`.
+pub fn get_audio_check(aud_modes: &crate::dc_stream::audio_info, audio_chk: &mut audio_check) {
+    audio_chk.audio_packet_type = 0x2; // audio sample packet AP = .25 for layout0, 1 for layout1
+
+    audio_chk.max_audiosample_rate = 0;
+    for i in 0..aud_modes.mode_count as usize {
+        let max_sample_rate = get_max_audio_sample_rate(&aud_modes.modes[i]);
+        if audio_chk.max_audiosample_rate < max_sample_rate {
+            audio_chk.max_audiosample_rate = max_sample_rate;
+        }
+        // dts takes the same as type 2: AP = 0.25
+    }
+    // check which one take more bandwidth
+    if audio_chk.max_audiosample_rate > 192000 {
+        audio_chk.audio_packet_type = 0x9; // AP =1
+    }
+    audio_chk.acat = 0; // not support
+}
+
+/// `resource_are_streams_timing_synchronizable`.
+pub fn resource_are_streams_timing_synchronizable(_dc: &dc, stream1: &dc_stream_state, stream2: &dc_stream_state)
+                                                  -> bool {
+    let (t1, t2) = (&stream1.timing, &stream2.timing);
+    if t1.h_total != t2.h_total
+        || t1.v_total != t2.v_total
+        || t1.h_addressable != t2.h_addressable
+        || t1.v_addressable != t2.v_addressable
+        || t1.v_front_porch != t2.v_front_porch
+        || t1.pix_clk_100hz != t2.pix_clk_100hz
+        || stream1.clamping.c_depth != stream2.clamping.c_depth
+    {
+        return false;
+    }
+
+    if stream1.phy_pix_clk != stream2.phy_pix_clk
+        && (!dc_is_dp_signal(stream1.signal) || !dc_is_dp_signal(stream2.signal))
+    {
+        return false;
+    }
+
+    if stream1.view_format != stream2.view_format {
+        return false;
+    }
+
+    if stream1.ignore_msa_timing_param || stream2.ignore_msa_timing_param {
+        return false;
+    }
+
+    true
+}
+
+/// `resource_are_vblanks_synchronizable`: DCN 2.1 has no
+/// `vblank_alignment_dto_params`, so streams of different timing never are.
+pub fn resource_are_vblanks_synchronizable(_dc: &dc, _stream1: &dc_stream_state, _stream2: &dc_stream_state) -> bool {
+    false
+}
+
+/// `find_pll_sharable_stream`.
+fn find_pll_sharable_stream(dc: &dc, stream_needs_pll: usize, context: &dc_state) -> Option<usize> {
+    let s1 = dc.streams[stream_needs_pll].as_deref().unwrap();
+    for i in 0..context.stream_count as usize {
+        let sh = context.streams[i].unwrap();
+        let stream_has_pll = dc.streams[sh].as_deref().unwrap();
+
+        // We are looking for non dp, non virtual stream
+        if resource_are_streams_timing_synchronizable(dc, s1, stream_has_pll)
+            && !dc_is_dp_signal(stream_has_pll.signal)
+            && dc.links[stream_has_pll.link].connector_signal != LF_SIGNAL_TYPE_VIRTUAL
+        {
+            return Some(sh);
+        }
+    }
+
+    None
+}
+
+/// `resource_unreference_clock_source`.
+pub fn resource_unreference_clock_source(res_ctx: &mut resource_context, pool: &resource_pool,
+                                         clock_source: Option<clock_source_ref>) {
+    let Some(cs) = clock_source else { return };
+    let i = find_matching_clock_source(pool, cs);
+
+    if i > -1 {
+        res_ctx.clock_source_ref_count[i as usize] -= 1;
+    }
+
+    if cs == clock_source_ref::Dp {
+        res_ctx.dp_clock_source_ref_count -= 1;
+    }
+}
+
+/// `resource_build_scaling_params_for_context`.
+pub fn resource_build_scaling_params_for_context(dc: &mut dc, context: &mut dc_state) -> dc_status {
+    for i in 0..MAX_PIPES {
+        if context.res_ctx.pipe_ctx[i].plane_state.is_some() && context.res_ctx.pipe_ctx[i].stream.is_some()
+            && !resource_build_scaling_params(dc, &mut context.res_ctx, i)
+        {
+            return dc_status::DC_FAIL_SCALING;
+        }
+    }
+
+    dc_status::DC_OK
+}
+
+/// `dc_validate_global_state`. DCN 2.1's pool has no `validate_global` and
+/// no `patch_unknown_plane_state`, and `enable_hblank_borrow` is off.
+pub fn dc_validate_global_state(dc: &mut dc, new_ctx: &mut dc_state, validate_mode: u32) -> dc_status {
+    let pipe_count = dc.res_pool.as_deref().unwrap().pipe_count as usize;
+
+    for i in 0..new_ctx.stream_count as usize {
+        let stream = new_ctx.streams[i].unwrap();
+
+        for j in 0..pipe_count {
+            if new_ctx.res_ctx.pipe_ctx[j].stream != Some(stream) {
+                continue;
+            }
+
+            // Switch to dp clock source only if there is
+            // no non dp stream that shares the same timing
+            // with the dp stream.
+            let signal = dc.streams[stream].as_deref().unwrap().signal;
+            if dc_is_dp_signal(signal) && find_pll_sharable_stream(dc, stream, new_ctx).is_none() {
+                let pool = dc.res_pool.as_deref().unwrap();
+                let cs = new_ctx.res_ctx.pipe_ctx[j].clock_source;
+                resource_unreference_clock_source(&mut new_ctx.res_ctx, pool, cs);
+
+                new_ctx.res_ctx.pipe_ctx[j].clock_source = pool.dp_clock_source.as_ref().map(|_| clock_source_ref::Dp);
+                if let Some(cs) = new_ctx.res_ctx.pipe_ctx[j].clock_source {
+                    resource_reference_clock_source(&mut new_ctx.res_ctx, pool, cs);
+                }
+            }
+        }
+    }
+
+    let mut result = resource_build_scaling_params_for_context(dc, new_ctx);
+
+    if result == dc_status::DC_OK {
+        result = crate::dcn21_resource::dcn21_validate_bandwidth(dc, new_ctx, validate_mode);
+    }
+
+    result
+}

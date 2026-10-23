@@ -22,7 +22,7 @@ use crate::dce_audio::{dce_aud_endpoint_valid, dcn21_create_audio};
 use crate::dce_hwseq::dcn21_hwseq_create;
 use crate::dcn20_fpu::{dcn2_1_ip, dcn2_1_soc};
 use crate::dcn20_stream_encoder::dcn21_stream_encoder_create;
-use crate::dml_structs::{dml_init_instance, dml_project};
+use crate::dml_structs::{dml_init_instance, DML_PROJECT_DCN21};
 use crate::virtual_stream_encoder::virtual_stream_encoder_create;
 use alloc::boxed::Box;
 use crate::regs::{
@@ -279,7 +279,8 @@ pub fn dcn21_resource_construct(
     }
     ip.max_num_dpp = num_pipes;
     ip.max_num_otg = num_pipes;
-    dc.dml = Some(Box::new(dml_init_instance(&dcn2_1_soc(), &ip, dml_project::DML_PROJECT_DCN21)));
+    let dml = dc.dml.get_or_insert_with(crate::dml_structs::DmlBox::zero);
+    dml_init_instance(dml, &dcn2_1_soc(), &ip, DML_PROJECT_DCN21);
 
     // Create resources: the clock sources. CLOCK_SOURCE_COMBO_PHY_PLL0..4 use
     // clk_src_regs[0..4]; the DP-DTO source reuses clk_src_regs[0] (Linux'
@@ -433,6 +434,11 @@ const DEBUG_DEFAULTS_DRV: dc_debug_options = dc_debug_options {
     always_scale: false,
     force_chroma_subsampling_1tap: false,
     visual_confirm_rect_height: 0,
+    disable_timing_sync: false,
+    min_dram_clk_khz: 0,
+    force_odm_combine: 0,
+    force_odm_combine_4to1: 0,
+    minimum_z8_residency_time: 0,
 };
 
 /// `dcn21_pp_smu_create` (dcn21_resource.c): a table that is not Renoir's is
@@ -471,4 +477,154 @@ pub fn dcn21_get_panel_config_defaults(panel_config: &mut crate::link_factory::p
         ilr_optimize_edp_link_rate: true,
         ..Default::default()
     };
+}
+
+/// `dcn21_fast_validate_bw`: DML's mode support on the context's pipes,
+/// then the pipe splits it asks for. Splitting a stream for ODM
+/// (`dcn20_split_stream_for_odm`) is named, not ported: DCN 2.1 takes ODM
+/// only past its single-pipe display clock.
+pub fn dcn21_fast_validate_bw(dc: &mut crate::dc::dc, context: &mut crate::dc_state::dc_state,
+                              pipes: &mut [crate::display_mode_structs::_vcs_dpi_display_e2e_pipe_params_st],
+                              pipe_cnt_out: &mut i32, pipe_split_from: &mut [i32], vlevel_out: &mut i32,
+                              validate_mode: u32) -> bool {
+    use crate::dcn20_resource::*;
+    use crate::display_mode_structs as dml;
+    use crate::dc_types::MAX_PIPES;
+    let mut split = [0i32; MAX_PIPES];
+    let mut merge = [false; MAX_PIPES];
+    let pipe_count = dc.res_pool.as_deref().unwrap().pipe_count as usize;
+
+    dcn20_merge_pipes_for_validate(dc, context);
+
+    let pipe_cnt = crate::dcn20_fpu::dcn21_populate_dml_pipes_from_context(dc, context, pipes, validate_mode);
+
+    *pipe_cnt_out = pipe_cnt;
+
+    if pipe_cnt == 0 {
+        return true;
+    }
+    // DML favors voltage over p-state, but we're more interested in
+    // supporting p-state over voltage. We can't support p-state in
+    // prefetch mode > 0 so try capping the prefetch mode to start.
+    let num_states;
+    let mut vlevel;
+    {
+        let d = context.dml.as_deref_mut().unwrap();
+        d.soc.allow_dram_self_refresh_or_dram_clock_change_in_vblank = dml::dm_allow_self_refresh_and_mclk_switch;
+        vlevel = crate::display_mode_vba::dml_get_voltage_level(d, pipes, pipe_cnt as u32) as i32;
+        num_states = d.soc.num_states as i32;
+
+        if vlevel > num_states {
+            // If mode is unsupported or there's still no p-state support then
+            // fall back to favoring voltage.
+            //
+            // We don't actually support prefetch mode 2, so require that we
+            // at least support prefetch mode 1.
+            d.soc.allow_dram_self_refresh_or_dram_clock_change_in_vblank = dml::dm_allow_self_refresh;
+            vlevel = crate::display_mode_vba::dml_get_voltage_level(d, pipes, pipe_cnt as u32) as i32;
+            if vlevel > num_states {
+                return false;
+            }
+        }
+    }
+
+    vlevel = dcn20_validate_apply_pipe_split_flags(dc, context, vlevel, &mut split, &mut merge);
+
+    let mut pipe_idx = 0usize;
+    for i in 0..pipe_count {
+        let pipe = &context.res_ctx.pipe_ctx[i];
+        let vba = &context.dml.as_deref().unwrap().vba;
+
+        if pipe.stream.is_none() {
+            continue;
+        }
+
+        // We only support full screen mpo with ODM
+        if let (Some(_), Some(mpo)) = (pipe.plane_state, pipe.bottom_pipe) {
+            if vba.ODMCombineEnabled[vba.pipe_plane[pipe_idx] as usize] != dml::dm_odm_combine_mode_disabled {
+                let mpo_plane = dc.planes[context.res_ctx.pipe_ctx[mpo].plane_state.unwrap()].as_deref().unwrap();
+                let src = dc.streams[pipe.stream.unwrap()].as_deref().unwrap().src;
+                if mpo_plane.clip_rect != src {
+                    return false;
+                }
+            }
+        }
+        pipe_idx += 1;
+    }
+
+    // initialize pipe_just_split_from to invalid idx
+    for p in pipe_split_from.iter_mut().take(MAX_PIPES) {
+        *p = -1;
+    }
+
+    let mut pipe_idx: i32 = -1;
+    for i in 0..pipe_count {
+        let pipe = context.res_ctx.pipe_ctx[i];
+        let mut hsplit_pipe = pipe.bottom_pipe;
+
+        if pipe.stream.is_none() || pipe_split_from[i] >= 0 {
+            continue;
+        }
+
+        pipe_idx += 1;
+
+        let odm = context.dml.as_deref().unwrap().vba.ODMCombineEnabled[pipe_idx as usize];
+        if pipe.top_pipe.is_none() && pipe.plane_state.is_none() && odm != 0 {
+            let _hsplit_pipe = dcn20_find_secondary_pipe(dc, &mut context.res_ctx, i);
+            crate::linux::Line::new().s("dcn20_split_stream_for_odm not ported").say();
+            return false;
+        }
+
+        if pipe.plane_state.is_none() {
+            continue;
+        }
+        // Skip 2nd half of already split pipe
+        if pipe.top_pipe.is_some_and(|t| context.res_ctx.pipe_ctx[t].plane_state == pipe.plane_state) {
+            continue;
+        }
+
+        if split[i] == 2 {
+            if hsplit_pipe.is_none_or(|h| context.res_ctx.pipe_ctx[h].plane_state != pipe.plane_state) {
+                // pipe not split previously needs split
+                hsplit_pipe = dcn20_find_secondary_pipe(dc, &mut context.res_ctx, i);
+                let Some(h) = hsplit_pipe else {
+                    let v = &mut context.dml.as_deref_mut().unwrap().vba;
+                    let mpc = v.maxMpcComb;
+                    crate::dcn20_fpu::dcn20_fpu_adjust_dppclk(v, vlevel, mpc, pipe_idx, true);
+                    continue;
+                };
+                if context.dml.as_deref().unwrap().vba.ODMCombineEnabled[pipe_idx as usize] != 0 {
+                    crate::linux::Line::new().s("dcn20_split_stream_for_odm not ported").say();
+                    return false;
+                } else {
+                    dcn20_split_stream_for_mpc(&mut context.res_ctx, dc.res_pool.as_deref().unwrap(), i, h);
+                    crate::dc_resource::resource_build_scaling_params(dc, &mut context.res_ctx, i);
+                    crate::dc_resource::resource_build_scaling_params(dc, &mut context.res_ctx, h);
+                }
+                pipe_split_from[context.res_ctx.pipe_ctx[h].pipe_idx as usize] = pipe_idx;
+            }
+        }
+    }
+    // Actual dsc count per stream dsc validation
+    if !dcn20_validate_dsc(dc, context) {
+        let d = context.dml.as_deref_mut().unwrap();
+        let ns = d.vba.soc.num_states as usize;
+        d.vba.ValidationStatus[ns] = dml::DML_FAIL_DSC_VALIDATION_FAILURE;
+        return false;
+    }
+
+    *vlevel_out = vlevel;
+
+    true
+}
+
+/// `dcn21_validate_bandwidth`, DCN 2.1's `validate_bandwidth`.
+pub fn dcn21_validate_bandwidth(dc: &mut crate::dc::dc, context: &mut crate::dc_state::dc_state, validate_mode: u32)
+                                -> crate::dc_types::dc_status {
+    let n = dc.res_pool.as_deref().unwrap().pipe_count as usize;
+    let mut pipes = alloc::vec![crate::display_mode_structs::_vcs_dpi_display_e2e_pipe_params_st::ZERO; n];
+
+    let voltage_supported = crate::dcn20_fpu::dcn21_validate_bandwidth_fp(dc, context, validate_mode, &mut pipes);
+
+    if voltage_supported { crate::dc_types::dc_status::DC_OK } else { crate::dc_types::dc_status::DC_NOT_SUPPORTED }
 }

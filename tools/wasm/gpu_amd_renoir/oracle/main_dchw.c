@@ -262,6 +262,52 @@ static void dump_context(const char *tag, struct dc_state *ctx)
 	}
 }
 
+#include "dml_dump.h"
+
+static void dump_wm(const char *n, const struct dcn_watermarks *w)
+{
+	printf("  wm %s urgent %u pte_meta %u frac_nom %u frac_flip %u urg_lat %u cstate_exit %u cstate_enter_exit %u"
+	       " pstate %u usr %u\n", n, w->urgent_ns, w->pte_meta_urgent_ns, w->frac_urg_bw_nom, w->frac_urg_bw_flip,
+	       w->urgent_latency_ns, w->cstate_pstate.cstate_exit_ns, w->cstate_pstate.cstate_enter_plus_exit_ns,
+	       w->cstate_pstate.pstate_change_ns, w->usr_retraining_ns);
+}
+
+/* What bandwidth validation leaves in the context: the clocks, the four
+ * watermark sets, per pipe the DLG/TTU/RQ programming DML computed, and
+ * DML's whole working state. */
+static void dump_bw(const char *tag, struct dc_state *ctx)
+{
+	struct dc_clocks *c = &ctx->bw_ctx.bw.dcn.clk;
+
+	printf("bw %s dispclk %d dppclk %d dcfclk %d socclk %d deep_sleep %d fclk %d dramclk %d pstate %d zstate %d"
+	       " dtbclk %d bw_dpp %d bw_disp %d max_dpp %d max_disp %d compbuf %d\n", tag, c->dispclk_khz, c->dppclk_khz,
+	       c->dcfclk_khz, c->socclk_khz, c->dcfclk_deep_sleep_khz, c->fclk_khz, c->dramclk_khz,
+	       c->p_state_change_support, c->zstate_support, c->dtbclk_en, c->bw_dppclk_khz, c->bw_dispclk_khz,
+	       c->max_supported_dppclk_khz, c->max_supported_dispclk_khz, ctx->bw_ctx.bw.dcn.compbuf_size_kb);
+	dump_wm("a", &ctx->bw_ctx.bw.dcn.watermarks.a);
+	dump_wm("b", &ctx->bw_ctx.bw.dcn.watermarks.b);
+	dump_wm("c", &ctx->bw_ctx.bw.dcn.watermarks.c);
+	dump_wm("d", &ctx->bw_ctx.bw.dcn.watermarks.d);
+	for (int i = 0; i < MAX_PIPES; i++) {
+		struct pipe_ctx *p = &ctx->res_ctx.pipe_ctx[i];
+		char q[32];
+
+		if (!p->stream)
+			continue;
+		printf("  pipe %d det %d unbounded %d dppclk %d\n", i, p->det_buffer_size_kb, p->unbounded_req,
+		       p->plane_res.bw.dppclk_khz);
+		snprintf(q, sizeof(q), "pipe%d.dest", i);
+		dmldump__vcs_dpi_display_pipe_dest_params_st(q, &p->pipe_dlg_param);
+		snprintf(q, sizeof(q), "pipe%d.dlg", i);
+		dmldump__vcs_dpi_display_dlg_regs_st(q, &p->dlg_regs);
+		snprintf(q, sizeof(q), "pipe%d.ttu", i);
+		dmldump__vcs_dpi_display_ttu_regs_st(q, &p->ttu_regs);
+		snprintf(q, sizeof(q), "pipe%d.rq", i);
+		dmldump__vcs_dpi_display_rq_regs_st(q, &p->rq_regs);
+	}
+	dmldump_vba_vars_st("vba", &ctx->bw_ctx.dml.vba);
+}
+
 /* udelay for the DMUB service's polls (dmub_srv.c): time does not pass
  * in the register file. */
 void (udelay)(unsigned long usecs)
@@ -501,6 +547,7 @@ int main(int argc, char **argv)
 		printf("dc_validate_global_state %d\n",
 		       dc_validate_global_state(dc, context, DC_VALIDATE_MODE_AND_PROGRAMMING));
 		dump_context("validated", context);
+		dump_bw("validated", context);
 		struct dc_commit_streams_params params = { .streams = &stream, .stream_count = 1 };
 		printf("dc_commit_streams %d\n", dc_commit_streams(dc, &params));
 		struct dc_surface_update srf = { .surface = plane };

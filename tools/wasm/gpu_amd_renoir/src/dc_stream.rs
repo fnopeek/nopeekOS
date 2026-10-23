@@ -105,7 +105,44 @@ pub struct dc_stream_state {
     pub clamping: clamping_and_pixel_encoding_params,
     pub bit_depth_params: bit_depth_reduction_params,
     pub stream_id: u32,
+    pub use_dynamic_meta: bool,
+    pub adjust: dc_crtc_timing_adjust,
+    pub writeback_info: [dc_writeback_info; MAX_DWB_PIPES],
+    pub ignore_msa_timing_param: bool,
+    /// `adaptive_sync_infopacket.valid`.
+    pub adaptive_sync_infopacket_valid: bool,
     pub refcount: u32,
+}
+
+/// `MAX_DWB_PIPES` (dc.h).
+pub const MAX_DWB_PIPES: usize = 1;
+
+/// `struct dc_crtc_timing_adjust` (dc_stream.h), the members reached.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct dc_crtc_timing_adjust {
+    pub v_total_min: u32,
+    pub v_total_max: u32,
+    pub v_total_mid: u32,
+    pub v_total_mid_frame_num: u32,
+}
+
+/// `struct dc_writeback_info` (dc_stream.h), the members bandwidth
+/// validation reads; the DWB programming joins with writeback.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct dc_writeback_info {
+    pub wb_enabled: bool,
+    pub dwb_pipe_inst: i32,
+    /// `dwb_params.cnv_params.crop_width` / `crop_height`.
+    pub crop_width: u32,
+    pub crop_height: u32,
+    pub dest_width: u32,
+    pub dest_height: u32,
+    /// `dwb_params.scaler_taps.h_taps_c` / `v_taps_c`.
+    pub h_taps_c: u32,
+    pub v_taps_c: u32,
+    /// `enum dwb_scaler_mode`, `enum dwb_output_depth`.
+    pub out_format: u32,
+    pub output_depth: u32,
 }
 
 /// `struct dc_plane_state`, the members the commit path reaches.
@@ -137,7 +174,23 @@ pub struct dc_plane_state {
     pub global_alpha: bool,
     pub global_alpha_value: i32,
     pub is_phantom: bool,
+    pub flip_immediate: bool,
+    /// `enum plane_stereo_format`.
+    pub stereo_format: u32,
+    pub dcc: dc_plane_dcc_param,
     pub refcount: u32,
+}
+
+/// `struct dc_plane_dcc_param` (dc_hw_types.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct dc_plane_dcc_param {
+    pub enable: bool,
+    pub meta_pitch: i32,
+    pub independent_64b_blks: bool,
+    pub dcc_ind_blk: u32,
+    pub meta_pitch_c: i32,
+    pub independent_64b_blks_c: bool,
+    pub dcc_ind_blk_c: u32,
 }
 
 /// `update_stream_signal`.
@@ -193,6 +246,11 @@ fn dc_stream_construct(dc: &mut dc, li: usize, dc_sink_data: &dc_sink) -> dc_str
         clamping: Default::default(),
         bit_depth_params: Default::default(),
         stream_id: 0,
+        use_dynamic_meta: false,
+        adjust: Default::default(),
+        writeback_info: Default::default(),
+        ignore_msa_timing_param: false,
+        adaptive_sync_infopacket_valid: false,
         refcount: 0,
     };
 

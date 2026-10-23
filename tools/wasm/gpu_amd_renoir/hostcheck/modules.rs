@@ -231,6 +231,24 @@ mod dc_stream;
 mod dc_dsc;
 #[path = "../src/dcn20_resource.rs"]
 mod dcn20_resource;
+#[path = "dml_dump.rs"]
+mod dml_dump;
+#[path = "../src/dml_math.rs"]
+mod dml_math;
+#[path = "../src/display_mode_structs.rs"]
+mod display_mode_structs;
+#[path = "../src/dcn_calc_math.rs"]
+mod dcn_calc_math;
+#[path = "../src/dml_inline_defs.rs"]
+mod dml_inline_defs;
+#[path = "../src/display_mode_vba.rs"]
+mod display_mode_vba;
+#[path = "../src/display_mode_vba_21.rs"]
+mod display_mode_vba_21;
+#[path = "../src/display_rq_dlg_calc_21.rs"]
+mod display_rq_dlg_calc_21;
+#[path = "../src/display_rq_dlg_helpers.rs"]
+mod display_rq_dlg_helpers;
 #[path = "../src/dc_ddc_types.rs"]
 mod dc_ddc_types;
 #[path = "../src/link_dpcd.rs"]

@@ -274,6 +274,40 @@ fn dump_context(dc: &dc::dc, tag: &str, ctx: &dc_state::dc_state) {
     }
 }
 
+fn dump_wm(n: &str, w: &dc_state::dcn_watermarks) {
+    println!("  wm {} urgent {} pte_meta {} frac_nom {} frac_flip {} urg_lat {} cstate_exit {} cstate_enter_exit {} pstate {} usr {}",
+        n, w.urgent_ns, w.pte_meta_urgent_ns, w.frac_urg_bw_nom, w.frac_urg_bw_flip, w.urgent_latency_ns,
+        w.cstate_pstate.cstate_exit_ns, w.cstate_pstate.cstate_enter_plus_exit_ns, w.cstate_pstate.pstate_change_ns,
+        w.usr_retraining_ns);
+}
+
+/// What bandwidth validation leaves in the context (the oracle's `dump_bw`).
+fn dump_bw(tag: &str, ctx: &dc_state::dc_state) {
+    let c = &ctx.bw_ctx.dcn.clk;
+    println!("bw {} dispclk {} dppclk {} dcfclk {} socclk {} deep_sleep {} fclk {} dramclk {} pstate {} zstate {} dtbclk {} bw_dpp {} bw_disp {} max_dpp {} max_disp {} compbuf {}",
+        tag, c.dispclk_khz, c.dppclk_khz, c.dcfclk_khz, c.socclk_khz, c.dcfclk_deep_sleep_khz, c.fclk_khz,
+        c.dramclk_khz, c.p_state_change_support as u32, c.zstate_support, c.dtbclk_en as u32, c.bw_dppclk_khz,
+        c.bw_dispclk_khz, c.max_supported_dppclk_khz, c.max_supported_dispclk_khz, ctx.bw_ctx.dcn.compbuf_size_kb);
+    let w = &ctx.bw_ctx.dcn.watermarks;
+    dump_wm("a", &w.a);
+    dump_wm("b", &w.b);
+    dump_wm("c", &w.c);
+    dump_wm("d", &w.d);
+    for i in 0..dc_types::MAX_PIPES {
+        let p = &ctx.res_ctx.pipe_ctx[i];
+        if p.stream.is_none() {
+            continue;
+        }
+        println!("  pipe {} det {} unbounded {} dppclk {}", i, p.det_buffer_size_kb, p.unbounded_req as u32,
+            p.plane_res.bw_dppclk_khz);
+        dml_dump::dmldump__vcs_dpi_display_pipe_dest_params_st(&format!("pipe{}.dest", i), &p.pipe_dlg_param);
+        dml_dump::dmldump__vcs_dpi_display_dlg_regs_st(&format!("pipe{}.dlg", i), &p.dlg_regs);
+        dml_dump::dmldump__vcs_dpi_display_ttu_regs_st(&format!("pipe{}.ttu", i), &p.ttu_regs);
+        dml_dump::dmldump__vcs_dpi_display_rq_regs_st(&format!("pipe{}.rq", i), &p.rq_regs);
+    }
+    dml_dump::dmldump_vba_vars_st("vba", &ctx.dml.as_deref().unwrap().vba);
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let bios = std::fs::read(args.next().expect("vbios.bin")).expect("read");
@@ -515,6 +549,10 @@ fn main() {
         println!("dc_state_add_stream {}", dc_state::dc_state_add_stream(&mut dc, &mut context, stream) as i32);
         println!("dc_state_add_plane {}", dc_state::dc_state_add_plane(&mut dc, stream, plane, &mut context) as u32);
         dump_context(&dc, "added", &context);
+        println!("dc_validate_global_state {}",
+            dc_resource::dc_validate_global_state(&mut dc, &mut context, DC_VALIDATE_MODE_AND_PROGRAMMING) as i32);
+        dump_context(&dc, "validated", &context);
+        dump_bw("validated", &context);
     }
     npk_sys::fake_card_echo(false);
 

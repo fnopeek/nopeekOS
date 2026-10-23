@@ -13,6 +13,8 @@ DISC=${2:-$DEV/ip_discovery.bin}
 FW=${3:-$(dirname "$(dirname "$(dirname "$MOD")")")/release/modules/gpu_amd_renoir.fw}
 B=$DEV/hostcheck-build
 "$MOD/oracle/build.sh" "$B"
+# The translated DML (and its dumps) must be what dmlgen.py writes today.
+python3 "$MOD/dmlgen.py" --check
 rustc --edition 2024 -O --crate-type rlib --crate-name npk_sys "$HERE/npk_sys.rs" -o "$B/libnpk_sys.rlib"
 rustc --edition 2024 -O --crate-type rlib --crate-name gpu_scene "$MOD/../gpu_scene/src/lib.rs" -o "$B/libgpu_scene.rlib"
 RF="--edition 2024 -O --cap-lints allow -A dead_code -A non_camel_case_types -A non_snake_case --extern npk_sys=$B/libnpk_sys.rlib --extern gpu_scene=$B/libgpu_scene.rlib"
@@ -163,21 +165,22 @@ for seed in ones zeros hash lit boot; do
     fi
 done
 # The commit after detection, as far as the port goes: a stream and a
-# plane added to a copy of the current state (dc_state_add_stream,
-# dc_state_add_plane), identity and scaled; compared up to the line where
-# the port stops, the oracle's dc_validate_global_state.
+# plane added to a copy of the current state, then dc_validate_global_state
+# (pipe split, DML, watermarks, DLG/TTU/RQ, DML's whole state), identity and
+# scaled plane; compared up to the first register write after it.
 for seed in ones zeros hash lit boot; do
     for plane in full scaled; do
-        "$B/oracle_dchw" "$BIOS" $seed commit $plane | grep -v '^ATOM BIOS:' > "$B/commit_$seed$plane.linux"
-        "$B/dchw_check" "$BIOS" $seed "$B/commit_$seed$plane.linux" commit $plane > "$B/commit_$seed$plane.port"
-        n=$(grep -n '^dc_validate_global_state' "$B/commit_$seed$plane.linux" | cut -d: -f1)
-        n=$(( ${n:-$(($(wc -l < "$B/commit_$seed$plane.linux") + 1))} - 1 ))
-        head -n $n "$B/commit_$seed$plane.linux" > "$B/commit_$seed$plane.linux.head"
-        head -n $n "$B/commit_$seed$plane.port" > "$B/commit_$seed$plane.port.head"
-        if diff -u "$B/commit_$seed$plane.linux.head" "$B/commit_$seed$plane.port.head" | head -30;
-           cmp -s "$B/commit_$seed$plane.linux.head" "$B/commit_$seed$plane.port.head"; then
-            echo "commit ($seed, $plane plane): port = Linux to dc_state_add_plane" \
-                "($(sed -n '/^context added/,$p' "$B/commit_$seed$plane.linux.head" | wc -l) context lines)"
+        n=commit_$seed$plane
+        "$B/oracle_dchw" "$BIOS" $seed commit $plane | grep -v '^ATOM BIOS:' > "$B/$n.linux"
+        "$B/dchw_check" "$BIOS" $seed "$B/$n.linux" commit $plane > "$B/$n.port"
+        for f in linux port; do
+            awk '/^dc_state_add_stream/{p=1} p&&/^(write|dmub cmd|wm_ranges)/{exit} p{print}' "$B/$n.$f" > "$B/$n.$f.blk"
+            n0=$(grep -n '^dc_state_add_stream' "$B/$n.$f" | cut -d: -f1)
+            head -n $(( ${n0:-$(($(wc -l < "$B/$n.$f") + 1))} - 1 )) "$B/$n.$f" >> "$B/$n.$f.blk"
+        done
+        if diff -u "$B/$n.linux.blk" "$B/$n.port.blk" | head -30; cmp -s "$B/$n.linux.blk" "$B/$n.port.blk"; then
+            echo "commit ($seed, $plane plane): port = Linux to dc_validate_global_state" \
+                "($(grep -c '^vba\.' "$B/$n.linux.blk") DML values)"
         else
             fail=1
         fi

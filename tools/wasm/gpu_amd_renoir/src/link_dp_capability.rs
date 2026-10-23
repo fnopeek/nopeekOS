@@ -1446,3 +1446,8 @@ pub fn link_decide_dp_tunnel_settings(dc: &dc, stream: &crate::dc_stream::dc_str
         }
     }
 }
+
+/// `dp_is_128b_132b_signal`: a pipe on an HPO DP encoder; DCN 2.1 has none.
+pub fn dp_is_128b_132b_signal(_dc: &dc, _context: &crate::dc_state::dc_state, _pipe: usize) -> bool {
+    false
+}

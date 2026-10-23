@@ -24429,3 +24429,85 @@ pub const DC_SW_LINEAR: u32 = 0x0;
 pub const PLN_ADDR_TYPE_GRAPHICS: u32 = 0x0;
 /// ?
 pub const SCANNING_TYPE_NODATA: u32 = 0x0;
+
+// Bandwidth validation: the DC enums dcn20_fpu.c and dcn20_resource.c read (dc_hw_types.h, dc.h, dc_stream.h)
+/// ?
+pub const dwb_scaler_mode_yuv420: u32 = 0x3;
+/// ?
+pub const DWB_OUTPUT_PIXEL_DEPTH_8BPC: u32 = 0x0;
+/// ?
+pub const PLN_ADDR_TYPE_VIDEO_PROGRESSIVE: u32 = 0x3;
+/// ?
+pub const PLANE_STEREO_FORMAT_SIDE_BY_SIDE: u32 = 0x1;
+/// ?
+pub const PLANE_STEREO_FORMAT_TOP_AND_BOTTOM: u32 = 0x2;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_RGBE_ALPHA: u32 = 0x11;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_VIDEO_BEGIN: u32 = 0x12;
+/// ?
+pub const COLOR_DEPTH_999: u32 = 0x7;
+/// ?
+pub const COLOR_DEPTH_111111: u32 = 0x8;
+/// ?
+pub const DCN_ZSTATE_SUPPORT_ALLOW: u32 = 0x1;
+/// ?
+pub const DCN_ZSTATE_SUPPORT_ALLOW_Z8_Z10_ONLY: u32 = 0x3;
+/// ?
+pub const DCN_ZSTATE_SUPPORT_ALLOW_Z8_ONLY: u32 = 0x2;
+/// ?
+pub const DCN_ZSTATE_SUPPORT_DISALLOW: u32 = 0x5;
+/// ?
+pub const DC_PSR_VERSION_1: u32 = 0x0;
+/// ?
+pub const DC_PSR_VERSION_SU_1: u32 = 0x1;
+/// ?
+pub const TIMING_3D_FORMAT_TOP_AND_BOTTOM: u32 = 0xb;
+/// ?
+pub const TIMING_3D_FORMAT_SIDE_BY_SIDE: u32 = 0xa;
+/// ?
+pub const DC_VALIDATE_MODE_AND_PROGRAMMING: u32 = 0x0;
+/// ?
+pub const DC_SW_UNKNOWN: u32 = 0x20;
+/// ?
+pub const DC_SW_256B_S: u32 = 0x1;
+/// ?
+pub const DC_SW_4KB_S: u32 = 0x5;
+/// ?
+pub const DC_SW_4KB_S_X: u32 = 0x15;
+/// ?
+pub const DC_SW_4KB_D: u32 = 0x6;
+/// ?
+pub const DC_SW_4KB_D_X: u32 = 0x16;
+/// ?
+pub const DC_SW_4KB_R: u32 = 0x7;
+/// ?
+pub const DC_SW_4KB_R_X: u32 = 0x17;
+/// ?
+pub const DC_SW_64KB_S: u32 = 0x9;
+/// ?
+pub const DC_SW_64KB_S_X: u32 = 0x19;
+/// ?
+pub const DC_SW_64KB_S_T: u32 = 0x11;
+/// ?
+pub const DC_SW_64KB_D: u32 = 0xa;
+/// ?
+pub const DC_SW_64KB_D_X: u32 = 0x1a;
+/// ?
+pub const DC_SW_64KB_D_T: u32 = 0x12;
+/// ?
+pub const DC_SW_64KB_R: u32 = 0xb;
+/// ?
+pub const DC_SW_64KB_R_X: u32 = 0x1b;
+/// ?
+pub const DC_SW_VAR_S: u32 = 0xd;
+/// ?
+pub const DC_SW_VAR_S_X: u32 = 0x1d;
+/// ?
+pub const DC_SW_VAR_D: u32 = 0xe;
+/// ?
+pub const DC_SW_VAR_D_X: u32 = 0x1e;
+/// ?
+pub const DC_SW_VAR_R: u32 = 0xf;
+/// ?
+pub const DC_SW_VAR_R_X: u32 = 0x1f;
