@@ -943,42 +943,85 @@ fn scenes_init(adev: &mut amdgpu_device, svc: &mut service) -> bool {
     true
 }
 
-/// Two page flips to the framebuffer on screen, each waited for until its
-/// completion event comes from the VUPDATE interrupt: the picture stays,
-/// and the log says whether the flip path works.
-fn flip_self_test(adev: &mut amdgpu_device, address: u64) {
-    for n in 0..2u32 {
-        let t0 = crate::linux::now_us();
-        let r = crate::amdgpu_dm::dm_page_flip(adev, address, n);
-        if r != 0 {
-            Line::new().s("dc live: flip ").dec(n as u64).s(" refused (").dec((-r) as u64).s(")").say();
-            return;
+/// A page flip to `address`, waited for until its completion event comes
+/// from the VUPDATE interrupt; the log says how it went.
+fn flip_and_wait(adev: &mut amdgpu_device, address: u64, n: u32) -> bool {
+    let t0 = crate::linux::now_us();
+    let r = crate::amdgpu_dm::dm_page_flip(adev, address, n);
+    if r != 0 {
+        Line::new().s("dc live: flip ").dec(n as u64).s(" refused (").dec((-r) as u64).s(")").say();
+        return false;
+    }
+    let done = loop {
+        if let Some(i) = adev.dm.flip_events.iter().position(|e| e.event == n) {
+            break Some(adev.dm.flip_events.remove(i));
         }
-        let done = loop {
-            if let Some(i) = adev.dm.flip_events.iter().position(|e| e.event == n) {
-                break Some(adev.dm.flip_events.remove(i));
-            }
-            if crate::linux::now_us() - t0 > 100_000 {
-                break None;
-            }
-            crate::amdgpu_irq::amdgpu_irq_wait(adev, 5);
-            crate::amdgpu_irq::amdgpu_ih_process(adev, false);
-            crate::workqueue::run_pending(adev);
-        };
-        match done {
-            Some(e) => Line::new().s("dc live: flip ").dec(n as u64).s(" completed after ")
-                .dec(e.time_us.saturating_sub(t0)).s(" us at vblank ").dec(e.sequence).say(),
-            None => {
-                let c = adev.mode_info.crtcs[0].unwrap();
-                let pending = crate::dc::dc_get_flip_pending_on_otg(adev, adev.dm.dc.as_deref().unwrap(),
-                                                                    c.otg_inst as u32);
-                Line::new().s("dc live: flip ").dec(n as u64).s(" not completed after 100 ms (flip pending ")
-                    .dec(pending as u64).s(", vblanks ").dec(c.vblank.count).s(", vblank irq ")
-                    .dec(c.vblank.enabled as u64).s(")").say();
-                return;
-            }
+        if crate::linux::now_us() - t0 > 100_000 {
+            break None;
+        }
+        crate::amdgpu_irq::amdgpu_irq_wait(adev, 5);
+        crate::amdgpu_irq::amdgpu_ih_process(adev, false);
+        crate::workqueue::run_pending(adev);
+    };
+    match done {
+        Some(e) => {
+            Line::new().s("dc live: flip ").dec(n as u64).s(" to 0x").hexw((address >> 32) as u32, 8)
+                .hexw(address as u32, 8).s(" completed after ").dec(e.time_us.saturating_sub(t0))
+                .s(" us at vblank ").dec(e.sequence).say();
+            true
+        }
+        None => {
+            let c = adev.mode_info.crtcs[0].unwrap();
+            let pending = crate::dc::dc_get_flip_pending_on_otg(adev, adev.dm.dc.as_deref().unwrap(),
+                                                                c.otg_inst as u32);
+            Line::new().s("dc live: flip ").dec(n as u64).s(" not completed after 100 ms (flip pending ")
+                .dec(pending as u64).s(", vblanks ").dec(c.vblank.count).s(", vblank irq ")
+                .dec(c.vblank.enabled as u64).s(")").say();
+            false
         }
     }
+}
+
+/// Two page flips to the framebuffer on screen: the picture stays, and the
+/// log says whether the flip path works.
+fn flip_self_test(adev: &mut amdgpu_device, address: u64) {
+    for n in 0..2u32 {
+        if !flip_and_wait(adev, address, n) {
+            return;
+        }
+    }
+}
+
+/// Whether the display scans out of system memory through the GART: the
+/// framebuffer copied into shadow `a` on SDMA, a flip there, half a second
+/// of it on screen with the OTG's underflow flag watched, and a flip back.
+fn gtt_scanout_test(adev: &mut amdgpu_device, fb: &bo, a: &bo) {
+    if copy_rect(adev, fb.gpu, fb.pitch, a.gpu, a.pitch, 0, 0, fb.width, fb.height).is_err() {
+        Line::new().s("dc live: scanout test: the copy into the shadow failed").say();
+        return;
+    }
+    let underflow = |adev: &amdgpu_device| {
+        let dc = adev.dm.dc.as_deref().unwrap();
+        let pool = dc.res_pool.as_deref().unwrap();
+        let otg = adev.mode_info.crtcs[0].unwrap().otg_inst as usize;
+        let tg = pool.timing_generators[otg].as_deref().unwrap();
+        let u = (tg.funcs().is_optc_underflow_occurred.unwrap())(adev, tg);
+        crate::dcn20_optc::optc1_clear_optc_underflow(adev, tg);
+        u
+    };
+    underflow(adev);
+    if !flip_and_wait(adev, a.gpu, 2) {
+        return;
+    }
+    let t0 = crate::linux::now_us();
+    while crate::linux::now_us() - t0 < 500_000 {
+        crate::amdgpu_irq::amdgpu_irq_wait(adev, 20);
+        crate::workqueue::run_pending(adev);
+    }
+    let under = underflow(adev);
+    let back = flip_and_wait(adev, fb.gpu, 3);
+    Line::new().s("dc live: scanout from the GART ").s(if under { "underflowed" } else { "without underflow" })
+        .s(if back { ", back on the framebuffer" } else { ", NOT back on the framebuffer" }).say();
 }
 
 /// Register with the kernel, bind its buffers, prove the copy and the
@@ -1042,6 +1085,10 @@ pub fn serve(adev: &mut amdgpu_device) {
     }
     svc.copy_ok = self_test(adev);
     Line::new().s("gpudev: sdma0 self-test ").s(if svc.copy_ok { "passed" } else { "FAILED" }).say();
+    if svc.copy_ok && adev.dm.live.is_some() {
+        let (fb, a) = (svc.bos[0], svc.bos[1]);
+        gtt_scanout_test(adev, &fb, &a);
+    }
     let scene_ok = svc.copy_ok && scenes_init(adev, &mut svc);
     // An APU's VRAM is the carve-out the CPU reaches whole (`aper_base`,
     // as gmc_v9_0_mc_init sets it); BAR0 shows only its start.
