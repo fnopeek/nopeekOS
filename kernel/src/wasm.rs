@@ -913,7 +913,7 @@ pub fn execute_wasi(
 
     let t_r = crate::interrupts::ticks();
     let r = start.call(&mut store, ());
-    kprintln!("[npk]   wasmi: laufen {} ms",
+    crate::kdebug!("[npk]   wasmi: laufen {} ms",
         crate::interrupts::ticks().saturating_sub(t_r) * 10);
     match r {
         Ok(()) => Ok(0),
@@ -1050,10 +1050,10 @@ pub fn execute_wasi_forge(
     }
     inst.set_fuel(fuel.min(i64::MAX as u64) as i64);
 
-    kprintln!("[npk]   forge: uebersetzen {} ms ({} B x86)", compile_ms, m.code.len());
+    crate::kdebug!("[npk]   forge: uebersetzen {} ms ({} B x86)", compile_ms, m.code.len());
     let t_r = crate::interrupts::ticks();
     let (_ret, trap) = inst.call(entry, 0, 0, 0);
-    kprintln!("[npk]   forge: laufen {} ms",
+    crate::kdebug!("[npk]   forge: laufen {} ms",
         crate::interrupts::ticks().saturating_sub(t_r) * 10);
     match trap {
         // Returning from `_start` is rare for a wasi program but allowed,

@@ -122,7 +122,7 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
     let _ = (vault, session);
 
     if let Some(s) = &guest_script {
-        kprintln!("[python] {}", s);
+        crate::kdebug!("[python] {}", s);
     }
 
     let term = crate::shade::terminal::active_idx() as u8;
@@ -137,12 +137,12 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
     // the same way.
     let ms = crate::interrupts::ticks().saturating_sub(t0) * 10;
     let c = crate::heap::counters();
-    kprintln!("[python] {} ms ({})", ms, if use_forge { "forge" } else { "wasmi" });
+    crate::kdebug!("[python] {} ms ({})", ms, if use_forge { "forge" } else { "wasmi" });
     // Allocator counters for this run. `steps` are free-list nodes visited,
     // which shows whether the linear search is the bottleneck.
-    kprintln!("[heap] {} allocs / {} frees, Schritte: {} beim Belegen + {} beim Freigeben",
+    crate::kdebug!("[heap] {} allocs / {} frees, Schritte: {} beim Belegen + {} beim Freigeben",
         c.allocs, c.frees, c.alloc_steps, c.free_steps);
-    kprintln!("[heap] Freiliste jetzt {} Knoten, Spitze {}, {} mal gewachsen",
+    crate::kdebug!("[heap] Freiliste jetzt {} Knoten, Spitze {}, {} mal gewachsen",
         c.free_nodes, c.max_free_nodes, c.grows);
     let mut line = alloc::string::String::new();
     for (i, n) in c.size_hist.iter().enumerate() {
@@ -151,7 +151,7 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
             let _ = write!(line, " <{}B:{}", 32usize << i, n);
         }
     }
-    kprintln!("[heap] Groessen:{}", line);
+    crate::kdebug!("[heap] Groessen:{}", line);
     match r {
         Ok(0) => {}
         Ok(code) => kprintln!("[python] exit {}", code),
