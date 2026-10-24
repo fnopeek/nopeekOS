@@ -577,6 +577,8 @@ pub fn amdgpu_dm_init(adev: &mut amdgpu_device) -> i32 {
     let r = dm_dmub_hw_init(adev);
     if r != 0 {
         Line::new().s("DMUB interface failed to initialize: status=").dec(r as i64 as u64).say();
+        // error: amdgpu_dm_fini → dc_destroy.
+        adev.dm.dc = None;
         return -22;
     }
 
@@ -793,21 +795,31 @@ pub fn dc_live_requested() -> bool {
     n > 0 && &buf[..n as usize] == b"live"
 }
 
+/// The framebuffer the kernel draws into, as a DRM framebuffer gives it to
+/// `fill_plane_buffer_attributes`: MC address, pitch in pixels, size.
+#[derive(Clone, Copy, Debug)]
+pub struct dm_framebuffer {
+    pub address: u64,
+    pub pitch: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 /// DC takes the panel over from the firmware: the rest of `amdgpu_dm_init`
 /// DC needs (`dc_hardware_init`, the system context, the boot detection of
 /// `amdgpu_dm_initialize_drm_device`), then what an atomic commit asks of
 /// DC for one stream and one plane — the stream in the timing the firmware
-/// set, the plane on the surface it scans out, so the picture the kernel
-/// draws stays. DCN 2.1 has no seamless boot: the panel goes dark between
-/// `dc_hardware_init` and the commit.
-pub fn dm_take_over_display(adev: &mut amdgpu_device) -> bool {
+/// set, the plane on `fb`, so the picture the kernel draws stays. DCN 2.1
+/// has no seamless boot: the panel goes dark between `dc_hardware_init` and
+/// the commit.
+pub fn dm_take_over_display(adev: &mut amdgpu_device, fb: &dm_framebuffer) -> bool {
     use crate::{dc, dc_state, dc_stream, link_detection};
     let Some(mut dcb) = adev.dm.dc.take() else { return false };
-    let r = dm_take_over(adev, &mut dcb);
+    let r = dm_take_over(adev, &mut dcb, fb);
     adev.dm.dc = Some(dcb);
     return r;
 
-    fn dm_take_over(adev: &amdgpu_device, dc: &mut dc::dc) -> bool {
+    fn dm_take_over(adev: &amdgpu_device, dc: &mut dc::dc, fb: &dm_framebuffer) -> bool {
         let Some(fw) = dm_read_firmware_scanout(adev, dc) else {
             Line::new().s("dc live: no firmware scanout on an eDP, staying with the firmware").say();
             return false;
@@ -818,6 +830,8 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device) -> bool {
             .s(" pclk ").dec(t.pix_clk_100hz as u64).s("00 Hz surface ").hex64(fw.address).s(" pitch ")
             .dec(fw.pitch as u64).s(" ").dec(fw.width as u64).s("x").dec(fw.height as u64).s(" format ")
             .dec(fw.format as u64).say();
+        Line::new().s("dc live: framebuffer ").hex64(fb.address).s(" pitch ").dec(fb.pitch as u64).s(" ")
+            .dec(fb.width as u64).s("x").dec(fb.height as u64).say();
 
         dc::dc_hardware_init(adev, dc);
 
@@ -857,8 +871,8 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device) -> bool {
         {
             let pl = dc.planes[plane].as_deref_mut().unwrap();
             pl.format = fw.format;
-            pl.plane_size.surface_size = crate::dc_hw_types::rect { x: 0, y: 0, width: fw.width, height: fw.height };
-            pl.plane_size.surface_pitch = fw.pitch;
+            pl.plane_size.surface_size = crate::dc_hw_types::rect { x: 0, y: 0, width: fb.width, height: fb.height };
+            pl.plane_size.surface_pitch = fb.pitch;
             pl.src_rect = pl.plane_size.surface_size;
             pl.dst_rect = crate::dc_hw_types::rect { x: 0, y: 0, width: t.h_addressable as i32, height: t.v_addressable as i32 };
             pl.clip_rect = pl.dst_rect;
@@ -867,7 +881,7 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device) -> bool {
             pl.visible = true;
             pl.color_space = COLOR_SPACE_SRGB;
             pl.address.r#type = PLN_ADDR_TYPE_GRAPHICS;
-            pl.address.u[0] = fw.address;
+            pl.address.u[0] = fb.address;
             pl.global_alpha_value = 0xff;
             pl.in_transfer_func.r#type = TF_TYPE_PREDEFINED;
             pl.in_transfer_func.tf = TRANSFER_FUNCTION_SRGB;

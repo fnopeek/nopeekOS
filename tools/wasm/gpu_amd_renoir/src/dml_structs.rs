@@ -1,4 +1,5 @@
-//! display/dc/dml/display_mode_lib.c (Linux 6.18.55): `dml_init_instance`.
+//! display/dc/dml/display_mode_lib.c (Linux 6.18.55): `dml_init_instance`,
+//! `dml_get_status_message`.
 //! The DML types themselves are generated (display_mode_structs.rs, from
 //! display_mode_structs.h / display_mode_vba.h / display_mode_lib.h).
 #![allow(dead_code, non_snake_case)]
@@ -59,5 +60,35 @@ pub fn dml_init_instance(lib: &mut display_mode_lib, soc_bb: &_vcs_dpi_soc_bound
         lib.funcs = dml21_funcs;
     } else {
         crate::linux::Line::new().s("dml_init_instance: project ").dec(project as u64).s(" not built").say();
+    }
+}
+
+/// `dml_get_status_message`.
+pub fn dml_get_status_message(status: u32) -> &'static str {
+    use crate::display_mode_structs::*;
+    match status {
+        DML_VALIDATION_OK => "Validation OK",
+        DML_FAIL_SCALE_RATIO_TAP => "Scale ratio/tap",
+        DML_FAIL_SOURCE_PIXEL_FORMAT => "Source pixel format",
+        DML_FAIL_VIEWPORT_SIZE => "Viewport size",
+        DML_FAIL_TOTAL_V_ACTIVE_BW => "Total vertical active bandwidth",
+        DML_FAIL_DIO_SUPPORT => "DIO support",
+        DML_FAIL_NOT_ENOUGH_DSC => "Not enough DSC Units",
+        DML_FAIL_DSC_CLK_REQUIRED => "DSC clock required",
+        DML_FAIL_URGENT_LATENCY => "Urgent latency",
+        DML_FAIL_REORDERING_BUFFER => "Re-ordering buffer",
+        DML_FAIL_DISPCLK_DPPCLK => "Dispclk and Dppclk",
+        DML_FAIL_TOTAL_AVAILABLE_PIPES => "Total available pipes",
+        DML_FAIL_NUM_OTG => "Number of OTG",
+        DML_FAIL_WRITEBACK_MODE => "Writeback mode",
+        DML_FAIL_WRITEBACK_LATENCY => "Writeback latency",
+        DML_FAIL_WRITEBACK_SCALE_RATIO_TAP => "Writeback scale ratio/tap",
+        DML_FAIL_CURSOR_SUPPORT => "Cursor support",
+        DML_FAIL_PITCH_SUPPORT => "Pitch support",
+        DML_FAIL_PTE_BUFFER_SIZE => "PTE buffer size",
+        DML_FAIL_DSC_INPUT_BPC => "DSC input bpc",
+        DML_FAIL_PREFETCH_SUPPORT => "Prefetch support",
+        DML_FAIL_V_RATIO_PREFETCH => "Vertical ratio prefetch",
+        _ => "Unknown Status",
     }
 }

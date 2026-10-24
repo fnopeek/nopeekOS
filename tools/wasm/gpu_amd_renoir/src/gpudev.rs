@@ -967,6 +967,13 @@ pub fn serve(adev: &mut amdgpu_device) {
         Line::new().s("gpudev: bo ").dec(id as u64).s(" at 0x").hexw((b.gpu >> 32) as u32, 8).hexw(b.gpu as u32, 8)
             .dbg();
     }
+    if crate::amdgpu_dm::dc_live_requested() && adev.dm.dc.is_some() {
+        let b = &svc.bos[0];
+        let fb = crate::amdgpu_dm::dm_framebuffer { address: b.gpu, pitch: (b.pitch / 4) as i32,
+                                                    width: b.width as i32, height: b.height as i32 };
+        let live = crate::amdgpu_dm::dm_take_over_display(adev, &fb);
+        Line::new().s("dc live: display ").s(if live { "driven by DC" } else { "not taken over" }).say();
+    }
     svc.copy_ok = self_test(adev);
     Line::new().s("gpudev: sdma0 self-test ").s(if svc.copy_ok { "passed" } else { "FAILED" }).say();
     let scene_ok = svc.copy_ok && scenes_init(adev, &mut svc);

@@ -1090,7 +1090,10 @@ pub fn dcn21_validate_bandwidth_fp(dc: &mut dc, context: &mut dc_state, validate
     }
 
     if !out {
-        crate::linux::Line::new().s("Mode Validation Warning: failed validation.").say();
+        let v = &context.dml.as_deref().unwrap().vba;
+        crate::linux::Line::new().s("Mode Validation Warning: ")
+            .s(crate::dml_structs::dml_get_status_message(v.ValidationStatus[v.soc.num_states as usize]))
+            .s(" failed validation.").say();
         out = false;
         return out;
     }
