@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.679.0"
+version = "0.680.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 authors = ["nopeek"]
@@ -8,11 +8,6 @@ description = "nopeekOS kernel"
 
 [features]
 installer = []
-# Bundle the LibreWolf userspace sqfs into the installer kernel binary
-# so a fresh USB-stick install has the browser ready without an OTA
-# round-trip. Off by default (keeps the regular kernel.efi small);
-# enabled by `./build.sh usb-full` / `./build.sh qemu-installer-full`.
-bundle-userspace = []
 
 [dependencies]
 spin = "0.12"         # Spinlock (no_std mutex)

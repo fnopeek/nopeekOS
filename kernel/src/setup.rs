@@ -152,11 +152,10 @@ fn setup_identity_and_settings() -> bool {
     let lang = read_line_default("en");
     config::set("lang", &lang);
 
-    // Default autostart: the app dock + the top bar. npk_sleep runs pending
-    // scheduler work while it waits, so several looping panels coexist
-    // without starving intents. A config seed; `set autostart ...`
-    // overrides it.
-    config::set("autostart", "dock bar");
+    // Default autostart: deck, the one bottom panel (launcher, windows,
+    // status items, clock). A config seed; `set autostart dock bar`
+    // brings back the two-panel layout.
+    config::set("autostart", "deck");
 
     // Theme follows the wallpaper: `auto` picks light/dark from the
     // background luminance (palette::is_light_theme). `theme light|dark`

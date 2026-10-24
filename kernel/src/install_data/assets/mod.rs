@@ -148,6 +148,11 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
         version: Some(include_str!("bar.version")),
     },
     BundledAsset {
+        fs_path: "sys/wasm/deck",
+        bytes:   include_bytes!("deck.wasm"),
+        version: Some(include_str!("deck.version")),
+    },
+    BundledAsset {
         fs_path: "sys/wasm/loft",
         bytes:   include_bytes!("loft.wasm"),
         version: Some(include_str!("loft.version")),

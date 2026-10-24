@@ -536,6 +536,7 @@ fn is_bundled_module(name: &str) -> bool {
         "loft",
         "dock",
         "bar",
+        "deck",
         "testdisk",
         "spell",
         "pick",
