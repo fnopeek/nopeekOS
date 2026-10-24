@@ -14,9 +14,18 @@ purchase is listed here.
 
 ## Bought with sponsor money
 
-| Date | Device | Price | Status |
-|---|---|---|---|
-| | | | |
+| Date | Device | Price | Sponsored by | Status |
+|---|---|---|---|---|
+| | | | | |
+
+## Sponsors
+
+Thank you to everyone who sponsors nopeekOS on
+[GitHub Sponsors](https://github.com/sponsors/fnopeek). Device patrons and
+device sponsors are listed here by name or handle, or anonymously if they
+prefer.
+
+*No sponsors yet. Be the first.*
 
 ## Vote for the next one
 
