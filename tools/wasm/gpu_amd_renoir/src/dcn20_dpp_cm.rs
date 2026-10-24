@@ -135,13 +135,13 @@ pub fn dpp2_cm_set_gamut_remap(adev: &amdgpu_device, dpp: &dcn20_dpp, adjust: &d
     }
 }
 
-/// `dpp_input_csc_matrix[]` (dpp.h): the colour space and its twelve
-/// coefficients, flat in `tables.rs`.
+/// `dpp_input_csc_matrix[]` (dpp.h): the colour space (an enum, two
+/// halves) and its twelve coefficients, flat in `tables.rs`.
 fn dpp_input_csc_matrix(color_space: u32) -> Option<&'static [u16]> {
     crate::tables::dpp_input_csc_matrix
-        .chunks(13)
-        .find(|e| e[0] as u32 == color_space)
-        .map(|e| &e[1..13])
+        .chunks(14)
+        .find(|e| (e[0] as u32 | (e[1] as u32) << 16) == color_space)
+        .map(|e| &e[2..14])
 }
 
 /// `dpp2_program_input_csc`: the coefficients go to the set not in use.

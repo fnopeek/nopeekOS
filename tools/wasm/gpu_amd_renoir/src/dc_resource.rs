@@ -157,6 +157,8 @@ pub struct resource_pool {
     pub ref_clocks: resource_pool_ref_clocks,
     /// `abm`: the adaptive backlight (DMUB-run on Renoir with a DMCUB).
     pub abm: Option<Box<crate::dmub_abm::dce_abm>>,
+    /// `irqs`: the interrupt service.
+    pub irqs: Option<Box<crate::irq_service::irq_service>>,
     /// `psr`: the DMUB panel self refresh object.
     pub psr: Option<Box<crate::dmub_abm::dmub_psr>>,
     /// `pp_smu`: the power-play SMU interface (None if the DM offers no

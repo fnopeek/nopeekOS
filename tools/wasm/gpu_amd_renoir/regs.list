@@ -12646,3 +12646,115 @@ DSCC0_DSCC_PPS_CONFIG0__BITS_PER_COMPONENT__SHIFT @ ../display/dc/resource/dcn21
 DSCC0_DSCC_PPS_CONFIG0__BITS_PER_COMPONENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
 DSCCIF0_DSCCIF_CONFIG0__BITS_PER_COMPONENT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
 DSCCIF0_DSCCIF_CONFIG0__BITS_PER_COMPONENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+# DC interrupt service (irq_service.c, irq_service_dcn21.c, DM irq sources)
+SIZEOF_irq_source_info = sizeof(struct irq_source_info) @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQINFO_SRC_ID = offsetof(struct irq_source_info, src_id) @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQINFO_EXT_ID = offsetof(struct irq_source_info, ext_id) @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQINFO_ENABLE_REG = offsetof(struct irq_source_info, enable_reg) @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQINFO_ENABLE_MASK = offsetof(struct irq_source_info, enable_mask) @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQINFO_ENABLE_VALUE = offsetof(struct irq_source_info, enable_value) @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQINFO_ACK_REG = offsetof(struct irq_source_info, ack_reg) @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQINFO_ACK_MASK = offsetof(struct irq_source_info, ack_mask) @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQINFO_ACK_VALUE = offsetof(struct irq_source_info, ack_value) @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQINFO_STATUS_REG = offsetof(struct irq_source_info, status_reg) @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQINFO_FUNCS = offsetof(struct irq_source_info, funcs) @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED_MASK @ ../display/dc/irq/irq_service.c
+HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED__SHIFT @ ../display/dc/irq/irq_service.c
+HPD0_DC_HPD_INT_CONTROL__DC_HPD_INT_POLARITY_MASK @ ../display/dc/irq/irq_service.c
+HPD0_DC_HPD_INT_CONTROL__DC_HPD_INT_POLARITY__SHIFT @ ../display/dc/irq/irq_service.c
+DCN_1_0__SRCID__DC_D1_OTG_VSTARTUP @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VBLANK1 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__DC_D2_OTG_VSTARTUP @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VBLANK2 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__DC_D3_OTG_VSTARTUP @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VBLANK3 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__DC_D4_OTG_VSTARTUP @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VBLANK4 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__DC_D5_OTG_VSTARTUP @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VBLANK5 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__DC_D6_OTG_VSTARTUP @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VBLANK6 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__DMCUB_OUTBOX_LOW_PRIORITY_READY_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_DMCUB_OUTBOX @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG1_VERTICAL_INTERRUPT0_CONTROL @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_DC1_VLINE0 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG2_VERTICAL_INTERRUPT0_CONTROL @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_DC2_VLINE0 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG3_VERTICAL_INTERRUPT0_CONTROL @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_DC3_VLINE0 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG4_VERTICAL_INTERRUPT0_CONTROL @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_DC4_VLINE0 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG5_VERTICAL_INTERRUPT0_CONTROL @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_DC5_VLINE0 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG6_VERTICAL_INTERRUPT0_CONTROL @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_DC6_VLINE0 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__HUBP0_FLIP_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_PFLIP1 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__HUBP1_FLIP_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_PFLIP2 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__HUBP2_FLIP_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_PFLIP3 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__HUBP3_FLIP_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_PFLIP4 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__HUBP4_FLIP_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_PFLIP5 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__HUBP5_FLIP_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_PFLIP6 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG0_IHC_V_UPDATE_NO_LOCK_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VUPDATE1 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG1_IHC_V_UPDATE_NO_LOCK_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VUPDATE2 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG2_IHC_V_UPDATE_NO_LOCK_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VUPDATE3 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG3_IHC_V_UPDATE_NO_LOCK_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VUPDATE4 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG4_IHC_V_UPDATE_NO_LOCK_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VUPDATE5 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__OTG5_IHC_V_UPDATE_NO_LOCK_INTERRUPT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_VUPDATE6 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__SRCID__DC_HPD1_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD1_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD2_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_HPD2 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD3_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_HPD3 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD4_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_HPD4 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD5_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_HPD5 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD6_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_HPD6 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD1_RX_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD2_RX_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_HPD2RX @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD3_RX_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_HPD3RX @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD4_RX_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_HPD4RX @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD5_RX_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_HPD5RX @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DCN_1_0__CTXID__DC_HPD6_RX_INT @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_IRQ_SOURCE_HPD6RX @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+SOC15_IH_CLIENTID_DCE @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQ_TYPE_VUPDATE @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQ_TYPE_PFLIP @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQ_TYPE_VBLANK @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+AMDGPU_CRTC_IRQ_NONE
+AMDGPU_CRTC_IRQ_VBLANK1
+AMDGPU_CRTC_IRQ_VBLANK2
+AMDGPU_CRTC_IRQ_VBLANK3
+AMDGPU_CRTC_IRQ_VBLANK4
+AMDGPU_CRTC_IRQ_VBLANK5
+AMDGPU_CRTC_IRQ_VBLANK6
+AMDGPU_FLIP_NONE
+AMDGPU_FLIP_PENDING
+AMDGPU_FLIP_SUBMITTED
+DC_IRQ_SOURCE_DMCUB_OUTBOX0 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+IRQ_TYPE_VLINE0 @ ../display/dc/irq/dcn21/irq_service_dcn21.c
+DC_PSR_VERSION_UNSUPPORTED @ ../display/dc/core/dc.c
+AMDGPU_HPD_1
+AMDGPU_HPD_2
+AMDGPU_HPD_3
+AMDGPU_HPD_4
+AMDGPU_HPD_5
+AMDGPU_HPD_6

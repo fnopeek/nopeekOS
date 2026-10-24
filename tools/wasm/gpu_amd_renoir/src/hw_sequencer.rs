@@ -271,12 +271,13 @@ fn get_color_space_type(color_space: u32) -> u32 {
 }
 
 /// `find_color_matrix` (dc_hw_sequencer.c): the output CSC coefficients of
-/// a colour space's type; `output_csc_matrix` is flat in `tables.rs`.
+/// a colour space's type; `output_csc_matrix` is flat in `tables.rs`, the
+/// type an enum in two halves.
 pub fn find_color_matrix(color_space: u32, array_size: &mut u32) -> Option<&'static [u16]> {
     let r#type = get_color_space_type(color_space);
-    let e = crate::tables::output_csc_matrix.chunks(13).find(|e| e[0] as u32 == r#type)?;
+    let e = crate::tables::output_csc_matrix.chunks(14).find(|e| (e[0] as u32 | (e[1] as u32) << 16) == r#type)?;
     *array_size = 12;
-    Some(&e[1..13])
+    Some(&e[2..14])
 }
 
 /// `set_p_state_switch_method` (dc_hw_sequencer.c): how the pipe switches

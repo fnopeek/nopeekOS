@@ -217,6 +217,12 @@ mod dcn20_stream_encoder;
 mod dcn21_hubp;
 #[path = "../src/dcn21_resource.rs"]
 mod dcn21_resource;
+#[path = "../src/irq_service.rs"]
+mod irq_service;
+#[path = "../src/amdgpu_dm_irq.rs"]
+mod amdgpu_dm_irq;
+#[path = "../src/drm_vblank.rs"]
+mod drm_vblank;
 #[path = "../src/virtual_stream_encoder.rs"]
 mod virtual_stream_encoder;
 #[path = "../src/dml_structs.rs"]

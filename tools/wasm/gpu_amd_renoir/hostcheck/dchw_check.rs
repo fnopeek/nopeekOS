@@ -589,6 +589,24 @@ fn main() {
                 let mut su = dc::dc_stream_update { stream, ..Default::default() };
                 println!("flip {}", dc::dc_update_planes_and_stream(&adev, &mut dc, &mut fu, stream, Some(&mut su)) as i32);
             }
+            // The interrupt sources, as in the oracle.
+            for otg in 0..4 {
+                println!("dc_get_flip_pending_on_otg {} {}", otg, dc::dc_get_flip_pending_on_otg(&adev, &dc, otg) as i32);
+            }
+            for id in [0x57u32, 0x58, 0x59, 0x5a, 0x4c, 0x4d, 0x7, 0x13] {
+                println!("dc_interrupt_to_irq_source 0x{:x} {}", id, dc::dc_interrupt_to_irq_source(&dc, id, 0));
+            }
+            for ctx in 0..14 {
+                println!("dc_interrupt_to_irq_source hpd {} {}", ctx,
+                    dc::dc_interrupt_to_irq_source(&dc, DCN_1_0__SRCID__DC_HPD1_INT, ctx));
+            }
+            println!("dc_interrupt_set {}", dc::dc_interrupt_set(&adev, &dc, DC_IRQ_SOURCE_VUPDATE1, true) as i32);
+            dc::dc_interrupt_ack(&adev, &dc, DC_IRQ_SOURCE_VUPDATE1);
+            println!("dc_interrupt_set {}", dc::dc_interrupt_set(&adev, &dc, DC_IRQ_SOURCE_PFLIP1, true) as i32);
+            println!("dc_interrupt_set {}", dc::dc_interrupt_set(&adev, &dc, DC_IRQ_SOURCE_HPD1, true) as i32);
+            dc::dc_interrupt_ack(&adev, &dc, DC_IRQ_SOURCE_HPD1);
+            println!("dc_interrupt_set {}", dc::dc_interrupt_set(&adev, &dc, DC_IRQ_SOURCE_VUPDATE1, false) as i32);
+            println!("dc_interrupt_set {}", dc::dc_interrupt_set(&adev, &dc, DC_IRQ_SOURCE_GPIOPAD0, true) as i32);
         }
     }
     npk_sys::fake_card_echo(false);

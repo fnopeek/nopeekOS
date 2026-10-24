@@ -29,6 +29,10 @@ pub enum work {
     jpeg_idle,
     /// `amdgpu_device_delayed_init_work_handler` (`delayed_init_work`).
     delayed_init,
+    /// `dm_irq_work_func`: a low DM interrupt handler.
+    dm_irq_work { irq_source: u32, handler: crate::amdgpu_dm_irq::dm_irq_handler },
+    /// `vblank_disable_fn` (the vblank's `disable_timer`).
+    vblank_disable { pipe: usize },
 }
 
 /// Queued work and armed timers.
@@ -160,6 +164,8 @@ pub fn run_pending(adev: &mut amdgpu_device) {
             work::vcn_idle { inst } => crate::vcn_v2_0::amdgpu_vcn_idle_work_handler(adev, inst),
             work::jpeg_idle => crate::jpeg_v2_0::amdgpu_jpeg_idle_work_handler(adev),
             work::delayed_init => crate::amdgpu_device::amdgpu_device_delayed_init_work_handler(adev),
+            work::dm_irq_work { handler, .. } => crate::amdgpu_dm_irq::dm_irq_work_func(adev, handler),
+            work::vblank_disable { pipe } => crate::drm_vblank::vblank_disable_fn(adev, pipe),
         }
         adev.wq.running.pop();
     }

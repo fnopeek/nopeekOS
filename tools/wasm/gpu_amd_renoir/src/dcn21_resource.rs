@@ -282,6 +282,8 @@ pub fn dcn21_resource_construct(
     let dml = dc.dml.get_or_insert_with(crate::dml_structs::DmlBox::zero);
     dml_init_instance(dml, &dcn2_1_soc(), &ip, DML_PROJECT_DCN21);
 
+    pool.irqs = Some(crate::irq_service::dal_irq_service_dcn21_create());
+
     // Create resources: the clock sources. CLOCK_SOURCE_COMBO_PHY_PLL0..4 use
     // clk_src_regs[0..4]; the DP-DTO source reuses clk_src_regs[0] (Linux'
     // "todo: not reuse phy_pll registers").
@@ -377,9 +379,8 @@ pub fn dcn21_resource_construct(
     dc.caps.max_odm_combine_factor = 2;
     dc.cap_funcs.get_dcc_compression_cap = Some(cap_func_id::dcn20_get_dcc_compression_cap);
 
-    // With this dcn21_resource_construct is complete bar the irq service
-    // (dal_irq_service_dcn21_create) and `pool.funcs = &dcn21_res_pool_funcs`
-    // (the validate/map vtable — stage E).
+    // With this dcn21_resource_construct is complete bar
+    // `pool.funcs = &dcn21_res_pool_funcs` (the validate/map vtable — stage E).
 }
 
 /// `bios_regs` (dcn21_resource.c).

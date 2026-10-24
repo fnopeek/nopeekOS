@@ -20,6 +20,7 @@
  * Every register write is printed; the commands DC hands the DMCUB are
  * recorded where it hands them to the DM, then printed with the state
  * init_hw leaves. hostcheck/dchw_check.rs prints the same for the port. */
+#include "ivsrcid/dcn/irqsrcs_dcn_1_0.h"
 #include <errno.h>
 #include "dc.h"
 #include "core_types.h"
@@ -586,6 +587,22 @@ int main(int argc, char **argv)
 				struct dc_stream_update su = { .stream = stream };
 				printf("flip %d\n", dc_update_planes_and_stream(dc, &fu, 1, stream, &su));
 			}
+			/* The interrupt sources a flip completes on (DCN: VUPDATE_NO_LOCK
+			 * of the stream's OTG) and the IV source ids DC maps. */
+			for (int otg = 0; otg < 4; otg++)
+				printf("dc_get_flip_pending_on_otg %d %d\n", otg, dc_get_flip_pending_on_otg(dc, otg));
+			unsigned int ids[] = { 0x57, 0x58, 0x59, 0x5a, 0x4c, 0x4d, 0x7, 0x13 };
+			for (int i = 0; i < 8; i++)
+				printf("dc_interrupt_to_irq_source 0x%x %d\n", ids[i], dc_interrupt_to_irq_source(dc, ids[i], 0));
+			for (int ctx = 0; ctx < 14; ctx++)
+				printf("dc_interrupt_to_irq_source hpd %d %d\n", ctx, dc_interrupt_to_irq_source(dc, DCN_1_0__SRCID__DC_HPD1_INT, ctx));
+			printf("dc_interrupt_set %d\n", dc_interrupt_set(dc, DC_IRQ_SOURCE_VUPDATE1, true));
+			dc_interrupt_ack(dc, DC_IRQ_SOURCE_VUPDATE1);
+			printf("dc_interrupt_set %d\n", dc_interrupt_set(dc, DC_IRQ_SOURCE_PFLIP1, true));
+			printf("dc_interrupt_set %d\n", dc_interrupt_set(dc, DC_IRQ_SOURCE_HPD1, true));
+			dc_interrupt_ack(dc, DC_IRQ_SOURCE_HPD1);
+			printf("dc_interrupt_set %d\n", dc_interrupt_set(dc, DC_IRQ_SOURCE_VUPDATE1, false));
+			printf("dc_interrupt_set %d\n", dc_interrupt_set(dc, DC_IRQ_SOURCE_GPIOPAD0, true));
 		}
 	}
 

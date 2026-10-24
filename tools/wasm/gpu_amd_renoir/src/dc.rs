@@ -2800,3 +2800,53 @@ pub fn dc_update_planes_and_stream(adev: &amdgpu_device, dc: &mut dc, srf_update
     // their own sequences; it is DCN 4.01's.
     update_planes_and_stream_v2(adev, dc, srf_updates, stream, stream_update)
 }
+
+/// `dc_interrupt_to_irq_source` (dc.c).
+pub fn dc_interrupt_to_irq_source(dc: &dc, src_id: u32, ext_id: u32) -> u32 {
+    crate::irq_service::dal_irq_service_to_irq_source(dc.res_pool.as_deref().unwrap().irqs.as_deref().unwrap(), src_id,
+                                                      ext_id)
+}
+
+/// `dc_interrupt_set` (dc.c): enable or disable an AMD hw interrupt source.
+pub fn dc_interrupt_set(adev: &amdgpu_device, dc: &dc, src: u32, enable: bool) -> bool {
+    crate::irq_service::dal_irq_service_set(adev, dc.res_pool.as_deref().unwrap().irqs.as_deref().unwrap(), src, enable)
+}
+
+/// `dc_interrupt_ack` (dc.c).
+pub fn dc_interrupt_ack(adev: &amdgpu_device, dc: &dc, src: u32) {
+    crate::irq_service::dal_irq_service_ack(adev, dc.res_pool.as_deref().unwrap().irqs.as_deref().unwrap(), src);
+}
+
+/// `dc_get_flip_pending_on_otg` (dc.c): whether a HUBP of a pipe bound to
+/// `otg_inst` has not yet latched its programmed surface address. It takes
+/// and changes no plane state, so it is safe from interrupt context.
+pub fn dc_get_flip_pending_on_otg(adev: &amdgpu_device, dc: &dc, otg_inst: u32) -> bool {
+    let mut flip_pending = false;
+
+    let Some(cur) = dc.current_state.as_deref() else { return false };
+
+    dc_exit_ips_for_hw_access(dc);
+
+    let pool = dc.res_pool.as_deref().unwrap();
+    for i in 0..pool.pipe_count as usize {
+        let pipe_ctx = &cur.res_ctx.pipe_ctx[i];
+
+        let (Some(_), Some(tg)) = (pipe_ctx.plane_state, pipe_ctx.stream_res.tg) else { continue };
+
+        if pool.timing_generators[tg].as_deref().unwrap().base.inst != otg_inst {
+            continue;
+        }
+
+        if let Some(h) = pipe_ctx.plane_res.hubp {
+            let hubp = pool.hubps[h].as_deref().unwrap();
+            if let Some(is_flip_pending) = hubp.funcs().hubp_is_flip_pending
+                && is_flip_pending(adev, hubp)
+            {
+                flip_pending = true;
+                break;
+            }
+        }
+    }
+
+    flip_pending
+}

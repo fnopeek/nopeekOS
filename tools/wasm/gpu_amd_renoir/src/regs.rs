@@ -25259,3 +25259,227 @@ pub const DSCC0_DSCC_PPS_CONFIG0__BITS_PER_COMPONENT_MASK: u32 = 0xf0000000;
 pub const DSCCIF0_DSCCIF_CONFIG0__BITS_PER_COMPONENT__SHIFT: u32 = 0x10;
 /// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:50953
 pub const DSCCIF0_DSCCIF_CONFIG0__BITS_PER_COMPONENT_MASK: u32 = 0xf0000;
+
+// DC interrupt service (irq_service.c, irq_service_dcn21.c, DM irq sources)
+/// The value of `sizeof(struct irq_source_info)` in ../display/dc/irq/dcn21/irq_service_dcn21.c
+pub const SIZEOF_irq_source_info: u32 = 0x30;
+/// The value of `offsetof(struct irq_source_info, src_id)` in ../display/dc/irq/dcn21/irq_service_dcn21.c
+pub const IRQINFO_SRC_ID: u32 = 0x0;
+/// The value of `offsetof(struct irq_source_info, ext_id)` in ../display/dc/irq/dcn21/irq_service_dcn21.c
+pub const IRQINFO_EXT_ID: u32 = 0x4;
+/// The value of `offsetof(struct irq_source_info, enable_reg)` in ../display/dc/irq/dcn21/irq_service_dcn21.c
+pub const IRQINFO_ENABLE_REG: u32 = 0x8;
+/// The value of `offsetof(struct irq_source_info, enable_mask)` in ../display/dc/irq/dcn21/irq_service_dcn21.c
+pub const IRQINFO_ENABLE_MASK: u32 = 0xc;
+/// The value of `offsetof(struct irq_source_info, enable_value)` in ../display/dc/irq/dcn21/irq_service_dcn21.c
+pub const IRQINFO_ENABLE_VALUE: u32 = 0x10;
+/// The value of `offsetof(struct irq_source_info, ack_reg)` in ../display/dc/irq/dcn21/irq_service_dcn21.c
+pub const IRQINFO_ACK_REG: u32 = 0x18;
+/// The value of `offsetof(struct irq_source_info, ack_mask)` in ../display/dc/irq/dcn21/irq_service_dcn21.c
+pub const IRQINFO_ACK_MASK: u32 = 0x1c;
+/// The value of `offsetof(struct irq_source_info, ack_value)` in ../display/dc/irq/dcn21/irq_service_dcn21.c
+pub const IRQINFO_ACK_VALUE: u32 = 0x20;
+/// The value of `offsetof(struct irq_source_info, status_reg)` in ../display/dc/irq/dcn21/irq_service_dcn21.c
+pub const IRQINFO_STATUS_REG: u32 = 0x24;
+/// The value of `offsetof(struct irq_source_info, funcs)` in ../display/dc/irq/dcn21/irq_service_dcn21.c
+pub const IRQINFO_FUNCS: u32 = 0x28;
+/// display/dc/irq/irq_service.c:45
+pub const HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED_MASK: u32 = 0x10;
+/// display/dc/irq/irq_service.c:47
+pub const HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED__SHIFT: u32 = 0x4;
+/// display/dc/irq/irq_service.c:46
+pub const HPD0_DC_HPD_INT_CONTROL__DC_HPD_INT_POLARITY_MASK: u32 = 0x100;
+/// display/dc/irq/irq_service.c:48
+pub const HPD0_DC_HPD_INT_CONTROL__DC_HPD_INT_POLARITY__SHIFT: u32 = 0x8;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1039
+pub const DCN_1_0__SRCID__DC_D1_OTG_VSTARTUP: u32 = 0x3c;
+/// ?
+pub const DC_IRQ_SOURCE_VBLANK1: u32 = 0x4e;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1040
+pub const DCN_1_0__SRCID__DC_D2_OTG_VSTARTUP: u32 = 0x3d;
+/// ?
+pub const DC_IRQ_SOURCE_VBLANK2: u32 = 0x4f;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1041
+pub const DCN_1_0__SRCID__DC_D3_OTG_VSTARTUP: u32 = 0x3e;
+/// ?
+pub const DC_IRQ_SOURCE_VBLANK3: u32 = 0x50;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1042
+pub const DCN_1_0__SRCID__DC_D4_OTG_VSTARTUP: u32 = 0x3f;
+/// ?
+pub const DC_IRQ_SOURCE_VBLANK4: u32 = 0x51;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1043
+pub const DCN_1_0__SRCID__DC_D5_OTG_VSTARTUP: u32 = 0x40;
+/// ?
+pub const DC_IRQ_SOURCE_VBLANK5: u32 = 0x52;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1044
+pub const DCN_1_0__SRCID__DC_D6_OTG_VSTARTUP: u32 = 0x41;
+/// ?
+pub const DC_IRQ_SOURCE_VBLANK6: u32 = 0x53;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1135
+pub const DCN_1_0__SRCID__DMCUB_OUTBOX_LOW_PRIORITY_READY_INT: u32 = 0x68;
+/// ?
+pub const DC_IRQ_SOURCE_DMCUB_OUTBOX: u32 = 0x60;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:589
+pub const DCN_1_0__SRCID__OTG1_VERTICAL_INTERRUPT0_CONTROL: u32 = 0x1e;
+/// ?
+pub const DC_IRQ_SOURCE_DC1_VLINE0: u32 = 0x54;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:628
+pub const DCN_1_0__SRCID__OTG2_VERTICAL_INTERRUPT0_CONTROL: u32 = 0x1f;
+/// ?
+pub const DC_IRQ_SOURCE_DC2_VLINE0: u32 = 0x55;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:667
+pub const DCN_1_0__SRCID__OTG3_VERTICAL_INTERRUPT0_CONTROL: u32 = 0x20;
+/// ?
+pub const DC_IRQ_SOURCE_DC3_VLINE0: u32 = 0x56;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:706
+pub const DCN_1_0__SRCID__OTG4_VERTICAL_INTERRUPT0_CONTROL: u32 = 0x21;
+/// ?
+pub const DC_IRQ_SOURCE_DC4_VLINE0: u32 = 0x57;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:745
+pub const DCN_1_0__SRCID__OTG5_VERTICAL_INTERRUPT0_CONTROL: u32 = 0x22;
+/// ?
+pub const DC_IRQ_SOURCE_DC5_VLINE0: u32 = 0x58;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1000
+pub const DCN_1_0__SRCID__OTG6_VERTICAL_INTERRUPT0_CONTROL: u32 = 0x38;
+/// ?
+pub const DC_IRQ_SOURCE_DC6_VLINE0: u32 = 0x59;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1108
+pub const DCN_1_0__SRCID__HUBP0_FLIP_INTERRUPT: u32 = 0x4f;
+/// ?
+pub const DC_IRQ_SOURCE_PFLIP1: u32 = 0x1a;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1109
+pub const DCN_1_0__SRCID__HUBP1_FLIP_INTERRUPT: u32 = 0x50;
+/// ?
+pub const DC_IRQ_SOURCE_PFLIP2: u32 = 0x1b;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1110
+pub const DCN_1_0__SRCID__HUBP2_FLIP_INTERRUPT: u32 = 0x51;
+/// ?
+pub const DC_IRQ_SOURCE_PFLIP3: u32 = 0x1c;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1111
+pub const DCN_1_0__SRCID__HUBP3_FLIP_INTERRUPT: u32 = 0x52;
+/// ?
+pub const DC_IRQ_SOURCE_PFLIP4: u32 = 0x1d;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1112
+pub const DCN_1_0__SRCID__HUBP4_FLIP_INTERRUPT: u32 = 0x53;
+/// ?
+pub const DC_IRQ_SOURCE_PFLIP5: u32 = 0x1e;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1113
+pub const DCN_1_0__SRCID__HUBP5_FLIP_INTERRUPT: u32 = 0x54;
+/// ?
+pub const DC_IRQ_SOURCE_PFLIP6: u32 = 0x1f;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1117
+pub const DCN_1_0__SRCID__OTG0_IHC_V_UPDATE_NO_LOCK_INTERRUPT: u32 = 0x57;
+/// ?
+pub const DC_IRQ_SOURCE_VUPDATE1: u32 = 0x48;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1118
+pub const DCN_1_0__SRCID__OTG1_IHC_V_UPDATE_NO_LOCK_INTERRUPT: u32 = 0x58;
+/// ?
+pub const DC_IRQ_SOURCE_VUPDATE2: u32 = 0x49;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1119
+pub const DCN_1_0__SRCID__OTG2_IHC_V_UPDATE_NO_LOCK_INTERRUPT: u32 = 0x59;
+/// ?
+pub const DC_IRQ_SOURCE_VUPDATE3: u32 = 0x4a;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1120
+pub const DCN_1_0__SRCID__OTG3_IHC_V_UPDATE_NO_LOCK_INTERRUPT: u32 = 0x5a;
+/// ?
+pub const DC_IRQ_SOURCE_VUPDATE4: u32 = 0x4b;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1121
+pub const DCN_1_0__SRCID__OTG4_IHC_V_UPDATE_NO_LOCK_INTERRUPT: u32 = 0x5b;
+/// ?
+pub const DC_IRQ_SOURCE_VUPDATE5: u32 = 0x4c;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:1122
+pub const DCN_1_0__SRCID__OTG5_IHC_V_UPDATE_NO_LOCK_INTERRUPT: u32 = 0x5c;
+/// ?
+pub const DC_IRQ_SOURCE_VUPDATE6: u32 = 0x4d;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:156
+pub const DCN_1_0__SRCID__DC_HPD1_INT: u32 = 0x9;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:157
+pub const DCN_1_0__CTXID__DC_HPD1_INT: u32 = 0x0;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:160
+pub const DCN_1_0__CTXID__DC_HPD2_INT: u32 = 0x1;
+/// ?
+pub const DC_IRQ_SOURCE_HPD2: u32 = 0x2;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:163
+pub const DCN_1_0__CTXID__DC_HPD3_INT: u32 = 0x2;
+/// ?
+pub const DC_IRQ_SOURCE_HPD3: u32 = 0x3;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:166
+pub const DCN_1_0__CTXID__DC_HPD4_INT: u32 = 0x3;
+/// ?
+pub const DC_IRQ_SOURCE_HPD4: u32 = 0x4;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:169
+pub const DCN_1_0__CTXID__DC_HPD5_INT: u32 = 0x4;
+/// ?
+pub const DC_IRQ_SOURCE_HPD5: u32 = 0x5;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:172
+pub const DCN_1_0__CTXID__DC_HPD6_INT: u32 = 0x5;
+/// ?
+pub const DC_IRQ_SOURCE_HPD6: u32 = 0x6;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:175
+pub const DCN_1_0__CTXID__DC_HPD1_RX_INT: u32 = 0x6;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:178
+pub const DCN_1_0__CTXID__DC_HPD2_RX_INT: u32 = 0x7;
+/// ?
+pub const DC_IRQ_SOURCE_HPD2RX: u32 = 0x8;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:181
+pub const DCN_1_0__CTXID__DC_HPD3_RX_INT: u32 = 0x8;
+/// ?
+pub const DC_IRQ_SOURCE_HPD3RX: u32 = 0x9;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:184
+pub const DCN_1_0__CTXID__DC_HPD4_RX_INT: u32 = 0x9;
+/// ?
+pub const DC_IRQ_SOURCE_HPD4RX: u32 = 0xa;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:187
+pub const DCN_1_0__CTXID__DC_HPD5_RX_INT: u32 = 0xa;
+/// ?
+pub const DC_IRQ_SOURCE_HPD5RX: u32 = 0xb;
+/// include/ivsrcid/dcn/irqsrcs_dcn_1_0.h:190
+pub const DCN_1_0__CTXID__DC_HPD6_RX_INT: u32 = 0xb;
+/// ?
+pub const DC_IRQ_SOURCE_HPD6RX: u32 = 0xc;
+/// include/soc15_ih_clientid.h:37
+pub const SOC15_IH_CLIENTID_DCE: u32 = 0x4;
+/// ?
+pub const IRQ_TYPE_VUPDATE: u32 = 0x48;
+/// ?
+pub const IRQ_TYPE_PFLIP: u32 = 0x1a;
+/// ?
+pub const IRQ_TYPE_VBLANK: u32 = 0x4e;
+/// amdgpu/amdgpu_mode.h:107
+pub const AMDGPU_CRTC_IRQ_NONE: u32 = 0xff;
+/// amdgpu/amdgpu_mode.h:95
+pub const AMDGPU_CRTC_IRQ_VBLANK1: u32 = 0x0;
+/// amdgpu/amdgpu_mode.h:96
+pub const AMDGPU_CRTC_IRQ_VBLANK2: u32 = 0x1;
+/// amdgpu/amdgpu_mode.h:97
+pub const AMDGPU_CRTC_IRQ_VBLANK3: u32 = 0x2;
+/// amdgpu/amdgpu_mode.h:98
+pub const AMDGPU_CRTC_IRQ_VBLANK4: u32 = 0x3;
+/// amdgpu/amdgpu_mode.h:99
+pub const AMDGPU_CRTC_IRQ_VBLANK5: u32 = 0x4;
+/// amdgpu/amdgpu_mode.h:100
+pub const AMDGPU_CRTC_IRQ_VBLANK6: u32 = 0x5;
+/// amdgpu/amdgpu_mode.h:121
+pub const AMDGPU_FLIP_NONE: u32 = 0x0;
+/// amdgpu/amdgpu_mode.h:122
+pub const AMDGPU_FLIP_PENDING: u32 = 0x1;
+/// amdgpu/amdgpu_mode.h:123
+pub const AMDGPU_FLIP_SUBMITTED: u32 = 0x2;
+/// ?
+pub const DC_IRQ_SOURCE_DMCUB_OUTBOX0: u32 = 0x61;
+/// ?
+pub const IRQ_TYPE_VLINE0: u32 = 0x54;
+/// ?
+pub const DC_PSR_VERSION_UNSUPPORTED: u32 = 0xffffffff;
+/// amdgpu/amdgpu_mode.h:85
+pub const AMDGPU_HPD_1: u32 = 0x0;
+/// amdgpu/amdgpu_mode.h:86
+pub const AMDGPU_HPD_2: u32 = 0x1;
+/// amdgpu/amdgpu_mode.h:87
+pub const AMDGPU_HPD_3: u32 = 0x2;
+/// amdgpu/amdgpu_mode.h:88
+pub const AMDGPU_HPD_4: u32 = 0x3;
+/// amdgpu/amdgpu_mode.h:89
+pub const AMDGPU_HPD_5: u32 = 0x4;
+/// amdgpu/amdgpu_mode.h:90
+pub const AMDGPU_HPD_6: u32 = 0x5;

@@ -160,3 +160,5 @@ filter_8tap_64p_183: u16
 dpp_input_csc_matrix: u16
 @ ../display/dc/core/dc_hw_sequencer.c
 output_csc_matrix: u16
+@ ../display/dc/irq/dcn21/irq_service_dcn21.c
+irq_source_info_dcn21: u32

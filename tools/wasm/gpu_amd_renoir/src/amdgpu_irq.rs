@@ -61,6 +61,13 @@ pub fn irq_src(adev: &amdgpu_device, name: &str) -> Option<amdgpu_irq_src> {
         "sdma.srbm_write_irq" => adev.sdma.srbm_write_irq,
         "vcn.inst[0].irq" => adev.vcn.inst[0].irq,
         "jpeg.inst[0].irq" => adev.jpeg.inst0_irq,
+        "crtc_irq" => adev.crtc_irq,
+        "vline0_irq" => adev.vline0_irq,
+        "dmub_outbox_irq" => adev.dmub_outbox_irq,
+        "vupdate_irq" => adev.vupdate_irq,
+        "dmub_trace_irq" => adev.dmub_trace_irq,
+        "pageflip_irq" => adev.pageflip_irq,
+        "hpd_irq" => adev.hpd_irq,
         _ => return None,
     })
 }
@@ -81,6 +88,13 @@ fn src_set(adev: &mut amdgpu_device, funcs: &str, type_: u32, state: u32) -> Opt
         // vcn_v2_0_set_interrupt_state and jpeg_v2_0_set_interrupt_state
         // return 0 and touch nothing.
         "vcn_v2_0_irq_funcs" | "jpeg_v2_0_irq_funcs" => 0,
+        "dm_crtc_irq_funcs" => crate::amdgpu_dm_irq::amdgpu_dm_set_crtc_irq_state(adev, type_, state),
+        "dm_vline0_irq_funcs" => crate::amdgpu_dm_irq::amdgpu_dm_set_vline0_irq_state(adev, type_, state),
+        "dm_dmub_outbox_irq_funcs" => crate::amdgpu_dm_irq::amdgpu_dm_set_dmub_outbox_irq_state(adev, type_, state),
+        "dm_vupdate_irq_funcs" => crate::amdgpu_dm_irq::amdgpu_dm_set_vupdate_irq_state(adev, type_, state),
+        "dm_dmub_trace_irq_funcs" => crate::amdgpu_dm_irq::amdgpu_dm_set_dmub_trace_irq_state(adev, type_, state),
+        "dm_pageflip_irq_funcs" => crate::amdgpu_dm_irq::amdgpu_dm_set_pflip_irq_state(adev, type_, state),
+        "dm_hpd_irq_funcs" => crate::amdgpu_dm_irq::amdgpu_dm_set_hpd_irq_state(adev, type_, state),
         _ => return None,
     })
 }
@@ -120,7 +134,9 @@ fn has_set(funcs: &str) -> bool {
     matches!(funcs, "gmc_v9_0_irq_funcs" | "gmc_v9_0_ecc_funcs" | "gfx_v9_0_eop_irq_funcs"
         | "gfx_v9_0_priv_reg_irq_funcs" | "gfx_v9_0_bad_op_irq_funcs" | "gfx_v9_0_priv_inst_irq_funcs"
         | "gfx_v9_0_cp_ecc_error_irq_funcs" | "sdma_v4_0_trap_irq_funcs" | "sdma_v4_0_ecc_irq_funcs"
-        | "vcn_v2_0_irq_funcs" | "jpeg_v2_0_irq_funcs")
+        | "vcn_v2_0_irq_funcs" | "jpeg_v2_0_irq_funcs" | "dm_crtc_irq_funcs" | "dm_vline0_irq_funcs"
+        | "dm_dmub_outbox_irq_funcs" | "dm_vupdate_irq_funcs" | "dm_dmub_trace_irq_funcs" | "dm_pageflip_irq_funcs"
+        | "dm_hpd_irq_funcs")
 }
 
 /// `amdgpu_irq_get`.
@@ -267,6 +283,10 @@ fn src_process(adev: &mut amdgpu_device, funcs: &str, entry: &amdgpu_iv_entry, s
         // vega10_ih_self_irq schedules the ih1/ih2 work an APU does not
         // have.
         "vega10_ih_self_irq_funcs" => 0,
+        "dm_crtc_irq_funcs" | "dm_vline0_irq_funcs" | "dm_dmub_outbox_irq_funcs" | "dm_vupdate_irq_funcs"
+        | "dm_dmub_trace_irq_funcs" | "dm_pageflip_irq_funcs" | "dm_hpd_irq_funcs" => {
+            crate::amdgpu_dm_irq::amdgpu_dm_irq_handler(adev, entry)
+        }
         _ => {
             Line::new().s("interrupt ").dec(entry.client_id as u64).s(":").dec(entry.src_id as u64)
                 .s(" for ").s(funcs).s(": its process is not ported").say();

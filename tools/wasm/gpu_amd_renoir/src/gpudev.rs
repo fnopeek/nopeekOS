@@ -918,6 +918,44 @@ fn scenes_init(adev: &mut amdgpu_device, svc: &mut service) -> bool {
     true
 }
 
+/// Two page flips to the framebuffer on screen, each waited for until its
+/// completion event comes from the VUPDATE interrupt: the picture stays,
+/// and the log says whether the flip path works.
+fn flip_self_test(adev: &mut amdgpu_device, address: u64) {
+    for n in 0..2u32 {
+        let t0 = crate::linux::now_us();
+        let r = crate::amdgpu_dm::dm_page_flip(adev, address, n);
+        if r != 0 {
+            Line::new().s("dc live: flip ").dec(n as u64).s(" refused (").dec((-r) as u64).s(")").say();
+            return;
+        }
+        let done = loop {
+            if let Some(i) = adev.dm.flip_events.iter().position(|e| e.event == n) {
+                break Some(adev.dm.flip_events.remove(i));
+            }
+            if crate::linux::now_us() - t0 > 100_000 {
+                break None;
+            }
+            crate::amdgpu_irq::amdgpu_irq_wait(adev, 5);
+            crate::amdgpu_irq::amdgpu_ih_process(adev, false);
+            crate::workqueue::run_pending(adev);
+        };
+        match done {
+            Some(e) => Line::new().s("dc live: flip ").dec(n as u64).s(" completed after ")
+                .dec(e.time_us.saturating_sub(t0)).s(" us at vblank ").dec(e.sequence).say(),
+            None => {
+                let c = adev.mode_info.crtcs[0].unwrap();
+                let pending = crate::dc::dc_get_flip_pending_on_otg(adev, adev.dm.dc.as_deref().unwrap(),
+                                                                    c.otg_inst as u32);
+                Line::new().s("dc live: flip ").dec(n as u64).s(" not completed after 100 ms (flip pending ")
+                    .dec(pending as u64).s(", vblanks ").dec(c.vblank.count).s(", vblank irq ")
+                    .dec(c.vblank.enabled as u64).s(")").say();
+                return;
+            }
+        }
+    }
+}
+
 /// Register with the kernel, bind its buffers, prove the copy and the
 /// dispatch, and serve until a copy times out.
 pub fn serve(adev: &mut amdgpu_device) {
@@ -973,6 +1011,9 @@ pub fn serve(adev: &mut amdgpu_device) {
                                                     width: b.width as i32, height: b.height as i32 };
         let live = crate::amdgpu_dm::dm_take_over_display(adev, &fb);
         Line::new().s("dc live: display ").s(if live { "driven by DC" } else { "not taken over" }).say();
+        if live {
+            flip_self_test(adev, fb.address);
+        }
     }
     svc.copy_ok = self_test(adev);
     Line::new().s("gpudev: sdma0 self-test ").s(if svc.copy_ok { "passed" } else { "FAILED" }).say();

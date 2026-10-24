@@ -35,6 +35,42 @@ pub struct amdgpu_display_manager {
     pub edp0_on_dp1_quirk: bool,
     /// `bb_from_dmub`: the DMUB bounding box, DCN 4.0.1 only.
     pub bb_from_dmub: bool,
+    /// `irq_handler_list_low_tab` / `irq_handler_list_high_tab`: the
+    /// handlers per DAL irq source (amdgpu_dm_irq.c).
+    pub irq_handler_list_low_tab: alloc::vec::Vec<alloc::vec::Vec<crate::amdgpu_dm_irq::dm_irq_handler>>,
+    pub irq_handler_list_high_tab: alloc::vec::Vec<alloc::vec::Vec<crate::amdgpu_dm_irq::dm_irq_handler>>,
+    /// `vupdate_params`: VUPDATE1..VUPDATE6.
+    pub vupdate_params: [crate::amdgpu_dm_irq::common_irq_params; 6],
+    pub dmub_outbox_params: [crate::amdgpu_dm_irq::common_irq_params; 1],
+    pub display_indexes_num: u32,
+    /// What DC drives the panel with, once it took it over.
+    pub live: Option<dm_live>,
+    /// Page flips completed since the driver's loop last took them.
+    pub flip_events: alloc::vec::Vec<crate::drm_vblank::drm_flip_event>,
+}
+
+/// `struct amdgpu_crtc` (amdgpu_mode.h) with its `drm_crtc` and DRM vblank
+/// state, the members DM reaches.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct amdgpu_crtc {
+    pub crtc_id: u32,
+    pub otg_inst: i32,
+    /// `base.enabled`.
+    pub enabled: bool,
+    /// `enum amdgpu_flip_status`.
+    pub pflip_status: u32,
+    /// `event`: the pending page-flip completion event, by its token.
+    pub event: Option<u32>,
+    pub dm_irq_params: dm_irq_params,
+    pub vblank: crate::drm_vblank::drm_vblank_crtc,
+}
+
+/// `struct dm_irq_params` (amdgpu_dm_irq_params.h), the members reached.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct dm_irq_params {
+    pub stream: Option<usize>,
+    pub active_planes: u32,
+    pub last_flip_vblank: u64,
 }
 
 /// `dm_init_microcode`: DCN 2.1.0, Renoir's DMCUB unless the revision is
@@ -189,12 +225,6 @@ fn dm_dmub_sw_init(adev: &mut amdgpu_device) -> i32 {
 pub fn dm_sw_init(adev: &mut amdgpu_device) -> i32 {
     adev.dm.cgs_device = true;
     dm_dmub_sw_init(adev)
-}
-
-/// `amdgpu_dm_irq_init` (amdgpu_dm_irq.c): it initializes an empty handler
-/// list per DAL irq source; the lists exist once handlers can be registered.
-fn amdgpu_dm_irq_init(_adev: &mut amdgpu_device) -> i32 {
-    0
 }
 
 /// `retrieve_dmi_info` (amdgpu_dm_quirks.c): the quirks match DMI system
@@ -402,7 +432,7 @@ fn dm_dmub_hw_init_srv(adev: &mut amdgpu_device, dmub_srv: &mut dmub_srv) -> Res
 /// the system context, freesync, the work queues, outbox, the DRM device —
 /// are the next stages; until then this returns after `dm_dmub_hw_init`.
 pub fn amdgpu_dm_init(adev: &mut amdgpu_device) -> i32 {
-    if amdgpu_dm_irq_init(adev) != 0 {
+    if crate::amdgpu_dm_irq::amdgpu_dm_irq_init(adev) != 0 {
         drm_err("failed to initialize DM IRQ support.");
         return -22;
     }
@@ -806,23 +836,52 @@ pub struct dm_framebuffer {
 }
 
 /// DC takes the panel over from the firmware: the rest of `amdgpu_dm_init`
-/// DC needs (`dc_hardware_init`, the system context, the boot detection of
-/// `amdgpu_dm_initialize_drm_device`), then what an atomic commit asks of
-/// DC for one stream and one plane — the stream in the timing the firmware
-/// set, the plane on `fb`, so the picture the kernel draws stays. DCN 2.1
-/// has no seamless boot: the panel goes dark between `dc_hardware_init` and
-/// the commit.
+/// DC needs (`dc_hardware_init`, the system context,
+/// `amdgpu_dm_initialize_drm_device` with the boot detection and the
+/// interrupt handlers), then what an atomic commit asks of DC for one
+/// stream and one plane — the stream in the timing the firmware set, the
+/// plane on `fb`, so the picture the kernel draws stays. DCN 2.1 has no
+/// seamless boot: the panel goes dark between `dc_hardware_init` and the
+/// commit.
 pub fn dm_take_over_display(adev: &mut amdgpu_device, fb: &dm_framebuffer) -> bool {
-    use crate::{dc, dc_state, dc_stream, link_detection};
+    use crate::{dc, dc_state, dc_stream};
     let Some(mut dcb) = adev.dm.dc.take() else { return false };
-    let r = dm_take_over(adev, &mut dcb, fb);
+    let fw = dm_init_hw(adev, &mut dcb, fb);
     adev.dm.dc = Some(dcb);
-    return r;
+    let Some(fw) = fw else { return false };
 
-    fn dm_take_over(adev: &amdgpu_device, dc: &mut dc::dc, fb: &dm_framebuffer) -> bool {
+    if amdgpu_dm_initialize_drm_device(adev) != 0 {
+        return false;
+    }
+    // drm_vblank_init: one vblank per display index.
+    for c in adev.mode_info.crtcs.iter_mut().flatten() {
+        c.vblank = Default::default();
+    }
+
+    let Some(mut dcb) = adev.dm.dc.take() else { return false };
+    let committed = dm_commit(adev, &mut dcb, &fw, fb);
+    let status = committed.and_then(|(stream, _)| dc::dc_stream_get_status(&dcb, stream))
+        .map(|i| dcb.current_state.as_deref().unwrap().stream_status[i].primary_otg_inst);
+    adev.dm.dc = Some(dcb);
+    let (Some((stream, plane)), Some(otg)) = (committed, status) else { return false };
+
+    // amdgpu_dm_commit_streams: the CRTC drives the stream's OTG.
+    if let Some(acrtc) = adev.mode_info.crtcs[0].as_mut() {
+        acrtc.otg_inst = otg;
+        acrtc.enabled = true;
+        acrtc.dm_irq_params.stream = Some(stream);
+        acrtc.dm_irq_params.active_planes = 1;
+    }
+    adev.dm.live = Some(dm_live { crtc: 0, stream, plane });
+    manage_dm_interrupts(adev, 0, true);
+    return true;
+
+    /// The rest of `amdgpu_dm_init` before the DRM device: the firmware's
+    /// scanout read first, as `dc_hardware_init` blanks it.
+    fn dm_init_hw(adev: &amdgpu_device, dc: &mut dc::dc, fb: &dm_framebuffer) -> Option<firmware_scanout> {
         let Some(fw) = dm_read_firmware_scanout(adev, dc) else {
             Line::new().s("dc live: no firmware scanout on an eDP, staying with the firmware").say();
-            return false;
+            return None;
         };
         let t = &fw.timing;
         Line::new().s("dc live: firmware scanout otg ").dec(fw.tg_inst as u64).s(" ").dec(t.h_addressable as u64)
@@ -839,24 +898,20 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device, fb: &dm_framebuffer) -> bo
             let pa_config = mmhub_read_system_context(adev);
             dc::dc_setup_system_context(adev, dc, &pa_config);
         }
+        Some(fw)
+    }
 
-        for l in 0..dc.link_count as usize {
-            if dc.links[l].connector_signal == LF_SIGNAL_TYPE_VIRTUAL {
-                continue;
-            }
-            crate::amdgpu_dm_helpers::amdgpu_dm_connector_init(dc, l);
-            let mut new_connection_type = 0;
-            if !link_detection::dc_link_detect_connection_type(adev, dc, l, &mut new_connection_type) {
-                drm_err("KMS: Failed to detect connector");
-            }
-            link_detection::dc_link_detect(adev, dc, l, link_detection::dc_detect_reason::DETECT_REASON_BOOT);
-        }
+    /// The atomic commit of the firmware's mode on `fb`: the stream and
+    /// plane, or None.
+    fn dm_commit(adev: &amdgpu_device, dc: &mut dc::dc, fw: &firmware_scanout, fb: &dm_framebuffer)
+                 -> Option<(usize, usize)> {
+        let t = &fw.timing;
         if dc.links[fw.link].local_sink.is_none() {
             Line::new().s("dc live: no sink on the eDP link").say();
-            return false;
+            return None;
         }
 
-        let Some(stream) = dc_stream::dc_create_stream_for_sink(dc, fw.link) else { return false };
+        let stream = dc_stream::dc_create_stream_for_sink(dc, fw.link)?;
         {
             let st = dc.streams[stream].as_deref_mut().unwrap();
             st.timing = fw.timing;
@@ -897,7 +952,7 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device, fb: &dm_framebuffer) -> bo
         Line::new().s("dc live: add stream ").dec(added as u64).s(", add plane ").dec(plane_added as u64)
             .s(", validate ").dec(valid as u64).say();
         if added != crate::dc_types::dc_status::DC_OK || !plane_added || valid != crate::dc_types::dc_status::DC_OK {
-            return false;
+            return None;
         }
 
         let streams = [stream];
@@ -909,6 +964,367 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device, fb: &dm_framebuffer) -> bo
         let mut srf = [dc::dc_surface_update { surface: plane, ..Default::default() }];
         let updated = dc::dc_update_planes_and_stream(adev, dc, &mut srf, stream, None);
         Line::new().s("dc live: commit streams ").dec(committed as u64).s(", update planes ").dec(updated as u64).say();
-        committed == crate::dc_types::dc_status::DC_OK && updated
+        (committed == crate::dc_types::dc_status::DC_OK && updated).then_some((stream, plane))
     }
+}
+
+/// The stream and plane DC drives the panel with, and the CRTC showing
+/// them.
+#[derive(Clone, Copy, Debug)]
+pub struct dm_live {
+    pub crtc: usize,
+    pub stream: usize,
+    pub plane: usize,
+}
+
+/// `amdgpu_dm_initialize_drm_device`, the part without DRM objects: the
+/// CRTCs, the DMUB outbox handler, the boot detection of every link, and
+/// the DCN interrupt handlers. Planes, encoders and connectors are DRM's;
+/// PSR and Replay caps join with their stages.
+fn amdgpu_dm_initialize_drm_device(adev: &mut amdgpu_device) -> i32 {
+    use crate::link_detection;
+    let max_streams = adev.dm.dc.as_deref().unwrap().caps.max_streams;
+
+    adev.dm.display_indexes_num = max_streams;
+    // Update the actual used number of crtc
+    adev.mode_info.num_crtc = adev.dm.display_indexes_num;
+
+    crate::amdgpu_dm_irq::amdgpu_dm_set_irq_funcs(adev);
+
+    for i in 0..max_streams {
+        amdgpu_dm_crtc_init(adev, i);
+    }
+
+    // DCN 2.1 has the DMUB outbox.
+    if register_outbox_irq_handlers(adev) != 0 {
+        drm_err("DM: Failed to initialize IRQ");
+        return -22;
+    }
+
+    let mut dcb = adev.dm.dc.take().unwrap();
+    let dc = &mut *dcb;
+    for l in 0..dc.link_count as usize {
+        if dc.links[l].connector_signal == LF_SIGNAL_TYPE_VIRTUAL {
+            continue;
+        }
+        crate::amdgpu_dm_helpers::amdgpu_dm_connector_init(dc, l);
+        let mut new_connection_type = 0;
+        if !link_detection::dc_link_detect_connection_type(adev, dc, l, &mut new_connection_type) {
+            drm_err("KMS: Failed to detect connector");
+        }
+        link_detection::dc_link_detect(adev, dc, l, link_detection::dc_detect_reason::DETECT_REASON_BOOT);
+    }
+    adev.dm.dc = Some(dcb);
+
+    // Software is initialized. Now we can register interrupt handlers.
+    if dcn10_register_irq_handlers(adev) != 0 {
+        drm_err("DM: Failed to initialize IRQ");
+        return -22;
+    }
+
+    0
+}
+
+/// `amdgpu_dm_crtc_init` (amdgpu_dm_crtc.c), without the DRM CRTC: no OTG
+/// until a commit binds one.
+fn amdgpu_dm_crtc_init(adev: &mut amdgpu_device, crtc_index: u32) {
+    let acrtc = amdgpu_crtc { crtc_id: crtc_index, otg_inst: -1, ..Default::default() };
+    let i = crtc_index as usize;
+    if adev.mode_info.crtcs.len() <= i {
+        adev.mode_info.crtcs.resize(i + 1, None);
+    }
+    adev.mode_info.crtcs[i] = Some(acrtc);
+}
+
+/// `register_outbox_irq_handlers`.
+fn register_outbox_irq_handlers(adev: &mut amdgpu_device) -> i32 {
+    use crate::amdgpu_dm_irq::*;
+    let src = adev.dmub_outbox_irq;
+    let r = crate::amdgpu_irq::amdgpu_irq_add_id(adev, SOC15_IH_CLIENTID_DCE,
+        DCN_1_0__SRCID__DMCUB_OUTBOX_LOW_PRIORITY_READY_INT, &src, "dmub_outbox_irq");
+    if r != 0 {
+        drm_err("Failed to add outbox irq id!");
+        return r;
+    }
+
+    let dc = adev.dm.dc.as_deref().unwrap();
+    if dc.ctx.dmub_srv.is_some() {
+        let i = DCN_1_0__SRCID__DMCUB_OUTBOX_LOW_PRIORITY_READY_INT;
+        let int_params = dc_interrupt_params {
+            int_context: dc_interrupt_context::INTERRUPT_LOW_IRQ_CONTEXT,
+            irq_source: crate::dc::dc_interrupt_to_irq_source(dc, i, 0),
+        };
+
+        adev.dm.dmub_outbox_params[0].irq_src = int_params.irq_source;
+
+        if !amdgpu_dm_irq_register_interrupt(adev, &int_params, dm_irq_handler::dm_dmub_outbox1_low_irq) {
+            return -12;
+        }
+    }
+
+    0
+}
+
+/// `dcn10_register_irq_handlers`: VUPDATE_NO_LOCK of each CRTC, the one OTG
+/// interrupt DCN delivers vblank and page-flip completion from, and HPD.
+/// The OTG vertical line interrupt is CONFIG_DRM_AMD_SECURE_DISPLAY's.
+fn dcn10_register_irq_handlers(adev: &mut amdgpu_device) -> i32 {
+    use crate::amdgpu_dm_irq::*;
+
+    // Use VUPDATE_NO_LOCK interrupt on DCN, which seems to correspond to the
+    // regular VUPDATE interrupt on DCE. We want DC_IRQ_SOURCE_VUPDATEx to
+    // trigger at end of each vblank, regardless of state of the lock,
+    // matching DCE behaviour.
+    let first = DCN_1_0__SRCID__OTG0_IHC_V_UPDATE_NO_LOCK_INTERRUPT;
+    for i in first..first + adev.mode_info.num_crtc {
+        let src = adev.vupdate_irq;
+        let r = crate::amdgpu_irq::amdgpu_irq_add_id(adev, SOC15_IH_CLIENTID_DCE, i, &src, "vupdate_irq");
+        if r != 0 {
+            drm_err("Failed to add vupdate irq id!");
+            return r;
+        }
+
+        let irq_source = crate::dc::dc_interrupt_to_irq_source(adev.dm.dc.as_deref().unwrap(), i, 0);
+        let int_params = dc_interrupt_params { int_context: dc_interrupt_context::INTERRUPT_HIGH_IRQ_CONTEXT, irq_source };
+
+        if irq_source == DC_IRQ_SOURCE_INVALID || irq_source < DC_IRQ_SOURCE_VUPDATE1
+            || irq_source > DC_IRQ_SOURCE_VUPDATE6
+        {
+            drm_err("Failed to register vupdate irq!");
+            return -22;
+        }
+
+        let params = (irq_source - DC_IRQ_SOURCE_VUPDATE1) as usize;
+        adev.dm.vupdate_params[params].irq_src = irq_source;
+
+        if !amdgpu_dm_irq_register_interrupt(adev, &int_params, dm_irq_handler::dm_vupdate_high_irq { params }) {
+            return -12;
+        }
+    }
+
+    // HPD
+    let src = adev.hpd_irq;
+    let r = crate::amdgpu_irq::amdgpu_irq_add_id(adev, SOC15_IH_CLIENTID_DCE, DCN_1_0__SRCID__DC_HPD1_INT, &src,
+                                                 "hpd_irq");
+    if r != 0 {
+        drm_err("Failed to add hpd irq id!");
+        return r;
+    }
+
+    register_hpd_handlers(adev)
+}
+
+/// `register_hpd_handlers`: hot plug and the HPD RX (short pulse) handlers
+/// of each connector join with external displays.
+fn register_hpd_handlers(_adev: &mut amdgpu_device) -> i32 {
+    Line::new().s("register_hpd_handlers: handle_hpd_irq, handle_hpd_rx_irq not ported").say();
+    0
+}
+
+/// `manage_dm_interrupts`: a CRTC's vblank on, with the disable delay of
+/// DCN before 3.5 on an APU without PSR (two frames), or off.
+fn manage_dm_interrupts(adev: &mut amdgpu_device, crtc: usize, enable: bool) {
+    if enable {
+        let Some(stream) = adev.mode_info.crtcs[crtc].unwrap().dm_irq_params.stream else { return };
+        let dc = adev.dm.dc.as_deref().unwrap();
+        let s = dc.streams[stream].as_deref().unwrap();
+        let timing = &s.timing;
+        let mut config = crate::drm_vblank::drm_vblank_crtc_config::default();
+
+        if dc.links[s.link].psr_settings.psr_version < DC_PSR_VERSION_UNSUPPORTED {
+            let offdelay = (5u64 * 3 * 10 * timing.v_total as u64 * timing.h_total as u64)
+                .div_ceil(timing.pix_clk_100hz as u64);
+            config.offdelay_ms = if offdelay != 0 { offdelay as i32 } else { 30 };
+        } else {
+            // Older HW and DGPU have issues with instant off; use a 2 frame
+            // offdelay.
+            let offdelay = (20u64 * timing.v_total as u64 * timing.h_total as u64)
+                .div_ceil(timing.pix_clk_100hz as u64);
+            config.offdelay_ms = if offdelay != 0 { offdelay as i32 } else { 30 };
+        }
+
+        crate::drm_vblank::drm_crtc_vblank_on_config(adev, crtc, &config);
+        // The extra vupdate reference is DCN 3.0 and 3.2's.
+    } else {
+        Line::new().s("manage_dm_interrupts: drm_crtc_vblank_off not ported").say();
+    }
+}
+
+/// `amdgpu_dm_crtc_set_vblank` (amdgpu_dm_crtc.c): on DCN, VUPDATE_NO_LOCK
+/// delivers vblank and page-flip completion, so it follows vblank. The
+/// vblank control worker (PSR, idle optimizations) is not ported.
+pub fn amdgpu_dm_crtc_set_vblank(adev: &mut amdgpu_device, crtc: usize, enable: bool) -> i32 {
+    let acrtc = adev.mode_info.crtcs[crtc].unwrap();
+
+    if enable && !acrtc.enabled {
+        return -22;
+    }
+
+    let irq_type = amdgpu_display_crtc_idx_to_irq_type(adev, acrtc.crtc_id);
+
+    // drm_crtc_vblank_restore is for IPS (DCN 3.5).
+
+    // On DCN, VUPDATE_NO_LOCK is the single OTG interrupt used to deliver
+    // vblank and pageflip completion events, so enable it whenever vblank is
+    // enabled.
+    let rc = if enable {
+        crate::amdgpu_irq::amdgpu_irq_get(adev, "vupdate_irq", irq_type)
+    } else {
+        crate::amdgpu_irq::amdgpu_irq_put(adev, "vupdate_irq", irq_type)
+    };
+    if rc != 0 {
+        return rc;
+    }
+
+    // VLINE0 is CONFIG_DRM_AMD_SECURE_DISPLAY's.
+
+    if adev.in_gpu_reset {
+        return 0;
+    }
+
+    0
+}
+
+/// `amdgpu_display_crtc_idx_to_irq_type` (amdgpu_display.c).
+fn amdgpu_display_crtc_idx_to_irq_type(_adev: &amdgpu_device, crtc: u32) -> u32 {
+    match crtc {
+        0 => AMDGPU_CRTC_IRQ_VBLANK1,
+        1 => AMDGPU_CRTC_IRQ_VBLANK2,
+        2 => AMDGPU_CRTC_IRQ_VBLANK3,
+        3 => AMDGPU_CRTC_IRQ_VBLANK4,
+        4 => AMDGPU_CRTC_IRQ_VBLANK5,
+        5 => AMDGPU_CRTC_IRQ_VBLANK6,
+        _ => AMDGPU_CRTC_IRQ_NONE,
+    }
+}
+
+/// `get_crtc_by_otg_inst`.
+fn get_crtc_by_otg_inst(adev: &amdgpu_device, otg_inst: i32) -> Option<usize> {
+    if otg_inst == -1 {
+        Line::new().s("WARNING: get_crtc_by_otg_inst for otg_inst -1").say();
+        return adev.mode_info.crtcs.first().and_then(|c| c.map(|_| 0));
+    }
+
+    adev.mode_info.crtcs.iter().position(|c| c.is_some_and(|c| c.otg_inst == otg_inst))
+}
+
+/// `dm_vupdate_high_irq`: on DCN the single OTG interrupt that delivers
+/// vblank and page-flip completion.
+pub fn dm_vupdate_high_irq(adev: &mut amdgpu_device, params: usize) {
+    let irq_params = adev.dm.vupdate_params[params];
+    let Some(acrtc) = get_crtc_by_otg_inst(adev, (irq_params.irq_src - IRQ_TYPE_VUPDATE) as i32) else { return };
+
+    // The refresh rate trace of the frame duration is a tracepoint.
+    adev.dm.vupdate_params[params].previous_timestamp = adev.mode_info.crtcs[acrtc].unwrap().vblank.time;
+
+    // On DCN, VUPDATE_NO_LOCK is the single OTG interrupt used to deliver
+    // vblank and pageflip completion events; VSTARTUP and GRPH_PFLIP are not
+    // used. Run the full handler here.
+    dm_crtc_high_irq_handler(adev, acrtc);
+}
+
+/// `dm_crtc_high_irq_handler`: the common OTG vblank and flip event
+/// handling, DCN's path. No writeback connector, CRC capture or FreeSync
+/// is set up.
+fn dm_crtc_high_irq_handler(adev: &mut amdgpu_device, acrtc: usize) {
+    // Core vblank handling. On DCN this handler runs at VUPDATE_NO_LOCK, the
+    // register latch point, which is the correct place to timestamp both VRR
+    // and non-VRR vblanks.
+    crate::drm_vblank::drm_crtc_handle_vblank(adev, acrtc);
+
+    // Deliver pageflip completion events (DCN only). Since GRPH_PFLIP is not
+    // used, VUPDATE_NO_LOCK is the flip latch point. Deliver any pending
+    // pageflip completion event from here, once HW has consumed the new
+    // address (the OTG no longer reports a pending flip).
+    let c = adev.mode_info.crtcs[acrtc].unwrap();
+    if c.pflip_status == AMDGPU_FLIP_SUBMITTED && c.event.is_some() {
+        let pending = crate::dc::dc_get_flip_pending_on_otg(adev, adev.dm.dc.as_deref().unwrap(), c.otg_inst as u32);
+        if !pending {
+            crate::drm_vblank::drm_crtc_send_vblank_event(adev, acrtc, c.event.unwrap());
+            let c = adev.mode_info.crtcs[acrtc].as_mut().unwrap();
+            c.event = None;
+            crate::drm_vblank::drm_crtc_vblank_put(adev, acrtc);
+            adev.mode_info.crtcs[acrtc].as_mut().unwrap().pflip_status = AMDGPU_FLIP_NONE;
+        }
+        // If the flip is still pending, leave it armed and retry on the next
+        // vupdate.
+    } else if c.pflip_status == AMDGPU_FLIP_SUBMITTED && c.dm_irq_params.active_planes == 0 {
+        if let Some(e) = c.event {
+            crate::drm_vblank::drm_crtc_send_vblank_event(adev, acrtc, e);
+            adev.mode_info.crtcs[acrtc].as_mut().unwrap().event = None;
+            crate::drm_vblank::drm_crtc_vblank_put(adev, acrtc);
+        }
+        adev.mode_info.crtcs[acrtc].as_mut().unwrap().pflip_status = AMDGPU_FLIP_NONE;
+    }
+}
+
+/// What `amdgpu_dm_commit_planes` does for a page flip of the one plane DC
+/// drives: the plane's unchanged plane and scaling info with the new
+/// address, the vblank reference, the update, and the event armed after
+/// programming (sent at once when the hardware latched already, else from
+/// the VUPDATE interrupt). Flips are not throttled to the vblank of the
+/// last one (amdgpu_display_get_crtc_scanoutpos is not ported): the caller
+/// flips again only after the event. -EBUSY while a flip is pending.
+pub fn dm_page_flip(adev: &mut amdgpu_device, address: u64, event: u32) -> i32 {
+    use crate::dc;
+    let Some(live) = adev.dm.live else { return -19 };
+    let acrtc = live.crtc;
+    let c = adev.mode_info.crtcs[acrtc].unwrap();
+    if c.pflip_status != AMDGPU_FLIP_NONE || c.event.is_some() {
+        return -16;
+    }
+
+    let (pi, si, mut fa) = {
+        let pl = adev.dm.dc.as_deref().unwrap().planes[live.plane].as_deref().unwrap();
+        // amdgpu_dm_plane_fill_dc_scaling_info and fill_dc_plane_info_and_addr
+        // of an unchanged framebuffer: what the plane has.
+        let pi = dc::dc_plane_info {
+            plane_size: pl.plane_size, tiling_info: pl.tiling_info, dcc: pl.dcc, format: pl.format,
+            rotation: pl.rotation, stereo_format: pl.stereo_format, color_space: pl.color_space,
+            horizontal_mirror: pl.horizontal_mirror, visible: pl.visible, per_pixel_alpha: pl.per_pixel_alpha,
+            pre_multiplied_alpha: pl.pre_multiplied_alpha, global_alpha: pl.global_alpha,
+            global_alpha_value: pl.global_alpha_value, input_csc_enabled: pl.input_csc_color_matrix.enable_adjustment,
+            layer_index: pl.layer_index,
+        };
+        let si = dc::dc_scaling_info { src_rect: pl.src_rect, dst_rect: pl.dst_rect, clip_rect: pl.clip_rect,
+                                       scaling_quality: pl.scaling_quality };
+        (pi, si, dc::dc_flip_addrs { address: pl.address, ..Default::default() })
+    };
+    fa.address.u[0] = address;
+    fa.flip_immediate = false;
+    fa.flip_timestamp_in_us = crate::linux::now_us();
+
+    // dm_arm_vblank_event_pre_programming
+    if c.dm_irq_params.active_planes != 0 {
+        crate::drm_vblank::drm_crtc_vblank_get(adev, acrtc);
+    }
+
+    let mut dcb = adev.dm.dc.take().unwrap();
+    let mut srf = [dc::dc_surface_update { surface: live.plane, flip_addr: Some(fa), plane_info: Some(pi),
+                                           scaling_info: Some(si), ..Default::default() }];
+    let mut su = dc::dc_stream_update { stream: live.stream, ..Default::default() };
+    let updated = dc::dc_update_planes_and_stream(adev, &mut dcb, &mut srf, live.stream, Some(&mut su));
+    adev.dm.dc = Some(dcb);
+
+    // DCN: arm the event after programming, and deliver it at once if the
+    // hardware latched during programming.
+    let flip_latched_during_prog = updated
+        && !dc::dc_get_flip_pending_on_otg(adev, adev.dm.dc.as_deref().unwrap(), c.otg_inst as u32);
+
+    // dm_arm_vblank_event
+    if c.dm_irq_params.active_planes != 0 {
+        let a = adev.mode_info.crtcs[acrtc].as_mut().unwrap();
+        a.pflip_status = AMDGPU_FLIP_SUBMITTED;
+        a.event = Some(event);
+    }
+
+    let a = adev.mode_info.crtcs[acrtc].unwrap();
+    if flip_latched_during_prog && a.pflip_status == AMDGPU_FLIP_SUBMITTED && a.event.is_some() {
+        crate::drm_vblank::drm_crtc_send_vblank_event(adev, acrtc, event);
+        adev.mode_info.crtcs[acrtc].as_mut().unwrap().event = None;
+        crate::drm_vblank::drm_crtc_vblank_put(adev, acrtc);
+        adev.mode_info.crtcs[acrtc].as_mut().unwrap().pflip_status = AMDGPU_FLIP_NONE;
+    }
+
+    if updated { 0 } else { -5 }
 }

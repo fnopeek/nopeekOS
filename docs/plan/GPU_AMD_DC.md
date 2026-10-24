@@ -265,9 +265,39 @@ host-prüfbare Meilenstein ist der Graph, nicht der Einzelblock.
   aktuellen Zustand (der Flip-Pfad), `commit_planes_do_stream_update`,
   Farbmanagement mit Kurven (Degamma-/Shaper-/3D-LUT-/Blend-/OGAM-RAM),
   Cursor, GSL-Gruppen (Immediate Flip), Testmuster.
-- **Nächster Schritt:** Geräte-Meilenstein — die Kette live hinter
-  `gpu_amd_renoir.dc` (DM: Stream aus der EDID, Plane auf einem
-  VRAM-Framebuffer), dann E5 der Flip-Pfad (Fast-Update) mit Vblank.
+- **Geräte-Meilenstein E (2026-10-24, 0.33.1):** `gpu_amd_renoir.dc live`
+  übernimmt das eDP — Firmware-Timing, Plane auf dem Kernel-Framebuffer,
+  Degamma/Regamma im Bypass wie amdgpu_dm ohne Farbeigenschaften. Am
+  Gerät: Farben richtig, ein kurzes Flackern beim Treiberstart (kein
+  Seamless Boot auf DCN 2.1).
+- **E5a Flip** (2026-10-24): ein Flip, wie `amdgpu_dm_commit_planes` ihn
+  baut (Plane-/Skalierungsinfo unverändert, neue Adresse, Stream-Update nur
+  mit dem Stream), ist ein Fast-Update auf `current_state`:
+  `update_planes_and_stream_state` gibt für FAST/MED den aktuellen Zustand
+  zurück (`update_context::current`), `update_planes_and_stream_v2`
+  committet darauf ohne Tausch, `commit_planes_do_stream_update` portiert.
+  Orakel: zwei Flips nach dem Plane-Update, `boot`/`lit` × `full` (zwei
+  Pipes) / `scaled`, Byte-gleich.
+- **E5b Interrupts** (2026-10-24): DC `irq_service.c` + `irq_service_dcn21.c`
+  (Tabelle aus Linux über `gen_regs.py`, das jetzt Zeiger in Tabellen als
+  `<name>_SYMS` führt), `dc_interrupt_set/ack/to_irq_source`,
+  `dc_get_flip_pending_on_otg`; DM `amdgpu_dm_irq.c` (Quellen, Handlerlisten,
+  `amdgpu_dm_irq_handler`), `amdgpu_dm_initialize_drm_device` ohne DRM-
+  Objekte (CRTCs, Outbox, Link-Detect, `dcn10_register_irq_handlers`),
+  `dm_vupdate_high_irq` → `dm_crtc_high_irq_handler` (DCN: VUPDATE_NO_LOCK
+  liefert Vblank UND Flip-Abschluss), DRM-Vblank (`drm_vblank.rs`:
+  Referenz, Abschalt-Timer 2 Frames, Ereignis). `dm_page_flip` ist der
+  Flip-Teil von `amdgpu_dm_commit_planes`. Orakel: Set/Ack-Schreibzugriffe
+  und Quellenzuordnung Byte-gleich. **Gerätetest:** nach der Übernahme zwei
+  Flips auf den gezeigten Framebuffer (`dc live: flip N completed …`).
+- **Benannt, nicht portiert (E5):** Flip-Drosselung auf den Vblank nach
+  dem letzten Flip (`amdgpu_display_get_crtc_scanoutpos`), Hardware-
+  Vblank-Zähler, HPD-Handler, DMUB-Outbox-Handler, Vblank-Control-Worker
+  (PSR/Idle-Optimierung).
+- **Nächster Schritt E5c:** Kernel-Naht — ein Flip-Auftrag (`OP_FLIP`) vom
+  Composer an das Modul, abgeschlossen beim Ereignis; und der Composer
+  zeichnet in den hinteren Puffer und flippt (Entscheid offen: Puffer-Alter
+  /Schaden, Cursor bis zum Hardware-Cursor G).
 
 ## Risiken / offen
 

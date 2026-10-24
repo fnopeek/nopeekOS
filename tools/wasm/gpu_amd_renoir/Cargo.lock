@@ -31,7 +31,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "gpu_amd_renoir"
-version = "0.33.1"
+version = "0.34.0"
 dependencies = [
  "gpu_scene",
  "nopeek_widgets",

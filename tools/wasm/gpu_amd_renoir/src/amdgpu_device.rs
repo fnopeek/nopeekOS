@@ -73,6 +73,8 @@ pub struct amdgpu_mode_info {
     pub num_dig: u32,
     pub funcs: Option<&'static str>,
     pub gpu_vm_support: bool,
+    /// `crtcs`: the display manager's CRTCs, by index.
+    pub crtcs: Vec<Option<crate::amdgpu_dm::amdgpu_crtc>>,
 }
 
 /// `struct amdgpu_pll`, the fields `amdgpu_atomfirmware_get_clock_info` sets.
@@ -742,6 +744,14 @@ pub struct amdgpu_device {
     /// `adev->dm.dmub_fw`.
     pub dm_dmub_fw: Option<crate::linux::firmware>,
     pub dm: crate::amdgpu_dm::amdgpu_display_manager,
+    /// The display interrupt sources `amdgpu_dm_set_irq_funcs` fills.
+    pub crtc_irq: crate::gmc_v9_0::amdgpu_irq_src,
+    pub vline0_irq: crate::gmc_v9_0::amdgpu_irq_src,
+    pub dmub_outbox_irq: crate::gmc_v9_0::amdgpu_irq_src,
+    pub vupdate_irq: crate::gmc_v9_0::amdgpu_irq_src,
+    pub dmub_trace_irq: crate::gmc_v9_0::amdgpu_irq_src,
+    pub pageflip_irq: crate::gmc_v9_0::amdgpu_irq_src,
+    pub hpd_irq: crate::gmc_v9_0::amdgpu_irq_src,
     pub ib_pool_ready: bool,
     pub ib_pools: [amdgpu_sa_manager; AMDGPU_IB_POOL_MAX as usize],
     /// The `drm_suballoc_manager` each IB pool embeds.
@@ -900,6 +910,13 @@ impl amdgpu_device {
             dc_enabled: false,
             dm_dmub_fw: None,
             dm: Default::default(),
+            crtc_irq: Default::default(),
+            vline0_irq: Default::default(),
+            dmub_outbox_irq: Default::default(),
+            vupdate_irq: Default::default(),
+            dmub_trace_irq: Default::default(),
+            pageflip_irq: Default::default(),
+            hpd_irq: Default::default(),
             ib_pool_ready: false,
             ib_pools: Default::default(),
             ib_sa: Default::default(),
