@@ -863,8 +863,9 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device, fb: &dm_framebuffer) -> bo
             st.src = crate::dc_hw_types::rect { x: 0, y: 0, width: t.h_addressable as i32, height: t.v_addressable as i32 };
             st.dst = st.src;
             st.output_color_space = COLOR_SPACE_SRGB;
-            st.out_transfer_func.r#type = TF_TYPE_PREDEFINED;
-            st.out_transfer_func.tf = TRANSFER_FUNCTION_SRGB;
+            // amdgpu_dm_set_atomic_regamma without a gamma LUT: bypass.
+            st.out_transfer_func.r#type = TF_TYPE_BYPASS;
+            st.out_transfer_func.tf = TRANSFER_FUNCTION_LINEAR;
         }
 
         let plane = dc_stream::dc_create_plane_state(dc);
@@ -883,8 +884,9 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device, fb: &dm_framebuffer) -> bo
             pl.address.r#type = PLN_ADDR_TYPE_GRAPHICS;
             pl.address.u[0] = fb.address;
             pl.global_alpha_value = 0xff;
-            pl.in_transfer_func.r#type = TF_TYPE_PREDEFINED;
-            pl.in_transfer_func.tf = TRANSFER_FUNCTION_SRGB;
+            // amdgpu_dm_update_plane_color_mgmt without a degamma: bypass.
+            pl.in_transfer_func.r#type = TF_TYPE_BYPASS;
+            pl.in_transfer_func.tf = TRANSFER_FUNCTION_LINEAR;
         }
 
         let mut context = dc_state::dc_state_create_current_copy(dc);
