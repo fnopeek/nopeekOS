@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue (private)
+    url: https://github.com/fnopeek/nopeekOS/security/advisories/new
+    about: Sandbox escapes, capability bypasses, crypto or update-signing flaws. Please report privately.
+  - name: Questions and ideas
+    url: https://github.com/fnopeek/nopeekOS/discussions
+    about: Ask, discuss, argue about design.

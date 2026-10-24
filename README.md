@@ -9,6 +9,10 @@ web browser all run inside the same WASM trust boundary. The kernel
 underneath stays small in what it *trusts*, and keeps shrinking: every
 driver that can live in a module moves there.
 
+> **Status:** experimental and **not audited** — don't trust it with real
+> data yet. Built by one person with [Claude Code](https://claude.com/claude-code)
+> as a pair programmer; every change is tested on real hardware.
+
 ---
 
 ## The Idea
@@ -195,7 +199,7 @@ under its content hash, and resumes a broken download with a range
 request.
 
 **Drivers** — in the kernel: NVMe, xHCI USB (HID after Linux `usbhid`,
-combined receivers, hotplug after `hub.c`), Intel I226-V and RTL8153 USB
+combined receivers, hotplug after `hub.c`), Intel I225/I226 (igc) and RTL8153 USB
 Ethernet, the UEFI GOP framebuffer, and the IOMMU (Intel VT-d, AMD-Vi),
 which can confine a device to its own page table. As **WASM modules** on a
 shared host-ABI crate (`npk_sys`): both GPU drivers, Intel HDA audio
@@ -504,6 +508,16 @@ third-party modules become possible this evolves into a key hierarchy
 - **Not a unikernel** — multi-app, not single-purpose
 - **Not a container runtime** — WASM modules are lighter than containers
 - **Not an academic experiment** — every phase produces working code
+
+---
+
+## Community
+
+- **Questions, ideas, design arguments** — [Discussions](https://github.com/fnopeek/nopeekOS/discussions)
+- **Which device comes next** — [HARDWARE.md](HARDWARE.md); vote on hardware requests with 👍
+- **Security issues** — privately, see [SECURITY.md](SECURITY.md)
+- **Code** — read [CONTRIBUTING.md](CONTRIBUTING.md) first
+- **Website** — [nopeek.ch](https://nopeek.ch)
 
 ---
 

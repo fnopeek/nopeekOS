@@ -1,0 +1,32 @@
+name: Bug report
+description: Something broke. Not for security issues — see SECURITY.md.
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `version` in the loop
+    validations:
+      required: true
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      description: Hardware model, or QEMU
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        `dmesg` (or `dmesg prev` for the last boot). Before posting, remove
+        network names, IP and MAC addresses, and anything else that is yours.
+      render: text

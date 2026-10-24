@@ -1,0 +1,34 @@
+name: Hardware request
+description: Suggest a device nopeekOS should support. Others vote with a thumbs up.
+title: "[hardware] "
+labels: ["hardware-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every new device means porting its drivers from Linux, with the device on the desk.
+        Please vote on an existing request with a 👍 instead of opening a duplicate.
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Exact model (laptop, mini PC, GPU, WiFi card, ...)
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type
+      options: [Laptop, Desktop / mini PC, GPU, WiFi, Ethernet, Audio, Input, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: ids
+    attributes:
+      label: PCI / USB IDs
+      description: "`lspci -nnk` / `lsusb` on Linux, or `pci` / `usb` in nopeekOS"
+      render: text
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this one?

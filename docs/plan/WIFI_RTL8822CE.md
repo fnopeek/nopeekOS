@@ -426,7 +426,7 @@ Stufe 4 dran ist oder eine der drei nachgebessert wird.
 ### Was das Gerät zuletzt gemessen hat (nicht abschreiben, das steht hier)
 
     SYS_CFG1 0x0c493d3d -> cut 3 = RTW_CHIP_VER_CUT_D, vendor 9, RF 2T2R
-    MAC       e0:0a:f6:8b:bf:83   (aus der efuse)
+    MAC       xx:xx:xx:xx:xx:xx   (aus der efuse)
     rfe_option 1 · channel_plan 0x7f · crystal_cap 63 · regd 1
     rf_board_option 0x21 -> btcoex JA, share_ant JA
     thermal A/B 27/27 · hw_cap nss 2, ant 2, bw 0x07 (bis 80 MHz), hci 0x04

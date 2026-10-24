@@ -1225,6 +1225,22 @@ whether a `update` is enough or modules must be `install`-ed too:
 - `abi+kernel:` — kernel + all SDK-using apps, coordinated release
 - `kernel+module <name>:` — both, because they belong together
 
+## Branches & Pull Requests
+
+- Own work (Florian + Claude Code) and every release go **straight to
+  `main`**. OTA serves `main/release/` via raw.githubusercontent.com, so a
+  release on a branch is invisible to devices.
+- **Never branch-protect `main`** — it would block `./build.sh release` and
+  its push.
+- A PR for own work only when Florian asks for one, and then in a
+  **separate worktree** (`git worktree add`): two sessions share this tree,
+  and switching its branch switches it for the other session too.
+- Outside contributions come as a PR from a fork. **No merge without the
+  CLA** (dual licensing, see README → License); ask Florian.
+- Public-facing docs (`README.md`, `CONTRIBUTING.md`, `SECURITY.md`,
+  `HARDWARE.md`, `.github/`) are written in English. No place of
+  residence or other private details in the repo.
+
 ## Release-Flow Plumbing (mandatory)
 
 `./build.sh release` regenerates `release/kernel.bin` + `release/manifest`
