@@ -2016,13 +2016,19 @@ fn update_seamless_boot_flags(dc: &mut dc, context: &crate::dc_state::dc_state, 
     }
 }
 
+/// The context an update programs: Linux' `dc->current_state` itself for
+/// a fast or medium update, a new one for a full update.
+enum update_context {
+    current,
+    new(Box<crate::dc_state::dc_state>),
+}
+
 /// `update_planes_and_stream_state` (dc.c): what kind of update this is,
 /// the surface and stream changes copied in, and for a full update a new
-/// context with the planes added and its bandwidth validated. A fast or
-/// medium update programs the current state, which joins with flips.
+/// context with the planes added and its bandwidth validated.
 fn update_planes_and_stream_state(dc: &mut dc, srf_updates: &[dc_surface_update], stream: usize,
                                   stream_update: Option<&mut dc_stream_update>, new_update_type: &mut u32)
-                                  -> Option<Box<crate::dc_state::dc_state>> {
+                                  -> Option<update_context> {
     use crate::regs::{UPDATE_TYPE_FULL, UPDATE_TYPE_MED};
 
     let stream_status = dc_stream_get_status(dc, stream);
@@ -2098,14 +2104,25 @@ fn update_planes_and_stream_state(dc: &mut dc, srf_updates: &[dc_surface_update]
             continue;
         }
         if dc.planes[u.surface].as_deref().unwrap().update_flags & crate::dc_stream::SURFACE_UPDATE_POSITION_CHANGE != 0 {
-            crate::linux::Line::new().s("update_planes_and_stream_state: medium update on the current state not ported").say();
-            return None;
+            // A medium update builds on the current state.
+            let mut cur = dc.current_state.take().unwrap();
+            for j in 0..dc.res_pool.as_deref().unwrap().pipe_count as usize {
+                if cur.res_ctx.pipe_ctx[j].plane_state != Some(u.surface) {
+                    continue;
+                }
+
+                crate::dc_resource::resource_build_scaling_params(dc, &mut cur.res_ctx, j);
+            }
+            dc.current_state = Some(cur);
         }
     }
 
     let Some(mut ctx) = context else {
-        crate::linux::Line::new().s("update_planes_and_stream_state: fast or medium update on the current state not ported").say();
-        return None;
+        let cur = dc.current_state.take().unwrap();
+        update_seamless_boot_flags(dc, &cur, srf_updates.len(), stream);
+        dc.current_state = Some(cur);
+        *new_update_type = update_type;
+        return Some(update_context::current);
     };
 
     if crate::dcn21_resource::dcn21_validate_bandwidth(dc, &mut ctx, crate::regs::DC_VALIDATE_MODE_AND_PROGRAMMING)
@@ -2119,7 +2136,7 @@ fn update_planes_and_stream_state(dc: &mut dc, srf_updates: &[dc_surface_update]
     *new_update_type = update_type;
     backup_planes_and_stream_state(dc, true, stream);
 
-    Some(ctx)
+    Some(update_context::new(ctx))
 }
 
 /// `dc_dmub_should_send_dirty_rect_cmd` (dc.c): PSR from DCN 3.1, Replay,
@@ -2190,6 +2207,82 @@ fn dc_dmub_update_dirty_rect(adev: &amdgpu_device, dc: &mut dc, srf_updates: &[d
             cmd.0[DIRTY_PANEL_INST as usize] = panel_inst as u8;
             cmd.0[DIRTY_PIPE_IDX as usize] = j as u8;
             crate::dc_dmub_srv::dc_wake_and_execute_dmub_cmd(adev, dc, &mut cmd, DM_DMUB_WAIT_TYPE_NO_WAIT);
+        }
+    }
+}
+
+/// `commit_planes_do_stream_update` (dc.c): the stream update's members
+/// on the stream's OTG master. The periodic interrupt, VSP/HF-VSIF/VTEM/AVI
+/// infopackets, dynamic metadata, cursor, DSC, MST and test pattern members
+/// join with their stages.
+fn commit_planes_do_stream_update(adev: &amdgpu_device, dc: &mut dc, stream: usize, stream_update: &dc_stream_update,
+                                  update_type: u32, context: &mut crate::dc_state::dc_state) {
+    use crate::dc_resource::{pipe_type, resource_is_pipe_type};
+
+    // Stream updates
+    for j in 0..dc.res_pool.as_deref().unwrap().pipe_count as usize {
+        let pipe_ctx = context.res_ctx.pipe_ctx[j];
+
+        if !(resource_is_pipe_type(&pipe_ctx, pipe_type::OTG_MASTER) && pipe_ctx.stream == Some(stream)) {
+            continue;
+        }
+
+        let use_dynamic_meta = dc.streams[stream].as_deref().unwrap().use_dynamic_meta;
+        if (stream_update.hdr_static_metadata.is_some() && !use_dynamic_meta)
+            || stream_update.output_color_space.is_some()
+            || stream_update.vrr_infopacket.is_some()
+            || stream_update.vsc_infopacket.is_some()
+            || stream_update.adaptive_sync_infopacket.is_some()
+        {
+            crate::link_dpms::resource_build_info_frame(dc, context, j);
+            (dc.hwss.update_info_frame.unwrap())(adev, dc, context, j);
+
+            let s = dc.streams[stream].as_deref().unwrap();
+            if crate::link_detection::dc_is_dp_signal(s.signal) {
+                let li = s.link;
+                crate::link_dpms::dp_trace_source_sequence(adev, dc, li,
+                    crate::regs::DPCD_SOURCE_SEQ_AFTER_UPDATE_INFO_FRAME);
+            }
+        }
+
+        // Dynamic metadata: dcn21_funcs has no set_dmdata_attributes.
+
+        if stream_update.gamut_remap.is_some() {
+            not_ported("commit_planes_do_stream_update: dc_stream_set_gamut_remap");
+        }
+
+        if stream_update.output_csc_transform.is_some() {
+            not_ported("commit_planes_do_stream_update: dc_stream_program_csc_matrix");
+        }
+
+        if stream_update.dither_option.is_some() {
+            let st = dc.streams[stream].as_deref_mut().unwrap();
+            let mut params = st.bit_depth_params;
+            crate::dc_resource::resource_build_bit_depth_reduction_params(st, &mut params);
+            st.bit_depth_params = params;
+            let (params, clamping) = (st.bit_depth_params, st.clamping);
+            let pool = dc.res_pool.as_deref().unwrap();
+            let opp = pool.opps[pipe_ctx.stream_res.opp.unwrap()].as_deref().unwrap();
+            (opp.funcs().opp_program_fmt.unwrap())(adev, &dc.debug, opp, &params, &clamping);
+            let mut odm_pipe = pipe_ctx.next_odm_pipe;
+            while let Some(o) = odm_pipe {
+                let opp = pool.opps[context.res_ctx.pipe_ctx[o].stream_res.opp.unwrap()].as_deref().unwrap();
+                (opp.funcs().opp_program_fmt.unwrap())(adev, &dc.debug, opp, &params, &clamping);
+                odm_pipe = context.res_ctx.pipe_ctx[o].next_odm_pipe;
+            }
+        }
+
+        // Full fe update
+        if update_type == crate::regs::UPDATE_TYPE_FAST {
+            continue;
+        }
+
+        if stream_update.dpms_off.is_some() {
+            not_ported("commit_planes_do_stream_update: dpms_off");
+        }
+
+        if stream_update.abm_level.is_some() && pipe_ctx.stream_res.abm {
+            not_ported("commit_planes_do_stream_update: abm_level (optc1_is_blanked)");
         }
     }
 }
@@ -2282,8 +2375,8 @@ fn commit_planes_for_stream(adev: &amdgpu_device, dc: &mut dc, srf_updates: &[dc
     dc_dmub_update_dirty_rect(adev, dc, srf_updates, stream, context);
 
     // Stream updates
-    if stream_update.is_some() {
-        not_ported("commit_planes_do_stream_update");
+    if let Some(su) = stream_update {
+        commit_planes_do_stream_update(adev, dc, stream, su, update_type, context);
     }
 
     if srf_updates.is_empty() {
@@ -2375,7 +2468,7 @@ fn commit_planes_for_stream(adev: &amdgpu_device, dc: &mut dc, srf_updates: &[dc
 
                     // GSL has to be used for flip immediate
                     let fi = dc.planes[u.surface].as_deref().unwrap().flip_immediate;
-                    set_flip_control_gsl(adev, dc, j, fi);
+                    set_flip_control_gsl(adev, dc, pipe_ctx, fi);
                 }
             }
         }
@@ -2653,7 +2746,7 @@ fn update_planes_and_stream_v2(adev: &amdgpu_device, dc: &mut dc, srf_updates: &
         return false;
     }
 
-    let Some(mut context) =
+    let Some(context) =
         update_planes_and_stream_state(dc, srf_updates, stream, stream_update.as_deref_mut(), &mut update_type)
     else {
         return false;
@@ -2661,20 +2754,40 @@ fn update_planes_and_stream_v2(adev: &amdgpu_device, dc: &mut dc, srf_updates: &
 
     // on plane removal, minimal state is the new one
     if force_minimal_pipe_splitting && !is_plane_addition {
-        if !commit_minimal_transition_state(dc, Some(&context)) {
-            crate::dc_state::dc_state_release(dc, context);
+        let ok = match &context {
+            update_context::current => commit_minimal_transition_state(dc, None),
+            update_context::new(ctx) => commit_minimal_transition_state(dc, Some(ctx)),
+        };
+        if !ok {
+            if let update_context::new(ctx) = context {
+                crate::dc_state::dc_state_release(dc, ctx);
+            }
             return false;
         }
         update_type = crate::regs::UPDATE_TYPE_FULL;
     }
 
-    if is_fast_update_only && !dc.debug.enable_legacy_fast_update {
-        not_ported("commit_planes_for_stream_fast");
-    } else {
-        let su = stream_update.as_deref().copied();
-        commit_planes_for_stream(adev, dc, srf_updates, stream, su.as_ref(), update_type, &mut context);
+    // dcn21_funcs has no is_pipe_topology_transition_seamless.
+
+    let su = stream_update.as_deref().copied();
+    let commit = |dc: &mut dc, ctx: &mut crate::dc_state::dc_state| {
+        if is_fast_update_only && !dc.debug.enable_legacy_fast_update {
+            not_ported("commit_planes_for_stream_fast");
+        } else {
+            commit_planes_for_stream(adev, dc, srf_updates, stream, su.as_ref(), update_type, ctx);
+        }
+    };
+    match context {
+        update_context::current => {
+            let mut cur = dc.current_state.take().unwrap();
+            commit(dc, &mut cur);
+            dc.current_state = Some(cur);
+        }
+        update_context::new(mut ctx) => {
+            commit(dc, &mut ctx);
+            swap_and_release_current_context(dc, ctx, stream);
+        }
     }
-    swap_and_release_current_context(dc, context, stream);
     true
 }
 

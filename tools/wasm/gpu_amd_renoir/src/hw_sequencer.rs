@@ -48,7 +48,7 @@ pub struct hw_sequencer_funcs {
     pub edp_power_control: Option<fn(&amdgpu_device, &mut dc, usize, bool)>,
     pub edp_wait_for_hpd_ready: Option<fn(&amdgpu_device, &mut dc, usize, bool)>,
     pub init_sys_ctx: Option<fn(&amdgpu_device, &mut dc, &crate::dc::dc_phy_addr_space_config) -> i32>,
-    pub set_flip_control_gsl: Option<fn(&amdgpu_device, &dc, usize, bool)>,
+    pub set_flip_control_gsl: Option<fn(&amdgpu_device, &dc, &crate::dc_state::pipe_ctx, bool)>,
     pub optimize_pwr_state: Option<fn(&amdgpu_device, &mut dc, &mut dc_state)>,
     pub exit_optimized_pwr_state: Option<fn(&amdgpu_device, &mut dc, &mut dc_state)>,
     pub get_vupdate_offset_from_vsync: Option<fn(&dc, &dc_state, usize) -> i32>,

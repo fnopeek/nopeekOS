@@ -290,8 +290,7 @@ pub fn dcn20_wait_for_blank_complete(adev: &amdgpu_device, opp: &dcn20_opp) -> b
 }
 
 /// `dcn20_set_flip_control_gsl` (dcn20_hwseq.c).
-pub fn dcn20_set_flip_control_gsl(adev: &amdgpu_device, dc: &dc, pipe_idx: usize, flip_immediate: bool) {
-    let pipe = &dc.current_state.as_deref().expect("state").res_ctx.pipe_ctx[pipe_idx];
+pub fn dcn20_set_flip_control_gsl(adev: &amdgpu_device, dc: &dc, pipe: &crate::dc_state::pipe_ctx, flip_immediate: bool) {
     let pool = dc.res_pool.as_deref().expect("pool");
     let hubp = pool.hubps[pipe.plane_res.hubp.expect("hubp")].as_deref().expect("hubp");
     if let Some(f) = hubp.funcs().hubp_set_flip_control_surface_gsl {
@@ -317,7 +316,7 @@ pub fn dcn20_plane_atomic_disable(adev: &amdgpu_device, dc: &mut dc, pipe_idx: u
 
     // hubp_update_mall_sel is not a member of dcn21_hubp_funcs.
 
-    (dc.hwss.set_flip_control_gsl.unwrap())(adev, dc, pipe_idx, false);
+    (dc.hwss.set_flip_control_gsl.unwrap())(adev, dc, &pipe, false);
 
     {
         let pool = dc.res_pool.as_deref_mut().expect("pool");

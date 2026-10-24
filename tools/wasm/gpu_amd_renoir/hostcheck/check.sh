@@ -168,9 +168,10 @@ done
 # current state, then dc_validate_global_state (pipe split, DML, watermarks,
 # DLG/TTU/RQ, DML's whole state), identity and scaled plane, then
 # dc_commit_streams (accelerated mode, clocks, watermarks, back end, link
-# training, stream enable) and dc_update_planes_and_stream (the plane's
-# front end: HUBP, DPP scaler and colour, MPCC, ABM); compared to the end,
-# with every DMUB command.
+# training, stream enable), dc_update_planes_and_stream (the plane's
+# front end: HUBP, DPP scaler and colour, MPCC, ABM) and two page flips (a
+# fast update on the current state); compared to the end, with every DMUB
+# command.
 for seed in ones zeros hash lit boot; do
     for plane in full scaled; do
         n=commit_$seed$plane
@@ -183,10 +184,11 @@ for seed in ones zeros hash lit boot; do
             grep '^dmub cmd' "$B/$n.$f" >> "$B/$n.$f.blk" || true
         done
         if diff -u "$B/$n.linux.blk" "$B/$n.port.blk" | head -30; cmp -s "$B/$n.linux.blk" "$B/$n.port.blk"; then
-            echo "commit ($seed, $plane plane): port = Linux through dc_update_planes_and_stream" \
+            echo "commit ($seed, $plane plane): port = Linux through two page flips" \
                 "($(grep -c '^vba\.' "$B/$n.linux.blk") DML values," \
                 "$(awk '/^dc_validate_global_state/{p=1} /^dc_commit_streams/{exit} p&&/^write/' "$B/$n.linux" | wc -l) commit writes," \
-                "$(awk '/^dc_commit_streams/{p=1} p&&/^(dmub cmd|wm_ranges)/{exit} p&&/^write/' "$B/$n.linux" | wc -l) plane update writes," \
+                "$(awk '/^dc_commit_streams/{p=1} /^dc_update_planes_and_stream/{exit} p&&/^write/' "$B/$n.linux" | wc -l) plane update writes," \
+                "$(awk '/^dc_update_planes_and_stream/{p=1} p&&/^(dmub cmd|wm_ranges)/{exit} p&&/^write/' "$B/$n.linux" | wc -l) flip writes," \
                 "$(grep -c '^dmub cmd' "$B/$n.linux") DMUB commands)"
         else
             fail=1

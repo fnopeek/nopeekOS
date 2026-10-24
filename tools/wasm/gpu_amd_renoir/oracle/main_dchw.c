@@ -557,6 +557,35 @@ int main(int argc, char **argv)
 			struct dc_surface_update srf = { .surface = plane };
 			printf("dc_update_planes_and_stream %d\n",
 			       dc_update_planes_and_stream(dc, &srf, 1, stream, NULL));
+			/* Two page flips as amdgpu_dm_commit_planes builds them: the
+			 * plane's unchanged scaling and plane info, a new address,
+			 * and a stream update naming only the stream. */
+			for (int f = 0; f < 2; f++) {
+				struct dc_plane_info pi = {
+					.plane_size = plane->plane_size, .tiling_info = plane->tiling_info,
+					.dcc = plane->dcc, .format = plane->format, .rotation = plane->rotation,
+					.stereo_format = plane->stereo_format, .color_space = plane->color_space,
+					.horizontal_mirror = plane->horizontal_mirror, .visible = plane->visible,
+					.per_pixel_alpha = plane->per_pixel_alpha,
+					.pre_multiplied_alpha = plane->pre_multiplied_alpha,
+					.global_alpha = plane->global_alpha,
+					.global_alpha_value = plane->global_alpha_value,
+					.input_csc_enabled = plane->input_csc_color_matrix.enable_adjustment,
+					.layer_index = plane->layer_index, .cositing = plane->cositing,
+				};
+				struct dc_scaling_info si = {
+					.src_rect = plane->src_rect, .dst_rect = plane->dst_rect,
+					.clip_rect = plane->clip_rect, .scaling_quality = plane->scaling_quality,
+				};
+				struct dc_flip_addrs fa = { .address = plane->address };
+				fa.address.grph.addr.quad_part = VRAM_START + 0x2000000 + f * 0x1000000;
+				fa.flip_timestamp_in_us = 1000 + f * 16667;
+				struct dc_surface_update fu = {
+					.surface = plane, .flip_addr = &fa, .plane_info = &pi, .scaling_info = &si,
+				};
+				struct dc_stream_update su = { .stream = stream };
+				printf("flip %d\n", dc_update_planes_and_stream(dc, &fu, 1, stream, &su));
+			}
 		}
 	}
 

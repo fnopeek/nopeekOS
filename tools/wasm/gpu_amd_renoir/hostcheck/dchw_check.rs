@@ -566,6 +566,29 @@ fn main() {
             let mut srf = [dc::dc_surface_update { surface: plane, ..Default::default() }];
             println!("dc_update_planes_and_stream {}",
                 dc::dc_update_planes_and_stream(&adev, &mut dc, &mut srf, stream, None) as i32);
+            // Two page flips, as in the oracle.
+            for f in 0..2u64 {
+                let pl = dc.planes[plane].as_deref().unwrap();
+                let pi = dc::dc_plane_info {
+                    plane_size: pl.plane_size, tiling_info: pl.tiling_info, dcc: pl.dcc, format: pl.format,
+                    rotation: pl.rotation, stereo_format: pl.stereo_format, color_space: pl.color_space,
+                    horizontal_mirror: pl.horizontal_mirror, visible: pl.visible,
+                    per_pixel_alpha: pl.per_pixel_alpha, pre_multiplied_alpha: pl.pre_multiplied_alpha,
+                    global_alpha: pl.global_alpha, global_alpha_value: pl.global_alpha_value,
+                    input_csc_enabled: pl.input_csc_color_matrix.enable_adjustment, layer_index: pl.layer_index,
+                };
+                let si = dc::dc_scaling_info {
+                    src_rect: pl.src_rect, dst_rect: pl.dst_rect, clip_rect: pl.clip_rect,
+                    scaling_quality: pl.scaling_quality,
+                };
+                let mut fa = dc::dc_flip_addrs { address: pl.address, ..Default::default() };
+                fa.address.u[0] = 0xf4_0000_0000 + 0x200_0000 + f * 0x100_0000;
+                fa.flip_timestamp_in_us = 1000 + f * 16667;
+                let mut fu = [dc::dc_surface_update { surface: plane, flip_addr: Some(fa), plane_info: Some(pi),
+                                                      scaling_info: Some(si), ..Default::default() }];
+                let mut su = dc::dc_stream_update { stream, ..Default::default() };
+                println!("flip {}", dc::dc_update_planes_and_stream(&adev, &mut dc, &mut fu, stream, Some(&mut su)) as i32);
+            }
         }
     }
     npk_sys::fake_card_echo(false);
