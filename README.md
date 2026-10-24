@@ -533,4 +533,4 @@ name. A fork is welcome under a name of its own.
 
 ## Author
 
-nopeek — [nopeek.ch](https://nopeek.ch) · from Luzern
+nopeek — [nopeek.ch](https://nopeek.ch)

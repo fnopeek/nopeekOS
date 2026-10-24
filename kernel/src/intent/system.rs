@@ -1830,8 +1830,6 @@ pub fn intent_about() {
     kprintln!("  Capabilities, not permissions. Intents, not commands.");
     kprintln!("  Content-addressed, not paths. Runtime-generated, not installed.");
     kprintln!();
-    kprintln!("  Created in Luzern, Switzerland.");
-    kprintln!();
 }
 
 pub fn intent_philosophy() {
