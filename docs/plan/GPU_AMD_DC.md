@@ -1,6 +1,6 @@
 # GPU_AMD_DC — Display Controller (DCN 2.1 / Renoir), 1:1 nach Linux
 
-**Stand:** 2026-10-22 · Kernel 0.669.0 · Modul `gpu_amd_renoir` 0.30.0 ·
+**Stand:** 2026-10-24 · Kernel 0.682.0 · Modul `gpu_amd_renoir` 0.36.0 ·
 Quelle `~/.cache/nopeekos/amdgpu-callgraph/linux-6.18.55[-renoir]`.
 
 **Prinzip (nicht verhandelbar):** DC wird **ganz** portiert, 1:1 aus Linux'
