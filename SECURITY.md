@@ -17,7 +17,7 @@ Most of all, anything that crosses the boundary the system is built on:
 ## Reporting
 
 Please report these **privately** via
-<https://github.com/fnopeek/nopeekOS/security/advisories/new> — not as a
+<https://github.com/fnopeek/nopeekOS/security/advisories/new>, not as a
 public issue.
 
 This is one person's project: expect an answer within days, not hours. A

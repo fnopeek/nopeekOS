@@ -3,7 +3,7 @@
 Right now nopeekOS is one person and a lot of evenings, built with
 [Claude Code](https://claude.com/claude-code) as a pair programmer. Every
 change is tested on real hardware, and the numbers in the docs are
-measured, not guessed. Help is welcome — questions, reviews, hardware
+measured, not guessed. Help is welcome: questions, reviews, hardware
 reports and code.
 
 ## Where things go
@@ -11,10 +11,10 @@ reports and code.
 | You have… | Go to |
 |---|---|
 | a question, an idea, a design argument | [Discussions](https://github.com/fnopeek/nopeekOS/discussions) |
-| a device you want supported | a [hardware request](https://github.com/fnopeek/nopeekOS/issues/new?template=hardware-request.yml) — others vote with 👍 |
+| a device you want supported | a [hardware request](https://github.com/fnopeek/nopeekOS/issues/new?template=hardware-request.yml); others vote with 👍 |
 | a bug | a [bug report](https://github.com/fnopeek/nopeekOS/issues/new?template=bug-report.yml) |
 | a security issue | **privately**, see [SECURITY.md](SECURITY.md) |
-| code | a pull request from your fork — please ask in Discussions first for anything larger |
+| code | a pull request from your fork; please ask in Discussions first for anything larger |
 
 ## Licensing note (read before a pull request)
 
@@ -28,18 +28,18 @@ change that cannot be merged.
 
 The rules live in [CLAUDE.md](CLAUDE.md) and `docs/spec/`. The short form:
 
-- **Architecture** — capabilities, not permissions; intents, not
+- **Architecture:** capabilities, not permissions; intents, not
   commands; content-addressed, not path-addressed; the WASM sandbox is the
   trust boundary. A change that weakens one of these will not be merged.
-- **Rust** — `no_std`, nightly, edition 2024, target `x86_64-nopeek`. No
+- **Rust:** `no_std`, nightly, edition 2024, target `x86_64-nopeek`. No
   POSIX, no libc.
-- **`unsafe`** — every block carries a `SAFETY` comment.
-- **Comments** — English, minimal, no history; see
+- **`unsafe`:** every block carries a `SAFETY` comment.
+- **Comments:** English, minimal, no history; see
   `docs/spec/COMMENTS.md`. The pre-commit hook `tools/hooks/pre-commit`
   checks it.
 - **Hardware drivers** are ported from Linux and kept as close to the
   original as possible, with Linux as the reference.
-- **Security checkpoint** — before every commit: *can a WASM module escape
+- **Security checkpoint:** before every commit, ask: *can a WASM module escape
   its sandbox through this change?* If the answer is not clearly **no**,
   it does not go in.
 

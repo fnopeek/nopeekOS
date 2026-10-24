@@ -1,5 +1,5 @@
 name: Bug report
-description: Something broke. Not for security issues — see SECURITY.md.
+description: Something broke. Not for security issues, see SECURITY.md.
 labels: ["bug"]
 body:
   - type: input
