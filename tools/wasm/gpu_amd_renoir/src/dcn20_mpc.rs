@@ -47,6 +47,7 @@ pub struct mpc_ops {
                                     Option<&crate::dcn20_dpp_cm::pwl_params>)>,
     pub power_on_mpc_mem_pwr: Option<fn(&amdgpu_device, &dcn20_mpc, i32, bool)>,
     pub set_bg_color: Option<fn(&amdgpu_device, &mut dcn20_mpc, &crate::dcn20_opp::tg_color, i32)>,
+    pub cursor_lock: Option<fn(&amdgpu_device, &dcn20_mpc, i32, bool)>,
 }
 
 /// `dcn20_mpc_funcs` (dcn20_mpc.c), as far as ported.
@@ -63,6 +64,7 @@ const DCN20_MPC_FUNCS: mpc_ops = mpc_ops {
     set_output_gamma: Some(mpc2_set_output_gamma),
     power_on_mpc_mem_pwr: Some(mpc20_power_on_ogam_lut),
     set_bg_color: Some(mpc1_set_bg_color),
+    cursor_lock: Some(mpc1_cursor_lock),
 };
 
 impl mpc_funcs {
@@ -965,3 +967,9 @@ pub static MPC_MASK: dcn20_mpc_mask = dcn20_mpc_mask {
     CUR_VUPDATE_LOCK_SET: CUR_VUPDATE_LOCK_SET0__CUR_VUPDATE_LOCK_SET_MASK,
     MPC_OCSC_TEST_DEBUG_DATA_OCSC_MODE: 0x3,
 };
+
+/// `mpc1_cursor_lock` (dcn10_mpc.c): the cursor's VUPDATE lock of the MPCC
+/// tree feeding `opp_id`.
+pub fn mpc1_cursor_lock(adev: &amdgpu_device, mpc10: &dcn20_mpc, opp_id: i32, lock: bool) {
+    reg_set!(adev, mpc10.rsm(), CUR[opp_id as usize], 0, CUR_VUPDATE_LOCK_SET, if lock { 1 } else { 0 });
+}

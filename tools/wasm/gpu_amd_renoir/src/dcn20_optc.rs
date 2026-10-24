@@ -54,6 +54,7 @@ pub struct timing_generator_ops {
     pub is_tg_enabled: Option<fn(&amdgpu_device, &optc) -> bool>,
     pub get_dsc_status: Option<fn(&amdgpu_device, &optc, &mut u32)>,
     pub get_optc_source: Option<fn(&amdgpu_device, &optc, &mut u32, &mut u32, &mut u32)>,
+    pub get_position: Option<fn(&amdgpu_device, &optc, &mut crate::dc_hw_types::crtc_position)>,
 }
 
 /// `dcn20_tg_funcs` (dcn20_optc.c), as far as ported. `init_odm` is not a
@@ -86,6 +87,7 @@ const DCN20_TG_FUNCS: timing_generator_ops = timing_generator_ops {
     is_tg_enabled: Some(optc1_is_tg_enabled),
     get_dsc_status: Some(optc2_get_dsc_status),
     get_optc_source: Some(optc2_get_optc_source),
+    get_position: Some(optc1_get_position),
 };
 
 impl timing_generator_funcs {
@@ -1922,4 +1924,13 @@ pub fn optc1_get_hw_timing(adev: &amdgpu_device, optc1: &optc, hw_crtc_timing: &
     hw_crtc_timing.v_sync_width = s.v_sync_a_end.wrapping_sub(s.v_sync_a_start);
 
     true
+}
+
+/// `optc1_get_position` (dcn10_optc.c).
+pub fn optc1_get_position(adev: &amdgpu_device, optc1: &optc, position: &mut crate::dc_hw_types::crtc_position) {
+    let c = optc1.rsm();
+    [position.horizontal_count, position.vertical_count] =
+        reg_get_n!(adev, c, OTG_STATUS_POSITION, OTG_HORZ_COUNT, OTG_VERT_COUNT);
+
+    position.nominal_vcount = reg_get!(adev, c, OTG_NOM_VERT_POSITION, OTG_VERT_COUNT_NOM);
 }

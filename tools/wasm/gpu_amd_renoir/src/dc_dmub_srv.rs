@@ -341,3 +341,39 @@ pub fn dc_dmub_srv_notify_stream_mask(adev: &amdgpu_device, dc: &mut dc, stream_
     dc_wake_and_execute_gpint(adev, dc, DMUB_GPINT__IDLE_OPT_NOTIFY_STREAM_MASK, stream_mask as u16,
         DM_DMUB_WAIT_TYPE_WAIT)
 }
+
+/// `dc_dmub_should_update_cursor_data` (dc_dmub_srv.c): the DMUB needs the
+/// cursor for PSR from DCN 3.1 and for Replay.
+fn dc_dmub_should_update_cursor_data(dc: &dc, context: &crate::dc_state::dc_state, p: usize) -> bool {
+    let pipe_ctx = &context.res_ctx.pipe_ctx[p];
+    if let Some(ps) = pipe_ctx.plane_state {
+        if dc.planes[ps].as_deref().unwrap().address.r#type == PLN_ADDR_TYPE_VIDEO_PROGRESSIVE
+            || crate::dc_resource::resource_can_pipe_disable_cursor(dc, context, p)
+        {
+            return false;
+        }
+    }
+
+    let s = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap();
+    let link = &dc.links[s.link];
+    if (link.psr_settings.psr_version == DC_PSR_VERSION_SU_1 || link.psr_settings.psr_version == DC_PSR_VERSION_1)
+        && dc.ctx.dce_version as i32 >= crate::dc_types::dce_version::DCN_VERSION_3_1 as i32
+    {
+        return true;
+    }
+
+    if link.replay_settings.replay_supported {
+        return true;
+    }
+
+    false
+}
+
+/// `dc_send_update_cursor_info_to_dmu` (dc_dmub_srv.c). The two
+/// DMUB_CMD__UPDATE_CURSOR_INFO payloads are PSR-SU and Replay's.
+pub fn dc_send_update_cursor_info_to_dmu(dc: &dc, context: &crate::dc_state::dc_state, p: usize) {
+    if !dc_dmub_should_update_cursor_data(dc, context, p) {
+        return;
+    }
+    Line::new().s("dc_send_update_cursor_info_to_dmu: cursor payloads not ported").say();
+}

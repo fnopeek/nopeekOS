@@ -603,6 +603,25 @@ int main(int argc, char **argv)
 			dc_interrupt_ack(dc, DC_IRQ_SOURCE_HPD1);
 			printf("dc_interrupt_set %d\n", dc_interrupt_set(dc, DC_IRQ_SOURCE_VUPDATE1, false));
 			printf("dc_interrupt_set %d\n", dc_interrupt_set(dc, DC_IRQ_SOURCE_GPIOPAD0, true));
+			/* The cursor as amdgpu_dm_plane_handle_cursor_update programs it:
+			 * a 64x64 pre-multiplied ARGB cursor, then positions inside, past
+			 * the top-left edge (hotspot from the clipped part) and off. */
+			struct dc_cursor_attributes ca = {0};
+			ca.address.quad_part = VRAM_START + 0x4000000;
+			ca.width = 64;
+			ca.height = 64;
+			ca.color_format = CURSOR_MODE_COLOR_PRE_MULTIPLIED_ALPHA;
+			ca.pitch = 64;
+			printf("dc_stream_program_cursor_attributes %d\n", dc_stream_program_cursor_attributes(stream, &ca));
+			int pos[][2] = { { 100, 200 }, { 1900, 1070 }, { -10, -5 }, { 0, 0 } };
+			for (int i = 0; i < 4; i++) {
+				struct dc_cursor_position cp = { .enable = i < 3, .translate_by_source = true };
+				cp.x = pos[i][0] < 0 ? 0 : pos[i][0];
+				cp.y = pos[i][1] < 0 ? 0 : pos[i][1];
+				cp.x_hotspot = pos[i][0] < 0 ? -pos[i][0] : 0;
+				cp.y_hotspot = pos[i][1] < 0 ? -pos[i][1] : 0;
+				printf("dc_stream_program_cursor_position %d\n", dc_stream_program_cursor_position(stream, &cp));
+			}
 		}
 	}
 

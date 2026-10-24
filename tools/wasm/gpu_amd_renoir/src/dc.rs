@@ -2850,3 +2850,164 @@ pub fn dc_get_flip_pending_on_otg(adev: &amdgpu_device, dc: &dc, otg_inst: u32) 
 
     flip_pending
 }
+
+/// `dc_stream_check_cursor_attributes` (dc_stream.c). The SW cursor
+/// fallback (`allow_sw_cursor_fallback`) is off on DCN 2.1.
+pub fn dc_stream_check_cursor_attributes(attributes: &crate::dc_hw_types::dc_cursor_attributes) -> bool {
+    if attributes.address == 0 {
+        crate::linux::Line::new().s("DC: Cursor address is 0!").say();
+        return false;
+    }
+
+    true
+}
+
+/// `dc_stream_set_cursor_attributes` (dc_stream.c).
+pub fn dc_stream_set_cursor_attributes(dc: &mut dc, stream: usize,
+                                       attributes: &crate::dc_hw_types::dc_cursor_attributes) -> bool {
+    let mut result = false;
+
+    if dc_stream_check_cursor_attributes(attributes) {
+        dc.streams[stream].as_deref_mut().unwrap().cursor_attributes = *attributes;
+        result = true;
+    }
+
+    result
+}
+
+/// `program_cursor_attributes` (dc_stream.c): on every pipe of the stream,
+/// under the cursor lock of its first.
+pub fn program_cursor_attributes(adev: &amdgpu_device, dc: &mut dc, stream: usize) {
+    let cur = dc.current_state.take().unwrap();
+    let res_ctx = &cur.res_ctx;
+    let mut pipe_to_program = None;
+
+    for i in 0..crate::dc_types::MAX_PIPES {
+        let pipe_ctx = &res_ctx.pipe_ctx[i];
+
+        if pipe_ctx.stream != Some(stream) {
+            continue;
+        }
+
+        if pipe_to_program.is_none() {
+            pipe_to_program = Some(i);
+            (dc.hwss.cursor_lock.unwrap())(adev, dc, &cur, i, true);
+            if let Some(o) = pipe_ctx.next_odm_pipe {
+                (dc.hwss.cursor_lock.unwrap())(adev, dc, &cur, o, true);
+            }
+        }
+
+        (dc.hwss.set_cursor_attribute.unwrap())(adev, dc, &cur, i);
+        if dc.ctx.dmub_srv.is_some() {
+            crate::dc_dmub_srv::dc_send_update_cursor_info_to_dmu(dc, &cur, i);
+        }
+        if let Some(set_cursor_sdr_white_level) = dc.hwss.set_cursor_sdr_white_level {
+            set_cursor_sdr_white_level(adev, dc, &cur, i);
+        }
+    }
+
+    if let Some(p) = pipe_to_program {
+        (dc.hwss.cursor_lock.unwrap())(adev, dc, &cur, p, false);
+        if let Some(o) = res_ctx.pipe_ctx[p].next_odm_pipe {
+            (dc.hwss.cursor_lock.unwrap())(adev, dc, &cur, o, false);
+        }
+    }
+    dc.current_state = Some(cur);
+}
+
+/// `dc_stream_program_cursor_attributes` (dc_stream.c).
+pub fn dc_stream_program_cursor_attributes(adev: &amdgpu_device, dc: &mut dc, stream: usize,
+                                           attributes: &crate::dc_hw_types::dc_cursor_attributes) -> bool {
+    let mut reset_idle_optimizations = false;
+
+    if dc_stream_set_cursor_attributes(dc, stream, attributes) {
+        dc_z10_restore(dc);
+        // disable idle optimizations while updating cursor
+        if dc.idle_optimizations_allowed {
+            dc_allow_idle_optimizations(dc, false);
+            reset_idle_optimizations = true;
+        }
+
+        program_cursor_attributes(adev, dc, stream);
+
+        // re-enable idle optimizations if necessary (disable_dmub_reallow_idle
+        // is off)
+        if reset_idle_optimizations {
+            dc_allow_idle_optimizations(dc, true);
+        }
+
+        return true;
+    }
+
+    false
+}
+
+/// `dc_stream_set_cursor_position` (dc_stream.c).
+pub fn dc_stream_set_cursor_position(dc: &mut dc, stream: usize,
+                                     position: &crate::dc_hw_types::dc_cursor_position) -> bool {
+    dc.streams[stream].as_deref_mut().unwrap().cursor_position = *position;
+
+    true
+}
+
+/// `program_cursor_position` (dc_stream.c): on every pipe of the stream
+/// with a plane, under the cursor lock of the first.
+pub fn program_cursor_position(adev: &amdgpu_device, dc: &mut dc, stream: usize) {
+    let cur = dc.current_state.take().unwrap();
+    let res_ctx = &cur.res_ctx;
+    let mut pipe_to_program = None;
+
+    for i in 0..crate::dc_types::MAX_PIPES {
+        let pipe_ctx = &res_ctx.pipe_ctx[i];
+
+        if pipe_ctx.stream != Some(stream) || pipe_ctx.plane_res.hubp.is_none() || pipe_ctx.plane_state.is_none()
+            || pipe_ctx.plane_res.dpp.is_none()
+        {
+            continue;
+        }
+
+        if pipe_to_program.is_none() {
+            pipe_to_program = Some(i);
+            (dc.hwss.cursor_lock.unwrap())(adev, dc, &cur, i, true);
+        }
+
+        (dc.hwss.set_cursor_position.unwrap())(adev, dc, &cur, i);
+        if dc.ctx.dmub_srv.is_some() {
+            crate::dc_dmub_srv::dc_send_update_cursor_info_to_dmu(dc, &cur, i);
+        }
+    }
+
+    if let Some(p) = pipe_to_program {
+        (dc.hwss.cursor_lock.unwrap())(adev, dc, &cur, p, false);
+    }
+    dc.current_state = Some(cur);
+}
+
+/// `dc_stream_program_cursor_position` (dc_stream.c). Visual confirm of
+/// the HW cursor is off.
+pub fn dc_stream_program_cursor_position(adev: &amdgpu_device, dc: &mut dc, stream: usize,
+                                         position: &crate::dc_hw_types::dc_cursor_position) -> bool {
+    let mut reset_idle_optimizations = false;
+    let old_enable = dc.streams[stream].as_deref().unwrap().cursor_position.enable;
+
+    if dc_stream_set_cursor_position(dc, stream, position) {
+        dc_z10_restore(dc);
+
+        // disable idle optimizations if enabling cursor
+        // (exit_idle_opt_for_cursor_updates is off)
+        if dc.idle_optimizations_allowed && !old_enable && position.enable {
+            dc_allow_idle_optimizations(dc, false);
+            reset_idle_optimizations = true;
+        }
+
+        program_cursor_position(adev, dc, stream);
+        // re-enable idle optimizations if necessary
+        if reset_idle_optimizations {
+            dc_allow_idle_optimizations(dc, true);
+        }
+
+        return true;
+    }
+
+    false
+}

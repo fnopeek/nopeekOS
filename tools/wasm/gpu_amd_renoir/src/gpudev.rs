@@ -39,12 +39,19 @@ const OP_BLOB: u32 = 8;
 /// `a0` client, `a1` resource id: the guest let go of the resource.
 const OP_BLOB_RELEASE: u32 = 9;
 const OP_ATTACH: u32 = 10;
+/// `a0` width, `a1` height, `a2`/`a3` hotspot; the payload is the image,
+/// premultiplied ARGB8888.
+const OP_CURSOR_IMAGE: u32 = 11;
+/// `a0` x, `a1` y (two's complement), `a2` shown.
+const OP_CURSOR_MOVE: u32 = 12;
+const MAX_CURSOR: u32 = 256;
 /// The largest ccmd a guest sends, and the kernel's largest reply.
 const CCMD_MAX: usize = 256 * 1024;
 const REPLY_MAX: usize = 64 * 1024;
 const CAP_COPY: i32 = 1;
 const CAP_SCENE: i32 = 2;
 const CAP_NATIVE: i32 = 4;
+const CAP_CURSOR: i32 = 8;
 const JOB_BYTES: usize = 32;
 const BO_INFO_BYTES: usize = 40;
 const NUM_BOS: usize = 3;
@@ -847,6 +854,24 @@ fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
             Ok(()) => 0,
             Err(e) => e,
         },
+        OP_CURSOR_IMAGE => {
+            let (cw, ch) = (w(2), w(3));
+            if cw == 0 || ch == 0 || cw > MAX_CURSOR || ch > MAX_CURSOR {
+                return -EINVAL;
+            }
+            let len = (cw * ch * 4) as usize;
+            let mut px = alloc::vec![0u8; len];
+            let mut at = 0usize;
+            while at < len {
+                let n = npk_sys::gpudev_job_data(seq as i32, at as i32, &mut px[at..]);
+                if n <= 0 {
+                    return -EINVAL;
+                }
+                at += n as usize;
+            }
+            crate::amdgpu_dm::dm_cursor_set_image(adev, &px, cw, ch, w(4) as i32, w(5) as i32)
+        }
+        OP_CURSOR_MOVE => crate::amdgpu_dm::dm_cursor_move(adev, w(2) as i32, w(3) as i32, w(4) != 0),
         OP_SCENE if svc.composer.is_some() => run_scene(adev, svc, seq, w(2), w(3)),
         OP_CLIENT => {
             if w(3) != 0 {
@@ -1034,7 +1059,7 @@ pub fn serve(adev: &mut amdgpu_device) {
     };
     let native_ok = scene_ok && capset;
     let caps = if svc.copy_ok { CAP_COPY } else { 0 } | if scene_ok { CAP_SCENE } else { 0 }
-        | if native_ok { CAP_NATIVE } else { 0 };
+        | if native_ok { CAP_NATIVE } else { 0 } | if adev.dm.live.is_some() { CAP_CURSOR } else { 0 };
     npk_sys::gpudev_ready(caps);
     if caps == 0 {
         unbind(adev, &mut svc);

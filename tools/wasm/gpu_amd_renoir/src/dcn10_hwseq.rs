@@ -720,3 +720,287 @@ pub fn dcn10_update_pending_status(adev: &amdgpu_device, dc: &mut dc, pipe_ctx: 
     // The multi-plane self refresh workaround is never applied: its arming
     // in dcn20_post_unlock_program_front_end is named, not ported.
 }
+
+/// `delay_cursor_until_vupdate` (dcn10_hwseq.c): when VUPDATE is under 70 us
+/// away, wait past it, so the cursor lock does not stall the update.
+fn delay_cursor_until_vupdate(adev: &amdgpu_device, dc: &dc, context: &crate::dc_state::dc_state, p: usize) {
+    let pipe_ctx = &context.res_ctx.pipe_ctx[p];
+    let mut position = crate::dc_hw_types::crtc_position::default();
+    let (mut vupdate_start, mut vupdate_end) = (0u32, 0u32);
+
+    let (Some(calc_vupdate_position), Some(get_position)) = (dc.hwss.calc_vupdate_position, dc.hwss.get_position)
+    else {
+        return;
+    };
+
+    if pipe_ctx.stream_res.stream_enc.is_none() || pipe_ctx.stream_res.tg.is_none() {
+        return;
+    }
+    let timing = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap().timing;
+
+    calc_vupdate_position(dc, context, p, &mut vupdate_start, &mut vupdate_end);
+
+    get_position(adev, dc, context, &[p], &mut position);
+    let vpos = position.vertical_count;
+
+    let lines_to_vupdate = if vpos <= vupdate_start {
+        // VPOS is in VACTIVE or back porch.
+        vupdate_start - vpos
+    } else {
+        timing.v_total - vpos + vupdate_start
+    };
+
+    // Calculate time until VUPDATE in microseconds.
+    let us_per_line = timing.h_total * 10000u32 / timing.pix_clk_100hz;
+    let mut us_to_vupdate = lines_to_vupdate * us_per_line;
+
+    // Stall out until the cursor update completes.
+    if vupdate_end < vupdate_start {
+        vupdate_end += timing.v_total;
+    }
+
+    // Position is in the range of vupdate start and end
+    if lines_to_vupdate > timing.v_total - vupdate_end + vupdate_start {
+        us_to_vupdate = 0;
+    }
+
+    // 70 us is a conservative estimate of cursor update time
+    if us_to_vupdate > 70 {
+        return;
+    }
+
+    let us_vupdate = (vupdate_end - vupdate_start + 1) * us_per_line;
+    crate::linux::udelay((us_to_vupdate + us_vupdate) as u64);
+}
+
+/// `dcn10_cursor_lock` (dcn10_hwseq.c): the cursor lock is per MPCC tree,
+/// so one pipe per stream locks it.
+pub fn dcn10_cursor_lock(adev: &amdgpu_device, dc: &mut dc, context: &crate::dc_state::dc_state, p: usize, lock: bool) {
+    let pipe = &context.res_ctx.pipe_ctx[p];
+    if pipe.top_pipe.is_some() {
+        return;
+    }
+
+    // Prevent cursor lock from stalling out cursor updates.
+    if lock {
+        delay_cursor_until_vupdate(adev, dc, context, p);
+    }
+
+    let li = pipe.stream.map(|s| dc.streams[s].as_deref().unwrap().link);
+    if li.is_some_and(|li| crate::dc::should_use_dmub_lock(dc, li)) {
+        crate::linux::Line::new().s("dcn10_cursor_lock: dmub_hw_lock_mgr_cmd not ported").say();
+    } else {
+        let pool = dc.res_pool.as_deref().unwrap();
+        let opp_inst = pool.opps[pipe.stream_res.opp.unwrap()].as_deref().unwrap().base.inst as i32;
+        let mpc = pool.mpc.as_deref().unwrap();
+        (mpc.funcs().cursor_lock.unwrap())(adev, mpc, opp_inst, lock);
+    }
+}
+
+/// `dcn10_calc_vupdate_position` (dcn10_hwseq.c).
+pub fn dcn10_calc_vupdate_position(dc: &dc, context: &crate::dc_state::dc_state, p: usize, start_line: &mut u32,
+                                   end_line: &mut u32) {
+    let pipe_ctx = &context.res_ctx.pipe_ctx[p];
+    let timing = &dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap().timing;
+    let vupdate_pos = (dc.hwss.get_vupdate_offset_from_vsync.unwrap())(dc, context, p);
+    let v_total = timing.v_total as i32;
+
+    *start_line = if vupdate_pos >= 0 {
+        (vupdate_pos - ((vupdate_pos / v_total) * v_total)) as u32
+    } else {
+        (vupdate_pos + ((-vupdate_pos / v_total) + 1) * v_total - 1) as u32
+    };
+    *end_line = (*start_line + 2) % timing.v_total;
+}
+
+/// `dcn10_get_position` (dcn10_hwseq.c).
+pub fn dcn10_get_position(adev: &amdgpu_device, dc: &dc, context: &crate::dc_state::dc_state, pipes: &[usize],
+                          position: &mut crate::dc_hw_types::crtc_position) {
+    for &p in pipes {
+        let tg = dc.res_pool.as_deref().unwrap().timing_generators[context.res_ctx.pipe_ctx[p].stream_res.tg.unwrap()]
+            .as_deref().unwrap();
+        (tg.funcs().get_position.unwrap())(adev, tg, position);
+    }
+}
+
+/// `dcn10_set_cursor_attribute` (dcn10_hwseq.c).
+pub fn dcn10_set_cursor_attribute(adev: &amdgpu_device, dc: &mut dc, context: &crate::dc_state::dc_state, p: usize) {
+    let pipe_ctx = &context.res_ctx.pipe_ctx[p];
+    let attributes = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap().cursor_attributes;
+    let pool = dc.res_pool.as_deref_mut().unwrap();
+
+    let hubp = pool.hubps[pipe_ctx.plane_res.hubp.unwrap()].as_deref_mut().unwrap();
+    (hubp.funcs().set_cursor_attributes.unwrap())(adev, hubp, &attributes);
+    let dpp = pool.dpps[pipe_ctx.plane_res.dpp.unwrap()].as_deref().unwrap();
+    (dpp.funcs().set_cursor_attributes.unwrap())(adev, dpp, &attributes);
+}
+
+/// `dcn10_set_cursor_sdr_white_level` (dcn10_hwseq.c): the cursor's FP
+/// scale, 1.0 unless the SDR white level is above 80 nits.
+pub fn dcn10_set_cursor_sdr_white_level(adev: &amdgpu_device, dc: &mut dc, context: &crate::dc_state::dc_state,
+                                        p: usize) {
+    let pipe_ctx = &context.res_ctx.pipe_ctx[p];
+    let sdr_white_level = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap().cursor_attributes.sdr_white_level;
+    let mut hw_scale = 0x3c00u32; // 1.0 default multiplier
+    let dpp = dc.res_pool.as_deref().unwrap().dpps[pipe_ctx.plane_res.dpp.unwrap()].as_deref().unwrap();
+
+    let Some(set_optional_cursor_attributes) = dpp.funcs().set_optional_cursor_attributes else { return };
+
+    let fmt = crate::conversion::custom_float_format { exponenta_bits: 5, mantissa_bits: 10, sign: true };
+
+    if sdr_white_level > 80 {
+        let multiplier = crate::fixpt31_32::dc_fixpt_from_fraction(sdr_white_level as i64, 80);
+        crate::conversion::convert_to_custom_float_format(multiplier, &fmt, &mut hw_scale);
+    }
+
+    let opt_attr = crate::dc_hw_types::dpp_cursor_attributes { scale: hw_scale as i32, bias: 0 };
+
+    set_optional_cursor_attributes(adev, dpp, &opt_attr);
+}
+
+/// `dcn10_set_cursor_position` (dcn10_hwseq.c): DC's cursor is in stream
+/// space, the hardware's in plane space and drawn as part of the
+/// framebuffer.
+pub fn dcn10_set_cursor_position(adev: &amdgpu_device, dc: &mut dc, context: &crate::dc_state::dc_state, p: usize) {
+    let pipe_ctx = &context.res_ctx.pipe_ctx[p];
+    let stream = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap();
+    let plane_state = *dc.planes[pipe_ctx.plane_state.unwrap()].as_deref().unwrap();
+    let mut pos_cpy = stream.cursor_position;
+    let scl = &pipe_ctx.plane_res.scl_data;
+    let param = crate::dc_hw_types::dc_cursor_mi_param {
+        pixel_clk_khz: stream.timing.pix_clk_100hz / 10,
+        ref_clk_khz: dc.res_pool.as_deref().unwrap().ref_clocks.dchub_ref_clock_inKhz,
+        viewport: scl.viewport,
+        recout: Default::default(),
+        h_scale_ratio: scl.ratios.horz,
+        v_scale_ratio: scl.ratios.vert,
+        rotation: plane_state.rotation,
+        mirror: plane_state.horizontal_mirror,
+        stream: pipe_ctx.stream.unwrap(),
+    };
+    let mut pipe_split_on = false;
+    let odm_combine_on = pipe_ctx.next_odm_pipe.is_some() || pipe_ctx.prev_odm_pipe.is_some();
+
+    let x_plane = plane_state.dst_rect.x;
+    let y_plane = plane_state.dst_rect.y;
+    let mut x_pos = pos_cpy.x as i32;
+    let mut y_pos = pos_cpy.y as i32;
+    let mut clip_x = plane_state.clip_rect.x;
+    let mut clip_width = plane_state.clip_rect.width;
+
+    if (pipe_ctx.top_pipe.is_some() || pipe_ctx.bottom_pipe.is_some())
+        && (plane_state.src_rect.width != scl.viewport.width || plane_state.src_rect.height != scl.viewport.height)
+    {
+        pipe_split_on = true;
+    }
+
+    // Translate cursor and clip offset from stream space to plane space. If
+    // the cursor is scaled then we need to scale the position to be in the
+    // approximately correct place. We can't do anything about the actual
+    // size being incorrect, that's a limitation of the hardware.
+    if param.rotation == ROTATION_ANGLE_90 || param.rotation == ROTATION_ANGLE_270 {
+        x_pos = (x_pos - x_plane) * plane_state.src_rect.height / plane_state.dst_rect.width;
+        y_pos = (y_pos - y_plane) * plane_state.src_rect.width / plane_state.dst_rect.height;
+    } else {
+        x_pos = (x_pos - x_plane) * plane_state.src_rect.width / plane_state.dst_rect.width;
+        y_pos = (y_pos - y_plane) * plane_state.src_rect.height / plane_state.dst_rect.height;
+        clip_x = (clip_x - x_plane) * plane_state.src_rect.width / plane_state.dst_rect.width;
+        clip_width = clip_width * plane_state.src_rect.width / plane_state.dst_rect.width;
+    }
+
+    // If the cursor's source viewport is clipped then we need to translate
+    // the cursor to appear in the correct position on the screen. This
+    // translation isn't affected by scaling so it needs to be done *after*
+    // we adjust the position for the scale factor.
+    if pos_cpy.translate_by_source {
+        x_pos += plane_state.src_rect.x;
+        y_pos += plane_state.src_rect.y;
+    }
+
+    // If the position is negative then we need to add to the hotspot to
+    // shift the cursor outside the plane.
+    if x_pos < 0 {
+        pos_cpy.x_hotspot = pos_cpy.x_hotspot.wrapping_sub(x_pos as u32);
+        x_pos = 0;
+    }
+
+    if y_pos < 0 {
+        pos_cpy.y_hotspot = pos_cpy.y_hotspot.wrapping_sub(y_pos as u32);
+        y_pos = 0;
+    }
+
+    pos_cpy.x = x_pos as u32;
+    pos_cpy.y = y_pos as u32;
+
+    if plane_state.address.r#type == PLN_ADDR_TYPE_VIDEO_PROGRESSIVE {
+        pos_cpy.enable = false;
+    }
+
+    if pos_cpy.enable && crate::dc_resource::resource_can_pipe_disable_cursor(dc, context, p) {
+        pos_cpy.enable = false;
+    }
+
+    if param.rotation == ROTATION_ANGLE_0 {
+        if param.mirror {
+            // The plane is split into multiple viewports. The combination of
+            // all viewports span the entirety of the clip rect. For no
+            // pipe_split, viewport_width is represents the full width of the
+            // clip_rect, so we can just mirror it.
+            pos_cpy.x = (clip_width as u32).wrapping_sub(pos_cpy.x).wrapping_add(2 * clip_x as u32);
+        }
+    } else if param.rotation == ROTATION_ANGLE_90 {
+        // Swap axis and mirror horizontally
+        let temp_x = pos_cpy.x;
+
+        pos_cpy.x = (scl.viewport.width as u32).wrapping_sub(pos_cpy.y.wrapping_sub(scl.viewport.x as u32))
+            .wrapping_add(scl.viewport.x as u32);
+        pos_cpy.y = temp_x;
+    } else if param.rotation == ROTATION_ANGLE_270 {
+        // Swap axis and mirror vertically
+        let temp_y = pos_cpy.y;
+        let viewport_height = scl.viewport.height;
+        let viewport_y = scl.viewport.y;
+
+        if pipe_split_on || odm_combine_on {
+            let res = &context.res_ctx;
+            let other_pipe_viewport_y = if pipe_split_on {
+                match pipe_ctx.bottom_pipe {
+                    Some(b) => res.pipe_ctx[b].plane_res.scl_data.viewport.y,
+                    None => res.pipe_ctx[pipe_ctx.top_pipe.unwrap()].plane_res.scl_data.viewport.y,
+                }
+            } else {
+                match pipe_ctx.next_odm_pipe {
+                    Some(n) => res.pipe_ctx[n].plane_res.scl_data.viewport.y,
+                    None => res.pipe_ctx[pipe_ctx.prev_odm_pipe.unwrap()].plane_res.scl_data.viewport.y,
+                }
+            };
+            let pos_cpy_x_offset = if viewport_y > other_pipe_viewport_y { other_pipe_viewport_y } else { viewport_y };
+            pos_cpy.x = pos_cpy.x.wrapping_sub(pos_cpy_x_offset as u32);
+            if pos_cpy.x > viewport_height as u32 {
+                pos_cpy.x = pos_cpy.x.wrapping_sub(viewport_height as u32);
+                pos_cpy.y = (viewport_height as u32).wrapping_sub(pos_cpy.x);
+            } else {
+                pos_cpy.y = (2 * viewport_height as u32).wrapping_sub(pos_cpy.x);
+            }
+            pos_cpy.y = pos_cpy.y.wrapping_add(pos_cpy_x_offset as u32);
+        } else {
+            pos_cpy.y = ((2 * viewport_y) as u32).wrapping_add(viewport_height as u32).wrapping_sub(pos_cpy.x);
+        }
+        pos_cpy.x = temp_y;
+    } else if param.rotation == ROTATION_ANGLE_180 {
+        // Mirror horizontally and vertically
+        if !param.mirror {
+            pos_cpy.x = (clip_width as u32).wrapping_sub(pos_cpy.x).wrapping_add(2 * clip_x as u32);
+        }
+
+        // pos_cpy.y = viewport.y * 2 + viewport.height - pos_cpy.y
+        pos_cpy.y = ((2 * scl.viewport.y) as u32).wrapping_add(scl.viewport.height as u32).wrapping_sub(pos_cpy.y);
+    }
+
+    let pool = dc.res_pool.as_deref_mut().unwrap();
+    let hubp = pool.hubps[pipe_ctx.plane_res.hubp.unwrap()].as_deref_mut().unwrap();
+    (hubp.funcs().set_cursor_position.unwrap())(adev, hubp, &pos_cpy, &param);
+    let (w, h) = (hubp.base.curs_attr.width, hubp.base.curs_attr.height);
+    let dpp = pool.dpps[pipe_ctx.plane_res.dpp.unwrap()].as_deref_mut().unwrap();
+    (dpp.funcs().set_cursor_position.unwrap())(adev, dpp, &pos_cpy, &param, w, h);
+}

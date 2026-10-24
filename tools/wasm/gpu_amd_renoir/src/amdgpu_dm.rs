@@ -47,6 +47,28 @@ pub struct amdgpu_display_manager {
     pub live: Option<dm_live>,
     /// Page flips completed since the driver's loop last took them.
     pub flip_events: alloc::vec::Vec<crate::drm_vblank::drm_flip_event>,
+    /// The cursor plane's state, once the kernel gave it an image.
+    pub cursor: Option<dm_cursor_plane>,
+}
+
+/// The cursor plane as DRM would hold it: its framebuffer (a VRAM buffer
+/// of the largest cursor DCN 2.1 shows), the image's size and hotspot, and
+/// where the pointer is.
+#[derive(Clone, Copy, Debug)]
+pub struct dm_cursor_plane {
+    pub bo: usize,
+    pub address: u64,
+    pub kptr: crate::amdgpu_object::amdgpu_kptr,
+    /// `crtc_w` / `crtc_h`, and the framebuffer's pitch in pixels.
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub hot_x: i32,
+    pub hot_y: i32,
+    pub x: i32,
+    pub y: i32,
+    /// Whether the plane has a framebuffer.
+    pub visible: bool,
 }
 
 /// `struct amdgpu_crtc` (amdgpu_mode.h) with its `drm_crtc` and DRM vblank
@@ -1327,4 +1349,147 @@ pub fn dm_page_flip(adev: &mut amdgpu_device, address: u64, event: u32) -> i32 {
     }
 
     if updated { 0 } else { -5 }
+}
+
+/// `amdgpu_dm_plane_get_cursor_position` (amdgpu_dm_plane.c): the position
+/// of the cursor plane's top left corner on the CRTC; a corner left of or
+/// above the CRTC moves into the hotspot.
+fn amdgpu_dm_plane_get_cursor_position(dc: &crate::dc::dc, c: &dm_cursor_plane,
+                                       position: &mut crate::dc_hw_types::dc_cursor_position) -> i32 {
+    let max_cursor_width = dc.caps.max_cursor_size as i32;
+    let max_cursor_height = dc.caps.max_cursor_size as i32;
+    let (mut xorigin, mut yorigin) = (0, 0);
+
+    if !c.visible {
+        return 0;
+    }
+
+    if c.width as i32 > max_cursor_width || c.height as i32 > max_cursor_height {
+        Line::new().s("amdgpu_dm_plane_get_cursor_position: bad cursor width or height ").dec(c.width as u64)
+            .s(" x ").dec(c.height as u64).say();
+        return -22;
+    }
+
+    let mut x = c.x - c.hot_x;
+    let mut y = c.y - c.hot_y;
+
+    if x <= -max_cursor_width || y <= -max_cursor_height {
+        return 0;
+    }
+
+    if x < 0 {
+        xorigin = (-x).min(max_cursor_width - 1);
+        x = 0;
+    }
+    if y < 0 {
+        yorigin = (-y).min(max_cursor_height - 1);
+        y = 0;
+    }
+    position.enable = true;
+    position.x = x as u32;
+    position.y = y as u32;
+    position.x_hotspot = xorigin as u32;
+    position.y_hotspot = yorigin as u32;
+
+    // DCE before 4.0.1
+    position.translate_by_source = true;
+
+    0
+}
+
+/// `amdgpu_dm_plane_handle_cursor_update` (amdgpu_dm_plane.c): the cursor
+/// plane's state to DC, attributes and position, or the cursor off.
+fn amdgpu_dm_plane_handle_cursor_update(adev: &mut amdgpu_device) {
+    let (Some(c), Some(live)) = (adev.dm.cursor, adev.dm.live) else { return };
+    let mut position = crate::dc_hw_types::dc_cursor_position::default();
+
+    let mut dcb = adev.dm.dc.take().unwrap();
+    let dc = &mut *dcb;
+    let ret = amdgpu_dm_plane_get_cursor_position(dc, &c, &mut position);
+    if ret == 0 {
+        if !position.enable {
+            // turn off cursor
+            crate::dc::dc_stream_program_cursor_position(adev, dc, live.stream, &position);
+        } else {
+            let attributes = crate::dc_hw_types::dc_cursor_attributes {
+                address: c.address,
+                width: c.width,
+                height: c.height,
+                color_format: CURSOR_MODE_COLOR_PRE_MULTIPLIED_ALPHA,
+                rotation_angle: 0,
+                attribute_flags: 0,
+                pitch: c.pitch,
+                sdr_white_level: 0,
+            };
+
+            if !crate::dc::dc_stream_program_cursor_attributes(adev, dc, live.stream, &attributes) {
+                drm_err("DC failed to set cursor attributes");
+            }
+
+            if !crate::dc::dc_stream_program_cursor_position(adev, dc, live.stream, &position) {
+                drm_err("DC failed to set cursor position");
+            }
+        }
+    }
+    adev.dm.dc = Some(dcb);
+}
+
+/// The kernel's cursor image, premultiplied ARGB8888 `width` x `height`
+/// with its hotspot, into the cursor plane's framebuffer. The buffer is
+/// the largest cursor DCN 2.1 shows (`caps.max_cursor_size`), allocated
+/// once in VRAM, where amdgpu_dm places cursor framebuffers.
+pub fn dm_cursor_set_image(adev: &mut amdgpu_device, pixels: &[u8], width: u32, height: u32, hot_x: i32,
+                           hot_y: i32) -> i32 {
+    let Some(dc) = adev.dm.dc.as_deref() else { return -19 };
+    let max = dc.caps.max_cursor_size;
+    if width == 0 || height == 0 || width > max || height > max || pixels.len() != (width * height * 4) as usize {
+        return -22;
+    }
+    let pitch = match width {
+        0..=64 => 64,
+        65..=128 => 128,
+        _ => 256,
+    };
+
+    if adev.dm.cursor.is_none() {
+        let size = (max * max * 4) as u64;
+        let h = match crate::amdgpu_object::amdgpu_bo_create_kernel(adev, size, crate::amdgpu_object::PAGE_SIZE,
+                                                                    AMDGPU_GEM_DOMAIN_VRAM, true) {
+            Ok(Some(h)) => h,
+            Ok(None) => return -12,
+            Err(r) => return r,
+        };
+        let Some(kptr) = crate::amdgpu_object::bo(adev, h).kptr else { return -12 };
+        let address = crate::amdgpu_object::amdgpu_bo_gpu_offset(adev, h);
+        adev.dm.cursor = Some(dm_cursor_plane { bo: h, address, kptr, width: 0, height: 0, pitch: 0, hot_x: 0,
+                                                hot_y: 0, x: 0, y: 0, visible: false });
+    }
+    let c = adev.dm.cursor.as_mut().unwrap();
+    let (kptr, row_bytes) = (c.kptr, (pitch * 4) as usize);
+    c.width = width;
+    c.height = height;
+    c.pitch = pitch;
+    c.hot_x = hot_x;
+    c.hot_y = hot_y;
+
+    let mut row = alloc::vec![0u8; row_bytes];
+    for y in 0..height as usize {
+        let src = &pixels[y * width as usize * 4..(y + 1) * width as usize * 4];
+        row[..src.len()].copy_from_slice(src);
+        row[src.len()..].fill(0);
+        crate::amdgpu_gart::kptr_write(adev, kptr, (y * row_bytes) as u64, &row);
+    }
+
+    amdgpu_dm_plane_handle_cursor_update(adev);
+    0
+}
+
+/// The pointer moved to `x`, `y` on the CRTC, or the cursor shows or hides.
+pub fn dm_cursor_move(adev: &mut amdgpu_device, x: i32, y: i32, visible: bool) -> i32 {
+    let Some(c) = adev.dm.cursor.as_mut() else { return -19 };
+    c.x = x;
+    c.y = y;
+    c.visible = visible;
+    amdgpu_dm_plane_handle_cursor_update(adev);
+    0
 }

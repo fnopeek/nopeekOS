@@ -25483,3 +25483,33 @@ pub const AMDGPU_HPD_4: u32 = 0x3;
 pub const AMDGPU_HPD_5: u32 = 0x4;
 /// amdgpu/amdgpu_mode.h:90
 pub const AMDGPU_HPD_6: u32 = 0x5;
+
+// Hardware cursor (dc_stream.c cursor, dcn10/dcn20 hubp/dpp cursor)
+/// ?
+pub const CURSOR_MODE_MONO: u32 = 0x0;
+/// ?
+pub const CURSOR_MODE_COLOR_1BIT_AND: u32 = 0x1;
+/// ?
+pub const CURSOR_MODE_COLOR_PRE_MULTIPLIED_ALPHA: u32 = 0x2;
+/// ?
+pub const CURSOR_MODE_COLOR_UN_PRE_MULTIPLIED_ALPHA: u32 = 0x3;
+/// ?
+pub const CURSOR_MODE_COLOR_64BIT_FP_PRE_MULTIPLIED: u32 = 0x4;
+/// ?
+pub const CURSOR_MODE_COLOR_64BIT_FP_UN_PRE_MULTIPLIED: u32 = 0x5;
+/// include/navi10_enum.h:2325
+pub const CURSOR_PITCH_64_PIXELS: u32 = 0x0;
+/// include/navi10_enum.h:2326
+pub const CURSOR_PITCH_128_PIXELS: u32 = 0x1;
+/// include/navi10_enum.h:2327
+pub const CURSOR_PITCH_256_PIXELS: u32 = 0x2;
+/// include/navi10_enum.h:2335
+pub const CURSOR_LINE_PER_CHUNK_1: u32 = 0x0;
+/// include/navi10_enum.h:2336
+pub const CURSOR_LINE_PER_CHUNK_2: u32 = 0x1;
+/// include/navi10_enum.h:2337
+pub const CURSOR_LINE_PER_CHUNK_4: u32 = 0x2;
+/// include/navi10_enum.h:2338
+pub const CURSOR_LINE_PER_CHUNK_8: u32 = 0x3;
+/// include/navi10_enum.h:2339
+pub const CURSOR_LINE_PER_CHUNK_16: u32 = 0x4;

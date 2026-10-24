@@ -1,8 +1,10 @@
-//! Software mouse cursor.
+//! Mouse cursor.
 //!
 //! The render path bakes the cursor into the shadow buffer with save-under,
 //! so a blit carries scene and cursor together and a pure move needs no
-//! recomposite.
+//! recomposite. With a driver module that shows a hardware cursor
+//! (`gpudev::cursor_supported`) nothing is baked: the image goes to the
+//! module once per size, and every bake becomes a move.
 //!
 //! Mouse position is stored as atomics, so input updates it without a lock.
 
@@ -37,10 +39,55 @@ static SU_VALID: AtomicBool = AtomicBool::new(false);
 pub fn saved_pos() -> (i32, i32) { (SU_X.load(Ordering::Relaxed), SU_Y.load(Ordering::Relaxed)) }
 pub fn save_valid() -> bool { SU_VALID.load(Ordering::Relaxed) }
 
+/// Whether the hardware cursor shows the pointer.
+pub fn hw_active() -> bool {
+    crate::gpu::gpudev::cursor_supported()
+}
+
+/// The size of the image the module has (0 = none yet).
+static HW_W: AtomicU32 = AtomicU32::new(0);
+static HW_H: AtomicU32 = AtomicU32::new(0);
+
+/// The hardware cursor to the pointer's position, with the image first when
+/// the module has none at this size. False when the module refused, and
+/// the caller bakes.
+fn hw_show() -> bool {
+    let (ew, eh) = eff_dims();
+    if HW_W.load(Ordering::Relaxed) != ew || HW_H.load(Ordering::Relaxed) != eh {
+        // The sprite is color | alpha << 24; the hardware wants it
+        // premultiplied.
+        let pixels = with_sprite(ew, eh, |sprite| {
+            let mut out = alloc::vec::Vec::with_capacity(sprite.len() * 4);
+            for &p in sprite {
+                let a = p >> 24;
+                let c = |s: u32| (((p >> s) & 0xff) * a / 255) << s;
+                out.extend_from_slice(&(a << 24 | c(16) | c(8) | c(0)).to_le_bytes());
+            }
+            out
+        });
+        if !crate::gpu::gpudev::cursor_image(ew, eh, 0, 0, pixels) {
+            return false;
+        }
+        HW_W.store(ew, Ordering::Relaxed);
+        HW_H.store(eh, Ordering::Relaxed);
+    }
+    let (cx, cy) = atomic_pos();
+    crate::gpu::gpudev::cursor_move(cx, cy, true)
+}
+
 /// Save the clean pixels under the cursor's current position from `buf`,
-/// then bake the cursor there. `buf` is a shadow buffer (plain RAM).
+/// then bake the cursor there. `buf` is a shadow buffer (plain RAM). With
+/// the hardware cursor, move that instead.
 pub fn save_under_and_bake(buf: *mut u8, info: &crate::framebuffer::FbInfo) {
     if buf.is_null() || !crate::xhci::mouse_available() { return; }
+    if hw_active() {
+        if hw_show() {
+            SU_VALID.store(false, Ordering::Relaxed);
+            return;
+        }
+    } else {
+        HW_W.store(0, Ordering::Relaxed);
+    }
     let pitch = info.pitch as usize;
     let sw = info.width as i32;
     let sh = info.height as i32;

@@ -12758,3 +12758,18 @@ AMDGPU_HPD_3
 AMDGPU_HPD_4
 AMDGPU_HPD_5
 AMDGPU_HPD_6
+# Hardware cursor (dc_stream.c cursor, dcn10/dcn20 hubp/dpp cursor)
+CURSOR_MODE_MONO @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_MODE_COLOR_1BIT_AND @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_MODE_COLOR_PRE_MULTIPLIED_ALPHA @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_MODE_COLOR_UN_PRE_MULTIPLIED_ALPHA @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_MODE_COLOR_64BIT_FP_PRE_MULTIPLIED @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_MODE_COLOR_64BIT_FP_UN_PRE_MULTIPLIED @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_PITCH_64_PIXELS @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_PITCH_128_PIXELS @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_PITCH_256_PIXELS @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_LINE_PER_CHUNK_1 @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_LINE_PER_CHUNK_2 @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_LINE_PER_CHUNK_4 @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_LINE_PER_CHUNK_8 @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+CURSOR_LINE_PER_CHUNK_16 @ ../display/dc/hubp/dcn20/dcn20_hubp.c

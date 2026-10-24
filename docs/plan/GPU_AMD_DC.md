@@ -294,6 +294,23 @@ host-prüfbare Meilenstein ist der Graph, nicht der Einzelblock.
   dem letzten Flip (`amdgpu_display_get_crtc_scanoutpos`), Hardware-
   Vblank-Zähler, HPD-Handler, DMUB-Outbox-Handler, Vblank-Control-Worker
   (PSR/Idle-Optimierung).
+- **E5b am Gerät ✅ (0.34.0):** `flip 0 completed after 16845 us at vblank 1`,
+  `flip 1 … 16555 us at vblank 2` — ein Frame bei 60,0 Hz.
+- **Entscheid (Florian, 2026-10-24):** erst Hardware-Cursor (G), dann der
+  Composer auf Flippen (E5c).
+- **G Hardware-Cursor** (2026-10-24, Kernel 0.681.0 + Modul 0.35.0):
+  `dc_stream_program_cursor_attributes/position` mit `program_cursor_*`,
+  `dcn10_cursor_lock` (+ `delay_cursor_until_vupdate`, `optc1_get_position`,
+  `mpc1_cursor_lock`), `dcn10_set_cursor_attribute/position/sdr_white_level`,
+  `hubp2_cursor_set_attributes`, `hubp1_cursor_set_position`,
+  `dpp2_set_cursor_attributes`, `dpp1_set_cursor_position`,
+  `resource_can_pipe_disable_cursor`; Orakel: Attribute + vier Positionen
+  (innen, Rand rechts unten, links oben mit Hotspot, aus) Byte-gleich, `full`
+  (zwei Pipes) und `scaled`. DM: Cursor-Ebene wie amdgpu_dm (Puffer im VRAM,
+  `amdgpu_dm_plane_get_cursor_position`, `handle_cursor_update`). Kernel:
+  `OP_CURSOR_IMAGE` / `OP_CURSOR_MOVE` mit `CAP_CURSOR` (Bewegungen werden
+  zusammengefasst), `shade::cursor` backt nicht mehr ein, wenn das Modul den
+  Hardware-Cursor zeigt. Benannt: DMUB-Cursor-Payloads (PSR-SU/Replay).
 - **Nächster Schritt E5c:** Kernel-Naht — ein Flip-Auftrag (`OP_FLIP`) vom
   Composer an das Modul, abgeschlossen beim Ereignis; und der Composer
   zeichnet in den hinteren Puffer und flippt (Entscheid offen: Puffer-Alter

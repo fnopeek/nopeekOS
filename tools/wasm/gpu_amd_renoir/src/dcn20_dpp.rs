@@ -67,6 +67,11 @@ pub struct dpp_ops {
     pub dpp_program_3dlut: Option<fn(&amdgpu_device, &dcn20_dpp, Option<&crate::dcn20_dpp_cm::tetrahedral_params>) -> bool>,
     pub dpp_dppclk_control: Option<fn(&amdgpu_device, &dcn20_dpp, bool, bool)>,
     pub dpp_set_hdr_multiplier: Option<fn(&amdgpu_device, &dcn20_dpp, u32)>,
+    pub set_cursor_attributes: Option<fn(&amdgpu_device, &dcn20_dpp, &crate::dc_hw_types::dc_cursor_attributes)>,
+    pub set_cursor_position: Option<fn(&amdgpu_device, &mut dcn20_dpp, &crate::dc_hw_types::dc_cursor_position,
+                                       &crate::dc_hw_types::dc_cursor_mi_param, u32, u32)>,
+    pub set_optional_cursor_attributes: Option<fn(&amdgpu_device, &dcn20_dpp,
+                                                  &crate::dc_hw_types::dpp_cursor_attributes)>,
 }
 
 /// `dcn20_dpp_funcs` (dcn20_dpp.c), as far as ported. `dpp_program_degamma_pwl`
@@ -83,6 +88,9 @@ const DCN20_DPP_FUNCS: dpp_ops = dpp_ops {
     dpp_program_3dlut: Some(crate::dcn20_dpp_cm::dpp20_program_3dlut),
     dpp_dppclk_control: Some(dpp1_dppclk_control),
     dpp_set_hdr_multiplier: Some(crate::dcn20_dpp_cm::dpp2_set_hdr_multiplier),
+    set_cursor_attributes: Some(dpp2_set_cursor_attributes),
+    set_cursor_position: Some(dpp1_set_cursor_position),
+    set_optional_cursor_attributes: Some(dpp1_cnv_set_optional_cursor_attributes),
 };
 
 impl dpp_funcs {
@@ -100,6 +108,9 @@ pub struct dpp {
     pub funcs: Option<dpp_funcs>,
     pub inst: u32,
     pub caps: Option<&'static dpp_caps>,
+    /// `pos.cur0_ctl.bits.cur0_enable`: the cursor enable as programmed. The
+    /// attribute cache (`att`) is written by DCN 3.x only.
+    pub pos_cur0_enable: u32,
 }
 
 /// `struct dcn20_dpp` (dcn20_dpp.h): the concrete DPP. The filters are the
@@ -147,6 +158,8 @@ pub fn dpp_reset(dpp: &mut dcn20_dpp) {
     dpp.filter_v_c = None;
     dpp.filter_h = None;
     dpp.filter_v = None;
+
+    dpp.base.pos_cur0_enable = 0;
 
     dpp.scl_data = Default::default();
 }
@@ -3577,4 +3590,97 @@ pub fn dpp1_get_optimal_number_of_taps(dpp: &dcn20_dpp, dc_debug: &crate::dc::dc
     }
 
     true
+}
+
+/// `dpp2_set_cursor_attributes` (dcn20_dpp.c).
+pub fn dpp2_set_cursor_attributes(adev: &amdgpu_device, dpp: &dcn20_dpp,
+                                  cursor_attributes: &crate::dc_hw_types::dc_cursor_attributes) {
+    let color_format = cursor_attributes.color_format;
+    let mut cur_rom_en = 0;
+
+    if (color_format == CURSOR_MODE_COLOR_PRE_MULTIPLIED_ALPHA
+        || color_format == CURSOR_MODE_COLOR_UN_PRE_MULTIPLIED_ALPHA)
+        && cursor_attributes.attribute_flags & crate::dc_hw_types::DC_CURSOR_ENABLE_CURSOR_DEGAMMA != 0
+    {
+        cur_rom_en = 1;
+    }
+
+    let c = dpp.rsm();
+    reg_update!(adev, c, CURSOR0_CONTROL, CUR0_MODE, color_format, CUR0_EXPANSION_MODE, 0, CUR0_ROM_EN, cur_rom_en);
+
+    if color_format == CURSOR_MODE_MONO {
+        // todo: clarify what to program these to
+        reg_update!(adev, c, CURSOR0_COLOR0, CUR0_COLOR0, 0x00000000);
+        reg_update!(adev, c, CURSOR0_COLOR1, CUR0_COLOR1, 0xFFFFFFFF);
+    }
+}
+
+/// `dpp1_set_cursor_position` (dcn10_dpp.c): the enable, written only when
+/// it changes.
+pub fn dpp1_set_cursor_position(adev: &amdgpu_device, dpp: &mut dcn20_dpp,
+                                pos: &crate::dc_hw_types::dc_cursor_position,
+                                param: &crate::dc_hw_types::dc_cursor_mi_param, width: u32, height: u32) {
+    let x_pos = (pos.x as i32).wrapping_sub(param.viewport.x);
+    let y_pos = (pos.y as i32).wrapping_sub(param.viewport.y);
+    let mut x_hotspot = pos.x_hotspot as i32;
+    let mut y_hotspot = pos.y_hotspot as i32;
+    let mut src_x_offset = x_pos.wrapping_sub(pos.x_hotspot as i32);
+    let mut src_y_offset = y_pos.wrapping_sub(pos.y_hotspot as i32);
+    let mut cursor_height = height as i32;
+    let mut cursor_width = width as i32;
+    let mut cur_en = pos.enable as u32;
+
+    // Transform cursor width / height and hotspots for offset calculations
+    if param.rotation == ROTATION_ANGLE_90 || param.rotation == ROTATION_ANGLE_270 {
+        core::mem::swap(&mut cursor_height, &mut cursor_width);
+        core::mem::swap(&mut x_hotspot, &mut y_hotspot);
+
+        if param.rotation == ROTATION_ANGLE_90 {
+            // hotspot = (-y, x)
+            src_x_offset = x_pos - (cursor_width - x_hotspot);
+            src_y_offset = y_pos - y_hotspot;
+        } else if param.rotation == ROTATION_ANGLE_270 {
+            // hotspot = (y, -x)
+            src_x_offset = x_pos - x_hotspot;
+            src_y_offset = y_pos - (cursor_height - y_hotspot);
+        }
+    } else if param.rotation == ROTATION_ANGLE_180 {
+        // hotspot = (-x, -y)
+        if !param.mirror {
+            src_x_offset = x_pos - (cursor_width - x_hotspot);
+        }
+
+        src_y_offset = y_pos - (cursor_height - y_hotspot);
+    }
+
+    if src_x_offset >= param.viewport.width {
+        cur_en = 0; // not visible beyond right edge
+    }
+
+    if src_x_offset + cursor_width <= 0 {
+        cur_en = 0; // not visible beyond left edge
+    }
+
+    if src_y_offset >= param.viewport.height {
+        cur_en = 0; // not visible beyond bottom edge
+    }
+
+    if src_y_offset + cursor_height <= 0 {
+        cur_en = 0; // not visible beyond top edge
+    }
+
+    if dpp.base.pos_cur0_enable != cur_en {
+        let c = dpp.rsm();
+        reg_update!(adev, c, CURSOR0_CONTROL, CUR0_ENABLE, cur_en);
+
+        dpp.base.pos_cur0_enable = cur_en;
+    }
+}
+
+/// `dpp1_cnv_set_optional_cursor_attributes` (dcn10_dpp.c).
+pub fn dpp1_cnv_set_optional_cursor_attributes(adev: &amdgpu_device, dpp: &dcn20_dpp,
+                                               attr: &crate::dc_hw_types::dpp_cursor_attributes) {
+    let c = dpp.rsm();
+    reg_update!(adev, c, CURSOR0_FP_SCALE_BIAS, CUR0_FP_BIAS, attr.bias as u32);
+    reg_update!(adev, c, CURSOR0_FP_SCALE_BIAS, CUR0_FP_SCALE, attr.scale as u32);
 }

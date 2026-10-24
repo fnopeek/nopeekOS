@@ -64,6 +64,12 @@ pub struct hw_sequencer_funcs {
     pub program_triplebuffer: Option<fn(&amdgpu_device, &dc, &crate::dc_state::pipe_ctx, bool)>,
     pub set_pipe: Option<fn(&amdgpu_device, &mut dc, &crate::dc_state::pipe_ctx)>,
     pub update_visual_confirm_color: Option<fn(&amdgpu_device, &mut dc, &crate::dc_state::pipe_ctx, i32)>,
+    pub cursor_lock: Option<fn(&amdgpu_device, &mut dc, &dc_state, usize, bool)>,
+    pub set_cursor_attribute: Option<fn(&amdgpu_device, &mut dc, &dc_state, usize)>,
+    pub set_cursor_position: Option<fn(&amdgpu_device, &mut dc, &dc_state, usize)>,
+    pub set_cursor_sdr_white_level: Option<fn(&amdgpu_device, &mut dc, &dc_state, usize)>,
+    pub calc_vupdate_position: Option<fn(&dc, &dc_state, usize, &mut u32, &mut u32)>,
+    pub get_position: Option<fn(&amdgpu_device, &dc, &dc_state, &[usize], &mut crate::dc_hw_types::crtc_position)>,
 }
 
 /// `dcn21_funcs` (dcn21_init.c), as far as ported.
@@ -106,6 +112,12 @@ const DCN21_FUNCS: hw_sequencer_funcs = hw_sequencer_funcs {
     program_triplebuffer: Some(crate::dcn20_hwseq::dcn20_program_triple_buffer),
     set_pipe: Some(crate::dcn21_hwseq::dcn21_set_pipe),
     update_visual_confirm_color: Some(crate::dcn10_hwseq::dcn10_update_visual_confirm_color),
+    cursor_lock: Some(crate::dcn10_hwseq::dcn10_cursor_lock),
+    set_cursor_attribute: Some(crate::dcn10_hwseq::dcn10_set_cursor_attribute),
+    set_cursor_position: Some(crate::dcn10_hwseq::dcn10_set_cursor_position),
+    set_cursor_sdr_white_level: Some(crate::dcn10_hwseq::dcn10_set_cursor_sdr_white_level),
+    calc_vupdate_position: Some(crate::dcn10_hwseq::dcn10_calc_vupdate_position),
+    get_position: Some(crate::dcn10_hwseq::dcn10_get_position),
 };
 
 /// `struct hwseq_private_funcs` (hw_sequencer_private.h), the members whose

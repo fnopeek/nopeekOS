@@ -54,6 +54,9 @@ pub struct hubp_ops {
     pub hubp_init: Option<fn(&amdgpu_device, &mut dcn21_hubp)>,
     pub hubp_set_flip_int: Option<fn(&amdgpu_device, &dcn21_hubp)>,
     pub hubp_enable_tripleBuffer: Option<fn(&amdgpu_device, &dcn21_hubp, bool)>,
+    pub set_cursor_attributes: Option<fn(&amdgpu_device, &mut dcn21_hubp, &crate::dc_hw_types::dc_cursor_attributes)>,
+    pub set_cursor_position: Option<fn(&amdgpu_device, &mut dcn21_hubp, &crate::dc_hw_types::dc_cursor_position,
+                                       &crate::dc_hw_types::dc_cursor_mi_param)>,
 }
 
 /// `dcn21_hubp_funcs` (dcn21_hubp.c), as far as ported. `hubp_disconnect`
@@ -74,6 +77,8 @@ const DCN21_HUBP_FUNCS: hubp_ops = hubp_ops {
     hubp_init: Some(hubp21_init),
     hubp_set_flip_int: Some(hubp1_set_flip_int),
     hubp_enable_tripleBuffer: Some(hubp2_enable_triplebuffer),
+    set_cursor_attributes: Some(hubp2_cursor_set_attributes),
+    set_cursor_position: Some(hubp1_cursor_set_position),
 };
 
 impl hubp_funcs {
@@ -95,6 +100,31 @@ pub struct hubp {
     pub mpcc_id: i32,
     pub power_gated: bool,
     pub request_address: crate::dc_hw_types::dc_plane_address,
+    pub curs_attr: crate::dc_hw_types::dc_cursor_attributes,
+    pub curs_pos: crate::dc_hw_types::dc_cursor_position,
+    /// `att`: the cursor attributes as programmed, for the DMUB's cursor
+    /// updates.
+    pub att: cursor_attribute_cache_hubp,
+    /// `cur_rect`: the cursor size.
+    pub cur_rect: rect,
+}
+
+/// `struct cursor_attribute_cache_hubp` (hw_shared.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct cursor_attribute_cache_hubp {
+    pub SURFACE_ADDR_HIGH: u32,
+    pub SURFACE_ADDR: u32,
+    /// `size.bits`.
+    pub width: u32,
+    pub height: u32,
+    /// `cur_ctl.bits`.
+    pub mode: u32,
+    pub pitch: u32,
+    pub line_per_chunk: u32,
+    pub cur_2x_magnify: u32,
+    /// `settings.bits`.
+    pub dst_y_offset: u32,
+    pub chunk_hdl_adjust: u32,
 }
 
 /// `struct dcn21_hubp` (dcn21_hubp.h): the concrete HUBP. `state`,
@@ -118,9 +148,11 @@ impl dcn21_hubp {
     }
 }
 
-/// `hubp_reset` (dcn10_hubp.c): clear the cursor position and attributes,
-/// which the port does not carry yet.
-pub fn hubp_reset(_hubp: &mut dcn21_hubp) {}
+/// `hubp_reset` (dcn10_hubp.c): clear the cursor caches. The position cache
+/// is DCN 2.0's `hubp2_cursor_set_position`'s; DCN 2.1 does not fill it.
+pub fn hubp_reset(hubp: &mut dcn21_hubp) {
+    hubp.base.att = Default::default();
+}
 
 /// `hubp1_clk_cntl` (dcn10_hubp.c).
 pub fn hubp1_clk_cntl(adev: &amdgpu_device, hubp1: &dcn21_hubp, enable: bool) {
@@ -2191,4 +2223,180 @@ pub fn hubp2_enable_triplebuffer(adev: &amdgpu_device, hubp2: &dcn21_hubp, enabl
         reg_update!(adev, hubp2.rsm(), DCSURF_FLIP_CONTROL2, SURFACE_TRIPLE_BUFFER_ENABLE,
             if enable { DC_TRIPLEBUFFER_ENABLE } else { DC_TRIPLEBUFFER_DISABLE });
     }
+}
+
+/// `hubp1_get_cursor_pitch` (dcn10_hubp.c).
+pub fn hubp1_get_cursor_pitch(pitch: u32) -> u32 {
+    match pitch {
+        64 => CURSOR_PITCH_64_PIXELS,
+        128 => CURSOR_PITCH_128_PIXELS,
+        256 => CURSOR_PITCH_256_PIXELS,
+        _ => {
+            crate::linux::Line::new().s("Invalid cursor pitch of ").dec(pitch as u64)
+                .s(". Only 64/128/256 is supported on DCN.").say();
+            CURSOR_PITCH_64_PIXELS
+        }
+    }
+}
+
+/// `hubp2_get_lines_per_chunk` (dcn20_hubp.c).
+pub fn hubp2_get_lines_per_chunk(cursor_width: u32, cursor_mode: u32) -> u32 {
+    let mut line_per_chunk = CURSOR_LINE_PER_CHUNK_16;
+
+    if cursor_mode == CURSOR_MODE_MONO {
+        line_per_chunk = CURSOR_LINE_PER_CHUNK_16;
+    } else if cursor_mode == CURSOR_MODE_COLOR_1BIT_AND || cursor_mode == CURSOR_MODE_COLOR_PRE_MULTIPLIED_ALPHA
+        || cursor_mode == CURSOR_MODE_COLOR_UN_PRE_MULTIPLIED_ALPHA
+    {
+        if (1..=32).contains(&cursor_width) {
+            line_per_chunk = CURSOR_LINE_PER_CHUNK_16;
+        } else if (33..=64).contains(&cursor_width) {
+            line_per_chunk = CURSOR_LINE_PER_CHUNK_8;
+        } else if (65..=128).contains(&cursor_width) {
+            line_per_chunk = CURSOR_LINE_PER_CHUNK_4;
+        } else if (129..=256).contains(&cursor_width) {
+            line_per_chunk = CURSOR_LINE_PER_CHUNK_2;
+        }
+    } else if cursor_mode == CURSOR_MODE_COLOR_64BIT_FP_PRE_MULTIPLIED
+        || cursor_mode == CURSOR_MODE_COLOR_64BIT_FP_UN_PRE_MULTIPLIED
+    {
+        if (1..=16).contains(&cursor_width) {
+            line_per_chunk = CURSOR_LINE_PER_CHUNK_16;
+        } else if (17..=32).contains(&cursor_width) {
+            line_per_chunk = CURSOR_LINE_PER_CHUNK_8;
+        } else if (33..=64).contains(&cursor_width) {
+            line_per_chunk = CURSOR_LINE_PER_CHUNK_4;
+        } else if (65..=128).contains(&cursor_width) {
+            line_per_chunk = CURSOR_LINE_PER_CHUNK_2;
+        } else if (129..=256).contains(&cursor_width) {
+            line_per_chunk = CURSOR_LINE_PER_CHUNK_1;
+        }
+    }
+
+    line_per_chunk
+}
+
+/// `hubp2_cursor_set_attributes` (dcn20_hubp.c).
+pub fn hubp2_cursor_set_attributes(adev: &amdgpu_device, hubp2: &mut dcn21_hubp,
+                                   attr: &crate::dc_hw_types::dc_cursor_attributes) {
+    let hw_pitch = hubp1_get_cursor_pitch(attr.pitch);
+    let lpc = hubp2_get_lines_per_chunk(attr.width, attr.color_format);
+    let magnify = attr.attribute_flags & crate::dc_hw_types::DC_CURSOR_ENABLE_MAGNIFICATION;
+
+    hubp2.base.curs_attr = *attr;
+
+    let c = hubp2.rsm();
+    reg_update!(adev, c, CURSOR_SURFACE_ADDRESS_HIGH, CURSOR_SURFACE_ADDRESS_HIGH, (attr.address >> 32) as u32);
+    reg_update!(adev, c, CURSOR_SURFACE_ADDRESS, CURSOR_SURFACE_ADDRESS, attr.address as u32);
+
+    reg_update!(adev, c, CURSOR_SIZE, CURSOR_WIDTH, attr.width, CURSOR_HEIGHT, attr.height);
+
+    reg_update!(adev, c, CURSOR_CONTROL, CURSOR_MODE, attr.color_format, CURSOR_2X_MAGNIFY, magnify,
+                CURSOR_PITCH, hw_pitch, CURSOR_LINES_PER_CHUNK, lpc);
+
+    // no shift of the cursor HDL schedule; used to shift the cursor chunk
+    // request deadline
+    reg_set!(adev, c, CURSOR_SETTINGS, 0, CURSOR0_DST_Y_OFFSET, 0, CURSOR0_CHUNK_HDL_ADJUST, 3);
+
+    let att = &mut hubp2.base.att;
+    att.SURFACE_ADDR_HIGH = (attr.address >> 32) as u32;
+    att.SURFACE_ADDR = attr.address as u32;
+    att.width = attr.width;
+    att.height = attr.height;
+    att.mode = attr.color_format;
+
+    hubp2.base.cur_rect.width = attr.width as i32;
+    hubp2.base.cur_rect.height = attr.height as i32;
+
+    let att = &mut hubp2.base.att;
+    att.pitch = hw_pitch;
+    att.line_per_chunk = lpc;
+    att.cur_2x_magnify = magnify;
+    att.dst_y_offset = 0;
+    att.chunk_hdl_adjust = 3;
+}
+
+/// `hubp1_cursor_set_position` (dcn10_hubp.c).
+pub fn hubp1_cursor_set_position(adev: &amdgpu_device, hubp1: &mut dcn21_hubp,
+                                 pos: &crate::dc_hw_types::dc_cursor_position,
+                                 param: &crate::dc_hw_types::dc_cursor_mi_param) {
+    use crate::fixpt31_32::*;
+    let x_pos = (pos.x as i32).wrapping_sub(param.viewport.x);
+    let y_pos = (pos.y as i32).wrapping_sub(param.viewport.y);
+    let mut x_hotspot = pos.x_hotspot as i32;
+    let mut y_hotspot = pos.y_hotspot as i32;
+    let mut src_x_offset = x_pos.wrapping_sub(pos.x_hotspot as i32);
+    let mut src_y_offset = y_pos.wrapping_sub(pos.y_hotspot as i32);
+    let mut cursor_height = hubp1.base.curs_attr.height as i32;
+    let mut cursor_width = hubp1.base.curs_attr.width as i32;
+    let mut cur_en = pos.enable as u32;
+
+    hubp1.base.curs_pos = *pos;
+
+    // Guard aganst cursor_set_position() from being called with invalid
+    // attributes
+    if hubp1.base.curs_attr.address == 0 {
+        return;
+    }
+
+    // Transform cursor width / height and hotspots for offset calculations
+    if param.rotation == ROTATION_ANGLE_90 || param.rotation == ROTATION_ANGLE_270 {
+        core::mem::swap(&mut cursor_height, &mut cursor_width);
+        core::mem::swap(&mut x_hotspot, &mut y_hotspot);
+
+        if param.rotation == ROTATION_ANGLE_90 {
+            // hotspot = (-y, x)
+            src_x_offset = x_pos - (cursor_width - x_hotspot);
+            src_y_offset = y_pos - y_hotspot;
+        } else if param.rotation == ROTATION_ANGLE_270 {
+            // hotspot = (y, -x)
+            src_x_offset = x_pos - x_hotspot;
+            src_y_offset = y_pos - (cursor_height - y_hotspot);
+        }
+    } else if param.rotation == ROTATION_ANGLE_180 {
+        // hotspot = (-x, -y)
+        if !param.mirror {
+            src_x_offset = x_pos - (cursor_width - x_hotspot);
+        }
+
+        src_y_offset = y_pos - (cursor_height - y_hotspot);
+    }
+
+    let mut dst_x_offset: u32 = if src_x_offset >= 0 { src_x_offset as u32 } else { 0 };
+    dst_x_offset = dst_x_offset.wrapping_mul(param.ref_clk_khz);
+    dst_x_offset /= param.pixel_clk_khz;
+
+    if param.h_scale_ratio.value != 0 {
+        dst_x_offset = dc_fixpt_floor(dc_fixpt_div(dc_fixpt_from_int(dst_x_offset as i32), param.h_scale_ratio)) as u32;
+    }
+
+    if src_x_offset >= param.viewport.width {
+        cur_en = 0; // not visible beyond right edge
+    }
+
+    if src_x_offset + cursor_width <= 0 {
+        cur_en = 0; // not visible beyond left edge
+    }
+
+    if src_y_offset >= param.viewport.height {
+        cur_en = 0; // not visible beyond bottom edge
+    }
+
+    if src_y_offset + cursor_height <= 0 {
+        cur_en = 0; // not visible beyond top edge
+    }
+
+    if cur_en != 0 && reg_read!(adev, hubp1.rsm().0, CURSOR_SURFACE_ADDRESS) == 0 {
+        let attr = hubp1.base.curs_attr;
+        (hubp1.funcs().set_cursor_attributes.unwrap())(adev, hubp1, &attr);
+    }
+
+    let c = hubp1.rsm();
+    reg_update!(adev, c, CURSOR_CONTROL, CURSOR_ENABLE, cur_en);
+
+    reg_set!(adev, c, CURSOR_POSITION, 0, CURSOR_X_POSITION, pos.x, CURSOR_Y_POSITION, pos.y);
+
+    reg_set!(adev, c, CURSOR_HOT_SPOT, 0, CURSOR_HOT_SPOT_X, pos.x_hotspot, CURSOR_HOT_SPOT_Y, pos.y_hotspot);
+
+    reg_set!(adev, c, CURSOR_DST_OFFSET, 0, CURSOR_DST_X_OFFSET, dst_x_offset);
 }

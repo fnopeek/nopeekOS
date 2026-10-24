@@ -1598,7 +1598,7 @@ pub fn dcn20_update_dchubp_dpp(adev: &amdgpu_device, dc: &mut dc, context: &mut 
     let timing = stream.timing;
     let output_color_space = stream.output_color_space;
     let csc_matrix = stream.csc_color_matrix.matrix;
-    let cursor_address = stream.cursor_attributes_address;
+    let cursor_address = stream.cursor_attributes.address;
     let flags = pipe_ctx.update_flags;
     let pflags = plane_state.update_flags;
     let debug = dc.debug;

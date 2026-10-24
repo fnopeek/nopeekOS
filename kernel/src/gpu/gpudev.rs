@@ -72,6 +72,14 @@ pub const OP_BLOB_RELEASE: u32 = 9;
 /// resource id, `a4` 1 = attach, 0 = detach: another context's resource
 /// (`amdgpu_renderer_attach_resource`, the same object imported).
 pub const OP_ATTACH: u32 = 10;
+/// `a0` width, `a1` height, `a2` hotspot x, `a3` hotspot y; the payload is
+/// the cursor image, premultiplied ARGB8888, row-major.
+pub const OP_CURSOR_IMAGE: u32 = 11;
+/// `a0` x, `a1` y (two's complement), `a2` 1 = shown, 0 = hidden: where the
+/// pointer is on the screen.
+pub const OP_CURSOR_MOVE: u32 = 12;
+/// Largest cursor image side (`OP_CURSOR_IMAGE`).
+pub const MAX_CURSOR: u32 = 256;
 /// What an `OP_BLOB` reply names: pages from `npk_gpudev_tt_alloc`, or
 /// ranges of the card's VRAM aperture (BAR0).
 const BLOB_TT: u32 = 0;
@@ -92,6 +100,8 @@ pub const BO_INFO_BYTES: usize = 40;
 pub const CAP_COPY: i32 = 1;
 pub const CAP_SCENE: i32 = 2;
 pub const CAP_NATIVE: i32 = 4;
+/// The module shows the pointer on the display's hardware cursor.
+pub const CAP_CURSOR: i32 = 8;
 const FIXED_BOS: u32 = 3;
 const JOB_TIMEOUT_MS: u64 = 100;
 /// Binding a new buffer is a page walk per 4 KB page in the module, once.
@@ -276,6 +286,8 @@ static READY: AtomicBool = AtomicBool::new(false);
 static SCENES: AtomicBool = AtomicBool::new(false);
 /// It also serves guest native contexts (`CAP_NATIVE`).
 static NATIVE: AtomicBool = AtomicBool::new(false);
+/// It also shows the hardware cursor (`CAP_CURSOR`).
+static CURSOR: AtomicBool = AtomicBool::new(false);
 static NEXT_SEQ: AtomicU32 = AtomicU32::new(1);
 /// Every job up to this sequence number is completed. Jobs that touch a
 /// buffer complete in order; a job without buffers (a guest's ccmd waiting
@@ -555,8 +567,10 @@ pub fn ready(dev: PciAddr, caps: i32) -> i32 {
     READY.store(true, Ordering::Release);
     SCENES.store(caps & CAP_SCENE != 0, Ordering::Release);
     NATIVE.store(caps & CAP_NATIVE != 0, Ordering::Release);
-    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}",
+    CURSOR.store(caps & CAP_CURSOR != 0, Ordering::Release);
+    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}{}",
         if caps & CAP_SCENE != 0 { ", scenes offered" } else { "" },
+        if caps & CAP_CURSOR != 0 { ", hardware cursor" } else { "" },
         if caps & CAP_NATIVE == 0 { "" }
         else if crate::drivers::iommu::protected(dev) { ", native contexts for guests" }
         else { ", native contexts need the IOMMU (set gpu_iommu on)" });
@@ -728,6 +742,7 @@ pub fn module_gone(dev: PciAddr) {
     SCENES.store(false, Ordering::Release);
     crate::audio::display_audio_clear();
     NATIVE.store(false, Ordering::Release);
+    CURSOR.store(false, Ordering::Release);
     RINGS.lock().clear();
     WAKER.store(NO_WAKER, Ordering::Release);
     wake_waiters();
@@ -1260,6 +1275,55 @@ pub fn submit_scene(target: u32, payload: Vec<u8>, sources: &[u32]) -> Option<u3
     };
     wake_module();
     Some(seq)
+}
+
+/// Whether the module shows the pointer with the hardware cursor.
+pub fn cursor_supported() -> bool {
+    READY.load(Ordering::Acquire) && CURSOR.load(Ordering::Acquire)
+}
+
+/// Hand the module the cursor image: `pixels` premultiplied ARGB8888,
+/// `width` x `height`, hotspot at `hot_x`, `hot_y`. Nothing waits for it.
+pub fn cursor_image(width: u32, height: u32, hot_x: u32, hot_y: u32, pixels: Vec<u8>) -> bool {
+    if !cursor_supported() || width == 0 || height == 0 || width > MAX_CURSOR || height > MAX_CURSOR
+        || pixels.len() != (width * height * 4) as usize
+    {
+        return false;
+    }
+    {
+        let mut st = STATE.lock();
+        if st.owner.is_none() {
+            return false;
+        }
+        queue_job(&mut st, OP_CURSOR_IMAGE, [width, height, hot_x, hot_y, 0, 0], Some(pixels), &[]);
+    }
+    wake_module();
+    true
+}
+
+/// Tell the module where the pointer is. A move the module has not taken
+/// yet is replaced, so moves never pile up behind a busy module.
+pub fn cursor_move(x: i32, y: i32, shown: bool) -> bool {
+    if !cursor_supported() {
+        return false;
+    }
+    {
+        let mut st = STATE.lock();
+        if st.owner.is_none() {
+            return false;
+        }
+        let a = [x as u32, y as u32, shown as u32, 0, 0, 0];
+        // Only the last cursor job may take the new position: one behind an
+        // image keeps the order of image and move.
+        match st.queue.iter_mut().rev().find(|j| j.op == OP_CURSOR_MOVE || j.op == OP_CURSOR_IMAGE) {
+            Some(j) if j.op == OP_CURSOR_MOVE => j.a = a,
+            _ => {
+                queue_job(&mut st, OP_CURSOR_MOVE, a, None, &[]);
+            }
+        }
+    }
+    wake_module();
+    true
 }
 
 /// Wait for scene job `seq`: 0 when the module composed it, else why not.

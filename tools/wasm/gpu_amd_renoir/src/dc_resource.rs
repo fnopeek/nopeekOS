@@ -1866,3 +1866,69 @@ pub fn resource_pixel_format_to_bpp(format: u32) -> u32 {
         _ => u32::MAX,
     }
 }
+
+/// `reverse_adjust_recout_for_visual_confirm`.
+fn reverse_adjust_recout_for_visual_confirm(recout: &mut rect, dc: &crate::dc::dc, pipe: &pipe_ctx) {
+    let stream = dc.streams[pipe.stream.unwrap()].as_deref().unwrap();
+    let (base_offset, dpp_offset) =
+        calculate_adjust_recout_for_visual_confirm(&dc.debug, dc.res_pool.as_deref().unwrap(), pipe, stream);
+    recout.height += base_offset;
+    recout.height += dpp_offset;
+}
+
+/// `resource_can_pipe_disable_cursor`: whether a pipe above this one shows
+/// a plane that contains this pipe's viewport, so its cursor would show
+/// twice or be scaled wrongly.
+pub fn resource_can_pipe_disable_cursor(dc: &crate::dc::dc, context: &crate::dc_state::dc_state, p: usize) -> bool {
+    let res = &context.res_ctx;
+    let pipe_ctx = &res.pipe_ctx[p];
+    let plane = |q: &pipe_ctx| dc.planes[q.plane_state.unwrap()].as_deref().unwrap();
+    let mut r1 = pipe_ctx.plane_res.scl_data.recout;
+    let cur_layer = plane(pipe_ctx).layer_index;
+
+    reverse_adjust_recout_for_visual_confirm(&mut r1, dc, pipe_ctx);
+    let r1_right = r1.x + r1.width;
+    let r1_bottom = r1.y + r1.height;
+
+    // Disable the cursor if there's another pipe above this with a plane
+    // that contains this pipe's viewport to prevent double cursor and
+    // incorrect scaling artifacts.
+    let mut test_pipe = pipe_ctx.top_pipe;
+    while let Some(t) = test_pipe {
+        let tp = &res.pipe_ctx[t];
+        // Skip invisible layer and pipe-split plane on same layer
+        if tp.plane_state.is_none() || !plane(tp).visible || plane(tp).layer_index == cur_layer {
+            test_pipe = tp.top_pipe;
+            continue;
+        }
+
+        let mut r2 = tp.plane_res.scl_data.recout;
+        reverse_adjust_recout_for_visual_confirm(&mut r2, dc, tp);
+        let mut r2_right = r2.x + r2.width;
+        let mut r2_bottom = r2.y + r2.height;
+
+        // There is another half plane on same layer because of pipe-split,
+        // merge together per same height.
+        let mut split_pipe = pipe_ctx.top_pipe;
+        while let Some(sp) = split_pipe {
+            let spp = &res.pipe_ctx[sp];
+            if plane(spp).layer_index == plane(tp).layer_index {
+                let mut r2_half = spp.plane_res.scl_data.recout;
+                reverse_adjust_recout_for_visual_confirm(&mut r2_half, dc, spp);
+                r2.x = r2_half.x.min(r2.x);
+                r2.width += r2_half.width;
+                r2_right = r2.x + r2.width;
+                r2_bottom = r2_bottom.min(r2_half.y + r2_half.height);
+                break;
+            }
+            split_pipe = spp.top_pipe;
+        }
+
+        if r1.x >= r2.x && r1.y >= r2.y && r1_right <= r2_right && r1_bottom <= r2_bottom {
+            return true;
+        }
+        test_pipe = tp.top_pipe;
+    }
+
+    false
+}

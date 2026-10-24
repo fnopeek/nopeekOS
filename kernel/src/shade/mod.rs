@@ -495,6 +495,11 @@ fn render_frame_mode(cursor_only: bool) {
 /// position in the front buffer is clean scene again (cursor restored +
 /// re-baked at the new spot), so this both erases the old and draws the new.
 fn blit_cursor_bbox(fb: &framebuffer::FbConsole, old: (i32, i32), had_old: bool) {
+    // The hardware cursor is not in the buffer: unless a baked one was just
+    // erased, the box shows what it did.
+    if cursor::hw_active() && !cursor::save_valid() && !had_old {
+        return;
+    }
     let (cw, ch) = cursor::cursor_size();
     let (cx, cy) = cursor::atomic_pos();
     let (x0, y0, x1, y1) = if had_old {

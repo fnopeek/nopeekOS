@@ -133,10 +133,8 @@ pub struct dc_stream_state {
     pub scaler_sharpener_update: bool,
     pub sharpening_required: bool,
     pub is_phantom: bool,
-    /// `cursor_attributes.address.quad_part`.
-    pub cursor_attributes_address: u64,
-    /// `cursor_position.enable`.
-    pub cursor_position_enable: bool,
+    pub cursor_attributes: crate::dc_hw_types::dc_cursor_attributes,
+    pub cursor_position: crate::dc_hw_types::dc_cursor_position,
     /// `test_pattern.type` (enum dp_test_pattern).
     pub test_pattern_type: u32,
     /// `out.otg_offset`.
@@ -382,8 +380,13 @@ fn dc_stream_construct(dc: &mut dc, li: usize, dc_sink_data: &dc_sink) -> dc_str
         scaler_sharpener_update: false,
         sharpening_required: false,
         is_phantom: false,
-        cursor_attributes_address: 0,
-        cursor_position_enable: false,
+        cursor_attributes: crate::dc_hw_types::dc_cursor_attributes {
+            address: 0, pitch: 0, width: 0, height: 0, color_format: 0, sdr_white_level: 0, rotation_angle: 0,
+            attribute_flags: 0,
+        },
+        cursor_position: crate::dc_hw_types::dc_cursor_position {
+            x: 0, y: 0, x_hotspot: 0, y_hotspot: 0, enable: false, translate_by_source: false,
+        },
         test_pattern_type: 0,
         out_otg_offset: 0,
         refcount: 0,

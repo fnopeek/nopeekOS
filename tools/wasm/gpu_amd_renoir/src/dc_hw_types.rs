@@ -247,3 +247,66 @@ pub struct scaler_data {
     pub format: u32,
     pub lb_params: line_buffer_params,
 }
+
+/// `struct dc_cursor_attributes` (dc_hw_types.h). `attribute_flags` is
+/// `union dc_cursor_attribute_flags`'s value.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct dc_cursor_attributes {
+    /// `address.quad_part`.
+    pub address: u64,
+    pub pitch: u32,
+    pub width: u32,
+    pub height: u32,
+    /// `enum dc_cursor_color_format`.
+    pub color_format: u32,
+    pub sdr_white_level: u32,
+    /// `enum dc_rotation_angle`.
+    pub rotation_angle: u32,
+    pub attribute_flags: u32,
+}
+
+/// `union dc_cursor_attribute_flags` bits.
+pub const DC_CURSOR_ENABLE_MAGNIFICATION: u32 = 1 << 0;
+pub const DC_CURSOR_ENABLE_CURSOR_DEGAMMA: u32 = 1 << 7;
+
+/// `struct dc_cursor_position` (dc_hw_types.h).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct dc_cursor_position {
+    pub x: u32,
+    pub y: u32,
+    pub x_hotspot: u32,
+    pub y_hotspot: u32,
+    pub enable: bool,
+    /// Translate cursor x/y by the source rectangle for each plane.
+    pub translate_by_source: bool,
+}
+
+/// `struct dc_cursor_mi_param` (dc_hw_types.h), `stream` by index.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct dc_cursor_mi_param {
+    pub pixel_clk_khz: u32,
+    pub ref_clk_khz: u32,
+    pub viewport: rect,
+    pub recout: rect,
+    pub h_scale_ratio: fixed31_32,
+    pub v_scale_ratio: fixed31_32,
+    /// `enum dc_rotation_angle`.
+    pub rotation: u32,
+    pub mirror: bool,
+    pub stream: usize,
+}
+
+/// `struct dpp_cursor_attributes` (dc_hw_types.h).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct dpp_cursor_attributes {
+    pub bias: i32,
+    pub scale: i32,
+}
+
+/// `struct crtc_position` (inc/hw/timing_generator.h).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct crtc_position {
+    pub vertical_count: u32,
+    pub horizontal_count: u32,
+    pub nominal_vcount: u32,
+}

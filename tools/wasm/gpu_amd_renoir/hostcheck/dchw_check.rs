@@ -607,6 +607,21 @@ fn main() {
             dc::dc_interrupt_ack(&adev, &dc, DC_IRQ_SOURCE_HPD1);
             println!("dc_interrupt_set {}", dc::dc_interrupt_set(&adev, &dc, DC_IRQ_SOURCE_VUPDATE1, false) as i32);
             println!("dc_interrupt_set {}", dc::dc_interrupt_set(&adev, &dc, DC_IRQ_SOURCE_GPIOPAD0, true) as i32);
+            // The cursor, as in the oracle.
+            let ca = dc_hw_types::dc_cursor_attributes {
+                address: 0xf4_0000_0000 + 0x400_0000, width: 64, height: 64,
+                color_format: CURSOR_MODE_COLOR_PRE_MULTIPLIED_ALPHA, pitch: 64, ..Default::default()
+            };
+            println!("dc_stream_program_cursor_attributes {}",
+                dc::dc_stream_program_cursor_attributes(&adev, &mut dc, stream, &ca) as i32);
+            for (i, (x, y)) in [(100i32, 200i32), (1900, 1070), (-10, -5), (0, 0)].into_iter().enumerate() {
+                let cp = dc_hw_types::dc_cursor_position {
+                    enable: i < 3, translate_by_source: true, x: x.max(0) as u32, y: y.max(0) as u32,
+                    x_hotspot: if x < 0 { -x as u32 } else { 0 }, y_hotspot: if y < 0 { -y as u32 } else { 0 },
+                };
+                println!("dc_stream_program_cursor_position {}",
+                    dc::dc_stream_program_cursor_position(&adev, &mut dc, stream, &cp) as i32);
+            }
         }
     }
     npk_sys::fake_card_echo(false);
