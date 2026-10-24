@@ -202,8 +202,9 @@ shared host-ABI crate (`npk_sys`): both GPU drivers, Intel HDA audio
 (including sound to a DisplayPort monitor), an I2C-HID touchpad, an AML
 interpreter driving firmware `_BST`/`_BIF` for a vendor-independent
 battery %, and WiFi for Intel AX200 and Realtek RTL8822CE. Hardware
-drivers are ported 1:1 from Linux — function by function, checked
-against Linux's own code on binaries read off the device.
+drivers are ported from Linux and kept as close to the original as
+possible, with Linux as the reference; where it can be done, a port is
+checked against Linux's own code on data read off the device.
 
 **GPU** — the kernel drives no GPU itself any more. It boots on GOP and
 the CPU; a GPU module that comes up registers as the `gpudev` service,
@@ -212,13 +213,13 @@ compute shaders, compiled at build time. `gpu_intel_tgl` is i915 for
 Tiger Lake (display readout and takeover, all engines with execlists,
 preemption, DP audio). `gpu_amd_renoir` is amdgpu for Renoir/Lucienne
 (PSP firmware load, SMU, GFX, SDMA, VCN 2.2 + JPEG 2.0 video, GPU
-recovery); its display core (DC, DCN 2.1) is being ported 1:1 and runs
+recovery); its display core (DC, DCN 2.1) is being ported and runs
 dormant until it is complete. On both, a microVM guest's Mesa reaches
 the card through a **virtio-gpu native context** — the guest gets real
 3D and hardware video decode, the module checks every command.
 
-**WiFi** — iwlwifi (AX200) and rtw88 (RTL8822CE) ported function by
-function: firmware load, scan, roaming, a WPA2 four-way handshake in a
+**WiFi** — iwlwifi (AX200) and rtw88 (RTL8822CE), ported from Linux and
+kept as close to the original as possible: firmware load, scan, roaming, a WPA2 four-way handshake in a
 resident `wifid` supplicant with CCMP replay checks, A-MPDU aggregation,
 fq_codel and AQL, which budgets airtime rather than bytes. `wifid` is
 also the network manager: it picks the best known network, remembers
@@ -373,7 +374,7 @@ drift, this paragraph will.
 | Linux apps | MicroVM (VT-x / AMD-V) | Vendor HAL, mini-Linux + virtio |
 | Guest 3D/video | virtio-gpu native context | Guest Mesa on the real card, every command checked |
 | Secrets | Keyvault, two tiers | A secret is not a file |
-| Hardware drivers | Ported 1:1 from Linux | Linux is the reference truth |
+| Hardware drivers | Ported from Linux, as close as possible | Linux is the reference |
 
 ---
 
