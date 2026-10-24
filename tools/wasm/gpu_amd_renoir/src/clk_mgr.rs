@@ -129,8 +129,10 @@ pub enum clk_mgr_funcs_id {
 /// `struct clk_mgr_funcs` (clk_mgr.h), the members ported.
 #[derive(Default, Clone, Copy)]
 pub struct clk_mgr_ops {
+    pub update_clocks: Option<fn(&amdgpu_device, &mut dc, &mut clk_mgr_internal, &mut crate::dc_state::dc_state, bool)>,
     pub init_clocks: Option<fn(&mut clk_mgr_internal)>,
     pub notify_wm_ranges: Option<fn(&amdgpu_device, &dc, &mut clk_mgr_internal)>,
+    pub notify_link_rate_change: Option<fn(&amdgpu_device, &mut dc, &mut clk_mgr_internal, usize)>,
 }
 
 impl clk_mgr_funcs_id {
@@ -143,6 +145,8 @@ impl clk_mgr_funcs_id {
 
 /// `enum dcn_pwr_state` (dc.h).
 pub const DCN_PWR_STATE_UNKNOWN: i32 = -1;
+pub const DCN_PWR_STATE_MISSION_MODE: i32 = 0;
+pub const DCN_PWR_STATE_LOW_POWER: i32 = 3;
 
 /// `struct dc_clocks` (dc.h). `zstate_support` is `enum
 /// dcn_zstate_support_state`, `dtm_level` `enum dtm_pstate`.
@@ -226,6 +230,7 @@ pub struct clk_mgr_internal {
     pub smu_present: bool,
     pub dpm_present: bool,
     pub pme_trigger_pending: bool,
+    pub cur_phyclk_req_table: [u32; crate::regs::LF_MAX_LINKS as usize],
 }
 
 /// `dce_clock_read_ss_info` (dce_clk_mgr.c).
@@ -275,4 +280,53 @@ pub fn dc_clk_mgr_create(adev: &amdgpu_device, dc: &mut dc) -> Option<Box<clk_mg
     let mut clk_mgr = Box::new(clk_mgr_internal::default());
     rn_clk_mgr_construct(adev, dc, &mut clk_mgr);
     Some(clk_mgr)
+}
+
+/// Run `update_clocks` with dc's clock manager taken out of `dc` for the
+/// call (Linux passes `dc->clk_mgr` beside `dc`).
+pub fn clk_mgr_update_clocks(adev: &amdgpu_device, dc: &mut dc, context: &mut crate::dc_state::dc_state,
+                             safe_to_lower: bool) {
+    let mut clk_mgr = dc.clk_mgr.take().unwrap();
+    (clk_mgr.funcs().update_clocks.unwrap())(adev, dc, &mut clk_mgr, context, safe_to_lower);
+    dc.clk_mgr = Some(clk_mgr);
+}
+
+/// Run a hw sequencer step on dc's current state, taken out of `dc` for
+/// the call.
+fn on_current_state(adev: &amdgpu_device, dc: &mut dc,
+                    f: fn(&amdgpu_device, &mut dc, &mut crate::dc_state::dc_state)) {
+    let mut state = dc.current_state.take().unwrap();
+    f(adev, dc, &mut state);
+    dc.current_state = Some(state);
+}
+
+/// `clk_mgr_exit_optimized_pwr_state` (clk_mgr.c). The eDP links' PSR and
+/// Replay are later stages; `psr_feature_enabled` is never set before.
+pub fn clk_mgr_exit_optimized_pwr_state(adev: &amdgpu_device, dc: &mut dc) {
+    let edp_links = crate::dc::dc_get_edp_links(dc);
+    if let Some(f) = dc.hwss.exit_optimized_pwr_state {
+        on_current_state(adev, dc, f);
+    }
+
+    for li in edp_links {
+        if !dc.links[li].psr_settings.psr_feature_enabled {
+            continue;
+        }
+        crate::linux::Line::new().s("clk_mgr_exit_optimized_pwr_state: edp_set_psr_allow_active not ported").say();
+    }
+}
+
+/// `clk_mgr_optimize_pwr_state` (clk_mgr.c).
+pub fn clk_mgr_optimize_pwr_state(adev: &amdgpu_device, dc: &mut dc) {
+    let edp_links = crate::dc::dc_get_edp_links(dc);
+    for li in edp_links {
+        if !dc.links[li].psr_settings.psr_feature_enabled {
+            continue;
+        }
+        crate::linux::Line::new().s("clk_mgr_optimize_pwr_state: edp_set_psr_allow_active not ported").say();
+    }
+
+    if let Some(f) = dc.hwss.optimize_pwr_state {
+        on_current_state(adev, dc, f);
+    }
 }

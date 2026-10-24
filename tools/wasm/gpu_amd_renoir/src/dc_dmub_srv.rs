@@ -301,3 +301,43 @@ pub fn dc_dmub_srv_notify_fw_dc_power_state(adev: &amdgpu_device, dc: &mut dc, p
 
     dc_wake_and_execute_dmub_cmd(adev, dc, &mut cmd, DM_DMUB_WAIT_TYPE_WAIT);
 }
+
+/// `dc_dmub_execute_gpint` (dc_dmub_srv.c). No caller here asks for the
+/// reply.
+fn dc_dmub_execute_gpint(adev: &amdgpu_device, dc: &dc, command_code: u32, param: u16, wait_type: u32) -> bool {
+    let wait_us = if wait_type == DM_DMUB_WAIT_TYPE_NO_WAIT { 0 } else { 30 };
+
+    let Some(dmub) = dc.ctx.dmub_srv.as_deref().and_then(|s| s.dmub.as_deref()) else { return false };
+
+    let status = dmub_srv_send_gpint_command(adev, dmub, command_code, param, wait_us);
+    if status != DMUB_STATUS_OK {
+        return status == DMUB_STATUS_TIMEOUT && wait_type == DM_DMUB_WAIT_TYPE_NO_WAIT;
+    }
+
+    true
+}
+
+/// `dc_wake_and_execute_gpint` (dc_dmub_srv.c). Idle optimizations are
+/// never allowed on DCN 2.1, so there is nothing to wake.
+pub fn dc_wake_and_execute_gpint(adev: &amdgpu_device, dc: &dc, command_code: u32, param: u16, wait_type: u32) -> bool {
+    let Some(srv) = dc.ctx.dmub_srv.as_deref() else { return false };
+    if srv.dmub.is_none() {
+        return false;
+    }
+
+    if srv.idle_allowed {
+        Line::new().s("dc_wake_and_execute_gpint: dc_dmub_srv_apply_idle_power_optimizations not ported").say();
+    }
+
+    dc_dmub_execute_gpint(adev, dc, command_code, param, wait_type)
+}
+
+/// `dc_dmub_srv_notify_stream_mask` (dc_dmub_srv.c).
+pub fn dc_dmub_srv_notify_stream_mask(adev: &amdgpu_device, dc: &mut dc, stream_mask: u32) -> bool {
+    if dc.ctx.dmub_srv.as_deref().is_none_or(|s| s.dmub.is_none()) {
+        return false;
+    }
+
+    dc_wake_and_execute_gpint(adev, dc, DMUB_GPINT__IDLE_OPT_NOTIFY_STREAM_MASK, stream_mask as u16,
+        DM_DMUB_WAIT_TYPE_WAIT)
+}

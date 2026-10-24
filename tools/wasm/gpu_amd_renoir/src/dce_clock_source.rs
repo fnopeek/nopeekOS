@@ -345,3 +345,168 @@ pub fn dce112_get_pix_clk_dividers(cs: &dce110_clk_src, pix_clk_params: &pixel_c
 
     0
 }
+
+/// `struct clock_source_funcs` (clock_source.h), the members ported. A
+/// clock source lives in the pool, so the members that reach the VBIOS
+/// name it by its pipe reference.
+#[derive(Default, Clone, Copy)]
+pub struct clock_source_ops {
+    pub cs_power_down: Option<fn(&crate::amdgpu_device::amdgpu_device, &mut crate::dc::dc,
+                                 crate::dc_state::clock_source_ref) -> bool>,
+    pub program_pix_clk: Option<fn(&crate::amdgpu_device::amdgpu_device, &mut crate::dc::dc,
+                                   crate::dc_state::clock_source_ref, &pixel_clk_params, u32, &pll_settings) -> bool>,
+    pub get_pixel_clk_frequency_100hz: Option<fn(&crate::amdgpu_device::amdgpu_device, &dce110_clk_src, u32,
+                                                 &mut u32) -> bool>,
+}
+
+/// `dcn20_clk_src_funcs` (dce_clock_source.c), as far as ported.
+const DCN20_CLK_SRC_FUNCS: clock_source_ops = clock_source_ops {
+    cs_power_down: Some(dce110_clock_source_power_down),
+    program_pix_clk: Some(dcn20_program_pix_clk),
+    get_pixel_clk_frequency_100hz: Some(get_pixel_clk_frequency_100hz),
+};
+
+/// `dce112_clk_src_funcs` (dce_clock_source.c), as far as ported.
+const DCE112_CLK_SRC_FUNCS: clock_source_ops = clock_source_ops {
+    cs_power_down: Some(dce110_clock_source_power_down),
+    program_pix_clk: Some(dce112_program_pix_clk),
+    get_pixel_clk_frequency_100hz: Some(get_pixel_clk_frequency_100hz),
+};
+
+impl clock_source_funcs {
+    pub fn ops(self) -> &'static clock_source_ops {
+        match self {
+            clock_source_funcs::dce112_clk_src_funcs => &DCE112_CLK_SRC_FUNCS,
+            clock_source_funcs::dcn20_clk_src_funcs => &DCN20_CLK_SRC_FUNCS,
+        }
+    }
+}
+
+impl dce110_clk_src {
+    /// `clock_source->funcs`.
+    pub fn funcs(&self) -> &'static clock_source_ops {
+        self.base.funcs.expect("clock source funcs").ops()
+    }
+}
+
+/// `dce110_clock_source_power_down` (dce_clock_source.c): a pixel clock of
+/// 0 powers the PLL down. The DP DTO source has no PLL.
+pub fn dce110_clock_source_power_down(adev: &crate::amdgpu_device::amdgpu_device, dc: &mut crate::dc::dc,
+                                      cs: crate::dc_state::clock_source_ref) -> bool {
+    use crate::command_table2::*;
+    let clk_src = crate::dc_resource::clock_source_of(dc.res_pool.as_deref().unwrap(), cs);
+
+    if clk_src.base.dp_clk_src {
+        return true;
+    }
+
+    // If Pixel Clock is 0 it means Power Down Pll
+    let bp_pixel_clock_params = bp_pixel_clock_parameters {
+        controller_id: CONTROLLER_ID_UNDEFINED,
+        pll_id: clk_src.base.id,
+        flags: FORCE_PROGRAMMING_OF_PLL,
+        ..Default::default()
+    };
+
+    // Call ASICControl to process ATOMBIOS Exec table
+    let bp_result = bios_parser_set_pixel_clock(adev, dc, &bp_pixel_clock_params);
+
+    bp_result == crate::bios_parser2::bp_result::BP_RESULT_OK
+}
+
+/// `get_pixel_clk_frequency_100hz` (dce_clock_source.c): the DP DTO's
+/// phase is the pixel clock, the VBIOS programming its modulo to the DP
+/// reference (vblank synchronization is not a member of dcn21_funcs).
+fn get_pixel_clk_frequency_100hz(adev: &crate::amdgpu_device::amdgpu_device, clk_src: &dce110_clk_src, inst: u32,
+                                 pixel_clk_khz: &mut u32) -> bool {
+    if clk_src.base.id == clock_source_id::CLOCK_SOURCE_ID_DP_DTO {
+        let clock_hz = crate::dc_helper::dm_read_reg(adev, clk_src.regs.unwrap().PHASE[inst as usize]);
+
+        *pixel_clk_khz = clock_hz / 100;
+        return true;
+    }
+
+    false
+}
+
+/// `dce112_program_pixel_clk_resync` (dce_clock_source.c): the HDMI deep
+/// colour ratio of the TMDS clock (24 bit 1:1, 30 bit 5:4, 36 bit 3:2,
+/// 48 bit 2:1).
+fn dce112_program_pixel_clk_resync(adev: &crate::amdgpu_device::amdgpu_device, clk_src: &dce110_clk_src,
+                                   signal_type: u32, colordepth: u32, enable_ycbcr420: bool) {
+    let mut deep_color_cntl = 0;
+    let mut double_rate_enable = 0;
+
+    if signal_type == LF_SIGNAL_TYPE_HDMI_TYPE_A {
+        double_rate_enable = enable_ycbcr420 as u32;
+
+        deep_color_cntl = match colordepth {
+            COLOR_DEPTH_888 => 0,
+            COLOR_DEPTH_101010 => 1,
+            COLOR_DEPTH_121212 => 2,
+            COLOR_DEPTH_161616 => 3,
+            _ => 0,
+        };
+    }
+
+    let c = (clk_src.regs.unwrap(), clk_src.cs_shift.unwrap(), clk_src.cs_mask.unwrap());
+    if c.2.PHYPLLA_PIXCLK_DOUBLE_RATE_ENABLE != 0 {
+        crate::dc_helper::reg_update!(adev, c, PIXCLK_RESYNC_CNTL,
+            PHYPLLA_DCCG_DEEP_COLOR_CNTL, deep_color_cntl,
+            PHYPLLA_PIXCLK_DOUBLE_RATE_ENABLE, double_rate_enable);
+    } else {
+        crate::dc_helper::reg_update!(adev, c, PIXCLK_RESYNC_CNTL, PHYPLLA_DCCG_DEEP_COLOR_CNTL, deep_color_cntl);
+    }
+}
+
+/// `dce112_program_pix_clk` (dce_clock_source.c): the pixel clock through
+/// the VBIOS, adjusted by the deep colour ratio. DCN has no spread
+/// spectrum to switch off first (that is DCE 11.0 and older).
+fn dce112_program_pix_clk(adev: &crate::amdgpu_device::amdgpu_device, dc: &mut crate::dc::dc,
+                          cs: crate::dc_state::clock_source_ref, pix_clk_params: &pixel_clk_params, _encoding: u32,
+                          pll_settings: &pll_settings) -> bool {
+    use crate::command_table2::*;
+    let id = crate::dc_resource::clock_source_of(dc.res_pool.as_deref().unwrap(), cs).base.id;
+
+    // ATOMBIOS expects pixel rate adjusted by deep color ratio)
+    let mut bp_pc_params = bp_pixel_clock_parameters {
+        controller_id: pix_clk_params.controller_id,
+        pll_id: id,
+        target_pixel_clock_100hz: pll_settings.actual_pix_clk_100hz,
+        encoder_object_id: pix_clk_params.encoder_object_id,
+        signal_type: pix_clk_params.signal_type,
+        ..Default::default()
+    };
+
+    if id != clock_source_id::CLOCK_SOURCE_ID_DP_DTO {
+        if pll_settings.use_external_clk {
+            bp_pc_params.flags |= SET_GENLOCK_REF_DIV_SRC;
+        } else {
+            bp_pc_params.flags |= SET_XTALIN_REF_SRC;
+        }
+        if pix_clk_params.flags.SUPPORT_YCBCR420 {
+            bp_pc_params.flags |= SUPPORT_YUV_420;
+        }
+    }
+    if bios_parser_set_pixel_clock(adev, dc, &bp_pc_params) != crate::bios_parser2::bp_result::BP_RESULT_OK {
+        return false;
+    }
+    // Resync deep color DTO
+    if id != clock_source_id::CLOCK_SOURCE_ID_DP_DTO {
+        let clk_src = crate::dc_resource::clock_source_of(dc.res_pool.as_deref().unwrap(), cs);
+        dce112_program_pixel_clk_resync(adev, clk_src, pix_clk_params.signal_type, pix_clk_params.color_depth,
+            pix_clk_params.flags.SUPPORT_YCBCR420);
+    }
+
+    true
+}
+
+/// `dcn20_program_pix_clk` (dce_clock_source.c). Vblank synchronization,
+/// which would reprogram the DTO modulo, is not a member of dcn21_funcs.
+fn dcn20_program_pix_clk(adev: &crate::amdgpu_device::amdgpu_device, dc: &mut crate::dc::dc,
+                         cs: crate::dc_state::clock_source_ref, pix_clk_params: &pixel_clk_params, encoding: u32,
+                         pll_settings: &pll_settings) -> bool {
+    dce112_program_pix_clk(adev, dc, cs, pix_clk_params, encoding, pll_settings);
+
+    true
+}

@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use crate::amdgpu_device::amdgpu_device;
-use crate::dc_helper::{reg_get, reg_get_n, reg_set, reg_update, reg_wait};
+use crate::dc_helper::{reg_get, reg_get_n, reg_set, reg_update, reg_wait, reg_write};
 use crate::regs::*;
 use alloc::boxed::Box;
 
@@ -26,6 +26,25 @@ pub enum timing_generator_funcs {
 /// `None` is a member the port has not reached, not one dcn20 leaves out.
 #[derive(Default, Clone, Copy)]
 pub struct timing_generator_ops {
+    pub validate_timing: Option<fn(&optc, &crate::dc_hw_types::dc_crtc_timing) -> bool>,
+    pub get_hw_timing: Option<fn(&amdgpu_device, &optc, &mut crate::dc_hw_types::dc_crtc_timing) -> bool>,
+    pub program_timing: Option<fn(&amdgpu_device, &mut optc, &crate::dc_hw_types::dc_crtc_timing, i32, i32, i32, i32, i32,
+                                  u32, bool)>,
+    pub setup_vertical_interrupt2: Option<fn(&amdgpu_device, &optc, u32)>,
+    pub program_global_sync: Option<fn(&amdgpu_device, &mut optc, i32, i32, i32, i32, i32)>,
+    pub enable_crtc: Option<fn(&amdgpu_device, &optc) -> bool>,
+    pub disable_crtc: Option<fn(&amdgpu_device, &optc) -> bool>,
+    pub set_early_control: Option<fn(&amdgpu_device, &optc, u32)>,
+    pub enable_optc_clock: Option<fn(&amdgpu_device, &optc, bool)>,
+    pub set_drr: Option<fn(&amdgpu_device, &optc, Option<&drr_params>)>,
+    pub set_vtotal_min_max: Option<fn(&amdgpu_device, &optc, i32, i32)>,
+    pub set_static_screen_control: Option<fn(&amdgpu_device, &optc, u32, u32)>,
+    pub program_stereo: Option<fn(&amdgpu_device, &optc, &crate::dc_hw_types::dc_crtc_timing, &crtc_stereo_flags)>,
+    pub is_optc_underflow_occurred: Option<fn(&amdgpu_device, &optc) -> bool>,
+    pub set_odm_bypass: Option<fn(&amdgpu_device, &mut optc, &crate::dc_hw_types::dc_crtc_timing)>,
+    pub set_vtg_params: Option<fn(&amdgpu_device, &optc, &crate::dc_hw_types::dc_crtc_timing, bool)>,
+    pub setup_manual_trigger: Option<fn(&amdgpu_device, &optc)>,
+    pub is_two_pixels_per_container: Option<fn(&crate::dc_hw_types::dc_crtc_timing) -> bool>,
     pub get_otg_active_size: Option<fn(&amdgpu_device, &optc, &mut u32, &mut u32) -> bool>,
     pub lock: Option<fn(&amdgpu_device, &optc)>,
     pub unlock: Option<fn(&amdgpu_device, &optc)>,
@@ -38,6 +57,24 @@ pub struct timing_generator_ops {
 /// `dcn20_tg_funcs` (dcn20_optc.c), as far as ported. `init_odm` is not a
 /// member of it.
 const DCN20_TG_FUNCS: timing_generator_ops = timing_generator_ops {
+    validate_timing: Some(optc1_validate_timing),
+    get_hw_timing: Some(optc1_get_hw_timing),
+    program_timing: Some(optc1_program_timing),
+    setup_vertical_interrupt2: Some(optc1_setup_vertical_interrupt2),
+    program_global_sync: Some(optc1_program_global_sync),
+    enable_crtc: Some(optc2_enable_crtc),
+    disable_crtc: Some(optc1_disable_crtc),
+    set_early_control: Some(optc1_set_early_control),
+    enable_optc_clock: Some(optc1_enable_optc_clock),
+    set_drr: Some(optc1_set_drr),
+    set_vtotal_min_max: Some(optc1_set_vtotal_min_max),
+    set_static_screen_control: Some(optc1_set_static_screen_control),
+    program_stereo: Some(optc1_program_stereo),
+    is_optc_underflow_occurred: Some(optc1_is_optc_underflow_occurred),
+    set_odm_bypass: Some(optc2_set_odm_bypass),
+    set_vtg_params: Some(optc1_set_vtg_params),
+    setup_manual_trigger: Some(optc2_setup_manual_trigger),
+    is_two_pixels_per_container: Some(optc1_is_two_pixels_per_container),
     get_otg_active_size: Some(optc1_get_otg_active_size),
     lock: Some(optc1_lock),
     unlock: Some(optc1_unlock),
@@ -78,6 +115,34 @@ pub struct optc {
     pub min_v_sync_width: u32,
     pub min_v_blank: u32,
     pub min_v_blank_interlace: u32,
+    /// `enum signal_type`.
+    pub signal: u32,
+    pub vready_offset: i32,
+    pub vstartup_start: i32,
+    pub vupdate_offset: i32,
+    pub vupdate_width: i32,
+    pub pstate_keepout: i32,
+    pub orginal_patched_timing: crate::dc_hw_types::dc_crtc_timing,
+    pub opp_count: i32,
+}
+
+/// `struct drr_params` (timing_generator.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct drr_params {
+    pub vertical_total_min: u32,
+    pub vertical_total_max: u32,
+    pub vertical_total_mid: u32,
+    pub vertical_total_mid_frame_num: u32,
+}
+
+/// `struct crtc_stereo_flags` (timing_generator.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct crtc_stereo_flags {
+    pub PROGRAM_STEREO: bool,
+    pub PROGRAM_POLARITY: bool,
+    pub RIGHT_EYE_POLARITY: bool,
+    pub FRAME_PACKED: bool,
+    pub DISABLE_STEREO_DP_SYNC: bool,
 }
 
 /// `dcn20_timing_generator_init` (dcn20_optc.c): install the funcs table and
@@ -1309,4 +1374,530 @@ pub fn optc1_is_two_pixels_per_container(timing: &crate::dc_hw_types::dc_crtc_ti
     two_pix = two_pix
         || (timing.flags.DSC && timing.pixel_encoding == PIXEL_ENCODING_YCBCR422 && !timing.dsc_cfg.ycbcr422_simple);
     two_pix
+}
+
+/// `optc1_validate_timing` (dcn10_optc.c): interlacing is blocked until it
+/// is supported, and the totals, blanks and syncs must fit the OTG.
+pub fn optc1_validate_timing(optc1: &optc, timing: &crate::dc_hw_types::dc_crtc_timing) -> bool {
+    let v_blank = timing.v_total.wrapping_sub(timing.v_addressable).wrapping_sub(timing.v_border_top)
+        .wrapping_sub(timing.v_border_bottom);
+
+    let h_blank = timing.h_total.wrapping_sub(timing.h_addressable).wrapping_sub(timing.h_border_right)
+        .wrapping_sub(timing.h_border_left);
+
+    if timing.timing_3d_format != TIMING_3D_FORMAT_NONE
+        && timing.timing_3d_format != TIMING_3D_FORMAT_HW_FRAME_PACKING
+        && timing.timing_3d_format != TIMING_3D_FORMAT_TOP_AND_BOTTOM
+        && timing.timing_3d_format != TIMING_3D_FORMAT_SIDE_BY_SIDE
+        && timing.timing_3d_format != TIMING_3D_FORMAT_FRAME_ALTERNATE
+        && timing.timing_3d_format != TIMING_3D_FORMAT_INBAND_FA
+    {
+        return false;
+    }
+
+    // Temporarily blocking interlacing mode until it's supported
+    if timing.flags.INTERLACE {
+        return false;
+    }
+
+    // Check maximum number of pixels supported by Timing Generator
+    // (Currently will never fail, in order to fail needs display which
+    // needs more than 8192 horizontal and more than 8192 vertical total
+    // pixels)
+    if timing.h_total > optc1.max_h_total || timing.v_total > optc1.max_v_total {
+        return false;
+    }
+
+    if h_blank < optc1.min_h_blank {
+        return false;
+    }
+
+    if timing.h_sync_width < optc1.min_h_sync_width || timing.v_sync_width < optc1.min_v_sync_width {
+        return false;
+    }
+
+    let min_v_blank = if timing.flags.INTERLACE { optc1.min_v_blank_interlace } else { optc1.min_v_blank };
+
+    if v_blank < min_v_blank {
+        return false;
+    }
+
+    true
+}
+
+/// `optc1_disable_crtc` (dcn10_optc.c): stop the OTG at the end of the
+/// first line of the vertical blank, then wait for it to go idle.
+pub fn optc1_disable_crtc(adev: &amdgpu_device, optc1: &optc) -> bool {
+    // disable otg request until end of the first line in the vertical blank
+    // region
+    reg_update!(adev, optc1.rsm(), OTG_CONTROL, OTG_DISABLE_POINT_CNTL, 3, OTG_MASTER_EN, 0);
+
+    reg_update!(adev, optc1.rsm(), CONTROL, VTG0_ENABLE, 0);
+
+    // CRTC disabled, so disable  clock.
+    reg_wait!(adev, optc1.rsm(), OTG_CLOCK_CONTROL, OTG_BUSY, 0, 1, 100000, "optc1_disable_crtc");
+
+    true
+}
+
+/// `apply_front_porch_workaround` (dcn10_optc.c): the front porch the OTG
+/// needs at least.
+fn apply_front_porch_workaround(timing: &mut crate::dc_hw_types::dc_crtc_timing) {
+    if timing.flags.INTERLACE {
+        if timing.v_front_porch < 2 {
+            timing.v_front_porch = 2;
+        }
+    } else if timing.v_front_porch < 1 {
+        timing.v_front_porch = 1;
+    }
+}
+
+/// `optc1_program_global_sync` (dcn10_optc.c). A VSTARTUP of 0 is a bug of
+/// the caller (Linux breaks to the debugger); nothing is written then.
+pub fn optc1_program_global_sync(adev: &amdgpu_device, optc1: &mut optc, vready_offset: i32, vstartup_start: i32,
+                                 vupdate_offset: i32, vupdate_width: i32, pstate_keepout: i32) {
+    optc1.vready_offset = vready_offset;
+    optc1.vstartup_start = vstartup_start;
+    optc1.vupdate_offset = vupdate_offset;
+    optc1.vupdate_width = vupdate_width;
+    optc1.pstate_keepout = pstate_keepout;
+
+    if optc1.vstartup_start == 0 {
+        return;
+    }
+
+    let c = optc1.rsm();
+    reg_set!(adev, c, OTG_VSTARTUP_PARAM, 0, VSTARTUP_START, optc1.vstartup_start);
+
+    reg_set!(adev, c, OTG_VUPDATE_PARAM, 0, VUPDATE_OFFSET, optc1.vupdate_offset, VUPDATE_WIDTH, optc1.vupdate_width);
+
+    reg_set!(adev, c, OTG_VREADY_PARAM, 0, VREADY_OFFSET, optc1.vready_offset);
+}
+
+/// `optc1_set_vtg_params` (dcn10_optc.c): VCOUNT_INIT is the start of
+/// the blank; FP2 is the offset when VSTARTUP lies before VSYNC.
+pub fn optc1_set_vtg_params(adev: &amdgpu_device, optc1: &optc, dc_crtc_timing: &crate::dc_hw_types::dc_crtc_timing,
+                            program_fp2: bool) {
+    let mut patched_crtc_timing = *dc_crtc_timing;
+    let mut v_fp2 = 0u32;
+
+    apply_front_porch_workaround(&mut patched_crtc_timing);
+
+    // VCOUNT_INIT is the start of blank
+    let mut v_init = patched_crtc_timing.v_total - patched_crtc_timing.v_front_porch;
+
+    // end of blank = v_init - active
+    let asic_blank_end = v_init - patched_crtc_timing.v_border_bottom - patched_crtc_timing.v_addressable
+        - patched_crtc_timing.v_border_top;
+
+    // if VSTARTUP is before VSYNC, FP2 is the offset, otherwise 0
+    let vertical_line_start = asic_blank_end as i32 - optc1.vstartup_start + 1;
+    if vertical_line_start < 0 {
+        v_fp2 = (-vertical_line_start) as u32;
+    }
+
+    // Interlace
+    if optc1.tg_regs.unwrap().OTG_INTERLACE_CONTROL != 0 && patched_crtc_timing.flags.INTERLACE {
+        v_init /= 2;
+        if ((optc1.vstartup_start / 2) * 2) as u32 > asic_blank_end {
+            v_fp2 /= 2;
+        }
+    }
+
+    if program_fp2 {
+        reg_update!(adev, optc1.rsm(), CONTROL, VTG0_FP2, v_fp2, VTG0_VCOUNT_INIT, v_init);
+    } else {
+        reg_update!(adev, optc1.rsm(), CONTROL, VTG0_VCOUNT_INIT, v_init);
+    }
+}
+
+/// `optc1_set_vtotal_min_max` (dcn10_optc.c).
+pub fn optc1_set_vtotal_min_max(adev: &amdgpu_device, optc1: &optc, vtotal_min: i32, vtotal_max: i32) {
+    reg_set!(adev, optc1.rsm(), OTG_V_TOTAL_MAX, 0, OTG_V_TOTAL_MAX, vtotal_max);
+
+    reg_set!(adev, optc1.rsm(), OTG_V_TOTAL_MIN, 0, OTG_V_TOTAL_MIN, vtotal_min);
+}
+
+/// `optc1_program_timing` (dcn10_optc.c): the CRTC timing, with the sync
+/// at the start of the line and frame and the blank around the active
+/// area. A DP signal starts the OTG at its start point.
+#[allow(clippy::too_many_arguments)]
+pub fn optc1_program_timing(adev: &amdgpu_device, optc1: &mut optc, dc_crtc_timing: &crate::dc_hw_types::dc_crtc_timing,
+                            vready_offset: i32, vstartup_start: i32, vupdate_offset: i32, vupdate_width: i32,
+                            pstate_keepout: i32, signal: u32, _use_vbios: bool) {
+    let mut start_point = 0;
+    let mut field_num = 0;
+    let mut h_div = H_TIMING_NO_DIV;
+
+    optc1.signal = signal;
+    optc1.vready_offset = vready_offset;
+    optc1.vstartup_start = vstartup_start;
+    optc1.vupdate_offset = vupdate_offset;
+    optc1.vupdate_width = vupdate_width;
+    optc1.pstate_keepout = pstate_keepout;
+    let mut patched_crtc_timing = *dc_crtc_timing;
+    apply_front_porch_workaround(&mut patched_crtc_timing);
+    optc1.orginal_patched_timing = patched_crtc_timing;
+    let c = optc1.rsm();
+
+    // Load horizontal timing
+
+    // CRTC_H_TOTAL = vesa.h_total - 1
+    reg_set!(adev, c, OTG_H_TOTAL, 0, OTG_H_TOTAL, patched_crtc_timing.h_total - 1);
+
+    // h_sync_start = 0, h_sync_end = vesa.h_sync_width
+    reg_update!(adev, c, OTG_H_SYNC_A, OTG_H_SYNC_A_START, 0, OTG_H_SYNC_A_END, patched_crtc_timing.h_sync_width);
+
+    // blank_start = line end - front porch
+    let asic_blank_start = patched_crtc_timing.h_total - patched_crtc_timing.h_front_porch;
+
+    // blank_end = blank_start - active
+    let asic_blank_end = asic_blank_start - patched_crtc_timing.h_border_right - patched_crtc_timing.h_addressable
+        - patched_crtc_timing.h_border_left;
+
+    reg_update!(adev, c, OTG_H_BLANK_START_END, OTG_H_BLANK_START, asic_blank_start, OTG_H_BLANK_END, asic_blank_end);
+
+    // h_sync polarity
+    let h_sync_polarity = if patched_crtc_timing.flags.HSYNC_POSITIVE_POLARITY { 0 } else { 1 };
+
+    reg_update!(adev, c, OTG_H_SYNC_A_CNTL, OTG_H_SYNC_A_POL, h_sync_polarity);
+
+    let v_total = patched_crtc_timing.v_total - 1;
+
+    reg_set!(adev, c, OTG_V_TOTAL, 0, OTG_V_TOTAL, v_total);
+
+    // In case of V_TOTAL_CONTROL is on, make sure OTG_V_TOTAL_MAX and
+    // OTG_V_TOTAL_MIN are equal to V_TOTAL.
+    (optc1.funcs().set_vtotal_min_max.unwrap())(adev, optc1, v_total as i32, v_total as i32);
+
+    // v_sync_start = 0, v_sync_end = v_sync_width
+    let v_sync_end = patched_crtc_timing.v_sync_width;
+
+    reg_update!(adev, c, OTG_V_SYNC_A, OTG_V_SYNC_A_START, 0, OTG_V_SYNC_A_END, v_sync_end);
+
+    // blank_start = frame end - front porch
+    let asic_blank_start = patched_crtc_timing.v_total - patched_crtc_timing.v_front_porch;
+
+    // blank_end = blank_start - active
+    let asic_blank_end = asic_blank_start - patched_crtc_timing.v_border_bottom - patched_crtc_timing.v_addressable
+        - patched_crtc_timing.v_border_top;
+
+    reg_update!(adev, c, OTG_V_BLANK_START_END, OTG_V_BLANK_START, asic_blank_start, OTG_V_BLANK_END, asic_blank_end);
+
+    // v_sync polarity
+    let v_sync_polarity = if patched_crtc_timing.flags.VSYNC_POSITIVE_POLARITY { 0 } else { 1 };
+
+    reg_update!(adev, c, OTG_V_SYNC_A_CNTL, OTG_V_SYNC_A_POL, v_sync_polarity);
+
+    if optc1.signal == LF_SIGNAL_TYPE_DISPLAY_PORT || optc1.signal == LF_SIGNAL_TYPE_DISPLAY_PORT_MST
+        || optc1.signal == LF_SIGNAL_TYPE_EDP
+    {
+        start_point = 1;
+        if patched_crtc_timing.flags.INTERLACE {
+            field_num = 1;
+        }
+    }
+
+    // Interlace
+    if c.0.OTG_INTERLACE_CONTROL != 0 {
+        reg_update!(adev, c, OTG_INTERLACE_CONTROL, OTG_INTERLACE_ENABLE, patched_crtc_timing.flags.INTERLACE as u32);
+    }
+
+    // VTG enable set to 0 first VInit
+    reg_update!(adev, c, CONTROL, VTG0_ENABLE, 0);
+
+    // original code is using VTG offset to address OTG reg, seems wrong
+    reg_update!(adev, c, OTG_CONTROL, OTG_START_POINT_CNTL, start_point, OTG_FIELD_NUMBER_CNTL, field_num);
+
+    (optc1.funcs().program_global_sync.unwrap())(adev, optc1, vready_offset, vstartup_start, vupdate_offset,
+        vupdate_width, pstate_keepout);
+
+    (optc1.funcs().set_vtg_params.unwrap())(adev, optc1, dc_crtc_timing, true);
+
+    // Horizontal count by two (DVI 30bpp) is a TODO in Linux.
+
+    // Enable stereo - only when we need to pack 3D frame. Other types of
+    // stereo handled in explicit call
+    if (optc1.funcs().is_two_pixels_per_container.unwrap())(&patched_crtc_timing) || optc1.opp_count == 2 {
+        h_div = H_TIMING_DIV_BY2;
+    }
+
+    if c.0.OPTC_DATA_FORMAT_CONTROL != 0 && c.2.OPTC_DATA_FORMAT != 0 {
+        let data_fmt = match patched_crtc_timing.pixel_encoding {
+            PIXEL_ENCODING_YCBCR422 => 1,
+            PIXEL_ENCODING_YCBCR420 => 2,
+            _ => 0,
+        };
+
+        reg_update!(adev, c, OPTC_DATA_FORMAT_CONTROL, OPTC_DATA_FORMAT, data_fmt);
+    }
+
+    // The DCN 2.0 mask has no OTG_H_TIMING_DIV_MODE.
+    reg_update!(adev, c, OTG_H_TIMING_CNTL, OTG_H_TIMING_DIV_BY2, h_div);
+}
+
+/// `optc1_setup_vertical_interrupt2` (dcn10_optc.c).
+pub fn optc1_setup_vertical_interrupt2(adev: &amdgpu_device, optc1: &optc, start_line: u32) {
+    reg_set!(adev, optc1.rsm(), OTG_VERTICAL_INTERRUPT2_POSITION, 0, OTG_VERTICAL_INTERRUPT2_LINE_START, start_line);
+}
+
+/// `optc2_enable_crtc` (dcn20_optc.c): the OPP of the same instance feeds
+/// the OTG, the VTG goes on first (a hardware workaround), then the OTG.
+/// `REG_SEQ_*` gather nothing with `dmub_offload_enabled` off, as DCN 2.1
+/// leaves it, so the writes go to MMIO.
+pub fn optc2_enable_crtc(adev: &amdgpu_device, optc1: &optc) -> bool {
+    let c = optc1.rsm();
+
+    // opp instance for OTG. For DCN1.0, ODM is remoed. OPP and OPTC should
+    // 1:1 mapping
+    reg_update!(adev, c, OPTC_DATA_SOURCE_SELECT, OPTC_SEG0_SRC_SEL, optc1.base.inst);
+
+    // VTG enable first is for HW workaround
+    reg_update!(adev, c, CONTROL, VTG0_ENABLE, 1);
+
+    // Enable CRTC
+    reg_update!(adev, c, OTG_CONTROL, OTG_DISABLE_POINT_CNTL, 3, OTG_MASTER_EN, 1);
+
+    true
+}
+
+/// `optc1_set_early_control` (dcn10_optc.c): a hardware design change
+/// left it empty.
+pub fn optc1_set_early_control(_adev: &amdgpu_device, _optc1: &optc, _early_cntl: u32) {}
+
+/// `optc1_is_optc_underflow_occurred` (dcn10_optc.c).
+pub fn optc1_is_optc_underflow_occurred(adev: &amdgpu_device, optc1: &optc) -> bool {
+    reg_get!(adev, optc1.rsm(), OPTC_INPUT_GLOBAL_CONTROL, OPTC_UNDERFLOW_OCCURRED_STATUS) == 1
+}
+
+/// `optc1_enable_optc_clock` (dcn10_optc.c). Before the clock goes off, an
+/// underflow is cleared: with the clock off it would stay.
+pub fn optc1_enable_optc_clock(adev: &amdgpu_device, optc1: &optc, enable: bool) {
+    let c = optc1.rsm();
+
+    if enable {
+        reg_update!(adev, c, OPTC_INPUT_CLOCK_CONTROL, OPTC_INPUT_CLK_EN, 1, OPTC_INPUT_CLK_GATE_DIS, 1);
+
+        reg_wait!(adev, c, OPTC_INPUT_CLOCK_CONTROL, OPTC_INPUT_CLK_ON, 1, 1, 1000, "optc1_enable_optc_clock");
+
+        // Enable clock
+        reg_update!(adev, c, OTG_CLOCK_CONTROL, OTG_CLOCK_EN, 1, OTG_CLOCK_GATE_DIS, 1);
+        reg_wait!(adev, c, OTG_CLOCK_CONTROL, OTG_CLOCK_ON, 1, 1, 1000, "optc1_enable_optc_clock");
+    } else {
+        if (optc1.funcs().is_optc_underflow_occurred.unwrap())(adev, optc1) {
+            optc1_clear_optc_underflow(adev, optc1);
+        }
+
+        reg_update!(adev, c, OTG_CLOCK_CONTROL, OTG_CLOCK_GATE_DIS, 0, OTG_CLOCK_EN, 0);
+
+        reg_update!(adev, c, OPTC_INPUT_CLOCK_CONTROL, OPTC_INPUT_CLK_GATE_DIS, 0, OPTC_INPUT_CLK_EN, 0);
+    }
+}
+
+/// `optc2_setup_manual_trigger` (dcn20_optc.c): the min/max selectors are
+/// set unconditionally so the DMCUB firmware may change the OTG timing,
+/// and TRIG_A fires on the end of frame.
+pub fn optc2_setup_manual_trigger(adev: &amdgpu_device, optc1: &optc) {
+    let c = optc1.rsm();
+
+    reg_update!(adev, c, OTG_V_TOTAL_CONTROL,
+        OTG_V_TOTAL_MIN_SEL, 1,
+        OTG_V_TOTAL_MAX_SEL, 1,
+        OTG_FORCE_LOCK_ON_EVENT, 0,
+        OTG_SET_V_TOTAL_MIN_MASK, 1 << 1); // TRIGA
+
+    reg_set!(adev, c, OTG_TRIGA_CNTL, 0,
+        OTG_TRIGA_SOURCE_SELECT, 21,
+        OTG_TRIGA_SOURCE_PIPE_SELECT, optc1.base.inst,
+        OTG_TRIGA_RISING_EDGE_DETECT_CNTL, 1,
+        OTG_TRIGA_FALLING_EDGE_DETECT_CNTL, 0,
+        OTG_TRIGA_POLARITY_SELECT, 0,
+        OTG_TRIGA_FREQUENCY_SELECT, 0,
+        OTG_TRIGA_DELAY, 0,
+        OTG_TRIGA_CLEAR, 1);
+}
+
+/// `optc1_set_drr` (dcn10_optc.c): a variable refresh range, then the
+/// manual trigger flow control for the end of frame.
+pub fn optc1_set_drr(adev: &amdgpu_device, optc1: &optc, params: Option<&drr_params>) {
+    let c = optc1.rsm();
+
+    if let Some(params) = params
+        && params.vertical_total_max > 0
+        && params.vertical_total_min > 0
+    {
+        if params.vertical_total_mid != 0 {
+            reg_set!(adev, c, OTG_V_TOTAL_MID, 0, OTG_V_TOTAL_MID, params.vertical_total_mid - 1);
+
+            reg_update!(adev, c, OTG_V_TOTAL_CONTROL,
+                OTG_VTOTAL_MID_REPLACING_MAX_EN, 1,
+                OTG_VTOTAL_MID_FRAME_NUM, params.vertical_total_mid_frame_num as u8);
+        }
+
+        (optc1.funcs().set_vtotal_min_max.unwrap())(adev, optc1, params.vertical_total_min as i32 - 1,
+            params.vertical_total_max as i32 - 1);
+
+        reg_update!(adev, c, OTG_V_TOTAL_CONTROL,
+            OTG_V_TOTAL_MIN_SEL, 1,
+            OTG_V_TOTAL_MAX_SEL, 1,
+            OTG_FORCE_LOCK_ON_EVENT, 0,
+            OTG_SET_V_TOTAL_MIN_MASK_EN, 0,
+            OTG_SET_V_TOTAL_MIN_MASK, 0);
+    }
+
+    // Setup manual flow control for EOF via TRIG_A
+    (optc1.funcs().setup_manual_trigger.unwrap())(adev, optc1);
+}
+
+/// `optc1_set_static_screen_control` (dcn10_optc.c): an 8-bit frame count;
+/// bit 8 of the event mask no longer applies (Raven, PSR).
+pub fn optc1_set_static_screen_control(adev: &amdgpu_device, optc1: &optc, mut event_triggers: u32,
+                                       mut num_frames: u32) {
+    // By register spec, it only takes 8 bit value
+    if num_frames > 0xFF {
+        num_frames = 0xFF;
+    }
+
+    // Bit 8 is no longer applicable in RV for PSR case, set bit 8 to 0 if
+    // given
+    if event_triggers & STATIC_SCREEN_EVENT_MASK_RANGETIMING_DOUBLE_BUFFER_UPDATE_EN != 0 {
+        event_triggers &= !STATIC_SCREEN_EVENT_MASK_RANGETIMING_DOUBLE_BUFFER_UPDATE_EN;
+    }
+
+    reg_set!(adev, optc1.rsm(), OTG_STATIC_SCREEN_CONTROL, 0,
+        OTG_STATIC_SCREEN_EVENT_MASK, event_triggers,
+        OTG_STATIC_SCREEN_FRAME_COUNT, num_frames);
+}
+
+/// `optc1_disable_stereo` (dcn10_optc.c).
+fn optc1_disable_stereo(adev: &amdgpu_device, optc1: &optc) {
+    let c = optc1.rsm();
+    reg_set!(adev, c, OTG_STEREO_CONTROL, 0, OTG_STEREO_EN, 0);
+
+    reg_set!(adev, c, OTG_3D_STRUCTURE_CONTROL, 0, OTG_3D_STRUCTURE_EN, 0, OTG_3D_STRUCTURE_STEREO_SEL_OVR, 0);
+}
+
+/// `optc1_program_stereo` (dcn10_optc.c). Enabling stereo is a later
+/// stage.
+pub fn optc1_program_stereo(adev: &amdgpu_device, optc1: &optc, _timing: &crate::dc_hw_types::dc_crtc_timing,
+                            flags: &crtc_stereo_flags) {
+    if flags.PROGRAM_STEREO {
+        crate::linux::Line::new().s("optc1_program_stereo: optc1_enable_stereo not ported").say();
+    } else {
+        optc1_disable_stereo(adev, optc1);
+    }
+}
+
+/// `optc2_set_odm_bypass` (dcn20_optc.c): one OPP segment, from the OPP of
+/// the same instance.
+pub fn optc2_set_odm_bypass(adev: &amdgpu_device, optc1: &mut optc, dc_crtc_timing: &crate::dc_hw_types::dc_crtc_timing) {
+    let c = optc1.rsm();
+
+    reg_set!(adev, c, OPTC_DATA_SOURCE_SELECT, 0,
+        OPTC_NUM_OF_INPUT_SEGMENT, 0,
+        OPTC_SEG0_SRC_SEL, optc1.base.inst,
+        OPTC_SEG1_SRC_SEL, 0xf);
+    reg_write!(adev, c.0, OTG_H_TIMING_CNTL, 0);
+
+    let h_div_2 = (optc1.funcs().is_two_pixels_per_container.unwrap())(dc_crtc_timing);
+    reg_update!(adev, c, OTG_H_TIMING_CNTL, OTG_H_TIMING_DIV_BY2, h_div_2 as u32);
+    reg_set!(adev, c, OPTC_MEMORY_CONFIG, 0, OPTC_MEM_SEL, 0);
+    optc1.opp_count = 1;
+}
+
+/// `struct dcn_otg_state` (dcn10_optc.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dcn_otg_state {
+    pub v_blank_start: u32,
+    pub v_blank_end: u32,
+    pub v_sync_a_pol: u32,
+    pub v_total: u32,
+    pub v_total_max: u32,
+    pub v_total_min: u32,
+    pub v_total_min_sel: u32,
+    pub v_total_max_sel: u32,
+    pub v_sync_a_start: u32,
+    pub v_sync_a_end: u32,
+    pub h_blank_start: u32,
+    pub h_blank_end: u32,
+    pub h_sync_a_start: u32,
+    pub h_sync_a_end: u32,
+    pub h_sync_a_pol: u32,
+    pub h_total: u32,
+    pub underflow_occurred_status: u32,
+    pub otg_enabled: u32,
+    pub blank_enabled: u32,
+    pub vertical_interrupt1_en: u32,
+    pub vertical_interrupt1_line: u32,
+    pub vertical_interrupt2_en: u32,
+    pub vertical_interrupt2_line: u32,
+    pub otg_master_update_lock: u32,
+    pub otg_double_buffer_control: u32,
+}
+
+/// `optc1_read_otg_state` (dcn10_optc.c).
+pub fn optc1_read_otg_state(adev: &amdgpu_device, optc1: &optc, s: &mut dcn_otg_state) {
+    use crate::dc_helper::reg_read;
+    let c = optc1.rsm();
+
+    s.otg_enabled = reg_get!(adev, c, OTG_CONTROL, OTG_MASTER_EN);
+
+    [s.v_blank_start, s.v_blank_end] = reg_get_n!(adev, c, OTG_V_BLANK_START_END, OTG_V_BLANK_START, OTG_V_BLANK_END);
+
+    s.v_sync_a_pol = reg_get!(adev, c, OTG_V_SYNC_A_CNTL, OTG_V_SYNC_A_POL);
+
+    s.v_total = reg_get!(adev, c, OTG_V_TOTAL, OTG_V_TOTAL);
+
+    s.v_total_max = reg_get!(adev, c, OTG_V_TOTAL_MAX, OTG_V_TOTAL_MAX);
+
+    s.v_total_min = reg_get!(adev, c, OTG_V_TOTAL_MIN, OTG_V_TOTAL_MIN);
+
+    s.v_total_max_sel = reg_get!(adev, c, OTG_V_TOTAL_CONTROL, OTG_V_TOTAL_MAX_SEL);
+
+    s.v_total_min_sel = reg_get!(adev, c, OTG_V_TOTAL_CONTROL, OTG_V_TOTAL_MIN_SEL);
+
+    [s.v_sync_a_start, s.v_sync_a_end] = reg_get_n!(adev, c, OTG_V_SYNC_A, OTG_V_SYNC_A_START, OTG_V_SYNC_A_END);
+
+    [s.h_blank_start, s.h_blank_end] = reg_get_n!(adev, c, OTG_H_BLANK_START_END, OTG_H_BLANK_START, OTG_H_BLANK_END);
+
+    [s.h_sync_a_start, s.h_sync_a_end] = reg_get_n!(adev, c, OTG_H_SYNC_A, OTG_H_SYNC_A_START, OTG_H_SYNC_A_END);
+
+    s.h_sync_a_pol = reg_get!(adev, c, OTG_H_SYNC_A_CNTL, OTG_H_SYNC_A_POL);
+
+    s.h_total = reg_get!(adev, c, OTG_H_TOTAL, OTG_H_TOTAL);
+
+    s.underflow_occurred_status = reg_get!(adev, c, OPTC_INPUT_GLOBAL_CONTROL, OPTC_UNDERFLOW_OCCURRED_STATUS);
+
+    s.vertical_interrupt1_en = reg_get!(adev, c, OTG_VERTICAL_INTERRUPT1_CONTROL, OTG_VERTICAL_INTERRUPT1_INT_ENABLE);
+
+    s.vertical_interrupt1_line = reg_get!(adev, c, OTG_VERTICAL_INTERRUPT1_POSITION, OTG_VERTICAL_INTERRUPT1_LINE_START);
+
+    s.vertical_interrupt2_en = reg_get!(adev, c, OTG_VERTICAL_INTERRUPT2_CONTROL, OTG_VERTICAL_INTERRUPT2_INT_ENABLE);
+
+    s.vertical_interrupt2_line = reg_get!(adev, c, OTG_VERTICAL_INTERRUPT2_POSITION, OTG_VERTICAL_INTERRUPT2_LINE_START);
+
+    s.otg_master_update_lock = reg_read!(adev, c.0, OTG_MASTER_UPDATE_LOCK);
+    s.otg_double_buffer_control = reg_read!(adev, c.0, OTG_DOUBLE_BUFFER_CONTROL);
+}
+
+/// `optc1_get_hw_timing` (dcn10_optc.c): the timing the OTG runs.
+pub fn optc1_get_hw_timing(adev: &amdgpu_device, optc1: &optc, hw_crtc_timing: &mut crate::dc_hw_types::dc_crtc_timing)
+                           -> bool {
+    let mut s = dcn_otg_state::default();
+
+    optc1_read_otg_state(adev, optc1, &mut s);
+
+    hw_crtc_timing.h_total = s.h_total.wrapping_add(1);
+    hw_crtc_timing.h_addressable =
+        s.h_total.wrapping_sub(s.h_total.wrapping_sub(s.h_blank_start).wrapping_add(s.h_blank_end));
+    hw_crtc_timing.h_front_porch = s.h_total.wrapping_add(1).wrapping_sub(s.h_blank_start);
+    hw_crtc_timing.h_sync_width = s.h_sync_a_end.wrapping_sub(s.h_sync_a_start);
+
+    hw_crtc_timing.v_total = s.v_total.wrapping_add(1);
+    hw_crtc_timing.v_addressable =
+        s.v_total.wrapping_sub(s.v_total.wrapping_sub(s.v_blank_start).wrapping_add(s.v_blank_end));
+    hw_crtc_timing.v_front_porch = s.v_total.wrapping_add(1).wrapping_sub(s.v_blank_start);
+    hw_crtc_timing.v_sync_width = s.v_sync_a_end.wrapping_sub(s.v_sync_a_start);
+
+    true
 }

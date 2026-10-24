@@ -1634,3 +1634,216 @@ pub fn dc_validate_global_state(dc: &mut dc, new_ctx: &mut dc_state, validate_mo
 
     result
 }
+
+/// `dc_validate_stream` (dc_resource.c): the timing against the first
+/// timing generator, the link encoder and the link.
+pub fn dc_validate_stream(adev: &amdgpu_device, dc: &mut dc, s: usize) -> dc_status {
+    let mut res = dc_status::DC_OK;
+
+    calculate_phy_pix_clks(dc.streams[s].as_deref_mut().unwrap());
+
+    let stream = dc.streams[s].as_deref().unwrap();
+    let li = stream.link;
+    let tg = dc.res_pool.as_deref().unwrap().timing_generators[0].as_deref().unwrap();
+    if !(tg.funcs().validate_timing.unwrap())(tg, &stream.timing) {
+        res = dc_status::DC_FAIL_CONTROLLER_VALIDATE;
+    }
+
+    if res == dc_status::DC_OK && dc.links[li].ep_type == LF_DISPLAY_ENDPOINT_PHY {
+        let stream = dc.streams[s].as_deref().unwrap();
+        let connector_signal = dc.links[li].connector_signal;
+        let hdmi20_disable = dc.debug.hdmi20_disable;
+        let enc = dc.links[li].link_enc.as_mut().unwrap();
+        if !(enc.funcs().validate_output_with_stream.unwrap())(enc, connector_signal, stream, hdmi20_disable) {
+            res = dc_status::DC_FAIL_ENC_VALIDATE;
+        }
+    }
+
+    // TODO: validate audio ASIC caps, encoder
+
+    if res == dc_status::DC_OK {
+        let stream = dc.streams[s].as_deref().unwrap();
+        res = crate::link_validation::link_validate_mode_timing(dc, stream.signal, li, &stream.timing);
+    }
+
+    let _ = adev;
+    res
+}
+
+/// `add_all_planes_for_stream` (dc_resource.c).
+fn add_all_planes_for_stream(dc: &mut dc, stream: usize, set: &[crate::dc::dc_validation_set], state: &mut dc_state)
+                             -> bool {
+    let Some(i) = set.iter().position(|s| s.stream == stream) else {
+        crate::linux::Line::new().s("Stream not found in set!").say();
+        return false;
+    };
+
+    for j in 0..set[i].plane_count as usize {
+        if !crate::dc_state::dc_state_add_plane(dc, stream, set[i].plane_states[j].unwrap(), state) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// `planes_changed_for_existing_stream` (dc_resource.c).
+fn planes_changed_for_existing_stream(context: &dc_state, stream: usize, set: &[crate::dc::dc_validation_set]) -> bool {
+    let Some(i) = (0..context.stream_count as usize).find(|&i| context.streams[i] == Some(stream)) else {
+        crate::linux::Line::new().s("Stream not found!").say();
+        return false;
+    };
+    let stream_status = &context.stream_status[i];
+
+    let Some(j) = set.iter().position(|s| s.stream == stream) else { return false };
+
+    if stream_status.plane_count != set[j].plane_count as i32 {
+        return true;
+    }
+
+    for i in 0..set[j].plane_count as usize {
+        if stream_status.plane_states[i] != set[j].plane_states[i] {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// `dc_validate_with_context` (dc_resource.c): bring `context` to the
+/// streams and planes of `set` and validate it. Removing a stream (and
+/// the writeback data it hands over) is a later stage, and so are SubVP
+/// phantoms; `calculate_pix_rate_divider` is not a member of dcn21_funcs.
+pub fn dc_validate_with_context(adev: &amdgpu_device, dc: &mut dc, set: &[crate::dc::dc_validation_set],
+                                context: &mut dc_state, validate_mode: u32) -> dc_status {
+    let mut unchanged_streams = alloc::vec::Vec::new();
+    let mut del_streams = alloc::vec::Vec::new();
+    let mut add_streams = alloc::vec::Vec::new();
+    let old_stream_count = context.stream_count as usize;
+    let mut res;
+
+    // First build a list of streams to be remove from current context
+    for i in 0..old_stream_count {
+        let stream = context.streams[i].unwrap();
+        if !set.iter().any(|s| s.stream == stream) {
+            del_streams.push(stream);
+        }
+    }
+
+    // Second, build a list of new streams
+    for s in set {
+        if !(0..old_stream_count).any(|j| context.streams[j] == Some(s.stream)) {
+            add_streams.push(s.stream);
+        }
+    }
+
+    // Build a list of unchanged streams which is necessary for handling
+    // planes change such as added, removed, and updated.
+    for s in set {
+        if !del_streams.contains(&s.stream) && !add_streams.contains(&s.stream) {
+            unchanged_streams.push(s.stream);
+        }
+    }
+
+    // Remove all planes for unchanged streams if planes changed
+    for &u in &unchanged_streams {
+        if planes_changed_for_existing_stream(context, u, set)
+            && !crate::dc_state::dc_state_rem_all_planes_for_stream(dc, u, context)
+        {
+            return dc_status::DC_FAIL_DETACH_SURFACES;
+        }
+    }
+
+    // Remove all planes for removed streams and then remove the streams
+    if !del_streams.is_empty() {
+        not_ported("dc_validate_with_context: removing a stream");
+        return dc_status::DC_ERROR_UNEXPECTED;
+    }
+
+    // Swap seamless boot stream to pipe 0 (if needed) to ensure pipe_ctx
+    // matches. This may change in the future if seamless_boot_stream can be
+    // multiple.
+    for i in 0..add_streams.len() {
+        let mut st = dc.streams[add_streams[i]].take().unwrap();
+        mark_seamless_boot_stream(dc, &mut st);
+        dc.streams[add_streams[i]] = Some(st);
+        if dc.streams[add_streams[i]].as_deref().unwrap().apply_seamless_boot_optimization && i != 0 {
+            add_streams.swap(0, i);
+            break;
+        }
+    }
+
+    // Add new streams and then add all planes for the new stream
+    for &a in &add_streams {
+        calculate_phy_pix_clks(dc.streams[a].as_deref_mut().unwrap());
+        res = crate::dc_state::dc_state_add_stream(dc, context, a);
+        if res != dc_status::DC_OK {
+            return res;
+        }
+
+        if !add_all_planes_for_stream(dc, a, set, context) {
+            return dc_status::DC_FAIL_ATTACH_SURFACES;
+        }
+    }
+
+    // Add all planes for unchanged streams if planes changed
+    for &u in &unchanged_streams {
+        if planes_changed_for_existing_stream(context, u, set) && !add_all_planes_for_stream(dc, u, set, context) {
+            return dc_status::DC_FAIL_ATTACH_SURFACES;
+        }
+    }
+
+    // clear subvp cursor limitations
+    for i in 0..context.stream_count as usize {
+        let s = context.streams[i].unwrap();
+        crate::dc_state::dc_state_set_stream_subvp_cursor_limit(s, context, false);
+    }
+
+    res = dc_validate_global_state(dc, context, validate_mode);
+
+    let _ = adev;
+    res
+}
+
+/// `resource_get_opp_heads_for_otg_master` (dc_resource.c): the OPP heads
+/// of an OTG master's ODM slices, in order.
+pub fn resource_get_opp_heads_for_otg_master(res_ctx: &resource_context, otg_master: usize) -> alloc::vec::Vec<usize> {
+    let mut opp_heads = alloc::vec::Vec::new();
+
+    if !resource_is_pipe_type(&res_ctx.pipe_ctx[otg_master], pipe_type::OTG_MASTER) {
+        crate::linux::Line::new().s("resource_get_opp_heads_for_otg_master called from a non OTG master").say();
+        return opp_heads;
+    }
+    let mut opp_head = Some(res_ctx.pipe_ctx[otg_master].pipe_idx as usize);
+    while let Some(h) = opp_head {
+        opp_heads.push(h);
+        opp_head = res_ctx.pipe_ctx[h].next_odm_pipe;
+    }
+    opp_heads
+}
+
+/// `resource_is_odm_topology_changed` (dc_resource.c): the OPP heads of the
+/// two OTG masters differ.
+pub fn resource_is_odm_topology_changed(res_a: &resource_context, otg_master_a: &pipe_ctx, res_b: &resource_context,
+                                        otg_master_b: &pipe_ctx) -> bool {
+    if !resource_is_pipe_type(otg_master_a, pipe_type::OTG_MASTER)
+        || !resource_is_pipe_type(otg_master_b, pipe_type::OTG_MASTER)
+    {
+        return true;
+    }
+
+    let mut opp_head_a = Some(otg_master_a);
+    let mut opp_head_b = Some(otg_master_b);
+    while let (Some(a), Some(b)) = (opp_head_a, opp_head_b) {
+        if a.stream_res.opp != b.stream_res.opp {
+            return true;
+        }
+        if a.next_odm_pipe.is_some() != b.next_odm_pipe.is_some() {
+            return true;
+        }
+        opp_head_a = a.next_odm_pipe.map(|n| &res_a.pipe_ctx[n]);
+        opp_head_b = b.next_odm_pipe.map(|n| &res_b.pipe_ctx[n]);
+    }
+
+    false
+}

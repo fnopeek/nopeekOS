@@ -24511,3 +24511,439 @@ pub const DC_SW_VAR_D_X: u32 = 0x1e;
 pub const DC_SW_VAR_R: u32 = 0xf;
 /// ?
 pub const DC_SW_VAR_R_X: u32 = 0x1f;
+
+// Commit streams: validation, accelerated mode, power-down, clocks (dc.c, dce110_hwseq.c, command_table2.c, rn_clk_mgr_vbios_smu.c)
+/// The value of `VBIOSSMC_MSG_SetDispclkFreq` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOSSMC_MSG_SetDispclkFreq: u32 = 0x4;
+/// The value of `VBIOSSMC_MSG_SetDppclkFreq` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOSSMC_MSG_SetDppclkFreq: u32 = 0x7;
+/// The value of `VBIOSSMC_MSG_SetHardMinDcfclkByFreq` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOSSMC_MSG_SetHardMinDcfclkByFreq: u32 = 0x8;
+/// The value of `VBIOSSMC_MSG_SetMinDeepSleepDcfclk` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOSSMC_MSG_SetMinDeepSleepDcfclk: u32 = 0x9;
+/// The value of `VBIOSSMC_MSG_SetPhyclkVoltageByFreq` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOSSMC_MSG_SetPhyclkVoltageByFreq: u32 = 0xa;
+/// The value of `VBIOSSMC_MSG_SetDisplayCount` in ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+pub const RN_VBIOSSMC_MSG_SetDisplayCount: u32 = 0xc;
+/// include/atombios.h:92
+pub const ATOM_COMBOPHY_PLL0: u32 = 0x14;
+/// include/atombios.h:93
+pub const ATOM_COMBOPHY_PLL1: u32 = 0x15;
+/// include/atombios.h:94
+pub const ATOM_COMBOPHY_PLL2: u32 = 0x16;
+/// include/atombios.h:95
+pub const ATOM_COMBOPHY_PLL3: u32 = 0x17;
+/// include/atombios.h:96
+pub const ATOM_COMBOPHY_PLL4: u32 = 0x18;
+/// include/atombios.h:97
+pub const ATOM_COMBOPHY_PLL5: u32 = 0x19;
+/// include/atombios.h:79
+pub const ATOM_PPLL0: u32 = 0x2;
+/// include/atombios.h:86
+pub const ATOM_GCK_DFS: u32 = 0x8;
+/// include/atombios.h:90
+pub const ATOM_DP_DTO: u32 = 0xb;
+/// include/atombios.h:99
+pub const ATOM_PPLL_INVALID: u32 = 0xff;
+/// amdgpu/ObjectID.h:49
+pub const ENCODER_OBJECT_ID_INTERNAL_LVDS: u32 = 0x1;
+/// amdgpu/ObjectID.h:50
+pub const ENCODER_OBJECT_ID_INTERNAL_TMDS1: u32 = 0x2;
+/// amdgpu/ObjectID.h:51
+pub const ENCODER_OBJECT_ID_INTERNAL_TMDS2: u32 = 0x3;
+/// amdgpu/ObjectID.h:52
+pub const ENCODER_OBJECT_ID_INTERNAL_DAC1: u32 = 0x4;
+/// amdgpu/ObjectID.h:53
+pub const ENCODER_OBJECT_ID_INTERNAL_DAC2: u32 = 0x5;
+/// amdgpu/ObjectID.h:65
+pub const ENCODER_OBJECT_ID_INTERNAL_LVTM1: u32 = 0xf;
+/// amdgpu/ObjectID.h:68
+pub const ENCODER_OBJECT_ID_HDMI_INTERNAL: u32 = 0x12;
+/// amdgpu/ObjectID.h:70
+pub const ENCODER_OBJECT_ID_TRAVIS: u32 = 0x23;
+/// amdgpu/ObjectID.h:71
+pub const ENCODER_OBJECT_ID_NUTMEG: u32 = 0x22;
+/// amdgpu/ObjectID.h:75
+pub const ENCODER_OBJECT_ID_INTERNAL_KLDSCP_TMDS1: u32 = 0x13;
+/// amdgpu/ObjectID.h:77
+pub const ENCODER_OBJECT_ID_INTERNAL_KLDSCP_DAC1: u32 = 0x15;
+/// amdgpu/ObjectID.h:78
+pub const ENCODER_OBJECT_ID_INTERNAL_KLDSCP_DAC2: u32 = 0x16;
+/// amdgpu/ObjectID.h:80
+pub const ENCODER_OBJECT_ID_MVPU_FPGA: u32 = 0x18;
+/// amdgpu/ObjectID.h:81
+pub const ENCODER_OBJECT_ID_INTERNAL_DDI: u32 = 0x19;
+/// amdgpu/ObjectID.h:86
+pub const ENCODER_OBJECT_ID_INTERNAL_UNIPHY: u32 = 0x1e;
+/// amdgpu/ObjectID.h:87
+pub const ENCODER_OBJECT_ID_INTERNAL_KLDSCP_LVTMA: u32 = 0x1f;
+/// amdgpu/ObjectID.h:88
+pub const ENCODER_OBJECT_ID_INTERNAL_UNIPHY1: u32 = 0x20;
+/// amdgpu/ObjectID.h:89
+pub const ENCODER_OBJECT_ID_INTERNAL_UNIPHY2: u32 = 0x21;
+/// amdgpu/ObjectID.h:91
+pub const ENCODER_OBJECT_ID_INTERNAL_UNIPHY3: u32 = 0x25;
+/// amdgpu/ObjectID.h:90
+pub const ENCODER_OBJECT_ID_INTERNAL_VCE: u32 = 0x24;
+/// amdgpu/ObjectID.h:46
+pub const ENCODER_OBJECT_ID_NONE: u32 = 0x0;
+/// include/atombios.h:874
+pub const ATOM_ENCODER_MODE_DVI: u32 = 0x2;
+/// include/atombios.h:875
+pub const ATOM_ENCODER_MODE_HDMI: u32 = 0x3;
+/// include/atombios.h:873
+pub const ATOM_ENCODER_MODE_LVDS: u32 = 0x1;
+/// include/atombios.h:877
+pub const ATOM_ENCODER_MODE_DP_AUDIO: u32 = 0x5;
+/// include/atombios.h:872
+pub const ATOM_ENCODER_MODE_DP: u32 = 0x0;
+/// include/atombios.h:880
+pub const ATOM_ENCODER_MODE_CRT: u32 = 0xf;
+/// ?
+pub const TRANSMITTER_COLOR_DEPTH_24: u32 = 0x0;
+/// ?
+pub const TRANSMITTER_COLOR_DEPTH_30: u32 = 0x1;
+/// ?
+pub const TRANSMITTER_COLOR_DEPTH_36: u32 = 0x2;
+/// ?
+pub const TRANSMITTER_COLOR_DEPTH_48: u32 = 0x3;
+/// include/atombios.h:2046
+pub const PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_DIS: u32 = 0x0;
+/// include/atombios.h:2047
+pub const PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_5_4: u32 = 0x1;
+/// include/atombios.h:2048
+pub const PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_3_2: u32 = 0x2;
+/// include/atombios.h:2049
+pub const PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_2_1: u32 = 0x3;
+/// include/atombios.h:2036
+pub const PIXEL_CLOCK_V7_MISC_FORCE_PROG_PPLL: u32 = 0x1;
+/// include/atombios.h:2037
+pub const PIXEL_CLOCK_V7_MISC_PROG_PHYPLL: u32 = 0x2;
+/// include/atombios.h:2038
+pub const PIXEL_CLOCK_V7_MISC_YUV420_MODE: u32 = 0x4;
+/// include/atombios.h:2041
+pub const PIXEL_CLOCK_V7_MISC_REF_DIV_SRC_XTALIN: u32 = 0x0;
+/// include/atombios.h:2043
+pub const PIXEL_CLOCK_V7_MISC_REF_DIV_SRC_GENLK: u32 = 0x20;
+/// include/atombios.h:2039
+pub const PIXEL_CLOCK_V7_MISC_DVI_DUALLINK_EN: u32 = 0x8;
+/// ?
+pub const DMUB_CMD__VBIOS_SET_PIXEL_CLOCK: u32 = 0x2;
+/// The value of `ENCODER_ID_UNKNOWN` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_UNKNOWN: u32 = 0x0;
+/// The value of `ENCODER_ID_INTERNAL_LVDS` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_LVDS: u32 = 0x1;
+/// The value of `ENCODER_ID_INTERNAL_TMDS1` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_TMDS1: u32 = 0x2;
+/// The value of `ENCODER_ID_INTERNAL_TMDS2` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_TMDS2: u32 = 0x3;
+/// The value of `ENCODER_ID_INTERNAL_DAC1` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_DAC1: u32 = 0x4;
+/// The value of `ENCODER_ID_INTERNAL_DAC2` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_DAC2: u32 = 0x5;
+/// The value of `ENCODER_ID_INTERNAL_LVTM1` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_LVTM1: u32 = 0x6;
+/// The value of `ENCODER_ID_INTERNAL_HDMI` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_HDMI: u32 = 0x7;
+/// The value of `ENCODER_ID_INTERNAL_KLDSCP_TMDS1` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_KLDSCP_TMDS1: u32 = 0x8;
+/// The value of `ENCODER_ID_INTERNAL_KLDSCP_DAC1` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_KLDSCP_DAC1: u32 = 0x9;
+/// The value of `ENCODER_ID_INTERNAL_KLDSCP_DAC2` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_KLDSCP_DAC2: u32 = 0xa;
+/// The value of `ENCODER_ID_EXTERNAL_MVPU_FPGA` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_EXTERNAL_MVPU_FPGA: u32 = 0xb;
+/// The value of `ENCODER_ID_INTERNAL_DDI` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_DDI: u32 = 0xc;
+/// The value of `ENCODER_ID_INTERNAL_UNIPHY` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_UNIPHY: u32 = 0xd;
+/// The value of `ENCODER_ID_INTERNAL_KLDSCP_LVTMA` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_KLDSCP_LVTMA: u32 = 0xe;
+/// The value of `ENCODER_ID_INTERNAL_UNIPHY1` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_UNIPHY1: u32 = 0xf;
+/// The value of `ENCODER_ID_INTERNAL_UNIPHY2` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_UNIPHY2: u32 = 0x10;
+/// The value of `ENCODER_ID_EXTERNAL_NUTMEG` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_EXTERNAL_NUTMEG: u32 = 0x11;
+/// The value of `ENCODER_ID_EXTERNAL_TRAVIS` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_EXTERNAL_TRAVIS: u32 = 0x12;
+/// The value of `ENCODER_ID_INTERNAL_WIRELESS` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_WIRELESS: u32 = 0x13;
+/// The value of `ENCODER_ID_INTERNAL_UNIPHY3` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_UNIPHY3: u32 = 0x14;
+/// The value of `ENCODER_ID_INTERNAL_VIRTUAL` in ../display/dc/bios/command_table2.c
+pub const CT_ENCODER_ID_INTERNAL_VIRTUAL: u32 = 0x15;
+/// The value of `sizeof(struct set_pixel_clock_parameter_v1_7)` in ../display/dc/bios/command_table2.c
+pub const SIZEOF_set_pixel_clock_parameter_v1_7: u32 = 0x10;
+/// The value of `sizeof(struct dmub_rb_cmd_set_pixel_clock)` in ../display/dc/bios/command_table2.c
+pub const SIZEOF_dmub_rb_cmd_set_pixel_clock: u32 = 0x14;
+/// The value of `offsetof(struct dmub_rb_cmd_set_pixel_clock, pixel_clock)` in ../display/dc/bios/command_table2.c
+pub const SPC_DATA: u32 = 0x4;
+/// The value of `offsetof(struct set_pixel_clock_parameter_v1_7, pixclk_100hz)` in ../display/dc/bios/command_table2.c
+pub const SPC7_PIXCLK_100HZ: u32 = 0x0;
+/// The value of `offsetof(struct set_pixel_clock_parameter_v1_7, pll_id)` in ../display/dc/bios/command_table2.c
+pub const SPC7_PLL_ID: u32 = 0x4;
+/// The value of `offsetof(struct set_pixel_clock_parameter_v1_7, encoderobjid)` in ../display/dc/bios/command_table2.c
+pub const SPC7_ENCODEROBJID: u32 = 0x5;
+/// The value of `offsetof(struct set_pixel_clock_parameter_v1_7, encoder_mode)` in ../display/dc/bios/command_table2.c
+pub const SPC7_ENCODER_MODE: u32 = 0x6;
+/// The value of `offsetof(struct set_pixel_clock_parameter_v1_7, miscinfo)` in ../display/dc/bios/command_table2.c
+pub const SPC7_MISCINFO: u32 = 0x7;
+/// The value of `offsetof(struct set_pixel_clock_parameter_v1_7, crtc_id)` in ../display/dc/bios/command_table2.c
+pub const SPC7_CRTC_ID: u32 = 0x8;
+/// The value of `offsetof(struct set_pixel_clock_parameter_v1_7, deep_color_ratio)` in ../display/dc/bios/command_table2.c
+pub const SPC7_DEEP_COLOR_RATIO: u32 = 0x9;
+/// display/dc/dio/dcn10/dcn10_link_encoder.c:55
+pub const DCN10_DIG_FE_SOURCE_SELECT_DIGA: u32 = 0x1;
+/// display/dc/dio/dcn10/dcn10_link_encoder.c:56
+pub const DCN10_DIG_FE_SOURCE_SELECT_DIGB: u32 = 0x2;
+/// display/dc/dio/dcn10/dcn10_link_encoder.c:57
+pub const DCN10_DIG_FE_SOURCE_SELECT_DIGC: u32 = 0x4;
+/// display/dc/dio/dcn10/dcn10_link_encoder.c:58
+pub const DCN10_DIG_FE_SOURCE_SELECT_DIGD: u32 = 0x8;
+/// display/dc/dio/dcn10/dcn10_link_encoder.c:59
+pub const DCN10_DIG_FE_SOURCE_SELECT_DIGE: u32 = 0x10;
+/// display/dc/dio/dcn10/dcn10_link_encoder.c:60
+pub const DCN10_DIG_FE_SOURCE_SELECT_DIGF: u32 = 0x20;
+/// display/dc/dio/dcn10/dcn10_link_encoder.c:61
+pub const DCN10_DIG_FE_SOURCE_SELECT_DIGG: u32 = 0x40;
+/// ?
+pub const DP_PANEL_MODE_DEFAULT: u32 = 0x0;
+/// ?
+pub const DP_PANEL_MODE_EDP: u32 = 0x1;
+/// ?
+pub const DP_PANEL_MODE_SPECIAL: u32 = 0x2;
+/// ?
+pub const TRANSMITTER_CONTROL_DISABLE: u32 = 0x0;
+/// ?
+pub const TRANSMITTER_CONTROL_BACKLIGHT_ON: u32 = 0x3;
+/// ?
+pub const TRANSMITTER_CONTROL_BACKLIGHT_OFF: u32 = 0x2;
+/// ?
+pub const TIMING_3D_FORMAT_NONE: u32 = 0x0;
+/// ?
+pub const TIMING_3D_FORMAT_FRAME_ALTERNATE: u32 = 0x1;
+/// ?
+pub const CONNECTOR_ID_VIRTUAL: u32 = 0x64;
+/// ?
+pub const dc_link_fec_not_ready: u32 = 0x0;
+/// display/dc/hwss/dce110/dce110_hwseq.c:83
+pub const OLED_PRE_T11_DELAY: u32 = 0x96;
+/// display/dc/hwss/dce110/dce110_hwseq.c:82
+pub const OLED_POST_T7_DELAY: u32 = 0x64;
+/// display/dc/hwss/dce110/dce110_hwseq.c:1033
+pub const LVTMA_CONTROL_LCD_BLON: u32 = 0x3;
+/// display/dc/hwss/dce110/dce110_hwseq.c:1037
+pub const LVTMA_CONTROL_LCD_BLOFF: u32 = 0x2;
+/// ?
+pub const DP_SOURCE_SEQUENCE: u32 = 0x30c;
+/// ?
+pub const DP_POWER_STATE_D0: u32 = 0x1;
+/// ?
+pub const DP_POWER_STATE_D3: u32 = 0x2;
+/// ?
+pub const DPCD_SOURCE_SEQ_AFTER_DISABLE_DP_VID_STREAM: u32 = 0x9;
+/// ?
+pub const DPCD_SOURCE_SEQ_AFTER_FIFO_STEER_RESET: u32 = 0xa;
+/// ?
+pub const TIMING_3D_FORMAT_INBAND_FA: u32 = 0x2;
+/// ?
+pub const DMUB_GPINT__IDLE_OPT_NOTIFY_STREAM_MASK: u32 = 0x8;
+/// ?
+pub const H_TIMING_NO_DIV: u32 = 0x0;
+/// ?
+pub const H_TIMING_DIV_BY2: u32 = 0x1;
+/// display/dc/optc/dcn10/dcn10_optc.c:42
+pub const STATIC_SCREEN_EVENT_MASK_RANGETIMING_DOUBLE_BUFFER_UPDATE_EN: u32 = 0x100;
+/// ?
+pub const CLAMPING_LIMITED_RANGE_8BPC: u32 = 0x1;
+/// ?
+pub const CLAMPING_LIMITED_RANGE_10BPC: u32 = 0x2;
+/// ?
+pub const CLAMPING_LIMITED_RANGE_12BPC: u32 = 0x3;
+/// ?
+pub const DP_PIXEL_ENCODING_TYPE_YCBCR422: u32 = 0x1;
+/// ?
+pub const DP_PIXEL_ENCODING_TYPE_YCBCR444: u32 = 0x2;
+/// ?
+pub const DP_PIXEL_ENCODING_TYPE_Y_ONLY: u32 = 0x4;
+/// ?
+pub const DP_PIXEL_ENCODING_TYPE_YCBCR420: u32 = 0x5;
+/// ?
+pub const DP_PIXEL_ENCODING_TYPE_RGB444: u32 = 0x0;
+/// ?
+pub const DP_COMPONENT_PIXEL_DEPTH_6BPC: u32 = 0x0;
+/// ?
+pub const DP_COMPONENT_PIXEL_DEPTH_8BPC: u32 = 0x1;
+/// ?
+pub const DP_COMPONENT_PIXEL_DEPTH_10BPC: u32 = 0x2;
+/// ?
+pub const DP_COMPONENT_PIXEL_DEPTH_12BPC: u32 = 0x3;
+/// ?
+pub const DP_COMPONENT_PIXEL_DEPTH_16BPC: u32 = 0x4;
+/// ?
+pub const DPCD_SOURCE_SEQ_AFTER_DP_STREAM_ATTR: u32 = 0x2;
+/// ?
+pub const DPCD_SOURCE_SEQ_AFTER_UPDATE_INFO_FRAME: u32 = 0x3;
+/// ?
+pub const DPCD_SOURCE_SEQ_AFTER_CONNECT_DIG_FE_OTG: u32 = 0x1;
+/// include/atombios.h:6981
+pub const ATOM_S6_CRITICAL_STATE: u32 = 0x100;
+/// include/atombios.h:7053
+pub const ATOM_S6_CRITICAL_STATE_SHIFT: u32 = 0x8;
+/// ?
+pub const PIPE_GATING_CONTROL_DISABLE: u32 = 0x0;
+/// ?
+pub const ABM_LEVEL_IMMEDIATE_DISABLE: u32 = 0xff;
+/// ?
+pub const SET_ABM_PIPE_IMMEDIATELY_DISABLE: u32 = 0xff;
+/// display/dc/dio/dcn10/dcn10_link_encoder.c:54
+pub const DCN10_DIG_FE_SOURCE_SELECT_INVALID: u32 = 0x0;
+/// display/dc/link/link_dpms.c:74
+pub const LINK_TRAINING_ATTEMPTS: u32 = 0x4;
+/// ?
+pub const DP_DOWNSPREAD_CTRL: u32 = 0x107;
+/// ?
+pub const dc_link_fec_ready: u32 = 0x1;
+/// ?
+pub const DPCD_SOURCE_SEQ_AFTER_CONNECT_DIG_FE_BE: u32 = 0x4;
+/// ?
+pub const DPCD_SOURCE_SEQ_AFTER_ENABLE_DP_VID_STREAM: u32 = 0x8;
+/// ?
+pub const DPCD_SOURCE_SEQ_AFTER_ENABLE_LINK_PHY: u32 = 0x5;
+/// include/atomfirmware.h:1308
+pub const AMD_EXT_DISPLAY_PATH_CAPS__DP_EARLY_8B10B_TPS2: u32 = 0x6;
+/// ?
+pub const DP_128b_132b_TPS1: u32 = 0x5;
+/// ?
+pub const DP_128b_132b_TPS2: u32 = 0x6;
+/// ?
+pub const DP_128b_132b_TPS2_CDS: u32 = 0x7;
+/// ?
+pub const DPCD_128b_132b_TPS1: u32 = 0x1;
+/// ?
+pub const DPCD_128b_132b_TPS2: u32 = 0x2;
+/// ?
+pub const DPCD_128b_132b_TPS2_CDS: u32 = 0x3;
+/// ?
+pub const DPCD_REV_12: u32 = 0x12;
+/// ?
+pub const DPCD_REV_13: u32 = 0x13;
+/// ?
+pub const DPCD_SOURCE_SEQ_AFTER_SET_SOURCE_PATTERN: u32 = 0x6;
+/// ?
+pub const DPCD_TRAINING_PATTERN_1: u32 = 0x1;
+/// ?
+pub const DPCD_TRAINING_PATTERN_2: u32 = 0x2;
+/// ?
+pub const DPCD_TRAINING_PATTERN_3: u32 = 0x3;
+/// ?
+pub const DPCD_TRAINING_PATTERN_4: u32 = 0x7;
+/// ?
+pub const DPCD_TRAINING_PATTERN_VIDEOIDLE: u32 = 0x0;
+/// ?
+pub const DP_EDP_CONFIGURATION_SET: u32 = 0x10a;
+/// ?
+pub const DP_FEC_CONFIGURATION: u32 = 0x120;
+/// ?
+pub const DP_LANE0_1_STATUS: u32 = 0x202;
+/// ?
+pub const DP_LANE0_1_STATUS_PHY_REPEATER1: u32 = 0xf0030;
+/// display/dc/link/protocols/link_dp_training.c:1057
+pub const DP_MAIN_LINK_CHANNEL_CODING_SET: u32 = 0x108;
+/// ?
+pub const DP_REPEATER_CONFIGURATION_AND_STATUS_SIZE: u32 = 0x50;
+/// ?
+pub const DPRX: u32 = 0x0;
+/// ?
+pub const DP_TEST_PATTERN_128b_132b_TPS1_TRAINING_MODE: u32 = 0x18;
+/// ?
+pub const DP_TEST_PATTERN_128b_132b_TPS2_TRAINING_MODE: u32 = 0x19;
+/// ?
+pub const DP_TEST_PATTERN_80BIT_CUSTOM: u32 = 0x4;
+/// ?
+pub const DP_TEST_PATTERN_CP2520_1: u32 = 0x5;
+/// ?
+pub const DP_TEST_PATTERN_CP2520_2: u32 = 0x6;
+/// ?
+pub const DP_TEST_PATTERN_CP2520_3: u32 = 0x7;
+/// ?
+pub const DP_TEST_PATTERN_D102: u32 = 0x1;
+/// ?
+pub const DP_TEST_PATTERN_PRBS7: u32 = 0x3;
+/// ?
+pub const DP_TEST_PATTERN_SYMBOL_ERROR: u32 = 0x2;
+/// ?
+pub const DP_TEST_PATTERN_TRAINING_PATTERN1: u32 = 0x14;
+/// ?
+pub const DP_TEST_PATTERN_TRAINING_PATTERN2: u32 = 0x15;
+/// ?
+pub const DP_TEST_PATTERN_TRAINING_PATTERN3: u32 = 0x16;
+/// ?
+pub const DP_TEST_PATTERN_TRAINING_PATTERN4: u32 = 0x17;
+/// ?
+pub const DP_TEST_PATTERN_UNSUPPORTED: u32 = 0x21;
+/// ?
+pub const DP_TEST_PATTERN_VIDEO_MODE: u32 = 0x0;
+/// display/dc/link/protocols/link_dp_training.c:1333
+pub const DP_TRAINING_LANE0_SET: u32 = 0x103;
+/// ?
+pub const DP_TRAINING_LANE0_SET_PHY_REPEATER1: u32 = 0xf0011;
+/// ?
+pub const DP_TRAINING_PATTERN_SEQUENCE_1: u32 = 0x0;
+/// ?
+pub const DP_TRAINING_PATTERN_SEQUENCE_2: u32 = 0x1;
+/// ?
+pub const DP_TRAINING_PATTERN_SEQUENCE_3: u32 = 0x2;
+/// ?
+pub const DP_TRAINING_PATTERN_SEQUENCE_4: u32 = 0x3;
+/// ?
+pub const DP_TRAINING_PATTERN_SET_PHY_REPEATER1: u32 = 0xf0010;
+/// ?
+pub const DP_TRAINING_PATTERN_VIDEOIDLE: u32 = 0x4;
+/// ?
+pub const LANE_COUNT_DP_MAX: u32 = 0x4;
+/// ?
+pub const LINK_TRAINING_MAX_CR_RETRY: u32 = 0x64;
+/// ?
+pub const LINK_TRAINING_MAX_RETRY_COUNT: u32 = 0x5;
+/// display/dc/link/protocols/link_dp_training.c:56
+pub const LINK_TRAINING_RETRY_DELAY: u32 = 0x32;
+/// ?
+pub const LTTPR_MODE_NON_LTTPR: u32 = 0x1;
+/// ?
+pub const LTTPR_MODE_NON_TRANSPARENT: u32 = 0x3;
+/// ?
+pub const LTTPR_MODE_TRANSPARENT: u32 = 0x2;
+/// ?
+pub const POST_CURSOR2_DISABLED: u32 = 0x0;
+/// ?
+pub const PRE_EMPHASIS_DISABLED: u32 = 0x0;
+/// display/dc/link/protocols/link_dp_training.c:286
+pub const PRE_EMPHASIS_LEVEL1: u32 = 0x1;
+/// display/dc/link/protocols/link_dp_training.c:285
+pub const PRE_EMPHASIS_LEVEL2: u32 = 0x2;
+/// display/dc/link/protocols/link_dp_training.c:284
+pub const PRE_EMPHASIS_LEVEL3: u32 = 0x3;
+/// ?
+pub const PRE_EMPHASIS_MAX_LEVEL: u32 = 0x3;
+/// ?
+pub const SYMCLK_OFF_TX_OFF: u32 = 0x0;
+/// ?
+pub const SYMCLK_ON_TX_OFF: u32 = 0x2;
+/// ?
+pub const SYMCLK_ON_TX_ON: u32 = 0x1;
+/// ?
+pub const VOLTAGE_SWING_LEVEL0: u32 = 0x0;
+/// ?
+pub const VOLTAGE_SWING_MAX_LEVEL: u32 = 0x3;
+/// ?
+pub const GPIO_SIGNAL_SOURCE_PASS_THROUGH_STEREO_SYNC: u32 = 0x1;
+/// ?
+pub const TIMING_3D_FORMAT_DP_HDMI_INBAND_FA: u32 = 0x3;
+/// ?
+pub const TIMING_3D_FORMAT_SIDEBAND_FA: u32 = 0x4;
+/// ?
+pub const VIEW_3D_FORMAT_FRAME_SEQUENTIAL: u32 = 0x1;
+/// ?
+pub const DPCD_SOURCE_SEQ_AFTER_DISABLE_LINK_PHY: u32 = 0xc;

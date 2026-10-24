@@ -228,6 +228,12 @@ impl graphics_object_id {
         if self.r#type == object_type::OBJECT_TYPE_CONNECTOR { self.id } else { 0 }
     }
 
+    /// `dal_graphics_object_id_get_encoder_id`: the id of an encoder object,
+    /// ENCODER_ID_UNKNOWN (0) for any other object.
+    pub fn get_encoder_id(&self) -> u32 {
+        if self.r#type == object_type::OBJECT_TYPE_ENCODER { self.id } else { 0 }
+    }
+
     /// `dal_graphics_object_id_init`.
     pub fn init(id: u32, enum_id: object_enum_id, r#type: object_type) -> Self {
         graphics_object_id { id: id & 0xff, enum_id, r#type }
@@ -678,4 +684,14 @@ pub enum dc_edid_status {
     EDID_THE_SAME,
     EDID_FALL_BACK,
     EDID_PARTIAL_VALID,
+}
+
+/// `struct dc_static_screen_params` (dc_hw_types.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dc_static_screen_params {
+    pub force_trigger: bool,
+    pub cursor_update: bool,
+    pub surface_update: bool,
+    pub overlay_update: bool,
+    pub num_frames: u32,
 }

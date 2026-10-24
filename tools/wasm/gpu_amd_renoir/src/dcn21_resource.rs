@@ -439,6 +439,11 @@ const DEBUG_DEFAULTS_DRV: dc_debug_options = dc_debug_options {
     force_odm_combine: 0,
     force_odm_combine_4to1: 0,
     minimum_z8_residency_time: 0,
+    enable_driver_sequence_debug: false,
+    disable_idle_power_optimizations: false,
+    lttpr_mode_override: 0,
+    avoid_vbios_exec_table: false,
+    disable_extblankadj: false,
 };
 
 /// `dcn21_pp_smu_create` (dcn21_resource.c): a table that is not Renoir's is

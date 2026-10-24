@@ -12272,3 +12272,221 @@ DC_SW_VAR_D @ ../display/dc/resource/dcn20/dcn20_resource.c
 DC_SW_VAR_D_X @ ../display/dc/resource/dcn20/dcn20_resource.c
 DC_SW_VAR_R @ ../display/dc/resource/dcn20/dcn20_resource.c
 DC_SW_VAR_R_X @ ../display/dc/resource/dcn20/dcn20_resource.c
+# Commit streams: validation, accelerated mode, power-down, clocks (dc.c, dce110_hwseq.c, command_table2.c, rn_clk_mgr_vbios_smu.c)
+RN_VBIOSSMC_MSG_SetDispclkFreq = VBIOSSMC_MSG_SetDispclkFreq @ ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+RN_VBIOSSMC_MSG_SetDppclkFreq = VBIOSSMC_MSG_SetDppclkFreq @ ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+RN_VBIOSSMC_MSG_SetHardMinDcfclkByFreq = VBIOSSMC_MSG_SetHardMinDcfclkByFreq @ ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+RN_VBIOSSMC_MSG_SetMinDeepSleepDcfclk = VBIOSSMC_MSG_SetMinDeepSleepDcfclk @ ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+RN_VBIOSSMC_MSG_SetPhyclkVoltageByFreq = VBIOSSMC_MSG_SetPhyclkVoltageByFreq @ ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+RN_VBIOSSMC_MSG_SetDisplayCount = VBIOSSMC_MSG_SetDisplayCount @ ../display/dc/clk_mgr/dcn21/rn_clk_mgr_vbios_smu.c
+ATOM_COMBOPHY_PLL0 @ ../display/dc/bios/command_table2.c
+ATOM_COMBOPHY_PLL1 @ ../display/dc/bios/command_table2.c
+ATOM_COMBOPHY_PLL2 @ ../display/dc/bios/command_table2.c
+ATOM_COMBOPHY_PLL3 @ ../display/dc/bios/command_table2.c
+ATOM_COMBOPHY_PLL4 @ ../display/dc/bios/command_table2.c
+ATOM_COMBOPHY_PLL5 @ ../display/dc/bios/command_table2.c
+ATOM_PPLL0 @ ../display/dc/bios/command_table2.c
+ATOM_GCK_DFS @ ../display/dc/bios/command_table2.c
+ATOM_DP_DTO @ ../display/dc/bios/command_table2.c
+ATOM_PPLL_INVALID @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_LVDS @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_TMDS1 @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_TMDS2 @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_DAC1 @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_DAC2 @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_LVTM1 @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_HDMI_INTERNAL @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_TRAVIS @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_NUTMEG @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_KLDSCP_TMDS1 @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_KLDSCP_DAC1 @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_KLDSCP_DAC2 @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_MVPU_FPGA @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_DDI @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_UNIPHY @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_KLDSCP_LVTMA @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_UNIPHY1 @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_UNIPHY2 @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_UNIPHY3 @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_INTERNAL_VCE @ ../display/dc/bios/command_table2.c
+ENCODER_OBJECT_ID_NONE @ ../display/dc/bios/command_table2.c
+ATOM_ENCODER_MODE_DVI @ ../display/dc/bios/command_table2.c
+ATOM_ENCODER_MODE_HDMI @ ../display/dc/bios/command_table2.c
+ATOM_ENCODER_MODE_LVDS @ ../display/dc/bios/command_table2.c
+ATOM_ENCODER_MODE_DP_AUDIO @ ../display/dc/bios/command_table2.c
+ATOM_ENCODER_MODE_DP @ ../display/dc/bios/command_table2.c
+ATOM_ENCODER_MODE_CRT @ ../display/dc/bios/command_table2.c
+TRANSMITTER_COLOR_DEPTH_24 @ ../display/dc/bios/command_table2.c
+TRANSMITTER_COLOR_DEPTH_30 @ ../display/dc/bios/command_table2.c
+TRANSMITTER_COLOR_DEPTH_36 @ ../display/dc/bios/command_table2.c
+TRANSMITTER_COLOR_DEPTH_48 @ ../display/dc/bios/command_table2.c
+PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_DIS @ ../display/dc/bios/command_table2.c
+PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_5_4 @ ../display/dc/bios/command_table2.c
+PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_3_2 @ ../display/dc/bios/command_table2.c
+PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_2_1 @ ../display/dc/bios/command_table2.c
+PIXEL_CLOCK_V7_MISC_FORCE_PROG_PPLL @ ../display/dc/bios/command_table2.c
+PIXEL_CLOCK_V7_MISC_PROG_PHYPLL @ ../display/dc/bios/command_table2.c
+PIXEL_CLOCK_V7_MISC_YUV420_MODE @ ../display/dc/bios/command_table2.c
+PIXEL_CLOCK_V7_MISC_REF_DIV_SRC_XTALIN @ ../display/dc/bios/command_table2.c
+PIXEL_CLOCK_V7_MISC_REF_DIV_SRC_GENLK @ ../display/dc/bios/command_table2.c
+PIXEL_CLOCK_V7_MISC_DVI_DUALLINK_EN @ ../display/dc/bios/command_table2.c
+DMUB_CMD__VBIOS_SET_PIXEL_CLOCK @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_UNKNOWN = ENCODER_ID_UNKNOWN @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_LVDS = ENCODER_ID_INTERNAL_LVDS @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_TMDS1 = ENCODER_ID_INTERNAL_TMDS1 @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_TMDS2 = ENCODER_ID_INTERNAL_TMDS2 @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_DAC1 = ENCODER_ID_INTERNAL_DAC1 @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_DAC2 = ENCODER_ID_INTERNAL_DAC2 @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_LVTM1 = ENCODER_ID_INTERNAL_LVTM1 @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_HDMI = ENCODER_ID_INTERNAL_HDMI @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_KLDSCP_TMDS1 = ENCODER_ID_INTERNAL_KLDSCP_TMDS1 @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_KLDSCP_DAC1 = ENCODER_ID_INTERNAL_KLDSCP_DAC1 @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_KLDSCP_DAC2 = ENCODER_ID_INTERNAL_KLDSCP_DAC2 @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_EXTERNAL_MVPU_FPGA = ENCODER_ID_EXTERNAL_MVPU_FPGA @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_DDI = ENCODER_ID_INTERNAL_DDI @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_UNIPHY = ENCODER_ID_INTERNAL_UNIPHY @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_KLDSCP_LVTMA = ENCODER_ID_INTERNAL_KLDSCP_LVTMA @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_UNIPHY1 = ENCODER_ID_INTERNAL_UNIPHY1 @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_UNIPHY2 = ENCODER_ID_INTERNAL_UNIPHY2 @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_EXTERNAL_NUTMEG = ENCODER_ID_EXTERNAL_NUTMEG @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_EXTERNAL_TRAVIS = ENCODER_ID_EXTERNAL_TRAVIS @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_WIRELESS = ENCODER_ID_INTERNAL_WIRELESS @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_UNIPHY3 = ENCODER_ID_INTERNAL_UNIPHY3 @ ../display/dc/bios/command_table2.c
+CT_ENCODER_ID_INTERNAL_VIRTUAL = ENCODER_ID_INTERNAL_VIRTUAL @ ../display/dc/bios/command_table2.c
+SIZEOF_set_pixel_clock_parameter_v1_7 = sizeof(struct set_pixel_clock_parameter_v1_7) @ ../display/dc/bios/command_table2.c
+SIZEOF_dmub_rb_cmd_set_pixel_clock = sizeof(struct dmub_rb_cmd_set_pixel_clock) @ ../display/dc/bios/command_table2.c
+SPC_DATA = offsetof(struct dmub_rb_cmd_set_pixel_clock, pixel_clock) @ ../display/dc/bios/command_table2.c
+SPC7_PIXCLK_100HZ = offsetof(struct set_pixel_clock_parameter_v1_7, pixclk_100hz) @ ../display/dc/bios/command_table2.c
+SPC7_PLL_ID = offsetof(struct set_pixel_clock_parameter_v1_7, pll_id) @ ../display/dc/bios/command_table2.c
+SPC7_ENCODEROBJID = offsetof(struct set_pixel_clock_parameter_v1_7, encoderobjid) @ ../display/dc/bios/command_table2.c
+SPC7_ENCODER_MODE = offsetof(struct set_pixel_clock_parameter_v1_7, encoder_mode) @ ../display/dc/bios/command_table2.c
+SPC7_MISCINFO = offsetof(struct set_pixel_clock_parameter_v1_7, miscinfo) @ ../display/dc/bios/command_table2.c
+SPC7_CRTC_ID = offsetof(struct set_pixel_clock_parameter_v1_7, crtc_id) @ ../display/dc/bios/command_table2.c
+SPC7_DEEP_COLOR_RATIO = offsetof(struct set_pixel_clock_parameter_v1_7, deep_color_ratio) @ ../display/dc/bios/command_table2.c
+DCN10_DIG_FE_SOURCE_SELECT_DIGA @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+DCN10_DIG_FE_SOURCE_SELECT_DIGB @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+DCN10_DIG_FE_SOURCE_SELECT_DIGC @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+DCN10_DIG_FE_SOURCE_SELECT_DIGD @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+DCN10_DIG_FE_SOURCE_SELECT_DIGE @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+DCN10_DIG_FE_SOURCE_SELECT_DIGF @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+DCN10_DIG_FE_SOURCE_SELECT_DIGG @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+DP_PANEL_MODE_DEFAULT @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+DP_PANEL_MODE_EDP @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+DP_PANEL_MODE_SPECIAL @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+TRANSMITTER_CONTROL_DISABLE @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+TRANSMITTER_CONTROL_BACKLIGHT_ON @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+TRANSMITTER_CONTROL_BACKLIGHT_OFF @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+TIMING_3D_FORMAT_NONE @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+TIMING_3D_FORMAT_FRAME_ALTERNATE @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+CONNECTOR_ID_VIRTUAL @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+dc_link_fec_not_ready @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+OLED_PRE_T11_DELAY @ ../display/dc/hwss/dce110/dce110_hwseq.c
+OLED_POST_T7_DELAY @ ../display/dc/hwss/dce110/dce110_hwseq.c
+LVTMA_CONTROL_LCD_BLON @ ../display/dc/hwss/dce110/dce110_hwseq.c
+LVTMA_CONTROL_LCD_BLOFF @ ../display/dc/hwss/dce110/dce110_hwseq.c
+DP_SOURCE_SEQUENCE @ ../display/dc/link/link_dpms.c
+DP_POWER_STATE_D0 @ ../display/dc/link/link_dpms.c
+DP_POWER_STATE_D3 @ ../display/dc/link/link_dpms.c
+DPCD_SOURCE_SEQ_AFTER_DISABLE_DP_VID_STREAM @ ../display/dc/link/link_dpms.c
+DPCD_SOURCE_SEQ_AFTER_FIFO_STEER_RESET @ ../display/dc/link/link_dpms.c
+TIMING_3D_FORMAT_INBAND_FA @ ../display/dc/optc/dcn10/dcn10_optc.c
+DMUB_GPINT__IDLE_OPT_NOTIFY_STREAM_MASK @ ../display/dc/dc_dmub_srv.c
+H_TIMING_NO_DIV @ ../display/dc/optc/dcn10/dcn10_optc.c
+H_TIMING_DIV_BY2 @ ../display/dc/optc/dcn10/dcn10_optc.c
+STATIC_SCREEN_EVENT_MASK_RANGETIMING_DOUBLE_BUFFER_UPDATE_EN @ ../display/dc/optc/dcn10/dcn10_optc.c
+CLAMPING_LIMITED_RANGE_8BPC @ ../display/dc/optc/dcn10/dcn10_optc.c
+CLAMPING_LIMITED_RANGE_10BPC @ ../display/dc/optc/dcn10/dcn10_optc.c
+CLAMPING_LIMITED_RANGE_12BPC @ ../display/dc/optc/dcn10/dcn10_optc.c
+DP_PIXEL_ENCODING_TYPE_YCBCR422 @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DP_PIXEL_ENCODING_TYPE_YCBCR444 @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DP_PIXEL_ENCODING_TYPE_Y_ONLY @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DP_PIXEL_ENCODING_TYPE_YCBCR420 @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DP_PIXEL_ENCODING_TYPE_RGB444 @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DP_COMPONENT_PIXEL_DEPTH_6BPC @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DP_COMPONENT_PIXEL_DEPTH_8BPC @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DP_COMPONENT_PIXEL_DEPTH_10BPC @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DP_COMPONENT_PIXEL_DEPTH_12BPC @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DP_COMPONENT_PIXEL_DEPTH_16BPC @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DPCD_SOURCE_SEQ_AFTER_DP_STREAM_ATTR @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DPCD_SOURCE_SEQ_AFTER_UPDATE_INFO_FRAME @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+DPCD_SOURCE_SEQ_AFTER_CONNECT_DIG_FE_OTG @ ../display/dc/dio/dcn10/dcn10_stream_encoder.c
+ATOM_S6_CRITICAL_STATE @ ../display/dc/bios/bios_parser_helper.c
+ATOM_S6_CRITICAL_STATE_SHIFT @ ../display/dc/bios/bios_parser_helper.c
+PIPE_GATING_CONTROL_DISABLE @ ../display/dc/hwss/dce110/dce110_hwseq.c
+ABM_LEVEL_IMMEDIATE_DISABLE @ ../display/dc/hwss/dce110/dce110_hwseq.c
+SET_ABM_PIPE_IMMEDIATELY_DISABLE @ ../display/dc/hwss/dce110/dce110_hwseq.c
+DCN10_DIG_FE_SOURCE_SELECT_INVALID @ ../display/dc/dio/dcn10/dcn10_link_encoder.c
+LINK_TRAINING_ATTEMPTS @ ../display/dc/link/link_dpms.c
+DP_DOWNSPREAD_CTRL @ ../display/dc/link/link_dpms.c
+dc_link_fec_ready @ ../display/dc/link/link_dpms.c
+DPCD_SOURCE_SEQ_AFTER_CONNECT_DIG_FE_BE @ ../display/dc/link/link_dpms.c
+DPCD_SOURCE_SEQ_AFTER_ENABLE_DP_VID_STREAM @ ../display/dc/link/link_dpms.c
+DPCD_SOURCE_SEQ_AFTER_ENABLE_LINK_PHY @ ../display/dc/link/link_dpms.c
+AMD_EXT_DISPLAY_PATH_CAPS__DP_EARLY_8B10B_TPS2 @ ../display/dc/link/protocols/link_dp_training.c
+DP_128b_132b_TPS1 @ ../display/dc/link/protocols/link_dp_training.c
+DP_128b_132b_TPS2 @ ../display/dc/link/protocols/link_dp_training.c
+DP_128b_132b_TPS2_CDS @ ../display/dc/link/protocols/link_dp_training.c
+DPCD_128b_132b_TPS1 @ ../display/dc/link/protocols/link_dp_training.c
+DPCD_128b_132b_TPS2 @ ../display/dc/link/protocols/link_dp_training.c
+DPCD_128b_132b_TPS2_CDS @ ../display/dc/link/protocols/link_dp_training.c
+DPCD_REV_12 @ ../display/dc/link/protocols/link_dp_training.c
+DPCD_REV_13 @ ../display/dc/link/protocols/link_dp_training.c
+DPCD_SOURCE_SEQ_AFTER_SET_SOURCE_PATTERN @ ../display/dc/link/protocols/link_dp_training.c
+DPCD_TRAINING_PATTERN_1 @ ../display/dc/link/protocols/link_dp_training.c
+DPCD_TRAINING_PATTERN_2 @ ../display/dc/link/protocols/link_dp_training.c
+DPCD_TRAINING_PATTERN_3 @ ../display/dc/link/protocols/link_dp_training.c
+DPCD_TRAINING_PATTERN_4 @ ../display/dc/link/protocols/link_dp_training.c
+DPCD_TRAINING_PATTERN_VIDEOIDLE @ ../display/dc/link/protocols/link_dp_training.c
+DP_EDP_CONFIGURATION_SET @ ../display/dc/link/protocols/link_dp_training.c
+DP_FEC_CONFIGURATION @ ../display/dc/link/protocols/link_dp_training.c
+DP_LANE0_1_STATUS @ ../display/dc/link/protocols/link_dp_training.c
+DP_LANE0_1_STATUS_PHY_REPEATER1 @ ../display/dc/link/protocols/link_dp_training.c
+DP_MAIN_LINK_CHANNEL_CODING_SET @ ../display/dc/link/protocols/link_dp_training.c
+DP_REPEATER_CONFIGURATION_AND_STATUS_SIZE @ ../display/dc/link/protocols/link_dp_training.c
+DPRX @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_128b_132b_TPS1_TRAINING_MODE @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_128b_132b_TPS2_TRAINING_MODE @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_80BIT_CUSTOM @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_CP2520_1 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_CP2520_2 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_CP2520_3 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_D102 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_PRBS7 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_SYMBOL_ERROR @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_TRAINING_PATTERN1 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_TRAINING_PATTERN2 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_TRAINING_PATTERN3 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_TRAINING_PATTERN4 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_UNSUPPORTED @ ../display/dc/link/protocols/link_dp_training.c
+DP_TEST_PATTERN_VIDEO_MODE @ ../display/dc/link/protocols/link_dp_training.c
+DP_TRAINING_LANE0_SET @ ../display/dc/link/protocols/link_dp_training.c
+DP_TRAINING_LANE0_SET_PHY_REPEATER1 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TRAINING_PATTERN_SEQUENCE_1 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TRAINING_PATTERN_SEQUENCE_2 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TRAINING_PATTERN_SEQUENCE_3 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TRAINING_PATTERN_SEQUENCE_4 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TRAINING_PATTERN_SET_PHY_REPEATER1 @ ../display/dc/link/protocols/link_dp_training.c
+DP_TRAINING_PATTERN_VIDEOIDLE @ ../display/dc/link/protocols/link_dp_training.c
+LANE_COUNT_DP_MAX @ ../display/dc/link/protocols/link_dp_training.c
+LINK_TRAINING_MAX_CR_RETRY @ ../display/dc/link/protocols/link_dp_training.c
+LINK_TRAINING_MAX_RETRY_COUNT @ ../display/dc/link/protocols/link_dp_training.c
+LINK_TRAINING_RETRY_DELAY @ ../display/dc/link/protocols/link_dp_training.c
+LTTPR_MODE_NON_LTTPR @ ../display/dc/link/protocols/link_dp_training.c
+LTTPR_MODE_NON_TRANSPARENT @ ../display/dc/link/protocols/link_dp_training.c
+LTTPR_MODE_TRANSPARENT @ ../display/dc/link/protocols/link_dp_training.c
+POST_CURSOR2_DISABLED @ ../display/dc/link/protocols/link_dp_training.c
+PRE_EMPHASIS_DISABLED @ ../display/dc/link/protocols/link_dp_training.c
+PRE_EMPHASIS_LEVEL1 @ ../display/dc/link/protocols/link_dp_training.c
+PRE_EMPHASIS_LEVEL2 @ ../display/dc/link/protocols/link_dp_training.c
+PRE_EMPHASIS_LEVEL3 @ ../display/dc/link/protocols/link_dp_training.c
+PRE_EMPHASIS_MAX_LEVEL @ ../display/dc/link/protocols/link_dp_training.c
+SYMCLK_OFF_TX_OFF @ ../display/dc/link/protocols/link_dp_training.c
+SYMCLK_ON_TX_OFF @ ../display/dc/link/protocols/link_dp_training.c
+SYMCLK_ON_TX_ON @ ../display/dc/link/protocols/link_dp_training.c
+VOLTAGE_SWING_LEVEL0 @ ../display/dc/link/protocols/link_dp_training.c
+VOLTAGE_SWING_MAX_LEVEL @ ../display/dc/link/protocols/link_dp_training.c
+GPIO_SIGNAL_SOURCE_PASS_THROUGH_STEREO_SYNC @ ../display/dc/core/dc.c
+TIMING_3D_FORMAT_DP_HDMI_INBAND_FA @ ../display/dc/core/dc.c
+TIMING_3D_FORMAT_SIDEBAND_FA @ ../display/dc/core/dc.c
+VIEW_3D_FORMAT_FRAME_SEQUENTIAL @ ../display/dc/core/dc.c
+DPCD_SOURCE_SEQ_AFTER_DISABLE_LINK_PHY @ ../display/dc/link/link_dpms.c

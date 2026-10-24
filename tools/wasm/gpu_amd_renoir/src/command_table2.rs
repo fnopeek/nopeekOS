@@ -221,6 +221,11 @@ pub struct bp_transmitter_control {
     pub action: u32,
     pub engine_id: u32,
     pub transmitter: u32,
+    /// `enum clock_source_id`.
+    pub pll_id: u32,
+    /// `enum dc_color_depth`.
+    pub color_depth: u32,
+    pub lane_select: u32,
     pub connector_obj_id: crate::dc_types::graphics_object_id,
     pub hpd_sel: u32,
     pub lanes_number: u32,
@@ -441,6 +446,208 @@ pub fn bios_parser_enable_disp_power_gating(adev: &amdgpu_device, dc: &mut crate
         }
         Some(enable_disp_power_gating_fn::enable_disp_power_gating_fallback) => {
             crate::linux::Line::new().s("bios_parser_enable_disp_power_gating: fallback not ported").say();
+            crate::bios_parser2::bp_result::BP_RESULT_FAILURE
+        }
+    }
+}
+
+/// `struct bp_pixel_clock_parameters` (bios_parser_types.h), the members
+/// the v7 executor reads; `flags` is the raw view of its bitfield, and the
+/// enums are their values.
+#[derive(Default, Clone, Copy)]
+pub struct bp_pixel_clock_parameters {
+    pub controller_id: u32,
+    pub pll_id: crate::dce_clock_source::clock_source_id,
+    pub signal_type: u32,
+    pub target_pixel_clock_100hz: u32,
+    pub reference_divider: u32,
+    pub feedback_divider: u32,
+    pub fractional_feedback_divider: u32,
+    pub pixel_clock_post_divider: u32,
+    pub encoder_object_id: crate::dc_types::graphics_object_id,
+    pub dfs_bypass_display_clock: u32,
+    pub color_depth: u32,
+    pub flags: u32,
+    pub dio_se_pix_per_cycle: u32,
+}
+
+/// `struct program_pixel_clock_flags` bits.
+pub const FORCE_PROGRAMMING_OF_PLL: u32 = 1 << 0;
+pub const USE_E_CLOCK_AS_SOURCE_FOR_D_CLOCK: u32 = 1 << 1;
+pub const SET_EXTERNAL_REF_DIV_SRC: u32 = 1 << 2;
+pub const SET_DISPCLK_DFS_BYPASS: u32 = 1 << 3;
+pub const PROGRAM_PHY_PLL_ONLY: u32 = 1 << 4;
+pub const SUPPORT_YUV_420: u32 = 1 << 5;
+pub const SET_XTALIN_REF_SRC: u32 = 1 << 6;
+pub const SET_GENLOCK_REF_DIV_SRC: u32 = 1 << 7;
+
+/// `clock_source_id_to_atom` (command_table_helper2_dce112.c).
+fn clock_source_id_to_atom(id: crate::dce_clock_source::clock_source_id, atom_pll_id: &mut u32) -> bool {
+    use crate::dce_clock_source::clock_source_id::*;
+    use crate::regs::*;
+    *atom_pll_id = match id {
+        CLOCK_SOURCE_COMBO_PHY_PLL0 => ATOM_COMBOPHY_PLL0,
+        CLOCK_SOURCE_COMBO_PHY_PLL1 => ATOM_COMBOPHY_PLL1,
+        CLOCK_SOURCE_COMBO_PHY_PLL2 => ATOM_COMBOPHY_PLL2,
+        CLOCK_SOURCE_COMBO_PHY_PLL3 => ATOM_COMBOPHY_PLL3,
+        CLOCK_SOURCE_COMBO_PHY_PLL4 => ATOM_COMBOPHY_PLL4,
+        CLOCK_SOURCE_COMBO_PHY_PLL5 => ATOM_COMBOPHY_PLL5,
+        CLOCK_SOURCE_COMBO_DISPLAY_PLL0 => ATOM_PPLL0,
+        CLOCK_SOURCE_ID_DFS => ATOM_GCK_DFS,
+        CLOCK_SOURCE_ID_VCE => ATOM_DP_DTO,
+        CLOCK_SOURCE_ID_DP_DTO => ATOM_DP_DTO,
+        CLOCK_SOURCE_ID_UNDEFINED => {
+            // Should not happen
+            *atom_pll_id = ATOM_PPLL_INVALID;
+            return false;
+        }
+        _ => return false,
+    };
+    true
+}
+
+/// `dal_cmd_table_helper_encoder_id_to_atom2` (command_table_helper2.c).
+fn encoder_id_to_atom(id: u32) -> u8 {
+    use crate::regs::*;
+    (match id {
+        CT_ENCODER_ID_INTERNAL_LVDS => ENCODER_OBJECT_ID_INTERNAL_LVDS,
+        CT_ENCODER_ID_INTERNAL_TMDS1 => ENCODER_OBJECT_ID_INTERNAL_TMDS1,
+        CT_ENCODER_ID_INTERNAL_TMDS2 => ENCODER_OBJECT_ID_INTERNAL_TMDS2,
+        CT_ENCODER_ID_INTERNAL_DAC1 => ENCODER_OBJECT_ID_INTERNAL_DAC1,
+        CT_ENCODER_ID_INTERNAL_DAC2 => ENCODER_OBJECT_ID_INTERNAL_DAC2,
+        CT_ENCODER_ID_INTERNAL_LVTM1 => ENCODER_OBJECT_ID_INTERNAL_LVTM1,
+        CT_ENCODER_ID_INTERNAL_HDMI => ENCODER_OBJECT_ID_HDMI_INTERNAL,
+        CT_ENCODER_ID_EXTERNAL_TRAVIS => ENCODER_OBJECT_ID_TRAVIS,
+        CT_ENCODER_ID_EXTERNAL_NUTMEG => ENCODER_OBJECT_ID_NUTMEG,
+        CT_ENCODER_ID_INTERNAL_KLDSCP_TMDS1 => ENCODER_OBJECT_ID_INTERNAL_KLDSCP_TMDS1,
+        CT_ENCODER_ID_INTERNAL_KLDSCP_DAC1 => ENCODER_OBJECT_ID_INTERNAL_KLDSCP_DAC1,
+        CT_ENCODER_ID_INTERNAL_KLDSCP_DAC2 => ENCODER_OBJECT_ID_INTERNAL_KLDSCP_DAC2,
+        CT_ENCODER_ID_EXTERNAL_MVPU_FPGA => ENCODER_OBJECT_ID_MVPU_FPGA,
+        CT_ENCODER_ID_INTERNAL_DDI => ENCODER_OBJECT_ID_INTERNAL_DDI,
+        CT_ENCODER_ID_INTERNAL_UNIPHY => ENCODER_OBJECT_ID_INTERNAL_UNIPHY,
+        CT_ENCODER_ID_INTERNAL_KLDSCP_LVTMA => ENCODER_OBJECT_ID_INTERNAL_KLDSCP_LVTMA,
+        CT_ENCODER_ID_INTERNAL_UNIPHY1 => ENCODER_OBJECT_ID_INTERNAL_UNIPHY1,
+        CT_ENCODER_ID_INTERNAL_UNIPHY2 => ENCODER_OBJECT_ID_INTERNAL_UNIPHY2,
+        CT_ENCODER_ID_INTERNAL_UNIPHY3 => ENCODER_OBJECT_ID_INTERNAL_UNIPHY3,
+        CT_ENCODER_ID_INTERNAL_WIRELESS => ENCODER_OBJECT_ID_INTERNAL_VCE,
+        CT_ENCODER_ID_INTERNAL_VIRTUAL => ENCODER_OBJECT_ID_NONE,
+        CT_ENCODER_ID_UNKNOWN => ENCODER_OBJECT_ID_NONE,
+        // Invalid encoder id
+        _ => ENCODER_OBJECT_ID_NONE,
+    }) as u8
+}
+
+/// `dal_cmd_table_helper_encoder_mode_bp_to_atom2` (command_table_helper2.c).
+pub fn encoder_mode_bp_to_atom(s: u32, enable_dp_audio: bool) -> u32 {
+    use crate::regs::*;
+    match s {
+        LF_SIGNAL_TYPE_DVI_SINGLE_LINK | LF_SIGNAL_TYPE_DVI_DUAL_LINK => ATOM_ENCODER_MODE_DVI,
+        LF_SIGNAL_TYPE_HDMI_TYPE_A => ATOM_ENCODER_MODE_HDMI,
+        LF_SIGNAL_TYPE_LVDS => ATOM_ENCODER_MODE_LVDS,
+        LF_SIGNAL_TYPE_EDP | LF_SIGNAL_TYPE_DISPLAY_PORT_MST | LF_SIGNAL_TYPE_DISPLAY_PORT | LF_SIGNAL_TYPE_VIRTUAL => {
+            if enable_dp_audio { ATOM_ENCODER_MODE_DP_AUDIO } else { ATOM_ENCODER_MODE_DP }
+        }
+        LF_SIGNAL_TYPE_RGB => ATOM_ENCODER_MODE_CRT,
+        _ => ATOM_ENCODER_MODE_CRT,
+    }
+}
+
+/// `transmitter_color_depth_to_atom` (command_table_helper2_dce112.c).
+fn transmitter_color_depth_to_atom(id: u32) -> u8 {
+    use crate::regs::*;
+    (match id {
+        TRANSMITTER_COLOR_DEPTH_24 => PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_DIS,
+        TRANSMITTER_COLOR_DEPTH_30 => PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_5_4,
+        TRANSMITTER_COLOR_DEPTH_36 => PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_3_2,
+        TRANSMITTER_COLOR_DEPTH_48 => PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_2_1,
+        // Unhandle action in driver!
+        _ => 0,
+    }) as u8
+}
+
+/// `set_pixel_clock_dmcub` (command_table2.c).
+fn set_pixel_clock_dmcub(adev: &amdgpu_device, dc: &mut crate::dc::dc,
+                         clk: &[u8; crate::regs::SIZEOF_set_pixel_clock_parameter_v1_7 as usize]) {
+    use crate::regs::*;
+    let mut cmd = crate::dmub_srv::dmub_rb_cmd::default();
+    cmd.set_header(DMUB_CMD__VBIOS, DMUB_CMD__VBIOS_SET_PIXEL_CLOCK,
+        SIZEOF_dmub_rb_cmd_set_pixel_clock - SIZEOF_dmub_cmd_header);
+    cmd.0[SPC_DATA as usize..][..clk.len()].copy_from_slice(clk);
+    crate::dc_dmub_srv::dc_wake_and_execute_dmub_cmd(adev, dc, &mut cmd, DM_DMUB_WAIT_TYPE_WAIT);
+}
+
+/// `set_pixel_clock_v7` (command_table2.c). Executing the ATOM table
+/// itself (without `dmub_command_table`) is not ported: DCN 2.1's
+/// defaults route it to the DMCUB.
+fn set_pixel_clock_v7(adev: &amdgpu_device, dc: &mut crate::dc::dc, bp_params: &bp_pixel_clock_parameters)
+                      -> crate::bios_parser2::bp_result {
+    use crate::regs::*;
+    let mut result = crate::bios_parser2::bp_result::BP_RESULT_FAILURE;
+    let mut clk = [0u8; SIZEOF_set_pixel_clock_parameter_v1_7 as usize];
+    let mut controller_id = 0u8;
+    let mut pll_id = 0u32;
+
+    if clock_source_id_to_atom(bp_params.pll_id, &mut pll_id)
+        && controller_id_to_atom(bp_params.controller_id, &mut controller_id)
+    {
+        clk[SPC7_CRTC_ID as usize] = controller_id;
+        clk[SPC7_PLL_ID as usize] = pll_id as u8;
+        clk[SPC7_ENCODEROBJID as usize] = encoder_id_to_atom(bp_params.encoder_object_id.get_encoder_id());
+
+        clk[SPC7_ENCODER_MODE as usize] = encoder_mode_bp_to_atom(bp_params.signal_type, false) as u8;
+
+        clk[SPC7_PIXCLK_100HZ as usize..][..4].copy_from_slice(&bp_params.target_pixel_clock_100hz.to_le_bytes());
+
+        clk[SPC7_DEEP_COLOR_RATIO as usize] = transmitter_color_depth_to_atom(bp_params.color_depth);
+
+        let mut miscinfo = 0u32;
+        if bp_params.flags & FORCE_PROGRAMMING_OF_PLL != 0 {
+            miscinfo |= PIXEL_CLOCK_V7_MISC_FORCE_PROG_PPLL;
+        }
+
+        if bp_params.flags & PROGRAM_PHY_PLL_ONLY != 0 {
+            miscinfo |= PIXEL_CLOCK_V7_MISC_PROG_PHYPLL;
+        }
+
+        if bp_params.flags & SUPPORT_YUV_420 != 0 {
+            miscinfo |= PIXEL_CLOCK_V7_MISC_YUV420_MODE;
+        }
+
+        if bp_params.flags & SET_XTALIN_REF_SRC != 0 {
+            miscinfo |= PIXEL_CLOCK_V7_MISC_REF_DIV_SRC_XTALIN;
+        }
+
+        if bp_params.flags & SET_GENLOCK_REF_DIV_SRC != 0 {
+            miscinfo |= PIXEL_CLOCK_V7_MISC_REF_DIV_SRC_GENLK;
+        }
+
+        if bp_params.signal_type == LF_SIGNAL_TYPE_DVI_DUAL_LINK {
+            miscinfo |= PIXEL_CLOCK_V7_MISC_DVI_DUALLINK_EN;
+        }
+        clk[SPC7_MISCINFO as usize] = miscinfo as u8;
+
+        if dc.ctx.dmub_srv.is_some() && dc.debug.dmub_command_table {
+            set_pixel_clock_dmcub(adev, dc, &clk);
+            return crate::bios_parser2::bp_result::BP_RESULT_OK;
+        }
+
+        crate::linux::Line::new().s("set_pixel_clock_v7: the ATOM table path is not ported").say();
+        result = crate::bios_parser2::bp_result::BP_RESULT_FAILURE;
+    }
+    result
+}
+
+/// `bios_parser_set_pixel_clock` (bios_parser2.c). The fallback hands the
+/// parameters to v7 when the DMCUB runs the command tables.
+pub fn bios_parser_set_pixel_clock(adev: &amdgpu_device, dc: &mut crate::dc::dc, bp_params: &bp_pixel_clock_parameters)
+                                   -> crate::bios_parser2::bp_result {
+    match dc.ctx.dc_bios.cmd_tbl.set_pixel_clock {
+        None => crate::bios_parser2::bp_result::BP_RESULT_FAILURE,
+        Some(set_pixel_clock_fn::set_pixel_clock_v7) => set_pixel_clock_v7(adev, dc, bp_params),
+        Some(set_pixel_clock_fn::set_pixel_clock_fallback) => {
+            if dc.ctx.dmub_srv.is_some() && dc.debug.dmub_command_table {
+                return set_pixel_clock_v7(adev, dc, bp_params);
+            }
             crate::bios_parser2::bp_result::BP_RESULT_FAILURE
         }
     }

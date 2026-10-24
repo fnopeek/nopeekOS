@@ -546,13 +546,24 @@ fn main() {
         }
 
         let mut context = dc_state::dc_state_create_current_copy(&mut dc);
-        println!("dc_state_add_stream {}", dc_state::dc_state_add_stream(&mut dc, &mut context, stream) as i32);
+        let added = dc_state::dc_state_add_stream(&mut dc, &mut context, stream);
+        println!("dc_state_add_stream {}", added as i32);
         println!("dc_state_add_plane {}", dc_state::dc_state_add_plane(&mut dc, stream, plane, &mut context) as u32);
         dump_context(&dc, "added", &context);
         println!("dc_validate_global_state {}",
             dc_resource::dc_validate_global_state(&mut dc, &mut context, DC_VALIDATE_MODE_AND_PROGRAMMING) as i32);
         dump_context(&dc, "validated", &context);
         dump_bw("validated", &context);
+        // A stream the pool has no pipe for (every pipe fused off) is not
+        // committed, as in the oracle.
+        if added == dc_types::dc_status::DC_OK {
+            let streams = [stream];
+            let params = dc::dc_commit_streams_params {
+                streams: &streams,
+                power_source: dc_state::dc_power_source_type::DC_POWER_SOURCE_AC,
+            };
+            println!("dc_commit_streams {}", dc::dc_commit_streams(&adev, &mut dc, &params) as i32);
+        }
     }
     npk_sys::fake_card_echo(false);
 

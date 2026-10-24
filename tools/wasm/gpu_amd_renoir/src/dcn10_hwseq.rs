@@ -38,14 +38,13 @@ pub fn dcn10_verify_allow_pstate_change_high(adev: &amdgpu_device, dc: &dc) {
 /// `dcn10_wait_for_mpcc_disconnect` (dcn10_hwseq.c): for every MPCC the
 /// pipe's OPP still has a disconnect pending on, wait for it to go idle
 /// (if the OTG runs) and blank its HUBP.
-pub fn dcn10_wait_for_mpcc_disconnect(adev: &amdgpu_device, dc: &mut dc, pipe_idx: usize) {
+pub fn dcn10_wait_for_mpcc_disconnect(adev: &amdgpu_device, dc: &mut dc, pipe: &crate::dc_state::pipe_ctx) {
     let verify = dc.hwseq.as_deref().expect("hwseq").funcs.verify_allow_pstate_change_high;
 
     if dc.debug.sanity_checks {
         (verify.unwrap())(adev, dc);
     }
 
-    let pipe = dc.current_state.as_deref().expect("state").res_ctx.pipe_ctx[pipe_idx];
     let Some(opp_idx) = pipe.stream_res.opp else { return };
 
     for mpcc_inst in 0..MAX_PIPES {
@@ -170,19 +169,24 @@ pub fn dcn10_bios_golden_init(adev: &amdgpu_device, dc: &mut dc) {
 
 /// `dcn10_init_pipes` (dcn10_hwseq.c): blank every running OTG, disconnect
 /// and power down every plane, re-init every OTG and power gate the DSCs a
-/// running OTG does not use. `context` is the current state.
-pub fn dcn10_init_pipes(adev: &amdgpu_device, dc: &mut dc) {
+/// running OTG does not use. `context` is the state whose streams are kept
+/// on a seamless boot, dc's current state when None; the pipes reset are
+/// the current state's either way.
+pub fn dcn10_init_pipes(adev: &amdgpu_device, dc: &mut dc, context: Option<&crate::dc_state::dc_state>) {
     let funcs = dc.hwseq.as_deref().expect("hwseq").funcs;
-    let can_apply_seamless_boot = false;
     let mut tg_enabled = [false; MAX_PIPES];
     let pipe_count = dc.res_pool.as_deref().expect("pool").pipe_count as usize;
     let res_cap = dc.res_pool.as_deref().unwrap().res_cap.expect("res_cap");
 
-    // A stream with apply_seamless_boot_optimization would set
-    // can_apply_seamless_boot; the state holds none yet.
-    let _ = dc.current_state.as_deref().expect("state").stream_count;
+    let (ctx_pipes, can_apply_seamless_boot) = {
+        let context = context.unwrap_or_else(|| dc.current_state.as_deref().unwrap());
+        let pipes = context.res_ctx.pipe_ctx;
+        let seamless = (0..context.stream_count as usize)
+            .any(|i| dc.streams[context.streams[i].unwrap()].as_deref().unwrap().apply_seamless_boot_optimization);
+        (pipes, seamless)
+    };
 
-    let stream_of = |dc: &dc, i: usize| dc.current_state.as_deref().unwrap().res_ctx.pipe_ctx[i].stream;
+    let stream_of = |_dc: &dc, i: usize| ctx_pipes[i].stream;
 
     for i in 0..pipe_count {
         // A pipe with a stream is kept when booting seamlessly.
@@ -234,11 +238,23 @@ pub fn dcn10_init_pipes(adev: &amdgpu_device, dc: &mut dc) {
     }
 
     for i in 0..pipe_count {
-        // A running OTG with a stream is kept when booting seamlessly
-        // (tg_init, power_gated, tg_enabled[i]); there is no stream yet.
+        // There is assumption that pipe_ctx is not mapping irregularly to
+        // non-preferred front end. If pipe_ctx->stream is not NULL, we will
+        // use the pipe, so don't disable
         if can_apply_seamless_boot && stream_of(dc, i).is_some() {
-            tg_enabled[i] = true;
-            continue;
+            let pool = dc.res_pool.as_deref_mut().unwrap();
+            let ctg = pool.timing_generators[ctx_pipes[i].stream_res.tg.unwrap()].as_deref().unwrap();
+            if (ctg.funcs().is_tg_enabled.unwrap())(adev, ctg) {
+                // Enable double buffering for OTG_BLANK no matter if seamless
+                // boot is enabled or not to suppress global sync signals when
+                // OTG blanked. This is to prevent pipe from requesting data
+                // while in PSR.
+                let tg = pool.timing_generators[i].as_deref().unwrap();
+                (tg.funcs().tg_init.unwrap())(adev, tg);
+                pool.hubps[i].as_deref_mut().unwrap().base.power_gated = true;
+                tg_enabled[i] = true;
+                continue;
+            }
         }
 
         // Disable on the current state so the new one isn't cleared.
@@ -453,7 +469,7 @@ pub fn dcn10_init_hw(adev: &amdgpu_device, dc: &mut dc) {
         || !dc.config.seamless_boot_edp_requested
     {
         if !is_optimized_init_done {
-            (funcs.init_pipes.unwrap())(adev, dc);
+            (funcs.init_pipes.unwrap())(adev, dc, None);
             let hubbub = dc.res_pool.as_deref().unwrap().hubbub.as_deref().expect("hubbub");
             if let Some(f) = hubbub.funcs().allow_self_refresh_control {
                 f(adev, hubbub, !dc.debug.disable_stutter);
@@ -504,5 +520,123 @@ pub fn dcn10_init_hw(adev: &amdgpu_device, dc: &mut dc) {
         let mut clk_mgr = dc.clk_mgr.take().unwrap();
         (clk_mgr.funcs().notify_wm_ranges.unwrap())(adev, dc, &mut clk_mgr);
         dc.clk_mgr = Some(clk_mgr);
+    }
+}
+
+/// `apply_front_porch_workaround` (dcn10_hwseq.c).
+fn apply_front_porch_workaround(timing: &mut crate::dc_hw_types::dc_crtc_timing) {
+    if timing.flags.INTERLACE {
+        if timing.v_front_porch < 2 {
+            timing.v_front_porch = 2;
+        }
+    } else if timing.v_front_porch < 1 {
+        timing.v_front_porch = 1;
+    }
+}
+
+/// `dcn10_get_vupdate_offset_from_vsync` (dcn10_hwseq.c).
+pub fn dcn10_get_vupdate_offset_from_vsync(dc: &dc, context: &crate::dc_state::dc_state, p: usize) -> i32 {
+    let pipe_ctx = &context.res_ctx.pipe_ctx[p];
+    let mut patched_crtc_timing = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap().timing;
+    apply_front_porch_workaround(&mut patched_crtc_timing);
+
+    let interlace_factor = if patched_crtc_timing.flags.INTERLACE { 2 } else { 1 };
+
+    let vesa_sync_start = (patched_crtc_timing.v_addressable + patched_crtc_timing.v_border_bottom
+        + patched_crtc_timing.v_front_porch) as i32;
+
+    let asic_blank_end = (patched_crtc_timing.v_total as i32 - vesa_sync_start
+        - patched_crtc_timing.v_border_top as i32) * interlace_factor;
+
+    asic_blank_end - pipe_ctx.pipe_dlg_param.vstartup_start as i32 + 1
+}
+
+/// `dcn10_config_stereo_parameters` (dcn10_hwseq.c).
+fn dcn10_config_stereo_parameters(dc: &dc, stream: &crate::dc_stream::dc_stream_state,
+                                  flags: &mut crate::dcn20_optc::crtc_stereo_flags) {
+    let view_format = stream.view_format;
+    let timing_3d_format = stream.timing.timing_3d_format;
+    let non_stereo_timing = timing_3d_format == TIMING_3D_FORMAT_NONE
+        || timing_3d_format == TIMING_3D_FORMAT_SIDE_BY_SIDE
+        || timing_3d_format == TIMING_3D_FORMAT_TOP_AND_BOTTOM;
+
+    if !non_stereo_timing && view_format == VIEW_3D_FORMAT_FRAME_SEQUENTIAL {
+        flags.PROGRAM_STEREO = true;
+        flags.PROGRAM_POLARITY = true;
+        if timing_3d_format == TIMING_3D_FORMAT_FRAME_ALTERNATE
+            || timing_3d_format == TIMING_3D_FORMAT_INBAND_FA
+            || timing_3d_format == TIMING_3D_FORMAT_DP_HDMI_INBAND_FA
+            || timing_3d_format == TIMING_3D_FORMAT_SIDEBAND_FA
+        {
+            if let Some(ddc) = dc.links[stream.link].ddc.as_deref() {
+                let dongle = ddc.dongle_type;
+
+                if dongle == crate::dc_ddc_types::DISPLAY_DONGLE_DP_VGA_CONVERTER
+                    || dongle == crate::dc_ddc_types::DISPLAY_DONGLE_DP_DVI_CONVERTER
+                    || dongle == crate::dc_ddc_types::DISPLAY_DONGLE_DP_HDMI_CONVERTER
+                {
+                    flags.DISABLE_STEREO_DP_SYNC = true;
+                }
+            }
+        }
+        flags.RIGHT_EYE_POLARITY = stream.timing.flags.RIGHT_EYE_3D_POLARITY;
+        if timing_3d_format == TIMING_3D_FORMAT_HW_FRAME_PACKING {
+            flags.FRAME_PACKED = true;
+        }
+    }
+}
+
+/// `dcn10_setup_stereo` (dcn10_hwseq.c): the stereo sync GPIO for a
+/// sideband frame-alternate timing, then the OPP's and OTG's stereo.
+pub fn dcn10_setup_stereo(adev: &amdgpu_device, dc: &mut dc, context: &mut crate::dc_state::dc_state, p: usize) {
+    let mut flags = crate::dcn20_optc::crtc_stereo_flags::default();
+    let pipe_ctx = context.res_ctx.pipe_ctx[p];
+    let stream = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap();
+
+    dcn10_config_stereo_parameters(dc, stream, &mut flags);
+
+    if stream.timing.timing_3d_format == TIMING_3D_FORMAT_SIDEBAND_FA {
+        if !crate::dc::dc_set_generic_gpio_for_stereo(adev, dc, true) {
+            crate::dc::dc_set_generic_gpio_for_stereo(adev, dc, false);
+        }
+    } else {
+        crate::dc::dc_set_generic_gpio_for_stereo(adev, dc, false);
+    }
+
+    let timing = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap().timing;
+    let pool = dc.res_pool.as_deref().unwrap();
+    let opp = pool.opps[pipe_ctx.stream_res.opp.unwrap()].as_deref().unwrap();
+    (opp.funcs().opp_program_stereo.unwrap())(adev, opp, flags.PROGRAM_STEREO, &timing);
+
+    let tg = pool.timing_generators[pipe_ctx.stream_res.tg.unwrap()].as_deref().unwrap();
+    (tg.funcs().program_stereo.unwrap())(adev, tg, &timing, &flags);
+}
+
+/// `dcn10_lock_all_pipes` (dcn10_hwseq.c): (un)lock the top pipe of every
+/// OTG with a plane in either state. `context` is the state locked, dc's
+/// current state when None.
+pub fn dcn10_lock_all_pipes(adev: &amdgpu_device, dc: &mut dc, context: Option<&crate::dc_state::dc_state>, lock: bool) {
+    let pipe_count = dc.res_pool.as_deref().unwrap().pipe_count as usize;
+    let cur = dc.current_state.as_deref().unwrap();
+    let context = context.unwrap_or(cur);
+
+    for i in 0..pipe_count {
+        let old_pipe_ctx = &cur.res_ctx.pipe_ctx[i];
+        let pipe_ctx = &context.res_ctx.pipe_ctx[i];
+
+        // Only lock the top pipe's tg to prevent redundant (un)locking. Also
+        // skip if pipe is disabled.
+        if pipe_ctx.top_pipe.is_some() || pipe_ctx.stream.is_none()
+            || (pipe_ctx.plane_state.is_none() && old_pipe_ctx.plane_state.is_none())
+        {
+            continue;
+        }
+        let tg = dc.res_pool.as_deref().unwrap().timing_generators[pipe_ctx.stream_res.tg.unwrap()].as_deref().unwrap();
+        if !(tg.funcs().is_tg_enabled.unwrap())(adev, tg) {
+            continue;
+        }
+
+        crate::linux::Line::new().s("dcn10_lock_all_pipes: dcn20_pipe_control_lock not ported").say();
+        let _ = lock;
     }
 }

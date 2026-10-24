@@ -1289,3 +1289,513 @@ pub static SE_MASK: dcn10_stream_encoder_mask = dcn10_stream_encoder_mask {
     DP_SEC_GSP5_LINE_NUM: DP0_DP_SEC_CNTL5__DP_SEC_GSP5_LINE_NUM_MASK,
     DP_SST_SDP_SPLITTING: DP0_DP_SEC_FRAMING4__DP_SST_SDP_SPLITTING_MASK,
 };
+
+/// `struct stream_encoder_funcs` (stream_encoder.h), the members ported.
+/// An encoder is named by its slot in the pool; the members that reach the
+/// link take its index too.
+#[derive(Default, Clone, Copy)]
+pub struct stream_encoder_ops {
+    pub dp_set_stream_attribute: Option<fn(&crate::amdgpu_device::amdgpu_device, &crate::dc_resource::stream_enc_slot,
+                                           &crate::dc_hw_types::dc_crtc_timing, u32, bool, u32)>,
+    pub update_dp_info_packets_sdp_line_num: Option<fn(&crate::amdgpu_device::amdgpu_device,
+                                                       &crate::dc_resource::stream_enc_slot,
+                                                       &crate::dc_stream::encoder_info_frame)>,
+    pub update_dp_info_packets: Option<fn(&crate::amdgpu_device::amdgpu_device, &crate::dc_resource::stream_enc_slot,
+                                          &crate::dc_stream::encoder_info_frame)>,
+    pub setup_stereo_sync: Option<fn(&crate::amdgpu_device::amdgpu_device, &crate::dc_resource::stream_enc_slot, i32, bool)>,
+    pub dp_set_odm_combine: Option<fn(&crate::amdgpu_device::amdgpu_device, &crate::dc_resource::stream_enc_slot, bool)>,
+    pub dp_unblank: Option<fn(&crate::amdgpu_device::amdgpu_device, &mut crate::dc::dc, usize, usize, &encoder_unblank_param)>,
+    pub dig_connect_to_otg: Option<fn(&crate::amdgpu_device::amdgpu_device, &crate::dc_resource::stream_enc_slot, i32)>,
+    pub dp_blank: Option<fn(&crate::amdgpu_device::amdgpu_device, &mut crate::dc::dc, usize, usize)>,
+    pub dig_source_otg: Option<fn(&crate::amdgpu_device::amdgpu_device, &crate::dc_resource::stream_enc_slot) -> u32>,
+    pub dp_get_pixel_format: Option<fn(&crate::amdgpu_device::amdgpu_device, &crate::dc_resource::stream_enc_slot,
+                                       &mut u32, &mut u32) -> bool>,
+}
+
+/// `dcn20_str_enc_funcs` (dcn20_stream_encoder.c), as far as ported.
+const DCN20_STR_ENC_FUNCS: stream_encoder_ops = stream_encoder_ops {
+    dp_set_stream_attribute: Some(enc2_stream_encoder_dp_set_stream_attribute),
+    update_dp_info_packets_sdp_line_num: Some(enc2_stream_encoder_update_dp_info_packets_sdp_line_num),
+    update_dp_info_packets: Some(enc2_stream_encoder_update_dp_info_packets),
+    setup_stereo_sync: Some(enc1_setup_stereo_sync),
+    dp_set_odm_combine: Some(enc2_dp_set_odm_combine),
+    dp_unblank: Some(enc2_stream_encoder_dp_unblank),
+    dig_connect_to_otg: Some(enc1_dig_connect_to_otg),
+    dp_blank: Some(enc1_stream_encoder_dp_blank),
+    dig_source_otg: Some(enc1_dig_source_otg),
+    dp_get_pixel_format: Some(enc1_stream_encoder_dp_get_pixel_format),
+};
+
+/// `virtual_str_enc_funcs` (virtual_stream_encoder.c), as far as ported.
+const VIRTUAL_STR_ENC_FUNCS: stream_encoder_ops = stream_encoder_ops {
+    dp_set_stream_attribute: Some(virtual_stream_encoder_dp_set_stream_attribute),
+    update_dp_info_packets_sdp_line_num: None,
+    update_dp_info_packets: Some(virtual_stream_encoder_update_dp_info_packets),
+    setup_stereo_sync: None,
+    dp_set_odm_combine: None,
+    dp_unblank: Some(virtual_stream_encoder_dp_unblank),
+    dig_connect_to_otg: None,
+    dp_blank: Some(virtual_stream_encoder_dp_blank),
+    dig_source_otg: None,
+    dp_get_pixel_format: None,
+};
+
+impl stream_encoder_funcs {
+    pub fn ops(self) -> &'static stream_encoder_ops {
+        match self {
+            stream_encoder_funcs::dcn20_str_enc_funcs => &DCN20_STR_ENC_FUNCS,
+            stream_encoder_funcs::virtual_str_enc_funcs => &VIRTUAL_STR_ENC_FUNCS,
+        }
+    }
+}
+
+impl crate::dc_resource::stream_enc_slot {
+    /// `enc->funcs`.
+    pub fn funcs(&self) -> &'static stream_encoder_ops {
+        self.base().funcs.expect("stream encoder funcs").ops()
+    }
+
+    /// `DCN10STRENC_FROM_STRENC`: only a DIG encoder is bound to the dcn
+    /// tables.
+    pub fn dcn10(&self) -> &dcn10_stream_encoder {
+        match self {
+            crate::dc_resource::stream_enc_slot::Dcn10(e) => e,
+            crate::dc_resource::stream_enc_slot::Virtual(_) => unreachable!("dcn stream encoder op on a virtual encoder"),
+        }
+    }
+}
+
+impl dcn10_stream_encoder {
+    pub fn rsm(&self) -> (&'static dcn10_stream_enc_registers, &'static dcn10_stream_encoder_shift,
+                          &'static dcn10_stream_encoder_mask) {
+        (self.regs.unwrap(), self.se_shift.unwrap(), self.se_mask.unwrap())
+    }
+}
+
+/// `virtual_stream_encoder_dp_blank` (virtual_stream_encoder.c).
+fn virtual_stream_encoder_dp_blank(_adev: &crate::amdgpu_device::amdgpu_device, _dc: &mut crate::dc::dc, _li: usize,
+                                   _se: usize) {}
+
+/// `enc1_dig_source_otg` (dcn10_stream_encoder.c).
+pub fn enc1_dig_source_otg(adev: &crate::amdgpu_device::amdgpu_device, enc: &crate::dc_resource::stream_enc_slot) -> u32 {
+    use crate::dc_helper::reg_get;
+    reg_get!(adev, enc.dcn10().rsm(), DIG_FE_CNTL, DIG_SOURCE_SELECT)
+}
+
+/// `DP_BLANK_MAX_RETRY` (dcn10_stream_encoder.h).
+const DP_BLANK_MAX_RETRY: u32 = 20;
+
+/// `enc1_stream_encoder_dp_blank` (dcn10_stream_encoder.c): stop the video
+/// stream at the start of the next vertical blank, wait for it, then make
+/// the encoder ignore the OTG's timing.
+pub fn enc1_stream_encoder_dp_blank(adev: &crate::amdgpu_device::amdgpu_device, dc: &mut crate::dc::dc, li: usize,
+                                    se: usize) {
+    use crate::dc_helper::{reg_get, reg_update, reg_wait};
+    let c = dc.res_pool.as_deref().unwrap().stream_enc[se].as_ref().unwrap().dcn10().rsm();
+
+    // For CZ the driver default is to disable the stream deferred to the
+    // next VBLANK: a handful of panels flash a white line when it is
+    // disabled at HBLANK.
+    let reg1 = reg_get!(adev, c, DP_VID_STREAM_CNTL, DP_VID_STREAM_ENABLE);
+    if reg1 & 0x1 == 0 {
+        // stream not enabled
+        return;
+    }
+    // Specify the video stream disable point (2 = start of the next
+    // vertical blank)
+    reg_update!(adev, c, DP_VID_STREAM_CNTL, DP_VID_STREAM_DIS_DEFER, 2);
+    // Larger delay to wait until VBLANK - use max retry of 10us*10200=102ms.
+    // This covers 100.0ms of minimum 10 Hz mode + a little more because we
+    // may not trust delay accuracy.
+    let max_retries = DP_BLANK_MAX_RETRY * 501;
+
+    // disable DP stream
+    reg_update!(adev, c, DP_VID_STREAM_CNTL, DP_VID_STREAM_ENABLE, 0);
+
+    crate::link_dpms::dp_trace_source_sequence(adev, dc, li, crate::regs::DPCD_SOURCE_SEQ_AFTER_DISABLE_DP_VID_STREAM);
+
+    // the encoder stops sending the video stream at the start of the
+    // vertical blanking. Poll for DP_VID_STREAM_STATUS == 0
+    reg_wait!(adev, c, DP_VID_STREAM_CNTL, DP_VID_STREAM_STATUS, 0, 10, max_retries, "enc1_stream_encoder_dp_blank");
+
+    // Tell the DP encoder to ignore timing from CRTC, must be done after the
+    // polling. If we set DP_STEER_FIFO_RESET before DP stream blank is
+    // complete, stream status will be stuck in video stream enabled state,
+    // i.e. DP_VID_STREAM_STATUS stuck at 1.
+    reg_update!(adev, c, DP_STEER_FIFO, DP_STEER_FIFO_RESET, 1);
+
+    crate::link_dpms::dp_trace_source_sequence(adev, dc, li, crate::regs::DPCD_SOURCE_SEQ_AFTER_FIFO_STEER_RESET);
+}
+
+/// `enc1_dig_connect_to_otg` (dcn10_stream_encoder.c).
+pub fn enc1_dig_connect_to_otg(adev: &crate::amdgpu_device::amdgpu_device, enc: &crate::dc_resource::stream_enc_slot,
+                               tg_inst: i32) {
+    use crate::dc_helper::reg_update;
+    reg_update!(adev, enc.dcn10().rsm(), DIG_FE_CNTL, DIG_SOURCE_SELECT, tg_inst);
+}
+
+/// `virtual_stream_encoder_dp_set_stream_attribute` (virtual_stream_encoder.c).
+fn virtual_stream_encoder_dp_set_stream_attribute(_adev: &crate::amdgpu_device::amdgpu_device,
+                                                  _enc: &crate::dc_resource::stream_enc_slot,
+                                                  _crtc_timing: &crate::dc_hw_types::dc_crtc_timing,
+                                                  _output_color_space: u32, _use_vsc_sdp_for_colorimetry: bool,
+                                                  _enable_sdp_splitting: u32) {}
+
+/// `virtual_stream_encoder_update_dp_info_packets` (virtual_stream_encoder.c).
+fn virtual_stream_encoder_update_dp_info_packets(_adev: &crate::amdgpu_device::amdgpu_device,
+                                                 _enc: &crate::dc_resource::stream_enc_slot,
+                                                 _info_frame: &crate::dc_stream::encoder_info_frame) {}
+
+/// `enc1_setup_stereo_sync` (dcn10_stream_encoder.c).
+pub fn enc1_setup_stereo_sync(adev: &crate::amdgpu_device::amdgpu_device, enc: &crate::dc_resource::stream_enc_slot,
+                              tg_inst: i32, enable: bool) {
+    use crate::dc_helper::reg_update;
+    let c = enc.dcn10().rsm();
+    reg_update!(adev, c, DIG_FE_CNTL, DIG_STEREOSYNC_SELECT, tg_inst);
+    reg_update!(adev, c, DIG_FE_CNTL, DIG_STEREOSYNC_GATE_EN, !enable as u32);
+}
+
+/// `enc1_stream_encoder_dp_set_stream_attribute` (dcn10_stream_encoder.c):
+/// the DP pixel format and the main stream attributes (MSA) of the timing.
+pub fn enc1_stream_encoder_dp_set_stream_attribute(adev: &crate::amdgpu_device::amdgpu_device,
+                                                   enc: &crate::dc_resource::stream_enc_slot,
+                                                   crtc_timing: &crate::dc_hw_types::dc_crtc_timing,
+                                                   output_color_space: u32, use_vsc_sdp_for_colorimetry: bool,
+                                                   _enable_sdp_splitting: u32) {
+    use crate::dc_helper::{reg_read, reg_set, reg_update, reg_write};
+    let c = enc.dcn10().rsm();
+    let mut hw_crtc_timing = *crtc_timing;
+
+    if hw_crtc_timing.flags.INTERLACE {
+        // the input timing is in VESA spec format with Interlace flag =1
+        hw_crtc_timing.v_total /= 2;
+        hw_crtc_timing.v_border_top /= 2;
+        hw_crtc_timing.v_addressable /= 2;
+        hw_crtc_timing.v_border_bottom /= 2;
+        hw_crtc_timing.v_front_porch /= 2;
+        hw_crtc_timing.v_sync_width /= 2;
+    }
+
+    // set pixel encoding
+    let dp_pixel_encoding = match hw_crtc_timing.pixel_encoding {
+        PIXEL_ENCODING_YCBCR422 => DP_PIXEL_ENCODING_TYPE_YCBCR422,
+        PIXEL_ENCODING_YCBCR444 => {
+            // HW testing only, no use case yet: a Y-only colour depth could
+            // be 8, 10, 12, 16 bits. DP_MSA_MISC1 bit 7 indicates Y-only
+            // mode; the hardware sets it when DP_PIXEL_ENCODING is 0x4.
+            if hw_crtc_timing.flags.Y_ONLY && hw_crtc_timing.display_color_depth != COLOR_DEPTH_666 {
+                DP_PIXEL_ENCODING_TYPE_Y_ONLY
+            } else {
+                DP_PIXEL_ENCODING_TYPE_YCBCR444
+            }
+        }
+        PIXEL_ENCODING_YCBCR420 => DP_PIXEL_ENCODING_TYPE_YCBCR420,
+        _ => DP_PIXEL_ENCODING_TYPE_RGB444,
+    };
+
+    let mut misc1 = reg_read!(adev, c.0, DP_MSA_MISC);
+    // For YCbCr420 and BT2020 Colorimetry Formats, VSC SDP shall be used.
+    // When MISC1, bit 6, is Set to 1, a Source device uses a VSC SDP to
+    // indicate the Pixel Encoding/Colorimetry Format and that a Sink device
+    // shall ignore MISC1, bit 7, and MISC0, bits 7:1 (MISC1, bit 7, and
+    // MISC0, bits 7:1, become "don't care").
+    if use_vsc_sdp_for_colorimetry {
+        misc1 |= 0x40;
+    } else {
+        misc1 &= !0x40;
+    }
+
+    // set color depth
+    let dp_component_depth = match hw_crtc_timing.display_color_depth {
+        COLOR_DEPTH_666 => DP_COMPONENT_PIXEL_DEPTH_6BPC,
+        COLOR_DEPTH_888 => DP_COMPONENT_PIXEL_DEPTH_8BPC,
+        COLOR_DEPTH_101010 => DP_COMPONENT_PIXEL_DEPTH_10BPC,
+        COLOR_DEPTH_121212 => DP_COMPONENT_PIXEL_DEPTH_12BPC,
+        COLOR_DEPTH_161616 => DP_COMPONENT_PIXEL_DEPTH_16BPC,
+        _ => DP_COMPONENT_PIXEL_DEPTH_6BPC,
+    };
+
+    // Set DP pixel encoding and component depth
+    reg_update!(adev, c, DP_PIXEL_FORMAT, DP_PIXEL_ENCODING, dp_pixel_encoding, DP_COMPONENT_DEPTH, dp_component_depth);
+
+    // set dynamic range and YCbCr range
+    let colorimetry_bpc: u32 = match hw_crtc_timing.display_color_depth {
+        COLOR_DEPTH_666 => 0,
+        COLOR_DEPTH_888 => 1,
+        COLOR_DEPTH_101010 => 2,
+        COLOR_DEPTH_121212 => 3,
+        _ => 0,
+    };
+
+    let mut misc0 = colorimetry_bpc << 5;
+
+    match output_color_space {
+        COLOR_SPACE_SRGB => {
+            misc1 &= !0x80; // bit7 = 0
+        }
+        COLOR_SPACE_SRGB_LIMITED => {
+            misc0 |= 0x8; // bit3=1
+            misc1 &= !0x80; // bit7 = 0
+        }
+        COLOR_SPACE_YCBCR601 | COLOR_SPACE_YCBCR601_LIMITED => {
+            misc0 |= 0x8; // bit3=1, bit4=0
+            misc1 &= !0x80; // bit7 = 0
+            if hw_crtc_timing.pixel_encoding == PIXEL_ENCODING_YCBCR422 {
+                misc0 |= 0x2; // bit2=0, bit1=1
+            } else if hw_crtc_timing.pixel_encoding == PIXEL_ENCODING_YCBCR444 {
+                misc0 |= 0x4; // bit2=1, bit1=0
+            }
+        }
+        COLOR_SPACE_YCBCR709 | COLOR_SPACE_YCBCR709_LIMITED => {
+            misc0 |= 0x18; // bit3=1, bit4=1
+            misc1 &= !0x80; // bit7 = 0
+            if hw_crtc_timing.pixel_encoding == PIXEL_ENCODING_YCBCR422 {
+                misc0 |= 0x2; // bit2=0, bit1=1
+            } else if hw_crtc_timing.pixel_encoding == PIXEL_ENCODING_YCBCR444 {
+                misc0 |= 0x4; // bit2=1, bit1=0
+            }
+        }
+        // The BT2020, xvYCC, AdobeRGB, DCI-P3 and native spaces leave the
+        // misc bits alone.
+        _ => {}
+    }
+
+    reg_set!(adev, c, DP_MSA_COLORIMETRY, 0, DP_MSA_MISC0, misc0);
+    reg_write!(adev, c.0, DP_MSA_MISC, misc1); // MSA_MISC1
+
+    // dcn new register: dc_crtc_timing is vesa dmt struct, data from edid
+    reg_set!(adev, c, DP_MSA_TIMING_PARAM1, 0, DP_MSA_HTOTAL, hw_crtc_timing.h_total,
+        DP_MSA_VTOTAL, hw_crtc_timing.v_total);
+
+    // calculate from vesa timing parameters: h_active_start related to
+    // leading edge of sync
+    let h_blank = hw_crtc_timing.h_total - hw_crtc_timing.h_border_left - hw_crtc_timing.h_addressable
+        - hw_crtc_timing.h_border_right;
+
+    let h_back_porch = h_blank - hw_crtc_timing.h_front_porch - hw_crtc_timing.h_sync_width;
+
+    // start at beginning of left border
+    let h_active_start = hw_crtc_timing.h_sync_width + h_back_porch;
+
+    let v_active_start = hw_crtc_timing.v_total - hw_crtc_timing.v_border_top - hw_crtc_timing.v_addressable
+        - hw_crtc_timing.v_border_bottom - hw_crtc_timing.v_front_porch;
+
+    // start at beginning of left border
+    reg_set!(adev, c, DP_MSA_TIMING_PARAM2, 0, DP_MSA_HSTART, h_active_start, DP_MSA_VSTART, v_active_start);
+
+    reg_set!(adev, c, DP_MSA_TIMING_PARAM3, 0,
+        DP_MSA_HSYNCWIDTH, hw_crtc_timing.h_sync_width,
+        DP_MSA_HSYNCPOLARITY, !hw_crtc_timing.flags.HSYNC_POSITIVE_POLARITY as u32,
+        DP_MSA_VSYNCWIDTH, hw_crtc_timing.v_sync_width,
+        DP_MSA_VSYNCPOLARITY, !hw_crtc_timing.flags.VSYNC_POSITIVE_POLARITY as u32);
+
+    // HWDITH include border or overscan
+    reg_set!(adev, c, DP_MSA_TIMING_PARAM4, 0,
+        DP_MSA_HWIDTH, hw_crtc_timing.h_border_left + hw_crtc_timing.h_addressable + hw_crtc_timing.h_border_right,
+        DP_MSA_VHEIGHT, hw_crtc_timing.v_border_top + hw_crtc_timing.v_addressable + hw_crtc_timing.v_border_bottom);
+}
+
+/// `enc2_stream_encoder_dp_set_stream_attribute` (dcn20_stream_encoder.c).
+pub fn enc2_stream_encoder_dp_set_stream_attribute(adev: &crate::amdgpu_device::amdgpu_device,
+                                                   enc: &crate::dc_resource::stream_enc_slot,
+                                                   crtc_timing: &crate::dc_hw_types::dc_crtc_timing,
+                                                   output_color_space: u32, use_vsc_sdp_for_colorimetry: bool,
+                                                   enable_sdp_splitting: u32) {
+    use crate::dc_helper::reg_update;
+    enc1_stream_encoder_dp_set_stream_attribute(adev, enc, crtc_timing, output_color_space,
+        use_vsc_sdp_for_colorimetry, enable_sdp_splitting);
+
+    reg_update!(adev, enc.dcn10().rsm(), DP_SEC_FRAMING4, DP_SST_SDP_SPLITTING, enable_sdp_splitting);
+}
+
+/// `enc2_stream_encoder_update_dp_info_packets_sdp_line_num` (dcn20_stream_encoder.c).
+fn enc2_stream_encoder_update_dp_info_packets_sdp_line_num(adev: &crate::amdgpu_device::amdgpu_device,
+                                                           enc: &crate::dc_resource::stream_enc_slot,
+                                                           info_frame: &crate::dc_stream::encoder_info_frame) {
+    use crate::dc_helper::reg_update;
+    let c = enc.dcn10().rsm();
+
+    if info_frame.adaptive_sync.valid && info_frame.sdp_line_num.adaptive_sync_line_num_valid {
+        // 00: REFER_TO_DP_SOF, 01: REFER_TO_OTG_SOF
+        reg_update!(adev, c, DP_SEC_CNTL1, DP_SEC_GSP5_LINE_REFERENCE, 1);
+
+        reg_update!(adev, c, DP_SEC_CNTL5, DP_SEC_GSP5_LINE_NUM, info_frame.sdp_line_num.adaptive_sync_line_num);
+    }
+}
+
+/// `enc1_stream_encoder_update_dp_info_packets` (dcn10_stream_encoder.c):
+/// the generic packets (VSC 0 and, for the DMCUB's PSR, 1; SPD 2; HDR 3;
+/// adaptive sync 5 - 4 is the immediate SDP's), then their transmission
+/// enables and the master enable this register shares with audio.
+fn enc1_stream_encoder_update_dp_info_packets(adev: &crate::amdgpu_device::amdgpu_device,
+                                              enc: &crate::dc_resource::stream_enc_slot,
+                                              info_frame: &crate::dc_stream::encoder_info_frame) {
+    use crate::dc_helper::{reg_read, reg_update};
+    let c = enc.dcn10().rsm();
+
+    if info_frame.vsc.valid || info_frame.spd.valid || info_frame.hdrsmd.valid || info_frame.adaptive_sync.valid {
+        crate::linux::Line::new().s("enc1_stream_encoder_update_dp_info_packets: enc1_update_generic_info_packet not ported").say();
+    }
+
+    // enable/disable transmission of packet(s). If enabled, packet
+    // transmission begins on the next frame
+    reg_update!(adev, c, DP_SEC_CNTL, DP_SEC_GSP0_ENABLE, info_frame.vsc.valid as u32);
+    reg_update!(adev, c, DP_SEC_CNTL, DP_SEC_GSP2_ENABLE, info_frame.spd.valid as u32);
+    reg_update!(adev, c, DP_SEC_CNTL, DP_SEC_GSP3_ENABLE, info_frame.hdrsmd.valid as u32);
+    reg_update!(adev, c, DP_SEC_CNTL, DP_SEC_GSP5_ENABLE, info_frame.adaptive_sync.valid as u32);
+
+    // This bit is the master enable bit. When enabling secondary stream
+    // engine, this master bit must also be set. This register shared with
+    // audio info frame. Therefore we need to enable master bit if at least
+    // on of the fields is not 0
+    let value = reg_read!(adev, c.0, DP_SEC_CNTL);
+    if value != 0 {
+        reg_update!(adev, c, DP_SEC_CNTL, DP_SEC_STREAM_ENABLE, 1);
+    }
+}
+
+/// `enc2_stream_encoder_update_dp_info_packets` (dcn20_stream_encoder.c).
+fn enc2_stream_encoder_update_dp_info_packets(adev: &crate::amdgpu_device::amdgpu_device,
+                                              enc: &crate::dc_resource::stream_enc_slot,
+                                              info_frame: &crate::dc_stream::encoder_info_frame) {
+    use crate::dc_helper::{reg_get, reg_update};
+    enc1_stream_encoder_update_dp_info_packets(adev, enc, info_frame);
+
+    // check if dynamic metadata packet transmission is enabled
+    let c = enc.dcn10().rsm();
+    let dmdata_packet_enabled = reg_get!(adev, c, DP_SEC_METADATA_TRANSMISSION, DP_SEC_METADATA_PACKET_ENABLE);
+
+    if dmdata_packet_enabled != 0 {
+        reg_update!(adev, c, DP_SEC_CNTL, DP_SEC_STREAM_ENABLE, 1);
+    }
+}
+
+/// `struct encoder_unblank_param` (stream_encoder.h), the members unblank
+/// reads.
+#[derive(Default, Clone, Copy)]
+pub struct encoder_unblank_param {
+    pub link_settings: crate::dc_dp_types::dc_link_settings,
+    pub timing: crate::dc_hw_types::dc_crtc_timing,
+    pub opp_cnt: i32,
+}
+
+/// `virtual_stream_encoder_dp_unblank` (virtual_stream_encoder.c).
+fn virtual_stream_encoder_dp_unblank(_adev: &crate::amdgpu_device::amdgpu_device, _dc: &mut crate::dc::dc, _li: usize,
+                                     _se: usize, _param: &encoder_unblank_param) {}
+
+/// `enc2_dp_set_odm_combine` (dcn20_stream_encoder.c).
+fn enc2_dp_set_odm_combine(adev: &crate::amdgpu_device::amdgpu_device, enc: &crate::dc_resource::stream_enc_slot,
+                           odm_combine: bool) {
+    use crate::dc_helper::reg_update;
+    reg_update!(adev, enc.dcn10().rsm(), DP_PIXEL_FORMAT, DP_PIXEL_COMBINE, odm_combine as u32);
+}
+
+/// `is_two_pixels_per_containter` (dcn20_stream_encoder.c).
+fn is_two_pixels_per_containter(timing: &crate::dc_hw_types::dc_crtc_timing) -> bool {
+    let mut two_pix = timing.pixel_encoding == PIXEL_ENCODING_YCBCR420;
+
+    two_pix = two_pix
+        || (timing.flags.DSC && timing.pixel_encoding == PIXEL_ENCODING_YCBCR422 && !timing.dsc_cfg.ycbcr422_simple);
+    two_pix
+}
+
+/// `enc2_stream_encoder_dp_unblank` (dcn20_stream_encoder.c): the M/N
+/// ratio of pixel and link rate (auto-measured after a first 0x8000
+/// symbol cycle), the FIFOs reset, then the video stream on; the hardware
+/// starts it with the next DP frame.
+pub fn enc2_stream_encoder_dp_unblank(adev: &crate::amdgpu_device::amdgpu_device, dc: &mut crate::dc::dc, li: usize,
+                                      se: usize, param: &encoder_unblank_param) {
+    use crate::dc_helper::{reg_update, reg_wait};
+    let c = dc.res_pool.as_deref().unwrap().stream_enc[se].as_ref().unwrap().dcn10().rsm();
+
+    if param.link_settings.link_rate != crate::dc_dp_types::LINK_RATE_UNKNOWN {
+        let n_vid = 0x8000u32;
+        let mut n_multiply = 0;
+        let mut m_vid_l = n_vid as u64;
+
+        // YCbCr 4:2:0 : Computed VID_M will be 2X the input rate
+        if is_two_pixels_per_containter(&param.timing) || param.opp_cnt > 1 {
+            // this logic should be the same in get_pixel_clock_parameters()
+            n_multiply = 1;
+        }
+        // M / N = Fstream / Flink
+        // m_vid / n_vid = pixel rate / link rate
+
+        m_vid_l *= (param.timing.pix_clk_100hz / 10) as u64;
+        m_vid_l /= (param.link_settings.link_rate * LINK_RATE_REF_FREQ_IN_KHZ) as u64;
+
+        let m_vid = m_vid_l as u32;
+
+        // enable auto measurement
+
+        reg_update!(adev, c, DP_VID_TIMING, DP_VID_M_N_GEN_EN, 0);
+
+        // auto measurement need 1 full 0x8000 symbol cycle to kick in,
+        // therefore program initial value for Mvid and Nvid
+
+        reg_update!(adev, c, DP_VID_N, DP_VID_N, n_vid);
+
+        reg_update!(adev, c, DP_VID_M, DP_VID_M, m_vid);
+
+        reg_update!(adev, c, DP_VID_TIMING, DP_VID_M_N_GEN_EN, 1, DP_VID_N_MUL, n_multiply);
+    }
+
+    // make sure stream is disabled before resetting steer fifo
+    reg_update!(adev, c, DP_VID_STREAM_CNTL, DP_VID_STREAM_ENABLE, 0);
+    reg_wait!(adev, c, DP_VID_STREAM_CNTL, DP_VID_STREAM_STATUS, 0, 10, 5000, "enc2_stream_encoder_dp_unblank");
+
+    // set DIG_START to 0x1 to reset FIFO
+    reg_update!(adev, c, DIG_FE_CNTL, DIG_START, 1);
+    crate::linux::udelay(1);
+
+    // write 0 to take the FIFO out of reset
+
+    reg_update!(adev, c, DIG_FE_CNTL, DIG_START, 0);
+
+    // switch DP encoder to CRTC data, but reset it the fifo first. It may
+    // happen that it overflows during mode transition, and sometimes doesn't
+    // recover.
+    reg_update!(adev, c, DP_STEER_FIFO, DP_STEER_FIFO_RESET, 1);
+    crate::linux::udelay(10);
+
+    reg_update!(adev, c, DP_STEER_FIFO, DP_STEER_FIFO_RESET, 0);
+
+    // wait 100us for DIG/DP logic to prime (i.e. a few video lines)
+    crate::linux::udelay(100);
+
+    // the hardware would start sending video at the start of the next DP
+    // frame (i.e. rising edge of the vblank). DP_VID_STREAM_DIS_DEFER has no
+    // effect on the enable transition: the hardware always enables the
+    // stream at the start of the next frame.
+
+    reg_update!(adev, c, DP_VID_STREAM_CNTL, DP_VID_STREAM_ENABLE, 1);
+
+    crate::link_dpms::dp_trace_source_sequence(adev, dc, li, DPCD_SOURCE_SEQ_AFTER_ENABLE_DP_VID_STREAM);
+}
+
+/// `enc1_stream_encoder_dp_get_pixel_format` (dcn10_stream_encoder.c).
+pub fn enc1_stream_encoder_dp_get_pixel_format(adev: &crate::amdgpu_device::amdgpu_device,
+                                               enc: &crate::dc_resource::stream_enc_slot, encoding: &mut u32,
+                                               depth: &mut u32) -> bool {
+    use crate::dc_helper::reg_get_n;
+    let [hw_encoding, hw_depth] = reg_get_n!(adev, enc.dcn10().rsm(), DP_PIXEL_FORMAT, DP_PIXEL_ENCODING,
+        DP_COMPONENT_DEPTH);
+
+    *depth = match hw_depth {
+        DP_COMPONENT_PIXEL_DEPTH_6BPC => COLOR_DEPTH_666,
+        DP_COMPONENT_PIXEL_DEPTH_8BPC => COLOR_DEPTH_888,
+        DP_COMPONENT_PIXEL_DEPTH_10BPC => COLOR_DEPTH_101010,
+        DP_COMPONENT_PIXEL_DEPTH_12BPC => COLOR_DEPTH_121212,
+        DP_COMPONENT_PIXEL_DEPTH_16BPC => COLOR_DEPTH_161616,
+        _ => COLOR_DEPTH_UNDEFINED,
+    };
+
+    *encoding = match hw_encoding {
+        DP_PIXEL_ENCODING_TYPE_RGB444 => PIXEL_ENCODING_RGB,
+        DP_PIXEL_ENCODING_TYPE_YCBCR422 => PIXEL_ENCODING_YCBCR422,
+        DP_PIXEL_ENCODING_TYPE_YCBCR444 | DP_PIXEL_ENCODING_TYPE_Y_ONLY => PIXEL_ENCODING_YCBCR444,
+        DP_PIXEL_ENCODING_TYPE_YCBCR420 => PIXEL_ENCODING_YCBCR420,
+        _ => PIXEL_ENCODING_UNDEFINED,
+    };
+    true
+}

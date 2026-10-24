@@ -27,7 +27,10 @@ pub enum hubbub_funcs {
 /// members of `HUBBUB21_FUNCS` are members hubbub21 leaves out.
 #[derive(Default, Clone, Copy)]
 pub struct hubbub_ops {
+    pub program_watermarks: Option<fn(&amdgpu_device, &crate::dc::dc, &mut dcn20_hubbub,
+                                      &crate::dc_state::dcn_watermark_set, u32, bool) -> bool>,
     pub get_dchub_ref_freq: Option<fn(&amdgpu_device, &dcn20_hubbub, u32, &mut u32)>,
+    pub apply_DEDCN21_147_wa: Option<fn(&amdgpu_device, &dcn20_hubbub)>,
     pub allow_self_refresh_control: Option<fn(&amdgpu_device, &dcn20_hubbub, bool)>,
     pub is_allow_self_refresh_enabled: Option<fn(&amdgpu_device, &dcn20_hubbub) -> bool>,
     pub verify_allow_pstate_change_high: Option<fn(&amdgpu_device, &dcn20_hubbub) -> bool>,
@@ -39,7 +42,9 @@ pub struct hubbub_ops {
 
 /// `hubbub21_funcs` (dcn21_hubbub.c), as far as ported.
 const HUBBUB21_FUNCS: hubbub_ops = hubbub_ops {
+    program_watermarks: Some(hubbub21_program_watermarks),
     get_dchub_ref_freq: Some(hubbub2_get_dchub_ref_freq),
+    apply_DEDCN21_147_wa: Some(hubbub21_apply_DEDCN21_147_wa),
     allow_self_refresh_control: Some(hubbub1_allow_self_refresh_control),
     is_allow_self_refresh_enabled: None,
     verify_allow_pstate_change_high: None,
@@ -85,6 +90,7 @@ pub struct dcn20_hubbub {
     pub num_vmid: i32,
     pub vmid: [dcn20_vmid; 16],
     pub detile_buf_size: u32,
+    pub watermarks: crate::dc_state::dcn_watermark_set,
 }
 
 impl dcn20_hubbub {
@@ -1003,3 +1009,215 @@ pub static VMID_MASK: dcn20_vmid_mask = dcn20_vmid_mask {
     VM_CONTEXT0_END_LOGICAL_PAGE_NUMBER_HI4: DCN_VM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32__VM_CONTEXT0_END_LOGICAL_PAGE_NUMBER_HI4_MASK,
     VM_CONTEXT0_END_LOGICAL_PAGE_NUMBER_LO32: DCN_VM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32__VM_CONTEXT0_END_LOGICAL_PAGE_NUMBER_LO32_MASK,
 };
+
+/// `convert_and_clamp` (dcn21_hubbub.c): nanoseconds as reference clock
+/// cycles.
+fn convert_and_clamp(wm_ns: u32, refclk_mhz: u32, clamp_value: u32) -> u32 {
+    let ret_val = wm_ns.wrapping_mul(refclk_mhz) / 1000;
+
+    ret_val.min(clamp_value)
+}
+
+/// `hubbub21_program_urgent_watermarks` (dcn21_hubbub.c). A set is only
+/// raised unless it is safe to lower; a lower one stays pending. Sets B, C
+/// and D take their fractional urgent bandwidths from set A, as Linux does.
+fn hubbub21_program_urgent_watermarks(adev: &amdgpu_device, hubbub1: &mut dcn20_hubbub,
+                                      watermarks: &crate::dc_state::dcn_watermark_set, refclk_mhz: u32,
+                                      safe_to_lower: bool) -> bool {
+    let c = hubbub1.rsm();
+    let mut wm_pending = false;
+
+    macro_rules! urgent {
+        ($set:ident, $wm:ident, $vm:ident, $flip:ident, $nom:ident, $trip:ident) => {
+            // Repeat for water mark set A, B, C and D.
+            if safe_to_lower || watermarks.$set.urgent_ns > hubbub1.watermarks.$set.urgent_ns {
+                hubbub1.watermarks.$set.urgent_ns = watermarks.$set.urgent_ns;
+                let prog_wm_value = convert_and_clamp(watermarks.$set.urgent_ns, refclk_mhz, 0x1fffff);
+                reg_set!(adev, c, $wm, 0, $wm, prog_wm_value, $vm, prog_wm_value);
+            } else if watermarks.$set.urgent_ns < hubbub1.watermarks.$set.urgent_ns {
+                wm_pending = true;
+            }
+
+            // determine the transfer time for a quantity of data for a
+            // particular requestor.
+            if safe_to_lower || watermarks.a.frac_urg_bw_flip > hubbub1.watermarks.a.frac_urg_bw_flip {
+                hubbub1.watermarks.a.frac_urg_bw_flip = watermarks.a.frac_urg_bw_flip;
+
+                reg_set!(adev, c, $flip, 0, $flip, watermarks.a.frac_urg_bw_flip);
+            } else if watermarks.a.frac_urg_bw_flip < hubbub1.watermarks.a.frac_urg_bw_flip {
+                wm_pending = true;
+            }
+
+            if safe_to_lower || watermarks.a.frac_urg_bw_nom > hubbub1.watermarks.a.frac_urg_bw_nom {
+                hubbub1.watermarks.a.frac_urg_bw_nom = watermarks.a.frac_urg_bw_nom;
+
+                reg_set!(adev, c, $nom, 0, $nom, watermarks.a.frac_urg_bw_nom);
+            } else if watermarks.a.frac_urg_bw_nom < hubbub1.watermarks.a.frac_urg_bw_nom {
+                wm_pending = true;
+            }
+
+            if safe_to_lower || watermarks.$set.urgent_latency_ns > hubbub1.watermarks.$set.urgent_latency_ns {
+                hubbub1.watermarks.$set.urgent_latency_ns = watermarks.$set.urgent_latency_ns;
+                let prog_wm_value = convert_and_clamp(watermarks.$set.urgent_latency_ns, refclk_mhz, 0x1fffff);
+                reg_set!(adev, c, $trip, 0, $trip, prog_wm_value);
+            } else if watermarks.$set.urgent_latency_ns < hubbub1.watermarks.$set.urgent_latency_ns {
+                wm_pending = true;
+            }
+        };
+    }
+
+    // clock state A
+    urgent!(a, DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A, DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_A,
+        DCHUBBUB_ARB_FRAC_URG_BW_FLIP_A, DCHUBBUB_ARB_FRAC_URG_BW_NOM_A, DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_A);
+    // clock state B
+    urgent!(b, DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_B, DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_B,
+        DCHUBBUB_ARB_FRAC_URG_BW_FLIP_B, DCHUBBUB_ARB_FRAC_URG_BW_NOM_B, DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_B);
+    // clock state C
+    urgent!(c, DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_C, DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_C,
+        DCHUBBUB_ARB_FRAC_URG_BW_FLIP_C, DCHUBBUB_ARB_FRAC_URG_BW_NOM_C, DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_C);
+    // clock state D
+    urgent!(d, DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_D, DCHUBBUB_ARB_VM_ROW_URGENCY_WATERMARK_D,
+        DCHUBBUB_ARB_FRAC_URG_BW_FLIP_D, DCHUBBUB_ARB_FRAC_URG_BW_NOM_D, DCHUBBUB_ARB_REFCYC_PER_TRIP_TO_MEMORY_D);
+
+    wm_pending
+}
+
+/// `hubbub21_program_stutter_watermarks` (dcn21_hubbub.c). The exit
+/// watermarks of sets B, C and D write their VM row field under set A's
+/// name, as Linux does.
+fn hubbub21_program_stutter_watermarks(adev: &amdgpu_device, hubbub1: &mut dcn20_hubbub,
+                                       watermarks: &crate::dc_state::dcn_watermark_set, refclk_mhz: u32,
+                                       safe_to_lower: bool) -> bool {
+    let c = hubbub1.rsm();
+    let mut wm_pending = false;
+
+    macro_rules! stutter {
+        ($set:ident, $enter:ident, $enter_vm:ident, $exit:ident, $exit_vm:ident) => {
+            if safe_to_lower || watermarks.$set.cstate_pstate.cstate_enter_plus_exit_ns
+                > hubbub1.watermarks.$set.cstate_pstate.cstate_enter_plus_exit_ns
+            {
+                hubbub1.watermarks.$set.cstate_pstate.cstate_enter_plus_exit_ns =
+                    watermarks.$set.cstate_pstate.cstate_enter_plus_exit_ns;
+                let prog_wm_value = convert_and_clamp(watermarks.$set.cstate_pstate.cstate_enter_plus_exit_ns,
+                    refclk_mhz, 0x1fffff);
+                reg_set!(adev, c, $enter, 0, $enter, prog_wm_value, $enter_vm, prog_wm_value);
+            } else if watermarks.$set.cstate_pstate.cstate_enter_plus_exit_ns
+                < hubbub1.watermarks.$set.cstate_pstate.cstate_enter_plus_exit_ns
+            {
+                wm_pending = true;
+            }
+
+            if safe_to_lower || watermarks.$set.cstate_pstate.cstate_exit_ns
+                > hubbub1.watermarks.$set.cstate_pstate.cstate_exit_ns
+            {
+                hubbub1.watermarks.$set.cstate_pstate.cstate_exit_ns = watermarks.$set.cstate_pstate.cstate_exit_ns;
+                let prog_wm_value = convert_and_clamp(watermarks.$set.cstate_pstate.cstate_exit_ns, refclk_mhz,
+                    0x1fffff);
+                reg_set!(adev, c, $exit, 0, $exit, prog_wm_value, $exit_vm, prog_wm_value);
+            } else if watermarks.$set.cstate_pstate.cstate_exit_ns
+                < hubbub1.watermarks.$set.cstate_pstate.cstate_exit_ns
+            {
+                wm_pending = true;
+            }
+        };
+    }
+
+    // clock state A
+    stutter!(a, DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_A, DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_A,
+        DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_A, DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_A);
+    // clock state B
+    stutter!(b, DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_B, DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_B,
+        DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_B, DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_A);
+    // clock state C
+    stutter!(c, DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_C, DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_C,
+        DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_C, DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_A);
+    // clock state D
+    stutter!(d, DCHUBBUB_ARB_ALLOW_SR_ENTER_WATERMARK_D, DCHUBBUB_ARB_VM_ROW_ALLOW_SR_ENTER_WATERMARK_D,
+        DCHUBBUB_ARB_ALLOW_SR_EXIT_WATERMARK_D, DCHUBBUB_ARB_VM_ROW_ALLOW_SR_EXIT_WATERMARK_A);
+
+    wm_pending
+}
+
+/// `hubbub21_program_pstate_watermarks` (dcn21_hubbub.c). A lower set B
+/// leaves nothing pending, as Linux does.
+fn hubbub21_program_pstate_watermarks(adev: &amdgpu_device, hubbub1: &mut dcn20_hubbub,
+                                      watermarks: &crate::dc_state::dcn_watermark_set, refclk_mhz: u32,
+                                      safe_to_lower: bool) -> bool {
+    let c = hubbub1.rsm();
+    let mut wm_pending = false;
+
+    macro_rules! pstate {
+        ($set:ident, $wm:ident, $vm:ident, $pending:expr) => {
+            if safe_to_lower || watermarks.$set.cstate_pstate.pstate_change_ns
+                > hubbub1.watermarks.$set.cstate_pstate.pstate_change_ns
+            {
+                hubbub1.watermarks.$set.cstate_pstate.pstate_change_ns = watermarks.$set.cstate_pstate.pstate_change_ns;
+                let prog_wm_value = convert_and_clamp(watermarks.$set.cstate_pstate.pstate_change_ns, refclk_mhz,
+                    0x1fffff);
+                reg_set!(adev, c, $wm, 0, $wm, prog_wm_value, $vm, prog_wm_value);
+            } else if watermarks.$set.cstate_pstate.pstate_change_ns
+                < hubbub1.watermarks.$set.cstate_pstate.pstate_change_ns
+            {
+                wm_pending = $pending;
+            }
+        };
+    }
+
+    // clock state A
+    pstate!(a, DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A, DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_A,
+        true);
+    // clock state B
+    pstate!(b, DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B, DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_B,
+        false);
+    // clock state C
+    pstate!(c, DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C, DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_C,
+        true);
+    // clock state D
+    pstate!(d, DCHUBBUB_ARB_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D, DCHUBBUB_ARB_VM_ROW_ALLOW_DRAM_CLK_CHANGE_WATERMARK_D,
+        true);
+
+    wm_pending
+}
+
+/// `hubbub21_program_watermarks` (dcn21_hubbub.c). The arbiter's request
+/// limit for Renoir is not decided yet; the maximum (0x1FF) turns it off.
+pub fn hubbub21_program_watermarks(adev: &amdgpu_device, dc: &crate::dc::dc, hubbub1: &mut dcn20_hubbub,
+                                   watermarks: &crate::dc_state::dcn_watermark_set, refclk_mhz: u32,
+                                   safe_to_lower: bool) -> bool {
+    let mut wm_pending = false;
+
+    if hubbub21_program_urgent_watermarks(adev, hubbub1, watermarks, refclk_mhz, safe_to_lower) {
+        wm_pending = true;
+    }
+
+    if hubbub21_program_stutter_watermarks(adev, hubbub1, watermarks, refclk_mhz, safe_to_lower) {
+        wm_pending = true;
+    }
+
+    if hubbub21_program_pstate_watermarks(adev, hubbub1, watermarks, refclk_mhz, safe_to_lower) {
+        wm_pending = true;
+    }
+
+    // The DCHub arbiter rate-limits the request stream to the fabric while
+    // the memory controller is busy (more requests outstanding than
+    // ARB_MIN_REQ_OUTSTAND) and the next winner is ahead of its schedule
+    // (its slack against ARB_SAT_LEVEL in DLG RefClk cycles).
+    let c = hubbub1.rsm();
+    reg_set!(adev, c, DCHUBBUB_ARB_SAT_LEVEL, 0, DCHUBBUB_ARB_SAT_LEVEL, 60 * refclk_mhz);
+    reg_update!(adev, c, DCHUBBUB_ARB_DF_REQ_OUTSTAND, DCHUBBUB_ARB_MIN_REQ_OUTSTAND, 0x1FF,
+        DCHUBBUB_ARB_MIN_REQ_OUTSTAND_COMMIT_THRESHOLD, 0xA);
+    reg_update!(adev, c, DCHUBBUB_ARB_HOSTVM_CNTL, DCHUBBUB_ARB_MAX_QOS_COMMIT_THRESHOLD, 0xF);
+
+    hubbub1_allow_self_refresh_control(adev, hubbub1, !dc.debug.disable_stutter);
+
+    wm_pending
+}
+
+/// `hubbub21_apply_DEDCN21_147_wa` (dcn21_hubbub.c): write the urgency
+/// watermark A back to itself.
+fn hubbub21_apply_DEDCN21_147_wa(adev: &amdgpu_device, hubbub1: &dcn20_hubbub) {
+    use crate::dc_helper::{reg_read, reg_write};
+    let r = hubbub1.regs.unwrap();
+    let prog_wm_value = reg_read!(adev, r, DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A);
+    reg_write!(adev, r, DCHUBBUB_ARB_DATA_URGENCY_WATERMARK_A, prog_wm_value);
+}

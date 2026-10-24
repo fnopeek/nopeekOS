@@ -523,3 +523,41 @@ pub fn dal_ddc_close(adev: &amdgpu_device, service: &mut gpio_service, ddc: &mut
     dal_gpio_close(adev, service, &mut ddc.pin_clock);
     dal_gpio_close(adev, service, &mut ddc.pin_data);
 }
+
+/// `dal_gpio_service_create_generic_mux` (gpio_service.c).
+pub fn dal_gpio_service_create_generic_mux(service: &gpio_service, offset: u32, mask: u32) -> Option<Box<gpio>> {
+    let mut id = None;
+    let mut en = 0;
+
+    if service.translate.funcs.is_none() || !offset_to_id(offset, mask, &mut id, &mut en) {
+        return None;
+    }
+
+    // GPIO_PIN_OUTPUT_STATE_DEFAULT is GPIO_PIN_OUTPUT_STATE_ACTIVE_LOW.
+    Some(dal_gpio_create(id, en, gpio_pin_output_state::GPIO_PIN_OUTPUT_STATE_ACTIVE_LOW))
+}
+
+/// `struct gpio_generic_mux_config` (gpio_types.h).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct gpio_generic_mux_config {
+    pub enable_output_from_mux: bool,
+    /// `enum gpio_signal_source`.
+    pub mux_select: u32,
+}
+
+/// `dal_mux_setup_config` (gpio_service.c), through the generic pin's
+/// `set_config` (hw_generic.c).
+pub fn dal_mux_setup_config(adev: &amdgpu_device, mux: &gpio, config: &gpio_generic_mux_config) -> gpio_result {
+    if !mux.pin_open {
+        return gpio_result::GPIO_RESULT_NULL_HANDLE;
+    }
+    let hw_container::Generic(generic) = &mux.hw_container else { return gpio_result::GPIO_RESULT_NON_SPECIFIC_ERROR };
+
+    let r = generic.regs.unwrap_or_default();
+    crate::dc_helper::generic_reg_update_ex(adev, r.mux, &[
+        (generic.shifts.GENERIC_EN as u8, generic.masks.GENERIC_EN, config.enable_output_from_mux as u32),
+        (generic.shifts.GENERIC_SEL as u8, generic.masks.GENERIC_SEL, config.mux_select),
+    ]);
+
+    gpio_result::GPIO_RESULT_OK
+}

@@ -25,12 +25,14 @@ pub enum dccg_funcs {
 /// `struct dccg_funcs` (dccg.h), the members ported.
 #[derive(Default, Clone, Copy)]
 pub struct dccg_ops {
+    pub update_dpp_dto: Option<fn(&amdgpu_device, &mut dcn_dccg, usize, i32)>,
     pub get_dccg_ref_freq: Option<fn(&amdgpu_device, &dcn_dccg, u32, &mut u32)>,
     pub dccg_init: Option<fn(&dcn_dccg)>,
 }
 
 /// `dccg21_funcs` (dcn21_dccg.c), as far as ported.
 const DCCG21_FUNCS: dccg_ops = dccg_ops {
+    update_dpp_dto: Some(dccg21_update_dpp_dto),
     get_dccg_ref_freq: Some(dccg2_get_dccg_ref_freq),
     dccg_init: Some(dccg2_init),
 };
@@ -270,4 +272,34 @@ pub fn dccg21_create(
     d.dccg_shift = Some(dccg_shift);
     d.dccg_mask = Some(dccg_mask);
     d
+}
+
+/// `dccg21_update_dpp_dto` (dcn21_dccg.c): the per-pipe DPP clock as a DTO
+/// of the global one. The phase is ceil(pipe clock / 10 MHz), the modulo
+/// trunc(global clock / 10 MHz), so the divided clock is never too slow; an
+/// unused pipe gets phase 10, which keeps its registers accessible.
+fn dccg21_update_dpp_dto(adev: &amdgpu_device, dccg: &mut dcn_dccg, dpp_inst: usize, req_dppclk: i32) {
+    if dccg.base.ref_dppclk != 0 {
+        let ref_dppclk = dccg.base.ref_dppclk;
+        let modulo = ref_dppclk / 10000;
+
+        let phase = if req_dppclk != 0 {
+            // phase > modulo result in screen corruption ie phase = 30,
+            // mod = 29 for 4k@60 HDMI in these case we don't want pipe
+            // clock to be divided
+            ((req_dppclk + 9999) / 10000).min(modulo)
+        } else {
+            10
+        };
+
+        let (r, sh, m) = dccg.rsm();
+        crate::dc_helper::generic_reg_set_ex(adev, r.DPPCLK_DTO_PARAM[dpp_inst], 0,
+            &[(sh.DPPCLK0_DTO_PHASE, m.DPPCLK0_DTO_PHASE, phase as u32),
+              (sh.DPPCLK0_DTO_MODULO, m.DPPCLK0_DTO_MODULO, modulo as u32)]);
+
+        crate::dc_helper::generic_reg_update_ex(adev, r.DPPCLK_DTO_CTRL,
+            &[(sh.DPPCLK_DTO_ENABLE[dpp_inst], m.DPPCLK_DTO_ENABLE[dpp_inst], 1)]);
+    }
+
+    dccg.base.pipe_dppclk_khz[dpp_inst] = req_dppclk;
 }

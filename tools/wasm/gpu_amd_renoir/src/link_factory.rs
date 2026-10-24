@@ -81,8 +81,22 @@ pub struct bios_forced_drive_settings {
 /// `struct psr_settings` (dc_types.h), the members construct sets.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct psr_settings {
+    pub psr_feature_enabled: bool,
     pub psr_vtotal_control_support: bool,
     pub psr_version: u32,
+}
+
+/// `struct dc_link`'s `phy_state`; `symclk_state` is `enum
+/// symclk_state`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct phy_state {
+    pub symclk_state: u32,
+}
+
+/// `struct replay_settings` (dc_types.h), the members reached.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct replay_settings {
+    pub replay_feature_enabled: bool,
 }
 
 /// `struct link_flags` (dc.h), the link's `wa_flags`.
@@ -108,7 +122,19 @@ pub struct link_wa_flags {
 /// detection reads.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct dc_link_training_overrides {
+    pub voltage_swing: Option<u32>,
+    pub pre_emphasis: Option<u32>,
+    pub post_cursor2: Option<u32>,
+    pub ffe_preset: Option<u8>,
+    pub cr_pattern_time: Option<u16>,
+    pub eq_pattern_time: Option<u16>,
+    pub pattern_for_cr: Option<u32>,
+    pub pattern_for_eq: Option<u32>,
+    pub downspread: Option<bool>,
+    pub alternate_scrambler_reset: Option<bool>,
+    pub enhanced_framing: Option<bool>,
     pub mst_enable: Option<bool>,
+    pub fec_enable: Option<bool>,
 }
 
 /// `struct dc_link_status` (dc.h), the members reached.
@@ -141,9 +167,20 @@ pub struct dc_link {
     pub chip_caps: u16,
     pub bios_forced_drive_settings: bios_forced_drive_settings,
     pub psr_settings: psr_settings,
+    pub replay_settings: replay_settings,
     pub is_hpd_filter_disabled: bool,
     pub edp_sink_present: bool,
     pub link_powered_externally: bool,
+    pub sync_lt_in_progress: bool,
+    pub skip_fallback_on_link_loss: bool,
+    pub skip_implict_edp_power_control: bool,
+    pub dp_ss_off: bool,
+    /// `forced_dp_ffe_preset.raw`.
+    pub forced_dp_ffe_preset: u8,
+    pub cur_lane_setting: [crate::link_dp_training::dc_lane_settings; 4],
+    /// `enum dp_panel_mode`.
+    pub panel_mode: u32,
+    pub phy_state: phy_state,
     pub is_hpd_pending: bool,
     /// `local_sink`: the sink detection found.
     pub local_sink: Option<Box<crate::dc_sink::dc_sink>>,

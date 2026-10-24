@@ -43,6 +43,12 @@ mod hw_sequencer;
 mod link_detection;
 #[path = "../src/link_dpms.rs"]
 mod link_dpms;
+#[path = "../src/link_validation.rs"]
+mod link_validation;
+#[path = "../src/link_hwss.rs"]
+mod link_hwss;
+#[path = "../src/link_dp_training.rs"]
+mod link_dp_training;
 #[path = "../src/dcn10_hwseq.rs"]
 mod dcn10_hwseq;
 #[path = "../src/dcn20_hwseq.rs"]

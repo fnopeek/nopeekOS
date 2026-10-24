@@ -87,6 +87,14 @@ pub fn dc_is_hdmi_signal(signal: u32) -> bool {
     signal == LF_SIGNAL_TYPE_HDMI_TYPE_A
 }
 
+pub fn dc_is_hdmi_tmds_signal(signal: u32) -> bool {
+    signal == LF_SIGNAL_TYPE_HDMI_TYPE_A
+}
+
+pub fn dc_is_lvds_signal(signal: u32) -> bool {
+    signal == LF_SIGNAL_TYPE_LVDS
+}
+
 pub fn dc_is_dp_sst_signal(signal: u32) -> bool {
     signal == LF_SIGNAL_TYPE_DISPLAY_PORT || signal == LF_SIGNAL_TYPE_EDP
 }

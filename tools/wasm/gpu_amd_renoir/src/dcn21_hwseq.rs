@@ -47,3 +47,42 @@ pub fn dcn21_init_sys_ctx(adev: &amdgpu_device, dc: &mut dc, pa_config: &crate::
     let hubbub = dc.res_pool.as_deref_mut().and_then(|p| p.hubbub.as_deref_mut()).expect("hubbub");
     (hubbub.funcs().init_dchub_sys_ctx.unwrap())(adev, &dc_config, hubbub, &config)
 }
+
+/// `dcn21_exit_optimized_pwr_state` (dcn21_hwseq.c).
+pub fn dcn21_exit_optimized_pwr_state(adev: &amdgpu_device, dc: &mut dc, context: &mut crate::dc_state::dc_state) {
+    crate::clk_mgr::clk_mgr_update_clocks(adev, dc, context, false);
+}
+
+/// `dcn21_optimize_pwr_state` (dcn21_hwseq.c).
+pub fn dcn21_optimize_pwr_state(adev: &amdgpu_device, dc: &mut dc, context: &mut crate::dc_state::dc_state) {
+    crate::clk_mgr::clk_mgr_update_clocks(adev, dc, context, true);
+}
+
+/// `dcn21_is_abm_supported` (dcn21_hwseq.c): ABM works on a stream that
+/// is not split across ODM pipes.
+pub fn dcn21_is_abm_supported(dc: &dc, context: &crate::dc_state::dc_state, stream: usize) -> bool {
+    for i in 0..dc.res_pool.as_deref().unwrap().pipe_count as usize {
+        let pipe_ctx = &context.res_ctx.pipe_ctx[i];
+
+        if pipe_ctx.stream == Some(stream) && pipe_ctx.prev_odm_pipe.is_none() && pipe_ctx.next_odm_pipe.is_none() {
+            return true;
+        }
+    }
+    false
+}
+
+/// `dcn21_set_abm_immediate_disable` (dcn21_hwseq.c). A short-term
+/// workaround for backlight ramping that paused midway leaves ABM alone at
+/// level 0 or already disabled; DCN 2.1 has no DMCU.
+pub fn dcn21_set_abm_immediate_disable(_adev: &amdgpu_device, dc: &mut dc, context: &crate::dc_state::dc_state, p: usize) {
+    let pipe_ctx = &context.res_ctx.pipe_ctx[p];
+    let stream = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap();
+
+    if stream.abm_level == 0 || stream.abm_level == crate::regs::ABM_LEVEL_IMMEDIATE_DISABLE {
+        return;
+    }
+
+    if pipe_ctx.stream_res.abm && dc.links[stream.link].panel_cntl.is_some() {
+        crate::linux::Line::new().s("dcn21_set_abm_immediate_disable: dmub_abm_set_pipe, store_backlight_level not ported").say();
+    }
+}

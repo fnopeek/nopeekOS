@@ -1366,6 +1366,14 @@ pub fn bios_parser_get_encoder_cap_info(bp: &bios_parser, bios: &[u8], object_id
 }
 
 /// `bios_is_accelerated_mode` (bios_parser_helper.c), as
+/// `bios_set_scratch_acc_mode_change` (bios_parser_helper.c): tell the
+/// VBIOS whether a driver owns the display.
+pub fn bios_set_scratch_acc_mode_change(adev: &amdgpu_device, dcb: &dc_bios, state: u32) {
+    let regs = dcb.regs.expect("bios regs");
+    crate::dc_helper::generic_reg_update_ex(adev, regs.BIOS_SCRATCH_6,
+        &[(ATOM_S6_ACC_MODE_SHIFT as u8, ATOM_S6_ACC_MODE, state)]);
+}
+
 /// `bios_parser_is_accelerated_mode`: the VBIOS clears S6_ACC_MODE while it
 /// owns the display and a driver sets it when it takes over.
 pub fn bios_parser_is_accelerated_mode(adev: &amdgpu_device, dcb: &dc_bios) -> bool {

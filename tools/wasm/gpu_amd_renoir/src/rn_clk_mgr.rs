@@ -11,6 +11,7 @@ use crate::clk_mgr::{
     WM_A, WM_B, WM_C, WM_D, WM_SET_COUNT, WM_TYPE_PSTATE_CHG, WM_TYPE_RETRAINING,
 };
 use crate::dc::dc;
+use crate::clk_mgr::{DCN_PWR_STATE_LOW_POWER, DCN_PWR_STATE_MISSION_MODE};
 use crate::dc_helper::{dm_read_reg, dm_write_reg, generic_reg_get};
 use crate::dc_types::integrated_info;
 use crate::dm_pp_smu::{
@@ -506,8 +507,10 @@ pub fn rn_clk_mgr_construct(adev: &amdgpu_device, dc: &mut dc, clk_mgr: &mut clk
 
 /// `dcn21_funcs` (rn_clk_mgr.c), as far as ported.
 pub const DCN21_FUNCS: crate::clk_mgr::clk_mgr_ops = crate::clk_mgr::clk_mgr_ops {
+    update_clocks: Some(rn_update_clocks),
     init_clocks: Some(rn_init_clocks),
     notify_wm_ranges: Some(rn_notify_wm_ranges),
+    notify_link_rate_change: Some(rn_notify_link_rate_change),
 };
 
 /// `rn_init_clocks` (rn_clk_mgr.c): forget the clocks; the boot state is
@@ -596,5 +599,253 @@ fn rn_notify_wm_ranges(adev: &amdgpu_device, dc: &dc, clk_mgr: &mut clk_mgr_inte
         {
             crate::dm_pp_smu::pp_rn_set_wm_ranges(adev, &base.ranges);
         }
+    }
+}
+
+/// `khz_to_mhz_ceil` (clk_mgr_internal.h).
+fn khz_to_mhz_ceil(khz: i32) -> i32 {
+    (khz + 999) / 1000
+}
+
+/// `should_set_clock` (clk_mgr_internal.h).
+fn should_set_clock(safe_to_lower: bool, calc_clk: i32, cur_clk: i32) -> bool {
+    (safe_to_lower && calc_clk < cur_clk) || calc_clk > cur_clk
+}
+
+/// `rn_vbios_smu_set_dispclk` (rn_clk_mgr_vbios_smu.c). DCN 2.1 has no
+/// DMCU to tell the new wait loop.
+fn rn_vbios_smu_set_dispclk(adev: &amdgpu_device, requested_dispclk_khz: i32) -> i32 {
+    // Unit of SMU msg parameter is Mhz
+    let actual_dispclk_set_mhz = rn_vbios_smu_send_msg_with_param(adev, RN_VBIOSSMC_MSG_SetDispclkFreq,
+        khz_to_mhz_ceil(requested_dispclk_khz) as u32);
+
+    actual_dispclk_set_mhz * 1000
+}
+
+/// `rn_vbios_smu_set_hard_min_dcfclk` (rn_clk_mgr_vbios_smu.c).
+fn rn_vbios_smu_set_hard_min_dcfclk(adev: &amdgpu_device, clk_mgr: &clk_mgr_internal, requested_dcfclk_khz: i32) -> i32 {
+    let mut actual_dcfclk_set_mhz = -1;
+
+    if clk_mgr.smu_ver < 0x370c00 {
+        return actual_dcfclk_set_mhz;
+    }
+
+    actual_dcfclk_set_mhz = rn_vbios_smu_send_msg_with_param(adev, RN_VBIOSSMC_MSG_SetHardMinDcfclkByFreq,
+        khz_to_mhz_ceil(requested_dcfclk_khz) as u32);
+
+    actual_dcfclk_set_mhz * 1000
+}
+
+/// `rn_vbios_smu_set_min_deep_sleep_dcfclk` (rn_clk_mgr_vbios_smu.c).
+fn rn_vbios_smu_set_min_deep_sleep_dcfclk(adev: &amdgpu_device, clk_mgr: &clk_mgr_internal,
+                                          requested_min_ds_dcfclk_khz: i32) -> i32 {
+    let mut actual_min_ds_dcfclk_mhz = -1;
+
+    if clk_mgr.smu_ver < 0x370c00 {
+        return actual_min_ds_dcfclk_mhz;
+    }
+
+    actual_min_ds_dcfclk_mhz = rn_vbios_smu_send_msg_with_param(adev, RN_VBIOSSMC_MSG_SetMinDeepSleepDcfclk,
+        khz_to_mhz_ceil(requested_min_ds_dcfclk_khz) as u32);
+
+    actual_min_ds_dcfclk_mhz * 1000
+}
+
+/// `rn_vbios_smu_set_phyclk` (rn_clk_mgr_vbios_smu.c).
+pub fn rn_vbios_smu_set_phyclk(adev: &amdgpu_device, requested_phyclk_khz: i32) {
+    rn_vbios_smu_send_msg_with_param(adev, RN_VBIOSSMC_MSG_SetPhyclkVoltageByFreq,
+        khz_to_mhz_ceil(requested_phyclk_khz) as u32);
+}
+
+/// `rn_vbios_smu_set_dppclk` (rn_clk_mgr_vbios_smu.c).
+fn rn_vbios_smu_set_dppclk(adev: &amdgpu_device, requested_dpp_khz: i32) -> i32 {
+    let actual_dppclk_set_mhz = rn_vbios_smu_send_msg_with_param(adev, RN_VBIOSSMC_MSG_SetDppclkFreq,
+        khz_to_mhz_ceil(requested_dpp_khz) as u32);
+
+    actual_dppclk_set_mhz * 1000
+}
+
+/// `rn_vbios_smu_set_dcn_low_power_state` (rn_clk_mgr_vbios_smu.c).
+fn rn_vbios_smu_set_dcn_low_power_state(adev: &amdgpu_device, state: i32) {
+    let disp_count = if state == DCN_PWR_STATE_LOW_POWER { 0 } else { 1 };
+
+    rn_vbios_smu_send_msg_with_param(adev, RN_VBIOSSMC_MSG_SetDisplayCount, disp_count);
+}
+
+/// `rn_get_active_display_cnt_wa` (rn_clk_mgr.c).
+fn rn_get_active_display_cnt_wa(adev: &amdgpu_device, dc: &dc, context: &crate::dc_state::dc_state) -> i32 {
+    let mut display_count = 0;
+    let mut tmds_present = false;
+
+    for i in 0..context.stream_count as usize {
+        let stream = dc.streams[context.streams[i].unwrap()].as_deref().unwrap();
+
+        if stream.signal == LF_SIGNAL_TYPE_HDMI_TYPE_A
+            || stream.signal == LF_SIGNAL_TYPE_DVI_SINGLE_LINK
+            || stream.signal == LF_SIGNAL_TYPE_DVI_DUAL_LINK
+        {
+            tmds_present = true;
+        }
+    }
+
+    for i in 0..dc.link_count as usize {
+        let enc = dc.links[i].link_enc.as_ref().unwrap();
+
+        // abusing the fact that the dig and phy are coupled to see if the
+        // phy is enabled
+        if enc.funcs().is_dig_enabled.is_some_and(|f| f(adev, enc)) {
+            display_count += 1;
+        }
+    }
+
+    // WA for hang on HDMI after display off back back on
+    if display_count == 0 && tmds_present {
+        display_count = 1;
+    }
+
+    display_count
+}
+
+/// `rn_update_clocks_update_dpp_dto` (rn_clk_mgr.c).
+fn rn_update_clocks_update_dpp_dto(adev: &amdgpu_device, dc: &mut dc, context: &crate::dc_state::dc_state,
+                                   ref_dpp_clk: i32, safe_to_lower: bool) {
+    let pool = dc.res_pool.as_deref_mut().unwrap();
+    let dccg = pool.dccg.as_deref_mut().unwrap();
+    dccg.base.ref_dppclk = ref_dpp_clk;
+
+    for i in 0..pool.pipe_count as usize {
+        // Loop index may not match dpp->inst if some pipes disabled, so
+        // select correct inst from res_pool
+        let dpp_inst = pool.dpps[i].as_deref().unwrap().base.inst as usize;
+        let dppclk_khz = context.res_ctx.pipe_ctx[i].plane_res.bw_dppclk_khz;
+
+        let dccg = pool.dccg.as_deref_mut().unwrap();
+        let prev_dppclk_khz = dccg.base.pipe_dppclk_khz[dpp_inst];
+
+        if safe_to_lower || prev_dppclk_khz < dppclk_khz {
+            (dccg.funcs().update_dpp_dto.unwrap())(adev, dccg, dpp_inst, dppclk_khz);
+        }
+    }
+}
+
+/// `rn_update_clocks` (rn_clk_mgr.c): raise (or, when safe, lower) the
+/// clocks to what `context` asks for. DCN 2.1 has no DMCU to tell a new
+/// dispclk.
+fn rn_update_clocks(adev: &amdgpu_device, dc: &mut dc, clk_mgr: &mut clk_mgr_internal,
+                    context: &mut crate::dc_state::dc_state, safe_to_lower: bool) {
+    let mut update_dppclk = false;
+    let mut update_dispclk = false;
+    let mut dpp_clock_lowered = false;
+
+    if dc.work_arounds.skip_clock_update {
+        return;
+    }
+
+    // if it is safe to lower, but we are already in the lower state, we
+    // don't have to do anything also if safe to lower is false, we just go
+    // in the higher state
+    if safe_to_lower && !dc.debug.disable_48mhz_pwrdwn {
+        // check that we're not already in lower
+        if clk_mgr.base.clks.pwr_state != DCN_PWR_STATE_LOW_POWER {
+            let display_count = rn_get_active_display_cnt_wa(adev, dc, context);
+
+            // if we can go lower, go lower
+            if display_count == 0 {
+                rn_vbios_smu_set_dcn_low_power_state(adev, DCN_PWR_STATE_LOW_POWER);
+                // update power state
+                clk_mgr.base.clks.pwr_state = DCN_PWR_STATE_LOW_POWER;
+            }
+        }
+    } else {
+        // check that we're not already in D0
+        if clk_mgr.base.clks.pwr_state != DCN_PWR_STATE_MISSION_MODE {
+            rn_vbios_smu_set_dcn_low_power_state(adev, DCN_PWR_STATE_MISSION_MODE);
+            // update power state
+            clk_mgr.base.clks.pwr_state = DCN_PWR_STATE_MISSION_MODE;
+        }
+    }
+
+    let new_clocks = &mut context.bw_ctx.dcn.clk;
+
+    if should_set_clock(safe_to_lower, new_clocks.dcfclk_khz, clk_mgr.base.clks.dcfclk_khz) {
+        clk_mgr.base.clks.dcfclk_khz = new_clocks.dcfclk_khz;
+        rn_vbios_smu_set_hard_min_dcfclk(adev, clk_mgr, clk_mgr.base.clks.dcfclk_khz);
+    }
+
+    let new_clocks = &mut context.bw_ctx.dcn.clk;
+    if should_set_clock(safe_to_lower, new_clocks.dcfclk_deep_sleep_khz, clk_mgr.base.clks.dcfclk_deep_sleep_khz) {
+        clk_mgr.base.clks.dcfclk_deep_sleep_khz = new_clocks.dcfclk_deep_sleep_khz;
+        rn_vbios_smu_set_min_deep_sleep_dcfclk(adev, clk_mgr, clk_mgr.base.clks.dcfclk_deep_sleep_khz);
+    }
+
+    // workaround: Limit dppclk to 100Mhz to avoid lower eDP panel switch to
+    // plus 4K monitor underflow. Do not adjust dppclk if dppclk is 0 to
+    // avoid unexpected result
+    if new_clocks.dppclk_khz < 100000 && new_clocks.dppclk_khz > 0 {
+        new_clocks.dppclk_khz = 100000;
+    }
+
+    // Temporally ignore thew 0 cases for disp and dpp clks. We may have a
+    // new feature that requires 0 clks in the future.
+    if new_clocks.dppclk_khz == 0 || new_clocks.dispclk_khz == 0 {
+        new_clocks.dppclk_khz = clk_mgr.base.clks.dppclk_khz;
+        new_clocks.dispclk_khz = clk_mgr.base.clks.dispclk_khz;
+    }
+
+    if should_set_clock(safe_to_lower, new_clocks.dppclk_khz, clk_mgr.base.clks.dppclk_khz) {
+        if clk_mgr.base.clks.dppclk_khz > new_clocks.dppclk_khz {
+            dpp_clock_lowered = true;
+        }
+        clk_mgr.base.clks.dppclk_khz = new_clocks.dppclk_khz;
+        update_dppclk = true;
+    }
+
+    if should_set_clock(safe_to_lower, new_clocks.dispclk_khz, clk_mgr.base.clks.dispclk_khz) {
+        clk_mgr.base.clks.dispclk_khz = new_clocks.dispclk_khz;
+        clk_mgr.base.clks.actual_dispclk_khz = rn_vbios_smu_set_dispclk(adev, clk_mgr.base.clks.dispclk_khz);
+
+        update_dispclk = true;
+    }
+
+    if dpp_clock_lowered {
+        // increase per DPP DTO before lowering global dppclk with requested
+        // dppclk
+        rn_update_clocks_update_dpp_dto(adev, dc, context, clk_mgr.base.clks.dppclk_khz, safe_to_lower);
+
+        clk_mgr.base.clks.actual_dppclk_khz = rn_vbios_smu_set_dppclk(adev, clk_mgr.base.clks.dppclk_khz);
+
+        // update dpp dto with actual dpp clk.
+        rn_update_clocks_update_dpp_dto(adev, dc, context, clk_mgr.base.clks.actual_dppclk_khz, safe_to_lower);
+    } else {
+        // increase global DPPCLK before lowering per DPP DTO
+        if update_dppclk || update_dispclk {
+            clk_mgr.base.clks.actual_dppclk_khz = rn_vbios_smu_set_dppclk(adev, clk_mgr.base.clks.dppclk_khz);
+        }
+
+        // always update dtos unless clock is lowered and not safe to lower
+        rn_update_clocks_update_dpp_dto(adev, dc, context, clk_mgr.base.clks.actual_dppclk_khz, safe_to_lower);
+    }
+
+    // res_pool->dmcu is NULL on DCN 2.1.
+    let _ = update_dispclk;
+}
+
+/// `rn_notify_link_rate_change` (rn_clk_mgr.c): the PHY clock follows the
+/// fastest enabled link.
+fn rn_notify_link_rate_change(adev: &amdgpu_device, dc: &mut dc, clk_mgr: &mut clk_mgr_internal, li: usize) {
+    let mut max_phyclk_req = 0;
+
+    clk_mgr.cur_phyclk_req_table[dc.links[li].link_index as usize] =
+        dc.links[li].cur_link_settings.link_rate * LINK_RATE_REF_FREQ_IN_KHZ;
+
+    for i in 0..LF_MAX_LINKS as usize {
+        if clk_mgr.cur_phyclk_req_table[i] > max_phyclk_req {
+            max_phyclk_req = clk_mgr.cur_phyclk_req_table[i];
+        }
+    }
+
+    if max_phyclk_req != clk_mgr.base.clks.phyclk_khz as u32 {
+        clk_mgr.base.clks.phyclk_khz = max_phyclk_req as i32;
+        rn_vbios_smu_set_phyclk(adev, max_phyclk_req as i32);
     }
 }

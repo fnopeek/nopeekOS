@@ -951,3 +951,30 @@ pub fn dmub_srv_get_diagnostic_data(adev: &amdgpu_device, dmub: &mut dmub_srv) -
     f(adev, dmub);
     true
 }
+
+/// `dmub_srv_send_gpint_command` (dmub_srv.c): a general purpose interrupt
+/// to the firmware, waited for up to `timeout_us`.
+pub fn dmub_srv_send_gpint_command(adev: &amdgpu_device, dmub: &dmub_srv, command_code: u32, param: u16,
+                                   timeout_us: u32) -> u32 {
+    if !dmub.sw_init {
+        return DMUB_STATUS_INVALID;
+    }
+
+    let (Some(set_gpint), Some(is_gpint_acked)) = (dmub.hw_funcs.set_gpint, dmub.hw_funcs.is_gpint_acked) else {
+        return DMUB_STATUS_INVALID;
+    };
+
+    let reg = crate::dmub_dcn20::dmub_gpint_data_register::new(1, command_code, param as u32);
+
+    set_gpint(adev, dmub, reg);
+
+    for _ in 0..timeout_us {
+        crate::linux::udelay(1);
+
+        if is_gpint_acked(adev, dmub, reg) {
+            return DMUB_STATUS_OK;
+        }
+    }
+
+    DMUB_STATUS_TIMEOUT
+}

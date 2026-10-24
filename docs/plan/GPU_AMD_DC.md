@@ -213,6 +213,37 @@ funcs); die Schreibzugriffe kommen in hwss (Stufe D/E). **Das formale
 Objektgraph gebaut und prüft dann den ganzen Construct** — der erste
 host-prüfbare Meilenstein ist der Graph, nicht der Einzelblock.
 
+## Stufe-E-Fortschritt
+
+- **E1** Stream/Plane/State bis `dc_state_add_plane`, **E2**
+  `dc_validate_global_state` + DML (dmlgen.py) — beide bitgleich.
+- **E3 `dc_commit_streams`** (2026-10-24): der ganze Weg bis vor
+  `dc_update_planes_and_stream`, ruhend. `dc_validate_with_context`,
+  `dc_commit_state_no_check`, eDP-Fast-Boot-Prüfung
+  (`dc_validate_boot_timing` mit `optc1_get_hw_timing`), Accelerated Mode
+  (Backlight aus, Encoder/OTGs/PLLs aus, VGA), `rn_update_clocks` +
+  DPP-DTOs, `hubbub21_program_watermarks`, `dce110_apply_ctx_to_hw`
+  (OPP-Format, `dcn20_enable_stream_timing`, OTG-Timing, DRR, DIG-FE an
+  OTG), `link_set_dpms_on` mit `enable_link_dp` (eDP-Power, OUI,
+  8b/10b-Training: Clock Recovery, Channel EQ, Lane-Anpassung über die
+  VBIOS-Tabelle, Video-Idle, FEC), Stream-Attribute/MSA, Info-Frames,
+  `dcn20_enable_stream`/`unblank_stream`, Front-End-Schritte ohne Plane,
+  Stereo über den GPIO-Mux, `dcn20_optimize_bandwidth`, Stream-Maske an den
+  DMCUB. Neue Dateien `link_validation.rs`, `link_hwss.rs`,
+  `link_dp_training.rs`.
+- **Orakel:** `check.sh` vergleicht im Modus `commit` jetzt durch
+  `dc_commit_streams` — `boot` 765 Register-Writes + 20 AUX + 25 DMUB-Befehle,
+  `lit` (VBIOS bereits beschleunigt, Link aktiv → `disable_link` vorab)
+  ebenso, jeweils `full` und `scaled`, Byte-gleich. Die DMUB-Befehle werden
+  als Präfix der Linux-Folge verglichen (der Rest gehört zu
+  `dc_update_planes_and_stream`).
+- **Benannt, nicht portiert:** MST, DSC, HDMI/DVI/LVDS-Attribute und
+  -Info-Frames, Audio-Ausgang, LTTPR im nicht-transparenten Modus, DPIA,
+  Fallback auf niedrigere Link-Settings, `dcn20_program_pipe` (mit Planes →
+  E4), Plane-Vergleich in `dcn20_detect_pipe_changes`, `pipe_control_lock`.
+- **Nächster Schritt E4:** `dc_update_planes_and_stream` →
+  `dcn20_program_pipe` (hubp/dpp/mpc), dann der Geräte-Meilenstein.
+
 ## Risiken / offen
 
 - **DML-Umfang:** selbst der dcn21-Teil ist groß und reiner Festkomma-Code;

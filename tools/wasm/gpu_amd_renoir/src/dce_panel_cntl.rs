@@ -152,12 +152,14 @@ pub enum panel_cntl_funcs_id {
 #[derive(Default, Clone, Copy)]
 pub struct panel_cntl_ops {
     pub hw_init: Option<fn(&crate::amdgpu_device::amdgpu_device, &mut dce_panel_cntl) -> u32>,
+    pub is_panel_backlight_on: Option<fn(&crate::amdgpu_device::amdgpu_device, &dce_panel_cntl) -> bool>,
     pub is_panel_powered_on: Option<fn(&crate::amdgpu_device::amdgpu_device, &dce_panel_cntl) -> bool>,
 }
 
 /// `dce_link_panel_cntl_funcs` (dce_panel_cntl.c), as far as ported.
 const DCE_LINK_PANEL_CNTL_FUNCS: panel_cntl_ops = panel_cntl_ops {
     hw_init: Some(dce_panel_cntl_hw_init),
+    is_panel_backlight_on: Some(dce_is_panel_backlight_on),
     is_panel_powered_on: Some(dce_is_panel_powered_on),
 };
 
@@ -179,6 +181,18 @@ pub struct dce_panel_cntl {
     pub regs: dce_panel_cntl_registers,
     pub shift: dce_panel_cntl_shift,
     pub mask: dce_panel_cntl_mask,
+}
+
+/// `dce_is_panel_backlight_on` (dce_panel_cntl.c): BLON when overridden,
+/// the power sequencer's target state otherwise.
+pub fn dce_is_panel_backlight_on(adev: &crate::amdgpu_device::amdgpu_device, p: &dce_panel_cntl) -> bool {
+    use crate::dc_helper::{reg_get, reg_get_n};
+    let c = (&p.regs, &p.shift, &p.mask);
+
+    let [blon, blon_ovrd] = reg_get_n!(adev, c, PWRSEQ_CNTL, LVTMA_BLON, LVTMA_BLON_OVRD);
+    let pwrseq_target_state = reg_get!(adev, c, PWRSEQ_CNTL, LVTMA_PWRSEQ_TARGET_STATE);
+
+    if blon_ovrd != 0 { blon != 0 } else { pwrseq_target_state != 0 }
 }
 
 /// `dce_is_panel_powered_on` (dce_panel_cntl.c): the power sequencer's

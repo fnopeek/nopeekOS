@@ -60,6 +60,9 @@ pub struct stream_resource {
     pub pix_clk_params: pixel_clk_params,
     pub abm: bool,
     pub gsl_group: i32,
+    pub encoder_info_frame: crate::dc_stream::encoder_info_frame,
+    /// `dsc`: the pool index of the stream's DSC.
+    pub dsc: Option<usize>,
 }
 
 /// `struct plane_resource` (core_types.h), the members reached. DCN has no
@@ -135,7 +138,28 @@ pub struct pipe_ctx {
     pub pipe_dlg_param: crate::display_mode_structs::_vcs_dpi_display_pipe_dest_params_st,
     pub det_buffer_size_kb: i32,
     pub unbounded_req: bool,
+    /// `update_flags.raw` (union pipe_update_flags).
+    pub update_flags: u32,
 }
+
+/// `union pipe_update_flags` (core_types.h) bits.
+pub const PIPE_UPDATE_ENABLE: u32 = 1 << 0;
+pub const PIPE_UPDATE_DISABLE: u32 = 1 << 1;
+pub const PIPE_UPDATE_ODM: u32 = 1 << 2;
+pub const PIPE_UPDATE_GLOBAL_SYNC: u32 = 1 << 3;
+pub const PIPE_UPDATE_OPP_CHANGED: u32 = 1 << 4;
+pub const PIPE_UPDATE_TG_CHANGED: u32 = 1 << 5;
+pub const PIPE_UPDATE_MPCC: u32 = 1 << 6;
+pub const PIPE_UPDATE_DPPCLK: u32 = 1 << 7;
+pub const PIPE_UPDATE_HUBP_INTERDEPENDENT: u32 = 1 << 8;
+pub const PIPE_UPDATE_HUBP_RQ_DLG_TTU: u32 = 1 << 9;
+pub const PIPE_UPDATE_GAMUT_REMAP: u32 = 1 << 10;
+pub const PIPE_UPDATE_SCALER: u32 = 1 << 11;
+pub const PIPE_UPDATE_VIEWPORT: u32 = 1 << 12;
+pub const PIPE_UPDATE_PLANE_CHANGED: u32 = 1 << 13;
+pub const PIPE_UPDATE_DET_SIZE: u32 = 1 << 14;
+pub const PIPE_UPDATE_UNBOUNDED_REQ: u32 = 1 << 15;
+pub const PIPE_UPDATE_TEST_PATTERN_CHANGED: u32 = 1 << 16;
 
 /// `struct resource_context` (core_types.h), the members reached.
 #[derive(Clone, Copy, Debug, Default)]
@@ -158,6 +182,8 @@ pub struct dc_stream_status {
     pub audio_inst: i32,
     pub plane_states: [Option<usize>; MAX_SURFACES],
     pub is_abm_supported: bool,
+    /// `mall_stream_config.subvp_limit_cursor_size`.
+    pub subvp_limit_cursor_size: bool,
 }
 
 /// `struct cstate_pstate_watermarks_st` (inc/hw/mem_input.h).
@@ -227,6 +253,7 @@ pub struct dc_state {
     pub res_ctx: resource_context,
     pub bw_ctx: bw_context,
     pub power_source: dc_power_source_type,
+    pub stream_mask: u32,
     pub refcount: u32,
 }
 
@@ -438,4 +465,54 @@ pub fn dc_state_add_plane(dc: &mut dc, stream: usize, plane_state: usize, state:
     }
 
     added
+}
+
+/// `dc_state_retain` (dc_state.c).
+pub fn dc_state_retain(state: &mut dc_state) {
+    state.refcount += 1;
+}
+
+/// `dc_state_destruct` (dc_state.c): drop the references the state holds.
+/// DCN 2.1 tracks no phantoms.
+pub fn dc_state_destruct(dc: &mut dc, state: &mut dc_state) {
+    for i in 0..state.stream_count as usize {
+        for j in 0..state.stream_status[i].plane_count as usize {
+            crate::dc_stream::dc_plane_state_release(dc, state.stream_status[i].plane_states[j].unwrap());
+        }
+
+        state.stream_status[i].plane_count = 0;
+        crate::dc_stream::dc_stream_release(dc, state.streams[i].unwrap());
+        state.streams[i] = None;
+    }
+    state.stream_count = 0;
+
+    state.stream_mask = 0;
+    state.res_ctx = resource_context::default();
+    state.has_clk_mgr = false;
+    state.bw_ctx = bw_context::default();
+}
+
+/// `dc_state_release` (dc_state.c): the last reference destructs and frees
+/// the state; any other is dropped with the Box Linux keeps pointing at.
+pub fn dc_state_release(dc: &mut dc, mut state: Box<dc_state>) {
+    state.refcount -= 1;
+    if state.refcount == 0 {
+        dc_state_destruct(dc, &mut state);
+    } else {
+        crate::linux::Line::new().s("dc_state_release: a state with further references").say();
+    }
+}
+
+/// `dc_state_set_stream_subvp_cursor_limit` (dc_state.c).
+pub fn dc_state_set_stream_subvp_cursor_limit(stream: usize, state: &mut dc_state, limit: bool) {
+    if let Some(i) = dc_state_get_stream_status(state, stream) {
+        state.stream_status[i].subvp_limit_cursor_size = limit;
+    }
+}
+
+/// `dc_state_rem_all_planes_for_stream` (dc_state.c): taking the planes of
+/// a stream back off its pipes is a later stage.
+pub fn dc_state_rem_all_planes_for_stream(_dc: &mut dc, _stream: usize, _state: &mut dc_state) -> bool {
+    crate::linux::Line::new().s("dc_state_rem_all_planes_for_stream not ported").say();
+    false
 }

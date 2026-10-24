@@ -14,7 +14,8 @@ use crate::dc_state::dc_state_create;
 use crate::dcn20_fpu::dcn21_update_bw_bounding_box;
 use crate::bios_parser2::{bios_parser_get_connector_id, bios_parser_get_connectors_number};
 use crate::link_factory::{create_virtual_link, dc_link, get_num_of_internal_disp, link_create, link_ctx, link_init_data};
-use crate::regs::{LF_ENUM_ID_COUNT, LF_MAX_LINKS};
+use crate::regs::{LF_ENUM_ID_COUNT, LF_MAX_LINKS, LF_SIGNAL_TYPE_EDP};
+use crate::dc_types::{dc_status, MAX_PIPES};
 use alloc::vec::Vec;
 use crate::dc_resource::{dc_create_resource_pool, resource_parse_asic_id, resource_pool, NO_UNDERLAY_PIPE};
 use crate::gpio_service::{dal_gpio_service_create, gpio_service};
@@ -119,6 +120,7 @@ pub struct dc_config {
     pub support_edp0_on_dp1: bool,
     pub unify_link_enc_assignment: bool,
     pub enable_dpia_pre_training: bool,
+    pub set_pipe_unlock_order: bool,
     pub enable_4to1MPC: bool,
 }
 
@@ -196,6 +198,12 @@ pub struct dc_debug_options {
     pub minimum_z8_residency_time: u32,
     pub force_chroma_subsampling_1tap: bool,
     pub visual_confirm_rect_height: u32,
+    pub enable_driver_sequence_debug: bool,
+    pub disable_idle_power_optimizations: bool,
+    /// `enum lttpr_mode`.
+    pub lttpr_mode_override: u32,
+    pub avoid_vbios_exec_table: bool,
+    pub disable_extblankadj: bool,
 }
 
 /// Which `dc_cap_funcs` entry is bound (dcn21 sets only
@@ -238,6 +246,8 @@ pub struct dc {
     /// `hwss`: the hw sequencer vtable (`dcn21_hw_sequencer_construct`).
     pub hwss: crate::hw_sequencer::hw_sequencer_funcs,
     pub optimized_required: bool,
+    pub idle_optimizations_allowed: bool,
+    pub work_arounds: dc_work_arounds,
     /// `vm_pa_config`: the system context `dc_setup_system_context` keeps.
     pub vm_pa_config: dc_phy_addr_space_config,
     pub vendor_signature: dpcd_vendor_signature,
@@ -247,6 +257,12 @@ pub struct dc {
     pub streams: Vec<Option<Box<crate::dc_stream::dc_stream_state>>>,
     /// The plane states the DM created (`dc_create_plane_state`).
     pub planes: Vec<Option<Box<crate::dc_stream::dc_plane_state>>>,
+}
+
+/// `struct dc_work_arounds` (dc.h), the members reached.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct dc_work_arounds {
+    pub skip_clock_update: bool,
 }
 
 /// `struct dc_bounding_box_overrides` (dc.h): bounding-box values the DM
@@ -530,4 +546,698 @@ pub fn dc_create(adev: &amdgpu_device, init_params: &dc_init_data) -> Option<Box
     dc.build_id = DC_BUILD_ID;
 
     Some(dc)
+}
+
+fn not_ported(name: &str) {
+    crate::linux::Line::new().s("dc: ").s(name).s(" not ported").say();
+}
+
+/// `MAX_STREAMS` (dc.h).
+pub const MAX_STREAMS: usize = 6;
+
+/// `struct dc_validation_set` (dc.h): a stream and its planes, as indices
+/// into dc's arenas.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct dc_validation_set {
+    pub stream: usize,
+    pub plane_states: [Option<usize>; crate::dc_types::MAX_SURFACES],
+    pub plane_count: u8,
+}
+
+/// `struct dc_commit_streams_params` (dc.h).
+pub struct dc_commit_streams_params<'a> {
+    pub streams: &'a [usize],
+    pub power_source: crate::dc_state::dc_power_source_type,
+}
+
+/// `streams_changed` (dc.c).
+fn streams_changed(dc: &dc, streams: &[usize]) -> bool {
+    let cur = dc.current_state.as_deref().unwrap();
+
+    if streams.len() as u32 != cur.stream_count {
+        return true;
+    }
+
+    for i in 0..cur.stream_count as usize {
+        if cur.streams[i] != Some(streams[i]) {
+            return true;
+        }
+        let link = dc.streams[streams[i]].as_deref().unwrap().link;
+        if !dc.links[link].link_state_valid {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// `dc_exit_ips_for_hw_access` (dc.c). DCN 2.1 has no IPS, so this does
+/// nothing; `dc_allow_idle_optimizations_internal` would be its body.
+pub fn dc_exit_ips_for_hw_access(dc: &dc) {
+    if dc.caps.ips_support {
+        not_ported("dc_allow_idle_optimizations_internal");
+    }
+}
+
+/// `dc_stream_get_status` (dc_stream.c): the slot of `stream` in the
+/// current state.
+pub fn dc_stream_get_status(dc: &dc, stream: usize) -> Option<usize> {
+    crate::dc_state::dc_state_get_stream_status(dc.current_state.as_deref().unwrap(), stream)
+}
+
+/// `get_seamless_boot_stream_count` (dc.c).
+fn get_seamless_boot_stream_count(dc: &dc, ctx: &crate::dc_state::dc_state) -> u32 {
+    let mut seamless_boot_stream_count = 0;
+
+    for i in 0..ctx.stream_count as usize {
+        if dc.streams[ctx.streams[i].unwrap()].as_deref().unwrap().apply_seamless_boot_optimization {
+            seamless_boot_stream_count += 1;
+        }
+    }
+
+    seamless_boot_stream_count
+}
+
+/// `dc_z10_restore` (dc.c). `z10_restore` is not a member of dcn21_funcs.
+fn dc_z10_restore(_dc: &dc) {}
+
+/// `dc_allow_idle_optimizations` (dc.c): with neither a DMUB IPS nor an
+/// `apply_idle_power_optimizations` in dcn21_funcs, and the debug flags
+/// at their defaults, this leaves `idle_optimizations_allowed` alone; on
+/// DCN 2.1 it only logs.
+fn dc_allow_idle_optimizations(dc: &mut dc, allow: bool) {
+    if dc.debug.disable_idle_power_optimizations {
+        return;
+    }
+    if allow == dc.idle_optimizations_allowed {
+        return;
+    }
+    // dc->hwss.apply_idle_power_optimizations is NULL on DCN 2.1.
+}
+
+/// `disable_vbios_mode_if_required` (dc.c): a lit eDP whose pixel clock is
+/// not the one the new state asks for is switched off first.
+fn disable_vbios_mode_if_required(adev: &amdgpu_device, dc: &mut dc, context: &mut crate::dc_state::dc_state) {
+    use crate::dcn21_link_encoder::ENGINE_ID_UNKNOWN;
+    let pipe_count = dc.res_pool.as_deref().unwrap().pipe_count as usize;
+
+    // check if timing_changed, disable stream
+    for i in 0..pipe_count {
+        let pipe = context.res_ctx.pipe_ctx[i];
+        let Some(s) = pipe.stream else { continue };
+        let stream = dc.streams[s].as_deref().unwrap();
+
+        if stream.apply_seamless_boot_optimization {
+            continue;
+        }
+
+        // only looking for first odm pipe
+        if pipe.prev_odm_pipe.is_some() {
+            continue;
+        }
+
+        let li = stream.link;
+        let link = (dc.links[li].local_sink.as_deref().is_some_and(|s| s.sink_signal == LF_SIGNAL_TYPE_EDP))
+            .then_some(li);
+
+        let Some(li) = link else { continue };
+        let enc = dc.links[li].link_enc.as_ref().unwrap();
+        if (enc.funcs().is_dig_enabled.unwrap())(adev, enc) {
+            let mut tg_inst = 0;
+            let mut pix_clk_100hz = 0;
+
+            let enc_inst = (enc.funcs().get_dig_frontend.unwrap())(adev, enc);
+            if enc_inst != ENGINE_ID_UNKNOWN {
+                let pool = dc.res_pool.as_deref().unwrap();
+                for j in 0..pool.stream_enc_count as usize {
+                    let se = pool.stream_enc[j].as_ref().unwrap();
+                    if se.base().id as u32 == enc_inst {
+                        tg_inst = (se.funcs().dig_source_otg.unwrap())(adev, se);
+                        break;
+                    }
+                }
+
+                let dp = pool.dp_clock_source.as_deref().unwrap();
+                (dp.funcs().get_pixel_clk_frequency_100hz.unwrap())(adev, dp, tg_inst, &mut pix_clk_100hz);
+
+                if dc.links[li].link_status.link_active {
+                    let requested_pix_clk_100hz = pipe.stream_res.pix_clk_params.requested_pix_clk_100hz;
+
+                    if pix_clk_100hz != requested_pix_clk_100hz {
+                        crate::link_dpms::link_set_dpms_off(adev, dc, context, i);
+                        dc.streams[s].as_deref_mut().unwrap().dpms_off = false;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `dc_validate_boot_timing` (dc.c): whether the eDP the VBIOS lit runs
+/// the timing `crtc_timing` asks for, so the first mode set can keep it.
+pub fn dc_validate_boot_timing(adev: &amdgpu_device, dc: &mut dc, sink_link: usize, sink_signal: u32,
+                               crtc_timing: &crate::dc_hw_types::dc_crtc_timing) -> bool {
+    use crate::dcn21_link_encoder::ENGINE_ID_UNKNOWN;
+    let mut hw_crtc_timing = crate::dc_hw_types::dc_crtc_timing::default();
+
+    // Support seamless boot on EDP displays only
+    if sink_signal != LF_SIGNAL_TYPE_EDP {
+        return false;
+    }
+
+    if dc.debug.force_odm_combine != 0 {
+        return false;
+    }
+
+    let link = &dc.links[sink_link];
+    let enc = link.link_enc.as_ref().unwrap();
+
+    // Check for enabled DIG to identify enabled display
+    if !(enc.funcs().is_dig_enabled.unwrap())(adev, enc) {
+        return false;
+    }
+
+    let enc_inst = (enc.funcs().get_dig_frontend.unwrap())(adev, enc);
+
+    if enc_inst == ENGINE_ID_UNKNOWN {
+        return false;
+    }
+
+    let pool = dc.res_pool.as_deref().unwrap();
+    let mut tg_inst = 0;
+    let mut se = None;
+    for i in 0..pool.stream_enc_count as usize {
+        let e = pool.stream_enc[i].as_ref().unwrap();
+        if e.base().id as u32 == enc_inst {
+            se = Some(i);
+            tg_inst = (e.funcs().dig_source_otg.unwrap())(adev, e);
+            break;
+        }
+    }
+
+    // tg_inst not found
+    let Some(se) = se else { return false };
+
+    if tg_inst >= pool.timing_generator_count {
+        return false;
+    }
+
+    if tg_inst != enc.base().preferred_engine {
+        return false;
+    }
+
+    let tg = pool.timing_generators[tg_inst as usize].as_deref().unwrap();
+
+    let Some(get_hw_timing) = tg.funcs().get_hw_timing else { return false };
+
+    if !get_hw_timing(adev, tg, &mut hw_crtc_timing) {
+        return false;
+    }
+
+    let (c, h) = (crtc_timing, &hw_crtc_timing);
+    if c.h_total != h.h_total || c.h_border_left != h.h_border_left || c.h_addressable != h.h_addressable
+        || c.h_border_right != h.h_border_right || c.h_front_porch != h.h_front_porch
+        || c.h_sync_width != h.h_sync_width || c.v_total != h.v_total || c.v_border_top != h.v_border_top
+        || c.v_addressable != h.v_addressable || c.v_border_bottom != h.v_border_bottom
+        || c.v_front_porch != h.v_front_porch || c.v_sync_width != h.v_sync_width
+    {
+        return false;
+    }
+
+    // block DSC for now, as VBIOS does not currently support DSC timings
+    if crtc_timing.flags.DSC {
+        return false;
+    }
+
+    if crate::link_detection::dc_is_dp_signal(link.connector_signal) {
+        let mut pix_clk_100hz = 0;
+        let mut num_odm_pipes = 1;
+        let mut id_src = [0u32; 4];
+
+        let dp = pool.dp_clock_source.as_deref().unwrap();
+        (dp.funcs().get_pixel_clk_frequency_100hz.unwrap())(adev, dp, tg_inst, &mut pix_clk_100hz);
+
+        if let Some(f) = tg.funcs().get_optc_source {
+            let (a, b) = id_src.split_at_mut(1);
+            f(adev, tg, &mut num_odm_pipes, &mut a[0], &mut b[0]);
+        }
+
+        if num_odm_pipes == 2 {
+            pix_clk_100hz *= 2;
+        } else if num_odm_pipes == 4 {
+            pix_clk_100hz *= 4;
+        }
+        // dcn20_str_enc_funcs has no get_pixels_per_cycle.
+
+        // Note: In rare cases, HW pixclk may differ from crtc's pixclk
+        // slightly due to rounding issues in 10 kHz units.
+        if crtc_timing.pix_clk_100hz != pix_clk_100hz {
+            return false;
+        }
+
+        let e = pool.stream_enc[se].as_ref().unwrap();
+        let Some(dp_get_pixel_format) = e.funcs().dp_get_pixel_format else { return false };
+
+        if !dp_get_pixel_format(adev, e, &mut hw_crtc_timing.pixel_encoding, &mut hw_crtc_timing.display_color_depth) {
+            return false;
+        }
+
+        if hw_crtc_timing.display_color_depth != crtc_timing.display_color_depth {
+            return false;
+        }
+
+        if hw_crtc_timing.pixel_encoding != crtc_timing.pixel_encoding {
+            return false;
+        }
+    }
+
+    if crate::dc_dp_types::bits(link.dpcd_caps.dprx_feature, 3, 1) != 0 {
+        return false;
+    }
+
+    if crate::dc_dp_types::channel_coding_cap_DP_128b_132b_SUPPORTED(link.dpcd_caps.channel_coding_cap) != 0 {
+        return false;
+    }
+
+    if crate::link_dp_training::edp_is_ilr_optimization_required(adev, dc, sink_link, crtc_timing) {
+        return false;
+    }
+
+    true
+}
+
+/// `disable_dangling_plane` (dc.c): every stream of the current state the
+/// new one drops loses its planes before the new state is applied. The
+/// planes are reprogrammed through `program_front_end_for_ctx` on a copy
+/// of the current state without them.
+fn disable_dangling_plane(adev: &amdgpu_device, dc: &mut dc, context: &crate::dc_state::dc_state) {
+    use crate::dc_state::*;
+    let mut dangling_context = dc_state_create_current_copy(dc);
+    let pipe_count = dc.res_pool.as_deref().unwrap().pipe_count as usize;
+
+    for i in 0..pipe_count {
+        let cur = dc.current_state.as_deref().unwrap();
+        let old_stream = cur.res_ctx.pipe_ctx[i].stream;
+        let mut should_disable = true;
+
+        let new_top = context.res_ctx.pipe_ctx[i].top_pipe;
+        let old_top = cur.res_ctx.pipe_ctx[i].top_pipe;
+        let pipe_split_change = match (new_top, old_top) {
+            (Some(n), Some(o)) => context.res_ctx.pipe_ctx[n].pipe_idx != cur.res_ctx.pipe_ctx[o].pipe_idx,
+            _ => new_top != old_top,
+        };
+
+        for j in 0..context.stream_count as usize {
+            if old_stream == context.streams[j] {
+                should_disable = false;
+                break;
+            }
+        }
+        if !should_disable && pipe_split_change && cur.stream_count != context.stream_count {
+            should_disable = true;
+        }
+
+        if old_stream.is_some() && cur.res_ctx.pipe_ctx[i].top_pipe.is_none()
+            && cur.res_ctx.pipe_ctx[i].prev_odm_pipe.is_none()
+        {
+            let old_pipe = &cur.res_ctx.pipe_ctx[i];
+            let new_pipe = &context.res_ctx.pipe_ctx[i];
+
+            if old_pipe.plane_state.is_some() && new_pipe.plane_state.is_none() {
+                should_disable = true;
+            }
+        }
+
+        if should_disable && let Some(old_stream) = old_stream {
+            // A stream of the current state is never a SubVP phantom on
+            // DCN 2.1.
+            dc_state_rem_all_planes_for_stream(dc, old_stream, &mut dangling_context);
+            // disable_all_writeback_pipes_for_stream
+            not_ported("disable_dangling_plane: disable_all_writeback_pipes_for_stream");
+
+            let pipe = dc.current_state.as_deref().unwrap().res_ctx.pipe_ctx[i];
+            if pipe.stream.is_some() && pipe.plane_state.is_some() {
+                // set_p_state_switch_method is a DCN 3.2 FAMS path;
+                // dc_update_visual_confirm_color with visual confirm off.
+                not_ported("disable_dangling_plane: dc_update_visual_confirm_color");
+            }
+
+            // apply_ctx_for_surface is NULL on DCN 2.1, and so is
+            // prepare_mcache_programming.
+            (dc.hwss.interdependent_update_lock.unwrap())(adev, dc, None, true);
+            (dc.hwss.program_front_end_for_ctx.unwrap())(adev, dc, &mut dangling_context);
+            (dc.hwss.interdependent_update_lock.unwrap())(adev, dc, None, false);
+            (dc.hwss.post_unlock_program_front_end.unwrap())(adev, dc, &mut dangling_context);
+        }
+    }
+
+    let current_ctx = dc.current_state.replace(dangling_context).unwrap();
+    dc_state_release(dc, current_ctx);
+}
+
+/// `dc_trigger_sync` (dc.c): with `enable_timing_synchronization` the
+/// timing generators of synchronizable streams are locked together.
+fn dc_trigger_sync(adev: &amdgpu_device, dc: &mut dc, context: &mut crate::dc_state::dc_state) {
+    if context.stream_count > 1 && !dc.debug.disable_timing_sync {
+        not_ported("dc_trigger_sync: enable_timing_synchronization");
+    }
+    let _ = adev;
+}
+
+/// `determine_pipe_unlock_order` (dc.c): without `dc->config.
+/// set_pipe_unlock_order` nothing is ordered.
+fn determine_pipe_unlock_order(dc: &dc, context: &mut crate::dc_state::dc_state) {
+    if !dc.config.set_pipe_unlock_order {
+        return;
+    }
+    let _ = context;
+    not_ported("determine_pipe_unlock_order");
+}
+
+/// `should_update_pipe_for_stream` (dc.c).
+fn should_update_pipe_for_stream(context: &crate::dc_state::dc_state, pipe: usize, stream: usize) -> bool {
+    context.res_ctx.pipe_ctx[pipe].stream == Some(stream)
+}
+
+/// `dc_enable_stereo` (dc.c).
+fn dc_enable_stereo(adev: &amdgpu_device, dc: &mut dc, context: &mut crate::dc_state::dc_state,
+                    streams: &[Option<usize>]) {
+    dc_exit_ips_for_hw_access(dc);
+
+    for i in 0..MAX_PIPES {
+        for &stream in streams {
+            let Some(stream) = stream else { continue };
+            if !should_update_pipe_for_stream(context, i, stream) {
+                continue;
+            }
+            if let Some(setup_stereo) = dc.hwss.setup_stereo {
+                setup_stereo(adev, dc, context, i);
+            }
+        }
+    }
+}
+
+/// `get_stream_mask` (dc.c): a bit for each pipe with a stream.
+fn get_stream_mask(dc: &dc, context: &crate::dc_state::dc_state) -> u32 {
+    let mut stream_mask = 0u32;
+
+    for i in 0..dc.res_pool.as_deref().unwrap().pipe_count as usize {
+        if context.res_ctx.pipe_ctx[i].stream.is_some() {
+            stream_mask |= 1 << i;
+        }
+    }
+
+    stream_mask as u8 as u32
+}
+
+/// `dc_commit_state_no_check` (dc.c): apply `context` to the hardware and
+/// make it the current state. On success the context is moved into
+/// `dc.current_state` (one reference, as Linux' retain and the caller's
+/// release leave it); on a failure of `apply_ctx_to_hw` it stays with the
+/// caller.
+fn dc_commit_state_no_check(adev: &amdgpu_device, dc: &mut dc, context_slot: &mut Option<Box<crate::dc_state::dc_state>>)
+                            -> dc_status {
+    use crate::dc_state::*;
+    let mut context = context_slot.take().unwrap();
+    let pipe_count = dc.res_pool.as_deref().unwrap().pipe_count as usize;
+
+    dc_z10_restore(dc);
+    dc_allow_idle_optimizations(dc, false);
+
+    // Check old context for SubVP: DCN 2.1 has none.
+    let subvp_prev_use = false;
+
+    let mut dc_streams = [None; MAX_STREAMS];
+    for i in 0..context.stream_count as usize {
+        dc_streams[i] = context.streams[i];
+    }
+
+    if !crate::bios_parser2::bios_parser_is_accelerated_mode(adev, &dc.ctx.dc_bios.base) {
+        disable_vbios_mode_if_required(adev, dc, &mut context);
+        (dc.hwss.enable_accelerated_mode.unwrap())(adev, dc, &mut context);
+    }
+
+    // wait_for_pipe_update_if_needed is not a member of dcn21_private_funcs.
+
+    if context.stream_count > get_seamless_boot_stream_count(dc, &context) || context.stream_count == 0 {
+        (dc.hwss.prepare_bandwidth.unwrap())(adev, dc, &mut context);
+    }
+
+    // subvp_pipe_control_lock, fams2_global_control_lock and update_dsc_pg
+    // are not members of dcn21_funcs.
+    let _ = subvp_prev_use;
+
+    disable_dangling_plane(adev, dc, &context);
+    // apply_ctx_for_surface is NULL on DCN 2.1.
+
+    // Program hardware
+    for i in 0..pipe_count {
+        (dc.hwss.wait_for_mpcc_disconnect.unwrap())(adev, dc, &context.res_ctx.pipe_ctx[i]);
+    }
+
+    let result = (dc.hwss.apply_ctx_to_hw.unwrap())(adev, dc, &mut context);
+
+    if result != dc_status::DC_OK {
+        // Application of dc_state to hardware stopped.
+        dc.current_state.as_deref_mut().unwrap().res_ctx.link_enc_cfg_ctx.mode = link_enc_cfg_mode::LINK_ENC_CFG_STEADY;
+        *context_slot = Some(context);
+        return result;
+    }
+
+    dc_trigger_sync(adev, dc, &mut context);
+
+    // Full update should unconditionally be triggered when
+    // dc_commit_state_no_check is called
+    for i in 0..context.stream_count as usize {
+        let s = dc.streams[context.streams[i].unwrap()].as_deref_mut().unwrap();
+        let prev_dsc_changed = s.update_flags & crate::dc_stream::UPDATE_FLAG_DSC_CHANGED;
+
+        s.update_flags = 0xFFFF_FFFF & !crate::dc_stream::UPDATE_FLAG_DSC_CHANGED | prev_dsc_changed;
+    }
+
+    determine_pipe_unlock_order(dc, &mut context);
+    // Program all planes within new context; prepare_mcache_programming is
+    // a DCN 4 member of the pool.
+    if let Some(program_front_end_for_ctx) = dc.hwss.program_front_end_for_ctx {
+        (dc.hwss.interdependent_update_lock.unwrap())(adev, dc, Some(&*context), true);
+        program_front_end_for_ctx(adev, dc, &mut context);
+
+        // set_wait_for_update_needed_for_pipe is not a member of
+        // dcn21_private_funcs.
+
+        (dc.hwss.interdependent_update_lock.unwrap())(adev, dc, Some(&*context), false);
+        (dc.hwss.post_unlock_program_front_end.unwrap())(adev, dc, &mut context);
+    }
+
+    // commit_subvp_config, subvp_pipe_control_lock and
+    // fams2_global_control_lock are not members of dcn21_funcs.
+
+    for i in 0..context.stream_count as usize {
+        let s = context.streams[i].unwrap();
+        if !dc.streams[s].as_deref().unwrap().mode_changed {
+            continue;
+        }
+
+        // apply_ctx_for_surface is NULL on DCN 2.1.
+
+        // enable stereo
+        for k in 0..MAX_PIPES {
+            for l in 0..context.stream_count as usize {
+                if context.streams[l].is_some() && context.streams[l] == context.res_ctx.pipe_ctx[k].stream
+                    && let Some(setup_stereo) = dc.hwss.setup_stereo
+                {
+                    setup_stereo(adev, dc, &mut context, k);
+                }
+            }
+        }
+    }
+
+    let n = context.stream_count as usize;
+    dc_enable_stereo(adev, dc, &mut context, &dc_streams[..n]);
+
+    if get_seamless_boot_stream_count(dc, &context) == 0 || context.stream_count == 0 {
+        // Must wait for no flips to be pending before doing optimize bw
+        crate::hw_sequencer::hwss_wait_for_no_pipes_pending(adev, dc, &context);
+        // optimized dispclk depends on ODM setup. Need to wait for ODM
+        // update pending complete before optimizing bandwidth.
+        crate::hw_sequencer::hwss_wait_for_odm_update_pending_complete(adev, dc, &context);
+        // pplib is notified if disp_num changed
+        (dc.hwss.optimize_bandwidth.unwrap())(adev, dc, &mut context);
+        // Need to do otg sync again as otg could be out of sync due to otg
+        // workaround applied during clock update
+        dc_trigger_sync(adev, dc, &mut context);
+    }
+
+    // update_dsc_pg is not a member of dcn21_funcs.
+
+    context.stream_mask = get_stream_mask(dc, &context);
+
+    if context.stream_mask != dc.current_state.as_deref().unwrap().stream_mask {
+        crate::dc_dmub_srv::dc_dmub_srv_notify_stream_mask(adev, dc, context.stream_mask);
+    }
+
+    for i in 0..context.stream_count as usize {
+        dc.streams[context.streams[i].unwrap()].as_deref_mut().unwrap().mode_changed = false;
+    }
+
+    // Clear update flags that were set earlier to avoid redundant programming
+    for i in 0..context.stream_count as usize {
+        dc.streams[context.streams[i].unwrap()].as_deref_mut().unwrap().update_flags = 0;
+    }
+
+    let old_state = dc.current_state.replace(context).unwrap();
+
+    dc_state_release(dc, old_state);
+
+    dc_state_retain(dc.current_state.as_deref_mut().unwrap());
+
+    result
+}
+
+/// `dc_commit_streams` (dc.c): validate `params.streams` against a copy
+/// of the current state and commit it. The ODM 2:1 exit and the minimal
+/// transition state are DCN 3.x paths and named, not ported.
+pub fn dc_commit_streams(adev: &amdgpu_device, dc: &mut dc, params: &dc_commit_streams_params) -> dc_status {
+    use crate::dc_state::*;
+    let mut res = dc_status::DC_OK;
+    let mut set = [dc_validation_set::default(); MAX_STREAMS];
+    let stream_count = params.streams.len();
+
+    if dc.ctx.dce_environment == crate::dc_types::dce_environment::DCE_ENV_VIRTUAL_HW {
+        return res;
+    }
+
+    if !streams_changed(dc, params.streams) && dc.current_state.as_deref().unwrap().power_source == params.power_source {
+        return res;
+    }
+
+    dc_exit_ips_for_hw_access(dc);
+
+    for i in 0..stream_count {
+        let stream = params.streams[i];
+        let status = dc_stream_get_status(dc, stream);
+        let sink_signal = dc.streams[stream].as_deref().unwrap().sink.as_deref().unwrap().sink_signal;
+
+        // revalidate streams
+        if !crate::link_detection::dc_is_virtual_signal(sink_signal) {
+            res = crate::dc_resource::dc_validate_stream(adev, dc, stream);
+            if res != dc_status::DC_OK {
+                return res;
+            }
+        }
+
+        // dc_stream_log logs only.
+
+        set[i].stream = stream;
+
+        if let Some(status) = status {
+            let st = &dc.current_state.as_deref().unwrap().stream_status[status];
+            set[i].plane_count = st.plane_count as u8;
+            for j in 0..st.plane_count as usize {
+                set[i].plane_states[j] = st.plane_states[j];
+            }
+        }
+    }
+
+    // ODM Combine 2:1 power optimization is only applied for single stream
+    // scenario, it uses extra pipes than needed to reduce power consumption
+    // We need to switch off this feature to make room for new streams.
+    let cur = dc.current_state.as_deref().unwrap();
+    if stream_count as u32 > cur.stream_count && cur.stream_count == 1 {
+        let pipe_count = dc.res_pool.as_deref().unwrap().pipe_count as usize;
+        if (0..pipe_count).any(|i| cur.res_ctx.pipe_ctx[i].next_odm_pipe.is_some()) {
+            not_ported("dc_commit_streams: commit_minimal_transition_state");
+        }
+    }
+
+    let mut context = dc_state_create_current_copy(dc);
+
+    context.power_source = params.power_source;
+
+    res = crate::dc_resource::dc_validate_with_context(adev, dc, &set[..stream_count], &mut context,
+        crate::regs::DC_VALIDATE_MODE_AND_PROGRAMMING);
+
+    // link_encs_assign is a DCN 3.1+ member of the pool;
+    // is_pipe_topology_transition_seamless a DCN 3.2 member of the hwss.
+
+    let mut slot = Some(context);
+    if res == dc_status::DC_OK {
+        res = dc_commit_state_no_check(adev, dc, &mut slot);
+
+        let context = match slot.as_deref() {
+            Some(c) => c,
+            None => dc.current_state.as_deref().unwrap(),
+        };
+        let mut abm = [None; MAX_STREAMS];
+        let mut otg = [None; MAX_STREAMS];
+        for i in 0..stream_count {
+            for j in 0..context.stream_count as usize {
+                let ps = params.streams[i];
+                let cs = context.streams[j].unwrap();
+                if dc.streams[ps].as_deref().unwrap().stream_id == dc.streams[cs].as_deref().unwrap().stream_id {
+                    otg[i] = Some(context.stream_status[j].primary_otg_inst);
+                }
+
+                if crate::link_detection::dc_is_embedded_signal(dc.streams[ps].as_deref().unwrap().signal) {
+                    let Some(status) = dc_state_get_stream_status(context, ps) else { continue };
+
+                    abm[i] = Some((status, match dc.hwss.is_abm_supported {
+                        Some(f) => f(dc, context, ps),
+                        None => true,
+                    }));
+                }
+            }
+        }
+        for i in 0..stream_count {
+            if let Some(o) = otg[i] {
+                dc.streams[params.streams[i]].as_deref_mut().unwrap().out_otg_offset = o;
+            }
+        }
+        let context = match slot.as_deref_mut() {
+            Some(c) => c,
+            None => dc.current_state.as_deref_mut().unwrap(),
+        };
+        for (status, supported) in abm.into_iter().flatten() {
+            context.stream_status[status].is_abm_supported = supported;
+        }
+    }
+
+    // fail:
+    match slot {
+        Some(context) => dc_state_release(dc, context),
+        None => dc.current_state.as_deref_mut().unwrap().refcount -= 1,
+    }
+
+    res
+}
+
+/// `dc_set_generic_gpio_for_stereo` (dc.c): the stereo sync through the
+/// generic GPIO mux, on or off.
+pub fn dc_set_generic_gpio_for_stereo(adev: &amdgpu_device, dc: &mut dc, enable: bool) -> bool {
+    use crate::gpio_base::*;
+    use crate::gpio_service::*;
+    let service = dc.ctx.gpio_service.as_deref_mut().unwrap();
+    let pin_info = dal_gpio_get_generic_pin_info(service, Some(gpio_id::GPIO_ID_GENERIC), 0);
+
+    if pin_info.mask == 0xFFFFFFFF || pin_info.offset == 0xFFFFFFFF {
+        return false;
+    }
+    let Some(mut generic) = dal_gpio_service_create_generic_mux(service, pin_info.offset, pin_info.mask) else {
+        return false;
+    };
+
+    let mut gpio_result = dal_gpio_open(adev, service, &mut generic, gpio_mode::GPIO_MODE_OUTPUT);
+
+    let config = gpio_generic_mux_config {
+        enable_output_from_mux: enable,
+        mux_select: crate::regs::GPIO_SIGNAL_SOURCE_PASS_THROUGH_STEREO_SYNC,
+    };
+
+    if gpio_result == gpio_result::GPIO_RESULT_OK {
+        gpio_result = dal_mux_setup_config(adev, &generic, &config);
+    }
+
+    dal_gpio_close(adev, service, &mut generic);
+    // dal_gpio_destroy_generic_mux frees the pin.
+    gpio_result == gpio_result::GPIO_RESULT_OK
 }

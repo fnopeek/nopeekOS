@@ -1028,7 +1028,7 @@ pub fn dcn20_calculate_dlg_params(dc: &dc, context: &mut dc_state, pipes: &mut [
         }
         pc.plane_res.bw_dppclk_khz = dml_math::f2i32(pipes[pipe_idx].clks_cfg.dppclk_mhz * 1000.0);
         pc.pipe_dlg_param = pipes[pipe_idx].pipe.dest;
-        if dc.streams[pc.stream.unwrap()].as_deref().unwrap().adaptive_sync_infopacket_valid {
+        if dc.streams[pc.stream.unwrap()].as_deref().unwrap().adaptive_sync_infopacket.valid {
             crate::linux::Line::new().s("dcn20_adjust_freesync_v_startup not ported").say();
         }
 

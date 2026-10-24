@@ -541,17 +541,23 @@ int main(int argc, char **argv)
 		plane->in_transfer_func.tf = TRANSFER_FUNCTION_SRGB;
 
 		struct dc_state *context = dc_state_create_current_copy(dc);
-		printf("dc_state_add_stream %d\n", dc_state_add_stream(dc, context, stream));
+		enum dc_status added = dc_state_add_stream(dc, context, stream);
+		printf("dc_state_add_stream %d\n", added);
 		printf("dc_state_add_plane %d\n", dc_state_add_plane(dc, stream, plane, context));
 		dump_context("added", context);
 		printf("dc_validate_global_state %d\n",
 		       dc_validate_global_state(dc, context, DC_VALIDATE_MODE_AND_PROGRAMMING));
 		dump_context("validated", context);
 		dump_bw("validated", context);
-		struct dc_commit_streams_params params = { .streams = &stream, .stream_count = 1 };
-		printf("dc_commit_streams %d\n", dc_commit_streams(dc, &params));
-		struct dc_surface_update srf = { .surface = plane };
-		printf("dc_update_planes_and_stream %d\n", dc_update_planes_and_stream(dc, &srf, 1, stream, NULL));
+		/* A stream the pool has no pipe for (every pipe fused off) is not
+		 * committed: dc_commit_streams would reach a missing OTG. */
+		if (added == DC_OK) {
+			struct dc_commit_streams_params params = { .streams = &stream, .stream_count = 1 };
+			printf("dc_commit_streams %d\n", dc_commit_streams(dc, &params));
+			struct dc_surface_update srf = { .surface = plane };
+			printf("dc_update_planes_and_stream %d\n",
+			       dc_update_planes_and_stream(dc, &srf, 1, stream, NULL));
+		}
 	}
 
 	for (int c = 0; c < n_dmub_cmds; c++) {

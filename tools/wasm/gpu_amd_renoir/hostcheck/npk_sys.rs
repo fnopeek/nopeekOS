@@ -337,16 +337,17 @@ thread_local! {
     static QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Whether `log` prints; the previous setting.
+/// Whether `log` prints to stdout (else stderr); the previous setting.
 pub fn quiet(on: bool) -> bool {
     QUIET.with(|q| q.replace(on))
 }
 
 pub fn log(b: &[u8]) {
+    let s = String::from_utf8_lossy(b);
     if QUIET.with(|q| q.get()) {
+        eprintln!("{}", s.strip_prefix("[gpu_amd_renoir] ").unwrap_or(&s));
         return;
     }
-    let s = String::from_utf8_lossy(b);
     println!("{}", s.strip_prefix("[gpu_amd_renoir] ").unwrap_or(&s));
 }
 

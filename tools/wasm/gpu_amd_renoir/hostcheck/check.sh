@@ -167,20 +167,28 @@ done
 # The commit after detection, as far as the port goes: a stream and a
 # plane added to a copy of the current state, then dc_validate_global_state
 # (pipe split, DML, watermarks, DLG/TTU/RQ, DML's whole state), identity and
-# scaled plane; compared up to the first register write after it.
+# scaled plane, then dc_commit_streams (accelerated mode, clocks,
+# watermarks, back end, link training, stream enable); compared through
+# dc_commit_streams.
 for seed in ones zeros hash lit boot; do
     for plane in full scaled; do
         n=commit_$seed$plane
         "$B/oracle_dchw" "$BIOS" $seed commit $plane | grep -v '^ATOM BIOS:' > "$B/$n.linux"
         "$B/dchw_check" "$BIOS" $seed "$B/$n.linux" commit $plane > "$B/$n.port"
         for f in linux port; do
-            awk '/^dc_state_add_stream/{p=1} p&&/^(write|dmub cmd|wm_ranges)/{exit} p{print}' "$B/$n.$f" > "$B/$n.$f.blk"
+            awk '/^dc_state_add_stream/{p=1} p&&/^(dmub cmd|wm_ranges)/{exit} p{print} p&&/^dc_commit_streams/{exit}' "$B/$n.$f" > "$B/$n.$f.blk"
             n0=$(grep -n '^dc_state_add_stream' "$B/$n.$f" | cut -d: -f1)
             head -n $(( ${n0:-$(($(wc -l < "$B/$n.$f") + 1))} - 1 )) "$B/$n.$f" >> "$B/$n.$f.blk"
         done
+        # The DMUB commands of the commit are the first of Linux's, which
+        # goes on to dc_update_planes_and_stream.
+        grep '^dmub cmd' "$B/$n.port" > "$B/$n.port.dmub" || true
+        grep '^dmub cmd' "$B/$n.linux" | head -n "$(wc -l < "$B/$n.port.dmub")" > "$B/$n.linux.dmub" || true
+        cat "$B/$n.linux.dmub" >> "$B/$n.linux.blk"
+        cat "$B/$n.port.dmub" >> "$B/$n.port.blk"
         if diff -u "$B/$n.linux.blk" "$B/$n.port.blk" | head -30; cmp -s "$B/$n.linux.blk" "$B/$n.port.blk"; then
-            echo "commit ($seed, $plane plane): port = Linux to dc_validate_global_state" \
-                "($(grep -c '^vba\.' "$B/$n.linux.blk") DML values)"
+            echo "commit ($seed, $plane plane): port = Linux through dc_commit_streams" \
+                "($(grep -c '^vba\.' "$B/$n.linux.blk") DML values, $(awk '/^dc_validate_global_state/{p=1} /^dc_commit_streams/{exit} p&&/^write/' "$B/$n.linux" | wc -l) commit writes, $(wc -l < "$B/$n.port.dmub") DMUB commands)"
         else
             fail=1
         fi

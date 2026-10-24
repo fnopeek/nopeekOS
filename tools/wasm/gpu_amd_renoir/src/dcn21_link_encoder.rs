@@ -8,7 +8,7 @@
 
 use crate::amdgpu_device::amdgpu_device;
 use crate::bios_parser2::{bios_parser, bios_parser_get_encoder_cap_info, bp_encoder_cap_info, bp_result};
-use crate::dc_helper::{reg_get, reg_update, reg_write};
+use crate::dc_helper::{reg_get, reg_read, reg_set, reg_update, reg_write};
 use crate::dc_types::graphics_object_id;
 use crate::link_factory::link_enc;
 use crate::regs::*;
@@ -1393,23 +1393,54 @@ pub enum link_encoder_funcs_id {
 /// `None` members of the virtual table are members it leaves out.
 #[derive(Default, Clone, Copy)]
 pub struct link_encoder_ops {
+    pub validate_output_with_stream: Option<fn(&mut link_enc, u32, &crate::dc_stream::dc_stream_state, bool) -> bool>,
     pub hw_init: Option<fn(&amdgpu_device, &link_enc)>,
+    pub setup: Option<fn(&amdgpu_device, &link_enc, u32)>,
+    pub connect_dig_be_to_fe: Option<fn(&amdgpu_device, &link_enc, u32, bool)>,
+    pub enable_dp_output: Option<fn(&amdgpu_device, &mut crate::dc::dc, usize, &crate::dc_dp_types::dc_link_settings, u32)>,
+    pub disable_output: Option<fn(&amdgpu_device, &mut crate::dc::dc, usize, u32)>,
+    pub dp_set_lane_settings: Option<fn(&amdgpu_device, &mut crate::dc::dc, usize, &crate::dc_dp_types::dc_link_settings,
+                                        &[crate::link_dp_training::dc_lane_settings])>,
+    pub dp_set_phy_pattern: Option<fn(&amdgpu_device, &link_enc, &crate::link_dp_training::encoder_set_dp_phy_pattern_param)>,
     pub is_dig_enabled: Option<fn(&amdgpu_device, &link_enc) -> bool>,
+    pub fec_set_enable: Option<fn(&amdgpu_device, &link_enc, bool)>,
+    pub fec_set_ready: Option<fn(&amdgpu_device, &link_enc, bool)>,
     pub fec_is_active: Option<fn(&amdgpu_device, &link_enc) -> bool>,
+    pub get_dig_frontend: Option<fn(&amdgpu_device, &link_enc) -> u32>,
 }
 
 /// `dcn21_link_enc_funcs` (dcn21_link_encoder.c), as far as ported.
 const DCN21_LINK_ENC_FUNCS: link_encoder_ops = link_encoder_ops {
+    validate_output_with_stream: Some(dcn10_link_encoder_validate_output_with_stream),
     hw_init: Some(enc2_hw_init),
+    setup: Some(dcn10_link_encoder_setup),
+    connect_dig_be_to_fe: Some(dcn10_link_encoder_connect_dig_be_to_fe),
+    enable_dp_output: Some(dcn21_link_encoder_enable_dp_output),
+    disable_output: Some(dcn21_link_encoder_disable_output),
+    dp_set_lane_settings: Some(dcn10_link_encoder_dp_set_lane_settings),
+    dp_set_phy_pattern: Some(dcn10_link_encoder_dp_set_phy_pattern),
     is_dig_enabled: Some(dcn10_is_dig_enabled),
+    fec_set_enable: Some(enc2_fec_set_enable),
+    fec_set_ready: Some(enc2_fec_set_ready),
     fec_is_active: Some(enc2_fec_is_active),
+    get_dig_frontend: Some(dcn10_get_dig_frontend),
 };
 
 /// `virtual_lnk_enc_funcs` (virtual_link_encoder.c), as far as ported.
 const VIRTUAL_LNK_ENC_FUNCS: link_encoder_ops = link_encoder_ops {
+    validate_output_with_stream: Some(virtual_link_encoder_validate_output_with_stream),
     hw_init: Some(virtual_link_encoder_hw_init),
+    setup: Some(virtual_link_encoder_setup),
+    connect_dig_be_to_fe: Some(virtual_link_encoder_connect_dig_be_to_fe),
+    enable_dp_output: Some(virtual_link_encoder_enable_dp_output),
+    disable_output: Some(virtual_link_encoder_disable_output),
+    dp_set_lane_settings: Some(virtual_link_encoder_dp_set_lane_settings),
+    dp_set_phy_pattern: Some(virtual_link_encoder_dp_set_phy_pattern),
     is_dig_enabled: None,
+    fec_set_enable: None,
+    fec_set_ready: None,
     fec_is_active: None,
+    get_dig_frontend: None,
 };
 
 impl link_encoder_funcs_id {
@@ -1480,6 +1511,263 @@ pub fn dcn10_is_dig_enabled(adev: &amdgpu_device, enc: &link_enc) -> bool {
 
 /// `virtual_link_encoder_hw_init` (virtual_link_encoder.c).
 fn virtual_link_encoder_hw_init(_adev: &amdgpu_device, _enc: &link_enc) {}
+
+/// `virtual_link_encoder_validate_output_with_stream` (virtual_link_encoder.c).
+fn virtual_link_encoder_validate_output_with_stream(_enc: &mut link_enc, _connector_signal: u32,
+                                                    _stream: &crate::dc_stream::dc_stream_state,
+                                                    _hdmi20_disable: bool) -> bool {
+    true
+}
+
+/// `virtual_link_encoder_disable_output` (virtual_link_encoder.c).
+fn virtual_link_encoder_disable_output(_adev: &amdgpu_device, _dc: &mut crate::dc::dc, _li: usize, _signal: u32) {}
+
+/// `TMDS_MAX_PIXEL_CLOCK` / `TMDS_MIN_PIXEL_CLOCK` (dcn10_link_encoder.c), kHz.
+const TMDS_MAX_PIXEL_CLOCK: u32 = 165000;
+const TMDS_MIN_PIXEL_CLOCK: u32 = 25000;
+
+/// `dcn10_link_encoder_validate_dvi_output` (dcn10_link_encoder.c).
+fn dcn10_link_encoder_validate_dvi_output(enc10: &dcn21_link_encoder, connector_signal: u32, signal: u32,
+                                          crtc_timing: &crate::dc_hw_types::dc_crtc_timing) -> bool {
+    let mut max_pixel_clock = TMDS_MAX_PIXEL_CLOCK;
+
+    if signal == LF_SIGNAL_TYPE_DVI_DUAL_LINK {
+        max_pixel_clock *= 2;
+    }
+
+    // This handles the case of HDMI downgrade to DVI we don't want to cap
+    // the pixel clock if the DDI is not DVI.
+    if connector_signal != LF_SIGNAL_TYPE_DVI_DUAL_LINK && connector_signal != LF_SIGNAL_TYPE_DVI_SINGLE_LINK {
+        max_pixel_clock = enc10.base.features.max_hdmi_pixel_clock;
+    }
+
+    // DVI only support RGB pixel encoding
+    if crtc_timing.pixel_encoding != PIXEL_ENCODING_RGB {
+        return false;
+    }
+
+    // connect DVI via adpater's HDMI connector
+    if (connector_signal == LF_SIGNAL_TYPE_DVI_SINGLE_LINK || connector_signal == LF_SIGNAL_TYPE_HDMI_TYPE_A)
+        && signal != LF_SIGNAL_TYPE_HDMI_TYPE_A
+        && crtc_timing.pix_clk_100hz > TMDS_MAX_PIXEL_CLOCK * 10
+    {
+        return false;
+    }
+    if crtc_timing.pix_clk_100hz < TMDS_MIN_PIXEL_CLOCK * 10 {
+        return false;
+    }
+
+    if crtc_timing.pix_clk_100hz > max_pixel_clock * 10 {
+        return false;
+    }
+
+    // DVI supports 6/8bpp single-link and 10/16bpp dual-link
+    match crtc_timing.display_color_depth {
+        COLOR_DEPTH_666 | COLOR_DEPTH_888 => {}
+        COLOR_DEPTH_101010 | COLOR_DEPTH_161616 => {
+            if signal != LF_SIGNAL_TYPE_DVI_DUAL_LINK {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+
+    true
+}
+
+/// `dcn10_link_encoder_validate_hdmi_output` (dcn10_link_encoder.c).
+fn dcn10_link_encoder_validate_hdmi_output(enc10: &dcn21_link_encoder, crtc_timing: &crate::dc_hw_types::dc_crtc_timing,
+                                           edid_caps: &crate::dc_sink::dc_edid_caps, adjusted_pix_clk_100hz: i32,
+                                           hdmi20_disable: bool) -> bool {
+    let max_deep_color = enc10.base.features.max_hdmi_deep_color;
+
+    // check pixel clock against edid specified max TMDS clk
+    if edid_caps.max_tmds_clk_mhz != 0 && adjusted_pix_clk_100hz > edid_caps.max_tmds_clk_mhz as i32 * 10000 {
+        return false;
+    }
+
+    if max_deep_color < crtc_timing.display_color_depth {
+        return false;
+    }
+
+    if crtc_timing.display_color_depth < COLOR_DEPTH_888 {
+        return false;
+    }
+    if adjusted_pix_clk_100hz < (TMDS_MIN_PIXEL_CLOCK * 10) as i32 {
+        return false;
+    }
+
+    if adjusted_pix_clk_100hz == 0 || adjusted_pix_clk_100hz > (enc10.base.features.max_hdmi_pixel_clock * 10) as i32 {
+        return false;
+    }
+
+    // DCE11 HW does not support 420
+    if !enc10.base.features.hdmi_ycbcr420_supported && crtc_timing.pixel_encoding == PIXEL_ENCODING_YCBCR420 {
+        return false;
+    }
+
+    if (enc10.base.features.flags & HDMI_6GB_EN == 0 || hdmi20_disable) && adjusted_pix_clk_100hz >= 3000000 {
+        return false;
+    }
+    if hdmi20_disable && crtc_timing.pixel_encoding == PIXEL_ENCODING_YCBCR420 {
+        return false;
+    }
+    true
+}
+
+/// `dcn10_link_encoder_validate_dp_output` (dcn10_link_encoder.c).
+fn dcn10_link_encoder_validate_dp_output(enc10: &dcn21_link_encoder, crtc_timing: &crate::dc_hw_types::dc_crtc_timing)
+                                         -> bool {
+    if crtc_timing.pixel_encoding == PIXEL_ENCODING_YCBCR420 && !enc10.base.features.dp_ycbcr420_supported {
+        return false;
+    }
+
+    true
+}
+
+/// `dcn10_link_encoder_validate_output_with_stream` (dcn10_link_encoder.c).
+/// `connector_signal` is the stream's link's; `hdmi20_disable` dc's debug
+/// option.
+pub fn dcn10_link_encoder_validate_output_with_stream(enc: &mut link_enc, connector_signal: u32,
+                                                      stream: &crate::dc_stream::dc_stream_state,
+                                                      hdmi20_disable: bool) -> bool {
+    let link_enc::Dcn21(enc10) = enc else { unreachable!("dcn link encoder op on a virtual encoder") };
+    let sink = stream.sink.as_deref().unwrap();
+
+    // if SCDC (340-600MHz) is disabled, set to HDMI 1.4 timing limit
+    if sink.edid_caps.panel_patch.skip_scdc_overwrite != 0 && enc10.base.features.max_hdmi_pixel_clock > 300000 {
+        enc10.base.features.max_hdmi_pixel_clock = 300000;
+    }
+
+    match stream.signal {
+        LF_SIGNAL_TYPE_DVI_SINGLE_LINK | LF_SIGNAL_TYPE_DVI_DUAL_LINK => {
+            dcn10_link_encoder_validate_dvi_output(enc10, connector_signal, stream.signal, &stream.timing)
+        }
+        LF_SIGNAL_TYPE_HDMI_TYPE_A => dcn10_link_encoder_validate_hdmi_output(enc10, &stream.timing,
+            &sink.edid_caps, (stream.phy_pix_clk * 10) as i32, hdmi20_disable),
+        LF_SIGNAL_TYPE_DISPLAY_PORT | LF_SIGNAL_TYPE_DISPLAY_PORT_MST => {
+            dcn10_link_encoder_validate_dp_output(enc10, &stream.timing)
+        }
+        LF_SIGNAL_TYPE_EDP => stream.timing.pixel_encoding == PIXEL_ENCODING_RGB,
+        LF_SIGNAL_TYPE_VIRTUAL => true,
+        _ => false,
+    }
+}
+
+/// `dcn10_get_dig_frontend` (dcn10_link_encoder.c): the stream encoder the
+/// DIG back end takes its pixels from.
+pub fn dcn10_get_dig_frontend(adev: &amdgpu_device, enc: &link_enc) -> u32 {
+    let enc10 = to_dcn10_link_enc(enc);
+    let value = reg_get!(adev, enc10.link(), DIG_BE_CNTL, DIG_FE_SOURCE_SELECT);
+
+    match value {
+        DCN10_DIG_FE_SOURCE_SELECT_DIGA => ENGINE_ID_DIGA,
+        DCN10_DIG_FE_SOURCE_SELECT_DIGB => ENGINE_ID_DIGB,
+        DCN10_DIG_FE_SOURCE_SELECT_DIGC => ENGINE_ID_DIGC,
+        DCN10_DIG_FE_SOURCE_SELECT_DIGD => ENGINE_ID_DIGD,
+        DCN10_DIG_FE_SOURCE_SELECT_DIGE => ENGINE_ID_DIGE,
+        DCN10_DIG_FE_SOURCE_SELECT_DIGF => ENGINE_ID_DIGF,
+        DCN10_DIG_FE_SOURCE_SELECT_DIGG => ENGINE_ID_DIGG,
+        // invalid source select DIG
+        _ => ENGINE_ID_UNKNOWN,
+    }
+}
+
+/// `enc2_fec_set_enable` (dcn20_link_encoder.c).
+pub fn enc2_fec_set_enable(adev: &amdgpu_device, enc: &link_enc, enable: bool) {
+    let enc10 = to_dcn10_link_enc(enc);
+    reg_update!(adev, enc10.link(), DP_DPHY_CNTL, DPHY_FEC_EN, enable as u32);
+}
+
+/// `enc2_fec_set_ready` (dcn20_link_encoder.c).
+pub fn enc2_fec_set_ready(adev: &amdgpu_device, enc: &link_enc, ready: bool) {
+    let enc10 = to_dcn10_link_enc(enc);
+    reg_update!(adev, enc10.link(), DP_DPHY_CNTL, DPHY_FEC_READY_SHADOW, ready as u32);
+}
+
+/// `setup_panel_mode` (dcn10_link_encoder.c).
+fn setup_panel_mode(adev: &amdgpu_device, enc10: &dcn21_link_encoder, panel_mode: u32) {
+    if enc10.link_regs.DP_DPHY_INTERNAL_CTRL == 0 {
+        return;
+    }
+
+    reg_read!(adev, enc10.link_regs, DP_DPHY_INTERNAL_CTRL);
+
+    let value = match panel_mode {
+        DP_PANEL_MODE_EDP => 0x1,
+        DP_PANEL_MODE_SPECIAL => 0x11,
+        _ => 0x0,
+    };
+
+    reg_write!(adev, enc10.link_regs, DP_DPHY_INTERNAL_CTRL, value);
+}
+
+/// `link_encoder_disable` (dcn10_link_encoder.c).
+fn link_encoder_disable(adev: &amdgpu_device, enc10: &dcn21_link_encoder) {
+    // reset training pattern
+    reg_set!(adev, enc10.link(), DP_DPHY_TRAINING_PATTERN_SEL, 0, DPHY_TRAINING_PATTERN_SEL, 0);
+
+    // reset training complete
+    reg_update!(adev, enc10.link(), DP_LINK_CNTL, DP_LINK_TRAINING_COMPLETE, 0);
+
+    // reset panel mode
+    setup_panel_mode(adev, enc10, DP_PANEL_MODE_DEFAULT);
+}
+
+/// `dcn10_link_encoder_disable_output` (dcn10_link_encoder.c): the
+/// transmitter off through the VBIOS, then the DP encoder reset. Power-down
+/// of the receiver and of the PHY go together, or the sink sees lost symbol
+/// lock; an encoder that is not on is left alone.
+fn dcn10_link_encoder_disable_output(adev: &amdgpu_device, dc: &mut crate::dc::dc, li: usize, signal: u32) {
+    let enc = dc.links[li].link_enc.as_ref().unwrap();
+    if let Some(is_dig_enabled) = enc.funcs().is_dig_enabled
+        && !is_dig_enabled(adev, enc)
+    {
+        // OF_SKIP_POWER_DOWN_INACTIVE_ENCODER
+        return;
+    }
+
+    let enc10 = to_dcn10_link_enc(enc);
+    // disable transmitter
+    let cntl = crate::command_table2::bp_transmitter_control {
+        action: TRANSMITTER_CONTROL_DISABLE,
+        transmitter: enc10.base.transmitter,
+        hpd_sel: enc10.base.hpd_source,
+        signal,
+        connector_obj_id: enc10.base.connector,
+        ..Default::default()
+    };
+
+    let result = crate::command_table2::bios_parser_transmitter_control(adev, dc, &cntl);
+
+    if result != crate::bios_parser2::bp_result::BP_RESULT_OK {
+        crate::linux::Line::new().s("dcn10_link_encoder_disable_output: Failed to execute VBIOS command table!").say();
+        return;
+    }
+
+    // disable encoder
+    if crate::link_detection::dc_is_dp_signal(signal) {
+        link_encoder_disable(adev, to_dcn10_link_enc(dc.links[li].link_enc.as_ref().unwrap()));
+    }
+}
+
+/// `dcn21_link_encoder_release_phy` (dcn21_link_encoder.c).
+fn dcn21_link_encoder_release_phy(adev: &amdgpu_device, enc10: &dcn21_link_encoder) {
+    if enc10.base.features.flags & DP_IS_USB_C != 0 {
+        reg_update!(adev, enc10.link(), RDPCSTX_PHY_CNTL6, RDPCS_PHY_DPALT_DISABLE_ACK, 1);
+    }
+
+    reg_update!(adev, enc10.link(), RDPCSTX_PHY_CNTL6, RDPCS_PHY_DP_REF_CLK_EN, 0);
+}
+
+/// `dcn21_link_encoder_disable_output` (dcn21_link_encoder.c).
+fn dcn21_link_encoder_disable_output(adev: &amdgpu_device, dc: &mut crate::dc::dc, li: usize, signal: u32) {
+    dcn10_link_encoder_disable_output(adev, dc, li, signal);
+
+    if crate::link_detection::dc_is_dp_signal(signal) {
+        dcn21_link_encoder_release_phy(adev, to_dcn10_link_enc(dc.links[li].link_enc.as_ref().unwrap()));
+    }
+}
 
 /// `struct link_encoder` (link_encoder.h).
 #[derive(Default, Clone, Copy, Debug)]
@@ -1668,4 +1956,281 @@ pub fn dcn20_link_encoder_is_in_alt_mode(adev: &amdgpu_device, enc: &link_enc) -
 /// `dcn20_link_encoder_get_max_link_cap`.
 pub fn rdpcs_phy_dpalt_dp4(adev: &amdgpu_device, enc: &link_enc) -> u32 {
     reg_get!(adev, to_dcn10_link_enc(enc).link(), RDPCSTX_PHY_CNTL6, RDPCS_PHY_DPALT_DP4)
+}
+
+/// `virtual_link_encoder_setup` (virtual_link_encoder.c).
+fn virtual_link_encoder_setup(_adev: &amdgpu_device, _enc: &link_enc, _signal: u32) {}
+
+/// `virtual_link_encoder_connect_dig_be_to_fe` (virtual_link_encoder.c).
+fn virtual_link_encoder_connect_dig_be_to_fe(_adev: &amdgpu_device, _enc: &link_enc, _engine: u32, _connect: bool) {}
+
+/// `dcn10_link_encoder_setup` (dcn10_link_encoder.c): the DIG back end's
+/// mode for the signal.
+pub fn dcn10_link_encoder_setup(adev: &amdgpu_device, enc: &link_enc, signal: u32) {
+    let enc10 = to_dcn10_link_enc(enc);
+
+    let mode = match signal {
+        // DP SST
+        LF_SIGNAL_TYPE_EDP | LF_SIGNAL_TYPE_DISPLAY_PORT => 0,
+        // LVDS
+        LF_SIGNAL_TYPE_LVDS => 1,
+        // TMDS-DVI
+        LF_SIGNAL_TYPE_DVI_SINGLE_LINK | LF_SIGNAL_TYPE_DVI_DUAL_LINK => 2,
+        // TMDS-HDMI
+        LF_SIGNAL_TYPE_HDMI_TYPE_A => 3,
+        // DP MST
+        LF_SIGNAL_TYPE_DISPLAY_PORT_MST => 5,
+        // invalid mode !
+        _ => return,
+    };
+    reg_update!(adev, enc10.link(), DIG_BE_CNTL, DIG_MODE, mode);
+}
+
+/// `get_frontend_source` (dcn10_link_encoder.c).
+fn get_frontend_source(engine: u32) -> u32 {
+    match engine {
+        ENGINE_ID_DIGA => DCN10_DIG_FE_SOURCE_SELECT_DIGA,
+        ENGINE_ID_DIGB => DCN10_DIG_FE_SOURCE_SELECT_DIGB,
+        ENGINE_ID_DIGC => DCN10_DIG_FE_SOURCE_SELECT_DIGC,
+        ENGINE_ID_DIGD => DCN10_DIG_FE_SOURCE_SELECT_DIGD,
+        ENGINE_ID_DIGE => DCN10_DIG_FE_SOURCE_SELECT_DIGE,
+        ENGINE_ID_DIGF => DCN10_DIG_FE_SOURCE_SELECT_DIGF,
+        ENGINE_ID_DIGG => DCN10_DIG_FE_SOURCE_SELECT_DIGG,
+        _ => DCN10_DIG_FE_SOURCE_SELECT_INVALID,
+    }
+}
+
+/// `dcn10_link_encoder_connect_dig_be_to_fe` (dcn10_link_encoder.c).
+pub fn dcn10_link_encoder_connect_dig_be_to_fe(adev: &amdgpu_device, enc: &link_enc, engine: u32, connect: bool) {
+    let enc10 = to_dcn10_link_enc(enc);
+
+    if engine != ENGINE_ID_UNKNOWN {
+        let mut field = reg_get!(adev, enc10.link(), DIG_BE_CNTL, DIG_FE_SOURCE_SELECT);
+
+        if connect {
+            field |= get_frontend_source(engine);
+        } else {
+            field &= !get_frontend_source(engine);
+        }
+
+        reg_update!(adev, enc10.link(), DIG_BE_CNTL, DIG_FE_SOURCE_SELECT, field);
+    }
+}
+
+/// `virtual_link_encoder_enable_dp_output` (virtual_link_encoder.c).
+fn virtual_link_encoder_enable_dp_output(_adev: &amdgpu_device, _dc: &mut crate::dc::dc, _li: usize,
+                                         _link_settings: &crate::dc_dp_types::dc_link_settings, _clock_source: u32) {}
+
+/// `virtual_link_encoder_dp_set_lane_settings` (virtual_link_encoder.c).
+fn virtual_link_encoder_dp_set_lane_settings(_adev: &amdgpu_device, _dc: &mut crate::dc::dc, _li: usize,
+                                             _link_settings: &crate::dc_dp_types::dc_link_settings,
+                                             _lane_settings: &[crate::link_dp_training::dc_lane_settings]) {}
+
+/// `virtual_link_encoder_dp_set_phy_pattern` (virtual_link_encoder.c).
+fn virtual_link_encoder_dp_set_phy_pattern(_adev: &amdgpu_device, _enc: &link_enc,
+                                           _param: &crate::link_dp_training::encoder_set_dp_phy_pattern_param) {}
+
+/// `enc1_configure_encoder` (dcn10_link_encoder.c): the lane count and the
+/// scrambler.
+fn enc1_configure_encoder(adev: &amdgpu_device, enc10: &dcn21_link_encoder,
+                          link_settings: &crate::dc_dp_types::dc_link_settings) {
+    // set number of lanes
+    reg_set!(adev, enc10.link(), DP_CONFIG, 0, DP_UDI_LANES,
+        link_settings.lane_count - crate::dc_dp_types::LANE_COUNT_ONE);
+
+    // setup scrambler
+    reg_update!(adev, enc10.link(), DP_DPHY_SCRAM_CNTL, DPHY_SCRAMBLER_ADVANCE, 1);
+}
+
+/// `dcn10_link_encoder_enable_dp_output` (dcn10_link_encoder.c): the PHY on
+/// through the VBIOS. The lane count goes to the encoder by hand: the
+/// table uses it only for the pixel clock.
+fn dcn10_link_encoder_enable_dp_output(adev: &amdgpu_device, dc: &mut crate::dc::dc, li: usize,
+                                       link_settings: &crate::dc_dp_types::dc_link_settings, clock_source: u32) {
+    let enc10 = to_dcn10_link_enc(dc.links[li].link_enc.as_ref().unwrap());
+
+    // Enable the PHY
+    enc1_configure_encoder(adev, enc10, link_settings);
+
+    let cntl = crate::command_table2::bp_transmitter_control {
+        action: TRANSMITTER_CONTROL_ENABLE,
+        engine_id: enc10.base.preferred_engine,
+        transmitter: enc10.base.transmitter,
+        pll_id: clock_source,
+        signal: LF_SIGNAL_TYPE_DISPLAY_PORT,
+        lanes_number: link_settings.lane_count,
+        hpd_sel: enc10.base.hpd_source,
+        pixel_clock: link_settings.link_rate * LINK_RATE_REF_FREQ_IN_KHZ,
+        // TODO: check if undefined works
+        color_depth: COLOR_DEPTH_UNDEFINED,
+        ..Default::default()
+    };
+
+    let result = crate::command_table2::bios_parser_transmitter_control(adev, dc, &cntl);
+
+    if result != bp_result::BP_RESULT_OK {
+        crate::linux::Line::new().s("dcn10_link_encoder_enable_dp_output: Failed to execute VBIOS command table!").say();
+    }
+}
+
+/// `dcn21_link_encoder_acquire_phy` (dcn21_link_encoder.c): a USB-C PHY
+/// the DP alternate mode disabled cannot be taken.
+fn dcn21_link_encoder_acquire_phy(adev: &amdgpu_device, enc10: &dcn21_link_encoder) -> bool {
+    if enc10.base.features.flags & DP_IS_USB_C != 0 {
+        let value = reg_get!(adev, enc10.link(), RDPCSTX_PHY_CNTL6, RDPCS_PHY_DPALT_DISABLE);
+
+        if value == 1 {
+            return false;
+        }
+        reg_update!(adev, enc10.link(), RDPCSTX_PHY_CNTL6, RDPCS_PHY_DPALT_DISABLE_ACK, 0);
+
+        crate::linux::udelay(40);
+
+        let value = reg_get!(adev, enc10.link(), RDPCSTX_PHY_CNTL6, RDPCS_PHY_DPALT_DISABLE);
+        if value == 1 {
+            reg_update!(adev, enc10.link(), RDPCSTX_PHY_CNTL6, RDPCS_PHY_DPALT_DISABLE_ACK, 1);
+            return false;
+        }
+    }
+
+    reg_update!(adev, enc10.link(), RDPCSTX_PHY_CNTL6, RDPCS_PHY_DP_REF_CLK_EN, 1);
+
+    true
+}
+
+/// `dcn21_link_encoder_enable_dp_output` (dcn21_link_encoder.c). Without
+/// `avoid_vbios_exec_table` the VBIOS sequence brings the PHY up; the
+/// driver's own PHY sequence (`update_cfg_data`) is not DCN 2.1's default.
+fn dcn21_link_encoder_enable_dp_output(adev: &amdgpu_device, dc: &mut crate::dc::dc, li: usize,
+                                       link_settings: &crate::dc_dp_types::dc_link_settings, clock_source: u32) {
+    if !dcn21_link_encoder_acquire_phy(adev, to_dcn10_link_enc(dc.links[li].link_enc.as_ref().unwrap())) {
+        return;
+    }
+
+    if !dc.debug.avoid_vbios_exec_table {
+        dcn10_link_encoder_enable_dp_output(adev, dc, li, link_settings, clock_source);
+        return;
+    }
+
+    crate::linux::Line::new().s("dcn21_link_encoder_enable_dp_output: update_cfg_data not ported").say();
+}
+
+/// `dcn10_link_encoder_dp_set_lane_settings` (dcn10_link_encoder.c): the
+/// voltage swing and pre-emphasis of each lane through the VBIOS. Post
+/// cursor 2 applies at HBR2 only.
+fn dcn10_link_encoder_dp_set_lane_settings(adev: &amdgpu_device, dc: &mut crate::dc::dc, li: usize,
+                                           link_settings: &crate::dc_dp_types::dc_link_settings,
+                                           lane_settings: &[crate::link_dp_training::dc_lane_settings]) {
+    let enc10 = to_dcn10_link_enc(dc.links[li].link_enc.as_ref().unwrap());
+
+    let mut cntl = crate::command_table2::bp_transmitter_control {
+        action: TRANSMITTER_CONTROL_SET_VOLTAGE_AND_PREEMPASIS,
+        transmitter: enc10.base.transmitter,
+        connector_obj_id: enc10.base.connector,
+        lanes_number: link_settings.lane_count,
+        hpd_sel: enc10.base.hpd_source,
+        pixel_clock: link_settings.link_rate * LINK_RATE_REF_FREQ_IN_KHZ,
+        ..Default::default()
+    };
+
+    for lane in 0..link_settings.lane_count as usize {
+        // translate lane settings: union dpcd_training_lane_set
+        // VOLTAGE_SWING_SET 1:0, PRE_EMPHASIS_SET 4:3, POST_CURSOR2_SET 7:6.
+        let mut training_lane_set = (lane_settings[lane].VOLTAGE_SWING & 0x3) | (lane_settings[lane].PRE_EMPHASIS & 0x3) << 3;
+
+        // post cursor 2 setting only applies to HBR2 link rate
+        if link_settings.link_rate == crate::dc_dp_types::LINK_RATE_HIGH2 {
+            // this is passed to VBIOS to program post cursor 2 level
+            training_lane_set |= (lane_settings[lane].POST_CURSOR2 & 0x3) << 6;
+        }
+
+        cntl.lane_select = lane as u32;
+        cntl.lane_settings = training_lane_set;
+
+        // call VBIOS table to set voltage swing and pre-emphasis
+        let result = crate::command_table2::bios_parser_transmitter_control(adev, dc, &cntl);
+
+        if result != bp_result::BP_RESULT_OK {
+            crate::linux::Line::new().s("dcn10_link_encoder_dp_set_lane_settings: Failed to execute VBIOS command table!").say();
+        }
+    }
+}
+
+/// `set_link_training_complete` (dcn10_link_encoder.c): the register is in
+/// the DP back end; the transmitter gives the offset.
+fn set_link_training_complete(adev: &amdgpu_device, enc10: &dcn21_link_encoder, complete: bool) {
+    reg_update!(adev, enc10.link(), DP_LINK_CNTL, DP_LINK_TRAINING_COMPLETE, complete as u32);
+}
+
+/// `enable_phy_bypass_mode` (dcn10_link_encoder.c).
+fn enable_phy_bypass_mode(adev: &amdgpu_device, enc10: &dcn21_link_encoder, enable: bool) {
+    reg_update!(adev, enc10.link(), DP_DPHY_CNTL, DPHY_BYPASS, enable as u32);
+}
+
+/// `disable_prbs_mode` (dcn10_link_encoder.c).
+fn disable_prbs_mode(adev: &amdgpu_device, enc10: &dcn21_link_encoder) {
+    reg_update!(adev, enc10.link(), DP_DPHY_PRBS_CNTL, DPHY_PRBS_EN, 0);
+}
+
+/// `dcn10_link_encoder_set_dp_phy_pattern_training_pattern` (dcn10_link_encoder.c).
+fn dcn10_link_encoder_set_dp_phy_pattern_training_pattern(adev: &amdgpu_device, enc10: &dcn21_link_encoder, index: u32) {
+    // Write Training Pattern
+    reg_write!(adev, enc10.link_regs, DP_DPHY_TRAINING_PATTERN_SEL, index);
+
+    // Set HW Register Training Complete to false
+    set_link_training_complete(adev, enc10, false);
+
+    // Disable PHY Bypass mode to output Training Pattern
+    enable_phy_bypass_mode(adev, enc10, false);
+
+    // Disable PRBS mode
+    disable_prbs_mode(adev, enc10);
+}
+
+/// `set_dp_phy_pattern_passthrough_mode` (dcn10_link_encoder.c): video
+/// mode, with the framing and blank-start counts an HBR2 compliance
+/// pattern may have changed restored.
+fn set_dp_phy_pattern_passthrough_mode(adev: &amdgpu_device, enc10: &dcn21_link_encoder, panel_mode: u32) {
+    // program correct panel mode
+    setup_panel_mode(adev, enc10, panel_mode);
+
+    // restore LINK_FRAMING_CNTL and DPHY_SCRAMBLER_BS_COUNT in case we were
+    // doing HBR2 compliance pattern before
+    reg_update!(adev, enc10.link(), DP_LINK_FRAMING_CNTL,
+        DP_IDLE_BS_INTERVAL, 0x2000,
+        DP_VBID_DISABLE, 0,
+        DP_VID_ENHANCED_FRAME_MODE, 1);
+
+    reg_update!(adev, enc10.link(), DP_DPHY_SCRAM_CNTL, DPHY_SCRAMBLER_BS_COUNT, 0x1FF);
+
+    // set link training complete
+    set_link_training_complete(adev, enc10, true);
+
+    // Disable PHY Bypass mode to setup the test pattern
+    enable_phy_bypass_mode(adev, enc10, false);
+
+    // Disable PRBS mode
+    disable_prbs_mode(adev, enc10);
+}
+
+/// `dcn10_link_encoder_dp_set_phy_pattern` (dcn10_link_encoder.c). The
+/// compliance patterns (D10.2, symbol error, PRBS7, 80-bit custom,
+/// CP2520) are later stages.
+fn dcn10_link_encoder_dp_set_phy_pattern(adev: &amdgpu_device, enc: &link_enc,
+                                         param: &crate::link_dp_training::encoder_set_dp_phy_pattern_param) {
+    let enc10 = to_dcn10_link_enc(enc);
+
+    match param.dp_phy_pattern {
+        DP_TEST_PATTERN_TRAINING_PATTERN1 => dcn10_link_encoder_set_dp_phy_pattern_training_pattern(adev, enc10, 0),
+        DP_TEST_PATTERN_TRAINING_PATTERN2 => dcn10_link_encoder_set_dp_phy_pattern_training_pattern(adev, enc10, 1),
+        DP_TEST_PATTERN_TRAINING_PATTERN3 => dcn10_link_encoder_set_dp_phy_pattern_training_pattern(adev, enc10, 2),
+        DP_TEST_PATTERN_TRAINING_PATTERN4 => dcn10_link_encoder_set_dp_phy_pattern_training_pattern(adev, enc10, 3),
+        DP_TEST_PATTERN_VIDEO_MODE => set_dp_phy_pattern_passthrough_mode(adev, enc10, param.dp_panel_mode),
+        DP_TEST_PATTERN_D102 | DP_TEST_PATTERN_SYMBOL_ERROR | DP_TEST_PATTERN_PRBS7 | DP_TEST_PATTERN_80BIT_CUSTOM
+        | DP_TEST_PATTERN_CP2520_1 | DP_TEST_PATTERN_CP2520_2 | DP_TEST_PATTERN_CP2520_3 => {
+            crate::linux::Line::new().s("dcn10_link_encoder_dp_set_phy_pattern: compliance pattern not ported").say();
+        }
+        // invalid phy pattern
+        _ => {}
+    }
 }

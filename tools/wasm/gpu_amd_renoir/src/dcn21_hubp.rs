@@ -36,6 +36,7 @@ pub struct hubp_ops {
     pub hubp_reset: Option<fn(&mut dcn21_hubp)>,
     pub hubp_clk_cntl: Option<fn(&amdgpu_device, &dcn21_hubp, bool)>,
     pub hubp_set_flip_control_surface_gsl: Option<fn(&amdgpu_device, &dcn21_hubp, bool)>,
+    pub hubp_is_flip_pending: Option<fn(&amdgpu_device, &dcn21_hubp) -> bool>,
 }
 
 /// `dcn21_hubp_funcs` (dcn21_hubp.c), as far as ported. `hubp_disconnect`
@@ -45,6 +46,7 @@ const DCN21_HUBP_FUNCS: hubp_ops = hubp_ops {
     hubp_reset: Some(hubp_reset),
     hubp_clk_cntl: Some(hubp1_clk_cntl),
     hubp_set_flip_control_surface_gsl: Some(hubp2_set_flip_control_surface_gsl),
+    hubp_is_flip_pending: Some(hubp1_is_flip_pending),
 };
 
 impl hubp_funcs {
@@ -65,6 +67,7 @@ pub struct hubp {
     pub opp_id: i32,
     pub mpcc_id: i32,
     pub power_gated: bool,
+    pub request_address: crate::dc_hw_types::dc_plane_address,
 }
 
 /// `struct dcn21_hubp` (dcn21_hubp.h): the concrete HUBP. `state`,
@@ -1503,3 +1506,26 @@ pub static HUBP_MASK: dcn_hubp2_mask = dcn_hubp2_mask {
     VM_GROUP_SIZE: HUBP0_DCHUBP_REQ_SIZE_CONFIG__VM_GROUP_SIZE_MASK,
     RB_ALIGNED: HUBP0_DCSURF_TILING_CONFIG__RB_ALIGNED_MASK,
 };
+
+/// `hubp1_is_flip_pending` (dcn10_hubp.c): a flip is pending until the
+/// surface address in use is the one last requested.
+pub fn hubp1_is_flip_pending(adev: &amdgpu_device, hubp1: &dcn21_hubp) -> bool {
+    use crate::dc_helper::reg_get;
+
+    if hubp1.base.power_gated {
+        return false;
+    }
+
+    let flip_pending = reg_get!(adev, hubp1.rsm(), DCSURF_FLIP_CONTROL, SURFACE_FLIP_PENDING);
+
+    let low = reg_get!(adev, hubp1.rsm(), DCSURF_SURFACE_EARLIEST_INUSE, SURFACE_EARLIEST_INUSE_ADDRESS);
+
+    let high = reg_get!(adev, hubp1.rsm(), DCSURF_SURFACE_EARLIEST_INUSE_HIGH, SURFACE_EARLIEST_INUSE_ADDRESS_HIGH);
+
+    if flip_pending != 0 {
+        return true;
+    }
+
+    let earliest_inuse_address = ((high as u64) << 32) | low as u64;
+    earliest_inuse_address != hubp1.base.request_address.grph_addr
+}

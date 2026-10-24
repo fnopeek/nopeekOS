@@ -23,6 +23,10 @@ pub enum opp_funcs {
     dcn20_opp_funcs,
 }
 
+/// `enum dc_dynamic_expansion` (dc_types.h).
+pub const DYN_EXPANSION_AUTO: u32 = 0;
+pub const DYN_EXPANSION_DISABLE: u32 = 1;
+
 /// `struct tg_color` (dc_hw_types.h): at most 10 bits per component.
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct tg_color {
@@ -35,6 +39,13 @@ pub struct tg_color {
 /// port has not reached.
 #[derive(Default, Clone, Copy)]
 pub struct opp_ops {
+    pub opp_set_dyn_expansion: Option<fn(&amdgpu_device, &dcn20_opp, u32, u32, u32)>,
+    pub opp_program_fmt: Option<fn(&amdgpu_device, &crate::dc::dc_debug_options, &dcn20_opp,
+                                   &crate::dc_stream::bit_depth_reduction_params,
+                                   &crate::dc_stream::clamping_and_pixel_encoding_params)>,
+    pub opp_program_stereo: Option<fn(&amdgpu_device, &dcn20_opp, bool, &crate::dc_hw_types::dc_crtc_timing)>,
+    pub opp_pipe_clock_control: Option<fn(&amdgpu_device, &dcn20_opp, bool)>,
+    pub opp_program_left_edge_extra_pixel: Option<fn(&amdgpu_device, &crate::dc::dc_debug_options, &dcn20_opp, u32, bool)>,
     pub opp_set_disp_pattern_generator: Option<fn(&amdgpu_device, &dcn20_opp, u32, u32, u32, &tg_color, i32, i32, i32)>,
     pub dpg_is_blanked: Option<fn(&amdgpu_device, &dcn20_opp) -> bool>,
     pub dpg_is_pending: Option<fn(&amdgpu_device, &dcn20_opp) -> bool>,
@@ -42,6 +53,11 @@ pub struct opp_ops {
 
 /// `dcn20_opp_funcs` (dcn20_opp.c), as far as ported.
 const DCN20_OPP_FUNCS: opp_ops = opp_ops {
+    opp_set_dyn_expansion: Some(opp1_set_dyn_expansion),
+    opp_program_fmt: Some(opp1_program_fmt),
+    opp_program_stereo: Some(opp1_program_stereo),
+    opp_pipe_clock_control: Some(opp1_pipe_clock_control),
+    opp_program_left_edge_extra_pixel: Some(opp2_program_left_edge_extra_pixel),
     opp_set_disp_pattern_generator: Some(opp2_set_disp_pattern_generator),
     dpg_is_blanked: Some(opp2_dpg_is_blanked),
     dpg_is_pending: Some(opp2_dpg_is_pending),
@@ -64,6 +80,8 @@ pub struct output_pixel_processor {
     pub funcs: Option<opp_funcs>,
     pub mpc_tree_params: mpc_tree,
     pub mpcc_disconnect_pending: [bool; MAX_PIPES],
+    /// `enum dc_dynamic_expansion`.
+    pub dyn_expansion: u32,
 }
 
 /// `struct dcn20_opp` (dcn20_opp.h): the concrete OPP.
@@ -672,4 +690,217 @@ pub fn opp2_get_left_edge_extra_pixel_count(dc_debug: &crate::dc::dc_debug_optio
     } else {
         0
     }
+}
+
+/// `opp1_set_truncation` (dcn10_opp.c).
+fn opp1_set_truncation(adev: &amdgpu_device, oppn10: &dcn20_opp, params: &crate::dc_stream::bit_depth_reduction_params) {
+    reg_update!(adev, oppn10.rsm(), FMT_BIT_DEPTH_CONTROL,
+        FMT_TRUNCATE_EN, params.TRUNCATE_ENABLED as u32,
+        FMT_TRUNCATE_DEPTH, params.TRUNCATE_DEPTH,
+        FMT_TRUNCATE_MODE, params.TRUNCATE_MODE as u32);
+}
+
+/// `opp1_set_spatial_dither` (dcn10_opp.c): random dithering off, then on
+/// as the parameters ask, seeded per channel. The zero offsets of the
+/// three channels stay at their defaults (0 RGB, 0x80000 YCbCr).
+fn opp1_set_spatial_dither(adev: &amdgpu_device, oppn10: &dcn20_opp,
+                           params: &crate::dc_stream::bit_depth_reduction_params) {
+    let c = oppn10.rsm();
+
+    // Disable spatial (random) dithering
+    reg_update!(adev, c, FMT_BIT_DEPTH_CONTROL,
+        FMT_SPATIAL_DITHER_EN, 0,
+        FMT_SPATIAL_DITHER_MODE, 0,
+        FMT_SPATIAL_DITHER_DEPTH, 0,
+        FMT_TEMPORAL_DITHER_EN, 0,
+        FMT_HIGHPASS_RANDOM_ENABLE, 0,
+        FMT_FRAME_RANDOM_ENABLE, 0,
+        FMT_RGB_RANDOM_ENABLE, 0);
+
+    // only use FRAME_COUNTER_MAX if frameRandom == 1
+    if params.FRAME_RANDOM {
+        if params.SPATIAL_DITHER_DEPTH == 0 || params.SPATIAL_DITHER_DEPTH == 1 {
+            reg_update!(adev, c, FMT_CONTROL,
+                FMT_SPATIAL_DITHER_FRAME_COUNTER_MAX, 15,
+                FMT_SPATIAL_DITHER_FRAME_COUNTER_BIT_SWAP, 2);
+        } else if params.SPATIAL_DITHER_DEPTH == 2 {
+            reg_update!(adev, c, FMT_CONTROL,
+                FMT_SPATIAL_DITHER_FRAME_COUNTER_MAX, 3,
+                FMT_SPATIAL_DITHER_FRAME_COUNTER_BIT_SWAP, 1);
+        } else {
+            return;
+        }
+    } else {
+        reg_update!(adev, c, FMT_CONTROL,
+            FMT_SPATIAL_DITHER_FRAME_COUNTER_MAX, 0,
+            FMT_SPATIAL_DITHER_FRAME_COUNTER_BIT_SWAP, 0);
+    }
+
+    // Set seed for random values for spatial dithering for R,G,B channels
+    reg_set!(adev, c, FMT_DITHER_RAND_R_SEED, 0, FMT_RAND_R_SEED, params.r_seed_value);
+
+    reg_set!(adev, c, FMT_DITHER_RAND_G_SEED, 0, FMT_RAND_G_SEED, params.g_seed_value);
+
+    reg_set!(adev, c, FMT_DITHER_RAND_B_SEED, 0, FMT_RAND_B_SEED, params.b_seed_value);
+
+    reg_update!(adev, c, FMT_BIT_DEPTH_CONTROL,
+        // Enable spatial dithering
+        FMT_SPATIAL_DITHER_EN, params.SPATIAL_DITHER_ENABLED as u32,
+        // Set spatial dithering mode (default is Seed patterrn AAAA...)
+        FMT_SPATIAL_DITHER_MODE, params.SPATIAL_DITHER_MODE,
+        // Set spatial dithering bit depth
+        FMT_SPATIAL_DITHER_DEPTH, params.SPATIAL_DITHER_DEPTH,
+        // Disable High pass filter
+        FMT_HIGHPASS_RANDOM_ENABLE, params.HIGHPASS_RANDOM as u32,
+        // Reset only at startup
+        FMT_FRAME_RANDOM_ENABLE, params.FRAME_RANDOM as u32,
+        // Set RGB data dithered with x^28+x^3+1
+        FMT_RGB_RANDOM_ENABLE, params.RGB_RANDOM as u32);
+}
+
+/// `opp1_program_bit_depth_reduction` (dcn10_opp.c). Temporal dithering is
+/// a TODO in Linux.
+pub fn opp1_program_bit_depth_reduction(adev: &amdgpu_device, oppn10: &dcn20_opp,
+                                        params: &crate::dc_stream::bit_depth_reduction_params) {
+    opp1_set_truncation(adev, oppn10, params);
+    opp1_set_spatial_dither(adev, oppn10, params);
+}
+
+/// `opp1_set_clamping` (dcn10_opp.c). A programmable limited range is a
+/// TODO in Linux.
+fn opp1_set_clamping(adev: &amdgpu_device, oppn10: &dcn20_opp,
+                     params: &crate::dc_stream::clamping_and_pixel_encoding_params) {
+    let c = oppn10.rsm();
+    reg_update!(adev, c, FMT_CLAMP_CNTL, FMT_CLAMP_DATA_EN, 0, FMT_CLAMP_COLOR_FORMAT, 0);
+
+    let format = match params.clamping_level {
+        CLAMPING_FULL_RANGE => Some(0),
+        CLAMPING_LIMITED_RANGE_8BPC => Some(1),
+        CLAMPING_LIMITED_RANGE_10BPC => Some(2),
+        CLAMPING_LIMITED_RANGE_12BPC => Some(3),
+        _ => None,
+    };
+    if let Some(format) = format {
+        reg_update!(adev, c, FMT_CLAMP_CNTL, FMT_CLAMP_DATA_EN, 1, FMT_CLAMP_COLOR_FORMAT, format);
+    }
+}
+
+/// `opp1_set_pixel_encoding` (dcn10_opp.c).
+fn opp1_set_pixel_encoding(adev: &amdgpu_device, dc_debug: &crate::dc::dc_debug_options, oppn10: &dcn20_opp,
+                           params: &crate::dc_stream::clamping_and_pixel_encoding_params) {
+    let c = oppn10.rsm();
+    let force_chroma_subsampling_1tap = dc_debug.force_chroma_subsampling_1tap;
+
+    match params.pixel_encoding {
+        PIXEL_ENCODING_RGB | PIXEL_ENCODING_YCBCR444 => {
+            reg_update!(adev, c, FMT_CONTROL, FMT_PIXEL_ENCODING, 0, FMT_SUBSAMPLING_MODE, 0,
+                FMT_CBCR_BIT_REDUCTION_BYPASS, 0);
+            reg_update!(adev, c, FMT_CONTROL, FMT_PIXEL_ENCODING, 0);
+        }
+        PIXEL_ENCODING_YCBCR422 => {
+            reg_update!(adev, c, FMT_CONTROL, FMT_PIXEL_ENCODING, 1, FMT_SUBSAMPLING_MODE, 2,
+                FMT_CBCR_BIT_REDUCTION_BYPASS, 0);
+        }
+        PIXEL_ENCODING_YCBCR420 => {
+            reg_update!(adev, c, FMT_CONTROL, FMT_PIXEL_ENCODING, 2, FMT_SUBSAMPLING_MODE, 2,
+                FMT_CBCR_BIT_REDUCTION_BYPASS, 1);
+        }
+        _ => {}
+    }
+
+    if force_chroma_subsampling_1tap {
+        reg_update!(adev, c, FMT_CONTROL, FMT_SUBSAMPLING_MODE, 0);
+    }
+}
+
+/// `opp1_program_fmt` (dcn10_opp.c): dithering depends on the CRTC source
+/// select, so it is programmed after it.
+pub fn opp1_program_fmt(adev: &amdgpu_device, dc_debug: &crate::dc::dc_debug_options, oppn10: &dcn20_opp,
+                        fmt_bit_depth: &crate::dc_stream::bit_depth_reduction_params,
+                        clamping: &crate::dc_stream::clamping_and_pixel_encoding_params) {
+    if clamping.pixel_encoding == PIXEL_ENCODING_YCBCR420 {
+        reg_update!(adev, oppn10.rsm(), FMT_MAP420_MEMORY_CONTROL, FMT_MAP420MEM_PWR_FORCE, 0);
+    }
+
+    opp1_program_bit_depth_reduction(adev, oppn10, fmt_bit_depth);
+
+    opp1_set_clamping(adev, oppn10, clamping);
+    opp1_set_pixel_encoding(adev, dc_debug, oppn10, clamping);
+}
+
+/// `opp1_set_dyn_expansion` (dcn10_opp.c): 10- or 8-bit input expanded to
+/// 12 bits on the signals that carry it.
+pub fn opp1_set_dyn_expansion(adev: &amdgpu_device, oppn10: &dcn20_opp, _color_sp: u32, color_dpth: u32, signal: u32) {
+    let c = oppn10.rsm();
+    reg_update!(adev, c, FMT_DYNAMIC_EXP_CNTL, FMT_DYNAMIC_EXP_EN, 0, FMT_DYNAMIC_EXP_MODE, 0);
+
+    if oppn10.base.dyn_expansion == DYN_EXPANSION_DISABLE {
+        return;
+    }
+
+    // 00 - 10-bit -> 12-bit dynamic expansion
+    // 01 - 8-bit  -> 12-bit dynamic expansion
+    if signal == LF_SIGNAL_TYPE_HDMI_TYPE_A || signal == LF_SIGNAL_TYPE_DISPLAY_PORT
+        || signal == LF_SIGNAL_TYPE_DISPLAY_PORT_MST || signal == LF_SIGNAL_TYPE_VIRTUAL
+    {
+        match color_dpth {
+            COLOR_DEPTH_888 => reg_update!(adev, c, FMT_DYNAMIC_EXP_CNTL, FMT_DYNAMIC_EXP_EN, 1, FMT_DYNAMIC_EXP_MODE, 1),
+            COLOR_DEPTH_101010 => {
+                reg_update!(adev, c, FMT_DYNAMIC_EXP_CNTL, FMT_DYNAMIC_EXP_EN, 1, FMT_DYNAMIC_EXP_MODE, 0)
+            }
+            // otherwise last two bits are zero
+            COLOR_DEPTH_121212 => {
+                reg_update!(adev, c, FMT_DYNAMIC_EXP_CNTL, FMT_DYNAMIC_EXP_EN, 1, FMT_DYNAMIC_EXP_MODE, 0)
+            }
+            _ => 0,
+        };
+    }
+}
+
+/// `opp1_pipe_clock_control` (dcn10_opp.c).
+pub fn opp1_pipe_clock_control(adev: &amdgpu_device, oppn10: &dcn20_opp, enable: bool) {
+    reg_update!(adev, oppn10.rsm(), OPP_PIPE_CONTROL, OPP_PIPE_CLOCK_EN, enable as u32);
+}
+
+/// `opp2_program_left_edge_extra_pixel` (dcn20_opp.c): the number of extra
+/// left edge pixels supplied to the 422 horizontal chroma sub-sample filter.
+pub fn opp2_program_left_edge_extra_pixel(adev: &amdgpu_device, dc_debug: &crate::dc::dc_debug_options,
+                                          oppn20: &dcn20_opp, pixel_encoding: u32, is_primary: bool) {
+    let count = opp2_get_left_edge_extra_pixel_count(dc_debug, pixel_encoding, is_primary);
+
+    reg_update!(adev, oppn20.rsm(), FMT_422_CONTROL, FMT_LEFT_EDGE_EXTRA_PIXEL_COUNT, count);
+}
+
+/// `opp1_program_stereo` (dcn10_opp.c): the OPP buffer's active width and
+/// the vertical active space between the two eyes' frames.
+pub fn opp1_program_stereo(adev: &amdgpu_device, oppn10: &dcn20_opp, enable: bool,
+                           timing: &crate::dc_hw_types::dc_crtc_timing) {
+    let c = oppn10.rsm();
+    let mut active_width = timing.h_addressable - timing.h_border_right - timing.h_border_right;
+    let mut space1_size = timing.v_total - timing.v_addressable;
+    // TODO: confirm computation of space2_size
+    let mut space2_size = timing.v_total - timing.v_addressable;
+
+    if !enable {
+        active_width = 0;
+        space1_size = 0;
+        space2_size = 0;
+    }
+
+    // TODO: for which cases should FMT_STEREOSYNC_OVERRIDE be set?
+    reg_update!(adev, c, FMT_CONTROL, FMT_STEREOSYNC_OVERRIDE, 0);
+
+    reg_update!(adev, c, OPPBUF_CONTROL, OPPBUF_ACTIVE_WIDTH, active_width);
+
+    // Program OPPBUF_3D_VACT_SPACE1_SIZE and OPPBUF_VACT_SPACE2_SIZE
+    // registers. In 3D progressive frames, Vactive space happens only in
+    // between the 2 frames, so only need to program OPPBUF_3D_VACT_SPACE1_SIZE.
+    // In 3D alternative frames, left and right frames, top and bottom field.
+    if timing.timing_3d_format == TIMING_3D_FORMAT_FRAME_ALTERNATE {
+        reg_update!(adev, c, OPPBUF_3D_PARAMETERS_0, OPPBUF_3D_VACT_SPACE2_SIZE, space2_size);
+    } else {
+        reg_update!(adev, c, OPPBUF_3D_PARAMETERS_0, OPPBUF_3D_VACT_SPACE1_SIZE, space1_size);
+    }
+
+    // TODO: Is programming of OPPBUF_DUMMY_DATA_R/G/B needed?
 }

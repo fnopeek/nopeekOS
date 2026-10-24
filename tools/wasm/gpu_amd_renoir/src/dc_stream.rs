@@ -65,6 +65,9 @@ pub struct bit_depth_reduction_params {
     pub FRC25: u8,
     pub FRC50: u8,
     pub FRC75: u8,
+    pub r_seed_value: u32,
+    pub g_seed_value: u32,
+    pub b_seed_value: u32,
     /// `enum dc_pixel_encoding`.
     pub pixel_encoding: u32,
 }
@@ -109,8 +112,19 @@ pub struct dc_stream_state {
     pub adjust: dc_crtc_timing_adjust,
     pub writeback_info: [dc_writeback_info; MAX_DWB_PIPES],
     pub ignore_msa_timing_param: bool,
-    /// `adaptive_sync_infopacket.valid`.
-    pub adaptive_sync_infopacket_valid: bool,
+    pub adaptive_sync_infopacket: dc_info_packet,
+    pub vsc_infopacket: dc_info_packet,
+    pub vrr_infopacket: dc_info_packet,
+    pub hdr_static_metadata: dc_info_packet,
+    pub use_vsc_sdp_for_colorimetry: bool,
+    pub abm_level: u32,
+    pub dpms_off: bool,
+    pub apply_edp_fast_boot_optimization: bool,
+    pub mode_changed: bool,
+    /// `update_flags.raw`.
+    pub update_flags: u32,
+    /// `out.otg_offset`.
+    pub out_otg_offset: i32,
     pub refcount: u32,
 }
 
@@ -124,6 +138,7 @@ pub struct dc_crtc_timing_adjust {
     pub v_total_max: u32,
     pub v_total_mid: u32,
     pub v_total_mid_frame_num: u32,
+    pub timing_adjust_pending: bool,
 }
 
 /// `struct dc_writeback_info` (dc_stream.h), the members bandwidth
@@ -178,7 +193,15 @@ pub struct dc_plane_state {
     /// `enum plane_stereo_format`.
     pub stereo_format: u32,
     pub dcc: dc_plane_dcc_param,
+    pub status: dc_plane_status,
     pub refcount: u32,
+}
+
+/// `struct dc_plane_status` (dc.h), the members reached.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct dc_plane_status {
+    pub is_flip_pending: bool,
+    pub is_right_eye: bool,
 }
 
 /// `struct dc_plane_dcc_param` (dc_hw_types.h).
@@ -250,7 +273,17 @@ fn dc_stream_construct(dc: &mut dc, li: usize, dc_sink_data: &dc_sink) -> dc_str
         adjust: Default::default(),
         writeback_info: Default::default(),
         ignore_msa_timing_param: false,
-        adaptive_sync_infopacket_valid: false,
+        adaptive_sync_infopacket: dc_info_packet::default(),
+        vsc_infopacket: dc_info_packet::default(),
+        vrr_infopacket: dc_info_packet::default(),
+        hdr_static_metadata: dc_info_packet::default(),
+        use_vsc_sdp_for_colorimetry: false,
+        abm_level: 0,
+        dpms_off: false,
+        apply_edp_fast_boot_optimization: false,
+        mode_changed: false,
+        update_flags: 0,
+        out_otg_offset: 0,
         refcount: 0,
     };
 
@@ -343,3 +376,58 @@ pub fn dc_create_plane_state(dc: &mut dc) -> usize {
 pub fn dc_plane_state_retain(dc: &mut dc, plane: usize) {
     dc.planes[plane].as_deref_mut().unwrap().refcount += 1;
 }
+
+/// `dc_stream_release` (dc_stream.c): the last reference frees the stream
+/// and, with it, its reference on the sink.
+pub fn dc_stream_release(dc: &mut dc, stream: usize) {
+    let s = dc.streams[stream].as_deref_mut().unwrap();
+    s.refcount -= 1;
+    if s.refcount == 0 {
+        dc.streams[stream] = None;
+    }
+}
+
+/// `dc_plane_state_release` (dc_surface.c).
+pub fn dc_plane_state_release(dc: &mut dc, plane: usize) {
+    let p = dc.planes[plane].as_deref_mut().unwrap();
+    p.refcount -= 1;
+    if p.refcount == 0 {
+        dc.planes[plane] = None;
+    }
+}
+
+/// `struct dc_info_packet` (dc_types.h).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct dc_info_packet {
+    pub valid: bool,
+    pub hb0: u8,
+    pub hb1: u8,
+    pub hb2: u8,
+    pub hb3: u8,
+    pub sb: [u8; 32],
+}
+
+/// `struct enc_sdp_line_num` (stream_encoder.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct enc_sdp_line_num {
+    pub adaptive_sync_line_num_valid: bool,
+    pub adaptive_sync_line_num: u32,
+}
+
+/// `struct encoder_info_frame` (stream_encoder.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct encoder_info_frame {
+    pub avi: dc_info_packet,
+    pub gamut: dc_info_packet,
+    pub vendor: dc_info_packet,
+    pub hfvsif: dc_info_packet,
+    pub vtem: dc_info_packet,
+    pub spd: dc_info_packet,
+    pub vsc: dc_info_packet,
+    pub hdrsmd: dc_info_packet,
+    pub adaptive_sync: dc_info_packet,
+    pub sdp_line_num: enc_sdp_line_num,
+}
+
+/// `union stream_update_flags` (dc_stream.h): `dsc_changed`.
+pub const UPDATE_FLAG_DSC_CHANGED: u32 = 1 << 7;
