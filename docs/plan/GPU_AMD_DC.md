@@ -326,6 +326,8 @@ host-prüfbare Meilenstein ist der Graph, nicht der Einzelblock.
   (`blit_rect`, `blit_all`, `blit_region`, `blit_char`, `clear`) als
   GPU-Kopie über das Modul. Beim Abgang flippt das Modul zurück auf den
   Framebuffer.
+- **E5c am Gerät (Log ✅):** `presented by flips` aktiv, System danach normal;
+  das Sichturteil (Reißen beim Scrollen/Video, Latenz) steht aus.
 - **Danach (offen):** Composer flippt die Schatten selbst (spart die
   Vollbild-Kopie), Flip-Drosselung, HW-Vblank-Zähler.
 - **Früher geplant als E5c:** Kernel-Naht — ein Flip-Auftrag (`OP_FLIP`) vom
