@@ -52,6 +52,7 @@ const CAP_COPY: i32 = 1;
 const CAP_SCENE: i32 = 2;
 const CAP_NATIVE: i32 = 4;
 const CAP_CURSOR: i32 = 8;
+const CAP_PRESENT: i32 = 16;
 const JOB_BYTES: usize = 32;
 const BO_INFO_BYTES: usize = 40;
 const NUM_BOS: usize = 3;
@@ -394,7 +395,51 @@ struct service {
     guest_bos: Vec<(u32, Vec<u64>)>,
     /// The buffers the scene being checked names (`buffers::surface`).
     named: core::cell::RefCell<Vec<u32>>,
+    /// With DC driving the panel: the buffers it shows.
+    present: Option<present>,
 }
+
+/// A buffer the display shows: its MC address and pitch, and what of the
+/// picture it lacks since it was last written.
+struct scanout {
+    gpu: u64,
+    pitch: u32,
+    /// The VRAM buffer, for the two the module allocates; the framebuffer
+    /// is the kernel's.
+    handle: Option<usize>,
+    stale: Vec<rect>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct rect {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+/// Rectangles a buffer keeps before they become their bounding box.
+const MAX_STALE: usize = 16;
+
+/// What goes "to the framebuffer" with DC driving the panel: the
+/// framebuffer and two VRAM buffers in turn. A copy lands in a buffer the
+/// display does not show, with what that buffer lacks since its last copy,
+/// and DC flips to it at the next VUPDATE. Of three buffers one is shown,
+/// one may wait for its flip, and the third is free, so a copy never waits
+/// for the display; one whose buffer waits to be flipped joins it.
+struct present {
+    bufs: [scanout; 3],
+    shown: usize,
+    /// The buffer whose flip DC has, and the one copied into since and not
+    /// yet flipped.
+    flipping: Option<usize>,
+    queued: Option<usize>,
+    width: u32,
+    height: u32,
+}
+
+/// Flip events of `present` are its buffer index plus this.
+const PRESENT_EVENT: u32 = 100;
 
 impl service {
     /// A buffer the compositor's VM has, by kernel id.
@@ -838,7 +883,11 @@ fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
             }
             drain_scene(adev, svc);
             let (s, d) = (svc.bos[src], svc.bos[dst]);
-            match copy_rect(adev, s.gpu, s.pitch, d.gpu, d.pitch, x, y, cw, ch) {
+            let r = match svc.present.as_mut() {
+                Some(p) if dst == 0 => present_copy(adev, p, &s, rect { x, y, w: cw, h: ch }),
+                _ => copy_rect(adev, s.gpu, s.pitch, d.gpu, d.pitch, x, y, cw, ch),
+            };
+            match r {
                 Ok(()) => 0,
                 Err(e) => e,
             }
@@ -898,6 +947,9 @@ fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
 /// Everything the service holds goes back.
 fn unbind(adev: &mut amdgpu_device, svc: &mut service) {
     drain_scene(adev, svc);
+    if let Some(p) = svc.present.take() {
+        present_fini(adev, p);
+    }
     if let Some(mut c) = svc.composer.take() {
         for b in svc.bos.iter_mut().chain(svc.dyn_bos.iter_mut()) {
             unmap_vm(adev, &mut c, b);
@@ -941,6 +993,107 @@ fn scenes_init(adev: &mut amdgpu_device, svc: &mut service) -> bool {
     }
     svc.composer = Some(c);
     true
+}
+
+/// The display's buffers: the framebuffer on screen, and two VRAM buffers
+/// that lack all of the picture.
+fn present_init(adev: &mut amdgpu_device, fb: &bo) -> Result<present, i32> {
+    let full = rect { x: 0, y: 0, w: fb.width, h: fb.height };
+    let size = fb.pitch as u64 * fb.height as u64;
+    let buf = |adev: &mut amdgpu_device| -> Result<scanout, i32> {
+        let h = obj::amdgpu_bo_create_kernel(adev, size, PAGE, crate::regs::AMDGPU_GEM_DOMAIN_VRAM, false)?
+            .ok_or(-ENOMEM)?;
+        Ok(scanout { gpu: obj::amdgpu_bo_gpu_offset(adev, h), pitch: fb.pitch, handle: Some(h),
+                     stale: alloc::vec![full] })
+    };
+    let b1 = buf(adev)?;
+    let b2 = buf(adev)?;
+    Ok(present {
+        bufs: [scanout { gpu: fb.gpu, pitch: fb.pitch, handle: None, stale: Vec::new() }, b1, b2],
+        shown: 0,
+        flipping: None,
+        queued: None,
+        width: fb.width,
+        height: fb.height,
+    })
+}
+
+/// A copy "to the framebuffer" of `r` from `src`: into the buffer to show
+/// next, with what it lacked, and that buffer's flip asked for. Complete
+/// once the copy is done; the flip follows at a VUPDATE.
+fn present_copy(adev: &mut amdgpu_device, p: &mut present, src: &bo, r: rect) -> Result<(), i32> {
+    for b in p.bufs.iter_mut() {
+        b.stale.push(r);
+        if b.stale.len() > MAX_STALE {
+            let (x0, y0) = (b.stale.iter().map(|r| r.x).min().unwrap(), b.stale.iter().map(|r| r.y).min().unwrap());
+            let x1 = b.stale.iter().map(|r| r.x + r.w).max().unwrap();
+            let y1 = b.stale.iter().map(|r| r.y + r.h).max().unwrap();
+            b.stale = alloc::vec![rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }];
+        }
+    }
+    let t = match p.queued {
+        Some(q) => q,
+        None => (0..3).find(|&i| i != p.shown && Some(i) != p.flipping).unwrap(),
+    };
+    let stale = core::mem::take(&mut p.bufs[t].stale);
+    let (dst, dpitch) = (p.bufs[t].gpu, p.bufs[t].pitch);
+    for s in &stale {
+        if let Err(e) = copy_rect(adev, src.gpu, src.pitch, dst, dpitch, s.x, s.y, s.w, s.h) {
+            p.bufs[t].stale = stale;
+            return Err(e);
+        }
+    }
+    p.queued = Some(t);
+    present_flip(adev, p);
+    Ok(())
+}
+
+/// The queued buffer's flip, when DC has none pending.
+fn present_flip(adev: &mut amdgpu_device, p: &mut present) {
+    if p.flipping.is_some() {
+        return;
+    }
+    let Some(q) = p.queued else { return };
+    let r = crate::amdgpu_dm::dm_page_flip(adev, p.bufs[q].gpu, PRESENT_EVENT + q as u32);
+    if r == 0 {
+        p.flipping = Some(q);
+        p.queued = None;
+    } else {
+        Line::new().s("gpudev: present flip refused (").dec((-r) as u64).s(")").say();
+    }
+}
+
+/// The flips DC completed: the buffer shown, and the queued one's flip.
+fn present_poll(adev: &mut amdgpu_device, p: &mut present) {
+    while let Some(i) = adev.dm.flip_events.iter().position(|e| e.event >= PRESENT_EVENT) {
+        let e = adev.dm.flip_events.remove(i);
+        let b = (e.event - PRESENT_EVENT) as usize;
+        if p.flipping == Some(b) {
+            p.shown = b;
+            p.flipping = None;
+        }
+    }
+    present_flip(adev, p);
+}
+
+/// Back to the framebuffer, as the kernel's own picture is there once the
+/// module is gone; the two VRAM buffers freed.
+fn present_fini(adev: &mut amdgpu_device, mut p: present) {
+    let fb = p.bufs[0].gpu;
+    let t0 = crate::linux::now_us();
+    while p.flipping.is_some() && crate::linux::now_us() - t0 < 100_000 {
+        crate::amdgpu_irq::amdgpu_irq_wait(adev, 5);
+        crate::workqueue::run_pending(adev);
+        present_poll(adev, &mut p);
+    }
+    if p.shown != 0 {
+        flip_and_wait(adev, fb, 4);
+    }
+    for b in p.bufs.iter_mut() {
+        if let Some(h) = b.handle.take() {
+            obj::amdgpu_bo_unref(adev, h);
+        }
+    }
 }
 
 /// A page flip to `address`, waited for until its completion event comes
@@ -1034,7 +1187,7 @@ pub fn serve(adev: &mut amdgpu_device) {
     }
     let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: Vec::new(), copy_ok: false, composer: None,
                             scene: None, scenes: 0, native: Default::default(), waits: Vec::new(),
-                            guest_bos: Vec::new(), named: core::cell::RefCell::new(Vec::new()) };
+                            guest_bos: Vec::new(), named: core::cell::RefCell::new(Vec::new()), present: None };
     for id in 0..NUM_BOS {
         let Some(info) = bo_info(id as u32) else {
             Line::new().s("gpudev: no buffer ").dec(id as u64).say();
@@ -1088,6 +1241,13 @@ pub fn serve(adev: &mut amdgpu_device) {
     if svc.copy_ok && adev.dm.live.is_some() {
         let (fb, a) = (svc.bos[0], svc.bos[1]);
         gtt_scanout_test(adev, &fb, &a);
+        match present_init(adev, &fb) {
+            Ok(p) => {
+                svc.present = Some(p);
+                Line::new().s("dc live: the framebuffer is presented by flips between three buffers").say();
+            }
+            Err(e) => Line::new().s("dc live: no present buffers (").dec((-e) as u64).s(")").say(),
+        }
     }
     let scene_ok = svc.copy_ok && scenes_init(adev, &mut svc);
     // An APU's VRAM is the carve-out the CPU reaches whole (`aper_base`,
@@ -1106,7 +1266,8 @@ pub fn serve(adev: &mut amdgpu_device) {
     };
     let native_ok = scene_ok && capset;
     let caps = if svc.copy_ok { CAP_COPY } else { 0 } | if scene_ok { CAP_SCENE } else { 0 }
-        | if native_ok { CAP_NATIVE } else { 0 } | if adev.dm.live.is_some() { CAP_CURSOR } else { 0 };
+        | if native_ok { CAP_NATIVE } else { 0 } | if adev.dm.live.is_some() { CAP_CURSOR } else { 0 }
+        | if svc.present.is_some() { CAP_PRESENT } else { 0 };
     npk_sys::gpudev_ready(caps);
     if caps == 0 {
         unbind(adev, &mut svc);
@@ -1127,6 +1288,9 @@ pub fn serve(adev: &mut amdgpu_device) {
         }
         crate::amdgpu_irq::amdgpu_ih_process(adev, false);
         crate::workqueue::run_pending(adev);
+        if let Some(p) = svc.present.as_mut() {
+            present_poll(adev, p);
+        }
         poll_scene(adev, &mut svc);
         crate::amdgpu_virtio::poll_rings(adev, &mut svc.native);
         poll_waits(adev, &mut svc);

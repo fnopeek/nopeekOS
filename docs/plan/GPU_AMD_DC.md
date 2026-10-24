@@ -311,7 +311,24 @@ host-prüfbare Meilenstein ist der Graph, nicht der Einzelblock.
   `OP_CURSOR_IMAGE` / `OP_CURSOR_MOVE` mit `CAP_CURSOR` (Bewegungen werden
   zusammengefasst), `shade::cursor` backt nicht mehr ein, wenn das Modul den
   Hardware-Cursor zeigt. Benannt: DMUB-Cursor-Payloads (PSR-SU/Replay).
-- **Nächster Schritt E5c:** Kernel-Naht — ein Flip-Auftrag (`OP_FLIP`) vom
+- **G am Gerät ✅:** Zeiger flüssig, auch über dem Firefox-Gast.
+- **GTT-Scanout am Gerät ✅ (0.35.1):** eine halbe Sekunde aus Schatten A
+  (GART-Adresse) ohne Unterlauf.
+- **E5c Present** (2026-10-24, Kernel 0.682.0 + Modul 0.36.0): die Anzeige
+  gehört dem Modul. Es hält drei Anzeigepuffer (Framebuffer + zwei VRAM-
+  Puffer); eine Kopie „in den Framebuffer“ (`OP_COPY_RECT`, Ziel 0) landet in
+  einem nicht gezeigten Puffer, samt dem, was diesem seit seinem letzten
+  Stand fehlt, und DC flippt im nächsten VUPDATE dorthin. Der Auftrag ist
+  fertig, wenn die Kopie fertig ist — der Kernel wartet nie auf einen
+  Vblank. Gezeigt / wartend / frei: mit drei Puffern ist immer einer frei,
+  ein weiterer Auftrag vor dem Flip schließt sich dem wartenden an. Kernel:
+  `CAP_PRESENT`, und dann gehen auch die CPU-Kopien des Framebuffers
+  (`blit_rect`, `blit_all`, `blit_region`, `blit_char`, `clear`) als
+  GPU-Kopie über das Modul. Beim Abgang flippt das Modul zurück auf den
+  Framebuffer.
+- **Danach (offen):** Composer flippt die Schatten selbst (spart die
+  Vollbild-Kopie), Flip-Drosselung, HW-Vblank-Zähler.
+- **Früher geplant als E5c:** Kernel-Naht — ein Flip-Auftrag (`OP_FLIP`) vom
   Composer an das Modul, abgeschlossen beim Ereignis; und der Composer
   zeichnet in den hinteren Puffer und flippt (Entscheid offen: Puffer-Alter
   /Schaden, Cursor bis zum Hardware-Cursor G).

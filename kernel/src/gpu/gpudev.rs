@@ -102,6 +102,10 @@ pub const CAP_SCENE: i32 = 2;
 pub const CAP_NATIVE: i32 = 4;
 /// The module shows the pointer on the display's hardware cursor.
 pub const CAP_CURSOR: i32 = 8;
+/// The display shows what is copied to the framebuffer only through the
+/// module (it flips between buffers of its own): every write of the
+/// framebuffer goes to it as a copy.
+pub const CAP_PRESENT: i32 = 16;
 const FIXED_BOS: u32 = 3;
 const JOB_TIMEOUT_MS: u64 = 100;
 /// Binding a new buffer is a page walk per 4 KB page in the module, once.
@@ -288,6 +292,8 @@ static SCENES: AtomicBool = AtomicBool::new(false);
 static NATIVE: AtomicBool = AtomicBool::new(false);
 /// It also shows the hardware cursor (`CAP_CURSOR`).
 static CURSOR: AtomicBool = AtomicBool::new(false);
+/// It also presents the framebuffer (`CAP_PRESENT`).
+static PRESENT: AtomicBool = AtomicBool::new(false);
 static NEXT_SEQ: AtomicU32 = AtomicU32::new(1);
 /// Every job up to this sequence number is completed. Jobs that touch a
 /// buffer complete in order; a job without buffers (a guest's ccmd waiting
@@ -568,9 +574,11 @@ pub fn ready(dev: PciAddr, caps: i32) -> i32 {
     SCENES.store(caps & CAP_SCENE != 0, Ordering::Release);
     NATIVE.store(caps & CAP_NATIVE != 0, Ordering::Release);
     CURSOR.store(caps & CAP_CURSOR != 0, Ordering::Release);
-    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}{}",
+    PRESENT.store(caps & CAP_PRESENT != 0, Ordering::Release);
+    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}{}{}",
         if caps & CAP_SCENE != 0 { ", scenes offered" } else { "" },
         if caps & CAP_CURSOR != 0 { ", hardware cursor" } else { "" },
+        if caps & CAP_PRESENT != 0 { ", presented by flips" } else { "" },
         if caps & CAP_NATIVE == 0 { "" }
         else if crate::drivers::iommu::protected(dev) { ", native contexts for guests" }
         else { ", native contexts need the IOMMU (set gpu_iommu on)" });
@@ -743,6 +751,7 @@ pub fn module_gone(dev: PciAddr) {
     crate::audio::display_audio_clear();
     NATIVE.store(false, Ordering::Release);
     CURSOR.store(false, Ordering::Release);
+    PRESENT.store(false, Ordering::Release);
     RINGS.lock().clear();
     WAKER.store(NO_WAKER, Ordering::Release);
     wake_waiters();
@@ -1275,6 +1284,12 @@ pub fn submit_scene(target: u32, payload: Vec<u8>, sources: &[u32]) -> Option<u3
     };
     wake_module();
     Some(seq)
+}
+
+/// Whether the display shows the framebuffer only as the module presents
+/// it: a CPU write of the framebuffer would not show.
+pub fn present_by_module() -> bool {
+    READY.load(Ordering::Acquire) && PRESENT.load(Ordering::Acquire)
 }
 
 /// Whether the module shows the pointer with the hardware cursor.

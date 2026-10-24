@@ -349,6 +349,7 @@ fn draw_char(console: &FbConsole, c: u8, col: u32, row: u32) {
 /// Blit a region of the front buffer to the MMIO framebuffer.
 fn blit_region(console: &FbConsole, y_start: u32, y_end: u32) {
     let info = &console.info;
+    if present(console, 0, y_start, info.width, y_end.saturating_sub(y_start)) { return; }
     let fb = info.addr as *mut u8;
     let front = console.front_ptr();
     let start = (y_start * info.pitch) as usize;
@@ -365,6 +366,7 @@ fn blit_region(console: &FbConsole, y_start: u32, y_end: u32) {
 
 /// Blit entire front buffer to MMIO framebuffer in 256-row chunks.
 fn blit_all(console: &FbConsole) {
+    if present(console, 0, 0, console.info.width, console.info.height) { return; }
     let fb = console.info.addr as *mut u8;
     let front = console.front_ptr();
     let pitch = console.info.pitch as usize;
@@ -390,6 +392,7 @@ fn blit_char(console: &FbConsole, col: u32, row: u32) {
     let y_start = row * FONT_HEIGHT * s;
     let y_end = y_start + FONT_HEIGHT * s;
     let x_start = col * FONT_WIDTH * s;
+    if present(console, x_start, y_start, FONT_WIDTH * s, FONT_HEIGHT * s) { return; }
     let bytes_per_pixel = (info.bpp as u32 + 7) / 8;
     let fb = info.addr as *mut u8;
     let front = console.front_ptr();
@@ -440,10 +443,28 @@ fn scroll(console: &mut FbConsole) {
     blit_all(console);
 }
 
+/// With a driver module presenting the framebuffer
+/// (`gpudev::present_by_module`), a rectangle of the front buffer copied
+/// through it: the display would not show a CPU write. False when there is
+/// no such module, or the copy was not taken.
+fn present(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) -> bool {
+    if !crate::gpu::gpudev::present_by_module() {
+        return false;
+    }
+    let info = &console.info;
+    let src = console.front_gpu();
+    let (w, h) = (w.min(info.width.saturating_sub(x)), h.min(info.height.saturating_sub(y)));
+    if w == 0 || h == 0 {
+        return true;
+    }
+    src != 0 && crate::gpu::gpu_blit_rect(src, info.pitch, crate::gpu::fb_gpu_addr(), info.pitch, x, y, w, h)
+}
+
 /// Blit a rectangular region from front buffer to MMIO framebuffer.
 pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
     let info = &console.info;
     if info.bpp != 32 { return; }
+    if present(console, x, y, w, h) { return; }
     let fb = info.addr as *mut u8;
     let front = console.front_ptr();
     for row in y..(y + h).min(info.height) {
@@ -704,10 +725,11 @@ pub fn clear() {
         core::ptr::write_bytes(console.shadow, 0, console.shadow_size);
         core::ptr::write_bytes(console.shadow_b, 0, console.shadow_size);
     }
-    let fb = console.info.addr as *mut u8;
-    unsafe { core::ptr::write_bytes(fb, 0, console.shadow_size); }
     console.col = 0;
     console.row = 0;
+    if present(console, 0, 0, console.info.width, console.info.height) { return; }
+    let fb = console.info.addr as *mut u8;
+    unsafe { core::ptr::write_bytes(fb, 0, console.shadow_size); }
 }
 
 #[allow(dead_code)]
