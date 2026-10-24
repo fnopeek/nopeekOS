@@ -141,6 +141,52 @@ pub fn generic_reg_wait(adev: &amdgpu_device, addr: u32, shift: u8, mask: u32,
     Line::new().s("REG_WAIT timeout in ").s(func_name).say();
 }
 
+/// `generic_read_indirect_reg` (dc_helper.c): select `index`, read the
+/// data register.
+pub fn generic_read_indirect_reg(adev: &amdgpu_device, addr_index: u32, addr_data: u32, index: u32) -> u32 {
+    dm_write_reg(adev, addr_index, index);
+    dm_read_reg(adev, addr_data)
+}
+
+/// `generic_indirect_reg_get` (dc_helper.c), one field.
+pub fn generic_indirect_reg_get(adev: &amdgpu_device, addr_index: u32, addr_data: u32, index: u32, shift: u8,
+                                mask: u32) -> u32 {
+    let value = generic_read_indirect_reg(adev, addr_index, addr_data, index);
+    get_reg_field_value_ex(value, mask, shift)
+}
+
+/// `struct color_matrices_reg` (dcn10_cm_common.h).
+#[derive(Clone, Copy, Default)]
+pub struct color_matrices_reg {
+    /// `shifts.csc_c11`, `shifts.csc_c12`.
+    pub shift_csc_c11: u8,
+    pub shift_csc_c12: u8,
+    /// `masks.csc_c11`, `masks.csc_c12`.
+    pub mask_csc_c11: u32,
+    pub mask_csc_c12: u32,
+    pub csc_c11_c12: u32,
+    pub csc_c33_c34: u32,
+}
+
+/// `cm_helper_program_color_matrices` (dcn10_cm_common.c): two
+/// coefficients per register, from `csc_c11_c12` to `csc_c33_c34`.
+pub fn cm_helper_program_color_matrices(adev: &amdgpu_device, regval: &[u16], reg: &color_matrices_reg) {
+    let mut i = 0;
+    let mut cur_csc_reg = reg.csc_c11_c12;
+    while cur_csc_reg <= reg.csc_c33_c34 {
+        let regval0 = regval[2 * i];
+        let regval1 = regval[2 * i + 1];
+
+        generic_reg_set_ex(adev, cur_csc_reg, 0, &[
+            (reg.shift_csc_c11, reg.mask_csc_c11, regval0 as u32),
+            (reg.shift_csc_c12, reg.mask_csc_c12, regval1 as u32),
+        ]);
+
+        i += 1;
+        cur_csc_reg += 1;
+    }
+}
+
 /// `REG_READ` (reg_helper.h) on a block's register table: `reg_read!(adev,
 /// regs, REG)` or `reg_read!(adev, regs, REG[i])`.
 macro_rules! reg_read {
@@ -204,4 +250,12 @@ macro_rules! reg_wait {
     }};
 }
 
-pub(crate) use {reg_get, reg_get_n, reg_read, reg_set, reg_update, reg_wait, reg_write};
+/// `IX_REG_GET` (reg_helper.h): one field of an indirect register.
+macro_rules! ix_reg_get {
+    ($adev:expr, $c:expr, $index_reg:ident, $data_reg:ident, $index:expr, $f:ident) => {{
+        let (r, s, m) = $c;
+        $crate::dc_helper::generic_indirect_reg_get($adev, r.$index_reg, r.$data_reg, ($index) as u32, s.$f, m.$f)
+    }};
+}
+
+pub(crate) use {ix_reg_get, reg_get, reg_get_n, reg_read, reg_set, reg_update, reg_wait, reg_write};

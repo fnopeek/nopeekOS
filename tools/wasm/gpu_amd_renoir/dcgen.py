@@ -50,7 +50,7 @@ BLOCKS = {
     ),
     "dpp": dict(
         headers=["dpp/dcn10/dcn10_dpp.h", "dpp/dcn20/dcn20_dpp.h"],
-        prefixes=["TF_", "DPP_", "CM_"],
+        prefixes=["TF_", "TF2_", "DPP_", "CM_"],
         reg_calls=["TF_REG_LIST_DCN20({i})", "TF_REG_LIST_DCN20_COMMON_APPEND({i})"],
         shift_calls=["TF_REG_LIST_SH_MASK_DCN20(__SHIFT)", "TF_DEBUG_REG_LIST_SH_DCN20"],
         mask_calls=["TF_REG_LIST_SH_MASK_DCN20(_MASK)", "TF_DEBUG_REG_LIST_MASK_DCN20"],
@@ -90,7 +90,7 @@ BLOCKS = {
     ),
     "dsc": dict(
         headers=["dsc/dcn20/dcn20_dsc.h"],
-        prefixes=["DSC_"],
+        prefixes=["DSC_", "DSC2_"],
         reg_calls=["DSC_REG_LIST_DCN20({i})"],
         shift_calls=["DSC_REG_LIST_SH_MASK_DCN20(__SHIFT)"],
         mask_calls=["DSC_REG_LIST_SH_MASK_DCN20(_MASK)"],

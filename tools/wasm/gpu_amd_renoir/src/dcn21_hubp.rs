@@ -15,7 +15,11 @@
 #![allow(dead_code)]
 
 use crate::amdgpu_device::amdgpu_device;
-use crate::dc_helper::{reg_read, reg_update, reg_wait};
+use crate::dc_helper::{reg_get, reg_read, reg_set, reg_update, reg_wait, reg_write};
+use crate::dc_hw_types::{dc_plane_address, dc_tiling_info_gfx9, high_part, low_part, plane_size, rect};
+use crate::dc_stream::dc_plane_dcc_param;
+use crate::display_mode_structs::{_vcs_dpi_display_dlg_regs_st, _vcs_dpi_display_pipe_dest_params_st,
+    _vcs_dpi_display_rq_regs_st, _vcs_dpi_display_ttu_regs_st};
 use crate::regs::*;
 use alloc::boxed::Box;
 
@@ -32,21 +36,44 @@ pub enum hubp_funcs {
 /// port has not reached.
 #[derive(Default, Clone, Copy)]
 pub struct hubp_ops {
+    pub hubp_setup: Option<fn(&amdgpu_device, &dcn21_hubp, &_vcs_dpi_display_dlg_regs_st, &_vcs_dpi_display_ttu_regs_st,
+                              &_vcs_dpi_display_rq_regs_st, &_vcs_dpi_display_pipe_dest_params_st)>,
+    pub hubp_setup_interdependent: Option<fn(&amdgpu_device, &dcn21_hubp, &_vcs_dpi_display_dlg_regs_st,
+                                             &_vcs_dpi_display_ttu_regs_st)>,
+    pub hubp_set_vm_system_aperture_settings: Option<fn(&amdgpu_device, &dcn21_hubp, &vm_system_aperture_param)>,
+    pub hubp_program_surface_flip_and_addr: Option<fn(&amdgpu_device, &mut dcn21_hubp, &dc_plane_address, bool) -> bool>,
+    pub hubp_program_surface_config: Option<fn(&amdgpu_device, &dcn21_hubp, u32, &dc_tiling_info_gfx9, &plane_size, u32,
+                                               &dc_plane_dcc_param, bool, u32)>,
+    pub hubp_is_flip_pending: Option<fn(&amdgpu_device, &dcn21_hubp) -> bool>,
     pub set_blank: Option<fn(&amdgpu_device, &mut dcn21_hubp, bool)>,
+    pub mem_program_viewport: Option<fn(&amdgpu_device, &dcn21_hubp, &rect, &rect)>,
+    pub hubp_set_flip_control_surface_gsl: Option<fn(&amdgpu_device, &dcn21_hubp, bool)>,
     pub hubp_reset: Option<fn(&mut dcn21_hubp)>,
     pub hubp_clk_cntl: Option<fn(&amdgpu_device, &dcn21_hubp, bool)>,
-    pub hubp_set_flip_control_surface_gsl: Option<fn(&amdgpu_device, &dcn21_hubp, bool)>,
-    pub hubp_is_flip_pending: Option<fn(&amdgpu_device, &dcn21_hubp) -> bool>,
+    pub hubp_vtg_sel: Option<fn(&amdgpu_device, &dcn21_hubp, u32)>,
+    pub hubp_init: Option<fn(&amdgpu_device, &mut dcn21_hubp)>,
+    pub hubp_set_flip_int: Option<fn(&amdgpu_device, &dcn21_hubp)>,
+    pub hubp_enable_tripleBuffer: Option<fn(&amdgpu_device, &dcn21_hubp, bool)>,
 }
 
 /// `dcn21_hubp_funcs` (dcn21_hubp.c), as far as ported. `hubp_disconnect`
 /// and `hubp_update_mall_sel` are not members of it.
 const DCN21_HUBP_FUNCS: hubp_ops = hubp_ops {
+    hubp_setup: Some(hubp21_setup),
+    hubp_setup_interdependent: Some(hubp2_setup_interdependent),
+    hubp_set_vm_system_aperture_settings: Some(hubp21_set_vm_system_aperture_settings),
+    hubp_program_surface_flip_and_addr: Some(hubp21_program_surface_flip_and_addr),
+    hubp_program_surface_config: Some(hubp1_program_surface_config),
+    hubp_is_flip_pending: Some(hubp1_is_flip_pending),
     set_blank: Some(hubp1_set_blank),
+    mem_program_viewport: Some(hubp21_set_viewport),
+    hubp_set_flip_control_surface_gsl: Some(hubp2_set_flip_control_surface_gsl),
     hubp_reset: Some(hubp_reset),
     hubp_clk_cntl: Some(hubp1_clk_cntl),
-    hubp_set_flip_control_surface_gsl: Some(hubp2_set_flip_control_surface_gsl),
-    hubp_is_flip_pending: Some(hubp1_is_flip_pending),
+    hubp_vtg_sel: Some(hubp1_vtg_sel),
+    hubp_init: Some(hubp21_init),
+    hubp_set_flip_int: Some(hubp1_set_flip_int),
+    hubp_enable_tripleBuffer: Some(hubp2_enable_triplebuffer),
 };
 
 impl hubp_funcs {
@@ -1527,5 +1554,641 @@ pub fn hubp1_is_flip_pending(adev: &amdgpu_device, hubp1: &dcn21_hubp) -> bool {
     }
 
     let earliest_inuse_address = ((high as u64) << 32) | low as u64;
-    earliest_inuse_address != hubp1.base.request_address.grph_addr
+    earliest_inuse_address != hubp1.base.request_address.grph_addr()
+}
+
+/// `struct vm_system_aperture_param` (inc/hw/mem_input.h).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct vm_system_aperture_param {
+    pub sys_default: u64,
+    pub sys_low: u64,
+    pub sys_high: u64,
+}
+
+/// `struct surface_flip_registers` (dcn21_hubp.c).
+#[derive(Clone, Copy, Default)]
+struct surface_flip_registers {
+    DCSURF_SURFACE_CONTROL: u32,
+    DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH: u32,
+    DCSURF_PRIMARY_META_SURFACE_ADDRESS: u32,
+    DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH: u32,
+    DCSURF_PRIMARY_SURFACE_ADDRESS: u32,
+    DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C: u32,
+    DCSURF_PRIMARY_META_SURFACE_ADDRESS_C: u32,
+    DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C: u32,
+    DCSURF_PRIMARY_SURFACE_ADDRESS_C: u32,
+    DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH: u32,
+    DCSURF_SECONDARY_META_SURFACE_ADDRESS: u32,
+    DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH: u32,
+    DCSURF_SECONDARY_SURFACE_ADDRESS: u32,
+    tmz_surface: bool,
+    immediate: bool,
+    vmid: u8,
+    grph_stereo: bool,
+}
+
+/// `hubp21_init` (dcn21_hubp.c): DEDCN21-133, inconsistent row starting
+/// line for flip between DPTE and Meta; a chicken bit enables the ECO fix.
+pub fn hubp21_init(adev: &amdgpu_device, hubp21: &mut dcn21_hubp) {
+    reg_write!(adev, hubp21.rsm().0, HUBPREQ_DEBUG, 1u32 << 26);
+
+    hubp_reset(hubp21);
+}
+
+/// `hubp21_set_vm_system_aperture_settings` (dcn21_hubp.c). The high and
+/// low addresses are bits 48:18 of the 48-bit address.
+pub fn hubp21_set_vm_system_aperture_settings(adev: &amdgpu_device, hubp21: &dcn21_hubp, apt: &vm_system_aperture_param) {
+    let mc_vm_apt_low = apt.sys_low >> 18;
+    let mc_vm_apt_high = apt.sys_high >> 18;
+
+    reg_set!(adev, hubp21.rsm(), DCN_VM_SYSTEM_APERTURE_LOW_ADDR, 0, MC_VM_SYSTEM_APERTURE_LOW_ADDR, mc_vm_apt_low);
+
+    reg_set!(adev, hubp21.rsm(), DCN_VM_SYSTEM_APERTURE_HIGH_ADDR, 0, MC_VM_SYSTEM_APERTURE_HIGH_ADDR, mc_vm_apt_high);
+
+    reg_set!(adev, hubp21.rsm(), DCN_VM_MX_L1_TLB_CNTL, 0, ENABLE_L1_TLB, 1, SYSTEM_ACCESS_MODE, 0x3);
+}
+
+/// `hubp1_vtg_sel` (dcn10_hubp.c).
+pub fn hubp1_vtg_sel(adev: &amdgpu_device, hubp1: &dcn21_hubp, otg_inst: u32) {
+    reg_update!(adev, hubp1.rsm(), DCHUBP_CNTL, HUBP_VTG_SEL, otg_inst);
+}
+
+/// `hubp2_vready_at_or_After_vsync` (dcn20_hubp.c): set
+/// HUBP_VREADY_AT_OR_AFTER_VSYNC when VSTARTUP_START -
+/// (VREADY_OFFSET+VUPDATE_WIDTH+VUPDATE_OFFSET)/htotal <= OTG_V_BLANK_END.
+pub fn hubp2_vready_at_or_After_vsync(adev: &amdgpu_device, hubp2: &dcn21_hubp,
+                                      pipe_dest: &_vcs_dpi_display_pipe_dest_params_st) {
+    let mut value = 0;
+    // disable_dlg_test_mode Set 9th bit to 1 to disable "dv" mode
+    reg_write!(adev, hubp2.rsm().0, HUBPREQ_DEBUG_DB, 1u32 << 8);
+    if pipe_dest.htotal != 0 {
+        value = (pipe_dest.vstartup_start.wrapping_sub(
+            (pipe_dest.vready_offset + pipe_dest.vupdate_width + pipe_dest.vupdate_offset) / pipe_dest.htotal)
+            <= pipe_dest.vblank_end) as u32;
+    }
+
+    reg_update!(adev, hubp2.rsm(), DCHUBP_CNTL, HUBP_VREADY_AT_OR_AFTER_VSYNC, value);
+}
+
+/// `hubp21_program_requestor` (dcn21_hubp.c).
+pub fn hubp21_program_requestor(adev: &amdgpu_device, hubp21: &dcn21_hubp, rq_regs: &_vcs_dpi_display_rq_regs_st) {
+    let c = hubp21.rsm();
+    reg_update!(adev, c, HUBPRET_CONTROL, DET_BUF_PLANE1_BASE_ADDRESS, rq_regs.plane1_base_address);
+    reg_set!(adev, c, DCN_EXPANSION_MODE, 0,
+        DRQ_EXPANSION_MODE, rq_regs.drq_expansion_mode,
+        PRQ_EXPANSION_MODE, rq_regs.prq_expansion_mode,
+        MRQ_EXPANSION_MODE, rq_regs.mrq_expansion_mode,
+        CRQ_EXPANSION_MODE, rq_regs.crq_expansion_mode);
+    reg_set!(adev, c, DCHUBP_REQ_SIZE_CONFIG, 0,
+        CHUNK_SIZE, rq_regs.rq_regs_l.chunk_size,
+        MIN_CHUNK_SIZE, rq_regs.rq_regs_l.min_chunk_size,
+        META_CHUNK_SIZE, rq_regs.rq_regs_l.meta_chunk_size,
+        MIN_META_CHUNK_SIZE, rq_regs.rq_regs_l.min_meta_chunk_size,
+        DPTE_GROUP_SIZE, rq_regs.rq_regs_l.dpte_group_size,
+        VM_GROUP_SIZE, rq_regs.rq_regs_l.mpte_group_size,
+        SWATH_HEIGHT, rq_regs.rq_regs_l.swath_height,
+        PTE_ROW_HEIGHT_LINEAR, rq_regs.rq_regs_l.pte_row_height_linear);
+    reg_set!(adev, c, DCHUBP_REQ_SIZE_CONFIG_C, 0,
+        CHUNK_SIZE_C, rq_regs.rq_regs_c.chunk_size,
+        MIN_CHUNK_SIZE_C, rq_regs.rq_regs_c.min_chunk_size,
+        META_CHUNK_SIZE_C, rq_regs.rq_regs_c.meta_chunk_size,
+        MIN_META_CHUNK_SIZE_C, rq_regs.rq_regs_c.min_meta_chunk_size,
+        DPTE_GROUP_SIZE_C, rq_regs.rq_regs_c.dpte_group_size,
+        SWATH_HEIGHT_C, rq_regs.rq_regs_c.swath_height,
+        PTE_ROW_HEIGHT_LINEAR_C, rq_regs.rq_regs_c.pte_row_height_linear);
+}
+
+/// `hubp2_program_deadline` (dcn20_hubp.c).
+pub fn hubp2_program_deadline(adev: &amdgpu_device, hubp2: &dcn21_hubp, dlg_attr: &_vcs_dpi_display_dlg_regs_st,
+                              ttu_attr: &_vcs_dpi_display_ttu_regs_st) {
+    let c = hubp2.rsm();
+    let regs = c.0;
+
+    // DLG - Per hubp
+    reg_set!(adev, c, BLANK_OFFSET_0, 0,
+        REFCYC_H_BLANK_END, dlg_attr.refcyc_h_blank_end,
+        DLG_V_BLANK_END, dlg_attr.dlg_vblank_end);
+
+    reg_set!(adev, c, BLANK_OFFSET_1, 0, MIN_DST_Y_NEXT_START, dlg_attr.min_dst_y_next_start);
+
+    reg_set!(adev, c, DST_DIMENSIONS, 0, REFCYC_PER_HTOTAL, dlg_attr.refcyc_per_htotal);
+
+    reg_set!(adev, c, DST_AFTER_SCALER, 0,
+        REFCYC_X_AFTER_SCALER, dlg_attr.refcyc_x_after_scaler,
+        DST_Y_AFTER_SCALER, dlg_attr.dst_y_after_scaler);
+
+    reg_set!(adev, c, REF_FREQ_TO_PIX_FREQ, 0, REF_FREQ_TO_PIX_FREQ, dlg_attr.ref_freq_to_pix_freq);
+
+    // DLG - Per luma/chroma
+    reg_set!(adev, c, VBLANK_PARAMETERS_1, 0, REFCYC_PER_PTE_GROUP_VBLANK_L, dlg_attr.refcyc_per_pte_group_vblank_l);
+
+    if regs.NOM_PARAMETERS_0 != 0 {
+        reg_set!(adev, c, NOM_PARAMETERS_0, 0, DST_Y_PER_PTE_ROW_NOM_L, dlg_attr.dst_y_per_pte_row_nom_l);
+    }
+
+    if regs.NOM_PARAMETERS_1 != 0 {
+        reg_set!(adev, c, NOM_PARAMETERS_1, 0, REFCYC_PER_PTE_GROUP_NOM_L, dlg_attr.refcyc_per_pte_group_nom_l);
+    }
+
+    reg_set!(adev, c, NOM_PARAMETERS_4, 0, DST_Y_PER_META_ROW_NOM_L, dlg_attr.dst_y_per_meta_row_nom_l);
+
+    reg_set!(adev, c, NOM_PARAMETERS_5, 0, REFCYC_PER_META_CHUNK_NOM_L, dlg_attr.refcyc_per_meta_chunk_nom_l);
+
+    reg_set!(adev, c, PER_LINE_DELIVERY, 0,
+        REFCYC_PER_LINE_DELIVERY_L, dlg_attr.refcyc_per_line_delivery_l,
+        REFCYC_PER_LINE_DELIVERY_C, dlg_attr.refcyc_per_line_delivery_c);
+
+    reg_set!(adev, c, VBLANK_PARAMETERS_2, 0, REFCYC_PER_PTE_GROUP_VBLANK_C, dlg_attr.refcyc_per_pte_group_vblank_c);
+
+    if regs.NOM_PARAMETERS_2 != 0 {
+        reg_set!(adev, c, NOM_PARAMETERS_2, 0, DST_Y_PER_PTE_ROW_NOM_C, dlg_attr.dst_y_per_pte_row_nom_c);
+    }
+
+    if regs.NOM_PARAMETERS_3 != 0 {
+        reg_set!(adev, c, NOM_PARAMETERS_3, 0, REFCYC_PER_PTE_GROUP_NOM_C, dlg_attr.refcyc_per_pte_group_nom_c);
+    }
+
+    reg_set!(adev, c, NOM_PARAMETERS_6, 0, DST_Y_PER_META_ROW_NOM_C, dlg_attr.dst_y_per_meta_row_nom_c);
+
+    reg_set!(adev, c, NOM_PARAMETERS_7, 0, REFCYC_PER_META_CHUNK_NOM_C, dlg_attr.refcyc_per_meta_chunk_nom_c);
+
+    // TTU - per hubp
+    reg_set!(adev, c, DCN_TTU_QOS_WM, 0,
+        QoS_LEVEL_LOW_WM, ttu_attr.qos_level_low_wm,
+        QoS_LEVEL_HIGH_WM, ttu_attr.qos_level_high_wm);
+
+    // TTU - per luma/chroma. Assumed surf0 is luma and 1 is chroma.
+    reg_set!(adev, c, DCN_SURF0_TTU_CNTL0, 0,
+        REFCYC_PER_REQ_DELIVERY, ttu_attr.refcyc_per_req_delivery_l,
+        QoS_LEVEL_FIXED, ttu_attr.qos_level_fixed_l,
+        QoS_RAMP_DISABLE, ttu_attr.qos_ramp_disable_l);
+
+    reg_set!(adev, c, DCN_SURF1_TTU_CNTL0, 0,
+        REFCYC_PER_REQ_DELIVERY, ttu_attr.refcyc_per_req_delivery_c,
+        QoS_LEVEL_FIXED, ttu_attr.qos_level_fixed_c,
+        QoS_RAMP_DISABLE, ttu_attr.qos_ramp_disable_c);
+
+    reg_set!(adev, c, DCN_CUR0_TTU_CNTL0, 0,
+        REFCYC_PER_REQ_DELIVERY, ttu_attr.refcyc_per_req_delivery_cur0,
+        QoS_LEVEL_FIXED, ttu_attr.qos_level_fixed_cur0,
+        QoS_RAMP_DISABLE, ttu_attr.qos_ramp_disable_cur0);
+
+    reg_set!(adev, c, FLIP_PARAMETERS_1, 0, REFCYC_PER_PTE_GROUP_FLIP_L, dlg_attr.refcyc_per_pte_group_flip_l);
+}
+
+/// `apply_DEDCN21_142_wa_for_hostvm_deadline` (dcn21_hubp.c): the VM group
+/// and request deadlines only ever shrink.
+pub fn apply_DEDCN21_142_wa_for_hostvm_deadline(adev: &amdgpu_device, hubp21: &dcn21_hubp,
+                                                dlg_attr: &_vcs_dpi_display_dlg_regs_st) {
+    let c = hubp21.rsm();
+    let uninitialized_hw_default = 0;
+
+    let refcyc_per_vm_group_vblank = reg_get!(adev, c, VBLANK_PARAMETERS_5, REFCYC_PER_VM_GROUP_VBLANK);
+
+    if refcyc_per_vm_group_vblank == uninitialized_hw_default
+        || refcyc_per_vm_group_vblank > dlg_attr.refcyc_per_vm_group_vblank
+    {
+        reg_set!(adev, c, VBLANK_PARAMETERS_5, 0, REFCYC_PER_VM_GROUP_VBLANK, dlg_attr.refcyc_per_vm_group_vblank);
+    }
+
+    let refcyc_per_vm_req_vblank = reg_get!(adev, c, VBLANK_PARAMETERS_6, REFCYC_PER_VM_REQ_VBLANK);
+
+    if refcyc_per_vm_req_vblank == uninitialized_hw_default
+        || refcyc_per_vm_req_vblank > dlg_attr.refcyc_per_vm_req_vblank
+    {
+        reg_set!(adev, c, VBLANK_PARAMETERS_6, 0, REFCYC_PER_VM_REQ_VBLANK, dlg_attr.refcyc_per_vm_req_vblank);
+    }
+
+    let refcyc_per_vm_group_flip = reg_get!(adev, c, FLIP_PARAMETERS_3, REFCYC_PER_VM_GROUP_FLIP);
+
+    if refcyc_per_vm_group_flip == uninitialized_hw_default
+        || refcyc_per_vm_group_flip > dlg_attr.refcyc_per_vm_group_flip
+    {
+        reg_set!(adev, c, FLIP_PARAMETERS_3, 0, REFCYC_PER_VM_GROUP_FLIP, dlg_attr.refcyc_per_vm_group_flip);
+    }
+
+    let refcyc_per_vm_req_flip = reg_get!(adev, c, FLIP_PARAMETERS_4, REFCYC_PER_VM_REQ_FLIP);
+
+    if refcyc_per_vm_req_flip == uninitialized_hw_default
+        || refcyc_per_vm_req_flip > dlg_attr.refcyc_per_vm_req_flip
+    {
+        reg_set!(adev, c, FLIP_PARAMETERS_4, 0, REFCYC_PER_VM_REQ_FLIP, dlg_attr.refcyc_per_vm_req_flip);
+    }
+
+    reg_set!(adev, c, FLIP_PARAMETERS_5, 0, REFCYC_PER_PTE_GROUP_FLIP_C, dlg_attr.refcyc_per_pte_group_flip_c);
+
+    reg_set!(adev, c, FLIP_PARAMETERS_6, 0, REFCYC_PER_META_CHUNK_FLIP_C, dlg_attr.refcyc_per_meta_chunk_flip_c);
+}
+
+/// `hubp21_program_deadline` (dcn21_hubp.c).
+pub fn hubp21_program_deadline(adev: &amdgpu_device, hubp: &dcn21_hubp, dlg_attr: &_vcs_dpi_display_dlg_regs_st,
+                               ttu_attr: &_vcs_dpi_display_ttu_regs_st) {
+    hubp2_program_deadline(adev, hubp, dlg_attr, ttu_attr);
+
+    apply_DEDCN21_142_wa_for_hostvm_deadline(adev, hubp, dlg_attr);
+}
+
+/// `hubp21_setup` (dcn21_hubp.c). The OTG is locked when this is called and
+/// the registers are double buffered, so the requestors stay enabled.
+pub fn hubp21_setup(adev: &amdgpu_device, hubp: &dcn21_hubp, dlg_attr: &_vcs_dpi_display_dlg_regs_st,
+                    ttu_attr: &_vcs_dpi_display_ttu_regs_st, rq_regs: &_vcs_dpi_display_rq_regs_st,
+                    pipe_dest: &_vcs_dpi_display_pipe_dest_params_st) {
+    hubp2_vready_at_or_After_vsync(adev, hubp, pipe_dest);
+    hubp21_program_requestor(adev, hubp, rq_regs);
+    hubp21_program_deadline(adev, hubp, dlg_attr, ttu_attr);
+}
+
+/// `hubp2_setup_interdependent` (dcn20_hubp.c).
+pub fn hubp2_setup_interdependent(adev: &amdgpu_device, hubp2: &dcn21_hubp, dlg_attr: &_vcs_dpi_display_dlg_regs_st,
+                                  ttu_attr: &_vcs_dpi_display_ttu_regs_st) {
+    let c = hubp2.rsm();
+
+    reg_set!(adev, c, PREFETCH_SETTINGS, 0,
+        DST_Y_PREFETCH, dlg_attr.dst_y_prefetch,
+        VRATIO_PREFETCH, dlg_attr.vratio_prefetch);
+
+    reg_set!(adev, c, PREFETCH_SETTINGS_C, 0, VRATIO_PREFETCH_C, dlg_attr.vratio_prefetch_c);
+
+    reg_set!(adev, c, VBLANK_PARAMETERS_0, 0,
+        DST_Y_PER_VM_VBLANK, dlg_attr.dst_y_per_vm_vblank,
+        DST_Y_PER_ROW_VBLANK, dlg_attr.dst_y_per_row_vblank);
+
+    reg_set!(adev, c, FLIP_PARAMETERS_0, 0,
+        DST_Y_PER_VM_FLIP, dlg_attr.dst_y_per_vm_flip,
+        DST_Y_PER_ROW_FLIP, dlg_attr.dst_y_per_row_flip);
+
+    reg_set!(adev, c, VBLANK_PARAMETERS_3, 0, REFCYC_PER_META_CHUNK_VBLANK_L, dlg_attr.refcyc_per_meta_chunk_vblank_l);
+
+    reg_set!(adev, c, VBLANK_PARAMETERS_4, 0, REFCYC_PER_META_CHUNK_VBLANK_C, dlg_attr.refcyc_per_meta_chunk_vblank_c);
+
+    reg_set!(adev, c, FLIP_PARAMETERS_2, 0, REFCYC_PER_META_CHUNK_FLIP_L, dlg_attr.refcyc_per_meta_chunk_flip_l);
+
+    reg_set!(adev, c, PER_LINE_DELIVERY_PRE, 0,
+        REFCYC_PER_LINE_DELIVERY_PRE_L, dlg_attr.refcyc_per_line_delivery_pre_l,
+        REFCYC_PER_LINE_DELIVERY_PRE_C, dlg_attr.refcyc_per_line_delivery_pre_c);
+
+    reg_set!(adev, c, DCN_SURF0_TTU_CNTL1, 0, REFCYC_PER_REQ_DELIVERY_PRE, ttu_attr.refcyc_per_req_delivery_pre_l);
+    reg_set!(adev, c, DCN_SURF1_TTU_CNTL1, 0, REFCYC_PER_REQ_DELIVERY_PRE, ttu_attr.refcyc_per_req_delivery_pre_c);
+    reg_set!(adev, c, DCN_CUR0_TTU_CNTL1, 0, REFCYC_PER_REQ_DELIVERY_PRE, ttu_attr.refcyc_per_req_delivery_pre_cur0);
+    reg_set!(adev, c, DCN_CUR1_TTU_CNTL1, 0, REFCYC_PER_REQ_DELIVERY_PRE, ttu_attr.refcyc_per_req_delivery_pre_cur1);
+
+    reg_set!(adev, c, DCN_GLOBAL_TTU_CNTL, 0,
+        MIN_TTU_VBLANK, ttu_attr.min_ttu_vblank,
+        QoS_LEVEL_FLIP, ttu_attr.qos_level_flip);
+}
+
+/// `hubp21_set_viewport` (dcn21_hubp.c). The secondary viewport is the
+/// stereo one; DC supports NV12 only for the chroma viewport.
+pub fn hubp21_set_viewport(adev: &amdgpu_device, hubp21: &dcn21_hubp, viewport: &rect, viewport_c: &rect) {
+    let c = hubp21.rsm();
+
+    reg_set!(adev, c, DCSURF_PRI_VIEWPORT_DIMENSION, 0,
+        PRI_VIEWPORT_WIDTH, viewport.width, PRI_VIEWPORT_HEIGHT, viewport.height);
+
+    reg_set!(adev, c, DCSURF_PRI_VIEWPORT_START, 0,
+        PRI_VIEWPORT_X_START, viewport.x, PRI_VIEWPORT_Y_START, viewport.y);
+
+    // for stereo
+    reg_set!(adev, c, DCSURF_SEC_VIEWPORT_DIMENSION, 0,
+        SEC_VIEWPORT_WIDTH, viewport.width, SEC_VIEWPORT_HEIGHT, viewport.height);
+
+    reg_set!(adev, c, DCSURF_SEC_VIEWPORT_START, 0,
+        SEC_VIEWPORT_X_START, viewport.x, SEC_VIEWPORT_Y_START, viewport.y);
+
+    // DC supports NV12 only at the moment
+    reg_set!(adev, c, DCSURF_PRI_VIEWPORT_DIMENSION_C, 0,
+        PRI_VIEWPORT_WIDTH_C, viewport_c.width, PRI_VIEWPORT_HEIGHT_C, viewport_c.height);
+
+    reg_set!(adev, c, DCSURF_PRI_VIEWPORT_START_C, 0,
+        PRI_VIEWPORT_X_START_C, viewport_c.x, PRI_VIEWPORT_Y_START_C, viewport_c.y);
+
+    reg_set!(adev, c, DCSURF_SEC_VIEWPORT_DIMENSION_C, 0,
+        SEC_VIEWPORT_WIDTH_C, viewport_c.width, SEC_VIEWPORT_HEIGHT_C, viewport_c.height);
+
+    reg_set!(adev, c, DCSURF_SEC_VIEWPORT_START_C, 0,
+        SEC_VIEWPORT_X_START_C, viewport_c.x, SEC_VIEWPORT_Y_START_C, viewport_c.y);
+}
+
+/// `hubp1_dcc_control` (dcn10_hubp.c).
+pub fn hubp1_dcc_control(adev: &amdgpu_device, hubp1: &dcn21_hubp, enable: bool, independent_64b_blks: bool) {
+    let dcc_en = enable as u32;
+    let dcc_ind_64b_blk = independent_64b_blks as u32;
+
+    reg_update!(adev, hubp1.rsm(), DCSURF_SURFACE_CONTROL,
+        PRIMARY_SURFACE_DCC_EN, dcc_en,
+        PRIMARY_SURFACE_DCC_IND_64B_BLK, dcc_ind_64b_blk,
+        SECONDARY_SURFACE_DCC_EN, dcc_en,
+        SECONDARY_SURFACE_DCC_IND_64B_BLK, dcc_ind_64b_blk);
+}
+
+/// `log_2` (basics/conversion.h): the kernel's run-time `ilog2`,
+/// `fls(n) - 1`, which is -1 for 0.
+fn log_2(num: u32) -> u32 {
+    (32 - num.leading_zeros()).wrapping_sub(1)
+}
+
+/// `hubp1_program_tiling` (dcn10_hubp.c).
+pub fn hubp1_program_tiling(adev: &amdgpu_device, hubp1: &dcn21_hubp, info: &dc_tiling_info_gfx9, _pixel_format: u32) {
+    reg_update!(adev, hubp1.rsm(), DCSURF_ADDR_CONFIG,
+        NUM_PIPES, log_2(info.num_pipes),
+        NUM_BANKS, log_2(info.num_banks),
+        PIPE_INTERLEAVE, info.pipe_interleave,
+        NUM_SE, log_2(info.num_shader_engines),
+        NUM_RB_PER_SE, log_2(info.num_rb_per_se),
+        MAX_COMPRESSED_FRAGS, log_2(info.max_compressed_frags));
+
+    reg_update!(adev, hubp1.rsm(), DCSURF_TILING_CONFIG,
+        SW_MODE, info.swizzle,
+        META_LINEAR, info.meta_linear as u32,
+        RB_ALIGNED, info.rb_aligned as u32,
+        PIPE_ALIGNED, info.pipe_aligned as u32);
+}
+
+/// `hubp1_program_size` (dcn10_hubp.c): the data and meta surface pitch
+/// (calculation from addrlib), for 444 or the 420 luma.
+pub fn hubp1_program_size(adev: &amdgpu_device, hubp1: &dcn21_hubp, format: u32, plane_size: &plane_size,
+                          dcc: &dc_plane_dcc_param) {
+    let pitch;
+    let mut meta_pitch;
+    let pitch_c;
+    let mut meta_pitch_c;
+
+    if (SURFACE_PIXEL_FORMAT_VIDEO_BEGIN..SURFACE_PIXEL_FORMAT_SUBSAMPLE_END).contains(&format) {
+        // Chroma pitch zero can cause system hang!
+        pitch = plane_size.surface_pitch - 1;
+        meta_pitch = dcc.meta_pitch - 1;
+        pitch_c = plane_size.chroma_pitch - 1;
+        meta_pitch_c = dcc.meta_pitch_c - 1;
+    } else {
+        pitch = plane_size.surface_pitch - 1;
+        meta_pitch = dcc.meta_pitch - 1;
+        pitch_c = 0;
+        meta_pitch_c = 0;
+    }
+
+    if !dcc.enable {
+        meta_pitch = 0;
+        meta_pitch_c = 0;
+    }
+
+    reg_update!(adev, hubp1.rsm(), DCSURF_SURFACE_PITCH, PITCH, pitch, META_PITCH, meta_pitch);
+
+    if format >= SURFACE_PIXEL_FORMAT_VIDEO_BEGIN {
+        reg_update!(adev, hubp1.rsm(), DCSURF_SURFACE_PITCH_C, PITCH_C, pitch_c, META_PITCH_C, meta_pitch_c);
+    }
+}
+
+/// `hubp1_program_rotation` (dcn10_hubp.c).
+pub fn hubp1_program_rotation(adev: &amdgpu_device, hubp1: &dcn21_hubp, rotation: u32, horizontal_mirror: bool) {
+    let mirror = horizontal_mirror as u32;
+
+    // Program rotation angle and horz mirror - no mirror
+    let angle = match rotation {
+        ROTATION_ANGLE_0 => 0,
+        ROTATION_ANGLE_90 => 1,
+        ROTATION_ANGLE_180 => 2,
+        ROTATION_ANGLE_270 => 3,
+        _ => return,
+    };
+    reg_update!(adev, hubp1.rsm(), DCSURF_SURFACE_CONFIG, ROTATION_ANGLE, angle, H_MIRROR_EN, mirror);
+}
+
+/// `hubp1_program_pixel_format` (dcn10_hubp.c). The mapping is the one of
+/// the IPP (CNVC) programming.
+pub fn hubp1_program_pixel_format(adev: &amdgpu_device, hubp1: &dcn21_hubp, format: u32) {
+    let c = hubp1.rsm();
+    let mut red_bar = 3;
+    let mut blue_bar = 2;
+
+    // swap for ABGR format
+    if format == SURFACE_PIXEL_FORMAT_GRPH_ABGR8888
+        || format == SURFACE_PIXEL_FORMAT_GRPH_ABGR2101010
+        || format == SURFACE_PIXEL_FORMAT_GRPH_ABGR2101010_XR_BIAS
+        || format == SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616
+        || format == SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616F
+    {
+        red_bar = 2;
+        blue_bar = 3;
+    }
+
+    reg_update!(adev, c, HUBPRET_CONTROL, CROSSBAR_SRC_CB_B, blue_bar, CROSSBAR_SRC_CR_R, red_bar);
+
+    match format {
+        SURFACE_PIXEL_FORMAT_GRPH_ARGB1555 => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 1);
+        }
+        SURFACE_PIXEL_FORMAT_GRPH_RGB565 => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 3);
+        }
+        SURFACE_PIXEL_FORMAT_GRPH_ARGB8888 | SURFACE_PIXEL_FORMAT_GRPH_ABGR8888 => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 8);
+        }
+        SURFACE_PIXEL_FORMAT_GRPH_ARGB2101010 | SURFACE_PIXEL_FORMAT_GRPH_ABGR2101010
+        | SURFACE_PIXEL_FORMAT_GRPH_ABGR2101010_XR_BIAS => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 10);
+        }
+        // we use crossbar already
+        SURFACE_PIXEL_FORMAT_GRPH_ARGB16161616 | SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616 => {
+            // ARGB16161616_UNORM
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 26);
+        }
+        // we use crossbar already
+        SURFACE_PIXEL_FORMAT_GRPH_ARGB16161616F | SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616F => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 24);
+        }
+        SURFACE_PIXEL_FORMAT_VIDEO_420_YCbCr => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 65);
+        }
+        SURFACE_PIXEL_FORMAT_VIDEO_420_YCrCb => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 64);
+        }
+        SURFACE_PIXEL_FORMAT_VIDEO_420_10bpc_YCbCr => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 67);
+        }
+        SURFACE_PIXEL_FORMAT_VIDEO_420_10bpc_YCrCb => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 66);
+        }
+        SURFACE_PIXEL_FORMAT_VIDEO_AYCrCb8888 => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 12);
+        }
+        SURFACE_PIXEL_FORMAT_GRPH_RGB111110_FIX => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 112);
+        }
+        SURFACE_PIXEL_FORMAT_GRPH_BGR101111_FIX => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 113);
+        }
+        SURFACE_PIXEL_FORMAT_VIDEO_ACrYCb2101010 => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 114);
+        }
+        SURFACE_PIXEL_FORMAT_GRPH_RGB111110_FLOAT => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 118);
+        }
+        SURFACE_PIXEL_FORMAT_GRPH_BGR101111_FLOAT => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 119);
+        }
+        // ALPHA_PLANE_EN is not in DCN 2.1's field list: its mask is 0, so
+        // Linux' second field of these two updates writes nothing.
+        SURFACE_PIXEL_FORMAT_GRPH_RGBE | SURFACE_PIXEL_FORMAT_GRPH_RGBE_ALPHA => {
+            reg_update!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT, 116);
+        }
+        _ => {}
+    }
+
+    // don't see the need of program the xbar in DCN 1.0
+}
+
+/// `hubp1_program_surface_config` (dcn10_hubp.c).
+pub fn hubp1_program_surface_config(adev: &amdgpu_device, hubp: &dcn21_hubp, format: u32, tiling_info: &dc_tiling_info_gfx9,
+                                    plane_size: &plane_size, rotation: u32, dcc: &dc_plane_dcc_param,
+                                    horizontal_mirror: bool, _compat_level: u32) {
+    hubp1_dcc_control(adev, hubp, dcc.enable, dcc.independent_64b_blks);
+    hubp1_program_tiling(adev, hubp, tiling_info, format);
+    hubp1_program_size(adev, hubp, format, plane_size, dcc);
+    hubp1_program_rotation(adev, hubp, rotation, horizontal_mirror);
+    hubp1_program_pixel_format(adev, hubp, format);
+}
+
+/// `program_surface_flip_and_addr` (dcn21_hubp.c).
+fn program_surface_flip_and_addr(adev: &amdgpu_device, hubp21: &dcn21_hubp, flip_regs: &surface_flip_registers) {
+    let c = hubp21.rsm();
+
+    reg_update!(adev, c, DCSURF_FLIP_CONTROL,
+        SURFACE_FLIP_TYPE, flip_regs.immediate as u32,
+        SURFACE_FLIP_MODE_FOR_STEREOSYNC, flip_regs.grph_stereo as u32,
+        SURFACE_FLIP_IN_STEREOSYNC, flip_regs.grph_stereo as u32);
+
+    reg_update!(adev, c, VMID_SETTINGS_0, VMID, flip_regs.vmid);
+
+    let tmz = flip_regs.tmz_surface as u32;
+    reg_update!(adev, c, DCSURF_SURFACE_CONTROL,
+        PRIMARY_SURFACE_TMZ, tmz,
+        PRIMARY_SURFACE_TMZ_C, tmz,
+        PRIMARY_META_SURFACE_TMZ, tmz,
+        PRIMARY_META_SURFACE_TMZ_C, tmz,
+        SECONDARY_SURFACE_TMZ, tmz,
+        SECONDARY_SURFACE_TMZ_C, tmz,
+        SECONDARY_META_SURFACE_TMZ, tmz,
+        SECONDARY_META_SURFACE_TMZ_C, tmz);
+
+    reg_set!(adev, c, DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C, 0,
+        PRIMARY_META_SURFACE_ADDRESS_HIGH_C, flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C);
+
+    reg_set!(adev, c, DCSURF_PRIMARY_META_SURFACE_ADDRESS_C, 0,
+        PRIMARY_META_SURFACE_ADDRESS_C, flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS_C);
+
+    reg_set!(adev, c, DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH, 0,
+        PRIMARY_META_SURFACE_ADDRESS_HIGH, flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH);
+
+    reg_set!(adev, c, DCSURF_PRIMARY_META_SURFACE_ADDRESS, 0,
+        PRIMARY_META_SURFACE_ADDRESS, flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS);
+
+    reg_set!(adev, c, DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH, 0,
+        SECONDARY_META_SURFACE_ADDRESS_HIGH, flip_regs.DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH);
+
+    reg_set!(adev, c, DCSURF_SECONDARY_META_SURFACE_ADDRESS, 0,
+        SECONDARY_META_SURFACE_ADDRESS, flip_regs.DCSURF_SECONDARY_META_SURFACE_ADDRESS);
+
+    reg_set!(adev, c, DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH, 0,
+        SECONDARY_SURFACE_ADDRESS_HIGH, flip_regs.DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH);
+
+    reg_set!(adev, c, DCSURF_SECONDARY_SURFACE_ADDRESS, 0,
+        SECONDARY_SURFACE_ADDRESS, flip_regs.DCSURF_SECONDARY_SURFACE_ADDRESS);
+
+    reg_set!(adev, c, DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C, 0,
+        PRIMARY_SURFACE_ADDRESS_HIGH_C, flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C);
+
+    reg_set!(adev, c, DCSURF_PRIMARY_SURFACE_ADDRESS_C, 0,
+        PRIMARY_SURFACE_ADDRESS_C, flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS_C);
+
+    reg_set!(adev, c, DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, 0,
+        PRIMARY_SURFACE_ADDRESS_HIGH, flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH);
+
+    reg_set!(adev, c, DCSURF_PRIMARY_SURFACE_ADDRESS, 0,
+        PRIMARY_SURFACE_ADDRESS, flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS);
+}
+
+/// `hubp21_program_surface_flip_and_addr` (dcn21_hubp.c). DCN 2.1 leaves
+/// `enable_dmcub_surface_flip` off, so the PLAT_54186 workaround for video
+/// through the DMCUB is not taken.
+pub fn hubp21_program_surface_flip_and_addr(adev: &amdgpu_device, hubp: &mut dcn21_hubp, address: &dc_plane_address,
+                                            flip_immediate: bool) -> bool {
+    let mut flip_regs = surface_flip_registers { vmid: address.vmid as u8, ..Default::default() };
+
+    match address.r#type {
+        PLN_ADDR_TYPE_GRAPHICS => {
+            if address.grph_addr() != 0 {
+                if address.grph_meta_addr() != 0 {
+                    flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS = low_part(address.grph_meta_addr());
+                    flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH = high_part(address.grph_meta_addr());
+                }
+
+                flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS = low_part(address.grph_addr());
+                flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH = high_part(address.grph_addr());
+            }
+        }
+        PLN_ADDR_TYPE_VIDEO_PROGRESSIVE => {
+            if address.luma_addr() != 0 && address.chroma_addr() != 0 {
+                if address.luma_meta_addr() != 0 {
+                    flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS = low_part(address.luma_meta_addr());
+                    flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH = high_part(address.luma_meta_addr());
+
+                    flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS_C = low_part(address.chroma_meta_addr());
+                    flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH_C = high_part(address.chroma_meta_addr());
+                }
+
+                flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS = low_part(address.luma_addr());
+                flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH = high_part(address.luma_addr());
+
+                flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS_C = low_part(address.chroma_addr());
+
+                flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH_C = high_part(address.chroma_addr());
+            }
+        }
+        PLN_ADDR_TYPE_GRPH_STEREO => {
+            if address.left_addr() != 0 && address.right_addr() != 0 {
+                flip_regs.grph_stereo = true;
+
+                if address.right_meta_addr() != 0 {
+                    flip_regs.DCSURF_SECONDARY_META_SURFACE_ADDRESS = low_part(address.right_meta_addr());
+                    flip_regs.DCSURF_SECONDARY_META_SURFACE_ADDRESS_HIGH = high_part(address.right_meta_addr());
+                }
+
+                if address.left_meta_addr() != 0 {
+                    flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS = low_part(address.left_meta_addr());
+                    flip_regs.DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH = high_part(address.left_meta_addr());
+                }
+
+                flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS = low_part(address.left_addr());
+                flip_regs.DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH = high_part(address.left_addr());
+
+                flip_regs.DCSURF_SECONDARY_SURFACE_ADDRESS = low_part(address.right_addr());
+                flip_regs.DCSURF_SECONDARY_SURFACE_ADDRESS_HIGH = high_part(address.right_addr());
+            }
+        }
+        _ => {}
+    }
+
+    flip_regs.tmz_surface = address.tmz_surface;
+    flip_regs.immediate = flip_immediate;
+
+    program_surface_flip_and_addr(adev, hubp, &flip_regs);
+
+    hubp.base.request_address = *address;
+
+    true
+}
+
+/// `hubp1_set_flip_int` (dcn10_hubp.c).
+pub fn hubp1_set_flip_int(adev: &amdgpu_device, hubp1: &dcn21_hubp) {
+    reg_update!(adev, hubp1.rsm(), DCSURF_SURFACE_FLIP_INTERRUPT, SURFACE_FLIP_INT_MASK, 1);
+}
+
+/// `hubp2_enable_triplebuffer` (dcn20_hubp.c).
+pub fn hubp2_enable_triplebuffer(adev: &amdgpu_device, hubp2: &dcn21_hubp, enable: bool) {
+    let triple_buffer_en = reg_get!(adev, hubp2.rsm(), DCSURF_FLIP_CONTROL2, SURFACE_TRIPLE_BUFFER_ENABLE);
+    let tri_buffer_en = triple_buffer_en == 1;
+    if tri_buffer_en != enable {
+        reg_update!(adev, hubp2.rsm(), DCSURF_FLIP_CONTROL2, SURFACE_TRIPLE_BUFFER_ENABLE,
+            if enable { DC_TRIPLEBUFFER_ENABLE } else { DC_TRIPLEBUFFER_DISABLE });
+    }
 }

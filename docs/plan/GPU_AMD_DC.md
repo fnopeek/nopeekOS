@@ -237,12 +237,37 @@ host-prüfbare Meilenstein ist der Graph, nicht der Einzelblock.
   ebenso, jeweils `full` und `scaled`, Byte-gleich. Die DMUB-Befehle werden
   als Präfix der Linux-Folge verglichen (der Rest gehört zu
   `dc_update_planes_and_stream`).
+- **E4 `dc_update_planes_and_stream`** (2026-10-24): die Plane kommt auf
+  die Pipe, ruhend. `update_planes_and_stream_v2` mit Update-Typ-Bestimmung
+  (`det_surface_update`, Plane-Info/Skalierung), neuem Kontext (Planes ab/an,
+  `dcn21_validate_bandwidth`), `commit_planes_for_stream` (alle Pipes
+  gesperrt, `dcn20_pipe_control_lock`, Front End, Unlock, Post-Unlock,
+  Manual Trigger, Stream-Maske), `dcn20_program_pipe`: Plane-Enable
+  (Power-Gating, HUBP-Init, Systemapertur), HUBP (VTG, Requestor, DLG/TTU,
+  DEDCN21-142, Viewport, Surface-Config, Flip-Adresse), DPP (CNVC +
+  Eingangs-CSC, Skalierer mit Line Buffer, Ratios/Inits und 64-Phasen-Filtern
+  aus Linux' Tabellen, Gamut-Remap, Degamma-ROM, HDR-Multiplikator), MPCC
+  (Einfügen/Entfernen, Blending, Hintergrund), Ausgangs-CSC, OGAM-Bypass,
+  FMT, ABM `set_pipe`/`set_level` über den DMCUB. Neue Dateien
+  `dcn10_dpp_dscl.rs`, `dcn20_dpp_cm.rs`, `dce_scl_filters.rs`,
+  `conversion.rs`.
+- **Orakel:** `check.sh` vergleicht `commit` jetzt bis zum Ende von
+  `dc_update_planes_and_stream`, mit ALLEN DMUB-Befehlen — `boot` +350
+  Zeilen (31 DMUB-Befehle), `lit` ebenso, `full` und `scaled`, Byte-gleich.
+  Zwei Werkzeugfehler dabei behoben: `dcgen.py` ließ die `TF2_SF`/`DSC2_SF`-
+  Felder weg (`LB_DATA_FORMAT__ALPHA_EN`, `FORMAT_CONTROL__ALPHA_EN`, zwei
+  DSC-Felder), `gen_regs.py` verlor Tabellen, deren Getter GCC mit einer
+  gleichen Funktion zusammenfaltete (`-fno-ipa-icf`). Und der Orakel-Shim
+  hatte `ilog2(0)` undefiniert statt `fls(0) - 1 = -1` wie der Kernel.
 - **Benannt, nicht portiert:** MST, DSC, HDMI/DVI/LVDS-Attribute und
   -Info-Frames, Audio-Ausgang, LTTPR im nicht-transparenten Modus, DPIA,
-  Fallback auf niedrigere Link-Settings, `dcn20_program_pipe` (mit Planes →
-  E4), Plane-Vergleich in `dcn20_detect_pipe_changes`, `pipe_control_lock`.
-- **Nächster Schritt E4:** `dc_update_planes_and_stream` →
-  `dcn20_program_pipe` (hubp/dpp/mpc), dann der Geräte-Meilenstein.
+  Fallback auf niedrigere Link-Settings; Fast-/Medium-Update auf dem
+  aktuellen Zustand (der Flip-Pfad), `commit_planes_do_stream_update`,
+  Farbmanagement mit Kurven (Degamma-/Shaper-/3D-LUT-/Blend-/OGAM-RAM),
+  Cursor, GSL-Gruppen (Immediate Flip), Testmuster.
+- **Nächster Schritt:** Geräte-Meilenstein — die Kette live hinter
+  `gpu_amd_renoir.dc` (DM: Stream aus der EDID, Plane auf einem
+  VRAM-Framebuffer), dann E5 der Flip-Pfad (Fast-Update) mit Vblank.
 
 ## Risiken / offen
 

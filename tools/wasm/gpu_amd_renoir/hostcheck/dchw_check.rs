@@ -539,7 +539,7 @@ fn main() {
             pl.visible = true;
             pl.color_space = COLOR_SPACE_SRGB;
             pl.address.r#type = PLN_ADDR_TYPE_GRAPHICS;
-            pl.address.grph_addr = 0xf4_0000_0000 + 0x100_0000;
+            pl.address.u[0] = 0xf4_0000_0000 + 0x100_0000;
             pl.global_alpha_value = 0xff;
             pl.in_transfer_func.r#type = TF_TYPE_PREDEFINED;
             pl.in_transfer_func.tf = TRANSFER_FUNCTION_SRGB;
@@ -563,6 +563,9 @@ fn main() {
                 power_source: dc_state::dc_power_source_type::DC_POWER_SOURCE_AC,
             };
             println!("dc_commit_streams {}", dc::dc_commit_streams(&adev, &mut dc, &params) as i32);
+            let mut srf = [dc::dc_surface_update { surface: plane, ..Default::default() }];
+            println!("dc_update_planes_and_stream {}",
+                dc::dc_update_planes_and_stream(&adev, &mut dc, &mut srf, stream, None) as i32);
         }
     }
     npk_sys::fake_card_echo(false);

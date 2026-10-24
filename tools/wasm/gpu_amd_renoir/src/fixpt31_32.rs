@@ -214,3 +214,69 @@ pub fn dc_fixpt_u2d19(arg: fixed31_32) -> u32 {
 pub fn dc_fixpt_u0d19(arg: fixed31_32) -> u32 {
     ux_dy(arg.value, 0, 19)
 }
+
+/// `dc_fixpt_u3d19`.
+pub fn dc_fixpt_u3d19(arg: fixed31_32) -> u32 {
+    ux_dy(arg.value, 3, 19)
+}
+
+/// `dc_fixpt_neg`.
+pub fn dc_fixpt_neg(arg: fixed31_32) -> fixed31_32 {
+    fixed31_32 { value: -arg.value }
+}
+
+/// `dc_fixpt_abs`.
+pub fn dc_fixpt_abs(arg: fixed31_32) -> fixed31_32 {
+    if arg.value < 0 { dc_fixpt_neg(arg) } else { arg }
+}
+
+/// `dc_fixpt_lt`.
+pub fn dc_fixpt_lt(arg1: fixed31_32, arg2: fixed31_32) -> bool {
+    arg1.value < arg2.value
+}
+
+/// `dc_fixpt_le`.
+pub fn dc_fixpt_le(arg1: fixed31_32, arg2: fixed31_32) -> bool {
+    arg1.value <= arg2.value
+}
+
+/// `dc_fixpt_eq`.
+pub fn dc_fixpt_eq(arg1: fixed31_32, arg2: fixed31_32) -> bool {
+    arg1.value == arg2.value
+}
+
+/// `dc_fixpt_clamp`.
+pub fn dc_fixpt_clamp(arg: fixed31_32, min_value: fixed31_32, max_value: fixed31_32) -> fixed31_32 {
+    if dc_fixpt_le(arg, min_value) {
+        min_value
+    } else if dc_fixpt_le(max_value, arg) {
+        max_value
+    } else {
+        arg
+    }
+}
+
+/// `dc_fixpt_shl`.
+pub fn dc_fixpt_shl(mut arg: fixed31_32, shift: u8) -> fixed31_32 {
+    arg.value <<= shift;
+    arg
+}
+
+/// `dc_fixpt_shr`.
+pub fn dc_fixpt_shr(mut arg: fixed31_32, shift: u8) -> fixed31_32 {
+    let negative = arg.value < 0;
+
+    if negative {
+        arg.value = -arg.value;
+    }
+    arg.value >>= shift;
+    if negative {
+        arg.value = -arg.value;
+    }
+    arg
+}
+
+/// `dc_fixpt_recip`.
+pub fn dc_fixpt_recip(arg: fixed31_32) -> fixed31_32 {
+    dc_fixpt_from_fraction(dc_fixpt_one.value, arg.value)
+}

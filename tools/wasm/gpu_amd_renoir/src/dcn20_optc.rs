@@ -48,6 +48,8 @@ pub struct timing_generator_ops {
     pub get_otg_active_size: Option<fn(&amdgpu_device, &optc, &mut u32, &mut u32) -> bool>,
     pub lock: Option<fn(&amdgpu_device, &optc)>,
     pub unlock: Option<fn(&amdgpu_device, &optc)>,
+    pub wait_for_state: Option<fn(&amdgpu_device, &optc, u32)>,
+    pub program_manual_trigger: Option<fn(&amdgpu_device, &optc)>,
     pub tg_init: Option<fn(&amdgpu_device, &optc)>,
     pub is_tg_enabled: Option<fn(&amdgpu_device, &optc) -> bool>,
     pub get_dsc_status: Option<fn(&amdgpu_device, &optc, &mut u32)>,
@@ -78,6 +80,8 @@ const DCN20_TG_FUNCS: timing_generator_ops = timing_generator_ops {
     get_otg_active_size: Some(optc1_get_otg_active_size),
     lock: Some(optc1_lock),
     unlock: Some(optc1_unlock),
+    wait_for_state: Some(optc1_wait_for_state),
+    program_manual_trigger: Some(optc2_program_manual_trigger),
     tg_init: Some(optc1_tg_init),
     is_tg_enabled: Some(optc1_is_tg_enabled),
     get_dsc_status: Some(optc2_get_dsc_status),
@@ -232,6 +236,24 @@ pub fn optc1_lock(adev: &amdgpu_device, optc1: &optc) {
 /// `optc1_unlock` (dcn10_optc.c).
 pub fn optc1_unlock(adev: &amdgpu_device, optc1: &optc) {
     reg_set!(adev, optc1.rsm(), OTG_MASTER_UPDATE_LOCK, 0, OTG_MASTER_UPDATE_LOCK, 0);
+}
+
+/// `optc1_wait_for_state` (dcn10_optc.c): one vupdate at 10 Hz at most.
+pub fn optc1_wait_for_state(adev: &amdgpu_device, optc1: &optc, state: u32) {
+    match state {
+        CRTC_STATE_VBLANK => {
+            reg_wait!(adev, optc1.rsm(), OTG_STATUS, OTG_V_BLANK, 1, 1, 100000, "optc1_wait_for_state");
+        }
+        CRTC_STATE_VACTIVE => {
+            reg_wait!(adev, optc1.rsm(), OTG_STATUS, OTG_V_ACTIVE_DISP, 1, 1, 100000, "optc1_wait_for_state");
+        }
+        _ => {}
+    }
+}
+
+/// `optc2_program_manual_trigger` (dcn20_optc.c).
+pub fn optc2_program_manual_trigger(adev: &amdgpu_device, optc1: &optc) {
+    reg_set!(adev, optc1.rsm(), OTG_TRIGA_MANUAL_TRIG, 0, OTG_TRIGA_MANUAL_TRIG, 1);
 }
 
 /// `optc2_get_dsc_status` (dcn20_optc.c).

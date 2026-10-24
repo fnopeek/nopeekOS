@@ -185,8 +185,16 @@ mod dce_hwseq;
 mod dce_clock_source;
 #[path = "../src/dce_i2c_hw.rs"]
 mod dce_i2c_hw;
+#[path = "../src/conversion.rs"]
+mod conversion;
+#[path = "../src/dce_scl_filters.rs"]
+mod dce_scl_filters;
+#[path = "../src/dcn10_dpp_dscl.rs"]
+mod dcn10_dpp_dscl;
 #[path = "../src/dcn10_ipp.rs"]
 mod dcn10_ipp;
+#[path = "../src/dcn20_dpp_cm.rs"]
+mod dcn20_dpp_cm;
 #[path = "../src/dcn20_dpp.rs"]
 mod dcn20_dpp;
 #[path = "../src/dcn20_dsc.rs"]

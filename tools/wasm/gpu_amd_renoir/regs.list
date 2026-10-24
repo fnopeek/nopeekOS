@@ -12490,3 +12490,159 @@ TIMING_3D_FORMAT_DP_HDMI_INBAND_FA @ ../display/dc/core/dc.c
 TIMING_3D_FORMAT_SIDEBAND_FA @ ../display/dc/core/dc.c
 VIEW_3D_FORMAT_FRAME_SEQUENTIAL @ ../display/dc/core/dc.c
 DPCD_SOURCE_SEQ_AFTER_DISABLE_LINK_PHY @ ../display/dc/link/link_dpms.c
+# Plane update: surfaces, front end, colour (dc.c, dcn20_hwseq.c, hubp/dpp/mpc dcn10/20/21, dmub_abm_lcd.c)
+UPDATE_TYPE_FAST @ ../display/dc/core/dc.c
+UPDATE_TYPE_MED @ ../display/dc/core/dc.c
+UPDATE_TYPE_FULL @ ../display/dc/core/dc.c
+MPC_SPLIT_AVOID @ ../display/dc/core/dc.c
+MPC_SPLIT_DYNAMIC @ ../display/dc/core/dc.c
+DMUB_CMD__UPDATE_DIRTY_RECT @ ../display/dc/core/dc.c
+DMUB_CMD_PSR_CONTROL_VERSION_1 @ ../display/dc/core/dc.c
+VISUAL_CONFIRM_SUBVP @ ../display/dc/core/dc.c
+VISUAL_CONFIRM_MCLK_SWITCH @ ../display/dc/core/dc.c
+VISUAL_CONFIRM_EXPLICIT @ ../display/dc/core/dc.c
+VISUAL_CONFIRM_HDR @ ../display/dc/core/dc.c
+VISUAL_CONFIRM_SURFACE @ ../display/dc/core/dc.c
+VISUAL_CONFIRM_SWIZZLE @ ../display/dc/core/dc.c
+VISUAL_CONFIRM_HW_CURSOR @ ../display/dc/core/dc.c
+VISUAL_CONFIRM_DCC @ ../display/dc/core/dc.c
+VISUAL_CONFIRM_MPCTREE @ ../display/dc/core/dc.c
+VISUAL_CONFIRM_FAMS2 @ ../display/dc/core/dc.c
+VISUAL_CONFIRM_VABC @ ../display/dc/core/dc.c
+MAX_TTU @ ../display/dc/core/dc.c
+DC_PLANE_UPDATE_TIMES_MAX @ ../display/dc/core/dc.c
+DC_CM2_TRANSFER_FUNC_SOURCE_VIDMEM @ ../display/dc/core/dc.c
+DC_CM2_SHAPER_3DLUT_SETTING_ENABLE_SHAPER @ ../display/dc/core/dc.c
+CRTC_STATE_VACTIVE @ ../display/dc/core/dc.c
+CRTC_STATE_VBLANK @ ../display/dc/core/dc.c
+SURFACE_PIXEL_FORMAT_GRPH_BEGIN @ ../display/dc/core/dc.c
+MAX_PHANTOM_PIPES @ ../display/dc/core/dc.c
+P_STATE_UNKNOWN @ ../display/dc/core/dc_hw_sequencer.c
+P_STATE_V_BLANK @ ../display/dc/core/dc_hw_sequencer.c
+P_STATE_FPO @ ../display/dc/core/dc_hw_sequencer.c
+P_STATE_V_ACTIVE @ ../display/dc/core/dc_hw_sequencer.c
+P_STATE_SUB_VP @ ../display/dc/core/dc_hw_sequencer.c
+P_STATE_DRR_SUB_VP @ ../display/dc/core/dc_hw_sequencer.c
+P_STATE_V_BLANK_SUB_VP @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_RGB_TYPE @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_RGB_LIMITED_TYPE @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR601_TYPE @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR709_TYPE @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR601_LIMITED_TYPE @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR709_LIMITED_TYPE @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR2020_LIMITED_TYPE @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR2020_FULL_TYPE @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_YCBCR709_BLACK_TYPE @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_XR_RGB @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_MSREF_SCRGB @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_2020_RGB_FULLRANGE @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_ADOBERGB @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_DCIP3 @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_DOLBYVISION @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_2020_RGB_LIMITEDRANGE @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_XV_YCC_601 @ ../display/dc/core/dc_hw_sequencer.c
+COLOR_SPACE_XV_YCC_709 @ ../display/dc/core/dc_hw_sequencer.c
+DSCL_MODE_SCALING_444_BYPASS @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+DSCL_MODE_SCALING_444_RGB_ENABLE @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+DSCL_MODE_SCALING_444_YCBCR_ENABLE @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+DSCL_MODE_SCALING_420_YCBCR_ENABLE @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+DSCL_MODE_SCALING_420_LUMA_BYPASS @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+DSCL_MODE_SCALING_420_CHROMA_BYPASS @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+DSCL_MODE_DSCL_BYPASS @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+LB_MEMORY_CONFIG_0 @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+LB_MEMORY_CONFIG_1 @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+LB_MEMORY_CONFIG_2 @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+LB_MEMORY_CONFIG_3 @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+SCL_COEF_LUMA_VERT_FILTER @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+SCL_COEF_LUMA_HORZ_FILTER @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+SCL_COEF_CHROMA_VERT_FILTER @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+SCL_COEF_CHROMA_HORZ_FILTER @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+NUM_PHASES @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+AUTOCAL_MODE_OFF @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+BLACK_OFFSET_RGB_Y @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+BLACK_OFFSET_CBCR @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+PIXEL_FORMAT_VIDEO_BEGIN @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+PIXEL_FORMAT_VIDEO_END @ ../display/dc/dpp/dcn10/dcn10_dpp_dscl.c
+DCN2_ICSC_SELECT_BYPASS @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+DCN2_ICSC_SELECT_ICSC_A @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+DCN2_ICSC_SELECT_ICSC_B @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+EXPANSION_MODE_ZERO @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+EXPANSION_MODE_DYNAMIC @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+SURFACE_PIXEL_FORMAT_GRPH_RGB111110_FIX @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+SURFACE_PIXEL_FORMAT_GRPH_BGR101111_FIX @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+SURFACE_PIXEL_FORMAT_GRPH_RGB111110_FLOAT @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+SURFACE_PIXEL_FORMAT_GRPH_BGR101111_FLOAT @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+SURFACE_PIXEL_FORMAT_GRPH_RGBE @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+SURFACE_PIXEL_FORMAT_SUBSAMPLE_END @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+SURFACE_PIXEL_FORMAT_VIDEO_AYCrCb8888 @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+SURFACE_PIXEL_FORMAT_VIDEO_ACrYCb2101010 @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+SURFACE_PIXEL_FORMAT_VIDEO_CrYCbA1010102 @ ../display/dc/dpp/dcn20/dcn20_dpp.c
+DCN2_GAMUT_REMAP_BYPASS @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+DCN2_GAMUT_REMAP_COEF_A @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+DCN2_GAMUT_REMAP_COEF_B @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+GAMUT_REMAP_BYPASS @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+GAMUT_REMAP_COEFF @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+GAMUT_REMAP_COMA_COEFF @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+GAMUT_REMAP_COMB_COEFF @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+GRAPHICS_GAMUT_ADJUST_TYPE_BYPASS @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+GRAPHICS_GAMUT_ADJUST_TYPE_HW @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+GRAPHICS_GAMUT_ADJUST_TYPE_SW @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+IPP_DEGAMMA_MODE_BYPASS @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+IPP_DEGAMMA_MODE_HW_sRGB @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+IPP_DEGAMMA_MODE_HW_xvYCC @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+IPP_DEGAMMA_MODE_USER_PWL @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+LUT_BYPASS @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+LUT_RAM_A @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+LUT_RAM_B @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+CM_TEST_DEBUG_DATA_STATUS_IDX @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+CSC_TEMPERATURE_MATRIX_SIZE @ ../display/dc/dpp/dcn20/dcn20_dpp_cm.c
+MPCC_ALPHA_BLEND_MODE_PER_PIXEL_ALPHA @ ../display/dc/mpc/dcn20/dcn20_mpc.c
+MPCC_ALPHA_BLEND_MODE_PER_PIXEL_ALPHA_COMBINED_GLOBAL_GAIN @ ../display/dc/mpc/dcn20/dcn20_mpc.c
+MPCC_ALPHA_BLEND_MODE_GLOBAL_ALPHA @ ../display/dc/mpc/dcn20/dcn20_mpc.c
+MPCC_BLEND_MODE_BYPASS @ ../display/dc/mpc/dcn20/dcn20_mpc.c
+MPCC_BLEND_MODE_TOP_LAYER_PASSTHROUGH @ ../display/dc/mpc/dcn20/dcn20_mpc.c
+MPCC_BLEND_MODE_TOP_LAYER_ONLY @ ../display/dc/mpc/dcn20/dcn20_mpc.c
+MPCC_BLEND_MODE_TOP_BOT_BLENDING @ ../display/dc/mpc/dcn20/dcn20_mpc.c
+MPC_OUTPUT_CSC_DISABLE @ ../display/dc/mpc/dcn20/dcn20_mpc.c
+MPC_OUTPUT_CSC_COEF_A @ ../display/dc/mpc/dcn20/dcn20_mpc.c
+MPC_OUTPUT_CSC_COEF_B @ ../display/dc/mpc/dcn20/dcn20_mpc.c
+MPC_OCSC_TEST_DEBUG_DATA_STATUS_IDX @ ../display/dc/mpc/dcn20/dcn20_mpc.c
+DMUB_CMD__ABM_SET_PIPE @ ../display/dc/dce/dmub_abm_lcd.c
+DMUB_CMD__ABM_SET_LEVEL @ ../display/dc/dce/dmub_abm_lcd.c
+SET_ABM_PIPE_NORMAL @ ../display/dc/dce/dmub_abm_lcd.c
+ABM_LCD_SUPPORT @ ../display/dc/dce/dmub_abm.c
+ABM_FEATURE_NO_SUPPORT @ ../display/dc/dce/dmub_abm.c
+TF_TYPE_DISTRIBUTED_POINTS @ ../display/dc/hwss/dcn20/dcn20_hwseq.c
+TF_TYPE_HWPWL @ ../display/dc/hwss/dcn20/dcn20_hwseq.c
+TRANSFER_FUNCTION_BT709 @ ../display/dc/hwss/dcn20/dcn20_hwseq.c
+TRANSFER_FUNCTION_LINEAR @ ../display/dc/hwss/dcn20/dcn20_hwseq.c
+TRANSFER_FUNCTION_PQ @ ../display/dc/hwss/dcn20/dcn20_hwseq.c
+PLN_ADDR_TYPE_GRPH_STEREO @ ../display/dc/hwss/dcn20/dcn20_hwseq.c
+DC_MAX_DIRTY_RECTS @ ../display/dc/core/dc.c
+ABMPIPE_OTG_INST = offsetof(struct dmub_rb_cmd_abm_set_pipe, abm_set_pipe_data.otg_inst) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMPIPE_PANEL_INST = offsetof(struct dmub_rb_cmd_abm_set_pipe, abm_set_pipe_data.panel_inst) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMPIPE_SET_PIPE_OPTION = offsetof(struct dmub_rb_cmd_abm_set_pipe, abm_set_pipe_data.set_pipe_option) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMPIPE_RAMPING_BOUNDARY = offsetof(struct dmub_rb_cmd_abm_set_pipe, abm_set_pipe_data.ramping_boundary) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMPIPE_PWRSEQ_INST = offsetof(struct dmub_rb_cmd_abm_set_pipe, abm_set_pipe_data.pwrseq_inst) @ ../display/dc/dce/dmub_abm_lcd.c
+SIZEOF_dmub_cmd_abm_set_pipe_data = sizeof(struct dmub_cmd_abm_set_pipe_data) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMLEVEL_LEVEL = offsetof(struct dmub_rb_cmd_abm_set_level, abm_set_level_data.level) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMLEVEL_VERSION = offsetof(struct dmub_rb_cmd_abm_set_level, abm_set_level_data.version) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMLEVEL_PANEL_MASK = offsetof(struct dmub_rb_cmd_abm_set_level, abm_set_level_data.panel_mask) @ ../display/dc/dce/dmub_abm_lcd.c
+SIZEOF_dmub_cmd_abm_set_level_data = sizeof(struct dmub_cmd_abm_set_level_data) @ ../display/dc/dce/dmub_abm_lcd.c
+DIRTY_SRC_DIRTY_RECTS = offsetof(struct dmub_rb_cmd_update_dirty_rect, update_dirty_rect_data.src_dirty_rects) @ ../display/dc/core/dc.c
+DIRTY_PIPE_IDX = offsetof(struct dmub_rb_cmd_update_dirty_rect, update_dirty_rect_data.pipe_idx) @ ../display/dc/core/dc.c
+DIRTY_DIRTY_RECT_COUNT = offsetof(struct dmub_rb_cmd_update_dirty_rect, update_dirty_rect_data.dirty_rect_count) @ ../display/dc/core/dc.c
+DIRTY_CMD_VERSION = offsetof(struct dmub_rb_cmd_update_dirty_rect, update_dirty_rect_data.cmd_version) @ ../display/dc/core/dc.c
+DIRTY_PANEL_INST = offsetof(struct dmub_rb_cmd_update_dirty_rect, update_dirty_rect_data.panel_inst) @ ../display/dc/core/dc.c
+SIZEOF_dmub_rb_cmd_update_dirty_rect = sizeof(struct dmub_rb_cmd_update_dirty_rect) @ ../display/dc/core/dc.c
+S2D13_MIN @ ../display/dc/basics/conversion.c
+S2D13_MAX @ ../display/dc/basics/conversion.c
+CONVERSION_DIVIDER = DIVIDER @ ../display/dc/basics/conversion.c
+DC_TRIPLEBUFFER_ENABLE @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+DC_TRIPLEBUFFER_DISABLE @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+DSCL0_LB_DATA_FORMAT__ALPHA_EN__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DSCL0_LB_DATA_FORMAT__ALPHA_EN_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DSCC0_DSCC_PPS_CONFIG0__BITS_PER_COMPONENT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DSCC0_DSCC_PPS_CONFIG0__BITS_PER_COMPONENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c
+DSCCIF0_DSCCIF_CONFIG0__BITS_PER_COMPONENT__SHIFT @ ../display/dc/resource/dcn21/dcn21_resource.c
+DSCCIF0_DSCCIF_CONFIG0__BITS_PER_COMPONENT_MASK @ ../display/dc/resource/dcn21/dcn21_resource.c

@@ -74,7 +74,6 @@ pub fn dcn10_wait_for_mpcc_disconnect(adev: &amdgpu_device, dc: &mut dc, pipe: &
 /// of its OPP's blending tree. A tree has nodes only after a plane was
 /// committed; until then there is nothing to remove.
 pub fn dcn10_plane_atomic_disconnect(adev: &amdgpu_device, dc: &mut dc, pipe_idx: usize) {
-    let _ = adev;
     let state = dc.current_state.as_deref().expect("state");
     let pipe = state.res_ctx.pipe_ctx[pipe_idx];
     let pool = dc.res_pool.as_deref().expect("pool");
@@ -86,11 +85,24 @@ pub fn dcn10_plane_atomic_disconnect(adev: &amdgpu_device, dc: &mut dc, pipe_idx
     let mpcc_to_remove = (mpc.funcs().get_mpcc_for_dpp.unwrap())(mpc, mpc_tree_params, dpp_id);
 
     // Already reset
-    if mpcc_to_remove.is_none() {
-        return;
-    }
+    let Some(mpcc_to_remove) = mpcc_to_remove else { return };
 
-    crate::linux::Line::new().s("dcn10_plane_atomic_disconnect: mpc1_remove_mpcc not ported").say();
+    let opp_idx = pipe.stream_res.opp.expect("opp");
+    let pool = dc.res_pool.as_deref_mut().expect("pool");
+    let mpc = pool.mpc.as_deref_mut().expect("mpc");
+    let opp = pool.opps[opp_idx].as_deref_mut().expect("opp");
+    (mpc.funcs().remove_mpcc.unwrap())(adev, mpc, &mut opp.base.mpc_tree_params, mpcc_to_remove);
+    // Phantom pipes have OTG disabled by default, so MPCC_STATUS will never
+    // assert idle; DCN 2.1 has none.
+    opp.base.mpcc_disconnect_pending[pipe.plane_res.mpcc_inst as usize] = true;
+
+    dc.optimized_required = true;
+
+    // dcn21_hubp_funcs has no hubp_disconnect.
+
+    if dc.debug.sanity_checks {
+        (dc.hwseq.as_deref().unwrap().funcs.verify_allow_pstate_change_high.unwrap())(adev, dc);
+    }
 }
 
 /// `dcn10_plane_atomic_power_down` (dcn10_hwseq.c): power gate the DPP and
@@ -612,17 +624,17 @@ pub fn dcn10_setup_stereo(adev: &amdgpu_device, dc: &mut dc, context: &mut crate
     (tg.funcs().program_stereo.unwrap())(adev, tg, &timing, &flags);
 }
 
-/// `dcn10_lock_all_pipes` (dcn10_hwseq.c): (un)lock the top pipe of every
-/// OTG with a plane in either state. `context` is the state locked, dc's
-/// current state when None.
+/// `dcn10_lock_all_pipes` (dcn10_hwseq.c): (un)lock the top pipe's TG of
+/// every enabled pipe that has or had a plane. `context` None is the
+/// current state. DCN 2.1 has no SubVP phantoms.
 pub fn dcn10_lock_all_pipes(adev: &amdgpu_device, dc: &mut dc, context: Option<&crate::dc_state::dc_state>, lock: bool) {
     let pipe_count = dc.res_pool.as_deref().unwrap().pipe_count as usize;
-    let cur = dc.current_state.as_deref().unwrap();
-    let context = context.unwrap_or(cur);
+    let cur_res = dc.current_state.as_deref().unwrap().res_ctx;
+    let res = context.map_or(cur_res, |c| c.res_ctx);
 
     for i in 0..pipe_count {
-        let old_pipe_ctx = &cur.res_ctx.pipe_ctx[i];
-        let pipe_ctx = &context.res_ctx.pipe_ctx[i];
+        let old_pipe_ctx = &cur_res.pipe_ctx[i];
+        let pipe_ctx = &res.pipe_ctx[i];
 
         // Only lock the top pipe's tg to prevent redundant (un)locking. Also
         // skip if pipe is disabled.
@@ -636,7 +648,75 @@ pub fn dcn10_lock_all_pipes(adev: &amdgpu_device, dc: &mut dc, context: Option<&
             continue;
         }
 
-        crate::linux::Line::new().s("dcn10_lock_all_pipes: dcn20_pipe_control_lock not ported").say();
-        let _ = lock;
+        (dc.hwss.pipe_control_lock.unwrap())(adev, dc, &res, i, lock);
     }
+}
+
+/// `dcn10_program_gamut_remap` (dcn10_hwseq.c): the stream's remap, else
+/// the plane's, else bypass.
+pub fn dcn10_program_gamut_remap(adev: &amdgpu_device, dc: &mut dc, context: &crate::dc_state::dc_state, p: usize) {
+    use crate::dcn20_dpp_cm::dpp_grph_csc_adjustment;
+    let pipe_ctx = &context.res_ctx.pipe_ctx[p];
+    let mut adjust = dpp_grph_csc_adjustment { gamut_adjust_type: GRAPHICS_GAMUT_ADJUST_TYPE_BYPASS, ..Default::default() };
+    let stream = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap();
+
+    if stream.gamut_remap_matrix.enable_remap {
+        adjust.gamut_adjust_type = GRAPHICS_GAMUT_ADJUST_TYPE_SW;
+        adjust.temperature_matrix = stream.gamut_remap_matrix.matrix;
+    } else if let Some(ps) = pipe_ctx.plane_state.map(|i| dc.planes[i].as_deref().unwrap())
+        && ps.gamut_remap_matrix.enable_remap
+    {
+        adjust.gamut_adjust_type = GRAPHICS_GAMUT_ADJUST_TYPE_SW;
+        adjust.temperature_matrix = ps.gamut_remap_matrix.matrix;
+    }
+
+    let dpp = dc.res_pool.as_deref().unwrap().dpps[pipe_ctx.plane_res.dpp.unwrap()].as_deref().unwrap();
+    (dpp.funcs().dpp_set_gamut_remap.unwrap())(adev, dpp, &adjust);
+}
+
+/// `dcn10_update_visual_confirm_color` (dcn10_hwseq.c).
+pub fn dcn10_update_visual_confirm_color(adev: &amdgpu_device, dc: &mut dc, pipe_ctx: &crate::dc_state::pipe_ctx,
+                                         mpcc_id: i32) {
+    let mpc = dc.res_pool.as_deref_mut().unwrap().mpc.as_deref_mut().unwrap();
+
+    if let Some(set_bg_color) = mpc.funcs().set_bg_color {
+        set_bg_color(adev, mpc, &pipe_ctx.visual_confirm_color, mpcc_id);
+    }
+}
+
+/// `dcn10_set_hdr_multiplier` (dcn10_hwseq.c): the plane's multiplier as a
+/// custom float (6 exponent, 12 mantissa bits, signed), 1.0 for none.
+pub fn dcn10_set_hdr_multiplier(adev: &amdgpu_device, dc: &dc, pipe_ctx: &crate::dc_state::pipe_ctx) {
+    use crate::fixpt31_32::{dc_fixpt_eq, dc_fixpt_from_int};
+    let multiplier = dc.planes[pipe_ctx.plane_state.unwrap()].as_deref().unwrap().hdr_mult;
+    let mut hw_mult = 0x1f000; // 1.0 default multiplier
+    let fmt = crate::conversion::custom_float_format { exponenta_bits: 6, mantissa_bits: 12, sign: true };
+
+    if !dc_fixpt_eq(multiplier, dc_fixpt_from_int(0)) {
+        // check != 0
+        crate::conversion::convert_to_custom_float_format(multiplier, &fmt, &mut hw_mult);
+    }
+
+    let dpp = dc.res_pool.as_deref().unwrap().dpps[pipe_ctx.plane_res.dpp.unwrap()].as_deref().unwrap();
+    (dpp.funcs().dpp_set_hdr_multiplier.unwrap())(adev, dpp, hw_mult);
+}
+
+/// `dcn10_update_pending_status` (dcn10_hwseq.c): whether the plane's flip
+/// is still pending, and the address it shows once not. DCN 2.1's TG has
+/// no `is_stereo_left_eye`.
+pub fn dcn10_update_pending_status(adev: &amdgpu_device, dc: &mut dc, pipe_ctx: &crate::dc_state::pipe_ctx) {
+    let Some(plane) = pipe_ctx.plane_state else { return };
+
+    let hubp = dc.res_pool.as_deref().unwrap().hubps[pipe_ctx.plane_res.hubp.unwrap()].as_deref().unwrap();
+    let flip_pending = (hubp.funcs().hubp_is_flip_pending.unwrap())(adev, hubp);
+
+    let plane_state = dc.planes[plane].as_deref_mut().unwrap();
+    plane_state.status.is_flip_pending = plane_state.status.is_flip_pending || flip_pending;
+
+    if !flip_pending {
+        plane_state.status.current_address = plane_state.status.requested_address;
+    }
+
+    // The multi-plane self refresh workaround is never applied: its arming
+    // in dcn20_post_unlock_program_front_end is named, not ported.
 }

@@ -186,6 +186,19 @@ pub struct dc_clocks {
     pub subvp_prefetch_fclk_khz: i32,
 }
 
+/// `memcmp(a, b, offsetof(struct dc_clocks, prev_p_state_change_support))`
+/// (dc.c): the clocks that count for "optimization required".
+pub fn dc_clocks_eq_before_prev_p_state_change_support(a: &dc_clocks, b: &dc_clocks) -> bool {
+    a.dispclk_khz == b.dispclk_khz && a.actual_dispclk_khz == b.actual_dispclk_khz && a.dppclk_khz == b.dppclk_khz
+        && a.actual_dppclk_khz == b.actual_dppclk_khz && a.disp_dpp_voltage_level_khz == b.disp_dpp_voltage_level_khz
+        && a.dcfclk_khz == b.dcfclk_khz && a.socclk_khz == b.socclk_khz
+        && a.dcfclk_deep_sleep_khz == b.dcfclk_deep_sleep_khz && a.fclk_khz == b.fclk_khz
+        && a.phyclk_khz == b.phyclk_khz && a.dramclk_khz == b.dramclk_khz
+        && a.p_state_change_support == b.p_state_change_support && a.zstate_support == b.zstate_support
+        && a.dtbclk_en == b.dtbclk_en && a.ref_dtbclk_khz == b.ref_dtbclk_khz
+        && a.fclk_p_state_change_support == b.fclk_p_state_change_support && a.pwr_state == b.pwr_state
+}
+
 /// `struct clk_mgr`. `bw_params` points at a per-ASIC static in Linux
 /// (`rn_bw_params`), which the construct then edits; the port owns the copy.
 #[derive(Default)]

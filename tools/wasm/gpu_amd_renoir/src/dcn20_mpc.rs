@@ -33,16 +33,36 @@ pub enum mpc_funcs {
 /// port has not reached.
 #[derive(Default, Clone, Copy)]
 pub struct mpc_ops {
+    pub insert_plane: Option<fn(&amdgpu_device, &mut dcn20_mpc, &mut mpc_tree, &mpcc_blnd_cfg, Option<&mpcc_sm_cfg>,
+                                Option<usize>, i32, i32) -> Option<usize>>,
+    pub remove_mpcc: Option<fn(&amdgpu_device, &mut dcn20_mpc, &mut mpc_tree, usize)>,
     pub mpc_init_single_inst: Option<fn(&amdgpu_device, &mut dcn20_mpc, u32)>,
+    pub update_blending: Option<fn(&amdgpu_device, &mut dcn20_mpc, &mpcc_blnd_cfg, i32)>,
     pub get_mpcc_for_dpp: Option<fn(&dcn20_mpc, &mpc_tree, i32) -> Option<usize>>,
     pub wait_for_idle: Option<fn(&amdgpu_device, &dcn20_mpc, i32)>,
+    pub assert_mpcc_idle_before_connect: Option<fn(&amdgpu_device, &dcn20_mpc, i32)>,
+    pub set_output_csc: Option<fn(&amdgpu_device, &dcn20_mpc, i32, Option<&[u16]>, u32)>,
+    pub set_ocsc_default: Option<fn(&amdgpu_device, &dcn20_mpc, i32, u32, u32)>,
+    pub set_output_gamma: Option<fn(&amdgpu_device, &dcn20_mpc, &crate::dc::dc_debug_options, i32,
+                                    Option<&crate::dcn20_dpp_cm::pwl_params>)>,
+    pub power_on_mpc_mem_pwr: Option<fn(&amdgpu_device, &dcn20_mpc, i32, bool)>,
+    pub set_bg_color: Option<fn(&amdgpu_device, &mut dcn20_mpc, &crate::dcn20_opp::tg_color, i32)>,
 }
 
 /// `dcn20_mpc_funcs` (dcn20_mpc.c), as far as ported.
 const DCN20_MPC_FUNCS: mpc_ops = mpc_ops {
+    insert_plane: Some(mpc1_insert_plane),
+    remove_mpcc: Some(mpc1_remove_mpcc),
     mpc_init_single_inst: Some(mpc1_mpc_init_single_inst),
+    update_blending: Some(mpc2_update_blending),
     get_mpcc_for_dpp: Some(mpc2_get_mpcc_for_dpp),
     wait_for_idle: Some(mpc2_assert_idle_mpcc),
+    assert_mpcc_idle_before_connect: Some(mpc2_assert_mpcc_idle_before_connect),
+    set_output_csc: Some(mpc2_set_output_csc),
+    set_ocsc_default: Some(mpc2_set_ocsc_default),
+    set_output_gamma: Some(mpc2_set_output_gamma),
+    power_on_mpc_mem_pwr: Some(mpc20_power_on_ogam_lut),
+    set_bg_color: Some(mpc1_set_bg_color),
 };
 
 impl mpc_funcs {
@@ -61,11 +81,13 @@ pub struct mpc_tree {
     pub opp_list: Option<usize>,
 }
 
-/// `struct mpcc_blnd_cfg` (inc/hw/mpc.h): ported grow-as-reached — the fields
-/// `mpc2_init_mpcc` sets. `background_color` and the CM fields join with a
-/// blending op that uses them.
+/// `struct mpcc_blnd_cfg` (inc/hw/mpc.h).
 #[derive(Default, Clone, Copy)]
 pub struct mpcc_blnd_cfg {
+    pub black_color: crate::dcn20_opp::tg_color,
+    /// `enum mpcc_alpha_blend_mode`.
+    pub alpha_mode: u32,
+    pub pre_multiplied_alpha: bool,
     pub global_gain: i32,
     pub global_alpha: i32,
     pub overlap_only: bool,
@@ -120,7 +142,7 @@ impl dcn20_mpc {
         self.base.funcs.expect("mpc funcs").ops()
     }
 
-    fn rsm(&self) -> (&'static dcn20_mpc_registers, &'static dcn20_mpc_shift, &'static dcn20_mpc_mask) {
+    pub fn rsm(&self) -> (&'static dcn20_mpc_registers, &'static dcn20_mpc_shift, &'static dcn20_mpc_mask) {
         (self.mpc_regs.unwrap(), self.mpc_shift.unwrap(), self.mpc_mask.unwrap())
     }
 }
@@ -186,6 +208,303 @@ pub fn mpc2_assert_idle_mpcc(adev: &amdgpu_device, mpc20: &dcn20_mpc, id: i32) {
     }
 
     reg_wait!(adev, mpc20.rsm(), MPCC_STATUS[i], MPCC_IDLE, 1, 1, 100000, "mpc2_assert_idle_mpcc");
+}
+
+/// `mpc1_get_mpcc` (dcn10_mpc.c): the node index of `mpcc_id`.
+fn mpc1_get_mpcc(_mpc: &dcn20_mpc, mpcc_id: i32) -> usize {
+    mpcc_id as usize
+}
+
+/// `mpc2_update_blending` (dcn20_mpc.c).
+pub fn mpc2_update_blending(adev: &amdgpu_device, mpc20: &mut dcn20_mpc, blnd_cfg: &mpcc_blnd_cfg, mpcc_id: i32) {
+    let i = mpcc_id as usize;
+    let m = mpc1_get_mpcc(mpc20, mpcc_id);
+
+    reg_update!(adev, mpc20.rsm(), MPCC_CONTROL[i],
+        MPCC_ALPHA_BLND_MODE, blnd_cfg.alpha_mode,
+        MPCC_ALPHA_MULTIPLIED_MODE, blnd_cfg.pre_multiplied_alpha as u32,
+        MPCC_BLND_ACTIVE_OVERLAP_ONLY, blnd_cfg.overlap_only as u32,
+        MPCC_GLOBAL_ALPHA, blnd_cfg.global_alpha,
+        MPCC_GLOBAL_GAIN, blnd_cfg.global_gain,
+        MPCC_BG_BPC, blnd_cfg.background_color_bpc,
+        MPCC_BOT_GAIN_MODE, blnd_cfg.bottom_gain_mode);
+
+    reg_set!(adev, mpc20.rsm(), MPCC_TOP_GAIN[i], 0, MPCC_TOP_GAIN, blnd_cfg.top_gain);
+    reg_set!(adev, mpc20.rsm(), MPCC_BOT_GAIN_INSIDE[i], 0, MPCC_BOT_GAIN_INSIDE, blnd_cfg.bottom_inside_gain);
+    reg_set!(adev, mpc20.rsm(), MPCC_BOT_GAIN_OUTSIDE[i], 0, MPCC_BOT_GAIN_OUTSIDE, blnd_cfg.bottom_outside_gain);
+
+    mpc20.base.mpcc_array[m].blnd_cfg = *blnd_cfg;
+}
+
+/// `mpc1_insert_plane` (dcn10_mpc.c): connect DPP `dpp_id` through node
+/// `mpcc_id` into `tree`, above `insert_above_mpcc` (or at the bottom).
+/// Returns the node's index.
+#[allow(clippy::too_many_arguments)]
+pub fn mpc1_insert_plane(adev: &amdgpu_device, mpc10: &mut dcn20_mpc, tree: &mut mpc_tree, blnd_cfg: &mpcc_blnd_cfg,
+                         sm_cfg: Option<&mpcc_sm_cfg>, insert_above_mpcc: Option<usize>, dpp_id: i32,
+                         mpcc_id: i32) -> Option<usize> {
+    let c = mpc10.rsm();
+    let i = mpcc_id as usize;
+
+    if let Some(above) = insert_above_mpcc {
+        // check insert_above_mpcc exist in tree->opp_list
+        let mut temp_mpcc = tree.opp_list;
+
+        if temp_mpcc != Some(above) {
+            while let Some(t) = temp_mpcc {
+                if mpc10.base.mpcc_array[t].mpcc_bot == Some(above) {
+                    break;
+                }
+                temp_mpcc = mpc10.base.mpcc_array[t].mpcc_bot;
+            }
+        }
+        temp_mpcc?;
+    }
+
+    // Get and update MPCC struct parameters
+    let new_mpcc = mpc1_get_mpcc(mpc10, mpcc_id);
+    mpc10.base.mpcc_array[new_mpcc].dpp_id = dpp_id;
+
+    // program mux and MPCC_MODE
+    if let Some(above) = insert_above_mpcc {
+        mpc10.base.mpcc_array[new_mpcc].mpcc_bot = Some(above);
+        reg_set!(adev, c, MPCC_BOT_SEL[i], 0, MPCC_BOT_SEL, mpc10.base.mpcc_array[above].mpcc_id);
+        reg_update!(adev, c, MPCC_CONTROL[i], MPCC_MODE, MPCC_BLEND_MODE_TOP_BOT_BLENDING);
+    } else {
+        mpc10.base.mpcc_array[new_mpcc].mpcc_bot = None;
+        reg_set!(adev, c, MPCC_BOT_SEL[i], 0, MPCC_BOT_SEL, 0xf);
+        reg_update!(adev, c, MPCC_CONTROL[i], MPCC_MODE, MPCC_BLEND_MODE_TOP_LAYER_ONLY);
+    }
+    reg_set!(adev, c, MPCC_TOP_SEL[i], 0, MPCC_TOP_SEL, dpp_id);
+    reg_set!(adev, c, MPCC_OPP_ID[i], 0, MPCC_OPP_ID, tree.opp_id);
+
+    // Configure VUPDATE lock set for this MPCC to map to the OPP
+    reg_set!(adev, c, MPCC_UPDATE_LOCK_SEL[i], 0, MPCC_UPDATE_LOCK_SEL, tree.opp_id);
+
+    // update mpc tree mux setting
+    if tree.opp_list == insert_above_mpcc {
+        // insert the toppest mpcc
+        tree.opp_list = Some(new_mpcc);
+        reg_update!(adev, c, MUX[tree.opp_id as usize], MPC_OUT_MUX, mpcc_id);
+    } else {
+        // find insert position
+        let mut temp_mpcc = tree.opp_list;
+
+        while let Some(t) = temp_mpcc {
+            if mpc10.base.mpcc_array[t].mpcc_bot == insert_above_mpcc {
+                break;
+            }
+            temp_mpcc = mpc10.base.mpcc_array[t].mpcc_bot;
+        }
+        if let Some(t) = temp_mpcc
+            && mpc10.base.mpcc_array[t].mpcc_bot == insert_above_mpcc
+        {
+            let tid = mpc10.base.mpcc_array[t].mpcc_id as usize;
+            reg_set!(adev, c, MPCC_BOT_SEL[tid], 0, MPCC_BOT_SEL, mpcc_id);
+            mpc10.base.mpcc_array[t].mpcc_bot = Some(new_mpcc);
+            if insert_above_mpcc.is_none() {
+                reg_update!(adev, c, MPCC_CONTROL[tid], MPCC_MODE, MPCC_BLEND_MODE_TOP_BOT_BLENDING);
+            }
+        }
+    }
+
+    // update the blending configuration
+    (mpc10.funcs().update_blending.unwrap())(adev, mpc10, blnd_cfg, mpcc_id);
+
+    // update the stereo mix settings, if provided
+    if let Some(sm) = sm_cfg {
+        mpc10.base.mpcc_array[new_mpcc].sm_cfg = *sm;
+        crate::linux::Line::new().s("mpc1_insert_plane: mpc1_update_stereo_mix not ported").say();
+    }
+
+    // mark this mpcc as in use
+    mpc10.mpcc_in_use_mask |= 1 << mpcc_id;
+
+    Some(new_mpcc)
+}
+
+/// `mpc1_remove_mpcc` (dcn10_mpc.c): take node `mpcc_to_remove` out of
+/// `tree`; a node not in it is one the BIOS left over (resume from S3/S4)
+/// and has its muxes cleared all the same.
+pub fn mpc1_remove_mpcc(adev: &amdgpu_device, mpc10: &mut dcn20_mpc, tree: &mut mpc_tree, mpcc_to_remove: usize) {
+    let c = mpc10.rsm();
+    let mut found = false;
+    let mpcc_id = mpc10.base.mpcc_array[mpcc_to_remove].mpcc_id;
+    let i = mpcc_id as usize;
+
+    if tree.opp_list == Some(mpcc_to_remove) {
+        found = true;
+        // remove MPCC from top of tree
+        if let Some(bot) = mpc10.base.mpcc_array[mpcc_to_remove].mpcc_bot {
+            // set the next MPCC in list to be the top MPCC
+            tree.opp_list = Some(bot);
+            reg_update!(adev, c, MUX[tree.opp_id as usize], MPC_OUT_MUX, mpc10.base.mpcc_array[bot].mpcc_id);
+        } else {
+            // there are no other MPCC is list
+            tree.opp_list = None;
+            reg_update!(adev, c, MUX[tree.opp_id as usize], MPC_OUT_MUX, 0xf);
+        }
+    } else {
+        // find mpcc to remove MPCC list
+        let mut temp_mpcc = tree.opp_list;
+
+        while let Some(t) = temp_mpcc {
+            if mpc10.base.mpcc_array[t].mpcc_bot == Some(mpcc_to_remove) {
+                break;
+            }
+            temp_mpcc = mpc10.base.mpcc_array[t].mpcc_bot;
+        }
+
+        if let Some(t) = temp_mpcc
+            && mpc10.base.mpcc_array[t].mpcc_bot == Some(mpcc_to_remove)
+        {
+            found = true;
+            let bot = mpc10.base.mpcc_array[mpcc_to_remove].mpcc_bot;
+            mpc10.base.mpcc_array[t].mpcc_bot = bot;
+            let tid = mpc10.base.mpcc_array[t].mpcc_id as usize;
+            if let Some(b) = bot {
+                // remove MPCC in middle of list
+                reg_set!(adev, c, MPCC_BOT_SEL[tid], 0, MPCC_BOT_SEL, mpc10.base.mpcc_array[b].mpcc_id);
+            } else {
+                // remove MPCC from bottom of list
+                reg_set!(adev, c, MPCC_BOT_SEL[tid], 0, MPCC_BOT_SEL, 0xf);
+                reg_update!(adev, c, MPCC_CONTROL[tid], MPCC_MODE, MPCC_BLEND_MODE_TOP_LAYER_PASSTHROUGH);
+            }
+        }
+    }
+
+    // turn off MPCC mux registers
+    reg_set!(adev, c, MPCC_TOP_SEL[i], 0, MPCC_TOP_SEL, 0xf);
+    reg_set!(adev, c, MPCC_BOT_SEL[i], 0, MPCC_BOT_SEL, 0xf);
+    reg_set!(adev, c, MPCC_OPP_ID[i], 0, MPCC_OPP_ID, 0xf);
+    reg_set!(adev, c, MPCC_UPDATE_LOCK_SEL[i], 0, MPCC_UPDATE_LOCK_SEL, 0xf);
+
+    if found {
+        // mark this mpcc as not in use
+        mpc10.mpcc_in_use_mask &= !(1 << mpcc_id);
+        mpc10.base.mpcc_array[mpcc_to_remove].dpp_id = 0xf;
+        mpc10.base.mpcc_array[mpcc_to_remove].mpcc_bot = None;
+    }
+}
+
+/// `mpc2_assert_mpcc_idle_before_connect` (dcn20_mpc.c): the reads of a
+/// sanity check whose asserts compile to nothing.
+pub fn mpc2_assert_mpcc_idle_before_connect(adev: &amdgpu_device, mpc20: &dcn20_mpc, mpcc_id: i32) {
+    use crate::dc_helper::reg_get_n;
+    let i = mpcc_id as usize;
+
+    let _top_sel = reg_get!(adev, mpc20.rsm(), MPCC_TOP_SEL[i], MPCC_TOP_SEL);
+
+    let _status = reg_get_n!(adev, mpc20.rsm(), MPCC_STATUS[i], MPCC_BUSY, MPCC_IDLE, MPCC_DISABLED);
+}
+
+/// `mpc1_set_bg_color` (dcn10_mpc.c): the background of the bottommost node
+/// of `mpcc_id`'s chain. The MPC colour is 12 bits, `tg_color` 10.
+pub fn mpc1_set_bg_color(adev: &amdgpu_device, mpc10: &mut dcn20_mpc, bg_color: &crate::dcn20_opp::tg_color,
+                         mpcc_id: i32) {
+    let mut bottommost_mpcc = mpc1_get_mpcc(mpc10, mpcc_id);
+
+    mpc10.base.mpcc_array[bottommost_mpcc].blnd_cfg.black_color = *bg_color;
+
+    // find bottommost mpcc.
+    while let Some(bot) = mpc10.base.mpcc_array[bottommost_mpcc].mpcc_bot {
+        // avoid circular linked link
+        if bottommost_mpcc == bot {
+            break;
+        }
+
+        bottommost_mpcc = bot;
+    }
+
+    let bg_r_cr = (bg_color.color_r_cr as u32) << 2;
+    let bg_g_y = (bg_color.color_g_y as u32) << 2;
+    let bg_b_cb = (bg_color.color_b_cb as u32) << 2;
+
+    let b = mpc10.base.mpcc_array[bottommost_mpcc].mpcc_id as usize;
+    reg_set!(adev, mpc10.rsm(), MPCC_BG_R_CR[b], 0, MPCC_BG_R_CR, bg_r_cr);
+    reg_set!(adev, mpc10.rsm(), MPCC_BG_G_Y[b], 0, MPCC_BG_G_Y, bg_g_y);
+    reg_set!(adev, mpc10.rsm(), MPCC_BG_B_CB[b], 0, MPCC_BG_B_CB, bg_b_cb);
+}
+
+/// `mpc20_power_on_ogam_lut` (dcn20_mpc.c).
+pub fn mpc20_power_on_ogam_lut(adev: &amdgpu_device, mpc20: &dcn20_mpc, mpcc_id: i32, power_on: bool) {
+    reg_set!(adev, mpc20.rsm(), MPCC_MEM_PWR_CTRL[mpcc_id as usize], 0, MPCC_OGAM_MEM_PWR_DIS, power_on as u32);
+}
+
+/// The coefficients of `opp_id`'s output CSC into the set not in use, then
+/// the mode: the common tail of `mpc2_set_output_csc` and
+/// `mpc2_set_ocsc_default`.
+fn mpc2_program_ocsc(adev: &amdgpu_device, mpc20: &dcn20_mpc, opp_id: i32, regval: &[u16]) {
+    use crate::dc_helper::{cm_helper_program_color_matrices, color_matrices_reg, ix_reg_get};
+    let c = mpc20.rsm();
+    let o = opp_id as usize;
+
+    // determine which CSC coefficients (A or B) we are using currently.
+    // select the alternate set to double buffer the CSC update so CSC is
+    // updated on frame boundary
+    let cur_mode = ix_reg_get!(adev, c, MPC_OCSC_TEST_DEBUG_INDEX, MPC_OCSC_TEST_DEBUG_DATA,
+        MPC_OCSC_TEST_DEBUG_DATA_STATUS_IDX, MPC_OCSC_TEST_DEBUG_DATA_OCSC_MODE);
+
+    let ocsc_mode = if cur_mode != MPC_OUTPUT_CSC_COEF_A { MPC_OUTPUT_CSC_COEF_A } else { MPC_OUTPUT_CSC_COEF_B };
+
+    let mut ocsc_regs = color_matrices_reg {
+        shift_csc_c11: c.1.MPC_OCSC_C11_A,
+        mask_csc_c11: c.2.MPC_OCSC_C11_A,
+        shift_csc_c12: c.1.MPC_OCSC_C12_A,
+        mask_csc_c12: c.2.MPC_OCSC_C12_A,
+        ..Default::default()
+    };
+
+    if ocsc_mode == MPC_OUTPUT_CSC_COEF_A {
+        ocsc_regs.csc_c11_c12 = c.0.CSC_C11_C12_A[o];
+        ocsc_regs.csc_c33_c34 = c.0.CSC_C33_C34_A[o];
+    } else {
+        ocsc_regs.csc_c11_c12 = c.0.CSC_C11_C12_B[o];
+        ocsc_regs.csc_c33_c34 = c.0.CSC_C33_C34_B[o];
+    }
+
+    cm_helper_program_color_matrices(adev, regval, &ocsc_regs);
+
+    reg_set!(adev, c, CSC_MODE[o], 0, MPC_OCSC_MODE, ocsc_mode);
+}
+
+/// `mpc2_set_output_csc` (dcn20_mpc.c).
+pub fn mpc2_set_output_csc(adev: &amdgpu_device, mpc20: &dcn20_mpc, opp_id: i32, regval: Option<&[u16]>,
+                           ocsc_mode: u32) {
+    if ocsc_mode == MPC_OUTPUT_CSC_DISABLE {
+        reg_set!(adev, mpc20.rsm(), CSC_MODE[opp_id as usize], 0, MPC_OCSC_MODE, ocsc_mode);
+        return;
+    }
+
+    let Some(regval) = regval else { return };
+
+    mpc2_program_ocsc(adev, mpc20, opp_id, regval);
+}
+
+/// `mpc2_set_ocsc_default` (dcn20_mpc.c): the output CSC of `color_space`.
+pub fn mpc2_set_ocsc_default(adev: &amdgpu_device, mpc20: &dcn20_mpc, opp_id: i32, color_space: u32, ocsc_mode: u32) {
+    if ocsc_mode == MPC_OUTPUT_CSC_DISABLE {
+        reg_set!(adev, mpc20.rsm(), CSC_MODE[opp_id as usize], 0, MPC_OCSC_MODE, ocsc_mode);
+        return;
+    }
+
+    let mut arr_size = 0;
+    let Some(regval) = crate::hw_sequencer::find_color_matrix(color_space, &mut arr_size) else { return };
+
+    mpc2_program_ocsc(adev, mpc20, opp_id, regval);
+}
+
+/// `mpc2_set_output_gamma` (dcn20_mpc.c): an output gamma curve joins with
+/// colour management; without one OGAM is bypassed.
+pub fn mpc2_set_output_gamma(adev: &amdgpu_device, mpc20: &dcn20_mpc, debug: &crate::dc::dc_debug_options, mpcc_id: i32,
+                             params: Option<&crate::dcn20_dpp_cm::pwl_params>) {
+    let i = mpcc_id as usize;
+    if debug.cm_in_bypass || params.is_none() {
+        reg_set!(adev, mpc20.rsm(), MPCC_OGAM_MODE[i], 0, MPCC_OGAM_MODE, 0);
+        return;
+    }
+
+    crate::linux::Line::new().s("mpc2_set_output_gamma: OGAM RAM not ported").say();
 }
 
 /// `mpc2_init_mpcc` (dcn20_mpc.c): the reset state of one mixing node.

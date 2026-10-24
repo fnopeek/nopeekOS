@@ -121,8 +121,24 @@ pub struct dc_stream_state {
     pub dpms_off: bool,
     pub apply_edp_fast_boot_optimization: bool,
     pub mode_changed: bool,
-    /// `update_flags.raw`.
+    /// `update_flags.raw` (union stream_update_flags).
     pub update_flags: u32,
+    pub allow_freesync: bool,
+    pub vrr_active_variable: bool,
+    pub vrr_active_fixed: bool,
+    pub freesync_on_desktop: bool,
+    pub gamut_remap_matrix: colorspace_transform,
+    pub csc_color_matrix: dc_csc_transform,
+    pub hw_cursor_req: bool,
+    pub scaler_sharpener_update: bool,
+    pub sharpening_required: bool,
+    pub is_phantom: bool,
+    /// `cursor_attributes.address.quad_part`.
+    pub cursor_attributes_address: u64,
+    /// `cursor_position.enable`.
+    pub cursor_position_enable: bool,
+    /// `test_pattern.type` (enum dp_test_pattern).
+    pub test_pattern_type: u32,
     /// `out.otg_offset`.
     pub out_otg_offset: i32,
     pub refcount: u32,
@@ -160,52 +176,125 @@ pub struct dc_writeback_info {
     pub output_depth: u32,
 }
 
-/// `struct dc_plane_state`, the members the commit path reaches.
+/// `struct dc_plane_state`, the members the commit path reaches. The gamma
+/// table, 3D LUT, MCM and sharpness members join with colour management.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct dc_plane_state {
     pub address: dc_plane_address,
+    pub time: dc_plane_flip_time,
+    pub triplebuffer_flips: bool,
     pub scaling_quality: scaling_taps,
     pub src_rect: rect,
     pub dst_rect: rect,
     pub clip_rect: rect,
     pub plane_size: plane_size,
     pub tiling_info: dc_tiling_info_gfx9,
+    pub dcc: dc_plane_dcc_param,
     pub gamma_correction_is_identity: bool,
     pub in_transfer_func: dc_transfer_func,
-    pub in_shaper_func: dc_transfer_func,
-    pub blend_tf: dc_transfer_func,
-    /// `lut3d_func.state.raw`.
-    pub lut3d_state: u32,
+    pub bias_and_scale: dc_bias_and_scale,
+    pub input_csc_color_matrix: dc_csc_transform,
+    pub coeff_reduction_factor: crate::fixpt31_32::fixed31_32,
+    pub hdr_mult: crate::fixpt31_32::fixed31_32,
+    pub gamut_remap_matrix: colorspace_transform,
     /// `enum dc_color_space`.
     pub color_space: u32,
+    /// `lut3d_func.state.raw`.
+    pub lut3d_state: u32,
+    pub in_shaper_func: dc_transfer_func,
+    pub blend_tf: dc_transfer_func,
     /// `enum surface_pixel_format`.
     pub format: u32,
     /// `enum dc_rotation_angle`.
     pub rotation: u32,
-    pub horizontal_mirror: bool,
-    pub visible: bool,
+    /// `enum plane_stereo_format`.
+    pub stereo_format: u32,
     pub per_pixel_alpha: bool,
     pub pre_multiplied_alpha: bool,
     pub global_alpha: bool,
     pub global_alpha_value: i32,
-    pub is_phantom: bool,
+    pub visible: bool,
     pub flip_immediate: bool,
-    /// `enum plane_stereo_format`.
-    pub stereo_format: u32,
-    pub dcc: dc_plane_dcc_param,
+    pub horizontal_mirror: bool,
+    pub layer_index: i32,
+    /// `update_flags.raw` (union surface_update_flags).
+    pub update_flags: u32,
+    pub flip_int_enabled: bool,
+    pub skip_manual_trigger: bool,
     pub status: dc_plane_status,
+    pub force_full_update: bool,
+    pub is_phantom: bool,
     pub refcount: u32,
+    pub visual_confirm_color: crate::dcn20_opp::tg_color,
+    pub lut_bank_a: bool,
+    pub cursor_csc_color_matrix: dc_csc_transform,
+    pub sdr_white_level_nits: u32,
 }
 
-/// `struct dc_plane_status` (dc.h), the members reached.
+/// `union surface_update_flags` (dc.h) bits.
+pub const SURFACE_UPDATE_ADDR_UPDATE: u32 = 1 << 0;
+pub const SURFACE_UPDATE_DCC_CHANGE: u32 = 1 << 1;
+pub const SURFACE_UPDATE_COLOR_SPACE_CHANGE: u32 = 1 << 2;
+pub const SURFACE_UPDATE_HORIZONTAL_MIRROR_CHANGE: u32 = 1 << 3;
+pub const SURFACE_UPDATE_PER_PIXEL_ALPHA_CHANGE: u32 = 1 << 4;
+pub const SURFACE_UPDATE_GLOBAL_ALPHA_CHANGE: u32 = 1 << 5;
+pub const SURFACE_UPDATE_HDR_MULT: u32 = 1 << 6;
+pub const SURFACE_UPDATE_ROTATION_CHANGE: u32 = 1 << 7;
+pub const SURFACE_UPDATE_SWIZZLE_CHANGE: u32 = 1 << 8;
+pub const SURFACE_UPDATE_SCALING_CHANGE: u32 = 1 << 9;
+pub const SURFACE_UPDATE_POSITION_CHANGE: u32 = 1 << 10;
+pub const SURFACE_UPDATE_IN_TRANSFER_FUNC_CHANGE: u32 = 1 << 11;
+pub const SURFACE_UPDATE_INPUT_CSC_CHANGE: u32 = 1 << 12;
+pub const SURFACE_UPDATE_COEFF_REDUCTION_CHANGE: u32 = 1 << 13;
+pub const SURFACE_UPDATE_PIXEL_FORMAT_CHANGE: u32 = 1 << 14;
+pub const SURFACE_UPDATE_PLANE_SIZE_CHANGE: u32 = 1 << 15;
+pub const SURFACE_UPDATE_GAMUT_REMAP_CHANGE: u32 = 1 << 16;
+pub const SURFACE_UPDATE_NEW_PLANE: u32 = 1 << 17;
+pub const SURFACE_UPDATE_BPP_CHANGE: u32 = 1 << 18;
+pub const SURFACE_UPDATE_GAMMA_CHANGE: u32 = 1 << 19;
+pub const SURFACE_UPDATE_BANDWIDTH_CHANGE: u32 = 1 << 20;
+pub const SURFACE_UPDATE_CLOCK_CHANGE: u32 = 1 << 21;
+pub const SURFACE_UPDATE_STEREO_FORMAT_CHANGE: u32 = 1 << 22;
+pub const SURFACE_UPDATE_LUT_3D: u32 = 1 << 23;
+pub const SURFACE_UPDATE_TMZ_CHANGED: u32 = 1 << 24;
+pub const SURFACE_UPDATE_MCM_TRANSFER_FUNCTION_ENABLE_CHANGE: u32 = 1 << 25;
+pub const SURFACE_UPDATE_FULL_UPDATE: u32 = 1 << 26;
+pub const SURFACE_UPDATE_SDR_WHITE_LEVEL_NITS: u32 = 1 << 27;
+
+/// `union stream_update_flags` (dc_stream.h) bits.
+pub const STREAM_UPDATE_SCALING: u32 = 1 << 0;
+pub const STREAM_UPDATE_OUT_TF: u32 = 1 << 1;
+pub const STREAM_UPDATE_OUT_CSC: u32 = 1 << 2;
+pub const STREAM_UPDATE_ABM_LEVEL: u32 = 1 << 3;
+pub const STREAM_UPDATE_DPMS_OFF: u32 = 1 << 4;
+pub const STREAM_UPDATE_GAMUT_REMAP: u32 = 1 << 5;
+pub const STREAM_UPDATE_WB_UPDATE: u32 = 1 << 6;
+pub const STREAM_UPDATE_DSC_CHANGED: u32 = 1 << 7;
+pub const STREAM_UPDATE_MST_BW: u32 = 1 << 8;
+pub const STREAM_UPDATE_CRTC_TIMING_ADJUST: u32 = 1 << 9;
+pub const STREAM_UPDATE_FAMS_CHANGED: u32 = 1 << 10;
+pub const STREAM_UPDATE_SCALER_SHARPENER: u32 = 1 << 11;
+pub const STREAM_UPDATE_SHARPENING_REQUIRED: u32 = 1 << 12;
+
+/// `struct dc_plane_flip_time` (dc_types.h).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct dc_plane_flip_time {
+    pub time_elapsed_in_us: [u32; DC_PLANE_UPDATE_TIMES_MAX as usize],
+    pub index: u32,
+    pub prev_update_time_in_us: u32,
+}
+
+/// `struct dc_plane_status` (dc.h).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct dc_plane_status {
+    pub requested_address: dc_plane_address,
+    pub current_address: dc_plane_address,
     pub is_flip_pending: bool,
     pub is_right_eye: bool,
 }
 
 /// `struct dc_plane_dcc_param` (dc_hw_types.h).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct dc_plane_dcc_param {
     pub enable: bool,
     pub meta_pitch: i32,
@@ -283,6 +372,19 @@ fn dc_stream_construct(dc: &mut dc, li: usize, dc_sink_data: &dc_sink) -> dc_str
         apply_edp_fast_boot_optimization: false,
         mode_changed: false,
         update_flags: 0,
+        allow_freesync: false,
+        vrr_active_variable: false,
+        vrr_active_fixed: false,
+        freesync_on_desktop: false,
+        gamut_remap_matrix: Default::default(),
+        csc_color_matrix: Default::default(),
+        hw_cursor_req: false,
+        scaler_sharpener_update: false,
+        sharpening_required: false,
+        is_phantom: false,
+        cursor_attributes_address: 0,
+        cursor_position_enable: false,
+        test_pattern_type: 0,
         out_otg_offset: 0,
         refcount: 0,
     };

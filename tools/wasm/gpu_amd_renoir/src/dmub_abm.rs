@@ -23,11 +23,15 @@ pub enum abm_funcs {
 #[derive(Default, Clone, Copy)]
 pub struct abm_ops {
     pub abm_init: Option<fn(&amdgpu_device, &mut dc, u32, u32)>,
+    pub set_abm_level: Option<fn(&amdgpu_device, &mut dc, u32) -> bool>,
+    pub set_pipe_ex: Option<fn(&amdgpu_device, &mut dc, u32, u32, u32, u32) -> bool>,
 }
 
 /// `abm_funcs` (dmub_abm.c), as far as ported.
 const DMUB_ABM_FUNCS: abm_ops = abm_ops {
     abm_init: Some(dmub_abm_init_ex),
+    set_abm_level: Some(dmub_abm_set_level_ex),
+    set_pipe_ex: Some(dmub_abm_set_pipe_ex),
 };
 
 impl abm_funcs {
@@ -85,6 +89,93 @@ pub fn dmub_abm_create(dmcub_support: bool, regs: &'static dce_abm_registers, ab
 /// `dmub_abm_init_ex` (dmub_abm.c).
 fn dmub_abm_init_ex(adev: &amdgpu_device, dc: &mut dc, backlight: u32, user_level: u32) {
     dmub_abm_init(adev, dc, backlight, user_level);
+}
+
+/// `abm_feature_support` (dmub_abm.c): ABM for the LCD of an eDP panel
+/// instance.
+fn abm_feature_support(dc: &dc, panel_inst: u32) -> u32 {
+    let edp_num = crate::dc::dc_get_edp_links(dc).len() as u32;
+    let mut ret = ABM_FEATURE_NO_SUPPORT;
+
+    let mut i = 0;
+    while i < edp_num {
+        if panel_inst == i {
+            break;
+        }
+        i += 1;
+    }
+
+    if i < edp_num {
+        ret = ABM_LCD_SUPPORT;
+    }
+
+    ret
+}
+
+/// `dmub_abm_set_level_ex` (dmub_abm.c): the level for every eDP panel
+/// that supports ABM.
+fn dmub_abm_set_level_ex(adev: &amdgpu_device, dc: &mut dc, level: u32) -> bool {
+    let mut ret = false;
+    let mut panel_mask0: u8 = 0;
+
+    for i in 0..MAX_NUM_EDP {
+        let feature_support = abm_feature_support(dc, i);
+
+        if feature_support == ABM_LCD_SUPPORT {
+            panel_mask0 |= 0x01 << i;
+        }
+    }
+
+    if panel_mask0 != 0 {
+        ret = dmub_abm_set_level(adev, dc, level, panel_mask0);
+    }
+
+    ret
+}
+
+/// `dmub_abm_set_pipe_ex` (dmub_abm.c).
+fn dmub_abm_set_pipe_ex(adev: &amdgpu_device, dc: &mut dc, otg_inst: u32, option: u32, panel_inst: u32,
+                        pwrseq_inst: u32) -> bool {
+    let mut ret = false;
+
+    let feature_support = abm_feature_support(dc, panel_inst);
+
+    if feature_support == ABM_LCD_SUPPORT {
+        ret = dmub_abm_set_pipe(adev, dc, otg_inst, option, panel_inst, pwrseq_inst);
+    }
+
+    ret
+}
+
+/// `dmub_abm_set_level` (dmub_abm_lcd.c).
+pub fn dmub_abm_set_level(adev: &amdgpu_device, dc: &mut dc, level: u32, panel_mask: u8) -> bool {
+    let mut cmd = crate::dmub_srv::dmub_rb_cmd::default();
+    cmd.set_header(DMUB_CMD__ABM, DMUB_CMD__ABM_SET_LEVEL, SIZEOF_dmub_cmd_abm_set_level_data);
+    cmd.0[ABMLEVEL_LEVEL as usize..][..4].copy_from_slice(&level.to_le_bytes());
+    cmd.0[ABMLEVEL_VERSION as usize] = DMUB_CMD_ABM_CONTROL_VERSION_1 as u8;
+    cmd.0[ABMLEVEL_PANEL_MASK as usize] = panel_mask;
+
+    crate::dc_dmub_srv::dc_wake_and_execute_dmub_cmd(adev, dc, &mut cmd, DM_DMUB_WAIT_TYPE_WAIT);
+
+    true
+}
+
+/// `dmub_abm_set_pipe` (dmub_abm_lcd.c).
+pub fn dmub_abm_set_pipe(adev: &amdgpu_device, dc: &mut dc, otg_inst: u32, option: u32, panel_inst: u32,
+                         pwrseq_inst: u32) -> bool {
+    let ramping_boundary: u8 = 0xFF;
+
+    let mut cmd = crate::dmub_srv::dmub_rb_cmd::default();
+    cmd.set_header(DMUB_CMD__ABM, DMUB_CMD__ABM_SET_PIPE, SIZEOF_dmub_cmd_abm_set_pipe_data);
+    cmd.0[ABMPIPE_OTG_INST as usize] = otg_inst as u8;
+    cmd.0[ABMPIPE_PWRSEQ_INST as usize] = pwrseq_inst as u8;
+    cmd.0[ABMPIPE_SET_PIPE_OPTION as usize] = option as u8;
+    cmd.0[ABMPIPE_PANEL_INST as usize] = panel_inst as u8;
+    cmd.0[ABMPIPE_RAMPING_BOUNDARY as usize] = ramping_boundary;
+
+    crate::dc_dmub_srv::dc_wake_and_execute_dmub_cmd(adev, dc, &mut cmd, DM_DMUB_WAIT_TYPE_WAIT);
+
+    true
 }
 
 /// `dmub_abm_enable_fractional_pwm` (dmub_abm_lcd.c): tell the firmware

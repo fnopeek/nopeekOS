@@ -57,6 +57,13 @@ pub struct hw_sequencer_funcs {
     pub disable_link_output: Option<fn(&amdgpu_device, &mut dc, usize, &crate::dc_state::link_resource, u32)>,
     pub is_abm_supported: Option<fn(&dc, &dc_state, usize) -> bool>,
     pub set_disp_pattern_generator: Option<fn(&amdgpu_device, &mut dc, &dc_state, usize, u32, u32, u32, Option<&crate::dcn20_opp::tg_color>, i32, i32, i32)>,
+    pub program_gamut_remap: Option<fn(&amdgpu_device, &mut dc, &dc_state, usize)>,
+    pub update_plane_addr: Option<fn(&amdgpu_device, &mut dc, &dc_state, usize)>,
+    pub program_output_csc: Option<fn(&amdgpu_device, &mut dc, &dc_state, usize, u32, &[u16; 12], i32)>,
+    pub pipe_control_lock: Option<fn(&amdgpu_device, &mut dc, &crate::dc_state::resource_context, usize, bool)>,
+    pub program_triplebuffer: Option<fn(&amdgpu_device, &dc, &crate::dc_state::pipe_ctx, bool)>,
+    pub set_pipe: Option<fn(&amdgpu_device, &mut dc, &crate::dc_state::pipe_ctx)>,
+    pub update_visual_confirm_color: Option<fn(&amdgpu_device, &mut dc, &crate::dc_state::pipe_ctx, i32)>,
 }
 
 /// `dcn21_funcs` (dcn21_init.c), as far as ported.
@@ -65,7 +72,7 @@ const DCN21_FUNCS: hw_sequencer_funcs = hw_sequencer_funcs {
     apply_ctx_to_hw: Some(dce110_apply_ctx_to_hw),
     program_front_end_for_ctx: Some(crate::dcn20_hwseq::dcn20_program_front_end_for_ctx),
     post_unlock_program_front_end: Some(crate::dcn20_hwseq::dcn20_post_unlock_program_front_end),
-    update_pending_status: None,
+    update_pending_status: Some(crate::dcn10_hwseq::dcn10_update_pending_status),
     enable_accelerated_mode: Some(dce110_enable_accelerated_mode),
     update_info_frame: Some(dce110_update_info_frame),
     enable_stream: Some(crate::dcn20_hwseq::dcn20_enable_stream),
@@ -92,6 +99,13 @@ const DCN21_FUNCS: hw_sequencer_funcs = hw_sequencer_funcs {
     disable_link_output: Some(dce110_disable_link_output),
     is_abm_supported: Some(crate::dcn21_hwseq::dcn21_is_abm_supported),
     set_disp_pattern_generator: Some(crate::dcn20_hwseq::dcn20_set_disp_pattern_generator),
+    program_gamut_remap: Some(crate::dcn10_hwseq::dcn10_program_gamut_remap),
+    update_plane_addr: Some(crate::dcn20_hwseq::dcn20_update_plane_addr),
+    program_output_csc: Some(crate::dcn20_hwseq::dcn20_program_output_csc),
+    pipe_control_lock: Some(crate::dcn20_hwseq::dcn20_pipe_control_lock),
+    program_triplebuffer: Some(crate::dcn20_hwseq::dcn20_program_triple_buffer),
+    set_pipe: Some(crate::dcn21_hwseq::dcn21_set_pipe),
+    update_visual_confirm_color: Some(crate::dcn10_hwseq::dcn10_update_visual_confirm_color),
 };
 
 /// `struct hwseq_private_funcs` (hw_sequencer_private.h), the members whose
@@ -123,6 +137,12 @@ pub struct hwseq_private_funcs {
     pub verify_allow_pstate_change_high: Option<fn(&amdgpu_device, &dc)>,
     pub s0i3_golden_init_wa: Option<fn(&amdgpu_device, &dc) -> bool>,
     pub wait_for_blank_complete: Option<fn(&amdgpu_device, &crate::dcn20_opp::dcn20_opp) -> bool>,
+    pub update_mpcc: Option<fn(&amdgpu_device, &mut dc, &dc_state, usize)>,
+    pub set_input_transfer_func: Option<fn(&amdgpu_device, &mut dc, &dc_state, usize, usize) -> bool>,
+    pub set_output_transfer_func: Option<fn(&amdgpu_device, &mut dc, &dc_state, usize, usize) -> bool>,
+    pub set_hdr_multiplier: Option<fn(&amdgpu_device, &dc, &crate::dc_state::pipe_ctx)>,
+    pub set_blend_lut: Option<fn(&amdgpu_device, &dc, &crate::dc_state::pipe_ctx, usize) -> bool>,
+    pub set_shaper_3dlut: Option<fn(&amdgpu_device, &dc, &crate::dc_state::pipe_ctx, usize) -> bool>,
 }
 
 /// `dcn21_private_funcs` (dcn21_init.c), as far as ported.
@@ -151,6 +171,12 @@ const DCN21_PRIVATE_FUNCS: hwseq_private_funcs = hwseq_private_funcs {
     verify_allow_pstate_change_high: Some(crate::dcn10_hwseq::dcn10_verify_allow_pstate_change_high),
     s0i3_golden_init_wa: Some(crate::dcn21_hwseq::dcn21_s0i3_golden_init_wa),
     wait_for_blank_complete: Some(crate::dcn20_hwseq::dcn20_wait_for_blank_complete),
+    update_mpcc: Some(crate::dcn20_hwseq::dcn20_update_mpcc),
+    set_input_transfer_func: Some(crate::dcn20_hwseq::dcn20_set_input_transfer_func),
+    set_output_transfer_func: Some(crate::dcn20_hwseq::dcn20_set_output_transfer_func),
+    set_hdr_multiplier: Some(crate::dcn10_hwseq::dcn10_set_hdr_multiplier),
+    set_blend_lut: Some(crate::dcn20_hwseq::dcn20_set_blend_lut),
+    set_shaper_3dlut: Some(crate::dcn20_hwseq::dcn20_set_shaper_3dlut),
 };
 
 /// `dcn21_hw_sequencer_construct` (dcn21_init.c).
@@ -175,6 +201,144 @@ pub fn color_space_to_black_color(colorspace: u32, black_color: &mut crate::dcn2
     } as usize;
     let t = &crate::tables::black_color_format[format * 3..format * 3 + 3];
     *black_color = crate::dcn20_opp::tg_color { color_r_cr: t[0], color_g_y: t[1], color_b_cb: t[2] };
+}
+
+/// `is_rgb_type` (dc_hw_sequencer.c).
+fn is_rgb_type(color_space: u32) -> bool {
+    matches!(color_space, COLOR_SPACE_SRGB | COLOR_SPACE_XR_RGB | COLOR_SPACE_MSREF_SCRGB
+        | COLOR_SPACE_2020_RGB_FULLRANGE | COLOR_SPACE_ADOBERGB | COLOR_SPACE_DCIP3 | COLOR_SPACE_DOLBYVISION)
+}
+
+/// `is_rgb_limited_type` (dc_hw_sequencer.c).
+fn is_rgb_limited_type(color_space: u32) -> bool {
+    color_space == COLOR_SPACE_SRGB_LIMITED || color_space == COLOR_SPACE_2020_RGB_LIMITEDRANGE
+}
+
+/// `is_ycbcr601_type` (dc_hw_sequencer.c).
+fn is_ycbcr601_type(color_space: u32) -> bool {
+    color_space == COLOR_SPACE_YCBCR601 || color_space == COLOR_SPACE_XV_YCC_601
+}
+
+/// `is_ycbcr601_limited_type` (dc_hw_sequencer.c).
+fn is_ycbcr601_limited_type(color_space: u32) -> bool {
+    color_space == COLOR_SPACE_YCBCR601_LIMITED
+}
+
+/// `is_ycbcr709_type` (dc_hw_sequencer.c).
+fn is_ycbcr709_type(color_space: u32) -> bool {
+    color_space == COLOR_SPACE_YCBCR709 || color_space == COLOR_SPACE_XV_YCC_709
+}
+
+/// `is_ycbcr2020_limited_type` (dc_hw_sequencer.c).
+fn is_ycbcr2020_limited_type(color_space: u32) -> bool {
+    color_space == COLOR_SPACE_2020_YCBCR_LIMITED
+}
+
+/// `is_ycbcr2020_full_type` (dc_hw_sequencer.c).
+fn is_ycbcr2020_full_type(color_space: u32) -> bool {
+    color_space == COLOR_SPACE_2020_YCBCR_FULL
+}
+
+/// `is_ycbcr709_limited_type` (dc_hw_sequencer.c).
+fn is_ycbcr709_limited_type(color_space: u32) -> bool {
+    color_space == COLOR_SPACE_YCBCR709_LIMITED
+}
+
+/// `get_color_space_type` (dc_hw_sequencer.c).
+fn get_color_space_type(color_space: u32) -> u32 {
+    let mut r#type = COLOR_SPACE_RGB_TYPE;
+
+    if is_rgb_type(color_space) {
+        r#type = COLOR_SPACE_RGB_TYPE;
+    } else if is_rgb_limited_type(color_space) {
+        r#type = COLOR_SPACE_RGB_LIMITED_TYPE;
+    } else if is_ycbcr601_type(color_space) {
+        r#type = COLOR_SPACE_YCBCR601_TYPE;
+    } else if is_ycbcr709_type(color_space) {
+        r#type = COLOR_SPACE_YCBCR709_TYPE;
+    } else if is_ycbcr601_limited_type(color_space) {
+        r#type = COLOR_SPACE_YCBCR601_LIMITED_TYPE;
+    } else if is_ycbcr709_limited_type(color_space) {
+        r#type = COLOR_SPACE_YCBCR709_LIMITED_TYPE;
+    } else if is_ycbcr2020_limited_type(color_space) {
+        r#type = COLOR_SPACE_YCBCR2020_LIMITED_TYPE;
+    } else if is_ycbcr2020_full_type(color_space) {
+        r#type = COLOR_SPACE_YCBCR2020_FULL_TYPE;
+    } else if color_space == COLOR_SPACE_YCBCR709 || color_space == COLOR_SPACE_YCBCR709_BLACK {
+        r#type = COLOR_SPACE_YCBCR709_BLACK_TYPE;
+    }
+    r#type
+}
+
+/// `find_color_matrix` (dc_hw_sequencer.c): the output CSC coefficients of
+/// a colour space's type; `output_csc_matrix` is flat in `tables.rs`.
+pub fn find_color_matrix(color_space: u32, array_size: &mut u32) -> Option<&'static [u16]> {
+    let r#type = get_color_space_type(color_space);
+    let e = crate::tables::output_csc_matrix.chunks(13).find(|e| e[0] as u32 == r#type)?;
+    *array_size = 12;
+    Some(&e[1..13])
+}
+
+/// `set_p_state_switch_method` (dc_hw_sequencer.c): how the pipe switches
+/// the memory clock, for visual confirm. DCN 2.1 has no SubVP or FPO.
+pub fn set_p_state_switch_method(dc: &dc, context: &mut dc_state, p: usize) {
+    use crate::display_mode_structs::dm_dram_clock_change_unsupported;
+    if dc.ctx.dmub_srv.is_none() {
+        return;
+    }
+    let Some(dml) = context.dml.as_deref() else { return };
+    let vba = &dml.vba;
+
+    let pipe_ctx = &mut context.res_ctx.pipe_ctx[p];
+    pipe_ctx.p_state_type = P_STATE_UNKNOWN;
+    if vba.DRAMClockChangeSupport[vba.VoltageLevel as usize][vba.maxMpcComb as usize] != dm_dram_clock_change_unsupported {
+        // MCLK switching is supported
+        if !pipe_ctx.has_vactive_margin {
+            // In Vblank - yellow
+            pipe_ctx.p_state_type = P_STATE_V_BLANK;
+
+            if context.bw_ctx.dcn.clk.fw_based_mclk_switching {
+                // FPO + Vblank - cyan
+                pipe_ctx.p_state_type = P_STATE_FPO;
+            }
+        } else {
+            // In Vactive - pink
+            pipe_ctx.p_state_type = P_STATE_V_ACTIVE;
+        }
+
+        // SubVP: dc_state_get_paired_subvp_stream finds no paired stream on
+        // DCN 2.1.
+    }
+}
+
+/// `hwss_wait_for_outstanding_hw_updates` (dc_hw_sequencer.c): wait for the
+/// double-buffered updates of a full update to complete before the locks.
+/// DCN 2.1 has no `wait_for_all_pending_updates`.
+pub fn hwss_wait_for_outstanding_hw_updates(adev: &amdgpu_device, dc: &mut dc, dc_context: &dc_state) {
+    let pool = dc.res_pool.as_deref_mut().unwrap();
+    let opp_count = pool.res_cap.unwrap().num_opp as usize;
+
+    for pipe_idx in 0..pool.pipe_count as usize {
+        let pipe_ctx = &dc_context.res_ctx.pipe_ctx[pipe_idx];
+
+        if pipe_ctx.stream.is_none() {
+            continue;
+        }
+
+        let Some(hubp) = pipe_ctx.plane_res.hubp else { continue };
+
+        let mpcc_inst = pool.hubps[hubp].as_deref().unwrap().base.inst as usize;
+        // MPCC inst is equal to pipe index in practice
+        for opp_inst in 0..opp_count {
+            if pool.opps[opp_inst].as_deref().is_some_and(|o| o.base.mpcc_disconnect_pending[mpcc_inst]) {
+                let mpc = pool.mpc.as_deref().unwrap();
+                (mpc.funcs().wait_for_idle.unwrap())(adev, mpc, mpcc_inst as i32);
+                pool.opps[opp_inst].as_deref_mut().unwrap().base.mpcc_disconnect_pending[mpcc_inst] = false;
+                break;
+            }
+        }
+    }
+    hwss_wait_for_odm_update_pending_complete(adev, dc, dc_context);
 }
 
 /// `dce110_edp_power_control` (dce110_hwseq.c): power the eDP panel up or

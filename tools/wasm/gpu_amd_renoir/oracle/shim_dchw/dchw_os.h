@@ -5,7 +5,9 @@
 #include <limits.h>
 #define container_of(ptr, type, member) ((type *)((char *)(ptr) - __builtin_offsetof(type, member)))
 #define BUILD_BUG_ON(x) ((void)sizeof(char[1 - 2 * !!(x)]))
-#define ilog2(n) (63 - __builtin_clzll(n))
+/* include/linux/log2.h: a run-time ilog2 is fls(n) - 1, so -1 for 0. */
+#define ilog2(n) (__builtin_constant_p(n) ? ((n) < 2 ? 0 : 63 - __builtin_clzll(n)) \
+		  : ((n) ? 63 - __builtin_clzll(n) : -1))
 #define noinline __attribute__((noinline))
 #define noinline_for_stack __attribute__((noinline))
 #ifndef min

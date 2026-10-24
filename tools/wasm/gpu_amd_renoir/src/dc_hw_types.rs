@@ -92,7 +92,7 @@ pub struct dc_crtc_timing {
 }
 
 /// `struct plane_size`: the graphics or video surface's size and pitch.
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct plane_size {
     pub surface_size: rect,
     pub chroma_size: rect,
@@ -101,7 +101,7 @@ pub struct plane_size {
 }
 
 /// `union dc_tiling_info`'s gfx9 view (DCN 1.x–3.x).
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct dc_tiling_info_gfx9 {
     pub num_pipes: u32,
     pub num_banks: u32,
@@ -118,15 +118,77 @@ pub struct dc_tiling_info_gfx9 {
     pub num_pkrs: u32,
 }
 
-/// `struct dc_plane_address`, the graphics view (`PLN_ADDR_TYPE_GRAPHICS`).
-#[derive(Clone, Copy, Default, Debug)]
+/// `struct dc_plane_address`. The anonymous union of its views (`grph`,
+/// `grph_stereo`, `video_progressive`, …) is `u`, its 64-bit members in
+/// memory order; the accessors name the views' members, which alias as in C.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct dc_plane_address {
     /// `enum dc_plane_addr_type`.
     pub r#type: u32,
     pub tmz_surface: bool,
-    pub grph_addr: u64,
-    pub grph_meta_addr: u64,
+    pub u: [u64; 12],
+    pub page_table_base: u64,
     pub vmid: u32,
+}
+
+impl dc_plane_address {
+    /// `grph.addr`.
+    pub fn grph_addr(&self) -> u64 { self.u[0] }
+    /// `grph.meta_addr`.
+    pub fn grph_meta_addr(&self) -> u64 { self.u[2] }
+    /// `grph_stereo.left_addr`.
+    pub fn left_addr(&self) -> u64 { self.u[0] }
+    /// `grph_stereo.left_meta_addr`.
+    pub fn left_meta_addr(&self) -> u64 { self.u[1] }
+    /// `grph_stereo.right_addr`.
+    pub fn right_addr(&self) -> u64 { self.u[3] }
+    /// `grph_stereo.right_meta_addr`.
+    pub fn right_meta_addr(&self) -> u64 { self.u[4] }
+    /// `video_progressive.luma_addr`.
+    pub fn luma_addr(&self) -> u64 { self.u[0] }
+    /// `video_progressive.luma_meta_addr`.
+    pub fn luma_meta_addr(&self) -> u64 { self.u[1] }
+    /// `video_progressive.chroma_addr`.
+    pub fn chroma_addr(&self) -> u64 { self.u[3] }
+    /// `video_progressive.chroma_meta_addr`.
+    pub fn chroma_meta_addr(&self) -> u64 { self.u[4] }
+}
+
+/// `PHYSICAL_ADDRESS_LOC.low_part` / `.high_part` of a quad part.
+pub fn low_part(quad: u64) -> u32 { quad as u32 }
+pub fn high_part(quad: u64) -> u32 { (quad >> 32) as u32 }
+
+/// `struct dc_csc_transform` (dc_hw_types.h).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct dc_csc_transform {
+    pub matrix: [u16; 12],
+    pub enable_adjustment: bool,
+}
+
+/// `struct colorspace_transform` (dc_hw_types.h).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct colorspace_transform {
+    pub matrix: [fixed31_32; 12],
+    pub enable_remap: bool,
+}
+
+/// `struct dc_bias_and_scale` (dc_hw_types.h).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct dc_bias_and_scale {
+    pub scale_red: u32,
+    pub bias_red: u32,
+    pub scale_green: u32,
+    pub bias_green: u32,
+    pub scale_blue: u32,
+    pub bias_blue: u32,
+    pub bias_and_scale_valid: bool,
+}
+
+/// `struct sharpness_adj` (transform.h).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct sharpness_adj {
+    pub horz: i32,
+    pub vert: i32,
 }
 
 /// `struct scaling_taps`.
@@ -140,7 +202,7 @@ pub struct scaling_taps {
 }
 
 /// `struct scaling_ratios`.
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct scaling_ratios {
     pub horz: fixed31_32,
     pub vert: fixed31_32,
@@ -149,7 +211,7 @@ pub struct scaling_ratios {
 }
 
 /// `struct scl_inits`.
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct scl_inits {
     pub h: fixed31_32,
     pub h_c: fixed31_32,
@@ -158,7 +220,7 @@ pub struct scl_inits {
 }
 
 /// `struct line_buffer_params`.
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct line_buffer_params {
     pub alpha_en: bool,
     pub pixel_expan_mode: bool,
@@ -168,9 +230,9 @@ pub struct line_buffer_params {
     pub depth: u32,
 }
 
-/// `struct scaler_data` (transform.h); `sharpness` and `dscl_prog_data` are
-/// the SPL path's, which DCN 2.1 does not take.
-#[derive(Clone, Copy, Default, Debug)]
+/// `struct scaler_data` (transform.h); `dscl_prog_data` is the SPL path's,
+/// which DCN 2.1 does not take.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct scaler_data {
     pub h_active: i32,
     pub v_active: i32,
@@ -180,6 +242,7 @@ pub struct scaler_data {
     pub recout: rect,
     pub ratios: scaling_ratios,
     pub inits: scl_inits,
+    pub sharpness: sharpness_adj,
     /// `enum pixel_format`.
     pub format: u32,
     pub lb_params: line_buffer_params,

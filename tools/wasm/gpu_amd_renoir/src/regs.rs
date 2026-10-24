@@ -24947,3 +24947,315 @@ pub const TIMING_3D_FORMAT_SIDEBAND_FA: u32 = 0x4;
 pub const VIEW_3D_FORMAT_FRAME_SEQUENTIAL: u32 = 0x1;
 /// ?
 pub const DPCD_SOURCE_SEQ_AFTER_DISABLE_LINK_PHY: u32 = 0xc;
+
+// Plane update: surfaces, front end, colour (dc.c, dcn20_hwseq.c, hubp/dpp/mpc dcn10/20/21, dmub_abm_lcd.c)
+/// ?
+pub const UPDATE_TYPE_FAST: u32 = 0x0;
+/// ?
+pub const UPDATE_TYPE_MED: u32 = 0x1;
+/// display/dc/core/dc.c:4773
+pub const UPDATE_TYPE_FULL: u32 = 0x2;
+/// ?
+pub const MPC_SPLIT_AVOID: u32 = 0x1;
+/// ?
+pub const MPC_SPLIT_DYNAMIC: u32 = 0x0;
+/// ?
+pub const DMUB_CMD__UPDATE_DIRTY_RECT: u32 = 0x43;
+/// ?
+pub const DMUB_CMD_PSR_CONTROL_VERSION_1: u32 = 0x1;
+/// ?
+pub const VISUAL_CONFIRM_SUBVP: u32 = 0xe;
+/// ?
+pub const VISUAL_CONFIRM_MCLK_SWITCH: u32 = 0x10;
+/// ?
+pub const VISUAL_CONFIRM_EXPLICIT: u32 = 0x80000000;
+/// ?
+pub const VISUAL_CONFIRM_HDR: u32 = 0x2;
+/// ?
+pub const VISUAL_CONFIRM_SURFACE: u32 = 0x1;
+/// ?
+pub const VISUAL_CONFIRM_SWIZZLE: u32 = 0x9;
+/// ?
+pub const VISUAL_CONFIRM_HW_CURSOR: u32 = 0x14;
+/// ?
+pub const VISUAL_CONFIRM_DCC: u32 = 0x16;
+/// ?
+pub const VISUAL_CONFIRM_MPCTREE: u32 = 0x4;
+/// ?
+pub const VISUAL_CONFIRM_FAMS2: u32 = 0x13;
+/// ?
+pub const VISUAL_CONFIRM_VABC: u32 = 0x15;
+/// ?
+pub const MAX_TTU: u32 = 0xffffff;
+/// ?
+pub const DC_PLANE_UPDATE_TIMES_MAX: u32 = 0xa;
+/// ?
+pub const DC_CM2_TRANSFER_FUNC_SOURCE_VIDMEM: u32 = 0x1;
+/// ?
+pub const DC_CM2_SHAPER_3DLUT_SETTING_ENABLE_SHAPER: u32 = 0x1;
+/// ?
+pub const CRTC_STATE_VACTIVE: u32 = 0x1;
+/// ?
+pub const CRTC_STATE_VBLANK: u32 = 0x0;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_BEGIN: u32 = 0x0;
+/// ?
+pub const MAX_PHANTOM_PIPES: u32 = 0x3;
+/// ?
+pub const P_STATE_UNKNOWN: u32 = 0x0;
+/// ?
+pub const P_STATE_V_BLANK: u32 = 0x1;
+/// ?
+pub const P_STATE_FPO: u32 = 0x2;
+/// ?
+pub const P_STATE_V_ACTIVE: u32 = 0x3;
+/// ?
+pub const P_STATE_SUB_VP: u32 = 0x4;
+/// ?
+pub const P_STATE_DRR_SUB_VP: u32 = 0x5;
+/// ?
+pub const P_STATE_V_BLANK_SUB_VP: u32 = 0x6;
+/// display/dc/core/dc_hw_sequencer.c:50
+pub const COLOR_SPACE_RGB_TYPE: u32 = 0x0;
+/// display/dc/core/dc_hw_sequencer.c:51
+pub const COLOR_SPACE_RGB_LIMITED_TYPE: u32 = 0x1;
+/// display/dc/core/dc_hw_sequencer.c:52
+pub const COLOR_SPACE_YCBCR601_TYPE: u32 = 0x2;
+/// display/dc/core/dc_hw_sequencer.c:53
+pub const COLOR_SPACE_YCBCR709_TYPE: u32 = 0x3;
+/// display/dc/core/dc_hw_sequencer.c:56
+pub const COLOR_SPACE_YCBCR601_LIMITED_TYPE: u32 = 0x6;
+/// display/dc/core/dc_hw_sequencer.c:57
+pub const COLOR_SPACE_YCBCR709_LIMITED_TYPE: u32 = 0x7;
+/// display/dc/core/dc_hw_sequencer.c:54
+pub const COLOR_SPACE_YCBCR2020_LIMITED_TYPE: u32 = 0x4;
+/// display/dc/core/dc_hw_sequencer.c:55
+pub const COLOR_SPACE_YCBCR2020_FULL_TYPE: u32 = 0x5;
+/// display/dc/core/dc_hw_sequencer.c:58
+pub const COLOR_SPACE_YCBCR709_BLACK_TYPE: u32 = 0x8;
+/// ?
+pub const COLOR_SPACE_XR_RGB: u32 = 0x2;
+/// ?
+pub const COLOR_SPACE_MSREF_SCRGB: u32 = 0x4;
+/// ?
+pub const COLOR_SPACE_2020_RGB_FULLRANGE: u32 = 0xb;
+/// ?
+pub const COLOR_SPACE_ADOBERGB: u32 = 0xf;
+/// ?
+pub const COLOR_SPACE_DCIP3: u32 = 0x10;
+/// ?
+pub const COLOR_SPACE_DOLBYVISION: u32 = 0x12;
+/// ?
+pub const COLOR_SPACE_2020_RGB_LIMITEDRANGE: u32 = 0xc;
+/// ?
+pub const COLOR_SPACE_XV_YCC_601: u32 = 0x8;
+/// ?
+pub const COLOR_SPACE_XV_YCC_709: u32 = 0x7;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:80
+pub const DSCL_MODE_SCALING_444_BYPASS: u32 = 0x0;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:81
+pub const DSCL_MODE_SCALING_444_RGB_ENABLE: u32 = 0x1;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:82
+pub const DSCL_MODE_SCALING_444_YCBCR_ENABLE: u32 = 0x2;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:83
+pub const DSCL_MODE_SCALING_420_YCBCR_ENABLE: u32 = 0x3;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:84
+pub const DSCL_MODE_SCALING_420_LUMA_BYPASS: u32 = 0x4;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:85
+pub const DSCL_MODE_SCALING_420_CHROMA_BYPASS: u32 = 0x5;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:86
+pub const DSCL_MODE_DSCL_BYPASS: u32 = 0x6;
+/// include/soc21_enum.h:862
+pub const LB_MEMORY_CONFIG_0: u32 = 0x0;
+/// include/soc21_enum.h:863
+pub const LB_MEMORY_CONFIG_1: u32 = 0x1;
+/// include/soc21_enum.h:864
+pub const LB_MEMORY_CONFIG_2: u32 = 0x2;
+/// include/soc21_enum.h:865
+pub const LB_MEMORY_CONFIG_3: u32 = 0x3;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:54
+pub const SCL_COEF_LUMA_VERT_FILTER: u32 = 0x0;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:55
+pub const SCL_COEF_LUMA_HORZ_FILTER: u32 = 0x1;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:56
+pub const SCL_COEF_CHROMA_VERT_FILTER: u32 = 0x2;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:57
+pub const SCL_COEF_CHROMA_HORZ_FILTER: u32 = 0x3;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:35
+pub const NUM_PHASES: u32 = 0x40;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:63
+pub const AUTOCAL_MODE_OFF: u32 = 0x0;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:39
+pub const BLACK_OFFSET_RGB_Y: u32 = 0x0;
+/// display/dc/dpp/dcn10/dcn10_dpp_dscl.c:40
+pub const BLACK_OFFSET_CBCR: u32 = 0x8000;
+/// ?
+pub const PIXEL_FORMAT_VIDEO_BEGIN: u32 = 0x7;
+/// ?
+pub const PIXEL_FORMAT_VIDEO_END: u32 = 0x8;
+/// ?
+pub const DCN2_ICSC_SELECT_BYPASS: u32 = 0x0;
+/// ?
+pub const DCN2_ICSC_SELECT_ICSC_A: u32 = 0x1;
+/// ?
+pub const DCN2_ICSC_SELECT_ICSC_B: u32 = 0x2;
+/// include/soc21_enum.h:2053
+pub const EXPANSION_MODE_ZERO: u32 = 0x1;
+/// ?
+pub const EXPANSION_MODE_DYNAMIC: u32 = 0x0;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_RGB111110_FIX: u32 = 0xc;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_BGR101111_FIX: u32 = 0xd;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_RGB111110_FLOAT: u32 = 0xe;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_BGR101111_FLOAT: u32 = 0xf;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_GRPH_RGBE: u32 = 0x10;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_SUBSAMPLE_END: u32 = 0x16;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_VIDEO_AYCrCb8888: u32 = 0x18;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_VIDEO_ACrYCb2101010: u32 = 0x16;
+/// ?
+pub const SURFACE_PIXEL_FORMAT_VIDEO_CrYCbA1010102: u32 = 0x17;
+/// ?
+pub const DCN2_GAMUT_REMAP_BYPASS: u32 = 0x0;
+/// ?
+pub const DCN2_GAMUT_REMAP_COEF_A: u32 = 0x1;
+/// ?
+pub const DCN2_GAMUT_REMAP_COEF_B: u32 = 0x2;
+/// amdgpu/cikd.h:161
+pub const GAMUT_REMAP_BYPASS: u32 = 0x0;
+/// ?
+pub const GAMUT_REMAP_COEFF: u32 = 0x1;
+/// ?
+pub const GAMUT_REMAP_COMA_COEFF: u32 = 0x2;
+/// ?
+pub const GAMUT_REMAP_COMB_COEFF: u32 = 0x3;
+/// ?
+pub const GRAPHICS_GAMUT_ADJUST_TYPE_BYPASS: u32 = 0x0;
+/// ?
+pub const GRAPHICS_GAMUT_ADJUST_TYPE_HW: u32 = 0x1;
+/// ?
+pub const GRAPHICS_GAMUT_ADJUST_TYPE_SW: u32 = 0x2;
+/// ?
+pub const IPP_DEGAMMA_MODE_BYPASS: u32 = 0x0;
+/// ?
+pub const IPP_DEGAMMA_MODE_HW_sRGB: u32 = 0x1;
+/// ?
+pub const IPP_DEGAMMA_MODE_HW_xvYCC: u32 = 0x2;
+/// ?
+pub const IPP_DEGAMMA_MODE_USER_PWL: u32 = 0x3;
+/// ?
+pub const LUT_BYPASS: u32 = 0x0;
+/// ?
+pub const LUT_RAM_A: u32 = 0x1;
+/// ?
+pub const LUT_RAM_B: u32 = 0x2;
+/// display/dc/dpp/dcn20/dcn20_dpp_cm.c:180
+pub const CM_TEST_DEBUG_DATA_STATUS_IDX: u32 = 0x9;
+/// ?
+pub const CSC_TEMPERATURE_MATRIX_SIZE: u32 = 0xc;
+/// ?
+pub const MPCC_ALPHA_BLEND_MODE_PER_PIXEL_ALPHA: u32 = 0x0;
+/// ?
+pub const MPCC_ALPHA_BLEND_MODE_PER_PIXEL_ALPHA_COMBINED_GLOBAL_GAIN: u32 = 0x1;
+/// ?
+pub const MPCC_ALPHA_BLEND_MODE_GLOBAL_ALPHA: u32 = 0x2;
+/// ?
+pub const MPCC_BLEND_MODE_BYPASS: u32 = 0x0;
+/// ?
+pub const MPCC_BLEND_MODE_TOP_LAYER_PASSTHROUGH: u32 = 0x1;
+/// ?
+pub const MPCC_BLEND_MODE_TOP_LAYER_ONLY: u32 = 0x2;
+/// ?
+pub const MPCC_BLEND_MODE_TOP_BOT_BLENDING: u32 = 0x3;
+/// ?
+pub const MPC_OUTPUT_CSC_DISABLE: u32 = 0x0;
+/// ?
+pub const MPC_OUTPUT_CSC_COEF_A: u32 = 0x1;
+/// ?
+pub const MPC_OUTPUT_CSC_COEF_B: u32 = 0x2;
+/// display/dc/mpc/dcn20/dcn20_mpc.c:156
+pub const MPC_OCSC_TEST_DEBUG_DATA_STATUS_IDX: u32 = 0x1;
+/// ?
+pub const DMUB_CMD__ABM_SET_PIPE: u32 = 0x1;
+/// ?
+pub const DMUB_CMD__ABM_SET_LEVEL: u32 = 0x3;
+/// ?
+pub const SET_ABM_PIPE_NORMAL: u32 = 0x1;
+/// display/dc/dce/dmub_abm.c:38
+pub const ABM_LCD_SUPPORT: u32 = 0x1;
+/// display/dc/dce/dmub_abm.c:37
+pub const ABM_FEATURE_NO_SUPPORT: u32 = 0x0;
+/// ?
+pub const TF_TYPE_DISTRIBUTED_POINTS: u32 = 0x1;
+/// ?
+pub const TF_TYPE_HWPWL: u32 = 0x3;
+/// ?
+pub const TRANSFER_FUNCTION_BT709: u32 = 0x1;
+/// ?
+pub const TRANSFER_FUNCTION_LINEAR: u32 = 0x3;
+/// ?
+pub const TRANSFER_FUNCTION_PQ: u32 = 0x2;
+/// ?
+pub const PLN_ADDR_TYPE_GRPH_STEREO: u32 = 0x2;
+/// ?
+pub const DC_MAX_DIRTY_RECTS: u32 = 0x3;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_pipe, abm_set_pipe_data.otg_inst)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMPIPE_OTG_INST: u32 = 0x4;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_pipe, abm_set_pipe_data.panel_inst)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMPIPE_PANEL_INST: u32 = 0x5;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_pipe, abm_set_pipe_data.set_pipe_option)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMPIPE_SET_PIPE_OPTION: u32 = 0x6;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_pipe, abm_set_pipe_data.ramping_boundary)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMPIPE_RAMPING_BOUNDARY: u32 = 0x7;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_pipe, abm_set_pipe_data.pwrseq_inst)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMPIPE_PWRSEQ_INST: u32 = 0x8;
+/// The value of `sizeof(struct dmub_cmd_abm_set_pipe_data)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const SIZEOF_dmub_cmd_abm_set_pipe_data: u32 = 0x8;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_level, abm_set_level_data.level)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMLEVEL_LEVEL: u32 = 0x4;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_level, abm_set_level_data.version)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMLEVEL_VERSION: u32 = 0x8;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_level, abm_set_level_data.panel_mask)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMLEVEL_PANEL_MASK: u32 = 0x9;
+/// The value of `sizeof(struct dmub_cmd_abm_set_level_data)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const SIZEOF_dmub_cmd_abm_set_level_data: u32 = 0x8;
+/// The value of `offsetof(struct dmub_rb_cmd_update_dirty_rect, update_dirty_rect_data.src_dirty_rects)` in ../display/dc/core/dc.c
+pub const DIRTY_SRC_DIRTY_RECTS: u32 = 0x4;
+/// The value of `offsetof(struct dmub_rb_cmd_update_dirty_rect, update_dirty_rect_data.pipe_idx)` in ../display/dc/core/dc.c
+pub const DIRTY_PIPE_IDX: u32 = 0x38;
+/// The value of `offsetof(struct dmub_rb_cmd_update_dirty_rect, update_dirty_rect_data.dirty_rect_count)` in ../display/dc/core/dc.c
+pub const DIRTY_DIRTY_RECT_COUNT: u32 = 0x39;
+/// The value of `offsetof(struct dmub_rb_cmd_update_dirty_rect, update_dirty_rect_data.cmd_version)` in ../display/dc/core/dc.c
+pub const DIRTY_CMD_VERSION: u32 = 0x3a;
+/// The value of `offsetof(struct dmub_rb_cmd_update_dirty_rect, update_dirty_rect_data.panel_inst)` in ../display/dc/core/dc.c
+pub const DIRTY_PANEL_INST: u32 = 0x3b;
+/// The value of `sizeof(struct dmub_rb_cmd_update_dirty_rect)` in ../display/dc/core/dc.c
+pub const SIZEOF_dmub_rb_cmd_update_dirty_rect: u32 = 0x3c;
+/// display/dc/basics/conversion.c:32
+pub const S2D13_MIN: u64 = 0xffffffffffff8ad0;
+/// display/dc/basics/conversion.c:33
+pub const S2D13_MAX: u32 = 0x7530;
+/// The value of `DIVIDER` in ../display/dc/basics/conversion.c
+pub const CONVERSION_DIVIDER: u32 = 0x2710;
+/// ?
+pub const DC_TRIPLEBUFFER_ENABLE: u32 = 0x1;
+/// ?
+pub const DC_TRIPLEBUFFER_DISABLE: u32 = 0x0;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12973
+pub const DSCL0_LB_DATA_FORMAT__ALPHA_EN__SHIFT: u32 = 0x4;
+/// include/asic_reg/dcn/dcn_1_0_sh_mask.h:12980
+pub const DSCL0_LB_DATA_FORMAT__ALPHA_EN_MASK: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:51034
+pub const DSCC0_DSCC_PPS_CONFIG0__BITS_PER_COMPONENT__SHIFT: u32 = 0x1c;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:51039
+pub const DSCC0_DSCC_PPS_CONFIG0__BITS_PER_COMPONENT_MASK: u32 = 0xf0000000;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:50947
+pub const DSCCIF0_DSCCIF_CONFIG0__BITS_PER_COMPONENT__SHIFT: u32 = 0x10;
+/// include/asic_reg/dcn/dcn_2_0_0_sh_mask.h:50953
+pub const DSCCIF0_DSCCIF_CONFIG0__BITS_PER_COMPONENT_MASK: u32 = 0xf0000;

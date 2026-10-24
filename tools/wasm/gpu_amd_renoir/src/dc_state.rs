@@ -140,6 +140,10 @@ pub struct pipe_ctx {
     pub unbounded_req: bool,
     /// `update_flags.raw` (union pipe_update_flags).
     pub update_flags: u32,
+    pub visual_confirm_color: crate::dcn20_opp::tg_color,
+    pub has_vactive_margin: bool,
+    /// `enum p_state_switch_method`.
+    pub p_state_type: u32,
 }
 
 /// `union pipe_update_flags` (core_types.h) bits.
@@ -184,6 +188,8 @@ pub struct dc_stream_status {
     pub is_abm_supported: bool,
     /// `mall_stream_config.subvp_limit_cursor_size`.
     pub subvp_limit_cursor_size: bool,
+    /// `mall_stream_config.cursor_size_limit_subvp`.
+    pub cursor_size_limit_subvp: bool,
 }
 
 /// `struct cstate_pstate_watermarks_st` (inc/hw/mem_input.h).
@@ -510,9 +516,154 @@ pub fn dc_state_set_stream_subvp_cursor_limit(stream: usize, state: &mut dc_stat
     }
 }
 
-/// `dc_state_rem_all_planes_for_stream` (dc_state.c): taking the planes of
-/// a stream back off its pipes is a later stage.
-pub fn dc_state_rem_all_planes_for_stream(_dc: &mut dc, _stream: usize, _state: &mut dc_state) -> bool {
-    crate::linux::Line::new().s("dc_state_rem_all_planes_for_stream not ported").say();
-    false
+/// `resource_remove_dpp_pipes_for_plane_composition` (dc_resource.c):
+/// detach `plane_state` from the head pipes that carry it and clear its
+/// secondary (tail) pipes.
+pub fn resource_remove_dpp_pipes_for_plane_composition(context: &mut dc_state, pipe_count: usize, plane_state: usize) {
+    for i in (0..pipe_count).rev() {
+        let pipe_ctx = context.res_ctx.pipe_ctx[i];
+
+        if pipe_ctx.plane_state == Some(plane_state) {
+            if let Some(t) = pipe_ctx.top_pipe {
+                context.res_ctx.pipe_ctx[t].bottom_pipe = pipe_ctx.bottom_pipe;
+            }
+
+            // Second condition is to avoid setting NULL to top pipe of tail
+            // pipe making it look like head pipe in subsequent deletes
+            if let (Some(b), Some(_)) = (pipe_ctx.bottom_pipe, pipe_ctx.top_pipe) {
+                context.res_ctx.pipe_ctx[b].top_pipe = pipe_ctx.top_pipe;
+            }
+
+            // For head pipe detach surfaces from pipe for tail pipe just zero
+            // it out
+            if pipe_ctx.top_pipe.is_none() {
+                context.res_ctx.pipe_ctx[i].plane_state = None;
+            } else {
+                context.res_ctx.pipe_ctx[i] = pipe_ctx::default();
+            }
+        }
+    }
+}
+
+/// `dc_state_remove_plane` (dc_state.c).
+pub fn dc_state_remove_plane(dc: &mut dc, stream: usize, plane_state: Option<usize>, state: &mut dc_state) -> bool {
+    let Some(plane_state) = plane_state else { return true };
+
+    let Some(ss) = (0..state.stream_count as usize).find(|&i| state.streams[i] == Some(stream)) else {
+        crate::linux::Line::new().s("Existing stream not found; failed to remove plane.").say();
+        return false;
+    };
+
+    let pipe_count = dc.res_pool.as_deref().unwrap().pipe_count as usize;
+    resource_remove_dpp_pipes_for_plane_composition(state, pipe_count, plane_state);
+
+    let stream_status = &mut state.stream_status[ss];
+    let mut i = 0;
+    while i < stream_status.plane_count as usize {
+        if stream_status.plane_states[i] == Some(plane_state) {
+            crate::dc_stream::dc_plane_state_release(dc, plane_state);
+            break;
+        }
+        i += 1;
+    }
+
+    if i == stream_status.plane_count as usize {
+        crate::linux::Line::new().s("Existing plane_state not found; failed to detach it!").say();
+        return false;
+    }
+
+    stream_status.plane_count -= 1;
+
+    // Start at the plane we've just released, and move all the planes one
+    // index forward to "trim" the array
+    while i < stream_status.plane_count as usize {
+        stream_status.plane_states[i] = stream_status.plane_states[i + 1];
+        i += 1;
+    }
+
+    stream_status.plane_states[stream_status.plane_count as usize] = None;
+
+    true
+}
+
+/// `dc_state_rem_all_planes_for_stream` (dc_state.c).
+pub fn dc_state_rem_all_planes_for_stream(dc: &mut dc, stream: usize, state: &mut dc_state) -> bool {
+    let Some(ss) = (0..state.stream_count as usize).find(|&i| state.streams[i] == Some(stream)) else {
+        crate::linux::Line::new().s("Existing stream not found!").say();
+        return false;
+    };
+
+    let old_plane_count = state.stream_status[ss].plane_count as usize;
+
+    let mut del_planes = [None; MAX_SURFACES];
+    del_planes[..old_plane_count].copy_from_slice(&state.stream_status[ss].plane_states[..old_plane_count]);
+
+    for &p in &del_planes[..old_plane_count] {
+        if !dc_state_remove_plane(dc, stream, p, state) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// `dc_state_add_all_planes_for_stream` (dc_state.c).
+pub fn dc_state_add_all_planes_for_stream(dc: &mut dc, stream: usize, plane_states: &[usize], state: &mut dc_state) -> bool {
+    let mut result = true;
+
+    for &p in plane_states {
+        if !dc_state_add_plane(dc, stream, p, state) {
+            result = false;
+            break;
+        }
+    }
+
+    result
+}
+
+/// `dc_state_remove_phantom_streams_and_planes` (dc_state.c): DCN 2.1
+/// makes no SubVP phantoms, so there are none to remove.
+pub fn dc_state_remove_phantom_streams_and_planes(dc: &dc, state: &dc_state) -> bool {
+    let removed_phantom = false;
+
+    for i in 0..dc.res_pool.as_deref().unwrap().pipe_count as usize {
+        let pipe = &state.res_ctx.pipe_ctx[i];
+        if pipe.plane_state.is_some() && pipe.stream.is_some()
+            && dc_state_get_pipe_subvp_type(state, pipe) == crate::regs::SUBVP_PHANTOM
+        {
+            crate::linux::Line::new().s("dc_state_remove_phantom_streams_and_planes: phantom pipes not ported").say();
+        }
+    }
+    removed_phantom
+}
+
+/// `dc_state_release_phantom_streams_and_planes` (dc_state.c): the state
+/// holds no phantom streams or planes on DCN 2.1.
+pub fn dc_state_release_phantom_streams_and_planes(_dc: &dc, _state: &mut dc_state) {}
+
+/// `dc_state_get_paired_subvp_stream` (dc_state.c): no stream is paired
+/// with a SubVP phantom on DCN 2.1.
+pub fn dc_state_get_paired_subvp_stream(_state: &dc_state, _stream: usize) -> Option<usize> {
+    None
+}
+
+/// `dc_state_get_stream_cursor_subvp_limit` (dc_state.c).
+pub fn dc_state_get_stream_cursor_subvp_limit(stream: usize, state: &dc_state) -> bool {
+    dc_state_get_stream_status(state, stream).is_some_and(|i| state.stream_status[i].cursor_size_limit_subvp)
+}
+
+/// `dc_state_can_clear_stream_cursor_subvp_limit` (dc_state.c). The limit
+/// is never set without SubVP, so the cursor checks behind it are not
+/// reached.
+pub fn dc_state_can_clear_stream_cursor_subvp_limit(stream: usize, state: &dc_state) -> bool {
+    let mut can_clear_limit = false;
+
+    if dc_state_get_stream_status(state, stream).is_some() {
+        can_clear_limit = dc_state_get_stream_cursor_subvp_limit(stream, state);
+        if can_clear_limit {
+            crate::linux::Line::new().s("dc_state_can_clear_stream_cursor_subvp_limit: cursor checks not ported").say();
+        }
+    }
+
+    can_clear_limit
 }

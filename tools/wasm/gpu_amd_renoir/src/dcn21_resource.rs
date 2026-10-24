@@ -444,6 +444,11 @@ const DEBUG_DEFAULTS_DRV: dc_debug_options = dc_debug_options {
     lttpr_mode_override: 0,
     avoid_vbios_exec_table: false,
     disable_extblankadj: false,
+    cm_in_bypass: false,
+    enable_tri_buf: false,
+    enable_mem_low_power_dscl: false,
+    skip_full_updated_if_possible: false,
+    enable_single_display_2to1_odm_policy: false,
 };
 
 /// `dcn21_pp_smu_create` (dcn21_resource.c): a table that is not Renoir's is

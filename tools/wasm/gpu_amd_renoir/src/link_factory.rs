@@ -97,6 +97,8 @@ pub struct phy_state {
 #[derive(Default, Clone, Copy, Debug)]
 pub struct replay_settings {
     pub replay_feature_enabled: bool,
+    /// `config.replay_supported`.
+    pub replay_supported: bool,
 }
 
 /// `struct link_flags` (dc.h), the link's `wa_flags`.

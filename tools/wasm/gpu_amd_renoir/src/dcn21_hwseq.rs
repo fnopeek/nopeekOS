@@ -86,3 +86,20 @@ pub fn dcn21_set_abm_immediate_disable(_adev: &amdgpu_device, dc: &mut dc, conte
         crate::linux::Line::new().s("dcn21_set_abm_immediate_disable: dmub_abm_set_pipe, store_backlight_level not ported").say();
     }
 }
+
+/// `dcn21_set_pipe` (dcn21_hwseq.c): tell the ABM firmware which OTG and
+/// panel the pipe drives. Renoir runs ABM on the DMCUB, so there is no
+/// DMCU path.
+pub fn dcn21_set_pipe(adev: &amdgpu_device, dc: &mut dc, pipe_ctx: &crate::dc_state::pipe_ctx) {
+    let stream = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap();
+    let Some(panel_cntl) = dc.links[stream.link].panel_cntl.as_deref() else { return };
+    let (panel_inst, pwrseq_inst) = (panel_cntl.inst, panel_cntl.pwrseq_inst);
+    let pool = dc.res_pool.as_deref().unwrap();
+    let Some(abm) = pool.abm.as_deref().filter(|_| pipe_ctx.stream_res.abm) else { return };
+    let Some(tg) = pipe_ctx.stream_res.tg else { return };
+
+    let otg_inst = pool.timing_generators[tg].as_deref().unwrap().base.inst;
+
+    let set_pipe_ex = abm.funcs().set_pipe_ex.unwrap();
+    set_pipe_ex(adev, dc, otg_inst, crate::regs::SET_ABM_PIPE_NORMAL, panel_inst, pwrseq_inst);
+}

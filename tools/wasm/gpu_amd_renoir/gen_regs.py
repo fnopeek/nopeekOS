@@ -260,7 +260,9 @@ def table_data(f, names):
     src = PRELUDE + f'#include "{f}"\n'
     for n in names:
         src += f"const void *t_{n}(void);\nconst void *t_{n}(void) {{ return &{n}; }}\n"
-    asm = gcc(src, ["-S"])
+    # Without -fno-ipa-icf GCC folds a t_ function into an identical one of
+    # the file (a getter returning the same array) and the label is lost.
+    asm = gcc(src, ["-S", "-fno-ipa-icf"])
     out, label, cur = {}, None, None
     sym_of = {}
     for line in asm.splitlines():

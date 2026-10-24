@@ -37,11 +37,11 @@ pub enum dscl_data_processing_format {
     DSCL_DATA_PRCESSING_FLOAT_FORMAT,
 }
 
-/// `struct dpp_caps` (inc/hw/transform.h): the `dscl_calc_lb_num_partitions` fn
-/// pointer joins when that DSCL op is ported (hwss stage).
+/// `struct dpp_caps` (inc/hw/transform.h).
 #[derive(Default, Clone, Copy)]
 pub struct dpp_caps {
     pub dscl_data_proc_format: dscl_data_processing_format,
+    pub dscl_calc_lb_num_partitions: Option<fn(&crate::dc_hw_types::scaler_data, u32, &mut i32, &mut i32)>,
     pub max_lb_partitions: u32,
 }
 
@@ -56,13 +56,33 @@ pub enum dpp_funcs {
 #[derive(Default, Clone, Copy)]
 pub struct dpp_ops {
     pub dpp_reset: Option<fn(&mut dcn20_dpp)>,
+    pub dpp_set_scaler: Option<fn(&amdgpu_device, &mut dcn20_dpp, &crate::dc::dc_debug_options,
+                                  &crate::dc_hw_types::scaler_data)>,
+    pub dpp_set_gamut_remap: Option<fn(&amdgpu_device, &dcn20_dpp, &crate::dcn20_dpp_cm::dpp_grph_csc_adjustment)>,
+    pub dpp_set_degamma: Option<fn(&amdgpu_device, &dcn20_dpp, &crate::dc::dc_debug_options, u32)>,
+    pub dpp_setup: Option<fn(&amdgpu_device, &dcn20_dpp, u32, u32, crate::dc_hw_types::dc_csc_transform, u32,
+                             Option<&crate::dcn20_dpp_cm::cnv_alpha_2bit_lut>)>,
+    pub dpp_program_blnd_lut: Option<fn(&amdgpu_device, &dcn20_dpp, Option<&crate::dcn20_dpp_cm::pwl_params>) -> bool>,
+    pub dpp_program_shaper_lut: Option<fn(&amdgpu_device, &dcn20_dpp, Option<&crate::dcn20_dpp_cm::pwl_params>) -> bool>,
+    pub dpp_program_3dlut: Option<fn(&amdgpu_device, &dcn20_dpp, Option<&crate::dcn20_dpp_cm::tetrahedral_params>) -> bool>,
     pub dpp_dppclk_control: Option<fn(&amdgpu_device, &dcn20_dpp, bool, bool)>,
+    pub dpp_set_hdr_multiplier: Option<fn(&amdgpu_device, &dcn20_dpp, u32)>,
 }
 
-/// `dcn20_dpp_funcs` (dcn20_dpp.c), as far as ported.
+/// `dcn20_dpp_funcs` (dcn20_dpp.c), as far as ported. `dpp_program_degamma_pwl`
+/// (a user degamma curve) joins with colour management; `dpp_program_bias_and_scale`
+/// and `set_cursor_matrix` are not members of it.
 const DCN20_DPP_FUNCS: dpp_ops = dpp_ops {
     dpp_reset: Some(dpp_reset),
+    dpp_set_scaler: Some(crate::dcn10_dpp_dscl::dpp1_dscl_set_scaler_manual_scale),
+    dpp_set_gamut_remap: Some(crate::dcn20_dpp_cm::dpp2_cm_set_gamut_remap),
+    dpp_set_degamma: Some(crate::dcn20_dpp_cm::dpp2_set_degamma),
+    dpp_setup: Some(crate::dcn20_dpp_cm::dpp2_cnv_setup),
+    dpp_program_blnd_lut: Some(crate::dcn20_dpp_cm::dpp20_program_blnd_lut),
+    dpp_program_shaper_lut: Some(crate::dcn20_dpp_cm::dpp20_program_shaper),
+    dpp_program_3dlut: Some(crate::dcn20_dpp_cm::dpp20_program_3dlut),
     dpp_dppclk_control: Some(dpp1_dppclk_control),
+    dpp_set_hdr_multiplier: Some(crate::dcn20_dpp_cm::dpp2_set_hdr_multiplier),
 };
 
 impl dpp_funcs {
@@ -82,14 +102,20 @@ pub struct dpp {
     pub caps: Option<&'static dpp_caps>,
 }
 
-/// `struct dcn20_dpp` (dcn20_dpp.h): the concrete DPP. The scaler filter tables
-/// and scaler/pwl run-time state join grow-as-reached.
+/// `struct dcn20_dpp` (dcn20_dpp.h): the concrete DPP. The filters are the
+/// tables last loaded into the coefficient RAM; the PWL state joins with
+/// colour management.
 #[derive(Default)]
 pub struct dcn20_dpp {
     pub base: dpp,
     pub tf_regs: Option<&'static dcn2_dpp_registers>,
     pub tf_shift: Option<&'static dcn2_dpp_shift>,
     pub tf_mask: Option<&'static dcn2_dpp_mask>,
+    pub filter_v: Option<&'static [u16]>,
+    pub filter_h: Option<&'static [u16]>,
+    pub filter_v_c: Option<&'static [u16]>,
+    pub filter_h_c: Option<&'static [u16]>,
+    pub scl_data: crate::dc_hw_types::scaler_data,
     pub lb_pixel_depth_supported: i32,
     pub lb_memory_size: i32,
     pub lb_bits_per_entry: i32,
@@ -99,6 +125,7 @@ pub struct dcn20_dpp {
 /// left 0 by the designated initializer.
 pub static DCN20_DPP_CAP: dpp_caps = dpp_caps {
     dscl_data_proc_format: dscl_data_processing_format::DSCL_DATA_PRCESSING_FLOAT_FORMAT,
+    dscl_calc_lb_num_partitions: Some(crate::dcn10_dpp_dscl::dscl2_calc_lb_num_partitions),
     max_lb_partitions: 0,
 };
 
@@ -108,14 +135,21 @@ impl dcn20_dpp {
         self.base.funcs.expect("dpp funcs").ops()
     }
 
-    fn rsm(&self) -> (&'static dcn2_dpp_registers, &'static dcn2_dpp_shift, &'static dcn2_dpp_mask) {
+    pub fn rsm(&self) -> (&'static dcn2_dpp_registers, &'static dcn2_dpp_shift, &'static dcn2_dpp_mask) {
         (self.tf_regs.unwrap(), self.tf_shift.unwrap(), self.tf_mask.unwrap())
     }
 }
 
-/// `dpp_reset` (dcn10_dpp.c): drop the scaler filters and clear the cursor,
-/// scaler and PWL state, none of which the port carries yet.
-pub fn dpp_reset(_dpp: &mut dcn20_dpp) {}
+/// `dpp_reset` (dcn10_dpp.c): drop the scaler filters and clear the
+/// scaler state; the cursor and PWL state the port does not carry yet.
+pub fn dpp_reset(dpp: &mut dcn20_dpp) {
+    dpp.filter_h_c = None;
+    dpp.filter_v_c = None;
+    dpp.filter_h = None;
+    dpp.filter_v = None;
+
+    dpp.scl_data = Default::default();
+}
 
 /// `dpp1_dppclk_control` (dcn10_dpp.c). The DCN 2.0 mask list has no
 /// DPPCLK_RATE_CONTROL, so its mask is 0 and enabling takes the plain path.
@@ -414,6 +448,7 @@ pub struct dcn2_dpp_shift {
     pub OTG_V_BLANK_START: u8,
     pub OTG_V_BLANK_END: u8,
     pub INTERLEAVE_EN: u8,
+    pub LB_DATA_FORMAT__ALPHA_EN: u8,
     pub MEMORY_CONFIG: u8,
     pub LB_MAX_PARTITIONS: u8,
     pub AUTOCAL_MODE: u8,
@@ -532,6 +567,7 @@ pub struct dcn2_dpp_shift {
     pub CM_DGAM_LUT_MODE: u8,
     pub CM_TEST_DEBUG_INDEX: u8,
     pub CNVC_BYPASS: u8,
+    pub FORMAT_CONTROL__ALPHA_EN: u8,
     pub FORMAT_EXPANSION_MODE: u8,
     pub CNVC_SURFACE_PIXEL_FORMAT: u8,
     pub CUR0_MODE: u8,
@@ -958,6 +994,7 @@ pub struct dcn2_dpp_mask {
     pub OTG_V_BLANK_START: u32,
     pub OTG_V_BLANK_END: u32,
     pub INTERLEAVE_EN: u32,
+    pub LB_DATA_FORMAT__ALPHA_EN: u32,
     pub MEMORY_CONFIG: u32,
     pub LB_MAX_PARTITIONS: u32,
     pub AUTOCAL_MODE: u32,
@@ -1076,6 +1113,7 @@ pub struct dcn2_dpp_mask {
     pub CM_DGAM_LUT_MODE: u32,
     pub CM_TEST_DEBUG_INDEX: u32,
     pub CNVC_BYPASS: u32,
+    pub FORMAT_CONTROL__ALPHA_EN: u32,
     pub FORMAT_EXPANSION_MODE: u32,
     pub CNVC_SURFACE_PIXEL_FORMAT: u32,
     pub CUR0_MODE: u32,
@@ -2400,6 +2438,7 @@ pub static DPP_SHIFT: dcn2_dpp_shift = dcn2_dpp_shift {
     OTG_V_BLANK_START: DSCL0_OTG_V_BLANK__OTG_V_BLANK_START__SHIFT as u8,
     OTG_V_BLANK_END: DSCL0_OTG_V_BLANK__OTG_V_BLANK_END__SHIFT as u8,
     INTERLEAVE_EN: DSCL0_LB_DATA_FORMAT__INTERLEAVE_EN__SHIFT as u8,
+    LB_DATA_FORMAT__ALPHA_EN: DSCL0_LB_DATA_FORMAT__ALPHA_EN__SHIFT as u8,
     MEMORY_CONFIG: DSCL0_LB_MEMORY_CTRL__MEMORY_CONFIG__SHIFT as u8,
     LB_MAX_PARTITIONS: DSCL0_LB_MEMORY_CTRL__LB_MAX_PARTITIONS__SHIFT as u8,
     AUTOCAL_MODE: DSCL0_DSCL_AUTOCAL__AUTOCAL_MODE__SHIFT as u8,
@@ -2518,6 +2557,7 @@ pub static DPP_SHIFT: dcn2_dpp_shift = dcn2_dpp_shift {
     CM_DGAM_LUT_MODE: CM0_CM_DGAM_CONTROL__CM_DGAM_LUT_MODE__SHIFT as u8,
     CM_TEST_DEBUG_INDEX: CM0_CM_TEST_DEBUG_INDEX__CM_TEST_DEBUG_INDEX__SHIFT as u8,
     CNVC_BYPASS: CNVC_CFG0_FORMAT_CONTROL__CNVC_BYPASS__SHIFT as u8,
+    FORMAT_CONTROL__ALPHA_EN: CNVC_CFG0_FORMAT_CONTROL__ALPHA_EN__SHIFT as u8,
     FORMAT_EXPANSION_MODE: CNVC_CFG0_FORMAT_CONTROL__FORMAT_EXPANSION_MODE__SHIFT as u8,
     CNVC_SURFACE_PIXEL_FORMAT: CNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT__CNVC_SURFACE_PIXEL_FORMAT__SHIFT as u8,
     CUR0_MODE: CNVC_CUR0_CURSOR0_CONTROL__CUR0_MODE__SHIFT as u8,
@@ -2943,6 +2983,7 @@ pub static DPP_MASK: dcn2_dpp_mask = dcn2_dpp_mask {
     OTG_V_BLANK_START: DSCL0_OTG_V_BLANK__OTG_V_BLANK_START_MASK,
     OTG_V_BLANK_END: DSCL0_OTG_V_BLANK__OTG_V_BLANK_END_MASK,
     INTERLEAVE_EN: DSCL0_LB_DATA_FORMAT__INTERLEAVE_EN_MASK,
+    LB_DATA_FORMAT__ALPHA_EN: DSCL0_LB_DATA_FORMAT__ALPHA_EN_MASK,
     MEMORY_CONFIG: DSCL0_LB_MEMORY_CTRL__MEMORY_CONFIG_MASK,
     LB_MAX_PARTITIONS: DSCL0_LB_MEMORY_CTRL__LB_MAX_PARTITIONS_MASK,
     AUTOCAL_MODE: DSCL0_DSCL_AUTOCAL__AUTOCAL_MODE_MASK,
@@ -3061,6 +3102,7 @@ pub static DPP_MASK: dcn2_dpp_mask = dcn2_dpp_mask {
     CM_DGAM_LUT_MODE: CM0_CM_DGAM_CONTROL__CM_DGAM_LUT_MODE_MASK,
     CM_TEST_DEBUG_INDEX: CM0_CM_TEST_DEBUG_INDEX__CM_TEST_DEBUG_INDEX_MASK,
     CNVC_BYPASS: CNVC_CFG0_FORMAT_CONTROL__CNVC_BYPASS_MASK,
+    FORMAT_CONTROL__ALPHA_EN: CNVC_CFG0_FORMAT_CONTROL__ALPHA_EN_MASK,
     FORMAT_EXPANSION_MODE: CNVC_CFG0_FORMAT_CONTROL__FORMAT_EXPANSION_MODE_MASK,
     CNVC_SURFACE_PIXEL_FORMAT: CNVC_CFG0_CNVC_SURFACE_PIXEL_FORMAT__CNVC_SURFACE_PIXEL_FORMAT_MASK,
     CUR0_MODE: CNVC_CUR0_CURSOR0_CONTROL__CUR0_MODE_MASK,
