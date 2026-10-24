@@ -4,9 +4,10 @@
 sandboxed WASM module.**
 
 A bare-metal Rust kernel. No Unix. No POSIX. No root. No legacy from
-the '70s. Apps, drivers, and even a from-scratch web browser all run
-inside the same WASM trust boundary — the only thing outside it is the
-microkernel itself.
+the '70s. Apps, drivers — WiFi, audio, even the GPU — and a from-scratch
+web browser all run inside the same WASM trust boundary. The kernel
+underneath stays small in what it *trusts*, and keeps shrinking: every
+driver that can live in a module moves there.
 
 ---
 
@@ -27,29 +28,33 @@ start over today?**
 - **Encrypted by default** — every byte on disk is AES-256-GCM at rest
 
 The kernel is written in Rust (`no_std`, nightly, x86_64) and boots
-straight from UEFI. Everything above it — the compositor, the panels,
-the file browser, the text editor, the WiFi driver, the web browser — is
-a signed, capability-gated WASM module.
+straight from UEFI. Everything above it — the panels, the file browser,
+the text editor, the password manager, the WiFi and GPU drivers, the web
+browser — is a signed, capability-gated WASM module. And where the legacy
+world is still needed, it gets a cage of its own: a full Linux with
+Firefox runs in a microVM, as one tiled window.
 
 ---
 
 ## What It Can Do Today
 
-A tiling desktop with real apps, networking, encrypted storage, and a
-native web browser — running on bare metal (Intel N100 NUC, AMD Ryzen
-laptop) and in QEMU.
+A tiling desktop with real apps, networking, encrypted storage, GPU
+drivers of its own, and a native web browser — running on bare metal
+(an Intel Tiger Lake NUC, an AMD Ryzen 5 5500U laptop) and in QEMU.
 
 ```
 # Desktop
 Mod+D                    # App launcher (drun) — search + Enter to launch
+Mod+F                    # True fullscreen for any window (Firefox: F11 / video too)
 loft                     # File browser: grid/list, copy/cut/paste, sortable columns
 spell                    # Text editor: tabs, syntax highlight, save to npkFS
 iris                     # Image viewer (PNG)
 tune                     # Audio player (MP3, WAV) — folder as playlist
 snap                     # Screenshot → npkFS
+vault                    # Password manager on the kernel's keyvault
+link                     # Network card: address, networks, connect/forget
 beak [url]               # Native web browser (from scratch, no Linux, own JS)
 firefox                  # Firefox in a Linux microVM, video decoded on the GPU
-librewolf                # LibreWolf in a Linux microVM (compatibility browser)
 
 # The intent loop (terminal)
 npk> status              # System overview (cores, RAM, disk, net)
@@ -62,10 +67,11 @@ npk> update              # OTA update of kernel, modules and assets (signed)
 npk> cert list           # TLS root store — inspect, add, drop a CA
 npk> driver wifi_rtl8822ce  # Start a driver module by hand (normally autostart)
 npk> wlan                # Link report: rate, retries, airtime, handshake rung
-npk> wlan set ssid <name> # WiFi settings; passphrase: store /sys/config/wifi_psk
+npk> wlan connect <name> # Join a network; the password goes into the vault
 npk> python fib.py       # CPython 3.13 as a WASM module (own WASI layer)
 npk> forge run <mod>     # Run a module on the compiler — A/B against wasmi
-npk> cores               # Trustworthy per-core CPU instrumentation
+npk> cores               # Per-core CPU and per-engine GPU load
+npk> usb                 # What the USB driver enumerated, with descriptors
 ```
 
 Every operation is capability-gated. No ambient authority, no sudo.
@@ -79,26 +85,29 @@ encrypted at rest.
 ```
  ┌──────────────────────────────────────────────────────────┐
  │  WASM apps & drivers (sandboxed, capability-gated)         │
- │  shade  — tiling compositor (theme, panels, animation)     │
- │  bar / dock  — top + bottom panels                         │
- │  drun / loft / spell / iris / snap — launcher + apps       │
- │  beak   — from-scratch web browser (HTML/CSS engine)       │
+ │  bar + dock, or deck — panels with status items            │
+ │  drun / loft / spell / iris / tune / snap / vault / link   │
+ │  beak   — from-scratch web browser (HTML/CSS/JS engine)    │
+ │  gpu_intel_tgl / gpu_amd_renoir — GPU drivers (from Linux) │
  │  wifi_* / wifid / aml / i2c_hid / audio_hda — drivers      │
  ├──────────────────────────────────────────────────────────┤
  │  MicroVM (compatibility layer)                             │
  │  VT-x / AMD-V hypervisor · custom Linux 6.18 · virtio      │
- │  bridges · 9p↔npkFS · runs LibreWolf as a tiled window     │
+ │  virtio-gpu native context — the guest's Mesa on our GPU   │
+ │  9p↔npkFS · runs Firefox as a tiled window                 │
  ├──────────────────────────────────────────────────────────┤
  │  WASM engine: forge (WASM→x86-64, W^X) · wasmi fallback    │
  │  host ABI (npk_*) · wasi · npk_scene_commit — widgets      │
  │  npk_fs_* · npk_http_request · npk_input · npk_battery     │
- │  npk_pci/mmio/dma — capability-gated driver ABI            │
+ │  npk_pci/mmio/dma/irq — capability-gated driver ABI        │
+ │  gpudev — a GPU module becomes the system's GPU service    │
  ├──────────────────────────────────────────────────────────┤
  │  Kernel (Rust, no_std)                                     │
  │  SMP scheduler (work-stealing + stackful fibers)           │
- │  npkFS v4 (content-addressed, CoW, encrypted)              │
+ │  npkFS v4 (content-addressed, CoW, encrypted) · keyvault   │
  │  Crypto (AES-256-GCM · BLAKE3 · TLS 1.3 · ECDSA P-384)     │
- │  Capability vault · network stack · GPU HAL · drivers      │
+ │  Shade compositor · network stack · IOMMU (VT-d/AMD-Vi)    │
+ │  Capability vault · NVMe / xHCI / NIC drivers · GOP        │
  ├──────────────────────────────────────────────────────────┤
  │  Hardware: x86_64, UEFI                                    │
  └──────────────────────────────────────────────────────────┘
@@ -185,22 +194,40 @@ that cannot be decoded is worse than a slow one — fetches each artifact
 under its content hash, and resumes a broken download with a range
 request.
 
-**Drivers** — NVMe, xHCI USB (keyboard + mouse, HID boot protocol),
-Intel I226-V and RTL8153 USB Ethernet, Intel Xe GPU (native 4K@60Hz
-HDMI 2.0 + a Gen-12 BCS blitter for compositing), GOP framebuffer
-elsewhere, Intel HDA audio, an I2C-HID touchpad, an AML interpreter
-driving firmware `_BST`/`_BIF` for a vendor-independent battery %, and
-WiFi for Intel AX200 and Realtek RTL8822CE. WiFi, the touchpad, AML and
-audio run as **WASM modules** on a shared host-ABI crate (`npk_sys`);
-hardware drivers are ported 1:1 from Linux.
+**Drivers** — in the kernel: NVMe, xHCI USB (HID after Linux `usbhid`,
+combined receivers, hotplug after `hub.c`), Intel I226-V and RTL8153 USB
+Ethernet, the UEFI GOP framebuffer, and the IOMMU (Intel VT-d, AMD-Vi),
+which can confine a device to its own page table. As **WASM modules** on a
+shared host-ABI crate (`npk_sys`): both GPU drivers, Intel HDA audio
+(including sound to a DisplayPort monitor), an I2C-HID touchpad, an AML
+interpreter driving firmware `_BST`/`_BIF` for a vendor-independent
+battery %, and WiFi for Intel AX200 and Realtek RTL8822CE. Hardware
+drivers are ported 1:1 from Linux — function by function, checked
+against Linux's own code on binaries read off the device.
+
+**GPU** — the kernel drives no GPU itself any more. It boots on GOP and
+the CPU; a GPU module that comes up registers as the `gpudev` service,
+and from then on the desktop is a scene list composed by the GPU's own
+compute shaders, compiled at build time. `gpu_intel_tgl` is i915 for
+Tiger Lake (display readout and takeover, all engines with execlists,
+preemption, DP audio). `gpu_amd_renoir` is amdgpu for Renoir/Lucienne
+(PSP firmware load, SMU, GFX, SDMA, VCN 2.2 + JPEG 2.0 video, GPU
+recovery); its display core (DC, DCN 2.1) is being ported 1:1 and runs
+dormant until it is complete. On both, a microVM guest's Mesa reaches
+the card through a **virtio-gpu native context** — the guest gets real
+3D and hardware video decode, the module checks every command.
 
 **WiFi** — iwlwifi (AX200) and rtw88 (RTL8822CE) ported function by
 function: firmware load, scan, roaming, a WPA2 four-way handshake in a
 resident `wifid` supplicant with CCMP replay checks, A-MPDU aggregation,
-fq_codel and AQL, which budgets airtime rather than bytes. The `wlan`
-intent prints the driver's own report — rate, retries, airtime,
-handshake rung, ring state — next to the kernel's view, so a bad link
-says *which* stage is bad.
+fq_codel and AQL, which budgets airtime rather than bytes. `wifid` is
+also the network manager: it picks the best known network, remembers
+where it last joined for a fast start, and takes a fresh DHCP lease when
+it moves. Known networks and their passwords live in the keyvault, not in
+a file; the `link` card shows and manages them. The `wlan` intent prints
+the driver's own report — rate, retries, airtime, handshake rung, ring
+state — next to the kernel's view, so a bad link says *which* stage is
+bad.
 
 **forge — the engine** — the default way a WASM module runs is our own
 single-pass **WASM→x86-64 compiler inside the kernel**.
@@ -227,9 +254,13 @@ would, plus two directories. `python fib.py`, stdlib from a bundle in
 **Desktop (Shade)** — Hyprland-style dwindle tiling compositor: rounded
 corners via SDF, light/dark `theme=auto` following wallpaper luminance,
 glass panels tinted from the wallpaper, smooth swap animations,
-per-window scrolling. The
-top bar and bottom dock are themselves WASM **panels**, alpha-composited
-translucent over the wallpaper.
+per-window scrolling, true fullscreen over the whole screen, and one UI
+scale factor (fractions included) that every widget app, the window
+chrome and the terminal follow live. The panels are themselves WASM
+apps, alpha-composited translucent over the wallpaper: a top bar plus
+bottom dock, or `deck` — one bottom panel with launcher, workspaces,
+window list, clock and **status items** (volume, network, …), whose
+popups are windows of their own.
 
 **Widget platform** — apps build a declarative `Widget` tree with the
 `nopeek_widgets` SDK and commit it through one host function; the
@@ -243,15 +274,27 @@ Input, Phosphor icon atlas, per-app capabilities, and file associations
 copy/cut/paste/rename), `spell` (text editor: tabs, multi-language
 syntax highlight, markdown preview), `iris` (image viewer), `tune`
 (audio player: MP3 + WAV, folder as playlist, seek), `snap`
-(screenshot), `drun` (launcher), `top`/`cores` (system monitors).
+(screenshot), `vault` (password manager: entries, generator, keyboard
+shortcuts), `link` (network card), `drun` (launcher), `top`/`cores`
+(system monitors).
+
+**Keyvault** — a secret is not a file. Secrets live in one encrypted
+vault object with two tiers and two data keys: a **system tier** (WiFi
+passwords) unlocked by a device key derived from the disk key, so the
+network comes up without anyone typing, and handed out only against a
+capability; and a **user tier** (website passwords, notes) behind a
+vault password of its own. The device key opens the system tier, never
+the user tier. No generic file call reaches either — only the vault.
 
 **MicroVM** — a per-app KVM-style hypervisor inside the kernel (Intel
 VT-x + EPT and AMD-V + NPT, vendor-symmetric), running a custom
-9.5 MB **Linux 6.18-nopeek** build. virtio-blk / -net / -gpu / -input
-backends, a 9p bridge that mounts npkFS into the guest, profile-image
-persistence, guest-SMP (one vCPU per host worker core), sound and
-networking. It runs **LibreWolf** as a tiled window — the
-compatibility browser for the legacy web.
+**Linux 6.18-nopeek** build. virtio-blk / -net / -gpu / -input / -balloon
+backends (freed guest pages go back to the host), a 9p bridge that mounts
+npkFS into the guest, profile-image persistence, guest-SMP (one vCPU per
+host worker core), sound and networking. Its first app is **Firefox** as
+a tiled window — WebGL and hardware video decode through VA-API (Intel's
+iHD, AMD's radeonsi) over the native context. The app model is generic:
+each Linux app is a squashfs plus a home image, delivered over OTA.
 
 ---
 
@@ -324,10 +367,12 @@ drift, this paragraph will.
 | TLS | 1.3 (RFC 8446) | X25519 + P-384, RustCrypto |
 | OTA | Signed manifests (ECDSA P-384), SHA-384-named blobs | Rollback-protected, cache-proof |
 | Identity | Passphrase → Argon2id keyslot → disk key | No users, no accounts |
-| GPU | Intel Xe Gen 12.2, else UEFI GOP | 4K@60Hz HDMI 2.0, BCS blitter |
-| Compositor | Shade (native Rust) | Dwindle tiling, layer-based |
+| GPU | Driver modules (i915 TGL, amdgpu Renoir), else GOP + CPU | Desktop on the GPU, the CPU stays the fallback |
+| Compositor | Shade (native Rust) | Dwindle tiling, scene lists |
 | SMP | N cores (no limit) | Work-stealing + stackful fibers |
 | Linux apps | MicroVM (VT-x / AMD-V) | Vendor HAL, mini-Linux + virtio |
+| Guest 3D/video | virtio-gpu native context | Guest Mesa on the real card, every command checked |
+| Secrets | Keyvault, two tiers | A secret is not a file |
 | Hardware drivers | Ported 1:1 from Linux | Linux is the reference truth |
 
 ---
@@ -347,8 +392,7 @@ sudo pacman -S edk2-ovmf mtools gdisk qemu-system-x86
 ./build.sh qemu-gui              # Serial + VGA window
 ./build.sh debug                 # + GDB stub on :1234
 ./build.sh release               # Compile + sign (ECDSA P-384) → release/
-./build.sh usb /dev/sdX          # USB installer (~30 MB, browser via OTA)
-./build.sh usb-full /dev/sdX     # USB installer + LibreWolf bundle (~290 MB)
+./build.sh usb /dev/sdX          # USB installer (~30 MB, Firefox via OTA)
 ```
 
 ### Release + OTA flow
@@ -395,7 +439,7 @@ nopeekOS/
 │   ├── storage/npkfs/        # Content-addressed filesystem
 │   ├── net/                  # Ethernet → ARP → IPv4 → TCP/UDP, DNS/DHCP/NTP
 │   ├── smp/                  # MADT, SIPI, work-stealing + fibers
-│   ├── gpu/                  # GOP + Intel Xe backend
+│   ├── gpu/                  # GOP + gpudev (the GPU-module service)
 │   ├── shade/                # Compositor: tiling, widgets, panels
 │   ├── intent/               # The intent loop (dispatch, fs, net, http, ...)
 │   ├── microvm/              # VT-x / AMD-V hypervisor + virtio + Linux loader
@@ -408,8 +452,11 @@ nopeekOS/
     ├── loft/ spell/ iris/    #   File browser, editor, image viewer
     ├── tune/                 #   Audio player (MP3/WAV -> kernel mixer)
     ├── snap/ drun/ top/      #   Screenshot, launcher, monitor
-    ├── bar/ dock/ volume/    #   Panels + volume overlay
+    ├── vault/ link/          #   Password manager, network card
+    ├── bar/ dock/ deck/ volume/  # Panels + volume
     ├── pick/ wallpaper/      #   File-dialog portal, wallpaper decoder
+    ├── gpu_intel_tgl/ gpu_amd_renoir/  # GPU drivers (i915, amdgpu)
+    ├── gpu_scene/ gpu_shaders/  #   Shared scene compositor + shaders
     ├── wifi_ax200/ wifi_rtl8822ce/  # WiFi drivers
     ├── wifid/ aml/ i2c_hid/  #   WPA supplicant, ACPI AML, touchpad
     ├── audio_hda/            #   Intel HDA driver as WASM
@@ -428,10 +475,15 @@ nopeekOS/
 4. **256-bit tokens** — CSPRNG, Grover-resistant, least-privilege
 5. **Temporal scoping** — module capabilities expire; rights only shrink
    on delegation
-6. **One trust boundary** — the WASM sandbox contains apps *and* drivers
-7. **Signed OTA** — signed manifests with rollback protection, every
+6. **One trust boundary** — the WASM sandbox contains apps *and* drivers;
+   a module's memory is capped, so a runaway module ends itself, not
+   the machine
+7. **Devices behind the IOMMU** — VT-d / AMD-Vi can confine a device's
+   DMA to the pages it was given (today opt-in, for the GPU)
+8. **Secrets in the keyvault** — never a file, handed out by policy
+9. **Signed OTA** — signed manifests with rollback protection, every
    artifact checked against its SHA-384
-8. **TLS 1.3 by default** — everything the system fetches goes over TLS;
+10. **TLS 1.3 by default** — everything the system fetches goes over TLS;
    plaintext HTTP only for literal private addresses when
    `net.allow_plain_http` is on
 
@@ -468,8 +520,9 @@ nopeekOS is dual-licensed.
 
 Bundled third-party components keep their own licenses: Inter and IBM
 Plex fonts (SIL OFL 1.1, texts in `release/assets/`), the Phosphor icons
-(MIT), CPython (PSF), and the microVM guest (Linux: GPL-2.0, LibreWolf:
-MPL-2.0).
+(MIT), CPython (PSF), the GPU firmware the AMD driver loads (AMD's
+redistributable license), and the microVM guest (Linux: GPL-2.0, Mesa:
+MIT, Firefox: MPL-2.0).
 
 **Contributions** are welcome, but can only be merged under a
 contributor license agreement that keeps dual licensing possible — ask

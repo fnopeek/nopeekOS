@@ -48,10 +48,7 @@ See README.md for the full vision and phase planning.
 ./build.sh vbox         # Build + VirtualBox (demo)
 ./build.sh vbox-clean   # Remove VirtualBox VM
 ./build.sh installer    # Two-pass installer build (bundled assets)
-./build.sh usb /dev/sdX # Build installer + flash USB stick
-./build.sh usb-full /dev/sdX  # USB stick + LibreWolf bundle (~290 MB,
-                              # browser ready on first boot, no OTA needed)
-./build.sh qemu-installer-full  # QEMU installer test with bundle
+./build.sh usb /dev/sdX # Build installer + flash USB stick (Firefox via OTA)
 ```
 
 ## Current Status

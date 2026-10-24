@@ -22,7 +22,7 @@
 #   qemu-installer       Installer + run (wipes disk, fresh install)
 #   qemu-installer-gui   Same with framebuffer
 #   usb /dev/sdX         Build self-contained installer + flash USB
-#                        (bundles all modules; usb-full adds the browser)
+#                        (bundles all modules; Linux apps arrive via OTA)
 #   release              Sign kernel + modules + assets (ECDSA P-384)
 #   sign-modules         Sign only release/modules/ (kernel untouched)
 #
@@ -264,9 +264,8 @@ build() {
 build_installer_disk() {
     log "Building installer boot disk..."
     rm -f "$INSTALLER_DISK"
-    # Size the ESP to the actual kernel.efi + headroom: the
-    # bundle-userspace (usb-full) build bakes the LibreWolf sqfs in via
-    # include_bytes!, which a fixed-size image cannot hold. +64 MB covers
+    # Size the ESP to the actual kernel.efi + headroom: the installer
+    # kernel embeds every bundled asset via include_bytes!. +64 MB covers
     # GPT + FAT metadata.
     local efi_mb=$(( ($(stat -c%s "$KERNEL_EFI") / 1024 / 1024) + 1 ))
     local disk_mb=$(( efi_mb + 64 ))
@@ -368,23 +367,6 @@ build_installer() {
         touch "$ASSETS_DIR/microvm-initramfs.cpio.gz"
     fi
 
-    # MicroVM userspace bundle (LibreWolf squashfs). Only staged when
-    # BUNDLE_USERSPACE=1; the `bundle-userspace` cargo feature then
-    # includes it via include_bytes!, so first boot has the browser
-    # without any OTA. Otherwise the asset arrives via the next `update`
-    # from GitHub Releases (manifest.large url= override).
-    if [ "${BUNDLE_USERSPACE:-0}" = "1" ]; then
-        SQFS_SRC="$PROJECT_DIR/release/assets/large/microvm-userspace.sqfs"
-        if [ -f "$SQFS_SRC" ]; then
-            cp "$SQFS_SRC" "$ASSETS_DIR/microvm-userspace.sqfs"
-            ok "  microvm: userspace.sqfs ($(du -h "$ASSETS_DIR/microvm-userspace.sqfs" | cut -f1)) [BUNDLED]"
-        else
-            warn "  userspace.sqfs missing: $SQFS_SRC — run ./build.sh release-large first"
-            warn "  BUNDLE_USERSPACE=1 was requested but the source is absent; falling back to OTA"
-            export BUNDLE_USERSPACE=0
-        fi
-    fi
-
     # Wallpapers: every file in assets/wallpapers/ goes into the installer
     # and from there straight into the user's pictures/wallpapers/. They are
     # content, not system: no OTA, no system copy. `include_bytes!` needs a
@@ -417,7 +399,7 @@ build_installer() {
     # (produced by a prior release build). The .version file lets
     # `intent::install` and `intent::update::update_all_modules` tell
     # that a bundled module is up to date; without it they redownload.
-    for mod in top debug wallpaper drun dock bar loft spell pick iris snap beak vault volume tune testdisk aml wifid wifi_ax200 audio_hda; do
+    for mod in top debug wallpaper drun dock bar deck loft spell pick iris snap beak vault volume tune testdisk aml wifid wifi_ax200 audio_hda; do
         WASM_SRC="$PROJECT_DIR/release/modules/${mod}.wasm"
         VER_SRC="$PROJECT_DIR/release/modules/${mod}.version"
 
@@ -439,14 +421,8 @@ build_installer() {
 
     # Pass 2: installer kernel (embeds the Pass-1 kernel.efi + assets
     # via the `installer` Cargo feature → include_bytes!).
-    # BUNDLE_USERSPACE=1 also bakes in the LibreWolf sqfs
-    # via the `bundle-userspace` feature.
     log "Pass 2: building installer kernel..."
     PASS2_FEATURES="installer"
-    if [ "${BUNDLE_USERSPACE:-0}" = "1" ]; then
-        PASS2_FEATURES="installer,bundle-userspace"
-        log "  with bundle-userspace (browser ready on first boot)"
-    fi
     cargo build \
         --release \
         --locked \
@@ -903,16 +879,10 @@ Installer / release:
   installer            Two-pass installer build (kernel.efi + bundled assets)
   qemu-installer       Installer + run (wipes NVMe, attaches installer USB)
   qemu-installer-gui   Same with framebuffer (QEMU_RES, default 2560x1440)
-  qemu-installer-full  Same as qemu-installer-gui but bundles the
-                       LibreWolf userspace sqfs (~261 MB) so the
-                       fresh install has the browser ready on first
-                       boot without any OTA round-trip
-  usb /dev/sdX         Build fully self-contained installer + flash USB.
-                       Bundles EVERYTHING (microVM Linux+initramfs, all
-                       WASM modules, fonts/icons/wallpapers AND the
-                       LibreWolf browser sqfs) → USB ~290 MB, first boot
-                       works fully offline, no OTA needed post-install.
-  usb-full /dev/sdX    Alias of `usb` (kept for back-compat).
+  usb /dev/sdX         Build the installer + flash USB. Bundles the
+                       microVM Linux + initramfs, all WASM modules,
+                       fonts/icons/wallpapers; a Linux app's squashfs
+                       (Firefox) arrives via OTA `update` after install.
   release              Sign kernel + modules + assets (ECDSA P-384)
   sign-modules         Sign ONLY release/modules/ + rewrite their manifest.
                        Baut den Kernel NICHT — eine Modulaenderung kostet
@@ -1004,17 +974,6 @@ case "${1:-}" in
         wipe_disk_img
         run_qemu_generic gui kvm installer
         ;;
-    qemu-installer-full)
-        # Same as qemu-installer but bakes the LibreWolf userspace sqfs
-        # into the installer kernel, so the QEMU NVMe is seeded with the
-        # browser bundle and `browser` works without `update`. Tests the
-        # bundled-browser flow end-to-end.
-        check_deps
-        BUNDLE_USERSPACE=1 build_installer
-        build_installer_disk
-        wipe_disk_img
-        run_qemu_generic gui kvm installer
-        ;;
     debug)
         check_deps
         build
@@ -1028,21 +987,11 @@ case "${1:-}" in
         ;;
     usb)
         # Bootable install stick. Bundles microVM Linux + initramfs, all
-        # WASM modules, fonts/icons/wallpapers, but not the LibreWolf
-        # sqfs: embedding it makes an EFI image too large for some
-        # firmware to LoadImage (no contiguous allocation that big), which
-        # bootloops. The browser bundle arrives via OTA `update` after
-        # install, or use `usb-full` on firmware that tolerates it.
+        # WASM modules, fonts/icons/wallpapers. A Linux app's squashfs is
+        # not embedded: an EFI image that large fails LoadImage on some
+        # firmware (no contiguous allocation), so it arrives via OTA.
         check_deps
         build_installer
-        write_usb "${2:-}"
-        ;;
-    usb-full)
-        # Same as `usb` but embeds the LibreWolf sqfs, so a fresh install
-        # has the browser with no OTA. The resulting EFI fails to load on
-        # some firmware; use `usb` there.
-        check_deps
-        BUNDLE_USERSPACE=1 build_installer
         write_usb "${2:-}"
         ;;
     build-linux)
