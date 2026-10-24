@@ -589,11 +589,12 @@ pub fn dm_hw_init(adev: &mut amdgpu_device) -> i32 {
     amdgpu_dm_init(adev)
 }
 
-/// Whether `set gpu_amd_renoir.dc on` asks for Display Core on this boot.
+/// Whether `set gpu_amd_renoir.dc on` (or `live`) asks for Display Core on
+/// this boot.
 pub fn dc_requested() -> bool {
     let mut buf = [0u8; 8];
     let n = npk_sys::config_get(b"gpu_amd_renoir.dc", &mut buf);
-    n > 0 && matches!(&buf[..n as usize], b"on" | b"1")
+    n > 0 && matches!(&buf[..n as usize], b"on" | b"1" | b"live")
 }
 
 /// What `dm_hw_init` built and found, one line per object, for reading
@@ -698,4 +699,200 @@ pub fn mmhub_read_system_context(adev: &amdgpu_device) -> crate::dc::dc_phy_addr
     pa_config.is_hvm_enabled = adev.mode_info.gpu_vm_support;
 
     pa_config
+}
+
+/// What the firmware left on the screen before DC takes over: the OTG's
+/// timing and the surface its HUBP scans out.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct firmware_scanout {
+    pub link: usize,
+    pub tg_inst: u32,
+    pub timing: crate::dc_hw_types::dc_crtc_timing,
+    pub address: u64,
+    pub pitch: i32,
+    pub width: i32,
+    pub height: i32,
+    /// `enum surface_pixel_format`.
+    pub format: u32,
+}
+
+/// The eDP the firmware lit (DIG enabled, front end and OTG as
+/// `dc_validate_boot_timing` finds them) and the HUBP feeding that OTG.
+/// Read before `dc_hardware_init`, whose `init_pipes` blanks every pipe.
+pub fn dm_read_firmware_scanout(adev: &amdgpu_device, dc: &crate::dc::dc) -> Option<firmware_scanout> {
+    use crate::dc_helper::{reg_get, reg_get_n};
+    use crate::dcn21_link_encoder::ENGINE_ID_UNKNOWN;
+    let li = dc.links.iter().position(|l| l.connector_signal == LF_SIGNAL_TYPE_EDP)?;
+    let enc = dc.links[li].link_enc.as_ref()?;
+    if !(enc.funcs().is_dig_enabled.unwrap())(adev, enc) {
+        return None;
+    }
+    let enc_inst = (enc.funcs().get_dig_frontend.unwrap())(adev, enc);
+    if enc_inst == ENGINE_ID_UNKNOWN {
+        return None;
+    }
+    let pool = dc.res_pool.as_deref()?;
+    let se = (0..pool.stream_enc_count as usize).find(|&i| pool.stream_enc[i].as_ref().unwrap().base().id as u32 == enc_inst)?;
+    let e = pool.stream_enc[se].as_ref().unwrap();
+    let tg_inst = (e.funcs().dig_source_otg.unwrap())(adev, e);
+    if tg_inst >= pool.timing_generator_count {
+        return None;
+    }
+    let tg = pool.timing_generators[tg_inst as usize].as_deref()?;
+
+    let mut timing = crate::dc_hw_types::dc_crtc_timing::default();
+    (tg.funcs().get_hw_timing.unwrap())(adev, tg, &mut timing);
+    let mut s = crate::dcn20_optc::dcn_otg_state::default();
+    crate::dcn20_optc::optc1_read_otg_state(adev, tg, &mut s);
+    // optc1_program_timing writes polarity 0 for a positive sync.
+    timing.flags.HSYNC_POSITIVE_POLARITY = s.h_sync_a_pol == 0;
+    timing.flags.VSYNC_POSITIVE_POLARITY = s.v_sync_a_pol == 0;
+    let dp = pool.dp_clock_source.as_deref()?;
+    (dp.funcs().get_pixel_clk_frequency_100hz.unwrap())(adev, dp, tg_inst, &mut timing.pix_clk_100hz);
+    (e.funcs().dp_get_pixel_format.unwrap())(adev, e, &mut timing.pixel_encoding, &mut timing.display_color_depth);
+    timing.scan_type = SCANNING_TYPE_NODATA;
+
+    for h in pool.hubps.iter().take(pool.pipe_count as usize).flatten() {
+        let c = h.rsm();
+        let [vtg, blank] = reg_get_n!(adev, c, DCHUBP_CNTL, HUBP_VTG_SEL, HUBP_BLANK_EN);
+        if vtg != tg_inst || blank != 0 {
+            continue;
+        }
+        let lo = reg_get!(adev, c, DCSURF_PRIMARY_SURFACE_ADDRESS, PRIMARY_SURFACE_ADDRESS);
+        let hi = reg_get!(adev, c, DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, PRIMARY_SURFACE_ADDRESS_HIGH);
+        let pitch = reg_get!(adev, c, DCSURF_SURFACE_PITCH, PITCH) as i32 + 1;
+        let [width, height] = reg_get_n!(adev, c, DCSURF_PRI_VIEWPORT_DIMENSION, PRI_VIEWPORT_WIDTH, PRI_VIEWPORT_HEIGHT);
+        let pf = reg_get!(adev, c, DCSURF_SURFACE_CONFIG, SURFACE_PIXEL_FORMAT);
+        let blue_bar = reg_get!(adev, c, HUBPRET_CONTROL, CROSSBAR_SRC_CB_B);
+        // The mapping of hubp1_program_pixel_format, 32-bit formats only.
+        let format = match (pf, blue_bar) {
+            (8, 2) => SURFACE_PIXEL_FORMAT_GRPH_ARGB8888,
+            (8, _) => SURFACE_PIXEL_FORMAT_GRPH_ABGR8888,
+            (10, 2) => SURFACE_PIXEL_FORMAT_GRPH_ARGB2101010,
+            (10, _) => SURFACE_PIXEL_FORMAT_GRPH_ABGR2101010,
+            _ => return None,
+        };
+        return Some(firmware_scanout {
+            link: li,
+            tg_inst,
+            timing,
+            address: (hi as u64) << 32 | lo as u64,
+            pitch,
+            width: width as i32,
+            height: height as i32,
+            format,
+        });
+    }
+    None
+}
+
+/// Whether `set gpu_amd_renoir.dc live` asks DC to drive the display.
+pub fn dc_live_requested() -> bool {
+    let mut buf = [0u8; 8];
+    let n = npk_sys::config_get(b"gpu_amd_renoir.dc", &mut buf);
+    n > 0 && &buf[..n as usize] == b"live"
+}
+
+/// DC takes the panel over from the firmware: the rest of `amdgpu_dm_init`
+/// DC needs (`dc_hardware_init`, the system context, the boot detection of
+/// `amdgpu_dm_initialize_drm_device`), then what an atomic commit asks of
+/// DC for one stream and one plane — the stream in the timing the firmware
+/// set, the plane on the surface it scans out, so the picture the kernel
+/// draws stays. DCN 2.1 has no seamless boot: the panel goes dark between
+/// `dc_hardware_init` and the commit.
+pub fn dm_take_over_display(adev: &mut amdgpu_device) -> bool {
+    use crate::{dc, dc_state, dc_stream, link_detection};
+    let Some(mut dcb) = adev.dm.dc.take() else { return false };
+    let r = dm_take_over(adev, &mut dcb);
+    adev.dm.dc = Some(dcb);
+    return r;
+
+    fn dm_take_over(adev: &amdgpu_device, dc: &mut dc::dc) -> bool {
+        let Some(fw) = dm_read_firmware_scanout(adev, dc) else {
+            Line::new().s("dc live: no firmware scanout on an eDP, staying with the firmware").say();
+            return false;
+        };
+        let t = &fw.timing;
+        Line::new().s("dc live: firmware scanout otg ").dec(fw.tg_inst as u64).s(" ").dec(t.h_addressable as u64)
+            .s("x").dec(t.v_addressable as u64).s(" total ").dec(t.h_total as u64).s("x").dec(t.v_total as u64)
+            .s(" pclk ").dec(t.pix_clk_100hz as u64).s("00 Hz surface ").hex64(fw.address).s(" pitch ")
+            .dec(fw.pitch as u64).s(" ").dec(fw.width as u64).s("x").dec(fw.height as u64).s(" format ")
+            .dec(fw.format as u64).say();
+
+        dc::dc_hardware_init(adev, dc);
+
+        if adev.flags & AMD_IS_APU != 0 && adev.asic_type >= CHIP_CARRIZO {
+            let pa_config = mmhub_read_system_context(adev);
+            dc::dc_setup_system_context(adev, dc, &pa_config);
+        }
+
+        for l in 0..dc.link_count as usize {
+            if dc.links[l].connector_signal == LF_SIGNAL_TYPE_VIRTUAL {
+                continue;
+            }
+            crate::amdgpu_dm_helpers::amdgpu_dm_connector_init(dc, l);
+            let mut new_connection_type = 0;
+            if !link_detection::dc_link_detect_connection_type(adev, dc, l, &mut new_connection_type) {
+                drm_err("KMS: Failed to detect connector");
+            }
+            link_detection::dc_link_detect(adev, dc, l, link_detection::dc_detect_reason::DETECT_REASON_BOOT);
+        }
+        if dc.links[fw.link].local_sink.is_none() {
+            Line::new().s("dc live: no sink on the eDP link").say();
+            return false;
+        }
+
+        let Some(stream) = dc_stream::dc_create_stream_for_sink(dc, fw.link) else { return false };
+        {
+            let st = dc.streams[stream].as_deref_mut().unwrap();
+            st.timing = fw.timing;
+            st.src = crate::dc_hw_types::rect { x: 0, y: 0, width: t.h_addressable as i32, height: t.v_addressable as i32 };
+            st.dst = st.src;
+            st.output_color_space = COLOR_SPACE_SRGB;
+            st.out_transfer_func.r#type = TF_TYPE_PREDEFINED;
+            st.out_transfer_func.tf = TRANSFER_FUNCTION_SRGB;
+        }
+
+        let plane = dc_stream::dc_create_plane_state(dc);
+        {
+            let pl = dc.planes[plane].as_deref_mut().unwrap();
+            pl.format = fw.format;
+            pl.plane_size.surface_size = crate::dc_hw_types::rect { x: 0, y: 0, width: fw.width, height: fw.height };
+            pl.plane_size.surface_pitch = fw.pitch;
+            pl.src_rect = pl.plane_size.surface_size;
+            pl.dst_rect = crate::dc_hw_types::rect { x: 0, y: 0, width: t.h_addressable as i32, height: t.v_addressable as i32 };
+            pl.clip_rect = pl.dst_rect;
+            pl.tiling_info.swizzle = DC_SW_LINEAR;
+            pl.rotation = ROTATION_ANGLE_0;
+            pl.visible = true;
+            pl.color_space = COLOR_SPACE_SRGB;
+            pl.address.r#type = PLN_ADDR_TYPE_GRAPHICS;
+            pl.address.u[0] = fw.address;
+            pl.global_alpha_value = 0xff;
+            pl.in_transfer_func.r#type = TF_TYPE_PREDEFINED;
+            pl.in_transfer_func.tf = TRANSFER_FUNCTION_SRGB;
+        }
+
+        let mut context = dc_state::dc_state_create_current_copy(dc);
+        let added = dc_state::dc_state_add_stream(dc, &mut context, stream);
+        let plane_added = dc_state::dc_state_add_plane(dc, stream, plane, &mut context);
+        let valid = crate::dc_resource::dc_validate_global_state(dc, &mut context, DC_VALIDATE_MODE_AND_PROGRAMMING);
+        dc_state::dc_state_release(dc, context);
+        Line::new().s("dc live: add stream ").dec(added as u64).s(", add plane ").dec(plane_added as u64)
+            .s(", validate ").dec(valid as u64).say();
+        if added != crate::dc_types::dc_status::DC_OK || !plane_added || valid != crate::dc_types::dc_status::DC_OK {
+            return false;
+        }
+
+        let streams = [stream];
+        let params = dc::dc_commit_streams_params {
+            streams: &streams,
+            power_source: dc_state::dc_power_source_type::DC_POWER_SOURCE_AC,
+        };
+        let committed = dc::dc_commit_streams(adev, dc, &params);
+        let mut srf = [dc::dc_surface_update { surface: plane, ..Default::default() }];
+        let updated = dc::dc_update_planes_and_stream(adev, dc, &mut srf, stream, None);
+        Line::new().s("dc live: commit streams ").dec(committed as u64).s(", update planes ").dec(updated as u64).say();
+        committed == crate::dc_types::dc_status::DC_OK && updated
+    }
 }

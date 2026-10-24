@@ -113,7 +113,7 @@ impl dcn21_hubp {
         self.base.funcs.expect("hubp funcs").ops()
     }
 
-    fn rsm(&self) -> (&'static dcn_hubp2_registers, &'static dcn_hubp2_shift, &'static dcn_hubp2_mask) {
+    pub fn rsm(&self) -> (&'static dcn_hubp2_registers, &'static dcn_hubp2_shift, &'static dcn_hubp2_mask) {
         (self.hubp_regs.unwrap(), self.hubp_shift.unwrap(), self.hubp_mask.unwrap())
     }
 }

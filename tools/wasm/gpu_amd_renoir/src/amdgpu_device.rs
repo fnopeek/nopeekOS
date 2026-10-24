@@ -1954,6 +1954,10 @@ pub fn amdgpu_device_ip_hw_init_phase2(adev: &mut amdgpu_device) -> i32 {
                     .s(">: Display Core bring-up ").s(if r == 0 { "done" } else { "failed" }).s(", status ")
                     .dec((-r) as u64).say();
                 crate::amdgpu_dm::dm_report(adev);
+                if r == 0 && crate::amdgpu_dm::dc_live_requested() {
+                    let live = crate::amdgpu_dm::dm_take_over_display(adev);
+                    Line::new().s("dc live: display ").s(if live { "driven by DC" } else { "not taken over" }).say();
+                }
                 continue;
             }
             _ => {
