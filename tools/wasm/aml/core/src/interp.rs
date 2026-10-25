@@ -1339,13 +1339,69 @@ impl<'a> Interp<'a> {
     }
 
     /// Parse `Index(source, index)` into a Place (without the optional target).
+    /// The source of an `Index`: the object itself where the operand names
+    /// one — a named buffer or package, a Local or Arg, or what a reference
+    /// points at (`DerefOf (Index (pkg, n))`) — as ACPICA indexes the
+    /// object and not a copy; otherwise its value.
+    fn index_source(&mut self, f: &Frame, p: usize) -> R<(Result<Obj, Value>, usize)> {
+        let b = f.body;
+        let follow = |o: Obj| -> Obj {
+            let inner = match &*o.borrow() {
+                Value::Ref(Place::Obj(i)) => Some(i.clone()),
+                _ => None,
+            };
+            inner.unwrap_or(o)
+        };
+        match b[p] {
+            0x83 => {
+                let (v, p1) = self.eval(f, p + 1)?;
+                match v {
+                    Value::Ref(Place::Obj(o)) => Ok((Ok(follow(o)), p1)),
+                    Value::Ref(pl) => Ok((Err(self.read_place(&pl)?), p1)),
+                    other => Ok((Err(other), p1)),
+                }
+            }
+            0x60..=0x6E | 0x5C | 0x5E | 0x2E | 0x2F | 0x41..=0x5A | 0x5F => {
+                let is_method = matches!(b[p], 0x5C | 0x5E | 0x2E | 0x2F | 0x41..=0x5A | 0x5F) && {
+                    let (nref, _) = name_at(b, p);
+                    self.resolve(&f.scope, nref.rooted, nref.carets, &nref.segs)
+                        .is_some_and(|pp| matches!(self.node(&pp), Some(Node::Method { .. })))
+                };
+                if !is_method {
+                    let (pl, p1) = self.super_name_opt(f, p)?;
+                    if let Some(Place::Obj(o)) = pl {
+                        return Ok((Ok(follow(o)), p1));
+                    }
+                }
+                let (v, p1) = self.eval(f, p)?;
+                Ok((Err(v), p1))
+            }
+            _ => {
+                let (v, p1) = self.eval(f, p)?;
+                Ok((Err(v), p1))
+            }
+        }
+    }
+
     fn index_place(&mut self, f: &Frame, p: usize) -> R<(Place, usize)> {
-        let (src, p1) = self.eval(f, p)?;
+        let (src, p1) = self.index_source(f, p)?;
         let (idx, p2) = self.eval(f, p1)?;
         let i = idx.as_int() as usize;
         let src = match src {
-            Value::Ref(pl) => self.read_place(&pl)?,
-            other => other,
+            Ok(cell) => {
+                let v = cell.borrow().clone();
+                let place = match v {
+                    Value::Package(elems) if i < elems.len() => Place::Obj(elems[i].clone()),
+                    Value::Package(elems) => {
+                        return Err(format!("package index {} out of range {}", i, elems.len()));
+                    }
+                    Value::Buffer(_) | Value::Str(_) => Place::BufIndex(cell, i),
+                    _ => return Err(String::from("Index on non-indexable value")),
+                };
+                return Ok((place, p2));
+            }
+            Err(Value::Ref(pl)) => self.read_place(&pl)?,
+            Err(other) => other,
         };
         let place = match src {
             Value::Package(elems) => {
