@@ -335,6 +335,58 @@ pub fn register_bsp(apic_id: u32) {
 const MSR_AMD_RAPL_POWER_UNIT: u32 = 0xC001_0299;
 const MSR_AMD_CORE_ENERGY_STATUS: u32 = 0xC001_029A;
 const MSR_AMD_PKG_ENERGY_STATUS: u32 = 0xC001_029B;
+// Intel: the MSRs of `arch/x86/events/rapl.c`, on the models its table
+// lists (`model_skl` for Tiger Lake); the core counter is PP0, all cores
+// together.
+const MSR_RAPL_POWER_UNIT: u32 = 0x606;
+const MSR_PKG_ENERGY_STATUS: u32 = 0x611;
+const MSR_PP0_ENERGY_STATUS: u32 = 0x639;
+/// RAPL through the Intel MSRs (else the AMD ones).
+static RAPL_INTEL: AtomicBool = AtomicBool::new(false);
+
+/// The model of an Intel family-6 CPU on bare metal (CPUID leaf 1), else
+/// None.
+pub fn intel_model() -> Option<u32> {
+    let (b, c, d): (u32, u32, u32);
+    let (a1, c1): (u32, u32);
+    // SAFETY: CPUID leaves 0 and 1 exist on every x86-64; rbx is reserved
+    // by LLVM, so it is moved out by hand.
+    unsafe {
+        core::arch::asm!("push rbx", "xor eax, eax", "xor ecx, ecx", "cpuid", "mov {0:e}, ebx", "pop rbx",
+            out(reg) b, out("ecx") c, out("edx") d, out("eax") _);
+        core::arch::asm!("push rbx", "mov eax, 1", "xor ecx, ecx", "cpuid", "pop rbx",
+            out("eax") a1, out("ecx") c1, out("edx") _);
+    }
+    // "GenuineIntel"
+    if (b, d, c) != (0x756E_6547, 0x4965_6E69, 0x6C65_746E) { return None; }
+    // Under a hypervisor these MSRs are its business.
+    if c1 & (1 << 31) != 0 { return None; }
+    if (a1 >> 8) & 0xF != 6 { return None; }
+    Some(((a1 >> 4) & 0xF) | (((a1 >> 16) & 0xF) << 4))
+}
+
+/// `INTEL_TIGERLAKE_L` / `INTEL_TIGERLAKE` (intel-family.h).
+fn intel_tigerlake(model: u32) -> bool {
+    matches!(model, 0x8C | 0x8D)
+}
+
+/// The C-state residency counters turbostat reads on Tiger Lake: package
+/// PC2, PC3, PC6, PC7, PC8, PC9, PC10, then this core's C6 and C7. They
+/// count at the TSC rate.
+pub const RESIDENCY_NAMES: [&str; 9] = ["PC2", "PC3", "PC6", "PC7", "PC8", "PC9", "PC10", "CC6", "CC7"];
+const RESIDENCY_MSRS: [u32; 9] = [0x60D, 0x3F8, 0x3F9, 0x3FA, 0x630, 0x631, 0x632, 0x3FD, 0x3FE];
+
+/// The residency counters, on a CPU that has them.
+pub fn residency() -> Option<[u64; 9]> {
+    if !intel_model().is_some_and(intel_tigerlake) { return None; }
+    let mut v = [0u64; 9];
+    for (o, &m) in v.iter_mut().zip(RESIDENCY_MSRS.iter()) {
+        // SAFETY: Tiger Lake has every one of these counters (turbostat's
+        // model table); reading them has no side effect.
+        *o = unsafe { msr::read(m) };
+    }
+    Some(v)
+}
 
 static HAS_RAPL: AtomicBool = AtomicBool::new(false);
 /// Nanojoules per counter step. The unit is 2^-ESU joules; in nJ it stays
@@ -352,13 +404,18 @@ enum RaplMsr {
 /// it runs on.
 fn rapl_read(r: RaplMsr) -> u32 {
     if !has_rapl() { return 0; }
-    let m = match r {
-        RaplMsr::PowerUnit => MSR_AMD_RAPL_POWER_UNIT,
-        RaplMsr::PkgEnergy => MSR_AMD_PKG_ENERGY_STATUS,
-        RaplMsr::CoreEnergy => MSR_AMD_CORE_ENERGY_STATUS,
+    let intel = RAPL_INTEL.load(Ordering::Relaxed);
+    let m = match (r, intel) {
+        (RaplMsr::PowerUnit, false) => MSR_AMD_RAPL_POWER_UNIT,
+        (RaplMsr::PkgEnergy, false) => MSR_AMD_PKG_ENERGY_STATUS,
+        (RaplMsr::CoreEnergy, false) => MSR_AMD_CORE_ENERGY_STATUS,
+        (RaplMsr::PowerUnit, true) => MSR_RAPL_POWER_UNIT,
+        (RaplMsr::PkgEnergy, true) => MSR_PKG_ENERGY_STATUS,
+        (RaplMsr::CoreEnergy, true) => MSR_PP0_ENERGY_STATUS,
     };
-    // SAFETY: `has_rapl()` (CPUID 0x80000007:EDX[14]) says these MSRs exist
-    // on every core of this socket; reading them has no side effect.
+    // SAFETY: `has_rapl()` (AMD: CPUID 0x80000007:EDX[14]; Intel: a model
+    // of rapl.c's table) says these MSRs exist on every core of this
+    // socket; reading them has no side effect.
     unsafe { msr::read(m) as u32 }
 }
 
@@ -377,7 +434,9 @@ fn rapl_probe() {
             out("ecx") _,
         );
     }
-    if edx & (1 << 14) == 0 { return; }
+    let intel = intel_model().is_some_and(intel_tigerlake);
+    if edx & (1 << 14) == 0 && !intel { return; }
+    RAPL_INTEL.store(intel, Ordering::Release);
     HAS_RAPL.store(true, Ordering::Release);
     // Only read after the feature check; before it this would #GP.
     let esu = (rapl_read(RaplMsr::PowerUnit) >> 8) & 0x1F;
@@ -402,7 +461,7 @@ pub fn rapl_pkg_raw() -> u32 {
     rapl_read(RaplMsr::PkgEnergy)
 }
 
-/// The same for the core this call runs on.
+/// The same for the core this call runs on (Intel: all cores, PP0).
 pub fn rapl_core_raw() -> u32 {
     if !has_rapl() { return 0; }
     rapl_read(RaplMsr::CoreEnergy)
@@ -1236,3 +1295,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         crate::interrupts::irq_restore(flags);
     }
 }
+
+/// Whether the core energy counter covers all cores (Intel PP0) rather
+/// than the calling one (AMD).
+pub fn rapl_core_is_all() -> bool { RAPL_INTEL.load(Ordering::Relaxed) }

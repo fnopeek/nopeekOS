@@ -552,8 +552,8 @@ pub fn intent_power(args: &str) {
     if !crate::smp::per_core::has_rapl() {
         kprintln!();
         kprintln!("  Kein RAPL: CPUID Fn8000_0007_EDX[14] ist nicht gesetzt.");
-        kprintln!("  Das gibt es auf AMD ab Zen (Familie 17h) und auf");
-        kprintln!("  Intel-Blech ueber andere MSRs, die wir nicht lesen.");
+        kprintln!("  Das gibt es auf AMD ab Zen (Familie 17h) und auf den");
+        kprintln!("  Intel-Modellen, die Linux' rapl.c listet (hier: Tiger Lake).");
         kprintln!();
         return;
     }
@@ -572,6 +572,7 @@ pub fn intent_power(args: &str) {
         .load(core::sync::atomic::Ordering::Relaxed)).sum();
     let tsc_hz = crate::interrupts::tsc_freq().max(1);
 
+    let res0 = crate::smp::per_core::residency();
     let t0 = crate::interrupts::rdtsc();
     let pkg0 = crate::smp::per_core::rapl_pkg_raw();
     let core0_e0 = crate::smp::per_core::rapl_core_raw();
@@ -601,6 +602,7 @@ pub fn intent_power(args: &str) {
     }
 
     let t1 = crate::interrupts::rdtsc();
+    let res1 = crate::smp::per_core::residency();
     let pkg1 = crate::smp::per_core::rapl_pkg_raw();
     let core0_e1 = crate::smp::per_core::rapl_core_raw();
     let (halt1, _) = crate::smp::per_core::halt_snapshot(0);
@@ -631,8 +633,22 @@ pub fn intent_power(args: &str) {
                 mw / 1000, mw % 1000, us / 1_000_000);
         }
     }
-    kprintln!("  davon Core 0     {}.{:03} W", core_mw / 1000, core_mw % 1000);
+    if crate::smp::per_core::rapl_core_is_all() {
+        kprintln!("  davon Kerne (PP0) {}.{:03} W", core_mw / 1000, core_mw % 1000);
+    } else {
+        kprintln!("  davon Core 0     {}.{:03} W", core_mw / 1000, core_mw % 1000);
+    }
     kprintln!("  Core 0 angehalten  {} % des Fensters", halt_pct);
+    // As turbostat: the share of the window each counter advanced, at the
+    // TSC rate. PCx is the package, CC6/CC7 the core this runs on.
+    if let (Some(a), Some(b)) = (res0, res1) {
+        let mut line = alloc::string::String::new();
+        for (i, name) in crate::smp::per_core::RESIDENCY_NAMES.iter().enumerate() {
+            let pct = (b[i].wrapping_sub(a[i]) as u128 * 1000 / window_tsc as u128).min(1000) as u64;
+            line.push_str(&alloc::format!(" {} {}.{}%", name, pct / 10, pct % 10));
+        }
+        kprintln!("  Residenz        {}", line);
+    }
     let port = crate::interrupts::deep_idle_port();
     if port == 0 {
         kprintln!("  Leerlauf          C1 (hlt) — 'power cstate' fuer tiefer");
