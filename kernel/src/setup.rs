@@ -152,10 +152,11 @@ fn setup_identity_and_settings() -> bool {
     let lang = read_line_default("en");
     config::set("lang", &lang);
 
-    // Default autostart: deck, the one bottom panel (launcher, windows,
-    // status items, clock). A config seed; `set autostart dock bar`
-    // brings back the two-panel layout.
-    config::set("autostart", "deck");
+    // Default autostart: deck, the bottom panel (launcher, windows, status
+    // items, clock), then the drivers every x86 machine needs: aml (ACPI:
+    // battery, power button, idle states) and audio_hda. Both exit quietly
+    // where their hardware is missing. A config seed; `set autostart` edits it.
+    config::set("autostart", "deck aml audio_hda");
 
     // Theme follows the wallpaper: `auto` picks light/dark from the
     // background luminance (palette::is_light_theme). `theme light|dark`

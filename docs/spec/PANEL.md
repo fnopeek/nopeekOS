@@ -5,9 +5,12 @@ surfaces, rendered through the widget ABI (SDF AA, theme tokens, the
 translucent-tray + crisp-icon blit), customizable via config and
 replaceable because they're plain WASM apps.
 
-> Status: **spec.** Approved design (2026-05-26): unified `set_panel`,
-> config-driven segments, WASM-replaceable. The top bar moves out of the
-> kernel (`bar.rs` native render) into `bar.wasm`, analogous to `dock.wasm`.
+> Status: **spec.** Unified `set_panel`, config-driven segments,
+> WASM-replaceable. The shipped panel is **`deck.wasm`** (§7), a bottom
+> strut. `bar.wasm` and `dock.wasm` are no longer shipped; their sources
+> are in the git history before `kernel-only: archive bar and dock`. The
+> compositor still implements their two modes, Top+Strut and
+> Bottom+AutoHide (and `npk_window_set_dock`), with no module using them.
 
 ---
 
@@ -106,19 +109,18 @@ clock-less regression if the app fails to load.
   `dock.autohide`, … (read by the apps / passed to `set_panel`).
 - Both apps are WASM → fully replaceable.
 
-## 6. `bar.wasm`
+## 6. `bar.wasm` (not shipped)
 
 `tools/wasm/bar/`, analogous to `tools/wasm/dock/`. `_start`: read
 `sys/config/bar`, `set_panel(Top, Strut, w, h)`, loop { poll `npk_bar_state`
 → re-commit on change; poll events → `workspace_switch` / `power` clicks }.
 Tree: `Row` of the configured segments with flex `Spacer`s distributing
-left/center/right. Bundled into the installer; autostart seed becomes
-`dock bar`.
+left/center/right.
 
 ## 7. `deck.wasm` — bar and dock in one
 
-`tools/wasm/deck/`: one bottom panel instead of `dock` + `bar`, started in
-their place (`set autostart deck`). Left to right: launcher button,
+`tools/wasm/deck/`: one bottom panel instead of `dock` + `bar`, bundled into
+the installer and first in the autostart seed. Left to right: launcher button,
 workspaces, the windows of the active workspace (icon + caption, the
 focused one underlined), volume, battery, screenshot, clock with date.
 

@@ -1155,10 +1155,10 @@ fn spawn_launcher() {
 
 /// Launch every app named in the `autostart` config (comma/space-
 /// separated) via the widget-spawn path — a fresh window, no terminal,
-/// no `APP_RUNNING` capture (so background overlays like the dock don't
+/// no `APP_RUNNING` capture (so background panels like the deck don't
 /// hijack keyboard focus the way `run <module>` would). Called once
 /// after `shade::init()`. The kernel stays generic: the app names live
-/// in config, not here. Set with e.g. `set autostart dock`.
+/// in config, not here. Set with e.g. `set autostart deck aml`.
 pub fn start_autostart() {
     let list = match crate::config::get("autostart") {
         Some(v) => v,

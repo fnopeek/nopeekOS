@@ -519,32 +519,13 @@ fn is_active_launcher(name: &str) -> bool {
     configured == name
 }
 
-/// True iff `name` is shipped as a bundled asset by the kernel.
-///
-/// The canonical list lives in `install_data/assets/mod.rs` as
-/// `BUNDLED_ASSETS`, but that module is `#[cfg(feature = "installer")]`
-/// — only the installer build embeds the wasm bytes. The runtime
-/// kernel (this code path) needs the names but not the bytes, so we
-/// keep a parallel string list here. Keep both in sync when adding
-/// or removing a bundled module.
+/// True iff `name` is one of the modules every install carries
+/// (`install_data/modules.list`, the same list the installer seeds).
 fn is_bundled_module(name: &str) -> bool {
-    const BUNDLED_NAMES: &[&str] = &[
-        "wallpaper",
-        "top",
-        "debug",
-        "drun",
-        "loft",
-        "dock",
-        "bar",
-        "deck",
-        "testdisk",
-        "spell",
-        "pick",
-        "iris",
-        "snap",
-        "vault",
-    ];
-    BUNDLED_NAMES.iter().any(|n| *n == name)
+    include_str!("../install_data/modules.list")
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .any(|n| !n.is_empty() && n == name)
 }
 
 /// `modules` — list installed and available modules.

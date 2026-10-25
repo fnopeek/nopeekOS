@@ -1,0 +1,26 @@
+# Modules every install carries from the first boot, without a network.
+# One name per line. Read by build.sh (installer staging), the installer
+# kernel (seeding sys/wasm/) and `uninstall` (needs --force for these).
+# Hardware-specific drivers, optional apps and developer tools are not
+# here: they come with `install <name>`.
+
+# desktop
+deck
+drun
+pick
+loft
+wallpaper
+vault
+
+# apps
+spell
+iris
+snap
+top
+beak
+link
+volume
+
+# drivers every x86 machine needs
+aml
+audio_hda

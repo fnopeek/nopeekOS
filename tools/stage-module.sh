@@ -8,7 +8,7 @@
 # file from elsewhere (a licence). It is staged to release/modules/<mod>.fw/
 # and is installed at sys/firmware/<path>.
 #
-#   tools/stage-module.sh loft spell dock bar
+#   tools/stage-module.sh loft spell deck
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

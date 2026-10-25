@@ -439,7 +439,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // Start shade compositor (GUI_MODE already set after login)
     if framebuffer::is_available() {
         shade::init();
-        // Autostart apps (e.g. the dock) via the widget-spawn path —
+        // Autostart apps (deck, drivers) via the widget-spawn path —
         // never via `run`, which would capture input. Names from the
         // `autostart` config key.
         shade::start_autostart();
