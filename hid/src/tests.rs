@@ -125,6 +125,11 @@ fn consumer_and_system_control() {
     assert!(f.media.is_empty());
     let f = feed(&mut d, &mut i, &[4, 0xe2, 0x00]);
     assert_eq!(f.media.as_slice(), [Media::Mute]);
+    // Display brightness up and down (consumer 0x6f / 0x70).
+    let f = feed(&mut d, &mut i, &[4, 0x6f, 0x00]);
+    assert_eq!(f.media.as_slice(), [Media::BrightnessUp]);
+    let f = feed(&mut d, &mut i, &[4, 0x70, 0x00]);
+    assert_eq!(f.media.as_slice(), [Media::BrightnessDown]);
     // Play/Pause has no consumer here: reported, not dropped.
     let f = feed(&mut d, &mut i, &[4, 0xcd, 0x00]);
     assert_eq!(f.unmapped.as_slice(), [UP_CONSUMER | 0xcd]);

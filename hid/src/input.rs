@@ -33,6 +33,8 @@ pub enum Media {
     Mute,
     VolumeUp,
     VolumeDown,
+    BrightnessUp,
+    BrightnessDown,
 }
 
 /// A short list with a fixed capacity.
@@ -134,6 +136,10 @@ impl Input {
                         u if u == UP_CONSUMER | 0xe2 => self.frame.media.push(Media::Mute),
                         u if u == UP_CONSUMER | 0xe9 => self.frame.media.push(Media::VolumeUp),
                         u if u == UP_CONSUMER | 0xea => self.frame.media.push(Media::VolumeDown),
+                        // hid-input: 0x06f KEY_BRIGHTNESSUP, 0x070
+                        // KEY_BRIGHTNESSDOWN.
+                        u if u == UP_CONSUMER | 0x6f => self.frame.media.push(Media::BrightnessUp),
+                        u if u == UP_CONSUMER | 0x70 => self.frame.media.push(Media::BrightnessDown),
                         // Absolute axes (touchscreens, joysticks) are not
                         // keys; they repeat their value on every report.
                         _ if page == UP_GENDESK && id < 0x80 => {}

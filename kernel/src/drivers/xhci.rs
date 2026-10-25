@@ -1622,6 +1622,8 @@ fn hid_deliver(h: &mut HidIntf, f: &hid_core::input::Frame) {
             hid_core::input::Media::Mute => crate::keyboard::toggle_mute(),
             hid_core::input::Media::VolumeUp => crate::keyboard::step_volume(5),
             hid_core::input::Media::VolumeDown => crate::keyboard::step_volume(-5),
+            hid_core::input::Media::BrightnessUp => crate::keyboard::step_brightness(5),
+            hid_core::input::Media::BrightnessDown => crate::keyboard::step_brightness(-5),
         }
     }
     for &u in f.unmapped.as_slice() { note_unmapped(u); }
