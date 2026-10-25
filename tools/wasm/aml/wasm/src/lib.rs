@@ -1,19 +1,18 @@
 //! aml.wasm — the AML battery driver.
 //!
-//! Resident background driver (autostart). Once at startup it fetches the
-//! firmware DSDT; each tick it parses it, runs the device's own `_BST`/`_BIF`
-//! AML (vendor-independent, via [`aml_core`]) against the embedded controller,
-//! and pushes the decoded percentage to the kernel via `npk_battery_report`.
-//! The bar reads it through the unchanged `npk_battery()`.
-//!
-//! No persisted device state: the DSDT is the source of truth, re-parsed each
-//! tick (cheap), so the same binary works on any laptop.
+//! Resident background driver (autostart). At startup it loads the firmware
+//! DSDT into a namespace and initialises it once (`_REG`, `_INI`, then the
+//! EC's `_REG`), as ACPICA and Linux do. From then on it runs the `_Qxx` of
+//! each EC event the SCI reports, and every 10 s the battery's own
+//! `_BST`/`_BIF` AML (vendor-independent, via [`aml_core`]), and pushes the
+//! decoded percentage to the kernel via `npk_battery_report`. The bar reads
+//! it through the unchanged `npk_battery()`.
 
 #![no_std]
 
 extern crate alloc;
 
-use aml_core::{ec_gpe, find_batteries, read_battery, run_ec_events, Ec, Namespace};
+use aml_core::{ec_gpe, find_batteries, Ec, Machine, Namespace};
 
 // The driver needs raw firmware + EC access — declare the HARDWARE capability
 // (bit 0x40) so the kernel grants exactly that and nothing else.
@@ -29,7 +28,6 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
 }
 
-use npk_sys::bump::Bump;
 use npk_sys::cell::Single;
 
 /// Log to one channel only.
@@ -78,16 +76,12 @@ fn lognum(prefix: &str, mut v: u32) {
 
 const WAIT_IRQ: i32 = 2;
 
-// ── bump allocator: reset to zero each tick (re-parse is fully transient) ──
-const HEAP_SIZE: usize = 16 * 1024 * 1024;
+// The namespace lives as long as the driver; what a method evaluation
+// allocates goes back.
 #[global_allocator]
-static ALLOC: Bump<HEAP_SIZE> = Bump::new();
+static ALLOC: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
-fn heap_reset() {
-    ALLOC.reset(0);
-}
-
-// DSDT buffer: filled once, persists across heap resets (it's not on the heap).
+// DSDT buffer: filled once.
 const DSDT_MAX: usize = 512 * 1024;
 static DSDT: Single<[u8; DSDT_MAX]> = Single::new([0; DSDT_MAX]);
 
@@ -100,10 +94,14 @@ static DSDT: Single<[u8; DSDT_MAX]> = Single::new([0; DSDT_MAX]);
 /// battery.
 struct HostEc { reads: u32, fails: u32, verbose: bool }
 
-/// EC events fetched (`QR_EC`) the moment the SCI reported them, before the
-/// round's namespace and `_REG`/`_INI`: this EC drops SCI_EVT again while
-/// other transactions run, and an event asked for only afterwards is lost.
-/// Linux too queries at once (`acpi_ec_submit_query`).
+/// The verbose trace (`set log.drivers 1`) is on for the start and the first
+/// battery round.
+static VERBOSE: Single<bool> = Single::new(false);
+
+/// EC events fetched (`QR_EC`) the moment the SCI reported them: this EC
+/// drops SCI_EVT again while other transactions run, and an event asked for
+/// only afterwards is lost. Linux too queries at once
+/// (`acpi_ec_submit_query`).
 struct Pending { q: [u8; 64], n: usize, next: usize }
 /// The EC event numbers already logged, one bit each.
 static SEEN_EVENTS: Single<[u64; 4]> = Single::new([0; 4]);
@@ -121,6 +119,12 @@ fn fetch_ec_events() {
     });
 }
 
+impl HostEc {
+    fn loud(&self) -> bool {
+        self.verbose || VERBOSE.with(|v| *v)
+    }
+}
+
 impl Ec for HostEc {
     fn read(&mut self, addr: u8) -> u8 {
         let r = npk_sys::ec_read(addr as i32);
@@ -131,14 +135,14 @@ impl Ec for HostEc {
         // "failed=0" only means "no error code", not "meaningful value". An
         // EC returning all zeros looks to the DSDT like a real reading and it
         // concludes "no battery".
-        if self.verbose {
+        if self.loud() {
             lognum2("[aml]   ec.read  [", addr as u32, "] -> ", v as u32);
         }
         v
     }
     fn write(&mut self, addr: u8, val: u8) {
         npk_sys::ec_write(addr as i32, val as i32);
-        if self.verbose {
+        if self.loud() {
             lognum2("[aml]   ec.write [", addr as u32, "] <- ", val as u32);
         }
     }
@@ -171,7 +175,7 @@ impl Ec for HostEc {
         if q <= 0 { None } else { Some(q as u8) }
     }
     fn note(&mut self, s: &str) {
-        if self.verbose { logln(s); }
+        if self.loud() { logln(s); }
     }
     fn ec_event(&mut self, q: u8, handled: bool) {
         // Each event number once (a new hotkey shows up this way); some
@@ -182,7 +186,7 @@ impl Ec for HostEc {
             s[(q / 64) as usize] |= bit;
             fresh
         });
-        if !first && !self.verbose {
+        if !first && !self.loud() {
             return;
         }
         log("[aml] EC event _Q");
@@ -194,7 +198,7 @@ impl Ec for HostEc {
         });
     }
     fn notify(&mut self, path: &[[u8; 4]], value: u64) {
-        if !self.verbose {
+        if !self.loud() {
             return;
         }
         log("[aml]   Notify(\\");
@@ -210,7 +214,7 @@ impl Ec for HostEc {
         npk_sys::acpi_video_notify(value as i32);
     }
     fn note_num(&mut self, s: &str, v: u64) {
-        if self.verbose { lognum(s, v as u32); }
+        if self.loud() { lognum(s, v as u32); }
     }
 }
 
@@ -230,102 +234,97 @@ pub extern "C" fn _start() {
         return;
     }
     let table_len = len as usize;
+    VERBOSE.with(|v| *v = loud);
 
-    // Count rounds: if the interpreter hangs, the last printed number shows
-    // whether it happened in the first pass or later. The first round is
-    // verbose; afterwards only changes of the result are logged, since the
-    // driver runs forever.
-    //
+    let Some(ns) = DSDT.with(|d| Namespace::load(&d[..table_len]).ok()) else {
+        logln("[aml] Namespace::load failed — driver idle");
+        return;
+    };
+    let ns: &'static Namespace = alloc::boxed::Box::leak(alloc::boxed::Box::new(ns));
+    let batteries = find_batteries(ns);
+
     // Take the SCI: the EC signals via its GPE, and a hotkey event must be
     // fetched within milliseconds; some ECs stop answering QR_EC (return 0)
     // if events are left pending for seconds. Without SCI the EC is polled
     // every 10 s.
-    let sci_vec = {
-        heap_reset();
-        let gpe = DSDT.with(|d| Namespace::load(&d[..table_len]).ok().and_then(|ns| ec_gpe(&ns)));
-        match gpe {
-            Some(gpe) => {
-                let v = npk_sys::sci_arm(gpe as i32);
-                if v > 0 {
-                    lognum("[aml] EC events by SCI, GPE ", gpe);
-                } else {
-                    logln("[aml] SCI not available — EC polled every 10 s");
-                }
-                v
+    let sci_vec = match ec_gpe(ns) {
+        Some(gpe) => {
+            let v = npk_sys::sci_arm(gpe as i32);
+            if v > 0 {
+                lognum("[aml] EC events by SCI, GPE ", gpe);
+            } else {
+                logln("[aml] SCI not available — EC polled every 10 s");
             }
-            None => { logln("[aml] no EC _GPE — EC polled every 10 s"); -1 }
+            v
         }
+        None => { logln("[aml] no EC _GPE — EC polled every 10 s"); -1 }
     };
 
-    let mut round = 0u32;
+    let ec: &'static mut HostEc = alloc::boxed::Box::leak(alloc::boxed::Box::new(HostEc { reads: 0, fails: 0, verbose: false }));
+    let mut m = Machine::new(ns, ec);
+    m.init();
+    // acpi_ec_clear: what the EC collected before anyone listened.
+    m.drain_events();
+
     let mut last = i32::MIN;
     // When the battery is next due (TSC). An SCI alone is no reason to work:
     // the EC raises its GPE after each of its own reads/writes too, so
-    // reading the battery on every SCI would keep waking ourselves. Work
-    // happens only on SCI_EVT (a real event) or when the battery is due.
+    // reading the battery on every SCI would keep waking ourselves. Events
+    // run only on SCI_EVT, the battery only when due.
     let tsc_per_ms = (npk_sys::sys_info(10) as u64).max(1) * 1000;
     let now = || npk_sys::sys_info(19) as u64;
     let mut battery_due = 0u64;
-    let mut work = true;
     loop {
-        if !work {
-            npk_sys::wait(WAIT_IRQ, 10_000);
-            let fired = npk_sys::sci_service();
-            if fired > 0 && (fired >> 16) & 0x100 != 0 {
-                logln("[aml] power button (PM1 PWRBTN_STS)");
+        if now() >= battery_due {
+            battery_due = now() + 10_000 * tsc_per_ms;
+            if sci_vec <= 0 {
+                m.drain_events();
             }
-            if fired > 0 && fired & 2 != 0 {
-                fetch_ec_events();
+            let (packed, info) = battery(&mut m, &batteries);
+            VERBOSE.with(|v| *v = false);
+            if packed != last {
+                if packed < 0 {
+                    // A battery that stops reporting is worth logging.
+                    logln("[aml] no usable battery (packed=-1)");
+                } else if loud {
+                    // The percentage is not: it changes about a hundred
+                    // times per discharge, and the bar shows it anyway.
+                    lognum("[aml] battery percent=", (packed & 0xFF) as u32);
+                }
+                last = packed;
             }
-            work = (fired > 0 && fired & 2 != 0) || now() >= battery_due;
-            continue;
-        }
-        work = sci_vec <= 0;
-        battery_due = now() + 10_000 * tsc_per_ms;
-        round += 1;
-        heap_reset();
-        let (packed, info) = DSDT.with(|d| decode(&d[..table_len], loud && round == 1));
-        if packed != last {
-            if packed < 0 {
-                // A battery that stops reporting is worth logging.
-                logln("[aml] no usable battery (packed=-1)");
-            } else if loud {
-                // The percentage is not: it changes about a hundred times
-                // per discharge, and the bar shows it anyway.
-                lognum("[aml] battery percent=", (packed & 0xFF) as u32);
+            npk_sys::battery_report(packed);
+            // Raw values for `battery` (whole-system draw); the bar needs
+            // only the percentage, a power reading needs more.
+            if let Some(i) = info {
+                npk_sys::battery_detail(i.rate as i32, i.remaining_mah as i32,
+                    i.full_charge_mah as i32, i.voltage_mv as i32, i.power_unit as i32);
             }
-            last = packed;
-        }
-        npk_sys::battery_report(packed);
-        // Raw values for `battery` (whole-system draw); the bar needs only
-        // the percentage, a power reading needs more.
-        if let Some(i) = info {
-            npk_sys::battery_detail(i.rate as i32, i.remaining_mah as i32,
-                i.full_charge_mah as i32, i.voltage_mv as i32, i.power_unit as i32);
         }
         if sci_vec <= 0 {
             npk_sys::sleep(10_000);
+            continue;
+        }
+        npk_sys::wait(WAIT_IRQ, 10_000);
+        let fired = npk_sys::sci_service();
+        if fired > 0 && (fired >> 16) & 0x100 != 0 {
+            logln("[aml] power button (PM1 PWRBTN_STS)");
+        }
+        if fired > 0 && fired & 2 != 0 {
+            fetch_ec_events();
+            m.drain_events();
         }
     }
 }
 
-/// Parse the DSDT and evaluate the first present battery; return the bar's
-/// packed encoding ((status<<8)|percent) or -1 if none, and the decoded
-/// battery when there is one.
-fn decode(table: &[u8], verbose: bool) -> (i32, Option<aml_core::BatteryInfo>) {
-    let ns = match Namespace::load(table) {
-        Ok(ns) => ns,
-        Err(_) => { logln("[aml]  Namespace::load failed"); return (-1, None); }
-    };
-    if verbose { logln("[aml]  namespace loaded, looking for batteries"); }
-    let mut ec = HostEc { reads: 0, fails: 0, verbose };
-    let mut n = 0u32;
-    for bat in find_batteries(&ns) {
-        n += 1;
+/// The first present battery: the bar's packed encoding ((status<<8)|percent)
+/// or -1 if none, and the decoded battery when there is one.
+fn battery(m: &mut Machine, batteries: &[aml_core::Path]) -> (i32, Option<aml_core::BatteryInfo>) {
+    let verbose = VERBOSE.with(|v| *v);
+    for bat in batteries {
         // Why -1? "method/EC failed" and "battery reports not present" are
-        // different failures; `read_battery` carries an error text, so log
-        // it.
-        match read_battery(&ns, &mut ec, &bat) {
+        // different failures; the error carries a text, so log it.
+        match m.battery(bat) {
             Err(e) => if verbose {
                 log("[aml]  _BST/_BIF failed: ");
                 logln(&e);
@@ -337,8 +336,6 @@ fn decode(table: &[u8], verbose: bool) -> (i32, Option<aml_core::BatteryInfo>) {
                 lognum("[aml]  remaining_mah=", info.remaining_mah);
                 lognum("[aml]  full_mah=", info.full_charge_mah);
                 lognum("[aml]  percent=", info.percent as u32);
-                lognum("[aml]  EC reads=", ec.reads);
-                lognum("[aml]  EC failed=", ec.fails);
             }
             // A battery whose remaining capacity the firmware does not state
             // has no percentage; an invented number in the bar is worse than
@@ -366,9 +363,6 @@ fn decode(table: &[u8], verbose: bool) -> (i32, Option<aml_core::BatteryInfo>) {
             }
         }
     }
-    if verbose { lognum("[aml]  batteries seen: ", n); }
-    if n == 0 {
-        run_ec_events(&ns, &mut ec);
-    }
+    if verbose { lognum("[aml]  batteries seen: ", batteries.len() as u32); }
     (-1, None)
 }

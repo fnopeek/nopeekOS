@@ -80,6 +80,26 @@ fn main() {
     println!("EC _GPE: {:?}", ec_gpe(&ns));
 
     let bats = find_batteries(&ns);
+    // ROUNDS=n: as the driver runs, one init and then n rounds of the
+    // events in QUERIES plus a battery read, each on the same namespace.
+    if let Some(n) = std::env::var("ROUNDS").ok().and_then(|v| v.parse::<u32>().ok()) {
+        let queries = MockEc::dragonfly().queries;
+        let mut ec = MockEc::dragonfly();
+        ec.queries.clear();
+        let ec: &'static mut MockEc = Box::leak(Box::new(ec));
+        let ec_ptr: *mut MockEc = ec;
+        let mut m = aml_core::Machine::new(&ns, ec);
+        m.init();
+        for r in 0..n {
+            // SAFETY: the harness is single-threaded; the machine is not
+            // inside a call while the queue is refilled.
+            unsafe { (*ec_ptr).queries = queries.clone() };
+            let ran = m.drain_events();
+            let b = bats.first().map(|b| m.battery(b));
+            println!("round {r}: {ran} event(s), battery {:?}", b.map(|b| b.map(|i| i.percent)));
+        }
+        return;
+    }
     println!("batteries found: {}", bats.len());
     for b in &bats {
         println!("  {}", path_str(b));

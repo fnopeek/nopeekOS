@@ -229,13 +229,6 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> Result<Batte
     interp::read_battery(ns, ec, bat)
 }
 
-/// Run the `_Qxx` of the EC events `ec.query()` hands over, after the
-/// initialisation `read_battery` does too; for a machine without a battery,
-/// whose events would otherwise never run. Returns how many ran.
-pub fn run_ec_events(ns: &Namespace, ec: &mut dyn Ec) -> u32 {
-    interp::run_ec_events(ns, ec)
-}
-
 /// The EC's GPE number (`_GPE` next to its EmbeddedControl region).
 pub fn ec_gpe(ns: &Namespace) -> Option<u32> {
     interp::ec_gpe(ns)

@@ -1,6 +1,6 @@
 [package]
 name = "aml"
-version = "0.5.5"
+version = "0.6.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 
@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 aml_core = { path = "../core" }
 npk_sys = { path = "../../sdk/npk_sys" }
+nopeek_widgets = { path = "../../sdk/widgets", features = ["heap"] }
 
 [profile.release]
 opt-level = "s"

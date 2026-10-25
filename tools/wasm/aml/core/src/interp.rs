@@ -118,15 +118,6 @@ pub fn ec_gpe(ns: &Namespace) -> Option<u32> {
     None
 }
 
-pub fn run_ec_events(ns: &Namespace, ec: &mut dyn Ec) -> u32 {
-    let mut it = Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() };
-    it.run_deferred();
-    let _ = it.register_regions(false);
-    it.run_ini_methods();
-    let _ = it.register_regions(true);
-    it.drain_ec_queries()
-}
-
 pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::BatteryInfo> {
     let mut it = Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() };
     // Order as in ACPICA `acpi_initialize_objects`: enable operation regions
@@ -167,106 +158,112 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     let drained = it.drain_ec_queries();
     it.ec.note_num("[aml]  stale EC events drained: ", drained as u64);
 
-    // The battery device's `_STA`, which an OS queries before `_BST`: bit 0
-    // present, bit 3 functional, bit 4 = battery inserted (ACPI 6.5
-    // §10.2.1). Without it, `_BST` returning 0xFFFFFFFF is ambiguous.
-    let mut sta = bat.clone();
-    sta.push(crate::value::seg("_STA"));
-    // Presence comes from `_STA` bit 4 (ACPI 6.5 §10.2.1 "Battery is
-    // present"), not from `remaining`: 0xFFFFFFFF means "unknown" per the
-    // specification, not "absent". A full battery on AC whose remaining
-    // capacity the firmware does not state is still present.
-    let mut sta_present: Option<bool> = None;
-    if it.has(&sta) {
-        match it.call_path(&sta, Vec::new()) {
-            Ok(v) => {
-                let f = v.as_int();
-                it.ec.note_num("[aml]  battery _STA=", f);
-                sta_present = Some(f & 0x10 != 0);
-            }
-            Err(_) => it.ec.note("[aml]  battery _STA failed"),
-        }
-    } else {
-        it.ec.note("[aml]  battery has no _STA");
-    }
-    // Order as in Linux: description first, then state.
-    //
-    // `drivers/acpi/battery.c` calls `acpi_battery_get_info` (_BIX/_BIF)
-    // before `acpi_battery_get_state` (_BST). Some firmware selects the
-    // battery or latches readings in `_BIF`, and a `_BST` before it reports
-    // "unknown".
-    it.ec.note("[aml]  phase _BIF");
-    let (full, power_unit) = it.read_full_charge(bat)?;
-    it.ec.note_num("[aml]  full charge: ", full as u64);
-
-    it.ec.note("[aml]  phase _BST");
-
-    // _BST -> Package { State, PresentRate, RemainingCapacity, Voltage }
-    let mut p = bat.clone();
-    p.push(crate::value::seg("_BST"));
-    let bst = it.call_path(&p, Vec::new())?;
-    let (state, remaining, rate, voltage_mv) = match &bst {
-        Value::Package(e) if e.len() >= 4 => {
-            // Log the whole package: 0xFFFFFFFF in every field means "no
-            // battery", in only one field it means "unknown"; `remaining`
-            // alone cannot tell.
-            for (i, el) in e.iter().enumerate().take(4) {
-                it.ec.note_num(
-                    match i { 0 => "[aml]   _BST[0] state=", 1 => "[aml]   _BST[1] rate=",
-                              2 => "[aml]   _BST[2] remaining=", _ => "[aml]   _BST[3] voltage=" },
-                    el.borrow().as_int());
-            }
-            (e[0].borrow().as_int() as u32, e[2].borrow().as_int() as u32,
-             e[1].borrow().as_int() as u32, e[3].borrow().as_int() as u32)
-        }
-        _ => return Err(format!("_BST did not return a Package(>=4): got {}", kind(&bst))),
-    };
-
-    // Absent batteries report 0xFFFFFFFF in every field.
-    //
-    // What `_BST` actually returned is passed along, so the caller can
-    // tell "firmware reports no battery" from "nothing was read". If `_STA`
-    // explicitly says "no battery" there is none; otherwise an unknown
-    // `remaining` counts as unknown, not absent.
-    if sta_present == Some(false) {
-        return Ok(crate::BatteryInfo {
-            present: false,
-            state,
-            remaining_mah: remaining,
-            ..Default::default()
-        });
-    }
-    if remaining == 0xFFFF_FFFF && sta_present.is_none() {
-        return Ok(crate::BatteryInfo {
-            present: false,
-            state,
-            remaining_mah: remaining,
-            ..Default::default()
-        });
-    }
-
-    // `remaining == 0xFFFFFFFF` means unknown (ACPI 6.5 §10.2.2), and an
-    // unknown remaining capacity must not yield a percentage; computed as a
-    // measurement it would clamp to a constant 100 %.
-    let percent = if full > 0 && remaining != 0xFFFF_FFFF {
-        (((remaining as u64) * 100 + (full as u64) / 2) / full as u64).min(100) as u8
-    } else {
-        0
-    };
-
-    Ok(crate::BatteryInfo {
-        present: true,
-        state,
-        remaining_mah: remaining,
-        full_charge_mah: full,
-        percent,
-        rate,
-        voltage_mv,
-        power_unit,
-    })
+    it.battery(bat)
 }
 
 impl<'a> Interp<'a> {
+    /// A battery's state from `_STA`, `_BIF`/`_BIX` and `_BST`, on an
+    /// initialised namespace.
+    fn battery(&mut self, bat: &Path) -> R<crate::BatteryInfo> {
+        // The battery device's `_STA`, which an OS queries before `_BST`: bit 0
+        // present, bit 3 functional, bit 4 = battery inserted (ACPI 6.5
+        // §10.2.1). Without it, `_BST` returning 0xFFFFFFFF is ambiguous.
+        let mut sta = bat.clone();
+        sta.push(crate::value::seg("_STA"));
+        // Presence comes from `_STA` bit 4 (ACPI 6.5 §10.2.1 "Battery is
+        // present"), not from `remaining`: 0xFFFFFFFF means "unknown" per the
+        // specification, not "absent". A full battery on AC whose remaining
+        // capacity the firmware does not state is still present.
+        let mut sta_present: Option<bool> = None;
+        if self.has(&sta) {
+            match self.call_path(&sta, Vec::new()) {
+                Ok(v) => {
+                    let f = v.as_int();
+                    self.ec.note_num("[aml]  battery _STA=", f);
+                    sta_present = Some(f & 0x10 != 0);
+                }
+                Err(_) => self.ec.note("[aml]  battery _STA failed"),
+            }
+        } else {
+            self.ec.note("[aml]  battery has no _STA");
+        }
+        // Order as in Linux: description first, then state.
+        //
+        // `drivers/acpi/battery.c` calls `acpi_battery_get_info` (_BIX/_BIF)
+        // before `acpi_battery_get_state` (_BST). Some firmware selects the
+        // battery or latches readings in `_BIF`, and a `_BST` before it reports
+        // "unknown".
+        self.ec.note("[aml]  phase _BIF");
+        let (full, power_unit) = self.read_full_charge(bat)?;
+        self.ec.note_num("[aml]  full charge: ", full as u64);
+
+        self.ec.note("[aml]  phase _BST");
+
+        // _BST -> Package { State, PresentRate, RemainingCapacity, Voltage }
+        let mut p = bat.clone();
+        p.push(crate::value::seg("_BST"));
+        let bst = self.call_path(&p, Vec::new())?;
+        let (state, remaining, rate, voltage_mv) = match &bst {
+            Value::Package(e) if e.len() >= 4 => {
+                // Log the whole package: 0xFFFFFFFF in every field means "no
+                // battery", in only one field it means "unknown"; `remaining`
+                // alone cannot tell.
+                for (i, el) in e.iter().enumerate().take(4) {
+                    self.ec.note_num(
+                        match i { 0 => "[aml]   _BST[0] state=", 1 => "[aml]   _BST[1] rate=",
+                                  2 => "[aml]   _BST[2] remaining=", _ => "[aml]   _BST[3] voltage=" },
+                        el.borrow().as_int());
+                }
+                (e[0].borrow().as_int() as u32, e[2].borrow().as_int() as u32,
+                 e[1].borrow().as_int() as u32, e[3].borrow().as_int() as u32)
+            }
+            _ => return Err(format!("_BST did not return a Package(>=4): got {}", kind(&bst))),
+        };
+
+        // Absent batteries report 0xFFFFFFFF in every field.
+        //
+        // What `_BST` actually returned is passed along, so the caller can
+        // tell "firmware reports no battery" from "nothing was read". If `_STA`
+        // explicitly says "no battery" there is none; otherwise an unknown
+        // `remaining` counts as unknown, not absent.
+        if sta_present == Some(false) {
+            return Ok(crate::BatteryInfo {
+                present: false,
+                state,
+                remaining_mah: remaining,
+                ..Default::default()
+            });
+        }
+        if remaining == 0xFFFF_FFFF && sta_present.is_none() {
+            return Ok(crate::BatteryInfo {
+                present: false,
+                state,
+                remaining_mah: remaining,
+                ..Default::default()
+            });
+        }
+
+        // `remaining == 0xFFFFFFFF` means unknown (ACPI 6.5 §10.2.2), and an
+        // unknown remaining capacity must not yield a percentage; computed as a
+        // measurement it would clamp to a constant 100 %.
+        let percent = if full > 0 && remaining != 0xFFFF_FFFF {
+            (((remaining as u64) * 100 + (full as u64) / 2) / full as u64).min(100) as u8
+        } else {
+            0
+        };
+
+        Ok(crate::BatteryInfo {
+            present: true,
+            state,
+            remaining_mah: remaining,
+            full_charge_mah: full,
+            percent,
+            rate,
+            voltage_mv,
+            power_unit,
+        })
+    }
+
     /// (LastFullChargeCap, power unit) — the unit says whether `_BST`'s
     /// rate and capacities are mW/mWh (0) or mA/mAh (1).
     fn read_full_charge(&mut self, bat: &Path) -> R<(u32, u32)> {
@@ -2012,6 +2009,16 @@ impl<'a> Machine<'a> {
                 "[aml]  deferred retry after _INI: {} of {n} now ok",
                 n - still.len()));
         }
+    }
+
+    /// Run the `_Qxx` of the EC events `Ec::query` hands over.
+    pub fn drain_events(&mut self) -> u32 {
+        self.it.drain_ec_queries()
+    }
+
+    /// A battery's state, on the namespace `init` set up.
+    pub fn battery(&mut self, bat: &Path) -> R<crate::BatteryInfo> {
+        self.it.battery(bat)
     }
 
     pub fn has(&self, p: &Path) -> bool {
