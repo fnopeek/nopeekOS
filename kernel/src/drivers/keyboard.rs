@@ -623,6 +623,9 @@ fn wait_write() {
 // fiber, which the ISR wakes anyway.
 static PENDING_VOL: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 static PENDING_MUTE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Backlight steps in percent, applied on the shell fiber: setting it waits
+/// for the GPU driver module.
+static PENDING_BRIGHTNESS: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 /// Unmapped extended codes seen but not yet reported (bit per code).
 static PENDING_UNKNOWN: [core::sync::atomic::AtomicU64; 2] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 2];
@@ -635,6 +638,12 @@ static MUTED_FROM: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::
 /// Volume up or down by `delta` percent; also used by USB consumer keys.
 pub(crate) fn step_volume(delta: i32) {
     PENDING_VOL.fetch_add(delta, Ordering::Relaxed);
+}
+
+/// Backlight up or down by `delta` percent of its range.
+pub(crate) fn step_brightness(delta: i32) {
+    PENDING_BRIGHTNESS.fetch_add(delta, Ordering::Relaxed);
+    crate::intent::wake_shell();
 }
 
 pub(crate) fn toggle_mute() {
@@ -662,6 +671,15 @@ pub fn apply_deferred() {
         }
     }
     crate::xhci::log_unmapped();
+    let bright = PENDING_BRIGHTNESS.swap(0, Ordering::Relaxed);
+    if bright != 0 {
+        use crate::gpu::gpudev::{backlight, BACKLIGHT_SCALE};
+        let step = (BACKLIGHT_SCALE / 100) as i32;
+        if let Some(cur) = backlight(None) {
+            let level = (cur as i32 + bright * step).clamp(0, BACKLIGHT_SCALE as i32) as u32;
+            backlight(Some(level));
+        }
+    }
     let mut mutes = PENDING_MUTE.swap(0, Ordering::Relaxed);
     let delta = PENDING_VOL.swap(0, Ordering::Relaxed);
     if delta != 0 {

@@ -154,6 +154,9 @@ impl Ec for HostEc {
         loghex2(value as u8);
         logln(")");
     }
+    fn video_output_notify(&mut self, value: u64) {
+        npk_sys::acpi_video_notify(value as i32);
+    }
     fn note_num(&mut self, s: &str, v: u64) {
         if self.verbose { lognum(s, v as u32); }
     }

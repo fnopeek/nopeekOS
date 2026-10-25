@@ -147,6 +147,7 @@ unsafe extern "C" {
     fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
     fn npk_sci_arm(gpe: i32) -> i32;
     fn npk_sci_service() -> i32;
+    fn npk_acpi_video_notify(event: i32) -> i32;
     fn npk_ec_read(addr: i32) -> i32;
     fn npk_ec_write(addr: i32, val: i32) -> i32;
     fn npk_ec_query() -> i32;
@@ -262,6 +263,9 @@ plain! {
     fn acpi_mem_read = npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
     fn sci_arm = npk_sci_arm(gpe: i32) -> i32;
     fn sci_service = npk_sci_service() -> i32;
+    /// An ACPI video output's event (0x85..0x89), for the kernel to act on
+    /// as Linux' `acpi_video` input keys (`aml` only).
+    fn acpi_video_notify = npk_acpi_video_notify(event: i32) -> i32;
     fn ec_read = npk_ec_read(addr: i32) -> i32;
     fn ec_write = npk_ec_write(addr: i32, val: i32) -> i32;
     fn ec_query = npk_ec_query() -> i32;

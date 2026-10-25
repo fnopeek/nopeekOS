@@ -931,6 +931,10 @@ host_imports! {
     ctx fn npk_sci_arm(gpe: i32) -> i32;
     ctx fn npk_sci_service() -> i32;
 
+    // npk_acpi_video_notify(event) -> 0 | -1: an ACPI video output's event
+    // (0x85..0x89), acted on as Linux' acpi_video input keys.
+    ctx fn npk_acpi_video_notify(event: i32) -> i32;
+
     // npk_irq_register_gsi(gsi, flags) -> vector | -1 — a non-PCI device's
     // I/O APIC line (flags: 1 level, 2 active-low). HARDWARE-gated.
     ctx fn npk_irq_register_gsi(gsi: i32, flags: i32) -> i32;

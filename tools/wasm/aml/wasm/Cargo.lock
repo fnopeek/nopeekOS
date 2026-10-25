@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aml"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "aml_core",
  "npk_sys",
@@ -16,4 +16,4 @@ version = "0.1.0"
 
 [[package]]
 name = "npk_sys"
-version = "0.1.0"
+version = "0.2.0"

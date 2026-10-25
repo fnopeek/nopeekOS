@@ -56,6 +56,10 @@ pub trait Ec {
     /// Brightness hotkeys end here (0x86 up / 0x87 down on the display
     /// output device, ACPI 6.5 §B.7).
     fn notify(&mut self, _path: &[[u8; 4]], _value: u64) {}
+    /// A `Notify` on an output device of an ACPI video bus (Linux
+    /// `acpi_video_device_notify`): 0x85 cycle, 0x86 brightness up, 0x87
+    /// down, 0x88 zero, 0x89 display off.
+    fn video_output_notify(&mut self, _value: u64) {}
 }
 
 /// A namespace object.

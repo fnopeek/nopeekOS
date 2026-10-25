@@ -1733,6 +1733,23 @@ pub(crate) fn npk_sci_service(ctx: &mut HostState) -> i32 {
     crate::sci::service() as i32
 }
 
+/// `npk_acpi_video_notify(event) -> 0 | -1`: the AML driver heard a
+/// `Notify` on an ACPI video output. Linux' `acpi_video_device_notify`
+/// turns 0x86/0x87 into KEY_BRIGHTNESSUP/DOWN, and the desktop steps the
+/// native backlight by a twentieth of its range; here the kernel does that
+/// step. HARDWARE-gated, the right the AML driver holds.
+pub(crate) fn npk_acpi_video_notify(ctx: &mut HostState, event: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    match event {
+        0x86 => crate::keyboard::step_brightness(5),
+        0x87 => crate::keyboard::step_brightness(-5),
+        _ => crate::kprintln!("[npk] acpi video: event 0x{:02x} not acted on", event),
+    }
+    0
+}
+
 /// Is `vector` the one this module's driver registered?
 fn owns_vector(ctx: &HostState, vector: i32) -> bool {
     matches!(ctx.hw.as_ref(), Some(h) if h.irq_vector != 0 && h.irq_vector as i32 == vector)

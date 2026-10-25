@@ -328,6 +328,24 @@ impl<'a> Interp<'a> {
         self.dyn_nodes.contains_key(p) || self.ns.nodes.contains_key(p)
     }
 
+    /// Whether `p` is an output device of an ACPI video bus, as Linux binds
+    /// `acpi_video` to it: a device with `_ADR` whose parent is a video
+    /// device (`acpi_is_video_device`: it has `_DOD`, `_DOS`, `_ROM`, `_GPD`,
+    /// `_SPD` or `_VPO`).
+    fn is_video_output(&self, p: &Path) -> bool {
+        let child = |dev: &Path, name: &[u8; 4]| {
+            let mut c = dev.clone();
+            c.push(*name);
+            self.has(&c)
+        };
+        if p.is_empty() || !child(p, b"_ADR") {
+            return false;
+        }
+        let mut parent = p.clone();
+        parent.pop();
+        [b"_DOD", b"_DOS", b"_ROM", b"_GPD", b"_SPD", b"_VPO"].iter().any(|m| child(&parent, m))
+    }
+
     /// Look up a node; run-time declarations shadow the table.
     fn node(&self, p: &Path) -> Option<&Node> {
         self.dyn_nodes.get(p).or_else(|| self.ns.get(p))
@@ -1000,6 +1018,9 @@ impl<'a> Interp<'a> {
                 let (v, p2) = self.eval(f, p1)?;
                 if let Some(path) = target {
                     self.ec.notify(&path, v.as_int());
+                    if self.is_video_output(&path) {
+                        self.ec.video_output_notify(v.as_int());
+                    }
                 }
                 Ok((Value::Uninit, p2))
             }
