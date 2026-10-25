@@ -34,13 +34,13 @@ only the code. Everything else has a better home.
 | Content | Where it goes instead |
 |---|---|
 | Version numbers ("since 0.185.0", "until kernel 0.405.2") | commit message |
-| Dates, "measured on …" | commit message, `docs/plan/` |
-| Measurements, benchmarks, A/B results | commit message, `docs/plan/` |
-| Our devices, network, setup (IdeaPad, repeater, "on the device") | memory, `docs/plan/` |
+| Dates, "measured on …" | commit message |
+| Measurements, benchmarks, A/B results | commit message |
+| Our devices, network, setup (IdeaPad, repeater, "on the device") | nowhere |
 | People ("Florian said", "per request") | nowhere, or the commit message |
 | Debugging stories, "previously this was X", "the bug was" | commit message |
-| Design discussion, alternatives weighed, roadmap | `docs/plan/`, `docs/spec/` |
-| TODO lists longer than one line | `docs/plan/` |
+| Design discussion, alternatives weighed | `docs/spec/` once decided |
+| Open work, TODO lists longer than one line | an issue; the comment may say `#N` |
 
 The test: **would this sentence still be true and useful if the git
 history were deleted?** If it only makes sense as history, it is history.

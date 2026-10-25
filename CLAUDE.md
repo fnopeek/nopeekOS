@@ -103,9 +103,33 @@ git push
 For a module-only change, `./build.sh sign-modules` re-signs only the
 modules whose hash changed and leaves the kernel untouched.
 
+## Tracking bugs, security findings and docs
+
+One finding, one ticket. Nothing open lives only in a document.
+
+| What | Where | Closed by |
+|---|---|---|
+| bug | public issue, label `bug` | the fix commit with `Fixes #N` |
+| hardening (crafted input only, not reachable from a module) | public issue, label `hardening` | the fix commit with `Fixes #N` |
+| vulnerability (sandbox, capabilities, crypto, update path) | **private** draft security advisory, never a public issue | publishing the advisory after the fix is released |
+| contract the code follows | `docs/spec/` | kept up to date |
+| current state, history, measurements | commit messages, `git log` | |
+
+A security fix:
+
+1. Draft advisory with impact, location and fix plan.
+2. Fix and release as usual. The commit message names the change, not
+   how to exploit it, and references the advisory ID.
+3. Set the patched version in the advisory and publish it.
+
+A review produces tickets, not a paper: each confirmed finding becomes an
+issue or an advisory as above. Code comments may reference a spec, an
+upstream source or an issue (`#N`); never an internal document.
+
 ## Where the state lives
 
 - `git log` is the history and the current state; there is no status
   section here.
+- Open work is in the issues; open vulnerabilities in the security
+  advisories.
 - `docs/spec/` holds the contracts that code refers to.
-- Security issues are reported privately, see [SECURITY.md](SECURITY.md).

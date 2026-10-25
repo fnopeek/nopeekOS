@@ -24,5 +24,13 @@ This is one person's project: expect an answer within days, not hours. A
 fix ships as a signed OTA release; you will be credited in it unless you
 prefer not to be.
 
+## What happens with a finding
+
+Every vulnerability, whether reported or found in our own reviews, is
+tracked as a private security advisory until the fix is released. Then
+the advisory is published with the patched version. Hardening against
+crafted disks or input that a module cannot reach is tracked in public
+issues with the label `hardening`.
+
 Reviews of the sandbox boundary, the capability vault and the crypto are
 especially welcome, even without a concrete finding.
