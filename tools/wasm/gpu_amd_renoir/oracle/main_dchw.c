@@ -215,6 +215,8 @@ static u64 amdgpu_gmc_pd_addr(struct amdgpu_bo *bo)
 #include "dchw_dm_funcs.c"
 
 void kdrm_connector_create(struct dc_link *link);
+void kdrm_crtc_queries(struct dc *dc, struct dc_stream_state *stream, int clock, int htotal, int vdisplay,
+		       int vtotal, int out[10]);
 
 
 /* The context as the commit path builds it: the stream, and per pipe the
@@ -621,6 +623,31 @@ int main(int argc, char **argv)
 				cp.x_hotspot = pos[i][0] < 0 ? -pos[i][0] : 0;
 				cp.y_hotspot = pos[i][1] < 0 ? -pos[i][1] : 0;
 				printf("dc_stream_program_cursor_position %d\n", dc_stream_program_cursor_position(stream, &cp));
+			}
+			/* The CRTC queries of vblank handling and flip throttling. */
+			printf("dc_stream_get_vblank_counter %u\n", dc_stream_get_vblank_counter(stream));
+			unsigned int vbs, vbe, hp, vp;
+			printf("dc_stream_get_scanoutpos %d", dc_stream_get_scanoutpos(stream, &vbs, &vbe, &hp, &vp));
+			printf(" %u %u %u %u\n", vbs, vbe, hp, vp);
+			/* At four scanout positions: active, vblank before and after
+			 * vsync, and the first lines, each with its frame count. */
+			struct optc *otg = NULL;
+			for (int i = 0; i < MAX_PIPES; i++)
+				if (dc->current_state->res_ctx.pipe_ctx[i].stream == stream &&
+				    dc->current_state->res_ctx.pipe_ctx[i].stream_res.tg)
+					otg = DCN10TG_FROM_TG(dc->current_state->res_ctx.pipe_ctx[i].stream_res.tg);
+			int at[4][2] = { { 50, 100 }, { 10, 1205 }, { 300, 1230 }, { 0, 5 } };
+			for (int k = 0; k < 4; k++) {
+				dm_write_reg(dc->ctx, otg->tg_regs->OTG_STATUS_POSITION,
+					     at[k][0] << otg->tg_shift->OTG_HORZ_COUNT | at[k][1] << otg->tg_shift->OTG_VERT_COUNT);
+				dm_write_reg(dc->ctx, otg->tg_regs->OTG_STATUS_FRAME_COUNT, 41 + k);
+				int q[10];
+				kdrm_crtc_queries(dc, stream, stream->timing.pix_clk_100hz / 10, stream->timing.h_total,
+						  stream->timing.v_addressable, stream->timing.v_total, q);
+				printf("crtc queries");
+				for (int i = 0; i < 10; i++)
+					printf(" %d", q[i]);
+				printf("\n");
 			}
 		}
 	}

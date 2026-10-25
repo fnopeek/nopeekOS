@@ -622,6 +622,56 @@ fn main() {
                 println!("dc_stream_program_cursor_position {}",
                     dc::dc_stream_program_cursor_position(&adev, &mut dc, stream, &cp) as i32);
             }
+            // The CRTC queries, as in the oracle.
+            println!("dc_stream_get_vblank_counter {}", dc::dc_stream_get_vblank_counter(&adev, &dc, stream));
+            let (mut vbs, mut vbe, mut hp, mut vp) = (0, 0, 0, 0);
+            let r = dc::dc_stream_get_scanoutpos(&adev, &dc, stream, &mut vbs, &mut vbe, &mut hp, &mut vp);
+            println!("dc_stream_get_scanoutpos {} {} {} {} {}", r as i32, vbs, vbe, hp, vp);
+            let t = dc.streams[stream].as_deref().unwrap().timing;
+            let mode = drm_vblank::drm_display_mode {
+                crtc_clock: (t.pix_clk_100hz / 10) as i32, crtc_htotal: t.h_total as i32,
+                crtc_vdisplay: t.v_addressable as i32, crtc_vtotal: t.v_total as i32, flags: 0,
+            };
+            // At four scanout positions, as in the oracle.
+            let otg = {
+                let cur = dc.current_state.as_deref().unwrap();
+                let pc = cur.res_ctx.pipe_ctx.iter()
+                    .filter(|p| p.stream == Some(stream) && p.stream_res.tg.is_some()).last().unwrap();
+                dc.res_pool.as_deref().unwrap().timing_generators[pc.stream_res.tg.unwrap()].as_deref().unwrap()
+            };
+            let (regs, shift) = (otg.tg_regs.unwrap(), otg.tg_shift.unwrap());
+            for (k, (h, v)) in [(50u32, 100u32), (10, 1205), (300, 1230), (0, 5)].into_iter().enumerate() {
+                dc_helper::dm_write_reg(&adev, regs.OTG_STATUS_POSITION,
+                    h << shift.OTG_HORZ_COUNT | v << shift.OTG_VERT_COUNT);
+                dc_helper::dm_write_reg(&adev, regs.OTG_STATUS_FRAME_COUNT, 41 + k as u32);
+                let mut acrtc = amdgpu_dm::amdgpu_crtc { hwmode: mode, ..Default::default() };
+                acrtc.dm_irq_params.stream = Some(stream);
+                adev.mode_info.num_crtc = 1;
+                adev.mode_info.crtcs = vec![Some(acrtc)];
+                adev.dm.dc = Some(dc);
+                let mut q = [0i32; 10];
+                let (mut vbl, mut position) = (0, 0);
+                q[0] = amdgpu_dm::dm_vblank_get_counter(&adev, 0) as i32;
+                amdgpu_dm::dm_crtc_get_scanoutpos(&adev, 0, &mut vbl, &mut position);
+                q[1] = vbl as i32;
+                q[2] = position as i32;
+                let (mut vpos, mut hpos) = (0, 0);
+                q[3] = amdgpu_display::amdgpu_display_get_crtc_scanoutpos(&adev, 0, 0, &mut vpos, &mut hpos, None, None,
+                                                                          &mode) as i32;
+                q[4] = vpos;
+                q[5] = hpos;
+                q[6] = amdgpu_display::amdgpu_display_get_crtc_scanoutpos(
+                    &adev, 0, amdgpu_display::GET_DISTANCE_TO_VBLANKSTART, &mut vpos, &mut hpos, None, None, &mode) as i32;
+                q[7] = vpos;
+                q[8] = hpos;
+                q[9] = amdgpu_display::amdgpu_get_vblank_counter_kms(&adev, 0) as i32;
+                dc = adev.dm.dc.take().unwrap();
+                print!("crtc queries");
+                for v in q {
+                    print!(" {}", v);
+                }
+                println!();
+            }
         }
     }
     npk_sys::fake_card_echo(false);

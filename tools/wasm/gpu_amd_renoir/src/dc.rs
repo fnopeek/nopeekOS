@@ -2851,6 +2851,51 @@ pub fn dc_get_flip_pending_on_otg(adev: &amdgpu_device, dc: &dc, otg_inst: u32) 
     flip_pending
 }
 
+/// `dc_stream_get_vblank_counter` (dc_stream.c): the frame count of the
+/// stream's timing generator.
+pub fn dc_stream_get_vblank_counter(adev: &amdgpu_device, dc: &dc, stream: usize) -> u32 {
+    let res_ctx = &dc.current_state.as_deref().unwrap().res_ctx;
+
+    dc_exit_ips_for_hw_access(dc);
+
+    for i in 0..MAX_PIPES {
+        let Some(tg) = res_ctx.pipe_ctx[i].stream_res.tg else { continue };
+        if res_ctx.pipe_ctx[i].stream != Some(stream) {
+            continue;
+        }
+
+        let tg = dc.res_pool.as_deref().unwrap().timing_generators[tg].as_deref().unwrap();
+        return (tg.funcs().get_frame_count.unwrap())(adev, tg);
+    }
+
+    0
+}
+
+/// `dc_stream_get_scanoutpos` (dc_stream.c): the vblank bounds and the
+/// scanout position of the stream's timing generator.
+pub fn dc_stream_get_scanoutpos(adev: &amdgpu_device, dc: &dc, stream: usize, v_blank_start: &mut u32,
+                                v_blank_end: &mut u32, h_position: &mut u32, v_position: &mut u32) -> bool {
+    let mut ret = false;
+    let res_ctx = &dc.current_state.as_deref().unwrap().res_ctx;
+
+    dc_exit_ips_for_hw_access(dc);
+
+    for i in 0..MAX_PIPES {
+        let Some(tg) = res_ctx.pipe_ctx[i].stream_res.tg else { continue };
+        if res_ctx.pipe_ctx[i].stream != Some(stream) {
+            continue;
+        }
+
+        let tg = dc.res_pool.as_deref().unwrap().timing_generators[tg].as_deref().unwrap();
+        (tg.funcs().get_scanoutpos.unwrap())(adev, tg, v_blank_start, v_blank_end, h_position, v_position);
+
+        ret = true;
+        break;
+    }
+
+    ret
+}
+
 /// `dc_stream_check_cursor_attributes` (dc_stream.c). The SW cursor
 /// fallback (`allow_sw_cursor_fallback`) is off on DCN 2.1.
 pub fn dc_stream_check_cursor_attributes(attributes: &crate::dc_hw_types::dc_cursor_attributes) -> bool {

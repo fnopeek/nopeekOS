@@ -223,6 +223,8 @@ mod irq_service;
 mod amdgpu_dm_irq;
 #[path = "../src/drm_vblank.rs"]
 mod drm_vblank;
+#[path = "../src/amdgpu_display.rs"]
+mod amdgpu_display;
 #[path = "../src/virtual_stream_encoder.rs"]
 mod virtual_stream_encoder;
 #[path = "../src/dml_structs.rs"]

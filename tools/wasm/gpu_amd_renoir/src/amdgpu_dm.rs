@@ -85,6 +85,10 @@ pub struct amdgpu_crtc {
     pub event: Option<u32>,
     pub dm_irq_params: dm_irq_params,
     pub vblank: crate::drm_vblank::drm_vblank_crtc,
+    /// `base.hwmode`: the adjusted mode of the last commit.
+    pub hwmode: crate::drm_vblank::drm_display_mode,
+    /// `lb_vblank_lead_lines`: DM leaves it 0.
+    pub lb_vblank_lead_lines: u32,
 }
 
 /// `struct dm_irq_params` (amdgpu_dm_irq_params.h), the members reached.
@@ -895,6 +899,14 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device, fb: &dm_framebuffer) -> bo
         acrtc.dm_irq_params.active_planes = 1;
     }
     adev.dm.live = Some(dm_live { crtc: 0, stream, plane });
+
+    // drm_atomic_helper_calc_timestamping_constants on the adjusted mode,
+    // which drm_atomic_helper_update_legacy_modeset_state also makes the
+    // CRTC's hardware mode.
+    let mode = dm_adjusted_mode(&adev.dm.dc.as_deref().unwrap().streams[stream].as_deref().unwrap().timing);
+    adev.mode_info.crtcs[0].as_mut().unwrap().hwmode = mode;
+    crate::drm_vblank::drm_calc_timestamping_constants(adev, 0, &mode);
+
     manage_dm_interrupts(adev, 0, true);
     return true;
 
@@ -987,6 +999,20 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device, fb: &dm_framebuffer) -> bo
         let updated = dc::dc_update_planes_and_stream(adev, dc, &mut srf, stream, None);
         Line::new().s("dc live: commit streams ").dec(committed as u64).s(", update planes ").dec(updated as u64).say();
         (committed == crate::dc_types::dc_status::DC_OK && updated).then_some((stream, plane))
+    }
+}
+
+/// The DRM mode a stream's timing is filled from
+/// (`fill_stream_properties_from_drm_display_mode` the other way round):
+/// the takeover builds the stream from the firmware's timing, not from a
+/// mode.
+fn dm_adjusted_mode(t: &crate::dc_hw_types::dc_crtc_timing) -> crate::drm_vblank::drm_display_mode {
+    crate::drm_vblank::drm_display_mode {
+        crtc_clock: (t.pix_clk_100hz / 10) as i32,
+        crtc_htotal: t.h_total as i32,
+        crtc_vdisplay: t.v_addressable as i32,
+        crtc_vtotal: t.v_total as i32,
+        flags: if t.flags.INTERLACE { crate::drm_vblank::DRM_MODE_FLAG_INTERLACE } else { 0 },
     }
 }
 
@@ -1143,6 +1169,52 @@ fn register_hpd_handlers(_adev: &mut amdgpu_device) -> i32 {
     0
 }
 
+/// `dm_vblank_get_counter`: the frame count of the CRTC's stream.
+pub fn dm_vblank_get_counter(adev: &amdgpu_device, crtc: i32) -> u32 {
+    if crtc >= adev.mode_info.num_crtc as i32 {
+        return 0;
+    }
+
+    let acrtc = adev.mode_info.crtcs[crtc as usize].unwrap();
+
+    let Some(stream) = acrtc.dm_irq_params.stream else {
+        drm_err("dc_stream_state is NULL for crtc!");
+        return 0;
+    };
+
+    crate::dc::dc_stream_get_vblank_counter(adev, adev.dm.dc.as_deref().unwrap(), stream)
+}
+
+/// `dm_crtc_get_scanoutpos`: the stream's vblank bounds and scanout
+/// position, packed in the register format the base driver parses.
+pub fn dm_crtc_get_scanoutpos(adev: &amdgpu_device, crtc: i32, vbl: &mut u32, position: &mut u32) -> i32 {
+    let (mut v_blank_start, mut v_blank_end, mut h_position, mut v_position) = (0, 0, 0, 0);
+    let dc = adev.dm.dc.as_deref();
+
+    if crtc < 0 || crtc >= adev.mode_info.num_crtc as i32 {
+        return -22;
+    }
+
+    let acrtc = adev.mode_info.crtcs[crtc as usize].unwrap();
+
+    let Some(stream) = acrtc.dm_irq_params.stream else {
+        drm_err("dc_stream_state is NULL for crtc!");
+        return 0;
+    };
+
+    // IPS (dc->caps.ips_support) is DCN 3.5's.
+
+    // TODO rework base driver to use values directly. for now parse it back
+    // into reg-format
+    crate::dc::dc_stream_get_scanoutpos(adev, dc.unwrap(), stream, &mut v_blank_start, &mut v_blank_end,
+                                        &mut h_position, &mut v_position);
+
+    *position = v_position | (h_position << 16);
+    *vbl = v_blank_start | (v_blank_end << 16);
+
+    0
+}
+
 /// `manage_dm_interrupts`: a CRTC's vblank on, with the disable delay of
 /// DCN before 3.5 on an APU without PSR (two frames), or off.
 fn manage_dm_interrupts(adev: &mut amdgpu_device, crtc: usize, enable: bool) {
@@ -1168,7 +1240,8 @@ fn manage_dm_interrupts(adev: &mut amdgpu_device, crtc: usize, enable: bool) {
         crate::drm_vblank::drm_crtc_vblank_on_config(adev, crtc, &config);
         // The extra vupdate reference is DCN 3.0 and 3.2's.
     } else {
-        Line::new().s("manage_dm_interrupts: drm_crtc_vblank_off not ported").say();
+        // The extra vupdate reference is DCN 3.0 and 3.2's.
+        crate::drm_vblank::drm_crtc_vblank_off(adev, crtc);
     }
 }
 
@@ -1284,9 +1357,8 @@ fn dm_crtc_high_irq_handler(adev: &mut amdgpu_device, acrtc: usize) {
 /// drives: the plane's unchanged plane and scaling info with the new
 /// address, the vblank reference, the update, and the event armed after
 /// programming (sent at once when the hardware latched already, else from
-/// the VUPDATE interrupt). Flips are not throttled to the vblank of the
-/// last one (amdgpu_display_get_crtc_scanoutpos is not ported): the caller
-/// flips again only after the event. -EBUSY while a flip is pending.
+/// the VUPDATE interrupt), throttled to leave the vblank before the one it
+/// targets. -EBUSY while a flip is pending.
 pub fn dm_page_flip(adev: &mut amdgpu_device, address: u64, event: u32) -> i32 {
     use crate::dc;
     let Some(live) = adev.dm.live else { return -19 };
@@ -1315,6 +1387,25 @@ pub fn dm_page_flip(adev: &mut amdgpu_device, address: u64, event: u32) -> i32 {
     fa.address.u[0] = address;
     fa.flip_immediate = false;
     fa.flip_timestamp_in_us = crate::linux::now_us();
+
+    // Use old throttling in non-vrr fixed refresh rate mode to keep flip
+    // scheduling based on target vblank counts working in a backwards
+    // compatible way, e.g., for clients using the GLX_OML_sync_control
+    // extension or DRI3/Present extension with defined target_msc.
+    let last_flip_vblank = crate::amdgpu_display::amdgpu_get_vblank_counter_kms(adev, acrtc);
+    // wait_for_vblank: no asynchronous flip is asked for.
+    let target_vblank = last_flip_vblank.wrapping_add(1);
+
+    // Wait until we're out of the vertical blank period before the one
+    // targeted by the flip
+    let both = crate::amdgpu_display::DRM_SCANOUTPOS_VALID | crate::amdgpu_display::DRM_SCANOUTPOS_IN_VBLANK;
+    while c.enabled
+        && crate::amdgpu_display::amdgpu_display_get_crtc_scanoutpos(adev, acrtc, 0, &mut 0, &mut 0, None, None,
+                                                                     &c.hwmode) & both == both
+        && (target_vblank.wrapping_sub(crate::amdgpu_display::amdgpu_get_vblank_counter_kms(adev, acrtc)) as i32) > 0
+    {
+        crate::linux::usleep_range(1000, 1100);
+    }
 
     // dm_arm_vblank_event_pre_programming
     if c.dm_irq_params.active_planes != 0 {

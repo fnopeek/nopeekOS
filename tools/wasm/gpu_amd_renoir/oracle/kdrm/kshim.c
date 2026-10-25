@@ -73,6 +73,7 @@ void __drm_err(const char *format, ...)
 }
 void __drm_dev_dbg(struct _ddebug *desc, const struct device *dev, enum drm_debug_category category,
 		   const char *format, ...) { }
+ktime_t ktime_get(void) { return 0; }
 void drm_dev_printk(const struct device *dev, const char *level, const char *format, ...) { }
 void drm_printf(struct drm_printer *p, const char *f, ...) { }
 void _dev_err(const struct device *dev, const char *fmt, ...) { }

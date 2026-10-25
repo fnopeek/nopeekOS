@@ -16,6 +16,7 @@
 #include "dc.h"
 #include "amdgpu_dm.h"
 #include "amdgpu_dm_irq.h"
+#include "amdgpu_display.h"
 #include "amdgpu_dm_mst_types.h"
 #include "dpcd_defs.h"
 #include "dc/inc/core_types.h"
@@ -62,4 +63,48 @@ void kdrm_connector_create(struct dc_link *link)
 		drm_dp_dpcd_set_probe(&aconnector->dm_dp_aux.aux, false);
 	}
 	link->priv = aconnector;
+}
+
+/* The CRTC queries of vblank handling and flip throttling, on DC's stream:
+ * DM's display funcs (vblank_get_counter, page_flip_get_scanoutpos) under
+ * amdgpu_display_get_crtc_scanoutpos and amdgpu_get_vblank_counter_kms,
+ * with CRTC 0 showing `stream` in the mode the stream's timing came from.
+ * out: dm counter, dm vbl, dm position, then ret/vpos/hpos with flags 0
+ * and GET_DISTANCE_TO_VBLANKSTART, then the cooked counter. */
+static const struct amdgpu_display_funcs kdrm_display_funcs = {
+	.vblank_get_counter = dm_vblank_get_counter,
+	.page_flip_get_scanoutpos = dm_crtc_get_scanoutpos,
+};
+
+void kdrm_crtc_queries(struct dc *dc, struct dc_stream_state *stream, int clock, int htotal, int vdisplay,
+		       int vtotal, int out[10])
+{
+	struct amdgpu_crtc *acrtc = kzalloc(sizeof(*acrtc), GFP_KERNEL);
+	struct drm_display_mode *mode = &acrtc->base.hwmode;
+	u32 vbl = 0, position = 0;
+	int vpos, hpos;
+
+	kdrm_adev->dm.dc = dc;
+	kdrm_adev->mode_info.num_crtc = 1;
+	kdrm_adev->mode_info.funcs = &kdrm_display_funcs;
+	kdrm_adev->mode_info.crtcs[0] = acrtc;
+	acrtc->base.dev = &kdrm_adev->ddev;
+	acrtc->dm_irq_params.stream = stream;
+	mode->crtc_clock = clock;
+	mode->crtc_htotal = htotal;
+	mode->crtc_vdisplay = vdisplay;
+	mode->crtc_vtotal = vtotal;
+
+	out[0] = dm_vblank_get_counter(kdrm_adev, 0);
+	dm_crtc_get_scanoutpos(kdrm_adev, 0, &vbl, &position);
+	out[1] = vbl;
+	out[2] = position;
+	out[3] = amdgpu_display_get_crtc_scanoutpos(&kdrm_adev->ddev, 0, 0, &vpos, &hpos, NULL, NULL, mode);
+	out[4] = vpos;
+	out[5] = hpos;
+	out[6] = amdgpu_display_get_crtc_scanoutpos(&kdrm_adev->ddev, 0, GET_DISTANCE_TO_VBLANKSTART, &vpos, &hpos,
+						    NULL, NULL, mode);
+	out[7] = vpos;
+	out[8] = hpos;
+	out[9] = amdgpu_get_vblank_counter_kms(&acrtc->base);
 }

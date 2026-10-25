@@ -118,6 +118,7 @@ mod dcn21_resource;
 mod irq_service;
 mod amdgpu_dm_irq;
 mod drm_vblank;
+mod amdgpu_display;
 mod virtual_stream_encoder;
 mod dml_structs;
 mod dcn20_fpu;

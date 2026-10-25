@@ -55,6 +55,8 @@ pub struct timing_generator_ops {
     pub get_dsc_status: Option<fn(&amdgpu_device, &optc, &mut u32)>,
     pub get_optc_source: Option<fn(&amdgpu_device, &optc, &mut u32, &mut u32, &mut u32)>,
     pub get_position: Option<fn(&amdgpu_device, &optc, &mut crate::dc_hw_types::crtc_position)>,
+    pub get_frame_count: Option<fn(&amdgpu_device, &optc) -> u32>,
+    pub get_scanoutpos: Option<fn(&amdgpu_device, &optc, &mut u32, &mut u32, &mut u32, &mut u32)>,
 }
 
 /// `dcn20_tg_funcs` (dcn20_optc.c), as far as ported. `init_odm` is not a
@@ -88,6 +90,8 @@ const DCN20_TG_FUNCS: timing_generator_ops = timing_generator_ops {
     get_dsc_status: Some(optc2_get_dsc_status),
     get_optc_source: Some(optc2_get_optc_source),
     get_position: Some(optc1_get_position),
+    get_frame_count: Some(optc1_get_vblank_counter),
+    get_scanoutpos: Some(optc1_get_crtc_scanoutpos),
 };
 
 impl timing_generator_funcs {
@@ -225,6 +229,11 @@ pub fn optc1_get_otg_active_size(adev: &amdgpu_device, optc1: &optc, otg_active_
     *otg_active_width = h_blank_start.wrapping_sub(h_blank_end);
     *otg_active_height = v_blank_start.wrapping_sub(v_blank_end);
     true
+}
+
+/// `optc1_get_vblank_counter` (dcn10_optc.c).
+pub fn optc1_get_vblank_counter(adev: &amdgpu_device, optc1: &optc) -> u32 {
+    reg_get!(adev, optc1.rsm(), OTG_STATUS_FRAME_COUNT, OTG_FRAME_COUNT)
 }
 
 /// `optc1_lock` (dcn10_optc.c).
@@ -1924,6 +1933,20 @@ pub fn optc1_get_hw_timing(adev: &amdgpu_device, optc1: &optc, hw_crtc_timing: &
     hw_crtc_timing.v_sync_width = s.v_sync_a_end.wrapping_sub(s.v_sync_a_start);
 
     true
+}
+
+/// `optc1_get_crtc_scanoutpos` (dcn10_optc.c).
+pub fn optc1_get_crtc_scanoutpos(adev: &amdgpu_device, optc1: &optc, v_blank_start: &mut u32, v_blank_end: &mut u32,
+                                 h_position: &mut u32, v_position: &mut u32) {
+    let mut position = crate::dc_hw_types::crtc_position::default();
+
+    [*v_blank_start, *v_blank_end] =
+        reg_get_n!(adev, optc1.rsm(), OTG_V_BLANK_START_END, OTG_V_BLANK_START, OTG_V_BLANK_END);
+
+    optc1_get_position(adev, optc1, &mut position);
+
+    *h_position = position.horizontal_count;
+    *v_position = position.vertical_count;
 }
 
 /// `optc1_get_position` (dcn10_optc.c).
