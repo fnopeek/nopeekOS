@@ -649,6 +649,9 @@ pub fn intent_power(args: &str) {
         }
         kprintln!("  Residenz        {}", line);
     }
+    if let Some((limit, locked)) = crate::smp::per_core::pkg_cstate_limit() {
+        kprintln!("  Package-Grenze    {} (MSR 0xE2{})", limit, if locked { ", von der Firmware gesperrt" } else { "" });
+    }
     let port = crate::interrupts::deep_idle_port();
     let (mwait, mwait_on) = crate::interrupts::mwait_states();
     if mwait_on {

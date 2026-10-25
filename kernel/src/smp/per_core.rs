@@ -376,6 +376,19 @@ fn intel_tigerlake(model: u32) -> bool {
 pub const RESIDENCY_NAMES: [&str; 9] = ["PC2", "PC3", "PC6", "PC7", "PC8", "PC9", "PC10", "CC6", "CC7"];
 const RESIDENCY_MSRS: [u32; 9] = [0x60D, 0x3F8, 0x3F9, 0x3FA, 0x630, 0x631, 0x632, 0x3FD, 0x3FE];
 
+/// `MSR_PKG_CST_CONFIG_CONTROL` on a CPU with the counters: the deepest
+/// package C-state the firmware allows (turbostat's `hsw_pkg_cstate_limits`
+/// for Tiger Lake) and whether the register is locked.
+pub fn pkg_cstate_limit() -> Option<(&'static str, bool)> {
+    if !intel_model().is_some_and(intel_tigerlake) { return None; }
+    // SAFETY: MSR_PKG_CST_CONFIG_CONTROL exists on every Intel core since
+    // Nehalem, Tiger Lake included; reading it has no side effect.
+    let v = unsafe { msr::read(0xE2) };
+    const HSW: [&str; 16] = ["PC0", "PC2", "PC3", "PC6", "PC7", "PC7S", "PC8", "PC9", "unbegrenzt",
+        "reserviert", "reserviert", "reserviert", "reserviert", "reserviert", "reserviert", "reserviert"];
+    Some((HSW[(v & 0xF) as usize], v & (1 << 15) != 0))
+}
+
 /// The residency counters, on a CPU that has them.
 pub fn residency() -> Option<[u64; 9]> {
     if !intel_model().is_some_and(intel_tigerlake) { return None; }
