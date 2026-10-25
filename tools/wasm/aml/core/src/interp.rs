@@ -124,10 +124,12 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     // first (`_REG`), then start the devices (`_STA`/`_INI`).
     it.run_deferred();
     it.ec.note("[aml]  phase _REG");
-    it.register_ec_regions()?;
+    it.register_regions(false)?;
     it.ec.note("[aml]  phase _INI");
     let ini_ran = it.run_ini_methods();
     it.ec.note_num("[aml]  _INI methods run: ", ini_ran as u64);
+    it.ec.note("[aml]  phase EC _REG");
+    it.register_regions(true)?;
 
     // How many `_Qxx` does this DSDT have?
     //
@@ -284,21 +286,26 @@ impl<'a> Interp<'a> {
         Err(String::from("neither _BIF nor _BIX usable"))
     }
 
-    /// Run every EmbeddedControl region's parent `_REG(3, 1)` so the firmware
-    /// sets its "EC ready" gate (e.g. ECRG = 1). Generic — no name hardcoded.
-    fn register_ec_regions(&mut self) -> R<()> {
-        // `_REG(space, 1)` for every region space we serve, not only the EC.
-        //
-        // ACPICA calls `_REG` for every space with an installed handler
-        // (`acpi_ev_initialize_op_regions`), telling the firmware "this
-        // space is now usable". A DSDT that sets up state in a `_REG` for
-        // SystemIO or SystemMemory would otherwise stay half-initialised.
-        //
+    /// Run `_REG(space, 1)` in the scope of every operation region: those
+    /// of the EmbeddedControl space (`ec`), or all the others.
+    ///
+    /// ACPICA calls `_REG` for every space with an installed handler
+    /// (`acpi_ev_initialize_op_regions`), telling the firmware "this space
+    /// is now usable"; a DSDT that sets up state in a `_REG` for SystemIO or
+    /// SystemMemory would otherwise stay half-initialised. Linux installs
+    /// the default handlers before `acpi_initialize_objects` runs `_INI`, and
+    /// the EC's only afterwards (`acpi_ec_dsdt_probe`, drivers/acpi/bus.c):
+    /// an EC `_REG` often hands the EC what `_INI` worked out, such as the
+    /// OS type from `_OSI`. Generic, no name hardcoded.
+    fn register_regions(&mut self, ec: bool) -> R<()> {
         // Pairs of (parent scope, space), so a scope with two regions gets
         // two calls.
         let mut pairs: Vec<(Path, u8)> = Vec::new();
         for (path, node) in self.ns.nodes.iter() {
             if let Node::Region { space, .. } = node {
+                if (*space == 3) != ec {
+                    continue;
+                }
                 let mut par = path.clone();
                 par.pop();
                 let e = (par, *space);
@@ -307,9 +314,6 @@ impl<'a> Interp<'a> {
                 }
             }
         }
-        // EC last: the other spaces often set up the gate through which the
-        // EC answers at all.
-        pairs.sort_by_key(|(_, sp)| if *sp == 3 { 1 } else { 0 });
         for (par, space) in pairs {
             let mut reg = par.clone();
             reg.push(crate::value::seg("_REG"));
@@ -594,23 +598,26 @@ impl<'a> Interp<'a> {
         Ok(Flow::Normal)
     }
 
-    fn stmt(&mut self, f: &Frame, p: usize, _end: usize) -> R<(Flow, usize)> {
+    fn stmt(&mut self, f: &Frame, p: usize, end: usize) -> R<(Flow, usize)> {
         let b = f.body;
         match b[p] {
             0xA0 => {
-                // If
+                // If. An Else belongs to it only inside the list the If
+                // stands in: an If that closes its enclosing block is
+                // followed by that block's own Else.
                 let (pkg_end, p1) = pkg_length(b, p + 1);
                 let (cond, p2) = self.eval(f, p1)?;
+                let has_else = pkg_end < end && b[pkg_end] == 0xA1;
                 if cond.as_int() != 0 {
                     let flow = self.exec_list(f, p2, pkg_end)?;
                     if !matches!(flow, Flow::Normal) {
                         return Ok((flow, pkg_end));
                     }
                     // fall through past a possible Else
-                    return Ok((Flow::Normal, skip_else(b, pkg_end)));
+                    return Ok((Flow::Normal, if has_else { skip_else(b, pkg_end) } else { pkg_end }));
                 } else {
                     // skip then-block; run Else if present
-                    if pkg_end < b.len() && b[pkg_end] == 0xA1 {
+                    if has_else {
                         let (else_end, e1) = pkg_length(b, pkg_end + 1);
                         let flow = self.exec_list(f, e1, else_end)?;
                         return Ok((flow, else_end));
@@ -1975,10 +1982,12 @@ impl<'a> Machine<'a> {
         self.it.ec.note("[aml]  phase deferred table ops");
         let failed = self.it.run_deferred();
         self.it.ec.note("[aml]  phase _REG");
-        let _ = self.it.register_ec_regions();
+        let _ = self.it.register_regions(false);
         self.it.ec.note("[aml]  phase _INI");
         let n = self.it.run_ini_methods();
         self.it.ec.note_num("[aml]  _INI methods run: ", n as u64);
+        self.it.ec.note("[aml]  phase EC _REG");
+        let _ = self.it.register_regions(true);
 
         // Retry what failed the first time.
         //
