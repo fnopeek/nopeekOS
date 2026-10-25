@@ -80,6 +80,28 @@ fn main() {
     println!("EC _GPE: {:?}", ec_gpe(&ns));
 
     let bats = find_batteries(&ns);
+    // CST=1: the processors' _OSC and _CST, with the SSDTs given after the
+    // DSDT; every processor counts as present (no MADT here).
+    if std::env::var("CST").is_ok() {
+        let mut ns = ns;
+        for f in std::env::args().skip(2) {
+            let t = std::fs::read(&f).expect("read SSDT");
+            if let Err(e) = ns.load_more(&t) { println!("{f}: {e}"); }
+        }
+        let ns: &'static Namespace = Box::leak(Box::new(ns));
+        let ec: &'static mut MockEc = Box::leak(Box::new(MockEc::dragonfly()));
+        let mut m = aml_core::Machine::new(ns, ec);
+        m.init();
+        let procs = aml_core::processor::processors(&mut m, ns);
+        println!("processors: {}", procs.len());
+        for p in procs.iter().take(2) {
+            let caps = 0x0bfb;
+            println!("{} id {}: _OSC -> {:?}", path_str(&p.path), p.acpi_id,
+                aml_core::processor::run_osc(&mut m, &p.path, caps));
+            println!("  _CST -> {:?}", aml_core::processor::evaluate_cst(&mut m, &p.path));
+        }
+        return;
+    }
     // ROUNDS=n: as the driver runs, one init and then n rounds of the
     // events in QUERIES plus a battery read, each on the same namespace.
     if let Some(n) = std::env::var("ROUNDS").ok().and_then(|v| v.parse::<u32>().ok()) {

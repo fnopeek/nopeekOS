@@ -650,7 +650,15 @@ pub fn intent_power(args: &str) {
         kprintln!("  Residenz        {}", line);
     }
     let port = crate::interrupts::deep_idle_port();
-    if port == 0 {
+    let (mwait, mwait_on) = crate::interrupts::mwait_states();
+    if mwait_on {
+        let mut line = alloc::string::String::new();
+        for (i, (hint, _)) in mwait.iter().enumerate() {
+            let n = crate::interrupts::MWAIT_ENTRIES[i].load(core::sync::atomic::Ordering::Relaxed);
+            line.push_str(&alloc::format!(" 0x{:02x}: {}", hint, n));
+        }
+        kprintln!("  Leerlauf          MWAIT aus _CST, Eintritte seit Start:{}", line);
+    } else if port == 0 {
         kprintln!("  Leerlauf          C1 (hlt) — 'power cstate' fuer tiefer");
     } else {
         kprintln!("  Leerlauf          tief ueber Port 0x{:x}: {} Eintritte/s (alle Kerne)",
@@ -674,6 +682,39 @@ pub fn intent_power(args: &str) {
 ///   power cstate off        back to hlt (C1)
 fn power_cstate(arg: &str) {
     kprintln!();
+    // Intel: the MWAIT states the firmware's _CST gave (via `aml`).
+    if crate::smp::per_core::intel_model().is_some() {
+        let tsc_per_us = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+        match arg {
+            "on" => {
+                if crate::interrupts::set_mwait_idle(true) {
+                    kprintln!("  Leerlauf ueber MWAIT aus _CST — bis zum naechsten Neustart.");
+                } else {
+                    kprintln!("  Keine MWAIT-Zustaende: laeuft 'aml'? (_CST kommt von dort)");
+                }
+            }
+            "off" => {
+                crate::interrupts::set_mwait_idle(false);
+                kprintln!("  Leerlauf wieder C1 (hlt).");
+            }
+            _ => {
+                kprintln!("  ARAT (LAPIC-Timer laeuft im Tiefschlaf): {}",
+                    if crate::interrupts::has_arat() { "ja" } else { "NEIN — nur C1" });
+                let (states, on) = crate::interrupts::mwait_states();
+                if states.is_empty() {
+                    kprintln!("  Keine Zustaende aus _CST (das meldet 'aml' beim Start).");
+                }
+                for (i, (hint, target)) in states.iter().enumerate() {
+                    kprintln!("  C{}  MWAIT 0x{:02x}  ab {} us Schlaf", i + 1, hint, target / tsc_per_us);
+                }
+                kprintln!("  aktiv: {}", if on { "MWAIT" } else { "C1 (hlt)" });
+                kprintln!();
+                kprintln!("  'power cstate on' schaltet ein, 'power cstate off' zurueck.");
+            }
+        }
+        kprintln!();
+        return;
+    }
     let base = crate::smp::per_core::amd_cstate_base();
     if arg.is_empty() {
         kprintln!("  ARAT (LAPIC-Timer laeuft im Tiefschlaf): {}",

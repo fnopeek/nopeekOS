@@ -935,6 +935,15 @@ host_imports! {
     // (0x85..0x89), acted on as Linux' acpi_video input keys.
     ctx fn npk_acpi_video_notify(event: i32) -> i32;
 
+    // npk_acpi_proc_caps() -> caps | -1: the support dword the AML driver
+    // hands the processors' _OSC/_PDC (arch_acpi_set_proc_cap_bits).
+    ctx fn npk_acpi_proc_caps() -> i32;
+
+    // npk_acpi_cst(ptr, count) -> usable states | -1: a processor's _CST,
+    // 24 bytes per entry (type, latency, power: u32; space_id, bit_offset,
+    // access_size, pad: u8; address: u64), for MWAIT idle.
+    mem fn npk_acpi_cst(ptr: i32, count: i32) -> i32;
+
     // npk_irq_register_gsi(gsi, flags) -> vector | -1 — a non-PCI device's
     // I/O APIC line (flags: 1 level, 2 active-low). HARDWARE-gated.
     ctx fn npk_irq_register_gsi(gsi: i32, flags: i32) -> i32;

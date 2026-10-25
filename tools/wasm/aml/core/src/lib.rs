@@ -15,6 +15,7 @@ mod value;
 mod load;
 mod interp;
 pub mod crs;
+pub mod processor;
 
 pub use interp::{devices_with_ids, eisa_str, Machine};
 pub use value::{obj, path_str, seg, Obj, Path, Place, Seg, Value};
@@ -91,6 +92,9 @@ pub struct Namespace {
     /// value of its source buffer, so it is kept with its scope and run on
     /// first use. Pairs of (scope, raw AML bytes of the statement).
     pub deferred: Vec<(Path, alloc::vec::Vec<u8>)>,
+    /// `Processor (Name, ProcID, …)` objects and their ProcID, the ACPI
+    /// processor id Linux matches against the MADT.
+    pub processors: BTreeMap<Path, u8>,
 }
 
 impl Namespace {

@@ -7,7 +7,7 @@ use crate::{Namespace, Node};
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 
 pub fn load_table(table: &[u8]) -> Result<Namespace, String> {
-    let mut ns = Namespace { nodes: BTreeMap::new(), deferred: Vec::new() };
+    let mut ns = Namespace { nodes: BTreeMap::new(), deferred: Vec::new(), processors: BTreeMap::new() };
     predefine_root(&mut ns);
     load_into(&mut ns, table)?;
     Ok(ns)
@@ -138,6 +138,16 @@ impl<'a> Loader<'a> {
                 let t = self.def_path(scope, &name);
                 self.ns.nodes.entry(t).or_insert(Node::Other);
             }
+            0x70 => {
+                // Store (TermArg, SuperName) at scope level: module-level
+                // code, which ACPICA runs while loading the table
+                // (`acpi_ns_execute_table`); deferred like the others.
+                let op_start = p - 1;
+                let p1 = self.skip_term_arg(scope, p)?;
+                p = self.skip_term_arg(scope, p1)?;
+                let bytes = self.b[op_start..p].to_vec();
+                self.ns.deferred.push((scope.clone(), bytes));
+            }
             0x8A | 0x8B | 0x8C | 0x8D | 0x8F => {
                 // CreateDWord/Word/Byte/Bit/QWordField(source, index, NameString)
                 let op_start = p - 1;
@@ -261,6 +271,9 @@ impl<'a> Loader<'a> {
                 let (name, p2) = self.name_ref(p1);
                 let target = self.def_path(scope, &name);
                 self.ns.nodes.entry(target.clone()).or_insert(Node::Scope);
+                if let Some(&id) = self.b.get(p2) {
+                    self.ns.processors.insert(target.clone(), id);
+                }
                 // ProcID(1) + PblkAddr(4) + PblkLen(1) = 6 bytes
                 self.term_list(target, p2 + 6, pkg_end)?;
                 p = pkg_end;

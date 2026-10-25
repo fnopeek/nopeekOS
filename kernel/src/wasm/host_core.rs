@@ -1750,6 +1750,39 @@ pub(crate) fn npk_acpi_video_notify(ctx: &mut HostState, event: i32) -> i32 {
     0
 }
 
+/// `npk_acpi_proc_caps() -> caps | -1`: the capabilities for the
+/// processors' `_OSC`/`_PDC` (see `acpi_processor::proc_cap_bits`).
+/// HARDWARE-gated.
+pub(crate) fn npk_acpi_proc_caps(ctx: &mut HostState) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    crate::drivers::acpi_processor::proc_cap_bits() as i32
+}
+
+/// `npk_acpi_cst(ptr, count) -> usable states | -1`: a processor's `_CST`
+/// entries for MWAIT idle (see `acpi_processor::take_cst`). HARDWARE-gated.
+pub(crate) fn npk_acpi_cst(mem: &mut [u8], ctx: &mut HostState, ptr: i32, count: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    if !(1..=16).contains(&count) { return -1; }
+    let Some(b) = read_bytes(mem, ptr, count * 24) else { return -1 };
+    let u32_at = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    let cst: alloc::vec::Vec<crate::drivers::acpi_processor::Cx> = b.chunks_exact(24).map(|e| {
+        let o = e.as_ptr() as usize - b.as_ptr() as usize;
+        crate::drivers::acpi_processor::Cx {
+            kind: u32_at(o),
+            latency: u32_at(o + 4),
+            power: u32_at(o + 8),
+            space_id: e[12],
+            bit_offset: e[13],
+            address: u64::from_le_bytes(e[16..24].try_into().unwrap()),
+        }
+    }).collect();
+    crate::drivers::acpi_processor::take_cst(&cst) as i32
+}
+
 /// Is `vector` the one this module's driver registered?
 fn owns_vector(ctx: &HostState, vector: i32) -> bool {
     matches!(ctx.hw.as_ref(), Some(h) if h.irq_vector != 0 && h.irq_vector as i32 == vector)

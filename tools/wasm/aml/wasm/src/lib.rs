@@ -81,6 +81,87 @@ const WAIT_IRQ: i32 = 2;
 #[global_allocator]
 static ALLOC: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
+/// The buffer an SSDT and the MADT are read into, one at a time.
+const TABLE_MAX: usize = 256 * 1024;
+static TABLE: Single<[u8; TABLE_MAX]> = Single::new([0; TABLE_MAX]);
+
+/// The processors as Linux sets them up for idle: `_OSC` with the OS's
+/// capabilities on each present one (`acpi_early_processor_osc`), `_PDC`
+/// for all when that fails (`acpi_early_processor_set_pdc`), then the
+/// first `_CST` that reads (`intel_idle_acpi_cst_extract`) to the kernel.
+fn processor_power(m: &mut Machine, ns: &Namespace) {
+    use aml_core::processor;
+    let caps = npk_sys::acpi_proc_caps();
+    if caps < 0 {
+        return;
+    }
+    let madt = TABLE.with(|t| {
+        let n = npk_sys::acpi_table(*b"APIC", 0, t);
+        (n > 0 && n as usize <= TABLE_MAX).then(|| t[..n as usize].to_vec())
+    });
+    let Some(madt) = madt else {
+        logln("[aml] processors: no MADT");
+        return;
+    };
+    let present: alloc::vec::Vec<processor::Processor> = processor::processors(m, ns).into_iter()
+        .filter(|p| processor::physically_present(&madt, p)).collect();
+    if present.is_empty() {
+        return;
+    }
+    let mut osc_ok = true;
+    for p in &present {
+        if let Err(e) = processor::run_osc(m, &p.path, caps as u32) {
+            log("[aml]  ");
+            logln(&e);
+            osc_ok = false;
+            break;
+        }
+    }
+    if !osc_ok {
+        for p in &present {
+            let _ = processor::set_pdc(m, &p.path, caps as u32);
+        }
+    }
+    let mut cst = None;
+    for p in &present {
+        match processor::evaluate_cst(m, &p.path) {
+            Ok((states, skipped)) => {
+                for e in skipped {
+                    log("[aml]  ");
+                    logln(&e);
+                }
+                if !states.is_empty() {
+                    cst = Some(states);
+                    break;
+                }
+            }
+            Err(e) => if VERBOSE.with(|v| *v) {
+                log("[aml]  ");
+                logln(&e);
+            },
+        }
+    }
+    log("[aml] processors: ");
+    lognum_raw(present.len() as u32);
+    log(if osc_ok { " present, _OSC" } else { " present, _PDC" });
+    let Some(states) = cst else {
+        logln(", no _CST");
+        return;
+    };
+    log(", _CST ");
+    lognum_raw(states.len() as u32);
+    logln(" state(s)");
+    let mut buf = alloc::vec::Vec::with_capacity(states.len() * 24);
+    for c in &states {
+        buf.extend_from_slice(&c.kind.to_le_bytes());
+        buf.extend_from_slice(&c.latency.to_le_bytes());
+        buf.extend_from_slice(&c.power.to_le_bytes());
+        buf.extend_from_slice(&[c.space_id, c.bit_offset, c.access_size, 0]);
+        buf.extend_from_slice(&c.address.to_le_bytes());
+    }
+    npk_sys::acpi_cst(&buf);
+}
+
 // DSDT buffer: filled once.
 const DSDT_MAX: usize = 512 * 1024;
 static DSDT: Single<[u8; DSDT_MAX]> = Single::new([0; DSDT_MAX]);
@@ -236,10 +317,24 @@ pub extern "C" fn _start() {
     let table_len = len as usize;
     VERBOSE.with(|v| *v = loud);
 
-    let Some(ns) = DSDT.with(|d| Namespace::load(&d[..table_len]).ok()) else {
+    let Some(mut ns) = DSDT.with(|d| Namespace::load(&d[..table_len]).ok()) else {
         logln("[aml] Namespace::load failed — driver idle");
         return;
     };
+    // Plus every SSDT: together they form one namespace, and Linux loads
+    // them all (the processors' _OSC lives in one).
+    let mut ssdts = 0u32;
+    for i in 0..64 {
+        let n = TABLE.with(|t| {
+            let n = npk_sys::acpi_table(*b"SSDT", i, t);
+            if n > 0 && n as usize <= TABLE_MAX && ns.load_more(&t[..n as usize]).is_ok() {
+                ssdts += 1;
+            }
+            n
+        });
+        if n <= 0 { break; }
+    }
+    lognum("[aml] namespace: DSDT + SSDTs ", ssdts);
     let ns: &'static Namespace = alloc::boxed::Box::leak(alloc::boxed::Box::new(ns));
     let batteries = find_batteries(ns);
 
@@ -262,7 +357,10 @@ pub extern "C" fn _start() {
 
     let ec: &'static mut HostEc = alloc::boxed::Box::leak(alloc::boxed::Box::new(HostEc { reads: 0, fails: 0, verbose: false }));
     let mut m = Machine::new(ns, ec);
-    m.init();
+    // The order of acpi_bus_init: objects, the processors' _OSC, the EC.
+    m.init_objects();
+    processor_power(&mut m, ns);
+    m.init_ec();
     // acpi_ec_clear: what the EC collected before anyone listened.
     m.drain_events();
 

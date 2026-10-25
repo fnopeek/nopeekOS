@@ -9,6 +9,9 @@ const MAX_DEPTH: usize = 64;
 
 pub struct Interp<'a> {
     ns: &'a Namespace,
+    /// Tables the AML loaded at run time (`Load`), kept for the life of the
+    /// interpreter as ACPICA keeps them until `Unload`.
+    loaded: Vec<&'a Namespace>,
     /// Nodes a method declares at run time (`OpRegion`, `Field` in a body).
     /// They are not in the loaded table: the loader defers method bodies and
     /// sees them only on execution.
@@ -119,7 +122,7 @@ pub fn ec_gpe(ns: &Namespace) -> Option<u32> {
 }
 
 pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::BatteryInfo> {
-    let mut it = Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() };
+    let mut it = Interp { ns, loaded: Vec::new(), dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() };
     // Order as in ACPICA `acpi_initialize_objects`: enable operation regions
     // first (`_REG`), then start the devices (`_STA`/`_INI`).
     it.run_deferred();
@@ -333,9 +336,54 @@ impl<'a> Interp<'a> {
         Ok(())
     }
 
-    /// Does this path exist, in the table or declared at run time?
+    /// `Load` from a SystemMemory region: the bytes read through the host
+    /// (never invented), checked to be an SSDT of the region's length, its
+    /// declarations added and its module-level code run, as ACPICA's
+    /// `acpi_tb_load_table` does. Returns the table's handle.
+    fn load_from_region(&mut self, region: &Path) -> R<u64> {
+        let (space, offset, len) = match self.node(region) {
+            Some(Node::Region { space, offset, len }) => (*space, *offset, *len),
+            _ => return Err(format!("Load: {} is not an operation region", path_str(region))),
+        };
+        if space != 0 || !(36..=0x10_0000).contains(&len) {
+            return Err(format!("Load: region space {space}, {len} bytes"));
+        }
+        let mut table = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            match self.ec.mem_read(offset + i) {
+                Some(v) => table.push(v),
+                None => return Err(format!("Load: {:#x} not readable", offset + i)),
+            }
+        }
+        let tlen = u32::from_le_bytes([table[4], table[5], table[6], table[7]]) as u64;
+        if &table[0..4] != b"SSDT" || tlen != len {
+            return Err(format!("Load: no SSDT of {len} bytes at {offset:#x}"));
+        }
+        // acpi_tb_verify_checksum warns and loads all the same.
+        if table.iter().fold(0u8, |a, &b| a.wrapping_add(b)) != 0 {
+            self.ec.note("[aml]   Load: table checksum is wrong");
+        }
+        let mut ns = crate::Namespace::load(&table)?;
+        let deferred = core::mem::take(&mut ns.deferred);
+        let ns: &'a Namespace = alloc::boxed::Box::leak(alloc::boxed::Box::new(ns));
+        self.loaded.push(ns);
+        let n = self.loaded.len() as u64;
+        self.ec.note(&format!("[aml]   Load: {} bytes at {offset:#x} as table {n}", len));
+        if !deferred.is_empty() {
+            let _ = self.run_deferred_items(deferred, false);
+        }
+        Ok(n)
+    }
+
+        /// A node of the loaded tables: the namespace, then what `Load` added.
+    fn table_node(&self, p: &Path) -> Option<&'a Node> {
+        let ns: &'a Namespace = self.ns;
+        ns.get(p).or_else(|| self.loaded.iter().find_map(|t| t.get(p)))
+    }
+
+        /// Does this path exist, in the table or declared at run time?
     fn has(&self, p: &Path) -> bool {
-        self.dyn_nodes.contains_key(p) || self.ns.nodes.contains_key(p)
+        self.dyn_nodes.contains_key(p) || self.table_node(p).is_some()
     }
 
     /// Whether `p` is an output device of an ACPI video bus, as Linux binds
@@ -358,7 +406,7 @@ impl<'a> Interp<'a> {
 
     /// Look up a node; run-time declarations shadow the table.
     fn node(&self, p: &Path) -> Option<&Node> {
-        self.dyn_nodes.get(p).or_else(|| self.ns.get(p))
+        self.dyn_nodes.get(p).or_else(|| self.table_node(p))
     }
 
     /// Like `Namespace::resolve`, but over both maps. A field a method has
@@ -550,7 +598,7 @@ impl<'a> Interp<'a> {
         if self.depth > MAX_DEPTH {
             return Err(String::from("recursion too deep"));
         }
-        let (body, scope) = match self.ns.get(path) {
+        let (body, scope) = match self.table_node(path) {
             Some(Node::Method { body, scope, .. }) => (body.as_slice(), scope.clone()),
             Some(Node::Name(v)) => return Ok(v.borrow().clone()),
             Some(Node::Field { .. }) => return self.read_field(path),
@@ -704,6 +752,28 @@ impl<'a> Interp<'a> {
             // creates its own operation region and fields, typical for
             // multiplexed EC registers. The loader never sees them because
             // it defers method bodies.
+            0x5B if b[p + 1] == 0x20 => {
+                // Load (Object, DDBHandle): a table from an operation region
+                // added to the namespace (ACPICA `acpi_ex_load_op`). The
+                // handle goes to the target.
+                let (src, p1) = self.super_name(f, p + 2)?;
+                let (tgt, p2) = self.super_name(f, p1)?;
+                let handle = match src {
+                    Some(Place::Field(path)) => self.load_from_region(&path)?,
+                    _ => return Err(String::from("Load: source is not an operation region")),
+                };
+                if let Some(pl) = tgt {
+                    self.store(&pl, Value::Int(handle))?;
+                }
+                Ok((Flow::Normal, p2))
+            }
+            0x5B if b[p + 1] == 0x2A => {
+                // Unload (DDBHandle): the table stays; nothing in the firmware
+                // we run unloads one it still needs.
+                let (_h, p1) = self.eval(f, p + 2)?;
+                self.ec.note("[aml]   Unload ignored");
+                Ok((Flow::Normal, p1))
+            }
             0x5B if b[p + 1] == 0x80 => {
                 // OpRegionOp NameString RegionSpace RegionOffset RegionLen.
                 // Offset and length are TermArgs and are evaluated here, the
@@ -1943,7 +2013,7 @@ pub struct Machine<'a> {
 impl<'a> Machine<'a> {
     pub fn new(ns: &'a Namespace, ec: &'a mut dyn Ec) -> Machine<'a> {
         Machine {
-            it: Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() },
+            it: Interp { ns, loaded: Vec::new(), dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() },
         }
     }
 
@@ -1985,6 +2055,12 @@ impl<'a> Machine<'a> {
     /// `acpi_initialize_objects`. Without it, firmware whose regions are not
     /// yet enabled answers with its initial values.
     pub fn init(&mut self) {
+        self.init_objects();
+        self.init_ec();
+    }
+
+    /// The part of `init` before the EC: `acpi_initialize_objects`.
+    pub fn init_objects(&mut self) {
         self.it.ec.note("[aml]  phase deferred table ops");
         let failed = self.it.run_deferred();
         self.it.ec.note("[aml]  phase _REG");
@@ -1992,8 +2068,6 @@ impl<'a> Machine<'a> {
         self.it.ec.note("[aml]  phase _INI");
         let n = self.it.run_ini_methods();
         self.it.ec.note_num("[aml]  _INI methods run: ", n as u64);
-        self.it.ec.note("[aml]  phase EC _REG");
-        let _ = self.it.register_regions(true);
 
         // Retry what failed the first time.
         //
@@ -2011,7 +2085,14 @@ impl<'a> Machine<'a> {
         }
     }
 
-    /// Run the `_Qxx` of the EC events `Ec::query` hands over.
+    /// The EC's `_REG`, which Linux runs in `acpi_ec_dsdt_probe` after
+    /// the objects and the processors' `_OSC`.
+    pub fn init_ec(&mut self) {
+        self.it.ec.note("[aml]  phase EC _REG");
+        let _ = self.it.register_regions(true);
+    }
+
+        /// Run the `_Qxx` of the EC events `Ec::query` hands over.
     pub fn drain_events(&mut self) -> u32 {
         self.it.drain_ec_queries()
     }
@@ -2040,7 +2121,7 @@ impl<'a> Machine<'a> {
     /// `_HID` may be a method (e.g. `Method (_HID) { Return ("SYNA30A1") }`),
     /// so every node kind must be handled.
     pub fn value_of(&mut self, p: &Path) -> R<Value> {
-        match self.it.ns.get(p) {
+        match self.it.table_node(p) {
             Some(Node::Name(o)) => Ok(o.borrow().clone()),
             Some(Node::Method { .. }) => self.it.call_path(p, Vec::new()),
             Some(_) => Err(String::from("node is not a value")),

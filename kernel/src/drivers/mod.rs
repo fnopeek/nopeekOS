@@ -20,6 +20,7 @@ pub mod netdev;
 pub mod wifi;
 pub mod report;
 pub mod acpi;
+pub mod acpi_processor;
 pub mod vtd;
 pub mod amd_vi;
 #[allow(dead_code)]

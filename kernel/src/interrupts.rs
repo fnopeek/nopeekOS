@@ -3,7 +3,7 @@
 use core::fmt::Write as _;
 use crate::hw::{msr, Mmio, Port};
 use crate::kprintln;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Timer interrupts taken on Core 0. Not a clock: only used to tell
 /// whether the PIT is running (`init_apic_timer`) and to pace the once-a-
@@ -636,6 +636,70 @@ pub fn set_deep_idle(port: u16, min_us: u64) -> Result<(), &'static str> {
 
 pub fn deep_idle_port() -> u16 { DEEP_IDLE_PORT.load(Ordering::Relaxed) }
 
+/// Idle states entered with MWAIT, from the firmware's `_CST` as Linux'
+/// `intel_idle` takes them on a CPU without a table of its own
+/// (`intel_idle_init_cstates_acpi`): the MWAIT hint, the target residency
+/// and the exit latency in TSC cycles, shallowest first.
+pub const MWAIT_STATES_MAX: usize = 8;
+static MWAIT_HINT: [AtomicU32; MWAIT_STATES_MAX] = [const { AtomicU32::new(0) }; MWAIT_STATES_MAX];
+static MWAIT_TARGET_TSC: [AtomicU64; MWAIT_STATES_MAX] = [const { AtomicU64::new(0) }; MWAIT_STATES_MAX];
+static MWAIT_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// The MWAIT states are used for idle (`power cstate on`).
+static MWAIT_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Entries per MWAIT state, all cores.
+pub static MWAIT_ENTRIES: [AtomicU64; MWAIT_STATES_MAX] = [const { AtomicU64::new(0) }; MWAIT_STATES_MAX];
+/// The line each core's MONITOR arms; an interrupt is the wake event, the
+/// line only has to exist.
+static MONITOR_LINE: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+/// Take the MWAIT idle states (hint, target residency µs), shallowest
+/// first. A state deeper than C1 needs a LAPIC timer that keeps running in
+/// it (ARAT): Linux would fall back to a broadcast timer, which we do not
+/// have, so without ARAT only C1 is taken.
+pub fn set_mwait_states(states: &[(u32, u64)]) -> usize {
+    let tsc_per_us = (tsc_freq() / 1_000_000).max(1);
+    let arat = has_arat();
+    MWAIT_ON.store(false, Ordering::Release);
+    let mut n = 0;
+    for &(hint, target_us) in states.iter().take(MWAIT_STATES_MAX) {
+        if !arat && hint >> 4 != 0 {
+            break;
+        }
+        MWAIT_HINT[n].store(hint, Ordering::Relaxed);
+        MWAIT_TARGET_TSC[n].store(target_us.saturating_mul(tsc_per_us), Ordering::Relaxed);
+        n += 1;
+    }
+    MWAIT_COUNT.store(n, Ordering::Release);
+    n
+}
+
+/// Use the MWAIT states for idle, or back to `hlt`.
+pub fn set_mwait_idle(on: bool) -> bool {
+    let ok = !on || MWAIT_COUNT.load(Ordering::Acquire) > 0;
+    MWAIT_ON.store(on && ok, Ordering::Release);
+    ok
+}
+
+/// The MWAIT states (hint, target residency in TSC cycles) and whether
+/// they are used.
+pub fn mwait_states() -> (alloc::vec::Vec<(u32, u64)>, bool) {
+    let n = MWAIT_COUNT.load(Ordering::Acquire);
+    ((0..n).map(|i| (MWAIT_HINT[i].load(Ordering::Relaxed), MWAIT_TARGET_TSC[i].load(Ordering::Relaxed))).collect(),
+     MWAIT_ON.load(Ordering::Acquire))
+}
+
+/// The deepest MWAIT state whose target residency fits before `deadline`
+/// (all of them without one), as the cpuidle governors pick against the
+/// next timer event.
+fn mwait_pick(t0: u64, deadline: Option<u64>) -> Option<usize> {
+    if !MWAIT_ON.load(Ordering::Relaxed) {
+        return None;
+    }
+    let n = MWAIT_COUNT.load(Ordering::Relaxed);
+    let span = deadline.map_or(u64::MAX, |d| d.saturating_sub(t0));
+    (0..n).rev().find(|&i| MWAIT_TARGET_TSC[i].load(Ordering::Relaxed) <= span)
+}
+
 /// CPUID.06H:EAX[2] — Always Running APIC Timer (keeps counting in deep
 /// C-states).
 pub fn has_arat() -> bool {
@@ -870,12 +934,32 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
     }
     let t0 = rdtsc();
     crate::smp::per_core::halt_begin(cid, t0);
+    let mwait = mwait_pick(t0, deadline);
     let port = DEEP_IDLE_PORT.load(Ordering::Relaxed);
-    let deep = port != 0 && match deadline {
+    let deep = mwait.is_none() && port != 0 && match deadline {
         None => true,
         Some(d) => d.saturating_sub(t0) >= DEEP_IDLE_MIN_TSC.load(Ordering::Relaxed),
     };
-    if deep {
+    if let Some(i) = mwait {
+        // Linux `mwait_idle_with_hints(eax, MWAIT_ECX_INTERRUPT_BREAK)`:
+        // MONITOR a line, then MWAIT with the state's hint. With ECX bit 0
+        // an interrupt ends it although IF=0, so as on the port path there
+        // is no window between arming and sleeping, and `sti; nop; cli`
+        // takes the interrupt here.
+        let line = &MONITOR_LINE[cid.min(255)] as *const AtomicU64 as u64;
+        let hint = MWAIT_HINT[i].load(Ordering::Relaxed);
+        // SAFETY: MONITOR on a valid, mapped kernel address with no
+        // extensions or hints; MWAIT with a hint `set_mwait_states` took
+        // from a `_CST` the kernel checked against CPUID leaf 5, and the
+        // interrupt-break extension, which that check requires.
+        unsafe {
+            core::arch::asm!("monitor", in("rax") line, in("ecx") 0u32, in("edx") 0u32,
+                options(nostack, preserves_flags));
+            core::arch::asm!("mwait", in("eax") hint, in("ecx") 1u32, options(nostack, preserves_flags));
+            core::arch::asm!("sti; nop; cli");
+        }
+        MWAIT_ENTRIES[i].fetch_add(1, Ordering::Relaxed);
+    } else if deep {
         // ACPI SystemIO C-state (Linux `io_idle`): a read of the port the
         // core traps as its C-state entry request. Entered with IF=0, like
         // Linux's cpuidle: a pending interrupt is a break event regardless
