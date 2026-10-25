@@ -429,7 +429,7 @@ Every kernel or module change ships to hardware through this loop:
 nopeekOS/
 ├── build.sh                  # Build + QEMU/VirtualBox/USB
 ├── docs/                     # spec/ = living contracts · plan/ = open
-│                             # notes/ = how-tos · archive/ = shipped
+│                             # archive/ = shipped
 ├── targets/                  # x86_64-nopeek.json: the kernel's own target
 ├── forge/core/               # WASM→x86-64 compiler (no_std, host-testable)
 ├── kernel/src/

@@ -1,13 +1,12 @@
 # docs/ — Karte
 
-Vier Ablagen, nach **Verbindlichkeit** getrennt, nicht nach Thema. Wer wissen
+Drei Ablagen, nach **Verbindlichkeit** getrennt, nicht nach Thema. Wer wissen
 will, woran der Code sich halten muss, liest `spec/` — und sonst nichts.
 
 | Ordner | Bedeutung | Lebensdauer |
 |---|---|---|
 | `spec/` | **Lebende Verträge.** Der Code hält sich daran; Abweichung ist ein Bug. Aus Quelldateien heraus referenziert. | wird gepflegt |
 | `plan/` | **Offene Arbeitspapiere.** Vorschlag, Analyse, Reihenfolge — noch nicht (ganz) gebaut. | bis erledigt |
-| `notes/` | **Dev-How-tos.** Handgriffe an der Werkbank, kein Vertrag. | bei Bedarf |
 | `archive/` | **Erledigt oder überholt.** Nur Herleitung und Geschichte, nie Referenz. | eingefroren |
 
 Nicht hier: der laufende Stand. Der steht im Memory (`memory/MEMORY.md`) und im
@@ -38,12 +37,6 @@ dem Schreiben bewegt hat. Erst den lesen.
 | [`SCHEDULER_FIBERS.md`](plan/SCHEDULER_FIBERS.md) | grösstenteils gebaut; offen ist der Multi-Core-Fan-out |
 | [`NPKFS_PERF_SAFETY.md`](plan/NPKFS_PERF_SAFETY.md) | auto-gc + Write-Barriere + fsck sind drin; offen ist Commit-Batching |
 | [`NOTES_framebuffer_netperf.md`](plan/NOTES_framebuffer_netperf.md) | Hypothese, nie nachgemessen — vor dem Umbau reproduzieren |
-
-## notes/
-
-| Datei | Worum es geht |
-|---|---|
-| [`RECORDING.md`](notes/RECORDING.md) | Demo-Video vom QEMU-Gast aufnehmen, ohne dass die Schrift matscht |
 
 ## archive/
 
