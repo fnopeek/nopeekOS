@@ -12773,3 +12773,24 @@ CURSOR_LINE_PER_CHUNK_2 @ ../display/dc/hubp/dcn20/dcn20_hubp.c
 CURSOR_LINE_PER_CHUNK_4 @ ../display/dc/hubp/dcn20/dcn20_hubp.c
 CURSOR_LINE_PER_CHUNK_8 @ ../display/dc/hubp/dcn20/dcn20_hubp.c
 CURSOR_LINE_PER_CHUNK_16 @ ../display/dc/hubp/dcn20/dcn20_hubp.c
+# The backlight: amdgpu_dm, edp_set_backlight_level, ABM over the DMCUB
+AMDGPU_DM_DEFAULT_MIN_BACKLIGHT @ ../display/amdgpu_dm/amdgpu_dm.c
+AMDGPU_DM_DEFAULT_MAX_BACKLIGHT @ ../display/amdgpu_dm/amdgpu_dm.c
+AMDGPU_DM_MIN_SPREAD @ ../display/amdgpu_dm/amdgpu_dm.c
+AMDGPU_MAX_BL_LEVEL @ ../display/amdgpu_dm/amdgpu_dm.c
+AMDGPU_DM_MAX_NUM_EDP @ ../display/amdgpu_dm/amdgpu_dm.c
+ATOM_S2_CURRENT_BL_LEVEL_MASK @ amdgpu_atombios.c
+ATOM_S2_CURRENT_BL_LEVEL_SHIFT @ amdgpu_atombios.c
+DC_ERROR_UNEXPECTED @ ../display/dc/link/protocols/link_edp_panel_control.c
+SIGNAL_TYPE_LVDS @ ../display/dc/link/protocols/link_edp_panel_control.c
+BACKLIGHT_CONTROL_AMD_AUX @ ../display/amdgpu_dm/amdgpu_dm.c
+DMUB_CMD__ABM_SET_BACKLIGHT @ ../display/dc/dce/dmub_abm_lcd.c
+ABMBL_FRAME_RAMP = offsetof(struct dmub_rb_cmd_abm_set_backlight, abm_set_backlight_data.frame_ramp) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMBL_BACKLIGHT_USER_LEVEL = offsetof(struct dmub_rb_cmd_abm_set_backlight, abm_set_backlight_data.backlight_user_level) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMBL_VERSION = offsetof(struct dmub_rb_cmd_abm_set_backlight, abm_set_backlight_data.version) @ ../display/dc/dce/dmub_abm_lcd.c
+ABMBL_PANEL_MASK = offsetof(struct dmub_rb_cmd_abm_set_backlight, abm_set_backlight_data.panel_mask) @ ../display/dc/dce/dmub_abm_lcd.c
+SIZEOF_dmub_cmd_abm_set_backlight_data = sizeof(struct dmub_cmd_abm_set_backlight_data) @ ../display/dc/dce/dmub_abm_lcd.c
+MAX_LUMINANCE_DATA_POINTS @ ../display/amdgpu_dm/amdgpu_dm.c
+BACKLIGHT_SCALE_LINEAR @ ../display/amdgpu_dm/amdgpu_dm.c
+BACKLIGHT_SCALE_NON_LINEAR @ ../display/amdgpu_dm/amdgpu_dm.c
+BACKLIGHT_RAW @ ../display/amdgpu_dm/amdgpu_dm.c

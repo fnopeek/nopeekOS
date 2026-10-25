@@ -44,6 +44,11 @@ const OP_ATTACH: u32 = 10;
 const OP_CURSOR_IMAGE: u32 = 11;
 /// `a0` x, `a1` y (two's complement), `a2` shown.
 const OP_CURSOR_MOVE: u32 = 12;
+/// `a0` level in hundredths of a percent of the backlight's range, `a1` 1 =
+/// set it, 0 = only read. The status is the level then.
+const OP_BACKLIGHT: u32 = 13;
+/// The top of `OP_BACKLIGHT`'s scale.
+const BACKLIGHT_SCALE: u32 = 10_000;
 const MAX_CURSOR: u32 = 256;
 /// The largest ccmd a guest sends, and the kernel's largest reply.
 const CCMD_MAX: usize = 256 * 1024;
@@ -53,6 +58,7 @@ const CAP_SCENE: i32 = 2;
 const CAP_NATIVE: i32 = 4;
 const CAP_CURSOR: i32 = 8;
 const CAP_PRESENT: i32 = 16;
+const CAP_BACKLIGHT: i32 = 32;
 const JOB_BYTES: usize = 32;
 const BO_INFO_BYTES: usize = 40;
 const NUM_BOS: usize = 3;
@@ -61,6 +67,7 @@ const EINVAL: i32 = 22;
 const ENOSPC: i32 = 28;
 const ENOMEM: i32 = 12;
 const ETIME: i32 = 62;
+const ENODEV: i32 = 19;
 /// The kernel gives a job 100 ms; the module answers before that.
 const JOB_TIMEOUT_US: i64 = 80_000;
 const PAGE: u64 = 4096;
@@ -921,6 +928,7 @@ fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
             crate::amdgpu_dm::dm_cursor_set_image(adev, &px, cw, ch, w(4) as i32, w(5) as i32)
         }
         OP_CURSOR_MOVE => crate::amdgpu_dm::dm_cursor_move(adev, w(2) as i32, w(3) as i32, w(4) != 0),
+        OP_BACKLIGHT => backlight(adev, (w(3) != 0).then_some(w(2))),
         OP_SCENE if svc.composer.is_some() => run_scene(adev, svc, seq, w(2), w(3)),
         OP_CLIENT => {
             if w(3) != 0 {
@@ -942,6 +950,25 @@ fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
         OP_ATTACH => crate::amdgpu_virtio::release_blob(adev, &mut svc.native, w(2), w(3)),
         _ => -EINVAL,
     }
+}
+
+/// The first eDP's backlight, as its sysfs files work it: `level` written
+/// to `brightness` (`backlight_device_set_brightness` →
+/// `amdgpu_dm_backlight_update_status`) answers with the level asked for,
+/// a read answers with `actual_brightness`. Levels are on
+/// `BACKLIGHT_SCALE`, the backlight's own range scaled.
+fn backlight(adev: &mut amdgpu_device, level: Option<u32>) -> i32 {
+    let Some(props) = adev.dm.backlight_dev[0] else { return -ENODEV };
+    let max = props.max_brightness.max(1) as u64;
+    let scale = BACKLIGHT_SCALE as u64;
+    if let Some(l) = level {
+        let user = ((l.min(BACKLIGHT_SCALE) as u64 * max + scale / 2) / scale) as u32;
+        adev.dm.backlight_dev[0].as_mut().unwrap().brightness = user;
+        crate::amdgpu_dm::amdgpu_dm_backlight_set_level(adev, 0, user);
+        return l.min(BACKLIGHT_SCALE) as i32;
+    }
+    let cur = crate::amdgpu_dm::amdgpu_dm_backlight_get_level(adev, 0) as u64;
+    ((cur.min(max) * scale + max / 2) / max) as i32
 }
 
 /// Everything the service holds goes back.
@@ -1267,7 +1294,8 @@ pub fn serve(adev: &mut amdgpu_device) {
     let native_ok = scene_ok && capset;
     let caps = if svc.copy_ok { CAP_COPY } else { 0 } | if scene_ok { CAP_SCENE } else { 0 }
         | if native_ok { CAP_NATIVE } else { 0 } | if adev.dm.live.is_some() { CAP_CURSOR } else { 0 }
-        | if svc.present.is_some() { CAP_PRESENT } else { 0 };
+        | if svc.present.is_some() { CAP_PRESENT } else { 0 }
+        | if adev.dm.backlight_dev[0].is_some() { CAP_BACKLIGHT } else { 0 };
     npk_sys::gpudev_ready(caps);
     if caps == 0 {
         unbind(adev, &mut svc);

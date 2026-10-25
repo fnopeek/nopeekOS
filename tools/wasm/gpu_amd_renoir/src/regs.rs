@@ -25513,3 +25513,45 @@ pub const CURSOR_LINE_PER_CHUNK_4: u32 = 0x2;
 pub const CURSOR_LINE_PER_CHUNK_8: u32 = 0x3;
 /// include/navi10_enum.h:2339
 pub const CURSOR_LINE_PER_CHUNK_16: u32 = 0x4;
+
+// The backlight: amdgpu_dm, edp_set_backlight_level, ABM over the DMCUB
+/// display/amdgpu_dm/amdgpu_dm.c:4910
+pub const AMDGPU_DM_DEFAULT_MIN_BACKLIGHT: u32 = 0xc;
+/// display/amdgpu_dm/amdgpu_dm.c:4911
+pub const AMDGPU_DM_DEFAULT_MAX_BACKLIGHT: u32 = 0xff;
+/// display/amdgpu_dm/amdgpu_dm.c:4912
+pub const AMDGPU_DM_MIN_SPREAD: u32 = 0x79;
+/// amdgpu/amdgpu_mode.h:438
+pub const AMDGPU_MAX_BL_LEVEL: u32 = 0xff;
+/// ?
+pub const AMDGPU_DM_MAX_NUM_EDP: u32 = 0x2;
+/// include/atombios.h:6822
+pub const ATOM_S2_CURRENT_BL_LEVEL_MASK: u32 = 0xff00;
+/// include/atombios.h:6823
+pub const ATOM_S2_CURRENT_BL_LEVEL_SHIFT: u32 = 0x8;
+/// ?
+pub const DC_ERROR_UNEXPECTED: u64 = 0xffffffffffffffff;
+/// ?
+pub const SIGNAL_TYPE_LVDS: u32 = 0x8;
+/// ?
+pub const BACKLIGHT_CONTROL_AMD_AUX: u32 = 0x2;
+/// ?
+pub const DMUB_CMD__ABM_SET_BACKLIGHT: u32 = 0x2;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_backlight, abm_set_backlight_data.frame_ramp)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMBL_FRAME_RAMP: u32 = 0x4;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_backlight, abm_set_backlight_data.backlight_user_level)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMBL_BACKLIGHT_USER_LEVEL: u32 = 0x8;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_backlight, abm_set_backlight_data.version)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMBL_VERSION: u32 = 0xc;
+/// The value of `offsetof(struct dmub_rb_cmd_abm_set_backlight, abm_set_backlight_data.panel_mask)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const ABMBL_PANEL_MASK: u32 = 0xd;
+/// The value of `sizeof(struct dmub_cmd_abm_set_backlight_data)` in ../display/dc/dce/dmub_abm_lcd.c
+pub const SIZEOF_dmub_cmd_abm_set_backlight_data: u32 = 0x20;
+/// ?
+pub const MAX_LUMINANCE_DATA_POINTS: u32 = 0x63;
+/// ?
+pub const BACKLIGHT_SCALE_LINEAR: u32 = 0x1;
+/// ?
+pub const BACKLIGHT_SCALE_NON_LINEAR: u32 = 0x2;
+/// ?
+pub const BACKLIGHT_RAW: u32 = 0x1;

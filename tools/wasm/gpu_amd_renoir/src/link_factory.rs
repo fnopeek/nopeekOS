@@ -201,6 +201,8 @@ pub struct dc_link {
     pub dpcd_caps: crate::dc_dp_types::dpcd_caps,
     /// `dpcd_sink_ext_caps.raw`.
     pub dpcd_sink_ext_caps: u8,
+    /// `enum backlight_control_type`: PWM unless DM chose AUX.
+    pub backlight_control_type: u32,
     pub dpcd_sink_count: u32,
     pub reported_link_cap: crate::dc_dp_types::dc_link_settings,
     pub verified_link_cap: crate::dc_dp_types::dc_link_settings,

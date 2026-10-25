@@ -78,6 +78,11 @@ pub const OP_CURSOR_IMAGE: u32 = 11;
 /// `a0` x, `a1` y (two's complement), `a2` 1 = shown, 0 = hidden: where the
 /// pointer is on the screen.
 pub const OP_CURSOR_MOVE: u32 = 12;
+/// `a0` backlight level (0..=`BACKLIGHT_SCALE`), `a1` 1 = set it, 0 =
+/// only read; the status is the level then.
+pub const OP_BACKLIGHT: u32 = 13;
+/// The top of the backlight scale: hundredths of a percent.
+pub const BACKLIGHT_SCALE: u32 = 10_000;
 /// Largest cursor image side (`OP_CURSOR_IMAGE`).
 pub const MAX_CURSOR: u32 = 256;
 /// What an `OP_BLOB` reply names: pages from `npk_gpudev_tt_alloc`, or
@@ -106,6 +111,8 @@ pub const CAP_CURSOR: i32 = 8;
 /// module (it flips between buffers of its own): every write of the
 /// framebuffer goes to it as a copy.
 pub const CAP_PRESENT: i32 = 16;
+/// The module sets the panel's backlight (`OP_BACKLIGHT`).
+pub const CAP_BACKLIGHT: i32 = 32;
 const FIXED_BOS: u32 = 3;
 const JOB_TIMEOUT_MS: u64 = 100;
 /// Binding a new buffer is a page walk per 4 KB page in the module, once.
@@ -294,6 +301,8 @@ static NATIVE: AtomicBool = AtomicBool::new(false);
 static CURSOR: AtomicBool = AtomicBool::new(false);
 /// It also presents the framebuffer (`CAP_PRESENT`).
 static PRESENT: AtomicBool = AtomicBool::new(false);
+/// It also sets the backlight (`CAP_BACKLIGHT`).
+static BACKLIGHT: AtomicBool = AtomicBool::new(false);
 static NEXT_SEQ: AtomicU32 = AtomicU32::new(1);
 /// Every job up to this sequence number is completed. Jobs that touch a
 /// buffer complete in order; a job without buffers (a guest's ccmd waiting
@@ -575,10 +584,12 @@ pub fn ready(dev: PciAddr, caps: i32) -> i32 {
     NATIVE.store(caps & CAP_NATIVE != 0, Ordering::Release);
     CURSOR.store(caps & CAP_CURSOR != 0, Ordering::Release);
     PRESENT.store(caps & CAP_PRESENT != 0, Ordering::Release);
-    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}{}{}",
+    BACKLIGHT.store(caps & CAP_BACKLIGHT != 0, Ordering::Release);
+    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}{}{}{}",
         if caps & CAP_SCENE != 0 { ", scenes offered" } else { "" },
         if caps & CAP_CURSOR != 0 { ", hardware cursor" } else { "" },
         if caps & CAP_PRESENT != 0 { ", presented by flips" } else { "" },
+        if caps & CAP_BACKLIGHT != 0 { ", backlight" } else { "" },
         if caps & CAP_NATIVE == 0 { "" }
         else if crate::drivers::iommu::protected(dev) { ", native contexts for guests" }
         else { ", native contexts need the IOMMU (set gpu_iommu on)" });
@@ -752,6 +763,7 @@ pub fn module_gone(dev: PciAddr) {
     NATIVE.store(false, Ordering::Release);
     CURSOR.store(false, Ordering::Release);
     PRESENT.store(false, Ordering::Release);
+    BACKLIGHT.store(false, Ordering::Release);
     RINGS.lock().clear();
     WAKER.store(NO_WAKER, Ordering::Release);
     wake_waiters();
@@ -1295,6 +1307,28 @@ pub fn present_by_module() -> bool {
 /// Whether the module shows the pointer with the hardware cursor.
 pub fn cursor_supported() -> bool {
     READY.load(Ordering::Acquire) && CURSOR.load(Ordering::Acquire)
+}
+
+/// Whether the module sets the panel's backlight.
+pub fn backlight_supported() -> bool {
+    READY.load(Ordering::Acquire) && BACKLIGHT.load(Ordering::Acquire)
+}
+
+/// The panel's backlight on `BACKLIGHT_SCALE`: set to `level`, or only
+/// read. None without a module that sets it, or when it failed.
+pub fn backlight(level: Option<u32>) -> Option<u32> {
+    if !backlight_supported() {
+        return None;
+    }
+    let seq = {
+        let mut st = STATE.lock();
+        st.owner?;
+        let a = [level.unwrap_or(0).min(BACKLIGHT_SCALE), level.is_some() as u32, 0, 0, 0, 0];
+        queue_job(&mut st, OP_BACKLIGHT, a, None, &[])
+    };
+    wake_module();
+    let r = wait_seq_yield(seq, deadline());
+    (r >= 0).then_some(r as u32)
 }
 
 /// Hand the module the cursor image: `pixels` premultiplied ARGB8888,

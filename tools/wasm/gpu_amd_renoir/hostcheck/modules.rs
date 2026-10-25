@@ -43,6 +43,8 @@ mod hw_sequencer;
 mod link_detection;
 #[path = "../src/link_dpms.rs"]
 mod link_dpms;
+#[path = "../src/link_edp_panel_control.rs"]
+mod link_edp_panel_control;
 #[path = "../src/link_validation.rs"]
 mod link_validation;
 #[path = "../src/link_hwss.rs"]

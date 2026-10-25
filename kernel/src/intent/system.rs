@@ -1720,6 +1720,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("dark | light | auto", "Switch the theme mode");
             help_row("gpu", "Graphics adapter and mode");
             help_row("volume [0-100]", "Audio level");
+            help_row("brightness [0-100|+N|-N]", "Display backlight");
             help_row("battery", "Charge level");
             help_row("mouse speed <25-600>", "Pointer speed (also: mouse size)");
             kprintln!("[npk]");
@@ -2287,5 +2288,33 @@ pub fn intent_halt() -> ! {
         core::arch::asm!("int3");
 
         loop { core::arch::asm!("cli; hlt"); }
+    }
+}
+
+/// `brightness [0-100|+N|-N]`: the panel's backlight in percent, set or
+/// stepped, through the GPU driver module that drives the display.
+pub fn intent_brightness(args: &str) {
+    use crate::gpu::gpudev::{backlight, BACKLIGHT_SCALE};
+    let a = args.trim();
+    let step = BACKLIGHT_SCALE / 100;
+    let target = if a.is_empty() {
+        None
+    } else if let Some(n) = a.strip_prefix('+').and_then(|n| n.parse::<u32>().ok()) {
+        backlight(None).map(|cur| cur.saturating_add(n * step).min(BACKLIGHT_SCALE))
+    } else if let Some(n) = a.strip_prefix('-').and_then(|n| n.parse::<u32>().ok()) {
+        backlight(None).map(|cur| cur.saturating_sub(n * step))
+    } else if let Ok(n) = a.parse::<u32>() {
+        Some(n.min(100) * step)
+    } else {
+        kprintln!("brightness: usage: brightness [0-100|+N|-N]");
+        return;
+    };
+    if !a.is_empty() && target.is_none() {
+        kprintln!("brightness: no driver sets the backlight of this display");
+        return;
+    }
+    match backlight(target) {
+        Some(l) => kprintln!("brightness: {}.{}%", l / step, l % step / (step / 10)),
+        None => kprintln!("brightness: no driver sets the backlight of this display"),
     }
 }

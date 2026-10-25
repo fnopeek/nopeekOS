@@ -2247,7 +2247,10 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 kprintln!("volume: usage: volume [0-100]");
             }
         }
-        "dmesg" | "bootlog" => {
+        "brightness" | "bright" => {
+            system::intent_brightness(args);
+        }
+                "dmesg" | "bootlog" => {
             system::intent_dmesg(args);
         }
         "gpu" => {

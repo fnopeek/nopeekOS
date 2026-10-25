@@ -24,14 +24,20 @@ pub enum abm_funcs {
 pub struct abm_ops {
     pub abm_init: Option<fn(&amdgpu_device, &mut dc, u32, u32)>,
     pub set_abm_level: Option<fn(&amdgpu_device, &mut dc, u32) -> bool>,
+    pub get_current_backlight: Option<fn(&amdgpu_device, &dc) -> u32>,
+    pub get_target_backlight: Option<fn(&amdgpu_device, &dc) -> u32>,
     pub set_pipe_ex: Option<fn(&amdgpu_device, &mut dc, u32, u32, u32, u32) -> bool>,
+    pub set_backlight_level_pwm: Option<fn(&amdgpu_device, &mut dc, u32, u32, u32, u32) -> bool>,
 }
 
 /// `abm_funcs` (dmub_abm.c), as far as ported.
 const DMUB_ABM_FUNCS: abm_ops = abm_ops {
     abm_init: Some(dmub_abm_init_ex),
     set_abm_level: Some(dmub_abm_set_level_ex),
+    get_current_backlight: Some(dmub_abm_get_current_backlight_ex),
+    get_target_backlight: Some(dmub_abm_get_target_backlight_ex),
     set_pipe_ex: Some(dmub_abm_set_pipe_ex),
+    set_backlight_level_pwm: Some(dmub_abm_set_backlight_level_pwm_ex),
 };
 
 impl abm_funcs {
@@ -91,6 +97,17 @@ fn dmub_abm_init_ex(adev: &amdgpu_device, dc: &mut dc, backlight: u32, user_leve
     dmub_abm_init(adev, dc, backlight, user_level);
 }
 
+/// `dmub_abm_get_current_backlight_ex` (dmub_abm.c); idle optimizations
+/// are DCN 3.x's.
+fn dmub_abm_get_current_backlight_ex(adev: &amdgpu_device, dc: &dc) -> u32 {
+    dmub_abm_get_current_backlight(adev, dc)
+}
+
+/// `dmub_abm_get_target_backlight_ex` (dmub_abm.c).
+fn dmub_abm_get_target_backlight_ex(adev: &amdgpu_device, dc: &dc) -> u32 {
+    dmub_abm_get_target_backlight(adev, dc)
+}
+
 /// `abm_feature_support` (dmub_abm.c): ABM for the LCD of an eDP panel
 /// instance.
 fn abm_feature_support(dc: &dc, panel_inst: u32) -> u32 {
@@ -145,6 +162,48 @@ fn dmub_abm_set_pipe_ex(adev: &amdgpu_device, dc: &mut dc, otg_inst: u32, option
     }
 
     ret
+}
+
+/// `dmub_abm_set_backlight_level_pwm_ex` (dmub_abm.c).
+fn dmub_abm_set_backlight_level_pwm_ex(adev: &amdgpu_device, dc: &mut dc, backlight_pwm_u16_16: u32, frame_ramp: u32,
+                                       _controller_id: u32, panel_inst: u32) -> bool {
+    let mut ret = false;
+
+    let feature_support = abm_feature_support(dc, panel_inst);
+
+    if feature_support == ABM_LCD_SUPPORT {
+        ret = dmub_abm_set_backlight_level(adev, dc, backlight_pwm_u16_16, frame_ramp, panel_inst);
+    }
+
+    ret
+}
+
+/// `dmub_abm_get_current_backlight` (dmub_abm_lcd.c): the level in
+/// hardware format, unsigned 17 bits with 1 integer and 16 fractional.
+pub fn dmub_abm_get_current_backlight(adev: &amdgpu_device, dc: &dc) -> u32 {
+    let regs = dc.res_pool.as_deref().and_then(|p| p.abm.as_deref()).expect("abm").rsm().0;
+    crate::dc_helper::reg_read!(adev, regs, BL1_PWM_CURRENT_ABM_LEVEL)
+}
+
+/// `dmub_abm_get_target_backlight` (dmub_abm_lcd.c).
+pub fn dmub_abm_get_target_backlight(adev: &amdgpu_device, dc: &dc) -> u32 {
+    let regs = dc.res_pool.as_deref().and_then(|p| p.abm.as_deref()).expect("abm").rsm().0;
+    crate::dc_helper::reg_read!(adev, regs, BL1_PWM_TARGET_ABM_LEVEL)
+}
+
+/// `dmub_abm_set_backlight_level` (dmub_abm_lcd.c).
+pub fn dmub_abm_set_backlight_level(adev: &amdgpu_device, dc: &mut dc, backlight_pwm_u16_16: u32, frame_ramp: u32,
+                                    panel_inst: u32) -> bool {
+    let mut cmd = crate::dmub_srv::dmub_rb_cmd::default();
+    cmd.set_header(DMUB_CMD__ABM, DMUB_CMD__ABM_SET_BACKLIGHT, SIZEOF_dmub_cmd_abm_set_backlight_data);
+    cmd.0[ABMBL_FRAME_RAMP as usize..][..4].copy_from_slice(&frame_ramp.to_le_bytes());
+    cmd.0[ABMBL_BACKLIGHT_USER_LEVEL as usize..][..4].copy_from_slice(&backlight_pwm_u16_16.to_le_bytes());
+    cmd.0[ABMBL_VERSION as usize] = DMUB_CMD_ABM_CONTROL_VERSION_1 as u8;
+    cmd.0[ABMBL_PANEL_MASK as usize] = 0x01 << panel_inst;
+
+    crate::dc_dmub_srv::dc_wake_and_execute_dmub_cmd(adev, dc, &mut cmd, DM_DMUB_WAIT_TYPE_WAIT);
+
+    true
 }
 
 /// `dmub_abm_set_level` (dmub_abm_lcd.c).

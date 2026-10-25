@@ -695,3 +695,18 @@ pub struct dc_static_screen_params {
     pub overlay_update: bool,
     pub num_frames: u32,
 }
+
+/// `struct set_backlight_level_params` (dc_types.h).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct set_backlight_level_params {
+    pub backlight_pwm_u16_16: u32,
+    pub frame_ramp: u32,
+    pub control_type: u32,
+    pub backlight_millinits: u32,
+    pub transition_time_in_ms: u32,
+    pub min_luminance: u32,
+    pub max_luminance: u32,
+    pub min_backlight_pwm: u32,
+    pub max_backlight_pwm: u32,
+    pub aux_inst: u8,
+}

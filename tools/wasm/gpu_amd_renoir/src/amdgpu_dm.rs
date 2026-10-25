@@ -49,6 +49,58 @@ pub struct amdgpu_display_manager {
     pub flip_events: alloc::vec::Vec<crate::drm_vblank::drm_flip_event>,
     /// The cursor plane's state, once the kernel gave it an image.
     pub cursor: Option<dm_cursor_plane>,
+    /// `backlight_dev`: the backlight of each eDP once registered.
+    pub backlight_dev: [Option<backlight_properties>; AMDGPU_DM_MAX_NUM_EDP as usize],
+    /// `backlight_link`: the link of each eDP, by index.
+    pub backlight_link: [Option<usize>; AMDGPU_DM_MAX_NUM_EDP as usize],
+    pub backlight_caps: [amdgpu_dm_backlight_caps; AMDGPU_DM_MAX_NUM_EDP as usize],
+    pub num_of_edps: u32,
+    /// `brightness`: the level asked for, in the backlight's range.
+    pub brightness: [u32; AMDGPU_DM_MAX_NUM_EDP as usize],
+    /// `actual_brightness`: the level last set.
+    pub actual_brightness: [u32; AMDGPU_DM_MAX_NUM_EDP as usize],
+}
+
+/// `struct amdgpu_dm_luminance_data`: luminance in percent at an input
+/// signal of 0-255.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct amdgpu_dm_luminance_data {
+    pub luminance: u8,
+    pub input_signal: u8,
+}
+
+/// `struct amdgpu_dm_backlight_caps`; `ext_caps` is the link's
+/// `dpcd_sink_ext_caps`, read where it is needed.
+#[derive(Clone, Copy, Debug)]
+pub struct amdgpu_dm_backlight_caps {
+    pub aux_min_input_signal: u32,
+    pub aux_max_input_signal: u32,
+    pub min_input_signal: i32,
+    pub max_input_signal: i32,
+    pub caps_valid: bool,
+    pub aux_support: bool,
+    pub brightness_mask: u32,
+    pub ac_level: u8,
+    pub dc_level: u8,
+    pub data_points: u8,
+    pub luminance_data: [amdgpu_dm_luminance_data; MAX_LUMINANCE_DATA_POINTS as usize],
+}
+
+impl Default for amdgpu_dm_backlight_caps {
+    fn default() -> Self {
+        Self { aux_min_input_signal: 0, aux_max_input_signal: 0, min_input_signal: 0, max_input_signal: 0,
+               caps_valid: false, aux_support: false, brightness_mask: 0, ac_level: 0, dc_level: 0, data_points: 0,
+               luminance_data: [Default::default(); MAX_LUMINANCE_DATA_POINTS as usize] }
+    }
+}
+
+/// `struct backlight_properties` (backlight.h), what a registered
+/// backlight holds: the level, its maximum and how it scales.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct backlight_properties {
+    pub brightness: u32,
+    pub max_brightness: u32,
+    pub scale: u32,
 }
 
 /// The cursor plane as DRM would hold it: its framebuffer (a VRAM buffer
@@ -879,6 +931,10 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device, fb: &dm_framebuffer) -> bo
     if amdgpu_dm_initialize_drm_device(adev) != 0 {
         return false;
     }
+    // drm_dev_register: each connector's late_register.
+    for li in 0..adev.dm.dc.as_deref().unwrap().link_count as usize {
+        amdgpu_dm_register_backlight_device(adev, li);
+    }
     // drm_vblank_init: one vblank per display index.
     for c in adev.mode_info.crtcs.iter_mut().flatten() {
         c.vblank = Default::default();
@@ -908,6 +964,13 @@ pub fn dm_take_over_display(adev: &mut amdgpu_device, fb: &dm_framebuffer) -> bo
     crate::drm_vblank::drm_calc_timestamping_constants(adev, 0, &mode);
 
     manage_dm_interrupts(adev, 0, true);
+
+    // restore the backlight level
+    for i in 0..adev.dm.num_of_edps as usize {
+        if adev.dm.backlight_dev[i].is_some() && adev.dm.actual_brightness[i] != adev.dm.brightness[i] {
+            amdgpu_dm_backlight_set_level(adev, i, adev.dm.brightness[i]);
+        }
+    }
     return true;
 
     /// The rest of `amdgpu_dm_init` before the DRM device: the firmware's
@@ -1060,7 +1123,9 @@ fn amdgpu_dm_initialize_drm_device(adev: &mut amdgpu_device) -> i32 {
         if !link_detection::dc_link_detect_connection_type(adev, dc, l, &mut new_connection_type) {
             drm_err("KMS: Failed to detect connector");
         }
-        link_detection::dc_link_detect(adev, dc, l, link_detection::dc_detect_reason::DETECT_REASON_BOOT);
+        if link_detection::dc_link_detect(adev, dc, l, link_detection::dc_detect_reason::DETECT_REASON_BOOT) {
+            setup_backlight_device(&mut adev.dm, dc, l);
+        }
     }
     adev.dm.dc = Some(dcb);
 
@@ -1213,6 +1278,358 @@ pub fn dm_crtc_get_scanoutpos(adev: &amdgpu_device, crtc: i32, vbl: &mut u32, po
     *vbl = v_blank_start | (v_blank_end << 16);
 
     0
+}
+
+/// `amdgpu_dm_update_backlight_caps`: the firmware's caps (ATIF), checked,
+/// or the defaults. `amdgpu_acpi_get_backlight_caps` copies what ATIF
+/// reported; the kernel hands modules no ACPI methods, so ATIF reports
+/// nothing and the defaults hold.
+pub fn amdgpu_dm_update_backlight_caps(dm: &mut amdgpu_display_manager, bl_idx: usize) {
+    let caps = &mut dm.backlight_caps[bl_idx];
+
+    if caps.caps_valid {
+        return;
+    }
+
+    // amdgpu_acpi_get_backlight_caps
+    *caps = amdgpu_dm_backlight_caps::default();
+
+    // validate the firmware value is sane
+    if caps.caps_valid {
+        let spread = caps.max_input_signal - caps.min_input_signal;
+
+        if caps.max_input_signal > AMDGPU_DM_DEFAULT_MAX_BACKLIGHT as i32 || caps.min_input_signal < 0
+            || spread > AMDGPU_DM_DEFAULT_MAX_BACKLIGHT as i32 || spread < AMDGPU_DM_MIN_SPREAD as i32
+        {
+            Line::new().s("DM: Invalid backlight caps: min=").dec(caps.min_input_signal as u64).s(", max=")
+                .dec(caps.max_input_signal as u64).dbg();
+            caps.caps_valid = false;
+        }
+    }
+
+    if !caps.caps_valid {
+        caps.min_input_signal = AMDGPU_DM_DEFAULT_MIN_BACKLIGHT as i32;
+        caps.max_input_signal = AMDGPU_DM_DEFAULT_MAX_BACKLIGHT as i32;
+        caps.caps_valid = true;
+    }
+}
+
+/// `get_brightness_range`: the range DC is driven in, millinits over AUX,
+/// 16-bit PWM otherwise.
+fn get_brightness_range(caps: &amdgpu_dm_backlight_caps, min: &mut u32, max: &mut u32) -> bool {
+    if caps.aux_support {
+        // Firmware limits are in nits, DC API wants millinits.
+        *max = 1000 * caps.aux_max_input_signal;
+        *min = 1000 * caps.aux_min_input_signal;
+    } else {
+        // Firmware limits are 8-bit, PWM control is 16-bit.
+        *max = 0x101 * caps.max_input_signal as u32;
+        *min = 0x101 * caps.min_input_signal as u32;
+    }
+    true
+}
+
+/// `DIV_ROUND_CLOSEST_ULL`.
+fn div_round_closest(n: u64, d: u64) -> u64 {
+    (n + d / 2) / d
+}
+
+/// `scale_input_to_fw`: userspace [0..max] to the firmware curve's
+/// [0..255].
+fn scale_input_to_fw(max: i32, input: u64) -> u32 {
+    div_round_closest(input * AMDGPU_MAX_BL_LEVEL as u64, max as u64) as u32
+}
+
+/// `scale_fw_to_input`: [0..AMDGPU_MAX_BL_LEVEL] to [min..max].
+fn scale_fw_to_input(min: i32, max: i32, input: u64) -> u32 {
+    (min as u64 + div_round_closest(input * (max - min) as u64, AMDGPU_MAX_BL_LEVEL as u64)) as u32
+}
+
+/// `convert_custom_brightness`: the user level through the firmware's
+/// luminance curve, when it has one.
+fn convert_custom_brightness(caps: &amdgpu_dm_backlight_caps, min: u32, max: u32, user_brightness: &mut u32) {
+    let brightness = scale_input_to_fw(max as i32, *user_brightness as u64);
+
+    // amdgpu_dc_debug_mask & DC_DISABLE_CUSTOM_BRIGHTNESS_CURVE: the mask
+    // is 0.
+
+    if caps.data_points == 0 {
+        return;
+    }
+
+    let d = &caps.luminance_data;
+    let round = |n: u32, q: u32| (n + q / 2) / q;
+    let lum: u32 = 'scale: {
+        // Handle the case where brightness is below the first data point
+        // Interpolate between (0,0) and (first_signal, first_lum)
+        if brightness < d[0].input_signal as u32 {
+            break 'scale round(d[0].luminance as u32 * brightness, d[0].input_signal as u32);
+        }
+
+        let mut left = 0i32;
+        let mut right = caps.data_points as i32 - 1;
+        while left <= right {
+            let mid = left + (right - left) / 2;
+            let signal = d[mid as usize].input_signal as u32;
+
+            // Exact match found
+            if signal == brightness {
+                break 'scale d[mid as usize].luminance as u32;
+            }
+
+            if signal < brightness {
+                left = mid + 1;
+            } else {
+                right = mid - 1;
+            }
+        }
+
+        // verify bound
+        if left >= caps.data_points as i32 {
+            left = caps.data_points as i32 - 1;
+        }
+
+        // At this point, left > right
+        let lower_signal = d[right as usize].input_signal as u32;
+        let upper_signal = d[left as usize].input_signal as u32;
+        let lower_lum = d[right as usize].luminance as u32;
+        let upper_lum = d[left as usize].luminance as u32;
+
+        // interpolate
+        if right == left || lower_lum == 0 {
+            upper_lum
+        } else {
+            lower_lum + round((upper_lum - lower_lum) * (brightness - lower_signal), upper_signal - lower_signal)
+        }
+    };
+    *user_brightness = scale_fw_to_input(min as i32, max as i32, round(lum * brightness, 101) as u64);
+}
+
+/// `convert_brightness_from_user`: a user level to DC's range.
+pub fn convert_brightness_from_user(caps: &amdgpu_dm_backlight_caps, mut brightness: u32) -> u32 {
+    let (mut min, mut max) = (0, 0);
+
+    if !get_brightness_range(caps, &mut min, &mut max) {
+        return brightness;
+    }
+
+    convert_custom_brightness(caps, min, max, &mut brightness);
+
+    // Rescale 0..max to min..max
+    min + div_round_closest((max - min) as u64 * brightness as u64, max as u64) as u32
+}
+
+/// `convert_brightness_to_user`: DC's level to the user's range.
+pub fn convert_brightness_to_user(caps: &amdgpu_dm_backlight_caps, brightness: u32) -> u32 {
+    let (mut min, mut max) = (0, 0);
+
+    if !get_brightness_range(caps, &mut min, &mut max) {
+        return brightness;
+    }
+
+    if brightness < min {
+        return 0;
+    }
+    // Rescale min..max to 0..max
+    div_round_closest(max as u64 * (brightness - min) as u64, (max - min) as u64) as u32
+}
+
+/// `amdgpu_atombios_scratch_regs_set_backlight_level` (amdgpu_atombios.c).
+fn amdgpu_atombios_scratch_regs_set_backlight_level(adev: &amdgpu_device, backlight_level: u32) {
+    let reg = adev.bios_scratch_reg_offset + 2;
+    let mut tmp = adev.rreg32(reg).unwrap_or(0);
+
+    tmp &= !ATOM_S2_CURRENT_BL_LEVEL_MASK;
+    tmp |= (backlight_level << ATOM_S2_CURRENT_BL_LEVEL_SHIFT) & ATOM_S2_CURRENT_BL_LEVEL_MASK;
+
+    adev.wreg32(reg, tmp);
+}
+
+/// Whether the connector of backlight `bl_idx` has an encoder: its link
+/// carries the stream DC drives.
+fn dm_backlight_connector_on(adev: &amdgpu_device, bl_idx: usize) -> bool {
+    let (Some(li), Some(live)) = (adev.dm.backlight_link[bl_idx], adev.dm.live) else { return false };
+    adev.dm.dc.as_deref().unwrap().streams[live.stream].as_deref().is_some_and(|s| s.link == li)
+}
+
+/// `amdgpu_dm_backlight_set_level`: user level `user_brightness` on the
+/// eDP of backlight `bl_idx`, kept for later while its connector is off.
+pub fn amdgpu_dm_backlight_set_level(adev: &mut amdgpu_device, bl_idx: usize, user_brightness: u32) {
+    // if connector is off, save the brightness for next time it's on
+    if !dm_backlight_connector_on(adev, bl_idx) {
+        adev.dm.brightness[bl_idx] = user_brightness;
+        adev.dm.actual_brightness[bl_idx] = 0;
+        return;
+    }
+
+    amdgpu_dm_update_backlight_caps(&mut adev.dm, bl_idx);
+    let caps = adev.dm.backlight_caps[bl_idx];
+
+    adev.dm.brightness[bl_idx] = user_brightness;
+    // update scratch register
+    if bl_idx == 0 {
+        amdgpu_atombios_scratch_regs_set_backlight_level(adev, adev.dm.brightness[bl_idx]);
+    }
+    let mut brightness = convert_brightness_from_user(&caps, adev.dm.brightness[bl_idx]);
+    let link = adev.dm.backlight_link[bl_idx].unwrap();
+
+    // Apply brightness quirk
+    if caps.brightness_mask != 0 {
+        brightness |= caps.brightness_mask;
+    }
+
+    // Change brightness based on AUX property. IPS is DCN 3.5's.
+    let mut dcb = adev.dm.dc.take().unwrap();
+    let rc = if caps.aux_support {
+        Line::new().s("dc_link_set_backlight_level_nits not ported").say();
+        false
+    } else {
+        let mut backlight_level_params = crate::dc_types::set_backlight_level_params {
+            backlight_pwm_u16_16: brightness,
+            transition_time_in_ms: 0,
+            ..Default::default()
+        };
+
+        let rc = crate::link_edp_panel_control::dc_link_set_backlight_level(adev, &mut dcb, link,
+                                                                            &mut backlight_level_params);
+        if !rc {
+            Line::new().s("DM: Failed to update backlight on eDP[").dec(bl_idx as u64).s("]").dbg();
+        }
+        rc
+    };
+    adev.dm.dc = Some(dcb);
+
+    if rc {
+        adev.dm.actual_brightness[bl_idx] = user_brightness;
+    }
+}
+
+/// `amdgpu_dm_backlight_get_level`: the panel's level in the user's range,
+/// or the level asked for when DC cannot tell.
+pub fn amdgpu_dm_backlight_get_level(adev: &mut amdgpu_device, bl_idx: usize) -> u32 {
+    let link = adev.dm.backlight_link[bl_idx].unwrap();
+
+    amdgpu_dm_update_backlight_caps(&mut adev.dm, bl_idx);
+    let caps = adev.dm.backlight_caps[bl_idx];
+
+    if caps.aux_support {
+        // dc_link_get_backlight_level_nits is OLED's.
+        return adev.dm.brightness[bl_idx];
+    }
+
+    let ret = crate::link_edp_panel_control::dc_link_get_backlight_level(adev, adev.dm.dc.as_deref().unwrap(), link);
+
+    if ret == DC_ERROR_UNEXPECTED as i32 {
+        return adev.dm.brightness[bl_idx];
+    }
+
+    convert_brightness_to_user(&caps, ret as u32)
+}
+
+/// `amdgpu_dm_register_backlight_device`, for the connector of link `li`:
+/// the backlight registered (`backlight_device_register`) with the
+/// default level the caps give, then the panel's real one. The kernel is
+/// told by the module's capabilities; `acpi_video_backlight_use_native`
+/// holds, there being no ACPI video backlight.
+fn amdgpu_dm_register_backlight_device(adev: &mut amdgpu_device, li: usize) {
+    let bl_idx = adev.dm.dc.as_deref().unwrap().links[li].priv_.as_deref().map_or(-1, |c| c.bl_idx);
+    let mut props = backlight_properties::default();
+    let (mut min, mut max) = (0, 0);
+
+    if bl_idx == -1 {
+        return;
+    }
+    let bl_idx = bl_idx as usize;
+
+    let caps = adev.dm.backlight_caps[bl_idx];
+    if get_brightness_range(&caps, &mut min, &mut max) {
+        // power_supply_is_system_supplied: the kernel's battery driver
+        // knows; ATIF gave no levels for either, so both are 0.
+        props.brightness = ((max * caps.ac_level as u32) + 50) / 100;
+        // min is zero, so max needs to be adjusted
+        props.max_brightness = max;
+        Line::new().s("Backlight caps: min: ").dec(min as u64).s(", max: ").dec(max as u64).s(", ac ")
+            .dec(caps.ac_level as u64).s(", dc ").dec(caps.dc_level as u64).dbg();
+    } else {
+        props.brightness = MAX_BACKLIGHT_LEVEL;
+        props.max_brightness = MAX_BACKLIGHT_LEVEL;
+    }
+
+    let init_brightness = props.brightness;
+
+    props.scale = if caps.data_points != 0 {
+        drm_info("Using custom brightness curve");
+        BACKLIGHT_SCALE_NON_LINEAR
+    } else {
+        BACKLIGHT_SCALE_LINEAR
+    };
+
+    adev.dm.backlight_dev[bl_idx] = Some(props);
+    adev.dm.brightness[bl_idx] = props.brightness;
+
+    // dm->brightness[x] can be inconsistent just after startup until
+    // ops.get_brightness is called.
+    let real_brightness = amdgpu_dm_backlight_get_level(adev, bl_idx);
+
+    if real_brightness != init_brightness {
+        adev.dm.actual_brightness[bl_idx] = real_brightness;
+        adev.dm.brightness[bl_idx] = real_brightness;
+    }
+    Line::new().s("DM: Registered Backlight device: amdgpu_bl").dec(bl_idx as u64).s(", max ")
+        .dec(props.max_brightness as u64).s(", level ").dec(adev.dm.brightness[bl_idx] as u64).say();
+}
+
+/// `update_connector_ext_caps`: whether the eDP's backlight goes over AUX
+/// (an OLED panel) and the luminance range for it. The panel's EDID
+/// luminance range (HDR static metadata) is not parsed, so the defaults
+/// hold; `drm_get_panel_backlight_quirk` matches DMI strings, which the
+/// kernel does not hand modules.
+fn update_connector_ext_caps(dm: &mut amdgpu_display_manager, dc: &mut crate::dc::dc, li: usize) {
+    let bl_idx = dc.links[li].priv_.as_deref().map_or(-1, |c| c.bl_idx);
+
+    if bl_idx == -1 || dc.links[li].connector_signal != LF_SIGNAL_TYPE_EDP {
+        return;
+    }
+
+    let caps = &mut dm.backlight_caps[bl_idx as usize];
+    caps.aux_support = false;
+
+    if crate::dc_dp_types::sink_ext_caps_oled(dc.links[li].dpcd_sink_ext_caps) == 1 {
+        caps.aux_support = true;
+    }
+
+    // amdgpu_backlight is -1 (auto).
+    if caps.aux_support {
+        dc.links[li].backlight_control_type = BACKLIGHT_CONTROL_AMD_AUX;
+    }
+
+    caps.aux_max_input_signal = 512;
+    caps.aux_min_input_signal = 1;
+}
+
+/// `setup_backlight_device`: an eDP with a panel gets the next backlight.
+fn setup_backlight_device(dm: &mut amdgpu_display_manager, dc: &mut crate::dc::dc, li: usize) {
+    let link = &dc.links[li];
+    let bl_idx = dm.num_of_edps as usize;
+
+    if link.connector_signal & (LF_SIGNAL_TYPE_EDP | SIGNAL_TYPE_LVDS) == 0 || link.r#type == dc_connection_none {
+        return;
+    }
+
+    if dm.num_of_edps >= AMDGPU_DM_MAX_NUM_EDP {
+        Line::new().s("Too much eDP connections, skipping backlight setup for additional eDPs").say();
+        return;
+    }
+
+    if let Some(c) = dc.links[li].priv_.as_deref_mut() {
+        c.bl_idx = bl_idx as i32;
+    }
+
+    amdgpu_dm_update_backlight_caps(dm, bl_idx);
+    dm.backlight_link[bl_idx] = Some(li);
+    dm.num_of_edps += 1;
+
+    update_connector_ext_caps(dm, dc, li);
 }
 
 /// `manage_dm_interrupts`: a CRTC's vblank on, with the disable delay of

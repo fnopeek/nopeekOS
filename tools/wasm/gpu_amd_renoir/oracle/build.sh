@@ -698,7 +698,10 @@ done
         dm_helpers_read_local_edid dm_helpers_init_panel_settings dm_helpers_override_panel_settings \
         dm_helpers_dp_write_hblank_reduction
     $X "$AMD/display/amdgpu_dm/amdgpu_dm.c" to_drm_connector_type amdgpu_dm_i2c_xfer amdgpu_dm_i2c_func \
-        amdgpu_dm_i2c_algo dm_vblank_get_counter dm_crtc_get_scanoutpos
+        amdgpu_dm_i2c_algo dm_vblank_get_counter dm_crtc_get_scanoutpos '#AMDGPU_DM_DEFAULT_MIN_BACKLIGHT' \
+        '#AMDGPU_DM_DEFAULT_MAX_BACKLIGHT' '#AMDGPU_DM_MIN_SPREAD' amdgpu_dm_update_backlight_caps \
+        get_brightness_range scale_input_to_fw scale_fw_to_input convert_custom_brightness \
+        convert_brightness_from_user convert_brightness_to_user
     $X "$AMD/amdgpu/amdgpu_display.c" amdgpu_display_get_crtc_scanoutpos
     $X "$AMD/amdgpu/amdgpu_kms.c" amdgpu_get_vblank_counter_kms
     $X "$AMD/display/amdgpu_dm/amdgpu_dm_mst_types.c" dm_dp_aux_transfer |
@@ -714,7 +717,7 @@ ld -r -o "$K/kworld_all.o" "$K/kdrm_bridge.o" "$K/kshim.o" "$K/drm_edid.o" "$K/d
     "$K/drm_displayid.o" "$K/drm_modes.o" "$K/ctype.o"
 printf '%s\n' kdrm_connector_create dm_helpers_read_local_edid dm_helpers_parse_edid_caps dm_helpers_dp_read_dpcd \
     dm_helpers_dp_write_dpcd dm_helpers_init_panel_settings dm_helpers_override_panel_settings \
-    dm_helpers_dp_write_hblank_reduction kdrm_crtc_queries > "$K/keep"
+    dm_helpers_dp_write_hblank_reduction kdrm_crtc_queries kdrm_backlight > "$K/keep"
 objcopy --keep-global-symbols="$K/keep" "$K/kworld_all.o" "$K/kworld.o"
 $KCC $KAMD -c "$HERE/kdrm/layout.c" -o "$K/layout_kernel.o"
 gcc $DCHW_CF -c "$HERE/kdrm/layout.c" -o "$K/layout_shim.o"

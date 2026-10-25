@@ -32,6 +32,13 @@ static struct amdgpu_device *kdrm_adev = &kdrm_adev_mem;
 static struct device kdrm_device;
 static struct drm_device kdrm_ddev = { .dev = &kdrm_device };
 
+/* No ATIF: the backlight caps it would report are all zero. */
+void amdgpu_acpi_get_backlight_caps(struct amdgpu_dm_backlight_caps *caps)
+{
+	memset(caps, 0, sizeof(*caps));
+}
+uint amdgpu_dc_debug_mask;
+
 #include "kdrm_extracted.c"
 
 /* amdgpu_dm_connector_init's part that DC's detection sees: the hardware
@@ -107,4 +114,23 @@ void kdrm_crtc_queries(struct dc *dc, struct dc_stream_state *stream, int clock,
 	out[7] = vpos;
 	out[8] = hpos;
 	out[9] = amdgpu_get_vblank_counter_kms(&acrtc->base);
+}
+
+/* DM's backlight caps and the conversions between the user's range and
+ * DC's: out[0..1] the input signal range, then convert_brightness_from_user
+ * of six user levels and convert_brightness_to_user of six DC levels. */
+void kdrm_backlight(int out[14])
+{
+	struct amdgpu_display_manager *dm = &kdrm_adev->dm;
+	u32 user[6] = { 0, 1, 1000, 32768, 65534, 65535 };
+	u32 pwm[6] = { 0, 3083, 3084, 3085, 32768, 65535 };
+
+	memset(&dm->backlight_caps[0], 0, sizeof(dm->backlight_caps[0]));
+	amdgpu_dm_update_backlight_caps(dm, 0);
+	out[0] = dm->backlight_caps[0].min_input_signal;
+	out[1] = dm->backlight_caps[0].max_input_signal;
+	for (int i = 0; i < 6; i++)
+		out[2 + i] = convert_brightness_from_user(&dm->backlight_caps[0], user[i]);
+	for (int i = 0; i < 6; i++)
+		out[8 + i] = convert_brightness_to_user(&dm->backlight_caps[0], pwm[i]);
 }

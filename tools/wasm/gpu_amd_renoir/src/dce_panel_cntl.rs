@@ -154,6 +154,8 @@ pub struct panel_cntl_ops {
     pub hw_init: Option<fn(&crate::amdgpu_device::amdgpu_device, &mut dce_panel_cntl) -> u32>,
     pub is_panel_backlight_on: Option<fn(&crate::amdgpu_device::amdgpu_device, &dce_panel_cntl) -> bool>,
     pub is_panel_powered_on: Option<fn(&crate::amdgpu_device::amdgpu_device, &dce_panel_cntl) -> bool>,
+    pub store_backlight_level: Option<fn(&crate::amdgpu_device::amdgpu_device, &mut dce_panel_cntl)>,
+    pub get_current_backlight: Option<fn(&crate::amdgpu_device::amdgpu_device, &dce_panel_cntl) -> u32>,
 }
 
 /// `dce_link_panel_cntl_funcs` (dce_panel_cntl.c), as far as ported.
@@ -161,6 +163,8 @@ const DCE_LINK_PANEL_CNTL_FUNCS: panel_cntl_ops = panel_cntl_ops {
     hw_init: Some(dce_panel_cntl_hw_init),
     is_panel_backlight_on: Some(dce_is_panel_backlight_on),
     is_panel_powered_on: Some(dce_is_panel_powered_on),
+    store_backlight_level: Some(dce_store_backlight_level),
+    get_current_backlight: Some(dce_get_16_bit_backlight_from_pwm),
 };
 
 impl panel_cntl_funcs_id {
@@ -212,6 +216,20 @@ impl dce_panel_cntl {
     pub fn funcs(&self) -> &'static panel_cntl_ops {
         self.funcs.expect("panel_cntl funcs").ops()
     }
+}
+
+/// `dce_store_backlight_level` (dce_panel_cntl.c): the PWM registers kept
+/// for `dce_panel_cntl_hw_init` to restore.
+fn dce_store_backlight_level(adev: &crate::amdgpu_device::amdgpu_device, p: &mut dce_panel_cntl) {
+    use crate::dc_helper::{reg_get, reg_read};
+    let (regs, shift, mask) = (p.regs, p.shift, p.mask);
+    let c = (&regs, &shift, &mask);
+
+    p.stored_backlight_registers.BL_PWM_CNTL = reg_read!(adev, regs, BL_PWM_CNTL);
+    p.stored_backlight_registers.BL_PWM_CNTL2 = reg_read!(adev, regs, BL_PWM_CNTL2);
+    p.stored_backlight_registers.BL_PWM_PERIOD_CNTL = reg_read!(adev, regs, BL_PWM_PERIOD_CNTL);
+
+    p.stored_backlight_registers.LVTMA_PWRSEQ_REF_DIV_BL_PWM_REF_DIV = reg_get!(adev, c, PWRSEQ_REF_DIV, BL_PWM_REF_DIV);
 }
 
 /// `dce_get_16_bit_backlight_from_pwm` (dce_panel_cntl.c): the PWM duty

@@ -672,6 +672,30 @@ fn main() {
                 }
                 println!();
             }
+            // The backlight, as in the oracle.
+            let li = dc.streams[stream].as_deref().unwrap().link;
+            let mut bp = dc_types::set_backlight_level_params { backlight_pwm_u16_16: 0x8080, ..Default::default() };
+            println!("dc_link_set_backlight_level {}",
+                link_edp_panel_control::dc_link_set_backlight_level(&adev, &mut dc, li, &mut bp) as i32);
+            println!("dc_link_get_backlight_level {}",
+                link_edp_panel_control::dc_link_get_backlight_level(&adev, &dc, li));
+            let mut bl = [0i32; 14];
+            adev.dm.backlight_caps[0] = Default::default();
+            amdgpu_dm::amdgpu_dm_update_backlight_caps(&mut adev.dm, 0);
+            let caps = adev.dm.backlight_caps[0];
+            bl[0] = caps.min_input_signal;
+            bl[1] = caps.max_input_signal;
+            for (i, u) in [0u32, 1, 1000, 32768, 65534, 65535].into_iter().enumerate() {
+                bl[2 + i] = amdgpu_dm::convert_brightness_from_user(&caps, u) as i32;
+            }
+            for (i, p) in [0u32, 3083, 3084, 3085, 32768, 65535].into_iter().enumerate() {
+                bl[8 + i] = amdgpu_dm::convert_brightness_to_user(&caps, p) as i32;
+            }
+            print!("backlight");
+            for v in bl {
+                print!(" {}", v);
+            }
+            println!();
         }
     }
     npk_sys::fake_card_echo(false);

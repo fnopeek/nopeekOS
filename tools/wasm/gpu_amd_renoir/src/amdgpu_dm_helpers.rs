@@ -48,6 +48,8 @@ pub struct amdgpu_dm_connector {
     pub base: drm_connector,
     pub i2c: Option<Box<amdgpu_i2c_adapter>>,
     pub dm_dp_aux: amdgpu_dm_dp_aux,
+    /// `bl_idx`: the backlight this connector's panel has, -1 for none.
+    pub bl_idx: i32,
 }
 
 impl core::fmt::Debug for amdgpu_dm_connector {
@@ -95,6 +97,7 @@ pub fn amdgpu_dm_connector_init(dc: &mut dc, li: usize) {
         base: drm_connector::new(format!("connector-{}", link.link_index), connector_type),
         i2c: Some(create_i2c(link.link_index, false)),
         dm_dp_aux: amdgpu_dm_dp_aux::default(),
+        bl_idx: -1,
     });
 
     if connector_type == DRM_MODE_CONNECTOR_DisplayPort || connector_type == DRM_MODE_CONNECTOR_eDP {

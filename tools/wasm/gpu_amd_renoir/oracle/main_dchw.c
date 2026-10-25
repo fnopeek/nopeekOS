@@ -217,6 +217,7 @@ static u64 amdgpu_gmc_pd_addr(struct amdgpu_bo *bo)
 void kdrm_connector_create(struct dc_link *link);
 void kdrm_crtc_queries(struct dc *dc, struct dc_stream_state *stream, int clock, int htotal, int vdisplay,
 		       int vtotal, int out[10]);
+void kdrm_backlight(int out[14]);
 
 
 /* The context as the commit path builds it: the stream, and per pipe the
@@ -649,6 +650,17 @@ int main(int argc, char **argv)
 					printf(" %d", q[i]);
 				printf("\n");
 			}
+			/* The backlight as amdgpu_dm_backlight_set_level drives it: a
+			 * PWM level on the eDP, read back, and DM's conversions. */
+			struct set_backlight_level_params bp = { .backlight_pwm_u16_16 = 0x8080 };
+			printf("dc_link_set_backlight_level %d\n", dc_link_set_backlight_level(stream->link, &bp));
+			printf("dc_link_get_backlight_level %d\n", dc_link_get_backlight_level(stream->link));
+			int bl[14];
+			kdrm_backlight(bl);
+			printf("backlight");
+			for (int i = 0; i < 14; i++)
+				printf(" %d", bl[i]);
+			printf("\n");
 		}
 	}
 

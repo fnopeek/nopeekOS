@@ -74,17 +74,28 @@ pub fn dcn21_is_abm_supported(dc: &dc, context: &crate::dc_state::dc_state, stre
 /// `dcn21_set_abm_immediate_disable` (dcn21_hwseq.c). A short-term
 /// workaround for backlight ramping that paused midway leaves ABM alone at
 /// level 0 or already disabled; DCN 2.1 has no DMCU.
-pub fn dcn21_set_abm_immediate_disable(_adev: &amdgpu_device, dc: &mut dc, context: &crate::dc_state::dc_state, p: usize) {
+pub fn dcn21_set_abm_immediate_disable(adev: &amdgpu_device, dc: &mut dc, context: &crate::dc_state::dc_state, p: usize) {
     let pipe_ctx = &context.res_ctx.pipe_ctx[p];
     let stream = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap();
+    let link = stream.link;
+    let pool = dc.res_pool.as_deref().unwrap();
+    let otg_inst = pool.timing_generators[pipe_ctx.stream_res.tg.unwrap()].as_deref().unwrap().base.inst;
 
+    // make a short term w/a for an issue that backlight ramping
+    // unexpectedly paused in the middle, will decouple backlight from ABM
+    // and redefine DMUB interface, then this w/a could be removed
     if stream.abm_level == 0 || stream.abm_level == crate::regs::ABM_LEVEL_IMMEDIATE_DISABLE {
         return;
     }
 
-    if pipe_ctx.stream_res.abm && dc.links[stream.link].panel_cntl.is_some() {
-        crate::linux::Line::new().s("dcn21_set_abm_immediate_disable: dmub_abm_set_pipe, store_backlight_level not ported").say();
-    }
+    let Some(panel_cntl) = dc.links[link].panel_cntl.as_deref() else { return };
+    let Some(abm) = pool.abm.as_deref().filter(|_| pipe_ctx.stream_res.abm) else { return };
+    let (panel_inst, pwrseq_inst) = (panel_cntl.inst, panel_cntl.pwrseq_inst);
+
+    let set_pipe_ex = abm.funcs().set_pipe_ex.unwrap();
+    set_pipe_ex(adev, dc, otg_inst, crate::regs::SET_ABM_PIPE_IMMEDIATELY_DISABLE, panel_inst, pwrseq_inst);
+    let panel_cntl = dc.links[link].panel_cntl.as_deref_mut().unwrap();
+    (panel_cntl.funcs().store_backlight_level.unwrap())(adev, panel_cntl);
 }
 
 /// `dcn21_set_pipe` (dcn21_hwseq.c): tell the ABM firmware which OTG and
@@ -102,4 +113,31 @@ pub fn dcn21_set_pipe(adev: &amdgpu_device, dc: &mut dc, pipe_ctx: &crate::dc_st
 
     let set_pipe_ex = abm.funcs().set_pipe_ex.unwrap();
     set_pipe_ex(adev, dc, otg_inst, crate::regs::SET_ABM_PIPE_NORMAL, panel_inst, pwrseq_inst);
+}
+
+/// `dcn21_set_backlight_level` (dcn21_hwseq.c): the ABM firmware told
+/// which OTG and panel, then the level. Renoir runs ABM on the DMCUB, so
+/// there is no DMCU path.
+pub fn dcn21_set_backlight_level(adev: &amdgpu_device, dc: &mut dc, pipe_ctx: &crate::dc_state::pipe_ctx,
+                                 backlight_level_params: &crate::dc_types::set_backlight_level_params) -> bool {
+    let stream = dc.streams[pipe_ctx.stream.unwrap()].as_deref().unwrap();
+    let pool = dc.res_pool.as_deref().unwrap();
+    let backlight_pwm_u16_16 = backlight_level_params.backlight_pwm_u16_16;
+    let frame_ramp = backlight_level_params.frame_ramp;
+
+    let (Some(abm), Some(tg), Some(panel_cntl)) = (pool.abm.as_deref().filter(|_| pipe_ctx.stream_res.abm),
+                                                   pipe_ctx.stream_res.tg, dc.links[stream.link].panel_cntl.as_deref())
+    else {
+        return false;
+    };
+
+    let otg_inst = pool.timing_generators[tg].as_deref().unwrap().base.inst;
+    let (panel_inst, pwrseq_inst) = (panel_cntl.inst, panel_cntl.pwrseq_inst);
+    let funcs = abm.funcs();
+
+    (funcs.set_pipe_ex.unwrap())(adev, dc, otg_inst, crate::regs::SET_ABM_PIPE_NORMAL, panel_inst, pwrseq_inst);
+
+    (funcs.set_backlight_level_pwm.unwrap())(adev, dc, backlight_pwm_u16_16, frame_ramp, 0, panel_inst);
+
+    true
 }

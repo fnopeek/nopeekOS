@@ -47,6 +47,7 @@ mod drm_dp_helper;
 mod link_dpcd;
 mod dc_ddc_types;
 mod link_dpms;
+mod link_edp_panel_control;
 mod link_validation;
 mod link_hwss;
 mod link_dp_training;
