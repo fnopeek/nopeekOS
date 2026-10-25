@@ -28,3 +28,6 @@ release/assets/manifest.large
 # large lane (GitHub Releases), never committed to the repo.
 release/apps/
 __pycache__/
+
+# Personal agent instructions, never published.
+CLAUDE.local.md
