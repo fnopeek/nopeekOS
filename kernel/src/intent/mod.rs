@@ -1984,9 +1984,14 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 Some("send") => {
                     let ip_s = it.next().unwrap_or("");
                     let port_s = it.next().unwrap_or("");
+                    // Further arguments: addresses of tables the firmware
+                    // loads at run time (an SSDT in ACPI memory).
+                    let extra: alloc::vec::Vec<u64> = it.filter_map(|a| {
+                        u64::from_str_radix(a.trim_start_matches("0x"), 16).ok()
+                    }).collect();
                     match (parse_ip(ip_s), port_s.parse::<u16>()) {
-                        (Some(ip), Ok(port)) if port != 0 => system::intent_dsdt_send(ip, port),
-                        _ => kprintln!("[npk] usage: dsdt send <ip> <port>"),
+                        (Some(ip), Ok(port)) if port != 0 => system::intent_dsdt_send(ip, port, &extra),
+                        _ => kprintln!("[npk] usage: dsdt send <ip> <port> [table address ...]"),
                     }
                 }
                 Some("full") => system::intent_dsdt_full(),

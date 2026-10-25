@@ -1064,7 +1064,7 @@ pub fn intent_dsdt_full() {
 /// (`nc -l <port> > tables.bin`). SSDTs are included because CPU `_CST`, the
 /// display's `_BCL`/`_BCM` and more often live there. Paced in small chunks
 /// so the NIC TX ring drains.
-pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
+pub fn intent_dsdt_send(ip: [u8; 4], port: u16, extra: &[u64]) {
     let Some(dsdt) = crate::acpi::dsdt() else {
         kprintln!("[npk] DSDT not found");
         return;
@@ -1076,6 +1076,20 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
         match crate::acpi::find_table_nth(b"SSDT", n - 1) {
             Some(t) => { tables[n] = t; n += 1; }
             None => break,
+        }
+    }
+    // Tables the firmware loads at run time: an SSDT whose every byte lies
+    // in memory the firmware typed as not RAM (ACPI tables, NVS).
+    for &a in extra {
+        if n >= 64 { break; }
+        let readable = |x: u64| crate::memory::is_device_window(x);
+        let len = (readable(a) && readable(a + 7)).then(|| {
+            let b: [u8; 8] = core::array::from_fn(|i| crate::paging::read_phys_u8(a + i as u64).unwrap_or(0));
+            (&b[0..4] == b"SSDT").then(|| u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as u64)
+        }).flatten().filter(|&l| (36..=0x10_0000).contains(&l) && readable(a + l - 1));
+        match len {
+            Some(l) => { tables[n] = (a as usize, l as usize); n += 1; }
+            None => kprintln!("[npk] dsdt send: no SSDT in ACPI memory at 0x{:x}", a),
         }
     }
     let total: usize = tables[..n].iter().map(|t| t.1).sum();
