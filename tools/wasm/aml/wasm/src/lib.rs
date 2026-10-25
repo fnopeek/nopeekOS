@@ -105,6 +105,8 @@ struct HostEc { reads: u32, fails: u32, verbose: bool }
 /// other transactions run, and an event asked for only afterwards is lost.
 /// Linux too queries at once (`acpi_ec_submit_query`).
 struct Pending { q: [u8; 64], n: usize, next: usize }
+/// The EC event numbers already logged, one bit each.
+static SEEN_EVENTS: Single<[u64; 4]> = Single::new([0; 4]);
 static PENDING: Single<Pending> = Single::new(Pending { q: [0; 64], n: 0, next: 0 });
 
 /// Fetch every event the EC has now.
@@ -172,11 +174,29 @@ impl Ec for HostEc {
         if self.verbose { logln(s); }
     }
     fn ec_event(&mut self, q: u8, handled: bool) {
+        // Each event number once (a new hotkey shows up this way); some
+        // fire every second, and Linux logs none of them.
+        let first = SEEN_EVENTS.with(|s| {
+            let bit = 1u64 << (q % 64);
+            let fresh = s[(q / 64) as usize] & bit == 0;
+            s[(q / 64) as usize] |= bit;
+            fresh
+        });
+        if !first && !self.verbose {
+            return;
+        }
         log("[aml] EC event _Q");
         loghex2(q);
-        logln(if handled { " (ran)" } else { " (no handler)" });
+        logln(match (handled, first) {
+            (true, true) => " (ran; further ones of it silent)",
+            (true, false) => " (ran)",
+            (false, _) => " (no handler)",
+        });
     }
     fn notify(&mut self, path: &[[u8; 4]], value: u64) {
+        if !self.verbose {
+            return;
+        }
         log("[aml]   Notify(\\");
         for (k, seg) in path.iter().enumerate() {
             if k > 0 { log("."); }
