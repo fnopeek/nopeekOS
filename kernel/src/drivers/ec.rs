@@ -29,9 +29,6 @@ const CMD_READ: u8 = 0x80; // RD_EC
 const CMD_WRITE: u8 = 0x81; // WR_EC
 const CMD_QUERY: u8 = 0x84; // QR_EC
 
-/// Status bit: the EC has an event pending (ec.c: `ACPI_EC_FLAG_SCI`).
-const EC_FLAG_SCI: u8 = 0x20;
-
 /// One EC transaction at a time (Linux `ec->mutex`): the protocol is several
 /// port writes long, and a second caller in between would feed its bytes to
 /// the first one's command — a read address taken as a write value. No ISR
@@ -95,11 +92,12 @@ fn read_locked(addr: u8) -> Option<u8> {
 /// (0x84) and runs `_Q<nr>` in AML; only there does the firmware update its
 /// state. Without it, e.g. a battery's `_STA` may never report "present".
 ///
-/// Query path from Linux `ec.c`: check the status bit, write the command,
-/// read one byte. Zero means "nothing pending" (ec.c treats 0 as an empty
+/// Query path from Linux `ec.c` (`acpi_ec_submit_query`, `acpi_ec_clear`):
+/// write the command and read one byte, without looking at SCI_EVT again
+/// — some ECs drop that bit while other transactions run, and the event is
+/// still queued. Zero means "nothing pending" (ec.c treats 0 as an empty
 /// query).
 pub fn query() -> Option<u8> {
-    if EC_SC.inb() & EC_FLAG_SCI == 0 { return None; }
     let _g = EC_LOCK.lock();
     if !wait_ibf_clear() { return None; }
     EC_SC.outb(CMD_QUERY);

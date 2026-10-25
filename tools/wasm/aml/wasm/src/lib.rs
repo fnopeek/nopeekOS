@@ -13,7 +13,7 @@
 
 extern crate alloc;
 
-use aml_core::{ec_gpe, find_batteries, read_battery, Ec, Namespace};
+use aml_core::{ec_gpe, find_batteries, read_battery, run_ec_events, Ec, Namespace};
 
 // The driver needs raw firmware + EC access — declare the HARDWARE capability
 // (bit 0x40) so the kernel grants exactly that and nothing else.
@@ -99,6 +99,26 @@ static DSDT: Single<[u8; DSDT_MAX]> = Single::new([0; DSDT_MAX]);
 /// logged; otherwise a silent EC looks like firmware that really reports no
 /// battery.
 struct HostEc { reads: u32, fails: u32, verbose: bool }
+
+/// EC events fetched (`QR_EC`) the moment the SCI reported them, before the
+/// round's namespace and `_REG`/`_INI`: this EC drops SCI_EVT again while
+/// other transactions run, and an event asked for only afterwards is lost.
+/// Linux too queries at once (`acpi_ec_submit_query`).
+struct Pending { q: [u8; 64], n: usize, next: usize }
+static PENDING: Single<Pending> = Single::new(Pending { q: [0; 64], n: 0, next: 0 });
+
+/// Fetch every event the EC has now.
+fn fetch_ec_events() {
+    PENDING.with(|p| {
+        while p.n < p.q.len() {
+            let q = npk_sys::ec_query();
+            if q <= 0 { break; }
+            p.q[p.n] = q as u8;
+            p.n += 1;
+        }
+    });
+}
+
 impl Ec for HostEc {
     fn read(&mut self, addr: u8) -> u8 {
         let r = npk_sys::ec_read(addr as i32);
@@ -133,8 +153,20 @@ impl Ec for HostEc {
         if r < 0 { None } else { Some(r as u8) }
     }
     fn query(&mut self) -> Option<u8> {
+        let fetched = PENDING.with(|p| {
+            if p.next < p.n {
+                p.next += 1;
+                return Some(p.q[p.next - 1]);
+            }
+            p.n = 0;
+            p.next = 0;
+            None
+        });
+        if fetched.is_some() {
+            return fetched;
+        }
         let q = npk_sys::ec_query();
-        if q < 0 { None } else { Some(q as u8) }
+        if q <= 0 { None } else { Some(q as u8) }
     }
     fn note(&mut self, s: &str) {
         if self.verbose { logln(s); }
@@ -221,6 +253,9 @@ pub extern "C" fn _start() {
             let fired = npk_sys::sci_service();
             if fired > 0 && (fired >> 16) & 0x100 != 0 {
                 logln("[aml] power button (PM1 PWRBTN_STS)");
+            }
+            if fired > 0 && fired & 2 != 0 {
+                fetch_ec_events();
             }
             work = (fired > 0 && fired & 2 != 0) || now() >= battery_due;
             continue;
@@ -312,5 +347,8 @@ fn decode(table: &[u8], verbose: bool) -> (i32, Option<aml_core::BatteryInfo>) {
         }
     }
     if verbose { lognum("[aml]  batteries seen: ", n); }
+    if n == 0 {
+        run_ec_events(&ns, &mut ec);
+    }
     (-1, None)
 }

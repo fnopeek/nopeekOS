@@ -118,6 +118,15 @@ pub fn ec_gpe(ns: &Namespace) -> Option<u32> {
     None
 }
 
+pub fn run_ec_events(ns: &Namespace, ec: &mut dyn Ec) -> u32 {
+    let mut it = Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() };
+    it.run_deferred();
+    let _ = it.register_regions(false);
+    it.run_ini_methods();
+    let _ = it.register_regions(true);
+    it.drain_ec_queries()
+}
+
 pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::BatteryInfo> {
     let mut it = Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() };
     // Order as in ACPICA `acpi_initialize_objects`: enable operation regions
