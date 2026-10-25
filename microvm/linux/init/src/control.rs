@@ -44,7 +44,7 @@ const PORT_NAME: &[u8] = b"npk.control";
 const PORTS_DIR: &[u8] = b"/sys/class/virtio-ports\0";
 /// The processes that get SIGTERM on quit (their `comm`): the browser the
 /// image carries.
-const APP_COMMS: &[&[u8]] = &[b"librewolf", b"firefox"];
+const APP_COMMS: &[&[u8]] = &[b"firefox"];
 
 /// Fork the control process; the parent returns at once.
 pub unsafe fn spawn(kmsg_fd: i64) {

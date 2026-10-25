@@ -25,13 +25,13 @@ set -euo pipefail
 source "$(dirname "$0")/alpine.env"
 
 # Output naming; the bundle is named after its main client.
-BUNDLE_NAME="${BUNDLE_NAME:-librewolf}"
+BUNDLE_NAME="${BUNDLE_NAME:-firefox}"
 BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 
 # Apks to add on top of minirootfs. Package names only; versions come
-# from the pinned Alpine branch and are recorded in packages.txt.
-#   librewolf - the browser (Firefox fork; pulls gtk/nss/fontconfig/
-#               freetype/... via apk deps)
+# from the pinned Alpine branch and are recorded in packages-<bundle>.txt.
+#   firefox   - the browser (pulls gtk/nss/fontconfig/freetype/... via
+#               apk deps)
 #   seatd     - libseat daemon (Alpine libseat has no builtin backend)
 #   libinput  - wlroots evdev input
 #   eudev     - udevd + udevadm + libudev. wlroots' libinput and
@@ -47,36 +47,24 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 # noto adds broad Unicode and a sans default.
 # libseat, wayland-libs-server, libdisplay-info: libraries npkwm links
 # (it carries wlroots itself); checked against its NEEDED list below.
-# alsa-lib: libasound for LibreWolf's cubeb ALSA backend (no PulseAudio /
+# alsa-lib: libasound for Firefox's cubeb ALSA backend (no PulseAudio /
 # PipeWire in the bundle). cubeb opens the ALSA "default" PCM, which is
 # the virtio-snd card (card 0) backed by the host audio path.
 # mesa-demos: es2gears_wayland and friends, GL test clients the session
 # runs instead of the browser with npkapp= on the guest command line.
-# vulkan-loader: libvulkan for anv (our Mesa) and Vulkan Video in ffmpeg.
-# vulkan-tools, ffmpeg: vulkaninfo and `ffmpeg -hwaccel vulkan`, run with
-# npkapp= to check the decoder without the browser.
-#
-# The firefox bundle (BUNDLE_NAME=firefox) carries Firefox instead, and
-# decodes video through VA-API: libva, Intel's media driver (replaced by
+# Video decodes through VA-API: libva, Intel's media driver (replaced by
 # our build over the native context, below), libva-utils for `vainfo`,
-# ffmpeg for Firefox's decoder and `ffmpeg -hwaccel vaapi`. No Vulkan.
-# gdb stays in both while the GPU paths are new (`npkgdb`).
+# ffmpeg for Firefox's decoder and `ffmpeg -hwaccel vaapi`.
+# gdb stays while the GPU paths are new (`npkgdb`).
 COMMON_APKS="seatd libseat libinput eudev mesa-gbm wayland-libs-server libdisplay-info font-dejavu font-noto alsa-lib mesa-demos ffmpeg gdb"
 case "$BUNDLE_NAME" in
     firefox) DEFAULT_APKS="firefox libva libva-utils intel-media-driver $COMMON_APKS" ;;
-    *)       DEFAULT_APKS="librewolf vulkan-loader vulkan-tools $COMMON_APKS" ;;
+    *)       echo "unknown bundle: $BUNDLE_NAME" >&2; exit 1 ;;
 esac
 APK_PACKAGES="${APK_PACKAGES:-$DEFAULT_APKS}"
-case "$BUNDLE_NAME" in
-    librewolf) PKG_LIST="$(dirname "$0")/packages.txt" ;;
-    *)         PKG_LIST="$(dirname "$0")/packages-${BUNDLE_NAME}.txt" ;;
-esac
-# The OTA asset name: the LibreWolf image keeps `microvm-userspace`
-# (section microvm:userspace-sqfs), others are `microvm-<name>`.
-case "$BUNDLE_NAME" in
-    librewolf) ASSET_NAME="microvm-userspace" ;;
-    *)         ASSET_NAME="microvm-${BUNDLE_NAME}" ;;
-esac
+PKG_LIST="$(dirname "$0")/packages-${BUNDLE_NAME}.txt"
+# The OTA asset name, section microvm:<name>-sqfs.
+ASSET_NAME="microvm-${BUNDLE_NAME}"
 
 # ── Paths ────────────────────────────────────────────────────────
 
@@ -233,7 +221,7 @@ if grep -q '^P:intel-media-driver$' "$APK_DB"; then
 fi
 
 # Firefox's autoconfig, which the session extends with `npkstats` and
-# `npksupport` (LibreWolf ships its own, librewolf.cfg).
+# `npksupport`.
 if [ -x "$STAGE/usr/lib/firefox/firefox" ]; then
     mkdir -p "$STAGE/usr/lib/firefox/defaults/pref"
     printf '%s\n' 'pref("general.config.filename", "firefox.cfg");' 'pref("general.config.obscure_value", 0);' \
@@ -275,7 +263,7 @@ cat > "$STAGE/etc/motd" <<'MOTD'
 
 MOTD
 
-# /etc/machine-id: LibreWolf's a11y stack spawns a DBus session bus,
+# /etc/machine-id: the browser's a11y stack spawns a DBus session bus,
 # which refuses to start without one ("Cannot spawn a message bus
 # without a machine-id") and costs a startup timeout. dbus also checks
 # /var/lib/dbus/machine-id. A fixed 32-hex value (not dbus-uuidgen):

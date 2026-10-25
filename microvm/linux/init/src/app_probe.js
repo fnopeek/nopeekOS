@@ -1,5 +1,5 @@
 
-// Startup probe appended by microvm-init: LibreWolf's own startup times,
+// Startup probe appended by microvm-init: Firefox's own startup times,
 // relative to its process creation, as one line on /dev/kmsg at first paint.
 try {
   let Cc = Components.classes, Ci = Components.interfaces;
@@ -9,7 +9,7 @@ try {
     let i = su.getStartupInfo();
     let p = i.process ? i.process.getTime() : 0;
     let at = k => (i[k] ? (i[k].getTime() - p) : -1);
-    let line = "<0>[lw-startup] main=" + at("main") + " window=" + at("createTopLevelWindow") +
+    let line = "<0>[app-startup] main=" + at("main") + " window=" + at("createTopLevelWindow") +
                " paint=" + at("firstPaint") + " (ms after process start)\n";
     let f = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
     f.initWithPath("/dev/kmsg");

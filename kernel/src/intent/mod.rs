@@ -2703,11 +2703,6 @@ pub fn launch_app(app: &'static crate::microvm::app::App) {
 fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
     const INITRAMFS_PATH: &str = "sys/microvm/initramfs.cpio.gz";
-    /// Optional userspace bundle (Alpine minirootfs + busybox + browser
-    /// stack), built by `microvm-userspace/build.sh` and distributed via OTA.
-    /// If present it replaces the minimal PID-1-only initramfs; it carries our
-    /// PID-1 at /init too, which then execs /bin/sh from the bundle's busybox.
-    const USERSPACE_PATH: &str = "sys/microvm/userspace.cpio.gz";
     // Linux boot protocol cmdline.
     //
     // `earlycon=uart8250,io,0x3f8,115200n8`: early console straight to COM1,
@@ -2804,7 +2799,7 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
     if let Some(p) = crate::microvm::devices::gpu_backend::native_protocol() {
         let _ = write!(s, " npkgpu={}", p);
     }
-    // The guest samples the app process too (`[lw-proc]` lines).
+    // The guest samples the app process too (`[app-proc]` lines).
     if stats {
         let _ = write!(s, " npkstats");
     }
@@ -2862,53 +2857,24 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
         }
     };
 
-    // Userspace-bundle delivery, newest path first:
-    //
-    //  1. squashfs bundle present → boot the tiny PID-1-only initramfs.
-    //     PID-1 mounts the .sqfs from /dev/vdb (the slot-5 read-only
-    //     virtio-blk device reads `sys/microvm/userspace.sqfs` directly,
-    //     never unpacked into RAM) and chroots into it. The bundle stays
-    //     compressed on the virtual disk.
-    //
-    //  2. legacy cpio bundle present (no sqfs) → use it as the initramfs
-    //     (embeds our PID-1 at /init). The whole tree is unpacked into
-    //     tmpfs. Kept until the sqfs bundle is the only shipped form.
-    //
-    //  3. neither → minimal PID-1-only substrate.
+    // The PID-1-only initramfs always boots. With the app's squashfs
+    // present, PID-1 mounts it from /dev/vdb (the slot-5 read-only
+    // virtio-blk device reads it straight from npkFS, never unpacked into
+    // RAM) and chroots into it; without it the guest stays a bare substrate.
     let sqfs_path = crate::microvm::app::current().sqfs;
-    let have_sqfs = crate::npkfs::exists(sqfs_path);
-    let initramfs = if have_sqfs {
+    if crate::npkfs::exists(sqfs_path) {
         kprintln!("[microvm] sqfs bundle at {} — booting tiny PID-1 (mounts /dev/vdb)", sqfs_path);
-        match crate::npkfs::fetch(INITRAMFS_PATH) {
-            Ok((b, _hash)) => {
-                kprintln!("[microvm] loaded initramfs ({} bytes)", b.len());
-                Some(b)
-            }
-            Err(e) => {
-                kprintln!("[microvm] no initramfs at {}: {:?} — booting without",
-                          INITRAMFS_PATH, e);
-                None
-            }
+    }
+    let initramfs = match crate::npkfs::fetch(INITRAMFS_PATH) {
+        Ok((b, _hash)) => {
+            kprintln!("[microvm] loaded initramfs ({} bytes)", b.len());
+            Some(b)
         }
-    } else {
-        match crate::npkfs::fetch(USERSPACE_PATH) {
-            Ok((b, _hash)) => {
-                kprintln!("[microvm] loaded legacy cpio userspace bundle ({} bytes) from {}",
-                          b.len(), USERSPACE_PATH);
-                Some(b)
-            }
-            Err(_) => match crate::npkfs::fetch(INITRAMFS_PATH) {
-                Ok((b, _hash)) => {
-                    kprintln!("[microvm] loaded initramfs ({} bytes)", b.len());
-                    Some(b)
-                }
-                Err(e) => {
-                    kprintln!("[microvm] no initramfs at {}: {:?} — booting without",
-                              INITRAMFS_PATH, e);
-                    kprintln!("[microvm] reinstall from USB to seed bundled assets");
-                    None
-                }
-            }
+        Err(e) => {
+            kprintln!("[microvm] no initramfs at {}: {:?} — booting without",
+                      INITRAMFS_PATH, e);
+            kprintln!("[microvm] reinstall from USB to seed bundled assets");
+            None
         }
     };
 

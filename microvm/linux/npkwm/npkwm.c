@@ -22,7 +22,7 @@
  * changes. npkwm asks the app for that size first, shows nothing new on
  * that output meanwhile, and switches the output once the app's picture
  * fills it (or after RESIZE_WAIT_MS), with that picture in the same commit. An app may send its buffer at the new size
- * before it has drawn into the new part (LibreWolf does: its old layout,
+ * before it has drawn into the new part (Firefox does: its old layout,
  * the rest unpainted), so "fills" means the bottom row holds pixels.
  *
  * The host's pointer is a tablet: x carries the output in its high part

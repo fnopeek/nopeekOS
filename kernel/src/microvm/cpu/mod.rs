@@ -1260,7 +1260,7 @@ pub fn vm_close_for_window(window_id: u32) {
     crate::intent::wake_shell();
 }
 
-/// The guest shut itself down (e.g. LibreWolf's own window-X → the app exits →
+/// The guest shut itself down (e.g. the browser's own window-X → the app exits →
 /// PID-1 `halt` → `reboot: System halted`). The serial scanner calls this so
 /// the run loop takes the same clean exit as a user Mod+Q: break → `close()`
 /// (saves the home image) → Core-0 reaper closes the window. Without it a

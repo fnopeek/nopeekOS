@@ -74,7 +74,7 @@ const ASSETS: &[AssetSpec] = &[
     // ZipImportError at the first import. It also saves decompressing on
     // every import.
     //
-    // Not bundled into the installer: like microvm:userspace, Python is
+    // Not bundled into the installer: like the guest images, Python is
     // something you fetch, not something every USB stick carries.
     AssetSpec { section: "python:stdlib",       npkfs_path: "sys/python/lib/python313.zip" },
 ];

@@ -1,6 +1,6 @@
 //! virtio-sound-pci device emulation (virtio 1.2 §5.14).
 //!
-//! Bridges guest audio (LibreWolf → ALSA/PipeWire → virtio_snd) to the
+//! Bridges guest audio (Firefox → ALSA → virtio_snd) to the
 //! kernel audio mailbox (`crate::audio`) → audio_hda.wasm → HDA → speaker.
 //! The guest decodes everything (YouTube/Opus/AAC); we just capture its PCM.
 //!

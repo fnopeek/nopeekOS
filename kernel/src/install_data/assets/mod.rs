@@ -197,7 +197,7 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
     // installer: they arrive via OTA from GitHub Releases on the first
     // `update` post-install. A future app that wants to be ready on the
     // first login without a network round-trip would plug in here behind
-    // its own feature flag (as the LibreWolf bundle once did).
+    // its own feature flag.
 ];
 
 /// Stub invoked by install.rs to avoid conditional compilation at the

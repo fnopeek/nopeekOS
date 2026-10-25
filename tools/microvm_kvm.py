@@ -47,7 +47,7 @@ GUEST_MARKS = [
     ("[9p] npkhome mounted", "session: mounts done"),
     ("[wl] npkwm start", "session: compositor start"),
     ("[wl] npkwm up", "session: compositor up"),
-    ("[wl] librewolf exec", "session: app exec"),
+    ("[wl] app exec", "session: app exec"),
     ("browser exited", "session: browser exited"),
 ]
 
@@ -194,9 +194,8 @@ def main():
     ap.add_argument("--bzimage", default=os.path.join(ROOT, "release/assets/linux-virt.bzImage"))
     ap.add_argument("--initramfs", default=os.path.join(ROOT, "release/assets/microvm-initramfs.cpio.gz"))
     ap.add_argument("--sqfs", default=first_existing(
-        os.path.join(ROOT, "release/assets/large/microvm-userspace.sqfs"),
-        os.path.join(ROOT, "kernel/src/install_data/assets/microvm-userspace.sqfs"),
-        os.path.join(ROOT, "release/apps/librewolf/librewolf-3.24.2.sqfs")))
+        os.path.join(ROOT, "release/assets/large/microvm-firefox.sqfs"),
+        os.path.join(ROOT, "release/apps/firefox/current.sqfs")))
     a = ap.parse_args()
 
     if not os.access("/dev/kvm", os.R_OK | os.W_OK):

@@ -1244,53 +1244,6 @@ sha384=${BZIMG_SHA}
             fi
         fi
 
-        # MicroVM userspace bundle, produced by
-        # microvm-userspace/build.sh. Optional. Not bundled into the
-        # kernel binary (BUNDLED_ASSETS); a pure OTA asset.
-        #
-        # Small enough for raw.githubusercontent: a regular release asset
-        # under release/assets/. Past the raw-content limits (~50 MB
-        # warning, 100 MB hard cap) move it to release/assets/large/ and
-        # ship via `./build.sh release-large <tag>`, which adds a `url=`
-        # line pointing at GitHub Releases; the kernel follows the 302
-        # redirect chain.
-        USERSPACE_FILE="$RELEASE_DIR/assets/microvm-userspace.cpio.gz"
-        if [ -f "$USERSPACE_FILE" ]; then
-            US_SIZE=$(stat -c%s "$USERSPACE_FILE")
-            US_SHA=$(openssl dgst -sha384 -hex "$USERSPACE_FILE" 2>/dev/null | awk '{print $NF}')
-
-            ASSET_MANIFEST="${ASSET_MANIFEST}[microvm:userspace]
-size=${US_SIZE}
-sha384=${US_SHA}
-
-"
-            if [ -f "$KEY_FILE" ]; then
-                openssl dgst -sha384 -sign "$KEY_FILE" \
-                    -out "${USERSPACE_FILE}.sig" "$USERSPACE_FILE"
-                ok "Signed userspace bundle: microvm-userspace.cpio.gz ($US_SIZE bytes)"
-            fi
-        fi
-
-        # Squashfs form of the userspace bundle: read-only, PID-1
-        # mounts it from /dev/vdb. Same provenance as the cpio above
-        # but RAM-efficient. Optional; ship whichever form exists.
-        USERSPACE_SQFS="$RELEASE_DIR/assets/microvm-userspace.sqfs"
-        if [ -f "$USERSPACE_SQFS" ]; then
-            USQ_SIZE=$(stat -c%s "$USERSPACE_SQFS")
-            USQ_SHA=$(openssl dgst -sha384 -hex "$USERSPACE_SQFS" 2>/dev/null | awk '{print $NF}')
-
-            ASSET_MANIFEST="${ASSET_MANIFEST}[microvm:userspace-sqfs]
-size=${USQ_SIZE}
-sha384=${USQ_SHA}
-
-"
-            if [ -f "$KEY_FILE" ]; then
-                openssl dgst -sha384 -sign "$KEY_FILE" \
-                    -out "${USERSPACE_SQFS}.sig" "$USERSPACE_SQFS"
-                ok "Signed userspace bundle: microvm-userspace.sqfs ($USQ_SIZE bytes)"
-            fi
-        fi
-
         # Pick up any pre-existing url= overrides from a previous
         # `release-large` invocation. The large-asset manifest is
         # written to release/assets/manifest.large by `release-large`
@@ -1464,10 +1417,8 @@ ${MOD_FW:+$MOD_FW
                 -out "${asset}.sig" "$asset"
 
             # Section name follows the AssetSpec table convention:
-            # microvm-userspace.cpio.gz -> [microvm:userspace]
+            # microvm-firefox.sqfs -> [microvm:firefox-sqfs]
             case "$NAME" in
-                microvm-userspace.cpio.gz) SECTION="microvm:userspace" ;;
-                microvm-userspace.sqfs)    SECTION="microvm:userspace-sqfs" ;;
                 microvm-firefox.sqfs)      SECTION="microvm:firefox-sqfs" ;;
                 *)
                     err "unknown large asset filename: $NAME"

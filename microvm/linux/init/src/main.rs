@@ -86,7 +86,7 @@ unsafe extern "C" fn rust_main() -> ! {
 
     // If the read-only userspace bundle is present on /dev/vdb
     // (second virtio-blk, slot 5), switch into it. The big bundle
-    // (Mesa/wlroots/LibreWolf) lives compressed on squashfs, decompressed
+    // (Mesa/wlroots/Firefox) lives compressed on squashfs, decompressed
     // on read — RAM-efficient vs. an unpacked cpio initramfs. On
     // absence/failure we stay in the minimal initramfs (the device
     // comes up empty until the OTA bundle lands).
@@ -119,7 +119,7 @@ unsafe extern "C" fn rust_main() -> ! {
     }
 
     // Hand the framebuffer to the Wayland stack: npkwm (our wlroots
-    // compositor) running LibreWolf, rendered through the pixman
+    // compositor) running Firefox, rendered through the pixman
     // software renderer (GLES2 when the host offers a GPU) + wlroots DRM
     // backend → /dev/dri/card0 →
     // virtio-gpu → our Shade Surface tile. On success PID-1 becomes
@@ -137,11 +137,11 @@ unsafe extern "C" fn rust_main() -> ! {
 
 /// Hand the framebuffer to a real Wayland stack. If the bundle ships
 /// wlroots, exec a shell that sets up the runtime env, starts npkwm and
-/// runs librewolf against it:
+/// runs firefox against it:
 ///   - npkwm: our wlroots compositor (`microvm/linux/npkwm`), embedded
 ///     here and written to /tmp; it speaks to the host over the
 ///     "npk.windows" port.
-///   - librewolf: the client (Firefox fork). Needs MOZ_ENABLE_WAYLAND=1
+///   - firefox: the client. Needs MOZ_ENABLE_WAYLAND=1
 ///     or it tries X11 (there is no X).
 /// Renderer = pixman (software, no GL/Mesa driver). Backend = wlroots
 /// DRM on /dev/dri/card0 (virtio-gpu KMS) → our Surface tile. Seat =
@@ -162,9 +162,9 @@ fn launch_wayland(kmsg_fd: i64) {
         return;
     }
     say(kmsg_fd, b"[microvm-init] starting Wayland session\n");
-    write_file(b"/tmp/lw-probe.js\0", LW_PROBE, 0o644);
-    write_file(b"/tmp/lw-support.js\0", LW_SUPPORT, 0o644);
-    write_file(b"/tmp/lw-sample.sh\0", LW_SAMPLE, 0o644);
+    write_file(b"/tmp/app-probe.js\0", APP_PROBE, 0o644);
+    write_file(b"/tmp/app-support.js\0", APP_SUPPORT, 0o644);
+    write_file(b"/tmp/app-sample.sh\0", APP_SAMPLE, 0o644);
     write_file(b"/tmp/load-sample.sh\0", LOAD_SAMPLE, 0o644);
     write_file(b"/tmp/rdd-gdb.sh\0", RDD_GDB, 0o644);
     write_file(b"/tmp/app-log.awk\0", APP_LOG_AWK, 0o644);
@@ -193,7 +193,7 @@ fn launch_wayland(kmsg_fd: i64) {
     // stall the parent process for over a second per round.
     // `npkscudo=off` restores scudo's default, `npkscudo=<options>` sets others.
     //
-    // Standard LibreWolf config — only the prefs this environment
+    // Standard Firefox config — only the prefs this environment
     // demands (no GPU / GL → software webrender, which reports only what
     // changed when partial present is on — the host composes guest frames
     // where they lie and recomposes only that; userChrome.css must
@@ -225,13 +225,12 @@ fn launch_wayland(kmsg_fd: i64) {
     // and to npk-gpuprobe, each `npkwmenv=NAME=value` to npkwm; `npkapp=NAME`
     // runs /usr/bin/NAME instead of the browser (a test client such as
     // es2gears_wayland).
-    // The app is the browser the image carries: Firefox when it has
-    // /usr/lib/firefox, else LibreWolf; its directory holds the preloaded
-    // libraries, the autoconfig (`<app>.cfg`) and the GPU probes. With a
-    // GPU, Firefox decodes video through VA-API over the native context, with
-    // the media driver of the card the host names (`npkgpu=amdgpu`: Mesa's
-    // radeonsi, else Intel's iHD; the render node is virtio_gpu, which names
-    // no VA driver); LibreWolf through Vulkan Video.
+    // The app is Firefox; /usr/lib/firefox holds the preloaded libraries,
+    // the autoconfig (`firefox.cfg`) and the GPU probes. With a GPU it
+    // decodes video through VA-API over the native context, with the media
+    // driver of the card the host names (`npkgpu=amdgpu`: Mesa's radeonsi,
+    // else Intel's iHD; the render node is virtio_gpu, which names no VA
+    // driver).
     // `npkvainfo` writes what vainfo reports for that driver as `[va]` lines.
     // `npklogs` on the command line streams the app's and npkwm's output
     // to the console (`set microvm_cmdline npklogs`); `npklogs=REGEX` only
@@ -294,7 +293,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ -n \"$WMENV\" ] && echo \"<0>[wl] npkwm env $WMENV\" > /dev/kmsg; \
                  su -s /bin/sh wl -c \"$WMENV XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec $WM\" > /tmp/npkwm.log 2>&1 & \
                  WLPID=$!; \
-                 APP=librewolf; [ -x /usr/lib/firefox/firefox ] && APP=firefox; ADIR=/usr/lib/$APP; \
+                 APP=firefox; ADIR=/usr/lib/$APP; \
                  nice -n 19 sh -c \"for r in 0 64 128; do dd if=$ADIR/libxul.so of=/dev/null bs=1M skip=\\$r count=64 2>/dev/null & done; \
                    cat $ADIR/omni.ja $ADIR/browser/omni.ja $ADIR/libgkcodecs.so /usr/lib/libgtk-3.so.0 > /dev/null 2>&1; \
                    wait\" & \
@@ -355,9 +354,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    case $k in gfx.webrender.software|gfx.webrender.max-partial-present-rects|gfx.canvas.accelerated|widget.dmabuf.force-enabled|layers.gpu-process.enabled|media.av1.enabled) [ $GPU = 1 ] && { sed -i \"/\\\"$k\\\"/d\" /tmp/moz/prefs.js 2>/dev/null; chown 1000:1000 /tmp/moz/prefs.js 2>/dev/null; continue; };; esac; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
-                 if [ $APP = firefox ]; then VPREFS='media.ffmpeg.vaapi.enabled|true media.hardware-video-decoding.force-enabled|true'; \
-                 else VPREFS='media.hardware-video-decoding-vulkan.enabled|true media.hardware-video-decoding-vulkan.force-enabled|true'; fi; \
-                 [ $GPU = 1 ] && for p in $VPREFS 'webgl.disabled|false'; \
+                 [ $GPU = 1 ] && for p in 'media.ffmpeg.vaapi.enabled|true' 'media.hardware-video-decoding.force-enabled|true' 'webgl.disabled|false'; \
                  do echo \"user_pref(\\\"${p%|*}\\\", ${p#*|});\" >> /tmp/moz/user.js; done; \
                  echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"browser.download.dir\", \"/tmp/npkhome/downloads\");' >> /tmp/moz/user.js; \
@@ -370,9 +367,9 @@ fn launch_wayland(kmsg_fd: i64) {
                  chown 1000:1000 /dev/snd/* 2>/dev/null; \
                  if grep -qE 'npkstats|npksupport' /proc/cmdline && [ -f $ADIR/$APP.cfg ]; then \
                    chgrp app /dev/kmsg; chmod 0620 /dev/kmsg; \
-                   grep -q npkstats /proc/cmdline || : > /tmp/lw-probe.js; \
-                   grep -q npksupport /proc/cmdline || : > /tmp/lw-support.js; \
-                   cat $ADIR/$APP.cfg /tmp/lw-probe.js /tmp/lw-support.js > /tmp/app.cfg \
+                   grep -q npkstats /proc/cmdline || : > /tmp/app-probe.js; \
+                   grep -q npksupport /proc/cmdline || : > /tmp/app-support.js; \
+                   cat $ADIR/$APP.cfg /tmp/app-probe.js /tmp/app-support.js > /tmp/app.cfg \
                      && mount --bind /tmp/app.cfg $ADIR/$APP.cfg 2>/dev/null; \
                    { cat $ADIR/defaults/pref/channel-prefs.js; echo 'pref(\"general.config.sandbox_enabled\", false);'; } > /tmp/channel-prefs.js \
                      && mount --bind /tmp/channel-prefs.js $ADIR/defaults/pref/channel-prefs.js 2>/dev/null; \
@@ -407,32 +404,31 @@ fn launch_wayland(kmsg_fd: i64) {
                    ( tee -a /tmp/app.log < /tmp/app.fifo | awk -v p=\"$LOGPAT\" -v all=$ALL -v frames=$FR -f /tmp/app-log.awk ) & \
                  fi; \
                  grep -q npklogs /proc/cmdline && tail -F /tmp/npkwm.log 2>/dev/null | awk -v p=\"$LOGPAT\" -v all=$ALL -v frames=0 -f /tmp/app-log.awk & \
-                 grep -q npkstats /proc/cmdline || : > /tmp/lw-sample.sh; \
+                 grep -q npkstats /proc/cmdline || : > /tmp/app-sample.sh; \
                  PROF=$(sed -n 's/.*npkprofile=\\([0-9.]*:[0-9]*\\).*/\\1/p' /proc/cmdline); \
-                 [ -n \"$PROF\" ] && echo 'export MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_STARTUP_INTERVAL=1 MOZ_PROFILER_STARTUP_ENTRIES=16777216 MOZ_PROFILER_STARTUP_FILTERS=GeckoMain,Socket,Worker,Timer,StreamTrans,IPC,RemoteLzy,File,BgIO,BackgroundThreadPool,Renderer MOZ_PROFILER_STARTUP_FEATURES=js,stackwalk,cpu,fileio MOZ_PROFILER_SHUTDOWN=/tmp/bcache/lw-prof.json' > /tmp/app.sh || : > /tmp/app.sh; \
+                 [ -n \"$PROF\" ] && echo 'export MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_STARTUP_INTERVAL=1 MOZ_PROFILER_STARTUP_ENTRIES=16777216 MOZ_PROFILER_STARTUP_FILTERS=GeckoMain,Socket,Worker,Timer,StreamTrans,IPC,RemoteLzy,File,BgIO,BackgroundThreadPool,Renderer MOZ_PROFILER_STARTUP_FEATURES=js,stackwalk,cpu,fileio MOZ_PROFILER_SHUTDOWN=/tmp/bcache/app-prof.json' > /tmp/app.sh || : > /tmp/app.sh; \
                  SCU=$(sed -n 's/.*npkscudo=\\([^ ]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$SCU\" ] || SCU=release_to_os_interval_ms=-1; \
                  [ \"$SCU\" = off ] || { echo \"export SCUDO_OPTIONS=$SCU\" >> /tmp/app.sh; \
                    echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
-                 if [ $APP = firefox ]; then [ $GPU = 1 ] && echo \"export LIBVA_DRIVER_NAME=$VA\" >> /tmp/app.sh; \
-                 else [ $GPU = 1 ] && echo 'export ANV_DEBUG=video-decode' >> /tmp/app.sh; fi; \
+                 [ $GPU = 1 ] && echo \"export LIBVA_DRIVER_NAME=$VA\" >> /tmp/app.sh; \
                  [ $FR = 1 ] && echo 'export MOZ_LOG=FFmpegVideo:4' >> /tmp/app.sh; \
                  for e in $(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p'); do \
                    echo \"export $e\" >> /tmp/app.sh; echo \"<0>[wl] app env $e\" > /dev/kmsg; done; \
                  NPKAPP=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkapp=//p' | head -1); \
                  if [ -n \"$NPKAPP\" ]; then echo \"exec /usr/bin/$NPKAPP\" >> /tmp/app.sh; \
                    echo \"<0>[wl] app replaced by $NPKAPP\" > /dev/kmsg; \
-                 else echo \"[ -s /tmp/lw-sample.sh ] && sh /tmp/lw-sample.sh \\$\\$ & exec $APP --no-remote --profile /tmp/moz\" >> /tmp/app.sh; fi; \
+                 else echo \"[ -s /tmp/app-sample.sh ] && sh /tmp/app-sample.sh \\$\\$ & exec $APP --no-remote --profile /tmp/moz\" >> /tmp/app.sh; fi; \
                  echo \"<0>[wl] app exec $APP\" > /dev/kmsg; \
                  su -s /bin/sh app -c 'WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 exec sh /tmp/app.sh' \
                    > $APPOUT 2>&1; \
                  rc=$?; echo \"<0>[wl] browser exited rc=$rc\" > /dev/kmsg; \
                  if [ -n \"$PROF\" ]; then \
-                   if [ -s /tmp/bcache/lw-prof.json ]; then \
-                     gzip -c /tmp/bcache/lw-prof.json | nc -w 10 ${PROF%:*} ${PROF#*:} \
-                       && echo \"<0>[lw-prof] sent $(wc -c < /tmp/bcache/lw-prof.json) bytes to $PROF\" > /dev/kmsg \
-                       || echo \"<0>[lw-prof] send to $PROF FAILED\" > /dev/kmsg; \
-                   else echo '<0>[lw-prof] no profile written' > /dev/kmsg; fi; \
+                   if [ -s /tmp/bcache/app-prof.json ]; then \
+                     gzip -c /tmp/bcache/app-prof.json | nc -w 10 ${PROF%:*} ${PROF#*:} \
+                       && echo \"<0>[app-prof] sent $(wc -c < /tmp/bcache/app-prof.json) bytes to $PROF\" > /dev/kmsg \
+                       || echo \"<0>[app-prof] send to $PROF FAILED\" > /dev/kmsg; \
+                   else echo '<0>[app-prof] no profile written' > /dev/kmsg; fi; \
                  fi; \
                  kill $WLPID 2>/dev/null; \
                  [ $rc = 0 ] || tail -n 20 /tmp/app.log /tmp/npkwm.log | while read -r l; do echo \"<0>[wl] $l\" > /dev/kmsg; done; \
@@ -706,19 +702,19 @@ fn open_console_kmsg() -> (i64, i64) {
     (kmsg_fd, console_fd)
 }
 
-/// Appended to LibreWolf's autoconfig by the session script, with
+/// Appended to Firefox's autoconfig by the session script, with
 /// `npkstats` only: the browser's own startup times go to /dev/kmsg, next to
 /// the host's timeline. It needs the autoconfig sandbox off, which the
 /// session script turns off for that run alone.
-const LW_PROBE: &[u8] = include_bytes!("lw_probe.js");
+const APP_PROBE: &[u8] = include_bytes!("app_probe.js");
 
-/// Appended to LibreWolf's autoconfig with `npksupport`: the graphics and
+/// Appended to Firefox's autoconfig with `npksupport`: the graphics and
 /// media sections of about:support as `[about]` lines on /dev/kmsg.
-const LW_SUPPORT: &[u8] = include_bytes!("lw_support.js");
+const APP_SUPPORT: &[u8] = include_bytes!("app_support.js");
 
 /// With `npkstats` on the command line, samples the app process's faults,
 /// CPU time and waits for its first second.
-const LW_SAMPLE: &[u8] = include_bytes!("lw_sample.sh");
+const APP_SAMPLE: &[u8] = include_bytes!("app_sample.sh");
 
 /// System load per second (`npkload` on the cmdline).
 const LOAD_SAMPLE: &[u8] = include_bytes!("load_sample.sh");
@@ -773,7 +769,7 @@ fn halt() -> ! {
 
 // ── Real-time audio-thread promoter ────────────────────────────────
 //
-// LibreWolf's audio thread needs SCHED_RR to avoid underruns under our
+// The browser's audio thread needs SCHED_RR to avoid underruns under our
 // software-everything CPU load, but inside the content sandbox it can't
 // promote itself (seccomp blocks sched_setscheduler) and there is no
 // rtkit/D-Bus broker. So PID-1 forks a tiny watcher that, from outside

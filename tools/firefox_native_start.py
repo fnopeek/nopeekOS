@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Start the microvm guest's LibreWolf natively and time its first paint.
+"""Start the microvm guest's Firefox natively and time its first paint.
 
 The baseline for the microvm app start: the same binary and libraries (the
 userspace sqfs, mounted or unpacked), the same prefs as the guest session,
-run under bwrap on the host's Wayland. Times come from LibreWolf itself
+run under bwrap on the host's Wayland. Times come from Firefox itself
 over Marionette (`Services.startup.getStartupInfo()`), measured from process
 creation.
 
-  sudo mount -o loop,ro release/assets/large/microvm-userspace.sqfs /mnt/lw
+  sudo mount -o loop,ro release/assets/large/microvm-firefox.sqfs /mnt/ff
   sudo -v                                     # --cold drops caches via sudo -n
-  python3 tools/librewolf_native_start.py --root /mnt/lw --cold --runs 3
+  python3 tools/firefox_native_start.py --root /mnt/ff --cold --runs 3
 
 The first run creates the profile and is not counted. With --cold the page
 cache is dropped before each counted run, so the sqfs is read and
@@ -119,7 +119,7 @@ def bwrap_cmd(root, profile):
         "--clearenv",
         "--setenv", "PATH", "/usr/bin:/bin:/usr/sbin:/sbin",
         "--ro-bind", root, "/",
-        # LibreWolf resolves its own host name at start. The sqfs's
+        # Firefox resolves its own host name at start. The sqfs's
         # /etc/hosts only knows localhost and its resolver is the guest's
         # NAT, unreachable here: two 5 s DNS timeouts otherwise.
         "--unshare-uts", "--hostname", "localhost",
@@ -142,7 +142,7 @@ def bwrap_cmd(root, profile):
         "--setenv", "MOZ_DISABLE_RDD_SANDBOX", "1",
         "--setenv", "MOZ_DISABLE_GMP_SANDBOX", "1",
         "--die-with-parent",
-        "/usr/bin/librewolf", "--no-remote", "--marionette",
+        "/usr/bin/firefox", "--no-remote", "--marionette",
         "--remote-allow-system-access", "--profile", "/tmp/moz", "about:blank",
     ]
 
@@ -197,9 +197,9 @@ def main():
     ap.add_argument("--timeout", type=float, default=60.0)
     a = ap.parse_args()
 
-    if not os.path.exists(os.path.join(a.root, "usr/bin/librewolf")):
-        sys.exit(f"no usr/bin/librewolf under {a.root}")
-    profile = tempfile.mkdtemp(prefix="lw-native-")
+    if not os.path.exists(os.path.join(a.root, "usr/bin/firefox")):
+        sys.exit(f"no usr/bin/firefox under {a.root}")
+    profile = tempfile.mkdtemp(prefix="ff-native-")
     write_profile(profile)
     try:
         run_once(a.root, profile, a.timeout)  # creates the profile

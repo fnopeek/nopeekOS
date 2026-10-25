@@ -1420,7 +1420,7 @@ struct SerialState {
     panic_msg: [u8; 192],
     panic_msg_n: usize,
     /// Set on the first `reboot: System halted` / `Power down` line — the
-    /// guest shut itself down (LibreWolf X → app exit → PID-1 halt). Drives
+    /// guest shut itself down (browser X → app exit → PID-1 halt). Drives
     /// the auto-close-and-save so the user doesn't need a second Mod+Q.
     halt_observed: bool,
     /// RX FIFO. Pre-injected by the host before
