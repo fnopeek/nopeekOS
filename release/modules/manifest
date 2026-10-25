@@ -1,9 +1,9 @@
-issued=1792932299
+issued=1792934488
 
 [aml]
-version=0.5.3
-size=117424
-sha384=b3ebf84f05f2537ea985d5fc71ea6edf5ada79b6e20d3e80e79968d5ca9e9a7afb67b39d4d512561eb86b9000b55ebc5
+version=0.5.4
+size=118867
+sha384=c67db3a1cff460ed3c2048ceb09e1b125993d977df1947f96c9276c1edf5c1a902e81d3cdda94acc2faffef53987472e
 
 [audio_hda]
 version=0.7.1
