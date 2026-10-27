@@ -100,6 +100,12 @@ fn wording(kind: &str) -> (&'static str, &'static str, &'static [&'static str]) 
             "The request succeeded but the response carried no content.",
             &[],
         ),
+        "http.too_large" => (
+            "This page is too large",
+            "The response is larger than the limit this page may hold, so it \
+             was stopped rather than shown cut off.",
+            &[],
+        ),
         "http.redirect" => (
             "This address redirected somewhere it shouldn't",
             "The site sent a redirect that could not be followed — missing, \

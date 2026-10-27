@@ -70,7 +70,17 @@ pub(crate) fn read_bytes(data: &[u8], ptr: i32, len: i32) -> Option<alloc::vec::
     if len <= 0 { return None; }
     let n = glen(len)?;
     if n > MAX_GUEST_BYTES { return None; }
-    guest(data, ptr, n).map(|b| b.to_vec())
+    guest(data, ptr, n).and_then(copy_out)
+}
+
+/// A kernel copy of guest bytes, or `None` when the heap cannot grow that
+/// far: the size is the module's choice, so running out is the module's
+/// refusal, not a kernel halt.
+pub(crate) fn copy_out(bytes: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    let mut v = alloc::vec::Vec::new();
+    v.try_reserve_exact(bytes.len()).ok()?;
+    v.extend_from_slice(bytes);
+    Some(v)
 }
 
 /// Writes `bytes` to guest memory at `ptr`; returns the length, or -1 if
@@ -655,7 +665,10 @@ pub(crate) fn npk_popup(mem: &mut [u8], ctx: &mut HostState, popup: i32, anchor:
         .filter(|&n| n <= MAX_SCENE_BYTES)
         .and_then(|n| guest(mem, ptr, n))
     {
-        Some(b) if !b.is_empty() => b.to_vec(),
+        Some(b) if !b.is_empty() => match copy_out(b) {
+            Some(v) => v,
+            None => return -1,
+        },
         _ => return -1,
     };
     let Some((w, h)) = crate::shade::widgets::commit_size(&payload) else { return -1 };
@@ -2400,12 +2413,23 @@ pub(crate) fn npk_fetch(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
         return -1;
     }
 
-    let (content, _) = match crate::npkfs::fetch(&name) {
-        Ok(v) => v,
-        Err(_) => return -1,
-    };
-
-    write_whole(mem, buf_ptr, buf_max, &content)
+    // Size first, then straight into the guest: a file the buffer cannot
+    // take is never read, and one it can take is never copied whole onto
+    // the kernel heap.
+    let Some(max) = glen(buf_max) else { return -1 };
+    let budget = file_budget(ctx, usize::MAX);
+    let Ok(mut reader) = crate::npkfs::open_range(&name, budget) else { return -1 };
+    let len = usize::try_from(reader.size()).unwrap_or(usize::MAX);
+    if len > max { return too_small(len); }
+    let Some(dst) = guest_mut(mem, buf_ptr, len) else { return -1 };
+    let mut at = 0;
+    while at < len {
+        match reader.read_at(at as u64, &mut dst[at..], budget) {
+            Ok(n) if n > 0 => at += n,
+            _ => return -1,
+        }
+    }
+    len as i32
 }
 
 // ── Keyvault ────────────────────────────────────
@@ -2981,7 +3005,10 @@ pub(crate) fn npk_scene_commit(mem: &mut [u8], ctx: &mut HostState, ptr: i32, le
         .filter(|&n| n <= MAX_SCENE_BYTES)
         .and_then(|n| guest(mem, ptr, n))
     {
-        Some(b) if !b.is_empty() => b.to_vec(),
+        Some(b) if !b.is_empty() => match copy_out(b) {
+            Some(v) => v,
+            None => return -1,
+        },
         _ => return -1,
     };
 
@@ -3030,7 +3057,7 @@ pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: 
     // The canvas caps, before anything is copied onto the kernel heap.
     use crate::shade::widgets::canvas::{MAX_BYTES, MAX_DIM};
     if width as u32 > MAX_DIM || height as u32 > MAX_DIM || pixel_bytes > MAX_BYTES { return -1; }
-    let Some(px) = guest(mem, ptr, pixel_bytes).map(|b| b.to_vec()) else { return -1 };
+    let Some(px) = guest(mem, ptr, pixel_bytes).and_then(copy_out) else { return -1 };
     if !crate::shade::widgets::canvas::commit(
         wid, canvas_id as u32, width as u32, height as u32, px) {
         return -1;
@@ -3078,7 +3105,7 @@ pub(crate) fn npk_canvas_commit_yuv(
         || need_y.saturating_add(need_c.saturating_mul(2)) > MAX_BYTES { return -1; }
 
     let data = &*mem;
-    let take = |ptr: i32, n: usize| guest(data, ptr, n).map(|b| b.to_vec());
+    let take = |ptr: i32, n: usize| guest(data, ptr, n).and_then(copy_out);
     let (Some(y), Some(u), Some(v)) =
         (take(y_ptr, need_y), take(u_ptr, need_c), take(v_ptr, need_c))
         else { return -1 };
@@ -3846,14 +3873,8 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
     let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let mut info = crate::intent::http::FetchInfo::default();
     let res = crate::intent::http::https_get_streaming_ex(
-        &host, &path, cap,
-        &mut |chunk: &[u8]| -> Result<(), &'static str> {
-            if out.len() < cap {
-                let take = chunk.len().min(cap - out.len());
-                out.extend_from_slice(&chunk[..take]);
-            }
-            Ok(())
-        },
+        &host, &path, crate::intent::http::limit_for(cap),
+        &mut |chunk: &[u8]| crate::intent::http::collect_within(&mut out, cap, chunk),
         Some(&mut info),
         &crate::intent::http::HttpRequest {
             // The document itself compresses well.
@@ -3881,11 +3902,9 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
         Err(e) => Some(alloc::format!("{}\t{}", crate::intent::http::error_kind(e), e)),
     };
     if res.is_err() { return -1; }
-
-    let write_len = out.len().min(cap);
     // Bounds-checked write: buf_ptr is guest-controlled, and a
     // wrapping `start + len` would panic the kernel on the slice index.
-    write_bytes(mem, buf_ptr, &out[..write_len])
+    write_bytes(mem, buf_ptr, &out)
 }
 
 pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32, method_len: i32, url_ptr: i32, url_len: i32, hdrs_ptr: i32, hdrs_len: i32, body_ptr: i32, body_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -3964,14 +3983,8 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
         addr: None,
     };
     let res = crate::intent::http::https_request_streaming(
-        &host, &path, &req, cap,
-        &mut |chunk: &[u8]| -> Result<(), &'static str> {
-            if out.len() < cap {
-                let take = chunk.len().min(cap - out.len());
-                out.extend_from_slice(&chunk[..take]);
-            }
-            Ok(())
-        },
+        &host, &path, &req, crate::intent::http::limit_for(cap),
+        &mut |chunk: &[u8]| crate::intent::http::collect_within(&mut out, cap, chunk),
         Some(&mut info),
         true,
     );
@@ -3991,9 +4004,7 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
         Err(e) => Some(alloc::format!("{}\t{}", crate::intent::http::error_kind(e), e)),
     };
     if res.is_err() { return -1; }
-
-    let write_len = out.len().min(cap);
-    write_bytes(mem, buf_ptr, &out[..write_len])
+    write_bytes(mem, buf_ptr, &out)
 }
 
 // ── Fetching without standing still ────────────────────────────────────────
@@ -4196,14 +4207,18 @@ pub(crate) fn npk_http_poll(ctx: &mut HostState, handle: i32) -> i32 {
 }
 
 /// Collect a finished single request. Bytes written on success; -1 if the
-/// request failed; -2 if the handle is unknown; -3 while it is still running
-/// (and only then does the job survive the call).
+/// request failed; -2 if the handle is unknown; -3 while it is still running;
+/// -4 if the body is longer than `buf_max` (it is at most the `buf_max` of
+/// `npk_http_begin`). The job survives -3 and -4 only.
 ///
 /// Fills exactly the five getters `npk_http_send` fills, and clears them the
 /// same way — a caller must never read one request's answer and attribute it
 /// to the next.
 pub(crate) fn npk_http_take(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     if buf_max < 0 { return -1; }
+    if crate::intent::fetch::body_len(ctx.pid, handle).is_some_and(|n| n > buf_max as usize) {
+        return -4;
+    }
     let reply = match crate::intent::fetch::take(ctx.pid, handle) {
         crate::intent::fetch::Take::Got(r) => r,
         crate::intent::fetch::Take::NotReady => return -3,
@@ -4218,13 +4233,12 @@ pub(crate) fn npk_http_take(mem: &mut [u8], ctx: &mut HostState, handle: i32, bu
     ctx.http_status = if ok { reply.status } else { 0 };
     ctx.http_last_error = if ok { None } else { Some(reply.error) };
     if !ok { return -1; }
-
-    let write_len = reply.body.len().min(buf_max as usize);
-    write_bytes(mem, buf_ptr, &reply.body[..write_len])
+    write_bytes(mem, buf_ptr, &reply.body)
 }
 
 /// Collect a finished batch: the bodies back to back in `out`, one
-/// little-endian i32 length per URL in `lens` (-1 for one that failed).
+/// little-endian i32 length per URL in `lens` (-1 for one that failed, -2
+/// for one left out because the batch's buffer was full).
 /// Returns how many URLs the batch had, or -1 / -2 / -3 as above.
 ///
 /// Touches none of the response getters — a batch has one status per URL and
@@ -4298,20 +4312,21 @@ pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_pt
     if (lens_max as usize) < urls.len() * 4 { return -1; }
 
     let total_cap = (out_max as usize).min(max_http_body());
-    let bodies = crate::intent::http::https_get_many(&urls, &[], total_cap, Some(ctx.net_reach));
+    let bodies = crate::intent::http::https_get_many(
+        &urls, &[], crate::intent::http::limit_for(total_cap), Some(ctx.net_reach));
 
     let mut blobs: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let mut lens: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     for body in bodies {
         let n: i32 = match body {
-            // Drop a body that would overrun the caller's buffer
-            // rather than truncating it — half an image decodes to
-            // garbage, whereas a missing one draws a placeholder.
+            // Left out rather than truncated: half an image decodes to
+            // garbage, and the caller can fetch a missing one on its own.
             Some(b) if blobs.len() + b.len() <= total_cap => {
                 blobs.extend_from_slice(&b);
                 b.len() as i32
             }
-            _ => -1,
+            Some(_) => crate::intent::fetch::OVER_BUDGET,
+            None => -1,
         };
         lens.extend_from_slice(&n.to_le_bytes());
     }

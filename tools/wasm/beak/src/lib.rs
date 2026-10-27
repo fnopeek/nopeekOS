@@ -740,10 +740,10 @@ fn set_html(bytes: &[u8]) {
 }
 
 /// Collect a finished single request into a heap buffer of the received
-/// size. `cap` is the room the request was begun with; a body that fills it
-/// was cut by the kernel, and that is logged with `what`. The kernel's
-/// negative code on failure.
-fn take_body(h: i32, cap: usize, what: &str) -> Result<Vec<u8>, i32> {
+/// size. `cap` is the room the request was begun with; a longer response
+/// fails in the kernel (`http.too_large`). The kernel's negative code on
+/// failure.
+fn take_body(h: i32, cap: usize) -> Result<Vec<u8>, i32> {
     let mut buf: Vec<u8> = Vec::with_capacity(cap);
     let n = http_take(h, &mut buf.spare_capacity_mut()[..cap]);
     if n < 0 {
@@ -752,9 +752,6 @@ fn take_body(h: i32, cap: usize, what: &str) -> Result<Vec<u8>, i32> {
     // SAFETY: the kernel initialised the first `n` bytes, and the capacity
     // is at least `cap`.
     unsafe { buf.set_len((n as usize).min(cap)) };
-    if buf.len() >= cap {
-        log(&alloc::format!("[beak] {what} cut at the {} MiB response limit", cap >> 20));
-    }
     buf.shrink_to_fit();
     Ok(buf)
 }
@@ -847,14 +844,21 @@ fn take_batch(handle: i32, dst: &mut [MaybeUninit<u8>], want: usize) -> Vec<(usi
         return spans;
     }
     let mut off = 0usize;
+    let mut left_out = 0;
     for i in 0..(n as usize).min(want).min(LENS_CAP / 4) {
         let len = i32::from_le_bytes([lens[i * 4], lens[i * 4 + 1], lens[i * 4 + 2], lens[i * 4 + 3]]);
         if len < 0 {
+            // -2: fetched, but past the batch's room.
+            if len == -2 { left_out += 1; }
             spans.push((0, 0)); // this one failed; keep positions aligned
         } else {
             spans.push((off, len as usize));
             off += len as usize;
         }
+    }
+    if left_out > 0 {
+        log(&alloc::format!("[beak] {left_out} response(s) left out: past the {} MiB batch limit",
+            dst.len() >> 20));
     }
     spans
 }
@@ -1617,7 +1621,7 @@ fn nav_pump(engine: &Engine) -> bool {
 fn nav_document_arrived(engine: &Engine) {
     let h = nav_job();
     let asked = nav_asked();
-    let body = take_body(h, HTML_CAP, "document");
+    let body = take_body(h, HTML_CAP);
     log_ms("fetch document", now_ms() - doc().nav_stage_ms);
     let Ok(body) = body else {
         nav_fail(&asked);
@@ -2474,7 +2478,7 @@ fn pump_fetches() -> bool {
         let (id, h) = fetch_jobs()[k];
         if http_poll(h) == 0 { k += 1; continue }
         fetch_jobs().remove(k);
-        let body = take_body(h, FETCH_CAP, "fetch() response");
+        let body = take_body(h, FETCH_CAP);
         landed = true;
         let Ok(buf) = body else {
             let why = last_error().map(|(a, _)| a).unwrap_or_else(|| String::from("request failed"));

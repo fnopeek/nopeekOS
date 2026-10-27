@@ -38,6 +38,10 @@ const MAX_JOBS: usize = 16;
 /// headroom for the turn where a navigation overlaps the batch it cancels.
 const MAX_JOBS_PER_OWNER: usize = 4;
 
+/// Batch length of a body that did not fit the batch's budget: fetched,
+/// but left out. The caller asks for it on its own.
+pub const OVER_BUDGET: i32 = -2;
+
 /// Same bound `npk_http_request_many` applies to one batch.
 const MAX_URLS: usize = 64;
 
@@ -96,7 +100,8 @@ enum Work {
 /// What came back. `error` empty means it worked.
 pub(crate) struct Reply {
     pub body: Vec<u8>,
-    /// `Many` only: bytes per URL in request order, -1 for one that failed.
+    /// `Many` only: bytes per URL in request order, -1 for one that failed,
+    /// `OVER_BUDGET` for one left out because the batch was full.
     pub lens: Vec<i32>,
     pub status: u16,
     pub headers: String,
@@ -305,6 +310,16 @@ pub(crate) fn result_count(owner: u32, id: i32) -> Option<usize> {
     }
 }
 
+/// Body length of a finished request that worked, without collecting it:
+/// `take` destroys the job, so a buffer too small is refused before.
+pub(crate) fn body_len(owner: u32, id: i32) -> Option<usize> {
+    let q = Q.lock();
+    match q.slots.iter().flatten().find(|j| j.id == id && j.owner == owner) {
+        Some(Job { phase: Phase::Ready(r), .. }) if r.error.is_empty() => Some(r.body.len()),
+        _ => None,
+    }
+}
+
 pub(crate) enum Take {
     /// The job is finished and gone; the answer is here (`error` says whether
     /// it worked).
@@ -464,18 +479,14 @@ fn run(slot: usize, work: Work) -> Reply {
                 addr: None,
             };
             let res = http::https_request_streaming(
-                &host, &path, &req, cap,
+                &host, &path, &req, http::limit_for(cap),
                 &mut |chunk: &[u8]| -> Result<(), &'static str> {
                     // The only place a running exchange can be stopped. One
                     // atomic per chunk, not per byte.
                     if CANCEL[slot].load(Ordering::Acquire) {
                         return Err("cancelled");
                     }
-                    if out.len() < cap {
-                        let take = chunk.len().min(cap - out.len());
-                        out.extend_from_slice(&chunk[..take]);
-                    }
-                    Ok(())
+                    http::collect_within(&mut out, cap, chunk)
                 },
                 Some(&mut info),
                 true,
@@ -505,11 +516,11 @@ fn run(slot: usize, work: Work) -> Reply {
             }
         }
         Work::Many { urls, cookies, cap, from_reach } => {
-            let bodies = http::https_get_many(&urls, &cookies, cap, from_reach);
+            let bodies = http::https_get_many(&urls, &cookies, http::limit_for(cap), from_reach);
             // Packed here rather than at `take`, so the guest side is a plain
-            // copy: bodies back to back, one length each, and one that would
-            // overrun the budget is dropped rather than truncated — half an
-            // image decodes to garbage, a missing one draws a placeholder.
+            // copy: bodies back to back, one length each. One that would
+            // overrun the budget is left out as `OVER_BUDGET` rather than
+            // truncated, so the caller can fetch it on its own.
             let mut blob: Vec<u8> = Vec::new();
             let mut lens: Vec<i32> = Vec::new();
             for body in bodies {
@@ -518,7 +529,8 @@ fn run(slot: usize, work: Work) -> Reply {
                         blob.extend_from_slice(&b);
                         b.len() as i32
                     }
-                    _ => -1,
+                    Some(_) => OVER_BUDGET,
+                    None => -1,
                 };
                 lens.push(n);
             }

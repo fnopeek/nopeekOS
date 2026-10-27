@@ -341,7 +341,11 @@ a slower page gets no hover.
 | `npk_launch_arg`, `npk_sleep`, `npk_ticks`, `npk_unix_time`, `npk_log_serial` | none checked in `host_core.rs` |
 
 `npk_http_take` returns the body for any status (`npk_http_status` has
-it). `npk_tls_connect` blocks for the handshake; `npk_tls_recv` returns at
+it). A response is whole or an error, never cut: one longer than the
+`buf_max` of `npk_http_begin` fails as `http.too_large`, and a take buffer
+shorter than the body gets -4 with the answer kept. In the length table of
+`npk_http_take_many`, -1 is a body that failed and -2 one left out because
+the batch's buffer was full. `npk_tls_connect` blocks for the handshake; `npk_tls_recv` returns at
 once (0 = nothing yet, -1 = closed).
 
 ## Testing on the host

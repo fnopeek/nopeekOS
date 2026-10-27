@@ -1254,6 +1254,28 @@ fn finish_conn(host: &str, tls: crate::tls::TlsSession, reusable: bool) {
 /// free to be reworded; this token is the contract a client branches on.
 /// Keeping them apart means improving a message never silently changes
 /// which error page the browser shows.
+/// An exchange stopped at the caller's limit, as curl's
+/// `CURLE_FILESIZE_EXCEEDED`: a response arrives whole or as this error,
+/// never cut short.
+pub const TOO_LARGE: &str = "response larger than the limit";
+
+/// The client's `max_size` for a caller that holds at most `cap` bytes: one
+/// byte more, so a longer response shows itself to [`collect_within`].
+pub fn limit_for(cap: usize) -> usize {
+    cap.saturating_add(1)
+}
+
+/// Append `chunk` to `out`, or fail the exchange with [`TOO_LARGE`] once
+/// the body would pass `cap`, or when the heap cannot hold it.
+pub fn collect_within(out: &mut alloc::vec::Vec<u8>, cap: usize, chunk: &[u8]) -> Result<(), &'static str> {
+    if out.len().saturating_add(chunk.len()) > cap {
+        return Err(TOO_LARGE);
+    }
+    out.try_reserve(chunk.len()).map_err(|_| "out of memory")?;
+    out.extend_from_slice(chunk);
+    Ok(())
+}
+
 pub fn error_kind(msg: &str) -> &'static str {
     match msg {
         "certificate: untrusted root CA" => "cert.untrusted",
@@ -1267,6 +1289,7 @@ pub fn error_kind(msg: &str) -> &'static str {
         "empty body" => "http.empty",
         "HTTP non-2xx response" => "http.status",
         "cancelled" => "cancelled",
+        TOO_LARGE => "http.too_large",
         m if m.starts_with("certificate:") => "cert.invalid",
         // Matched against the constants, not copies of the text; see
         // `tls::reasons`. The peer aborting the handshake (a server that
