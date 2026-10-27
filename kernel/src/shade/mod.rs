@@ -1824,7 +1824,7 @@ pub fn stop() {
 /// Get shade config defaults.
 pub fn default_config() -> &'static [(&'static str, &'static str, &'static str)] {
     &[
-        ("shade.gaps", "6", "Gap between tiled windows (px at 1x)"),
+        ("shade.gaps", "8", "Gap between tiled windows (px at 1x)"),
         ("shade.border", "1", "Window border width (px at 1x)"),
         ("shade.border_active", "", "Active window border color (hex; empty = palette AccentLine)"),
         ("shade.border_inactive", "", "Inactive window border color (hex; empty = palette Border)"),

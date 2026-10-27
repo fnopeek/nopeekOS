@@ -261,8 +261,11 @@ pub fn request_connect(ssid: &[u8], psk: Option<&[u8]>) -> Result<(), &'static s
 
 pub fn forget(ssid: &[u8]) -> Result<(), &'static str> {
     let msg = ssid_msg(REQ_FORGET, ssid).ok_or("invalid SSID")?;
-    if !crate::security::keyvault::system_delete(&entry_name(ssid)) {
+    if known(ssid).is_none() {
         return Err("not a known network");
+    }
+    if !crate::security::keyvault::system_delete(&entry_name(ssid)) {
+        return Err("vault not saved");
     }
     request(&msg);
     Ok(())
@@ -352,7 +355,7 @@ fn store(ssid: &[u8], e: &KnownNet) -> Result<(), &'static str> {
 }
 
 /// Inverse of `entry_name` (without the `net:` prefix).
-fn ssid_of(name: &str) -> Vec<u8> {
+pub fn ssid_of(name: &str) -> Vec<u8> {
     let b = name.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

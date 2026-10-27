@@ -37,27 +37,14 @@ pub fn intent_run(args: &str) {
 
     // BLAKE3 integrity verified by npkfs::fetch
 
-    // Delegate the standard caps (READ + WRITE + EXECUTE + RENDER). Trust
-    // comes from: (a) the module is ECDSA-P-384-signed and verified at
-    // install time, (b) the user explicitly typed `run`, (c) the sandbox
-    // bounds memory, fuel and host-fn surface. AUDIT stays off: apps should
-    // not introspect kernel state.
+    // AUDIT stays off: apps should not introspect kernel state.
     // TTL 600_000 ticks ≈ 100 minutes at 100 Hz: instantiation and
     // first-touch of large heaps can take tens of seconds before the first
     // host call, and the bound still reaps a hung worker.
-    // The fixed standard set plus what the module declares in `.npk.caps`,
-    // the same as the click path (`npk_spawn_module`). A union, not a
-    // replacement, so no module loses a right it relied on here. Open: the
-    // fixed set grants WRITE to modules that never declared it.
+    // What the module declares in `.npk.caps` (the widget default without
+    // one), the same as the click path (`npk_spawn_module`).
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
-    let module_cap = match capability::create_module_cap(
-        capability::Rights::READ
-            | capability::Rights::WRITE
-            | capability::Rights::EXECUTE
-            | capability::Rights::RENDER
-            | declared,
-        Some(600_000),
-    ) {
+    let module_cap = match capability::create_module_cap(declared, Some(600_000)) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
@@ -123,19 +110,10 @@ pub fn intent_run_background(module_name: &str) {
 
     let Some((wasm_bytes, hash)) = fetch_store_module(module_name) else { return };
 
-    // The fixed standard set plus what the module declares in `.npk.caps`,
-    // the same as the click path (`npk_spawn_module`). A union, not a
-    // replacement, so no module loses a right it relied on here. Open: the
-    // fixed set grants WRITE to modules that never declared it.
+    // What the module declares in `.npk.caps` (the widget default without
+    // one), the same as the click path (`npk_spawn_module`).
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
-    let module_cap = match capability::create_module_cap(
-        capability::Rights::READ
-            | capability::Rights::WRITE
-            | capability::Rights::EXECUTE
-            | capability::Rights::RENDER
-            | declared,
-        Some(600_000),
-    ) {
+    let module_cap = match capability::create_module_cap(declared, Some(600_000)) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
@@ -168,19 +146,10 @@ fn run_interactive_on(module_name: &str, use_forge: bool) {
 
     let Some((wasm_bytes, hash)) = fetch_store_module(module_name) else { return };
 
-    // The fixed standard set plus what the module declares in `.npk.caps`,
-    // the same as the click path (`npk_spawn_module`). A union, not a
-    // replacement, so no module loses a right it relied on here. Open: the
-    // fixed set grants WRITE to modules that never declared it.
+    // What the module declares in `.npk.caps` (the widget default without
+    // one), the same as the click path (`npk_spawn_module`).
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
-    let module_cap = match capability::create_module_cap(
-        capability::Rights::READ
-            | capability::Rights::WRITE
-            | capability::Rights::EXECUTE
-            | capability::Rights::RENDER
-            | declared,
-        Some(600_000),
-    ) {
+    let module_cap = match capability::create_module_cap(declared, Some(600_000)) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };

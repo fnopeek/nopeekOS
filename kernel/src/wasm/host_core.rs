@@ -2481,8 +2481,10 @@ pub(crate) fn npk_vault_system_set(
         return -1;
     };
     // A network password: the WLAN manager owns the record format.
-    if let Some(ssid) = name.strip_prefix("net:") {
-        return if crate::drivers::wifi::save_password(ssid.as_bytes(), val).is_ok() { 0 } else { -1 };
+    // The name is the escaped form `npk_vault_system_list` showed.
+    if let Some(rest) = name.strip_prefix("net:") {
+        let ssid = crate::drivers::wifi::ssid_of(rest);
+        return if crate::drivers::wifi::save_password(&ssid, val).is_ok() { 0 } else { -1 };
     }
     if crate::security::keyvault::system_set(&name, val) { 0 } else { -1 }
 }
@@ -4673,6 +4675,8 @@ pub(crate) fn npk_netdev_rx_deliver(mem: &mut [u8], ctx: &mut HostState, buf_ptr
 
 pub(crate) fn npk_netdev_poll_tx(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     if !is_netdev(ctx) { return -1; }
+    // Checked before the dequeue: a frame taken out cannot be put back.
+    if max < 0 || (max as usize) < crate::netdev::MTU { return -1; }
     let mut frame = [0u8; crate::netdev::MTU];
     let len = match crate::netdev::wasm_nic_poll_tx(&mut frame) {
         Some(n) => n,
