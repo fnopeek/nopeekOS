@@ -167,6 +167,7 @@ fn rdrand64() -> Option<u64> {
 fn rdtsc() -> u64 {
     let lo: u32;
     let hi: u32;
+    // SAFETY: rdtsc is allowed in ring 0 and only writes eax and edx.
     unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi); }
     ((hi as u64) << 32) | (lo as u64)
 }

@@ -123,6 +123,8 @@ pub fn read_legacy_magic(cache: &mut BlockCache) -> Option<u8> {
 pub fn write_next_durable(cache: &mut BlockCache, sb: &mut SuperblockRaw) -> Result<u64, FsError> {
     sb.set_checksum();
     let slot = SUPERBLOCK_START + (sb.generation % SUPERBLOCK_SLOTS);
+    // SAFETY: SuperblockRaw is repr(C), BLOCK_SIZE bytes without padding
+    // (asserted), so it reads as a byte array; sb is not used while buf lives.
     let buf = unsafe { &*(sb as *const SuperblockRaw as *const [u8; BLOCK_SIZE]) };
     cache.invalidate(slot);
     crate::blkdev::write_block_fua(slot, buf)?;
@@ -132,6 +134,8 @@ pub fn write_next_durable(cache: &mut BlockCache, sb: &mut SuperblockRaw) -> Res
 /// Write the same superblock to all 8 slots (used by mkfs).
 pub fn write_all(cache: &mut BlockCache, sb: &mut SuperblockRaw) -> Result<(), FsError> {
     sb.set_checksum();
+    // SAFETY: SuperblockRaw is repr(C), BLOCK_SIZE bytes without padding
+    // (asserted), so it reads as a byte array; sb is not used while buf lives.
     let buf = unsafe { &*(sb as *const SuperblockRaw as *const [u8; BLOCK_SIZE]) };
     for slot in 0..SUPERBLOCK_SLOTS {
         cache.write(SUPERBLOCK_START + slot, buf)?;

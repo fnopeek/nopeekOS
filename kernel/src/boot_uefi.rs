@@ -256,6 +256,8 @@ use crate::boot_info::{BootInfo, MemoryRegion, MAX_MEMORY_REGIONS};
 
 #[inline(always)]
 unsafe fn com1_putc(b: u8) {
+    // SAFETY: `out` to the ISA UART data registers 0x2F8 and 0x3F8 touches no
+    // memory; a write to an absent port is ignored on x86.
     unsafe {
         // COM2 (0x2F8) → -serial file:target/serial.log. Unbuffered.
         // Write first so the byte hits disk even if COM1 stalls.
@@ -274,7 +276,9 @@ unsafe fn com1_putc(b: u8) {
 
 unsafe fn com1_print(s: &[u8]) {
     for &b in s {
+        // SAFETY: com1_putc only writes the COM2/COM1 data ports.
         if b == b'\n' { unsafe { com1_putc(b'\r') }; }
+        // SAFETY: com1_putc only writes the COM2/COM1 data ports.
         unsafe { com1_putc(b) };
     }
 }
@@ -283,11 +287,13 @@ unsafe fn com1_hex64(v: u64) {
     for i in (0..16).rev() {
         let nibble = ((v >> (i * 4)) & 0xF) as u8;
         let c = if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) };
+        // SAFETY: com1_putc only writes the COM2/COM1 data ports.
         unsafe { com1_putc(c) };
     }
 }
 
 unsafe fn com1_dec(v: u64) {
+    // SAFETY: com1_putc only writes the COM2/COM1 data ports.
     if v == 0 { unsafe { com1_putc(b'0') }; return; }
     let mut buf = [0u8; 20];
     let mut n = v;
@@ -299,6 +305,7 @@ unsafe fn com1_dec(v: u64) {
     }
     while i > 0 {
         i -= 1;
+        // SAFETY: com1_putc only writes the COM2/COM1 data ports.
         unsafe { com1_putc(buf[i]) };
     }
 }
@@ -313,11 +320,16 @@ static mut BOOT_INFO: BootInfo = BootInfo::empty();
 // ── ACPI RSDP discovery ────────────────────────────────────────────
 
 unsafe fn find_acpi_rsdp(system_table: *mut EfiSystemTable) -> u64 {
+    // SAFETY: system_table is the table the firmware passed to efi_main, valid
+    // until ExitBootServices, which has not run yet.
     let count = unsafe { (*system_table).number_of_table_entries };
+    // SAFETY: as above.
     let table = unsafe { (*system_table).configuration_table };
     let mut rsdp_v2: u64 = 0;
     let mut rsdp_v1: u64 = 0;
     for i in 0..count {
+        // SAFETY: configuration_table is the firmware's array of
+        // number_of_table_entries entries, and i is below that count.
         let entry = unsafe { &*table.add(i) };
         if entry.vendor_guid == EFI_ACPI_20_TABLE_GUID {
             rsdp_v2 = entry.vendor_table as u64;
@@ -333,6 +345,8 @@ unsafe fn find_acpi_rsdp(system_table: *mut EfiSystemTable) -> u64 {
 
 unsafe fn locate_gop(bs: *mut EfiBootServices) -> Option<&'static EfiGraphicsOutputProtocol> {
     let mut interface: *mut c_void = core::ptr::null_mut();
+    // SAFETY: bs is the firmware's boot services table, still valid before
+    // ExitBootServices; the GUID and the out pointer outlive the call.
     let status = unsafe {
         ((*bs).locate_protocol)(
             &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
@@ -341,6 +355,9 @@ unsafe fn locate_gop(bs: *mut EfiBootServices) -> Option<&'static EfiGraphicsOut
         )
     };
     if status != EFI_SUCCESS || interface.is_null() { return None; }
+    // SAFETY: LocateProtocol succeeded with a non-null interface for the GOP
+    // GUID, so it points at the firmware's EfiGraphicsOutputProtocol; the
+    // caller uses it only before ExitBootServices.
     Some(unsafe { &*(interface as *const EfiGraphicsOutputProtocol) })
 }
 
@@ -362,12 +379,17 @@ static mut MMAP_SCRATCH: MmapBuf = MmapBuf([0; 16 * 1024]);
 /// so the caller must invoke them in the right order (we don't do any
 /// allocation after this).
 unsafe fn collect_memory_map(bs: *mut EfiBootServices) -> Uintn {
+    // SAFETY: only a raw pointer to MMAP_SCRATCH is taken, no reference; the
+    // boot core is the only one running.
     let buf_ptr = unsafe { &raw mut MMAP_SCRATCH.0 } as *mut EfiMemoryDescriptor;
     let mut map_size: Uintn = 16 * 1024;
     let mut map_key: Uintn = 0;
     let mut desc_size: Uintn = 0;
     let mut desc_version: u32 = 0;
 
+    // SAFETY: bs is the firmware's boot services table, still callable here
+    // (also after a failed ExitBootServices); buf_ptr points at MMAP_SCRATCH,
+    // whose 16 KiB map_size announces.
     let status = unsafe {
         ((*bs).get_memory_map)(
             &mut map_size,
@@ -378,6 +400,7 @@ unsafe fn collect_memory_map(bs: *mut EfiBootServices) -> Uintn {
         )
     };
     if status != EFI_SUCCESS {
+        // SAFETY: com1_print and com1_hex64 only write the UART data ports.
         unsafe {
             com1_print(b"[uefi] GetMemoryMap failed: ");
             com1_hex64(status as u64);
@@ -389,12 +412,27 @@ unsafe fn collect_memory_map(bs: *mut EfiBootServices) -> Uintn {
     // Walk descriptors. Note `desc_size` may be larger than
     // sizeof(EfiMemoryDescriptor) — vendor extensions are allowed.
     // We stride by desc_size in bytes, casting each.
-    let n = map_size / desc_size;
+    // A stride shorter than the descriptor (or zero) would read past each
+    // entry; the spec allows longer ones, not shorter.
+    if desc_size < core::mem::size_of::<EfiMemoryDescriptor>() {
+        // SAFETY: com1_print only writes the UART data port.
+        unsafe { com1_print(b"[uefi] memory map descriptor size too small\n"); }
+        return 0;
+    }
+    let n = map_size.min(core::mem::size_of::<MmapBuf>()) / desc_size;
     let buf_bytes = buf_ptr as *const u8;
     let mut stored = 0u32;
     for i in 0..n {
-        let d = unsafe { &*(buf_bytes.add(i * desc_size) as *const EfiMemoryDescriptor) };
+        // SAFETY: entry `i` starts at `i * desc_size` and its descriptor-sized
+        // prefix lies inside the `map_size` bytes the firmware filled in
+        // MMAP_SCRATCH (`n` stops before a partial entry). The stride need not
+        // be a multiple of the alignment, hence the unaligned read.
+        let d = unsafe { core::ptr::read_unaligned(buf_bytes.add(i * desc_size) as *const EfiMemoryDescriptor) };
+        let d = &d;
         if (stored as usize) < MAX_MEMORY_REGIONS {
+            // SAFETY: BOOT_INFO is only touched by the boot core inside
+            // efi_main, before any other core runs and before kernel_main gets
+            // a reference to it. stored is below MAX_MEMORY_REGIONS.
             unsafe {
                 BOOT_INFO.regions[stored as usize] = MemoryRegion {
                     physical_start: d.physical_start,
@@ -405,6 +443,8 @@ unsafe fn collect_memory_map(bs: *mut EfiBootServices) -> Uintn {
             stored += 1;
         }
     }
+    // SAFETY: BOOT_INFO is only touched by the boot core inside efi_main,
+    // before any other core runs and before kernel_main gets a reference to it.
     unsafe { BOOT_INFO.region_count = stored };
     map_key
 }
@@ -414,7 +454,12 @@ unsafe fn collect_memory_map(bs: *mut EfiBootServices) -> Uintn {
 unsafe fn print_mem_summary() {
     let mut usable_pages: u64 = 0;
     let mut total_pages: u64 = 0;
+    // SAFETY: BOOT_INFO is only touched by the boot core inside efi_main,
+    // before any other core runs and before kernel_main gets a reference to it.
     for i in 0..unsafe { BOOT_INFO.region_count } {
+        // SAFETY: BOOT_INFO is only touched by the boot core inside efi_main,
+        // before any other core runs and before kernel_main gets a reference to
+        // it. i is below region_count, which never exceeds MAX_MEMORY_REGIONS.
         let r = unsafe { &BOOT_INFO.regions[i as usize] };
         total_pages += r.page_count;
         match r.uefi_type {
@@ -425,6 +470,8 @@ unsafe fn print_mem_summary() {
             _ => {}
         }
     }
+    // SAFETY: only UART port writes and a read of BOOT_INFO, which the boot
+    // core alone touches here.
     unsafe {
         com1_print(b"[uefi] memory regions: ");
         com1_dec(BOOT_INFO.region_count as u64);
@@ -443,20 +490,34 @@ pub unsafe extern "efiapi" fn efi_main(
     image_handle: EfiHandle,
     system_table: *mut EfiSystemTable,
 ) -> ! {
+    // SAFETY: com1_print only writes the UART data ports.
     unsafe {
         com1_print(b"\n=== nopeekOS UEFI entry ===\n");
     }
 
+    // SAFETY: system_table is the firmware's system table, passed to efi_main
+    // and valid until ExitBootServices.
     let bs = unsafe { (*system_table).boot_services };
 
     // 1. ACPI RSDP via ConfigurationTable walk.
+    // SAFETY: system_table is valid and boot services are still up.
     let rsdp = unsafe { find_acpi_rsdp(system_table) };
+    // SAFETY: BOOT_INFO is only touched by the boot core inside efi_main,
+    // before any other core runs and before kernel_main gets a reference to it.
     unsafe { BOOT_INFO.acpi_rsdp = rsdp; }
 
     // 2. Graphics Output Protocol → framebuffer.
+    // SAFETY: bs is the firmware's boot services table, before
+    // ExitBootServices.
     if let Some(gop) = unsafe { locate_gop(bs) } {
+        // SAFETY: gop.mode is the protocol's mode structure, owned by the
+        // firmware and valid while boot services run.
         let mode = unsafe { &*gop.mode };
+        // SAFETY: mode.info is the current mode's information, valid like mode.
         let info = unsafe { &*mode.info };
+        // SAFETY: BOOT_INFO is only touched by the boot core inside efi_main,
+        // before any other core runs and before kernel_main gets a reference to
+        // it. the prints only write the UART data ports.
         unsafe {
             BOOT_INFO.fb_base = mode.frame_buffer_base;
             BOOT_INFO.fb_width = info.horizontal_resolution;
@@ -474,6 +535,7 @@ pub unsafe extern "efiapi" fn efi_main(
             com1_print(b"B\n");
         }
     } else {
+        // SAFETY: com1_print only writes the UART data ports.
         unsafe {
             com1_print(b"[uefi] GOP not found (no framebuffer info)\n");
         }
@@ -481,20 +543,29 @@ pub unsafe extern "efiapi" fn efi_main(
 
     // 3. Memory map — this is also the last UEFI call before
     // ExitBootServices; map_key must come from this snapshot.
+    // SAFETY: bs is still valid, and nothing allocates between this snapshot
+    // and ExitBootServices, so map_key stays current.
     let map_key = unsafe { collect_memory_map(bs) };
+    // SAFETY: reads BOOT_INFO on the boot core only and writes the UART ports.
     unsafe { print_mem_summary() };
 
     // 4. ExitBootServices. After this call UEFI Boot Services are
     // gone — no more LocateProtocol, no more printk through ConOut.
     // We're on our own from here.
+    // SAFETY: bs is still valid and map_key comes from the last GetMemoryMap.
     let status = unsafe { ((*bs).exit_boot_services)(image_handle, map_key) };
 
     // Now that UEFI's IDT is no longer the active one (we still
     // share it but boot services are dismantled), gate IRQs off
     // until our own IDT loads in interrupts::init. boot.s left IF=1
     // because Boot Services need timer IRQs to make progress.
+    // SAFETY: cli touches no memory; IRQs stay off until interrupts::init loads
+    // the kernel's IDT.
     unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
     if status != EFI_SUCCESS {
+        // SAFETY: after a failed ExitBootServices the firmware still accepts
+        // GetMemoryMap and ExitBootServices (UEFI spec, ExitBootServices); the
+        // rest is UART port output and halting.
         unsafe {
             com1_print(b"[uefi] ExitBootServices failed: 0x");
             com1_hex64(status as u64);
@@ -513,6 +584,7 @@ pub unsafe extern "efiapi" fn efi_main(
             }
         }
     }
+    // SAFETY: com1_print only writes the UART data ports.
     unsafe {
         com1_print(b"[uefi] ExitBootServices OK\n");
     }
@@ -521,11 +593,15 @@ pub unsafe extern "efiapi" fn efi_main(
     // the firmware mid-call — Boot Services internally relies on
     // UEFI's selector layout (TR/LDT/code segs). After ExitBootServices
     // the firmware is dismantled and we're free to install ours.
+    // SAFETY: ExitBootServices succeeded (a second failure halts above), which
+    // is install_kernel_gdt's precondition.
     unsafe { install_kernel_gdt() };
 
     // Hand off to the kernel proper. BOOT_INFO lives in .bss (the
     // kernel image), so the &'static reference outlives anything
     // UEFI gave us. kernel_main never returns.
+    // SAFETY: BOOT_INFO is fully written and nothing writes it after this
+    // point, so a shared 'static reference to it is sound.
     unsafe { crate::kernel_main(&*(&raw const BOOT_INFO)) };
 }
 
@@ -551,6 +627,9 @@ struct GdtPointer {
 /// hardcodes and what VMX host-state validation expects later.
 #[unsafe(no_mangle)]
 unsafe fn install_kernel_gdt() {
+    // SAFETY: gdt64 and gdt64_end bracket the GDT in boot.s inside the kernel
+    // image, with code at 0x08 and data at 0x10 as loaded below; ptr is a local
+    // that lgdt reads; the caller runs after ExitBootServices.
     unsafe {
         let base = &gdt64 as *const u8 as u64;
         let end = &gdt64_end as *const u8 as u64;

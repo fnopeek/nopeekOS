@@ -208,6 +208,7 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
     let free_mb = free * PAGE_SIZE / (1024 * 1024);
     let total_mb = alloc.memory_top * PAGE_SIZE / (1024 * 1024);
 
+    // SAFETY: only the address of the linker symbol is taken; it is never read.
     let _kernel_end_marker = unsafe { &__heap_start as *const u8 as u64 };
 
     kprintln!("[npk] Physical memory: {} MB free ({} frames), {} MB detected",

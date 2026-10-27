@@ -19,6 +19,9 @@ pub fn put_pixel(shadow: *mut u8, info: &FbInfo, x: u32, y: u32, color: u32) {
     } else {
         let bpp = (info.bpp as u32 + 7) / 8;
         let offset = (y * info.pitch + x * bpp) as usize;
+        // SAFETY: x and y are checked above, so the three bytes of pixel (x, y)
+        // lie in the shadow buffer of pitch * height bytes for bpp >= 24. Every
+        // framebuffer in use is 32 bpp, so narrower formats never get here.
         unsafe {
             *shadow.add(offset) = (color & 0xFF) as u8;
             *shadow.add(offset + 1) = ((color >> 8) & 0xFF) as u8;
@@ -33,6 +36,8 @@ pub fn fill_rect(shadow: *mut u8, info: &FbInfo, x: u32, y: u32, w: u32, h: u32,
     let y_end = (y + h).min(info.height);
     if info.bpp == 32 {
         for row in y..y_end {
+            // SAFETY: row < y_end <= height, so the row start lies in the
+            // shadow buffer.
             let row_ptr = unsafe { shadow.add((row * info.pitch) as usize) as *mut u32 };
             for col in x..x_end {
                 // SAFETY: col < width, row < height, within shadow buffer
@@ -347,6 +352,8 @@ fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*con
             let wprow = unsafe { wp.add(py * pitch_px * 4) as *const u32 };
             let base = py * pitch_px;
             for px in 0..width {
+                // SAFETY: px < width <= pitch_px, inside row py of the screen-
+                // sized plane wp.
                 let wpx = unsafe { *wprow.add(px) };
                 buf[base + px] = glass_blend(fill, wpx, opacity, ink);
             }

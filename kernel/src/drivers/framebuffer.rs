@@ -244,9 +244,13 @@ pub fn init_from_gpu() {
             let old_layout = alloc::alloc::Layout::from_size_align(
                 old_console.shadow_size, 4096).unwrap();
             if !old_console.shadow.is_null() && old_console.shadow_size > 0 {
+                // SAFETY: allocated below with this same layout; the console is
+                // out of CONSOLE and the cached front pointer is cleared, so
+                // nothing reaches it.
                 unsafe { alloc::alloc::dealloc(old_console.shadow, old_layout); }
             }
             if !old_console.shadow_b.is_null() && old_console.shadow_size > 0 {
+                // SAFETY: as for shadow above.
                 unsafe { alloc::alloc::dealloc(old_console.shadow_b, old_layout); }
             }
         }
@@ -255,14 +259,24 @@ pub fn init_from_gpu() {
     // Allocate two shadow buffers for double-buffering (fast WB-cached RAM)
     // Page-aligned (4096) so a GPU can map them for its copies
     let shadow_size = pitch as usize * height as usize;
+    // A zero-sized layout may not be allocated; a mode without rows or
+    // pitch is not one to draw on anyway.
+    if shadow_size == 0 {
+        crate::kprintln!("[npk] Framebuffer: mode has no pixels ({}x{}, pitch {})", width, height, pitch);
+        return;
+    }
     let layout = alloc::alloc::Layout::from_size_align(shadow_size, 4096)
         .expect("shadow buffer layout");
+    // SAFETY: `layout` has a non-zero size (checked above).
     let shadow = unsafe { alloc::alloc::alloc_zeroed(layout) };
+    // SAFETY: as above.
     let shadow_b = unsafe { alloc::alloc::alloc_zeroed(layout) };
 
     if shadow.is_null() || shadow_b.is_null() {
         crate::kprintln!("[npk] Framebuffer: shadow alloc failed ({}KB x2)", shadow_size / 1024);
+        // SAFETY: returned by alloc_zeroed with this layout and not shared yet.
         if !shadow.is_null() { unsafe { alloc::alloc::dealloc(shadow, layout); } }
+        // SAFETY: returned by alloc_zeroed with this layout and not shared yet.
         if !shadow_b.is_null() { unsafe { alloc::alloc::dealloc(shadow_b, layout); } }
         return;
     }
@@ -295,6 +309,8 @@ pub fn init_from_boot_info(boot_info: &crate::boot_info::BootInfo) {
 fn clear_screen(info: &FbInfo) {
     let fb = info.addr as *mut u8;
     let size = info.pitch as usize * info.height as usize;
+    // SAFETY: info.addr is the CPU mapping of the framebuffer, pitch * height
+    // bytes long (ioremap in init_from_gpu, or the native driver's mapping).
     unsafe { core::ptr::write_bytes(fb, 0, size); }
 }
 
@@ -310,6 +326,9 @@ fn put_pixel_shadow(console: &FbConsole, x: u32, y: u32, color: u32) {
     } else {
         let bytes_per_pixel = (info.bpp as u32 + 7) / 8;
         let offset = (y * info.pitch + x * bytes_per_pixel) as usize;
+        // SAFETY: x and y are checked above, so the three bytes of pixel (x, y)
+        // lie in the shadow buffer of pitch * height bytes for bpp >= 24. Every
+        // framebuffer in use is 32 bpp, so narrower formats never get here.
         unsafe {
             *console.shadow.add(offset) = (color & 0xFF) as u8;
             *console.shadow.add(offset + 1) = ((color >> 8) & 0xFF) as u8;
@@ -355,6 +374,9 @@ fn blit_region(console: &FbConsole, y_start: u32, y_end: u32) {
     let start = (y_start * info.pitch) as usize;
     let end = (y_end * info.pitch) as usize;
     let len = end.min(console.shadow_size) - start;
+    // SAFETY: y_end comes from text rows below rows, so start <= shadow_size,
+    // and len is clamped to shadow_size; front and the framebuffer mapping are
+    // both shadow_size bytes and do not overlap.
     unsafe {
         core::ptr::copy_nonoverlapping(
             front.add(start),
@@ -377,6 +399,8 @@ fn blit_all(console: &FbConsole) {
         let rows = chunk.min(height - row);
         let off = row * pitch;
         let len = rows * pitch;
+        // SAFETY: off + len <= height * pitch = shadow_size, the size of both
+        // the front buffer and the framebuffer mapping, which do not overlap.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 front.add(off), fb.add(off), len);
@@ -400,6 +424,9 @@ fn blit_char(console: &FbConsole, col: u32, row: u32) {
 
     for y in y_start..y_end.min(info.height) {
         let offset = (y * info.pitch + x_start * bytes_per_pixel) as usize;
+        // SAFETY: col < cols and row < rows keep the cell inside width, y is
+        // clipped to height, so offset + char_bytes stays within shadow_size in
+        // both the front buffer and the framebuffer mapping.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 front.add(offset),
@@ -419,6 +446,9 @@ fn scroll_shadow(console: &mut FbConsole, n: u32) -> u32 {
     let row_bytes = console.info.pitch as usize * (FONT_HEIGHT * console.scale) as usize;
     let keep = (total_rows - n) as usize;
 
+    // SAFETY: n <= total_rows and total_rows * row_bytes <= shadow_size, so
+    // source, destination and the cleared tail lie in the shadow buffer;
+    // ptr::copy allows the overlap; &mut console excludes other users.
     unsafe {
         if keep > 0 {
             core::ptr::copy(
@@ -729,6 +759,8 @@ pub fn clear() {
     console.row = 0;
     if present(console, 0, 0, console.info.width, console.info.height) { return; }
     let fb = console.info.addr as *mut u8;
+    // SAFETY: the framebuffer mapping holds pitch * height = shadow_size bytes;
+    // CONSOLE is held and the GPU copy is done.
     unsafe { core::ptr::write_bytes(fb, 0, console.shadow_size); }
 }
 

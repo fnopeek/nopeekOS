@@ -58,6 +58,7 @@ pub fn tsc_to_ns(cycles: u64) -> u64 {
 pub fn rdtsc() -> u64 {
     let lo: u32;
     let hi: u32;
+    // SAFETY: rdtsc is allowed in ring 0 and only writes eax and edx.
     unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi); }
     ((hi as u64) << 32) | lo as u64
 }
@@ -83,6 +84,8 @@ pub fn calibrate_tsc() {
     let eax: u32;
     let ebx: u32;
     let ecx: u32;
+    // SAFETY: CPUID exists on every x86_64 CPU and only writes registers; rbx,
+    // which LLVM reserves, is saved and restored around it.
     unsafe {
         // rbx is reserved by LLVM, so save/restore manually
         let ebx_out: u64;
@@ -265,6 +268,9 @@ const PIC_OFFSET_MASTER: u8 = 32; // IRQ0-7 → vectors 32-39
 const PIC_OFFSET_SLAVE: u8 = 40;  // IRQ8-15 → vectors 40-47
 
 pub fn init() {
+    // SAFETY: init runs once on the boot core from kernel_main, before the APs
+    // start and before sti, so nothing else touches IDT while it is written;
+    // lidt reads the fully built table, and the PIC data ports are masked.
     unsafe {
         // Exception handlers
         // Both go through a stub that first asks whether the fault came from

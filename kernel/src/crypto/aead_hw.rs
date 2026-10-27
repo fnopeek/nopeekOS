@@ -66,6 +66,8 @@ fn lengths_block(aad_len: usize, ct_len: usize) -> [u8; BLOCK_LEN] {
 fn ghash_padded(ghash: &mut GHash, data: &[u8]) {
     let nblocks = data.len() / BLOCK_LEN;
     if nblocks > 0 {
+        // SAFETY: ghash::Block is 16 bytes with alignment 1, and data holds at
+        // least nblocks * 16 bytes, all initialized.
         let blocks = unsafe {
             core::slice::from_raw_parts(
                 data.as_ptr() as *const ghash::Block, nblocks)
@@ -109,6 +111,9 @@ pub fn aead_encrypt_aes_hw(
 
         // Encrypt first (in-place), then GHASH the resulting CT.
         ctr.apply_keystream(chunk);
+        // SAFETY: ghash::Block is 16 bytes with alignment 1, and chunk is
+        // exactly CHUNK_BLOCKS * 16 bytes; chunk is not written while blocks
+        // lives.
         let blocks = unsafe {
             core::slice::from_raw_parts(
                 chunk.as_ptr() as *const ghash::Block, CHUNK_BLOCKS)
@@ -162,6 +167,9 @@ pub fn aead_decrypt_aes_hw_in_place(
 
         // GHASH the ciphertext (must come BEFORE decrypt — we
         // authenticate the on-the-wire bytes, not the plaintext).
+        // SAFETY: ghash::Block is 16 bytes with alignment 1, and chunk is
+        // exactly CHUNK_BLOCKS * 16 bytes; chunk is not written while blocks
+        // lives.
         let blocks = unsafe {
             core::slice::from_raw_parts(
                 chunk.as_ptr() as *const ghash::Block, CHUNK_BLOCKS)

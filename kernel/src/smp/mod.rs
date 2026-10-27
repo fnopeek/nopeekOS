@@ -218,10 +218,10 @@ fn setup_trampoline() {
         // SAFETY: 0x8000 is in first 1MB (reserved, identity-mapped, not used by kernel)
         core::ptr::copy_nonoverlapping(start, TRAMPOLINE_BASE as *mut u8, size);
 
-        // CR3 — BSP's page table root
-        // Trampoline loads CR3 from 32-bit protected mode (only 32-bit mov available).
-        // PML4 is in kernel BSS (~7MB) — well below 4GB. Assert guards against future
-        // changes where frame allocator might place page tables in high RAM.
+        // CR3 — BSP's page table root. The trampoline loads it in 32-bit
+        // protected mode (only a 32-bit mov), so the PML4 must lie below
+        // 4 GiB; `paging::init` takes it from the frame allocator, which can
+        // hand out any frame, hence the assert.
         let cr3: u64;
         core::arch::asm!("mov {}, cr3", out(reg) cr3);
         assert!(cr3 < 0x1_0000_0000, "PML4 above 4GB — AP trampoline cannot load it");
@@ -235,7 +235,9 @@ fn setup_trampoline() {
         let gdt_limit = (core::mem::size_of::<[u64; 3]>() - 1) as u16;
         assert!(gdt_base < 0x1_0000_0000, "GDT above 4GB — AP trampoline cannot load it");
         *((TRAMPOLINE_BASE + OFF_GDT64) as *mut u16) = gdt_limit;
-        *((TRAMPOLINE_BASE + OFF_GDT64 + 2) as *mut u32) = gdt_base as u32;
+        // The base follows the 2-byte limit (descriptor-table register
+        // layout), so it is only 2-byte aligned.
+        core::ptr::write_unaligned((TRAMPOLINE_BASE + OFF_GDT64 + 2) as *mut u32, gdt_base as u32);
 
         // IDTR — copy BSP's IDT register (SIDT stores 10 bytes)
         let mut idtr = [0u8; 10];

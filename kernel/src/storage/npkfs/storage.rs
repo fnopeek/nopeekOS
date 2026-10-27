@@ -55,6 +55,8 @@ fn halt_for_legacy_disk(version: u8) -> ! {
     kprintln!("[npk] │ older kernels can still read it.                         │");
     kprintln!("[npk] └──────────────────────────────────────────────────────────┘");
     kprintln!("");
+    // SAFETY: cli; hlt stops this core with interrupts off and touches no
+    // memory.
     loop { unsafe { core::arch::asm!("cli; hlt"); } }
 }
 
@@ -83,6 +85,8 @@ pub fn halt_for_unmountable_disk(p: &sb_io::SbProbe) -> ! {
     kprintln!("[npk] │ the installer USB.                                       │");
     kprintln!("[npk] └──────────────────────────────────────────────────────────┘");
     kprintln!("");
+    // SAFETY: cli; hlt stops this core with interrupts off and touches no
+    // memory.
     loop { unsafe { core::arch::asm!("cli; hlt"); } }
 }
 

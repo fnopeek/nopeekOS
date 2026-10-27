@@ -2052,6 +2052,10 @@ pub fn intent_reboot() -> ! {
     kprintln!("[npk] Rebooting...");
     crate::npkfs::sync();
     kprintln!();
+    // SAFETY: the machine is being reset: interrupts go off on this core, the
+    // port writes hit the chipset reset control (0xCF9) and the i8042 (0x64),
+    // and a null IDT forces a triple fault. None of it touches memory the
+    // kernel still uses.
     unsafe {
         // Disable interrupts first
         core::arch::asm!("cli");
@@ -2345,6 +2349,10 @@ pub fn intent_halt() -> ! {
     crate::npkfs::sync();
     kprintln!("[npk] Goodbye.");
     kprintln!();
+    // SAFETY: the machine is being powered off: the port writes hit the QEMU
+    // exit port and the PM1a control ports, which an absent device ignores, and
+    // a null IDT turns int3 into a triple fault. None of it touches memory the
+    // kernel still uses.
     unsafe {
         // Try QEMU exit (harmless on real hardware)
         core::arch::asm!("out dx, al", in("dx") 0xf4u16, in("al") 0u8);

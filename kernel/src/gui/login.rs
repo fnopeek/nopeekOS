@@ -57,8 +57,12 @@ fn draw_background(shadow: *mut u8, info: &FbInfo) {
     let w = info.width;
     let h = info.height;
     for y in 0..h {
+        // SAFETY: shadow is the console's 32 bpp shadow buffer of pitch *
+        // height bytes, and y is below height.
         let row = unsafe { shadow.add((y * info.pitch) as usize) as *mut u32 };
         for x in 0..w {
+            // SAFETY: x is below width and pitch >= width * 4, so the write
+            // stays in row y.
             unsafe { *row.add(x as usize) = login_pixel(x, y, h); }
         }
     }
@@ -68,8 +72,12 @@ fn draw_background(shadow: *mut u8, info: &FbInfo) {
 fn draw_login_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32) {
     let h = info.height;
     for y in ry..(ry + rh).min(h) {
+        // SAFETY: shadow is the console's 32 bpp shadow buffer of pitch *
+        // height bytes, and y is clipped to height.
         let row = unsafe { shadow.add((y * info.pitch) as usize) as *mut u32 };
         for x in rx..(rx + rw).min(info.width) {
+            // SAFETY: x is clipped to width and pitch >= width * 4, so the
+            // write stays in row y.
             unsafe { *row.add(x as usize) = login_pixel(x, y, h); }
         }
     }
@@ -381,6 +389,8 @@ pub fn run() {
                                         Theme::ACCENT_RED);
                                     crate::framebuffer::blit_rect(fb, 0, 0, info.width, info.height);
                                 });
+                                // SAFETY: cli; hlt stops this core with
+                                // interrupts off and touches no memory.
                                 loop { unsafe { core::arch::asm!("cli; hlt"); } }
                             }
 

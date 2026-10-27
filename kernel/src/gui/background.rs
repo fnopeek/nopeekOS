@@ -168,8 +168,13 @@ fn fill_grey(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32)
     let x1 = ((rx + rw) as usize).min(info.width as usize);
     let y1 = (ry + rh).min(info.height);
     for y in ry..y1 {
+        // SAFETY: shadow is a 32 bpp screen buffer of pitch * height bytes, and
+        // y is below height.
         let row = unsafe { shadow.add(y as usize * pitch) as *mut u32 };
         for x in (rx as usize)..x1 {
+            // SAFETY: x is below width and pitch >= width * 4, so the write
+            // stays in row y; row is 4-byte aligned because the buffer and
+            // pitch are.
             unsafe { *row.add(x) = BG_GREY; }
         }
     }
@@ -187,6 +192,9 @@ fn draw_wallpaper_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u
     let bytes = (x1 - x0) * 4;
     for y in ry..(ry + rh).min(info.height) {
         let off = y as usize * pitch + x0 * 4;
+        // SAFETY: the wallpaper plane and shadow are distinct screen buffers of
+        // pitch * height bytes; the caller clips the region to the screen, so
+        // off + bytes <= y * pitch + width * 4 stays inside both.
         unsafe { core::ptr::copy_nonoverlapping(wp.add(off), shadow.add(off), bytes); }
     }
 }
@@ -511,6 +519,8 @@ fn scale_cover(src: &[u8], w: u32, h: u32, dst: *mut u8, info: &FbInfo) {
         if ty % 128 == 0 { crate::xhci::poll_events(); }
         let fy0 = oy + ty * ch / th;
         let fy1 = oy + (ty + 1) * ch / th;
+        // SAFETY: dst is a plane of at least pitch * height bytes (back_plane
+        // sizes it for the screen) and ty is below height.
         let row = unsafe { dst.add(ty as usize * pitch) as *mut u32 };
         for tx in 0..tw {
             let fx0 = ox + tx * cw / tw;

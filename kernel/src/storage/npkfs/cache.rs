@@ -72,6 +72,9 @@ impl BlockCache {
         if !self.meta[slot].valid || !self.meta[slot].dirty { return Ok(()); }
         let block = self.meta[slot].block;
         let ptr = self.slot_ptr(slot);
+        // SAFETY: slot < CACHE_SLOTS, so ptr is a BLOCK_SIZE region of this
+        // cache's own identity-mapped allocation; &mut self keeps it unwritten
+        // while buf lives.
         let buf = unsafe { &*(ptr as *const [u8; BLOCK_SIZE]) };
         blkdev::write_block(block, buf)?;
         self.meta[slot].dirty = false;
@@ -87,6 +90,8 @@ impl BlockCache {
     pub fn read(&mut self, block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError> {
         if let Some(slot) = self.find_slot(block) {
             self.touch(slot);
+            // SAFETY: slot < CACHE_SLOTS: a BLOCK_SIZE region of this cache's
+            // own allocation, disjoint from buf.
             unsafe { core::ptr::copy_nonoverlapping(self.slot_ptr(slot), buf.as_mut_ptr(), BLOCK_SIZE); }
             return Ok(());
         }
@@ -96,6 +101,8 @@ impl BlockCache {
 
         // Cache it
         let slot = self.evict_slot()?;
+        // SAFETY: slot < CACHE_SLOTS: a BLOCK_SIZE region of this cache's own
+        // allocation, disjoint from buf.
         unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), self.slot_ptr(slot), BLOCK_SIZE); }
         self.meta[slot] = CacheMeta { block, dirty: false, valid: true, last_used: 0 };
         self.touch(slot);
@@ -111,6 +118,8 @@ impl BlockCache {
             self.meta[s] = CacheMeta { block, dirty: false, valid: true, last_used: 0 };
             s
         };
+        // SAFETY: slot < CACHE_SLOTS: a BLOCK_SIZE region of this cache's own
+        // allocation, disjoint from buf.
         unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), self.slot_ptr(slot), BLOCK_SIZE); }
         self.meta[slot].dirty = true;
         self.touch(slot);

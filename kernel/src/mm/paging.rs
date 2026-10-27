@@ -203,6 +203,9 @@ pub fn sync_tlb() {
 /// Returns the physical address of the new PDT.
 /// SAFETY: pdpt must be valid, index must point to a 1GB huge page entry.
 unsafe fn split_1gb_to_2mb(pdpt: u64, index: usize) -> Result<u64, PagingError> {
+    // SAFETY: the caller (map_page, under PT_LOCK) passes a live identity-
+    // mapped table whose entry at index is a 1 GB page; the new table is a
+    // fresh frame below the 64 GB identity limit, filled before it is linked.
     unsafe {
         let entry = read_entry(pdpt, index);
         let huge_base = entry_addr(entry); // 1GB-aligned physical base
@@ -228,6 +231,9 @@ unsafe fn split_1gb_to_2mb(pdpt: u64, index: usize) -> Result<u64, PagingError> 
 /// Returns the physical address of the new PT.
 /// SAFETY: pdt must be valid, index must point to a 2MB huge page entry.
 unsafe fn split_2mb_to_4kb(pdt: u64, index: usize) -> Result<u64, PagingError> {
+    // SAFETY: the caller (map_page, under PT_LOCK) passes a live identity-
+    // mapped table whose entry at index is a 2 MB page; the new table is a
+    // fresh frame below the 64 GB identity limit, filled before it is linked.
     unsafe {
         let entry = read_entry(pdt, index);
         let huge_base = entry_addr(entry);
@@ -254,22 +260,30 @@ unsafe fn split_2mb_to_4kb(pdt: u64, index: usize) -> Result<u64, PagingError> {
 /// Read a page table entry. SAFETY: table_phys must be in identity-mapped range.
 unsafe fn read_entry(table_phys: u64, index: usize) -> u64 {
     let ptr = table_phys as *const u64;
+    // SAFETY: the caller guarantees table_phys is an identity-mapped, 4 KiB-
+    // aligned page table; every index passed is masked to 0..ENTRY_COUNT.
     unsafe { *ptr.add(index) }
 }
 
 /// Write a page table entry. SAFETY: table_phys must be in identity-mapped range.
 unsafe fn write_entry(table_phys: u64, index: usize, value: u64) {
     let ptr = table_phys as *mut u64;
+    // SAFETY: the caller guarantees table_phys is an identity-mapped, 4 KiB-
+    // aligned page table; every index passed is masked to 0..ENTRY_COUNT.
     unsafe { *ptr.add(index) = value; }
 }
 
 /// Zero a freshly allocated 4KB frame for use as a page table.
 unsafe fn zero_frame(addr: u64) {
+    // SAFETY: the caller passes a frame fresh from the allocator, below the 64
+    // GB identity limit and referenced by nothing else.
     unsafe { core::ptr::write_bytes(addr as *mut u8, 0, memory::PAGE_SIZE); }
 }
 
 /// Walk to the next table level. If not present, allocate a new table.
 unsafe fn get_or_create(table_phys: u64, index: usize) -> Result<u64, PagingError> {
+    // SAFETY: the caller holds PT_LOCK and passes a live table; a new table is
+    // a fresh frame below the 64 GB identity limit, zeroed before it is linked.
     unsafe {
         let entry = read_entry(table_phys, index);
 
@@ -311,6 +325,9 @@ pub fn init() {
         .expect("paging::init: failed to allocate PML4 frame");
     let pdpt_phys = memory::allocate_frame()
         .expect("paging::init: failed to allocate PDPT frame");
+    // SAFETY: both frames are fresh from the allocator, 4 KiB-aligned and below
+    // 64 GB, still identity-mapped by the firmware's tables, and referenced by
+    // nothing else.
     unsafe {
         // Zero both tables.
         core::ptr::write_bytes(pml4_phys as *mut u8, 0, 4096);
@@ -332,6 +349,9 @@ pub fn init() {
     // Switch CR3 to our new tables. Any TLB entries from UEFI's
     // mapping get flushed. From here on, MMIO mappings can be added
     // freely (map_page will modify our own tables, which are writable).
+    // SAFETY: the new tables identity-map the first 64 GB, which hold the
+    // kernel image, its stack and every frame the allocator hands out, so every
+    // live address keeps its meaning across the switch.
     unsafe {
         core::arch::asm!("mov cr3, {}", in(reg) pml4_phys);
     }
@@ -546,5 +566,8 @@ fn count_mappings(pml4: u64) -> (usize, usize) {
 pub fn stats() -> (usize, usize) {
     let pml4 = PML4_PHYS.load(Ordering::Relaxed);
     if pml4 == 0 { return (0, 0); }
+    // The walk reads entries that `map_page`/`unmap_page` write; under their
+    // lock it sees a consistent tree.
+    let _pt = PT_LOCK.lock();
     count_mappings(pml4)
 }

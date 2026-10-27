@@ -265,6 +265,8 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
                 Err(e) => {
                     kprintln!("[npk] Installation failed: {}", e);
                     kprintln!("[npk] System halted.");
+                    // SAFETY: cli; hlt stops this core with interrupts off and
+                    // touches no memory.
                     loop { unsafe { core::arch::asm!("cli; hlt"); } }
                 }
             }
@@ -348,6 +350,8 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         // === First boot: Setup Wizard (identity, settings) ===
         if !setup::run_fresh_install() {
             kprintln!("[npk] Setup failed. System halted.");
+            // SAFETY: cli; hlt stops this core with interrupts off and touches
+            // no memory.
             loop { unsafe { core::arch::asm!("cli; hlt"); } }
         }
         vga::show_status(b"Setup complete");
@@ -510,6 +514,8 @@ fn text_mode_auth() {
                         Err(e) => {
                             kprintln!("[npk] Installation failed: {}", e);
                             kprintln!("[npk] System halted.");
+                            // SAFETY: cli; hlt stops this core with interrupts
+                            // off and touches no memory.
                             loop { unsafe { core::arch::asm!("cli; hlt"); } }
                         }
                     }
@@ -521,6 +527,8 @@ fn text_mode_auth() {
                 kprintln!();
                 if !setup::run_fresh_install() {
                     kprintln!("[npk] Setup failed. System halted.");
+                    // SAFETY: cli; hlt stops this core with interrupts off and
+                    // touches no memory.
                     loop { unsafe { core::arch::asm!("cli; hlt"); } }
                 }
                 return;
@@ -548,6 +556,8 @@ fn text_mode_auth() {
 
         if attempts >= 10 {
             kprintln!("[npk] Too many failed attempts. System halted.");
+            // SAFETY: cli; hlt stops this core with interrupts off and touches
+            // no memory.
             loop { unsafe { core::arch::asm!("cli; hlt"); } }
         }
     }

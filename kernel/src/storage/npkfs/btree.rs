@@ -104,6 +104,8 @@ fn leaf_entry(buf: &[u8; BLOCK_SIZE], idx: usize) -> BTreeEntryRaw {
 
 fn set_leaf_entry(buf: &mut [u8; BLOCK_SIZE], idx: usize, entry: &BTreeEntryRaw) {
     let off = NODE_HEADER_SIZE + idx * LEAF_ENTRY_SIZE;
+    // SAFETY: BTreeEntryRaw is repr(C) without padding (its fields sum to
+    // LEAF_ENTRY_SIZE, the asserted size), so all of its bytes are initialized.
     let src = unsafe {
         core::slice::from_raw_parts(entry as *const BTreeEntryRaw as *const u8, LEAF_ENTRY_SIZE)
     };

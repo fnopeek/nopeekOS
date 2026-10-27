@@ -156,6 +156,9 @@ const _SB_SIZE: () = assert!(core::mem::size_of::<SuperblockRaw>() == BLOCK_SIZE
 
 impl SuperblockRaw {
     pub fn compute_checksum(&self) -> [u8; 32] {
+        // SAFETY: SuperblockRaw is repr(C) without padding (its fields sum to
+        // BLOCK_SIZE, the asserted size), so its first BLOCK_SIZE - 32 bytes
+        // are initialized.
         let bytes = unsafe {
             core::slice::from_raw_parts(self as *const Self as *const u8, BLOCK_SIZE - 32)
         };
