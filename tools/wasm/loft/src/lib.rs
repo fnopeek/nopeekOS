@@ -2098,10 +2098,12 @@ fn list_data_row(e: &Entry, selected: bool, browsing: bool, on_click: ActionId) 
                     if selected { Token::Accent } else { Token::OnSurfaceMuted },
                 )],
             },
+            // Flex so a narrow window shrinks the name, which then ends in
+            // an ellipsis, instead of pushing it over the Size column.
             Widget::Text {
                 content:   e.name.clone(),
                 style:     TextStyle::Body,
-                modifiers: alloc::vec![],
+                modifiers: alloc::vec![Modifier::Flex(1)],
             },
         ],
         spacing: Spacing::Sm.as_u16(),
