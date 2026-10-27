@@ -608,7 +608,7 @@ fn apply_asset(job: &AssetJob) -> bool {
         };
         let mut hasher = crate::tls::sha256::Sha384::new();
         let mut total_bytes: usize = 0;
-        let mut write_err: Option<&'static str> = None;
+        let mut write_err: Option<alloc::string::String> = None;
         // Progress heartbeat every 8 MiB. The asset size is known
         // from the manifest so we can show a percentage — the
         // download blocks the shell, the line proves it's alive.
@@ -622,8 +622,8 @@ fn apply_asset(job: &AssetJob) -> bool {
             &mut |chunk: &[u8]| -> Result<(), &'static str> {
                 hasher.update(chunk);
                 total_bytes = total_bytes.saturating_add(chunk.len());
-                if let Err(_) = writer.write(chunk) {
-                    write_err = Some("npkfs write failed");
+                if let Err(e) = writer.write(chunk) {
+                    write_err = Some(alloc::format!("{:?}", e));
                     return Err("npkfs write failed");
                 }
                 if total_bytes >= next_report {
