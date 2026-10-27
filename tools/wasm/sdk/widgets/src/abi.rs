@@ -93,6 +93,7 @@ pub enum Token {
     /// Accent at 22 % over `Surface` — focus rings.
     AccentRing      = 15,
     /// Accent at 45 % over `Surface` — focused window border.
+    AccentLine      = 16,
 
     // ── Code tokens (syntax highlighting) ─────────────────────────────
     //
@@ -119,7 +120,6 @@ pub enum Token {
     CodeVariable    = 24,
     /// Language constants (`true` `None` `null`) and escape sequences.
     CodeConstant    = 25,
-    AccentLine      = 16,
     // Appended only.
 }
 
@@ -245,10 +245,8 @@ pub enum TextStyle {
     Caption = 2,
     Muted   = 3,
     Mono    = 4,
-    /// 18 px regular weight — between `Body` (14) and `Title` (24, bold).
-    /// Used for non-bold display text such as input placeholders /
-    /// values where Body reads too small but Title's 600-weight bold
-    /// is too heavy.
+    /// 15 px, between `Body` (13) and `Title` (22). Sizes per style are
+    /// the kernel's `gui::text::style_desc`; weights are not rendered.
     Heading = 5,
     // Appended only.
 }

@@ -274,3 +274,25 @@ fn _keycode_wire_position(k: &KeyCode) -> usize {
         KeyCode::F(_)       => 15,
     }
 }
+
+/// postcard encodes a unit variant by its declaration position, not by its
+/// `= n`, and the kernel decodes by its own declaration order. A token
+/// declared out of place sends a different number than `as u8` says.
+#[cfg(test)]
+mod wire_order {
+    use crate::abi::Token::{self, *};
+
+    const ALL: [Token; 26] = [
+        Surface, SurfaceElevated, SurfaceMuted, OnSurface, OnSurfaceMuted, OnAccent,
+        Accent, AccentMuted, Border, Success, Warning, Danger, Page, SurfaceHover,
+        OnSurfaceFaint, AccentRing, AccentLine, CodeKeyword, CodeControl, CodeString,
+        CodeComment, CodeNumber, CodeFunction, CodeType, CodeVariable, CodeConstant,
+    ];
+
+    #[test]
+    fn token_wire_index_is_its_value() {
+        for t in ALL {
+            assert_eq!(postcard::to_allocvec(&t).unwrap(), [t as u8], "{:?}", t);
+        }
+    }
+}
