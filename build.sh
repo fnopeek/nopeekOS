@@ -1030,6 +1030,12 @@ case "${1:-}" in
         KEY_FILE="$PROJECT_DIR/update.key"
         [ -d "$RELEASE_DIR/modules" ] || { err "no release/modules/"; exit 1; }
         [ -f "$KEY_FILE" ] || { err "no update.key - cannot sign"; exit 1; }
+        # The same gate as `release`: nothing is signed unless forge
+        # translates every module completely.
+        if ! python3 "$PROJECT_DIR/tools/forge-gate.py"; then
+            err "forge-Tor: nicht freigabefaehig — es wird NICHTS signiert"
+            exit 1
+        fi
         OLD_MANIFEST="$RELEASE_DIR/modules/manifest"
         MODULE_MANIFEST="issued=$(date +%s)
 
