@@ -2499,7 +2499,8 @@ fn blit_to_host_fb(src_pixels: &[u8], src_w: u32, src_h: u32) {
         if src_off + row_bytes > src_pixels.len() { break; }
         // SAFETY: `row < h <= height` and `row_bytes <= width * 4 <= pitch`, so the write
         // stays in the `pitch * height` front shadow buffer; the source range was checked
-        // above. Assumes no mode switch frees that buffer during the blit.
+        // above. The shadow buffers are made once at boot (`init_from_boot_info`) and
+        // never freed while the system runs, so pointer and geometry stay one pair.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 src_pixels.as_ptr().add(src_off),
