@@ -528,7 +528,7 @@ pub fn leaf_entry(vaddr: u64) -> Option<(u64, u8)> {
     }
 }
 
-/// Count mapped pages: (huge_2mb, small_4kb)
+/// Count mapped pages: (huge_2mb, small_4kb). The caller holds `PT_LOCK`.
 fn count_mappings(pml4: u64) -> (usize, usize) {
     let mut huge = 0;
     let mut small = 0;
@@ -540,18 +540,22 @@ fn count_mappings(pml4: u64) -> (usize, usize) {
 
         let pdpt = entry_addr(pml4_e);
         for j in 0..ENTRY_COUNT {
+            // SAFETY: a present, non-huge entry points at a table frame in the
+            // identity map; `PT_LOCK` keeps it from changing under the walk.
             let pdpt_e = unsafe { read_entry(pdpt, j) };
             if pdpt_e & PageFlags::PRESENT.bits() == 0 { continue; }
             if pdpt_e & PageFlags::HUGE.bits() != 0 { huge += 512; continue; } // 1GB = 512 x 2MB
 
             let pdt = entry_addr(pdpt_e);
             for k in 0..ENTRY_COUNT {
+                // SAFETY: as above, one level down.
                 let pdt_e = unsafe { read_entry(pdt, k) };
                 if pdt_e & PageFlags::PRESENT.bits() == 0 { continue; }
                 if pdt_e & PageFlags::HUGE.bits() != 0 { huge += 1; continue; }
 
                 let pt = entry_addr(pdt_e);
                 for l in 0..ENTRY_COUNT {
+                    // SAFETY: as above, one level down.
                     let pt_e = unsafe { read_entry(pt, l) };
                     if pt_e & PageFlags::PRESENT.bits() != 0 { small += 1; }
                 }

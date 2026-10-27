@@ -210,6 +210,10 @@ static AP_BOOT_GDT: [u64; 3] = [
 
 /// Copy trampoline to 0x8000 and fill in shared data (CR3, GDT, IDT, entry)
 fn setup_trampoline() {
+    // SAFETY: runs on the boot core before any AP is started, so nothing else
+    // touches the trampoline page. 0x8000 is below 1 MiB, identity-mapped and
+    // reserved for this; every write below stays inside the trampoline image
+    // (offsets from `trampoline.s`), and the asm only reads CR3 and the IDTR.
     unsafe {
         let start = &smp_trampoline_start as *const u8;
         let end = &smp_trampoline_end as *const u8;
