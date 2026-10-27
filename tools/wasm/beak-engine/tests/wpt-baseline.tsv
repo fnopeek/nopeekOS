@@ -3263,9 +3263,9 @@ PASS	CSS2/uri-018.xht
 FAIL	CSS2/vertical-align-baseline-003.xht
 PASS	CSS2/vertical-align-baseline-006.xht
 PASS	CSS2/vertical-align-baseline-007.xht
-FAIL	CSS2/vertical-align-baseline-008.xht
+PASS	CSS2/vertical-align-baseline-008.xht
 FAIL	CSS2/vertical-align-baseline-009.xht
-FAIL	CSS2/vertical-align-baseline-010.xht
+PASS	CSS2/vertical-align-baseline-010.xht
 INCONCLUSIVE	CSS2/vertical-align-nested-top-001.html
 PASS	CSS2/vertical-align-sub-001.xht
 PASS	CSS2/vertical-align-super-001.xht
@@ -5254,7 +5254,7 @@ PASS	css-sizing/intrinsic-height-abspos-percentage-child.html
 FAIL	css-sizing/intrinsic-height-abspos-stretch-percentage-child.html
 PASS	css-sizing/intrinsic-percent-non-replaced-004.html
 PASS	css-sizing/intrinsic-percent-non-replaced-005.html
-FAIL	css-sizing/intrinsic-size-min-content-box-sizing.html
+PASS	css-sizing/intrinsic-size-min-content-box-sizing.html
 FAIL	css-sizing/max-content-input-001.html
 FAIL	css-sizing/percentage-width-subpixels.tentative.html
 FAIL	css-sizing/range-percent-intrinsic-size-1.html
@@ -5768,7 +5768,7 @@ PASS	html-forms/centering-001.html
 PASS	html-forms/centering-002.html
 PASS	html-forms/centering-003.html
 PASS	html-forms/centering-004.html
-FAIL	html-forms/field-sizing-placeholder-stretch.html
+PASS	html-forms/field-sizing-placeholder-stretch.html
 PASS	html-forms/input-checkbox-no-centering.html
 PASS	html-forms/input-date-baseline-min-height.html
 PASS	html-forms/input-date-baseline-print.html

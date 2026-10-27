@@ -341,8 +341,8 @@ numbers live in files, not in this paragraph:**
 
 | Oracle | What it measures | Runner |
 |---|---|---|
-| WPT CSS reftests | rendering against the reference, without test vehicles | `docs/spec/CONFORMANCE.md` |
-| test262 | the JavaScript language, with V8 on the same corpus as yardstick | `…/beak-engine/tests/test262.rs` |
+| WPT CSS reftests | rendering against the reference | `docs/spec/CONFORMANCE.md` |
+| test262 | the JavaScript language, with V8 on the same corpus as yardstick | `docs/spec/CONFORMANCE.md` |
 | DOM surface | a Chromium call census of real pages | `…/beak-engine/tests/apigap.rs` |
 
 The counterpart runs on the device: `beak:selftest`, a check page baked
