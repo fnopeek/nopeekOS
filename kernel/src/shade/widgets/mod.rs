@@ -1569,8 +1569,10 @@ fn find_click_target(
     for m in modifiers_of_ref(widget) {
         if let abi::Modifier::OnClick(id) = m { *out = Some(*id); return; }
     }
-    if let abi::Widget::Button { on_click, .. } = widget {
-        *out = Some(*on_click);
+    match widget {
+        abi::Widget::Button { on_click, .. } => *out = Some(*on_click),
+        abi::Widget::Checkbox { on_toggle, .. } => *out = Some(*on_toggle),
+        _ => {}
     }
 }
 

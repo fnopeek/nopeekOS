@@ -55,7 +55,8 @@ token's alpha byte; translucency comes only from a panel's fill opacity
 
 An app that paints its own pixels reads a resolved token with
 `npk_theme_token(id)` (needs the `RENDER` right; 0 for an unknown id). It
-answers from the active theme, not from the glass palette.
+answers from the palette the caller's window is drawn with: the glass
+palette for a panel, the active theme otherwise.
 
 ## 1a. Code ramp
 
@@ -367,10 +368,13 @@ draws no title and no shadow; the app fills the inside.
 
 ### Border colour
 
+A colour pinned with `shade.border_active` / `shade.border_inactive`
+(hex) wins in both cases. Otherwise:
+
 | | Wallpaper set | No wallpaper |
 |---|---|---|
-| Focused | 45 degree gradient between wallpaper palette colours 1 and 2, each raised to luma >= 80 | `shade.border_active` (hex) or `AccentLine` |
-| Unfocused | wallpaper palette colour 8 | `shade.border_inactive` (hex) or `Border` |
+| Focused | 45 degree gradient between wallpaper palette colours 1 and 2, each raised to luma >= 80 | `AccentLine` |
+| Unfocused | wallpaper palette colour 8 | `Border` |
 | Blend | 235/256 | 130/256 |
 
 ### Focus halo
@@ -448,9 +452,9 @@ The rest is app code. The values the first-party apps share:
 ## 6. Config keys
 
 `set` and `unset` re-render every scene at once. `shade.gaps`,
-`shade.border` and `shade.rounding` are read when the compositor starts
-and when `shade.scale` changes; `shade.border_active` and
-`shade.border_inactive` only when the compositor starts.
+`shade.border`, `shade.rounding`, `shade.border_active` and
+`shade.border_inactive` apply on the next frame; a changed length
+re-tiles the workspace.
 `theme <dark|light|auto>` is also an intent of its own.
 
 | Key | Values | Default | Changes |
@@ -462,8 +466,8 @@ and when `shade.scale` changes; `shade.border_active` and
 | `shade.gaps` | px | 8 | Gap between tiles |
 | `shade.border` | px | 1 | Window border width |
 | `shade.rounding` | px | 10 | Window corner radius |
-| `shade.border_active` | hex | `AccentLine` | Focused border, without wallpaper |
-| `shade.border_inactive` | hex | `Border` | Unfocused border, without wallpaper |
+| `shade.border_active` | hex | `AccentLine` | Focused border, pinned (wins over the wallpaper) |
+| `shade.border_inactive` | hex | `Border` | Unfocused border, pinned (wins over the wallpaper) |
 | `shade.glow` | px, 0 off | 6 | Focus halo width |
 | `shade.bar_margin` | px | 6 | Gap between a strut panel and the screen edge |
 | `shade.blur` | 0..8 | auto | Glass blur |

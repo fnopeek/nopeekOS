@@ -145,7 +145,7 @@ tree is dropped. Its own `modifiers` are ignored; style the `child`.
 | `Button { label, icon, on_click, modifiers }`       | Label in `Body` plus an optional 16 px icon (`IconId::None` = none). Fills `Accent` unless a `Background` is given. Fixed inner padding (8 px horizontal, 4 px vertical); `Padding` modifiers do not change it. |
 | `Input { value, placeholder, on_submit, modifiers }`| Single-line text field, edited by the compositor (see below). |
 | `TextArea { value, placeholder, spans, modifiers }` | Multi-line editor in `Mono`, edited by the compositor. `spans` colour byte ranges of `value` (syntax highlighting). |
-| `Checkbox { value, on_toggle, modifiers }`          | 16 px box, `Accent` fill when `value`. `on_toggle` is never fired; give it `Modifier::OnClick` to react to clicks. |
+| `Checkbox { value, on_toggle, modifiers }`          | 16 px box, `Accent` fill when `value`. A click sends `Action(on_toggle)`; the app flips `value`. |
 | `Slider { value, on_change, modifiers }`            | Horizontal track with a draggable thumb; `value` in `0..=SLIDER_MAX` (1000). At least 80 px wide; meant to `Flex`/stretch. |
 | `Spacer { flex }`                                   | Flexible empty space (see above). |
 | `Divider`                                           | Horizontal 1 px line in the `Border` token across the parent's width. For a vertical line use `prefab::mark`. |
@@ -444,7 +444,7 @@ skipped.
 | `Picked { path, tag }` | A `host::pick` file dialog finished; empty `path` = cancelled, `tag` as passed. |
 | `CloseRequest` | The user asked to close the window after `npk_window_set_close_guard(1)`. Call `host::close_widget()` to go; a second close gesture or a few seconds of silence close it anyway. |
 | `PopupDone { popup }` | The compositor closed popup `popup` opened with `npk_popup`. |
-| `Focus(bool)` | Declared on the wire; the compositor never sends it. |
+| `Focus(bool)` | The app's window (or one of its popups) got (`true`) or lost (`false`) the keyboard. Moving between the window and its own popups sends nothing. |
 
 ---
 

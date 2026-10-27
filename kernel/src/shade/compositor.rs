@@ -254,6 +254,11 @@ pub struct Compositor {
     pub border_active: Option<u32>,
     /// Inactive window border color — `None` = palette `Border`.
     pub border_inactive: Option<u32>,
+    /// Config generation the chrome lengths and border colours were read at.
+    chrome_gen: u32,
+    /// The widget window last told `Event::Focus(true)`: the focused window,
+    /// or the parent of the focused popup.
+    focus_told: Option<WindowId>,
     /// Corner radius (in pixels, scaled).
     pub rounding: u32,
     /// Full redraw needed (including aurora background).
@@ -319,6 +324,8 @@ impl Compositor {
             border,
             border_active,
             border_inactive,
+            chrome_gen: crate::config::generation(),
+            focus_told: None,
             rounding,
             needs_full_redraw: true,
             extra_damage: Vec::new(),
@@ -360,7 +367,9 @@ impl Compositor {
     /// Border colour actually used for the focused / unfocused tile: a
     /// wallpaper theme overrides the palette tokens.
     fn active_border_color(&self) -> u32 {
-        if crate::theme::is_active() {
+        if let Some(c) = self.border_active {
+            c
+        } else if crate::theme::is_active() {
             crate::gui::background::accent_color()
         } else {
             self.border_active()
@@ -368,7 +377,9 @@ impl Compositor {
     }
 
     fn inactive_border_color(&self) -> u32 {
-        if crate::theme::is_active() {
+        if let Some(c) = self.border_inactive {
+            c
+        } else if crate::theme::is_active() {
             crate::theme::inactive_border()
         } else {
             self.border_inactive()
@@ -832,6 +843,47 @@ impl Compositor {
             self.needs_full_redraw = true;
         }
         changed
+    }
+
+    /// Send `Event::Focus` when the keyboard moved to another app: false to
+    /// the widget window that had it, true to the one that has it now. A
+    /// popup counts as its parent, so opening a menu changes nothing.
+    fn tell_focus(&mut self) {
+        let now = self.focused
+            .and_then(|f| self.windows.iter().find(|w| w.id == f))
+            .map(|w| w.popup_of.unwrap_or(w.id))
+            .filter(|id| self.windows.iter().any(|w| w.id == *id
+                && w.kind == crate::shade::window::WindowKind::Widget));
+        if now == self.focus_told { return; }
+        use crate::shade::widgets::abi::Event;
+        if let Some(old) = self.focus_told {
+            if self.windows.iter().any(|w| w.id == old) {
+                crate::shade::widgets::push_event(old.0, Event::Focus(false));
+            }
+        }
+        if let Some(new) = now {
+            crate::shade::widgets::push_event(new.0, Event::Focus(true));
+        }
+        self.focus_told = now;
+    }
+
+    /// Take a `set shade.gaps|border|rounding|border_active|border_inactive`
+    /// at once: re-read them when the config changed, re-tile on a new
+    /// length.
+    fn refresh_chrome(&mut self) {
+        let generation = crate::config::generation();
+        if generation == self.chrome_gen { return; }
+        self.chrome_gen = generation;
+        self.border_active = crate::config::get("shade.border_active")
+            .and_then(|s| parse_hex_color(&s));
+        self.border_inactive = crate::config::get("shade.border_inactive")
+            .and_then(|s| parse_hex_color(&s));
+        let lengths = chrome_lengths();
+        if lengths != (self.gaps, self.border, self.rounding) {
+            (self.gaps, self.border, self.rounding) = lengths;
+            self.retile();
+        }
+        self.needs_full_redraw = true;
     }
 
     /// The UI scale changed from `old` to `new` (1/120 units): apps sized
@@ -2069,6 +2121,8 @@ impl Compositor {
     /// scene is built; dirty flags are cleared by the callers that repaint
     /// those windows (`render`, `render_damaged`).
     pub fn compose(&mut self, target: *mut u8, info: &FbInfo, mut damage: Vec<Rect>) -> Vec<Rect> {
+        self.refresh_chrome();
+        self.tell_focus();
         let frame = self.build_scene();
         scene::expand_damage(&frame, &mut damage, Rect::new(0, 0, info.width, info.height));
         crate::shade::gpu_scene::compose(&frame, &*self, target, info, &damage);
@@ -2122,6 +2176,7 @@ impl Compositor {
         }
         let border = self.border;
         let rounding = self.rounding;
+        let border_pinned = self.border_active.is_some();
         let opacity = crate::shade::glass::params().loop_opacity;
         let in_motion = self.geometry_in_motion() || self.animation.is_some();
 
@@ -2180,7 +2235,7 @@ impl Compositor {
                 else { rounding.saturating_sub(border) };
             if !p.panel && !p.fullscreen {
                 let (ba, bb, b_op) = if p.focused {
-                    if crate::theme::is_active() {
+                    if crate::theme::is_active() && !border_pinned {
                         let (ga, gb) = crate::theme::border_gradient();
                         (ga, gb, BORDER_ACTIVE_OPACITY)
                     } else {

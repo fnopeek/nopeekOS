@@ -209,7 +209,8 @@ pub(crate) fn npk_theme_token(ctx: &mut HostState, token_id: i32) -> i32 {
         Some(t) => t,
         None => return 0,
     };
-    crate::shade::widgets::palette::resolve(token) as i32
+    // The palette the caller's window is drawn with: panels are glass.
+    crate::shade::widgets::palette::for_window(ctx.widget_window_id).colors[token as u8 as usize] as i32
 }
 
 pub(crate) fn npk_cursor_pos(ctx: &mut HostState) -> i32 {
