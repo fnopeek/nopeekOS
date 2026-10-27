@@ -2429,6 +2429,12 @@ pub fn make_realm() -> Realm {
     // One prototype, two containers, so that `x instanceof Storage` and
     // `Storage.prototype.getItem.call(…)` work; a flat object with methods on
     // itself would fail both.
+    //
+    // Each area holds at most 5 MiB of UTF-16 code units, keys and values
+    // together, as Gecko and Chromium allow per origin (HTML §12.2.4 leaves
+    // the figure to the user agent); `setItem` past it throws
+    // `QuotaExceededError`.
+    const STORAGE_QUOTA_UNITS: usize = 5 * 1024 * 1024;
     let make_storage_proto = |object_proto: &Gc, function_proto: &Gc| -> Gc {
         let st = new_obj(Some(object_proto.clone()));
         let d = |o: &Gc, n: &str, f: NativeFn, l: usize| {
@@ -2445,6 +2451,24 @@ pub fn make_realm() -> Realm {
             let v = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
             let key = alloc::format!("__s_{k}");
             if let Value::Obj(o) = &t {
+                // The quota counts UTF-16 code units of every key and value
+                // in this area, the entry being replaced excluded.
+                let units = |s: &str| s.chars().map(char::len_utf16).sum::<usize>();
+                let used: usize = {
+                    let b = o.borrow();
+                    b.own_keys().iter()
+                        .filter(|n| n.starts_with("__s_") && n[..] != key[..])
+                        .map(|n| units(&n[4..]) + match b.get_own(n).and_then(|p| p.value.as_ref()) {
+                            Some(Value::Str(s)) => units(s),
+                            _ => 0,
+                        })
+                        .sum()
+                };
+                if used + units(&k) + units(&v) > STORAGE_QUOTA_UNITS {
+                    crate::cuts::note(crate::cuts::Cut::StorageQuota);
+                    return Err(super::dombind::dom_exc(i, "QuotaExceededError",
+                        "the storage quota of this origin is exceeded"));
+                }
                 o.borrow_mut().define(&key, Prop {
                     value: Some(Value::Str(v)), get: None, set: None,
                     writable: true, enumerable: false, configurable: true });

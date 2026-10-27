@@ -11,7 +11,7 @@
 //! below are the parts of `igc_configure`/`igc_up` that set up the
 //! queues and the interrupt, not the PHY bring-up.
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU16, Ordering};
 use spin::Mutex;
 use crate::{kprintln, pci};
 use crate::hw::{DmaRegion, Mmio};
@@ -275,7 +275,7 @@ fn write_itr(d: &mut Igc) {
 }
 
 static DEVICE: Mutex<Option<Igc>> = Mutex::new(None);
-static RX_VECTOR: AtomicU8 = AtomicU8::new(0);
+static RX_VECTOR: AtomicU16 = AtomicU16::new(0);
 
 const IGC_CTRL: u32 = 0x0000;
 const IGC_CTRL_RFCE: u32 = 0x0800_0000;
@@ -817,4 +817,4 @@ pub fn link_up() -> bool {
 
 
 /// LAPIC vector of the RX queue interrupt, 0 when polled.
-pub fn rx_irq_vector() -> u8 { RX_VECTOR.load(Ordering::Acquire) }
+pub fn rx_irq_vector() -> crate::irq::Irq { RX_VECTOR.load(Ordering::Acquire) }

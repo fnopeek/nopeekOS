@@ -20,6 +20,7 @@ pub mod charset;
 pub mod cookies;
 pub mod color;
 pub mod css;
+pub mod cuts;
 pub mod dom;
 pub mod entities;
 pub mod fonts;

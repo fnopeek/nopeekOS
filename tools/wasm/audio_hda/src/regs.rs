@@ -44,16 +44,13 @@ pub const SD_INT_MASK: u32 = 0x1c; // DESC_ERR 0x10 | FIFO_ERR 0x08 | COMPLETE 0
 // is index `iss`.
 pub const AZX_INT_GLOBAL_EN: u32 = 1 << 31;
 
-// Stream format: base 48k, 16-bit, 2ch = 0x0011.
-//   bit14 base(0=48k), bits[6:4] bits-per-sample(001=16), bits[3:0] chan-1(0001=2)
-pub const FMT_48K_S16_STEREO: u16 = 0x0011;
-
 // ── Codec verbs ─────────────────────────────────────────────────────────
 // Command dword: [31:28] codec addr, [27:20] node id, [19:0] verb.
 // "Long" verbs: (12-bit id << 8) | 8-bit payload.
 // "Short" verbs: (4-bit id << 16) | 16-bit payload.
 
 // GET_PARAMETER (0xF00) parameter ids:
+pub const PARAM_VENDOR_ID: u32 = 0x00;
 pub const PARAM_SUB_NODE_COUNT: u32 = 0x04; // [23:16] start, [7:0] count
 pub const PARAM_FUNCTION_TYPE: u32 = 0x05; // [7:0]: 0x01 = audio function group
 pub const PARAM_AUDIO_WIDGET_CAP: u32 = 0x09; // [23:20] = widget type
@@ -65,15 +62,13 @@ pub const PARAM_AMP_IN_CAP: u32 = 0x0D;  // [14:8] num steps
 /// pure mute switch — an amp that can only open or close.
 pub const AMP_CAP_MUTE: u32 = 1 << 31;
 /// Widget capability "has an output amp" (AC_WCAP_OUT_AMP). Without this
-/// bit an amp verb to the widget is undefined — see `unmute_out`.
+/// bit an amp verb to the widget is undefined.
 pub const WCAP_OUT_AMP: u32 = 1 << 2;
 /// Widget capability "has an input amp" (AC_WCAP_IN_AMP).
 pub const WCAP_IN_AMP: u32 = 1 << 1;
 
 // Widget types (from AUDIO_WIDGET_CAP >> 20 & 0xF):
 pub const WTYPE_DAC: u32 = 0x0; // audio output
-pub const WTYPE_MIXER: u32 = 0x2;
-pub const WTYPE_SELECTOR: u32 = 0x3;
 pub const WTYPE_PIN: u32 = 0x4;
 
 pub const FUNC_TYPE_AFG: u32 = 0x01;
@@ -81,7 +76,6 @@ pub const FUNC_TYPE_AFG: u32 = 0x01;
 // Build a 20-bit verb field.
 pub fn vget_param(param: u32) -> u32 { (0xF00 << 8) | (param & 0xFF) }
 pub fn vget_config_default() -> u32 { 0xF1C << 8 }
-pub fn vget_conn_entry(idx: u32) -> u32 { (0xF02 << 8) | (idx & 0xFF) }
 pub fn vset_power(state: u32) -> u32 { (0x705 << 8) | (state & 0xFF) }
 pub fn vset_pin_ctl(val: u32) -> u32 { (0x707 << 8) | (val & 0xFF) }
 pub fn vset_eapd(val: u32) -> u32 { (0x70C << 8) | (val & 0xFF) }
@@ -90,11 +84,5 @@ pub fn vset_conn_select(val: u32) -> u32 { (0x701 << 8) | (val & 0xFF) }
 pub fn vset_format(fmt: u16) -> u32 { (0x2 << 16) | (fmt as u32) }
 pub fn vset_amp(payload: u16) -> u32 { (0x3 << 16) | (payload as u32) }
 
-// Pin widget control: bit6 = output enable.
-pub const PIN_CTL_OUT_EN: u32 = 1 << 6;
 // EAPD/BTL enable: bit1 = EAPD.
 pub const EAPD_ENABLE: u32 = 1 << 1;
-// Amp set: output amp, both channels, unmuted, gain in [6:0].
-pub const AMP_SET_OUT_BOTH: u16 = 0x8000 | 0x2000 | 0x1000; // = 0xB000
-/// Bit 14 instead of bit 15 = input amp; the index sits in [11:8].
-pub const AMP_SET_IN_BOTH: u16 = 0x4000 | 0x2000 | 0x1000; // = 0x7000

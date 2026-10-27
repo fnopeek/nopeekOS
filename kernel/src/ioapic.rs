@@ -302,10 +302,11 @@ pub fn unmask(gsi: u32) {
     });
 }
 
-/// Re-point `gsi` at LAPIC `dest_apic` (the core that waits on it).
-pub fn set_dest(gsi: u32, dest_apic: u32) {
+/// Re-point `gsi` at `vector` on LAPIC `dest_apic` (the core that waits
+/// on it). The mask bit and trigger mode stay as they are.
+pub fn set_target(gsi: u32, vector: u8, dest_apic: u32) {
     with_pin(gsi, |a, pin| {
         let (lo, _) = read_entry(a, pin);
-        write_entry(a, pin, lo, (dest_apic & 0xFF) << 24);
+        write_entry(a, pin, (lo & !0xFF) | vector as u32, (dest_apic & 0xFF) << 24);
     });
 }

@@ -491,6 +491,7 @@ pub fn decode_all(pairs: &[(String, Vec<u8>)]) -> ImageMap {
     for (src, bytes) in pairs {
         if let Some(img) = decode(bytes) {
             if img.bgra.len() > budget {
+                crate::cuts::note(crate::cuts::Cut::ImageBudget);
                 continue;
             }
             budget -= img.bgra.len();

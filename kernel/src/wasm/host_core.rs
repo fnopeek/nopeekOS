@@ -579,6 +579,32 @@ pub(crate) fn npk_audio_open(ctx: &mut HostState) -> i32 {
     crate::audio::open_for(ctx.pid)
 }
 
+/// The format of the caller's stream `slot` (`audio::Encoding` numbering);
+/// empties its ring. -1 for a foreign slot or a format the mixer does not
+/// take.
+pub(crate) fn npk_audio_format(ctx: &mut HostState, slot: i32, rate: i32, encoding: i32, channels: i32) -> i32 {
+    let Some(fmt) = audio_format(rate, encoding, channels) else { return -1 };
+    if slot < 0 { return -1; }
+    if crate::audio::set_format_for(slot as usize, ctx.pid, fmt) { 0 } else { -1 }
+}
+
+/// The audio driver's device format, what `npk_audio_poll_mix` produces.
+/// Requires `Rights::HARDWARE`, like the poll itself.
+pub(crate) fn npk_audio_device_format(ctx: &mut HostState, rate: i32, encoding: i32, channels: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    let Some(fmt) = audio_format(rate, encoding, channels) else { return -1 };
+    if crate::audio::set_device_format(fmt) { 0 } else { -1 }
+}
+
+fn audio_format(rate: i32, encoding: i32, channels: i32) -> Option<crate::audio::Format> {
+    let encoding = crate::audio::Encoding::from_abi(encoding)?;
+    let rate = u32::try_from(rate).ok()?;
+    let channels = u8::try_from(channels).ok()?;
+    Some(crate::audio::Format { rate, encoding, channels })
+}
+
 pub(crate) fn npk_audio_close(ctx: &mut HostState, slot: i32) -> i32 {
     if slot < 0 { return -1; }
     if crate::audio::close_for(slot as usize, ctx.pid) { 0 } else { -1 }
@@ -1670,9 +1696,8 @@ pub(crate) fn npk_irq_register(ctx: &mut HostState, entry: i32) -> i32 {
     // Without a PCI device there is no config address.
     let hw = match ctx.hw.as_mut() { Some(h) if h.is_pci => h, _ => return -1 };
     if !(0..2048).contains(&entry) { return -1; }
-    // One vector per driver. Registering again returns the same one — the
-    // pool has 16 vectors and is never freed, so a loop around this call
-    // would otherwise take them all.
+    // One interrupt per driver: registering again returns the same one, so
+    // a loop around this call cannot take the vectors of its core.
     if hw.irq_vector != 0 { return hw.irq_vector as i32; }
     match crate::irq::register(hw.pci_addr, entry as u16) {
         Some(v) => { hw.irq_vector = v; v as i32 }
@@ -1811,13 +1836,13 @@ pub(crate) fn npk_irq_arm(ctx: &mut HostState, vector: i32) -> i64 {
     // Arming re-routes the device's MSI to the calling core — only for the
     // module that owns it.
     if !owns_vector(ctx, vector) { return -1; }
-    crate::irq::arm(vector as u8) as i64
+    crate::irq::arm(vector as crate::irq::Irq) as i64
 }
 
 pub(crate) fn npk_irq_wait(ctx: &mut HostState, vector: i32, since: i64, timeout_ms: i32) -> i32 {
     if !owns_vector(ctx, vector) || since < 0 { return -1; }
     let t = if timeout_ms <= 0 { 1000 } else { timeout_ms as u64 };
-    if crate::irq::wait(vector as u8, since as u64, t) { 1 } else { 0 }
+    if crate::irq::wait(vector as crate::irq::Irq, since as u64, t) { 1 } else { 0 }
 }
 
 pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) -> i32 {

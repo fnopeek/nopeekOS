@@ -692,7 +692,7 @@ pub fn yield_ready() -> bool {
 /// snapshots `since` via `irq::arm(vector)` before submitting the device
 /// command. The MSI-X targets this core; the ISR signals the registered
 /// waiter (`irq::set_waiter`), which ends the park.
-pub fn irq_wait(vector: u8, since: u64, timeout_ms: u64) -> bool {
+pub fn irq_wait(vector: crate::irq::Irq, since: u64, timeout_ms: u64) -> bool {
     let Some(w) = current_waker() else { return false };
     let freq = crate::interrupts::tsc_freq();
     let deadline = crate::interrupts::rdtsc() + timeout_ms.saturating_mul(freq / 1000);

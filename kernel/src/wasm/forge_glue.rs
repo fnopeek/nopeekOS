@@ -816,13 +816,23 @@ host_imports! {
     ctx fn npk_battery_detail(rate: i32, remaining: i32, full: i32, voltage_mv: i32, unit: i32);
 
     // ── Audio mailbox + mixer ────────────────────────────────────────────
-    // Apps push PCM (S16LE / 48 kHz / stereo) into per-slot rings; the HDA
-    // driver pulls a mixed stream via npk_audio_poll_mix. Ungated: audio
-    // playback is not a security boundary, and the kernel holds no HDA
-    // knowledge — it just shuttles + sum-mixes bytes.
+    // Apps push PCM into per-slot rings, S16LE / 48 kHz / stereo unless
+    // npk_audio_format says otherwise; the HDA driver pulls a mixed stream
+    // in its device format via npk_audio_poll_mix. Ungated: audio playback
+    // is not a security boundary, and the kernel holds no HDA knowledge; it
+    // shuttles, converts and sum-mixes bytes.
 
     // npk_audio_open() -> slot index, or -1 if no slot free.
     ctx fn npk_audio_open() -> i32;
+
+    // npk_audio_format(slot, rate, encoding, channels) -> 0 / -1.
+    // encoding: 0 = S16LE, 1 = S32LE, 2 = F32LE; 1 or 2 channels; empties
+    // the ring.
+    ctx fn npk_audio_format(slot: i32, rate: i32, encoding: i32, channels: i32) -> i32;
+
+    // npk_audio_device_format(rate, encoding, channels) -> 0 / -1 (driver
+    // side): what npk_audio_poll_mix produces, up to 8 channels.
+    ctx fn npk_audio_device_format(rate: i32, encoding: i32, channels: i32) -> i32;
 
     // npk_audio_close(slot) -> 0.
     ctx fn npk_audio_close(slot: i32) -> i32;

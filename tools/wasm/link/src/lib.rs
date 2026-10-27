@@ -50,7 +50,7 @@ fn set_light_dismiss(on: bool) {
 fn log(msg: &str) { host::log_serial(msg); }
 
 #[global_allocator]
-static ALLOCATOR: nopeek_widgets::bump::Bump<{ 256 * 1024 }> = nopeek_widgets::bump::Bump::new();
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -101,7 +101,6 @@ struct St {
     focus: u32,
     msg: &'static str,
     msg_err: bool,
-    heap_base: usize,
 }
 
 impl St {
@@ -572,7 +571,6 @@ fn render(st: &St) -> Widget {
 }
 
 fn commit_tree(st: &St) {
-    ALLOCATOR.reset(st.heap_base);
     let tree = render(st);
     match wire::encode(&tree) {
         Ok(bytes) => { if !host::scene_commit(&bytes) { log("[link] commit failed"); } }
@@ -691,7 +689,6 @@ pub extern "C" fn _start() {
         focus: 1,
         msg: "",
         msg_err: false,
-        heap_base: ALLOCATOR.mark(),
     };
     st.refresh();
     // A list to show. While linked a scan runs in slices beside the link

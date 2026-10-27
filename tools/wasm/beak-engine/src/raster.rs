@@ -214,7 +214,9 @@ fn cache_put(
 ) {
     let n = img.bgra.len();
     if n > budget {
-        return; // one picture may not evict the whole cache for itself
+        // One picture may not evict the whole cache for itself.
+        crate::cuts::note(crate::cuts::Cut::CacheTooSmall);
+        return;
     }
     {
         let mut c = slots.borrow_mut();
@@ -652,6 +654,7 @@ impl Engine {
                 // pixels are live for this page whether or not they are shared.
                 let n = img.bgra.len();
                 if n > self.img_budget.get() {
+                    crate::cuts::note(crate::cuts::Cut::ImageBudget);
                     continue;
                 }
                 self.img_budget.set(self.img_budget.get() - n);
@@ -1042,6 +1045,8 @@ impl Engine {
                                 if img.bgra.len() <= eng.img_budget.get() {
                                     eng.img_budget.set(eng.img_budget.get() - img.bgra.len());
                                     eng.images.borrow_mut().insert(key, alloc::rc::Rc::new(img));
+                                } else {
+                                    crate::cuts::note(crate::cuts::Cut::SvgBudget);
                                 }
                             }
                         }
@@ -1122,6 +1127,7 @@ impl Engine {
         let Some(img) = hit else { return false };
         let n = img.bgra.len();
         if n > self.css_img_budget.get() {
+            crate::cuts::note(crate::cuts::Cut::CssImageBudget);
             return false;
         }
         self.css_img_budget.set(self.css_img_budget.get() - n);

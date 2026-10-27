@@ -39,228 +39,348 @@
 //!   would deadlock the parked waiter. Snapshot/submit under the lock, drop it,
 //!   then `arm`/`wait`, then re-acquire to service.
 //!
+//! Vectors are per core, as Linux' `irq_matrix`: each core has the whole
+//! device range, and a driver holds an interrupt number (`Irq`) that stays
+//! put while `arm` moves its vector to another core.
+//!
 //! WASM drivers use the mirror host-fns `npk_irq_register` / `npk_irq_arm` /
 //! `npk_irq_wait` (see `wasm.rs`). MSI-X when the device has it (NIC / NVMe /
 //! modern virtio), plain MSI with one vector otherwise (RTL8822CE).
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::drivers::pci::{self, PciAddr};
 use crate::interrupts::{DEVICE_IRQ_VEC_BASE, DEVICE_IRQ_VEC_COUNT};
+use crate::smp::fiber::{Waker, NO_WAKER};
 
-/// Per-vector registration: which device/MSI-X-entry a vector drives, and the
-/// LAPIC the IRQ is currently pointed at. Lets `arm()` re-route the IRQ to the
-/// core that is about to wait on it — so a device's interrupt always wakes the
-/// right core out of HLT regardless of which fiber/core services it.
-#[derive(Clone, Copy)]
-struct IrqReg {
-    dev: PciAddr,
-    /// MSI-X table entry, or `MSI` for a plain-MSI device (one vector).
-    entry: u16,
-    last_dest: u32, // APIC ID the message currently targets
+/// An interrupt number: what `register` hands out and a driver passes back,
+/// 0 for none. It stays the same while the vector behind it moves from core
+/// to core, as Linux' IRQ number against its per-CPU `vector_irq`.
+pub type Irq = u16;
+
+/// Cores the matrix serves: an xAPIC id has 8 bits.
+const CORES: usize = 256;
+/// Every device vector of every core can carry one interrupt.
+const NR_IRQS: usize = DEVICE_IRQ_VEC_COUNT * CORES;
+/// Descriptors are allocated this many at a time, on first use.
+const CHUNK: usize = 128;
+/// Words of the per-core vector bitmap.
+const WORDS: usize = DEVICE_IRQ_VEC_COUNT.div_ceil(64);
+
+/// The part of an interrupt the ISR and a waiting fiber read without a lock.
+struct Desc {
+    /// Bumped by the ISR. A driver snapshots it before submitting work and
+    /// waits for it to advance.
+    fired: AtomicU64,
+    /// The fiber parked on this interrupt; the ISR signals it.
+    waiter: AtomicU32,
+    /// I/O APIC input of a line-routed interrupt.
+    gsi: AtomicU32,
+    /// The line is level-triggered: the ISR masks it, `arm` unmasks it.
+    /// Linux' `IRQF_ONESHOT` for a threaded handler: the device keeps its
+    /// line asserted until the driver has serviced it, and unmasked it would
+    /// fire again the moment the LAPIC EOI lands.
+    level: AtomicBool,
 }
 
-/// `IrqReg::entry` of a device driven by plain MSI instead of MSI-X.
-const MSI: u16 = u16::MAX;
-/// `IrqReg::entry` of a line routed through an I/O APIC; the GSI is in
-/// `GSI_OF[vector]`.
-const GSI: u16 = u16::MAX - 1;
-
-fn set_dest(r: &IrqReg, apic: u32, vector: u8) {
-    match r.entry {
-        MSI => pci::msi_set_dest(r.dev, apic),
-        GSI => crate::ioapic::set_dest(GSI_OF[vector as usize].load(Ordering::Relaxed), apic),
-        e => pci::msix_set_dest(r.dev, e, apic),
+impl Desc {
+    const fn new() -> Desc {
+        Desc {
+            fired: AtomicU64::new(0),
+            waiter: AtomicU32::new(NO_WAKER),
+            gsi: AtomicU32::new(0),
+            level: AtomicBool::new(false),
+        }
     }
 }
 
-/// GSI of a vector routed through an I/O APIC.
-static GSI_OF: [core::sync::atomic::AtomicU32; 256] =
-    [const { core::sync::atomic::AtomicU32::new(0) }; 256];
-/// The vector's line is level-triggered: the ISR masks it, `arm` unmasks it.
-///
-/// Linux' `IRQF_ONESHOT` for a threaded handler: the device keeps its line
-/// asserted until the driver has serviced it, and unmasked it would fire
-/// again the moment the LAPIC EOI lands — an interrupt storm on the driver's
-/// core that never lets the driver run.
-static LEVEL: [core::sync::atomic::AtomicBool; 256] =
-    [const { core::sync::atomic::AtomicBool::new(false) }; 256];
+/// Descriptor chunks, allocated when an interrupt number in their range is
+/// first handed out and kept: numbers are reused before new ones are taken.
+static DESCS: [AtomicPtr<[Desc; CHUNK]>; NR_IRQS / CHUNK] =
+    [const { AtomicPtr::new(core::ptr::null_mut()) }; NR_IRQS / CHUNK];
 
-/// Route I/O APIC input `gsi` to a fresh vector on the current core,
+fn desc(irq: Irq) -> Option<&'static Desc> {
+    let i = (irq as usize).checked_sub(1)?;
+    let chunk = DESCS.get(i / CHUNK)?.load(Ordering::Acquire);
+    // SAFETY: a non-null chunk was leaked by `State::alloc_irq` and is
+    // never freed.
+    (!chunk.is_null()).then(|| unsafe { &(*chunk)[i % CHUNK] })
+}
+
+/// Per core, the interrupt each device vector delivers (0: none). The ISR's
+/// lookup, as Linux' per-CPU `vector_irq`.
+static VECTOR_IRQ: [[AtomicU16; DEVICE_IRQ_VEC_COUNT]; CORES] =
+    [const { [const { AtomicU16::new(0) }; DEVICE_IRQ_VEC_COUNT] }; CORES];
+
+/// Where an interrupt comes from and where it is delivered.
+#[derive(Clone, Copy)]
+struct Reg {
+    dev: PciAddr,
+    /// MSI-X table entry, `MSI` or `GSI`.
+    entry: u16,
+    core: usize,
+    vector: u8,
+    /// The core and vector before the last move. Kept until the next move,
+    /// so a message already on its way to the old target still finds this
+    /// interrupt, as Linux' deferred `__vector_cleanup`.
+    prev: Option<(usize, u8)>,
+}
+
+/// `Reg::entry` of a device driven by plain MSI instead of MSI-X.
+const MSI: u16 = u16::MAX;
+/// `Reg::entry` of a line routed through an I/O APIC.
+const GSI: u16 = u16::MAX - 1;
+
+/// The vector matrix and the interrupt numbers, as Linux' `irq_matrix`.
+struct State {
+    regs: BTreeMap<Irq, Reg>,
+    /// Device vectors in use, per core.
+    used: Vec<[u64; WORDS]>,
+    /// Numbers given back, taken before a new one.
+    free: Vec<Irq>,
+    /// Highest number handed out so far.
+    top: Irq,
+}
+
+static STATE: Mutex<State> =
+    Mutex::new(State { regs: BTreeMap::new(), used: Vec::new(), free: Vec::new(), top: 0 });
+
+impl State {
+    fn alloc_irq(&mut self) -> Option<Irq> {
+        let irq = match self.free.pop() {
+            Some(irq) => irq,
+            None => {
+                if self.top as usize >= NR_IRQS {
+                    return None;
+                }
+                self.top += 1;
+                self.top
+            }
+        };
+        let slot = &DESCS[(irq as usize - 1) / CHUNK];
+        if slot.load(Ordering::Acquire).is_null() {
+            let chunk = Box::leak(Box::new([const { Desc::new() }; CHUNK]));
+            slot.store(chunk, Ordering::Release);
+        }
+        let d = desc(irq)?;
+        d.waiter.store(NO_WAKER, Ordering::Release);
+        d.level.store(false, Ordering::Release);
+        d.gsi.store(0, Ordering::Relaxed);
+        Some(irq)
+    }
+
+    /// A free device vector on `core`, `want` if that one is free: keeping
+    /// the vector across a move changes only the destination.
+    fn take_vector(&mut self, core: usize, want: Option<u8>, irq: Irq) -> Option<u8> {
+        if core >= CORES {
+            return None;
+        }
+        if self.used.len() <= core {
+            self.used.resize(core + 1, [0; WORDS]);
+        }
+        let used = &mut self.used[core];
+        let free = |used: &[u64; WORDS], s: usize| used[s / 64] & (1 << (s % 64)) == 0;
+        let slot = want
+            .map(|v| v.wrapping_sub(DEVICE_IRQ_VEC_BASE) as usize)
+            .filter(|&s| s < DEVICE_IRQ_VEC_COUNT && free(used, s))
+            .or_else(|| (0..DEVICE_IRQ_VEC_COUNT).find(|&s| free(used, s)))?;
+        used[slot / 64] |= 1 << (slot % 64);
+        VECTOR_IRQ[core][slot].store(irq, Ordering::Release);
+        Some(DEVICE_IRQ_VEC_BASE + slot as u8)
+    }
+
+    fn put_vector(&mut self, core: usize, vector: u8) {
+        let slot = vector.wrapping_sub(DEVICE_IRQ_VEC_BASE) as usize;
+        if core >= CORES || slot >= DEVICE_IRQ_VEC_COUNT {
+            return;
+        }
+        VECTOR_IRQ[core][slot].store(0, Ordering::Release);
+        if let Some(used) = self.used.get_mut(core) {
+            used[slot / 64] &= !(1 << (slot % 64));
+        }
+    }
+
+    /// A number and a vector on the current core for a new interrupt.
+    fn alloc(&mut self, dev: PciAddr, entry: u16) -> Option<(Irq, u8, u32)> {
+        let core = crate::smp::per_core::current_core_id();
+        let dest = crate::interrupts::current_apic_id();
+        let Some(irq) = self.alloc_irq() else {
+            crate::kprintln!("[npk] irq: all {} interrupt numbers in use", NR_IRQS);
+            return None;
+        };
+        let Some(vector) = self.take_vector(core, None, irq) else {
+            self.free.push(irq);
+            crate::kprintln!("[npk] irq: all {} device vectors of core {} in use",
+                DEVICE_IRQ_VEC_COUNT, core);
+            return None;
+        };
+        self.regs.insert(irq, Reg { dev, entry, core, vector, prev: None });
+        Some((irq, vector, dest))
+    }
+}
+
+/// Route I/O APIC input `gsi` to a fresh interrupt on the current core,
 /// masked. The driver unmasks it by `arm`ing it before its first `wait`.
-/// None if the pool is exhausted or no I/O APIC serves the GSI.
-pub fn register_gsi(gsi: u32, level: bool, active_low: bool) -> Option<u8> {
-    // Checked first: the vector pool is never freed.
+/// None if no vector is free or no I/O APIC serves the GSI.
+pub fn register_gsi(gsi: u32, level: bool, active_low: bool) -> Option<Irq> {
     if !crate::ioapic::is_free(gsi) {
         return None;
     }
-    let vector = alloc_vector()?;
-    let dest = crate::interrupts::current_apic_id();
+    let none = PciAddr { bus: 0, device: 0, function: 0 };
+    let (irq, vector, dest) = STATE.lock().alloc(none, GSI)?;
+    let d = desc(irq)?;
+    d.gsi.store(gsi, Ordering::Relaxed);
     if !crate::ioapic::route(gsi, vector, dest, level, active_low) {
-        release(vector);
+        release(irq);
         return None;
     }
-    GSI_OF[vector as usize].store(gsi, Ordering::Relaxed);
-    LEVEL[vector as usize].store(level, Ordering::Release);
-    IRQ_REG.lock()[vector as usize] = Some(IrqReg {
-        dev: PciAddr { bus: 0, device: 0, function: 0 },
-        entry: GSI,
-        last_dest: dest,
-    });
-    crate::kprintln!("[npk] irq: GSI {} ({}, active-{}) on vector {:#x}",
-        gsi, if level { "level" } else { "edge" }, if active_low { "low" } else { "high" }, vector);
-    Some(vector)
+    d.level.store(level, Ordering::Release);
+    crate::kprintln!("[npk] irq: GSI {} ({}, active-{}) as irq {} on vector {:#x}",
+        gsi, if level { "level" } else { "edge" }, if active_low { "low" } else { "high" },
+        irq, vector);
+    Some(irq)
 }
 
-/// Interrupt-context part of a device vector, before the LAPIC EOI: a
-/// level line is masked (see `LEVEL`), then the waiter is told.
+/// Interrupt-context part of a device vector, before the LAPIC EOI: find
+/// the interrupt this core's `vector` carries, mask a level line (see
+/// `Desc::level`), tell the waiter.
 pub fn isr(vector: u8) {
-    if LEVEL[vector as usize].load(Ordering::Acquire) {
-        crate::ioapic::mask(GSI_OF[vector as usize].load(Ordering::Relaxed));
+    let core = crate::smp::per_core::current_core_id();
+    let slot = vector.wrapping_sub(DEVICE_IRQ_VEC_BASE) as usize;
+    let irq = VECTOR_IRQ.get(core).and_then(|row| row.get(slot)).map_or(0, |a| a.load(Ordering::Acquire));
+    let Some(d) = desc(irq) else { return };
+    if d.level.load(Ordering::Acquire) {
+        crate::ioapic::mask(d.gsi.load(Ordering::Relaxed));
     }
-    note_fired(vector);
+    note_fired(d);
 }
-static IRQ_REG: Mutex<[Option<IrqReg>; 256]> = Mutex::new([None; 256]);
 
-/// Per-vector fired count, bumped by the ISR. Indexed by IDT vector (full
-/// 256 so the ISR indexes without a bounds branch). A driver snapshots the
-/// count before submitting a command, then waits for it to advance.
-static IRQ_FIRED: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
-
-/// Bump the fired count for `vector`. Called only from the device ISR.
 /// Release so a parked fiber observing the advance also sees the device
-/// data the IRQ signalled.
+/// data the interrupt signalled.
 #[inline]
-pub fn note_fired(vector: u8) {
-    IRQ_FIRED[vector as usize].fetch_add(1, Ordering::Release);
-    let w = IRQ_WAITER[vector as usize].load(Ordering::Acquire);
-    if w != crate::smp::fiber::NO_WAKER {
+fn note_fired(d: &Desc) {
+    d.fired.fetch_add(1, Ordering::Release);
+    let w = d.waiter.load(Ordering::Acquire);
+    if w != NO_WAKER {
         crate::smp::fiber::signal(w, crate::smp::fiber::SIG_IRQ);
     }
 }
 
-/// The fiber waiting on each vector (`fiber::irq_wait`). The ISR signals it,
-/// so the park ends on the interrupt itself instead of a re-check.
-static IRQ_WAITER: [core::sync::atomic::AtomicU32; 256] =
-    [const { core::sync::atomic::AtomicU32::new(crate::smp::fiber::NO_WAKER) }; 256];
-
-/// Register `w` as the fiber waiting on `vector`.
-pub fn set_waiter(vector: u8, w: crate::smp::fiber::Waker) {
-    IRQ_WAITER[vector as usize].store(w, Ordering::Release);
-}
-
-/// Current fired count for `vector`. Acquire pairs with `note_fired`.
-#[inline]
-pub fn fired_count(vector: u8) -> u64 {
-    IRQ_FIRED[vector as usize].load(Ordering::Acquire)
-}
-
-/// Device-IRQ vector slots in use, one bit each (`DEVICE_IRQ_VEC_COUNT`).
-/// A driver that ends gives its vector back (`release`), so restarting
-/// drivers cannot run the pool dry.
-static SLOTS_USED: [AtomicU64; DEVICE_IRQ_VEC_COUNT.div_ceil(64)] =
-    [const { AtomicU64::new(0) }; DEVICE_IRQ_VEC_COUNT.div_ceil(64)];
-
-/// Allocate a fresh LAPIC vector from the device-IRQ pool, or None if
-/// exhausted. The matching IDT entry is already installed (`interrupts::init`).
-pub fn alloc_vector() -> Option<u8> {
-    for (w, word) in SLOTS_USED.iter().enumerate() {
-        loop {
-            let used = word.load(Ordering::Acquire);
-            let bit = (!used).trailing_zeros() as usize;
-            let s = w * 64 + bit;
-            if bit >= 64 || s >= DEVICE_IRQ_VEC_COUNT {
-                break;
-            }
-            if word
-                .compare_exchange(used, used | (1 << bit), Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return Some(DEVICE_IRQ_VEC_BASE + s as u8);
-            }
-        }
+/// Register `w` as the fiber waiting on `irq`.
+pub fn set_waiter(irq: Irq, w: Waker) {
+    if let Some(d) = desc(irq) {
+        d.waiter.store(w, Ordering::Release);
     }
-    crate::kprintln!("[npk] irq: all {} device vectors in use", DEVICE_IRQ_VEC_COUNT);
-    None
 }
 
-/// Give `vector` back: no waiter, no registration, its I/O APIC line masked
+/// Current fired count of `irq`. Acquire pairs with `note_fired`.
+#[inline]
+pub fn fired_count(irq: Irq) -> u64 {
+    desc(irq).map_or(0, |d| d.fired.load(Ordering::Acquire))
+}
+
+/// Give `irq` back: no waiter, its vectors free, its I/O APIC line masked
 /// and released. The device must already be quiet (bus mastering off, which
 /// also stops its MSI writes).
-pub fn release(vector: u8) {
-    let s = vector.wrapping_sub(DEVICE_IRQ_VEC_BASE) as usize;
-    if s >= DEVICE_IRQ_VEC_COUNT {
-        return;
+pub fn release(irq: Irq) {
+    let Some(d) = desc(irq) else { return };
+    d.waiter.store(NO_WAKER, Ordering::Release);
+    let mut st = STATE.lock();
+    let Some(r) = st.regs.remove(&irq) else { return };
+    st.put_vector(r.core, r.vector);
+    if let Some((c, v)) = r.prev {
+        st.put_vector(c, v);
     }
-    IRQ_WAITER[vector as usize].store(crate::smp::fiber::NO_WAKER, Ordering::Release);
-    let reg = IRQ_REG.lock()[vector as usize].take();
-    if let Some(r) = reg {
-        if r.entry == GSI {
-            crate::ioapic::release(GSI_OF[vector as usize].load(Ordering::Relaxed));
-        }
+    if r.entry == GSI {
+        crate::ioapic::release(d.gsi.load(Ordering::Relaxed));
     }
-    LEVEL[vector as usize].store(false, Ordering::Release);
-    SLOTS_USED[s / 64].fetch_and(!(1 << (s % 64)), Ordering::AcqRel);
+    d.level.store(false, Ordering::Release);
+    st.free.push(irq);
 }
 
-/// Snapshot the fired count for `vector` before submitting the device
+/// Snapshot the fired count for `irq` before submitting the device
 /// command (ringing the doorbell). Pass the returned token to `wait`. This
 /// closes the lost-wakeup window: an IRQ that fires between submit and park
 /// still advances the count past the snapshot, so `wait` returns at once.
 ///
 /// Also routes the IRQ to the current core (where the caller will `wait`), so
 /// the device's interrupt wakes this core out of HLT and its scheduler resumes
-/// the parked fiber. Reprograms the MSI-X dest only when the
-/// waiting core changed — a no-op for a driver that always services on its own
-/// pinned fiber; cheap (one MMIO write) for one that moves between cores.
-pub fn arm(vector: u8) -> u64 {
+/// the parked fiber. Reprograms the device only when the waiting core
+/// changed: a no-op for a driver that always services on its own pinned
+/// fiber.
+pub fn arm(irq: Irq) -> u64 {
     let cid = crate::smp::per_core::current_core_id();
     if !crate::microvm::cpu::is_vcpu_core(cid) {
         crate::smp::per_core::mark_driver_core(cid);
     }
-    // The vector now targets this core; its waiter stays here.
+    // The interrupt now targets this core; its waiter stays here.
     crate::smp::fiber::pin_current();
-    route_to_current(vector);
-    let since = fired_count(vector);
+    route_to_current(irq);
+    let since = fired_count(irq);
     // A level line was masked by the ISR: the driver has serviced the
     // device, so let the next assertion through.
-    if LEVEL[vector as usize].load(Ordering::Acquire) {
-        crate::ioapic::unmask(GSI_OF[vector as usize].load(Ordering::Relaxed));
+    if let Some(d) = desc(irq) {
+        if d.level.load(Ordering::Acquire) {
+            crate::ioapic::unmask(d.gsi.load(Ordering::Relaxed));
+        }
     }
     since
 }
 
-/// Route an already-registered device IRQ to the current core. For the
-/// "wake this core" usage where no fiber calls `arm`/`wait` — e.g. the host
-/// NIC RX-IRQ, which targets the vCPU core so RX arrival wakes the vCPU to
-/// pump. No-op if `vector` isn't registered or already targets this core.
-pub fn route_to_current(vector: u8) {
-    if vector == 0 {
+/// Route a registered interrupt to the current core: a vector there (the
+/// same number when it is free), then the device re-pointed. For the "wake
+/// this core" usage where no fiber calls `arm`/`wait`, e.g. the host NIC
+/// RX interrupt that wakes the vCPU to pump. No-op if `irq` is not
+/// registered or already targets this core.
+pub fn route_to_current(irq: Irq) {
+    let Some(d) = desc(irq) else { return };
+    let core = crate::smp::per_core::current_core_id();
+    let mut st = STATE.lock();
+    let Some(mut r) = st.regs.get(&irq).copied() else { return };
+    if r.core == core {
         return;
     }
+    let Some(vector) = st.take_vector(core, Some(r.vector), irq) else {
+        crate::kprintln!("[npk] irq: no free vector on core {}; irq {} stays on core {}",
+            core, irq, r.core);
+        return;
+    };
+    // The target two moves ago has had all the time in-flight messages need.
+    if let Some((c, v)) = r.prev {
+        st.put_vector(c, v);
+    }
     let apic = crate::interrupts::current_apic_id();
-    let mut reg = IRQ_REG.lock();
-    if let Some(r) = reg[vector as usize].as_mut() {
-        if r.last_dest != apic {
-            set_dest(r, apic, vector);
-            r.last_dest = apic;
-        }
+    match r.entry {
+        MSI => pci::msi_set_target(r.dev, vector, apic),
+        GSI => crate::ioapic::set_target(d.gsi.load(Ordering::Relaxed), vector, apic),
+        e => pci::msix_set_target(r.dev, e, vector, apic),
+    }
+    let moved_vector = vector != r.vector;
+    r.prev = Some((r.core, r.vector));
+    r.core = core;
+    r.vector = vector;
+    st.regs.insert(irq, r);
+    drop(st);
+    // A new vector can lose a message sent mid-change (an unmaskable MSI);
+    // one extra wake covers it, as Linux retriggers a pending one. Drivers
+    // look at the device after every wake.
+    if moved_vector {
+        note_fired(d);
     }
 }
 
-/// Park the current fiber until `vector` fires (its count moves past `since`)
+/// Park the current fiber until `irq` fires (its count moves past `since`)
 /// or `timeout_ms` elapses. Returns true if the IRQ fired, false on timeout.
-/// Must be called from inside a fiber (returns false otherwise — the caller
+/// Must be called from inside a fiber (returns false otherwise; the caller
 /// should fall back to polling).
-pub fn wait(vector: u8, since: u64, timeout_ms: u64) -> bool {
-    crate::smp::fiber::irq_wait(vector, since, timeout_ms)
+pub fn wait(irq: Irq, since: u64, timeout_ms: u64) -> bool {
+    crate::smp::fiber::irq_wait(irq, since, timeout_ms)
 }
 
-/// Allocate a vector and program `dev`'s MSI-X table `entry` to deliver it to
-/// the current core's LAPIC. Call this from the driver fiber so the IRQ wakes
-/// exactly the core that will service it. Returns the vector, or None if the
-/// device has no usable MSI-X capability or the vector pool is exhausted.
 /// One-shot guard for the VT-d interrupt-remapping check below.
 static IR_HANDLED: AtomicBool = AtomicBool::new(false);
 
@@ -353,30 +473,30 @@ fn disable_ir_unit(regbase: u64, flags: u8) {
     }
 }
 
-pub fn register(dev: PciAddr, entry: u16) -> Option<u8> {
+/// Allocate an interrupt and program `dev`'s MSI-X table `entry` (or its
+/// plain MSI) to deliver it to the current core. Call this from the driver
+/// fiber so the interrupt wakes exactly the core that will service it.
+/// None if the device has no usable MSI or MSI-X, or no vector is free.
+pub fn register(dev: PciAddr, entry: u16) -> Option<Irq> {
     // VT-d IR (if the platform enabled it) silently drops our compatibility-
-    // format MSIs — disable it once before programming any device MSI-X.
+    // format MSIs: disable it once before programming any device MSI-X.
     ensure_msi_deliverable();
-    let dest = crate::interrupts::current_apic_id();
     // MSI-X when the device has it; otherwise plain MSI with its one vector
     // (the RTL8822CE). `entry` only means something for MSI-X.
-    let (vector, entry) = if pci::has_msix(dev) {
-        let vector = alloc_vector()?;
-        if !pci::program_msix(dev, entry, vector, dest) {
-            release(vector);
-            return None;
-        }
-        (vector, entry)
+    let msix = pci::has_msix(dev);
+    let (irq, vector, dest) = STATE.lock().alloc(dev, if msix { entry } else { MSI })?;
+    let ok = if msix {
+        pci::program_msix(dev, entry, vector, dest)
     } else {
-        let vector = alloc_vector()?;
-        if !pci::program_msi(dev, vector, dest) {
-            release(vector);
-            return None;
-        }
-        crate::kdebug!("[npk] irq: {:02x}:{:02x}.{} plain MSI on vector {:#x}",
-            dev.bus, dev.device, dev.function, vector);
-        (vector, MSI)
+        pci::program_msi(dev, vector, dest)
     };
-    IRQ_REG.lock()[vector as usize] = Some(IrqReg { dev, entry, last_dest: dest });
-    Some(vector)
+    if !ok {
+        release(irq);
+        return None;
+    }
+    if !msix {
+        crate::kdebug!("[npk] irq: {:02x}:{:02x}.{} plain MSI as irq {} on vector {:#x}",
+            dev.bus, dev.device, dev.function, irq, vector);
+    }
+    Some(irq)
 }

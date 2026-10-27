@@ -1,6 +1,6 @@
 [package]
 name = "volume"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "Volume mixer — a centred overlay slider (drun-style)."
@@ -9,7 +9,7 @@ description = "Volume mixer — a centred overlay slider (drun-style)."
 crate-type = ["cdylib"]
 
 [dependencies]
-nopeek_widgets = { path = "../sdk/widgets" }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 
 [dependencies.postcard]
 version = "1.0"

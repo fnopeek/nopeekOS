@@ -454,6 +454,10 @@ struct Doc {
     /// The JS session of this page.
     js: Option<beak_engine::js::Session>,
     nav_js_count: usize,
+    /// All external scripts of the page, fetched in batches; the running
+    /// batch starts at `nav_js_off`.
+    nav_js_urls: Vec<String>,
+    nav_js_off: usize,
     nav_mod_entries: Option<Vec<String>>,
     nav_mod_want: Option<Vec<String>>,
     nav_mod_rounds: usize,
@@ -516,6 +520,8 @@ struct Doc {
     /// The running font round.
     font_job: i32,
     font_want: Option<Vec<(String, u32, u16, bool)>>,
+    /// Fonts past the last round's count, asked for in the next one.
+    font_rest: Vec<(String, u32, u16, bool)>,
     /// Which engine `fetch` request sits on which host handle.
     fetch_jobs: Vec<(u32, i32)>,
     /// Images of this page not yet requested — the rest of the queue behind
@@ -579,12 +585,12 @@ impl Doc {
             content_gen: 0, scroll_y: 0, sel_anchor: None, sel: None, pending_link: None,
             find: None, found: Vec::new(), find_at: 0,
             find_pending: [0; 4], find_pending_len: 0,
-            nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0, nav_dynjs_nodes: None, nav_dynjs_rounds: 0, nav_imp_want: None, nav_imp_rounds: 0,
+            nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_js_urls: Vec::new(), nav_js_off: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0, nav_dynjs_nodes: None, nav_dynjs_rounds: 0, nav_imp_want: None, nav_imp_rounds: 0,
             dirty: true, need_full: true, images_dirty: false, geom: None, last_vp: (0, 0),
             told_scroll: 0, told_vp: (0, 0), caret_phase: None, caret_since: 0,
             img_job: -1, img_job_srcs: None, img_missed: Vec::new(),
             cssimg_job: -1, cssimg_job_keys: None,
-            font_job: -1, font_want: None, fetch_jobs: Vec::new(),
+            font_job: -1, font_want: None, font_rest: Vec::new(), fetch_jobs: Vec::new(),
             pending_imgs: Vec::new(), pending_css_imgs: Vec::new(), css_asked: Vec::new(),
             script_nav_chain: 0, nav_from_script: false, script_tally: (0, 0, 0),
             script_t0: 0, load_pending: false, obs_rounds: 0,
@@ -680,49 +686,90 @@ fn doc_mut() -> &'static mut Doc {
 
 use beak_engine::clip;
 
-const HTML_CAP: usize = 3 * 1024 * 1024;
-static mut HTML_BUF: [u8; HTML_CAP] = [0; HTML_CAP];
-static HTML_LEN: AtomicUsize = AtomicUsize::new(0);
+// Response limits. The kernel learns the room for a body when the request
+// starts, reserves it against free RAM and stops reading there, so each of
+// these is the most one answer may bring, not a buffer anyone holds: the
+// bytes land in a heap buffer of the received size, and a body that reaches
+// its limit is logged as cut. Browsers have no such limit; these only keep
+// one answer from claiming the module's memory.
 
-// Concatenated bytes of the page's external <link rel=stylesheet> files.
-// Large pages link dozens of sheets totalling several MiB; the link count is
-// the wrong unit to cap. A dropped stylesheet is a broken page, not a missing
-// icon, so the headroom is deliberate. The buffer is `.bss`: it costs runtime
-// memory only, nothing in the shipped .wasm.
-const CSS_CAP: usize = 8 * 1024 * 1024;
-const MAX_CSS_LINKS: usize = 64;
-static mut CSS_BUF: [u8; CSS_CAP] = [0; CSS_CAP];
-static CSS_LEN: AtomicUsize = AtomicUsize::new(0);
-
-// Scratch buffer a whole batch of <img> bytes arrives in before decoding.
-//
-// Shared by `IMG_BATCH` images at once; a single large photograph must fit.
-// The kernel bounds what all pending answers may reserve together
-// (`MAX_RESERVED_BYTES`, 64 MB); 24 MB leaves room for a document (3) +
-// stylesheets (8) + scripts (8) in flight beside it.
+/// One document.
+const HTML_CAP: usize = 32 * 1024 * 1024;
+/// One batch of stylesheets, and all of a page's sheets together.
+const CSS_CAP: usize = 32 * 1024 * 1024;
+/// One batch of images (`IMG_BATCH` of them); a single large photograph must
+/// fit.
 const IMG_FETCH_CAP: usize = 24 * 1024 * 1024;
+
+/// The most URLs one batch carries: the kernel's limit per batch
+/// (`intent::fetch::MAX_URLS`). More are fetched in further batches.
+const MAX_BATCH_URLS: usize = 64;
+const MAX_CSS_LINKS: usize = MAX_BATCH_URLS;
 /// A request backstop, not a memory bound. Memory is bounded in the engine:
 /// a per-page budget of decoded BGRA plus a per-image pixel cap. This only
 /// keeps one absurd document from queueing thousands of round-trips, and it
 /// says so when it bites.
 const MAX_IMAGES: usize = 512;
-static mut IMG_FETCH_BUF: [u8; IMG_FETCH_CAP] = [0; IMG_FETCH_CAP];
 
-// The three fetch buffers stay in `.bss`: they are tens of MiB and are filled
-// by the kernel without being zeroed first. Every access goes through these
-// accessors; the borrow they hand out must end before the next call to the
-// same accessor (single thread, same rule as `doc_mut`).
-fn html_buf() -> &'static mut [u8; HTML_CAP] {
+// The document and the page's concatenated stylesheets, each `*_LEN` bytes
+// of valid UTF-8 at the front of its buffer. On the heap, sized to what
+// arrived. Every access goes through these accessors; the borrow they hand
+// out must end before the next call to the same accessor (single thread,
+// same rule as `doc_mut`).
+static mut HTML_BUF: Vec<u8> = Vec::new();
+static HTML_LEN: AtomicUsize = AtomicUsize::new(0);
+static mut CSS_BUF: Vec<u8> = Vec::new();
+static CSS_LEN: AtomicUsize = AtomicUsize::new(0);
+
+fn html_buf() -> &'static mut Vec<u8> {
     // SAFETY: single thread; see above.
     unsafe { &mut *core::ptr::addr_of_mut!(HTML_BUF) }
 }
-fn css_buf() -> &'static mut [u8; CSS_CAP] {
+fn css_buf() -> &'static mut Vec<u8> {
     // SAFETY: single thread; see above.
     unsafe { &mut *core::ptr::addr_of_mut!(CSS_BUF) }
 }
-fn img_fetch_buf() -> &'static mut [u8; IMG_FETCH_CAP] {
-    // SAFETY: single thread; see above.
-    unsafe { &mut *core::ptr::addr_of_mut!(IMG_FETCH_BUF) }
+
+/// Replace the document with `bytes`.
+fn set_html(bytes: &[u8]) {
+    let b = html_buf();
+    b.clear();
+    b.extend_from_slice(bytes);
+    b.shrink_to_fit();
+    HTML_LEN.store(b.len(), Relaxed);
+}
+
+/// Collect a finished single request into a heap buffer of the received
+/// size. `cap` is the room the request was begun with; a body that fills it
+/// was cut by the kernel, and that is logged with `what`. The kernel's
+/// negative code on failure.
+fn take_body(h: i32, cap: usize, what: &str) -> Result<Vec<u8>, i32> {
+    let mut buf: Vec<u8> = Vec::with_capacity(cap);
+    let n = http_take(h, &mut buf.spare_capacity_mut()[..cap]);
+    if n < 0 {
+        return Err(n);
+    }
+    // SAFETY: the kernel initialised the first `n` bytes, and the capacity
+    // is at least `cap`.
+    unsafe { buf.set_len((n as usize).min(cap)) };
+    if buf.len() >= cap {
+        log(&alloc::format!("[beak] {what} cut at the {} MiB response limit", cap >> 20));
+    }
+    buf.shrink_to_fit();
+    Ok(buf)
+}
+
+/// Collect a finished batch into a heap buffer: the bytes, and each body as
+/// an `(offset, len)` span, `(0, 0)` for one that failed. `cap` is the room
+/// the batch was begun with.
+fn take_batch_buf(handle: i32, cap: usize, want: usize) -> (Vec<u8>, Vec<(usize, usize)>) {
+    let mut buf: Vec<u8> = Vec::with_capacity(cap);
+    let spans = take_batch(handle, &mut buf.spare_capacity_mut()[..cap], want);
+    let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
+    // SAFETY: the kernel initialised the bytes up to the end of the last
+    // span, and the capacity is at least `cap`.
+    unsafe { buf.set_len(total.min(cap)) };
+    (buf, spans)
 }
 
 /// How many images one batch asks for. Small on purpose: a large batch
@@ -1205,9 +1252,7 @@ fn show_error_page(url: &str) {
     log(&alloc::format!("[beak] fetch failed: {} ({})", message, kind));
 
     let doc = neterror::document(url, &kind, &message);
-    let len = doc.len().min(HTML_CAP);
-    html_buf()[..len].copy_from_slice(&doc.as_bytes()[..len]);
-    HTML_LEN.store(len, Relaxed);
+    set_html(doc.as_bytes());
     // The page carries its own inline <style> and links nothing, so any
     // leftover author CSS from the previous page must go — otherwise the
     // last site's rules would style this one.
@@ -1230,11 +1275,26 @@ fn decode_document() {
         return;
     }
     let ct = content_type();
-    let (n, how) = charset::to_utf8_in_place(html_buf(), len, ct.as_deref());
+    let b = html_buf();
+    let n_room = utf8_room(b, len);
+    let (n, how) = charset::to_utf8_in_place(&mut b[..n_room], len, ct.as_deref());
+    b.truncate(n);
+    b.shrink_to_fit();
     HTML_LEN.store(n, Relaxed);
     if how != charset::KEPT {
         log(&alloc::format!("[beak] document charset: {} ({} -> {} B)", how, len, n));
     }
+}
+
+/// Make room behind `buf[..len]` for transcoding to UTF-8, where one byte
+/// becomes up to three, and return the usable length. Valid UTF-8 needs
+/// none.
+fn utf8_room(buf: &mut Vec<u8>, len: usize) -> usize {
+    buf.truncate(len);
+    if core::str::from_utf8(buf).is_err() {
+        buf.resize(len.saturating_mul(3), 0);
+    }
+    buf.len()
 }
 
 /// Same for the concatenated stylesheets. No Content-Type here — they arrive
@@ -1245,7 +1305,10 @@ fn decode_css() {
     if len == 0 {
         return;
     }
-    let (n, how) = charset::to_utf8_in_place(css_buf(), len, None);
+    let b = css_buf();
+    let n_room = utf8_room(b, len);
+    let (n, how) = charset::to_utf8_in_place(&mut b[..n_room], len, None);
+    b.truncate(n);
     CSS_LEN.store(n, Relaxed);
     if how != charset::KEPT {
         log(&alloc::format!("[beak] css charset: {} ({} -> {} B)", how, len, n));
@@ -1509,9 +1572,7 @@ fn file_cookies(asked: &str) {
 /// the bytes came from; otherwise the test page would test its own path
 /// instead of the real one.
 fn deliver_builtin(engine: &Engine, url: &str, html: &str, push_hist: bool) {
-    let len = html.len().min(HTML_CAP);
-    html_buf()[..len].copy_from_slice(&html.as_bytes()[..len]);
-    HTML_LEN.store(len, Relaxed);
+    set_html(html.as_bytes());
     // The page brings its own `<style>` and links nothing; the previous
     // page's CSS must go or it would style this one.
     CSS_LEN.store(0, Relaxed);
@@ -1556,16 +1617,17 @@ fn nav_pump(engine: &Engine) -> bool {
 fn nav_document_arrived(engine: &Engine) {
     let h = nav_job();
     let asked = nav_asked();
-    let n = http_take(h, as_uninit(html_buf()));
+    let body = take_body(h, HTML_CAP, "document");
     log_ms("fetch document", now_ms() - doc().nav_stage_ms);
-    if n < 0 {
+    let Ok(body) = body else {
         nav_fail(&asked);
         return;
-    }
+    };
     // Before anything downstream: the cookies belong to this response, and
     // the getters that carry them are overwritten by the next `take`.
     file_cookies(&asked);
-    HTML_LEN.store((n as usize).min(HTML_CAP), Relaxed);
+    HTML_LEN.store(body.len(), Relaxed);
+    *html_buf() = body;
     // The bytes are not UTF-8 just because we would like them to be, and the
     // stylesheet scan below reads `html_str()`.
     decode_document();
@@ -1668,12 +1730,9 @@ enum PendingScript {
     Fetching(usize, String, bool, u32),
 }
 
-/// How many external scripts one page may fetch.
-///
-/// Capped by count and by bytes (`SCRIPT_CAP`): 200 bundles must not cause
-/// 200 round trips, and a 50 MB one must not overflow the buffer.
-const MAX_SCRIPT_URLS: usize = 32;
-const SCRIPT_CAP: usize = 8 * 1024 * 1024;
+/// The bytes one batch of scripts may bring. External scripts go out in
+/// batches of `MAX_BATCH_URLS`, as many batches as the page has.
+const SCRIPT_CAP: usize = 32 * 1024 * 1024;
 /// How large a module graph may grow, and in how many rounds.
 ///
 /// Both ends can run away: a thousand small modules, and a chain that
@@ -1694,12 +1753,7 @@ fn nav_stylesheets_arrived(engine: &Engine) {
     // Fetched into a scratch buffer first because the bodies come back
     // concatenated, and they need a separator between them: without one, a
     // sheet not ending in `}` would merge into the next sheet's first rule.
-    let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
-    let spans = take_batch(h, &mut scratch.spare_capacity_mut()[..CSS_CAP], want);
-    let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
-    // SAFETY: the kernel initialised the bytes up to the end of the last
-    // span, and the capacity is `CSS_CAP`.
-    unsafe { scratch.set_len(total.min(CSS_CAP)) };
+    let (scratch, spans) = take_batch_buf(h, CSS_CAP, want);
 
     // The bodies are kept as parts rather than written straight into
     // `CSS_BUF`: an `@import` cascades ahead of the sheet that imported it, so
@@ -1707,10 +1761,12 @@ fn nav_stylesheets_arrived(engine: &Engine) {
     let urls = doc_mut().nav_css_urls.take().unwrap_or_default();
     let mut parts: Vec<(String, Vec<u8>, bool)> = Vec::with_capacity(spans.len());
     for (k, (off, n)) in spans.iter().copied().enumerate() {
+        let url = urls.get(k).cloned().unwrap_or_default();
         if n == 0 || off + n > scratch.len() {
+            log(&alloc::format!("[beak] stylesheet not delivered (failed, or over the {} MiB batch limit): {url}",
+                                CSS_CAP >> 20));
             continue;
         }
-        let url = urls.get(k).cloned().unwrap_or_default();
         parts.push((url, scratch[off..off + n].to_vec(), false));
     }
     log_ms("fetch stylesheets", now_ms() - doc().nav_stage_ms);
@@ -1781,11 +1837,7 @@ fn css_import_pump() -> bool {
 fn nav_css_imports_arrived(engine: &Engine) {
     let h = nav_job();
     let want = doc_mut().nav_css_want.take().unwrap_or_default();
-    let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
-    let spans = take_batch(h, &mut scratch.spare_capacity_mut()[..CSS_CAP], want.len());
-    let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
-    // SAFETY: as in `nav_stylesheets_arrived`.
-    unsafe { scratch.set_len(total.min(CSS_CAP)) };
+    let (scratch, spans) = take_batch_buf(h, CSS_CAP, want.len());
     let (mut ok, mut bad) = (0usize, 0usize);
     if let Some(parts) = doc_mut().nav_css_parts.as_mut() {
         // Insert from the back: each insertion shifts everything after it;
@@ -1816,6 +1868,8 @@ fn nav_css_imports_arrived(engine: &Engine) {
 fn css_assemble() {
     let parts = doc_mut().nav_css_parts.take().unwrap_or_default();
     CSS_LEN.store(0, Relaxed);
+    css_buf().clear();
+    css_buf().shrink_to_fit();
     for (_, body, _) in &parts {
         if !css_append(body) {
             break;
@@ -1871,10 +1925,6 @@ fn nav_begin_scripts(engine: &Engine) -> bool {
                 list.push(PendingScript::Ready(t, label, m, node));
             }
             ScriptRef::External(src, m, node) => {
-                if urls.len() >= MAX_SCRIPT_URLS {
-                    log(&alloc::format!("[beak] script cap hit: {} external scripts used", MAX_SCRIPT_URLS));
-                    continue;
-                }
                 let u = resolve(&base, &src);
                 list.push(PendingScript::Fetching(urls.len(), u.clone(), m, node));
                 urls.push(u);
@@ -1884,35 +1934,56 @@ fn nav_begin_scripts(engine: &Engine) -> bool {
     if urls.is_empty() {
         return run_scripts(engine, list);
     }
-    let h = begin_batch(&urls, SCRIPT_CAP);
-    if h < 0 {
+    doc_mut().nav_js_urls = urls;
+    doc_mut().nav_js_off = 0;
+    if !nav_js_next_batch() {
         // Not fetchable: the inline ones still run. A page without its
         // bundles is less than whole, but more than nothing.
         log("[beak] external scripts could not be fetched — running inline only");
+        doc_mut().nav_js_urls = Vec::new();
         return run_scripts(engine, list);
     }
-    {
-        doc_mut().nav_scripts = Some(list);
-        doc_mut().nav_js_count = urls.len();
-        doc_mut().nav_stage = NavStage::Js;
-        doc_mut().nav_job = h;
-        doc_mut().nav_stage_ms = now_ms();
+    doc_mut().nav_scripts = Some(list);
+    doc_mut().nav_stage_ms = now_ms();
+    true
+}
+
+/// Ask for the next `MAX_BATCH_URLS` of the page's external scripts, from
+/// `nav_js_off` on. False if the batch could not start.
+fn nav_js_next_batch() -> bool {
+    let (off, end) = {
+        let d = doc();
+        (d.nav_js_off, (d.nav_js_off + MAX_BATCH_URLS).min(d.nav_js_urls.len()))
+    };
+    let h = begin_batch(&doc().nav_js_urls[off..end], SCRIPT_CAP);
+    if h < 0 {
+        return false;
     }
+    let d = doc_mut();
+    d.nav_js_count = end - off;
+    d.nav_stage = NavStage::Js;
+    d.nav_job = h;
     true
 }
 
 fn nav_scripts_arrived(engine: &Engine) {
     let h = nav_job();
     let want = doc().nav_js_count;
+    let first = doc().nav_js_off;
     let mut list = doc_mut().nav_scripts.take().unwrap_or_default();
-    let dst = img_fetch_buf();
-    let spans = take_batch(h, as_uninit(&mut dst[..SCRIPT_CAP.min(IMG_FETCH_CAP)]), want);
+    let (dst, spans) = take_batch_buf(h, SCRIPT_CAP, want);
     for p in list.iter_mut() {
         let (k, label, is_mod, node) = match p {
-            PendingScript::Fetching(k, l, m, n) => (*k, core::mem::take(l), *m, *n),
+            PendingScript::Fetching(k, l, m, n) if (first..first + want).contains(k) =>
+                (*k - first, core::mem::take(l), *m, *n),
             _ => continue,
         };
         let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
+        if n == 0 {
+            log(&alloc::format!(
+                "[beak]   script FAIL {label}: not delivered (failed, or over the {} MiB batch limit)",
+                SCRIPT_CAP >> 20));
+        }
         let text = if n == 0 { String::new() } else {
             let bytes = &dst[off..off + n];
             // Not decodable means not executed. Running half a script is
@@ -1929,6 +2000,18 @@ fn nav_scripts_arrived(engine: &Engine) {
         };
         *p = PendingScript::Ready(text, label, is_mod, node);
     }
+    drop(dst);
+    // More scripts than one batch carries: the next batch, then run. Run
+    // order is document order either way; they all run once all are in.
+    doc_mut().nav_js_off = first + want;
+    if doc().nav_js_off < doc().nav_js_urls.len() {
+        if nav_js_next_batch() {
+            doc_mut().nav_scripts = Some(list);
+            return;
+        }
+        log("[beak] further external scripts could not be fetched");
+    }
+    doc_mut().nav_js_urls = Vec::new();
     log_ms("fetch scripts", now_ms() - doc().nav_stage_ms);
     if !run_scripts(engine, list) { nav_done(); }
 }
@@ -2241,18 +2324,19 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
 }
 
 
-/// How many fonts a page may fetch in one round, and how many bytes
-/// together. The font round is its own job, not the navigation's: which
-/// fonts a page needs is known only after the first layout, as with images.
+/// How many fonts one round fetches, and how many bytes together; the rest
+/// waits for the next round. The font round is its own job, not the
+/// navigation's: which fonts a page needs is known only after the first
+/// layout, as with images.
 const MAX_FONT_URLS: usize = 12;
-const FONT_CAP: usize = 4 * 1024 * 1024;
+const FONT_CAP: usize = 16 * 1024 * 1024;
 
 /// How many `fetch` requests may be in flight at once.
 ///
 /// The host holds a response buffer per request; what does not fit waits
 /// for the next round.
 const MAX_FETCH_INFLIGHT: usize = 6;
-const FETCH_CAP: usize = 2 * 1024 * 1024;
+const FETCH_CAP: usize = 16 * 1024 * 1024;
 
 fn fetch_jobs() -> &'static mut Vec<(u32, i32)> {
     &mut doc_mut().fetch_jobs
@@ -2390,17 +2474,13 @@ fn pump_fetches() -> bool {
         let (id, h) = fetch_jobs()[k];
         if http_poll(h) == 0 { k += 1; continue }
         fetch_jobs().remove(k);
-        let mut buf: Vec<u8> = Vec::with_capacity(FETCH_CAP);
-        let n = http_take(h, &mut buf.spare_capacity_mut()[..FETCH_CAP]);
+        let body = take_body(h, FETCH_CAP, "fetch() response");
         landed = true;
-        if n < 0 {
+        let Ok(buf) = body else {
             let why = last_error().map(|(a, _)| a).unwrap_or_else(|| String::from("request failed"));
             beak_engine::js::fetch::fetch_failed(&mut sess.interp, id, &why);
             continue;
-        }
-        // SAFETY: the kernel initialised the first `n` bytes, and the
-        // capacity is `FETCH_CAP`.
-        unsafe { buf.set_len((n as usize).min(FETCH_CAP)) };
+        };
         // The cookies belong to this response, and the getters carrying them
         // are overwritten by the next `take`.
         let from = fetched_from().unwrap_or_default();
@@ -2456,12 +2536,7 @@ fn pump_fonts(engine: &Engine) -> bool {
         if http_poll(h) == 0 { return false }
         doc_mut().font_job = -1;
         let want = doc_mut().font_want.take().unwrap_or_default();
-        let mut buf: Vec<u8> = Vec::with_capacity(FONT_CAP);
-        let spans = take_batch(h, &mut buf.spare_capacity_mut()[..FONT_CAP], want.len());
-        let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
-        // SAFETY: the kernel initialised the bytes up to the end of the last
-        // span, and the capacity is `FONT_CAP`.
-        unsafe { buf.set_len(total.min(FONT_CAP)) };
+        let (buf, spans) = take_batch_buf(h, FONT_CAP, want.len());
         let (mut ok, mut bad) = (0usize, 0usize);
         for (k, (url, family, weight, italic)) in want.iter().enumerate() {
             let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
@@ -2487,9 +2562,12 @@ fn pump_fonts(engine: &Engine) -> bool {
     // Inline faces first: their bytes are already in the sheet, so they cost
     // no round trip.
     if engine.load_inline_fonts() { loaded = true; }
-    let mut want = engine.take_pending_fonts();
+    let mut want = core::mem::take(&mut doc_mut().font_rest);
+    want.extend(engine.take_pending_fonts());
     if want.is_empty() { return loaded }
-    want.truncate(MAX_FONT_URLS);
+    if want.len() > MAX_FONT_URLS {
+        doc_mut().font_rest = want.split_off(MAX_FONT_URLS);
+    }
     let base = url_str().to_string();
     let urls: Vec<String> = want.iter().map(|(u, ..)| resolve(&base, u)).collect();
     let h = begin_batch(&urls, FONT_CAP);
@@ -2618,7 +2696,8 @@ fn module_pump(engine: &Engine) -> bool {
               else if seen.len() > MAX_MODULE_URLS { Some("Adressen") }
               else { None };
     if !missing.is_empty() && cap.is_none() {
-        missing.truncate(MAX_SCRIPT_URLS);
+        // The rest is still missing in the next round's walk.
+        missing.truncate(MAX_BATCH_URLS);
         let h = begin_batch(&missing, SCRIPT_CAP);
         if h >= 0 {
             {
@@ -2670,7 +2749,12 @@ fn sheet_pump(engine: &Engine) -> bool {
     let base = url_str().to_string();
     let mut nodes: Vec<u32> = Vec::new();
     let mut urls: Vec<String> = Vec::new();
-    for (id, href) in want.into_iter().take(MAX_SCRIPT_URLS) {
+    let mut want = want;
+    if want.len() > MAX_BATCH_URLS {
+        // Taken in the next round, after this batch.
+        sess.interp.pending_sheets.extend(want.split_off(MAX_BATCH_URLS));
+    }
+    for (id, href) in want {
         nodes.push(id);
         urls.push(resolve(&base, &href));
     }
@@ -2694,11 +2778,7 @@ fn sheet_pump(engine: &Engine) -> bool {
 fn nav_sheets_arrived(engine: &Engine) {
     let h = nav_job();
     let nodes = doc_mut().nav_sheet_nodes.take().unwrap_or_default();
-    let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
-    let spans = take_batch(h, &mut scratch.spare_capacity_mut()[..CSS_CAP], nodes.len());
-    let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
-    // SAFETY: as in `nav_stylesheets_arrived`.
-    unsafe { scratch.set_len(total.min(CSS_CAP)) };
+    let (scratch, spans) = take_batch_buf(h, CSS_CAP, nodes.len());
     let (mut ok, mut bad) = (0usize, 0usize);
     if let Some(sess) = js_session() {
         for (k, id) in nodes.iter().enumerate() {
@@ -2743,7 +2823,12 @@ fn script_pump(engine: &Engine) -> bool {
     let base = url_str().to_string();
     let mut nodes: Vec<u32> = Vec::new();
     let mut urls: Vec<String> = Vec::new();
-    for (id, src) in want.into_iter().take(MAX_SCRIPT_URLS) {
+    let mut want = want;
+    if want.len() > MAX_BATCH_URLS {
+        // Taken in the next round, after this batch.
+        sess.interp.pending_scripts.extend(want.split_off(MAX_BATCH_URLS));
+    }
+    for (id, src) in want {
         nodes.push(id);
         urls.push(resolve(&base, &src));
     }
@@ -2790,7 +2875,8 @@ fn import_pump(engine: &Engine) -> bool {
         finish_scripts(engine);
         return false;
     }
-    want.truncate(MAX_SCRIPT_URLS);
+    // The rest is still wanted in the next round.
+    want.truncate(MAX_BATCH_URLS);
     let h = begin_batch(&want, SCRIPT_CAP);
     if h < 0 {
         log("[beak] import() modules could not be fetched");
@@ -2811,8 +2897,7 @@ fn import_pump(engine: &Engine) -> bool {
 fn nav_imports_arrived(engine: &Engine) {
     let h = nav_job();
     let want = doc_mut().nav_imp_want.take().unwrap_or_default();
-    let dst = img_fetch_buf();
-    let spans = take_batch(h, as_uninit(&mut dst[..SCRIPT_CAP.min(IMG_FETCH_CAP)]), want.len());
+    let (dst, spans) = take_batch_buf(h, SCRIPT_CAP, want.len());
     if let Some(sess) = js_session() {
         for (k, url) in want.iter().enumerate() {
             let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
@@ -2840,10 +2925,9 @@ fn nav_imports_arrived(engine: &Engine) {
 fn nav_dynjs_arrived(engine: &Engine) {
     let h = nav_job();
     let nodes = doc_mut().nav_dynjs_nodes.take().unwrap_or_default();
-    let dst = img_fetch_buf();
-    let spans = take_batch(h, as_uninit(&mut dst[..SCRIPT_CAP.min(IMG_FETCH_CAP)]), nodes.len());
-    // Copy everything out first, then run: a running script may insert the
-    // next one, which reuses the same buffer.
+    let (dst, spans) = take_batch_buf(h, SCRIPT_CAP, nodes.len());
+    // Copy everything out first, then run, so the batch buffer is gone
+    // before a running script inserts the next one.
     let mut texts: Vec<Option<String>> = Vec::with_capacity(nodes.len());
     for k in 0..nodes.len() {
         let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
@@ -2851,6 +2935,7 @@ fn nav_dynjs_arrived(engine: &Engine) {
         let bytes = &dst[off..off + n];
         texts.push(core::str::from_utf8(bytes).ok().map(String::from));
     }
+    drop(dst);
     let (mut ok, mut bad) = (0usize, 0usize);
     if let Some(sess) = js_session() {
         for (k, id) in nodes.iter().enumerate() {
@@ -2895,21 +2980,22 @@ fn log_font_faces(css: &str) {
 fn css_append(bytes: &[u8]) -> bool {
     let len = CSS_LEN.load(Relaxed);
     if len + bytes.len() + 1 >= CSS_CAP {
-        log(&alloc::format!("[beak] CSS buffer full at {len} B — dropped a {} B sheet", bytes.len()));
+        log(&alloc::format!("[beak] CSS limit of {} MiB reached at {len} B, dropped a {} B sheet",
+                            CSS_CAP >> 20, bytes.len()));
         return false;
     }
     let dst = css_buf();
-    dst[len..len + bytes.len()].copy_from_slice(bytes);
-    dst[len + bytes.len()] = b'\n';
-    CSS_LEN.store(len + bytes.len() + 1, Relaxed);
+    dst.truncate(len);
+    dst.extend_from_slice(bytes);
+    dst.push(b'\n');
+    CSS_LEN.store(dst.len(), Relaxed);
     true
 }
 
 fn nav_modules_arrived(engine: &Engine) {
     let h = nav_job();
     let want = doc_mut().nav_mod_want.take().unwrap_or_default();
-    let dst = img_fetch_buf();
-    let spans = take_batch(h, as_uninit(&mut dst[..SCRIPT_CAP.min(IMG_FETCH_CAP)]), want.len());
+    let (dst, spans) = take_batch_buf(h, SCRIPT_CAP, want.len());
     if let Some(sess) = js_session() {
         for (k, url) in want.iter().enumerate() {
             let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
@@ -3317,8 +3403,7 @@ fn images_arrived(
 ) {
     let want: Vec<(String, String)> = doc_mut().img_job_srcs.take().unwrap_or_default();
     doc_mut().img_job = -1;
-    let dst = img_fetch_buf();
-    let spans = take_batch(handle, as_uninit(dst), want.len());
+    let (dst, spans) = take_batch_buf(handle, IMG_FETCH_CAP, want.len());
     let mut arrived: Vec<&str> = Vec::new();
     let mut moved = false;
     for ((src, url), (off, n)) in want.iter().zip(spans) {
@@ -3441,8 +3526,7 @@ fn css_images_arrived(
 ) {
     let want: Vec<(u64, String)> = doc_mut().cssimg_job_keys.take().unwrap_or_default();
     doc_mut().cssimg_job = -1;
-    let dst = img_fetch_buf();
-    let spans = take_batch(handle, as_uninit(dst), want.len());
+    let (dst, spans) = take_batch_buf(handle, IMG_FETCH_CAP, want.len());
     let mut arrived: Vec<u64> = Vec::new();
     for ((key, url), (off, n)) in want.iter().zip(spans) {
         if n == 0 {
@@ -3636,8 +3720,9 @@ fn tab_freeze() {
 /// program, not the page, and a new tab showing the old one's text would be
 /// exactly the mix-up `Doc` exists to prevent.
 fn blank_document(engine: &Engine) {
-    HTML_LEN.store(0, Relaxed);
+    set_html(&[]);
     CSS_LEN.store(0, Relaxed);
+    *css_buf() = Vec::new();
     engine.set_scripted_dom(None);
     engine.set_hit_all(false);
     bump_content_gen("tab-blank");
@@ -5784,6 +5869,10 @@ pub extern "C" fn _start() {
             bump_content_gen("font");
             mark_dirty();
         }
+        // What the engine's safety limits cut since the last frame.
+        for (cut, n) in beak_engine::cuts::take() {
+            log(&alloc::format!("[beak] {} ({n}x)", cut.reason()));
+        }
         // The open WebSockets. A message arrives unprompted, so they are
         // polled every frame. Events from them are entry points like any
         // other, so the same follow-up work runs, under the same condition.
@@ -5903,7 +5992,7 @@ pub extern "C" fn _start() {
         // ask the kernel whether the answer is here. A running font round
         // counts too, or the page would stay unstyled longer.
         let waiting = nav_busy() || img_job() >= 0 || cssimg_job() >= 0
-            || font_job() >= 0;
+            || font_job() >= 0 || !doc().font_rest.is_empty();
         let busy = had_event
             || waiting
             || !doc().pending_imgs.is_empty()

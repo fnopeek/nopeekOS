@@ -2,8 +2,10 @@
 //!
 //! Hardware-independent by construction: binds the HDA controller by PCI class
 //! (0x04/0x03), not vendor:device, so it drives any HDA-spec controller (Intel,
-//! AMD, NVIDIA, QEMU's intel-hda). The codec is enumerated generically by walking
-//! the widget graph (like `snd-hda-codec-generic`) to find a DAC -> output-pin path.
+//! AMD, NVIDIA, QEMU's intel-hda). Every codec on the link is probed and its
+//! widget graph parsed as `snd-hda-codec-generic` does (`codec.rs`); the
+//! stream format is the best one the chosen converters take, and the kernel
+//! mixer produces it.
 //!
 //! Codec verbs use the spec's Immediate Command Interface (IC/IR/IRS) — what Linux
 //! uses as `single_cmd` on Intel — so the only DMA is the audio ring + BDL.
@@ -11,6 +13,7 @@
 
 #![no_std]
 
+mod codec;
 mod host;
 mod intelhdmi;
 mod regs;
@@ -32,10 +35,10 @@ static NPK_CAPS: [u8; 1] = [0x04 | 0x40];
 // ── audio buffer geometry ───────────────────────────────────────────────
 // HDA playback ring: two halves fed from the kernel audio mailbox. The DMA
 // cycles the ring; the loop refills what it has played with freshly mixed
-// PCM (silence when no app is playing).
+// PCM (silence when no app is playing). Its bytes follow the device format.
 const HALF_FRAMES: usize = 2048; // ~43 ms per half @ 48 kHz
-const HALF_BYTES: usize = HALF_FRAMES * 4; // S16 stereo
-const RING_BYTES: usize = HALF_BYTES * 2;
+/// The largest frame: 8 channels in 32-bit containers.
+const MAX_FRAME_BYTES: usize = 8 * 4;
 
 const STREAM_TAG: u32 = 1;
 
@@ -91,218 +94,105 @@ fn widget_type(mmio: i32, cad: u32, nid: u32) -> u32 {
     (get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) >> 20) & 0xF
 }
 
-/// Unmute the output amp of a widget at (near) max gain — if it has one.
-///
-/// An amp verb sent to a widget without an amp is undefined by the spec, and
-/// QEMU's line-out pin (`AMP_OUT_CAP = 0`, no `stindex`) shares the DAC's
-/// stream, so a gain-0 verb there silences the DAC that was just set up.
-///
-/// Zero steps does not mean "no amp" either: it can be a pure mute switch
-/// (e.g. on Realtek speaker pins), whose mute bit must be cleared. The spec
-/// separates the two by bit 31 of `AMP_*_CAP` ("can mute"):
-///
-/// * 0 steps and bit 31 set   → mute switch, must be opened
-/// * 0 steps and bit 31 clear → nothing there, the verb only does harm (QEMU)
-fn unmute_out(mmio: i32, cad: u32, nid: u32) {
-    // Ask both, because each can say no independently: the widget's
-    // capability bit and the step count of its amp.
-    if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_OUT_AMP == 0 {
-        return;
-    }
-    let cap = get_param(mmio, cad, nid, PARAM_AMP_OUT_CAP);
-    let steps = (cap >> 8) & 0x7F;
-    if steps == 0 {
-        if cap & AMP_CAP_MUTE == 0 { return; }
-        // Gain 0, mute bit (bit 7) clear: open.
-        codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_OUT_BOTH));
-        return;
-    }
-    // ~3/4 of max gain — audible but not blasting.
-    let gain = ((steps * 3 / 4) & 0x7F) as u16;
-    codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_OUT_BOTH | gain));
+/// What the chosen codec drives: the generic parser's outputs, or an Intel
+/// display codec, which routes by the display driver's report.
+enum Output {
+    Generic(codec::Spec),
+    IntelHdmi(codec::Codec),
 }
 
-/// Unmute input amp `index` of a node.
-///
-/// A mixer has one amp per input, and on many codecs they default to muted.
-/// `unmute_out` opens only the output, leaving mixer → pin open and DAC →
-/// mixer closed: LPIB runs, the pin is right, and nothing is heard.
-fn unmute_in(mmio: i32, cad: u32, nid: u32, index: u32) {
-    if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_IN_AMP == 0 {
-        return;
-    }
-    let cap = get_param(mmio, cad, nid, PARAM_AMP_IN_CAP);
-    let steps = (cap >> 8) & 0x7F;
-    let idx = (index as u16 & 0xF) << 8;
-    if steps == 0 {
-        // Same split as for the output: open a mute switch, leave an amp
-        // without any capability alone.
-        if cap & AMP_CAP_MUTE == 0 { return; }
-        codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_IN_BOTH | idx));
-        return;
-    }
-    let gain = ((steps * 3 / 4) & 0x7F) as u16;
-    codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_IN_BOTH | idx | gain));
-}
-
-/// The raw amp capability of a node, for the log.
-///
-/// The step count alone is ambiguous: `steps = 0` can mean "no amp", "pure
-/// mute switch" or "no output amp at all", and each needs something
-/// different. Bit 31 = can mute, [14:8] = steps, [6:0] = offset. `0` means
-/// the widget has no output amp.
-fn amp_cap(mmio: i32, cad: u32, nid: u32) -> u32 {
-    if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_OUT_AMP == 0 { return 0; }
-    get_param(mmio, cad, nid, PARAM_AMP_OUT_CAP)
-}
-
-fn conn_entry0(mmio: i32, cad: u32, nid: u32) -> u32 {
-    // Short-form connection list: 4 entries packed in one response.
-    let r = codec_cmd(mmio, cad, nid, vget_conn_entry(0)).unwrap_or(0);
-    r & 0xFF
-}
-
-// Walk from an output pin back to its feeding DAC (up to 2 hops through a
-// mixer/selector), unmuting each node in the path.
-fn trace_to_dac(mmio: i32, cad: u32, pin: u32) -> u32 {
-    // Log the path, so it shows whether a mixer — and thus an input amp —
-    // sits between pin and DAC.
-    if host::verbose() {
-        loghex("[audio_hda] path: pin 0x", pin);
-        loghex(" (out-amp cap=0x", amp_cap(mmio, cad, pin));
-        log(")");
-    }
-    let len = get_param(mmio, cad, pin, PARAM_CONN_LIST_LEN) & 0x7F;
-    if len == 0 { log(" <- (no connection list)\n"); return 0; }
-    let first = conn_entry0(mmio, cad, pin);
-    if first == 0 { log(" <- (empty)\n"); return 0; }
-    if widget_type(mmio, cad, first) == WTYPE_DAC {
-        loghex(" <- dac 0x", first);
-        loghex(" (out-amp cap=0x", amp_cap(mmio, cad, first));
-        log(")\n");
-        return first;
-    }
-    // mixer or selector: select input 0, unmute both directions, descend
-    if widget_type(mmio, cad, first) == WTYPE_SELECTOR {
-        codec_cmd(mmio, cad, first, vset_conn_select(0));
-    }
-    unmute_out(mmio, cad, first);
-    unmute_in(mmio, cad, first, 0);
-    loghex(" <- mid 0x", first);
-    loghex(" (out-amp cap=0x", amp_cap(mmio, cad, first));
-    log(")");
-    let inner = conn_entry0(mmio, cad, first);
-    if inner != 0 && widget_type(mmio, cad, inner) == WTYPE_DAC {
-        loghex(" <- dac 0x", inner);
-        loghex(" (out-amp cap=0x", amp_cap(mmio, cad, inner));
-        log(")\n");
-        return inner;
-    }
-    loghex(" <- 0x", inner);
-    log(" (not a DAC)\n");
-    inner
-}
-
-// Generic codec setup: find an output pin + its DAC, configure format/stream,
-// enable the pin, unmute the path. Returns the DAC NID or 0 on failure, and
-// whether the chosen output is analog (speaker, headphone or line-out).
-// `_start` uses that to pick the controller: an HDMI audio unit has only
-// `dev=0x05` pins, and a tone sent there is not heard on the speakers.
-fn setup_codec(mmio: i32, cad: u32) -> (u32, bool) {
+/// Probe the codec at `cad`: power its audio function group and parse its
+/// outputs. `None` without an audio function group.
+fn probe_codec(mmio: i32, cad: u32) -> Option<Output> {
     // Function groups under the root node.
     let root = get_param(mmio, cad, 0, PARAM_SUB_NODE_COUNT);
     let fg_start = (root >> 16) & 0xFF;
     let fg_count = root & 0xFF;
-    let mut afg = 0u32;
-    for fg in fg_start..fg_start + fg_count {
-        if get_param(mmio, cad, fg, PARAM_FUNCTION_TYPE) & 0xFF == FUNC_TYPE_AFG {
-            afg = fg;
-            break;
-        }
-    }
-    if afg == 0 {
-        log("[audio_hda] no audio function group\n");
-        return (0, false);
-    }
-    dbghexln("[audio_hda] AFG nid=0x", afg);
+    let afg = (fg_start..fg_start + fg_count)
+        .find(|&fg| get_param(mmio, cad, fg, PARAM_FUNCTION_TYPE) & 0xFF == FUNC_TYPE_AFG)?;
+    loghex("[audio_hda] codec 0x", cad);
+    loghex(" vendor 0x", get_param(mmio, cad, 0, PARAM_VENDOR_ID));
+    loghex(" AFG 0x", afg);
+    log("\n");
     codec_cmd(mmio, cad, afg, vset_power(0)); // D0
 
+    let c = codec::Codec::new(mmio, cad, afg);
     // An Intel display codec takes its own path: its pins are display
     // ports, and which one carries a sink is the display driver's to say.
     if intelhdmi::is_tgl_hdmi(mmio, cad) {
-        return (intelhdmi::setup(mmio, cad, afg, STREAM_TAG, FMT_48K_S16_STEREO), false);
+        return Some(Output::IntelHdmi(c));
     }
+    let spec = codec::Spec::parse(c);
+    spec.log_outputs();
+    Some(Output::Generic(spec))
+}
 
-    // Widgets under the AFG.
-    let w = get_param(mmio, cad, afg, PARAM_SUB_NODE_COUNT);
-    let w_start = (w >> 16) & 0xFF;
-    let w_count = w & 0xFF;
+/// The device format: rate, sample width (16, 20, 24 or 32 bits, the
+/// latter three in a 32-bit container), channels, and the SDxFMT word.
+#[derive(Clone, Copy)]
+struct DevFormat {
+    rate: u32,
+    bits: u32,
+    channels: u32,
+    word: u16,
+}
 
-    // Find the best output pin. Prefer the built-in speaker (so a tone is
-    // audible with no cable), then headphone, then line-out. Log every
-    // output-capable pin so the real codec topology is visible on hardware.
-    let mut pin = 0u32;
-    let mut pin_pri = 99u32;
-    let mut pin_dev = 0xFFu32;
-    let mut pin_fallback = 0u32;
-    for nid in w_start..w_start + w_count {
-        if widget_type(mmio, cad, nid) != WTYPE_PIN { continue; }
-        let pcap = get_param(mmio, cad, nid, PARAM_PIN_CAP);
-        if pcap & (1 << 4) == 0 { continue; } // not output-capable
-        if pin_fallback == 0 { pin_fallback = nid; }
-        let cfg = codec_cmd(mmio, cad, nid, vget_config_default()).unwrap_or(0);
-        let conn = (cfg >> 30) & 0x3; // 1 = no physical connection
-        let dev = (cfg >> 20) & 0xF; // 0=LineOut 1=Speaker 2=HPOut
-        if host::verbose() {
-            loghex("[audio_hda]  out-pin nid=0x", nid);
-            loghex(" dev=0x", dev);
-            loghex(" conn=0x", conn);
-            log("\n");
+impl DevFormat {
+    fn sample_bytes(&self) -> usize {
+        if self.bits == 16 { 2 } else { 4 }
+    }
+    fn frame_bytes(&self) -> usize {
+        self.sample_bytes() * self.channels as usize
+    }
+}
+
+/// Rates in order of preference: 48 kHz, which sources use as a rule, then
+/// by closeness to it.
+const RATE_PREFERENCE: [u32; 11] = [48000, 44100, 96000, 88200, 192000, 176400, 32000, 22050, 16000, 11025, 8000];
+
+/// The best format the converters take (`rates`: AC_PAR_PCM rate bits,
+/// `widths`: AC_SUPPCM_BITS_* bits): the most preferred rate, 16 bits when
+/// supported, else the widest container.
+fn pick_format(rates: u32, widths: u32, channels: u32) -> Option<DevFormat> {
+    let rate = RATE_PREFERENCE.iter().copied().find(|r| {
+        codec::RATE_BITS.iter().position(|(hz, _)| hz == r).is_some_and(|i| rates & (1 << i) != 0)
+    })?;
+    let bits = [(16, 1u32 << 17), (24, 1 << 19), (32, 1 << 20), (20, 1 << 18)]
+        .iter()
+        .find(|(_, bit)| widths & bit != 0)
+        .map(|(b, _)| *b)?;
+    let word = codec::stream_format(channels, bits, rate);
+    (word != 0).then_some(DevFormat { rate, bits, channels, word })
+}
+
+/// Set up the chosen output for a stream in its best format.
+fn setup_output(out: &mut Output) -> Option<DevFormat> {
+    match out {
+        Output::Generic(spec) => {
+            let mut dacs = [0u8; 4 * codec::HDA_MAX_OUTS];
+            let n = spec.used_dacs(&mut dacs);
+            if n == 0 {
+                return None;
+            }
+            // What every DAC of the stream takes.
+            let (mut rates, mut widths) = (u32::MAX, u32::MAX);
+            for &d in &dacs[..n] {
+                let (r, w) = spec.codec.supported_pcm(d as u32);
+                rates &= r;
+                widths &= w;
+            }
+            let fmt = pick_format(rates, widths, spec.channels(2))?;
+            spec.init();
+            spec.setup_stream(STREAM_TAG, fmt.word, fmt.channels);
+            Some(fmt)
         }
-        if conn == 1 { continue; } // no physical jack/connection
-        let pri = match dev { 1 => 0, 2 => 1, 0 => 2, _ => continue };
-        if pri < pin_pri {
-            pin_pri = pri;
-            pin = nid;
-            pin_dev = dev;
+        Output::IntelHdmi(c) => {
+            // One stereo stream (`intelhdmi::setup`).
+            let (rates, widths) = c.supported_pcm(c.afg);
+            let fmt = pick_format(rates, widths, 2)?;
+            (intelhdmi::setup(c.mmio, c.cad, c.afg, STREAM_TAG, fmt.word) != 0).then_some(fmt)
         }
     }
-    if pin == 0 { pin = pin_fallback; }
-    if pin == 0 {
-        log("[audio_hda] no output pin\n");
-        return (0, false);
-    }
-    let devname = match pin_dev {
-        1 => "speaker",
-        2 => "headphone",
-        0 => "line-out",
-        _ => "(fallback)",
-    };
-    log("[audio_hda] selected output: ");
-    log(devname);
-    loghex(" pin nid=0x", pin);
-    log("\n");
-
-    let dac = trace_to_dac(mmio, cad, pin);
-    if dac == 0 {
-        log("[audio_hda] no DAC behind pin\n");
-        return (0, false);
-    }
-    dbghexln("[audio_hda] DAC nid=0x", dac);
-
-    // Configure the DAC: power, format, bind to our stream tag, unmute.
-    codec_cmd(mmio, cad, dac, vset_power(0));
-    codec_cmd(mmio, cad, dac, vset_format(FMT_48K_S16_STEREO));
-    codec_cmd(mmio, cad, dac, vset_stream_chan((STREAM_TAG << 4) | 0));
-    unmute_out(mmio, cad, dac);
-
-    // Enable the pin: power, output enable, EAPD, unmute.
-    codec_cmd(mmio, cad, pin, vset_power(0));
-    codec_cmd(mmio, cad, pin, vset_pin_ctl(PIN_CTL_OUT_EN));
-    codec_cmd(mmio, cad, pin, vset_eapd(EAPD_ENABLE));
-    unmute_out(mmio, cad, pin);
-
-    (dac, pin_pri != 99)
 }
 
 // ── controller bring-up ───────────────────────────────────────────────────
@@ -310,10 +200,23 @@ fn setup_codec(mmio: i32, cad: u32) -> (u32, bool) {
 /// Upper bound on HD Audio controllers probed.
 const MAX_HDA: u32 = 4;
 
-/// The binding is in place: bring the controller up and set up the codec.
-/// Returns `(mmio, iss, analog)`, or `None` if this controller is unusable
+/// Codec addresses on the link: STATESTS bits 0..14 (`HDA_MAX_CODEC_ADDRESS`).
+const HDA_MAX_CODECS: u32 = 15;
+
+/// A controller brought up with its codec output set up.
+struct Hda {
+    mmio: i32,
+    iss: u32,
+    analog: bool,
+    fmt: DevFormat,
+    out: Output,
+}
+
+/// The binding is in place: bring the controller up, probe every codec on
+/// the link and set up the best output: the first codec with an analog
+/// output, else the first with any. `None` if this controller is unusable
 /// and the caller should try the next one.
-fn bring_up() -> Option<(i32, u32, bool)> {
+fn bring_up() -> Option<Hda> {
     pci_enable_bus_master();
     // Intel quirk: clear TCSEL (PCI 0x44) traffic-class bits so DMA uses TC0.
     let tcsel = pci_read_config(0x44);
@@ -333,13 +236,56 @@ fn bring_up() -> Option<(i32, u32, bool)> {
     loghex("[audio_hda] codecs present (STATESTS) 0x", statests);
     log("\n");
     if statests == 0 { log("[audio_hda] no codec detected\n"); return None; }
-    let mut cad = 0u32;
-    while cad < 15 && statests & (1 << cad) == 0 { cad += 1; }
-    dbghexln("[audio_hda] codec addr=0x", cad);
 
-    let (dac, analog) = setup_codec(mmio, cad);
-    if dac == 0 { log("[audio_hda] codec setup failed\n"); return None; }
-    Some((mmio, iss, analog))
+    let mut chosen: Option<(Output, bool)> = None;
+    for cad in 0..HDA_MAX_CODECS {
+        if statests & (1 << cad) == 0 { continue; }
+        let Some(out) = probe_codec(mmio, cad) else {
+            loghex("[audio_hda] codec 0x", cad);
+            log(" has no audio function group\n");
+            continue;
+        };
+        let (usable, analog) = match &out {
+            Output::Generic(spec) => (spec.has_output(), spec.has_analog()),
+            Output::IntelHdmi(_) => (true, false),
+        };
+        if !usable { continue; }
+        let better = match &chosen {
+            None => true,
+            Some((_, a)) => analog && !*a,
+        };
+        if better { chosen = Some((out, analog)); }
+    }
+    let Some((mut out, analog)) = chosen else {
+        log("[audio_hda] no codec with an output\n");
+        return None;
+    };
+    let Some(fmt) = setup_output(&mut out) else {
+        log("[audio_hda] codec setup failed\n");
+        return None;
+    };
+    let cad = match &out { Output::Generic(s) => s.codec.cad, Output::IntelHdmi(c) => c.cad };
+    loghex("[audio_hda] output on codec 0x", cad);
+    log(if analog { " (analog), " } else { " (digital), " });
+    logdec(fmt.rate);
+    log(" Hz ");
+    logdec(fmt.bits);
+    log(" bit ");
+    logdec(fmt.channels);
+    log(" ch\n");
+    Some(Hda { mmio, iss, analog, fmt, out })
+}
+
+fn logdec(mut v: u32) {
+    let mut buf = [0u8; 10];
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 { break; }
+    }
+    log(core::str::from_utf8(&buf[i..]).unwrap_or("?"));
 }
 
 fn reset_controller(mmio: i32) -> bool {
@@ -392,14 +338,14 @@ pub extern "C" fn _start() {
     // speakers and headphones), and PCI order between them is arbitrary.
     // Only this driver knows what a usable output is, so the choice lives
     // here, not in the kernel.
-    let mut chosen: Option<(i32, u32)> = None;   // (mmio, iss)
+    let mut chosen: Option<Hda> = None;
     let mut fb: Option<(u8, u32)> = None;        // first usable one, but digital
     'outer: for &sub in [0x03u8, 0x01u8].iter() {
         for i in 0..MAX_HDA {
             if pci_bind_class_n(0x04, sub, i) != 0 { break; }
             match bring_up() {
-                Some((mmio, iss, true)) => { chosen = Some((mmio, iss)); break 'outer; }
-                Some((_, _, false)) => { if fb.is_none() { fb = Some((sub, i)); } }
+                Some(h) if h.analog => { chosen = Some(h); break 'outer; }
+                Some(_) => { if fb.is_none() { fb = Some((sub, i)); } }
                 None => {}
             }
         }
@@ -410,17 +356,27 @@ pub extern "C" fn _start() {
         if let Some((sub, i)) = fb {
             log("[audio_hda] no analog output anywhere — using the first controller that worked\n");
             if pci_bind_class_n(0x04, sub, i) == 0 {
-                if let Some((mmio, iss, _)) = bring_up() { chosen = Some((mmio, iss)); }
+                chosen = bring_up();
             }
         }
     }
-    let (mmio, iss) = match chosen {
-        Some(c) => c,
-        None => { log("[audio_hda] no usable HDA controller — exit\n"); return; }
+    let Some(Hda { mmio, iss, fmt, mut out, .. }) = chosen else {
+        log("[audio_hda] no usable HDA controller — exit\n");
+        return;
     };
 
+    // The kernel mixer produces the device format.
+    let encoding = if fmt.bits == 16 { 0 } else { 1 }; // S16LE, else S32LE (MSB-aligned)
+    if npk_sys::audio_device_format(fmt.rate as i32, encoding, fmt.channels as i32) != 0 {
+        log("[audio_hda] the mixer does not take the device format, exit\n");
+        return;
+    }
+    let fb_bytes = fmt.frame_bytes();
+    let half_bytes = HALF_FRAMES * fb_bytes;
+    let ring_bytes = half_bytes * 2;
+
     // ── DMA: the playback ring (zeroed by the kernel = silence) + its BDL ──
-    let audio = dma_alloc(((RING_BYTES + 4095) / 4096) as u16);
+    let audio = dma_alloc(((ring_bytes + 4095) / 4096) as u16);
     let bdl = dma_alloc(1);
     if audio < 0 || bdl < 0 {
         log("[audio_hda] DMA alloc failed — exit\n");
@@ -429,7 +385,7 @@ pub extern "C" fn _start() {
     let audio_phys = dma_phys(audio);
 
     // BDL: two equal cyclic halves (HDA wants >= 2; LVI = entries-1).
-    let half = HALF_BYTES as u32;
+    let half = half_bytes as u32;
     let mut bdl_buf = [0u8; 32];
     let mk = |buf: &mut [u8], i: usize, addr: u64, len: u32| {
         buf[i..i + 8].copy_from_slice(&addr.to_le_bytes());
@@ -446,9 +402,9 @@ pub extern "C" fn _start() {
     reset_stream(mmio, base);
     mmio_w32(mmio, base + SD_BDLPL, (bdl_phys & 0xFFFF_FFFF) as u32);
     mmio_w32(mmio, base + SD_BDLPU, (bdl_phys >> 32) as u32);
-    mmio_w32(mmio, base + SD_CBL, RING_BYTES as u32);
+    mmio_w32(mmio, base + SD_CBL, ring_bytes as u32);
     mmio_w16(mmio, base + SD_LVI, 1);
-    mmio_w16(mmio, base + SD_FORMAT, FMT_48K_S16_STEREO);
+    mmio_w16(mmio, base + SD_FORMAT, fmt.word);
     fence();
     // The controller's MSI (`azx_acquire_irq`; the AMD SB preset allows MSI).
     // With it the stream raises an interrupt at the end of each half
@@ -476,7 +432,7 @@ pub extern "C" fn _start() {
     // Streaming loop: a true ring-buffer copy. Each poll refills exactly the
     // region the DMA has played since last time — [write_pos, LPIB) — pulling
     // that many bytes from the kernel mixer. This locks the drain rate to the
-    // DMA's real 48 kHz regardless of how often this loop is scheduled; a
+    // DMA's real rate regardless of how often this loop is scheduled; a
     // refill-on-crossing scheme misses crossings under coarse wakeups and
     // drains the mailbox too slowly. write_pos chases LPIB; the ring stays
     // about one lap ahead of the play head (~85 ms latency, reported to the
@@ -499,10 +455,21 @@ pub extern "C" fn _start() {
     let mut wrote: u32 = 0;
     let mut readback: u32 = 0;
     // Scratch buffer for one mailbox poll -> one ring half.
-    let mut mix = [0u8; HALF_BYTES];
+    let mut mix = [0u8; HALF_FRAMES * MAX_FRAME_BYTES];
+    // Peaks are read from the top 16 bits of each sample.
+    let sample_bytes = fmt.sample_bytes();
+    let half_ms = (HALF_FRAMES as u32 * 1000) / fmt.rate;
+    let mut last_jack_poll = npk_sys::ticks();
     loop {
         intelhdmi::poll();
-        let lpib = (mmio_r32(mmio, base + SD_LPIB) as usize) % RING_BYTES;
+        if let Output::Generic(spec) = &mut out {
+            let now = npk_sys::ticks();
+            if now - last_jack_poll >= JACK_POLL_MS {
+                last_jack_poll = now;
+                spec.poll_jacks();
+            }
+        }
+        let lpib = (mmio_r32(mmio, base + SD_LPIB) as usize) % ring_bytes;
         ticks += 1;
         if host::verbose() && reports > 0 && ticks % 250 == 0 {
             reports -= 1;
@@ -524,20 +491,21 @@ pub extern "C" fn _start() {
             peak = 0;
         }
         loop {
-            // Bytes the DMA has played since we last filled (frame-aligned to 4).
-            let avail = ((lpib + RING_BYTES - write_pos) % RING_BYTES) & !3;
+            // Bytes the DMA has played since we last filled, whole frames.
+            let avail = (lpib + ring_bytes - write_pos) % ring_bytes;
+            let avail = avail - avail % fb_bytes;
             if avail == 0 { break; }
             // Don't cross the ring end or overflow `mix` in one copy.
-            let n = avail.min(RING_BYTES - write_pos).min(HALF_BYTES);
+            let n = avail.min(ring_bytes - write_pos).min(half_bytes);
             audio_poll_mix(&mut mix[..n]);
             // Peak of the mixed block: shows whether the mailbox delivers
             // anything. Every eighth sample is enough for a peak.
-            let mut i = 0usize;
+            let mut i = sample_bytes - 2;
             while i + 1 < n {
                 let v = i16::from_le_bytes([mix[i], mix[i + 1]]) as i32;
                 let a = if v < 0 { -v } else { v };
                 if a > peak { peak = a; }
-                i += 16;
+                i += 8 * sample_bytes;
             }
             dma_write(audio, write_pos as u32, &mix[..n]);
             // Read back what was just written. If it does not match,
@@ -547,7 +515,7 @@ pub extern "C" fn _start() {
                 readback = dma_read32(audio, write_pos as u32);
             }
             pulled += n as u64;
-            write_pos = (write_pos + n) % RING_BYTES;
+            write_pos = (write_pos + n) % ring_bytes;
         }
         if irq {
             // `azx_interrupt` → `snd_hdac_bus_handle_stream_irq`: the
@@ -560,14 +528,15 @@ pub extern "C" fn _start() {
                 mmio_w8(mmio, base + SD_STS, SD_INT_MASK as u8);
             }
             // Sleep until the DMA finishes a half. One half is HALF_FRAMES at
-            // 48 kHz; if the interrupt never came we would still refill a
-            // half-period late, with the other half queued.
-            wait_irq(HALF_MS + 10);
+            // the device rate; if the interrupt never came we would still
+            // refill a half-period late, with the other half queued.
+            wait_irq(half_ms + 10);
         } else {
             sleep_ms(4);
         }
     }
 }
 
-/// Play time of one ring half.
-const HALF_MS: u32 = (HALF_FRAMES as u32 * 1000) / 48_000;
+/// How often the jacks are read for headphone automute (Linux
+/// `jackpoll_ms`, whose usual setting is in this range).
+const JACK_POLL_MS: i64 = 500;

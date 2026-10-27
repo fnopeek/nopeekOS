@@ -138,8 +138,8 @@ pub fn report() {
         crate::kprintln!("  SCI: nicht genommen (laeuft acpi?)");
         return;
     }
-    let v = VECTOR.load(Ordering::Relaxed) as u8;
-    crate::kprintln!("  SCI: vector {:#x} fired {} · service {} (EC {}, PM1 {}, leer {})",
+    let v = VECTOR.load(Ordering::Relaxed) as crate::irq::Irq;
+    crate::kprintln!("  SCI: irq {} fired {} · service {} (EC {}, PM1 {}, leer {})",
         v, crate::irq::fired_count(v), CALLS.load(Ordering::Relaxed),
         EC_HITS.load(Ordering::Relaxed), PM1_HITS.load(Ordering::Relaxed),
         EMPTY.load(Ordering::Relaxed));

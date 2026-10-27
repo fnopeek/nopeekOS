@@ -66,6 +66,7 @@ unsafe extern "C" {
     fn npk_screen_size() -> i32;
     fn npk_audio_get_volume() -> i32;
     fn npk_audio_set_volume(pct: i32) -> i32;
+    fn npk_audio_format(slot: i32, rate: i32, encoding: i32, channels: i32) -> i32;
     fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
     fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
     fn npk_pick(mode: i32, start_ptr: i32, start_len: i32,
@@ -164,6 +165,7 @@ unsafe extern "C" {
     fn npk_battery_detail(rate: i32, remaining: i32, full: i32, voltage_mv: i32, unit: i32);
     fn npk_pointer_inject(dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32) -> i32;
     fn npk_audio_poll_mix(ptr: i32, max: i32) -> i32;
+    fn npk_audio_device_format(rate: i32, encoding: i32, channels: i32) -> i32;
     fn npk_display_audio_set(port: i32, ptr: i32, len: i32) -> i32;
     fn npk_display_audio_get(port: i32, ptr: i32, max: i32) -> i32;
     fn npk_display_audio_generation() -> i32;
@@ -208,6 +210,12 @@ plain! {
     fn screen_size = npk_screen_size() -> i32;
     fn audio_get_volume = npk_audio_get_volume() -> i32;
     fn audio_set_volume = npk_audio_set_volume(pct: i32) -> i32;
+    /// The format of one's own stream `slot`: `encoding` 0 = S16LE,
+    /// 1 = S32LE, 2 = F32LE, 1 or 2 channels, any rate 8..384 kHz.
+    fn audio_format = npk_audio_format(slot: i32, rate: i32, encoding: i32, channels: i32) -> i32;
+    /// The device format the mixer produces (driver side): `encoding`
+    /// 0 = S16LE, 1 = S32LE, 2 = F32LE.
+    fn audio_device_format = npk_audio_device_format(rate: i32, encoding: i32, channels: i32) -> i32;
 
     fn pci_bind = npk_pci_bind(vendor: i32, device: i32) -> i32;
     fn pci_bind_class = npk_pci_bind_class(class: i32, subclass: i32) -> i32;

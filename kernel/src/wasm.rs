@@ -67,11 +67,11 @@ pub(crate) struct HwDriverState {
     dma_pages: usize,
     bus_master_enabled: bool,
     registered_as_netdev: bool,
-    /// The device-IRQ vector this driver registered, 0 = none. A driver
-    /// may arm and wait on this vector only — any vector of the pool would
-    /// let a module re-route another driver's interrupt to its own core.
-    irq_vector: u8,
-    /// `irq::fired_count` of that vector when `npk_wait` last reported it.
+    /// The interrupt this driver registered, 0 = none. A driver may arm
+    /// and wait on this one only: any other would let a module re-route
+    /// another driver's interrupt to its own core.
+    irq_vector: crate::irq::Irq,
+    /// `irq::fired_count` of that interrupt when `npk_wait` last reported it.
     irq_seen: u64,
     /// The device's DMA mask as a limit (`dma_set_mask`): its buffers lie
     /// below it. 4 GB until the driver names a wider one.

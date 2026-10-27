@@ -583,12 +583,10 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
     true
 }
 
-/// Re-point an already-programmed MSI-X table `entry` of `dev` to deliver to
-/// LAPIC `dest_apic` — rewrites only the message address (one MMIO write).
-/// Lets the IRQ subsystem route a device's interrupt to whichever core is
-/// about to wait on it (so the IRQ wakes the right core out of HLT). The entry
-/// must already be programmed + the table page mapped (via `program_msix`).
-pub fn msix_set_dest(dev: PciAddr, entry: u16, dest_apic: u32) {
+/// Re-point an already-programmed MSI-X table `entry` of `dev` at `vector`
+/// on LAPIC `dest_apic`. The entry is masked while address and data change,
+/// as Linux' `__pci_write_msi_msg`, so no message goes out half-written.
+pub fn msix_set_target(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) {
     if read16(dev, 0x06) & (1 << 4) == 0 {
         return;
     }
@@ -621,8 +619,11 @@ pub fn msix_set_dest(dev: PciAddr, entry: u16, dest_apic: u32) {
     // SAFETY: MSI-X table entry in an assigned BAR; `irq` only re-points
     // entries `program_msix` has programmed.
     let Some(e) = (unsafe { msix_entry(entry_addr) }) else { return };
-    // Re-points delivery; no enable/mask change.
+    let ctrl = e.r32(12u64);
+    e.w32(12u64, ctrl | 1);
     e.w32(0u64, msg_addr_lo);
+    e.w32(8u64, vector as u32);
+    e.w32(12u64, ctrl);
 }
 
 /// The 16-byte MSI-X table entry at physical `entry_addr`, its page mapped
@@ -708,12 +709,26 @@ pub fn program_msi(dev: PciAddr, vector: u8, dest_apic: u32) -> bool {
     true
 }
 
-/// Re-point `dev`'s plain MSI to LAPIC `dest_apic` — one config write of the
-/// message address (the counterpart of `msix_set_dest`).
-pub fn msi_set_dest(dev: PciAddr, dest_apic: u32) {
+/// Re-point `dev`'s plain MSI at `vector` on LAPIC `dest_apic`, masked
+/// while it changes when the device can mask (the counterpart of
+/// `msix_set_target`). Without masking a message may go out between the
+/// two writes; the caller covers that by waking the waiter once.
+pub fn msi_set_target(dev: PciAddr, vector: u8, dest_apic: u32) {
     let cap = find_cap(dev, 0x05);
-    if cap != 0 {
-        write32(dev, cap + 4, 0xFEE0_0000 | ((dest_apic & 0xFF) << 12));
+    if cap == 0 {
+        return;
+    }
+    let ctrl = (read32(dev, cap) >> 16) as u16;
+    let data_off = if ctrl & (1 << 7) != 0 { cap + 0x0C } else { cap + 8 };
+    let mask_off = (ctrl & (1 << 8) != 0).then_some(data_off + 4);
+    let mask = mask_off.map(|m| read32(dev, m));
+    if let (Some(m), Some(v)) = (mask_off, mask) {
+        write32(dev, m, v | 1);
+    }
+    write32(dev, cap + 4, 0xFEE0_0000 | ((dest_apic & 0xFF) << 12));
+    write32(dev, data_off, vector as u32);
+    if let (Some(m), Some(v)) = (mask_off, mask) {
+        write32(dev, m, v);
     }
 }
 

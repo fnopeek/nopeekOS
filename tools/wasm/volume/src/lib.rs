@@ -61,10 +61,8 @@ fn poll_event(buf: &mut [u8]) -> PollResult {
     }
 }
 
-// No heap state survives between frames (the slider keeps its level in
-// `Volume`), so every commit resets to the start mark and rebuilds.
 #[global_allocator]
-static ALLOCATOR: nopeek_widgets::bump::Bump<{ 128 * 1024 }> = nopeek_widgets::bump::Bump::new();
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -89,8 +87,6 @@ struct Volume {
     vol: u8,
     /// Level restored on un-mute.
     pre_mute: u8,
-    /// Allocator fill level before the first frame.
-    heap_base: usize,
 }
 
 fn render(v: &Volume) -> Widget {
@@ -125,7 +121,6 @@ fn render(v: &Volume) -> Widget {
 }
 
 fn commit_tree(v: &Volume) {
-    ALLOCATOR.reset(v.heap_base);   // reclaim the previous frame's tree
     let tree = render(v);
     match wire::encode(&tree) {
         Ok(bytes) => { if !host::scene_commit(&bytes) { log("[volume] commit failed"); } }
@@ -168,7 +163,6 @@ pub extern "C" fn _start() {
     let mut st = Volume {
         vol,
         pre_mute: if vol > 0 { vol } else { 50 },
-        heap_base: ALLOCATOR.mark(),
     };
     // Placed by the kernel next to the item deck was clicked on; started any
     // other way it is centred. Light-dismiss either way.

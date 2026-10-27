@@ -400,7 +400,7 @@ pub fn try_send_csum(frame: &[u8], csum: igc::TxCsum) -> Result<(), NetError> {
 }
 
 /// LAPIC vector of the RX interrupt; 0 for the polled e1000 path.
-pub fn rx_irq_vector() -> u8 {
+pub fn rx_irq_vector() -> crate::irq::Irq {
     if IS_IGC.load(Ordering::Acquire) { igc::rx_irq_vector() } else { 0 }
 }
 

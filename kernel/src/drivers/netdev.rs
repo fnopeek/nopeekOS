@@ -577,10 +577,10 @@ fn virtio_rx_seq() -> u64 {
     ext
 }
 
-/// LAPIC vector to park on for RX arrival, or `None` when the active card has
+/// Interrupt to park on for RX arrival, or `None` when the active card has
 /// no RX MSI-X and must be polled. Only virtio-net has one today; the intel
 /// NIC, the USB dongle and a WASM-driven card are all polled.
-pub fn rx_wake_vector() -> Option<u8> {
+pub fn rx_wake_vector() -> Option<crate::irq::Irq> {
     match active() {
         Active::Virtio | Active::None => match virtio_net::rx_irq_vector() {
             0 => None,

@@ -21,8 +21,14 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use libm::{ceilf, cosf, fabsf, floorf, sinf, sqrtf, tanf};
 
-const MAX_SIDE: u32 = 1024;
-const MAX_PIXELS: usize = 1_000_000; // caps the f32 accumulation buffer (~16 MB)
+/// Bytes one raster may take while it is drawn: the premultiplied f32
+/// accumulation (16 B per pixel) plus the BGRA result (4 B). Larger drawings
+/// are rasterised scaled down to fit and stretched into their box, never
+/// dropped. 80 MiB holds a 2560x1600 drawing at full size.
+pub(crate) const MAX_RASTER_BYTES: usize = 80 * 1024 * 1024;
+const BYTES_PER_PIXEL: usize = 16 + 4;
+/// Longest side of a raster, so a 1x10^7 strip cannot pass the byte limit.
+const MAX_SIDE: u32 = 8192;
 const SS: usize = 4; // vertical supersampling for anti-aliasing
 
 // ── foreign-content name adjustment (HTML tree construction) ───────────────
@@ -233,17 +239,20 @@ fn render_tree(root: &XmlEl, current: Rgb, box_px: Option<(u32, u32)>, spin: Opt
     if !(dev_w > 0.0) || !(dev_h > 0.0) {
         return None;
     }
-    // Clamp raster size to bounds, keeping aspect.
-    let mut w = dev_w;
-    let mut h = dev_h;
-    let scale_cap = (MAX_SIDE as f32 / w.max(h)).min(1.0);
-    w *= scale_cap;
-    h *= scale_cap;
-    let iw = (ceilf(w) as u32).clamp(1, MAX_SIDE);
-    let ih = (ceilf(h) as u32).clamp(1, MAX_SIDE);
-    if (iw as usize).checked_mul(ih as usize)? > MAX_PIXELS {
-        return None;
+    // Scale down to the raster limits, keeping aspect.
+    let max_px = (MAX_RASTER_BYTES / BYTES_PER_PIXEL) as f32;
+    let scale_cap = (MAX_SIDE as f32 / dev_w.max(dev_h))
+        .min(sqrtf(max_px / (dev_w * dev_h)))
+        .min(1.0);
+    if scale_cap < 1.0 {
+        crate::cuts::note(crate::cuts::Cut::SvgScaled);
     }
+    let w = dev_w * scale_cap;
+    let h = dev_h * scale_cap;
+    // `floor` after the scale, so rounding up cannot step over the limit.
+    let round = |v: f32| if scale_cap < 1.0 { floorf(v) } else { ceilf(v) };
+    let iw = (round(w) as u32).clamp(1, MAX_SIDE);
+    let ih = (round(h) as u32).clamp(1, MAX_SIDE);
 
     let mut root_mat = view_box_matrix(vb, iw as f32, ih as f32);
     if let Some([a, b, c, d]) = spin {
@@ -1687,6 +1696,17 @@ mod tests {
         // a corner pixel should be transparent
         let corner = 0;
         assert_eq!(img.bgra[corner + 3], 0, "corner should be transparent");
+    }
+
+    #[test]
+    fn a_large_drawing_renders() {
+        let svg = br##"<svg viewBox="0 0 10 10" width="1500" height="1200"><rect width="10" height="10" fill="#f00"/></svg>"##;
+        let img = render(svg).expect("render");
+        assert_eq!((img.w, img.h), (1500, 1200));
+        let huge = br##"<svg viewBox="0 0 10 10" width="20000" height="20000"><rect width="10" height="10" fill="#f00"/></svg>"##;
+        let img = render(huge).expect("scaled, not dropped");
+        assert!(img.w == img.h && img.w > 1000);
+        assert!(img.w as usize * img.h as usize * BYTES_PER_PIXEL <= MAX_RASTER_BYTES);
     }
 
     #[test]

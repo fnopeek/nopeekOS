@@ -145,7 +145,7 @@ struct NvmeState {
     /// DMA at any moment, so the queue is closed for good: refusing I/O is
     /// safe, guessing which completion belongs to whom is not.
     io_dead: bool,
-    msix_vector: u8,            // LAPIC vector for I/O CQ completion MSI-X (0 = none/poll)
+    msix_vector: crate::irq::Irq, // interrupt of the I/O CQ completion MSI-X (0 = none/poll)
     pci_addr: pci::PciAddr,     // for live MSI-X read-back (disk diagnostic)
 }
 
@@ -373,7 +373,7 @@ fn io_command(state: &mut NvmeState, cmd: SqEntry) -> Result<CqEntry, BlkError> 
 /// One-shot confirmation that NVMe completions raise our MSI-X ISR, without
 /// changing the poll-based completion logic.
 static MSIX_CONFIRMED: AtomicBool = AtomicBool::new(false);
-fn nvme_msix_confirm(vector: u8) {
+fn nvme_msix_confirm(vector: crate::irq::Irq) {
     if vector != 0 && !MSIX_CONFIRMED.load(Ordering::Relaxed) {
         let n = crate::irq::fired_count(vector);
         if n > 0 {
@@ -987,7 +987,7 @@ static NVME_DRAIN_SLOW: AtomicU64 = AtomicU64::new(0);
 const NVME_DRAIN_LOG_EVERY: u64 = 512;
 const NVME_SLOW_US: u64 = 200; // a completion that spun > this is "slow"
 
-fn record_drain(t0: u64, vector: u8) {
+fn record_drain(t0: u64, vector: crate::irq::Irq) {
     let dt = crate::interrupts::rdtsc().saturating_sub(t0);
     let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
     let us = dt / mhz;
@@ -1397,10 +1397,10 @@ pub fn max_blocks_per_cmd() -> u32 {
     MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed)
 }
 
-/// (LAPIC vector, total completion-IRQ fires) for the I/O-CQ MSI-X, or None
+/// (interrupt number, total completion-IRQ fires) for the I/O-CQ MSI-X, or None
 /// if MSI-X isn't set up (poll-only). For the `disk` diagnostic — `fires > 0`
 /// proves the device-IRQ path works.
-pub fn msix_status() -> Option<(u8, u64)> {
+pub fn msix_status() -> Option<(crate::irq::Irq, u64)> {
     let guard = NVME.lock();
     let v = guard.as_ref()?.msix_vector;
     if v == 0 {

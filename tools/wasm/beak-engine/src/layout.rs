@@ -775,9 +775,9 @@ fn faded(c: Rgba, k: f32) -> Rgba {
 fn fade_style(st: &ComputedStyle) -> ComputedStyle {
     let k = st.inline_fade;
     if k >= 0.999 {
-        return *st;
+        return st.clone();
     }
-    let mut s = *st;
+    let mut s = st.clone();
     s.color = faded(s.color, k);
     s.bg = s.bg.map(|c| faded(c, k));
     for b in [&mut s.border_top, &mut s.border_right, &mut s.border_bottom, &mut s.border_left,
@@ -2321,7 +2321,7 @@ impl<'a> Ctx<'a> {
         let key = style_key(el, parent, &self.path, prev, sib_count) ^ self.cq_key();
         if let Some(s) = self.styles.borrow().get(&key) {
             self.note_vh(s);
-            return *s;
+            return s.clone();
         }
         let inherited = match self.path.last() {
             Some(p) => self.vars_of(p.el.seq),
@@ -2340,7 +2340,7 @@ impl<'a> Ctx<'a> {
             None => inherited,
         });
         self.note_vh(&s);
-        self.styles.borrow_mut().insert(key, s);
+        self.styles.borrow_mut().insert(key, s.clone());
         s
     }
 
@@ -2379,7 +2379,7 @@ impl<'a> Ctx<'a> {
         if st.pct_pad == [0.0; 4] && st.pct_margin_tb == [0.0; 2] {
             return None;
         }
-        let mut out = *st;
+        let mut out = st.clone();
         // The stored px is the constant half of the value (`calc(10% + 5px)`
         // keeps its 5px), so the percentage is added to it, not put in its
         // place.
@@ -2433,7 +2433,7 @@ impl<'a> Ctx<'a> {
             },
             other => other,
         };
-        let mut out = *st;
+        let mut out = st.clone();
         out.height = one(st.height, Len::Auto);
         out.min_height = one(st.min_height, Len::Px(0.0));
         out.max_height = one(st.max_height, Len::Auto);
@@ -3034,7 +3034,7 @@ impl<'a> Ctx<'a> {
         let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
         let resolved;
         let st = if pct(st.width) || pct(st.min_width) || pct(st.max_width) {
-            let mut s = *st;
+            let mut s = st.clone();
             let outer = |v: f32| Len::Px(if s.box_border { v + pad_border } else { v });
             if pct(s.width) {
                 s.width = outer(content_w);
@@ -3096,7 +3096,7 @@ impl<'a> Ctx<'a> {
         // the margin box.
         let ctl_st;
         let (lx, lw, st) = if crate::forms::kind_of(el).is_some() {
-            let mut s = *st;
+            let mut s = st.clone();
             s.margin_left = Len::Px(0.0);
             s.margin_right = Len::Px(0.0);
             ctl_st = s;
@@ -3481,7 +3481,7 @@ impl<'a> Ctx<'a> {
                 // the box. Here `bw` is the containing block's width, so the
                 // margins are applied first. Both `auto` margins are left alone:
                 // `layout_box_inner` resolves centring itself.
-                let mut cst = st;
+                let mut cst = st.clone();
                 if crate::forms::kind_of(el).is_some() {
                     let auto_l = matches!(st.margin_left, Len::Auto);
                     let auto_r = matches!(st.margin_right, Len::Auto);
@@ -3669,7 +3669,7 @@ impl<'a> Ctx<'a> {
             ^ self.cq_key();
         if let Some(hit) = self.pseudos.borrow().get(&key) {
             let (template, ps) = hit.as_ref()?;
-            return Some((self.render_content(owner, template), *ps));
+            return Some((self.render_content(owner, template), ps.clone()));
         }
         let cq = self.cq.borrow();
         let got = style::resolve_pseudo(&self.info(owner), own, self.theme, self.sheet,
@@ -4199,7 +4199,7 @@ family: st.family,
                 cb.4 = Some(self.cb_pend.len() as u32);
                 self.cb_pend.push(PendingCbH {
                     el,
-                    st: *st,
+                    st: st.clone(),
                     x: content_x,
                     w: content_w,
                     y: prov_top_y,
@@ -4687,7 +4687,7 @@ family: st.family,
         // `min-width: max-content` (every Primer button) is the box's own
         // natural width, whatever `width` says.
         if matches!(st.min_width, Len::Intrinsic(_)) || matches!(st.max_width, Len::Intrinsic(_)) {
-            let mut m = *st;
+            let mut m = st.clone();
             m.width = Len::Auto;
             m.min_width = Len::Auto;
             m.max_width = Len::Auto;
@@ -4850,7 +4850,7 @@ family: st.family,
         // beside it. The style handed down has the chrome zeroed:
         // `paint_control` owns the face, the frame and the padding, and a
         // second copy here would paint the box twice and inset it twice.
-        let mut inner = *st;
+        let mut inner = st.clone();
         inner.bg = None;
         inner.bg_set = false;
         inner.bg_layer.image = None;
@@ -5010,7 +5010,7 @@ family: st.family,
         // §10.6.4: `top` + `bottom` with `height:auto` stretches the box to the
         // gap between them. Over-constrained (all three given) → `bottom` is
         // the one that gets ignored, which is what the `top` arm below does.
-        let mut st_owned = *st;
+        let mut st_owned = st.clone();
         // A percentage `height` is not resolved against `cbh` here (§10.5)
         // even though it could be: doing it in the abspos path alone would
         // disagree with the in-flow path.
@@ -5059,7 +5059,7 @@ family: st.family,
         let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
         let abs_resolved;
         let st = if pct(st.width) || pct(st.min_width) || pct(st.max_width) {
-            let mut sx = *st;
+            let mut sx = st.clone();
             let frame = sx.pad_left + sx.pad_right + sx.border_x();
             if pct(sx.width) {
                 sx.width = Len::Px(if sx.box_border { width } else { (width - frame).max(0.0) });
@@ -5478,7 +5478,7 @@ family: st.family,
         if self.has_top_caption(el, st) {
             let mut rows = self.collect_table_rows(&el.children, st);
             rows.retain(|r| !r.cells.is_empty());
-            let ncols = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0).min(64);
+            let ncols = table_ncols(&rows);
             if ncols > 0 {
                 let (_, tw, off) = self.table_columns(&rows, ncols, st, w);
                 (top_x, top_w) = (x + off, tw);
@@ -5565,7 +5565,7 @@ family: st.family,
     fn layout_table_body(&mut self, nodes: &'a [Node], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> (i32, i32, i32) {
         let mut rows = self.collect_table_rows(nodes, st);
         rows.retain(|r| !r.cells.is_empty());
-        let ncols = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0).min(64);
+        let ncols = table_ncols(&rows);
         if ncols == 0 {
             // A table with no rows is still a box. `width`/`height` on it are
             // content-box dimensions like anywhere else, so a bordered empty
@@ -5869,7 +5869,7 @@ family: st.family,
                 if c >= ncols || cell_span(&sc.cell) > 1 {
                     continue;
                 }
-                let cs = sc.st;
+                let cs = sc.st.clone();
                 if let Some(cw) = cs.width.px(content_w) {
                     let (bl, br, _, _) = cell_borders(&cs, st.border_collapse);
                     let border_box = if cs.box_border { cw } else { cw + cs.pad_left + cs.pad_right + bl + br };
@@ -5944,15 +5944,15 @@ family: st.family,
         let mut group: Option<(&'a Element, ComputedStyle, SpecMark, i32)> = None;
         let mut last_bottom = y0;
         for (ri, row) in rows.iter().enumerate() {
-            if let Some((gel, gst, part, top)) = group {
-                if row.group.map(|(g, _)| g.seq) != Some(gel.seq) {
+            if let Some((gel, gst, part, top)) = group.clone() {
+                if row.group.as_ref().map(|(g, _)| g.seq) != Some(gel.seq) {
                     self.finish_table_part(&gst, x, top, grid_w, last_bottom - top, part, grid_w as f32, Some((last_bottom - top) as f32));
                     self.record_inspect(gel, &gst, x, top, grid_w, last_bottom - top, part.ops);
                     group = None;
                 }
             }
-            if let (None, Some((g, gst))) = (group, row.group) {
-                group = Some((g, gst, self.part_start(), y));
+            if let (None, Some((g, gst))) = (&group, &row.group) {
+                group = Some((*g, gst.clone(), self.part_start(), y));
             }
             // Pass 1: place the cells + measure the tallest one. Their styles
             // were settled when the row was collected.
@@ -5970,7 +5970,7 @@ family: st.family,
                 // covers along with the columns themselves.
                 let cw = colw[c..end].iter().sum::<i32>() + sx * (end - c).saturating_sub(1) as i32;
                 let cx = x + col_x(c);
-                let cs = sc.st;
+                let cs = sc.st.clone();
                 let (bl, br, _, _) = cell_borders(&cs, collapse);
                 let content_x = cx + bl as i32 + px_of(cs.pad_left);
                 let content_w = (cw - (bl + br) as i32 - (cs.pad_left + cs.pad_right) as i32).max(0);
@@ -6004,14 +6004,14 @@ family: st.family,
             // block its cells' absolutely positioned descendants resolve
             // against — the row's height is known now, the group's is not yet.
             let row_part = self.part_start();
-            let row_pos = row.el.map(|(_, rst)| rst.position != Position::Static).unwrap_or(false);
+            let row_pos = row.el.as_ref().map(|(_, rst)| rst.position != Position::Static).unwrap_or(false);
             if row_pos {
                 self.cb = (x, y, grid_w, Some(row_h), None);
-            } else if let Some((_, gst, _, top)) = group {
+            } else if let Some((_, gst, _, top)) = &group {
                 if gst.position != Position::Static {
                     // A row group's height is not known yet, and unlike a
                     // positioned block there is no box to measure for it.
-                    self.cb = (x, top, grid_w, None, None);
+                    self.cb = (x, *top, grid_w, None, None);
                 }
             }
             for (c, (cs, cell_x, cell_w, content_x, content_w)) in cells.iter().enumerate() {
@@ -6078,13 +6078,13 @@ family: st.family,
                     // borders of the cells inside it. The row's own left/right
                     // edges only exist at the ends of the row, and a group's
                     // top/bottom only where the group starts and ends.
-                    for outer in [row.el.map(|(_, s)| s), row.group.map(|(_, s)| s)].into_iter().flatten() {
+                    for outer in [row.el.as_ref().map(|(_, s)| s), row.group.as_ref().map(|(_, s)| s)].into_iter().flatten() {
                         top = collapsed_edge(&top, &outer.border_top);
                         if c == 0 {
                             lft = collapsed_edge(&lft, &outer.border_left);
                         }
                     }
-                    if let Some((_, prst)) = prev_row_el {
+                    if let Some((_, prst)) = &prev_row_el {
                         top = collapsed_edge(&top, &prst.border_bottom);
                     }
                     // In the collapsed model a cell paints its shadows too
@@ -6103,14 +6103,14 @@ family: st.family,
                     self.paint_edge(&lft, cell_x - half(lft.width), y, px_of(lft.width), row_h);
                     if c + 1 == cells.len() {
                         let mut r = collapsed_edge(&cs.border_right, &st.border_right);
-                        for outer in [row.el.map(|(_, s)| s), row.group.map(|(_, s)| s)].into_iter().flatten() {
+                        for outer in [row.el.as_ref().map(|(_, s)| s), row.group.as_ref().map(|(_, s)| s)].into_iter().flatten() {
                             r = collapsed_edge(&r, &outer.border_right);
                         }
                         self.paint_edge(&r, cell_x + cell_w - half(r.width), y, px_of(r.width), row_h);
                     }
                     if ri + 1 == nrows {
                         let mut b = collapsed_edge(&cs.border_bottom, &st.border_bottom);
-                        for outer in [row.el.map(|(_, s)| s), row.group.map(|(_, s)| s)].into_iter().flatten() {
+                        for outer in [row.el.as_ref().map(|(_, s)| s), row.group.as_ref().map(|(_, s)| s)].into_iter().flatten() {
                             b = collapsed_edge(&b, &outer.border_bottom);
                         }
                         self.paint_edge(&b, *cell_x, y + row_h - half(b.width), *cell_w, px_of(b.width));
@@ -6142,12 +6142,12 @@ family: st.family,
             }
             self.cb = outer_cb;
             self.path.truncate(row_depth);
-            if let Some((rel_el, rst)) = row.el {
+            if let Some((rel_el, rst)) = &row.el {
                 self.finish_table_part(&rst, x, y, grid_w, row_h, row_part, grid_w as f32, Some(row_h as f32));
                 self.record_inspect(rel_el, &rst, x, y, grid_w, row_h, row_part.ops);
             }
-            prev_row = cells.iter().map(|(cs, cx, cw, _, _)| (*cs, *cx, *cw)).collect();
-            prev_row_el = row.el.map(|(e, s)| (e.seq, s));
+            prev_row = cells.iter().map(|(cs, cx, cw, _, _)| (cs.clone(), *cx, *cw)).collect();
+            prev_row_el = row.el.as_ref().map(|(e, s)| (e.seq, s.clone()));
             last_bottom = y + row_h;
             y = last_bottom + sy;
         }
@@ -6226,7 +6226,7 @@ family: st.family,
         // it takes no height and no column width. Dropping it here rather than
         // at paint time is what keeps measurement and layout agreeing — both
         // sides of the table go through this one function.
-        let visible = |s: &Option<(&Element, ComputedStyle)>| s.is_none_or(|(_, st)| st.display != Display::None);
+        let visible = |s: &Option<(&Element, ComputedStyle)>| s.as_ref().is_none_or(|(_, st)| st.display != Display::None);
         header.retain(|r: &Row| visible(&r.el) && visible(&r.group));
         header
     }
@@ -6264,7 +6264,7 @@ family: st.family,
                 Some(TableRole::Row) | Some(TableRole::RowGroup) | Some(TableRole::HeaderGroup) | Some(TableRole::FooterGroup) => {
                     if let Some(s) = run_start.take() {
                         if run_has_content {
-                            body.push(Row { el: None, group, cells: self.partition_cells(&nodes[s..i], parent) });
+                            body.push(Row { el: None, group: group.clone(), cells: self.partition_cells(&nodes[s..i], parent) });
                         }
                         run_has_content = false;
                     }
@@ -6279,17 +6279,17 @@ family: st.family,
                             self.path.push(self.info(e));
                             let cells = self.partition_cells(&e.children, &est);
                             self.path.pop();
-                            body.push(Row { el: Some((e, est)), group, cells })
+                            body.push(Row { el: Some((e, est)), group: group.clone(), cells })
                         }
                         Some(TableRole::RowGroup) => {
                             self.path.push(self.info(e));
-                            self.collect_rows_into(&e.children, &est, Some((e, est)), header, body, footer);
+                            self.collect_rows_into(&e.children, &est, Some((e, est.clone())), header, body, footer);
                             self.path.pop();
                         }
                         Some(TableRole::HeaderGroup) | Some(TableRole::FooterGroup) => {
                             let (mut h, mut b, mut f) = (Vec::new(), Vec::new(), Vec::new());
                             self.path.push(self.info(e));
-                            self.collect_rows_into(&e.children, &est, Some((e, est)), &mut h, &mut b, &mut f);
+                            self.collect_rows_into(&e.children, &est, Some((e, est.clone())), &mut h, &mut b, &mut f);
                             self.path.pop();
                             let out = if role == Some(TableRole::HeaderGroup) { &mut *header } else { &mut *footer };
                             out.extend(h);
@@ -6459,7 +6459,7 @@ family: st.family,
                 // Measure it with its own style, the way it will be painted, so
                 // the declared sizes and the page's frame apply; a root style
                 // would read the label at the root font size.
-                let mut mst = *st;
+                let mut mst = st.clone();
                 // Percentages have no basis while measuring, so they behave as
                 // `auto` (css-sizing-3 §4.1) rather than resolving against 0.
                 for len in [&mut mst.width, &mut mst.min_width, &mut mst.max_width] {
@@ -6555,7 +6555,7 @@ family: st.family,
     fn intrinsic_table(&mut self, nodes: &'a [Node], st: &ComputedStyle) -> (f32, f32) {
         let mut rows = self.collect_table_rows(nodes, st);
         rows.retain(|r| !r.cells.is_empty());
-        let ncols = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0).min(64);
+        let ncols = table_ncols(&rows);
         if ncols == 0 {
             return (0.0, 0.0);
         }
@@ -6838,7 +6838,7 @@ family: st.family,
     /// child per track, since the child → column assignment needs the full
     /// placement, which only runs in layout.
     fn intrinsic_grid(&mut self, el: &'a Element, st: &ComputedStyle) -> (f32, f32) {
-        let ncols = st.grid_ncols as usize;
+        let ncols = st.grid_tracks.len();
         if ncols == 0 { return self.intrinsic_width_nodes(&el.children, st) }
         let kids = self.flow_kids(el, st);
         let gap = st.grid_col_gap.px(0.0).unwrap_or(0.0);
@@ -7206,7 +7206,7 @@ family: st.family,
 
     fn layout_grid_body(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // No template at all → a grid degenerates to a block box.
-        if st.grid_ncols == 0 && st.grid_nrows == 0 {
+        if st.grid_tracks.is_empty() && st.grid_nrows == 0 {
             return self.layout_block(el, st, x, w, y0);
         }
 
@@ -7257,7 +7257,7 @@ family: st.family,
     fn grid_content(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // Column tracks, expanding any `repeat(auto-fill/auto-fit, …)` to fill the
         // container width.
-        let mut tracks: Vec<GridTrack> = st.grid_tracks[..st.grid_ncols as usize].to_vec();
+        let mut tracks: Vec<GridTrack> = st.grid_tracks.clone();
         if st.grid_col_fill != 0
             && st.grid_col_fill_len > 0
             && (st.grid_col_fill_start as usize + st.grid_col_fill_len as usize) <= tracks.len()
@@ -7292,13 +7292,17 @@ family: st.family,
                 let pat: Vec<GridTrack> = tracks[start..start + len].to_vec();
                 let mut nt: Vec<GridTrack> = tracks[..start].to_vec();
                 for _ in 0..count {
-                    if nt.len() + len > style::MAX_GRID_COLS {
+                    if nt.len() + len > style::MAX_GRID_TRACKS {
+                        crate::cuts::note(crate::cuts::Cut::GridTracks);
                         break;
                     }
                     nt.extend_from_slice(&pat);
                 }
                 nt.extend_from_slice(&tracks[start + len..]);
-                nt.truncate(style::MAX_GRID_COLS);
+                if nt.len() > style::MAX_GRID_TRACKS {
+                    crate::cuts::note(crate::cuts::Cut::GridTracks);
+                    nt.truncate(style::MAX_GRID_TRACKS);
+                }
                 tracks = nt;
             }
         }
@@ -7361,37 +7365,35 @@ family: st.family,
         // Row line → 0-based row index; the row count is not yet known, so
         // negative lines (relative to the last row) fall back to the first row.
         let resolve_row = |line: i16| -> usize { (line.max(1) as usize) - 1 };
-        let colmask = |c: usize, span: usize| -> u32 {
-            let mut m = 0u32;
-            for k in c..(c + span).min(ncols) {
-                m |= 1u32 << k;
+        // Occupied cells, one row of `ncols` flags per grid row.
+        let cols = |c: usize, span: usize| -> core::ops::Range<usize> {
+            let end = (c + span).min(ncols);
+            c.min(end)..end
+        };
+        let fits = |occ: &Vec<Vec<bool>>, r: usize, c: usize, span: usize, rspan: usize| -> bool {
+            (r..r + rspan).all(|rr| rr >= occ.len() || !occ[rr][cols(c, span)].contains(&true))
+        };
+        let mark = |occ: &mut Vec<Vec<bool>>, r: usize, c: usize, span: usize, rspan: usize| {
+            while occ.len() < r + rspan {
+                occ.push(alloc::vec![false; ncols]);
             }
-            m
+            for row in &mut occ[r..r + rspan] {
+                row[cols(c, span)].fill(true);
+            }
         };
-        let fits = |occ: &Vec<u32>, r: usize, mask: u32, rspan: usize| -> bool {
-            (r..r + rspan).all(|rr| rr >= occ.len() || occ[rr] & mask == 0)
-        };
-        let mut occ: Vec<u32> = Vec::new();
+        let mut occ: Vec<Vec<bool>> = Vec::new();
         let mut place: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(items.len());
         let (mut cur_r, mut cur_c) = (0usize, 0usize);
         for (_, s) in &items {
             // Named `grid-area` placement (from the container's grid-template-areas)
             // takes priority over line/auto placement.
             if s.grid_area != 0 {
-                if let Some(a) =
-                    st.grid_areas[..st.grid_area_count as usize].iter().find(|a| a.name == s.grid_area)
-                {
+                if let Some(a) = st.grid_areas.iter().find(|a| a.name == s.grid_area) {
                     let c0 = (a.c0 as usize).min(ncols.saturating_sub(1));
                     let cspan = (a.c1 as usize).min(ncols).max(c0 + 1) - c0;
                     let fr = a.r0 as usize;
                     let rspan = (a.r1.saturating_sub(a.r0)).max(1) as usize;
-                    let mask = colmask(c0, cspan);
-                    while occ.len() < fr + rspan {
-                        occ.push(0);
-                    }
-                    for rr in fr..fr + rspan {
-                        occ[rr] |= mask;
-                    }
+                    mark(&mut occ, fr, c0, cspan, rspan);
                     place.push((c0, cspan, fr, rspan));
                     continue;
                 }
@@ -7409,16 +7411,15 @@ family: st.family,
             let (fc, fr) = if has_col && has_row {
                 (col, resolve_row(s.grid_row_start))
             } else if has_col {
-                let mask = colmask(col, cspan);
                 let mut r = 0;
-                while !fits(&occ, r, mask, rspan) {
+                while !fits(&occ, r, col, cspan, rspan) {
                     r += 1;
                 }
                 (col, r)
             } else if has_row {
                 let r = resolve_row(s.grid_row_start);
                 let mut c = 0;
-                while c + cspan <= ncols && !fits(&occ, r, colmask(c, cspan), rspan) {
+                while c + cspan <= ncols && !fits(&occ, r, c, cspan, rspan) {
                     c += 1;
                 }
                 if c + cspan > ncols {
@@ -7432,7 +7433,7 @@ family: st.family,
                         r += 1;
                         c = 0;
                     }
-                    if fits(&occ, r, colmask(c, cspan), rspan) {
+                    if fits(&occ, r, c, cspan, rspan) {
                         break;
                     }
                     c += 1;
@@ -7441,13 +7442,7 @@ family: st.family,
                 cur_c = c + cspan;
                 (c, r)
             };
-            let mask = colmask(fc, cspan);
-            while occ.len() < fr + rspan {
-                occ.push(0);
-            }
-            for rr in fr..fr + rspan {
-                occ[rr] |= mask;
-            }
+            mark(&mut occ, fr, fc, cspan, rspan);
             place.push((fc, cspan, fr, rspan));
         }
 
@@ -7580,7 +7575,7 @@ family: st.family,
                 };
                 (ix, uw)
             };
-            let s_copy = *s;
+            let s_copy = s.clone();
             // A row holds the item's margin box.
             let nh = self.measure_box_height(el_i, &s_copy, ix as i32, iw as i32, y0)
                 + px_of(s.margin_top) + px_of(s.margin_bottom);
@@ -7592,7 +7587,7 @@ family: st.family,
         let nrows = occ.len().max(st.grid_nrows as usize);
         let row_track = |r: usize| -> GridTrack {
             if r < st.grid_nrows as usize {
-                st.grid_row_tracks[r]
+                st.grid_row_tracks.get(r).copied().unwrap_or(GridTrack::Auto)
             } else {
                 st.grid_auto_rows
             }
@@ -7691,7 +7686,7 @@ family: st.family,
             }
             let aself = s.align_self.unwrap_or(st.align_items);
             let height_auto = matches!(s.height, Len::Auto);
-            let mut s2 = *s;
+            let mut s2 = s.clone();
             // The margin box is aligned in the area; a stretched item's
             // border box fills it less its margins (css-align-3 §6.1).
             let (mt, mb) = (px_of(s.margin_top), px_of(s.margin_bottom));
@@ -7797,7 +7792,7 @@ family: st.family,
         // ancestor path is longer and the containing block, its height and the
         // active floats have all moved on.
         let p = &self.cb_pend[idx];
-        let (el, st, x, w, y, border_y, path_len) = (p.el, p.st, p.x, p.w, p.y, p.border_y, p.path_len);
+        let (el, st, x, w, y, border_y, path_len) = (p.el, p.st.clone(), p.x, p.w, p.y, p.border_y, p.path_len);
         let (pcb, pcb_h) = (p.cb, p.cb_h);
         let pfloats = p.floats.clone();
         let tail = self.path.split_off(path_len);
@@ -8265,7 +8260,7 @@ family: st.family,
         let mut h_nat = alloc::vec![0i32; ln];
         let mut marks: Vec<FlexMark> = Vec::with_capacity(ln);
         for k in 0..ln {
-            let (kid, s) = (&items[idx0 + k].0, items[idx0 + k].1);
+            let (kid, s) = (&items[idx0 + k].0, items[idx0 + k].1.clone());
             let s_meas = flex_item_style(&s, Some(size[k]), None, true);
             // No minimum pixel. A flex item may be empty, and the intrinsic
             // width computes with 0 as well — a 1 here would let the two paths
@@ -8366,7 +8361,7 @@ family: st.family,
         if first_redo < ln {
             self.flex_rollback(&marks[first_redo]);
             for k in first_redo..ln {
-                let (kid, s) = (&items[idx0 + k].0, items[idx0 + k].1);
+                let (kid, s) = (&items[idx0 + k].0, items[idx0 + k].1.clone());
                 let (forced_h, y) = plan[k];
                 let s2 = flex_item_style(&s, Some(size[k]), forced_h, true);
                 let Kid::El(el) = kid else {
@@ -8969,7 +8964,7 @@ fn clamp_cross(v: f32, min: f32, max: f32) -> f32 {
 /// border-box). Item margins are zeroed — the flex code positions the item by
 /// hand — while keeping the item's own box-sizing for padding conversion.
 fn flex_item_style(s: &ComputedStyle, main: Option<f32>, forced_cross: Option<f32>, row: bool) -> ComputedStyle {
-    let mut s2 = *s;
+    let mut s2 = s.clone();
     s2.margin_left = Len::Px(0.0);
     s2.margin_right = Len::Px(0.0);
     s2.margin_top = 0.0;
@@ -9273,7 +9268,7 @@ impl<'a> Ctx<'a> {
         let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
         let resolved;
         let st = if pct(st.width) || pct(st.min_width) || pct(st.max_width) {
-            let mut s = *st;
+            let mut s = st.clone();
             if pct(s.width) {
                 s.width = Len::Px(if s.box_border { content_w + pad_border } else { content_w });
             }
@@ -9390,7 +9385,7 @@ impl<'a> Ctx<'a> {
             return None;
         }
         Some(InlineBox {
-            st: *st,
+            st: st.clone(),
             // An image's own box; a hover rule on it is caught by the element's
             // block-level record, not here.
             hover_seq: None,
@@ -11088,7 +11083,7 @@ pub fn resolve_out_of_band(
 /// `::before`/`::after` are here because a hover rule reaches them (e.g.
 /// `a:hover::after{background}` underlining a tab). Their boxes are generated
 /// during layout and never recorded, so a changed one gives up.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct StyleProbe {
     pub own: ComputedStyle,
     pub before: Option<ComputedStyle>,
@@ -11124,7 +11119,7 @@ fn probe_of<'a>(
             .map(|(_, st)| st)
     };
     StyleProbe {
-        own,
+        own: own.clone(),
         before: one(crate::css::PseudoElem::Before),
         after: one(crate::css::PseudoElem::After),
     }
@@ -11200,7 +11195,7 @@ fn resolve_kids<'a>(
             return false;
         }
         let st = style::resolve(&ElemInfo::of_hovered(e, hover), own, theme, sheet, anc, &prev, sib_count, vw);
-        out.push(probe_of(e, st, anc, &prev, sib_count, sheet, theme, vw, hover));
+        out.push(probe_of(e, st.clone(), anc, &prev, sib_count, sheet, theme, vw, hover));
         if !resolve_kids(e, &st, anc, sheet, theme, vw, hover, budget, out) {
             anc.pop();
             return false;
@@ -11679,7 +11674,7 @@ fn plan_one(
         if subs.iter().any(|s| s.off.color == off.color && (s.on.color != on.color || s.on.deco != on.deco)) {
             return Err("two elements share a colour and must not share the next");
         }
-        subs.push(Sub { off: *off, on: *on });
+        subs.push(Sub { off: off.clone(), on: on.clone() });
     }
     // A run painted in a colour that some unchanged element also uses would be
     // recoloured by mistake.
@@ -12348,6 +12343,29 @@ mod tests {
         assert_eq!(boxed(&l, "div#c"), (284, 16));
         assert_eq!(boxed(&l, "div#d"), (100, 40));
         assert_eq!(boxed(&l, "div#e"), (140, 60));
+    }
+
+    #[test]
+    fn grids_and_tables_hold_more_than_a_handful_of_columns() {
+        let mut cells = String::new();
+        for k in 0..40 {
+            cells.push_str(&alloc::format!("<div id=g{k}></div>"));
+        }
+        let mut tds = String::new();
+        for k in 0..100 {
+            tds.push_str(&alloc::format!("<td id=t{k} style=padding:0><div style=width:5px>x</div></td>"));
+        }
+        let l = lay_inspect(
+            &alloc::format!(
+                "<body style=margin:0><div style=\"display:grid;width:800px;\
+                 grid-template-columns:repeat(40,20px)\">{cells}</div>\
+                 <div style=\"display:grid;width:800px;\
+                 grid-template-columns:repeat(auto-fill,10px)\">{cells}</div>\
+                 <table style=border-spacing:0><tr>{tds}</tr></table></body>"),
+            800,
+        );
+        assert_eq!(boxed(&l, "div#g39"), (780, 20));
+        assert_eq!(boxed(&l, "td#t99").0, 495);
     }
 
     #[test]
@@ -15290,12 +15308,26 @@ fn dbg_wiki_shape() {
     }
 }
 
-/// `colspan` (HTML §4.9.11): how many columns a cell occupies. `0` means "to
-/// the end of the row group" in old HTML and was dropped from the spec, so it
-/// folds to 1 like any other unparseable value.
+/// Most columns a table lays out, a safety bound: every cell may span 1000
+/// columns, so a hostile page could otherwise ask for millions.
+pub const MAX_TABLE_COLS: usize = 16_384;
+
+/// The table's column count: its widest row, cut at `MAX_TABLE_COLS`.
+fn table_ncols(rows: &[Row]) -> usize {
+    let n = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0);
+    if n > MAX_TABLE_COLS {
+        crate::cuts::note(crate::cuts::Cut::TableColumns);
+    }
+    n.min(MAX_TABLE_COLS)
+}
+
+/// `colspan` (HTML §4.9.11): how many columns a cell occupies, clamped to
+/// 1000 as the spec does. `0` means "to the end of the row group" in old HTML
+/// and was dropped from the spec, so it folds to 1 like any other unparseable
+/// value.
 fn cell_span(cell: &Cell) -> usize {
     match cell {
-        Cell::Real(e) => e.attr("colspan").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(1).clamp(1, 64),
+        Cell::Real(e) => e.attr("colspan").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(1).clamp(1, 1000),
         Cell::Anon(_) => 1,
     }
 }
@@ -15437,7 +15469,7 @@ fn with_aspect_height(st: &ComputedStyle, cw: f32) -> Option<ComputedStyle> {
     if !matches!(st.height, Len::Auto) {
         return None;
     }
-    let mut s = *st;
+    let mut s = st.clone();
     // The ratio governs whichever box `box-sizing` names, so under
     // `border-box` the width it divides is the border-box width — and the
     // height it yields is one too, which is exactly what `content_height_of`

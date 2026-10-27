@@ -2458,7 +2458,7 @@ fn computed_decls(i: &Interp, node: u32) -> Option<String> {
     // never reach the element and `getComputedStyle` would disagree with
     // what layout painted.
     let mut vars = crate::vars::VarMap::new();
-    let mut out = parent;
+    let mut out = parent.clone();
     for (k, el) in path.iter().enumerate() {
         // Count siblings so `:nth-*` and `:first-child` match the same way as in
         // layout.
@@ -2490,7 +2490,7 @@ fn computed_decls(i: &Interp, node: u32) -> Option<String> {
         if k == 0 {
             out.rem_base = out.font_px;
         }
-        parent = out;
+        parent = out.clone();
         anc.push(info);
     }
     let mut text = crate::style::serialize_computed(&out);
@@ -8456,6 +8456,19 @@ mod ce_tests {
         );
         assert_eq!(out, ["conn c", "true", "NotSupportedError true", "SyntaxError",
                          "TypeError", "defined true"]);
+    }
+
+    #[test]
+    fn local_storage_refuses_writes_past_its_quota() {
+        let out = run(
+            "<body></body>",
+            "var big = 'x'.repeat(3 * 1024 * 1024);\
+             localStorage.setItem('a', big);\
+             localStorage.setItem('a', big);\
+             try { localStorage.setItem('b', big); } catch (e) { console.log(e.name); }\
+             console.log(localStorage.length, localStorage.getItem('b'));",
+        );
+        assert_eq!(out, ["QuotaExceededError", "1 null"]);
     }
 
     #[test]

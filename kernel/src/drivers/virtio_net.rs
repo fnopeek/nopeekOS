@@ -124,7 +124,7 @@ struct VirtioNet {
     rx_buffers: DmaRegion, // contiguous RX buffer region
     rx_repost_pending: u16, // RX buffers reposted but not yet notified (batch the doorbell)
     pci_addr: pci::PciAddr, // for MSI-X dest re-routing (net-RX IRQ)
-    rx_msix_vector: u8,     // LAPIC vector for RX-queue MSI-X (0 = none, polling)
+    rx_msix_vector: crate::irq::Irq, // interrupt of the RX-queue MSI-X (0 = none, polling)
 
     // TX queue, laid out as the RX queue
     tx_q: DmaRegion,
@@ -340,14 +340,14 @@ pub fn init() -> bool {
     // config-change IRQ). Read-back guards a device that rejects it →
     // rx_msix_vector stays 0 and we keep polling (the recv path is
     // unchanged either way).
-    let mut rx_msix_vector = 0u8;
+    let mut rx_msix_vector: crate::irq::Irq = 0;
     if rx_vec != 0 {
         io.outw(REG_CONFIG_MSIX_VEC, MSIX_NO_VECTOR);
         io.outw(REG_QUEUE_SEL, RX_QUEUE);
         io.outw(REG_QUEUE_MSIX_VEC, 0);
         if io.inw(REG_QUEUE_MSIX_VEC) == 0 {
             rx_msix_vector = rx_vec;
-            crate::kdebug!("[npk] virtio-net: RX MSI-X on vector {:#04x}", rx_vec);
+            crate::kdebug!("[npk] virtio-net: RX MSI-X as irq {}", rx_vec);
         } else {
             kprintln!("[npk] virtio-net: RX MSI-X vector rejected — polling");
         }
@@ -401,7 +401,7 @@ pub fn init() -> bool {
 
 /// LAPIC vector the host NIC raises on RX (0 = none / polling). The microvm
 /// routes this IRQ to its vCPU core so RX arrival wakes the vCPU to pump.
-pub fn rx_irq_vector() -> u8 {
+pub fn rx_irq_vector() -> crate::irq::Irq {
     DEVICE.lock().as_ref().map_or(0, |d| d.rx_msix_vector)
 }
 

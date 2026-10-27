@@ -188,25 +188,19 @@ pub enum GridTrack {
     Fr(f32), // fraction of leftover space
 }
 
-/// Max explicit grid columns we track (content grids rarely exceed this).
-pub const MAX_GRID_COLS: usize = 16;
-
-/// Max named grid areas per container (page shells rarely exceed this).
-pub const GRID_AREAS_MAX: usize = 12;
+/// Most tracks one grid axis holds, a safety bound against `repeat(1e9, …)`.
+/// Gecko clamps grid lines to the same 10000 (`nsStyleGridLine::kMaxLine`).
+pub const MAX_GRID_TRACKS: usize = 10_000;
 
 /// A `grid-template-areas` region: the area name (FNV-1a hash) and its half-open
 /// cell rectangle `[c0,c1) × [r0,r1)` in the template grid.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct GridArea {
     pub name: u32,
-    pub r0: u8,
-    pub r1: u8,
-    pub c0: u8,
-    pub c1: u8,
-}
-
-impl GridArea {
-    pub const EMPTY: GridArea = GridArea { name: 0, r0: 0, r1: 0, c0: 0, c1: 0 };
+    pub r0: u16,
+    pub r1: u16,
+    pub c0: u16,
+    pub c1: u16,
 }
 
 /// FNV-1a hash of a grid-area name (0 = "none"). Both `grid-template-areas` and
@@ -912,7 +906,7 @@ impl BoxShadow {
 
 /// The subset of computed properties the renderer consumes. Split by CSS
 /// inheritance: font/colour/`white-space` inherit; box/`display` do not.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ComputedStyle {
     // — inherited —
     pub font_px: f32,
@@ -1149,10 +1143,12 @@ pub struct ComputedStyle {
     pub align_self: Option<CrossAlign>,
     pub order: i32,
     // — grid container —
-    pub grid_ncols: u8,
-    pub grid_tracks: [GridTrack; MAX_GRID_COLS],
-    pub grid_nrows: u8,
-    pub grid_row_tracks: [GridTrack; MAX_GRID_COLS],
+    /// Explicit column tracks; their count is the explicit column count.
+    pub grid_tracks: Vec<GridTrack>,
+    /// Explicit row count: the row tracks, or more rows named by
+    /// `grid-template-areas`, which are `auto`.
+    pub grid_nrows: u16,
+    pub grid_row_tracks: Vec<GridTrack>,
     pub grid_auto_rows: GridTrack,
     /// `grid-auto-columns`: the size of an implicit column, one past the last
     /// `grid-template-columns` track.
@@ -1163,14 +1159,13 @@ pub struct ComputedStyle {
     pub grid_row_gap: Len,
     pub justify_items: CrossAlign,
     // `grid-template-areas` — named regions (container), 0-count = none.
-    pub grid_areas: [GridArea; GRID_AREAS_MAX],
-    pub grid_area_count: u8,
+    pub grid_areas: Vec<GridArea>,
     // `repeat(auto-fill/auto-fit, …)` in the columns: 0 = none, else the stored
     // one-copy pattern spans `grid_col_fill_start .. +len` and is expanded to fill
     // the container width at layout time.
     pub grid_col_fill: u8,
-    pub grid_col_fill_start: u8,
-    pub grid_col_fill_len: u8,
+    pub grid_col_fill_start: u16,
+    pub grid_col_fill_len: u16,
     // — grid item —
     pub grid_col_span: u16,
     pub grid_col_start: i16, // 0 = auto placement
@@ -1418,17 +1413,15 @@ impl ComputedStyle {
             flex_basis: FlexBasis::Auto,
             align_self: None,
             order: 0,
-            grid_ncols: 0,
-            grid_tracks: [GridTrack::Auto; MAX_GRID_COLS],
+            grid_tracks: Vec::new(),
             grid_nrows: 0,
-            grid_row_tracks: [GridTrack::Auto; MAX_GRID_COLS],
+            grid_row_tracks: Vec::new(),
             grid_auto_rows: GridTrack::Auto,
             grid_auto_cols: GridTrack::Auto,
             grid_col_gap: Len::Px(0.0),
             grid_row_gap: Len::Px(0.0),
             justify_items: CrossAlign::Stretch,
-            grid_areas: [GridArea::EMPTY; GRID_AREAS_MAX],
-            grid_area_count: 0,
+            grid_areas: Vec::new(),
             grid_col_fill: 0,
             grid_col_fill_start: 0,
             grid_col_fill_len: 0,
@@ -1670,17 +1663,15 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         flex_basis: FlexBasis::Auto,
         align_self: None,
         order: 0,
-        grid_ncols: 0,
-        grid_tracks: [GridTrack::Auto; MAX_GRID_COLS],
+        grid_tracks: Vec::new(),
         grid_nrows: 0,
-        grid_row_tracks: [GridTrack::Auto; MAX_GRID_COLS],
+        grid_row_tracks: Vec::new(),
         grid_auto_rows: GridTrack::Auto,
         grid_auto_cols: GridTrack::Auto,
         grid_col_gap: Len::Px(0.0),
         grid_row_gap: Len::Px(0.0),
         justify_items: CrossAlign::Stretch,
-        grid_areas: [GridArea::EMPTY; GRID_AREAS_MAX],
-        grid_area_count: 0,
+        grid_areas: Vec::new(),
         grid_col_fill: 0,
         grid_col_fill_start: 0,
         grid_col_fill_len: 0,
@@ -3063,7 +3054,7 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
             let (rem, rlh, vw, vh, seen) = (s.rem_base, s.rlh_base, s.vw, s.vh, s.vh_seen);
             let (acb, acp) = (s.attr_cell_border, s.attr_cell_padding);
             let (link, rule, brk, summ) = (s.is_link, s.is_rule, s.is_break, s.is_summary);
-            *s = *src;
+            *s = src.clone();
             s.rtl = rtl;
             s.rem_base = rem;
             s.rlh_base = rlh;
@@ -4140,7 +4131,6 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // — grid —
         Prop::GridTemplateColumns => {
             let t = parse_grid_tracks(&v, s.units());
-            s.grid_ncols = t.n;
             s.grid_tracks = t.tracks;
             s.grid_col_fill = t.fill;
             s.grid_col_fill_start = t.fill_start;
@@ -4148,7 +4138,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         Prop::GridTemplateRows => {
             let t = parse_grid_tracks(&v, s.units());
-            s.grid_nrows = t.n;
+            s.grid_nrows = t.tracks.len() as u16;
             s.grid_row_tracks = t.tracks;
         }
         Prop::GridAutoRows => s.grid_auto_rows = parse_track(v.trim(), s.units()),
@@ -4163,10 +4153,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             }
             if let Some((rows, cols)) = split_slash(&v) {
                 let r = parse_grid_tracks(rows.trim(), s.units());
-                s.grid_nrows = r.n;
+                s.grid_nrows = r.tracks.len() as u16;
                 s.grid_row_tracks = r.tracks;
                 let c = parse_grid_tracks(cols.trim(), s.units());
-                s.grid_ncols = c.n;
                 s.grid_tracks = c.tracks;
                 s.grid_col_fill = c.fill;
                 s.grid_col_fill_start = c.fill_start;
@@ -5525,27 +5514,25 @@ fn four_values(v: &str) -> (&str, &str, &str, &str) {
     }
 }
 
-/// A parsed track list: `n` tracks in `tracks`, plus—if the source held a
-/// `repeat(auto-fill|auto-fit, …)`—the one-copy pattern's span (`fill_start` ..
+/// A parsed track list. If the source held a
+/// `repeat(auto-fill|auto-fit, …)`, it also records the one-copy pattern's span (`fill_start` ..
 /// `+fill_len`) and `fill` kind (1 = auto-fill, 2 = auto-fit) so layout can
 /// expand it to the container width.
 pub struct TrackList {
-    pub n: u8,
-    pub tracks: [GridTrack; MAX_GRID_COLS],
+    pub tracks: Vec<GridTrack>,
     pub fill: u8,
-    pub fill_start: u8,
-    pub fill_len: u8,
+    pub fill_start: u16,
+    pub fill_len: u16,
 }
 
 /// Parse a `grid-template-*` value, expanding `repeat(n, …)` and recording any
 /// `repeat(auto-fill|auto-fit, …)`. `[line-name]` tokens are skipped.
-/// Truncates at `MAX_GRID_COLS`.
+/// Cuts at `MAX_GRID_TRACKS`, and counts the cut.
 fn parse_grid_tracks(v: &str, u: Units) -> TrackList {
-    let mut tracks = [GridTrack::Auto; MAX_GRID_COLS];
-    let mut n = 0usize;
-    let (mut fill, mut fill_start, mut fill_len) = (0u8, 0u8, 0u8);
+    let mut tracks: Vec<GridTrack> = Vec::new();
+    let (mut fill, mut fill_start, mut fill_len) = (0u8, 0u16, 0u16);
     for tok in split_top_level(v) {
-        if n >= MAX_GRID_COLS {
+        if tracks.len() > MAX_GRID_TRACKS {
             break;
         }
         if tok.starts_with('[') {
@@ -5564,31 +5551,30 @@ fn parse_grid_tracks(v: &str, u: Units) -> TrackList {
             if auto != 0 {
                 // Store one copy; layout repeats it to fill the width.
                 fill = auto;
-                fill_start = n as u8;
-                fill_len = sub.n;
-                for t in sub.tracks.iter().take(sub.n as usize) {
-                    if n < MAX_GRID_COLS {
-                        tracks[n] = *t;
-                        n += 1;
-                    }
-                }
+                fill_start = tracks.len() as u16;
+                fill_len = sub.tracks.len() as u16;
+                tracks.extend_from_slice(&sub.tracks);
             } else {
                 let count = count_s.parse::<usize>().unwrap_or(1);
                 for _ in 0..count {
-                    for t in sub.tracks.iter().take(sub.n as usize) {
-                        if n < MAX_GRID_COLS {
-                            tracks[n] = *t;
-                            n += 1;
-                        }
+                    if tracks.len() > MAX_GRID_TRACKS {
+                        break;
                     }
+                    tracks.extend_from_slice(&sub.tracks);
                 }
             }
         } else {
-            tracks[n] = parse_track(&tok, u);
-            n += 1;
+            tracks.push(parse_track(&tok, u));
         }
     }
-    TrackList { n: n as u8, tracks, fill, fill_start, fill_len }
+    if tracks.len() > MAX_GRID_TRACKS {
+        crate::cuts::note(crate::cuts::Cut::GridTracks);
+        tracks.truncate(MAX_GRID_TRACKS);
+        if fill_start as usize + fill_len as usize > MAX_GRID_TRACKS {
+            fill = 0;
+        }
+    }
+    TrackList { tracks, fill, fill_start, fill_len }
 }
 
 fn parse_track(t: &str, u: Units) -> GridTrack {
@@ -5657,8 +5643,8 @@ fn split_top_level(v: &str) -> alloc::vec::Vec<alloc::string::String> {
 /// empty). An area's rectangle is the bounding box of its cells.
 fn set_grid_areas(s: &mut ComputedStyle, v: &str) {
     let bytes = v.as_bytes();
-    let mut names: alloc::vec::Vec<(u32, u8, u8, u8, u8)> = alloc::vec::Vec::new();
-    let (mut i, mut r) = (0usize, 0u8);
+    let mut names: alloc::vec::Vec<(u32, u16, u16, u16, u16)> = alloc::vec::Vec::new();
+    let (mut i, mut r) = (0usize, 0u16);
     while i < bytes.len() {
         while i < bytes.len() && bytes[i] != b'"' && bytes[i] != b'\'' {
             i += 1;
@@ -5674,17 +5660,25 @@ fn set_grid_areas(s: &mut ComputedStyle, v: &str) {
         }
         let row = &v[s0..i.min(v.len())];
         i += 1;
+        if r as usize >= MAX_GRID_TRACKS {
+            crate::cuts::note(crate::cuts::Cut::GridTracks);
+            break;
+        }
         for (c, tok) in row.split_whitespace().enumerate() {
             if tok == "." {
                 continue;
             }
-            let (h, c) = (area_hash(tok), c as u8);
+            if c >= MAX_GRID_TRACKS {
+                crate::cuts::note(crate::cuts::Cut::GridTracks);
+                break;
+            }
+            let (h, c) = (area_hash(tok), c as u16);
             if let Some(a) = names.iter_mut().find(|a| a.0 == h) {
                 a.1 = a.1.min(r);
                 a.2 = a.2.max(r + 1);
                 a.3 = a.3.min(c);
                 a.4 = a.4.max(c + 1);
-            } else if names.len() < GRID_AREAS_MAX {
+            } else {
                 names.push((h, r, r + 1, c, c + 1));
             }
         }
@@ -5693,19 +5687,13 @@ fn set_grid_areas(s: &mut ComputedStyle, v: &str) {
     if names.is_empty() {
         return;
     }
-    for (k, &(h, r0, r1, c0, c1)) in names.iter().enumerate() {
-        s.grid_areas[k] = GridArea { name: h, r0, r1, c0, c1 };
-    }
-    s.grid_area_count = names.len() as u8;
+    s.grid_areas = names.iter().map(|&(name, r0, r1, c0, c1)| GridArea { name, r0, r1, c0, c1 }).collect();
     s.grid_nrows = s.grid_nrows.max(r);
     // With no explicit `grid-template-columns`, the template width defines the
     // (auto-sized) column tracks.
-    if s.grid_ncols == 0 {
-        let ncols = names.iter().map(|a| a.4).max().unwrap_or(0).min(MAX_GRID_COLS as u8);
-        for k in 0..ncols as usize {
-            s.grid_tracks[k] = GridTrack::Auto;
-        }
-        s.grid_ncols = ncols;
+    if s.grid_tracks.is_empty() {
+        let ncols = names.iter().map(|a| a.4).max().unwrap_or(0) as usize;
+        s.grid_tracks = alloc::vec![GridTrack::Auto; ncols];
     }
 }
 
@@ -6647,6 +6635,6 @@ mod size_probe {
     fn the_style_stays_small() {
         assert_eq!(core::mem::size_of::<super::GradStop>(), 12);
         assert_eq!(core::mem::size_of::<super::Gradient>(), 84);
-        assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1544);
+        assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1264);
     }
 }
