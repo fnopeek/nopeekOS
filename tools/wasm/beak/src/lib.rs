@@ -678,14 +678,7 @@ fn doc_mut() -> &'static mut Doc {
     &mut tabs()[a]
 }
 
-/// Truncate to `cap` bytes, at a character boundary (a cut mid-character
-/// would make the text invalid UTF-8).
-fn clip(s: &str, cap: usize) -> &str {
-    if s.len() <= cap { return s }
-    let mut n = cap;
-    while n > 0 && !s.is_char_boundary(n) { n -= 1; }
-    &s[..n]
-}
+use beak_engine::clip;
 
 const HTML_CAP: usize = 3 * 1024 * 1024;
 static mut HTML_BUF: [u8; HTML_CAP] = [0; HTML_CAP];
@@ -3240,7 +3233,7 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
     // "looked in the wrong tree".
     if !all.is_empty() {
         log(&alloc::format!("[beak] Bilder gesammelt: {} (z.B. {})",
-            all.len(), all.first().map(|s| &s[..s.len().min(72)]).unwrap_or("")));
+            all.len(), all.first().map(|s| clip(s, 72)).unwrap_or("")));
     }
     for src in all.iter() {
         if pending.len() >= MAX_IMAGES {
@@ -3398,7 +3391,7 @@ fn log_image_miss(engine: &Engine) {
     if doc().img_missed.iter().any(|s| *s == src) { return }
     doc_mut().img_missed.push(src.clone());
     log(&alloc::format!("[beak] Bild nicht im Speicher ({held} da): {}",
-        &src[..src.len().min(96)]));
+        clip(&src, 96)));
 }
 
 fn images_dirty() -> bool {

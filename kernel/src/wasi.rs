@@ -53,6 +53,7 @@ const EINVAL: i32 = 28;
 const EIO: i32 = 29;
 const EISDIR: i32 = 31;
 const ENOENT: i32 = 44;
+const ENOSPC: i32 = 51;
 const ENOSYS: i32 = 52;
 const ENOTDIR: i32 = 54;
 const ENOTEMPTY: i32 = 55;
@@ -312,9 +313,23 @@ fn write_string_vec(mem: &mut [u8], ptr_arr: i32, buf: i32, items: &[String]) ->
 /// terabytes. A write may be partial: the caller is told how much went in
 /// and writes the rest.
 const MAX_WRITE_CALL: usize = 64 * 1024 * 1024;
-/// Largest file a wasi program may grow by positioned writes; the whole file
-/// is held in kernel memory until it is synced.
-const MAX_WASI_FILE: usize = 256 * 1024 * 1024;
+/// Grow the open file `fd` to at least `end` bytes. A wasi program holds its
+/// open files in kernel memory until they are synced, so the bytes are
+/// charged to it: all its file buffers together stay within half of the free
+/// RAM (Linux charges page cache to the owner's memcg), and a failed
+/// allocation is ENOSPC rather than a kernel panic.
+fn grow_file(w: &mut WasiCtx, fd: i32, end: usize) -> Result<(), i32> {
+    let held: usize = w.fds.values()
+        .map(|h| if let Handle::File { data, .. } = h { data.len() } else { 0 })
+        .sum();
+    let Some(Handle::File { data, .. }) = w.fds.get_mut(&fd) else { return Err(EBADF) };
+    if end <= data.len() { return Ok(()); }
+    let budget = crate::memory::stats().0.saturating_mul(crate::memory::PAGE_SIZE) / 2;
+    if held.saturating_sub(data.len()).saturating_add(end) > budget { return Err(EFBIG); }
+    data.try_reserve(end - data.len()).map_err(|_| ENOSPC)?;
+    data.resize(end, 0);
+    Ok(())
+}
 
 /// Gather the `iovec` array into one buffer. Copying first keeps the
 /// borrow of guest memory apart from the borrow of the fd table.

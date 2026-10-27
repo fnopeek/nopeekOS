@@ -18,7 +18,10 @@ static SYNCED: AtomicBool = AtomicBool::new(false);
 /// An NTP sync is queued or running.
 static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 
-const NTP_HOST: &str = "pool.ntp.org";
+/// Separate lookups, so the answers come from separate servers.
+const NTP_HOSTS: [&str; 4] = ["0.pool.ntp.org", "1.pool.ntp.org", "2.pool.ntp.org", "3.pool.ntp.org"];
+/// Answers this close to their median agree.
+const AGREE_SECS: u64 = 2;
 
 /// Take the RTC as the starting time. Called once at boot.
 pub fn init_from_rtc() -> Option<u64> {
@@ -62,14 +65,52 @@ fn step(unix: u64) {
 
 /// Query NTP and step the clock. Blocks for up to the DNS and NTP
 /// timeouts (several seconds); call it where blocking is allowed.
+///
+/// SNTP is unauthenticated and certificate validity rests on this clock, so
+/// one answer is not enough: several servers must agree (a majority within
+/// `AGREE_SECS` of the median), and the clock never goes back before a time
+/// a signed release has proved.
 pub fn sync_now() -> bool {
-    match crate::net::ntp::query_via_dns(NTP_HOST) {
-        Some(t) => { step(t); true }
-        None => {
-            crate::kprintln!("[npk] NTP: no answer from {}", NTP_HOST);
-            false
+    let t0 = crate::interrupts::ticks();
+    let mut asked: alloc::vec::Vec<[u8; 4]> = alloc::vec::Vec::new();
+    let mut answers: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    for host in NTP_HOSTS {
+        let Some(ip) = crate::net::dns::resolve(host) else { continue };
+        if asked.contains(&ip) { continue; }
+        asked.push(ip);
+        if let Some(t) = crate::net::ntp::query(ip) {
+            // Back to the moment the sync began, so slow answers compare.
+            answers.push(t.saturating_sub(crate::interrupts::ticks().saturating_sub(t0) / 100));
         }
     }
+    answers.sort_unstable();
+    let Some(&median) = answers.get(answers.len() / 2) else {
+        crate::kprintln!("[npk] NTP: no answer");
+        return false;
+    };
+    let agree = answers.iter().filter(|&&t| t.abs_diff(median) <= AGREE_SECS).count();
+    if agree < 2 || agree * 2 <= answers.len() {
+        crate::kprintln!("[npk] NTP: {} of {} answers agree, clock left alone", agree, answers.len());
+        return false;
+    }
+    let floor = proven_floor();
+    if median < floor {
+        crate::kprintln!("[npk] NTP: answer is before {} (a signed release), clock left alone",
+            format(floor));
+        return false;
+    }
+    step(median.saturating_add(crate::interrupts::ticks().saturating_sub(t0) / 100));
+    true
+}
+
+/// The latest time a signed release proved: its `issued=` stamp cannot
+/// predate its signing.
+fn proven_floor() -> u64 {
+    ["kernel", "modules", "assets"].iter()
+        .filter_map(|k| crate::npkfs::fetch(&alloc::format!("sys/ota/issued-{}", k)).ok())
+        .filter_map(|(d, _)| core::str::from_utf8(&d).ok()?.trim().parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
 }
 
 /// Sync in the background. Called when an interface gets an address. A

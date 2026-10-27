@@ -689,7 +689,7 @@ pub fn header_line_is_safe(line: &str) -> bool {
 // the sandboxed module draws itself is none; beak only says where a request
 // comes from.
 
-pub use super::reach::{classify_ip, Reach};
+pub use super::reach::Reach;
 
 /// Resolve a host and check its reach in one step, so the check cannot be
 /// forgotten; bypassing it has to be visible.
@@ -699,11 +699,18 @@ pub use super::reach::{classify_ip, Reach};
 /// allowed anywhere.
 pub fn resolve_checked(host: &str, from: Option<Reach>) -> Result<[u8; 4], &'static str> {
     let bare = split_host_port(host).0;
-    let ip = parse_ip(bare)
+    let literal = parse_ip(bare);
+    let ip = literal
         .or_else(|| crate::net::dns::resolve(bare))
         .ok_or("DNS resolution failed")?;
+    if literal.is_none() { note_connected(bare, ip); }
+    if !super::reach::is_unicast(ip) || super::reach::is_subnet_broadcast(ip,
+        crate::net::arp::our_ip(), crate::net::ipv4::subnet())
+    {
+        return Err("not a unicast address");
+    }
     if let Some(from) = from {
-        let to = classify_ip(ip);
+        let to = class_of(ip);
         if !super::reach::allows(from, to) {
             kprintln!("[npk] REICHWEITE verweigert: {} ({}.{}.{}.{}) ist {:?}, die Seite ist {:?}",
                 bare, ip[0], ip[1], ip[2], ip[3], to, from);
@@ -713,10 +720,30 @@ pub fn resolve_checked(host: &str, from: Option<Reach>) -> Result<[u8; 4], &'sta
     Ok(ip)
 }
 
+/// The address each name was last connected to, newest last. A page's class
+/// comes from where its document really came from: a later lookup of the
+/// same name (DNS rebinding, TTL 0) can make it stricter, never looser.
+static CONNECTED: spin::Mutex<alloc::vec::Vec<(String, [u8; 4])>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
+/// Names remembered; the oldest goes first.
+const CONNECTED_KEEP: usize = 64;
+
+fn note_connected(name: &str, ip: [u8; 4]) {
+    let mut c = CONNECTED.lock();
+    c.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+    if c.len() >= CONNECTED_KEEP { c.remove(0); }
+    c.push((String::from(name), ip));
+}
+
+fn connected_to(name: &str) -> Option<[u8; 4]> {
+    CONNECTED.lock().iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, ip)| *ip)
+}
+
 /// Reach of a document, from its URL, resolved here in the kernel.
 ///
 /// Anything without a usable address or that does not resolve is `Public`,
-/// the strictest class: a failure must never allow more than a success.
+/// the strictest class: a failure must never allow more than a success. A
+/// name already connected to is at least as strict as that address.
 pub fn reach_of_url(url: &str) -> Reach {
     let rest = match url.split_once("://") {
         Some((_, r)) => r,
@@ -727,10 +754,21 @@ pub fn reach_of_url(url: &str) -> Reach {
         None => rest,
     };
     let bare = split_host_port(hostport).0;
-    match parse_ip(bare).or_else(|| crate::net::dns::resolve(bare)) {
-        Some(ip) => classify_ip(ip),
-        None => Reach::Public,
+    if let Some(ip) = parse_ip(bare) { return class_of(ip); }
+    let fresh = match crate::net::dns::resolve(bare) {
+        Some(ip) => class_of(ip),
+        None => return Reach::Public,
+    };
+    match connected_to(bare) {
+        Some(ip) => fresh.max(class_of(ip)),
+        None => fresh,
     }
+}
+
+/// `classify_ip` with our own link counted as the user's network.
+fn class_of(ip: [u8; 4]) -> Reach {
+    super::reach::classify_on_link(ip, crate::net::arp::our_ip(),
+        crate::net::ipv4::subnet(), crate::net::ipv4::gateway())
 }
 
 /// Is this a method a guest is allowed to send? A token of ASCII letters,

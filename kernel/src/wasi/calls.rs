@@ -94,12 +94,17 @@ if is_std {
     return match w32(mem, out, written) { Ok(()) => SUCCESS, Err(e) => e };
 }
 let w = wasi_of!(st);
-match w.fds.get_mut(&fd) {
-    Some(Handle::File { data: buf, pos, dirty, writable, .. }) => {
+let end = match w.fds.get(&fd) {
+    Some(Handle::File { data: buf, pos, writable, .. }) => {
         if !*writable { return EPERM; }
         if *pos > buf.len() { return EINVAL; }
-        let end = pos.saturating_add(data.len());
-        if end > buf.len() { buf.resize(end, 0); }
+        pos.saturating_add(data.len())
+    }
+    _ => 0,
+};
+if end > 0 { if let Err(e) = grow_file(w, fd, end) { return e; } }
+match w.fds.get_mut(&fd) {
+    Some(Handle::File { data: buf, pos, dirty, .. }) => {
         buf[*pos..end].copy_from_slice(&data);
         *pos = end;
         *dirty = true;
@@ -173,12 +178,16 @@ if st.wasi.is_none() { return ENOTCAPABLE; }
 let data = match gather(mem, iovs, n) { Ok(d) => d, Err(e) => return e };
 let at = match usize::try_from(off) { Ok(v) => v, Err(_) => return EINVAL };
 let w = wasi_of!(st);
-match w.fds.get_mut(&fd) {
-    Some(Handle::File { data: buf, dirty, writable, .. }) => {
+let end = at.saturating_add(data.len());
+match w.fds.get(&fd) {
+    Some(Handle::File { writable, .. }) => {
         if !*writable { return EPERM; }
-        let end = at.saturating_add(data.len());
-        if end > MAX_WASI_FILE { return EFBIG; }
-        if end > buf.len() { buf.resize(end, 0); }
+        if let Err(e) = grow_file(w, fd, end) { return e; }
+    }
+    _ => {}
+}
+match w.fds.get_mut(&fd) {
+    Some(Handle::File { data: buf, dirty, .. }) => {
         buf[at..end].copy_from_slice(&data);
         *dirty = true;
     }
@@ -226,6 +235,7 @@ match w.fds.remove(&fd) {
     // on every fd_write. A close that fails must say so — a
     // silently dropped buffer is a lost file.
     Some(Handle::File { path, data, dirty: true, .. }) => {
+        if !crate::npkfs::room_for(data.len()) { return ENOSPC; }
         match fs::write(&path, &data) { Ok(()) => SUCCESS, Err(e) => fs_errno(&e) }
     }
     Some(_) => SUCCESS,

@@ -1335,7 +1335,8 @@ impl Interp {
         }
         let mut l = line;
         if l.len() > MAX_CONSOLE_LEN {
-            l.truncate(MAX_CONSOLE_LEN);
+            let keep = crate::clip(&l, MAX_CONSOLE_LEN).len();
+            l.truncate(keep);
             l.push_str(" …");
         }
         self.console.push(l);

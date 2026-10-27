@@ -10,8 +10,6 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
-const MAX_ENTRIES: usize = 32;
-
 /// Path of the encrypted config blob.
 pub const CONFIG_OBJECT: &str = ".system/config";
 
@@ -38,7 +36,7 @@ impl ConfigStore {
     fn set(&mut self, key: &str, value: &str) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.key == key) {
             entry.value = String::from(value);
-        } else if self.entries.len() < MAX_ENTRIES {
+        } else {
             self.entries.push(ConfigEntry {
                 key: String::from(key),
                 value: String::from(value),
@@ -71,7 +69,7 @@ impl ConfigStore {
                 if let Some((k, v)) = line.split_once('=') {
                     let k = k.trim();
                     let v = v.trim();
-                    if !k.is_empty() && self.entries.len() < MAX_ENTRIES {
+                    if !k.is_empty() {
                         self.entries.push(ConfigEntry {
                             key: String::from(k),
                             value: String::from(v),

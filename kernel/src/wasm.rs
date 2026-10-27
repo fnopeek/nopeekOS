@@ -178,6 +178,16 @@ pub(crate) struct HostState {
     pub(crate) tcp_handles: Vec<usize>,
 }
 
+/// The instance owns its capability: when it ends, on any path, the
+/// capability, what it delegated and its per-path grants are released. A
+/// later instance reusing the id must not inherit a file it never asked for.
+impl Drop for HostState {
+    fn drop(&mut self) {
+        capability::revoke_path_grants(&self.cap_id);
+        capability::release_module_cap(&self.cap_id);
+    }
+}
+
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 
 /// Fuel budget for interactive apps and drivers — effectively unlimited.
@@ -234,6 +244,16 @@ struct WasmJob {
 
 static WASM_JOBS: Mutex<[Option<WasmJob>; MAX_WASM_JOBS]> =
     Mutex::new([const { None }; MAX_WASM_JOBS]);
+
+/// A job owns its capability until a worker hands it to the instance's
+/// `HostState`; a job that never starts releases it here.
+impl Drop for WasmJob {
+    fn drop(&mut self) {
+        if self.cap_id != capability::CAP_NULL {
+            capability::release_module_cap(&self.cap_id);
+        }
+    }
+}
 
 /// Per-job completion flag (set by worker, read by BSP)
 static JOB_DONE: [core::sync::atomic::AtomicBool; MAX_WASM_JOBS] =
@@ -483,7 +503,11 @@ fn spawn_on_worker_inner_engine(
     let mut jobs = WASM_JOBS.lock();
     let slot = match jobs.iter().position(|j| j.is_none()) {
         Some(i) => i,
-        None => { kprintln!("[npk] No free WASM job slots"); return false; }
+        None => {
+            kprintln!("[npk] No free WASM job slots");
+            capability::release_module_cap(&cap_id);
+            return false;
+        }
     };
 
     let mut name = [0u8; 32];
@@ -537,7 +561,7 @@ fn wasm_worker_task(arg: u64) {
         if slot >= MAX_WASM_JOBS { return; }
         jobs[slot].take()
     };
-    let job = match job {
+    let mut job = match job {
         Some(j) => j,
         None => return,
     };
@@ -567,7 +591,7 @@ fn wasm_worker_task(arg: u64) {
     let mut store = Store::new(&engine, HostState {
         limits: guest_limits(),
         output: String::new(),
-        cap_id: job.cap_id,
+        cap_id: core::mem::replace(&mut job.cap_id, capability::CAP_NULL),
         net_reach: crate::intent::http::Reach::Public,
         direct_output: true,
         terminal_idx: job.terminal_idx,
@@ -623,12 +647,6 @@ fn wasm_worker_task(arg: u64) {
     // Cleanup hardware resources before process exit
     cleanup_instance_state(store.data_mut());
 
-    // Drop this instance's per-path grants. They were handed out for one
-    // pick and must not outlive the app that got them — a later instance
-    // reusing the capability id would otherwise inherit a file it never
-    // asked for.
-    capability::revoke_path_grants(&store.data().cap_id);
-    capability::release_module_cap(&store.data().cap_id);
 
     // Update final memory usage
     if let Some(mem) = instance.get_memory(&store, "memory") {
@@ -646,7 +664,7 @@ fn wasm_worker_task(arg: u64) {
 
 /// The same job under forge. Kept separate from `wasm_worker_task` so the
 /// interpreter path stays untouched; the cost is a duplicated cleanup tail.
-fn forge_worker_task(slot: usize, job: WasmJob) {
+fn forge_worker_task(slot: usize, mut job: WasmJob) {
     // Generated code gives its core up at fuel-slice ends (`forge_rt::refuel`),
     // so this fiber may also run on a core it shares with a vCPU.
     crate::smp::fiber::mark_preemptible();
@@ -690,7 +708,7 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
     let mut hs = HostState {
         limits: guest_limits(),
         output: String::new(),
-        cap_id: job.cap_id,
+        cap_id: core::mem::replace(&mut job.cap_id, capability::CAP_NULL),
         net_reach: crate::intent::http::Reach::Public,
         direct_output: true,
         terminal_idx: job.terminal_idx,
@@ -735,10 +753,8 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
         kprintln!("[npk] forge: {} endete mit {}", name_str, forge_core::trap::name(trap));
     }
 
-    // As in the interpreter path: release hardware, revoke path grants.
+    // As in the interpreter path: release hardware.
     cleanup_instance_state(&mut hs);
-    capability::revoke_path_grants(&hs.cap_id);
-    capability::release_module_cap(&hs.cap_id);
     crate::process::set_memory(pid, inst.memory_size() as u32);
     done(pid, terminal_idx, slot);
 }
@@ -981,10 +997,8 @@ fn execute_inner_forge(
     let (_ret, trap) = inst.call(off, a(0), a(1), a(2));
 
     cleanup_instance_state(&mut hs);
-    capability::revoke_path_grants(&hs.cap_id);
-    capability::release_module_cap(&hs.cap_id);
     Some(match trap {
-        forge_core::trap::NONE => Ok(WasmResult { output: hs.output }),
+        forge_core::trap::NONE => Ok(WasmResult { output: core::mem::take(&mut hs.output) }),
         forge_core::trap::OUT_OF_FUEL => Err(WasmError::FuelExhausted),
         other => {
             kprintln!("[npk] forge: {} endete mit {}", func_name, forge_core::trap::name(other));

@@ -1139,7 +1139,7 @@ fn spawn_launcher() {
     // Grant exactly the rights the app declares in its `.npk.caps`
     // section (per-app, no blanket WRITE); absent → safe default.
     let rights = crate::capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match crate::capability::create_module_cap(rights, Some(600_000)) {
+    let module_cap = match crate::capability::create_module_cap(rights, None) {
         Ok(id) => id,
         Err(e) => { crate::kprintln!("[npk] launcher: cap delegation failed: {}", e); return; }
     };
@@ -1204,14 +1204,11 @@ const AUTOSTART_STAGGER_MS: u64 = 400;
 /// Must run on Core 0 (touches the compositor). Re-focuses an existing
 /// window of that name instead of spawning a duplicate.
 pub fn launch_app(name: &str) {
-    launch_app_with_ttl(name, Some(600_000));
+    launch_app_with_ttl(name, None);
 }
 
-/// `ttl_ticks` = None for a resident service. Autostart entries are exactly
-/// that: a WiFi driver, a supplicant, the panel. The default 600 000 ticks are
-/// 100 minutes at 100 Hz — after which every gated host call of a still-running
-/// module starts failing, which looks like the device breaking, not like a
-/// capability expiring.
+/// `ttl_ticks` = None for an instance capability, which ends with the
+/// instance; a TTL is only for an explicitly time-limited grant.
 pub fn launch_app_with_ttl(name: &str, ttl_ticks: Option<u64>) {
     launch(name, ttl_ticks, false);
 }

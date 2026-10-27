@@ -94,6 +94,35 @@ pub fn set_keyslot(i: usize, slot: &crate::crypto::keyslot::Slot) -> Result<(), 
 
 pub fn stats() -> Option<(u64, u64, u64, u64)> { storage::stats() }
 
+/// npkFS space only the system may fill: install, update, the vault, deletes
+/// and the user's own saves need room after a module has filled the rest
+/// (ext4's reserved blocks, mke2fs `-m 5`). The larger of the two.
+const RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+const RESERVE_PERCENT: u64 = 5;
+
+/// Whether a write a module drives may add `len` bytes without touching the
+/// system reserve (Linux `ext4_has_free_clusters`).
+pub fn room_for(len: usize) -> bool {
+    let Some((total, free, _, _)) = stats() else { return false };
+    let bs = BLOCK_SIZE as u64;
+    let reserve = RESERVE_BYTES.max(total * bs * RESERVE_PERCENT / 100);
+    (free * bs).saturating_sub(reserve) >= len as u64
+}
+
+/// Bytes of all files at and under `path`.
+pub fn tree_bytes(path: &str) -> u64 {
+    let path = clean_path(path);
+    match fs::stat(path) {
+        Ok(Some(st)) if st.kind == object::EntryKind::File => st.size,
+        Ok(Some(_)) => {
+            let mut out = Vec::new();
+            let _ = walk_recursive(String::from(path), &mut out);
+            out.iter().map(|(_, size, _)| *size).sum()
+        }
+        _ => 0,
+    }
+}
+
 /// Strict create: errors with `ObjectExists` if `name` is already present.
 /// `cap_id` is accepted for ABI compat and ignored by the content-
 /// addressed backend.

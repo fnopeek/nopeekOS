@@ -51,10 +51,20 @@ const NVM_DSM: u8 = 0x09;   // Dataset Management (TRIM/Deallocate)
 
 // Queue sizes (entries)
 const ADMIN_QUEUE_SIZE: u16 = 16;
-// 256 entries is universally supported (CAP.MQES on any modern SSD is well
-// above this). A larger queue fails init on SSDs with a smaller MQES, and
-// then at-rest decryption cannot read a thing.
-const IO_QUEUE_SIZE: u16 = 256;
+/// I/O queue depth asked for; the controller's CAP.MQES may lower it, as in
+/// Linux `nvme_pci_enable` (`io_queue_depth`).
+const IO_QUEUE_DEPTH: u32 = 1024;
+/// Spec minimum for an I/O queue (CAP.MQES >= 1).
+const IO_QUEUE_MIN: u32 = 2;
+
+/// The I/O queue depth in use, set once at init.
+static IO_Q_DEPTH: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(IO_QUEUE_MIN as u16);
+
+/// Commands one submission may keep outstanding: a queue of N entries holds
+/// at most N - 1 (NVMe base spec 4.1, "Full Queue").
+fn queue_room() -> usize {
+    IO_Q_DEPTH.load(Ordering::Relaxed) as usize - 1
+}
 
 // Submission Queue Entry (64 bytes)
 #[repr(C)]
@@ -120,6 +130,7 @@ struct NvmeState {
     io_sq_tail: u16,
     io_cq_head: u16,
     io_phase: bool,
+    io_q_depth: u16,
     // Device info
     total_lbas: u64,            // Total logical blocks (512-byte sectors)
     model: [u8; 40],
@@ -155,14 +166,10 @@ static DMA_BUF: Mutex<Option<DmaRegion>> = Mutex::new(None);
 /// simultaneously.
 const DMA_POOL_SLOTS: usize = 256;
 
-/// Largest batch submitted at once. An NVMe queue of N entries holds at
-/// most N - 1 commands: with N outstanding, tail == head and the
-/// controller sees an empty queue (NVMe base spec 4.1, "Full Queue").
-const MAX_BATCH: usize = if DMA_POOL_SLOTS < IO_QUEUE_SIZE as usize {
-    DMA_POOL_SLOTS
-} else {
-    IO_QUEUE_SIZE as usize - 1
-};
+/// Largest batch submitted at once: what both the DMA pool and the queue hold.
+fn max_batch() -> usize {
+    DMA_POOL_SLOTS.min(queue_room())
+}
 static DMA_POOL_BASE: Mutex<Option<DmaRegion>> = Mutex::new(None);
 
 /// Number of NVMe commands `read_extent` / `write_extent` keep in
@@ -259,7 +266,7 @@ impl NvmeState {
         cmd.command_id = cid;
         self.command_id = self.command_id.wrapping_add(1);
         sq_write(&self.io_sq, self.io_sq_tail, cmd);
-        self.io_sq_tail = (self.io_sq_tail + 1) % IO_QUEUE_SIZE;
+        self.io_sq_tail = (self.io_sq_tail + 1) % self.io_q_depth;
         self.io_inflight += 1;
         cid
     }
@@ -286,7 +293,7 @@ impl NvmeState {
             }
             let entry = cq_read(&self.io_cq, self.io_cq_head);
             if ((entry.status & 1) != 0) == self.io_phase {
-                self.io_cq_head = (self.io_cq_head + 1) % IO_QUEUE_SIZE;
+                self.io_cq_head = (self.io_cq_head + 1) % self.io_q_depth;
                 if self.io_cq_head == 0 { self.io_phase = !self.io_phase; }
                 ring_cq_doorbell(self, 1, self.io_cq_head);
                 self.io_inflight = self.io_inflight.saturating_sub(1);
@@ -431,11 +438,13 @@ pub fn init() -> bool {
         version >> 16, (version >> 8) & 0xFF, version & 0xFF,
         cap, max_queue_entries);
 
-    if IO_QUEUE_SIZE as u32 > max_queue_entries {
-        kprintln!("[npk] nvme: IO_QUEUE_SIZE={} exceeds CAP.MQES+1={}, refusing init",
-            IO_QUEUE_SIZE, max_queue_entries);
+    if max_queue_entries < IO_QUEUE_MIN {
+        kprintln!("[npk] nvme: CAP.MQES+1={} below the spec minimum, refusing init",
+            max_queue_entries);
         return false;
     }
+    let io_q_depth = max_queue_entries.min(IO_QUEUE_DEPTH) as u16;
+    IO_Q_DEPTH.store(io_q_depth, Ordering::Relaxed);
 
     // Disable controller
     let cc = regs.r32(REG_CC);
@@ -491,7 +500,7 @@ pub fn init() -> bool {
         admin_sq, admin_cq,
         admin_sq_tail: 0, admin_cq_head: 0, admin_phase: true,
         io_sq: DmaRegion::empty(), io_cq: DmaRegion::empty(),
-        io_sq_tail: 0, io_cq_head: 0, io_phase: true,
+        io_sq_tail: 0, io_cq_head: 0, io_phase: true, io_q_depth,
         total_lbas: 0,
         model: [0; 40],
         serial: [0; 20],
@@ -604,7 +613,7 @@ pub fn init() -> bool {
     }
 
     // Create I/O Completion Queue (QID=1)
-    let io_cq_pages = ((IO_QUEUE_SIZE as usize * 16) + 4095) / 4096;
+    let io_cq_pages = ((io_q_depth as usize * 16) + 4095) / 4096;
     let io_cq = match DmaRegion::alloc_zeroed(io_cq_pages) {
         Some(r) => r,
         None => { kprintln!("[npk] nvme: failed to allocate I/O CQ"); return false; }
@@ -628,7 +637,7 @@ pub fn init() -> bool {
     let mut cmd = SqEntry::zeroed();
     cmd.opcode = ADM_CREATE_IO_CQ;
     cmd.prp1 = io_cq.phys();
-    cmd.cdw10 = ((IO_QUEUE_SIZE as u32 - 1) << 16) | 1; // QID=1, size
+    cmd.cdw10 = ((io_q_depth as u32 - 1) << 16) | 1; // QID=1, size
     cmd.cdw11 = 1 | ien; // bit0 = Physically Contiguous, bit1 = IEN; IV=0
     if admin_command(&mut state, cmd).is_err() {
         kprintln!("[npk] nvme: Create I/O CQ failed");
@@ -636,7 +645,7 @@ pub fn init() -> bool {
     }
 
     // Create I/O Submission Queue (QID=1, CQ=1)
-    let io_sq_pages = ((IO_QUEUE_SIZE as usize * 64) + 4095) / 4096;
+    let io_sq_pages = ((io_q_depth as usize * 64) + 4095) / 4096;
     let io_sq = match DmaRegion::alloc_zeroed(io_sq_pages) {
         Some(r) => r,
         None => { kprintln!("[npk] nvme: failed to allocate I/O SQ"); return false; }
@@ -645,7 +654,7 @@ pub fn init() -> bool {
     let mut cmd = SqEntry::zeroed();
     cmd.opcode = ADM_CREATE_IO_SQ;
     cmd.prp1 = io_sq.phys();
-    cmd.cdw10 = ((IO_QUEUE_SIZE as u32 - 1) << 16) | 1; // QID=1, size
+    cmd.cdw10 = ((io_q_depth as u32 - 1) << 16) | 1; // QID=1, size
     cmd.cdw11 = (1 << 16) | 1; // CQID=1, Physically contiguous
     if admin_command(&mut state, cmd).is_err() {
         kprintln!("[npk] nvme: Create I/O SQ failed");
@@ -795,7 +804,7 @@ pub fn read_block(block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError
     Ok(())
 }
 
-/// Submit up to `MAX_BATCH` write-block commands in parallel and
+/// Submit up to `max_batch()` write-block commands in parallel and
 /// wait for them all. Returns Ok only if every command completed
 /// without error. Falls back to per-block sequential writes when the
 /// batch is too large or the pool isn't available.
@@ -808,7 +817,7 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
 
     // Batch larger than the pool → fall back to sequential. `cache::flush`
     // never exceeds its cache slot count, so no internal chunking.
-    if items.len() > MAX_BATCH {
+    if items.len() > max_batch() {
         for &(block, buf) in items {
             write_block(block, buf)?;
         }
@@ -836,7 +845,7 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
     }
 
     // Stage every payload into its own DMA pool slot + push every SQ
-    // entry, then ring the doorbell exactly once. `items.len() <= MAX_BATCH`,
+    // entry, then ring the doorbell exactly once. `items.len() <= max_batch()`,
     // so the tail cannot wrap onto our own un-acked head.
     for (i, &(block, buf)) in items.iter().enumerate() {
         let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
@@ -857,7 +866,7 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
     state.io_wait_all()
 }
 
-/// Submit up to `MAX_BATCH` read-block commands in parallel and
+/// Submit up to `max_batch()` read-block commands in parallel and
 /// wait for them all. `output` is the destination buffer, sized
 /// `blocks.len() * BLOCK_SIZE` — block i lands at `output[i*B..i*B+B]`.
 /// Falls back to sequential `read_block` when the batch exceeds the
@@ -886,10 +895,10 @@ pub fn read_blocks_batch(blocks: &[u64], output: &mut [u8]) -> Result<(), BlkErr
     };
 
     // Chunk into batches that fit both the DMA pool and the queue.
-    if blocks.len() > MAX_BATCH {
+    if blocks.len() > max_batch() {
         let mut offset = 0;
         while offset < blocks.len() {
-            let take = (blocks.len() - offset).min(MAX_BATCH);
+            let take = (blocks.len() - offset).min(max_batch());
             let chunk_blocks = &blocks[offset..offset + take];
             let chunk_out = &mut output[offset * BLOCK_SIZE..(offset + take) * BLOCK_SIZE];
             read_blocks_batch_inner(chunk_blocks, chunk_out, &pool)?;
@@ -901,7 +910,7 @@ pub fn read_blocks_batch(blocks: &[u64], output: &mut [u8]) -> Result<(), BlkErr
     read_blocks_batch_inner(blocks, output, &pool)
 }
 
-/// Single ≤ MAX_BATCH read batch. Pool-based, queue-depth ≈ N.
+/// Single ≤ `max_batch()` read batch. Pool-based, queue-depth ≈ N.
 fn read_blocks_batch_inner(blocks: &[u64], output: &mut [u8], pool: &DmaRegion) -> Result<(), BlkError> {
 
     let mut nvme = NVME.lock();
@@ -1076,7 +1085,7 @@ pub fn read_extent(start_block: u64, count: u64, output: &mut [u8]) -> Result<()
         let mut batch_len = 0usize;
 
         // Submit phase: queue up to MAX_INFLIGHT cmds.
-        for slot in 0..MAX_INFLIGHT {
+        for slot in 0..MAX_INFLIGHT.min(queue_room()) {
             if offset >= count { break; }
             let chunk = (count - offset).min(max_per_cmd);
             let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
@@ -1141,7 +1150,7 @@ pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), Bl
     while offset < count {
 
         // Stage + submit phase.
-        for slot in 0..MAX_INFLIGHT {
+        for slot in 0..MAX_INFLIGHT.min(queue_room()) {
             if offset >= count { break; }
             let chunk = (count - offset).min(max_per_cmd);
             let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
@@ -1238,7 +1247,7 @@ pub fn read_multi_extent(extents: &[(u64, u64)], output: &mut [u8]) -> Result<()
         let mut batch_len = 0usize;
         let mut pool_used = 0u64;
 
-        while wi < work.len() && batch_len < MAX_INFLIGHT_MULTI {
+        while wi < work.len() && batch_len < MAX_INFLIGHT_MULTI.min(queue_room()) {
             let (start, count, out_off) = work[wi];
             // Pool capacity check — can't fit this chunk in the
             // remaining slots; close the batch and process it.

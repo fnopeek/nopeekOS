@@ -1299,7 +1299,9 @@ pub(crate) fn npk_tcp_connect(ctx: &mut HostState, ip_packed: i32, port: i32) ->
     // `debug` the local network is the point (it logs to `nc -lk`).
     // The TLS path above is used by beak on behalf of a page and does apply
     // it.
-    match crate::net::tcp::connect_start(ip, port as u16) {
+    // A run without a process entry (pid 0) is still a module, never the kernel.
+    let owner = if ctx.pid != 0 { ctx.pid } else { u32::MAX };
+    match crate::net::tcp::connect_start_as(owner, ip, port as u16) {
         Ok(h) => { ctx.tcp_handles.push(h); h as i32 }
         Err(_) => -1,
     }
@@ -2538,6 +2540,9 @@ pub(crate) fn npk_http_last_error(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
     write_bytes(mem, buf_ptr, &err.as_bytes()[..n])
 }
 
+/// A module's private area may hold this share of the store: 1/32.
+const PRIVATE_QUOTA_DIVISOR: u64 = 32;
+
 pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     let name = match read_str(mem, name_ptr, name_len) {
@@ -2580,19 +2585,27 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
         kprintln!("[npk] WASM: npk_store DENIED (no WRITE, no grant for {})", name);
         return -1;
     }
-    // The private area must not be a way to fill the disk without WRITE.
-    // Larger data needs WRITE, and with it the user's consent.
-    // Not implemented: a total quota. This caps each write, so many small
-    // files still get past it.
-    const PRIVATE_WRITE_MAX: i32 = 1024 * 1024;
-    if by_private && data_len > PRIVATE_WRITE_MAX {
-        kprintln!("[npk] WASM: npk_store DENIED ({} B in den privaten Bereich, Deckel {} B)",
-            data_len, PRIVATE_WRITE_MAX);
-        return -1;
-    }
-
     let Some(payload) = glen(data_len).and_then(|n| guest(mem, data_ptr, n)) else { return -1 };
     if payload.is_empty() { return -1; }
+
+    if !crate::npkfs::room_for(payload.len()) {
+        kprintln!("[npk] WASM: npk_store DENIED ({} B, npkFS is down to the system reserve)",
+            payload.len());
+        return -1;
+    }
+    // The private area must not be a way to fill the disk without WRITE: a
+    // quota per module (Linux `dquot`), a share of the store's size.
+    if by_private {
+        let area = alloc::format!("{}/{}", crate::wasm::PRIVATE_ROOT, ctx.module_name);
+        let held = crate::npkfs::tree_bytes(&area).saturating_sub(crate::npkfs::tree_bytes(&name));
+        let quota = crate::npkfs::stats()
+            .map_or(0, |(total, ..)| total * crate::npkfs::BLOCK_SIZE as u64 / PRIVATE_QUOTA_DIVISOR);
+        if held.saturating_add(payload.len() as u64) > quota {
+            kprintln!("[npk] WASM: npk_store DENIED (privater Bereich von {} voll, {} MiB)",
+                ctx.module_name, quota / (1024 * 1024));
+            return -1;
+        }
+    }
 
     // Insert-or-replace: apps with state to persist (panel
     // configs, etc.) re-write the same key on every change. The
@@ -2978,7 +2991,7 @@ pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i3
     // no declaration get the safe default (no WRITE). Per-app, not
     // a blanket grant.
     let rights = capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match capability::create_module_cap(rights, Some(600_000)) {
+    let module_cap = match capability::create_module_cap(rights, None) {
         Ok(id) => id,
         Err(_) => return -1,
     };
@@ -2998,7 +3011,7 @@ pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i3
 
     let (win_id, term_idx) = match spawned {
         Some(v) => v,
-        None => return -1,
+        None => { capability::release_module_cap(&module_cap); return -1; }
     };
 
     // Fresh session prompt so the terminal isn't stuck on the
@@ -4105,7 +4118,7 @@ pub(crate) fn npk_open(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_le
         Err(_) => return -1,
     };
     let rights = capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match capability::create_module_cap(rights, Some(600_000)) {
+    let module_cap = match capability::create_module_cap(rights, None) {
         Ok(id) => id,
         Err(_) => return -1,
     };
@@ -4124,7 +4137,11 @@ pub(crate) fn npk_open(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_le
     // next open find it and route an Event::Open tab instead.
     let win = match crate::shade::with_compositor(|c| c.create_widget_window(&app)) {
         Some(id) => id,
-        None => return -1,
+        None => {
+            capability::revoke_path_grants(&module_cap);
+            capability::release_module_cap(&module_cap);
+            return -1;
+        }
     };
     crate::shade::focus_window(win); // bring the editor to the front
     crate::shade::request_render();
@@ -4215,7 +4232,7 @@ pub(crate) fn npk_launch(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_
         Err(_) => return -1,
     };
     let rights = capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match capability::create_module_cap(rights, Some(600_000)) {
+    let module_cap = match capability::create_module_cap(rights, None) {
         Ok(id) => id,
         Err(_) => return -1,
     };
@@ -4269,7 +4286,7 @@ pub(crate) fn npk_pick(mem: &mut [u8], ctx: &mut HostState, mode: i32, start_ptr
         }
     };
     let rights = capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match capability::create_module_cap(rights, Some(600_000)) {
+    let module_cap = match capability::create_module_cap(rights, None) {
         Ok(id) => id,
         Err(_) => return -1,
     };
@@ -4287,7 +4304,7 @@ pub(crate) fn npk_pick(mem: &mut [u8], ctx: &mut HostState, mode: i32, start_ptr
         id
     }) {
         Some(id) => id,
-        None => return -1,
+        None => { capability::release_module_cap(&module_cap); return -1; }
     };
     crate::shade::widgets::register_pick(win.0, requester, tag as u32, cap_id, mode == 1);
     crate::shade::focus_window(win);

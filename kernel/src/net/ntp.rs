@@ -14,11 +14,6 @@ use super::udp;
 const NTP_PORT: u16 = 123;
 const NTP_EPOCH_OFFSET: u64 = 2_208_988_800; // seconds from 1900 to 1970
 
-/// Resolve `hostname` and ask it for the time. Blocking.
-pub fn query_via_dns(hostname: &str) -> Option<u64> {
-    query(super::dns::resolve(hostname)?)
-}
-
 /// The time from an NTP server, as Unix seconds. Blocking, 3 s at most.
 pub fn query(server_ip: [u8; 4]) -> Option<u64> {
     // Build SNTP request (48 bytes)

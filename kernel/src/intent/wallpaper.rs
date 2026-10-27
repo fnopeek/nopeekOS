@@ -213,7 +213,7 @@ fn decode_with_wasm(name: &str) -> bool {
     // Delegate capability: READ (fetch image) + WRITE (set wallpaper) + EXECUTE
     let module_cap = match crate::capability::create_module_cap(
         crate::capability::Rights::READ | crate::capability::Rights::WRITE | crate::capability::Rights::EXECUTE,
-        Some(30_000), // 5 minutes (PNG decode can be slow)
+        None,
     ) {
         Ok(id) => id,
         Err(_) => return false,
@@ -303,7 +303,7 @@ fn delegate_to_wallpaper(target: String, w: u32, h: u32, label: &str) {
         crate::capability::Rights::READ
             | crate::capability::Rights::WRITE
             | crate::capability::Rights::EXECUTE,
-        Some(60_000),
+        None,
     ) {
         Ok(id) => id,
         Err(_) => {

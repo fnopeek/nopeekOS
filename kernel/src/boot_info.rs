@@ -10,8 +10,6 @@
 
 #![allow(dead_code)]
 
-pub const MAX_MEMORY_REGIONS: usize = 256;
-
 // UEFI memory type constants (UEFI Spec §7.2). Mirror them here so
 // modules outside the boot stub (memory.rs, framebuffer.rs, acpi.rs)
 // don't have to import from boot_uefi.
@@ -72,7 +70,10 @@ pub struct BootInfo {
     pub _fb_pad: [u8; 3],
 
     pub region_count: u32,
-    pub regions: [MemoryRegion; MAX_MEMORY_REGIONS],
+    /// The firmware memory map, in an `EfiLoaderData` pool the stub
+    /// allocated before ExitBootServices: the frame allocator never hands
+    /// it out, and it lies in the identity map.
+    pub regions_ptr: *const MemoryRegion,
 }
 
 impl BootInfo {
@@ -86,12 +87,19 @@ impl BootInfo {
             fb_bpp: 0,
             _fb_pad: [0; 3],
             region_count: 0,
-            regions: [MemoryRegion::ZERO; MAX_MEMORY_REGIONS],
+            regions_ptr: core::ptr::null(),
         }
     }
 
-    pub fn usable_regions(&self) -> impl Iterator<Item = &MemoryRegion> {
-        self.regions[..self.region_count as usize]
+    pub fn regions(&self) -> &'static [MemoryRegion] {
+        if self.regions_ptr.is_null() { return &[]; }
+        // SAFETY: the stub wrote `region_count` regions at `regions_ptr`
+        // into loader data that is never freed or handed out (see the field).
+        unsafe { core::slice::from_raw_parts(self.regions_ptr, self.region_count as usize) }
+    }
+
+    pub fn usable_regions(&self) -> impl Iterator<Item = &'static MemoryRegion> {
+        self.regions()
             .iter()
             .filter(|r| r.is_usable() && r.page_count > 0)
     }

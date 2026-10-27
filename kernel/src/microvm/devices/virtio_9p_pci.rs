@@ -1410,6 +1410,7 @@ fn npkfs_read(path: &str) -> Option<Vec<u8>> {
 /// Write (create-or-replace) a whole file. Parent dir must exist (9P
 /// always walks to it first). `Err(())` on any storage error.
 fn npkfs_write(path: &str, data: &[u8]) -> Result<(), ()> {
+    if !crate::npkfs::room_for(data.len()) { return Err(()); }
     crate::npkfs::fs::write(path, data).map_err(|e| { p9diag!("[9p] fs::write({}) err: {:?}", path, e); })
 }
 fn npkfs_mkdir(path: &str) -> Result<(), ()> {

@@ -114,7 +114,7 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
 
     let cap = match capability::create_module_cap(
         Rights::READ | Rights::WRITE | Rights::EXECUTE,
-        Some(600_000),
+        None,
     ) {
         Ok(id) => id,
         Err(e) => { kprintln!("[python] cap delegation failed: {}", e); return; }

@@ -77,6 +77,14 @@ static RX_TOTAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::
 static NO_LISTENER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static NO_LISTENER_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 
+/// UDP checksum over the IPv4 pseudo-header + datagram (RFC 768). A computed
+/// zero goes on the wire as 0xFFFF, because zero is the "no checksum" escape.
+pub fn checksum(src_ip: [u8; 4], dst_ip: [u8; 4], udp: &[u8]) -> u16 {
+    use super::csum;
+    let c = !csum::fold(csum::pseudo(src_ip, dst_ip, ipv4::PROTO_UDP, udp.len()) + csum::sum(udp));
+    if c == 0 { 0xFFFF } else { c }
+}
+
 /// Send a UDP datagram
 pub fn send(dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) {
     let udp_len = (HEADER_LEN + payload.len()) as u16;
@@ -85,8 +93,10 @@ pub fn send(dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) {
     pkt[0..2].copy_from_slice(&src_port.to_be_bytes());
     pkt[2..4].copy_from_slice(&dst_port.to_be_bytes());
     pkt[4..6].copy_from_slice(&udp_len.to_be_bytes());
-    // pkt[6..8] = checksum (0 = disabled for UDP over IPv4)
     pkt[HEADER_LEN..].copy_from_slice(payload);
+    // RFC 1122 4.1.3.4: checksumming defaults to on (Linux `udp_send_skb`).
+    let c = checksum(super::arp::our_ip(), dst_ip, &pkt);
+    pkt[6..8].copy_from_slice(&c.to_be_bytes());
 
     let _ = ipv4::send(dst_ip, ipv4::PROTO_UDP, &pkt);
 }

@@ -208,7 +208,8 @@ fn control_of(e: &Element, kind: ControlKind, form: Option<usize>) -> Control {
     }
     // The label: a `<button>`'s text, an `<input>`'s `value`.
     let mut label = if e.tag == "button" { text_of(e) } else { default_value.clone() };
-    if label.len() > 60 { label.truncate(60); }
+    let keep = crate::clip(&label, 60).len();
+    label.truncate(keep);
     let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
     Control {
         seq: e.seq,

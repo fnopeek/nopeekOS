@@ -38,13 +38,12 @@ pub fn intent_run(args: &str) {
     // BLAKE3 integrity verified by npkfs::fetch
 
     // AUDIT stays off: apps should not introspect kernel state.
-    // TTL 600_000 ticks ≈ 100 minutes at 100 Hz: instantiation and
-    // first-touch of large heaps can take tens of seconds before the first
-    // host call, and the bound still reaps a hung worker.
+    // No TTL: the capability lives as long as the instance and is released
+    // when it ends (`HostState`'s drop), as a process's rights end with it.
     // What the module declares in `.npk.caps` (the widget default without
     // one), the same as the click path (`npk_spawn_module`).
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
-    let module_cap = match capability::create_module_cap(declared, Some(600_000)) {
+    let module_cap = match capability::create_module_cap(declared, None) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
@@ -113,7 +112,7 @@ pub fn intent_run_background(module_name: &str) {
     // What the module declares in `.npk.caps` (the widget default without
     // one), the same as the click path (`npk_spawn_module`).
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
-    let module_cap = match capability::create_module_cap(declared, Some(600_000)) {
+    let module_cap = match capability::create_module_cap(declared, None) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
@@ -149,7 +148,7 @@ fn run_interactive_on(module_name: &str, use_forge: bool) {
     // What the module declares in `.npk.caps` (the widget default without
     // one), the same as the click path (`npk_spawn_module`).
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
-    let module_cap = match capability::create_module_cap(declared, Some(600_000)) {
+    let module_cap = match capability::create_module_cap(declared, None) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };

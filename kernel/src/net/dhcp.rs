@@ -69,6 +69,9 @@ enum Phase {
 struct Exchange {
     phase: Phase,
     mac: [u8; 6],
+    /// Random per exchange (RFC 2131 4.1, Linux `ipconfig.c`); a reply
+    /// carrying another one is someone else's.
+    xid: u32,
     hint: [u8; 4],
     tries: u8,
     deadline: u64, // rdtsc
@@ -154,17 +157,18 @@ pub fn start() -> Start {
 
     udp::listen(CLIENT_PORT);
     arp::set_ip([0, 0, 0, 0]);
+    let xid = crate::csprng::random_u64() as u32;
 
     // Rung 1, INIT-REBOOT: we still hold an address, so ask for that one — a
     // broadcast REQUEST carrying it in option 50 and no server identifier. One
     // round trip when the server still knows us. Silence falls through to the
     // full exchange, which is the point of the rung.
     let phase = if hint != [0, 0, 0, 0] {
-        let reboot = build_dhcp(&mac, MSG_REQUEST, hint, [0; 4]);
+        let reboot = build_dhcp(&mac, xid, MSG_REQUEST, hint, [0; 4]);
         udp::send(BCAST, CLIENT_PORT, SERVER_PORT, &reboot);
         Phase::Reboot
     } else {
-        let discover = build_dhcp(&mac, MSG_DISCOVER, hint, [0; 4]);
+        let discover = build_dhcp(&mac, xid, MSG_DISCOVER, hint, [0; 4]);
         udp::send(BCAST, CLIENT_PORT, SERVER_PORT, &discover);
         Phase::Discover
     };
@@ -172,6 +176,7 @@ pub fn start() -> Start {
     *EXCHANGE.lock() = Some(Exchange {
         phase,
         mac,
+        xid,
         hint,
         tries: 1,
         deadline: deadline_in(REPLY_WAIT_MS),
@@ -204,14 +209,14 @@ fn step(ex: &mut Exchange) -> Step {
     if let Some((_src_ip, _src_port, data)) = udp::recv(CLIENT_PORT) {
         match ex.phase {
             Phase::Reboot => {
-                if let Some((ack, _)) = parse_dhcp_reply(&data, MSG_ACK) {
+                if let Some((ack, _)) = parse_dhcp_reply(&data, ex.xid, &ex.mac, MSG_ACK) {
                     succeed(ex.mac, ack, true);
                     return Step::Done;
                 }
             }
             Phase::Discover => {
-                if let Some((offer, server)) = parse_dhcp_reply(&data, MSG_OFFER) {
-                    let req = build_dhcp(&ex.mac, MSG_REQUEST, offer, server);
+                if let Some((offer, server)) = parse_dhcp_reply(&data, ex.xid, &ex.mac, MSG_OFFER) {
+                    let req = build_dhcp(&ex.mac, ex.xid, MSG_REQUEST, offer, server);
                     udp::send(BCAST, CLIENT_PORT, SERVER_PORT, &req);
                     ex.phase = Phase::Request { offer, server };
                     ex.tries = 1;
@@ -220,7 +225,7 @@ fn step(ex: &mut Exchange) -> Step {
                 }
             }
             Phase::Request { .. } => {
-                if let Some((ack, _)) = parse_dhcp_reply(&data, MSG_ACK) {
+                if let Some((ack, _)) = parse_dhcp_reply(&data, ex.xid, &ex.mac, MSG_ACK) {
                     succeed(ex.mac, ack, false);
                     return Step::Done;
                 }
@@ -235,7 +240,7 @@ fn step(ex: &mut Exchange) -> Step {
     match ex.phase {
         Phase::Reboot => {
             kprintln!("[npk] DHCP: lease not reconfirmed - full exchange");
-            let discover = build_dhcp(&ex.mac, MSG_DISCOVER, ex.hint, [0; 4]);
+            let discover = build_dhcp(&ex.mac, ex.xid, MSG_DISCOVER, ex.hint, [0; 4]);
             udp::send(BCAST, CLIENT_PORT, SERVER_PORT, &discover);
             ex.phase = Phase::Discover;
             ex.tries = 1;
@@ -250,7 +255,7 @@ fn step(ex: &mut Exchange) -> Step {
             }
             ex.tries += 1;
             kprintln!("[npk] DHCP: retry {}...", ex.tries);
-            let discover = build_dhcp(&ex.mac, MSG_DISCOVER, ex.hint, [0; 4]);
+            let discover = build_dhcp(&ex.mac, ex.xid, MSG_DISCOVER, ex.hint, [0; 4]);
             udp::send(BCAST, CLIENT_PORT, SERVER_PORT, &discover);
             ex.deadline = deadline_in(REPLY_WAIT_MS);
             Step::Continue
@@ -262,7 +267,7 @@ fn step(ex: &mut Exchange) -> Step {
                 return Step::Done;
             }
             ex.tries += 1;
-            let req = build_dhcp(&ex.mac, MSG_REQUEST, offer, server);
+            let req = build_dhcp(&ex.mac, ex.xid, MSG_REQUEST, offer, server);
             udp::send(BCAST, CLIENT_PORT, SERVER_PORT, &req);
             ex.deadline = deadline_in(REPLY_WAIT_MS);
             Step::Continue
@@ -337,14 +342,14 @@ pub fn run_blocking(max_ms: u64) -> bool {
     arp::our_ip() != [0, 0, 0, 0]
 }
 
-fn build_dhcp(mac: &[u8; 6], msg_type: u8, requested_ip: [u8; 4], server_ip: [u8; 4]) -> Vec<u8> {
+fn build_dhcp(mac: &[u8; 6], xid: u32, msg_type: u8, requested_ip: [u8; 4], server_ip: [u8; 4]) -> Vec<u8> {
     let mut pkt = alloc::vec![0u8; 300];
 
     pkt[0] = 1;      // op: BOOTREQUEST
     pkt[1] = 1;      // htype: Ethernet
     pkt[2] = 6;      // hlen: MAC length
     pkt[3] = 0;      // hops
-    pkt[4..8].copy_from_slice(&0xDEADBEEFu32.to_be_bytes()); // xid
+    pkt[4..8].copy_from_slice(&xid.to_be_bytes());
     // secs, flags at 8..12 = 0
     // ciaddr at 12..16 = 0
     // yiaddr at 16..20 = 0
@@ -390,9 +395,15 @@ fn build_dhcp(mac: &[u8; 6], msg_type: u8, requested_ip: [u8; 4], server_ip: [u8
     pkt
 }
 
-fn parse_dhcp_reply(data: &[u8], expected_type: u8) -> Option<([u8; 4], [u8; 4])> {
+fn parse_dhcp_reply(data: &[u8], xid: u32, mac: &[u8; 6], expected_type: u8)
+    -> Option<([u8; 4], [u8; 4])>
+{
     if data.len() < 240 { return None; }
     if data[0] != 2 { return None; } // not BOOTREPLY
+    // Another client's reply (a server may broadcast it): RFC 2131 4.4.5,
+    // Linux `ic_bootp_recv` checks xid, htype, hlen and chaddr.
+    if data[1] != 1 || data[2] != 6 { return None; }
+    if data[4..8] != xid.to_be_bytes() || data[28..34] != mac[..] { return None; }
 
     // Check magic cookie
     if data[236..240] != DHCP_MAGIC { return None; }

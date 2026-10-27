@@ -604,7 +604,20 @@ struct TcpConn {
     /// The owner has let go (`close`). Until then a Closed slot still
     /// belongs to whoever holds the handle and is not reused under it.
     released: bool,
+    /// Who holds the handle: `KERNEL`, or a module's pid.
+    owner: Owner,
 }
+
+/// Who holds a connection: the kernel itself, or a module by its pid.
+pub type Owner = u32;
+pub const KERNEL: Owner = 0;
+
+/// Slots only the kernel's own connections may take, so the update path can
+/// still connect while modules hold the rest.
+const KERNEL_RESERVE: usize = 16;
+/// Connections one module may hold at once (Linux bounds a process's
+/// sockets by `RLIMIT_NOFILE`).
+const PER_OWNER_MAX: usize = 32;
 
 static CONNECTIONS: Mutex<[Option<TcpConn>; MAX_CONNECTIONS]> = Mutex::new(
     [const { None }; MAX_CONNECTIONS]
@@ -639,6 +652,13 @@ fn alloc_port() -> u16 {
 /// sees the answer. Sending it to broadcast meanwhile is what most gateways
 /// drop.
 pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
+    connect_start_as(KERNEL, remote_ip, remote_port)
+}
+
+/// `connect_start` on behalf of `owner`. A module's handle is only an index,
+/// so its slot is never reused until the module released it (`close`, or
+/// its exit), and one module cannot take the table.
+pub fn connect_start_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
     let local_port = alloc_port();
     let iss = generate_isn(arp::our_ip(), remote_ip, local_port, remote_port);
 
@@ -704,6 +724,7 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
         arp_pending,
         arp_tries: 1,
         released: false,
+        owner,
     };
 
     // Find free slot
@@ -718,14 +739,21 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
         // exhausted) is not reused at once: the owner's next `close` or
         // `recv` would hit the new connection. Only after FIN_TIMEOUT_TICKS
         // of silence, so an owner that never closes cannot starve the table.
+        //
+        // A module's handle carries no generation, so its unreleased slot is
+        // never reclaimed: a stale index must not reach the next connection.
         let now = crate::interrupts::ticks();
+        let reusable = |c: &Option<TcpConn>| c.as_ref().is_none_or(|x| reusable_conn(x, now));
+        if owner != KERNEL {
+            let held = conns.iter().flatten().filter(|c| c.owner == owner && !reusable_conn(c, now)).count();
+            let room = conns.iter().filter(|c| reusable(c)).count();
+            if held >= PER_OWNER_MAX || room <= KERNEL_RESERVE {
+                return Err(TcpError::TooManyConnections);
+            }
+        }
         let slot = conns.iter()
             .position(|c| c.is_none())
-            .or_else(|| conns.iter()
-                .position(|c| matches!(c, Some(x) if x.state == State::Closed && x.released)))
-            .or_else(|| conns.iter()
-                .position(|c| matches!(c, Some(x) if x.state == State::Closed
-                    && now.saturating_sub(x.last_send_tick) > FIN_TIMEOUT_TICKS)))
+            .or_else(|| conns.iter().position(|c| c.is_some() && reusable(c)))
             .ok_or(TcpError::TooManyConnections)?;
         conns[slot] = Some(conn);
         slot
@@ -870,6 +898,7 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         arp_pending: false,
         arp_tries: 0,
         released: false,
+        owner: KERNEL,
     };
 
     let mut conns = CONNECTIONS.lock();
@@ -976,6 +1005,7 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         arp_pending: false,
         arp_tries: 0,
         released: false,
+        owner: KERNEL,
     };
     Ok(())
 }
@@ -2375,17 +2405,26 @@ fn ack_in_range(una: u32, ack: u32, nxt: u32) -> bool {
     diff_una > 0 && diff_una <= diff_nxt
 }
 
+/// Whether a held slot could be taken by the next connect.
+fn reusable_conn(c: &TcpConn, now: u64) -> bool {
+    c.state == State::Closed && (c.released
+        || (c.owner == KERNEL && now.saturating_sub(c.last_send_tick) > FIN_TIMEOUT_TICKS))
+}
+
 fn close_cleanup(handle: usize) {
     CONNECTIONS.lock()[handle] = None;
 }
 
 /// Does any connection run a timer (retransmit, delayed ACK, SYN retry,
-/// TIME_WAIT, FIN timeout)? Listening and closed sockets have none. The
-/// shell loop drives `tick_connections` and must keep coming back while
-/// this holds.
+/// TIME_WAIT, FIN timeout)? The shell loop drives `tick_connections` and
+/// must keep coming back while this holds. As in Linux, an idle established
+/// connection has none: only data in flight or unsent, or an ACK held back.
 pub fn has_timers() -> bool {
-    CONNECTIONS.lock().iter().flatten()
-        .any(|c| !matches!(c.state, State::Closed | State::Listen))
+    CONNECTIONS.lock().iter().flatten().any(|c| match c.state {
+        State::Closed | State::Listen => false,
+        State::Established | State::CloseWait => c.ack_pending || !c.send_buf.is_empty(),
+        _ => true,
+    })
 }
 
 pub fn list_connections() -> alloc::vec::Vec<(u16, [u8; 4], u16, &'static str)> {

@@ -205,7 +205,7 @@ fn log(msg: &str) { host::log_serial(msg); }
 // for a large file; a larger event gets its own (`events::poll`).
 const EVENT_BUF_SIZE: usize = 512 * 1024;
 
-// Scratch for npk_fetch (open) — same ceiling as the edit buffer.
+// First scratch size for npk_fetch (open); it doubles until the file fits.
 const FETCH_BUF_SIZE: usize = 512 * 1024;
 
 // Pre-allocate the document so ordinary edits stay within capacity.
@@ -616,11 +616,21 @@ fn pick(mode: host::PickMode, start: &str, suggest: &str, tag: u32) {
 }
 
 /// Fetch a file's contents as a String, or None on error / non-UTF-8.
+/// `npk_fetch` cuts at the buffer's end without saying so (#121): a full
+/// buffer means the file may be longer, so it is read again with a larger
+/// one. A cut document must never be opened, or Ctrl+S writes it back cut.
 fn read_file(path: &str) -> Option<String> {
-    let mut buf = alloc::vec![0u8; FETCH_BUF_SIZE];
-    let n = host::fetch(path, &mut buf)?;
-    if n == 0 { return None; }
-    core::str::from_utf8(&buf[..n]).ok().map(|s| s.to_string())
+    let mut size = FETCH_BUF_SIZE;
+    loop {
+        let mut buf = alloc::vec![0u8; size];
+        let n = host::fetch(path, &mut buf)?;
+        if n == 0 { return None; }
+        if n < size {
+            buf.truncate(n);
+            return String::from_utf8(buf).ok();
+        }
+        size = size.checked_mul(2)?;
+    }
 }
 
 // ── Config ────────────────────────────────────────────────────────────

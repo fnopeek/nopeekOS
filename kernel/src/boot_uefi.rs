@@ -250,7 +250,7 @@ pub struct EfiGraphicsOutputProtocol {
 // BootInfo / MemoryRegion live in `crate::boot_info` — same types the
 // kernel proper sees. The UEFI stub populates them before
 // ExitBootServices; everything downstream is firmware-independent.
-use crate::boot_info::{BootInfo, MemoryRegion, MAX_MEMORY_REGIONS};
+use crate::boot_info::{BootInfo, MemoryRegion};
 
 // ── COM1 raw debug print (survives ExitBootServices) ───────────────
 
@@ -363,37 +363,95 @@ unsafe fn locate_gop(bs: *mut EfiBootServices) -> Option<&'static EfiGraphicsOut
 
 // ── Memory map collection ──────────────────────────────────────────
 //
-// UEFI GetMemoryMap is "tell me how big a buffer to give you" + "now
-// fill it". The buffer must come from AllocatePool because the map
-// can change between calls. After ExitBootServices we have no
-// allocator — but we copy regions into the static BootInfo.regions
-// array before exiting, so it's fine.
+// As Linux `efi_get_memory_map`: ask for the size, allocate the buffer with
+// spare slots for the descriptors the allocation itself adds, then fetch.
+// Both pools are EfiLoaderData, which survives ExitBootServices untouched,
+// so the region list is handed to the kernel in place.
 
-#[repr(C, align(8))]
-struct MmapBuf([u8; 16 * 1024]);
-static mut MMAP_SCRATCH: MmapBuf = MmapBuf([0; 16 * 1024]);
+/// Spare descriptors (Linux `EFI_MMAP_NR_SLACK_SLOTS`).
+const MMAP_SLACK_SLOTS: usize = 32;
 
-/// Fill `BOOT_INFO.regions` from the UEFI memory map. Also returns
+struct MmapBufs {
+    descs: *mut EfiMemoryDescriptor,
+    descs_size: Uintn,
+    regions: *mut MemoryRegion,
+    regions_cap: usize,
+}
+
+static mut MMAP_BUFS: MmapBufs = MmapBufs {
+    descs: core::ptr::null_mut(), descs_size: 0,
+    regions: core::ptr::null_mut(), regions_cap: 0,
+};
+
+/// Allocate the descriptor buffer and the region list. Must run before
+/// `collect_memory_map`, since allocating changes the map.
+unsafe fn alloc_memory_map(bs: *mut EfiBootServices) -> bool {
+    let mut map_size: Uintn = 0;
+    let mut map_key: Uintn = 0;
+    let mut desc_size: Uintn = 0;
+    let mut desc_version: u32 = 0;
+    // SAFETY: bs is the firmware's boot services table, before
+    // ExitBootServices; a zero size with no buffer only asks for the size.
+    let status = unsafe {
+        ((*bs).get_memory_map)(&mut map_size, core::ptr::null_mut(), &mut map_key,
+            &mut desc_size, &mut desc_version)
+    };
+    if status != EFI_BUFFER_TOO_SMALL || desc_size < core::mem::size_of::<EfiMemoryDescriptor>() {
+        // SAFETY: com1_print and com1_hex64 only write the UART data ports.
+        unsafe {
+            com1_print(b"[uefi] GetMemoryMap size query failed: ");
+            com1_hex64(status as u64);
+            com1_print(b"\n");
+        }
+        return false;
+    }
+    let descs_size = map_size + MMAP_SLACK_SLOTS * desc_size;
+    let regions_cap = descs_size / desc_size;
+    let mut descs: *mut c_void = core::ptr::null_mut();
+    let mut regions: *mut c_void = core::ptr::null_mut();
+    // SAFETY: bs is valid before ExitBootServices; AllocatePool writes the
+    // buffer address into the out pointers.
+    let ok = unsafe {
+        ((*bs).allocate_pool)(EFI_LOADER_DATA_POOL, descs_size, &mut descs) == EFI_SUCCESS
+            && ((*bs).allocate_pool)(EFI_LOADER_DATA_POOL,
+                regions_cap * core::mem::size_of::<MemoryRegion>(), &mut regions) == EFI_SUCCESS
+    };
+    if !ok {
+        // SAFETY: com1_print only writes the UART data port.
+        unsafe { com1_print(b"[uefi] AllocatePool for the memory map failed\n"); }
+        return false;
+    }
+    // SAFETY: MMAP_BUFS is only touched by the boot core inside efi_main.
+    unsafe {
+        MMAP_BUFS = MmapBufs {
+            descs: descs as *mut EfiMemoryDescriptor, descs_size,
+            regions: regions as *mut MemoryRegion, regions_cap,
+        };
+    }
+    true
+}
+
+/// Fill `BOOT_INFO`'s region list from the UEFI memory map. Also returns
 /// the `map_key` that must be passed to `ExitBootServices`. The map
 /// changes when any allocator call runs between this and ExitBootServices,
 /// so the caller must invoke them in the right order (we don't do any
 /// allocation after this).
 unsafe fn collect_memory_map(bs: *mut EfiBootServices) -> Uintn {
-    // SAFETY: only a raw pointer to MMAP_SCRATCH is taken, no reference; the
-    // boot core is the only one running.
-    let buf_ptr = unsafe { &raw mut MMAP_SCRATCH.0 } as *mut EfiMemoryDescriptor;
-    let mut map_size: Uintn = 16 * 1024;
+    // SAFETY: MMAP_BUFS is only touched by the boot core inside efi_main.
+    let bufs = unsafe { &*(&raw const MMAP_BUFS) };
+    if bufs.descs.is_null() { return 0; }
+    let mut map_size: Uintn = bufs.descs_size;
     let mut map_key: Uintn = 0;
     let mut desc_size: Uintn = 0;
     let mut desc_version: u32 = 0;
 
     // SAFETY: bs is the firmware's boot services table, still callable here
-    // (also after a failed ExitBootServices); buf_ptr points at MMAP_SCRATCH,
-    // whose 16 KiB map_size announces.
+    // (also after a failed ExitBootServices); descs is the pool of
+    // descs_size bytes that map_size announces.
     let status = unsafe {
         ((*bs).get_memory_map)(
             &mut map_size,
-            buf_ptr,
+            bufs.descs,
             &mut map_key,
             &mut desc_size,
             &mut desc_version,
@@ -419,48 +477,40 @@ unsafe fn collect_memory_map(bs: *mut EfiBootServices) -> Uintn {
         unsafe { com1_print(b"[uefi] memory map descriptor size too small\n"); }
         return 0;
     }
-    let n = map_size.min(core::mem::size_of::<MmapBuf>()) / desc_size;
-    let buf_bytes = buf_ptr as *const u8;
-    let mut stored = 0u32;
+    let n = (map_size.min(bufs.descs_size) / desc_size).min(bufs.regions_cap);
+    let buf_bytes = bufs.descs as *const u8;
     for i in 0..n {
         // SAFETY: entry `i` starts at `i * desc_size` and its descriptor-sized
-        // prefix lies inside the `map_size` bytes the firmware filled in
-        // MMAP_SCRATCH (`n` stops before a partial entry). The stride need not
-        // be a multiple of the alignment, hence the unaligned read.
+        // prefix lies inside the `map_size` bytes the firmware filled in the
+        // pool (`n` stops before a partial entry). The stride need not be a
+        // multiple of the alignment, hence the unaligned read.
         let d = unsafe { core::ptr::read_unaligned(buf_bytes.add(i * desc_size) as *const EfiMemoryDescriptor) };
-        let d = &d;
-        if (stored as usize) < MAX_MEMORY_REGIONS {
-            // SAFETY: BOOT_INFO is only touched by the boot core inside
-            // efi_main, before any other core runs and before kernel_main gets
-            // a reference to it. stored is below MAX_MEMORY_REGIONS.
-            unsafe {
-                BOOT_INFO.regions[stored as usize] = MemoryRegion {
-                    physical_start: d.physical_start,
-                    page_count: d.number_of_pages,
-                    uefi_type: d.r#type,
-                };
-            }
-            stored += 1;
+        // SAFETY: regions holds regions_cap entries and i < n <= regions_cap.
+        unsafe {
+            bufs.regions.add(i).write(MemoryRegion {
+                physical_start: d.physical_start,
+                page_count: d.number_of_pages,
+                uefi_type: d.r#type,
+            });
         }
     }
     // SAFETY: BOOT_INFO is only touched by the boot core inside efi_main,
     // before any other core runs and before kernel_main gets a reference to it.
-    unsafe { BOOT_INFO.region_count = stored };
+    unsafe {
+        BOOT_INFO.regions_ptr = bufs.regions;
+        BOOT_INFO.region_count = n as u32;
+    }
     map_key
 }
 
 /// Diagnostic dump of usable / total memory from the populated
-/// BOOT_INFO.regions[].
+/// BOOT_INFO region list.
 unsafe fn print_mem_summary() {
     let mut usable_pages: u64 = 0;
     let mut total_pages: u64 = 0;
     // SAFETY: BOOT_INFO is only touched by the boot core inside efi_main,
     // before any other core runs and before kernel_main gets a reference to it.
-    for i in 0..unsafe { BOOT_INFO.region_count } {
-        // SAFETY: BOOT_INFO is only touched by the boot core inside efi_main,
-        // before any other core runs and before kernel_main gets a reference to
-        // it. i is below region_count, which never exceeds MAX_MEMORY_REGIONS.
-        let r = unsafe { &BOOT_INFO.regions[i as usize] };
+    for r in unsafe { (*(&raw const BOOT_INFO)).regions() } {
         total_pages += r.page_count;
         match r.uefi_type {
             EFI_CONVENTIONAL_MEMORY | EFI_LOADER_CODE | EFI_LOADER_DATA
@@ -542,7 +592,16 @@ pub unsafe extern "efiapi" fn efi_main(
     }
 
     // 3. Memory map — this is also the last UEFI call before
-    // ExitBootServices; map_key must come from this snapshot.
+    // ExitBootServices; map_key must come from this snapshot. The buffers
+    // are allocated first, since allocating changes the map.
+    // SAFETY: bs is still valid before ExitBootServices.
+    if !unsafe { alloc_memory_map(bs) } {
+        // SAFETY: com1_print only writes the UART data port; cli/hlt stops.
+        unsafe {
+            com1_print(b"[uefi] no memory map, halting.\n");
+            loop { core::arch::asm!("cli; hlt") }
+        }
+    }
     // SAFETY: bs is still valid, and nothing allocates between this snapshot
     // and ExitBootServices, so map_key stays current.
     let map_key = unsafe { collect_memory_map(bs) };

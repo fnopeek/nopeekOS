@@ -218,8 +218,103 @@ pub fn mark_active() {
 /// never alias a host-originated connection (OTA `update`, `https`).
 const L3_PORT_LO: u16 = 20000;
 const L3_PORT_HI: u16 = 40000;
-const L3_TCP_IDLE_TICKS: u64 = 12_000; // ~2 min  (~100 ticks/s)
-const L3_UDP_IDLE_TICKS: u64 = 3_000;  // ~30 s
+
+// ── Connection tracking for the mappings ──────────────────────────────
+//
+// A mapping lives as long as its flow, as in Linux conntrack: the TCP state
+// machine and timeouts of `nf_conntrack_proto_tcp.c` (`tcp_conntracks`,
+// `tcp_timeouts`), UDP 30 s unreplied and 120 s replied
+// (`nf_conntrack_proto_udp.c`), ICMP 30 s (`nf_conntrack_proto_icmp.c`).
+// Ticks are 10 ms.
+
+const SECS: u64 = 100;
+const MINS: u64 = 60 * SECS;
+
+// TCP conntrack states, in Linux's order.
+const S_NO: u8 = 0;
+const S_SS: u8 = 1;
+const S_SR: u8 = 2;
+const S_ES: u8 = 3;
+const S_FW: u8 = 4;
+const S_CW: u8 = 5;
+const S_LA: u8 = 6;
+const S_TW: u8 = 7;
+const S_CL: u8 = 8;
+const S_S2: u8 = 9;
+/// Invalid or ignored for the state machine: the state and its timer stay.
+const S_IV: u8 = 0xFF;
+const S_IG: u8 = 0xFE;
+
+const TCP_TIMEOUTS: [u64; 10] = [
+    0,              // NONE
+    2 * MINS,       // SYN_SENT
+    60 * SECS,      // SYN_RECV
+    5 * 24 * 60 * MINS, // ESTABLISHED
+    2 * MINS,       // FIN_WAIT
+    60 * SECS,      // CLOSE_WAIT
+    30 * SECS,      // LAST_ACK
+    2 * MINS,       // TIME_WAIT
+    10 * SECS,      // CLOSE
+    2 * MINS,       // SYN_SENT2
+];
+const UDP_UNREPLIED: u64 = 30 * SECS;
+const UDP_REPLIED: u64 = 120 * SECS;
+const ICMP_TIMEOUT: u64 = 30 * SECS;
+
+/// `tcp_conntracks[direction][index][state]`.
+const TCP_CONNTRACKS: [[[u8; 10]; 6]; 2] = [
+    [ // ORIGINAL
+        //  sNO   sSS   sSR   sES   sFW   sCW   sLA   sTW   sCL   sS2
+        [S_SS, S_SS, S_IG, S_IG, S_IG, S_IG, S_IG, S_SS, S_SS, S_S2], // syn
+        [S_IV, S_IV, S_SR, S_IV, S_IV, S_IV, S_IV, S_IV, S_IV, S_SR], // synack
+        [S_IV, S_IV, S_FW, S_FW, S_LA, S_LA, S_LA, S_TW, S_CL, S_IV], // fin
+        [S_ES, S_IV, S_ES, S_ES, S_CW, S_CW, S_TW, S_TW, S_CL, S_IV], // ack
+        [S_IV, S_CL, S_CL, S_CL, S_CL, S_CL, S_CL, S_CL, S_CL, S_CL], // rst
+        [S_IV; 10],                                                   // none
+    ],
+    [ // REPLY
+        [S_IV, S_S2, S_IV, S_IV, S_IV, S_IV, S_IV, S_SS, S_IV, S_S2], // syn
+        [S_IV, S_SR, S_IG, S_IG, S_IG, S_IG, S_IG, S_IG, S_IG, S_SR], // synack
+        [S_IV, S_IV, S_FW, S_FW, S_LA, S_LA, S_LA, S_TW, S_CL, S_IV], // fin
+        [S_IV, S_IG, S_SR, S_ES, S_CW, S_CW, S_TW, S_TW, S_CL, S_IG], // ack
+        [S_IV, S_CL, S_CL, S_CL, S_CL, S_CL, S_CL, S_CL, S_CL, S_CL], // rst
+        [S_IV; 10],                                                   // none
+    ],
+];
+
+/// `get_conntrack_index`.
+fn conntrack_index(flags: u8) -> usize {
+    const TCP_ACK: u8 = 0x10;
+    if flags & TCP_RST != 0 { 4 }
+    else if flags & TCP_SYN != 0 { if flags & TCP_ACK != 0 { 1 } else { 0 } }
+    else if flags & TCP_FIN != 0 { 2 }
+    else if flags & TCP_ACK != 0 { 3 }
+    else { 5 }
+}
+
+const DIR_ORIGINAL: usize = 0;
+const DIR_REPLY: usize = 1;
+
+impl L3Map {
+    /// A packet of this flow went by in `dir`: step the state and re-arm the
+    /// timeout (`nf_conntrack_tcp_packet`, `udp_packet`, `icmp_packet`).
+    fn track(&mut self, dir: usize, tcp_flags: u8, now: u64) {
+        let timeout = match self.proto {
+            PROTO_TCP => {
+                let next = TCP_CONNTRACKS[dir][conntrack_index(tcp_flags)][self.ct as usize];
+                if next == S_IV || next == S_IG { return; }
+                self.ct = next;
+                TCP_TIMEOUTS[next as usize]
+            }
+            PROTO_UDP => {
+                if dir == DIR_REPLY { self.ct = 1; }
+                if self.ct == 0 { UDP_UNREPLIED } else { UDP_REPLIED }
+            }
+            _ => ICMP_TIMEOUT,
+        };
+        self.expires = now.saturating_add(timeout);
+    }
+}
 
 #[derive(Clone, Copy)]
 struct L3Map {
@@ -234,7 +329,10 @@ struct L3Map {
     /// the address the replies carry.
     host_ip: [u8; 4],
     host_port: u16,
-    last_tick: u64,
+    /// TCP: the conntrack state (`S_*`); UDP: 1 once the far end replied.
+    ct: u8,
+    /// Tick at which the mapping is reaped.
+    expires: u64,
 }
 
 /// Masquerade table plus a bit per host port in `[L3_PORT_LO, L3_PORT_HI)`
@@ -443,7 +541,8 @@ fn note_table_full() {
 
 /// Find an existing mapping for this guest flow or allocate one.
 /// Returns the masquerade host port.
-fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Option<u16> {
+fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, tcp_flags: u8,
+              now: u64) -> Option<u16> {
     let our_ip = crate::net::arp::our_ip();
     let mut tbl = L3.lock();
     // Existing? A hit whose `host_ip` is no longer ours describes a flow the
@@ -453,7 +552,7 @@ fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Opti
     if let Some(i) = tbl.find_flow(proto, gport, rip, rport) {
         if let Some(m) = tbl.maps[i].as_mut() {
             if m.host_ip == our_ip {
-                m.last_tick = now;
+                m.track(DIR_ORIGINAL, tcp_flags, now);
                 return Some(m.host_port);
             }
         }
@@ -476,9 +575,14 @@ fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Opti
     }
     let hp = hp?;
     let slot = tbl.alloc_slot()?;
-    tbl.insert(slot, L3Map { proto, guest_port: gport, remote_ip: rip,
-                             remote_port: rport, host_ip: our_ip,
-                             host_port: hp, last_tick: now });
+    // A flow picked up without its SYN starts as established, as
+    // conntrack does with `nf_conntrack_tcp_loose` (Linux's default).
+    let ct = if proto == PROTO_TCP && tcp_flags & TCP_SYN == 0 { S_ES } else { S_NO };
+    let mut m = L3Map { proto, guest_port: gport, remote_ip: rip, remote_port: rport,
+                        host_ip: our_ip, host_port: hp, ct, expires: now };
+    if ct == S_ES { m.expires = now.saturating_add(TCP_TIMEOUTS[S_ES as usize]); }
+    else { m.track(DIR_ORIGINAL, tcp_flags, now); }
+    tbl.insert(slot, m);
     // New flow — count by transport (UDP-heavy cold load = QUIC/HTTP-3).
     match proto {
         PROTO_TCP => { NS_TCP_FLOWS.fetch_add(1, AtOrd::Relaxed); }
@@ -491,7 +595,7 @@ fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Opti
 /// Reverse lookup for an inbound reply: (proto, host_port) + remote
 /// must match. Returns the guest port to deliver to.
 fn l3_map_in(proto: u8, dst_ip: [u8; 4], hport: u16, rip: [u8; 4], rport: u16,
-             now: u64) -> Option<u16> {
+             tcp_flags: u8, now: u64) -> Option<u16> {
     if !(L3_PORT_LO..L3_PORT_HI).contains(&hport) { return None; }
     let mut tbl = L3.lock();
     let slot = tbl.by_port[(hport - L3_PORT_LO) as usize];
@@ -500,19 +604,10 @@ fn l3_map_in(proto: u8, dst_ip: [u8; 4], hport: u16, rip: [u8; 4], rport: u16,
     if m.proto == proto && m.host_ip == dst_ip
         && m.remote_ip == rip && m.remote_port == rport
     {
-        m.last_tick = now;
+        m.track(DIR_REPLY, tcp_flags, now);
         return Some(m.guest_port);
     }
     None
-}
-
-/// UDP checksum over the IPv4 pseudo-header + datagram (RFC 768). A computed
-/// zero goes on the wire as 0xFFFF, because zero is the "no checksum" escape and
-/// would undo the whole point.
-fn udp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], udp: &[u8]) -> u16 {
-    use crate::net::csum;
-    let c = !csum::fold(csum::pseudo(src_ip, dst_ip, PROTO_UDP, udp.len()) + csum::sum(udp));
-    if c == 0 { 0xFFFF } else { c }
 }
 
 /// Incremental ones-complement checksum update (RFC 1624). Adjust an existing
@@ -689,7 +784,8 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
         return None;
     }
     let now = crate::interrupts::ticks();
-    let hp = match l3_map_out(proto, src_port, dst_ip, dst_port, now) {
+    let tcp_flags = if proto == PROTO_TCP && l4.len() >= TCP_HDR_LEN { l4[13] } else { 0 };
+    let hp = match l3_map_out(proto, src_port, dst_ip, dst_port, tcp_flags, now) {
         Some(p) => p,
         None => { note_table_full(); return None; }
     };
@@ -1187,7 +1283,7 @@ fn l3_icmp_outbound(dst_ip: [u8; 4], l4: &[u8]) -> Option<Vec<u8>> {
     }
     let guest_id = u16::from_be_bytes([l4[4], l4[5]]);
     let now = crate::interrupts::ticks();
-    let hp = l3_map_out(PROTO_ICMP, guest_id, dst_ip, 0, now)?;
+    let hp = l3_map_out(PROTO_ICMP, guest_id, dst_ip, 0, 0, now)?;
     let mut seg = l4.to_vec();
     seg[4..6].copy_from_slice(&hp.to_be_bytes()); // id → masquerade id
     fix_icmp_checksum(&mut seg);
@@ -1579,7 +1675,8 @@ pub fn tap_inbound(ip: &[u8], csum_ok: bool) -> bool {
         (u16::from_be_bytes([l4[0], l4[1]]), u16::from_be_bytes([l4[2], l4[3]]))
     };
     let now = crate::interrupts::ticks();
-    let gport = match l3_map_in(proto, dst_ip, host_port, src_ip, remote_port, now) {
+    let tcp_flags = if proto == PROTO_TCP && l4.len() >= TCP_HDR_LEN { l4[13] } else { 0 };
+    let gport = match l3_map_in(proto, dst_ip, host_port, src_ip, remote_port, tcp_flags, now) {
         Some(g) => g,
         None => {
             // Not ours by the mapping. A TCP port inside our masquerade range is
@@ -1676,15 +1773,12 @@ pub fn housekeep() {
 static LAST_REAP: AtomicU64 = AtomicU64::new(0);
 const REAP_EVERY_TICKS: u64 = 100;
 
-/// Drop idle mappings so the table can't fill over a long session.
+/// Drop mappings whose flow timed out (conntrack's `gc_worker`).
 fn l3_reap(now: u64) {
     let mut tbl = L3.lock();
     for i in 0..tbl.maps.len() {
         let Some(m) = tbl.maps[i].as_ref() else { continue };
-        let idle = now.wrapping_sub(m.last_tick);
-        let max = if m.proto == PROTO_TCP { L3_TCP_IDLE_TICKS }
-                  else { L3_UDP_IDLE_TICKS };
-        if idle > max { tbl.release(i); }
+        if now >= m.expires { tbl.release(i); }
     }
 }
 

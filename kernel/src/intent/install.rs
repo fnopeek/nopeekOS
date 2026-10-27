@@ -11,9 +11,6 @@ use alloc::vec::Vec;
 
 const MODULE_HOST: &str = "raw.githubusercontent.com";
 const MODULE_BASE: &str = "/fnopeek/nopeekOS/main/release/modules";
-const MAX_MODULE_SIZE: usize = 16 * 1024 * 1024; // 16 MB (buffer is min(content_length, cap), so no waste)
-const MAX_MANIFEST_SIZE: usize = 8192;
-const MAX_FIRMWARE_SIZE: usize = 4 * 1024 * 1024;
 
 /// Where a module's firmware lives; module writes are refused there
 /// (`wasm::is_trust_critical_path`).
@@ -47,7 +44,7 @@ fn parse_firmware(val: &str) -> Option<FirmwareEntry> {
     let path = it.next()?;
     let size = it.next()?.parse::<usize>().ok()?;
     let sha384 = hex_to_bytes48(it.next()?).ok()?;
-    if it.next().is_some() || !safe_firmware_path(path) || size == 0 || size > MAX_FIRMWARE_SIZE {
+    if it.next().is_some() || !safe_firmware_path(path) || size == 0 {
         return None;
     }
     Some(FirmwareEntry { path: String::from(path), size, sha384 })
@@ -120,7 +117,7 @@ fn parse_manifest(data: &[u8]) -> Result<Vec<ModuleEntry>, &'static str> {
 
 fn fetch_module_manifest() -> Result<Vec<u8>, String> {
     let manifest_path = alloc::format!("{}/manifest", MODULE_BASE);
-    super::update::fetch_manifest(MODULE_HOST, &manifest_path, MAX_MANIFEST_SIZE,
+    super::update::fetch_manifest(MODULE_HOST, &manifest_path,
         super::update::ManifestKind::Modules)
 }
 
@@ -243,11 +240,9 @@ pub fn intent_install(args: &str) {
 
     // Download module
     let wasm_path = super::update::blob_path(&entry.sha384);
-    // Bound the fetch by the manifest's own size rather than a fixed cap, so
-    // a growing module is never silently truncated.
-    if entry.size == 0 || entry.size > MAX_MODULE_SIZE {
-        kprintln!("[npk] Refusing implausible module size: {} bytes (max {})",
-            entry.size, MAX_MODULE_SIZE);
+    // The download is bounded by the size the signed manifest names.
+    if entry.size == 0 {
+        kprintln!("[npk] Refusing an empty module");
         return;
     }
     let wasm_data = match super::http::https_get_resumable(MODULE_HOST, &wasm_path, entry.size) {
@@ -368,8 +363,8 @@ pub fn apply_module(p: &ModulePlan) -> bool {
         false
     };
 
-    if p.size == 0 || p.size > MAX_MODULE_SIZE {
-        return fail(format_args!("implausible size {} (max {})", p.size, MAX_MODULE_SIZE));
+    if p.size == 0 {
+        return fail(format_args!("empty module"));
     }
     let wasm_path = super::update::blob_path(&p.sha384);
     let wasm_data = match super::http::https_get_resumable(MODULE_HOST, &wasm_path, p.size) {

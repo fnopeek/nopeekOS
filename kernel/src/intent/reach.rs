@@ -17,7 +17,8 @@ pub enum Reach {
     /// This machine: 127/8 and the link-local addresses, where local
     /// services may listen.
     Local,
-    /// The user's network: 10/8, 172.16/12, 192.168/16, 100.64/10.
+    /// The user's network: 10/8, 172.16/12, 192.168/16, 100.64/10, the
+    /// other ranges RFC 6890 marks as not global, and the local link.
     Private,
     /// The open internet.
     Public,
@@ -42,8 +43,35 @@ pub fn classify_ip(ip: [u8; 4]) -> Reach {
         // Carrier-grade NAT (100.64/10): not routable on the open internet,
         // so treated like 10/8.
         [100, b, ..] if (64..=127).contains(&b) => Reach::Private,
+        // The rest of RFC 6890's "Global: False": IETF protocol assignments,
+        // the documentation nets, benchmarking, and the reserved 240/4.
+        [192, 0, 0, _] | [192, 0, 2, _] | [198, 51, 100, _] | [203, 0, 113, _] => Reach::Private,
+        [198, 18 | 19, ..] => Reach::Private,
+        [b, ..] if b >= 240 => Reach::Private,
         _ => Reach::Public,
     }
+}
+
+/// Whether `ip` names one host. A page must never make the kernel send to
+/// a group: multicast 224/4 and the limited broadcast (RFC 1122 3.2.1.3).
+pub fn is_unicast(ip: [u8; 4]) -> bool {
+    !(224..=239).contains(&ip[0]) && ip != [255, 255, 255, 255]
+}
+
+/// `classify_ip`, knowing our own link: a host on the local segment (inside
+/// `addr`/`mask`, or the gateway) is the user's network even when the network
+/// is numbered from public space.
+pub fn classify_on_link(ip: [u8; 4], addr: [u8; 4], mask: [u8; 4], gateway: [u8; 4]) -> Reach {
+    let c = classify_ip(ip);
+    let on_link = addr != [0; 4] && mask != [0; 4]
+        && (0..4).all(|i| ip[i] & mask[i] == addr[i] & mask[i]);
+    if on_link || (gateway != [0; 4] && ip == gateway) { c.min(Reach::Private) } else { c }
+}
+
+/// The directed broadcast of our own subnet, which `is_unicast` cannot see.
+pub fn is_subnet_broadcast(ip: [u8; 4], addr: [u8; 4], mask: [u8; 4]) -> bool {
+    addr != [0; 4] && mask != [0; 4] && mask != [255; 4]
+        && (0..4).all(|i| ip[i] == addr[i] & mask[i] | !mask[i])
 }
 
 /// May a document of class `from` reach an address of class `to`?
@@ -109,6 +137,36 @@ mod tests {
     fn the_router_page_may_load_its_own_assets() {
         assert!(allows(Reach::Private, Reach::Private));
         assert!(allows(Reach::Local, Reach::Local));
+    }
+
+    #[test]
+    fn the_rfc6890_non_global_ranges_are_private() {
+        for ip in [[192, 0, 0, 9], [192, 0, 2, 1], [198, 18, 0, 1], [198, 19, 255, 1],
+                   [198, 51, 100, 7], [203, 0, 113, 7], [240, 0, 0, 1]] {
+            assert_eq!(classify_ip(ip), Reach::Private, "{ip:?}");
+        }
+        for ip in [[198, 17, 0, 1], [198, 20, 0, 1], [192, 0, 1, 1], [192, 88, 99, 1]] {
+            assert_eq!(classify_ip(ip), Reach::Public, "{ip:?}");
+        }
+    }
+
+    #[test]
+    fn groups_are_not_unicast() {
+        assert!(!is_unicast([255, 255, 255, 255]));
+        assert!(!is_unicast([224, 0, 0, 251]));
+        assert!(!is_unicast([239, 255, 255, 250]));
+        assert!(is_unicast([8, 8, 8, 8]));
+        assert!(is_subnet_broadcast([192, 168, 1, 255], [192, 168, 1, 7], [255, 255, 255, 0]));
+        assert!(!is_subnet_broadcast([192, 168, 1, 254], [192, 168, 1, 7], [255, 255, 255, 0]));
+    }
+
+    /// A LAN numbered from public space is still the user's network.
+    #[test]
+    fn a_public_lan_is_private() {
+        let (addr, mask, gw) = ([130, 59, 10, 20], [255, 255, 255, 0], [130, 59, 10, 1]);
+        assert_eq!(classify_on_link([130, 59, 10, 77], addr, mask, gw), Reach::Private);
+        assert_eq!(classify_on_link([130, 59, 11, 77], addr, mask, gw), Reach::Public);
+        assert_eq!(classify_on_link([127, 0, 0, 1], addr, mask, gw), Reach::Local);
     }
 
     /// The ordering carries the whole rule, so it is tested, not assumed.

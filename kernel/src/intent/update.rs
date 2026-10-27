@@ -32,8 +32,10 @@ pub(super) fn blob_path(sha384: &[u8; 48]) -> String {
 /// implausibly large. A fixed cap close to the real size would eventually
 /// truncate a grown kernel and leave the updater unable to install any fix.
 const MAX_KERNEL_SIZE: usize = 64 * 1024 * 1024;
-const MAX_MANIFEST_SIZE: usize = 4096;
-const MAX_ASSET_MANIFEST_SIZE: usize = 16 * 1024;
+/// Bound on any signed manifest, read before its signature is checked. Far
+/// above what a release needs; one byte more is refused by name, never cut
+/// into a "signature invalid".
+const MAX_MANIFEST_SIZE: usize = 1024 * 1024;
 /// 1 GiB ceiling for OTA assets. The download streams into npkFS one chunk
 /// at a time, so the cap bounds disk use, not RAM. raw-githubusercontent
 /// caps at ~50–100 MB per file, so large assets ship via GitHub Releases
@@ -121,10 +123,13 @@ const MANIFEST_SIG_TAG: &str = "nopeekOS-ota-manifest-v1";
 
 /// Fetch a release manifest and its detached signature, verify both and
 /// the `issued=` order. Returns the manifest bytes, now authenticated.
-pub(super) fn fetch_manifest(host: &str, path: &str, max: usize, kind: ManifestKind)
+pub(super) fn fetch_manifest(host: &str, path: &str, kind: ManifestKind)
     -> Result<Vec<u8>, String>
 {
-    let data = super::http::https_get(host, path, max).map_err(String::from)?;
+    let data = super::http::https_get(host, path, MAX_MANIFEST_SIZE + 1).map_err(String::from)?;
+    if data.len() > MAX_MANIFEST_SIZE {
+        return Err(alloc::format!("manifest larger than {} KiB — rejected", MAX_MANIFEST_SIZE / 1024));
+    }
     let sig_path = alloc::format!("{}.sig", path);
     let sig = super::http::https_get(host, &sig_path, MAX_SIG_SIZE)
         .map_err(|e| alloc::format!("signature: {}", e))?;
@@ -300,7 +305,7 @@ fn build_plan() -> Option<Plan> {
     kprintln!("[npk] update — {}{}", UPDATE_HOST, UPDATE_BASE);
 
     let manifest_path = alloc::format!("{}/manifest", UPDATE_BASE);
-    let manifest_data = match fetch_manifest(UPDATE_HOST, &manifest_path, MAX_MANIFEST_SIZE, ManifestKind::Kernel) {
+    let manifest_data = match fetch_manifest(UPDATE_HOST, &manifest_path, ManifestKind::Kernel) {
         Ok(d) => d,
         Err(e) => { kprintln!("[npk]   ! manifest: {}", e); return None; }
     };
@@ -491,7 +496,7 @@ struct AssetJob {
 /// returns the jobs to run and how many were already current.
 fn plan_assets() -> (Vec<AssetJob>, usize) {
     let manifest_path = alloc::format!("{}/assets/manifest", UPDATE_BASE);
-    let manifest_data = match fetch_manifest(UPDATE_HOST, &manifest_path, MAX_ASSET_MANIFEST_SIZE, ManifestKind::Assets) {
+    let manifest_data = match fetch_manifest(UPDATE_HOST, &manifest_path, ManifestKind::Assets) {
         Ok(d) => d,
         Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0); }
     };

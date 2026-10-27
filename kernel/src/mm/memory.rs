@@ -105,16 +105,20 @@ unsafe extern "C" {
 /// whether it was cut short. Answers one question: may a module map or
 /// read this physical address?
 struct FirmwareMap {
-    regions: [(u64, u64, u32); crate::boot_info::MAX_MEMORY_REGIONS],
-    count: usize,
-    truncated: bool,
+    regions: &'static [crate::boot_info::MemoryRegion],
+    /// Set once the map is in; until then only MMIO-typed regions pass.
+    complete: bool,
 }
 
 static FIRMWARE_MAP: Mutex<FirmwareMap> = Mutex::new(FirmwareMap {
-    regions: [(0, 0, 0); crate::boot_info::MAX_MEMORY_REGIONS],
-    count: 0,
-    truncated: true,
+    regions: &[],
+    complete: false,
 });
+
+/// `(base, length, uefi type)` of a firmware region.
+fn span(r: &crate::boot_info::MemoryRegion) -> (u64, u64, u32) {
+    (r.physical_start, r.page_count.saturating_mul(PAGE_SIZE as u64), r.uefi_type)
+}
 
 /// Memory types that hold RAM someone owns: the kernel image (loader code
 /// and data), the frames the kernel hands out (boot services, conventional),
@@ -141,11 +145,11 @@ pub fn is_device_window(addr: u64) -> bool {
     };
     if addr >= image_lo && addr < image_hi { return false; }
     let map = FIRMWARE_MAP.lock();
-    let found = map.regions[..map.count].iter()
+    let found = map.regions.iter().map(span)
         .find(|(b, l, _)| addr >= *b && addr < b.saturating_add(*l));
     match found {
-        Some(&(_, _, t)) => !is_ram_type(t),
-        None => !map.truncated,
+        Some((_, _, t)) => !is_ram_type(t),
+        None => map.complete,
     }
 }
 
@@ -161,8 +165,8 @@ pub fn is_firmware_device_region(base: u64, len: u64) -> bool {
     };
     if base < image_hi && image_lo < end { return false; }
     let map = FIRMWARE_MAP.lock();
-    map.regions[..map.count].iter()
-        .any(|&(b, l, t)| !is_ram_type(t) && base >= b && end <= b.saturating_add(l))
+    map.regions.iter().map(span)
+        .any(|(b, l, t)| !is_ram_type(t) && base >= b && end <= b.saturating_add(l))
 }
 
 pub fn init(boot_info: &crate::boot_info::BootInfo) {
@@ -194,13 +198,8 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
     // Keep the whole map while we still have it.
     {
         let mut m = FIRMWARE_MAP.lock();
-        let n = (boot_info.region_count as usize).min(m.regions.len());
-        for (dst, r) in m.regions.iter_mut().zip(&boot_info.regions[..n]) {
-            *dst = (r.physical_start, r.page_count * PAGE_SIZE as u64, r.uefi_type);
-        }
-        m.count = n;
-        // A full table may have lost descriptors at the stub.
-        m.truncated = n >= crate::boot_info::MAX_MEMORY_REGIONS;
+        m.regions = boot_info.regions();
+        m.complete = !m.regions.is_empty();
     }
 
     let free = alloc.free_count;
@@ -339,7 +338,7 @@ pub fn deallocate_contiguous(base: u64, count: usize) {
 /// (a type the allocator may hand out).
 pub fn firmware_ram_in(base: u64, length: u64) -> bool {
     let map = FIRMWARE_MAP.lock();
-    map.regions[..map.count].iter().any(|&(b, l, t)| {
+    map.regions.iter().map(span).any(|(b, l, t)| {
         is_ram_type(t) && b < base.saturating_add(length) && base < b.saturating_add(l)
     })
 }

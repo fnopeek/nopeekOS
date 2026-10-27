@@ -55,6 +55,15 @@ pub use image::{Image, ImageMap};
 pub use layout::{Layout, Rgb, Theme};
 pub use raster::Engine;
 
+/// `s` cut to at most `cap` bytes, at a character boundary: a byte cap on a
+/// `str` must never split a UTF-8 character (`String::truncate` panics there).
+pub fn clip(s: &str, cap: usize) -> &str {
+    if s.len() <= cap { return s }
+    let mut n = cap;
+    while n > 0 && !s.is_char_boundary(n) { n -= 1; }
+    &s[..n]
+}
+
 /// Hrefs of every `<link rel="stylesheet">` in an HTML document. The shell
 /// fetches these as sub-resources and feeds the bytes back via
 /// `Engine::layout_ext` (the engine cannot fetch — it is host-free).

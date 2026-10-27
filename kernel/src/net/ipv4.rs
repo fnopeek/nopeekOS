@@ -11,6 +11,13 @@ const HEADER_LEN: usize  = 20; // no options
 static GATEWAY: Mutex<[u8; 4]> = Mutex::new([10, 0, 2, 2]); // QEMU default
 static SUBNET:  Mutex<[u8; 4]> = Mutex::new([255, 255, 255, 0]);
 
+/// Fragments dropped for want of reassembly (Linux MIB `ReasmFails`, #36).
+static REASM_FAILS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn reasm_fails() -> u64 {
+    REASM_FAILS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn set_gateway(ip: [u8; 4]) { *GATEWAY.lock() = ip; }
 pub fn set_subnet(mask: [u8; 4]) { *SUBNET.lock() = mask; }
 pub fn gateway() -> [u8; 4] { *GATEWAY.lock() }
@@ -48,6 +55,14 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool) {
     // ip_rcv_core: a header whose checksum does not hold is dropped.
     if super::csum::fold(super::csum::sum(&data[..ihl])) != 0xFFFF { return; }
 
+    // No reassembly yet (#36): a fragment parsed as a whole datagram hands
+    // payload bytes to L4 as headers, unchecked. Dropped before anything,
+    // the microvm tap included.
+    if u16::from_be_bytes([data[6], data[7]]) & 0x3FFF != 0 {
+        REASM_FAILS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+
     let protocol = data[9];
     let src_ip = <[u8; 4]>::try_from(&data[12..16]).unwrap();
     let dst_ip = <[u8; 4]>::try_from(&data[16..20]).unwrap();
@@ -66,10 +81,8 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool) {
     if dst_ip != our_ip && dst_ip != [255, 255, 255, 255] && our_ip != [0, 0, 0, 0] { return; }
 
     let payload = &data[ihl..total_len];
-    // The L4 checksum, unless the card verified it (skb_checksum_init). A
-    // fragment is not whole, so its checksum cannot be checked yet.
-    let fragment = u16::from_be_bytes([data[6], data[7]]) & 0x3FFF != 0;
-    if !csum_ok && !fragment && !l4_checksum_holds(protocol, src_ip, dst_ip, payload) {
+    // The L4 checksum, unless the card verified it (skb_checksum_init).
+    if !csum_ok && !l4_checksum_holds(protocol, src_ip, dst_ip, payload) {
         return;
     }
 

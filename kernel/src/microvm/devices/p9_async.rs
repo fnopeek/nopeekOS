@@ -26,18 +26,6 @@ use spin::Mutex;
 const EIO: i32 = 5;
 const ENOSPC: i32 = 28;
 
-/// npkFS space a guest download may not take: the host's own saves, the
-/// vault and the app's disk image still need room. The larger of the two.
-const NPKFS_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
-const NPKFS_RESERVE_PERCENT: u64 = 5;
-
-/// Whether npkFS still has room for `len` more streamed bytes.
-fn npkfs_has_room(len: usize) -> bool {
-    let Some((total, free, _, _)) = crate::npkfs::stats() else { return false };
-    let bs = crate::npkfs::BLOCK_SIZE as u64;
-    let reserve = NPKFS_RESERVE_BYTES.max(total * bs * NPKFS_RESERVE_PERCENT / 100);
-    (free * bs).saturating_sub(reserve) >= len as u64
-}
 
 /// Backpressure ceiling: bytes buffered in PENDING but not yet persisted. When
 /// exceeded, the vCPU stops pulling the 9p avail-ring, so the guest's
@@ -201,7 +189,7 @@ fn apply(writers: &mut BTreeMap<u64, Stream>, key: u64, op: Op) -> i32 {
     use crate::storage::npkfs::fs;
     match op {
         Op::Start { path, data } => {
-            if !npkfs_has_room(data.len()) { return -ENOSPC; }
+            if !crate::npkfs::room_for(data.len()) { return -ENOSPC; }
             let mut writer = fs::open_streaming_write(&path);
             match writer.write(&data) {
                 Ok(_) => {
@@ -214,7 +202,7 @@ fn apply(writers: &mut BTreeMap<u64, Stream>, key: u64, op: Op) -> i32 {
         Op::Write { data } => match writers.get_mut(&key) {
             Some(Stream { failed: Some(e), .. }) => *e,
             Some(st) => {
-                let r = if !npkfs_has_room(data.len()) {
+                let r = if !crate::npkfs::room_for(data.len()) {
                     -ENOSPC
                 } else {
                     match st.writer.write(&data) { Ok(_) => data.len() as i32, Err(_) => -EIO }

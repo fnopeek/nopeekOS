@@ -162,7 +162,7 @@ pub fn looks_like_svg(bytes: &[u8]) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    let head = &s[..s.len().min(1024)];
+    let head = crate::clip(s, 1024);
     head.contains("<svg")
 }
 
