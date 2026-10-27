@@ -14,6 +14,8 @@
 
 use alloc::vec::Vec;
 
+use crate::media::Media;
+
 /// A bounds-checked cursor. Every getter answers `None` past the end, so a
 /// truncated or hostile file ends as a refusal and never as a panic.
 struct Cur<'a> {
@@ -83,7 +85,7 @@ fn children(d: &[u8]) -> Cur<'_> { Cur::new(d) }
 /// One decodable unit, already located in the file.
 #[derive(Clone, Copy)]
 pub struct Sample {
-    pub offset: usize,
+    pub offset: u64,
     pub size: usize,
     /// Decode and presentation time, in the track's timescale.
     pub dts: u64,
@@ -187,30 +189,55 @@ pub struct Mp4 {
     pub fragmented: bool,
 }
 
-pub fn looks_like(d: &[u8]) -> bool {
+/// Whether the file starting with `head` is an MP4, by the type of its first
+/// box; `head` need not hold that whole box.
+pub fn looks_like(head: &[u8]) -> bool {
     // `ftyp` at offset 4 is the normal case. Some muxers put `styp`, `moov`
     // or `free` first, so accept any known top-level box rather than only
     // the tidy one.
-    let mut c = Cur::new(d);
-    match c.next_box() {
-        Some((t, _)) => matches!(&t, b"ftyp" | b"styp" | b"moov" | b"free" | b"skip" | b"mdat" | b"wide"),
+    match head.get(4..8) {
+        Some(t) => matches!(t, b"ftyp" | b"styp" | b"moov" | b"free" | b"skip" | b"mdat" | b"wide"),
         None => false,
     }
 }
 
-pub fn parse(d: &[u8]) -> Option<Mp4> {
-    let mut top = Cur::new(d);
-    let mut moov: Option<&[u8]> = None;
+/// Walk the top-level boxes of the file in `m`, reading their headers and
+/// `moov` only; the media data stays on disk.
+pub fn parse(m: &mut Media) -> Option<Mp4> {
+    let size = m.size();
+    let mut at = 0u64;
+    let mut moov: Option<Vec<u8>> = None;
     let mut fragmented = false;
-    while let Some((ty, body)) = top.next_box() {
+    // As `Cur::next_box`: a box that does not fit in the file ends the walk.
+    while size - at >= 8 {
+        let mut h = [0u8; 16];
+        if !m.read_exact_at(at, &mut h[..8]) { break; }
+        let size32 = u32::from_be_bytes([h[0], h[1], h[2], h[3]]) as u64;
+        let ty = [h[4], h[5], h[6], h[7]];
+        let (hdr, len) = if size32 == 1 {
+            if size - at < 16 || !m.read_exact_at(at + 8, &mut h[8..16]) { break; }
+            (16u64, u64::from_be_bytes([h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]]))
+        } else if size32 == 0 {
+            (8u64, size - at)
+        } else {
+            (8u64, size32)
+        };
+        if len < hdr || len > size - at { break; }
         match &ty {
-            b"moov" => moov = Some(body),
+            b"moov" => {
+                let body = usize::try_from(len - hdr).ok()?;
+                moov = Some(m.get(at + hdr, body)?.to_vec());
+            }
             b"moof" => fragmented = true,
             _ => {}
         }
+        at += len;
     }
     let moov = moov?;
+    parse_moov(&moov, fragmented, size)
+}
 
+fn parse_moov(moov: &[u8], fragmented: bool, file_len: u64) -> Option<Mp4> {
     let mut out = Mp4 { video: None, audio: None, fragmented };
     let mut c = children(moov);
     while let Some((ty, body)) = c.next_box() {
@@ -220,7 +247,7 @@ pub fn parse(d: &[u8]) -> Option<Mp4> {
             out.fragmented = true;
         }
         if &ty != b"trak" { continue; }
-        if let Some(t) = parse_trak(body, d) {
+        if let Some(t) = parse_trak(body, file_len) {
             match t.kind {
                 Kind::Video if out.video.is_none() => out.video = Some(t),
                 Kind::Audio if out.audio.is_none() => out.audio = Some(t),
@@ -231,7 +258,7 @@ pub fn parse(d: &[u8]) -> Option<Mp4> {
     Some(out)
 }
 
-fn parse_trak(trak: &[u8], file: &[u8]) -> Option<Track> {
+fn parse_trak(trak: &[u8], file_len: u64) -> Option<Track> {
     let mut width = 0u32;
     let mut height = 0u32;
     let mut rotation = 0u16;
@@ -305,7 +332,7 @@ fn parse_trak(trak: &[u8], file: &[u8]) -> Option<Track> {
         _ => (width, height),
     };
 
-    let samples = build_samples(&tables, file);
+    let samples = build_samples(&tables, file_len);
     let colour = tables.colour
         .or_else(|| match &tables.codec {
             Codec::Avc { sps, .. } => sps.first().and_then(|s| sps_colour(s)),
@@ -739,7 +766,7 @@ fn parse_esds(d: &[u8]) -> Option<Vec<u8>> {
 /// container: `stsc` says how many samples sit in each chunk, `stco` says
 /// where each chunk starts, `stsz` how long each sample is, and the offsets
 /// simply accumulate inside a chunk.
-fn build_samples(t: &Tables, file: &[u8]) -> Vec<Sample> {
+fn build_samples(t: &Tables, file_len: u64) -> Vec<Sample> {
     let count = if t.uniform_size == 0 { t.sizes.len() } else { t.sample_count as usize };
     let mut out: Vec<Sample> = Vec::with_capacity(count);
     if t.stsc.is_empty() || t.chunks.is_empty() { return out; }
@@ -757,17 +784,17 @@ fn build_samples(t: &Tables, file: &[u8]) -> Vec<Sample> {
         if first == 0 { continue; }
         for ch in first..last {
             let Some(&base) = t.chunks.get(ch as usize - 1) else { break };
-            let mut off = base as usize;
+            let mut off = base;
             for _ in 0..per {
                 if idx >= count { break; }
                 let sz = size_of(idx);
                 // A sample that does not lie inside the file is where a
                 // damaged or hostile table shows itself. Stop; do not clamp.
-                if off.checked_add(sz).map_or(true, |e| e > file.len()) {
+                if off.checked_add(sz as u64).map_or(true, |e| e > file_len) {
                     return out;
                 }
                 out.push(Sample { offset: off, size: sz, dts: 0, pts: 0, sync: true });
-                off += sz;
+                off += sz as u64;
                 idx += 1;
             }
         }

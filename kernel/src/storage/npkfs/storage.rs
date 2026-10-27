@@ -909,6 +909,15 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     Ok(Some(plaintext))
 }
 
+/// Length of the stored object's encoding, from the index alone; `Ok(None)`
+/// if the hash is not stored. The index is not keyed, so a caller that
+/// sizes anything from it checks the object once it reads it.
+pub fn plaintext_size(hash: &[u8; 32]) -> Result<Option<u64>, FsError> {
+    let mut lock = FS.lock();
+    let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
+    Ok(btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?.map(|e| e.plaintext_size))
+}
+
 /// True iff the hash is present in the index. No data read.
 pub fn has(hash: &[u8; 32]) -> bool {
     let mut lock = FS.lock();

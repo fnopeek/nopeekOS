@@ -59,6 +59,89 @@ pub fn fetch_into(name: &str, buf: &mut [u8]) -> Fill { fill(sys::fetch(name.as_
 /// Write `data` as file `name`. False if refused.
 pub fn store(name: &str, data: &[u8]) -> bool { sys::store(name.as_bytes(), data) == 0 }
 
+/// A file open for ranged reads, for files too large to fetch whole. Same
+/// gates as [`fetch`]; closed on drop.
+pub struct File { handle: i32, size: u64 }
+
+impl File {
+    /// Open file `name`; `None` if it does not exist or may not be read.
+    pub fn open(name: &str) -> Option<File> {
+        let handle = sys::file_open(name.as_bytes());
+        if handle < 0 { return None; }
+        let size = sys::file_size(handle);
+        if size < 0 {
+            sys::file_close(handle);
+            return None;
+        }
+        Some(File { handle, size: size as u64 })
+    }
+
+    /// Length of the file as it was when opened.
+    pub fn size(&self) -> u64 { self.size }
+
+    /// Bytes at `offset` into `buf`: the count, `Some(0)` at the end, `None`
+    /// on error. The count may be short of `buf`.
+    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Option<usize> {
+        let n = sys::file_read(self.handle, offset, buf);
+        if n < 0 { None } else { Some(n as usize) }
+    }
+
+    /// Fill `buf` from `offset`; false at the end of the file or on error.
+    pub fn read_exact_at(&self, mut offset: u64, mut buf: &mut [u8]) -> bool {
+        while !buf.is_empty() {
+            match self.read_at(offset, buf) {
+                Some(0) | None => return false,
+                Some(n) => {
+                    offset += n as u64;
+                    buf = &mut buf[n..];
+                }
+            }
+        }
+        true
+    }
+
+    /// Close now rather than on drop.
+    pub fn close(self) {}
+}
+
+impl Drop for File {
+    fn drop(&mut self) { sys::file_close(self.handle); }
+}
+
+/// A file written as a stream, for files too large to store whole. Same
+/// gates as [`store`]. The file appears at [`FileWriter::finish`], whole; a
+/// writer dropped before that leaves the name as it was.
+pub struct FileWriter { handle: i32 }
+
+impl FileWriter {
+    /// Start writing file `name`; `None` if refused.
+    pub fn create(name: &str) -> Option<FileWriter> {
+        let handle = sys::file_create(name.as_bytes());
+        if handle < 0 { None } else { Some(FileWriter { handle }) }
+    }
+
+    /// Append `data`. False if refused (disk reserve, quota) or failed.
+    pub fn write(&mut self, mut data: &[u8]) -> bool {
+        while !data.is_empty() {
+            let n = sys::file_write(self.handle, data);
+            if n <= 0 { return false; }
+            data = &data[n as usize..];
+        }
+        true
+    }
+
+    /// Publish the file. False if it was not written.
+    pub fn finish(self) -> bool {
+        let ok = sys::file_close(self.handle) == 0;
+        core::mem::forget(self);
+        ok
+    }
+}
+
+impl Drop for FileWriter {
+    fn drop(&mut self) { sys::file_abort(self.handle); }
+}
+
 // ── Keyvault — only the `vault` module may call ──
 pub fn vault_exists() -> bool { let s = sys::vault_status(); s >= 0 && s & 1 != 0 }
 pub fn vault_user_present() -> bool { let s = sys::vault_status(); s >= 0 && s & 2 != 0 }

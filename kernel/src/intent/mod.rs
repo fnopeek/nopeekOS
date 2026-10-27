@@ -29,6 +29,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use spin::Mutex;
 
+/// First size of the input line; it grows with what is typed or pasted.
 const INPUT_BUF_SIZE: usize = 512;
 
 /// Cooperative cancel for long-running foreground intents (downloads, OTA).
@@ -277,7 +278,7 @@ impl History {
 /// Heap-allocated, one per window, owned by Core 0.
 pub struct IntentSession {
     /// Input buffer (what the user is typing).
-    pub input_buf: [u8; INPUT_BUF_SIZE],
+    pub input_buf: alloc::vec::Vec<u8>,
     /// Number of valid bytes in input_buf.
     pub pos: usize,
     /// Cursor position within input (0..=pos).
@@ -291,9 +292,14 @@ pub struct IntentSession {
 }
 
 impl IntentSession {
+    /// Make the input buffer hold at least `n` bytes.
+    fn room(&mut self, n: usize) {
+        if self.input_buf.len() < n { self.input_buf.resize(n, 0); }
+    }
+
     pub fn new(terminal_idx: u8) -> Self {
         Self {
-            input_buf: [0u8; INPUT_BUF_SIZE],
+            input_buf: alloc::vec![0u8; INPUT_BUF_SIZE],
             pos: 0,
             cursor: 0,
             history: History::new(),
@@ -464,8 +470,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering as AtOrd};
 const MAX_INTENT_JOBS: usize = 4;
 
 struct IntentJob {
-    command: [u8; INPUT_BUF_SIZE],
-    command_len: usize,
+    command: String,
     terminal_idx: u8,
     session_id: CapId,
 }
@@ -501,11 +506,7 @@ fn spawn_intent_on_worker(input: &str, terminal_idx: u8, session_id: CapId) -> b
         None => return false,
     };
 
-    let mut command = [0u8; INPUT_BUF_SIZE];
-    let len = input.len().min(INPUT_BUF_SIZE);
-    command[..len].copy_from_slice(&input.as_bytes()[..len]);
-
-    jobs[slot] = Some(IntentJob { command, command_len: len, terminal_idx, session_id });
+    jobs[slot] = Some(IntentJob { command: String::from(input), terminal_idx, session_id });
     drop(jobs);
 
     INTENT_RUNNING[terminal_idx as usize].store(true, AtOrd::Release);
@@ -529,14 +530,7 @@ fn intent_worker_task(arg: u64) {
     };
     let job = match job { Some(j) => j, None => return };
 
-    let input = match core::str::from_utf8(&job.command[..job.command_len]) {
-        Ok(s) => s.trim(),
-        Err(_) => {
-            INTENT_RUNNING[job.terminal_idx as usize].store(false, AtOrd::Release);
-            wake_shell();
-            return;
-        }
-    };
+    let input = job.command.trim();
 
     // Extract verb for process name
     let verb = input.splitn(2, ' ').next().unwrap_or("?");
@@ -906,7 +900,8 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         match event.key {
             KeyCode::Up => {
                 if let Some(line) = session.history.up() {
-                    let len = line.len().min(session.input_buf.len());
+                    let len = line.len();
+                    if session.input_buf.len() < len { session.input_buf.resize(len, 0); }
                     if !crate::shade::is_active() {
                         for _ in 0..session.pos { kprint!("\x08 \x08"); }
                     }
@@ -925,7 +920,8 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     for _ in 0..session.pos { kprint!("\x08 \x08"); }
                 }
                 if let Some(line) = session.history.down() {
-                    let len = line.len().min(session.input_buf.len());
+                    let len = line.len();
+                    if session.input_buf.len() < len { session.input_buf.resize(len, 0); }
                     session.input_buf[..len].copy_from_slice(&line.as_bytes()[..len]);
                     session.pos = len;
                     session.cursor = len;
@@ -1003,10 +999,9 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     crate::shade::terminal::clear_output_redirect();
                     if let Some(completion) = completion {
                         for cb in completion.as_bytes() {
-                            if session.pos < session.input_buf.len() {
-                                session.input_buf[session.pos] = *cb;
-                                session.pos += 1;
-                            }
+                            session.room(session.pos + 1);
+                            session.input_buf[session.pos] = *cb;
+                            session.pos += 1;
                         }
                         session.cursor = session.pos;
                         if crate::shade::is_active() {
@@ -1042,7 +1037,8 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     Ok(t) => t.chars().all(|c| !c.is_control()),
                     Err(_) => false,
                 };
-                if printable && session.pos + got < session.input_buf.len() {
+                if printable {
+                    session.room(session.pos + got);
                     session.input_buf.copy_within(session.cursor..session.pos, session.cursor + got);
                     session.input_buf[session.cursor..session.cursor + got].copy_from_slice(ch);
                     session.pos += got;

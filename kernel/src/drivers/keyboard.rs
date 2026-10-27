@@ -17,8 +17,8 @@ const STATUS_PORT: Port = unsafe { Port::new(0x64) };
 // from modules and the terminal, read by several loops, so every access holds
 // the lock with IF=0 (the ISR takes it too). A multi-byte sequence goes in
 // under one hold, so another producer cannot split it.
-// A pasted line arrives as a fast key burst while the shell drains one key
-// per loop iteration; 512 (= INPUT_BUF_SIZE) absorbs any pasteable line.
+// A burst of keys arrives faster than the shell drains one per loop
+// iteration; a paste does not go through here (`inject_paste`).
 const BUF_SIZE: usize = 512;
 
 struct KeyRing {
@@ -342,6 +342,9 @@ pub fn read_key() -> Option<u8> {
     if let Some(key) = crate::interrupts::without_interrupts(|| KEY_RING.lock().pop()) {
         return Some(key);
     }
+    if let Some(key) = PASTE.lock().pop_front() {
+        return Some(key);
+    }
     // PS/2 polling: with the legacy PIC masked (UEFI/APIC machines) IRQ1
     // never fires, so the buffer above stays empty — but the i8042 still
     // latches scancodes. Read them on demand. (No-op if no PS/2 keyboard.)
@@ -591,6 +594,17 @@ fn push_char(first: u8) {
 /// Clients should send ANSI escape sequences for arrow/nav keys (ESC [ A etc).
 pub fn inject_byte(byte: u8) {
     push_seq(&[byte]);
+}
+
+/// Pasted text waiting to be read as typed input, after the keys in the
+/// ring. On the heap, not in the IRQ ring, so a paste of any length arrives
+/// whole.
+static PASTE: spin::Mutex<alloc::collections::VecDeque<u8>> =
+    spin::Mutex::new(alloc::collections::VecDeque::new());
+
+/// Queue `bytes` as typed input.
+pub fn inject_paste(bytes: &[u8]) {
+    PASTE.lock().extend(bytes.iter().copied());
 }
 
 /// Push an arrow key as ANSI escape sequence: ESC [ A/B/C/D

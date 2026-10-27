@@ -562,9 +562,8 @@ pub fn last_gc() -> Option<LastGc> { *LAST_GC.lock() }
 // is therefore one chunk + manifest overhead, independent of total size.
 //
 // Reads are transparent: `fs::read` detects `Object::Chunked` and
-// stitches the chunks back into one `Vec<u8>` for consumers. Not
-// implemented: a streaming reader that iterates the manifest without
-// materializing the full payload.
+// stitches the chunks back into one `Vec<u8>` for consumers.
+// [`RangeReader`] reads a range without materializing the whole payload.
 
 /// Default streaming-write chunk size. Each chunk is hashed in one shot
 /// with `blake3::hash(&chunk)`, and BLAKE3's one-shot path
@@ -608,6 +607,164 @@ pub fn read_chunk(hash: &[u8; 32]) -> Result<Vec<u8>, Error> {
         .map_err(Error::Storage)?
         .ok_or(PathError::Corrupt)?;
     super::object::decode_blob_inplace(bytes).map_err(|_| PathError::Corrupt)
+}
+
+/// Content length of the chunk stored under `hash`, from the object index.
+fn chunk_len(hash: &[u8; 32]) -> Result<u64, Error> {
+    let encoded = storage::plaintext_size(hash)
+        .map_err(Error::Storage)?
+        .ok_or(PathError::Corrupt)?;
+    super::object::blob_len_from_encoded(encoded).ok_or(PathError::Corrupt)
+}
+
+/// Random access to one File without holding all of it: the reader behind a
+/// module's open file, a 9p fid and a wasi descriptor.
+///
+/// A single `Blob` has no smaller unit and is held whole; a `Chunked` file
+/// holds one chunk at a time. Chunk lengths come from the object index,
+/// never from the writer's chunk size, and every chunk read must match its
+/// length. The chunk list is the file as it was at open: a file replaced
+/// meanwhile serves its old content until GC collects it, then reads fail.
+pub struct RangeReader {
+    total: u64,
+    src: RangeSource,
+}
+
+enum RangeSource {
+    Whole(Vec<u8>),
+    Chunked {
+        chunks: Vec<[u8; 32]>,
+        /// Start offset of each chunk resolved so far, plus where the next
+        /// one starts. Grows on demand, so a seek costs index lookups only.
+        starts: Vec<u64>,
+        /// Index and bytes of the chunk read last.
+        cur: Option<(usize, Vec<u8>)>,
+    },
+}
+
+/// What a read may hold that its caller's `budget` does not allow.
+fn over_budget() -> Error { Error::Storage(FsError::OutOfMemory) }
+
+impl RangeReader {
+    /// Open the File at `path`; `Ok(None)` if it is missing. A Blob longer
+    /// than `budget` is refused with `Storage(OutOfMemory)` before it is read.
+    pub fn open(path: &str, budget: usize) -> Result<Option<Self>, Error> {
+        let root = current_root()?;
+        let walk = match paths::walk(&root, path) {
+            Ok(w) => w,
+            Err(PathError::NotFound) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if walk.kind != EntryKind::File {
+            return Err(PathError::NotADirectory);
+        }
+        let encoded = storage::plaintext_size(&walk.hash)
+            .map_err(Error::Storage)?
+            .ok_or(PathError::Corrupt)?;
+        if encoded > budget as u64 {
+            return Err(over_budget());
+        }
+        let bytes = storage::get(&walk.hash)
+            .map_err(Error::Storage)?
+            .ok_or(PathError::Corrupt)?;
+        if bytes.first() == Some(&0) {
+            let blob = super::object::decode_blob_inplace(bytes).map_err(|_| PathError::Corrupt)?;
+            return Ok(Some(RangeReader { total: blob.len() as u64, src: RangeSource::Whole(blob) }));
+        }
+        match super::object::Object::decode(&bytes).map_err(|_| PathError::Corrupt)? {
+            super::object::Object::Chunked { total_size, chunks } => Ok(Some(RangeReader {
+                total: total_size,
+                src: RangeSource::Chunked { chunks, starts: alloc::vec![0], cur: None },
+            })),
+            super::object::Object::Blob(b) => {
+                Ok(Some(RangeReader { total: b.len() as u64, src: RangeSource::Whole(b) }))
+            }
+            super::object::Object::Tree(_) => Err(PathError::Corrupt),
+        }
+    }
+
+    /// Length of the file.
+    pub fn size(&self) -> u64 { self.total }
+
+    /// Bytes the reader holds in memory right now.
+    pub fn held(&self) -> usize {
+        match &self.src {
+            RangeSource::Whole(b) => b.len(),
+            RangeSource::Chunked { cur, .. } => cur.as_ref().map_or(0, |(_, b)| b.len()),
+        }
+    }
+
+    /// The whole content, for a caller that keeps a single Blob as a
+    /// buffer; the reader back if the file is chunked.
+    pub fn into_whole(self) -> Result<Vec<u8>, Self> {
+        match self.src {
+            RangeSource::Whole(b) => Ok(b),
+            src => Err(RangeReader { total: self.total, src }),
+        }
+    }
+
+    /// Copy the bytes at `offset` into `dst`, across chunk boundaries;
+    /// returns how many, 0 at or past the end. A chunk longer than `budget`
+    /// is refused with `Storage(OutOfMemory)` before it is read.
+    pub fn read_at(&mut self, offset: u64, dst: &mut [u8], budget: usize) -> Result<usize, Error> {
+        if offset >= self.total || dst.is_empty() {
+            return Ok(0);
+        }
+        let end = offset.saturating_add(dst.len() as u64).min(self.total);
+        let total = self.total;
+        match &mut self.src {
+            RangeSource::Whole(b) => {
+                let (at, to) = (offset as usize, end as usize);
+                let src = b.get(at..to).ok_or(PathError::Corrupt)?;
+                dst[..src.len()].copy_from_slice(src);
+                Ok(src.len())
+            }
+            RangeSource::Chunked { chunks, starts, cur } => {
+                let mut pos = offset;
+                let mut n = 0usize;
+                while pos < end {
+                    let i = chunk_at(chunks, starts, total, pos)?;
+                    let len = starts[i + 1] - starts[i];
+                    if !cur.as_ref().is_some_and(|(c, _)| *c == i) {
+                        if len > budget as u64 {
+                            return Err(over_budget());
+                        }
+                        *cur = None;
+                        let bytes = read_chunk(&chunks[i])?;
+                        if bytes.len() as u64 != len {
+                            return Err(PathError::Corrupt);
+                        }
+                        *cur = Some((i, bytes));
+                    }
+                    let (_, bytes) = cur.as_ref().ok_or(PathError::Corrupt)?;
+                    let at = (pos - starts[i]) as usize;
+                    let take = (bytes.len() - at).min((end - pos) as usize);
+                    dst[n..n + take].copy_from_slice(&bytes[at..at + take]);
+                    n += take;
+                    pos += take as u64;
+                }
+                Ok(n)
+            }
+        }
+    }
+}
+
+/// Index of the chunk holding `pos` (< `total`), resolving chunk starts up
+/// to it. The chunks must add up to `total` exactly.
+fn chunk_at(chunks: &[[u8; 32]], starts: &mut Vec<u64>, total: u64, pos: u64) -> Result<usize, Error> {
+    while starts.last().is_some_and(|&s| s <= pos) && starts.len() <= chunks.len() {
+        let k = starts.len() - 1;
+        let next = starts[k].checked_add(chunk_len(&chunks[k])?).ok_or(PathError::Corrupt)?;
+        if next > total || (k + 1 == chunks.len() && next != total) {
+            return Err(PathError::Corrupt);
+        }
+        starts.push(next);
+    }
+    let k = starts.partition_point(|&s| s <= pos);
+    if k == 0 || k >= starts.len() {
+        return Err(PathError::Corrupt);
+    }
+    Ok(k - 1)
 }
 
 /// Stitch a `Chunked` manifest back into a single `Vec<u8>`. Used by

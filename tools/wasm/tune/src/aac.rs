@@ -8,11 +8,12 @@
 //! [`MAX_BLOCK_FRAMES`](crate::source::MAX_BLOCK_FRAMES) (1152).
 
 
+use crate::media::Media;
 use crate::mp4;
 use crate::source::{Info, Source};
 
 pub struct Aac {
-    data: &'static [u8],
+    media: Media,
     track: mp4::Track,
     dec: rusty_aac::decode::Decoder,
     info: Info,
@@ -24,7 +25,7 @@ pub struct Aac {
 
 impl Aac {
     /// `track` must be the audio track of an already parsed MP4.
-    pub fn from_track(data: &'static [u8], track: mp4::Track) -> Option<Aac> {
+    pub fn from_track(media: Media, track: mp4::Track) -> Option<Aac> {
         let cfg_bytes = match &track.codec {
             mp4::Codec::Aac { config } => config.clone(),
             _ => return None,
@@ -54,7 +55,7 @@ impl Aac {
                 bitrate_kbps: kbps,
             },
             dec: rusty_aac::decode::Decoder::new(cfg.sample_rate),
-            data,
+            media,
             track,
             next: 0,
             frame: 0,
@@ -81,7 +82,7 @@ impl Source for Aac {
         while self.next < self.track.samples.len() {
             let s = self.track.samples[self.next];
             self.next += 1;
-            let Some(au) = self.data.get(s.offset..s.offset + s.size) else { break };
+            let Some(au) = self.media.get(s.offset, s.size) else { break };
             // A rejected frame is a gap, not the end: the next one recovers,
             // because every AAC frame stands alone.
             let Ok(d) = self.dec.decode(au, None) else { continue };

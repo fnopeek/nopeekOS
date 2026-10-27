@@ -30,6 +30,7 @@ use nopeek_widgets::*;
 mod aac;
 mod demux;
 mod host;
+mod media;
 mod mp3;
 // The MP4 container, tested host-side against ffmpeg.
 mod mp4;
@@ -70,10 +71,11 @@ fn poll_event(buf: &mut [u8]) -> PollResult {
 // ── Heap ──────────────────────────────────────────────────────────────
 //
 // Everything the player keeps on the heap is small: the playlist, decoder
-// state, and a scene tree rebuilt each frame. The file bytes do not live
-// here — they are claimed with `memory.grow` (see `Arena`), so a long
-// song never has to fit in a fixed heap. The heap must free: a video frame
-// is about 0.5 MB and many arrive per second.
+// state, a read window per film stream (`media`) and a scene tree rebuilt
+// each frame. An audio file's bytes do not live here — they are claimed
+// with `memory.grow` (see `Arena`), so a long song never has to fit in a
+// fixed heap. The heap must free: a video frame is about 0.5 MB and many
+// arrive per second.
 #[global_allocator]
 static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
@@ -292,14 +294,19 @@ impl Tune {
         self.drained = false;
         self.error = None;
         let path = match self.full_path() { Some(p) => p, None => return };
-        let size = self.files[self.idx].size as usize;
-        let bytes = match self.arena.fetch(&path, size) {
-            Some(b) => b,
-            None => { self.error = Some("cannot read file".to_string()); return; }
+        // A film is read range by range, whatever its size; anything else is
+        // an audio file and read whole. One read of the container, two
+        // streams, chosen by content, not by extension.
+        let d = match demux::open_mp4(&path) {
+            Some(d) => d,
+            None => {
+                let size = self.files[self.idx].size as usize;
+                match self.arena.fetch(&path, size) {
+                    Some(bytes) => demux::open(bytes),
+                    None => { self.error = Some("cannot read file".to_string()); return; }
+                }
+            }
         };
-        // One read of the container, two streams. Chosen by content, not by
-        // extension — the same rule `source::open` uses for the audio decoder.
-        let d = demux::open(bytes);
         let priming = d.audio_priming;
 
         if let Some(v) = d.video {

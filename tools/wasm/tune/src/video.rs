@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use rusty_h264_common::YuvFrame;
 use rusty_h264_decoder::Decoder;
 
+use crate::media::Media;
 use crate::mp4;
 
 /// Pictures held before one is handed out. Four covers the reorder depth of
@@ -67,7 +68,7 @@ const MAX_QUEUE_BYTES: usize = 256 * 1024 * 1024;
 const PREROLL_MS: i64 = 400;
 
 pub struct Video {
-    data: &'static [u8],
+    media: Media,
     track: mp4::Track,
     dec: Decoder,
     /// Next sample to feed the decoder, in decode order.
@@ -117,7 +118,7 @@ pub enum OpenError {
 impl Video {
     /// `track` must be the video track of an already parsed MP4. The container
     /// is parsed once (see `demux`), so audio and video cannot disagree about it.
-    pub fn from_track(data: &'static [u8], track: mp4::Track) -> Result<Video, OpenError> {
+    pub fn from_track(media: Media, track: mp4::Track) -> Result<Video, OpenError> {
         if !matches!(track.codec, mp4::Codec::Avc { .. }) || track.samples.is_empty() {
             return Err(OpenError::NoVideo);
         }
@@ -127,7 +128,7 @@ impl Video {
             rotation: track.rotation,
             duration_ms: track.duration_ms(),
             colour_flags: (track.colour.bt709 as i32) | ((track.colour.full_range as i32) << 1),
-            data,
+            media,
             track,
             dec: Decoder::new(),
             next: 0,
@@ -165,12 +166,13 @@ impl Video {
         let s = self.track.samples[self.next];
         self.next += 1;
         let pts = self.track.pts_ms(&s);
-        let Some(bytes) = self.data.get(s.offset..s.offset + s.size) else {
+        let nal_len = self.nal_len();
+        let Some(bytes) = self.media.get(s.offset, s.size) else {
             self.fed_all = true;
             return false;
         };
         self.au.clear();
-        mp4::to_annex_b(bytes, self.nal_len(), &mut self.au);
+        mp4::to_annex_b(bytes, nal_len, &mut self.au);
         // A sample the decoder refuses is one lost picture, not a lost film:
         // the next sync sample starts it again. Silence here would hide a
         // broken file, so the caller gets to log it.

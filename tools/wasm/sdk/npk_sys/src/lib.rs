@@ -11,6 +11,8 @@
 //! answers a buffer too small for it with `-(needed + 2)` and writes
 //! nothing; -1 is an error or a refusal. [`fill`] reads such an answer,
 //! and [`read_all`] (feature `alloc`) grows the buffer and asks again.
+//! Stream calls (`file_read`, socket receives) are not whole objects: they
+//! return what fits, 0 at the end.
 //!
 //! No allocator is needed; drivers and small tools use this directly, the
 //! widget SDK builds on it.

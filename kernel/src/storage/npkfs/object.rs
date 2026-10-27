@@ -194,6 +194,16 @@ pub fn blob_content_hash(data: &[u8]) -> Option<[u8; 32]> {
     Some(*hasher.finalize().as_bytes())
 }
 
+/// Content length of an `Object::Blob` whose encoding is `encoded` bytes
+/// long: the one `n` with `1 + varint_len(n) + n == encoded`.
+pub fn blob_len_from_encoded(encoded: u64) -> Option<u64> {
+    let mut varint = [0u8; 10];
+    (1..=10u64).find_map(|k| {
+        let n = encoded.checked_sub(1 + k)?;
+        (encode_varint_u64(n, &mut varint) as u64 == k).then_some(n)
+    })
+}
+
 fn encode_varint_u64(mut x: u64, buf: &mut [u8; 10]) -> usize {
     // postcard uses LEB128: 7 bits payload per byte, high bit set
     // means "more bytes follow".

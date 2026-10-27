@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use nopeek_widgets::host as sdk;
 
-pub use sdk::Fill;
+pub use sdk::{File, Fill};
 
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {

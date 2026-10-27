@@ -19,14 +19,13 @@
 //! outside the grant, so "which files can this program see" is answered
 //! once, at spawn, by whoever built the `WasiCtx` — not by the program.
 //!
-//! ## Whole-file storage
+//! ## File storage
 //!
-//! npkFS reads and writes whole objects; there is no seek at the storage
-//! layer. So an opened file is fetched once into the fd entry and served
-//! from there, and a written file is flushed on close. That is a real
-//! memory cost — CPython holds an 8.5 MB stdlib zip open for its whole
-//! run — and it is the honest shape for a content-addressed store: a
-//! blob has a hash, and half a blob does not.
+//! A file opened only for reading is served by `fs::RangeReader`: a chunked
+//! file holds one chunk in kernel memory, a single Blob is held whole. A
+//! file opened for writing is fetched once into the fd entry, edited there
+//! and written back whole on close; npkFS writes whole objects, and a
+//! write may land at any offset.
 
 #![allow(dead_code)]
 
@@ -53,6 +52,7 @@ const EINVAL: i32 = 28;
 const EIO: i32 = 29;
 const EISDIR: i32 = 31;
 const ENOENT: i32 = 44;
+const ENOMEM: i32 = 48;
 const ENOSPC: i32 = 51;
 const ENOSYS: i32 = 52;
 const ENOTDIR: i32 = 54;
@@ -76,12 +76,17 @@ const RIGHT_FD_WRITE: i64 = 1 << 6;
 
 /// An open descriptor.
 ///
-/// `File` carries the bytes because npkFS has no seek — see the module
-/// header. `dirty` decides whether closing has to write back.
+/// `File` carries the bytes of a writable file — see the module header.
+/// `dirty` decides whether closing has to write back. `Reader` is a file
+/// opened only for reading.
 pub enum Handle {
     Stdin,
     Stdout,
     Stderr,
+    Reader {
+        reader: fs::RangeReader,
+        pos: u64,
+    },
     File {
         path: String,
         data: Vec<u8>,
@@ -183,6 +188,23 @@ fn fs_errno(e: &fs::Error) -> i32 {
         fs::Error::Corrupt        => EIO,
         fs::Error::Storage(_)     => EIO,
     }
+}
+
+/// A failed ranged read: over the program's memory budget, or as `fs_errno`.
+fn range_errno(e: &fs::Error) -> i32 {
+    match e {
+        fs::Error::Storage(crate::storage::npkfs::FsError::OutOfMemory) => ENOMEM,
+        e => fs_errno(e),
+    }
+}
+
+/// Read from the `Reader` at `fd` into guest memory `[ptr, ptr + len)` at
+/// `at`; the count, 0 at the end.
+fn reader_read(mem: &mut [u8], w: &mut WasiCtx, fd: i32, at: u64, ptr: i32, len: usize) -> Result<usize, i32> {
+    let budget = file_budget(w, fd);
+    let dst = crate::wasm::host_core::guest_mut(mem, ptr, len).ok_or(EFAULT)?;
+    let Some(Handle::Reader { reader, .. }) = w.fds.get_mut(&fd) else { return Err(EBADF) };
+    reader.read_at(at, dst, budget).map_err(|e| range_errno(&e))
 }
 
 // ── guest memory pokes ────────────────────────────────────────────────
@@ -319,16 +341,28 @@ const MAX_WRITE_CALL: usize = 64 * 1024 * 1024;
 /// RAM (Linux charges page cache to the owner's memcg), and a failed
 /// allocation is ENOSPC rather than a kernel panic.
 fn grow_file(w: &mut WasiCtx, fd: i32, end: usize) -> Result<(), i32> {
-    let held: usize = w.fds.values()
-        .map(|h| if let Handle::File { data, .. } = h { data.len() } else { 0 })
-        .sum();
+    let budget = file_budget(w, fd);
     let Some(Handle::File { data, .. }) = w.fds.get_mut(&fd) else { return Err(EBADF) };
     if end <= data.len() { return Ok(()); }
-    let budget = crate::memory::stats().0.saturating_mul(crate::memory::PAGE_SIZE) / 2;
-    if held.saturating_sub(data.len()).saturating_add(end) > budget { return Err(EFBIG); }
+    if end > budget { return Err(EFBIG); }
     data.try_reserve(end - data.len()).map_err(|_| ENOSPC)?;
     data.resize(end, 0);
     Ok(())
+}
+
+/// Kernel memory the open files other than `except` leave for one: all of
+/// the program's file buffers and readers together stay within half of the
+/// free RAM.
+fn file_budget(w: &WasiCtx, except: i32) -> usize {
+    let held: usize = w.fds.iter()
+        .filter(|(fd, _)| **fd != except)
+        .map(|(_, h)| match h {
+            Handle::File { data, .. } => data.len(),
+            Handle::Reader { reader, .. } => reader.held(),
+            _ => 0,
+        })
+        .sum();
+    (crate::memory::stats().0.saturating_mul(crate::memory::PAGE_SIZE) / 2).saturating_sub(held)
 }
 
 /// Gather the `iovec` array into one buffer. Copying first keeps the

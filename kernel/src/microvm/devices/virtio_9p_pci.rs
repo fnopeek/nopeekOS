@@ -257,7 +257,7 @@ struct Fid {
     data: Option<Vec<u8>>,
     /// An opened file stored chunked in npkFS: read one chunk at a time
     /// instead of caching the whole file.
-    chunked: Option<ChunkedRead>,
+    chunked: Option<crate::npkfs::fs::RangeReader>,
     /// `data` has unflushed writes — persisted to npkFS on Tfsync/Tclunk.
     dirty: bool,
     /// Set once a write grows the file past STREAM_PROMOTE_BYTES while
@@ -272,56 +272,11 @@ struct Fid {
     stream_next: u64,
 }
 
-/// Reader over a chunked npkFS file. Chunk lengths are learned as chunks
-/// are read; only the current chunk is held in memory.
-struct ChunkedRead {
-    total: u64,
-    chunks: Vec<[u8; 32]>,
-    /// Start offset of chunk i, known for every chunk up to the first unread.
-    starts: Vec<u64>,
-    /// Index and bytes of the chunk read last.
-    cur: Option<(usize, Vec<u8>)>,
-}
-
-impl ChunkedRead {
-    fn held(&self) -> usize { self.cur.as_ref().map_or(0, |(_, b)| b.len()) }
-
-    /// Load chunk `i` into `cur`, recording where chunk `i + 1` starts.
-    /// `budget` caps the chunk's size.
-    fn load(&mut self, i: usize, budget: usize) -> Result<(), u32> {
-        if self.cur.as_ref().is_some_and(|(c, _)| *c == i) { return Ok(()); }
-        let hash = self.chunks.get(i).ok_or(EIO)?;
-        self.cur = None;
-        let bytes = crate::npkfs::fs::read_chunk(hash).map_err(|_| EIO)?;
-        if bytes.len() > budget { return Err(ENOSPC); }
-        if i + 1 == self.starts.len() {
-            self.starts.push(self.starts[i] + bytes.len() as u64);
-        }
-        self.cur = Some((i, bytes));
-        Ok(())
-    }
-
-    /// Up to `count` bytes at `offset`; crosses chunk boundaries.
-    fn read_at(&mut self, offset: u64, count: usize, budget: usize) -> Result<Vec<u8>, u32> {
-        let end = offset.saturating_add(count as u64).min(self.total);
-        let mut out = Vec::new();
-        let mut pos = offset;
-        while pos < end {
-            // The chunk holding `pos`: among the known starts, or by reading on.
-            let i = loop {
-                let k = self.starts.partition_point(|&s| s <= pos);
-                if k < self.starts.len() || k > self.chunks.len() { break k - 1; }
-                self.load(k - 1, budget)?;
-            };
-            self.load(i, budget)?;
-            let (_, bytes) = self.cur.as_ref().ok_or(EIO)?;
-            let at = (pos - self.starts[i]) as usize;
-            if at >= bytes.len() { return Err(EIO); }
-            let take = bytes.len().min(at + (end - pos) as usize);
-            out.extend_from_slice(&bytes[at..take]);
-            pos += (take - at) as u64;
-        }
-        Ok(out)
+/// 9P error for a failed ranged read: over the device budget, or I/O.
+fn range_errno(e: &crate::npkfs::fs::Error) -> u32 {
+    match e {
+        crate::npkfs::fs::Error::Storage(crate::npkfs::FsError::OutOfMemory) => ENOSPC,
+        _ => EIO,
     }
 }
 
@@ -766,7 +721,7 @@ impl Virtio9p {
         let room = MAX_DEVICE_BUFFERED.saturating_sub(self.buffered_except(fid));
         let Some(f) = self.fids.get_mut(&fid) else { return Ok(()) };
         let Some(c) = f.chunked.as_ref() else { return Ok(()) };
-        if c.total > room.min(MAX_BUFFERED_BYTES) as u64 { return Err(EFBIG); }
+        if c.size() > room.min(MAX_BUFFERED_BYTES) as u64 { return Err(EFBIG); }
         f.chunked = None;
         f.data = Some(npkfs_read(&f.path).ok_or(EIO)?);
         Ok(())
@@ -939,13 +894,17 @@ impl Virtio9p {
                 (Some(MAGIC_OPEN_CONTENT.to_vec()), None)
             } else if flags & P9_DOTL_TRUNC != 0 {
                 (Some(Vec::new()), None)
-            } else if let Ok(Some((total, chunks))) = crate::npkfs::fs::chunk_list(&path) {
-                (None, Some(ChunkedRead { total, chunks, starts: alloc::vec![0], cur: None }))
             } else {
-                // A single blob: read whole, but only if it fits the budget.
-                let size = npkfs_stat(&path).map_or(0, |(_, size, _)| size);
-                if size > room as u64 { return rlerror(tag, ENOSPC); }
-                (Some(npkfs_read(&path).unwrap_or_default()), None)
+                // A single blob is read whole, within the budget, and kept as
+                // the working buffer; a chunked file is read chunk by chunk.
+                match crate::npkfs::fs::RangeReader::open(&path, room) {
+                    Ok(Some(r)) => match r.into_whole() {
+                        Ok(bytes) => (Some(bytes), None),
+                        Err(r) => (None, Some(r)),
+                    },
+                    Ok(None) => (Some(Vec::new()), None),
+                    Err(e) => return rlerror(tag, range_errno(&e)),
+                }
             };
             if data.as_ref().map_or(0, |d| d.len()) > room { return rlerror(tag, ENOSPC); }
             if let Some(f) = self.fids.get_mut(&fid) {
@@ -971,14 +930,15 @@ impl Virtio9p {
         let room = MAX_DEVICE_BUFFERED.saturating_sub(self.buffered_except(fid));
         let f = match self.fids.get_mut(&fid) { Some(f) => f, None => return rlerror(tag, EINVAL) };
         if let Some(c) = f.chunked.as_mut() {
-            return match c.read_at(offset, count, room) {
-                Ok(bytes) => {
-                    let mut b = Vec::with_capacity(4 + bytes.len());
-                    b.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                    b.extend_from_slice(&bytes);
+            let want = count.min(usize::try_from(c.size().saturating_sub(offset)).unwrap_or(usize::MAX));
+            let mut b = alloc::vec![0u8; 4 + want];
+            return match c.read_at(offset, &mut b[4..], room) {
+                Ok(n) => {
+                    b.truncate(4 + n);
+                    b[..4].copy_from_slice(&(n as u32).to_le_bytes());
                     msg(RREAD, tag, &b)
                 }
-                Err(e) => rlerror(tag, e),
+                Err(e) => rlerror(tag, range_errno(&e)),
             };
         }
         let offset = usize::try_from(offset).unwrap_or(usize::MAX);

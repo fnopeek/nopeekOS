@@ -100,6 +100,7 @@ let end = match w.fds.get(&fd) {
         if *pos > buf.len() { return EINVAL; }
         pos.saturating_add(data.len())
     }
+    Some(Handle::Reader { .. }) => return EPERM,
     _ => 0,
 };
 if end > 0 { if let Err(e) = grow_file(w, fd, end) { return e; } }
@@ -124,6 +125,14 @@ for i in 0..n {
     let ptr = match r32(mem, base) { Ok(v) => v as i32, Err(e) => return e };
     let len = match r32(mem, base + 4) { Ok(v) => v as usize, Err(e) => return e };
     if len == 0 { continue; }
+    let at = match w.fds.get(&fd) { Some(Handle::Reader { pos, .. }) => Some(*pos), _ => None };
+    if let Some(at) = at {
+        let n = match reader_read(mem, w, fd, at, ptr, len) { Ok(n) => n, Err(e) => return e };
+        if let Some(Handle::Reader { pos, .. }) = w.fds.get_mut(&fd) { *pos += n as u64; }
+        total += n as u32;
+        if n < len { break; }
+        continue;
+    }
     let chunk: Vec<u8> = match w.fds.get_mut(&fd) {
         // Nothing types into a wasi program yet: it gets EOF, not
         // a hang. A REPL will need a real stdin here.
@@ -156,6 +165,13 @@ for i in 0..n {
     if len == 0 { continue; }
     // pread must not move the cursor — with the bytes already in
     // hand that is just not touching `pos`.
+    if let Some(Handle::Reader { .. }) = w.fds.get(&fd) {
+        let n = match reader_read(mem, w, fd, pos as u64, ptr, len) { Ok(n) => n, Err(e) => return e };
+        total += n as u32;
+        pos += n;
+        if n < len { break; }
+        continue;
+    }
     let chunk: Vec<u8> = match w.fds.get(&fd) {
         Some(Handle::File { data, .. }) => {
             let start = pos.min(data.len());
@@ -184,6 +200,7 @@ match w.fds.get(&fd) {
         if !*writable { return EPERM; }
         if let Err(e) = grow_file(w, fd, end) { return e; }
     }
+    Some(Handle::Reader { .. }) => return EPERM,
     _ => {}
 }
 match w.fds.get_mut(&fd) {
@@ -212,6 +229,18 @@ let pos = match w.fds.get_mut(&fd) {
         *pos = np as usize;
         *pos as u64
     }
+    Some(Handle::Reader { reader, pos }) => {
+        let base = match whence {
+            0 => 0i64,
+            1 => i64::try_from(*pos).unwrap_or(i64::MAX),
+            2 => i64::try_from(reader.size()).unwrap_or(i64::MAX),
+            _ => return EINVAL,
+        };
+        let np = match base.checked_add(off) { Some(v) => v, None => return EINVAL };
+        if np < 0 { return EINVAL; }
+        *pos = np as u64;
+        *pos
+    }
     Some(_) => return ESPIPE,
     None => return EBADF,
 };
@@ -222,6 +251,7 @@ pub(crate) fn fd_tell(mem: &mut [u8], st: &mut HS, fd: i32, out: i32) -> i32 {
 let w = wasi_of!(st);
 let pos = match w.fds.get(&fd) {
     Some(Handle::File { pos, .. }) => *pos as u64,
+    Some(Handle::Reader { pos, .. }) => *pos,
     Some(_) => return ESPIPE,
     None => return EBADF,
 };
@@ -264,7 +294,7 @@ let w = wasi_of!(st);
 let (ft, flags) = match w.fds.get(&fd) {
     Some(Handle::Stdin) | Some(Handle::Stdout) | Some(Handle::Stderr) => (FT_CHR, 0u16),
     Some(Handle::Dir { .. }) => (FT_DIR, 0),
-    Some(Handle::File { .. }) => (FT_REG, 0),
+    Some(Handle::File { .. }) | Some(Handle::Reader { .. }) => (FT_REG, 0),
     None => return EBADF,
 };
 let mut b = [0u8; 24];
@@ -279,6 +309,7 @@ pub(crate) fn fd_filestat_get(mem: &mut [u8], st: &mut HS, fd: i32, out: i32) ->
 let w = wasi_of!(st);
 let b = match w.fds.get(&fd) {
     Some(Handle::File { data, .. }) => filestat_bytes(EntryKind::File, data.len() as u64, 0),
+    Some(Handle::Reader { reader, .. }) => filestat_bytes(EntryKind::File, reader.size(), 0),
     Some(Handle::Dir { path, .. }) => match fs::stat(path) {
         Ok(Some(s)) => filestat_bytes(s.kind, s.size, s.mtime),
         Ok(None) => return ENOENT,
@@ -400,6 +431,17 @@ if let Some(st_) = &existing {
     if oflags & O_CREAT == 0 { return ENOENT; }
 }
 
+// Read-only: served range by range, never loaded whole.
+if existing.is_some() && !want_write {
+    let budget = file_budget(w, -1);
+    let reader = match fs::RangeReader::open(&full, budget) {
+        Ok(Some(r)) => r,
+        Ok(None) => return ENOENT,
+        Err(e) => return range_errno(&e),
+    };
+    let fd = w.insert(Handle::Reader { reader, pos: 0 });
+    return match w32(mem, out, fd as u32) { Ok(()) => SUCCESS, Err(e) => e };
+}
 let data = if existing.is_some() && oflags & O_TRUNC == 0 {
     match fs::read(&full) {
         Ok(Some(d)) => d,

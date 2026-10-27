@@ -173,6 +173,18 @@ pub fn read_chunk(hash: &[u8; 32]) -> Result<Vec<u8>, FsError> {
     fs::read_chunk(hash).map_err(path_to_fs_err)
 }
 
+/// Open `name` for ranged reads ([`fs::RangeReader`]). A single Blob longer
+/// than `budget` is refused with `OutOfMemory` before it is read.
+pub fn open_range(name: &str, budget: usize) -> Result<fs::RangeReader, FsError> {
+    let path = clean_path(name);
+    validate(path)?;
+    match fs::RangeReader::open(path, budget) {
+        Ok(Some(r)) => Ok(r),
+        Ok(None) => Err(FsError::ObjectNotFound),
+        Err(e) => Err(path_to_fs_err(e)),
+    }
+}
+
 /// Open a streaming writer for `name`. Use this for inputs that don't
 /// fit comfortably in a single `Vec<u8>` (downloads, ISO images, media
 /// blobs). The writer accumulates fixed-size chunks, encrypt-stores each

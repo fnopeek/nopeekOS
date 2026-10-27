@@ -176,6 +176,8 @@ pub(crate) struct HostState {
     /// shared with the kernel's own clients, so a handle is honoured only
     /// if it is listed here; all of them close when the module ends.
     pub(crate) tcp_handles: Vec<usize>,
+    /// Files this module holds open (`npk_file_*`); the slot is the handle.
+    pub(crate) files: Vec<Option<host_core::OpenFile>>,
 }
 
 /// The instance owns its capability: when it ends, on any path, the
@@ -229,8 +231,9 @@ struct WasmJob {
     bytes: Vec<u8>,
     cap_id: CapId,
     terminal_idx: u8,
-    name: [u8; 32],
-    name_len: u8,
+    /// Whole, never cut: it keys `priv/<name>`, `sys/config/<name>` and the
+    /// vault check, so two modules must never share a prefix of it.
+    name: String,
     /// Pre-allocated widget window id for widget-kind apps. 0 = app
     /// will get a window on its first npk_scene_commit (classic path).
     widget_window_id: u32,
@@ -510,13 +513,9 @@ fn spawn_on_worker_inner_engine(
         }
     };
 
-    let mut name = [0u8; 32];
-    let nlen = module_name.len().min(32);
-    name[..nlen].copy_from_slice(&module_name.as_bytes()[..nlen]);
-
     JOB_DONE[slot].store(false, core::sync::atomic::Ordering::Relaxed);
     jobs[slot] = Some(WasmJob {
-        bytes: wasm_bytes, cap_id, terminal_idx, name, name_len: nlen as u8,
+        bytes: wasm_bytes, cap_id, terminal_idx, name: String::from(module_name),
         widget_window_id: widget_wid, launch_arg, use_forge,
     });
     drop(jobs);
@@ -544,7 +543,7 @@ fn wasm_job_dropped(arg: u64) {
     let job = WASM_JOBS.lock()[slot].take();
     if let Some(job) = job {
         kprintln!("[npk] WASM: {} not started, no fiber for it",
-            core::str::from_utf8(&job.name[..job.name_len as usize]).unwrap_or("?"));
+            job.name.as_str());
         if (job.terminal_idx as usize) < MAX_APP_BUFS {
             APP_RUNNING[job.terminal_idx as usize].store(false, AtOrd::Release);
             crate::intent::wake_shell();
@@ -585,7 +584,7 @@ fn wasm_worker_task(arg: u64) {
     let core_id = crate::smp::per_core::current_core_id();
 
     // Register process in process table
-    let name_str = core::str::from_utf8(&job.name[..job.name_len as usize]).unwrap_or("?");
+    let name_str = job.name.as_str();
     let pid = crate::process::spawn(name_str, crate::process::KIND_WASM, terminal_idx, core_id as u8);
 
     let mut store = Store::new(&engine, HostState {
@@ -608,6 +607,7 @@ fn wasm_worker_task(arg: u64) {
         http_status: 0,
         wasi: None,
         tcp_handles: Vec::new(),
+        files: Vec::new(),
     });
     store.limiter(|s| &mut s.limits);
     let _ = store.set_fuel(INTERACTIVE_FUEL);
@@ -670,7 +670,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
     crate::smp::fiber::mark_preemptible();
     let terminal_idx = job.terminal_idx;
     let core_id = crate::smp::per_core::current_core_id();
-    let name_str = core::str::from_utf8(&job.name[..job.name_len as usize]).unwrap_or("?");
+    let name_str = job.name.as_str();
     let pid = crate::process::spawn(name_str, crate::process::KIND_WASM, terminal_idx, core_id as u8);
 
     // From here every exit must clean up, otherwise a process is left behind
@@ -725,6 +725,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
         http_status: 0,
         wasi: None,
         tcp_handles: Vec::new(),
+        files: Vec::new(),
     };
 
     let host = forge_glue::NpkHost(&raw mut hs);
@@ -829,6 +830,7 @@ fn execute_inner(
         http_status: 0,
         wasi: None,
         tcp_handles: Vec::new(),
+        files: Vec::new(),
     });
     store.limiter(|s| &mut s.limits);
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
@@ -913,6 +915,7 @@ pub fn execute_wasi(
         http_status: 0,
         wasi: Some(ctx),
         tcp_handles: Vec::new(),
+        files: Vec::new(),
     });
     store.limiter(|s| &mut s.limits);
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
@@ -983,6 +986,7 @@ fn execute_inner_forge(
         http_status: 0,
         wasi: None,
         tcp_handles: Vec::new(),
+        files: Vec::new(),
     };
     let host = forge_glue::NpkHost(&raw mut hs);
     let Some(mut inst) = crate::forge_rt::Instance::new_with_host(&m, &host) else {
@@ -1052,6 +1056,7 @@ pub fn execute_wasi_forge(
         http_status: 0,
         wasi: Some(ctx),
         tcp_handles: Vec::new(),
+        files: Vec::new(),
     };
     let host = forge_glue::NpkHost(&raw mut hs);
     let mut inst = crate::forge_rt::Instance::new_with_host(&m, &host)
@@ -1119,6 +1124,9 @@ fn cleanup_instance_state(state: &mut HostState) {
         let _ = crate::net::tcp::close(h);
     }
     crate::wasm::host_core::tls_release_owner(state.pid);
+    // A file still being written is dropped unpublished: its name keeps the
+    // old content, and the chunks already stored go to the next GC.
+    state.files.clear();
     crate::audio::release_owner(state.pid);
     if let Some(hw) = state.hw.take() {
         release_hw(hw);

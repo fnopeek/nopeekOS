@@ -29,7 +29,6 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
@@ -39,7 +38,7 @@ use crate::shade::widgets::abi::IconId;
 const FS_PATH: &str = "sys/icons/phosphor";
 const MAGIC: &[u8; 8] = b"NPKIATLS";
 const PATH_MAGIC: &[u8; 8] = b"NPKIPATH";
-/// Alpha bytes the rasterized-size cache may hold before it starts over.
+/// Alpha bytes the rasterized-size cache holds; past it the coldest go.
 const CACHE_MAX: usize = 4 * 1024 * 1024;
 
 /// Parsed atlas header + raw bytes, stored once at load time.
@@ -48,8 +47,7 @@ pub struct Atlas {
     sizes:      Vec<u16>,
     entries:    Vec<IndexEntry>,
     /// (icon id, px) → alpha, filled from the outlines on first use.
-    cache:      BTreeMap<(u16, u16), Vec<u8>>,
-    cache_bytes: usize,
+    cache:      crate::gui::lru::LruBytes<(u16, u16), Vec<u8>>,
 }
 
 struct IndexEntry {
@@ -116,12 +114,8 @@ pub fn with_alpha<R>(icon: IconId, size_px: u16, f: impl FnOnce(u16, &[u8]) -> R
             let key = (icon.0, size_px);
             if !atlas.cache.contains_key(&key) {
                 let alpha = crate::gui::icon_raster::rasterize(o, size_px);
-                if atlas.cache_bytes + alpha.len() > CACHE_MAX {
-                    atlas.cache.clear();
-                    atlas.cache_bytes = 0;
-                }
-                atlas.cache_bytes += alpha.len();
-                atlas.cache.insert(key, alpha);
+                let size = alpha.len();
+                atlas.cache.insert(key, alpha, size);
             }
             return atlas.cache.get(&key).map(|a| f(size_px, a));
         }
@@ -199,7 +193,7 @@ fn parse(bytes: Vec<u8>) -> Result<Atlas, &'static str> {
 
     // Sorted by id for `with_alpha`'s binary search.
     entries.sort_unstable_by_key(|e| e.id);
-    Ok(Atlas { bytes, sizes, entries, cache: BTreeMap::new(), cache_bytes: 0 })
+    Ok(Atlas { bytes, sizes, entries, cache: crate::gui::lru::LruBytes::new(CACHE_MAX) })
 }
 
 /// The version-2 outline section at `at`, attached to `entries` by id.

@@ -14,8 +14,8 @@
 //! A call that writes one complete object (a file, a list, a string) into a
 //! guest buffer answers a buffer too small for it with `-(needed + 2)` and
 //! writes nothing; -1 is an error or a refusal (`host_core::write_whole`).
-//! A queue pop leaves the item queued. Stream calls (`npk_tcp_recv`, ring
-//! and mix polls) return what fits, like `read`.
+//! A queue pop leaves the item queued. Stream calls (`npk_tcp_recv`,
+//! `npk_file_read`, ring and mix polls) return what fits, like `read`.
 
 use super::host_core;
 use super::HostState;
@@ -312,6 +312,31 @@ host_imports! {
 
     // npk_store(name_ptr, name_len, data_ptr, data_len) -> 0 or -1
     mem fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
+
+    // ── npk_file_* ─────────────────────────────
+    //
+    // A file read at any offset or written as a stream, for files too large
+    // to move whole. Open and create apply the gates of npk_fetch and
+    // npk_store; every later call checks them again. At most 32 open per
+    // module; all of them close when it ends, a writer unpublished.
+
+    // npk_file_open(name_ptr, name_len) -> handle or -1
+    mem fn npk_file_open(name_ptr: i32, name_len: i32) -> i32;
+    // npk_file_read(handle, offset, buf_ptr, buf_max) -> bytes, 0 at the end, or -1.
+    // A stream read: what fits, a short count is no error.
+    mem fn npk_file_read(handle: i32, offset: i64, buf_ptr: i32, buf_max: i32) -> i32;
+    // npk_file_size(handle) -> file length (a writer: bytes so far) or -1
+    ctx fn npk_file_size(handle: i32) -> i64;
+    // npk_file_create(name_ptr, name_len) -> handle or -1. The file appears
+    // at npk_file_close, whole; until then the name keeps its old content.
+    mem fn npk_file_create(name_ptr: i32, name_len: i32) -> i32;
+    // npk_file_write(handle, data_ptr, len) -> len or -1. Appends; checks the
+    // system reserve and the private-area quota on every call.
+    mem fn npk_file_write(handle: i32, data_ptr: i32, len: i32) -> i32;
+    // npk_file_close(handle) -> 0 or -1. Publishes a writer's file.
+    ctx fn npk_file_close(handle: i32) -> i32;
+    // npk_file_abort(handle) -> 0 or -1. Closes without publishing.
+    ctx fn npk_file_abort(handle: i32) -> i32;
 
     // ── Keyvault ───────────────────────────────
     //

@@ -21,7 +21,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use fontdue::{Font, FontSettings, Metrics};
-use hashbrown::HashMap;
 use spin::Mutex;
 
 use crate::shade::widgets::abi::TextStyle;
@@ -118,11 +117,10 @@ pub struct CachedGlyph {
     pub advance:     f32,
 }
 
-static GLYPH_CACHE: Mutex<Option<HashMap<GlyphKey, CachedGlyph>>> = Mutex::new(None);
-/// Alpha bytes held by the cache. An app chooses sizes (6..64 px) and
-/// text freely, so the key space is large; at the cap the cache starts
-/// over instead of growing for the rest of the boot.
-static GLYPH_CACHE_BYTES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// Rasterized glyphs. An app chooses sizes (6..64 px) and text freely, so
+/// the key space is large; past `GLYPH_CACHE_MAX` alpha bytes the glyphs
+/// drawn longest ago go.
+static GLYPH_CACHE: Mutex<Option<crate::gui::lru::LruBytes<GlyphKey, CachedGlyph>>> = Mutex::new(None);
 const GLYPH_CACHE_MAX: usize = 16 * 1024 * 1024;
 
 // ── Init ──────────────────────────────────────────────────────────────
@@ -225,7 +223,7 @@ pub fn init() {
         Err(_) => crate::kprintln!(
             "[npk] text::init: {} not found; mono falls back to Inter", MONO_FS_PATH),
     }
-    *GLYPH_CACHE.lock() = Some(HashMap::new());
+    *GLYPH_CACHE.lock() = Some(crate::gui::lru::LruBytes::new(GLYPH_CACHE_MAX));
     READY.store(true, Ordering::Release);
 }
 
@@ -373,12 +371,7 @@ where
 
     if !cache.contains_key(&key) {
         let (m, alpha) = font.rasterize_indexed(glyph, d.size_px as f32);
-        use core::sync::atomic::Ordering::Relaxed;
-        if GLYPH_CACHE_BYTES.load(Relaxed) + alpha.len() > GLYPH_CACHE_MAX {
-            cache.clear();
-            GLYPH_CACHE_BYTES.store(0, Relaxed);
-        }
-        GLYPH_CACHE_BYTES.fetch_add(alpha.len(), Relaxed);
+        let size = alpha.len();
         cache.insert(key, CachedGlyph {
             alpha,
             width:       m.width  as u16,
@@ -386,7 +379,7 @@ where
             xmin:        m.xmin   as i16,
             ymin:        m.ymin   as i16,
             advance:     m.advance_width,
-        });
+        }, size);
     }
     cache.get(&key).map(f)
 }

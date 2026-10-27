@@ -2347,24 +2347,32 @@ pub(crate) fn npk_netdev_set_link_state(ctx: &mut HostState, carrier: i32, dorma
     0
 }
 
+/// May the module of `ctx` read file `name`? The rule of `npk_fetch` and
+/// `npk_file_*`: another module's private area is closed, even with global
+/// READ; the module's own area is open even without READ
+/// (`wasm::is_own_private`).
+fn read_allowed(ctx: &HostState, name: &str, call: &str) -> bool {
+    if !crate::wasm::private_area_allows(name, &ctx.module_name) {
+        kprintln!("[npk] WASM: {} DENIED ({} gehoert einem anderen Modul)", call, name);
+        return false;
+    }
+    if !crate::wasm::is_own_private(name, &ctx.module_name) {
+        if let Err(e) = capability::check_global(&ctx.cap_id, capability::Rights::READ) {
+            kprintln!("[npk] WASM: {} DENIED (cap_id={:08x}, {:?})",
+                call, capability::short_id(&ctx.cap_id), e);
+            return false;
+        }
+    }
+    true
+}
+
 pub(crate) fn npk_fetch(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
-    let cap_id = ctx.cap_id;
     let name = match read_str(mem, name_ptr, name_len) {
         Some(s) => s,
         None => return -1,
     };
-    // Another module's private area is closed, even with global READ. The
-    // module's own area is open even without READ (`wasm::is_own_private`).
-    if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
-        kprintln!("[npk] WASM: npk_fetch DENIED ({} gehoert einem anderen Modul)", name);
+    if !read_allowed(ctx, &name, "npk_fetch") {
         return -1;
-    }
-    if !crate::wasm::is_own_private(&name, &ctx.module_name) {
-        if let Err(e) = capability::check_global(&cap_id, capability::Rights::READ) {
-            kprintln!("[npk] WASM: npk_fetch DENIED (cap_id={:08x}, {:?})",
-                capability::short_id(&cap_id), e);
-            return -1;
-        }
     }
 
     let (content, _) = match crate::npkfs::fetch(&name) {
@@ -2576,26 +2584,24 @@ pub(crate) fn npk_http_last_error(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
 /// A module's private area may hold this share of the store: 1/32.
 const PRIVATE_QUOTA_DIVISOR: u64 = 32;
 
-pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32 {
-    let cap_id = ctx.cap_id;
-    let name = match read_str(mem, name_ptr, name_len) {
-        Some(s) => s,
-        None => return -1,
-    };
-
+/// How the module of `ctx` may write file `name`, the rule of `npk_store`
+/// and `npk_file_*`: `Some(false)` by capability or as its own settings
+/// file, `Some(true)` only through its private area (the quota applies),
+/// `None` refused.
+fn write_allowed(ctx: &HostState, name: &str, call: &str) -> Option<bool> {
     // Apps may not write the module store or the trust store — see
     // is_trust_critical_path.
     // Checked before the grant path so a per-file grant can never
     // become a way in there.
-    if is_trust_critical_path(&name) {
-        kprintln!("[npk] WASM: npk_store DENIED ({} is read-only to apps)", name);
-        return -1;
+    if is_trust_critical_path(name) {
+        kprintln!("[npk] WASM: {} DENIED ({} is read-only to apps)", call, name);
+        return None;
     }
     // Another module's private area is closed, even with global READ and
     // WRITE. See `wasm::private_area_owner`.
-    if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
-        kprintln!("[npk] WASM: npk_store DENIED ({} gehoert einem anderen Modul)", name);
-        return -1;
+    if !crate::wasm::private_area_allows(name, &ctx.module_name) {
+        kprintln!("[npk] WASM: {} DENIED ({} gehoert einem anderen Modul)", call, name);
+        return None;
     }
 
     // Four ways to be allowed to write, narrowest last:
@@ -2609,15 +2615,64 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
     //   4. the app's own private area, `priv/<module>/…`. It needs no
     //      capability: it is this program's state, not a file of the
     //      machine's store.
+    let cap_id = ctx.cap_id;
     let own_config = alloc::format!("sys/config/{}", ctx.module_name);
     let has_write = capability::check_global(&cap_id, capability::Rights::WRITE).is_ok()
-        || capability::check_path_grant(&cap_id, &name, capability::Rights::WRITE)
+        || capability::check_path_grant(&cap_id, name, capability::Rights::WRITE)
         || name == own_config;
-    let by_private = !has_write && crate::wasm::is_own_private(&name, &ctx.module_name);
-    if !has_write && !by_private {
-        kprintln!("[npk] WASM: npk_store DENIED (no WRITE, no grant for {})", name);
-        return -1;
+    if has_write {
+        return Some(false);
     }
+    if crate::wasm::is_own_private(name, &ctx.module_name) {
+        return Some(true);
+    }
+    kprintln!("[npk] WASM: {} DENIED (no WRITE, no grant for {})", call, name);
+    None
+}
+
+/// The module's private area and its quota, a share of the store's size.
+fn private_area(ctx: &HostState) -> (String, u64) {
+    let area = alloc::format!("{}/{}", crate::wasm::PRIVATE_ROOT, ctx.module_name);
+    let quota = crate::npkfs::stats()
+        .map_or(0, |(total, ..)| total * crate::npkfs::BLOCK_SIZE as u64 / PRIVATE_QUOTA_DIVISOR);
+    (area, quota)
+}
+
+/// Bytes the module's open writers into its private area have taken in and
+/// not yet committed; they count against the quota like stored ones.
+fn private_pending(ctx: &HostState) -> u64 {
+    ctx.files.iter().flatten().map(|f| match f {
+        OpenFile::Write { name, writer, .. }
+            if crate::wasm::is_own_private(name, &ctx.module_name) => writer.written(),
+        _ => 0,
+    }).sum()
+}
+
+/// Whether the private area takes `len` more bytes, where `committed` is
+/// what it holds besides the file being written.
+fn private_quota_ok(ctx: &HostState, committed: u64, len: usize) -> bool {
+    let (_, quota) = private_area(ctx);
+    if committed.saturating_add(private_pending(ctx)).saturating_add(len as u64) > quota {
+        kprintln!("[npk] WASM: write DENIED (privater Bereich von {} voll, {} MiB)",
+            ctx.module_name, quota / (1024 * 1024));
+        return false;
+    }
+    true
+}
+
+/// What the private area holds besides file `name`.
+fn private_committed(ctx: &HostState, name: &str) -> u64 {
+    let (area, _) = private_area(ctx);
+    crate::npkfs::tree_bytes(&area).saturating_sub(crate::npkfs::tree_bytes(name))
+}
+
+pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32 {
+    let cap_id = ctx.cap_id;
+    let name = match read_str(mem, name_ptr, name_len) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let Some(by_private) = write_allowed(ctx, &name, "npk_store") else { return -1 };
     let Some(payload) = glen(data_len).and_then(|n| guest(mem, data_ptr, n)) else { return -1 };
 
     if !crate::npkfs::room_for(payload.len()) {
@@ -2627,16 +2682,8 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
     }
     // The private area must not be a way to fill the disk without WRITE: a
     // quota per module (Linux `dquot`), a share of the store's size.
-    if by_private {
-        let area = alloc::format!("{}/{}", crate::wasm::PRIVATE_ROOT, ctx.module_name);
-        let held = crate::npkfs::tree_bytes(&area).saturating_sub(crate::npkfs::tree_bytes(&name));
-        let quota = crate::npkfs::stats()
-            .map_or(0, |(total, ..)| total * crate::npkfs::BLOCK_SIZE as u64 / PRIVATE_QUOTA_DIVISOR);
-        if held.saturating_add(payload.len() as u64) > quota {
-            kprintln!("[npk] WASM: npk_store DENIED (privater Bereich von {} voll, {} MiB)",
-                ctx.module_name, quota / (1024 * 1024));
-            return -1;
-        }
+    if by_private && !private_quota_ok(ctx, private_committed(ctx, &name), payload.len()) {
+        return -1;
     }
 
     // Insert-or-replace: apps with state to persist (panel
@@ -2647,6 +2694,203 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
         Ok(_) => 0,
         Err(_) => -1,
     }
+}
+
+// ── Ranged file access ───────────────────────────────────────────────────
+//
+// `npk_file_*`: a file opened once and read at any offset, or written as a
+// sequential stream, so neither side holds the whole file. Same gates as
+// `npk_fetch` and `npk_store`, checked at open and again on every call.
+// The handle table lives in the instance state: a handle names nothing in
+// another module, and every handle goes when the module ends.
+
+/// One open file of a module.
+pub(crate) enum OpenFile {
+    Read {
+        name: String,
+        reader: crate::npkfs::fs::RangeReader,
+    },
+    Write {
+        name: String,
+        writer: crate::npkfs::fs::StreamingWriter,
+        /// `private_committed` at a root: recomputed only after a commit.
+        committed: Option<([u8; 32], u64)>,
+    },
+}
+
+impl OpenFile {
+    /// Kernel memory the handle holds: a reader's current chunk (or its
+    /// whole Blob), a writer's chunk buffer.
+    fn held(&self) -> usize {
+        match self {
+            OpenFile::Read { reader, .. } => reader.held(),
+            OpenFile::Write { .. } => crate::npkfs::STREAMING_CHUNK_SIZE,
+        }
+    }
+}
+
+/// Files one module may hold open at once, like its TCP connections
+/// (`net::tcp::PER_OWNER_MAX`, Linux `RLIMIT_NOFILE`).
+const FILES_PER_MODULE: usize = 32;
+
+/// Kernel memory the module's open files other than `except` leave for it:
+/// all together stay within half of the free RAM, the rule wasi descriptors
+/// follow (`wasi::grow_file`).
+fn file_budget(ctx: &HostState, except: usize) -> usize {
+    let held: usize = ctx.files.iter().enumerate()
+        .filter(|(i, _)| *i != except)
+        .filter_map(|(_, f)| f.as_ref().map(OpenFile::held))
+        .sum();
+    (crate::memory::stats().0.saturating_mul(crate::memory::PAGE_SIZE) / 2).saturating_sub(held)
+}
+
+/// A free slot in the module's handle table, or `None` at the limit.
+fn file_slot(ctx: &mut HostState) -> Option<usize> {
+    if let Some(i) = ctx.files.iter().position(|f| f.is_none()) {
+        return Some(i);
+    }
+    if ctx.files.len() >= FILES_PER_MODULE {
+        kprintln!("[npk] WASM: {} holds {} files open, none more", ctx.module_name, FILES_PER_MODULE);
+        return None;
+    }
+    ctx.files.push(None);
+    Some(ctx.files.len() - 1)
+}
+
+/// The slot of an open handle.
+fn file_index(ctx: &HostState, handle: i32) -> Option<usize> {
+    let i = usize::try_from(handle).ok()?;
+    ctx.files.get(i)?.as_ref().map(|_| i)
+}
+
+/// `npk_file_open(name_ptr, name_len) -> handle | -1`
+pub(crate) fn npk_file_open(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
+    let Some(name) = read_str(mem, name_ptr, name_len) else { return -1 };
+    if !read_allowed(ctx, &name, "npk_file_open") {
+        return -1;
+    }
+    let Some(i) = file_slot(ctx) else { return -1 };
+    let Ok(reader) = crate::npkfs::open_range(&name, file_budget(ctx, i)) else { return -1 };
+    ctx.files[i] = Some(OpenFile::Read { name, reader });
+    i as i32
+}
+
+/// `npk_file_read(handle, offset, buf_ptr, buf_max) -> n | 0 (end) | -1`
+///
+/// A stream read: what fits from `offset` on, never past the end of the
+/// file; a short read is no error.
+pub(crate) fn npk_file_read(mem: &mut [u8], ctx: &mut HostState,
+                            handle: i32, offset: i64, buf_ptr: i32, buf_max: i32) -> i32 {
+    let Some(i) = file_index(ctx, handle) else { return -1 };
+    let Ok(offset) = u64::try_from(offset) else { return -1 };
+    let Some(dst) = glen(buf_max).and_then(|n| guest_mut(mem, buf_ptr, n)) else { return -1 };
+    let allowed = match &ctx.files[i] {
+        Some(OpenFile::Read { name, .. }) => read_allowed(ctx, name, "npk_file_read"),
+        _ => false,
+    };
+    if !allowed { return -1; }
+    let budget = file_budget(ctx, i);
+    let Some(OpenFile::Read { reader, .. }) = ctx.files[i].as_mut() else { return -1 };
+    match reader.read_at(offset, dst, budget) {
+        Ok(n) => n as i32,
+        Err(_) => -1,
+    }
+}
+
+/// `npk_file_size(handle) -> bytes | -1`: a reader's file length, a
+/// writer's bytes so far.
+pub(crate) fn npk_file_size(ctx: &mut HostState, handle: i32) -> i64 {
+    let Some(i) = file_index(ctx, handle) else { return -1 };
+    let n = match &ctx.files[i] {
+        Some(OpenFile::Read { reader, .. }) => reader.size(),
+        Some(OpenFile::Write { writer, .. }) => writer.written(),
+        None => return -1,
+    };
+    i64::try_from(n).unwrap_or(-1)
+}
+
+/// `npk_file_create(name_ptr, name_len) -> handle | -1`
+///
+/// The file appears at `npk_file_close`, whole and at once; until then the
+/// name keeps its old content, if it had one.
+pub(crate) fn npk_file_create(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
+    let Some(name) = read_str(mem, name_ptr, name_len) else { return -1 };
+    if write_allowed(ctx, &name, "npk_file_create").is_none() {
+        return -1;
+    }
+    let Some(i) = file_slot(ctx) else { return -1 };
+    // The writer allocates its chunk buffer as it opens.
+    if file_budget(ctx, i) < crate::npkfs::STREAMING_CHUNK_SIZE {
+        return -1;
+    }
+    let Ok(writer) = crate::npkfs::open_streaming_write(&name) else { return -1 };
+    ctx.files[i] = Some(OpenFile::Write { name, writer, committed: None });
+    i as i32
+}
+
+/// `npk_file_write(handle, buf_ptr, len) -> len | -1`: append `len` bytes.
+pub(crate) fn npk_file_write(mem: &mut [u8], ctx: &mut HostState,
+                             handle: i32, buf_ptr: i32, len: i32) -> i32 {
+    let Some(i) = file_index(ctx, handle) else { return -1 };
+    let Some(data) = glen(len).and_then(|n| guest(mem, buf_ptr, n)) else { return -1 };
+    let (name, cached) = match &ctx.files[i] {
+        Some(OpenFile::Write { name, committed, .. }) => (name.clone(), *committed),
+        _ => return -1,
+    };
+    let Some(by_private) = write_allowed(ctx, &name, "npk_file_write") else { return -1 };
+    if !crate::npkfs::room_for(data.len()) {
+        kprintln!("[npk] WASM: npk_file_write DENIED ({} B, npkFS is down to the system reserve)",
+            data.len());
+        return -1;
+    }
+    if by_private {
+        let root = crate::npkfs::storage::current_root();
+        let committed = match (root, cached) {
+            (Some(r), Some((at, bytes))) if r == at => bytes,
+            _ => {
+                let bytes = private_committed(ctx, &name);
+                if let (Some(r), Some(OpenFile::Write { committed, .. })) = (root, ctx.files[i].as_mut()) {
+                    *committed = Some((r, bytes));
+                }
+                bytes
+            }
+        };
+        if !private_quota_ok(ctx, committed, data.len()) {
+            return -1;
+        }
+    }
+    let Some(OpenFile::Write { writer, .. }) = ctx.files[i].as_mut() else { return -1 };
+    match writer.write(data) {
+        Ok(()) => data.len() as i32,
+        Err(_) => -1,
+    }
+}
+
+/// `npk_file_close(handle) -> 0 | -1`. Closing a writer publishes the file;
+/// -1 then means it was not written and the name keeps its old content.
+pub(crate) fn npk_file_close(ctx: &mut HostState, handle: i32) -> i32 {
+    let Some(i) = file_index(ctx, handle) else { return -1 };
+    match ctx.files[i].take() {
+        Some(OpenFile::Write { name, writer, .. }) => {
+            if write_allowed(ctx, &name, "npk_file_close").is_none() {
+                return -1;
+            }
+            match writer.finish() {
+                Ok(_) => 0,
+                Err(_) => -1,
+            }
+        }
+        Some(OpenFile::Read { .. }) => 0,
+        None => -1,
+    }
+}
+
+/// `npk_file_abort(handle) -> 0 | -1`. Closes without publishing: a
+/// writer's file is not written. For a reader the same as close.
+pub(crate) fn npk_file_abort(ctx: &mut HostState, handle: i32) -> i32 {
+    let Some(i) = file_index(ctx, handle) else { return -1 };
+    ctx.files[i] = None;
+    0
 }
 
 pub(crate) fn npk_home_dir(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {

@@ -5,6 +5,9 @@ use crate::{Ec, Namespace, Node};
 use alloc::collections::BTreeMap;
 use alloc::{format, string::String, vec, vec::Vec};
 
+/// Longest `Sleep` (ACPICA `acconfig.h`), two seconds.
+const ACPI_MAX_SLEEP: u64 = 2000;
+
 const MAX_DEPTH: usize = 64;
 
 pub struct Interp<'a> {
@@ -1169,14 +1172,19 @@ impl<'a> Interp<'a> {
                 // and returns the old value without any error.
                 let (a, p1) = self.eval(f, p + 2)?;
                 let ms = if b[p + 1] == 0x21 {
-                    // Stall is in microseconds; round up so Stall(1) does
-                    // not become zero.
-                    ((a.as_int() + 999) / 1000) as u32
+                    // ACPICA `acpi_ex_system_do_stall`: longer than 255 us
+                    // is an AML error (the spec says 100). Rounded up to a
+                    // millisecond so Stall(1) does not become zero.
+                    let us = a.as_int();
+                    if us > 255 {
+                        return Err(format!("Stall({us}): longer than 255 us"));
+                    }
+                    ((us + 999) / 1000) as u32
                 } else {
-                    a.as_int() as u32
+                    // `acpi_ex_system_do_sleep`: capped at ACPI_MAX_SLEEP.
+                    a.as_int().min(ACPI_MAX_SLEEP) as u32
                 };
-                // Cap: a DSDT must not stall us for minutes.
-                if ms > 0 { self.ec.sleep_ms(ms.min(50)); }
+                if ms > 0 { self.ec.sleep_ms(ms); }
                 Ok((Value::Uninit, p1))
             }
             0x31 => {

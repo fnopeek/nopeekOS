@@ -20,6 +20,13 @@ unsafe extern "C" {
 
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
+    fn npk_file_open(name_ptr: i32, name_len: i32) -> i32;
+    fn npk_file_read(handle: i32, offset: i64, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_file_size(handle: i32) -> i64;
+    fn npk_file_create(name_ptr: i32, name_len: i32) -> i32;
+    fn npk_file_write(handle: i32, data_ptr: i32, len: i32) -> i32;
+    fn npk_file_close(handle: i32) -> i32;
+    fn npk_file_abort(handle: i32) -> i32;
 
     // Keyvault — usable only by the signed `vault` GUI module.
     fn npk_vault_status() -> i32;
@@ -392,6 +399,54 @@ pub fn fetch(name: &[u8], buf: &mut [u8]) -> i32 {
 pub fn store(name: &[u8], data: &[u8]) -> i32 {
     // SAFETY: FFI; both ranges are borrowed for the call.
     unsafe { npk_store(name.as_ptr() as i32, name.len() as i32, data.as_ptr() as i32, data.len() as i32) }
+}
+
+/// Open file `name` for ranged reads (gates of `fetch`); a handle or -1.
+pub fn file_open(name: &[u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_file_open(name.as_ptr() as i32, name.len() as i32) }
+}
+
+/// Bytes of the file at `offset` into `buf`: the count, 0 at the end, -1 on
+/// error. A short count is no error. Offsets past `i64::MAX` are refused.
+pub fn file_read(handle: i32, offset: u64, buf: &mut [u8]) -> i32 {
+    let Ok(offset) = i64::try_from(offset) else { return -1 };
+    let len = buf.len().min(i32::MAX as usize) as i32;
+    // SAFETY: FFI; the kernel writes at most `len` bytes into `buf`, which
+    // is borrowed for the call.
+    unsafe { npk_file_read(handle, offset, buf.as_mut_ptr() as i32, len) }
+}
+
+/// Length of an open file (a writer: bytes so far), or -1.
+pub fn file_size(handle: i32) -> i64 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_file_size(handle) }
+}
+
+/// Start writing file `name` (gates of `store`); a handle or -1. The file
+/// appears at [`file_close`].
+pub fn file_create(name: &[u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_file_create(name.as_ptr() as i32, name.len() as i32) }
+}
+
+/// Append `data` (at most `i32::MAX` bytes per call); its length or -1.
+pub fn file_write(handle: i32, data: &[u8]) -> i32 {
+    let len = data.len().min(i32::MAX as usize) as i32;
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_file_write(handle, data.as_ptr() as i32, len) }
+}
+
+/// Close a handle; a writer's file is published. 0 or -1.
+pub fn file_close(handle: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_file_close(handle) }
+}
+
+/// Close a handle without publishing a writer's file. 0 or -1.
+pub fn file_abort(handle: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_file_abort(handle) }
 }
 
 // ── Keyvault — only the `vault` module may call ──

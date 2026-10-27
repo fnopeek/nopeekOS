@@ -923,24 +923,18 @@ pub fn copy_selection() {
     }
 }
 
-/// Paste the clipboard into the focused terminal by injecting its bytes into
-/// the keyboard stream — the interactive loop then consumes them exactly as
-/// typed input. Newlines act as Enter (run the line), matching terminals.
-/// Bounded to the keyboard ring so a huge paste can't overflow it.
+/// Paste the clipboard into the focused terminal as typed input, whole and
+/// with its UTF-8 intact. Newlines act as Enter (run the line), matching
+/// terminals; other control bytes are dropped.
 pub fn paste_clipboard() {
     let bytes = match crate::shade::clipboard::get_text() { Some(b) => b, None => return };
-    let mut injected = 0usize;
-    for &b in bytes.iter() {
-        let c = match b {
-            b'\n' | b'\r' => b'\n',
-            b'\t'         => b' ',
-            0x20..=0x7E   => b,
-            _             => continue,
-        };
-        crate::keyboard::inject_byte(c);
-        injected += 1;
-        if injected >= 256 { break; } // keyboard ring is 512; leave headroom
-    }
+    let clean: alloc::vec::Vec<u8> = bytes.iter().filter_map(|&b| match b {
+        b'\n' | b'\r' => Some(b'\n'),
+        b'\t'         => Some(b' '),
+        0x00..=0x1F | 0x7F => None,
+        _             => Some(b),
+    }).collect();
+    crate::keyboard::inject_paste(&clean);
 }
 
 /// Drop the selection if it belongs to terminal `idx` (its content just

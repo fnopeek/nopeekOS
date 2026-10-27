@@ -14,8 +14,7 @@ pub const KIND_SYSTEM: u8 = 2;
 
 pub struct Process {
     pub pid: u32,
-    pub name: [u8; 32],
-    pub name_len: u8,
+    pub name: alloc::string::String,
     pub kind: u8,
     pub terminal_idx: u8, // 255 = no terminal
     pub core_id: u8,
@@ -34,14 +33,10 @@ static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 /// Register a new process. Returns the assigned PID.
 pub fn spawn(name: &str, kind: u8, terminal_idx: u8, core_id: u8) -> u32 {
     let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
-    let mut proc_name = [0u8; 32];
-    let len = name.len().min(32);
-    proc_name[..len].copy_from_slice(&name.as_bytes()[..len]);
 
     let process = Process {
         pid,
-        name: proc_name,
-        name_len: len as u8,
+        name: alloc::string::String::from(name),
         kind,
         terminal_idx,
         core_id,
@@ -88,7 +83,7 @@ pub fn wasm_names_on_core(cid: usize) -> (alloc::string::String, u64) {
     for p in PROCS.lock().values() {
         if p.kind != KIND_WASM || p.core_id as usize != cid { continue; }
         if n > 0 { out.push_str(", "); }
-        out.push_str(core::str::from_utf8(&p.name[..p.name_len as usize]).unwrap_or("?"));
+        out.push_str(&p.name);
         n += 1;
     }
     (out, n)
@@ -170,8 +165,8 @@ pub fn sys_info(key: i32) -> i64 {
         25 => {
             PROCS.lock().get(&param).map(|p| {
                 let mut val = 0u64;
-                let len = (p.name_len as usize).min(8);
-                for i in 0..len { val |= (p.name[i] as u64) << (i * 8); }
+                let n = p.name.as_bytes();
+                for (i, &b) in n.iter().take(8).enumerate() { val |= (b as u64) << (i * 8); }
                 val as i64
             }).unwrap_or(0)
         }
@@ -179,10 +174,9 @@ pub fn sys_info(key: i32) -> i64 {
         // 26: name bytes 8-15 as i64
         26 => {
             PROCS.lock().get(&param).map(|p| {
-                if p.name_len <= 8 { return 0i64; }
                 let mut val = 0u64;
-                let len = (p.name_len as usize).min(16);
-                for i in 8..len { val |= (p.name[i] as u64) << ((i - 8) * 8); }
+                let n = p.name.as_bytes();
+                for (i, &b) in n.iter().skip(8).take(8).enumerate() { val |= (b as u64) << (i * 8); }
                 val as i64
             }).unwrap_or(0)
         }
