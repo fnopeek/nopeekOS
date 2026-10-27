@@ -85,28 +85,23 @@ pub fn list_row(
     on_click: Option<ActionId>,
     on_hover: Option<ActionId>,
 ) -> Widget {
-    let mut row_mods: Vec<Modifier> = Vec::with_capacity(6);
-    row_mods.push(Modifier::Padding(Padding::Lg.as_u16()));
+    // The `list_row` state of docs/spec/UI_REFRESH.md: selection is a
+    // tint plus a 2 px leading edge, never an outline.
+    let mut row_mods: Vec<Modifier> = Vec::with_capacity(7);
+    row_mods.push(Modifier::Padding(Padding::Xs.as_u16()));
+    row_mods.push(Modifier::MinHeight(LIST_ROW_H));
+    row_mods.push(Modifier::Rounded(Radius::Sm.as_u8()));
     if let Some(id) = on_click { row_mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { row_mods.push(Modifier::OnHover(id)); }
     if selected {
-        row_mods.push(Modifier::Background(Token::SurfaceElevated));
-        row_mods.push(Modifier::Border {
-            token:  Token::Accent,
-            width:  1,
-            radius: Radius::Sm.as_u8(),
-        });
+        row_mods.push(Modifier::Background(Token::AccentMuted));
     } else {
-        // Non-selected rows get a subtle hover highlight + a focus
-        // outline (Tab-nav). Selected rows skip both so hovering /
-        // focusing an already-selected row doesn't compete with its
-        // accent fill — keeps visual hierarchy stable.
         row_mods.push(Modifier::Hover(vec![
-            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Background(Token::SurfaceHover),
             Modifier::Rounded(Radius::Sm.as_u8()),
         ]));
         row_mods.push(Modifier::Focus(vec![
-            Modifier::Border { token: Token::OnSurfaceMuted, width: 1, radius: Radius::Sm.as_u8() },
+            Modifier::Ring { token: Token::AccentRing, width: 2 },
         ]));
     }
 
@@ -129,12 +124,11 @@ pub fn list_row(
         },
     ];
 
-    let icon_mods = if selected {
-        vec![Modifier::Tint(Token::Accent)]
-    } else {
-        vec![]
-    };
-    let mut children: Vec<Widget> = Vec::with_capacity(4);
+    let icon_mods = vec![Modifier::Tint(
+        if selected { Token::Accent } else { Token::OnSurfaceMuted },
+    )];
+    let mut children: Vec<Widget> = Vec::with_capacity(5);
+    children.push(mark(2, 26, selected.then_some(Token::Accent)));
     children.push(Widget::Icon { id: icon, size: 24, modifiers: icon_mods });
     children.push(Widget::Column {
         children:  text_col,
@@ -364,6 +358,7 @@ pub fn nav_row(
 }
 
 const NAV_ROW_H: u16 = 30;
+const LIST_ROW_H: u16 = 34;
 const NAV_ROW_RADIUS: u8 = 7;
 
 /// Horizontal toolbar with built-in padding. Children align centred.
@@ -439,16 +434,16 @@ pub fn grid_item(
     mods.push(Modifier::Padding(Padding::Sm.as_u16()));
     if let Some(id) = on_click { mods.push(Modifier::OnClick(id)); }
     if let Some(id) = on_hover { mods.push(Modifier::OnHover(id)); }
+    mods.push(Modifier::Rounded(Radius::Md.as_u8()));
     if selected {
-        mods.push(Modifier::Background(Token::SurfaceElevated));
-        mods.push(Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() });
+        mods.push(Modifier::Background(Token::AccentMuted));
     } else {
         mods.push(Modifier::Hover(vec![
-            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Background(Token::SurfaceHover),
             Modifier::Rounded(Radius::Md.as_u8()),
         ]));
         mods.push(Modifier::Focus(vec![
-            Modifier::Border { token: Token::OnSurfaceMuted, width: 1, radius: Radius::Md.as_u8() },
+            Modifier::Ring { token: Token::AccentRing, width: 2 },
         ]));
     }
 
@@ -587,7 +582,7 @@ pub fn button(label: &str, style: ButtonStyle, on_click: ActionId) -> Widget {
         ButtonStyle::Primary     => (Token::Accent,          Token::AccentMuted,   Token::AccentMuted),
         ButtonStyle::Secondary   => (Token::SurfaceElevated, Token::SurfaceMuted,  Token::Border),
         ButtonStyle::Ghost       => (Token::Surface,         Token::SurfaceMuted,  Token::Border),
-        ButtonStyle::Destructive => (Token::Danger,          Token::Warning,       Token::Warning),
+        ButtonStyle::Destructive => (Token::Danger,          Token::Danger,        Token::Danger),
     };
     // Text colour has to follow the fill, or a filled button paints
     // body-coloured text on its own Accent and reads as disabled. Ghost
@@ -601,12 +596,19 @@ pub fn button(label: &str, style: ButtonStyle, on_click: ActionId) -> Widget {
     mods.push(Modifier::Background(bg));
     if let Some(tok) = label_tint { mods.push(Modifier::Tint(tok)); }
     mods.push(Modifier::Rounded(Radius::Md.as_u8()));
-    mods.push(Modifier::Hover(vec![
-        Modifier::Background(hover_bg),
-    ]));
-    mods.push(Modifier::Active(vec![
-        Modifier::Background(active_bg),
-    ]));
+    // Danger has no muted twin; the destructive button lightens instead
+    // of turning into another colour.
+    let destructive = matches!(style, ButtonStyle::Destructive);
+    mods.push(Modifier::Hover(if destructive {
+        vec![Modifier::Background(hover_bg), Modifier::Opacity(220)]
+    } else {
+        vec![Modifier::Background(hover_bg)]
+    }));
+    mods.push(Modifier::Active(if destructive {
+        vec![Modifier::Background(active_bg), Modifier::Opacity(190)]
+    } else {
+        vec![Modifier::Background(active_bg)]
+    }));
     mods.push(Modifier::Focus(vec![
         Modifier::Border { token: Token::Accent, width: 2, radius: Radius::Md.as_u8() },
     ]));

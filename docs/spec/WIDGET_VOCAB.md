@@ -388,12 +388,12 @@ only reach for raw `Widget`/`Modifier` when no prefab fits. All live in
 
 | Prefab                                                   | Use                                              |
 |----------------------------------------------------------|--------------------------------------------------|
-| `list_row(icon, title, subtitle, selected, on_click: Option<ActionId>, on_hover: Option<ActionId>)` | Padding Lg row: 24 px icon, Body title over Muted subtitle. Selected: `SurfaceElevated` + 1 px `Accent` border, `Accent` icon, trailing arrow. Otherwise Hover `SurfaceMuted`, Focus 1 px `OnSurfaceMuted` border. |
+| `list_row(icon, title, subtitle, selected, on_click: Option<ActionId>, on_hover: Option<ActionId>)` | Min height 34, padding Xs: 2 px leading edge, 24 px icon, Body title over Muted subtitle. Selected: `AccentMuted` fill, `Accent` edge and icon, trailing arrow. Otherwise Hover `SurfaceHover`, Focus `Ring { AccentRing, 2 }`. |
 | `nav_row(icon, label, selected, on_click, on_hover)`     | 30 px sidebar item, 16 px icon. Selected: `AccentMuted` fill + `Accent` tint. Otherwise Hover `SurfaceHover`, Focus `AccentRing` ring. |
 | `sidebar_section(label, items)`                          | `Mono` label tinted `OnSurfaceFaint` above a group of `nav_row`s. |
 | `breadcrumb(&[(String, ActionId)])`                      | `Mono` path segments joined by carets; the last is a `SurfaceHover` chip, the others are muted with a hover fill. |
 | `scroll_list(items)`                                     | Vertical `Scroll` around a Stretch `Column` (spacing Xxs). |
-| `grid_item(icon, label, selected, on_click, on_hover)`   | 64 px icon over a Body label. Selected: `SurfaceElevated` + `Accent` border and tint. |
+| `grid_item(icon, label, selected, on_click, on_hover)`   | 64 px icon over a Body label, radius Md. Selected: `AccentMuted` fill, `Accent` icon. Otherwise Hover `SurfaceHover`, Focus `Ring { AccentRing, 2 }`. |
 | `grid(items, per_row)`                                   | Wrap a flat list into rows of `per_row` cells.   |
 | `popover_menu(&[(String, ActionId)], selected: Option<usize>)` | Popover content: `SurfaceElevated` column with a 1 px `Border`, at least 180 px wide; the selected row gets a leading `Check`. |
 | `popover_menu_shortcuts(items, hints: &[&str], selected)` | Same with a right-hand Caption column ("Ctrl+S"), indexed alongside `items`. |

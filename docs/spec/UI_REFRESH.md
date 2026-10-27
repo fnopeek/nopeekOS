@@ -290,14 +290,14 @@ content below it.
 | `button` `Primary` | `Accent`, label `OnAccent` | `AccentMuted` | `AccentMuted` | `Border { Accent, 2, 8 }` |
 | `button` `Secondary` | `SurfaceElevated` | `SurfaceMuted` | `Border` | same |
 | `button` `Ghost` | `Surface` | `SurfaceMuted` | `Border` | same |
-| `button` `Destructive` | `Danger`, label `OnAccent` | `Warning` | `Warning` | same |
+| `button` `Destructive` | `Danger`, label `OnAccent` | `Danger`, `Opacity(220)` | `Danger`, `Opacity(190)` | same |
 | `menu_bar_with_icon` label | `Body`, `OnSurfaceMuted`, padding 8 | `SurfaceHover`, `OnSurface`, radius 4 | | |
 | `popover_menu` row | `Body`, padding 8, shortcut `Caption` `OnSurfaceFaint` | `SurfaceMuted`, radius 4 | | |
 | `breadcrumb` segment | `Mono`, `OnSurfaceMuted`; last segment `SurfaceHover` | `SurfaceHover`, radius 4 | | |
-| `list_row` (launcher style) | padding 16, 24 px icon | `SurfaceMuted`, radius 4 | | `Border { OnSurfaceMuted, 1, 4 }` |
-| `list_row` selected | `SurfaceElevated`, `Border { Accent, 1, 4 }`, icon `Accent` | | | |
-| `grid_item` | padding 8, 64 px icon | `SurfaceMuted`, radius 8 | | `Border { OnSurfaceMuted, 1, 8 }` |
-| `grid_item` selected | `SurfaceElevated`, `Border { Accent, 1, 8 }`, icon `Accent` | | | |
+| `list_row` | the `list_row` state above: min height 34, padding 4, 2 px leading edge, 24 px icon `OnSurfaceMuted` | `SurfaceHover`, radius 4 | | `Ring { AccentRing, 2 }` |
+| `list_row` selected | `AccentMuted`, edge and icon `Accent` | | | |
+| `grid_item` | padding 8, 64 px icon, radius 8 | `SurfaceHover` | | `Ring { AccentRing, 2 }` |
+| `grid_item` selected | `AccentMuted`, icon `Accent` | | | |
 
 Buttons have padding 12 and radius 8. Containers:
 
