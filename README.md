@@ -13,6 +13,10 @@ driver that can live in a module moves there.
 > data yet. Built by one person with [Claude Code](https://claude.com/claude-code)
 > as a pair programmer; every change is tested on real hardware.
 
+https://github.com/user-attachments/assets/474fe66d-89df-46f2-92ea-c1b92360587d
+
+*A quick tour, recorded in QEMU. The same image runs on real hardware.*
+
 ---
 
 ## The Idea
