@@ -368,11 +368,17 @@ fn send_ipi_masked(lapic: Mmio, target_apic_id: u32, icr_low: u32) {
     lapic.w32(LAPIC_ICR_LO, icr_low);
 }
 
-/// Allocate the per-AP stack (`AP_STACK_SIZE`). Returns stack top (grows down).
+/// Allocate the per-AP stack (`AP_STACK_SIZE`) with an unmapped guard page
+/// below it (`mm::stack`), so running off its end faults instead of
+/// overwriting whatever lies beneath. Returns the stack top (grows down).
+/// An AP's stack lives as long as the machine, so it is never handed back.
 fn allocate_ap_stack() -> u64 {
-    let pages = AP_STACK_SIZE / crate::memory::PAGE_SIZE;
-    match crate::memory::allocate_contiguous(pages) {
-        Some(base) => base + AP_STACK_SIZE as u64,
+    match crate::mm::stack::KernelStack::new(AP_STACK_SIZE) {
+        Some(stack) => {
+            let top = stack.top();
+            core::mem::forget(stack);
+            top
+        }
         None => 0,
     }
 }
