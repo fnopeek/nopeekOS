@@ -1,170 +1,193 @@
-# PANEL.md — Customizable Panel System (Bar + Dock)
+# PANEL.md: the panel, status items and popups
 
-Generalise the dock into a **panel** primitive: edge-docked WASM widget
-surfaces, rendered through the widget ABI (SDF AA, theme tokens, the
-translucent-tray + crisp-icon blit), customizable via config and
-replaceable because they're plain WASM apps.
+A panel is a WASM widget app whose window the compositor keeps along a
+screen edge; the compositor owns the geometry, the app the content. The
+shipped panel is `deck` (`tools/wasm/deck`), one bottom strip.
 
-> Status: **spec.** Unified `set_panel`, config-driven segments,
-> WASM-replaceable. The shipped panel is **`deck.wasm`** (§7), a bottom
-> strut. `bar.wasm` and `dock.wasm` are no longer shipped; their sources
-> are in the git history before `kernel-only: archive bar and dock`. The
-> compositor still implements their two modes, Top+Strut and
-> Bottom+AutoHide (and `npk_window_set_dock`), with no module using them.
+## Becoming a panel
 
----
+`npk_window_set_panel(edge, behavior, w, h) -> i32` (RENDER + SHELL).
+`deck` calls it once at start with `edge = 0` (bottom), `behavior = 1`
+(strut) and `h = 44` logical px.
 
-## 1. Why
+- The caller's widget window is created (or its terminal promoted)
+  without taking focus.
+- `w` and `h` are logical px, converted to physical; `h` is clamped to a
+  quarter of the screen height and raised to at least 22 px. For the
+  bottom strut `w` is ignored: the window spans the screen width minus
+  `shade.bar_margin` on each side.
+- The window sits `shade.bar_margin` above the bottom edge. The tiling
+  area gives up `margin + h` at the bottom (`bottom_band()`), plus the
+  usual `shade.gaps`.
+- A panel is never focused (`focus_window` refuses it), never modal, is
+  excluded from `npk_window_titles`, Mod+Q and workspace moves, and follows
+  the active workspace on every switch, staying visible.
+- While a window is fullscreen the panel is not drawn.
+- When the panel window closes, the band is released. On a UI scale
+  change the compositor rescales the panel height.
+- Drawing: a scene rooted in a `Widget::Stack` (as `deck`'s bar and
+  popups are) is cleared transparent and its backgrounds are filled at
+  the panel opacity. Panels and their popups use the dark glass palette.
 
-- **Sharper edges** — the widget rasteriser's SDF AA beats the native
-  `fill_rounded_rect_*` the bar uses today.
-- **No UI transparency/AA code in the kernel** — the compositor only owns
-  the panel *geometry* (edge, strut/overlay, reveal); the app owns content.
-  Respects `memory/feedback_kernel_stays_generic.md`.
-- **One render path** for bar + dock + drun.
-- **Customizable + replaceable** — config-driven content, and a power user
-  can ship their own `bar.wasm` / `dock.wasm`.
+-1 when the right is missing, a size is not positive, or the pair is
+unknown.
 
-## 2. The panel primitive
+## deck layout
 
-Replace `npk_window_set_dock(w,h)` with:
+Left to right inside one rounded card (`NodeId` 100000):
 
-```
-npk_window_set_panel(edge: i32, behavior: i32, w: i32, h: i32) -> i32   // RENDER cap
-```
+1. **Launcher button**: opens the launcher popup (see below).
+2. **Workspaces**: one cell per workspace (count and active index from
+   `npk_bar_state`). The active one is filled with the accent, empty ones
+   are faint. A click calls `npk_workspace_switch(n)`.
+3. **Window list**: the windows of the active workspace from
+   `npk_window_titles`, ordered by window id. A button shows the app icon
+   (from the app catalog) and the caption; the focused window has an
+   accent line underneath. A click calls `npk_window_activate(id)`.
+4. **Status items** (place 0 only), then a **screenshot** button: click
+   launches `snap region`, right click `snap full`.
+5. **Clock**: `HH:MM` from `npk_bar_state` over a date line ("Sun 18
+   Oct") computed from `npk_unix_time` and the offset implied by the local
+   `HH:MM`. Strings follow the system locale (English, German).
 
-- `edge`: 0=Bottom, 1=Top (2=Left, 3=Right reserved for later).
-- `behavior`: 0=AutoHideOverlay (dock — slides in on edge-hover, no strut),
-  1=Strut (bar — always visible, reserves its band from the tiling area).
-- `set_dock(w,h)` becomes a thin wrapper → `set_panel(Bottom, AutoHide, w,h)`.
+When the window list does not fit, `plan_tasks` gives way in this order:
+buttons narrow from 200 px down to 100 px with clipped captions; the app
+with the most windows is folded into a group button with a count,
+repeatedly; icons only; then a "+N" button holding the rest. The focused
+window keeps a place. The budget is the screen width minus fixed
+estimates for the other cells. A group or "+N" toggles a popup listing its
+windows, which closes when all of them are gone.
 
-Compositor: `DockState` → `PanelState { id, edge, behavior, thickness, gap,
-offset, target_shown, dwell, debounce }`. Bottom+AutoHide keeps today's
-reveal/slide/handle. Top+Strut: positioned into the bar band, `is_overlay +
-is_panel`, never modal/focused, global across workspaces, **rendered with
-the same translucent-tray + crisp-icon blit as the dock** (generalise the
-`is_dock` branch to `is_dock || is_bar`).
+**Launcher popup** (anchored at the card, 340 px wide): a search field
+(focused through `Modifier::FocusRequest`) over up to 8 rows of the app
+catalog (modules with app metadata except `deck`, `drun`, `pick`,
+`volume`, plus intent entries), sorted by display name, filtered by
+substring of display or launch name. Up/Down and pointer hover move the
+selection, Enter or a click launches (`spawn_module` or `run_intent`) and
+closes. Footer: the user name (last component of the home directory) and
+a power button calling `npk_power()`. Esc closes the popup.
 
-**Strut ownership (interim):** keep the existing `ShadeBar` geometry
-(`workspace_y` / `workspace_height` / `pill_top`) as the strut source so the
-tiling band stays exactly as today — zero tiling refactor. `set_panel(Top,
-Strut)` positions the bar window into that band and sets `bar.height` from
-the requested `h`. Native `ShadeBar` pill-drawing is removed; only its
-geometry remains.
+**Main loop**: drain events; re-read `npk_bar_state`, `npk_window_titles`
+and `npk_status_list`; commit the bar, then the popup, only on a change;
+`npk_wait(INPUT | STATE, ms to next minute)`. `STATE` (32, RENDER) wakes
+on any notify topic (windows, battery, volume, config, status).
 
-## 3. Live state + actions (host fns)
+## Status items
 
-The bar needs kernel state a WASM app can't compute:
+`kernel/src/status.rs`. An item is `owner, key, icon: u16, value: i32,
+state, place, text, opens`.
 
-```
-npk_bar_state(buf, max) -> i32     // fills: "HH:MM\n<ws_count>\n<ws_active>\n<title>"
-npk_workspace_switch(n) -> i32     // comp.switch_workspace(n)
-npk_power() -> i32                 // acpi::power_off path
-```
+- `owner` is the publishing module's name, set by the kernel. At most 4
+  items per owner, 32 in total. `key` is 1..16 bytes, `text` at most 48,
+  `opens` at most 32 bytes and without `/`.
+- `state`: 0 normal, 1 attention, 2 off (clamped). `place`: 0 bar,
+  1 quick (clamped).
+- Items go when the publishing fiber ends. Changes notify `TOPIC_STATUS`.
 
-All RENDER-gated (bar is a trusted bundled app). `npk_bar_state` sources:
-clock = `rtc::read_unix_time`, ws_count = `ShadeBar.workspace_count`,
-ws_active = `comp.active_workspace`, title = focused window's `title`.
+The kernel's own items are not stored but built on each read, with owner
+`kernel`:
 
-**Live update:** the bar polls `npk_bar_state` (~1 Hz) and re-commits its
-tree only when the string changed (clock minute / workspace / title). No
-kernel push needed.
+| key | icon | text | opens |
+|---|---|---|---|
+| `net` | WLAN or wired, off when the link is down | none | `link` |
+| `volume` | speaker by level | `N%` | `volume` |
+| `battery` | by charge and status; attention at 10 % or less while discharging | `N%` | none |
 
-## 4. The render-site finding (why this is bigger than the dock)
+`net` is the primary interface (else the first). The `wifid` item `wlan`
+replaces it, unless a wired primary has a link: then the `wifid` item is
+left out. `battery` appears only when a battery is known.
 
-The native bar is drawn at **4 sites** in `compositor.rs` — full render
-(769), partial-chrome (1128), and the LAYER_CHROME path (1687, 1729). The
-dock was a pure overlay with one draw. Migration must route all of these to
-"render the bar widget window (if present) else native fallback", and the
-translucent bar must **restore its band from the wallpaper layer before
-blitting** (frequent clock repaints would otherwise stack translucency).
-Keeping a native fallback when no `bar.wasm` window exists avoids a
-clock-less regression if the app fails to load.
+Order: network, volume, battery, then module items by owner and key.
+Wire format of `npk_status_list`: `count: u16 LE`, then per item
+`owner`, `key` (u8 length + bytes), `icon: u16 LE`, `value: i32 LE`,
+`state: u8`, `place: u8`, `text`, `opens` (u8 length + bytes).
 
-## 5. Customization (config-driven)
+`deck` draws each place-0 item as its icon, tinted by state (attention =
+danger, off = faint), with its text if it has one. An item with a
+non-empty `opens` is clickable: `npk_launch_at(opens, key, node)` with the
+item's node as anchor. A right click on the kernel's volume item toggles
+mute (restoring the previous level, at least 10 %).
 
-- `sys/config/bar` — ordered segments, e.g.
-  ```
-  left: workspaces title
-  center: clock
-  right: tray power
-  ```
-  Built-in segment widgets (Phase 1): `workspaces`, `title`, `clock`,
-  `tray` (status icons), `power`. Unknown names skipped. Missing config →
-  built-in default layout above.
+**Launching a tool from an item.**
 
-  Same file, sizing (re-read every ~3 s, so editing it is edit-and-look):
-  ```
-  font: 15    # text px, 9..18 (default 15)
-  icon: 18    # icon px, 12..22 (default 18)
-  ```
-  Both are capped to what the 24 px content band holds — turning them up
-  never makes the bar taller.
-- `sys/config/dock` — pins (already shipped).
-- Panel translucency is compositor-side: `set shade.chrome_opacity <0-255>`
-  is the master — it moves both panels and **clears** the per-panel keys.
-  `shade.bar_opacity` / `shade.dock_opacity` then override one of them
-  again (unset = inherit the shared value).
-- Placement/behaviour as config keys later: `bar.edge`, `bar.height`,
-  `dock.autohide`, … (read by the apps / passed to `set_panel`).
-- Both apps are WASM → fully replaceable.
+`npk_launch_at` resolves `anchor` in the caller's last layout, then does
+`npk_launch(app, arg)`. On success it remembers the anchor rectangle for
+that module name for 5 s. The launched app's first
+`npk_window_set_overlay` within that time is placed like a popup (below
+the anchor 8 logical px away, flipped above when it does not fit, slid to
+stay on screen) and made light-dismiss: a press outside closes the
+window. `link` and `volume` are opened this way.
 
-## 6. `bar.wasm` (not shipped)
+## Popups
 
-`tools/wasm/bar/`, analogous to `tools/wasm/dock/`. `_start`: read
-`sys/config/bar`, `set_panel(Top, Strut, w, h)`, loop { poll `npk_bar_state`
-→ re-commit on change; poll events → `workspace_switch` / `power` clicks }.
-Tree: `Row` of the configured segments with flex `Spacer`s distributing
-left/center/right.
+`npk_popup(popup, anchor, gap, ptr, len) -> i32` (RENDER) opens or updates
+popup `popup` (0..7) of the caller's widget window.
 
-## 7. `deck.wasm` — bar and dock in one
+- `ptr..ptr+len` is a wire-encoded scene tree (at most 16 MiB). The popup
+  is exactly its intrinsic size, clamped to the screen.
+- `anchor` is a `NodeId` in the app's own last committed tree; commit
+  the main tree first. `gap` is 0..256 logical px.
+- Placement: below the anchor at `gap`; above it when it does not fit
+  below; else bottom-aligned to the screen. `x` is the anchor's left edge,
+  slid to stay on screen. At the bottom panel this always flips above.
+- A new popup takes the keyboard; the focus before the first popup is
+  remembered. Its events go to the parent window's queue. Popups are
+  drawn above all panels and windows. Calling `npk_popup` again for an
+  open slot re-places and re-commits it.
 
-`tools/wasm/deck/`: one bottom panel instead of `dock` + `bar`, bundled into
-the installer and first in the autostart seed. Left to right: launcher button,
-workspaces, the windows of the active workspace (icon + caption, the
-focused one underlined), volume, battery, screenshot, clock with date.
+- `npk_popup_close(popup)` and closing the parent window: no `PopupDone`.
+- The compositor sends `Event::PopupDone { popup }` to the parent when it
+  closes a popup itself: a press (left or right) outside every popup
+  (closes all, consumed); focus moving to a window that is not a popup;
+  a workspace switch; a UI scale change.
+- After a close, the keyboard goes to another open popup, else back to the
+  remembered window if it is still visible on the active workspace, else
+  to the active workspace's top window.
 
-Kernel side:
+`deck` uses slot 0 only; on `PopupDone` it just forgets its menu state.
 
-- `set_panel(Bottom, Strut, w, h)` — a strut at the bottom: the compositor
-  reserves `margin + h` there (`BottomStrut`, `bottom_band()`) and lays the
-  tiles above it. Independent of the top strut; both may exist.
-- Menus are popups (`npk_popup`): windows of their
-  own, as large as their content, anchored at a node of the panel's tree.
-  The panel itself never grows and never holds the keyboard.
-- `npk_window_titles` lines carry two more columns:
-  `<flags>\t<workspace>\t<title>\t<id>\t<caption>` — the window id and
-  what the bar shows for it, for a SHELL caller only (a caption is another
-  app's content, e.g. a page title). The first three are unchanged.
-- `npk_window_activate(id)` — switch to the window's workspace and focus
-  it (RENDER + SHELL). Panels and overlays are refused.
+## Host functions used by the panel
 
-When the windows outrun the screen the list gives way in a fixed order
-(`plan_tasks`): narrower buttons with clipped captions (down to 100 px);
-then the windows of one app folded into a group button with a count, the
-app with the most windows first; then icons only; then a "+N" button. The
-clock and the readouts never move: the deck computes the list's budget from
-the screen width minus fixed cell widths, since the layout engine does not
-shrink children and the app cannot measure text. The focused window always
-keeps a place. A group and "+N" open a list of their windows in a popup.
+| Function | Right | Returns |
+|---|---|---|
+| `npk_window_set_panel(edge, behavior, w, h)` | RENDER + SHELL | 0 / -1 |
+| `npk_bar_state(buf, max)` | RENDER | bytes; `"HH:MM\n<ws_count>\n<ws_active>\n<title>"`, local time from `timezone`, truncated to `max` |
+| `npk_window_titles(buf, max)` | RENDER | bytes; lines `<flags>\t<workspace>\t<module>`, plus `\t<id>\t<caption>` for SHELL; flags 1 focused, 2 on the active workspace |
+| `npk_window_activate(id)` | RENDER + SHELL | 0 / -1; switches to the window's workspace and focuses it; refuses panels and overlays |
+| `npk_workspace_switch(n)` | RENDER | 0 / -1; `n` in 0..255, ignored past the workspace count |
+| `npk_popup(...)`, `npk_popup_close(popup)` | RENDER | 0 / -1 |
+| `npk_status_set(key, icon, value, flags, text, opens)` | none | 0 / -1; `flags = state \| place << 8` |
+| `npk_status_clear(key)` | none | 0 |
+| `npk_status_list(buf, max)` | RENDER | bytes, the needed size when larger than `max`, -1 when refused |
+| `npk_launch_at(app, arg, anchor)` | EXECUTE | 0 / -1 |
+| `npk_power()` | RENDER + SHELL | ACPI S5 power-off |
 
-The launcher menu is a popup anchored at the bar card, a window list one
-anchored at its button; the compositor dismisses either on a press outside
-(`Event::PopupDone`). The search field takes the focus through
-`FocusRequest`: the popup stays open when a list turns into the menu, and
-`Autofocus` only fires on a scene's first commit.
+`deck` declares `READ | EXEC | RENDER` and the extended `SHELL` right.
+Only `npk_status_set` / `npk_status_clear` (`npk_sys::status_set`,
+`status_clear`) and `npk_window_titles` (`host::window_titles`) have SDK
+wrappers; `deck` declares the other imports itself.
 
-Open: a files section in the menu (needs the extension → app table that
-`loft` keeps, shared through the SDK instead of copied), a settings app for
-the gear, a Wi-Fi readout (no state call yet), a grid icon for the launcher,
-Mod+D opening the deck menu instead of `drun`.
+## Configuration
 
-## 8. Phasing
+| Key | Effect |
+|---|---|
+| `autostart` | modules started at boot, space or comma separated, 400 ms apart; the setup seed is `deck acpi audio_hda` |
+| `shade.bar_margin` | gap between the panel and the screen edge, logical px (default 6) |
+| `shade.chrome_opacity` | panel opacity 0..255 (default derived from the wallpaper); setting it clears `shade.bar_opacity` and `shade.dock_opacity` |
+| `shade.bar_opacity` | overrides the opacity of the strut panels, including `deck` |
+| `timezone` | offset applied to the clock in `npk_bar_state` |
 
-- **P1 (this spec):** unified `set_panel` (dock = wrapper); `is_bar` strut
-  window reusing `ShadeBar` geometry + the dock blit; `npk_bar_state` /
-  `workspace_switch` / `power`; `bar.wasm` with config segments + native
-  fallback; bundle + autostart.
-- **P2:** placement config (`bar.edge`/`height`), left/right panels,
-  per-element styling.
-- **P3:** user-defined custom segment widgets.
+## Present in the compositor, unused
+
+No shipped module uses these:
+
+- `set_panel(edge = 1, behavior = 1)`: a top strut (`TopStrut`,
+  `top_band()`), same geometry rules at the top edge.
+- `set_panel(edge = 0, behavior = 0)` and `npk_window_set_dock(w, h)`
+  (RENDER + SHELL): a bottom auto-hide overlay (`DockState`) that slides
+  in when the pointer holds the bottom edge, with `shade.dock_opacity`.
+- `npk_battery()` (RENDER): no module imports it; status items read the
+  battery directly.
+- The `title` line of `npk_bar_state` and the `value` field of status
+  items: provided, but `deck` does not show them.
+- Status items with place 1 (quick): accepted, not drawn by `deck`.
