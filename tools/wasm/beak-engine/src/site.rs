@@ -12,7 +12,6 @@
 //! `b.github.io` would both become `github.io`, and two unrelated user
 //! sites would share cookies. So the real Public Suffix List is embedded;
 //! a security boundary is not approximated when the exact answer is cheap.
-//! See `docs/plan/BROWSER_FETCH_ORIGIN.md` §5.3.
 
 extern crate alloc;
 use alloc::string::{String, ToString};

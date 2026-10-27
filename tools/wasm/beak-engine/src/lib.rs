@@ -41,7 +41,7 @@ pub mod site;
 ///
 /// The kernel has no test infrastructure, so the file is included rather
 /// than copied: there is exactly one version, and its table runs with every
-/// `cargo test` of this crate. See `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2.
+/// `cargo test` of this crate.
 #[cfg(test)]
 #[path = "../../../../kernel/src/intent/reach.rs"]
 pub mod kernel_reach;

@@ -147,7 +147,6 @@ unsafe extern "C" {
     /// Tell the kernel which document is shown. It resolves the address
     /// itself and keeps only the network class, which decides whether a
     /// subresource may reach the private network.
-    /// See `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2.
     fn npk_net_context(url_ptr: i32, url_len: i32) -> i32;
     fn npk_clipboard_set(ptr: i32, len: i32) -> i32;
     /// A TLS stream, unlike `npk_http_*`: not a request with an end but a
@@ -384,8 +383,8 @@ fn toggle_menu(which: u8) {
 
 const URL_CAP: usize = 4096;
 
-/// Everything that belongs to one document rather than to the program
-/// (`docs/plan/BROWSER_TABS.md` §A2). Two fields in one struct cannot be the
+/// Everything that belongs to one document rather than to the program.
+/// Two fields in one struct cannot be the
 /// same buffer, which keeps e.g. the document URL and the address-bar text
 /// apart.
 ///
@@ -595,7 +594,7 @@ impl Doc {
     }
 }
 
-/// The tabs. `docs/plan/BROWSER_TABS.md` §A3 (b): one live engine, the rest
+/// The tabs: one live engine, the rest
 /// frozen.
 ///
 /// The engine holds the tree, style sheet and images of one page, and
@@ -1105,7 +1104,7 @@ fn scroll_y() -> i32 {
 /// Where the page scrolls after loading.
 ///
 /// Zero for a new page. For a returning tab, the remembered position: the
-/// page is refetched on switch (`docs/plan/BROWSER_TABS.md` §A3 b), and
+/// page is refetched on switch, and
 /// without it the reader would land at the top.
 fn scroll_after_load() {
     let y = doc().scroll_want;
@@ -2145,7 +2144,7 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
     sess.interp.deadline = Some(script_time_left);
     // Lay out on demand. Without it every box query answers from the last
     // frame, and an element a script just inserted reports 0 — forever, on a
-    // page that measures only once. See `docs/plan/BROWSER_RELAYOUT_ON_DEMAND.md`.
+    // page that measures only once.
     sess.interp.relayout = Some(host_relayout);
     arm_script_budget();
     sess.interp.set_document(doc);
@@ -2438,8 +2437,7 @@ fn pump_fetches() -> bool {
         let mut hdrs = f.headers.replace("\r\n", "\n").trim_end_matches('\n').to_string();
         // Cookies go along for the same origin only (rule K3), and the
         // engine lets only same-origin requests through. Across an origin
-        // boundary they would be the ambient authority
-        // `BROWSER_FETCH_ORIGIN.md` §3.1 warns about.
+        // boundary they would be ambient authority.
         let jar = cookies::header_for(&url, unix_now());
         if !jar.is_empty() {
             if !hdrs.is_empty() { hdrs.push('\n'); }

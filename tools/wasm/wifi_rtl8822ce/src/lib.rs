@@ -1,8 +1,7 @@
 //! wifi_rtl8822ce — Realtek RTL8822CE (Wi-Fi 5, 2T2R, PCIe) WASM driver.
 //!
 //! Strict 1:1 port of Linux 6.18.26, `drivers/net/wireless/realtek/rtw88/`
-//! (module `rtw_8822ce`). Plan: `docs/plan/WIFI_RTL8822CE.md`, map:
-//! `docs/plan/WIFI_RTL8822CE_LINUX_MAP.md`.
+//! (module `rtw_8822ce`).
 //!
 //! The driver runs as a chain of stages, each behind a gate:
 //!
@@ -842,8 +841,8 @@ fn next_ask(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     }
 }
 
-/// After bring-up: the driver does what `wifid` asks
-/// (docs/plan/WLAN_MANAGER.md). Calibration (5d) runs once, before the
+/// After bring-up: the driver does what `wifid` asks.
+/// Calibration (5d) runs once, before the
 /// first connect; the first connect runs 5e, 5f and 6a, every later one
 /// the reconnect path. A running link is stage 6b: it roams and reconnects
 /// on its own within its network, and leaves when asked.
@@ -1274,7 +1273,7 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse, d: &mut Dev)
     host::print(if dack_ok {
         "  [Befund] die DAC-Kalibrierung konvergiert auf beiden Pfaden\n"
     } else {
-        "  [Befund] die DAC-Kalibrierung konvergiert NICHT auf beiden Pfaden.\n                    Linux prueft das nicht, wir haben kein Vergleichsmass —\n                    benannt und offen, siehe docs/plan/WIFI_RTL8822CE.md\n"
+        "  [Befund] die DAC-Kalibrierung konvergiert NICHT auf beiden Pfaden.\n                    Linux prueft das nicht, wir haben kein Vergleichsmass —\n                    benannt und offen\n"
     });
 
     // Measured but not gated: the counters are expected to be 0 here. They
@@ -1318,7 +1317,6 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse, d: &mut Dev)
 ///
 ///     rtw_mac_postinit        NULL on the 8822C (rtw8822c.c:4967) -> nothing
 ///     rtw_hci_start           = rtw_pci_start: only enables interrupts.
-///                               Deviation: see docs/plan/WIFI_RTL8822CE.md
 ///     rtw_fw_send_general_info    H2C packet through the H2C queue
 ///     rtw_fw_send_phydm_info      likewise
 ///     rtw_coex_power_on_setting   antenna to BT
@@ -2905,7 +2903,7 @@ fn security_of(b: &Bss) -> u8 {
 }
 
 /// `SCAN_RESULT`: [op][count] then per cell bssid[6] rssi ch security
-/// ssid_len ssid (docs/plan/WLAN_MANAGER.md §3). One message: the channel
+/// ssid_len ssid. One message: the channel
 /// holds 16, a scan finds up to 48.
 fn report_scan(found: &[Bss]) {
     let mut m = [0u8; 2048];

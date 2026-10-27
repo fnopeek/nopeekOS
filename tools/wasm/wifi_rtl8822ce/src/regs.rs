@@ -1225,7 +1225,7 @@ pub const EV_LINK_UP: u8 = 0x85;
 pub const EV_LINK_DOWN: u8 = 0x86;
 pub const EV_CONNECT_FAILED: u8 = 0x87;
 pub const EV_RX_MGMT: u8 = 0x88;
-/// All cells of a scan in one message (docs/plan/WLAN_MANAGER.md §3).
+/// All cells of a scan in one message.
 pub const EV_SCAN_RESULT: u8 = 0x89;
 /// The driver takes commands (after bring-up).
 pub const EV_DRIVER_UP: u8 = 0x8a;

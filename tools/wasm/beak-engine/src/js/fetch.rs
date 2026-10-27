@@ -1,7 +1,7 @@
 //! `fetch`, `Response`, `Headers`, `AbortController`/`AbortSignal` and
 //! `XMLHttpRequest`.
 //!
-//! Same origin only (`docs/plan/BROWSER_FETCH_ORIGIN.md`). A foreign origin
+//! Same origin only. A foreign origin
 //! is rejected with a reason. Without a CORS response check there must be
 //! no foreign response to read, otherwise a public page could read
 //! `https://192.168.178.1/`. `<img src>` and `<script src>` may load cross
@@ -455,7 +455,7 @@ fn do_fetch_inner(i: &mut Interp, _t: Value, a: &[Value]) -> C<Value> {
         let base = document_origin(i).unwrap_or_default();
         return i.type_err(&alloc::format!(
             "fetch: {raw} is a different origin than {base} — cross-origin fetch is not \
-             built yet (see docs/plan/BROWSER_FETCH_ORIGIN.md)"));
+             built yet"));
     };
 
     let (method, headers, body, signal) = if matches!(init, Value::Obj(_)) {
