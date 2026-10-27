@@ -1,8 +1,7 @@
 //! deck — bottom panel: bar, window list and launcher in one window.
 //!
-//! Started instead of `dock` + `bar` (`set autostart deck`). Declares a
-//! bottom strut panel (`npk_window_set_panel(Bottom, Strut)`), so the tiles
-//! end above it. Left to right: the launcher button, the workspaces, the
+//! Started from `autostart`. Declares a bottom strut panel
+//! (`npk_window_set_panel(Bottom, Strut)`), so the tiles end above it. Left to right: the launcher button, the workspaces, the
 //! windows of the active workspace, the status readouts and the clock.
 //!
 //! The launcher opens a menu above the button: a search field over the app
@@ -463,7 +462,7 @@ struct Deck {
 impl Deck {
     fn new() -> Self {
         let (w, _) = host::screen_size();
-        let mut catalog = app_catalog::load(&["deck", "dock", "bar", "drun", "pick", "volume"]);
+        let mut catalog = app_catalog::load(&["deck", "drun", "pick", "volume"]);
         // One list, as a person reads it: "beak" next to "Firefox", not
         // after every capital.
         catalog.sort_by_key(|e| e.display_name.to_ascii_lowercase());

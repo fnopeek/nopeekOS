@@ -168,8 +168,8 @@ pub struct DragState {
 }
 
 /// Auto-hide bottom dock state. The compositor owns the reveal/hide
-/// slide; the dock app (`dock.wasm`) only declares itself via
-/// `npk_window_set_dock` and renders its icon row.
+/// slide; the app only declares itself via `npk_window_set_dock` and
+/// renders its content.
 #[derive(Clone, Copy)]
 pub struct DockState {
     pub id: WindowId,
@@ -189,10 +189,10 @@ pub struct DockState {
     pub debounce: u32,
 }
 
-/// Top strut panel registered by a bar app (`bar.wasm`) via
+/// Top strut panel registered via
 /// `npk_window_set_panel(Top, Strut)`. The app reports its height; the kernel
 /// reserves a `margin + pill_h` band at the top and lays tiles below it. The
-/// app owns all rendering; there is no native fallback, so an unregistered or
+/// app owns all rendering; there is no native fallback.
 #[derive(Clone, Copy)]
 pub struct TopStrut {
     pub id: WindowId,
@@ -283,9 +283,9 @@ pub struct Compositor {
     /// Timer tick the halo was last repainted at — the callers can run far
     /// more often than the animation has frames.
     glow_last_tick: u64,
-    /// Auto-hide bottom dock, if a dock app has registered one.
+    /// Auto-hide bottom panel, if an app has registered one.
     pub dock: Option<DockState>,
-    /// Top strut bar, if a bar app (`bar.wasm`) has registered one. `None`
+    /// Top strut panel, if an app has registered one. `None`
     /// reserves no top band (tiles use the full height). The app renders
     /// itself — there is no native fallback.
     pub top_strut: Option<TopStrut>,

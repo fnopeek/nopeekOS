@@ -1804,9 +1804,9 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("[npk]");
             help_note("config: shade.gaps, shade.border, shade.rounding, shade.glow,");
             help_note("        shade.opacity, shade.mod, shade.blur  (`shade glass` shows them)");
-            help_note("panels: shade.chrome_opacity sets bar + dock (0-255) and");
-            help_note("        clears the per-panel keys; shade.bar_opacity /");
-            help_note("        shade.dock_opacity then override one of them again.");
+            help_note("panels: shade.chrome_opacity sets all panels (0-255) and");
+            help_note("        clears shade.bar_opacity / shade.dock_opacity,");
+            help_note("        which then override strut / auto-hide panels again.");
             help_note("        bar text + icon px: 'font:' / 'icon:' in sys/config/bar");
             help_note("        shade.flash_opacity: screenshot blink (0-255, 0 = off)");
         }

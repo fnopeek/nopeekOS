@@ -696,9 +696,9 @@ host_imports! {
     ctx fn npk_window_set_panel(edge: i32, behavior: i32, w: i32, h: i32) -> i32;
 
     // npk_bar_state(buf, max) -> i32
-    // Live state for the bar app: "HH:MM\n<ws_count>\n<ws_active>\n<title>"
-    // (clock already timezone-adjusted). Returns bytes written, -1 on
-    // cap / args / buffer too small.
+    // Live state for the panel: "HH:MM\n<ws_count>\n<ws_active>\n<title>"
+    // (clock already timezone-adjusted). Returns bytes written, truncated
+    // to `max`; -1 on cap / args.
     mem fn npk_bar_state(buf_ptr: i32, max: i32) -> i32;
 
     // npk_window_titles(buf, max) -> i32

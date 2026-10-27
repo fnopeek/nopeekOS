@@ -269,19 +269,17 @@ const WIFI_CFG: &str = "sys/config/wifi";
 
 /// The keys the wifi stack actually reads; anything else is rejected so a
 /// typo does not write a setting nobody reads.
-const WIFI_KEYS: &[&str] = &["band", "bw", "ampdu", "txagg", "roam", "bawin", "ps", "btcoex", "settle_ms"];
+const WIFI_KEYS: &[&str] = &["band", "bw", "ampdu", "txagg", "roam", "aspm", "debug"];
 
 fn wlan_set_usage() {
     kprintln!("[wlan] Usage: wlan set <key> <value> | wlan unset <key>");
     kprintln!("[wlan]   band: 5 | 2.4 | auto");
-    kprintln!("[wlan]   ampdu: on | off     RX aggregation (throughput)");
-    kprintln!("[wlan]   txagg: on | off     TX aggregation, RTL8822CE (default: on)");
-    kprintln!("[wlan]   roam: on|off|nurbericht  switch AP when the signal drops (default: on)");
-    kprintln!("[wlan]   bw: 80 | 40 | 20    channel width cap, RTL8822CE (default: 80)");
-    kprintln!("[wlan]   bawin: <n>          cap the RX reorder window (0/unset = what the AP asks)");
-    kprintln!("[wlan]   ps: on | off        power save (default off = CAM)");
-    kprintln!("[wlan]   btcoex: on | off");
-    kprintln!("[wlan]   settle_ms: <n>      pause before the first scan");
+    kprintln!("[wlan]   bw: 80 | 40 | 20    channel width cap (default: 80)");
+    kprintln!("[wlan]   ampdu: off | <n>    RX block-ack window (default: the maximum)");
+    kprintln!("[wlan]   txagg: on | off     TX aggregation (default: on)");
+    kprintln!("[wlan]   roam: on | off | report  switch cells when the signal drops (default: report)");
+    kprintln!("[wlan]   aspm: on | off | keep  PCIe link power saving (default: off)");
+    kprintln!("[wlan]   debug: on | off     print the driver's bring-up stages");
     kprintln!("[wlan] networks: wlan connect <name> · wlan known");
 }
 

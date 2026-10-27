@@ -5,8 +5,8 @@
 //! EC's `_REG`), as ACPICA and Linux do. From then on it runs the `_Qxx` of
 //! each EC event the SCI reports, and every 10 s the battery's own
 //! `_BST`/`_BIF` AML (vendor-independent, via [`aml_core`]), and pushes the
-//! decoded percentage to the kernel via `npk_battery_report`; status items
-//! read it through `npk_battery()`.
+//! decoded percentage to the kernel via `npk_battery_report`, where the
+//! battery status item reads it.
 
 #![no_std]
 
