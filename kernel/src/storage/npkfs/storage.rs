@@ -187,6 +187,14 @@ pub fn mount() -> Result<(), FsError> {
         return Err(FsError::Corrupt);
     }
 
+    // The head is a position in the journal ring; anything else did not
+    // come from `Journal::prepare`. Refused here rather than left to the
+    // replay's own bounds.
+    if sb.journal_head >= JOURNAL_BLOCKS {
+        kprintln!("[npk] npkfs: journal head {} outside the {}-block journal — refusing mount",
+            sb.journal_head, JOURNAL_BLOCKS);
+        return Err(FsError::Corrupt);
+    }
     let frees = Journal::replay(&mut cache, sb.journal_head, sb.journal_seq)?;
     let mut bmap = Bitmap::load_args(
         &mut cache, sb.total_blocks, sb.bitmap_start, sb.bitmap_count, sb.data_start,

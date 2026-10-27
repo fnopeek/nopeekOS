@@ -90,68 +90,96 @@ pub fn has_gpt_header() -> Option<bool> {
     Some(&hdr[0..8] == b"EFI PART")
 }
 
+/// A partition table that passed the checks of UEFI 2.10 §5.3.2: the
+/// header's signature, size and CRC, its own LBA, and the CRC of the entry
+/// array. The primary header first, the backup at the disk's last sector
+/// when the primary fails.
+struct Table {
+    /// Last usable LBA from the header; partitions must end at or before it.
+    last_usable: u64,
+    /// The first four entries (one sector), the only ones this kernel reads.
+    entries: [u8; 512],
+}
+
+/// Entry arrays beyond this are not ones this kernel wrote or reads
+/// (128 entries of 128 bytes is the UEFI minimum and our layout).
+const MAX_ENTRY_BYTES: usize = 128 * 128;
+
+fn read_u32(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+}
+
+fn read_u64(b: &[u8], o: usize) -> u64 {
+    u64::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3], b[o + 4], b[o + 5], b[o + 6], b[o + 7]])
+}
+
+fn read_table() -> Option<Table> {
+    if !nvme::is_available() { return None; }
+    read_table_at(1).or_else(|| {
+        let last = nvme::capacity()?.checked_sub(1)?;
+        let t = read_table_at(last);
+        if t.is_some() {
+            crate::kprintln!("[npk] GPT: primary header invalid, using the backup");
+        }
+        t
+    })
+}
+
+fn read_table_at(lba: u64) -> Option<Table> {
+    let mut hdr = [0u8; 512];
+    nvme::read_sector(lba, &mut hdr).ok()?;
+    if &hdr[0..8] != b"EFI PART" { return None; }
+    let size = read_u32(&hdr, 12) as usize;
+    if !(92..=512).contains(&size) { return None; }
+    let mut copy = hdr;
+    copy[16..20].fill(0);
+    if crc32(&copy[..size]) != read_u32(&hdr, 16) { return None; }
+    if read_u64(&hdr, 24) != lba { return None; }
+
+    let entries_lba = read_u64(&hdr, 72);
+    let count = read_u32(&hdr, 80) as usize;
+    let entry_size = read_u32(&hdr, 84) as usize;
+    let bytes = count.checked_mul(entry_size)?;
+    if entry_size < 128 || bytes == 0 || bytes > MAX_ENTRY_BYTES { return None; }
+    let mut array = alloc::vec![0u8; bytes.div_ceil(512) * 512];
+    for (i, sec) in array.chunks_exact_mut(512).enumerate() {
+        let sec: &mut [u8; 512] = sec.try_into().ok()?;
+        nvme::read_sector(entries_lba.checked_add(i as u64)?, sec).ok()?;
+    }
+    if crc32(&array[..bytes]) != read_u32(&hdr, 88) { return None; }
+    if entry_size != 128 { return None; }
+
+    let mut entries = [0u8; 512];
+    entries.copy_from_slice(&array[..512]);
+    Some(Table { last_usable: read_u64(&hdr, 48), entries })
+}
+
 /// Detect existing GPT and return npkFS partition (block_offset, block_count).
 /// Both values are in 4 KB blocks. Used by the boot path so blkdev knows
 /// both the start and the size of our partition — without the size,
 /// allocations past the partition end land in the backup-GPT region
 /// at the disk tail and hit `BlkError::OutOfRange`.
 pub fn detect_npkfs_partition() -> Option<(u64, u64)> {
-    if !nvme::is_available() { return None; }
-
-    let mut hdr = [0u8; 512];
-    nvme::read_sector(1, &mut hdr).ok()?;
-
-    if &hdr[0..8] != b"EFI PART" { return None; }
-
-    let mut entry_sec = [0u8; 512];
-    nvme::read_sector(2, &mut entry_sec).ok()?;
-
-    // Second partition entry starts at offset 128 within the sector.
-    let off = 128;
-    let type_guid = &entry_sec[off..off + 16];
-    if type_guid == &[0u8; 16] { return None; }
-
-    let start_lba = u64::from_le_bytes([
-        entry_sec[off + 32], entry_sec[off + 33], entry_sec[off + 34], entry_sec[off + 35],
-        entry_sec[off + 36], entry_sec[off + 37], entry_sec[off + 38], entry_sec[off + 39],
-    ]);
-    let end_lba = u64::from_le_bytes([
-        entry_sec[off + 40], entry_sec[off + 41], entry_sec[off + 42], entry_sec[off + 43],
-        entry_sec[off + 44], entry_sec[off + 45], entry_sec[off + 46], entry_sec[off + 47],
-    ]);
-
-    if start_lba == 0 || end_lba <= start_lba { return None; }
+    let t = read_table()?;
+    // Second partition entry.
+    let e = &t.entries[128..256];
+    if e[0..16] == [0u8; 16] { return None; }
+    let start_lba = read_u64(e, 32);
+    let end_lba = read_u64(e, 40);
+    if start_lba == 0 || end_lba <= start_lba || end_lba > t.last_usable { return None; }
 
     let block_offset = start_lba / 8;
     // end_lba is inclusive. Block count = floor of usable sector count / 8.
-    let usable_sectors = end_lba + 1 - start_lba;
-    let block_count = usable_sectors / 8;
-    Some((block_offset, block_count))
+    let usable_sectors = end_lba.checked_add(1)?.checked_sub(start_lba)?;
+    Some((block_offset, usable_sectors / 8))
 }
 
 /// Detect existing GPT and return ESP (EFI System Partition) sector offset.
 pub fn detect_esp_offset() -> Option<u64> {
-    if !nvme::is_available() { return None; }
-
-    let mut hdr = [0u8; 512];
-    nvme::read_sector(1, &mut hdr).ok()?;
-
-    // Check GPT signature
-    if &hdr[0..8] != b"EFI PART" { return None; }
-
-    // Read first partition entry (sector 2, offset 0 = first entry = ESP)
-    let mut entry_sec = [0u8; 512];
-    nvme::read_sector(2, &mut entry_sec).ok()?;
-
-    // Check type GUID matches ESP
-    if &entry_sec[0..16] != &ESP_TYPE_GUID { return None; }
-
-    // Read starting LBA (offset 32 within entry)
-    let start_lba = u64::from_le_bytes([
-        entry_sec[32], entry_sec[33], entry_sec[34], entry_sec[35],
-        entry_sec[36], entry_sec[37], entry_sec[38], entry_sec[39],
-    ]);
-
+    let t = read_table()?;
+    // First partition entry: the ESP.
+    if t.entries[0..16] != ESP_TYPE_GUID { return None; }
+    let start_lba = read_u64(&t.entries, 32);
     if start_lba == 0 { return None; }
     Some(start_lba)
 }

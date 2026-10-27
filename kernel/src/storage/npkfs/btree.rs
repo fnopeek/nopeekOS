@@ -330,85 +330,71 @@ fn fsck_subtree(
     cache: &mut BlockCache, block: u64, depth: u32,
     nodes: &mut alloc::vec::Vec<u64>, entries: &mut alloc::vec::Vec<BTreeEntryRaw>,
 ) {
-    if depth > 64 { return; }
-    let mut buf = [0u8; BLOCK_SIZE];
-    if read_node(cache, block, &mut buf).is_err() { return; }
-    let hdr = read_header(&buf);
-    if hdr.magic != BTREE_NODE_MAGIC { return; }
-    match hdr.node_type {
-        BTREE_LEAF => {
-            let n = (hdr.num_entries as usize).min(MAX_LEAF_ENTRIES);
-            for i in 0..n { entries.push(leaf_entry(&buf, i)); }
-        }
-        BTREE_INTERNAL => {
-            let n = (hdr.num_entries as usize).min(MAX_INTERNAL_KEYS);
-            for i in 0..n {
-                let child = internal_child(&buf, i);
-                if child != 0 {
-                    nodes.push(child);
-                    fsck_subtree(cache, child, depth + 1, nodes, entries);
-                }
-            }
-            if hdr.right_child != 0 {
-                nodes.push(hdr.right_child);
-                fsck_subtree(cache, hdr.right_child, depth + 1, nodes, entries);
-            }
-        }
-        _ => {}
-    }
+    walk(cache, block, depth, |w| match w {
+        Walk::Entry(e) => entries.push(e),
+        Walk::Child(c) => nodes.push(c),
+        Walk::Skip(..) => {}
+    });
 }
 
 /// Best-effort traversal used only by `iter_all` (GC enumeration):
 /// a node that is out-of-range, unreadable, has a bad magic / type, or
 /// a corrupt `num_entries` is logged and skipped rather than aborting
-/// the whole sweep — one bad pointer must not wedge GC forever. Depth-
-/// guarded against corrupt cycles, and `num_entries` is clamped to the
-/// node capacity so a garbage count can't index past the 4 KiB buffer
-/// (which would panic). `lookup`/`insert`/`delete` stay strict.
+/// the whole sweep — one bad pointer must not wedge GC forever.
+/// `lookup`/`insert`/`delete` stay strict.
 #[allow(dead_code)]
 fn iter_subtree<F: FnMut(&BTreeEntryRaw)>(
     cache: &mut BlockCache, block: u64, depth: u32, f: &mut F,
 ) -> Result<(), FsError> {
-    if depth > 64 {
-        crate::kprintln!("[npk] gc: btree depth >64 at block {} — corrupt cycle, skipping", block);
-        return Ok(());
-    }
-    let mut buf = [0u8; BLOCK_SIZE];
-    if let Err(e) = read_node(cache, block, &mut buf) {
-        crate::kprintln!("[npk] gc: unreadable btree node {} ({:?}) — skipping subtree", block, e);
-        return Ok(());
-    }
-    let hdr = read_header(&buf);
-    if hdr.magic != BTREE_NODE_MAGIC {
-        crate::kprintln!("[npk] gc: bad btree magic at block {} — skipping subtree", block);
-        return Ok(());
-    }
+    walk(cache, block, depth, |w| match w {
+        Walk::Entry(e) => f(&e),
+        Walk::Child(_) => {}
+        Walk::Skip(b, why) => crate::kprintln!("[npk] gc: btree node {} {} — skipping", b, why),
+    });
+    Ok(())
+}
 
-    match hdr.node_type {
-        BTREE_LEAF => {
-            let n = (hdr.num_entries as usize).min(MAX_LEAF_ENTRIES);
-            for i in 0..n {
-                f(&leaf_entry(&buf, i));
+/// What `walk` reports.
+enum Walk {
+    /// A leaf entry, in key order.
+    Entry(BTreeEntryRaw),
+    /// A child pointer of an internal node, before it is visited.
+    Child(u64),
+    /// A node that was not descended into, and why.
+    Skip(u64, &'static str),
+}
+
+/// Corruption-tolerant depth-first walk from `root`, entries in key order.
+/// Iterative, with the work list and the one block buffer on the heap: a
+/// crafted disk of deeply nested nodes cannot exhaust the kernel stack, a
+/// node already visited is not entered again (a cycle ends there), and a
+/// bad count is clamped to the node's capacity.
+fn walk(cache: &mut BlockCache, root: u64, depth: u32, mut out: impl FnMut(Walk)) {
+    let mut buf = alloc::boxed::Box::new([0u8; BLOCK_SIZE]);
+    let mut todo: alloc::vec::Vec<(u64, u32)> = alloc::vec![(root, depth)];
+    let mut seen = alloc::collections::BTreeSet::new();
+    while let Some((block, depth)) = todo.pop() {
+        if depth > 64 { out(Walk::Skip(block, "deeper than 64")); continue; }
+        if !seen.insert(block) { out(Walk::Skip(block, "visited twice")); continue; }
+        if read_node(cache, block, &mut buf).is_err() { out(Walk::Skip(block, "unreadable")); continue; }
+        let hdr = read_header(&buf);
+        if hdr.magic != BTREE_NODE_MAGIC { out(Walk::Skip(block, "bad magic")); continue; }
+        match hdr.node_type {
+            BTREE_LEAF => {
+                let n = (hdr.num_entries as usize).min(MAX_LEAF_ENTRIES);
+                for i in 0..n { out(Walk::Entry(leaf_entry(&buf, i))); }
             }
-            Ok(())
-        }
-        BTREE_INTERNAL => {
-            let n = (hdr.num_entries as usize).min(MAX_INTERNAL_KEYS);
-            for i in 0..n {
-                let child = internal_child(&buf, i);
-                if child != 0 {
-                    iter_subtree(cache, child, depth + 1, f)?;
-                }
+            BTREE_INTERNAL => {
+                let n = (hdr.num_entries as usize).min(MAX_INTERNAL_KEYS);
+                let children: alloc::vec::Vec<u64> = (0..n).map(|i| internal_child(&buf, i))
+                    .chain(core::iter::once(hdr.right_child))
+                    .filter(|&c| c != 0)
+                    .collect();
+                for &c in &children { out(Walk::Child(c)); }
+                // Reversed onto the stack, so the leftmost child comes off first.
+                for &c in children.iter().rev() { todo.push((c, depth + 1)); }
             }
-            if hdr.right_child != 0 {
-                iter_subtree(cache, hdr.right_child, depth + 1, f)?;
-            }
-            Ok(())
-        }
-        _ => {
-            crate::kprintln!("[npk] gc: bad btree node_type {} at block {} — skipping",
-                hdr.node_type, block);
-            Ok(())
+            _ => out(Walk::Skip(block, "bad node type")),
         }
     }
 }
