@@ -765,7 +765,7 @@ pub fn init() {
     config.consume_fuel(true);
     let engine = Engine::new(&config);
     *ENGINE.lock() = Some(engine);
-    crate::kdebug!("[npk] WASM runtime: wasmi v1.0 (fuel-metered)");
+    crate::kdebug!("[npk] WASM runtime: wasmi (fuel-metered)");
 }
 
 /// Execute a WASM module with an explicit fuel budget. Use for trusted
