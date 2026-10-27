@@ -882,7 +882,7 @@ fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
         {
             r |= WAIT_NET_TX;
         }
-        if mask & WAIT_WIFI_CMD != 0 && crate::wifi::cmd_pending() {
+        if mask & WAIT_WIFI_CMD != 0 && hw.registered_as_netdev && crate::wifi::cmd_pending() {
             r |= WAIT_WIFI_CMD;
         }
         if mask & WAIT_GPU_CMD != 0 && hw.is_pci && crate::gpu::gpudev::pending(hw.pci_addr) {
@@ -890,7 +890,7 @@ fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
         }
     }
     if mask & WAIT_WIFI_EVENT != 0
-        && capability::check_global(&ctx.cap_id, capability::Rights::NETCTL).is_ok()
+        && is_wifi_manager(ctx)
         && crate::wifi::event_pending()
     {
         r |= WAIT_WIFI_EVENT;
@@ -966,7 +966,7 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
                 crate::netdev::set_nic_waker(w);
                 sig |= SIG_TX;
             }
-            if mask & WAIT_WIFI_CMD != 0 {
+            if mask & WAIT_WIFI_CMD != 0 && hw.registered_as_netdev {
                 crate::wifi::set_cmd_waker(w);
                 sig |= SIG_WIFI;
             }
@@ -975,9 +975,7 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
                 sig |= crate::smp::fiber::SIG_GPU;
             }
         }
-        if mask & WAIT_WIFI_EVENT != 0
-            && capability::check_global(&ctx.cap_id, capability::Rights::NETCTL).is_ok()
-        {
+        if mask & WAIT_WIFI_EVENT != 0 && is_wifi_manager(ctx) {
             crate::wifi::set_event_waker(w);
             sig |= SIG_WIFI;
         }
@@ -3522,7 +3520,10 @@ pub(crate) fn npk_netdev_register(mem: &mut [u8], ctx: &mut HostState, mac_ptr: 
     let mut mac = [0u8; 6];
     mac.copy_from_slice(raw);
 
-    crate::netdev::register_wasm_nic(mac);
+    if !crate::netdev::register_wasm_nic(mac) {
+        kprintln!("[npk] {}: NIC refused, another driver holds it", ctx.module_name);
+        return -1;
+    }
     // Re-borrow after register call
     if let Some(h) = ctx.hw.as_mut() {
         h.registered_as_netdev = true;
@@ -4494,8 +4495,7 @@ pub(crate) fn npk_fs_copy(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old
 }
 
 pub(crate) fn npk_wifi_send_cmd(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
-    let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::NETCTL).is_err() {
+    if !is_wifi_manager(ctx) {
         return -1;
     }
     match read_bytes(mem, buf_ptr, len) {
@@ -4505,8 +4505,7 @@ pub(crate) fn npk_wifi_send_cmd(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i3
 }
 
 pub(crate) fn npk_wifi_poll_event(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
-    let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::NETCTL).is_err() {
+    if !is_wifi_manager(ctx) {
         return -1;
     }
     // The manager's own fiber is calling: remember its core so the

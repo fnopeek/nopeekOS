@@ -1,10 +1,29 @@
 //! WASM intents: run, driver
 
 use crate::{kprint, kprintln};
-use super::resolve_path;
+
+/// Load a module from the store, `sys/wasm/<name>`, the only place a
+/// module runs from. What is there was signature-checked when it was
+/// installed, and `wasm::is_trust_critical_path` keeps apps from writing
+/// there. A file anywhere else could carry any `.npk.caps` and would run
+/// under the name the name-gated host functions trust, so a name that is a
+/// path is refused rather than looked up.
+fn fetch_store_module(name: &str) -> Option<(alloc::vec::Vec<u8>, [u8; 32])> {
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        kprintln!("[npk] Module '{}': not a module name (modules run from sys/wasm/)", name);
+        return None;
+    }
+    match crate::npkfs::fetch(&alloc::format!("sys/wasm/{}", name)) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            kprintln!("[npk] Module '{}': {}", name, e);
+            None
+        }
+    }
+}
 
 pub fn intent_run(args: &str) {
-    use crate::{wasm, npkfs, capability};
+    use crate::{wasm, capability};
     use wasmi::Val;
 
     let mut parts = args.trim().splitn(2, ' ');
@@ -14,16 +33,7 @@ pub fn intent_run(args: &str) {
     };
     let arg_str = parts.next().unwrap_or("");
 
-    // Load module from npkFS: try cwd-relative, then sys/wasm/
-    let resolved = resolve_path(module_name);
-    let sys_path = alloc::format!("sys/wasm/{}", module_name);
-    let (wasm_bytes, hash) = match npkfs::fetch(&resolved) {
-        Ok(v) => v,
-        Err(_) => match npkfs::fetch(&sys_path) {
-            Ok(v) => v,
-            Err(e) => { kprintln!("[npk] Module '{}': {}", module_name, e); return; }
-        }
-    };
+    let Some((wasm_bytes, hash)) = fetch_store_module(module_name) else { return };
 
     // BLAKE3 integrity verified by npkfs::fetch
 
@@ -109,17 +119,9 @@ pub fn intent_run(args: &str) {
 /// The intent shell stays active — the module runs in parallel, sharing the
 /// terminal (output visible) but NOT capturing input. Used by debug.wasm.
 pub fn intent_run_background(module_name: &str) {
-    use crate::{wasm, npkfs, capability};
+    use crate::{wasm, capability};
 
-    let sys_path = alloc::format!("sys/wasm/{}", module_name);
-    let resolved = resolve_path(module_name);
-    let (wasm_bytes, hash) = match npkfs::fetch(&resolved) {
-        Ok(v) => v,
-        Err(_) => match npkfs::fetch(&sys_path) {
-            Ok(v) => v,
-            Err(e) => { kprintln!("[npk] Module '{}': {}", module_name, e); return; }
-        }
-    };
+    let Some((wasm_bytes, hash)) = fetch_store_module(module_name) else { return };
 
     // The fixed standard set plus what the module declares in `.npk.caps`,
     // the same as the click path (`npk_spawn_module`). A union, not a
@@ -162,17 +164,9 @@ pub fn intent_run_interactive_forge(module_name: &str) {
 }
 
 fn run_interactive_on(module_name: &str, use_forge: bool) {
-    use crate::{wasm, npkfs, capability};
+    use crate::{wasm, capability};
 
-    let sys_path = alloc::format!("sys/wasm/{}", module_name);
-    let resolved = resolve_path(module_name);
-    let (wasm_bytes, hash) = match npkfs::fetch(&resolved) {
-        Ok(v) => v,
-        Err(_) => match npkfs::fetch(&sys_path) {
-            Ok(v) => v,
-            Err(e) => { kprintln!("[npk] Module '{}': {}", module_name, e); return; }
-        }
-    };
+    let Some((wasm_bytes, hash)) = fetch_store_module(module_name) else { return };
 
     // The fixed standard set plus what the module declares in `.npk.caps`,
     // the same as the click path (`npk_spawn_module`). A union, not a
@@ -214,7 +208,7 @@ fn run_interactive_on(module_name: &str, use_forge: bool) {
 /// Usage: driver <module> [bus:dev.func]
 /// If no BDF given, auto-detects by module name.
 pub fn intent_run_driver(args: &str) {
-    use crate::{wasm, npkfs, capability};
+    use crate::{wasm, capability};
     use crate::drivers::pci;
 
     let mut parts = args.trim().splitn(2, ' ');
@@ -224,16 +218,7 @@ pub fn intent_run_driver(args: &str) {
     };
     let bdf_arg = parts.next().unwrap_or("").trim();
 
-    // Load WASM module from npkFS
-    let sys_path = alloc::format!("sys/wasm/{}", module_name);
-    let resolved = resolve_path(module_name);
-    let (wasm_bytes, hash) = match npkfs::fetch(&resolved) {
-        Ok(v) => v,
-        Err(_) => match npkfs::fetch(&sys_path) {
-            Ok(v) => v,
-            Err(e) => { kprintln!("[npk] Module '{}': {}", module_name, e); return; }
-        }
-    };
+    let Some((wasm_bytes, hash)) = fetch_store_module(module_name) else { return };
 
     // Find PCI device: manual BDF or auto-detect by module name
     let dev = if !bdf_arg.is_empty() {

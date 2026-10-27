@@ -95,9 +95,14 @@ impl WasmNic {
 /// when the vCPU yields.
 static WASM_NIC_CORE: AtomicU32 = AtomicU32::new(0);
 
-/// Called by WASM host function npk_netdev_register
-pub fn register_wasm_nic(mac: [u8; 6]) {
+/// Called by WASM host function npk_netdev_register. One driver at a time:
+/// false while another module holds the NIC, which would otherwise take
+/// over its traffic and the device side of the WiFi control channel.
+pub fn register_wasm_nic(mac: [u8; 6]) -> bool {
     let mut nic = WASM_NIC.lock();
+    if WASM_NIC_ACTIVE.load(Ordering::Acquire) {
+        return false;
+    }
     nic.mac_addr = mac;
     WASM_NIC_RX.lock().clear();
     nic.tx.clear();
@@ -107,6 +112,7 @@ pub fn register_wasm_nic(mac: [u8; 6]) {
     // The core is recorded once and kept clear of vCPUs; the driver stays.
     crate::smp::fiber::pin_current();
     WASM_NIC_ACTIVE.store(true, Ordering::Release);
+    true
 }
 
 /// Called by cleanup_hw_state when WASM driver exits

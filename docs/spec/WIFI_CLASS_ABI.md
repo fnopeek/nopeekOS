@@ -47,8 +47,8 @@ kernel-assigned module name (`ctx.module_name`).
 
 | Host function | Gate | Used by |
 |---|---|---|
-| `npk_wifi_send_cmd(buf, len) -> 0 / -1` | NETCTL | wifid |
-| `npk_wifi_poll_event(buf, max) -> len / -1` | NETCTL | wifid |
+| `npk_wifi_send_cmd(buf, len) -> 0 / -1` | name `wifid` and NETCTL | wifid |
+| `npk_wifi_poll_event(buf, max) -> len / -1` | name `wifid` and NETCTL | wifid |
 | `npk_wifi_poll_cmd(buf, max) -> len / -1` | driver | driver |
 | `npk_wifi_send_event(buf, len) -> 0 / -1` | driver | driver |
 | `npk_wifi_known(buf, max) -> len / -1 / -2` | name `wifid` and NETCTL | wifid |
@@ -58,7 +58,7 @@ kernel-assigned module name (`ctx.module_name`).
 | `npk_wifi_status(buf, max) -> len / -1 / -2` | name `link` | link |
 | `npk_wifi_request(buf, len) -> 0 / -1` | name `link` | link |
 | `npk_net_info(buf, max) -> len / -1 / -2` | RENDER | link |
-| `npk_netdev_register(mac_ptr) -> 0 / -1` | driver state, once per module | driver |
+| `npk_netdev_register(mac_ptr) -> 0 / -1` | driver state, once per module, refused while another module holds the NIC | driver |
 | `npk_netdev_submit_rx(buf, len) -> 0 / -1` | driver | driver |
 | `npk_netdev_rx_deliver(buf, len) -> 0 / -1` | driver | none |
 | `npk_netdev_poll_tx(buf, max) -> len / -1` | driver | driver |
@@ -74,8 +74,8 @@ copied. Pointers are offsets into the caller's linear memory.
 
 | Bit | Name | Fires when | Gate |
 |---|---|---|---|
-| `8` | `WAIT_WIFI_CMD` | a command is queued for the driver | caller has driver state |
-| `16` | `WAIT_WIFI_EVENT` | an event or a user request is queued for the manager | NETCTL |
+| `8` | `WAIT_WIFI_CMD` | a command is queued for the driver | caller is the registered NIC driver |
+| `16` | `WAIT_WIFI_EVENT` | an event or a user request is queued for the manager | name `wifid` and NETCTL |
 | `32` | `WAIT_STATE` | a status topic changed (wifid's `npk_wifi_publish` notifies it) | RENDER |
 
 A push to either control queue signals the fiber registered for that bit.
@@ -493,8 +493,11 @@ What the code enforces:
   passphrase but have no call that returns one; the state text carries none.
 - **The vault object is closed to npkFS calls** (`sys/vault` is trust-critical);
   entries are encrypted per tier with the name bound as associated data.
-- **Manager side of the control channel requires NETCTL**; driver side
-  requires a registered WASM NIC.
+- **Each end of the control channel has one owner.** The manager side
+  requires the name `wifid` with NETCTL; the driver side requires being the
+  registered WASM NIC, and only one module can hold it.
+- **Names are store names.** Modules run only from `sys/wasm/`, which apps
+  cannot write, so a name gate cannot be met by a file placed elsewhere.
 - **EAPOL frames never enter the IP stack**: the driver routes ethertype
   `0x888E` to wifid only.
 - **No data before authorization**: the driver forwards non-EAPOL frames and
