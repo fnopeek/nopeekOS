@@ -814,7 +814,9 @@ fn next_ask(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     if let Some((b, ch)) = NEXT_CONNECT.with(|c| c.take()) {
         return Some(Ask::Connect(b, ch));
     }
-    let mut cmd = [0u8; 64];
+    // The channel's message size: a smaller buffer leaves a long command
+    // (a late TX_EAPOL) at the head of the queue and blocks every later one.
+    let mut cmd = [0u8; 2048];
     let mut n = host::wifi_poll_cmd(&mut cmd);
     if n <= 0 && wait_ms > 0 {
         host::wait(host::WAIT_WIFI_CMD, wait_ms);
@@ -2099,6 +2101,9 @@ struct Bss {
     /// AP grants VHT: hostapd strips VHT from a station without WMM element
     /// (`copy_sta_vht_capab`, ieee802_11_vht.c:200).
     wmm: bool,
+    /// A WPA (version 1) element: vendor 00:50:f2 type 1, as mac80211
+    /// `parse.c` tells it from WMM. Only for reporting the network as WPA.
+    wpa1: bool,
 }
 
 const MAX_BSS: usize = 48;
@@ -2127,7 +2132,7 @@ impl Bss {
         ht_op_seen: false, ht_cap: 0,
         vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
         ap_vht_cap: 0, ap_vht_cap_seen: false,
-        bss_load: 0, bss_load_seen: false, wmm: false,
+        bss_load: 0, bss_load_seen: false, wmm: false, wpa1: false,
     };
 
     fn width(&self) -> CellWidth {
@@ -2512,7 +2517,7 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         ht_op_seen: false, ht_cap: 0,
         vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
         ap_vht_cap: 0, ap_vht_cap_seen: false,
-        bss_load: 0, bss_load_seen: false, wmm: false,
+        bss_load: 0, bss_load_seen: false, wmm: false, wpa1: false,
     }; MAX_BSS];
     let mut n_found = 0usize;
     let mut probes = 0u32;
@@ -2872,9 +2877,11 @@ fn set_roam_channels(t: &Bss) {
 }
 
 /// What a cell asks for, from its RSN element (802.11 §9.4.2.24) and the
-/// privacy bit: 0 open · 1 WEP · 2 WPA2-PSK · 3 WPA3-SAE · 4 both · 5 other.
+/// privacy bit: 0 open · 1 WEP · 2 WPA2-PSK · 3 WPA3-SAE · 4 both · 5 other
+/// · 6 WPA (version 1 only).
 fn security_of(b: &Bss) -> u8 {
     if b.rsn_len == 0 {
+        if b.wpa1 { return 6; }
         return if b.capability & 0x0010 != 0 { 1 } else { 0 };
     }
     // version 2 · group suite 4 · pairwise count 2 + 4n · AKM count 2 + 4m
@@ -3039,6 +3046,11 @@ fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
                 && f[i + 5] == 2
                 && (f[i + 6] == 0 || f[i + 6] == 1) => {
                 e.wmm = true;
+            }
+            221 if len >= 4
+                && f[i + 2..i + 5] == [0x00, 0x50, 0xf2]
+                && f[i + 5] == 1 => {
+                e.wpa1 = true;
             }
             192 if len >= 3 => {
                 e.vht_chanwidth = f[i + 2];
@@ -6433,7 +6445,9 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 // TX_EAPOL: [op][len u16 LE][frame]
                 Some(CMD_TX_EAPOL) if cmd.len() >= 3 => {
                     let len = ((cmd[2] as usize) << 8) | cmd[1] as usize;
-                    if cmd.len() >= 3 + len {
+                    // A frame that does not fit behind the Ethernet header
+                    // is dropped, as on the RX side.
+                    if cmd.len() >= 3 + len && 14 + len <= 600 {
                         let mut eth = [0u8; 600];
                         eth[0..6].copy_from_slice(&link.bssid);
                         eth[6..12].copy_from_slice(&mac);
@@ -6695,7 +6709,7 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0,
                         vht_op_seen: false,
                         ap_vht_cap: 0, ap_vht_cap_seen: false,
-                        bss_load: 0, bss_load_seen: false, wmm: false,
+                        bss_load: 0, bss_load_seen: false, wmm: false, wpa1: false,
                     }; ROAM_BSS_MAX];
                     let mut n_kand = 0usize;
                     let ms = roam_scan(h, hal, trx, mgmt_buf, e, t_pwr, link,

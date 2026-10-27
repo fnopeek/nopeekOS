@@ -165,7 +165,8 @@ The pairwise key is installed for the BSSID, the group key for
 `ff:ff:ff:ff:ff:ff`. After the pairwise key, frames the driver sends are
 encrypted.
 
-**TX_EAPOL.** `frame` is the EAPOL frame starting at the 802.1X header. The
+**TX_EAPOL.** `frame` is the EAPOL frame starting at the 802.1X header,
+at most 586 bytes (a longer one is dropped). The
 driver wraps it in an Ethernet header (destination BSSID, source own MAC,
 ethertype `0x888E`), sends it as a data frame, encrypted once the pairwise
 key is installed, and requests a TX report. Handled only while a link runs.
@@ -240,8 +241,8 @@ own (after two failures it rescans for the same SSID) and sends a new
 Cells that would push the message past 2048 bytes are left out. wifid skips
 cells with an empty SSID and keeps at most 48.
 
-Security values (from the RSN element's AKM list, else the beacon's privacy
-bit):
+Security values (from the RSN element's AKM list, else the WPA vendor
+element, else the beacon's privacy bit):
 
 | Value | Meaning |
 |---|---|
@@ -251,6 +252,7 @@ bit):
 | `3` | RSN with AKM 8 (SAE), no PSK |
 | `4` | RSN with both PSK and SAE |
 | `5` | RSN element without a known AKM, or unparsable |
+| `6` | no RSN element, a WPA (version 1) vendor element |
 
 wifid connects only to cells with security 2 or 4.
 

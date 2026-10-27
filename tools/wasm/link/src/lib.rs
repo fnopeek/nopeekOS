@@ -289,6 +289,7 @@ fn security_name(s: u8) -> &'static str {
         2 => "WPA2",
         3 => "WPA3",
         4 => "WPA2/WPA3",
+        6 => "WPA",
         _ => "Enterprise",
     }
 }
