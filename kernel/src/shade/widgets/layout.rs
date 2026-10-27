@@ -701,16 +701,12 @@ fn place_axis(
     let remaining = main_avail.saturating_sub(total_main).saturating_sub(gaps);
 
     // Overflow: Flex children give back space in proportion to weight ×
-    // basis, down to zero (css-flexbox-1 §9.7 flex-shrink). Everyone else
-    // keeps its intrinsic size.
+    // basis (css-flexbox-1 §9.7 flex-shrink), never below their own
+    // MinWidth/MinHeight: one that would is frozen there and the rest is
+    // shared among the others. Everyone else keeps its intrinsic size;
+    // what still does not fit runs past the end and is clipped there.
     let overflow = total_main.saturating_add(gaps).saturating_sub(main_avail);
-    let shrink_basis = |c: &Widget, m: &Size| -> u64 {
-        match (c, flex_modifier(mods_of_widget(c))) {
-            (Widget::Spacer { .. }, _) | (_, None) => 0,
-            (_, Some(weight)) => weight as u64 * if vertical { m.h } else { m.w } as u64,
-        }
-    };
-    let shrink_total: u64 = children.iter().zip(measured.iter()).map(|(c, m)| shrink_basis(c, m)).sum();
+    let shrunk = (overflow > 0).then(|| shrink_sizes(children, &measured, overflow, vertical));
 
     // Pass 2: walk children, place them along the main axis. Spacers
     // and Modifier::Flex children absorb `remaining` proportionally
@@ -729,10 +725,7 @@ fn place_axis(
                     (remaining * (*flex).max(1) as u32) / flex_sum
                 }
             }
-            _ if overflow > 0 && shrink_total > 0 => {
-                let give = (overflow as u64 * shrink_basis(c, m) / shrink_total) as u32;
-                intrinsic_main.saturating_sub(give)
-            }
+            _ if shrunk.is_some() => shrunk.as_ref().map_or(intrinsic_main, |v| v[idx]),
             _ => match flex_modifier(mods_of_widget(c)) {
                 Some(weight) if flex_sum > 0 => {
                     intrinsic_main + (remaining * weight as u32) / flex_sum
@@ -775,6 +768,58 @@ fn place_axis(
     }
 
     LayoutNode { rect: content, baseline: 0, children: kids }
+}
+
+/// Main-axis sizes after giving back `overflow`, css-flexbox-1 §9.7: each
+/// unfrozen Flex child gives in proportion to weight × basis; one that
+/// would end below its minimum is frozen at it, and the loop shares what
+/// is left among the rest.
+fn shrink_sizes(children: &[Widget], measured: &[Size], overflow: u32, vertical: bool) -> Vec<u32> {
+    let main = |m: &Size| if vertical { m.h } else { m.w };
+    let mut size: Vec<u32> = measured.iter().map(main).collect();
+    let basis: Vec<u64> = children.iter().zip(measured).map(|(c, m)| {
+        match (c, flex_modifier(mods_of_widget(c))) {
+            (Widget::Spacer { .. }, _) | (_, None) => 0,
+            (_, Some(weight)) => weight as u64 * main(m) as u64,
+        }
+    }).collect();
+    let min: Vec<u32> = children.iter().map(|c| min_main(mods_of_widget(c), vertical)).collect();
+    let mut frozen: Vec<bool> = basis.iter().map(|&b| b == 0).collect();
+    let mut left = overflow as u64;
+    loop {
+        let total: u64 = (0..size.len()).filter(|&i| !frozen[i]).map(|i| basis[i]).sum();
+        if total == 0 || left == 0 {
+            return size;
+        }
+        let mut froze = false;
+        for i in 0..size.len() {
+            if frozen[i] { continue; }
+            let want = size[i] as u64 - (left * basis[i] / total).min(size[i] as u64);
+            if want < min[i] as u64 {
+                let floor = min[i].min(size[i]);
+                left = left.saturating_sub((size[i] - floor) as u64);
+                size[i] = floor;
+                frozen[i] = true;
+                froze = true;
+            }
+        }
+        if froze {
+            continue;
+        }
+        for i in (0..size.len()).filter(|&i| !frozen[i]) {
+            size[i] -= (left * basis[i] / total).min(size[i] as u64) as u32;
+        }
+        return size;
+    }
+}
+
+/// A widget's own minimum on the main axis (MinWidth or MinHeight), 0
+/// without one.
+fn min_main(mods: &[Modifier], vertical: bool) -> u32 {
+    mods.iter().filter_map(|m| match (m, vertical) {
+        (Modifier::MinWidth(v), false) | (Modifier::MinHeight(v), true) => Some(scale::len(*v as u32)),
+        _ => None,
+    }).max().unwrap_or(0)
 }
 
 // ── Modifier helpers ──────────────────────────────────────────────────
