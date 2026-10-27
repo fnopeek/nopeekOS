@@ -1154,9 +1154,6 @@ fn pool_take(host: &str) -> Option<crate::tls::TlsSession> {
             if fresh && tls.is_healthy() {
                 return Some(tls);
             }
-            // Logged so a discarded stale connection is visible.
-            kprintln!("[npk]   pool {}: Verbindung verworfen ({})", host,
-                if fresh { "Gegenstelle hat zugemacht" } else { "zu lange ungenutzt" });
             let _ = crate::tls::tls_close(&mut tls);
             return None;
         }
@@ -1338,8 +1335,6 @@ fn h2_take_exact(host: &str) -> Option<Http2> {
                 conn.reused = true;
                 return Some(conn);
             }
-            kprintln!("[npk]   h2 pool {}: Verbindung verworfen ({})", host,
-                if fresh { "Gegenstelle hat zugemacht" } else { "zu lange ungenutzt" });
             conn.close();
             return None;
         }
@@ -2751,8 +2746,6 @@ fn plain_take(key: &str) -> Option<usize> {
             if fresh && crate::net::tcp::conn_healthy(c.handle) {
                 return Some(c.handle);
             }
-            kprintln!("[npk]   pool {}: Verbindung verworfen ({})", key,
-                if fresh { "Gegenstelle hat zugemacht" } else { "zu lange ungenutzt" });
             let _ = crate::net::tcp::close(c.handle);
             return None;
         }
