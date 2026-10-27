@@ -22,7 +22,7 @@ Nothing here encodes hardware knowledge by hand:
     fill the holes with RADV's values and compare every word.
 
 The Mesa tree is the 26.2.4 source at ~/.cache/nopeekos/gpu-shaders/src/mesa,
-built once for RADV and the drm-shim (see docs/plan/GPU_AMD_SCENES.md):
+built once for RADV and the drm-shim:
 
     meson setup build-amd src/mesa -Dbuildtype=release -Dplatforms= \\
       -Dgallium-drivers= -Dvulkan-drivers=amd -Dtools=drm-shim \\

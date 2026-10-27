@@ -1,4 +1,4 @@
-//! Native contexts for guests (docs/plan/GPU_AMD_NATIVE.md): the ccmd
+//! Native contexts for guests: the ccmd
 //! handlers of virglrenderer `src/drm/amdgpu/amdgpu_renderer.c`, each
 //! calling this driver where virglrenderer calls libdrm and the host's
 //! amdgpu, and `amdgpu_renderer_probe`'s capset. A guest context is a

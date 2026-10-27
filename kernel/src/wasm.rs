@@ -506,8 +506,7 @@ fn spawn_on_worker_inner_engine(
     }
 
     // Run the app on a fiber (own stack) so it can yield at npk_sleep /
-    // npk_event_wait instead of pinning its worker core — see smp::fiber
-    // + docs/plan/SCHEDULER_FIBERS.md. Native intents still use plain `spawn`.
+    // npk_event_wait instead of pinning its worker core — see smp::fiber. Native intents still use plain `spawn`.
     crate::smp::scheduler::spawn_fiber_or(wasm_worker_task, slot as u64, shared_core, wasm_job_dropped);
 
     true
@@ -1257,8 +1256,8 @@ fn is_trust_critical_path(name: &str) -> bool {
     // which must keep working. This is checked before own_config in npk_store,
     // so a module named `picker`/`launcher` cannot write its anchor either.
     // The network-credential keys
-    // (sys/config/wifi, wifi_psk) are deliberately left to the keystore track
-    // (docs/plan/KEYSTORE.md), not blanket-blocked here, so wifid keeps working.
+    // (sys/config/wifi, wifi_psk) are deliberately left to the keystore track,
+    // not blanket-blocked here, so wifid keeps working.
     if c == "sys/config/picker" || c == "sys/config/launcher" {
         return true;
     }

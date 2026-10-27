@@ -1,4 +1,4 @@
-//! The gpudev scene executor (docs/plan/GPU_STACK.md §3.3 v1, `SCENE`) on
+//! The gpudev scene executor (`SCENE`) on
 //! the render engine: the scene checked and planned by gpu_scene, run by
 //! the programs compose.comp, blur_down.comp and blur_box.comp in one
 //! batch. Not a Linux file.

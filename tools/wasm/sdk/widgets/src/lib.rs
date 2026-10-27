@@ -4,8 +4,6 @@
 //! Apps build a `Widget` tree, call [`wire::encode`] to produce a
 //! version-prefixed byte buffer, and commit it via `npk_scene_commit`.
 //!
-//! See `docs/archive/PHASE10_WIDGETS.md` for the full architecture.
-//!
 //! # Layering rules
 //!
 //! - Types in this crate are ABI — variant order, struct field order,

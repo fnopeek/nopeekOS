@@ -4,8 +4,7 @@
 //! apps spawn from worker cores (`npk_spawn_module`, `npk_open`,
 //! `npk_launch`, `npk_pick`, the microVM AP fallback), so any core may push.
 //!
-//! Workers take from the inbox in FIFO order. This is the interim form of the
-//! per-core mailbox in `docs/plan/CORES_AND_EVENTS.md` §3.3.
+//! Workers take from the inbox in FIFO order.
 
 use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -14,8 +13,8 @@ use spin::Mutex;
 // ── Task ───────────────────────────────────────────────────────
 
 /// A unit of new work. There is no priority: ordering among runnable work
-/// belongs to the per-core fiber scheduler
-/// (`docs/plan/CORES_AND_EVENTS.md`), not to the inbox.
+/// belongs to the per-core fiber scheduler,
+/// not to the inbox.
 pub struct Task {
     /// What it is, for `cores` — a native task holds its core until it
     /// returns, and a name is the first question when one does not.

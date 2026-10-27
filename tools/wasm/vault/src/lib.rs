@@ -1,5 +1,5 @@
-//! vault — a small password manager over the kernel keyvault
-//! (docs/plan/KEYSTORE.md). UI after the agreed mockup: setup / unlock, a
+//! vault — a small password manager over the kernel keyvault.
+//! UI after the agreed mockup: setup / unlock, a
 //! sidebar + list + detail, and the add/edit forms.
 //!
 //! Layout follows `loft`: the root Column has no fixed size (the window

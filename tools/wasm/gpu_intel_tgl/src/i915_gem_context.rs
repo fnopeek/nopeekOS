@@ -1,5 +1,5 @@
-//! The drm_file side of i915 for native-context clients
-//! (docs/plan/GPU_IN_VM.md §4b): gem/i915_gem_context.c (contexts, their
+//! The drm_file side of i915 for native-context clients:
+//! gem/i915_gem_context.c (contexts, their
 //! engines and address spaces, `I915_GEM_VM_*`), the object bookkeeping of
 //! gem/i915_gem_object.c and i915_vma.c (an object bound at the offset a
 //! client chose), and the fences virglrenderer's drm_timeline keeps per

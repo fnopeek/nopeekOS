@@ -1,4 +1,4 @@
-//! Fill an icon outline at any pixel size (docs/plan/UI_SCALE.md, step 2).
+//! Fill an icon outline at any pixel size.
 //!
 //! The outline comes from `tools/regen-icons`: closed polygons in 1/64 units
 //! of the 256 grid, strokes already turned into fills, curves flattened. So

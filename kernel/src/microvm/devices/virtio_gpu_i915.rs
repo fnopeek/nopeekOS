@@ -1,4 +1,4 @@
-//! The i915 backend of native contexts (docs/plan/GPU_IN_VM.md §4b): the
+//! The i915 backend of native contexts: the
 //! host side of virglrenderer `src/drm/i915/` with the GPU driver module in
 //! the place of the host's i915. GEM objects are kernel frames (GEM_CREATE,
 //! GEM_CREATE_EXT, GEM_SET_MMAP_MODE are served here, as

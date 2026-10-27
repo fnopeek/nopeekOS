@@ -81,5 +81,5 @@ for shell and TOML only full-line `#` comments, for Python also docstrings):
   token stream must be identical to `REV`.
 - `archive DIR` — dumps every comment block with its location.
 
-The pre-cleanup comments are archived in `docs/archive/comments/` and
-under the git tag `comments-archive-2026-10`.
+The pre-cleanup comments are kept under the git tag
+`comments-archive-2026-10`.

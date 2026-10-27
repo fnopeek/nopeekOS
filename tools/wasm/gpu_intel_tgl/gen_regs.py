@@ -45,8 +45,7 @@ The tree is ~/.cache/nopeekos/i915-work: the include/, arch/x86/include/
 and drivers/gpu/drm/i915/ parts of the linux-6.18.55 tarball and
 drivers/gpu/drm/drm_fourcc.c (the format table), drm_edid.c with its three
 internal headers and display/drm_dp_helper.c with its one, plus the
-generated headers of a build configured with CONFIG_DRM_I915=m (kb/). See
-docs/plan/GPU_INTEL_LINUX_MAP.md.
+generated headers of a build configured with CONFIG_DRM_I915=m (kb/).
 """
 import base64
 import os

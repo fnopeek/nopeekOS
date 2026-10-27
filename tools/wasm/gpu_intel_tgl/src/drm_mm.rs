@@ -6,7 +6,7 @@
 //! `drm_mm_remove_node` and the holes walk of `drm_mm_for_each_hole`.
 //!
 //! The address-space bookkeeping belongs to the gpudev side
-//! (GPU_STACK.md §3.3); until it exists the module keeps it here. The
+//! of the kernel; until it exists the module keeps it here. The
 //! module has no heap that frees, so the nodes sit in a fixed array; a
 //! full array is reported as -ENOSPC, the same answer as an overlap.
 

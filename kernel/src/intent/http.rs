@@ -667,8 +667,8 @@ pub fn header_line_is_safe(line: &str) -> bool {
 
 // ── Reach ────────────────────────────────────────────────────────────────
 //
-// A public page may not reach the user's private network
-// (`docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2). CORS does not cover this:
+// A public page may not reach the user's private network.
+// CORS does not cover this:
 // it protects the target server, not the network the browser sits in
 // (cf. Private Network Access). Enforced in the kernel because a boundary
 // the sandboxed module draws itself is none; beak only says where a request

@@ -161,7 +161,7 @@ pub fn reset() {
     UPLINK.lock().clear();
 }
 
-// ── User requests to the manager (docs/plan/WLAN_MANAGER.md §4) ──
+// ── User requests to the manager ──
 //
 // The `wlan` intent and the `link` tool ask; `wifid` decides. A password that comes
 // with a request is stored in the vault here and never travels further:
@@ -286,7 +286,7 @@ pub fn set_prio(ssid: &[u8], prio: i8) -> Result<(), &'static str> {
 
 // ── Known networks: vault system tier, `net:<SSID>` ──
 
-/// A known network (docs/plan/WLAN_MANAGER.md §1).
+/// A known network.
 pub struct KnownNet {
     pub auto: bool,
     pub prio: i8,

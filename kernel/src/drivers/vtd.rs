@@ -1,5 +1,4 @@
-//! Intel VT-d DMA remapping for one device (docs/plan/GPU_STACK.md stage 2,
-//! docs/plan/GPU_IN_VM.md).
+//! Intel VT-d DMA remapping for one device.
 //!
 //! A driver module programs its device with physical addresses. Without an
 //! IOMMU nothing stops the device from reaching any page; the WASM sandbox

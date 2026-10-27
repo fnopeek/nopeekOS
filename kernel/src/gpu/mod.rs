@@ -7,7 +7,6 @@
 //! Backends:
 //! - GOP: UEFI Graphics Output Protocol, the CPU path every machine has
 //! - gpudev: a GPU driver module that serves the compositor's copies
-//!   (docs/plan/GPU_STACK.md §3.3)
 
 #![allow(dead_code)]
 

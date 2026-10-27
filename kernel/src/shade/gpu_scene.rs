@@ -1,4 +1,4 @@
-//! Scene lists on the GPU (docs/plan/GPU_STACK.md §3.3 v1, §5.4 A5).
+//! Scene lists on the GPU.
 //!
 //! When the GPU module offers scenes, a frame's scene list is encoded with
 //! its sources named by gpudev buffer handles and composed by the module's

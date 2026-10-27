@@ -2,8 +2,6 @@
 //!
 //! Apps describe what to render (widget tree); Shade owns how
 //! (layout, rasterization, GPU compositing, animation, theming).
-//!
-//! See docs/archive/PHASE10_WIDGETS.md for the full spec.
 
 pub mod abi;
 pub mod canvas;

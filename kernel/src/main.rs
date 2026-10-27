@@ -156,8 +156,8 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // SMP: discover cores via ACPI MADT, boot Application Processors
     smp::init();
 
-    // Validate the fiber context-switch primitive on Core 0
-    // (docs/plan/SCHEDULER_FIBERS.md). Prints `[fiber] self-test OK`.
+    // Validate the fiber context-switch primitive on Core 0.
+    // Prints `[fiber] self-test OK`.
     smp::fiber::self_test();
 
     // MicroVM: vendor-detect (Intel VMX / AMD SVM), probe

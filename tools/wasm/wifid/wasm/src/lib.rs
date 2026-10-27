@@ -1,4 +1,4 @@
-//! wifid.wasm — the WiFi connection manager (docs/plan/WLAN_MANAGER.md).
+//! wifid.wasm — the WiFi connection manager.
 //!
 //! Vendor-independent: it drives any vendor WiFi driver over the
 //! kernel-mediated WiFi-class control channel (docs/spec/WIFI_CLASS_ABI.md).
@@ -103,7 +103,7 @@ const EV_DRIVER_UP: u8 = 0x8a;
 /// The smoothed level of our cell: [op][dBm i8].
 const EV_SIGNAL: u8 = 0x8b;
 
-// The panel's item (docs/plan/STATUS_ITEMS.md): icons by `IconId`, the
+// The panel's item: icons by `IconId`, the
 // `link` tool opens on a click.
 const ICON_WIFI_HIGH: i32 = 55;
 const ICON_WIFI_MEDIUM: i32 = 56;

@@ -114,7 +114,7 @@ Link, der wegen Legacy-Rate langsam ist, nicht von einem zu unterscheiden, der
 wegen voller Queues langsam ist.
 
 ### Verbindungs-Policy
-`wifid` wählt das Netz und schickt `CONNECT` (docs/plan/WLAN_MANAGER.md). Die
+`wifid` wählt das Netz und schickt `CONNECT`. Die
 bekannten Netze stehen im Vault (Systembereich, `net:<SSID>`), die
 Kartenparameter in `sys/config/wifi`:
 
@@ -212,8 +212,7 @@ ASSOCIATED→AUTHORIZED) — das ist der erste testbare Daten-Pfad (Stage 5d).
 ---
 
 ## 6. Credential-Speicher (nur `wifid`)
-Bekannte Netze im Vault, Systembereich, `net:<SSID>` (docs/plan/KEYSTORE.md,
-Format in WLAN_MANAGER.md §1). Lesen darf sie nur `wifid` (Modulname +
+Bekannte Netze im Vault, Systembereich, `net:<SSID>`. Lesen darf sie nur `wifid` (Modulname +
 NETCTL, `npk_wifi_known`); geschrieben werden sie vom Kernel (Intent `wlan`,
 Deck-Anfrage) und von der Vault-GUI. **Der Treiber bekommt davon nichts** —
 Trennung der Geheimnisse.
@@ -238,7 +237,6 @@ Trennung der Geheimnisse.
 - **#3 connect = der erste TX-Datenpfad:** PHY_CONTEXT_CMD + BINDING_CONTEXT_CMD +
   ADD_STA v12 + dyn. gen2-TX-Queue (SCD_QUEUE_CONFIG + **bc_tbl**) + eingebettetes
   tx_cmd; Auth/Assoc-Frames baut `wifid` (TX_MGMT/RX_MGMT). Bisher nur Cmd-Queue+RX.
-  Voller Stage-Plan (5a–5e) in `docs/archive/WIFI_AX200.md`.
 - EAPOL-Demux (Ethertype 0x888E) + SET_KEY→**ADD_STA_KEY (0x17)** (diese FW,
   new_station_api; nicht SEC_KEY_CMD).
 - Data-Pfad: `npk_netdev_submit_rx`/`poll_tx`/`set_link` (Host-Fns ✅ in v0.205.0).

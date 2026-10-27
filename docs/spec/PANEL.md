@@ -129,7 +129,7 @@ Kernel side:
 - `set_panel(Bottom, Strut, w, h)` — a strut at the bottom: the compositor
   reserves `margin + h` there (`BottomStrut`, `bottom_band()`) and lays the
   tiles above it. Independent of the top strut; both may exist.
-- Menus are popups (`npk_popup`, docs/plan/POPUP.md): windows of their
+- Menus are popups (`npk_popup`): windows of their
   own, as large as their content, anchored at a node of the panel's tree.
   The panel itself never grows and never holds the keyboard.
 - `npk_window_titles` lines carry two more columns:

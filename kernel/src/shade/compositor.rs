@@ -490,7 +490,7 @@ impl Compositor {
     /// Vertical band the tiling area gives up at the bottom for the
     /// auto-hide dock: the dock band plus a top gap equal to its floating
     /// bottom gap, once it is fully revealed and meant to stay. While it
-    /// slides it is an overlay over the tiles (docs/archive/DOCK.md §3):
+    /// slides it is an overlay over the tiles:
     /// revealing, the tiles keep their size until the dock is up; hiding,
     /// they take the space back at once and the dock slides away over them.
     /// The tiles are laid out once per slide, not per step.
@@ -1613,7 +1613,7 @@ impl Compositor {
         true
     }
 
-    // === Popups — docs/plan/POPUP.md, after xdg_popup ===
+    // === Popups, after xdg_popup ===
 
     /// Popup `slot` of `parent`, if it is open.
     pub fn popup_window(&self, parent: WindowId, slot: u8) -> Option<WindowId> {

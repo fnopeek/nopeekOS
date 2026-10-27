@@ -378,7 +378,7 @@ pub fn store(name: &[u8], data: &[u8]) -> i32 {
     unsafe { npk_store(name.as_ptr() as i32, name.len() as i32, data.as_ptr() as i32, data.len() as i32) }
 }
 
-// ── Keyvault (docs/plan/KEYSTORE.md) — only the `vault` module may call ──
+// ── Keyvault — only the `vault` module may call ──
 
 /// Bits: 1 exists, 2 user tier present, 4 user tier unlocked; -1 if denied.
 pub fn vault_status() -> i32 {
@@ -389,7 +389,7 @@ pub fn vault_init() -> i32 {
     // SAFETY: FFI without pointers.
     unsafe { npk_vault_init() }
 }
-/// Publish status item `key` (docs/plan/STATUS_ITEMS.md): `flags` = state
+/// Publish status item `key`: `flags` = state
 /// | place << 8; a click on it opens module `opens`.
 pub fn status_set(key: &[u8], icon: i32, value: i32, flags: i32, text: &[u8], opens: &[u8]) -> i32 {
     // SAFETY: FFI; the three ranges are borrowed for the call.

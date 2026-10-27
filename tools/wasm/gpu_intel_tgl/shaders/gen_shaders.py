@@ -21,7 +21,7 @@ Nothing here encodes hardware knowledge by hand:
 
 The Mesa tree is the 26.2.4 source at ~/.cache/nopeekos/gpu-shaders/src/mesa,
 built once with meson for the compiler libraries only (no LLVM, no drivers
-beyond softpipe, which keeps NIR complete; see GPU_INTEL_LINUX_MAP.md §0):
+beyond softpipe, which keeps NIR complete):
 
     meson setup build src/mesa -Dbuildtype=release -Dplatforms= \\
       -Dgallium-drivers=softpipe -Dvulkan-drivers= -Dtools=intel \\

@@ -1,4 +1,4 @@
-//! The UI scale factor (docs/plan/UI_SCALE.md).
+//! The UI scale factor.
 //!
 //! Apps write logical px; layout and raster work in physical px. Every
 //! logical length crosses into physical through `len` (or `font`), so the

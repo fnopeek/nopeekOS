@@ -11,7 +11,7 @@
 #
 # Contents: Alpine minirootfs + our PID-1 as /init + the apks below.
 #
-# Trust split (see docs/archive/PHASE12_MICROVM.md):
+# Trust split:
 #   - Kernel + microvm-init: compiled + signed by us.
 #   - Alpine minirootfs: pinned tarball + pinned sha256.
 #   - apks: package names here, versions from the pinned Alpine branch;

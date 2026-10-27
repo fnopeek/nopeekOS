@@ -1,6 +1,6 @@
 //! AMD-Vi (the AMD IOMMU), after Linux 6.18.55 drivers/iommu/amd.
 //!
-//! Stage 0 of docs/plan/AMD_VI.md (`dump`): the IVRS table and the IOMMU's
+//! Stage 0 (`dump`): the IVRS table and the IOMMU's
 //! registers read the way init.c reads them, printed in the shape of its
 //! `amd_iommu_dump` lines.
 //!
@@ -426,7 +426,7 @@ pub fn dump() {
         p += len;
     }
     // An alias that folds the display controller with a neighbour would
-    // give both one device table entry (docs/plan/AMD_VI.md §5).
+    // give both one device table entry.
     match crate::drivers::pci::find_by_class(0x03, 0x00) {
         Some(g) => {
             let gpu = (g.addr.bus as u32) << 8 | (g.addr.device as u32) << 3 | g.addr.function as u32;

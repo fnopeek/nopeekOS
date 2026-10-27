@@ -1,5 +1,4 @@
-//! The scene list: what one frame of the desktop is made of
-//! (docs/plan/GPU_STACK.md §5.3, §5.4 A2).
+//! The scene list: what one frame of the desktop is made of.
 //!
 //! A frame is a list of items, painted in order over the screen. Items are
 //! plain data — rectangles, colours, and sources named by the window that

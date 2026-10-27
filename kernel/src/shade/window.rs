@@ -111,7 +111,7 @@ pub struct Window {
     pub light_dismiss: bool,
     /// A popup (`npk_popup`): the window it belongs to and the app's number
     /// for it. Floating, as large as its content, placed by the compositor
-    /// next to an anchor in the parent; see docs/plan/POPUP.md.
+    /// next to an anchor in the parent.
     pub popup_of: Option<WindowId>,
     pub popup_slot: u8,
 }

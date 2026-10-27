@@ -2,7 +2,7 @@
 //! self-contained core types of Display Core — the ones `dc_create` touches
 //! that do not pull in a sub-block (bios, link, dml). The nested caps structs
 //! (dc_caps → dc_plane_cap / dc_color_caps / …), dc_context and struct dc come
-//! with the object graph (docs/plan/GPU_AMD_DC.md stage A).
+//! with the object graph.
 #![allow(dead_code)]
 
 /// `enum dce_environment` (dc_types.h). Renoir boots `DCE_ENV_PRODUCTION_DRV`.

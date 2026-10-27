@@ -1,7 +1,6 @@
 //! gpu_intel_tgl: Intel Tiger Lake graphics, ported from Linux 6.18.55 i915.
 //!
-//! The port follows docs/plan/GPU_INTEL_LINUX_MAP.md and the call order in
-//! docs/plan/GPU_INTEL_TGL_TREE.txt. This stage runs `i915_driver_probe`
+//! The port follows Linux' call order. This stage runs `i915_driver_probe`
 //! through `i915_driver_mmio_probe` (device and display info, the PCH,
 //! forcewake, the GT's clock, slices, L3 banks and engines from the fuses,
 //! the display fuses and raw clock, the full GT reset of `sanitize_gpu`)

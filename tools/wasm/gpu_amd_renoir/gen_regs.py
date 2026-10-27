@@ -20,7 +20,7 @@ array of integers in that file, or per static struct made only of integers,
 which comes out flat, in memory order; `name: str` for an array of string
 pointers.
 
-The tree is the call-graph build of docs/plan/GPU_AMD_LINUX_MAP.md:
+The tree is the call-graph build:
 ~/.cache/nopeekos/amdgpu-callgraph/linux-6.18.55, configured with
 CONFIG_DRM_AMDGPU=m and built in place.
 """

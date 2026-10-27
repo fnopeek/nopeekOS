@@ -343,10 +343,9 @@ without a measured run.
 reads the blessed baseline and prints both numbers, so the denominator is a
 measurement rather than a remembered constant. It also settles which bucket a
 test that names two of these falls into — the table is a breakdown of the
-UNION, first match wins, which is why `subgrid` reads 18 here and 22 in
-`docs/plan/CSS_GAP_2026_08.md`: four subgrid tests also set a vertical writing
-mode, and that paper's hand count put them on the other side. The union — the
-only figure the denominator uses — is the same either way.
+UNION, first match wins: a subgrid test that also sets a vertical writing
+mode counts under the first bucket it matches. The union, the only figure the
+denominator uses, is the same either way.
 
 A hard ceiling inside the real corpus: `css-fonts/font-family-name` (18 tests)
 demands the W3C CSSTest fonts be installed. It is not winnable here, ever.

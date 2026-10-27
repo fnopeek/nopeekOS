@@ -1,7 +1,7 @@
 //! wifi_ax200 — Intel Wi-Fi 6 AX200 driver (WASM module)
 //!
 //! iwlwifi-mvm, device family 22000 (gen2). Strict 1:1 port of Linux 6.18.26.
-//! Plan: docs/archive/WIFI_AX200.md. Uses the nopeekOS WASM Driver ABI (npk_pci_*,
+//! Uses the nopeekOS WASM Driver ABI (npk_pci_*,
 //! npk_mmio_*, npk_dma_*), the same ABI as the RTL8852BE `wifi` driver.
 //!
 //! Bring-up follows `_iwl_trans_pcie_start_hw` for family 22000 (non-integrated

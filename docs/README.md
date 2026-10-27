@@ -1,63 +1,30 @@
-# docs/ — Karte
+# docs/
 
-Drei Ablagen, nach **Verbindlichkeit** getrennt, nicht nach Thema. Wer wissen
-will, woran der Code sich halten muss, liest `spec/` — und sonst nichts.
+What is here describes nopeekOS as it is built today, written from the code.
+Plans, history and measurements are not kept here: open work is in the
+issues, history and measurements are in `git log`.
 
-| Ordner | Bedeutung | Lebensdauer |
-|---|---|---|
-| `spec/` | **Lebende Verträge.** Der Code hält sich daran; Abweichung ist ein Bug. Aus Quelldateien heraus referenziert. | wird gepflegt |
-| `plan/` | **Offene Arbeitspapiere.** Vorschlag, Analyse, Reihenfolge — noch nicht (ganz) gebaut. | bis erledigt |
-| `archive/` | **Erledigt oder überholt.** Nur Herleitung und Geschichte, nie Referenz. | eingefroren |
+## spec/
 
-Nicht hier: der laufende Stand. Der steht im Memory (`memory/MEMORY.md`) und im
-git log. Diese Ordner sind für das, was länger gilt als eine Session.
+Contracts the code follows. A deviation between a spec and the code is a
+bug in one of them; the change that moves the code updates the spec too.
 
----
-
-## spec/ — lebende Verträge
-
-| Datei | Worum es geht |
+| File | What it covers |
 |---|---|
-| [`BROWSER.md`](spec/BROWSER.md) | `beak`, der eigene Browser: Architektur, Stufen, Grenzen |
-| [`CONFORMANCE.md`](spec/CONFORMANCE.md) | beaks Strichliste gegen die offiziellen Testsuiten. **Die WPT-Zahl steht hier und nirgends sonst.** |
-| [`WIDGET_VOCAB.md`](spec/WIDGET_VOCAB.md) | `nopeek_widgets`-Vokabular — die Referenz zum Bauen von Apps |
-| [`UI_REFRESH.md`](spec/UI_REFRESH.md) | Design-Kontrakt: Tokens, Farben, Abstände. Apps lesen dieses File, nicht das Mockup |
-| [`PANEL.md`](spec/PANEL.md) | Panel-Primitiv (Bar + Dock als WASM am Bildschirmrand) |
-| [`WIFI_CLASS_ABI.md`](spec/WIFI_CLASS_ABI.md) | Vertrag zwischen Applet, `wifid` und den Vendor-Treibern |
-| [`AX200_FUNC_MAP.md`](spec/AX200_FUNC_MAP.md) | Was Linux' `iwlwifi-mvm` kann und was wir davon nachgebaut haben |
+| [`COMMENTS.md`](spec/COMMENTS.md) | Rules for code comments, enforced by `tools/comments.py` |
+| [`WIDGET_VOCAB.md`](spec/WIDGET_VOCAB.md) | The `nopeek_widgets` vocabulary for building apps |
+| [`UI_REFRESH.md`](spec/UI_REFRESH.md) | Design tokens: colours, spacing, type |
+| [`PANEL.md`](spec/PANEL.md) | Panels at the screen edge (`deck`), popups |
+| [`WIFI_CLASS_ABI.md`](spec/WIFI_CLASS_ABI.md) | Contract between `link`, `wifid` and the vendor WiFi drivers |
+| [`AX200_FUNC_MAP.md`](spec/AX200_FUNC_MAP.md) | Which `iwlwifi-mvm` functions the AX200 driver ports |
+| [`BROWSER.md`](spec/BROWSER.md) | `beak`, the native browser |
+| [`CONFORMANCE.md`](spec/CONFORMANCE.md) | `beak` against the official test suites |
 
-## plan/ — offen
+## Rules
 
-Jedes Papier trägt oben einen datierten Status-Kopf, weil die Lage sich seit
-dem Schreiben bewegt hat. Erst den lesen.
-
-| Datei | Stand |
-|---|---|
-| [`MICROKERNEL_REFACTOR.md`](plan/MICROKERNEL_REFACTOR.md) | teilweise: `aml`, `wifi`, `audio_hda` sind WASM-Driver; NVMe/xHCI/GPU/NIC nicht |
-| [`SCHEDULER_FIBERS.md`](plan/SCHEDULER_FIBERS.md) | grösstenteils gebaut; offen ist der Multi-Core-Fan-out |
-| [`NPKFS_PERF_SAFETY.md`](plan/NPKFS_PERF_SAFETY.md) | auto-gc + Write-Barriere + fsck sind drin; offen ist Commit-Batching |
-| [`NOTES_framebuffer_netperf.md`](plan/NOTES_framebuffer_netperf.md) | Hypothese, nie nachgemessen — vor dem Umbau reproduzieren |
-
-## archive/
-
-Gebaut oder abgelöst: [`CHANGELOG_2026.md`](archive/CHANGELOG_2026.md) (der
-Session-Verlauf, der bis August in `CLAUDE.md` stand),
-[`PHASE10_WIDGETS.md`](archive/PHASE10_WIDGETS.md),
-[`PHASE12_MICROVM.md`](archive/PHASE12_MICROVM.md),
-[`PHASE12_DISPLAY_BRIDGE.md`](archive/PHASE12_DISPLAY_BRIDGE.md),
-[`NPKFS_V2.md`](archive/NPKFS_V2.md) (wir sind bei v3),
-[`DOCK.md`](archive/DOCK.md) (→ `spec/PANEL.md`),
-[`WIFI_AX200.md`](archive/WIFI_AX200.md),
-[`fix_uefi_boot.md`](archive/fix_uefi_boot.md).
-
----
-
-## Regeln
-
-1. **Ein Dokument hat genau einen Ort.** Steht etwas in `spec/`, wird es nicht
-   in README oder CLAUDE.md nacherzählt — dort steht der Zeiger.
-2. **Zahlen leben an einer Stelle.** Versionen im Cargo.toml, die WPT-Zahl in
-   `spec/CONFORMANCE.md`, der Verlauf im git log. Was doppelt steht, driftet.
-3. **Fertig heisst umziehen.** Ein Plan, der gebaut ist, wandert mit einem
-   datierten Kopf nach `archive/` — er wird nicht stillschweigend liegen
-   gelassen, wo ihn jemand für gültig hält.
+1. **Describe what is, not what was planned.** A spec is written from the
+   code. What the code does not do yet is an issue, not a paragraph.
+2. **One fact, one place.** Versions live in `Cargo.toml`, test counts in
+   `spec/CONFORMANCE.md`, history in `git log`. What is written twice drifts.
+3. **Code may point at a spec, an upstream source or an issue (`#N`)**, never
+   at a plan or a paper.

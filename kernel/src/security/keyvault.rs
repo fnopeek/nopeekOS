@@ -1,4 +1,4 @@
-//! Keyvault — secrets kept apart from files (docs/plan/KEYSTORE.md).
+//! Keyvault — secrets kept apart from files.
 //!
 //! One object (`sys/vault`), two tiers, each with its own DEK:
 //!   - system tier: DEK wrapped under the device subkey (`crypto::vault_subkey`)

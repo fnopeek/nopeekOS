@@ -1229,7 +1229,7 @@ fn launch(name: &str, ttl_ticks: Option<u64>, background: bool) {
         render_frame();
         return;
     }
-    // Loading the module happens on a worker (`docs/plan/CORES_AND_EVENTS.md`):
+    // Loading the module happens on a worker:
     // reading it from npkFS, decrypting it and checking its hash can take
     // tens of milliseconds for a large module, which on Core 0 would delay
     // the next frame. The check above stays here: it needs the compositor.

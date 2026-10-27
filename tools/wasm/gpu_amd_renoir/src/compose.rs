@@ -1,4 +1,4 @@
-//! The gpudev scene executor on the compute ring (docs/plan/GPU_AMD_SCENES.md):
+//! The gpudev scene executor on the compute ring:
 //! the scene checked and planned by gpu_scene, run by compose.comp,
 //! blur_down.comp and blur_box.comp in one IB of the compositor's own
 //! client (amdgpu_cs.rs), the dispatches written as RADV writes them

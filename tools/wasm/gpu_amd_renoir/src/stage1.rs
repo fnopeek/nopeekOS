@@ -1,4 +1,4 @@
-//! The run of the port (docs/plan/GPU_AMD_LINUX_MAP.md §1), up to stage 2:
+//! The run of the port, up to stage 2:
 //! `amdgpu_device_init` with the IP discovery, the IP block list,
 //! `soc15_common_early_init`, the VBIOS from VFCT, `amdgpu_atombios_init`,
 //! the early_init of the nine blocks after COMMON (their microcode), the

@@ -57,7 +57,7 @@ const FLAG_WALL: u32 = 1;
 const FLAG_BLURRED: u32 = 2;
 const FLAG_GLASS: u32 = 4;
 
-/// Header flags of the scene (GPU_STACK.md §3.3).
+/// Header flags of the scene.
 const HDR_WALL: u32 = 1;
 const HDR_BLURRED: u32 = 2;
 

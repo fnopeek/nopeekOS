@@ -21,8 +21,8 @@ pub fn init_tsc_ticks() {
 /// 100 Hz ticks since boot, derived from the TSC.
 ///
 /// The clock is the TSC on every machine. An interrupt count would stop while
-/// Core 0 runs with IF=0 and could not survive the tick going away
-/// (`docs/plan/CORES_AND_EVENTS.md` §3.2). The unit is 10 ms.
+/// Core 0 runs with IF=0 and could not survive the tick going away.
+/// The unit is 10 ms.
 pub fn ticks() -> u64 {
     let freq = TSC_FREQ.load(Ordering::Relaxed);
     let period = freq / 100; // TSC cycles per 10ms tick
@@ -575,7 +575,7 @@ fn worker_lapic() -> Option<Mmio> {
 
 // ── Per-core worker timer: one-shot to the next deadline ────────────
 //
-// See `docs/plan/CORES_AND_EVENTS.md`. The timer is one-shot, armed to the
+// The timer is one-shot, armed to the
 // exact TSC deadline the core waits for or not at all, so an idle core does
 // not wake periodically. New work wakes an idle core with an IPI
 // (`WORKER_WAKE_VECTOR`).

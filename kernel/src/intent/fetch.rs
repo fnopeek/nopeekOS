@@ -84,7 +84,7 @@ enum Work {
         /// under the policy in `plain_http_allowed`.
         tls: bool,
         /// Reach of the document that triggers the request.
-        /// See `http::Reach` and `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1.
+        /// See `http::Reach`.
         from_reach: Option<http::Reach>,
     },
     /// A batch, multiplexed per host exactly as `npk_http_request_many` does.

@@ -42,7 +42,7 @@ pub fn fetch(name: &str, buf: &mut [u8]) -> Option<usize> { len(sys::fetch(name.
 /// Write `data` as file `name`. False if refused.
 pub fn store(name: &str, data: &[u8]) -> bool { sys::store(name.as_bytes(), data) == 0 }
 
-// ── Keyvault (docs/plan/KEYSTORE.md) — only the `vault` module may call ──
+// ── Keyvault — only the `vault` module may call ──
 pub fn vault_exists() -> bool { let s = sys::vault_status(); s >= 0 && s & 1 != 0 }
 pub fn vault_user_present() -> bool { let s = sys::vault_status(); s >= 0 && s & 2 != 0 }
 pub fn vault_unlocked() -> bool { let s = sys::vault_status(); s >= 0 && s & 4 != 0 }
@@ -66,7 +66,7 @@ pub fn vault_system_list(buf: &mut [u8]) -> Option<usize> { len(sys::vault_syste
 pub fn vault_user_delete(name: &str) -> bool { sys::vault_user_delete(name.as_bytes()) == 0 }
 pub fn vault_system_delete(name: &str) -> bool { sys::vault_system_delete(name.as_bytes()) == 0 }
 
-// ── Network (docs/plan/WLAN_MANAGER.md) — the `link` tool ─────────────
+// ── Network — the `link` tool ─────────────
 /// The WLAN manager's state text; None if denied or too large for `buf`.
 pub fn wifi_status(buf: &mut [u8]) -> Option<usize> { len(sys::wifi_status(buf)) }
 /// Ask the WLAN manager: scan, connect, disconnect, forget, auto.

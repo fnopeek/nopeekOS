@@ -289,7 +289,7 @@ fn wlan_set_usage() {
 
 // ── Networks: `wlan scan|connect|disconnect|forget|auto|prio|known` ──
 //
-// These ask `wifid`, which decides (docs/plan/WLAN_MANAGER.md). A password is
+// These ask `wifid`, which decides. A password is
 // read here, masked, and goes straight into the vault.
 
 /// The verbs handled by `intent_wlan_manage`.
@@ -461,7 +461,7 @@ pub fn intent_wlan_set(args: &str, cap_id: crate::capability::CapId) {
     }
 }
 
-/// The manager's state text (docs/plan/WLAN_MANAGER.md), for a person.
+/// The manager's state text, for a person.
 fn print_manager_status(st: &str) {
     let mut aps = 0;
     for line in st.lines() {

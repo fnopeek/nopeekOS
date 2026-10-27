@@ -1,5 +1,4 @@
-//! gpudev: the kernel side of a GPU driver module (docs/plan/GPU_STACK.md
-//! §3.3, v1).
+//! gpudev: the kernel side of a GPU driver module.
 //!
 //! Without a module the compositor copies and composes on the CPU (GOP). A
 //! module that binds the display controller registers here, binds the
@@ -28,7 +27,7 @@
 //! last job that reads or writes it (its fence); a CPU writer waits only for
 //! that one.
 //!
-//! v2 adds native contexts for guests (docs/plan/GPU_IN_VM.md §4b): clients
+//! v2 adds native contexts for guests: clients
 //! (`OP_CLIENT`), GEM objects in kernel frames handed to a client by
 //! resource id (`OP_OBJECT`), and the guest's ccmds (`OP_CCMD`) with a reply
 //! (`reply`). The module reports per client and ring how many submissions it

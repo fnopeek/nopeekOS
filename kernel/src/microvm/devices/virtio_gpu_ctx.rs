@@ -1,5 +1,4 @@
-//! virtio-gpu DRM native context, device side (docs/plan/GPU_IN_VM.md §2,
-//! GPU_STACK.md stage 6).
+//! virtio-gpu DRM native context, device side.
 //!
 //! The guest's Mesa driver for the host's real GPU sends its kernel calls
 //! as ccmds in SUBMIT_3D; the answers go into a response buffer the guest

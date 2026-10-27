@@ -1,5 +1,5 @@
-//! The host-visible window of virtio-gpu (`VIRTIO_GPU_SHM_ID_HOST_VISIBLE`,
-//! docs/plan/GPU_STACK.md §4.3): host frames of GPU objects mapped straight
+//! The host-visible window of virtio-gpu (`VIRTIO_GPU_SHM_ID_HOST_VISIBLE`):
+//! host frames of GPU objects mapped straight
 //! into guest-physical space, so the guest maps a GPU buffer without a copy
 //! (`RESOURCE_MAP_BLOB`). It is as large as the host's memory, rounded up
 //! to a power of two, so it fills no sooner than the memory it maps; a BAR

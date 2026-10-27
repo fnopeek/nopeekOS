@@ -24,8 +24,8 @@
 //!                    per contour { points: u16, [x: i16, y: i16; points] } }
 //! ```
 //!
-//! The outlines let the kernel rasterize an icon at any size
-//! (docs/plan/UI_SCALE.md, step 2): every stroke is turned into its fill
+//! The outlines let the kernel rasterize an icon at any size:
+//! every stroke is turned into its fill
 //! outline here, curves are flattened, and a point is in 1/64 units of the
 //! 256 grid, so the kernel only fills closed polygons by the nonzero rule.
 //!

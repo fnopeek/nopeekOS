@@ -1,7 +1,7 @@
 //! gpu_amd_renoir: AMD Renoir/Lucienne graphics, ported from Linux 6.18.55
 //! amdgpu.
 //!
-//! The port follows docs/plan/GPU_AMD_LINUX_MAP.md. This is stage 2
+//! This is stage 2
 //! (`stage1.rs`): `amdgpu_device_init` with the reset on init, then
 //! `amdgpu_device_ip_init` through the COMMON block, then the card is given
 //! back. hostcheck/check.sh holds the port against Linux's own code on the

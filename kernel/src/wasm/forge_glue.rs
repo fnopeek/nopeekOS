@@ -306,7 +306,7 @@ host_imports! {
     // npk_store(name_ptr, name_len, data_ptr, data_len) -> 0 or -1
     mem fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
 
-    // ── Keyvault (docs/plan/KEYSTORE.md) ───────────────────────────────
+    // ── Keyvault ───────────────────────────────
     //
     // The kernel is the vault authority (crate::security::keyvault). These
     // are usable only by the signed `vault` GUI module (checked by the
@@ -722,7 +722,7 @@ host_imports! {
     // tree, `gap` px away, flipped and slid to stay on screen. It takes the
     // keyboard; its events go to the app's queue; a press outside or the
     // focus moving elsewhere closes it with Event::PopupDone.
-    // docs/plan/POPUP.md. 0 / -1.
+    // 0 / -1.
     mem fn npk_popup(popup: i32, anchor: i32, gap: i32, ptr: i32, len: i32) -> i32;
 
     // npk_popup_close(popup) -> i32 — close popup `popup`; no PopupDone.
@@ -736,7 +736,7 @@ host_imports! {
     // standardised SBS-over-SMBus path for SBS laptops.
     ctx fn npk_battery() -> i32;
 
-    // Status items (docs/plan/STATUS_ITEMS.md).
+    // Status items.
     // npk_status_set(key, icon, value, flags, text, opens) -> 0 / -1:
     // create or replace the caller's item `key`; flags = state | place << 8.
     // No right needed: plain data under the caller's own name, bounded.
@@ -913,8 +913,8 @@ host_imports! {
     // npk_sleep(ms) -> 0 — sleep for N milliseconds.
     // Parks this app's fiber and yields the worker core to the per-core
     // scheduler, which runs the core's other ready fibers meanwhile, so many
-    // apps multiplex over a few workers instead of each pinning a core
-    // (docs/plan/SCHEDULER_FIBERS.md). The fiber resumes once the deadline
+    // apps multiplex over a few workers instead of each pinning a core.
+    // The fiber resumes once the deadline
     // passes.
     ctx fn npk_sleep(ms: i32) -> i32;
 
@@ -1156,7 +1156,7 @@ host_imports! {
     // npk_memory_fence() -> 0
     ctx fn npk_memory_fence() -> i32;
 
-    // gpudev (docs/plan/GPU_STACK.md §3.3): a driver module holding a display
+    // gpudev: a driver module holding a display
     // controller becomes the GPU service. HARDWARE-gated.
     // npk_gpudev_register(version) -> 0 / <0
     ctx fn npk_gpudev_register(version: i32) -> i32;
@@ -1222,7 +1222,7 @@ host_imports! {
     // npk_wifi_send_event(buf_ptr, len) -> 0 / -1 — driver enqueues an event.
     mem fn npk_wifi_send_event(buf_ptr: i32, len: i32) -> i32;
 
-    // WLAN manager (docs/plan/WLAN_MANAGER.md). Manager side: `wifid` by name
+    // WLAN manager. Manager side: `wifid` by name
     // and NETCTL. UI side: the `link` tool by name.
     // npk_wifi_known(buf_ptr, max) -> len / -1 / -2 (buffer too small).
     mem fn npk_wifi_known(buf_ptr: i32, max: i32) -> i32;

@@ -14,7 +14,7 @@
 //! as large as their content, anchored at the bar card or at a button. A
 //! popup holds the keyboard while open; it closes on Esc, on a launch, and
 //! by the compositor on a press outside or when the focus moves elsewhere
-//! (`Event::PopupDone`). See docs/spec/PANEL.md, docs/plan/POPUP.md.
+//! (`Event::PopupDone`). See docs/spec/PANEL.md.
 
 #![no_std]
 
@@ -85,7 +85,7 @@ fn bar_state(buf: &mut [u8]) -> i32 {
     unsafe { npk_bar_state(buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
-/// The status items into `buf` (docs/plan/STATUS_ITEMS.md); the length,
+/// The status items into `buf`; the length,
 /// larger than `buf` when it did not fit, `< 0` when refused.
 fn status_list(buf: &mut [u8]) -> i32 {
     // SAFETY: FFI; the range is borrowed for the call.
@@ -298,7 +298,7 @@ const NODE_STATUS_BASE: u32 = 120_000; // + status index
 /// Last, because a window id has no upper bound of its own.
 const TASK_BASE: u32 = 1_000_000;    // + window id
 
-// Wake masks for `host::wait` (docs/plan/CORES_AND_EVENTS.md).
+// Wake masks for `host::wait`.
 const WAIT_INPUT: u32 = 1;
 const WAIT_STATE: u32 = 32;
 

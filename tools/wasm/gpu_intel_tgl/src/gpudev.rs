@@ -1,4 +1,4 @@
-//! The module side of gpudev v1 (docs/plan/GPU_STACK.md §3.3): after the
+//! The module side of gpudev v1: after the
 //! probe the module stays resident as the GPU service of its card. It binds
 //! the kernel's fixed buffers into the kernel context's PPGTT, proves a bcs0
 //! copy and the GPGPU path with read-backs, reports what it can serve, and
@@ -7,7 +7,7 @@
 //! (compose.rs). Not a Linux file: Linux has no in-kernel blit on TGL; the
 //! copy is encoded as `emit_copy` in gt/intel_migrate.c does it.
 //!
-//! gpudev v2 adds native contexts (docs/plan/GPU_IN_VM.md §4b): clients,
+//! gpudev v2 adds native contexts: clients,
 //! their objects and their ccmds (`i915_gem_context.rs`, `virtio_ccmd.rs`),
 //! whose fences are reported per ring after every pass of the loop.
 

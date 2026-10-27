@@ -1,4 +1,4 @@
-//! The GPU service (docs/plan/GPU_STACK.md §3.3): the kernel's framebuffer
+//! The GPU service: the kernel's framebuffer
 //! and its two shadow buffers made reachable for the SDMA engine and for
 //! the compositor's own client, the copy and dispatch self-tests, then the
 //! compositor's copies on SDMA0 and its scenes on the compute ring until

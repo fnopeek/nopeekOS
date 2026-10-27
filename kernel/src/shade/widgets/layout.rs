@@ -18,8 +18,8 @@
 //!     sized placeholder — the compositor logs + rejects them.
 //!
 //! Apps write logical px; the tree this produces is in physical px. Every
-//! length read from the widget tree goes through `scale` on the way in
-//! (docs/plan/UI_SCALE.md), so render and hit tests see physical rects.
+//! length read from the widget tree goes through `scale` on the way in,
+//! so render and hit tests see physical rects.
 //!
 //! Two-pass algorithm — cheap, fits on the stack:
 //!

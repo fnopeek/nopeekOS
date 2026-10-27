@@ -103,7 +103,7 @@ pub fn want(name: &str) {
         if q.len() >= WANTED_MAX || q.iter().any(|n| n == name) { return; }
         q.push_back(String::from(name));
     }
-    // A worker resolves it (`docs/plan/CORES_AND_EVENTS.md`, stage 3):
+    // A worker resolves it:
     // `resolve` blocks up to 5.5 s, which Core 0 (cursor, rendering, shell)
     // cannot afford. A native task may block; placement gives it a free
     // worker. Without workers, Core 0 keeps pumping.

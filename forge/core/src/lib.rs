@@ -7,8 +7,7 @@
 //! `FEATURES` below is the contract between validator and code generator:
 //! the validator rejects anything the generator cannot emit, so a module
 //! that reaches codegen is by construction inside the opcode set our
-//! modules use. Widening it is a decision, not an accident — see
-//! docs/plan/WASM_SPEED_2026_08.md.
+//! modules use. Widening it is a decision, not an accident.
 
 #![no_std]
 

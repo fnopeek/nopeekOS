@@ -1,12 +1,12 @@
 //! link — the network card next to the panel's network icon.
 //!
-//! deck opens it with `npk_launch_at` (docs/plan/STATUS_ITEMS.md); the
+//! deck opens it with `npk_launch_at`; the
 //! kernel places it next to the icon and closes it on a click outside.
 //! Top: the connection the traffic takes, with its addresses. Below, when
 //! there is a WLAN: the networks in range. A click on one opens its
 //! actions: connect (a new network asks for its password), disconnect,
 //! forget, join automatically. The tool only shows and asks; `wifid`
-//! decides and the kernel keeps the password (docs/plan/WLAN_MANAGER.md).
+//! decides and the kernel keeps the password.
 
 #![no_std]
 
@@ -78,7 +78,7 @@ const A_ROW_BASE: u32 = 1000;
 
 const NODE_PASS: u32 = 100;
 
-// Requests (WLAN_MANAGER.md §4).
+// Requests.
 const REQ_SCAN: u8 = 0x01;
 const REQ_CONNECT: u8 = 0x02;
 const REQ_DISCONNECT: u8 = 0x03;

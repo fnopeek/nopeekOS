@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Probe virtio-gpu 3D for the microvm guest on stock QEMU/KVM.
 
-Reference run for docs/plan/GPU_STACK.md §4: does the guest userspace bundle
+Reference run: does the guest userspace bundle
 (Mesa radeonsi with its virtio backend) get a hardware GL context through
 virtio-gpu DRM native context, and what does it send over virtio to get it?
 

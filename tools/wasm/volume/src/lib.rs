@@ -2,8 +2,8 @@
 //! speaker.
 //!
 //! deck opens it with `npk_launch_at`; the kernel places the overlay next
-//! to the item that was clicked and closes it on a click outside
-//! (docs/plan/STATUS_ITEMS.md). The speaker mutes, the slider sets the
+//! to the item that was clicked and closes it on a click outside.
+//! The speaker mutes, the slider sets the
 //! level while it is dragged, Esc closes. A level changed elsewhere (keys,
 //! another app) shows here as it happens.
 
@@ -81,7 +81,7 @@ const LEVEL: u32 = 3;
 const W: i32 = 280;
 const H: i32 = 44;
 
-// Wake masks for `host::wait` (docs/plan/CORES_AND_EVENTS.md).
+// Wake masks for `host::wait`.
 const WAIT_INPUT: u32 = 1;
 const WAIT_STATE: u32 = 32;
 

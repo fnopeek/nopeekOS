@@ -1,7 +1,7 @@
 //! Network reach: may a page go where it wants to?
 //!
-//! A public page must not reach the user's private network
-//! (`docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2). CORS does not cover this:
+//! A public page must not reach the user's private network.
+//! CORS does not cover this:
 //! it protects the target server, not the network the browser sits in.
 //! Browsers retrofitted the rule as Private Network Access.
 //!

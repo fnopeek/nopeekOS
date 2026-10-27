@@ -5,7 +5,7 @@
 //! variant order, #[repr] discriminants, and struct field order are all
 //! frozen at v1 (WIRE_VERSION = 0x01).
 //!
-//! Rules (see docs/archive/PHASE10_WIDGETS.md "ABI stability & future-proofing"):
+//! Rules:
 //!   - All ABI-visible enums carry #[non_exhaustive]
 //!   - New variants appended only — never inserted, never reordered
 //!   - Removing a variant = wire-version bump

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Count which Linux functions one of our drivers mentions at all.
-Basis of the maps in docs/plan/WIFI_*_LINUX_MAP.md.
 
 Generous heuristic: a function counts as mentioned when its name occurs
 anywhere in our sources, even in a comment. The number is an upper bound

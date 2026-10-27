@@ -1,5 +1,4 @@
-//! Status items: what the panel shows on its right side
-//! (docs/plan/STATUS_ITEMS.md).
+//! Status items: what the panel shows on its right side.
 //!
 //! A module publishes plain data under its own name (the kernel sets the
 //! owner); the panel reads the list and draws it, and a click opens the tool

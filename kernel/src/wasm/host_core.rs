@@ -159,7 +159,7 @@ pub(crate) fn npk_capture_size(ctx: &mut HostState) -> i32 {
     (((info.width & 0xFFFF) << 16) | (info.height & 0xFFFF)) as i32
 }
 
-/// Window geometry crosses the ABI in logical px (docs/plan/UI_SCALE.md).
+/// Window geometry crosses the ABI in logical px.
 fn phys(v: i32) -> i32 { crate::shade::widgets::scale::len_i(v) }
 fn logical(v: u32) -> u32 { crate::shade::widgets::scale::logical(v) }
 
@@ -646,7 +646,7 @@ const MAX_POPUPS: i32 = 8;
 
 /// Open or update popup `popup` of the app's window: a window of its own,
 /// as large as `ptr..ptr+len` (a scene tree) wants, next to anchor node
-/// `anchor` in the app's own tree, `gap` px away. docs/plan/POPUP.md.
+/// `anchor` in the app's own tree, `gap` px away.
 pub(crate) fn npk_popup(mem: &mut [u8], ctx: &mut HostState, popup: i32, anchor: i32, gap: i32,
     ptr: i32, len: i32) -> i32
 {
@@ -926,7 +926,7 @@ fn input_ready(ctx: &HostState) -> bool {
 /// The event-driven replacement for `loop { poll; npk_sleep(16) }`: the
 /// app's fiber gives up its core and costs nothing until an event is pushed
 /// for it (`widgets::push_event`, `wasm::push_app_key` signal it) or its
-/// deadline comes. `docs/plan/CORES_AND_EVENTS.md` §3.3.
+/// deadline comes.
 ///
 /// Every bit is gated by what the caller already owns: the IRQ bit by the
 /// vector its driver registered, the NIC bit by being the registered WASM
@@ -2357,7 +2357,7 @@ pub(crate) fn npk_fetch(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
     write_bytes(mem, buf_ptr, &content[..content.len().min(max)])
 }
 
-// ── Keyvault (docs/plan/KEYSTORE.md) ────────────────────────────────────
+// ── Keyvault ────────────────────────────────────
 //
 // The kernel is the vault authority (crate::security::keyvault). These are
 // usable only by the signed `vault` GUI module, checked by its kernel-assigned
@@ -3619,8 +3619,7 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
         },
         Some(&mut info),
         &crate::intent::http::HttpRequest {
-            // The document itself compresses well
-            // (docs/plan/JS_SCOPE_CONTENT_WEB.md §8).
+            // The document itself compresses well.
             accept_gzip: tls,
             // HTTP/2 avoids per-connection throttling by some servers
             // (BROWSER.md §8.1).
@@ -4529,7 +4528,7 @@ pub(crate) fn npk_wifi_send_event(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
     }
 }
 
-// ── WLAN manager (docs/plan/WLAN_MANAGER.md) ──
+// ── WLAN manager ──
 //
 // The manager is `wifid` by its kernel-assigned name AND NETCTL: the known
 // networks carry their passwords, and NETCTL alone is a capability a second
@@ -4540,7 +4539,7 @@ fn is_wifi_manager(ctx: &HostState) -> bool {
         && capability::check_global(&ctx.cap_id, capability::Rights::NETCTL).is_ok()
 }
 
-/// The network tool the panel opens (`STATUS_ITEMS.md`): it may read the
+/// The network tool the panel opens: it may read the
 /// manager's state and ask it to scan, connect or forget.
 fn is_wifi_ui(ctx: &HostState) -> bool {
     ctx.module_name == "link"
@@ -4698,7 +4697,7 @@ fn gpudev_device(ctx: &HostState) -> Option<crate::drivers::pci::PciAddr> {
     Some(hw.pci_addr)
 }
 
-/// `npk_gpudev_register(version) -> 0 | <0` (GPU_STACK.md §3.3).
+/// `npk_gpudev_register(version) -> 0 | <0`.
 pub(crate) fn npk_gpudev_register(ctx: &mut HostState, version: i32) -> i32 {
     match gpudev_device(ctx) {
         Some(dev) => crate::gpu::gpudev::register(dev, version),

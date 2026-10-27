@@ -554,7 +554,7 @@ pub fn init_dedicated_vm_core(worker_count: usize) {
 
     // vCPU-as-fiber: the guest runs as a normal pool fiber on a dynamic
     // core, so no core is carved out (a carve-out wastes a core while no VM
-    // runs). See microvm::cpu and docs/plan/SCHEDULER_FIBERS.md. On VMX this
+    // runs). See microvm::cpu. On VMX this
     // is flag-gated; the per-core TSS VMX host-state needs is installed
     // lazily in vmx::vm_open.
     let fiber_mode = crate::microvm::cpu::VCPU_AS_FIBER

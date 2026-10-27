@@ -2,8 +2,7 @@
 //! gem/i915_gem_internal.c, gem/i915_gem_stolen.c, i915_vma.c,
 //! i915_gem_gtt.c): internal objects, stolen objects, and `i915_ggtt_pin`.
 //!
-//! This is class B in GPU_INTEL_LINUX_MAP.md (object bookkeeping, the
-//! gpudev side later); what is kept is what the GPU sees of it: where
+//! This is object bookkeeping (the gpudev side later); what is kept is what the GPU sees of it: where
 //! an object lands in the GGTT and which entries point at it. An internal
 //! object is one contiguous DMA buffer from the kernel (Linux takes single
 //! pages; the GPU sees the same through the GGTT). Nothing is unbound: on

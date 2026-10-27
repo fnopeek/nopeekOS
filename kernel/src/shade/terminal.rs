@@ -547,7 +547,7 @@ pub fn clear_dirty() {
 
 // ── Cells ───────────────────────────────────────────────────────────
 
-/// Terminal text size in logical px (docs/plan/UI_SCALE.md, step 4).
+/// Terminal text size in logical px.
 const TERM_PX: u16 = 14;
 
 #[derive(Clone, Copy)]

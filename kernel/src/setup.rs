@@ -130,7 +130,7 @@ fn setup_identity_and_settings() -> bool {
 
     // Lay down the locked default tree once. Idempotent — re-runs are
     // a no-op. Apps assume these dirs exist; the installer is the only
-    // thing that creates them. See docs/archive/NPKFS_V2.md for the spec.
+    // thing that creates them.
     if let Err(e) = setup_default_tree(&name) {
         kprintln!("[npk]   WARNING: Could not lay down default tree: {:?}", e);
     }

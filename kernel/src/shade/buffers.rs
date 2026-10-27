@@ -1,4 +1,4 @@
-//! Pixel buffers the compositor composes from (docs/plan/GPU_STACK.md §5.4).
+//! Pixel buffers the compositor composes from.
 //!
 //! One type for every window's and panel's pixels: page-aligned, physically
 //! contiguous frames from the frame allocator, the same kind of memory the

@@ -1,4 +1,4 @@
-//! The amdgpu backend of native contexts (docs/plan/GPU_AMD_NATIVE.md): the
+//! The amdgpu backend of native contexts: the
 //! host side of virglrenderer `src/drm/amdgpu/amdgpu_renderer.c` with the
 //! GPU driver module in the place of the host's amdgpu. The ccmd handlers
 //! run in the module, which also allocates the GEM objects (with their VRAM
