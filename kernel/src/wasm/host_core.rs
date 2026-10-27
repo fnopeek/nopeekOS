@@ -3723,6 +3723,7 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
         // the kernel computed itself, not from the request.
         from_reach: Some(ctx.net_reach),
         require_partial: false,
+        addr: None,
     };
     let res = crate::intent::http::https_request_streaming(
         &host, &path, &req, cap,

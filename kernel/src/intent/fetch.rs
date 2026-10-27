@@ -441,6 +441,7 @@ fn run(slot: usize, work: Work) -> Reply {
                 plain: !tls,
                 from_reach,
                 require_partial: false,
+                addr: None,
             };
             let res = http::https_request_streaming(
                 &host, &path, &req, cap,

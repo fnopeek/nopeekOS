@@ -562,13 +562,28 @@ pub struct HttpRequest<'a> {
     /// deliver a body: a 200 would restart the file into a sink that
     /// already holds its beginning.
     pub require_partial: bool,
+    /// The address `resolve_checked` approved for this hop. When set, the
+    /// connection goes there and nowhere else, and a pooled connection is
+    /// reused only if its peer is that address: a second lookup could
+    /// answer differently (DNS rebinding) and walk around the reach check.
+    pub addr: Option<[u8; 4]>,
 }
 
 impl Default for HttpRequest<'_> {
     fn default() -> Self {
         HttpRequest { method: "GET", headers: &[], body: &[], accept_gzip: false, try_h2: false,
-                      plain: false, from_reach: None, require_partial: false }
+                      plain: false, from_reach: None, require_partial: false, addr: None }
     }
+}
+
+/// The address to connect to: the one already checked, else a lookup.
+fn connect_addr(bare: &str, addr: Option<[u8; 4]>) -> Option<[u8; 4]> {
+    addr.or_else(|| parse_ip(bare)).or_else(|| crate::net::dns::resolve(bare))
+}
+
+/// A pooled connection to `peer` may serve a request pinned to `addr`.
+fn peer_ok(peer: [u8; 4], addr: Option<[u8; 4]>) -> bool {
+    addr.is_none_or(|a| a == peer)
 }
 
 /// The response header block, minus the status line, capped and cleaned.
@@ -881,9 +896,8 @@ fn https_get_req(host: &str, path: &str, max_size: usize, req: &HttpRequest)
     for _ in 0..4 {
         // Checked on every hop: otherwise a redirect to a private address
         // would bypass a check made only on the first request.
-        if let Err(e) = resolve_checked(&cur_host, req.from_reach) {
-            return Err(e);
-        }
+        let ip = resolve_checked(&cur_host, req.from_reach)?;
+        let hop = HttpRequest { addr: Some(ip), ..*req };
         // Vec-mode: accumulate into out, sink just extends it.
         let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         // Progress heartbeat, so a slow download is distinguishable from a
@@ -895,7 +909,7 @@ fn https_get_req(host: &str, path: &str, max_size: usize, req: &HttpRequest)
         let resp = https_get_once(
             &cur_host,
             &cur_path,
-            req,
+            &hop,
             max_size,
             &mut |chunk: &[u8]| -> Result<(), &'static str> {
                 if out.len().saturating_add(chunk.len()) > max_size {
@@ -998,9 +1012,7 @@ pub fn https_request_streaming(
         let mut total: usize = 0;
         let no_headers: [String; 0] = [];
         // Reach is checked on every hop here too; this is the browser's loop.
-        if let Err(e) = resolve_checked(&cur_host, req.from_reach) {
-            return Err(e);
-        }
+        let ip = resolve_checked(&cur_host, req.from_reach)?;
         let hop = HttpRequest {
             method: &method,
             headers: if carry_headers { req.headers } else { &no_headers },
@@ -1010,6 +1022,7 @@ pub fn https_request_streaming(
             plain: !cur_tls,
             from_reach: req.from_reach,
             require_partial: req.require_partial,
+            addr: Some(ip),
         };
         // Known before the body starts, so a caller whose download breaks
         // can resume at the hop that was serving it.
@@ -1142,12 +1155,12 @@ fn drain_before_reuse() {
     crate::net::poll_rx_only();
 }
 
-fn pool_take(host: &str) -> Option<crate::tls::TlsSession> {
+fn pool_take(host: &str, addr: Option<[u8; 4]>) -> Option<crate::tls::TlsSession> {
     drain_before_reuse();
     let mut pool = CONN_POOL.lock();
     let now = crate::interrupts::ticks();
     for slot in pool.iter_mut() {
-        if matches!(slot, Some(c) if c.host == host) {
+        if matches!(slot, Some(c) if c.host == host && peer_ok(c.tls.peer().0, addr)) {
             let c = slot.take().unwrap();
             let fresh = now.wrapping_sub(c.idle_since) < POOL_MAX_IDLE_TICKS;
             let mut tls = c.tls;
@@ -1234,16 +1247,12 @@ pub fn error_kind(msg: &str) -> &'static str {
 }
 
 /// Fresh DNS + ARP + TCP + TLS to `host:443`. Only paid on a pool miss.
-fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
+fn open_tls(host: &str, addr: Option<[u8; 4]>) -> Result<crate::tls::TlsSession, &'static str> {
     // The bare name for DNS and SNI; the explicit port if given, else 443.
     let (bare, port) = split_host_port(host);
     let port = port.unwrap_or(443);
     let t_dns = crate::interrupts::ticks();
-    let ip = if let Some(ip) = parse_ip(bare) {
-        ip
-    } else {
-        crate::net::dns::resolve(bare).ok_or("DNS resolution failed")?
-    };
+    let ip = connect_addr(bare, addr).ok_or("DNS resolution failed")?;
     let t_arp = crate::interrupts::ticks();
     // Make sure the gateway's MAC is known before we SYN. `arp::resolve`
     // returns immediately on a cache hit and otherwise polls only until the
@@ -1312,18 +1321,18 @@ fn mark_h2_refused(host: &str) {
     list[0] = Some(String::from(host));
 }
 
-fn h2_take(host: &str) -> Option<Http2> {
-    h2_take_exact(host).or_else(|| h2_take_coalesced(host))
+fn h2_take(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
+    h2_take_exact(host, addr).or_else(|| h2_take_coalesced(host, addr))
 }
 
 /// A connection already open for exactly this name. Needs no DNS, so it is
 /// tried first.
-fn h2_take_exact(host: &str) -> Option<Http2> {
+fn h2_take_exact(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
     drain_before_reuse();
     let mut pool = H2_POOL.lock();
     let now = crate::interrupts::ticks();
     for slot in pool.iter_mut() {
-        if matches!(slot, Some((h, _, _)) if h == host) {
+        if matches!(slot, Some((h, c, _)) if h == host && peer_ok(c.peer().0, addr)) {
             let (_, mut conn, idle_since) = slot.take().unwrap();
             // Same rule as the HTTP/1.1 pool: a GOAWAY we have not read yet
             // is indistinguishable from a quiet connection.
@@ -1349,13 +1358,13 @@ fn h2_take_exact(host: &str) -> Option<Http2> {
 ///
 /// The name check is the same function the handshake uses
 /// (`certstore::covers`), so the two cannot drift apart.
-fn h2_take_coalesced(host: &str) -> Option<Http2> {
+fn h2_take_coalesced(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
     let (bare, port) = split_host_port(host);
     let port = port.unwrap_or(443);
     // Resolve rather than only consult the cache: `h2_connect` would do the
     // lookup right after anyway. Before the lock, because a blocking DNS
     // query under a spinlock stalls every other taker.
-    let ip = parse_ip(bare).or_else(|| crate::net::dns::resolve(bare))?;
+    let ip = connect_addr(bare, addr)?;
     drain_before_reuse();
     let mut pool = H2_POOL.lock();
     let now = crate::interrupts::ticks();
@@ -1396,15 +1405,15 @@ fn h2_put(host: &str, conn: Http2) {
 
 /// A connection for `host`: the pooled one if it is still fresh, otherwise a
 /// new one. The batch fetch's entry point.
-fn h2_open(host: &str) -> Option<Http2> {
-    h2_take(host).or_else(|| h2_connect(host))
+fn h2_open(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
+    h2_take(host, addr).or_else(|| h2_connect(host, addr))
 }
 
 /// A new connection, bypassing the pool. Split out because the document path
 /// needs to say "not that one": a pooled connection can carry a GOAWAY we
 /// have not read yet, and giving up on h2 for that would put the document
 /// back on HTTP/1.1.
-fn h2_connect(host: &str) -> Option<Http2> {
+fn h2_connect(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
     // Timed from entry so no stretch of the connect goes unmeasured.
     let t_enter = crate::interrupts::ticks();
     if h2_refused(host) {
@@ -1413,7 +1422,7 @@ fn h2_connect(host: &str) -> Option<Http2> {
     let t_dns = crate::interrupts::ticks();
     let (bare, port) = split_host_port(host);
     let port = port.unwrap_or(443);
-    let ip = parse_ip(bare).or_else(|| crate::net::dns::resolve(bare))?;
+    let ip = connect_addr(bare, addr)?;
     let t_arp = crate::interrupts::ticks();
     // Gateway MAC, same as the h1 path (see `open_tls` for why this is a
     // resolve and not a spin).
@@ -1484,11 +1493,11 @@ pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
 
     // Reach is checked once per host, before anything else. A refused host
     // leaves its slots empty, like a broken stream below.
-    let hosts: alloc::vec::Vec<String> = hosts.into_iter()
-        .filter(|h| resolve_checked(h, from_reach).is_ok())
+    let hosts: alloc::vec::Vec<(String, [u8; 4])> = hosts.into_iter()
+        .filter_map(|h| resolve_checked(&h, from_reach).ok().map(|ip| (h, ip)))
         .collect();
 
-    for host in &hosts {
+    for (host, ip) in &hosts {
         let idxs: alloc::vec::Vec<usize> = parsed
             .iter()
             .enumerate()
@@ -1499,7 +1508,7 @@ pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
 
         let mut served = false;
         let t0 = crate::interrupts::ticks();
-        if let Some(mut conn) = if plain { None } else { h2_open(host) } {
+        if let Some(mut conn) = if plain { None } else { h2_open(host, Some(*ip)) } {
             let t_conn = crate::interrupts::ticks();
             let paths: alloc::vec::Vec<&str> =
                 idxs.iter().map(|&i| parsed[i].as_ref().unwrap().1.as_str()).collect();
@@ -1725,7 +1734,7 @@ fn h2_once(
 ) -> Result<HttpResponse, ExchangeErr> {
     // Attempt 1: the pooled connection. Same ladder as HTTP/1.1 below, for
     // the same reason: the peer may have hung up while it sat idle.
-    if let Some(conn) = h2_take(host) {
+    if let Some(conn) = h2_take(host, req.addr) {
         match h2_exchange(host, path, req, max_size, on_chunk, conn) {
             Ok(r) => return Ok(r),
             Err(ExchangeErr::Fatal(e)) => return Err(ExchangeErr::Fatal(e)),
@@ -1733,7 +1742,7 @@ fn h2_once(
         }
     }
     // Attempt 2: a fresh one. `None` here means this host does not speak h2.
-    let Some(conn) = h2_connect(host) else {
+    let Some(conn) = h2_connect(host, req.addr) else {
         return Err(ExchangeErr::Retry);
     };
     h2_exchange(host, path, req, max_size, on_chunk, conn)
@@ -2128,7 +2137,7 @@ fn https_get_once(
         if req.method != "GET" && !req.method.is_empty() {
             return Err("plain http: only GET");
         }
-        return http_get_once(host, path, max_size, on_chunk);
+        return http_get_once(host, req.addr, path, max_size, on_chunk);
     }
 
     // Attempt 0: HTTP/2. Some servers (e.g. Wikimedia) rate-limit HTTP/1.1
@@ -2143,7 +2152,7 @@ fn https_get_once(
     }
 
     // Attempt 1: reuse a pooled session (no DNS/TCP/TLS handshake).
-    if let Some(tls) = pool_take(host) {
+    if let Some(tls) = pool_take(host, req.addr) {
         match https_exchange(host, path, req, max_size, tls, on_chunk) {
             Ok(r) => return Ok(r),
             Err(ExchangeErr::Retry) => {} // stale: reconnect below
@@ -2151,7 +2160,7 @@ fn https_get_once(
         }
     }
     // Attempt 2: fresh connection.
-    let tls = open_tls(host)?;
+    let tls = open_tls(host, req.addr)?;
     match https_exchange(host, path, req, max_size, tls, on_chunk) {
         Ok(r) => Ok(r),
         Err(ExchangeErr::Retry) => Err("connection reset after handshake"),
@@ -2406,7 +2415,7 @@ pub fn http_get_streaming(
     let mut cur_path = String::from(path);
     for _ in 0..5 {
         let mut total: usize = 0;
-        let resp = http_get_once(&cur_host, &cur_path, max_size,
+        let resp = http_get_once(&cur_host, None, &cur_path, max_size,
             &mut |chunk: &[u8]| -> Result<(), &'static str> {
                 on_chunk(chunk)?;
                 total = total.saturating_add(chunk.len());
@@ -2667,7 +2676,7 @@ fn user_download_streaming(
         let resp = if use_tls {
             https_get_once(&cur_host, &cur_path, &HttpRequest::default(), max_size, on_chunk)?
         } else {
-            http_get_once(&cur_host, &cur_path, max_size, on_chunk)?
+            http_get_once(&cur_host, None, &cur_path, max_size, on_chunk)?
         };
         match resp.status {
             200..=299 => return Ok(0), // bytes already counted by the caller's sink
@@ -2735,12 +2744,14 @@ static PLAIN_POOL: spin::Mutex<[Option<PlainConn>; CONN_POOL_SIZE]> =
 /// Take a live plaintext handle for `key`. As in the TLS pool, drain the NIC
 /// ring before reading the state, or a peer's unprocessed FIN would let
 /// `conn_healthy` pass a dead connection.
-fn plain_take(key: &str) -> Option<usize> {
+fn plain_take(key: &str, addr: Option<[u8; 4]>) -> Option<usize> {
     drain_before_reuse();
     let mut pool = PLAIN_POOL.lock();
     let now = crate::interrupts::ticks();
     for slot in pool.iter_mut() {
-        if matches!(slot, Some(c) if c.key == key) {
+        if matches!(slot, Some(c) if c.key == key
+            && crate::net::tcp::peer(c.handle).is_some_and(|p| peer_ok(p.0, addr)))
+        {
             let c = slot.take().unwrap();
             let fresh = now.wrapping_sub(c.idle_since) < POOL_MAX_IDLE_TICKS;
             if fresh && crate::net::tcp::conn_healthy(c.handle) {
@@ -2774,6 +2785,7 @@ fn plain_put(key: &str, handle: usize) {
 /// retry fresh whatever fails there before a byte was delivered.
 fn http_get_once(
     host: &str,
+    addr: Option<[u8; 4]>,
     path: &str,
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
@@ -2783,7 +2795,7 @@ fn http_get_once(
     let key = alloc::format!("{}:{}", bare, port);
 
     // Attempt 1: an open connection. No DNS, no ARP, no handshake.
-    if let Some(handle) = plain_take(&key) {
+    if let Some(handle) = plain_take(&key, addr) {
         match http_exchange(handle, host, path, &key, max_size, on_chunk) {
             Ok(r) => return Ok(r),
             Err(ExchangeErr::Retry) => {} // stale: reconnect below
@@ -2792,10 +2804,7 @@ fn http_get_once(
     }
 
     // Attempt 2: fresh connection.
-    let ip = match parse_ip(bare) {
-        Some(ip) => ip,
-        None => crate::net::dns::resolve(bare).ok_or("DNS resolution failed")?,
-    };
+    let ip = connect_addr(bare, addr).ok_or("DNS resolution failed")?;
     if chatty() { kprintln!("[npk]   {} -> {}.{}.{}.{}", bare, ip[0], ip[1], ip[2], ip[3]); }
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100); // see open_tls: not a blind spin
