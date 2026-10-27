@@ -83,7 +83,9 @@ repaint.
 A failed document fetch shows a local error page (`neterror.rs`) from
 `npk_http_last_error`'s `kind\tmessage`: inline HTML, escaped, loading
 nothing. `beak:selftest` (also `about:selftest`, `beak:test`) is compiled
-into the binary (`selftest.html`) and takes the normal path after the fetch.
+into the binary (`selftest.html`) and takes the normal path after the fetch;
+so is `beak:about` (also `about:beak`, Help > About), name, version and
+licence.
 
 Address bar input (`typed_to_url`): `http://` and `https://` stay as typed,
 something that looks like a host gets `https://`, anything else becomes a
@@ -229,8 +231,11 @@ All network I/O is the kernel's (`kernel/src/intent/http.rs`, `http2/`,
 
 **Cookies** (`beak-engine/src/cookies.rs`; policy is beak's, the kernel
 only carries bytes). The jar holds 256 cookies, dropping the oldest. It handles `Domain`, `Path`, `Secure`, `HttpOnly`, `Expires` (both
-date spellings), `Max-Age` and the `__Secure-`/`__Host-` prefixes; a cookie
-is replaced on (name, domain, path) and an expired one deletes. Selection
+date spellings), `Max-Age` and the `__Secure-`/`__Host-` prefixes. A
+`Domain` must be a parent of the host and not a public suffix (Public Suffix
+List, `site`); a `Secure` cookie is accepted only from an `https` response
+or hop. A cookie is replaced on (name, domain, path) and an expired one
+deletes. Selection
 for a request is by domain, path, `Secure` and expiry. Every request
 carries the matching cookies: the document, each URL of a sub-resource
 batch (one line per URL) and same-origin `fetch`/XHR. Script sees and sets
@@ -250,10 +255,13 @@ shell decides on.
 
 - `fetch`, `XMLHttpRequest` and `sendBeacon` go to the document's origin
   only; a foreign URL rejects or fails before any request
-  (`same_origin_url` in `js/fetch.rs`). `<img>`, stylesheets, scripts and
+  (`same_origin_url` in `js/fetch.rs`), and a response whose final URL
+  (after the kernel's redirects) is on another origin fails as a network
+  error. `<img>`, stylesheets, scripts and
   fonts load cross-origin but never hand bytes to page code.
-- `WebSocket` connects only to the page's host; `ws://` from an `https`
-  page is refused, and the shell drives `wss://` only.
+- `WebSocket` connects only to the page's own origin (scheme, host and
+  port, `wss` for `https`); `ws://` from an `https` page is refused, and
+  the shell drives `wss://` only.
 - `history.pushState`/`replaceState` may not change the origin.
 - Script navigation is limited to `http(s)` and the self-test page, eight in
   a row; `javascript:` and `data:` are rejected by the engine.
@@ -271,7 +279,8 @@ shell decides on.
   document URL with `npk_net_context`; the kernel resolves it and keeps
   only the class, defaulting to `Public` when it cannot. The check runs on
   the resolved address of every hop of `npk_http_begin`, every host of a
-  batch and every `npk_tls_connect`. beak sets the context to the target
+  batch and every `npk_tls_connect`, and the connection then goes to that
+  checked address (a pooled one only if its peer is that address). beak sets the context to the target
   before a navigation, so a navigation may go anywhere while the page's own
   requests stay within its class.
 - Header and method hygiene, redirect rules and plaintext policy as under
@@ -322,7 +331,7 @@ a slower page gets no hover.
 | `npk_scene_commit`, `npk_event_poll`, `npk_canvas_rect`, `npk_close_widget` | `RENDER` |
 | `npk_canvas_commit` | `CANVAS` |
 | `npk_clipboard_set` | `RENDER` and window focus |
-| `npk_http_begin` | `NET`; method and header checks; reach |
+| `npk_http_begin` | `NET`; method and header checks; reach; -2 when the caller's jobs fill the table (beak queues the fetch for the next round) |
 | `npk_http_begin_many`, `npk_http_begin_many_hdr` | `NET`; cookie line check; reach |
 | `npk_http_poll`, `npk_http_take`, `npk_http_take_many`, `npk_http_cancel` | owning process |
 | `npk_http_status`, `npk_http_response_headers`, `npk_http_final_url`, `npk_http_content_type`, `npk_http_last_error`, `npk_net_context` | `NET` |

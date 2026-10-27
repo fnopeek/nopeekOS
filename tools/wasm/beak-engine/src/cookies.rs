@@ -6,9 +6,7 @@
 //! Only persistent cookies survive a restart (see `serialize`); session cookies
 //! live until beak quits.
 //!
-//! Not implemented: `SameSite`, public-suffix rejection beyond the crude
-//! check in `domain_ok`, and cookies on sub-resource requests (only the
-//! document request carries them).
+//! Not implemented: `SameSite`.
 
 extern crate alloc;
 use alloc::string::{String, ToString};
@@ -165,35 +163,14 @@ fn path_match(req: &str, path: &str) -> bool {
 }
 
 /// May `host` set a cookie for `domain`? A server may widen to a parent
-/// domain it belongs to, but never to a public suffix — `Domain=.com` would
-/// hand the cookie to every site on the internet.
-///
-/// The real rule needs the Public Suffix List. This is the crude stand-in:
-/// the domain must contain a dot and must not be the bare two-label tail of
-/// a well-known multi-label suffix. It errs toward refusing, which costs a
-/// cookie; erring the other way costs the session.
+/// domain it belongs to, but never to a public suffix (RFC 6265 §5.3 step
+/// 5): `Domain=github.io` would hand the cookie to every site on it. The
+/// suffix comes from the Public Suffix List in `site`.
 fn domain_ok(host: &str, domain: &str) -> bool {
     if domain.is_empty() || !domain.contains('.') || domain.starts_with('.') {
         return false;
     }
-    if !domain_match(host, domain) {
-        return false;
-    }
-    let labels = domain.split('.').count();
-    if labels < 2 {
-        return false;
-    }
-    // `co.uk`, `com.au`, `co.jp`… — two labels where the first is one of the
-    // usual second-level registry names is a suffix, not a site.
-    const REGISTRY_2LD: &[&str] = &["co", "com", "net", "org", "gov", "edu", "ac"];
-    if labels == 2 {
-        let first = domain.split('.').next().unwrap_or("");
-        let tail = domain.rsplit('.').next().unwrap_or("");
-        if tail.len() == 2 && REGISTRY_2LD.contains(&first) {
-            return false;
-        }
-    }
-    true
+    domain_match(host, domain) && crate::site::registrable_domain(domain).is_some()
 }
 
 /// Parse the `Expires` date, into seconds since the epoch.
@@ -252,14 +229,15 @@ impl Jar {
 /// file cookies against a host it does not own. Both sides must change
 /// together.
 pub fn store(&mut self, url: &str, headers: &str, now: i64) {
-    let (mut host, mut path, _) = split_url(url);
+    let (mut host, mut path, mut https) = split_url(url);
     for line in headers.split('\n') {
         let line = line.trim_end_matches('\r');
         if let Some(hop) = line.strip_prefix(":hop ") {
-            let (h, p, _) = split_url(hop.trim());
+            let (h, p, s) = split_url(hop.trim());
             if !h.is_empty() {
                 host = h;
                 path = p;
+                https = s;
             }
             continue;
         }
@@ -270,11 +248,13 @@ pub fn store(&mut self, url: &str, headers: &str, now: i64) {
         if !name.trim().eq_ignore_ascii_case("set-cookie") {
             continue;
         }
-        self.store_one(&host, &path, value.trim(), now, false);
+        self.store_one(&host, &path, https, value.trim(), now, false);
     }
 }
 
-fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64, from_script: bool) {
+/// `https`: the response (or the document, for a script) came over TLS.
+fn store_one(&mut self, host: &str, req_path: &str, https: bool, decl: &str, now: i64,
+             from_script: bool) {
     let mut parts = decl.split(';');
     let Some(pair) = parts.next() else { return };
     let Some((name, value)) = pair.split_once('=') else { return };
@@ -319,6 +299,11 @@ fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64, from_s
     // Cookie name prefixes (RFC 6265bis §4.1.3). The name itself carries a
     // promise, so a server that breaks it gets nothing; otherwise
     // `__Host-session` would mean nothing.
+    // A Secure cookie only from a secure origin (RFC 6265bis 5.7): a plain
+    // http answer could otherwise plant one that later rides along to https.
+    if secure && !https {
+        return;
+    }
     if name.starts_with("__Secure-") && !secure {
         return;
     }
@@ -391,11 +376,11 @@ pub fn script_header_for(&mut self, url: &str, now: i64) -> String {
 /// without the `Set-Cookie:` prefix. Same rules as for a server, with the
 /// two exceptions noted in `store_one`.
 pub fn store_from_script(&mut self, url: &str, decl: &str, now: i64) {
-    let (host, path, _) = split_url(url);
+    let (host, path, https) = split_url(url);
     if host.is_empty() {
         return;
     }
-    self.store_one(&host, &path, decl, now, true);
+    self.store_one(&host, &path, https, decl, now, true);
 }
 
 fn collect(&mut self, url: &str, now: i64, for_script: bool) -> String {
@@ -806,5 +791,29 @@ mod tests {
         assert_eq!(j.serialize(1_700_000_000), "");
         let mut fresh = jar();
         assert_eq!(fresh.load("old\t1\texample.com\t/\t0\t1631127817\n", 1_700_000_000), 0);
+    }
+
+    /// A suffix from the Public Suffix List is no domain to widen to, even
+    /// one the crude two-label rule would have let through.
+    #[test]
+    fn a_public_suffix_is_refused_as_domain() {
+        let mut j = jar();
+        j.store("https://a.github.io/", "set-cookie: s=1; Domain=github.io\r\n", 1000);
+        assert!(!j.header_for("https://b.github.io/", 1000).contains("s=1"));
+        assert!(!j.header_for("https://a.github.io/", 1000).contains("s=1"));
+        j.store("https://www.example.com/", "set-cookie: t=2; Domain=example.com\r\n", 1000);
+        assert!(j.header_for("https://shop.example.com/", 1000).contains("t=2"));
+    }
+
+    /// A Secure cookie only from TLS, also on a redirect hop.
+    #[test]
+    fn a_secure_cookie_needs_a_secure_origin() {
+        let mut j = jar();
+        j.store("http://example.com/", "set-cookie: s=1; Secure\r\n", 1000);
+        assert!(!j.header_for("https://example.com/", 1000).contains("s=1"));
+        j.store("https://example.com/", ":hop http://example.com/x\nset-cookie: h=2; Secure\r\n", 1000);
+        assert!(!j.header_for("https://example.com/", 1000).contains("h=2"));
+        j.store("https://example.com/", "set-cookie: ok=3; Secure\r\n", 1000);
+        assert!(j.header_for("https://example.com/", 1000).contains("ok=3"));
     }
 }

@@ -605,9 +605,16 @@ pub fn install(i: &mut Interp) {
             Err(e) => return Err(i.throw_kind("SyntaxError", &e)),
         };
         // Same origin only (see the module header); `Origin` is sent anyway.
-        // The host is compared, not the scheme: `wss://` pairs with `https://`
-        // as `ws://` with `http://`.
-        let same = page.as_ref().is_some_and(|p| p.host.eq_ignore_ascii_case(&sock.host));
+        // Scheme, host and port all count, with `wss://` standing for
+        // `https://` and `ws://` for `http://`.
+        let tls = url.starts_with("wss://");
+        let same = page.as_ref().is_some_and(|p| {
+            let page_port = p.port.parse::<u16>().ok()
+                .unwrap_or(if p.scheme == "https" { 443 } else { 80 });
+            p.host.eq_ignore_ascii_case(&sock.host)
+                && (p.scheme == "https") == tls
+                && page_port == sock.port
+        });
         if !same {
             // Page code checks `e.name === 'SecurityError'`, not the message.
             // `throw_kind` only knows the language error types, so the name is set
@@ -632,7 +639,7 @@ pub fn install(i: &mut Interp) {
         obj.borrow_mut().define(W_LISTEN, hidden(list));
         i.pending_sockets.push(PendingSocket {
             id, host: sock.host.clone(), port: sock.port,
-            hello: sock.handshake(), secure: sock.port == 443 || url.starts_with("wss://"),
+            hello: sock.handshake(), secure: tls,
         });
         i.sockets.push(sock);
         i.socket_objs.insert(id, obj.clone());

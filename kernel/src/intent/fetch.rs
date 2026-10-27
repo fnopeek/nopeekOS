@@ -172,6 +172,16 @@ pub(crate) fn begin_many(
     submit(owner, caller_core, cap, Work::Many { urls, cookies, cap, from_reach })
 }
 
+/// The table has no room for this caller right now; a later try can
+/// succeed. Every other error is final.
+const BUSY: [&str; 3] = ["too many fetches in flight", "fetch buffer budget exhausted",
+                         "fetch queue full"];
+
+/// Whether a `begin_*` error is [`BUSY`], not a refusal.
+pub fn is_busy(e: &str) -> bool {
+    BUSY.contains(&e)
+}
+
 fn submit(
     owner: u32,
     caller_core: usize,
@@ -190,13 +200,13 @@ fn submit(
     let (id, spawn) = {
         let mut q = Q.lock();
         if q.slots.iter().flatten().filter(|j| j.owner == owner).count() >= MAX_JOBS_PER_OWNER {
-            return Err("too many fetches in flight");
+            return Err(BUSY[0]);
         }
         if q.reserved + cap > MAX_RESERVED_BYTES {
-            return Err("fetch buffer budget exhausted");
+            return Err(BUSY[1]);
         }
         let Some(slot) = q.slots.iter().position(|s| s.is_none()) else {
-            return Err("fetch queue full");
+            return Err(BUSY[2]);
         };
         let id = q.next_id;
         // Never 0 (a caller may read it as "no handle") and never negative

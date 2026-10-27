@@ -535,6 +535,13 @@ fn take_waiting(i: &mut Interp, id: u32) -> Option<Waiter> {
 /// status line.
 pub fn fetch_done(i: &mut Interp, id: u32, status: u16, final_url: &str,
                   raw_headers: &str, body: String) {
+    // The request was same-origin, but the kernel follows redirects; a
+    // response that ended on another origin is a network error, as fetch
+    // without CORS treats it.
+    if !matches!(same_origin_url(i, final_url), Ok(Some(_))) {
+        fetch_failed(i, id, "redirected to another origin");
+        return;
+    }
     let Some(w) = take_waiting(i, id) else { return };
     let p = match w {
         Waiter::Promise(p) => p,

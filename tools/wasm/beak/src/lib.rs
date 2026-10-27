@@ -21,6 +21,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, AtomicUsize
 
 mod neterror;
 mod selftest;
+mod about;
 use beak_engine::cookies;
 
 use beak_engine::charset;
@@ -1380,6 +1381,10 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
         deliver_builtin(engine, selftest::URL, selftest::HTML, push_hist);
         return;
     }
+    if about::matches(url) {
+        deliver_builtin(engine, about::URL, about::HTML, push_hist);
+        return;
+    }
 
     let now = unix_now();
     let mut hdrs = String::new();
@@ -2101,7 +2106,7 @@ fn sync_nav(engine: &Engine) -> bool {
     // dropped here because `nav_begin` would send it to the network and the
     // answer would be a blank page that looks like a server error.
     let ok = n.url.starts_with("https://") || n.url.starts_with("http://")
-             || selftest::matches(&n.url);
+             || selftest::matches(&n.url) || about::matches(&n.url);
     if !ok {
         log(&alloc::format!("[beak] Navigation abgelehnt (Schema): {}", n.url));
         return false;
@@ -2446,7 +2451,11 @@ fn pump_fetches() -> bool {
         }
         let body = f.body.clone().unwrap_or_default();
         let h = http_begin(&f.method, &url, &hdrs, body.as_bytes(), FETCH_CAP);
-        if h < 0 {
+        // The kernel's job table is shared with navigation, images and
+        // fonts; a full one means the next round, not a failed fetch.
+        if h == -2 {
+            rest.push(f);
+        } else if h < 0 {
             beak_engine::js::fetch::fetch_failed(&mut sess.interp, f.id, "no handle");
             landed = true;
         } else {
@@ -3216,7 +3225,7 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
     // A built-in page fetches nothing. Its images are relative to
     // `beak:selftest`, which would resolve to a host name `beak` — and an
     // invented name sent to the resolver leaves the machine.
-    if selftest::matches(url_str()) {
+    if selftest::matches(url_str()) || about::matches(url_str()) {
         return Vec::new();
     }
     let mut pending: Vec<String> = Vec::new();
@@ -3559,6 +3568,8 @@ fn typed_to_url(typed: &str) -> Option<String> {
     }
     let abs = if selftest::matches(t) {
         selftest::URL.to_string()
+    } else if about::matches(t) {
+        about::URL.to_string()
     } else if t.starts_with("http://") || t.starts_with("https://") {
         t.to_string()
     } else if looks_like_url(t) {
@@ -5316,8 +5327,13 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                 toggle_menu(4);
                 true
             }
-            ACT_MENU_DISMISS | ACT_HELP_ABOUT => {
+            ACT_MENU_DISMISS => {
                 set_open_menu(0);
+                true
+            }
+            ACT_HELP_ABOUT => {
+                set_open_menu(0);
+                go(engine, about::URL);
                 true
             }
             ACT_FILE_CLOSE => {
@@ -5655,6 +5671,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     // No heap init here — the allocator claims the heap lazily on first use.
+    beak_engine::js::builtins::set_language_de(matches!(i18n::lang(), i18n::Lang::De));
 
     // Launch argument: `npk_open("beak", "https://…")` → prime the address bar
     // now; the actual fetch waits until the engine is set up (below).

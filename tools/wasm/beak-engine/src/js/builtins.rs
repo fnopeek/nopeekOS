@@ -2738,7 +2738,7 @@ pub fn make_realm() -> Realm {
 
     let nav = new_obj(Some(object_proto.clone()));
     nav.borrow_mut().define("userAgent", Prop::builtin(Value::str("Mozilla/5.0 (nopeekOS) beak")));
-    nav.borrow_mut().define("language", Prop::builtin(Value::str("de")));
+    nav.borrow_mut().define("language", Prop::builtin(Value::str(language())));
     nav.borrow_mut().define("onLine", Prop::builtin(Value::Bool(true)));
     // ── Fields every page reads ───────────────────────────────────────────
     //
@@ -4225,4 +4225,16 @@ fn as_n(i: &mut Interp, a: &[Value], signed: bool) -> C<Value> {
     let p = i.to_primitive(&v, false)?;
     let Value::BigInt(b) = &p else { return i.type_err("asIntN: value is not a BigInt") };
     Ok(Value::BigInt(Rc::new(b.as_n(f64_to_usize(bits) as u64, signed))))
+}
+
+/// The user's language for `navigator.language`, as a BCP 47 tag. The shell
+/// sets it from the system language before the first page.
+static LANGUAGE_DE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn set_language_de(de: bool) {
+    LANGUAGE_DE.store(de, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn language() -> &'static str {
+    if LANGUAGE_DE.load(core::sync::atomic::Ordering::Relaxed) { "de" } else { "en" }
 }

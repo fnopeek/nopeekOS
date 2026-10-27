@@ -3871,7 +3871,7 @@ pub(crate) fn npk_http_begin(
         Ok(h) => h,
         Err(e) => {
             ctx.http_last_error = Some(alloc::format!("queue\t{}", e));
-            -1
+            if crate::intent::fetch::is_busy(e) { -2 } else { -1 }
         }
     }
 }

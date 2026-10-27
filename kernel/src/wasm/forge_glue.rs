@@ -240,7 +240,8 @@ host_imports! {
 
     // npk_http_begin(method_ptr, method_len, url_ptr, url_len,
     //                hdrs_ptr, hdrs_len, body_ptr, body_len, buf_max)
-    //   -> handle >= 1, or -1 (reason via npk_http_last_error)
+    //   -> handle >= 1, -2 when this caller's jobs fill the table for now
+    //      (try again later), or -1 (reason via npk_http_last_error)
     mem fn npk_http_begin(method_ptr: i32, method_len: i32, url_ptr: i32, url_len: i32, hdrs_ptr: i32, hdrs_len: i32, body_ptr: i32, body_len: i32, buf_max: i32) -> i32;
 
     // npk_http_begin_many(urls_ptr, urls_len, out_max) -> handle >= 1, or -1
