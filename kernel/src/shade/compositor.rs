@@ -1627,6 +1627,14 @@ impl Compositor {
     pub fn open_popup(&mut self, parent: WindowId, slot: u8) -> Option<WindowId> {
         let (ws, title, panel) = self.windows.iter().find(|w| w.id == parent)
             .map(|w| (w.workspace, w.title.clone(), w.is_bar || w.is_dock))?;
+        // A new popup takes the keyboard, so only the app the user is
+        // working with may open one: its window or one of its popups has the
+        // focus, or it just got a press or key (a panel is never focused).
+        let owns_focus = self.focused.is_some_and(|f| f == parent
+            || self.windows.iter().any(|w| w.id == f && w.popup_of == Some(parent)));
+        if !owns_focus && !crate::shade::widgets::had_recent_input(parent.0) {
+            return None;
+        }
         let id = WindowId(self.next_id);
         self.next_id += 1;
         let mut win = Window::new(id, &title, 0, 0, 1, 1);

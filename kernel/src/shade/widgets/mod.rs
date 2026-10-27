@@ -334,9 +334,32 @@ pub fn set_popup_parent(popup: u32, parent: Option<u32>) {
     }
 }
 
+/// The window that got the last press or key (a popup counts as its
+/// parent) and when, in `interrupts::ticks`. A popup may take the keyboard
+/// only in answer to such input, as `xdg_popup.grab` needs the serial of one.
+static LAST_INPUT_WINDOW: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static LAST_INPUT_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// How long a press or key still entitles its window to open a popup.
+const POPUP_INPUT_TICKS: u64 = 100;
+
+/// True if the last press or key went to `window_id` (or one of its popups)
+/// within `POPUP_INPUT_TICKS`.
+pub fn had_recent_input(window_id: u32) -> bool {
+    use core::sync::atomic::Ordering;
+    LAST_INPUT_WINDOW.load(Ordering::Acquire) == window_id
+        && crate::interrupts::ticks()
+            .saturating_sub(LAST_INPUT_TICK.load(Ordering::Acquire)) <= POPUP_INPUT_TICKS
+}
+
 /// Push an event into the window's queue.
 pub fn push_event(window_id: u32, event: abi::Event) {
+    use core::sync::atomic::Ordering;
     let window_id = POPUP_PARENT.lock().get(&window_id).copied().unwrap_or(window_id);
+    if matches!(event, abi::Event::Key(_) | abi::Event::MouseButton { down: true, .. }) {
+        LAST_INPUT_TICK.store(crate::interrupts::ticks(), Ordering::Release);
+        LAST_INPUT_WINDOW.store(window_id, Ordering::Release);
+    }
     {
         let mut queues = EVENT_QUEUES.lock();
         let q = queues.entry(window_id).or_insert_with(VecDeque::new);

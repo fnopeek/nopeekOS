@@ -130,6 +130,10 @@ popup `popup` (0..7) of the caller's widget window.
 - Placement: below the anchor at `gap`; above it when it does not fit
   below; else bottom-aligned to the screen. `x` is the anchor's left edge,
   slid to stay on screen. At the bottom panel this always flips above.
+- Opening a new popup needs the user: the parent window or one of its
+  popups has the focus, or the last press or key (within 1 s) went to the
+  parent; otherwise `npk_popup` returns -1. A panel, which is never
+  focused, opens popups only in answer to a click on it.
 - A new popup takes the keyboard; the focus before the first popup is
   remembered. Its events go to the parent window's queue. Popups are
   drawn above all panels and windows. Calling `npk_popup` again for an
