@@ -53,7 +53,7 @@ kernel-assigned module name (`ctx.module_name`).
 | `npk_wifi_send_event(buf, len) -> 0 / -1` | driver | driver |
 | `npk_wifi_known(buf, max) -> len / -(needed + 2) / -1` | name `wifid` and NETCTL | wifid |
 | `npk_wifi_poll_request(buf, max) -> len / 0 / -(needed + 2) / -1` | name `wifid` and NETCTL | wifid |
-| `npk_wifi_publish(buf, len) -> 0 / -1` | name `wifid` and NETCTL, `len <= 4096` | wifid |
+| `npk_wifi_publish(buf, len) -> 0 / -1` | name `wifid` and NETCTL, `len <= 65536` | wifid |
 | `npk_wifi_new_network() -> 0 / -1` | name `wifid` and NETCTL | wifid |
 | `npk_wifi_status(buf, max) -> len / -(needed + 2) / -1` | name `link` | link |
 | `npk_wifi_request(buf, len) -> 0 / -1` | name `link` | link |
@@ -91,7 +91,7 @@ A push to either control queue signals the fiber registered for that bit.
 
 | Property | Value |
 |---|---|
-| Message size | 1 to 2048 bytes (`WIFI_MSG_MAX`) |
+| Message size | 1 to 65536 bytes (`WIFI_MSG_MAX`; a `SCAN_RESULT` of 1000 cells is at most 42003) |
 | Queue depth | 16 messages per direction |
 | Push to a full queue, or an empty or oversized message | rejected (`-1`), counted as dropped |
 | Poll of an empty queue | `0` |
@@ -186,7 +186,7 @@ calls `npk_netdev_set_link(1)` and sends `LINK_UP`.
 | `0x85` | `LINK_UP` | `[85][bssid 6][channel u8]` | 8 |
 | `0x86` | `LINK_DOWN` | `[86][reason u8]` | 2 |
 | `0x87` | `CONNECT_FAILED` | `[87][reason u8]` | 2 |
-| `0x89` | `SCAN_RESULT` | `[89][count u8]` then `count` cells | up to 2048 |
+| `0x89` | `SCAN_RESULT` | `[89][count u16]` then `count` cells | 3 + the cells |
 | `0x8a` | `DRIVER_UP` | `[8a]` | 1 |
 | `0x8b` | `SIGNAL` | `[8b][dbm i8]` | 2 |
 
@@ -239,8 +239,10 @@ own (after two failures it rescans for the same SSID) and sends a new
 | 9 | 1 | `ssid_len` (0 for a hidden network) |
 | 10 | `ssid_len` | SSID, raw bytes |
 
-Cells that would push the message past 2048 bytes are left out. wifid skips
-cells with an empty SSID and keeps at most 48.
+The driver's scan list grows with the cells it hears, up to 1000 (cfg80211
+`bss_entries_limit`, a guard against a flood of fake beacons); every cell of
+the list goes into the one message. wifid skips cells with an empty SSID and
+keeps the rest.
 
 Security values (from the RSN element's AKM list, else the WPA vendor
 element, else the beacon's privacy bit):
@@ -309,7 +311,8 @@ link / wlan ─ REQ_CONNECT{ssid[,psk]} ─► kernel: psk into the vault, reque
 wifid ◄─ REQ_CONNECT
 wifid: re-reads the known networks; no fitting cell in the last scan → SCAN first
 wifid ─ SCAN ────────────────► driver ─ SCAN_RESULT ─► wifid
-wifid: picks the cell (6.1), PMK = PBKDF2-SHA1(psk, ssid, 4096)
+wifid: picks the cell (6.1), PMK = PBKDF2-SHA1(psk, ssid, 4096),
+       or the PSK itself if it is 64 hex digits
 wifid ─ CONNECT{bssid,channel} ─► driver: auth + assoc with the AP
 driver ─ READY{ap,own} ────────► wifid: supplicant with a random SNonce
 AP ─ msg1 ─► driver ─ EAPOL_RX ─► wifid ─ TX_EAPOL(msg2) ─► driver ─► AP
@@ -366,7 +369,9 @@ Record (v1):
 
 An entry that does not start with `0x01` is read as a bare passphrase with
 `auto` on, priority 0, band 0. A passphrase is accepted only if it is 8 to 63
-bytes of printable ASCII.
+bytes of printable ASCII, or 64 hex digits: then it is the PSK itself (IEEE
+802.11i; wpa_supplicant `psk=` without quotes) and wifid uses it as the PMK
+without PBKDF2.
 
 | Who | Reads | Writes |
 |---|---|---|
@@ -378,8 +383,7 @@ bytes of printable ASCII.
 
 `npk_wifi_known` returns, per network, `[ssid_len u8][ssid][rec_len u8][v1
 record]`, all networks or none (`-(needed + 2)` if the buffer is too small). wifid keeps
-at most 32 networks and zeroes its copy of the passphrases before every
-re-read.
+every network and zeroes its copy of the passphrases before every re-read.
 
 Every write by the kernel or the vault GUI queues `REQ_KNOWN_CHANGED`, except
 `forget`, which queues `REQ_FORGET`, and `connect`, which queues
@@ -392,7 +396,7 @@ Every write by the kernel or the vault GUI queues `REQ_KNOWN_CHANGED`, except
 ### 8.1 Requests
 
 The kernel queues user requests for wifid in a third FIFO (depth 16, up to
-2048 bytes per message); wifid reads them with `npk_wifi_poll_request`. A
+`WIFI_MSG_MAX` bytes per message); wifid reads them with `npk_wifi_poll_request`. A
 password never travels in a request to wifid: the kernel stores it in the
 vault first.
 
@@ -418,7 +422,7 @@ The SSID is 1 to 32 bytes. Kernel checks before queueing:
 
 ### 8.2 State text
 
-wifid publishes its state with `npk_wifi_publish` (at most 4096 bytes) after
+wifid publishes its state with `npk_wifi_publish` (at most 64 KiB) after
 every round that changed something. The kernel keeps the last text, notifies
 the status topic when it changes, returns it to `link` through
 `npk_wifi_status`, and prints it in `wlan`. One `key value` line each:
@@ -435,7 +439,10 @@ the status topic when it changes, returns it to `link` through
 | `known <auto 0\|1> <prio> <escaped ssid>` | per known network |
 
 SSIDs are escaped: printable ASCII other than `\` stays, every other byte is
-`\xNN`. The text contains no passphrase.
+`\xNN`. The text contains no passphrase. The lines come in the order of the
+table, except that `known` lines come before `ap` lines; a line that would
+take the text past 64 KiB is left out with all after it, so the weakest
+networks in range are the first to go.
 
 wifid also sets the panel's `wlan` status item (icon by signal: -60/-70/-80 dBm
 steps while connected, dimmed while connecting, struck through otherwise);
@@ -511,5 +518,5 @@ What the code enforces:
 - **Handshake**: random SNonce or no handshake; key descriptor version 2 only;
   replay counter enforced; msg3 verified before its key is used; no key
   reinstallation.
-- **Bounded channel**: 2048-byte messages, 16 per queue, cleared when the
+- **Bounded channel**: messages up to 64 KiB, 16 per queue, cleared when the
   driver exits.

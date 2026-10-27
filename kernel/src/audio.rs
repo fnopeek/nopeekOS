@@ -12,11 +12,12 @@ use spin::Mutex;
 pub const CHANNELS: usize = 2;
 pub const BYTES_PER_FRAME: usize = CHANNELS * 2; // S16
 
-const NUM_SLOTS: usize = 4;
+/// Streams one module may hold at once; the table itself grows.
+const SLOTS_PER_OWNER: usize = 8;
 // ~1.36 s ring per slot: it must absorb the clock drift between virtio-snd's
 // wall-clock-paced fill (100 Hz ticks) and audio_hda's HDA-crystal-paced
 // drain, plus driver poll jitter under load; a full ring makes `submit` drop
-// PCM. Zero-init → .bss, so 4 × 256 KiB = 1 MiB costs no binary size.
+// PCM.
 const SLOT_BYTES: usize = 262144;
 
 struct Slot {
@@ -26,19 +27,29 @@ struct Slot {
     len: usize,       // bytes currently buffered
     drained: u64,     // total bytes pulled by `poll_mix` since `open` (real 48 kHz clock)
     owner: Option<u32>, // pid of the opening module; None = kernel
-    buf: [u8; SLOT_BYTES],
+    buf: alloc::vec::Vec<u8>,
 }
 
 impl Slot {
-    const fn new() -> Self {
-        Self { active: false, auto_close: false, head: 0, len: 0, drained: 0, owner: None, buf: [0u8; SLOT_BYTES] }
+    fn new() -> Self {
+        Self { active: false, auto_close: false, head: 0, len: 0, drained: 0, owner: None,
+               buf: alloc::vec![0u8; SLOT_BYTES] }
     }
 }
 
-// All-zero initial value -> lands in .bss (not the kernel binary). Volume is a
-// separate atomic so its non-zero default doesn't drag the slots into .data.
-static SLOTS: Mutex<[Slot; NUM_SLOTS]> =
-    Mutex::new([Slot::new(), Slot::new(), Slot::new(), Slot::new()]);
+/// Streams by index; a closed slot is reused, so indices stay put.
+static SLOTS: Mutex<alloc::vec::Vec<Slot>> = Mutex::new(alloc::vec::Vec::new());
+
+/// A free slot, reused or new. `None` when `owner` already holds its share.
+fn free_slot(slots: &mut alloc::vec::Vec<Slot>, owner: Option<u32>) -> Option<usize> {
+    if owner.is_some() && slots.iter().filter(|s| s.active && s.owner == owner).count() >= SLOTS_PER_OWNER {
+        return None;
+    }
+    match slots.iter().position(|s| !s.active) {
+        Some(i) => Some(i),
+        None => { slots.push(Slot::new()); Some(slots.len() - 1) }
+    }
+}
 static VOLUME: AtomicU8 = AtomicU8::new(80); // master, 0..=100 %
 
 /// Allocate a streaming slot for the kernel. Returns the slot index or -1
@@ -55,18 +66,15 @@ pub fn open_for(pid: u32) -> i32 {
 
 fn open_owned(owner: Option<u32>) -> i32 {
     let mut slots = SLOTS.lock();
-    for (i, s) in slots.iter_mut().enumerate() {
-        if !s.active {
-            s.active = true;
-            s.auto_close = false;
-            s.head = 0;
-            s.len = 0;
-            s.drained = 0;
-            s.owner = owner;
-            return i as i32;
-        }
-    }
-    -1
+    let Some(i) = free_slot(&mut slots, owner) else { return -1 };
+    let s = &mut slots[i];
+    s.active = true;
+    s.auto_close = false;
+    s.head = 0;
+    s.len = 0;
+    s.drained = 0;
+    s.owner = owner;
+    i as i32
 }
 
 fn owned(s: &Slot, pid: u32) -> bool {
@@ -75,8 +83,8 @@ fn owned(s: &Slot, pid: u32) -> bool {
 
 /// `close` for a module: only its own slot. Returns false otherwise.
 pub fn close_for(slot: usize, pid: u32) -> bool {
-    if slot >= NUM_SLOTS { return false; }
     let mut slots = SLOTS.lock();
+    if slot >= slots.len() { return false; }
     if !owned(&slots[slot], pid) { return false; }
     slots[slot].active = false;
     slots[slot].len = 0;
@@ -85,16 +93,16 @@ pub fn close_for(slot: usize, pid: u32) -> bool {
 
 /// `submit` for a module: None unless the slot belongs to `pid`.
 pub fn submit_for(slot: usize, pid: u32, data: &[u8]) -> Option<usize> {
-    if slot >= NUM_SLOTS { return None; }
     let mut slots = SLOTS.lock();
+    if slot >= slots.len() { return None; }
     if !owned(&slots[slot], pid) { return None; }
     Some(push(&mut slots[slot], data))
 }
 
 /// `buffered` for a module: None unless the slot belongs to `pid`.
 pub fn buffered_for(slot: usize, pid: u32) -> Option<usize> {
-    if slot >= NUM_SLOTS { return None; }
     let slots = SLOTS.lock();
+    if slot >= slots.len() { return None; }
     if !owned(&slots[slot], pid) { return None; }
     Some(slots[slot].len)
 }
@@ -110,8 +118,8 @@ pub fn release_owner(pid: u32) {
 
 /// Release a streaming slot (discards anything still buffered).
 pub fn close(slot: usize) {
-    if slot >= NUM_SLOTS { return; }
     let mut slots = SLOTS.lock();
+    if slot >= slots.len() { return; }
     slots[slot].active = false;
     slots[slot].len = 0;
 }
@@ -120,8 +128,8 @@ pub fn close(slot: usize) {
 /// re-prepared (e.g. cubeb re-initialising after an underrun without a clean
 /// RELEASE): reuse the slot + drop stale PCM instead of leaking a fresh one.
 pub fn reset(slot: usize) {
-    if slot >= NUM_SLOTS { return; }
     let mut slots = SLOTS.lock();
+    if slot >= slots.len() { return; }
     slots[slot].head = 0;
     slots[slot].len = 0;
 }
@@ -129,8 +137,8 @@ pub fn reset(slot: usize) {
 /// Append PCM to a slot's ring. Returns the number of bytes accepted (fewer
 /// than `data.len()` when the ring is full — the submitter must retry/pace).
 pub fn submit(slot: usize, data: &[u8]) -> usize {
-    if slot >= NUM_SLOTS { return 0; }
     let mut slots = SLOTS.lock();
+    if slot >= slots.len() { return 0; }
     let s = &mut slots[slot];
     if !s.active { return 0; }
     push(s, data)
@@ -152,19 +160,17 @@ fn push(s: &mut Slot, data: &[u8]) -> usize {
 /// once the driver has drained it. For short one-shots (must fit in a slot).
 pub fn play_oneshot(data: &[u8]) -> bool {
     let mut slots = SLOTS.lock();
-    for s in slots.iter_mut() {
-        if !s.active {
-            let n = data.len().min(SLOT_BYTES);
-            s.active = true;
-            s.auto_close = true;
-            s.owner = None;
-            s.head = 0;
-            s.len = n;
-            s.buf[..n].copy_from_slice(&data[..n]);
-            return true;
-        }
-    }
-    false
+    let Some(i) = free_slot(&mut slots, None) else { return false };
+    let s = &mut slots[i];
+    let n = data.len().min(SLOT_BYTES);
+    s.active = true;
+    s.auto_close = true;
+    s.owner = None;
+    s.head = 0;
+    s.drained = 0;
+    s.len = n;
+    s.buf[..n].copy_from_slice(&data[..n]);
+    true
 }
 
 /// Driver side: mix every active slot into `out` (S16 add + clamp), scale by
@@ -208,8 +214,8 @@ pub fn poll_mix(out: &mut [u8]) -> usize {
 /// latency in each tx completion, so the guest's A/V sync accounts for our
 /// hidden host buffering.
 pub fn buffered(slot: usize) -> usize {
-    if slot >= NUM_SLOTS { return 0; }
     let slots = SLOTS.lock();
+    if slot >= slots.len() { return 0; }
     if !slots[slot].active { return 0; }
     slots[slot].len
 }

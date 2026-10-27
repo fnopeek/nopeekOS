@@ -49,9 +49,13 @@ const MAX_GUEST_STR: usize = 1024 * 1024;
 /// Largest byte buffer a host call copies out of a guest (request bodies,
 /// frames, driver messages).
 const MAX_GUEST_BYTES: usize = 64 * 1024 * 1024;
-/// Most response body a module's HTTP request makes the kernel hold; the
-/// module names the buffer, the server decides how much arrives.
-const MAX_HTTP_BODY: usize = 256 * 1024 * 1024;
+/// Most response body one HTTP request makes the kernel hold: the module
+/// names the buffer, the server decides how much arrives, and no request may
+/// take more than a quarter of the free RAM (the async path's per-owner
+/// share, `fetch::reserve_limits`).
+fn max_http_body() -> usize {
+    crate::memory::stats().0.saturating_mul(crate::memory::PAGE_SIZE) / 4
+}
 
 pub(crate) fn read_str(data: &[u8], ptr: i32, len: i32) -> Option<String> {
     let n = glen(len)?;
@@ -101,17 +105,16 @@ fn wifi_poll_into(
     mem: &mut [u8],
     buf_ptr: i32,
     max: i32,
-    dequeue: fn(&mut [u8]) -> crate::wifi::Pop,
+    dequeue: fn(usize) -> crate::wifi::Pop,
 ) -> i32 {
     let Some(max) = glen(max) else { return -1 };
     let cap = max.min(crate::wifi::WIFI_MSG_MAX);
     // Checked before the dequeue: a message taken out cannot be put back.
     if guest(mem, buf_ptr, cap).is_none() { return -1; }
-    let mut tmp = [0u8; crate::wifi::WIFI_MSG_MAX];
-    match dequeue(&mut tmp[..cap]) {
+    match dequeue(cap) {
         crate::wifi::Pop::Empty => 0,
         crate::wifi::Pop::Short(needed) => too_small(needed),
-        crate::wifi::Pop::Got(len) => write_bytes(mem, buf_ptr, &tmp[..len]),
+        crate::wifi::Pop::Got(msg) => write_bytes(mem, buf_ptr, &msg),
     }
 }
 
@@ -1120,8 +1123,6 @@ fn net_allowed(ctx: &mut HostState) -> bool {
 // this is a long-lived, mostly idle connection, hence a slot table instead
 // of a queue.
 
-const MAX_TLS: usize = 8;
-
 struct TlsSlot {
     /// Owner. A handle is served only to the process that opened it, as
     /// with the HTTP handles.
@@ -1133,16 +1134,23 @@ struct TlsSlot {
     closed: bool,
 }
 
-static TLS_SLOTS: spin::Mutex<[Option<TlsSlot>; MAX_TLS]> =
-    spin::Mutex::new([const { None }; MAX_TLS]);
+/// Grows with the connections; how many one module holds is bounded by its
+/// TCP connections (`tcp::connect_as`).
+static TLS_SLOTS: spin::Mutex<alloc::vec::Vec<Option<TlsSlot>>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
+
+/// The TCP owner a module's connections are charged to. A run without a
+/// process entry (pid 0) is still a module, never the kernel.
+fn tcp_owner(ctx: &HostState) -> crate::net::tcp::Owner {
+    if ctx.pid != 0 { ctx.pid } else { u32::MAX }
+}
 
 /// Common gate for every access to an existing handle.
 fn tls_slot_ok(ctx: &mut HostState, handle: i32) -> Option<usize> {
     if !net_allowed(ctx) { return None }
-    if handle < 0 || handle as usize >= MAX_TLS { return None }
-    let i = handle as usize;
+    let i = usize::try_from(handle).ok()?;
     let g = TLS_SLOTS.lock();
-    match &g[i] {
+    match g.get(i)? {
         Some(sl) if sl.pid == ctx.pid => Some(i),
         _ => None,
     }
@@ -1228,12 +1236,14 @@ pub(crate) fn npk_tls_connect(mem: &mut [u8], ctx: &mut HostState,
     // Reserved before the handshake, so two connects cannot pick one slot.
     let free = {
         let mut g = TLS_SLOTS.lock();
-        let Some(i) = g.iter().position(|s| s.is_none()) else { return -1 };
-        g[i] = Some(TlsSlot { pid: ctx.pid, session: None, closed: false });
-        i
+        let slot = Some(TlsSlot { pid: ctx.pid, session: None, closed: false });
+        match g.iter().position(|s| s.is_none()) {
+            Some(i) => { g[i] = slot; i }
+            None => { g.push(slot); g.len() - 1 }
+        }
     };
     let release = || { TLS_SLOTS.lock()[free] = None; };
-    let tcp = match crate::net::tcp::connect(ip, port as u16) {
+    let tcp = match crate::net::tcp::connect_as(tcp_owner(ctx), ip, port as u16) {
         Ok(h) => h,
         Err(_) => { release(); return -1 }
     };
@@ -1318,9 +1328,7 @@ pub(crate) fn npk_tcp_connect(ctx: &mut HostState, ip_packed: i32, port: i32) ->
     // `debug` the local network is the point (it logs to `nc -lk`).
     // The TLS path above is used by beak on behalf of a page and does apply
     // it.
-    // A run without a process entry (pid 0) is still a module, never the kernel.
-    let owner = if ctx.pid != 0 { ctx.pid } else { u32::MAX };
-    match crate::net::tcp::connect_start_as(owner, ip, port as u16) {
+    match crate::net::tcp::connect_start_as(tcp_owner(ctx), ip, port as u16) {
         Ok(h) => { ctx.tcp_handles.push(h); h as i32 }
         Err(_) => -1,
     }
@@ -2611,7 +2619,6 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
         return -1;
     }
     let Some(payload) = glen(data_len).and_then(|n| guest(mem, data_ptr, n)) else { return -1 };
-    if payload.is_empty() { return -1; }
 
     if !crate::npkfs::room_for(payload.len()) {
         kprintln!("[npk] WASM: npk_store DENIED ({} B, npkFS is down to the system reserve)",
@@ -2670,7 +2677,7 @@ pub(crate) fn npk_clipboard_set(mem: &mut [u8], ctx: &mut HostState, ptr: i32, l
     }
     if !app_is_focused(ctx) { return -1; }
     let Some(slice) = glen(len).and_then(|n| guest(mem, ptr, n)) else { return -1 };
-    crate::shade::clipboard::set_text(slice);
+    if !crate::shade::clipboard::set_text(slice) { return -1; }
     slice.len() as i32
 }
 
@@ -3553,7 +3560,7 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
         return -1;
     }
     if buf_max <= 0 { return -1; }
-    let cap = (buf_max as usize).min(MAX_HTTP_BODY);
+    let cap = (buf_max as usize).min(max_http_body());
 
     let url = match read_str(mem, url_ptr, url_len) {
         Some(s) => s,
@@ -3620,7 +3627,7 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
         return -1;
     }
     if buf_max <= 0 { return -1; }
-    let cap = (buf_max as usize).min(MAX_HTTP_BODY);
+    let cap = (buf_max as usize).min(max_http_body());
 
     let method = match read_str(mem, method_ptr, method_len) {
         Some(s) => s,
@@ -3775,7 +3782,7 @@ pub(crate) fn npk_http_begin(
         return -1;
     }
     if buf_max <= 0 { return -1; }
-    let cap = (buf_max as usize).min(MAX_HTTP_BODY);
+    let cap = (buf_max as usize).min(max_http_body());
 
     let method = match read_str(mem, method_ptr, method_len) {
         Some(s) => s,
@@ -3903,7 +3910,7 @@ pub(crate) fn npk_http_begin_many_hdr(
     } else {
         alloc::vec::Vec::new()
     };
-    match crate::intent::fetch::begin_many(ctx.pid, ctx.core_id, urls, cookies, (out_max as usize).min(MAX_HTTP_BODY),
+    match crate::intent::fetch::begin_many(ctx.pid, ctx.core_id, urls, cookies, (out_max as usize).min(max_http_body()),
                                           Some(ctx.net_reach)) {
         Ok(h) => h,
         Err(e) => {
@@ -4021,7 +4028,7 @@ pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_pt
     if urls.is_empty() || urls.len() > MAX_URLS { return -1; }
     if (lens_max as usize) < urls.len() * 4 { return -1; }
 
-    let total_cap = (out_max as usize).min(MAX_HTTP_BODY);
+    let total_cap = (out_max as usize).min(max_http_body());
     let bodies = crate::intent::http::https_get_many(&urls, &[], total_cap, Some(ctx.net_reach));
 
     let mut blobs: alloc::vec::Vec<u8> = alloc::vec::Vec::new();

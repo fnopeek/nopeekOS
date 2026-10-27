@@ -916,7 +916,7 @@ fn repeat_one(node: &Node, min: u32, max: u32, greedy: bool, st: &mut St,
 fn repeat(node: &Node, min: u32, max: u32, greedy: bool, st: &mut St,
           pos: usize, done: u32, k: K) -> Option<usize> {
     st.steps += 1;
-    if st.steps > MAX_STEPS { return None; }
+    if st.steps > st.budget { return None; }
     let can_more = done < max;
     let more = |st: &mut St| -> Option<usize> {
         if !can_more { return None; }

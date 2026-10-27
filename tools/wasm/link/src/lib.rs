@@ -95,7 +95,7 @@ struct St {
     /// The network whose actions are open.
     sel: [u8; 32],
     sel_n: usize,
-    pass: [u8; 63],
+    pass: [u8; 64],
     pass_n: usize,
     reveal: bool,
     focus: u32,
@@ -109,7 +109,7 @@ impl St {
         (self.sel_n > 0).then(|| &self.sel[..self.sel_n])
     }
     fn set_sel(&mut self, s: Option<&[u8]>) {
-        self.pass = [0; 63];
+        self.pass = [0; 64];
         self.pass_n = 0;
         self.reveal = false;
         match s {
@@ -605,8 +605,10 @@ fn connect(st: &mut St, w: &Wifi) {
     let mut m = ssid_msg(REQ_CONNECT, &sel);
     if !known {
         let p = &st.pass[..st.pass_n];
-        if !(8..=63).contains(&p.len()) {
-            st.msg = "A Wi-Fi password is 8 to 63 characters.";
+        // A passphrase, or the PSK itself as 64 hex digits (IEEE 802.11i).
+        let hex = p.len() == 64 && p.iter().all(u8::is_ascii_hexdigit);
+        if !(8..=63).contains(&p.len()) && !hex {
+            st.msg = "A Wi-Fi password is 8 to 63 characters or 64 hex digits.";
             st.msg_err = true;
             st.focus = st.focus.wrapping_add(1).max(1);
             return;
@@ -683,7 +685,7 @@ pub extern "C" fn _start() {
         net: Vec::new(),
         sel: [0; 32],
         sel_n: 0,
-        pass: [0; 63],
+        pass: [0; 64],
         pass_n: 0,
         reveal: false,
         focus: 1,

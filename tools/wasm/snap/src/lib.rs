@@ -162,7 +162,14 @@ fn next_name(dir: &str) -> String {
             if let Ok(v) = num.parse::<u32>() { if v > max { max = v; } }
         }
     }
-    alloc::format!("screenshot-{:03}.png", max + 1)
+    // The listing is a hint; a name that exists is never reused, so a
+    // listing that came back short cannot make a shot overwrite another.
+    let mut n = max + 1;
+    loop {
+        let name = alloc::format!("screenshot-{:03}.png", n);
+        if host::fs_stat(&alloc::format!("{}/{}", dir, name)).is_none() { return name; }
+        n += 1;
+    }
 }
 
 // ── PNG encoder (RGB8, single IDAT, filter 0) ─────────────────────────

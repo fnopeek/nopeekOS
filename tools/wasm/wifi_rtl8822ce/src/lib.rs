@@ -26,6 +26,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 mod host;
 mod bf;
 mod chip;
@@ -50,6 +52,7 @@ mod vif;
 mod txpower;
 mod regs;
 use regs::*;
+use alloc::vec::Vec;
 use npk_sys::cell::Single;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
@@ -67,6 +70,10 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 #[unsafe(link_section = ".npk.caps")]
 #[used]
 static NPK_CAPS: [u8; 1] = [0x01 | 0x04 | 0x08 | 0x40]; // READ|EXEC|RENDER|HARDWARE
+
+// The scan lists grow with the cells in the air.
+#[global_allocator]
+static ALLOC: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 /// Never die silently: a bare `loop {}` looks like an unresponsive chip from
 /// the outside. `Location` survives `strip = true` because it is static data.
@@ -2106,7 +2113,10 @@ struct Bss {
     wpa1: bool,
 }
 
-const MAX_BSS: usize = 48;
+/// Cells one scan list holds at most; the list grows up to it. Protection
+/// against a flood of fake beacons, as cfg80211 `bss_entries_limit`
+/// (default 1000, core.c).
+const BSS_ENTRIES_LIMIT: usize = 1000;
 
 /// What the cell says about its width: the raw bytes from its operation
 /// elements, not their interpretation.
@@ -2510,16 +2520,7 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let path_div = &mut d.path_div;
     chip::read_cck_gi_bnd(h, dm);
 
-    let mut found: [Bss; MAX_BSS] = [Bss {
-        bssid: [0; 6], ssid: [0; 32], ssid_len: 0,
-        channel: 0, best: -128, beacons: 0, resps: 0,
-        capability: 0, rsn: [0; 64], rsn_len: 0, ht_param: 0,
-        ht_op_seen: false, ht_cap: 0,
-        vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
-        ap_vht_cap: 0, ap_vht_cap_seen: false,
-        bss_load: 0, bss_load_seen: false, wmm: false, wpa1: false,
-    }; MAX_BSS];
-    let mut n_found = 0usize;
+    let mut found: Vec<Bss> = Vec::new();
     let mut probes = 0u32;
     let mut overflow = false;
 
@@ -2570,7 +2571,7 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     if !is_beacon && !is_resp {
                         return;
                     }
-                    if !record_bss(&mut found, &mut n_found, &pkt[off..], ch,
+                    if !record_bss(&mut found, &pkt[off..], ch,
                                    st.signal_power, is_beacon) {
                         overflow = true;
                     }
@@ -2581,6 +2582,7 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         }
     }
+    let n_found = found.len();
 
     // `rtw_core_scan_complete`
     if notify {
@@ -2625,7 +2627,7 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::print(" auf 5 GHz)\n");
     if overflow {
         host::print("  [Hinweis] mehr als ");
-        host::print_dec(MAX_BSS as u32);
+        host::print_dec(BSS_ENTRIES_LIMIT as u32);
         host::print(" Netze — die Liste ist voll, nicht die Luft\n");
     }
 
@@ -2670,12 +2672,9 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 
     // The list is kept for `CONNECT`, which names a cell by BSSID; a plain
     // `SCAN` reports it to `wifid` and chooses nothing itself.
-    LAST_SCAN.with(|(l, n)| {
-        l[..n_found].copy_from_slice(&found[..n_found]);
-        *n = n_found;
-    });
+    LAST_SCAN.with(|l| l.clone_from(&found));
     if want.is_none() {
-        report_scan(&found[..n_found]);
+        report_scan(&found);
     }
 
     // 5 GHz cells are selectable. The scan covers them passively (see
@@ -2756,7 +2755,7 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // channel.
     if n_found > 0 {
         host::print("  Zellen nach Signal:\n");
-        let mut gezeigt = [false; MAX_BSS];
+        let mut gezeigt = alloc::vec![false; n_found];
         for _ in 0..n_found.min(8) {
             let mut best: Option<usize> = None;
             for i in 0..n_found {
@@ -2841,7 +2840,7 @@ fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 }
 
 /// The cells of the last scan, for `CONNECT` (which names a BSSID).
-static LAST_SCAN: Single<([Bss; MAX_BSS], usize)> = Single::new(([Bss::EMPTY; MAX_BSS], 0));
+static LAST_SCAN: Single<Vec<Bss>> = Single::new(Vec::new());
 
 /// The channels of `t`'s network in the last scan: the search space for
 /// roaming. Channels only, not levels: those are stale as soon as someone
@@ -2849,8 +2848,8 @@ static LAST_SCAN: Single<([Bss; MAX_BSS], usize)> = Single::new(([Bss::EMPTY; MA
 fn set_roam_channels(t: &Bss) {
     let mut chs = [0u8; ROAM_CHANNELS_MAX];
     let mut n_ch = 0usize;
-    LAST_SCAN.with(|(l, n)| {
-        for b in l[..*n].iter() {
+    LAST_SCAN.with(|l| {
+        for b in l.iter() {
             if b.ssid[..b.ssid_len as usize] != t.ssid[..t.ssid_len as usize] {
                 continue;
             }
@@ -2909,30 +2908,23 @@ fn security_of(b: &Bss) -> u8 {
     }
 }
 
-/// `SCAN_RESULT`: [op][count] then per cell bssid[6] rssi ch security
-/// ssid_len ssid. One message: the channel
-/// holds 16, a scan finds up to 48.
+/// `SCAN_RESULT`: [op][count u16] then per cell bssid[6] rssi ch security
+/// ssid_len ssid, all cells in one message sized to them. The list holds at
+/// most `BSS_ENTRIES_LIMIT` cells, so the count fits.
 fn report_scan(found: &[Bss]) {
-    let mut m = [0u8; 2048];
-    let mut n = 2usize;
-    let mut count = 0u8;
+    let mut m = Vec::with_capacity(3 + found.iter().map(|b| 10 + b.ssid_len as usize).sum::<usize>());
+    m.push(EV_SCAN_RESULT);
+    m.extend_from_slice(&(found.len() as u16).to_le_bytes());
     for b in found {
         let sl = b.ssid_len as usize;
-        if n + 10 + sl > m.len() {
-            break;
-        }
-        m[n..n + 6].copy_from_slice(&b.bssid);
-        m[n + 6] = b.best as u8;
-        m[n + 7] = b.channel;
-        m[n + 8] = security_of(b);
-        m[n + 9] = sl as u8;
-        m[n + 10..n + 10 + sl].copy_from_slice(&b.ssid[..sl]);
-        n += 10 + sl;
-        count += 1;
+        m.extend_from_slice(&b.bssid);
+        m.push(b.best as u8);
+        m.push(b.channel);
+        m.push(security_of(b));
+        m.push(sl as u8);
+        m.extend_from_slice(&b.ssid[..sl]);
     }
-    m[0] = EV_SCAN_RESULT;
-    m[1] = count;
-    send_event_retry(&m[..n]);
+    send_event_retry(&m);
 }
 
 /// The channel holds 16 messages; `wifid` drains it when woken. Retry for a
@@ -2948,9 +2940,9 @@ fn send_event_retry(m: &[u8]) {
 }
 
 /// Adds a beacon or probe response to the list. Returns `false` when the
-/// list is full; a full list is a finding and must not look like an empty
-/// channel.
-fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
+/// list is at `BSS_ENTRIES_LIMIT`; a full list is a finding and must not
+/// look like an empty channel.
+fn record_bss(found: &mut Vec<Bss>, f: &[u8], ch: u8,
               signal: i8, is_beacon: bool) -> bool {
     let mut bssid = [0u8; 6];
     bssid.copy_from_slice(&f[16..22]); // addr3
@@ -2959,7 +2951,7 @@ fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
     // entry with every beacon. Keeping those of the first frame would let
     // chance (beacon or probe response, early or late) decide the channel
     // width attributed to a cell forever.
-    let idx = match found[..*n].iter().position(|b| b.bssid == bssid) {
+    let idx = match found.iter().position(|b| b.bssid == bssid) {
         Some(i) => {
             if signal > found[i].best {
                 found[i].best = signal;
@@ -2968,17 +2960,18 @@ fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
             i
         }
         None => {
-            if *n >= found.len() {
+            if found.len() >= BSS_ENTRIES_LIMIT {
                 return false;
             }
-            let i = *n;
-            *n += 1;
-            found[i].bssid = bssid;
-            found[i].channel = ch;
-            found[i].best = signal;
-            found[i].beacons = is_beacon as u16;
-            found[i].resps = !is_beacon as u16;
-            i
+            found.push(Bss {
+                bssid,
+                channel: ch,
+                best: signal,
+                beacons: is_beacon as u16,
+                resps: !is_beacon as u16,
+                ..Bss::EMPTY
+            });
+            found.len() - 1
         }
     };
     let e = &mut found[idx];
@@ -4516,8 +4509,6 @@ const ROAM_WIDER_TOLERANCE_DB: i8 = 6;
 const ROAM_DWELL_MS: u32 = 25;
 /// How many channels to remember from the scan.
 const ROAM_CHANNELS_MAX: usize = 6;
-/// And how many cells one roam scan can find.
-const ROAM_BSS_MAX: usize = 8;
 
 /// The channels on which the initial scan saw cells of our SSID.
 ///
@@ -6701,20 +6692,11 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     host::print(" — die bekannten Kanaele werden abgehorcht\n");
                     host::loud_end();
 
-                    let mut kand = [Bss {
-                        bssid: [0; 6], ssid: [0; 32], ssid_len: 0,
-                        channel: 0, best: -128, beacons: 0, resps: 0,
-                        capability: 0, rsn: [0; 64], rsn_len: 0,
-                        ht_param: 0, ht_op_seen: false, ht_cap: 0,
-                        vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0,
-                        vht_op_seen: false,
-                        ap_vht_cap: 0, ap_vht_cap_seen: false,
-                        bss_load: 0, bss_load_seen: false, wmm: false, wpa1: false,
-                    }; ROAM_BSS_MAX];
-                    let mut n_kand = 0usize;
+                    let mut kand: Vec<Bss> = Vec::new();
                     let ms = roam_scan(h, hal, trx, mgmt_buf, e, t_pwr, link,
                                        rxbuf, &mut d.dm, &mut d.path_div,
-                                       &mut kand, &mut n_kand);
+                                       &mut kand);
+                    let n_kand = kand.len();
                     let max_bw = max_bw_for(e);
                     let mut best: Option<Bss> = None;
                     let mut selbst_gut: Option<i8> = None;
@@ -7183,7 +7165,7 @@ fn leave(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, h2c: &mut fw::H2cState,
 fn find_cell(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
              d: &mut Dev, bssid: [u8; 6], channel: u8) -> Option<Bss> {
-    let known = LAST_SCAN.with(|(l, n)| l[..*n].iter().find(|b| b.bssid == bssid).copied());
+    let known = LAST_SCAN.with(|l| l.iter().find(|b| b.bssid == bssid).copied());
     if known.is_some() {
         return known;
     }
@@ -7205,13 +7187,12 @@ fn find_cell(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 pci::tx_kick_off_queue(h, trx, q);
             }
         }
-        let mut found = [Bss::EMPTY; 4];
-        let mut n_found = 0usize;
+        let mut found: Vec<Bss> = Vec::new();
         let dm = &mut d.dm;
         let path_div = &mut d.path_div;
         let t0 = host::now_ms();
         while host::now_ms() - t0 < LISTEN_MS
-            && !found[..n_found].iter().any(|b| b.bssid == bssid)
+            && !found.iter().any(|b| b.bssid == bssid)
         {
             let got = pci::rx_poll(h, trx, 64, buf, dm, path_div, hal.rf_path_num, 0, channel, |st, pkt| {
                 if st.crc_err || st.is_c2h {
@@ -7224,7 +7205,7 @@ fn find_cell(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 let fc = u16::from_le_bytes([pkt[off], pkt[off + 1]]);
                 let is_beacon = fc & 0xfc == 0x80;
                 if (is_beacon || fc & 0xfc == 0x50) && pkt[off + 16..off + 22] == bssid {
-                    record_bss(&mut found, &mut n_found, &pkt[off..], channel, st.signal_power, is_beacon);
+                    record_bss(&mut found, &pkt[off..], channel, st.signal_power, is_beacon);
                 }
             });
             if got == 0 {
@@ -7233,11 +7214,11 @@ fn find_cell(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
         // Back to the channel the bring-up measured on, as after a scan.
         let _ = switch_channel(h, hal, e, t, 1, CellWidth::default(), 0);
-        let cell = found[..n_found].iter().find(|b| b.bssid == bssid).copied();
+        let cell = found.iter().find(|b| b.bssid == bssid).copied();
         if let Some(c) = cell {
-            LAST_SCAN.with(|(l, n)| {
-                l[0] = c;
-                *n = 1;
+            LAST_SCAN.with(|l| {
+                l.clear();
+                l.push(c);
             });
         }
         cell
@@ -7263,13 +7244,12 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              e: &efuse::Efuse, t_pwr: &txpower::TxPower, link: &Link,
              rxbuf: &mut [u8], dm: &mut dm::DmInfo,
              path_div: &mut dm::PathDiv,
-             found: &mut [Bss; ROAM_BSS_MAX], n_found: &mut usize) -> u32 {
-    *found = [Bss::EMPTY; ROAM_BSS_MAX];
-    *n_found = 0;
+             found: &mut Vec<Bss>) -> u32 {
+    found.clear();
     let (chs, n_ch) = ROAM_CHANNELS.get();
     offchannel(h, hal, trx, mgmt_buf, e, t_pwr, link, rxbuf, dm, path_div,
                &chs[..n_ch], &link.ssid[..link.ssid_len as usize], false,
-               ROAM_DWELL_MS, found, n_found)
+               ROAM_DWELL_MS, found)
 }
 
 /// Listen on `chans` and come back, the link kept (steps 1-4 above).
@@ -7282,7 +7262,7 @@ fn offchannel(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
               rxbuf: &mut [u8], dm: &mut dm::DmInfo,
               path_div: &mut dm::PathDiv, chans: &[u8], ssid: &[u8],
               passive_5g: bool, dwell_ms: u32,
-              found: &mut [Bss], n_found: &mut usize) -> u32 {
+              found: &mut Vec<Bss>) -> u32 {
     let mac = link.mac;
 
     // (1) doze
@@ -7326,7 +7306,7 @@ fn offchannel(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 if fc & 0xfc != 0x80 && fc & 0xfc != 0x50 {
                     return;
                 }
-                let _ = record_bss(found, n_found, f, ch, st.signal_power,
+                let _ = record_bss(found, f, ch, st.signal_power,
                                    fc & 0xfc == 0x80);
             });
             if got == 0 {
@@ -7362,12 +7342,11 @@ struct BgScan {
     /// Index into the 2.4 + 5 GHz list of the next channel.
     next: usize,
     due_ms: u64,
-    found: [Bss; MAX_BSS],
-    n: usize,
+    found: Vec<Bss>,
 }
 
 static BG_SCAN: Single<BgScan> = Single::new(BgScan {
-    active: false, next: 0, due_ms: 0, found: [Bss::EMPTY; MAX_BSS], n: 0,
+    active: false, next: 0, due_ms: 0, found: Vec::new(),
 });
 
 /// Channels per slice and the time at home between slices: three channels
@@ -7381,7 +7360,7 @@ fn bg_scan_start(now: u64) {
         b.active = true;
         b.next = 0;
         b.due_ms = now;
-        b.n = 0;
+        b.found.clear();
     });
 }
 
@@ -7407,18 +7386,14 @@ fn bg_scan_step(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             b.next += 1;
             k += 1;
         }
-        let (found, n) = (&mut b.found, &mut b.n);
         let _ = offchannel(h, hal, trx, mgmt_buf, e, t_pwr, link, rxbuf, dm,
                            path_div, &chans[..k], &[], true, BG_DWELL_MS,
-                           found, n);
+                           &mut b.found);
         b.due_ms = host::now_ms() + BG_HOME_MS;
         if b.next >= all {
             b.active = false;
-            LAST_SCAN.with(|(l, ln)| {
-                l[..b.n].copy_from_slice(&b.found[..b.n]);
-                *ln = b.n;
-            });
-            report_scan(&b.found[..b.n]);
+            LAST_SCAN.with(|l| l.clone_from(&b.found));
+            report_scan(&b.found);
         }
     });
 }

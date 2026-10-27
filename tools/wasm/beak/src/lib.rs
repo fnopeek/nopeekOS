@@ -3893,24 +3893,20 @@ const HIST_MAX: usize = 64;
 fn hist_get(i: usize) -> &'static str {
     doc().hist.get(i).map(|s| s.as_str()).unwrap_or("")
 }
-/// Record a new navigation: truncate forward entries, append (caps at HIST_MAX).
-///
-/// At the cap the last entry is overwritten and the position stays.
+/// Record a new navigation: truncate forward entries, append. At `HIST_MAX`
+/// the oldest entry goes, as Firefox and Chromium keep their last 50.
 fn hist_push(url: &str) {
     let d = doc_mut();
     if !d.hist.is_empty() && d.hist.get(d.hist_pos).map(|s| s.as_str()) == Some(url) {
         return;
     }
-    let new_pos = if d.hist.is_empty() { 0 } else { d.hist_pos + 1 };
-    if new_pos >= HIST_MAX {
-        if let Some(last) = d.hist.get_mut(HIST_MAX - 1) {
-            last.clear();
-            last.push_str(clip(url, URL_CAP));
-        }
-        return;
-    }
+    let mut new_pos = if d.hist.is_empty() { 0 } else { d.hist_pos + 1 };
     // Forward entries are dropped.
     d.hist.truncate(new_pos);
+    if new_pos >= HIST_MAX {
+        d.hist.remove(0);
+        new_pos -= 1;
+    }
     d.hist.push(String::from(clip(url, URL_CAP)));
     d.hist_pos = new_pos;
 }

@@ -14,8 +14,9 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-/// Largest single control message (an EAPOL frame fits comfortably).
-pub const WIFI_MSG_MAX: usize = 2048;
+/// Largest single control message: a `SCAN_RESULT` of the driver's
+/// 1000-cell limit is at most 3 + 1000 * 42 bytes.
+pub const WIFI_MSG_MAX: usize = 64 * 1024;
 /// Bounded FIFO depth per direction. Control traffic is low-rate; if a side
 /// stops draining, new messages are rejected rather than growing unbounded.
 const WIFI_QUEUE_DEPTH: usize = 16;
@@ -105,25 +106,20 @@ fn push(q: &Mutex<VecDeque<Vec<u8>>>, msg: &[u8], sent: &AtomicU32, dropped: &At
 /// What one dequeue found.
 pub enum Pop {
     Empty,
-    /// The message's length, copied out and removed from the queue.
-    Got(usize),
-    /// `out` is shorter than the next message, which stays queued.
+    /// The message, removed from the queue.
+    Got(Vec<u8>),
+    /// The caller's `max` is shorter than the next message, which stays
+    /// queued.
     Short(usize),
 }
 
-fn pop(q: &Mutex<VecDeque<Vec<u8>>>, out: &mut [u8]) -> Pop {
+fn pop(q: &Mutex<VecDeque<Vec<u8>>>, max: usize) -> Pop {
     let mut q = q.lock();
     let Some(len) = q.front().map(Vec::len) else { return Pop::Empty };
-    if len > out.len() {
+    if len > max {
         return Pop::Short(len);
     }
-    match q.pop_front() {
-        Some(msg) => {
-            out[..len].copy_from_slice(&msg);
-            Pop::Got(len)
-        }
-        None => Pop::Empty,
-    }
+    q.pop_front().map_or(Pop::Empty, Pop::Got)
 }
 
 // ── Manager side (wifid.wasm) ──
@@ -133,8 +129,8 @@ pub fn send_cmd(msg: &[u8]) -> bool {
     if ok { wake(&CMD_WAKER); }
     ok
 }
-/// Dequeue the next event from the driver into `out`.
-pub fn poll_event(out: &mut [u8]) -> Pop { pop(&UPLINK, out) }
+/// Dequeue the next event from the driver if it fits `max` bytes.
+pub fn poll_event(max: usize) -> Pop { pop(&UPLINK, max) }
 
 // ── Driver side (wifi_*.wasm) ──
 /// Enqueue an event for the manager. Returns false if full / oversized.
@@ -163,8 +159,8 @@ pub fn set_event_waker(w: crate::smp::fiber::Waker) { EVENT_WAKER.store(w, Order
 pub fn cmd_pending() -> bool { !DOWNLINK.lock().is_empty() }
 /// Something for the manager: a driver event or a user request.
 pub fn event_pending() -> bool { !UPLINK.lock().is_empty() || !REQUESTS.lock().is_empty() }
-/// Dequeue the next command from the manager into `out`.
-pub fn poll_cmd(out: &mut [u8]) -> Pop { pop(&DOWNLINK, out) }
+/// Dequeue the next command from the manager if it fits `max` bytes.
+pub fn poll_cmd(max: usize) -> Pop { pop(&DOWNLINK, max) }
 
 /// Drop all queued messages — called when a driver or manager exits so a new
 /// instance starts with an empty channel (stale commands/events don't leak
@@ -195,8 +191,9 @@ static REQS_DROPPED: AtomicU32 = AtomicU32::new(0);
 
 /// The manager's own view (state, link, scan list), as it last published it.
 static STATUS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
-/// Largest published status.
-pub const STATUS_MAX: usize = 4096;
+/// Largest published status: the bound of a control message, so a status
+/// listing every cell of the largest scan result fits.
+pub const STATUS_MAX: usize = WIFI_MSG_MAX;
 
 fn request(msg: &[u8]) -> bool {
     let ok = push(&REQUESTS, msg, &REQS_SENT, &REQS_DROPPED);
@@ -204,8 +201,8 @@ fn request(msg: &[u8]) -> bool {
     ok
 }
 
-/// Dequeue the next user request into `out`.
-pub fn poll_request(out: &mut [u8]) -> Pop { pop(&REQUESTS, out) }
+/// Dequeue the next user request if it fits `max` bytes.
+pub fn poll_request(max: usize) -> Pop { pop(&REQUESTS, max) }
 
 pub fn publish_status(text: &[u8]) {
     {
@@ -237,14 +234,17 @@ fn ssid_msg(op: u8, ssid: &[u8]) -> Option<Vec<u8>> {
 pub fn request_scan() -> bool { request(&[REQ_SCAN]) }
 pub fn request_disconnect() -> bool { request(&[REQ_DISCONNECT]) }
 
+/// A passphrase of 8 to 63 printable ASCII characters, or the PSK itself
+/// as 64 hex digits (IEEE 802.11i; wpa_supplicant `psk=` without quotes).
 fn valid_psk(p: &[u8]) -> bool {
-    (8..=63).contains(&p.len()) && p.iter().all(|&b| (0x20..0x7f).contains(&b))
+    ((8..=63).contains(&p.len()) && p.iter().all(|&b| (0x20..0x7f).contains(&b)))
+        || (p.len() == 64 && p.iter().all(u8::is_ascii_hexdigit))
 }
 
 /// Store a network's password (the vault GUI), keeping its options.
 pub fn save_password(ssid: &[u8], psk: &[u8]) -> Result<(), &'static str> {
     if ssid.is_empty() || ssid.len() > SSID_MAX { return Err("invalid SSID"); }
-    if !valid_psk(psk) { return Err("a WPA2 password is 8 to 63 printable characters"); }
+    if !valid_psk(psk) { return Err("a WPA2 password is 8 to 63 printable characters or 64 hex digits"); }
     let mut e = known(ssid).unwrap_or_default();
     e.psk = psk.to_vec();
     store(ssid, &e)?;
@@ -261,7 +261,7 @@ pub fn request_connect(ssid: &[u8], psk: Option<&[u8]>) -> Result<(), &'static s
     let msg = ssid_msg(REQ_CONNECT, ssid).ok_or("invalid SSID")?;
     if let Some(p) = psk {
         if !valid_psk(p) {
-            return Err("a WPA2 password is 8 to 63 printable characters");
+            return Err("a WPA2 password is 8 to 63 printable characters or 64 hex digits");
         }
         let mut e = known(ssid).unwrap_or_default();
         e.psk = p.to_vec();

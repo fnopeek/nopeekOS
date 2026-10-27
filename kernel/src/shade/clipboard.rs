@@ -20,11 +20,12 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-/// Hard cap on inline `Text` payloads. Not a UX limit — you never select
-/// 4 MiB of text by hand — only an anti-heap-exhaustion guard so a
-/// malicious app can't balloon kernel memory. Large data uses `Object`
-/// (a reference), never inline bytes.
-const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
+/// Bound on inline `Text`: a sixteenth of the free RAM, so an app cannot
+/// balloon kernel memory through the clipboard. Larger text is refused, never
+/// stored cut.
+fn max_text_bytes() -> usize {
+    crate::memory::stats().0.saturating_mul(crate::memory::PAGE_SIZE) / 16
+}
 
 #[allow(dead_code)] // `Object` lands with loft file-copy.
 pub enum ClipData {
@@ -38,23 +39,17 @@ static CLIPBOARD: Mutex<Option<ClipData>> = Mutex::new(None);
 /// cheaply detect "did the clipboard change?" without diffing bytes.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Replace the clipboard with UTF-8 text. Truncates at `MAX_TEXT_BYTES`
-/// on a char boundary. Empty input clears the clipboard.
-pub fn set_text(bytes: &[u8]) {
-    let data = if bytes.len() > MAX_TEXT_BYTES {
-        // Back up to a UTF-8 boundary so `Text` never holds a split codepoint.
-        let mut end = MAX_TEXT_BYTES;
-        while end > 0 && (bytes[end] & 0xC0) == 0x80 { end -= 1; }
-        &bytes[..end]
-    } else {
-        bytes
-    };
-    *CLIPBOARD.lock() = if data.is_empty() {
-        None
-    } else {
-        Some(ClipData::Text(data.to_vec()))
-    };
+/// Replace the clipboard with UTF-8 text; empty input clears it. False,
+/// and the clipboard unchanged, when the text is larger than
+/// `max_text_bytes` or the memory for it is not there.
+pub fn set_text(bytes: &[u8]) -> bool {
+    if bytes.len() > max_text_bytes() { return false; }
+    let mut data = Vec::new();
+    if data.try_reserve_exact(bytes.len()).is_err() { return false; }
+    data.extend_from_slice(bytes);
+    *CLIPBOARD.lock() = if data.is_empty() { None } else { Some(ClipData::Text(data)) };
     GENERATION.fetch_add(1, Ordering::Release);
+    true
 }
 
 /// Current clipboard text, or `None` if empty / holding a non-text kind.

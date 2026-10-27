@@ -325,7 +325,7 @@ pub fn intent_wlan_manage(args: &str) {
                 return;
             }
             let ssid = rest.as_bytes();
-            let mut buf = [0u8; 63];
+            let mut buf = [0u8; 64];
             let psk = if w::known(ssid).is_some() {
                 None
             } else {

@@ -1,6 +1,6 @@
 [package]
 name = "wifi_rtl8822ce"
-version = "0.75.0"
+version = "0.76.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 
@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 npk_sys = { path = "../sdk/npk_sys" }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 
 [build-dependencies]
 nopeek_widgets = { path = "../sdk/widgets" }

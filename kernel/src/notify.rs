@@ -7,11 +7,10 @@
 //!
 //! A subscription is a (waker, pending topics) slot. It is taken the first
 //! time a fiber waits and dropped when the fiber ends (`fiber::free_waker`
-//! calls `forget`). Lock-free: `notify` may come from any core.
+//! calls `forget`). The list grows with the watchers; `notify` signals them
+//! after the lock is dropped.
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
-use crate::smp::fiber::{self, Waker, NO_WAKER};
+use crate::smp::fiber::{self, Waker};
 
 /// Windows: focus, titles, workspaces, the window list.
 pub const TOPIC_WINDOWS: u32 = 1 << 0;
@@ -34,57 +33,39 @@ pub fn path_changed(path: &str) {
     }
 }
 
-const MAX_SUBS: usize = 32;
+/// Watchers and the topics that changed for each since it last asked.
+static SUBS: spin::Mutex<alloc::vec::Vec<(Waker, u32)>> = spin::Mutex::new(alloc::vec::Vec::new());
 
-struct Sub {
-    waker: AtomicU32,
-    pending: AtomicU32,
-}
-
-static SUBS: [Sub; MAX_SUBS] = [const {
-    Sub { waker: AtomicU32::new(NO_WAKER), pending: AtomicU32::new(0) }
-}; MAX_SUBS];
-
-/// Make `w` a watcher. Idempotent; a full table means `w` is simply not
-/// woken by topics (its own deadline still ends the wait).
+/// Make `w` a watcher. Idempotent.
 pub fn subscribe(w: Waker) {
-    if SUBS.iter().any(|s| s.waker.load(Ordering::Acquire) == w) {
-        return;
-    }
-    for s in SUBS.iter() {
-        if s.waker.compare_exchange(NO_WAKER, w, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-            // A change before this point is not the watcher's to see; it
-            // reads the current state after subscribing anyway.
-            s.pending.store(0, Ordering::Release);
-            return;
-        }
+    let mut subs = SUBS.lock();
+    if !subs.iter().any(|&(s, _)| s == w) {
+        // A change before this point is not the watcher's to see; it
+        // reads the current state after subscribing anyway.
+        subs.push((w, 0));
     }
 }
 
 /// Drop `w`'s subscription (its fiber ended).
 pub fn forget(w: Waker) {
-    for s in SUBS.iter() {
-        if s.waker.load(Ordering::Acquire) == w {
-            s.pending.store(0, Ordering::Relaxed);
-            s.waker.store(NO_WAKER, Ordering::Release);
-        }
-    }
+    SUBS.lock().retain(|&(s, _)| s != w);
 }
 
 /// Take the topics that changed for `w` since it last asked. 0 = none.
 pub fn take(w: Waker) -> u32 {
-    SUBS.iter()
-        .find(|s| s.waker.load(Ordering::Acquire) == w)
-        .map_or(0, |s| s.pending.swap(0, Ordering::AcqRel))
+    SUBS.lock().iter_mut()
+        .find(|(s, _)| *s == w)
+        .map_or(0, |(_, p)| core::mem::take(p))
 }
 
 /// `topics` changed: mark them for every watcher and wake it.
 pub fn notify(topics: u32) {
-    for s in SUBS.iter() {
-        let w = s.waker.load(Ordering::Acquire);
-        if w != NO_WAKER {
-            s.pending.fetch_or(topics, Ordering::AcqRel);
-            fiber::signal(w, fiber::SIG_STATE);
-        }
+    let woken: alloc::vec::Vec<Waker> = {
+        let mut subs = SUBS.lock();
+        for (_, p) in subs.iter_mut() { *p |= topics; }
+        subs.iter().map(|&(w, _)| w).collect()
+    };
+    for w in woken {
+        fiber::signal(w, fiber::SIG_STATE);
     }
 }

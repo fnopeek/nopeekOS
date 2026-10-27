@@ -22,6 +22,8 @@
 //!    into a drag when the finger lands again within the window. This needs
 //!    a timer the caller must drive (`tick`), or the button stays down.
 
+use alloc::vec::Vec;
+
 /// A finger on the pad: ID, position.
 pub type Contact = (i32, i32, i32);
 
@@ -111,8 +113,11 @@ pub struct Tracker {
     pinned: bool,
     pin_dx: i32,
     pin_dy: i32,
-    frame: [Contact; 8],
-    frame_n: usize,
+    /// Fingers of the current frame, at most `max_contacts`.
+    frame: Vec<Contact>,
+    /// The device's contact limit; fingers past it are dropped, as
+    /// hid-multitouch drops a contact without a free slot (`mt_process_slot`).
+    max_contacts: usize,
     expected: usize,
     collected: usize,
     in_frame: bool,
@@ -128,7 +133,7 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    pub fn new(step: i32, hstep: i32, tap_move: i32, pin_move: i32) -> Self {
+    pub fn new(step: i32, hstep: i32, tap_move: i32, pin_move: i32, max_contacts: usize) -> Self {
         Tracker {
             step: step.max(1),
             hstep: hstep.max(1),
@@ -143,8 +148,8 @@ impl Tracker {
             pinned: false,
             pin_dx: 0,
             pin_dy: 0,
-            frame: [(0, 0, 0); 8],
-            frame_n: 0,
+            frame: Vec::with_capacity(max_contacts.max(1)),
+            max_contacts: max_contacts.max(1),
             expected: 0,
             collected: 0,
             in_frame: false,
@@ -162,7 +167,7 @@ impl Tracker {
 
     /// Fingers of the last complete frame, for logging.
     pub fn frame(&self) -> &[Contact] {
-        &self.frame[..self.frame_n]
+        &self.frame
     }
 
     /// The button a tap is currently holding down. 0 = none.
@@ -216,14 +221,13 @@ impl Tracker {
         self.expire(now_ms);
         if cc > 0 || !self.in_frame {
             self.expected = if cc > 0 { cc as usize } else { 0 };
-            self.frame_n = 0;
+            self.frame.clear();
             self.collected = 0;
             self.in_frame = true;
         }
         for c in present {
-            if self.frame_n < self.frame.len() {
-                self.frame[self.frame_n] = *c;
-                self.frame_n += 1;
+            if self.frame.len() < self.max_contacts {
+                self.frame.push(*c);
             }
         }
         self.collected += slots;
@@ -249,7 +253,7 @@ impl Tracker {
         }
         self.btn_was = btn;
 
-        let n = self.frame_n;
+        let n = self.frame.len();
         if n == 0 {
             // All fingers lifted: only now does the gesture end, and only
             // here is it known whether it was a tap.
@@ -396,7 +400,7 @@ mod tests {
 
     /// A tracker with the dimensions most tests use: detent 50, tap travel
     /// 40, pin travel 80.
-    fn tr() -> Tracker { Tracker::new(50, 50, 40, 80) }
+    fn tr() -> Tracker { Tracker::new(50, 50, 40, 80, 10) }
 
     /// A device with one slot: two fingers are two reports, and the contact
     /// count is only in the first.
@@ -421,6 +425,18 @@ mod tests {
             }
             o => panic!("{o:?}"),
         }
+    }
+
+    /// The frame holds as many fingers as the device tracks, and no more.
+    #[test]
+    fn a_frame_holds_the_device_contact_limit() {
+        let ten: Vec<Contact> = (0..10).map(|i| (i, 100 * i, 200)).collect();
+        let mut t = Tracker::new(50, 50, 40, 80, 10);
+        assert!(matches!(t.feed(10, &ten, 10, 0, false), Out::Frame { n: 10, .. }));
+        assert_eq!(t.frame().len(), 10);
+
+        let mut t = Tracker::new(50, 50, 40, 80, 5);
+        assert!(matches!(t.feed(10, &ten, 10, 0, false), Out::Frame { n: 5, .. }));
     }
 
     #[test]
@@ -697,7 +713,7 @@ mod tests {
     /// a step derived from the height would be too fine horizontally.
     #[test]
     fn the_horizontal_step_is_its_own() {
-        let mut t = Tracker::new(50, 100, 40, 80);
+        let mut t = Tracker::new(50, 100, 40, 80, 10);
         two_finger(&mut t, (0, 100, 200), (1, 400, 210));
         // 50 across is below the horizontal step: no detent yet.
         let out = two_finger(&mut t, (0, 150, 200), (1, 450, 210));

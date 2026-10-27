@@ -28,6 +28,8 @@ pub const USAGE_CONTACT_ID: u16 = 0x51;
 /// multi-finger data and behaves like a mouse.
 pub const USAGE_INPUT_MODE: u16 = 0x52;
 pub const USAGE_CONTACT_COUNT: u16 = 0x54;
+/// "Contact Count Maximum", a feature: how many fingers the device tracks.
+pub const USAGE_CONTACT_MAX: u16 = 0x55;
 
 /// Which report type a field belongs to.
 ///

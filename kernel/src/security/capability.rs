@@ -284,9 +284,9 @@ pub fn release_module_cap(cap: &CapId) {
 //   - never covers `sys/wasm/` — that check runs before this one and a
 //     grant must not be a way around it
 //
-// Bounded array rather than a growing map: a runaway app must not be
-// able to make the kernel allocate. Oldest entry is evicted when full,
-// which at worst costs a user one re-pick.
+// Bounded per capability, not per system: one app's grants never push out
+// another's. Past the bound that app's oldest grant goes, which at worst
+// costs its user one re-pick; all of them go when the instance ends.
 
 const MAX_PATH_GRANTS: usize = 64;
 
@@ -307,7 +307,9 @@ pub fn grant_path(cap: CapId, path: &str, rights: Rights) {
         e.rights |= rights;
         return;
     }
-    if g.len() >= MAX_PATH_GRANTS { g.remove(0); }
+    if g.iter().filter(|e| e.cap == cap).count() >= MAX_PATH_GRANTS {
+        if let Some(i) = g.iter().position(|e| e.cap == cap) { g.remove(i); }
+    }
     g.push(PathGrant { cap, path: alloc::string::String::from(path), rights });
 }
 

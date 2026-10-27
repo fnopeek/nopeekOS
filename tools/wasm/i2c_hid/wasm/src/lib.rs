@@ -223,7 +223,9 @@ pub extern "C" fn _start() {
     // 5 ms interval: a touchpad reports at about 100-200 Hz, and
     // `npk_sleep` yields to the scheduler in between, costing neither CPU
     // nor fuel.
-    let mut buf = [0u8; 64];
+    // `i2c_hid_get_input` reads `wMaxInputLength` bytes; one buffer fits
+    // the largest of the devices.
+    let mut buf = alloc::vec![0u8; live.iter().map(|l| l.desc.max_input_length as usize).max().unwrap_or(0)];
     // Three minutes of statistics, then quiet.
     let mut stat_lines_left = 18u32;
     let mut next_stat_us = { let t = npk_sys::now_us(); if t < 0 { 0 } else { t as u64 } }
@@ -255,7 +257,7 @@ pub extern "C" fn _start() {
         for l in live.iter_mut() {
             // Ask the pin first, then touch the bus.
             //
-            // A read fetches `wMaxInputLength` bytes, up to 64, i.e. about
+            // A read fetches `wMaxInputLength` bytes, for 64 bytes about
             // 1.4 ms on the bus at 400 kHz. The pin costs one register read.
             let (poll_now, gate_said_no) = gate_check(l);
             if !poll_now {
@@ -643,9 +645,9 @@ struct Live {
 
 /// The pin that says whether a report is pending at all.
 ///
-/// A read is not cheap: it fetches `wMaxInputLength` bytes (up to 64 here,
-/// capped by the buffer), about 1.4 ms on the bus at 400 kHz, two hundred
-/// times a second per device.
+/// A read is not cheap: it fetches `wMaxInputLength` bytes, for 64 bytes
+/// about 1.4 ms on the bus at 400 kHz, two hundred times a second per
+/// device.
 ///
 /// Linux never reads blind: `i2c_hid_get_input` is called only from
 /// `i2c_hid_irq`. Without the interrupt, the level stays asserted until the
@@ -864,6 +866,22 @@ fn talk_to_device(
     }
     logln(&alloc::format!("[i2c-hid]   {} decoder(s), ready", decoders.len()));
 
+    // Every slot of one touchpad report is a finger the device may send.
+    let slots = decoders.iter().find_map(|d| match &d.mode {
+        Mode::Touchpad { contacts, .. } => Some(contacts.len()),
+        Mode::Mouse { .. } => None,
+    });
+    let max_contacts = match slots {
+        Some(slots) => {
+            let max = contact_max(bus, dw, addr, &desc, &map)
+                .unwrap_or(MT_DEFAULT_MAXCONTACT)
+                .max(slots);
+            logln(&alloc::format!("[i2c-hid]   up to {max} contact(s)"));
+            max
+        }
+        None => 1,
+    };
+
     Some(Live {
         bus: HostBus { handle: bus.handle },
         dw: i2c_hid_core::dw_i2c::Dw { ..*dw },
@@ -881,7 +899,8 @@ fn talk_to_device(
         other_seen: 0,
         touch_logged: 0,
         raw_logged: 0, scroll_logged: 0, tap_logged: 0,
-        track: i2c_hid_core::gesture::Tracker::new(scroll_step, hscroll_step, tap_move, pin_move),
+        track: i2c_hid_core::gesture::Tracker::new(
+            scroll_step, hscroll_step, tap_move, pin_move, max_contacts),
         have_ref: false, rx: 0, ry: 0,
         last_buttons: 0, hw_buttons: 0,
         gate: Gate::Blind,
@@ -889,6 +908,47 @@ fn talk_to_device(
         polls: 0, datas: 0, empties: 0, junk: 0, errs: 0, skips: 0, capped: 0,
         err_logged: 0,
     })
+}
+
+/// hid-multitouch.c `MT_DEFAULT_MAXCONTACT`: the limit of a device that
+/// does not state one.
+const MT_DEFAULT_MAXCONTACT: usize = 10;
+/// hid-multitouch.c `MT_MAX_MAXCONTACT`: the largest logical maximum taken
+/// as the limit.
+const MT_MAX_MAXCONTACT: i32 = 250;
+
+/// hid-multitouch `mt_feature_mapping`, `HID_DG_CONTACTMAX`: the Contact
+/// Count Maximum feature as the device reports it (`mt_get_feature`), else
+/// its logical maximum. None when the device has no such feature.
+fn contact_max(
+    bus: &mut HostBus,
+    dw: &i2c_hid_core::dw_i2c::Dw,
+    addr: u16,
+    desc: &i2c_hid_core::hid::HidDesc,
+    map: &i2c_hid_core::report::ReportMap,
+) -> Option<usize> {
+    use i2c_hid_core::{hid, report};
+    let f = *map.find_feature(report::PAGE_DIGITIZER, report::USAGE_CONTACT_MAX)?;
+    let len = map.report_bytes(report::Kind::Feature, f.report_id);
+    let v = match hid::get_report(bus, dw, addr, desc, hid::REPORT_TYPE_FEATURE, f.report_id, len) {
+        Ok(Some(data)) if !data.is_empty() => report::extract(&data, &f),
+        Ok(Some(_)) => 0,
+        Ok(None) => {
+            logln("[i2c-hid]   contact maximum: the device answered with another report");
+            0
+        }
+        Err(e) => {
+            logln(&alloc::format!("[i2c-hid]   contact maximum: GET_REPORT failed: {e:?}"));
+            0
+        }
+    };
+    if v > 0 {
+        Some(v as usize)
+    } else if f.logical_max > 0 && f.logical_max <= MT_MAX_MAXCONTACT {
+        Some(f.logical_max as usize)
+    } else {
+        None
+    }
 }
 
 /// Outcome of a single read attempt.

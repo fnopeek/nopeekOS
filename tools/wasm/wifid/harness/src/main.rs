@@ -56,6 +56,21 @@ fn main() {
         "f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e",
     );
 
+    // 64 hex digits are the PMK itself; anything else goes through PBKDF2.
+    all &= check(
+        "pmk_from_key(64 hex)",
+        &wifid_core::pmk_from_key(
+            b"F42C6FC52DF0EBEF9EBB4B90B38A5F902E83FE1B135A70E23AED762E9710A12E",
+            b"other",
+        ),
+        "f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e",
+    );
+    all &= check(
+        "pmk_from_key(passphrase)",
+        &wifid_core::pmk_from_key(b"password", b"IEEE"),
+        "f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e",
+    );
+
     // PTK derivation smoke test (Jouni Malinen's well-known 4-way vector):
     // PMK all-zero variant is deterministic; assert it runs and is stable.
     let pmk = wpa2_pmk(b"password", b"IEEE");

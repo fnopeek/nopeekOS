@@ -118,6 +118,7 @@ pub fn fetch_descriptor(
 
 /// Opcodes of the HID-over-I2C protocol (i2c-hid-core.c).
 pub const OPCODE_RESET: u8 = 0x01;
+pub const OPCODE_GET_REPORT: u8 = 0x02;
 pub const OPCODE_SET_REPORT: u8 = 0x03;
 pub const OPCODE_SET_POWER: u8 = 0x08;
 pub const REPORT_TYPE_FEATURE: u8 = 0x03;
@@ -200,6 +201,43 @@ pub fn set_report(
 
     let mut msgs = [Msg::Write(&cmd)];
     dw_i2c::xfer(bus, dw, addr, &mut msgs)
+}
+
+/// `i2c_hid_get_report` — a report read from the device on request.
+///
+/// `len` is the report's size without its ID byte. Returns the report data
+/// after the ID byte (empty for an empty answer), or `None` when the device
+/// answered with another report ID.
+pub fn get_report(
+    bus: &mut dyn Bus, dw: &dw_i2c::Dw, addr: u16, d: &HidDesc,
+    report_type: u8, report_id: u8, len: usize,
+) -> Result<Option<Vec<u8>>, Error> {
+    let mut cmd: Vec<u8> = vec![
+        (d.command_register & 0xFF) as u8,
+        (d.command_register >> 8) as u8,
+    ];
+    encode_command(&mut cmd, OPCODE_GET_REPORT, report_type, report_id);
+    cmd.push((d.data_register & 0xFF) as u8);
+    cmd.push((d.data_register >> 8) as u8);
+
+    // The device puts the length first; a numbered report then starts with
+    // its ID (`i2c_hid_get_raw_report`).
+    let id_len = (report_id != 0) as usize;
+    let mut raw = vec![0u8; 2 + id_len + len];
+    {
+        let mut msgs = [Msg::Write(&cmd), Msg::Read(&mut raw)];
+        dw_i2c::xfer(bus, dw, addr, &mut msgs)?;
+    }
+    let ret_count = (raw[0] as usize) | ((raw[1] as usize) << 8);
+    if ret_count <= 2 {
+        return Ok(Some(Vec::new()));
+    }
+    let n = (raw.len() - 2).min(ret_count - 2);
+    let body = &raw[2..2 + n];
+    if report_id != 0 && body.first() != Some(&report_id) {
+        return Ok(None);
+    }
+    Ok(Some(body[id_len.min(body.len())..].to_vec()))
 }
 
 /// `i2c_hid_start_hwreset` + `i2c_hid_finish_hwreset`.

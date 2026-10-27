@@ -177,6 +177,32 @@ pub fn wpa2_pmk(passphrase: &[u8], ssid: &[u8]) -> [u8; 32] {
     pmk
 }
 
+/// The PMK for a stored key: 64 hex digits are the PSK itself (IEEE
+/// 802.11i M.4; wpa_supplicant `psk=` without quotes), anything else is a
+/// passphrase for [`wpa2_pmk`].
+pub fn pmk_from_key(key: &[u8], ssid: &[u8]) -> [u8; 32] {
+    let nib = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    };
+    if key.len() == 64 {
+        let mut pmk = [0u8; 32];
+        let mut ok = true;
+        for (i, b) in pmk.iter_mut().enumerate() {
+            match (nib(key[2 * i]), nib(key[2 * i + 1])) {
+                (Some(h), Some(l)) => *b = h << 4 | l,
+                _ => ok = false,
+            }
+        }
+        if ok {
+            return pmk;
+        }
+    }
+    wpa2_pmk(key, ssid)
+}
+
 // ── PRF-SHA1 (IEEE 802.11i) → PTK ─────────────────────────────────────────
 // PTK = PRF(PMK, "Pairwise key expansion",
 //          min(AA,SA) || max(AA,SA) || min(ANonce,SNonce) || max(ANonce,SNonce))

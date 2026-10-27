@@ -651,13 +651,10 @@ fn alloc_port() -> u16 {
 /// once here and hold the SYN back (`arp_pending`) until `tick_connections`
 /// sees the answer. Sending it to broadcast meanwhile is what most gateways
 /// drop.
-pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
-    connect_start_as(KERNEL, remote_ip, remote_port)
-}
-
-/// `connect_start` on behalf of `owner`. A module's handle is only an index,
-/// so its slot is never reused until the module released it (`close`, or
-/// its exit), and one module cannot take the table.
+///
+/// On behalf of `owner`. A module's handle is only an index, so its slot is
+/// never reused until the module released it (`close`, or its exit), and one
+/// module cannot take the table.
 pub fn connect_start_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
     let local_port = alloc_port();
     let iss = generate_isn(arp::our_ip(), remote_ip, local_port, remote_port);
@@ -791,7 +788,12 @@ pub fn connect_status(handle: usize) -> i32 {
 /// fibers so the NIC keeps being drained while we wait. A module must use
 /// `connect_start` + `connect_status` instead; see the note there.
 pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
-    let handle = connect_start(remote_ip, remote_port)?;
+    connect_as(KERNEL, remote_ip, remote_port)
+}
+
+/// `connect` on behalf of `owner` (see `connect_start_as`).
+pub fn connect_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
+    let handle = connect_start_as(owner, remote_ip, remote_port)?;
 
     // Wait for ESTABLISHED (blocking poll)
     let t0 = crate::interrupts::ticks();

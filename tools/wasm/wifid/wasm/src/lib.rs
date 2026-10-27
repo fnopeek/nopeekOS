@@ -7,18 +7,25 @@
 //! and group-key handshakes with the PMK of that network. Users ask through
 //! the kernel (`wlan` intent, deck); wifid publishes its state back.
 //!
-//! No heap: networks, scan list and buffers are fixed arrays.
+//! The known networks and the scan list grow with what the kernel and the
+//! driver deliver, on a growing heap.
 
 #![no_std]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use wifid_core::eapol::{Step, Supplicant};
-use wifid_core::wpa2_pmk;
+use wifid_core::pmk_from_key;
 
 // Capabilities: NETCTL (0x80, the control channel and the known networks) +
 // READ (0x01, sys/config/wifi) + WRITE (0x02, the log and sys/config/wifid).
 #[unsafe(link_section = ".npk.caps")]
 #[used]
 static NPK_CAPS: [u8; 1] = [0x83];
+
+#[global_allocator]
+static ALLOC: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -147,15 +154,10 @@ const MAX_AUTH_FAILURES: u32 = 3;
 const PREFER_5G_DBM: i8 = -70;
 
 const SSID_MAX: usize = 32;
-const PSK_MAX: usize = 63;
-const MAX_KNOWN: usize = 32;
-const MAX_APS: usize = 48;
-/// The longest `npk_wifi_known` answer for the networks wifid keeps: per
-/// network a length byte, the SSID, a length byte and a record of at most
-/// 255 bytes. wifid has no heap, so the buffer is this bound.
-const KNOWN_WIRE_MAX: usize = MAX_KNOWN * (1 + SSID_MAX + 1 + u8::MAX as usize);
-/// A queue message is at most this long (`WIFI_MSG_MAX` in the kernel).
-const WIFI_MSG_MAX: usize = 2048;
+/// A passphrase is 8 to 63 characters, a raw PSK 64 hex digits.
+const PSK_MAX: usize = 64;
+/// `npk_wifi_publish` takes at most this much (`STATUS_MAX` in the kernel).
+const STATUS_MAX: usize = 64 * 1024;
 
 #[derive(Clone, Copy)]
 struct Ssid {
@@ -237,10 +239,8 @@ enum BandPref {
 }
 
 struct Mgr {
-    known: [Known; MAX_KNOWN],
-    n_known: usize,
-    aps: [Ap; MAX_APS],
-    n_aps: usize,
+    known: Vec<Known>,
+    aps: Vec<Ap>,
     have_scan: bool,
     state: State,
     /// The network being joined or joined.
@@ -309,10 +309,8 @@ fn send_set_key(group: bool, key_idx: u8, key: &[u8], rsc: &[u8; 6]) {
 impl Mgr {
     fn new() -> Mgr {
         Mgr {
-            known: [Known { ssid: Ssid::EMPTY, auto: false, prio: 0, band: 0, psk: [0; PSK_MAX], psk_len: 0 }; MAX_KNOWN],
-            n_known: 0,
-            aps: [Ap { bssid: [0; 6], rssi: -128, channel: 0, security: 0, ssid: Ssid::EMPTY }; MAX_APS],
-            n_aps: 0,
+            known: Vec::new(),
+            aps: Vec::new(),
             have_scan: false,
             state: State::Idle,
             target: Ssid::EMPTY,
@@ -337,30 +335,34 @@ impl Mgr {
 
     /// Re-read the known networks: `[ssid_len][ssid][rec_len][record]`.
     fn load_known(&mut self) {
-        let mut buf = [0u8; KNOWN_WIRE_MAX];
-        let n = npk_sys::wifi_known(&mut buf);
         // Wipe the old passwords first; the list may have shrunk.
         for k in self.known.iter_mut() {
             k.psk = [0; PSK_MAX];
         }
-        self.n_known = 0;
-        if n < -1 {
-            log("[wifid] more known networks than wifid keeps\n");
-            return;
-        }
-        if n < 0 {
+        self.known = Vec::new();
+        // A buffer that is too small is not written, so only the final one
+        // ever holds passwords; it is wiped below.
+        let Some(mut buf) = npk_sys::read_all(npk_sys::wifi_known) else {
             log("[wifid] the known networks could not be read\n");
             return;
-        }
-        let b = &buf[..n as usize];
-        let mut i = 0;
-        while i < b.len() && self.n_known < MAX_KNOWN {
-            let sl = b[i] as usize;
-            let Some(ssid) = b.get(i + 1..i + 1 + sl).and_then(Ssid::from) else { break };
-            i += 1 + sl;
-            let Some(&rl) = b.get(i) else { break };
-            let Some(rec) = b.get(i + 1..i + 1 + rl as usize) else { break };
-            i += 1 + rl as usize;
+        };
+        let entries = || {
+            let b = &buf[..];
+            let mut i = 0;
+            core::iter::from_fn(move || {
+                let sl = *b.get(i)? as usize;
+                let ssid = b.get(i + 1..i + 1 + sl)?;
+                i += 1 + sl;
+                let rl = *b.get(i)? as usize;
+                let rec = b.get(i + 1..i + 1 + rl)?;
+                i += 1 + rl;
+                Some((ssid, rec))
+            })
+        };
+        // Sized once, so growing never leaves a copy of a password behind.
+        let mut known = Vec::with_capacity(entries().count());
+        for (ssid, rec) in entries() {
+            let Some(ssid) = Ssid::from(ssid) else { continue };
             // v1: [0x01][flags][prio][band][psk_len][psk]
             if rec.len() < 5 || rec[0] != 0x01 {
                 continue;
@@ -370,28 +372,24 @@ impl Mgr {
             if pl > PSK_MAX {
                 continue;
             }
-            let k = &mut self.known[self.n_known];
-            k.ssid = ssid;
-            k.auto = rec[1] & 1 != 0;
-            k.prio = rec[2] as i8;
-            k.band = rec[3];
+            let mut k = Known { ssid, auto: rec[1] & 1 != 0, prio: rec[2] as i8, band: rec[3], psk: [0; PSK_MAX], psk_len: pl as u8 };
             k.psk[..pl].copy_from_slice(psk);
-            k.psk_len = pl as u8;
-            self.n_known += 1;
+            known.push(k);
         }
         buf.fill(0);
+        self.known = known;
         log("[wifid] known networks: ");
-        log_num(self.n_known as u32);
+        log_num(self.known.len() as u32);
         log("\n");
     }
 
     fn known(&self, s: &Ssid) -> Option<&Known> {
-        self.known[..self.n_known].iter().find(|k| k.ssid == *s)
+        self.known.iter().find(|k| k.ssid == *s)
     }
 
     fn read_default_band(&mut self) {
-        let mut buf = [0u8; 512];
-        self.default_band = match read_cfg(b"sys/config/wifi", &mut buf).and_then(|c| cfg_get(c, b"band")) {
+        let cfg = read_cfg(b"sys/config/wifi");
+        self.default_band = match cfg.as_deref().and_then(|c| cfg_get(c, b"band")) {
             Some(b"5") => BandPref::Only5,
             Some(b"2.4") | Some(b"2,4") => BandPref::Only24,
             _ => BandPref::Auto,
@@ -411,7 +409,7 @@ impl Mgr {
         let mut best_all: Option<Ap> = None;
         let mut best_5g: Option<Ap> = None;
         let mut best_24: Option<Ap> = None;
-        for a in self.aps[..self.n_aps].iter().filter(|a| a.ssid == *ssid) {
+        for a in self.aps.iter().filter(|a| a.ssid == *ssid) {
             if best_all.is_none_or(|b| a.rssi > b.rssi) {
                 best_all = Some(*a);
             }
@@ -436,7 +434,7 @@ impl Mgr {
     /// priority first, then the stronger signal.
     fn pick_auto(&self) -> Option<Ssid> {
         let mut best: Option<(i8, i8, Ssid)> = None;
-        for k in self.known[..self.n_known].iter().filter(|k| k.auto) {
+        for k in self.known.iter().filter(|k| k.auto) {
             let Some(c) = self.pick_cell(&k.ssid, k.band) else { continue };
             if !matches!(c.security, SEC_WPA2_PSK | SEC_WPA2_WPA3) {
                 continue;
@@ -465,7 +463,7 @@ impl Mgr {
         // PBKDF2 is the slow part (4096 rounds); a reconnect to the same
         // network keeps it.
         if self.target != ssid || self.pmk.is_none() {
-            self.pmk = Some(wpa2_pmk(&k.psk[..k.psk_len as usize], ssid.get()));
+            self.pmk = Some(pmk_from_key(&k.psk[..k.psk_len as usize], ssid.get()));
         }
         self.target = ssid;
         self.bssid = bssid;
@@ -499,7 +497,7 @@ impl Mgr {
                 self.error = "this network's security is not supported (WPA2-PSK only)";
                 self.idle();
             }
-            None if self.aps[..self.n_aps].iter().any(|a| a.ssid == ssid) => {
+            None if self.aps.iter().any(|a| a.ssid == ssid) => {
                 self.error = "this network is not on the band set for it";
                 self.idle();
             }
@@ -530,8 +528,8 @@ impl Mgr {
 
     /// The fast path: the last network, straight to its cell.
     fn try_last(&mut self) -> bool {
-        let mut buf = [0u8; 256];
-        let Some(c) = read_cfg(b"sys/config/wifid", &mut buf) else { return false };
+        let Some(c) = read_cfg(b"sys/config/wifid") else { return false };
+        let c = &c[..];
         let (Some(b), Some(ch), Some(s)) = (cfg_get(c, b"bssid"), cfg_get(c, b"channel"), cfg_get(c, b"ssid")) else {
             return false;
         };
@@ -698,32 +696,29 @@ impl Mgr {
         }
     }
 
-    /// SCAN_RESULT: [op][count] then per AP bssid[6] rssi ch sec ssid_len ssid.
+    /// SCAN_RESULT: [op][count u16] then per AP bssid[6] rssi ch sec
+    /// ssid_len ssid.
     fn on_scan(&mut self, ev: &[u8]) {
         self.scanning = false;
         self.have_scan = true;
-        self.n_aps = 0;
-        let count = ev.get(1).copied().unwrap_or(0) as usize;
-        let mut i = 2;
+        self.aps.clear();
+        let count = match ev.get(1..3) {
+            Some(c) => u16::from_le_bytes([c[0], c[1]]) as usize,
+            None => 0,
+        };
+        let mut i = 3;
         for _ in 0..count {
             let Some(h) = ev.get(i..i + 10) else { break };
             let sl = h[9] as usize;
             let Some(s) = ev.get(i + 10..i + 10 + sl) else { break };
             i += 10 + sl;
             let Some(ssid) = Ssid::from(s) else { continue }; // hidden
-            if self.n_aps == MAX_APS {
-                break;
-            }
-            let a = &mut self.aps[self.n_aps];
-            a.bssid.copy_from_slice(&h[0..6]);
-            a.rssi = h[6] as i8;
-            a.channel = h[7];
-            a.security = h[8];
-            a.ssid = ssid;
-            self.n_aps += 1;
+            let mut bssid = [0u8; 6];
+            bssid.copy_from_slice(&h[0..6]);
+            self.aps.push(Ap { bssid, rssi: h[6] as i8, channel: h[7], security: h[8], ssid });
         }
         log("[wifid] scan: ");
-        log_num(self.n_aps as u32);
+        log_num(self.aps.len() as u32);
         log(" cells\n");
         if let Some(s) = self.pending.take() {
             self.state = if self.state == State::Disconnected { State::Idle } else { self.state };
@@ -868,10 +863,11 @@ impl Mgr {
         }
     }
 
-    /// The state text (`wlan` and the deck read it).
+    /// The state text (`wlan` and the deck read it). Lines that would pass
+    /// the kernel's `STATUS_MAX` are left out whole; networks in range come
+    /// strongest first, so the weakest are the ones left out.
     fn publish(&self) {
-        let mut buf = [0u8; 4096];
-        let mut w = Writer { b: &mut buf, n: 0 };
+        let mut w = Writer { b: Vec::new(), kept: 0 };
         w.s(b"state ");
         w.s(if self.driver_up { self.state.name().as_bytes() } else { b"no-driver" });
         if self.scanning {
@@ -890,7 +886,7 @@ impl Mgr {
                 w.i8(self.rssi);
                 w.s(b"\n");
             }
-            let sec = self.aps[..self.n_aps].iter().find(|a| a.ssid == self.target).map(|a| a.security);
+            let sec = self.aps.iter().find(|a| a.ssid == self.target).map(|a| a.security);
             if let Some(sec) = sec {
                 w.s(b"security ");
                 w.s(dec_u8(sec, &mut d));
@@ -902,25 +898,29 @@ impl Mgr {
             w.s(self.error.as_bytes());
             w.s(b"\n");
         }
+        w.line_end();
+        // Known networks before the networks in range, so a cut drops a
+        // weak stranger rather than a saved network.
+        for k in &self.known {
+            w.s(b"known ");
+            w.s(if k.auto { b"1 " } else { b"0 " });
+            w.i8(k.prio);
+            w.s(b" ");
+            w.esc(k.ssid.get());
+            w.s(b"\n");
+            if !w.line_end() {
+                break;
+            }
+        }
         // Networks in range, one line each (best cell), strongest first.
-        let mut shown = [false; MAX_APS];
-        loop {
-            let mut best: Option<usize> = None;
-            for i in 0..self.n_aps {
-                if shown[i] {
-                    continue;
-                }
-                if best.is_none_or(|b| self.aps[i].rssi > self.aps[b].rssi) {
-                    best = Some(i);
-                }
+        let mut order: Vec<&Ap> = self.aps.iter().collect();
+        order.sort_by(|a, b| b.rssi.cmp(&a.rssi));
+        let mut shown: Vec<&Ssid> = Vec::new();
+        for a in order {
+            if shown.contains(&&a.ssid) {
+                continue;
             }
-            let Some(i) = best else { break };
-            let a = self.aps[i];
-            for j in 0..self.n_aps {
-                if self.aps[j].ssid == a.ssid {
-                    shown[j] = true;
-                }
-            }
+            shown.push(&a.ssid);
             w.s(b"ap ");
             w.i8(a.rssi);
             w.s(b" ");
@@ -931,17 +931,11 @@ impl Mgr {
             w.s(if self.known(&a.ssid).is_some() { b" 1 " } else { b" 0 " });
             w.esc(a.ssid.get());
             w.s(b"\n");
+            if !w.line_end() {
+                break;
+            }
         }
-        for k in &self.known[..self.n_known] {
-            w.s(b"known ");
-            w.s(if k.auto { b"1 " } else { b"0 " });
-            w.i8(k.prio);
-            w.s(b" ");
-            w.esc(k.ssid.get());
-            w.s(b"\n");
-        }
-        let n = w.n;
-        npk_sys::wifi_publish(&buf[..n]);
+        npk_sys::wifi_publish(&w.b[..w.kept]);
         self.publish_item();
     }
 
@@ -972,16 +966,26 @@ impl Mgr {
     }
 }
 
-struct Writer<'a> {
-    b: &'a mut [u8],
-    n: usize,
+struct Writer {
+    b: Vec<u8>,
+    /// Length of the text up to the last line that fits `STATUS_MAX`.
+    kept: usize,
 }
 
-impl Writer<'_> {
+impl Writer {
     fn s(&mut self, s: &[u8]) {
-        let k = s.len().min(self.b.len() - self.n);
-        self.b[self.n..self.n + k].copy_from_slice(&s[..k]);
-        self.n += k;
+        self.b.extend_from_slice(s);
+    }
+    /// Closes the lines written since the last call: kept if the text still
+    /// fits `STATUS_MAX`, else dropped. Returns whether they were kept.
+    fn line_end(&mut self) -> bool {
+        if self.b.len() <= STATUS_MAX {
+            self.kept = self.b.len();
+            true
+        } else {
+            self.b.truncate(self.kept);
+            false
+        }
     }
     fn i8(&mut self, v: i8) {
         if v < 0 {
@@ -1069,25 +1073,15 @@ pub extern "C" fn _start() {
     m.publish();
     log_flush();
 
-    let mut buf = [0u8; WIFI_MSG_MAX];
+    let mut buf = Vec::new();
     loop {
         let mut changed = false;
-        loop {
-            let n = npk_sys::wifi_poll_request(&mut buf);
-            if n <= 0 {
-                break;
-            }
-            let r = buf;
-            m.on_request(&r[..n as usize]);
+        while let Some(n) = poll(&mut buf, npk_sys::wifi_poll_request) {
+            m.on_request(&buf[..n]);
             changed = true;
         }
-        loop {
-            let n = npk_sys::wifi_poll_event(&mut buf);
-            if n <= 0 {
-                break;
-            }
-            let ev = buf;
-            m.on_event(&ev[..n as usize]);
+        while let Some(n) = poll(&mut buf, npk_sys::wifi_poll_event) {
+            m.on_event(&buf[..n]);
             changed = true;
         }
         let before = m.state;
@@ -1134,13 +1128,19 @@ fn cfg_get<'a>(text: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     None
 }
 
-fn read_cfg<'a>(name: &[u8], buf: &'a mut [u8]) -> Option<&'a [u8]> {
-    let n = npk_sys::fetch(name, buf);
-    if n < -1 {
-        log("[wifid] a config file is too long, ignored\n");
+fn read_cfg(name: &[u8]) -> Option<Vec<u8>> {
+    npk_sys::read_all(|b| npk_sys::fetch(name, b)).filter(|c| !c.is_empty())
+}
+
+/// The next queued message into `buf`, grown to its size; None when the
+/// queue is empty or the call is refused.
+fn poll(buf: &mut Vec<u8>, call: fn(&mut [u8]) -> i32) -> Option<usize> {
+    loop {
+        match npk_sys::fill(call(buf)) {
+            npk_sys::Fill::Len(0) | npk_sys::Fill::Fail => return None,
+            npk_sys::Fill::Len(n) => return Some(n),
+            npk_sys::Fill::Need(n) if n > buf.len() => buf.resize(n, 0),
+            npk_sys::Fill::Need(_) => return None,
+        }
     }
-    if n <= 0 {
-        return None;
-    }
-    Some(&buf[..n as usize])
 }

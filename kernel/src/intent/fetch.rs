@@ -41,12 +41,14 @@ const MAX_JOBS_PER_OWNER: usize = 4;
 /// Same bound `npk_http_request_many` applies to one batch.
 const MAX_URLS: usize = 64;
 
-/// Bytes all pending answers may reserve at once. Reserved at `begin` from
-/// what the caller asked for (not what arrives — that is unknown until it
-/// does), released at `take` or `cancel`. Room for about three concurrent
-/// browser page loads; beyond that the request is refused rather than
-/// letting callers grow the kernel heap.
-const MAX_RESERVED_BYTES: usize = 64 * 1024 * 1024;
+/// Bytes pending answers may reserve, as a share of free RAM: all callers
+/// together half of it, one caller a quarter (Linux charges such memory to
+/// the owner's memcg). Reserved at `begin` from what the caller asked for
+/// and its request body, released at `take` or `cancel`.
+fn reserve_limits() -> (usize, usize) {
+    let free = crate::memory::stats().0.saturating_mul(crate::memory::PAGE_SIZE);
+    (free / 2, free / 4)
+}
 
 /// How many fetch workers may run at once.
 ///
@@ -154,7 +156,8 @@ pub(crate) fn begin_one(
     tls: bool,
     from_reach: Option<http::Reach>,
 ) -> Result<i32, &'static str> {
-    submit(owner, caller_core, cap,
+    let held = cap.saturating_add(body.len());
+    submit(owner, caller_core, held,
            Work::One { method, host, path, headers, body, cap, tls, from_reach })
 }
 
@@ -202,7 +205,14 @@ fn submit(
         if q.slots.iter().flatten().filter(|j| j.owner == owner).count() >= MAX_JOBS_PER_OWNER {
             return Err(BUSY[0]);
         }
-        if q.reserved + cap > MAX_RESERVED_BYTES {
+        let (total, per_owner) = reserve_limits();
+        // More than one caller may ever hold is final, not busy: retrying
+        // would never succeed.
+        if cap > per_owner {
+            return Err("fetch larger than this machine can hold");
+        }
+        let held: usize = q.slots.iter().flatten().filter(|j| j.owner == owner).map(|j| j.reserved).sum();
+        if q.reserved + cap > total || held + cap > per_owner {
             return Err(BUSY[1]);
         }
         let Some(slot) = q.slots.iter().position(|s| s.is_none()) else {

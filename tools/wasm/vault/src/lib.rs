@@ -18,8 +18,8 @@
 //!   so it is raised only when a screen opens or a field must be fixed,
 //!   never on show/hide.
 //!
-//! No heap state (the bump allocator resets each frame): fields sit in fixed
-//! buffers, entries are fetched from the kernel each frame.
+//! Fields live on a growing heap and grow with their text; entries are
+//! fetched from the kernel each frame.
 
 #![no_std]
 
@@ -44,7 +44,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 static NPK_CAPS: [u8; 2] = [caps::READ | caps::EXEC | caps::RENDER, 0];
 
 #[global_allocator]
-static ALLOCATOR: nopeek_widgets::bump::Bump<{ 512 * 1024 }> = nopeek_widgets::bump::Bump::new();
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -120,35 +120,36 @@ enum View {
     AddWifi,
 }
 
-/// A fixed-size text field — survives the per-frame allocator reset.
+/// A text field that may hold a secret: its bytes are zeroed before they
+/// are dropped or replaced, and it never reallocates with the old text in
+/// it, so no copy is left behind in freed memory.
 struct Field {
-    b: [u8; 1024],
-    n: usize,
+    b: Vec<u8>,
 }
 
 impl Field {
     const fn new() -> Self {
-        Field { b: [0u8; 1024], n: 0 }
+        Field { b: Vec::new() }
     }
     fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.b[..self.n]).unwrap_or("")
+        core::str::from_utf8(&self.b).unwrap_or("")
     }
-    /// Store `s`, cut at a char boundary if it does not fit (a cut through a
-    /// UTF-8 sequence would make the whole field read as empty).
     fn set(&mut self, s: &str) {
-        let mut k = s.len().min(self.b.len());
-        while k > 0 && !s.is_char_boundary(k) {
-            k -= 1;
+        self.clear();
+        if self.b.capacity() < s.len() {
+            self.b = Vec::with_capacity(s.len());
         }
-        self.b[..k].copy_from_slice(&s.as_bytes()[..k]);
-        self.n = k;
+        self.b.extend_from_slice(s.as_bytes());
     }
     fn clear(&mut self) {
         self.b.fill(0);
-        self.n = 0;
+        self.b.clear();
     }
     fn is_empty(&self) -> bool {
-        self.n == 0
+        self.b.is_empty()
+    }
+    fn len(&self) -> usize {
+        self.b.len()
     }
 }
 
@@ -186,7 +187,6 @@ struct St {
     /// to clear it again.
     clip_hash: u64,
     clip_deadline: u64,
-    heap_base: usize,
 }
 
 impl St {
@@ -222,10 +222,13 @@ impl St {
 
 const RECORD_V1: u8 = 0x01;
 
+/// Longest field the v1 record holds (its u16 length).
+const FIELD_MAX: usize = u16::MAX as usize;
+
+/// `s` with its u16 length; the caller has checked `s.len() <= FIELD_MAX`.
 fn put_str(out: &mut Vec<u8>, s: &str) {
-    let b = &s.as_bytes()[..s.len().min(u16::MAX as usize)];
-    out.extend_from_slice(&(b.len() as u16).to_le_bytes());
-    out.extend_from_slice(b);
+    out.extend_from_slice(&(s.len() as u16).to_le_bytes());
+    out.extend_from_slice(s.as_bytes());
 }
 
 fn encode_login(url: &str, user: &str, pass: &str, note: &str) -> Vec<u8> {
@@ -987,7 +990,6 @@ fn render(st: &St) -> Widget {
 }
 
 fn commit_tree(st: &St) {
-    ALLOCATOR.reset(st.heap_base);
     let tree = render(st);
     match wire::encode(&tree) {
         Ok(bytes) => {
@@ -1094,6 +1096,11 @@ fn save_secret(st: &mut St) {
         st.focus_on(0);
         return;
     }
+    if let Some(i) = (1..5).find(|&i| st.f[i].len() > FIELD_MAX) {
+        st.error("A field is longer than 65535 bytes.");
+        st.focus_on(i);
+        return;
+    }
     let rec = encode_login(st.f[1].as_str(), st.f[2].as_str(), st.f[3].as_str(), st.f[4].as_str());
     // Write the new entry first; only then drop the old name of a rename,
     // so a failed write never loses the entry.
@@ -1120,8 +1127,11 @@ fn save_wifi(st: &mut St) {
         return;
     }
     let pass = st.f[1].as_str();
-    if !(8..=63).contains(&pass.len()) || !pass.bytes().all(|b| (0x20..0x7f).contains(&b)) {
-        st.error("A Wi-Fi password is 8 to 63 characters (letters, digits, symbols).");
+    // A passphrase, or the PSK itself as 64 hex digits (IEEE 802.11i).
+    let phrase = (8..=63).contains(&pass.len()) && pass.bytes().all(|b| (0x20..0x7f).contains(&b));
+    let hex = pass.len() == 64 && pass.bytes().all(|b| b.is_ascii_hexdigit());
+    if !phrase && !hex {
+        st.error("A Wi-Fi password is 8 to 63 characters (letters, digits, symbols) or 64 hex digits.");
         st.focus_on(1);
         return;
     }
@@ -1479,7 +1489,6 @@ pub extern "C" fn _start() {
         gen_classes: 0b1111,
         clip_hash: 0,
         clip_deadline: 0,
-        heap_base: ALLOCATOR.mark(),
     };
     commit_tree(&st);
 
