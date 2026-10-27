@@ -1821,6 +1821,17 @@ impl Compositor {
             let inner_r = if p.fullscreen { 0 }
                 else if p.panel { rounding }
                 else { rounding.saturating_sub(border) };
+            // Terminal (`loop`) windows are glass with the theme's Surface
+            // colour, fullscreen included; widget windows fill themselves.
+            let paint_content = p.kind == WindowKind::Terminal;
+            if p.fullscreen && paint_content {
+                // No border and square corners, but the same glass.
+                let bg = crate::shade::widgets::palette::resolve_glass(
+                    crate::shade::widgets::abi::Token::Surface) & 0x00FF_FFFF;
+                items.push(Item::GlassBackdrop { rect: p.win_rect, radius: 0 });
+                items.push(Item::Chrome { rect: p.win_rect, border_a: bg, border_b: bg, bg, rounding: 0,
+                    border: 0, border_opacity: 0, bg_opacity: opacity, paint_content: true });
+            }
             if !p.panel && !p.fullscreen {
                 let (ba, bb, b_op) = if p.focused {
                     if crate::theme::is_active() && !border_pinned {
@@ -1832,10 +1843,6 @@ impl Compositor {
                 } else {
                     (p.border_color, p.border_color, BORDER_INACTIVE_OPACITY)
                 };
-                // Terminal (`loop`) windows are glass with the theme's Surface
-                // colour; widget windows get the border only, their content
-                // fills the inside.
-                let paint_content = p.kind == WindowKind::Terminal;
                 let bg = if paint_content {
                     crate::shade::widgets::palette::resolve_glass(
                         crate::shade::widgets::abi::Token::Surface) & 0x00FF_FFFF
