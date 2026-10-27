@@ -5,7 +5,7 @@ Generous heuristic: a function counts as mentioned when its name occurs
 anywhere in our sources, even in a comment. The number is an upper bound
 of coverage, never a lower bound.
 
-    python3 tools/linux-coverage.py                    # AX200 (default)
+    python3 tools/linux-coverage.py                    # RTL8822CE (default)
     python3 tools/linux-coverage.py -v                 # list missing names
     python3 tools/linux-coverage.py --chip rtl8822ce   # RTL8822CE / rtw88
     python3 tools/linux-coverage.py --chip rtl8822ce --tree ~/path/to/linux
@@ -19,17 +19,6 @@ DEFAULT_TREE = os.path.expanduser("~/.cache/nopeekos/linux-src/linux-6.18.26")
 
 # name -> (our sources, {group: [Linux directories relative to the tree]})
 CHIPS = {
-    "ax200": (
-        "tools/wasm/wifi_ax200/src",
-        {
-            "pcie":     ["drivers/net/wireless/intel/iwlwifi/pcie",
-                         "drivers/net/wireless/intel/iwlwifi/pcie/gen1_2"],
-            "mvm":      ["drivers/net/wireless/intel/iwlwifi/mvm"],
-            "fw":       ["drivers/net/wireless/intel/iwlwifi/fw"],
-            "iwlwifi":  ["drivers/net/wireless/intel/iwlwifi"],
-            "mac80211": ["net/mac80211"],
-        },
-    ),
     "rtl8822ce": (
         "tools/wasm/wifi_rtl8822ce/src",
         {
@@ -62,7 +51,7 @@ def funcs(path):
 
 
 def main(argv):
-    chip, tree, verbose = "ax200", DEFAULT_TREE, False
+    chip, tree, verbose = "rtl8822ce", DEFAULT_TREE, False
     i = 1
     while i < len(argv):
         a = argv[i]

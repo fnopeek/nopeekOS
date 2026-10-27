@@ -1,6 +1,6 @@
 //! nopeekOS WASM driver ABI: bindings for the RTL8822CE driver.
 //!
-//! The same ABI as `wifi_ax200` and `wifi` (RTL8852BE), plus the two 8-bit
+//! The common WASM driver ABI, plus the two 8-bit
 //! accessors rtw88 needs: the power sequence interpreter in `mac.c` is
 //! nothing but `rtw_read8`/`rtw_write8`, and a 32-bit RMW is no substitute.
 

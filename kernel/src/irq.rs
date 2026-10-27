@@ -41,7 +41,7 @@
 //!
 //! WASM drivers use the mirror host-fns `npk_irq_register` / `npk_irq_arm` /
 //! `npk_irq_wait` (see `wasm.rs`). MSI-X when the device has it (NIC / NVMe /
-//! AX200 / modern virtio), plain MSI with one vector otherwise (RTL8822CE).
+//! modern virtio), plain MSI with one vector otherwise (RTL8822CE).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;

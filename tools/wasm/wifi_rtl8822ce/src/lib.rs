@@ -7744,13 +7744,12 @@ fn read_ampdu_buf() -> u16 {
     if any { num.clamp(1, sta::BA_TX_BUF_SIZE) } else { VORGABE }
 }
 
-/// `on` or `1`, the same rule `wifi_ax200` uses for `ampdu:` and `ps:`. An
-/// unknown word is no, not a guess.
+/// `on` or `1`. An unknown word is no, not a guess.
 fn cfg_on(v: &[u8]) -> bool {
     v.starts_with(b"on") || v.starts_with(b"1")
 }
 
-/// `cfg_get` from `wifid`/`wifi_ax200`: one `key: value` line, `#` starts a
+/// `cfg_get` from `wifid`: one `key: value` line, `#` starts a
 /// comment. Returns the bounds of the value, not a slice, because the
 /// buffer is used alongside.
 fn cfg_get(text: &[u8], key: &[u8]) -> Option<(usize, usize)> {

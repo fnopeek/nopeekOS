@@ -189,14 +189,14 @@ def vif_port_defs():
 
 
 def peer_driver_defs():
-    """Control-channel constants of the AX200 driver.
+    """Control-channel constants of `wifid`.
 
-    `CMD_*`, `EV_*` and the 802.11 frame bits are not in Linux; they come
-    from `docs/spec/WIFI_CLASS_ABI.md`. They are checked against the other
-    driver that speaks the same ABI, so the two cannot drift apart.
+    `CMD_*` and `EV_*` are not in Linux; they come from
+    `docs/spec/WIFI_CLASS_ABI.md`. They are checked against `wifid`, the
+    other side of that channel, so the two cannot drift apart.
     """
     peer = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "..", "wifi_ax200", "src", "regs.rs")
+                        "..", "wifid", "wasm", "src", "lib.rs")
     if not os.path.exists(peer):
         return {}
     out = {}
@@ -204,7 +204,7 @@ def peer_driver_defs():
     for m in re.finditer(r"(?:pub )?const ((?:CMD|EV|DOT11|LLC|ETHERTYPE)"
                          r"[A-Z0-9_]*)\s*:\s*\w+(?:\s*;\s*\d+\])?"
                          r"\s*=\s*([^;]+);", src):
-        out[m.group(1)] = ("wifi_ax200/regs.rs", 0, m.group(2).strip())
+        out[m.group(1)] = ("wifid/lib.rs", 0, m.group(2).strip())
     return out
 
 

@@ -269,7 +269,7 @@ const WIFI_CFG: &str = "sys/config/wifi";
 
 /// The keys the wifi stack actually reads; anything else is rejected so a
 /// typo does not write a setting nobody reads.
-const WIFI_KEYS: &[&str] = &["band", "bw", "ampdu", "txagg", "roam", "ht40", "vht", "bawin", "ps", "btcoex", "settle_ms"];
+const WIFI_KEYS: &[&str] = &["band", "bw", "ampdu", "txagg", "roam", "bawin", "ps", "btcoex", "settle_ms"];
 
 fn wlan_set_usage() {
     kprintln!("[wlan] Usage: wlan set <key> <value> | wlan unset <key>");
@@ -278,8 +278,6 @@ fn wlan_set_usage() {
     kprintln!("[wlan]   txagg: on | off     TX aggregation, RTL8822CE (default: on)");
     kprintln!("[wlan]   roam: on|off|nurbericht  switch AP when the signal drops (default: on)");
     kprintln!("[wlan]   bw: 80 | 40 | 20    channel width cap, RTL8822CE (default: 80)");
-    kprintln!("[wlan]   ht40: on | off      40 MHz, AX200 only (measured best: on)");
-    kprintln!("[wlan]   vht: on | off       80 MHz, AX200 only (needs ht40 on; measured SLOWER)");
     kprintln!("[wlan]   bawin: <n>          cap the RX reorder window (0/unset = what the AP asks)");
     kprintln!("[wlan]   ps: on | off        power save (default off = CAM)");
     kprintln!("[wlan]   btcoex: on | off");
@@ -588,8 +586,8 @@ pub fn intent_wlan(args: &str) {
         kprintln!("             (no reply yet — expected while the AP has not sent EAPOL msg1)");
     }
 
-    // The driver half. Printed verbatim: the kernel does not know what an
-    // AX200 rate code means, and should not have to.
+    // The driver half. Printed verbatim: the kernel does not know what a
+    // driver's rate code means, and should not have to.
     let mut any = false;
     for name in crate::drivers::report::names() {
         if let Some((text, at_ms)) = crate::drivers::report::get(&name) {
@@ -607,7 +605,7 @@ pub fn intent_wlan(args: &str) {
     if !any {
         kprintln!();
         kprintln!("  (no driver report — the driver is not running, or predates");
-        kprintln!("   npk_driver_report; start it with 'driver wifi_ax200')");
+        kprintln!("   npk_driver_report; start it with 'driver wifi_rtl8822ce')");
     }
 
     // wifid runs in an invisible autostart window, so its log is the only place

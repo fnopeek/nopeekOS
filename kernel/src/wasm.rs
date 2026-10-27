@@ -87,10 +87,10 @@ impl HwDriverState {
 
 const MAX_MMIO_MAPS: usize = 4;
 /// Per-module DMA allocation slots. A WiFi driver needs many one-page
-/// receive buffers plus its rings (Linux allocates 2048 for the AX200). Each
+/// receive buffers plus its rings. Each
 /// slot is a (phys, pages) pair, so the ceiling is bookkeeping, not memory.
 const MAX_DMA_ALLOCS: usize = 1024;
-const MAX_DMA_PAGES: usize = 2048; // 8MB total (iwlwifi FW sections ~1.3MB)
+const MAX_DMA_PAGES: usize = 2048; // 8MB total
 /// For a display controller's module (`host_core::dma_caps`): 128 MB.
 const MAX_DMA_ALLOCS_GPU: usize = 16384;
 const MAX_DMA_PAGES_GPU: usize = 32768;

@@ -315,7 +315,7 @@ fn parse_bdf(s: &str) -> Option<(u8, u8, u8)> {
 
 fn auto_detect_device(name: &str) -> Option<crate::drivers::pci::PciDevice> {
     use crate::drivers::pci;
-    // Prefix-match so chip-specific names (wifi_ax200, wifi_rtl8852be, …) all
+    // Prefix-match so chip-specific names (wifi_rtl8822ce, …) all
     // resolve to the network class without hardcoding each chip in the kernel.
     if name.starts_with("wifi") || name.starts_with("wlan") || name.starts_with("wireless") {
         // Class 02:80 = Network controller (other — WiFi)

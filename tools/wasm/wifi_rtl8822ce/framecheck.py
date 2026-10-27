@@ -81,7 +81,7 @@ CASES = [
      frame(0xc1, THEIRS, 15), None),
 ]
 
-# `cfg_on`: the same rule as `ampdu:`/`ps:` in the AX200 driver.
+# `cfg_on`: `on` or `1`, nothing else.
 CFG_ON = [
     ("1", True), ("on", True), ("On", False), ("1 ", True),
     ("0", False), ("off", False), ("yes", False), ("", False),

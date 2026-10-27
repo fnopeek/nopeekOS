@@ -205,7 +205,7 @@ which can confine a device to its own page table. As **WASM modules** on a
 shared host-ABI crate (`npk_sys`): both GPU drivers, Intel HDA audio
 (including sound to a DisplayPort monitor), an I2C-HID touchpad, an AML
 interpreter driving firmware `_BST`/`_BIF` for a vendor-independent
-battery %, and WiFi for Intel AX200 and Realtek RTL8822CE. Hardware
+battery %, and WiFi for Realtek RTL8822CE. Hardware
 drivers are ported from Linux and kept as close to the original as
 possible, with Linux as the reference; where it can be done, a port is
 checked against Linux's own code on data read off the device.
@@ -222,7 +222,7 @@ dormant until it is complete. On both, a microVM guest's Mesa reaches
 the card through a **virtio-gpu native context:** the guest gets real
 3D and hardware video decode, the module checks every command.
 
-**WiFi:** iwlwifi (AX200) and rtw88 (RTL8822CE), ported from Linux and
+**WiFi:** rtw88 (RTL8822CE), ported from Linux and
 kept as close to the original as possible: firmware load, scan, roaming, a WPA2 four-way handshake in a
 resident `wifid` supplicant with CCMP replay checks, A-MPDU aggregation,
 fq_codel and AQL, which budgets airtime rather than bytes. `wifid` is
@@ -457,11 +457,11 @@ nopeekOS/
     ├── tune/                 #   Audio player (MP3/WAV -> kernel mixer)
     ├── snap/ drun/ top/      #   Screenshot, launcher, monitor
     ├── vault/ link/          #   Password manager, network card
-    ├── bar/ dock/ deck/ volume/  # Panels + volume
+    ├── deck/ volume/         # Panel + volume
     ├── pick/ wallpaper/      #   File-dialog portal, wallpaper decoder
     ├── gpu_intel_tgl/ gpu_amd_renoir/  # GPU drivers (i915, amdgpu)
     ├── gpu_scene/ gpu_shaders/  #   Shared scene compositor + shaders
-    ├── wifi_ax200/ wifi_rtl8822ce/  # WiFi drivers
+    ├── wifi_rtl8822ce/       # WiFi driver
     ├── wifid/ acpi/ i2c_hid/ #   WPA supplicant, ACPI AML, touchpad
     ├── audio_hda/            #   Intel HDA driver as WASM
     └── sdk/                  #   npk_sys (host ABI) + widgets (declarative UI SDK)
