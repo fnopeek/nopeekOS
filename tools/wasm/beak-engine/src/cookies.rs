@@ -30,10 +30,15 @@ struct Cookie {
     expires: Option<i64>,
 }
 
-/// A jar big enough for real browsing. Past the cap the oldest entry is
-/// dropped rather than the newest refused, so a site that sets a tracking
-/// cookie per page view cannot lock out the session cookie you need.
-const MAX_COOKIES: usize = 256;
+/// RFC 6265 6.1 asks for at least 50 cookies per domain, 3000 in total and
+/// 4096 bytes per cookie; these are Chromium's figures, above all three.
+/// Past a cap the oldest entry is dropped rather than the newest refused, and
+/// per domain first, so one site setting a cookie per page view cannot push
+/// out another site's session.
+const MAX_COOKIES: usize = 3300;
+const MAX_PER_DOMAIN: usize = 180;
+/// Name plus value (RFC 6265bis 5.6): a longer cookie is ignored.
+const MAX_COOKIE_BYTES: usize = 4096;
 
 /// A set of cookies. The browser holds one; a test holds its own, which is
 /// what keeps the domain-matching rules testable without a shared global.
@@ -262,7 +267,7 @@ fn store_one(&mut self, host: &str, req_path: &str, https: bool, decl: &str, now
     let Some(pair) = parts.next() else { return };
     let Some((name, value)) = pair.split_once('=') else { return };
     let (name, value) = (name.trim(), value.trim());
-    if name.is_empty() {
+    if name.is_empty() || name.len() + value.len() > MAX_COOKIE_BYTES {
         return;
     }
 
@@ -347,10 +352,8 @@ fn store_one(&mut self, host: &str, req_path: &str, https: bool, decl: &str, now
     if expiry.is_some_and(|e| e <= now) {
         return; // an already-expired cookie IS the delete
     }
-    if jar.len() >= MAX_COOKIES {
-        jar.remove(0);
-    }
-    jar.push(Cookie {
+    self.make_room(&domain);
+    self.cookies.push(Cookie {
         name: name.to_string(),
         value: value.to_string(),
         domain,
@@ -360,6 +363,19 @@ fn store_one(&mut self, host: &str, req_path: &str, https: bool, decl: &str, now
         http_only,
         expires: expiry,
     });
+}
+
+/// Room for one more cookie of `domain`: its oldest goes when the domain is
+/// full, the jar's oldest when the jar is.
+fn make_room(&mut self, domain: &str) {
+    if self.cookies.iter().filter(|c| c.domain == domain).count() >= MAX_PER_DOMAIN {
+        if let Some(i) = self.cookies.iter().position(|c| c.domain == domain) {
+            self.cookies.remove(i);
+        }
+    }
+    if self.cookies.len() >= MAX_COOKIES {
+        self.cookies.remove(0);
+    }
 }
 
 /// The `Cookie:` header value for `url`, or an empty string if the jar has
@@ -461,7 +477,7 @@ impl Jar {
             let (Ok(flags), Ok(exp)) = (flags.parse::<u8>(), exp.parse::<i64>()) else { continue };
             if exp <= now || name.is_empty() { continue }
             self.cookies.retain(|c| !(c.name == name && c.domain == domain && c.path == path));
-            if self.cookies.len() >= MAX_COOKIES { self.cookies.remove(0); }
+            self.make_room(domain);
             self.cookies.push(Cookie {
                 name: name.into(), value: value.into(), domain: domain.into(),
                 path: path.into(),
@@ -818,5 +834,28 @@ mod tests {
         assert!(!j.header_for("https://example.com/", 1000).contains("h=2"));
         j.store("https://example.com/", "set-cookie: ok=3; Secure\r\n", 1000);
         assert!(j.header_for("https://example.com/", 1000).contains("ok=3"));
+    }
+
+    /// One site filling its share pushes out its own oldest cookie, never
+    /// another site's session.
+    #[test]
+    fn a_full_domain_evicts_its_own_oldest() {
+        let mut j = jar();
+        j.store("https://bank.example/", "set-cookie: session=1\r\n", 1000);
+        for i in 0..MAX_PER_DOMAIN + 5 {
+            let h = alloc::format!("set-cookie: t{}=x\r\n", i);
+            j.store("https://tracker.example/", &h, 1000);
+        }
+        assert!(j.header_for("https://bank.example/", 1000).contains("session=1"));
+        let t = j.header_for("https://tracker.example/", 1000);
+        assert!(!t.contains("t0=") && t.contains(&alloc::format!("t{}=", MAX_PER_DOMAIN + 4)));
+    }
+
+    #[test]
+    fn an_oversized_cookie_is_ignored() {
+        let mut j = jar();
+        let big = alloc::format!("set-cookie: big={}\r\n", "x".repeat(MAX_COOKIE_BYTES));
+        j.store("https://example.com/", &big, 1000);
+        assert!(j.header_for("https://example.com/", 1000).is_empty());
     }
 }

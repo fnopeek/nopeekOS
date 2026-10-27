@@ -81,9 +81,10 @@ const WAIT_IRQ: i32 = 2;
 #[global_allocator]
 static ALLOC: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
-/// The buffer an SSDT and the MADT are read into, one at a time.
-const TABLE_MAX: usize = 256 * 1024;
-static TABLE: Single<[u8; TABLE_MAX]> = Single::new([0; TABLE_MAX]);
+/// The `index`-th ACPI table named `sig`, whole; None if there is none.
+fn acpi_table(sig: [u8; 4], index: i32) -> Option<alloc::vec::Vec<u8>> {
+    npk_sys::read_all(|b| npk_sys::acpi_table(sig, index, b))
+}
 
 /// The processors as Linux sets them up for idle: `_OSC` with the OS's
 /// capabilities on each present one (`acpi_early_processor_osc`), `_PDC`
@@ -95,11 +96,7 @@ fn processor_power(m: &mut Machine, ns: &Namespace) {
     if caps < 0 {
         return;
     }
-    let madt = TABLE.with(|t| {
-        let n = npk_sys::acpi_table(*b"APIC", 0, t);
-        (n > 0 && n as usize <= TABLE_MAX).then(|| t[..n as usize].to_vec())
-    });
-    let Some(madt) = madt else {
+    let Some(madt) = acpi_table(*b"APIC", 0).filter(|t| !t.is_empty()) else {
         logln("[acpi] processors: no MADT");
         return;
     };
@@ -162,9 +159,6 @@ fn processor_power(m: &mut Machine, ns: &Namespace) {
     npk_sys::acpi_cst(&buf);
 }
 
-// DSDT buffer: filled once.
-const DSDT_MAX: usize = 512 * 1024;
-static DSDT: Single<[u8; DSDT_MAX]> = Single::new([0; DSDT_MAX]);
 
 /// The driver's EC access.
 ///
@@ -307,17 +301,15 @@ pub extern "C" fn _start() {
     // enables it.
     let loud = npk_sys::sys_info(50) == 1;
 
-    let len = DSDT.with(|d| npk_sys::acpi_dsdt(d));
-    lognum("[acpi] DSDT bytes reported: ", len as u32);
-    if len <= 0 || len as usize > DSDT_MAX {
-        lognum("[acpi] no DSDT, or larger than the buffer of ", DSDT_MAX as u32);
-        logln("[acpi] driver idle");
+    let dsdt = npk_sys::read_all(npk_sys::acpi_dsdt).unwrap_or_default();
+    lognum("[acpi] DSDT bytes reported: ", dsdt.len() as u32);
+    if dsdt.is_empty() {
+        logln("[acpi] no DSDT, driver idle");
         return;
     }
-    let table_len = len as usize;
     VERBOSE.with(|v| *v = loud);
 
-    let Some(mut ns) = DSDT.with(|d| Namespace::load(&d[..table_len]).ok()) else {
+    let Some(mut ns) = Namespace::load(&dsdt).ok() else {
         logln("[acpi] Namespace::load failed — driver idle");
         return;
     };
@@ -325,15 +317,12 @@ pub extern "C" fn _start() {
     // them all (the processors' _OSC lives in one).
     let mut ssdts = 0u32;
     for i in 0..64 {
-        let n = TABLE.with(|t| {
-            let n = npk_sys::acpi_table(*b"SSDT", i, t);
-            if n > 0 && n as usize <= TABLE_MAX && ns.load_more(&t[..n as usize]).is_ok() {
-                ssdts += 1;
-            }
-            n
-        });
-        if n <= 0 { break; }
+        let Some(t) = acpi_table(*b"SSDT", i).filter(|t| !t.is_empty()) else { break };
+        if ns.load_more(&t).is_ok() {
+            ssdts += 1;
+        }
     }
+    drop(dsdt);
     lognum("[acpi] namespace: DSDT + SSDTs ", ssdts);
     let ns: &'static Namespace = alloc::boxed::Box::leak(alloc::boxed::Box::new(ns));
     let batteries = find_batteries(ns);

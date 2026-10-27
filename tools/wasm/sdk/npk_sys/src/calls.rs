@@ -160,6 +160,9 @@ unsafe extern "C" {
     fn npk_display_audio_set(port: i32, ptr: i32, len: i32) -> i32;
     fn npk_display_audio_get(port: i32, ptr: i32, max: i32) -> i32;
     fn npk_display_audio_generation() -> i32;
+    fn npk_locale(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_list_modules(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_app_meta(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
 }
 
 /// Calls that take no pointer: the safe form is the call itself.
@@ -340,17 +343,30 @@ fills! {
     fn netdev_poll_tx = npk_netdev_poll_tx -> i32;
     /// Jobs for the GPU service, 32 bytes each (`gpudev_poll`).
     fn gpudev_poll = npk_gpudev_poll -> i32;
+    /// The next command (driver side); 0 when there is none.
     fn wifi_poll_cmd = npk_wifi_poll_cmd -> i32;
+    /// The next driver event (`wifid` only); 0 when there is none.
     fn wifi_poll_event = npk_wifi_poll_event -> i32;
-    /// Known networks with their records (`wifid` only); -2 = buffer too small.
+    /// Known networks with their records (`wifid` only).
     fn wifi_known = npk_wifi_known -> i32;
+    /// The next user request (`wifid` only); 0 when there is none.
     fn wifi_poll_request = npk_wifi_poll_request -> i32;
-    /// The manager's state text (`link` only); -2 = buffer too small.
+    /// The manager's state text (`link` only).
     fn wifi_status = npk_wifi_status -> i32;
-    /// Interfaces + IPv4 as `key value` lines (RENDER); -2 = buffer too small.
+    /// Interfaces + IPv4 as `key value` lines (RENDER).
     fn net_info = npk_net_info -> i32;
     fn acpi_dsdt = npk_acpi_dsdt -> i32;
     fn audio_poll_mix = npk_audio_poll_mix -> i32;
+    /// The UI language code (`en`, `de`).
+    fn locale = npk_locale -> i32;
+    /// Installed module names, NUL-separated (RENDER).
+    fn list_modules = npk_list_modules -> i32;
+}
+
+/// The `.npk.app_meta` section of module `name` (RENDER).
+pub fn app_meta(name: &[u8], buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; both ranges are borrowed for the call.
+    unsafe { npk_app_meta(name.as_ptr() as i32, name.len() as i32, buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
 /// The display driver reports the ELD of `port`'s sink; empty for none.
@@ -448,8 +464,8 @@ pub fn clipboard_set(text: &[u8]) -> i32 {
     // SAFETY: FFI; the range is borrowed for the call.
     unsafe { npk_clipboard_set(text.as_ptr() as i32, text.len() as i32) }
 }
-/// Copy the clipboard text into `buf`. The full text length (may exceed
-/// `buf`), 0 if empty, or -1 (not focused / denied).
+/// Copy the clipboard text into `buf`. Its length, 0 if empty, or -1 (not
+/// focused / denied).
 pub fn clipboard_get(buf: &mut [u8]) -> i32 {
     // SAFETY: FFI; the range is borrowed for the call.
     unsafe { npk_clipboard_get(buf.as_mut_ptr() as i32, buf.len() as i32) }
@@ -475,15 +491,14 @@ pub fn fs_copy(old: &[u8], new: &[u8]) -> i32 {
     unsafe { npk_fs_copy(old.as_ptr() as i32, old.len() as i32, new.as_ptr() as i32, new.len() as i32) }
 }
 
-/// Size (8 bytes LE), directory flag (1), mtime (8 bytes LE) into `out`.
 /// A `set` value of this module's own namespace (`<module>.<name>`) into
-/// `buf`: its length, 0 when unset, -1 for another namespace or a short
-/// buffer.
+/// `buf`: its length, 0 when unset, -1 for another namespace.
 pub fn config_get(key: &[u8], buf: &mut [u8]) -> i32 {
     // SAFETY: FFI; both ranges are borrowed for the call.
     unsafe { npk_config_get(key.as_ptr() as i32, key.len() as i32, buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
+/// Size (8 bytes LE), directory flag (1), mtime (8 bytes LE) into `out`.
 pub fn fs_stat(name: &[u8], out: &mut [u8; 17]) -> i32 {
     // SAFETY: FFI; `out` is the 17 bytes the kernel writes.
     unsafe { npk_fs_stat(name.as_ptr() as i32, name.len() as i32, out.as_mut_ptr() as i32) }

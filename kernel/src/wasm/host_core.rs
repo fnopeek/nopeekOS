@@ -78,22 +78,41 @@ pub(crate) fn write_bytes(data: &mut [u8], ptr: i32, bytes: &[u8]) -> i32 {
     }
 }
 
-/// Shared body of both poll functions: copies one message from `dequeue`
-/// into the guest buffer (capped by `max`); returns the length or -1.
+/// The answer to a buffer too small for one complete object: `-(needed + 2)`.
+/// -1 stays "error or denied" and 0 a valid empty answer, so a caller grows
+/// its buffer to `needed` and asks again (the SDK's `read_all`).
+pub(crate) fn too_small(needed: usize) -> i32 {
+    -(i32::try_from(needed).unwrap_or(i32::MAX - 2).min(i32::MAX - 2) + 2)
+}
+
+/// Writes one complete object into the guest buffer `[buf_ptr, buf_ptr +
+/// buf_max)`: its length, `too_small` when it does not fit, -1 for a bad
+/// range. Never a cut object.
+pub(crate) fn write_whole(mem: &mut [u8], buf_ptr: i32, buf_max: i32, bytes: &[u8]) -> i32 {
+    let Some(max) = glen(buf_max) else { return -1 };
+    if bytes.len() > max { return too_small(bytes.len()); }
+    write_bytes(mem, buf_ptr, bytes)
+}
+
+/// Shared body of the WLAN queue polls: moves one message from `dequeue`
+/// into the guest buffer. Its length, 0 for an empty queue, `too_small`
+/// with the message left queued, or -1 for a bad range.
 fn wifi_poll_into(
     mem: &mut [u8],
     buf_ptr: i32,
     max: i32,
-    dequeue: fn(&mut [u8]) -> Option<usize>,
+    dequeue: fn(&mut [u8]) -> crate::wifi::Pop,
 ) -> i32 {
-    if max <= 0 { return -1; }
-    let cap = (max as usize).min(crate::wifi::WIFI_MSG_MAX);
+    let Some(max) = glen(max) else { return -1 };
+    let cap = max.min(crate::wifi::WIFI_MSG_MAX);
+    // Checked before the dequeue: a message taken out cannot be put back.
+    if guest(mem, buf_ptr, cap).is_none() { return -1; }
     let mut tmp = [0u8; crate::wifi::WIFI_MSG_MAX];
-    let len = match dequeue(&mut tmp[..cap]) {
-        Some(n) => n,
-        None => return -1,
-    };
-    write_bytes(mem, buf_ptr, &tmp[..len])
+    match dequeue(&mut tmp[..cap]) {
+        crate::wifi::Pop::Empty => 0,
+        crate::wifi::Pop::Short(needed) => too_small(needed),
+        crate::wifi::Pop::Got(len) => write_bytes(mem, buf_ptr, &tmp[..len]),
+    }
 }
 
 pub(crate) fn npk_http_status(ctx: &mut HostState) -> i32 {
@@ -1457,7 +1476,10 @@ pub(crate) fn npk_pci_read_config(ctx: &mut HostState, offset: i32) -> i32 {
         // would access 00:00.0.
         _ => return -1,
     };
-    if offset < 0 || offset > 255 { return -1; }
+    if offset < 0 || offset > 0xFFF { return -1; }
+    if offset > 255 {
+        return pci::read32_ext(hw.pci_addr, offset as u16).map_or(-1, |v| v as i32);
+    }
     pci::read32(hw.pci_addr, offset as u8) as i32
 }
 
@@ -1470,7 +1492,7 @@ pub(crate) fn npk_pci_read_config_at(ctx: &mut HostState, bdf: i32, offset: i32)
     if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
         return -1;
     }
-    if !(0..=0xffff).contains(&bdf) || !(0..=252).contains(&offset) || offset & 3 != 0 {
+    if !(0..=0xffff).contains(&bdf) || !(0..=0xFFC).contains(&offset) || offset & 3 != 0 {
         return -1;
     }
     let addr = pci::PciAddr {
@@ -1478,6 +1500,9 @@ pub(crate) fn npk_pci_read_config_at(ctx: &mut HostState, bdf: i32, offset: i32)
         device: ((bdf >> 3) & 0x1f) as u8,
         function: (bdf & 7) as u8,
     };
+    if offset > 255 {
+        return pci::read32_ext(addr, offset as u16).map_or(-1, |v| v as i32);
+    }
     pci::read32(addr, offset as u8) as i32
 }
 
@@ -1499,7 +1524,14 @@ pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32)
         // would access 00:00.0.
         _ => return -1,
     };
-    if offset < 0 || offset > 255 { return -1; }
+    if offset < 0 || offset > 0xFFF { return -1; }
+    if offset > 255 {
+        if offset & 3 != 0 || ext_write_refused(hw.pci_addr, offset as u16) {
+            kprintln!("[npk] WASM: PCI extended config write at {:#x} refused", offset);
+            return -1;
+        }
+        return if pci::write32_ext(hw.pci_addr, offset as u16, value as u32) { 0 } else { -1 };
+    }
     if config_write_refused(hw.pci_addr, offset as u8 & !3) {
         kprintln!("[npk] WASM: PCI config write at {:#x} refused (address or interrupt routing)", offset);
         return -1;
@@ -1549,6 +1581,27 @@ pub(crate) fn npk_vga_msr_touch(ctx: &mut HostState) -> i32 {
 /// interrupts go (MSI address and data, MSI-X control). The kernel sizes and
 /// assigns BARs and programs interrupts itself; a driver that moved a BAR
 /// onto RAM could map that RAM through `npk_mmio_map_bar`.
+/// Extended capabilities a module may not write: they move BARs (SR-IOV,
+/// Resizable BAR, VF Resizable BAR) or change how the device's DMA is
+/// translated (ATS, PRI, PASID). Power management (L1 PM Substates, LTR)
+/// and error reporting stay writable.
+fn ext_write_refused(dev: pci::PciAddr, offset: u16) -> bool {
+    let mut ptr: u16 = 0x100;
+    for _ in 0..(0x1000 - 0x100) / 4 {
+        let Some(hdr) = pci::read32_ext(dev, ptr) else { return true };
+        if hdr == 0 || hdr == u32::MAX { return false; }
+        let (id, next) = ((hdr & 0xFFFF) as u16, (hdr >> 20) as u16 & 0xFFC);
+        // Sizes from the PCIe base spec: ATS 8, PRI 16, PASID 8, SR-IOV 64,
+        // (VF) Resizable BAR up to 52 bytes.
+        let span: u16 = match id { 0x0F | 0x1B => 8, 0x13 => 16, 0x10 => 0x40, 0x15 | 0x24 => 0x34, _ => 4 };
+        // Every capability header is refused too: it links the list.
+        if offset >= ptr && offset < ptr + span { return true; }
+        if next < 0x100 { return false; }
+        ptr = next;
+    }
+    true
+}
+
 fn config_write_refused(dev: pci::PciAddr, dword: u8) -> bool {
     let header = pci::read8(dev, 0x0E) & 0x7F;
     let fixed = match header {
@@ -2311,8 +2364,7 @@ pub(crate) fn npk_fetch(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
         Err(_) => return -1,
     };
 
-    let Some(max) = glen(buf_max) else { return -1 };
-    write_bytes(mem, buf_ptr, &content[..content.len().min(max)])
+    write_whole(mem, buf_ptr, buf_max, &content)
 }
 
 // ── Keyvault ────────────────────────────────────
@@ -2415,8 +2467,7 @@ pub(crate) fn npk_vault_user_get(
     }
     let Some(name) = read_str(mem, name_ptr, name_len) else { return -1 };
     let Some(val) = crate::security::keyvault::user_get(&name) else { return -1 };
-    let Some(max) = glen(buf_max) else { return -1 };
-    write_bytes(mem, buf_ptr, &val[..val.len().min(max)])
+    write_whole(mem, buf_ptr, buf_max, &val)
 }
 
 pub(crate) fn npk_vault_user_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -2424,8 +2475,7 @@ pub(crate) fn npk_vault_user_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
         return -1;
     }
     let joined = crate::security::keyvault::user_list().join("\n");
-    let Some(max) = glen(buf_max) else { return -1 };
-    write_bytes(mem, buf_ptr, &joined.as_bytes()[..joined.len().min(max)])
+    write_whole(mem, buf_ptr, buf_max, joined.as_bytes())
 }
 
 pub(crate) fn npk_vault_system_set(
@@ -2454,8 +2504,7 @@ pub(crate) fn npk_vault_system_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr
         return -1;
     }
     let joined = crate::security::keyvault::system_list().join("\n");
-    let Some(max) = glen(buf_max) else { return -1 };
-    write_bytes(mem, buf_ptr, &joined.as_bytes()[..joined.len().min(max)])
+    write_whole(mem, buf_ptr, buf_max, joined.as_bytes())
 }
 
 pub(crate) fn npk_vault_user_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
@@ -2485,14 +2534,8 @@ pub(crate) fn npk_http_response_headers(mem: &mut [u8], ctx: &mut HostState, buf
     if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
         return -1;
     }
-    if buf_ptr < 0 || buf_max <= 0 { return -1; }
-    let hdrs = match &ctx.http_reply_headers {
-        Some(h) => h.clone(),
-        None => return -1,
-    };
-    let Some(max) = glen(buf_max) else { return -1 };
-    let n = hdrs.len().min(max);
-    write_bytes(mem, buf_ptr, &hdrs.as_bytes()[..n])
+    let Some(hdrs) = &ctx.http_reply_headers else { return -1 };
+    write_whole(mem, buf_ptr, buf_max, hdrs.as_bytes())
 }
 
 pub(crate) fn npk_http_final_url(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -2500,14 +2543,8 @@ pub(crate) fn npk_http_final_url(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
     if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
         return -1;
     }
-    if buf_ptr < 0 || buf_max <= 0 { return -1; }
-    let url = match &ctx.http_final_url {
-        Some(u) => u.clone(),
-        None => return -1,
-    };
-    let Some(max) = glen(buf_max) else { return -1 };
-    let n = url.len().min(max);
-    write_bytes(mem, buf_ptr, &url.as_bytes()[..n])
+    let Some(url) = &ctx.http_final_url else { return -1 };
+    write_whole(mem, buf_ptr, buf_max, url.as_bytes())
 }
 
 pub(crate) fn npk_http_content_type(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -2515,14 +2552,8 @@ pub(crate) fn npk_http_content_type(mem: &mut [u8], ctx: &mut HostState, buf_ptr
     if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
         return -1;
     }
-    if buf_ptr < 0 || buf_max <= 0 { return -1; }
-    let ct = match &ctx.http_content_type {
-        Some(c) => c.clone(),
-        None => return -1,
-    };
-    let Some(max) = glen(buf_max) else { return -1 };
-    let n = ct.len().min(max);
-    write_bytes(mem, buf_ptr, &ct.as_bytes()[..n])
+    let Some(ct) = &ctx.http_content_type else { return -1 };
+    write_whole(mem, buf_ptr, buf_max, ct.as_bytes())
 }
 
 pub(crate) fn npk_http_last_error(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -2530,14 +2561,8 @@ pub(crate) fn npk_http_last_error(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
     if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
         return -1;
     }
-    if buf_ptr < 0 || buf_max <= 0 { return -1; }
-    let err = match &ctx.http_last_error {
-        Some(e) => e.clone(),
-        None => return -1,
-    };
-    let Some(max) = glen(buf_max) else { return -1 };
-    let n = err.len().min(max);
-    write_bytes(mem, buf_ptr, &err.as_bytes()[..n])
+    let Some(err) = &ctx.http_last_error else { return -1 };
+    write_whole(mem, buf_ptr, buf_max, err.as_bytes())
 }
 
 /// A module's private area may hold this share of the store: 1/32.
@@ -2623,32 +2648,19 @@ pub(crate) fn npk_home_dir(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, bu
         return -1;
     }
     let home = crate::intent::home_dir();
-    let bytes = home.as_bytes();
-    if glen(buf_max).is_none_or(|m| bytes.len() > m) { return -1; }
-    write_bytes(mem, buf_ptr, bytes)
+    write_whole(mem, buf_ptr, buf_max, home.as_bytes())
 }
 
 pub(crate) fn npk_locale(mem: &mut [u8], _ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let lang = crate::config::get("lang").unwrap_or_default();
     let lang = lang.trim();
     let bytes = if lang.is_empty() { b"en".as_slice() } else { lang.as_bytes() };
-    if buf_max < 0 || bytes.len() > buf_max as usize { return -1; }
-    let data = &mut *mem;
-    let Ok(start) = usize::try_from(buf_ptr) else { return -1 };
-    let Some(end) = start.checked_add(bytes.len()) else { return -1 };
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(bytes);
-    bytes.len() as i32
+    write_whole(mem, buf_ptr, buf_max, bytes)
 }
 
 pub(crate) fn npk_launch_arg(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
-    let arg = match &ctx.launch_arg {
-        Some(s) => s.clone(),
-        None => return 0,
-    };
-    let bytes = arg.as_bytes();
-    if glen(buf_max).is_none_or(|m| bytes.len() > m) { return -1; }
-    write_bytes(mem, buf_ptr, bytes)
+    let Some(arg) = &ctx.launch_arg else { return 0 };
+    write_whole(mem, buf_ptr, buf_max, arg.as_bytes())
 }
 
 pub(crate) fn npk_clipboard_set(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
@@ -2672,9 +2684,7 @@ pub(crate) fn npk_clipboard_get(mem: &mut [u8], ctx: &mut HostState, ptr: i32, m
         Some(t) => t,
         None => return 0,
     };
-    let n = text.len().min(max.max(0) as usize);
-    if write_bytes(mem, ptr, &text[..n]) < 0 { return -1; }
-    text.len() as i32
+    write_whole(mem, ptr, max, &text)
 }
 
 pub(crate) fn npk_scene_commit(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
@@ -2842,8 +2852,8 @@ pub(crate) fn npk_capture_screen(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
     let pitch = info.pitch as usize;
     if w == 0 || h == 0 { return -1; }
     let need = w * h * 4;
-    if (buf_max as usize) < need { return -1; }
     if info.addr == 0 { return -1; }
+    if glen(buf_max).is_none_or(|m| m < need) { return too_small(need); }
     // Read the actual displayed MMIO framebuffer (not a shadow
     // buffer): it always holds the final composite (background +
     // windows + cursor) that's physically on screen. The shadow
@@ -2896,9 +2906,8 @@ pub(crate) fn npk_event_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, 
     // "window gone", so an app that knows only that one still stops cleanly
     // instead of reading a size as an event.
     if buf_max < 0 || encoded.len() > buf_max as usize {
-        let needed = encoded.len();
         crate::shade::widgets::unpoll_event(window_id, event);
-        return -(i32::try_from(needed).unwrap_or(i32::MAX - 2) + 2);
+        return too_small(encoded.len());
     }
 
     write_bytes(mem, buf_ptr, &encoded[..])
@@ -2925,9 +2934,7 @@ pub(crate) fn npk_list_modules(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32
         out.extend_from_slice(e.name.as_bytes());
     }
 
-    if out.len() > buf_max as usize { return -1; }
-
-    write_bytes(mem, buf_ptr, &out[..])
+    write_whole(mem, buf_ptr, buf_max, &out)
 }
 
 pub(crate) fn npk_app_meta(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -2935,7 +2942,7 @@ pub(crate) fn npk_app_meta(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, n
     if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
         return -1;
     }
-    if name_len <= 0 || name_len > 64 || buf_max <= 0 { return -1; }
+    if name_len <= 0 || name_len > 64 { return -1; }
 
     let name = match read_str(mem, name_ptr, name_len) {
         Some(s) => s,
@@ -2961,8 +2968,7 @@ pub(crate) fn npk_app_meta(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, n
         None => return -1,
     };
 
-    let Some(max) = glen(buf_max) else { return -1 };
-    write_bytes(mem, buf_ptr, &meta[..meta.len().min(max)])
+    write_whole(mem, buf_ptr, buf_max, meta)
 }
 
 pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
@@ -3061,8 +3067,6 @@ pub(crate) fn npk_bar_state(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, m
     if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
         return -1;
     }
-    if max <= 0 { return -1; }
-
     let local = crate::time::local(crate::time::now_or_zero());
     let secs = local.rem_euclid(86_400);
     let (ws_count, ws_active, title) =
@@ -3071,9 +3075,7 @@ pub(crate) fn npk_bar_state(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, m
     let s = alloc::format!("{:02}:{:02}\n{}\n{}\n{}",
         secs / 3600, (secs % 3600) / 60, ws_count, ws_active, title);
 
-    let bytes = s.as_bytes();
-    let Some(max) = glen(max) else { return -1 };
-    write_bytes(mem, buf_ptr, &bytes[..bytes.len().min(max)])
+    write_whole(mem, buf_ptr, max, s.as_bytes())
 }
 
 pub(crate) fn npk_window_titles(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
@@ -3081,18 +3083,10 @@ pub(crate) fn npk_window_titles(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i3
     if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
         return -1;
     }
-    if max <= 0 { return -1; }
     let full = capability::check_global(&cap_id, capability::Rights::SHELL).is_ok();
     let s = crate::shade::with_compositor(|c| c.window_lines(full))
         .unwrap_or_default();
-    let bytes = s.as_bytes();
-    let write_len = bytes.len().min(max as usize);
-    let data = &mut *mem;
-    let Ok(start) = usize::try_from(buf_ptr) else { return -1 };
-    let Some(end) = start.checked_add(write_len) else { return -1 };
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(&bytes[..write_len]);
-    write_len as i32
+    write_whole(mem, buf_ptr, max, s.as_bytes())
 }
 
 /// Copies the `index`-th ACPI table with this signature into module memory.
@@ -3104,8 +3098,8 @@ pub(crate) fn npk_window_titles(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i3
 /// and Linux loads them all into one (`acpi_tb_load_namespace`); reading
 /// only the DSDT misses names declared elsewhere.
 ///
-/// Returns the length, the required length if the buffer is too small, or
-/// -1 (no right / no such table).
+/// Returns the length, `-(needed + 2)` if the buffer is too small, or -1
+/// (no right / no such table).
 pub(crate) fn npk_acpi_table(
     mem: &mut [u8], ctx: &mut HostState, sig: i32, index: i32, buf_ptr: i32, buf_max: i32,
 ) -> i32 {
@@ -3118,8 +3112,8 @@ pub(crate) fn npk_acpi_table(
     let Some((addr, len)) = crate::acpi::find_table_nth(&sig_bytes, index as usize) else {
         return -1;
     };
-    if len > buf_max as usize {
-        return len as i32;
+    if glen(buf_max).is_none_or(|m| len > m) {
+        return too_small(len);
     }
     // SAFETY: find_table_nth mapped [addr, addr+len).
     let src = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
@@ -3132,8 +3126,8 @@ pub(crate) fn npk_acpi_dsdt(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, b
         return -1;
     }
     let Some((addr, len)) = crate::acpi::dsdt() else { return -1 };
-    if len > buf_max as usize {
-        return len as i32; // too small: tell the caller the needed size
+    if glen(buf_max).is_none_or(|m| len > m) {
+        return too_small(len);
     }
     // SAFETY: acpi::dsdt() mapped [addr, addr+len) for us.
     let src = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
@@ -3200,17 +3194,18 @@ pub(crate) fn npk_display_audio_set(mem: &mut [u8], ctx: &mut HostState, port: i
 }
 
 /// The audio driver reads the ELD of `port` (`get_eld`): its length, 0 when
-/// no sink is there. Only the driver of a multimedia device may.
+/// no sink is there, `-(needed + 2)` for a short buffer. Only the driver of
+/// a multimedia device may.
 pub(crate) fn npk_display_audio_get(mem: &mut [u8], ctx: &mut HostState, port: i32, ptr: i32, max: i32) -> i32 {
     if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err()
         || owned_pci_class(ctx) != Some(0x04)
     {
         return -1;
     }
-    if port < 0 || ptr < 0 || max < 0 { return -1; }
-    let Some(out) = guest_mut(mem, ptr, max as usize) else { return -1 };
-    match crate::audio::display_audio_get(port as usize, out) {
-        Some(n) => n as i32,
+    if port < 0 { return -1; }
+    let mut eld = [0u8; crate::audio::ELD_MAX];
+    match crate::audio::display_audio_get(port as usize, &mut eld) {
+        Some(n) => write_whole(mem, ptr, max, &eld[..n]),
         None => -1,
     }
 }
@@ -3229,7 +3224,7 @@ pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, 
     if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
         return -1;
     }
-    if prefix_len < 0 || out_cap <= 0 { return -1; }
+    if prefix_len < 0 { return -1; }
 
     let prefix = if prefix_len == 0 {
         alloc::string::String::new()
@@ -3319,15 +3314,13 @@ pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, 
         }
     }
 
-    if out.len() > out_cap as usize { return -1; }
-
-    write_bytes(mem, out_ptr, &out[..])
+    write_whole(mem, out_ptr, out_cap, &out)
 }
 
 /// `npk_config_get(key, buf)`: a `set` value of the module's own
-/// namespace, `<module>.<name>`; its length, 0 when the key is unset, -1
-/// for a key outside the namespace or a buffer too short. Read only: the
-/// user sets it, the module reads it.
+/// namespace, `<module>.<name>`; its length, 0 when the key is unset,
+/// `-(needed + 2)` for a buffer too short, -1 for a key outside the
+/// namespace. Read only: the user sets it, the module reads it.
 pub(crate) fn npk_config_get(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     let Some(key) = read_str(mem, key_ptr, key_len) else { return -1 };
     let Some(name) = key.strip_prefix(ctx.module_name.as_str()).and_then(|r| r.strip_prefix('.')) else { return -1 };
@@ -3335,11 +3328,7 @@ pub(crate) fn npk_config_get(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, 
         return -1;
     }
     let Some(value) = crate::config::get(&key) else { return 0 };
-    let Some(max) = glen(buf_max) else { return -1 };
-    if value.len() > max {
-        return -1;
-    }
-    write_bytes(mem, buf_ptr, value.as_bytes())
+    write_whole(mem, buf_ptr, buf_max, value.as_bytes())
 }
 
 pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, out_ptr: i32) -> i32 {
@@ -4209,10 +4198,7 @@ pub(crate) fn npk_status_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32,
     if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
         return -1;
     }
-    let bytes = crate::status::serialize();
-    if glen(max).is_none_or(|m| bytes.len() > m) { return bytes.len() as i32; }
-    if write_bytes(mem, buf_ptr, &bytes) < 0 { return -1; }
-    bytes.len() as i32
+    write_whole(mem, buf_ptr, max, &crate::status::serialize())
 }
 
 pub(crate) fn npk_launch(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32 {
@@ -4520,7 +4506,7 @@ fn is_wifi_ui(ctx: &HostState) -> bool {
     ctx.module_name == "link"
 }
 
-/// npk_net_info(buf, max) -> len / -1 / -2: the interfaces and the IPv4
+/// npk_net_info(buf, max) -> len / -1 / `-(needed + 2)`: the interfaces and the IPv4
 /// configuration as `key value` lines (RENDER, like the status list):
 /// `iface <name> <driver> <mac> <up 0|1> <primary 0|1>`, `ipv4 a.b.c.d/p`,
 /// `gateway a.b.c.d`, `dns a.b.c.d`.
@@ -4544,19 +4530,14 @@ pub(crate) fn npk_net_info(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, ma
         let _ = writeln!(t, "gateway {}.{}.{}.{}", gw[0], gw[1], gw[2], gw[3]);
         let _ = writeln!(t, "dns {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
     }
-    let Some(max) = glen(max) else { return -1 };
-    if t.len() > max { return -2; }
-    write_bytes(mem, buf_ptr, t.as_bytes())
+    write_whole(mem, buf_ptr, max, t.as_bytes())
 }
 
-/// npk_wifi_known(buf, max) -> len / -1: every known network with its record.
+/// npk_wifi_known(buf, max) -> len / -1 / `-(needed + 2)`: every known
+/// network with its record.
 pub(crate) fn npk_wifi_known(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     if !is_wifi_manager(ctx) { return -1; }
-    let wire = crate::drivers::wifi::known_wire();
-    let Some(max) = glen(max) else { return -1 };
-    // All or nothing: a cut list would drop networks silently.
-    if wire.len() > max { return -2; }
-    write_bytes(mem, buf_ptr, &wire)
+    write_whole(mem, buf_ptr, max, &crate::drivers::wifi::known_wire())
 }
 
 /// npk_wifi_new_network() -> 0 / -1: the link just came up on a different
@@ -4583,10 +4564,7 @@ pub(crate) fn npk_wifi_publish(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32
 
 pub(crate) fn npk_wifi_status(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     if !is_wifi_ui(ctx) { return -1; }
-    let st = crate::drivers::wifi::status();
-    let Some(max) = glen(max) else { return -1 };
-    if st.len() > max { return -2; }
-    write_bytes(mem, buf_ptr, &st)
+    write_whole(mem, buf_ptr, max, &crate::drivers::wifi::status())
 }
 
 /// npk_wifi_request(buf, len) -> 0 / -1. `[op]` or `[op][ssid_len][ssid]`;

@@ -8,7 +8,7 @@ version = "0.2.0"
 
 [[package]]
 name = "wifid"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "npk_sys",
  "wifid_core",

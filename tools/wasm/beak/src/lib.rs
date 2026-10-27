@@ -218,16 +218,16 @@ fn http_status() -> i32 {
     unsafe { npk_http_status() }
 }
 
-/// One of the four getters of the last response: bytes into `buf`, or `None`
-/// when it wrote nothing.
-fn http_getter(f: unsafe extern "C" fn(i32, i32) -> i32, buf: &mut [u8]) -> Option<&str> {
+/// One of the four getters of the last response, whole; `None` when there
+/// is none or it is empty.
+fn http_getter(f: unsafe extern "C" fn(i32, i32) -> i32) -> Option<String> {
     // SAFETY: FFI; `f` is one of the getters declared above, and the range
     // is borrowed for the call.
-    let n = unsafe { f(buf.as_mut_ptr() as i32, buf.len() as i32) };
-    if n <= 0 {
+    let bytes = host::read_all(|buf| unsafe { f(buf.as_mut_ptr() as i32, buf.len() as i32) })?;
+    if bytes.is_empty() {
         return None;
     }
-    core::str::from_utf8(&buf[..(n as usize).min(buf.len())]).ok()
+    String::from_utf8(bytes).ok()
 }
 
 fn net_context(url: &str) {
@@ -811,7 +811,6 @@ fn take_batch(handle: i32, dst: &mut [MaybeUninit<u8>], want: usize) -> Vec<(usi
     }
     spans
 }
-const PAYLOAD_CAP: usize = URL_CAP;
 
 const EVENT_BUF_SIZE: usize = 16 * 1024;
 
@@ -1190,8 +1189,7 @@ fn hover_affordable() -> bool {
 /// Why the last fetch failed, as `(kind, message)`. `None` if the kernel
 /// reported nothing, so the caller must have a fallback.
 fn last_error() -> Option<(String, String)> {
-    let mut buf = [0u8; 512];
-    let s = http_getter(npk_http_last_error, &mut buf)?;
+    let s = http_getter(npk_http_last_error)?;
     let (kind, msg) = s.split_once('\t')?;
     Some((kind.to_string(), msg.to_string()))
 }
@@ -1219,8 +1217,7 @@ fn show_error_page(url: &str) {
 /// The last response's Content-Type. `None` if the server sent none, which
 /// is why every caller has to cope with not knowing rather than assume UTF-8.
 fn content_type() -> Option<String> {
-    let mut buf = [0u8; 256];
-    http_getter(npk_http_content_type, &mut buf).map(|s| s.to_string())
+    http_getter(npk_http_content_type)
 }
 
 /// Bring the freshly fetched document to valid UTF-8, in place.
@@ -1258,13 +1255,8 @@ fn decode_css() {
 /// The URL the last fetch's body actually came from, after redirects.
 /// `None` if the kernel reported none (e.g. the request failed).
 fn fetched_from() -> Option<String> {
-    let mut buf = [0u8; URL_CAP];
-    http_getter(npk_http_final_url, &mut buf).map(|s| s.to_string())
+    http_getter(npk_http_final_url)
 }
-
-/// Room for one response's header block — the kernel caps what it hands back
-/// at 8 KiB, and a page that sets a dozen cookies still fits.
-const HDR_CAP: usize = 8 * 1024;
 
 // ── A navigation that runs while the window stays alive ───────────────────
 //
@@ -1454,16 +1446,13 @@ fn nav_fail(url: &str) {
 /// and the kernel assigns it. So beak keeps `RENDER | CANVAS | NET` and needs
 /// no right to system-wide storage for its own state.
 const COOKIE_FILE: &str = "priv/beak/cookies";
-const COOKIE_CAP: usize = 96 * 1024;   // 256 cookies fit well below
 
 /// Load the stored cookies into the jar — once at startup.
 fn cookies_restore() {
     let now = unix_now();
-    let mut buf = vec![0u8; COOKIE_CAP];
-    let n = host::fetch(COOKIE_FILE, &mut buf).unwrap_or(0);
     // No file is the normal case on first start, not an error.
-    if n == 0 { return }
-    let Ok(text) = core::str::from_utf8(&buf[..n.min(COOKIE_CAP)]) else {
+    let Some(buf) = host::fetch(COOKIE_FILE).filter(|b| !b.is_empty()) else { return };
+    let Ok(text) = core::str::from_utf8(&buf) else {
         log("[beak] cookies: gespeicherte Datei ist kein UTF-8 — uebergangen");
         return;
     };
@@ -1490,11 +1479,10 @@ fn cookies_persist() {
 /// wrong host.
 fn file_cookies(asked: &str) {
     let now = unix_now();
-    let mut buf = [0u8; HDR_CAP];
-    let Some(h) = http_getter(npk_http_response_headers, &mut buf) else { return };
+    let Some(h) = http_getter(npk_http_response_headers) else { return };
     let from = fetched_from().unwrap_or_else(|| asked.to_string());
     let before = cookies::count();
-    cookies::store(&from, h, now);
+    cookies::store(&from, &h, now);
     let after = cookies::count();
     if after != before || h.to_ascii_lowercase().contains("set-cookie") {
         // Only when something really changed — otherwise every response
@@ -2272,8 +2260,7 @@ fn fetch_jobs() -> &'static mut Vec<(u32, i32)> {
 
 /// The header block of the last collected response.
 fn response_headers() -> String {
-    let mut buf = [0u8; HDR_CAP];
-    http_getter(npk_http_response_headers, &mut buf).unwrap_or("").to_string()
+    http_getter(npk_http_response_headers).unwrap_or_default()
 }
 
 /// A global for state that has no context to be passed through.
@@ -5668,10 +5655,9 @@ pub extern "C" fn _start() {
 
     // Launch argument: `npk_open("beak", "https://…")` → prime the address bar
     // now; the actual fetch waits until the engine is set up (below).
-    let mut arg = [0u8; PAYLOAD_CAP];
-    let arg_len = host::launch_arg(&mut arg).unwrap_or(0).min(PAYLOAD_CAP);
-    if arg_len > 0 {
-        set_url(core::str::from_utf8(&arg[..arg_len]).unwrap_or(""));
+    let arg = host::launch_arg().unwrap_or_default();
+    if !arg.is_empty() {
+        set_url(&arg);
     } else {
         focus_address();
     }
@@ -5702,7 +5688,7 @@ pub extern "C" fn _start() {
     log("[beak] engine ready");
 
     // Engine is up — fetch the launch URL now (if we were opened with one).
-    if arg_len > 0 {
+    if !arg.is_empty() {
         let u = url_str().to_string();
         go(engine(), &u);
     }

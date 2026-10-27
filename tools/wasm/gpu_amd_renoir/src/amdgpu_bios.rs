@@ -3,7 +3,6 @@
 
 use crate::linux::Line;
 use crate::regs::*;
-use alloc::vec;
 use alloc::vec::Vec;
 
 fn le16(b: &[u8], at: u32) -> u16 {
@@ -59,14 +58,7 @@ fn amdgpu_acpi_vfct_match(t: &[u8], vhdr: u32, vendor: u16, device: u16, bus: u8
 /// `amdgpu_acpi_vfct_bios`: the VBIOS image of this card, checked.
 pub fn amdgpu_acpi_vfct_bios(vendor: u16, device: u16, bus: u8, slot: u8, func: u8) -> Option<Vec<u8>> {
     // acpi_get_table("VFCT", 1, &hdr): the first one.
-    let need = npk_sys::acpi_table(*b"VFCT", 0, &mut []);
-    if need <= 0 {
-        return None;
-    }
-    let mut t = vec![0u8; need as usize];
-    if npk_sys::acpi_table(*b"VFCT", 0, &mut t) != need {
-        return None;
-    }
+    let t = npk_sys::read_all(|b| npk_sys::acpi_table(*b"VFCT", 0, b)).filter(|t| !t.is_empty())?;
     let tbl_size = le32(&t, ACPI_TABLE_HEADER_LENGTH).min(t.len() as u32);
     if tbl_size < VFCT_SIZE {
         Line::new().s("ACPI VFCT table present but broken (too short #1),skipping").say();

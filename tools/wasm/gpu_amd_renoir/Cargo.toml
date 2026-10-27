@@ -1,6 +1,6 @@
 [package]
 name = "gpu_amd_renoir"
-version = "0.37.0"
+version = "0.38.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 
@@ -8,7 +8,7 @@ license = "AGPL-3.0-or-later"
 crate-type = ["cdylib"]
 
 [dependencies]
-npk_sys = { path = "../sdk/npk_sys" }
+npk_sys = { path = "../sdk/npk_sys", features = ["alloc"] }
 gpu_scene = { path = "../gpu_scene" }
 nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 

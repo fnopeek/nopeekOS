@@ -282,15 +282,14 @@ fn decode_login(b: &[u8]) -> Login {
 }
 
 fn fetch_login(name: &str) -> Login {
-    let mut buf = [0u8; 8192];
-    match host::vault_user_get(name, &mut buf) {
-        Some(n) if n <= buf.len() => decode_login(&buf[..n]),
-        _ => Login { url: String::new(), user: String::new(), pass: String::new(), note: String::new() },
+    match host::vault_user_get(name) {
+        Some(b) => decode_login(&b),
+        None => Login { url: String::new(), user: String::new(), pass: String::new(), note: String::new() },
     }
 }
 
-fn split_names(buf: &[u8], n: usize) -> Vec<String> {
-    core::str::from_utf8(&buf[..n.min(buf.len())])
+fn split_names(buf: &[u8]) -> Vec<String> {
+    core::str::from_utf8(buf)
         .unwrap_or("")
         .split('\n')
         .filter(|s| !s.is_empty())
@@ -299,19 +298,11 @@ fn split_names(buf: &[u8], n: usize) -> Vec<String> {
 }
 
 fn user_names() -> Vec<String> {
-    let mut buf = [0u8; 8192];
-    match host::vault_user_list(&mut buf) {
-        Some(n) => split_names(&buf, n),
-        None => Vec::new(),
-    }
+    host::vault_user_list().map(|b| split_names(&b)).unwrap_or_default()
 }
 
 fn wifi_names() -> Vec<String> {
-    let mut buf = [0u8; 8192];
-    let raw = match host::vault_system_list(&mut buf) {
-        Some(n) => split_names(&buf, n),
-        None => Vec::new(),
-    };
+    let raw = host::vault_system_list().map(|b| split_names(&b)).unwrap_or_default();
     raw.iter().filter_map(|s| s.strip_prefix("net:")).map(|s| s.into()).collect()
 }
 
@@ -1265,10 +1256,9 @@ fn clear_clipboard(st: &mut St) -> bool {
     if st.clip_hash == 0 {
         return true;
     }
-    let mut buf = [0u8; 2048];
-    match host::clipboard_get(&mut buf) {
-        Some(n) => {
-            if n <= buf.len() && fnv(&buf[..n]) == st.clip_hash {
+    match host::clipboard_get() {
+        Some(text) => {
+            if fnv(&text) == st.clip_hash {
                 host::clipboard_set("");
             }
             st.clip_hash = 0;

@@ -1,12 +1,20 @@
 //! Host calls with the conventions an app wants: a length is `Some(n)`, a
 //! refusal or error is `None`/`false`. Built on `npk_sys`, which holds the
 //! FFI.
+//!
+//! A call that returns one complete object (a file, a list, a string)
+//! returns it whole, read with [`read_all`]: the host answers a short
+//! buffer with the size it needs, so no app guesses one.
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use npk_sys as sys;
 
-/// A non-negative return as a length.
-fn len(n: i32) -> Option<usize> {
-    usize::try_from(n).ok()
+pub use npk_sys::{fill, read_all, read_all_from, Fill};
+
+/// Bytes as text; `None` if they are not UTF-8.
+fn text(bytes: Vec<u8>) -> Option<String> {
+    String::from_utf8(bytes).ok()
 }
 
 /// To the boot log (`dmesg`); shown on screen only with `set bootlog verbose`.
@@ -35,9 +43,18 @@ pub fn ticks_ms() -> u64 { sys::ticks().max(0) as u64 }
 /// Seconds since the Unix epoch (0 if the clock is unknown).
 pub fn unix_time() -> u64 { sys::unix_time().max(0) as u64 }
 
-/// Read file `name` into `buf`; `Some(n)` bytes copied (a longer file is
-/// cut to `buf.len()`).
-pub fn fetch(name: &str, buf: &mut [u8]) -> Option<usize> { len(sys::fetch(name.as_bytes(), buf)) }
+/// File `name`, whole; `None` if it does not exist or may not be read.
+/// The buffer starts at the listed size, so a large file is read once.
+pub fn fetch(name: &str) -> Option<Vec<u8>> {
+    match fs_stat(name).and_then(|(size, ..)| usize::try_from(size).ok()) {
+        Some(size) => read_all_from(size, |b| sys::fetch(name.as_bytes(), b)),
+        None => read_all(|b| sys::fetch(name.as_bytes(), b)),
+    }
+}
+
+/// File `name` into `buf`, for a caller that manages its own memory:
+/// `Fill::Need(n)` when the file is longer than `buf`, nothing written.
+pub fn fetch_into(name: &str, buf: &mut [u8]) -> Fill { fill(sys::fetch(name.as_bytes(), buf)) }
 
 /// Write `data` as file `name`. False if refused.
 pub fn store(name: &str, data: &[u8]) -> bool { sys::store(name.as_bytes(), data) == 0 }
@@ -55,33 +72,36 @@ pub fn vault_lock() { sys::vault_lock(); }
 pub fn vault_user_set(name: &str, val: &[u8]) -> bool {
     sys::vault_user_set(name.as_bytes(), val) == 0
 }
-pub fn vault_user_get(name: &str, buf: &mut [u8]) -> Option<usize> {
-    len(sys::vault_user_get(name.as_bytes(), buf))
+pub fn vault_user_get(name: &str) -> Option<Vec<u8>> {
+    read_all(|b| sys::vault_user_get(name.as_bytes(), b))
 }
-pub fn vault_user_list(buf: &mut [u8]) -> Option<usize> { len(sys::vault_user_list(buf)) }
+/// Newline-separated names.
+pub fn vault_user_list() -> Option<Vec<u8>> { read_all(sys::vault_user_list) }
 pub fn vault_system_set(name: &str, val: &[u8]) -> bool {
     sys::vault_system_set(name.as_bytes(), val) == 0
 }
-pub fn vault_system_list(buf: &mut [u8]) -> Option<usize> { len(sys::vault_system_list(buf)) }
+/// Newline-separated names, never values.
+pub fn vault_system_list() -> Option<Vec<u8>> { read_all(sys::vault_system_list) }
 pub fn vault_user_delete(name: &str) -> bool { sys::vault_user_delete(name.as_bytes()) == 0 }
 pub fn vault_system_delete(name: &str) -> bool { sys::vault_system_delete(name.as_bytes()) == 0 }
 
 // ── Network — the `link` tool ─────────────
-/// The WLAN manager's state text; None if denied or too large for `buf`.
-pub fn wifi_status(buf: &mut [u8]) -> Option<usize> { len(sys::wifi_status(buf)) }
+/// The WLAN manager's state text; None if denied.
+pub fn wifi_status() -> Option<Vec<u8>> { read_all(sys::wifi_status) }
 /// Ask the WLAN manager: scan, connect, disconnect, forget, auto.
 pub fn wifi_request(msg: &[u8]) -> bool { sys::wifi_request(msg) == 0 }
-/// Interfaces and IPv4 as `key value` lines.
-pub fn net_info(buf: &mut [u8]) -> Option<usize> { len(sys::net_info(buf)) }
+/// Interfaces and IPv4 as `key value` lines; None if denied.
+pub fn net_info() -> Option<Vec<u8>> { read_all(sys::net_info) }
 
 // ── Clipboard — focus-gated: works only while this app has focus ──────
 pub fn clipboard_set(text: &str) -> bool { sys::clipboard_set(text.as_bytes()) >= 0 }
-/// The clipboard text's full length (may exceed `buf`), or None if denied.
-pub fn clipboard_get(buf: &mut [u8]) -> Option<usize> { len(sys::clipboard_get(buf)) }
+/// The clipboard text (empty when there is none), or None if denied.
+pub fn clipboard_get() -> Option<Vec<u8>> { read_all(sys::clipboard_get) }
 
-/// List `prefix` into `out` (the kernel's entry encoding); `Some(n)` bytes.
-pub fn fs_list(prefix: &str, out: &mut [u8], recursive: bool) -> Option<usize> {
-    len(sys::fs_list(prefix.as_bytes(), out, recursive))
+/// The listing of `prefix` in the kernel's entry encoding (decode with
+/// `fs::list_entries`); None if it may not be read.
+pub fn fs_list(prefix: &str, recursive: bool) -> Option<Vec<u8>> {
+    read_all(|b| sys::fs_list(prefix.as_bytes(), b, recursive))
 }
 
 /// Size, directory flag and mtime of `name`; `None` if it does not exist or
@@ -94,11 +114,11 @@ pub fn fs_stat(name: &str) -> Option<(u64, bool, u64)> {
     Some((size, out[8] != 0, mtime))
 }
 
-/// The user's home directory into `buf`; `Some(n)` bytes.
-pub fn home_dir(buf: &mut [u8]) -> Option<usize> { len(sys::home_dir(buf)) }
+/// The user's home directory.
+pub fn home_dir() -> Option<String> { read_all(sys::home_dir).and_then(text) }
 
-/// The launch argument into `buf`; `Some(0)` when there is none.
-pub fn launch_arg(buf: &mut [u8]) -> Option<usize> { len(sys::launch_arg(buf)) }
+/// The launch argument; empty when there is none.
+pub fn launch_arg() -> Option<String> { read_all(sys::launch_arg).and_then(text) }
 
 /// Close this app's window.
 pub fn close_widget() { sys::close_widget(); }
@@ -112,8 +132,8 @@ pub fn run_intent(verb: &str) -> i32 { sys::run_intent(verb.as_bytes()) }
 /// Make this window modal or not.
 pub fn window_set_modal(modal: bool) { sys::window_set_modal(modal as i32); }
 
-/// The compositor's window list into `buf`; `Some(n)` bytes.
-pub fn window_titles(buf: &mut [u8]) -> Option<usize> { len(sys::window_titles(buf)) }
+/// The compositor's window list, one line per window.
+pub fn window_titles() -> Option<Vec<u8>> { read_all(sys::window_titles) }
 
 /// Park until a signal in `mask` or `timeout_ms` (negative: no timeout).
 pub fn wait(mask: u32, timeout_ms: i32) -> i32 { sys::wait(mask as i32, timeout_ms) }

@@ -438,10 +438,6 @@ const NODE_MENU_HELP: u32 = 104;
 
 const GRID_COLS: usize = 4;
 const QUERY_CAP: usize = 127;
-const LIST_BUF_SIZE: usize = 128 * 1024;
-const NAME_FETCH_CAP: usize = 64;
-/// Largest trash index read back; a bigger file is read up to this size.
-const TRASH_INDEX_CAP: u64 = 1024 * 1024;
 
 // ── State ─────────────────────────────────────────────────────────────
 
@@ -1272,10 +1268,8 @@ impl Loft {
 
     fn read_trash_index(&self) -> Vec<TrashRecord> {
         let path = self.trash_index();
-        let Some((size, false, _)) = host::fs_stat(&path) else { return Vec::new() };
-        let mut buf = alloc::vec![0u8; size.min(TRASH_INDEX_CAP) as usize];
-        let n = host::fetch(&path, &mut buf).unwrap_or(0).min(buf.len());
-        parse_trash_index(&buf[..n])
+        let Some((_, false, _)) = host::fs_stat(&path) else { return Vec::new() };
+        parse_trash_index(&host::fetch(&path).unwrap_or_default())
     }
 
     /// Replace the index with `records`; an empty index is removed.
@@ -2491,10 +2485,8 @@ fn toggle_menu(current: Option<OpenMenu>, target: OpenMenu) -> Option<OpenMenu> 
 fn load_associations() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let key = "sys/config/associations";
-    let mut buf = [0u8; 2048];
-    let n = host::fetch(key, &mut buf).unwrap_or(0);
-    if n == 0 { return out; }
-    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+    let Some(buf) = host::fetch(key) else { return out };
+    if let Ok(s) = core::str::from_utf8(&buf) {
         for line in s.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') { continue; }
@@ -2512,11 +2504,8 @@ fn read_home_dir() -> String {
     // The username lives in the single encrypted `.system/config` blob,
     // not a fetchable `sys/config/name` object — ask the kernel for the
     // resolved home dir directly.
-    let mut buf = [0u8; NAME_FETCH_CAP];
-    let n = host::home_dir(&mut buf).unwrap_or(0);
-    if n == 0 { return String::from("home"); }
-    match core::str::from_utf8(&buf[..n]) {
-        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+    match host::home_dir() {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => String::from("home"),
     }
 }
@@ -2541,11 +2530,9 @@ fn dir_signature(entries: &[Entry]) -> u64 {
 /// sub-path under `prefix` (e.g. "wallpapers/aurora"), so a search hit
 /// shows where the match lives.
 fn list_dir_internal(prefix: &str, recursive: bool) -> Vec<Entry> {
-    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
-    let n = host::fs_list(prefix, &mut buf, recursive).unwrap_or(0);
-    if n == 0 { return Vec::new(); }
+    let Some(listing) = host::fs_list(prefix, recursive) else { return Vec::new() };
     let mut out: Vec<Entry> = Vec::new();
-    for e in nopeek_widgets::fs::list_entries(&buf[..n]) {
+    for e in nopeek_widgets::fs::list_entries(&listing) {
         out.push(Entry {
             name:          e.name.to_string(),
             name_lc:       e.name.to_ascii_lowercase(),
@@ -2592,11 +2579,9 @@ fn pending_folder_indices(entries: &[Entry]) -> Vec<usize> {
 /// `Entry` per descendant — cheap even for large subtrees, and called one
 /// folder at a time off the idle loop so no single scan stalls the app.
 fn scan_folder_stats(path: &str) -> (u64, u64) {
-    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
-    let n = host::fs_list(path, &mut buf, true).unwrap_or(0);
-    if n == 0 { return (0, 0); }
+    let Some(listing) = host::fs_list(path, true) else { return (0, 0) };
     let (mut bytes, mut files) = (0u64, 0u64);
-    for e in nopeek_widgets::fs::list_entries(&buf[..n]) {
+    for e in nopeek_widgets::fs::list_entries(&listing) {
         if e.is_dir { continue; }                // directory → count files only
         bytes = bytes.saturating_add(e.size);
         files += 1;

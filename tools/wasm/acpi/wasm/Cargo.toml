@@ -1,6 +1,6 @@
 [package]
 name = "acpi"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 
@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 aml_core = { path = "../core" }
-npk_sys = { path = "../../sdk/npk_sys" }
+npk_sys = { path = "../../sdk/npk_sys", features = ["alloc"] }
 nopeek_widgets = { path = "../../sdk/widgets", features = ["heap"] }
 
 [profile.release]

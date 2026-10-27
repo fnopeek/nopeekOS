@@ -10,6 +10,12 @@
 //! arguments from `rsi`, return in `rax`. That is SysV, so `extern "C"` fits
 //! as is, including functions with more than five arguments, which spill to
 //! the stack.
+//!
+//! A call that writes one complete object (a file, a list, a string) into a
+//! guest buffer answers a buffer too small for it with `-(needed + 2)` and
+//! writes nothing; -1 is an error or a refusal (`host_core::write_whole`).
+//! A queue pop leaves the item queued. Stream calls (`npk_tcp_recv`, ring
+//! and mix polls) return what fits, like `read`.
 
 use super::host_core;
 use super::HostState;
@@ -164,7 +170,7 @@ host_imports! {
     // regardless of shade state.
     mem fn npk_log_serial(ptr: i32, len: i32);
 
-    // npk_fetch(name_ptr, name_len, buf_ptr, buf_max) -> bytes or -1
+    // npk_fetch(name_ptr, name_len, buf_ptr, buf_max) -> bytes, -(needed + 2) or -1
     mem fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
 
     // npk_http_request(url_ptr, url_len, buf_ptr, buf_max) -> bytes or -1
@@ -193,7 +199,7 @@ host_imports! {
     // NET-gated, same capability as npk_http_request.
     mem fn npk_http_send(method_ptr: i32, method_len: i32, url_ptr: i32, url_len: i32, hdrs_ptr: i32, hdrs_len: i32, body_ptr: i32, body_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
 
-    // npk_http_response_headers(buf_ptr, buf_max) -> len, or -1
+    // npk_http_response_headers(buf_ptr, buf_max) -> len, -(needed + 2) or -1
     // The last npk_http_send response's header block, minus the status line.
     // `Set-Cookie` repeats, so this is a raw block rather than a getter per
     // name. NET-gated.
@@ -276,14 +282,14 @@ host_imports! {
     // hold the RNG mutex arbitrarily long.
     mem fn npk_random_bytes(buf_ptr: i32, len: i32) -> i32;
 
-    // npk_http_final_url(buf_ptr, buf_max) -> len, or -1
+    // npk_http_final_url(buf_ptr, buf_max) -> len, -(needed + 2) or -1
     // The URL the last npk_http_request's body actually came from, after
     // redirects. A browser resolves relative sub-resources against this
     // (the document base URL) — resolving against the requested URL
     // instead makes every sub-resource repeat the redirect. NET-gated.
     mem fn npk_http_final_url(buf_ptr: i32, buf_max: i32) -> i32;
 
-    // npk_http_content_type(buf_ptr, buf_max) -> len, or -1
+    // npk_http_content_type(buf_ptr, buf_max) -> len, -(needed + 2) or -1
     //
     // The last npk_http_request's Content-Type, verbatim (e.g.
     // "text/html; charset=ISO-8859-1"). Cleared when the request failed.
@@ -293,7 +299,7 @@ host_imports! {
     // costs it the entire page. NET-gated, like the request it describes.
     mem fn npk_http_content_type(buf_ptr: i32, buf_max: i32) -> i32;
 
-    // npk_http_last_error(buf_ptr, buf_max) -> len, or -1
+    // npk_http_last_error(buf_ptr, buf_max) -> len, -(needed + 2) or -1
     //
     // Why the last npk_http_request failed: `kind\tmessage`, where kind is
     // a stable token (`cert.untrusted`, `cert.expired`, `net.connect`, …)
@@ -329,14 +335,16 @@ host_imports! {
     ctx fn npk_vault_lock() -> i32;
     // npk_vault_user_set(name_ptr, name_len, val_ptr, val_len) -> 0 or -1.
     mem fn npk_vault_user_set(name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32) -> i32;
-    // npk_vault_user_get(name_ptr, name_len, buf_ptr, buf_max) -> bytes or -1.
+    // npk_vault_user_get(name_ptr, name_len, buf_ptr, buf_max) -> bytes, -(needed + 2) or -1.
     mem fn npk_vault_user_get(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    // npk_vault_user_list(buf_ptr, buf_max) -> len or -1. Newline-separated names.
+    // npk_vault_user_list(buf_ptr, buf_max) -> len, -(needed + 2) or -1.
+    // Newline-separated names.
     mem fn npk_vault_user_list(buf_ptr: i32, buf_max: i32) -> i32;
     // npk_vault_system_set(name_ptr, name_len, val_ptr, val_len) -> 0 or -1.
     // Write a system credential (e.g. "net:<ssid>") from the GUI.
     mem fn npk_vault_system_set(name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32) -> i32;
-    // npk_vault_system_list(buf_ptr, buf_max) -> len or -1. Names only, never values.
+    // npk_vault_system_list(buf_ptr, buf_max) -> len, -(needed + 2) or -1.
+    // Names only, never values.
     mem fn npk_vault_system_list(buf_ptr: i32, buf_max: i32) -> i32;
     // npk_vault_user_delete / system_delete(name_ptr, name_len) -> 0 or -1.
     mem fn npk_vault_user_delete(name_ptr: i32, name_len: i32) -> i32;
@@ -344,7 +352,8 @@ host_imports! {
 
     // npk_home_dir(buf_ptr, buf_max) -> i32
     // Write the current user's home directory ("home/<name>", or "home"
-    // if unset) into the caller's buffer; returns bytes written or -1.
+    // if unset) into the caller's buffer; returns bytes written,
+    // -(needed + 2) or -1.
     // Apps need this because the username lives in the single encrypted
     // `.system/config` blob, not a fetchable `sys/config/name` object —
     // so they can't derive their home/documents path on their own.
@@ -359,8 +368,8 @@ host_imports! {
 
     // npk_locale(buf_ptr, buf_max) -> i32
     // Write the UI language code (`lang` config key, e.g. "en" / "de")
-    // into the caller's buffer; returns bytes written or -1. Defaults to
-    // "en". The kernel stores the code only — the catalogs live in the
+    // into the caller's buffer; returns bytes written, -(needed + 2) or -1.
+    // Defaults to "en". The kernel stores the code only — the catalogs live in the
     // apps, so adding a language never touches the kernel.
     //
     // Deliberately ungated: which language to draw labels in is a display
@@ -371,8 +380,8 @@ host_imports! {
 
     // npk_launch_arg(buf_ptr, buf_max) -> i32
     // Read the launch argument the app was started with (e.g. a file
-    // path passed by npk_open). Returns bytes written, 0 if none, -1 on
-    // error. Apps call this once at startup.
+    // path passed by npk_open). Returns bytes written, 0 if none,
+    // -(needed + 2) or -1 on error. Apps call this once at startup.
     mem fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
 
     // ── Clipboard (cross-app copy/paste) ──────────────────────────────
@@ -395,9 +404,9 @@ host_imports! {
     ctx fn npk_clipboard_len() -> i32;
 
     // npk_clipboard_get(ptr, max) -> i32
-    // Write up to `max` clipboard bytes into the guest buffer. Returns the
-    // full text length (so the app can detect truncation and re-query with
-    // a bigger buffer), 0 if empty, or -1 (denied / not focused / bad ptr).
+    // Write the clipboard text into the guest buffer. Returns its length,
+    // 0 if empty, -(needed + 2) for a short buffer, or -1 (denied / not
+    // focused / bad ptr).
     mem fn npk_clipboard_get(ptr: i32, max: i32) -> i32;
 
     // npk_open(app_ptr, app_len, arg_ptr, arg_len) -> i32
@@ -576,7 +585,7 @@ host_imports! {
     // compositor also draws it last, after every window.
     ctx fn npk_screen_flash() -> i32;
 
-    // npk_capture_screen(buf_ptr, buf_max) -> bytes_written or -1
+    // npk_capture_screen(buf_ptr, buf_max) -> bytes_written, -(needed + 2) or -1
     // CAPTURE-gated (screen-scrape — only the screenshot tool holds it).
     // Copies the composited front framebuffer as tightly-packed BGRA32
     // (width*height*4) into the app buffer. The app then PNG-encodes /
@@ -588,19 +597,20 @@ host_imports! {
     // queue, postcard-encode it into the supplied WASM buffer.
     //   >0 → encoded byte count
     //   0  → queue empty (app should sleep / yield)
-    //   -1 → no widget window, cap denied, or buffer too small
+    //   -1 → no widget window or cap denied
+    //   -(needed + 2) → buffer too small; the event stays queued
     mem fn npk_event_poll(buf_ptr: i32, buf_max: i32) -> i32;
 
     // npk_list_modules(buf_ptr, buf_max) -> i32
     // Writes a NUL-separated list of module names from `sys/wasm/*` into
-    // the caller's buffer. Returns bytes written, or -1 on cap denied /
-    // buffer too small. The trailing entry is not terminated — caller
-    // splits on 0x00.
+    // the caller's buffer. Returns bytes written, -(needed + 2) for a short
+    // buffer, or -1 on cap denied. The trailing entry is not terminated —
+    // caller splits on 0x00.
     //
     // RENDER-gated because only GUI apps (drun) need it.
     mem fn npk_list_modules(buf_ptr: i32, buf_max: i32) -> i32;
 
-    // npk_app_meta(name_ptr, name_len, buf_ptr, buf_max) -> bytes or -1
+    // npk_app_meta(name_ptr, name_len, buf_ptr, buf_max) -> bytes, -(needed + 2) or -1
     // Returns only the `.npk.app_meta` custom-section payload of the module
     // `sys/wasm/<name>`, extracted kernel-side. Launchers (drun, deck) read an
     // app's icon/name/description with this without fetching the whole
@@ -692,8 +702,8 @@ host_imports! {
 
     // npk_bar_state(buf, max) -> i32
     // Live state for the panel: "HH:MM\n<ws_count>\n<ws_active>\n<title>"
-    // (clock already timezone-adjusted). Returns bytes written, truncated
-    // to `max`; -1 on cap / args.
+    // (clock already timezone-adjusted). Returns bytes written,
+    // -(needed + 2) for a short buffer; -1 on cap / args.
     mem fn npk_bar_state(buf_ptr: i32, max: i32) -> i32;
 
     // npk_window_titles(buf, max) -> i32
@@ -703,6 +713,7 @@ host_imports! {
     // the module name, `caption` what the panel shows; `id` and `caption`
     // only for a SHELL caller. Panels and overlays are excluded. The panel
     // derives its window list from this; the kernel stays free of app names.
+    // Bytes written, -(needed + 2) for a short buffer, -1 on cap.
     mem fn npk_window_titles(buf_ptr: i32, max: i32) -> i32;
 
     // npk_window_activate(id) -> i32 — switch to the workspace of window
@@ -730,8 +741,8 @@ host_imports! {
         text_ptr: i32, text_len: i32, opens_ptr: i32, opens_len: i32) -> i32;
     // npk_status_clear(key) -> 0 / -1
     mem fn npk_status_clear(key_ptr: i32, key_len: i32) -> i32;
-    // npk_status_list(buf, max) -> bytes / -1 (needed size when larger);
-    // RENDER. Format in `status::serialize`.
+    // npk_status_list(buf, max) -> bytes / -(needed + 2) / -1; RENDER.
+    // Format in `status::serialize`.
     mem fn npk_status_list(buf_ptr: i32, max: i32) -> i32;
     // npk_launch_at(app, arg, anchor) -> 0 / -1: `npk_launch`, and the
     // app's first overlay is placed next to node `anchor` of the caller's
@@ -740,15 +751,16 @@ host_imports! {
 
     // ── AML battery driver (acpi.wasm) host functions, HARDWARE-gated ─────
     // npk_acpi_dsdt(buf_ptr, buf_max) -> i32: copy the DSDT (firmware AML)
-    // into the caller's buffer; returns the DSDT length. If it exceeds
-    // buf_max nothing is copied (caller sizes its buffer up). -1 on error.
+    // into the caller's buffer; returns the DSDT length, -(needed + 2) if
+    // it exceeds buf_max (nothing copied), -1 on error.
     mem fn npk_acpi_dsdt(buf_ptr: i32, buf_max: i32) -> i32;
 
     // npk_acpi_mem_read(hi, lo) -> byte, or -1 (RAM / no right / unmapped)
     ctx fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
 
-    // npk_acpi_table(sig, index, buf_ptr, buf_max) -> len. The n-th table
-    // with this signature; `sig` is the four characters, little-endian.
+    // npk_acpi_table(sig, index, buf_ptr, buf_max) -> len, -(needed + 2)
+    // or -1. The n-th table with this signature; `sig` is the four
+    // characters, little-endian.
     mem fn npk_acpi_table(sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32;
 
     // npk_mmio_map_phys(hi, lo, pages) -> handle, or -1. For hardware not on
@@ -801,7 +813,8 @@ host_imports! {
     mem fn npk_audio_poll_mix(ptr: i32, max: i32) -> i32;
 
     // npk_display_audio_set(port, ptr, len) -> 0 (display driver);
-    // npk_display_audio_get(port, ptr, max) -> ELD length (audio driver);
+    // npk_display_audio_get(port, ptr, max) -> ELD length or -(needed + 2)
+    // (audio driver);
     // npk_display_audio_generation() -> count of reports. Gated by
     // HARDWARE and the class of the PCI device the caller owns.
     mem fn npk_display_audio_set(port: i32, ptr: i32, len: i32) -> i32;
@@ -842,8 +855,8 @@ host_imports! {
     //   Synthetic directory entries from recursive descent inherit
     //   mtime=0; only stored TreeEntry instances carry real values.
     //
-    // Returns bytes written, 0 if prefix is empty, -1 on cap / args /
-    // truncation (buffer too small to fit the full listing).
+    // Returns bytes written, -(needed + 2) when the full listing does not
+    // fit, -1 on cap / args.
     mem fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
 
     // npk_fs_stat(name_ptr, name_len, out_ptr) -> i32
@@ -853,7 +866,8 @@ host_imports! {
     // mtime is UTC seconds since the Unix epoch — zero means unknown.
     mem fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
 
-    // npk_config_get(key_ptr, key_len, buf_ptr, buf_max) -> len, 0 or -1
+    // npk_config_get(key_ptr, key_len, buf_ptr, buf_max) -> len, 0 (unset),
+    // -(needed + 2) or -1
     // A `set` value of the module's own namespace (`<module>.<name>`).
     mem fn npk_config_get(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
 
@@ -1204,10 +1218,12 @@ host_imports! {
     // npk_wifi_send_cmd(buf_ptr, len) -> 0 / -1 — manager enqueues a command.
     mem fn npk_wifi_send_cmd(buf_ptr: i32, len: i32) -> i32;
 
-    // npk_wifi_poll_event(buf_ptr, max) -> len / -1 — manager dequeues an event.
+    // npk_wifi_poll_event(buf_ptr, max) -> len / 0 (none) / -(needed + 2) / -1
+    // — manager dequeues an event.
     mem fn npk_wifi_poll_event(buf_ptr: i32, max: i32) -> i32;
 
-    // npk_wifi_poll_cmd(buf_ptr, max) -> len / -1 — driver dequeues a command.
+    // npk_wifi_poll_cmd(buf_ptr, max) -> len / 0 (none) / -(needed + 2) / -1
+    // — driver dequeues a command.
     mem fn npk_wifi_poll_cmd(buf_ptr: i32, max: i32) -> i32;
 
     // npk_wifi_send_event(buf_ptr, len) -> 0 / -1 — driver enqueues an event.
@@ -1215,20 +1231,23 @@ host_imports! {
 
     // WLAN manager. Manager side: `wifid` by name
     // and NETCTL. UI side: the `link` tool by name.
-    // npk_wifi_known(buf_ptr, max) -> len / -1 / -2 (buffer too small).
+    // npk_wifi_known(buf_ptr, max) -> len / -(needed + 2) / -1.
     mem fn npk_wifi_known(buf_ptr: i32, max: i32) -> i32;
     // npk_wifi_new_network() -> 0 / -1 — the link is on another network now:
     // a new DHCP lease.
     ctx fn npk_wifi_new_network() -> i32;
-    // npk_wifi_poll_request(buf_ptr, max) -> len / -1 — next user request.
+    // npk_wifi_poll_request(buf_ptr, max) -> len / 0 (none) / -(needed + 2)
+    // / -1 — next user request.
     mem fn npk_wifi_poll_request(buf_ptr: i32, max: i32) -> i32;
     // npk_wifi_publish(buf_ptr, len) -> 0 / -1 — the manager's state text.
     mem fn npk_wifi_publish(buf_ptr: i32, len: i32) -> i32;
-    // npk_wifi_status(buf_ptr, max) -> len / -1 / -2 — read that state (`link`).
+    // npk_wifi_status(buf_ptr, max) -> len / -(needed + 2) / -1 — read that
+    // state (`link`).
     mem fn npk_wifi_status(buf_ptr: i32, max: i32) -> i32;
     // npk_wifi_request(buf_ptr, len) -> 0 / -1 — scan/connect/disconnect/forget (`link`).
     mem fn npk_wifi_request(buf_ptr: i32, len: i32) -> i32;
-    // npk_net_info(buf_ptr, max) -> len / -1 / -2 — interfaces + IPv4 (RENDER).
+    // npk_net_info(buf_ptr, max) -> len / -(needed + 2) / -1 — interfaces +
+    // IPv4 (RENDER).
     mem fn npk_net_info(buf_ptr: i32, max: i32) -> i32;
 
     // npk_driver_report(buf_ptr, len) -> 0 / -1 — a bound driver publishes a

@@ -8,7 +8,7 @@ version = "0.1.0"
 
 [[package]]
 name = "i2c_hid"
-version = "0.28.2"
+version = "0.29.0"
 dependencies = [
  "aml_core",
  "i2c_hid_core",
@@ -24,4 +24,4 @@ dependencies = [
 
 [[package]]
 name = "npk_sys"
-version = "0.1.0"
+version = "0.2.0"

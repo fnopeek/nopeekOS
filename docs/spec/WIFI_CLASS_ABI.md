@@ -48,16 +48,16 @@ kernel-assigned module name (`ctx.module_name`).
 | Host function | Gate | Used by |
 |---|---|---|
 | `npk_wifi_send_cmd(buf, len) -> 0 / -1` | name `wifid` and NETCTL | wifid |
-| `npk_wifi_poll_event(buf, max) -> len / -1` | name `wifid` and NETCTL | wifid |
-| `npk_wifi_poll_cmd(buf, max) -> len / -1` | driver | driver |
+| `npk_wifi_poll_event(buf, max) -> len / 0 / -(needed + 2) / -1` | name `wifid` and NETCTL | wifid |
+| `npk_wifi_poll_cmd(buf, max) -> len / 0 / -(needed + 2) / -1` | driver | driver |
 | `npk_wifi_send_event(buf, len) -> 0 / -1` | driver | driver |
-| `npk_wifi_known(buf, max) -> len / -1 / -2` | name `wifid` and NETCTL | wifid |
-| `npk_wifi_poll_request(buf, max) -> len / -1` | name `wifid` and NETCTL | wifid |
+| `npk_wifi_known(buf, max) -> len / -(needed + 2) / -1` | name `wifid` and NETCTL | wifid |
+| `npk_wifi_poll_request(buf, max) -> len / 0 / -(needed + 2) / -1` | name `wifid` and NETCTL | wifid |
 | `npk_wifi_publish(buf, len) -> 0 / -1` | name `wifid` and NETCTL, `len <= 4096` | wifid |
 | `npk_wifi_new_network() -> 0 / -1` | name `wifid` and NETCTL | wifid |
-| `npk_wifi_status(buf, max) -> len / -1 / -2` | name `link` | link |
+| `npk_wifi_status(buf, max) -> len / -(needed + 2) / -1` | name `link` | link |
 | `npk_wifi_request(buf, len) -> 0 / -1` | name `link` | link |
-| `npk_net_info(buf, max) -> len / -1 / -2` | RENDER | link |
+| `npk_net_info(buf, max) -> len / -(needed + 2) / -1` | RENDER | link |
 | `npk_netdev_register(mac_ptr) -> 0 / -1` | driver state, once per module, refused while another module holds the NIC | driver |
 | `npk_netdev_submit_rx(buf, len) -> 0 / -1` | driver | driver |
 | `npk_netdev_rx_deliver(buf, len) -> 0 / -1` | driver | none |
@@ -94,7 +94,8 @@ A push to either control queue signals the fiber registered for that bit.
 | Message size | 1 to 2048 bytes (`WIFI_MSG_MAX`) |
 | Queue depth | 16 messages per direction |
 | Push to a full queue, or an empty or oversized message | rejected (`-1`), counted as dropped |
-| Poll with a buffer smaller than the head message | `-1`, the message stays at the head |
+| Poll of an empty queue | `0` |
+| Poll with a buffer smaller than the head message | `-(needed + 2)`, the message stays at the head |
 | Driver module exits | both queues are cleared |
 
 The first byte of every message is its code. `wlan` prints sent, queued and
@@ -376,7 +377,7 @@ bytes of printable ASCII.
 | driver | nothing | nothing |
 
 `npk_wifi_known` returns, per network, `[ssid_len u8][ssid][rec_len u8][v1
-record]`, all networks or none (`-2` if the buffer is too small). wifid keeps
+record]`, all networks or none (`-(needed + 2)` if the buffer is too small). wifid keeps
 at most 32 networks and zeroes its copy of the passphrases before every
 re-read.
 

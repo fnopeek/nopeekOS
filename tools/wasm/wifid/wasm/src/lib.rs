@@ -150,6 +150,12 @@ const SSID_MAX: usize = 32;
 const PSK_MAX: usize = 63;
 const MAX_KNOWN: usize = 32;
 const MAX_APS: usize = 48;
+/// The longest `npk_wifi_known` answer for the networks wifid keeps: per
+/// network a length byte, the SSID, a length byte and a record of at most
+/// 255 bytes. wifid has no heap, so the buffer is this bound.
+const KNOWN_WIRE_MAX: usize = MAX_KNOWN * (1 + SSID_MAX + 1 + u8::MAX as usize);
+/// A queue message is at most this long (`WIFI_MSG_MAX` in the kernel).
+const WIFI_MSG_MAX: usize = 2048;
 
 #[derive(Clone, Copy)]
 struct Ssid {
@@ -331,13 +337,17 @@ impl Mgr {
 
     /// Re-read the known networks: `[ssid_len][ssid][rec_len][record]`.
     fn load_known(&mut self) {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; KNOWN_WIRE_MAX];
         let n = npk_sys::wifi_known(&mut buf);
         // Wipe the old passwords first; the list may have shrunk.
         for k in self.known.iter_mut() {
             k.psk = [0; PSK_MAX];
         }
         self.n_known = 0;
+        if n < -1 {
+            log("[wifid] more known networks than wifid keeps\n");
+            return;
+        }
         if n < 0 {
             log("[wifid] the known networks could not be read\n");
             return;
@@ -1059,7 +1069,7 @@ pub extern "C" fn _start() {
     m.publish();
     log_flush();
 
-    let mut buf = [0u8; 2048];
+    let mut buf = [0u8; WIFI_MSG_MAX];
     loop {
         let mut changed = false;
         loop {
@@ -1126,6 +1136,9 @@ fn cfg_get<'a>(text: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
 
 fn read_cfg<'a>(name: &[u8], buf: &'a mut [u8]) -> Option<&'a [u8]> {
     let n = npk_sys::fetch(name, buf);
+    if n < -1 {
+        log("[wifid] a config file is too long, ignored\n");
+    }
     if n <= 0 {
         return None;
     }

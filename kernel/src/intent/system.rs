@@ -1558,15 +1558,13 @@ pub fn intent_dmesg(args: &str) {
         return;
     }
 
-    // Stop capture, print, restart — so dmesg output itself isn't appended
-    let log = crate::serial::stop_capture();
+    // Read without consuming; printing it must not append it to itself.
+    let log = crate::serial::capture_snapshot();
     if log.is_empty() {
         kprintln!("(no boot log captured)");
     } else {
-        // Print without going through capture (direct serial + framebuffer)
-        print_log(&log, pat);
+        crate::serial::without_capture(|| print_log(&log, pat));
     }
-    crate::serial::start_capture();
 }
 
 /// File this boot's log in npkFS, keeping the previous one alongside it.

@@ -94,9 +94,6 @@ fn push_i64(out: &mut String, mut v: i64) {
     while n > 0 { n -= 1; out.push(digits[n] as char); }
 }
 
-// ── Buffers ───────────────────────────────────────────────────────────
-const LIST_BUF_SIZE: usize = 64 * 1024;
-const HOME_CAP: usize = 256;
 
 // The SDK's growing heap: it frees, and it takes memory from the runtime as
 // it is needed instead of reserving it at launch.
@@ -110,9 +107,8 @@ fn panic(_: &core::panic::PanicInfo) -> ! { log("[snap] panic!"); core::arch::wa
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     // Mode (unused — region falls back to full).
-    let mut argbuf = [0u8; 32];
-    let n = host::launch_arg(&mut argbuf).unwrap_or(0);
-    let _mode = if n > 0 { core::str::from_utf8(&argbuf[..n]).unwrap_or("full") } else { "full" };
+    let arg = host::launch_arg().unwrap_or_default();
+    let _mode = if arg.is_empty() { "full" } else { arg.as_str() };
 
     let (w, h) = capture_size();
     if (w, h) == (0, 0) { log("[snap] capture_size failed"); return; }
@@ -122,9 +118,10 @@ pub extern "C" fn _start() {
 
     // Capture the composited screen as BGRA.
     let need = w * h * 4;
-    let mut bgra: Vec<u8> = alloc::vec![0u8; need];
-    let got = capture_screen(&mut bgra);
-    if got as usize != need { log("[snap] capture failed"); return; }
+    let bgra: Vec<u8> = match host::read_all_from(need, capture_screen) {
+        Some(px) if px.len() == need => px,
+        _ => { log("[snap] capture failed"); return; }
+    };
     let t_captured = now_ms();
     log_ms("capture", t_captured - t_start);
 
@@ -152,23 +149,17 @@ pub extern "C" fn _start() {
 
 // ── npkFS helpers ─────────────────────────────────────────────────────
 fn read_home_dir() -> String {
-    let mut buf = [0u8; HOME_CAP];
-    let n = host::home_dir(&mut buf).unwrap_or(0);
-    if n == 0 { return "home".to_string(); }
-    core::str::from_utf8(&buf[..n]).unwrap_or("home").to_string()
+    host::home_dir().filter(|h| !h.is_empty()).unwrap_or_else(|| "home".to_string())
 }
 
 /// Next free `screenshot-NNN.png` in `dir` (clock-free naming — we have
 /// no time host fn, so number sequentially from the existing files).
 fn next_name(dir: &str) -> String {
-    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
-    let n = host::fs_list(dir, &mut buf, false).unwrap_or(0);
+    let listing = host::fs_list(dir, false).unwrap_or_default();
     let mut max: u32 = 0;
-    if n > 0 {
-        for e in nopeek_widgets::fs::list_entries(&buf[..n]) {
-            if let Some(num) = e.name.strip_prefix("screenshot-").and_then(|s| s.strip_suffix(".png")) {
-                if let Ok(v) = num.parse::<u32>() { if v > max { max = v; } }
-            }
+    for e in nopeek_widgets::fs::list_entries(&listing) {
+        if let Some(num) = e.name.strip_prefix("screenshot-").and_then(|s| s.strip_suffix(".png")) {
+            if let Ok(v) = num.parse::<u32>() { if v > max { max = v; } }
         }
     }
     alloc::format!("screenshot-{:03}.png", max + 1)

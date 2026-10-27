@@ -107,6 +107,52 @@ pub fn write16(addr: PciAddr, offset: u8, value: u16) {
     })
 }
 
+/// The ECAM window for segment 0 from the MCFG table: `(base, first bus,
+/// last bus)`, read once.
+static ECAM: spin::Once<Option<(u64, u8, u8)>> = spin::Once::new();
+
+fn ecam() -> Option<(u64, u8, u8)> {
+    *ECAM.call_once(|| {
+        let t = crate::drivers::acpi::table(b"MCFG")?;
+        // Allocation entries of 16 bytes after the 44-byte header.
+        let mut off = 44;
+        while off + 16 <= t.len() {
+            let base = t.u64(off)?;
+            if t.u16(off + 8)? == 0 && base != 0 {
+                return Some((base, t.u8(off + 10)?, t.u8(off + 11)?));
+            }
+            off += 16;
+        }
+        None
+    })
+}
+
+/// The 4 KiB config page of `addr` in the ECAM window, mapped.
+fn ecam_page(addr: PciAddr) -> Option<Mmio> {
+    let (base, first, last) = ecam()?;
+    if addr.bus < first || addr.bus > last { return None; }
+    let phys = base + (((addr.bus - first) as u64) << 20)
+        + ((addr.device as u64) << 15) + ((addr.function as u64) << 12);
+    // SAFETY: a function's config page inside the firmware's ECAM window,
+    // device registers that no driver maps (`platform_mmio_ranges`).
+    unsafe { Mmio::map(phys, 0x1000) }.ok()
+}
+
+/// A dword of PCI Express extended config space (offsets up to 4095)
+/// through ECAM, Linux `pci_mmcfg_read`. `None` without an ECAM window.
+pub fn read32_ext(addr: PciAddr, offset: u16) -> Option<u32> {
+    if offset >= 0x1000 || offset & 3 != 0 { return None; }
+    Some(ecam_page(addr)?.r32(offset as u64))
+}
+
+/// `pci_mmcfg_write` for a dword; false without an ECAM window.
+pub fn write32_ext(addr: PciAddr, offset: u16, value: u32) -> bool {
+    if offset >= 0x1000 || offset & 3 != 0 { return false; }
+    let Some(page) = ecam_page(addr) else { return false };
+    page.w32(offset as u64, value);
+    true
+}
+
 pub fn read16(addr: PciAddr, offset: u8) -> u16 {
     let val = read32(addr, offset);
     ((val >> ((offset & 2) * 8)) & 0xFFFF) as u16

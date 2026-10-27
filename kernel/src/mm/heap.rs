@@ -11,6 +11,11 @@
 //!
 //! Each region is bracketed by sentinel blocks that are never free, so
 //! coalescing stops at the region boundary without a range check.
+//!
+//! Regions come from the frame allocator in the direct map, as Linux's
+//! `kmalloc`: there is no ceiling but RAM, and growing stops at the reserve
+//! the rest of the kernel needs (`min_free_kbytes`). A failed grow returns
+//! null to the caller; `try_reserve` paths turn that into an error.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
@@ -18,9 +23,16 @@ use spin::Mutex;
 
 const INITIAL_HEAP: usize = 64 * 1024 * 1024;       // 64MB initial
 const GROW_CHUNK: usize = 64 * 1024 * 1024;          // 64MB growth increments
-const MAX_HEAP: usize = 2 * 1024 * 1024 * 1024;      // 2GB ceiling
-const MAX_REGIONS: usize = 32;
 const BLOCK_ALIGN: usize = 16;
+
+/// Region header, before the start sentinel: the region's end and the next
+/// region. The list lives in the regions themselves, so there is no count.
+#[repr(C)]
+struct RegionHdr {
+    end: usize,
+    next: *mut RegionHdr,
+}
+const REGION_HDR: usize = 16;
 
 /// Header tag and footer copy, eight bytes each.
 const TAG: usize = 8;
@@ -89,8 +101,7 @@ pub struct HeapCounters {
 
 struct Heap {
     bins: [*mut FreeNode; NBINS],
-    regions: [(usize, usize); MAX_REGIONS], // (start, end) of each chunk
-    region_count: usize,
+    regions: *mut RegionHdr,
     total_size: usize,
     allocated_bytes: usize,
     c: HeapCounters,
@@ -141,8 +152,7 @@ impl Heap {
     const fn empty() -> Self {
         Heap {
             bins: [ptr::null_mut(); NBINS],
-            regions: [(0, 0); MAX_REGIONS],
-            region_count: 0,
+            regions: ptr::null_mut(),
             total_size: 0,
             allocated_bytes: 0,
             c: HeapCounters {
@@ -188,18 +198,22 @@ impl Heap {
     }
 
     fn init(&mut self, start: usize, size: usize) {
-        self.regions[0] = (start, start + size);
-        self.region_count = 1;
-        self.total_size = size;
         self.allocated_bytes = 0;
         // SAFETY: the region is reserved and at least 64 MB large.
-        unsafe { self.lay_out_region(start, size) };
+        unsafe { self.add_region(start, size) };
     }
 
-    /// Sentinel, payload block, sentinel. The sentinels are never free, so
-    /// coalescing stops at the region boundary by itself.
-    unsafe fn lay_out_region(&mut self, start: usize, size: usize) {
-        let body = size - 2 * SENTINEL;
+    /// Link a region in, then lay out header, sentinel, payload block,
+    /// sentinel. The sentinels are never free, so coalescing stops at the
+    /// region boundary by itself.
+    unsafe fn add_region(&mut self, region: usize, size: usize) {
+        let hdr = region as *mut RegionHdr;
+        // SAFETY: the caller owns the region; the header is its first bytes.
+        unsafe { hdr.write(RegionHdr { end: region + size, next: self.regions }) };
+        self.regions = hdr;
+        self.total_size += size;
+        let start = region + REGION_HDR;
+        let body = size - REGION_HDR - 2 * SENTINEL;
         // SAFETY: the caller owns a region of this size.
         unsafe {
             set_tags(start, SENTINEL, false);
@@ -211,9 +225,12 @@ impl Heap {
 
     /// Check if an address falls within any known heap region.
     fn contains(&self, addr: usize) -> bool {
-        for i in 0..self.region_count {
-            let (start, end) = self.regions[i];
-            if addr >= start && addr < end { return true; }
+        let mut r = self.regions;
+        while !r.is_null() {
+            // SAFETY: every list entry is the header of a live region.
+            let h = unsafe { &*r };
+            if addr >= r as usize && addr < h.end { return true; }
+            r = h.next;
         }
         false
     }
@@ -301,32 +318,27 @@ impl Heap {
         ptr::null_mut()
     }
 
-    /// Grow heap by requesting contiguous frames from the physical memory manager.
+    /// Grow heap by requesting contiguous frames from the physical memory
+    /// manager: `GROW_CHUNK` if RAM has it in one piece, else halving down
+    /// to what the request needs. Never below the frame reserve.
     fn grow(&mut self, min_size: usize) -> bool {
-        if self.total_size >= MAX_HEAP { return false; }
-        if self.region_count >= MAX_REGIONS { return false; }
-
-        let chunk = (min_size + 2 * SENTINEL).max(GROW_CHUNK).min(MAX_HEAP - self.total_size);
-        let frames = chunk.div_ceil(4096);
-
-        // SAFETY: memory::allocate_contiguous uses its own lock (memory::ALLOCATOR),
-        // independent of the heap lock we're holding. No deadlock possible.
-        // NOTE: no kprintln here — we're inside GlobalAlloc::alloc,
-        // and kprintln can allocate (capture_bytes → String::push_str) → deadlock.
-        if let Some(base) = crate::memory::allocate_contiguous(frames) {
-            let start = base as usize;
-            let size = frames * 4096;
-
-            self.regions[self.region_count] = (start, start + size);
-            self.region_count += 1;
-            self.total_size += size;
-            self.c.grows += 1;
-
-            // SAFETY: the region was just allocated and is ours.
-            unsafe { self.lay_out_region(start, size) };
-            true
-        } else {
-            false
+        let need = (min_size + REGION_HDR + 2 * SENTINEL).div_ceil(4096);
+        let mut frames = need.max(GROW_CHUNK / 4096);
+        let reserve = min_free_frames();
+        // memory::allocate_contiguous uses its own lock (memory::ALLOCATOR),
+        // independent of the heap lock we're holding. No kprintln here:
+        // we're inside GlobalAlloc::alloc, and kprintln can allocate.
+        loop {
+            if crate::memory::stats().0 >= frames + reserve {
+                if let Some(base) = crate::memory::allocate_contiguous(frames) {
+                    self.c.grows += 1;
+                    // SAFETY: the region was just allocated and is ours.
+                    unsafe { self.add_region(base as usize, frames * 4096) };
+                    return true;
+                }
+            }
+            if frames == need { return false; }
+            frames = (frames / 2).max(need);
         }
     }
 
@@ -394,6 +406,25 @@ unsafe impl GlobalAlloc for LockedHeap {
 #[global_allocator]
 static HEAP: LockedHeap = LockedHeap::new();
 
+/// Frames the heap leaves to page tables, DMA and stacks: Linux's
+/// `calculate_min_free_kbytes`, sqrt(16 * RAM in KiB), 128 KiB to 256 MiB.
+fn min_free_frames() -> usize {
+    let kbytes = crate::memory::usable_bytes() / 1024;
+    let min_kbytes = isqrt(kbytes * 16).clamp(128, 262_144);
+    (min_kbytes / 4) as usize
+}
+
+fn isqrt(n: u64) -> u64 {
+    if n < 2 { return n; }
+    let mut x = n;
+    let mut y = x.div_ceil(2);
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
 /// The initial heap comes from the frame allocator like every later grow:
 /// only frames the firmware map called usable RAM. The bytes after the
 /// image are not known to be RAM.
@@ -402,8 +433,8 @@ pub fn init() {
     let heap_start = crate::memory::allocate_contiguous(frames)
         .expect("no contiguous RAM for the initial heap") as usize;
     HEAP.inner.lock().init(heap_start, INITIAL_HEAP);
-    crate::kdebug!("[npk] Heap: {} MB (max {} MB)",
-        INITIAL_HEAP / (1024 * 1024), MAX_HEAP / (1024 * 1024));
+    crate::kdebug!("[npk] Heap: {} MB, grows to RAM less {} MB reserve",
+        INITIAL_HEAP / (1024 * 1024), min_free_frames() * 4096 / (1024 * 1024));
 }
 
 /// Snapshot of the counters, so the caller can print without holding the

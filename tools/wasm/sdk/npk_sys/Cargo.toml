@@ -8,6 +8,11 @@ license = "AGPL-3.0-or-later"
 [lib]
 crate-type = ["rlib"]
 
+[features]
+# `read_all`: grows a buffer to what the host says it needs. Needs a global
+# allocator in the module.
+alloc = []
+
 [profile.release]
 opt-level = "s"
 lto = true

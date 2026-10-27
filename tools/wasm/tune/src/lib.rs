@@ -56,8 +56,6 @@ fn log(msg: &str) { host::log(msg); }
 
 // ── Buffers ───────────────────────────────────────────────────────────
 const EVENT_BUF_SIZE: usize = 4 * 1024;
-const LIST_BUF_SIZE: usize = 64 * 1024;
-const HOME_CAP: usize = 256;
 
 enum PollResult { Event(Event), Empty, WindowGone }
 
@@ -114,16 +112,23 @@ impl Arena {
     /// listing; a wrong guess only costs a second claim. The caller drops
     /// every slice of the previous file first.
     fn fetch(&mut self, path: &str, size: usize) -> Option<&'static [u8]> {
-        let want = size.max(64 * 1024);
-        let ptr = self.reserve(want)?;
-        // SAFETY: `ptr..ptr + want` lies in pages `memory.grow` gave to the
-        // arena alone, which are never freed. The slices of the previous file
-        // are dropped before `load` calls this, so the buffer is unaliased.
-        let buf: &'static mut [u8] = unsafe { core::slice::from_raw_parts_mut(ptr, want) };
-        let n = host::fetch(path, buf)?;
-        if n == 0 { return None; }
-        let buf: &'static [u8] = buf;
-        Some(&buf[..n])
+        let mut want = size.max(64 * 1024);
+        loop {
+            let ptr = self.reserve(want)?;
+            // SAFETY: `ptr..ptr + want` lies in pages `memory.grow` gave to the
+            // arena alone, which are never freed. The slices of the previous file
+            // are dropped before `load` calls this, so the buffer is unaliased.
+            let buf: &'static mut [u8] = unsafe { core::slice::from_raw_parts_mut(ptr, want) };
+            match host::fetch_into(path, buf) {
+                host::Fill::Len(0) | host::Fill::Fail => return None,
+                host::Fill::Len(n) => {
+                    let buf: &'static [u8] = buf;
+                    return Some(&buf[..n]);
+                }
+                host::Fill::Need(n) if n > want => want = n,
+                host::Fill::Need(_) => return None,
+            }
+        }
     }
 }
 
@@ -241,14 +246,11 @@ impl Tune {
             arena: Arena::new(),
         };
 
-        let mut argbuf = [0u8; 512];
-        let n = host::launch_arg(&mut argbuf).unwrap_or(0);
-        if n > 0 {
-            if let Ok(path) = core::str::from_utf8(&argbuf[..n]) {
-                t.point_at(path);
-                t.opened_with_file = true;
-                return t;
-            }
+        let arg = host::launch_arg().unwrap_or_default();
+        if !arg.is_empty() {
+            t.point_at(&arg);
+            t.opened_with_file = true;
+            return t;
         }
         // No argument: the music folder, if the user has one.
         let home = read_home_dir();
@@ -927,10 +929,7 @@ fn handle(t: &mut Tune, ev: Event, payload: &str) -> Outcome {
 // ── npkFS helpers ─────────────────────────────────────────────────────
 
 fn read_home_dir() -> String {
-    let mut buf = [0u8; HOME_CAP];
-    let n = host::home_dir(&mut buf).unwrap_or(0);
-    if n == 0 { return "home".to_string(); }
-    core::str::from_utf8(&buf[..n]).unwrap_or("home").to_string()
+    host::home_dir().filter(|h| !h.is_empty()).unwrap_or_else(|| "home".to_string())
 }
 
 /// What the folder list accepts: audio and video in one place, so a new
@@ -949,11 +948,9 @@ fn is_media(name: &str) -> bool {
 }
 
 fn list_media(dir: &str) -> Vec<Track> {
-    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
-    let n = host::fs_list(dir, &mut buf, false).unwrap_or(0);
+    let listing = host::fs_list(dir, false).unwrap_or_default();
     let mut out: Vec<Track> = Vec::new();
-    if n == 0 { return out; }
-    for e in nopeek_widgets::fs::list_entries(&buf[..n]) {
+    for e in nopeek_widgets::fs::list_entries(&listing) {
         if e.is_dir || !is_media(e.name) { continue; }
         out.push(Track { name: e.name.to_string(), size: e.size });
     }

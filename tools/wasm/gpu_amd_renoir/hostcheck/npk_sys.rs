@@ -88,17 +88,47 @@ pub fn fake_acpi(sig: [u8; 4], table: Vec<u8>) {
     ACPI.with(|a| a.borrow_mut().push((sig, table)));
 }
 
-/// `npk_acpi_table`: the length, and the bytes into `buf` when it is large
-/// enough; -1 when there is no such table.
+/// The answer to a buffer too small for one complete object.
+fn too_small(needed: usize) -> i32 {
+    -(needed as i32 + 2)
+}
+
+/// `npk_acpi_table`: the length and the bytes, `-(needed + 2)` when `buf`
+/// is too small, -1 when there is no such table.
 pub fn acpi_table(sig: [u8; 4], index: i32, buf: &mut [u8]) -> i32 {
     ACPI.with(|a| {
         let a = a.borrow();
         let Some((_, t)) = a.iter().filter(|e| e.0 == sig).nth(index as usize) else { return -1 };
-        if buf.len() >= t.len() {
-            buf[..t.len()].copy_from_slice(t);
+        if buf.len() < t.len() {
+            return too_small(t.len());
         }
+        buf[..t.len()].copy_from_slice(t);
         t.len() as i32
     })
+}
+
+/// `npk_sys::read_all`.
+pub fn read_all(call: impl FnMut(&mut [u8]) -> i32) -> Option<Vec<u8>> {
+    read_all_from(1024, call)
+}
+
+/// `npk_sys::read_all_from`.
+pub fn read_all_from(first: usize, mut call: impl FnMut(&mut [u8]) -> i32) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; first];
+    loop {
+        match call(&mut buf) {
+            n if n >= 0 => {
+                buf.truncate(n as usize);
+                return Some(buf);
+            }
+            -1 => return None,
+            n => {
+                let need = (-(n as i64) - 2) as usize;
+                if need <= buf.len() { return None; }
+                buf.resize(need, 0);
+            }
+        }
+    }
 }
 
 pub fn fake_card(card: FakeCard) {
@@ -305,12 +335,15 @@ pub fn fs_stat(name: &[u8], out: &mut [u8; 17]) -> i32 {
     17
 }
 
-/// `npk_fetch`: the bytes into `buf`, their count; -1 when absent.
+/// `npk_fetch`: the bytes into `buf`, their count; `-(needed + 2)` when
+/// `buf` is too small, -1 when absent.
 pub fn fetch(name: &[u8], buf: &mut [u8]) -> i32 {
     let Some(data) = host_path(name).and_then(|p| std::fs::read(p).ok()) else { return -1 };
-    let n = data.len().min(buf.len());
-    buf[..n].copy_from_slice(&data[..n]);
-    n as i32
+    if buf.len() < data.len() {
+        return too_small(data.len());
+    }
+    buf[..data.len()].copy_from_slice(&data);
+    data.len() as i32
 }
 
 /// `npk_pci_read_config_at`: no device answers on the host.
@@ -328,7 +361,7 @@ pub fn config_get(key: &[u8], buf: &mut [u8]) -> i32 {
             buf[..v.len()].copy_from_slice(v.as_bytes());
             v.len() as i32
         }
-        Ok(_) => -1,
+        Ok(v) => too_small(v.len()),
         Err(_) => 0,
     }
 }

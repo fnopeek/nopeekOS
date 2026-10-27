@@ -83,10 +83,6 @@ const CANVAS_ID: u32 = 1;
 // ── Buffers ───────────────────────────────────────────────────────────
 const EVENT_BUF_SIZE: usize = 8 * 1024;
 
-const LIST_BUF_SIZE: usize = 64 * 1024;
-
-const HOME_CAP: usize = 256;
-
 enum PollResult { Event(Event), Empty, WindowGone }
 
 fn poll_event(buf: &mut [u8]) -> PollResult {
@@ -256,13 +252,10 @@ impl Iris {
             forward: true, ready: Vec::new(), unreadable: None,
         };
         // Launched to open a specific file?
-        let mut argbuf = [0u8; 512];
-        let n = host::launch_arg(&mut argbuf).unwrap_or(0);
-        if n > 0 {
-            if let Ok(path) = core::str::from_utf8(&argbuf[..n]) {
-                iris.point_at(path);
-                return iris;
-            }
+        let arg = host::launch_arg().unwrap_or_default();
+        if !arg.is_empty() {
+            iris.point_at(&arg);
+            return iris;
         }
         // No argument → default to the screenshots folder.
         let home = read_home_dir();
@@ -780,10 +773,7 @@ pub extern "C" fn _start() {
 
 // ── npkFS helpers ─────────────────────────────────────────────────────
 fn read_home_dir() -> String {
-    let mut buf = [0u8; HOME_CAP];
-    let n = host::home_dir(&mut buf).unwrap_or(0);
-    if n == 0 { return "home".to_string(); }
-    core::str::from_utf8(&buf[..n]).unwrap_or("home").to_string()
+    host::home_dir().filter(|h| !h.is_empty()).unwrap_or_else(|| "home".to_string())
 }
 
 /// Pointer position in screen coordinates — the same space the mouse
@@ -805,20 +795,16 @@ fn canvas_rect() -> Option<(i32, i32, i32, i32)> {
 fn fetch_file(path: &str) -> Option<Vec<u8>> {
     let (size, is_dir, _) = host::fs_stat(path)?;
     if is_dir || size == 0 { return None; }
-    let mut buf = alloc::vec![0u8; usize::try_from(size).ok()?];
-    let n = host::fetch(path, &mut buf)?;
-    if n == 0 { return None; }
-    buf.truncate(n);
+    let buf = host::fetch(path)?;
+    if buf.is_empty() { return None; }
     Some(buf)
 }
 
 /// List `.png` files (non-recursive) in `dir`, sorted by name.
 fn list_images(dir: &str) -> Vec<String> {
-    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
-    let n = host::fs_list(dir, &mut buf, false).unwrap_or(0);
+    let listing = host::fs_list(dir, false).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
-    if n == 0 { return out; }
-    for e in nopeek_widgets::fs::list_entries(&buf[..n]) {
+    for e in nopeek_widgets::fs::list_entries(&listing) {
         if e.is_dir { continue; }
         if is_image(e.name) { out.push(e.name.to_string()); }
     }

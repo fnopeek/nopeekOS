@@ -205,9 +205,6 @@ fn log(msg: &str) { host::log_serial(msg); }
 // for a large file; a larger event gets its own (`events::poll`).
 const EVENT_BUF_SIZE: usize = 512 * 1024;
 
-// First scratch size for npk_fetch (open); it doubles until the file fits.
-const FETCH_BUF_SIZE: usize = 512 * 1024;
-
 // Pre-allocate the document so ordinary edits stay within capacity.
 const TEXT_CAP: usize = 256 * 1024;
 
@@ -394,18 +391,15 @@ impl Spell {
         };
 
         // Launched to open a specific file (loft file association)?
-        let mut argbuf = [0u8; 512];
-        let n = host::launch_arg(&mut argbuf).unwrap_or(0);
-        if n > 0 {
-            if let Ok(path) = core::str::from_utf8(&argbuf[..n]) {
-                if let Some(text) = read_file(path) {
-                    let mut d = Doc::empty();
-                    d.set_text(&text);
-                    d.path = Some(path.to_string());
-                    d.title = basename(path).to_string();
-                    sp.docs.push(d);
-                    return sp;
-                }
+        let path = host::launch_arg().unwrap_or_default();
+        if !path.is_empty() {
+            if let Some(text) = read_file(&path) {
+                let mut d = Doc::empty();
+                d.set_text(&text);
+                d.title = basename(&path).to_string();
+                d.path = Some(path);
+                sp.docs.push(d);
+                return sp;
             }
         }
 
@@ -615,22 +609,13 @@ fn pick(mode: host::PickMode, start: &str, suggest: &str, tag: u32) {
     host::pick(mode, start, suggest, tag);
 }
 
-/// Fetch a file's contents as a String, or None on error / non-UTF-8.
-/// `npk_fetch` cuts at the buffer's end without saying so (#121): a full
-/// buffer means the file may be longer, so it is read again with a larger
-/// one. A cut document must never be opened, or Ctrl+S writes it back cut.
+/// Fetch a file's contents as a String, or None on error, an empty file or
+/// non-UTF-8. The file comes whole; a cut document must never be opened,
+/// or Ctrl+S writes it back cut.
 fn read_file(path: &str) -> Option<String> {
-    let mut size = FETCH_BUF_SIZE;
-    loop {
-        let mut buf = alloc::vec![0u8; size];
-        let n = host::fetch(path, &mut buf)?;
-        if n == 0 { return None; }
-        if n < size {
-            buf.truncate(n);
-            return String::from_utf8(buf).ok();
-        }
-        size = size.checked_mul(2)?;
-    }
+    let buf = host::fetch(path)?;
+    if buf.is_empty() { return None; }
+    String::from_utf8(buf).ok()
 }
 
 // ── Config ────────────────────────────────────────────────────────────
@@ -642,15 +627,12 @@ fn read_file(path: &str) -> Option<String> {
 // not make an older one refuse the file.
 
 const CONFIG_PATH: &str = "sys/config/spell";
-const CONFIG_CAP: usize = 2048;
 
 /// Read the saved font size. Anything missing or unparseable falls back
 /// to the default — a broken config should never keep the editor shut.
 fn read_config_font() -> u16 {
-    let mut buf = [0u8; CONFIG_CAP];
-    let n = host::fetch(CONFIG_PATH, &mut buf).unwrap_or(0);
-    if n == 0 { return MONO_SIZE_PX; }
-    let text = match core::str::from_utf8(&buf[..n]) { Ok(t) => t, Err(_) => return MONO_SIZE_PX };
+    let Some(buf) = host::fetch(CONFIG_PATH) else { return MONO_SIZE_PX };
+    let text = match core::str::from_utf8(&buf) { Ok(t) => t, Err(_) => return MONO_SIZE_PX };
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') { continue; }

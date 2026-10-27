@@ -631,10 +631,10 @@ fn push_hop(out: &mut String, host: &str, path: &str, headers: &str, tls: bool) 
     }
 }
 
-/// Response headers we hand back to a guest, capped. Big enough for a page
-/// that sets a dozen cookies, small enough that a hostile server cannot make
-/// the kernel hold an unbounded string per request.
-const MAX_REPLY_HEADERS: usize = 8 * 1024;
+/// Bound on a response's header block, HTTP/1 and HTTP/2 alike (the h2
+/// header list limit): 256 KiB as Chromium allows. A larger block is an
+/// error, not a cut, so no `Set-Cookie` is lost silently.
+const MAX_REPLY_HEADERS: usize = super::http2::hpack::MAX_HEADER_LIST;
 
 /// Headers a guest may not set, because we own them.
 ///
@@ -1961,7 +1961,7 @@ fn https_exchange(
                 return Err(ExchangeErr::Retry);
             }
         }
-        if raw.len() > 32_768 {
+        if raw.len() > MAX_REPLY_HEADERS {
             let _ = crate::tls::tls_close(&mut tls);
             return Err(ExchangeErr::Fatal("headers too large"));
         }
@@ -2911,7 +2911,7 @@ fn http_exchange(
             }
             Err(_) => break,
         }
-        if raw.len() > 32_768 {
+        if raw.len() > MAX_REPLY_HEADERS {
             let _ = crate::net::tcp::close(handle);
             return Err(ExchangeErr::Fatal("headers too large"));
         }

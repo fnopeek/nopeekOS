@@ -102,15 +102,28 @@ fn push(q: &Mutex<VecDeque<Vec<u8>>>, msg: &[u8], sent: &AtomicU32, dropped: &At
     true
 }
 
-fn pop(q: &Mutex<VecDeque<Vec<u8>>>, out: &mut [u8]) -> Option<usize> {
+/// What one dequeue found.
+pub enum Pop {
+    Empty,
+    /// The message's length, copied out and removed from the queue.
+    Got(usize),
+    /// `out` is shorter than the next message, which stays queued.
+    Short(usize),
+}
+
+fn pop(q: &Mutex<VecDeque<Vec<u8>>>, out: &mut [u8]) -> Pop {
     let mut q = q.lock();
-    let msg = q.front()?;
-    if msg.len() > out.len() {
-        return None; // caller's buffer too small — leave it queued
+    let Some(len) = q.front().map(Vec::len) else { return Pop::Empty };
+    if len > out.len() {
+        return Pop::Short(len);
     }
-    let msg = q.pop_front().unwrap();
-    out[..msg.len()].copy_from_slice(&msg);
-    Some(msg.len())
+    match q.pop_front() {
+        Some(msg) => {
+            out[..len].copy_from_slice(&msg);
+            Pop::Got(len)
+        }
+        None => Pop::Empty,
+    }
 }
 
 // ── Manager side (wifid.wasm) ──
@@ -120,8 +133,8 @@ pub fn send_cmd(msg: &[u8]) -> bool {
     if ok { wake(&CMD_WAKER); }
     ok
 }
-/// Dequeue the next event from the driver into `out`; None if empty / too small.
-pub fn poll_event(out: &mut [u8]) -> Option<usize> { pop(&UPLINK, out) }
+/// Dequeue the next event from the driver into `out`.
+pub fn poll_event(out: &mut [u8]) -> Pop { pop(&UPLINK, out) }
 
 // ── Driver side (wifi_*.wasm) ──
 /// Enqueue an event for the manager. Returns false if full / oversized.
@@ -150,8 +163,8 @@ pub fn set_event_waker(w: crate::smp::fiber::Waker) { EVENT_WAKER.store(w, Order
 pub fn cmd_pending() -> bool { !DOWNLINK.lock().is_empty() }
 /// Something for the manager: a driver event or a user request.
 pub fn event_pending() -> bool { !UPLINK.lock().is_empty() || !REQUESTS.lock().is_empty() }
-/// Dequeue the next command from the manager into `out`; None if empty / too small.
-pub fn poll_cmd(out: &mut [u8]) -> Option<usize> { pop(&DOWNLINK, out) }
+/// Dequeue the next command from the manager into `out`.
+pub fn poll_cmd(out: &mut [u8]) -> Pop { pop(&DOWNLINK, out) }
 
 /// Drop all queued messages — called when a driver or manager exits so a new
 /// instance starts with an empty channel (stale commands/events don't leak
@@ -191,8 +204,8 @@ fn request(msg: &[u8]) -> bool {
     ok
 }
 
-/// Dequeue the next user request into `out`; None if empty / too small.
-pub fn poll_request(out: &mut [u8]) -> Option<usize> { pop(&REQUESTS, out) }
+/// Dequeue the next user request into `out`.
+pub fn poll_request(out: &mut [u8]) -> Pop { pop(&REQUESTS, out) }
 
 pub fn publish_status(text: &[u8]) {
     {

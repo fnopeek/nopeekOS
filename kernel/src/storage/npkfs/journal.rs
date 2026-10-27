@@ -44,6 +44,27 @@ impl Journal {
         self.seq += 1;
         self.uncommitted_blocks.clear();
 
+        // Adjacent frees as one range: a COW commit frees runs of blocks.
+        self.pending_frees.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(self.pending_frees.len());
+        for &(start, cnt) in &self.pending_frees {
+            match merged.last_mut() {
+                Some((s, c)) if *s + *c == start => *c += cnt,
+                _ => merged.push((start, cnt)),
+            }
+        }
+        self.pending_frees = merged;
+
+        // One commit never wraps onto its own entries. Frees past the ring's
+        // size go unjournaled: a crash before they reach the bitmap leaves
+        // them allocated, a leak gc reclaims, never a double allocation.
+        let room = (JOURNAL_BLOCKS as usize) * MAX_JOURNAL_ENTRIES;
+        if self.pending_frees.len() > room {
+            crate::kprintln!("[npk] npkfs: {} frees in one commit, {} journaled",
+                self.pending_frees.len(), room);
+            self.pending_frees.truncate(room);
+        }
+
         // Write all pending frees across multiple journal blocks if needed
         let mut offset = 0;
         while offset < self.pending_frees.len() {

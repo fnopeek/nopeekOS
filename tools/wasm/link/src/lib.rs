@@ -90,10 +90,8 @@ const SEC_WPA2: u8 = 2;
 const SEC_WPA2_WPA3: u8 = 4;
 
 struct St {
-    wifi: [u8; 4096],
-    wifi_n: usize,
-    net: [u8; 2048],
-    net_n: usize,
+    wifi: Vec<u8>,
+    net: Vec<u8>,
     /// The network whose actions are open.
     sel: [u8; 32],
     sel_n: usize,
@@ -125,15 +123,11 @@ impl St {
     }
     /// Read both sources again; true if anything changed.
     fn refresh(&mut self) -> bool {
-        let mut w = [0u8; 4096];
-        let wn = host::wifi_status(&mut w).unwrap_or(0).min(w.len());
-        let mut n = [0u8; 2048];
-        let nn = host::net_info(&mut n).unwrap_or(0).min(n.len());
-        let changed = w[..wn] != self.wifi[..self.wifi_n] || n[..nn] != self.net[..self.net_n];
-        self.wifi[..wn].copy_from_slice(&w[..wn]);
-        self.wifi_n = wn;
-        self.net[..nn].copy_from_slice(&n[..nn]);
-        self.net_n = nn;
+        let w = host::wifi_status().unwrap_or_default();
+        let n = host::net_info().unwrap_or_default();
+        let changed = w != self.wifi || n != self.net;
+        self.wifi = w;
+        self.net = n;
         changed
     }
 }
@@ -527,8 +521,8 @@ fn network_row(st: &St, w: &Wifi, i: usize, ap: &Ap) -> Widget {
 }
 
 fn render(st: &St) -> Widget {
-    let w = parse_wifi(&st.wifi[..st.wifi_n]);
-    let n = parse_net(&st.net[..st.net_n]);
+    let w = parse_wifi(&st.wifi);
+    let n = parse_net(&st.net);
     let mut children = connection(&w, &n);
 
     if w.present && w.state != "no-driver" {
@@ -639,7 +633,7 @@ fn handle(st: &mut St, ev: Event) -> Outcome {
             Outcome::Idle
         }
         Event::Action(ActionId(id)) => {
-            let w = parse_wifi(&st.wifi[..st.wifi_n]);
+            let w = parse_wifi(&st.wifi);
             st.msg = "";
             match id {
                 A_SCAN => ask(st, &[REQ_SCAN], "Searching…"),
@@ -660,7 +654,7 @@ fn handle(st: &mut St, ev: Event) -> Outcome {
                 A_CONNECT => connect(st, &w),
                 A_REVEAL => st.reveal = !st.reveal,
                 A_COPY_IP => {
-                    let n = parse_net(&st.net[..st.net_n]);
+                    let n = parse_net(&st.net);
                     let ip = n.ipv4.split('/').next().unwrap_or("");
                     if !ip.is_empty() && host::clipboard_set(ip) {
                         st.msg = "IP address copied.";
@@ -685,10 +679,8 @@ fn handle(st: &mut St, ev: Event) -> Outcome {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let mut st = St {
-        wifi: [0; 4096],
-        wifi_n: 0,
-        net: [0; 2048],
-        net_n: 0,
+        wifi: Vec::new(),
+        net: Vec::new(),
         sel: [0; 32],
         sel_n: 0,
         pass: [0; 63],
@@ -702,7 +694,7 @@ pub extern "C" fn _start() {
     st.refresh();
     // A list to show. While linked a scan runs in slices beside the link
     // (~10 s), so only when there is next to nothing; the button forces one.
-    if parse_wifi(&st.wifi[..st.wifi_n]).aps.len() <= 1 {
+    if parse_wifi(&st.wifi).aps.len() <= 1 {
         host::wifi_request(&[REQ_SCAN]);
     }
     // Placed by the kernel next to the icon deck was clicked on.

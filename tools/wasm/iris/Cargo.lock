@@ -37,7 +37,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "iris"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "miniz_oxide",
  "nopeek_widgets",
@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.32.0"
+version = "0.36.0"
 dependencies = [
  "npk_sys",
  "postcard",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "npk_sys"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "postcard"

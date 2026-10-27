@@ -18,12 +18,6 @@
 //!
 //! English is the source language and the fallback for any unknown code.
 
-#[cfg(target_arch = "wasm32")]
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn npk_locale(buf_ptr: i32, buf_max: i32) -> i32;
-}
-
 /// Languages the UI ships catalogs for. Adding one is an SDK bump plus a
 /// `const` per app — the kernel is not involved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,15 +67,9 @@ pub fn lang() -> Lang {
 
 #[cfg(target_arch = "wasm32")]
 fn query() -> Lang {
-    let mut buf = [0u8; 16];
-    // SAFETY: the host writes at most `buf.len()` bytes into `buf`, borrowed for the call.
-    let n = unsafe { npk_locale(buf.as_mut_ptr() as i32, buf.len() as i32) };
-    if n <= 0 {
-        return Lang::En;
-    }
-    match core::str::from_utf8(&buf[..n as usize]) {
-        Ok(code) => Lang::from_code(code),
-        Err(_) => Lang::En,
+    match npk_sys::read_all(npk_sys::locale).map(alloc::string::String::from_utf8) {
+        Some(Ok(code)) => Lang::from_code(&code),
+        _ => Lang::En,
     }
 }
 

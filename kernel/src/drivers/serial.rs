@@ -29,26 +29,59 @@ const COM2_THR: Port = unsafe { Port::new(0x2F8) };
 
 pub static SERIAL: Mutex<SerialPort> = Mutex::new(SerialPort::new(COM1));
 
-// Output capture for npk-shell: when active, all kprint output is also buffered
-static CAPTURE: Mutex<Option<String>> = Mutex::new(None);
+/// The kernel log: every console line, kept in a ring like Linux's printk
+/// buffer. Full, it drops its oldest lines; readers copy, never consume.
+struct LogRing {
+    buf: alloc::collections::VecDeque<u8>,
+    cap: usize,
+}
 
-/// Start capturing serial output into a buffer.
+impl LogRing {
+    fn push(&mut self, s: &str) {
+        let bytes = s.as_bytes();
+        let bytes = &bytes[bytes.len().saturating_sub(self.cap)..];
+        let over = (self.buf.len() + bytes.len()).saturating_sub(self.cap);
+        if over > 0 {
+            // Whole lines go, so the oldest kept line starts at its start.
+            let cut = self.buf.iter().skip(over).position(|&b| b == b'\n')
+                .map_or(self.buf.len(), |i| over + i + 1);
+            self.buf.drain(..cut);
+        }
+        self.buf.extend(bytes);
+    }
+}
+
+static CAPTURE: Mutex<Option<LogRing>> = Mutex::new(None);
+
+/// While set, console output is not logged (`dmesg` printing the log).
+static CAPTURE_PAUSED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Start the kernel log. Its size follows the RAM, 1/4096 of it between
+/// 256 KiB and 16 MiB (Linux: `log_buf_len`).
 pub fn start_capture() {
-    *CAPTURE.lock() = Some(String::new());
+    let cap = ((crate::memory::usable_bytes() / 4096) as usize).clamp(256 * 1024, 16 * 1024 * 1024);
+    *CAPTURE.lock() = Some(LogRing { buf: alloc::collections::VecDeque::with_capacity(cap), cap });
 }
 
-/// Stop capturing and return the captured output.
-pub fn stop_capture() -> String {
-    CAPTURE.lock().take().unwrap_or_default()
-}
-
-/// Copy what has been captured so far, leaving capture running. Used to
-/// persist the boot log without blinding `dmesg` for the rest of the session.
+/// A copy of the kernel log; it keeps running.
 pub fn capture_snapshot() -> String {
     match *CAPTURE.lock() {
-        Some(ref buf) => buf.clone(),
+        Some(ref r) => {
+            let (a, b) = r.buf.as_slices();
+            let mut v = alloc::vec::Vec::with_capacity(a.len() + b.len());
+            v.extend_from_slice(a);
+            v.extend_from_slice(b);
+            String::from_utf8_lossy(&v).into_owned()
+        }
         None => String::new(),
     }
+}
+
+/// Run `f` with console output kept out of the kernel log.
+pub fn without_capture(f: impl FnOnce()) {
+    CAPTURE_PAUSED.store(true, Ordering::Relaxed);
+    f();
+    CAPTURE_PAUSED.store(false, Ordering::Relaxed);
 }
 
 /// Whether `kdebug!` lines also go to the screen and serial (config
@@ -66,31 +99,25 @@ pub fn verbose() -> bool {
 
 /// Capture-only output.
 pub fn capture_fmt(args: fmt::Arguments) {
-    use fmt::Write;
-    if let Some(ref mut buf) = *CAPTURE.lock() {
-        let _ = buf.write_fmt(args);
-    }
+    let line = alloc::format!("{}", args);
+    capture_bytes(&line);
 }
 
 /// The quiet half of `kdebug!`: into the capture buffer and to the remote
 /// mirror (`debug`), not to screen or serial. Before the heap exists there
 /// is no capture buffer and the line is dropped.
 pub fn quiet_line(args: fmt::Arguments) {
-    use fmt::Write;
-    let line = {
-        let mut cap = CAPTURE.lock();
-        let Some(ref mut buf) = *cap else { return };
-        let start = buf.len();
-        let _ = buf.write_fmt(args);
-        String::from(&buf[start..])
-    };
+    if CAPTURE.lock().is_none() { return; }
+    let line = alloc::format!("{}", args);
+    capture_bytes(&line);
     crate::shade::terminal::stream_push_global(&line);
 }
 
-/// Append to capture buffer if active (called from write_str).
+/// Append to the kernel log if it runs (called from write_str).
 fn capture_bytes(s: &str) {
-    if let Some(ref mut buf) = *CAPTURE.lock() {
-        buf.push_str(s);
+    if CAPTURE_PAUSED.load(Ordering::Relaxed) { return; }
+    if let Some(ref mut r) = *CAPTURE.lock() {
+        r.push(s);
     }
 }
 

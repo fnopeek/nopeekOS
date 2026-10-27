@@ -43,7 +43,7 @@
 //! `npk_irq_wait` (see `wasm.rs`). MSI-X when the device has it (NIC / NVMe /
 //! modern virtio), plain MSI with one vector otherwise (RTL8822CE).
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::drivers::pci::{self, PciAddr};
@@ -98,6 +98,7 @@ pub fn register_gsi(gsi: u32, level: bool, active_low: bool) -> Option<u8> {
     let vector = alloc_vector()?;
     let dest = crate::interrupts::current_apic_id();
     if !crate::ioapic::route(gsi, vector, dest, level, active_low) {
+        release(vector);
         return None;
     }
     GSI_OF[vector as usize].store(gsi, Ordering::Relaxed);
@@ -158,24 +159,30 @@ pub fn fired_count(vector: u8) -> u64 {
 /// Device-IRQ vector slots in use, one bit each (`DEVICE_IRQ_VEC_COUNT`).
 /// A driver that ends gives its vector back (`release`), so restarting
 /// drivers cannot run the pool dry.
-static SLOTS_USED: AtomicUsize = AtomicUsize::new(0);
+static SLOTS_USED: [AtomicU64; DEVICE_IRQ_VEC_COUNT.div_ceil(64)] =
+    [const { AtomicU64::new(0) }; DEVICE_IRQ_VEC_COUNT.div_ceil(64)];
 
 /// Allocate a fresh LAPIC vector from the device-IRQ pool, or None if
 /// exhausted. The matching IDT entry is already installed (`interrupts::init`).
 pub fn alloc_vector() -> Option<u8> {
-    loop {
-        let used = SLOTS_USED.load(Ordering::Acquire);
-        let s = (!used).trailing_zeros() as usize;
-        if s >= DEVICE_IRQ_VEC_COUNT {
-            return None;
-        }
-        if SLOTS_USED
-            .compare_exchange(used, used | (1 << s), Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            return Some(DEVICE_IRQ_VEC_BASE + s as u8);
+    for (w, word) in SLOTS_USED.iter().enumerate() {
+        loop {
+            let used = word.load(Ordering::Acquire);
+            let bit = (!used).trailing_zeros() as usize;
+            let s = w * 64 + bit;
+            if bit >= 64 || s >= DEVICE_IRQ_VEC_COUNT {
+                break;
+            }
+            if word
+                .compare_exchange(used, used | (1 << bit), Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(DEVICE_IRQ_VEC_BASE + s as u8);
+            }
         }
     }
+    crate::kprintln!("[npk] irq: all {} device vectors in use", DEVICE_IRQ_VEC_COUNT);
+    None
 }
 
 /// Give `vector` back: no waiter, no registration, its I/O APIC line masked
@@ -194,7 +201,7 @@ pub fn release(vector: u8) {
         }
     }
     LEVEL[vector as usize].store(false, Ordering::Release);
-    SLOTS_USED.fetch_and(!(1 << s), Ordering::AcqRel);
+    SLOTS_USED[s / 64].fetch_and(!(1 << (s % 64)), Ordering::AcqRel);
 }
 
 /// Snapshot the fired count for `vector` before submitting the device
@@ -273,34 +280,42 @@ fn ensure_msi_deliverable() {
         crate::kdebug!("[npk] irq: no DMAR table — no VT-d, compatibility MSIs OK");
         return;
     };
-    crate::drivers::acpi::ensure_mapped_pub(dmar, 4096);
     // DMAR: ACPI header (length @4 u32), Flags @37 (1 byte). Remapping
-    // structures start at +48; walk for a DRHD (type 0). Its register base is
-    // at DRHD+8 (after type:2 len:2 flags:1 rsvd:1 segment:2).
-    // SAFETY: one page of the DMAR table, mapped above; firmware tables do
-    // not change. Reads are bounded by `len` as well.
-    let t = unsafe { crate::hw::PhysView::new(dmar as u64, 4096) };
-    let len = t.u32(4u32).unwrap_or(0) as usize;
+    // structures start at +48; every DRHD (type 0) is one remapping unit,
+    // its register base at DRHD+8 (after type:2 len:2 flags:1 rsvd:1
+    // segment:2). Intel clients have several; each is turned off, as Linux
+    // walks every DRHD (`dmar_table_init`).
+    crate::drivers::acpi::ensure_mapped_pub(dmar, 4096);
+    // SAFETY: the DMAR header, mapped above; firmware tables do not change.
+    let len = unsafe { crate::hw::PhysView::new(dmar as u64, 4096) }.u32(4u32).unwrap_or(0) as usize;
+    crate::drivers::acpi::ensure_mapped_pub(dmar, len.max(48));
+    // SAFETY: the whole DMAR table, mapped above. Reads are bounded by `len`.
+    let t = unsafe { crate::hw::PhysView::new(dmar as u64, len.max(48) as u64) };
     let flags = t.u8(37u32).unwrap_or(0);
-    let scan_end = len.min(4096);
     let mut off = 48usize;
-    let mut regbase = 0u64;
-    while off + 4 <= scan_end {
+    let mut units = 0;
+    while off + 4 <= len {
         let ty = t.u16(off).unwrap_or(0);
         let slen = t.u16(off + 2).unwrap_or(0) as usize;
         if slen == 0 {
             break;
         }
-        if ty == 0 && off + 16 <= scan_end {
-            regbase = t.u64(off + 8).unwrap_or(0);
-            break;
+        if ty == 0 && off + 16 <= len {
+            let regbase = t.u64(off + 8).unwrap_or(0);
+            if regbase != 0 {
+                disable_ir_unit(regbase, flags);
+                units += 1;
+            }
         }
         off += slen;
     }
-    if regbase == 0 {
+    if units == 0 {
         crate::kprintln!("[npk] irq: DMAR present (flags={:#x}) but no DRHD regbase", flags);
-        return;
     }
+}
+
+/// Turn interrupt remapping off on one VT-d unit.
+fn disable_ir_unit(regbase: u64, flags: u8) {
     const GCMD: u64 = 0x18; // Global Command Register
     const GSTS: u64 = 0x1C; // Global Status Register
     // SAFETY: the DRHD register base is VT-d remapping-hardware MMIO.
@@ -348,12 +363,14 @@ pub fn register(dev: PciAddr, entry: u16) -> Option<u8> {
     let (vector, entry) = if pci::has_msix(dev) {
         let vector = alloc_vector()?;
         if !pci::program_msix(dev, entry, vector, dest) {
+            release(vector);
             return None;
         }
         (vector, entry)
     } else {
         let vector = alloc_vector()?;
         if !pci::program_msi(dev, vector, dest) {
+            release(vector);
             return None;
         }
         crate::kdebug!("[npk] irq: {:02x}:{:02x}.{} plain MSI on vector {:#x}",

@@ -1,7 +1,7 @@
 //! Host calls for testdisk: the shared ones from `nopeek_widgets::host`,
 //! plus delete and the benchmark keys of `npk_sys_info`.
 
-pub use nopeek_widgets::host::{fetch, log, print, store};
+pub use nopeek_widgets::host::{fetch_into, log, print, store, Fill};
 use nopeek_widgets::host::sys_info;
 
 #[link(wasm_import_module = "env")]

@@ -109,12 +109,6 @@ const SIG_SSDT: [u8; 4] = *b"SSDT";
 const SIG_PSDT: [u8; 4] = *b"PSDT";
 const SIG_OSDT: [u8; 4] = *b"OSDT";
 
-const DSDT_MAX: usize = 512 * 1024;
-static DSDT: Single<[u8; DSDT_MAX]> = Single::new([0; DSDT_MAX]);
-/// Room for one SSDT at a time. The namespace copies out what it needs, so
-/// the buffer may be reused afterwards.
-const SSDT_MAX: usize = 256 * 1024;
-static SSDT: Single<[u8; SSDT_MAX]> = Single::new([0; SSDT_MAX]);
 
 /// Firmware access for the interpreter.
 ///
@@ -141,14 +135,11 @@ pub extern "C" fn _start() {
     VERBOSE.store(npk_sys::sys_info(50) == 1, Ordering::Relaxed);
     logln("[i2c-hid] looking for a HID-over-I2C device in the firmware tables");
 
-    let dsdt = DSDT.with(|d| {
-        let len = npk_sys::acpi_dsdt(d);
-        if len <= 0 || len as usize > DSDT_MAX { return None; }
-        // The kernel wrote exactly `len` bytes.
-        Some(Namespace::load(&d[..len as usize]))
-    });
+    let dsdt = npk_sys::read_all(npk_sys::acpi_dsdt)
+        .filter(|d| !d.is_empty())
+        .map(|d| Namespace::load(&d));
     let Some(dsdt) = dsdt else {
-        logln("[i2c-hid] no DSDT, or bigger than our buffer — nothing to do");
+        logln("[i2c-hid] no DSDT — nothing to do");
         return;
     };
 
@@ -166,19 +157,10 @@ pub extern "C" fn _start() {
     let mut loaded = 0u32;
     for (sig, name) in [(SIG_SSDT, "SSDT"), (SIG_PSDT, "PSDT"), (SIG_OSDT, "OSDT")] {
     for i in 0..32 {
-        let (n, r) = SSDT.with(|t| {
-            let n = npk_sys::acpi_table(sig, i, t);
-            // The kernel wrote exactly `n` bytes.
-            let r = (n > 0 && n as usize <= SSDT_MAX).then(|| ns.load_more(&t[..n as usize]));
-            (n, r)
-        });
-        if n <= 0 { break; }
-        let _ = name;
-        let Some(r) = r else {
-            logln(&alloc::format!("[i2c-hid] SSDT {i} is {n} bytes — bigger than our buffer"));
-            continue;
+        let Some(t) = npk_sys::read_all(|b| npk_sys::acpi_table(sig, i, b)).filter(|t| !t.is_empty()) else {
+            break;
         };
-        match r {
+        match ns.load_more(&t) {
             Ok(()) => loaded += 1,
             Err(e) => logln(&alloc::format!("[i2c-hid] {name} {i} did not parse: {e}")),
         }

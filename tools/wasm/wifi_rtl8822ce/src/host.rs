@@ -29,13 +29,14 @@ pub fn wait(mask: i32, timeout_ms: u32) -> i32 {
 
 // ── Control channel, npkFS and data path ─────────────────────────
 
-/// Fetch an object from npkFS. Returns its length, or `-1` if it does not
-/// exist, which is an ordinary case and not an error.
+/// Fetch an object from npkFS. Returns its length, `-1` if it does not
+/// exist, which is an ordinary case and not an error, or `-(needed + 2)`
+/// when it is longer than `buf`.
 pub fn fetch(name: &str, buf: &mut [u8]) -> i32 {
     npk_sys::fetch(name.as_bytes(), buf)
 }
 
-/// Next command from `wifid`, `-1` = none.
+/// Next command from `wifid`, `0` = none.
 pub fn wifi_poll_cmd(buf: &mut [u8]) -> i32 {
     npk_sys::wifi_poll_cmd(buf)
 }

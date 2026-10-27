@@ -79,14 +79,13 @@ fn window_activate(id: u32) {
     unsafe { npk_window_activate(id as i32) };
 }
 
-/// Live bar state into `buf`; the raw length, `<= 0` when there is none.
+/// Live bar state into `buf`; the host's answer.
 fn bar_state(buf: &mut [u8]) -> i32 {
     // SAFETY: FFI; the range is borrowed for the call.
     unsafe { npk_bar_state(buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
-/// The status items into `buf`; the length,
-/// larger than `buf` when it did not fit, `< 0` when refused.
+/// The status items into `buf`; the host's answer.
 fn status_list(buf: &mut [u8]) -> i32 {
     // SAFETY: FFI; the range is borrowed for the call.
     unsafe { npk_status_list(buf.as_mut_ptr() as i32, buf.len() as i32) }
@@ -308,9 +307,6 @@ const TASK_BASE: u32 = 1_000_000;    // + window id
 const WAIT_INPUT: u32 = 1;
 const WAIT_STATE: u32 = 32;
 
-const STATE_MAX: usize = 256;
-const WINS_CAP: usize = 4096;
-const STATUS_CAP: usize = 4096;
 
 // ── Window list ──────────────────────────────────────────────────────
 
@@ -499,23 +495,15 @@ impl Deck {
 
     /// Re-read everything the panel shows; true when any of it changed.
     fn refresh(&mut self) -> bool {
-        let mut buf = [0u8; STATE_MAX];
-        let n = bar_state(&mut buf);
-        let n = if n > 0 { (n as usize).min(STATE_MAX) } else { 0 };
-        let mut wins = [0u8; WINS_CAP];
-        let wn = host::window_titles(&mut wins).unwrap_or(0).min(WINS_CAP);
-        let mut st = [0u8; STATUS_CAP];
-        let sn = status_list(&mut st);
-        let sn = if sn > 0 && (sn as usize) <= STATUS_CAP { sn as usize } else { 0 };
-        if self.state[..] == buf[..n] && self.wins[..] == wins[..wn] && self.status[..] == st[..sn] {
+        let state = host::read_all(bar_state).unwrap_or_default();
+        let wins = host::window_titles().unwrap_or_default();
+        let status = host::read_all(status_list).unwrap_or_default();
+        if self.state == state && self.wins == wins && self.status == status {
             return false;
         }
-        self.state.clear();
-        self.state.extend_from_slice(&buf[..n]);
-        self.wins.clear();
-        self.wins.extend_from_slice(&wins[..wn]);
-        self.status.clear();
-        self.status.extend_from_slice(&st[..sn]);
+        self.state = state;
+        self.wins = wins;
+        self.status = status;
         true
     }
 
@@ -1280,9 +1268,7 @@ fn clip(text: &str, max: usize) -> String {
 
 /// The last component of the home directory: the user's name.
 fn user_name() -> String {
-    let mut buf = [0u8; 128];
-    let n = host::home_dir(&mut buf).unwrap_or(0).min(buf.len());
-    let home = core::str::from_utf8(&buf[..n]).unwrap_or("");
+    let home = host::home_dir().unwrap_or_default();
     home.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string()
 }
 

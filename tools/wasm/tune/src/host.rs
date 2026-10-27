@@ -1,7 +1,11 @@
 //! Host functions. The shared ones come from `nopeek_widgets::host`; the
 //! audio mailbox, the file dialog and the YUV canvas are tune's own.
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use nopeek_widgets::host as sdk;
+
+pub use sdk::Fill;
 
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
@@ -14,10 +18,10 @@ unsafe extern "C" {
 }
 
 pub fn scene_commit(bytes: &[u8]) -> bool { sdk::scene_commit(bytes) }
-pub fn fetch(name: &str, buf: &mut [u8]) -> Option<usize> { sdk::fetch(name, buf) }
-pub fn fs_list(dir: &str, buf: &mut [u8], recursive: bool) -> Option<usize> { sdk::fs_list(dir, buf, recursive) }
-pub fn home_dir(buf: &mut [u8]) -> Option<usize> { sdk::home_dir(buf) }
-pub fn launch_arg(buf: &mut [u8]) -> Option<usize> { sdk::launch_arg(buf) }
+pub fn fetch_into(name: &str, buf: &mut [u8]) -> Fill { sdk::fetch_into(name, buf) }
+pub fn fs_list(dir: &str, recursive: bool) -> Option<Vec<u8>> { sdk::fs_list(dir, recursive) }
+pub fn home_dir() -> Option<String> { sdk::home_dir() }
+pub fn launch_arg() -> Option<String> { sdk::launch_arg() }
 pub fn close_widget() { sdk::close_widget(); }
 pub fn ticks() -> i64 { sdk::ticks_ms() as i64 }
 pub fn sleep(ms: i32) { sdk::sleep_ms(ms.max(0) as u32); }

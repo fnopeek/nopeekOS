@@ -146,13 +146,6 @@ fn fill(template: &str, value: &str) -> String {
 // ── Buffers ───────────────────────────────────────────────────────────
 
 const EVENT_BUF_SIZE: usize = 8 * 1024;
-
-// Directory listings. npkFS names are long; a deep home dir with many
-// files needs room. Oversized rather than truncating a listing silently.
-const LIST_BUF_SIZE: usize = 256 * 1024;
-// The per-folder child count reads only how many entries there are.
-const COUNT_BUF_SIZE: usize = 64 * 1024;
-const ARG_CAP: usize = 1024;
 const NAME_CAP: usize = 128;
 
 enum PollResult { Event(Event), Empty, WindowGone }
@@ -395,17 +388,12 @@ impl Pick {
 // ── Filesystem ────────────────────────────────────────────────────────
 
 fn read_launch_arg() -> String {
-    let mut buf = [0u8; ARG_CAP];
-    let n = host::launch_arg(&mut buf).unwrap_or(0);
-    core::str::from_utf8(&buf[..n]).unwrap_or("").to_string()
+    host::launch_arg().unwrap_or_default()
 }
 
 fn read_home_dir() -> String {
-    let mut buf = [0u8; NAME_CAP];
-    let n = host::home_dir(&mut buf).unwrap_or(0);
-    if n == 0 { return String::from("home"); }
-    match core::str::from_utf8(&buf[..n]) {
-        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+    match host::home_dir() {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => String::from("home"),
     }
 }
@@ -413,13 +401,10 @@ fn read_home_dir() -> String {
 /// Immediate children of `dir`, folders first then files, each group
 /// sorted by name. Wire per line: `name\0size(8)\0is_dir(1)\0mtime(8)`.
 fn list_dir(dir: &str) -> Vec<Entry> {
-    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
-    let n = host::fs_list(dir, &mut buf, false).unwrap_or(0);
-    if n == 0 { return Vec::new(); }
-    let slice = &buf[..n];
+    let Some(listing) = host::fs_list(dir, false) else { return Vec::new() };
 
     let mut out: Vec<Entry> = Vec::new();
-    for e in nopeek_widgets::fs::list_entries(slice) {
+    for e in nopeek_widgets::fs::list_entries(&listing) {
         if e.name == ".dir" { continue; }
         let full = if dir.is_empty() { e.name.to_string() }
                    else { alloc::format!("{}/{}", dir, e.name) };
@@ -444,9 +429,8 @@ fn list_dir(dir: &str) -> Vec<Entry> {
 
 /// Number of entries directly inside `dir`.
 fn count_children(dir: &str) -> usize {
-    let mut buf = alloc::vec![0u8; COUNT_BUF_SIZE];
-    let n = host::fs_list(dir, &mut buf, false).unwrap_or(0);
-    nopeek_widgets::fs::list_entries(&buf[..n])
+    let listing = host::fs_list(dir, false).unwrap_or_default();
+    nopeek_widgets::fs::list_entries(&listing)
         .filter(|e| e.name != ".dir")
         .count()
 }

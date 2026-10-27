@@ -56,12 +56,11 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 pub extern "C" fn _start() {
     // Read target from .npk-wallpaper-target — either a PNG filename
     // (decode mode) or a `@demos:<W>x<H>:<wp_dir>` string (generate mode).
-    let mut name_buf = [0u8; 512];
-    let name_len = match fetch(".npk-wallpaper-target", &mut name_buf) {
-        Some(n) => n,
+    let name_buf = match fetch(".npk-wallpaper-target") {
+        Some(b) => b,
         None => { log("[wallpaper] no target file"); return; }
     };
-    let target = match core::str::from_utf8(&name_buf[..name_len]) {
+    let target = match core::str::from_utf8(&name_buf) {
         Ok(s) => s,
         Err(_) => { log("[wallpaper] invalid target"); return; }
     };
@@ -325,21 +324,12 @@ fn fill_noise(pixels: &mut [u8], w: u32, h: u32, fg: (u8,u8,u8), bg: (u8,u8,u8))
 // --- Decode mode (PNG → BGRA → set framebuffer) ---
 
 fn run_decode(filename: &str) {
-    // 32 MB cap — covers a high-detail 4K PNG (these can reach 20-25 MB).
-    // Anything larger would need streaming decode, which `npk_fetch`
-    // doesn't support. A truncated input fails the decode on the missing
-    // IEND chunk.
-    let max_size = 32 * 1024 * 1024;
-    let mut img_buf = vec![0u8; max_size];
-    let img_len = match fetch(filename, &mut img_buf) {
-        Some(n) => n,
+    let img_buf = match fetch(filename) {
+        Some(b) => b,
         None => { log("[wallpaper] failed to fetch image"); return; }
     };
-    if img_len == max_size {
-        log("[wallpaper] WARN: image hit 32 MB buffer cap — may be truncated");
-    }
 
-    let (pixels, width, height) = match decode_png(&img_buf[..img_len]) {
+    let (pixels, width, height) = match decode_png(&img_buf) {
         Some(v) => v,
         None => { log("[wallpaper] PNG decode failed"); return; }
     };

@@ -8,7 +8,7 @@
 //! growing one.
 
 use crate::abi::Event;
-use alloc::vec;
+use npk_sys::{fill, Fill};
 
 /// What one poll found.
 pub enum Poll {
@@ -21,21 +21,15 @@ pub enum Poll {
 /// Take the next event, decoding it from `buf` or, if it is larger, from a
 /// buffer of its size.
 pub fn poll(buf: &mut [u8]) -> Poll {
-    let n = npk_sys::event_poll(buf);
-    match n {
-        0 => Poll::Empty,
-        -1 => Poll::Gone,
-        n if n > 0 => decode(&buf[..n as usize]),
-        n => {
-            let needed = (-(n as i64) - 2) as usize;
-            let mut big = vec![0u8; needed];
-            let m = npk_sys::event_poll(&mut big);
-            match m {
-                m if m > 0 => decode(&big[..m as usize]),
-                -1 => Poll::Gone,
-                _ => Poll::Empty,
-            }
-        }
+    match fill(npk_sys::event_poll(buf)) {
+        Fill::Len(0) => Poll::Empty,
+        Fill::Len(n) => decode(&buf[..n]),
+        Fill::Fail => Poll::Gone,
+        Fill::Need(n) => match npk_sys::read_all_from(n, npk_sys::event_poll) {
+            Some(big) if big.is_empty() => Poll::Empty,
+            Some(big) => decode(&big),
+            None => Poll::Gone,
+        },
     }
 }
 

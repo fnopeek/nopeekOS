@@ -1100,10 +1100,11 @@ pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
 // Real-hardware device IRQs route via MSI-X to a vector in this pool (the
 // PIC is masked, no IOAPIC). Each vector has a tiny ISR that bumps a
 // per-vector fired-count (`irq::note_fired`) + EOIs the LAPIC; a driver
-// fiber parks on it via `irq::wait`. See `crate::irq`. Vectors 0x70..0x80
-// sit above the timer vectors (32/48/49/50) and the masked PIC range.
+// fiber parks on it via `irq::wait`. See `crate::irq`. Vectors 0x70..0xF0
+// sit above the timer vectors (32/48/49/50) and the masked PIC range, and
+// below the spurious vector 0xFF.
 pub const DEVICE_IRQ_VEC_BASE: u8 = 0x70;
-pub const DEVICE_IRQ_VEC_COUNT: usize = 16;
+pub const DEVICE_IRQ_VEC_COUNT: usize = 128;
 
 /// Shared body of every device-IRQ ISR: note the fire (wakes the parked
 /// driver fiber via its count) + EOI this core's LAPIC. Minimal by design —
@@ -1122,7 +1123,7 @@ fn device_irq_common(vector: u8) {
 
 // Generate one `extern "x86-interrupt"` stub per pool vector (each hardcodes
 // its vector, since the CPU passes none) + an installer that wires them into
-// the IDT. Macro keeps the 16 stubs + 16 IDT writes in lockstep.
+// the IDT. Macro keeps the stubs and the IDT writes in lockstep.
 macro_rules! device_isrs {
     ($($name:ident = $idx:expr),+ $(,)?) => {
         $(
@@ -1145,8 +1146,21 @@ macro_rules! device_isrs {
 }
 device_isrs!(
     di0 = 0, di1 = 1, di2 = 2, di3 = 3, di4 = 4, di5 = 5, di6 = 6, di7 = 7,
-    di8 = 8, di9 = 9, di10 = 10, di11 = 11, di12 = 12, di13 = 13, di14 = 14,
-    di15 = 15,
+    di8 = 8, di9 = 9, di10 = 10, di11 = 11, di12 = 12, di13 = 13, di14 = 14, di15 = 15,
+    di16 = 16, di17 = 17, di18 = 18, di19 = 19, di20 = 20, di21 = 21, di22 = 22, di23 = 23,
+    di24 = 24, di25 = 25, di26 = 26, di27 = 27, di28 = 28, di29 = 29, di30 = 30, di31 = 31,
+    di32 = 32, di33 = 33, di34 = 34, di35 = 35, di36 = 36, di37 = 37, di38 = 38, di39 = 39,
+    di40 = 40, di41 = 41, di42 = 42, di43 = 43, di44 = 44, di45 = 45, di46 = 46, di47 = 47,
+    di48 = 48, di49 = 49, di50 = 50, di51 = 51, di52 = 52, di53 = 53, di54 = 54, di55 = 55,
+    di56 = 56, di57 = 57, di58 = 58, di59 = 59, di60 = 60, di61 = 61, di62 = 62, di63 = 63,
+    di64 = 64, di65 = 65, di66 = 66, di67 = 67, di68 = 68, di69 = 69, di70 = 70, di71 = 71,
+    di72 = 72, di73 = 73, di74 = 74, di75 = 75, di76 = 76, di77 = 77, di78 = 78, di79 = 79,
+    di80 = 80, di81 = 81, di82 = 82, di83 = 83, di84 = 84, di85 = 85, di86 = 86, di87 = 87,
+    di88 = 88, di89 = 89, di90 = 90, di91 = 91, di92 = 92, di93 = 93, di94 = 94, di95 = 95,
+    di96 = 96, di97 = 97, di98 = 98, di99 = 99, di100 = 100, di101 = 101, di102 = 102, di103 = 103,
+    di104 = 104, di105 = 105, di106 = 106, di107 = 107, di108 = 108, di109 = 109, di110 = 110, di111 = 111,
+    di112 = 112, di113 = 113, di114 = 114, di115 = 115, di116 = 116, di117 = 117, di118 = 118, di119 = 119,
+    di120 = 120, di121 = 121, di122 = 122, di123 = 123, di124 = 124, di125 = 125, di126 = 126, di127 = 127,
 );
 
 /// Hardware APIC ID of the calling core (xAPIC ID register, bits 31:24).

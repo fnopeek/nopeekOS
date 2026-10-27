@@ -1,6 +1,6 @@
 [package]
 name = "i2c_hid"
-version = "0.28.2"
+version = "0.29.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 
@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 i2c_hid_core = { path = "../core" }
 aml_core = { path = "../../acpi/core" }
-npk_sys = { path = "../../sdk/npk_sys" }
+npk_sys = { path = "../../sdk/npk_sys", features = ["alloc"] }
 
 [profile.release]
 opt-level = "s"

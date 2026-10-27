@@ -223,11 +223,10 @@ pub fn request_firmware(name: &[u8]) -> Result<firmware, i32> {
         return Err(-2);
     }
     let size = u64::from_le_bytes(st[..8].try_into().unwrap_or([0; 8])) as usize;
-    let mut data = alloc::vec![0u8; size];
-    if size == 0 || npk_sys::fetch(&path, &mut data) != size as i32 {
-        return Err(-2);
+    match npk_sys::read_all_from(size, |b| npk_sys::fetch(&path, b)) {
+        Some(data) if !data.is_empty() => Ok(firmware { data }),
+        _ => Err(-2),
     }
-    Ok(firmware { data })
 }
 
 /// `drm_info`.
