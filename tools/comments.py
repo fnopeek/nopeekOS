@@ -463,6 +463,28 @@ def added_lines(diff_args):
     return out
 
 
+UNSAFE_BLOCK = re.compile(r"\bunsafe\s*\{")
+
+
+def lacks_safety(src_lines, i):
+    """True if the `unsafe {` on line index `i` has no SAFETY comment on its
+    line or above it, looking past attributes, comments, blank lines and the
+    earlier lines of the same statement (CLAUDE.md: every unsafe block has
+    one)."""
+    if "SAFETY" in src_lines[i]:
+        return False
+    k = i - 1
+    while k >= 0 and i - k <= 12:
+        t = src_lines[k].strip()
+        if "SAFETY" in t:
+            return False
+        if t.startswith(("//", "#[")) or not t or not t.endswith((";", "{", "}")):
+            k -= 1
+            continue
+        break
+    return True
+
+
 def cmd_lint(staged, rev, warn):
     touched = added_lines(["--cached"] if staged else [rev])
     hits = []
@@ -470,6 +492,13 @@ def cmd_lint(staged, rev, warn):
         src = show("", path) if staged else read(path)
         if src is None:
             continue
+        if path.endswith(".rs"):
+            src_lines = src.splitlines()
+            for l in sorted(lines):
+                t = src_lines[l - 1] if l <= len(src_lines) else ""
+                if (UNSAFE_BLOCK.search(t) and not t.strip().startswith("//")
+                        and lacks_safety(src_lines, l - 1)):
+                    hits.append(f"{path}:{l}: unsafe block without a SAFETY comment: {t.strip()[:80]}")
         for start, end, text, ctx in blocks(lex_for(path, src), src.splitlines()):
             if not any(start <= l <= end for l in lines):
                 continue
@@ -479,8 +508,9 @@ def cmd_lint(staged, rev, warn):
     for h in hits:
         print(h)
     if hits:
-        print(f"\n{len(hits)} comment block(s) break docs/spec/COMMENTS.md "
-              "(English only; no versions, dates, names, devices, history).")
+        print(f"\n{len(hits)} finding(s) break docs/spec/COMMENTS.md "
+              "(English only; no versions, dates, names, devices, history; "
+              "every unsafe block has a SAFETY comment).")
     return 0 if warn or not hits else 1
 
 
