@@ -1,12 +1,12 @@
-//! aml.wasm — the AML battery driver.
+//! acpi.wasm — the ACPI driver: runs the firmware's AML (battery, EC events, processor idle states).
 //!
 //! Resident background driver (autostart). At startup it loads the firmware
 //! DSDT into a namespace and initialises it once (`_REG`, `_INI`, then the
 //! EC's `_REG`), as ACPICA and Linux do. From then on it runs the `_Qxx` of
 //! each EC event the SCI reports, and every 10 s the battery's own
 //! `_BST`/`_BIF` AML (vendor-independent, via [`aml_core`]), and pushes the
-//! decoded percentage to the kernel via `npk_battery_report`. The bar reads
-//! it through the unchanged `npk_battery()`.
+//! decoded percentage to the kernel via `npk_battery_report`; status items
+//! read it through `npk_battery()`.
 
 #![no_std]
 
@@ -22,7 +22,7 @@ static NPK_CAPS: [u8; 1] = [0x40];
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    logln("[aml] panic");
+    logln("[acpi] panic");
     // Trap, do not spin. `loop {}` would turn every panic into a silent
     // hang; a trap is caught by the kernel and reported on screen.
     core::arch::wasm32::unreachable()
@@ -100,7 +100,7 @@ fn processor_power(m: &mut Machine, ns: &Namespace) {
         (n > 0 && n as usize <= TABLE_MAX).then(|| t[..n as usize].to_vec())
     });
     let Some(madt) = madt else {
-        logln("[aml] processors: no MADT");
+        logln("[acpi] processors: no MADT");
         return;
     };
     let present: alloc::vec::Vec<processor::Processor> = processor::processors(m, ns).into_iter()
@@ -111,7 +111,7 @@ fn processor_power(m: &mut Machine, ns: &Namespace) {
     let mut osc_ok = true;
     for p in &present {
         if let Err(e) = processor::run_osc(m, &p.path, caps as u32) {
-            log("[aml]  ");
+            log("[acpi]  ");
             logln(&e);
             osc_ok = false;
             break;
@@ -127,7 +127,7 @@ fn processor_power(m: &mut Machine, ns: &Namespace) {
         match processor::evaluate_cst(m, &p.path) {
             Ok((states, skipped)) => {
                 for e in skipped {
-                    log("[aml]  ");
+                    log("[acpi]  ");
                     logln(&e);
                 }
                 if !states.is_empty() {
@@ -136,12 +136,12 @@ fn processor_power(m: &mut Machine, ns: &Namespace) {
                 }
             }
             Err(e) => if VERBOSE.with(|v| *v) {
-                log("[aml]  ");
+                log("[acpi]  ");
                 logln(&e);
             },
         }
     }
-    log("[aml] processors: ");
+    log("[acpi] processors: ");
     lognum_raw(present.len() as u32);
     log(if osc_ok { " present, _OSC" } else { " present, _PDC" });
     let Some(states) = cst else {
@@ -217,14 +217,14 @@ impl Ec for HostEc {
         // EC returning all zeros looks to the DSDT like a real reading and it
         // concludes "no battery".
         if self.loud() {
-            lognum2("[aml]   ec.read  [", addr as u32, "] -> ", v as u32);
+            lognum2("[acpi]   ec.read  [", addr as u32, "] -> ", v as u32);
         }
         v
     }
     fn write(&mut self, addr: u8, val: u8) {
         npk_sys::ec_write(addr as i32, val as i32);
         if self.loud() {
-            lognum2("[aml]   ec.write [", addr as u32, "] <- ", val as u32);
+            lognum2("[acpi]   ec.write [", addr as u32, "] <- ", val as u32);
         }
     }
     fn sleep_ms(&mut self, ms: u32) {
@@ -270,7 +270,7 @@ impl Ec for HostEc {
         if !first && !self.loud() {
             return;
         }
-        log("[aml] EC event _Q");
+        log("[acpi] EC event _Q");
         loghex2(q);
         logln(match (handled, first) {
             (true, true) => " (ran; further ones of it silent)",
@@ -282,7 +282,7 @@ impl Ec for HostEc {
         if !self.loud() {
             return;
         }
-        log("[aml]   Notify(\\");
+        log("[acpi]   Notify(\\");
         for (k, seg) in path.iter().enumerate() {
             if k > 0 { log("."); }
             if let Ok(t) = core::str::from_utf8(seg) { log(t); }
@@ -301,24 +301,24 @@ impl Ec for HostEc {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    logln("[aml] battery driver start");
+    logln("[acpi] battery driver start");
     // Verbose trace of the first round (every region, every EC access,
     // every `_BIF` field). Off in normal operation; `set log.drivers 1`
     // enables it.
     let loud = npk_sys::sys_info(50) == 1;
 
     let len = DSDT.with(|d| npk_sys::acpi_dsdt(d));
-    lognum("[aml] DSDT bytes reported: ", len as u32);
+    lognum("[acpi] DSDT bytes reported: ", len as u32);
     if len <= 0 || len as usize > DSDT_MAX {
-        lognum("[aml] no DSDT, or larger than the buffer of ", DSDT_MAX as u32);
-        logln("[aml] driver idle");
+        lognum("[acpi] no DSDT, or larger than the buffer of ", DSDT_MAX as u32);
+        logln("[acpi] driver idle");
         return;
     }
     let table_len = len as usize;
     VERBOSE.with(|v| *v = loud);
 
     let Some(mut ns) = DSDT.with(|d| Namespace::load(&d[..table_len]).ok()) else {
-        logln("[aml] Namespace::load failed — driver idle");
+        logln("[acpi] Namespace::load failed — driver idle");
         return;
     };
     // Plus every SSDT: together they form one namespace, and Linux loads
@@ -334,7 +334,7 @@ pub extern "C" fn _start() {
         });
         if n <= 0 { break; }
     }
-    lognum("[aml] namespace: DSDT + SSDTs ", ssdts);
+    lognum("[acpi] namespace: DSDT + SSDTs ", ssdts);
     let ns: &'static Namespace = alloc::boxed::Box::leak(alloc::boxed::Box::new(ns));
     let batteries = find_batteries(ns);
 
@@ -346,13 +346,13 @@ pub extern "C" fn _start() {
         Some(gpe) => {
             let v = npk_sys::sci_arm(gpe as i32);
             if v > 0 {
-                lognum("[aml] EC events by SCI, GPE ", gpe);
+                lognum("[acpi] EC events by SCI, GPE ", gpe);
             } else {
-                logln("[aml] SCI not available — EC polled every 10 s");
+                logln("[acpi] SCI not available — EC polled every 10 s");
             }
             v
         }
-        None => { logln("[aml] no EC _GPE — EC polled every 10 s"); -1 }
+        None => { logln("[acpi] no EC _GPE — EC polled every 10 s"); -1 }
     };
 
     let ec: &'static mut HostEc = alloc::boxed::Box::leak(alloc::boxed::Box::new(HostEc { reads: 0, fails: 0, verbose: false }));
@@ -383,11 +383,11 @@ pub extern "C" fn _start() {
             if packed != last {
                 if packed < 0 {
                     // A battery that stops reporting is worth logging.
-                    logln("[aml] no usable battery (packed=-1)");
+                    logln("[acpi] no usable battery (packed=-1)");
                 } else if loud {
                     // The percentage is not: it changes about a hundred
                     // times per discharge, and the bar shows it anyway.
-                    lognum("[aml] battery percent=", (packed & 0xFF) as u32);
+                    lognum("[acpi] battery percent=", (packed & 0xFF) as u32);
                 }
                 last = packed;
             }
@@ -406,7 +406,7 @@ pub extern "C" fn _start() {
         npk_sys::wait(WAIT_IRQ, 10_000);
         let fired = npk_sys::sci_service();
         if fired > 0 && (fired >> 16) & 0x100 != 0 {
-            logln("[aml] power button (PM1 PWRBTN_STS)");
+            logln("[acpi] power button (PM1 PWRBTN_STS)");
         }
         if fired > 0 && fired & 2 != 0 {
             fetch_ec_events();
@@ -424,24 +424,24 @@ fn battery(m: &mut Machine, batteries: &[aml_core::Path]) -> (i32, Option<aml_co
         // different failures; the error carries a text, so log it.
         match m.battery(bat) {
             Err(e) => if verbose {
-                log("[aml]  _BST/_BIF failed: ");
+                log("[acpi]  _BST/_BIF failed: ");
                 logln(&e);
             },
             Ok(info) => {
             if verbose {
-                lognum("[aml]  present=", info.present as u32);
-                lognum("[aml]  state=", info.state);
-                lognum("[aml]  remaining_mah=", info.remaining_mah);
-                lognum("[aml]  full_mah=", info.full_charge_mah);
-                lognum("[aml]  percent=", info.percent as u32);
+                lognum("[acpi]  present=", info.present as u32);
+                lognum("[acpi]  state=", info.state);
+                lognum("[acpi]  remaining_mah=", info.remaining_mah);
+                lognum("[acpi]  full_mah=", info.full_charge_mah);
+                lognum("[acpi]  percent=", info.percent as u32);
             }
             // A battery whose remaining capacity the firmware does not state
             // has no percentage; an invented number in the bar is worse than
             // no cell at all.
             if info.present && info.remaining_mah == 0xFFFF_FFFF {
                 if verbose {
-                    logln("[aml]  battery present, but _BST reports UNKNOWN remaining");
-                    logln("[aml]  -> kein Prozentwert; die Bar zeigt nichts statt etwas Falsches");
+                    logln("[acpi]  battery present, but _BST reports UNKNOWN remaining");
+                    logln("[acpi]  -> kein Prozentwert; die Bar zeigt nichts statt etwas Falsches");
                 }
                 return (-1, Some(info));
             }
@@ -461,6 +461,6 @@ fn battery(m: &mut Machine, batteries: &[aml_core::Path]) -> (i32, Option<aml_co
             }
         }
     }
-    if verbose { lognum("[aml]  batteries seen: ", batteries.len() as u32); }
+    if verbose { lognum("[acpi]  batteries seen: ", batteries.len() as u32); }
     (-1, None)
 }

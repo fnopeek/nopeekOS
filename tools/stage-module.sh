@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 for mod in "$@"; do
     src="$ROOT/tools/wasm/$mod"
-    # Modules with their own core/harness (aml, i2c_hid) keep the crate
+    # Modules with their own core/harness (acpi, i2c_hid) keep the crate
     # one level deeper.
     if [ ! -f "$src/Cargo.toml" ] && [ -f "$src/wasm/Cargo.toml" ]; then
         src="$src/wasm"

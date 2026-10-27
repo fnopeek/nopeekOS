@@ -1158,7 +1158,7 @@ fn spawn_launcher() {
 /// no `APP_RUNNING` capture (so background panels like the deck don't
 /// hijack keyboard focus the way `run <module>` would). Called once
 /// after `shade::init()`. The kernel stays generic: the app names live
-/// in config, not here. Set with e.g. `set autostart deck aml`.
+/// in config, not here. Set with e.g. `set autostart deck acpi`.
 pub fn start_autostart() {
     let list = match crate::config::get("autostart") {
         Some(v) => v,

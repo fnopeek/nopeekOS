@@ -685,7 +685,7 @@ pub fn intent_power(args: &str) {
 ///   power cstate off        back to hlt (C1)
 fn power_cstate(arg: &str) {
     kprintln!();
-    // Intel: the MWAIT states the firmware's _CST gave (via `aml`).
+    // Intel: the MWAIT states the firmware's _CST gave (via `acpi`).
     if crate::smp::per_core::intel_model().is_some() {
         let tsc_per_us = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
         match arg {
@@ -693,7 +693,7 @@ fn power_cstate(arg: &str) {
                 if crate::interrupts::set_mwait_idle(true) {
                     kprintln!("  Leerlauf ueber MWAIT aus _CST — bis zum naechsten Neustart.");
                 } else {
-                    kprintln!("  Keine MWAIT-Zustaende: laeuft 'aml'? (_CST kommt von dort)");
+                    kprintln!("  Keine MWAIT-Zustaende: laeuft 'acpi'? (_CST kommt von dort)");
                 }
             }
             "off" => {
@@ -705,7 +705,7 @@ fn power_cstate(arg: &str) {
                     if crate::interrupts::has_arat() { "ja" } else { "NEIN — nur C1" });
                 let (states, on) = crate::interrupts::mwait_states();
                 if states.is_empty() {
-                    kprintln!("  Keine Zustaende aus _CST (das meldet 'aml' beim Start).");
+                    kprintln!("  Keine Zustaende aus _CST (das meldet 'acpi' beim Start).");
                 }
                 for (i, (hint, target)) in states.iter().enumerate() {
                     kprintln!("  C{}  MWAIT 0x{:02x}  ab {} us Schlaf", i + 1, hint, target / tsc_per_us);
@@ -773,7 +773,7 @@ fn power_cstate(arg: &str) {
 pub fn intent_battery() {
     const SBS_ADDR: u8 = 0x0B;
     // A notebook whose pack sits behind the EC reports through the firmware
-    // (`aml`: `_BST`/`_BIF`). That is the common case, and it carries what
+    // (`acpi`: `_BST`/`_BIF`). That is the common case, and it carries what
     // the SMBus path never had: the draw of the whole machine.
     if let Some(d) = crate::battery::detail() {
         battery_from_acpi(d);
@@ -834,7 +834,7 @@ fn battery_from_acpi(d: crate::battery::Detail) {
     const UNKNOWN: u32 = 0xFFFF_FFFF;
     let packed = crate::battery::cached();
     kprintln!();
-    kprintln!("  Akku (ACPI _BST/_BIF, ueber aml)");
+    kprintln!("  Akku (ACPI _BST/_BIF, ueber acpi)");
     kprintln!("  ────────────────────────────────");
     if packed >= 0 {
         let st = match packed >> 8 {
@@ -870,7 +870,7 @@ fn battery_from_acpi(d: crate::battery::Detail) {
     }
     kprintln!();
     kprintln!("  Die Firmware frischt die Rate selbst nur alle paar Sekunden auf,");
-    kprintln!("  aml liest alle 10 s. Fuer einen Vergleich 20-30 s warten.");
+    kprintln!("  acpi liest alle 10 s. Fuer einen Vergleich 20-30 s warten.");
     kprintln!();
 }
 
@@ -1027,7 +1027,7 @@ pub fn intent_dsdt() {
 }
 
 /// `dsdt full` — base64-dump the entire DSDT to the console, framed by
-/// markers, so the aml.wasm interpreter dev-harness can reconstruct the exact
+/// markers, so the acpi.wasm interpreter dev-harness can reconstruct the exact
 /// bytes the kernel sees (cross-check against Linux's acpidump). Generic ACPI
 /// diagnostic — no device-specific logic.
 pub fn intent_dsdt_full() {
@@ -1131,13 +1131,13 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16, extra: &[u64]) {
 
 /// `ec watch [s]` — read-only look at how firmware events reach us: is ACPI mode on
 /// (PM1_CNT.SCI_EN), which GPE status bits rise, does the EC raise SCI_EVT.
-/// Nothing is written and no event is taken — aml keeps draining the EC.
+/// Nothing is written and no event is taken — acpi keeps draining the EC.
 pub fn intent_ec_watch(args: &str) {
     use crate::hw::{Port, PortRange};
     // SAFETY: the EC status/command port, read only.
     const EC_SC: Port = unsafe { Port::new(0x66) };
     // `ec watch take [s]`: also fetch each event (QR_EC) and print the raw
-    // answer — this steals it from aml, whose `_Qxx` then does not run.
+    // answer — this steals it from acpi, whose `_Qxx` then does not run.
     let (take, rest) = match args.trim().strip_prefix("take") {
         Some(r) => (true, r),
         None => (false, args),

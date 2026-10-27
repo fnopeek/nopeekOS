@@ -126,12 +126,12 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     // Order as in ACPICA `acpi_initialize_objects`: enable operation regions
     // first (`_REG`), then start the devices (`_STA`/`_INI`).
     it.run_deferred();
-    it.ec.note("[aml]  phase _REG");
+    it.ec.note("[acpi]  phase _REG");
     it.register_regions(false)?;
-    it.ec.note("[aml]  phase _INI");
+    it.ec.note("[acpi]  phase _INI");
     let ini_ran = it.run_ini_methods();
-    it.ec.note_num("[aml]  _INI methods run: ", ini_ran as u64);
-    it.ec.note("[aml]  phase EC _REG");
+    it.ec.note_num("[acpi]  _INI methods run: ", ini_ran as u64);
+    it.ec.note("[acpi]  phase EC _REG");
     it.register_regions(true)?;
 
     // How many `_Qxx` does this DSDT have?
@@ -146,7 +146,7 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
             if last[0] == b'_' && last[1] == b'Q' { qcount += 1; }
         }
     }
-    it.ec.note_num("[aml]  _Qxx handlers in DSDT: ", qcount);
+    it.ec.note_num("[acpi]  _Qxx handlers in DSDT: ", qcount);
 
     // Fetch pending EC events and run their `_Qxx`.
     //
@@ -159,7 +159,7 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     // Limit of 100 as `ACPI_EC_CLEAR_MAX`; Linux warns when it is hit and
     // treats it as a stuck EC.
     let drained = it.drain_ec_queries();
-    it.ec.note_num("[aml]  stale EC events drained: ", drained as u64);
+    it.ec.note_num("[acpi]  stale EC events drained: ", drained as u64);
 
     it.battery(bat)
 }
@@ -182,13 +182,13 @@ impl<'a> Interp<'a> {
             match self.call_path(&sta, Vec::new()) {
                 Ok(v) => {
                     let f = v.as_int();
-                    self.ec.note_num("[aml]  battery _STA=", f);
+                    self.ec.note_num("[acpi]  battery _STA=", f);
                     sta_present = Some(f & 0x10 != 0);
                 }
-                Err(_) => self.ec.note("[aml]  battery _STA failed"),
+                Err(_) => self.ec.note("[acpi]  battery _STA failed"),
             }
         } else {
-            self.ec.note("[aml]  battery has no _STA");
+            self.ec.note("[acpi]  battery has no _STA");
         }
         // Order as in Linux: description first, then state.
         //
@@ -196,11 +196,11 @@ impl<'a> Interp<'a> {
         // before `acpi_battery_get_state` (_BST). Some firmware selects the
         // battery or latches readings in `_BIF`, and a `_BST` before it reports
         // "unknown".
-        self.ec.note("[aml]  phase _BIF");
+        self.ec.note("[acpi]  phase _BIF");
         let (full, power_unit) = self.read_full_charge(bat)?;
-        self.ec.note_num("[aml]  full charge: ", full as u64);
+        self.ec.note_num("[acpi]  full charge: ", full as u64);
 
-        self.ec.note("[aml]  phase _BST");
+        self.ec.note("[acpi]  phase _BST");
 
         // _BST -> Package { State, PresentRate, RemainingCapacity, Voltage }
         let mut p = bat.clone();
@@ -213,8 +213,8 @@ impl<'a> Interp<'a> {
                 // alone cannot tell.
                 for (i, el) in e.iter().enumerate().take(4) {
                     self.ec.note_num(
-                        match i { 0 => "[aml]   _BST[0] state=", 1 => "[aml]   _BST[1] rate=",
-                                  2 => "[aml]   _BST[2] remaining=", _ => "[aml]   _BST[3] voltage=" },
+                        match i { 0 => "[acpi]   _BST[0] state=", 1 => "[acpi]   _BST[1] rate=",
+                                  2 => "[acpi]   _BST[2] remaining=", _ => "[acpi]   _BST[3] voltage=" },
                         el.borrow().as_int());
                 }
                 (e[0].borrow().as_int() as u32, e[2].borrow().as_int() as u32,
@@ -361,14 +361,14 @@ impl<'a> Interp<'a> {
         }
         // acpi_tb_verify_checksum warns and loads all the same.
         if table.iter().fold(0u8, |a, &b| a.wrapping_add(b)) != 0 {
-            self.ec.note("[aml]   Load: table checksum is wrong");
+            self.ec.note("[acpi]   Load: table checksum is wrong");
         }
         let mut ns = crate::Namespace::load(&table)?;
         let deferred = core::mem::take(&mut ns.deferred);
         let ns: &'a Namespace = alloc::boxed::Box::leak(alloc::boxed::Box::new(ns));
         self.loaded.push(ns);
         let n = self.loaded.len() as u64;
-        self.ec.note(&format!("[aml]   Load: {} bytes at {offset:#x} as table {n}", len));
+        self.ec.note(&format!("[acpi]   Load: {} bytes at {offset:#x} as table {n}", len));
         if !deferred.is_empty() {
             let _ = self.run_deferred_items(deferred, false);
         }
@@ -492,7 +492,7 @@ impl<'a> Interp<'a> {
             .filter(|p| p.len() > 1 && p.last() == Some(&ini_seg))
             .map(|p| { let mut d = p.clone(); d.pop(); d })
             .collect();
-        self.ec.note_num("[aml]  _INI methods found: ", devs.len() as u64);
+        self.ec.note_num("[acpi]  _INI methods found: ", devs.len() as u64);
         devs.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
 
         let mut ran = 0u32;
@@ -535,7 +535,7 @@ impl<'a> Interp<'a> {
                         Ok(_) => {}
                         Err(e) => {
                             let name = path_str(&ip);
-                            self.ec.note(&format!("[aml]  {name} failed: {e}"));
+                            self.ec.note(&format!("[acpi]  {name} failed: {e}"));
                         }
                     }
                     ran += 1;
@@ -571,7 +571,7 @@ impl<'a> Interp<'a> {
         let mut done = 0u32;
         for _ in 0..100 {
             let q = match self.ec.query() { Some(q) => q, None => break };
-            self.ec.note_num("[aml]   EC query 0x", q as u64);
+            self.ec.note_num("[acpi]   EC query 0x", q as u64);
             let name = hex(q);
             let mut found = false;
             for sc in &scopes {
@@ -586,7 +586,7 @@ impl<'a> Interp<'a> {
             if !found {
                 // Linux logs this too and continues: an event without a
                 // handler is not an error; it has been fetched.
-                self.ec.note("[aml]   (no handler for that query)");
+                self.ec.note("[acpi]   (no handler for that query)");
             }
             self.ec.ec_event(q, found);
             done += 1;
@@ -771,7 +771,7 @@ impl<'a> Interp<'a> {
                 // Unload (DDBHandle): the table stays; nothing in the firmware
                 // we run unloads one it still needs.
                 let (_h, p1) = self.eval(f, p + 2)?;
-                self.ec.note("[aml]   Unload ignored");
+                self.ec.note("[acpi]   Unload ignored");
                 Ok((Flow::Normal, p1))
             }
             0x5B if b[p + 1] == 0x80 => {
@@ -1262,7 +1262,7 @@ impl<'a> Interp<'a> {
                 if self.trace {
                     let d = describe(&v);
                     let n = path_str(&path);
-                    self.ec.note(&format!("[aml]   trace {n} = {d}"));
+                    self.ec.note(&format!("[acpi]   trace {n} = {d}"));
                 }
                 Ok((v, p1))
             }
@@ -1271,7 +1271,7 @@ impl<'a> Interp<'a> {
                 if self.trace {
                     let d = describe(&v);
                     let n = path_str(&path);
-                    self.ec.note(&format!("[aml]   trace {n} = {d} (field)"));
+                    self.ec.note(&format!("[acpi]   trace {n} = {d} (field)"));
                 }
                 Ok((v, p1))
             }
@@ -1448,7 +1448,7 @@ impl<'a> Interp<'a> {
                     Some(pl) => self.read_place(&pl)?,
                     None => Value::Uninit,
                 };
-                self.ec.note("[aml]  Create*Field on a non-name source — writes will not stick");
+                self.ec.note("[acpi]  Create*Field on a non-name source — writes will not stick");
                 obj(v)
             }
         };
@@ -1500,7 +1500,7 @@ impl<'a> Interp<'a> {
             if let Err(e) = self.stmt(&f, 0, bytes.len()) {
                 if loud {
                     let name = path_str(&scope);
-                    self.ec.note(&format!("[aml]  deferred op in {name} failed: {e}"));
+                    self.ec.note(&format!("[acpi]  deferred op in {name} failed: {e}"));
                     // "Unresolvable" is half the answer. The other half is
                     // whether the name exists at all, which separates
                     // "defined elsewhere in the tree" from "in no table we
@@ -1511,13 +1511,13 @@ impl<'a> Interp<'a> {
                         let mut hits = 0usize;
                         for p in self.ns.nodes.keys() {
                             if p.last() == Some(&seg) && hits < 3 {
-                                self.ec.note(&format!("[aml]    but {want} exists at {}", path_str(p)));
+                                self.ec.note(&format!("[acpi]    but {want} exists at {}", path_str(p)));
                                 hits += 1;
                             }
                         }
                         if hits == 0 {
                             self.ec.note(&format!(
-                                "[aml]    {want} is in NO table we loaded"));
+                                "[acpi]    {want} is in NO table we loaded"));
                         }
                     }
                 }
@@ -1598,8 +1598,8 @@ impl<'a> Interp<'a> {
             if let Some(v) = self.ec.mem_read(addr) {
                 // Log with the address: values without their origin do not
                 // show whether a contiguous block or one location is read.
-                self.ec.note_num("[aml]   sysmem [", addr);
-                self.ec.note_num("[aml]        ] -> ", v as u64);
+                self.ec.note_num("[acpi]   sysmem [", addr);
+                self.ec.note_num("[acpi]        ] -> ", v as u64);
                 return v;
             }
         }
@@ -1613,9 +1613,9 @@ impl<'a> Interp<'a> {
         let n = INVENTED.fetch_add(1, Ordering::Relaxed);
         if n < 4 {
             self.ec.note(&format!(
-                "[aml]   region space={space} addr={addr:#x} not backed -> 0 (invented)"));
+                "[acpi]   region space={space} addr={addr:#x} not backed -> 0 (invented)"));
         } else if n == 4 {
-            self.ec.note("[aml]   (further invented region reads silenced)");
+            self.ec.note("[acpi]   (further invented region reads silenced)");
         }
         0
     }
@@ -1630,9 +1630,9 @@ impl<'a> Interp<'a> {
         // could reprogram devices), but if the firmware drives a select
         // register here and then reads, it gets data for the wrong
         // selection, so it is logged.
-        self.ec.note_num("[aml]   scratch write space=", space as u64);
-        self.ec.note_num("[aml]        addr=", addr);
-        self.ec.note_num("[aml]        val=", val as u64);
+        self.ec.note_num("[acpi]   scratch write space=", space as u64);
+        self.ec.note_num("[acpi]        addr=", addr);
+        self.ec.note_num("[acpi]        val=", val as u64);
         self.mem.insert((space, addr), val);
     }
 
@@ -2092,7 +2092,7 @@ impl<'a> Machine<'a> {
             Ok(v) => v,
             Err(e) => {
                 let n = path_str(scope);
-                self.it.ec.note(&format!("[aml]  scope-If in {n}: {e}"));
+                self.it.ec.note(&format!("[acpi]  scope-If in {n}: {e}"));
                 return None;
             }
         };
@@ -2117,13 +2117,13 @@ impl<'a> Machine<'a> {
 
     /// The part of `init` before the EC: `acpi_initialize_objects`.
     pub fn init_objects(&mut self) {
-        self.it.ec.note("[aml]  phase deferred table ops");
+        self.it.ec.note("[acpi]  phase deferred table ops");
         let failed = self.it.run_deferred();
-        self.it.ec.note("[aml]  phase _REG");
+        self.it.ec.note("[acpi]  phase _REG");
         let _ = self.it.register_regions(false);
-        self.it.ec.note("[aml]  phase _INI");
+        self.it.ec.note("[acpi]  phase _INI");
         let n = self.it.run_ini_methods();
-        self.it.ec.note_num("[aml]  _INI methods run: ", n as u64);
+        self.it.ec.note_num("[acpi]  _INI methods run: ", n as u64);
 
         // Retry what failed the first time.
         //
@@ -2136,7 +2136,7 @@ impl<'a> Machine<'a> {
             let n = failed.len();
             let still = self.it.run_deferred_items(failed, true);
             self.it.ec.note(&format!(
-                "[aml]  deferred retry after _INI: {} of {n} now ok",
+                "[acpi]  deferred retry after _INI: {} of {n} now ok",
                 n - still.len()));
         }
     }
@@ -2144,7 +2144,7 @@ impl<'a> Machine<'a> {
     /// The EC's `_REG`, which Linux runs in `acpi_ec_dsdt_probe` after
     /// the objects and the processors' `_OSC`.
     pub fn init_ec(&mut self) {
-        self.it.ec.note("[aml]  phase EC _REG");
+        self.it.ec.note("[acpi]  phase EC _REG");
         let _ = self.it.register_regions(true);
     }
 

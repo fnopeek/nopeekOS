@@ -22,5 +22,5 @@ link
 volume
 
 # drivers every x86 machine needs
-aml
+acpi
 audio_hda

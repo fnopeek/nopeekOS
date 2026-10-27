@@ -3,19 +3,19 @@
 version = 4
 
 [[package]]
-name = "allocator-api2"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c880a97d28a3681c0267bd29cff89621202715b065127cd445fa0f0fe0aa2880"
-
-[[package]]
-name = "aml"
-version = "0.7.1"
+name = "acpi"
+version = "0.8.0"
 dependencies = [
  "aml_core",
  "nopeek_widgets",
  "npk_sys",
 ]
+
+[[package]]
+name = "allocator-api2"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c880a97d28a3681c0267bd29cff89621202715b065127cd445fa0f0fe0aa2880"
 
 [[package]]
 name = "aml_core"

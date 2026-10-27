@@ -14,7 +14,7 @@ Two checks, and the second is why "it compiled" is not enough:
    the `host_imports!` entries in `kernel/src/wasm/forge_glue.rs` (env) and
    `kernel/src/wasi/forge_glue.rs` (wasi_snapshot_preview1).
 
-Runs over `release/modules/*.wasm`, not the build path, because `aml` and
+Runs over `release/modules/*.wasm`, not the build path, because `acpi` and
 `wifid` are staged by hand and would otherwise bypass it. Individual files
 can be passed as arguments to test the gate without touching `release/`.
 """

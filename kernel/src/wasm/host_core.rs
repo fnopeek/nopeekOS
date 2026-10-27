@@ -538,9 +538,9 @@ pub(crate) fn npk_acpi_mem_read(ctx: &mut HostState, hi: i32, lo: i32) -> i32 {
         static REFUSED: AtomicU32 = AtomicU32::new(0);
         let n = REFUSED.fetch_add(1, Ordering::Relaxed);
         if n < 3 {
-            kprintln!("[npk] aml: refused SystemMemory read at {:#x} — that is RAM", addr);
+            kprintln!("[npk] acpi: refused SystemMemory read at {:#x} — that is RAM", addr);
         } else if n == 3 {
-            kprintln!("[npk] aml: (further SystemMemory refusals silenced)");
+            kprintln!("[npk] acpi: (further SystemMemory refusals silenced)");
         }
         return -1;
     }

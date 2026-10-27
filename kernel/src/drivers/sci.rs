@@ -1,6 +1,6 @@
 //! ACPI SCI: the fixed and general-purpose event registers of the FADT.
 //!
-//! The kernel owns the registers; the AML driver (`aml`) owns the meaning.
+//! The kernel owns the registers; the AML driver (`acpi`) owns the meaning.
 //! It asks for its EC's GPE with `npk_sci_arm(gpe)`, gets the SCI as an
 //! ordinary level interrupt (oneshot: masked on fire, unmasked by the next
 //! `npk_wait`), and on every wake calls `npk_sci_service` — which acks what
@@ -135,7 +135,7 @@ pub fn service() -> u32 {
 pub fn report() {
     let Some(b) = blocks() else { return };
     if !ARMED.load(Ordering::Acquire) {
-        crate::kprintln!("  SCI: nicht genommen (aml < 0.4.0?)");
+        crate::kprintln!("  SCI: nicht genommen (laeuft acpi?)");
         return;
     }
     let v = VECTOR.load(Ordering::Relaxed) as u8;
@@ -154,7 +154,7 @@ pub fn report() {
 }
 
 /// `ec gpe off|on` (diagnostic): take the EC's GPE out of the SCI or put it
-/// back. While off, events are only drained on aml's periodic battery round.
+/// back. While off, events are only drained on acpi's periodic battery round.
 pub fn set_ec_gpe(on: bool) -> bool {
     let Some(b) = blocks() else { return false };
     if !ARMED.load(Ordering::Acquire) { return false; }

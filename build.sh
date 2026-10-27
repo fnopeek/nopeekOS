@@ -1281,7 +1281,7 @@ sha384=${BZIMG_SHA}
         # Release gate: no module ships unless forge translates all of it.
         # A function or import that lands on the trap stub would fail only
         # on its first call, not at load time. The gate lives here and not
-        # in `stage-module.sh` because `aml` and `wifid` are staged by hand.
+        # in `stage-module.sh` because `acpi` and `wifid` are staged by hand.
         if [ -d "$RELEASE_DIR/modules" ]; then
             log "forge-Tor: Module pruefen..."
             if ! python3 "$PROJECT_DIR/tools/forge-gate.py"; then

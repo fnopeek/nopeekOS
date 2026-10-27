@@ -5251,7 +5251,7 @@ impl Ax200 {
 
     // ── Resident NIC service loop ─────────────────────────────────
     // The chip is up and the scan has run; register as a network interface and
-    // own the card from here. Same shape as aml.wasm: an infinite loop that
+    // own the card from here. Same shape as acpi.wasm: an infinite loop that
     // does the driver's work and yields via npk_sleep — never returns (the
     // driver holds its DMA + the netdev registration for its lifetime).
     fn run_netdev(&mut self, associated: bool) -> ! {
@@ -6632,7 +6632,7 @@ pub extern "C" fn _start() {
                                 // ── Register as a NIC + go resident ──
                                 // run_netdev never returns: the driver owns the
                                 // card and the `wlan` interface for its lifetime
-                                // (same model as aml.wasm). It only tells wifid the
+                                // (same model as acpi.wasm). It only tells wifid the
                                 // link is ready (→ the 4-way) when we actually
                                 // associated — otherwise wifid would arm a
                                 // supplicant for a BSS we never joined and stall.

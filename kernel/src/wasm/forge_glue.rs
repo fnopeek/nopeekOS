@@ -732,7 +732,7 @@ host_imports! {
     // when no battery is known (desktops/QEMU → segment stays empty), else
     // (status << 8) | percent, with status 0=discharging 1=charging 2=full
     // 3=plugged-idle and percent in 0..=100. Prefers the AML driver's report
-    // (aml.wasm, vendor-independent via _BST/_BIF); falls back to the
+    // (acpi.wasm, vendor-independent via _BST/_BIF); falls back to the
     // standardised SBS-over-SMBus path for SBS laptops.
     ctx fn npk_battery() -> i32;
 
@@ -752,7 +752,7 @@ host_imports! {
     // window, light-dismissed. EXECUTE.
     mem fn npk_launch_at(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32, anchor: i32) -> i32;
 
-    // ── AML battery driver (aml.wasm) host functions, HARDWARE-gated ─────
+    // ── AML battery driver (acpi.wasm) host functions, HARDWARE-gated ─────
     // npk_acpi_dsdt(buf_ptr, buf_max) -> i32: copy the DSDT (firmware AML)
     // into the caller's buffer; returns the DSDT length. If it exceeds
     // buf_max nothing is copied (caller sizes its buffer up). -1 on error.

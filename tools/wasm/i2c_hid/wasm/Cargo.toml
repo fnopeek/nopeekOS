@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 i2c_hid_core = { path = "../core" }
-aml_core = { path = "../../aml/core" }
+aml_core = { path = "../../acpi/core" }
 npk_sys = { path = "../../sdk/npk_sys" }
 
 [profile.release]

@@ -10,4 +10,4 @@ path = "src/main.rs"
 
 [dependencies]
 i2c_hid_core = { path = "../core" }
-aml_core = { path = "../../aml/core" }
+aml_core = { path = "../../acpi/core" }

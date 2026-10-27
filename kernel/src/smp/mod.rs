@@ -117,7 +117,7 @@ pub fn init() {
 
 /// Deep idle by default where the CPU offers it (AMD Zen on bare metal,
 /// with ARAT): CStateBaseAddr+2, the usual C3. The deepest port belongs to
-/// ACPI `_CST` (Linux `acpi_idle`). Not implemented: reading `_CST` via aml.
+/// ACPI `_CST` (Linux `acpi_idle`). Not implemented: reading `_CST` via acpi.
 fn enable_deep_idle() {
     let Some(base) = per_core::amd_cstate_base() else { return };
     match crate::interrupts::set_deep_idle(base + 2, 200) {

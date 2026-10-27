@@ -9,7 +9,7 @@ license = "AGPL-3.0-or-later"
 crate-type = ["rlib"]
 
 [dependencies]
-aml_core = { path = "../../aml/core" }
+aml_core = { path = "../../acpi/core" }
 
 [profile.release]
 opt-level = "s"

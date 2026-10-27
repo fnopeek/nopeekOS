@@ -4,7 +4,7 @@
 //! `_CST` states `intel_idle` takes on a CPU without a table of its own
 //! (`acpi_processor_ffh_cstate_probe`, arch/x86/kernel/acpi/cstate.c;
 //! `intel_idle_cst_usable`, `intel_idle_init_cstates_acpi`,
-//! drivers/idle/intel_idle.c). The AML runs in the `aml` module, which
+//! drivers/idle/intel_idle.c). The AML runs in the `acpi` module, which
 //! reports the `_CST` entries here.
 
 use crate::kprintln;
@@ -85,7 +85,7 @@ pub fn proc_cap_bits() -> u32 {
     cap
 }
 
-/// A `_CST` entry as `aml` reports it (`struct acpi_processor_cx` plus its
+/// A `_CST` entry as `acpi` reports it (`struct acpi_processor_cx` plus its
 /// register). The register's access size steers bus-master avoidance,
 /// which `acpi_idle` checks and `intel_idle` does not.
 #[derive(Clone, Copy, Debug)]

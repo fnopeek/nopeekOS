@@ -475,7 +475,7 @@ mod tests {
     /// * the descriptor address needs `CreateWordField`.
     #[test]
     fn hp_dsdt_finds_the_touchpad() {
-        let table = include_bytes!("../../../aml/dev/DSDT.aml");
+        let table = include_bytes!("../../../acpi/dev/DSDT.aml");
         let ns = Namespace::load(table).expect("load");
         let mut ec = NoEc;
         let mut m = Machine::new(&ns, &mut ec);
@@ -521,7 +521,7 @@ mod tests {
     /// them is checked.
     #[test]
     fn scope_level_conditionals_declare_the_controller_hid() {
-        let table = include_bytes!("../../../aml/dev/DSDT.aml");
+        let table = include_bytes!("../../../acpi/dev/DSDT.aml");
         let mut ns = Namespace::load(table).expect("load");
         let mut ec = NoEc;
         let (seen, taken) = ns.resolve_conditionals(&mut ec);

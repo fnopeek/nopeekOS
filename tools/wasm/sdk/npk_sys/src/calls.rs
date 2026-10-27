@@ -266,9 +266,9 @@ plain! {
     fn sci_arm = npk_sci_arm(gpe: i32) -> i32;
     fn sci_service = npk_sci_service() -> i32;
     /// An ACPI video output's event (0x85..0x89), for the kernel to act on
-    /// as Linux' `acpi_video` input keys (`aml` only).
+    /// as Linux' `acpi_video` input keys (`acpi` only).
     fn acpi_video_notify = npk_acpi_video_notify(event: i32) -> i32;
-    /// The capabilities for the processors' `_OSC`/`_PDC` (`aml` only).
+    /// The capabilities for the processors' `_OSC`/`_PDC` (`acpi` only).
     fn acpi_proc_caps = npk_acpi_proc_caps() -> i32;
     fn ec_read = npk_ec_read(addr: i32) -> i32;
     fn ec_write = npk_ec_write(addr: i32, val: i32) -> i32;
@@ -531,7 +531,7 @@ pub fn acpi_table(sig: [u8; 4], index: i32, buf: &mut [u8]) -> i32 {
     unsafe { npk_acpi_table(i32::from_le_bytes(sig), index, buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
-/// A processor's `_CST` for MWAIT idle, 24 bytes per entry (`aml` only);
+/// A processor's `_CST` for MWAIT idle, 24 bytes per entry (`acpi` only);
 /// the number of states idle may use.
 pub fn acpi_cst(entries: &[u8]) -> i32 {
     // SAFETY: FFI; `entries` is borrowed for the call.

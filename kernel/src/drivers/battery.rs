@@ -10,8 +10,8 @@
 use crate::smbus;
 use core::sync::atomic::{AtomicI32, Ordering};
 
-// Battery state reported by the AML driver (aml.wasm), encoded as the bar
-// expects: (status << 8) | percent, or -1 for "no battery / no report yet".
+// Battery state reported by the ACPI driver (acpi.wasm), encoded as
+// (status << 8) | percent, or -1 for "no battery / no report yet".
 // The driver runs the firmware's _BST/_BIF (vendor-independent) and pushes
 // here; `npk_battery()` returns this.
 static REPORT: AtomicI32 = AtomicI32::new(-1);

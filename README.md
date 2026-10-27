@@ -93,7 +93,7 @@ encrypted at rest.
  │  drun / loft / spell / iris / tune / snap / vault / link   │
  │  beak: from-scratch web browser (HTML/CSS/JS engine)       │
  │  gpu_intel_tgl / gpu_amd_renoir: GPU drivers (from Linux)  │
- │  wifi_* / wifid / aml / i2c_hid / audio_hda: drivers       │
+ │  wifi_* / wifid / acpi / i2c_hid / audio_hda: drivers      │
  ├──────────────────────────────────────────────────────────┤
  │  MicroVM (compatibility layer)                             │
  │  VT-x / AMD-V hypervisor · custom Linux 6.18 · virtio      │
@@ -463,7 +463,7 @@ nopeekOS/
     ├── gpu_intel_tgl/ gpu_amd_renoir/  # GPU drivers (i915, amdgpu)
     ├── gpu_scene/ gpu_shaders/  #   Shared scene compositor + shaders
     ├── wifi_ax200/ wifi_rtl8822ce/  # WiFi drivers
-    ├── wifid/ aml/ i2c_hid/  #   WPA supplicant, ACPI AML, touchpad
+    ├── wifid/ acpi/ i2c_hid/ #   WPA supplicant, ACPI AML, touchpad
     ├── audio_hda/            #   Intel HDA driver as WASM
     └── sdk/                  #   npk_sys (host ABI) + widgets (declarative UI SDK)
 ```
